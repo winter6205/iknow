@@ -1,35 +1,44 @@
 /**
- * settings.json 文件级热更新 —— 纯函数 watcher 模块（T1）。
+ * File-level hot reload for settings.json — pure watcher module.
  *
- * 监听两个 settings 文件：user 级 `~/.iknow/settings.json` + project 级
- * `<cwd>/.iknow/settings.json`。两者任一变化（修改 / 首次创建）→ 合并去重后
- * 以 `onChange({ path, reason })` 通知。**不解析文件内容**（env 解析归
- * EnvLoader / loadIknowEnv），本模块只做「文件系统事件 → 节流回调」。
+ * Watches two settings files: user-level `~/.iknow/settings.json` +
+ * project-level `<cwd>/.iknow/settings.json`. A change to either (modify /
+ * first create) → merged and deduplicated, notified via
+ * `onChange({ path, reason })`. **Never parses file content** (env parsing
+ * belongs to EnvLoader / loadIknowEnv); this module only does
+ * "filesystem event → throttled callback".
  *
- * 技术（plans/settings-hot-reload.md T1，无新 npm 依赖，Node 内置 fs）：
- *   - **主路径**：`fs.watch(dir, { recursive: false })` —— 事件驱动，实测毫秒级
- *     到达，可靠覆盖「创建」（rename）+「修改」（change）两事件。
- *   - **回退路径**：`fs.watchFile(path, { interval: 500 })` —— 轮询兜底，仅在
- *     主路径不可用时激活（`.iknow` 目录尚不存在 → fs.watch 抛 ENOENT），等用户
- *     首次创建目录 / 文件。两条通道**择一**（单活动通道）：同一物理变化不会双报
- *     （reviewer minor 4 根因：双通道各报一次会破坏「多次连续 write → 一次
- *     onChange」的去重验收）。
+ * Tech (no new npm deps, Node built-in fs):
+ *   - **Primary path**: `fs.watch(dir, { recursive: false })` — event-driven,
+ *     reliably arriving in milliseconds in practice, covering both "creation"
+ *     (rename) and "modification" (change) events.
+ *   - **Fallback path**: `fs.watchFile(path, { interval: 500 })` — polling
+ *     safety net, activated only when the primary path is unavailable (the
+ *     `.iknow` directory does not exist yet → fs.watch throws ENOENT), waiting
+ *     for the user's first directory / file creation. The two channels are
+ *     **mutually exclusive** (single active channel): one physical change is
+ *     never double-reported (both channels reporting would break the "many
+ *     consecutive writes → one onChange" dedup acceptance).
  *
- * 事件语义（对齐计划回调签名）：
- *   - `reason: "change"` —— 文件内容变化（write / touch）；
- *   - `reason: "rename"` —— 文件创建 / 替换（create / rename 事件、watchFile
- *     从「不存在 → 存在」的跃迁）。
- *   单通道下每个物理变化只上报一次（100ms debounce 合并同窗口内的重复触发）。
+ * Event semantics:
+ *   - `reason: "change"` — file content changed (write / touch);
+ *   - `reason: "rename"` — file created / replaced (create / rename events,
+ *     watchFile transitions from "absent → present").
+ *   With a single channel each physical change is reported once (100ms
+ *   debounce merges repeats inside the window).
  *
- * 启动期语义：
- *   - 文件 / 目录都不存在 → 不抛错，照常注册 watcher 等用户创建（计划 T1）；
- *   - 用户创建的目录在 watcher 启动后才出现 → fs.watch 首次 ENOENT 报错由
- *     内部捕获（不冒泡），watchFile 轮询负责上报首次创建。
+ * Startup semantics:
+ *   - File / directory both absent → no throw; watchers register normally and
+ *     wait for user creation;
+ *   - A directory created after the watcher starts → the first fs.watch ENOENT
+ *     is caught internally (never bubbles); watchFile polling reports the
+ *     first creation.
  *
- * 生命周期：
- *   - `stop()`：关闭全部 `fs.watch` + `fs.watchFile`，幂等可重复调；停后
- *     onChange 不再触发。
- *   - onChange 回调内抛错被捕获（不阻断后续事件，fire-and-forget 语义）。
+ * Lifecycle:
+ *   - `stop()`: closes all `fs.watch` + `fs.watchFile`, idempotent; after
+ *     stopping onChange never fires.
+ *   - Errors thrown inside onChange callbacks are caught (never block later
+ *     events, fire-and-forget semantics).
  */
 
 import {
@@ -42,37 +51,37 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-/** watchFile 轮询间隔（跨平台一致；fs.watch 事件路径不依赖它）。 */
+/** watchFile polling interval (consistent across platforms; the fs.watch event path does not depend on it). */
 const WATCH_FILE_INTERVAL_MS = 500;
-/** debounce 窗口：编辑器原子保存多次 writeFile 只触发一次 onChange。 */
+/** Debounce window: an editor's atomic save with multiple writeFile calls triggers onChange once. */
 export const DEBOUNCE_MS = 100;
 
 export type WatchReason = "change" | "rename";
 
 export interface SettingsChangeEvent {
-  /** 变化的 settings 文件绝对路径（user 或 project）。 */
+  /** Absolute path of the changed settings file (user or project). */
   readonly path: string;
-  /** "change" = 内容变化；"rename" = 创建 / 替换。 */
+  /** "change" = content changed; "rename" = created / replaced. */
   readonly reason: WatchReason;
 }
 
 export interface WatchSettingsOptions {
-  /** 项目根（project 级 settings 的 `cwd/.iknow/settings.json`）。 */
+  /** Project root (project-level settings at `cwd/.iknow/settings.json`). */
   readonly cwd?: string;
-  /** 用户 home（user 级 settings 的 `home/.iknow/settings.json`）。 */
+  /** User home (user-level settings at `home/.iknow/settings.json`). */
   readonly home?: string;
   readonly onChange: (event: SettingsChangeEvent) => void;
 }
 
 export interface SettingsWatcher {
-  /** 幂等：可重复调；停后 onChange 不再触发。 */
+  /** Idempotent: repeatable; after stopping onChange never fires. */
   readonly stop: () => void;
 }
 
 /**
- * 归一化「目录 fs.watch 事件类型」→ 计划回调 reason。
- * dir watch 对创建发 `rename`、对写入发 `change`；rename/change 之外的
- * 类型（Linux 偶发）→ "change"（保守内容变化语义）。
+ * Normalize a "directory fs.watch event type" → callback reason.
+ * Dir watch emits `rename` for creation and `change` for writes; any other
+ * type (occasional on Linux) → "change" (conservative content-change semantics).
  */
 function dirEventReason(eventType: string | Buffer): WatchReason {
   const t = typeof eventType === "string" ? eventType : eventType.toString();
@@ -80,26 +89,29 @@ function dirEventReason(eventType: string | Buffer): WatchReason {
 }
 
 /**
- * 归一化「watchFile 两代 stat 对比」→ 计划回调 reason。
- *  - 从不存在 → 存在（首次创建 / 原子替换）→ "rename"；
- *  - 存在且内容变了（mtime 或 size）→ "change"。
- *  - 初始注册回显（两代同为缺失 / 同为既存但无实质变化）→ undefined（丢弃）。
+ * Normalize a "watchFile two-generation stat compare" → callback reason.
+ *  - absent → present (first creation / atomic replace) → "rename";
+ *  - present and content changed (mtime or size) → "change".
+ *  - Initial registration echo (both generations absent, or both present with
+ *    no substantive change) → undefined (dropped).
  */
 function statChangeReason(curr: Stats, prev: Stats): WatchReason | undefined {
   const currExists = curr.size > 0 || curr.mtimeMs > 0;
   const prevExists = prev.size > 0 || prev.mtimeMs > 0;
   if (currExists !== prevExists) return currExists ? "rename" : "change";
-  if (!currExists) return undefined; // 两代都缺失：注册回显 / 空态轮询
-  // 两代都存在 → 仅当 mtime 或 size 实际变化才报（touch 命中的是 mtime）。
+  if (!currExists) return undefined; // both generations absent: registration echo / idle poll
+  // Both generations exist → report only when mtime or size actually changed (touch hits mtime).
   if (curr.mtimeMs !== prev.mtimeMs || curr.size !== prev.size) return "change";
   return undefined;
 }
 
 /**
- * 为单个 settings 文件建立事件上报（两通道：目录 fs.watch + watchFile 轮询）。
+ * Set up event reporting for one settings file (two channels: directory
+ * fs.watch + watchFile polling).
  *
- * 每个物理写入经 `debouncedEmit` 合并：任一通道先到 → 进入 100ms debounce；
- * 窗口内后续触发被吞。窗口结束以**首次**触发的事件发送一次 onChange。
+ * Each physical write is merged by `debouncedEmit`: whichever channel arrives
+ * first starts the 100ms debounce; later triggers inside the window are
+ * swallowed. At window end onChange fires once with the **first** event.
  */
 function watchOneFile(
   filePath: string,
@@ -114,7 +126,7 @@ function watchOneFile(
 
   const debouncedEmit = (reason: WatchReason): void => {
     if (closed) return;
-    if (timer !== undefined) return; // 窗口内：吞掉后续（去重）
+    if (timer !== undefined) return; // inside the window: swallow later triggers (dedup)
     pending = { path: fileResolved, reason };
     timer = setTimeout(() => {
       timer = undefined;
@@ -124,20 +136,23 @@ function watchOneFile(
       try {
         onChange(event);
       } catch {
-        // fire-and-forget：回调内抛错不阻断后续事件（计划 T1）。
+        // fire-and-forget: errors inside the callback never block later events.
       }
     }, DEBOUNCE_MS);
   };
 
-  // 单活动通道设计（reviewer minor 4 根因修复）：每文件同一物理变化只走**一条**
-  // 通道，避免「同一次 write 被双通道各报一次」破坏去重。
-  //   - 目录存在 → fs.watch 事件驱动（主路径，实测毫秒级可靠：write→change、
-  //     create→rename）；
-  //   - 目录缺失 → fs.watch ENOENT 捕获，改由 watchFile 轮询兜底（用户首次
-  //     创建目录/文件时上报，不抛错，计划 T1 启动期语义）。
-  // 两条通道是「择一」而非「冗余并联」：watchFile 只在 fs.watch 不可用时激活，
-  // 故同一物理变化不会双报。慢 fs.watch 场景由 waitForEvents 超时兜底
-  // （测试 SETTLE_MS ≥750ms）。
+  // Single-active-channel design: each physical change per file goes through
+  // **one** channel only, avoiding "one write double-reported by both
+  // channels" breaking dedup.
+  //   - directory present → fs.watch event-driven (primary path, reliably
+  //     millisecond-level in practice: write→change, create→rename);
+  //   - directory absent → fs.watch ENOENT caught, fall back to watchFile
+  //     polling (reports the user's first directory/file creation, no throw,
+  //     startup semantics).
+  // The two channels are "mutually exclusive", not "redundant in parallel":
+  // watchFile activates only when fs.watch is unavailable, so one physical
+  // change is never double-reported. Slow-fs.watch scenarios are covered by
+  // the waitForEvents timeout (tests SETTLE_MS ≥750ms).
   const listenerRef = (curr: Stats, prev: Stats): void => {
     const reason = statChangeReason(curr, prev);
     if (reason === undefined) return;
@@ -149,14 +164,14 @@ function watchOneFile(
       dirResolved,
       { recursive: false },
       (eventType, filename) => {
-        // filename 为 null 或非本文件 → 忽略（同目录其它文件变化不触发）。
+        // filename null or not this file → ignore (other files in the same directory do not trigger).
         if (filename === null) return;
         if (resolve(dirResolved, filename.toString()) !== fileResolved) return;
         debouncedEmit(dirEventReason(eventType));
       }
     );
   } catch {
-    // 目录缺失 → 走 watchFile 兜底通道（首次创建上报）。
+    // Directory absent → use the watchFile fallback channel (reports first creation).
     dirWatcher = undefined;
     watchFile(fileResolved, { interval: WATCH_FILE_INTERVAL_MS }, listenerRef);
   }
@@ -172,9 +187,9 @@ function watchOneFile(
       try {
         dirWatcher?.close();
       } catch {
-        // watcher 已关闭时 close() 幂等（可能已随 stop 释放）。
+        // close() on an already-closed watcher is idempotent (may already be released via stop).
       }
-      // watchFile 仅在兜底路径注册；unwatchFile 幂等（未注册时 no-op）。
+      // watchFile is only registered on the fallback path; unwatchFile is idempotent (no-op when unregistered).
       unwatchFile(fileResolved, listenerRef);
     },
   };
@@ -182,8 +197,9 @@ function watchOneFile(
 
 export function watchSettings(opts: WatchSettingsOptions): SettingsWatcher {
   const cwd = resolve(opts.cwd ?? process.cwd());
-  // SSOT 对齐 settings.ts:332 用 os.homedir()（process.env.HOME 在 HOME 未设时
-  // 为 undefined，回退 process.cwd() 会与 project 文件重复、漏掉真实 user 文件）。
+  // Aligns with settings.ts which uses os.homedir(): process.env.HOME is
+  // undefined when HOME is unset, and falling back to process.cwd() would
+  // duplicate the project file and miss the real user file.
   const home = resolve(opts.home ?? homedir());
   const paths = [
     { file: join(home, ".iknow", "settings.json"), dir: join(home, ".iknow") },

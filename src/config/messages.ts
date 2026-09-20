@@ -1,15 +1,17 @@
 /**
- * LLM 装配守卫的统一文案（settings-model-extension，ADR-0015）。
+ * Unified copy for LLM assembly guards.
  *
- * 单一承载：settings.llm.model / settings.llm.apiKey（字面 / ${VAR} 占位符）。
- * 守卫文案必须指向同一地址 + 同一占位符语法，避免「model/apiKey 到底在哪配」
- * 的多版本歧义（issue #353 / #164）。
+ * Single carrier: settings.llm.model / settings.llm.apiKey (literal / ${VAR}
+ * placeholder). Guard copy must point to the same address and the same
+ * placeholder syntax, avoiding "where exactly do I configure model/apiKey"
+ * ambiguity.
  *
- * ADR-0084：`llm` 是**用户层键**——项目文件只采纳 verify / secrets /
- * permissions，项目文件里的 `llm` 段被丢弃且不生效。文案只指向
- * `~/.iknow/settings.json`；不得再引导用户写 `<cwd>/.iknow/settings.json`。
+ * `llm` is a **user-layer key** — project files only adopt verify / secrets /
+ * permissions; an `llm` section in a project file is dropped and has no
+ * effect. The copy points only to `~/.iknow/settings.json`; never guide users
+ * to write `<cwd>/.iknow/settings.json`.
  *
- * 消费点：build-engine / tui-deps / thinking-override 装配期守卫。
+ * Consumers: build-engine / tui-deps / thinking-override assembly guards.
  */
 
 export const LLM_MODEL_MISSING_MESSAGE =

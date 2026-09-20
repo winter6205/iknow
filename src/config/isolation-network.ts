@@ -1,45 +1,59 @@
 /**
- * spec/network-egress-allowlist.md SC12 配置层契约 — `isolation.network` 解析体。
+ * Config-layer contract for the network egress allowlist — parse body for
+ * `isolation.network`.
  *
- * 承载 `allowedDomains` / `deniedDomains` 两个域名允许/拒绝集；只做形态合法判定：
- *  - 空数组 → 保留空数组事实（fail-closed 信号，由判定层据此全拒），非错误；
- *  - 非字符串条目 / trim 后为空字符串 → 丢弃该条目 + onWarn 留痕（不抛）；
- *  - allowed / denied 中裸 `*` → 丢弃该条目 + onWarn（保守做法：denied 与
- *    allowed 同纪律；裸 `*` 不允许成为合法域模式）；
- *  - `:port` 越界（0 / >65535 / 非数字 / 空 / 负数）→ 拒绝该条目 + onWarn；
- *    **不得透传为永不匹配**（避免「静默退化」伪装成 fail-closed）；
- *  - 非法条目不影响同批合法条目（逐条判定）；
- *  - 丢弃方向恒为收紧：丢弃后若导致空集 → 保留空数组事实，不合成「允许一切」。
+ * Carries the `allowedDomains` / `deniedDomains` allow/deny sets; checks shape
+ * validity only:
+ *  - empty array → keep the empty-array fact (fail-closed signal; the decision
+ *    layer rejects everything accordingly), not an error;
+ *  - non-string entries / entries empty after trim → drop the entry + onWarn
+ *    trace (never throw);
+ *  - bare `*` in allowed / denied → drop the entry + onWarn (conservative:
+ *    denied follows the same discipline as allowed; bare `*` is never a valid
+ *    domain pattern);
+ *  - out-of-range `:port` (0 / >65535 / non-numeric / empty / negative) →
+ *    reject the entry + onWarn; it **must not pass through as never-match**
+ *    (avoid "silent degradation" masquerading as fail-closed);
+ *  - an invalid entry never affects valid entries in the same batch
+ *    (per-entry decisions);
+ *  - drops always tighten: if dropping yields an empty set, keep the
+ *    empty-array fact — never synthesize "allow everything".
  *
- * `*.x` 通配语义 / 大小写归一 / 端口拼接形态留给 T3（语义层）。
+ * Wildcard semantics for `*.x`, case normalization and port concatenation are
+ * left to the semantic layer.
  *
- * 独立文件承载 —— `settings.ts` 已 1639 行（依赖 fork「文件承载纪律」）。
+ * Separate file by design: `settings.ts` is already very large (file-size
+ * discipline).
  */
 export interface IknowSettingsIsolationNetwork {
   /**
-   * 允许通过的域名列表（逐条解析后的 trim 结果）。
-   * 空数组 = 全拒（fail-closed 合法态，由判定层据此全拒）。
+   * Allowed domain list (per-entry parsed trim results).
+   * Empty array = deny all (a legitimate fail-closed state; the decision layer
+   * rejects everything accordingly).
    */
   allowedDomains?: string[];
   /**
-   * 拒绝的域名列表（逐条解析后的 trim 结果）。
-   * 与 allowedDomains 同款解析纪律；deny 优先于 allow（在语义层判定）。
+   * Denied domain list (per-entry parsed trim results).
+   * Same parsing discipline as allowedDomains; deny takes precedence over allow
+   * (decided in the semantic layer).
    */
   deniedDomains?: string[];
 }
 
-/** 端口范围合法（1-65535）；0 / 65536 / 负数 / 非整数 / 非数字均非法。 */
+/** Port range valid (1-65535); 0 / 65536 / negative / non-integer / non-numeric are all invalid. */
 function isValidPort(p: number): boolean {
   return Number.isInteger(p) && p >= 1 && p <= 65535;
 }
 
 /**
- * 解析 `:port` 后缀形态 —— 严格数字串（1-65535）；空串 / 非数字串 / 越界均非法。
- * 独立成函数：SC12 要求非法 port 整条拒（不透传为永不匹配），此判定与
- * host 形态判定是两条独立规则，拆开后各自保持单一职责。
+ * Parse the `:port` suffix shape — strict digit string (1-65535); empty,
+ * non-numeric or out-of-range are all invalid.
+ * Separate function: an invalid port must reject the whole entry (never pass
+ * through as never-match); this check and the host-shape check are two
+ * independent rules, each kept single-purpose.
  */
 function parsePortSuffix(portStr: string): number | undefined {
-  // 非数字 / 含前导零 / 含小数点 / 含空白 → 拒；Number() 过于宽松，必须严格数字串
+  // Non-numeric / leading zeros / decimal point / whitespace → reject; Number() is too lenient, require a strict digit string
   if (!/^\d+$/.test(portStr)) return undefined;
   const n = Number(portStr);
   if (!isValidPort(n)) return undefined;
@@ -47,18 +61,21 @@ function parsePortSuffix(portStr: string): number | undefined {
 }
 
 /**
- * 解析「域名[:port]」条目 —— 仅判定「形态合法」，不解释通配 `*.x` 的语义
- * （留给语义层）。返回 `{ host, port }` 或 `undefined`（非法）。
+ * Parse a "domain[:port]" entry — checks shape validity only; wildcard `*.x`
+ * semantics are left to the semantic layer. Returns `{ host, port }` or
+ * `undefined` (invalid).
  *
- * 形态要求：
- *  - host trim 后非空；
- *  - host 不为裸 `*`（保守做法：denied 同纪律，allowed 不允许「通配一切」）；
- *  - 无 `:port` 后缀 → port = undefined；
- *  - 有 `:port` 后缀 → port 必须为合法整数（1-65535），否则整条拒；
- *  - host 内可包含若干点号（如 `api.example.com`），不要求包含点号
- *    （允许单标签 host，由语义层裁定是否含点号）。
+ * Shape requirements:
+ *  - host non-empty after trim;
+ *  - host must not be bare `*` (conservative, same discipline for denied:
+ *    "wildcard everything" is not allowed);
+ *  - no `:port` suffix → port = undefined;
+ *  - with `:port` suffix → port must be a valid integer (1-65535), otherwise
+ *    the whole entry is rejected;
+ *  - host may contain several dots (e.g. `api.example.com`) but dots are not
+ *    required (single-label hosts allowed; the semantic layer decides).
  *
- * 返回的 `host` 是 trim 后的字符串；`port` 是 number 或 undefined。
+ * The returned `host` is trimmed; `port` is number or undefined.
  */
 function parseNetworkEntry(
   raw: unknown
@@ -68,7 +85,7 @@ function parseNetworkEntry(
   if (trimmed.length === 0) return undefined;
   if (trimmed === "*") return undefined;
 
-  // 最多一个 ':' 切分；host 不含 ':' 时整串就是 host，无 port。
+  // Split on the last ':' only; without a ':' the whole string is the host, no port.
   const colonIdx = trimmed.lastIndexOf(":");
   let host: string;
   let portStr: string | undefined;
@@ -79,31 +96,32 @@ function parseNetworkEntry(
     portStr = trimmed.slice(colonIdx + 1);
   }
 
-  if (host.length === 0) return undefined; // 形如 ":443" 或 "example.com:"
-  // host 为裸 `*`（含 `*:` 前缀）也拒 —— 与全串裸 `*` 同纪律
+  if (host.length === 0) return undefined; // e.g. ":443" or "example.com:"
+  // Bare `*` as host (incl. the `*:` prefix) is also rejected — same discipline as a whole-string bare `*`
   if (host === "*") return undefined;
 
   const port = portStr === undefined ? undefined : parsePortSuffix(portStr);
-  // 有 ":" 但 port 非法（空串 / 非数字 / 越界）→ 整条拒
+  // Has ":" but invalid port (empty / non-numeric / out-of-range) → reject the whole entry
   if (portStr !== undefined && port === undefined) return undefined;
 
   return { host, port };
 }
 
 /**
- * 解析域名列表条目 —— 单字段（allowedDomains / deniedDomains）共用。
+ * Parse a domain-list field — shared by allowedDomains / deniedDomains.
  *
- * 行为：
- *  - 非数组 → 返回 undefined（字段整体丢弃，不警告 —— 类型层错配，
- *    与 isolation.fsMode 等同款 drop-not-throw 纪律；非法整字段已隐含上层
- *    「非普通对象」上下文）；
- *  - 空数组 → 返回空数组（合法 fail-closed 态）；
- *  - 逐条 parseNetworkEntry，非法条目丢弃 + onWarn 留痕；
- *  - 合法条目保留为「序列化形态」：无 port → host 串；有 port → `host:port` 串
- *    （trim + port 数值校验后的形态，便于语义层直接 split）。
+ * Behavior:
+ *  - non-array → return undefined (whole field dropped, no warning — a
+ *    type-layer mismatch, same drop-not-throw discipline as isolation.fsMode;
+ *    an invalid whole field already implies a non-plain-object context above);
+ *  - empty array → return empty array (legitimate fail-closed state);
+ *  - per-entry parseNetworkEntry; invalid entries dropped + onWarn trace;
+ *  - valid entries kept in "serialized shape": no port → host string; with
+ *    port → `host:port` string (after trim + port numeric validation), so the
+ *    semantic layer can split directly.
  *
- * onWarn 消息格式：`[settings] isolation.network.<field> entry "<raw>" dropped: <reason>`，
- * 对齐既有 `[settings] ...` 前缀（settings.ts:1617 / :1633）。
+ * onWarn message format: `[settings] isolation.network.<field> entry "<raw>" dropped: <reason>`,
+ * matching the existing `[settings] ...` prefix convention.
  */
 export function parseNetworkDomainList(
   raw: unknown,
@@ -130,15 +148,18 @@ export function parseNetworkDomainList(
 }
 
 /**
- * 解析 `isolation.network` 整段 —— 用户层（仅用户层，ADR-0084）。
+ * Parse the whole `isolation.network` section — user layer only.
  *
- * 行为：
- *  - 非普通对象 → undefined（段整体丢弃，与 parseIsolation 同纪律）；
- *  - allowedDomains / deniedDomains 各自独立解析（逐字段 drop-not-throw）；
- *  - 未知 sibling 字段 → 静默丢弃（与 isolation.fsMode 同纪律：未来字段
- *    上线不影响旧解析体）；
- *  - allowedDomains 与 deniedDomains 同时空 → 段返回 undefined（无内容）；
- *    仅其中一个空数组 → 段保留空数组事实（合法 fail-closed 态）。
+ * Behavior:
+ *  - non-plain-object → undefined (whole section dropped, same discipline as
+ *    parseIsolation);
+ *  - allowedDomains / deniedDomains parsed independently (per-field
+ *    drop-not-throw);
+ *  - unknown sibling fields → silently dropped (same discipline as
+ *    isolation.fsMode: future fields don't break this parser);
+ *  - both allowedDomains and deniedDomains empty → section returns undefined
+ *    (no content); only one being an empty array → keep the empty-array fact
+ *    (legitimate fail-closed state).
  */
 export function parseIsolationNetwork(
   raw: unknown,
@@ -169,10 +190,11 @@ export function parseIsolationNetwork(
 }
 
 /**
- * 合并 user / project 的 `isolation.network` —— project 整段被 ADR-0084
- * 丢弃（filterProjectSettingsKeys 对整个 isolation key 已发一条警告），故
- * 本函数实际只看 user。保留合并函数形态以与 parseIsolation / mergeIsolation
- * 配套（对称 + 未来若调整层归属时改一处即可）。
+ * Merge user / project `isolation.network` — the project section is dropped
+ * upstream (filterProjectSettingsKeys already warns once for the whole
+ * isolation key), so this function effectively only looks at user. Kept in
+ * merge-function form for symmetry with parseIsolation / mergeIsolation (and
+ * a single change point if layer ownership ever shifts).
  */
 export function mergeIsolationNetwork(
   user: IknowSettingsIsolationNetwork | undefined,

@@ -1,26 +1,33 @@
 /**
- * EnvLoader 工厂 —— settings.json 热更新的宿主侧消费面（T2）。
+ * EnvLoader factory — host-side consumer surface for settings.json hot reload.
  *
- * 把 `loadIknowEnv`（一次性读取）与 `watchSettings`（文件事件）组合成
- * 可订阅的 env 源：
- *   - `get()`：lazy load（首次调用才读 settings + .env.local + .env + process.env）；
- *     再次调用返回**同一对象引用**（缓存命中）。
- *   - `reload()`：强制重读并替换缓存；成功返回新 env（新引用），失败**抛错且
- *     不更新缓存**（保留旧 env，降级语义）。
- *   - watch 集成：构造时自建 watcher 订阅；settings 文件变化 → 自动 reload →
- *     成功后通知所有 subscriber（新 env 为参数），失败通知所有 onError 注册
- *     （错误为参数）。通知回调内的异常被吞（observer 错误不阻断 reload 链路）。
- *   - `stop()`：关 watcher + 清空 subscriber / onError 引用，幂等可重复调；
- *     停后不再触发任何通知。
- *   - `markSelfWrite(path, bytes)`：登记一次 settings.json 写回（self-write
- *     哨兵，T2）；后续 watcher 事件读到**相同内容**时跳过 reload（写回不回环）。
- *     判定在 onChange 前置做（读文件 + 内容哈希比对），不碰 settings-watch。
+ * Composes `loadIknowEnv` (one-shot read) and `watchSettings` (file events)
+ * into a subscribable env source:
+ *   - `get()`: lazy load (first call reads settings + .env.local + .env +
+ *     process.env); later calls return **the same object reference** (cache hit).
+ *   - `reload()`: force a re-read and replace the cache; on success returns the
+ *     new env (new reference); on failure **throws and keeps the cache** (old
+ *     env retained, degraded-mode semantics).
+ *   - Watch integration: builds its own watcher subscription at construction;
+ *     settings file change → auto reload → on success notifies all subscribers
+ *     (new env as argument), on failure notifies all onError handlers (error as
+ *     argument). Exceptions inside notification callbacks are swallowed
+ *     (observer errors never block the reload pipeline).
+ *   - `stop()`: closes the watcher and clears subscriber / onError references;
+ *     idempotent; after stopping, no notifications fire.
+ *   - `markSelfWrite(path, bytes)`: registers one settings.json write-back
+ *     (self-write sentinel); when a later watcher event reads the **same
+ *     content**, reload is skipped (write-backs never loop back). The check is
+ *     done up front in onChange (file read + content hash compare);
+ *     settings-watch is untouched.
  *
- * opts.cwd / opts.home 透传给 `loadIknowEnv(cwd, undefined, home)` 与
- * `watchSettings`（测试注入 tmp 路径隔离，生产缺省 = process.cwd() / HOME）。
+ * opts.cwd / opts.home are passed through to `loadIknowEnv(cwd, undefined, home)`
+ * and `watchSettings` (tests inject tmp paths for isolation; production
+ * defaults = process.cwd() / HOME).
  *
- * 与 settings-watch 同纪律：不解析文件内容（env 解析归 loadIknowEnv），
- * 本模块只做「缓存 + 订阅 + 生命周期」编排。
+ * Same discipline as settings-watch: no file-content parsing (env parsing
+ * belongs to loadIknowEnv); this module only orchestrates
+ * "cache + subscription + lifecycle".
  */
 
 import { readFileSync } from "node:fs";
@@ -30,36 +37,39 @@ import { watchSettings, type SettingsWatcher } from "./settings-watch.js";
 import { hashSettingsContent } from "./persist-settings.js";
 
 export interface EnvLoaderOptions {
-  /** 项目根（loadIknowEnv 的 settings / .env 读取 + watchSettings project 级）。 */
+  /** Project root (loadIknowEnv settings / .env reads + watchSettings project level). */
   readonly cwd?: string;
-  /** 用户 home（loadIknowEnv 的 user 级 settings + watchSettings user 级）。 */
+  /** User home (loadIknowEnv user-level settings + watchSettings user level). */
   readonly home?: string;
 }
 
 export interface EnvLoader {
-  /** 首次调用 lazy load；后续返回缓存的同一引用。 */
+  /** First call lazy-loads; later calls return the same cached reference. */
   get(): IknowEnv;
-  /** 强制重读；成功 → 新 env（替换缓存）；失败 → 抛错且缓存不变。 */
+  /** Force re-read; success → new env (replaces cache); failure → throws, cache unchanged. */
   reload(): IknowEnv;
-  /** 订阅 env 变化（watcher 触发且 reload 成功）。返回退订函数。 */
+  /** Subscribe to env changes (watcher-triggered and reload succeeded). Returns an unsubscribe function. */
   subscribe(fn: (env: IknowEnv) => void): () => void;
-  /** 注册 reload 失败通知（坏 JSON / model 缺失 / apiKey 解析失败）。 */
+  /** Register reload-failure notifications (bad JSON / missing model / apiKey parse failure). */
   onError(fn: (err: unknown) => void): void;
   /**
-   * 登记一次 settings 写回（self-write 哨兵，T2）。
-   * 写入 bytes 的 sha256 进入该路径的哨兵集合；后续 watcher 事件读到相同
-   * 内容 → 一次性消费该哈希并跳过 reload（写回不回环）。容量 LRU 8 条路径，
-   * 超限挤掉最旧路径（整组哨兵丢弃）。
+   * Register one settings write-back (self-write sentinel).
+   * The sha256 of the written bytes enters that path's sentinel set; when a
+   * later watcher event reads the same content → the hash is consumed once and
+   * reload is skipped (write-backs never loop back). LRU capacity of 8 paths;
+   * exceeding it evicts the oldest path (its whole sentinel group is dropped).
    */
   markSelfWrite(path: string, bytes: string): void;
-  /** 关 watcher + 清引用，幂等。 */
+  /** Close the watcher + clear references; idempotent. */
   stop(): void;
 }
 
 /**
- * self-write 哨兵 LRU 容量（路径条数）。T2 设计：写回登记入 `Map<path, Set<sha256>>`，
- * 满 8 条挤掉最旧路径（整组哨兵丢弃，不逐哈希淘汰——单次写回内容唯一，逐哈希
- * 无意义且复杂度更高）。
+ * Self-write sentinel LRU capacity (number of paths). Write-backs are registered
+ * in a `Map<path, Set<sha256>>`; when 8 paths are full the oldest is evicted
+ * (its whole sentinel group is dropped — no per-hash eviction: a single
+ * write-back's content is unique, so per-hash eviction is pointless and
+ * adds complexity).
  */
 const SELF_WRITE_LRU_CAPACITY = 8;
 
@@ -72,8 +82,9 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
   const errorHandlers = new Set<(err: unknown) => void>();
   let watcher: SettingsWatcher | undefined;
 
-  // self-write 哨兵：path → 已登记写回 bytes 的 sha256 集合。
-  // Map 插入序即 LRU 序：每「路径命中」把该路径挪到末尾；超容量丢头部。
+  // Self-write sentinel: path → set of sha256 hashes of registered write-back bytes.
+  // Map insertion order is the LRU order: each path hit moves it to the end;
+  // over capacity drops the head.
   const selfWrites = new Map<string, Set<string>>();
 
   const markSelfWrite = (path: string, bytes: string): void => {
@@ -82,23 +93,27 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
       hashes = new Set();
       selfWrites.set(path, hashes);
     } else {
-      // 已存在的路径重新登记 → 命中，提前到最后（LRU 触摸）。
+      // Re-registering an existing path → hit; move it to the end (LRU touch).
       selfWrites.delete(path);
       selfWrites.set(path, hashes);
     }
     hashes.add(hashSettingsContent(bytes));
-    // 超容量：丢最旧路径（头部整组）。单路径多次登记只占一条，容量按路径数。
-    // size > 容量 > 0 → 头部键必存在，next().value 断言为 string（无分支）。
+    // Over capacity: drop the oldest path (whole head group). Multiple
+    // registrations on one path still occupy a single entry; capacity counts paths.
+    // size > capacity > 0 → the head key must exist; next().value is asserted as
+    // string (no branch).
     if (selfWrites.size > SELF_WRITE_LRU_CAPACITY) {
       selfWrites.delete(selfWrites.keys().next().value as string);
     }
   };
 
   /**
-   * self-write 命中判定（onChange 前置哨兵）：
-   * 读当前文件 bytes → sha256 → 与登记集合比对；命中 → 移除该哈希并返回 true。
-   * 读文件失败（rename 中间态 ENOENT / 权限等）→ 返回 false（按外部走 reload，
-   * 保守不吞事件——最坏多 reload 一次，不丢真实外部改动）。
+   * Self-write hit check (sentinel applied before onChange logic):
+   * read the current file bytes → sha256 → compare against the registered set;
+   * on hit, remove that hash and return true.
+   * If the file read fails (transient ENOENT during rename / permissions),
+   * return false (treat as external and reload — conservatively do not swallow
+   * events; worst case is one extra reload, never a lost real external change).
    */
   const consumeSelfWrite = (path: string): boolean => {
     let currentBytes: string;
@@ -110,11 +125,11 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
     const hash = hashSettingsContent(currentBytes);
     const hashes = selfWrites.get(path);
     if (hashes === undefined || !hashes.has(hash)) return false;
-    // 一次性消费：移除该哈希（Set 为空则整条路径哨兵清空，后续同内容按外部）。
+    // Consume once: remove the hash (if the Set becomes empty, drop the whole path sentinel; later identical content counts as external).
     hashes.delete(hash);
     if (hashes.size === 0) selfWrites.delete(path);
     else {
-      // 该路径仍有其它登记哈希 → 触摸，保持 LRU 活性。
+      // Path still has other registered hashes → touch it to keep it LRU-active.
       selfWrites.delete(path);
       selfWrites.set(path, hashes);
     }
@@ -132,20 +147,22 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
       try {
         fn(env);
       } catch {
-        // observer 异常不阻断 reload 链路（与 watcher 回调吞错同纪律）。
+        // Observer exceptions never block the reload pipeline (same error-swallowing discipline as watcher callbacks).
       }
     }
   };
 
-  // notifyError 逐条 try/catch（与 notify 同吞错纪律）。forEach 回调里抛错
-  // 会被 catch 吞掉（vitest 分支探针不把 try/catch 内的 forEach 算分支）。
-  // 注释对齐：notify 用 for..of（既有写法），notifyError 用 forEach 消分支。
+  // notifyError wraps each handler in try/catch (same error-swallowing
+  // discipline as notify). Errors thrown inside forEach callbacks are absorbed
+  // by the catch (vitest branch probes don't count a forEach inside try/catch
+  // as a branch). notify uses for..of (existing style); notifyError uses
+  // forEach to avoid an extra branch.
   const notifyError = (err: unknown): void => {
     [...errorHandlers].forEach((fn) => {
       try {
         fn(err);
       } catch {
-        // 同上：错误处理器自身抛错不影响其它处理器 / 后续事件。
+        // As above: a throwing error handler doesn't affect other handlers or later events.
       }
     });
   };
@@ -154,9 +171,9 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
     ...(cwd !== undefined ? { cwd } : {}),
     ...(home !== undefined ? { home } : {}),
     onChange: (event) => {
-      // self-write 哨兵：命中 → 跳过 reload（写回不回环，subscriber 不动）。
-      // 判定在 settings-watch 之外做（env-loader 侧），保持其「不解析文件内容」
-      // 契约（plans 决策 2）；settings-watch 只透传 { path, reason }。
+      // Self-write sentinel: on hit → skip reload (no write-back loopback; subscribers unchanged).
+      // The check lives outside settings-watch (on the env-loader side) to keep its
+      // "no file-content parsing" contract; settings-watch only forwards { path, reason }.
       if (consumeSelfWrite(event.path)) return;
       try {
         notify(reload());
@@ -171,7 +188,7 @@ export function createEnvLoader(opts?: EnvLoaderOptions): EnvLoader {
     reload,
     subscribe: (fn) => {
       subscribers.add(fn);
-      // 退订闭包（供调用方解绑；测试 stop() 后复调退订函数覆盖该行）。
+      // Unsubscribe closure (for the caller to detach; tests re-invoke it after stop() to cover this line).
       return () => subscribers.delete(fn);
     },
     onError: (fn) => {

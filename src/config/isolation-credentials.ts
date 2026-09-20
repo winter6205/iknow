@@ -1,54 +1,62 @@
 /**
- * specs/egress-credential-sentinel.md T1 配置层契约 —— `isolation.credentials` 解析体。
+ * Config-layer contract for the egress credential sentinel — parse body for
+ * `isolation.credentials`.
  *
- * 用户层凭据名册段（Assumption 2：仅用户层，项目文件不采纳 —— ADR-0084
- * 由 `filterProjectSettingsKeys` 对整个 isolation 键统一丢段 + 警告，本层
- * 不重复发）。github 两条目由代码内置名册提供
- * （`src/harness/sandbox/egress/credential-assembly.ts` SSOT），本段只做
- * 收窄/追加的数据承载。
+ * User-layer credential roster section (user layer only — project files are
+ * not adopted: `filterProjectSettingsKeys` drops the whole isolation key with
+ * one warning upstream, so this layer never repeats it). The two github
+ * entries come from the code-built-in roster
+ * (`src/harness/sandbox/egress/credential-assembly.ts` SSOT); this section
+ * only carries data for narrowing / appending.
  *
- * 校验纪律对齐 settings.ts:34-43 既有形态（drop-not-throw、恒收紧）：
- *  - 非普通对象段 → 丢段不抛、不警告（同 network 段）；
- *  - 条目非法（缺 path/name、缺 injectHosts、extract 编译失败或无捕获组 1、
- *    decode 非 "jwt"）→ 丢该条目 + `[settings]` 警告，其余条目保留；
- *  - injectHosts 必填：缺失/空数组/含非法串 → 丢该条目（Assumption 6：
- *    本仓不吃包「缺省 = 全部 allowedDomains」的 trade-off，宁可丢条目）；
- *  - extract 捕获组校验：命名组 `(?<n>…)` 不占编号，不算捕获组 1
- *    （sandbox-config.js:180-197 的 group-1 校验是教训）；
- *  - 用户层条目总数上限 16（Input-contract overflow 档）：files 优先、
- *    envVars 其次，超出丢尾 + 警告；
- *  - 丢弃后空数组 = 保留空数组事实（无追加 = 仅内置名册），段不合成。
+ * Validation discipline matches settings.ts's existing shape (drop-not-throw,
+ * drops always tighten):
+ *  - non-plain-object section → drop silently, no throw, no warn (same as the
+ *    network section);
+ *  - invalid entry (missing path/name, missing injectHosts, extract fails to
+ *    compile or lacks capture group 1, decode not "jwt") → drop that entry +
+ *    `[settings]` warning; other entries kept;
+ *  - injectHosts required: missing / empty array / any invalid string → drop
+ *    the entry (this repo does not take the "default = all allowedDomains"
+ *    trade-off; better to drop the entry);
+ *  - extract capture-group check: named groups `(?<n>…)` take no number and
+ *    do not count as group 1 (a past lesson from group-1 validation);
+ *  - user-layer total entry cap of 16 (overflow tier of the input contract):
+ *    files first, envVars next; the excess tail is dropped + warned;
+ *  - empty array after drops = keep the empty-array fact (no append =
+ *    built-in roster only); the section is not synthesized.
  *
- * 独立文件承载 —— settings.ts 文件承载纪律（前例 isolation-network.ts）。
+ * Separate file by design — settings.ts file-size discipline (precedent:
+ * isolation-network.ts).
  */
 
-/** 单条凭据文件条目（settings 侧形态；egress 侧数据形状见 credential-assembly.ts）。 */
+/** A single credential file entry (settings-side shape; for the egress-side data shape see credential-assembly.ts). */
 export interface IknowSettingsCredentialFileEntry {
-  /** 凭据文件路径（字面串原样承载，`~` 展开归消费方/铸造层）。 */
+  /** Credential file path (literal string carried as-is; `~` expansion belongs to the consumer / minting layer). */
   path: string;
-  /** 可选提取正则源串，必须可编译且含捕获组 1。 */
+  /** Optional extraction regex source; must compile and contain capture group 1. */
   extract?: string;
-  /** 可选解码标记，仅字面量 "jwt" 合法。 */
+  /** Optional decode flag; only the literal "jwt" is valid. */
   decode?: "jwt";
-  /** 注入域名单，必填非空（invariant 3 洗出防护的数据面）。 */
+  /** Injection host list; required and non-empty (the data face behind exfil prevention). */
   injectHosts: string[];
 }
 
-/** 单条凭据 env 变量条目。 */
+/** A single credential env-var entry. */
 export interface IknowSettingsCredentialEnvVarEntry {
-  /** env 变量名（字面串，trim 后非空）。 */
+  /** Env var name (literal string, non-empty after trim). */
   name: string;
-  /** 注入域名单，必填非空。 */
+  /** Injection host list; required and non-empty. */
   injectHosts: string[];
 }
 
-/** `isolation.credentials` 段。 */
+/** The `isolation.credentials` section. */
 export interface IknowSettingsIsolationCredentials {
   files?: IknowSettingsCredentialFileEntry[];
   envVars?: IknowSettingsCredentialEnvVarEntry[];
 }
 
-/** 用户层条目总数上限（files + envVars 合计，plan 子弹 1 钉死）。 */
+/** Total user-layer entry cap (files + envVars combined, pinned at 16). */
 export const CREDENTIALS_ENTRY_CAP = 16;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -60,9 +68,11 @@ function isNonEmptyString(v: unknown): v is string {
 }
 
 /**
- * injectHosts 值域：非空数组且每项 trim 后非空字符串。
- * 整体判定（任一非法串 → 整条拒）：凭据注入面走部分接受会造成
- * 「以为收窄了实际没窄」的静默半生效，宁可丢条目 + 留痕。
+ * injectHosts value domain: non-empty array with every item a non-empty
+ * string after trim.
+ * Whole-value decision (any invalid string → reject the entry): partial
+ * acceptance on the credential-injection face would silently half-apply
+ * ("thought it was narrowed, actually wasn't"); better to drop + trace.
  */
 function parseInjectHosts(v: unknown): string[] | undefined {
   if (!Array.isArray(v) || v.length === 0) return undefined;
@@ -75,16 +85,16 @@ function parseInjectHosts(v: unknown): string[] | undefined {
 }
 
 /**
- * 捕获组 1 存在性扫描：统计「不在字符类内、未被转义、后随不是 `?`」的
- * `(` 个数（JS 里只有裸 `(` 产编号组；`(?:` `(?=` `(?!` `(?<=` `(?<!`
- * `(?<name>` 均不占编号）。
+ * Capture-group-1 existence scan: count `(` that are outside character
+ * classes, unescaped, and not followed by `?` (in JS only a bare `(` produces
+ * a numbered group; `(?:` `(?=` `(?!` `(?<=` `(?<!` `(?<name>` take no number).
  */
 function hasCaptureGroup1(source: string): boolean {
   let inClass = false;
   for (let i = 0; i < source.length; i++) {
     const c = source[i]!;
     if (c === "\\") {
-      i++; // 跳过被转义的下一字符（含 `\(` `\]` 等）
+      i++; // skip the escaped next char (incl. `\(` `\]` etc.)
       continue;
     }
     if (inClass) {
@@ -100,7 +110,7 @@ function hasCaptureGroup1(source: string): boolean {
   return false;
 }
 
-/** 编译性 + 捕获组 1 双查；非法返回 reason 串，合法返回 undefined。 */
+/** Compile check + capture-group-1 check; returns a reason string when invalid, undefined when valid. */
 function validateExtract(raw: unknown): string | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "string") return "extract is not a string";
@@ -113,7 +123,7 @@ function validateExtract(raw: unknown): string | undefined {
   return undefined;
 }
 
-/** decode 值域：仅字面量 "jwt"（缺席合法）。 */
+/** decode value domain: only the literal "jwt" (absence is valid). */
 function validateDecode(raw: unknown): string | undefined {
   if (raw === undefined) return undefined;
   if (raw !== "jwt") return 'decode must be the literal "jwt"';
@@ -188,8 +198,9 @@ function parseEnvVarEntry(
 }
 
 /**
- * 上限收尾：files 优先、envVars 其次的稳定序，超出 CREDENTIALS_ENTRY_CAP
- * 的尾部条目丢弃 + 逐条警告（丢弃方向恒为收紧）。
+ * Cap finalization: stable order files first, envVars next; tail entries
+ * beyond CREDENTIALS_ENTRY_CAP are dropped + warned per entry (drops always
+ * tighten).
  */
 function applyEntryCap(
   files: IknowSettingsCredentialFileEntry[],
@@ -224,7 +235,7 @@ function applyEntryCap(
   return { files: keptFiles, envVars: keptEnvVars };
 }
 
-/** 单侧列表逐条解析：非数组 → undefined（该字段缺席）；数组 → 保序收集合法条目。 */
+/** Per-side list parsing: non-array → undefined (field absent); array → collect valid entries in order. */
 function parseEntryList<T>(
   rawList: unknown,
   parseEntry: (
@@ -242,7 +253,7 @@ function parseEntryList<T>(
   return out;
 }
 
-/** 段合成：缺席字段不落键（缺席 ≠ 空数组事实，见主函数注释）。 */
+/** Section synthesis: absent fields write no key (absent != empty-array fact; see the main function comment). */
 function synthesizeSection(
   hasFiles: boolean,
   hasEnvVars: boolean,
@@ -258,11 +269,12 @@ function synthesizeSection(
 }
 
 /**
- * 解析 `isolation.credentials` 段 —— 仅用户层（编排层：守卫 → 两列表
- * 解析 → 上限收尾 → 合成；各段私有件）。
- * 非普通对象 → undefined（丢段不警告，同 parseIsolationNetwork）；
- * 两列表各自逐条解析（非法条目丢该条 + 警告）；合计超上限丢尾 + 警告；
- * 两字段皆缺席 → undefined（空段不产出）。
+ * Parse the `isolation.credentials` section — user layer only (orchestration:
+ * guard → two list parses → cap finalization → synthesis; each stage private).
+ * Non-plain-object → undefined (drop silently, same as parseIsolationNetwork);
+ * both lists parsed per entry (invalid entries dropped + warned); combined
+ * overflow drops the tail + warns; both fields absent → undefined (empty
+ * section not produced).
  */
 export function parseIsolationCredentials(
   raw: unknown,
@@ -279,9 +291,9 @@ export function parseIsolationCredentials(
 }
 
 /**
- * 合并 user / project 的 `isolation.credentials` —— project 整段被
- * ADR-0084 allowlist 在 filter 阶段丢弃，本函数实际只看 user（与
- * mergeIsolationNetwork 同款对称保留）。
+ * Merge user / project `isolation.credentials` — the project section is
+ * dropped at the upstream filter-allowlist stage, so this function effectively
+ * only looks at user (same symmetric-keepsake shape as mergeIsolationNetwork).
  */
 export function mergeIsolationCredentials(
   user: IknowSettingsIsolationCredentials | undefined,

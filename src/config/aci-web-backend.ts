@@ -1,9 +1,11 @@
 /**
- * ACI web backend 能力表：一个闭集 id 声明「有搜 / 有抓」。
+ * ACI web backend capability table: one closed-set id declares "can search /
+ * can fetch".
  *
- * 缺 = 无实现 / 无 key / 厂商无该 API。本轮仅 `exa`+key 两侧都有；
- * tavily / brave 一律缺（不接 extract / 真 search）。传输失败 ≠ 缺，
- * 不在本函数判定。非法 id 由 env loader fail-loud，不进这里。
+ * Absent = no implementation / no key / vendor has no such API; this round
+ * only `exa`+key has both sides; tavily / brave are always absent (no extract
+ * / no real search). A transport failure != absent and is not decided here.
+ * Invalid ids fail loud in the env loader and never reach this function.
  */
 
 import type { SearchBackendId } from "./env.js";
@@ -28,8 +30,9 @@ function usableKey(raw: string | undefined): boolean {
 }
 
 /**
- * 装配期：「搜走谁 / 抓走谁」。
- * 仅 `exa` + 可用 key → 两侧都走 Exa；其余回落默认检索 + 本机阅读。
+ * Assembly time: "who handles search / who handles fetch".
+ * Only `exa` + a usable key → both sides go through Exa; everything else falls
+ * back to default search + local reading.
  */
 export function resolveWebCapability(input: WebCapabilityInput): WebCapability {
   const exaReady = input.backend === "exa" && usableKey(input.exaApiKey);

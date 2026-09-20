@@ -1,18 +1,20 @@
 /**
  * Load iknow runtime config from process.env + optional `.env` / `.env.local` (cwd)
- * + `.iknow/settings.json` (#353, loop 配置的单一事实源)。
+ * + `.iknow/settings.json` (the single source of truth for loop config).
  *
- * settings-model-extension (#164 第二阶段) — LLM 配置收敛到 settings.json 单承载:
- *   - `settings.llm.model` 是模型路由 ID 的**字面值**唯一来源（无占位符、无 env 回退）。
- *     缺失 → fail-fast 抛「no LLM model configured in settings.llm.model」（见
- *     `LLM_MODEL_MISSING_MESSAGE`）。
- *     `IKNOW_LLM_MODEL` env 支已退役（不再读取）。
- *   - `settings.llm.apiKey` 接受字面值或 `${VAR}` 占位符，经 `expandPlaceholders`
- *     从 `process.env[VAR]` 优先、`.env.local` / `.env` 兜底解析；解析不到 →
- *     undefined（消费点守卫抛「LLM mode needs API key.」）。
- *     `IKNOW_LLM_API_KEY_ENV` env 支已退役（不再读取），apiKey 不再依赖 env 变量名。
- *   - `settings.llm.fallback` / `maxTurns` / `compress` 保留（用户自配）。
- * 其它字段保持既有 `process.env > .env.local > .env > hardcoded defaults`。
+ * LLM config converges on settings.json as its sole carrier:
+ *   - `settings.llm.model` is the **only** source of the literal model route ID
+ *     (no placeholders, no env fallback). Missing → fail-fast throw of
+ *     "no LLM model configured in settings.llm.model" (see
+ *     `LLM_MODEL_MISSING_MESSAGE`). The `IKNOW_LLM_MODEL` env path is retired
+ *     (no longer read).
+ *   - `settings.llm.apiKey` accepts a literal or a `${VAR}` placeholder,
+ *     resolved by `expandPlaceholders` from `process.env[VAR]` first, with
+ *     `.env.local` / `.env` as fallback; unresolved → undefined (consumer-side
+ *     guards throw "LLM mode needs API key."). The `IKNOW_LLM_API_KEY_ENV` env
+ *     path is retired (no longer read); apiKey no longer depends on env names.
+ *   - `settings.llm.fallback` / `maxTurns` / `compress` are kept (user-configured).
+ * Other fields keep the existing `process.env > .env.local > .env > hardcoded defaults`.
  *
  * Never logs secret values.
  */
@@ -31,13 +33,14 @@ import {
 } from "./workspace-root.js";
 
 /**
- * ADR-0113: `settings.llm.liteModel` 命中 providers 注册表后的路由结果 ——
- * transport 三元组（baseUrl/apiKey/headers）与主模型同源同链路。
- * `apiKey` 在成功路径必有值（`resolveLlmTransport` 对缺失密钥抛 typed 错，
- * lite 侧捕获后整键丢弃，故这里不会出现 undefined）。
+ * Routing result after `settings.llm.liteModel` hits the providers registry —
+ * the transport triple (baseUrl/apiKey/headers) comes from the same chain as
+ * the main model. `apiKey` always has a value on the success path
+ * (`resolveLlmTransport` throws a typed error on a missing key and the lite
+ * side catches it and drops the whole key, so undefined never appears here).
  */
 export interface LiteModelEnv {
-  /** 路由 ID（settings.llm.liteModel trim 后字面值，原样透传给消费方）。 */
+  /** Route ID (trimmed literal of settings.llm.liteModel, passed through verbatim to consumers). */
   model: string;
   baseUrl: string;
   apiKey: string;
@@ -47,161 +50,183 @@ export interface LiteModelEnv {
 export interface LlmEnv {
   baseUrl: string;
   /**
-   * 模型路由 ID（settings.llm.model 字面值，trim 后必填）。
-   * env loader fail-fast 保证有值（settings 唯一来源，无任何代码默认）。
+   * Model route ID (literal of settings.llm.model, required after trim).
+   * The env loader fail-fast guarantees a value (settings is the sole source,
+   * no code defaults at all).
    */
   model: string;
   /**
-   * ADR-0113: `settings.llm.liteModel` 的路由结果（provider/model 同形，
-   * 走同一 `providers[]` 查表）。未配置 / 非法形态 / provider 未注册 /
-   * provider 密钥未设 → **键缺席**（headers 同款「缺席=不产出」纪律），
-   * 不 fail-fast；主模型装配不受影响。
+   * Routing result of `settings.llm.liteModel` (same provider/model shape,
+   * same `providers[]` lookup). Unset / invalid shape / provider unregistered
+   * / provider key unset → **key absent** (same "absent = not produced"
+   * discipline as headers), no fail-fast; main-model assembly is unaffected.
    */
   liteModel?: LiteModelEnv;
   /**
-   * ADR-0093 provider 命中时的额外请求头（settings.llm.providers[i].headers）。
-   * 只有 `provider/model` 命中注册表且该 provider 配了非空 headers 才有值；
-   * 其余路径（provider 未命中 / 无 providers 段）**键缺席**，不写空对象 ——
-   * 消费方据此判断是否透传 `defaultHeaders`。
+   * Extra request headers on a provider hit (settings.llm.providers[i].headers).
+   * Only set when `provider/model` hits the registry and that provider has
+   * non-empty headers; all other paths (no hit / no providers section) leave
+   * the **key absent** — never an empty object — consumers use its presence
+   * to decide whether to pass through `defaultHeaders`.
    */
   headers?: Readonly<Record<string, string>>;
   /**
-   * 模型 fallback 路由 ID 列表（来自 settings.llm.fallback，用户自配）。
-   * 未配置 → []（无兜底；fallback 的消费方自行决定是否/如何使用）。
+   * Model fallback route ID list (from settings.llm.fallback, user-configured).
+   * Unset → [] (no safety net; fallback consumers decide whether/how to use it).
    */
   fallback: string[];
   /**
-   * LLM API key（settings.llm.apiKey 经 `expandPlaceholders` 解析）。
-   * 字面值或 `${VAR}` 占位符解析成功 → 真实密钥；解析失败 → undefined。
-   * 消费点守卫：!env.llm.apiKey 时 build-engine / tui-deps / thinking-override
-   * 抛「LLM mode needs API key.」（不允许硬编码兜底）。
+   * LLM API key (settings.llm.apiKey resolved by `expandPlaceholders`).
+   * Successful literal or `${VAR}` resolution → real key; failure → undefined.
+   * Consumer guards: when !env.llm.apiKey, build-engine / tui-deps /
+   * thinking-override throw "LLM mode needs API key." (no hardcoded fallback).
    */
   apiKey: string | undefined;
   maxOutputTokens: number;
   temperature: number;
   /**
-   * #151 T4 请求侧 thinking 控制臂:
-   *   - "off"      → 不发送 thinking / output_config(默认)
-   *   - "adaptive" → 发送 thinking:{type:'adaptive'};effort 非空时再追加 output_config:{effort:N}
-   * 非法值 → 回退 "off"。
+   * Request-side thinking control arm:
+   *   - "off"      → send no thinking / output_config (default)
+   *   - "adaptive" → send thinking:{type:'adaptive'}; when effort is non-empty also append output_config:{effort:N}
+   * Invalid value → fall back to "off".
    */
   thinking: "off" | "adaptive";
   /**
-   * #151 T4 effort 档位:空 → 不发送 output_config。
-   * 非法值 → 视同空。
+   * Effort tier: empty → send no output_config. Invalid value → treated as empty.
    */
   thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
   /**
-   * #179 T6 (#147 D0) 流式臂开关:
-   *   - "on"  → adapter 走 `client.messages.stream(...)`(默认)
-   *   - "off" → 非流式回退臂(`messages.create`,017 A1 既有行为)
-   * 非法值 → 回退 "on" 且不崩溃(对齐 thinking flag 的回退纪律,方向相反)。
+   * Streaming arm switch:
+   *   - "on"  → adapter uses `client.messages.stream(...)` (default)
+   *   - "off" → non-streaming fallback arm (`messages.create`, existing behavior)
+   * Invalid value → fall back to "on" without crashing (same fallback
+   * discipline as the thinking flag, opposite direction).
    */
   stream: "on" | "off";
   /**
-   * plan T5: 单次会话最大循环轮数上限(可选正整数)。
-   * `undefined`(默认)= 无限(loop-engine 无轮数上限);
-   * 显式配置时 loop-engine 达上限即停(超限 throw + reactive compact 分支归 loop-engine)。
-   * 值域校验:非整数 / < 1 由 CLI `--max-turns` 解析层拒绝(parse-args.ts),
-   * env 侧走 envOptionalInt(未设 / 空 / 非数字 → undefined,不抛错)。
+   * Max loop turns per session (optional positive integer).
+   * `undefined` (default) = unlimited (loop-engine has no turn cap); when
+   * explicitly set loop-engine stops at the cap (over-cap throw + reactive
+   * compact branches belong to loop-engine).
+   * Range validation: non-integer / < 1 is rejected by the CLI `--max-turns`
+   * parsing layer (parse-args.ts); the env side uses envOptionalInt
+   * (unset / empty / non-numeric → undefined, never throws).
    */
   maxTurns?: number;
   /**
-   * #358 T1: 单次 LLM 调用竞速上限(per-call,毫秒)。
-   * env 链:`envOptionalPositiveInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 300_000`。
-   * 第三层 300_000（5 min）对齐 coding-agent 单次调用（thinking + 长 tool_use），
-   * 不是 MCP 连接超时。env / settings 显式值仍覆盖。
+   * Racing cap per single LLM call (per-call, milliseconds).
+   * env chain: `envOptionalPositiveInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 300_000`.
+   * The third layer 300_000 (5 min) matches a single coding-agent call
+   * (thinking + long tool_use), not the MCP connect timeout. Explicit env /
+   * settings values still override.
    */
   timeoutMs: number;
   /**
-   * #742 T1 / CONTEXT「model-call idle」:流式臂上「模型一个增量都不出」的
-   * 静默上限(毫秒)。到点落既有 `StopReason: timeout`,不新增停因;
-   * `stream=off` 无增量可重置它,harness 侧按缺席处理。
+   * "Model-call idle": on the streaming arm, the silent cap (ms) for the model
+   * producing not a single delta. On expiry it falls through to the existing
+   * `StopReason: timeout`; no new stop reason; with `stream=off` there are no
+   * deltas to reset it and the harness treats it as absent.
    *
-   * env 链:`envOptionalPositiveInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`。
-   * 第三层 5 分钟(T2 #transport-continue-persist 从 2 分钟上调):正常出字时
-   * 供应商 delta 是亚秒级间隔,连续数分钟一个增量都没有 = 这条连接大概率已废;
-   * 但长 thinking / 32k 生成前的排队与上游限流经常超过 2 分钟,旧值会把
-   * 「还在想」误判成断流。idle 钟从 step 起就在跑,取值必须给首 delta 前的
-   * 排队留足余量;UI 侧 ~20s 静默只改 notice 文案(不等待、不打断)。
+   * env chain: `envOptionalPositiveInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`.
+   * Third layer is 5 minutes (raised from 2 minutes): while output flows,
+   * provider deltas arrive at sub-second intervals, so minutes without a
+   * single delta almost certainly mean a dead connection. But queueing and
+   * upstream rate limiting before long thinking / 32k generations frequently
+   * exceed 2 minutes, and the old value misjudged "still thinking" as a dead
+   * stream. The idle clock runs from step start, so it must leave enough
+   * slack for queueing before the first delta; the UI side only changes the
+   * notice text at ~20s silence (never waits or interrupts).
    *
-   * 可选而非必填:`IknowEnv` 字面量在测试 / 脚本里有几十处手写点,新增必填
-   * 字段会把 T1 的改动摊到这些无关文件上(minimal-change)。生产装配一律走
-   * `loadIknowEnv`,它总会填上本字段。
+   * Optional rather than required: `IknowEnv` literals are hand-written in
+   * dozens of test / script spots; a required field would spread this change
+   * into unrelated files (minimal-change). Production assembly always goes
+   * through `loadIknowEnv`, which always fills this field.
    */
   idleTimeoutMs?: number;
   /**
-   * #742 T1 / CONTEXT「模型调用硬顶」:流式臂上从本次 `adapter.step` 起算的
-   * **有限**上限(毫秒),到点即使仍有增量也落 `timeout`(CONTEXT _Avoid_:
-   * 硬顶调成无限当验收)。
+   * "Model-call hard cap": on the streaming arm, a **finite** cap (ms) measured
+   * from this `adapter.step`; on expiry it falls to `timeout` even while deltas
+   * still flow (the hard cap must stay finite for acceptance).
    *
-   * env 链:`envOptionalPositiveInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
-   * 第三层 15 分钟:必须严格大于今日单钟默认 300_000,否则"持续出字的调用不被
-   * 从开打起算的墙钟误杀"这条验收在默认配置下不成立;取单钟默认的 3 倍,覆盖
-   * extended thinking + 32k 输出的最长合理单步,同时保持有限。
+   * env chain: `envOptionalPositiveInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`.
+   * Third layer is 15 minutes: must be strictly greater than the idle clock's
+   * 300_000 default, otherwise the acceptance criterion "a call that keeps
+   * producing deltas is not killed by a wall clock started at open" fails
+   * under default config; take 3x the idle default to cover the longest
+   * reasonable single step of extended thinking + 32k output while staying
+   * finite.
    *
-   * 流式臂上它取代 `timeoutMs` 当墙钟(`timeoutMs` 仍是 `stream=off` 的单钟)。
-   * 可选原因同 `idleTimeoutMs`。
+   * On the streaming arm it replaces `timeoutMs` as the wall clock
+   * (`timeoutMs` remains the single clock for `stream=off`). Optional for the
+   * same reason as `idleTimeoutMs`.
    */
   hardCapMs?: number;
 }
 
 /**
- * #152 T5:thinking 可见面控制臂(env flag → env SSOT)。
+ * Thinking visibility control arm (env flag → env SSOT).
  *
- * `IKNOW_CHAT_SHOW_THINKING` 值域 `"off" | "on"`(大小写不敏感)。
- * 非法值 → 回退 `false`。默认 off(thinking 不进答案正文)。
+ * `IKNOW_CHAT_SHOW_THINKING` value domain `"off" | "on"` (case-insensitive).
+ * Invalid value → fall back to `false`. Default off (thinking never enters
+ * the answer body).
  */
 export interface ChatEnv {
   /**
-   * #152 T5:是否在回答中显示模型 thinking 文本。
-   * `false`(默认)= 不显示,保持既有 chat 投影行为不变;
-   * `true` = 在答案文本前以区隔样式显示 thinking。
+   * Whether to show model thinking text in answers.
+   * `false` (default) = hidden, existing chat projection behavior unchanged;
+   * `true` = show thinking before the answer text in a distinct style.
    */
   showThinking: boolean;
 }
 
 /**
- * ACI Web 类工具的 env 配置臂（web_search 端点覆写 + 出站代理 + 可插拔后端）。
+ * Env config arms for ACI web-family tools (web_search endpoint override +
+ * egress proxy + pluggable backends).
  *
- * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
- * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
+ * `IKNOW_WEB_SEARCH_URL`: optional HTML search endpoint override (private
+ * backend / testing). Empty → undefined (web_search uses the default
+ * DuckDuckGo html endpoint).
  *
- * `IKNOW_WEB_PROXY`：可选出站 HTTP(S) 代理 URL（trust_env=False 语义 ——
- * 显式配置才生效，
- * 不读系统 HTTP(S)_PROXY）。装配方在 network-guard 构造 ProxyAgent
- * dispatcher；非空时 web_fetch / web_search 出口走代理（远端解析 +
- * 出网，绕开本地 DNS 污染 / egress 阻断）。代理 URL 仍走与目标同套
- * 语法校验（协议 / host / 凭据）。
+ * `IKNOW_WEB_PROXY`: optional egress HTTP(S) proxy URL (trust_env=False
+ * semantics — only explicit config takes effect; system HTTP(S)_PROXY is not
+ * read). The assembly side builds a ProxyAgent dispatcher in network-guard;
+ * when non-empty, web_fetch / web_search egress goes through the proxy
+ * (remote resolution + egress, bypassing local DNS pollution / egress
+ * blocking). The proxy URL still passes the same syntax validation as targets
+ * (protocol / host / credentials).
  *
- * `IKNOW_WEB_SEARCH_BACKEND` (#826 T1)：web_search 后端选择（闭集
- * `"bing" | "tavily" | "exa" | "brave"`）。未设 / 空串 → 默认 `"bing"`
- * （HTML 解析路径不变，与 v0 字节级一致；spec Assumption 2）。非法值 →
- * 抛 typed `WebEnvConfigError( "invalid_search_backend" )`，**不**静默回退
- * default（区别于 envThinkingModeOptional 等"非法 → undefined"旧模式 —
- * 默认后端对配错敏感，配错比 fallback 更显眼）。
+ * `IKNOW_WEB_SEARCH_BACKEND`: web_search backend selection (closed set
+ * `"bing" | "tavily" | "exa" | "brave"`). Unset / empty string → default
+ * `"bing"` (HTML parsing path unchanged, byte-identical to v0). Invalid value
+ * → throw typed `WebEnvConfigError( "invalid_search_backend" )`, **never**
+ * silently fall back to the default (unlike envThinkingModeOptional-style
+ * "invalid → undefined" patterns — the default backend is sensitive to
+ * misconfiguration, and a loud failure beats a fallback).
  *
- * `EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` (#826 T1, vendor 命名)：
- * keyed 后端 API key，字面或 `${VAR}` 占位符；空串 / "yes" / 占位符解析失败
- * → undefined（与 settings.llm.apiKey 同 expandPlaceholders 链路）。
+ * `EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` (vendor-named): keyed
+ * backend API keys, literal or `${VAR}` placeholder; empty string / "yes" /
+ * placeholder resolution failure → undefined (same expandPlaceholders chain
+ * as settings.llm.apiKey).
  *
- * 读取经本模块统一走 process.env > .env.local > .env 优先级（env.ts
- * SSOT，与 LLM key 同一加载链路）；工具自身不直读 process.env。
+ * Reads go through this module's unified process.env > .env.local > .env
+ * priority (env.ts SSOT, same loading chain as the LLM key); tools never read
+ * process.env directly.
  */
 
-/** #826 T1: 项目命名 — web_search 后端选择 env var 名。 */
+/** Project naming — env var name for web_search backend selection. */
 export const SEARCH_BACKEND_ENV_KEY = "IKNOW_WEB_SEARCH_BACKEND";
 
-/** #826 T1: vendor 命名 — 三个 keyed 后端的 API key env var 名。 */
+/** Vendor naming — API key env var names for the three keyed backends. */
 export const EXA_API_KEY_ENV_KEY = "EXA_API_KEY";
 export const TAVILY_API_KEY_ENV_KEY = "TAVILY_API_KEY";
 export const BRAVE_API_KEY_ENV_KEY = "BRAVE_API_KEY";
 
 /**
- * #826 T1 / spec Assumption 5：web_search 后端 id 闭集。
- * 顺序与 spec 保持一致（bing → tavily → exa → brave）；`envOptionalEnum` 判定
- * 对顺序不敏感（`Array.includes` 线性扫描），但保持字面形态便于错误消息 / 测试断言。
- * loader 装配反序列化走 `(typeof VALUES)[number]`。
+ * Closed set of web_search backend ids.
+ * Order kept stable (bing → tavily → exa → brave); the `envOptionalEnum` check
+ * is order-insensitive (`Array.includes` linear scan), but the literal shape
+ * is kept for error messages / test assertions. Loader assembly deserializes
+ * via `(typeof VALUES)[number]`.
  */
 export const SEARCH_BACKEND_VALUES = [
   "bing",
@@ -210,16 +235,17 @@ export const SEARCH_BACKEND_VALUES = [
   "brave",
 ] as const;
 
-/** #826 T1: 后端 id 字面联合（与 envOptionalEnum helper 默认值的强类型对齐）。 */
+/** Backend id literal union (strong-typed alignment with envOptionalEnum helper defaults). */
 export type SearchBackendId = (typeof SEARCH_BACKEND_VALUES)[number];
 
 /**
- * #826 T1: WebEnv typed-error 判别联合。
- * 当前仅 `invalid_search_backend` 一 kind —— `IKNOW_WEB_SEARCH_BACKEND` 不在
- * `SEARCH_BACKEND_VALUES` 闭集。镜像 `WorkspaceRootError` 的 plain-object
- * `satisfies` 形态（callers 走 `isWebEnvConfigError` 守卫，绝不 `instanceof Error`：
- * 后者会把 plain object 打成 `[object Object]`，kind/varName 全不可见）。
- * 保留 `expected`（而非消解为字符串）让 render 端按需重排闭集展示。
+ * WebEnv typed-error discriminated union.
+ * Currently only the `invalid_search_backend` kind — `IKNOW_WEB_SEARCH_BACKEND`
+ * outside the `SEARCH_BACKEND_VALUES` closed set. Mirrors `WorkspaceRootError`'s
+ * plain-object `satisfies` shape (callers use the `isWebEnvConfigError` guard,
+ * never `instanceof Error`: the latter stringifies a plain object to
+ * `[object Object]`, hiding kind/varName entirely). Keeping `expected` (not
+ * flattened into a string) lets the render side re-order the closed set as needed.
  */
 export type WebEnvConfigError = {
   kind: "invalid_search_backend";
@@ -229,10 +255,10 @@ export type WebEnvConfigError = {
 };
 
 /**
- * #826 T1: WebEnv typed-error 判别守卫。
- * `kind` 必须命中已知闭集 + `varName`/`value` 都是 string + `expected` 是数组。
- * 与 `WorkspaceRootError` 的「kind + payload field 同款判定」语义对齐，避免与
- * `SessionStoreError` 的同名 kind 串台。
+ * WebEnv typed-error discriminated guard.
+ * `kind` must hit the known closed set + `varName`/`value` are strings +
+ * `expected` is an array. Same "kind + payload field" semantics as
+ * `WorkspaceRootError`, avoiding kind collisions with `SessionStoreError`.
  */
 export function isWebEnvConfigError(err: unknown): err is WebEnvConfigError {
   if (err === null || typeof err !== "object") return false;
@@ -246,19 +272,22 @@ export function isWebEnvConfigError(err: unknown): err is WebEnvConfigError {
 }
 
 /**
- * ADR-0093 / spec SC4：provider 命中但 `provider.apiKeyEnv` 对应的 env var
- * 未设（process.env 侧缺席 / 空串）时的 typed-error 判别联合。当前仅
- * `provider_api_key_missing` 一 kind。
+ * Typed-error discriminated union for when a provider is matched but the env
+ * var named by `provider.apiKeyEnv` is unset (absent / empty in process.env).
+ * Currently only the `provider_api_key_missing` kind.
  *
- * plain-object `satisfies` 形态（同 `WebEnvConfigError` / `WorkspaceRootError`）：
- * callers 走 `isLlmProviderConfigError` 守卫，**绝不** `err instanceof Error`
- * —— 后者会把 plain object 打成 `[object Object]`，kind / providerId /
- * apiKeyEnv 全不可见（`code-quality.md` typed-error catch 契约）。
+ * Plain-object `satisfies` shape (like `WebEnvConfigError` /
+ * `WorkspaceRootError`): callers use the `isLlmProviderConfigError` guard,
+ * **never** `err instanceof Error` — the latter stringifies a plain object to
+ * `[object Object]`, hiding kind / providerId / apiKeyEnv (the typed-error
+ * catch contract).
  *
- * 安全契约：payload 只带 env var **名**（`apiKeyEnv`），不带任何密钥值；本
- * 模块不打印 / 不落盘任何密钥。**绝不**回退 `settings.llm.apiKey` 字面 ——
- * provider 显式登记 apiKeyEnv 即声明走 env，静默降级会把「配错 env 名」伪装
- * 成「用另一把 key 正常工作」。
+ * Security contract: the payload carries only env var **names** (`apiKeyEnv`),
+ * never key values; this module never prints or persists any secret.
+ * **Never** fall back to the literal `settings.llm.apiKey` — a provider that
+ * explicitly declares apiKeyEnv has opted into env resolution; silently
+ * degrading would disguise "wrong env var name" as "working fine with a
+ * different key".
  */
 export type LlmProviderConfigError =
   | {
@@ -271,7 +300,7 @@ export type LlmProviderConfigError =
       model: string;
     };
 
-/** ADR-0093：provider typed-error 判别守卫。 */
+/** Provider typed-error discriminated guard. */
 export function isLlmProviderConfigError(
   err: unknown
 ): err is LlmProviderConfigError {
@@ -290,31 +319,35 @@ export function isLlmProviderConfigError(
 }
 
 /**
- * ADR-0094 T1 / spec SC1-SC3, SC7：wire-model SSOT 解析。
+ * Wire-model SSOT parsing.
  *
- * 物理世界 = Anthropic SDK 请求 body 的 `model` 字段 = providers.models[].id
- * （不含 provider 前缀）。`settings.llm.model` 是路由 ID（`provider/model` 字面），
- * provider id 仅用来查注册表拿 baseUrl/apiKey/headers，**绝不**上 wire —— 上 wire
- * 只走 models[].id。
+ * The physical world = the `model` field of Anthropic SDK request bodies =
+ * providers.models[].id (without the provider prefix). `settings.llm.model` is
+ * a route ID (`provider/model` literal); the provider id is only used to look
+ * up the registry for baseUrl/apiKey/headers and **never** goes on the wire —
+ * only models[].id does.
  *
- * 行为：
- *  - 首个 `/` 拆分：左 = provider id（trim）、右 = model id（trim 后含其余 `/`）；
- *  - 无 `/`、左 / 右 trim 后空 → 原串 identity 返回（bare name 直传；`a/` /
- *    `/x` 等 miss 形态今日 loadIknowEnv 在装配前 typed 抛，本函数保持
- *    total，**不**再抛，便于单元测试与未来未配 providers 的回归路径）。
+ * Behavior:
+ *  - split on the first `/`: left = provider id (trimmed), right = model id
+ *    (trimmed, may contain further `/`);
+ *  - no `/`, or either side empty after trim → return the input unchanged
+ *    (bare names pass through; `a/` / `/x` miss shapes are thrown as typed
+ *    errors by today's loadIknowEnv before assembly; this function stays
+ *    total and **never** throws, for unit-testability and future no-providers
+ *    regression paths).
  *
- * 三装配点（build-engine / thinking-override / subagent worker）共用本函数，
- * 严禁各自内联重复。
+ * The three assembly points (build-engine / thinking-override / subagent
+ * worker) share this function; inlining duplicates is forbidden.
  */
 export function wireModelFromRoute(route: string): string {
   const slash = route.indexOf("/");
   if (slash === -1) return route;
   const tail = route.slice(slash + 1).trim();
-  if (tail === "") return route; // `a/` 形态：miss 路径原样返回
+  if (tail === "") return route; // `a/` shape: miss path returns the input verbatim
   return tail;
 }
 
-/** ADR-0093：`LlmProviderConfigError` 文本渲染；只出 provider / env 名，绝不出密钥值。 */
+/** Renders `LlmProviderConfigError` text; emits only provider / env names, never key values. */
 export function formatLlmProviderConfigError(
   err: LlmProviderConfigError
 ): string {
@@ -325,15 +358,16 @@ export function formatLlmProviderConfigError(
 }
 
 /**
- * ADR-0093：`settings.llm.model` 拆 provider 路由 ID 的解析结果。
- *  - `providerId`：按**第一个** `/` 拆分出的首段（trim 后非空，且尾段也非空，
- *    才算 provider 形态）；
- *  - `provider`：命中的 provider 记录；未命中 / 非 provider 形态 → undefined
- *    （`resolveLlmTransport` 会抛 `provider_model_not_registered`）。
+ * Parse result of splitting the provider route ID out of `settings.llm.model`.
+ *  - `providerId`: the first segment split on the **first** `/` (only counts
+ *    as provider shape when non-empty after trim and the tail is also non-empty);
+ *  - `provider`: the matched provider record; no hit / non-provider shape →
+ *    undefined (`resolveLlmTransport` throws `provider_model_not_registered`).
  *
- * 尾段（modelId）只在形态判定里用一次：本函数把它 trim 后丢弃，不放进结果 ——
- * 消费方 `resolveLlmTransport` 只需要 providerId 查表；model 串本身（含尾段）
- * 由 `loadIknowEnv` 原样透传进 `IknowEnv.llm.model`。
+ * The tail (modelId) is used once for the shape check only: this function
+ * trims and discards it — the consumer `resolveLlmTransport` only needs
+ * providerId for the lookup; the model string itself (tail included) is
+ * passed through verbatim into `IknowEnv.llm.model` by `loadIknowEnv`.
  */
 interface ResolvedLlmProvider {
   readonly providerId: string;
@@ -341,16 +375,18 @@ interface ResolvedLlmProvider {
 }
 
 /**
- * ADR-0093：provider 命中时的密钥读取 —— **只读 `process.env[apiKeyEnv]`**，
- * 沿 spec 明文；**不**回落 `.env` / `.env.local` fileMap（与 apiKey 占位符
- * 链路刻意分离：provider 声明的 env var 是部署环境契约，不是工作区配置）。
- * 值 trim 后非空才算有效；未设 / 空串 / 全空白 → undefined。
+ * Key lookup on a provider hit — reads **only `process.env[apiKeyEnv]`**;
+ * **no** fallback to the `.env` / `.env.local` fileMap (deliberately separate
+ * from the apiKey placeholder chain: a provider-declared env var is a
+ * deployment contract, not workspace config). A value counts only when
+ * non-empty after trim; unset / empty / whitespace-only → undefined.
  *
- * `typeof raw === "string"` 是 M2 同族守卫：`apiKeyEnv` 若恰是
- * Object.prototype 自有键（`constructor` / `__proto__` / `toString` 等），
- * `process.env[key]` 会命中原型拿到函数 / 对象，直接 `.trim()` 抛 TypeError
- * 而非 typed 错。非字符串一律按「未设」处理 → 落 typed `provider_api_key_missing`
- * （fail-safe：绝不拿非 env 值当密钥用）。
+ * `typeof raw === "string"` is the prototype-injection guard: if `apiKeyEnv`
+ * happens to be an own key of Object.prototype (`constructor` / `__proto__` /
+ * `toString` etc.), `process.env[key]` would hit the prototype and return a
+ * function / object, and a direct `.trim()` would throw TypeError instead of a
+ * typed error. Non-strings are treated as "unset" → typed
+ * `provider_api_key_missing` (fail-safe: never use a non-env value as a key).
  */
 function resolveProviderApiKey(apiKeyEnv: string): string | undefined {
   const raw = process.env[apiKeyEnv];
@@ -359,16 +395,19 @@ function resolveProviderApiKey(apiKeyEnv: string): string | undefined {
 }
 
 /**
- * ADR-0093 / spec SC2：`settings.llm.model` 的 `provider/model` 拆分与注册表
- * 查找。**未命中 / providers 缺席 → typed 抛**（`provider_model_not_registered`），
- * 不再回落 `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey` 旧路径。
+ * `provider/model` split + registry lookup for `settings.llm.model`.
+ * **No hit / providers absent → typed throw** (`provider_model_not_registered`);
+ * no more fallback to the old `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey` path.
  *
- *  - 首个 `/` 拆分，两段 trim 后都非空才算 provider 形态（`/x` / `x/` /
- *    `a//b` 形态 → 尾段为空 → 按未命中处理，不抛错、不拆第二刀）；
- *  - 尾段保留其余 `/`（`a/b/c` → 首段 `a`，尾段 `b/c` 参与形态判定后丢弃）；
- *  - `providers` 缺席 / 空数组 → 直接未命中（0 成本短路）；
- *  - 查找用 `p.id === providerId`（settings 装载层已 trim provider id）；
- *    注册表不去重，**首条命中生效**（后定义同 id 不覆盖，见 settings.ts）。
+ *  - split on the first `/`; provider shape only when both segments are
+ *    non-empty after trim (`/x` / `x/` / `a//b` → empty tail → treated as no
+ *    match, no throw, no second split);
+ *  - the tail keeps remaining `/`s (`a/b/c` → head `a`, tail `b/c`, used for
+ *    the shape check then discarded);
+ *  - `providers` absent / empty array → straight no-match (zero-cost short circuit);
+ *  - lookup via `p.id === providerId` (the settings loading layer already
+ *    trims provider ids); the registry is not deduplicated, **first match
+ *    wins** (later same-id definitions do not override; see settings.ts).
  */
 function resolveLlmProvider(
   providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined,
@@ -385,13 +424,14 @@ function resolveLlmProvider(
 }
 
 /**
- * ADR-0093：`llm.baseUrl` / `llm.apiKey` / `llm.headers` 的三元装配。
+ * Triple assembly for `llm.baseUrl` / `llm.apiKey` / `llm.headers`.
  *
- * 命中（SC2）→ baseUrl = provider.baseUrl 去尾斜杠、apiKey =
- * `process.env[provider.apiKeyEnv]`、headers = provider.headers（缺席则不产出）；
- * apiKeyEnv 缺席 / 空 → 抛 typed `LlmProviderConfigError`（SC4），**绝不**回退
- * `settings.llm.apiKey` 字面。providers 缺席 / 空数组 / 未命中 →
- * `provider_model_not_registered`。
+ * Hit → baseUrl = provider.baseUrl without trailing slash, apiKey =
+ * `process.env[provider.apiKeyEnv]`, headers = provider.headers (absent →
+ * not produced); missing / empty apiKeyEnv → throw typed
+ * `LlmProviderConfigError`, **never** fall back to the literal
+ * `settings.llm.apiKey`. providers absent / empty / no match →
+ * `provider_model_not_registered`.
  */
 interface ResolvedLlmTransport {
   readonly baseUrl: string;
@@ -428,18 +468,19 @@ function resolveLlmTransport(
   return {
     baseUrl: provider.baseUrl.replace(/\/$/, ""),
     apiKey,
-    // headers 缺席（含空对象——settings 装载层已把空映射折叠成字段缺席）→
-    // 保持 undefined，不写 `{}`（spec 行为契约 5）。
+    // headers absent (including empty object — the settings loading layer
+    // folds empty maps into field absence) → keep undefined, never write `{}`.
     headers: provider.headers,
   };
 }
 
 /**
- * ADR-0113: `settings.llm.liteModel` → 路由结果。与主模型共用
- * `resolveLlmTransport`（同一 providers[] 查表），但任何配置非法态
- * （缺席 / 空串 / 无 slash / provider 未注册 / provider 密钥未设）一律
- * 静默丢弃返回 undefined —— 标题生成是增强，lite 不得 fail-fast 主会话；
- * 主模型的 SC4 抛错路径不经此处。
+ * `settings.llm.liteModel` → routing result. Shares `resolveLlmTransport` with
+ * the main model (same providers[] lookup), but every illegal config state
+ * (absent / empty string / no slash / provider unregistered / provider key
+ * unset) is silently dropped to undefined — title generation is an
+ * enhancement; lite must never fail-fast the main session; the main model's
+ * throw paths never pass through here.
  */
 function resolveLlmLite(
   mergedSettings: IknowSettings
@@ -457,15 +498,16 @@ function resolveLlmLite(
     model: route,
     baseUrl: transport.baseUrl,
     apiKey: transport.apiKey,
-    // headers 缺席 → 不产出键（与 LlmEnv.headers 同款纪律）。
+    // headers absent → key not produced (same discipline as LlmEnv.headers).
     ...(transport.headers === undefined ? {} : { headers: transport.headers }),
   };
 }
 
 /**
- * ADR-0113: lite 路由结果存在才产出 `{ liteModel }`，缺席产出 `{}`（不写键）。
- * 从 loadIknowEnv 的等价搬移 —— 条件 spread 收进单一职责 helper，
- * 控制 loadIknowEnv 复杂度不再随可选臂增长。
+ * Produce `{ liteModel }` only when the lite routing result exists; absent →
+ * `{}` (no key). Moved verbatim from loadIknowEnv — the conditional spread is
+ * folded into a single-purpose helper so loadIknowEnv's complexity doesn't
+ * grow with optional arms.
  */
 function spreadLiteModel(
   liteModel: LiteModelEnv | undefined
@@ -477,103 +519,113 @@ export interface WebEnv {
   searchUrl: string | undefined;
   proxy: string | undefined;
   /**
-   * #826 T1: 选定的 web_search 后端 id（`"bing" | "tavily" | "exa" | "brave"` 闭集）。
-   * 回退链 env > settings.web.searchBackend > 默认 `"bing"`（settings-web-backend）。
-   * 非法值 env loader 抛 typed `WebEnvConfigError`，**不**静默回退。
+   * Selected web_search backend id (closed set `"bing" | "tavily" | "exa" | "brave"`).
+   * Fallback chain env > settings.web.searchBackend > default `"bing"`.
+   * Invalid values throw typed `WebEnvConfigError` from the env loader, **never** silent fallback.
    */
   searchBackend?: "bing" | "tavily" | "exa" | "brave";
   /**
-   * #826 T1: Exa API key（env `EXA_API_KEY`，vendor 命名）。
-   * 字面密钥或 `${VAR}` 占位符经 expandPlaceholders 解析；
-   * 未设 / 空串 / "yes" / 占位符解析失败 → undefined。
+   * Exa API key (env `EXA_API_KEY`, vendor-named).
+   * Literal key or `${VAR}` placeholder resolved by expandPlaceholders;
+   * unset / empty / "yes" / placeholder resolution failure → undefined.
    */
   exaApiKey?: string;
   /**
-   * #826 T1: Tavily API key（env `TAVILY_API_KEY`，vendor 命名）。
-   * 同 exaApiKey 同款空态语义。
+   * Tavily API key (env `TAVILY_API_KEY`, vendor-named).
+   * Same empty-state semantics as exaApiKey.
    */
   tavilyApiKey?: string;
   /**
-   * #826 T1: Brave API key（env `BRAVE_API_KEY`，vendor 命名）。
-   * 同 exaApiKey 同款空态语义。
+   * Brave API key (env `BRAVE_API_KEY`, vendor-named).
+   * Same empty-state semantics as exaApiKey.
    */
   braveApiKey?: string;
 }
 
 /**
- * #119 T1: 自动压缩配置臂(env SSOT, 透传至 harness/compress/)。
+ * Auto-compact config arm (env SSOT, passed through to harness/compress/).
  *
- * `IKNOW_MODEL_CONTEXT_WINDOW`:**策略预算窗口**(整数, ADR-0100)—— 用量显示
- * 分母与 proactive auto-compact 闸共用的同一个数字,不是供应商模型上限。
- * 默认 256000(`DEFAULT_STRATEGY_CONTEXT_WINDOW`),非数字 → 回退同一默认
- * (对齐 envInt 既有纪律, 不抛错)。
+ * `IKNOW_MODEL_CONTEXT_WINDOW`: the **policy budget window** (integer) — the
+ * same number shared by the usage-display denominator and the proactive
+ * auto-compact gate; it is not the vendor model limit. Default 256000
+ * (`DEFAULT_STRATEGY_CONTEXT_WINDOW`); non-numeric → fall back to the same
+ * default (matches envInt's existing discipline, never throws).
  *
- * `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`:proactive auto-compact 阈值(可选整数)。
- * 未设 / 空串 / 非数字 → undefined(由 threshold.ts 在 derive 时缺省推导
- * `floor(0.95 × contextWindow)`, 硬校验 `threshold < window`)。提前校验归 T4
- * 不归 env loader。把分母设成供应商真上限的人自己压低本 env。
+ * `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`: proactive auto-compact threshold
+ * (optional integer). Unset / empty / non-numeric → undefined (threshold.ts
+ * derives `floor(0.95 × contextWindow)` by default at derive time, with the
+ * hard check `threshold < window`). Early validation belongs to threshold.ts,
+ * not the env loader. Whoever sets the denominator to the vendor's real cap
+ * should lower this env themselves.
  */
 export interface IknowCompressEnv {
-  // 字段访问形如 `env.compress.contextWindow` / `env.compress.thresholdTokens`。
+  // Field access looks like `env.compress.contextWindow` / `env.compress.thresholdTokens`.
   contextWindow: number;
   thresholdTokens: number | undefined;
 }
 
 /**
- * 缺省 **策略预算窗口**（ADR-0100）：env 派生缺省、TUI `ContextBar` 分母与
- * health 投影分母三处共用本常量 —— 各写一份字面量时任何一处漂移都会让
- * 「显示快满了却还没压缩」重新出现。
+ * Default **policy budget window**: shared by three spots — env-derived
+ * default, TUI `ContextBar` denominator and health-projection denominator —
+ * so drifting literals can never reintroduce "the bar says nearly full but
+ * compaction hasn't happened".
  */
 export const DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000;
 
 /**
- * #378 根因 B: MCP 连接超时配置臂(env SSOT, 透传至 createMcpManager.timeoutMsOverride)。
+ * MCP connect-timeout config arm (env SSOT, passed to createMcpManager.timeoutMsOverride).
  *
- * `IKNOW_MCP_CONNECT_TIMEOUT_MS`:MCP server 连接超时毫秒(正整数)。
- * 默认 60_000(根因 B: 30s 被 npx -y cold start 击穿, 提到 60s 缓解)。
- * 非法值(非数字 / 负数 / 0)→ 回退 60_000(统一双轨, 零/负超时无意义)。
+ * `IKNOW_MCP_CONNECT_TIMEOUT_MS`: MCP server connect timeout in ms (positive integer).
+ * Default 60_000 (30s was being busted by npx -y cold starts; raised to 60s to mitigate).
+ * Invalid values (non-numeric / negative / 0) → fall back to 60_000 (unified
+ * dual track; zero / negative timeouts are meaningless).
  */
 export interface McpEnv {
   connectTimeoutMs: number;
 }
 
 /**
- * #358 T1: 子代理配置臂(透传至 harness/subagent/manager.ts 的 SIGTERM 计时器消费点)。
+ * Subagent config arm (passed to the SIGTERM timer consumption point in
+ * harness/subagent/manager.ts).
  *
- * `taskTimeoutMs` = 子代理整任务寿命上限(per-task wallclock, 毫秒)。
- * 与 `LlmEnv.timeoutMs`(per-call LLM 调用竞速)语义、命名、消费点全程分离(C9)。
+ * `taskTimeoutMs` = whole-task lifetime cap per subagent (per-task wallclock, ms).
+ * Semantics, naming and consumption point are kept fully separate from
+ * `LlmEnv.timeoutMs` (per-call LLM racing).
  *
- * env 链:`envOptionalPositiveInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`。
- * env 层无第三层默认值(7200s 常量由 T2 的 manager 消费点声明,
- * 避免缺省值在两处声明, settings 单一承载通过 mirror 校验)。
+ * env chain: `envOptionalPositiveInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`.
+ * No third-layer default at the env layer (the 7200s constant is declared at
+ * the manager consumption point, to avoid declaring the default in two places;
+ * single-carrier settings passes mirror validation).
  *
- * `maxConcurrentWorkers` = 同时处于 starting/running 的 worker 并发上限。
- * 未设 / 空 / 非数字 / 非正 → 默认 `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`(15)。
+ * `maxConcurrentWorkers` = cap on workers simultaneously in starting/running.
+ * Unset / empty / non-numeric / non-positive → default
+ * `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS` (15).
  *
- * ADR-0096 T2：值域扩到 `number | "unlimited"`；`"unlimited"` 仅 settings 来源
- * 产出（env 不接 unlimited 字面），由面板 / persist 反向通道落盘。
+ * Value domain widened to `number | "unlimited"`; `"unlimited"` is only
+ * produced from settings (env never accepts the unlimited literal), persisted
+ * via the panel / persist reverse channel.
  */
 export interface IknowSubagentEnv {
-  /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
+  /** Subagent whole-task lifetime cap (ms); env unset + settings unset → undefined. */
   taskTimeoutMs: number | undefined;
-  /** 子代理并发上限；loadIknowEnv 总会填入正整数默认值或 `"unlimited"`。 */
+  /** Subagent concurrency cap; loadIknowEnv always fills a positive integer default or `"unlimited"`. */
   maxConcurrentWorkers?: number | "unlimited";
 }
 
 export interface IknowEnv {
   llm: LlmEnv;
-  /** #152 T5:thinking 可见面控制臂。 */
+  /** Thinking visibility control arm. */
   chat: ChatEnv;
-  /** ACI Web 类工具配置臂（web_search 端点覆写）。 */
+  /** ACI web-family tool config arm (web_search endpoint override). */
   web: WebEnv;
-  /** #119 T1: 自动压缩配置臂(透传至 harness/compress/)。 */
+  /** Auto-compact config arm (passed through to harness/compress/). */
   compress: IknowCompressEnv;
-  /** #378 根因 B: MCP 连接超时配置臂(透传至 createMcpManager.timeoutMsOverride)。 */
+  /** MCP connect-timeout config arm (passed to createMcpManager.timeoutMsOverride). */
   mcp: McpEnv;
-  /** #358 T1: 子代理配置臂(per-task wallclock; manager SIGTERM 计时器消费)。 */
+  /** Subagent config arm (per-task wallclock; consumed by the manager SIGTERM timer). */
   subagent: IknowSubagentEnv;
   /**
-   * #672 T3: 工具环检测（默认开）。env `IKNOW_TOOL_LOOP_DETECTION` 与 settings.loop.detectToolLoop。
+   * Tool loop detection (on by default). env `IKNOW_TOOL_LOOP_DETECTION` and settings.loop.detectToolLoop.
    */
   loop?: { detectToolLoop: boolean };
   /**
@@ -586,11 +638,12 @@ export interface IknowEnv {
    */
   workspaceRoot: string | undefined;
   /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根，读
-   * `IKNOW_PRODUCT_ROOT`。父会话 spawn 子代理时注入本变量，让 worker 的
-   * rules / 项目 `AGENTS.md` / 项目 skills 发现落在**主仓**而不是它自己的
-   * cwd（改绑后那是一棵 gitignored 的裸树）。unset → undefined，worker 回落
-   * 到 cwd（未改绑时两者同值，字节不变）。
+   * Project identity root, read from `IKNOW_PRODUCT_ROOT`. When a parent
+   * session spawns subagents it injects this var so the worker's rules /
+   * project `AGENTS.md` / project skills discovery land on the **main repo**
+   * instead of its own cwd (after rebinding, that is a gitignored bare tree).
+   * Unset → undefined, worker falls back to cwd (without rebinding both are
+   * the same value, byte-for-byte unchanged).
    */
   productRoot: string | undefined;
 }
@@ -634,7 +687,7 @@ function envGet(opts: EnvGetOpts): string {
   return fallback;
 }
 
-/** Optional string env: 未设 / 空串 → undefined（区别于 envGet 的 "" 兜底）。 */
+/** Optional string env: unset / empty → undefined (unlike envGet's "" fallback). */
 function envOptional(opts: EnvGetOpts): string | undefined {
   const raw = envGet({ file: opts.file, key: opts.key });
   return raw.length > 0 ? raw : undefined;
@@ -664,9 +717,10 @@ function envInt(opts: EnvIntOpts): number {
 }
 
 /**
- * #378 根因 B: 正整数 env values(MCP 连接超时等)。
- * envInt 只查 finite, 但 0 / 负超时无意义, 此处收紧为 > 0 才透传,
- * 否则回退 fallback(未设 / 非数字 / 负数 / 0 → fallback, 不抛错)。
+ * Positive-integer env values (MCP connect timeout, etc.).
+ * envInt only checks finiteness, but 0 / negative timeouts are meaningless;
+ * tighten to pass through only when > 0, otherwise fall back (unset /
+ * non-numeric / negative / 0 → fallback, never throws).
  */
 function envPositiveInt(opts: EnvIntOpts): number {
   const n = envInt(opts);
@@ -679,9 +733,9 @@ interface EnvOptionalIntOpts {
 }
 
 /**
- * #119 T1: 可选整数 env values(如 auto-compact 阈值)。
- * 未设 / 空串 → undefined;否则 Number + isFinite + trunc 后返回,
- * 非数字 → undefined(回退纪律对齐 envInt, 不抛错)。
+ * Optional integer env values (e.g. auto-compact threshold).
+ * Unset / empty → undefined; otherwise Number + isFinite + trunc;
+ * non-numeric → undefined (fallback discipline matches envInt, never throws).
  */
 function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
   const raw = envGet({ file: opts.file, key: opts.key });
@@ -716,9 +770,10 @@ interface EnvFileKeyOpts {
 }
 
 /**
- * #151 T4 / S4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"(大小写不敏感)。
- * 未设 / 空串 / 非法值 → undefined(区别于 envThinkingMode 的"非法回退 off"):
- * S4 需要三态(off / adaptive / 未设),未设时才能回退 settings.llm.thinking。
+ * Parse IKNOW_LLM_THINKING value domain "off" | "adaptive" (case-insensitive).
+ * Unset / empty / invalid → undefined (unlike the thinking-mode parser's
+ * "invalid → fall back to off"): callers need the tri-state (off / adaptive /
+ * unset) so that only a truly-unset env falls back to settings.llm.thinking.
  */
 function envThinkingModeOptional(
   opts: EnvFileKeyOpts
@@ -729,9 +784,10 @@ function envThinkingModeOptional(
 }
 
 /**
- * #151 T4 / S4: 解析 IKNOW_LLM_THINKING_EFFORT 值域 "low" | "medium" |
- * "high" | "xhigh" | "max"。未设 / 空串 / 非法值 → undefined
- * (区别于 envThinkingEffort 的"非法视同空"):S4 需要区分"未设"以回退 settings。
+ * Parse IKNOW_LLM_THINKING_EFFORT value domain "low" | "medium" | "high" |
+ * "xhigh" | "max". Unset / empty / invalid → undefined (unlike the effort
+ * parser's "invalid treated as empty"): callers must distinguish "unset" to
+ * fall back to settings.
  */
 function envThinkingEffortOptional(
   opts: EnvFileKeyOpts
@@ -750,8 +806,8 @@ function envThinkingEffortOptional(
 }
 
 /**
- * #152 T5: 解析 IKNOW_CHAT_SHOW_THINKING。合法值 "on" / "off"（大小写不敏感），
- * 非法值 → 回退 false（默认不显示 thinking）。
+ * Parse IKNOW_CHAT_SHOW_THINKING. Valid values "on" / "off" (case-insensitive);
+ * invalid → fall back to false (thinking hidden by default).
  */
 function envShowThinking(opts: EnvFileKeyOpts): boolean {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
@@ -759,9 +815,10 @@ function envShowThinking(opts: EnvFileKeyOpts): boolean {
 }
 
 /**
- * #179 T6 (#147 D0): 解析 IKNOW_LLM_STREAM 值域 "on" | "off"(大小写不敏感)。
- * 默认 on(D0:流式为默认臂);非法值 → 回退 "on",不抛错。
- * 与 envThinkingMode 先例同构,仅回退方向相反(thinking 默认 off,stream 默认 on)。
+ * Parse IKNOW_LLM_STREAM value domain "on" | "off" (case-insensitive).
+ * Default on (streaming is the default arm); invalid → fall back to "on",
+ * never throws. Structurally like the thinking-mode parser, only the fallback
+ * direction is opposite (thinking defaults off, stream defaults on).
  */
 function envStreamMode(opts: EnvFileKeyOpts): "on" | "off" {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
@@ -773,20 +830,24 @@ interface EnvOptionalEnumOpts<T extends string> {
   readonly file: Record<string, string>;
   readonly key: string;
   readonly values: readonly T[];
-  /** 缺省时未设返回 undefined（调用方走 settings / 默认值回退链）。 */
+  /** Value used when the env var is unset; if absent, returns undefined (caller runs the settings / default fallback chain). */
   readonly default?: T;
 }
 
 /**
- * #826 T1: 闭集 enum 解析器（IKNOW_WEB_SEARCH_BACKEND 等）。
- *  - 未设 / 空串 → `default`（给了 default 时）否则 undefined（settings-web-backend:
- *    未设与显式值需区分，调用方接 env > settings > 默认回退链）；
- *  - 命中 `values` 闭集 → 原样返回值（**区分大小写**，与 spec 字面形态对齐）；
- *  - 非空但不在闭集 → 抛 typed `WebEnvConfigError( "invalid_search_backend", ... )`，
- *    **不**静默回退 `default`。
+ * Closed-set enum parser (IKNOW_WEB_SEARCH_BACKEND, etc.).
+ *  - unset / empty → `default` (when provided) else undefined — unset must
+ *    stay distinguishable from an explicit value; callers run an
+ *    env > settings > default fallback chain;
+ *  - hit in the `values` closed set → returned verbatim (**case-sensitive**,
+ *    aligned with the spec literal shapes);
+ *  - non-empty but outside the closed set → throw typed
+ *    `WebEnvConfigError( "invalid_search_backend", ... )`, **never** silently
+ *    fall back to `default`.
  *
- * 与 `envThinkingModeOptional` 等"非法 → undefined"旧模式相反 —— 默认后端对配错敏感，
- * schema reject 比 silent fallback 更显眼。
+ * Opposite of the "invalid → undefined" pattern used by envThinkingModeOptional
+ * and friends — the default backend is misconfiguration-sensitive, so a schema
+ * reject is louder than a silent fallback.
  */
 function envOptionalEnum<T extends string>(
   opts: EnvOptionalEnumOpts<T>
@@ -803,17 +864,19 @@ function envOptionalEnum<T extends string>(
 }
 
 /**
- * 占位符形态：`${VAR}` 或 `$VAR`。`expandPlaceholders` 与 settings.ts
- * `isApiKeyOrPlaceholder` 共用同一 VAR 名字符集（`[A-Za-z_][A-Za-z0-9_]*`）。
+ * Placeholder shape: `${VAR}` or `$VAR`. `expandPlaceholders` and settings.ts
+ * `isApiKeyOrPlaceholder` share the same VAR-name character set
+ * (`[A-Za-z_][A-Za-z0-9_]*`).
  */
 const PLACEHOLDER_PATTERN =
   /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
- * 提取 value 中所有 `${VAR}` / `$VAR` 占位符的变量名（去重保序）。
- * 与 settings.ts `analyzePlaceholderSyntax` 共用同一正则源（防 drift）。
- * env-isolation 的 SC20 遮蔽名单也复用此函数（M1：多段 `${A}${B}` 与
- * 字面 + 占位符混合的合法形态都能提取出变量名）。
+ * Extract all `${VAR}` / `$VAR` placeholder variable names from a value
+ * (deduplicated, order-preserving). Shares the same regex source with
+ * settings.ts `analyzePlaceholderSyntax` (anti-drift). The env-isolation
+ * masking list reuses this function too: multi-segment `${A}${B}` and legal
+ * literal-plus-placeholder mixtures all extract correctly.
  */
 export function extractPlaceholders(value: string): string[] {
   PLACEHOLDER_PATTERN.lastIndex = 0;
@@ -830,21 +893,22 @@ export function extractPlaceholders(value: string): string[] {
 }
 
 /**
- * M2（prototype 注入）守卫 — `isPrototypeOwnKey`：
- * Object.prototype 自有键（`constructor` / `__proto__` / `toString` /
- * `hasOwnProperty` / `valueOf` 等）不是合法 env var 名 —— `process.env[name]`
- * 与 `fileMap[name]` 都会命中 Object.prototype 返回函数 / 对象，
- * `raw.trim is not a function` TypeError。任何路径读到这些键 → 拒绝。
+ * Prototype-injection guard — `isPrototypeOwnKey`:
+ * Object.prototype own keys (`constructor` / `__proto__` / `toString` /
+ * `hasOwnProperty` / `valueOf` etc.) are never legal env var names —
+ * `process.env[name]` and `fileMap[name]` would hit Object.prototype and
+ * return a function / object, causing a `raw.trim is not a function`
+ * TypeError. Any path reaching these keys → reject.
  */
 function isPrototypeOwnKey(name: string): boolean {
   return Object.prototype.hasOwnProperty.call(Object.prototype, name);
 }
 
 /**
- * M2（prototype 注入）守卫 — `isPlainEnvName`：
- *  - 合法标识符形态（`[A-Za-z_][A-Za-z0-9_]*`）；
- *  - 非 Object.prototype 自有键（防 prototype 注入）；
- *  - `Object.hasOwn(process.env, varName)`（process.env 是真值源才走）。
+ * Prototype-injection guard — `isPlainEnvName`:
+ *  - legal identifier shape (`[A-Za-z_][A-Za-z0-9_]*`);
+ *  - not an Object.prototype own key (blocks prototype injection);
+ *  - `Object.hasOwn(process.env, varName)` (only real process.env entries pass).
  */
 function isPlainEnvName(varName: string): boolean {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) return false;
@@ -852,19 +916,20 @@ function isPlainEnvName(varName: string): boolean {
   return Object.prototype.hasOwnProperty.call(process.env, varName);
 }
 
-/** 按优先级解析单个占位符变量：process.env[varName]（isPlainEnvName 守卫）→ fileMap[varName]。 */
+/** Resolve one placeholder variable by priority: process.env[varName] (isPlainEnvName-guarded) → fileMap[varName]. */
 function resolveValueFromFilename(
   varName: string,
   fileMap: Record<string, string>
 ): string | undefined {
-  // M2 硬拒：任何 Object.prototype 自有键（包括 fileMap 显式同名 `constructor`）都不解析。
+  // Hard reject: any Object.prototype own key (incl. an explicit same-name `constructor` in fileMap) is never resolved.
   if (isPrototypeOwnKey(varName)) return undefined;
   if (isPlainEnvName(varName)) {
     const fromProc = process.env[varName];
     if (fromProc !== undefined && fromProc !== "") return fromProc;
   }
-  // fileMap 兜底：仅当 varName 是合法标识符、且 fileMap 自身拥有该键时读取
-  // （防 fileMap 命中 Object.prototype；与 process.env 同款 hasOwn 守卫）。
+  // fileMap fallback: read only when varName is a legal identifier and
+  // fileMap owns the key itself (guards against hitting Object.prototype;
+  // same hasOwn discipline as process.env).
   if (
     /^[A-Za-z_][A-Za-z0-9_]*$/.test(varName) &&
     Object.prototype.hasOwnProperty.call(fileMap, varName)
@@ -876,21 +941,24 @@ function resolveValueFromFilename(
 }
 
 /**
- * settings-model-extension：解析 settings.llm.apiKey 的字面值 / `${VAR}` 占位符。
+ * Resolve the settings.llm.apiKey literal / `${VAR}` placeholder.
  *
- *  - undefined → undefined（未配，消费点守卫抛「no API key configured」）；
- *  - 字面值（不含 `$VAR` / `${VAR}` 形态）→ 原样 trim 返回（设置文件里的字面
- *    密钥即真实密钥；含 `$IDENT` 形态被当作占位符解析，无 `$$` 转义）；
- *  - `${VAR}` / `$VAR` → 从 `process.env[VAR]` 优先、`fileMap[VAR]`（.env.local /
- *    .env 合并）兜底解析；任一变量解析不到（未设 / 空 / "yes" 占位符 /
- *    非普通环境名）→ 返 undefined（触发消费点守卫）；
- *  - `"yes"`（dotenv 风格占位符，大小写不敏感）→ 视同未设 → undefined。
+ *  - undefined → undefined (unconfigured; consumer guards throw "no API key configured");
+ *  - literal (no `$VAR` / `${VAR}` shape) → trimmed verbatim (a literal key in
+ *    the settings file is the real key; anything containing `$IDENT` is parsed
+ *    as a placeholder, no `$$` escaping);
+ *  - `${VAR}` / `$VAR` → resolved from `process.env[VAR]` first, falling back
+ *    to `fileMap[VAR]` (merged .env.local / .env); any variable that fails to
+ *    resolve (unset / empty / "yes" placeholder / non-plain env name) →
+ *    undefined (triggers the consumer guards);
+ *  - `"yes"` (dotenv-style placeholder, case-insensitive) → treated as unset → undefined.
  *
- * 多段占位符（如 `${A}${B}`）逐段解析后拼接；任一缺失整串返 undefined。
- * 非法占位符形态（如 `${}` / `${1VAR}` / `${VAR` 未闭合）→ undefined
- * （与 settings.ts `isApiKeyOrPlaceholder` 的丢弃语义对齐 —— 含 `${` 但不匹配
- * `${VAR}` 形态的串不是合法占位符也不是字面密钥）。
- * 本函数不打印 / 不落盘任何密钥值。
+ * Multi-segment placeholders (e.g. `${A}${B}`) resolve per segment and are
+ * concatenated; any missing segment makes the whole string undefined. Invalid
+ * placeholder shapes (e.g. `${}` / `${1VAR}` / unterminated `${VAR`) →
+ * undefined (aligned with settings.ts `isApiKeyOrPlaceholder` drop semantics —
+ * a string containing `${` that doesn't match `${VAR}` is neither a valid
+ * placeholder nor a literal key). This function never prints or persists key values.
  */
 export function expandPlaceholders(
   value: string | undefined,
@@ -900,16 +968,17 @@ export function expandPlaceholders(
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   if (API_KEY_PLACEHOLDERS.has(trimmed.toLowerCase())) return undefined;
-  // 含 `${` 时先做 braced 残骸检测：所有 `${...}` 子串必须都是合法 `${VAR}`，
-  // 残余 `${` 视为非法（`${}` / `${1VAR}` / `${VAR` 未闭合）→ undefined。
-  // 必须在「字面短路」前判，否则 `${}` 等会被当作纯字面返回。
+  // When the value contains `${`, run braced-debris detection first: every
+  // `${...}` substring must be a legal `${VAR}`; leftover `${` is illegal
+  // (`${}` / `${1VAR}` / unterminated `${VAR`) → undefined. Must check before
+  // the literal short-circuit, otherwise `${}` etc. would return as literals.
   if (trimmed.includes("${")) {
     const bracedOnly = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/g;
     const stripped = trimmed.replace(bracedOnly, "");
     if (stripped.includes("${")) return undefined;
   }
   const names = extractPlaceholders(trimmed);
-  if (names.length === 0) return trimmed; // 字面密钥原样返回。
+  if (names.length === 0) return trimmed; // Literal key returned verbatim.
   let resolved = true;
   const out = trimmed.replace(
     PLACEHOLDER_PATTERN,
@@ -937,12 +1006,14 @@ export function loadIknowEnv(
   home?: string
 ): IknowEnv {
   // process.env still wins via envGet; among files, .env.local overrides .env.
-  // settings 参数是测试注入缝；不传时自动读取真实 settings 文件。ADR-0084 项目允许名单下
-  // 项目文件只贡献 verify / secrets / permissions；本函数消费的 `llm` 是用户层键
-  // （唯一来源 = `~/.iknow/settings.json`）。
-  // home 参数透传给 loadIknowSettings：测试隔离 user 级 settings 用。显式注入固定该层，
-  // 不依赖 ambient process.env.HOME；POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作，
-  // 但隐式、易被破坏。
+  // The settings parameter is a test injection seam; when omitted the real
+  // settings files are read. Under the project allowlist, project files
+  // contribute only verify / secrets / permissions; the `llm` consumed here is
+  // a user-layer key (sole source = `~/.iknow/settings.json`).
+  // The home parameter is passed through to loadIknowSettings: for isolating
+  // user-level settings in tests. Explicit injection pins this layer instead
+  // of relying on ambient process.env.HOME; on POSIX os.homedir() does follow
+  // $HOME, so it would work, but implicitly and breakably.
   const mergedSettings = settings ?? loadIknowSettings({ cwd, home });
 
   const file = {
@@ -950,46 +1021,50 @@ export function loadIknowEnv(
     ...parseEnvFile(join(cwd, ".env.local")),
   };
 
-  // settings-model-extension：模型唯一来源 = settings.llm.model 字面值（无占位符、
-  // 无 env 回退）。缺失 → fail-fast 抛错（不硬编码兜底）。IKNOW_LLM_MODEL 已退役。
+  // Model sole source = settings.llm.model literal (no placeholders, no env
+  // fallback). Missing → fail-fast throw (no hardcoded fallback).
+  // IKNOW_LLM_MODEL is retired.
   const modelRaw = mergedSettings.llm?.model?.trim();
   if (!modelRaw) {
     throw new Error(LLM_MODEL_MISSING_MESSAGE);
   }
 
-  // ADR-0093：model 串必须命中 providers 注册表 → baseUrl/apiKey/headers 走
-  // provider 三元组；未命中 / providers 缺席 → typed 抛。apiKeyEnv 缺席 → SC4。
+  // The model string must hit the providers registry → baseUrl/apiKey/headers
+  // come from the provider triple; no hit / providers absent → typed throw.
+  // Missing apiKeyEnv → typed error.
   const transport = resolveLlmTransport(mergedSettings, modelRaw);
 
-  // ADR-0113: lite 路由结果（可选键）——非法态静默缺席，不影响上面的主模型 fail-fast。
+  // Lite routing result (optional key) — illegal states silently absent, never affecting the main-model fail-fast above.
   const liteModel = resolveLlmLite(mergedSettings);
 
   return {
     llm: {
       baseUrl: transport.baseUrl,
       model: modelRaw,
-      // headers 只在 provider 命中且配了非空 headers 时产出（不写空对象）。
+      // headers produced only when the provider hit has non-empty headers configured (never an empty object).
       ...(transport.headers === undefined
         ? {}
         : { headers: transport.headers }),
       ...spreadLiteModel(liteModel),
       fallback: mergedSettings.llm?.fallback ?? [],
-      // settings-model-extension：apiKey 来源 = settings.llm.apiKey（字面或 ${VAR}
-      // 占位符）经 expandPlaceholders 解析；未配 / 解析不到 → undefined（消费点守卫）。
-      // ADR-0093 provider 命中时由 transport.apiKey 接管（provider 显式登记
-      // apiKeyEnv 即声明走 env，绝不回退这里的字面）。
+      // apiKey source = settings.llm.apiKey (literal or ${VAR} placeholder)
+      // resolved by expandPlaceholders; unset / unresolvable → undefined
+      // (consumer guards). On a provider hit transport.apiKey takes over (a
+      // provider that declares apiKeyEnv opts into env; never falls back to
+      // the literal here).
       apiKey: transport.apiKey,
       maxOutputTokens: envPositiveInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
-        // Claude Code 主会话默认 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000（可配到 64k）。
-        // 按实际生成计费，帽本身不加价。不要再按单次任务（贪吃蛇 / 腕表 HTML）
-        // 逐步加码。
+        // Main-session default is 32000 output tokens (configurable up to 64k).
+        // Billed on actual generation; the cap itself adds no cost. Don't keep
+        // ratcheting it up task by task.
         fallback: 32_000,
       }),
-      // #358 T1: per-call LLM 调用竞速上限(env > settings > 300_000 fallback)。
-      // 镜像 maxTurns 模式(envOptionalPositiveInt ?? settings),第三层 5 min：thinking +
-      // 32k 生成常见超过 60s。MCP connectTimeoutMs 仍是 60s。
+      // Per-call LLM racing cap (env > settings > 300_000 fallback). Mirrors
+      // the maxTurns pattern (envOptionalPositiveInt ?? settings); third layer
+      // 5 min: thinking + 32k generations commonly exceed 60s. MCP
+      // connectTimeoutMs stays 60s.
       timeoutMs:
         envOptionalPositiveInt({
           file,
@@ -997,12 +1072,13 @@ export function loadIknowEnv(
         }) ??
         mergedSettings.llm?.timeoutMs ??
         300_000,
-      // #742 T1: 流式臂双钟(env > settings > 默认)。默认值理由见 LlmEnv 字段注释;
-      // 不变式 idle < 硬顶、硬顶有限由 tests/harness/model-idle-hardcap-config.test.ts 钉。
-      // T2 (#transport-continue-persist):默认 idle 从 120s 升到 minute-scale
-      // 300s(~5 min)——长 thinking / 32k 生成常见超过 60s,旧值易误杀。env /
-      // settings 覆盖优先级不变;hardCapMs 默认仍 900s,idle < hardCap 不变式
-      // 仍由测试钉(300_000 < 900_000)。
+      // Streaming-arm dual clocks (env > settings > default). Rationale in the
+      // LlmEnv field docs; the idle < hard-cap and finite-hard-cap invariants
+      // are pinned by tests/harness/model-idle-hardcap-config.test.ts.
+      // Default idle is minute-scale 300s (~5 min) — long thinking / 32k
+      // generations commonly exceed 60s, so smaller values mis-kill. env /
+      // settings override priority unchanged; hardCapMs default stays 900s,
+      // the idle < hardCap invariant still pinned by tests (300_000 < 900_000).
       idleTimeoutMs:
         envOptionalPositiveInt({
           file,
@@ -1022,9 +1098,10 @@ export function loadIknowEnv(
         key: "IKNOW_LLM_TEMPERATURE",
         fallback: 0,
       }),
-      // S4: settings.llm.thinking / thinkingEffort 回退（env > settings > 默认）。
-      // Optional 解析保证三态：env 显式 off/adaptive 或合法 effort 直接赢；
-      // 未设 / 空 / 非法 → undefined → 落 settings；两者皆缺 → off / ""。
+      // settings.llm.thinking / thinkingEffort fallback (env > settings > default).
+      // Optional parsing keeps the tri-state: explicit env off/adaptive or a
+      // legal effort wins outright; unset / empty / invalid → undefined →
+      // falls to settings; both missing → off / "".
       thinking:
         envThinkingModeOptional({
           file,
@@ -1039,13 +1116,13 @@ export function loadIknowEnv(
         }) ??
         mergedSettings.llm?.thinkingEffort ??
         "",
-      // #179 T6 (D0):流式默认开;非法值回退 on。
+      // Streaming on by default; invalid values fall back to on.
       stream: envStreamMode({
         file,
         key: "IKNOW_LLM_STREAM",
       }),
-      // plan T5: 可选正整数;未设 / 空 / 非数字 → undefined(= 无限)。
-      // #353: settings.llm.maxTurns 回退（env > settings）。
+      // Optional positive integer; unset / empty / non-numeric → undefined (= unlimited).
+      // settings.llm.maxTurns fallback (env > settings).
       maxTurns:
         envOptionalInt({
           file,
@@ -1053,27 +1130,31 @@ export function loadIknowEnv(
         }) ?? mergedSettings.llm?.maxTurns,
     },
     chat: {
-      // #152 T5:默认 off（不显示 thinking，保持现状）。
+      // Default off (thinking hidden, status quo kept).
       showThinking: envShowThinking({
         file,
         key: "IKNOW_CHAT_SHOW_THINKING",
       }),
     },
     web: {
-      // 可选端点覆写：空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
+      // Optional endpoint override: empty → undefined (web_search uses the default DuckDuckGo html endpoint).
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
-      // 可选出站代理：空 → undefined（network-guard 直连）。显式配置才生效。
+      // Optional egress proxy: empty → undefined (network-guard direct connect). Only explicit config takes effect.
       proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
-      // #826 T1 + settings-web-backend: web_search 后端选择，回退链
-      // env > settings.web.searchBackend > 默认 bing（对齐 #353 maxTurns 先例）。
-      // env 未设返回 undefined（不与显式 "bing" 折叠），settings 侧非法值已在
-      // parseWeb 丢弃；env 侧非法值仍抛 typed error（更显眼的配错面）。
-      // 显式标注 T=SearchBackendId：helper 的 T extends string 默认会被
-      // TS 推到 string 宽类型，丢失字面联合。
-      // 注意：`?? "bing"` 使 IknowEnv.searchBackend 永不 undefined —— 三态
-      // 「未设 ≠ 显式 bing」只在 helper 返回层保留，到 WebSearchToolDeps.backend
-      // 时已折叠（backend_unset_with_key fail-closed 防线因此仅测试路径可达；
-      // 放开需 IknowEnv 层承载 undefined，另行任务）。
+      // web_search backend selection, fallback chain
+      // env > settings.web.searchBackend > default bing (mirrors the maxTurns
+      // precedent). env unset returns undefined (not folded with explicit
+      // "bing"); illegal settings-side values were already dropped in
+      // parseWeb; illegal env-side values still throw a typed error (a louder
+      // misconfiguration surface).
+      // Explicit T=SearchBackendId: the helper's T extends string would
+      // otherwise be inferred by TS to the wide string type, losing the
+      // literal union.
+      // Note: `?? "bing"` makes IknowEnv.searchBackend never undefined — the
+      // tri-state "unset != explicit bing" survives only at the helper return
+      // layer and is folded by the time it reaches WebSearchToolDeps.backend
+      // (so the backend_unset_with_key fail-closed defense is test-path-only;
+      // restoring it needs undefined carried in the IknowEnv layer, a separate task).
       searchBackend:
         envOptionalEnum<SearchBackendId>({
           file,
@@ -1082,9 +1163,9 @@ export function loadIknowEnv(
         }) ??
         mergedSettings.web?.searchBackend ??
         "bing",
-      // #826 T1: vendor-keyed 后端 API key —— 字面或 `${VAR}` 占位符经
-      // expandPlaceholders 解析（与 settings.llm.apiKey 同链路）；
-      // 空 / "yes" / 占位符解析失败 → undefined（不 silent 空串）。
+      // Vendor-keyed backend API keys — literal or `${VAR}` placeholder
+      // resolved by expandPlaceholders (same chain as settings.llm.apiKey);
+      // empty / "yes" / placeholder resolution failure → undefined (never silent empty strings).
       exaApiKey: expandPlaceholders(
         envOptional({ file, key: EXA_API_KEY_ENV_KEY }),
         file
@@ -1098,11 +1179,11 @@ export function loadIknowEnv(
         file
       ),
     },
-    // #119 T1: 自动压缩配置臂(透传至 harness/compress/ via LoopEngineDeps.compress)。
-    // thresholdTokens 阈值合理性校验(threshold >= window 拒绝)归 T4 threshold.ts,
-    // 本 loader 仅承载 raw env 解析, 不抛错。
+    // Auto-compact config arm (passed through to harness/compress/ via LoopEngineDeps.compress).
+    // Threshold sanity validation (threshold >= window rejected) belongs to
+    // threshold.ts; this loader only carries raw env parsing and never throws.
     compress: {
-      // #353: settings.llm.compress.contextWindow 回退（env > settings > 缺省策略预算窗口）。
+      // settings.llm.compress.contextWindow fallback (env > settings > default policy budget window).
       contextWindow: envInt({
         file,
         key: "IKNOW_MODEL_CONTEXT_WINDOW",
@@ -1110,14 +1191,14 @@ export function loadIknowEnv(
           mergedSettings.llm?.compress?.contextWindow ??
           DEFAULT_STRATEGY_CONTEXT_WINDOW,
       }),
-      // #353: settings.llm.compress.thresholdTokens 回退（env > settings）。
+      // settings.llm.compress.thresholdTokens fallback (env > settings).
       thresholdTokens:
         envOptionalInt({
           file,
           key: "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
         }) ?? mergedSettings.llm?.compress?.thresholdTokens,
     },
-    // #378 根因 B: MCP 连接超时(默认 60_000, 缓解 npx -y cold start 击穿 30s)。
+    // MCP connect timeout (default 60_000; mitigates npx -y cold starts busting through 30s).
     mcp: {
       connectTimeoutMs: envPositiveInt({
         file,
@@ -1125,18 +1206,20 @@ export function loadIknowEnv(
         fallback: 60_000,
       }),
     },
-    // #358 T1: 子代理 per-task wallclock(env > settings,无第三层默认;7200s 常量归 T2 manager)。
+    // Subagent per-task wallclock (env > settings, no third-layer default; the 7200s constant lives in the manager).
     subagent: {
       taskTimeoutMs:
         envOptionalPositiveInt({
           file,
           key: "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
         }) ?? mergedSettings.subagent?.taskTimeoutMs,
-      // T4: 并发上限(env > settings > manager default 15)。settings 可能
-      // 来自测试注入而未经过 parse，故此处再次 fail-safe 校验。T2：值域扩到
-      // `number | "unlimited"` —— env 仍只认正整数（不接受 unlimited 字面）；
-      // settings 接受正整数或字面 `"unlimited"`；两条链会合后类型 = `number |
-      // "unlimited"`，manager 透传为同型（见 harness/subagent/manager.ts）。
+      // Concurrency cap (env > settings > manager default 15). settings may
+      // come from test injection that skipped parse, so re-validate fail-safe
+      // here. Value domain widened to `number | "unlimited"` — env still
+      // accepts only positive integers (no unlimited literal); settings accepts
+      // positive integers or the literal `"unlimited"`; after both chains
+      // converge the type is `number | "unlimited"`, which the manager passes
+      // through unchanged (see harness/subagent/manager.ts).
       maxConcurrentWorkers:
         envOptionalPositiveInt({
           file,
@@ -1145,15 +1228,15 @@ export function loadIknowEnv(
         mergedSettings.subagent?.maxConcurrentWorkers ??
         DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
     },
-    // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
-    // env SSOT; `envOptional` canonical reader — empty/unset → undefined,
-    // 消费方 resolver 对相对路径 / 目录不存在做 typed 校验)。
+    // Workspace-root per-root state anchor (registered at env SSOT;
+    // `envOptional` canonical reader — empty/unset → undefined; the consumer
+    // resolver type-validates relative paths / missing directories).
     workspaceRoot: envOptional({
       file,
       key: WORKSPACE_ROOT_ENV_KEY,
     }),
-    // T3 (ADR-0037 §4): 项目身份根。同 workspaceRoot 的 envOptional 纪律
-    // （empty/unset → undefined）；消费者是 subagent worker 的身份发现。
+    // Project identity root. Same envOptional discipline as workspaceRoot
+    // (empty/unset → undefined); consumed by subagent worker identity discovery.
     productRoot: envOptional({
       file,
       key: PRODUCT_ROOT_ENV_KEY,

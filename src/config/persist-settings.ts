@@ -1,27 +1,33 @@
 /**
- * settings.json 反向持久化 —— 运行时 /thinking /effort /memory 面板 Esc
- * 保存退出时把改动写回 settings.json（纯函数 + 原子写）。
+ * Reverse persistence for settings.json — when the runtime /thinking /effort
+ * /memory panels exit via Esc-save, write changes back to settings.json
+ * (pure functions + atomic write).
  *
- * 与 settings.ts 的单向读取（文件 → 运行时）相反，本模块是反向通道
- * （运行时 → 文件）。设计约束（plans/settings-bidirectional-persist.md）：
- *   - **merge 基于原始 raw JSON，不是解析后的 IknowSettings**：IknowSettings
- *     深 frozen 且丢弃非法字段，写回必须保留用户文件里的一切字段。thinking
- *     只改 `llm.thinking` / `llm.thinkingEffort`；memory 只改 `memory.autoExtract`
- *     / `memory.dream`；model 只改 `llm.model`。
- *   - **字段语义**：`llm.thinking` 仅 `"off" | "adaptive"`；
- *     `llm.thinkingEffort` 仅五档或 `null`（null = auto → 删除键，缺省 =
- *     自适应，与 env 缺省语义一致）。`memory.autoExtract` / `dream` 仅
- *     boolean；关 autoExtract 时 dream 强制 false。其它字段一律原样保留。
- *   - **原子写**：tmp 文件写入**同目录**后 rename 替换（原子）；tmp 在 rename
- *     前 chmod 0600（settings 含 apiKey，敏感）；父目录缺失 → mkdir -p。
- *     tmp 文件名 per-invocation 唯一（randomUUID 后缀）—— 并行双写同一文件
- *     时两个调用各写各自 tmp，rename 原子交换保证无双写踩踏（
- *     plans/workspace-root-launch.md T3 acceptance #2 concurrent 边界类）。
- *   - **self-write 哨兵**：返回写入的完整 bytes 字符串（非解析对象），由
- *     EnvLoader（T2）按 sha256 内容哈希登记，watcher 命中时跳过 reload 防止
- *     写回回环。
- *   - **坏 JSON 起步**：对齐 settings.ts `readSettingsFile` 惯例 —— 文件
- *     不存在 / 坏 JSON → 从空对象合并后写回（不覆盖用户文件本身）。
+ * Opposite to settings.ts's one-way read (file → runtime), this module is
+ * the reverse channel (runtime → file). Design constraints:
+ *   - **Merge is based on the original raw JSON, not the parsed
+ *     IknowSettings**: IknowSettings is deep-frozen and drops illegal fields,
+ *     so write-back must preserve everything in the user's file. thinking
+ *     touches only `llm.thinking` / `llm.thinkingEffort`; memory touches only
+ *     `memory.autoExtract` / `memory.dream`; model touches only `llm.model`.
+ *   - **Field semantics**: `llm.thinking` only `"off" | "adaptive"`;
+ *     `llm.thinkingEffort` only the five levels or `null` (null = auto →
+ *     delete the key; absence = adaptive, matching env default semantics).
+ *     `memory.autoExtract` / `dream` are booleans only; turning autoExtract
+ *     off forces dream=false. All other fields are preserved verbatim.
+ *   - **Atomic write**: write a tmp file in the **same directory**, then
+ *     rename to replace (atomic); the tmp is chmod 0600 before rename
+ *     (settings contains apiKey, sensitive); missing parent dir → mkdir -p.
+ *     The tmp name is unique per invocation (randomUUID suffix) — concurrent
+ *     writers to the same file each write their own tmp, and the atomic
+ *     rename guarantees no interleaved partial writes.
+ *   - **Self-write sentinel**: returns the full bytes string written (not the
+ *     parsed object) so EnvLoader can register it by sha256 content hash;
+ *     when the watcher matches it, reload is skipped to prevent write-back
+ *     loopback.
+ *   - **Starting from broken JSON**: same convention as settings.ts
+ *     `readSettingsFile` — file missing / broken JSON → merge from an empty
+ *     object, then write back (never clobbers the user's file itself).
  */
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -37,80 +43,89 @@ import {
 } from "./settings.js";
 
 /**
- * settings.json 文件名。仅与 `<home>/.iknow/` 拼接（见
- * `resolveThinkingSettingsPath`）：ADR-0084 起写回恒落用户层，不写项目层。
+ * settings.json filename. Joined only with `<home>/.iknow/` (see
+ * `resolveThinkingSettingsPath`): write-back always lands in the user layer,
+ * never the project layer.
  */
 const SETTINGS_FILENAME = "settings.json";
 
 /**
- * thinking 面板可持久化 patch 值域。thinkingEffort 为 `null` 表示 auto 语义
- * （删除该键，不残留空串——空串在 settings schema 中无意义）。
+ * Persistable patch value domain for the thinking panel. thinkingEffort
+ * `null` means the auto semantics (delete the key, no leftover empty
+ * string — empty strings are meaningless in the settings schema).
  */
 export interface ThinkingPersistPatch {
   thinking?: IknowSettingsThinking;
   thinkingEffort?: IknowSettingsThinkingEffort | null;
 }
 
-/** /memory 面板可持久化 patch。关 autoExtract 时 merge 层强制 dream=false。 */
+/** Persistable patch for the /memory panel. With autoExtract off, the merge layer forces dream=false. */
 export interface MemoryPersistPatch {
   autoExtract: boolean;
   dream: boolean;
 }
 
 /**
- * /model picker 可持久化 patch：只改 `llm.model`（模型路由 ID 形如
- * `"<provider>/<model>"`）。provider 段门禁（SC6：未知 provider 抛 TypeError）
- * 见 `mergeModelPatch`。
+ * Persistable patch for the /model picker: only changes `llm.model` (model
+ * route IDs look like `"<provider>/<model>"`). The provider-segment gate
+ * (unknown provider → TypeError) lives in `mergeModelPatch`.
  */
 export interface ModelPersistPatch {
   model: string;
 }
 
 /**
- * ADR-0096 T2：TUI /config 面板「子代理并发上限」行可持久化 patch。值域
- * `3 | 5 | 9 | 15 | "unlimited"`（面板 Enter 闭集；env.ts 不接受
- * `"unlimited"`，此处面板独有）。settings 层存 / 读语义：
- *   - 数字 3 / 5 / 9 / 15 → JSON 写为数字；
- *   - `"unlimited"` → JSON 写为字符串字面 `"unlimited"`（与 `settings.ts`
- *     `SubagentCapValue` 同形态，settings 解析层无需新加分支）；
- *   - 非法值 → merge 抛 TypeError（与 fsMode / thinking 同步）。
+ * Persistable patch for the TUI /config panel "subagent concurrency cap"
+ * row. Value domain `3 | 5 | 9 | 15 | "unlimited"` (closed set on panel
+ * Enter; env.ts does not accept `"unlimited"`, it is panel-only here).
+ * Settings store / read semantics:
+ *   - numbers 3 / 5 / 9 / 15 → written as JSON numbers;
+ *   - `"unlimited"` → written as the string literal `"unlimited"` (same shape
+ *     as `SubagentCapValue` in settings.ts, so the settings parser needs no
+ *     new branch);
+ *   - invalid values → merge throws TypeError (in sync with fsMode / thinking).
  *
- * 持久化层（用户层；ADR-0084）与 fsMode patch 同形态（`isolation` 子键）。
- * 「unlimited 在场」与「字段缺失（默认 15）」可区分：写时 vs 不写。
+ * The persistence layer (user layer) follows the same pattern as the fsMode
+ * patch. "unlimited present" vs "field absent (default 15)" stay
+ * distinguishable: write vs don't write.
  */
 export interface SubagentCapPersistPatch {
   maxConcurrentWorkers: number | "unlimited";
 }
 
 /**
- * resolveThinkingSettingsPath 的注入选项（ADR-0084 写回落对层）。
+ * Injection options for resolveThinkingSettingsPath (which layer
+ * write-back targets).
  *
- * ADR-0084：thinking / memory 是**用户层键**（`llm` / `memory` 段），项目文件
- * 不再采纳这两段（项目允许名单 = verify / secrets / permissions）。
- * 因此写回目标恒为用户层文件 `<home>/.iknow/settings.json`，与「项目文件是否
- * 存在」解耦 —— 旧 ADR-0019 D1.3 的「project 存在写 project」在允许名单下会把
- * 用户层键写进一个不再被读取的项目文件（静默无效 + 污染共享仓库），故退役。
+ * thinking / memory are **user-layer keys** (`llm` / `memory` sections);
+ * project files no longer adopt them (project allowlist = verify / secrets /
+ * permissions). Therefore the write-back target is always the user-layer
+ * file `<home>/.iknow/settings.json`, decoupled from whether a project file
+ * exists — the old "write to project if project exists" rule would put
+ * user-layer keys into a file that is never read again (silent no-op +
+ * polluting the shared repo), so it is retired.
  */
 export interface ResolveSettingsPathOptions {
   /**
-   * 用户 home（global config anchor，ADR-0015/0019）。写回目标 =
-   * `<home>/.iknow/settings.json`；缺省 `homedir()`（与 `loadIknowSettings`
-   * 的 user 层解析同一 SSOT，读侧写侧同源）。测试注入 tmp home 隔离真实
-   * 用户目录。
+   * User home (global config anchor). Write-back target =
+   * `<home>/.iknow/settings.json`; default `homedir()` (the same SSOT as
+   * `loadIknowSettings`'s user-layer resolution — reader and writer share
+   * one source). Tests inject a tmp home to isolate the real user directory.
    */
   home?: string;
 }
 
-/** 普通对象（raw JSON 的顶层 / llm 层只可能是这种；排除 null / 数组）。 */
+/** Plain object (raw JSON's top / llm level can only be this; excludes null / arrays). */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /**
- * 读取单个 settings 文件并解析为普通对象（对齐 settings.ts readSettingsFile）：
- * 文件不存在 / 坏 JSON（SyntaxError）→ {}；顶层非普通对象 → {}。
- * JSON.parse 抛出的非 SyntaxError 异常（实测当前运行时不可达）→ 防御性重抛，
- * 避免静默吞掉非语法类解析失败。
+ * Read one settings file and parse it into a plain object (same convention
+ * as settings.ts readSettingsFile): missing file / broken JSON (SyntaxError)
+ * → {}; non-plain-object top level → {}. Non-SyntaxError exceptions from
+ * JSON.parse (unreachable in today's runtimes) are rethrown defensively to
+ * avoid silently swallowing non-syntax parse failures.
  */
 async function readSettingsRaw(path: string): Promise<Record<string, unknown>> {
   let text: string;
@@ -130,12 +145,12 @@ async function readSettingsRaw(path: string): Promise<Record<string, unknown>> {
   return isPlainObject(parsed) ? parsed : {};
 }
 
-/** thinking 值域校验：仅小写 "off" | "adaptive"（对齐 settings.ts 语义）。 */
+/** thinking value check: only lowercase "off" | "adaptive" (aligned with settings.ts semantics). */
 function isValidThinking(v: unknown): v is IknowSettingsThinking {
   return v === "off" || v === "adaptive";
 }
 
-/** thinkingEffort 值域校验：仅小写五档（null 由调用方单独处理）。 */
+/** thinkingEffort value check: only the five lowercase levels (null handled separately by the caller). */
 function isValidThinkingEffort(v: unknown): v is IknowSettingsThinkingEffort {
   return (THINKING_EFFORT_LEVELS as readonly string[]).includes(
     typeof v === "string" ? v : ""
@@ -143,14 +158,18 @@ function isValidThinkingEffort(v: unknown): v is IknowSettingsThinkingEffort {
 }
 
 /**
- * 合并 thinking patch 到 raw JSON（纯函数，无 fs）。
- *  - `llm` 缺失 → 创建；
- *  - `thinkingEffort: null` → 删除该键（auto 语义），不残留空串；
- *  - `llm` 非普通对象 → 以新对象覆盖（原非法 `llm` 值整体丢弃，仍只保留
- *    用户 patch 字段）；
- *  - 其它字段一律原样保留（apiKey / model / fallback / secrets 等绝不触碰）；
- *  - 非法 patch 值（thinking 非 off/adaptive、thinkingEffort 非五档且非
- *    null）→ 抛带明确消息的 TypeError（调用方边界，不静默丢弃）。
+ * Merge the thinking patch into raw JSON (pure function, no fs).
+ *  - missing `llm` → create it;
+ *  - `thinkingEffort: null` → delete the key (auto semantics), no leftover
+ *    empty string;
+ *  - non-plain-object `llm` → overwrite with a fresh object (the original
+ *    illegal `llm` value is dropped entirely; only the user's patch fields
+ *    remain);
+ *  - all other fields preserved verbatim (apiKey / model / fallback / secrets
+ *    are never touched);
+ *  - illegal patch values (thinking not off/adaptive; thinkingEffort not one
+ *    of the five levels and not null) → throw TypeError with a clear message
+ *    (caller-boundary error, never silently dropped).
  */
 export function mergeThinkingPatch(
   raw: Record<string, unknown>,
@@ -172,7 +191,7 @@ export function mergeThinkingPatch(
 
   if (patch.thinkingEffort !== undefined) {
     if (patch.thinkingEffort === null) {
-      // auto 语义：缺省 = 自适应，settings schema 不接受空串，直接删键。
+      // auto semantics: default = adaptive; the settings schema rejects empty strings, so just delete the key.
       delete nextLlm.thinkingEffort;
     } else if (isValidThinkingEffort(patch.thinkingEffort)) {
       nextLlm.thinkingEffort = patch.thinkingEffort;
@@ -212,40 +231,49 @@ export function mergeMemoryPatch(
 }
 
 /**
- * ADR-0092 / SC13：fsMode 反向持久化 patch。值域 `"global" | "workspace"`，
- * 与 `settings.isolation.fsMode` 解析端共用 `isFsIsolationMode` 闭集。
+ * Reverse-persistence patch for fsMode. Value domain `"global" | "workspace"`,
+ * sharing the `isFsIsolationMode` closed set with the
+ * `settings.isolation.fsMode` parser.
  */
 export interface FsModePersistPatch {
   fsMode: FsIsolationMode;
 }
 
 /**
- * ADR-0096 T3 ── worktree 门禁反向持久化 patch。值域闭集 `true | false`
- * （TUI 展示层渲染为 `ON | OFF`，与 `resolveWorktreeOnMutate` 解析端同源）。
+ * Reverse-persistence patch for the worktree gate. Closed value set
+ * `true | false` (the TUI display layer renders `ON | OFF`, same source as
+ * the `resolveWorktreeOnMutate` parser).
  *
- * 用户层键：写 `<home>/.iknow/settings.json` 的 `isolation.worktreeOnMutate`
- * （与 fsMode 同段；ADR-0037「开关属用户层」）。
+ * User-layer key: writes `isolation.worktreeOnMutate` in
+ * `<home>/.iknow/settings.json` (same section as fsMode; the switch belongs
+ * to the user layer).
  */
 export interface WorktreeOnMutatePersistPatch {
   worktreeOnMutate: boolean;
 }
 
 /**
- * 合并 fsMode patch 到 raw JSON（纯函数，无 fs）。
- *  - `isolation` 缺失 → 创建；
- *  - `isolation` 非普通对象 → 以新对象覆盖（原非法 `isolation` 值整体丢弃，
- *    仍只保留 patch 字段与已知 user-isolation 子键；但本函数**只**写
- *    `fsMode`，其它 isolation 子键不复刻——这是 drop-not-throw 形态的
- *    简化：以对象覆盖 isolation 段会丢掉 worktreeOnMutate 等并发键，故
- *    本实现走 `{ ...raw.isolation }` 浅拷贝再覆盖 fsMode 的形态）；
- *  - 非法 patch 值（fsMode 不在 `"global" | "workspace"` 闭集）→ 抛
- *    `TypeError`（调用方边界，不静默丢弃；与 `mergeThinkingPatch` 纪律一致）；
- *  - 其它顶层键（llm / memory / secrets 等）一律原样保留。
+ * Merge the fsMode patch into raw JSON (pure function, no fs).
+ *  - missing `isolation` → create it;
+ *  - non-plain-object `isolation` → overwrite with a fresh object (the
+ *    original illegal `isolation` value is dropped entirely; only the patch
+ *    field and known user-isolation subkeys are kept; but this function
+ *    writes **only** `fsMode` and never replicates other isolation subkeys —
+ *    a simplification in the drop-not-throw shape: replacing the isolation
+ *    section wholesale would lose concurrent keys like worktreeOnMutate, so
+ *    this implementation does a shallow `{ ...raw.isolation }` copy and then
+ *    overwrites fsMode);
+ *  - illegal patch value (fsMode outside the `"global" | "workspace"` closed
+ *    set) → throw `TypeError` (caller-boundary error, never silently
+ *    dropped; same discipline as `mergeThinkingPatch`);
+ *  - all other top-level keys (llm / memory / secrets, etc.) preserved verbatim.
  *
- * 已知低效（不修，Spec 轴 review Low #3 已记录）：值未变时仍重写整个文件。
- * 收口点在调用方（TUI persist 闭包先比对 holder 现值再决定是否落盘），不在
- * 本纯函数 —— 本函数的返回 `bytes` 是 self-write 哨兵的哈希来源，短路返回
- * 未合并的 raw 会让该哨兵读到与实际落盘不符的内容。
+ * Known inefficiency (left unfixed, recorded in review): the whole file is
+ * rewritten even when the value is unchanged. The choke point is the caller
+ * (the TUI persist closure compares against the current holder value before
+ * deciding to write), not this pure function — the returned `bytes` feeds
+ * the self-write sentinel's hash, and short-circuiting to unmerged raw would
+ * make the sentinel read content that differs from what actually landed.
  */
 export function mergeFsModePatch(
   raw: Record<string, unknown>,
@@ -266,16 +294,20 @@ export function mergeFsModePatch(
 }
 
 /**
- * ADR-0096 T3 ── 合并 worktree 门禁 patch 到 raw JSON（纯函数，无 fs）。
+ * Merge the worktree-gate patch into raw JSON (pure function, no fs).
  *
- * 形态与 `mergeFsModePatch` 逐条对齐（同段同纪律）：
- *  - `isolation` 缺失 → 创建；
- *  - `isolation` 非普通对象 → 以新对象覆盖（原非法值整体丢弃）；
- *  - 已有 `isolation` 段一律**浅拷贝**后只覆盖 `worktreeOnMutate` ——
- *    `fsMode` / `worktreeExclusive` 等邻键原样保留（round-trip 断言钉死）；
- *  - 非法 patch 值（非 boolean，如 `"ON"` / `1` / `undefined`）→ 抛
- *    `TypeError`（不静默丢弃，与 fsMode / thinking / cap 同步）；
- *  - 其它顶层键（llm / memory / secrets / subagent 等）一律原样保留。
+ * Shaped entry-by-entry like `mergeFsModePatch` (same section, same discipline):
+ *  - missing `isolation` → create it;
+ *  - non-plain-object `isolation` → overwrite with a fresh object (the
+ *    original illegal value is dropped entirely);
+ *  - an existing `isolation` section is always **shallow-copied** and only
+ *    `worktreeOnMutate` is overwritten — neighbor keys like `fsMode` /
+ *    `worktreeExclusive` are preserved verbatim (pinned by round-trip assertions);
+ *  - illegal patch value (non-boolean, e.g. `"ON"` / `1` / `undefined`) →
+ *    throw `TypeError` (never silently dropped; in sync with fsMode /
+ *    thinking / cap);
+ *  - all other top-level keys (llm / memory / secrets / subagent, etc.)
+ *    preserved verbatim.
  */
 export function mergeWorktreeOnMutatePatch(
   raw: Record<string, unknown>,
@@ -296,20 +328,25 @@ export function mergeWorktreeOnMutatePatch(
 }
 
 /**
- * ADR-0096 T2 ── 合并 subagent cap patch 到 raw JSON（纯函数，无 fs）。
+ * Merge the subagent cap patch into raw JSON (pure function, no fs).
  *
- * 形态镜像 `mergeFsModePatch`：subagent 缺失 → 创建；subagent 非普通对象
- * → 以新对象覆盖（浅拷贝原 subagent 段保留 taskTimeoutMs 等未来并发键，但
- * 当前 subagent 段只 maxConcurrentWorkers 一键，未来扩字段时同 drop-not-
- * throw 简化 —— 与 fsMode 一致，避免以新对象整体覆盖丢用户已有字段）。
+ * Mirrors `mergeFsModePatch`'s shape: missing subagent → create;
+ * non-plain-object subagent → overwrite with a fresh object (a shallow copy
+ * of the original subagent section would preserve future concurrent keys
+ * like taskTimeoutMs, but today the subagent section has only the single
+ * maxConcurrentWorkers key; when fields grow, apply the same drop-not-throw
+ * simplification — consistent with fsMode, avoiding wholesale replacement
+ * that would lose user fields).
  *
- * 值域门禁（与面板 Enter 闭集对齐 1:1：3 | 5 | 9 | 15 | "unlimited"）：
- *   - 其它任何数字 / 字符串字面 / null / undefined → 抛 TypeError（不静默
- *     落盘；与 fsMode / thinking 同步）；
- *   - 数字字面必须是有限正整数（NaN / Infinity / 浮点都拒）。
+ * Value gate (1:1 with the panel's closed Enter set 3 | 5 | 9 | 15 | "unlimited"):
+ *   - any other number / string literal / null / undefined → throw TypeError
+ *     (never silently persisted; in sync with fsMode / thinking);
+ *   - numeric literals must be finite positive integers (NaN / Infinity /
+ *     floats all rejected).
  *
- * 不看 project 文件是否存在 —— `subagent` 是用户层键（与 thinking /
- * fsMode 同形态），走 `persistSubagentCapChanges` 写回用户层。
+ * Does not check whether the project file exists — `subagent` is a
+ * user-layer key (like thinking / fsMode); `persistSubagentCapChanges`
+ * writes it back to the user layer.
  */
 export function mergeSubagentCapPatch(
   raw: Record<string, unknown>,
@@ -344,10 +381,11 @@ export function mergeSubagentCapPatch(
 }
 
 /**
- * 读取 raw `llm.providers` 登记的 provider id 集合（SC6 门禁数据源）。
- * 沿 settings.ts `parseLlmProvider` 同款纪律：仅「普通对象且 `.id` 为 trim 后
- * 非空字符串」的项计入；`providers` 缺失 / 非数组 / 项非法 → 不计入（该
- * provider 视为未知，由调用方抛错，不静默放行）。
+ * Collect the provider id set registered in raw `llm.providers` (data source
+ * for the gate). Same discipline as settings.ts `parseLlmProvider`: only
+ * items that are plain objects with a non-empty-after-trim `.id` count;
+ * missing / non-array `providers` / invalid items → not counted (that
+ * provider is treated as unknown and the caller throws; never silently passed).
  */
 function collectProviderIds(rawLlm: unknown): Set<string> {
   const ids = new Set<string>();
@@ -367,21 +405,26 @@ function collectProviderIds(rawLlm: unknown): Set<string> {
 }
 
 /**
- * 合并 model patch 到 raw JSON（纯函数，无 fs），只改 `llm.model`。
+ * Merge the model patch into raw JSON (pure function, no fs); only changes
+ * `llm.model`.
  *
- * 值域门禁（SC6：任一不满足 → 抛带具体非法值与期望形态的 TypeError，由调用方
- * 边界 catch 后走 notice；不静默丢弃、不静默写入）：
- *   - `patch.model` 非字符串 / trim 后为空；
- *   - 不含 "/"（模型路由 ID 形如 `"<provider>/<model>"`）；
- *   - 按**第一个** "/" 拆出的 provider / model 段 trim 后任一为空
- *     （如 `"/foo"`、`"foo/"`）；
- *   - provider 段不在 **raw** `llm.providers`（数组，逐项 `.id`）里 —— 未知
- *     provider 不落盘：写进去只会落到 env 层 fallback 路径，与用户所选不符。
+ * Value gate (any failure → TypeError carrying the concrete illegal value
+ * and the expected shape; the caller-boundary catch turns it into a notice;
+ * nothing is silently dropped or written):
+ *   - `patch.model` not a string / empty after trim;
+ *   - missing "/" (model route IDs look like `"<provider>/<model>"`);
+ *   - either segment empty after trimming the split on the **first** "/"
+ *     (e.g. `"/foo"`, `"foo/"`);
+ *   - the provider segment not present in the **raw** `llm.providers`
+ *     (array, per-item `.id`) — unknown providers are never persisted:
+ *     writing one would fall through to the env-layer fallback path,
+ *     contradicting the user's choice.
  *
- * 通过后：`llm` 非普通对象 → 以新对象覆盖（同 mergeThinkingPatch）；`llm` 其余
- * 字段与其它顶层段（apiKey / thinking / memory / isolation / permissions /
- * providers …）一律原样保留。写回值 = patch.model 的 trim 结果（与 settings.ts
- * `parseLlm` 对 model 的 trim 纪律一致）。
+ * On pass: non-plain-object `llm` → overwrite with a fresh object (same as
+ * mergeThinkingPatch); all other `llm` fields and other top-level sections
+ * (apiKey / thinking / memory / isolation / permissions / providers …) are
+ * preserved verbatim. The written value = trimmed patch.model (consistent
+ * with settings.ts `parseLlm`'s trim discipline for model).
  */
 export function mergeModelPatch(
   raw: Record<string, unknown>,
@@ -418,15 +461,17 @@ export function mergeModelPatch(
 }
 
 /**
- * 选择写回目标 settings 文件路径（ADR-0084 写回落对层）：
- *  - thinking / memory 是**用户层键**（`llm` / `memory` 段）→ 目标恒为
- *    `<home>/.iknow/settings.json`；`home` 缺省 `homedir()`（与
- *    `loadIknowSettings` 同一解析）。
- *  - **不看** project 文件是否存在 —— 项目文件已不采纳 `llm` / `memory`
- *    （ADR-0084 允许名单），写进去等于静默无效并污染共享仓库。旧 ADR-0019
- *    D1.3 的「project 存在 → project 路径 / 否则 workspaceRoot 路径」两档
- *    （含 `existsSync` 探测）整体退役。
- *  - 目标目录不存在时由 `persistThinkingChanges` 内部 `mkdir -p` 兜底。
+ * Choose the target settings file path for write-back (which layer it lands in):
+ *  - thinking / memory are **user-layer keys** (`llm` / `memory` sections) →
+ *    the target is always `<home>/.iknow/settings.json`; `home` defaults to
+ *    `homedir()` (same resolution as `loadIknowSettings`).
+ *  - **Never checks** whether a project file exists — project files no longer
+ *    adopt `llm` / `memory` (the allowlist), so writing there is a silent
+ *    no-op that pollutes the shared repo. The old two-tier "project exists
+ *    → project path / else workspaceRoot path" rule (including the
+ *    `existsSync` probe) is fully retired.
+ *  - A missing target directory is handled by `persistThinkingChanges`'s
+ *    internal `mkdir -p`.
  */
 export function resolveThinkingSettingsPath(
   opts?: ResolveSettingsPathOptions
@@ -452,13 +497,15 @@ async function persistMergedSettings(
 }
 
 /**
- * 把 thinking patch 持久化到指定 settings 文件（原子写）。
- * 读 raw JSON（文件不存在 / 坏 JSON → 空对象起步）→ 合并 patch → 写 tmp
- * （同目录，rename 前 chmod 0600）→ rename 原子替换。tmp 文件名 per-
- * invocation 唯一（`.settings.json.<uuid>.tmp`），并行双写同一文件时
- * 两个调用各自写各自 tmp，rename 原子替换目标文件，最终状态 = 某次完整
- * 写入的快照（无 half-written / 无 torn）。返回完整 bytes 字符串供
- * self-write 哨兵登记（T2 按内容哈希比对，不解析对象）。
+ * Persist the thinking patch to the given settings file (atomic write).
+ * Read raw JSON (missing file / broken JSON → start from an empty object) →
+ * merge the patch → write a tmp file (same directory, chmod 0600 before
+ * rename) → atomic rename replace. The tmp name is unique per invocation
+ * (`.settings.json.<uuid>.tmp`): concurrent writers each write their own tmp
+ * and the atomic rename guarantees the final state = one complete write
+ * snapshot (no half-written / no torn content). Returns the full bytes
+ * string for self-write sentinel registration (compared by content hash; no
+ * object parsing).
  */
 export async function persistThinkingChanges(
   filePath: string,
@@ -477,14 +524,15 @@ export async function persistMemoryChanges(
 }
 
 /**
- * ADR-0092 / SC13：把 fsMode patch 持久化到 settings.json（原子写）。
- * 镜像 `persistMemoryChanges` 形态：读 raw JSON（坏 JSON / 文件缺失 → 空对象
- * 起步）→ 合并 patch → 写 tmp（同目录、rename 前 chmod 0600）→ rename 原子
- * 替换。返回完整 bytes 字符串供 self-write 哨兵登记（EnvLoader 按内容哈希
- * 比对，watcher 命中时跳过 reload 防回环）。
+ * Persist the fsMode patch to settings.json (atomic write).
+ * Mirrors `persistMemoryChanges`: read raw JSON (broken JSON / missing file
+ * → start from an empty object) → merge the patch → write a tmp file (same
+ * directory, chmod 0600 before rename) → atomic rename replace. Returns the
+ * full bytes string for self-write sentinel registration (EnvLoader compares
+ * content hashes and skips reload on a watcher hit to prevent loopback).
  *
- * 非法 fsMode 值由 `mergeFsModePatch` 抛 `TypeError`，写回未发生，原文件
- * 原样保留（不静默吞、不双写）。
+ * Illegal fsMode values throw `TypeError` from `mergeFsModePatch`; no write
+ * happens and the original file is left untouched (no silent swallowing, no double write).
  */
 export async function persistFsModeChanges(
   filePath: string,
@@ -495,15 +543,17 @@ export async function persistFsModeChanges(
 }
 
 /**
- * ADR-0096 T2 ── 把 subagent cap patch 持久化到 settings.json（原子写）。
+ * Persist the subagent cap patch to settings.json (atomic write).
  *
- * 镜像 `persistFsModeChanges` 形态：读 raw JSON（坏 JSON / 文件缺失 → 空对象
- * 起步）→ merge patch → 写 tmp（同目录、rename 前 chmod 0600）→ rename 原子
- * 替换。返回完整 bytes 字符串供 self-write 哨兵登记（EnvLoader 按内容哈希
- * 比对，watcher 命中时跳过 reload 防回环，与 fsMode patch 同形态）。
+ * Mirrors `persistFsModeChanges`: read raw JSON (broken JSON / missing file
+ * → start from an empty object) → merge patch → write a tmp file (same
+ * directory, chmod 0600 before rename) → atomic rename replace. Returns the
+ * full bytes string for self-write sentinel registration (EnvLoader compares
+ * content hashes and skips reload on a watcher hit to prevent loopback, same
+ * shape as the fsMode patch).
  *
- * 非法 cap 值由 `mergeSubagentCapPatch` 抛 TypeError，写回未发生，原文件
- * 原样保留（不静默吞、不双写）。
+ * Illegal cap values throw TypeError from `mergeSubagentCapPatch`; no write
+ * happens and the original file is left untouched (no silent swallowing, no double write).
  */
 export async function persistSubagentCapChanges(
   filePath: string,
@@ -514,15 +564,17 @@ export async function persistSubagentCapChanges(
 }
 
 /**
- * ADR-0096 T3 ── 把 worktree 门禁 patch 持久化到 settings.json（原子写）。
+ * Persist the worktree-gate patch to settings.json (atomic write).
  *
- * 镜像 `persistFsModeChanges` / `persistSubagentCapChanges` 形态：读 raw JSON
- * （坏 JSON / 文件缺失 → 空对象起步）→ merge patch → 写同目录 tmp（rename 前
- * chmod 0600）→ rename 原子替换。返回完整 bytes 供 self-write 哨兵登记
- * （EnvLoader 按内容哈希比对，watcher 命中即跳过 reload 防回环）。
+ * Mirrors `persistFsModeChanges` / `persistSubagentCapChanges`: read raw
+ * JSON (broken JSON / missing file → start from an empty object) → merge
+ * patch → write a tmp file in the same directory (chmod 0600 before rename)
+ * → atomic rename replace. Returns the full bytes for self-write sentinel
+ * registration (EnvLoader compares content hashes and skips reload on a
+ * watcher hit to prevent loopback).
  *
- * 非法值由 `mergeWorktreeOnMutatePatch` 抛 TypeError，写回未发生，原文件原样
- * 保留（不静默吞、不双写）。
+ * Illegal values throw TypeError from `mergeWorktreeOnMutatePatch`; no write
+ * happens and the original file is left untouched (no silent swallowing, no double write).
  */
 export async function persistWorktreeOnMutateChanges(
   filePath: string,
@@ -536,11 +588,13 @@ export async function persistWorktreeOnMutateChanges(
 }
 
 /**
- * 把 model patch 持久化到指定 settings 文件（原子写，复用 persistMergedSettings）。
- * 读 raw JSON（文件不存在 / 坏 JSON → 空对象起步）→ mergeModelPatch → 同目录
- * tmp + chmod 0600 + rename。非法 model / 未知 provider → merge 抛 TypeError，
- * 文件不被触碰。返回完整 bytes 字符串供 self-write 哨兵登记（与 thinking /
- * memory 同款内容哈希契约）。
+ * Persist the model patch to the given settings file (atomic write, reuses
+ * persistMergedSettings). Read raw JSON (missing file / broken JSON → start
+ * from an empty object) → mergeModelPatch → tmp in the same directory +
+ * chmod 0600 + rename. Illegal model / unknown provider → merge throws
+ * TypeError and the file is not touched. Returns the full bytes string for
+ * self-write sentinel registration (same content-hash contract as thinking /
+ * memory).
  */
 export async function persistModelChanges(
   filePath: string,
@@ -550,7 +604,7 @@ export async function persistModelChanges(
   return persistMergedSettings(filePath, mergeModelPatch(raw, patch));
 }
 
-/** sha256 hex —— self-write 哨兵的内容哈希（T2 markSelfWrite 比对用）。 */
+/** sha256 hex — content hash for the self-write sentinel (compared by markSelfWrite). */
 export function hashSettingsContent(bytes: string): string {
   return createHash("sha256").update(bytes, "utf8").digest("hex");
 }

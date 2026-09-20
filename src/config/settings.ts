@@ -1,52 +1,64 @@
 /**
- * #353: iknow settings 文件机制（loop 配置的单一事实源）。
+ * iknow settings file mechanism — the single source of truth for loop config.
  *
- * 两层文件：user 级 `~/.iknow/settings.json` 与 project 级
- * `<cwd>/.iknow/settings.json`。ADR-0084 项目允许名单：项目文件**只采纳**
- * `verify` / `secrets` / `permissions` 三段 —— 这三段仍是 project 覆盖
- * user（段内逐字段：project 只覆盖其实际出现的合法字段，未覆盖的 user
- * 字段保留）。`hooks` 仅用户层（Claude command 钩子 = 任意 shell，与
- * `plugins` 同款供应链）。其余顶层段（`llm` / `isolation` / `subagent` /
- * `web` / `lsp` / `memory` / `loop` / `graph` / `hooks`）出现在项目文件
- * 即丢弃并告警（`filterProjectSettingsKeys`），只有 user 层能提供。
+ * Two layers: user-level `~/.iknow/settings.json` and project-level
+ * `<cwd>/.iknow/settings.json`. Project files adopt only the `verify` /
+ * `secrets` / `permissions` sections; these still override user settings
+ * field-by-field (project overrides only the legal fields it actually declares,
+ * unlisted user fields are kept). `hooks` is user-layer only (command hooks are
+ * arbitrary shell — the same supply-chain risk as `plugins`). Any other
+ * top-level section (`llm` / `isolation` / `subagent` / `web` / `lsp` /
+ * `memory` / `loop` / `graph` / `hooks`) found in a project file is dropped
+ * with a warning (`filterProjectSettingsKeys`); only the user layer may give it.
  *
- * `secrets` 段（#126 hook-system）：
- *  - `secrets.enabled`：是否启用 hook 敏感信息脱敏，boolean 才合法；缺失 → 消费方按
- *    true（默认开启）处理。
- *  - `secrets.patterns`：敏感信息匹配模式（正则源串）列表，非空串字符串数组才合法；
- *    缺失 / 空数组 → 消费方回退内置默认集（settings 层不预填内置集，只承载用户配置）。
- *  - `secrets.mode`（#406 T4）：secret 处理模式，仅 `"roundtrip"` | `"block"` 合法；
- *    缺失 → 消费方按 "roundtrip"（识别 + 占位符替换 + 还原）处理；"block" = 旧
- *    deny-only preToolUse guard（#126 兼容路径）。非法值 → 丢弃该字段。
+ * The `secrets` section:
+ *  - `secrets.enabled`: whether hook secret redaction is active; only a boolean
+ *    is legal; missing → consumers treat it as true (on by default).
+ *  - `secrets.patterns`: list of secret-matching patterns (regex source
+ *    strings); only a non-empty string array is legal; missing / empty array →
+ *    consumers fall back to the built-in default set (the settings layer never
+ *    pre-fills the built-in set, it only carries user config).
+ *  - `secrets.mode`: secret handling mode; only `"roundtrip"` | `"block"` is
+ *    legal; missing → consumers treat it as "roundtrip" (detect + placeholder
+ *    substitution + restore); "block" = the older deny-only preToolUse guard
+ *    (compat path). Illegal value → drop the field.
  *
- * settings-model-extension（#164 第二阶段）：
- *  - `settings.llm.model` 是模型路由 ID 的字面值来源（trim 后非空串），env.ts
- *    不再读 IKNOW_LLM_MODEL；缺失由 env loader fail-fast。
- *  - `settings.llm.apiKey` 接受字面值或 `${VAR}` 占位符，env.ts 经
- *    `expandPlaceholders` 从 process.env > .env.local > .env 解析；未配 →
- *    undefined（消费点守卫抛错）。
+ * settings model extension:
+ *  - `settings.llm.model` is the literal source of the model routing ID (a
+ *    non-empty trimmed string); env.ts no longer reads IKNOW_LLM_MODEL; a
+ *    missing value makes the env loader fail fast.
+ *  - `settings.llm.apiKey` accepts a literal or a `${VAR}` placeholder; env.ts
+ *    resolves it via `expandPlaceholders` from process.env > .env.local > .env;
+ *    unset → undefined (a guard at the consumer point throws).
  *
- * #128 自动修正闭环（T5）：
- *  - `settings.verify` 段承载闭环配置；未配置 → verify undefined（装配层
- *    resolveVerifyConfig 以 command="" 兜底, 由分类器判官接管, 见 verify-config.ts）。
- *  - 默认值（timeoutSec=600 / onExhausted=report / maxRounds=12）不在 settings
- *    层填，由消费点（verify-loop）兜底——settings 层只透传用户显式配置。
+ * The auto-correction loop:
+ *  - the `settings.verify` section carries the loop config; unset → verify is
+ *    undefined (the assembly layer resolveVerifyConfig falls back to command="",
+ *    handing off to the classifier judge — see verify-config.ts).
+ *  - defaults (timeoutSec=600 / onExhausted=report / maxRounds=12) are filled at
+ *    the consumer (verify-loop), not here — the settings layer only passes
+ *    through explicit user config.
  *
- * 对齐 env.ts 的"非法值回退不抛错"纪律：
- *  - 文件不存在 → 空对象；
- *  - 坏 JSON（SyntaxError）→ 空对象，其它意外异常继续抛；
- *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数 /
- *    thinking 非 "off"|"adaptive" / thinkingEffort 非五档 /
- *    model 非空串字符串 / fallback 非空串字符串数组 /
- *    apiKey 非字面非占位符 / verify 段各字段越界或非字面量 /
- *    isolation.worktreeOnMutate 非 boolean）→ 丢弃该字段，
- *    且被丢弃的字段不参与覆盖（不抹掉 user 对应值）；
- *  - 顶层 / 中间层必须是普通对象（数组 / 字符串等 → 丢弃该层 / 该字段）。
+ * Following env.ts's "fall back on illegal values, never throw" discipline:
+ *  - file missing → empty object;
+ *  - bad JSON (SyntaxError) → empty object; other unexpected errors rethrow;
+ *  - illegal values (maxTurns not a finite positive integer / contextWindow /
+ *    thresholdTokens not a finite positive number / thinking not
+ *    "off"|"adaptive" / thinkingEffort not one of the five levels /
+ *    model not a non-empty string / fallback not a non-empty string array /
+ *    apiKey neither literal nor placeholder / verify fields out of range or
+ *    non-literal / isolation.worktreeOnMutate not boolean) → drop the field,
+ *    and a dropped field does not take part in overriding (it won't erase the
+ *    matching user value);
+ *  - top / intermediate layers must be plain objects (arrays / strings, etc. →
+ *    drop that layer / field).
  *
- * llm.thinking / llm.thinkingEffort 与 env.ts IKNOW_LLM_THINKING(_EFFORT) 同值域，
- * 但按 env > settings 优先级回退（#353 maxTurns 同款）——settings 只做缺省来源。
+ * llm.thinking / llm.thinkingEffort share their value domain with env.ts
+ * IKNOW_LLM_THINKING(_EFFORT), but fall back by env > settings priority —
+ * settings only supplies the default.
  *
- * 返回的 IknowSettings 深 frozen（Object.freeze 递归，对齐项目 immutable 纪律）。
+ * The returned IknowSettings is deep-frozen (recursive Object.freeze, aligned
+ * with the project's immutability discipline).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -76,13 +88,15 @@ export interface IknowSettingsLlmCompress {
 }
 
 /**
- * ADR-0093 / #1010 `llm.providers` 段的单 model 项:
- *  - `id`: 模型路由 ID 在 provider 内唯一,trim 后非空(沿用 `isNonEmptyString`)；
- *  - `name?`: 显示名(非空串 trim);
- *  - `contextWindow?` / `maxTokens?`: 上下文窗 / max output;有限正数,与
- *    `IknowSettingsLlmCompress` 同款 `isPositiveFinite` 值域。
- * `id` 为必填;缺 `id` 整条 model drop(provider 仍可保留,空数组 provider 自身
- * drop——见 `parseLlmProvider`)。
+ * A single model entry in the `llm.providers` section:
+ *  - `id`: model routing ID, unique within the provider, non-empty after trim
+ *    (reuses `isNonEmptyString`);
+ *  - `name?`: display name (non-empty trimmed string);
+ *  - `contextWindow?` / `maxTokens?`: context window / max output; finite
+ *    positive numbers, same `isPositiveFinite` domain as `IknowSettingsLlmCompress`.
+ * `id` is required; a missing `id` drops the whole model entry (the provider may
+ * still be kept; a provider with an empty array drops itself — see
+ * `parseLlmProvider`).
  */
 export interface IknowSettingsLlmProviderModel {
   readonly id: string;
@@ -92,18 +106,23 @@ export interface IknowSettingsLlmProviderModel {
 }
 
 /**
- * ADR-0093 / #1010 `llm.providers` 段的单 provider 项:
- *  - `id`: provider 路由 ID(模型路由串 `provider/model` 拆头第一段),trim 后
- *    非空;不在 providers 内显式排重(load 层不去重,行为同 user-fallback 数组
- *    —— 后定义覆盖前定义,首条命中生效;run-time 由 `loadIknowEnv` 的解析序决定);
- *  - `baseUrl`: Anthropic 兼容 endpoint(非空串 trim,V1 不验 URL 形态);
- *  - `apiKeyEnv`: env 变量名,运行时由 `process.env[apiKeyEnv]` 取密钥
- *    (非空串 trim,变量名非法 → 消费点 typed 抛);
- *  - `headers?`: 可选字典,键值均为字符串(非字符串值 drop 整键);
- *  - `models`: provider 内 model 数组(非空数组)。
+ * A single provider entry in the `llm.providers` section:
+ *  - `id`: provider routing ID (the first segment of the `provider/model`
+ *    routing string), non-empty after trim; not de-duplicated within providers
+ *    (the load layer does not dedupe, behaving like the user-fallback array —
+ *    later definitions override earlier ones, the first hit wins; at run time
+ *    `loadIknowEnv`'s resolution order decides);
+ *  - `baseUrl`: Anthropic-compatible endpoint (non-empty trimmed string; V1
+ *    does not validate URL shape);
+ *  - `apiKeyEnv`: env var name; the key is read at run time via
+ *    `process.env[apiKeyEnv]` (non-empty trimmed string; illegal name → typed
+ *    throw at the consumer);
+ *  - `headers?`: optional dictionary, keys and values both strings (a non-string
+ *    value drops the whole key);
+ *  - `models`: the provider's model array (non-empty array).
  *
- * V1 硬约束:本类型仅描述 anthropic 格式 provider;OpenAI-compatible / Gemini
- * native 等留后续轮(规格:`specs/tui-model-command.md` / ADR-0093)。
+ * V1 hard constraint: this type describes anthropic-format providers only;
+ * OpenAI-compatible / Gemini native etc. are left to later rounds.
  */
 export interface IknowSettingsLlmProvider {
   readonly id: string;
@@ -113,14 +132,14 @@ export interface IknowSettingsLlmProvider {
   readonly models: ReadonlyArray<IknowSettingsLlmProviderModel>;
 }
 
-/** llm.thinking 值域：与 env.ts IKNOW_LLM_THINKING 一致（大小写敏感小写）。 */
+/** llm.thinking value domain: matches env.ts IKNOW_LLM_THINKING (case-sensitive, lowercase). */
 export type IknowSettingsThinking = "off" | "adaptive";
 
-/** llm.thinkingEffort 值域：env 五档（不含 "" 占位——空串在 settings 中无意义）。 */
+/** llm.thinkingEffort value domain: the env five levels (no "" placeholder — an empty string is meaningless in settings). */
 export type IknowSettingsThinkingEffort =
   "low" | "medium" | "high" | "xhigh" | "max";
 
-/** settings 侧 thinkingEffort 合法档位（不含 ""）。SSOT 见 session-api THINKING_EFFORT_VALUES（wire 层含 ""）。 */
+/** Legal thinkingEffort levels on the settings side (no ""). SSOT: session-api THINKING_EFFORT_VALUES (the wire layer includes ""). */
 export const THINKING_EFFORT_LEVELS = [
   "low",
   "medium",
@@ -132,167 +151,181 @@ export const THINKING_EFFORT_LEVELS = [
 export interface IknowSettingsLlm {
   maxTurns?: number;
   /**
-   * #358 T1: 单次 LLM 调用竞速上限（per-call，毫秒）。
-   * 镜像 maxTurns 校验纪律：有限正整数才合法；非整数 / 非正数 / 非数字 / 错类型 → 丢弃该字段。
-   * env 链：`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 300_000`。
+   * Race ceiling for a single LLM call (per-call, milliseconds).
+   * Mirrors the maxTurns validation discipline: only a finite positive integer is
+   * legal; non-integer / non-positive / non-number / wrong type → drop the field.
+   * env chain: `envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 300_000`.
    */
   timeoutMs?: number;
   /**
-   * #742 T1: 流式臂上「模型输出增量静默」的上限（毫秒）。镜像 timeoutMs 校验
-   * 纪律：有限正整数才合法，其余丢弃。
-   * T2 (#transport-continue-persist)：默认 idle 从 120s 升到 minute-scale
-   * 300s（~5 min），避免长 thinking / 大输出被误杀；spec 不变式 idle 在
-   * `[60s, 600s]` 区间由 tests/harness/model-idle-hardcap-config.test.ts 钉。
-   * env 链：`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`。
+   * Ceiling on model-output-increment silence in the streaming arm (ms).
+   * Mirrors the timeoutMs validation discipline: only a finite positive integer
+   * is legal, everything else is dropped. The default idle is raised from 120s
+   * to a minute-scale 300s (~5 min) so long thinking / large output isn't
+   * killed by mistake; the invariant that idle stays within `[60s, 600s]` is
+   * pinned by tests/harness/model-idle-hardcap-config.test.ts.
+   * env chain: `envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`.
    */
   idleTimeoutMs?: number;
   /**
-   * #742 T1: 流式臂上单次模型调用的有限硬顶（毫秒），到点即使仍有增量也超时。
-   * 镜像 timeoutMs 校验纪律。
-   * env 链：`envOptionalInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
+   * Finite hard cap for a single model call in the streaming arm (ms): it times
+   * out on reaching the cap even if increments are still arriving.
+   * Mirrors the timeoutMs validation discipline.
+   * env chain: `envOptionalInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`.
    */
   hardCapMs?: number;
   compress?: IknowSettingsLlmCompress;
-  /** 缺省 thinking 开关；env IKNOW_LLM_THINKING 显式设置时覆盖它。 */
+  /** Default thinking switch; overridden when env IKNOW_LLM_THINKING is explicitly set. */
   thinking?: IknowSettingsThinking;
-  /** 缺省 effort；env IKNOW_LLM_THINKING_EFFORT 显式设置时覆盖它。 */
+  /** Default effort; overridden when env IKNOW_LLM_THINKING_EFFORT is explicitly set. */
   thinkingEffort?: IknowSettingsThinkingEffort;
-  /** 模型路由 ID（9router）；非空串字符串才合法。 */
+  /** Model routing ID; only a non-empty string is legal. */
   model?: string;
   /**
-   * ADR-0113: lite 模型路由 ID，与 `model` 同形（`provider/model`），共用
-   * `providers[]` 查表；目前唯一消费方是会话标题生成。非空串字符串才合法，
-   * 非法值丢弃；缺席 / 配置错误不 fail-fast（装配见 env.ts `resolveLlmLite`）。
+   * Lite model routing ID, same shape as `model` (`provider/model`), sharing the
+   * `providers[]` lookup; currently its only consumer is session-title generation.
+   * Only a non-empty string is legal, illegal values are dropped; absence /
+   * misconfiguration does not fail fast (assembly: env.ts `resolveLlmLite`).
    */
   liteModel?: string;
-  /**
-   * 模型 fallback 路由 ID 列表（用户自配，代码不预置任何默认）。
-   * 非空串字符串数组才合法（至少 1 项）；非法 → 丢弃该字段。
+  /** Model fallback routing ID list (user-configured; code presets no default).
+   * Only a non-empty string array is legal (at least 1 item); illegal → drop the field.
    */
   fallback?: string[];
-  /**
-   * LLM API key 来源（settings-model-extension 单一承载）：
-   *  - 字面值：直接作为密钥使用（不经占位符解析）；
-   *  - `${VAR}` / `$VAR` 占位符：由 env.ts `expandPlaceholders` 从
-   *    process.env[VAR] 优先、.env.local / .env 兜底解析；解析不到 → undefined。
-   * 未配 → undefined（不默认、不硬编码；消费点守卫抛「no API key configured」）。
+  /** Source of the LLM API key (the single carrier):
+   *  - literal value: used directly as the key (no placeholder expansion);
+   *  - `${VAR}` / `$VAR` placeholder: resolved by env.ts `expandPlaceholders`,
+   *    preferring process.env[VAR], with .env.local / .env as fallback;
+   *    unresolved → undefined.
+   * Unset → undefined (no default, no hardcoding; a guard at the consumer throws "no API key configured").
    */
   apiKey?: string;
-  /** ADR-0093 / #1010 LLM provider 注册表——用户层键（项目文件不采纳，沿 ADR-0084）。
-   *  loadIknowEnv 按 settings.llm.model = "<provider>/<model>" 拆头查表，命中 →
-   *  baseUrl = provider.baseUrl + apiKey = process.env[provider.apiKeyEnv];未命中 →
-   *  fallback 今日路径 IKNOW_LLM_BASE_URL + settings.llm.apiKey(back-compat)。
-   *  非法 provider 整条 drop（详见 parseLlmProvider）；空数组 → 字段缺席。
+  /** LLM provider registry — a user-layer key (not adopted from project files).
+   *  loadIknowEnv splits settings.llm.model = "<provider>/<model>" and looks it
+   *  up: a hit → baseUrl = provider.baseUrl + apiKey = process.env[provider.apiKeyEnv];
+   *  a miss → fallback to the current path IKNOW_LLM_BASE_URL + settings.llm.apiKey
+   *  (back-compat).
+   *  An illegal provider drops entirely (see parseLlmProvider); an empty array → field absent.
    */
   providers?: ReadonlyArray<IknowSettingsLlmProvider>;
 }
 
 export interface IknowSettingsVerify {
   /**
-   * 验证命令。非空串才合法；未配置 → verify 段不产 command 字段，装配层
-   * resolveVerifyConfig 以 command="" 兜底（分类器判官接管，见 verify-config.ts）。
+   * Verification command. Only a non-empty string is legal; unset → the verify
+   * section produces no command field, and the assembly layer resolveVerifyConfig
+   * falls back to command="" (handed to the classifier judge — see verify-config.ts).
    */
   command?: string;
-  /** 失败用例单跑模板，`{files}` 占位；非空串才合法。 */
+  /** Per-file rerun template for failed cases, with a `{files}` placeholder; only a non-empty string is legal. */
   rerunTemplate?: string;
-  /** 失败数提取正则覆盖（可选）；非空串才合法。 */
+  /** Override regex for extracting the failure count (optional); only a non-empty string is legal. */
   countRegex?: string;
   /**
-   * 验证命令超时（秒）。默认 600 由消费点兜底（settings 层不透传默认值）；
-   * 有限正整数才合法。
+   * Verification command timeout (seconds). The default 600 is applied at the
+   * consumer (the settings layer does not pass a default); only a finite
+   * positive integer is legal.
    */
   timeoutSec?: number;
   /**
-   * 修正耗尽处置。仅 `"report"` | `"escalate"` 字面量合法；默认 report 由
-   * 消费点兜底。
+   * Action when fix attempts are exhausted. Only the `"report"` | `"escalate"`
+   * literals are legal; the default report is applied at the consumer.
    */
   onExhausted?: "report" | "escalate";
-  /** 兜底总轮数上限。默认 12 由消费点兜底；有限正整数才合法。 */
+  /** Overall round cap. The default 12 is applied at the consumer; only a finite positive integer is legal. */
   maxRounds?: number;
   /**
-   * 分类器（command 缺失时的子代理 LLM 判官）模型路由 ID（A7）。
-   * 显式指定时用其值；缺省解析到 settings.llm.model。ADR-0015 扩展，
-   * 非空串才合法（与 command 同纪律），代码层不硬编码模型 ID。
+   * Model routing ID for the classifier (the subagent LLM judge used when
+   * command is absent). Used as-is when set; by default it resolves to
+   * settings.llm.model. Only a non-empty string is legal (same discipline as
+   * command); code does not hardcode a model ID.
    */
   classifierModel?: string;
 }
 
 export interface IknowSettingsSecrets {
-  /** 是否启用 hook 敏感信息脱敏。缺失时消费方按 true 处理（默认开启）。 */
+  /** Whether hook secret redaction is enabled. When missing, consumers treat it as true (on by default). */
   enabled?: boolean;
   /**
-   * 敏感信息匹配模式（正则源串）列表。用户自配，代码不预置任何默认；
-   * 缺失 / 空数组 → 消费方回退内置默认集（settings 层不填内置集）。
-   * 非空串字符串数组才合法（至少 1 项，每项 trim 后非空）；非法 → 丢弃该字段。
+   * List of secret-matching patterns (regex source strings). User-configured;
+   * code presets no default; missing / empty array → consumers fall back to the
+   * built-in default set (the settings layer does not fill the built-in set).
+   * Only a non-empty string array is legal (at least 1 item, each non-empty after trim); illegal → drop the field.
    */
   patterns?: string[];
   /**
-   * #406 T4: secret 处理模式。缺省 = "roundtrip"（识别+占位符替换+还原）；
-   * "block" = 旧 deny-only preToolUse guard（#126 兼容路径）。非法值 → 丢弃。
+   * Secret handling mode. Default = "roundtrip" (detect + placeholder substitution + restore);
+   * "block" = the older deny-only preToolUse guard (compat path). Illegal value → drop.
    */
   mode?: "roundtrip" | "block";
 }
 
 /**
- * #358 T1: 子代理配置段（per-task wallclock，独立于 per-call llm.timeoutMs）。
+ * Subagent config section (per-task wallclock, independent of per-call llm.timeoutMs).
  *
- * `taskTimeoutMs` = 子代理整任务寿命上限（毫秒），父 manager SIGTERM 计时消费。
- * 与 `llm.timeoutMs`（per-call LLM 调用竞速）语义、命名、消费点全程分离（C9）。
+ * `taskTimeoutMs` = a subagent's whole-task lifetime cap (ms), consumed by the
+ * parent manager's SIGTERM timer. Its semantics, naming, and consumer point stay
+ * fully separate from `llm.timeoutMs` (per-call LLM race).
  *
- * 校验纪律（镜像 maxTurns）：
- *  - 有限正整数（>= 1 且为整数）才合法；
- *  - 非正 / 非整数 / 非数字 / 错类型 → 丢弃该字段；
- *  - 全部字段非法 → 不产出 subagent 段。
+ * Validation discipline (mirrors maxTurns):
+ *  - only a finite positive integer (>= 1 and integral) is legal;
+ *  - non-positive / non-integer / non-number / wrong type → drop the field;
+ *  - all fields illegal → the subagent section is not produced.
  *
- * env 链（镜像 maxTurns 模式）：
- * `envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`，
- * env 层不预填 7200s 默认值（缺省值在 T2 的 manager 消费点声明，避免两处声明）。
+ * env chain (mirrors the maxTurns pattern):
+ * `envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`;
+ * the env layer does not pre-fill the 7200s default (the default is declared at
+ * the manager consumer point to avoid declaring it in two places).
  */
 /**
- * 子代理并发上限值域（ADR-0096，T2）：正整数 `3|5|9|15` 或 `"unlimited"`。
- *  - 正整数 → 闸值（active+starting ≥ 此值即抛 SubAgentCapacityError）；
- *  - `"unlimited"` → 不做并发拒绝（OS / 内存仍是事实顶）；
- *  - settings 缺省 → env 缺省 → 默认 15（与既有行为逐字节相等）。
+ * Subagent concurrency cap value domain: a positive integer `3|5|9|15` or `"unlimited"`.
+ *  - positive integer → gate value (active+starting >= this value throws SubAgentCapacityError);
+ *  - `"unlimited"` → no concurrency rejection (OS / memory remain the real ceiling);
+ *  - settings default → env default → 15 (byte-for-byte equal to prior behavior).
  *
- * 落盘表示：settings.json 的 `subagent.maxConcurrentWorkers` 字段允许正整数
- * 或字面字符串 `"unlimited"`；其它值（字符串如 `"off"`、负数、浮点、boolean）
- * 一律丢弃（fail-closed，对齐 `IknowSettingsSubagent` 既有值域纪律）。
+ * On-disk form: the `subagent.maxConcurrentWorkers` field in settings.json accepts a
+ * positive integer or the literal string `"unlimited"`; every other value (strings
+ * like `"off"`, negatives, floats, booleans) is dropped (fail-closed, aligned with
+ * the existing value-domain discipline of `IknowSettingsSubagent`).
  */
 export type SubagentCapValue = number | "unlimited";
 
 export interface IknowSettingsSubagent {
   taskTimeoutMs?: number;
-  /** 子代理同时处于 starting/running 的并发上限；正整数或 `"unlimited"` 才生效。 */
+  /** Concurrency cap for subagents simultaneously in starting/running; only a positive integer or `"unlimited"` takes effect. */
   maxConcurrentWorkers?: SubagentCapValue;
 }
 
 /**
- * 子代理并发上限缺省（CONTEXT「子代理并发上限」）。
- * env / settings 未设或非正时回退此值；manager 与 env loader 共用，禁止
- * config 反向 import harness。
+ * Default subagent concurrency cap.
+ * env / settings fall back to this value when unset or non-positive; shared by the
+ * manager and the env loader. Config must not import harness in reverse.
  */
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS = 15;
 
 /**
- * D-α V1 graph mode: graph 编排 overlay 的持久默认（ADR-0030）。
+ * Durable default for the graph-orchestration overlay.
  *
- * graph 是**可选 overlay**：默认任务仍走一次性 `spawn_subagent` 不进图，所以
- * 本段缺席时消费方按「关」处理（缺省不在 settings 层预填）。运行时链：
- * `settings.graph.enabled > false`；会话内 Shift+Tab / `/graph` 再就地翻
- * （`harness/graph/mode.ts` 的 `resolveGraphMode` 是唯一装配点）。
+ * graph is an optional overlay: by default tasks still go through one-shot
+ * `spawn_subagent` without entering a graph, so when this section is absent
+ * consumers treat it as "off" (the default is not pre-filled at the settings layer).
+ * Runtime chain: `settings.graph.enabled > false`; within a session Shift+Tab /
+ * `/graph` toggle it in place (`resolveGraphMode` in `harness/graph/mode.ts` is the
+ * single assembly point).
  *
- * 校验纪律镜像 `IknowSettingsSubagent`：boolean 才合法；错类型 → 丢弃该字段；
- * 全部字段非法 / 缺席 → 不产出 graph 段。
+ * Validation discipline mirrors `IknowSettingsSubagent`: only a boolean is legal;
+ * wrong type → drop the field; all fields illegal / absent → the graph section is not produced.
  */
 export interface IknowSettingsGraph {
   enabled?: boolean;
 }
 
 /**
- * auto-memory T4 / ADR-0031 D5: 自动记忆段。
+ * Auto-memory section.
  *
- * `autoExtract` / `dream` 只认 boolean；缺失 / 非法 → 字段不产出，消费方按
- * **false** 处理（默认 OFF 是决策，不是巧合）。两者独立。
+ * `autoExtract` / `dream` accept only booleans; missing / illegal → the field is
+ * not produced and consumers treat it as false (defaulting OFF is a decision, not
+ * an accident). The two are independent.
  */
 export interface IknowSettingsMemory {
   autoExtract?: boolean;
@@ -300,78 +333,84 @@ export interface IknowSettingsMemory {
 }
 
 /**
- * ADR-0037: 会话级 git worktree 隔离段（plans/worktree-isolation-on-mutate.md）。
+ * Session-level git worktree isolation section.
  *
- * `worktreeOnMutate` 只认 boolean；缺失 / 非 `true` / 非法值一律按 **OFF**
- * 处理（fail-closed，与 `memory.autoExtract` 同款值域纪律）—— OFF 时 mutate
- * 路径行为与今日完全一致。唯一 fail-closed 读取点是 `resolveWorktreeOnMutate`。
+ * `worktreeOnMutate` accepts only a boolean; missing / non-`true` / illegal values
+ * are all treated as OFF (fail-closed, same value-domain discipline as
+ * `memory.autoExtract`) — when OFF, the mutate path behaves exactly as today. The
+ * only fail-closed read point is `resolveWorktreeOnMutate`.
  *
- * 值域合同（硬要求 9 / ADR-0037 §5）：config 层只承载 boolean 值域语义——
- * 不读 git、不持会话状态；开关只在启动加载点读取一次。
+ * Value-domain contract: the config layer carries boolean value-domain semantics
+ * only — it does not read git or hold session state; the switch is read once at
+ * the startup load point.
  *
- * ADR-0070 / plans/worktree-exclusive-lock.md T2：`worktreeExclusive` 与
- * `worktreeOnMutate` **正交**、同款 boolean-only / 默认 OFF / fail-closed
- * 纪律；缺失 / 非 `true` 一律按 OFF（`resolveWorktreeExclusive` 单读点）。
- * 装配期由 `src/harness/build-engine.ts` 读取并透传给需要的缝（T3 在
- * session-api `enter` 检查时消费），不在 settings 层做 git / 会话查询。
+ * `worktreeExclusive` is orthogonal to `worktreeOnMutate` with the same
+ * boolean-only / default-OFF / fail-closed discipline; missing / non-`true` is
+ * treated as OFF (`resolveWorktreeExclusive` is the single read point). At
+ * assembly time `src/harness/build-engine.ts` reads it and passes it to the
+ * seams that need it (consumed by the session-api `enter` check); no git / session
+ * query happens at the settings layer.
  *
- * **L1 弱档披露（spec L1「三处强制披露」之设置项文档处，T4 落点）**：
- * 占用枚举走 `SessionStore.list()`，**仅本进程可见**——`SessionStore`
- * 在每个进程只构造一份，绑定到一个 cwd / workspaceRoot（`serve.ts:107` /
- * `cli.ts:318` / `tui/hub-bridge.ts:248`），无跨 root / 跨 dataDir 聚合
- * 入口。跨进程（独立 CLI 会话、不同 PID 的 `iknow serve`）的占用看不见
- * ——同棵树可能被两个进程同时 enter 而本开关只挡得住本进程。强档要
- * "跨进程占用可见"必须扫遍 `<dataDir>/projects/*` 全部项目命名空间
- * （M×N 文件 parse），本 spec 不做。打开此开关的 operator 已知此限制。
+ * L1 weak-mode disclosure: the occupancy enumeration goes through
+ * `SessionStore.list()` and is visible only within this process — `SessionStore`
+ * is constructed once per process, bound to one cwd / workspaceRoot, with no
+ * cross-root / cross-dataDir aggregation entry. Occupancy held by other processes
+ * (independent CLI sessions, `iknow serve` under a different PID) is invisible —
+ * the same tree could be entered by two processes while this switch only blocks
+ * this one. A strong "cross-process occupancy visible" mode would require scanning
+ * every project namespace under `<dataDir>/projects/*` (M×N file parses); that is
+ * not done here. An operator who turns this switch on already knows the limit.
  */
 export interface IknowSettingsIsolation {
-  /** mutate 时建 task worktree 并改绑会话的开关（默认 OFF）。 */
+  /** Switch: on mutate, create a task worktree and rebind the session (default OFF). */
   worktreeOnMutate?: boolean;
   /**
-   * ADR-0070: enter-worktree 多一道前置占用检查 —— 目标树若被别的现存
-   * 会话记录占用则 typed 拒绝（`worktree_claimed`）。默认 OFF（与今日逐字节
-   * 一致）；OFF 时 enter 行为与今日一致，不引入任何新拒绝路径。
+   * enter-worktree adds a pre-flight occupancy check — if the target tree is held
+   * by another existing session record, reject with a typed error (`worktree_claimed`).
+   * Default OFF (byte-for-byte as today); when OFF, enter behaves as today with no new
+   * rejection path.
    */
   worktreeExclusive?: boolean;
   /**
-   * ADR-0092 / SC13：filesystem isolation 档（bash 物理围栏上「能看见 /
-   * 能写哪些路径」的档位）。默认 **全局档**；可选 **工作区档**。与
-   * PermissionMode、worktreeOnMutate 正交。值域 `"global" | "workspace"`；
-   * 非法值（大小写错配 / 其它字符串 / 非字符串）→ 丢弃该字段，回落 global。
-   * 同一 fail-closed 读取点是 `resolveFsIsolationMode`（与
-   * `resolveWorktreeOnMutate` 同款 shape）。**仅用户层键**（ADR-0084）——
-   * 项目文件 isolation 段被丢弃，与 worktreeOnMutate / worktreeExclusive
-   * 同纪律。
+   * Filesystem isolation mode (how the bash physical fence decides which paths are
+   * visible / writable). Defaults to global mode; workspace mode is optional.
+   * Orthogonal to PermissionMode and worktreeOnMutate. Value domain `"global" | "workspace"`;
+   * illegal values (case mismatch / other strings / non-string) → drop the field, fall back to global.
+   * The same fail-closed read point is `resolveFsIsolationMode` (same shape as
+   * `resolveWorktreeOnMutate`). User-layer key only — the project file's isolation
+   * section is dropped, same discipline as worktreeOnMutate / worktreeExclusive.
    */
   fsMode?: FsIsolationMode;
   /**
-   * ADR-0097 / SC12：出口代理缝的域白名单配置 —— 仅用户层键（ADR-0084）。
-   * 承载 `allowedDomains` / `deniedDomains` 形态合法判定；`*.x` 通配语义、
-   * 大小写归一留给语义层（T3）。空数组 = 全拒（fail-closed 合法态）；
-   * 非字符串条目 / trim 后为空 / 裸 `*` / `:port` 越界 → 丢弃该条目 +
-   * onWarn 留痕（不抛）。项目文件出现本段即随 isolation 整段被丢弃（现有
-   * `filterProjectSettingsKeys` 行为），不在此处重复警告。详见
-   * `src/config/isolation-network.ts`。
+   * Domain allowlist config for the egress proxy seam — user-layer key only.
+   * Carries the shape validation of `allowedDomains` / `deniedDomains`; `*.x`
+   * wildcard semantics and case normalization are left to the semantic layer. An
+   * empty array = deny all (a legal fail-closed state); non-string entries / empty
+   * after trim / bare `*` / out-of-range `:port` → drop the entry + record it via
+   * onWarn (no throw). If this section appears in a project file it is dropped with
+   * the whole isolation section (existing `filterProjectSettingsKeys` behavior), so no
+   * duplicate warning here. See `src/config/isolation-network.ts`.
    */
   network?: IknowSettingsIsolationNetwork;
   /**
-   * egress-credential-sentinel T1：凭据名册段 —— **仅用户层键**（ADR-0084，
-   * 项目文件出现 isolation 即整段丢弃）。承载 `files[]`（path / 可选 extract
-   * 须含捕获组 1 / 可选 decode:"jwt" / injectHosts 必填）与 `envVars[]`
-   * （name / injectHosts 必填）；非法条目丢该条 + 警告不抛；用户层条目总数
-   * 上限 16 超出丢尾 + 警告。github 两条目由代码内置名册提供
-   * （`harness/sandbox/egress/credential-assembly.ts` SSOT），本段只做
-   * 收窄/追加。详见 `src/config/isolation-credentials.ts`。
+   * Credential roster section — user-layer key only (a project file's isolation
+   * section is dropped entirely). Carries `files[]` (path / optional extract which
+   * must contain capture group 1 / optional decode:"jwt" / required injectHosts)
+   * and `envVars[]` (name / required injectHosts); an illegal entry drops that
+   * entry with a warning, no throw; the user-layer total is capped at 16, extras
+   * are dropped from the tail with a warning. The two github entries come from the
+   * code's built-in roster (`harness/sandbox/egress/credential-assembly.ts` SSOT);
+   * this section only narrows / appends. See `src/config/isolation-credentials.ts`.
    */
   credentials?: IknowSettingsIsolationCredentials;
 }
 
-/** ADR-0092 / SC13：filesystem isolation 档值域。 */
+/** Filesystem isolation mode value domain. */
 export type FsIsolationMode = "global" | "workspace";
 
 /**
- * 用户 command 钩子 handler（Claude settings.json / 插件 hooks.json 同形）。
- * 只认 `type: "command"`；timeout 为秒（可选）。
+ * User command-hook handler (same shape as plugin hooks.json).
+ * Only `type: "command"` is accepted; timeout is in seconds (optional).
  */
 export interface IknowSettingsHookHandler {
   type: "command";
@@ -379,53 +418,57 @@ export interface IknowSettingsHookHandler {
   timeout?: number;
 }
 
-/** 一组 matcher + handlers。matcher 缺席 = 通配。 */
+/** A matcher plus its handlers. A missing matcher means match-all. */
 export interface IknowSettingsHookGroup {
   matcher?: string;
   hooks: IknowSettingsHookHandler[];
 }
 
 /**
- * `settings.hooks`：Claude 形态（仅用户层）。段缺席 = 无用户 command 钩子。
- * 未知事件名忽略。内置钩子不经本段。
+ * `settings.hooks`: user-layer only. A missing section = no user command hooks.
+ * Unknown event names are ignored. Built-in hooks do not go through this section.
  */
 export interface IknowSettingsHooks {
   PreToolUse?: IknowSettingsHookGroup[];
   PostToolUse?: IknowSettingsHookGroup[];
 }
 
-/** 用户 command 钩子事件闭集（与插件 hooks.json 同集）。 */
+/** Closed set of user command-hook events (same set as plugin hooks.json). */
 export const HOOK_EVENT_VALUES: readonly (keyof IknowSettingsHooks)[] = [
   "PreToolUse",
   "PostToolUse",
 ];
 
 /**
- * Web 工具配置段。回退链 env > settings > 默认（对齐 #353 maxTurns 先例），
- * 装配期字段（不在 settings 热更新白名单，改后需重启进程）。
+ * Web tool config section. Fallback chain env > settings > default (following the
+ * maxTurns precedent); these are assembly-time fields (not in the settings
+ * hot-reload allowlist, so a change requires a process restart).
  */
 export interface IknowSettingsWeb {
   /**
-   * web_search 后端选择。值域与 env.ts `SEARCH_BACKEND_VALUES` 闭集一致；
-   * 非法值 → 丢弃该字段（drop-not-throw，loader 侧非法 env 值仍抛 typed error）。
+   * web_search backend selection. Value domain matches env.ts's `SEARCH_BACKEND_VALUES`
+   * closed set; illegal value → drop the field (drop-not-throw; the loader still throws a
+   * typed error for illegal env values).
    */
   searchBackend?: "bing" | "exa" | "tavily" | "brave";
 }
 
 /**
- * web.searchBackend 闭集（settings 层本地常量）：与 env.ts `SEARCH_BACKEND_VALUES`
- * 同值域（顺序对齐 env SSOT bing → tavily → exa → brave）。settings.ts 不能反向
- * import env.ts（env.ts → settings.ts 已有依赖，反向即环），故从字段联合派生；
- * 类型面只保证元素 ⊆ 联合，值域 parity 由 tests/config/web-settings.test.ts 的
- * sort-deepEqual 守卫兜住（测试期显红，非静默漂移）。
+ * web.searchBackend closed set (a settings-layer local constant): same value domain as
+ * env.ts `SEARCH_BACKEND_VALUES` (ordered to match the env SSOT bing → tavily → exa →
+ * brave). settings.ts must not import env.ts in reverse (env.ts → settings.ts already
+ * depends; the reverse would be a cycle), so this is derived from the field union; the
+ * type level only guarantees elements ⊆ the union, and value-domain parity is held by the
+ * sort-deepEqual guard in tests/config/web-settings.test.ts (an explicit test-time red,
+ * not silent drift).
  */
 export const WEB_SEARCH_BACKEND_VALUES: readonly IknowSettingsWeb["searchBackend"][] =
   ["bing", "tavily", "exa", "brave"];
 
 /**
- * ADR-0037: `isolation.worktreeOnMutate` 的唯一 fail-closed 读取点。
- * 缺失 / 非 boolean / 非 `true` → false（回落至今日行为）；config 层不做
- * 任何 git / 会话状态查询（硬要求 9）。
+ * The only fail-closed read point for `isolation.worktreeOnMutate`.
+ * Missing / non-boolean / non-`true` → false (falls back to today's behavior); the
+ * config layer performs no git / session-state query.
  */
 export function resolveWorktreeOnMutate(
   settings: IknowSettings | undefined | null
@@ -434,18 +477,18 @@ export function resolveWorktreeOnMutate(
 }
 
 /**
- * ADR-0070 / plans/worktree-exclusive-lock.md T2:
- * `isolation.worktreeExclusive` 的唯一 fail-closed 读取点（同
- * `resolveWorktreeOnMutate` 形状）。
+ * The only fail-closed read point for `isolation.worktreeExclusive` (same shape as
+ * `resolveWorktreeOnMutate`).
  *
- *  - 缺失 / 非 boolean / 非 `true` → false（回落至今日 enter 行为，逐字节
- *    一致；SC2 / OFF 档零回归钉死）；
- *  - config 层只承载 boolean 值域语义（ADR-0037 §5 硬要求 9）—— **不读
- *    git、不持会话状态、不枚举现存会话记录**；占用判定（T3）由 session-api
- *    `enter-worktree` 缝消费装配期一次性读取的结果执行；
- *  - 开关只在启动加载点读取一次，会话根改绑（rebind）不触发 settings 重载
- *    —— `WorktreeIsolationHostOpts.worktreeExclusive` 是该一次性读取结果
- *    在装配期的透传载体。
+ *  - missing / non-boolean / non-`true` → false (falls back to today's enter behavior,
+ *    byte-for-byte; the OFF mode's zero-regression is pinned);
+ *  - the config layer carries boolean value-domain semantics only — it does not read
+ *    git, hold session state, or enumerate existing session records; the occupancy
+ *    decision is executed by the session-api `enter-worktree` seam consuming the result
+ *    of a one-time assembly-time read;
+ *  - the switch is read once at the startup load point; a session-root rebind does not
+ *    trigger a settings reload — `WorktreeIsolationHostOpts.worktreeExclusive` is the
+ *    assembly-time carrier of that one-time read result.
  */
 export function resolveWorktreeExclusive(
   settings: IknowSettings | undefined | null
@@ -454,18 +497,19 @@ export function resolveWorktreeExclusive(
 }
 
 /**
- * ADR-0092 / SC13：`isolation.fsMode` 的唯一 fail-closed 读取点（镜像
- * `resolveWorktreeOnMutate` 形状）。
+ * The only fail-closed read point for `isolation.fsMode` (mirrors the shape of
+ * `resolveWorktreeOnMutate`).
  *
- *  - 缺席 / 非 `"workspace"` → `"global"`（回落至默认全局档；ADR-0092
- *    「默认全局档」是缺省设计，不是巧合）；
- *  - 仅当字面量严格 === `"workspace"` 才返回 `"workspace"`；其它（含
- *    大小写错配 / `"WORKSPACE"` / `"Global"` / 其它字符串 / 非字符串 /
- *    布尔 / 数字）一律按 `"global"` 兜底——settings 层不抛错，与
- *    `worktreeOnMutate` / `worktreeExclusive` 的 fail-closed 纪律一致；
- *  - config 层只承载字符串值域语义，不读会话状态；开关只在启动加载点读
- *    一次（review High-2 / ADR-0037 §5 硬要求 9），运行中由 `/config` 或
- *    `FsModeContext` holder 就地翻。
+ *  - absent / non-`"workspace"` → `"global"` (falls back to the default global mode;
+ *    "default global" is a deliberate design, not an accident);
+ *  - returns `"workspace"` only when the literal is strictly === `"workspace"`;
+ *    everything else (case mismatch / `"WORKSPACE"` / `"Global"` / other strings /
+ *    non-string / boolean / number) falls back to `"global"` — the settings layer does
+ *    not throw, consistent with the fail-closed discipline of `worktreeOnMutate` /
+ *    `worktreeExclusive`;
+ *  - the config layer carries string value-domain semantics and does not read session
+ *    state; the switch is read once at the startup load point, and at run time is
+ *    toggled in place by `/config` or the `FsModeContext` holder.
  */
 export function resolveFsIsolationMode(
   settings: IknowSettings | undefined | null
@@ -474,43 +518,44 @@ export function resolveFsIsolationMode(
 }
 
 /**
- * lsp-optimization 二期 B7: LSP 配置段。全部字段可选；requestTimeoutMs /
- * diagnosticsWaitMs 为正整数；idleTimeoutMs 为 ≥0 整数（0 = 关闭 sweep）。
- * 消费点：build-engine 装配 LspCtx 注入（tools 层超时/等待 + client idle
- * sweep + disabledServers 过滤）。worker 不读 settings 文件，注入 idle
- * 缺省值（DEFAULT_LSP_IDLE_TIMEOUT_MS）。
+ * LSP config section. All fields optional; requestTimeoutMs / diagnosticsWaitMs are
+ * positive integers; idleTimeoutMs is an integer >= 0 (0 = sweep off). Consumers:
+ * build-engine assembles and injects LspCtx (tool-layer timeout/wait + client idle
+ * sweep + disabledServers filtering). The worker does not read the settings file and
+ * is injected with the idle default (DEFAULT_LSP_IDLE_TIMEOUT_MS).
  */
 export interface IknowLspSettings {
-  /** per-request LSP 超时上限（毫秒，缺省 20_000）。 */
+  /** Per-request LSP timeout cap (ms, default 20_000). */
   requestTimeoutMs?: number;
-  /** lsp_diagnostics 读前等待 deadline（毫秒，缺省 2_000）。 */
+  /** Pre-read wait deadline for lsp_diagnostics (ms, default 2_000). */
   diagnosticsWaitMs?: number;
-  /** 空闲 LSP 客户端回收阈值（毫秒，缺省 600_000；0 视为不回收）。 */
+  /** Idle LSP-client reclaim threshold (ms, default 600_000; 0 means no reclaim). */
   idleTimeoutMs?: number;
-  /** 禁用的 server id 列表（命中 → 视为未配置）。 */
+  /** List of disabled server ids (a hit → treated as unconfigured). */
   disabledServers?: string[];
 }
 
 /**
- * ADR-0090: 项目层 `permissions` 段改为声明式字符串列表（`allow` / `ask` /
- * `deny`）+ 可选 `defaultMode`。本层只做形状门禁（普通对象 + 字段类型）；
- * ajv schema 校验 + 规则解析 / 编译归
- * `src/harness/permission/project-settings.ts`（SSOT），config 层不反向
- * import harness。本字段是**值语义透传载体**——运行时不消费，只供权限
- * 装配层一次性读取（`resolveProjectPermissionSource` 单点读根）。
+ * Project-layer `permissions` section: a declarative string-list (`allow` / `ask` /
+ * `deny`) plus an optional `defaultMode`. This layer only gates shape (plain object +
+ * field types); ajv schema validation and rule parsing / compilation live in
+ * `src/harness/permission/project-settings.ts` (SSOT), and the config layer does not
+ * import harness in reverse. This field is a pass-through value carrier — it is not
+ * consumed at run time, only read once by the permission assembly layer
+ * (`resolveProjectPermissionSource` reads the root at a single point).
  */
 export interface IknowSettingsPermissions {
   /**
-   * 启动 `PermissionMode` 种子；仅 `"default"` | `"plan"` 合法；
-   * `"full_auto"` 在 project-settings 层 fail-loud
-   * （共享仓库不得自授自动模式，ADR-0090）。
+   * Startup `PermissionMode` seed; only `"default"` | `"plan"` is legal;
+   * `"full_auto"` fails loud at the project-settings layer (a shared repo must
+   * not self-grant automatic mode).
    */
   defaultMode?: string;
-  /** allow 规则数组（字符串透传，编译归 permission 层）。 */
+  /** allow rule array (strings passed through; compilation is in the permission layer). */
   allow?: ReadonlyArray<unknown>;
-  /** ask 规则数组（字符串透传，编译归 permission 层）。 */
+  /** ask rule array (strings passed through; compilation is in the permission layer). */
   ask?: ReadonlyArray<unknown>;
-  /** deny 规则数组（字符串透传，编译归 permission 层）。 */
+  /** deny rule array (strings passed through; compilation is in the permission layer). */
   deny?: ReadonlyArray<unknown>;
 }
 
@@ -519,39 +564,40 @@ export interface IknowSettings {
   verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
   /**
-   * ADR-0084 / ADR-0090: 项目层权限规则段，声明式 `allow` / `ask` /
-   * `deny` 字符串列表 + 可选 `defaultMode`。**仅项目层解析**——用户层
-   * `permissions` 不接（ADR-0084，见 `loadIknowSettings`）。本接口只承载
-   * 形状门禁；规则解析 / 编译归
-   * `src/harness/permission/project-settings.ts`（同一 SSOT）。
+   * Project-layer permission rule section: a declarative `allow` / `ask` / `deny`
+   * string list plus an optional `defaultMode`. Parsed at the project layer only —
+   * the user layer's `permissions` is not accepted (see `loadIknowSettings`). This
+   * interface only gates shape; rule parsing / compilation live in
+   * `src/harness/permission/project-settings.ts` (the same SSOT).
    *
-   * **运行时不消费本字段**：权限源由装配层经
-   * `resolveProjectPermissionSource({ projectIdentityRoot })` 单点读取
-   * （build-engine / worker 共用），本层是形状门禁而非第二读者。本层丢弃
-   * 非法字段（drop-not-throw），拿它当策略源会把 schema 违规静默降级成
-   * 「无项目规则」，正是 ADR-0084 / ADR-0090 fail-loud 要排除的形态。
+   * This field is not consumed at run time: the permission source is read at a
+   * single point by the assembly layer via
+   * `resolveProjectPermissionSource({ projectIdentityRoot })` (shared by build-engine /
+   * worker); this layer is a shape gate, not a second reader. This layer drops illegal
+   * fields (drop-not-throw), so treating it as a policy source would silently downgrade
+   * a schema violation to "no project rules" — exactly the form the fail-loud policy is meant to exclude.
    */
   permissions?: IknowSettingsPermissions;
-  /** #358 T1: 子代理配置段（per-task wallclock）。 */
+  /** Subagent config section (per-task wallclock). */
   subagent?: IknowSettingsSubagent;
-  /** D-α: graph 编排 overlay 的新会话默认（缺省关）。 */
+  /** Graph-orchestration overlay default for new sessions (off by default). */
   graph?: IknowSettingsGraph;
-  /** #672 T3: 工具环检测。boolean 才合法；缺省由消费方按 true。 */
+  /** Tool-loop detection. Only a boolean is legal; consumers treat the default as true. */
   loop?: IknowSettingsLoop;
-  /** auto-memory T4: 自动记忆抽取开关（默认 OFF）。 */
+  /** Auto-memory extraction switch (default OFF). */
   memory?: IknowSettingsMemory;
-  /** ADR-0037: 会话级 git worktree 隔离开关（默认 OFF）。 */
+  /** Session-level git worktree isolation switch (default OFF). */
   isolation?: IknowSettingsIsolation;
-  /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
+  /** LSP config section (all optional, defaults resolved at the consumer). */
   lsp?: IknowLspSettings;
-  /** 用户 command 钩子（Claude PreToolUse/PostToolUse；仅用户层）。 */
+  /** User command hooks (PreToolUse/PostToolUse; user-layer only). */
   hooks?: IknowSettingsHooks;
-  /** Web 工具配置段（web_search 后端选择等）。 */
+  /** Web tool config section (web_search backend selection, etc.). */
   web?: IknowSettingsWeb;
   /**
-   * #global-plugins T1: 插件组件加载配置（仅用户层 —— 项目层出现
-   * `plugins` 即被 allowlist 丢弃 + 告警）。消费点 src/harness/plugin/roots.ts
-   * `resolvePluginRoots`（roots 解析）+ `discoverPlugins`（disabled 过滤）。
+   * Plugin component loading config (user-layer only — a project layer's `plugins`
+   * is dropped by the allowlist with a warning). Consumers: src/harness/plugin/roots.ts
+   * `resolvePluginRoots` (roots resolution) + `discoverPlugins` (disabled filtering).
    */
   plugins?: IknowSettingsPlugins;
 }
@@ -561,29 +607,31 @@ export interface IknowSettingsLoop {
 }
 
 /**
- * #global-plugins T1（plans/global-plugins-loading.md §3.3 / §3.4）：
- * 插件组件加载配置段 —— **仅用户层**。项目层出现 `plugins` 即被
- * `PROJECT_SETTINGS_ALLOWED_KEYS` 丢弃并告警（ADR-0084 既有 allowlist 机制，
- * 防「clone 即执行」供应链攻击：plugins 携带 hooks = 任意命令执行）。
+ * Plugin component loading config section — user-layer only. A project layer's
+ * `plugins` is dropped and warned by `PROJECT_SETTINGS_ALLOWED_KEYS` (the existing
+ * allowlist mechanism, guarding against "clone-and-execute" supply-chain attacks:
+ * plugins carry hooks = arbitrary command execution).
  *
- * 校验纪律：非普通对象 → 丢弃该层（不抛）；roots 非字符串数组 / 元素非非空
- * 字符串 → 丢弃该字段；disabled 非字符串数组 / 元素非非空字符串 → 丢弃
- * 该字段；全部字段非法 → 段缺席（消费方按"无配置"处理）。merge 阶段
- * 项目层 parsePlugins 永远拿到 {}（项目层 plugins 已被 allowlist 丢弃）。
+ * Validation discipline: non-plain-object → drop the section (no throw); roots not a
+ * string array / an element not a non-empty string → drop the field; same for disabled;
+ * all fields illegal → section absent (consumers treat it as "no config"). In the merge
+ * phase the project layer's parsePlugins always receives {} (project plugins were
+ * already dropped by the allowlist).
  */
 export interface IknowSettingsPlugins {
-  /** 显式插件根列表（绝对路径 / 相对路径均可；解析时 resolve 为绝对路径）。 */
+  /** Explicit plugin root list (absolute or relative paths; resolved to absolute on parse). */
   roots?: string[];
-  /** 禁用插件名列表 —— 命中即跳过（与 plugin/roots.ts 联动）。 */
+  /** Disabled plugin name list — a hit is skipped (works with plugin/roots.ts). */
   disabled?: string[];
 }
 
 /**
- * ADR-0084: 共享项目 settings 文件的顶层键允许名单 —— 项目文件只采纳
- * 「团队契约」三段；`hooks` 不进名单（command 钩子 = 任意 shell，与
- * `plugins` 同款供应链：项目可配即 clone 即执行）。其余顶层键（isolation /
- * llm / memory / subagent / web / lsp / loop / graph / hooks ...）出现在
- * 项目文件即丢弃、不覆盖用户层值，并经 `LoadSettingsOpts.onWarn` 告警。
+ * Top-level key allowlist for shared project settings files — a project file adopts
+ * only the three "team contract" sections; `hooks` is not in the list (command hooks
+ * are arbitrary shell, the same supply-chain class as `plugins`: if a project can
+ * configure it, cloning means executing). Any other top-level key (isolation /
+ * llm / memory / subagent / web / lsp / loop / graph / hooks ...) found in a project
+ * file is dropped, does not override user values, and is warned via `LoadSettingsOpts.onWarn`.
  */
 export const PROJECT_SETTINGS_ALLOWED_KEYS = [
   "verify",
@@ -596,38 +644,39 @@ const PROJECT_SETTINGS_ALLOWED_KEY_SET: ReadonlySet<string> = Object.freeze(
 );
 
 export interface LoadSettingsOpts {
-  /** 项目根，默认 process.cwd()。 */
+  /** Project root, defaults to process.cwd(). */
   cwd?: string;
-  /** 用户 home，默认 os.homedir()。 */
+  /** User home, defaults to os.homedir(). */
   home?: string;
   /**
-   * ADR-0084 告警通道：项目文件出现非允许名单顶层键 / 用户文件出现
-   * `permissions` 时逐条调用（每条一个键）。缺省 → `console.warn`；
-   * 测试注入以捕获消息（不注入时走默认，不重复上报）。
+   * Warning channel: called once per key when a project file has a top-level key
+   * outside the allowlist / a user file has `permissions`. Default → `console.warn`;
+   * tests inject one to capture messages (without injection it uses the default, no duplicate reporting).
    */
   onWarn?: (message: string) => void;
 }
 
-/** 普通对象（JSON.parse 产出的顶层/中间层只可能是这种；排除 null / 数组）。 */
+/** Plain object (the top/intermediate layer from JSON.parse can only be this; excludes null / arrays). */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /**
- * ADR-0092: `parseIsolation` / `mergeIsolation` 的收尾 —— 未落下任何键的段
- * 视为「字段全非法 / 缺席」，返回 undefined（消费方按 OFF / global 处理）。
+ * Wrap-up for `parseIsolation` / `mergeIsolation` — a section that set no keys is
+ * treated as "all fields illegal / absent" and returns undefined (consumers treat it
+ * as OFF / global).
  *
- * 用键数判断而非逐字段 `=== undefined` 链：字段增减不再改变这个判断的代价
- * （同形先例 `aci-executor.ts` 的 partial-result 收尾）。
+ * Judge by key count rather than a per-field `=== undefined` chain: adding or
+ * removing fields no longer changes the cost of this check.
  */
 function undefinedWhenEmpty<T extends object>(out: T): T | undefined {
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
 /**
- * ADR-0092: `mergeIsolation` 的 per-field project > user 选择 —— project 已
- * 定义则用 project，否则回落 user；**两者皆 undefined 时不落键**（写出
- * `out.x = undefined` 会让消费方的 `Object.keys` 看见一个假存在的键）。
+ * The per-field project > user pick for `mergeIsolation` — use project when defined,
+ * else fall back to user; when both are undefined do not set the key (writing
+ * `out.x = undefined` would let consumers' `Object.keys` see a phantom key).
  */
 function assignPreferred<K extends keyof IknowSettingsIsolation>(
   out: IknowSettingsIsolation,
@@ -639,12 +688,12 @@ function assignPreferred<K extends keyof IknowSettingsIsolation>(
   if (value !== undefined) out[key] = value;
 }
 
-/** 有限正数（> 0）：contextWindow / thresholdTokens 的值域。 */
+/** Finite positive number (> 0): value domain of contextWindow / thresholdTokens. */
 function isPositiveFinite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
 }
 
-/** 有限正整数（>= 1 且为整数）：maxTurns 的值域。 */
+/** Finite positive integer (>= 1 and integral): value domain of maxTurns. */
 function isValidMaxTurns(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
@@ -652,8 +701,9 @@ function isValidMaxTurns(v: unknown): v is number {
 }
 
 /**
- * #358 T1: llm.timeoutMs 校验（per-call LLM 调用竞速上限，毫秒）。
- * 镜像 maxTurns 纪律：有限正整数才合法；非正 / 非整数 / 非数字 / 错类型 → 丢弃。
+ * Validation for llm.timeoutMs (per-call LLM race ceiling, ms).
+ * Mirrors the maxTurns discipline: only a finite positive integer is legal; non-positive /
+ * non-integer / non-number / wrong type → drop.
  */
 function isValidTimeoutMs(v: unknown): v is number {
   return (
@@ -661,7 +711,7 @@ function isValidTimeoutMs(v: unknown): v is number {
   );
 }
 
-/** LSP idle sweep：0 = 关闭回收；负数 / 非整数仍丢弃。 */
+/** LSP idle sweep: 0 = reclaim off; negatives / non-integers are still dropped. */
 function isValidIdleTimeoutMs(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0
@@ -669,8 +719,9 @@ function isValidIdleTimeoutMs(v: unknown): v is number {
 }
 
 /**
- * #358 T1: subagent.taskTimeoutMs 校验（per-task 整任务寿命上限，毫秒）。
- * 镜像 maxTurns 纪律：有限正整数才合法；非正 / 非整数 / 非数字 / 错类型 → 丢弃。
+ * Validation for subagent.taskTimeoutMs (per-task whole-task lifetime cap, ms).
+ * Mirrors the maxTurns discipline: only a finite positive integer is legal; non-positive /
+ * non-integer / non-number / wrong type → drop.
  */
 function isValidTaskTimeoutMs(v: unknown): v is number {
   return (
@@ -678,7 +729,7 @@ function isValidTaskTimeoutMs(v: unknown): v is number {
   );
 }
 
-/** 子代理并发上限的值域：有限正整数或字面字符串 `"unlimited"`。 */
+/** Value domain of the subagent concurrency cap: a finite positive integer or the literal string `"unlimited"`. */
 function isValidMaxConcurrentWorkers(v: unknown): v is SubagentCapValue {
   return (
     (typeof v === "number" &&
@@ -689,47 +740,49 @@ function isValidMaxConcurrentWorkers(v: unknown): v is SubagentCapValue {
   );
 }
 
-/** thinking 值域校验：仅小写 "off" | "adaptive"（大小写敏感，对齐 env 语义）。 */
+/** thinking value-domain check: only lowercase "off" | "adaptive" (case-sensitive, aligned with env semantics). */
 function isValidThinking(v: unknown): v is IknowSettingsThinking {
   return v === "off" || v === "adaptive";
 }
 
-/** thinkingEffort 值域校验：仅小写五档（"" 在 settings 中无意义 → 非合法）。 */
+/** thinkingEffort value-domain check: only the five lowercase levels ("" is meaningless in settings → illegal). */
 function isValidThinkingEffort(v: unknown): v is IknowSettingsThinkingEffort {
   return (THINKING_EFFORT_LEVELS as readonly string[]).includes(
     typeof v === "string" ? v : ""
   );
 }
 
-/** 非空串字符串（trim 后仍有内容）：model 的值域。 */
+/** Non-empty string (still has content after trim): value domain of model. */
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
-/** 非空串字符串数组（至少 1 项，每项 trim 后仍有内容）：fallback 的值域。 */
+/** Non-empty string array (at least 1 item, each still has content after trim): value domain of fallback. */
 function isNonEmptyStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.length > 0 && v.every(isNonEmptyString);
 }
 
-/** secret mode 值域：仅 "roundtrip" | "block"（缺省由消费方按 roundtrip 处理）。 */
+/** secret mode value domain: only "roundtrip" | "block" (consumers treat the default as roundtrip). */
 function isValidSecretMode(v: unknown): v is IknowSettingsSecrets["mode"] {
   return v === "roundtrip" || v === "block";
 }
 
 /**
- * ADR-0092 / SC13: `isolation.fsMode` 值域守卫（大小写敏感，仅小写字面量）。
- * 与 `isValidSecretMode` 同款：非字面量 → 调用方丢弃该字段（不转型、不抛）。
+ * Value-domain guard for `isolation.fsMode` (case-sensitive, lowercase literals only).
+ * Same shape as `isValidSecretMode`: non-literal → the caller drops the field (no cast,
+ * no throw).
  *
- * 导出给 `persist-settings.ts` 的写回校验复用（同一闭集，避免两处各自漂移）。
+ * Exported for reuse by `persist-settings.ts`'s write-back validation (the same closed
+ * set, to avoid the two drifting apart).
  */
 export function isFsIsolationMode(value: unknown): value is FsIsolationMode {
   return value === "global" || value === "workspace";
 }
 
 /**
- * ADR-0093 / #1010: 单 model 项解析。`id` 非空串为唯一硬要求；`name` 同款；
- * `contextWindow` / `maxTokens` 走 `isPositiveFinite`（>0 有限正数）。
- * 非法字段 drop；`id` 非法 → 整条 model drop（返回 undefined）。
+ * Parse a single model entry. A non-empty `id` is the only hard requirement; `name` the
+ * same; `contextWindow` / `maxTokens` go through `isPositiveFinite` (> 0 finite positive).
+ * Illegal fields are dropped; an illegal `id` → drop the whole model entry (return undefined).
  */
 function parseLlmProviderModel(
   raw: unknown
@@ -752,10 +805,10 @@ function parseLlmProviderModel(
 }
 
 /**
- * ADR-0093 / #1010: 单 provider 项解析。`id` / `baseUrl` / `apiKeyEnv` 三者
- * 任一非空串缺失 → 整条 provider drop。`headers` 仅接受字符串→字符串映射，
- * 非字符串值 drop 整键。`models` 非空数组,逐项 `parseLlmProviderModel`,
- * 过滤后仍为空 → provider 自身 drop。
+ * Parse a single provider entry. If any of `id` / `baseUrl` / `apiKeyEnv` is a missing
+ * non-empty string → drop the whole provider. `headers` accepts only string→string maps; a
+ * non-string value drops the whole key. `models` is a non-empty array, each item via
+ * `parseLlmProviderModel`; still empty after filtering → the provider itself drops.
  */
 function parseLlmProviderHeaders(
   raw: unknown
@@ -778,13 +831,13 @@ function parseLlmProviders(raw: unknown): IknowSettingsLlmProvider[] {
   return out;
 }
 
-/** ADR-0093: 将合法 providers 数组写入 out;空数组 / 非数组 → 不写。 */
+/** Write the legal providers array into out; empty array / non-array → do not write. */
 function applyLlmProviders(out: IknowSettingsLlm, raw: unknown): void {
   const providers = parseLlmProviders(raw);
   if (providers.length > 0) out.providers = providers;
 }
 
-/** ADR-0093: providers 是用户层键 → merge 直接透传 user 值。 */
+/** providers is a user-layer key → merge passes the user value straight through. */
 function mergeLlmProviders(
   out: IknowSettingsLlm,
   user: IknowSettingsLlm | undefined
@@ -831,28 +884,30 @@ function parseLlmProvider(raw: unknown): IknowSettingsLlmProvider | undefined {
 }
 
 /**
- * 占位符形态：`${VAR}` 或 `$VAR`。与 env.ts `expandPlaceholders` 共用同一
- * VAR 名字符集（`[A-Za-z_][A-Za-z0-9_]*`）。settings.ts 独立持有一份扫描
- * 实现（避免 settings.ts 依赖 env.ts），用同一正则源防 drift（M7 对齐）。
+ * Placeholder form: `${VAR}` or `$VAR`. Shares the same VAR-name char set with env.ts's
+ * `expandPlaceholders` (`[A-Za-z_][A-Za-z0-9_]*`). settings.ts keeps its own scan
+ * implementation (to avoid depending on env.ts), using the same regex source to prevent drift.
  */
 export const PLACEHOLDER_PATTERN =
   /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
- * 整串占位符语法分析（M7：settings.ts validator 与 env.ts resolver 对齐）：
- *  - placeholders：全串出现的 `${VAR}` / `$VAR` 变量名（去重保序）；
- *  - hasInvalidResidue：剥离合法占位符后仍剩非法残余（含 `${` 但不匹配
- *    `${VAR}`，如 `${}` / `${1VAR}` / `${VAR` 未闭合；或字面里嵌了 `$` 但不
- *    成合法 `$VAR` 形态，如 `foo$bar`）。有残余 → 既非合法占位符串，也非
- *    纯字面密钥（M2 语义：`${constructor}` 属 `$VAR` 形态但 var 名非合法
- *    环境标识符，validator 接受后 resolver 命中 Object.prototype —— 见 M2
- *    isPlainEnvName 守卫）。
+ * Whole-string placeholder syntax analysis (settings.ts validator aligned with the env.ts
+ * resolver):
+ *  - placeholders: the `${VAR}` / `$VAR` variable names appearing across the whole string
+ *    (de-duplicated, order preserved);
+ *  - hasInvalidResidue: after stripping legal placeholders, illegal residue remains
+ *    (contains `${` but does not match `${VAR}`, e.g. `${}` / `${1VAR}` / unclosed `${VAR`;
+ *    or a `$` embedded in a literal that does not form a legal `$VAR`, e.g. `foo$bar`).
+ *    With residue → neither a legal placeholder string nor a pure literal key (a name like
+ *    `constructor` is `$VAR`-shaped but not a legal env identifier — the resolver would hit
+ *    Object.prototype, hence the isPlainEnvName guard).
  *
- * 语义（与 env.ts `expandPlaceholders` 完全一致）：
- *  - 纯字面（无 `$`）→ placeholders=[] 且无残余；
- *  - 合法占位符串（全串由 `${VAR}` / `$VAR` 拼成）→ 无残余；
- *  - 字面 + 合法占位符混合（`${A}literal`）→ 无残余（env.ts 同样解析）；
- *  - 含非法形态 → hasInvalidResidue=true。
+ * Semantics (exactly matching env.ts `expandPlaceholders`):
+ *  - pure literal (no `$`) → placeholders=[] and no residue;
+ *  - legal placeholder string (whole string made of `${VAR}` / `$VAR`) → no residue;
+ *  - literal + legal placeholder mixed (`${A}literal`) → no residue (env.ts parses it too);
+ *  - contains an illegal form → hasInvalidResidue=true.
  */
 export function analyzePlaceholderSyntax(value: string): {
   placeholders: string[];
@@ -868,9 +923,10 @@ export function analyzePlaceholderSyntax(value: string): {
     }
   );
   PLACEHOLDER_PATTERN.lastIndex = 0;
-  // 非法残余 = 剥离合法占位符后仍剩 `${`（`${}` / `${1VAR}` / `${VAR` 未闭合 /
-  // `${A}${1B}` 混合非法）。纯字面残余（无 `${`，如 `plain` / `foo$bar` 的
-  // "foo" / `${A}literal` 的 "literal"）是合法字面，不算非法。
+  // Illegal residue = after stripping legal placeholders, `${` still remains (`${}` /
+  // `${1VAR}` / unclosed `${VAR` / mixed-illegal `${A}${1B}`). Pure-literal residue (no
+  // `${`, e.g. `plain`, the "foo" in `foo$bar`, the "literal" in `${A}literal`) is a legal
+  // literal, not illegal.
   return {
     placeholders: [...placeholders],
     hasInvalidResidue: residue.includes("${"),
@@ -878,12 +934,12 @@ export function analyzePlaceholderSyntax(value: string): {
 }
 
 /**
- * settings.llm.apiKey 形态守卫：trim 非空串。
- *  - 字面（不含 `$`）→ trim 非空即接受；
- *  - 含合法占位符且无非法残余（`${VAR}` / `$VAR` 混排、字面 + 占位符混合）→
- *    接受（占位符由 env.ts 解析）；
- *  - 含 `${` 但含非法形态 / 含 `$` 但不成合法 `$VAR` → 拒绝（非法占位符，
- *    丢弃）。与 env.ts `expandPlaceholders` 的解析语义对齐（M7）。
+ * Shape guard for settings.llm.apiKey: a non-empty trimmed string.
+ *  - literal (no `$`) → accepted once non-empty after trim;
+ *  - contains legal placeholders with no illegal residue (`${VAR}` / `$VAR` mixed, or
+ *    literal + placeholder mixed) → accepted (placeholders resolved by env.ts);
+ *  - contains `${` but in an illegal form / contains `$` but not a legal `$VAR` → rejected
+ *    (illegal placeholder, dropped). Aligned with env.ts `expandPlaceholders` semantics.
  */
 export function isApiKeyOrPlaceholder(v: unknown): v is string {
   if (typeof v !== "string") return false;
@@ -893,9 +949,9 @@ export function isApiKeyOrPlaceholder(v: unknown): v is string {
 }
 
 /**
- * 读取单个 settings 文件并解析为普通对象。
- * 文件不存在 → {}；坏 JSON（SyntaxError）→ {}（不抛错）；顶层非普通对象 → {}。
- * 仅吞 JSON.parse 的 SyntaxError，其它意外异常重新抛（不静默吞掉）。
+ * Read one settings file and parse it into a plain object.
+ * File missing → {}; bad JSON (SyntaxError) → {} (no throw); top level not a plain object → {}.
+ * Only JSON.parse's SyntaxError is swallowed; other unexpected errors rethrow (never silently eaten).
  */
 function readSettingsFile(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
@@ -910,17 +966,17 @@ function readSettingsFile(path: string): Record<string, unknown> {
 }
 
 /**
- * 校验单个 `llm` 层：非法字段丢弃。
- * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
- * compress 为普通对象但字段全部非法 → 不产出 compress（丢弃该字段）。
+ * Validate a single `llm` layer: illegal fields are dropped.
+ * Non-plain-object (array / string / number, etc.) → undefined (drop the layer).
+ * compress is a plain object but all its fields illegal → no compress is produced (drop the field).
  */
 function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLlm = {};
   if (isValidMaxTurns(raw.maxTurns)) out.maxTurns = raw.maxTurns;
-  // #358 T1: per-call LLM 调用竞速上限（毫秒）。
+  // Per-call LLM race ceiling (ms).
   if (isValidTimeoutMs(raw.timeoutMs)) out.timeoutMs = raw.timeoutMs;
-  // #742 T1: 流式臂双钟（idle 静默上限 + 有限硬顶），同 timeoutMs 值域纪律。
+  // Streaming-arm dual clocks (idle silence ceiling + finite hard cap), same value-domain discipline as timeoutMs.
   if (isValidTimeoutMs(raw.idleTimeoutMs))
     out.idleTimeoutMs = raw.idleTimeoutMs;
   if (isValidTimeoutMs(raw.hardCapMs)) out.hardCapMs = raw.hardCapMs;
@@ -934,7 +990,7 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
     out.fallback = raw.fallback.map((s) => s.trim());
   }
   if (isApiKeyOrPlaceholder(raw.apiKey)) out.apiKey = raw.apiKey.trim();
-  // ADR-0093 / #1010: providers 数组解析——非数组 / 空数组 → 字段缺席。
+  // providers array parsing — non-array / empty array → field absent.
   applyLlmProviders(out, raw.providers);
   applyLlmCompress(out, raw.compress);
   if (isEmptyLlm(out)) return undefined;
@@ -942,8 +998,9 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
 }
 
 /**
- * parseLlm 的 compress 子层校验（自 parseLlm 等价搬移，控复杂度）：
- * 非普通对象 → 不产出；普通对象但字段全部非法 → 不产出 compress（丢弃该字段）。
+ * The compress sub-layer validation for parseLlm (moved out verbatim to bound complexity):
+ * non-plain-object → nothing produced; plain object but all fields illegal → no compress
+ * (drop the field).
  */
 function applyLlmCompress(out: IknowSettingsLlm, raw: unknown): void {
   if (!isPlainObject(raw)) return;
@@ -963,9 +1020,10 @@ function applyLlmCompress(out: IknowSettingsLlm, raw: unknown): void {
 }
 
 /**
- * ADR-0093: IknowSettingsLlm 全字段 undefined 判定 —— 整段 drop 时使用。
- * 字面量 Record<keyof …> 提供编译期穷举：类型新增字段必须同步登记，
- * 否则 typecheck 报错（与原 && 链同语义，防漂移由编译器强制）。
+ * Whether every IknowSettingsLlm field is undefined — used when dropping the whole section.
+ * The literal Record<keyof …> gives compile-time exhaustiveness: a new type field must be
+ * registered here too, or typecheck fails (same semantics as the old && chain, drift prevention
+ * enforced by the compiler).
  */
 function isEmptyLlm(out: IknowSettingsLlm): boolean {
   const fieldPresence: Record<keyof IknowSettingsLlm, boolean> = {
@@ -986,11 +1044,11 @@ function isEmptyLlm(out: IknowSettingsLlm): boolean {
 }
 
 /**
- * 校验单个 `verify` 层：非法字段丢弃。
- * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
- * verify 为普通对象但字段全部非法 → undefined（丢弃该字段，闭环不启用）。
- * 默认值（timeoutSec=600 / onExhausted=report / maxRounds=12）不在此填充，
- * 由消费点（verify-loop）兜底。
+ * Validate a single `verify` layer: illegal fields are dropped.
+ * Non-plain-object (array / string / number, etc.) → undefined (drop the layer).
+ * verify is a plain object but all fields illegal → undefined (drop the field, the loop stays off).
+ * Defaults (timeoutSec=600 / onExhausted=report / maxRounds=12) are not filled here, applied
+ * at the consumer (verify-loop).
  */
 function parseVerify(raw: unknown): IknowSettingsVerify | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1022,10 +1080,10 @@ function parseVerify(raw: unknown): IknowSettingsVerify | undefined {
 }
 
 /**
- * #358 T1: 校验单个 `subagent` 层 —— 非法字段丢弃。
- * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
- * taskTimeoutMs 非有限正整数 → 丢弃该字段。
- * 全部字段非法 → undefined（丢弃该段）。
+ * Validate a single `subagent` layer — illegal fields are dropped.
+ * Non-plain-object (array / string / number, etc.) → undefined (drop the layer).
+ * taskTimeoutMs not a finite positive integer → drop the field.
+ * All fields illegal → undefined (drop the section).
  */
 function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1041,7 +1099,7 @@ function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
   return out;
 }
 
-/** 逐层合并 verify：project 字段优先，未覆盖的 user 字段保留。 */
+/** Merge verify layer by layer: project fields take priority, uncovered user fields are kept. */
 function mergeVerify(
   user: IknowSettingsVerify | undefined,
   project: IknowSettingsVerify | undefined
@@ -1082,8 +1140,8 @@ function mergeVerify(
 }
 
 /**
- * #358 T1: 逐层合并 subagent：project 字段优先，未覆盖的 user 字段保留。
- * parse 层已保证字段为 > 0 整数，merge 仅做 project > user 选择。
+ * Merge subagent layer by layer: project fields take priority, uncovered user fields are kept.
+ * The parse layer already guarantees fields are integers > 0, so merge only does project > user.
  */
 function mergeSubagent(
   user: IknowSettingsSubagent | undefined,
@@ -1107,9 +1165,9 @@ function mergeSubagent(
 }
 
 /**
- * D-α: 校验 `graph` 层 —— 非法字段丢弃（镜像 parseLoop）。
- * 非普通对象 → undefined（丢弃该层）；非 boolean → 丢弃该字段；
- * 字段全非法 → undefined（消费方回退默认关）。
+ * Validate the `graph` layer — illegal fields are dropped (mirrors parseLoop).
+ * Non-plain-object → undefined (drop the layer); non-boolean → drop the field;
+ * all fields illegal → undefined (consumers fall back to the default off).
  */
 function parseGraph(raw: unknown): IknowSettingsGraph | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1119,7 +1177,7 @@ function parseGraph(raw: unknown): IknowSettingsGraph | undefined {
   return out;
 }
 
-/** D-α: 逐层合并 graph：project 字段优先，未覆盖的 user 字段保留。 */
+/** Merge graph layer by layer: project fields take priority, uncovered user fields are kept. */
 function mergeGraph(
   user: IknowSettingsGraph | undefined,
   project: IknowSettingsGraph | undefined
@@ -1183,16 +1241,17 @@ function mergeMemory(
 }
 
 /**
- * ADR-0037 / ADR-0070 / ADR-0092 / ADR-0097: 校验 `isolation` 层 —— 非法字段
- * 丢弃（镜像 parseGraph）。非普通对象 → undefined（丢弃该层）；worktreeOnMutate /
- * worktreeExclusive 非 boolean → 丢弃该字段（不转型）；fsMode 非
- * `"global"` | `"workspace"` 字面量 → 丢弃（大小写敏感，与 `worktreeOnMutate`
- * boolean-only 纪律一致）；network 段走 `parseIsolationNetwork` 独立解析
- * （SC12 配置层契约）；credentials 段走 `parseIsolationCredentials` 独立解析
- * （egress-credential-sentinel T1）。各字段独立校验、互不影响——任一合法即保留段。
+ * Validate the `isolation` layer — illegal fields are dropped (mirrors parseGraph).
+ * Non-plain-object → undefined (drop the layer); worktreeOnMutate / worktreeExclusive
+ * non-boolean → drop the field (no cast); fsMode not a `"global"` | `"workspace"`
+ * literal → drop (case-sensitive, consistent with worktreeOnMutate's boolean-only
+ * discipline); the network section is parsed independently by `parseIsolationNetwork`
+ * (config-layer contract); the credentials section is parsed independently by
+ * `parseIsolationCredentials`. Fields are validated independently and do not affect each
+ * other — if any is legal, the section is kept.
  *
- * onWarn 透传给 `parseIsolationNetwork`，让非法网络条目留痕（与文件加载
- * 阶段 `[settings] ...` 警告通道共用一份 caller-supplied sink）。
+ * onWarn is passed through to `parseIsolationNetwork` so illegal network entries leave a
+ * trace (sharing the caller-supplied sink with the file-load `[settings] ...` warning channel).
  */
 function parseIsolation(
   raw: unknown,
@@ -1212,9 +1271,9 @@ function parseIsolation(
 }
 
 /**
- * worktreeOnMutate / worktreeExclusive / fsMode 三字段的既有校验
- * （ADR-0037 / ADR-0070 / ADR-0092）——独立成函数，parseIsolation 只做
- * 「旧三字段 + network 子段」两级编排（S5 complexity 门）。
+ * The existing validation for the three fields worktreeOnMutate / worktreeExclusive /
+ * fsMode — factored out so parseIsolation only orchestrates the two levels "old three
+ * fields + network sub-section" (complexity gate).
  */
 function parseIsolationLegacyFields(
   raw: Record<string, unknown>
@@ -1233,13 +1292,14 @@ function parseIsolationLegacyFields(
 }
 
 /**
- * ADR-0037 / ADR-0070 / ADR-0092 / ADR-0097: 逐层合并 isolation —— project
- * 字段优先，未覆盖的 user 字段保留。四字段独立 per-field project > user 合并
- * （镜像 llm.timeoutMs 形态）；任一字段合并后合法即保留段。
- * ADR-0084: `isolation` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
- * `mergeSettings`），项目文件不得卸门禁。network 段虽理论可走 project > user
- * 分支（`mergeIsolationNetwork` 对齐同形态），但生产上不可达（filter 阶段
- * 已丢），保留分支是为对称 + 将来调整层归属时只改一处。
+ * Merge isolation layer by layer — project fields take priority, uncovered user fields
+ * are kept. The four fields merge independently per-field project > user (mirroring the
+ * llm.timeoutMs shape); if any field is legal after merge, the section is kept.
+ * `isolation` is a user-layer key — on the production path `project` is always an empty
+ * object (see `mergeSettings`), so a project file cannot take the gate off. The network
+ * section could theoretically take the project > user branch (`mergeIsolationNetwork`
+ * aligned to the same shape), but it is unreachable in production (already dropped at the
+ * filter stage); the branch is kept for symmetry + so a future layer-ownership change is one edit.
  */
 function mergeIsolation(
   user: IknowSettingsIsolation | undefined,
@@ -1258,10 +1318,9 @@ function mergeIsolation(
 }
 
 /**
- * worktreeOnMutate / worktreeExclusive / fsMode 三字段的 per-field
- * project > user 合并（ADR-0037 / ADR-0070 / ADR-0092 既有语义）——
- * 独立成函数，mergeIsolation 只做「旧三字段 + network 子段」两级编排
- * （S5 complexity 门）。
+ * The per-field project > user merge for the three fields worktreeOnMutate /
+ * worktreeExclusive / fsMode (their existing semantics) — factored out so mergeIsolation
+ * only orchestrates the two levels "old three fields + network sub-section" (complexity gate).
  */
 function mergeIsolationLegacyFields(
   user: IknowSettingsIsolation | undefined,
@@ -1285,10 +1344,10 @@ function mergeIsolationLegacyFields(
 }
 
 /**
- * lsp-optimization 二期 B7: 校验 `lsp` 层 —— 非法字段丢弃（镜像 parseIsolation）。
- * 非普通对象 → undefined；requestTimeoutMs / diagnosticsWaitMs 非正整数 → 丢弃；
- * idleTimeoutMs 非 ≥0 整数 → 丢弃（0 合法 = 关闭 sweep）；disabledServers 非
- * 非空字符串数组 → 丢弃该字段；字段全非法 / 缺席 → undefined（消费方走缺省值）。
+ * Validate the `lsp` layer — illegal fields are dropped (mirrors parseIsolation).
+ * Non-plain-object → undefined; requestTimeoutMs / diagnosticsWaitMs not positive integers → drop;
+ * idleTimeoutMs not an integer >= 0 → drop (0 is legal = sweep off); disabledServers not a
+ * non-empty string array → drop the field; all fields illegal / absent → undefined (consumers use defaults).
  */
 function parseLsp(raw: unknown): IknowLspSettings | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1315,7 +1374,7 @@ function parseLsp(raw: unknown): IknowLspSettings | undefined {
   return out;
 }
 
-/** lsp-optimization 二期 B7: 逐层合并 lsp：project 字段优先，未覆盖的 user 字段保留。 */
+/** Merge lsp layer by layer: project fields take priority, uncovered user fields are kept. */
 function mergeLsp(
   user: IknowLspSettings | undefined,
   project: IknowLspSettings | undefined
@@ -1353,10 +1412,10 @@ function mergeLsp(
 }
 
 /**
- * Web 工具配置段：校验 `web` 层 —— 非法字段丢弃（镜像 parseIsolation）。
- * 非普通对象 → undefined；searchBackend 不在闭集 → 丢弃该字段（drop-not-throw，
- * 与 settings 层其它字段纪律一致；env 侧非法值仍走 typed error 更显眼）；
- * 字段全非法 / 缺席 → undefined（env / 默认 bing 兜底）。
+ * Web tool config: validate the `web` layer — illegal fields are dropped (mirrors parseIsolation).
+ * Non-plain-object → undefined; searchBackend not in the closed set → drop the field (drop-not-throw,
+ * consistent with the settings layer's other fields; illegal env values still surface as a more visible
+ * typed error); all fields illegal / absent → undefined (env / default bing as fallback).
  */
 function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1372,12 +1431,13 @@ function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
 }
 
 /**
- * #global-plugins T1: 校验 `plugins` 层 —— 非法字段丢弃（镜像 parseWeb）。
- * 非普通对象 → undefined；roots 非字符串数组 / 任一元素非非空串 → 丢弃
- * 该字段；disabled 同款纪律；全部字段非法 → undefined（消费方按"未配"处理）。
+ * Validate the `plugins` layer — illegal fields are dropped (mirrors parseWeb).
+ * Non-plain-object → undefined; roots not a string array / any element not a non-empty
+ * string → drop the field; same discipline for disabled; all fields illegal → undefined
+ * (consumers treat it as "unconfigured").
  *
- * **仅用户层**：mergePlugins 永远只看 user —— 项目层 plugins 已被
- * PROJECT_SETTINGS_ALLOWED_KEYS 在 `filterProjectSettingsKeys` 阶段丢弃。
+ * User-layer only: mergePlugins always looks only at user — project-layer plugins were
+ * already dropped by PROJECT_SETTINGS_ALLOWED_KEYS at the `filterProjectSettingsKeys` stage.
  */
 function parsePlugins(raw: unknown): IknowSettingsPlugins | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1394,7 +1454,7 @@ function parsePlugins(raw: unknown): IknowSettingsPlugins | undefined {
   return out;
 }
 
-/** plugins 段逐层合并 —— user 唯一来源（项目层早已被 allowlist 丢弃）。 */
+/** Merge the plugins section layer by layer — user is the only source (project layer was dropped by the allowlist earlier). */
 function mergePlugins(
   user: IknowSettingsPlugins | undefined,
   _project: IknowSettingsPlugins | undefined
@@ -1406,7 +1466,7 @@ function mergePlugins(
   return out;
 }
 
-/** Web 工具配置段：逐层合并 web —— project 字段优先，未覆盖的 user 字段保留。 */
+/** Web tool config: merge the web layer — project fields take priority, uncovered user fields are kept. */
 function mergeWeb(
   user: IknowSettingsWeb | undefined,
   project: IknowSettingsWeb | undefined
@@ -1423,8 +1483,8 @@ function mergeWeb(
 }
 
 /**
- * 校验用户 `hooks` 层（Claude 形态）。非法组/handler 丢弃不抛。
- * 非普通对象 → undefined；未知事件忽略；两事件皆空 → undefined。
+ * Validate the user `hooks` layer. Illegal groups/handlers are dropped without throwing.
+ * Non-plain-object → undefined; unknown events ignored; both events empty → undefined.
  */
 function parseHooks(raw: unknown): IknowSettingsHooks | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1482,7 +1542,7 @@ function parseHookHandler(raw: unknown): IknowSettingsHookHandler | undefined {
   return handler;
 }
 
-/** hooks 仅用户层：项目层已被 allowlist 丢弃，merge 只透传 user。 */
+/** hooks are user-layer only: the project layer was dropped by the allowlist, so merge just passes user through. */
 function mergeHooks(
   user: IknowSettingsHooks | undefined,
   _project: IknowSettingsHooks | undefined
@@ -1491,9 +1551,9 @@ function mergeHooks(
 }
 
 /**
- * mergeLlm 的单字段 project > user 优先级（自 mergeLlm 逐字段 if/else-if 对
- * 等价搬移，控复杂度）：project 有值取 project，否则 user 有值取 user，
- * 两者皆无 → 字段缺席。
+ * The single-field project > user priority for mergeLlm (moved out of mergeLlm's per-field
+ * if/else-if pairs verbatim to bound complexity): take project when it has a value, else
+ * user when it has a value, neither → field absent.
  */
 function pickLlmField<K extends keyof IknowSettingsLlm>(
   out: IknowSettingsLlm,
@@ -1506,9 +1566,9 @@ function pickLlmField<K extends keyof IknowSettingsLlm>(
 }
 
 /**
- * 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。
- * ADR-0084: `llm` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
- * `mergeSettings`），实际只有 user 值生效。
+ * Merge llm layer by layer: project fields take priority, uncovered user fields are kept.
+ * `llm` is a user-layer key — on the production path `project` is always an empty object
+ * (see `mergeSettings`), so in practice only user values take effect.
  */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -1516,8 +1576,8 @@ function mergeLlm(
 ): IknowSettingsLlm | undefined {
   if (!user && !project) return undefined;
   const out: IknowSettingsLlm = {};
-  // #358 T1 / #742 T1: per-field project > user（含 timeoutMs / 流式臂双钟），
-  // 统一走 pickLlmField；liteModel 为 ADR-0113 可选键。
+  // Per-field project > user (including timeoutMs / the streaming-arm dual clocks),
+  // all via pickLlmField; liteModel is an optional key.
   pickLlmField(out, "maxTurns", project, user);
   pickLlmField(out, "timeoutMs", project, user);
   pickLlmField(out, "idleTimeoutMs", project, user);
@@ -1528,7 +1588,7 @@ function mergeLlm(
   pickLlmField(out, "liteModel", project, user);
   pickLlmField(out, "fallback", project, user);
   pickLlmField(out, "apiKey", project, user);
-  // ADR-0093 / #1010: providers 用户层键 → 直接 user 透传。
+  // providers is a user-layer key → pass the user value straight through.
   mergeLlmProviders(out, user);
   if (project?.compress !== undefined || user?.compress !== undefined) {
     const compress: IknowSettingsLlmCompress = {};
@@ -1554,10 +1614,10 @@ function mergeLlm(
 }
 
 /**
- * 校验单个 `secrets` 层：非法字段丢弃。
- * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
- * enabled 非 boolean → 丢弃该字段；patterns 非非空串字符串数组 → 丢弃该字段；
- * 全部字段非法 → undefined（丢弃该层）。
+ * Validate a single `secrets` layer: illegal fields are dropped.
+ * Non-plain-object (array / string / number, etc.) → undefined (drop the layer).
+ * enabled not boolean → drop the field; patterns not a non-empty string array → drop the field;
+ * all fields illegal → undefined (drop the layer).
  */
 function parseSecrets(raw: unknown): IknowSettingsSecrets | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1576,7 +1636,7 @@ function parseSecrets(raw: unknown): IknowSettingsSecrets | undefined {
   return out;
 }
 
-/** 逐层合并 secrets：project 字段优先，未覆盖的 user 字段保留。 */
+/** Merge secrets layer by layer: project fields take priority, uncovered user fields are kept. */
 function mergeSecrets(
   user: IknowSettingsSecrets | undefined,
   project: IknowSettingsSecrets | undefined
@@ -1599,15 +1659,15 @@ function mergeSecrets(
 }
 
 /**
- * 先对每层做值校验，再合并；被丢弃的字段不参与覆盖。
+ * Value-check each layer first, then merge; dropped fields do not take part in overriding.
  *
- * ADR-0084: 生产路径上 `projectRaw` 已过项目允许名单
- * （`loadIknowSettings` → `filterProjectSettingsKeys`），非允许名单段
- * （llm / isolation / subagent / web / lsp / memory / loop / graph）恒为空对象
- * —— 各 `mergeXxx` 的 `project > user` 分支对这些段当前不可达（保留以维持
- * 合并函数自身语义完整，不删分支）。
- * 允许名单三段（verify / secrets / permissions）不受影响，project 仍按
- * 字段覆盖 user。`hooks` 仅用户层。
+ * On the production path `projectRaw` has passed the project allowlist
+ * (`loadIknowSettings` → `filterProjectSettingsKeys`), so the non-allowlisted sections
+ * (llm / isolation / subagent / web / lsp / memory / loop / graph) are always empty objects
+ * — each `mergeXxx`'s `project > user` branch is currently unreachable for them (kept to
+ * preserve the merge functions' own semantic completeness; the branch is not deleted).
+ * The three allowlisted sections (verify / secrets / permissions) are unaffected: project
+ * still overrides user field by field. `hooks` is user-layer only.
  */
 function mergeSettings(
   userRaw: Record<string, unknown>,
@@ -1623,43 +1683,43 @@ function mergeSettings(
   const userSecrets = parseSecrets(userRaw.secrets);
   const projectSecrets = parseSecrets(projectRaw.secrets);
   const secrets = mergeSecrets(userSecrets, projectSecrets);
-  // #358 T1: 子代理配置段（per-task wallclock），与 llm.timeoutMs（per-call）独立。
+  // Subagent config section (per-task wallclock), independent of llm.timeoutMs (per-call).
   const userSubagent = parseSubagent(userRaw.subagent);
   const projectSubagent = parseSubagent(projectRaw.subagent);
   const subagent = mergeSubagent(userSubagent, projectSubagent);
   const userLoop = parseLoop(userRaw.loop);
   const projectLoop = parseLoop(projectRaw.loop);
   const loop = mergeLoop(userLoop, projectLoop);
-  // D-α: graph 编排 overlay 的新会话默认（缺省关）。
+  // Graph-orchestration overlay default for new sessions (off by default).
   const userGraph = parseGraph(userRaw.graph);
   const projectGraph = parseGraph(projectRaw.graph);
   const graph = mergeGraph(userGraph, projectGraph);
-  // auto-memory T4: 自动记忆开关（默认 OFF —— 段缺席即关）。
+  // Auto-memory switch (default OFF — an absent section means off).
   const memory = mergeMemory(
     parseMemory(userRaw.memory),
     parseMemory(projectRaw.memory)
   );
-  // ADR-0037: 会话级 git worktree 隔离开关（默认 OFF —— 段缺席即关）。
-  // ADR-0097 / SC12: isolation.network 解析用同一 onWarn 通道（与
-  // filterProjectSettingsKeys 同前缀 `[settings] ...`），让非法条目留痕。
+  // Session-level git worktree isolation switch (default OFF — an absent section means off).
+  // isolation.network parsing uses the same onWarn channel (same `[settings] ...`
+  // prefix as filterProjectSettingsKeys) so illegal entries leave a trace.
   const isolation = mergeIsolation(
     parseIsolation(userRaw.isolation, onWarn),
     parseIsolation(projectRaw.isolation, onWarn)
   );
-  // lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。
+  // LSP config section (all optional, defaults resolved at the consumer).
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
-  // Web 工具配置段（web_search 后端选择；env > settings 回退链在 env.ts）。
+  // Web tool config (web_search backend selection; the env > settings fallback chain is in env.ts).
   const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
-  // 用户 command 钩子（仅 userRaw；项目 hooks 已在 allowlist 丢弃）。
+  // User command hooks (userRaw only; project hooks were dropped by the allowlist).
   const hooks = mergeHooks(
     parseHooks(userRaw.hooks),
     parseHooks(projectRaw.hooks)
   );
-  // ADR-0084: 权限规则段 —— 只从项目层解析（用户层同名键在
-  // `loadIknowSettings` 已被丢弃）。`projectRaw` 进来前已过允许名单。
+  // Permission rule section — parsed only from the project layer (the user layer's same-named
+  // key was already dropped in `loadIknowSettings`). `projectRaw` passed the allowlist before entering.
   const permissions = parsePermissions(projectRaw.permissions);
-  // #global-plugins T1: 插件组件加载配置 —— 仅用户层（项目层 plugins 已在
-  // allowlist 阶段丢弃；此处 `parsePlugins(projectRaw.plugins)` 必为 undefined）。
+  // Plugin component loading config — user-layer only (project-layer plugins were
+  // dropped at the allowlist stage; here `parsePlugins(projectRaw.plugins)` is always undefined).
   const plugins = mergePlugins(
     parsePlugins(userRaw.plugins),
     parsePlugins(projectRaw.plugins)
@@ -1681,7 +1741,7 @@ function mergeSettings(
   });
 }
 
-/** 只把已解析出的段放进结果对象（absent 段不产出键）。 */
+/** Put only the parsed sections into the result object (absent sections produce no key). */
 function assembleSettings(segments: IknowSettings): IknowSettings {
   const out: IknowSettings = {};
   for (const [key, value] of Object.entries(segments)) {
@@ -1691,10 +1751,10 @@ function assembleSettings(segments: IknowSettings): IknowSettings {
 }
 
 /**
- * ADR-0090: 项目层 `permissions` 段只做形状门禁（普通对象 / `defaultMode`
- * 字符串 / `allow` / `ask` / `deny` 数组），值域与规则合法性由
- * `src/harness/permission/project-settings.ts` 的 ajv schema 校验（typed
- * error）。形状不合法的字段丢弃，不抛错（drop-not-throw）。
+ * The project-layer `permissions` section only gates shape (plain object / `defaultMode`
+ * string / `allow` / `ask` / `deny` arrays); value domain and rule legality are validated by
+ * the ajv schema in `src/harness/permission/project-settings.ts` (typed error). Fields with an
+ * illegal shape are dropped without throwing (drop-not-throw).
  */
 function parsePermissions(raw: unknown): IknowSettingsPermissions | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -1703,7 +1763,7 @@ function parsePermissions(raw: unknown): IknowSettingsPermissions | undefined {
   if (Array.isArray(raw.allow)) out.allow = raw.allow;
   if (Array.isArray(raw.ask)) out.ask = raw.ask;
   if (Array.isArray(raw.deny)) out.deny = raw.deny;
-  // 空段（全部字段非法 / 缺席）→ 不产出 permissions（对齐 parseSecrets 纪律）。
+  // Empty section (all fields illegal / absent) → produce no permissions (aligned with the parseSecrets discipline).
   if (
     out.defaultMode === undefined &&
     out.allow === undefined &&
@@ -1714,7 +1774,7 @@ function parsePermissions(raw: unknown): IknowSettingsPermissions | undefined {
   return out;
 }
 
-/** 递归冻结对象（含嵌套对象）。 */
+/** Recursively freeze an object (including nested objects). */
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -1726,9 +1786,9 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * ADR-0084: 项目文件顶层键过滤 —— 只放行允许名单内的键；名单外的键丢弃并
- * 逐键告警（一个键一条消息，消息含键名）。丢弃是刻意的：项目文件不得覆盖
- * 用户层（drop-not-throw，非法来源不生效）。
+ * Filter a project file's top-level keys — only allowlisted keys pass; keys outside the
+ * list are dropped and warned one by one (one message per key, naming the key). The drop is
+ * deliberate: a project file must not override the user layer (drop-not-throw, an illegal source takes no effect).
  */
 function filterProjectSettingsKeys(
   projectRaw: Record<string, unknown>,

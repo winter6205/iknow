@@ -10,7 +10,7 @@
  *     ]
  *   }
  *
- * Recents membership == trust (ADR-0023 rule 3: "recents 已信任").
+ * Recents membership == trust ("present in recents means trusted").
  * The file is the single trust roster — paths outside it cannot be bound
  * without an explicit confirmTrust=true on the PUT.
  *
