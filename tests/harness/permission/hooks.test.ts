@@ -63,8 +63,8 @@ describe("createHooksPair", () => {
     const h = createHooksPair({
       preToolUse: () => ({ reason: "blocked by audit hook" }),
     });
-    // #global-plugins T2：PreToolUseHook 返回类型放宽为含 Promise 的联合，
-    // 断言前先 await（本 hook 同步返回，await 无代价）。
+    // PreToolUseHook's return type was widened to a union including Promise;
+    // await before asserting (this hook resolves synchronously, so await costs nothing).
     const out = await h.preToolUse({
       tool: "write_file",
       input: { path: "x" },

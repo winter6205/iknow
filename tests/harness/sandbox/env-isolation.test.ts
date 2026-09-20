@@ -1,14 +1,16 @@
 /**
- * env-isolation / SC20 遮蔽（settings-model-extension）。
+ * env-isolation / secret masking.
  *
- * configuredSecretNames 的来源 = settings.llm.apiKey 占位符指向的变量名
- * + process.env 中命中 SECRET_PATTERN 的变量名（兜底扫描）。
+ * configuredSecretNames derives from: the variable names pointed to by the
+ * settings.llm.apiKey placeholders + names in process.env matching
+ * SECRET_PATTERN (fallback scan).
  *
- * 由于 `SECRET_ENV_NAMES` / `currentSecretEnvNames()` 在模块加载时经
- * `loadIknowSettings()`（真实 HOME / cwd）解析，单测无法注入 tmp settings——
- * 这里用真实文件链路验证占位符语义（把 HOME 重定向到 tmp，写
- * `{llm:{apiKey:"${VAR}"}}` 后再加载模块级函数），以及字面 apiKey
- * 不加入 secret 名、SC20 遮蔽不退化。
+ * Because `SECRET_ENV_NAMES` / `currentSecretEnvNames()` are resolved at module
+ * load through `loadIknowSettings()` (real HOME / cwd), unit tests cannot inject
+ * tmp settings — so this file verifies the placeholder semantics over the real
+ * file chain (redirect HOME to tmp, write `{llm:{apiKey:"${VAR}"}}`, then load
+ * the module-level functions), and checks that a literal apiKey adds no secret
+ * name and that masking never degrades.
  */
 import {
   describe,
@@ -32,9 +34,10 @@ import {
   currentSecretValues,
   setActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.js";
-// SECRET_ENV_NAMES 在模块加载期经 loadIknowSettings() 解析（真实 HOME / cwd），
-// 单测无法稳定注入 tmp settings —— 本文件断言占位符语义走 currentSecretEnvNames()
-// （实时解析），SECRET_ENV_NAMES 仅用于「至少一个 canonical secret 名」的既有断言。
+// SECRET_ENV_NAMES is resolved at module load via loadIknowSettings() (real HOME / cwd),
+// so unit tests cannot stably inject tmp settings — placeholder assertions here go
+// through the live currentSecretEnvNames(); SECRET_ENV_NAMES only backs the existing
+// "at least one canonical secret name" assertion.
 
 describe("createEnvIsolation", () => {
   it("filters to explicitly allowed non-secret names", () => {
@@ -59,12 +62,14 @@ describe("createEnvIsolation", () => {
     assert.equal(applyCwdReadonlyFenceEnv(filtered, undefined), filtered);
   });
 
-  // 注：原「derives at least one canonical secret name from env configuration」
-  // 断言已删除（用户授权）：SECRET_ENV_NAMES 是模块加载期固化值，依赖 CI
-  // runner 导出命中 SECRET_PATTERN 的 token 类 env 变量（如 ACTIONS_RUNTIME_TOKEN），
-  // 该依赖不可移植（runner 不保证导出），CI 偶发 false。其「secret 名推导非空」
-  // 语义已由下方 configuredSecretNames 系列的 currentSecretEnvNames() 实时断言
-  // 覆盖（占位符 / SECRET_PATTERN 兜底 / 多段遮蔽），删除不丢真覆盖。
+  // Note: the old "derives at least one canonical secret name from env
+  // configuration" assertion was removed (user-authorized): SECRET_ENV_NAMES is
+  // frozen at module load and depended on the CI runner exporting token-like env
+  // vars matching SECRET_PATTERN (e.g. ACTIONS_RUNTIME_TOKEN), an unportable
+  // dependency that caused sporadic CI false failures. Its "secret-name
+  // derivation is non-empty" meaning is fully covered by the live
+  // currentSecretEnvNames() assertions below (placeholders / SECRET_PATTERN
+  // fallback / multi-segment masking), so removing it loses no real coverage.
 
   it("never includes values for names identified as secrets", () => {
     const isolation = createEnvIsolation({ allowEnv: SECRET_ENV_NAMES });
@@ -75,9 +80,10 @@ describe("createEnvIsolation", () => {
   });
 
   it("keeps host GIT_SSH_COMMAND out of the fence (ssh-bridge T3 白名单钉)", () => {
-    // specs/egress-ssh-bridge.md §T3：GIT_SSH_COMMAND 不入
-    // BASE_ENV_WHITELIST —— 宿主值恒不进围栏，围栏内该 env 只可能来自
-    // egress spec.env（invariant 3：无缝 = 无注入 = 纯断网同态）。
+    // specs/egress-ssh-bridge.md: GIT_SSH_COMMAND is not in BASE_ENV_WHITELIST —
+    // the host value never enters the fence; inside the fence this env can only
+    // come from egress spec.env (invariant 3: no seam = no injection = the
+    // fully-offline homomorphic state).
     assert.ok(!BASE_ENV_WHITELIST.includes("GIT_SSH_COMMAND"));
     const isolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
     const filtered = isolation.filter({
@@ -98,7 +104,7 @@ describe("configuredSecretNames — settings.llm.apiKey 占位符语义 (setting
     origHome = process.env.HOME;
     tmpHome = mkdtempSync(join(tmpdir(), "iknow-secret-names-"));
     mkdirSync(join(tmpHome, ".iknow"), { recursive: true });
-    // settings.llm.apiKey = ${IKNOW_TEST_SECRET_VAR} → configuredSecretNames 应含该变量名。
+    // settings.llm.apiKey = ${IKNOW_TEST_SECRET_VAR} → configuredSecretNames should include that variable name.
     writeFileSync(
       join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
@@ -130,7 +136,7 @@ describe("configuredSecretNames — settings.llm.apiKey 占位符语义 (setting
 });
 
 describe("configuredSecretNames — 字面 apiKey 不加入 secret 名 (settings-model-extension)", () => {
-  // 独立于第一组 describe 的常量（名字相同但作用域不同，避免跨块引用）。
+  // Independent from the first describe group's constant (same name, different scope, to avoid cross-block references).
   const LITERAL_SECRET_PATTERN_VAR = "IKNOW_TEST_SECRET_VAR";
   let origHome: string | undefined;
   let tmpHome: string;
@@ -139,8 +145,8 @@ describe("configuredSecretNames — 字面 apiKey 不加入 secret 名 (settings
     origHome = process.env.HOME;
     tmpHome = mkdtempSync(join(tmpdir(), "iknow-secret-literal-"));
     mkdirSync(join(tmpHome, ".iknow"), { recursive: true });
-    // 字面 apiKey：没有变量名可遮蔽，但 SECRET_PATTERN 兜底扫描仍会把
-    // 命中 *API_KEY* 的 process.env 名字加入 secret 名单。
+    // literal apiKey: no variable name to mask, but the SECRET_PATTERN fallback
+    // scan still adds process.env names matching *API_KEY* to the secret-name list.
     writeFileSync(
       join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
@@ -157,8 +163,8 @@ describe("configuredSecretNames — 字面 apiKey 不加入 secret 名 (settings
   });
 
   it("字面 apiKey 不贡献变量名（仅 SECRET_PATTERN 兜底扫描）", () => {
-    // 即使 settings 只有字面 key，SECRET_PATTERN 兜底仍会把形如
-    // IKNOW_TEST_SECRET_VAR 的名字视为 secret（防漏）。
+    // even when settings holds only a literal key, the SECRET_PATTERN fallback
+    // still treats names like IKNOW_TEST_SECRET_VAR as secrets (leak prevention).
     process.env[LITERAL_SECRET_PATTERN_VAR] = "x";
     try {
       const names = currentSecretEnvNames();
@@ -181,7 +187,7 @@ describe("currentSecretValues — 字面 apiKey 内存值遮蔽 (M3, SC20)", () 
     origHome = process.env.HOME;
     tmpHome = mkdtempSync(join(tmpdir(), "iknow-secret-literal-mask-"));
     mkdirSync(join(tmpHome, ".iknow"), { recursive: true });
-    // M3: 字面 apiKey 写入 settings（无 ${VAR} 占位符 → 无 var 名贡献）。
+    // literal apiKey written into settings (no ${VAR} placeholder → contributes no var name).
     writeFileSync(
       join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({ llm: { apiKey: LITERAL_KEY } })
@@ -205,7 +211,7 @@ describe("currentSecretValues — 字面 apiKey 内存值遮蔽 (M3, SC20)", () 
 
   it("字面 apiKey 不贡献变量名（currentSecretEnvNames 仍只含 SECRET_PATTERN 兜底）", () => {
     const names = currentSecretEnvNames();
-    // LITERAL_KEY 是字面密钥（值），不是 env 变量名 → 不应出现在名单里。
+    // LITERAL_KEY is a literal key (a value), not an env variable name → it must not appear in the name list.
     assert.ok(
       !names.includes(LITERAL_KEY),
       `变量名名单不应含字面 key=${LITERAL_KEY}`
@@ -223,7 +229,7 @@ describe("configuredSecretNames — 多段占位符遮蔽 (M1, SC20)", () => {
     origHome = process.env.HOME;
     tmpHome = mkdtempSync(join(tmpdir(), "iknow-secret-multi-"));
     mkdirSync(join(tmpHome, ".iknow"), { recursive: true });
-    // M1: 多段占位符 + 字面混合（合法形态），遮蔽名单应收两段 var。
+    // multi-segment placeholder mixed with a literal (a valid form); the masking list should collect both variable names.
     writeFileSync(
       join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
@@ -264,12 +270,13 @@ describe("configuredSecretNames — 多段占位符遮蔽 (M1, SC20)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #406 T3: currentSecretValues extraSecrets 合并 + activeExtraSecrets 模块槽位
+// currentSecretValues extraSecrets merge + the activeExtraSecrets module slot
 // ---------------------------------------------------------------------------
-// A3/A4 不依赖 settings 文件（currentSecretValues 传 env 参数 / 模块槽位），
-// 但需要 SECRET_PATTERN 兜底扫描命中一个 env 变量名——用 MY_TOKEN_X
-// （命中 TOKEN 子串）验证 env 派生值参与并集。beforeEach/afterEach 清槽位，
-// 避免跨测试污染。
+// These groups do not depend on the settings file (currentSecretValues takes an
+// env parameter / the module slot), but the SECRET_PATTERN fallback scan needs to
+// hit one env variable name — MY_TOKEN_X (matches the TOKEN substring) verifies
+// that env-derived values join the union. beforeEach/afterEach clear the slot to
+// avoid cross-test pollution.
 describe("#406 T3 — currentSecretValues extraSecrets 合并 (A3)", () => {
   const EXTRA_VAR = "MY_TOKEN_X";
 

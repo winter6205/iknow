@@ -1,16 +1,16 @@
 /**
- * read_file 工具（T5）单元测试。
+ * Unit tests for the read_file tool.
  *
- * 覆盖契约（ADR-0004 L14 / T1-5 / T1-7 裁定 + ADR-0084 D1c + ADR-0006 Decision 4）：
- *   - 工厂签名 = createReadFileTool(root): AciToolDef，name === "read_file"
- *   - inputSchema: path 必填 + offset? (0 基) + limit? (**无默认值**，显式上限 2000) + additionalProperties:false
- *   - 行为：resolve+containment（symlink 越界拒绝）→ stat (必须文件，目录→报错) → >1MB 拒绝 → NUL 二进制拒绝
- *     → 窗口：不传 `limit` = 从 offset 整读到 EOF（页预算 16000 码点，页停给续读提示）；
- *       显式 `limit` 硬上限 2000（超出截断到 2000）；offset 越过末尾给续读/页停回执，不是空串
- *   - 输出：每行 `${String(lineNo).padStart(6)}\t${line}`，行号 1 起 (即 offset 后第一行 = offset+1)
- *   - aci 元数据: category=read-only, isReadOnly=true, isConcurrencySafe=true, interruptBehavior=cancel
- *   - 错误一律 throw ToolExecutionError
- *   - 纯无状态：工厂闭包不得持有跨调用状态
+ * Contract covered (ADR-0004 as amended by ADR-0084 D1c + ADR-0006 Decision 4):
+ *   - factory signature = createReadFileTool(root): AciToolDef, name === "read_file"
+ *   - inputSchema: path required + offset? (0-based) + limit? (**no default value**, explicit cap 2000) + additionalProperties:false
+ *   - behavior: resolve+containment (symlink escape rejected) → stat (must be a file, directory → error) → >1MB rejected → NUL binary rejected
+ *     → window: no `limit` = read from offset to EOF (page budget 16000 code points; a page stop emits a continuation hint);
+ *       explicit `limit` hard-capped at 2000 (excess truncated to 2000); an offset past the end yields a continuation/page-stop receipt, not an empty string
+ *   - output: each line `${String(lineNo).padStart(6)}\t${line}`, line numbers start at 1 (first line after offset = offset+1)
+ *   - aci metadata: category=read-only, isReadOnly=true, isConcurrencySafe=true, interruptBehavior=cancel
+ *   - all errors throw ToolExecutionError
+ *   - purely stateless: the factory closure must not hold state across calls
  */
 
 import assert from "node:assert/strict";
@@ -72,8 +72,8 @@ describe("createReadFileTool — schema/aci shape", () => {
     assert.equal(schema.properties.limit.type, "integer");
     assert.equal(schema.properties.limit.minimum, 1);
     assert.equal(schema.properties.limit.maximum, 2000);
-    // D1c：不写 limit = 整读到 EOF，schema 里**不得**再出现默认行数
-    // （ADR-0004 L14 的「默认 200 行」已被 ADR-0084 Amends）。
+    // Without limit = read to EOF, so the schema **must not** carry a default line count
+    // (ADR-0004's old "default 200 lines" was amended by ADR-0084 D1c).
     assert.equal(
       Object.hasOwn(schema.properties.limit, "default"),
       false,
@@ -91,8 +91,9 @@ describe("createReadFileTool — schema/aci shape", () => {
   });
 
   it("不带输出闸豁免声明（ADR-0083 只对 skill 内建落值）", async () => {
-    // read_file 输出仍走 executor 兜底闸：>1MB 拒绝 + offset/limit 窗口是它的
-    // 精度路径，豁免会去掉「换更精确输入重调」这条恢复路径的前提。
+    // read_file output still passes the executor fallback cap: the >1MB rejection +
+    // offset/limit window is its precision path, and an exemption would remove the
+    // premise of the "re-call with a more precise input" recovery route.
     const root = await makeScratch("read-file-shape-");
     const tool = createReadFileTool(root);
 
@@ -187,7 +188,7 @@ describe("read_file — offset/limit paging", () => {
     const result = (await tool.handler({ path: "p.txt" })) as string;
     const resultLines = result.split("\n");
 
-    // 250 行全部返回、无续读提示 —— 既不截到 200（旧默认），也不截到 2000。
+    // all 250 lines returned, no continuation hint — neither cut to 200 (old default) nor to 2000.
     assert.equal(resultLines.length, 250);
     assert.equal(resultLines[0], "     1\tn0");
     assert.equal(resultLines[249], "   250\tn249");
@@ -199,7 +200,7 @@ describe("read_file — offset/limit paging", () => {
 
   it("不传 limit 且超过整页预算 → 正文停在 16000 code point 以内，尾部带续读 offset", async () => {
     const root = await makeScratch("read-file-paging-");
-    // 每行 100 字符 + 行号前缀 7 字符 = 每行约 108 cp；2000 行远超 16000。
+    // 100 chars per line + 7-char line-number prefix ≈ 108 cp per line; 2000 lines is far over 16000.
     const line = "x".repeat(100);
     const lines = Array.from({ length: 2000 }, () => line).join("\n");
     await writeFile(join(root, "big.txt"), lines + "\n");
@@ -210,12 +211,12 @@ describe("read_file — offset/limit paging", () => {
     assert.ok(hintIndex > 0, `期望续读提示，实际尾部: ${result.slice(-120)}`);
 
     const body = result.slice(0, hintIndex);
-    // 正文（不含提示行）≤ 16000 code point。
+    // body (excluding the hint line) ≤ 16000 code points.
     assert.ok(
       Array.from(body).length <= 16000,
       `正文超预算: ${Array.from(body).length}`
     );
-    // 未到 EOF：文件名与总行数在提示里。
+    // not at EOF: the hint carries the file name and total line count.
     assert.match(
       result.slice(hintIndex),
       /of 2000; call read_file again with offset=\d+/
@@ -224,13 +225,13 @@ describe("read_file — offset/limit paging", () => {
 
   it("单行超页预算：正文显式标注截断，不冒充干净 EOF（ADR-0006 D4 无静默截断）", async () => {
     const root = await makeScratch("read-file-longline-");
-    // 单行 20000 字符 + 行号前缀 → 超 16000 页预算，进入整行截断分支。
+    // one line of 20000 chars + line-number prefix → over the 16000 page budget, entering the whole-line truncation branch.
     await writeFile(join(root, "long.txt"), "x".repeat(20000) + "\n");
 
     const tool = createReadFileTool(root);
     const result = (await tool.handler({ path: "long.txt" })) as string;
 
-    // 截断必须显式：正文里有「行被截断、其余部分 offset 翻页取不到」的标记。
+    // truncation must be explicit: the body carries a "line truncated, remainder unreachable via offset paging" marker.
     assert.ok(
       result.includes("[read_file] line 1 truncated at the page budget"),
       `期望单行截断标记，实际尾部: ${result.slice(-160)}`
@@ -239,13 +240,13 @@ describe("read_file — offset/limit paging", () => {
       result.includes("not reachable via offset paging"),
       "标记必须说清 offset 按行翻页、行内余下部分取不到"
     );
-    // 正文首行（含行号前缀）不超 16000 code point 的页预算。
+    // the body's first line (incl. line-number prefix) stays within the 16000-code-point page budget.
     const body = result.split("\n")[0]!;
     assert.ok(
       Array.from(body).length <= 16000,
       `正文超预算: ${Array.from(body).length}`
     );
-    // 单行文件没有「后续行」→ 不应出现续读提示（没有可续的 offset）。
+    // a single-line file has no "following lines" → no continuation hint (there is no offset to continue to).
     assert.ok(!result.includes("continued at line"));
   });
 
@@ -260,12 +261,12 @@ describe("read_file — offset/limit paging", () => {
     const result = (await tool.handler({ path: "long-then.txt" })) as string;
 
     assert.ok(result.includes("truncated at the page budget"));
-    // 后续行仍在 → 续读提示把 offset 指向第 2 行。
+    // following lines remain → the continuation hint points offset at line 2.
     assert.match(
       result.slice(result.indexOf("truncated at the page budget")),
       /\[read_file\] continued at line 2 of 2; call read_file again with offset=1/
     );
-    // 按提示续读确实能拿到被截断行之后的完整内容。
+    // continuing at the hinted offset really yields the full content after the truncated line.
     const rest = (await tool.handler({
       path: "long-then.txt",
       offset: 1,
@@ -275,8 +276,8 @@ describe("read_file — offset/limit paging", () => {
 
   it("astral 字符页：UTF-16 长度低于 executor 20000 闸，不发生二次截断", async () => {
     const root = await makeScratch("read-file-astral-");
-    // 30000 个 astral code point = 60000 UTF-16 单元；只按 code point 计量
-    // 会产出 ~32000 字符的页，被 executor 兜底闸二次截断（ADR-0006 D4 禁止）。
+    // 30000 astral code points = 60000 UTF-16 units; counting only by code point
+    // would yield a ~32000-char page, double-truncated by the executor fallback cap (forbidden by ADR-0006 D4).
     await writeFile(join(root, "astral.txt"), "😀".repeat(30_000) + "\n");
 
     const tool = createReadFileTool(root);
@@ -291,9 +292,10 @@ describe("read_file — offset/limit paging", () => {
 
   it("显式 limit 的行窗硬顶 2000 行：空白行（渲染后 7 字符，页预算容得下 2000 行）整窗取满", async () => {
     const root = await makeScratch("read-file-paging-");
-    // 空白行渲染后恰好 7 字符（6 位行号 + tab），是 16000 cp 预算下唯一能
-    // 容纳 2000 行的行宽 —— 用它把「窗口硬顶」与「页预算」两个闸分开验证：
-    // 这里窗口先到顶，预算不得再把它缩到 2000 行以下。
+    // A blank line renders to exactly 7 chars (6-digit line number + tab), the only line
+    // width that fits 2000 lines in the 16000-cp budget — it lets us verify the "window cap"
+    // and the "page budget" gates separately: here the window tops out first,
+    // and the budget must not shrink the window below 2000 lines.
     await writeFile(join(root, "blank-lines.txt"), "\n".repeat(2500));
 
     const tool = createReadFileTool(root);
@@ -314,8 +316,8 @@ describe("read_file — offset/limit paging", () => {
 
   it("limit:2000 宽行文件：正文受页预算约束，不触达 executor 20000 闸（无双重截断）", async () => {
     const root = await makeScratch("read-file-wide-");
-    // 400 字符/行 × 2000 行：整窗不做预算会产出 ~816000 UTF-16 单元的页，
-    // 被 executor 20000 闸砍尾（ADR-0006 Decision 4 禁止的双重截断）。
+    // 400 chars/line × 2000 lines: the full window without a budget would yield a ~816000-UTF-16-unit page,
+    // tail-cut by the executor 20000 cap (double truncation forbidden by ADR-0006 Decision 4).
     const lines = Array.from({ length: 2000 }, () => "x".repeat(400)).join(
       "\n"
     );
@@ -372,8 +374,8 @@ describe("read_file — offset/limit paging", () => {
       result.includes("not reachable via offset paging"),
       "首行行内余下部分不可达 → 行内截断标记必须在"
     );
-    // 窗口内还有后续行 → 窗口续读标记指向第 2 行（offset=1），
-    // 且该 offset 被下一次调用接受（不是「past end of file」）。
+    // the window still has following lines → the window continuation marker points at
+    // line 2 (offset=1), and that offset is accepted by the next call (not "past end of file").
     assert.match(result, /call read_file again with offset=1\b/);
     const rest = (await tool.handler({
       path: "long-first.txt",
@@ -397,8 +399,8 @@ describe("read_file — offset/limit paging", () => {
     assert.ok(match, `期望续读提示，实际尾部: ${result.slice(-160)}`);
     const nextOffset = Number(match[1]);
 
-    // 恢复路径必须真的可用：按提示的 offset 再调一次不得落在
-    // 「offset past end of file」上，且首页行号 = offset + 1。
+    // The recovery path must really work: re-calling at the hinted offset must not land
+    // on "offset past end of file", and the first line number = offset + 1.
     const rest = (await tool.handler({
       path: "resume.txt",
       offset: nextOffset,

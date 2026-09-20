@@ -1,14 +1,15 @@
 /**
- * plan compress-trigger-gate T1:统一触发判据 `evaluateCompactTrigger` 单测。
+ * Unit tests for the unified trigger decision `evaluateCompactTrigger`.
  *
- * 覆盖 3 个分类分支:
- *   - token 已超阈值 + 有可丢前缀 → compact_via_window / windowed
- *   - token 已超阈值 + 无可丢前缀 → compact_via_full_summary / messages_too_few
- *   - token 未达阈值 → noop / below_token_threshold
+ * Covers the 3 classification branches:
+ *   - tokens over threshold + droppable prefix -> compact_via_window / windowed
+ *   - tokens over threshold + no droppable prefix -> compact_via_full_summary / messages_too_few
+ *   - tokens below threshold -> noop / below_token_threshold
  *
- * `preserveToolPairs` 在 `messages.length <= keepRecent` 时返回
- * `slicedFrom === 0`,因此 messages_too_few 路径天然包含"消息条数过少 +
- * 全在尾部"的语义;下方 case 直接用此不变量构造。
+ * `preserveToolPairs` returns `slicedFrom === 0` when
+ * `messages.length <= keepRecent`, so the messages_too_few path inherently
+ * carries the "too few messages, all in the tail" semantics; the cases below
+ * exploit that invariant directly.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -25,10 +26,10 @@ const text = (value: string): AnthropicNativeMessage => ({
 
 describe("evaluateCompactTrigger — 统一触发判据 (plan compress-trigger-gate T1)", () => {
   it("token 已超 + messages.length=10(可丢前缀)→ compact_via_window / windowed", () => {
-    // 10 条 9000-char 文本 → 单条 estimate = floor((9000+3)/4) = 2250;
-    // 总 raw = 22500;estimateMessagesTokens = ceil(22500 * 4/3) = 30000。
-    // threshold=10000 远低于 estimate → 走窗口守门,10 > 6(DEFAULT_KEEP_RECENT)
-    // → slicedFrom > 0 → windowed。
+    // 10 texts of 9000 chars -> per-message estimate = floor((9000+3)/4) = 2250;
+    // raw total = 22500; estimateMessagesTokens = ceil(22500 * 4/3) = 30000.
+    // threshold=10000 is far below estimate -> window guard applies;
+    // 10 > 6 (DEFAULT_KEEP_RECENT) -> slicedFrom > 0 -> windowed.
     const messages = Array.from({ length: 10 }, () => text("x".repeat(9000)));
     const estimate = estimateMessagesTokens(messages);
     assert.ok(estimate >= 30_000, `前置断言: estimate=${estimate} 应 ≥ 30k`);
@@ -44,9 +45,9 @@ describe("evaluateCompactTrigger — 统一触发判据 (plan compress-trigger-g
   });
 
   it("token 已超 + messages.length=3(≤ keepRecent)→ compact_via_full_summary / messages_too_few", () => {
-    // 3 条 60000-char 文本 → 单条 estimate = floor((60000+3)/4) = 15000;
-    // 总 raw = 45000;estimate ≈ 60000(远超阈值)。3 ≤ 6(DEFAULT_KEEP_RECENT)
-    // → preserveToolPairs 返 slicedFrom=0 → messages_too_few。
+    // 3 texts of 60000 chars -> per-message estimate = floor((60000+3)/4) = 15000;
+    // raw total = 45000; estimate ≈ 60000 (far over threshold). 3 ≤ 6
+    // (DEFAULT_KEEP_RECENT) -> preserveToolPairs returns slicedFrom=0 -> messages_too_few.
     const messages = Array.from({ length: 3 }, () => text("x".repeat(60_000)));
     const estimate = estimateMessagesTokens(messages);
     assert.ok(estimate >= 60_000, `前置断言: estimate=${estimate} 应 ≥ 60k`);
@@ -62,9 +63,9 @@ describe("evaluateCompactTrigger — 统一触发判据 (plan compress-trigger-g
   });
 
   it("messages.length=5 + 低 token(未达阈值)→ noop / below_token_threshold", () => {
-    // 5 条 1000-char 文本 → 单条 estimate = floor((1000+3)/4) = 250;
-    // 总 raw = 1250;estimateMessagesTokens = ceil(1250 * 4/3) = 1667。
-    // threshold=5000 远高于 estimate → below_token_threshold → noop。
+    // 5 texts of 1000 chars -> per-message estimate = floor((1000+3)/4) = 250;
+    // raw total = 1250; estimateMessagesTokens = ceil(1250 * 4/3) = 1667.
+    // threshold=5000 is far above estimate -> below_token_threshold -> noop.
     const messages = Array.from({ length: 5 }, () => text("x".repeat(1000)));
     const estimate = estimateMessagesTokens(messages);
     assert.ok(
@@ -85,8 +86,9 @@ describe("evaluateCompactTrigger — 统一触发判据 (plan compress-trigger-g
 
 describe("evaluateCompactTrigger — 仅含嵌套 image 的 tool_result 不崩 (SC9)", () => {
   it("纯 image tool_result(无 text)→ 不抛且返回合法判定", () => {
-    // SC9 不变式：image-only tool_result 走 compact 判据不得抛异常，
-    // 且必须是三分支 union 之一的合法判定。公式不钉，不 assert 具体分支。
+    // Invariant: an image-only tool_result must never throw under the compaction
+    // decision, and must return a legal verdict of the three-branch union. The
+    // formula is not pinned and no specific branch is asserted.
     const imageData =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".repeat(
         64

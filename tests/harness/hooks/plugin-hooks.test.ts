@@ -1,13 +1,15 @@
 /**
- * plugin-hooks: 插件 `hooks/hooks.json` 文件源（#global-plugins T2）测试。
+ * plugin-hooks: tests for the plugin `hooks/hooks.json` file source.
  *
- * SSOT: plans/global-plugins-loading.md §5（hook 契约）/ §7（降级面）/
- * §9（测试矩阵）。逐条钉：解析降级（§5.1）、matcher 三态（§5.3）、工具名候选
- * 集、envelope 字段与别名视图（§5.4）、退出码语义（§5.5）、占位符与 env 导出
- * （§5.6）、先拦先赢（§5.7）、异步链（B 面）。
+ * Pins down, one by one: parse-time degradation, matcher tri-state,
+ * tool-name candidate sets, envelope fields and the alias view, exit-code
+ * semantics, placeholders and env export, first-block-wins ordering, and the
+ * async chain.
  *
- * 子进程用真 spawn（`node -e` / `sh`），不用 mock —— 与 test.md「命令 handler
- * 集成接真实依赖」同纪律；唯一例外是 spawn ENOENT 面（不可达 binary 名）。
+ * Child processes are really spawned (`node -e` / `sh`), never mocked — same
+ * discipline as the project rule that command-handler integration tests wire
+ * real dependencies. The only exception is the spawn-ENOENT path (an
+ * unreachable binary name).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -38,11 +40,11 @@ import type {
   PreToolUseHook,
 } from "../../../src/harness/permission/types.js";
 
-// ─── 测试脚手架 ──────────────────────────────────────────────────────────────
+// ─── Test scaffolding ────────────────────────────────────────────────────────
 
 interface Sandbox {
   readonly dir: string;
-  /** 写一份 hooks.json，返回 {file, plugin} 条目。 */
+  /** Write a hooks.json, return its {file, plugin} entry. */
   hookFile: (
     plugin: string,
     content: unknown
@@ -50,7 +52,7 @@ interface Sandbox {
     file: string;
     plugin: string;
   };
-  /** 写一份原始文本 hooks.json（非法 JSON 面）。 */
+  /** Write a hooks.json with raw text (for the invalid-JSON path). */
   rawHookFile: (
     plugin: string,
     content: string
@@ -99,8 +101,10 @@ interface Harness {
 }
 
 /**
- * 构造贡献的统一入口：files 由调用方给，roots / userHome / cwd 从 sandbox 派生。
- * onError 收 typed 事件（断言 phase）；warn 也收一份（覆盖 onError 缺席面）。
+ * Single entry point for building a contribution: files come from the caller;
+ * roots / userHome / cwd derive from the sandbox. onError collects typed
+ * events (assert the phase); warn also receives a copy (covers the
+ * onError-absent path).
  */
 function makeHarness(
   sandbox: Sandbox,
@@ -123,14 +127,15 @@ function makeHarness(
   return { errors, warns, opts };
 }
 
-/** 单行 node 脚本：读 stdin 到 completion，按脚本逻辑输出 / 退出。 */
+/** One-line node script: reads stdin to completion, then prints / exits per the script logic. */
 function nodeCommand(script: string): string {
   return `node -e ${JSON.stringify(script)}`;
 }
 
 /**
- * 从 plugin-exec 诊断文本里取回 envelope JSON（脚本人为把 envelope 写进
- * stderr，再经 exit 2 的 reason 通道带回）—— 免开第二条通道。
+ * Recover the envelope JSON from plugin-exec diagnostic text (the script
+ * deliberately writes the envelope to stderr, brought back via the exit-2
+ * reason channel) — avoids opening a second channel.
  */
 function envelopeFrom(message: string): Record<string, unknown> {
   const start = message.indexOf("{");
@@ -139,7 +144,7 @@ function envelopeFrom(message: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
-/** 断言 Pre hook 放行（undefined）。 */
+/** Assert the Pre hook passes (undefined). */
 async function assertPrePass(
   pre: PreToolUseHook,
   tool: string,
@@ -148,7 +153,7 @@ async function assertPrePass(
   assert.equal(await pre({ tool, input }), undefined);
 }
 
-// ─── §5.3 工具名候选集 / matcher 纯函数 ──────────────────────────────────────
+// ─── Tool-name candidate sets / matcher pure functions ───────────────────────
 
 describe("pluginHookToolNames — §5.3 候选集表", () => {
   it("表内工具：首项是规范 iknow 名，含协议别名", () => {
@@ -225,11 +230,11 @@ describe("evaluatePluginHookMatcher — §5.3 三态求值", () => {
   });
 
   it("含正则元字符 → 非锚定 RegExp.prototype.test 语义", () => {
-    // `Edit.*` 未锚定：Edit / MultiEdit 都命中
+    // Unanchored `Edit.*`: matches both Edit and MultiEdit
     assert.equal(evaluatePluginHookMatcher("Edit.*", ["Edit"]), true);
     assert.equal(evaluatePluginHookMatcher("Edit.*", ["MultiEdit"]), true);
     assert.equal(evaluatePluginHookMatcher("Edit.*", ["NoWrite"]), false);
-    // 非锚定：`a.h` 命中 `Bash`
+    // Unanchored: `a.h` matches `Bash`
     assert.equal(evaluatePluginHookMatcher("a.h", ["Bash"]), true);
   });
 
@@ -296,7 +301,7 @@ describe("pluginHookTimeoutMs — §5.1 归一", () => {
   });
 });
 
-// ─── §5.1 解析降级 ──────────────────────────────────────────────────────────
+// ─── Parse-time degradation ──────────────────────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.1 解析降级", () => {
   it("非法 JSON → 跳过该文件 + plugin-init；其他文件照常", async () => {
@@ -386,7 +391,7 @@ describe("createPluginHookContribution — §5.1 解析降级", () => {
       });
       const h = makeHarness(sb, [f]);
       const c = createPluginHookContribution(h.opts);
-      // 两个未知事件 → 每条一次（消息含事件名，去重按消息文本）
+      // Two unknown events → one report each (message carries the event name; dedup keys on message text)
       const unknown = h.errors.filter((e) =>
         e.message.includes("unknown hook event")
       );
@@ -498,9 +503,9 @@ describe("createPluginHookContribution — §5.1 解析降级", () => {
       assert.equal(h.errors.length, 1);
       assert.ok(h.errors[0]!.message.includes("invalid matcher regex"));
       assert.ok(c.pre);
-      // 坏组剔除 → read_file 不被拦（不毒化：坏组若在场会通配拦）
+      // The bad group is pruned → read_file is not blocked (no poisoning: had the bad group stayed, it would wildcard-block)
       await assertPrePass(c.pre!, "read_file", {});
-      // 合法组照常
+      // The valid group behaves as usual
       assert.ok(await c.pre({ tool: "bash", input: {} }));
     } finally {
       sb.cleanup();
@@ -610,7 +615,7 @@ describe("createPluginHookContribution — §5.1 解析降级", () => {
   it("matcher / command 自由文本不撞去重键（空格拼接会撞）", async () => {
     const sb = makeSandbox();
     try {
-      // (matcher="a b", command="true") 与 (matcher="a", command="b true") 不同
+      // (matcher="a b", command="true") differs from (matcher="a", command="b true")
       const f = sb.hookFile("keycollide", {
         hooks: {
           PreToolUse: [
@@ -667,12 +672,12 @@ describe("createPluginHookContribution — §5.1 解析降级", () => {
   });
 });
 
-// ─── §5.4 envelope ──────────────────────────────────────────────────────────
+// ─── Envelope ──────────────────────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.4 envelope", () => {
   /**
-   * 用 node 脚本把 stdin JSON 原样写回 stdout（exit 0），再通过 exit 2 的
-   * stdout fallback 把 envelope 文本带回来断言 —— 不另开通道。
+   * The node script echoes stdin JSON verbatim to stdout (exit 0); the
+   * envelope text is brought back via the exit-2 stdout fallback for assertions — no extra channel.
    */
   async function captureEnvelope(
     sb: Sandbox,
@@ -792,7 +797,7 @@ describe("createPluginHookContribution — §5.4 envelope", () => {
   });
 });
 
-// ─── §5.5 退出码语义 ────────────────────────────────────────────────────────
+// ─── Exit-code semantics ────────────────────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.5 Pre 退出码", () => {
   async function preWith(
@@ -1131,7 +1136,7 @@ describe("createPluginHookContribution — §5.5 Post 退出码（仅观测）",
           name: "bash",
           input: {},
           kind: "ok",
-          // 显式「无 message」：投影退到 payload（§5.4 tool_response 二选一）
+          // Explicit "no message": projection falls back to the payload (tool_response picks one of the two)
           message: undefined,
           payload: { exitCode: 0 },
         }
@@ -1156,7 +1161,7 @@ describe("createPluginHookContribution — §5.5 Post 退出码（仅观测）",
       const c = createPluginHookContribution(h.opts);
       const cyclic: Record<string, unknown> = {};
       cyclic.self = cyclic;
-      // 不抛（never-throw 契约）
+      // Does not throw (never-throw contract)
       await c.post!({
         toolUseId: "u1",
         name: "bash",
@@ -1170,7 +1175,7 @@ describe("createPluginHookContribution — §5.5 Post 退出码（仅观测）",
   });
 });
 
-// ─── §5.7 先拦先赢 / matcher 组序 ───────────────────────────────────────────
+// ─── First block wins / matcher group order ───────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.7 先拦先赢", () => {
   it("跨组：首组 block 后第二组不执行", async () => {
@@ -1282,7 +1287,7 @@ describe("createPluginHookContribution — §5.7 先拦先赢", () => {
       const c = createPluginHookContribution(h.opts);
       await assertPrePass(c.pre!, "read_file", { path: "x" });
       assert.equal(readFileSync(countFile, "utf8"), "");
-      // 别名命中：read_file 自身；再验 Edit 命中 edit_file
+      // Alias hit: read_file itself; then verify Edit hits edit_file
       await assertPrePass(c.pre!, "bash", { command: "ls" });
       assert.equal(readFileSync(countFile, "utf8"), "");
     } finally {
@@ -1325,7 +1330,7 @@ describe("createPluginHookContribution — §5.7 先拦先赢", () => {
   });
 });
 
-// ─── §5.6 占位符 ────────────────────────────────────────────────────────────
+// ─── Placeholders ────────────────────────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.6 占位符", () => {
   async function runPlaceholderCommand(
@@ -1353,7 +1358,7 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
         `node -e "process.stderr.write(process.argv[1]);process.exit(2)" "\${VENDOR_PLUGIN_ROOT}"`
       );
       assert.deepEqual(result, { reason: sb.pluginRoot("rooted") });
-      // 不同前缀同样匹配
+      // A different prefix matches the same way
       const other = await runPlaceholderCommand(
         sb,
         "rooted2",
@@ -1375,7 +1380,7 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
         `node -e "process.stderr.write(process.argv[1]);process.exit(2)" "\${X_PLUGIN_DATA}"`
       );
       assert.deepEqual(result, { reason: dir });
-      // 目录已建（再次引用不再 mkdir，路径仍一致）
+      // The directory exists (re-referencing skips mkdir; path still matches)
       const second = await runPlaceholderCommand(
         sb,
         "datay",
@@ -1426,17 +1431,17 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
           KNOWN: "known-val",
         },
       });
-      // 命令串里显式写 ${KNOWN} / ${UNKNOWN_MISSING} —— 同时验替换与未定义空串
+      // The command string writes ${KNOWN} / ${UNKNOWN_MISSING} literally — verifies both substitution and empty-string for undefined
       const opts = {
         ...h.opts,
         files: [
           {
             ...f,
-            // 重写文件内容：命令里带占位符
+            // Rewrite the file content: the command carries placeholders
           },
         ],
       };
-      // 直接重写 hooks.json 以带占位符
+      // Rewrite hooks.json directly so the command carries placeholders
       writeFileSync(
         f.file,
         JSON.stringify({
@@ -1470,8 +1475,7 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
   it("被替换变量按命令中原样名导出进子进程 env（前缀保留、任意命名空间）", async () => {
     const sb = makeSandbox();
     try {
-      // 命名空间用中性前缀（`ACME_`）—— 后缀匹配不认品牌，任何 `<NS>_` 都
-      // 应命中；命令体从 env 读同名变量，尾随 `#` 注释只为触发替换本身。
+      // Neutral namespace prefix (`ACME_`) — suffix matching is brand-agnostic, so any `<NS>_` should hit; the command body reads the same-named variables from env, and the trailing `#` comment exists only to trigger the substitution itself.
       const f = sb.hookFile("envexport", {
         hooks: {
           PreToolUse: [
@@ -1548,7 +1552,7 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
           ],
         },
       });
-      // roots 空 Map → 走 dirname(dirname(file))
+      // Empty roots Map → plugin root derived via dirname(dirname(file))
       const h = makeHarness(sb, [f]);
       const c = createPluginHookContribution(h.opts);
       const result = await c.pre!({ tool: "bash", input: {} });
@@ -1559,7 +1563,7 @@ describe("createPluginHookContribution — §5.6 占位符", () => {
   });
 });
 
-// ─── §5.6 输出截断 ──────────────────────────────────────────────────────────
+// ─── Output truncation ──────────────────────────────────────────────────────────
 
 describe("createPluginHookContribution — §5.6 输出截断（1 MiB）", () => {
   it("stderr 超 1 MiB → 截断，不缓冲爆炸（exit 2 的 reason 也受限）", async () => {
@@ -1573,7 +1577,7 @@ describe("createPluginHookContribution — §5.6 输出截断（1 MiB）", () =>
                 {
                   type: "command",
                   command: nodeCommand(
-                    // 2 MiB stderr，然后 exit 2
+                    // 2 MiB to stderr, then exit 2
                     "const b=Buffer.alloc(2*1024*1024,0x61);" +
                       "process.stderr.write(b);process.exit(2)"
                   ),
@@ -1600,7 +1604,7 @@ describe("createPluginHookContribution — §5.6 输出截断（1 MiB）", () =>
   }, 30_000);
 });
 
-// ─── 降级通道优先级（onError 优先，warn 兜底，不双报）───────────────────────
+// ─── Degradation-channel priority (onError wins, warn is the fallback, never both)───────────────────────
 
 describe("createPluginHookContribution — 降级通道", () => {
   it("onError 在场 → 事件走 typed 通道，warn 不重复收", () => {
@@ -1630,7 +1634,7 @@ describe("createPluginHookContribution — 降级通道", () => {
   });
 });
 
-// ─── B 面：异步钩子链 ───────────────────────────────────────────────────────
+// ─── Async hook chain ───────────────────────────────────────────────────────
 
 describe("plugin-hooks — 异步面（B/§5.7）", () => {
   it("pre 返回 Promise（贡献接缝是 async 的）", async () => {
@@ -1767,7 +1771,7 @@ describe("plugin-hooks — 异步面（B/§5.7）", () => {
   });
 });
 
-// ─── 装配缝便利函数（build-engine / worker 共用） ───────────────────────────
+// ─── Assembly-seam helper (shared by build-engine / worker) ───────────────────────────
 
 describe("createPluginHooksFromCatalog — 装配缝便利函数", () => {
   it("entries 为空 → 空贡献（pre/post 双缺席），装配层无需判空", () => {
@@ -1840,7 +1844,7 @@ describe("createPluginHooksFromCatalog — 装配缝便利函数", () => {
   });
 });
 
-// ─── PostToolUseHook 类型兼容 ───────────────────────────────────────────────
+// ─── PostToolUseHook type compatibility ───────────────────────────────────────────────
 
 describe("plugin-hooks — PostToolUseHook 类型兼容", () => {
   it("贡献的 post 可作为 PostToolUseHook 使用（放宽后的联合返回类型）", async () => {

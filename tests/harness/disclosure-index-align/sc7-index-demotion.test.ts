@@ -1,18 +1,23 @@
 /**
- * T5 / ADR-0046 Decision 2 + spec disclosure-index-align Does #6 / SC7 —
- * MCP + skill 索引降档「仅剥描述」。
+ * ADR-0046 Decision 2 — MCP + skill index demotion ("strip descriptions only").
  *
- * 钉住的不变式:
- *   1. 闸门 = `<mcp_name_directory>` + `<available_skills>` 两段**合计**超
- *      端点 contextWindow 的 10%(countTokens 实测,禁 chars/4)。
- *   2. 降档动作 = 从大到小(按各自索引条目渲染体积)剥描述只留名。
- *      **名字永不删**、段永不缺席。
- *   3. `<deferred_internal_tools>`(退场内建件,T4 名+描述形态)不参与剥描述。
- *   4. 剥光仍超阈 → 接受超阈、不删名、不剥内建描述。
- *   5. countTokens 失败 → 跳过本会话 + `console.warn`,两段保持带描述形态。
- *   6. 降档结果首轮定稿、会话内恒定 → 相邻轮 system deep-equal(SC2)。
+ * Pinned invariants:
+ *   1. Gate = the two segments `<mcp_name_directory>` + `<available_skills>`
+ *      TOGETHER exceeding 10% of the endpoint contextWindow (measured via
+ *      countTokens; never chars/4).
+ *   2. Demotion action = strip descriptions down to bare names, largest entry
+ *      first (by rendered size). **Names are never deleted**, segments never disappear.
+ *   3. `<deferred_internal_tools>` (retired builtins, name+description form)
+ *      is not eligible for stripping.
+ *   4. Still over threshold after stripping everything → accept the overflow,
+ *      keep names, do not touch builtin descriptions.
+ *   5. countTokens failure → skip for this conversation + `console.warn`;
+ *      both segments stay in with-description form.
+ *   6. The demotion result is final at first turn and constant per session →
+ *      adjacent turns' system prompts deep-equal.
  *
- * 判定层单测(纯逻辑,无装配)在本文件前半;build-engine wire 形态在后半。
+ * Decision-layer unit tests (pure logic, no assembly) in the first half;
+ * build-engine wiring in the second half.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -42,7 +47,7 @@ import type { McpClientHandle } from "../../../src/harness/mcp/manager.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/client";
 
 // ---------------------------------------------------------------------------
-// 判定层 fixtures
+// Decision-layer fixtures
 // ---------------------------------------------------------------------------
 
 function svc(
@@ -59,7 +64,7 @@ function svc(
   };
 }
 
-/** 判定入参装配:threshold + countTokens 由用例控制。 */
+/** Assemble decision input: threshold + countTokens are controlled by each case. */
 function input(
   over: Partial<IndexDemotionInput> & Pick<IndexDemotionInput, "countTokens">
 ): IndexDemotionInput {
@@ -116,8 +121,9 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
   });
 
   it("超阈 → 从大到小剥:体积悬殊的两条目里大者先被剥,退到 ≤ 阈值即停", async () => {
-    // 条目体积:big 行 ≫ small 行 → big 先剥;剥 1 件后实测降到阈值内 → 停,
-    // small 的描述保留(证明"从大到小"而非全剥)。
+    // Entry sizes: big line ≫ small line → strip big first; after stripping one
+    // item the measured size drops within threshold -> stop,
+    // so small keeps its description (proves "largest first", not strip-all).
     const measurements = [500, 80];
     let idx = 0;
     const out = await runIndexDemotion(
@@ -143,10 +149,10 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
     const tools = out.mcp[0]!.tools;
     const big = tools.find((t) => t.name === "mcp__svc__big")!;
     const small = tools.find((t) => t.name === "mcp__svc__small")!;
-    // 大者剥成仅名字:description 缺席,但**名字仍在**。
+    // The big entry is stripped to bare name: description absent, but the **name stays**.
     assert.equal(big.description, undefined);
     assert.equal(big.name, "mcp__svc__big");
-    // 小者未被剥。
+    // The small entry was not stripped.
     assert.equal(small.description, "s");
   });
 
@@ -175,9 +181,9 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
       })
     );
     assert.equal(out.reason, "demoted");
-    // 体积序:huge(120) > large(60) > mid(40) > tiny(1)
+    // Size order: huge(120) > large(60) > mid(40) > tiny(1)
     assert.deepEqual(out.demoted, ["huge", "large", "mcp__svc__mid"]);
-    // 未被剥的 tiny 仍带描述;被剥的三条名字都还在。
+    // Unstripped tiny still carries its description; all three stripped names are still present.
     const tools = out.mcp[0]!.tools;
     assert.equal(
       tools.find((t) => t.name === "mcp__svc__tiny")!.description,
@@ -206,14 +212,14 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
         threshold: 10,
         countTokens: async () => {
           calls += 1;
-          return 5_000; // 恒超阈
+          return 5_000; // always over threshold
         },
       })
     );
     assert.equal(out.reason, "demoted");
     assert.deepEqual(out.demoted.slice().sort(), ["alpha", "mcp__svc__a"]);
     assert.equal(calls, 3, "1 首测 + 2 次剥后重测(候选池剥光)");
-    // 名字全在,描述全无。
+    // All names present, all descriptions gone.
     assert.deepEqual(
       out.mcp[0]!.tools.map((t) => t.name),
       ["mcp__svc__a"]
@@ -224,7 +230,7 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
       ["alpha"]
     );
     assert.equal(out.skills[0]!.description, undefined);
-    // 段仍渲染(名字在 = 段不缺席)。
+    // Segments still render (names present = segments never absent).
     const text = renderIndexText(out.mcp, out.skills);
     assert.ok(text.includes("mcp__svc__a"));
     assert.ok(text.includes("alpha"));
@@ -339,7 +345,7 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// build-engine wire(与 build-engine-tool-overflow.test.ts 同款装配)
+// build-engine wiring (same assembly style as build-engine-tool-overflow.test.ts)
 // ---------------------------------------------------------------------------
 
 function makeEnv(apiKey: string): IknowEnv {
@@ -358,7 +364,7 @@ function makeEnv(apiKey: string): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
-    // contextWindow = 20_000 → 阈值 2_000(10%)。
+    // contextWindow = 20_000 -> threshold 2_000 (10%).
     compress: { contextWindow: 20_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
@@ -390,7 +396,7 @@ async function plantMcpConfig(cwd: string, servers: string[]): Promise<void> {
   );
 }
 
-/** fixture skill:<root>/.iknow/skills/<name>/SKILL.md(与 e2e 同法)。 */
+/** Fixture skill: <root>/.iknow/skills/<name>/SKILL.md (same convention as e2e). */
 async function plantSkill(
   root: string,
   name: string,
@@ -439,8 +445,9 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
     await plantMcpConfig(root, ["stubsvc"]);
     await plantSkill(root, "bigskill", "S".repeat(200));
 
-    // 第 1 次 = 内建 schema 判定(1_000 ≤ 2_000 → no_overflow,零退场);
-    // 之后是索引闸门:首测 9_000 超阈 → 逐件剥,每剥重测,末次 100 ≤ 阈值。
+    // Call 1 = builtin-schema gate (1_000 ≤ 2_000 -> no_overflow, zero retirements);
+    // then the index gate: first measure 9_000 over threshold -> strip one by one,
+    // re-measuring each time, last 100 ≤ threshold.
     const measurements = [1_000, 9_000, 8_000, 7_000, 100];
     let idx = 0;
     const built = track(
@@ -474,14 +481,14 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
-    // 两段都在(名字永不删 → 段永不缺席)。
+    // Both segments present (names never deleted -> segments never absent).
     expect(systemText).toContain("<mcp_name_directory>");
     expect(systemText).toContain("<available_skills>");
-    // 被降档的三条(bigskill 200 > alpha 100 > beta 60)剥成仅名字。
+    // The three demoted entries (bigskill 200 > alpha 100 > beta 60) are stripped to bare names.
     expect(systemText).toMatch(/^- mcp__stubsvc__alpha$/m);
     expect(systemText).toMatch(/^- mcp__stubsvc__beta$/m);
     expect(systemText).toMatch(/^bigskill$/m);
-    // 描述正文不再出现。
+    // Description bodies no longer appear.
     expect(systemText).not.toContain("A".repeat(100));
     expect(systemText).not.toContain("S".repeat(200));
   }, 30_000);
@@ -492,7 +499,7 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
     await plantMcpConfig(root, ["stubsvc"]);
     await plantSkill(root, "someskill", "skill description text");
 
-    // 恒超阈:内建 schema 判定退光 5 件;索引闸门也剥光候选池。
+    // Always over threshold: the builtin-schema gate retires all 5 items; the index gate drains its candidate pool too.
     const built = track(
       await buildHarnessEngine({
         env: makeEnv("sk-test-t5-ceiling"),
@@ -514,13 +521,13 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
-    // 索引名字全在。
+    // All index names remain.
     expect(systemText).toMatch(/^- mcp__stubsvc__alpha$/m);
     expect(systemText).toMatch(/^someskill$/m);
     expect(systemText).not.toContain("alpha tool description");
     expect(systemText).not.toContain("skill description text");
 
-    // 退场内建段在场且**仍带描述**(ADR-0046 Decision 2:退场件不参与剥)。
+    // The retired-builtin segment is present and **still carries descriptions** (ADR-0046 Decision 2: retired items are never stripped).
     expect(systemText).toContain("<deferred_internal_tools>");
     const segment = systemText!.slice(
       systemText!.indexOf("<deferred_internal_tools>"),
@@ -565,12 +572,12 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
     );
 
     const systemText = await built.deps.system?.();
-    // 描述保留(降档跳过)。
+    // Descriptions kept (demotion skipped).
     expect(systemText).toContain(
       "- mcp__stubsvc__alpha: alpha tool description"
     );
     expect(systemText).toContain("someskill: skill description text");
-    // warn 一行,显式指名索引降档被跳过。
+    // One warn line, explicitly naming the skipped index demotion.
     expect(
       warnings.some((w) => w.includes("index demotion skipped")),
       `warnings=${JSON.stringify(warnings)}`
@@ -646,9 +653,9 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
     const tools2 = built.deps.promptTools();
     assert.deepEqual(system2, system1);
     assert.deepEqual(tools2, tools1);
-    // 装配后不再实测(首轮一次)。
+    // No re-measuring after assembly (one shot at first turn).
     expect(calls).toBe(callsAfterAssembly);
-    // 降档确实发生过(否则本用例不测到降档态的稳定性)。
+    // Demotion really happened (otherwise this case proves nothing about demoted-state stability).
     expect(system1).toMatch(/^- mcp__stubsvc__alpha$/m);
   }, 30_000);
 });

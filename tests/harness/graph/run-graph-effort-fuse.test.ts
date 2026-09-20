@@ -1,19 +1,21 @@
 /**
- * live-graph-phase2 T3 — effort 熔断（spec SC7 / ADR-0057 / 0064）。
+ * Effort fuse (ADR-0057 / ADR-0064).
  *
- * 与 outcome-scheduler.test.ts / run-graph-failure-edges.test.ts 的分工：
- * 熔断闸在 handler 的 executor 入口（run-graph-tool.ts 的 exec 闭包现装
- * createEffortFuse），不在调度器 / 校验层里。本组测试走真 SubAgentManager
- * + 假 child，验证：
- *   - **SC7 熔断**：同一 id 第 9 次 executor 进入 → 整次调用 typed 拒、
- *     第 9 进入零 spawn（调度收敛、不空转）。
- *   - **SC7 合法绕回**：进入 ≤8 不熔断（7 次失败 + 第 8 次 done）。
- *   - **SC7 冻结保留**：熔断后已 done 的 id 仍冻结（与 T2 violation 同一
- *     partial-results 通道：先 freeze 再拒）。
- *   - **熔断按单次调用计**：熔断后外环下一段交新 id 正常 spawn。
- *   - **SC9 不回退**：plain Kahn 路径（无 onFailure）不装计数器。
- *   - **ADR-0064**：阈值常量 = 8，不进 settings（createRunGraphTool deps
- *     无阈值旋钮 —— typecheck 级守门，这里钉常量值本身）。
+ * Division of labor with outcome-scheduler.test.ts / run-graph-failure-edges.test.ts:
+ * the fuse gate lives at the handler's executor entry (run-graph-tool.ts's
+ * exec closure installs a fresh createEffortFuse), not in the scheduler or
+ * validation layer. These tests use a real SubAgentManager + fake child and verify:
+ *   - **Fuse trip**: the 9th executor entry for one id → the whole call is
+ *     rejected with a typed error, the 9th entry spawns nothing (scheduling
+ *     converges, no spinning).
+ *   - **Legal escape**: entries ≤ 8 never trip (7 failures + 8th entry done).
+ *   - **Freeze retention**: after a trip, ids already done stay frozen (same
+ *     partial-results channel as the violation path: freeze first, then reject).
+ *   - **Per-call counting**: the next outer-loop segment with new ids spawns normally.
+ *   - **No regression**: the plain Kahn path (no onFailure) installs no counter.
+ *   - **ADR-0064**: threshold constant = 8, deliberately not in settings
+ *     (createRunGraphTool deps expose no threshold knob — a typecheck-level
+ *     guard; this file pins the constant itself).
  */
 
 import { describe, expect, it } from "vitest";
@@ -41,7 +43,7 @@ describe("createEffortFuse — 计数器单元", () => {
       expect(fuse.enter("a")).toBe(true);
     }
     expect(fuse.signal.aborted).toBe(false);
-    expect(fuse.enter("a")).toBe(false); // 第 9 次
+    expect(fuse.enter("a")).toBe(false); // the 9th entry
     expect(fuse.signal.aborted).toBe(true);
     expect(fuse.trippedBy).toBe("a");
   });
@@ -73,7 +75,7 @@ describe("run_graph effort fuse — SC7 第 9 次进入熔断", () => {
       ledger: host,
       isEnabled: () => true,
     });
-    // b 依赖 a：先让 a done（冻结候选），再让 b 恒 failed 空转
+    // b depends on a: let a go done first (freeze candidate), then spin b always-failed.
     const pending = t.handler(
       {
         nodes: [
@@ -85,17 +87,17 @@ describe("run_graph effort fuse — SC7 第 9 次进入熔断", () => {
     );
     await waitForChildren(children, 1);
     settle(children[0]!, ok("A-OK"));
-    // b 进入 1..8 各 spawn 一次（children[1..8]）；b 依赖的 a 已 done，
-    // 同 id 再进入合法（失败边绕过 deps 门）。
+    // b entries 1..8 each spawn once (children[1..8]); its dep a is already
+    // done, and re-entry under the same id is legal (the failure edge bypasses the deps gate).
     for (let entry = 1; entry <= 8; entry++) {
       await waitForChildren(children, entry + 1);
       settle(children[entry]!, fail("crashed"));
     }
-    // 第 9 次进入被熔断：不再 spawn，整次调用 typed 拒
+    // The 9th entry trips the fuse: no more spawns, whole call typed-rejected.
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/effort fuse/);
-    expect(children).toHaveLength(9); // a 1 次 + b 8 次，第 9 进入零 spawn
-    // partial-results（T2 violation 同通道）：done 先冻结再拒
+    expect(children).toHaveLength(9); // a once + b eight times; the 9th entry spawns nothing
+    // Partial results (same channel as the violation path): done freezes before the rejection.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.frozenIds()).toContain("a");
     expect(ledger.statusOf("a")).toBe("done");
@@ -116,7 +118,7 @@ describe("run_graph effort fuse — SC7 进入 ≤8 合法绕回不熔断", () =
       settle(children[entry - 1]!, fail("crashed"));
     }
     await waitForChildren(children, 8);
-    settle(children[7]!, ok("B-RECOVERED")); // 第 8 次进入（含首次）合法
+    settle(children[7]!, ok("B-RECOVERED")); // 8th entry overall (incl. first) is still legal
     const out = parse(await pending);
     expect(children).toHaveLength(8);
     expect(out.nodes).toEqual([
@@ -135,7 +137,7 @@ describe("run_graph effort fuse — 熔断按单次调用计", () => {
       ledger: host,
       isEnabled: () => true,
     });
-    // 第一段：a self-onFailure 恒 failed → 第 9 进入熔断
+    // Segment 1: a with self-onFailure always fails → the 9th entry trips the fuse.
     const first = t.handler(
       { nodes: [{ id: "a", task: "ta", onFailure: "a" }] },
       { conversationId: CONV }
@@ -146,7 +148,7 @@ describe("run_graph effort fuse — 熔断按单次调用计", () => {
     }
     await expect(first).rejects.toThrow(/effort fuse/);
     expect(children).toHaveLength(8);
-    // 第二段（同一会话账本）：新 id 不受上一段熔断影响
+    // Segment 2 (same-session ledger): a new id is unaffected by the previous trip.
     const second = t.handler(
       { nodes: [{ id: "n", task: "tn" }] },
       { conversationId: CONV }
@@ -168,8 +170,9 @@ describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 faile
       ledger: host,
       isEnabled: () => true,
     });
-    // c 带 self-onFailure 恒 failed 空转（第 9 进入触发熔断）；d 是无失败边
-    // 的普通节点，wave 0 真跑一次即 failed —— 那是真终结而非 cancel 症状。
+    // c spins with self-onFailure always failed (9th entry trips the fuse); d is
+    // an ordinary edge-free node that really runs once in wave 0 and fails —
+    // a true terminal outcome, not a cancel symptom.
     const pending = t.handler(
       {
         nodes: [
@@ -179,16 +182,17 @@ describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 faile
       },
       { conversationId: CONV }
     );
-    // spawn 顺序：wave 0 = c1, d1（children 1-2）；此后每波 c 再进
-    // （c2..c8 = children 3-9，共 8 次）；c 第 9 进入零 spawn、熔断。
+    // Spawn order: wave 0 = c1, d1 (children 1-2); each later wave re-enters c
+    // (c2..c8 = children 3-9, 8 entries total); c's 9th entry spawns nothing and trips.
     for (let entry = 1; entry <= 9; entry++) {
       await waitForChildren(children, entry);
       settle(children[entry - 1]!, fail("crashed"));
     }
     await expect(pending).rejects.toThrow(/effort fuse/);
     expect(children).toHaveLength(9);
-    // F2：fuse 熔断 ≠ 调用侧 abort —— 本段真实 failed 的结局必须冻结，
-    // 否则下一段剩余子图重交 d / c 会被允许再 spawn，违反 ADR-0050。
+    // A fuse trip is not a caller-side abort — genuinely failed ids in this
+    // segment must freeze, otherwise the next residual-subgraph segment could
+    // resubmit d / c and spawn again, violating ADR-0050.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.statusOf("d")).toBe("failed");
     expect(ledger.statusOf("c")).toBe("failed");
@@ -205,20 +209,22 @@ describe("run_graph effort fuse — 熔断时同波 in-flight 兄弟照实落定
       ledger: host,
       isEnabled: () => true,
     });
-    // 结构说明（为什么这条测试长这样）：同批 Promise.all 等全部节点
-    // 落定，所以「熔断时 in-flight 的兄弟」只能与第 9 进入**同批**，
-    // 且 executor 进入顺序必须在 s(9) 之前（fuse abort 后 enter 恒
-    // false，晚于 s(9) 进入的节点会零 spawn 直接 failed）。做法：
-    //   - s(self-onFailure) 每波空转一次（8 次合法进入），第 9 进入
-    //     在 wave 8 触发熔断；
-    //   - h1..h7→g 的 done 链把 e 的 deps 晋升精确延迟到 wave 8
-    //     （g 在 wave 7 落定 done → e 晋升）；
-    //   - s 排在 spec 末位 → 每波 batch 里 done 链的晋升先于 s 的
-    //     self-kick → wave 8 batch = [e, s(9)]，e 先 spawn 成
-    //     in-flight，s(9) 随后熔断。
-    // fuse.signal 只喂调度器、不喂节点 executor：e 的 in-flight
-    // child 不被打断，settle ok 后按真实结局落 done 并冻结（T2
-    // violation 同一 partial-results 通道：先 freeze 再 typed 拒）。
+    // Why this test is shaped like this: a same-batch Promise.all waits for
+    // every node to settle, so an "in-flight sibling at trip time" can only be
+    // in the **same batch** as the 9th entry, and its executor entry must
+    // precede s(9) (after fuse abort, enter() is always false, so a node
+    // entering after s(9) spawns zero and goes failed outright). Construction:
+    //   - s (self-onFailure) spins once per wave (8 legal entries); its 9th
+    //     entry trips in wave 8;
+    //   - the done chain h1..h7→g delays e's deps promotion precisely to wave 8
+    //     (g settles done in wave 7 → e is promoted);
+    //   - s is last in the spec → within each wave's batch the done chain's
+    //     promotion precedes s's self-kick → wave 8 batch = [e, s(9)], e spawns
+    //     first (in-flight), s(9) trips the fuse right after.
+    // fuse.signal feeds only the scheduler, never a node executor: e's
+    // in-flight child is not interrupted; on settle ok it lands done by its
+    // real outcome and freezes (same partial-results channel as the violation
+    // path: freeze first, then typed rejection).
     const pending = t.handler(
       {
         nodes: [
@@ -236,29 +242,29 @@ describe("run_graph effort fuse — 熔断时同波 in-flight 兄弟照实落定
       },
       { conversationId: CONV }
     );
-    // waves 0-6：每批 [h(w+1), s(w+1)]（h 晋升先于 s 的 self-kick）。
-    // children[2w]=h(w+1)、children[2w+1]=s(w+1)。h 全部 ok、s 全部
-    // failed（s 的 8 次合法进入 = children 1,3,5,7,9,11,13,15）。
+    // waves 0-6: each batch is [h(w+1), s(w+1)] (h's promotion precedes s's
+    // self-kick). children[2w]=h(w+1), children[2w+1]=s(w+1). All h settle ok,
+    // all s fail (s's 8 legal entries = children 1,3,5,7,9,11,13,15).
     for (let w = 0; w <= 6; w++) {
       await waitForChildren(children, 2 * w + 2);
       settle(children[2 * w]!, ok(`H${w + 1}`));
       settle(children[2 * w + 1]!, fail("crashed"));
     }
-    // wave 7：[g, s(8)]（g 由 h7 晋升）。g ok、s(8) failed —— s(8)
-    // 的 self-kick 与 g 的 e 晋升把 wave 8 凑成 [e, s(9)]。
+    // wave 7: [g, s(8)] (g promoted by h7). g ok, s(8) failed — s(8)'s
+    // self-kick plus g's promotion of e assemble wave 8 as [e, s(9)].
     await waitForChildren(children, 16);
     settle(children[14]!, ok("G-OK"));
     settle(children[15]!, fail("crashed"));
-    // wave 8：e 先 spawn（in-flight），s(9) 第 9 进入熔断、零 spawn。
+    // wave 8: e spawns first (in-flight); s(9) is the 9th entry — fuse trips, zero spawn.
     await waitForChildren(children, 17);
     expect(children).toHaveLength(17);
-    // 熔断之后 e 才 settle ok —— 必须按真实结局落 done。
+    // e settles ok only after the trip — it must land done by its real outcome.
     settle(children[16]!, ok("E-OK"));
     await expect(pending).rejects.toThrow(/effort fuse/);
     const ledger = host.ledgerFor(CONV);
     expect(ledger.statusOf("e")).toBe("done");
     expect(ledger.isFrozen("e")).toBe(true);
-    // s 的空转结局是真 failed（F2：熔断 ≠ cancel，failed 也冻）。
+    // s's spinning ends as a real failed (fuse trip ≠ cancel; failed freezes too).
     expect(ledger.statusOf("s")).toBe("failed");
     await manager.shutdown();
   }, 20_000);

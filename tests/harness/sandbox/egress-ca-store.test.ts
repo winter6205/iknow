@@ -1,19 +1,23 @@
 /**
- * Tests for `egress/ca-store.ts` — T4 CA 持久层与信任链装配面
- * （specs/egress-credential-sentinel.md §T4 + F7 + SC8 + Assumption 4/11）。
+ * Tests for `egress/ca-store.ts` — the CA persistence layer and the
+ * trust-chain assembly face (specs/egress-credential-sentinel.md,
+ * Assumptions 4/11).
  *
- * 钉住的不变式：
- *   - 持久 CA 落注入目录，目录 0700 / key 0600（Assumption 4）；
- *   - 权限不符 / validateCaPair 失败 / 半边 pair → 拒用 + 告警痕 + 重生成（F7），
- *     重生成后 session 可装载（createMitmCA 成功）；
- *   - trust bundle = CA 证书 + 常规根拼接，只含 CERTIFICATE 块，绝无 PRIVATE KEY
- *     （mitm-ca.js:166-175 的 PEM 过滤教训）；
- *   - SC8：CA 私钥路径不出现在任何 bind 表输出；
- *   - 告警痕只带模式/文件名，绝不带 PEM 材料；
- *   - 逐客户端信任名册常量（gh/Go → SSL_CERT_FILE、git → GIT_SSL_CAINFO、
- *     curl → CURL_CA_BUNDLE）就位且 ∈ 包 CA_TRUST_VARS 全集。
+ * Pinned invariants:
+ *   - the persistent CA lands in the injected directory, dir 0700 / key 0600
+ *     (Assumption 4);
+ *   - permission mismatch / validateCaPair failure / half a pair → refuse +
+ *     warning trace + regenerate; after regeneration the session can load
+ *     (createMitmCA succeeds);
+ *   - trust bundle = CA cert + regular roots concatenated, CERTIFICATE blocks
+ *     only, never a PRIVATE KEY block (the PEM-filter lesson from mitm-ca.js);
+ *   - the CA private-key path never appears in any bind-table output;
+ *   - warning traces carry only modes/filenames, never PEM material;
+ *   - the per-client trust-name roster constants are in place (gh/Go →
+ *     SSL_CERT_FILE, git → GIT_SSL_CAINFO, curl → CURL_CA_BUNDLE) and each is
+ *     a member of the package CA_TRUST_VARS roster.
  *
- * 全部用例注入临时目录，不触碰真实 ~/.config。
+ * Every case injects a temp directory and never touches the real ~/.config.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -222,7 +226,7 @@ describe("loadEgressCa (session装载面)", () => {
       expect(load.state.notice?.kind).toBe("ca_permissions");
       expect(load.ca.certPath).toBe(join(caDir, CERT_FILE));
       expect(load.ca.keyPath).toBe(join(caDir, KEY_FILE));
-      // 从持久盘装载 → 包不认为是 temp ephemeral CA（dispose 不删持久目录）
+      // loaded from the persistent disk → the package must not treat it as a temp ephemeral CA (dispose won't delete the persistent dir)
       expect(load.ca.ephemeral).toBe(false);
       expect(modeOf(load.ca.keyPath)).toBe(0o600);
       rmSync(load.ca.trustBundlePath, { force: true });
@@ -239,11 +243,11 @@ describe("trust bundle 内容（每次 createMitmCA 现写）", () => {
       const bundle = readFileSync(ca.trustBundlePath, "utf8");
       const caBlocks = certBlocks(ca.certPem);
       expect(caBlocks.length).toBe(1);
-      // 含代理 CA
+      // includes the proxy CA
       expect(bundle).toContain(caBlocks[0]);
-      // 含常规根（块数严格大于仅代理 CA）
+      // includes the regular roots (block count strictly greater than proxy-CA alone)
       expect(certBlocks(bundle).length).toBeGreaterThan(caBlocks.length);
-      // 绝无 PRIVATE KEY 块（防拷进 world-readable bundle）
+      // never a PRIVATE KEY block (prevents copying one into a world-readable bundle)
       expect(bundle).not.toContain("PRIVATE KEY");
       rmSync(ca.trustBundlePath, { force: true });
     }

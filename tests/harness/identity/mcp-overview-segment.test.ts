@@ -1,14 +1,22 @@
-// disclosure-index-align T1 — `<mcp_name_directory>` 段（渐进式披露"索引常驻档"）装配层单测。
+// Assembly-layer unit tests for the `<mcp_name_directory>` segment (the
+// persistent index tier of progressive disclosure).
 //
-// T1 contract (specs/disclosure-index-align.md Does #1 / SC1 + SC2):
-//   - 每 connected 服务一行：name 或 "name: <service description>"（描述缺席 → 裸名）。
-//   - 每工具一行：`- <name>` 或 `- <name>: <short desc>`（首行 + 限 120 字 + 超长加 …）。
-//   - 描述缺席（工具或服务）→ 只渲染名字（契约允许态）。
-//   - failed / pending / disabled 服务不渲染；过滤后空 → 段整体缺席（undefined）。
-//   - 末行引导改为 "Call a listed tool directly to load its schema and use it."
-//     (有描述后直呼工具即可，不再强制 "Use tool_search ...")。
-//   - 加性段，不触碰 IKNOW_ASSEMBLY_ORDER；IKNOW_ASSEMBLY_ORDER 锁定 6 段。
-//   - 字节稳定：服务名 / 工具名 字母序；相邻 turn snapshot 深等。
+// Pinned contract:
+//   - One line per connected service: name, or "name: <service description>"
+//     (description absent → bare name).
+//   - One line per tool: `- <name>` or `- <name>: <short desc>` (first line +
+//     120-char cap + trailing … when over).
+//   - Description absent (tool or service) → render the bare name (a
+//     contract-legal state).
+//   - failed / pending / disabled services are not rendered; if everything is
+//     filtered out → the whole segment is absent (undefined).
+//   - The guidance last line is "Call a listed tool directly to load its
+//     schema and use it." (with descriptions present, calling tools directly
+//     suffices; no forced "Use tool_search ...").
+//   - Additive segment: does not touch IKNOW_ASSEMBLY_ORDER, which is locked
+//     at 6 segments.
+//   - Byte stability: service / tool names alphabetical; adjacent-turn
+//     snapshots deep-equal.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -115,14 +123,14 @@ describe("mcpNameDirectorySegment 渲染（装配层纯函数）", () => {
     ]);
     expect(out).toBeDefined();
     const text = out as string;
-    // 服务行：name + 描述
+    // service line: name + description
     expect(text).toContain("stubsvc: Stub MCP server for tests");
-    // 工具行：alpha 带短描述、beta 裸名
+    // tool lines: alpha carries the short description, beta is bare
     expect(text).toContain(
       "- mcp__stubsvc__alpha: Alpha tool does many useful things"
     );
     expect(text).toContain("- mcp__stubsvc__beta");
-    // 末行引导：直呼工具即可，不再强制 tool_search
+    // last-line guidance: calling the tool directly suffices, tool_search is no longer forced
     expect(text).toContain(
       "Call a listed tool directly to load its schema and use it."
     );
@@ -136,10 +144,10 @@ describe("mcpNameDirectorySegment 渲染（装配层纯函数）", () => {
       }),
     ]);
     const text = out as string;
-    // 服务行:裸名（行首无 "- "）
+    // service line: bare name (no "- " prefix at line start)
     expect(text).toMatch(/^plain$/m);
     expect(text).not.toMatch(/^plain:/m);
-    // 工具行:仍带描述
+    // tool line: description still present
     expect(text).toContain("- mcp__plain__t: a tool");
   });
 
@@ -149,7 +157,8 @@ describe("mcpNameDirectorySegment 渲染（装配层纯函数）", () => {
     ]);
     const text = out as string;
     expect(text).toContain("- mcp__s__bare");
-    // 工具名 + 冒号 + 描述的形态不应出现（服务行无 ":" 时也类似，但这里是工具行）
+    // the name + colon + description shape must not appear (here on the tool
+    // line; same idea as a bare service line without ":")
     expect(text).not.toMatch(/^- mcp__s__bare:/m);
   });
 
@@ -172,11 +181,11 @@ describe("mcpNameDirectorySegment 渲染（装配层纯函数）", () => {
       svc("s", { tools: [tool("mcp__s__blank", "   \nreal")] }),
     ]);
     const text = out as string;
-    // shortToolDescription("   \nreal"):首行 = "   ",trim 后空 → undefined
-    // → 工具行只剩裸名 "- mcp__s__blank",没有 ": real"
+    // shortToolDescription("   \nreal"): first line is "   ", trims to empty →
+    // undefined → the tool line stays bare "- mcp__s__blank", no ": real"
     expect(text).toContain("- mcp__s__blank");
     expect(text).not.toMatch(/^- mcp__s__blank:/m);
-    // "real" 是第二行,首行截断丢弃,不进入段
+    // "real" is the second line; dropped by the first-line cut, never enters the segment
     expect(text).not.toContain("real");
   });
 
@@ -186,9 +195,9 @@ describe("mcpNameDirectorySegment 渲染（装配层纯函数）", () => {
       svc("alpha", { tools: [tool("mcp__alpha__y"), tool("mcp__alpha__b")] }),
     ]);
     const text = out as string;
-    // 服务序:alpha < zeta
+    // service order: alpha < zeta
     expect(text.indexOf("alpha")).toBeLessThan(text.indexOf("zeta"));
-    // 工具序:每服务内字母升序
+    // tool order: ascending alphabetical within each service
     expect(text.indexOf("- mcp__alpha__b")).toBeLessThan(
       text.indexOf("- mcp__alpha__y")
     );
@@ -283,9 +292,9 @@ describe("assembleIdentityContext MCP 名字目录段注入", () => {
     expect(out).toContain(
       "Call a listed tool directly to load its schema and use it."
     );
-    // schema 不进名字目录（披露分层）
+    // schemas never enter the name directory (disclosure tiering)
     expect(out).not.toContain("inputSchema");
-    // 旧 tool_search 引导已撤
+    // the old tool_search guidance is retired
     expect(out).not.toContain("Use tool_search");
   });
 

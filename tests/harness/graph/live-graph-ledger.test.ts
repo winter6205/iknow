@@ -1,20 +1,20 @@
 /**
- * live-graph-phase1 T1 — 账本单点权威（SC1–SC4 / ADR-0051）。
+ * Live-graph ledger — single-source-of-truth tests.
  *
- * 本测试只覆盖账本本身（harness/graph 权威）。接线（run_graph handler
- * / session-api 持有 / CLI reset / hub compact/shutdown）见各自集成测试。
+ * Covers the ledger module alone (harness/graph authority). Wiring (run_graph
+ * handler / session-api holding / CLI reset / hub compact/shutdown) is tested
+ * by the respective integration tests.
  *
- * 五件事：
- *   1. **不存在**：新建 host / ledger，未交节点前 `exists()` 为 false，
- *      `isFrozen` 全 false；
- *   2. **ensure**：调一次 → exists；幂等；不调 → 后续 freeze 不生效
- *      （防御：handler 误调 freeze 也不会被冻结，零行为变化）；
- *   3. **freeze 收/拒**：done / failed 冻结，skipped 不冻，未跑过不冻；
- *   4. **destroy / reset**：清空冻结集合 + 存在标志；之后旧 id 不再冻结；
- *   5. **host 多会话**：按 conversationId 隔离；destroy 单 / destroyAll；
- *      `undefined` id 落到共享匿名账本。
+ * Five aspects:
+ *   1. absent: a fresh ledger → exists() false before any node settles, isFrozen all false;
+ *   2. ensure: one call → exists; idempotent; without it freeze never takes
+ *      effect (defense: a handler mis-calling freeze cannot freeze anything);
+ *   3. freeze accept/reject: done/failed freeze, skipped does not, never-run ids do not;
+ *   4. destroy/reset: clears the frozen set + exists flag; old ids are no longer frozen afterwards;
+ *   5. host multi-session: isolated per conversationId; destroy one / destroyAll;
+ *      `undefined` id maps to the shared anonymous ledger.
  *
- * 不依赖 run_graph handler 或 SubAgentManager — 是纯模块单测。
+ * Pure module unit test — no run_graph handler or SubAgentManager involved.
  */
 
 import { describe, expect, it } from "vitest";
@@ -62,8 +62,8 @@ describe("LiveGraphLedger: freeze 收/拒（spec Glossary：done/failed 冻，sk
   it("skipped 不冻结（spec Glossary：未冻状态含 skipped 与从未跑过）", () => {
     const ledger = createLiveGraphLedger();
     ledger.ensure();
-    // skipped 是合法结算状态（handler 直传 GraphNodeResult.status）——
-    // 账本单点强制不冻结，不靠调用方过滤。
+    // skipped is a legal settle status (the handler passes GraphNodeResult.status
+    // through) — the ledger itself enforces no-freeze, not caller-side filtering.
     ledger.freeze("sk", "skipped");
     expect(ledger.isFrozen("sk")).toBe(false);
     expect(ledger.frozenIds()).toEqual([]);
@@ -72,13 +72,14 @@ describe("LiveGraphLedger: freeze 收/拒（spec Glossary：done/failed 冻，sk
   it("非终态值 / 非法值不冻结（防御性运行时容错）", () => {
     const ledger = createLiveGraphLedger();
     ledger.ensure();
-    // SettleStatus 已 narrow 到 done | failed | skipped —— "running"/"pending"
-    // 既不在签名里，也没有生产者；测的是绕过类型时的兜底（账本不应冻）。
-    // @ts-expect-error running 不在 SettleStatus 内
+    // SettleStatus is narrowed to done | failed | skipped — "running"/"pending"
+    // are neither in the signature nor produced anywhere; this tests the
+    // fallback when the type is bypassed (the ledger must not freeze).
+    // @ts-expect-error running is not in SettleStatus
     ledger.freeze("r", "running");
-    // @ts-expect-error pending 不在 SettleStatus 内
+    // @ts-expect-error pending is not in SettleStatus
     ledger.freeze("p", "pending");
-    // @ts-expect-error 非法值：即便绕过类型，账本也不冻结。
+    // @ts-expect-error bogus value: even bypassing the type, the ledger must not freeze.
     ledger.freeze("x", "bogus" as "done");
     expect(ledger.isFrozen("r")).toBe(false);
     expect(ledger.isFrozen("p")).toBe(false);
@@ -126,7 +127,7 @@ describe("LiveGraphLedger: 产出记录（T2 / spec SC5「B 能读到 A 的产�
     ledger.freeze("a", "failed");
     expect(ledger.statusOf("a")).toBe("failed");
     expect(ledger.outputOf("a")).toBe(undefined);
-    // failed → 再 done 带新产出：末次为准
+    // failed → then done with a new output: last write wins
     ledger.freeze("a", "done", "V2");
     expect(ledger.statusOf("a")).toBe("done");
     expect(ledger.outputOf("a")).toBe("V2");
@@ -171,7 +172,7 @@ describe("LiveGraphLedger: destroy / reset 语义（SC3）", () => {
     expect(ledger.isFrozen("a")).toBe(false);
     expect(ledger.frozenIds()).toEqual([]);
 
-    // destroy 后再 ensure → 干净新账本
+    // destroy then ensure again → clean fresh ledger
     ledger.ensure();
     expect(ledger.exists()).toBe(true);
     expect(ledger.frozenIds()).toEqual([]);
@@ -208,7 +209,7 @@ describe("LiveGraphLedgerHost: 多会话解析（hub 接线）", () => {
     expect(host.size()).toBe(1);
     expect(a.exists()).toBe(false);
     expect(a.isFrozen("x")).toBe(false);
-    // b 不受影响
+    // b is untouched
     expect(b.exists()).toBe(true);
     expect(b.isFrozen("y")).toBe(true);
   });
@@ -240,7 +241,7 @@ describe("LiveGraphLedgerHost: 多会话解析（hub 接线）", () => {
     const anon1 = host.ledgerFor(undefined);
     const anon2 = host.ledgerFor(undefined);
     expect(anon1).toBe(anon2);
-    // 匿名账本不计入 size（按会话隔离的观测量）
+    // the anonymous ledger is not counted in size (size measures per-session isolation)
     expect(host.size()).toBe(0);
 
     anon1.ensure();

@@ -19,7 +19,7 @@ const text = (value: string): AnthropicNativeMessage => ({
 
 describe("shouldAutoCompact", () => {
   it("estimate < threshold → false", () => {
-    // 单字符 → estimate = ceil(1 * 4/3) = 2;threshold 100 → 不触发
+    // single char -> estimate = ceil(1 * 4/3) = 2; threshold 100 -> no trigger
     const messages = [text("x")];
     assert.equal(
       shouldAutoCompact(messages, { contextWindow: 200_000, threshold: 100 }),
@@ -28,7 +28,7 @@ describe("shouldAutoCompact", () => {
   });
 
   it("estimate >= threshold → true", () => {
-    // 100 条 40 字符消息 → 每条 estimate = ceil(11 * 4/3) = 15;total ≈ 1500
+    // 100 messages of 40 chars -> per-message estimate = ceil(11 * 4/3) = 15; total ≈ 1500
     const messages = Array.from({ length: 100 }, () => text("a".repeat(40)));
     const estimate = estimateMessagesTokens(messages);
     assert.ok(estimate > 0);
@@ -84,7 +84,7 @@ describe("shouldAutoCompact", () => {
     ];
     const estimate = estimateMessagesTokens(mixed);
     assert.ok(estimate > 0);
-    // 恰好等于 estimate 的阈值 → 触发;比 estimate 大 1 → 不触发
+    // threshold exactly = estimate -> fires; estimate + 1 -> doesn't
     assert.equal(
       shouldAutoCompact(mixed, { contextWindow: 200_000, threshold: estimate }),
       true

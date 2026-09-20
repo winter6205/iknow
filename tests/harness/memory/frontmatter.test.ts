@@ -1,10 +1,10 @@
 /**
- * #121 T2: parseMemoryEntry / serializeMemoryEntry / computeSignature
+ * parseMemoryEntry / serializeMemoryEntry / computeSignature
  * pure-function tests.
  *
- * Spec: specs/121-memory-injection.md (Project Structure frontmatter.ts,
- * Testing Strategy frontmatter half — parse / 往返 / 缺字段默认 /
- * 超量字段保留 / signature 稳定 / 缺 frontmatter 包裹符报错).
+ * Coverage (frontmatter half): parse / round-trip / defaults for missing
+ * fields / retention of excess fields / signature stability / error when the
+ * frontmatter fence is missing.
  *
  * Why no YAML dependency: spec Tech Stack bans new npm deps. The frontmatter
  * format here is a minimal scalar subset (key: value lines); the parse path

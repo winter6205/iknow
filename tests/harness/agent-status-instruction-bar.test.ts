@@ -1,27 +1,32 @@
 /**
- * spec agent-status-instruction-echo T3（instruction 半边）/ plan 子弹 3:
- * `appendAgentStatusBar` 消费 T2 提取器 —— 最新真实用户指令首行逐字回显进
- * 每条 `<agent_status>` 栏,`agent_status` 流事件字段随同一份 snapshot 加性
- * 扩(SC6 同源)。reconcile 结算归子弹 4,本套件只钉「透传不结算」形态。
+ * agent-status-instruction-echo spec (instruction half):
+ * `appendAgentStatusBar` consumes the extractor from the prior layer — the
+ * first line of the latest real user instruction is echoed verbatim into
+ * every `<agent_status>` bar, and the `agent_status` stream-event fields grow
+ * additively from the same snapshot (single source). Reconcile settlement is a
+ * separate concern; this suite pins only the pass-through-without-settlement shape.
  *
- * 双轨 assert(仓规):
- *   - trace 轨:createJsonlTraceService 落盘 + createJsonlTraceReader 回读
- *     event sequence(llm_call / tool_call / turn 计数与终态);
- *   - 基线轨:no-trace vs NoopTraceService(真 trace 同理)messages / result
- *     deepEqual —— trace 观测不改变注入行为。
+ * Double-track asserts (repo rule):
+ *   - trace track: createJsonlTraceService writes to disk + createJsonlTraceReader
+ *     reads back the event sequence (llm_call / tool_call / turn counts and final state);
+ *   - baseline track: no-trace vs NoopTraceService (real trace likewise) messages /
+ *     result deepEqual — trace observation does not change injection behavior.
  *
- * 验收映射(plan 子弹 3 逐字):
- *   ① prior 含真实指令 → 该指令首行在每条栏的 `instruction:` 行(逐字、
- *      非摘要、第二行不进);append-only 每跳一条新栏照常;
- *   ② 同回合多跳每跳在场且不进 `deps.system`(request.system 恒等 provider
- *      返回值);
- *   ③ 流事件与栏文本同一 snapshot 派生(SC6):事件数据字段重放
- *      buildAgentStatusText === 当次请求尾栏逐字节;
- *   ④ 无真实用户消息时段(prior 全注入 + 不追加新 user 文本)→ `instruction:`
- *      段整段缺席(F1),事件字段退回旧三件;旧注入栏里的 instruction 行
- *      不被当指令复读;
- *   ⑤ todo 读取路径零变化(既有 agent-status-bar / stream / fields 套件
- *      全绿承担,本文件不重复其断言)。
+ * Acceptance mapping:
+ *   - prior contains a real instruction → its first line appears in every bar's
+ *     `instruction:` line (verbatim, not a summary, the second line never enters);
+ *     append-only still adds one new bar per hop;
+ *   - present on every hop of a multi-hop turn and never in `deps.system`
+ *     (request.system stays identical to the provider's return value);
+ *   - stream events and bar text derive from the same snapshot: replaying the
+ *     event data fields through buildAgentStatusText === that request's tail bar
+ *     byte for byte;
+ *   - windows with no real user messages (prior fully injected + no new user text
+ *     appended) → the `instruction:` section is absent entirely, event fields
+ *     revert to the legacy trio; instruction lines inside old injected bars are
+ *     never re-read as instructions;
+ *   - the todo read path is unchanged (held by the existing agent-status-bar /
+ *     stream / fields suites going green; not re-asserted here).
  */
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -62,7 +67,7 @@ afterAll(() => {
   }
 });
 
-/** 栏 body 里的 `instruction:` 行(至多一条);无 → undefined。 */
+/** The `instruction:` line(s) in a bar body (at most one); absent → empty list. */
 function instructionLinesOf(barText: string): string[] {
   return barText
     .split("\n")
@@ -90,7 +95,8 @@ function scriptedModel(): LoopEngineDeps["adapter"] {
 }
 
 // ---------------------------------------------------------------------------
-// ① + trace 双轨:真实指令逐字进每条栏;trace 观测不改变行为
+// Real instructions enter every bar verbatim; trace observation changes
+// nothing (double-track).
 // ---------------------------------------------------------------------------
 
 describe("instruction echo T3: prior 含真实指令 → 每条栏 instruction: 行", () => {
@@ -129,13 +135,13 @@ describe("instruction echo T3: prior 含真实指令 → 每条栏 instruction: 
       }),
     });
 
-    // 基线轨:no-trace vs NoopTraceService vs 真 trace —— 注入行为不受观测影响。
+    // Baseline track: no-trace vs NoopTraceService vs real trace — injection behavior is unaffected by observation.
     assert.deepEqual(runNoop.result.messages, runNoTrace.result.messages);
     assert.deepEqual(runJsonl.result.messages, runNoTrace.result.messages);
     assert.deepEqual(runNoop.result, runNoTrace.result);
     assert.deepEqual(runJsonl.result, runNoTrace.result);
 
-    // ① 每条栏(append-only 全量)都含指令首行的 `instruction:` 行,逐字回显。
+    // Every bar (full append-only set) carries the instruction's first line as an `instruction:` row, echoed verbatim.
     const bars = barTexts(runNoTrace.result.messages);
     assert.equal(bars.length, 2, "一跳一条栏 × 2 跳");
     for (const bar of bars) {
@@ -143,23 +149,23 @@ describe("instruction echo T3: prior 含真实指令 → 每条栏 instruction: 
         `instruction: ${PIVOT_FIRST_LINE}`,
       ]);
       assert.ok(!bar.includes("第二行说明保留"), "只回显首行,非全文");
-      // todo 段次序纪律:todos: 头仍在标量段之后(读取路径零变化的形态面)。
+      // Todo-section ordering discipline: the `todos:` header still follows the scalar sections (read path shape unchanged).
       assert.ok(bar.includes("todos:\n- [ ] [t1] alpha task"));
     }
 
-    // trace 轨:reader 回读 event sequence(消费面 SSOT,不手解 JSONL)。
+    // Trace track: read the event sequence back via the reader (consumer-side SSOT, no manual JSONL parsing).
     const reader = createJsonlTraceReader({ filePath: traceFile });
     assert.equal(reader.query({ recordType: "llm_call" }).total, 2);
     assert.equal(reader.query({ recordType: "tool_call" }).total, 1);
     const turns = reader.query({ recordType: "turn" });
-    // 一跳一条 turn 记录(step 级),末条 decision = completed。
+    // One turn record per hop (step level); the last record's decision = completed.
     assert.equal(turns.total, 2);
     assert.equal(turns.records[0]!["decision"], "completed");
   });
 });
 
 // ---------------------------------------------------------------------------
-// ② 同回合多跳每跳在场 + 不进 deps.system
+// Present on every hop of a multi-turn hop sequence + never enters deps.system.
 // ---------------------------------------------------------------------------
 
 describe("instruction echo T3: 每跳在场且不进 system", () => {
@@ -223,7 +229,7 @@ describe("instruction echo T3: 每跳在场且不进 system", () => {
         ]);
       }
     }
-    // 不进 deps.system:模型面 system 恒等 provider 原文,零附加。
+    // Never in deps.system: the model-facing system stays byte-identical to the provider's original text, zero additions.
     assert.deepEqual(systemsCaptured, [
       "BASE SYSTEM TEXT",
       "BASE SYSTEM TEXT",
@@ -233,7 +239,7 @@ describe("instruction echo T3: 每跳在场且不进 system", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ③ SC6:流事件与栏文本同一 snapshot 派生
+// Stream events and bar text derive from the same snapshot.
 // ---------------------------------------------------------------------------
 
 describe("instruction echo T3: 流事件与栏同源", () => {
@@ -278,7 +284,7 @@ describe("instruction echo T3: 流事件与栏同源", () => {
     for (let i = 0; i < events.length; i++) {
       const ev = events[i]!;
       assert.equal(ev.instruction, PIVOT_FIRST_LINE, "事件字段 = 栏同源指令");
-      // 事件数据字段(即 snapshot 数据字段)重放 T1 构造器 === 当次尾栏。
+      // Replaying the event data fields (i.e. the snapshot data fields) through the bar builder === that hop's tail bar.
       const snapshotFields = {
         lastTool: ev.lastTool,
         openTodoLines: ev.openTodoLines,
@@ -298,7 +304,7 @@ describe("instruction echo T3: 流事件与栏同源", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ④ F1:无真实用户消息时段 → 整段缺席
+// Windows with no real user messages → the instruction section is absent.
 // ---------------------------------------------------------------------------
 
 describe("instruction echo T3: F1 全注入 prior → instruction 段整段缺席", () => {
@@ -364,7 +370,7 @@ describe("instruction echo T3: F1 全注入 prior → instruction 段整段缺�
     assert.equal(captured.length, 2);
     for (const messages of captured) {
       const bars = barTexts(messages);
-      // 当次注入的新栏(末条)整段无 instruction(F1:空槽不广告)。
+      // The bar injected this hop (the last one) has no instruction section at all (empty slots are not advertised).
       const tail = bars.at(-1)!;
       assert.deepEqual(instructionLinesOf(tail), []);
       assert.ok(!tail.includes("旧指令不应被复读"), "旧注入栏不进指令源");

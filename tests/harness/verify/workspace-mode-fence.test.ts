@@ -1,24 +1,25 @@
 /**
- * ADR-0092 / specs/fs-isolation-modes.md SC11 + SC12 — **verify 命令面**的
- * 工作区档真实围栏行为。
+ * ADR-0092 — real workspace-mode fence behaviour on the **verify command face**.
  *
- * 镜像 `tests/harness/aci/bash-workspace-mode-fence.test.ts` 的形态（真实
- * bwrap，`it.skipIf(!hasBwrap())`，host 缺 bwrap 时整组跳过），但被测面是
- * `makeDefaultRunVerify`（verify 闭环的缺省执行体），不是 bash 工具。
+ * Mirrors `tests/harness/aci/bash-workspace-mode-fence.test.ts` (real bwrap,
+ * `it.skipIf(!hasBwrap())`, whole group skipped when the host lacks bwrap),
+ * but the subject under test is `makeDefaultRunVerify` (the verify loop's
+ * default executor), not the bash tool.
  *
- * 为什么单独一份：`tests/harness/verify/sandbox-run.test.ts` 在文件级
- * `vi.mock` 掉了 `sandbox/index.ts` 的 `createBwrapFence` / `runInSandbox`
- * （捕获 opts 用），mock 是文件级的 —— 同一个文件里跑不了真围栏。argv 形态
- * 与真实行为必须两组测试共同钉住（与 bash 面同款分工）。
+ * Why a separate file: `tests/harness/verify/sandbox-run.test.ts` vi.mocks
+ * `createBwrapFence` / `runInSandbox` at file scope (to capture opts), so real
+ * fences cannot run in the same file. argv shape and real behaviour must be
+ * pinned by both files together (same split of duties as the bash face).
  *
- * 关键形状：**会话 tmp 嵌套在 homeRoot 之下**（生产形态 —— chat/hub 的会话
- * 文件夹是 `<home>/.iknow/projects/<slug>/<convId>/fence-tmp`）。这正是
- * 判别力所在：
- *   - `--ro-bind <home> <home>` 先盖住整棵 home；
- *   - `--bind <会话 tmp>` 必须晚于它（last-mount-wins）才能把该子树撬回可写；
- *   - `$TMPDIR` 必须等于该宿主真路径，否则围栏内的 `> "$TMPDIR/x"` 落到
- *     `/x`（guest 根）→ EACCES。
- * 缺任一条 → SC12 在该面上不成立（本文件即回归钉）。
+ * Key shape: **the session tmp nests under homeRoot** (production shape — a
+ * chat/hub session folder is `<home>/.iknow/projects/<slug>/<convId>/fence-tmp`).
+ * That is the discriminating part:
+ *   - `--ro-bind <home> <home>` covers the whole home tree first;
+ *   - `--bind <session tmp>` must come after it (last-mount-wins) to pry that
+ *     subtree writable again;
+ *   - `$TMPDIR` must equal that host real path, otherwise `> "$TMPDIR/x"`
+ *     inside the fence lands on `/x` (guest root) → EACCES.
+ * Miss any one and the contract fails on this face (this file is the regression pin).
  */
 
 import assert from "node:assert/strict";
@@ -57,9 +58,9 @@ function hasBwrap(): boolean {
 
 interface WorkspaceFixture {
   readonly homeRoot: string;
-  /** 会话 tmp，**嵌套在 homeRoot 之下**（生产形态）。 */
+  /** Session tmp, **nested under homeRoot** (production shape). */
   readonly sessionTmp: string;
-  /** taskRoot（围栏 cwd）；home 之外，避免 home ro-bind 盖过 cwd bind。 */
+  /** taskRoot (fence cwd); outside home so the home ro-bind never covers the cwd bind. */
   readonly taskRoot: string;
 }
 
@@ -170,7 +171,7 @@ describe("verify 命令面工作区档真实围栏（ADR-0092 SC11 / SC12）", (
       const { homeRoot, taskRoot } = makeWorkspaceFixture();
       const runVerify = makeDefaultRunVerify({
         cwd: taskRoot,
-        // tmpDir 缺席 —— 回退分支（未接线调用方的 V1 形态）。
+        // tmpDir absent — the fallback branch (V1 shape of unwired callers).
         fsMode: "workspace",
         homeRoot,
       });

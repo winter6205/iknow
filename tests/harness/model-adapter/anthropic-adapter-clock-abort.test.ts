@@ -1,18 +1,19 @@
 /**
- * transport-continue-persist T1 / spec inv 2（SC2）:**时钟 abort 不得翻成
- * `user_cancel`**；宿主 Ctrl+C 仍必须是 `user_cancel`。
+ * specs/transport-continue-persist.md invariant 2: **a clock abort must never
+ * be translated into `user_cancel`**; a host Ctrl+C must still be `user_cancel`.
  *
- * 这两件事在 thrown error 上完全同形：SDK 的 `APIUserAbortError` 不转发
- * `signal.reason`（fetch 不转发），且不设 `.name`（恒为 `"Error"`）。判据只能
- * 是 `signal.reason` 上的 `clock_abort` 标记，本文件把它钉死在翻译层。
+ * Both look identical on the thrown error: the SDK's `APIUserAbortError`
+ * doesn't forward `signal.reason` (fetch doesn't either) and never sets
+ * `.name` (always `"Error"`). The only discriminator is the `clock_abort`
+ * marker on `signal.reason` — this file nails that down in the translation layer.
  *
- * 分流：
- *   - 时钟标记 + 不可见 → `clock_timeout`（retry 类 → 可重发，spec inv 1）
- *   - 时钟标记 + 可见   → `timeout`（none 类 → 不重发）
- *   - 无标记的 abort    → `user_cancel`（宿主意图，绝不重发）
- *   - 429 / 5xx         → `llm_http` + `retry-after` 毫秒化（spec inv 4）
- *   - 连接故障          → `llm_network`（retry 类，spec inv 4）
- *   - cert / TLS 失败   → 非重试类（spec inv 4 的 cert 格）
+ * Routing:
+ *   - clock marker + invisible → `clock_timeout` (retry class → resendable, invariant 1)
+ *   - clock marker + visible   → `timeout` (none class → no resend)
+ *   - abort without marker     → `user_cancel` (host intent, never resend)
+ *   - 429 / 5xx                → `llm_http` + `retry-after` in milliseconds (invariant 4)
+ *   - connection faults        → `llm_network` (retry class, invariant 4)
+ *   - cert / TLS failure       → non-retry class (the cert cell of invariant 4)
  */
 
 import { describe, it } from "vitest";
@@ -30,7 +31,7 @@ import {
   parseRetryAfterMs,
 } from "../../../src/harness/fault-class.ts";
 
-/** 复刻 loop-engine 到点时的做法：abort 一个带 clock_abort 标记的 reason。 */
+/** Mirrors what loop-engine does at deadline: abort with a clock_abort-marked reason. */
 function clockSignal(
   source: "idle" | "hardCap",
   visible: boolean
@@ -46,7 +47,7 @@ function hostAbortSignal(): AbortSignal {
   return controller.signal;
 }
 
-/** SDK 形态的 abort:这就是时钟到点时 adapter 里被 catch 到的那个 error。 */
+/** SDK-shaped abort: this is the exact error the adapter catches when the clock fires. */
 function sdkAbortError(): APIUserAbortError {
   return new APIUserAbortError();
 }
@@ -167,11 +168,12 @@ describe("translateAnthropicTransportFault: retry-after 毫秒化", () => {
 });
 
 /**
- * transport-continue-persist T1 / spec inv 4:显式网络故障必须可重试,且
- * 不得被翻成 `llm_http` 假状态码 —— SDK 的 `APIConnectionError` /
- * `APIConnectionTimeoutError` 都 extends `APIError` 而 `status === undefined`,
- * 落到泛化 HTTP 支就会变成 `llm_http: 0`(classifyFault → none),让 spec 的
- * 「explicit network faults」重试格永远不可达。
+ * specs/transport-continue-persist.md invariant 4: explicit network faults must
+ * stay retryable and must not become `llm_http` fake status codes — the SDK's
+ * `APIConnectionError` / `APIConnectionTimeoutError` both extend `APIError`
+ * with `status === undefined`, so falling into the generic HTTP branch would
+ * yield `llm_http: 0` (classifyFault → none), making the spec's
+ * "explicit network faults" retry cell unreachable.
  */
 describe("translateAnthropicTransportFault: 连接故障 ≠ 假 HTTP 状态", () => {
   it("SDK APIConnectionError(cause 为 fetch failed)→ llm_network,归 retry 类", () => {
@@ -220,9 +222,10 @@ describe("translateAnthropicTransportFault: 连接故障 ≠ 假 HTTP 状态", (
 });
 
 /**
- * spec inv 4 的 cert 格:证书 / TLS 校验失败是确定性失败,重发同一请求
- * 只会再失败一次 —— 必须落非重试类,且不得冒充可重试的 `llm_network`。
- * 这里显式钉住,而不是依赖「正则恰好没命中」的偶然。
+ * The cert cell of invariant 4: certificate / TLS verification failure is
+ * deterministic — resending the same request just fails again. It must land in
+ * the non-retry class and must not masquerade as retryable `llm_network`.
+ * Pinned explicitly here rather than relying on "the regex happens to miss".
  */
 describe("translateAnthropicTransportFault: cert 失败不可重试", () => {
   it("unable to verify the first certificate → protocol_error(none 类)", () => {
@@ -244,8 +247,9 @@ describe("translateAnthropicTransportFault: cert 失败不可重试", () => {
     assert.equal(classifyFault(event), "none");
   });
 
-  // cert 支只在「无 HTTP status」时才可判：真 HTTP 语义优先,否则一个碰巧
-  // 提到证书字样的 5xx 会被降级成不可重试,丢掉本该有的重试。
+  // The cert branch may only decide when there is no HTTP status: real HTTP
+  // semantics take precedence, otherwise a 5xx that happens to mention
+  // certificates gets downgraded to non-retryable, losing its owed retry.
   it("带数值 status 的 500 即使文案提到证书 → 仍 llm_http 可重试", () => {
     const err = new APIError(
       500,

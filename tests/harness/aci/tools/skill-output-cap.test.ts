@@ -1,25 +1,31 @@
 /**
  * tests/harness/aci/tools/skill-output-cap.test.ts
  *
- * ADR-0083 / specs/skill-body-load-contract.md 的行为合同：skill 正文不经
- * executor 的 `OUTPUT_HARD_CAP`（20000 字符）兜底闸。
+ * ADR-0083 behavior contract: skill bodies bypass the executor's
+ * `OUTPUT_HARD_CAP` (20000 chars) fallback gate.
  *
- * 断言面刻意走**真实 executor**（`createExecutor` + `createRegistry`），
- * 不是 handler 直调 —— 豁免是 executor 读 def 上的装配期声明决定的，handler
- * 级断言证明不了闸被绕过。
+ * Assertions deliberately run through the **real executor**
+ * (`createExecutor` + `createRegistry`), not direct handler calls — the
+ * exemption is decided by the executor reading the assembly-time declaration
+ * on the def; handler-level assertions cannot prove the gate was bypassed.
  *
- *   - SC1 超长正文完整交付：>20000 字符 SKILL.md → 交付文本与
- *     `createSkillBody` 产物逐字节相等、含 `</skill_files>`、无截断标记。
- *   - SC3 闸不泄漏：内建非豁免工具（read_file）与 MCP 形态（toAciToolDef
- *     产物）的超长输出仍截到 <= 20000 且带既有标记。
- *   - SC6 失败面不变：未知名 → 既有引导句；SKILL.md 读失败 → executor
- *     `execution_failed`，不被豁免改写成静默假成功。
+ *   - Over-long bodies delivered whole: a >20000-char SKILL.md → delivered text
+ *     is byte-equal to the `createSkillBody` product, ends with
+ *     `</skill_files>`, no truncation marker.
+ *   - The gate does not leak: over-long output from a built-in non-exempt tool
+ *     (read_file) and from the MCP shape (toAciToolDef product) is still cut to
+ *     <= 20000 with the existing marker.
+ *   - Failure surface unchanged: unknown name → existing guidance sentence;
+ *     SKILL.md read failure → executor `execution_failed`; the exemption never
+ *     rewrites it into a silent false success.
  *
- * 环境依赖说明：本文件用 `buildHarnessEngine` 装配生产 executor 取证，
- * 该装配链经 `createDefaultAciRegistry` → `createBashTool` →
- * `requireBwrap` fail-loud，故已进 CI --exclude 集（bwrap 缺失的 runner
- * 结构性跑不了，本地 WSL 全量验证）。该用例是 ADR-0083 唯一「生产装配实际
- * 落值」的证据，不用自建 registry 顶替（那会绕开被测的装配链本身）。
+ * Environment note: this file assembles the production executor via
+ * `buildHarnessEngine`, and that chain goes
+ * `createDefaultAciRegistry` → `createBashTool` → `requireBwrap` fail-loud, so
+ * it is in the CI --exclude set (runners without bwrap structurally cannot run
+ * it; full verification happens locally on WSL). That case is ADR-0083's only
+ * evidence of "the production assembly really lands the value" — a hand-built
+ * registry must not substitute (it would bypass the assembly chain under test).
  */
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -46,24 +52,25 @@ import type { ToolExecutionResult } from "../../../../src/harness/tools/types.js
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
 
-/** 兜底闸阈值（ADR-0006）：> 20000 字符即截断 + 标记。 */
+/** Fallback-gate threshold (ADR-0006): > 20000 chars → truncate + marker. */
 const OUTPUT_HARD_CAP = 20000;
 
-/** 既有截断标记前缀（executor.ts 模板，逐字）。 */
+/** Prefix of the existing truncation marker (verbatim from the executor.ts template). */
 const TRUNCATION_MARKER = "[executor: 输出超长已截断";
 
-/** 一行 fixture 正文的字符数（`repeat` 次数按目标字符数换算）。 */
+/** Char count of one fixture line (`repeat` counts are derived from target char counts). */
 const PROCEDURE_LINE_CHARS = "procedure line\n".length;
 
 /**
- * 1MB 级 fixture 的正文行数：spec S2 overflow 行口径是「>20000 字符正文
- * （含 1MB 级）」，上界取 1MB 字符。
+ * Line count for the 1MB-grade fixture body: the overflow contract is ">20000
+ * char bodies (including 1MB grade)", with 1M chars as the upper bound.
  */
 const MEGABYTE_BODY_REPEATS = Math.ceil(1_000_000 / PROCEDURE_LINE_CHARS);
 
 /**
- * 超长正文（含 frontmatter）——剥离后仍 > 20000 字符。`name` 同时是扫描期
- * catalog 键（scanner 取 frontmatter name，不是目录名）。
+ * Over-long body (frontmatter included) — still > 20000 chars after stripping.
+ * `name` is also the scan-time catalog key (the scanner reads the frontmatter
+ * name, not the directory name).
  */
 function longSkillMarkdown(name: string, repeats = 1800): string {
   const body = `${"procedure line\n".repeat(repeats)}`;
@@ -76,8 +83,8 @@ function longSkillMarkdown(name: string, repeats = 1800): string {
 }
 
 /**
- * 空正文 S2 类 fixture（spec 输入表 empty 行）——`createSkillBody` 的
- * `if (body.length > 0)` 守卫只省掉正文段，两段骨架仍必须齐全。
+ * Empty-body fixtures — `createSkillBody`'s `if (body.length > 0)` guard omits
+ * only the body segment; both skeleton sections must still be present.
  */
 const EMPTY_BODY_FIXTURES: ReadonlyArray<readonly [string, string]> = [
   ["fm-only", "---\nname: fm-only\n---\n"],
@@ -90,7 +97,7 @@ function entry(
   return { description: "default", disabled: false, ...overrides };
 }
 
-/** 取 ok result 的交付文本（模型可见 tool_result 的 text 块）。 */
+/** Extract the delivered text of an ok result (the text block of the model-visible tool_result). */
 function deliveredText(result: ToolExecutionResult | undefined): string {
   assert.equal(result?.kind, "ok");
   if (result?.kind !== "ok") throw new Error("unreachable");
@@ -116,7 +123,7 @@ async function writeSkillDir(name: string, raw: string): Promise<string> {
   return dir;
 }
 
-/** skill 工具经真实 executor 执行一次（可带 messages 快照）。 */
+/** Run the skill tool once through the real executor (optionally with a messages snapshot). */
 async function runSkillThroughExecutor(opts: {
   readonly tool: AciToolDef;
   readonly callName?: string;
@@ -145,8 +152,9 @@ async function runSkillThroughExecutor(opts: {
 }
 
 describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
-  // 组合路径（createSkillTool + createExecutor 就地装配）——证明豁免在
-  // 执行器读点生效，不证明生产装配链落值；后者是下一条（buildHarnessEngine）。
+  // Composition path (createSkillTool + createExecutor assembled here) — proves
+  // the exemption takes effect at the executor's read point, not that the
+  // production assembly chain lands it; that is the next case (buildHarnessEngine).
   it("组合路径 >20000 字符 SKILL.md：交付文本与 createSkillBody 产物逐字节相等、无截断标记", async () => {
     const dir = await writeSkillDir("echo", longSkillMarkdown("echo"));
     const tool = createSkillTool({
@@ -171,8 +179,8 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
 
   it(
     "1MB 级正文（spec S2 overflow 上界）：经 executor 完整交付、逐字节相等、无截断标记",
-    // 本机实测：写盘 4ms + 装配 5ms + executeAll 43ms ≈ 52ms 总计（1MB
-    // 正文）。30s 与同文件 buildHarnessEngine 用例同档，只兜 runner 抖动。
+    // Measured locally at ~52ms total for a 1MB body (write + assembly +
+    // executeAll). 30s matches the buildHarnessEngine case in this file; it only absorbs runner jitter.
     { timeout: 30_000 },
     async () => {
       const raw = longSkillMarkdown("huge", MEGABYTE_BODY_REPEATS);
@@ -189,7 +197,7 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
         await runSkillThroughExecutor({ tool, input: { name: "huge" } })
       );
 
-      // 100 倍于闸值：任何「按 OUTPUT_HARD_CAP 截断」的回归都会命中。
+      // 50x the gate: any "truncate at OUTPUT_HARD_CAP" regression would hit.
       assert.ok(
         expected.length > OUTPUT_HARD_CAP * 50,
         `装配产物须为 MB 级，实际 ${expected.length}`
@@ -217,9 +225,11 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
         longSkillMarkdown("prod-echo")
       );
       const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
-      // 扫描根注入是 scanner 三级通道之一（G1 Q6）：tmp fixture 走此通道进
-      // catalog，不依赖 cwd/.iknow 约定。同时压掉用户级 / 项目级扫描根，让
-      // 装配面只含本 fixture（同 tests/session-api/ensure-deps-aci-tools.test.ts）。
+      // Scan-root injection is one of the scanner's three channels: the tmp
+      // fixture enters the catalog this way instead of relying on cwd/.iknow
+      // conventions. Also suppress the user-level / project-level scan roots so
+      // the assembled surface contains only this fixture (same as
+      // tests/session-api/ensure-deps-aci-tools.test.ts).
       const prevHome = process.env.HOME;
       const emptyHome = join(scratch, "home");
       await mkdir(emptyHome, { recursive: true });
@@ -227,8 +237,8 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
       process.env.HOME = emptyHome;
       try {
         const built = await buildHarnessEngine({
-          // 最小可用 IknowEnv（与 tests/harness/build-engine.test.ts 的
-          // makeEnv 同形，apiKey 占位）。
+          // Minimal usable IknowEnv (same shape as makeEnv in
+          // tests/harness/build-engine.test.ts, placeholder apiKey).
           env: {
             llm: {
               baseUrl: "http://127.0.0.1:9999",
@@ -251,33 +261,36 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
             productRoot: undefined,
           },
           askUser: createNoAskUser(),
-          // 三根钉到 tmp scratch（同 tests/harness/build-engine.test.ts 的
-          // sandboxRoot/workspaceRoot/productRoot 三连）：本用例证的是装配
-          // 链落值 + executor 交付，不该把仓库自身的 mcp.json / .iknow/skills
-          // 拖进扫描面（那会让用例依赖工作区内容并拉起无关 MCP 连接）。
+          // Pin all three roots to the tmp scratch (same triple as
+          // tests/harness/build-engine.test.ts): this case proves the assembly
+          // chain lands the value + executor delivery; it must not drag the
+          // repo's own mcp.json / .iknow/skills into the scan surface (that
+          // would couple the test to workspace content and start unrelated MCP connections).
           sandboxRoot: scratch,
           workspaceRoot: scratch,
           productRoot: scratch,
-          // 项目身份根 = 项目 skills 的扫描根，也钉到 scratch，避免仓库
-          // 自身的 `.iknow/skills` 混进 catalog（压掉无关 stderr 并让用例与
-          // 工作区内容无关）。
+          // The project identity root doubles as the project-skills scan root;
+          // pin it to scratch too, so the repo's own `.iknow/skills` stays out
+          // of the catalog (suppresses unrelated stderr and decouples from workspace content).
           projectIdentityRoot: scratch,
-          // 身份根 / cwd 也钉 scratch（否则 resolveSessionRoots 回落 cwd 再
-          // 次扫到仓库）。cwd 只在缺省路径使用，钉住是让「生产装配」这一
-          // 命题不被工作区状态污染。
+          // Identity root / cwd pinned to scratch as well (otherwise
+          // resolveSessionRoots falls back to cwd and scans the repo again).
+          // cwd is only used on the default path; pinning it keeps the
+          // "production assembly" proposition uncontaminated by workspace state.
           cwd: scratch,
           userHome: emptyHome,
-          // 本用例验 skill 正文在**生产装配链上**的 exemptFromOutputCap 落值,
-          // 不验溢出退场 / 索引降档(专测见 build-engine-tool-overflow.test.ts、
-          // disclosure-index-align/)。旁路装配期 countTokens:缝语义见
-          // BuildEngineOpts.skipCountTokens 注释。
+          // This case verifies exemptFromOutputCap landing on the **production
+          // assembly chain**; overflow ejection / index downgrade are not
+          // tested here (see build-engine-tool-overflow.test.ts and
+          // disclosure-index-align). Assembly-time countTokens is bypassed; the
+          // seam's semantics are in the BuildEngineOpts.skipCountTokens comment.
           skipCountTokens: true,
         });
         try {
           const def = built.deps.registry.get("skill");
           assert.ok(def !== undefined, "生产装配必须含 skill 工具");
-          // 这一条是本 spec 的核心：落值发生在生产装配链上（createSkillTool），
-          // 不是只在测试自建的 def 上。
+          // The core point: the value lands on the production assembly chain
+          // (createSkillTool), not only on a test-built def.
           assert.equal(def!.exemptFromOutputCap, true);
 
           const text = deliveredText(
@@ -320,8 +333,8 @@ describe("ADR-0083 — S2 empty 类：空正文仍装配两段骨架（经真实
         dir,
       });
 
-      // deliveredText 内含 assert.equal(result?.kind, "ok") —— 未 panic 的
-      // 机器可检形态（失败会以 execution_failed 落，不会静默）。
+      // deliveredText contains assert.equal(result?.kind, "ok") — the
+      // machine-checkable form of "no panic" (failure lands as execution_failed, never silent).
       const text = deliveredText(
         await runSkillThroughExecutor({ tool, input: { name } })
       );
@@ -341,8 +354,8 @@ describe("ADR-0083 — S2 empty 类：空正文仍装配两段骨架（经真实
       dir,
     });
 
-    // 正文段缺席 → 首段即 `Base directory:`（createSkillBody 的
-    // `if (body.length > 0)` 守卫），不是「空字符串 + 空行 + ...」。
+    // Body segment absent → the first section is `Base directory:` (the
+    // `if (body.length > 0)` guard in createSkillBody), not "empty string + blank line + ...".
     assert.ok(
       body.startsWith("Base directory:"),
       `实际开头：${body.slice(0, 40)}`
@@ -352,13 +365,17 @@ describe("ADR-0083 — S2 empty 类：空正文仍装配两段骨架（经真实
 
 describe("ADR-0083 SC3 — 闸不泄漏（非豁免工具仍截断）", () => {
   it("内建 read_file：工具层页预算先收束，交付 <= 20000 且无 executor 二次截断标记（ADR-0006 D4）", async () => {
-    // read_file 不豁免（下面断言 def 上无声明）—— 但它的**精度闸**已覆盖
-    // 所有可达输出：显式 limit 与整读路径共用 16000 cp / 19000 单元页预算，
-    // 1MB 单行文件也在工具层截断并显式标注。因此经真实 executor 交付时
-    // executor 兜底闸不再触发 —— 这正是 ADR-0006 Decision 4 要的两层不重叠
-    // （工具级管「读多少」，executor 管「输出不超多少」），不是闸被绕过。
-    // executor 兜底闸咬得住非豁免工具这件事由本 describe 下 MCP 形态用例
-    // 认证（那条的生产者没有工具级预算，输出真能超闸）。
+    // read_file is not exempt (the def carries no declaration below) — but its
+    // **precision gate** already bounds every reachable output: explicit limit
+    // and whole-file reads share the 16000 cp / 19000 unit page budget, and
+    // even a 1MB single-line file is truncated at the tool layer with an
+    // explicit note. So delivering through the real executor never triggers the
+    // fallback gate — exactly the two non-overlapping layers ADR-0006
+    // Decision 4 wants (tool layer governs "how much to read", executor
+    // governs "output stays under the cap"), not a bypassed gate. That the
+    // executor gate still bites non-exempt tools is proven by the MCP-shape
+    // case in this describe (its producer has no tool-layer budget, so output
+    // really can exceed the cap).
     const dir = await writeSkillDir("plain", "x".repeat(30_000));
     const file = join(dir, "SKILL.md");
     const tool = createReadFileTool(dir);
@@ -382,8 +399,9 @@ describe("ADR-0083 SC3 — 闸不泄漏（非豁免工具仍截断）", () => {
   });
 
   it("MCP 形态（toAciToolDef 产物）：超长结果仍截断，且经 registerExternal 后声明被剥离", async () => {
-    // 结构半：转换路径不落声明（防自称）；行为半：真实 ACI registry 存储的
-    // def 上无声明 → 交付文本仍 <= 20000 且带既有标记。
+    // Structural half: the conversion path drops the declaration (no
+    // self-claiming). Behavioral half: the def stored in the real ACI registry
+    // carries no declaration → delivered text is still <= 20000 with the existing marker.
     const call = async (): Promise<CallToolResult> => ({
       content: [{ type: "text", text: "m".repeat(30_000) }],
     });
@@ -442,8 +460,9 @@ describe("ADR-0083 SC6 — 失败面不因豁免改写", () => {
 
     const text = deliveredText(await runSkillThroughExecutor({ tool }));
 
-    // 与上一条（未知名）同强度：引导句必须点名 `<available_skills>` 且
-    // 不携带装配形态（`Base directory:` 是全文标记，出现即说明误装配）。
+    // Same strength as the unknown-name case: the guidance sentence must name
+    // `<available_skills>` and carry no assembled form (`Base directory:` is the
+    // full-text marker; its presence means assembly happened by mistake).
     assert.ok(text.includes("available_skills"));
     assert.equal(text.includes("Base directory:"), false);
     assert.ok(text.length < OUTPUT_HARD_CAP, "引导句远短于闸值");
@@ -490,7 +509,7 @@ describe("ADR-0083 — 声明不进 prompt schema / 不跨工具面漂移", () =
   });
 });
 
-/** registry 里内建 def 的声明读点（与本文件 SC1 生产装配同源）。 */
+/** Read point for built-in defs' declaration in the registry (same source as this file's production-assembly case). */
 describe("ADR-0083 — registry 冻结快照保留声明", () => {
   it("createRegistry 冻结后 def 上声明仍可读（executor 走注册表路径）", () => {
     const tool = createSkillTool({ catalog: createSkillCatalog([]) });

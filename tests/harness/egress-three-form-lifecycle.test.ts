@@ -1,29 +1,35 @@
 /**
  * tests/harness/egress-three-form-lifecycle.test.ts
  *
- * specs/egress-ssh-bridge.md T5/SC5 —— 三形态生命周期 + yolo no-op 接线
- * （单桥条件形态：SOCKS 桥已被操作员裁定摘出本分支，一切断言只覆盖
- * 「当前在场的桥」= HTTP 桥 `iknow-egress-*`；不写死双桥，也不写死
- * 「永不出现第二桥」——T2 日后在场时本集自然扩容不判红）。
+ * specs/egress-ssh-bridge.md — three-form lifecycle + yolo no-op wiring.
+ * Single-bridge conditional form: the SOCKS bridge was cut from this branch by
+ * operator decision, so all assertions cover only the bridges actually present
+ * = the HTTP bridge `iknow-egress-*`; never hardcode two bridges, and never
+ * hardcode "a second bridge will never appear" — once more bridges land, this
+ * suite should grow naturally without going red.
  *
- * 钉住的不变式：
- *   - invariant 4（注入面 SSOT）：bash 前台 / background per-task / verify
- *     单例三形态消费**同一份** EgressFenceSpec —— spec 字段集
- *     {unixSocketPath, sandboxLocalPort, env, innerBridgeScript} 在三个
- *     命令装配点的消费形状（socket bind / --setenv env 注入 / bash -c
- *     payload 内层前导）逐形态相等；
- *   - invariant 3 / F1：yolo（消费面无缝入参）/ 工厂返 undefined /
- *     EgressRelayUnavailableError 三类「session 缺席」路径下，GIT_SSH_COMMAND
- *     与内层前导在围栏 argv 中**均缺席**，payload byte-identical；
- *   - 0097 §dispose 契约：per-task settle() 单次释放（exit 重复触发不
- *     二次 dispose）；verify 模块级单例 lazy start 跨调用复用；
- *   - SC5：stale socket 启动前清理 + dispose 收「全部已起的桥」+ 幂等
- *     （断言从 spawn spy 现场记录派生，不写死桥数）。
+ * Pinned invariants:
+ *   - injection-face SSOT: bash foreground / background per-task / verify
+ *     singleton consume the SAME EgressFenceSpec — the consumption shape of
+ *     {unixSocketPath, sandboxLocalPort, env, innerBridgeScript} at the three
+ *     command assembly points (socket bind / --setenv env injection /
+ *     bash -c inner prefix) is equal across forms;
+ *   - under all three "session absent" paths (yolo = no seam input at the
+ *     consumer / factory returns undefined / EgressRelayUnavailableError),
+ *     GIT_SSH_COMMAND and the inner prefix are BOTH absent from the fence
+ *     argv and the payload is byte-identical;
+ *   - ADR-0097 dispose contract: per-task settle() releases exactly once
+ *     (repeated exit must not dispose twice); verify's module-level singleton
+ *     lazy-starts once and is reused across calls;
+ *   - stale socket cleaned before start + dispose collects ALL started
+ *     bridges + is idempotent (assertions derived from live spawn-spy
+ *     records, bridge count not hardcoded).
  *
- * 手法：node:child_process.spawn 模块 mock 捕获三形态最终 fence argv
- * （同 bash-egress-inner-bridge.test.ts 先例）；session.js 的
- * createEgressSession 经 re-export 链注入（manager.test.ts 先例），三消费
- * 面共用同一 holder。真 session 生命周期件用 importActual 取。
+ * Technique: mock node:child_process.spawn to capture each form's final fence
+ * argv (precedent: bash-egress-inner-bridge.test.ts); inject
+ * createEgressSession through session.js's re-export chain (precedent:
+ * manager.test.ts) so all three consumers share one holder. Real session
+ * lifecycle parts come from importActual.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -51,9 +57,10 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 /**
- * 三消费面（bash 默认工厂 / manager per-task / verify 模块级）都经
- * sandbox/index → egress/index → session.js 的 re-export 链取
- * createEgressSession 绑定；替换本模块即同时驱动三形态的「起 session」面。
+ * All three consumers (bash default factory / manager per-task / verify
+ * module level) resolve createEgressSession through the re-export chain
+ * sandbox/index → egress/index → session.js; mocking this module drives the
+ * "start session" face of all three forms at once.
  */
 const sessionHolder: {
   impl: (opts: unknown) => Promise<unknown>;
@@ -116,7 +123,7 @@ function scratchDir(prefix: string): string {
   return d;
 }
 
-// ── 假 child：三形态共用（runInSandbox 等 close；manager settle 等 exit） ──
+// ── Fake child shared by all three forms (runInSandbox awaits close; manager settle awaits exit) ──
 
 function makeFakeChild(pid = 47181) {
   const child = Object.assign(new EventEmitter(), {
@@ -146,7 +153,7 @@ afterEach(() => {
   }
 });
 
-// ── 单桥 stub spec（形状来自真 builder = 注入面 SSOT） ─────────────────────
+// ── Single-bridge stub spec (shape built by the real builders = injection-face SSOT) ──
 
 const STUB_SOCKET = join(scratchDir("iknow-egress-3f-sock-"), "live.sock");
 const STUB_TOKEN = "ab".repeat(32);
@@ -178,7 +185,7 @@ const POLICY = {
   commandLabel: "test:three-form",
 } as const;
 
-// ── fence argv 事实抽取 ───────────────────────────────────────────────────
+// ── fence argv fact extraction ────────────────────────────────────────────
 
 function firstSpawnArgv(): readonly string[] {
   const call = spawnMock.mock.calls[0] as readonly unknown[] | undefined;
@@ -206,13 +213,13 @@ function fenceFacts(argv: readonly string[]) {
 type Facts = ReturnType<typeof fenceFacts>;
 
 const ABSENT: Partial<Facts> = {
-  payload: WIRE_CMD, // byte-identical（invariant 3 的 argv 面）
+  payload: WIRE_CMD, // byte-identical (the argv face of the zero-injection invariant)
   gitSsh: undefined,
   httpProxy: undefined,
   socketBound: false,
 };
 
-// ── 三形态驱动 ────────────────────────────────────────────────────────────
+// ── Three-form drivers ─────────────────────────────────────────────────────
 
 async function driveForegroundBash(): Promise<readonly string[]> {
   const tool = createBashTool(FIX_CWD, {
@@ -255,7 +262,7 @@ async function driveVerify(withPolicy: boolean): Promise<readonly string[]> {
   return firstSpawnArgv();
 }
 
-// ── 1. 三形态 spec 字段集相等（present 路径，单桥条件形态） ────────────────
+// ── 1. All three forms consume the same spec field set (present path, single-bridge form) ──
 
 describe("egress-ssh-bridge T5 — 三形态消费同一份 EgressFenceSpec", () => {
   it("前台 / background / verify 的 socket bind、env 注入、内层前导逐形态相等", async () => {
@@ -265,20 +272,23 @@ describe("egress-ssh-bridge T5 — 三形态消费同一份 EgressFenceSpec", ()
     const vf = fenceFacts(await driveVerify(true));
 
     const expected = {
-      // 前导 = spec.innerBridgeScript 逐字 + "\n" + 命令（与 bash.ts 前台 T1
-      // 接线同形；background spawn factory 与 verify 命令包装是消费点）。
+      // prefix = spec.innerBridgeScript verbatim + "\n" + command (same shape
+      // as the bash.ts foreground wiring; background spawn factory and verify
+      // command wrapper are the consumption points).
       payload: `${STUB_SPEC.innerBridgeScript}\n${WIRE_CMD}`,
       gitSsh: STUB_SPEC.env.GIT_SSH_COMMAND,
       httpProxy: STUB_SPEC.env.HTTP_PROXY,
       socketBound: true,
     };
-    // spec 四字段在三个装配点的消费形状相等：unixSocketPath→--bind、
-    // env→--setenv（含 GIT_SSH_COMMAND，sandboxLocalPort 以 3128 字面
-    // 活在 env 值里）、innerBridgeScript→bash -c 前导。
+    // The four spec fields consume equally at all three assembly points:
+    // unixSocketPath→--bind, env→--setenv (incl. GIT_SSH_COMMAND;
+    // sandboxLocalPort lives as the literal 3128 inside env values),
+    // innerBridgeScript→bash -c prefix.
     expect([bg, vf]).toEqual([expected, expected]);
     expect(fg).toEqual(expected);
-    // 前导含单桥中继 + trap（形状 SSOT 在 session.ts，此处钉三处接线；
-    // ADR-0107：自带 node 中继件，旧宿主装包字样不得回潮）。
+    // Prefix carries the single-bridge relay + trap (shape SSOT lives in
+    // session.ts; this pins the wiring at three sites; ADR-0107: shipped
+    // node relay assets — old host-package-install wording must not return).
     for (const f of [fg, bg, vf]) {
       expect(f.payload).toContain("egress-tcp-relay.mjs");
       expect(f.payload).toContain(" 3128 ");
@@ -288,7 +298,7 @@ describe("egress-ssh-bridge T5 — 三形态消费同一份 EgressFenceSpec", ()
   });
 });
 
-// ── 2. F1 零注入：yolo / 工厂 undefined / EgressRelayUnavailableError ────
+// ── 2. Zero injection: yolo / factory undefined / EgressRelayUnavailableError ──
 
 describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invariant 3）", () => {
   it("前台：无 egressPolicyFactory（yolo 姿态 = 无出网资格入参）→ argv 零注入", async () => {
@@ -319,8 +329,9 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
       }) as never,
     });
     spawnMock.mockClear();
-    // bash 装配层把 start 失败留痕为 infra violation → typed failure；
-    // 执行本身已发生（F1「等同本次调用无 egress 缝」形态）。
+    // The bash assembly layer records a start failure as an infra violation
+    // → typed failure; the run itself already happened (equivalent to this
+    // call having no egress seam).
     await expect(
       tool.handler({ command: WIRE_CMD }, { conversationId: "conv-3f-s" })
     ).rejects.toThrow();
@@ -357,7 +368,7 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
   });
 });
 
-// ── 3. 生命周期通道（零新代码，只加断言） ─────────────────────────────────
+// ── 3. Lifecycle channels (no new code, assertions only) ───────────────────
 
 describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", () => {
   it("per-task settle()：exit 触发 dispose 一次，重复 exit 不二次释放", async () => {
@@ -385,7 +396,7 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
     settledChild!.emit("exit", 0, null);
     await new Promise<void>((r) => setImmediate(r));
     expect(dispose).toHaveBeenCalledTimes(1);
-    // 重复 exit（shutdown 级联 / 事件重放形状）不再二次 dispose。
+    // Repeated exit (shutdown cascade / event-replay shape) must not dispose a second time.
     settledChild!.emit("exit", 0, null);
     await new Promise<void>((r) => setImmediate(r));
     expect(dispose).toHaveBeenCalledTimes(1);
@@ -400,7 +411,8 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
     await runVerify("echo a", {});
     await runVerify("echo b", {});
     expect(sessionHolder.calls).toBe(1);
-    // 0097 §dispose 契约：释放调用幂等（未起 / 已释放静默成功）。
+    // ADR-0097 dispose contract: release is idempotent (not started / already
+    // released → silent success).
     await expect(
       disposeEgressSessionForVerify(runVerify)
     ).resolves.toBeUndefined();
@@ -410,9 +422,10 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
   });
 
   it("资源在场证据：stale socket 启动前清理 + server 真 listen + dispose 收全部已起资源且幂等", async () => {
-    // 真 createEgressSession（importActual）+ relayResolver / socketPath
-    // 注入 seam（ADR-0107：桥 = 宿主无进程的 unix listen，资源在场性以
-    // socket 文件与真实应答为证据，不依赖任何宿主装包面）。
+    // Real createEgressSession (importActual) + relayResolver / socketPath
+    // injection seams (ADR-0107: bridge = unix listen with no host process;
+    // resource presence is evidenced by the socket file and a live listener,
+    // independent of any host package surface).
     const dir = scratchDir("iknow-egress-3f-life-");
     const stalePath = join(dir, "iknow-egress-stale-3f.sock");
     writeFileSync(stalePath, "");
@@ -429,15 +442,17 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
       socketPathFactory: () => stalePath,
     });
 
-    // 启动即在场：stale 空文件被换装成真监听（server 本体 listen unix
-    // socket），默认在场的资源 = HTTP 代理监听一条（SOCKS 桥已被操作员
-    // 裁定摘出本分支，T2 日后在场时本集自然扩容不判红 —— SC5 条件形态）。
+    // Present right after start: the stale empty file is replaced by a real
+    // listener (the server itself listens on the unix socket); default present
+    // resource = one HTTP proxy listener (SOCKS bridge was cut from this
+    // branch by operator decision — when it lands again this suite should grow
+    // naturally without going red; conditional form).
     expect(existsSync(stalePath)).toBe(true);
 
     await session.dispose();
-    // dispose 单通道收「全部已起的资源」：监听关闭 + socket 删除。
+    // One dispose channel collects ALL started resources: listener closed + socket removed.
     expect(existsSync(stalePath)).toBe(false);
-    // 幂等：重复 dispose 不抛（finally-safe）。
+    // Idempotent: repeated dispose never throws (finally-safe).
     await session.dispose();
     await session.dispose();
   });

@@ -1,26 +1,34 @@
 /**
- * ADR-0045 — sandbox 执行面 server 化(T8 实施)合同测试。
+ * ADR-0045 — contract tests for server-izing the sandbox execution surface.
  *
- * 覆盖 ADR-0045 §4 四类故障路径(overflow 已合并进 truncateByCodePoint
- * 契约,不抛 typed error)+ §5 失败合同 + 两型协议 happy path:
- *   - §2.1 短生命周期 exec happy path(等子进程退出、stdout/stderr/exitCode)
- *   - §2.2 长生命周期 spawn happy path(同步 task_id、AsyncIterable 事件流、
- *     stop control message 触发 SIGTERM → SIGKILL 升级)
- *   - §4 empty fence / cwd → typed fail-loud,不 spawn(empty_task_id 已
- *     删除 —— task_id 由 server randomBytes 生成,caller 无法传空)
- *   - §4 negative maxOutputCodePoints / killGraceMs → RangeError 沿 truncateByCodePoint 契约
- *   - §4 concurrent fence 构造无共享 mutable state(并行允许,显式记录决策)
- *   - §4 exception:child 进程退出未回执 → typed orphan_process_group fail-loud
- *     + pgid reap;spawn 失败 → typed server_unreachable fail-loud
- *   - §5 ctx.signal abort:exec 协议透传到 spawnWithStopSignal;spawn 协议经 stop
- *     control message 取消,不只丢 client promise(orphan 进程组 reap 纪律)
+ * Covers ADR-0045 §4's fault classes (overflow folded into the
+ * truncateByCodePoint contract, so it throws no typed error) + §5's failure
+ * contract + the two protocol shapes' happy paths:
+ *   - §2.1 short-lived exec happy path (await child exit; stdout/stderr/exitCode)
+ *   - §2.2 long-lived spawn happy path (synchronous task_id, AsyncIterable event
+ *     stream, stop control message driving SIGTERM → SIGKILL escalation)
+ *   - §4 empty fence / cwd → typed fail-loud, no spawn (empty_task_id is gone —
+ *     task_id comes from the server's randomBytes, callers cannot pass empty)
+ *   - §4 negative maxOutputCodePoints / killGraceMs → RangeError along the
+ *     truncateByCodePoint contract
+ *   - §4 concurrent fence construction shares no mutable state (parallelism is
+ *     allowed; a recorded decision)
+ *   - §4 exception: child exits after accept without an ack → typed
+ *     orphan_process_group fail-loud + pgid reap; spawn failure → typed
+ *     server_unreachable fail-loud
+ *   - §5 ctx.signal abort: the exec protocol routes through
+ *     spawnWithStopSignal; the spawn protocol cancels via the stop control
+ *     message, never by just dropping the client promise (orphan process-group
+ *     reap discipline)
  *
- * 同进程 router 形态下「server 不可达」物理上不发生,但合同保留 typed
- * fail-loud 语义并写测试覆盖 —— 为未来跨进程化留接口稳定。
+ * In the same-process router shape "server unreachable" physically cannot
+ * happen, but the contract keeps the typed fail-loud semantics with test
+ * coverage — keeping the interface stable for a future cross-process split.
  *
- * 同 trace double-track:不依赖 trace-service(stub-server 不产 trace 事件),
- * 但每条断言有两条路径 —— server handler 直接调用 + runInSandbox 间接路径,
- * 让 router 行为本身保持 ground truth。
+ * Same double-track as trace: no trace-service dependency (the stub server emits
+ * no trace events), but every assertion runs two paths — direct server-handler
+ * call + the indirect runInSandbox path — so the router behavior itself stays
+ * ground truth.
  */
 
 import assert from "node:assert/strict";
@@ -52,7 +60,7 @@ afterEach(() => {
   for (const d of SCRATCH) rmSync(d, { recursive: true, force: true });
 });
 
-/** 测试替身 fence —— 不经 bwrap,用 sh 直接当 argv(与 runner.test.ts 同款)。 */
+/** Test-double fence — no bwrap; sh acts as the argv directly (same shape as runner.test.ts). */
 function shFence(command: string): BwrapFence {
   return Object.freeze({
     argv: Object.freeze(["sh", "-c", command]),
@@ -60,7 +68,7 @@ function shFence(command: string): BwrapFence {
   });
 }
 
-/** typed-error kind 枚举 —— 4 类故障路径分支。 */
+/** typed-error kind enumeration — the fault-path branches. */
 function expectTypedFail(
   err: unknown,
   kind: SandboxServerError["kind"]
@@ -75,7 +83,7 @@ function expectTypedFail(
   );
 }
 
-// ─── §2.1 短生命周期 exec happy path ──────────────────────────────────────
+// ─── §2.1 short-lived exec happy path ──────────────────────────────────────
 
 describe("sandbox server exec — short-lived happy path (ADR-0045 §2.1)", () => {
   it("returns exitCode + stdout + stderr from a completed fence child", async () => {
@@ -117,7 +125,7 @@ describe("sandbox server exec — short-lived happy path (ADR-0045 §2.1)", () =
       signal: controller.signal,
       killGraceMs: 50,
     });
-    // 等 child.pid 落盘(信号透传到 spawnWithStopSignal 已发生)。
+    // wait for child.pid to land (the signal has already routed through spawnWithStopSignal).
     await new Promise<void>((resolve) => {
       const start = Date.now();
       const i = setInterval(() => {
@@ -140,7 +148,7 @@ describe("sandbox server exec — short-lived happy path (ADR-0045 §2.1)", () =
   }, 5_000);
 });
 
-// ─── §2.2 长生命周期 spawn happy path ──────────────────────────────────────
+// ─── §2.2 long-lived spawn happy path ──────────────────────────────────────
 
 describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () => {
   it("resolves task_id synchronously, log_path present, event stream yields stdout", async () => {
@@ -173,7 +181,7 @@ describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () 
       cwd,
       env: process.env,
     });
-    // 等子进程真正起来 —— 否则 stop 可能在 SIGTERM 之前就看到 close。
+    // wait for the child to really come up — otherwise stop may see close before SIGTERM.
     await new Promise((r) => setTimeout(r, 100));
     await handle.stop(50);
     const events = await drainUntilExit(handle);
@@ -194,12 +202,12 @@ describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () 
       env: process.env,
     });
     await handle.stop(30);
-    await handle.stop(30); // 不抛错
+    await handle.stop(30); // does not throw
     assert.ok(true);
   }, 10_000);
 });
 
-// ─── §4 四类故障路径(overflow 已合并进 truncateByCodePoint)──────────────────────
+// ─── §4 fault classes (overflow folded into truncateByCodePoint) ────────────
 
 describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () => {
   it("empty: missing fence in exec request → empty_request, no spawn", async () => {
@@ -326,7 +334,7 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
 
   it("exception: spawn failure surfaces as typed server_unreachable (fail-loud, no silent degrade)", async () => {
     const server = createSandboxServer();
-    // bwrap 不存在的命令 —— server.exec 必须抛 typed fail-loud 而非静默降级。
+    // a nonexistent fence command — server.exec must throw typed fail-loud instead of silently degrading.
     try {
       await server.exec({
         kind: "exec",
@@ -342,7 +350,7 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
       });
       assert.fail("expected throw");
     } catch (err) {
-      // exec 阶段 spawn 失败 → typed server_unreachable(沿 ADR §5 不降级)。
+      // spawn failure during exec → typed server_unreachable (no degrade, per ADR §5).
       expectTypedFail(err, "server_unreachable");
     }
   });
@@ -350,13 +358,13 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
   it("exception: spawn accept 后子进程退出未回执 → typed orphan_process_group fail-loud + pgid reap", async () => {
     const server = createSandboxServer();
     const cwd = makeScratch("server-orphan-");
-    // spawn argv[0] 指向不存在的命令 —— Node 在 spawn syscall 失败时
-    // 触发 child.once("error"),路径 = "accept 后子进程异常退出未回执"。
-    // 修复前:server 只 reap + close,handle.events() 自然 drain 出空
-    // stream,client 拿不到 typed fail-loud → 静默降级到「exit event
-    // 已落,push(exit,null,null)」,client 看不到 typed error。
-    // 修复后:rejectHandle typed orphan_process_group + context 含
-    // 「accept 后子进程异常退出未回执」 + task_id 锚定。
+    // spawn argv[0] points at a nonexistent command: Node fires child.once("error")
+    // when the spawn syscall fails — the "child exited after accept without an ack"
+    // path (the product context marker `accept 后子进程异常退出未回执`, "child
+    // exited after accept without ack", asserted below). Silent degradation is the
+    // old bug shape: the server only reaped + closed, events() drained empty, and
+    // the client saw no typed error. The contract now: reject with typed
+    // orphan_process_group whose context carries the task_id + that marker.
     const task = server.spawn({
       kind: "spawn",
       fence: Object.freeze({
@@ -383,7 +391,7 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
   });
 });
 
-// ─── §5 失败合同:signal abort 经 control message 取消 ──────────────────────
+// ─── §5 failure contract: signal abort cancels via control message ─────────
 
 describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
   it("exec: ctx.signal abort routes through stopTree — child gets killed, no orphan", async () => {
@@ -398,8 +406,8 @@ describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
       signal: controller.signal,
       killGraceMs: 30,
     });
-    // 立即 abort —— handler 必须把信号透传到 spawnWithStopSignal stopTree,
-    // 不只丢 client promise。
+    // abort immediately — the handler must route the signal into
+    // spawnWithStopSignal's stopTree, not just drop the client promise.
     controller.abort();
     const result = await execution;
     assert.notEqual(result.exitCode, 0, "aborted exec must yield non-zero");
@@ -416,7 +424,7 @@ describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
       env: process.env,
       signal: controller.signal,
     });
-    // 等子进程起来再 abort。
+    // let the child start before aborting.
     await new Promise((r) => setTimeout(r, 100));
     controller.abort();
     const events = await drainUntilExit(handle);
@@ -460,7 +468,7 @@ describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
   }, 10_000);
 });
 
-// ─── §6 runInSandbox 仍为 router handler 薄包装 ───────────────────────────
+// ─── §6 runInSandbox stays a thin wrapper over the router handler ──────────
 
 describe("runInSandbox — adapter for §1 compat fixtures (ADR-0045 §1)", () => {
   it("delegates to server.exec (observable behavior preserved)", async () => {
@@ -512,9 +520,10 @@ function existsSyncSafe(p: string): boolean {
 }
 
 /**
- * 抽离 4 处重复:`for await ... break on exit`。返回 exit 事件之前的所有
- * 事件(包括 exit 自己)。注意 events() 单 consumer 契约 —— 同一 handle
- * 上多次调用会抢事件,故 drainUntilExit 只能调一次。
+ * Deduplicates the four `for await ... break on exit` sites: returns every event
+ * up to and including the exit event. Note the single-consumer contract of
+ * events() — calling this twice on one handle steals events, so drainUntilExit
+ * may be called only once per handle.
  */
 async function drainUntilExit(
   handle: SandboxTaskHandle

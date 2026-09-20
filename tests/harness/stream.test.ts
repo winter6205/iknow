@@ -1,14 +1,16 @@
 /**
- * T2 (#175): HarnessStreamEvent 判别联合契约 SSOT (src/harness/stream.ts)。
+ * HarnessStreamEvent discriminated-union contract SSOT (src/harness/stream.ts).
  *
- * D1 最小集 (plans/harness-streaming.md §2) + 阶段扩展:
- *   - text_delta / tool_call_start 两种事件;
- *   - 阶段二 (plans/tui-stream-phase2.md): thinking_delta / tool_call_start.id;
- *   - T1 (plans/tui-render-optimization.md): tool_input_delta — tool input 增量
- *     流逐段 emit (增量只服务展示层,权威 input 仍由 finalMessage() 一次性交付)。
+ * Minimal set + phased extensions:
+ *   - text_delta / tool_call_start events;
+ *   - thinking_delta / tool_call_start.id (stream phase 2);
+ *   - tool_input_delta — tool-input increments emitted segment by segment
+ *     (increments serve the display layer only; the authoritative input is
+ *     still delivered in full by finalMessage()).
  *
- * 本文件只验契约形状:判别字段 type 收窄后,event-shape 字段的访问编译期正确。
- * 端到端 streaming 行为归 T3/T4 测。
+ * This file verifies the contract shape only: after narrowing on the
+ * discriminant `type`, field access per event shape is compile-time correct.
+ * End-to-end streaming behavior is covered by other tests.
  */
 
 import { describe, it } from "vitest";
@@ -59,7 +61,7 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     const textPieces: string[] = [];
     for (const e of events) {
       if (e.type === "text_delta") {
-        // 编译期正确:窄化后只有 text 字段,没有 name
+        // Compile-time correct: after narrowing only the text field exists, no name
         textPieces.push(e.text);
       }
     }
@@ -76,7 +78,7 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     const ids: string[] = [];
     for (const e of events) {
       if (e.type === "tool_call_start") {
-        // 编译期正确:窄化后同时持有 name + id
+        // Compile-time correct: after narrowing both name + id are held
         names.push(e.name);
         ids.push(e.id);
       }
@@ -96,7 +98,7 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     const ids: string[] = [];
     for (const e of events) {
       if (e.type === "tool_input_delta") {
-        // 编译期正确:窄化后同时持有 id + partialJson,没有 text/name
+        // Compile-time correct: after narrowing both id + partialJson are held, no text/name
         ids.push(e.id);
         pieces.push(e.partialJson);
       }

@@ -1,19 +1,23 @@
 /**
- * Tests for `egress/violations.ts` — T4 egress 违例记录器。
+ * Tests for `egress/violations.ts` — the egress violation recorder.
  *
- * 钉住的不变式（来自 specs/network-egress-allowlist.md §Violation feedback
- * channel 第 1 跳 + ADR-0097）：
- *   - record() 纯 append；同 sink 内多条违例保留顺序。
- *   - drain() 出快照后清空；二次 drain 返回空数组。
- *   - 防御性：空 host / 非整数 port 不入缓冲（防下游假设破灭）。
- *   - renderEgressViolations() 每个 reason 形出一行可读文本，包含被拒域名 + 端口。
- *   - 命令字段超过 80 字符被截断到 77 + `...`。
+ * Pinned invariants (from hop 1 of the violation feedback channel in
+ * specs/network-egress-allowlist.md + ADR-0097):
+ *   - record() is pure append; multiple violations within one sink keep order.
+ *   - drain() takes a snapshot then clears; a second drain returns an empty array.
+ *   - defensive: empty host / non-integer port never enter the buffer (downstream
+ *     assumptions must not break).
+ *   - renderEgressViolations() emits one readable line per reason, including the
+ *     denied hostname + port.
+ *   - command fields over 80 chars are truncated to 77 + `...`.
  *
- * T5 新增（spec §Violation feedback channel 第 3 跳）：
- *   - renderEgressFailureMessage() 拼 typed failure message：含
- *     `[network_denied]` 前缀 + 每条一行 + 共享补配指引 + 「命令已跑完」
- *     语义；infra / 域判定绝不混排同一段；allowlistSource 透传；
- *     命令已跑完但出网被拒语义保留（不误导为进程崩溃）。
+ * Hop 3 of the spec's violation feedback channel:
+ *   - renderEgressFailureMessage() assembles the typed failure message: the
+ *     `[network_denied]` prefix + one line per violation + a shared remediation
+ *     footer + "the command ran to completion" semantics; infra and domain
+ *     denial never mix in one section; allowlistSource passes through; the
+ *     "command completed but egress denied" meaning is kept (never misread as
+ *     a process crash).
  */
 
 import { describe, it, expect } from "vitest";
@@ -57,19 +61,19 @@ describe("createEgressViolationSink", () => {
     expect(drained[0]?.host).toBe("a.example");
     expect(drained[1]?.host).toBe("b.example");
     expect(sink.size()).toBe(0);
-    // 二次 drain 返回空（不重用上次快照）
+    // the second drain returns empty (the previous snapshot is not reused)
     expect(sink.drain()).toHaveLength(0);
   });
 
   it("rejects empty host and non-integer port (defensive)", () => {
     const sink = createEgressViolationSink();
-    // 空 host 不入
+    // empty host rejected
     sink.record(v({ host: "", port: 443 }) as unknown as EgressViolation);
-    // port=NaN 不入（防御）
+    // NaN port rejected (defensive)
     sink.record(
       v({ host: "a.example", port: Number.NaN }) as unknown as EgressViolation
     );
-    // 负 port 不入
+    // negative port rejected
     sink.record(
       v({ host: "a.example", port: -1 }) as unknown as EgressViolation
     );
@@ -121,8 +125,8 @@ describe("renderEgressViolations", () => {
     expect(out).toContain("[network_denied]");
     expect(out).toContain("loopback.example:443");
     expect(out).toContain("denied address");
-    // F5（egress-preset-allowlist spec）：preset 在场后 address-denied 文案逐字
-    // 不变——整行精确钉子防渲染漂移。
+    // with the preset in play the address-denied text stays verbatim — an exact
+    // whole-line pin guards against render drift (egress-preset-allowlist spec).
     expect(out).toBe(
       "[network_denied] loopback.example:443 resolved to a denied address " +
         "(command: echo hi); an allowed hostname must not resolve into " +
@@ -147,7 +151,7 @@ describe("renderEgressViolations", () => {
     const out = renderEgressViolations([
       v({ host: "a.example", port: 443, command: longCmd }),
     ]);
-    // 截断到 77 + "..." = 80 字符
+    // truncated to 77 + "..." = 80 chars
     expect(out).toContain("...");
     expect(out).not.toContain("x".repeat(120));
   });
@@ -170,7 +174,7 @@ describe("renderEgressViolations", () => {
     expect(out).toContain("[network_denied]");
     expect(out).toContain("egress seam unavailable");
     expect(out).toContain("infrastructure fault");
-    // 修复动作完全不同:infra → 不说「add to allowlist」。
+    // the fix action is entirely different: infra must not say "add to allowlist".
     expect(out).not.toContain("isolation.network.allowedDomains");
     expect(out).not.toContain("configure isolation.network");
   });
@@ -187,15 +191,15 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
         v({ host: "evil.example", port: 443, reason: "not-in-allowlist" }),
       ],
     });
-    // 前缀 —— 让既有 categorizeResult 命中 networkDenied → mid
+    // the prefix lets the existing categorizeResult hit networkDenied → mid
     expect(out).toContain("[network_denied]");
-    // 「命令已跑完但出网被拒」语义 —— 不误导为进程崩溃
+    // "the command ran to completion but egress was denied" — never misread as a crash
     expect(out).toContain("command ran to completion");
     expect(out).toContain("egress connection was denied");
-    // 每条违例一行
+    // one line per violation
     expect(out).toContain("evil.example:443");
     expect(out).toContain("isolation.network.allowedDomains");
-    // 共享补配指引尾注 —— 不逐行重复
+    // shared remediation footer — not repeated per line
     expect(out).toContain("Remediation:");
     expect(out).toContain("add the host to isolation.network.allowedDomains");
   });
@@ -209,12 +213,12 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     expect(out).toContain("[network_denied]");
     expect(out).toContain("egress seam unavailable");
     expect(out).toContain("infrastructure fault");
-    // 修复指引分两份:infra 路径
+    // remediation guidance splits in two; the infra path
     expect(out).toContain("iknow-bundled egress relay");
-    // ADR-0107：装包字样钉死不回潮。
+    // ADR-0107: package-install wording is pinned out and must not return.
     expect(out.toLowerCase()).not.toContain("socat");
     expect(out.toLowerCase()).not.toContain("apt");
-    // 域判定拒绝指引**不**出现
+    // the domain-denial guidance must **not** appear
     expect(out).not.toContain(
       "add the host to isolation.network.allowedDomains"
     );
@@ -229,7 +233,7 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     });
     expect(out).toContain("evil1.example:443");
     expect(out).toContain("evil2.example:80");
-    // 共享尾注只一份(不是 N 份)
+    // exactly one shared footer (not N)
     const matches = out.match(/Remediation:/g) ?? [];
     expect(matches.length).toBe(1);
   });
@@ -284,17 +288,17 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
       ],
       allowlistSource: "session",
     });
-    expect(out).toContain(
-      "Current allowlist source: session-level allowlist."
-    );
+    expect(out).toContain("Current allowlist source: session-level allowlist.");
   });
 });
 
 /**
- * spec invariant 4 / SC4：封闭三档清算后，旧值 pres[e]t（带引号字面值）
- * 不得在任何 source 语义位残留（grep 断言）。渲染文案 "built-in preset
- * allowlist (...)" 是 label 内容不是 source 值，不含引号紧邻的 pres[e]t，
- * 故不被本断言命中；needle 与本文件正文都用 pres[e]t 写法避免自匹配。
+ * spec invariant 4: after the closed three-tier settlement, the legacy quoted
+ * literal pres[e]t must not linger in any source-semantic position (grep
+ * assertion). The rendered label "built-in preset allowlist (...)" is label
+ * content, not a source value, and contains no quote-adjacent pres[e]t, so this
+ * assertion does not hit it; both the needle and this file's prose use the
+ * pres[e]t spelling to avoid self-matching.
  */
 describe("T2 三档清算 grep 钉子：全仓代码面无 pres[e]t 值残留", () => {
   it("src / tests / scripts 的 .ts 文件零 pres[e]t 带引号字面值", () => {
@@ -336,10 +340,10 @@ describe("sshHostKeyFailureGuidance — F4 known_hosts 指引 (spec §Failure pa
       "This key is not known by any other names.\n";
     const g = sshHostKeyFailureGuidance(stderr);
     expect(g).toBeDefined();
-    // F4 钉死要素：宿主侧 ssh-keyscan / 登录确认 + -o UserKnownHostsFile= 组合写法。
+    // pinned guidance elements: host-side ssh-keyscan / interactive login confirmation, combined with the -o UserKnownHostsFile= spelling.
     expect(g).toMatch(/ssh-keyscan/);
     expect(g).toMatch(/UserKnownHostsFile=/);
-    // 不默认注入 StrictHostKeyChecking=no（削弱信任面非 spec 授权）。
+    // never injects StrictHostKeyChecking=no by default (weakening the trust surface is not spec-authorized).
     expect(g).not.toMatch(/StrictHostKeyChecking=no/);
   });
 

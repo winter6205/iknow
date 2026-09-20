@@ -1,5 +1,5 @@
 /**
- * T6 Trace Service integration tests (GH #64).
+ * Trace Service integration tests.
  *
  * 5 scenarios end-to-end (stub model + stub tool, full run):
  *   1. pure text turn
@@ -39,7 +39,7 @@ function makeTmpTrace(conversationId: string): {
 } {
   const dir = mkdtempSync(join(tmpdir(), "iknow-trace-integration-"));
   tmpDirs.push(dir);
-  // T2 每会话独立文件: filePath 是目录, 实际写 <dir>/<conversationId>.jsonl。
+  // Per-session file layout: filePath is a directory; writes go to <dir>/<conversationId>.jsonl.
   const trace = createJsonlTraceService({
     filePath: dir,
     conversationId,
@@ -103,7 +103,7 @@ describe("T6 scenario 1: pure text turn", () => {
     assert.equal(result.turnCount, 1);
     assert.equal(result.finalText, "hello");
 
-    // T2 每会话独立文件: 目录下生成 <convId>.jsonl, 而非裸 trace.jsonl。
+    // Per-session files: <convId>.jsonl inside the dir, not a bare trace.jsonl.
     assert.equal(existsSync(traceFile), true, "per-session file must exist");
     assert.equal(
       existsSync(join(traceDir, "trace.jsonl")),
@@ -322,7 +322,7 @@ describe("T6 scenario 5: timeout", () => {
     assert.equal(result.turnCount, 0);
 
     const lines = parseJsonl(traceFile);
-    // plan T4 / ADR-0011:异常停收尾摘要额外落一条 status=ok llm_call。
+    // ADR-0011: abnormal-stop wrap-up adds one extra closing llm_call with status=ok.
     assert.equal(lines.length, 3);
     assert.equal(lines[0]!["record_type"], "llm_call");
     assert.equal(lines[0]!["status"], "error");

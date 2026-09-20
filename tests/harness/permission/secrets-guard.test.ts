@@ -1,21 +1,24 @@
 /**
- * secrets-guard.test.ts — T3 secrets-guard 模块（内置模式集 + 工厂）。
+ * secrets-guard.test.ts — the built-in pattern set + factory.
  *
- * 覆盖 spec Testing Strategy §4/§5：
- *  - §4 正例：6 类内置模式各 1 条拦截断言（私钥块 / sk- / AKIA / ghp_ / xox / cat id_rsa 外传）
- *  - 反例：普通命令、含 "key" 字样无害文本 → 放行
- *  - overflow：超 20000 字符 input 不抛、不误拦（截断尾部密钥特征不命中）；窗口内仍命中
- *  - 非法正则剔除：坏 pattern 剔除 + onHookError(guard-init) 触发 + 其余模式正常生效
- *  - enabled:false → 透明不拦
- *  - 并发一致性：同 input 多次调用结果一致（纯函数无状态）
- *  - stringify 失败（循环引用）→ 放行不抛（异常类边界）
- *  - 内置常量无真实密钥（占位正则形态 grep 断言）
+ * Coverage:
+ *  - positive: each of the 6 built-in pattern classes blocks at least one input
+ *    (private-key block / sk- / AKIA / ghp_ / xox / cat id_rsa exfiltration)
+ *  - negative: ordinary commands and harmless text containing "key" pass
+ *  - overflow: inputs over 20000 chars neither throw nor false-block (a key
+ *    signature beyond the truncation window misses); inside the window it still hits
+ *  - invalid-regex pruning: bad pattern dropped + onHookError(guard-init) fires +
+ *    remaining patterns stay effective
+ *  - enabled:false → transparent, never blocks
+ *  - concurrency: same input yields identical results (pure, stateless)
+ *  - stringify failure (cyclic refs) → pass without throwing
+ *  - built-in constants contain no real secrets (placeholder regex form, grep-asserted)
  */
 
-// NOTE (#406 T4): 这些测试覆盖 `settings.secrets.mode = "block"` 的 legacy
-// deny-only 路径。roundtrip 默认模式（识别 + 占位符替换 + bash 还原）在
-// tests/harness/secret-roundtrip/ 下覆盖。secrets-guard.ts 现在只作为
-// mode:"block" 的向后兼容装配保留。
+// NOTE: these tests cover the legacy deny-only path of `settings.secrets.mode = "block"`.
+// The roundtrip default mode (detection + placeholder substitution + bash restoration) is
+// covered under tests/harness/secret-roundtrip/. secrets-guard.ts is retained only as the
+// backward-compat assembly for mode:"block".
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -63,8 +66,8 @@ describe("createSecretsGuardHook — 正例（内置模式拦截）", () => {
 
   for (const c of cases) {
     it(`拦截：${c.label}`, async () => {
-      // #global-plugins T2：PreToolUseHook 返回类型放宽为含 Promise 的联合，
-      // 断言前先 await（本 hook 同步返回，await 无代价）。
+      // PreToolUseHook's return type was widened to a union including Promise;
+      // await before asserting (this hook resolves synchronously, so await costs nothing).
       const block = await hook({ tool: "bash", input: c.input });
       assert.ok(block, `expected block for ${c.label}`);
       assert.equal(typeof block.reason, "string");
@@ -144,14 +147,14 @@ describe("createSecretsGuardHook — 非法正则剔除", () => {
       onHookError: (e) => errors.push(e),
     });
 
-    // 坏 pattern 不拦正常调用（Constraints (a)：绝不允许坏 pattern 拦死所有调用）
+    // a bad pattern must never block every call
     assert.equal(hook({ tool: "bash", input: "ls -la" }), undefined);
-    // 合法自定义 pattern 仍生效
+    // custom valid pattern still blocks
     assert.ok(hook({ tool: "bash", input: "AKIA1234567890ABCDEF" }));
-    // 内置模式仍生效
+    // built-in patterns still block
     assert.ok(hook({ tool: "bash", input: "cat ~/.ssh/id_rsa" }));
 
-    // 仅触发 1 次 guard-init 告警，且指向坏 pattern
+    // exactly one guard-init warning, pointing at the bad pattern
     assert.equal(errors.length, 1);
     assert.equal(errors[0]!.phase, "guard-init");
     assert.ok(errors[0]!.message.includes("[unclosed"));

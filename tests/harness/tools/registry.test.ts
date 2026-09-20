@@ -1,15 +1,14 @@
 /**
- * T2 S13 fixture: Registry 构造期校验。
+ * Registry construction-time validation.
  *
- * 015 冻:重复工具名 / 坏 JSON Schema / validator 编译失败 -> RegistryConstructionError;
- * 构造成功后 Registry 不可变(Object.freeze);按名定位返回 ToolDef / undefined。
+ * Frozen contract: duplicate tool name / bad JSON Schema / validator compile
+ * failure -> RegistryConstructionError; after construction the Registry is
+ * immutable (Object.freeze); name lookup returns ToolDef / undefined.
  */
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import {
-  RegistryConstructionError,
-} from "../../../src/harness/errors.ts";
+import { RegistryConstructionError } from "../../../src/harness/errors.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 
@@ -79,7 +78,10 @@ describe("createRegistry (S13)", () => {
 
   it("constructs an immutable registry on success", () => {
     const reg = createRegistry([echo, sum]);
-    const names = reg.list().map((t) => t.name).sort();
+    const names = reg
+      .list()
+      .map((t) => t.name)
+      .sort();
     assert.deepEqual(names, ["echo", "sum"]);
     assert.deepEqual(reg.get("echo")?.name, "echo");
     assert.equal(reg.get("missing"), undefined);

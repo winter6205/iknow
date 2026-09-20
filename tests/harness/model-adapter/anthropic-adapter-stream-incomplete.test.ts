@@ -1,21 +1,28 @@
 /**
- * ADR-0111 T2：adapter 层「上游流未完成」typed 翻译 + fault 判别收窄 + SDK 形态哨兵。
+ * ADR-0111: adapter-layer typed translation of "upstream stream incomplete" +
+ * fault-discrimination narrowing + SDK-shape sentinel.
  *
- * 钉住的不变式（ADR-0111）：
- * - Decision 1：`finalMessage()` 以 SDK 断流形态（`AnthropicError('stream ended
- *   without producing a Message with role=assistant')`）reject 时，出 adapter 边界的是
- *   `ModelStreamIncompleteError`（extends `ProtocolError`，携 `visible` + `cause`），
- *   非裸 Error；`visible` 来自 stream arm 的「见过非空可见增量」标志
- *   （text / thinking / input_json 三处非空增量置位；空 delta 与 tool_call_start 不置位）。
- * - Decision 3(a)：`nonClockFaultOf` 对本类 → `{kind:"stream_incomplete", visible}`，
- *   判别顺序上先于 abort / HTTP / cert / network 各支。
- * - Decision 4：default 支收窄为真·未知形态且产生 console.warn 诊断
- *   （name + message 截断 ≤200，不打 stack / 请求体）；既有形态不误入 default。
- * - Decision 1 判据三条件：message 形态 + 非 APIError + cause 链无网络错误
- *   （真网络断开属 `llm_network` retry 格，不双标签 → 不翻本类）。
+ * Invariants pinned (ADR-0111):
+ * - Decision 1: when `finalMessage()` rejects with the SDK stream-cut shape
+ *   (`AnthropicError('stream ended without producing a Message with role=assistant')`),
+ *   what leaves the adapter boundary is `ModelStreamIncompleteError` (extends
+ *   `ProtocolError`, carries `visible` + `cause`), never a bare Error;
+ *   `visible` comes from the stream arm's "saw a non-empty visible delta" flag
+ *   (set by non-empty text / thinking / input_json deltas; empty deltas and
+ *   tool_call_start do not set it).
+ * - Decision 3(a): `nonClockFaultOf` maps this class →
+ *   `{kind:"stream_incomplete", visible}`, discriminated before the abort /
+ *   HTTP / cert / network branches.
+ * - Decision 4: the default branch narrows to genuinely unknown shapes and
+ *   emits a console.warn diagnostic (name + message truncated ≤200, never
+ *   stack / request body); known shapes never fall into default.
+ * - Decision 1's three conditions: message shape + not an APIError + no
+ *   network error in the cause chain (a real disconnect belongs to the
+ *   `llm_network` retry cell — no double-labeling → not translated here).
  *
- * 断言强度对齐既有先例：anthropic-adapter-stream.test.ts（D8 断流 reject）、
- * anthropic-adapter-prompt-too-long.test.ts（fake client + finalMessage reject 翻译）。
+ * Assertion strength follows precedent: anthropic-adapter-stream.test.ts
+ * (stream-cut reject case) and anthropic-adapter-prompt-too-long.test.ts
+ * (fake client + finalMessage reject translation).
  */
 
 import { describe, it, vi } from "vitest";
@@ -62,9 +69,10 @@ type FakeOp =
   | { kind: "fail"; error: unknown };
 
 /**
- * 最小 fake streaming client（对齐 anthropic-adapter-prompt-too-long.test.ts 的
- * streamClient 手法）：`finalMessage()` reject 指定错误；ops 里的增量在装配
- * listener 后经 microtask 派发，驱动 measurement 的可见增量标志。
+ * Minimal fake streaming client (same streamClient technique as
+ * anthropic-adapter-prompt-too-long.test.ts): `finalMessage()` rejects with
+ * the given error; deltas in ops dispatch via microtask once listeners are
+ * wired, driving the adapter's visible-delta flag.
  */
 function streamClient(ops: ReadonlyArray<FakeOp>): SdkClient {
   return {
@@ -144,7 +152,7 @@ function sdkStreamIncompleteError(): AnthropicError {
   return new AnthropicError(SDK_STREAM_INCOMPLETE_MESSAGE);
 }
 
-// ─── 1. stream arm：SDK 断流形态 → ModelStreamIncompleteError（visible 分流）──
+// ─── 1. stream arm: SDK stream-cut shape → ModelStreamIncompleteError (visible routing) ─
 
 describe("ModelStreamIncompleteError translation — stream arm (ADR-0111 D1)", () => {
   it("finalMessage rejects with SDK 断流形态, no delta → ModelStreamIncompleteError(visible=false), not bare Error", async () => {
@@ -257,13 +265,11 @@ describe("ModelStreamIncompleteError translation — stream arm (ADR-0111 D1)", 
   });
 });
 
-// ─── 2. nonClockFaultOf：stream_incomplete 格 + default 收窄（观测信号）─────
+// ─── 2. nonClockFaultOf: stream_incomplete cell + default narrowing (observability signal) ─
 
-/** 捕获 console.warn 一条：返回 [命中次数, 首条文本]。 */
+/** Capture console.warn during a run: returns [hit count, first message]. */
 function captureConsoleWarn(run: () => void): [number, string] {
-  const spy = vi
-    .spyOn(console, "warn")
-    .mockImplementation(() => undefined);
+  const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   try {
     run();
     const calls = spy.mock.calls.map((args) => String(args[0]));
@@ -331,7 +337,10 @@ describe("nonClockFaultOf: stream_incomplete 格（ADR-0111 D3a/D4）", () => {
         "llm_http",
       ],
       [new Error("unable to verify the first certificate"), "protocol_error"],
-      [new APIConnectionError({ cause: new TypeError("fetch failed") }), "llm_network"],
+      [
+        new APIConnectionError({ cause: new TypeError("fetch failed") }),
+        "llm_network",
+      ],
     ];
     for (const [err, kind] of cases) {
       let event: unknown;
@@ -344,15 +353,17 @@ describe("nonClockFaultOf: stream_incomplete 格（ADR-0111 D3a/D4）", () => {
   });
 });
 
-// ─── 3. SDK 形态哨兵（升级换形态即 RED）─────────────────────────────────────
+// ─── 3. SDK shape sentinel (any shape change on SDK upgrade goes RED) ────────
 
 /**
- * 钉住 @anthropic-ai/sdk 0.115.0（package.json "^0.115.0"，package-lock 解析
- * 0.115.0）的 MessageStream 空流真实 reject 形态：只含 message_start 的流结束
- * → 未收到 message_stop 之前的任何完整 Message → `finalMessage()` 走真实
- * `#getFinalMessage` reject 路径。本测试不 mock SDK —— 若升级改了错误类 /
- * message 文本 / reject 时机，这里立即 RED，强制人工复核 adapter 判据
- * （`isStreamIncompleteShape` 的三条件）。
+ * Pins the real MessageStream empty-stream reject shape of @anthropic-ai/sdk
+ * 0.115.0 (package.json "^0.115.0", resolved to 0.115.0 in package-lock): a
+ * stream that ends with only message_start seen → no complete Message before
+ * message_stop → `finalMessage()` takes the real `#getFinalMessage` reject
+ * path. This test does not mock the SDK — if an upgrade changes the error
+ * class / message text / reject timing, it goes RED immediately, forcing a
+ * manual re-check of the adapter predicate (the three conditions of
+ * `isStreamIncompleteShape`).
  */
 describe("@anthropic-ai/sdk 0.115.0 断流形态哨兵（ADR-0111 D1 判据的 ground truth）", () => {
   it("real MessageStream: message_start 后流结束（无 message_stop）→ finalMessage rejects 匹配 /stream ended without producing a Message/i 的 AnthropicError，非 APIError、无 cause", async () => {
@@ -369,7 +380,7 @@ describe("@anthropic-ai/sdk 0.115.0 断流形态哨兵（ADR-0111 D1 判据的 g
         usage: { input_tokens: 0, output_tokens: 0 },
       },
     };
-    // MessageStream.fromReadableStream 消费 newline-separated JSON 帧（SDK 公开前端面）。
+    // MessageStream.fromReadableStream consumes newline-separated JSON frames (the SDK's public front-end surface).
     const payload = JSON.stringify(startEvent) + "\n";
     const readable = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -381,7 +392,10 @@ describe("@anthropic-ai/sdk 0.115.0 断流形态哨兵（ADR-0111 D1 判据的 g
     await assert.rejects(
       () => stream.finalMessage(),
       (e: unknown) => {
-        assert.ok(e instanceof AnthropicError, "断流错误形态必须是 AnthropicError");
+        assert.ok(
+          e instanceof AnthropicError,
+          "断流错误形态必须是 AnthropicError"
+        );
         assert.ok(
           /stream ended without producing a Message/i.test(
             (e as Error).message
@@ -400,7 +414,7 @@ describe("@anthropic-ai/sdk 0.115.0 断流形态哨兵（ADR-0111 D1 判据的 g
   });
 });
 
-// ─── 4. 正常流回归：翻译不影响成功路径 ──────────────────────────────────────
+// ─── 4. happy-path regression: translation must not touch the success path ───
 
 describe("stream arm 成功路径回归（翻译只改异常类，不触正常流）", () => {
   it("正常流 complete fixture → step resolves（无 typed 错误挂上）", async () => {

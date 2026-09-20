@@ -1,16 +1,16 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：topo.test.ts。
+ * PROTOTYPE — self-authored Graph multi-task orchestration: topo.test.ts.
  *
- * 覆盖：
- *   1. validateGraph 接受无 deps 节点。
- *   2. validateGraph 接受线性链（合法 DAG）。
- *   3. validateGraph 拒绝 self-dep。
- *   4. validateGraph 拒绝 unknown-dep。
- *   5. validateGraph 拒绝 duplicate-id。
- *   6. validateGraph 检测 cycle（尽力而为）。
- *   7. topoWaves 把 DAG 分层，每层内节点按 spec 原始顺序排序。
- *   8. topoWaves 把菱形依赖分成 3 层。
- *   9. topoWaves 在非法图上抛 Error。
+ * Coverage:
+ *   1. validateGraph accepts nodes without deps.
+ *   2. validateGraph accepts a linear chain (valid DAG).
+ *   3. validateGraph rejects self-deps.
+ *   4. validateGraph rejects unknown deps.
+ *   5. validateGraph rejects duplicate ids.
+ *   6. validateGraph detects cycles (best effort).
+ *   7. topoWaves layers a DAG; nodes within a layer keep spec order.
+ *   8. topoWaves splits a diamond dependency into 3 layers.
+ *   9. topoWaves throws Error on invalid graphs.
  */
 
 import { describe, it } from "vitest";

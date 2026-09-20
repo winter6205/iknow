@@ -1,16 +1,17 @@
 /**
- * T4 / ADR-0046 §3 + spec disclosure-index-align SC4 — schema 退场内建件
- * 直呼加载。
+ * ADR-0046 — direct-call hydration for builtins retired by schema overflow.
  *
- * 钉住的不变式:
- *   - schema 溢出退场(`retireBuiltin` stamp `aci.lazy: true`)的内建件被
- *     直呼时,走与 `mcp__` 相同的 hydrate 路径:本轮 `discover(name)` →
- *     下一轮 `visibleSchemas()` 尾部追加该 schema;input 通过 schema →
- *     直接执行;不要求先 `tool_search`。
- *   - 判定依据 = `def.aci.lazy === true && !isDiscovered(name)`(不看名字
- *     前缀)。核心七件永不 lazy(`CORE_TOOL_NAMES` 在退场候选 derivation
- *     层被剔除)→ 天然不进 hydrate 分支。
- *   - 常驻(非 lazy)内建件不受影响:闸门不调 discover,直接按权限层放行。
+ * Pinned invariants:
+ *   - A builtin retired by schema overflow (`retireBuiltin` stamps
+ *     `aci.lazy: true`) takes the same hydrate path as `mcp__` tools when
+ *     called directly: `discover(name)` this round -> schema appended to next
+ *     round's `visibleSchemas()` tail; input passes schema -> execute directly;
+ *     no `tool_search` prerequisite.
+ *   - The decision is `def.aci.lazy === true && !isDiscovered(name)` (never by
+ *     name prefix). Core tools are never lazy (`CORE_TOOL_NAMES` is pruned in
+ *     the retirement-candidate derivation) -> they never enter the hydrate branch.
+ *   - Resident (non-lazy) builtins are unaffected: the gate skips discover and
+ *     proceeds straight to the permission layer.
  */
 import { describe, it, expect } from "vitest";
 import assert from "node:assert/strict";
@@ -24,8 +25,8 @@ import { CORE_TOOL_NAMES } from "../../../src/harness/aci/tool-overflow.js";
 import type { AciToolDef } from "../../../src/harness/aci/types.js";
 import type { ToolCall } from "../../../src/harness/tools/types.js";
 
-/** deferrable 内建件(退场候选形态):必填 input `conversation_id`,
- *  handler 返 "traced:<id>"。 */
+/** Deferrable builtin (retirement-candidate shape): required input
+ *  `conversation_id`, handler returns "traced:<id>". */
 function makeDeferrableBuiltin(name: string): AciToolDef {
   return Object.freeze({
     name,
@@ -48,7 +49,7 @@ function makeDeferrableBuiltin(name: string): AciToolDef {
   });
 }
 
-/** 核心件形态(永不 deferrable / 永不 lazy)。 */
+/** Core-tool shape (never deferrable / never lazy). */
 function makeCoreBuiltin(name: string): AciToolDef {
   return Object.freeze({
     name,
@@ -64,8 +65,8 @@ function makeCoreBuiltin(name: string): AciToolDef {
   });
 }
 
-/** 装配 permission runtime,registry 面从 aci-registry 的 catalog 现读
- *  (retireBuiltin 后 catalog.get 返回带 lazy:true 的新 def)。 */
+/** Wire a permission runtime whose registry face reads the aci-registry
+ *  catalog live (after retireBuiltin, catalog.get returns the new def stamped lazy:true). */
 function wire(registry: ReturnType<typeof createAciRegistry>) {
   const discoverCalls: string[] = [];
   const perm = createPermissionRuntime({
@@ -93,16 +94,16 @@ describe("T4 SC4 — schema 退场内建件直呼:hydrate + 执行", () => {
       makeDeferrableBuiltin("query_trace"),
       makeCoreBuiltin("bash"),
     ]);
-    // 首轮 schema 都在可见前缀(未退场)。
+    // First round: both schemas are in the visible prefix (not retired yet).
     expect(registry.visibleSchemas().map((t) => t.name)).toContain(
       "query_trace"
     );
-    // 溢出退场:stamp aci.lazy:true → schema 撤出可见集。
+    // Overflow retirement: stamps aci.lazy:true -> schema leaves the visible set.
     registry.retireBuiltin(["query_trace"]);
     expect(registry.visibleSchemas().map((t) => t.name)).not.toContain(
       "query_trace"
     );
-    // SC4:核心件 schema 仍在(退场不碰核心七件)。
+    // Core tools' schemas remain (retirement never touches them).
     expect(registry.visibleSchemas().map((t) => t.name)).toContain("bash");
 
     const { perm, discoverCalls } = wire(registry);
@@ -112,20 +113,20 @@ describe("T4 SC4 — schema 退场内建件直呼:hydrate + 执行", () => {
       input: { conversation_id: "c-1" },
     };
     const gate = await perm.gateOne(call, undefined);
-    // 关键:不要求先 tool_search —— 直呼即放行。
+    // Key: no tool_search prerequisite — a direct call proceeds immediately.
     assert.equal(gate.kind, "proceed");
     if (gate.kind === "proceed") {
       assert.equal(gate.def?.name, "query_trace");
     }
-    // hydrate 副作用:本轮 discover(name)。
+    // Hydration side effect: discover(name) this round.
     assert.deepEqual(discoverCalls, ["query_trace"]);
     expect(registry.isDiscovered("query_trace")).toBe(true);
-    // 下一轮 visibleSchemas 尾部追加该 schema。
+    // Next round: the schema is appended to the visibleSchemas tail.
     expect(registry.visibleSchemas().map((t) => t.name)).toContain(
       "query_trace"
     );
 
-    // 放行后真跑:handler 输出原样进 ok payload。
+    // Once it proceeds, the handler really runs; its output goes verbatim into the ok payload.
     const result = await perm.runAllowed(
       call,
       gate.kind === "proceed" ? gate.def : undefined
@@ -159,7 +160,7 @@ describe("T4 SC4 — schema 退场内建件直呼:hydrate + 执行", () => {
       assert.equal(parsed.description, "builtin get_record");
       assert.ok(parsed.inputSchema);
     }
-    // discover 副作用照发(下一轮 schema 可见,模型能补 input)。
+    // The discover side effect still fires (schema visible next round, so the model can fill input).
     assert.deepEqual(discoverCalls, ["get_record"]);
   });
 
@@ -179,7 +180,7 @@ describe("T4 SC4 — schema 退场内建件直呼:hydrate + 执行", () => {
 
   it("常驻(非 lazy)内建件 → 不进 hydrate 分支,discover 零调用", async () => {
     const registry = createAciRegistry([makeDeferrableBuiltin("query_trace")]);
-    // 不 retire → 仍常驻。
+    // not retired -> still resident
     const { perm, discoverCalls } = wire(registry);
 
     const gate = await perm.gateOne(

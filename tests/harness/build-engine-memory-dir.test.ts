@@ -1,9 +1,9 @@
 /**
- * ADR-0099 — 项目记忆库跟会话池同一项目树:
- * `<poolRoot>/projects/<slug>/memory/`。
+ * ADR-0099 — the project memory store lives in the same home-side project
+ * tree as the session pool: `<poolRoot>/projects/<slug>/memory/`.
  *
- * 手法与 `build-engine-tasks-dir.test.ts` 同款:module-mock
- * `createSystemResolver` 抓 `ctx.memoryDir`。
+ * Technique mirrors build-engine-tasks-dir.test.ts: module-mock
+ * `createSystemResolver` to capture `ctx.memoryDir`.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

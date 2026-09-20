@@ -1,18 +1,27 @@
 /**
- * Tests for `egress/domain-matcher.ts` — T3 域匹配与地址守卫适配层。
+ * Tests for `egress/domain-matcher.ts` — domain matching + address guard
+ * adapter layer.
  *
- * 钉住的不变式（来自 specs/network-egress-allowlist.md + ADR-0097）：
- *   - 纯逻辑件，无 IO；输入 (host, port, resolvedAddresses?) 输出 allow | deny | reason。
- *   - deny 优先：host 在 denied 集或命中 denied pattern → 拒，即使 allowed 也命中。
- *   - `*.example.com` 严格子域：匹配子域、**不**匹配 apex、不匹配前缀相似、不匹配后缀相似。
- *   - 大小写不敏感。
- *   - `:port` 合法：仅匹配该端口；不带 port 的 pattern 匹配任意端口。
- *   - `:port` 非法到达本层（`65536` / `0` / `abc` / 空）→ 拒绝并留痕（不静默永不匹配）。
- *   - 允许集为空 → 全拒（fail-closed），不查地址守卫。
- *   - 地址守卫正交：域名命中 + 私网地址 → 拒；注入 `deniedResolvedAddresses` 须实测生效
- *     （含 RFC 1918 / ULA / CGNAT，既非上游默认拒绝档）。
+ * Pinned invariants (from specs/network-egress-allowlist.md + ADR-0097):
+ *   - pure logic, no IO; input (host, port, resolvedAddresses?) → output
+ *     allow | deny | reason.
+ *   - deny precedence: host in the denied set or hitting a denied pattern →
+ *     deny, even when allowed also matches.
+ *   - `*.example.com` is strict-subdomain: matches subdomains, **not** the
+ *     apex, not prefix-similar, not suffix-similar.
+ *   - case insensitive.
+ *   - `:port` is legal: matches only that port; a pattern without a port
+ *     matches every port.
+ *   - an illegal `:port` that reaches this layer (`65536` / `0` / `abc` /
+ *     empty) → refuse with a trace (never silently "matches nothing").
+ *   - empty allowlist → deny everything (fail-closed), address guard not
+ *     consulted.
+ *   - address guard is orthogonal: domain hit + private address → deny; an
+ *     injected `deniedResolvedAddresses` must actually take effect (covering
+ *     RFC 1918 / ULA / CGNAT, none of which are upstream's default-denied set).
  *
- * 这一文件**不**触碰 bwrap / bash / settings；T4 在测试通过后接该判定函数。
+ * This file does **not** touch bwrap / bash / settings; downstream faces wire
+ * up this decision function once these tests pass.
  */
 
 import { describe, it, expect } from "vitest";
@@ -74,7 +83,7 @@ describe("decideEgress — 域名匹配", () => {
   });
 
   it("空 allowedDomains 时不查地址守卫（即便传了 resolvedAddresses）", () => {
-    // 即使解析到 loopback,空 allowed 已 fail-closed,reason 应是 allowlist-empty
+    // even though it resolves to loopback, an empty allowlist is already fail-closed and the reason should be allowlist-empty
     const result = decideEgress({
       host: "github.com",
       port: 443,
@@ -99,7 +108,7 @@ describe("decideEgress — deny 优先", () => {
   });
 
   it("host 命中 allowed pattern 但 pattern 形式在 denied 集也命中 → deny", () => {
-    // *.example.com 允许 *.example.com,但 denied 集里 *.example.com 应覆盖之
+    // *.example.com allows subdomains, but the same pattern in the denied set must override it
     const result = decideEgress({
       host: "api.example.com",
       port: 443,
@@ -230,8 +239,9 @@ describe("decideEgress — :port 合法匹配", () => {
 });
 
 describe("decideEgress — :port 非法到达本层", () => {
-  // 配置层（T2）本应在 :65536 之类的非法形态到达本层前就拒掉。
-  // 但本层必须自身也能正确处置（防御性深度）——不留静默永不匹配的空档。
+  // The config layer should reject illegal shapes like :65536 before they reach
+  // this layer, but this layer must still handle them correctly (defensive depth)
+  // — no silently-never-matching gap.
   it.each([
     { pattern: "github.com:65536", label: "65536 上界越界" },
     { pattern: "github.com:0", label: "0 下界越界" },
@@ -244,18 +254,21 @@ describe("decideEgress — :port 非法到达本层", () => {
       allowedDomains: [pattern],
       deniedDomains: [],
     });
-    // 行为：拒绝该次请求（域名未匹配），而不是让 pattern 像不存在一样 → allowlist-empty 仅当整张表空时；
-    // 这里表非空但每条都非法 → 整张 allowedDomains 无效 → fail-closed。
+    // Behavior: refuse this request (domain unmatched) rather than let the pattern
+    // act as if absent; allowlist-empty applies only to a wholly empty table —
+    // here the table is non-empty yet every entry is illegal, so the whole
+    // allowedDomains is invalid → fail-closed.
     expect(result.outcome).toBe("deny");
     expect(result.reason).toBe("allowlist-malformed");
   });
 });
 
 describe("decideEgress — 地址守卫正交", () => {
-  // SC4：域名命中 + 私网地址 → 拒。
-  // 注：本层仅裁决「允不允许这个 (host, port, addresses) 组合出站」。
-  // T4 接入时会在 DNS 解析后调用本判定；若 resolvedAddresses 已含全部解析结果，
-  // 本判定按 OR 拒绝（任一地址落在 deniedResolvedAddresses 即拒，与上游语义对齐）。
+  // Domain hit + private address → deny.
+  // Note: this layer only adjudicates whether this (host, port, addresses) combo
+  // may egress. It is called after DNS resolution; when resolvedAddresses carries
+  // all results, denial is OR-joined (any address in deniedResolvedAddresses
+  // denies, aligned with upstream semantics).
   const allowed = ["github.com"];
   const denied = [] as string[];
 
@@ -379,8 +392,8 @@ describe("decideEgress — 地址守卫正交", () => {
   });
 
   it("未传 resolvedAddresses 时仅做域名判定", () => {
-    // T4 可能在解析前先做一次快速域名判定；解析后再二次判定。
-    // 这里要确保：未传 resolvedAddresses 时仍按域名允许集走。
+    // Consumers may do a fast domain-only pass before resolution and re-check after.
+    // Ensure: with no resolvedAddresses passed, the domain allowlist still decides.
     const result = decideEgress({
       host: "github.com",
       port: 443,
@@ -392,11 +405,13 @@ describe("decideEgress — 地址守卫正交", () => {
 });
 
 describe("decideEgress — F5: preset 域命中不豁免地址守卫（rebinding）", () => {
-  // spec egress-preset-allowlist invariant 5 / F5：允许集换为 builtin preset
-  // 后，地址守卫正交性不缩——preset 命中的域被 rebinding 解析到
-  // loopback / 私网 / metadata 时照拒（address-denied）。
-  // 与上方「地址守卫正交」段的区别：allowedDomains 直接吃 preset SSOT 常量，
-  // 钉的是「合并后的真实出厂集」而非手写单域表。
+  // spec egress-preset-allowlist invariant 5: swapping the allowlist to the
+  // builtin preset must not shrink address-guard orthogonality — a preset-hit
+  // domain that rebinding resolves to loopback / private / metadata is still
+  // denied (address-denied).
+  // Unlike the "address guard" section above, allowedDomains consumes the preset
+  // SSOT constant directly, pinning the real shipped merged set rather than a
+  // hand-written single-domain table.
   const preset = BUILTIN_PRESET_ALLOWED_DOMAINS;
 
   it("对照：preset 域 + 公网地址 → allow（证明拒绝源自地址档而非域表）", () => {
@@ -473,7 +488,7 @@ describe("decideEgress — F5: preset 域命中不豁免地址守卫（rebinding
 });
 
 describe("DEFAULT_PRIVATE_DENIED_RANGES", () => {
-  // 钉住 SC4 落地前提：deniedResolvedAddresses 须含 RFC 1918 + ULA + CGNAT（spec/ADR 显式要求 opt-in）
+  // Pin the landing precondition: deniedResolvedAddresses must cover RFC 1918 + ULA + CGNAT (spec/ADR require an explicit opt-in)
   it("RFC 1918 三段均在内", () => {
     expect(DEFAULT_PRIVATE_DENIED_RANGES).toContain("10.0.0.0/8");
     expect(DEFAULT_PRIVATE_DENIED_RANGES).toContain("172.16.0.0/12");
@@ -488,13 +503,16 @@ describe("DEFAULT_PRIVATE_DENIED_RANGES", () => {
 });
 
 describe("isAddressGuardDenied — 纯函数暴露", () => {
-  // T4 可能在解析链路中以更细粒度调用：判定单个 host+address+port 是否被地址守卫拒。
-  // 该函数仅做地址守卫层判定，不重复 allowlist 域名匹配（T4 应另走 decideEgress）。
+  // Resolution paths may call at finer granularity: is one host+address+port
+  // combo denied by the address guard? This function performs only the
+  // guard-layer decision and does not duplicate allowlist domain matching
+  // (callers should route through decideEgress separately).
   //
-  // 上游契约（resolved-address-guard.d.ts:64-67）：
-  //   - "Always true when hostname is itself an IP literal" —— IP 字面量作 hostname
-  //   时地址守卫恒为 allow（视为显式选择,不再二次判定）。
-  //   - name → IP 走完整 DENIED_CLASSES + deniedResolvedAddresses。
+  // Upstream contract (resolved-address-guard.d.ts):
+  //   - "Always true when hostname is itself an IP literal" — with an IP
+  //   literal as hostname the guard outcome is always allow (an explicit
+  //   choice, not re-adjudicated).
+  //   - name → IP goes through the full DENIED_CLASSES + deniedResolvedAddresses.
   it("hostname literal (IP) 即使落在 RFC 1918 → allow (上游 IP 显式选择契约)", () => {
     expect(
       isAddressGuardDenied({

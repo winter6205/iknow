@@ -1,12 +1,13 @@
 /**
- * verify 沙箱装配 (ADR-0092 全局档)。
+ * verify sandbox assembly (ADR-0092 global mode).
  *
- * verify 与 bash 工具共用同一围栏装配语义(spec:64):命令拼 `bash -c`,
- * bwrap 全局档 argv 由 createBwrapFence 决定。Round 1 后 policy 只承载
- * 会话 tmp 宿主路径(`$TMPDIR` 来源),不再有闭世界读/写白名单。
+ * verify shares the fence-assembly semantics with the bash tool: the command
+ * is wrapped as `bash -c` and the bwrap global-mode argv comes from
+ * createBwrapFence. Post-Round-1 the policy carries only the session tmp host
+ * path (`$TMPDIR` source) — no closed-world read/write allowlists.
  *
- * 手法:module-mock sandbox index(捕获 createBwrapFence 的 opts,
- * stub runInSandbox),与 tests/subagent/bash-mode-channel.test.ts 同款。
+ * Technique: module-mock the sandbox index (capture createBwrapFence opts,
+ * stub runInSandbox), same shape as tests/subagent/bash-mode-channel.test.ts.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -95,9 +96,11 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   });
 
   it("fenceEnv carries TMPDIR = the session tmp (ADR-0092 SC12)", async () => {
-    // 判别力:修复前 fenceEnv 只过 envIsolation.filter(process.env),宿主未
-    // 导出 TMPDIR 时围栏内 `$TMPDIR` 根本不在场 → 写 `"$TMPDIR/x"` 落到
-    // `/x` 被拒。本用例钉「显式注入且值 = 会话 tmp 宿主真路径」。
+    // Discriminating case: before the fix fenceEnv only passed
+    // envIsolation.filter(process.env), so when the host did not export TMPDIR
+    // the fence had no `$TMPDIR` at all → writes to `"$TMPDIR/x"` landed on
+    // `/x` and were denied. This pins "explicitly injected, value = session
+    // tmp's real host path".
     captured.length = 0;
     const cwd = tmpdir();
     const sessionTmp = mkdtempSync(join(tmpdir(), "verify-fence-env-tmp-"));
@@ -105,8 +108,8 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
       const runVerify = makeDefaultRunVerify({ cwd, tmpDir: sessionTmp });
       await runVerify("true", {});
       assert.equal(captured[0]!.env["TMPDIR"], sessionTmp);
-      // $TMPDIR 与交给 fence 的 tmpRoot 必须是同一份(工作区档写白名单
-      // 与围栏内看到的路径不能分叉)。
+      // $TMPDIR and the tmpRoot handed to the fence must be the same value
+      // (the path seen inside the fence cannot diverge from the bind source).
       const runArgs = vi.mocked(sandboxIndex.runInSandbox).mock
         .calls[0]?.[0] as { env?: Record<string, string> } | undefined;
       assert.equal(runArgs?.env?.["TMPDIR"], sessionTmp);
@@ -142,20 +145,23 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   });
 
   it("workspace mode without homeRoot keeps the key so the fence guard is reachable", async () => {
-    // verify 面是独立调用点:workspace 档漏传 homeRoot 时**不得**在此预过滤
-    // 掉该 key —— 丢弃 = 装配层看不见缺口,静默退化成全局档(home 可写)。
-    // 本用例钉调用点这一段(key 在场、值 undefined);bwrap 对该形态抛 typed
-    // error 由下面 `real createBwrapFence` 一段直接验证 —— 两段合起来才是
-    // 「fail-loud」,单看任一段都不够。
-    // 判别力:修复前是条件展开(`homeRoot !== undefined ? {...} : {}`),
-    // key 不在场 → 本用例红(已实测)。
+    // verify is an independent call site: when workspace mode omits homeRoot
+    // this key must NOT be pre-filtered here — dropping it hides the gap from
+    // assembly and silently degrades to global mode (writable home). This case
+    // pins the call-site half (key present, value undefined); the typed error
+    // bwrap throws for that shape is verified directly by the real
+    // createBwrapFence block below — both halves together make "fail loud",
+    // neither alone is enough.
+    // Discriminating case: before the fix the spread was conditional
+    // (`homeRoot !== undefined ? {...} : {}`), the key was absent → this test
+    // went red (actually observed).
     const cwd = mkdtempSync(join(tmpdir(), "verify-ws-nohome-"));
     try {
       const runVerify = makeDefaultRunVerify({
         cwd,
         tmpDir: cwd,
         fsMode: "workspace",
-        // homeRoot 缺席 —— 缺口本身。
+        // homeRoot absent — that absence is the gap under test.
       });
       captured.length = 0;
       await runVerify("true", {});
@@ -167,7 +173,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
       );
       assert.equal(opts["homeRoot"], undefined);
 
-      // 真实(未 mock 的)构造函数对这份 opts 抛 typed error。
+      // The real (unmocked) constructor must throw a typed error for these opts.
       const realBwrap = await vi.importActual<
         typeof import("../../../src/harness/sandbox/bwrap.ts")
       >("../../../src/harness/sandbox/bwrap.ts");
@@ -208,11 +214,11 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   });
 });
 
-// ── ADR-0097 / T7:egress 缝装配单测 ────────────────────────────────────────
+// ── ADR-0097: egress seam assembly ─────────────────────────────────────────
 //
-// 验证 verify 模块级 session 形态:policy 缺省 = 无缝;policy 在场 → 首次
-// 调用 lazy start,session 起成功 → fence args 带 egress spec;start 失败
-// → 无缝(fail-closed,任务仍起)。
+// verify's module-level session shape: no policy → no seam; policy present →
+// lazy start on first call; session up → fence args carry the egress spec;
+// start failure → no seam (fail-closed, the task still runs).
 
 describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
   it("egressPolicy 缺省 → 不起 session,fence 不带 egress spec", async () => {
@@ -225,7 +231,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
   });
 
   it("egressPolicy 在场 + createEgressSession 成功 → fence 带 egress spec,spec.env 注入 fenceEnv", async () => {
-    // 透过 mock 返回 fake session;fake spec.env 应出现在 fence.env。
+    // The mock returns a fake session; the fake spec.env must show up in fence.env.
     const fakeSpec = {
       unixSocketPath: "/tmp/iknow-verify-egress.sock",
       sandboxLocalPort: 19090,
@@ -312,21 +318,24 @@ describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
   it.each([
     ["holder OFF", () => ({ get: () => false })],
     ["bound(task-worktree 形 cwd)", () => ({ get: () => true })],
-  ])("%s → 不发段 (G3: 与 bash 工具面同源判定)", async (_label, holderFactory) => {
-    captured.length = 0;
-    const isBound = _label.startsWith("bound");
-    const cwd = isBound
-      ? join("/tmp/verify-unbound-main", ".iknow", "worktrees", "conv-1")
-      : "/tmp/verify-unbound-main";
-    const runVerify = makeDefaultRunVerify({
-      cwd,
-      ...(isBound
-        ? { worktreeOnMutate: { get: () => true } }
-        : { worktreeOnMutate: holderFactory() }),
-    });
-    await runVerify("true", {});
-    assert.equal("unboundFence" in captured[0]!, false);
-  });
+  ])(
+    "%s → 不发段 (G3: 与 bash 工具面同源判定)",
+    async (_label, holderFactory) => {
+      captured.length = 0;
+      const isBound = _label.startsWith("bound");
+      const cwd = isBound
+        ? join("/tmp/verify-unbound-main", ".iknow", "worktrees", "conv-1")
+        : "/tmp/verify-unbound-main";
+      const runVerify = makeDefaultRunVerify({
+        cwd,
+        ...(isBound
+          ? { worktreeOnMutate: { get: () => true } }
+          : { worktreeOnMutate: holderFactory() }),
+      });
+      await runVerify("true", {});
+      assert.equal("unboundFence" in captured[0]!, false);
+    }
+  );
 
   it("工厂期快照 vintage:闭包造好后翻 holder,本轮 opts 不变 (per-round 快照)", async () => {
     captured.length = 0;
@@ -336,13 +345,13 @@ describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
       cwd,
       worktreeOnMutate: { get: () => on },
     });
-    on = false; // 本轮闭包已建:翻值不得渗透进本轮
+    on = false; // closure already built: flipping the value must not leak into this round
     await runVerify("true", {});
     assert.deepEqual(captured[0]!.unboundFence, {
       mainCheckout: cwd,
       tmpPad: tmpdir(),
     });
-    // 下一轮(调用方每轮现造)按新值
+    // Next round (caller rebuilds per round) sees the new value.
     captured.length = 0;
     const nextRound = makeDefaultRunVerify({
       cwd,

@@ -1,15 +1,16 @@
 /**
  * tests/harness/secret-roundtrip/sentinel-false-positive.test.ts
  *
- * specs/egress-credential-sentinel.md T5 / invariant 4 / Assumption 14 ——
- * sentinel 假值的三重误报防线（各层一具名钉）。假凭据进围栏后，用户文本、
- * 屏上输出、工具参数三面都会携带 `fake_value_<uuid>` 系假值；三层实现
- * （recognize / output-mask / secrets guard）若把假值当 secret 处理，
- * 「屏上可诊断性」即告失（echo $GH_TOKEN 被掩成 ***，模型看不见假值）。
- * 本文件是反向钉子测试：三层源文件零 diff（Assumption 14），只钉
- * 「假值不被三层触发」。
+ * Triple false-positive defense for sentinel fake values
+ * (specs/egress-credential-sentinel.md). Once fake credentials enter the egress
+ * fence, `fake_value_<uuid>`-shaped fakes ride along in all three faces: user
+ * text, on-screen output, and tool arguments. If any of the three layers
+ * (recognize / output-mask / secrets guard) treated a fake as a secret,
+ * on-screen diagnosability would be lost (echo $GH_TOKEN masked to ***, the
+ * model never sees the fake value). This file is a reverse pin test: it changes
+ * zero lines of the three layer sources and only pins "fakes never trigger the three layers".
  *
- * 全部 fixture 为生成假凭据；宿主真值 / .env* 不进任何断言输出。
+ * All fixtures are generated fake credentials; host real values / .env* never enter any assertion output.
  */
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -23,17 +24,19 @@ import { currentSecretValues } from "../../../src/harness/sandbox/env-isolation.
 import { createOutputMask } from "../../../src/harness/sandbox/output-mask.js";
 import { createSecretsGuardHook } from "../../../src/harness/permission/secrets-guard.js";
 import { SentinelRegistry } from "../../../src/harness/sandbox/egress/upstream.js";
-// 测试专用深路径（SC10 只钉 src/；upstream.ts 未 re-export 该纯生成件，
-// T5 diff 仅测试文件、不得扩 upstream —— 先例：egress-proxy-behavior.test.ts）。
+// Test-only deep import (the pin covers src/ only; upstream.ts does not re-export this
+// pure generator, and this diff must stay test-only — must not extend upstream; precedent: egress-proxy-behavior.test.ts).
 import { mintFakeJwt } from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-decode.js";
 
 /**
- * 三类假值形态（与铸造面逐字同形）：
- *  a) 基础 sentinel `fake_value_<uuid4>`（credential-sentinel.js:24-34）；
- *  b) JWT 同形假值（mintFakeJwt：三段 HS256，payload sub = sentinel 身份）；
- *  c) 配平长假值 —— 真值更长时 pad 到等字节长（SENTINEL_ALPHABET 同字符类）。
- *     pad 用确定性轮转字母表（真实铸造为随机 pad；轮转序列不含任何
- *     内置模式的必需子串，避免 0.4%/例的随机 flake，形态等价）。
+ * Three fake-value shapes (byte-identical to the minting surface):
+ *  a) basic sentinel `fake_value_<uuid4>` (credential-sentinel.js:24-34);
+ *  b) JWT-shaped fake (mintFakeJwt: three-segment HS256, payload sub = sentinel identity);
+ *  c) length-balanced fake — padded to the real value's byte length when the real
+ *     value is longer (same character class as SENTINEL_ALPHABET). Padding uses a
+ *     deterministic rotating alphabet (real minting pads randomly; the rotation
+ *     sequence contains no substring any builtin pattern requires, avoiding a
+ *     0.4%-per-case random flake while staying shape-equivalent).
  */
 const PAD_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_-";
 function paddedSentinel(realByteLength: number): string {
@@ -45,8 +48,8 @@ function paddedSentinel(realByteLength: number): string {
   return out;
 }
 
-/** 假 JWT 用固定 uuid4 形态：mintFakeJwt 输出全由 uuid 决定，钉死避免
- *  base64 段随机撞上 `sk-`/`xox?` 模式的百万分级 flake。 */
+/** The fake JWT uses a fixed uuid4 shape: mintFakeJwt's output is fully determined by
+ *  the uuid; pinning it avoids million-to-one flakes where a random base64 segment collides with the `sk-`/`xox?` patterns. */
 const FIXED_FAKE_UUID = "3f2a9c1e-7b64-4d0a-9e5f-1c2b3d4e5f60";
 
 function fakeFixtures(): string[] {
@@ -81,7 +84,7 @@ describe("T5① recognize —— 假值零命中（matched=[] 且 replaced 逐�
   it("patterns SSOT（DEFAULT_SECRET_PATTERNS）对每类假值逐条零命中", () => {
     for (const fake of fakeFixtures()) {
       for (const source of DEFAULT_SECRET_PATTERNS) {
-        // g 无副作用新建；与 recognize/守卫共用的就是这一组源串。
+        // Fresh regex, no g-flag side effects; recognize and the guard share exactly this set of source strings.
         assert.equal(
           new RegExp(source).test(fake),
           false,
@@ -95,7 +98,7 @@ describe("T5① recognize —— 假值零命中（matched=[] 且 replaced 逐�
 describe("T5② output-mask —— 假值不进遮蔽集、屏上原样可诊断", () => {
   it("假值 ∉ currentSecretValues(process.env, registry 真值) → createOutputMask 不掩假值", () => {
     const registry = new SentinelRegistry();
-    // 生成的假「真值」fixture（不是宿主任何真实凭据）。
+    // A generated fake "real value" fixture (not any host credential).
     const realFixture = `gho_FAKEONLY_${randomBytes(12).toString("hex")}`;
     const sentinel = registry.register("GH_TOKEN", realFixture, [
       "github.com",
@@ -109,10 +112,10 @@ describe("T5② output-mask —— 假值不进遮蔽集、屏上原样可诊断
     assert.equal(maskSet.includes(sentinel), false);
 
     const mask = createOutputMask(maskSet);
-    // echo $GH_TOKEN 经 mask 层输出原样含假值（屏上可诊断性）。
+    // Output through the mask layer keeps `echo $GH_TOKEN` plus the fake value verbatim (on-screen diagnosability).
     const line = `echo $GH_TOKEN → ${sentinel}`;
     assert.equal(mask.mask(line), line);
-    // 阳性对照：真值在遮蔽集内、会被掩（否则本钉是假绿）。
+    // Positive control: the real value IS in the mask set and does get masked (otherwise this pin would be falsely green).
     assert.ok(!mask.mask(`leak ${realFixture} here`).includes(realFixture));
   });
 });

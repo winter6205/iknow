@@ -1,10 +1,9 @@
 /**
- * #121 T2: sanitizeMemoryFile pure-function tests.
+ * sanitizeMemoryFile pure-function tests.
  *
- * Spec: specs/121-memory-injection.md (Project Structure schema.ts, Testing
- * Strategy schema half — v1 sanitize / v0 补齐 / schemaVersion > 1 拒绝 /
- * 未知字段保留 / 根非对象拒绝; Boundaries Always — sanitize 是纯函数、
- * 无写盘副作用).
+ * Coverage (schema half): v1 sanitize / v0 backfill / reject schemaVersion > 1 /
+ * unknown fields preserved / non-object root rejected; sanitize must stay a
+ * pure function with no disk-write side effects.
  *
  * Failure path: throws typed MemorySchemaInvalid (not a bare Error, not a
  * structured-object literal — memory uses class-based typed errors per

@@ -1,22 +1,25 @@
 /**
- * live-graph-phase1 T1 — run_graph handler 接到账本（SC1 / SC2）。
+ * run_graph handler wired to the ledger.
  *
- * 走真 `SubAgentManager`（fake spawn + 假 child，与 run-graph-executor.test.ts
- * 同模式）—— 不 mock manager，否则要验的"工具真的驱动 spawn + ledger
- * 真的拦冻结"就被 mock 掉。
+ * Uses a real `SubAgentManager` (fake spawn + fake child, same pattern as
+ * run-graph-executor.test.ts) — mocking the manager would mock away exactly
+ * what is being verified: "the tool really drives spawn + the ledger really
+ * blocks frozen ids".
  *
- * 五件事（SC1 / SC2 / 冻结种子）：
- *   1. **SC1a**：host 新建 + 工具无任何调用 → 账本未创建；
- *   2. **SC1b**：拓扑非法（环 / 自依赖 / 未知依赖 / 重复 id / 空 nodes）
- *      → typed 拒绝、零 spawn、账本仍未创建（spec 关键边界）；
- *   3. **SC1c**：第一次校验通过的调用 → ledgerFor(conv).exists() === true，
- *      且 frozen 中含本次 done id；
- *   4. **SC2**：再交同一已冻结 id → typed 拒绝、零 spawn；ledger 未受
- *      graph mode 开关影响（host 与 graphAssembly 平行挂在 deps 上，
- *      翻键不销毁账本）—— 这一条由"overlay 关 → on → 再交冻结 id 仍拒"
- *      复合断言；
- *   5. **冻结种子**：skipped 的 id 未冻结（spec Glossary：未冻含 skipped），
- *      后续再交能真 spawn —— T2 完整合并已就位前的最小证明。
+ * Five things:
+ *   1. Fresh host + no calls → no ledger created;
+ *   2. Invalid topology (cycle / self-dep / unknown dep / duplicate id /
+ *      empty nodes) → typed rejection, zero spawns, still no ledger (the
+ *      key boundary);
+ *   3. First call that passes validation → ledgerFor(conv).exists() === true
+ *      and the done ids of that call are in the frozen set;
+ *   4. Resubmitting an already-frozen id → typed rejection, zero spawns;
+ *      the ledger is unaffected by graph-mode toggling (host and
+ *      graphAssembly hang off deps in parallel; toggling never destroys the
+ *      ledger) — asserted as the composite "off → on → frozen id still
+ *      rejected";
+ *   5. Freeze seeding: a skipped id stays unfrozen (done/failed freeze,
+ *      skipped does not), so a later resubmission really spawns.
  */
 
 import { describe, expect, it } from "vitest";
@@ -34,7 +37,7 @@ import {
 
 const CONV = "conv-t1";
 
-// ── SC1：账本创建时机 ──────────────────────────────────────────────────
+// ── When the ledger is created ─────────────────────────────────────────
 
 describe("run_graph handler + ledger：SC1 账本创建时机", () => {
   it("host 新建 + 无任何调用 → 任何会话账本 exists() 为 false", () => {
@@ -96,7 +99,7 @@ describe("run_graph handler + ledger：SC1 账本创建时机", () => {
       await expect(tool.handler(input)).rejects.toThrow(ToolExecutionError);
       await expect(tool.handler(input)).rejects.toThrow(pattern);
       expect(children).toHaveLength(0);
-      // 关键边界：验证失败绝不创建账本（spec SC1 + ASSUMPTIONS #4）。
+      // Key boundary: validation failure must never create a ledger.
       expect(host.ledgerFor(CONV).exists()).toBe(false);
       await manager.shutdown();
     }
@@ -162,15 +165,15 @@ describe("run_graph handler + ledger：SC1 账本创建时机", () => {
   });
 });
 
-// ── SC2：关 overlay 不毁账本 ────────────────────────────────────────────
+// ── Turning the overlay off does not destroy the ledger ─────────────────
 
 describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
   it("账本建立后关掉 graph mode 再开：已冻结 id 仍被 typed 拒绝、零 spawn", async () => {
     const { manager, children } = makeManager();
     const host = createLiveGraphLedgerHost();
 
-    // 模拟 graphMode holder / graphAssembly 平行挂在 deps 上 ——
-    // graphAssembly.enabled() 翻 false / true，账本不受影响。
+    // graphMode holder / graphAssembly hang off deps in parallel — flipping
+    // graphAssembly.enabled() false / true leaves the ledger untouched.
     let graphOn = true;
     const tool = createRunGraphTool({
       manager,
@@ -178,7 +181,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
       isEnabled: () => graphOn,
     });
 
-    // 第一段图：跑通 → 冻结 a
+    // First graph run: completes → a is frozen.
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -188,7 +191,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
     await first;
     expect(host.ledgerFor(CONV).isFrozen("a")).toBe(true);
 
-    // 关 overlay → handler 拒绝（与原 SPEC ADR-0041 行为一致）
+    // Overlay off → handler rejects (per ADR-0041 gating behavior).
     graphOn = false;
     await expect(
       tool.handler(
@@ -196,11 +199,11 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
         { conversationId: CONV }
       )
     ).rejects.toThrow(/graph mode is off/i);
-    // 关键：关 overlay 期间账本未消失
+    // Key: the ledger survives while the overlay is off.
     expect(host.ledgerFor(CONV).exists()).toBe(true);
     expect(host.ledgerFor(CONV).isFrozen("a")).toBe(true);
 
-    // 开 overlay → 再交已冻结 a → typed 拒绝、零 spawn（spec SC2 核心）
+    // Overlay back on → resubmitting frozen a → typed rejection, zero spawns (the core promise).
     graphOn = true;
     const childrenBefore = children.length;
     await expect(
@@ -229,7 +232,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
       isEnabled: () => true,
     });
 
-    // 第一段：冻结 a
+    // First segment: freeze a.
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -238,7 +241,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
     settle(children[0]!, ok("A"));
     await first;
 
-    // 第二段：交未冻结 b —— 真 spawn（不是只交 a 那种 typed 拒绝路径）
+    // Second segment: submit unfrozen b — real spawn (not the typed-rejection path of resubmitting a).
     const second = tool.handler(
       { nodes: [{ id: "b", task: "tb" }] },
       { conversationId: CONV }
@@ -255,7 +258,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
   });
 });
 
-// ── 冻结种子：failed 冻结、skipped 不冻 ────────────────────────────────
+// ── Freeze seeding: done/failed freeze, skipped does not ───────────────
 
 describe("run_graph handler + ledger：冻结语义种子（done 冻 / failed 冻 / skipped 不冻）", () => {
   it("failed id 同样冻结（spec Glossary：done/failed 均冻）", async () => {
@@ -279,7 +282,7 @@ describe("run_graph handler + ledger：冻结语义种子（done 冻 / failed �
     expect(ledger.isFrozen("boom")).toBe(true);
     expect(ledger.frozenIds()).toEqual(["boom"]);
 
-    // 再交 boom → typed 拒绝、零 spawn
+    // Resubmitting boom → typed rejection, zero spawns.
     const childrenBefore = children.length;
     await expect(
       tool.handler(
@@ -300,7 +303,7 @@ describe("run_graph handler + ledger：冻结语义种子（done 冻 / failed �
       isEnabled: () => true,
     });
 
-    // 上游失败 → 下游 skipped
+    // Upstream fails → downstream is skipped.
     const pending = tool.handler(
       {
         nodes: [
@@ -319,7 +322,7 @@ describe("run_graph handler + ledger：冻结语义种子（done 冻 / failed �
     expect(ledger.isFrozen("after")).toBe(false);
     expect(ledger.frozenIds()).toEqual(["boom"]);
 
-    // 再交 after（未冻结）→ 真 spawn（T2 完整合并的种子）
+    // Resubmitting "after" (unfrozen) → real spawn.
     const second = tool.handler(
       { nodes: [{ id: "after", task: "retry" }] },
       { conversationId: CONV }
@@ -332,7 +335,7 @@ describe("run_graph handler + ledger：冻结语义种子（done 冻 / failed �
   });
 });
 
-// ── 不接 host 的回归：旧调用方零行为变化 ────────────────────────────────
+// ── Regression without a host: zero behavior change for old callers ─────
 
 describe("run_graph handler：未接 host 时零行为变化", () => {
   it("host 缺席 → 工具照常跑通、不冻结任何 id（不在账本位置报错）", async () => {
@@ -347,7 +350,7 @@ describe("run_graph handler：未接 host 时零行为变化", () => {
     settle(children[0]!, ok("A"));
     await pending;
 
-    // 无 host：不冻结、但 handler 不抛 —— 与 V1 行为字节一致
+    // No host: nothing freezes, the handler never throws — same behavior as before the ledger existed.
     expect(children).toHaveLength(1);
     await manager.shutdown();
   });

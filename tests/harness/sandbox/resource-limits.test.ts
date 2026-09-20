@@ -28,8 +28,9 @@ describe("createResourceLimits", () => {
         fd: MAX_FD,
       }
     );
-    // ADR-0092 全局档:围栏不再发射 --size / --tmpfs /tmp,`ResourceLimits`
-    // 只保留 v1 hooks(seccomp / cgroup v2)消费的常量面。
+    // ADR-0092 global mode: the fence no longer emits --size / --tmpfs /tmp, so
+    // `ResourceLimits` keeps only the constant surface consumed by the v1 hooks
+    // (seccomp / cgroup v2).
     assert.equal("toRlimitFlags" in limits, false);
     assert.ok(Object.isFrozen(limits));
   });

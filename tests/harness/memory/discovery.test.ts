@@ -1,12 +1,11 @@
 /**
- * #121 T3: discovery.ts tests (findProjectAgents / findUserAgents / listRulesFiles).
+ * Tests for discovery.ts (findProjectAgents / findUserAgents / listRulesFiles).
  *
- * Spec: specs/121-memory-injection.md (Testing Strategy discovery half —
- * cwd 存在 / cwd 缺失 / user home 缺失 / rules glob 排序 / mtime 元信息 /
- * symlink 拒绝 / 非 UTF-8 跳过 + stderr 警告). Project Structure discovery.ts.
+ * Coverage (discovery half): cwd present / cwd missing / user home missing /
+ * rules glob ordering / mtime metadata / symlink rejection / non-UTF-8 skip + stderr warning.
  *
  * discovery is the read-side metadata scanner: NEVER reads content (content
- * loading is assembly.ts's job in T4). It only resolves existence + mtime +
+ * loading is assembly.ts's job). It only resolves existence + mtime +
  * size so the per-turn refresh hook can compare cached mtimes.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";

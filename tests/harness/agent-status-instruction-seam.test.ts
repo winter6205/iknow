@@ -1,12 +1,17 @@
 /**
- * spec agent-status-instruction-echo T2「名册完备性锁」+ SC2 grep 面 / SC5。
+ * specs/agent-status-instruction-echo.md roster-completeness lock for the
+ * injection seams, plus the zero-LLM grep surface.
  *
- * 1. SEAM 枚举：读 loop-engine 源，找全部 `encodeUserText(` 注入缝产出点；
- *    每个调用点必须命中已登记名册（按实参表达式 + 前向赋值窗分类），
- *    新注入缝不挂名册即红。除操作员原文入口（effectiveUserText）外，
- *    每个注入缝的**实际产出文本**必须被 `isHostInjectedUserText` 判注入。
- * 2. grep 断言：甄别模块零 adapter import（SC2「无任何 LLM 参与」）——
- *    model-adapter 只允许 type-only 的 wire 类型导入。
+ * 1. SEAM enumeration: read the loop-engine source and locate every
+ *    `encodeUserText(` injection-seam production site; each call site must hit
+ *    the registered roster (classified by argument expression + forward
+ *    assignment window), so a new seam not on the roster goes red. Except for
+ *    the operator's raw-text entry (effectiveUserText), every injection seam's
+ *    ACTUAL produced text must be classified as injected by
+ *    `isHostInjectedUserText`.
+ * 2. grep assertion: the discrimination module imports no adapter surface
+ *    (nothing touches an LLM) — model-adapter is allowed only as a type-only
+ *    wire-type import.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -41,16 +46,16 @@ const instructionModuleSource = readFileSync(
   "utf8"
 );
 
-// -- SEAM 枚举 ----------------------------------------------------------------
+// -- SEAM enumeration -----------------------------------------------------------
 
 interface SeamSite {
-  /** 调用点实参表达式（配平括号提取）。 */
+  /** The call site's argument expression (extracted with paren balancing). */
   readonly arg: string;
-  /** 实参为裸 `text` 时的前向赋值窗。 */
+  /** Forward assignment window when the argument is a bare `text`. */
   readonly window: string;
 }
 
-/** 提取全部 `adapter.encodeUserText(` 调用点的实参表达式与前向窗。 */
+/** Extract the argument expressions and forward windows of all `adapter.encodeUserText(` call sites. */
 function enumerateEncodeUserTextSites(source: string): ReadonlyArray<SeamSite> {
   const sites: SeamSite[] = [];
   const needle = "encodeUserText(";
@@ -58,7 +63,7 @@ function enumerateEncodeUserTextSites(source: string): ReadonlyArray<SeamSite> {
   for (;;) {
     const idx = source.indexOf(needle, from);
     if (idx < 0) return sites;
-    const open = idx + needle.length - 1; // '(' 的位置
+    const open = idx + needle.length - 1; // position of '('
     let depth = 0;
     let end = open;
     for (let i = open; i < source.length; i++) {
@@ -82,8 +87,10 @@ function enumerateEncodeUserTextSites(source: string): ReadonlyArray<SeamSite> {
 }
 
 /**
- * 名册登记：调用点 →（分类标签, 该缝实际产出文本的样本）。
- * 匹配规则按实参精确式或前向窗中的赋值源标识；新缝不匹配任何规则 → 红。
+ * Roster registration: call site → (classification label, a sample of the text
+ * the seam actually produces). Matching uses exact argument forms or the
+ * assignment-source identifier in the forward window; a new seam matching no
+ * rule → red.
  */
 const ROSTER_RULES: ReadonlyArray<{
   readonly label: string;
@@ -93,12 +100,13 @@ const ROSTER_RULES: ReadonlyArray<{
   {
     label: "agent_status 栏",
     match: (s) => s.arg === "snapshot.text",
-    sample: () =>
-      buildAgentStatusText({ lastTool: "idle", openTodoLines: [] }),
+    sample: () => buildAgentStatusText({ lastTool: "idle", openTodoLines: [] }),
   },
   {
     label: "graph mode change",
-    match: (s) => s.arg === "text" && s.window.includes("renderGraphModeChangeNotification"),
+    match: (s) =>
+      s.arg === "text" &&
+      s.window.includes("renderGraphModeChangeNotification"),
     sample: () => renderGraphModeChangeNotification("on"),
   },
   {
@@ -108,7 +116,9 @@ const ROSTER_RULES: ReadonlyArray<{
   },
   {
     label: "MCP 重连通知",
-    match: (s) => s.arg === "text" && s.window.includes("MCP_RECONNECT_NOTIFICATION_TEMPLATE"),
+    match: (s) =>
+      s.arg === "text" &&
+      s.window.includes("MCP_RECONNECT_NOTIFICATION_TEMPLATE"),
     sample: () =>
       MCP_RECONNECT_NOTIFICATION_TEMPLATE.replace("<server>", "gh").replace(
         "<tools>",
@@ -126,8 +136,9 @@ const ROSTER_RULES: ReadonlyArray<{
     sample: () => buildCompactPrompt(),
   },
   {
-    // ADR-0112 T2:runFullCompact 的 adapter 视图（compress 有界上下文外、
-    // 宿主 commit 方盖戳）；产出文本与 buildCompactPrompt 同缝同名册。
+    // ADR-0112: runFullCompact's adapter view (outside the compress bounded
+    // context, stamped by the host commit side); its produced text shares the
+    // same seam and roster entry as buildCompactPrompt.
     label: "compact request（runFullCompact adapter 视图）",
     match: (s) => s.arg === "compactPromptText",
     sample: () => buildCompactPrompt(),
@@ -145,7 +156,7 @@ const ROSTER_RULES: ReadonlyArray<{
   },
 ];
 
-/** 操作员原文入口：非注入缝，名册之外唯一合法调用点。 */
+/** The operator's raw-text entry: not an injection seam, the one legal call site outside the roster. */
 const USER_TEXT_ENTRY = "effectiveUserText";
 
 describe("SEAM 名册完备性锁（loop-engine encodeUserText 全集）", () => {
@@ -157,7 +168,7 @@ describe("SEAM 名册完备性锁（loop-engine encodeUserText 全集）", () =>
 
   for (const [i, site] of sites.entries()) {
     it(`调用点 #${i}（arg=${JSON.stringify(site.arg).slice(0, 48)}）挂名册或为原文入口`, () => {
-      if (site.arg === USER_TEXT_ENTRY) return; // 操作员键入原文，非注入
+      if (site.arg === USER_TEXT_ENTRY) return; // operator-typed raw text, not an injection
       const rule = ROSTER_RULES.find((r) => r.match(site));
       assert.ok(
         rule !== undefined,
@@ -187,13 +198,17 @@ describe("SEAM 名册完备性锁（loop-engine encodeUserText 全集）", () =>
       )
     );
     assert.ok(LOOP_DETECTED_TEXT.startsWith(LOOP_DETECTED_INJECTION_PREFIX));
-    assert.ok(buildCompactPrompt().startsWith(COMPACT_REQUEST_INJECTION_PREFIX));
-    // SUMMARY_PROMPT 未导出：从 loop-engine 源钉其字面头部
+    assert.ok(
+      buildCompactPrompt().startsWith(COMPACT_REQUEST_INJECTION_PREFIX)
+    );
+    // SUMMARY_PROMPT is not exported: pin its literal head from the loop-engine source
     assert.match(
       loopEngineSource,
-      new RegExp(`SUMMARY_PROMPT[\\s\\S]{0,80}\`${STOP_SUMMARY_INJECTION_PREFIX}`)
+      new RegExp(
+        `SUMMARY_PROMPT[\\s\\S]{0,80}\`${STOP_SUMMARY_INJECTION_PREFIX}`
+      )
     );
-    // compact 产物摘要（持久进 prior 的 user 消息）同样在名册内
+    // The compact-produced summary (a user message persisted into prior) is on the roster too
     const compactSource = readFileSync(
       join(REPO_ROOT, "src/harness/compress/full-compact.ts"),
       "utf8"
@@ -208,7 +223,7 @@ describe("SEAM 名册完备性锁（loop-engine encodeUserText 全集）", () =>
   });
 });
 
-// -- SC2：零 adapter import grep ----------------------------------------------
+// -- zero adapter import grep ---------------------------------------------------
 
 describe("甄别模块零 adapter import（SC2 无任何 LLM 参与）", () => {
   const importStatements = instructionModuleSource
@@ -217,19 +232,20 @@ describe("甄别模块零 adapter import（SC2 无任何 LLM 参与）", () => {
 
   it("不 import 任何 adapter / model / LLM 实现面", () => {
     for (const line of importStatements) {
-      assert.doesNotMatch(line, /anthropic-adapter|stub-model|model-adapter\/(?!types)/i);
+      assert.doesNotMatch(
+        line,
+        /anthropic-adapter|stub-model|model-adapter\/(?!types)/i
+      );
       assert.doesNotMatch(line, /\bAdapter\b/);
     }
   });
 
   it("model-adapter 相关 import 仅允许 type-only wire 类型", () => {
-    // 逐行收集真实 import 语句，避免注释里的“import”字样污染匹配。
+    // Collect real import statements line by line so the word "import" appearing in comments cannot pollute the match.
     const adapterPathImports = instructionModuleSource
       .split("\n")
       .filter(
-        (l) =>
-          /^import\b/.test(l) &&
-          /from\s+"[^"]*model-adapter[^"]*"/.test(l)
+        (l) => /^import\b/.test(l) && /from\s+"[^"]*model-adapter[^"]*"/.test(l)
       );
     for (const stmt of adapterPathImports) {
       assert.match(stmt, /^import\s+type\s/);
@@ -238,10 +254,13 @@ describe("甄别模块零 adapter import（SC2 无任何 LLM 参与）", () => {
   });
 
   it("LoopEngineDeps 引用面 sanity（类型导入不携带运行时 adapter 依赖）", () => {
-    // 本测试文件自身 import loop-engine 仅为 MCP 模板常量与类型；
-    // 甄别模块自身源码不得出现对 loop-engine 的 import（防成环）。
+    // This test file imports loop-engine only for the MCP template constant and types;
+    // the discrimination module's own source must never import loop-engine (cycle guard).
     assert.doesNotMatch(instructionModuleSource, /from\s+"[^"]*loop-engine/);
     assert.doesNotMatch(instructionModuleSource, /from\s+"[^"]*session-api/);
-    assert.doesNotMatch(instructionModuleSource, /from\s+"[^"]*\/tui\/|src\/tui/);
+    assert.doesNotMatch(
+      instructionModuleSource,
+      /from\s+"[^"]*\/tui\/|src\/tui/
+    );
   });
 });

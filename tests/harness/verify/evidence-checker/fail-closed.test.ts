@@ -4,9 +4,9 @@ import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.j
 import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
 
 /**
- * T4 fail-closed 收口 (spec SC7 / A8): 歧义 / 残缺 / 空输入样本集全部
- * 非 SUFFICIENT。属性式用例: 随机残缺 fixture 集 (缺 content / 空 runs /
- * 全 null exitCode) 任一永不 SUFFICIENT。
+ * fail-closed convergence: every ambiguous / truncated / empty input sample
+ * must be non-SUFFICIENT. Property-style case: no fixture in the randomly
+ * malformed set (missing content / empty runs / all-null exitCode) is ever SUFFICIENT.
  */
 
 describe("fail-closed 歧义 / 残缺 / 空输入 → 非 SUFFICIENT (A8)", () => {
@@ -90,13 +90,13 @@ describe("fail-closed 歧义 / 残缺 / 空输入 → 非 SUFFICIENT (A8)", () =
 
   it("属性式: 随机残缺 fixture 集任一永不 SUFFICIENT", () => {
     const malformedFixtures: AnthropicNativeMessage[][] = [
-      // 缺 content
+      // missing content
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       [{ role: "user" } as any, { role: "assistant" } as any],
-      // content 非数组
+      // content is not an array
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       [{ role: "user", content: {} } as any],
-      // tool_use 缺 input
+      // tool_use without input
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       [
         message("user", textBlock("task")),
@@ -106,7 +106,7 @@ describe("fail-closed 歧义 / 残缺 / 空输入 → 非 SUFFICIENT (A8)", () =
         } as any,
         message("user", textBlock("done")),
       ],
-      // tool_result 缺失 (tool_use 无配对 result)
+      // tool_result missing (tool_use has no paired result)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       [
         message("user", textBlock("task")),

@@ -1,15 +1,18 @@
 /**
- * ADR-0092 — 全局档可见性接线(前台 + 后台)。
+ * ADR-0092 — global-mode visibility wiring (foreground + background).
  *
- * 取代 `bash-closed-world-read-roots.test.ts`:闭世界读白名单(installRoot /
- * git 全局配置的逐根 `--ro-bind`)随全局档退役,`--bind / /` 使宿主真实路径
- * 本就可见,不再需要逐根读通道。本文件认证仍然真实的命题:
- *   - 宿主根 `--bind / /` 在前后台同波同一份;
- *   - 系统前缀只读重绑仍在(读可见、写被拒);
- *   - 不再有逐根 `--ro-bind <home|installRoot>` 白名单发射(不再有那条通道
- *     需要认证);absent 选项不导致构造失败。
+ * Replaces `bash-closed-world-read-roots.test.ts`: the closed-world read
+ * whitelist (per-root `--ro-bind` of installRoot / global git config) retired
+ * with global mode — `--bind / /` already exposes real host paths, so no
+ * per-root read channel is needed. This file authenticates what remains true:
+ *   - host root `--bind / /` is the same on both fg and bg sides;
+ *   - read-only system-prefix rebinding remains (readable, writes denied);
+ *   - no per-root `--ro-bind <home|installRoot>` whitelist emission anymore
+ *     (that channel no longer exists to authenticate); absent options must not
+ *     break construction.
  *
- * 前台链路经 spawn-mock 拦截,后台直驱 defaultBackgroundSpawn(同一 mock)。
+ * Foreground goes through the spawn-mock interception; background drives
+ * defaultBackgroundSpawn directly (same mock).
  */
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
@@ -45,8 +48,9 @@ function makeFakeChild(pid = 47181) {
     pid,
     kill: vi.fn(() => true),
   });
-  // 前台路径经 runInSandbox 等子进程退出 —— 异步发 close(code 0) 模拟
-  // bwrap 立即成功返回,避免真实 spawn 拖慢/超时。
+  // The foreground path waits for child exit inside runInSandbox — emit
+  // close(code 0) asynchronously to mimic bwrap returning instantly, so the
+  // fake spawn never slows or times out the test.
   queueMicrotask(() => {
     child.emit("close", 0);
   });
@@ -114,8 +118,9 @@ describe("bash global-mode visibility (ADR-0092 wiring)", () => {
       hasHostRootBind(argv),
       `foreground fence must --bind / /; argv=${JSON.stringify(argv)}`
     );
-    // 只允许系统前缀(及其后可选宿主前缀)的固定 ro-bind;闭世界逐根读白名单
-    // (installRoot / git 配置)随全局档退役。
+    // Only fixed ro-binds of system prefixes (plus optional host prefixes) are
+    // allowed; the closed-world per-root read whitelist (installRoot / git
+    // config) retired with global mode.
     const allowedRoBindTargets = new Set<string>([
       ...READ_ONLY_SYSTEM_PATHS,
       ...OPTIONAL_HOST_RO_PREFIXES,

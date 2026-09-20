@@ -1,10 +1,10 @@
 /**
- * T12 (plans/worktree-live-task-root.md §6 T12) — run-level e2e reproduction
- * of the §1 trace scenario, exercising the full assembly + loop-engine path
+ * Run-level e2e reproduction of the live-task-root trace scenario, exercising
+ * the full assembly + loop-engine path
  * (`buildHarnessEngine` + `run()` + stub model + real ACI write_file /
  * create-worktree tools).
  *
- * Acceptance (§6 T12 + §5 D1/D2/D11):
+ * Expected end-to-end flow:
  *   - turn 0: model emits `create-worktree` → gate admits (classified as
  *     "read" → bypasses the gate) → inner handler invokes the host
  *     `provision` seam, which is wrapped with `withLiveTaskRootWrite` so
@@ -160,7 +160,7 @@ async function fakeProvision(ctx: {
 }
 
 // ---------------------------------------------------------------------------
-// T12 — run-level e2e
+// run-level e2e
 // ---------------------------------------------------------------------------
 
 describe("T12 — run-level e2e: create-worktree + write_file in one run", () => {
@@ -180,9 +180,10 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
-      // 本文件验 worktree 门禁的 run-level 行为,不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies the worktree gate's run-level behavior, not overflow
+      // retirement / index demotion (covered by build-engine-tool-overflow.test.ts
+      // and disclosure-index-align/). Bypass assembly-time countTokens; see the
+      // BuildEngineOpts.skipCountTokens comment for the seam's semantics.
       skipCountTokens: true,
       worktreeIsolation: {
         // Model-provision seam (see fakeProvision above).
@@ -264,7 +265,7 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
     // succeeds against a root that exists, and the write lands inside the
     // resolved tree. A handler frozen at the assembly-time mainRoot would
     // have written `<mainRoot>/a.txt` instead (fail-open, the original
-    // §2 bug class).
+    // original fail-open bug class).
     const mainRoot = await makeMainRoot();
     const conversationId = "conv-t12-e2e-2";
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -276,7 +277,7 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
-      skipCountTokens: true, // 同上:验 run-level worktree 落点。
+      skipCountTokens: true, // same as above: verifies run-level worktree landing.
       worktreeIsolation: {
         provision: async ({ root }) =>
           fakeProvision({ root, mainRoot, wtRoot }),
@@ -314,7 +315,7 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
 });
 
 // ---------------------------------------------------------------------------
-// Trace double-track — §6 T12 acceptance + test.md `Trace as the integration
+// Trace double-track — per test.md's `Trace as the integration
 // test assert surface`. Two complementary assertions:
 //
 //   (a) trace-based — JSONL event sequence (llm_call / tool_call / turn)
@@ -343,7 +344,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
-      skipCountTokens: true, // 同上:验 trace 事件序列。
+      skipCountTokens: true, // same as above: verifies the trace event sequence.
       worktreeIsolation: {
         provision: async ({ root }) =>
           fakeProvision({ root, mainRoot, wtRoot }),
@@ -424,8 +425,8 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
   });
 
   it("(b) NoopTraceService-vs-no-trace: RunResult is byte-identical", async () => {
-    // Per test.md: "trace-based assert 之外,必须再配一个独立的
-    // NoopTraceService-vs-no-trace deepEqual 基线". Two fresh engines
+    // Per test.md: beyond trace-based asserts, an independent
+    // NoopTraceService-vs-no-trace deepEqual baseline is required. Two fresh engines
     // (each has its own live cell), two stub models with the same
     // script, two run() calls. The two RunResults must deepEqual —
     // trace presence does not change harness behavior.
@@ -444,7 +445,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
         cwd: mainRoot,
         userHome: join(mainRoot, "home"),
         settings: { isolation: { worktreeOnMutate: true } },
-        skipCountTokens: true, // 同上:验 RunResult 基线 deepEqual。
+        skipCountTokens: true, // same as above: verifies RunResult baseline deepEqual.
         worktreeIsolation: {
           provision: async ({ root }) =>
             fakeProvision({ root, mainRoot, wtRoot }),

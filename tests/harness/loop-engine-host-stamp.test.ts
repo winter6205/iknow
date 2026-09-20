@@ -1,18 +1,22 @@
 /**
- * ADR-0112 T2 — 宿主注入 commit 盖戳。
+ * ADR-0112 — host-injected commit stamping.
  *
- * 本套件钉住的不变式（SSOT: specs/instruction-authority-projection.md
- * invariant 2 + ADR-0112 Decision 1）：
- *   - loop-engine 全部宿主注入 commit 缝（agent_status 栏 / graph 切换与
- *     现势 / MCP 重连 / skill 索引增量 / LOOP_DETECTED envelope / compact
- *     请求 / 收尾摘要 prompt）写进 LoopState 的 user 消息携带非模型可见的
- *     `hostInjected` 出处戳；
- *   - 操作员首轮文本与 assistant 回合不盖戳（operator 通道 out of scope，
- *     无戳 user 文本由出站投影按 invariant 3 转译）；
- *   - 权威历史不落转译：戳只是出处标记，消息正文原样（盘上可脏）；
- *   - 戳随 pendingInjected → commitMessages → store JSONL 链存活
- *     （resume 后同一历史仍出同一 wire 前缀，KV 稳定）；
- *   - `agentStatusFromMessages` 读盘上原文解析照常（转译只发生在 wire）。
+ * Pinned invariants (SSOT: specs/instruction-authority-projection.md
+ * invariant 2 + ADR-0112 Decision 1):
+ *   - every host-injected commit seam in loop-engine (agent_status bar /
+ *     graph switch notice & presence / MCP reconnect / skill-index delta /
+ *     LOOP_DETECTED envelope / compact request / closing summary prompt)
+ *     stamps the user message written into LoopState with a
+ *     model-invisible `hostInjected` provenance mark;
+ *   - the operator's first text and assistant turns are NOT stamped (the
+ *     operator channel is out of scope; unstamped user text is translated by
+ *     the outbound projection per invariant 3);
+ *   - authoritative history stores no translation: the stamp is only a
+ *     provenance marker, body kept verbatim (disk may be "dirty");
+ *   - the stamp survives pendingInjected → commitMessages → store JSONL
+ *     (after resume, the same history yields the same wire prefix — KV stable);
+ *   - `agentStatusFromMessages` keeps parsing on-disk originals as usual
+ *     (translation happens only on the wire).
  */
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -68,7 +72,7 @@ function userText(m: AnthropicNativeMessage): string {
     .join("\n");
 }
 
-/** 文本回合 stub adapter，记录每次 step 收到的 state.messages。 */
+/** Text-turn stub adapter; records state.messages seen at every step. */
 function recordingTextAdapter(responses: string[]) {
   const steps: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
   let call = 0;
@@ -112,7 +116,7 @@ function makeGraphAssembly(enabled: boolean) {
   return assembly;
 }
 
-/** 找出含给定标记文本的 user 消息（返回消息对象以便断言戳）。 */
+/** Find the user message containing a marker text (returns the message so the stamp can be asserted). */
 function findUserMessage(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   marker: string
@@ -122,7 +126,7 @@ function findUserMessage(
   );
 }
 
-// -- 1. 各宿主注入缝盖戳 ----------------------------------------------------------
+// -- 1. Every host-injection seam gets stamped --------------------------------
 
 describe("host commit stamping: every injected seam carries hostInjected", () => {
   it("agent_status 栏盖戳；操作员 query 与 assistant 回合不盖戳；正文不被改写", async () => {
@@ -138,13 +142,13 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
     const bar = findUserMessage(result.messages, "<agent_status>");
     assert.ok(bar, "栏消息存在");
     assert.equal(bar.hostInjected, true);
-    // 正文原样：权威历史不预转译（转译只发生在 wire）。
+    // Body verbatim: authoritative history is never pre-translated (translation happens only on the wire).
     assert.ok(userText(bar).startsWith("<agent_status>"));
-    // 首条 = 操作员 query：不盖戳。
+    // First message = operator query: not stamped.
     const query = result.messages[0]!;
     assert.equal(query.role, "user");
     assert.equal(query.hostInjected, undefined);
-    // assistant 回合无戳。
+    // Assistant turns carry no stamp.
     for (const m of result.messages.filter((x) => x.role === "assistant")) {
       assert.equal(m.hostInjected, undefined);
     }
@@ -310,8 +314,8 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // runFullCompact 摘要步（request.tools 缺席的那次 step）的 state 末条 =
-    // compact 请求 prompt，带戳。
+    // The runFullCompact summary step (the step call without request.tools)
+    // ends on a stamped compact-request prompt.
     const compactStep = adapter.steps.find(
       (msgs) =>
         userText(msgs[msgs.length - 1] ?? { role: "assistant", content: [] })
@@ -324,8 +328,9 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
     const promptMsg = compactStep[compactStep.length - 1]!;
     assert.equal(userText(promptMsg), buildCompactPrompt());
     assert.equal(promptMsg.hostInjected, true);
-    // spec Does #1 / invariant 2:compact 续传摘要同样落盘为宿主 commit，
-    // 必须带戳（否则出站时 COMPACT_SUMMARY 官方前缀被自家转译剥掉）。
+    // Invariant 2: the compact-resume summary is likewise committed by the
+    // host, so it must carry the stamp (otherwise the outbound
+    // COMPACT_SUMMARY official prefix gets stripped by our own translation).
     const summary = findUserMessage(
       result.messages,
       COMPACT_SUMMARY_INJECTION_PREFIX
@@ -384,7 +389,7 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
   });
 });
 
-// -- 2. 戳随落盘链存活；解析面读原文 ----------------------------------------------
+// -- 2. Stamp survives persistence; parsing reads originals -------------------
 
 describe("stamp survives persistence and does not leak into parsing semantics", () => {
   it("commit → store JSONL → load：戳在盘上保留，agentStatusFromMessages 解析照常", async () => {
@@ -429,19 +434,19 @@ describe("stamp survives persistence and does not leak into parsing semantics", 
       },
     });
     const loaded = await store.load(id);
-    // 盘上原文（未转译）仍被 isHostInjectedUserText 认出：
+    // On-disk original (untranslated) is still recognized by isHostInjectedUserText:
     const barOnDisk = loaded.messages.find((m) =>
       userText(m).startsWith("<agent_status>")
     );
     assert.ok(barOnDisk, "栏消息在盘上");
     assert.equal(isHostInjectedUserText(userText(barOnDisk)), true);
-    // 戳随 JSONL 链存活（resume 后同一历史出同一 wire 前缀）：
+    // The stamp survives the JSONL chain (after resume the same history yields the same wire prefix):
     assert.equal(barOnDisk.hostInjected, true);
-    // 解析面读盘上原文不受投影影响（invariant 2 的展示侧不回归）：
+    // Parsing over on-disk originals is unaffected by projection (the display side does not regress):
     const snapshot = agentStatusFromMessages(loaded.messages);
     assert.equal(snapshot?.lastTool, "idle");
     assert.deepEqual(snapshot?.openTodoLines, ["- [ ] [t1] planted"]);
-    // 原始文件里确认过 JSONL 也含戳（投影只发生在 wire）：
+    // Verified the raw JSONL file also carries the stamp (projection happens only on the wire):
     const raw = await (
       await import("node:fs/promises")
     ).readFile(

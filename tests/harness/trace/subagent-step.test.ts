@@ -1,16 +1,17 @@
 /**
- * D-α V1 graph mode T1 — `SUBAGENT_STEP` record_type（观测地板第 4 件）。
+ * `SUBAGENT_STEP` record_type — the fourth subagent observability record.
  *
- * 与 spawn / stop / state_change 三类同形态（id 由调用方提供、Postel 可选
- * 字段、@throws never），唯一形态差异是 id 载体为 `subagent_step_id`：前三类
- * 的 `id === taskId`（同一子代理实例），step 的 id 每步唯一。
+ * Same shape as spawn / stop / state_change (caller-provided id, Postel
+ * optional fields, @throws never); the one shape difference is the id carrier
+ * `subagent_step_id`: the first three share `id === taskId` (one subagent
+ * instance), while a step's id is unique per step.
  *
- * 覆盖：
- *   1. jsonl 行形状（record_type / subagent_step_id / snake_case 顶层 key）；
- *   2. Postel 可选字段缺席 → 不写 key；
- *   3. always-throw writer → 返回 undefined 不抛；
- *   4. noop 实现返回 undefined；
- *   5. traceserver 读侧认得 `subagent_step` 且有 step 专属列。
+ * Coverage:
+ *   1. jsonl row shape (record_type / subagent_step_id / snake_case top-level keys);
+ *   2. absent Postel optional fields → key not written;
+ *   3. always-throw writer → returns undefined, never throws;
+ *   4. noop implementation returns undefined;
+ *   5. the traceserver reader recognizes `subagent_step` and has step-specific columns.
  */
 
 import { describe, it } from "vitest";
@@ -80,9 +81,10 @@ describe("trace: recordSubagentStep (jsonl sink)", () => {
       assert.equal(line!.phase, "dispatch");
       assert.equal(line!.label, "analyze");
       assert.equal(line!.started_at, "2026-08-27T00:00:00.000Z");
-      // step 的 id 不占 subagent_id 列（那是子代理实例 id 的语义）
+      // A step's id does not occupy the subagent_id column (that column means
+      // subagent-instance id)
       assert.equal("subagent_id" in line!, false);
-      // Postel: 缺席可选字段不落 key
+      // Postel: absent optional fields are not written as keys
       assert.equal("parent_turn_id" in line!, false);
       assert.equal("ended_at" in line!, false);
       assert.equal("duration_ms" in line!, false);
@@ -141,7 +143,7 @@ describe("traceserver: subagent_step 读侧", () => {
     for (const expected of ["subagentStepId", "stepIndex", "phase", "taskId"]) {
       assert.ok(keys.includes(expected), `missing field ${expected}`);
     }
-    // subagentId 列刻意不挂 step（id 载体不同）
+    // The subagentId column deliberately does not carry a step (different id carrier)
     const subagentIdDef = TRACE_FIELD_DEFS.find((d) => d.key === "subagentId");
     assert.ok(subagentIdDef);
     assert.equal(subagentIdDef!.recordTypes.includes("subagent_step"), false);

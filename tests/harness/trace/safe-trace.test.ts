@@ -1,16 +1,16 @@
 /**
- * safeTrace wrapper (T2, GH #64 ADR Decision 13)。
+ * safeTrace wrapper contracts.
  *
- * 9 项契约:
- * 1. 成功 async fn → resolve 为其结果
- * 2. 成功 async fn (falsy/对象/0/"") → 原样回传
- * 3. async fn 抛 Error → resolve undefined
- * 4. async fn 抛非 Error → resolve undefined
- * 5. Promise.reject → resolve undefined
- * 6. Promise.reject 非 Error reason → resolve undefined
- * 7. 外部同步抛 (在 safeTrace 调用栈内) → assert.throws 捕获 (同步传播)
- * 8. 外部同步抛字符串 → 同步传播
- * 9. safeTrace 自身返回 Promise
+ * Nine contracts:
+ * 1. Successful async fn → resolves to its result
+ * 2. Successful async fn (falsy / object / 0 / "") → result passed through as-is
+ * 3. async fn throws Error → resolves undefined
+ * 4. async fn throws non-Error → resolves undefined
+ * 5. Promise.reject → resolves undefined
+ * 6. Promise.reject with non-Error reason → resolves undefined
+ * 7. External synchronous throw (inside safeTrace's call stack) → caught by assert.throws (propagates synchronously)
+ * 8. External synchronous string throw → propagates synchronously
+ * 9. safeTrace itself returns a Promise
  */
 
 import { describe, it } from "vitest";

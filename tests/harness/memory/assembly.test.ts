@@ -1,16 +1,16 @@
 /**
- * #121 T4: assembly.ts tests (assembleSystemPrompt).
+ * Tests for assembly.ts (assembleSystemPrompt).
  *
- * Spec: specs/121-memory-injection.md (Testing Strategy assembly half — 三层拼接
- * 顺序 / 优先级声明位置精确 / 存在性指针条件出现 / 文件截断 / 三层全缺 → 仅存在性指针;
- * SC 3/4/5). Project Structure assembly.ts (装配顺序固定, append-only 纪律).
+ * Coverage (assembly half): three-layer concatenation order / exact position
+ * of the priority declaration / conditional appearance of the existence
+ * pointer / file truncation / all three layers absent -> existence pointer
+ * only. Assembly order is fixed under an append-only discipline.
  *
- * ADR-0044 / specs/promote-bodies-never-enter-system.md: the promote segment is
- * no longer rendered. Assemble must NOT include `formatPromote` body blocks
+ * ADR-0044: the promote segment is no longer rendered. Assemble must NOT include `formatPromote` body blocks
  * (`### <title>` followed by `updated_at:` / `importance:` plus body) for any
  * provenance, any `autoExtract` value, or any `promoteEntries` injection.
  *
- * assembleSystemPrompt is the thin composer over the T2/T3 read-side layer:
+ * assembleSystemPrompt is the thin composer over the read-side layer:
  * it reads static-layer files (AGENTS.md + rules) with readFile fallback, emits
  * the locked priority declaration + existence pointer, and — when the gate is
  * open — the catalog segment. Promote bodies are intentionally excluded (ADR-0044).
@@ -88,7 +88,7 @@ const memoryEntry = (
   updated_at: "2026-01-01T00:00:00.000Z",
 });
 
-/** The module `cwd` temp dir plays the project-identity-root role (#861). */
+/** The module `cwd` temp dir plays the project-identity-root role. */
 function ctx(overrides?: Partial<AssemblyContext>): AssemblyContext {
   return { projectIdentityRoot: cwd, userHome, memoryDir, ...overrides };
 }
@@ -170,7 +170,7 @@ describe("assembleSystemPrompt", () => {
     await write(earlyPath, "EARLY");
 
     const out = await assembleSystemPrompt(ctx());
-    // "manifest" mode lists rule paths, never bodies (#841 T6) — the asc
+    // "manifest" mode lists rule paths, never bodies — the asc
     // contract is now pinned on the index entry order.
     const early = out.indexOf(earlyPath);
     const late = out.indexOf(latePath);
@@ -256,7 +256,7 @@ describe("assembleSystemPrompt", () => {
     assert.ok(!out.includes("### "), "no promote segment expected");
   });
 
-  // -- promote gating (specs/auto-memory-layering.md SC7/SC8 + ADR-0044) -----
+  // -- promote gating (ADR-0044) -----------------------------------------------
 
   it("omits the promote segment when autoExtract is not true, even with eligible entries on disk (SC7)", async () => {
     await write(
@@ -344,7 +344,7 @@ describe("assembleSystemPrompt", () => {
     assert.ok(out.includes("PROJECT AGENTS"), "AGENTS section unaffected");
   });
 
-  // -- user static layer root (#732) -----------------------------------------
+  // -- user static layer root --------------------------------------------------
 
   it("reads the user layer from userHome even when workspaceRoot is set", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "assembly-ws-"));
@@ -362,7 +362,7 @@ describe("assembleSystemPrompt", () => {
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
 
     assert.ok(out.includes("USER AGENTS"), "user AGENTS.md from userHome");
-    // #841 T6: rules enter as a manifest, so root provenance is pinned on the
+    // Rules enter as a manifest, so root provenance is pinned on the
     // listed path rather than on body text.
     assert.ok(out.includes(userRule), "user rules discovered from userHome");
     assert.ok(
@@ -407,7 +407,7 @@ describe("assembleSystemPrompt", () => {
   });
 });
 
-// -- memory_catalog (specs/auto-memory-low-trust-read.md SC1–SC3) ------------
+// -- memory_catalog --------------------------------------------------------------
 
 describe("assembleSystemPrompt — memory_catalog", () => {
   async function writeLive(id: string, title: string, body: string) {
@@ -479,7 +479,7 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     );
   });
 
-  // specs/casual-ask-context-hygiene.md SC1: the existence pointer states that
+  // The existence pointer states that
   // a library exists; it must not command the model to call memory_recall.
   const RECALL_COMMAND_SENTENCE =
     "Use memory_recall(query) to retrieve past experience.";
@@ -547,10 +547,10 @@ describe("assembleSystemPrompt — memory_catalog", () => {
   });
 });
 
-// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+// -- capability observations (read-side filtering) ----------------------------
 //
 // Old capability rows stay on disk (the sweep soft-disables them later) but
-// must not render a catalog line (spec SC7; ADR-0042 snapshot eats the filtered
+// must not render a catalog line (ADR-0042 snapshot eats the filtered
 // list). The existence pointer still tracks files on disk, so an
 // all-capability store keeps the pointer live — same semantics as the
 // all-disabled case above.

@@ -1,27 +1,27 @@
 /**
- * T6 (plans/worktree-live-task-root.md §6 T6) — read-path tools take the
- * live `taskRoot` cell at call time and D9 keeps `extraReadRoots` /
- * `root` on the **same vintage**.
+ * Read-path tools take the live `taskRoot` cell at call time, keeping
+ * `extraReadRoots` / `root` on the **same vintage**.
  *
- * Coverage map (named against plan §6 T6 acceptance):
+ * Coverage map:
  *   1. read_file: liveTaskRoot flips → next read_file call resolves to the
  *      new tree (no factory-time closure on `root`).
  *   2. read_file: liveTaskRoot absent → factory-captured `root` stays
  *      authoritative (legacy parity, byte-identical).
- *   3. read_file: D9 same vintage — `root` and `<workspaceRoot>/.iknow`
+ *   3. read_file: same vintage — `root` and `<workspaceRoot>/.iknow`
  *      extraReadRoots are computed against the same snapshot; rebinding
  *      mid-handler does NOT mutate the in-flight call's root/extras.
  *   4. read_file: containment preserved — post-rebind, escaping the new
  *      root is still typed-rejected.
  *   5. glob: liveTaskRoot flips → next glob call walks the new tree.
  *   6. grep: liveTaskRoot flips → next grep call walks the new tree.
- *   7. D10 wired: when `projectIdentityRoot` differs from the live root,
- *      read_file can reach the identity-root path; when equal, it does NOT
- *      add a redundant entry (root already covers it).
+ *   7. Identity-root wiring: when `projectIdentityRoot` differs from the live
+ *      root, read_file can reach the identity-root path; when equal, it does
+ *      NOT add a redundant entry (root already covers it).
  *   8. `string` legacy callers (no cell) keep byte-identical behavior
  *      across read_file / glob / grep.
  *
- * Strategy mirrors T5 / T7: drive the AciToolDef's `handler` directly so we
+ * Strategy mirrors the bash live-task-root tests: drive the AciToolDef's
+ * `handler` directly so we
  * observe the per-call snapshot without going through executor wiring. rg
  * unavailability on the runner is tolerated — the glob/grep rebind tests
  * create files only in the rebound tree so the absence of the file in the
@@ -82,7 +82,7 @@ describe("read_file T6: live taskRoot cell drives handler root", () => {
       `pre-rebind read must NOT come from B; got: ${before}`
     );
 
-    // Rebind: D1 single writer updates the cell.
+    // Rebind: the single writer updates the cell.
     writeLiveTaskRoot(cell, rootB);
 
     // Post-rebind: read from rootB without rebuilding the tool.
@@ -107,7 +107,7 @@ describe("read_file T6: live taskRoot cell drives handler root", () => {
   });
 });
 
-// ─── 2. read_file: D9 same vintage (root + extraReadRoots share snapshot) ─
+// ─── 2. read_file: same vintage (root + extraReadRoots share snapshot) ─────
 
 describe("read_file T6: D9 — root + extraReadRoots share the same wave snapshot", () => {
   it("workspaceRoot extraReadRoots are anchored to the live root snapshot, not a stale value", async () => {
@@ -118,7 +118,7 @@ describe("read_file T6: D9 — root + extraReadRoots share the same wave snapsho
     // and <workspaceRootA>/.iknow is NOT in scope because A is no longer the
     // live root's identity).
     //
-    // This proves the D9 invariant: both root and extraReadRoots are
+    // This proves the same-vintage invariant: both root and extraReadRoots are
     // computed at the same wave; rebinding the cell mid-stream changes
     // BOTH at once. No "root is new, extra is old" mixed vintage can
     // exist because the conditional uses the live `rootAtCall`, not a
@@ -149,7 +149,7 @@ describe("read_file T6: D9 — root + extraReadRoots share the same wave snapsho
     );
 
     // Rebind the cell. Now `rootAtCall = wsB`. The workspaceRoot option
-    // is still wsA (stable, set at assembly). With D9 same-vintage:
+    // is still wsA (stable, set at assembly). With same-vintage reads:
     //   - root = wsB
     //   - <workspaceRoot>/.iknow = wsA/.iknow (extra)
     //   - root === workspaceRoot is false (wsB !== wsA), so the extra
@@ -180,7 +180,7 @@ describe("read_file T6: D9 — root + extraReadRoots share the same wave snapsho
   });
 
   it("mid-handler rebind does NOT mutate the in-flight call's root or extras", async () => {
-    // D2 wave snapshot: handler reads cell.read() exactly once; subsequent
+    // Wave snapshot: handler reads cell.read() exactly once; subsequent
     // writes to the cell during the same handler call must NOT affect
     // either root or extraReadRoots (both are derived from the same
     // snapshot). Pin this by binding a cell, calling read_file, and
@@ -295,8 +295,9 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
     const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
     const tool = createGrepTool(cell);
 
-    // 两个 root 下的文件名都是 `needle.txt`，只有**内容**能区分走的是哪棵树；
-    // D2 默认出法是 paths，故此处的 snapshot 不变式要用 output=content 观察。
+    // Both roots hold a file named `needle.txt` — only the **content** tells
+    // which tree was read; since the default output mode is paths, this
+    // snapshot invariant must be observed with output=content.
     const before = String(
       await tool.handler({ pattern: "needle-", output: "content" })
     );
@@ -327,7 +328,7 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
     const root = await makeScratch("t6-grep-legacy-");
     await writeFile(join(root, "x.txt"), "needle-x\n");
     const tool = createGrepTool(root); // string legacy
-    // 同上：`needle-x` 是**行内容**，要 output=content 才可见。
+    // Same as above: `needle-x` is line **content**, visible only with output=content.
     const out = String(
       await tool.handler({ pattern: "needle-x", output: "content" })
     );
@@ -335,7 +336,7 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
   });
 });
 
-// ─── 6. D10 wired (projectIdentityRoot extraReadRoot in read_file) ────────
+// ─── 6. Identity-root wiring (projectIdentityRoot extraReadRoot in read_file) ─
 
 describe("read_file T6: D10 wired — projectIdentityRoot extraReadRoot", () => {
   it("when projectIdentityRoot === live root, no redundant entry is added (root already covers it)", async () => {
@@ -357,7 +358,7 @@ describe("read_file T6: D10 wired — projectIdentityRoot extraReadRoot", () => 
 
   it("when projectIdentityRoot !== live root, identity-root path is reachable as an extraReadRoot", async () => {
     // After rebind: live root = the new task worktree (rootB), but the
-    // identity root is the stable project root (rootA). ADR-0037 §1
+    // identity root is the stable project root (rootA). ADR-0037
     // requires the identity-root files (e.g. AGENTS.md / permissions.toml)
     // to remain readable from the rebound tree — the wiring through
     // projectIdentityRoot satisfies that.
@@ -380,7 +381,7 @@ describe("read_file T6: D10 wired — projectIdentityRoot extraReadRoot", () => 
       `live-root read must work; got: ${ownOut}`
     );
 
-    // Identity-root file is reachable via the D10 wiring.
+    // Identity-root file is reachable via the identity-root wiring.
     const idOut = (await tool.handler({
       path: join(identityRoot, "AGENTS.md"),
     })) as string;

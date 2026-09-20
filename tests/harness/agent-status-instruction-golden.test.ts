@@ -1,20 +1,22 @@
 /**
- * spec agent-status-instruction-echo T5 / SC7 黄金集离线半边：
- * <agent_status> 面的 STATIC 锁 + 轨迹夹具形状锁。
+ * Offline half of the agent-status-instruction-echo golden set: the STATIC
+ * lock on the <agent_status> surface plus the trajectory fixture shape lock.
  *
- * STATIC（本文件）：reconcile 常量句逐字节锁 + 栏关键行前缀
- * （`last_tool:` / `instruction:` / `reconcile:` / `todos:` 头）次序模板锁。
- * 改文案 = 黄金集事件，必须显式过本锁（字段兼容 / round-trip 细则在
- * agent-status-fields.test.ts，本文件不重复，只钉模型可见字节）。
+ * STATIC (this file): byte-for-byte lock on the reconcile constant sentence +
+ * ordering-template lock on the bar's key line prefixes (`last_tool:` /
+ * `instruction:` / `reconcile:` / `todos:` header). Changing model-visible
+ * text is a golden-set event and must pass this lock explicitly (field
+ * compatibility / round-trip details live in agent-status-fields.test.ts, not
+ * repeated here; this file pins only the bytes the model sees).
  *
- * SEAM 由 T3/T4 集成断言承担，可指认：
- *   - tests/harness/agent-status-instruction-bar.test.ts（回显进栏 + 不进
- *     system + 事件同源，trace 双轨）
- *   - tests/harness/agent-status-reconcile.test.ts（一次性结算，trace 双轨）
+ * SEAM is carried by integration assertions, locatable at:
+ *   - tests/harness/agent-status-instruction-bar.test.ts (echo into the bar +
+ *     never in system + event same-source, trace double-track)
+ *   - tests/harness/agent-status-reconcile.test.ts (one-shot settlement, trace double-track)
  *
- * 轨迹集：夹具 agent-status-instruction.fixtures.ts，真模型半边
- * archive/tests-real-llm/agent-status-instruction-echo.test.ts
- * （npm run test:real-llm；缺 key → Not run，不以本文件离线绿冒充）。
+ * Trajectory set: fixtures in agent-status-instruction.fixtures.ts; the
+ * real-model half is archive/tests-real-llm/agent-status-instruction-echo.test.ts
+ * (npm run test:real-llm; missing key → Not run; offline green here never impersonates it).
  */
 import assert from "node:assert/strict";
 import { describe, it, afterAll } from "vitest";
@@ -40,7 +42,7 @@ afterAll(async () => {
   }
 });
 
-// -- STATIC：模型可见字节锁（invariant 1 / 4 / 5） ---------------------------
+// -- STATIC: model-visible byte locks (invariant 1 / 4 / 5) ---------------------------
 
 describe("agent_status STATIC 锁（黄金集）", () => {
   it("reconcile 常量句逐字节锁定（改文案 = 黄金集事件，需显式过锁）", () => {
@@ -85,7 +87,7 @@ describe("agent_status STATIC 锁（黄金集）", () => {
   });
 });
 
-// -- 轨迹夹具形状锁（离线半边；vacuity guard 照 graph 集纪律） ----------------
+// -- trajectory fixture shape lock (offline half; vacuity guard follows the graph-set discipline) ----------------
 
 describe("agent_status pivot 轨迹夹具（离线半边）", () => {
   it("夹具册恰好一条 A1，verdict = todo_write", () => {
@@ -114,7 +116,10 @@ describe("agent_status pivot 轨迹夹具（离线半边）", () => {
       tempDirs.push(todoDir);
       await writeFile(join(todoDir, "todos.md"), fixture.staleLedger, "utf8");
       const openLines = await readOpenTodoLines(todoDir);
-      assert.ok(openLines.length > 0, `${fixture.id}: ledger must be non-empty`);
+      assert.ok(
+        openLines.length > 0,
+        `${fixture.id}: ledger must be non-empty`
+      );
       for (const line of openLines) {
         assert.match(line, /^- \[[ x~]\] /);
       }

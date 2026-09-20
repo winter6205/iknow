@@ -1,10 +1,9 @@
 /**
  * git-snapshot module — single git read exit point.
  *
- * TDD: spec `specs/model-prefix-layering.md` §9 / plan B5:
  *   - The git block's text is captured **once at engine-build time** (closure)
  *     and frozen for the session, so adjacent turns produce byte-identical
- *     text → D9 / KV-cache contract.
+ *     text → KV-cache contract.
  *   - Degradation uses the three `EnvDegradeReason` states
  *     (cwd_unavailable | not_a_git_repo | git_unavailable). The provider
  *     returns `undefined` for any degrade state → assembly segment absent.
@@ -97,8 +96,8 @@ describe("createGitSnapshotProvider — provider shape", () => {
   it("degrades (undefined) when exec is injected to fail (git_unavailable simulation)", () => {
     const provider = createGitSnapshotProvider({
       cwd: "/does-not-matter",
-      // Sync exec returning SpawnSyncReturns-shape with a non-zero status →
-      // 整体退化（退化即 undefined）。
+      // Sync exec returning a SpawnSyncReturns-shape with non-zero status →
+      // degrade as a whole (degrade means undefined).
       exec: () => ({
         pid: 0,
         output: [null, "", "fatal: not a git repository"],

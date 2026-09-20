@@ -1,31 +1,38 @@
 /**
- * Tests for T3 (specs/egress-preset-allowlist.md §T3 + SC5 + invariant 3/5)
- * —— 批准门恢复在岗 + 生命周期落差闭合的测试钉。
+ * Approval-gate restoration + lifecycle-gap closure pins
+ * (specs/egress-preset-allowlist.md, invariants 3 and 5).
  *
- * 生命周期落差（本文件按 spec invariant 3 显式引用，不另立文字例外）：
- *   ADR-0097 §生命周期表裁定「允许集非空或批准流可问才起」代理 session。
- *   旧实现落差：settings 无 `isolation.network` 段 → `createEgressPolicyFactory`
- *   返 `undefined` → egress session 根本不起 → 首见批准门「死在入口」
- *   （approval.ts / session.ts 门件与 filter 接线俱在，却被入口短路：档外域
- *   既不会被 ask、也不会被 deny，命令拿到的是静默 DNS 失败）。
- *   ADR-0104 §Consequences「副作用（正向）」裁定闭合该落差：preset 非空 =
- *   生产入口默认起 egress session，首见批准门从「死在入口」恢复在岗。
- *   T1 已把工厂段缺席分支反转为 preset-only policy；本文件以三臂测试钉住
- *   「批准门在岗」这一实现事实，防止回退。
+ * Lifecycle gap (referenced explicitly per spec invariant 3, no separate
+ * carve-out):
+ *   ADR-0097's lifecycle table says the proxy session starts only "when the
+ *   allowlist is non-empty or an approval flow can ask". Old implementation:
+ *   settings without an `isolation.network` section →
+ *   `createEgressPolicyFactory` returned `undefined` → no egress session ever
+ *   started → the first-seen approval gate "died at the inlet" (the gate
+ *   pieces in approval.ts / session.ts and the filter wiring were all there,
+ *   but the inlet short-circuited them: an off-profile domain was neither
+ *   asked nor denied — commands just got a silent DNS failure). ADR-0104's
+ *   Consequences rules the gap closed: a non-empty preset means the
+ *   production inlet starts the egress session by default and the gate is
+ *   back on duty. The factory's section-absent branch already became a
+ *   preset-only policy; this file pins "the approval gate is on duty" with a
+ *   three-arm test to prevent regression.
  *
- * invariant 5（fail-closed 面不缩，逐字继承）：
- *   - 批准门非交互拒 → `no-approval-inlet`（臂②）；
- *   - 用户拒绝 → `denied-by-user` → typed failure 回灌（臂①拒绝半）；
- *   - 代理死 fail-closed（egress-proxy-behavior.test.ts）与地址守卫正交
- *     （egress-domain-matcher.test.ts / F5 面）已由既有钉子承担，本文件
- *     不重复覆盖。
+ * Invariant 5 (the fail-closed surface must not shrink, inherited verbatim):
+ *   - non-interactive gate rejection → `no-approval-inlet` (arm 2);
+ *   - user denial → `denied-by-user` → typed failure fed back (deny half of
+ *     arm 1);
+ *   - proxy-dead fail-closed (egress-proxy-behavior.test.ts) and the address
+ *     guard (egress-domain-matcher.test.ts) are already pinned by existing
+ *     tests and not re-covered here.
  *
- * 手法（spec T3「复用 T6 注入 filter 驱动 seam，不真起代理」）：
- *   policy 全部出自真实 `createEgressPolicyFactory`（干净 settings = 无
- *   `isolation.network` 段），session 走真实 `createEgressSession`，经
- *   `createHttpProxyServer` / `probeSocat` / `spawn` / `socketPathFactory`
- *   注入缝捕获 filter 回调直接驱动 —— 不真起 HTTP CONNECT 代理、不依赖
- *   宿主 socat、不真出网。
+ * Technique (spec: "reuse the injected-filter driving seam, never start a
+ * real proxy"): every policy comes from the real
+ * `createEgressPolicyFactory` (clean settings = no `isolation.network`
+ * section) and every session from the real `createEgressSession`; the filter
+ * callback is captured through the `createHttpProxyServer` / `probeSocat` /
+ * `spawn` / `socketPathFactory` injection seams and driven directly — no
+ * real HTTP CONNECT proxy, no host socat, no real egress.
  */
 
 import { spawn as realSpawn } from "node:child_process";
@@ -67,7 +74,7 @@ afterAll(() => {
   rmSync(FIX_CWD, { recursive: true, force: true });
 });
 
-/** 干净装配：settings 无 `isolation.network` 段（ADR-0104 preset-only 入口）。 */
+/** Clean assembly: settings without an `isolation.network` section (ADR-0104 preset-only inlet). */
 function cleanPolicyFactory(
   commandLabel: string
 ): () => EgressPolicyInput | undefined {
@@ -96,10 +103,12 @@ interface CapturedCall {
 }
 
 /**
- * T6 注入 filter 驱动 seam 的 bash 侧包装：真实 `createEgressSession` +
- * 全假装配（probeSocat 恒真 / fake spawn / 落盘 socket 文件 / 捕获 filter）。
- * `driveOutboundOnAssembly` = 装配期即对档外域发起一次 filter 驱动（fire-and-
- * await-microtask），让拒绝违例在 handler drain 前确定性入 sink。
+ * Bash-side wrapper of the filter-driving injection seam: real
+ * `createEgressSession` over an all-fake assembly (probeSocat always true /
+ * fake spawn / on-disk socket file / captured filter).
+ * `driveOutboundOnAssembly` = drive the filter once against an off-profile
+ * domain during assembly (fire-and-await-microtask), so the denial violation
+ * lands in the sink deterministically before the handler drains.
  */
 function makeSessionCaptureSeam(driveOutboundOnAssembly = false): {
   factory: (opts: EgressSessionOptions) => Promise<EgressSession>;
@@ -117,22 +126,23 @@ function makeSessionCaptureSeam(driveOutboundOnAssembly = false): {
         fakeSocatProc(fakePidCounter++)) as unknown as typeof realSpawn,
       socketPathFactory: (id) => {
         const p = join(scratchDir(), `t3-${id}.sock`);
-        // 落盘一个普通文件占位：fence 的 socket bind 源端存在即可，
-        // 本测试不真连代理。
+        // Write a plain placeholder file: the fence's socket bind only needs
+        // the source to exist; this test never connects to the proxy.
         writeFileSync(p, "");
         return p;
       },
       createHttpProxyServer: (proxyOpts) => {
         captured.filter = proxyOpts.filter as CapturedCall["filter"];
         if (driveOutboundOnAssembly && captured.filter !== undefined) {
-          // 拒绝路径违例 = 纯 microtask 链；handler 的 sandbox 执行跨
-          // 真实子进程 spawn（≥1 macrotask），drain 前必然已入 sink。
+          // The denial-path violation is a pure microtask chain; the handler's
+          // sandbox execution crosses a real subprocess spawn (≥1 macrotask),
+          // so it is always in the sink before drain.
           void captured.filter(443, "example.com");
         }
         return createServer();
       },
     });
-    // session 装配成功 ⇒ filter 必已构造（createHttpProxyServer 同步调用）。
+    // session assembled successfully ⇒ filter must already be constructed (createHttpProxyServer is called synchronously).
     calls.push({
       filter: captured.filter!,
       policy: opts.policy,
@@ -172,43 +182,41 @@ describe("T3 臂① — 干净装配交互前台：首见批准门在岗（ask �
       { command: "true" },
       { conversationId: "t3-approve" }
     )) as BashEnvelope;
-    // 无违例 → ok envelope（批准门放行不打断命令）。
+    // No violation → ok envelope (the approval gate pass-through doesn't interrupt the command).
     expect(parseBashEnvelope(envelope)).toBeDefined();
 
     expect(seam.calls.length).toBe(1);
     const { filter, policy, session } = seam.calls[0]!;
-    // —— 生命周期落差闭合的可观察证据（旧行为反转记录）：干净装配下
-    //    session 起了（calls.length===1）、policy 是 preset-only 且
-    //    approvalGate 已挂上 —— 旧实现此处工厂返 undefined、session 根本
-    //    不起、门死在入口（ADR-0097 §生命周期表落差 / ADR-0104 §Consequences）。
+    // —— observable evidence that the lifecycle gap is closed (record of the
+    //    old-behavior reversal): under clean assembly the session starts
+    //    (calls.length===1), the policy is preset-only and approvalGate is
+    //    attached — the old implementation returned undefined here, never
+    //    started a session, and the gate died at the inlet
+    //    (ADR-0097 lifecycle table / ADR-0104 Consequences).
     expect(policy.approvalGate).toBeDefined();
-    expect(policy.allowedDomains).toEqual([
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-    ]);
+    expect(policy.allowedDomains).toEqual([...BUILTIN_PRESET_ALLOWED_DOMAINS]);
     expect(policy.allowlistSource).toBe("builtin");
     expect(askApproval).not.toHaveBeenCalled();
 
-    // 档内域（preset）直通，不问。
+    // In-profile (preset) domains pass straight through, no ask.
     await expect(filter(443, "github.com")).resolves.toBe(true);
     expect(askApproval).not.toHaveBeenCalled();
 
-    // 档外域首见 → ask 一次 → 放行。
+    // First-seen off-profile domain → one ask → allow.
     await expect(filter(443, "example.com")).resolves.toBe(true);
     expect(askApproval).toHaveBeenCalledTimes(1);
     expect(askApproval).toHaveBeenCalledWith("example.com");
     expect(session.violationSink.size()).toBe(0);
 
-    // 本会话再访档外域 → 集合命中，不再问（批准 = 会话级放行）。
+    // Revisiting the off-profile domain in this session → set hit, no re-ask (approval = session-level pass).
     await expect(filter(443, "example.com")).resolves.toBe(true);
     expect(askApproval).toHaveBeenCalledTimes(1);
 
-    // 跨 per-call session 共享同一 gate（同一 bash tool 实例 = 同一会话）：
-    // 第二次 handler 调用的新 session 里再访 → 仍不问。
+    // The same gate is shared across per-call sessions (one bash tool instance = one
+    // session): revisiting in the fresh session of a second handler call still does not ask.
     await tool.handler({ command: "true" }, { conversationId: "t3-approve" });
     expect(seam.calls.length).toBe(2);
-    await expect(seam.calls[1]!.filter(443, "example.com")).resolves.toBe(
-      true
-    );
+    await expect(seam.calls[1]!.filter(443, "example.com")).resolves.toBe(true);
     expect(askApproval).toHaveBeenCalledTimes(1);
 
     await session.dispose();
@@ -219,7 +227,7 @@ describe("T3 臂① — 干净装配交互前台：首见批准门在岗（ask �
 describe("T3 臂① — 干净装配交互前台：拒绝 → denied-by-user 违例回灌 execution_failed", () => {
   it("用户拒绝 → handler drain 到 denied-by-user → 抛 typed failure（[network_denied] + session 级文案 + builtin 来源标注）", async () => {
     const askApproval = vi.fn(async () => false);
-    const seam = makeSessionCaptureSeam(true); // 装配期驱动档外域
+    const seam = makeSessionCaptureSeam(true); // drive an off-profile domain during assembly
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: cleanPolicyFactory("bash"),
       askApproval,
@@ -228,34 +236,34 @@ describe("T3 臂① — 干净装配交互前台：拒绝 → denied-by-user 违
 
     let caught: unknown;
     try {
-      await tool.handler(
-        { command: "true" },
-        { conversationId: "t3-deny" }
-      );
+      await tool.handler({ command: "true" }, { conversationId: "t3-deny" });
     } catch (err) {
       caught = err;
     }
-    // executor 把 ToolExecutionError 包成 kind:"execution_failed"
-    //（bash-egress-typed-failure.test.ts 已端到端钉死该包装；此处按
-    // 同款钉子断言 typed failure 源头）。
+    // The executor wraps ToolExecutionError as kind:"execution_failed"
+    // (bash-egress-typed-failure.test.ts already pins that wrapping end to
+    // end; here we assert the typed-failure source with the same contract).
     expect(caught).toBeInstanceOf(ToolExecutionError);
     const message = (caught as ToolExecutionError).message;
     expect(message).toContain("[network_denied]");
-    expect(message).toContain("example.com:443 denied by user for this session");
-    // 干净装配的来源标注 = builtin 档（非静默、非伪造）。
+    expect(message).toContain(
+      "example.com:443 denied by user for this session"
+    );
+    // Source annotation under clean assembly = the builtin profile (neither silent nor fabricated).
     expect(message).toContain(
       "Current allowlist source: built-in preset allowlist (github / npm / playwright defaults)."
     );
     expect(askApproval).toHaveBeenCalledTimes(1);
-    expect(seam.calls[0]!.session.violationSink.size()).toBe(0); // 已 drain
+    expect(seam.calls[0]!.session.violationSink.size()).toBe(0); // already drained
     await seam.calls[0]!.session.dispose();
   });
 });
 
 describe("T3 臂② — 干净装配非交互面（background / verify 形态）：no-approval-inlet fail-closed", () => {
   it("policy 无 approvalGate（非交互 caller 直喂工厂产物）→ 档外域 session 照起、filter fail-closed 且违例有名字（区别于旧「session 不起、静默 DNS 失败」）", async () => {
-    // background manager / verify sandbox-run 拿到的就是工厂直出 policy
-    //（gate 只由 bash 工厂闭包期附加——非交互面拿不到 ask 入口）。
+    // background manager / verify sandbox-run receive the factory's raw policy
+    // (the gate is attached only in the bash factory closure — non-interactive
+    // faces have no ask inlet).
     const policy = cleanPolicyFactory("background:t3")();
     expect(policy).toBeDefined();
     expect(policy!.approvalGate).toBeUndefined();
@@ -264,14 +272,15 @@ describe("T3 臂② — 干净装配非交互面（background / verify 形态）
     const session = await seam.factory({ policy: policy! });
     const filter = seam.calls[0]!.filter;
 
-    // 旧行为对照：干净装配下 session 现在会起（此处 seam 已被调用即证）。
+    // Old-behavior contrast: under clean assembly the session now starts (the seam being called at all proves it).
     await expect(filter(443, "example.com")).resolves.toBe(false);
     const drained = session.violationSink.drain();
     expect(drained.length).toBe(1);
     expect(drained[0]!.reason).toBe("no-approval-inlet");
     expect(drained[0]!.host).toBe("example.com");
-    // 违例回灌「有名字」：可行动文案（含非交互入口事实 + 预配指引），
-    // 而不是旧世界「session 不起 → 命令静默 DNS 失败」无名无姓。
+    // The fed-back violation "has a name": actionable text (states the
+    // non-interactive inlet fact + pre-provisioning guidance), unlike the old
+    // world of "session never starts → silent DNS failure".
     const rendered = renderEgressViolations(drained);
     expect(rendered).toContain("[network_denied]");
     expect(rendered).toContain(

@@ -1,15 +1,15 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：scheduler.test.ts。
+ * PROTOTYPE — self-authored Graph multi-task orchestration: scheduler.test.ts.
  *
- * 覆盖：
- *   1. 空 spec → waveCount=0, 所有节点 absent。
- *   2. 同 wave 内节点并发执行（Promise.all + spawn ordering）。
- *   3. 跨 wave 串行：wave N 在 wave N-1 全 settled 后才开工。
- *   4. 节点失败 → 其直接依赖者被 skipped（fail-fast 沿 deps 链）。
- *   5. 节点失败不传染无关分支：分支 A 失败不影响分支 B。
- *   6. 子节点 thrown error 被捕获并归为 failed。
- *   7. waveCount 等于实际推进的 wave 数（不是 spec.nodes.length）。
- *   8. onWave / onNode 回调触发顺序正确。
+ * Coverage:
+ *   1. Empty spec → waveCount=0, all nodes absent.
+ *   2. Nodes in one wave run concurrently (Promise.all + spawn ordering).
+ *   3. Waves serialize: wave N starts only after wave N-1 fully settles.
+ *   4. A failed node skips its direct dependents (fail-fast down deps).
+ *   5. Failure does not leak into unrelated branches.
+ *   6. Thrown errors from child nodes are captured as failed.
+ *   7. waveCount counts waves actually advanced (not spec.nodes.length).
+ *   8. onWave / onNode callbacks fire in the right order.
  */
 
 import { describe, it } from "vitest";
@@ -45,11 +45,11 @@ describe("runGraph", () => {
   });
 
   it("same-wave nodes run concurrently (Promise.all)", async () => {
-    // 收集"开始执行"时间戳，证明两个节点并行启动（间隔 < ~10ms）。
+    // Collect start timestamps to prove both nodes launch in parallel.
     const starts: number[] = [];
     const exec: NodeExecutor = async () => {
       starts.push(Date.now());
-      // 等 50ms 模拟真实工作。
+      // 50ms pause simulating real work.
       await new Promise((r) => setTimeout(r, 50));
       return { status: "done", output: "ok" };
     };
@@ -63,7 +63,7 @@ describe("runGraph", () => {
     const out = await runGraph(spec, exec);
     const total = Date.now() - t0;
     assert.equal(starts.length, 2);
-    // 并行：两个节点几乎同时开始，整体 < 100ms。
+    // Concurrent: both nodes start nearly simultaneously, total < 100ms.
     const gap = Math.abs(starts[0]! - starts[1]!);
     assert.ok(gap < 30, `expected concurrent start, gap=${gap}ms`);
     assert.ok(total < 100, `expected concurrent total <100ms, got ${total}ms`);
@@ -86,7 +86,7 @@ describe("runGraph", () => {
       ],
     };
     await runGraph(spec, exec);
-    // wave 0 (a) 必须 end 在 wave 1 (b) start 之前。
+    // wave 0 (a) must end before wave 1 (b) starts.
     const endA = order.indexOf("end:a");
     const startB = order.indexOf("start:b");
     assert.ok(endA >= 0 && startB >= 0);
@@ -102,7 +102,7 @@ describe("runGraph", () => {
       nodes: [
         { id: "a", deps: [] },
         { id: "b", deps: ["a"] },
-        { id: "c", deps: ["b"] }, // 传递依赖 a → 也应 skipped
+        { id: "c", deps: ["b"] }, // transitively on a → also skipped
       ],
     };
     const out = await runGraph(spec, exec);
@@ -112,7 +112,7 @@ describe("runGraph", () => {
     const bResult = out.results.b;
     assert.ok(bResult?.status === "skipped");
     const bReason = bResult?.status === "skipped" ? bResult.reason : "";
-    // reason 形如 `upstream node "a" did not complete` —— 字符级断言上游 id。
+    // reason has the shape `upstream node "a" did not complete` — assert the upstream id verbatim.
     assert.match(bReason, /"a" did not complete/);
   });
 
@@ -172,8 +172,8 @@ describe("runGraph", () => {
         events.push(`node:${r.id}:${r.status}`);
       },
     });
-    // wave 0 在 a/b 完成前发；onNode 应在 wave 0 内出现两次 a/b done;
-    // wave 1 在 c 完成前发；最后一条是 c done。
+    // wave 0 is emitted before a/b finish; onNode fires a/b done twice inside
+    // wave 0; wave 1 is emitted before c finishes; the last event is c done.
     assert.equal(events[0], "wave:0:a,b");
     assert.ok(events.includes("node:a:done"));
     assert.ok(events.includes("node:b:done"));

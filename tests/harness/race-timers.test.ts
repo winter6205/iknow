@@ -1,9 +1,11 @@
 /**
- * #742 T1:模型调用双钟(idle 重置钟 + 有限硬顶)的纯 helper 套件。
+ * Pure-helper suite for the model-call dual clocks (idle-reset clock +
+ * finite hard cap).
  *
- * 这一层只钉 helper 自身的合同:哪些流事件重置 idle、两根钟各自到点、
- * cancel 之后不再触发、非正值等价关闭。loop-engine 侧的 StopReason /
- * cancelKind 归属由 `model-idle-hardcap.test.ts` 钉。
+ * This layer pins only the helpers' own contract: which stream events reset
+ * idle, each clock firing on expiry, nothing firing after cancel, non-positive
+ * values meaning disabled. The loop-engine-side StopReason / cancelKind
+ * ownership is pinned by `model-idle-hardcap.test.ts`.
  */
 
 import { describe, it } from "vitest";
@@ -179,9 +181,10 @@ describe("#742 T1 race-timers: 两根钟", () => {
 });
 
 /**
- * transport-continue-persist T1 / spec inv 1:`hadVisibleDelta` 是「到点后
- * 还能不能自动重发整次调用」的唯一判据 —— 到点时刻它必须是**到点前**的
- * 累积值,且只被模型输出增量闭集置位。
+ * specs/transport-continue-persist.md invariant 1: `hadVisibleDelta` is the
+ * sole criterion for "may the call still be auto-resumed after a clock
+ * expiry" — at expiry time it must hold the pre-expiry accumulated value, and
+ * only the closed set of model-output deltas may set it.
  */
 describe("transport-continue-persist T1: hadVisibleDelta", () => {
   it("起表即为 false(还没出字)", () => {
@@ -285,7 +288,7 @@ describe("transport-continue-persist T1: hadVisibleDelta", () => {
     });
     timers.cancel();
     timers.noteStreamEvent(THINKING);
-    // 标记照记(noteStreamEvent 不因 stopped 改变语义),但钟不复活、不再到点。
+    // The flag keeps being recorded (noteStreamEvent semantics don't change on stopped), but the clock stays dead.
     assert.equal(timers.hadVisibleDelta, true);
     await sleep(200);
     assert.deepEqual(fired, []);

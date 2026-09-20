@@ -1,28 +1,33 @@
 /**
- * spec agent-status-instruction-echo T3 结算半边 / plan 子弹 4:
- * reconcile run 作用域一次性结算 —— `appendAgentStatusBar` 内经 run 作用域
- * 装箱(`reconcileRef.stamped`,照 `lastToolRef` 形态)结算:新真实用户消息
- * 进场后的**下一条栏**附固定标记行,次跳起消失;标记在场条件只有一个
- * (invariant 3)——与 todo_write 调用史 / todo 段在场 / 栏变化无关。
- * reactive-compact 重试调用点与正常 step 调用点共享同一装箱,结算行为同形:
- * compact 对 kept 尾的 re-freeze 克隆不伪造「新消息进场」信号(clone 的
- * frozen 消息与 stamped 同内容 → 视作同一条,不重复标记)。
+ * agent-status-instruction-echo (settlement half): run-scoped one-shot
+ * reconcile settlement. Inside `appendAgentStatusBar`, settlement goes through
+ * a run-scoped box (`reconcileRef.stamped`, mirroring the `lastToolRef`
+ * shape): the NEXT bar after a new real user message carries the fixed marker
+ * line, gone from the second hop on; the presence condition is exactly one
+ * (invariant 3) — independent of todo_write call history, todo section
+ * presence, or bar changes. The reactive-compact retry call site and the
+ * normal step call site share the same box, so settlement behaves identically:
+ * compact's re-freeze clone of the kept tail does not fake a "new message
+ * arrived" signal (the clone's frozen message equals the stamped one →
+ * treated as the same message, no re-mark).
  *
- * 双轨 assert(仓规):
- *   - trace 轨:createJsonlTraceService 落盘 + createJsonlTraceReader 回读
- *     event sequence(llm_call / turn 计数与终态);
- *   - 基线轨:no-trace vs NoopTraceService vs 真 trace 三方 messages /
- *     result deepEqual —— 结算装箱不改变注入行为。
+ * Double-track asserts (repo rule):
+ *   - trace track: createJsonlTraceService writes to disk + createJsonlTraceReader
+ *     reads back the event sequence (llm_call / turn counts and final state);
+ *   - baseline track: no-trace vs NoopTraceService vs real trace, three-way
+ *     messages / result deepEqual — the settlement box does not change injection behavior.
  *
- * 验收映射(plan 子弹 4 逐字):
- *   ① 新消息进场首跳栏含 reconcile 行、次跳起消失(常量行字节一致 =
- *      T1 AGENT_STATUS_RECONCILE_LINE);
- *   ② 第二波消息(新 run)再标记一次、该 run 次跳起消失;
- *   ③ todo 段为空时标记独立在场(invariant 3:条件与 todo 无关);
- *   ④ 两处调用点(含 reactive-compact 重试)结算行为同形(同一装箱:
- *      compact 重试栏不再重复标记、instruction 仍在);
- *   ⑤ F1 无判定对象(prior 全注入)→ reconcile 不结算:栏无标记行、
- *      事件无 reconcile key(与 T3 ④ 的旧字段集退回形态同一契约)。
+ * Acceptance mapping:
+ *   - the first-hop bar after a new message carries the reconcile line, gone from
+ *     the next hop on (constant-line bytes === the exported AGENT_STATUS_RECONCILE_LINE);
+ *   - a second wave of messages (new run) marks once more, gone from that run's next hop;
+ *   - with an empty todo section the marker is still independently present (invariant 3:
+ *     the condition has nothing to do with todos);
+ *   - both call sites (incl. reactive-compact retry) settle alike: the compact retry
+ *     does not re-mark, and the instruction is still there;
+ *   - no judgment target (prior fully injected) → reconcile does not settle: no marker
+ *     line in the bar, no reconcile key in the event (same contract as the legacy
+ *     field-set fallback on the echo side).
  */
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -62,7 +67,7 @@ afterAll(() => {
   }
 });
 
-/** 栏 body 里的 reconcile 标记行(常量行逐字)。 */
+/** The reconcile marker line(s) in a bar body (the constant line, verbatim). */
 function reconcileLinesOf(barText: string): string[] {
   return barText
     .split("\n")
@@ -84,13 +89,17 @@ function threeHopModel(): LoopEngineDeps["adapter"] {
         texts: [],
         toolCalls: [{ id: "t2", name: "echo", input: { value: "b" } }],
       }),
-      assistantResult({ texts: ["done"], toolCalls: [], supplierStop: "success" }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
     ],
   });
 }
 
 // ---------------------------------------------------------------------------
-// ① 首跳在场、次跳起消失 + 双轨(仓规基线)
+// Present on the first hop, gone from the next hop on + double-track (repo-rule baseline).
 // ---------------------------------------------------------------------------
 
 describe("reconcile T4: 新消息进场首跳标记、次跳起消失", () => {
@@ -129,7 +138,7 @@ describe("reconcile T4: 新消息进场首跳标记、次跳起消失", () => {
       }),
     });
 
-    // 基线轨:结算装箱不改变注入行为 —— 三方 messages / result deepEqual。
+    // Baseline track: the settlement box does not change injection behavior — three-way messages / result deepEqual.
     assert.deepEqual(runNoop.result.messages, runNoTrace.result.messages);
     assert.deepEqual(runJsonl.result.messages, runNoTrace.result.messages);
     assert.deepEqual(runNoop.result, runNoTrace.result);
@@ -137,16 +146,16 @@ describe("reconcile T4: 新消息进场首跳标记、次跳起消失", () => {
 
     const bars = barTexts(runNoTrace.result.messages);
     assert.equal(bars.length, 3, "一跳一条栏 × 3 跳");
-    // ① 常量行跨回合字节一致(=== T1 导出常量,逐字)。
+    // The constant line is byte-identical across turns (=== the exported AGENT_STATUS_RECONCILE_LINE, verbatim).
     assert.deepEqual(reconcileLinesOf(bars[0]!), [AGENT_STATUS_RECONCILE_LINE]);
     assert.deepEqual(reconcileLinesOf(bars[1]!), [], "次跳起消失");
     assert.deepEqual(reconcileLinesOf(bars[2]!), [], "三跳仍消失");
-    // 在场条件与栏内容无关:标记消失时 instruction 行仍在(每跳在场)。
+    // Presence is independent of bar contents: the instruction line stays on every hop even after the marker disappears.
     for (const bar of bars) {
       assert.ok(bar.includes("instruction: 先做A"));
     }
 
-    // trace 轨:reader 回读 event sequence(消费面 SSOT)。
+    // Trace track: read the event sequence back via the reader (consumer-side SSOT).
     const reader = createJsonlTraceReader({ filePath: traceFile });
     assert.equal(reader.query({ recordType: "llm_call" }).total, 3);
     assert.equal(reader.query({ recordType: "tool_call" }).total, 2);
@@ -157,7 +166,7 @@ describe("reconcile T4: 新消息进场首跳标记、次跳起消失", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ② 第二波消息(新 run)再标记一次
+// A second wave of messages (new run) marks once more.
 // ---------------------------------------------------------------------------
 
 describe("reconcile T4: 新 run 的第二波用户消息再标记一次", () => {
@@ -195,9 +204,11 @@ describe("reconcile T4: 新 run 的第二波用户消息再标记一次", () => 
       barTexts(run1.result.messages).length
     );
     assert.equal(newBars.length, 2, "run2 两跳各一条新栏");
-    assert.deepEqual(reconcileLinesOf(newBars[0]!), [
-      AGENT_STATUS_RECONCILE_LINE,
-    ], "第二波进场 → 新 run 首跳再标记");
+    assert.deepEqual(
+      reconcileLinesOf(newBars[0]!),
+      [AGENT_STATUS_RECONCILE_LINE],
+      "第二波进场 → 新 run 首跳再标记"
+    );
     assert.deepEqual(reconcileLinesOf(newBars[1]!), []);
     assert.ok(newBars[0]!.includes(`instruction: ${SECOND_TEXT}`));
     assert.ok(newBars[1]!.includes(`instruction: ${SECOND_TEXT}`));
@@ -211,18 +222,22 @@ function twoHopModel(): LoopEngineDeps["adapter"] {
         texts: [],
         toolCalls: [{ id: "t1", name: "echo", input: { value: "a" } }],
       }),
-      assistantResult({ texts: ["done"], toolCalls: [], supplierStop: "success" }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
     ],
   });
 }
 
 // ---------------------------------------------------------------------------
-// ③ todo 段为空时标记独立在场(invariant 3)
+// With an empty todo section the marker is still independently present (invariant 3).
 // ---------------------------------------------------------------------------
 
 describe("reconcile T4: 在场条件独立于 todo 段", () => {
   it("③ 无 todos.md(todo 段缺席)→ 首跳栏仍含标记行且无 `todos:` 头", async () => {
-    const todoDir = await makeTodoDir(); // 空目录:不写 todos.md
+    const todoDir = await makeTodoDir(); // empty dir: no todos.md written
     const echo = okEchoTool();
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
@@ -236,16 +251,18 @@ describe("reconcile T4: 在场条件独立于 todo 段", () => {
     });
     const bars = barTexts(result.messages);
     assert.equal(bars.length, 2);
-    assert.deepEqual(reconcileLinesOf(bars[0]!), [
-      AGENT_STATUS_RECONCILE_LINE,
-    ], "todo 段为空时标记独立在场");
+    assert.deepEqual(
+      reconcileLinesOf(bars[0]!),
+      [AGENT_STATUS_RECONCILE_LINE],
+      "todo 段为空时标记独立在场"
+    );
     assert.ok(!bars[0]!.includes("todos:"), "空 todo 段不广告");
     assert.deepEqual(reconcileLinesOf(bars[1]!), []);
   });
 });
 
 // ---------------------------------------------------------------------------
-// ④ reactive-compact 重试调用点结算同形(共享同一装箱)
+// The reactive-compact retry call site settles alike (shares the same box).
 // ---------------------------------------------------------------------------
 
 describe("reconcile T4: compact 重试与正常 step 结算同形", () => {
@@ -258,7 +275,10 @@ describe("reconcile T4: compact 重试与正常 step 结算同形", () => {
       { kind: "promptTooLong" },
       {
         kind: "reply",
-        result: assistantResult({ texts: ["done after compact"], toolCalls: [] }),
+        result: assistantResult({
+          texts: ["done after compact"],
+          toolCalls: [],
+        }),
       },
     ]);
     const longPrior = Array.from({ length: 12 }, (_, i) => ({
@@ -288,16 +308,16 @@ describe("reconcile T4: compact 重试与正常 step 结算同形", () => {
 
     assert.equal(result.stopReason, "completed");
     assert.equal(captured.length, 2, "首试 + compact 重试各一跳");
-    // 首试请求尾栏:标记在场(新指令进场后的下一条栏)。
+    // First attempt's tail bar: marker present (the next bar after the new instruction arrived).
     assert.deepEqual(reconcileLinesOf(barTexts(captured[0]!).at(-1)!), [
       AGENT_STATUS_RECONCILE_LINE,
     ]);
-    // 重试请求尾栏:同一条指令(compact kept 尾 re-freeze 克隆)不伪造进场
-    // —— 两处调用点共享同一装箱,结算同形;instruction 回显不受影响。
+    // Retry request's tail bar: the same instruction (compact's re-freeze clone of the kept tail)
+    // fakes no arrival — both call sites share one box and settle alike; instruction echo is unaffected.
     const retryBar = barTexts(captured[1]!).at(-1)!;
     assert.deepEqual(reconcileLinesOf(retryBar), []);
     assert.ok(retryBar.includes("instruction: Q 指令"));
-    // 事件面同源:同一 snapshot 派生 → true → false(键在场而非缺席)。
+    // Event side shares the source: derived from the same snapshot → true → false (key present, not absent).
     assert.equal(events.length, 2);
     assert.equal(events[0]!.reconcile, true);
     assert.equal(events[1]!.reconcile, false);
@@ -305,7 +325,7 @@ describe("reconcile T4: compact 重试与正常 step 结算同形", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ⑤ F1:无判定对象 → 不结算(栏无标记行、事件无 reconcile key)
+// No judgment target → no settlement (no marker line in bars, no reconcile key in events).
 // ---------------------------------------------------------------------------
 
 describe("reconcile T4: F1 全注入 prior → reconcile 不结算", () => {
@@ -361,7 +381,7 @@ describe("reconcile T4: F1 全注入 prior → reconcile 不结算", () => {
 
     assert.equal(result.stopReason, "completed");
     const bars = barTexts(result.messages);
-    // 旧栏自带标记行也不被复读:新注入栏(末两条)无标记行。
+    // An old bar's own marker line is never re-read: the newly injected bars (the last two) carry no marker line.
     const injected = bars.slice(1);
     assert.equal(injected.length, 2);
     for (const bar of injected) {
@@ -369,10 +389,7 @@ describe("reconcile T4: F1 全注入 prior → reconcile 不结算", () => {
     }
     assert.equal(events.length, 2);
     for (const ev of events) {
-      assert.ok(
-        !("reconcile" in ev),
-        "F1 事件 reconcile 键缺席而非 false"
-      );
+      assert.ok(!("reconcile" in ev), "F1 事件 reconcile 键缺席而非 false");
     }
   });
 });

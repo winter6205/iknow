@@ -1,16 +1,20 @@
-// specs/agent-status-instruction-echo.md invariant 5+7 / ADR-0103 / F3+F4+F5:
-// `buildAgentStatusText` / `parseAgentStatusText` 纯函数对的双向兼容扩展 ——
-// instruction + reconcile 字段进栏，标量段全部先于 `todos:` 头（次序纪律是
-// 双向兼容的根：旧解析器吃新栏得正确子集，新解析器吃旧栏得合法缺省）。
+// specs/agent-status-instruction-echo.md invariant 5+7 / ADR-0103:
+// bidirectional-compatibility extension of the buildAgentStatusText /
+// parseAgentStatusText pure-function pair — instruction and reconcile fields
+// join the bar, and every scalar section precedes the `todos:` header (the
+// ordering discipline is the root of bidirectional compatibility: an old
+// parser reading a new bar yields a correct subset; a new parser reading an
+// old bar yields legal defaults).
 //
-// 覆盖 T1 Acceptance:
-//   ① 新构新解 round-trip；
-//   ② 旧格式栏（仅 last_tool + todos）解析得 instruction: null, reconcile: false；
-//   ③ `todos:` 头之前的未知标量行不吞进 todo 列表；
-//   ④ 畸形 → null 不 throw（既有契约不因新段放宽）；
-//   ⑤ reconcile 常量为导出件（供测试与名册锁引用）；
-//   ⑥ F3：instruction 值含 `</agent_status>` 子串不破坏行级结构解析；
-//   ⑦ F5：新格式栏被旧版本解析算法（回滚场景）得到正确旧字段子集。
+// Acceptance coverage:
+//   - new-build / new-parse round-trip;
+//   - a legacy bar (last_tool + todos only) parses to instruction: null, reconcile: false;
+//   - unknown scalar lines before the `todos:` header are not swallowed into the todo list;
+//   - malformed → null without throwing (existing contract not relaxed by the new sections);
+//   - the reconcile constant is an exported artifact (referenced by tests and the roster lock);
+//   - an instruction value containing `</agent_status>` does not break line-level structural parsing;
+//   - a new-format bar read by the pre-extension parsing algorithm (rollback scenario)
+//     yields the correct legacy subset.
 
 import { describe, it, expect } from "vitest";
 
@@ -22,7 +26,7 @@ import {
   AGENT_STATUS_RECONCILE_LINE,
 } from "../../src/harness/agent-status.ts";
 
-// -- ① round-trip ---------------------------------------------------------------
+// -- round-trip ---------------------------------------------------------------
 
 describe("buildAgentStatusText / parseAgentStatusText round-trip", () => {
   it("carries instruction, reconcile and todo lines through a full round-trip", () => {
@@ -61,7 +65,7 @@ describe("buildAgentStatusText / parseAgentStatusText round-trip", () => {
   });
 });
 
-// -- ② 空槽不广告 (invariant 7) --------------------------------------------------
+// -- empty slots are not advertised (invariant 7) -------------------------------
 
 describe("empty slots are not advertised", () => {
   it("omits the instruction and reconcile lines when null / false", () => {
@@ -76,7 +80,7 @@ describe("empty slots are not advertised", () => {
   });
 
   it("keeps the legacy byte shape for snapshots that never mention new fields", () => {
-    // 未装箱新字段的旧装配点（compute / TUI 事件）产出的栏必须逐字节等于旧形态。
+    // Bars from old assembly points that never box the new fields (compute / TUI events) must equal the legacy shape byte-for-byte.
     const text = buildAgentStatusText({
       lastTool: "echo",
       openTodoLines: ["- [ ] [t1] a"],
@@ -93,7 +97,7 @@ describe("empty slots are not advertised", () => {
   });
 });
 
-// -- 次序纪律 (invariant 5 / SC1) -------------------------------------------------
+// -- field order discipline (invariant 5) ---------------------------------------
 
 describe("field order discipline", () => {
   it("places every scalar line before the todos: header", () => {
@@ -111,12 +115,12 @@ describe("field order discipline", () => {
     expect(toolIdx).toBeLessThan(headerIdx);
     expect(instrIdx).toBeLessThan(headerIdx);
     expect(recIdx).toBeLessThan(headerIdx);
-    // todo 行永远占据栏末段
+    // Todo lines always occupy the bar's tail section.
     expect(lines.slice(headerIdx + 1, -1)).toEqual(["- [ ] [t1] a"]);
   });
 });
 
-// -- ③ 旧栏兼容 (F4) + hydrate ----------------------------------------------------
+// -- legacy bar compatibility + hydrate -----------------------------------------
 
 describe("legacy bar compatibility", () => {
   const LEGACY_BAR = [
@@ -162,7 +166,7 @@ describe("legacy bar compatibility", () => {
   });
 });
 
-// -- 未知标量行不吞进 todo 段 ------------------------------------------------------
+// -- unknown scalar lines are not swallowed into the todo section ----------------
 
 describe("unknown scalar lines before todos: header", () => {
   it("does not swallow them into openTodoLines", () => {
@@ -180,11 +184,11 @@ describe("unknown scalar lines before todos: header", () => {
   });
 });
 
-// -- ⑦ F5 前向兼容：旧解析算法吃新栏 ------------------------------------------------
+// -- forward compatibility: old parsing algorithm reading a new bar --------------
 
 describe("forward compatibility for old parsers (rollback)", () => {
   it("yields the correct legacy subset from a new-format bar", () => {
-    // 复刻扩展前的旧解析算法：find last_tool 前缀行 + `todos:` 头后全收。
+    // Replicates the pre-extension parsing algorithm: find the last_tool prefix line + take everything after the `todos:` header.
     const newBar = buildAgentStatusText({
       lastTool: "echo",
       instruction: "pivot now",
@@ -207,7 +211,7 @@ describe("forward compatibility for old parsers (rollback)", () => {
   });
 });
 
-// -- ⑥ F3 结构性子串 ---------------------------------------------------------------
+// -- structural substrings inside the instruction value --------------------------
 
 describe("instruction containing wrapper substrings (F3)", () => {
   it("survives the round-trip without breaking line-level validation", () => {
@@ -223,7 +227,7 @@ describe("instruction containing wrapper substrings (F3)", () => {
   });
 });
 
-// -- ④ 畸形 → null 不 throw ---------------------------------------------------------
+// -- malformed bars → null without throwing --------------------------------------
 
 describe("malformed bars still parse to null", () => {
   const cases: ReadonlyArray<[string, string]> = [
@@ -244,7 +248,7 @@ describe("malformed bars still parse to null", () => {
   });
 });
 
-// -- ⑤ reconcile 常量导出件 ----------------------------------------------------------
+// -- exported reconcile constant --------------------------------------------------
 
 describe("AGENT_STATUS_RECONCILE_LINE", () => {
   it("is an exported single line with the reconcile: prefix", () => {
@@ -272,7 +276,7 @@ describe("AGENT_STATUS_RECONCILE_LINE", () => {
   });
 });
 
-// -- 返回值不可变契约沿用 -------------------------------------------------------------
+// -- inherited immutability contract for the parse result ------------------------
 
 describe("parse result immutability contract", () => {
   it("keeps the frozen snapshot shape with new fields present", () => {
@@ -290,7 +294,7 @@ describe("parse result immutability contract", () => {
   });
 });
 
-// -- 条件在场投影 SSOT（review 修复弹 Standards-Med#2 收敛点） ----------------------
+// -- conditional-slot presence projection, single source of the rule -------------
 
 describe("pickPresentAgentStatusSlots: instruction/reconcile 条件在场 → key 缺席 的单点规则", () => {
   it("两槽均 undefined（未提供）→ key 全缺席（F1 旧字段集形态）", () => {

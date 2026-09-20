@@ -1,8 +1,10 @@
 /**
- * ACI 原型 Layer 0：permission 单元测试。
- * 覆盖：类别默认 / byName 覆盖 / 危险命令 deny / 安全命令 allow /
- * **危险模式 + 敏感路径硬墙**（非白名单但非危险的命令落入 ask，执行期边界由 bwrap 承担）/
- * **always_allow 不能绕过 execute 安全兜底**。
+ * ACI prototype Layer 0: permission unit tests.
+ * Covers: category defaults / byName overrides / dangerous-command deny /
+ * safe-command allow / **dangerous pattern + sensitive-path hard walls**
+ * (commands neither on the allowlist nor dangerous fall to ask; runtime
+ * boundaries are carried by bwrap) / **always_allow cannot bypass the
+ * execute safety backstop**.
  */
 
 import { describe, it } from "vitest";
@@ -51,8 +53,9 @@ describe("createPermissionPolicy", () => {
     // The code layer ships with built-in allow rules:
     //   - code-allow-memory-save: agent self-write to its own memory library
     //     (unblocks non-interactive inlets — ask/serve/chat TTY without prompt)
-    //   - code-allow-todo-write-read (#440 T5 / ADR-0085): todo_write read
-    //     子模式只读,bypass ask。add/update 仍走默认 write → ask。
+    //   - code-allow-todo-write-read (ADR-0085): the todo_write read
+    //     sub-mode is read-only and bypasses ask. add/update still take the
+    //     default write → ask.
     // Project / session layers can still escalate to ask or deny; hard-walls
     // remain un-overrideable.
     assert.equal(p.sources.code.rules.length, 2);
@@ -110,8 +113,8 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
     assert.equal(isAllowedCommand("echo hello"), true);
     assert.equal(isAllowedCommand("node -v"), true);
     assert.equal(isAllowedCommand("git status"), true);
-    assert.equal(isAllowedCommand("/usr/bin/node -v"), true); // 路径前缀
-    assert.equal(isAllowedCommand("C:\\bin\\node -v"), true); // Windows 路径
+    assert.equal(isAllowedCommand("/usr/bin/node -v"), true); // path prefix
+    assert.equal(isAllowedCommand("C:\\bin\\node -v"), true); // Windows path
   });
 
   it("首 token 不在白名单 → false", () => {
@@ -121,21 +124,22 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
   });
 
   it("分段 + 重定向豁免后判定 → 白名单段 allow / 危险段 deny", () => {
-    // 重定向已豁免：> / >> / < 是只读工具标准用法，不再是 isAllowed 的拒因。
-    assert.equal(isAllowedCommand("echo a > b"), true); // 重定向豁免
-    assert.equal(isAllowedCommand("echo a >> b"), true); // 重定向豁免
-    assert.equal(isAllowedCommand("echo a | grep x"), false); // 管道（grep 段非白名单）
-    assert.equal(isAllowedCommand("echo a | head -1"), true); // 管道（head 段在白名单）
-    assert.equal(isAllowedCommand("echo a; echo b"), true); // 分号分段（echo 段白名单）
-    assert.equal(isAllowedCommand("echo a; rm -rf /"), false); // 分段后 rm 段危险
-    assert.equal(isAllowedCommand("echo a && echo b"), true); // && 分段（echo 段白名单）
-    assert.equal(isAllowedCommand("echo $PATH"), true); // 纯 $VAR 读取放行（不再拒）
-    assert.equal(isAllowedCommand("echo $HOME"), true); // 纯 $VAR 读取放行
-    assert.equal(isAllowedCommand("echo `whoami`"), false); // 反引号
-    assert.equal(isAllowedCommand("echo $(whoami)"), false); // 命令替换
+    // Redirects are now exempt: > / >> / < are standard read-only tool usage
+    // and no longer a reject reason in isAllowed.
+    assert.equal(isAllowedCommand("echo a > b"), true); // redirect exempt
+    assert.equal(isAllowedCommand("echo a >> b"), true); // redirect exempt
+    assert.equal(isAllowedCommand("echo a | grep x"), false); // pipe (grep segment not on allowlist)
+    assert.equal(isAllowedCommand("echo a | head -1"), true); // pipe (head segment on allowlist)
+    assert.equal(isAllowedCommand("echo a; echo b"), true); // semicolon split (echo segments allowlisted)
+    assert.equal(isAllowedCommand("echo a; rm -rf /"), false); // rm segment dangerous after split
+    assert.equal(isAllowedCommand("echo a && echo b"), true); // && split (echo segments allowlisted)
+    assert.equal(isAllowedCommand("echo $PATH"), true); // bare $VAR reads allowed (no longer rejected)
+    assert.equal(isAllowedCommand("echo $HOME"), true); // bare $VAR reads allowed
+    assert.equal(isAllowedCommand("echo `whoami`"), false); // backticks
+    assert.equal(isAllowedCommand("echo $(whoami)"), false); // command substitution
     assert.equal(isAllowedCommand("echo (a)"), false); // subshell
-    assert.equal(isAllowedCommand("echo a\nrm -rf /"), false); // 换行
-    assert.equal(isAllowedCommand("echo a\rb"), false); // 回车
+    assert.equal(isAllowedCommand("echo a\nrm -rf /"), false); // newline
+    assert.equal(isAllowedCommand("echo a\rb"), false); // carriage return
   });
 
   it("扩写白名单原语 → 写/工具命令 isAllowed", () => {
@@ -146,7 +150,7 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
     assert.equal(isAllowedCommand("tee -a log"), true);
     assert.equal(isAllowedCommand("sed -i s/x/y/g f"), true);
     assert.equal(isAllowedCommand("chmod +x run.sh"), true);
-    assert.equal(isAllowedCommand("chown user file"), true); // chown 已离开危险列表
+    assert.equal(isAllowedCommand("chown user file"), true); // chown has left the dangerous list
     assert.equal(isAllowedCommand("diff a b"), true);
     assert.equal(isAllowedCommand("file x"), true);
     assert.equal(isAllowedCommand("base64 -d x"), true);
@@ -185,7 +189,8 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "echo $(whoami)",
     "echo ${PATH}",
     "echo $(rm -rf /)",
-    // 段内危险子串（SC8 不回退）：换行后的段仍要命中 `rm -rf` 等。
+    // In-segment dangerous substrings must not regress: a segment after a
+    // newline still has to hit `rm -rf` etc.
     "echo a\nrm -rf /",
     "mkdir -p ./a\nrm -fr /tmp/x",
   ];
@@ -201,32 +206,34 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "cat README.md",
     "node --version",
     "git status",
-    // 用户初始化脚本原 case（误伤修复的核心场景）
+    // User init-script original case (the core scenario of the false-positive fix)
     'ls -la ~/.iknow 2>/dev/null; echo "---"; ls -la ~ 2>/dev/null | head -30',
-    // 仅白名单段组合 + 重定向 / 管道 / 分号
+    // Allowlist-only segment combinations + redirect / pipe / semicolon
     "ls -la ~ 2>/dev/null",
     "echo a > b",
     "echo a >> b",
     "git status && echo done",
     "ls; ls; ls",
     "echo a | head -1",
-    // 纯 $VAR 读取放行（W4）
+    // Bare $VAR reads allowed
     "echo $HOME",
     "echo $PATH",
     "echo $X",
     "ls $PWD/src",
-    // chown 已离开危险列表
+    // chown has left the dangerous list
     "chown user file",
-    // 扩写白名单原语（mkdir/cp/mv/...）
+    // Extended allowlist primitives (mkdir/cp/mv/...)
     "mkdir -p ~/.iknow/sub",
     "cp a.ts b.ts",
     "mv a b",
     "curl -s http://x",
-    // 换行只作分段符（SC1 / ADR-0068）：换行本身不是危险模式。
-    // 原 dangerous 表里的 "echo a\nrm" 命中的是换行补丁（`\\n` 返回值），
-    // 不是 `rm` 段（裸 `rm` 无参数不匹配任何危险子串）。换行退役后
-    // 该样例按新合同归入 safe；段内真正危险子串的回归由上面
-    // "echo a\nrm -rf /" 两例钉住。
+    // Newline acts only as a segment separator (ADR-0068): the newline
+    // itself is not a dangerous pattern. The old "echo a\nrm" entry in the
+    // dangerous table hit the newline patch (`\\n` as return value), not the
+    // `rm` segment (bare `rm` without args matches no dangerous substring).
+    // With the newline patch retired, that sample belongs in safe under the
+    // new contract; genuine in-segment dangerous substrings are still pinned
+    // by the "echo a\nrm -rf /" cases above.
     "echo a\nrm",
     "mkdir -p ./a\nls",
     "echo a\nls",
@@ -262,8 +269,9 @@ describe("hard-wall 按段扫描 — 换行只作分段符 (SC1 / ADR-0068)", ()
   });
 
   it("换行不返回字面 `\\n` 命中值（旧换行补丁已退役）", () => {
-    // 旧实现 `/\r|\n/.test(command) → return "\\n"`；新合同换行只是分段符，
-    // 不产生任何命中。此断言钉住「换行不再作为 pattern 返回」。
+    // Old implementation: `/\r|\n/.test(command) → return "\\n"`. Under the
+    // new contract a newline is only a segment separator and produces no hit.
+    // This assertion pins "newline is no longer returned as a pattern match".
     assert.equal(isDangerousCommand("echo a\nls"), false);
     assert.equal(isDangerousCommand("\n"), false);
     assert.equal(isDangerousCommand("\r\n"), false);
@@ -283,14 +291,17 @@ describe("hard-wall format 子串退役 (SC2 / ADR-0068: format 不得子串匹�
     assert.equal(isDangerousCommand("format C:"), true);
     assert.equal(isDangerousCommand("format c:"), true);
     assert.equal(isDangerousCommand("format"), true);
-    // 段内以独立词出现 format 命令（如多行脚本第二行）也拦。
+    // `format` as a standalone word inside a segment (e.g. line 2 of a
+    // multi-line script) is also blocked.
     assert.equal(isDangerousCommand("echo a\nformat c:"), true);
   });
 
   it("反斜杠逃逸 fo\\rmat → 词法闸仍命中（backslash strip 与子串扫描同源）", () => {
-    // review High 回归：词法闸必须吃与子串扫描同一 normalize 形态 ——
-    // bash 剥反斜杠后 `fo\rmat` 即 `format`，逃逸不能因闸间 normalize
-    // 不对称而漏过（`format` 已退出子串表，词法闸是唯一拦截面）。
+    // Review-High regression: the lexical gate must consume the same
+    // normalized form as the substring scan — bash strips backslashes, so
+    // `fo\rmat` becomes `format`; an escape must not slip through due to
+    // normalize asymmetry between gates (`format` has left the substring
+    // table, making the lexical gate the only interception surface).
     assert.equal(isDangerousCommand("fo\\rmat C:"), true);
     assert.equal(isDangerousCommand("fo\\rmat"), true);
     assert.equal(isDangerousCommand("echo a\nfo\\rmat c:"), true);
@@ -330,22 +341,24 @@ describe("hard-wall deny reason 带 pattern id (SC3)", () => {
 });
 
 describe("输入五类表 A — findDangerousPattern / isDangerousCommand (S2)", () => {
-  // empty: `""` / 仅空白 → 既有空命令语义不变（不放行执行），且不得误标
-  // 为 format 子串命中。
+  // empty: `""` / whitespace-only → existing empty-command semantics unchanged
+  // (execution is not allowed through), and must not be mislabeled as a
+  // format-substring hit.
   it("empty: 空串 / 仅空白 → 非危险（既有空命令语义，由 handler 自验兜底）", () => {
     assert.equal(isDangerousCommand(""), false);
     assert.equal(isDangerousCommand("   "), false);
     assert.equal(isDangerousCommand("\t\n "), false);
   });
 
-  // negative: 合法多行白名单段；含 text-transform 的 echo → 不 hard-wall。
+  // negative: legal multi-line allowlisted segments; echo containing
+  // text-transform → no hard-wall.
   it("negative: 合法多行段 + text-transform echo → 不 hard-wall", () => {
     assert.equal(isDangerousCommand("mkdir -p ./a\nls"), false);
     assert.equal(isDangerousCommand("echo 'text-transform: uppercase'"), false);
   });
 
-  // overflow: 很长命令 / 很多换行但仍为白名单段 → 不因长度/换行 deny；
-  // 段内 rm -rf 仍命中。
+  // overflow: very long command / many newlines but still allowlisted
+  // segments → no deny for length/newlines; in-segment rm -rf still hits.
   it("overflow: 长命令 / 多换行白名单段不 deny；末段危险仍命中", () => {
     const longEcho = `echo ${"x".repeat(8000)}`;
     assert.equal(isDangerousCommand(longEcho), false);
@@ -354,12 +367,13 @@ describe("输入五类表 A — findDangerousPattern / isDangerousCommand (S2)",
     assert.equal(isDangerousCommand(`${manyLines}\nrm -rf /`), true);
   });
 
-  // concurrent: 纯函数，无共享状态。
+  // concurrent: pure function, no shared state.
   it("concurrent: N/A: pure（findDangerousPattern 为纯函数，无共享可变状态）", () => {
     // N/A: pure
   });
 
-  // exception: 真危险（rm -rf、$(...)）→ deny 且 reason 带 pattern id。
+  // exception: genuinely dangerous (rm -rf, $(...)) → deny and reason
+  // carries the pattern id.
   it("exception: 真危险 deny 且 reason 带 pattern id（见 SC3 describe）", () => {
     assert.equal(isDangerousCommand("rm -rf /"), true);
     assert.equal(isDangerousCommand("echo $(whoami)"), true);
@@ -468,7 +482,8 @@ describe("checkPermission — 类别默认", () => {
 
 describe("checkPermission — byName 覆盖", () => {
   it("byName always_allow **不能**绕过 execute 硬墙（Security CRITICAL）", () => {
-    // 即便策略声明 bash 永远允许，危险命令仍必须被硬墙拦下
+    // Even when the policy declares bash always-allowed, dangerous commands
+    // must still be stopped by the hard wall
     const policy = createPermissionPolicy({
       byName: { bash: "allow" },
     });
@@ -511,7 +526,7 @@ describe("checkPermission — byName 覆盖", () => {
   });
 
   it("byName deny 覆盖 execute 即便命令安全", () => {
-    // deny 在 normal 层短路，优先级高于类别默认
+    // deny short-circuits at the normal layer, above category defaults
     const policy = createPermissionPolicy({
       byName: { bash: "deny" },
     });
@@ -593,7 +608,7 @@ describe("checkPermission — execute 安全兜底细节", () => {
       input: { command: "echo $HOME" },
       policy,
     });
-    // 纯 $VAR 读取放行：isAllowedCommand true 且 findDangerousPattern 不命中
+    // Bare $VAR reads allowed: isAllowedCommand true and findDangerousPattern does not hit
     assert.equal(out.decision, "ask");
   });
 

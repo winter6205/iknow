@@ -1,20 +1,21 @@
 /**
- * e2e.test.ts — #406 T5 端到端矩阵验收（4 surface × 2 mode → 8 cases）。
+ * e2e.test.ts — end-to-end matrix acceptance (4 surfaces × 2 modes -> 8 cases).
  *
- * 两个断言面：
- *   A) 装配面（8 个矩阵 case）—— 对每个 surface（chat / ask / tui / serve）在
- *      roundtrip 与 block 两种 mode 下断言机器状态：
- *        roundtrip → deps.secretRegistry 在场 + secretsMode 非 "block"
- *                    （识别 + 占位符 + 还原链路装配）
- *        block     → deps.secretsMode === "block" + secretRegistry 缺席
- *                    （legacy deny-only guard 兼容路径）
- *   B) 全流面（bonus）—— 经独立 run() + stub model/registry/executor 驱动
- *      「识别层占位符化 → bash 还原层真值」闭环；block 下断言 run() 明文原样
- *      进消息（roundtrip 识别关闭）。bash 还原层用真实 createBashTool 验证
- *      （bwrap 可用，与 bash.test.ts 同款真实 spawn）。
+ * Two assertion surfaces:
+ *   A) Assembly surface (8 matrix cases) — for each surface (chat / ask / tui / serve)
+ *      under roundtrip and block modes, assert machine state:
+ *        roundtrip -> deps.secretRegistry present + secretsMode not "block"
+ *                     (recognize + placeholder + restore chain wired)
+ *        block     -> deps.secretsMode === "block" + secretRegistry absent
+ *                     (legacy deny-only guard compatibility path)
+ *   B) Full-flow surface (bonus) — a standalone run() + stub model/registry/executor
+ *      drives the "recognize-layer placeholderization -> bash restore-layer real value"
+ *      closed loop; under block, assert run() puts user plaintext verbatim into
+ *      messages (roundtrip recognition off). The bash restore layer uses the real
+ *      createBashTool (bwrap available, real spawn as in bash.test.ts).
  *
- * 测试缝（对齐 build-engine.test.ts）：opts.settings 注入隔离 settings +
- * tmp userHome/cwd fixture（#337 T8）——不读真实 ~/.iknow、不污染 process.env。
+ * Test seam (aligned with build-engine.test.ts): opts.settings injects isolated
+ * settings + tmp userHome/cwd fixture — never reads the real ~/.iknow, never pollutes process.env.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -58,12 +59,12 @@ function makeEnv(apiKey: string): IknowEnv {
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    // subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
   };
 }
 
-/** 每个 case 独立 tmp fixture 隔离 skill scanner / mcp config / 真实 home。 */
+/** Per-case tmp fixture isolating skill scanner / mcp config / the real home. */
 const roots: string[] = [];
 async function makeFixture(): Promise<{ root: string; home: string }> {
   const root = await mkdtemp(join(tmpdir(), "iknow-406-e2e-"));
@@ -77,9 +78,9 @@ afterEach(async () => {
   );
 });
 
-/** 全流面 stub rig：确定性 stub model + noop tool + 空 secret registry。
- *  mirror tests/cli/_fixtures.ts makeDeps——block 模式不传 secretRegistry，
- *  roundtrip 传 secretRegistry（供识别层 + 断言共享）。 */
+/** Full-flow stub rig: deterministic stub model + noop tool + empty secret registry.
+ *  Mirrors tests/cli/_fixtures.ts makeDeps — block mode passes no secretRegistry,
+ *  roundtrip passes one (shared by the recognition layer + the assertions). */
 function makeRunDeps(opts: {
   readonly responses: ReadonlyArray<
     import("../../../src/harness/index.ts").AssistantTurnResult
@@ -106,7 +107,7 @@ function makeRunDeps(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// A) 装配面：4 surface × 2 mode 矩阵（A1：8 case 至少 6 绿）
+// A) Assembly surface: 4 surfaces × 2 modes matrix (8 cases)
 // ---------------------------------------------------------------------------
 describe("secret-roundtrip e2e — 4 surface × 2 mode 装配矩阵 (#406)", () => {
   const SURFACES = ["chat", "ask", "tui", "serve"] as const;
@@ -130,10 +131,10 @@ describe("secret-roundtrip e2e — 4 surface × 2 mode 装配矩阵 (#406)", () 
           userHome: home,
           cwd: root,
           sandboxRoot: root,
-          // 本文件验 secrets 装配矩阵,不验溢出退场 / 索引降档(专测见
-          // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-          // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens
-          // 注释。
+          // This file verifies the secrets assembly matrix, not overflow retirement /
+          // index demotion (covered by build-engine-tool-overflow.test.ts and
+          // disclosure-index-align/). Bypassing assembly-time countTokens; see the
+          // BuildEngineOpts.skipCountTokens comment for seam semantics.
           skipCountTokens: true,
         });
         try {
@@ -147,7 +148,7 @@ describe("secret-roundtrip e2e — 4 surface × 2 mode 装配矩阵 (#406)", () 
               "block",
               `${surface}/${mode}: secretsMode must not be "block"`
             );
-            // 构造期空表（未跑任何 run() 前不注册任何值）
+            // empty table at construction time (no value registered before any run())
             assert.equal(built.deps.secretRegistry!.size, 0);
           } else {
             assert.equal(
@@ -170,10 +171,10 @@ describe("secret-roundtrip e2e — 4 surface × 2 mode 装配矩阵 (#406)", () 
 });
 
 // ---------------------------------------------------------------------------
-// B) 全流面：识别层占位符化 + bash 还原（模型上下文只见占位符，bash 拿真值）
+// B) Full-flow surface: recognize-layer placeholderization + bash restore (model context sees only placeholders, bash gets real values)
 // ---------------------------------------------------------------------------
 describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 → 输出 mask 兜底）", () => {
-  // 测试密钥：形态只需命中 DEFAULT sk- pattern 并映射到单个占位符；具体值无关紧要。
+  // Test secret: the shape only needs to hit the DEFAULT sk- pattern and map to a single placeholder; the concrete value is irrelevant.
   const SECRET = "sk-aaaaaaaaaaaaaaaaaaaa";
 
   it("chat × roundtrip：run() 消息全树占位符；bash 还原层 spawn 前回填真值，输出 mask 兜底", async () => {
@@ -189,7 +190,7 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
       secretRegistry,
     });
 
-    // (1) 识别层：run() 首条 user 消息 = 占位符，明文绝不出现在任何消息中。
+    // (1) Recognition layer: run()'s first user message = placeholder; plaintext must never appear in any message.
     const { result } = await run(`这是 ${SECRET}，帮我测`, {
       adapter: deps.adapter,
       executor: deps.executor,
@@ -210,11 +211,12 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
     }
     assert.equal(secretRegistry.resolve("<<<SECRET_1>>>"), SECRET);
 
-    // (2) 还原层 + 输出 mask（#357 T3）：bash 工具拿到同一 registry → spawn 前
-    // restore（命令拿真值）→ echo 回来后 stdout 经 output-mask 洗涤：真值不外泄到
-    // tool_result。restore 命中证据 = 占位符缺席；mask 命中证据 = 真值缺席 + *** 在场。
-    // #693 T4 D4:handler 自 T4 起返回 envelope `{ output, meta? }`,output 字段里
-    // 仍是 JSON 化的 code/stdout/stderr,parse 一下拿到原 BashResult 形态。
+    // (2) Restore layer + output mask: the bash tool gets the same registry -> restore
+    // before spawn (command receives the real value) -> after echo, stdout passes the output mask:
+    // the real value must not leak into tool_result. Restore-hit evidence = placeholder absent;
+    // mask-hit evidence = real value absent + *** present.
+    // The handler returns the envelope `{ output, meta? }`; output still holds the JSON-ized
+    // code/stdout/stderr, so parse to get the original BashResult shape.
     const { root } = await makeFixture();
     const bashTool = createBashTool(root, { secretRegistry });
     const bashEnvelope = (await bashTool.handler({
@@ -238,7 +240,7 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
   });
 
   it("chat × block：run() 用户明文原样进消息（roundtrip 识别关闭），registry 缺席", async () => {
-    // block 模式：deps.secretsMode="block" + secretRegistry 缺席 → 识别层跳过。
+    // block mode: deps.secretsMode="block" + secretRegistry absent -> recognition layer skipped.
     const deps = makeRunDeps({
       responses: [
         assistantResult({
@@ -313,7 +315,7 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
       undefined,
       { priorMessages: firstRun.result.messages }
     );
-    // prior 消息原样保留占位符；新消息文本 verbatim（占位符不触发任何 pattern）。
+    // prior messages keep placeholders verbatim; new message text verbatim (placeholders trigger no pattern).
     const priorUserText = (
       secondRun.result.messages[0]!.content[0] as {
         type: "text";
@@ -321,14 +323,14 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
       }
     ).text;
     assert.equal(priorUserText, "用 <<<SECRET_1>>> 处理");
-    // registry 不重复注册（size 仍 1，去重验证）。
+    // registry does not re-register (size still 1, dedup check).
     assert.equal(secretRegistry.size, 1);
     assert.equal(secretRegistry.resolve("<<<SECRET_1>>>"), SECRET);
   });
 
   it("roundtrip：session 重启（registry 重建）后历史占位符无法还原 — restore 原样透传不抛", async () => {
-    // 模拟旧 session 的 registry：新 session 的空 registry 不认识历史占位符。
-    // restore 是纯函数：空 registry 下原样返回，不抛（session-restart limitation）。
+    // Simulate the old session's registry: a new session's empty registry does not recognize historical placeholders.
+    // restore is a pure function: with an empty registry it returns the input verbatim, no throw (session-restart limitation).
     const freshRegistry = createSecretRegistry();
     const restored = restore("echo <<<SECRET_1>>>", freshRegistry);
     assert.equal(restored, "echo <<<SECRET_1>>>", "占位符原样透传（不抛）");

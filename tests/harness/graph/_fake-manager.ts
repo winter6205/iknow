@@ -1,18 +1,19 @@
 /**
- * 共享 `run_graph` handler 测试 fixture:fake SubAgentManager + 假 child +
- * envelope 写回 / 等待工具。
+ * Shared `run_graph` handler test fixture: fake SubAgentManager + fake child +
+ * envelope write-back / wait helpers.
  *
- * 风格参考 `tests/cli/_fixtures.ts`(本地 fixture,不从 src/ 出口外露;
- * 测试通过直接 import 拿到 harness stub)。
+ * Style follows `tests/cli/_fixtures.ts` (local fixture, never re-exported from
+ * src/; tests import the harness stubs directly).
  *
- * 涵盖的四个测试文件:
+ * Used by these four test files:
  *   - tests/harness/graph/run-graph-ledger.test.ts
  *   - tests/harness/graph/run-graph-residual.test.ts
  *   - tests/harness/graph/run-graph-cancel.test.ts
  *   - tests/harness/graph/run-graph-contract.test.ts
  *
- * 这套 fixture 钉住「handler 真的驱动了 manager 的 spawn」—— 用 fake
- * 替代会让我们要验的真 spawn / 零 spawn / 产出沿边流动被 mock 掉。
+ * This fixture pins "the handler really drove manager.spawn": only the child
+ * process is faked — the manager itself is real, so spawn counts and
+ * output-along-edge flow remain observable ground truth, not mocked away.
  */
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -36,7 +37,7 @@ export interface FakeChild {
   readonly signalCode: NodeJS.Signals | null;
   emit: (event: string | symbol, ...args: unknown[]) => boolean;
   once: (event: string | symbol, ...args: unknown[]) => unknown;
-  /** 累积写进 stdin 的 payload(manager 的 worker 载荷),供 task 文本断言。 */
+  /** Payloads accumulated on stdin (the manager's worker input), for asserting task text. */
   readonly written: string[];
 }
 
@@ -80,7 +81,7 @@ export function makeManager(opts: MakeManagerOpts = {}): FakeManagerBundle {
   return { manager, children };
 }
 
-/** 写一份 envelope + 触发 child 退出,让 manager.waitFor 解除阻塞。 */
+/** Write an envelope to stdout and emit exit, unblocking manager.waitFor. */
 export function settle(child: FakeChild, envelope: SubAgentEnvelope): void {
   child.stdout.write(JSON.stringify(envelope) + "\n");
   child.emit("exit", 0, null);
@@ -100,10 +101,10 @@ export function fail(error: string): SubAgentEnvelope {
 }
 
 /**
- * 等到 children 累计到目标数。scheduler 在 spawn 后才把它放进数组,
- * 所以是「下一个子代理的 child 已 spawn」的 ground truth —— 比
- * `setTimeout` / 固定 sleep 更稳定(SPEC 文件里 handler 测试共享
- * 这个 poll-loop)。
+ * Wait until the children array reaches the target length. The scheduler only
+ * pushes a child after spawn, so this is ground truth for "the next
+ * sub-agent's child has spawned" — more stable than `setTimeout`/fixed sleep
+ * (shared poll-loop across the run_graph handler tests).
  */
 export async function waitForChildren(
   children: FakeChild[],
@@ -120,7 +121,7 @@ export async function waitForChildren(
   });
 }
 
-/** condense() 返回的浓缩结果结构 —— 单测断言形状。 */
+/** Shape of condense()'s condensed result — the structure unit tests assert against. */
 export interface CondensedNode {
   readonly id: string;
   readonly status: string;

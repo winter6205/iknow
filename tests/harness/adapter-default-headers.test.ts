@@ -1,15 +1,17 @@
 /**
- * specs/tui-model-command.md SC9 —— provider.headers → Anthropic SDK
- * `defaultHeaders` 透传（`createAdapterFromEnv` 真实装配路径）。
+ * provider.headers → Anthropic SDK `defaultHeaders` pass-through, verified on
+ * the real assembly path of `createAdapterFromEnv`.
  *
- * 观测手段（为什么这样选）：
- *   - 在场一侧走 **wire**：本地 http server 记录请求头 —— 黑盒证明 headers
- *     真到达 SDK 发出的请求，而不是只信构造参数。
- *   - 缺席一侧要证的是「构造时根本没传该键」（`undefined` / `{}` 都不允许）。
- *     这一点 wire 上看不出差别（两者都不发头），只能回到 client 实例的
- *     options 观察：断言无同有键 + 与「今日同款构造」（只有 apiKey/baseURL）
- *     的 client 键集逐字节相同。SDK 内部 options 字段名变了的话，本用例会
- *     直接红线报错而不是静默放过。
+ * Observation design:
+ *   - Present side asserts on the WIRE: a local http server records request
+ *     headers — black-box proof that headers actually reach the SDK request,
+ *     not just the constructor argument.
+ *   - Absent side must prove the key is never passed at construction (neither
+ *     `undefined` nor `{}` allowed). The wire cannot tell those apart (neither
+ *     sends the header), so observe the client instance's options instead:
+ *     no such own key, plus a key set identical to a control client built the
+ *     same way today (apiKey/baseURL only). If the SDK renames its internal
+ *     options field, this test fails loudly rather than passing silently.
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -23,7 +25,7 @@ import {
   type HttpCapture,
 } from "../_helpers/http-capture.ts";
 
-/** 与生产同形的 IknowEnv 字面（只有 baseUrl / headers 参与本文件的断言）。 */
+/** IknowEnv literal shaped like production; only baseUrl / headers matter to this file's asserts. */
 function makeEnv(opts: {
   readonly baseUrl: string;
   readonly headers?: Readonly<Record<string, string>>;
@@ -52,12 +54,12 @@ function makeEnv(opts: {
   };
 }
 
-/** SDK 把构造 options 冻结在此 protected 字段上（headers 合并点同源）。 */
+/** The SDK freezes constructor options on this protected field (same point where headers are merged). */
 function clientOptions(client: Anthropic): Record<string, unknown> {
   return (client as unknown as { _options: Record<string, unknown> })._options;
 }
 
-/** 走一次真实 adapter 请求（非流式臂；state.messages 空是合法请求）。 */
+/** Drive one real adapter request (non-streaming arm; empty state.messages is a valid request). */
 async function stepOnce(adapter: LoopAdapter): Promise<void> {
   await adapter.step(
     { messages: [], turnCount: 0 } as Parameters<LoopAdapter["step"]>[0],
@@ -98,9 +100,9 @@ describe("createAdapterFromEnv — provider headers 透传（SC9）", () => {
     const { client, adapter } = createAdapterFromEnv(
       makeEnv({ baseUrl: capture.origin })
     );
-    // 对照组 = 今日的构造调用形态（只有 apiKey / baseURL）。键集相等 ⟺
-    // 没有多出 `defaultHeaders` 这个自有键（显式传 undefined 会多出该键，
-    // 实测可分辨）。
+    // Control group = today's construction shape (apiKey / baseURL only).
+    // Equal key sets ⟺ no extra `defaultHeaders` own key (passing undefined
+    // explicitly would add the key; empirically distinguishable).
     const control = new Anthropic({
       apiKey: "test-key",
       baseURL: capture.origin,

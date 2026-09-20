@@ -20,9 +20,12 @@ describe("getAutoCompactThreshold", () => {
   });
 
   it("缺省闸不得再是旧余量公式 window − 20000 − 13000 (ADR-0100 否决)", () => {
-    // 反例钉住:余量公式只在分母≈供应商真上限时合理;策略预算上会过早压缩。
-    // 两常量仍留在 constant.ts(Q6b-D4 的常量照搬集,由 constant.test.ts 钉值
-    // 防漂移),ADR-0100 后缺省闸改 floor(0.95×window),生产侧无消费者。
+    // Counter-example pin: the buffer formula only makes sense when the
+    // denominator ≈ the provider's real cap; over a strategy budget it would
+    // compact too early. Both constants remain in constant.ts (ported
+    // constant set, value-pinned by constant.test.ts against drift); since
+    // ADR-0100 the default gate is floor(0.95 × window) and production has no
+    // consumer of the old formula.
     assert.notEqual(
       getAutoCompactThreshold(200_000, undefined),
       200_000 - MAX_OUTPUT_TOKENS_FOR_SUMMARY - AUTOCOMPACT_BUFFER_TOKENS

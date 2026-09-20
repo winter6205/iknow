@@ -1,12 +1,15 @@
 /**
- * bash → last-read 账本入账（ADR-0084 / spec D1 入账源之二）。
+ * bash → last-read ledger accounting (ADR-0084, the second accounting source).
  *
- * 不变式：**成功**（exit 0）且命令是白名单读、恰好一个文件参数、无管道、
- * 无重定向 → 规范 path 入账；其余一律不入账。入账后同 conversation 的非空
- * `write_file` 覆写放行 —— 用真实 write_file 闸验证，不只看账本 size。
+ * Invariant: a **successful** (exit 0) command that is a whitelisted read
+ * with exactly one file operand, no pipes and no redirections → the
+ * canonical path is recorded; nothing else is. Once recorded, a non-empty
+ * `write_file` overwrite in the same conversation is allowed — verified
+ * through the real write_file gate, not just the ledger size.
  *
- * 本套件跑真实 bwrap 沙箱（现行 bash 测试同款）；沙箱不可用的环境由 CI
- * exclude 覆盖（见 `vitest.ci-excludes.ts` —— 排除集 SSOT）。
+ * This suite runs the real bwrap sandbox (same as current bash tests);
+ * environments without a sandbox are covered by the CI exclude set
+ * (`vitest.ci-excludes.ts` — the exclude-list SSOT).
  */
 
 import assert from "node:assert/strict";
@@ -22,7 +25,7 @@ import { createWriteFileTool } from "../../../../src/harness/aci/tools/write-fil
 import type { AciToolDef } from "../../../../src/harness/aci/types.ts";
 import type { ToolExecutionContext } from "../../../../src/harness/tools/types.ts";
 
-/** bash handler 返回 envelope（#693 T4 D4）：模型面 output + 观测面 meta。 */
+/** The bash handler returns an envelope: model-facing output + observation-facing meta. */
 interface BashEnvelope {
   readonly output: string;
   readonly meta?: { readonly stdout?: string; readonly stderr?: string };
@@ -173,7 +176,7 @@ describe("bash — last-read 入账", () => {
       tmpDir: pad,
     });
 
-    // ADR-0092: pad 是 `$TMPDIR` 宿主路径，guest `/tmp` 不再别名到 pad。
+    // ADR-0092: pad is the host path behind `$TMPDIR`; guest `/tmp` no longer aliases to it.
     const note = join(pad, "note.txt");
     await writeFile(note, "pad content\n");
     const result = await runBash(
@@ -239,7 +242,7 @@ describe("bash — last-read 入账", () => {
       { command: "grep --qui SECRET cfg.ts" },
       { conversationId: "conv-a" }
     );
-    // 真实 bwrap 里的 GNU grep 3.12 接受 `--qui` 前缀、exit 0、无输出。
+    // GNU grep 3.12 inside real bwrap accepts the `--qui` prefix: exit 0, no output.
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "");
     assert.equal(
@@ -275,7 +278,7 @@ describe("bash — last-read 入账", () => {
       { command: "rg --c SECRET cfg.ts" },
       { conversationId: "conv-a" }
     );
-    // 实测 vendored rg 15.1.0：`rg --c` = `-c`，只打印条数、exit 0。
+    // Measured vendored rg 15.1.0: `rg --c` equals `-c` — prints only the count, exit 0.
     assert.equal(result.code, 0);
     assert.equal(result.stdout.trim(), "1");
     assert.equal(
@@ -347,7 +350,7 @@ describe("bash — last-read 入账", () => {
       { conversationId: "conv-a" }
     );
     assert.equal(result.code, 0);
-    // 原地改是写不是读：文件已被 sed 改写（bwrap 未把 cwd 挂只读）。
+    // In-place editing is a write, not a read: sed already rewrote the file (bwrap does not mount cwd read-only).
     assert.equal(await readFile(target, "utf8"), "one\ntwo\n");
     assert.equal(
       ledger.ledgerFor("conv-a")?.has(target),
@@ -382,10 +385,12 @@ describe("bash — last-read 入账", () => {
   });
 
   it("cat --help 成功但根本没打开文件 → 不入账，随后覆写被拒且字节不变（簇 A 端到端）", async () => {
-    // 真实 bwrap 里的沙箱内 `/usr/bin/cat` 是本机 uutils coreutils 0.8.0：
-    // `cat --help a.txt` rc=0，stdout 只有 "Concatenate FILE(s), ..." 帮助文本，
-    // a.txt 从未被打开。旧提取器只看「余下恰一个操作数」→ 记入 a.txt，随后
-    // `write_file` 就能把未读的 PRECIOUS 覆盖成 CLOBBERED（真沙箱实测可利用）。
+    // Inside real bwrap, the sandbox's /usr/bin/cat is the host's uutils
+    // coreutils 0.8.0: `cat --help a.txt` exits 0 with only
+    // "Concatenate FILE(s), ..." help text on stdout, and a.txt is never
+    // opened. The old extractor looked only at "exactly one operand left" →
+    // recorded a.txt, after which `write_file` could clobber the unread
+    // PRECIOUS into CLOBBERED (exploitable, measured in the real sandbox).
     const cwd = await makeScratch("bash-last-read-help-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS\n");
@@ -425,8 +430,10 @@ describe("bash — last-read 入账", () => {
   });
 
   it("正向对照：同一条命令去掉 --help（真读）→ 入账且覆写放行", async () => {
-    // 与上一条同一文件、同一工具：只差短路旗标。防「见 -- 就拒」式的过度收紧
-    // —— 拒集若误伤真读形态，模型会被迫重读，但账本的可用性也被毁掉。
+    // Same file and tool as the previous case, minus only the
+    // short-circuit flag. Guards against over-tightening like "reject
+    // anything with --": if the reject set hit a real read, the model would
+    // be forced to re-read and the ledger's usefulness would be destroyed.
     const cwd = await makeScratch("bash-last-read-help-control-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS\n");
@@ -452,16 +459,19 @@ describe("bash — last-read 入账", () => {
   });
 
   it("rg --pre COMMAND（伪造视图）成功但 stdout 不是磁盘现态 → 不入账，随后覆写被拒", async () => {
-    // 端到端可利用面：`rg --pre rev <PATTERN> a.txt` 让 rg 跑 `rev a.txt` 并
-    // 搜索其输出 —— stdout 是**反转后的文件字节**，模型以为自己读到了文件，
-    // 看到的是被模型自选命令改造过的视图。真机 bwrap 沙箱内 vendored rg
-    // 15.1.0 实测（a.txt 磁盘内容 `PRECIOUS_DISK_CONTENT`）：
+    // End-to-end exploit surface: `rg --pre rev <PATTERN> a.txt` makes rg
+    // run `rev a.txt` and search its output — stdout holds **reversed file
+    // bytes**, so the model thinks it read the file while seeing a view
+    // transformed by a model-chosen command. Measured with vendored rg
+    // 15.1.0 in a real bwrap sandbox (on-disk a.txt = `PRECIOUS_DISK_CONTENT`):
     //   `rg --pre rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 stdout=TNETNOC_KSID_SUOICERP
-    //   `rg --pre=rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 同上（`=` 拼写同形）
+    //   `rg --pre=rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 same (the `=` spelling is equivalent)
     //   `rg --pre cat PRECIOUS_DISK a.txt`          rc=0 stdout=PRECIOUS_DISK_CONTENT
-    // 三种拼写都需拒：`--pre cat` 是恒等预处理、恰好等同磁盘原文，但同一槽位
-    // 换成 `rev` 即可自造视图 —— 判定按**形状**（与 `-r` 同类），不看某次
-    // 运行恰好相等。漏判会把未读的非空文件入账，随后 write_file 放行覆写。
+    // All three spellings must be rejected: `--pre cat` is an identity
+    // preprocessor that happens to match the disk bytes, but the same slot
+    // filled with `rev` fabricates a view — the verdict is by **shape**
+    // (same family as `-r`), not by one run happening to be equal. A miss
+    // would ledger a never-read nonempty file and let write_file clobber it.
     const cwd = await makeScratch("bash-last-read-rg-pre-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS_DISK_CONTENT\n");
@@ -473,24 +483,27 @@ describe("bash — last-read 入账", () => {
     const cases: ReadonlyArray<{
       command: string;
       fakeInStdout: string;
-      /** 磁盘原文是否出现在 stdout —— `rev` 制造假视图（缺），`cat` 是恒等（在）。 */
+      /** Whether the on-disk text appears in stdout — `rev` fabricates a view (absent), `cat` is identity (present). */
       diskContentInStdout: boolean;
     }> = [
-      // 反转后的伪造文本（rev 作用于 pattern 产生的假视图）。
+      // Reversed fabricated text (the fake view `rev` produces for the pattern).
       {
         command: "rg --pre rev TNETNOC_KSID_SUOICERP a.txt",
         fakeInStdout: "TNETNOC_KSID_SUOICERP",
         diskContentInStdout: false,
       },
-      // `=` 拼写同形。
+      // The `=` spelling is equivalent.
       {
         command: "rg --pre=rev TNETNOC_KSID_SUOICERP a.txt",
         fakeInStdout: "TNETNOC_KSID_SUOICERP",
         diskContentInStdout: false,
       },
-      // `cat` 是恒等预处理：输出的确是磁盘原文，但「读」经过了一条模型自选的
-      // 任意命令 —— 同一个缝可以换成 `rev`/`sed`/任何脚本。判定按**形状**拒
-      // （与 `-r` 同类：打印的不保证是磁盘现态），不看某次运行恰好相等。
+      // `cat` is an identity preprocessor: the output really is the disk
+      // text, but the "read" passes through an arbitrary model-chosen
+      // command — the same seam could carry `rev`/`sed`/any script.
+      // Rejected by **shape** (same family as `-r`: what is printed is not
+      // guaranteed to be the current disk state), not by one run happening
+      // to be equal.
       {
         command: "rg --pre cat PRECIOUS_DISK a.txt",
         fakeInStdout: "PRECIOUS_DISK",
@@ -525,7 +538,8 @@ describe("bash — last-read 入账", () => {
       );
     }
 
-    // 三条都拒：随后 write_file 同一 conversation 必须拒，字节不变。
+    // All three rejected: the following write_file in the same conversation
+    // must be refused, bytes unchanged.
     await assert.rejects(
       () =>
         writer.handler(
@@ -540,8 +554,9 @@ describe("bash — last-read 入账", () => {
   });
 
   it("正向对照：同一条命令去掉 --pre（真读）→ 入账且覆写放行", async () => {
-    // 与上一条同一文件、同一工具：只差 `--pre`。拒集若误伤真读形态，模型
-    // 会被迫重读，账本的可用性被毁掉。
+    // Same file and tool as the previous case, minus only `--pre`. If the
+    // reject set hit a real read, the model would be forced to re-read and
+    // the ledger's usefulness would be destroyed.
     const cwd = await makeScratch("bash-last-read-rg-pre-control-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS\n");

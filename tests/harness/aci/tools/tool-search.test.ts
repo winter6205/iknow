@@ -1,18 +1,18 @@
 /**
  * tests/harness/aci/tools/tool-search.test.ts
  *
- * `tool_search` 工具（第 9 件 ACI）单元测试 — 对齐 spec 224-tool-extension-path.md
- * 验收 S4 / S5：
- *   - S4：空 `{query,names}` 返回 `"(no matches)"` 前缀 + retry guidance；
- *     子串命中；精确取名；不匹配返回 `"(no matches)"` + guidance
- *   - S5：handler 返回 string；每行 JSON.parse → `{name, description, inputSchema}`
- *     不含 `aci` 泄漏
- *   - ajv input 校验：合法 schema + 拒非法类型 + 拒 additionalProperties
- *     (S4 / D9)
+ * `tool_search` unit tests — the contract:
+ *   - empty `{query,names}` returns the `"(no matches)"` prefix + retry guidance;
+ *     substring match; exact-name selection; no match returns `"(no matches)"` + guidance
+ *   - handler returns a string; each line JSON.parses to
+ *     `{name, description, inputSchema}` with no `aci` leakage
+ *   - ajv input validation: accepts the legal schema, rejects bad types and
+ *     additionalProperties
  *
- * 装配形态：复刻 registry.ts 的 holder 模式 —— 用 `makeTool` 装配 fixture
- * registry,tool_search 的 `getRegistry` 解引用该 fixture 闭包,跑完后
- * `assembled.reg = fixtureReg` 让 tool_search 内部可见。
+ * Assembly shape: replicates the holder pattern of registry.ts — a fixture
+ * registry built with `makeTool`; tool_search's `getRegistry` dereferences
+ * that fixture closure, and `assembled.reg = fixtureReg` makes it visible
+ * inside tool_search.
  */
 import { describe, expect, it } from "vitest";
 import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.js";
@@ -25,7 +25,7 @@ import type {
   AciToolDef,
 } from "../../../../src/harness/aci/types.js";
 
-/** 复刻 aci-registry.test.ts 的 makeTool fixture:纯 read-only stub。 */
+/** Replicates the makeTool fixture from aci-registry.test.ts: a pure read-only stub. */
 function makeTool(name: string, description = `fixture ${name}`): AciToolDef {
   return Object.freeze({
     name,
@@ -46,12 +46,13 @@ function makeTool(name: string, description = `fixture ${name}`): AciToolDef {
 }
 
 /**
- * 装配 fixture registry + tool_search(holder 模式):
- * `getRegistry` 闭包捕获 `holder`,tool_search 实际被调用时
- * `holder.reg` 已被赋值,正常返回。
+ * Assembles the fixture registry + tool_search (holder pattern): the
+ * `getRegistry` closure captures `holder`, and by the time tool_search is
+ * actually called `holder.reg` is assigned, so it resolves normally.
  *
- * `getRegistryCalls` / `discovered` 记录副作用轨迹:前者证明空白 query
- * 根本不解引用 registry,后者证明 discover 只覆盖真正输出的工具。
+ * `getRegistryCalls` / `discovered` record the side-effect trail: the former
+ * proves a blank query never dereferences the registry; the latter proves
+ * discover covers exactly the tools that were emitted.
  */
 function buildToolSearchOverFixture(fixtures: ReadonlyArray<AciToolDef>): {
   toolSearch: AciToolDef;
@@ -82,13 +83,13 @@ function buildToolSearchOverFixture(fixtures: ReadonlyArray<AciToolDef>): {
   return { toolSearch, registry, getRegistryCalls, discovered };
 }
 
-/** 直接调 tool_search handler(同步,返回 string)。 */
+/** Calls the tool_search handler directly (synchronous, returns a string). */
 function invokeToolSearch(toolSearch: AciToolDef, input: unknown): string {
   const handler = toolSearch.handler as (input: unknown) => unknown;
   return handler(input) as string;
 }
 
-/** S4 契约断言：返回是合法 string 且精确等于 NO_MATCHES（含 guidance）。 */
+/** Contract assertion: the return is a valid string exactly equal to NO_MATCHES (with guidance). */
 function expectNoMatchesGuidance(out: unknown): void {
   expect(typeof out).toBe("string");
   expect(out).toBe(NO_MATCHES);
@@ -186,8 +187,8 @@ describe("tool_search — S4:子串命中 / 精确取名", () => {
       makeTool("beta"),
     ]);
     invokeToolSearch(toolSearch, { names: ["alpha", "beta"] });
-    // 当前 registry.discover 是 byName 查询(无 lazy 集合也通过);
-    // 验证匹配的工具都存在并可被 discover 命中。
+    // registry.discover is currently a byName lookup (passes even without a
+    // lazy set); verify the matched tools exist and are discoverable.
     expect(registry.discover("alpha")?.name).toBe("alpha");
     expect(registry.discover("beta")?.name).toBe("beta");
   });
@@ -208,7 +209,7 @@ describe("tool_search — S5:wire 形态 = 字符串装 JSON", () => {
     expect(parsed).toHaveProperty("name", "alpha");
     expect(parsed).toHaveProperty("description", "desc alpha");
     expect(parsed).toHaveProperty("inputSchema");
-    // D6:不泄漏 aci 元数据 / handler。
+    // No leakage of aci metadata / handler.
     expect(parsed).not.toHaveProperty("aci");
     expect(parsed).not.toHaveProperty("handler");
   });
@@ -218,8 +219,8 @@ describe("tool_search — S5:wire 形态 = 字符串装 JSON", () => {
       makeTool("a", "vtool aa"),
       makeTool("b", "vtool bb"),
     ]);
-    // query "vtool" 只命中两个 fixture 的 description;tool_search 自身
-    // description 不含 "vtool",不会误入。
+    // The query "vtool" matches only the two fixtures' descriptions;
+    // tool_search's own description lacks "vtool", so it cannot slip in.
     const out = invokeToolSearch(toolSearch, { query: "vtool" });
     const lines = out.split("\n");
     expect(lines).toHaveLength(2);
@@ -303,29 +304,30 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
   });
 
   it("schema 字段描述包含 spec 要求的英文短语 + T3 检索范围/触发时机", () => {
-    // #483 D9: description must contain "pull ToolDef JSON"(D7 原文案)。
-    // T3 触发时机:tool_search 仅在工具的目录条目没有 description(全 schema
-    // 不可见)时使用 —— 不再"先搜后用",因为直呼加载路径已自动 hydrate。
-    // "Discover tools beyond the current prompt" 这条 D9 原文案被 T3 替
-    // 换 —— 提示信息改为 "Use only when a tool's directory entry has no
-    // description"(由 T3 触发条件决定调用时机)。
+    // The description must contain "pull ToolDef JSON" (carried over from the
+    // earlier wording). Trigger timing: tool_search is used only when a tool's
+    // directory entry has no description (its full schema is invisible) — no
+    // more "search before use", since by-name loading already auto-hydrates.
+    // The old "Discover tools beyond the current prompt" wording was replaced
+    // by "Use only when a tool's directory entry has no description"
+    // (that trigger condition decides when to call).
     const { toolSearch } = buildToolSearchOverFixture([makeTool("x")]);
     const desc = toolSearch.description;
     expect(desc).toContain("pull ToolDef JSON");
     expect(desc).toContain("mcp__");
-    // T3 新触发条件描述:目录条目没有 description → 调 tool_search
+    // New trigger condition: directory entry without a description → call tool_search
     expect(desc).toContain("no description");
   });
 });
 
-/** 批量 fixture：`bulk` 子串只命中这些 fixture（tool_search 自身不含）。 */
+/** Bulk fixtures: the `bulk` substring matches only these fixtures (tool_search's own text lacks it). */
 function bulkFixtures(count: number, descLength = 20): AciToolDef[] {
   return Array.from({ length: count }, (_, i) =>
     makeTool(`bulk_${i}`, `bulk ${"d".repeat(descLength)}`)
   );
 }
 
-/** 输出末行是引导行时的拆分：JSON 行集合 + 引导行。 */
+/** Split for when the last output line is the guidance line: JSON lines + guidance line. */
 function splitBounded(out: string): { jsonLines: string[]; guidance: string } {
   const lines = out.split("\n");
   const guidance = lines[lines.length - 1]!;

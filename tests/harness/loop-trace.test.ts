@@ -1,7 +1,8 @@
 /**
- * 017 A7 LoopTrace.computeTotals:run 结束时一次性从 turns reduce 出来的纯函数。
+ * LoopTrace.computeTotals: a pure function reducing over turns once at run end.
  *
- * 验证空输入全零,以及混合 fixture 下各 totals 字段精确求和。
+ * Verifies all-zero totals for empty input and exact per-field sums over a
+ * mixed fixture.
  */
 
 import { describe, it } from "vitest";

@@ -1,17 +1,20 @@
 /**
- * T3 (plans/write-situation-disclosure.md) — 三态写处境判定（expand，无消费方）。
+ * Three-state write-situation decision (expand; no consumers yet).
  *
- * SC1 / 输入五类 A 表（specs/write-situation-disclosure.md）：
- *   - `writeSituation(false, <任意非空根>)` → `writable_main`，**含「隔离 OFF +
- *     树形路径」组合**——negative 臂钉死，防形状判断被单独误用（对齐 ADR-0037 §4
- *     「taskWorktreeOwnerOf 只是路径形状判断，单靠它会拿到沙箱外的读放行」教训）。
- *   - `writeSituation(true, <树形根>)` → `writable_tree`；
- *     `writeSituation(true, <非树形根>)` → `no_writable_root`。
- *   - 空 / 空白根 → typed 结果，不 throw 不静默。
- *   - overflow：极长 / 深嵌套 / 尾随分隔符——形状裁决仍按 `isTaskWorktreePath`，
- *     不自造第二套形状逻辑。
- *   - SC4 依赖方向：`src/harness/skill/body.ts` 不 import `src/harness/isolation/`
- *     （判定住 isolation，渲染住 skill，枚举住 session-roots）。
+ * Pinned contract:
+ *   - `writeSituation(false, <any non-empty root>)` -> `writable_main`,
+ *     **including the "isolation OFF + tree-shaped path" combination** — the
+ *     negative arm is pinned so the shape check can never be misused on its
+ *     own (the ADR-0037 lesson: `taskWorktreeOwnerOf` is only a path-shape
+ *     test; alone it would let reads escape the sandbox).
+ *   - `writeSituation(true, <tree-shaped root>)` -> `writable_tree`;
+ *     `writeSituation(true, <non-tree root>)` -> `no_writable_root`.
+ *   - Empty / whitespace root -> typed result; never throws, never silent.
+ *   - Overflow: very long / deep nesting / trailing separators — shape
+ *     decisions still delegate to `isTaskWorktreePath`, no second shape logic.
+ *   - Dependency direction: `src/harness/skill/body.ts` must not import
+ *     `src/harness/isolation/` (the decision lives in isolation, rendering in
+ *     skill, the enum in session-roots).
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -45,8 +48,9 @@ describe("writeSituation — SC1 三态", () => {
 });
 
 describe("writeSituation — empty 臂（空 / 空白根）", () => {
-  // 空根没有任何可写对象，writable_main 会是谎话；fail-closed 落
-  // no_writable_root（typed 联合内的合法成员），不 throw、不静默放行。
+  // An empty root has nothing writable, so writable_main would be a lie;
+  // fail-closed to no_writable_root (a legal member of the typed union) —
+  // no throw, no silent pass.
   it("空串 → no_writable_root，不 throw", () => {
     expect(writeSituation(false, "")).toBe("no_writable_root");
     expect(writeSituation(true, "")).toBe("no_writable_root");
@@ -84,8 +88,9 @@ describe("writeSituation — overflow 臂", () => {
 });
 
 describe("writeSituation — 形状逻辑单一来源", () => {
-  // 树形臂必须逐字复用 isTaskWorktreePath：任何一组输入下三态结果都由它
-  // 唯一裁决，这里用代表性样本性质断言堵住「第二份形状逻辑」。
+  // The tree arm must reuse isTaskWorktreePath verbatim: for any input the
+  // three-state result is decided solely by it, and this property assertion
+  // over representative samples blocks a "second shape logic" from appearing.
   const samples = [
     TREE_ROOT,
     MAIN_ROOT,

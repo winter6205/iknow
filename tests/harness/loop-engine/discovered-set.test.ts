@@ -1,11 +1,12 @@
 /**
- * #224 W5（S8 / D10）：discovered set 全链路 stub-model 集成测试。
+ * Discovered-set full-chain stub-model integration test.
  *
- * 核心交付验证：模型用 tool_search 检索一个 lazy 工具，从下一轮起该工具
- * 进入 adapter.step 的 request.tools（经 promptTools=reg.visibleSchemas 消费
- * discovered set），并可被成功调用。
+ * Core delivery being verified: the model retrieves a lazy tool via
+ * tool_search; from the next turn on that tool appears in adapter.step's
+ * request.tools (the discovered set is consumed via
+ * promptTools=reg.visibleSchemas), and it can be called successfully.
  *
- * 装配（D10）：真 executor 链路 ——
+ * Assembly: real executor chain —
  *   reg = createAciRegistry([tool_search, fake_nonlazy, fake_lazy])
  *   executor = createExecutor(reg.inner)
  *   stub-model responses = [turn1 tool_use(tool_search, names:["fake_lazy"]),
@@ -13,9 +14,9 @@
  *                           turn3 final text]
  *   deps.promptTools = reg.visibleSchemas
  *
- * 断言：turn1 的 request.tools 不含 fake_lazy schema；turn2/3 的
- * request.tools 含 fake_lazy schema（discovered set 流动生效）；fake_lazy
- * 被真正调用；最终 stopReason === "completed"。
+ * Assertions: turn1's request.tools lacks the fake_lazy schema;
+ * turn2/3's request.tools contain it (the discovered set flows through);
+ * fake_lazy is actually invoked; final stopReason === "completed".
  */
 
 import { describe, it } from "vitest";
@@ -34,7 +35,7 @@ import { createToolSearchTool } from "../../../src/harness/aci/tools/tool-search
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
 
-/** 构造一个 ACI 假工具（非 lazy 或 lazy）。 */
+/** Build an ACI fake tool (non-lazy or lazy). */
 function makeFake(name: string, lazy: boolean, ret: string): AciToolDef {
   return Object.freeze({
     name,
@@ -80,7 +81,7 @@ describe("#224 S8: discovered set 全链路 stub-model", () => {
     const reg = createAciRegistry(tools);
     holder.reg = reg;
 
-    // b. engine deps（真 executor + spy adapter 捕获 request.tools）
+    // b. engine deps (real executor + spy adapter capturing request.tools)
     const executor = createExecutor(reg.inner);
     const model = createStubModel({
       responses: [
@@ -130,28 +131,29 @@ describe("#224 S8: discovered set 全链路 stub-model", () => {
       (tools as ReadonlyArray<{ name: string }>).map((t) => t.name);
 
     assert.equal(capturedTools.length, 3, "three model steps expected");
-    // turn1：tool_search + fake_nonlazy 已进 prompt，lazy 未发现 → 不含 fake_lazy
+    // turn1: tool_search + fake_nonlazy are already in the prompt; the lazy
+    // tool is undiscovered → fake_lazy absent
     assert.deepEqual(namesOf(capturedTools[0]), [
       "tool_search",
       "fake_nonlazy",
     ]);
-    // turn2：discovered set 已标记 fake_lazy → tools[] 含它（插在末尾）
+    // turn2: the discovered set now marks fake_lazy → tools[] includes it (appended at the end)
     assert.deepEqual(namesOf(capturedTools[1]), [
       "tool_search",
       "fake_nonlazy",
       "fake_lazy",
     ]);
-    // turn3：与 turn2 相同（discovered set 持续生效）
+    // turn3: same as turn2 (discovered set persists)
     assert.deepEqual(namesOf(capturedTools[2]), [
       "tool_search",
       "fake_nonlazy",
       "fake_lazy",
     ]);
 
-    // fake_lazy 的 handler 被真正调用（非仅 schema 出现）
+    // fake_lazy's handler was really invoked (not just its schema appearing)
     assert.equal(lazyCalled, true);
 
-    // 最终文本确定这条 tool_call 结果被模型消费
+    // the final text proves the model consumed that tool_call result
     assert.equal(result.finalText, "done");
   });
 });

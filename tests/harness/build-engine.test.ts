@@ -5,8 +5,9 @@
  * These tests pin the ACI toolset (via EXPECTED_TOOLS) so a future tool-set
  * change cannot drift between the two entry points silently: if a tool is
  * added/renamed/removed, this test forces an explicit decision at the single
- * assembly point.件数 = `EXPECTED_TOOLS.length` 推导,以数组为 source of truth,
- * 注释里不再写加法叙事（避免与实际长度漂移）。
+ * assembly point. The tool count derives from `EXPECTED_TOOLS.length` — the
+ * array is the source of truth; no additive narration in comments (it drifts
+ * from the real length).
  */
 import {
   afterAll,
@@ -19,19 +20,22 @@ import {
   vi,
 } from "vitest";
 
-// 装配类用例（真实 MCP manager / bwrap 探测 / skill scanner）在并发负载下
-// 可超 vitest 默认 5s —— 与 hub-worktree-isolation.test.ts 同款放宽。
-// 这些用例同属 CI 排除集（SSOT: vitest.ci-excludes.ts），本地仍需可过。
+// Assembly-class cases (real MCP manager / bwrap probe / skill scanner) can
+// exceed vitest's default 5s under concurrent load — same relaxation as
+// hub-worktree-isolation.test.ts. They are also in the CI exclude set
+// (SSOT: vitest.ci-excludes.ts) and must still pass locally.
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// ADR-0085 SC9: worker 子进程用假 child 顶替 —— 断言面 = 子进程 stdin 上的
-// wire 字节（build-engine → manager → envelope），不真起 worker。
-// 只遮 `createDefaultSubAgentSpawn` 一个缝：同文件其余用例要么注入自己的
-// manager，要么（secrets guard / rebind 的 bash）真起子进程 —— 若改遮
-// `node:child_process`，那些用例会被一并打掉。未设 override 时透传真实实现。
+// ADR-0085: worker subprocesses are replaced by fake children — the
+// assertion surface is the wire bytes on a child's stdin (build-engine →
+// manager → envelope); no real worker starts.
+// Only the `createDefaultSubAgentSpawn` seam is masked: other cases in this
+// file either inject their own manager or (secrets guard / rebind bash)
+// really spawn child processes — masking `node:child_process` instead would
+// take those cases down too. With no override set, the real impl passes through.
 const workerSpawnOverride = vi.hoisted(() => ({
   current: undefined as ((...args: readonly unknown[]) => unknown) | undefined,
 }));
@@ -88,30 +92,26 @@ import {
 import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
-// `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
-// 装配层历史 append-only：8 baseline → + memory_recall/save (#194)
-// → + tool_search (#224) → + skill (#337 T5) → - skill_search
-// (disclosure-index-align T2 / SC5) → + spawn_subagent /
-// subagent_result (#356) → + todo_write / list_mcp_resources / read_mcp_resource
-// (#440 双 Stream) → + bash_output / bash_stop (#502) → + run_graph
-// (ADR-0041 / plans/model-prefix-layering.md B3 常驻) → + query_trace
-// → + 10 符号查询 (symbol-primary-aci T2) → + 5 符号改 (T4) → + list_sessions
-// (trace-mcp-read-side-split T5b) → + get_record (同 plan T6) = 38 件;
+// `src/harness/build-engine.ts` (policy byName key-space, ADR-0006).
+// The assembly surface grows append-only (existing entries are never
+// reordered); the tool count is always derived from `EXPECTED_TOOLS.length`
+// — never narrated additively in comments.
 //
-// symbol-primary-aci T5：旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md
-// §37-53 + SC2 + SC7 + ACR complexity-anti-drift）；build-engine 装配路径不再产出
-// lsp_* 工具。其实现 + 内部 export 仍住 lsp.ts 作 symbol.ts 的 SSOT 复用层。
-// 符号面 10 + 改 5 在 build-engine 默认 chat surface 装配。run_graph 在
-// 本数组(ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻
-// 注册 — build-engine 默认 chat surface 装配 subagentManager,handler
-// isEnabled 缺省恒关守门,promptTools 与 system 字节不随 graph 开关
-// 抖动)。graphAssembly 缺席仅让 handler 闭包不解 graph 装配件,
-// 工具本身仍在注册表(参见 promptTools 数组长度 = EXPECTED_TOOLS.length)。
+// The old 10 lsp_* tools are retired: build-engine no longer registers
+// lsp_*, but their implementation + internal exports still live in lsp.ts as
+// symbol.ts's SSOT reuse layer. The 10 query + 5 mutate symbol tools assemble
+// on the default chat surface. run_graph is resident in this array: the chat
+// surface assembles subagentManager, while the handler's isEnabled stays
+// closed by default, so promptTools and the system bytes never flap with the
+// graph switch; a missing graphAssembly only leaves the handler closure
+// without graph parts — the tool itself stays registered (promptTools length
+// = EXPECTED_TOOLS.length).
 //
-// 各条件化 seam 缺席后 = EXPECTED_TOOLS.filter(...) 推导，以 filter 表达式为
-// source of truth:SC8（ask 入口不建 subagentManager / mcpManager / backgroundManager）、
-// SC12（ask 不创建 manager → mcp__* 缺席）、#440（T4 todoDir seam）、#440 T11
-// （MCP resources seam）、#502 T3（background seam）— 缺席集具体见各用例注释。
+// Conditional-absence views = EXPECTED_TOOLS.filter(...) derivation, with
+// the filter expression as the source of truth: the ask entry builds no
+// subagentManager / mcpManager / backgroundManager (so mcp__* is absent),
+// plus the todoDir, MCP-resources and background seams — per-case comments
+// list the concrete absent sets.
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -124,32 +124,35 @@ const EXPECTED_TOOLS = [
   "memory_recall",
   "memory_save",
   "tool_search",
-  // #337 T8 skill 工具集 append-only:11→12,1 件在末尾(disclosure-index-align
-  // T2 删 skill_search 后只剩 1 件)。
+  // Skill tools (append-only tail): only "skill" remains after skill_search
+  // was removed by the index-demotion pass (disclosure-index-align/).
   "skill",
-  // #356 T6 subagent 工具集 append-only:12→14,2 件在末尾(全装配 chat surface
-  // 才在场;ask 缺 subagentManager → 12 件)。
+  // Subagent tools (append-only, 2 at the tail): present only on the fully
+  // assembled chat surface (ask lacks subagentManager).
   "spawn_subagent",
   "subagent_result",
-  // #440 双 Stream 并集 append-only:14→17。todo_write（T4，chat surface +
-  // todoDir 在场才入注册表；ask 不传 todoDir → 不在场。worker 在父会话经
-  // envelope 透传 todoLedger 时**在场**，见 ADR-0085 / SC9）+ MCP resources
-  // 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
+  // todo_write (enters the registry only on chat surface + todoDir present;
+  // ask passes no todoDir → absent. The worker IS present when the parent
+  // session threads its todoLedger through the envelope — see ADR-0085) plus
+  // the two MCP-resource tools (fully assembled chat surface only; ask lacks
+  // mcpManager → absent).
   "todo_write",
   "list_mcp_resources",
   "read_mcp_resource",
-  // #502 T3 bash_output / bash_stop 工具集 append-only:17→19,末位 2 件
-  // （全装配 chat/tui/serve surface 在场;ask 缺 backgroundManager → 缺席;
-  //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
+  // bash_output / bash_stop (append-only, last 2): present on fully
+  // assembled chat/tui/serve surfaces; ask lacks backgroundManager → absent.
+  // bash itself stays resident; the parameter-level background:true
+  // capability is a runtime handler decision.
   "bash_output",
   "bash_stop",
-  // ADR-0041 / plans/model-prefix-layering.md B3 run_graph 常驻 append-only:
-  // 19→20,与 bash_output/bash_stop 同形态 —— 仅 subagentManager 缺席才不
-  // 入注册表(graphAssembly 缺席由 handler isEnabled 缺省恒关守门)。
+  // run_graph is resident (append-only) — same shape as bash_output/bash_stop:
+  // it leaves the registry only when subagentManager is absent (a missing
+  // graphAssembly is guarded by the handler's default-off isEnabled).
   "run_graph",
   "query_trace",
-  // symbol-primary-aci T2 符号查询工具集 append-only:20→30,末位 10 件常驻
-  // （不条件化——与 lsp.ts 内部 SSOT 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
+  // Symbol-query tools (append-only, last 10, resident — never conditional;
+  // they share lspCtx with lsp.ts's internal SSOT. The old lsp_* set is
+  // retired).
   "find_symbol",
   "find_declaration",
   "find_referencing_symbols",
@@ -160,62 +163,72 @@ const EXPECTED_TOOLS = [
   "prepare_call_hierarchy",
   "list_incoming_calls",
   "list_outgoing_calls",
-  // symbol-primary-aci T4 符号改工具集 append-only:30→35,末位 5 件常驻
-  // （category=write；不条件化——与查询面共享 lspCtx + lsp.ts；onEdit
-  //  透传自 build-engine lspNotifier.invalidate，写盘后 textDocument/didChange
-  //  与 edit_file 同链路；edit_file 仍在 —— 留给非单一符号的文本补丁）。
+  // Symbol-mutate tools (append-only, last 5, resident; category=write,
+  // never conditional — they share lspCtx + lsp.ts with the query face).
+  // onEdit is threaded from build-engine's lspNotifier.invalidate, so
+  // post-write textDocument/didChange follows the same path as edit_file;
+  // edit_file stays for non-single-symbol text patches.
   "rename_symbol",
   "replace_symbol_body",
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
-  // trace-mcp-read-side-split T5b list_sessions append-only:35→36,末位 1 件常驻
-  //（读侧目录轴,不条件化——任何 surface 都建 traceDir）。
+  // list_sessions (append-only, 1 resident entry): the trace read-side
+  // directory axis, never conditional — every surface builds a traceDir.
   "list_sessions",
-  // trace-mcp-read-side-split T6 get_record append-only:36→37,末位再加 1 件常驻
-  //（读侧内容轴,与目录轴同样不条件化;三轴顺序 = append 顺序,不重排既有件）。
+  // get_record (append-only, 1 more resident entry): the read-side content
+  // axis, likewise never conditional; read-side axes keep append order —
+  // existing entries are never reordered.
   "get_record",
-  // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
-  // 与 spawn_subagent / subagent_result 同门（chat 全装配自建 subagentManager
-  // → 在场；ask 缺 manager → 缺席）。
+  // subagent_stop (append-only, ADR-0101): same gate as spawn_subagent /
+  // subagent_result — chat's self-built subagentManager → present; ask lacks
+  // the manager → absent.
   "subagent_stop",
-  // plan subagent-stop-and-continue T4 (ADR-0102) subagent_continue append-only:
-  // 同门条件、stop 之后末位。
+  // subagent_continue (append-only, ADR-0102): same gate, appended right after stop.
   "subagent_continue",
-  // read-image-vision T2 (spec SC6) read_image append-only:常驻（无缺席条件），
-  // 任何 surface 全装配都在场。
+  // read_image (append-only, resident — no absence condition): present on
+  // any fully assembled surface.
   "read_image",
 ];
 
-/** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
- *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"todo_write 不在表";todo_write
- *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。具体件数 =
- *  EXPECTED_TOOLS_NO_TODO.length = 38,以数组为 source of truth。 */
+/** Conditional-absence view for the chat surface without a threaded todoDir
+ *  (the default shape): EXPECTED_TOOLS_NO_TODO expresses "todo_write not in
+ *  the table"; its presence requires an explicit todoDir (the production
+ *  main-loop path, not the test default). Count =
+ *  EXPECTED_TOOLS_NO_TODO.length, with the array as the source of truth. */
 const EXPECTED_TOOLS_NO_TODO = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
 
 /**
- * 本文件 61 个 callsite 验的是**装配后的形状**(工具表 / 透传字段 / 门禁
- * 判定),不验「溢出退场」与「索引降档」两条路径 —— 那两条的测试在
- * build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
+ * The callsites in this file verify the ASSEMBLED SHAPE (tool table /
+ * threaded fields / gate decisions), not the "overflow eviction" and "index
+ * demotion" paths — those are tested in build-engine-tool-overflow.test.ts
+ * and disclosure-index-align/.
  *
- * 为此封装 `buildHarnessEngine`,加三处**装配期成本**治理,断言一字不改:
+ * It wraps `buildHarnessEngine` with three assembly-time cost controls,
+ * leaving every assertion untouched:
  *
- * 1. `skipCountTokens`:不旁路时装配期真调 `adapter.countTokens`(SDK,
- *    baseURL 指向不可达的 127.0.0.1:9999),SDK 自带 maxRetries=2 + 指数
- *    退避 ⇒ 每次装配白烧 ~2.5s 只为走到「Connection error → skip 本会话」
- *    这个确定性分支(实测 maxRetries=2 → 2493ms vs 0 → 2ms)。
- * 2. `mcpFirstTurnReadyTimeoutMs`:窗口是生产契约 30s;本文件只断言窗口
- *    resolve 之后的装配形状,不需要真等满(详见该缝的 BuildEngineOpts 注释)。
- * 3. 缺 `cwd` 的 callsite 喂**本文件私有 tmp 根**(见下):否则默认
- *    `process.cwd()` = 真实仓库根,会读到仓库自带的 `.iknow/mcp.json`
- *    (2 个真 stdio server:`npx -y codebase-memory-mcp` + `node scripts/
- *    iknow-trace-mcp-dev.cjs`)。那些用例不 shutdown 该 manager,真子进程
- *    只在本进程存活期内挂着(实测:单次不 shutdown 的仓库根装配在同一进程
- *    里留下 5 个 MCP 子孙进程;18 次装配后 90 个,进程一退就被回收 —— 所以
- *    不是跨 run 的常驻泄漏,而是**测试进程存活期的资源挤占**:每个子进程都
- *    占 CPU/内存,直接放大并发档下的调度延迟)。这些用例的断言全部与仓库
- *    内容无关(工具名表 / env 透传 / secret 表),tmp 根不削弱任何一条 ——
- *    反而去掉「读真实仓库配置」这一隐式依赖。
+ * 1. `skipCountTokens`: without the bypass, assembly really calls
+ *    `adapter.countTokens` (SDK, baseURL pointed at the unreachable
+ *    127.0.0.1:9999); the SDK's maxRetries=2 + exponential backoff burns
+ *    ~2.5s per assembly just to reach the deterministic "Connection error →
+ *    skip this session" branch (measured: maxRetries=2 → 2493ms vs 0 → 2ms).
+ * 2. `mcpFirstTurnReadyTimeoutMs`: the production contract window is 30s;
+ *    this file only asserts the assembled shape after the window resolves,
+ *    so it need not wait it out (see that seam's BuildEngineOpts comment).
+ * 3. Call sites lacking `cwd` get a file-private tmp root (below): otherwise
+ *    the default `process.cwd()` = the real repo root, which would read the
+ *    repo's own `.iknow/mcp.json` (2 real stdio servers: `npx -y
+ *    codebase-memory-mcp` + `node scripts/iknow-trace-mcp-dev.cjs`). Those
+ *    cases never shut that manager down, so real child processes linger for
+ *    the process lifetime (measured: one un-shutdown repo-root assembly
+ *    leaves 5 MCP descendant processes in the same process; 90 after 18
+ *    assemblies, reaped on exit — not a cross-run leak but resource
+ *    contention during the test process's life: every child competes for
+ *    CPU/memory, directly amplifying scheduling latency under CI
+ *    concurrency). Those cases' assertions never depend on repo contents
+ *    (tool-name table / env threading / secret table), so a tmp root
+ *    weakens nothing — and it removes the implicit "read real repo config"
+ *    dependency.
  */
 const BE_TEST_BUILD_DEFAULTS = {
   mcpFirstTurnReadyTimeoutMs: 150,
@@ -223,8 +236,8 @@ const BE_TEST_BUILD_DEFAULTS = {
 } as const;
 
 /**
- * 缺 cwd 的 callsite 专用 hermetic 根(懒建一次,进程内复用)。
- * 同时钉 cwd / userHome,避免读真实 `~/.iknow`。
+ * Hermetic root for callsites lacking cwd (lazily built once, reused
+ * in-process). Pins both cwd / userHome to avoid reading the real `~/.iknow`.
  */
 let hermeticRoot: { cwd: string; home: string } | undefined;
 async function hermeticBuildRoot(): Promise<{ cwd: string; home: string }> {
@@ -235,9 +248,10 @@ async function hermeticBuildRoot(): Promise<{ cwd: string; home: string }> {
   return hermeticRoot;
 }
 
-// 进程级收尾:hermeticRoot 懒建且跨用例复用,没有用例级 afterEach 能覆盖它;
-// 不在此清收则每个测试进程都在 /tmp 留下一个
-// `iknow-build-engine-hermetic-*` 目录。未建(undefined)时 no-op。
+// Process-level teardown: hermeticRoot is lazily built and reused across
+// cases, so no per-test afterEach covers it; without clearing it here every
+// test process leaves an `iknow-build-engine-hermetic-*` dir in /tmp.
+// No-op when never created (undefined).
 afterAll(async () => {
   if (hermeticRoot) {
     await removeTmpTree(hermeticRoot.cwd);
@@ -246,37 +260,43 @@ afterAll(async () => {
 });
 
 /**
- * tmp 树清收 —— 本文件全部 `mkdtemp` 根共用。
+ * tmp-tree cleanup — shared by every `mkdtemp` root in this file.
  *
- * 为什么不是裸 `rm(root, { recursive: true, force: true })`:`force` 只压
- * ENOENT,压不住「rm 走到最后一步 rmdir(root) 时,root 里**刚好**又长出一个
- * 目录」。而本文件的根确实会这样长:装配期 `createSystemResolver`
- * (src/harness/memory/refresh.ts)对 `memoryDir` 走的是
- * **fire-and-forget** `void mkdir(..., { recursive: true }).catch(() => {})`
- * —— ADR-0019 明确「不阻塞装配」。实测该 mkdir 落在 buildHarnessEngine
- * 返回后 0–28ms(40 次采样:median 2ms / p90 17ms / max 28ms),而 T2 矩阵
- * 那种 `await built.shutdown?.()` 紧接 `rm` 的写法,rm 的最后一步 rmdir 与
- * 这条 mkdir 存在**真实重叠窗口**。这解释了全量并发下偶发的
- * `ENOTEMPTY: directory not empty, rmdir '/tmp/iknow-t2-matrix-…'`(实测该
- * 竞态窗口极窄:单测 503ms 绿;10 路并发 × 200 次复现探针 0 失败 —— 故只
- * 在全量 maxForks=3 + 同文件多用例排队时才现形)。
+ * Why not a bare `rm(root, { recursive: true, force: true })`: `force` only
+ * suppresses ENOENT, not "rm reaches its final rmdir(root) while a new
+ * directory has JUST sprouted inside root". That genuinely happens here:
+ * assembly-time `createSystemResolver` (src/harness/memory/refresh.ts)
+ * issues a fire-and-forget
+ * `void mkdir(..., { recursive: true }).catch(() => {})` against `memoryDir`
+ * — ADR-0019 explicitly chose "never block assembly". Measured, that mkdir
+ * lands 0–28ms after buildHarnessEngine returns (40 samples: median 2ms /
+ * p90 17ms / max 28ms), and the `await built.shutdown?.()`-then-`rm`
+ * pattern gives a real overlap window between rm's final rmdir and that
+ * mkdir. That explains the occasional
+ * `ENOTEMPTY: directory not empty, rmdir '/tmp/iknow-t2-matrix-…'` under
+ * full-concurrency runs (the race window is narrow: green in isolation;
+ * 0 failures in a 10-way x 200-iteration probe — it only surfaces under
+ * full-suite maxForks=3 with same-file cases queued).
  *
- * `maxRetries` / `retryDelay` 是 Node `fs.rm` 针对**并发目录变动**的标准面:
- * rimraf 只在 `retryErrorCodes`(含 ENOTEMPTY)上按 `retries * retryDelay`
- * 线性退避重试,且**重试耗尽后原错误照抛**。实测三条界线:
- *   - 持续写入的同名竞态:maxRetries=0/1/5 均抛 ENOTEMPTY,20 才成功
- *     ⇒ 重试是「等到不抖」,不是「抹掉错误」;
- *   - 只读父目录(EACCES):maxRetries=3 仍抛 EACCES ⇒ 真实权限失败照旧
- *     暴露,不被吞;
- *   - 路径穿过普通文件(ENOTDIR,非 retryErrorCodes):立即抛 ⇒ 非竞态
- *     错误零延迟上浮。
- * 本文件的写者只写一次(单次 mkdir),3 次 × 50ms 退避(共 ~300ms)远大于
- * 实测 28ms 窗口。
+ * `maxRetries` / `retryDelay` are Node `fs.rm`'s standard surface for
+ * CONCURRENT directory mutation: retries happen only on `retryErrorCodes`
+ * (incl. ENOTEMPTY) with linear backoff over `retries * retryDelay`, and
+ * the original error is rethrown once retries are exhausted. Three measured
+ * boundaries:
+ *   - a persistently-written race dir: ENOTEMPTY still thrown at
+ *     maxRetries=0/1/5, only passing at 20 ⇒ retries "wait for the churn to
+ *     stop", not "erase the error";
+ *   - unreadable parent (EACCES): still thrown at maxRetries=3 ⇒ real
+ *     permission failures stay visible, not swallowed;
+ *   - path through a plain file (ENOTDIR, not a retryErrorCodes): thrown
+ *     immediately ⇒ non-race errors surface with zero delay.
+ * This file's writers mkdir once each, so 3 x 50ms backoff (~300ms) dwarfs
+ * the measured 28ms window.
  *
- * 适用范围:喂给 `buildHarnessEngine` 的**装配根**(cwd / workspaceRoot /
- * userHome 都在其下者)。纯 fixture 目录(装配不碰,如上面那个 `outside`)
- * 保持裸 `rm` —— 没有写者就没有可重试的竞态,裸 rm 反而是「零重试」的
- * 诚实信号。
+ * Scope: assembly roots fed to `buildHarnessEngine` (cwd / workspaceRoot /
+ * userHome below them). Pure fixture dirs the assembly never touches (like
+ * `outside` above) keep the bare `rm` — no writer, no retryable race, and
+ * bare rm is the honest "zero retries" signal.
  */
 async function removeTmpTree(path: string): Promise<void> {
   await rm(path, {
@@ -288,13 +308,16 @@ async function removeTmpTree(path: string): Promise<void> {
 }
 
 /**
- * 与 `buildHarnessEngine` 同签名的本文件默认封装。调用方显式传的字段
- * (含 cwd/userHome)一律覆盖默认。
+ * This file's default wrapper with the same signature as
+ * `buildHarnessEngine`. Any field a caller passes explicitly (incl.
+ * cwd/userHome) overrides the default.
  *
- * `skipCountTokens: true` 是**默认值**,但显式传 `countTokens` 的调用方
- * 不受影响 —— build-engine 侧优先级是 `countTokens ?? (skip ? undefined :
- * adapter.countTokens)`,显式注入永远最高(见该处注释)。本文件当前没有
- * 传 `countTokens` 的 callsite;要验真 countTokens 路径的测试在别处。
+ * `skipCountTokens: true` is the DEFAULT, but callers that explicitly pass
+ * `countTokens` are unaffected — build-engine's precedence is
+ * `countTokens ?? (skip ? undefined : adapter.countTokens)`: explicit
+ * injection always wins (see the comment there). No call site in this file
+ * passes `countTokens`; tests that verify the real countTokens path live
+ * elsewhere.
  */
 const buildHarnessEngine: typeof rawBuildHarnessEngine = (async (opts) =>
   rawBuildHarnessEngine({
@@ -325,14 +348,14 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
-    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传给
-    // LoopEngineDeps.compress。夹具**显式**写死 200_000（不是产品缺省，
-    // 产品缺省见 DEFAULT_STRATEGY_CONTEXT_WINDOW），thresholdTokens=undefined
-    // → 由 threshold.ts 推 floor(0.95 × window)。
+    // IknowCompressEnv is required and build-engine threads it into
+    // LoopEngineDeps.compress. The fixture pins 200_000 EXPLICITLY (not the
+    // product default — see DEFAULT_STRATEGY_CONTEXT_WINDOW);
+    // thresholdTokens=undefined → threshold.ts derives floor(0.95 × window).
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs 透传给 manager)。
+    // Subagent config arm (build-engine reads taskTimeoutMs and threads it to the manager).
     subagent: { taskTimeoutMs: undefined },
   };
 }
@@ -381,13 +404,13 @@ function makeCapturingSubagentManager(sandboxRoot: string): {
   return { manager, payloads };
 }
 
-/** SC9 用例内造的假 child（beforeEach 清空）。 */
+/** Fake children created by the worker-envelope cases (cleared in beforeEach). */
 const fakeWorkerChildren: ChildProcess[] = [];
 
 /**
- * ADR-0085 SC9: 假 child —— `spawn()` 的返回值，它的 stdin 收 manager 写的
- * envelope（真实 wire 字节）。stdout/stderr 也换成 PassThrough，避免任何
- * 真实子进程 I/O。
+ * Fake child — the return value of `spawn()`; its stdin receives the
+ * envelope (real wire bytes) written by the manager. stdout/stderr are
+ * PassThroughs too, so no real subprocess I/O ever happens.
  */
 function makeFakeWorkerChild(): ChildProcess {
   const child = Object.assign(new EventEmitter(), {
@@ -404,9 +427,9 @@ function makeFakeWorkerChild(): ChildProcess {
 }
 
 /**
- * 最近一次 worker spawn 写到 stdin 的 envelope（真实 wire 字节）。
- * 读的是**假 child 自己**的 stdin —— 不看 spawn 调用记录（`calls[0]` 只是
- * argv 首项，child 是返回值）。
+ * The envelope (real wire bytes) last written to stdin by a worker spawn.
+ * Reads the FAKE CHILD's own stdin — not the spawn call record (`calls[0]`
+ * only carries argv; the child is the return value).
  */
 function firstWorkerEnvelope(): WorkerEnvelope | undefined {
   for (const child of fakeWorkerChildren) {
@@ -443,17 +466,17 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     });
 
     const names = deps.registry.list().map((def) => def.name);
-    // #440 T4:todo_write 条件化 — todoDir 未透传 → 不在场。具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 38,以数组为 source of truth。
+    // todo_write is conditional — no threaded todoDir → absent.
+    // Count = EXPECTED_TOOLS_NO_TODO.length; the array is the source of truth.
     expect(names).toEqual(EXPECTED_TOOLS_NO_TODO);
-    // 显式锁 Web 工具存在(plan-fidelity:SSOT 收敛到 registry.ts 后,
-    // build-engine 路径也必须仍带 web_fetch / web_search)。
+    // Explicitly locks the web tools (after the SSOT converged into registry.ts,
+    // the build-engine path must still carry web_fetch / web_search).
     expect(names).toContain("web_fetch");
     expect(names).toContain("web_search");
-    // #356 T6:全装配(默认 chat surface)含 spawn_subagent / subagent_result 两件。
+    // Full assembly (default chat surface) includes spawn_subagent / subagent_result.
     expect(names).toContain("spawn_subagent");
     expect(names).toContain("subagent_result");
-    // #440 T4:todo_write 在 todoDir 未透传路径下缺席。
+    // todo_write absent on the path where todoDir is not threaded.
     expect(names).not.toContain("todo_write");
   });
 
@@ -463,11 +486,11 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
       askUser: createNoAskUser(),
     });
 
-    // chat surface 自建 subagentManager(是函数对象);shutdown 为组合句柄(函数)。
+    // The chat surface builds its own subagentManager (an object); shutdown is a composed handle (function).
     expect(typeof built.subagentManager).toBe("object");
     expect(typeof built.subagentManager!.shutdown).toBe("function");
     expect(typeof built.shutdown).toBe("function");
-    // cleanup:组合 shutdown 不抛(空 MCP config + 无运行子代理)。
+    // Cleanup: the composed shutdown does not throw (empty MCP config + no running subagents).
     await built.shutdown!();
   });
 
@@ -477,15 +500,15 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
       askUser: createNoAskUser(),
     });
 
-    // #224 注入缝：buildHarnessEngine 把 reg.visibleSchemas 注入 promptTools。
+    // Injection seam: buildHarnessEngine threads reg.visibleSchemas into promptTools.
     expect(typeof deps.promptTools).toBe("function");
     const promptNames = deps.promptTools!()
       .map((d) => d.name)
       .sort();
     expect(promptNames).toEqual([...EXPECTED_TOOLS_NO_TODO].sort());
-    // 默认 registry 无 lazy 工具 → visibleSchemas ≡ registry.list()
-    // #440 T4:todoDir 未透传 → todo_write 缺席;具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 38,以数组常量为准。
+    // Default registry has no lazy tools → visibleSchemas ≡ registry.list();
+    // with no threaded todoDir, todo_write is absent — count again comes from
+    // EXPECTED_TOOLS_NO_TODO.length, the array being the source of truth.
     expect(deps.promptTools!().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS_NO_TODO
     );
@@ -510,7 +533,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
   });
 });
 
-// --- #121 T6 / SC 12: memory opt-out + system wiring ------------------------
+// --- memory opt-out + system wiring ------------------------------------------
 
 describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
   it("memory disabled → registry stays at 8 (no memory tools) and memory_layer inactive", async () => {
@@ -521,10 +544,11 @@ describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
     });
 
     const names = deps.registry.list().map((def) => def.name);
-    // ask surface（SC8 + SC12 + #440 T4）→ memory(enabled:false 缺席)+ todoDir
-    // (未透传缺席)+ subagentManager/mcpManager/backgroundManager(ask 不创建,SC12)
-    // 一并缺席。具体件数 = filter 表达式长度,以 EXPECTED_TOOLS_NO_TODO.filter
-    // 为 source of truth;本断言 = 同表达式 + memory 缺席剥除。
+    // ask surface → the memory pair (enabled:false), todo_write (no threaded
+    // todoDir), and the subagentManager/mcpManager/backgroundManager tool sets
+    // are all absent. Count = length of the EXPECTED_TOOLS_NO_TODO.filter
+    // expression (source of truth); this assertion = that expression with the
+    // memory pair stripped.
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) => n !== "memory_recall" && n !== "memory_save"
@@ -532,8 +556,9 @@ describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
     );
     expect(names).not.toContain("memory_recall");
     expect(names).not.toContain("memory_save");
-    // landing 形态：deps.system 始终挂 createIknowSystemResolver（identity 层恒在），
-    // memoryEnabled=false 让 memory_layer slot 返回 undefined。
+    // Landing shape: deps.system always carries createIknowSystemResolver (the
+    // identity layer is always present); memoryEnabled=false makes the
+    // memory_layer slot return undefined.
     const sys = await deps.system?.();
     expect(sys).toContain("iknow Identity");
   });
@@ -543,8 +568,8 @@ describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
       env: makeEnv("sk-test-mem-on-1"),
       askUser: createNoAskUser(),
     });
-    // seam 契约：deps.system 是函数（#194 同款断言，不实际调用——
-    // 调用会写 usage.json 进真实 ~/.iknow/memory）
+    // Seam contract: deps.system is a function (asserted as such, never invoked —
+    // invoking it would write usage.json into the real ~/.iknow/memory).
     expect(typeof deps.system).toBe("function");
   });
 });
@@ -558,7 +583,7 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
       askUser: createNoAskUser(),
     });
 
-    // plan T5-engine / ADR-0012:默认 env 不设 IKNOW_LLM_MAX_TURNS → undefined(无限)。
+    // ADR-0012: the default env sets no IKNOW_LLM_MAX_TURNS → undefined (unlimited).
     expect(deps.maxTurns).toBeUndefined();
     // Proves timeoutMs is read through from env, not a hard-coded constant.
     expect(deps.timeoutMs).toBe(12345);
@@ -598,7 +623,7 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
   });
 
   it("IKNOW_WEB_PROXY 非法值 → build 时同步抛错,空值 → 不影响装配", async () => {
-    // 验证代理配置在装配时即被 SSRF 防线拦截,避免到 fetch 时才报。
+    // Proves the proxy config is intercepted by the SSRF defense at assembly time, not lazily at fetch time.
     const env = makeEnv("sk-test-passthrough-3");
     env.web.proxy = "ftp://bad-proxy:9999";
     await expect(
@@ -608,14 +633,14 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
       })
     ).rejects.toThrow(/only http and https|malformed/i);
 
-    // 对照:空代理配置不抛错,装配成功。
+    // Control: an empty proxy config does not throw; assembly succeeds.
     const envOk = makeEnv("sk-test-passthrough-4");
     envOk.web.proxy = undefined;
     const { deps } = await buildHarnessEngine({
       env: envOk,
       askUser: createNoAskUser(),
     });
-    // #440 T4:todoDir 未透传 → todo_write 缺席。
+    // No threaded todoDir → todo_write absent.
     expect(deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS_NO_TODO
     );
@@ -625,8 +650,8 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-build-engine-root-"));
     const outside = await mkdtemp(join(tmpdir(), "iknow-build-engine-out-"));
     try {
-      // T5:显式 sandboxRoot 必须与 resolveMcpRoots 的 workspaceRoot 一致；
-      // 同根透传后 ACI FS fence 仍以该 root 拒越界路径。
+      // An explicit sandboxRoot must agree with resolveMcpRoots' workspaceRoot;
+      // passed as the same root, the ACI FS fence still rejects out-of-root paths.
       const { deps } = await buildHarnessEngine({
         env: makeEnv("sk-test-passthrough-2"),
         askUser: createNoAskUser(),
@@ -658,9 +683,9 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
   });
 });
 
-// --- #337 T8: skill catalog + MCP manager 装配 / 四入口条件化 / SC12 --------
+// --- skill catalog + MCP manager assembly / per-surface conditioning ---------
 
-/** 在 tmp 目录铺一个 skill fixture（SKILL.md 含合法 frontmatter）。 */
+/** Plants a skill fixture (a SKILL.md with valid frontmatter) in a tmp directory. */
 async function plantSkill(
   root: string,
   skillName: string,
@@ -696,13 +721,13 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     });
 
     expect(built.deps.registry.get("skill")).toBeDefined();
-    // disclosure-index-align T2 / SC5:skill_search 已删。
+    // skill_search has been removed (see disclosure-index-align/).
     expect(built.deps.registry.get("skill_search")).toBeUndefined();
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).toContain("skill");
     expect(names).not.toContain("skill_search");
 
-    // cleanup:manager 在场则调用 shutdown 不抛（即使无 MCP server）
+    // Cleanup: if a shutdown handle exists, calling it does not throw (even with no MCP server).
     if (built.shutdown) await built.shutdown();
   });
 
@@ -720,34 +745,34 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
       cwd: root,
     });
 
-    // skill 一件仍装配（ask 也含 skill 工具）。
+    // skill is still assembled (the ask surface carries the skill tool too).
     expect(built.deps.registry.get("skill")).toBeDefined();
-    // disclosure-index-align T2 / SC5:skill_search 已删。
+    // skill_search has been removed (see disclosure-index-align/).
     expect(built.deps.registry.get("skill_search")).toBeUndefined();
 
-    // ask 不创建 MCP manager → shutdown 句柄缺席;subagent manager 同门缺席
-    // （T6:surface !== "ask" 才创建）。
+    // ask builds no MCP manager → shutdown handle absent; the subagent
+    // manager is gated the same way (created only when surface !== "ask").
     expect(built.shutdown).toBeUndefined();
     expect(built.subagentManager).toBeUndefined();
 
-    // SC8:ask 剥离 spawn_subagent / subagent_result(registry / executor /
-    // catalog 三方视图一致)。skillCatalog 仍装配(SC12)。
+    // ask strips spawn_subagent / subagent_result from the registry view.
+    // skillCatalog is still assembled.
     expect(built.deps.registry.get("spawn_subagent")).toBeUndefined();
     expect(built.deps.registry.get("subagent_result")).toBeUndefined();
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
     expect(names).not.toContain("subagent_result");
-    // ask + memory:{enabled:false} 双重剥离（SC8 + SC12 + #440 T4 + #502 T3）:
-    //   - memory2:memory.enabled=false
-    //   - subagent2:ask 不创建 subagentManager（SC8）
-    //   - mcp2:ask 不创建 mcpManager（SC12）
-    //   - bg2:ask 不创建 backgroundManager（#502 T3）
-    //   - todo_write:todoDir oneshot 剥离（#440 T4）
-    //   - run_graph:ADR-0041 同 subagentManager 同门 —— ask 无 subagentManager
-    //     → run_graph 缺席（handler isEnabled 与 graphAssembly 都无依赖,工具
-    //     本身缺席即等价）
-    // skill 两件仍装配,SC12 守门。本断言以 EXPECTED_TOOLS_NO_TODO.filter
-    // 表达式为 source of truth(不写加法叙事 — 加法易漂)。
+    // ask + memory off: layered stripping —
+    //   - memory pair: memory.enabled=false
+    //   - subagent pair + run_graph: ask never builds a subagentManager
+    //     (run_graph is gated on the same seam; with the tool itself absent,
+    //     handler isEnabled / graphAssembly dependencies are moot)
+    //   - mcp pair: ask never builds an mcpManager
+    //   - background pair (bash_output/bash_stop): ask never builds a backgroundManager
+    //   - todo_write: no threaded todoDir
+    // skill stays assembled. This assertion uses the
+    // EXPECTED_TOOLS_NO_TODO.filter expression as the source of truth
+    // (no additive arithmetic — sums drift).
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) =>
@@ -765,8 +790,8 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
       )
     );
 
-    // 三方视图零 mcp__*（SC12）：registry.list()（= executor 可见视图）
-    // + deps 视图（registry = executor 的输入，registry 是真实三方视图锚点）。
+    // Zero mcp__* names in the views: registry.list() is the executor's
+    // visible view (registry is the executor's input, so it anchors it).
     expect(names.filter((n) => n.startsWith("mcp__"))).toEqual([]);
   });
 });
@@ -790,9 +815,9 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
       cwd: root,
     });
 
-    // 即使 mcp config 两级都缺席,manager 仍创建(只是 slot=空 map)。
+    // Even with both mcp config levels absent, the manager is still created (its slot is just an empty map).
     expect(typeof built.shutdown).toBe("function");
-    // 不阻塞装配：调用 shutdown 不抛
+    // Non-blocking assembly: calling shutdown does not throw.
     await built.shutdown!();
   });
 
@@ -800,11 +825,12 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t8-sc8-"));
     roots.push(root);
 
-    // 一个永远不 resolve 的 connect —— 验证 buildHarnessEngine 不 await 即可返回。
-    // connect 计数：行为断言（build 期间 connect 必须未被调用 = 早返回的证据）。
-    // 原断言 `elapsed < 200ms` 在 4 核重载 host 上稳定超时(实测 392-584ms)，
-    // 属时序容差缺陷，非 build 逻辑缺陷；改用 connect 调用计数 + 无限下界
-    // 时间断言，两者都不依赖机器负载。
+    // A connect that never resolves — verifies buildHarnessEngine returns without awaiting it.
+    // Connect-call counting is the behavioral assertion (connect must not have been called
+    // during build = evidence of early return). The original `elapsed < 200ms` assertion
+    // failed reliably on loaded 4-core hosts (measured 392-584ms) — a timing-tolerance
+    // defect, not a build-logic defect; replaced by the connect counter plus a lower-bound
+    // timing assertion, neither dependent on machine load.
     let connectCalls = 0;
     const slowClient: McpClientHandle = {
       connect: () => {
@@ -825,21 +851,22 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      // T8 测试缝：注入慢 client。manager.start() 不 await,该 client
-      // 永远挂着,build 必须早就返回。
+      // Test seam: inject a slow client. manager.start() never awaits it, so
+      // this client hangs forever and build must still return early.
       createMcpClient: () => slowClient,
     });
     const elapsed = Date.now() - start;
 
-    // 行为断言:build 早返回 → connect 未被调用。慢 connect 是 ∞,若被
-    // await 则 build 永不返回(connectCalls 必为 0)。
+    // Behavioral assertion: build returned early → connect was never called.
+    // The slow connect is infinite; if it were awaited, build would never return.
     expect(connectCalls).toBe(0);
-    // 时间下界断言:elapsed 须远小于慢 connect 的剩余时间(∞),任何有限
-    // build 耗时都满足。上界断言(如 <200ms)属负载敏感时序容差,已移除。
+    // Lower-bound timing assertion: any finite build time passes against an
+    // infinite connect. Upper bounds (e.g. <200ms) are load-sensitive timing
+    // tolerances and were removed.
     expect(elapsed).toBeGreaterThanOrEqual(0);
     expect(typeof built.shutdown).toBe("function");
-    // cleanup:触发 shutdown,manager 关闭慢 client(connect 永不 resolve,
-    // close 仅清状态,不 await connect)。
+    // Cleanup: trigger shutdown; the manager closes the slow client (connect
+    // never resolves; close only clears state, it does not await connect).
     if (built.shutdown) await built.shutdown();
   });
 
@@ -877,8 +904,9 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
     await Promise.all(roots.splice(0).map((r) => removeTmpTree(r)));
   });
 
-  /** fake manager 注入验证装配不崩(spawn 不被调用;仅验证 registry 含两件 +
-   *  BuiltEngine.subagentManager 透出注入对象)。 */
+  /** Verifies the fake-manager injection does not break assembly (spawn is never
+   *  called; only that the registry carries the two tools and
+   *  BuiltEngine.subagentManager surfaces the injected object). */
   const fakeManager: SubAgentManager = {
     spawn: () => ({ taskId: "fake-id" }),
     queryBuffer: () => ({ status: "not_found" }),
@@ -887,10 +915,11 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
-    // ADR-0096 T2：spawn_subagent tool description getter 退化路径走
-    // manager.getCapacity()，这里给静态 15 与既有形态对齐。
+    // ADR-0096: the spawn_subagent tool-description getter's fallback path goes
+    // through manager.getCapacity(); a static 15 matches the existing shape.
     getCapacity: () => 15,
-    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    // The interface gained a read-only enumeration surface — the fake is
+    // completed to stay structurally compatible.
     listSubagents: () => [],
     subscribe: () => () => {},
   };
@@ -908,17 +937,17 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
       subagentManager: fakeManager,
     });
 
-    // 注入对象透出(BuiltEngine.subagentManager === fakeManager,引用相等)。
+    // The injected object is surfaced (BuiltEngine.subagentManager === fakeManager, reference equality).
     expect(built.subagentManager).toBe(fakeManager);
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).toContain("spawn_subagent");
     expect(names).toContain("subagent_result");
     expect(built.deps.registry.get("spawn_subagent")).toBeDefined();
     expect(built.deps.registry.get("subagent_result")).toBeDefined();
-    // #440 T4:todoDir 未透传 → todo_write 缺席。
+    // No threaded todoDir → todo_write absent.
     expect(names).toEqual(EXPECTED_TOOLS_NO_TODO);
 
-    // 组合 shutdown 不抛(fake manager shutdown resolve)。
+    // The composed shutdown does not throw (fake manager's shutdown resolves).
     await built.shutdown!();
   });
 
@@ -936,7 +965,7 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
       subagentManager: fakeManager,
     });
 
-    // ask 不创建/不透出 manager,registry 停 23 件(SC8)。
+    // ask neither creates nor surfaces a manager; the registry stays at the stripped set.
     expect(built.subagentManager).toBeUndefined();
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
@@ -944,9 +973,10 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
   });
 });
 
-// --- #126 T5: secrets guard 产品装配组合 ----------------------------------
-// #406 T4：以下用例全部显式 `mode: "block"` —— guard 现只作为 legacy
-// deny-only 兼容路径装配（roundtrip 默认不装 guard，见下方 T4 describe）。
+// --- secrets guard assembly in the product wiring ----------------------------
+// All cases below pin `mode: "block"` explicitly — the guard is now assembled
+// only as the legacy deny-only path (the default roundtrip ships no guard;
+// see the mode-matrix describe below).
 describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
   const roots: string[] = [];
 
@@ -967,13 +997,13 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
       settings: { secrets: { mode: "block" } },
     });
 
-    // guard 放行普通 bash → inner 执行（read-only/execute 类默认 ask，用 askUser 全批）
+    // guard passes a plain bash through → inner executes (read-only/execute categories default to ask; askUser approves all)
     const [allow] = await built.deps.executor.executeAll([
       { id: "t5-allow", name: "bash", input: { command: "echo hi" } },
     ]);
     expect(allow.kind).toBe("ok");
 
-    // 密钥正例：bash input 夹带 sk- 形态 → [hook_blocked]，inner 不执行
+    // Secret positive: a bash input carrying an `sk-` shaped token → `[hook_blocked]`, inner not executed
     const [blocked] = await built.deps.executor.executeAll([
       {
         id: "t5-block",
@@ -996,7 +1026,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t5-guard-custom-"));
     roots.push(root);
 
-    // settings.secrets.patterns 追加自定义形态
+    // settings.secrets.patterns appends a custom shape
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t5-guard-2"),
       askUser: createNoAskUser(),
@@ -1008,7 +1038,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
       },
     });
 
-    // 自定义 pattern 命中 → 拦截
+    // Custom pattern match → blocked
     const [blocked] = await built.deps.executor.executeAll([
       {
         id: "t5-custom-block",
@@ -1023,7 +1053,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
 
     if (built.shutdown) await built.shutdown();
 
-    // enabled:false → guard 透明，密钥形态放行
+    // enabled:false → guard is transparent, secret shapes pass through
     const transparent = await buildHarnessEngine({
       env: makeEnv("sk-test-t5-guard-3"),
       askUser: createNoAskUser(),
@@ -1059,7 +1089,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
       settings: { secrets: { mode: "block" } },
     });
 
-    // 硬墙必拦调用（rm -rf）+ 无密钥 input → guard 放行后 [permission_denied] 仍拦
+    // A call the hard wall always blocks (rm -rf) + secret-free input → guard passes it, `[permission_denied]` still blocks
     const [result] = await built.deps.executor.executeAll([
       { id: "t5-wall", name: "bash", input: { command: "rm -rf /" } },
     ]);
@@ -1091,7 +1121,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
       onHookError: (e) => hookErrors.push(e),
     });
 
-    // 坏 pattern 剔除 + 告警；好 pattern 仍生效
+    // Bad pattern dropped + warning raised; good pattern still active
     expect(hookErrors.some((e) => e.phase === "guard-init")).toBe(true);
 
     const [blocked] = await built.deps.executor.executeAll([
@@ -1111,7 +1141,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #406 T2: secret registry 装配 — deps.secretRegistry 暴露
+// Secret registry assembly — deps.secretRegistry exposure
 // ---------------------------------------------------------------------------
 describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
   it("默认 settings：deps.secretRegistry 是 SecretRegistry，构造期空表 + 默认 7 patterns", async () => {
@@ -1120,13 +1150,13 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
       askUser: createNoAskUser(),
     });
 
-    // 类型已证明 SecretRegistry；运行期断言对象在场 + 关键契约
+    // The type already proves SecretRegistry; runtime asserts presence + key contracts
     expect(built.deps.secretRegistry).toBeDefined();
     expect(typeof built.deps.secretRegistry!.register).toBe("function");
     expect(typeof built.deps.secretRegistry!.resolve).toBe("function");
-    // 构造期空表：未跑任何 run() 前 size === 0
+    // Empty at construction: size === 0 before any run()
     expect(built.deps.secretRegistry!.size).toBe(0);
-    // 默认 patterns = DEFAULT_SECRET_PATTERNS 7 条
+    // Default patterns = the 7 DEFAULT_SECRET_PATTERNS
     expect(built.deps.secretRegistry!.patterns.length).toBe(7);
 
     if (built.shutdown) await built.shutdown();
@@ -1147,7 +1177,7 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
       });
 
       expect(built.deps.secretRegistry).toBeDefined();
-      // 自定义 extras 追加在 DEFAULT 之后 → 8 条，末尾 source 是自定义 pattern
+      // Custom extras append after DEFAULT → 8 entries; the last one's source is the custom pattern
       expect(built.deps.secretRegistry!.patterns.length).toBe(8);
       expect(built.deps.secretRegistry!.patterns[7]!.source).toBe(
         "CUSTOM_TOKEN_[A-Z0-9]{6}"
@@ -1183,17 +1213,20 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #440 T1 — session 作用域 todoDir seam（build-engine 装配侧）
+// Session-scoped todoDir seam (build-engine assembly side)
 //
-// D2 决议：build-engine 在 surface !== "ask" 时把 host-injected todoDir 透传
-// 给 createDefaultAciRegistry；ask 不传。worker 装配路径（createWorkerDeps）
-// 不传 todoDir → 所有权边界隔在主 loop 内。
+// Decision: when surface !== "ask", build-engine threads the host-injected
+// todoDir to createDefaultAciRegistry; ask never threads it. The worker
+// assembly path (createWorkerDeps) never threads todoDir either → the
+// ownership boundary stays inside the main loop.
 //
-// 范围：仅断言 buildHarnessEngine 接受 todoDir opt、Gate 3 不抛；todo_write
-// 工厂 + SSOT append 在 T2/T4 才进入，本步不假设工具在注册表中。
+// Scope: asserts only that buildHarnessEngine accepts the todoDir option and
+// Gate 3 does not throw; the todo_write factory and the SSOT append came in
+// later steps, so nothing here assumes the tool is already in the registry.
 //
-// 各用例的件数 = `EXPECTED_TOOLS.filter(...)` 表达式长度推导,以表达式为
-// source of truth — 注释里不写加法叙事（避免与实际长度漂移）。
+// Per-case expected counts derive from the length of the
+// `EXPECTED_TOOLS.filter(...)` expression — the expression is the source of
+// truth; no additive arithmetic in comments (sums drift).
 // ---------------------------------------------------------------------------
 
 describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
@@ -1204,11 +1237,12 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       surface: "chat",
       todoDir: "/tmp/some-session/todos",
     });
-    // chat surface + todoDir → todoDir 透传给 registry → todo_write 装配。
-    // EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop + run_graph
-    // （ADR-0041 run_graph 常驻 —— chat surface 含 subagentManager →
-    // run_graph 入注册表;graphAssembly 不传,handler isEnabled 缺省恒关
-    // 守门,工具本身仍在表里）。具体件数以 EXPECTED_TOOLS.length 为真值源。
+    // chat surface + todoDir → todoDir is threaded to the registry → todo_write assembles.
+    // EXPECTED_TOOLS includes todo_write, bash_output, bash_stop and run_graph
+    // (run_graph is resident on a chat surface that has a subagentManager;
+    // graphAssembly is not passed, so the handler isEnabled default keeps it
+    // closed — the tool itself still stands in the table). The count follows
+    // EXPECTED_TOOLS.length, the source of truth.
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS
     );
@@ -1224,11 +1258,12 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       memory: { enabled: false },
       todoDir: "/tmp/some-session/todos",
     });
-    // ask 形态与现有 SC8 守门一致：EXPECTED_TOOLS filter 剥除
-    // memory2 + subagent2 + mcp2 + todo_write + bg2 + run_graph（ask 不创建
-    // subagentManager / mcpManager / backgroundManager → run_graph 因
-    // subagentManager 缺席而缺席;memory:enabled:false;todoDir oneshot 剥离
-    // —— SC8 + SC12）。具体件数 = filter 表达式长度，以数组为准。
+    // The ask surface keeps the existing gating: EXPECTED_TOOLS.filter strips
+    // the memory pair, the subagent pair, the mcp pair, todo_write, the
+    // background pair and run_graph (ask creates no subagentManager /
+    // mcpManager / backgroundManager — run_graph falls with the missing
+    // subagentManager; memory enabled:false; todoDir stripped oneshot).
+    // Count = length of the filter expression, the array being the source of truth.
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
@@ -1243,7 +1278,7 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
           n !== "todo_write" &&
           n !== "bash_output" &&
           n !== "bash_stop" &&
-          // ADR-0041:ask 无 subagentManager → run_graph 缺席。
+          // ask has no subagentManager → run_graph absent.
           n !== "run_graph"
       )
     );
@@ -1255,9 +1290,10 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       env: makeEnv("sk-test-t1-chat-default"),
       askUser: createNoAskUser(),
     });
-    // todoDir undefined → todo_write 缺席;EXPECTED_TOOLS.filter 剥 todo_write
-    // → 38 件;backgroundManager 已装配,bash_output/bash_stop 在场;ADR-0041
-    // run_graph 常驻 → 仍入注册表(handler isEnabled 缺省恒关)。
+    // todoDir undefined → todo_write absent; EXPECTED_TOOLS.filter strips
+    // todo_write; backgroundManager is still assembled (bash_output/bash_stop
+    // present); run_graph stays resident in the chat registry (handler
+    // isEnabled defaults to closed).
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter((n) => n !== "todo_write")
     );
@@ -1267,16 +1303,17 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #406 T4: secrets.mode 装配矩阵 — roundtrip 默认 vs block 兼容
+// secrets.mode assembly matrix — roundtrip default vs block compatibility
 // ---------------------------------------------------------------------------
-// A1/A3:缺省(无 mode)或显式 "roundtrip" → secretsMode 缺席(undefined)、
-// secretRegistry 在场(roundtrip 机制 ON)、guard 不装配。
-// A2:mode:"block" → secretsMode==="block"、secretRegistry 缺席(roundtrip 机制
-// OFF)、guard 装配。
-// A4:mode:"invalid" → settings.parseSecrets 已丢弃 → 同缺省 roundtrip。
-// 说明:guard 装配在 createAciExecutor 内部,hooks 不可从外部直达;secretsMode +
-// secretRegistry 是 loop-engine / bash 机器状态的忠实代理(secrets-guard.test.ts
-// 已证明 guard 自身行为,block 用例在此文件 T5 describe 覆盖端到端拦截)。
+// A1/A3: no mode or explicit "roundtrip" → secretsMode absent (undefined),
+// secretRegistry present (roundtrip mechanism ON), guard not assembled.
+// A2: mode:"block" → secretsMode==="block", secretRegistry absent (roundtrip
+// mechanism OFF), guard assembled.
+// A4: mode:"invalid" → settings.parseSecrets already dropped it → same as the roundtrip default.
+// Note: the guard is assembled inside createAciExecutor; hooks are not reachable
+// from outside. secretsMode + secretRegistry are faithful proxies for the
+// loop-engine / bash machinery state (secrets-guard.test.ts proves the guard's
+// own behavior; block end-to-end cases live in this file's guard-assembly describe above).
 describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
   it("A1:缺省 settings(无 secrets.mode)→ secretsMode undefined + secretRegistry 在场", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-a1-"));
@@ -1355,10 +1392,11 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #558 T2: 默认路径停止注入 coordinator 调度段(plan 555 T2 acceptance 1)
-// — 默认 buildHarnessEngine(自建 subagentManager 的 surface)在 deps.system()
-//   不再渲染 "## Sub-agent coordination" 段 / 6 验收关键词;装配缝仍保留
-//   (显式传入非空 coordinatorText 才渲染,见 coordinator-segment.test.ts seam 用例)。
+// The default path no longer injects the coordinator scheduling segment:
+// the default buildHarnessEngine (surfaces that self-build a subagentManager)
+// renders no "## Sub-agent coordination" section / acceptance keywords in
+// deps.system(); the assembly seam remains (only an explicitly passed
+// non-empty coordinatorText renders — see the seam cases in coordinator-segment.test.ts).
 // ---------------------------------------------------------------------------
 describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () => {
   it("默认 chat surface(自建 subagentManager)→ deps.system() 不含 ## Sub-agent coordination 段", async () => {
@@ -1372,9 +1410,9 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
         cwd: root,
       });
 
-      // subagentManager 在场(全装配),但默认不再注入 coordinator 段:
-      // plan 555 T2 决议:默认路径引导落点 = 工具 description (T1 SSOT),
-      // 不再向 system 段双写。
+      // subagentManager present (full assembly), but the coordinator section is no
+      // longer injected by default: the default path's guidance landing point is the
+      // tool description (the SSOT), never double-written into the system section.
       expect(built.subagentManager).toBeDefined();
 
       const systemText = (await built.deps.system?.()) ?? "";
@@ -1440,9 +1478,10 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
 });
 
 // ---------------------------------------------------------------------------
-// #841 T6 / ADR-0009 D2 amended: 父会话 (chat / tui / serve) 开场不灌 rules
-// 正文 —— 三条装配路径共用 build-engine deps.system,只注入带路径的 rules
-// 清单 + 读路径指引;无 rules 目录时会话正常开始。
+// ADR-0009 D2 (amended): parent sessions (chat / tui / serve) do not load rules
+// bodies at opening — all three assembly paths share build-engine deps.system,
+// which injects only the rules path list plus a read-path pointer; a session
+// without a rules directory still starts normally.
 // ---------------------------------------------------------------------------
 describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
   const surfaces = ["chat", "tui", "serve"] as const;
@@ -1499,7 +1538,7 @@ describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T4 / ADR-0040 — subagent dispatch classification at the build-engine gate.
+// ADR-0040 — subagent dispatch classification at the build-engine gate.
 // The gate must classify the worker's effective capability surface rather than
 // treating every spawn_subagent call as read-only.
 // ---------------------------------------------------------------------------
@@ -1791,12 +1830,13 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
 });
 
 // --------------------------------------------------------------------------
-// ADR-0085 / SC9 — build-engine 把 host-injected todoDir 透传给
-// createSubAgentManager，manager spawn 期落 `todoLedger` 进 worker envelope。
+// ADR-0085 — build-engine threads the host-injected todoDir to
+// createSubAgentManager, which lands `todoLedger` into the worker envelope on spawn.
 //
-// 这是「父会话账本 → worker 工具面」整条链的装配侧端点：build-engine 是
-// todoDir 的 host 注入点（与主 loop registry 同一值），manager 是落线点，
-// worker 是消费点（worker-tool-surface.test.ts 钉住消费侧）。
+// This is the assembly-side endpoint of the "parent-session ledger → worker tool
+// surface" chain: build-engine is todoDir's host injection point (the same value
+// the main-loop registry gets), the manager is the write point, and the worker is
+// the consumer (worker-tool-surface.test.ts pins the consuming side).
 // --------------------------------------------------------------------------
 
 describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
@@ -1806,7 +1846,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
   });
 
   afterEach(() => {
-    // 透传真实 spawn —— 不留全局 override 影响同文件其余用例。
+    // Restore the real spawn — leave no global override affecting other cases in this file.
     workerSpawnOverride.current = undefined;
   });
 
@@ -1829,9 +1869,9 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
         "conv-sc9-parent"
       );
       expect(result.kind).toBe("ok");
-      // 断言面 = 子进程 stdin 上的 wire 字节（build-engine → manager →
-      // envelope 全链的真实出口；inject 一个 manager 会绕过本测试要证的
-      // todoDir 透传）。
+      // Assertion surface = the wire bytes on the child's stdin (the genuine outlet
+      // of the whole build-engine → manager → envelope chain; injecting a manager
+      // would bypass the todoDir threading this test must prove).
       const payload = firstWorkerEnvelope();
       expect(payload?.todoLedger).toEqual({
         projectDir: join(root, "projects", "repo-deadbeef"),
@@ -1872,18 +1912,17 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
 });
 
 // --------------------------------------------------------------------------
-// T4 (plans/worktree-live-task-root.md §6 T4) — build-engine wires the live
-// taskRoot holder + single writer at the host seam boundary. T4 初期无消费
-// 方；specs/skill-load-write-root.md 起 BuiltEngine 透出该 cell（skill 正文
-// trailer 消费），单一根权威不变式随之演进为「透出的就是 registry / hub
-// 消费的同一 cell 实例」——不存在第二份根持有者，stable roots 仍冻结。
+// build-engine wires the live taskRoot holder + single writer at the host seam
+// boundary. There was initially no consumer; from the skill-trailer work
+// BuiltEngine exposes the cell, and the single-root-authority invariant evolved
+// into "the exposed cell IS the same instance the registry / hub consume" —
+// no second root holder exists, and the stable roots remain frozen.
 // --------------------------------------------------------------------------
 
 describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", () => {
   it("host seams present + isolation OFF → worktree tools registered (seam-keyed), gate passthrough", async () => {
-    // ADR-0037 Amendment 2026-09-11 (specs/agent-control-surface.md Slice A /
-    // SC1): the worktree ACI tools are keyed on host-seam presence, NOT on
-    // `isolation.worktreeOnMutate`. The switch arms ONLY the mutate gate.
+    // ADR-0037 (amended): the worktree ACI tools are keyed on host-seam presence,
+    // NOT on `isolation.worktreeOnMutate`. The switch arms ONLY the mutate gate.
     // Pins both halves: (a) registry membership follows the seams; (b) no
     // interception happens with the switch OFF (write lands, nothing blocked).
     const root = await mkdtemp(join(tmpdir(), "iknow-slice-a-off-"));
@@ -1954,8 +1993,8 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
     try {
       // settings without isolation.worktreeOnMutate → isolationEnabled = false.
-      // The build-engine branch at lines 784 + 897 should NOT enter the
-      // isolation path; wrap is dormant. Behavior is byte-identical to T3.
+      // The build-engine isolation branch should NOT be entered; the wrap is
+      // dormant. Behavior is byte-identical to the non-isolation baseline.
       const built = await buildHarnessEngine({
         env: makeEnv("sk-test-t4-off"),
         askUser: createNoAskUser(),
@@ -1966,13 +2005,13 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
         // No worktreeIsolation host seam — registry should still build
         // the chat tool set without isolation-aware wrappers.
       });
-      // sessionRoots is the resolveSessionRoots snapshot (D3 stable):
-      // productRoot / projectIdentityRoot / installRoot unchanged from T3.
+      // sessionRoots is the resolveSessionRoots snapshot (stable roots):
+      // productRoot / projectIdentityRoot / installRoot unchanged from assembly.
       expect(built.sessionRoots.taskRoot).toBe(root);
       expect(built.sessionRoots.productRoot).not.toBe("");
-      // 单一根权威（specs/skill-load-write-root.md）：BuiltEngine 透出的
-      // liveTaskRoot 就是 registry / hub 消费的那个 cell——不存在第二份
-      // 根持有者。OFF 档 cell 初值 = taskRoot，同样在场。
+      // Single root authority: the liveTaskRoot BuiltEngine exposes IS the
+      // very cell the registry / hub consume — no second root holder exists.
+      // On the OFF tier the cell's initial value = taskRoot, still present.
       expect("liveTaskRoot" in built).toBe(true);
       expect(built.liveTaskRoot?.read()).toBe(root);
       await built.shutdown?.();
@@ -2003,16 +2042,17 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       // (a) Engine builds successfully with isolation enabled + custom seam.
       // (b) sessionRoots.taskRoot stays at the initial sandboxRoot — Hub
       //     observes this through BuiltEngine.sessionRoots, NOT through
-      //     the live cell. (T4 has no consumer reading the cell, so this
+      //     the live cell. (No consumer reads the cell here, so this
       //     stays at the initial value.)
       expect(built.sessionRoots.taskRoot).toBe(root);
-      // (c) D3 stable roots are NOT carried by a live cell:
+      // (c) The stable roots are NOT carried by a live cell:
       expect(built.sessionRoots.productRoot).not.toBe("");
       expect(built.sessionRoots.projectIdentityRoot).not.toBe("");
       expect(built.sessionRoots.installRoot).not.toBe("");
-      // (d) 单一根权威（specs/skill-load-write-root.md）：透出的 liveTaskRoot
-      //     是唯一 cell 实例（registry 工厂 / hub 读同一份），不是第二根权威；
-      //     此时 cell 初值仍 = 初始 taskRoot（seam 未被调用）。
+      // (d) Single root authority: the exposed liveTaskRoot is the ONLY cell
+      //     instance (registry factory / hub read the same one), not a second
+      //     root authority; at this point the cell still holds the initial
+      //     taskRoot (the seam has never been called).
       expect(built.liveTaskRoot?.read()).toBe(root);
       // (e) Seam is not invoked at build time (the gate only calls
       //     provision when an engine is rooted at a task-worktree-shaped
@@ -2027,8 +2067,8 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
 
   it("isolation ON + seam throws typed error → gate blocks, no second root authority, BuiltEngine surface stable", async () => {
     // Provoke the typed-error path: a session in main-repo state tries to
-    // mutate. The gate blocks (T3 behavior), the seam is NOT called for
-    // main-repo traffic (T3 model-provision contract), and any latent
+    // mutate. The gate blocks (established behavior), the seam is NOT called
+    // for main-repo traffic (the provision contract), and any latent
     // seam throw wouldn't poison the live cell because the wrap is
     // downstream of the gate's block.
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-throw-"));
@@ -2055,8 +2095,9 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       });
       // sessionRoots surface unchanged (Hub reads from this, not the cell).
       expect(built.sessionRoots.taskRoot).toBe(root);
-      // 单一根权威（specs/skill-load-write-root.md）：cell 透出但 seam 从未被
-      // 调用 → 仍持初值；typed throw 不写 cell（withLiveTaskRootWrite 契约）。
+      // Single root authority: the cell is exposed but the seam was never
+      // called → it still holds its initial value; a typed throw never writes
+      // the cell (the withLiveTaskRootWrite contract).
       expect(built.liveTaskRoot?.read()).toBe(root);
 
       await built.shutdown?.();
@@ -2066,10 +2107,10 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
   });
 
   it("stable roots stay frozen through the wrap (D3) — sessionRoots.productRoot / projectIdentityRoot / installRoot not affected by host seam", async () => {
-    // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot 必须保持
-    // 装配期冻结。Live taskRoot 槽位的写入**不**影响这三根 —— 它们由
-    // resolveSessionRoots 在装配期一次定型（见 build-engine.ts:438），wrap
-    // 只接触 taskRoot 槽位。
+    // Stable-roots list: productRoot / projectIdentityRoot / installRoot must
+    // stay frozen through assembly. Writes to the live taskRoot slot never
+    // touch these three — resolveSessionRoots fixes them once at assembly
+    // (see build-engine.ts:438); the wrap only contacts the taskRoot slot.
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-stable-"));
     try {
       const seamResolved = join(root, ".iknow", "worktrees", "conv-1");
@@ -2094,9 +2135,9 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       expect(initialInstall).toBeTruthy();
       expect(initialTask).toBe(root);
 
-      // The cell is internal; we cannot poke it via BuiltEngine. The D3
+      // The cell is internal; we cannot poke it via BuiltEngine. The stable-root
       // invariants are exercised by resolveSessionRoots tests in
-      // session-roots.test.ts (T3). Here we assert that
+      // session-roots.test.ts. Here we assert that
       // sessionRoots.productRoot / projectIdentityRoot / installRoot are
       // stable strings, equal to themselves on every read (frozen), and
       // never replaced by the wrap's host seam output.
@@ -2104,7 +2145,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       expect(built.sessionRoots.projectIdentityRoot).toBe(initialIdentity);
       expect(built.sessionRoots.installRoot).toBe(initialInstall);
       // Cross-rebind invariance: even if the cell gets written (which it
-      // doesn't in T4 because no consumer reads), the sessionRoots object
+      // doesn't here because no consumer reads), the sessionRoots object
       // is the immutable resolveSessionRoots output and is NOT aliased to
       // the cell. `taskRoot` here is the initial sandboxRoot, NOT the
       // seamResolved value — proving sessionRoots is the assembly-time
@@ -2120,7 +2161,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0096 T3 (amends ADR-0037) — the mutate switch is a live holder, not an
+// ADR-0096 (amends ADR-0037) — the mutate switch is a live holder, not an
 // assembly-time boolean. The /config panel flips it in-session; the gate reads
 // it once per wave, so a flip lands on the NEXT wave and never auto-provisions.
 // ---------------------------------------------------------------------------
@@ -2159,7 +2200,7 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
   });
 
   it("panel flip OFF → ON arms the gate on the next wave, without auto-provision", async () => {
-    // The acceptance sentence for T3: with the panel flipping ON mid-session
+    // Acceptance: with the panel flipping ON mid-session
     // and the session still unbound, the next mutate is blocked and NO
     // `git worktree add` happens (provision seam never called).
     const root = await mkdtemp(join(tmpdir(), "iknow-t3-flip-on-"));
@@ -2219,7 +2260,7 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
       expect(provisionCalls).toBe(0);
 
       // (d) BuiltEngine.isolationOn stays the startup value (assembly-time
-      //     consumers are NOT re-derived by a panel flip — T3 scope).
+      //     consumers are NOT re-derived by a panel flip).
       expect(built.isolationOn).toBe(false);
 
       await built.shutdown?.();
@@ -2316,17 +2357,20 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
 });
 
 // ===========================================================================
-// T9 (worktree-live-task-root.md §6 / ADR-0037 §4):展示面 —— system prompt
-// 钉稳定 projectIdentityRoot;env_snapshot 接活 taskRoot reader。
-// 验证三件事:
-//   (a) 未 rebind 时,buildHarnessEngine 注入的 envSnapshot 字段形态从
-//       `{cwd:静态}` 变成 `{readCwd:活 reader}`,且 reader 的初始值与今日
-//       直接喂 workspaceRoot 的 readEnvSnapshot 输出**逐字节相同**;
-//   (b) 调用 withLiveTaskRootWrite 缝后,readCwd 立刻反映新根;
-//   (c) system prompt 装配层在 rebind 前后字节级不变 (projectPath 段钉稳定
-//       projectIdentityRoot,不读取 cwd 缝)—— 间接通过 buildHarnessEngine
-//       自身不暴露 system deps 直接验;此处只钉( a )( b )两个 envSnapshot
-//       边界,(c) 由 identity/project-path-segment.test.ts 钉死。
+// Display surface: the system prompt pins the stable projectIdentityRoot while
+// env_snapshot is wired to the live taskRoot reader (ADR-0037, as amended).
+// Verifies three things:
+//   (a) before any rebind, the envSnapshot injected by buildHarnessEngine has the
+//       shape `{readCwd: live reader}` instead of `{cwd: static}`, and the
+//       reader's initial output is byte-identical to today's readEnvSnapshot fed
+//       workspaceRoot directly;
+//   (b) after the withLiveTaskRootWrite seam runs, readCwd immediately reflects
+//       the new root;
+//   (c) the system-prompt assembly layer is byte-stable across a rebind (the
+//       projectPath section pins the stable projectIdentityRoot and never reads
+//       the cwd seam) — buildHarnessEngine does not expose system deps for a
+//       direct check, so only the (a)(b) envSnapshot boundaries are pinned here;
+//       (c) is pinned by identity/project-path-segment.test.ts.
 // ===========================================================================
 
 describe("buildHarnessEngine — T9 display surface", () => {
@@ -2372,16 +2416,17 @@ describe("buildHarnessEngine — T9 display surface", () => {
         },
       });
 
-      // (a) deps.envSnapshot 形态:readCwd 活 reader,不是静态 cwd。
+      // (a) deps.envSnapshot shape: a live readCwd reader, not a static cwd.
       const seam = built.deps.envSnapshot as EnvSnapshotSeam | undefined;
       expect(seam).toBeDefined();
       const liveReader = seam!.readCwd;
       expect(typeof liveReader).toBe("function");
       expect(liveReader()).toBe(root);
 
-      // 装配期若走旧静态 cwd 缝,readEnvSnapshot 输出与今日基线不一致;
-      // 走活 reader 时,readEnvSnapshot({cwd: root}) 与 readEnvSnapshot({cwd: liveReader()})
-      // 在 root 是 git repo 的前提下应**完全**等价(逐字段 deep equal)。
+      // If assembly still used a static-cwd seam, readEnvSnapshot output would
+      // diverge from the baseline; with the live reader, readEnvSnapshot({cwd: root})
+      // and readEnvSnapshot({cwd: liveReader()}) must be fully equivalent
+      // (field-by-field deep equal) given root is a git repo.
       const fromReader = await readEnvSnapshot({ cwd: liveReader() });
       const baseline = await readEnvSnapshot({ cwd: root });
       expect(fromReader).toEqual(baseline);
@@ -2416,8 +2461,9 @@ describe("buildHarnessEngine — T9 display surface", () => {
       const liveReader = seam!.readCwd;
       expect(liveReader()).toBe(root);
 
-      // 触发 withLiveTaskRootWrite 缝:用真实的 create-worktree 工具
-      // 路径(handler 直接走 build-engine 装配层),跑出 rebind 后再读。
+      // Trigger the withLiveTaskRootWrite seam via the real create-worktree tool
+      // path (the handler goes straight through the build-engine assembly layer),
+      // then re-read after the rebind.
       const provisionTool = built.deps.registry.get("create-worktree");
       expect(provisionTool).toBeDefined();
       const toolResult = await provisionTool!.handler(
@@ -2429,8 +2475,8 @@ describe("buildHarnessEngine — T9 display surface", () => {
           `(session root rebound; the next wave of tool calls in this run will land in the new root, re-issue the blocked write then)`
       );
 
-      // rebind 后活 reader 立刻翻到新 taskRoot(envSnapshot 的人读面跟随
-      // 活根)。
+      // After the rebind the live reader immediately flips to the new taskRoot
+      // (envSnapshot's human-readable face follows the live root).
       expect(liveReader()).toBe(reboundRoot);
 
       await built.shutdown?.();
@@ -2441,19 +2487,21 @@ describe("buildHarnessEngine — T9 display surface", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T2 / plans/worktree-exclusive-lock.md / ADR-0070: `isolation.worktreeExclusive`
-// 装配期透传缝。OFF 档 enter 行为与今日逐字节一致（SC2 钉死）；ON 档
-// `built.worktreeExclusive === true`，session-api hub（T3 实施 bullet）据此
-// 决定是否在 `worktreeEnter` closure 内跑占用检查。
+// ADR-0070: assembly-time transmission seam for `isolation.worktreeExclusive`.
+// On the OFF tier the enter behavior is byte-identical to today's path; on the ON
+// tier `built.worktreeExclusive === true`, and the session-api hub uses it to
+// decide whether to run the occupancy check inside the `worktreeEnter` closure.
 //
-// 锁定不变式：
-//   - settings 缺席 / 非 `true` → `built.worktreeExclusive === false`（OFF 档
-//     严格走今日 enter 路径，不引入新拒绝路径）；不依赖 host 缝在场；
-//   - settings = true → `built.worktreeExclusive === true`；与 `worktreeOnMutate`
-//     正交、两字段独立解析（矩阵鉴面）；
-//   - 与 `isolationOn` 形态不同：`worktreeExclusive` 是纯设置判定（不带
-//     `&& isolationHost` 前置），严格反映 settings 解析结果；
-//   - 装配期一次性读取（ADR-0037 §5 硬要求 9），改绑不触发 settings 重载。
+// Pinned invariants:
+//   - settings absent / not `true` → `built.worktreeExclusive === false` (the OFF
+//     tier strictly follows today's enter path, introducing no new denial route);
+//     no dependence on a host seam being present;
+//   - settings = true → `built.worktreeExclusive === true`; orthogonal to
+//     `worktreeOnMutate`, the two fields resolve independently;
+//   - unlike `isolationOn`: `worktreeExclusive` is a pure settings check (no
+//     `&& isolationHost` conjunct), strictly reflecting the settings parse;
+//   - read once at assembly time (ADR-0037 hard requirement 9); rebinding never
+//     reloads settings.
 // ---------------------------------------------------------------------------
 
 describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => {
@@ -2468,9 +2516,9 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
         userHome: join(root, "home"),
         settings: {},
       });
-      // OFF 档：未设 → false；不依赖 host 缝在场（无 worktreeIsolation 入参）。
+      // OFF tier: unset → false; no dependence on a host seam (no worktreeIsolation argument).
       expect(built.worktreeExclusive).toBe(false);
-      // 不污染 isolationOn 形态：未注入 worktreeIsolation host → isolationOn false。
+      // No contamination of the isolationOn shape: no worktreeIsolation host injected → isolationOn false.
       expect(built.isolationOn).toBe(false);
       await built.shutdown?.();
     } finally {
@@ -2499,8 +2547,8 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
   it("ON档（settings = true）：built.worktreeExclusive === true, 独立于 host 缝在场", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t2-exclusive-on-"));
     try {
-      // 不注入 worktreeIsolation host 缝：开关仍按 settings 解析为 true。
-      // 这与 `isolationOn` 不同（后者依赖 host 缝在场才返 true）。
+      // No worktreeIsolation host seam injected: the switch still resolves true from settings.
+      // Unlike `isolationOn` (which requires a host seam present to return true).
       const built = await buildHarnessEngine({
         env: makeEnv("sk-test-t2-exclusive-on"),
         askUser: createNoAskUser(),
@@ -2510,7 +2558,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
         settings: { isolation: { worktreeExclusive: true } },
       });
       expect(built.worktreeExclusive).toBe(true);
-      // isolationOn 仍 false（无 host 缝）：两字段独立。
+      // isolationOn stays false (no host seam): the two fields are independent.
       expect(built.isolationOn).toBe(false);
       await built.shutdown?.();
     } finally {
@@ -2543,10 +2591,11 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
   });
 
   it("worktreeOnMutate × worktreeExclusive 矩阵：两字段独立解析，互不影响", async () => {
-    // ADR-0070 已认下 trade-off：每多一个 boolean 设置即多一档组合状态，
-    // 测试矩阵相应增加。2×2 = 4 档分别验证 built 暴露的两字段。
-    // 注意：isolationOn = (host 在场) && wom=true（settings=false 在隔离
-    // resolver 一律按 OFF）；worktreeExclusive = exc=true（不依赖 host）。
+    // ADR-0070 accepts the trade-off: each extra boolean setting adds a combined
+    // state and the test matrix grows with it. The 2×2 = 4 tiers verify the two
+    // fields BuiltEngine exposes.
+    // Note: isolationOn = (host present) && wom=true (settings=false is always
+    // OFF in the isolation resolver); worktreeExclusive = exc=true (host-independent).
     const matrix: ReadonlyArray<{
       readonly wom: boolean | undefined;
       readonly exc: boolean | undefined;
@@ -2589,11 +2638,12 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       },
     ];
     for (const cell of matrix) {
-      // 清收走 removeTmpTree 而非裸 rm:装配期 `void mkdir(<root>/.iknow/
-      // memory/<ns>)` 是 fire-and-forget,实测落在 buildHarnessEngine 返回后
-      // 0–28ms;本循环 `await shutdown()` 紧接清收,rm 的最后一步 rmdir 可能
-      // 撞上它 —— 全量并发(maxForks=3)下正是此处报过
-      // `ENOTEMPTY: … rmdir '/tmp/iknow-t2-matrix-…'`。详见 removeTmpTree 注释。
+      // Cleanup goes through removeTmpTree, not bare rm: assembly kicks off
+      // `void mkdir(<root>/.iknow/memory/<ns>)` fire-and-forget, measured to land
+      // 0–28ms after buildHarnessEngine returns; this loop awaits shutdown() and
+      // then cleans up immediately, so rm's final rmdir can collide with it —
+      // under full concurrency (maxForks=3) this is exactly where
+      // `ENOTEMPTY: … rmdir '/tmp/iknow-t2-matrix-…'` surfaced. See the removeTmpTree comment.
       const root = await mkdtemp(
         join(tmpdir(), `iknow-t2-matrix-${cell.label}-`)
       );
@@ -2626,8 +2676,8 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
               }
             : {}),
         });
-        // 注意：isolationOn = isolationEnabled = host && wom===true；
-        // worktreeExclusive = exc===true（与 host 无关）。
+        // Note: isolationOn = isolationEnabled = host && wom===true;
+        // worktreeExclusive = exc===true (independent of host).
         expect(built.worktreeExclusive).toBe(cell.expectedExc);
         expect(built.isolationOn).toBe(cell.expectedWom);
         await built.shutdown?.();

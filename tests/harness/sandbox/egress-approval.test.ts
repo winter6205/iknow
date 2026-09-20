@@ -1,21 +1,25 @@
 /**
- * Tests for `egress/approval.ts` — T6 首次域名批准流的会话级门件
- * (specs/network-egress-allowlist.md §首次域名批准流 + SC10 + ADR-0097 §批准
- * 持久化粒度)。
+ * Tests for `egress/approval.ts` — the session-level gate of the first-seen
+ * domain approval flow (specs/network-egress-allowlist.md, ADR-0097 approval
+ * persistence granularity).
  *
- * 钉住的不变式（来自 spec §Boundaries 「首次域名批准流」 + §Failure paths
- * 三行 + §Input-contract classes「首次域名批准」行）：
- *   - 首次见到新 host → askApproval 被调一次;
- *   - 批准 → 该 host 加入会话级 allowed 集,本会话内不再 ask 且放行;
- *   - 拒绝 → 该 host 加入会话级 denied 集,本会话内不再 ask 且再次请求直接 deny;
- *   - pending 期间同 host 并发 → 合并为同一次结果(后到者等待同一 Promise);
- *     askApproval 只被调一次;
- *   - 不同 host 并发 → 各自独立调用,不合并;
- *   - askApproval 缺席 → 任何首次见到的新 host 都直接 deny(fail-closed);
- *   - askApproval 抛异常 → 直接 deny(fail-closed),不残留 in-flight 条目
- *     阻塞后续请求;
- *   - 状态可观察:allowedThisSession / deniedThisSession 含已决条目(in-flight
- *     pending 期间不含;pending 解决后才入集)。
+ * Pinned invariants (from the spec's Boundaries / Failure paths /
+ * Input-contract classes entries for the first-seen approval flow):
+ *   - a host seen for the first time → askApproval is called once;
+ *   - approved → the host joins the session-level allowed set: no further
+ *     asks this session and requests pass;
+ *   - denied → the host joins the session-level denied set: no further asks
+ *     this session and later requests are denied directly;
+ *   - concurrent same-host requests while pending → merged into one result
+ *     (latecomers await the same Promise); askApproval is called once;
+ *   - concurrent different hosts → independent calls, no merging;
+ *   - askApproval absent → any first-seen host is denied directly
+ *     (fail-closed);
+ *   - askApproval throws → denied directly (fail-closed), with no leftover
+ *     in-flight entry blocking later requests;
+ *   - observable state: allowedThisSession / deniedThisSession contain
+ *     decided entries (not while pending; entries join the sets only once
+ *     the pending decision resolves).
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -69,9 +73,9 @@ describe("createEgressApprovalGate — 首次域名批准流 (SC10)", () => {
     const gate = createEgressApprovalGate({ askApproval });
     const p1 = gate.askIfUnknown("github.com");
     const p2 = gate.askIfUnknown("github.com");
-    // 两次并发都 pending → askApproval 只调一次
+    // both concurrent calls pending → askApproval invoked only once
     expect(askApproval).toHaveBeenCalledTimes(1);
-    // 解决
+    // resolve
     resolveAsk?.(true);
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1).toBe(true);
@@ -114,11 +118,11 @@ describe("createEgressApprovalGate — 首次域名批准流 (SC10)", () => {
   });
 
   it("askApproval 缺席 → 任何首次见到的新 host 直接 deny(fail-closed)", async () => {
-    const gate = createEgressApprovalGate({}); // 无 askApproval
+    const gate = createEgressApprovalGate({}); // no askApproval
     const r = await gate.askIfUnknown("github.com");
     expect(r).toBe(false);
     expect(gate.deniedThisSession()).toContain("github.com");
-    // 再次调用同样 deny(deniedThisSession 命中),不再尝试任何 ask
+    // a repeat call denies the same way (deniedThisSession hit), attempting no ask
     const r2 = await gate.askIfUnknown("github.com");
     expect(r2).toBe(false);
   });
@@ -131,7 +135,7 @@ describe("createEgressApprovalGate — 首次域名批准流 (SC10)", () => {
     const r = await gate.askIfUnknown("github.com");
     expect(r).toBe(false);
     expect(gate.deniedThisSession()).toContain("github.com");
-    // 第二次调用(并发或顺序)不会再尝试 askApproval,直接 deny
+    // a second call (concurrent or sequential) never retries askApproval, it denies directly
     const askApprovalCallsAfter = askApproval.mock.calls.length;
     const r2 = await gate.askIfUnknown("github.com");
     expect(r2).toBe(false);
@@ -148,7 +152,7 @@ describe("createEgressApprovalGate — 首次域名批准流 (SC10)", () => {
     );
     const gate: EgressApprovalGate = createEgressApprovalGate({ askApproval });
     const pending = gate.askIfUnknown("github.com");
-    // pending 期间:既不在 allowed 也不在 denied(决策未决)
+    // while pending: in neither allowed nor denied (the decision is undecided)
     expect(gate.allowedThisSession()).not.toContain("github.com");
     expect(gate.deniedThisSession()).not.toContain("github.com");
     resolveAsk?.(true);
@@ -160,7 +164,7 @@ describe("createEgressApprovalGate — 首次域名批准流 (SC10)", () => {
     const askApproval = vi.fn(async () => true);
     const gate = createEgressApprovalGate({ askApproval });
     await gate.askIfUnknown("Example.COM");
-    // 第二次用小写 — 应直接命中 allowed 集,不再次问
+    // second call uses lowercase — should hit the allowed set directly, no re-ask
     const r = await gate.askIfUnknown("example.com");
     expect(r).toBe(true);
     expect(askApproval).toHaveBeenCalledTimes(1);

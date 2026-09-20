@@ -1,19 +1,20 @@
 /**
- * T10 (plans/worktree-live-task-root.md §6 T10) — the contract phase that
- * closes the original bug: the gate now reads the LIVE `taskRoot` cell
- * instead of the assembly-time-frozen `root`. After `create-worktree`
+ * Contract phase closing the original bug: the gate reads the LIVE `taskRoot`
+ * cell instead of the assembly-time-frozen `root`. After `create-worktree`
  * succeeds inside a run, the same engine's next wave of mutate tool calls
  * lands in the new task worktree.
  *
- * Acceptance (per §6 T10 / D1/D2/D11):
- *   - red → green: 门禁读活根后,「run 内 turn 0 `create-worktree` 成功 →
- *     同 run 后续 turn 的 mutate 落地到新树」这条从 red 转 green.
- *   - D2 batch 快照 — 同一波 executeAll 内活根翻转不被观察到(整波一个根);
- *     跨波才生效.
- *   - D11 invariant — 门禁放行的每一个 mutate,其执行消费者的根与门禁
- *     裁决用的根是同一个波快照值(无 admit-but-write-old-root 窗口).
- *   - fail-closed — unboundMutateNotice() 在真的没建过树时仍照旧拦.
- *   - 未 rebind 时行为逐字节不变.
+ * Pinned invariants:
+ *   - red -> green: once the gate reads the live root, "turn 0 of a run runs
+ *     `create-worktree` successfully -> later turns' mutates land in the new
+ *     tree" flips from red to green.
+ *   - Batch snapshot: a live-root flip is NOT observed within the same
+ *     executeAll wave (one root per wave); it takes effect only across waves.
+ *   - Consistency invariant: for every mutate the gate admits, the executing
+ *     consumer's root and the gate's decision root are the same wave-snapshot
+ *     value (no admit-but-write-old-root window).
+ *   - fail-closed — unboundMutateNotice() still blocks when no tree exists.
+ *   - Without a rebind, behavior is byte-for-byte unchanged.
  *
  * These tests pin those invariants against `createWorktreeIsolationExecutor`
  * with a fake inner executor so the gate's wire-level contract is exercised
@@ -82,7 +83,7 @@ const writeCall = (id = "c1"): ToolCall => ({
 
 const WORKTREE_ROOT = "/repo/.iknow/worktrees/conv-1";
 
-/** Build a gate that snapshots liveTaskRoot at executeAll entry (T10). */
+/** Build a gate that snapshots liveTaskRoot at executeAll entry. */
 function makeGate(opts: {
   readonly liveTaskRoot: LiveTaskRoot;
   readonly provision: (ctx: {
@@ -109,7 +110,7 @@ function makeGate(opts: {
 
 describe("T10 — gate reads live taskRoot (red→green of the original bug)", () => {
   it("after `create-worktree` flips the cell, the next wave's mutate lands in the new tree", async () => {
-    // T4: live cell initialised at the assembly-time sandboxRoot (main repo).
+    // The live cell is initialised at the assembly-time sandboxRoot (main repo).
     const cell = createLiveTaskRoot("/main");
     const { inner, invocations } = fakeInner();
     let provisionCalls = 0;
@@ -137,7 +138,7 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
 
     // 2) Model calls `create-worktree` in the SAME run. The tool's
     //    handler calls `provision` (host seam), which updates the live cell
-    //    via withLiveTaskRootWrite (T4 wrap). We simulate that here by
+    //    via withLiveTaskRootWrite. We simulate that here by
     //    writing the new taskRoot into the cell directly.
     writeLiveTaskRoot(cell, WORKTREE_ROOT);
 
@@ -335,7 +336,7 @@ describe("T10 — D11 invariant (gate adjudication root == consumer handler root
 });
 
 // ============================================================================
-// D11 — root-flip lifecycle tools in a mixed wave (review fix)
+// Root-flip lifecycle tools in a mixed wave
 // ============================================================================
 
 /**
@@ -485,7 +486,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
 
 describe("T10 — initiallyBound with liveTaskRoot initialised at the worktree", () => {
   it("engine pre-rebound to its task worktree: mutate passes through without further provision", async () => {
-    // Same shape as T3/T4 test "engine rooted at a task-worktree-shaped root
+    // Same shape as the test "engine rooted at a task-worktree-shaped root
     // (rebound engine)" — uses the liveTaskRoot API and asserts identical
     // passthrough semantics.
     const cell = createLiveTaskRoot(WORKTREE_ROOT);

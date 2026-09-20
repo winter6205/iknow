@@ -1,16 +1,18 @@
 /**
  * tests/harness/aci/tools/skill-short-circuit.test.ts
  *
- * skill() 二次短路（spec skill-body-short-circuit.md SC2/SC3/SC5/SC7 +
- * S2 五类输入表）。行为合同：
- *   - 可见 messages 已有该名成功全文 tool_result（337 装配形态：同时含
- *     `Base directory:` 与 `</skill_files>` 双标记）→ 只回短回执；
- *   - compact 丢掉该条 / 历史快照缺席 → fail-closed 灌全文（不得假装已加载）；
- *   - 同一波（同 turnId）第二次同名短路 —— wave map 承载（同波 tool_result
- *     尚未入史，单靠历史快照看不见）；
- *   - 未知名引导句既不算已加载、也不进 wave map；
- *   - 短回执本身不是全文（无双标记），因此「只剩回执」的历史会再灌全文。
- * 闸只罩 ACI `skill()` handler；slash / Web 不经此路径。
+ * skill() second-call short circuit. Behavior contract:
+ *   - visible messages already hold a successful full-body tool_result for this name
+ *     (the assembled form carrying both `Base directory:` and `</skill_files>` markers)
+ *     → reply with only the short receipt;
+ *   - compact dropped that entry / history snapshot absent → fail-closed: load the full
+ *     body again (never pretend it is already loaded);
+ *   - the second same-name call within one wave (same turnId) also short-circuits, via the
+ *     wave map (the same wave's tool_result is not yet in history, invisible to a snapshot alone);
+ *   - an unknown-name guidance line counts as neither loaded nor enters the wave map;
+ *   - the short receipt itself is not the full body (no marker pair), so a "receipt only"
+ *     history triggers a full reload again.
+ * The gate covers only the ACI `skill()` handler; slash / Web do not take this path.
  */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -53,7 +55,7 @@ async function invokeSkill(
   return (await tool.handler(input, ctx)) as string;
 }
 
-/** 337 装配形态的全文样本（双标记齐全）。 */
+/** Full-body sample in the assembled form (both markers present). */
 const FULL_BODY_SAMPLE = [
   "# echo body",
   "follow the steps above",
@@ -65,11 +67,11 @@ const FULL_BODY_SAMPLE = [
   "</skill_files>",
 ].join("\n");
 
-/** 未知名引导句样本（不含任何双标记）。 */
+/** Unknown-name guidance line sample (carries neither marker). */
 const GUIDANCE_SAMPLE =
   "skill 'echo' not found. Pick the name from the `<available_skills>` list in the system prompt.";
 
-/** 一对（assistant tool_use + user tool_result）消息。 */
+/** One message pair (assistant tool_use + user tool_result). */
 function skillPair(
   toolUseId: string,
   name: string,
@@ -226,14 +228,14 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
       const out = await invokeSkill(tool, badInput, ctx);
       expect(out).toMatch(/available_skills|read_file/);
     }
-    // 未命中不进 wave map：同回合再调合法名不受污染（下条用 negative 钉）。
+    // a miss does not enter the wave map: a later legal-name call in the same turn stays unpolluted (nailed by the negative case below).
   });
 
   it("negative：可见历史无该名全文（或只有引导句）→ 灌全文（337 形态）", async () => {
     const dir = join(scratch, "echo");
     await writeEcho(dir);
     const tool = echoTool(dir);
-    // 空历史
+    // empty history
     const outEmpty = await invokeSkill(
       tool,
       { name: "echo" },
@@ -245,7 +247,7 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
     expect(outEmpty).toContain("Base directory:");
     expect(outEmpty.trimEnd().endsWith("</skill_files>")).toBe(true);
     expect(outEmpty).toContain("# echo body");
-    // 历史只有引导句（曾叫错名）→ 仍灌全文
+    // history holds only guidance lines (a wrong name was called before) → still load the full body
     const outGuidanceOnly = await invokeSkill(
       tool,
       { name: "echo" },
@@ -294,7 +296,7 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
     expect(second.length).toBeLessThan(first.length / 10);
     expect(second).not.toContain("# echo body");
     expect(second).not.toContain("x".repeat(100));
-    // 回执不得同时含双标记（否则会被 recognizer 误认成全文）
+    // the receipt must not carry both markers at once (the recognizer would mistake it for the full body)
     expect(
       second.includes("Base directory:") && second.includes("</skill_files>")
     ).toBe(false);
@@ -308,8 +310,8 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
       turnId: "turn-1",
       messages: [textMessage("user", "go")],
     };
-    // 生产路径 ACI executor 的 wave 是 Promise.all 并发启动 —— 两次 handler
-    // 调用在同一同步批里启动，模拟真实并发形态。
+    // In production the ACI executor wave starts via Promise.all — launch both handler
+    // calls in one synchronous batch to mimic the real concurrent shape.
     const [a, b] = await Promise.all([
       invokeSkill(tool, { name: "echo" }, ctx),
       invokeSkill(tool, { name: "echo" }, ctx),
@@ -331,7 +333,7 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
     const dir = join(scratch, "echo");
     await writeEcho(dir);
     const tool = echoTool(dir);
-    // 未知名 + ctx 在场 → 引导句
+    // unknown name + ctx present → guidance line
     const outUnknown = await invokeSkill(
       tool,
       { name: "nope" },
@@ -342,14 +344,15 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
     );
     expect(outUnknown).toMatch(/available_skills|read_file/);
 
-    // ctx 整体缺席（slash / 直调 handler 路径）→ 全文
+    // ctx absent entirely (slash / direct handler-call path) → full body
     const outNoCtx = await invokeSkill(tool, { name: "echo" });
     expect(outNoCtx).toContain("Base directory:");
     expect(outNoCtx.trimEnd().endsWith("</skill_files>")).toBe(true);
 
-    // messages 缺席（缝未接）→ fail-closed 灌全文。第一次装配即预记 wave
-    // map（fail-closed 灌的是真实全文，会被 commit 成 tool_result），所以
-    // 同 turnId 第二次短路 —— 与 SC7 语义一致（首次装配成功，第二次不再重装）。
+    // messages absent (seam not wired) → fail-closed loads the full body. The first assembly
+    // already pre-records into the wave map (fail-closed loads the real full body, which gets
+    // committed as a tool_result), so the second same-name call in the same turnId short-circuits
+    // — consistent with the same-wave semantics (first assembly succeeds, the second no longer re-assembles).
     const outNoMessages1 = await invokeSkill(
       tool,
       { name: "echo" },
@@ -377,11 +380,12 @@ describe("skill() 二次短路 — S2 五类（handler 级）", () => {
       turnId: "turn-fail",
       messages: [textMessage("user", "go")],
     };
-    // SKILL.md 缺席 → 第一次装配抛错，预记回滚，错误显形。
+    // SKILL.md absent → the first assembly throws, the pre-record is rolled back, the error surfaces.
     await expect(invokeSkill(tool, { name: "echo" }, ctx)).rejects.toThrow();
 
-    // 恢复文件：同 turnId 第二次同名调用必须重新装配全文（预记已回滚，
-    // 不得返回「already in context」短回执——正文从未入史）。
+    // File restored: a second same-name call with the same turnId must re-assemble the full body
+    // (the pre-record was rolled back; it must not return the "already in context" short receipt —
+    // the body never entered history).
     await writeEcho(dir, "# re-assembled body\n");
     const second = await invokeSkill(tool, { name: "echo" }, ctx);
     expect(second).toContain("Base directory:");
@@ -482,7 +486,7 @@ describe("skill() 二次短路 — SC2/SC3 场景", () => {
     expect(second.length).toBeGreaterThan(0);
     expect(second).not.toContain("procedure line");
     expect(second.length).toBeLessThan(first.length / 2);
-    // 短回执语义：已在可见上下文 / 勿再调 / 按先前正文执行
+    // short-receipt semantics: already in visible context / do not call again / act on the earlier body
     expect(second).toContain("already in context");
     expect(second).toContain("Do not call");
   });
@@ -497,7 +501,7 @@ describe("skill() 二次短路 — SC2/SC3 场景", () => {
         "# echo body\nprocedure line\n\nBase directory: /tmp/x\n\n<skill_files>\n/tmp/x/a.md\n</skill_files>"
       ),
     ];
-    // 全文在史 → 短回执
+    // full body in history → short receipt
     const shortCircuited = await invokeSkill(
       tool,
       { name: "echo" },
@@ -508,7 +512,7 @@ describe("skill() 二次短路 — SC2/SC3 场景", () => {
     );
     expect(shortCircuited).not.toContain("procedure line");
 
-    // compact 后：全文被丢，只剩边界占位符（截断窗口外）
+    // after compact: the full body is dropped, only the boundary placeholder remains (outside the truncated window)
     const compacted = [textMessage("user", "[earlier messages compacted]")];
     const refed = await invokeSkill(
       tool,
@@ -522,7 +526,7 @@ describe("skill() 二次短路 — SC2/SC3 场景", () => {
     expect(refed).toContain("Base directory:");
     expect(refed.trimEnd().endsWith("</skill_files>")).toBe(true);
 
-    // 历史只剩短回执（全文已丢）→ 同样重灌全文（回执不算全文）
+    // history holds only the short receipt (full body gone) → reload the full body too (a receipt is not the full body)
     const receiptOnly = [
       textMessage("user", "go"),
       ...skillPair("t2", "echo", shortCircuited),

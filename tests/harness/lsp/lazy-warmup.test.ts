@@ -1,17 +1,19 @@
 /**
- * Locked sentence 5 钉（plans/session-fg-handoff-interrupt.md §Locked sentences
- * / Task 6）：未发生 `lsp_*`（及同族符号工具）调用前，装配不得 warmup / spawn
- * language server；第一次这类工具调用再起，且同一 engine / worker 只 arm 一次。
+ * Invariant: before any `lsp_*` (or sibling symbol-tool) call, assembly must
+ * not warmup / spawn a language server. The first such call triggers warmup,
+ * and each engine / worker arms at most once.
  *
- * 断言面（ground truth 选择）：
- *   - warmup 唯一的 spawn 入口是 `client.ts` 的 `getClient`（client.ts 是
- *     spawn 单漏斗，见 `getClientDetailed` 的 `spawnClient` 调用点），故以
- *     `getClient` mock 的调用次数作为「warmup 是否真的去 spawn」的判据；
- *   - 触发点 = `LoopEngineDeps.registry.get(name)` —— loop-engine 工具相位里
- *     唯一的按名解析点（`runToolPhase` → `partitionConcurrencyWaves` 分类），
- *     每个模型工具调用必经。engine / worker 两条装配路径都覆盖。
- *   - 样本文件真建在临时根上（warmup 按扩展名扫盘选 server），单个 `.ts`
- *     样本 ⇒ 一次 warmup 恰好一次 getClient：次数 1 与 2 有判别力。
+ * Assertion surface (why these are the ground truth):
+ *   - `getClient` in `client.ts` is the single spawn funnel for warmup (see
+ *     the `spawnClient` call site in `getClientDetailed`), so counting
+ *     `getClient` mock calls answers "did warmup actually try to spawn";
+ *   - the trigger point is `LoopEngineDeps.registry.get(name)` — the only
+ *     name-resolution site in the loop-engine tool phase (`runToolPhase` →
+ *     `partitionConcurrencyWaves` classification), hit by every model tool
+ *     call. Both engine and worker assembly paths are covered.
+ *   - the sample file really lives on a temp root (warmup scans by extension
+ *     to pick servers), and a single `.ts` sample ⇒ exactly one getClient per
+ *     warmup, so counts 1 vs 2 are distinguishable.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -40,8 +42,9 @@ const { mockGetClient, mockEnsureOpen } = vi.hoisted(() => ({
   mockEnsureOpen: vi.fn(),
 }));
 
-// 只替换 getClient（warmup 的 spawn 入口）；getClientDetailed 及其余导出透传真实
-// 实现 —— 装配与本文件都不执行真实 handler，不会真起 language server。
+// Mock only getClient (warmup's spawn entry); getClientDetailed and all other
+// exports pass through to the real implementation — neither assembly nor this
+// file runs real handlers, so no language server is ever actually spawned.
 vi.mock("../../../src/harness/lsp/client.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../src/harness/lsp/client.js")>();
@@ -60,14 +63,14 @@ function makeRoot(prefix: string): string {
   return root;
 }
 
-/** 一个 `.ts` 样本 ⇒ 只有 typescript server 命中 warmup 扫描。 */
+/** One `.ts` sample ⇒ only the typescript server matches warmup's scan. */
 function makeRootWithTsSample(prefix: string): string {
   const root = makeRoot(prefix);
   writeFileSync(join(root, "a.ts"), "export const a = 1;\n");
   return root;
 }
 
-/** fire-and-forget 的观察窗：给后台 warmup 落地的时间。 */
+/** Observation window for fire-and-forget: lets a background warmup land. */
 const flush = (ms = 60): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -155,7 +158,7 @@ afterAll(async () => {
   }
 });
 
-// ── 1. 装配：不 warmup、不 spawn（acceptance） ─────────────────────────────────
+// ── 1. assembly: no warmup, no spawn (acceptance) ────────────────────────────
 
 describe("装配完成且从未调用 language-server 工具 → warmup 不 spawn", () => {
   it("engine 装配（根上有 .ts 样本）→ getClient 零调用、outcome 仍未 settle", async () => {
@@ -163,9 +166,10 @@ describe("装配完成且从未调用 language-server 工具 → warmup 不 spaw
 
     await buildEngine(root);
 
-    // 给 fire-and-forget 一个落地窗口：warmup 若在装配期被 arm，它会异步跑，
-    // 不经这格就断言等于还没等到那件事发生；经过这格仍是零调用才说明它压根
-    // 没被 arm。
+    // Give fire-and-forget a landing window: if warmup were armed during
+    // assembly it would run async, and asserting without waiting would just
+    // mean we hadn't waited long enough; zero calls after this window proves
+    // it was never armed at all.
     await flush();
     expect(mockGetClient).not.toHaveBeenCalled();
     expect(getWarmupOutcome()).toBeUndefined();
@@ -182,7 +186,7 @@ describe("装配完成且从未调用 language-server 工具 → warmup 不 spaw
   });
 });
 
-// ── 2. 首次 language-server 工具名解析：arm 一次 ──────────────────────────────
+// ── 2. first language-server tool-name resolution: arm once ──────────────────
 
 describe("首次 language-server 工具调用 arm warmup（恰好一次）", () => {
   it("engine deps.registry：非 LSP 名不 arm；find_symbol arm 一次；同族后续不再 arm", async () => {
@@ -190,24 +194,27 @@ describe("首次 language-server 工具调用 arm warmup（恰好一次）", () 
     const engine = await buildEngine(root);
     const registry = engine.deps.registry;
 
-    // 包装视图必须原样透传（list 非空且含符号工具，get 命中原 registry）。
+    // The wrapped view must pass through unchanged (list non-empty with
+    // symbol tools, get hits the original registry).
     expect(registry.list().map((d) => d.name)).toContain("find_symbol");
 
-    // 非 language-server 工具名解析（含高频常驻件）→ 不 arm。
+    // Resolving non-language-server tool names (incl. hot resident tools) → no arm.
     expect(registry.get("read_file")).toBeDefined();
     expect(registry.get("bash")).toBeDefined();
     await flush();
     expect(mockGetClient).not.toHaveBeenCalled();
 
-    // 第一次 language-server 工具调用 → arm（fire-and-forget，同步返回）。
+    // First language-server tool call → arm (fire-and-forget, returns sync).
     expect(registry.get("find_symbol")).toBeDefined();
     await vi.waitFor(() => expect(mockGetClient).toHaveBeenCalledTimes(1), {
       timeout: 5_000,
     });
 
-    // 同族其余两族（改工具 / 坐标面）与重复解析 → 不再 arm。
+    // Sibling families (mutate tools / coordinate surface) and repeat
+    // resolution → no re-arm.
     expect(registry.get("rename_symbol")).toBeDefined();
-    // 坐标面 `lsp_*` 已退役出模型面 → 名解析为 undefined；这里只钉「不再 arm」。
+    // The `lsp_*` coordinate surface has retired from the model surface →
+    // resolves to undefined; this only pins "no re-arm".
     expect(registry.get("lsp_hover")).toBeUndefined();
     expect(registry.get("find_symbol")).toBeDefined();
     await flush();
@@ -229,16 +236,19 @@ describe("首次 language-server 工具调用 arm warmup（恰好一次）", () 
 
   it("视图的判定名集 = 工具层 SSOT 的 15 件符号工具（无静默漏网）", async () => {
     const ssot = [...SYMBOL_QUERY_TOOL_NAMES, ...SYMBOL_MUTATE_TOOL_NAMES];
-    // 数量断言先于逐个 arm：数组增删一件时它先炸，报的是「SSOT 数量变了」
-    // 而不是 loop 里某一件的 arm 超时。真正的漂移诊断在循环的 `arm for ${name}`
-    // 上（warmup 视图漏判该名 → 该 name 永不 arm）。
+    // Count assertion precedes the per-name arming: when the array grows or
+    // shrinks by one it fails first, reporting "the SSOT count changed"
+    // rather than an arm timeout on some tool inside the loop. The real
+    // drift diagnostic is the per-name `arm for ${name}` message below (the
+    // warmup view missing a name → that name never arms).
     expect(
       ssot,
       "SYMBOL_QUERY_TOOL_NAMES + SYMBOL_MUTATE_TOOL_NAMES 件数变了：新增/删除符号工具时，warmup 视图的判定集（warmup.ts 的 LANGUAGE_SERVER_TOOL_NAMES，取自同一组 SSOT 数组）会同步变化；此处必须同步更新，并确认装配面工具表也是 15 件。"
     ).toHaveLength(15);
     const root = makeRootWithTsSample("lazy-warmup-ssot-");
 
-    // 每个名字单独包一份视图（latch 一次性）→ 逐个观察该名 resolve 是否 arm。
+    // Wrap each name in its own view (the latch is one-shot per view) →
+    // observe per name whether resolving it arms warmup.
     for (const name of ssot) {
       const view = withLazyLspWarmup(
         {
@@ -253,7 +263,7 @@ describe("首次 language-server 工具调用 arm warmup（恰好一次）", () 
         () => expect(mockGetClient, `arm for ${name}`).toHaveBeenCalledTimes(1),
         { timeout: 5_000 }
       );
-      await flush(); // 吸收本轮后台收尾，避免计入下一轮的计数
+      await flush(); // absorb this round's background wrap-up so it doesn't pollute the next count
       mockGetClient.mockClear();
     }
   });

@@ -1,21 +1,23 @@
 /**
- * issue 1059 / ADR-0109 — bash 工具面的 UNBOUND_FENCE 行为。
+ * ADR-0109 — UNBOUND_FENCE behaviour on the bash tool surface.
  *
- * 翻转后 bash 的写保护 = 物理的:handler 入口读 holder + liveTaskRoot 一次
- * 冻结,unbound(gate ON ∧ waveRoot 是主 checkout)时前台 fence 与后台 spawn
- * 叠同一段 `--ro-bind <main> <main>` + `--bind <pad> <pad>`(G3 前后台集合
- * 相等),EROFS 出现时以 `[fs_denied]` 指引回灌 stderr。
+ * After the flip, bash write-protection is physical: the handler entry reads
+ * the holder + liveTaskRoot once and freezes them; when unbound (gate ON ∧
+ * waveRoot is the main checkout), the foreground fence and the background
+ * spawn stack the same `--ro-bind <main> <main>` + `--bind <pad> <pad>`
+ * segment (foreground/background set-equality on this axis), and when EROFS
+ * occurs a `[fs_denied]` guidance is appended back to stderr.
  *
- * 断言面:
- *   - fence argv(mock runInSandbox / node:child_process spawn 捕获真实
- *     createBwrapFence 产物,与 fs-mode-propagation C 段同款);
- *   - envelope stderr(EROFS 回灌:有/无指引的字节同一性对照);
- *   - 入口 vintage:handler 执行中翻 holder 不渗透进本次调用。
+ * Assertion surface:
+ *   - fence argv (mock runInSandbox / node:child_process spawn to capture the
+ *     real createBwrapFence output, same shape as the fs-mode-propagation C section);
+ *   - envelope stderr (EROFS back-fill: byte-identity control between with/without guidance);
+ *   - entry vintage: flipping the holder mid-handler does not leak into the current call.
  *
- * bound / holder OFF / holder 缺席三态的 argv 与基线 byte-identical —— SC3
- * (bound / gate OFF 档逐字节不变)的工具层形态;argv 段序合同在
- * tests/harness/sandbox/bwrap.test.ts,纯函数合同在
- * tests/harness/isolation/worktree-gate.test.ts。
+ * The bound / holder-OFF / holder-absent states stay byte-identical to the
+ * baseline argv — the tool-layer form of "bound / gate-OFF tiers unchanged";
+ * the argv segment-order contract lives in tests/harness/sandbox/bwrap.test.ts
+ * and the pure-function contract in tests/harness/isolation/worktree-gate.test.ts.
  */
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
@@ -33,9 +35,9 @@ import {
   vi,
 } from "vitest";
 
-// 前台:挡掉真 bwrap 探测与真执行,捕获 fence。后台:defaultBackgroundSpawn
-// 走 node:child_process.spawn,替身只取 argv(被测系统 = handler 装配 + 真
-// createBwrapFence)。
+// Foreground: block the real bwrap probe and real execution, capture the fence.
+// Background: defaultBackgroundSpawn goes through node:child_process.spawn; the
+// substitute only takes the argv (system under test = handler assembly + real createBwrapFence).
 vi.mock("../../../src/harness/sandbox/runner.js", async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -245,7 +247,7 @@ describe("bash UNBOUND_FENCE — 前台/后台物理段 (issue 1059 / G3)", () =
       const bareArgv = await foregroundArgv(
         makeTool({ mainCheckout: MAIN, pad: PAD, holder: undefined })
       );
-      // MAIN 本身是 cwd,普通 rw bind 合法携带;unbound 段的特征是 --ro-bind 三重奏。
+      // MAIN is the cwd itself, so a plain rw bind legitimately carries it; the unbound segment's signature is the --ro-bind triple.
       expect(tripleIdx(offArgv, "--ro-bind", MAIN)).toBe(-1);
       assert.deepEqual([...offArgv], [...bareArgv]);
     }
@@ -271,7 +273,7 @@ describe("bash UNBOUND_FENCE — 前台/后台物理段 (issue 1059 / G3)", () =
     const PAD = makeScratch("unbound-pad-");
     const holder = makeHolder(true);
     const tool = makeTool({ mainCheckout: MAIN, pad: PAD, holder });
-    // 执行中段翻 OFF:本次调用的 fence 段与 EROFS 回灌都必须按入口快照走。
+    // Flip OFF mid-execution: this call's fence segment and EROFS back-fill must both follow the entry snapshot.
     vi.mocked(runInSandbox).mockImplementation(async () => {
       holder.set(false);
       return {
@@ -284,7 +286,7 @@ describe("bash UNBOUND_FENCE — 前台/后台物理段 (issue 1059 / G3)", () =
     const argv = foregroundArgvFromMock();
     expect(tripleIdx(argv, "--ro-bind", MAIN)).toBeGreaterThan(-1);
     expect(envelope.stderr).toContain("[fs_denied]");
-    // 下一次调用按新 vintage 装配:段消失。
+    // The next call assembles under the new vintage: the segment disappears.
     vi.mocked(runInSandbox).mockResolvedValue({
       exitCode: 0,
       stdout: "",
@@ -325,7 +327,7 @@ describe("bash EROFS 回灌 — [fs_denied] 指引 (issue 1059)", () => {
     expect(envelope.stderr).toContain("create-worktree");
     expect(envelope.stderr).toContain("re-issue this same command");
     expect(envelope.stderr).toContain("/repo/f.txt");
-    // 原文不被吞:指引是追加,EROFS 原始行仍在
+    // The original is not swallowed: guidance is appended, the raw EROFS line stays
     expect(envelope.stderr).toContain(EROFS_STDERR.trim());
   });
 
@@ -393,7 +395,7 @@ describe("bash EROFS 回灌 — [fs_denied] 指引 (issue 1059)", () => {
     const envelope = parseBash(
       await unboundTool(MAIN, PAD).handler({ command: "touch many" })
     );
-    // 原文 7 行全部保留(回灌是追加);上限只作用于指引里的 attempted paths 段。
+    // All 7 original lines stay (the back-fill is append-only); the cap only applies to the attempted-paths section inside the guidance.
     expect(envelope.stderr).toContain("f6.txt");
     const guidance = envelope.stderr.slice(
       envelope.stderr.indexOf("[fs_denied]")

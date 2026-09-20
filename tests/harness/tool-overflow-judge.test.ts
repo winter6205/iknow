@@ -1,20 +1,23 @@
 /**
- * B6 / ADR-0043 §3 — 溢出治理判定函数（纯逻辑）单测。
+ * Unit tests for the overflow-governance judge (pure logic) — ADR-0043 §3.
  *
- * 测四个不变量：
- *   1. **未超阈值**（countTokens 总量 <= 阈值）→ 全部 deferrable 内建件保持
- *      常驻（无 stamp lazy: true），核心件不参与（永不退场）。
- *   2. **超阈值**（countTokens 总量 > 阈值）→ 按退场次序（面积 × 低频）从大
- *      到小逐件退：每退一件重算 countTokens，退出循环当 ≤ 阈值或无可退。
- *   3. **核心件永不退场**（bash / read_file / edit_file / write_file / grep /
- *      glob / spawn_subagent 即使标 deferrable 也不参与退场）。
- *   4. **countTokens 失败 / 缺席** → 跳过本会话（全部 deferrable 内建件保持
- *      常驻，不抛错）。
+ * Four invariants:
+ *   1. **Below threshold** (countTokens total <= threshold) → all deferrable
+ *      built-ins stay resident (no `lazy: true` stamp); core tools never
+ *      participate (never retired).
+ *   2. **Over threshold** (countTokens total > threshold) → retire one tool
+ *      at a time in retirement order (large surface × low frequency),
+ *      recomputing countTokens after each, exiting when <= threshold or
+ *      nothing is left to retire.
+ *   3. **Core tools are never retired** (bash / read_file / edit_file /
+ *      write_file / grep / glob / spawn_subagent stay even if marked deferrable).
+ *   4. **countTokens failure / absence** → skip for this session (all
+ *      deferrable built-ins stay resident, no throw).
  *
- * 判定函数是**纯逻辑**：`runOverflowJudge(tools, getCountTokens, threshold)` →
- * `{ retire: string[]; reason: "no_overflow" | "retired" | "countTokens_failed" }`。
- * 测不绑 build-engine（与 build-engine-mcp-startwire.test.ts 的 wire 风格一致
- * —— 这里是判定单测，wire 验证在 build-engine-tool-overflow.test.ts 跑）。
+ * The judge is **pure logic**: `runOverflowJudge(tools, getCountTokens, threshold)` →
+ * `{ retire: string[]; reason: "no_overflow" | "retired" | "countTokens_failed" }`.
+ * Not bound to build-engine — this is the judge unit test; wire verification
+ * lives in build-engine-tool-overflow.test.ts.
  */
 
 import { describe, it } from "vitest";
@@ -52,9 +55,9 @@ function makeTool(
 
 describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
   it("DEFERRABLE_BUILTIN_RETIRE_ORDER 锁死退场次序:trace 读侧三件 → web → 其余", () => {
-    // 预置次序 (B6 plan §3 + ADR-0043 §3):trace 读侧三件 →
-    // web_search / web_fetch → 其余低频查询件。锁定 = 测试碰到任意次序漂
-    // 移立即红。
+    // Preset order (ADR-0043 §3): trace read-side trio →
+    // web_search / web_fetch → remaining low-frequency query tools. Pinning it
+    // means any order drift turns this test red immediately.
     assert.deepEqual(
       [...DEFERRABLE_BUILTIN_RETIRE_ORDER],
       ["query_trace", "list_sessions", "get_record", "web_search", "web_fetch"]
@@ -71,11 +74,11 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
       makeTool("web_search", { deferrable: true }),
       makeTool("web_fetch", { deferrable: true }),
     ];
-    // 阈值 100_000;模拟实测 5_000 < 阈值 → 无退场
+    // threshold 100_000; simulated measurement 5_000 < threshold → no retirement
     const result = await runOverflowJudge({
       tools,
       threshold: 100_000,
-      // 实测：tool 列表整体 + system 文本的 token 数（5_000 tok 远低于 100_000）
+      // measurement: tokens of the whole tool list + system text (5_000 tok, far below 100_000)
       countTokens: async () => 5_000,
     });
     assert.equal(result.reason, "no_overflow");
@@ -92,8 +95,8 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
       makeTool("web_search", { deferrable: true }),
       makeTool("web_fetch", { deferrable: true }),
     ];
-    // 阈值 10_000;模拟"全部 deferrable = 30_000 → 退 1 件后 24_000 → 再退
-    // 1 件后 18_000 → 再退 1 件后 12_000 → 再退 1 件后 6_000 ≤ 阈值"。
+    // threshold 10_000; simulate "all deferrable = 30_000 → after retiring 1: 24_000
+    // → 2nd: 18_000 → 3rd: 12_000 → 4th: 6_000 <= threshold".
     const measurements = [30_000, 24_000, 18_000, 12_000, 6_000];
     let callIdx = 0;
     const result = await runOverflowJudge({
@@ -106,8 +109,8 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
         return v;
       },
     });
-    // 退场次序:query_trace → list_sessions → get_record → web_search
-    // (web_fetch 不退,因为退到 web_search 已 ≤ 阈值)
+    // Retirement order: query_trace → list_sessions → get_record → web_search
+    // (web_fetch is not retired, because by web_search the total is already <= threshold)
     assert.equal(result.reason, "retired");
     assert.deepEqual(result.retire, [
       "query_trace",
@@ -115,13 +118,13 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
       "get_record",
       "web_search",
     ]);
-    // 测量次数:首测 1 次 + 每退 1 件重测 1 次 = 1 + 4 = 5 次
+    // Measurement count: 1 initial + 1 re-measure per retirement = 1 + 4 = 5
     assert.equal(callIdx, 5);
   });
 
   it("核心件永不退场:即使被标 deferrable 也不参与判定", async () => {
     const tools: AciToolDef[] = [
-      // 即使尝试标 deferrable:true,核心件在退场时跳过(SSR 不变)
+      // even with deferrable:true attempted, core tools are skipped at retirement (residency invariant)
       makeTool("bash", { deferrable: true }),
       makeTool("read_file", { deferrable: true }),
       makeTool("edit_file", { deferrable: true }),
@@ -131,14 +134,14 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
       makeTool("spawn_subagent", { deferrable: true }),
       makeTool("query_trace", { deferrable: true }),
     ];
-    // 阈值 1_000;模拟每次都超阈值——但核心件永不参与退场
+    // threshold 1_000; simulate over-threshold every time — but core tools never participate
     const result = await runOverflowJudge({
       tools,
       threshold: 1_000,
       countTokens: async () => 5_000,
     });
-    // 全部 deferrable 内建件(仅 query_trace)都退完仍超阈 → retire 含
-    // query_trace(仅有的 1 件),但核心件零参与
+    // all deferrable built-ins (only query_trace) retired and still over threshold →
+    // retire includes query_trace (the sole candidate), but zero core participation
     assert.equal(result.reason, "retired");
     assert.ok(result.retire.includes("query_trace"));
     for (const core of [
@@ -170,7 +173,7 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
         throw new Error("API down");
       },
     });
-    // 失败 = 跳过,retire 必空(reason 标记以便调用方打 warn)
+    // failure = skip, retire must be empty (reason is flagged so callers can warn)
     assert.equal(result.reason, "countTokens_failed");
     assert.deepEqual(result.retire, []);
   });
@@ -186,8 +189,9 @@ describe("runOverflowJudge — ADR-0043 §3 溢出治理判定", () => {
       threshold: 1_000,
       countTokens: async () => 5_000,
     });
-    // 无 deferrable → 退场池为空 → reason:no_overflow(本会话无超限退场
-    // 动作,核心件永不退场 → 静默保留;调用方无须 warn,因为池就是空)
+    // no deferrable → retirement pool empty → reason:no_overflow (no over-threshold
+    // retirement happened this session; core tools never retire → kept silently;
+    // callers need no warn, the pool is simply empty)
     assert.equal(result.reason, "no_overflow");
     assert.deepEqual(result.retire, []);
   });

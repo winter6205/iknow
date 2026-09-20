@@ -1,15 +1,12 @@
 /**
- * #121 T5: memory_save tool tests.
+ * Tests for the memory_save tool.
  *
- * Spec: specs/121-memory-injection.md (Project Structure tools/save.ts,
- * Testing Strategy tools-save half, SC 6/7/9).
- *
- * Contract (SC 6/7/9):
+ * Contract:
  *   - first save creates `<pool>/projects/<slug>/memory/MEMORY.md`
  *     + `<slug>.md`
  *   - input `{ title, body, type?, importance? }`
- *   - affirmative phrasing rejection (spec SC 9): `don't` / `never` / `禁止` /
- *     `不要` / `不能` / body starting with `not ` → MemoryError (typed)
+ *   - affirmative phrasing rejection: `don't` / `never` / `禁止` ("forbidden") /
+ *     `不要` ("do not") / `不能` ("cannot") / body starting with `not ` → MemoryError (typed)
  *   - atomic write (tmp/rename); frontmatter auto-writes 6 fields + timestamp
  *   - slug naming (implementation choice: hash-based, collision-safe under
  *     concurrent save)

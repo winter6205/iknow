@@ -1,31 +1,40 @@
 /**
- * egress credential 集成臂 — T7（specs/egress-credential-sentinel.md §T7 +
- * specs/egress-credential-sentinel.md / ADR-0105（T7 集成验收）。
+ * Egress credential integration arm (specs/egress-credential-sentinel.md,
+ * ADR-0105 integration acceptance).
  *
- * 钉住的不变式（全真实件，不 mock 上游）：
- *   - 真起代理 = createEgressSession 完整装配链（铸造 → mitmCA → 代换
- *     接线 → listen）；客户端经 `spec.unixSocketPath`（生产访问面：围栏内
- *     中继 → unix socket → 宿主代理）直连；
- *   - 自建 HTTPS echo server：证书 = 同一持久 CA 经 `mintLeafCert` 铸造，
- *     代理经 `tlsTerminateUpstreamCA` 信任测试上游根；回环目标经
- *     `localhost` loopback 名原生放行通道（guard 内建语义），地址判定
- *     注入 seam = `policy.deniedResolvedAddresses`——生产档位不放宽
- *     （Assumption 12，本测试不使用该覆盖档位，走 localhost 语义）；
- *   - SC3 三臂：放行域 ∧ injectHosts 命中 → echo 收到真值（header + body
- *     各 1 例）；条目收窄到别域 → 假值原样到达；非放行域 → 既有 403 面
- *     不变 + 违例留痕；
- *   - SC6：`Content-Encoding` 请求体原样透传（假值不动）+
- *     `substitution-skipped` 诊断痕（header 臂仍代换）；
- *   - SC11：dispose → registry 清空 / masked store 目录删除 / trust
- *     bundle 临时件删除 / socket 不留 stale。
+ * Pinned invariants (all real components, upstream not mocked):
+ *   - the proxy really starts, through the full createEgressSession
+ *     assembly chain (mint → mitmCA → substitution wiring → listen);
+ *     clients connect directly via `spec.unixSocketPath` (the production
+ *     access face: in-fence relay → unix socket → host proxy);
+ *   - self-built HTTPS echo server: its cert is minted by `mintLeafCert`
+ *     from the same persistent CA, and the proxy trusts the test upstream
+ *     root via `tlsTerminateUpstreamCA`; the loopback target goes through
+ *     the native `localhost` pass channel (guard built-in semantics); the
+ *     address-check injection seam is `policy.deniedResolvedAddresses` —
+ *     production mode is not relaxed (Assumption 12; this test does not use
+ *     that override, it rides the localhost semantics);
+ *   - three substitution arms: allowed domain ∧ injectHosts hit → echo
+ *     receives the real value (one header + one body case); entry narrowed
+ *     to another domain → the fake value arrives untouched; non-allowed
+ *     domain → the existing 403 face unchanged + a violation trace;
+ *   - a `Content-Encoding` body is passed through verbatim (fake value
+ *     untouched) + a `substitution-skipped` diagnostic trace (the header
+ *     arm is still substituted);
+ *   - dispose → registry cleared / masked store dir deleted / temp trust
+ *     bundle deleted / no stale socket left.
  *
- * 能力 guard（显式 skip + Not run，纪律同 tests-real-llm）：仅当真实
- * egress 桥可起时运行——probe = 真建一次 session，不检查错误类名（集成
- * 态类名已换代，判据只认「能不能真起来」）。本分支基底 master 仍是 socat
- * 桥而宿主无 socat → 全臂 skip；三线会师的集成态运行真绿。
+ * Capability guard (explicit skip + Not run, same discipline as
+ * tests-real-llm): runs only when a real egress bridge can start — the
+ * probe builds one session for real and checks no error class name
+ * (integration-era class names churn; only "can it actually start"
+ * counts). On a host whose bridge cannot start, every arm skips; the
+ * merged integration state runs for the real-green claim.
  *
- * 最高危安全纪律：本文件只使用生成 fixture「真值」，绝不读取宿主真实
- * 凭据（hostEnv / fixture 文件全注入）；断言面向自建 echo server。
+ * Top-severity safety discipline: this file only uses generated-fixture
+ * "real values" and never reads host real credentials (hostEnv / fixture
+ * files are fully injected); all assertions target the self-built echo
+ * server.
  */
 
 import {
@@ -57,7 +66,7 @@ import {
 import { loadEgressCa } from "../../../src/harness/sandbox/egress/ca-store.js";
 import type { EgressCredentialRoster } from "../../../src/harness/sandbox/egress/credential-assembly.js";
 
-// ── fixture 材料（生成假「真值」，与宿主凭据无关）─────────────────────────
+// ── fixture material (generated fake "real values", unrelated to host credentials) ──
 
 const HIT_ENV = "IKNOW_T7_HIT_TOKEN";
 const NARROW_ENV = "IKNOW_T7_NARROW_TOKEN";
@@ -67,7 +76,7 @@ const REAL_FILE = `fixture-file-${randomBytes(24).toString("hex")}`;
 const TEST_HOST = "localhost";
 const DENIED_HOST = "denied.example.invalid";
 
-/** 能力 probe：真实 egress 桥能否建立（不窥探错误类型，只看成败）。 */
+/** Capability probe: whether a real egress bridge can be established (success/failure only, no error-type peeking). */
 async function probeRealEgressBridge(): Promise<boolean> {
   let session: EgressSession | undefined;
   try {
@@ -85,7 +94,7 @@ async function probeRealEgressBridge(): Promise<boolean> {
     try {
       await session?.dispose();
     } catch {
-      // probe 收尾 best-effort，不影响判定
+      // probe teardown is best-effort and does not affect the verdict
     }
   }
 }
@@ -175,7 +184,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
       onCredentialMint: (c) => {
         credRes = c;
       },
-      // 生产默认代理 + 测试档位一条：信任自建 echo server 的上游根。
+      // production default proxy + one test override: trust the self-built echo server's upstream root.
       createHttpProxyServer: (opts) =>
         createHttpProxyServer({
           ...opts,
@@ -194,7 +203,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     try {
       await session?.dispose();
     } catch {
-      // afterAll 兜底，dispose 判据在专用测试里已 assert
+      // afterAll backstop; the dispose verdicts are asserted in a dedicated test
     }
     await new Promise<void>((resolve) => {
       if (!echoServer) resolve();
@@ -205,7 +214,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     }
   }, 30_000);
 
-  /** 拨通桥入口（生产访问面：unix socket）。 */
+  /** Dial the bridge inlet (production access face: unix socket). */
   function dialBridgeSocket(): Promise<net.Socket> {
     return new Promise((resolve, reject) => {
       const sock = net.connect({ path: session.spec.unixSocketPath });
@@ -216,7 +225,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
       const onConnect = (): void => {
         sock.off("error", onErr);
         sock.on("error", () => {
-          // 运行期错误由后续读取路径各自处理
+          // runtime errors are handled by the later read paths
         });
         resolve(sock);
       };
@@ -238,7 +247,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     );
   }
 
-  /** 读到代理 CONNECT 应答头块结束（返回含 status line 的文本）。 */
+  /** Read until the end of the proxy CONNECT response header block (text includes the status line). */
   function readProxyGreeting(sock: net.Socket): Promise<string> {
     return new Promise((resolve, reject) => {
       let acc = Buffer.alloc(0);
@@ -261,7 +270,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     });
   }
 
-  /** CONNECT + MITM TLS 隧道（客户端信任代理 CA）。 */
+  /** CONNECT + MITM TLS tunnel (the client trusts the proxy CA). */
   async function openTlsTunnel(hostname: string): Promise<tls.TLSSocket> {
     const sock = await dialBridgeSocket();
     writeConnectRequest(sock, hostname, echoPort);
@@ -287,7 +296,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     });
   }
 
-  /** 一次请求一次隧道（Connection: close，读满即返）。 */
+  /** One request per tunnel (Connection: close, resolves when the stream ends). */
   async function oneShot(
     sock: tls.TLSSocket,
     method: string,
@@ -327,7 +336,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     });
   }
 
-  /** 开隧道 → 发一次请求 → 收尾。返回 echo server 侧最后一条捕获。 */
+  /** Open tunnel → send one request → teardown. Returns the newest echo-server capture. */
   async function requestThroughArm(
     method: string,
     headers: Record<string, string>,
@@ -400,7 +409,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     expect(cap.body.toString("utf8")).toBe(sent);
     expect(cap.body.toString("utf8")).not.toContain(REAL_NARROW);
     expect(String(cap.headers.authorization)).not.toContain(REAL_HIT);
-    // 合法放行 + 按门不收 → 不得产生违例（方向断言：无多余痕）
+    // allowed pass with no gate collection → no violation may appear (directional assertion: no spurious traces)
     expect(session.violationSink.size()).toBe(sizeBefore);
   });
 
@@ -449,7 +458,7 @@ integrationDescribe("egress credential integration arm (T7)", () => {
     expect(existsSync(storeDir!)).toBe(false);
     expect(existsSync(trustBundle)).toBe(false);
     expect(existsSync(socketPath)).toBe(false);
-    // dispose 幂等（重复调用不抛）
+    // dispose is idempotent (repeat calls do not throw)
     await session.dispose();
   }, 60_000);
 });

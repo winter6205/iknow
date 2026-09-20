@@ -1,14 +1,17 @@
 /**
  * SubagentSpawnRecord / SubagentStopRecord / SubagentStateChangeRecord
- * + recordSubagentSpawn / recordSubagentStop / recordSubagentStateChange (T4, #358 子进程运行时观察).
+ * + recordSubagentSpawn / recordSubagentStop / recordSubagentStateChange
+ * (subagent runtime observation).
  *
- * 契约（对齐 verification.test.ts / goal-trace.test.ts 装配方式：captureWriter + always-throw writer）:
- * 1. jsonl sink 写入三类 record: 行形状 (record_type 字面值 / subagent_id 取调用方 id /
- *    snake_case 顶层 key / conversation_id 实例绑定 / 无重复 id 载体 / ISO ts)
- * 2. 可选字段缺席 (model/taskPreview/maxTurns/timeoutMs/error/exitCode/signal/
- *    reason/summary) → 不写 key (Postel)
- * 3. always-throw writer → 返回 undefined, 不抛 (@throws never)
- * 4. noop 实现返回 undefined (零副作用)
+ * Contracts (mirrors verification.test.ts / goal-trace.test.ts wiring:
+ * captureWriter + always-throw writer):
+ * 1. jsonl sink writes all three record kinds: row shape (record_type literal /
+ *    subagent_id carries the caller-supplied id / snake_case top-level keys /
+ *    conversation_id instance-bound / no duplicate id carrier / ISO ts)
+ * 2. absent optional fields (model/taskPreview/maxTurns/timeoutMs/error/
+ *    exitCode/signal/reason/summary) → key omitted (Postel)
+ * 3. always-throw writer → returns undefined, never throws (@throws never)
+ * 4. noop implementation returns undefined (zero side effects)
  */
 
 import { describe, it } from "vitest";
@@ -24,7 +27,7 @@ import type {
   SubagentStateChangeRecord,
 } from "../../../src/harness/trace/types.ts";
 
-// ─── 调用方提供 id 的最小可行 sample (对齐 manager taskId) ─────────────────
+// ─── minimal samples with caller-provided ids (aligned with manager taskId) ──
 
 const SAMPLE_SPAWN: SubagentSpawnRecord = {
   id: "task-spawn-1",
@@ -34,7 +37,7 @@ const SAMPLE_SPAWN: SubagentSpawnRecord = {
   startedAt: "2026-08-18T00:00:00.000Z",
   status: "ok",
   ts: "2026-08-18T00:00:00.000Z",
-  // Postel 可选: model / taskPreview / maxTurns / timeoutMs 缺省时不落 key
+  // Postel optional: model / taskPreview / maxTurns / timeoutMs — absent ⇒ key not written
   model: "opus",
   taskPreview: "实现 goal 生命周期",
   maxTurns: 5,
@@ -52,7 +55,7 @@ const SAMPLE_STOP: SubagentStopRecord = {
   finalState: "completed",
   status: "ok",
   ts: "2026-08-18T00:00:05.000Z",
-  // Postel 可选: exitCode / signal / reason / summary
+  // Postel optional: exitCode / signal / reason / summary
   exitCode: 0,
   summary: "ok result",
 };
@@ -99,7 +102,7 @@ describe("createJsonlTraceService — recordSubagentSpawn (T4, #358)", () => {
     assert.equal(parsed.record_type, "subagent_spawn");
     assert.equal(parsed.subagent_id, "task-spawn-1");
     assert.equal(parsed.conversation_id, "conv-subagent-spawn");
-    // snake_case 顶层 key
+    // snake_case top-level keys
     assert.equal(parsed.task_id, "task-spawn-1");
     assert.equal(parsed.parent_turn_id, "turn-1");
     assert.equal(parsed.origin, "parent");
@@ -110,7 +113,7 @@ describe("createJsonlTraceService — recordSubagentSpawn (T4, #358)", () => {
     assert.equal(parsed.max_turns, 5);
     assert.equal(parsed.timeout_ms, 7200000);
     assert.equal(parsed.ts, SAMPLE_SPAWN.ts);
-    // 单 id 载体: 顶层不重复落 id (id 已由 subagent_id 承载)
+    // Single id carrier: no duplicate top-level id (subagent_id already carries it)
     assert.equal(parsed.id, undefined);
   });
 
@@ -168,7 +171,7 @@ describe("createJsonlTraceService — recordSubagentStop (T4, #358)", () => {
     assert.equal(parsed.record_type, "subagent_stop");
     assert.equal(parsed.subagent_id, "task-spawn-1");
     assert.equal(parsed.conversation_id, "conv-subagent-stop");
-    // snake_case 顶层 key
+    // snake_case top-level keys
     assert.equal(parsed.task_id, "task-spawn-1");
     assert.equal(parsed.parent_turn_id, "turn-1");
     assert.equal(parsed.origin, "parent");
@@ -180,7 +183,7 @@ describe("createJsonlTraceService — recordSubagentStop (T4, #358)", () => {
     assert.equal(parsed.exit_code, 0);
     assert.equal(parsed.summary, "ok result");
     assert.equal(parsed.ts, SAMPLE_STOP.ts);
-    // 单 id 载体: 顶层不重复落 id (id 已由 subagent_id 承载)
+    // Single id carrier: no duplicate top-level id (subagent_id already carries it)
     assert.equal(parsed.id, undefined);
   });
 
@@ -272,7 +275,7 @@ describe("createJsonlTraceService — recordSubagentStateChange (T4, #358)", () 
     assert.equal(parsed.record_type, "subagent_state_change");
     assert.equal(parsed.subagent_id, "task-spawn-1");
     assert.equal(parsed.conversation_id, "conv-subagent-sc");
-    // snake_case 顶层 key
+    // snake_case top-level keys
     assert.equal(parsed.from_state, "starting");
     assert.equal(parsed.to_state, "running");
     assert.equal(parsed.parent_turn_id, "turn-1");
@@ -343,7 +346,7 @@ describe("createJsonlTraceService — recordSubagentStateChange (T4, #358)", () 
   });
 });
 
-// ─── 真实 FS 落盘验证 ─────────────────────────────────────────────────────
+// ─── real-FS persistence verification ──────────────────────────────────────
 
 describe("createJsonlTraceService — subagent records FS round-trip", () => {
   it("三类 record 落同一 conversationId 文件且行形状正确", async () => {
@@ -369,7 +372,7 @@ describe("createJsonlTraceService — subagent records FS round-trip", () => {
       assert.equal(parsed0["record_type"], "subagent_spawn");
       assert.equal(parsed1["record_type"], "subagent_state_change");
       assert.equal(parsed2["record_type"], "subagent_stop");
-      // subagent_id 跨 record 一致 (reader 配对 spawn/stop 用)
+      // subagent_id is consistent across records (the reader uses it to pair spawn/stop)
       assert.equal(parsed0["subagent_id"], "task-spawn-1");
       assert.equal(parsed1["subagent_id"], "task-spawn-1");
       assert.equal(parsed2["subagent_id"], "task-spawn-1");
@@ -379,7 +382,7 @@ describe("createJsonlTraceService — subagent records FS round-trip", () => {
   });
 });
 
-// ─── noop 路径 ───────────────────────────────────────────────────────────────
+// ─── noop path ─────────────────────────────────────────────────────────────
 
 describe("createNoopTraceService — subagent records (T4, #358)", () => {
   it("recordSubagentSpawn 返回 undefined (零副作用)", async () => {

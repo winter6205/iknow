@@ -1,19 +1,24 @@
 /**
- * ADR-0111 T3: `stream_incomplete` 接通既有重试机器的集成验收。
+ * ADR-0111: integration acceptance that `stream_incomplete` feeds the
+ * existing transport-retry machine.
  *
- * 装配面是真实机器: 真 withTransportRetry + 真 loop-engine run() + 真
- * translateAnthropicTransportFault。stub 只做一件事 —— 每次 attempt 抛
- * adapter 边界产出的 `ModelStreamIncompleteError`(T2 翻译形态)。
+ * Assembled from the real machinery: real withTransportRetry + real
+ * loop-engine run() + real translateAnthropicTransportFault. The stub does
+ * one thing only — throw the `ModelStreamIncompleteError` that the adapter
+ * boundary produces on each attempt.
  *
- * 认证的不变式:
- *  1. 不可见断流 → classifyFault retry → 既有预算(5 attempts)/退避表
- *     (1s/2s/4s/8s)/transport_retry 流事件全部由 withTransportRetry 承载
- *     (本体零改动),耗尽 → TransportRetryExhaustedError → loop 既有收口支
- *     → stopReason protocolError + apiError 在场,整 step 不进历史。
- *  2. 可见断流 → classifyFault none → :141 rethrow typed 错误 → loop
- *     `instanceof ProtocolError` 收口 → 同 stopReason + apiError;零重试。
- *  3. trace 双轨(test.md 契约): JsonlTraceService 事件序列 assert +
- *     NoopTraceService-vs-no-trace deepEqual 基线。
+ * Invariants certified:
+ *  1. invisible stream break → classifyFault retry → existing budget
+ *     (5 attempts) / backoff table (1s/2s/4s/8s) / transport_retry stream
+ *     events, all carried by withTransportRetry untouched; exhaustion →
+ *     TransportRetryExhaustedError → loop's existing convergence branch →
+ *     stopReason protocolError + apiError present; the whole step stays out
+ *     of history.
+ *  2. visible stream break → classifyFault none → typed-error rethrow →
+ *     loop's `instanceof ProtocolError` branch → same stopReason + apiError;
+ *     zero retries.
+ *  3. trace double-track (test.md contract): JsonlTraceService event-sequence
+ *     assert + NoopTraceService-vs-no-trace deepEqual baseline.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -37,15 +42,16 @@ import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 import { parseJsonl } from "./trace/_fixtures.ts";
 
-/** SDK 断流原文形态(T2 哨兵钉住的 `finalMessage()` reject 原因)。 */
+/** Raw SDK stream-break shape: the `finalMessage()` rejection reason the sentinel test pins down. */
 const SDK_SHAPE_MESSAGE =
   "stream ended without producing a Message with role=assistant";
 
 type RetryStub = ModelAdapter & { readonly calls: number };
 
 /**
- * 前 `failures` 次 step 抛 ModelStreamIncompleteError,其后返回成功纯文本
- * (供 best-effort 收尾摘要轮消化,使调用计数保持精确)。
+ * First `failures` step calls throw ModelStreamIncompleteError, later ones
+ * return plain-text success (consumed by the best-effort closing summary
+ * turn, keeping the call count exact).
  */
 function retryStub(opts: {
   readonly failures: number;
@@ -117,24 +123,24 @@ describe("ADR-0111 T3: stream_incomplete 有界重试 → loop 干净收口", ()
         undefined,
         { onStream: (e) => streamEvents.push(e) }
       );
-      // 收口: 干净回合失败,不裸抛(run 正常返回)。
+      // Convergence: clean turn failure, no bare throw (run returns normally).
       assert.equal(result.stopReason, "protocolError");
       assert.equal(result.finalText, null);
       assert.equal(result.turnCount, 0);
-      // 整 step 不提交: 权威历史只剩初始 user 消息。
+      // The whole step stays uncommitted: authoritative history holds only the initial user message.
       assert.equal(result.messages.length, 1);
       assert.equal(result.messages[0]!.role, "user");
-      // apiError 在场(Decision 2(c) 不变式: 带 cause 的瞬时失败 ⇔ 挂摘要)。
-      // 耗尽路径 cause = 最后一次 ModelStreamIncompleteError。
+      // apiError present (ADR-0111 Decision 2(c): transient failure with cause ⇔ summary attached).
+      // Exhaustion path cause = the last ModelStreamIncompleteError.
       assert.deepEqual(result.apiError, {
         message:
           "model stream ended without producing a complete assistant message",
       });
-      // 有界重试 = 既有预算(5 attempts,第 5 次失败即耗尽)+ 既有退避表。
+      // Bounded retry = existing budget (5 attempts, exhaustion on the 5th failure) + existing backoff table.
       assert.deepEqual(delays, [1_000, 2_000, 4_000, 8_000]);
-      // 调用计数: 主相 5 次断流 + 收尾摘要轮 1 次成功(不进主相预算)。
+      // Call count: 5 stream breaks in the main phase + 1 success in the closing summary turn (not charged to the main budget).
       assert.equal(inner.calls, 6);
-      // transport_retry 流事件由既有机器发射,主相 4 次退避各一条。
+      // transport_retry stream events are emitted by the existing machine, one per backoff in the main phase.
       assert.deepEqual(
         streamEvents.filter(
           (e) =>
@@ -149,7 +155,7 @@ describe("ADR-0111 T3: stream_incomplete 有界重试 → loop 干净收口", ()
           detail: "stream_incomplete",
         }))
       );
-      // trace 双轨 assert ①: 事件序列 = 失败 llm_call → 失败 turn → 摘要 ok llm_call。
+      // Trace double-track assert: event sequence = failing llm_call → failing turn → summary ok llm_call.
       const lines = parseJsonl(join(tmpDir, "stream-exhaust.jsonl"));
       const types = lines.map((l) => l["record_type"]);
       assert.deepEqual(types, ["llm_call", "turn", "llm_call"]);
@@ -177,8 +183,8 @@ describe("ADR-0111 T3: stream_incomplete 有界重试 → loop 干净收口", ()
     assert.equal(result.stopReason, "protocolError");
     assert.equal(result.finalText, null);
     assert.equal(result.messages.length, 1);
-    // 零重试: 主相 1 次 + 摘要轮 1 次,无退避、无 transport_retry
-    // (stop_summary 是摘要轮既有事件,不属本 assert 面,故只过滤 transport_retry)。
+    // Zero retries: 1 main-phase call + 1 summary-turn call, no backoff, no transport_retry
+    // (stop_summary is an existing summary-turn event outside this assert surface, so only transport_retry is filtered).
     assert.equal(inner.calls, 2);
     assert.deepEqual(delays, []);
     assert.deepEqual(
@@ -190,7 +196,7 @@ describe("ADR-0111 T3: stream_incomplete 有界重试 → loop 干净收口", ()
       ),
       []
     );
-    // 直抛路径 cause = SDK 原文 → apiError 摘要即 SDK message(Decision 2(c))。
+    // Direct-throw path cause = raw SDK error → apiError summary is the SDK message (ADR-0111 Decision 2(c)).
     assert.deepEqual(result.apiError, { message: SDK_SHAPE_MESSAGE });
   });
 

@@ -1,8 +1,7 @@
 /**
- * T7 (plans/worktree-live-task-root.md §6 T7 / §5 D4) — bash cwd + bwrap
- * fence per-call rebuild against the live `taskRoot` cell.
+ * bash cwd + bwrap fence per-call rebuild against the live `taskRoot` cell.
  *
- * Acceptance focus (named by plan §6 T7):
+ * Acceptance focus:
  *   1. liveTaskRoot flips → next bash call's fence argv binds new cwd
  *      (no factory-time closure on `cwd` capturing the build-time root).
  *   2. wave snapshot is read ONCE per handler invocation — both the foreground
@@ -121,9 +120,10 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
-// T3 闭世界适配:合同根(taskRoot)盘上校验 → 全部根 fixture 用真实目录
-// (mkdtemp),不再用不存在的 "/workspace/*" 假路径。rebind 不变式只依赖
-// 「argv 形状不变、cwd token 随活根走」,与根的具体值无关。
+// The contract root (taskRoot) is validated on disk → all root fixtures use real
+// directories (mkdtemp), never nonexistent "/workspace/*" fake paths. The
+// rebind invariant depends only on "argv shape unchanged, cwd token follows the
+// live root", independent of the concrete root value.
 const REAL_ROOTS: string[] = [];
 function makeRealRoot(name: string): string {
   const dir = mkdtempSync(join(tmpdir(), `bash-lt-${name}-`));
@@ -160,7 +160,7 @@ describe("bash T7: live taskRoot cell drives fence per call", () => {
       `pre-rebind argv must NOT bind reboundRoot; argv=${JSON.stringify(argvPre)}`
     );
 
-    // Rebind: D1 single writer updates the cell.
+    // Rebind: the single writer updates the cell.
     writeLiveTaskRoot(cell, reboundRoot);
 
     // Post-rebind call: handler reads cell → reboundRoot.
@@ -240,8 +240,8 @@ describe("bash T7: live taskRoot cell drives fence per call", () => {
 describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
   it("rebind changes only cwd tokens (every non-cwd position byte-equal)", async () => {
     // For a frozen home / tmpdir pair the only argv deltas across a root
-    // rebind are the cwd tokens themselves. Locks the "argv 形状与顺序
-    // 逐字节不变" contract from plan §5 D4 — only the substring changes,
+    // rebind are the cwd tokens themselves. Locks the "argv shape and order
+    // byte-for-byte unchanged" contract — only the substring changes,
     // not the shape, the order, or the set of flags.
     // Pin a single command across both calls so the byte-equal comparison
     // is not contaminated by command text.
@@ -263,7 +263,7 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
 
     // Length parity is a precondition of the byte-equal comparison below —
     // a length mismatch would mean a new flag slipped in or a flag was
-    // dropped, which is exactly the regression D4 forbids.
+    // dropped, which is exactly the per-call-rebuild regression this pins.
     assert.equal(
       argvRebound.length,
       argvOriginal.length,
@@ -273,7 +273,7 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
     // Every position that held `<originalRoot>` in argvOriginal must hold
     // `<reboundRoot>` in argvRebound, and every other position must be
     // byte-equal. This is the strongest form of "argv shape + order
-    // 逐字节不变" short of producing the exact same string.
+    // byte-for-byte unchanged" short of producing the exact same string.
     for (let i = 0; i < argvRebound.length; i++) {
       if (argvOriginal[i] === originalRoot) {
         assert.equal(
@@ -342,8 +342,9 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
 
 describe("bash T7: wave snapshot (D2) — one read per handler invocation", () => {
   it("handler reads liveTaskRoot: mid-call flip does NOT leak into this call's fence", async () => {
-    // D2 一次入口读一次。同 handler 内反复改 cell 不应影响本次 fence——
-    // handler 在入口读一次冻结局部 waveRoot,贯穿整条路径。
+    // One read per handler entry: flipping the cell mid-call must not affect
+    // this call's fence — the handler freezes a local waveRoot at entry and
+    // carries it through the whole path.
     const initialRoot = makeRealRoot("wave-original");
     const flickeredRoot = makeRealRoot("wave-flickered");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);

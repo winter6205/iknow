@@ -267,7 +267,7 @@ describe("buildClassifierEnvelope", () => {
       reason: "goal 已写入 session store,但 staging 部署步骤未执行",
     });
 
-    // 1. first line carries attempt + verdict + source markers (A8 固定英文).
+    // 1. first line carries attempt + verdict + source markers (fixed English text).
     assert.ok(
       envelope.startsWith(
         "[VALIDATION FAILED] attempt=2/12 verdict=true-failure source=classifier\n"
@@ -276,7 +276,7 @@ describe("buildClassifierEnvelope", () => {
         envelope
     );
 
-    // 2. fixed-shape envelope (A8: 无 command/exit_code/failed_count/signature).
+    // 2. fixed-shape envelope (no command/exit_code/failed_count/signature).
     assert.ok(
       envelope.includes("\ntask: 为 SessionGoal 增加 status 字段并落盘\n")
     );
@@ -287,7 +287,7 @@ describe("buildClassifierEnvelope", () => {
       )
     );
 
-    // 3. command-path fields must NOT appear (A8).
+    // 3. command-path fields must NOT appear.
     assert.equal(envelope.includes("command:"), false);
     assert.equal(envelope.includes("exit_code:"), false);
     assert.equal(envelope.includes("failed_count:"), false);
@@ -449,7 +449,7 @@ describe("buildClassifierEnvelope", () => {
       reason: "judge",
     });
 
-    // A8 explicit: 无 command / exit_code / failed_count / signature
+    // Explicit: no command / exit_code / failed_count / signature fields.
     assert.equal(envelope.includes("command:"), false);
     assert.equal(envelope.includes("exit_code:"), false);
     assert.equal(envelope.includes("failed_count:"), false);
@@ -458,11 +458,13 @@ describe("buildClassifierEnvelope", () => {
 });
 
 /**
- * B5 (#449b) 补跑信封构造器 — B1 OQ1 终稿逐字 + 1-attempt-cap 收尾指令。
- * 不复用 assertEnvelopeShape (绑 command 路径字段); 内联断言。
+ * Rerun-envelope builder tests — asserts the final agreed copy verbatim plus
+ * the rerun-specific closing instruction. assertEnvelopeShape is not reused
+ * (it pins command-path fields); assertions are inlined.
  */
 describe("buildEvidenceRerunEnvelope", () => {
-  // B5 新尾指令, 独立常量 (不复用 VALIDATION_FIXED_INSTRUCTION); 测试端逐字锁。
+  // Rerun-specific tail instruction as its own constant (does not reuse
+  // VALIDATION_FIXED_INSTRUCTION); pinned verbatim test-side.
   const RERUN_INSTRUCTION =
     "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
 
@@ -477,7 +479,7 @@ describe("buildEvidenceRerunEnvelope", () => {
       command: "npm test",
     });
 
-    // B1 OQ1 终稿逐字 (plan/449-verify-evidence-first-loop.md B1 bullet 代码块)。
+    // Final agreed copy, verbatim.
     assert.deepEqual(envelope.split("\n"), [
       "[VERIFY: rerun needed] attempt=1/12",
       "You claimed completion, but the automated evidence check did not find",
@@ -528,7 +530,7 @@ describe("buildEvidenceRerunEnvelope", () => {
       reasons,
       command: "npm test",
     });
-    // 前 5 条按原顺序逐字
+    // First 5 reasons verbatim, original order.
     for (const r of [
       "reason 1",
       "reason 2",
@@ -544,7 +546,7 @@ describe("buildEvidenceRerunEnvelope", () => {
     assert.ok(!envelope.includes("- reason 6"), "must not include 6th reason");
     assert.ok(!envelope.includes("- reason 7"), "must not include 7th reason");
     assert.ok(!envelope.includes("- reason 8"), "must not include 8th reason");
-    // …3 more (省略 8-5=3 条); OQ1 决议: 超出截 …N more 避免 envelope 膨胀
+    // …3 more (8-5=3 omitted); overflow collapses to "…N more" to keep the envelope small
     assert.ok(
       envelope.includes("…3 more"),
       `must append …N more line for omitted reasons\n---\n${envelope}`
@@ -566,7 +568,7 @@ describe("buildEvidenceRerunEnvelope", () => {
       !envelope.includes("- "),
       "empty reasons → no bullet lines\n---\n" + envelope
     );
-    // 其余结构仍完整 (header + body + command + tail)
+    // Remaining structure stays intact (header + body + command + tail)
     assert.ok(envelope.startsWith("[VERIFY: rerun needed]"));
     assert.ok(envelope.includes("  npm test\n"));
     assert.ok(envelope.endsWith(RERUN_INSTRUCTION + "\n"));
@@ -588,7 +590,7 @@ describe("buildEvidenceRerunEnvelope", () => {
       false,
       "must not reuse VALIDATION_FIXED_INSTRUCTION (B5 替换为补跑专属指令)"
     );
-    // 第二末行 = RERUN_INSTRUCTION, 第一末行 = ""
+    // Second-to-last line = RERUN_INSTRUCTION, last line = ""
     const lines = envelope.split("\n");
     assert.equal(lines[lines.length - 2], RERUN_INSTRUCTION);
     assert.equal(lines[lines.length - 1], "");
@@ -629,23 +631,24 @@ describe("buildEvidenceRerunEnvelope", () => {
       reasons: ["x"],
       command: "npm test",
     });
-    // 补跑信封只带: attempt + Missing(reasons) + command + tail (无 exit_code 等)。
+    // The rerun envelope carries only: attempt + Missing(reasons) + command + tail (no exit_code etc.).
     assert.equal(envelope.includes("exit_code:"), false);
     assert.equal(envelope.includes("failed_count:"), false);
     assert.equal(envelope.includes("signature:"), false);
-    // command: 字符串只以 2 空格缩进形式出现 (在 "your next response ..." 之后),
-    // 不应有 "command: npm test" 这种键值对形态。
+    // The command string appears only as the 2-space-indented line after
+    // "your next response ...", never as a "command: npm test" key-value pair.
     assert.equal(envelope.includes("command: npm test"), false);
   });
 });
 
 /**
- * B6 (#449b) buildClassifierEnvelope evidence_context 扩段 — G5-3 证据体检单进
- * 失败修正信封。既有 buildClassifierEnvelope 用例 (上方 describe) 零删除,
- * 本 describe 只追加 evidenceContext 在场/缺席两个方向。
+ * buildClassifierEnvelope evidence_context extension — the evidence checklist
+ * rides inside the failure-fix envelope. The existing buildClassifierEnvelope
+ * cases (describe above) are untouched; this describe only adds the
+ * present/absent directions for evidenceContext.
  */
 describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
-  /** 构造完整 EvidenceContext fixture (含多行 summary 验证截断)。 */
+  /** Full EvidenceContext fixture (multi-line summary exercises truncation). */
   function makeEvidenceContext(): EvidenceContext {
     return {
       checkerVerdict: "EVIDENCE_INSUFFICIENT",
@@ -667,7 +670,7 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
       evidenceContext: makeEvidenceContext(),
     });
 
-    // 段序: missing/reason 之后、evidence_context 之后、固定指令之前。
+    // Section order: after missing/reason, before the fixed instruction.
     const idxEvidence = envelope.indexOf("\nevidence_context:\n");
     const idxReason = envelope.indexOf("\nreason: judge one-liner\n");
     const idxInstruction = envelope.indexOf("\n" + FIXED_INSTRUCTION + "\n");
@@ -683,28 +686,28 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
     );
     assert.ok(envelope.endsWith(FIXED_INSTRUCTION + "\n"));
 
-    // 头部 (missing/reason 段) 与既有 envelope 一致 —— SC10 回归锚。
+    // Header (missing/reason section) must match the plain envelope — regression anchor.
     const headerEnd = idxEvidence + 1;
     const header = envelope.slice(0, headerEnd);
     assert.ok(header.includes("\ntask: goal text\n"));
     assert.ok(header.includes('\nmissing: ["m1"]\n'));
     assert.ok(header.includes("\nreason: judge one-liner\n"));
 
-    // evidence_context 段 deepEqual 行结构 (evidenceSummary 多行块)。
+    // evidence_context section checked line-by-line via deepEqual (multi-line evidenceSummary block).
     const tail = envelope.slice(idxEvidence + 1);
     const tailLines = tail.split("\n");
-    // tail 末三行 = summary末行 + FIXED_INSTRUCTION + ""; 但 summary 自身以 \n
-    // 结尾时, 末行 = "" + FIXED_INSTRUCTION + "". 取 summary 后段。
+    // The tail ends with the summary's last line + FIXED_INSTRUCTION + "";
+    // when the summary itself ends with \n the last line is "". Slice after the summary block.
     const summaryStart =
       tailLines.findIndex((l) => l === "evidence_summary:") + 1;
     assert.ok(summaryStart > 0, "evidence_summary: marker must precede block");
-    const summaryEnd = tailLines.length - 2; // 末 = "" , 末-1 = FIXED_INSTRUCTION
+    const summaryEnd = tailLines.length - 2; // last = "", second-to-last = FIXED_INSTRUCTION
     const summaryLines = tailLines.slice(summaryStart, summaryEnd);
     assert.deepEqual(summaryLines, [
       "npx vitest run exit=1 green=false",
       "pytest exit=0 green=true",
     ]);
-    // 头部 5 行: evidence_context: + checker_verdict + reasons + executed_commands + rerun_attempted。
+    // First 5 tail lines: evidence_context: + checker_verdict + reasons + executed_commands + rerun_attempted.
     assert.deepEqual(tailLines.slice(0, 5), [
       "evidence_context:",
       "checker_verdict: EVIDENCE_INSUFFICIENT",
@@ -730,8 +733,8 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
         evidenceSummary,
       },
     });
-    // evidence_summary 块跟在 evidence_summary: 标记之后, 在 FIXED_INSTRUCTION
-    // 之前; 取该块 = envelope 中 marker 之后到 FIXED_INSTRUCTION 之前的子串。
+    // The evidence_summary block sits between the "evidence_summary:" marker and
+    // FIXED_INSTRUCTION; extract exactly that substring.
     const markerIdx = envelope.indexOf("evidence_summary:\n");
     const instructionIdx = envelope.lastIndexOf(
       "\n" + FIXED_INSTRUCTION + "\n"

@@ -1,9 +1,8 @@
 /**
- * auto-memory T4: `BuiltEngine.autoMemory` wiring.
+ * `BuiltEngine.autoMemory` wiring.
  *
- * Spec: specs/auto-memory.md D1/SC1; ADR-0031 Decision 1/5; ADR-0031 D5
- * amendment 2026-09-11 + specs/runtime-capability-memory-gate.md (SC2 / SC5 /
- * SC8 / SC11). The assembly point is where the opt-in becomes a live hook, so
+ * ADR-0031 Decision 1/5 and the ADR-0031 D5 amendment (runtime-capability
+ * memory gate). The assembly point is where the opt-in becomes a live hook, so
  * this is where the default-OFF promise, the mechanical-only dual-off hook and
  * the `ask` opt-out (ADR-0010 D3) are pinned.
  */
@@ -84,10 +83,10 @@ async function buildIn(
     userHome,
     workspaceRoot: cwd,
     sandboxRoot: cwd,
-    // 本文件验的是 autoMemory 的 opt-in 接线,不验溢出退场 / 索引降档 ——
-    // 那两条路径的专测在 build-engine-tool-overflow.test.ts 与
-    // disclosure-index-align/sc7-index-demotion.test.ts。故旁路装配期
-    // countTokens(缝语义见 BuildEngineOpts.skipCountTokens 注释)。
+    // This file verifies the autoMemory opt-in wiring only, not tool overflow or index
+    // demotion — those paths have dedicated tests in build-engine-tool-overflow.test.ts
+    // and disclosure-index-align/sc7-index-demotion.test.ts. Hence countTokens is
+    // bypassed at assembly time (seam semantics: BuildEngineOpts.skipCountTokens comment).
     skipCountTokens: true,
     ...opts,
   });
@@ -135,7 +134,7 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     // Read-side prefetch still follows autoExtract alone.
     expect(engine.overlayMemoryPrefetch).toBeUndefined();
     expect(engine.memoryFlags).toBeUndefined();
-    // SC2/SC8: below the gate and on an empty store nothing is written at all.
+    // Below the gate and on an empty store nothing is written at all.
     const memoryDir = resolveProjectMemoryDir({
       dataDir: join(userHome, ".iknow"),
       projectIdentityRoot: cwd,
@@ -294,8 +293,8 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
   });
 
   it("wires autoMemory from user settings.json without an injected settings object", async () => {
-    // ADR-0084：memory 是用户层键 → 承载文件是 <userHome>/.iknow/settings.json；
-    // 项目文件里的 memory 段会被允许名单丢弃。
+    // ADR-0084: memory is a user-tier key, so its carrier file is
+    // <userHome>/.iknow/settings.json; a memory section in the project file is dropped by the allowlist.
     const { cwd, userHome } = await isolate();
     await mkdir(join(userHome, ".iknow"), { recursive: true });
     await writeFile(
@@ -309,7 +308,7 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
       userHome,
       workspaceRoot: cwd,
       sandboxRoot: cwd,
-      // 同上:验 settings.json 驱动 autoMemory,不验溢出 / 索引降档。
+      // Same as above: verifies settings.json-driven autoMemory, not overflow or index demotion.
       skipCountTokens: true,
     });
     built.push(engine);

@@ -1,29 +1,38 @@
 /**
- * Tests for `egress/domain-matcher.ts` — SSH 域判定语义钉子（specs/egress-ssh-bridge.md T4 / SC4）。
+ * Tests for `egress/domain-matcher.ts` — SSH domain-decision pins
+ * (specs/egress-ssh-bridge.md).
  *
- * 钉住的不变式：
- *   - assumption 6（引文 domain-pattern.js:106-114，与本 spec 对齐）：「A pattern
- *     without a port matches every port」⇒ preset 的裸 host 条目已覆盖 :22 / :443，
- *     preset 清单无需任何 `:port` 形态条目（零改动结论）。
- *   - invariant 5：批准 / 违例 / 地址守卫的判定输入恒为 (host, port) 纯数据；
- *     `:22` 不引入新配置形态。
- *   - deny 优先无端口例外：host 进 deniedDomains 后 :22 同拒。
+ * Pinned invariants:
+ *   - assumption 6 (quoted from the package's domain-pattern.js, aligned with
+ *     this spec): "A pattern without a port matches every port" ⇒ the bare
+ *     host entries in the preset already cover :22 / :443, so the preset list
+ *     needs zero `:port`-shaped entries (no-change conclusion).
+ *   - invariant 5: the decision inputs for approval / violation / address
+ *     guard are always plain (host, port) data; `:22` introduces no new
+ *     config shape.
+ *   - deny precedence has no port exception: once a host is in
+ *     deniedDomains, :22 is denied too.
  *
- * 测试用显式 policy 输入喂条目（镜像 ADR-0104 preset 形状），不 import preset 模块：
- * preset 清单是并行 PR，本分支上不存在，判定语义不依赖其装配面。
+ * Tests feed explicit policy inputs mirroring the ADR-0104 preset shape; the
+ * preset module is not imported: its list ships in a parallel PR and does not
+ * exist on this branch, so the decision semantics must not depend on that
+ * assembly face.
  *
- * 零生产码改动：本文件是唯一 Surface。若「ssh-port-inherits-bare-host-entry」
- * 转红 = 上游 `matchesDomainPatternWithPort` 升版改语义，唯一改动点是
- * `upstream.ts` 适配层（0097 Dependency fork 纪律），并按 assumption 6 回改
- * specs/egress-ssh-bridge.md，不改 preset spec。
+ * Zero production-code changes: this file is the only surface. If
+ * "ssh-port-inherits-bare-host-entry" turns red, upstream
+ * `matchesDomainPatternWithPort` changed semantics on a version bump; the
+ * only place to adapt is the `upstream.ts` adapter layer (ADR-0097
+ * dependency-fork discipline), re-checking assumption 6 in
+ * specs/egress-ssh-bridge.md — never the preset spec.
  */
 
 import { describe, it, expect } from "vitest";
 import { decideEgress } from "../../../src/harness/sandbox/egress/domain-matcher.js";
 
 /**
- * ADR-0104 preset 六域的**形状镜像**：全部裸 host 条目，零 `:port` 形态。
- * 这是显式测试输入，非对 preset 模块的依赖（后者不在本分支）。
+ * Shape mirror of ADR-0104's six preset domains: all bare host entries, zero
+ * `:port` shapes. This is explicit test input, not a dependency on the preset
+ * module (which is absent on this branch).
  */
 const PRESET_SHAPE_ALLOWED: readonly string[] = [
   "github.com",
@@ -95,15 +104,16 @@ describe("decideEgress — SSH 域判定四态（spec T4 表）", () => {
 
 describe("ssh-port-inherits-bare-host-entry — SC4 回归钉子（preset 零改动前提）", () => {
   it("ssh-port-inherits-bare-host-entry：允许集零 :port 条目时，SSH 端口轴 (:22/:443) 仍由裸 host 条目覆盖", () => {
-    // 前提自检：喂入的条目形态必须是裸 host（零 `:port`）——若哪天有人往这张表
-    // 加了 `github.com:22`，本钉子就失去「preset 无需 :port 条目」的证明力。
+    // Precondition self-check: fed entries must be bare hosts (zero `:port`) —
+    // if anyone ever adds `github.com:22` to this table, the pin loses its proof
+    // power for "the preset needs no :port entries".
     expect(PRESET_SHAPE_ALLOWED.every((entry) => !entry.includes(":"))).toBe(
       true
     );
 
-    // 结论：不带任何 :port 形态条目，SSH 两形态均判 allow。
-    // 翻红 = 上游「pattern without a port matches every port」语义变更
-    // （见文件头处置纪律）。
+    // Conclusion: with zero `:port`-shaped entries, both SSH shapes decide allow.
+    // Turning red = upstream changed the "pattern without a port matches every
+    // port" semantics (see the handling discipline at the file head).
     expect(
       decideEgress({
         host: "github.com",

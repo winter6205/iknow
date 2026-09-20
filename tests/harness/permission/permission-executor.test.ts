@@ -156,7 +156,7 @@ describe("createPermissionExecutor — 5-step chain order", () => {
       capturedMeta = result.meta;
     };
     const { executor: inner } = makeInnerSpy();
-    // inner 返回带 meta 的 ok result(模拟 executor 从 handler envelope 填充)。
+    // inner returns an ok result carrying meta (mirrors the executor filling it from the handler envelope).
     const innerWithMeta: Executor = Object.freeze({
       executeAll: async (
         batch: ReadonlyArray<ToolCall>
@@ -450,10 +450,10 @@ describe("createPermissionExecutor — pre-hook exception → fail-closed", () =
       assert.ok(first.message.includes("pre-hook threw"), first.message);
       assert.ok(first.message.includes("pre-hook blew up"), first.message);
     }
-    // fail-closed：grep 拦下，inner 只收到后续正常放行的 glob（无 grep）
+    // fail-closed: grep is blocked; inner only receives the later, normally released glob (no grep).
     assert.equal(calls.length, 1);
     assert.equal(calls[0]![0]!.name, "glob");
-    // loop 继续：第二个调用正常放行并执行
+    // the loop continues: the second call is released and executes normally.
     const second = result[1]!;
     assert.equal(second.kind, "ok");
   });
@@ -554,8 +554,9 @@ describe("createPermissionExecutor — #global-plugins T2 异步钩子", () => {
     const out = await ex.executeAll([
       { id: "u1", name: "grep", input: { pattern: "*.ts" } },
     ]);
-    // await 语义：executeAll 返回时 post 已跑完（fire-and-forget 的放宽未改变
-    // 「结果返回前 post 已观测」，只是把拒绝收进 catch）
+    // await semantics: post has finished by the time executeAll returns (the
+    // fire-and-forget relaxation keeps "post observed before the result returns"
+    // and only funnels rejections into catch).
     assert.deepEqual(observed, ["post-done"]);
     assert.equal(out[0]!.kind, "ok");
   });
@@ -586,7 +587,7 @@ describe("createPermissionExecutor — #global-plugins T2 异步钩子", () => {
       assert.equal(fired.length, 1);
       assert.equal(fired[0]!.phase, "post");
       assert.ok(fired[0]!.message.includes("async post exploded"));
-      // 让 microtask 队列排空后再断言：无逃逸的 rejected promise
+      // drain the microtask queue before asserting: no escaped rejected promise.
       await new Promise((r) => setTimeout(r, 20));
       assert.deepEqual(rejections, []);
     } finally {
@@ -621,12 +622,12 @@ describe("createPermissionExecutor — post-hook exception → fire-and-forget",
       });
     };
 
-    // 基线：post 无异常
+    // baseline: post without throwing
     const baseline = await make(undefined, () => undefined).executeAll([call]);
     const baselineResult = baseline[0]!;
     assert.equal(baselineResult.kind, "ok");
 
-    // post 抛异常
+    // post throws
     const fired: Array<HookErrorEvent> = [];
     const threw = await make(
       () => {
@@ -656,7 +657,7 @@ describe("createPermissionExecutor — hook-error reason redaction", () => {
       policy,
       askUser: async () => true,
       preToolUse: ({ input }) => {
-        // 异常 message 包含 input 原文（含敏感串）+ 超长填充
+        // the error message embeds the raw input (incl. a secret) plus overlong padding
         throw new Error(`${JSON.stringify(input)} ${"x".repeat(500)}`);
       },
     });
@@ -665,9 +666,9 @@ describe("createPermissionExecutor — hook-error reason redaction", () => {
     const r = result[0]!;
     assert.equal(r.kind, "execution_failed");
     if (r.kind === "execution_failed") {
-      // spec Constraints (b)：组装后的完整 message ≤ 200 字符
+      // the assembled message is capped at 200 chars
       assert.ok(r.message.length <= 200, `message length ${r.message.length}`);
-      // 不回灌原始 input 内容（脱敏核心）
+      // never echo raw input content back (the core of redaction)
       assert.ok(!r.message.includes("sk-secret-abc"), r.message);
       assert.ok(!r.message.includes("id_rsa"), r.message);
     }

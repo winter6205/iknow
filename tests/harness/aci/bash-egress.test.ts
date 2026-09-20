@@ -1,26 +1,28 @@
 /**
- * Tests for `aci/tools/bash.ts` egress wiring — T4 前台 fence 装配 +
- * T5 typed failure 升级（specs/network-egress-allowlist.md §Violation
- * feedback channel 第 2/3 跳「回灌 → 前缀与 tier 入口」）。
+ * Tests for `aci/tools/bash.ts` egress wiring — foreground fence assembly and
+ * typed-failure escalation (specs/network-egress-allowlist.md, violation
+ * feedback channel: feedback → prefix and tier entry).
  *
- * 钉住的不变式（来自 specs/network-egress-allowlist.md §T4 + §T5 + ADR-0097）：
- *   - egressPolicyFactory 缺席 → handler 不起 session,fence 走 V1 baseline
- *     (无 socket bind,无代理 env);
- *   - egressPolicyFactory 返回 policy + 中继产品依赖缺席(seam 注入抛
- *     `EgressRelayUnavailableError`) → handler 抛 typed failure
- *     `ToolExecutionError`,message 含 `[network_denied]` 前缀
- *     + 「egress seam unavailable」infra 文案（不再走 stderr 旁路 —— T5
- *     升级后走通既有 `categorizeResult` 的 `networkDenied → mid` 分支）;
- *   - egressPolicyFactory 返回 undefined → handler 完全跳过 session 尝试;
+ * Pinned invariants (specs/network-egress-allowlist.md + ADR-0097):
+ *   - egressPolicyFactory absent → handler starts no session; the fence takes
+ *     the V1 baseline (no socket bind, no proxy env);
+ *   - factory returns a policy but the relay product dependency is missing
+ *     (the injected seam throws `EgressRelayUnavailableError`) → handler throws
+ *     the typed `ToolExecutionError` whose message carries the
+ *     `[network_denied]` prefix + "egress seam unavailable" infra text (no
+ *     more stderr bypass — it flows through categorizeResult's
+ *     `networkDenied → mid` branch);
+ *   - factory returns undefined → handler skips the session attempt entirely.
  *
- * **不测真实 bwrap+netns 出网**(SC2 真实链路实测由 leader 在收尾阶段用
- * pty 或 probe 承担)。present 路径真起中继 session(裸 http server listen
- * unix socket, ADR-0107)+ 真 spawn bwrap —— 按 bwrap 在场性 gate(CI
- * runner 无 user-namespace 时优雅跳过,本机必跑)。
+ * Not tested here: real bwrap+netns egress (the real chain is measured
+ * out-of-band via pty/probe). The present path really starts a relay session
+ * (bare http server listening on a unix socket, ADR-0107) and really spawns
+ * bwrap — gated on bwrap availability (graceful skip on CI runners without
+ * user-namespace; always runs locally).
  *
- * tier 1→mid 端到端走读见 `bash-egress-typed-failure.test.ts`(走 bash
- * handler 真实返回 → executor → categorizeResult → mid tier,不直接
- * 造 `kind:"execution_failed"`)。
+ * The tier 1→mid end-to-end walkthrough lives in
+ * `bash-egress-typed-failure.test.ts` (real bash handler return → executor →
+ * categorizeResult → mid tier, not a hand-made `kind:"execution_failed"`).
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -38,8 +40,9 @@ afterAll(() => {
   rmSync(FIX_CWD, { recursive: true, force: true });
 });
 
-/** bwrap 在场性 gate —— present 路径真起 fence 子进程（ADR-0107 后
- * 中继 session 装配本身无宿主装包前提，剩下的机器前提只有 bwrap）。 */
+/** bwrap-availability gate — the present path really spawns the fence child
+ *  (since ADR-0107 the relay session assembly itself has no host packaging
+ *  prerequisite; bwrap is the only remaining machine prerequisite). */
 function bwrapAvailable(): boolean {
   const probe = spawnSync("which", ["bwrap"], {
     encoding: "utf8",
@@ -67,14 +70,14 @@ function parseBashEnvelope(envelope: BashEnvelope): BashResult {
 describe("bash handler — egress wiring (T4 expand)", () => {
   it("egressPolicyFactory 缺席 → 无 egress 旁路,handler 走 V1 路径", async () => {
     const tool = createBashTool(FIX_CWD, {
-      // 故意不传 egressPolicyFactory
+      // deliberately omit egressPolicyFactory
     });
     const result = (await tool.handler(
       { command: "true" },
       { conversationId: "conv-no-policy" }
     )) as BashEnvelope;
     const env = parseBashEnvelope(result);
-    // V1 baseline: 无 egress 旁路文案
+    // V1 baseline: no egress bypass text
     expect(env.stderr).not.toContain("[network_denied] egress");
     expect(env.stderr).not.toContain("egress seam unavailable");
   });
@@ -93,8 +96,9 @@ describe("bash handler — egress wiring (T4 expand)", () => {
   });
 
   it("egressPolicyFactory 返 policy + 中继依赖缺席 → 抛 typed failure,message 含 [network_denied] 前缀 (T5 / SC13)", async () => {
-    // 缺席路径经 seam 注入必抛，恒可测、不依赖宿主状态（ADR-0107：
-    // 中继缺席是产品依赖语义，不再有「宿主缺包→降级」的可测性分叉）。
+    // The seam-injected absence path always throws, so this is testable
+    // independent of host state (ADR-0107: a missing relay is a product
+    // dependency semantic; there is no "host lacks a package → degrade" fork).
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => ({
         allowedDomains: ["github.com"],
@@ -117,29 +121,29 @@ describe("bash handler — egress wiring (T4 expand)", () => {
     } catch (err) {
       caught = err;
     }
-    // T5:typed failure（不再是 stderr 旁路 + ok envelope）。
+    // Typed failure (no longer stderr bypass + ok envelope).
     expect(caught).toBeInstanceOf(ToolExecutionError);
     const message = (caught as ToolExecutionError).message;
-    // 含 [network_denied] 前缀 → 让既有 categorizeResult 落到 mid tier。
+    // The [network_denied] prefix routes it into the mid tier via the existing categorizeResult.
     expect(message).toContain("[network_denied]");
-    // 「egress seam unavailable」infra 文案 —— 与域判定拒绝可区分。
+    // "egress seam unavailable" infra text — distinguishable from domain-policy denials.
     expect(message).toContain("egress seam unavailable");
     expect(message).toContain("infrastructure fault");
-    // 修复指引:infra → 不给配置键指引（避免误导）。
+    // Repair guidance: an infra fault must not cite config keys (misleading).
     expect(message).not.toContain("isolation.network.allowedDomains");
     expect(message).toContain("egress relay");
-    // 「命令已跑完」语义提示。
+    // The message signals the command still ran to completion.
     expect(message).toContain("command ran to completion");
   });
 
   it("egressPolicyFactory 返 policy + 中继在场（生产解析路径）→ handler 正常走完(占位 smoke)", async () => {
     if (!bwrapAvailable()) {
-      return; // 无 bwrap 的 CI runner 上此 case 不适用
+      return; // not applicable on CI runners without bwrap
     }
-    // 真中继解析 + 裸 http server listen unix socket + 真 bwrap ——
-    // 消耗 socket 资源,本测试仅断言 handler 不抛 typed error。
-    // SC2 真实链路(curl 经代理出网)由 leader 在收尾阶段用 probe 测,本仓
-    // 只验装配契约。
+    // Real relay resolution + bare http server listening on a unix socket +
+    // real bwrap — consumes socket resources; this test only asserts the
+    // handler does not throw a typed error. The real curl-through-proxy chain
+    // is measured out-of-band via probe scripts; this repo pins the assembly contract.
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => ({
         allowedDomains: ["github.com"],
@@ -152,8 +156,9 @@ describe("bash handler — egress wiring (T4 expand)", () => {
       { conversationId: "conv-relay-present" }
     )) as BashEnvelope;
     const env = parseBashEnvelope(result);
-    // 真 session 起来后,runInSandbox 会真 spawn bwrap,可能因 fence 内
-    // 缺可执行程序而失败 —— 我们只断言 handler 不抛 typed error。
+    // Once the real session is up, runInSandbox really spawns bwrap, which may
+    // fail on a missing executable inside the fence — we only assert the
+    // handler does not throw a typed error.
     expect(typeof env.code).toBe("number");
     expect(typeof env.stderr).toBe("string");
   });

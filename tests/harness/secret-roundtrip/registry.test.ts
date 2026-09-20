@@ -1,16 +1,16 @@
 /**
- * registry.test.ts — T1 secret-roundtrip SSOT — registry.ts 验收。
+ * registry.test.ts — SSOT acceptance tests for secret-roundtrip registry.ts.
  *
- * 覆盖 plan #406 §3 T1:
- *   A3: restore("echo <<<SECRET_1>>>", registry) → "echo sk-..."
- *   边界：空 registry restore → 原样返回
- *   边界：未知 placeholder 透传不抛（跨 session 重启场景）
- *   边界：同 value 多次 register → 同一 placeholder（ID 不重用）
- *   边界：并发 register（多值并发注册各得唯一 ID）
- *   边界：register 触发顺序 → 占位符 ID 单调递增且不重用
- *   不可变：registry 函数冻结 (Object.freeze 顶层)
- *   不可变：entries() 返回的 entries 数组冻结
- *   patterns 字段为冻结的编译集
+ * Coverage:
+ *   restore("echo <<<SECRET_1>>>", registry) → "echo sk-..."
+ *   boundary: empty registry restore → returns input verbatim
+ *   boundary: unknown placeholder passes through without throwing (cross-session restart scenario)
+ *   boundary: repeated register of the same value → same placeholder (IDs never reused)
+ *   boundary: concurrent register (each of several simultaneous values gets a unique ID)
+ *   boundary: register call order → placeholder IDs increase monotonically and are never reused
+ *   immutability: registry functions frozen (top-level Object.freeze)
+ *   immutability: the entries array returned by entries() is frozen
+ *   patterns field is a frozen compiled set
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -77,7 +77,7 @@ describe("createSecretRegistry — 基本 API", () => {
     const reg = createSecretRegistry();
     reg.register("sk-aaaa");
     reg.register("sk-bbbb");
-    reg.register("sk-aaaa"); // 重复
+    reg.register("sk-aaaa"); // duplicate
     const v = reg.values();
     assert.deepEqual(v, ["sk-aaaa", "sk-bbbb"]);
     assert.equal(Object.isFrozen(v), true);
@@ -86,7 +86,7 @@ describe("createSecretRegistry — 基本 API", () => {
   it("patterns 字段为冻结的编译集（构造期编译，运行期不重编译）", () => {
     const reg = createSecretRegistry();
     assert.equal(Object.isFrozen(reg.patterns), true);
-    assert.equal(reg.patterns.length, 7); // DEFAULT_SECRET_PATTERNS 7 条
+    assert.equal(reg.patterns.length, 7); // the 7 DEFAULT_SECRET_PATTERNS
   });
 
   it("自定义 patterns：注入 extras 后 patterns 长度 = 7 + extras", () => {
@@ -97,7 +97,7 @@ describe("createSecretRegistry — 基本 API", () => {
 
   it("非法 extras pattern 被剔除（compilePatterns dropped 语义）", () => {
     const reg = createSecretRegistry({ patterns: ["(", "MY_[0-9]{6}"] });
-    // "(": 非法 → dropped → 不入 compiled;MY_: 合法 → 入 compiled
+    // "(": invalid → dropped → not in compiled; MY_: valid → in compiled
     assert.equal(reg.patterns.length, 8);
     assert.equal(reg.patterns[7]!.source, "MY_[0-9]{6}");
   });
@@ -133,7 +133,7 @@ describe("restore — 占位符 → value 还原", () => {
   it("未知占位符透传不抛（graceful degradation）", () => {
     const reg = createSecretRegistry();
     reg.register("sk-aaaa");
-    // <<<SECRET_99>>> 未注册
+    // <<<SECRET_99>>> is unregistered
     assert.equal(
       restore("a <<<SECRET_1>>> b <<<SECRET_99>>> c", reg),
       "a sk-aaaa b <<<SECRET_99>>> c"
@@ -141,18 +141,18 @@ describe("restore — 占位符 → value 还原", () => {
   });
 
   it("占位符前缀不误匹配（<<<SECRET_1>>> 不匹配 <<<SECRET_10>>>）", () => {
-    // split/join 安全性：split("<<<SECRET_1>>>") 在 "<<<SECRET_10>>>" 串里
-    // 找不到完整字面 "<<<SECRET_1>>>"（后者闭合是 10>>>），故不影响兄弟 ID。
+    // split/join safety: split("<<<SECRET_1>>>") finds no complete literal
+    // "<<<SECRET_1>>>" inside "<<<SECRET_10>>>" (the latter closes at 10>>>), so sibling IDs are unaffected.
     const reg = createSecretRegistry();
-    // 注册 10 个值 → 占位符编号正好覆盖到 <<<SECRET_10>>>（原 fixture 只注册
-    // 2 个值，<<<SECRET_10>>> 是未注册占位符 → restore 透传，无法测到前缀边界）
+    // Register 10 values → numbering covers exactly up to <<<SECRET_10>>> (the old fixture registered
+    // only 2 values, so <<<SECRET_10>>> was unregistered → restore passed it through, never exercising the prefix boundary)
     for (let i = 0; i < 10; i++) reg.register(`value-${i + 1}`);
     const input = "<<<SECRET_1>>> + <<<SECRET_10>>>";
     assert.equal(restore(input, reg), "value-1 + value-10");
   });
 
   it("占位符作为非密钥子串：不被误识别", () => {
-    // 真实文本里出现 <<<SECRET_1>>> 时，restore 原样输出（占位符是 registry 私域）
+    // When <<<SECRET_1>>> appears in plain text, restore emits it verbatim (placeholders are the registry's private namespace)
     const reg = createSecretRegistry();
     assert.equal(
       restore("text <<<SECRET_1>>> more", reg),
@@ -175,8 +175,8 @@ describe("createSecretRegistry — 并发与不可变", () => {
     const reg = createSecretRegistry();
     reg.register("sk-aaaa"); // ID 1
     reg.register("sk-bbbb"); // ID 2
-    // 即使 value 序列出现重复同形 ID 也不会回退
-    reg.register("sk-aaaa"); // 仍 ID 1
+    // Even with repeated same-shaped values in the sequence, the ID never rolls back
+    reg.register("sk-aaaa"); // still ID 1
     assert.equal(reg.register("sk-cccc"), "<<<SECRET_3>>>");
   });
 

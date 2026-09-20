@@ -1,20 +1,26 @@
 /**
- * ADR-0084 / ADR-0090 / Slice B SC5 — build-engine 装配真实读项目 `permissions` 段。
+ * ADR-0084 / ADR-0090 — build-engine assembly really reads the project
+ * `permissions` section.
  *
- * 不变式（本文件钉住的东西）：
- *  - 项目 `settings.json` 的 `permissions` 声明式列表经**真实装配**（build-engine
- *    → createPermissionPolicy → permission-executor）落到工具调用上：命中 deny
- *    的调用以 `[permission_denied]` + 规则 reason 返回，未命中的同工具调用
- *    仍按类别默认放行 —— 规则是选择性的，不是整工具封禁。
- *  - 读根是 `projectIdentityRoot`（项目身份锚），不是 `cwd`：改绑后 cwd 是
- *    没有 `.iknow` 的裸 task worktree，项目契约只在身份根上。
- *  - 两份 SSOT 并存（toml + JSON `permissions`）→ 装配期 typed fail-loud，
- *    不是被吞的 catch。
- *  - 只有惰性 toml、JSON 侧无 `permissions` 段 → 装配照常（ADR-0084 只把
- *    「两份同时存在」定为不可恢复歧义）。
+ * Invariants pinned by this file:
+ *  - The declarative `permissions` list in project `settings.json` reaches
+ *    tool calls through REAL assembly (build-engine →
+ *    createPermissionPolicy → permission-executor): a deny-matched call
+ *    returns `[permission_denied]` plus the rule reason, while non-matching
+ *    calls of the same tool still pass by category default — rules are
+ *    selective, not whole-tool bans.
+ *  - The read root is `projectIdentityRoot` (the project identity anchor),
+ *    not `cwd`: after rebinding, cwd is a bare task worktree without
+ *    `.iknow`, so the project contract exists only at the identity root.
+ *  - Two coexisting SSOTs (toml + JSON `permissions`) → typed fail-loud at
+ *    assembly time, not a swallowed catch.
+ *  - A lazy toml with no `permissions` section on the JSON side → assembly
+ *    proceeds normally (ADR-0084 defines only "both present simultaneously"
+ *    as unrecoverable ambiguity).
  *
- * 手法：真实 build-engine 装配 + 真实 executor + 真实 read_file handler；
- * 项目 fixture 走 tmp 目录，`:memory:` 之外的根不污染真实 ~/.iknow。
+ * Technique: real build-engine assembly + real executor + real read_file
+ * handler; project fixtures live in tmp dirs, so nothing outside
+ * `:memory:` touches the real ~/.iknow.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -53,15 +59,17 @@ function makeEnv(apiKey: string): IknowEnv {
 }
 
 /**
- * 项目 `permissions` 段（ADR-0090 声明式）：deny 命中任意深度 `secret.txt`
- * 的读工具调用。deny 的单段路径在工作根下任意深度命中，故 `Read(secret.txt)`
- * 覆盖工作根顶层的 `<root>/secret.txt`（旧 `path_contains` 语义的等价表达）。
+ * Project `permissions` section (ADR-0090 declarative form): a deny matching
+ * read-tool calls on `secret.txt` at any depth. A single-segment deny path
+ * matches at any depth under the workspace root, so `Read(secret.txt)`
+ * covers the top-level `<root>/secret.txt` — the equivalent of the old
+ * `path_contains` semantics.
  */
 const DENY_SECRET_SECTION = {
   deny: ["Read(secret.txt)"],
 };
 
-/** 铺 `<root>/.iknow/settings.json`（可选带 permissions 段）+ 两个可读文件。 */
+/** Plant `<root>/.iknow/settings.json` (optionally with a permissions section) plus two readable files. */
 async function plantProject(
   root: string,
   settings: Record<string, unknown>
@@ -120,10 +128,10 @@ describe("buildHarnessEngine — 项目权限源装配（ADR-0084 / SC5）", () 
       const denied = await readFileResult(built, join(root, "secret.txt"));
       expect(denied.kind).toBe("execution_failed");
       expect(denied.message).toMatch(/\[permission_denied\]/);
-      // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+      // The compile-time-generated reason echoes the declarative rule text verbatim (the settings file stores no id / reason).
       expect(denied.message).toMatch(/Read\(secret\.txt\)/);
 
-      // 选择性：同一条规则下未命中的路径仍走 read-only 类别默认 allow。
+      // Selectivity: under the same rule, non-matching paths still take the read-only category default allow.
       const allowed = await readFileResult(built, join(root, "ok.txt"));
       expect(allowed.kind).toBe("ok");
     } finally {
@@ -158,8 +166,8 @@ describe("buildHarnessEngine — 项目权限源装配（ADR-0084 / SC5）", () 
 
     const built = await buildAt(root);
     try {
-      // 惰性 toml 既不是第二份 SSOT 也不产生幽灵 deny：deny 规则不在场，
-      // read_file 走 read-only 类别默认 allow。
+      // A lazy toml is neither a second SSOT nor a source of ghost denies:
+      // with no deny rule present, read_file takes the read-only category default allow.
       const result = await readFileResult(built, join(root, "secret.txt"));
       expect(result.kind).toBe("ok");
     } finally {

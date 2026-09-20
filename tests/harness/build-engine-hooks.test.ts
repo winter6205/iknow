@@ -1,5 +1,6 @@
 /**
- * 用户 command 钩子 + 插件 hooks 装配级回归（buildHarnessEngine）。
+ * Assembly-level regression for user command hooks + plugin hooks wiring
+ * (buildHarnessEngine).
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";

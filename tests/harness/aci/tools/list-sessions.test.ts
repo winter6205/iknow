@@ -26,8 +26,8 @@ import {
 } from "../../../../src/traceserver/list-sessions-core.ts";
 
 /**
- * `list_sessions` on the ACI face (plan `trace-mcp-read-side-split` T5b,
- * spec SC16 / SC20 and the 目录轴 column of the 边界类 × 三面 table).
+ * `list_sessions` on the ACI face — the directory-axis listing of the
+ * trace read-side tools.
  *
  * This face owns three things and nothing else: the ACI metadata, the schema
  * bounds the executor's ajv validator enforces, and the domain-error → typed
@@ -52,7 +52,7 @@ function makeTraceDir(): string {
     ["older-session", 300],
     ["newer-session", 100],
   ] as const) {
-    // T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。
+    // Sessions live in the two-level tree `<dir>/projects/<slug>/<convId>/trace.jsonl`.
     const path = join(
       dir,
       "projects",
@@ -149,7 +149,7 @@ describe("list_sessions ACI tool", () => {
       { limit: body.limit, offset: body.offset },
       { limit: LIST_SESSIONS_DEFAULT_LIMIT, offset: 0 }
     );
-    // 契约 X (ADR-0004:23): the executor owns output-size reporting, so this face
+    // ADR-0004: the executor owns output-size reporting, so this face
     // must not grow a truncation field of its own.
     for (const banned of ["total", "truncated", "response_truncated"]) {
       assert.ok(!raw.includes(banned), `"${banned}" leaked into the response`);
@@ -232,12 +232,12 @@ describe("list_sessions ACI tool", () => {
     });
     const validator = reg.inner.getValidator("list_sessions");
 
-    // append-only 仍生效：list_sessions 是目录轴读工具（无 host 缝条件），
-    // get_record 是内容轴读工具（同形态常驻）。断言改用 SSOT 派生的索引对：
-    // list_sessions 与 get_record 在 ACI_TOOLSET_NAMES 中相邻且前后顺序固定,
-    // 位置由 indexOf 推导（不写死 at(-N) 之类的硬编码下标;task-worktree-lifecycle
-    // #869 在末尾再 append 2 件 host 缝条件化装配的 list/remove,使硬编码下标
-    // 立刻过期）。
+    // append-only still holds: list_sessions (directory-axis read tool, no
+    // host-seam condition) and get_record (content-axis read tool, same
+    // resident shape) must stay adjacent in fixed order inside
+    // ACI_TOOLSET_NAMES. Positions are derived via indexOf, never hardcoded
+    // at(-N) offsets — appending more host-seam-conditioned tools at the end
+    // would silently rot any hardcoded index.
     const listSessionsIdx = ACI_TOOLSET_NAMES.indexOf("list_sessions");
     const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
     assert.ok(listSessionsIdx >= 0, "list_sessions 仍在 SSOT");
@@ -247,8 +247,9 @@ describe("list_sessions ACI tool", () => {
       1,
       "list_sessions 必须紧邻 get_record 之前（append-only 不重排）"
     );
-    // 实例面同锁相邻：get_record 之后允许再 append（read_image 常驻 +
-    // 条件化件），所以用 indexOf 派生相邻关系而非硬编码 at(-N) 尾位。
+    // Same adjacency lock on the instance face: appends after get_record are
+    // allowed (read_image is resident, plus conditioned tools), so derive
+    // adjacency via indexOf instead of a hardcoded at(-N) tail position.
     const presentNames = reg.inner.list().map((d) => d.name);
     assert.equal(
       presentNames[presentNames.indexOf("get_record") - 1],
@@ -257,13 +258,15 @@ describe("list_sessions ACI tool", () => {
     );
     assert.equal(reg.catalog.get("list_sessions")?.name, "list_sessions");
     assert.ok(validator, "the registry must compile a validator for the tool");
-    // 界真的由 ajv 执行，不只是写在 schema 里：这是 ACI 面拒 `limit: 0` 的那道门。
+    // The bounds are really enforced by ajv, not just written in the schema:
+    // this is the gate that rejects `limit: 0` on the ACI face.
     assert.equal(validator!({ limit: 0 }), false);
     assert.equal(validator!({ limit: LIST_SESSIONS_MAX_LIMIT }), true);
     assert.equal(validator!({ offset: -1 }), false);
     assert.equal(validator!({ unknown_axis: 1 }), false);
-    // append-only SSOT 纪律：行轴 query_trace 必须排在 list_sessions 之前；
-    // 这是「后来者不能悄悄把它打乱」的可测不变式。
+    // append-only SSOT discipline: the record-axis query_trace must precede
+    // this directory-axis tool — the testable form of "later additions cannot
+    // silently reshuffle it".
     assert.ok(
       ACI_TOOLSET_NAMES.indexOf("query_trace") < listSessionsIdx,
       "query_trace (行轴) 必须在 list_sessions (目录轴) 之前"

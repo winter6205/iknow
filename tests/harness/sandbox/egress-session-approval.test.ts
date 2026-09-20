@@ -1,22 +1,24 @@
 /**
  * Tests for `egress/session.ts` filter + approvalGate integration —
- * T6 首次域名批准流的判定侧端到端走读
- * (specs/network-egress-allowlist.md §首次域名批准流 + SC10)。
+ * end-to-end walk of the first-seen-domain approval decision side
+ * (specs/network-egress-allowlist.md, first-domain approval flow).
  *
- * 钉住的不变式:
- *   - filter 内 not-in-allowlist + gate 在场 + 批准 → 返回 true + 不记违例;
- *   - filter 内 not-in-allowlist + gate 在场 + 拒绝 → 返回 false + 记
- *     `denied-by-user` 违例;
- *   - filter 内 not-in-allowlist + gate 缺席 → 返回 false + 记
- *     `no-approval-inlet` 违例(spec §Failure paths「非交互入口首见新域名」);
- *   - 其它 deny reason(denied / allowlist-empty / allowlist-malformed /
- *     address-denied)不经 gate —— deny 优先 / 配置层错误 不该被「询问用户」
- *     绕过;
- *   - gate 同 host 第二次进入 filter → 不再调 askApproval(集合命中)。
+ * Pinned invariants:
+ *   - not-in-allowlist + gate present + approved → return true, record no violation;
+ *   - not-in-allowlist + gate present + denied → return false, record a
+ *     `denied-by-user` violation;
+ *   - not-in-allowlist + gate absent → return false, record a `no-approval-inlet`
+ *     violation (spec failure path: a non-interactive inlet seeing a new domain);
+ *   - other deny reasons (denied / allowlist-empty / allowlist-malformed /
+ *     address-denied) never reach the gate — deny precedence and config-layer
+ *     errors must not be bypassed by "asking the user";
+ *   - second filter entry for the same host after the gate ran → askApproval is not
+ *     called again (session-set hit).
  *
- * 本测试通过 `createHttpProxyServer` 测试 seam 注入假 factory,在装配期
- * 捕获 filter 回调并直接驱动,避免真起 HTTP 代理 server + 走真实 CONNECT
- * 协议 + 处理 auth token 的复杂性(只验判定逻辑,不验真 dial 出网)。
+ * The test injects a fake factory through the `createHttpProxyServer` seam and
+ * drives the captured filter callback directly, avoiding a real HTTP proxy server,
+ * the real CONNECT protocol and auth-token handling — it verifies the decision
+ * logic only, never an actual outbound dial.
  */
 
 import { createServer } from "node:http";
@@ -58,8 +60,8 @@ const STUB_RELAY: EgressRelayPaths = {
 };
 
 /**
- * 在 session 装配期捕获 filter 回调 —— 用注入的假 `createHttpProxyServer`
- * 拦截。
+ * Capture the filter callback during session assembly by intercepting through the
+ * injected fake `createHttpProxyServer`.
  */
 interface CapturedFilter {
   readonly filter: (port: number, host: string) => Promise<boolean> | boolean;
@@ -75,8 +77,8 @@ function captureFilter(): {
     opts: Parameters<typeof createHttpProxyServerOrig>[0]
   ) => {
     captured.value = { filter: opts.filter };
-    // 返回一个最小 server 形状,让 session 后续 listenOnUnixSocket 完成
-    // （裸 http server listen unix socket 路径即可）。
+    // minimal server shape so the session's later listenOnUnixSocket completes
+    // (a plain http server listening on a unix socket suffices).
     return createServer();
   };
   return { createHttpProxyServer, captured };
@@ -153,7 +155,7 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       allowedDomains: ["github.com"],
       deniedDomains: [],
       commandLabel: "test:no-inlet",
-      // approvalGate 故意缺席
+      // approvalGate deliberately absent
     };
     const { createHttpProxyServer, captured } = captureFilter();
     const session = await createEgressSession({
@@ -176,8 +178,8 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
   });
 
   it("deny 优先 —— host 在 denied 集 → 不调 askApproval,reason=denied", async () => {
-    // deny 优先(spec §Settled invariants)—— host 在 denied 集,即使
-    // approvalGate 在场,filter 也直接拒,不调 askApproval。
+    // deny precedence (spec settled invariant) — a host in the denied set is
+    // rejected by the filter directly, even with approvalGate present.
     const askApproval = vi.fn(async () => true);
     const gate = createEgressApprovalGate({ askApproval });
     const sink: EgressViolationSink = createEgressViolationSink();
@@ -239,8 +241,8 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
   });
 
   it("并发同 host 两次进入 filter → 合并为一次 ask(只调一次)", async () => {
-    // 异步并发进入 filter → 同 host 走 gate 的 in-flight 合并表,只调
-    // askApproval 一次。
+    // concurrent async entries for the same host merge on the gate's in-flight
+    // table, so askApproval is called only once.
     let resolveAsk: ((v: boolean) => void) | undefined;
     const askApproval = vi.fn(
       () =>

@@ -10,8 +10,9 @@ import {
 } from "./_fixtures.js";
 
 /**
- * T3 五框架 green marker (spec SC3 / A4): 五框架各一条「exit 0 + green 摘要
- * + 无编辑」→ SUFFICIENT (一条即够, G2-4 阈值)。marker 只从框架摘要行读数字。
+ * Green markers for the five frameworks: one run each with "exit 0 + green
+ * summary + no edits" → SUFFICIENT (a single qualifying run is enough).
+ * Counts are read only from the framework's own summary line.
  */
 
 describe("五框架 green marker → SUFFICIENT (exit 0 + green 摘要 + 无编辑)", () => {

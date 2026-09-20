@@ -1,5 +1,6 @@
 /**
- * #672 T3: loop-engine 环检测 — fused 停因、LOOP_DETECTED 入史、可关闭。
+ * loop-engine loop detection: fuse stop reason, LOOP_DETECTED entry in
+ * history, detection can be disabled.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

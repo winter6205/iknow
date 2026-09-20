@@ -1,21 +1,24 @@
 /**
- * T3 / ADR-0046 §3 — 直呼加载 SC3:未 discover 的 mcp__ 工具被直呼,
- * 该轮 hydrate(discover 副作用=尾部追加到下一轮 visibleSchemas);
- * input 通过 schema → 直接执行;否则非 error 文本投影 schema。
+ * ADR-0046 — direct-call hydration for undiscovered mcp__ tools: calling one
+ * directly hydrates that turn (discover's side effect = append to next turn's
+ * visibleSchemas); if input passes the schema -> execute directly; otherwise
+ * project the schema as non-error text.
  *
- * 行为真值(spec Does #2 + SC3):
- *   - mcp__ 工具,not discovered → 触发 discover(name);
- *     gate.proceed;inner 真跑,handler 返回值原样进 ok payload;
- *     下一轮 visibleSchemas() 尾部追加该 schema(邻轮 deep-equal
- *     仅在该工具被 hydrate 时追加)。
- *   - mcp__ 工具,not discovered,input 不通过 schema → blocked + kind: "ok"
- *     + payload 文本 = JSON.stringify({name, description, inputSchema});
- *     is_error = false(模型可见的成功送达结果,引导模型补齐 input);
- *     discover 副作用照样发生(下一轮 tools 尾部可见 schema)。
- *   - 不抛 "tool <name> not loaded — call tool_search first"。
+ * Behavioral truth (spec):
+ *   - mcp__ tool, not discovered -> triggers discover(name);
+ *     gate.proceed; inner really runs, handler return goes into the ok payload
+ *     verbatim; next turn's visibleSchemas() appends the schema at the tail
+ *     (neighbor-turn deep-equal appends only when that tool was hydrated).
+ *   - mcp__ tool, not discovered, input fails schema -> blocked + kind: "ok"
+ *     + payload text = JSON.stringify({name, description, inputSchema});
+ *     is_error = false (a model-visible successful delivery guiding the model
+ *     to fill the input); the discover side effect still happens (next turn's
+ *     tools show the schema at the tail).
+ *   - never throws "tool <name> not loaded — call tool_search first".
  *
- * 与 mcp-not-loaded-gate.test.ts 的区别:那里只验 gateOne 的 proceed/blocked
- * 判定,本文件验 end-to-end(hydrate → execute 或投影 + discover 副作用)。
+ * Unlike mcp-not-loaded-gate.test.ts (which checks only gateOne's
+ * proceed/blocked verdict), this file verifies end-to-end: hydrate -> execute
+ * or schema projection + the discover side effect.
  */
 import { describe, it, expect } from "vitest";
 import assert from "node:assert/strict";
@@ -33,8 +36,8 @@ import type {
   ToolExecutionResult,
 } from "../../../src/harness/tools/types.js";
 
-/** 构造一个 mcp__ 工具(lazy + write tier 与 MCP 工具同形态):
- *  必填 input `q`,handler 返 "ok:<q>"。 */
+/** Build an mcp__ tool (lazy + write tier, same shape as real MCP tools):
+ *  required input `q`, handler returns "ok:<q>". */
 function makeMcpTool(name: string): AciToolDef {
   return Object.freeze({
     name,
@@ -76,17 +79,18 @@ function makeInnerSpy(): { executor: Executor; calls: ToolCall[][] } {
   return { executor, calls };
 }
 
-/** 构造一个装好 MCP 工具的 aci-registry(mcp__ 经 registerExternal,
- *  非 mcp__ 工具空位),让测试不踩 Gate 2 防撞。 */
+/** Build an aci-registry loaded with MCP tools (mcp__ via registerExternal,
+ *  no non-mcp__ tools), so tests don't trip the Gate 2 collision guard. */
 function buildRegistry(): ReturnType<typeof createAciRegistry> {
   const reg = createAciRegistry([]);
   reg.registerExternal([makeMcpTool("mcp__svc__ping")]);
   return reg;
 }
 
-/** 把 aci-registry 投影成 permission-executor 接受的 `Registry` 形态。
- *  用 `registry.catalog`(含 registerExternal 注入的 mcp__ 工具),不用
- *  `registry.inner`(inner 仅含构造期 tools 快照,registerExternal 不动)。 */
+/** Project the aci-registry into the `Registry` shape permission-executor accepts.
+ *  Use `registry.catalog` (includes mcp__ tools injected by registerExternal),
+ *  not `registry.inner` (inner only snapshots construction-time tools;
+ *  registerExternal doesn't touch it). */
 function registrySurface(registry: ReturnType<typeof createAciRegistry>): {
   list: () => ReadonlyArray<AciToolDef>;
   get: (name: string) => AciToolDef | undefined;
@@ -101,12 +105,13 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
   it("合法 input:gate.proceed → inner 真跑,handler 输出进 ok payload", async () => {
     const registry = buildRegistry();
     const discoveredSet = new Set<string>();
-    // 把 mcp__ 工具的 def 直接交到 inner executor —— createAciRegistry 的
-    // `registerExternal` 不动 inner,所以这里用 catalog 的 def 显式构造一个
-    // 含 mcp__ 工具的 inner registry(给 createExecutor)。这只在测试装配
-    // 内出现,生产路径由 manager.registerExternal + aci-executor 装配保证。
+    // Hand the mcp__ tool's def directly to the inner executor —
+    // createAciRegistry's `registerExternal` doesn't touch inner, so here we
+    // explicitly build an inner registry containing the mcp__ tool from the
+    // catalog def (for createExecutor). This exists only in test assembly; the
+    // production path is guaranteed by manager.registerExternal + aci-executor wiring.
     const mcpDef = registry.catalog.get("mcp__svc__ping")!;
-    // ajv 编译 def.inputSchema —— 与 aci-registry.registerExternal 同源。
+    // Compile def.inputSchema with ajv — same source as aci-registry.registerExternal.
     const ajv = new Ajv.default({ strict: true, allErrors: true });
     addFormats.default(ajv);
     const mcpValidator = ajv.compile(mcpDef.inputSchema);
@@ -131,14 +136,14 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
       input: { q: "hello" },
     };
     const gate = await perm.gateOne(call, undefined);
-    // 关键:不该返 blocked,不该含 "not loaded"。
+    // Key: must not return blocked, must not contain "not loaded".
     assert.equal(gate.kind, "proceed");
     if (gate.kind === "proceed") {
       assert.ok(gate.def, "proceed 应带回 def");
       assert.equal(gate.def!.name, "mcp__svc__ping");
     }
 
-    // 模拟上层驱动 runAllowed:调用真 inner executor。
+    // Simulate the upstream runAllowed driver: call the real inner executor.
     const [result] = await realExecutor.executeAll([call]);
     assert.equal(result.kind, "ok");
     if (result.kind === "ok") {
@@ -147,9 +152,9 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
       expect(text?.text).toBe("ok:hello");
     }
 
-    // 副作用:discover 已被触发 → registry.isDiscovered(name) === true。
+    // Side effect: discover was triggered -> registry.isDiscovered(name) === true.
     expect(registry.isDiscovered("mcp__svc__ping")).toBe(true);
-    // 下一轮 visibleSchemas 尾部追加(mcp__ lazy: true + 已 discover):
+    // Next round's visibleSchemas gains it at the tail (mcp__ lazy: true + discovered):
     expect(registry.visibleSchemas().map((t) => t.name)).toContain(
       "mcp__svc__ping"
     );
@@ -170,15 +175,15 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
     const call: ToolCall = {
       id: "sc3-2",
       name: "mcp__svc__ping",
-      input: {}, // 缺 required `q`
+      input: {}, // missing required `q`
     };
     const gate = await perm.gateOne(call, undefined);
 
-    // 关键契约:
-    //   - kind: blocked (gate 不放行,因为 input 校验失败)
-    //   - result.kind: "ok" —— 非 error,文本投影送达模型
-    //   - result.payload 文本 = JSON.stringify({name, description, inputSchema})
-    //   - 不再含 "not loaded — call tool_search first"
+    // Key contract:
+    //   - kind: blocked (gate refuses because input validation failed)
+    //   - result.kind: "ok" — not an error; text projection delivered to the model
+    //   - result.payload text = JSON.stringify({name, description, inputSchema})
+    //   - no longer contains "not loaded — call tool_search first"
     assert.equal(gate.kind, "blocked");
     if (gate.kind === "blocked") {
       assert.equal(gate.result.kind, "ok");
@@ -195,7 +200,7 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
       expect(parsed.name).toBe("mcp__svc__ping");
       expect(parsed.description).toBe("mcp mcp__svc__ping");
       expect(parsed.inputSchema).toBeDefined();
-      // schema 字段必须是对象,含 properties + required。
+      // The schema field must be an object with properties + required.
       const schema = parsed.inputSchema as Record<string, unknown>;
       expect(schema.type).toBe("object");
       expect(schema.required).toEqual(["q"]);
@@ -217,7 +222,7 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
     const call: ToolCall = {
       id: "sc3-3",
       name: "mcp__svc__ping",
-      input: { q: 123 }, // q 必须是 string
+      input: { q: 123 }, // q must be a string
     };
     const gate = await perm.gateOne(call, undefined);
     assert.equal(gate.kind, "blocked");
@@ -232,13 +237,13 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
   });
 
   it("discover 副作用:aci registry.discover 后 isDiscovered === true + visibleSchemas 仍含", () => {
-    // 直验 aci-registry 的 discover 副作用契约 —— permission-executor
-    // 调过 discover 后,这两条不变式必须成立(permission-executor 自身的
-    // hydrate 由其内 catalog.discover seam 触发;此处仅校验 ACI registry
-    // 端语义未被破坏)。
+    // Directly verify the aci-registry discover side-effect contract — after
+    // permission-executor calls discover, these two invariants must hold
+    // (permission-executor's own hydrate is triggered via its internal
+    // catalog.discover seam; here only the ACI registry-side semantics are checked).
     const registry = buildRegistry();
     expect(registry.isDiscovered("mcp__svc__ping")).toBe(false);
-    // 初始:lazy 工具不在 visibleSchemas
+    // Initially: lazy tools are absent from visibleSchemas
     expect(registry.visibleSchemas().map((t) => t.name)).not.toContain(
       "mcp__svc__ping"
     );
@@ -248,7 +253,7 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
 
     const after = registry.visibleSchemas().map((t) => t.name);
     expect(after).toContain("mcp__svc__ping");
-    // 邻轮 deep-equal:再次调 visibleSchemas 应字节级一致。
+    // Neighbor-turn deep-equal: calling visibleSchemas again must be byte-identical.
     const again = registry.visibleSchemas().map((t) => t.name);
     expect(again).toEqual(after);
   });

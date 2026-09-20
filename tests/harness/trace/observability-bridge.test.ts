@@ -1,16 +1,17 @@
 /**
- * translateToObservability (B-scope 占位 stub, GH #64)。
+ * translateToObservability — placeholder stub for the B-scope.
  *
- * 文件名 / 函数名 rename 自 orchestrator 原始 contract 的 "otel-translator / translateToOtel":
- * Gate B 禁止可执行面出现 OTel 导出（import / 标识符），注释用词不扫。
- * 占位 stub 改用 observability-bridge / translateToObservability 命名,
- * 保持 B-scope 占位语义不变。
+ * The file/function names were renamed from the orchestrator's original
+ * contract ("otel-translator / translateToOtel"): Gate B forbids OTel exports
+ * (imports / identifiers) on the executable surface, comment wording is not
+ * scanned. The placeholder keeps B-scope semantics under the new names
+ * observability-bridge / translateToObservability.
  *
- * 4 项契约:
- * 1. translateToObservability(llm) → 抛 "B-scenario not implemented"
- * 2. translateToObservability(tool) → 抛同样错误
- * 3. translateToObservability(turn) → 抛同样错误
- * 4. safeTrace 包裹后 → resolves undefined
+ * 4 contracts:
+ * 1. translateToObservability(llm) → throws "B-scenario not implemented"
+ * 2. translateToObservability(tool) → throws the same error
+ * 3. translateToObservability(turn) → throws the same error
+ * 4. wrapped by safeTrace → resolves undefined
  */
 
 import { describe, it } from "vitest";

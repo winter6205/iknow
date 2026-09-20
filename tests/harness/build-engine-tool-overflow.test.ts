@@ -1,13 +1,15 @@
 /**
- * B6 / ADR-0043 §3 — build-engine 装配期溢出治理 wire:
- *   - 注入超阈值工具面(stub countTokens 返回大值)→ 首轮装配退场按次序
- *   - 注入未超阈值(stub 返回小值)→ 不退场
- *   - 会话中不重算(第二次装配不调 countTokens)
- *   - countTokens 失败/缺席 → 跳过本会话(全部 deferrable 保持常驻)+ warn
+ * Assembly-time overflow governance wiring (ADR-0043):
+ *   - Tool surface over the threshold (stub countTokens returns a large value)
+ *     → the first assembly retires tools in the fixed order
+ *   - Below the threshold (stub returns a small value) → nothing retires
+ *   - No recompute mid-session (later assemblies do not call countTokens)
+ *   - countTokens fails / absent → skip for this session (all deferrables stay
+ *     resident) + a warn line
  *
- * 与 `build-engine-mcp-startwire.test.ts` 风格一致 —— 本文件专注 wire
- * 形态(钩子触发、结果可见、countTokens 调用次数),判定函数单测在
- * `tool-overflow-judge.test.ts` 完成。
+ * This file pins only the wiring shape (hook firing, result visibility,
+ * countTokens call counts); the judge function is unit-tested in
+ * `tool-overflow-judge.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -41,8 +43,8 @@ function makeEnv(apiKey: string): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
-    // contextWindow = 20_000(非 200_000);阈值 = 2_000(10%),
-    // 让测试容易写期望值。
+    // contextWindow = 20_000 (not 200_000); threshold = 2_000 (10%),
+    // so expected values stay easy to write.
     compress: { contextWindow: 20_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
@@ -115,7 +117,7 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
             inputSchema: { type: "object", properties: {} },
           },
         ]),
-      // countTokens stub:返 1_000(阈值 2_000 → 远低于,无超限)
+      // countTokens stub: returns 1_000 (well below the 2_000 threshold → no overflow)
       countTokens: async () => {
         callCount += 1;
         return { inputTokens: 1_000 };
@@ -125,19 +127,19 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // countTokens 至少调一次(首轮判定)
+    // countTokens called at least once (first-round judgement)
     expect(callCount).toBeGreaterThanOrEqual(1);
-    // 全部 visible 工具里都包含 query_trace / list_sessions 等 deferrable 件
+    // every visible set still contains the deferrables query_trace / list_sessions etc.
     const visibleNames = built.deps.promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("list_sessions");
     expect(visibleNames).toContain("get_record");
     expect(visibleNames).toContain("web_search");
     expect(visibleNames).toContain("web_fetch");
-    // 核心件零参与
+    // core tools untouched
     expect(visibleNames).toContain("bash");
     expect(visibleNames).toContain("read_file");
-    // 系统文本不含 <deferred_internal_tools> 段(无退场)
+    // system text carries no <deferred_internal_tools> segment (nothing retired)
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
     expect(systemText).not.toContain("<deferred_internal_tools>");
@@ -148,14 +150,16 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     roots.push(root);
     await plantMcpConfig(root, ["stubsvc"]);
 
-    // 阈值 2_000;模拟"全部 deferrable = 8_000 → 退 1 件 6_500 → 退 2 件
-    // 5_000 → 退 3 件 3_500 → 退 4 件 2_500 → 退 5 件 500 ≤ 阈值"。5 件全
-    // 退(退场次序 5 件全到位)。
+    // Threshold 2_000; simulate "all deferrables = 8_000 → retire 1: 6_500 →
+    // 2: 5_000 → 3: 3_500 → 4: 2_500 → 5: 500 ≤ threshold". All 5 retire
+    // (the full retirement ladder runs).
     //
-    // T5:装配期是**两道闸门**共用同一 countTokens 来源 —— 先跑内建 schema
-    // 退场梯子(前 6 次实测),再跑 MCP/skill 索引降档闸门(第 7 次)。本文件
-    // 只钉退场梯子,故给索引闸门喂一个未超阈值(500 ≤ 2_000)让它零动作,
-    // 索引降档本身在 disclosure-index-align/sc7-index-demotion.test.ts 覆盖。
+    // Assembly shares one countTokens source across two gates: first the
+    // built-in schema retirement ladder (the first 6 measurements), then the
+    // MCP/skill index-demotion gate (call 7). This file pins only the ladder,
+    // so feed the index gate a below-threshold value (500 ≤ 2_000) to keep it
+    // inert; index demotion itself is covered in
+    // disclosure-index-align/sc7-index-demotion.test.ts.
     const measurements = [8_000, 6_500, 5_000, 3_500, 2_500, 500, 500];
     let callIdx = 0;
     const built = await buildHarnessEngine({
@@ -183,10 +187,10 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // 5 件全退(退到 ≤ 阈值);第 7 次 = T5 索引降档闸门首测(未超阈 → 零动作)。
-    expect(callIdx).toBe(7); // 1 首测 + 5 重测 + 1 索引闸门首测
+    // All 5 retire (down to ≤ threshold); call 7 = the index-demotion gate's first measurement (below threshold → inert).
+    expect(callIdx).toBe(7); // 1 initial + 5 re-measurements + 1 index-gate measurement
     const visibleNames = built.deps.promptTools().map((t) => t.name);
-    // 5 件 deferrable 内建件全部不在 visible
+    // none of the 5 deferrable built-ins remains visible
     for (const retired of [
       "query_trace",
       "list_sessions",
@@ -196,7 +200,7 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     ]) {
       expect(visibleNames).not.toContain(retired);
     }
-    // 核心件零影响
+    // core tools unaffected
     expect(visibleNames).toContain("bash");
     expect(visibleNames).toContain("read_file");
     expect(visibleNames).toContain("edit_file");
@@ -205,7 +209,7 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     expect(visibleNames).toContain("glob");
     expect(visibleNames).toContain("spawn_subagent");
 
-    // 系统文本含 <deferred_internal_tools> 段 + 5 件全列(字母序)
+    // system text carries <deferred_internal_tools> + all 5 names listed (alphabetical)
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
     expect(systemText).toContain("<deferred_internal_tools>");
@@ -219,9 +223,10 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       expect(systemText).toContain(retired);
     }
 
-    // SC4 / spec ASSUMPTIONS #5:退场内建件的索引段是 **名+描述**(不剥描述、
-    // 不走 search)。描述来自该工具 ToolDef.description(首行短描述),SSOT =
-    // registry;此处从 catalog 现取真描述,不硬编码文案。
+    // The index segment for retired built-ins is **name + description**
+    // (descriptions not stripped, no search round-trip). Each description
+    // comes from the tool's ToolDef.description (first line), SSOT =
+    // registry; taken live from the catalog here, no hard-coded text.
     const segment = systemText!.slice(
       systemText!.indexOf("<deferred_internal_tools>"),
       systemText!.indexOf("</deferred_internal_tools>")
@@ -245,7 +250,7 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       expect(short.length).toBeGreaterThan(0);
       expect(segment).toContain(`- ${retired}: ${short}`);
     }
-    // 索引段不再要求先 tool_search(ADR-0046 修订 ADR-0043 §2/§5/§7)。
+    // The index segment no longer requires calling tool_search first (ADR-0046 amends ADR-0043).
     expect(segment).not.toContain("tool_search");
   });
 
@@ -276,14 +281,14 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // 全部 deferrable 内建件保持常驻
+    // all deferrable built-ins stay resident
     const visibleNames = built.deps.promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("web_fetch");
-    // 系统文本不含退场段
+    // no retirement segment in system text
     const systemText = await built.deps.system?.();
     expect(systemText).not.toContain("<deferred_internal_tools>");
-    // warn 至少一行(且提到 countTokens failed)
+    // at least one warn line (mentioning countTokens failed)
     expect(warnings.some((w) => w.includes("countTokens failed"))).toBe(true);
   });
 
@@ -292,11 +297,12 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     roots.push(root);
     await plantMcpConfig(root, ["stubsvc"]);
 
-    // 不传 countTokens → 用 adapter.countTokens。createRealAnthropicAdapter
-    // 实际实现,生产路径(无 mock)会真去调 API。本测试用 mkdtemp + chat
-    // 入口 → adapter 真实存在,但 buildHarnessEngine 期间 network 不可达
-    // (127.0.0.1:9999)→ fetch reject → 装配层 catch → skip 路径。
-    // 接受两种语义:warn + 全部保持常驻(stub failure 路径)。
+    // No countTokens passed → falls back to adapter.countTokens. The real
+    // anthropic adapter implements it, so an unmocked production path would call
+    // the API. Here the adapter exists (tmpdir + chat surface) but the network is
+    // unreachable during build (127.0.0.1:9999) → fetch rejects → the assembly
+    // catches → skip path. Two semantics are accepted: warn + everything stays
+    // resident (the stub-failure path).
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-b6-ctabsent"),
       askUser: createNoAskUser(),
@@ -311,16 +317,16 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
             inputSchema: { type: "object", properties: {} },
           },
         ]),
-      // 不传 countTokens → 走 adapter.countTokens(可能抛错)
+      // No countTokens → adapter.countTokens (may throw)
     });
     shutdowns.push(async () => {
       if (built.shutdown) await built.shutdown();
     });
-    // 跳过(无论路径):deferrable 保持常驻
+    // Skipped (by either path): deferrables stay resident
     const visibleNames = built.deps.promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("web_fetch");
-    // 系统文本无退场段
+    // no retirement segment in system text
     const systemText = await built.deps.system?.();
     expect(systemText).not.toContain("<deferred_internal_tools>");
   });
@@ -353,9 +359,9 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     shutdowns.push(async () => {
       if (built.shutdown) await built.shutdown();
     });
-    // countTokens 只在装配期调一次,后续 resolver() 不重测
+    // countTokens is called once at assembly time; later resolver() calls never re-measure
     const firstCallCount = callCount;
-    // 多次调 resolver → countTokens 不增
+    // multiple resolver() calls → countTokens does not grow
     await built.deps.system?.();
     await built.deps.system?.();
     await built.deps.system?.();

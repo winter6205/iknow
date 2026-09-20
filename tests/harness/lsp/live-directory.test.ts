@@ -1,8 +1,8 @@
 /**
- * T8 (plans/worktree-live-task-root.md §6 T8 / §5 D5) — LSP `LspCtx.directory`
- * follows the live `taskRoot` cell across worktree rebind.
+ * LSP `LspCtx.directory` follows the live `taskRoot` cell across worktree
+ * rebind.
  *
- * Acceptance (named by plan §6 T8):
+ * Acceptance:
  *   1. `LspCtx.directory` is read at call time, not captured at build time —
  *      `NearestRoot` upper-bound moves with rebind (symbol tools can reach the
  *      new tree, cannot reach files outside the active root).
@@ -12,7 +12,7 @@
  *      old tree).
  *
  * The directory snapshot is taken once per `getClient` call, mirroring
- * the batch-snapshot discipline (D2): one tool call → one root value.
+ * the batch-snapshot discipline: one tool call → one root value.
  *
  * Test strategy: stub `node:child_process` `spawn` so we can intercept
  * how `client.ts` invokes the LSP server. Two temporary roots simulate
@@ -39,9 +39,10 @@ import {
   type LspClientPool,
 } from "../../../src/harness/lsp/client.ts";
 
-// ── vscode-jsonrpc/node 替身 ──────────────────────────────────────────────────
+// ── vscode-jsonrpc/node stand-in ─────────────────────────────────────────────
 //
-// 用 vi.hoisted 捕获引用,避免 vi.mock 提前看到 createMessageConnection。
+// Capture the connection factory via vi.hoisted so vi.mock never sees an
+// uninitialized `createMessageConnection` reference.
 
 const {
   mockSendRequest,
@@ -73,11 +74,11 @@ vi.mock("vscode-jsonrpc/node", async (importOriginal) => {
   };
 });
 
-// ── 动态导入必须在 mock 安装之后 ──────────────────────────────────────────────
+// ── dynamic import must happen after the mock is installed ───────────────────
 
 const { getClient } = await import("../../../src/harness/lsp/client.ts");
 
-// ── fake child + fake server 工厂 ──────────────────────────────────────────────
+// ── fake child + fake server factories ─────────────────────────────────────────
 
 function makeFakeChild(pid = 9001) {
   const stdin = new PassThrough();
@@ -101,7 +102,7 @@ function makeFakeServer(opts: {
     id: opts.id,
     extensions: [".ts"],
     root: async (file, ctx) => {
-      // 与真 NearestRoot 同形态: ctx.directory 即上界 stop。
+      // Same shape as the real NearestRoot: ctx.directory is the upper-bound stop.
       return opts.rootFor(file, ctx.directory);
     },
     spawn: async (root) => {
@@ -114,7 +115,7 @@ function makeFakeServer(opts: {
   };
 }
 
-// ── 临时目录管理 ──────────────────────────────────────────────────────────────
+// ── temp directory management ────────────────────────────────────────────────
 
 const tmpRoots: string[] = [];
 
@@ -144,9 +145,9 @@ beforeEach(() => {
 
 describe("LspCtx.directory follows live taskRoot cell", () => {
   it("after rebind, ctx.directory moves to the new tree (NearestRoot reads at call time)", async () => {
-    // 两个独立 taskRoot (模拟主仓与 rebind 后的 task worktree),
-    // 每个目录放一份 .ts 文件;NearestRoot 直接按 (file, directory) 形态返
-    // directory 自身 (与 YamlLS / JsonLS 的 ctx.directory 边界同源)。
+    // Two independent taskRoots (main repo vs rebound task worktree), each
+    // holding one .ts file; NearestRoot returns `directory` itself for the
+    // (file, directory) shape (same boundary as YamlLS / JsonLS ctx.directory).
     const oldDir = freshDir("iknow-lsp-live-old-");
     const newDir = freshDir("iknow-lsp-live-new-");
     const oldFile = join(oldDir, "a.ts");
@@ -162,9 +163,10 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     });
 
     const cell: LiveTaskRoot = createLiveTaskRoot(oldDir);
-    // 与 build-engine 一致:lspCtx.directory 由 cell.read() 派生,
-    // LspClientPool + getClient 入口读 cell。每条 case 用独立 pool,
-    // 避免模块级 defaultPool 的 lastSeenTaskRoot 在 case 间漂移。
+    // Mirrors build-engine: lspCtx.directory derives from cell.read(), and
+    // LspClientPool + getClient read the cell at entry. Each case uses its
+    // own pool so the module-level defaultPool's lastSeenTaskRoot cannot
+    // drift across cases.
     const pool: LspClientPool = createLspClientPool();
     const ctx: LspCtx = {
       directory: cell.read(),
@@ -172,23 +174,25 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
       pool,
     };
 
-    // 1. 旧根:getClient 在 ctx.directory = oldDir 下拿到客户端。
+    // 1. Old root: getClient obtains a client while ctx.directory = oldDir.
     const c1 = await getClient(ctx, oldFile, { server });
     expect(c1).toBeDefined();
     expect(spawnCalls).toEqual([{ root: oldDir }]);
 
-    // 2. 翻 cell 到新根。模拟 host `provision` 缝成功返回。
+    // 2. Flip the cell to the new root (simulates host `provision` returning OK).
     writeLiveTaskRoot(cell, newDir);
 
-    // 3. 用新文件调 getClient,ctx.directory 必须已是 newDir,
-    //    否则 NearestRoot 上界 stop 还是 oldDir → newDir 的文件被认为 outside → no-root。
+    // 3. getClient with the new file: ctx.directory must already be newDir,
+    //    otherwise NearestRoot's upper-bound stop is still oldDir → files in
+    //    newDir count as outside → no-root.
     const c2 = await getClient(ctx, newFile, { server });
     expect(c2).toBeDefined();
-    // 旧 key (oldDir) 与新 key (newDir) 不重叠 → pool 必然再 spawn 一次,
-    // 且新 spawn 拿 newDir (验证 ctx.directory 已切到 cell 当前值)。
+    // Old key (oldDir) and new key (newDir) don't overlap → the pool must
+    // spawn again, with newDir as root (proving ctx.directory followed the
+    // cell's current value).
     expect(spawnCalls.length).toBeGreaterThanOrEqual(2);
     expect(spawnCalls.at(-1)?.root).toBe(newDir);
-    // 新 client ≠ 旧 client (新 key 实例,不复用旧 client)。
+    // New client ≠ old client (fresh instance under the new key, no reuse).
     expect(c2).not.toBe(c1);
   });
 
@@ -222,18 +226,21 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     // rebind
     writeLiveTaskRoot(cell, newDir);
 
-    // 触发新根上的 getClient —— 旧 client 必须被终结。
+    // Trigger getClient on the new root — the old client must be terminated.
     await getClient(ctx, newFile, { server });
 
-    // 断言:连接先释放 + 子进程 SIGTERM。关连接不释放 stdio 管道句柄,
-    // 只 dispose() 会让旧 server 活到宿主退出 —— 池回收缝的职责是两者都做。
+    // Assert: connection released first + child process SIGTERM. Closing the
+    // connection alone leaves stdio pipe handles behind, so dispose()-only
+    // would keep the old server alive until host exit — the pool's reclaim
+    // seam is responsible for doing both.
     expect(mockDispose).toHaveBeenCalled();
     expect(vi.mocked(oldClient.process.kill)).toHaveBeenCalledWith("SIGTERM");
-    // 池不再持有旧 key:后续同 root 调用必然重新 spawn,不复用已终结实例。
+    // The pool no longer holds the old key: a later call on the same root
+    // must re-spawn, never reuse the terminated instance.
     expect(pool.clients.has(`${oldDir}:live-dir-leak`)).toBe(false);
 
-    // 旧 client 已被池逐出;后续再以 oldDir 调一次,必须重新 spawn
-    // (不复用旧的、已终结的实例),且第二次不触发任何 dispose。
+    // Old client evicted from the pool; calling again with oldDir must
+    // re-spawn (no reuse of the dead instance) and trigger no dispose.
     mockDispose.mockClear();
     const oldAgain = await getClient(ctx, oldFile, { server });
     expect(oldAgain).toBeDefined();
@@ -277,8 +284,9 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     expect(pool.clients.size).toBe(2);
 
     writeLiveTaskRoot(cell, newDir);
-    // 只 dispatch TS —— yaml 的旧根 client 不因「本次未命中」而漏回收:
-    // rebind 后 lastSeenTaskRoot 即更新,再过滤 serverId 就永远扫不到它。
+    // Dispatch TS only — the yaml old-root client must still be reclaimed,
+    // not skipped for "not hit this time": after rebind lastSeenTaskRoot is
+    // already updated, so filtering by serverId here would never find it.
     await getClient(ctx, newTs, { server: tsServer });
 
     expect(vi.mocked(yamlClient!.process.kill)).toHaveBeenCalledWith("SIGTERM");
@@ -289,8 +297,9 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
   });
 
   it("before rebind, behavior is byte-identical to a frozen-directory ctx (legacy parity)", async () => {
-    // 守门:门禁未翻 ⇒ 未 rebind 时行为逐字节同今日。
-    // 这条断言不依赖 live cell;只比较传统 string directory vs cell-backed。
+    // Guard: while the gate has not flipped (no rebind), behavior is
+    // byte-identical to a frozen directory. This assertion does not depend
+    // on the live cell; it only compares plain-string directory vs cell-backed.
     const dir = freshDir("iknow-lsp-live-legacy-");
     const file = join(dir, "y.ts");
     writeFileSync(file, "export const y = 1;\n", "utf8");
@@ -314,7 +323,7 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     expect(legacyClient).toBeDefined();
     expect(legacySpawns).toEqual([{ root: dir }]);
 
-    // cell-backed ctx with same initial value: 同样 spawn 一次,同 key 复用
+    // cell-backed ctx with same initial value: spawns once too, reused under the same key
     const cellSpawns: { root: string }[] = [];
     const cellServer = makeFakeServer({
       id: "cell",
@@ -329,7 +338,7 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     const cellClient = await getClient(cellCtx, file, { server: cellServer });
     expect(cellClient).toBeDefined();
     expect(cellSpawns).toEqual([{ root: dir }]);
-    // 再次同 key 调用 → 复用同一 client,不再 spawn。
+    // Repeat call under the same key → same client reused, no new spawn.
     const cellClient2 = await getClient(cellCtx, file, { server: cellServer });
     expect(cellClient2).toBe(cellClient);
     expect(cellSpawns).toHaveLength(1);

@@ -1,6 +1,6 @@
 /**
- * resolveProjectMemoryDir — home 项目树兄弟 `memory/`（ADR-0099）。
- * 跨函数等式钉死与会话文件夹同 slug；fail-closed 同 resolveTasksDir。
+ * resolveProjectMemoryDir — the sibling `memory/` under the home project tree (ADR-0099).
+ * Pins the cross-function equality that it shares the same slug as the session folder; fail-closed like resolveTasksDir.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

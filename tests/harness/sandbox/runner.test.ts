@@ -1,10 +1,11 @@
 /**
- * runner 直连单测（#128 T2 抽取后新增）。
+ * Direct unit tests for the runner (added after the runner extraction).
  *
- * runInSandbox 的契约是「argv = fence argv」；测试用 sh 直接充当 argv（不经
- * bwrap），因此无需 bwrap 在场即可覆盖退出码映射 / 截断 / abort 行为。bwrap
- * 真 fence 的执行路径由 bash-sandbox.test.ts / interrupt-routing.test.ts 的
- * 真 spawn 测试承接。
+ * runInSandbox's contract is "argv = the fence argv"; the tests let sh act as
+ * the argv directly (bypassing bwrap), so exit-code mapping / truncation /
+ * abort behavior are all coverable without bwrap present. The real bwrap-fence
+ * execution path is covered by the real-spawn tests in bash-sandbox.test.ts /
+ * interrupt-routing.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -38,7 +39,7 @@ afterEach(async () => {
   );
 });
 
-/** 用 sh 充当 fence argv 的测试替身（不经 bwrap）。 */
+/** Test double for the fence: sh stands in as the fence argv (no bwrap). */
 function shFence(command: string): BwrapFence {
   return Object.freeze({
     argv: Object.freeze(["sh", "-c", command]),

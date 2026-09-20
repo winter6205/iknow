@@ -1,14 +1,15 @@
 /**
- * read_image 工具（path-image-vision T1）单元测试。
+ * read_image unit tests.
  *
- * 契约（specs/read-image-vision.md SC1–SC4 + 假设 3/4/5/10）：
- *   - 输入 { path: string }；围栏语义与 read_file 一致（resolveWithinRoot）
- *   - 魔数判型（不看扩展名）：PNG / JPEG / GIF87a / GIF89a / RIFF….WEBP
- *   - 体积顶 = read_file 同档 1MB，编码前判定
- *   - 成功返回 SDK ImageBlockParam 形状的 image block（base64）
- *   - 失败一律 throw ToolExecutionError：空/非字符串 path、越围栏、ENOENT、
- *     目录、>1MB、非四类魔数（含 NUL 二进制、空文件）
- *   - read_image 不入 last-read ledger（本工厂根本不接 ledger 参数）
+ * Contract (specs/read-image-vision.md):
+ *   - input { path: string }; fence semantics identical to read_file (resolveWithinRoot)
+ *   - type decided by magic bytes (never by extension): PNG / JPEG / GIF87a / GIF89a / RIFF….WEBP
+ *   - size ceiling = read_file's tier at 1MB, checked before encoding
+ *   - success returns an SDK ImageBlockParam-shaped image block (base64)
+ *   - every failure throws ToolExecutionError: empty / non-string path,
+ *     outside the fence, ENOENT, directory, >1MB, magic bytes outside the four
+ *     families (incl. NUL binaries and empty files)
+ *   - read_image never enters the last-read ledger (the factory takes no ledger param at all)
  */
 
 import assert from "node:assert/strict";
@@ -160,7 +161,10 @@ describe("read_image — SC2 read_file 对同一 PNG 回归拒绝", () => {
 describe("read_image — SC3 非四类魔数 typed 拒绝", () => {
   it("含 NUL 但非图像魔数 → typed 失败", async () => {
     const root = await makeScratch("read-image-sc3-");
-    await writeFile(join(root, "blob.bin"), Buffer.from([0x41, 0x42, 0x00, 0x43]));
+    await writeFile(
+      join(root, "blob.bin"),
+      Buffer.from([0x41, 0x42, 0x00, 0x43])
+    );
 
     const tool = createReadImageTool(root);
     await assert.rejects(

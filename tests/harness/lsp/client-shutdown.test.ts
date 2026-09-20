@@ -1,22 +1,27 @@
 /**
- * LspClientPool 回收缝 — 终结 LSP 子进程。
+ * LspClientPool recycling seam — terminates LSP child processes.
  *
- * 根因（真实 PTY 复验）：退出链从未终止 LSP 子进程 —— pool 只有 connection
- * 级 disposeAll()，typescript-language-server / vscode-json-languageserver
- * 子进程及其 stdio 管道存活，Bun 事件循环在 runTui 返回 0 后永不排空；
- * 手动 SIGTERM 两个 LSP 子进程后父进程立即退出（隔离实验）。同一条泄漏在
- * 长 session 的 idle 回收与 worktree rebind 上同样成立：连接关闭不释放
- * stdio 管道句柄，子进程会活到宿主退出。
+ * Root cause (reproduced on a real PTY): the exit chain never terminated LSP
+ * children — the pool only had a connection-level disposeAll(), so
+ * typescript-language-server / vscode-json-languageserver children and their
+ * stdio pipes stayed alive and the Bun event loop never drained after runTui
+ * returned 0; manually SIGTERM-ing the two LSP children let the parent exit
+ * immediately (isolation experiment). The same leak applies to idle recycling
+ * in long sessions and to worktree rebind: closing a connection does not
+ * release the stdio pipe handles, so children live until the host exits.
  *
- * 本文件钉四条行为：
- *   1. sweepIdleClients 到期回收 → 子进程 SIGTERM 退出 + 池状态清空；
- *   2. worktree rebind stale sweep → 旧 root 子进程退出（含本次未命中的
- *      serverId）；
- *   3. disposeAll → 子进程退出，且不 latch（之后 getClient 可重新 spawn）；
- *   4. shutdownAll → 子进程退出 + latch（之后 getClient 一律 spawn-failed）。
+ * This file pins four behaviors:
+ *   1. sweepIdleClients expiry recycling → child exits via SIGTERM + pool state
+ *      cleared;
+ *   2. worktree rebind stale sweep → old-root children exit (including
+ *      serverIds not touched by the current dispatch);
+ *   3. disposeAll → children exit, no latch (a later getClient can respawn);
+ *   4. shutdownAll → children exit + latch (a later getClient always reports
+ *      spawn failure).
  *
- * 测试策略：createMessageConnection mock（同 client.test.ts），但 spawn 用
- * **真实子进程**（node -e setInterval），证明 kill 落在真 ChildProcess 上。
+ * Strategy: mocked createMessageConnection (same as client.test.ts), but
+ * spawning uses **real child processes** (node -e setInterval) to prove the
+ * kill lands on a genuine ChildProcess.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -44,7 +49,7 @@ vi.mock("vscode-jsonrpc/node", async (importOriginal) => {
   };
 });
 
-// 动态导入 —— 必须在 mock 安装之后。
+// Dynamic imports — must come after the mocks are installed.
 import type { LspCtx, LspServerInfo } from "../../../src/harness/lsp/types.ts";
 import {
   createLiveTaskRoot,
@@ -56,10 +61,10 @@ import {
   getClientDetailed,
 } from "../../../src/harness/lsp/client.ts";
 
-/** 本文件 spawn 过的真实子进程 —— afterEach 兜底清理,失败路径不泄漏。 */
+/** Real children spawned by this file — afterEach backstop so failure paths never leak. */
 const spawnedChildren: ChildProcess[] = [];
 
-/** 真实长驻子进程：有 stdio 管道，收到 SIGTERM 默认退出。 */
+/** A real long-lived child: has stdio pipes and exits on SIGTERM by default. */
 function spawnRealChild(): ChildProcess {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -68,7 +73,7 @@ function spawnRealChild(): ChildProcess {
   return child;
 }
 
-/** 固定 root 的 server：key 落 `/root:<id>`，用于单 entry 回收路径。 */
+/** Server with a fixed root: pool key lands at `/root:<id>`, for single-entry recycling paths. */
 function makeServerWithRealChild(id: string): {
   server: LspServerInfo;
   calls: { spawn: number };
@@ -89,7 +94,7 @@ function makeServerWithRealChild(id: string): {
   return { server, calls };
 }
 
-/** root 跟随 ctx.directory 的 server：rebind 前后各落一个 pool key。 */
+/** Server whose root follows ctx.directory: yields one pool key before and one after a rebind. */
 function makeDirectoryServerWithRealChild(id: string): {
   server: LspServerInfo;
   calls: { spawn: number };
@@ -110,13 +115,13 @@ function makeDirectoryServerWithRealChild(id: string): {
   return { server, calls };
 }
 
-/** 等待 child exit 事件（SIGTERM 后 node 默认退出，2s 上限）。 */
+/** Waits for the child's exit event (node exits on SIGTERM by default; 2s ceiling). */
 function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null)
     return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      // 超时先杀再拒绝：不留活子进程持事件循环句柄。
+      // On timeout, kill first, then reject: never leave a live child holding event-loop handles.
       child.kill("SIGKILL");
       reject(new Error("child did not exit within 2s"));
     }, 2000);
@@ -127,7 +132,7 @@ function waitForExit(child: ChildProcess): Promise<void> {
   });
 }
 
-/** 前置：子进程确实活着（kill(pid,0) 不抛；pid 是真实 OS pid）。 */
+/** Precondition: the child is genuinely alive (kill(pid,0) does not throw; pid is a real OS pid). */
 function expectAlive(child: ChildProcess): void {
   expect(child.pid).toBeGreaterThan(0);
   expect(() => process.kill(child.pid!, 0)).not.toThrow();
@@ -143,7 +148,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
-  // 失败路径兜底：断言失败时 spawn 的子进程仍在 → 全部 SIGTERM,不泄漏。
+  // Failure-path backstop: if an assertion failed, spawned children may still be alive → SIGTERM them all, no leaks.
   for (const child of spawnedChildren.splice(0)) {
     child.kill("SIGTERM");
   }
@@ -163,9 +168,9 @@ describe("LspClientPool.shutdownAll — 退出链终止 LSP 子进程", () => {
     await pool.shutdownAll();
 
     await waitForExit(child);
-    expect(child.signalCode).toBe("SIGTERM"); // 死于本次 SIGTERM，非自然退出
-    expect(mockDispose).toHaveBeenCalled(); // connection 先释放
-    expect(() => process.kill(child.pid!, 0)).toThrow(); // OS 侧已无此进程
+    expect(child.signalCode).toBe("SIGTERM"); // died from this SIGTERM, not a natural exit
+    expect(mockDispose).toHaveBeenCalled(); // the connection is released first
+    expect(() => process.kill(child.pid!, 0)).toThrow(); // the OS no longer has this process
     expect(pool.clients.size).toBe(0);
     expect(pool.lastUsedAt.size).toBe(0);
     expect(pool.broken.size).toBe(0);
@@ -187,9 +192,9 @@ describe("LspClientPool.shutdownAll — 退出链终止 LSP 子进程", () => {
       "/root/b.ts",
       { server }
     );
-    expect(second.failure?.reason).toBe("spawn-failed"); // 哨兵，不发起新 spawn
+    expect(second.failure?.reason).toBe("spawn-failed"); // sentinel; no new spawn is initiated
     expect(second.client).toBeUndefined();
-    expect(calls.spawn).toBe(1); // 没有重建子进程
+    expect(calls.spawn).toBe(1); // no child was re-created
     expect(pool.clients.size).toBe(0);
   });
 });
@@ -204,7 +209,7 @@ describe("LspClientPool 回收缝 — 长 session / rebind 不漏子进程", () 
     const child = client!.process;
     expectAlive(child);
 
-    // 到期：把 lastUsedAt 拨回过去再 sweep（不依赖真实时钟睡眠）。
+    // Expire it: rewind lastUsedAt, then sweep (no dependence on real-clock sleep).
     pool.lastUsedAt.set("/root:idlesweep", Date.now() - 60_000);
     pool.sweepIdleClients(1_000);
 
@@ -229,7 +234,7 @@ describe("LspClientPool 回收缝 — 长 session / rebind 不漏子进程", () 
 
     await waitForExit(oldChild);
     expect(oldChild.signalCode).toBe("SIGTERM");
-    expect(newClient).not.toBe(oldClient); // 旧实例不复活
+    expect(newClient).not.toBe(oldClient); // the old instance is not revived
     expect(pool.clients.has("/work-old:rebind-same")).toBe(false);
     expect(pool.clients.has("/work-new:rebind-same")).toBe(true);
   });
@@ -249,14 +254,14 @@ describe("LspClientPool 回收缝 — 长 session / rebind 不漏子进程", () 
     expect(pool.clients.size).toBe(2);
 
     writeLiveTaskRoot(cell, "/work-new");
-    // 只 dispatch TS server —— yaml 在旧 root 的 client 不得因此漏杀。
+    // Dispatch only the TS server — the yaml client on the old root must not escape the kill.
     await getClient(ctx, "/root/c.ts", { server: ts.server });
 
-    await waitForExit(yamlClient!.process); // 旧扫描只认 serverId 时这里超时
+    await waitForExit(yamlClient!.process); // this times out if the stale sweep only matches by serverId
     expect(yamlClient!.process.signalCode).toBe("SIGTERM");
     expect(pool.clients.has("/work-old:rebind-yaml")).toBe(false);
     expect(pool.clients.has("/work-old:rebind-ts")).toBe(false);
-    expect(pool.clients.size).toBe(1); // 只剩新 root 的 TS client
+    expect(pool.clients.size).toBe(1); // only the new root's TS client remains
   });
 
   it("disposeAll 终结子进程且不 latch（之后 getClient 重新 spawn）", async () => {
@@ -275,7 +280,7 @@ describe("LspClientPool 回收缝 — 长 session / rebind 不漏子进程", () 
     expect(mockDispose).toHaveBeenCalled();
     expect(pool.clients.size).toBe(0);
 
-    // 不 latch：同 key 再取 → 重新 spawn 新子进程（现有行为，不回归）。
+    // No latch: re-acquiring the same key spawns a fresh child (existing behavior, no regression).
     const second = await getClient({ directory: "/work", pool }, "/root/a.ts", {
       server,
     });

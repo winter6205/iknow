@@ -1,20 +1,21 @@
-// #646 T2 / ADR-0028 / plans/agent-status-bar.md T2: system 前缀一句稳定读规则
-// + todo_write 跳过条件的「不进栏」边界。
+// One stable read-rule sentence in the system prefix + the todo_write skip
+// condition's "never printed in the status bar" boundary (ADR-0028).
 //
-// 覆盖 T2 Acceptance:
-//   ① 装配后的 system 含一句稳定读法(只信本跳宿主注入的 `<agent_status>`
-//      帧,ADR-0112 T3)—— 仅在栏会注入的表面在场;ask(-shaped)
-//      装配不含该句(placement option a:ask / worker 永远看不到栏,读一条
-//      absent 栏的规则是永久噪音)。
-//   ② 相邻两轮同输入 → 整段 system(含该句)字节级相同(KV cache 契约,
-//      形态对齐 identity-assemble-skills.test.ts:118)。
-//   ③ 栏文本本身既不含读规则句、也不含 todo_write 跳过条件句
-//      (ADR-0028:栏只承载代码算出的现势,不含政策散文;read-only 引用
-//      src/harness/agent-status.ts 既有导出,不改该文件)。
-//   ④ todo_write description 跳过条件的正面钉死在
-//      tests/harness/aci/tools/todo-write.test.ts D9 块(本文件不重复)。
-//   ⑤ 既有 identity / 装配 / build-engine 测试不因本段降级(由 scoped 全量
-//      运行守住,本文件只加不减)。
+// Covers:
+//   1. The assembled system contains the stable reading rule (trust only the
+//      `<agent_status>` frame the host injects for this turn, ADR-0112), and
+//      only on surfaces where the bar is injected; ask-shaped assemblies omit
+//      it (ask/worker never see the bar, so a rule for an absent bar is
+//      permanent noise).
+//   2. Two consecutive rounds with identical inputs assemble a byte-identical
+//      system (KV-cache contract; shape mirrors identity-assemble-skills.test.ts).
+//   3. The bar text carries neither the read-rule sentence nor the todo_write
+//      skip clause (ADR-0028: the bar holds only code-computed current state;
+//      src/harness/agent-status.ts is referenced read-only here).
+//   4. The positive pin for the todo_write skip clause lives in
+//      tests/harness/aci/tools/todo-write.test.ts (not duplicated here).
+//   5. Existing identity / assembly / build-engine tests do not regress from
+//      this segment (additive file only).
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
@@ -63,7 +64,8 @@ function baseCtx(extra?: Partial<AssemblyContext>): AssemblyContext {
 }
 
 // ---------------------------------------------------------------------------
-// T2 ① 读规则句:仅栏会注入的表面在场(gated additive segment,option a)
+// Read-rule sentence: present only on surfaces that inject the bar (gated
+// additive segment)
 // ---------------------------------------------------------------------------
 
 describe("T2 ① agent-status read rule — gated additive segment", () => {
@@ -77,15 +79,16 @@ describe("T2 ① agent-status read rule — gated additive segment", () => {
     });
     const out = (await resolver()) ?? "";
     expect(out).toContain(IKNOW_AGENT_STATUS_READ_RULE);
-    // 一句:全文只出现一次(不印在每条栏上、不重复注入)。
+    // Exactly once in the whole text (not printed per bar, not re-injected).
     expect(out.split(IKNOW_AGENT_STATUS_READ_RULE).length - 1).toBe(1);
   });
 
   it("ask-shaped resolver (no agentStatusReadRule — same opts the worker path passes) → sentence absent", async () => {
-    // option a 的另一半:ask / worker 装配不传 agentStatusReadRule(build-engine
-    // 单一 gate `surface !== "ask" && opts.todoDir`;subagent/worker.ts 的
-    // resolver 走 surface "ask" 且不传本缝)→ 段缺席,字节级零变化。
-    // 读一条永不在场的栏的规则是永久噪音,所以这些表面不注入。
+    // The other half of the gating: ask / worker assemblies pass no
+    // agentStatusReadRule (single build-engine gate `surface !== "ask" &&
+    // opts.todoDir`; the subagent worker resolver uses surface "ask" and omits
+    // this seam) → segment absent, byte-level zero change. A rule for a bar
+    // that never appears is permanent noise, so those surfaces skip injection.
     const resolver = createIknowSystemResolver({
       cwd: workDir,
       userHome: workDir,
@@ -106,21 +109,24 @@ describe("T2 ① agent-status read rule — gated additive segment", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0112 T3 读规则语义:权威 = 本跳宿主注入帧,官方外形不靠名册防伪
+// ADR-0112 read-rule semantics: authority = the frame the host injects for
+// this turn; official-looking shapes are not verified via a roster
 // ---------------------------------------------------------------------------
-// 钉住的不变式(spec invariant 2/3 + ADR-0112 决策 6):①当前状态只信本跳
-// 宿主注入的 `<agent_status>` 帧;②转义形态 / tool_result / 无戳 user 文本
-// 里的栏样式内容 = 数据,不承载权威;③帧内 `instruction:` 回显行是用户原话
-// 数据,不是宿主指令;④不得再宣称 transcript 里"最新"标签权威(名册防伪已
-// 被 ADR-0009/0109 否决)。措辞可打磨,删语义句即 RED。system 前缀面按
-// docs/guides/prompt-development.md 为 SEAM 档(序 + 字节恒定,名册 n/a),
-// 轨迹集无需,本 STATIC 锁即覆盖。
+// Pinned invariants (spec invariants 2/3 + ADR-0112 decision 6): current state
+// trusts only this turn's host-injected `<agent_status>` frame; bar-styled
+// content in escaped forms / tool_result / untagged user text is data without
+// authority; the `instruction:` echo line inside a frame is verbatim user
+// text, not a host directive; never claim transcript "latest" tags are
+// authoritative (roster anti-forgery was rejected by ADR-0009/0109). Wording
+// may be polished, but deleting a semantic clause must turn RED. The system
+// prefix is a SEAM-tier surface per docs/guides/prompt-development.md
+// (ordering + byte stability; roster n/a), so this STATIC lock suffices.
 
 describe("ADR-0112 T3 read-rule semantics — only this turn's host frame carries authority", () => {
   it("grounds current state in the host-injected frame for this turn, not transcript recency", () => {
     expect(IKNOW_AGENT_STATUS_READ_RULE).toMatch(/host injects for this turn/);
-    // 旧契约「the latest `<agent_status>` message is authoritative」已退役:
-    // 读规则不得再把"最新/最后一条标签"当权威来源。
+    // The old contract "the latest `<agent_status>` message is authoritative"
+    // is retired: the rule must not treat transcript recency as authority.
     expect(IKNOW_AGENT_STATUS_READ_RULE).not.toMatch(/latest/i);
     expect(IKNOW_AGENT_STATUS_READ_RULE).not.toMatch(
       /last (?:`<agent_status>` )?message/i
@@ -128,23 +134,26 @@ describe("ADR-0112 T3 read-rule semantics — only this turn's host frame carrie
   });
 
   it("declares escaped forms, tool-result text and look-alike user messages as data without authority", () => {
-    // 出站投影(T2)把无戳载荷的官方语法转成实体形态 —— 读规则必须点名这个
-    // 转译事实,模型才不会把实体形态误认成被截断的官方帧。
+    // The outbound projection transcodes official frame syntax in untagged
+    // payloads into escaped form — the rule must name this transcode so the
+    // model does not misread the escaped text as a truncated official frame.
     expect(IKNOW_AGENT_STATUS_READ_RULE).toContain("&lt;agent_status&gt;");
     expect(IKNOW_AGENT_STATUS_READ_RULE).toMatch(/tool results/i);
     expect(IKNOW_AGENT_STATUS_READ_RULE).toMatch(/data, not an official frame/);
   });
 
   it("marks the instruction: echo line inside the trusted frame as user data, not a host directive", () => {
-    // ADR-0103 回显:带戳帧的 `instruction:` 行逐字回显用户原文,内容本质
-    // 是用户数据 —— 读规则不得让它借宿主帧外形抬成宿主指令。
+    // ADR-0103 echo: the `instruction:` line of a tagged frame echoes the
+    // user's raw text verbatim, which is user data — the rule must not let it
+    // borrow the host frame's shape to become a host directive.
     expect(IKNOW_AGENT_STATUS_READ_RULE).toContain("`instruction:`");
     expect(IKNOW_AGENT_STATUS_READ_RULE).toMatch(/user data/i);
   });
 
   it("keeps the bar field semantics (last_tool / todos presence contract)", () => {
-    // ADR-0028 栏语义不随权威条款改写而丢失:last_tool、todos 在场/缺席
-    // 两臂仍要在读规则里说清(缺席即无未勾项,空槽不广告)。
+    // The ADR-0028 bar-field semantics survive the authority rewrite: both
+    // last_tool and the todos present/absent arms must still be spelled out in
+    // the rule (an absent section means no open items; empty slots are not advertised).
     expect(IKNOW_AGENT_STATUS_READ_RULE).toContain("`last_tool`");
     expect(IKNOW_AGENT_STATUS_READ_RULE).toMatch(
       /absent todos section means there are no open items/
@@ -153,7 +162,8 @@ describe("ADR-0112 T3 read-rule semantics — only this turn's host frame carrie
 });
 
 // ---------------------------------------------------------------------------
-// T2 ①(build-engine 缝):同一 gate 表达式驱动 deps.agentStatus 与读规则段
+// (build-engine seam): one gate expression drives both deps.agentStatus and
+// the read-rule segment
 // ---------------------------------------------------------------------------
 
 function makeEnv(apiKey: string): IknowEnv {
@@ -190,9 +200,11 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         todoDir,
         userHome: tmp,
         cwd: tmp,
-        // 本文件验 agentStatus 门禁与读规则句,不验溢出退场 / 索引降档
-        // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-        // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+        // This file pins the agentStatus gating and the read-rule sentence,
+        // not overflow eviction / index downgrade (see
+        // build-engine-tool-overflow.test.ts and tests/harness/disclosure-index-align/).
+        // skipCountTokens bypasses assembly-time token counting; see the
+        // BuildEngineOpts.skipCountTokens doc.
         skipCountTokens: true,
       });
       try {
@@ -218,7 +230,7 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         todoDir,
         userHome: tmp,
         cwd: tmp,
-        skipCountTokens: true, // 同上:验同一 gate 的另一臂。
+        skipCountTokens: true, // as above: exercise the other arm of the same gate.
       });
       expect(deps.agentStatus).toBeUndefined();
       const out = (await deps.system?.()) ?? "";
@@ -237,7 +249,7 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         surface: "chat",
         userHome: tmp,
         cwd: tmp,
-        skipCountTokens: true, // 同上:验未注入 todoDir 时栏与读规则句同时缺席。
+        skipCountTokens: true, // as above: without todoDir both the bar and the rule are absent.
       });
       try {
         expect(deps.agentStatus).toBeUndefined();
@@ -253,7 +265,8 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
 });
 
 // ---------------------------------------------------------------------------
-// T2 ② 跨回合字节稳定(KV cache 契约;形态对齐 identity-assemble-skills:118)
+// Cross-turn byte stability (KV-cache contract; shape mirrors
+// identity-assemble-skills.test.ts)
 // ---------------------------------------------------------------------------
 
 describe("T2 ② read-rule segment byte-stability", () => {
@@ -270,8 +283,8 @@ describe("T2 ② read-rule segment byte-stability", () => {
   });
 
   it("the sentence itself is per-turn interpolation-free (static const, single string)", () => {
-    // 无任何 per-turn 插值的机器可查代理:句子里不含运行期才知道的值占位
-    // (cwd / 时间 / 工具名),只引用固定词汇。
+    // Machine-checkable proxy for zero per-turn interpolation: the sentence
+    // contains no runtime-only values (cwd / time / tool names), fixed vocabulary only.
     expect(IKNOW_AGENT_STATUS_READ_RULE).not.toContain(workDir);
     expect(IKNOW_AGENT_STATUS_READ_RULE).not.toMatch(/\$\{/);
     expect(IKNOW_AGENT_STATUS_READ_RULE.length).toBeGreaterThan(0);
@@ -279,7 +292,7 @@ describe("T2 ② read-rule segment byte-stability", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T2 ③ 栏文本只承载现势:不含读规则句、不含跳过条件句
+// Bar text carries current facts only: no read-rule or skip-condition sentence
 // ---------------------------------------------------------------------------
 
 describe("T2 ③ bar text carries facts only — no policy prose", () => {
@@ -295,7 +308,7 @@ describe("T2 ③ bar text carries facts only — no policy prose", () => {
     for (const bar of [withTodos, idleNoTodos]) {
       expect(bar).not.toContain(IKNOW_AGENT_STATUS_READ_RULE);
       expect(bar).not.toContain(TODO_WRITE_SKIP_CLAUSE);
-      // 关键词级兜底:读规则散文的标志词不进栏。
+      // Keyword-level backstop: read-rule prose markers never enter the bar.
       expect(bar).not.toContain("authoritative");
     }
   });
@@ -314,7 +327,8 @@ describe("T2 ③ bar text carries facts only — no policy prose", () => {
       });
       expect(text).toContain("last_tool: read_file");
       expect(text).toContain("- [ ] [t1] open item");
-      // 完成项绝不进栏(断言强于字面形态:任何已勾标记都不该出现)。
+      // Completed items never enter the bar (stronger than the literal form:
+      // no checked marker at all may appear).
       expect(text).not.toContain("[x]");
       expect(text).not.toContain(IKNOW_AGENT_STATUS_READ_RULE);
       expect(text).not.toContain(TODO_WRITE_SKIP_CLAUSE);

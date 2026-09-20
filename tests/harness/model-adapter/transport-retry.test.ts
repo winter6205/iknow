@@ -1,5 +1,5 @@
 /**
- * #672 T2: ModelAdapter.step 传输重试装饰器。
+ * Transport retry decorator for ModelAdapter.step.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -158,11 +158,13 @@ describe("withTransportRetry", () => {
     assert.equal(b.calls, 2);
   });
 
-  // Bug（2026-09-07）:重试此前完全静默,429/网络故障期间宿主无法显示
-  // 「连接重试 1/5」类进度。每次退避重试前必须向 request.onStream 发
-  // transport_retry 事件(attempt 从 1 计,成功路径不发)。
-  // spec inv 4:事件里的 maxAttempts 与退避预算同源(TRANSPORT_MAX_ATTEMPTS),
-  // 宿主可见的进度分母必须是实际生效的那份 SSOT。
+  // Retries used to be completely silent: during 429/network faults the host
+  // could not show progress like 「连接重试 1/5」 ("connection retry 1/5").
+  // Every backoff retry must first emit a transport_retry event on
+  // request.onStream (attempt counts from 1; success paths emit none).
+  // specs/transport-continue-persist.md invariant 4: the event's maxAttempts
+  // shares one source with the backoff budget (TRANSPORT_MAX_ATTEMPTS) — the
+  // progress denominator shown to the host must be the SSOT actually in effect.
   it("429 then success → onStream emits transport_retry 1/5 before backoff", async () => {
     const inner = stub([new Error("http:429"), okResult]);
     const wrapped = withTransportRetry(inner, {
@@ -199,8 +201,9 @@ describe("withTransportRetry", () => {
 });
 
 /**
- * transport-continue-persist T1 / spec inv 4:
- * 秒级指数退避、有界尝试(5)、honor `retry-after`、非重试 4xx 不变。
+ * specs/transport-continue-persist.md invariant 4:
+ * second-scale exponential backoff, bounded attempts (5), honor `retry-after`,
+ * non-retryable 4xx unchanged.
  */
 describe("withTransportRetry: spec inv 4 退避与预算", () => {
   it("默认预算 = 5 次尝试(第 5 次失败即耗尽,不再有第 6 次)", async () => {
@@ -224,7 +227,7 @@ describe("withTransportRetry: spec inv 4 退避与预算", () => {
         e instanceof TransportRetryExhaustedError && e.attempts === 5
     );
     assert.equal(inner.calls, 5);
-    // 秒级指数:1s / 2s / 4s / 8s(4 次退避,5 次尝试)。
+    // Second-scale exponential: 1s / 2s / 4s / 8s (4 backoffs, 5 attempts).
     assert.deepEqual(delays, [1_000, 2_000, 4_000, 8_000]);
   });
 
@@ -305,9 +308,11 @@ describe("withTransportRetry: spec inv 4 退避与预算", () => {
   });
 
   /**
-   * spec inv 4 的「explicit network faults」格:真实 SDK 连接失败
-   * (`APIConnectionError extends APIError`、`status === undefined`)必须经真
-   * translator 落 retry 类 —— 否则 adapter 换了连接故障,重试路径整条不可达。
+   * The "explicit network faults" cell of specs/transport-continue-persist.md
+   * invariant 4: real SDK connection failures (`APIConnectionError extends
+   * APIError`, `status === undefined`) must land in the retry class via the
+   * real translator — otherwise an adapter swapped to connection faults would
+   * leave the whole retry path unreachable.
    */
   it("真实 SDK 连接故障经真 translator → 被重试(attempt > 1 且发 transport_retry)", async () => {
     const connErr = (): APIConnectionError =>

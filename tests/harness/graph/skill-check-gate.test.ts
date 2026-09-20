@@ -1,12 +1,13 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：skill-check-gate.test.ts。
+ * PROTOTYPE — self-authored Graph multi-task orchestration: skill-check-gate.test.ts.
  *
- * 覆盖：
- *   1. 匹配 skill 的节点 → route + 标注 skill 名。
- *   2. 高危节点（deploy-prod） → block + reason。
- *   3. 未知节点 → route 但 skill = ""（放行不套契约）。
- *   4. skillCatalog 至少含 code-review 与 tdd 两个内置 skill。
- *   5. block 决策与 runGraph 串联：blocked 节点走 skipped 分支（不调底层）。
+ * Coverage:
+ *   1. Node matching a skill → route, annotated with the skill name.
+ *   2. High-risk node (deploy-prod) → block with reason.
+ *   3. Unknown node → route with skill = "" (passed through, no contract).
+ *   4. skillCatalog contains at least the built-in code-review and tdd skills.
+ *   5. block + runGraph wiring: blocked nodes take the skipped branch
+ *      (the underlying executor is never called).
  */
 
 import { describe, it } from "vitest";
@@ -59,7 +60,7 @@ describe("skillCheckGate (pure function)", () => {
   });
 
   it("opts.nodeSkillMap override default route table (per-call injection)", () => {
-    // 默认表里 'review-code' → code-review；这里 override 让它指向 custom skill。
+    // Default table maps 'review-code' → code-review; the override points it at a custom skill.
     const d = skillCheckGate("review-code", {
       nodeSkillMap: { "review-code": "custom-skill" },
     });
@@ -70,7 +71,7 @@ describe("skillCheckGate (pure function)", () => {
   });
 
   it("opts.blockedNodes override default block table (per-call injection)", () => {
-    // 默认表里 'unknown' 不被 block；这里 override 让它被 block。
+    // Default table does not block 'unknown'; the override blocks it.
     const d = skillCheckGate("unknown", {
       blockedNodes: { unknown: "test override: 强制拦截" },
     });
@@ -84,12 +85,12 @@ describe("skillCheckGate (pure function)", () => {
 describe("skillCheckGate wired into runGraph", () => {
   it("blocked 节点 → status=skipped 不调底层 executor", async () => {
     const called: string[] = [];
-    // 底层 executor：若被调用则记录。blocked 节点不应触发。
+    // Inner executor records any call; blocked nodes must not reach it.
     const inner: NodeExecutor = async (id) => {
       called.push(id);
       return { status: "done", output: id };
     };
-    // 在 inner 外面包 skillCheckGate；block → skipped 不委派。
+    // Wrap inner with skillCheckGate: block → skipped, no delegation.
     const gated: NodeExecutor = async (id, ctx) => {
       const gate = skillCheckGate(id);
       if (gate.decision === "block") {
@@ -110,9 +111,9 @@ describe("skillCheckGate wired into runGraph", () => {
     assert.equal(out.statuses["review-code"], "done");
     assert.equal(out.statuses["write-test"], "done");
     assert.equal(out.statuses["deploy-prod"], "skipped");
-    // blocked 节点未被调到底层 executor。
+    // The blocked node never reached the underlying executor.
     assert.deepEqual(called, ["review-code", "write-test"]);
-    // reason 含禁止语义。
+    // The skip reason carries the prohibition ("禁止").
     const r = out.results["deploy-prod"];
     assert.ok(r?.status === "skipped");
     if (r?.status === "skipped") {

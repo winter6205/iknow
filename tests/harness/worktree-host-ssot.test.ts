@@ -1,8 +1,10 @@
 /**
- * 共享 worktree host provision 缝 SSOT（src/harness/isolation/worktree-host.ts）
- * 回归：cli.ts（PR #881）与 tui/run.tsx（2026-09-05 trace dfce6b4f）两次
- * 入口级手工解构丢 `name` 的真 bug 之后，所有入口的 provision 缝装配收敛
- * 到本工厂。本测试钉死核心不变式：**整 ctx 到达 hub 实现，零字段损失**。
+ * SSOT for the shared worktree host provision seam
+ * (src/harness/isolation/worktree-host.ts). Regression background: two
+ * entry-level hand-written destructurings (cli.ts and tui/run.tsx) really
+ * dropped `name`; after that, every entry's provision-seam assembly converged
+ * into this factory. This test pins the core invariant: **the full ctx reaches
+ * the hub implementation with zero field loss**.
  */
 import { describe, expect, it } from "vitest";
 
@@ -37,8 +39,8 @@ describe("createWorktreeHostProvision (shared provision seam SSOT)", () => {
       },
     });
 
-    // 纯透传语义：hub 实现的同步 throw 原样同步冒泡（与 PR #881 前后
-    // 的 CLI 缝行为一致），executor 侧 await + try/catch 承接。
+    // Pure pass-through semantics: a sync throw from the hub implementation bubbles up
+    // sync unchanged (same as the CLI seam), and the executor side catches it via await + try/catch.
     expect(() =>
       provision({ conversationId: "conv-b", root: "/repo" })
     ).toThrow("TUI Hub is not ready");

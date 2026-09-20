@@ -1,11 +1,12 @@
 /**
- * B4 / ADR-0043 §4 — build-engine 装配期 wire:
+ * ADR-0043 — build-engine assembly-time wiring:
  *   - await manager.start({firstTurnReadyTimeoutMs: 30_000});
- *   - onManualReconnect(cb) 注入 → cb 触发时刻由 loop-engine 消费,
- *     本测试仅验 wire 形态(回调注册、参数形态)。
+ *   - onManualReconnect(cb) injection — cb fires at a moment consumed by
+ *     loop-engine; this test pins only the wire shape (callback registered,
+ *     argument shape).
  *
- * 不验 managers 自己语义(分 open manager.test.ts 完成);本文件专注于
- * build-engine 是否正确将两个 seam 接到 manager。
+ * Manager's own semantics are covered by manager.test.ts; this file focuses
+ * solely on build-engine connecting the two seams to the manager correctly.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -93,9 +94,9 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      // 本文件验 MCP seam 的 wire 形态,不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file pins the MCP seam wire shape, not overflow eviction /
+      // index downgrade (dedicated test: build-engine-tool-overflow.test.ts).
+      // Assembly-time countTokens is bypassed; see the BuildEngineOpts.skipCountTokens comment for seam semantics.
       skipCountTokens: true,
       createMcpClient: () =>
         makeInstantClient([
@@ -112,7 +113,7 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
     managerPresent = built.mcpManager !== undefined;
     buildResolved = true;
 
-    // build-engine 完成时,manager 已经"装配期"等过 firstTurnReady。
+    // Once build-engine resolves, the manager has already awaited firstTurnReady during assembly.
     expect(buildResolved).toBe(true);
     expect(managerPresent).toBe(true);
     expect(built.mcpManager).toBeDefined();
@@ -129,7 +130,7 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验 onManualReconnect wire,不验溢出 / 索引降档。
+      skipCountTokens: true, // as above: pins the onManualReconnect wire, not overflow / downgrade.
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -145,8 +146,8 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
 
     const mgr = built.mcpManager as McpManager;
     expect(mgr).toBeDefined();
-    // 接口已暴露 onManualReconnect 字段(类型保 + 函数形态可调);
-    // 消费面(loop-engine)在 loop-engine 测试中验证。
+    // The interface exposes onManualReconnect (type-checked, callable shape);
+    // the consuming side (loop-engine) is verified in loop-engine tests.
     expect(
       typeof (mgr as unknown as { onManualReconnect: unknown })
         .onManualReconnect
@@ -166,7 +167,7 @@ describe("buildHarnessEngine — MCP 名字目录段(替代旧概览段)", () =>
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验名字目录段,不验溢出 / 索引降档。
+      skipCountTokens: true, // as above: pins the name-directory section, not overflow / downgrade.
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -180,20 +181,20 @@ describe("buildHarnessEngine — MCP 名字目录段(替代旧概览段)", () =>
       if (built.shutdown) await built.shutdown();
     });
 
-    // 等到 connected(装配期已 await firstTurnReady,正常情况下已 connected)。
+    // Await connected (assembly already awaited firstTurnReady, so normally connected).
     const status = built.mcpManager!.status();
     const stubsvc = status.find((s) => s.name === "stubsvc")!;
     expect(stubsvc.state).toBe("connected");
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
-    // 名字目录段 + 服务名 + 工具名(sans schema)
+    // name directory section + server name + tool name (sans schema)
     expect(systemText).toContain("<mcp_name_directory>");
     expect(systemText).toContain("stubsvc");
     expect(systemText).toContain("alpha");
-    // 工具 schema 不应进 directory(参考 B4 spec §4 二)
+    // tool schema must not enter the directory (see ADR-0043)
     expect(systemText).not.toContain("inputSchema");
-    // 旧概览段已撤除
+    // old overview section removed
     expect(systemText).not.toContain("<mcp_tools_overview>");
   });
 });
@@ -209,9 +210,9 @@ describe("buildHarnessEngine — manager 未装配 (ask 路径) 字节级零变�
       surface: "ask",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验 ask 路径零接线,不验溢出 / 索引降档。
+      skipCountTokens: true, // as above: pins zero wiring on the ask path, not overflow / downgrade.
     });
-    // ask 表面不创建 MCP manager
+    // the ask surface never creates an MCP manager
     expect(built.mcpManager).toBeUndefined();
     await built.shutdown?.();
   });

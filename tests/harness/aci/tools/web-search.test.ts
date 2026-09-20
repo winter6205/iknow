@@ -1,23 +1,23 @@
 /**
- * web_search 工具单元测试。
+ * web_search unit tests.
  *
- * 行为真值：web_search_tool.py
- * （默认 DuckDuckGo html 端点 + result__a / result__snippet 解析 + uddg URL 归一）。
+ * Behavioral ground truth: web_search_tool.py
+ * (default DuckDuckGo html endpoint + result__a / result__snippet parsing + uddg URL normalization).
  *
- * 覆盖契约（ADR 测试规范 6 项 + ACR 5 类边界）：
- *   - 工厂签名 createWebSearchTool(deps?) → AciToolDef，name === "web_search"
- *   - inputSchema: query 必填 + max_results?(默认 5, ge 1, le 10) + search_url? +
+ * Contract coverage:
+ *   - factory signature createWebSearchTool(deps?) → AciToolDef, name === "web_search"
+ *   - inputSchema: query required + max_results?(default 5, ge 1, le 10) + search_url? +
  *     additionalProperties:false
- *   - aci 元数据: category=read-only, isConcurrencySafe=true,
+ *   - aci metadata: category=read-only, isConcurrencySafe=true,
  *     interruptBehavior=cancel, timeoutTier=default
- *   - 成功路径：编号列表 `N. title / URL: / snippet`
- *   - max_results 截断；clamp 超上限 → 10，≤0/非数 → 5
- *   - DuckDuckGo /l/?uddg= 重定向链接归一为目标 URL
- *   - 空 query / 无结果 → ToolExecutionError
- *   - 非 2xx → ToolExecutionError
- *   - 并发扇出（Promise.all + 独立 stub）
+ *   - happy path: numbered list `N. title / URL: / snippet`
+ *   - max_results truncation; clamp above ceiling → 10, ≤0 / non-number → 5
+ *   - DuckDuckGo /l/?uddg= redirect links normalized to the target URL
+ *   - empty query / no results → ToolExecutionError
+ *   - non-2xx → ToolExecutionError
+ *   - concurrency fan-out (Promise.all + independent stubs)
  *
- * 全部离线：deps.fetch / deps.lookup 注入 stub。
+ * Fully offline: deps.fetch / deps.lookup are injected stubs.
  */
 
 import assert from "node:assert/strict";
@@ -37,7 +37,7 @@ import type {
 const PUBLIC_IP = "93.184.216.34";
 const okLookup: GuardLookupFn = async () => [PUBLIC_IP];
 
-/** 构造 DuckDuckGo html 风格的结果页。 */
+/** Builds a DuckDuckGo-html-style results page. */
 function ddgBody(count: number): string {
   const items: string[] = [];
   for (let i = 1; i <= count; i++) {
@@ -60,7 +60,7 @@ function ddgBodyWithLongFields(count: number): string {
   return `<html><body>${items.join("")}</body></html>`;
 }
 
-/** 构造 Bing 风格的结果页（真实 DOM：li.b_algo → h2>a + div.b_caption）。 */
+/** Builds a Bing-style results page (real DOM: li.b_algo → h2>a + div.b_caption). */
 function bingBody(count: number): string {
   const items: string[] = [];
   for (let i = 1; i <= count; i++) {
@@ -73,10 +73,11 @@ function bingBody(count: number): string {
 }
 
 /**
- * 构造工具 deps。默认端点=Bing(B1),所以显式声明测试端点避免耦合:
- * - 传 DDG body 的测试应给 DDG endpoint;
- * - 传 Bing body 的测试应给 Bing endpoint。
- * `endpoint` 缺省为 DDG(保留旧测试 fixture 的意图)。
+ * Builds tool deps. The default endpoint is Bing, so tests declare their
+ * endpoint explicitly to avoid coupling:
+ * - a test feeding a DDG body should pass the DDG endpoint;
+ * - a test feeding a Bing body should pass the Bing endpoint.
+ * `endpoint` defaults to DDG (preserving the intent of the older fixtures).
  */
 function searchDeps(
   body: string,
@@ -266,7 +267,7 @@ describe("createWebSearchTool — success path", () => {
 
 describe("createWebSearchTool — Bing 解析器（B1 默认端点）", () => {
   it("默认端点指向 Bing(bing.com)而非 DDG html", async () => {
-    // B1:默认端点切到 Bing,DDG html 不再是默认。
+    // The default endpoint is Bing; DDG html is no longer the default.
     const seen: string[] = [];
     const fetch: GuardFetchFn = async (url) => {
       seen.push(url);

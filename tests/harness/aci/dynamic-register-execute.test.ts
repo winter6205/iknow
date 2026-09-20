@@ -1,23 +1,26 @@
 /**
- * 回归测试：MCP 动态注册工具经 permission-executor 可执行。
+ * Regression test: MCP dynamically registered tools are executable through
+ * the permission-executor.
  *
- * 背景（#337）：MCP 扩展源通过 `reg.registerExternal(defs)` 动态注册
- * `mcp__` 前缀工具。早期的 `createAciCatalog.get` 用构造期快照
- * `byName`，导致：
- *   1. permission-executor 把动态工具当作 catalog miss → 直接 delegate
- *      inner；
- *   2. 而 inner（来自 `createExecutor(reg.inner)`）也是构造期快照，
- *      没有动态工具 → 返 `tool_not_found`。
+ * Background: MCP extension sources register `mcp__`-prefixed tools
+ * dynamically via `reg.registerExternal(defs)`. Early `createAciCatalog.get`
+ * used a construction-time snapshot of `byName`, which caused:
+ *   1. the permission-executor treated dynamic tools as catalog misses →
+ *      delegating straight to inner;
+ *   2. but inner (from `createExecutor(reg.inner)`) was also a construction-
+ *      time snapshot without the dynamic tools → returned `tool_not_found`.
  *
- * 修复后契约：registerExternal 注册的 mcp__ 工具必须经
- * `executor.executeAll` 真实可执行（handler 被调、payload 含 marker）。
+ * Post-fix contract: mcp__ tools registered via registerExternal must be
+ * genuinely executable through `executor.executeAll` (handler invoked,
+ * payload carries a marker).
  *
- * 本测试断言三个稳定阶段：
- *   - 构造后/注册前：executeAll 同名 mcp__ 工具 → tool_not_found（红路径）
- *   - registerExternal 后：executeAll 同名 → kind="ok" + marker（绿路径）
- *   - 注册前的 catalog.get(name) === undefined；注册后 === dyn def
+ * This test asserts three stable stages:
+ *   - after construction / before registration: executeAll on the same
+ *     mcp__ tool → tool_not_found (red-path control)
+ *   - after registerExternal: executeAll on the same tool → kind="ok" + marker
+ *   - catalog.get(name) === undefined before registration; === dyn def after
  *
- * 不修改任何 src/ 文件；只用 vitest + stub def + 本地 handler。
+ * Touches no src/ files; uses only vitest + stub defs + a local handler.
  */
 
 import assert from "node:assert/strict";
@@ -32,7 +35,7 @@ import type {
   ToolExecutionResult,
 } from "../../../src/harness/tools/types.ts";
 
-/** marker：handler 被真实调用时由 ok payload 携带。 */
+/** Marker: carried by the ok payload only when the handler truly ran. */
 const DYNAMIC_MARKER = "dynamic-ok";
 
 function makeStaticReadOnlyTool(name: string): AciToolDef {
@@ -66,9 +69,10 @@ function makeDynamicMcpTool(name: string, marker: string): AciToolDef {
 }
 
 /**
- * 构造一个 inner executor：在执行时从 catalog 动态查 def（模拟真实的
- * loop-engine 行为，关键差别是 lookup 是 call-time 而非构造期）。
- * 这样 registerExternal 追加的 mcp__ 工具，inner 也能解析。
+ * Build an inner executor that looks up defs from the catalog at execution
+ * time (modeling real loop-engine behavior; the key difference is call-time
+ * lookup instead of construction-time). This way mcp__ tools appended by
+ * registerExternal resolve in inner too.
  */
 function makeCatalogBackedInner(catalog: AciCatalog): Executor {
   return Object.freeze({
@@ -110,7 +114,7 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
       askUser: async () => true,
     });
 
-    // 关键观察：catalog.get 此刻确实取不到（动态源为空）
+    // Key observation: catalog.get genuinely misses right now (dynamic source empty)
     assert.equal(
       reg.catalog.get("mcp__server__dyn"),
       undefined,
@@ -123,7 +127,7 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
 
     assert.equal(results.length, 1);
     const r = results[0]!;
-    // 决定性断言：handler 未被调、payload 无 marker、kind === tool_not_found
+    // Decisive assertion: handler not called, payload without marker, kind === tool_not_found
     assert.equal(r.kind, "tool_not_found");
     if (r.kind === "tool_not_found") {
       assert.equal(r.toolName, "mcp__server__dyn");
@@ -142,16 +146,18 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
       askUser: async () => true,
     });
 
-    // 模拟 MCP manager 的 T1 缝：registerExternal 动态注册 mcp__ 工具
+    // Modeling the MCP manager's dynamic-registration seam: registerExternal
+    // registers the mcp__ tool dynamically
     const dyn = makeDynamicMcpTool("mcp__server__dyn", DYNAMIC_MARKER);
     reg.registerExternal([dyn]);
 
-    // B4 / ADR-0043 §2:permission-executor 在 mcp__ 工具调用前要求
-    // `discover()` 已标记该名。这里测试显式调一次,模拟工具面 tool_search
-    // 已把该工具检索出来的真实装配路径。
+    // ADR-0043: the permission-executor requires `discover()` to have marked
+    // the name before an mcp__ tool call. The test calls it once explicitly,
+    // simulating the real assembly path where tool_search has already
+    // retrieved this tool.
     reg.discover(dyn.name);
 
-    // 注册后 catalog.get 应命中动态 def（这是修复后的契约）
+    // After registration catalog.get must hit the dynamic def (the post-fix contract)
     const hit = reg.catalog.get("mcp__server__dyn");
     assert.ok(hit, "registerExternal 后 catalog.get 必须命中动态 def");
     assert.equal(hit!.aci.category, "read-only");
@@ -162,10 +168,11 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
 
     assert.equal(results.length, 1);
     const r = results[0]!;
-    // 决定性断言：handler 必须被真实调用、payload 必须含 marker
-    //   这同时证明：(a) catalog.get 在 executeAll 路径上是动态的；
-    //               (b) permission-executor 没把 mcp__ 当作 miss delegate；
-    //               (c) inner 经 catalog 也能解析到 handler。
+    // Decisive assertion: the handler must genuinely be called and the payload
+    // must carry the marker. This simultaneously proves:
+    //   (a) catalog.get is dynamic on the executeAll path;
+    //   (b) the permission-executor does not treat mcp__ as a miss to delegate;
+    //   (c) inner resolves the handler through the catalog as well.
     assert.equal(r.kind, "ok");
     if (r.kind === "ok") {
       assert.equal(r.toolUseId, "u2");
@@ -181,8 +188,9 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
   });
 
   it("registerExternal 后：catalog.get 的动态 hit 与 registerExternal 入参 def 身份一致", async () => {
-    // 这条断言锁定动态源的"注册即查询"对称性，防止 catalog.get 默默
-    // 返回另一个被冻结的副本（registration 实际写的是这个 Map 吗？）。
+    // This assertion locks the "register-equals-query" symmetry of the
+    // dynamic source, preventing catalog.get from silently returning another
+    // frozen copy (is registration really writing into this Map?).
     const reg = createAciRegistry([makeStaticReadOnlyTool("read_file")]);
     const dyn = makeDynamicMcpTool("mcp__server__dyn", DYNAMIC_MARKER);
 
@@ -192,7 +200,7 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
     assert.ok(got, "动态 get 必须返回非 undefined");
     assert.equal(got!.name, dyn.name);
     assert.equal(got!.description, dyn.description);
-    // handler 身份相等（同一引用）—— handler 是动态工具的核心执行单元
+    // handler identity equality (same reference) — the handler is the core execution unit of a dynamic tool
     assert.equal(got!.handler, dyn.handler);
     assert.equal(got!.aci.category, dyn.aci.category);
   });

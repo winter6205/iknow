@@ -1,11 +1,12 @@
 /**
  * tests/harness/sandbox/egress-bwrap-binds.test.ts
  *
- * specs/egress-credential-sentinel.md T2 / SC7 后半 + invariant 9 ——
- * bwrap argv 快照钉：凭据围栏 binds（masked store 目录、trust bundle、
- * masked-file 盖真路径、F3 deny 的 /dev/null 盖行）全部落 egressBind 段，
- * 位序 = workspaceMounts 之后、cwdReadonly 之前（last-mount-wins 盖过
- * home ro-bind / 根 bind 下的真路径）。
+ * specs/egress-credential-sentinel.md, invariant 9 — bwrap argv snapshot
+ * pin: all credential-fence binds (masked store directory, trust bundle,
+ * masked files over real paths, `/dev/null` overlays for denied entries)
+ * land in the egressBind segment, ordered after workspaceMounts and before
+ * cwdReadonly (last-mount-wins so they override the real paths under the
+ * home ro-bind / root bind).
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -63,7 +64,7 @@ function fenceArgv(egress?: EgressFenceSpec): readonly string[] {
   }).argv;
 }
 
-/** 找 `--ro-bind src dest` 三元组的起始下标。 */
+/** Start index of the `--ro-bind src dest` triple. */
 function findRoBind(
   argv: readonly string[],
   src: string,
@@ -96,7 +97,7 @@ describe("createBwrapFence — 凭据 bind 段落位（invariant 9 / SC7 后半�
     ] as const) {
       assert.ok(idx >= 0, `${label} 应发射 --ro-bind`);
     }
-    // 位序：workspaceMounts（home ro-bind / task / tmp bind）之后。
+    // placement: after workspaceMounts (home ro-bind / task / tmp binds).
     const homeRo = findRoBind(argv, HOME, HOME);
     const socketSrcIdx = argv.indexOf(SOCKET);
     assert.ok(
@@ -104,11 +105,11 @@ describe("createBwrapFence — 凭据 bind 段落位（invariant 9 / SC7 后半�
       "socket --bind 在场"
     );
     assert.ok(homeRo >= 0, "workspace 档 home ro-bind 在场");
-    // masked bind 段全部在 socket bind 之后（同段内 socket 先行）。
+    // the whole masked-bind segment lands after the socket bind (socket leads within the segment).
     assert.ok(
       masked > socketSrcIdx && store > socketSrcIdx && bundle > socketSrcIdx
     );
-    // cwdReadonly 的 --ro-bind <cwd> <cwd> 在全部 egress bind 之后（mount 序最末）。
+    // the cwdReadonly `--ro-bind <cwd> <cwd>` lands after all egress binds (last in mount order).
     const cwdRo = findRoBind(argv, TASK, TASK);
     assert.ok(
       cwdRo > masked && cwdRo > store && cwdRo > bundle && cwdRo > deny

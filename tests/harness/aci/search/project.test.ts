@@ -1,13 +1,15 @@
 /**
- * 输出投影层单测（SC12「输出投影」；契约 D2/D3；SC4/SC5/SC6/SC7）。
+ * Output-projection layer unit tests.
  *
- * 锁的不变式：
- *   - `paths`：每个唯一文件一条相对路径，条数按**文件**计（SC4）。
- *   - `content`：`path:line:text`（SC5）。
- *   - `count`：`path:条数` + 全库 `total:` = **未切片前**命中总数（SC5）。
- *   - `content + context`：上下文行 `-` 分隔、组间 `--`，不被切成假
- *     `path:line:text`（SC6）。
- *   - 有命中但 offset 越过最后一条 → 精确 `No entries at this offset`（SC7）。
+ * Invariants locked:
+ *   - `paths`: one relative path per unique file; line count is per **file**.
+ *   - `content`: `path:line:text`.
+ *   - `count`: `path:count` plus a corpus-wide `total:` = hit count **before
+ *     slicing**.
+ *   - `content + context`: context lines use `-` separators, groups separated
+ *     by `--`, never rendered as fake `path:line:text`.
+ *   - Hits exist but offset passes the last one → exact `No entries at this
+ *     offset`.
  */
 
 import assert from "node:assert/strict";
@@ -200,10 +202,11 @@ describe("projectContext — content + context（SC6）", () => {
   });
 
   it("上下文行内容自带 `:N:` 时也不被读成假命中（SC6 判别位置唯一）", () => {
-    // 最刁的形状：内容本身就是 `x:9:fake`。若上下文行渲染成
-    // `a.ts-3-see x:9:fake`，`^[^:]+:\d+:` 会把它读成一条真命中
-    // （路径段吃掉 `a.ts-3-see x`）—— 上下文行必须与匹配行共用
-    // `path:line` 前缀，真假只由行号后那一个字符承担。
+    // Nastiest shape: the text itself is `x:9:fake`. If a context line
+    // rendered as `a.ts-3-see x:9:fake`, `^[^:]+:\d+:` would read it as a
+    // real hit (path segment swallowing `a.ts-3-see x`) — context lines must
+    // share the `path:line` prefix with match lines, so truth hinges on the
+    // single character after the line number.
     const out = projectContext([
       {
         entries: [

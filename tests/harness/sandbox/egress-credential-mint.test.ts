@@ -1,28 +1,39 @@
 /**
  * tests/harness/sandbox/egress-credential-mint.test.ts
  *
- * specs/egress-credential-sentinel.md T2 —— 启动期铸造单测。
+ * specs/egress-credential-sentinel.md — startup-time credential minting unit tests.
  *
- * 钉住的不变式：
- *   - 铸造幂等 / 长值配平（credential-sentinel.js:24-34：register 同名幂等、
- *     真值更长时 sentinel 补 pad 到等字节长）；MaskedFileStore.write 同 key
- *     幂等（不每次漏新文件）；
- *   - GH_TOKEN whole-value：env 假值 = `fake_value_<uuid4>` ∈ registry 假值
- *     空间，真值字面 ∉（fence env ∪ bind src 内容）全集（SC1 / invariant 1）；
- *   - hosts.yml structured extract：假文件保留 YAML 其余字节、只换捕获段；
- *   - JWT 同形假值（decode:"jwt" → registerWithSentinel caller-minted，
- *     `credential-decode.js:73-77`）；
- *   - F1（env 缺席 / 空串 → 跳过 + debug 痕，不注入空假值）；
- *   - F2（不存在 / 目录 → 跳过 + 痕，不硬错）；
- *   - F3 / Assumption 8（非 UTF-8 二进制、extract 未命中 → 一律降级 deny：
- *     `/dev/null` 盖 bind + typed 违例痕含修复指引；判据 = bind 表 deny 盖行
- *     在场且无 masked 盖行，即「围栏内该路径不可读」的装配层等价断言，F8）；
- *   - F4 / invariant 6（子串契约违例 = typed EgressCredentialMintError）；
- *   - Assumption 11（env 增量含 CA_TRUST_VARS 全量、值 = trust bundle）；
- *   - SC8 沿用（bind 内容源侧只有 fake 文件 / store 目录 / trust bundle /
- *     /dev/null，CA key 路径不进表）。
+ * Pinned invariants:
+ *   - registry idempotence / long-value padding (package credential-sentinel.js:
+ *     re-registering the same name is idempotent; when the real value is
+ *     longer, the sentinel is padded to equal byte length);
+ *     MaskedFileStore.write is idempotent per key (no new file leaked on
+ *     every call);
+ *   - GH_TOKEN whole-value: env fake value = `fake_value_<uuid4>` inside the
+ *     registry's fake space; the real literal ∉ (fence env ∪ bind src
+ *     contents) (invariant 1);
+ *   - hosts.yml structured extract: the fake file keeps all other YAML bytes,
+ *     only the captured segment is swapped;
+ *   - JWT isomorph fake value (decode:"jwt" → registerWithSentinel
+ *     caller-minted, package credential-decode.js);
+ *   - env value absent / empty string → skip entry + debug trace, never
+ *     inject an empty fake value;
+ *   - credential file absent / is a directory → skip + trace, no hard error;
+ *   - Assumption 8: non-UTF-8 binary, or extract miss → always degrade to
+ *     deny: `/dev/null` overlay bind + a typed violation trace carrying fix
+ *     guidance; the criterion = deny overlay present in the bind table and no
+ *     masked overlay, i.e. the assembly-layer equivalent of "this path is
+ *     unreadable inside the fence";
+ *   - invariant 6: sentinel substring-contract violation = typed
+ *     EgressCredentialMintError;
+ *   - Assumption 11: the env delta includes all CA_TRUST_VARS with value =
+ *     trust bundle path;
+ *   - bind content sources come only from the fake side (fake files / store
+ *     dir / trust bundle / /dev/null); the CA key path never enters the
+ *     table.
  *
- * 全部 fixture 为生成假凭据，宿主真值 / .env* 不进任何输入或断言。
+ * All fixtures are generated fake credentials; host real values / .env* enter
+ * no input and no assertion.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -59,7 +70,7 @@ function scratchDir(): string {
   return d;
 }
 
-/** mint 并登记（afterEach 统一 dispose，防 fake store 目录 litter /tmp）。 */
+/** Mint and register (one shared dispose in afterEach keeps fake store dirs from littering /tmp). */
 function mintTracked(
   args: Parameters<typeof mintEgressCredentials>[0]
 ): EgressCredentialMint {
@@ -74,7 +85,7 @@ afterEach(() => {
     rmSync(p, { recursive: true, force: true });
 });
 
-/** 生成的假凭据（非任何真实值）。 */
+/** A generated fake credential (never a real value). */
 function fakeToken(): string {
   return `gho_FAKE${randomBytes(16).toString("hex")}`;
 }
@@ -83,12 +94,12 @@ function b64url(obj: unknown): string {
   return Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
 }
 
-/** 生成的同形假 JWT fixture（HS256 头 + 垃圾签名，verifyJwt 结构可过）。 */
+/** Generated isomorph fake-JWT fixture (HS256 header + junk signature, passes verifyJwt structural checks). */
 function fixtureJwt(sub: string): string {
   return `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url({ sub, exp: 9999999999 })}.${b64url("fixture-signature")}`;
 }
 
-/** 测试用 MitmCA 替身：mint 只消费 trustBundlePath / egressCaBindSources。 */
+/** Test MitmCA stand-in: mint consumes only trustBundlePath / egressCaBindSources. */
 function fakeCa(): MitmCA {
   const dir = scratchDir();
   const bundlePath = join(dir, "trust-bundle.pem");
@@ -159,7 +170,7 @@ describe("env 条目铸造（whole-value，F1 / invariant 1）", () => {
     const pairs = [...mint.registry.entries()];
     assert.equal(pairs.length, 1);
     assert.deepEqual(pairs[0], [fake, real]);
-    // SC1（env 半边）：真值字面不进任何注入 env 值。
+    // env half of the real-value-absence pin: the real literal enters no injected env value.
     for (const v of Object.values(mint.envVars)) assert.ok(!v.includes(real));
   });
 
@@ -224,7 +235,7 @@ describe("文件条目铸造（structured / JWT / F2 / F3）", () => {
     assert.match(fakeBody, /oauth_token: fake_value_[0-9a-f-]{36}/);
     assert.ok(fakeBody.includes("git_protocol: https"), "其余字节逐字保留");
     assert.ok(!fakeBody.includes(real), "真值不进 fake 文件（SC1）");
-    // sentinel 键 = file:<resolved>#0 → registry 持「假 → 真」单向映射。
+    // sentinel key = file:<resolved>#0 → the registry holds the fake→real one-way map.
     const pairs = new Map(mint.registry.entries());
     assert.equal([...pairs.values()][0], real);
   });
@@ -258,7 +269,7 @@ describe("文件条目铸造（structured / JWT / F2 / F3）", () => {
       /^fake_value_/,
       "sentinel 身份嵌在假 JWT 内"
     );
-    // registry 注册的是 caller-minted 同形假值 → 真 JWT（假→真单向）。
+    // the registry stores the caller-minted isomorph fake → real JWT pair (fake→real, one way).
     assert.equal(mint.registry.lookupReal(fakeTokenMatch[0]), real);
   });
 
@@ -310,7 +321,7 @@ describe("文件条目铸造（structured / JWT / F2 / F3）", () => {
     assert.equal(trace.kind, "credential_mask_denied");
     assert.match(trace.reason, /non-UTF-8[\s\S]*Fix:/, "含修复指引");
     assert.ok(warns.length > 0, "禁静默（invariant 7）");
-    // 判据 = bind 表：deny 盖行在场 + 无 masked 盖行（围栏内不可读的装配层等价断言，F8）。
+    // criterion = bind table: deny overlay present + no masked overlay (the assembly-layer equivalent of "unreadable inside the fence").
     assert.deepEqual(
       mint.binds.find((b) => b.dest === binPath),
       {
@@ -398,7 +409,7 @@ describe("文件条目铸造（structured / JWT / F2 / F3）", () => {
           b.src.startsWith(`${storeDir}/`),
         `bind src 落 fake 侧：${b.src}`
       );
-      // CA key 路径永不出表（SC8 消费面）。
+      // The CA key path never appears in any bind (consumer-side surface).
       assert.notEqual(b.src, ca.keyPath);
       assert.notEqual(b.dest, ca.keyPath);
     }
@@ -438,7 +449,7 @@ describe("装配期防线（F4 / invariant 1）", () => {
     assert.doesNotThrow(() =>
       assertInjectedEnvInFakeSpace({ GH_TOKEN: sentinel }, registry)
     );
-    // structured 形态：含 sentinel 的合成交替值同样在假值空间内。
+    // structured form: a synthetic interpolated value containing the sentinel is likewise inside the fake space.
     assert.doesNotThrow(() =>
       assertInjectedEnvInFakeSpace(
         { URL: `postgres://${sentinel}@db` },
@@ -459,8 +470,9 @@ describe("装配期防线（F4 / invariant 1）", () => {
 
 describe("T4 持久层消费面（真装载）", () => {
   it("loadEgressCa 产物 → mint 出 trust bundle 自 bind + env 指向；key 不出表", () => {
-    // 唯一真生成 CA 的用例（generateCa 纯生成件，装配形状验证；权限/自愈
-    // 矩阵归 egress-ca-store.test.ts，不重复）。注入临时目录。
+    // The only case that really generates a CA (generateCa is a pure generator;
+    // this checks the assembly shape; the permission/self-heal matrix belongs to
+    // egress-ca-store.test.ts and is not repeated). Temp dir injected.
     const dir = scratchDir();
     const pair = generateCa({ cn: "mint-test ca" });
     writeFileSync(join(dir, "cert.pem"), pair.certPem, { mode: 0o600 });

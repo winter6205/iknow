@@ -1,13 +1,16 @@
 /**
- * verdict.ts 纯函数 (T3, GH #128 失败自动修正闭环)。
+ * verdict.ts pure functions (failure auto-fix closed loop).
  *
- * 覆盖 spec §Testing Strategy unit 层 + plan §Decisions 语义:
- *   - 三态判定: pass / true-failure / unstable 各一例
- *   - 确认阶梯: 两级 (全量复跑过→flaky; 全不过→真失败)
- *   - 签名归一: 内置正则提取 / countRegex 优先 / 均无→纯 exit 签名
- *   - 趋势判定: 进展放行 / 同签名停滞停 / 连续两轮退化停 / 单轮震荡宽容
+ * Coverage of the unit-level semantics:
+ *   - three-state verdict: pass / true-failure / unstable, one case each
+ *   - confirmation ladder: two levels (full rerun passes → flaky; all fail → true failure)
+ *   - signature normalization: built-in regex extraction / countRegex takes
+ *     priority / neither → plain exit signature
+ *   - trend: progress continues / same-signature stall stops / two consecutive
+ *     regressing rounds stop / single-round oscillation is tolerated
  *
- * 边界 (spec:94 类): 空输出 / 无失败行但 exit≠0 / rerunTemplate 未配置跳过单跑。
+ * Boundaries: empty output / no failure lines but exit≠0 / rerunTemplate
+ * unset skips the single run.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -20,7 +23,7 @@ import {
   countFailures,
 } from "../../../src/harness/verify/verdict.ts";
 
-/* ------------------------------ 三态判定 ------------------------------ */
+/* ------------------------------ three-state verdict ------------------------------ */
 
 describe("assessVerdict — 三态判定", () => {
   it("exit 0 → pass", () => {
@@ -69,7 +72,7 @@ describe("assessVerdict — 三态判定", () => {
   });
 });
 
-/* ------------------------------ 确认阶梯 ------------------------------ */
+/* ------------------------------ confirmation ladder ------------------------------ */
 
 describe("confirmFailure — 两级确认阶梯", () => {
   it("全量复跑过 → flaky, 不再单跑", () => {
@@ -95,8 +98,8 @@ describe("confirmFailure — 两级确认阶梯", () => {
   });
 
   it("rerunTemplate 未配置 → 跳过单跑, 全量复跑不过即真失败", () => {
-    // 未配置的语义由 confirmFailure 的调用方 (verify-loop) 体现:
-    // 无 template 时不发单跑, singleRunPassed 传 undefined。
+    // The "unset" semantics lives with confirmFailure's caller (verify-loop):
+    // without a template no single run is issued and singleRunPassed is undefined.
     assert.deepEqual(
       confirmFailure({ rerunPassed: false, singleRunPassed: undefined }),
       { verdict: "true-failure", rerunFailed: true, singleRunPassed: undefined }
@@ -104,7 +107,7 @@ describe("confirmFailure — 两级确认阶梯", () => {
   });
 });
 
-/* ------------------------------ 失败计数 ------------------------------ */
+/* ------------------------------ failure counting ------------------------------ */
 
 describe("countFailures — 失败数提取", () => {
   const OUTPUT = [
@@ -117,7 +120,7 @@ describe("countFailures — 失败数提取", () => {
   ].join("\n");
 
   it("内置正则计数 (exit≠0): FAIL / error: 计入, 缩进 ✗ 细节行不计", () => {
-    // 缩进 "  ✗ expected..." 不匹配内置正则 — ✗ 后是空格,\b 词边界失效 (spec 正则语义)。
+    // The indented "  ✗ expected..." does not match the built-in regex — a space follows ✗ so the \b word boundary fails.
     assert.equal(countFailures(OUTPUT), 2);
   });
 
@@ -152,7 +155,7 @@ describe("countFailures — 失败数提取", () => {
   });
 });
 
-/* ------------------------------ 签名归一 ------------------------------ */
+/* ------------------------------ signature normalization ------------------------------ */
 
 describe("buildFailureSignature — 失败签名归一", () => {
   const OUTPUT = [
@@ -209,7 +212,7 @@ describe("buildFailureSignature — 失败签名归一", () => {
   });
 });
 
-/* ------------------------------ 趋势判定 ------------------------------ */
+/* ------------------------------ trend evaluation ------------------------------ */
 
 describe("evaluateTrend — 趋势判定", () => {
   it("进展 (失败数优于历史最好) → progress", () => {
@@ -239,7 +242,8 @@ describe("evaluateTrend — 趋势判定", () => {
   });
 
   it("连续两轮差于最好成绩 → regression (签名不同, 非停滞)", () => {
-    // 上轮 (2) 与上上轮都差于 best (1); 签名已变 → 不是停滞, 判回归。
+    // Last round (2) and the round before it are both worse than best (1);
+    // the signature changed → not a stall, judged regression.
     assert.deepEqual(
       evaluateTrend({
         currentFailed: 3,
@@ -253,7 +257,8 @@ describe("evaluateTrend — 趋势判定", () => {
   });
 
   it("单轮震荡宽容 (一次退化, 签名变, 未达两轮) → oscillation-tolerant", () => {
-    // 上轮为 best (1), 本轮退到 2; 本轮签名变化 → 非停滞、未到连续两轮 → 放行。
+    // Last round was best (1), this round degraded to 2; the signature changed
+    // → not a stall, fewer than two consecutive rounds → continue.
     assert.deepEqual(
       evaluateTrend({
         currentFailed: 2,

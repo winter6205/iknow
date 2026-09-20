@@ -1,14 +1,17 @@
 /**
- * write_file last-read 闸（ADR-0084 / spec D1 + SC1 / SC1b / SC3）。
+ * write_file last-read gate (ADR-0084).
  *
- * 不变式：目标**已存在且 size>0** 且本 conversation 账上无该规范 path →
- * typed 失败、**不写盘**；新建 / 空文件（size==0）免检。host 缺席（legacy
- * 直调）→ 不查表；host 在场但 conversationId 缺席 → 非空覆写 fail-closed
- * （禁止隐式进程级全局表）。
+ * Invariant: target already exists with size>0 and this conversation's ledger
+ * has no entry for the canonical path → typed failure, nothing written to
+ * disk; new files / empty files (size==0) are exempt. No host (legacy direct
+ * call) → no lookup at all; host present but conversationId absent →
+ * non-empty overwrite fails closed (an implicit process-wide global table is
+ * forbidden).
  *
- * 账本 host 走真实实现（`createLastReadLedgerHost`），入账用真实 read_file
- * handler —— 不 stub 账本，否则「read 入账 → write 放行」这条同回合链路
- * 会被测试自己假造，SC1 的 ground truth 就没了。
+ * The ledger host is the real implementation (`createLastReadLedgerHost`) and
+ * registration uses the real read_file handler — never stub the ledger, or the
+ * same-turn chain "read registers → write passes" would be fabricated by the
+ * test itself and the ground truth would be lost.
  */
 
 import assert from "node:assert/strict";
@@ -44,8 +47,10 @@ afterEach(async () => {
 function isRefusal(error: unknown): boolean {
   return (
     error instanceof ToolExecutionError &&
-    // 模型可判别的 typed 拒绝：不是泛化 ToolExecutionError，kind 点名原因、
-    // path 点名目标。message 仍点名 read_file（spec：回执点名或等价先读）。
+    // A typed refusal the model can discriminate: not a generic
+    // ToolExecutionError — kind names the reason, path names the target. The
+    // message still names read_file (the receipt must name it or an equivalent
+    // prior read).
     error instanceof LastReadRequiredError &&
     error.kind === "last_read_required" &&
     error.path.length > 0 &&
@@ -291,7 +296,7 @@ describe("write_file last-read 闸 — SC1b 并发", () => {
     assert.equal(await readFile(target, "utf8"), "original\n");
   });
 
-  // 证明的是账本闸行为（账上有读 → 两次覆写都放行、表未被清空），不是字节级结果。
+  // This proves ledger-gate behavior (a registered read → both overwrites pass, the table is not cleared), not byte-level outcomes.
   it("账上已有读：并行两次覆写均执行（直调 handler 绕过 wave 串行化），且表未被清空", async () => {
     const root = await makeScratch("write-last-read-sc1b-");
     const target = join(root, "a.ts");
@@ -317,46 +322,53 @@ describe("write_file last-read 闸 — SC1b 并发", () => {
       results.map((r) => r.status),
       ["fulfilled", "fulfilled"]
     );
-    // 旧断言 `finalContent === "first\n" || finalContent === "second\n"` 是
-    // **假前提**,已复现并替换。契约侧:spec SC1b 只承诺「先落盘者赢」+「表
-    // 未被清空」,没有承诺最终字节等于哪一次 —— 它也没法承诺。
+    // The old assertion `finalContent === "first\n" || finalContent === "second\n"`
+    // was a FALSE PREMISE — reproduced and replaced. On the contract side, SC1b only
+    // promises "first writer to land wins" + "the table is not cleared"; it never
+    // promised which byte sequence ends up last — it cannot.
     //
-    // 机制:`fs.promises.writeFile` = `open(O_TRUNC) + write(fd) + close`。
-    // O_TRUNC 在 **open** 时把 size 归零,`write(2)` 本身**只写不缩**。两次
-    // 并发、长度不同时,短的那次写完不会清掉长的那次在后面的尾巴。实测最简
-    // 交错:A(7B `"second\n"`)与 B(6B `"first\n"`)都先 open(trunc,size=0),
-    // A 写入 7B(size=7),B 再在 offset 0 写 6B —— B 只改 offset 0..5,size
-    // 仍是 7 → 内容 `"first\n" + "\n"` = `"first\n\n"`。
+    // Mechanism: `fs.promises.writeFile` = `open(O_TRUNC) + write(fd) + close`.
+    // O_TRUNC zeroes the size at OPEN time; `write(2)` itself only writes, never
+    // shrinks. Two concurrent writes of different length: the shorter one cannot
+    // clear the longer one's tail. Observed simplest interleaving: A (7B
+    // `"second\n"`) and B (6B `"first\n"`) both open(trunc) first; A writes 7B
+    // (size=7); B then writes 6B at offset 0 — B only changes bytes 0..5, size
+    // stays 7 → content `"first\n" + "\n"` = `"first\n\n"`.
     //
-    // 复现数字(**先在未修改的代码上取证,再改**):
-    //   - 纯 Node 探针 `/home/winner/.claude/jobs/0df87588/tmp/probe-tear.mts`:
-    //     300 样本 → 13~18 次 `"first\n\n"`(leader 13 / 我 18);
-    //   - 直调真实 handler 的放大跑(同用例形状,不进 vitest):400 样本 →
-    //     65 次撕裂(16%):328 × `"second\n"`、65 × `"first\n\n"`、7 × `"first\n"`;
-    //   - vitest runtime 内放大跑:300 样本 → 旧断言 25 次违反(8%);
-    //   - **未修改的该测试文件整跑 150 次 → 11 次红**(7.3%),全部是
-    //     AssertionError `最终内容必须是两次覆写之一,实际: "first\n\n"`。
+    // Reproduction evidence (taken against the unmodified code before changing it):
+    //   - plain-Node probe, 300 samples → 13~18 occurrences of `"first\n\n"`;
+    //   - amplified run calling the real handler (same shape as this case, outside
+    //     vitest): 400 samples → 65 tears (16%): 328 × `"second\n"`,
+    //     65 × `"first\n\n"`, 7 × `"first\n"`;
+    //   - amplified run inside vitest: 300 samples → old assertion violated 25× (8%);
+    //   - the unmodified test file run 150× → 11 red runs (7.3%), all AssertionError
+    //     with final content `"first\n\n"`.
     //
-    // 新断言的恒真性:两次写入各自把完整 buffer 写到 offset 0(6~7B 缓冲区,
-    // 单次 `write(2)`,不存在部分写)。设最后被服务的那次写为 W:
-    //   - 每次 open(O_TRUNC) 之后,其写者的 write 必在其后 → 最后一个 truncate
-    //     之后必然至少有一次完整 write,故文件不会停在空/original;
-    //   - W 的 write 覆盖 offset 0..len(W)-1;此后没有更晚的写去改这段,也没
-    //     有 truncate → **文件头 len(W) 字节恒等于 W 的缓冲区**;
-    //   - 另一写者只可能在 len(W) 之外留下尾巴(write 不缩文件)。
-    // 所以 `startsWith("first\n") || startsWith("second\n")` 恒真 —— 它比旧
-    // 断言弱(容许尾巴),但仍是「头归属 = 两次写入之一」这一有内容的性质,
-    // 同时排除了「文件没被覆写(== original)」与「头部被无关字节污染」。
+    // Why the new assertion holds unconditionally: each writer puts its full buffer
+    // at offset 0 (6~7B buffers, single `write(2)`, no partial writes). Let W be the
+    // last-served write:
+    //   - every open(O_TRUNC) is followed by its own writer's write → after the last
+    //     truncate there is at least one complete write, so the file never rests at
+    //     empty/original;
+    //   - W covers offsets 0..len(W)-1 and nothing later rewrites or truncates that
+    //     span → the first len(W) bytes always equal W's buffer;
+    //   - the other writer can only leave a tail beyond len(W) (writes don't shrink).
+    // So `startsWith("first\n") || startsWith("second\n")` is always true — weaker
+    // than the old assertion (it tolerates a tail) but still a content-bearing
+    // property ("the head belongs to one of the two writes"), while excluding both
+    // "never overwritten (== original)" and "head polluted by unrelated bytes".
     //
-    // 为何生产面到不了这个并发形态:`write_file` 在
-    // `src/harness/aci/tools/write-file.ts:237` 声明 `isConcurrencySafe: false`,
-    // 引擎的 `partitionConcurrencyWaves`(`src/harness/tools/concurrency-waves.ts:5-24`,
-    // 调用点 `src/harness/aci/aci-executor.ts:158` 与
-    // `src/harness/loop-engine.ts:1712`)把非并发安全工具逐个隔成单元素
-    // wave。两次相邻 `write_file` 永远落在不同 wave 串行执行,不会撞到本测试
-    // 用 `Promise.allSettled` 直调 handler 模拟出的并发形状。**本用例是刻意
-    // 绕过引擎 wave 的账本闸单元断言**(闸在被 wave 串行化之前的 handler 里
-    // 也必须在场),引擎路径的写-写串行化由 wave 划分保证、不在本文件的射程。
+    // Why production never reaches this concurrency shape: write_file declares
+    // `isConcurrencySafe: false` (src/harness/aci/tools/write-file.ts), and the
+    // engine's `partitionConcurrencyWaves`
+    // (src/harness/tools/concurrency-waves.ts, called from aci-executor.ts and
+    // loop-engine.ts) isolates non-concurrency-safe tools into single-element
+    // waves. Two adjacent write_file calls always run in different, serialized
+    // waves and never hit the shape this test creates by calling handlers directly
+    // via `Promise.allSettled`. This case deliberately bypasses the engine waves:
+    // it unit-asserts the ledger gate, which must also be present inside the
+    // handler before any wave serialization. Write-write serialization on the
+    // engine path is guaranteed by wave partitioning, outside this file's range.
     const finalContent = await readFile(target, "utf8");
     assert.ok(
       finalContent.startsWith("first\n") || finalContent.startsWith("second\n"),
@@ -364,7 +376,7 @@ describe("write_file last-read 闸 — SC1b 并发", () => {
         finalContent
       )}`
     );
-    // 表不得被写路径清空 —— 再写第三次仍应放行。
+    // The table must not be cleared by the write path — a third write must still pass.
     assert.equal(ledger.ledgerFor("conv-a")?.has(target), true);
     await tool.handler(
       { path: "a.ts", content: "third\n" },
@@ -391,7 +403,7 @@ describe("write_file last-read 闸 — SC1b 并发", () => {
       ["rejected", "rejected"]
     );
     assert.equal(await readFile(target, "utf8"), "original\n");
-    // 无 id 的读也不入账 → 进程里不存在任何隐式全局桶。
+    // Reads without an id also register nothing → no implicit process-wide bucket exists.
     assert.equal(ledger.size(), 0);
   });
 });

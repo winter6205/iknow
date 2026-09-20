@@ -13,13 +13,16 @@ import {
 } from "../../../src/harness/sandbox/fs-policy.js";
 
 /**
- * ADR-0092 全局档挂载排序(#196 T12b 病灶退役后的不变式)。
+ * ADR-0092 global-mode mount ordering — the invariant that survived retiring
+ * the old closed-world /tmp workaround.
  *
- * 旧闭世界靠 `--tmpfs /tmp` + post-tmpfs 重绑兜底,tmpfs 遮蔽此前绑入的
- * /tmp/* 子树是病灶本体。全局档没有任何 /tmp 挂载,/tmp 子树里的 cwd
- * 由 `--bind / /` 一次性覆盖 —— 不存在遮蔽,也就不需要重绑。本文件钉住
- * 排序不变式:宿主根打底、系统前缀只读覆盖、cwdReadonly 覆盖在其后、
- * 命令尾部不变;并把 "不再有重绑 token" 作为正命题。
+ * The old scheme leaned on `--tmpfs /tmp` plus a post-tmpfs rebind, but tmpfs
+ * shadowing of previously bound /tmp/* subtrees was the pathology itself.
+ * Global mode mounts nothing under /tmp: a cwd inside a /tmp subtree is
+ * covered once by `--bind / /` — no shadowing, hence no rebind. This file
+ * pins the ordering invariant (host root base, system prefixes read-only on
+ * top, cwdReadonly override after them, command tail unchanged) and asserts
+ * the absence of any rebind token as a positive proposition.
  */
 
 const OUTSIDE_ROOT = mkdtempSync(join(homedir(), ".iknow-bwrap-global-order-"));
@@ -64,13 +67,13 @@ describe("createBwrapFence — 全局档挂载排序 (/tmp 子树不再是特例
       const argv = fenceArgs({ cwd });
       const rootBindIdx = tripleIdx(argv, "--bind", "/");
       assert.notEqual(rootBindIdx, -1, "host root bind is present");
-      // cwd 子树不再有独立可写 bind —— `/` 已覆盖。
+      // no per-cwd writable bind remains — the `/` mount already covers the subtree.
       assert.equal(
         tripleIdx(argv, "--bind", cwd),
         -1,
         "no per-cwd writable rebind in global mode"
       );
-      // 系统块仍在 `/` 之后(cwd ∈ /tmp 不影响系统前缀只读覆盖)。
+      // system block still follows `/` (a cwd inside /tmp does not affect the read-only system overrides).
       const etcIdx = tripleIdx(argv, "--ro-bind", "/etc");
       assert.ok(etcIdx > rootBindIdx);
     } finally {
@@ -83,7 +86,7 @@ describe("createBwrapFence — 全局档挂载排序 (/tmp 子树不再是特例
     mkdirSync(cwd, { recursive: true });
     const insideTmp = fenceArgs({ cwd: OUTSIDE_ROOT });
     const outside = fenceArgs({ cwd });
-    // 两形态只在 cwd token 上不同;mount 骨架逐字节一致。
+    // the two shapes differ only in cwd tokens; the mount skeleton is byte-identical.
     const mountOf = (argv: readonly string[]): readonly string[] =>
       argv.slice(0, argv.indexOf("--clearenv"));
     assert.deepEqual([...mountOf(outside)], [...mountOf(insideTmp)]);
@@ -98,8 +101,8 @@ describe("createBwrapFence — 全局档挂载排序 (/tmp 子树不再是特例
       assert.equal(tripleIdx(argv, "--bind", cwd), -1);
       const roIdx = tripleIdx(argv, "--ro-bind", cwd);
       assert.notEqual(roIdx, -1, "readonly cwd is ro-bound exactly once");
-      // cwd 恰好出现 3 次 = `--ro-bind cwd cwd` 三元组(2) + `--chdir cwd`(1)。
-      // 任何额外出现即退役的 post-mount 重绑残留。
+      // cwd appears exactly 3 times = the `--ro-bind cwd cwd` triple (2) plus `--chdir cwd` (1).
+      // Any extra occurrence would be residue of the retired post-mount rebind.
       assert.equal(
         argv.filter((a) => a === cwd).length,
         3,

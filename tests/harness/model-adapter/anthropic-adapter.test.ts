@@ -1,11 +1,11 @@
 /**
- * T11 Anthropic Adapter offline acceptance — 7 classes from contract 014.
+ * Anthropic adapter offline acceptance — the seven response classes.
  *
- * Adapter 是 Foundation 自治的 ModelAdapter 实现:它把 Anthropic 原生
- * JSON 响应解释成 AssistantTurnResult(完整原子校验 + 投影);把用户文本
- * / 工具结果编码为原生 Anthropic user message;不连真实模型;全部 fixture
- * 离线。所有样例用 SDK 的 Message 类型构造 fixture,Adapter 不调用
- * client.messages.create。
+ * The adapter is Foundation-owned: it interprets a native Anthropic JSON
+ * response into an AssistantTurnResult (full atomic validation + projection)
+ * and encodes user text / tool results into native Anthropic user messages.
+ * No real model is contacted; every fixture is offline. Fixtures are built
+ * with the SDK's Message type; the adapter never calls client.messages.create.
  */
 
 import { describe, it } from "vitest";
@@ -59,9 +59,9 @@ describe("createAnthropicAdapter (T11)", () => {
       content: [{ type: "text", text: "hi there" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      // #160 T2 / ADR-0008 Decision 2: 复用既有 usage fixture 用例,
-      // 断言 cache_creation_input_tokens 缺失 → null, cache_read_input_tokens
-      // 出现 → 透传,snake→camel 映射落在 result.usage 上。
+      // ADR-0008 Decision 2: reuse this usage fixture to assert that a missing
+      // cache_creation_input_tokens maps to null, a present
+      // cache_read_input_tokens passes through, and snake→camel lands on result.usage.
       usage: {
         input_tokens: 100,
         output_tokens: 20,
@@ -79,8 +79,8 @@ describe("createAnthropicAdapter (T11)", () => {
     assert.equal(result.isEmptyFinalResponse, false);
     assert.equal(result.projection.texts.length, 1);
     assert.equal(result.projection.texts[0], "hi there");
-    // #160 T2: usage 投影到 AssistantTurnResult;NULL cache_creation 字段
-    // 透传为 null(snake→camel 投影仅此一处)。
+    // usage projects onto AssistantTurnResult; a NULL cache_creation field
+    // passes through as null (this is the only snake→camel projection site).
     assert.deepEqual(result.usage, {
       inputTokens: 100,
       outputTokens: 20,
@@ -406,7 +406,7 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       {}
     )) as AssistantTurnResult;
 
-    // --- 1. nativeMessage.content 字段级深保留,块序保持 ---
+    // --- 1. nativeMessage.content keeps every field, block order preserved ---
     const nativeContent = result.nativeMessage.content;
     assert.equal(nativeContent.length, 4);
 
@@ -420,17 +420,17 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     assert.equal(b0.thinking, "Let me reason about this carefully.");
     assert.equal(b0.signature, "sig_abc123");
 
-    // Block 1: redacted_thinking (data 完整保留)
+    // Block 1: redacted_thinking (data fully preserved)
     const b1 = nativeContent[1] as { type: "redacted_thinking"; data: string };
     assert.equal(b1.type, "redacted_thinking");
     assert.equal(b1.data, "encrypted_blob_data_here==");
 
-    // Block 2: text (顺序仍在 thinking/tool_use 之间)
+    // Block 2: text (still ordered between thinking and tool_use)
     const b2 = nativeContent[2] as { type: "text"; text: string };
     assert.equal(b2.type, "text");
     assert.equal(b2.text, "final answer");
 
-    // Block 3: tool_use (顺序在 thinking 之后)
+    // Block 3: tool_use (ordered after thinking)
     const b3 = nativeContent[3] as {
       type: "tool_use";
       id: string;
@@ -442,20 +442,21 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     assert.equal(b3.name, "echo");
     assert.deepEqual(b3.input, { value: "x" });
 
-    // --- 2. projection.texts 不含 thinking 文本;finalText 派生不变 ---
+    // --- 2. projection.texts excludes thinking text; finalText derivation unchanged ---
     assert.deepEqual(result.projection.texts, ["final answer"]);
 
-    // --- 3. tool_calls 投影正常 ---
+    // --- 3. tool_calls projection unaffected ---
     assert.equal(result.projection.toolCalls.length, 1);
     assert.equal(result.projection.toolCalls[0]!.id, "toolu_t1");
     assert.equal(result.projection.toolCalls[0]!.name, "echo");
 
-    // --- 4. supplierStop: tool_use stop_reason 不在 success 分类 -> "other"
-    //         (这是现有 014 投影的既有行为,本测试只确认未因 thinking 引入回归) ---
+    // --- 4. supplierStop: tool_use stop_reason is not classified as success -> "other"
+    //         (pre-existing projection behavior; this only confirms thinking
+    //          introduced no regression) ---
     assert.equal(result.supplierStop, "other");
     assert.equal(result.needsTools, true);
 
-    // --- 5. projection.nativeMessage === nativeMessage (同源引用) ---
+    // --- 5. projection.nativeMessage === nativeMessage (same reference) ---
     assert.equal(result.projection.nativeMessage, result.nativeMessage);
   });
 
@@ -482,7 +483,7 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       {}
     )) as AssistantTurnResult;
 
-    // nativeMessage.content 保留 thinking 全字段
+    // nativeMessage.content keeps all thinking fields
     assert.equal(result.nativeMessage.content.length, 1);
     const tBlock = result.nativeMessage.content[0] as {
       type: "thinking";
@@ -493,17 +494,18 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     assert.equal(tBlock.thinking, "Just thinking...");
     assert.equal(tBlock.signature, "sig_xyz");
 
-    // projection.texts 为空(thinking 不进 texts)
+    // projection.texts is empty (thinking never enters texts)
     assert.deepEqual(result.projection.texts, []);
-    // 仅有 thinking + success stop_reason -> isEmptyFinalResponse 应为 true
-    // (因为成功停止但无 text block)
+    // thinking only + success stop_reason -> isEmptyFinalResponse must be true
+    // (stopped successfully but produced no text block)
     assert.equal(result.isEmptyFinalResponse, true);
     assert.equal(result.needsTools, false);
   });
 
   it("normalizes a thinking block missing signature to empty string (#191 deepseek compat)", async () => {
-    // deepseek-flash-combo 经 9router 转发的 thinking block 无 signature
-    // 字段(实测仅 { type, thinking })— 归一化为 "" 以保住 canonical 契约。
+    // deepseek-flash-combo forwarded through 9router emits thinking blocks with
+    // no signature field (observed: only { type, thinking }) — normalize to ""
+    // so the canonical contract holds.
     const sdkResp: SdkMessage = {
       id: "msg_think_nosig",
       type: "message",
@@ -533,9 +535,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     };
     assert.equal(tBlock.type, "thinking");
     assert.equal(tBlock.thinking, "We need answer.");
-    assert.equal(tBlock.signature, ""); // 缺 signature → 空串
+    assert.equal(tBlock.signature, ""); // missing signature normalizes to ""
 
-    // 投影不受影响:thinking 不进 texts
+    // Projection is unaffected: thinking does not enter texts
     assert.deepEqual(result.projection.texts, ["final"]);
   });
 
@@ -607,11 +609,12 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
   });
 });
 
-// --- T4 (#151): RealAnthropicAdapter 请求侧 thinking 控制臂 ---------------
+// --- request-side thinking control arm of RealAnthropicAdapter --------------
 
 /**
- * 构造假 Anthropic 客户端:messages.create 捕获 params,返回可被 interpretMessage
- * 接受的最小 SdkMessage fixture。让请求侧断言落在实际发出的 params 上。
+ * Fake Anthropic client: messages.create captures params and returns the
+ * minimal SdkMessage fixture interpretMessage accepts, so request-side
+ * assertions run against the params actually sent.
  */
 function makeFakeClient(opts: {
   readonly captured: { params: unknown | null };
@@ -626,7 +629,7 @@ function makeFakeClient(opts: {
     stop_sequence: null,
     usage: { input_tokens: 1, output_tokens: 1 },
   };
-  // 仅取 messages.create 子集,类型最宽。
+  // Only the messages.create subset; widest possible typing.
   return {
     messages: {
       create: async (
@@ -758,11 +761,12 @@ describe("createRealAnthropicAdapter — request-side thinking control (#151 T4)
   });
 });
 
-// --- #160 T2 (ADR-0008 Decision 2/4): AssistantTurnResult 透出 usage ----
+// --- ADR-0008 Decision 2/4: AssistantTurnResult exposes usage ---------------
 describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)", () => {
   it("SDK usage 缺失 → result.usage 字段缺席(=== undefined,Postel)", async () => {
-    // 构造裸 message(故意缺 usage)以模拟 stub / 9router 缺省返回;
-    // SdkMessage 静态类型在那里要求 usage,此处与 class 6/7 同样用 cast 旁路。
+    // Bare message with usage deliberately missing, simulating stub / 9router
+    // default returns; SdkMessage's static type requires usage there, so this
+    // casts around it like the class 6/7 fixtures do.
     const noUsage = {
       id: "msg_no_usage",
       type: "message",
@@ -778,14 +782,16 @@ describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)
       {}
     )) as AssistantTurnResult;
     assert.equal(result.supplierStop, "success");
-    // 字段缺席即 Postel 语义:not null,not 占位值,not 包裹 undefined 的 object。
+    // Absent field is the Postel semantics: not null, not a placeholder, not an
+    // object wrapping undefined.
     assert.equal(result.usage, undefined);
   });
 
   it("SDK 周边字段(service_tier / cache_creation / output_tokens_details 等)不进 result.usage", async () => {
-    // 极简 SdkMessage:usage 携带 SDK 0.115 全周边字段(service_tier、cache_creation TTL
-    // 对象、output_tokens_details、server_tool_use、inference_geo),只允许 4 个 token
-    // 字段穿越到域 TokenUsage;ad-hoc 新造最小 fixture,以排除既有测试的其他语义干涉。
+    // Minimal SdkMessage whose usage carries every SDK 0.115 peripheral field
+    // (service_tier, cache_creation TTL object, output_tokens_details,
+    // server_tool_use, inference_geo); only the 4 token fields may cross into
+    // the domain TokenUsage. Built fresh to avoid interference from other fixtures.
     const sdkResp = {
       id: "msg_peripheral",
       type: "message",
@@ -814,8 +820,9 @@ describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)
       initState([userMsg("hi")]),
       {}
     )) as AssistantTurnResult;
-    // deepStrictEqual:在 result.usage 上多出任何周边字段都会失败,所以这一条
-    // 同时锁死「仅 4 字段」与「snake→camel 翻译」两个不变式。
+    // deepStrictEqual fails on any extra peripheral field in result.usage, so
+    // this one assertion pins both invariants: "exactly 4 fields" and the
+    // snake→camel translation.
     assert.deepEqual(result.usage, {
       inputTokens: 7,
       outputTokens: 2,
@@ -825,8 +832,8 @@ describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)
   });
 
   it("畸形 usage(usage:{} / input_tokens 非 number)→ result.usage 字段缺席(不产垃圾对象)", async () => {
-    // Postel:usage 存在但形状非法 → 整条缺席,绝不产出
-    // {inputTokens: undefined,...} 这类违反 TokenUsage 契约的对象。
+    // Postel: usage present but malformed → the whole field is absent; never
+    // emit an {inputTokens: undefined,...} object that violates the TokenUsage contract.
     const malformed = {
       id: "msg_malformed",
       type: "message",
@@ -845,7 +852,7 @@ describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)
     assert.equal(result.supplierStop, "success");
     assert.equal(result.usage, undefined);
 
-    // input_tokens 非 number → 同样缺席。
+    // non-number input_tokens → absent as well.
     const wrongType = {
       id: "msg_malformed2",
       type: "message",
@@ -863,7 +870,7 @@ describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)
     )) as AssistantTurnResult;
     assert.equal(result2.usage, undefined);
 
-    // cache 两字段非 number → 归一为 null,而非透传垃圾值 / undefined。
+    // non-number cache fields normalize to null rather than passing through garbage / undefined.
     const garbageCache = {
       id: "msg_malformed3",
       type: "message",

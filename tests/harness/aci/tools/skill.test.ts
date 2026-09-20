@@ -1,19 +1,18 @@
 /**
  * tests/harness/aci/tools/skill.test.ts
  *
- * `skill` 工具（第 22 件 ACI，#337 T5）单元测试 — 对齐 spec
- * 337-skill-mcp-extension.md § Code Style + T5 acceptance +
- * spec disclosure-index-align.md SC6（未知名引导文本不含 skill_search）：
+ * Unit tests for the `skill` ACI tool — contract:
  *   - inputSchema `{name: string required}`
- *   - 直呼名返回正文（cat SKILL.md 内容）；叫错名返回引导文本,引导回
- *     `<available_skills>` 清单或 `read_file`(spec ADR-0046 / SC6)
- *   - aci 元数据：read-only / lazy:false / timeoutTier:fast
- *   - handler 同步返回 string（与 catalog.getBodyPath() → readFile 同步读）
+ *   - a correct name returns the body (SKILL.md content); a wrong name returns
+ *     guidance back to the `<available_skills>` list or `read_file`
+ *     (ADR-0046; the guidance must not mention skill_search)
+ *   - aci metadata: read-only / lazy:false / timeoutTier:fast
+ *   - handler returns a string synchronously (catalog.getBodyPath() → synchronous readFile)
  *
- * **fixture 形态**：用 `createSkillCatalog(entries)` 直接喂 entries（不必经
- * scanner / SKILL.md 真实文件系统），handler 通过 `deps.catalog` 的
- * `getBodyPath()` 拿 SKILL.md 绝对路径并 readFile。`dir` 字段指向 tmpdir
- * 真实写入 SKILL.md，确保 readFile 成功。
+ * **Fixture shape**: feed entries directly to `createSkillCatalog(entries)` (no
+ * scanner / real SKILL.md filesystem needed); the handler gets the absolute
+ * SKILL.md path via `deps.catalog.getBodyPath()` and readFile's it. `dir`
+ * points at a tmpdir where SKILL.md is really written, so readFile succeeds.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -48,7 +47,7 @@ function entry(
   };
 }
 
-/** 直呼 handler(同步,返回 string;async handler 内部 await 后 resolve)。 */
+/** Call the handler directly (sync, returns string; an async handler resolves after internal awaits). */
 async function invokeSkill(
   tool: AciToolDef,
   input: unknown,
@@ -79,9 +78,10 @@ describe("skill — 元数据 (G1 Q1 / T5 acceptance 3)", () => {
   });
 
   it("exemptFromOutputCap === true（ADR-0083 装配期落值）", () => {
-    // 豁免声明的唯一落值点：装配期静态字段，executor 的 safeContent 读它。
-    // 契约 X（executor 是截断元数据唯一权威）不受影响——本字段是工具定义
-    // 属性，不是任何一次输出的截断声称。
+    // The single landing point of the exemption declaration: a static
+    // assembly-time field read by executor's safeContent. Contract X (executor
+    // is the sole authority on truncation metadata) is unaffected — this is a
+    // tool-definition property, not a truncation claim about any output.
     const tool = createSkillTool({
       catalog: createSkillCatalog([]),
     });
@@ -101,9 +101,10 @@ describe("skill — 元数据 (G1 Q1 / T5 acceptance 3)", () => {
   });
 
   it("description: 直呼 `<available_skills>` 精确名,不再 pair skill_search(SC5)", () => {
-    // SC5:`skill` 文案 = 从 `<available_skills>` 精确名直呼,不再 pair
-    // skill_search(spec ADR-0046)。文案同时显式引导回 `<available_skills>`
-    // 清单或（操作员指路径时）`read_file`。
+    // `skill`'s wording = call the exact name from `<available_skills>`
+    // directly, no pairing with skill_search (ADR-0046). The text also
+    // explicitly guides back to the `<available_skills>` list or, when the
+    // operator points at a file path, `read_file`.
     const tool = createSkillTool({
       catalog: createSkillCatalog([]),
     });
@@ -191,10 +192,10 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
     const tool = createSkillTool({ catalog });
     const out = await invokeSkill(tool, { name: "nope" });
     expect(out.toLowerCase()).toContain("nope");
-    // SC6 契约:引导文本绝不出现已删的 skill_search 字样。
+    // The guidance text must never mention the removed skill_search.
     expect(out).not.toContain("skill_search");
     expect(out).not.toContain("body");
-    // 引导落到 available_skills / read_file 任一(operator 在对话里指路径时)。
+    // Guidance lands on available_skills / read_file (when the operator points at a path in chat).
     expect(out).toMatch(/available_skills|read_file/);
   });
 
@@ -207,11 +208,13 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
   });
 
   it("disabled skill 直呼 → 按模型索引资格拒（SC6），不灌正文", async () => {
-    // 旧锁（「disabled 仍灌正文」）按 spec skill-index-increment SC6 改写：
-    // `skill()` 只服务模型索引资格（CONTEXT：有 description 且未
-    // disable-model-invocation），disabled 名字只走人侧 slash —— 拒、且输出
-    // 不含正文任何片段。catalog.get 仍按名返回含 disabled 的条目（可加载
-    // 技能面），闸落在本工具 handler。
+    // The old lock ("disabled skills still serve the body") is rewritten per
+    // specs/skill-index-increment.md: `skill()` serves model-index
+    // eligibility only (CONTEXT: has description and not
+    // disable-model-invocation); disabled names go through the human-side
+    // slash only — reject, and output must contain no body fragment. catalog
+    // .get still returns disabled entries by name (the loadable-skills face);
+    // the gate lives in this tool's handler.
     const dir = join(scratch, "secret");
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -235,15 +238,20 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
   });
 });
 
-// spec skill-index-increment.md SC5/SC6 + Input-contract 表 `skill()` 行：
-// 「非模型索引 → 拒、不灌正文」「读盘失败 typed，与『资格拒』分型」。
+// specs/skill-index-increment.md + the Input-contract table's `skill()` row:
+// "not model-indexed → reject, no body served"; "disk-read failure is typed and
+// a different error class from an eligibility rejection".
 //
-// 模型索引资格（docs/CONTEXT.md「技能模型索引」）= 有 description 且未
-// `disable-model-invocation`。本 describe 钉三件事：
-//   1. 两类不合格名（无 description / disabled）都拒，且输出不含正文任何片段；
-//   2. 资格拒与读盘失败是**不同型**的 typed error（调用方可分辨下一步）；
-//   3. 闸只罩 ACI `skill()` —— 文件工具读同一份 SKILL.md 不因本闸失败
-//      （SC5 末句：不禁止 `read_file`；read-file.ts 与本闸无代码耦合）。
+// Model-index eligibility (docs/CONTEXT.md section `技能模型索引`, "skill model
+// index") = has description and
+// not `disable-model-invocation`. This describe pins three things:
+//   1. both unqualified kinds (no description / disabled) are rejected with no
+//      body fragment in the output;
+//   2. eligibility rejection and disk-read failure are **different** typed
+//      errors (the caller can tell the next step apart);
+//   3. the gate covers only the ACI `skill()` — file tools reading the same
+//      SKILL.md never fail because of it (`read_file` is not forbidden;
+//      read-file.ts has no code coupling to this gate).
 describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败分型）", () => {
   let scratch: string;
 
@@ -255,7 +263,7 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
     await rm(scratch, { recursive: true, force: true });
   });
 
-  /** 写一份带唯一正文标记的 SKILL.md，返回其 dir。 */
+  /** Write a SKILL.md with a unique body marker; return its dir. */
   async function writeSkill(
     name: string,
     frontmatter: string,
@@ -272,8 +280,9 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
   }
 
   it("①无 description → 拒（typed），输出不含正文任何片段、不含装配双标记", async () => {
-    // 无 description 只从模型索引面隐去（SC5）；人侧仍可 slash 信封加载。
-    // 直呼该名是「模型不知道怎么用它对」的调用，必须拒而不是灌正文。
+    // A missing description only hides the skill from the model-facing index;
+    // humans can still load it via slash. Calling it by name directly is a call
+    // the model cannot know how to use, so it must be rejected, not served.
     const bodyMarker = "SECRET_BODY_MARKER_NO_DESCRIPTION";
     const dir = await writeSkill("nodesc", "", bodyMarker);
     const tool = createSkillTool({
@@ -289,7 +298,7 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
     expect(message).not.toContain(bodyMarker);
     expect(message).not.toContain("Base directory:");
     expect(message).not.toContain("</skill_files>");
-    // 出路必须写明：该名是人力 slash 专用，或作者补 description。
+    // The escape hatch must be spelled out: human slash use only, or the author adds a description.
     expect(message).toMatch(/description/);
   });
 
@@ -318,7 +327,7 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
     expect(message).not.toContain(bodyMarker);
     expect(message).not.toContain("Base directory:");
     expect(message).not.toContain("</skill_files>");
-    // 出路必须写明：人力 slash 专用。
+    // The escape hatch must be spelled out: human slash use only.
     expect(message).toMatch(/slash|disable-model-invocation/);
   });
 
@@ -380,9 +389,11 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
   });
 
   it("⑥读盘失败（SKILL.md 不可读）→ 与资格拒不同型：SkillBodyReadError，cause 保留读盘故障", async () => {
-    // 合格名 + dir 在但 SKILL.md 缺席：资格闸放行、装配期读盘失败。
-    // 两类失败必须先分型：资格拒是「这条路对你不开放」，读盘失败是
-    // 「本该开放但现在读不到」—— 调用方下一步不同（换名 vs 重试 / 报障）。
+    // Qualified name + dir present but SKILL.md missing: the eligibility gate
+    // passes, then assembly-time disk read fails. The two failure kinds must be
+    // typed apart: eligibility rejection means "this path is not open to you",
+    // a read failure means "it should be open but is unreadable right now" —
+    // the caller's next step differs (pick another name vs retry / report).
     const dir = join(scratch, "broken");
     await mkdir(dir, { recursive: true });
     const tool = createSkillTool({
@@ -397,14 +408,15 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
     expect(thrown).not.toBeInstanceOf(SkillNotModelIndexedError);
     expect((thrown as SkillBodyReadError).name).toBe("SkillBodyReadError");
     expect((thrown as Error).message).toContain("broken");
-    // ENOENT 的原始故障保留在 cause 上，不吞。
+    // The original ENOENT fault stays on `cause`, not swallowed.
     expect((thrown as SkillBodyReadError).cause).toBeDefined();
   });
 
   it("⑦闸只罩 skill()：read_file 读同一份 disabled SKILL.md 不因本闸失败", async () => {
-    // SC5 末句 / spec Boundaries：「`skill()`：非模型索引资格 → 拒、不灌正文；
-    // 不禁止 `read_file`」。read-file.ts 与本闸无代码耦合 —— 本用例钉住
-    // 这一点，防止后人把资格闸上移成跨模块拦截。
+    // Boundaries: "`skill()`: non-model-indexed → reject, no body; does not
+    // forbid `read_file`". read-file.ts has no code coupling to this gate —
+    // this case pins that, so a later refactor cannot lift the eligibility
+    // gate into a cross-module interception.
     const dir = await writeSkill(
       "secret7",
       "description: hidden\ndisable-model-invocation: true\n",
@@ -429,10 +441,12 @@ describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败�
   });
 
   it("⑧资格闸先于二次短路：全文在史也不放行不合格名（拒不是回执）", async () => {
-    // 顺序钉死：资格检查先于短路 / wave 预记 / 装配 —— 不合格名不该进任何
-    // 路径，否则历史里恰好存在的同名旧全文会把它「洗白」成已加载。本用例
-    // 用「可见历史已有该名成功全文」的构造认证：闸若在短路之后，这里会
-    // 拿到短回执而不是拒。
+    // Order pinned: the eligibility check runs before the short-circuit / wave
+    // pre-record / assembly — an unqualified name must enter no path, otherwise
+    // an old full-body copy of the same name sitting in history would "launder"
+    // it into loaded. The construction here has visible history already
+    // containing a successful full body for this name: if the gate ran after
+    // the short-circuit, this call would get a short receipt instead of a rejection.
     const bodyMarker = "SECRET_BODY_MARKER_SHORTCIRCUIT";
     const dir = await writeSkill(
       "secret8",
@@ -500,10 +514,10 @@ describe("skill — 资格拒经真实 executor 到模型面（execution_failed 
   });
 
   it("不合格名：execution_failed，message 是资格拒文案（不被 executor 净化成通用串）", async () => {
-    // 文案必须到达模型：executor 的 sanitizeFailure 只放行
-    // ToolExecutionError（含子类）的 message，其余塌成 "tool execution
-    // failed"。本用例钉住「拒绝原因可见」这一环（与 memory_save 的
-    // 端到端同法）。
+    // The reason must reach the model: executor's sanitizeFailure only passes
+    // through the message of ToolExecutionError (incl. subclasses); everything
+    // else collapses to "tool execution failed". This case pins the
+    // "rejection reason is visible" leg (same end-to-end method as memory_save).
     const dir = join(scratch, "secret");
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -531,11 +545,13 @@ describe("skill — 资格拒经真实 executor 到模型面（execution_failed 
   });
 });
 
-// ADR-0079 — skill() 工具不再挂写根 trailer（specs/skill-load-write-root.md
-// 合同 6 amend）。handler 装配正文末段始终是 </skill_files>，与 #337 SC6
-// 形态逐字节一致；未知 skill 名仍是引导句。`SkillToolDeps` 也不再接受
-// `liveTaskRoot` / `isolationOn`（写处境披露的权威路径迁到 worker prior +
-// chat-session rebind，共用同一 helper `writeRootSegment`）。
+// ADR-0079 — the skill() tool no longer appends a write-root trailer (amending
+// the earlier write-root load contract). The assembled body always ends with
+// </skill_files>, byte-identical in shape to the normal delivery; unknown skill
+// names still get the guidance sentence. `SkillToolDeps` also no longer accepts
+// `liveTaskRoot` / `isolationOn` — the authoritative path for write-context
+// disclosure moved to worker prior + chat-session rebind, sharing the
+// `writeRootSegment` helper.
 describe("skill — 正文不挂写根（ADR-0079）", () => {
   let scratch: string;
 
@@ -563,17 +579,20 @@ describe("skill — 正文不挂写根（ADR-0079）", () => {
   }
 
   it("SkillToolDeps 不再接受 liveTaskRoot（类型层钉死）", () => {
-    // TypeScript 编译期钉住：SkillToolDeps 上不再有 liveTaskRoot / iso-
-    // lationOn 字段。本用例在运行期只验工厂可被不含这俩字段的 deps 调用。
+    // Pinned at TypeScript compile time: SkillToolDeps no longer has
+    // liveTaskRoot / isolationOn fields. At runtime this case only checks the
+    // factory accepts deps without them.
     const dir = join(scratch, "echo-type");
     const tool = createSkillTool({ catalog: echoCatalog(dir) });
     expect(tool.name).toBe("skill");
   });
 
   it("handler 调用 → 末段是 </skill_files>，正文不出现 current write root（即使 caller 持 cell）", async () => {
-    // 守门 ADR-0079：cell 在场也不再渲染 trailer。本用例直接构造 cell 仅
-    // 是模拟「caller 侧仍在持有活根」，但 SkillToolDeps 已不接它；如要
-    // 模拟错误地把 cell 传过去，应通过未声明字段（编译失败）做强制收口。
+    // Guarding ADR-0079: even with a cell present, no trailer is rendered. The
+    // cell constructed here merely simulates "the caller still holds a live
+    // root", but SkillToolDeps no longer accepts it; an erroneous cell pass-
+    // through would have to use an undeclared field (compile error), so the
+    // surface is closed off by the type system.
     const dir = join(scratch, "echo");
     await writeEcho(dir);
     const tool = createSkillTool({ catalog: echoCatalog(dir) });
@@ -581,7 +600,7 @@ describe("skill — 正文不挂写根（ADR-0079）", () => {
     expect(out).not.toContain("current write root");
     expect(out).not.toContain("no writable root");
     expect(out.trimEnd().endsWith("</skill_files>")).toBe(true);
-    // 正文仍含 skill 自身装配形态（frontmatter 剥离 + Base directory 行）
+    // The body still carries the skill's own assembled form (frontmatter stripped + Base directory line)
     expect(out).toContain("# echo body");
     expect(out).toContain("Base directory:");
   });
@@ -597,9 +616,10 @@ describe("skill — 正文不挂写根（ADR-0079）", () => {
   });
 
   it("createLiveTaskRoot / writeLiveTaskRoot helper 仍存在（写处境披露的下游消费者继续用）", () => {
-    // writeRootSegment 的下游消费者（worker prior / chat-session rebind）
-    // 仍用 createLiveTaskRoot / writeLiveTaskRoot 持有活根 —— 本用例守
-    // 门 helper 不被本轮 T1 误删。
+    // Downstream consumers of writeRootSegment (worker prior / chat-session
+    // rebind) still use createLiveTaskRoot / writeLiveTaskRoot to hold the live
+    // root — this guards the helpers against accidental deletion by the
+    // skill-side cleanup.
     const cell = createLiveTaskRoot("/tmp/keep-alive");
     writeLiveTaskRoot(cell, "/tmp/rebind");
     expect(cell.read()).toBe("/tmp/rebind");

@@ -1,25 +1,26 @@
 /**
- * T7 (plans/write-situation-disclosure.md) — 可恢复性穷尽表 + `operator_required`
- * 停止指令（specs/write-situation-disclosure.md SC6 / SC7）。
+ * Exhaustive recoverability table + `operator_required` stop directives.
  *
- * 落点：
- *   - 新增 `src/harness/isolation/recoverability.ts`，导出：
- *       * `Recoverability` 类型（至少 `operator_required` 与 `model_self_recoverable`
- *         两类）；
- *       * `RECOVERABILITY: Record<WorktreeIsolationErrorKind, Recoverability>`
- *         ——编译期穷尽 16 个 kind；漏一个则 `npm run typecheck` 失败；
- *       * `gateBlockNotice(kind, detail): string` ——门禁渲染缝；operator_required
- *         类附加停止指令语义（"重试无用 / 报给操作员"），并保留机读 `kind=` 前缀
- *         （沿用 PR #947 `HardRuleSpec.reasonFor` 惯例）。
+ * Pins the contract of `src/harness/isolation/recoverability.ts`:
+ *   - `Recoverability` type (at least `operator_required` and
+ *     `model_self_recoverable`);
+ *   - `RECOVERABILITY: Record<WorktreeIsolationErrorKind, Recoverability>`
+ *     — compile-time exhaustive over all kinds; a missing kind fails `npm run typecheck`;
+ *   - `gateBlockNotice(kind, detail): string` — the gate's rendering seam;
+ *     operator_required kinds add stop-directive semantics ("retrying is
+ *     useless / report to the operator") and keep the machine-readable
+ *     `kind=` prefix (following the existing `HardRuleSpec.reasonFor` convention).
  *
- * 测试覆盖（输入五类 B 表）：
- *   - overflow：16 个 kind 全有分类（额外加防呆 key 数断言，typecheck 是主防线）；
- *   - negative：`operator_required` 类的回执**不含** `create-worktree` /
- *     `enter-worktree` 等会引诱模型再试的子串；
- *   - exception：`not_a_git_repo` / `git_unavailable` 的回执同时含「Retry will
- *     not help」等价停止指令 + 机读 `kind=`，并打 `[worktree_isolation]` 前缀；
- *   - empty：未知 kind 由 `Record` 联合兜底（typecheck 已保证覆盖；runtime 测
- *     `RECOVERABILITY` 含 16 个键）。
+ * Coverage (five input classes):
+ *   - overflow: every kind has a classification (extra key-count sanity check;
+ *     typecheck is the main defense);
+ *   - negative: `operator_required` notices must NOT contain substrings that
+ *     lure the model into retrying, e.g. `create-worktree` / `enter-worktree`;
+ *   - exception: `not_a_git_repo` / `git_unavailable` notices contain both a
+ *     "Retry will not help"-equivalent stop directive + machine-readable
+ *     `kind=`, prefixed with `[worktree_isolation]`;
+ *   - empty: unknown kinds are caught by the `Record` union (typecheck
+ *     guarantees coverage; runtime checks the key count).
  */
 import { describe, expect, it } from "vitest";
 
@@ -40,7 +41,7 @@ import type {
   ToolExecutionResult,
 } from "../../../src/harness/tools/types.ts";
 
-// -- executor 集成测试的 helper（与 worktree-gate.test.ts 同款） ----------------
+// -- helpers for executor integration tests (same style as worktree-gate.test.ts) --
 
 /** Fake inner executor: records executeAll invocations. */
 function fakeInner() {
@@ -63,7 +64,7 @@ const writeCall = (id = "c1"): ToolCall => ({
   input: { path: "a.txt", content: "x" },
 });
 
-// -- overflow：16 个 kind 全有分类 --------------------------------------------
+// -- overflow: every kind has a classification ---------------------------------
 
 const ALL_KINDS: readonly WorktreeIsolationErrorKind[] = [
   "not_a_git_repo",
@@ -82,9 +83,9 @@ const ALL_KINDS: readonly WorktreeIsolationErrorKind[] = [
   "current_worktree",
   "worktree_remove_failed",
   "branch_delete_failed",
-  // T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter 前置占用
-  // 检查的拒收 kind（spec SC6 分类表行；归 operator_required 模型无法
-  // 解掉别人占用，详见 worktree-rebind.ts assertNotClaimed）。
+  // ADR-0070 — rejection kind from the pre-`enter` occupancy check
+  // (classification-table row; operator_required — the model cannot release
+  // someone else's claim; see assertNotClaimed in worktree-rebind.ts).
   "worktree_claimed",
 ];
 
@@ -106,7 +107,7 @@ describe("RECOVERABILITY — SC6 编译期穷尽", () => {
   });
 });
 
-// -- exception + negative：operator_required 类的停止指令 + 机读 kind ---------
+// -- exception + negative: stop directives + machine-readable kind for operator_required --
 
 describe("RECOVERABILITY — operator_required 分类", () => {
   it("not_a_git_repo 、 git_unavailable 与 worktree_claimed 归 operator_required（结构死路）", () => {
@@ -123,10 +124,10 @@ describe("gateBlockNotice — operator_required 停止指令语义", () => {
     expect(notice).toContain("kind=not_a_git_repo");
     expect(notice).toContain("Retry will not help");
     expect(notice).toContain("Report to the operator");
-    // 不引诱模型再试：negative 臂——不点名 create-worktree / enter-worktree
+    // Do not lure the model into retrying: negative arm — no mention of create-worktree / enter-worktree
     expect(notice).not.toContain("create-worktree");
     expect(notice).not.toContain("enter-worktree");
-    // detail 透传
+    // detail passes through
     expect(notice).toContain("no gitdir found: /tmp/x");
   });
 
@@ -150,13 +151,13 @@ describe("gateBlockNotice — operator_required 停止指令语义", () => {
     expect(notice).toContain("kind=worktree_claimed");
     expect(notice).toContain("Retry will not help");
     expect(notice).toContain("Report to the operator");
-    // detail 透传 — 占用者 id 与释放路径文案都得进回执
+    // detail passes through — both the claiming session id and the release-path wording must reach the notice
     expect(notice).toContain("conv-y");
     expect(notice).toContain("/repo/.iknow/worktrees/conv-x");
   });
 });
 
-// -- 渲染缝对 model_self_recoverable 不加停止指令（不喧宾夺主） ----------------
+// -- the rendering seam adds no stop directive for model_self_recoverable kinds ------
 
 describe("gateBlockNotice — model_self_recoverable 类不含停止指令", () => {
   it("branch_exists / worktree_exists / worktree_not_found 不附停止指令", () => {
@@ -171,20 +172,20 @@ describe("gateBlockNotice — model_self_recoverable 类不含停止指令", () 
       const notice = gateBlockNotice(k, "some detail");
       expect(notice).toContain(`kind=${k}`);
       expect(notice).toContain("some detail");
-      // 不加 operator_required 才有的停止指令
+      // no stop directive, which only operator_required kinds carry
       expect(notice).not.toContain("Retry will not help");
       expect(notice).not.toContain("Report to the operator");
     }
   });
 });
 
-// -- 渲染缝被门禁实际使用（防回归：worktree-gate.ts 真的走这条路径） -----------
+// -- the gate really uses the rendering seam (regression guard: worktree-gate.ts takes this path) --
 
 describe("gateBlockNotice — 门禁接渲染点（pending → catch 路径）", () => {
-  // 真实的渲染缝在 worktree-gate.ts 的 pending → catch 分支：provision 抛
-  // typed `WorktreeIsolationError` 时，回执必须来自 gateBlockNotice——
-  // operator_required 类（如 not_a_git_repo）的停止指令才真的进回执，
-  // 而非只在单测里成立。
+  // The real rendering seam is the pending -> catch branch in worktree-gate.ts:
+  // when provision throws a typed `WorktreeIsolationError`, the notice must come
+  // from gateBlockNotice — so operator_required stop directives reach real
+  // notices, not just unit tests.
   it("provision 抛 not_a_git_repo 时，executor 回执含停止指令 + 机读 kind", async () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
@@ -205,7 +206,7 @@ describe("gateBlockNotice — 门禁接渲染点（pending → catch 路径）",
     expect(message).toContain("kind=not_a_git_repo");
     expect(message).toContain("Retry will not help");
     expect(message).toContain("Report to the operator");
-    // inner 未触达 → fail-closed（main repo 零写）
+    // inner never reached -> fail-closed (zero writes to the main repo)
     expect(calls.calls).toHaveLength(0);
   });
 });

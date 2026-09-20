@@ -1,13 +1,16 @@
 /**
- * last-read ledger（ADR-0084 / spec D1）单元测试。
+ * last-read ledger unit tests (ADR-0084).
  *
- * 钉住的不变式：
- *   - 分桶按 conversationId，同 id 同一份、异 id 互不可见（禁止跨会话串读）。
- *   - `undefined` conversationId → **不建匿名桶**（与 graph/ledger.ts 相反）：
- *     这是 spec 的显式要求 —— 无 id 的非空覆写必须 fail-closed，且禁止隐式
- *     进程级全局表。
- *   - destroy / destroyAll 后账本为空（reset / 会话结束 / 进程重启的空表语义）。
- *   - 进程内存：本模块不 import 任何 fs / store，resume 天然空表。
+ * Invariants pinned here:
+ *   - Buckets keyed by conversationId: same id shares one ledger, different
+ *     ids never see each other (no cross-session reads).
+ *   - `undefined` conversationId → **no anonymous bucket** (unlike
+ *     graph/ledger.ts): a non-empty overwrite without an id must fail closed,
+ *     and no implicit process-level global table.
+ *   - destroy / destroyAll leave the ledger empty (reset / session end /
+ *     process-restart empty-table semantics).
+ *   - Process memory only: this module imports no fs / store, so resume is
+ *     naturally empty.
  */
 
 import assert from "node:assert/strict";
@@ -72,7 +75,7 @@ describe("createLastReadLedgerHost — 多会话分桶", () => {
   it("undefined conversationId → undefined，且不建匿名桶（spec D1 显式例外）", () => {
     const host = createLastReadLedgerHost();
     assert.equal(host.ledgerFor(undefined), undefined);
-    // 不建桶：host 里没有任何会话账本可被后来的 undefined 命中。
+    // No bucket created: a later undefined lookup must not hit any session ledger.
     assert.equal(host.size(), 0);
   });
 
@@ -101,7 +104,7 @@ describe("createLastReadLedgerHost — 多会话分桶", () => {
     host.destroyAll();
 
     assert.equal(host.size(), 0);
-    // destroyAll 后新取一份 → 空表（resume / 重启的空表语义）。
+    // Fresh ledger after destroyAll → empty (resume / restart empty-table semantics).
     assert.equal(host.ledgerFor("conv-a")?.size(), 0);
   });
 

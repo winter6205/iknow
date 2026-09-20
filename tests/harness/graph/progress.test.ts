@@ -1,7 +1,8 @@
 /**
- * TUI run_graph 进度快照（plans/tui-run-graph-view.md T1）。
+ * TUI run_graph progress snapshot tracker.
  *
- * 纯累加：onWave 把本波标 running；onNode 写入终态；不读 JSONL。
+ * Pure accumulation: onWave marks the current wave running, onNode writes
+ * terminal states; nothing reads the session JSONL.
  */
 import { describe, expect, it } from "vitest";
 import { createGraphProgressTracker } from "../../../src/harness/graph/progress.ts";
@@ -17,17 +18,15 @@ describe("createGraphProgressTracker", () => {
     const t = createGraphProgressTracker(NODES);
     const snap = t.snapshot();
     expect(snap.waveIndex).toBe(-1);
-    expect(snap.nodes.map((n) => n.id)).toEqual([
-      "research",
-      "write",
-      "after",
-    ]);
+    expect(snap.nodes.map((n) => n.id)).toEqual(["research", "write", "after"]);
     expect(snap.nodes.map((n) => n.status)).toEqual([
       "pending",
       "pending",
       "pending",
     ]);
-    expect(snap.nodes.find((n) => n.id === "write")!.deps).toEqual(["research"]);
+    expect(snap.nodes.find((n) => n.id === "write")!.deps).toEqual([
+      "research",
+    ]);
   });
 
   it("空节点列表 → 空快照（不画行的数据前提）", () => {
@@ -97,7 +96,9 @@ describe("createGraphProgressTracker", () => {
     now = 2_500;
     const snap = t.onNode({ id: "research", status: "done", output: "FACT" });
     expect(snap.nodes.find((n) => n.id === "research")!.durationMs).toBe(1_500);
-    expect(snap.nodes.find((n) => n.id === "write")!.durationMs).toBeUndefined();
+    expect(
+      snap.nodes.find((n) => n.id === "write")!.durationMs
+    ).toBeUndefined();
   });
 
   it("超长 output 截成粗摘要，不整包塞进 snapshot", () => {

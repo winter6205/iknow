@@ -1,17 +1,20 @@
 /**
- * ADR-0088 (docs/adr/0088-home-project-tree.md) — 后台任务登记根跟会话池同一
- * 项目树:`<poolRoot>/projects/<slug>/tasks/`(`poolRoot` = 显式 dataDir 否则
- * `~/.iknow`,`slug` = ADR-0071 的 `basename(projectIdentityRoot)-sha1[:12]`)。
+ * ADR-0088 (docs/adr/0088-home-project-tree.md) — the background-task
+ * registry root shares the home-side project tree with the session pool:
+ * `<poolRoot>/projects/<slug>/tasks/` (`poolRoot` = explicit dataDir else
+ * `~/.iknow`; `slug` = ADR-0071's `basename(projectIdentityRoot)-sha1[:12]`).
  *
- * 本文件钉三条装配层不变式(单测 `resolveTasksDir` 只证公式,证不了接线):
- *   1. 缺省池根 = `<userHome>/.iknow`(`resolveServeDataDir()` 的默认);
- *   2. slug 取自 `projectIdentityRoot`,**不**取自 cwd / workspaceRoot;
- *   3. 换 workspaceRoot 不改 tasks 路径(throwaway checkout 不另开活账本,
- *      即 ADR-0021 D1.3 的 `<workspaceRoot>/.iknow/tasks` 形态已退役)。
+ * This file pins three assembly-layer invariants (unit-testing
+ * `resolveTasksDir` proves the formula but not the wiring):
+ *   1. default pool root = `<userHome>/.iknow` (`resolveServeDataDir()`'s default);
+ *   2. the slug comes from `projectIdentityRoot`, NOT from cwd / workspaceRoot;
+ *   3. changing workspaceRoot does not change the tasks path (a throwaway
+ *      checkout opens no separate live ledger — the ADR-0021 D1.3 form
+ *      `<workspaceRoot>/.iknow/tasks` is retired).
  *
- * 手法与 `build-engine-install-root.test.ts` 同款:module-mock
- * `createBackgroundTaskManager` 抓 `opts.tasksDir`(委托真实工厂,行为不变),
- * 其余装配走真实路径。
+ * Technique: module-mock `createBackgroundTaskManager` to capture
+ * `opts.tasksDir` (delegating to the real factory, so behavior is unchanged);
+ * the rest of the assembly runs for real.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,8 +67,9 @@ function makeEnv(): IknowEnv {
   };
 }
 
-/** 与 `resolveProjectSessionDir` 严格同公式的期望值:跨函数等式(不要独立重算
- *  哈希 —— review fix:测试独立重算会让公式漂移后两边仍各自"绿")。 */
+/** Expected value using the exact same formula as `resolveProjectSessionDir`:
+ *  a cross-function equality (do NOT recompute the hash independently in the
+ *  test — that would keep both sides "green" even after the formula drifts). */
 function expectedTasksDir(
   poolRoot: string,
   projectIdentityRoot: string
@@ -108,7 +112,8 @@ async function build(opts: {
       ? { projectIdentityRoot: opts.projectIdentityRoot }
       : {}),
     ...(opts.tasksDir !== undefined ? { tasksDir: opts.tasksDir } : {}),
-    // 本文件只验 tasksDir 接线,不验溢出退场 / 索引降档 / 真 MCP 连接。
+    // This file verifies tasksDir wiring only, not tool overflow / index
+    // demotion or real MCP connections.
     skipCountTokens: true,
     mcpFirstTurnReadyTimeoutMs: 150,
   });
@@ -128,7 +133,7 @@ describe("buildHarnessEngine — tasksDir 锚 home 项目树 (ADR-0088)", () => 
     expect(captured.tasksDirs).toEqual([
       expectedTasksDir(join(userHome, ".iknow"), projectRoot),
     ]);
-    // 旧形态(ADR-0021 D1.3)已退役:工作区 `.iknow/tasks` 不再是写点。
+    // The old form (ADR-0021 D1.3) is retired: workspace `.iknow/tasks` is no longer a write target.
     expect(captured.tasksDirs[0].startsWith(join(projectRoot, ".iknow"))).toBe(
       false
     );

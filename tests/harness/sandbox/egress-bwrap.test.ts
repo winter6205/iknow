@@ -1,16 +1,19 @@
 /**
- * Tests for `bwrap.ts` egress spec 扩展 —— T4 argv 形态。
+ * Tests for the egress spec extension of `bwrap.ts` — argv shape.
  *
- * 钉住的不变式（来自 specs/network-egress-allowlist.md §T4 + ADR-0097 +
- * .claude/rules/security-boundaries.md「Sandbox argv」）:
- *   - 不带 egress spec → argv 恒断网基线（`--unshare-net` 恒在;egress 缝
- *     unix socket 与代理 env 都不发射）;
- *   - 带 egress spec → argv 含 `--bind <unixSocket> <unixSocket>` 与
- *     `--setenv HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY` 等;
- *   - socket bind 落位 = workspaceMounts 之后、cwdReadonly 之前
- *     （last-mount-wins 序）;
- *   - 旧 `network?: boolean` 已从 fence 选项层整体退役（fence 不再消费该
- *     入参）；fence 恒含 `--unshare-net` = 出口缝不构成宿主 netns 旁路。
+ * Pinned invariants (from specs/network-egress-allowlist.md, ADR-0097 and
+ * .claude/rules/security-boundaries.md "Sandbox argv"):
+ *   - without an egress spec → argv stays at the always-disconnected
+ *     baseline (`--unshare-net` always present; neither the seam's unix
+ *     socket nor the proxy env is emitted);
+ *   - with an egress spec → argv contains `--bind <unixSocket> <unixSocket>`
+ *     and `--setenv HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY` etc.;
+ *   - socket bind placement = after workspaceMounts, before cwdReadonly
+ *     (last-mount-wins order);
+ *   - the legacy `network?: boolean` is retired from the fence option layer
+ *     entirely (the fence no longer consumes such an input); the fence
+ *     always contains `--unshare-net` = the egress seam never bypasses the
+ *     host netns.
  */
 
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -44,15 +47,16 @@ function egressSpec(): EgressFenceSpec {
       HTTPS_PROXY: "http://127.0.0.1:3128",
       ALL_PROXY: "http://127.0.0.1:3128",
       NO_PROXY: "127.0.0.1,localhost",
-      // T3：GIT_SSH_COMMAND 与代理 env 同经 spec.env → mergedEnv →
-      // --setenv 单通道（invariant 4），fence 层零复制。
+      // GIT_SSH_COMMAND travels the same single channel as the proxy env:
+      // spec.env → mergedEnv → --setenv (invariant 4), zero duplication at the fence layer.
       GIT_SSH_COMMAND:
         "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
         "-o ProxyCommand=\"'/test-root/bin/node' " +
         "'/test-root/vendor/egress-relay/egress-http-connect.mjs' %h %p\"",
     },
-    // bwrap 层不消费 innerBridgeScript（消费面是 bash.ts 命令链）；
-    // 这里只需满足 spec 形状。中继资产目录则**由 bwrap 消费**（ro-bind）。
+    // The bwrap layer does not consume innerBridgeScript (bash.ts's command
+    // chain does); it only needs to satisfy the spec shape here. The relay
+    // assets directory, however, IS consumed by bwrap (ro-bind).
     innerBridgeScript: "",
     relayAssetsDir: "/test-root/vendor/egress-relay",
   };
@@ -79,10 +83,10 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       true,
       "--unshare-net remains the default"
     );
-    // T3 invariant 3：session 缺席（任何原因）→ 围栏 env 中不存在
-    // GIT_SSH_COMMAND（无缝 = 无注入 = git-over-SSH 纯断网同态）。
+    // Invariant 3: session absent (for any reason) → no GIT_SSH_COMMAND in
+    // the fence env (no seam = no injection = git-over-SSH stays purely offline).
     assert.ok(!argv.includes("GIT_SSH_COMMAND"));
-    // 无 --bind /tmp/iknow-egress-test.sock
+    // no --bind /tmp/iknow-egress-test.sock
     for (let i = 0; i + 2 < argv.length; i++) {
       if (argv[i] === "--bind" && argv[i + 1] === argv[i + 2]) {
         assert.notEqual(
@@ -96,7 +100,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
 
   it("egress spec emits --bind socket AND --setenv proxy env", () => {
     const argv = fenceArgv({ egress: egressSpec() });
-    // socket bind 三元组
+    // the socket bind triple
     const sockPath = "/tmp/iknow-egress-test.sock";
     let found = false;
     for (let i = 0; i + 2 < argv.length; i++) {
@@ -108,7 +112,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
     }
     assert.ok(found, `expected --bind ${sockPath} ${sockPath}`);
 
-    // --setenv 注入代理 env
+    // --setenv injects the proxy env
     assert.ok(argv.includes("--setenv"));
     let sawHttp = false;
     let sawHttps = false;
@@ -125,7 +129,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       if (name === "NO_PROXY") sawNo = true;
       if (name === "GIT_SSH_COMMAND") {
         sawGitSsh = true;
-        // T3：值 = spec.env 逐字透传（fence 层不改造注入串）。
+        // value passes through spec.env verbatim (the fence layer never rewrites the injected string).
         assert.equal(value, egressSpec().env.GIT_SSH_COMMAND);
       }
       // env value matches spec
@@ -141,11 +145,12 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       sawHttp && sawHttps && sawAll && sawNo,
       "all 4 proxy env keys set"
     );
-    // T3：GIT_SSH_COMMAND 经 spec.env → mergedEnv → --setenv 单通道注入
-    // （invariant 4：三消费面零复制，fence 只透传）。
+    // GIT_SSH_COMMAND is injected through the single spec.env → mergedEnv →
+    // --setenv channel (invariant 4: zero duplication across the three
+    // consuming faces; the fence only passes through).
     assert.ok(sawGitSsh, "GIT_SSH_COMMAND set via spec.env channel");
 
-    // --unshare-net 仍在（egress ≠ host network）
+    // --unshare-net still present (egress ≠ host network)
     assert.ok(argv.includes("--unshare-net"));
   });
 
@@ -167,9 +172,10 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       roIdx > 0,
       "expected --ro-bind <relayAssetsDir> <relayAssetsDir>"
     );
-    // 独立 argv 项（security-boundaries.md：不许内联语法）——三项形态已
-    // 由上面的索引校验（每项独立元素）。落位 = workspaceMounts 之后、
-    // cwdReadonly/proc 之前：与 socket bind 同段。
+    // Separate argv items (security-boundaries.md forbids inline syntax) —
+    // the three-item shape is already verified by the index checks above
+    // (each item is its own element). Placement = after workspaceMounts,
+    // before cwdReadonly/proc: the same segment as the socket bind.
     assert.ok(
       roIdx < argv.indexOf("--proc"),
       "relay ro-bind precedes proc/dev"
@@ -183,7 +189,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
   it("socket bind lands AFTER workspaceMounts, BEFORE cwdReadonly/proc", () => {
     const argv = fenceArgv({ egress: egressSpec() });
     const sockPath = "/tmp/iknow-egress-test.sock";
-    // 找到 socket bind 的索引
+    // locate the socket bind index
     let bindIdx = -1;
     for (let i = 0; i + 2 < argv.length; i++) {
       if (argv[i] === "--bind" && argv[i + 1] === sockPath) {
@@ -192,17 +198,18 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       }
     }
     assert.ok(bindIdx > 0, "socket bind present");
-    // 在 proc/dev 之前
+    // before proc/dev
     const procIdx = argv.indexOf("--proc");
     assert.ok(bindIdx < procIdx, "socket bind precedes proc/dev");
-    // --clearenv 之前（与其它 --setenv 一起）
+    // before --clearenv (alongside the other --setenv entries)
     const clearenvIdx = argv.indexOf("--clearenv");
     assert.ok(bindIdx < clearenvIdx, "socket bind precedes --clearenv");
   });
 
   it("--unshare-net stays constant when an egress spec is set (seam is not a netns bypass)", () => {
-    // 即便配了 egress spec,`--unshare-net` 的恒定承诺也不被打开 —— egress 是
-    // unix socket 进沙箱内代理,仍走 netns 隔离(ADR-0097 单一通道)。
+    // Even with an egress spec configured, the constant `--unshare-net`
+    // guarantee is not opened up — egress reaches the in-sandbox proxy via a
+    // unix socket and still runs under netns isolation (ADR-0097 single channel).
     const argv = fenceArgv({ egress: egressSpec() });
     assert.ok(
       argv.includes("--unshare-net"),
@@ -220,13 +227,13 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
         relayAssetsDir: "/test-root/vendor/egress-relay",
       },
     });
-    // 空 socketPath → 不发射 --bind
+    // empty socketPath → no --bind emitted
     for (let i = 0; i + 2 < argv.length; i++) {
       if (argv[i] === "--bind" && argv[i + 1] === argv[i + 2]) {
         assert.notEqual(argv[i + 1], "", "no empty socket bind");
       }
     }
-    // 但 env 仍注入（fail-open on env? 不 —— env 是 spec 给的，应仍注入）
+    // env is still injected (fail-open on env? no — the spec supplied it, so it must be injected)
     assert.ok(argv.includes("--setenv"));
   });
 });

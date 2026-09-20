@@ -4,7 +4,7 @@
  * The agent has no direct way to know its own project path (cwd) from the
  * system prompt; it would otherwise have to run `bash pwd` (execute → ask).
  * The assembly injects an additive segment that renders the **stable**
- * `projectIdentityRoot` (T9 / ADR-0037 §4) so the agent can sense which
+ * `projectIdentityRoot` (ADR-0037) so the agent can sense which
  * project it is in by default without exposing the rebind-volatile live
  * taskRoot — that surface belongs to the `env_snapshot` stream.
  *
@@ -39,8 +39,9 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-/** Default `projectIdentityRoot` = `cwd` for tests that don't care about T9
- *  byte-stability across rebinds. T9 测试必须显式传独立 `projectIdentityRoot`。 */
+/** Default `projectIdentityRoot` = `cwd` for tests that don't care about
+ *  byte-stability across rebinds. Byte-stability tests must pass an explicit,
+ *  separate `projectIdentityRoot`. */
 function baseCtx(cwd: string): AssemblyContext {
   return {
     cwd,
@@ -93,10 +94,10 @@ describe("identity assembly — project path additive segment", () => {
     expect(out).toContain(process.cwd());
   });
 
-  // ── T9 / ADR-0037 §4 acceptance ──────────────────────────────────────────
-  // system prompt "## Project path" 段必须钉稳定 projectIdentityRoot —— 即使
-  // active cwd (== 活 taskRoot) 在 rebind 后翻转,该段字节级不变,KV 缓存前
-  // 缀不抖动。这是 T9 展示面第一硬挂钩。
+  // ── ADR-0037 acceptance ────────────────────────────────────────────────
+  // The "## Project path" segment must pin the stable projectIdentityRoot —
+  // even after the active cwd (== live taskRoot) flips on rebind, the segment
+  // stays byte-identical so the KV-cache prefix does not churn.
   it("T9: 活 taskRoot 翻转前后 system prompt 字节级不变(## Project path 钉稳定根)", async () => {
     const stableRoot = "/stable/project-identity";
     const beforeRebind = await assembleIdentityContext({
@@ -114,11 +115,12 @@ describe("identity assembly — project path additive segment", () => {
 
     expect(beforeRebind).toBeDefined();
     expect(afterRebind).toBeDefined();
-    // 整个 system 字节级逐字节相同(不只 Project path 段 —— 因为活 taskRoot
-    // 唯一可能注入的位置就是该段,且已被切到稳定根)。
+    // The whole system prompt is byte-identical, not just the Project path
+    // segment — the live taskRoot could only ever be injected there, and it
+    // has been switched to the stable root.
     expect(afterRebind).toBe(beforeRebind);
-    // "## Project path" 段在渲染稳定根的同时,**不**泄漏任何 active cwd 字
-    // 段(before/after 的 active cwd 不应出现在 system prompt 中)。
+    // While "## Project path" renders the stable root, no active-cwd field
+    // may leak (neither before/after active cwd appears in the system prompt).
     expect(beforeRebind).toContain(`## Project path\n${stableRoot}`);
     expect(beforeRebind).not.toContain("/active/worktree-before");
     expect(beforeRebind).not.toContain("/active/worktree-after");

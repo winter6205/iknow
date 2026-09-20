@@ -1,6 +1,6 @@
 /**
- * ACI 原型 Layer 0：aci-registry 单元测试。
- * 覆盖：visibleSchemas 过滤 lazy / discover 命中与未命中 / inner 可用。
+ * ACI Layer 0: aci-registry unit tests.
+ * Covers: visibleSchemas lazy filtering / discover hit and miss / inner availability.
  */
 
 import { describe, it } from "vitest";
@@ -39,7 +39,7 @@ describe("createAciRegistry — visibleSchemas 过滤 lazy", () => {
     const reg = createAciRegistry([
       makeTool({ name: "bash" }),
       makeTool({ name: "read_file" }),
-      makeTool({ name: "grep", lazy: true }), // lazy stub — registry 协议
+      makeTool({ name: "grep", lazy: true }), // lazy stub — registry protocol
     ]);
     const visible = reg.visibleSchemas();
     const names = visible.map((t) => t.name);
@@ -132,22 +132,23 @@ describe("createAciRegistry — 装配期三闸门（#224 Gate 1 / Gate 2）", (
 
 describe("createAciRegistry — discovered set（#224）", () => {
   it("discover() 命中 lazy 工具后，visibleSchemas 尾部追加（非 lazy 注册序前缀不动）", () => {
-    // b 是 lazy 且注册在 c 之前 —— 旧行为会插回注册序 [a, b, c]；
-    // 新行为尾部追加 → [a, c, b]（非 lazy 前缀逐位不变）。
+    // b is lazy and registered before c — old behavior re-inserted it in
+    // registration order [a, b, c]; new behavior appends at the tail →
+    // [a, c, b] (the non-lazy prefix stays position-stable).
     const reg = createAciRegistry([
       makeTool({ name: "a" }),
       makeTool({ name: "b", lazy: true }),
       makeTool({ name: "c" }),
     ]);
-    // 初始：lazy 工具不在 visibleSchemas
+    // initially: the lazy tool is absent from visibleSchemas
     const before = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(before, ["a", "c"]);
 
-    // discover("b") 命中 → 标记 discovered
+    // discover("b") hits → marks it discovered
     const hit = reg.discover("b");
     assert.ok(hit !== undefined);
 
-    // 标记后：b 追加到尾部，非 lazy 前缀 [a, c] 逐位不变
+    // after marking: b is appended at the tail, non-lazy prefix [a, c] unchanged
     const after = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(after, ["a", "c", "b"]);
   });
@@ -159,7 +160,7 @@ describe("createAciRegistry — discovered set（#224）", () => {
       makeTool({ name: "b" }),
       makeTool({ name: "l2", lazy: true }),
     ]);
-    // 刻意倒序发现（相对注册序）——追加序 = discovery 序
+    // deliberately discover against registration order — append order = discovery order
     reg.discover("l2");
     reg.discover("l1");
     assert.deepEqual(
@@ -179,13 +180,13 @@ describe("createAciRegistry — discovered set（#224）", () => {
     const turn1 = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(turn1, ["a", "c", "X"]);
 
-    // 相邻下一轮：无新 discovery
+    // the next adjacent turn: no new discovery
     const turn2 = reg.visibleSchemas().map((t) => t.name);
-    // 前 N 项逐位相等（N = turn1 长度）
+    // the first N items are equal position by position (N = turn1 length)
     assert.deepEqual(turn2.slice(0, turn1.length), turn1);
     assert.deepEqual(turn2, turn1);
 
-    // 再发现一个 → 只向尾部增长，前缀仍逐位不变
+    // discovering one more grows only the tail; the prefix stays position-stable
     reg.discover("Y");
     const turn3 = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(turn3.slice(0, turn2.length), turn2);
@@ -193,19 +194,20 @@ describe("createAciRegistry — discovered set（#224）", () => {
   });
 
   it("discover() 命中非 lazy 工具 → 不挪位，注册序前缀逐位不变（tool_search 全量命中路径）", () => {
-    // tool_search 对全量工具调 discover()（含非 lazy）；若已发现的非
-    // lazy 工具被挪到尾段，一次检索就破 KV cache 前缀（#224 / #631 AC①）。
+    // tool_search calls discover() over every tool (including non-lazy); if an
+    // already-discovered non-lazy tool were moved to the tail, a single search
+    // would break the KV cache prefix.
     const reg = createAciRegistry([
       makeTool({ name: "a" }),
       makeTool({ name: "b" }),
       makeTool({ name: "X", lazy: true }),
       makeTool({ name: "c" }),
     ]);
-    reg.discover("b"); // 命中非 lazy
-    reg.discover("X"); // 命中 lazy
+    reg.discover("b"); // hits non-lazy
+    reg.discover("X"); // hits lazy
     assert.deepEqual(
       reg.visibleSchemas().map((t) => t.name),
-      ["a", "b", "c", "X"] // b 留在注册位，只有 lazy 的 X 尾追加
+      ["a", "b", "c", "X"] // b keeps its registration slot; only lazy X is appended
     );
   });
 
@@ -255,9 +257,9 @@ describe("createAciRegistry — inner 可用", () => {
     const reg = createAciRegistry([makeTool({ name: "bash" })]);
     const validator = reg.inner.getValidator("bash");
     assert.ok(validator !== undefined);
-    // 合法输入通过
+    // valid input passes
     assert.equal(validator!({ q: "hello" }), true);
-    // 非法输入（额外字段）被拒绝
+    // invalid input (extra field) is rejected
     assert.equal(validator!({ q: "hello", extra: 1 }), false);
   });
 

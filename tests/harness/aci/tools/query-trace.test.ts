@@ -16,11 +16,11 @@ import {
 import { TRACE_BACKSTOP_MARKER } from "../../../../src/traceserver/output-backstop.ts";
 
 /**
- * plan `trace-mcp-read-side-split` T7: drill-down (`record_id` / `detail`) is
- * gone — `get_record` owns the content axis. The byte-pagination `resume_offset`
- * left with the panel, leaving `query_trace` a row axis: filter + page. The
- * `additionalProperties: false` gate is the per-face contract (SC18) that
- * prevents the three retired names from sneaking back in.
+ * Drill-down (`record_id` / `detail`) is gone — `get_record` owns the content
+ * axis. The byte-pagination `resume_offset` left with the panel, leaving
+ * `query_trace` a row axis: filter + page. The `additionalProperties: false`
+ * gate is the per-face contract that prevents the three retired names from
+ * sneaking back in.
  */
 
 const scratchPaths: string[] = [];
@@ -31,12 +31,12 @@ const scratchPaths: string[] = [];
  * id sits one row past the cap, so the scan has to run to exhaustion. That one
  * case costs 2.5s on an idle core but measured 5158ms inside a full 385-file
  * `npm test` — over the 5000ms default. The fork pool (`maxForks: 3` on 4
- * cores) decides whether it lands above or below, which is why #864 saw it fail
- * in the full run and pass standalone. Not state pollution: the fixtures are
+ * cores) decides whether it lands above or below, which is why it failed
+ * in the full run and passed standalone. Not state pollution: the fixtures are
  * mkdtemp-only, and `pool: "forks"` runs each file in its own process.
  */
 const SCAN_CAP_TEST_TIMEOUT = 20_000;
-/** T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。 */
+/** Sessions live in the two-level tree `<dir>/projects/<slug>/<convId>/trace.jsonl`. */
 const TEST_PROJECT_SLUG = "test-project-aci-query-trace";
 
 function writeSession(convId: string, jsonl: string): string {
@@ -278,17 +278,20 @@ describe("query_trace ACI tool (T7)", () => {
   });
 
   it("registers query_trace as an append-only SSOT member followed by every post-#251 tool", () => {
-    // query_trace 之后的事实清单由 SSOT 长度派生（不再写 22 / 23 之类硬编数字）：
-    // append-only 纪律下,query_trace 后只允许再加新件,不能插队改既有顺序。
-    // 本测锁三件事:① query_trace 仍在名单;② 之后还有若干件(SSOT 派生);
-    // ③ 名单末尾必须收在新件上(get_record 是本场景无 host 缝时的常驻末位)。
+    // The tail after query_trace is derived from the SSOT array length (no
+    // hardcoded counts like 22 / 23): under append-only discipline, only new
+    // appends may follow query_trace, never reshuffling. This test pins three
+    // things: (1) query_trace is still listed; (2) some tools follow it (count
+    // derived from the SSOT); (3) the list ends on the newest appends
+    // (get_record is the resident tail when this scenario has no host seam).
     const queryTraceIndex = ACI_TOOLSET_NAMES.indexOf("query_trace");
     assert.ok(queryTraceIndex >= 0, "query_trace 仍在 ACI_TOOLSET_NAMES");
-    // query_trace 之前的部分 = SSOT 头(append-only 不重排既有);
-    // 之后件数由 ACI_TOOLSET_NAMES.length 推导,以数组为 source of truth。
+    // Everything before query_trace is the untouched SSOT head (append-only
+    // never reshuffles); the tail size comes from ACI_TOOLSET_NAMES.length,
+    // with the array as the source of truth.
     const tailCount = ACI_TOOLSET_NAMES.length - queryTraceIndex - 1;
     assert.ok(tailCount > 0, "query_trace 之后必有 append 件");
-    // 锁每件 query_trace 之后的成员都是单一 append(不重排):
+    // Every member after query_trace must be a plain single append (no reshuffle):
     for (let i = queryTraceIndex + 1; i < ACI_TOOLSET_NAMES.length; i++) {
       assert.ok(
         typeof ACI_TOOLSET_NAMES[i] === "string" &&
@@ -301,9 +304,11 @@ describe("query_trace ACI tool (T7)", () => {
       sandboxRoot: makeTraceDir(),
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
-    // 读侧三件都无装配条件 → 常驻;两件读轴工具也是 trace 读侧的同门。
-    // 三轴阅读顺序（行 → 目录 → 内容）在实例装配序里由 indexOf 派生锁死，
-    // 不钉绝对尾位（read_image 等后续 append 件允许排在更后）。
+    // All three read-side tools carry no assembly condition → resident; they
+    // are the trace read-side family. The three-axis reading order (row →
+    // directory → content) is locked in the instance assembly order via
+    // indexOf-derived positions, not absolute tail slots (later appends such
+    // as read_image may sit after them).
     const presentNames = registry.inner.list().map((d) => d.name);
     assert.ok(presentNames.includes("query_trace"));
     assert.ok(presentNames.includes("list_sessions"));
@@ -359,14 +364,14 @@ describe("query_trace ACI tool -- role projection (v1.2)", () => {
       records: Array<Record<string, unknown>>;
     };
 
-    // v1.2 判据 (b): last_assistant_preview 是最后一条 assistant 消息的预览.
+    // last_assistant_preview is the preview of the last assistant message.
     // preview() JSON-stringifies the message object, hence the form.
     const record = body.records[0]!;
     assert.equal(
       record.last_assistant_preview,
       JSON.stringify({ role: "assistant", content: "final answer" })
     );
-    // last_message_preview 语义不变 (仍是最后一条任意角色消息).
+    // last_message_preview semantics unchanged (still the last message of any role).
     assert.equal(
       record.last_message_preview,
       JSON.stringify({ role: "assistant", content: "final answer" })
@@ -374,8 +379,8 @@ describe("query_trace ACI tool -- role projection (v1.2)", () => {
   });
 
   it("omits last_assistant_preview when no assistant message exists (v1.2 合法态)", async () => {
-    // v1.2 判据 (b): 「无 assistant 消息的 llm_call → 字段缺席为合法态」.
-    // 钉住「缺席」语义, 不退化为 empty string.
+    // An llm_call with no assistant message makes the field absent — that is
+    // a legal state; pinned as "absent", never degraded to an empty string.
     const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-v12-no-"));
     scratchPaths.push(dir);
     mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, "c-v12"), {

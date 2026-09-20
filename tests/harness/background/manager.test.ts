@@ -1,19 +1,20 @@
 /**
- * #502 T2 — BackgroundTaskManager + registry 落盘单测。
+ * Unit tests for BackgroundTaskManager + registry persistence.
  *
- * 覆盖计划 acceptance 要求的六类边界(不真启子进程,fake spawn 工厂):
- *   1. 正常路径:fake spawn → spawn 返回 {task_id, log_path} → registry json
- *      读回一致(stdout/stderr 流入 log)
- *   2. 日志尾部读:log 超默认窗口只回尾部,status/exitCode 附带
- *   3. 空 task_id → empty_task_id(typed)
- *   4. 未知 task_id → task_not_found(typed)
- *   5. 并发重复:同一 task 并发两次 stop → 幂等,第二次语义确定
- *   6. kill 竞态:对已 exited 的 task stop → 幂等成功(不再发信号)
- *   7. 落盘 IO 失败:registry save/load 遇 fs 错误 → io_failure(typed)
+ * Covers the boundary classes required by the acceptance list (no real child
+ * processes; fake spawn factory):
+ *   1. happy path: fake spawn -> spawn returns {task_id, log_path} -> registry
+ *      json reads back identically (stdout/stderr flow into the log)
+ *   2. log tail read: oversized log returns only the tail window, with status/exitCode
+ *   3. empty task_id -> empty_task_id (typed)
+ *   4. unknown task_id -> task_not_found (typed)
+ *   5. concurrent duplicate: two parallel stops of one task -> idempotent, second call deterministic
+ *   6. kill race: stop on an already-exited task -> idempotent success (no further signals)
+ *   7. persistence IO failure: registry save/load fs errors -> io_failure (typed)
  *
- * fake ChildProcess 构造沿用 tests/subagent/manager.test.ts 先例:
- * EventEmitter + PassThrough stdin/stdout/stderr + kill spy。
- * registry / log 落盘全部走真实 fs(mkdtemp temp dir,afterAll 清理)。
+ * Fake ChildProcess follows the precedent in tests/subagent/manager.test.ts:
+ * EventEmitter + PassThrough stdin/stdout/stderr + kill spy.
+ * Registry / log persistence uses the real fs (mkdtemp dir, cleaned in afterAll).
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
@@ -35,7 +36,7 @@ import { renderTaskError } from "../../../src/harness/background/registry.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
 import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 
-// ── fake ChildProcess 工厂(沿用 subagent/manager.test.ts 先例)─────────────────
+// ── fake ChildProcess factory (same shape as subagent/manager.test.ts) ─────────
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -65,7 +66,7 @@ function makeFakeChild(pid = 12345): FakeChild {
   }) as unknown as FakeChild;
 }
 
-// ── 会话级 temp 落盘根(registry/log 走真实 fs)───────────────────────────────
+// ── per-run temp root for real-fs registry/log persistence ─────────────────────
 
 const tempRoots: string[] = [];
 
@@ -90,11 +91,11 @@ async function makeManager(opts?: {
 }
 
 afterEach(() => {
-  // 清掉 stop 升级发出的兜底 timer(不 unref 时防悬挂)。
+  // Clear kill-fallback timers armed by stop escalation (they keep the loop alive if unref'd).
   vi.clearAllTimers();
 });
 
-// ── 1.正常路径 ─────────────────────────────────────────────────────────────────
+// ── 1. happy path ──────────────────────────────────────────────────────────────
 
 describe("BackgroundTaskManager 正常路径", () => {
   it("spawn 返回 {task_id, log_path},registry json 读回字段全对齐", async () => {
@@ -110,7 +111,7 @@ describe("BackgroundTaskManager 正常路径", () => {
     assert.equal(status.status, "running");
     assert.equal(status.task_id, res.task_id);
 
-    // 落盘 json 读回,字段全对齐
+    // Read back the persisted json; every field must match.
     const jsonPath = res.log_path.replace(/\.log$/, ".json");
     const raw = await fs.readFile(jsonPath, "utf8");
     const rec = JSON.parse(raw) as Record<string, unknown>;
@@ -131,15 +132,15 @@ describe("BackgroundTaskManager 正常路径", () => {
     const rec = JSON.parse(
       await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
     ) as { command: string };
-    // 无 recordCommand 字段:manager 内部 `request.recordCommand ?? request.command`
-    // 取 command,落盘 command = request.command。既有手写调用方（spawn
-    // 不带 recordCommand）行为零回归。
+    // Without recordCommand: manager internally takes `request.recordCommand ?? request.command`,
+    // so the persisted command = request.command. Existing callers that spawn
+    // without recordCommand see zero regression.
     assert.equal(rec.command, "echo fallback");
   });
 
   it("recordCommand 存在 → 落盘 command = recordCommand,spawn 工厂仍收 command（真值不上盘）", async () => {
-    // 自定义 manager:spawn 工厂捕获 request,断言 spawn 工厂收真值、registry
-    // 落盘记录存占位符形态。#502 review-repair #406 roundtrip 契约。
+    // Custom manager: the spawn factory captures the request, proving the factory
+    // receives the real value while the registry record stores the placeholder form.
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-record-"));
     tempRoots.push(root);
     let capturedRequest:
@@ -165,13 +166,13 @@ describe("BackgroundTaskManager 正常路径", () => {
     });
     assert.equal(res.status, "ok");
 
-    // spawn 工厂只收 request.command(还原后真值);recordCommand 字段存在于
-    // request 但不参与 spawn 调用栈。
+    // The spawn factory receives only request.command (the restored real value);
+    // recordCommand exists on the request but never enters the spawn call stack.
     assert.ok(capturedRequest, "spawn factory must have captured request");
     assert.equal(capturedRequest!.command, 'echo "sk-real-secret"');
     assert.equal(capturedRequest!.recordCommand, 'echo "<<<SECRET_1>>>"');
 
-    // 落盘 JSON:command 字段 = 占位符形态,真值不上盘。
+    // Persisted JSON: command field = placeholder form; the real secret never reaches disk.
     const rec = JSON.parse(
       await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
     ) as { command: string };
@@ -192,7 +193,7 @@ describe("BackgroundTaskManager 正常路径", () => {
     await new Promise<void>((resolvePromise) => {
       spawned[0]!.stdout.write("tail", () => resolvePromise());
     });
-    // 无换行结尾:exit 时 flush 剩余 buffer
+    // No trailing newline: remaining buffer is flushed on exit.
     spawned[0]!.emit("exit", 0, null);
     const out = await manager.output(task_id);
     assert.equal(out.status, "exited");
@@ -226,7 +227,7 @@ describe("BackgroundTaskManager 正常路径", () => {
   });
 });
 
-// ── 2.日志尾部读 ───────────────────────────────────────────────────────────────
+// ── 2. log tail read ───────────────────────────────────────────────────────────
 
 describe("BackgroundTaskManager output 尾部读", () => {
   it("log 超过默认窗口只回尾部(<= limit)", async () => {
@@ -257,7 +258,7 @@ describe("BackgroundTaskManager output 尾部读", () => {
   });
 });
 
-// ── 3.空 task_id → empty_task_id ───────────────────────────────────────────────
+// ── 3. empty task_id → empty_task_id ───────────────────────────────────────────
 
 describe("BackgroundTaskManager typed-error:空 task_id", () => {
   it('stop("") → 抛出 kind=empty_task_id', async () => {
@@ -285,7 +286,7 @@ describe("BackgroundTaskManager typed-error:空 task_id", () => {
   });
 });
 
-// ── 4.未知 task_id → task_not_found ───────────────────────────────────────────
+// ── 4. unknown task_id → task_not_found ────────────────────────────────────────
 
 describe("BackgroundTaskManager typed-error:未知 task_id", () => {
   it('status("bg-unknown") → 抛出 kind=task_not_found', async () => {
@@ -313,7 +314,7 @@ describe("BackgroundTaskManager typed-error:未知 task_id", () => {
   });
 });
 
-// ── 5.并发重复 ─────────────────────────────────────────────────────────────────
+// ── 5. concurrent duplicates ───────────────────────────────────────────────────
 
 describe("BackgroundTaskManager 并发重复 stop", () => {
   it("同一 task 并发两次 stop → 都成功且 SIGTERM 次数有限", async () => {
@@ -323,15 +324,15 @@ describe("BackgroundTaskManager 并发重复 stop", () => {
       manager.stop(task_id),
       manager.stop(task_id),
     ]);
-    // 两次 stop 都成功(并发被 manager 内部串行化)
+    // Both stops succeed (the manager serializes them internally).
     assert.equal(results[0]?.status, "fulfilled");
     assert.equal(results[1]?.status, "fulfilled");
-    // INVARIANT:fake 不退出时,kill 调用次数 <= 2(每次 stop 一轮 SIGTERM)
+    // INVARIANT: while the fake never exits, kill calls <= 2 (one SIGTERM round per stop)
     const sigterms = spawned[0]!.kill.mock.calls.filter(
       (c) => c[0] === "SIGTERM"
     ).length;
     assert.ok(sigterms >= 1 && sigterms <= 2, `sigterm count=${sigterms}`);
-    // 收尾:fake 退出 → kill 兜底 timer 清理
+    // Cleanup: fake exits -> kill-fallback timer is cleared.
     spawned[0]!.emit("exit", null, "SIGTERM");
   });
 
@@ -345,7 +346,7 @@ describe("BackgroundTaskManager 并发重复 stop", () => {
   });
 });
 
-// ── 6.kill 竞态(对已终态任务 stop)───────────────────────────────────────────
+// ── 6. kill race (stop on a terminal task) ─────────────────────────────────────
 
 describe("BackgroundTaskManager kill 竞态", () => {
   it("对已 exited 的 task stop → 幂等成功(不再发任何信号)", async () => {
@@ -354,9 +355,9 @@ describe("BackgroundTaskManager kill 竞态", () => {
     spawned[0]!.emit("exit", 0, null);
     const st = await manager.status(task_id);
     assert.equal(st.status, "exited");
-    // 对已终态 stop:幂等成功,不 throw
+    // Stop on a terminal task: idempotent success, no throw
     await manager.stop(task_id);
-    // 不追加任何信号
+    // No additional signals sent
     assert.equal(spawned[0]!.kill.mock.calls.length, 0);
     const st2 = await manager.status(task_id);
     assert.equal(st2.status, "exited");
@@ -365,12 +366,12 @@ describe("BackgroundTaskManager kill 竞态", () => {
   it("对已 killed 的任务 stop → 幂等成功", async () => {
     const { manager, spawned } = await makeManager();
     const { task_id } = await manager.spawn({ command: "fast", cwd: "." });
-    // 先 stop:child 收到 SIGTERM 后以信号退出 → terminal 态
+    // First stop: child gets SIGTERM then exits by signal -> terminal state
     await manager.stop(task_id);
     spawned[0]!.emit("exit", null, "SIGTERM");
     const st = await manager.status(task_id);
     assert.equal(st.status, "killed");
-    // 再 stop:幂等成功,不再追加信号
+    // Second stop: idempotent success, no extra signal
     await manager.stop(task_id);
     const sigtermCount = spawned[0]!.kill.mock.calls.filter(
       (c) => c[0] === "SIGTERM"
@@ -379,7 +380,7 @@ describe("BackgroundTaskManager kill 竞态", () => {
   });
 });
 
-// ── 7.落盘 IO 失败 ────────────────────────────────────────────────────────────
+// ── 7. persistence IO failure ──────────────────────────────────────────────────
 
 describe("BackgroundTaskManager 落盘 IO 失败", () => {
   it("tasksDir 不可写(父路径是文件) → spawn 返回 spawn_error 且 error.kind=io_failure", async () => {
@@ -387,7 +388,7 @@ describe("BackgroundTaskManager 落盘 IO 失败", () => {
     tempRoots.push(root);
     const blocker = join(root, "blocker");
     await fsWriteFile(blocker, "file", "utf8");
-    const tasksDir = join(blocker, "tasks"); // 父路径是文件 → mkdir ENOTDIR
+    const tasksDir = join(blocker, "tasks"); // parent path is a file -> mkdir ENOTDIR
     const manager = createBackgroundTaskManager({
       tasksDir,
       spawn: async (_req) => makeFakeChild(1) as unknown as ChildProcess,
@@ -442,7 +443,7 @@ describe("BackgroundTaskManager 落盘 IO 失败", () => {
   });
 });
 
-// ── typed-error catch 契约:用 kind 判别,不用 message 字符串 ──────────────────
+// ── typed-error catch contract: discriminate by kind, never by message string ──
 
 describe("typed-error catch 契约(kind 判别)", () => {
   it("errors 带 kind + context 供判别渲染", async () => {
@@ -471,13 +472,14 @@ describe("typed-error catch 契约(kind 判别)", () => {
   });
 });
 
-// ── paths.ts 纯函数 ───────────────────────────────────────────────────────────
+// ── paths.ts pure functions ────────────────────────────────────────────────────
 
 describe("paths.resolveTasksDir", () => {
   it("返回 <pool>/projects/<slug>/tasks，与 resolveProjectSessionDir 严格同树", () => {
-    // ADR-0088:任务登记跟会话池同一项目树。公式/上限共享
-    // `src/shared/project-slug.ts`;断言改用跨函数等式,任一边漂移即失败
-    // (此前测试独立重算 sha1,公式漂移后两边仍各自"绿")。
+    // ADR-0088: task records share the session pool's project tree. The slug
+    // formula/cap are shared via `src/shared/project-slug.ts`; assert a
+    // cross-function equality so drift on either side fails (previously each
+    // test recomputed sha1 independently and stayed green while drifting).
     assert.equal(
       resolveTasksDir({ dataDir: "/home/x", projectIdentityRoot: "/repo" }),
       join(resolveProjectSessionDir("/home/x", "/repo"), "tasks")
@@ -485,8 +487,9 @@ describe("paths.resolveTasksDir", () => {
   });
 
   it("workspaceRoot 不再参与派生（多 checkout 共用一份账本）", () => {
-    // ADR-0088：throwaway checkout 不另开活账本 —— 同一 projectIdentityRoot
-    // 下换个 dataDir 才换池，换工作区不换。
+    // ADR-0088: throwaway checkouts don't open a second live ledger — within the
+    // same projectIdentityRoot, only a different dataDir switches pools; a
+    // different workspace does not.
     const a = resolveTasksDir({
       dataDir: "/pool-a",
       projectIdentityRoot: "/repo",
@@ -500,16 +503,17 @@ describe("paths.resolveTasksDir", () => {
   });
 
   it("边界回归:121–255 字符的 projectIdentityRoot 两边都接受(review 抓到的区间)", () => {
-    // 此前 paths.ts 用 MAX_ROOT_DETAIL_CHARS=120 上限,session-store.ts 用 255。
-    // 121–255 字符的根:会话文件夹已解析,登记表抛错 → 孤儿账本。
-    // 现在两边共享 MAX_PROJECT_IDENTITY_ROOT_BYTES=255,跨函数必须同接受。
-    const longRoot = "/" + "a".repeat(254); // 255 字符整
+    // paths.ts once capped at MAX_ROOT_DETAIL_CHARS=120 while session-store.ts
+    // allowed 255: roots of 121-255 chars resolved a session dir but threw in
+    // the registry, orphaning the ledger. Both now share
+    // MAX_PROJECT_IDENTITY_ROOT_BYTES=255, so both must accept the same input.
+    const longRoot = "/" + "a".repeat(254); // exactly 255 chars
     assert.equal(longRoot.length, 255);
     assert.doesNotThrow(() => resolveProjectSessionDir("/pool", longRoot));
     assert.doesNotThrow(() =>
       resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot })
     );
-    // 跨函数等式:同一个长根必须落到同一个 slug 兄弟目录。
+    // Cross-function equality: the same long root must land in the same slug sibling dir.
     assert.equal(
       resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot }),
       join(resolveProjectSessionDir("/pool", longRoot), "tasks")
@@ -517,7 +521,7 @@ describe("paths.resolveTasksDir", () => {
   });
 
   it("边界外:256 字符根两边一致拒绝(同一上限派生同一报错)", () => {
-    const tooLong = "/" + "a".repeat(255); // 256 字符
+    const tooLong = "/" + "a".repeat(255); // 256 chars
     assert.equal(tooLong.length, 256);
     assert.throws(() => resolveProjectSessionDir("/pool", tooLong));
     assert.throws(() =>
@@ -566,12 +570,13 @@ describe("registry 读回一致性(字段全对齐)", () => {
   });
 });
 
-// ── ADR-0097 / T7:egress 缝装配单测 ────────────────────────────────────────
+// ── ADR-0097: egress-seam assembly unit tests ────────────────────────────────
 //
-// 不用 vi.doMock(对静态导入不生效) —— 改用顶层 vi.mock,factory 内部读
-// 模块级 mutable 变量 nextCreateEgressImpl。测试在跑前重置这个变量。
-// 验证三件事:fence spec 透传、settle 触发 dispose、start 失败 →
-// fail-closed(无缝,任务仍起)。
+// vi.doMock does not affect static imports, so use a top-level vi.mock whose
+// factory reads the module-level mutable `nextCreateEgressImpl`; each test
+// resets that variable before running. Verifies three things: fence-spec
+// passthrough, dispose on settle, and start failure -> fail-closed (no seam,
+// task still spawns).
 
 const nextCreateEgressImpl: {
   current: () => Promise<unknown>;
@@ -646,11 +651,11 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
         allowlistSource: "persisted",
       },
     });
-    // fence request 收到 spec(spec shape 透传,非 deep clone)
+    // The fence request receives the spec (shape passthrough, not a deep clone)
     assert.equal(capturedSpec.length, 1);
     assert.equal(capturedSpec[0], fakeSession.spec);
     assert.equal(dispose.mock.calls.length, 0);
-    // child exit → settle → dispose 触发一次
+    // child exit -> settle -> dispose fires exactly once
     const child = spawnedChildren[0]!;
     child.emit("exit", 0, null);
     await new Promise<void>((r) => setImmediate(r));
@@ -658,9 +663,9 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
   });
 
   it("session.start 抛错 → 无 egressSpec 注入 fence,task 仍能正常 spawn (fail-closed)", async () => {
-    // fail-closed:createEgressSession 抛错(e.g. 中继依赖缺失) → manager
-    // 不挂 spec 到 fence request,fence 走纯断网(V1 baseline),任务仍
-    // 正常起。
+    // fail-closed: if createEgressSession throws (e.g. relay deps missing),
+    // the manager attaches no spec to the fence request, so the fence runs
+    // fully offline (V1 baseline) and the task still spawns normally.
     nextCreateEgressImpl.current = async () => {
       throw new Error("relay deps not found");
     };
@@ -691,7 +696,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
     });
     assert.equal(res.status, "ok");
     assert.equal(capturedSpec.length, 1);
-    // start 失败 → manager 不挂 spec 到 fence request
+    // start failed -> manager keeps the fence request spec-free
     assert.equal(capturedSpec[0], undefined);
   });
 });

@@ -1,17 +1,17 @@
 /**
- * createJsonlTraceService (T3, GH #64).
+ * createJsonlTraceService.
  *
- * 10 项契约 (spec §Testing Strategy + 判据 6/7/10/15):
- * 1. snake_case 转换 (camelCase TS 字段 → snake_case JSONL key)
- * 2. 单行合法 JSONL (每行 JSON.parse 成功, 无嵌入换行)
- * 3. parent_llm_call_id: null (parentLlmCallId=undefined → 字面 null)
- * 4. 写盘失败不抛 (always-throw writer → recordXxx 返回 undefined)
- * 5. console.warn 一次 (多次失败 → 只 warn 一次)
- * 6. 三方法返回 string | undefined (成功 string UUID, 失败 undefined)
- * 7. conversation_id 每行存在 (实例绑定)
- * 8. record_type 判别器 (llm_call / tool_call / turn)
- * 9. 真实 FS 测试 (mkdtempSync + appendFileSync 实际写盘 + statSync size > 0)
- * 10. 不 fsync (代码审查, 非测试)
+ * 10 contracts:
+ * 1. snake_case key conversion (camelCase TS fields → snake_case JSONL keys)
+ * 2. each line is valid single-line JSONL (JSON.parse per line, no embedded newlines)
+ * 3. parent_llm_call_id: null (parentLlmCallId=undefined → literal null)
+ * 4. write failures never throw (always-throw writer → recordXxx returns undefined)
+ * 5. console.warn fires once (repeated failures still warn only once)
+ * 6. all three record methods return string | undefined (UUID on success)
+ * 7. conversation_id present on every line (instance-bound)
+ * 8. record_type discriminator (llm_call / tool_call / turn)
+ * 9. real-FS coverage (mkdtempSync + actual appends + statSync size > 0)
+ * 10. no fsync (code-review fact, not a test)
  */
 
 import { describe, it, beforeEach, afterEach, vi } from "vitest";
@@ -238,9 +238,10 @@ describe("createJsonlTraceService — snake_case 转换", () => {
   });
 
   it("不递归进 content payload: messages role 内联 / arguments/result 内部 key 保持原样", async () => {
-    // T4 (SC10): llm_call 的 messages content 走 content 级 blob 引用，
-    // role 仍内联；camelToSnake 不递归的判据转移到 tool_call 的
-    // arguments / result（仍整体内联，内部 key 不转 snake_case）。
+    // llm_call message content goes to a content-level blob ref while role
+    // stays inline, so the "camelToSnake never recurses" judgement lives on
+    // tool_call arguments / result instead: fully inline, inner keys not
+    // snake_cased.
     const { lines, writer } = captureWriter();
     const svc = createJsonlTraceService({
       filePath: join(scratch, "trace.jsonl"),
@@ -459,8 +460,9 @@ describe("createJsonlTraceService — 写盘失败处理", () => {
   });
 
   it("filePath 被同名文件占据 (旧 ./trace.jsonl) → 构造不抛, recordXxx 返回 undefined 不炸 turn", async () => {
-    // 回归: 写侧默认曾是 ./trace.jsonl 单文件; T2 目录语义后 mkdirSync 撞旧文件
-    // EEXIST 曾在构造期抛出打挂 TUI turn。
+    // Regression: the writer default used to be a single ./trace.jsonl file;
+    // after the directory-semantics switch, mkdirSync hitting that legacy file
+    // threw EEXIST at construction time and killed a TUI turn.
     const legacyFile = join(scratch, "trace.jsonl");
     writeFileSync(legacyFile, '{"legacy":"single-file"}\n', "utf8");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -592,8 +594,8 @@ describe("createJsonlTraceService — 真实 FS (T2 每会话独立文件)", () 
     await b.recordLlmCall(SAMPLE_LLM);
     assert.equal(existsSync(join(scratch, "conv-a.jsonl")), true);
     assert.equal(existsSync(join(scratch, "conv-b.jsonl")), true);
-    // T4 (SC10): blob 唯一模式下共享 traceDir 的两个会话还共享 blobs/
-    // 内容寻址池（同一 SAMPLE_LLM content → 恰好 1 个 blob）。
+    // Blobs are the only mode, so two sessions sharing a traceDir also share
+    // the blobs/ content-addressed pool (same SAMPLE_LLM content → exactly 1 blob).
     const files = readdirSync(scratch).sort();
     assert.deepEqual(files, ["blobs", "conv-a.jsonl", "conv-b.jsonl"]);
     assert.equal(readdirSync(join(scratch, "blobs")).length, 1);
@@ -720,10 +722,9 @@ describe("createJsonlTraceService — recordSandboxCmd (T2, schema 就位埋点�
 });
 
 // ---------------------------------------------------------------------------
-// #406 T3 A4: 输出 mask 兜底 —— jsonl 无参 currentSecretValues() 覆盖 registry 值
-// ---------------------------------------------------------------------------
-// jsonl.ts:76 调用 currentSecretValues() 无参 → 经模块槽位（setActiveExtraSecrets）
-// 覆盖 registry 追踪的密钥值。写入行里的真值应被 mask 成 ***（沿用 mask 链路）。
+// Output-mask fallback: jsonl calls currentSecretValues() with no arguments,
+// so it picks up the registry values via the module slot (setActiveExtraSecrets).
+// Real secret values written into rows must be masked to *** through that chain.
 describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
   beforeEach(() => clearActiveExtraSecrets());
   afterEach(() => clearActiveExtraSecrets());
@@ -746,7 +747,7 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
       !content.includes("sk-registry-secret"),
       `行不应含 registry 真值（实际=${content}）`
     );
-    // T4 (SC10): 正文进了 blob —— mask 后的 *** 在 blob 内容里。
+    // The body went into a blob — the masked *** lives in the blob content.
     const blobsDir = join(scratch, "blobs");
     const blob = readFileSync(
       join(blobsDir, readdirSync(blobsDir)[0]!),
@@ -818,8 +819,8 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
 
       assert.equal(lines.length, 1);
       assert.equal(lines[0]!.includes("NEWSECRET"), false);
-      // T4 (SC10): mask 生效面在 blob 正文 —— 行内 sha ref 看不出 mask,
-      // blob 里应有 ***。
+      // Masking takes effect on the blob body — the inline sha ref reveals
+      // nothing, so the *** must be inside the blob.
       const blobsDir = join(scratch, "blobs");
       const blob = readFileSync(
         join(blobsDir, readdirSync(blobsDir)[0]!),
@@ -834,9 +835,10 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
 });
 
 describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () => {
-  // T4: blob 是唯一模式（SC9 开关退役），无条件启用，不再有 full 分支。
-  // 粒度 = content：messages[i] 仍是 {role, content} 两键，content 被
-  // {sha, bytes} 替换（ADR-0036 同日 Amendment 表 C）。
+  // Blob mode is the only mode (the on/off switch was retired): always on,
+  // no "full" branch. Granularity = content: messages[i] keeps the two keys
+  // {role, content}, with content replaced by {sha, bytes}
+  // (per ADR-0036 Amendment table C).
   interface ContentRef {
     sha: string;
     bytes: number;
@@ -868,9 +870,9 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     const messages = parseMessages(lines[0]!);
     assert.equal(messages.length, 1);
     const message = messages[0]!;
-    // SC10: role 内联在场 —— 读侧 messageRole() 源码零改动即返回正确 role。
+    // role stays inline — the reader's messageRole() works unchanged.
     assert.equal(message.role, "user");
-    // SC10: content 被替换为 {sha, bytes} ref。
+    // content is replaced by a {sha, bytes} ref.
     assert.deepEqual(Object.keys(message.content).sort(), ["bytes", "sha"]);
     assert.equal(typeof message.content.sha, "string");
     assert.equal(typeof message.content.bytes, "number");
@@ -895,7 +897,8 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     });
 
     const messages = parseMessages(lines[0]!);
-    // 形状 2 (字符串): blob 编码保留形状标记, 读侧还原为字符串不被误包成数组。
+    // Shape 2 (string): blob encoding keeps a shape tag so the reader restores
+    // a string, never wrongly wrapping it into an array.
     const strBlob = readFileSync(
       join(scratch, "blobs", messages[0]!.content.sha),
       "utf8"
@@ -903,7 +906,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     const strPayload = JSON.parse(strBlob) as { kind: string; v: unknown };
     assert.equal(strPayload.kind, "str");
     assert.equal(strPayload.v, "string shape");
-    // 形状 1 (block 数组): 整个数组一条 blob。
+    // Shape 1 (block array): the whole array is one blob.
     const blocksBlob = readFileSync(
       join(scratch, "blobs", messages[1]!.content.sha),
       "utf8"
@@ -914,7 +917,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     };
     assert.equal(blocksPayload.kind, "blocks");
     assert.deepEqual(blocksPayload.v, [{ type: "text", text: "block shape" }]);
-    // 两种形状 ref 字节各自匹配。
+    // Each shape's ref bytes match independently.
     assert.equal(
       messages[0]!.content.bytes,
       Buffer.byteLength(strBlob, "utf8")
@@ -978,9 +981,9 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
       const blobPath = join(scratch, "blobs", message.content.sha);
       assert.equal(existsSync(blobPath), true, "empty content has its sha");
     }
-    // 空串与空数组是不同内容 → 不同 sha、不同 blob。
+    // Empty string and empty array are different content → different sha, different blob.
     assert.notEqual(messages[0]!.content.sha, messages[1]!.content.sha);
-    // 行内不含空串/空数组的内联字面（内容寻址生效）。
+    // No inline ""/[] literals remain in the row (content addressing applied).
     assert.ok(!lines[0]!.includes('"content":[]'));
   });
 
@@ -1011,7 +1014,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
         createHash("sha256").update(blob, "utf8").digest("hex")
       );
       assert.equal(ref.bytes, Buffer.byteLength(blob, "utf8"));
-      // 行内也不含 secret。
+      // The row also contains no secret.
       assert.equal(lines[0]!.includes("blob-secret"), false);
     } finally {
       clearActiveExtraSecrets();
@@ -1087,7 +1090,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     ]);
     assert.ok(typeof results[0] === "string");
     assert.ok(typeof results[1] === "string");
-    // 同一 traceDir → 同一 blobs/ 目录, 恰好 1 个文件, 内容完整可解析。
+    // Same traceDir → same blobs/ directory, exactly 1 file, fully parseable.
     const blobsDir = join(scratch, "blobs");
     const files = readdirSync(blobsDir);
     assert.equal(files.length, 1);
@@ -1110,10 +1113,11 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
           messages: [{ role: "user", content: "blob-secret" }],
         });
 
-        // (iii) recordLlmCall 返回 undefined 而不 throw (ADR-0003 D13)。
+        // (iii) recordLlmCall returns undefined instead of throwing (ADR-0003 D13).
         assert.equal(result, undefined);
 
-        // trace 文件不存在 → (i) 该 llm_call_id 零行 + (ii) 无任何内联全量行。
+        // trace file absent → (i) zero rows for that llm_call_id and
+        // (ii) no fully-inlined rows anywhere.
         const traceFile = join(scratch, "conv-blob-failclosed.jsonl");
         assert.equal(
           existsSync(traceFile),
@@ -1121,17 +1125,19 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
           "fail-closed: zero rows including zero inline fallback rows"
         );
 
-        // (v) 服务存活: 同一实例继续记录后续事件 (turn) 正常返回 id。
+        // (v) service survives: the same instance keeps recording later events
+        // (turn) and returns an id normally.
         const turnId = await svc.recordTurn(SAMPLE_TURN);
         assert.ok(
           typeof turnId === "string",
           "service survives blob IO failure"
         );
 
-        // (iv) 同轮后续 tool_call 仍在场 (真实 FS 落盘) 且 parent_llm_call_id
-        // 为 null —— loop-engine 侧行为 (ADR-0003 D14) 由
-        // loop-engine-trace.test.ts "recordLlmCall returns undefined" 用例认证;
-        // 此处认证写侧照常接收并落盘 null 链。
+        // (iv) the later tool_call of the same turn is still present (real-FS
+        // write) with parent_llm_call_id = null — the loop-engine side
+        // (ADR-0003 D14) is certified by loop-engine-trace.test.ts
+        // "recordLlmCall returns undefined"; here we certify that the writer
+        // accepts and persists the null chain as usual.
         const toolSvc = createJsonlTraceService({
           filePath: scratch,
           conversationId: "conv-blob-failclosed",
@@ -1149,7 +1155,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
         assert.equal(toolRow["record_type"], "tool_call");
         assert.equal(toolRow["parent_llm_call_id"], null);
 
-        // 内层 blob IO 失败同样走 recordFailure warn-once。
+        // Inner blob IO failures also route through recordFailure warn-once.
         assert.ok(warnSpy.mock.calls.length >= 1);
       } finally {
         warnSpy.mockRestore();
@@ -1161,13 +1167,14 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
 });
 
 // ---------------------------------------------------------------------------
-// review-fix (M4): file-mode (`traceFilePath`) 直接 unit test。T5 起主会话与
-// per-agent 落点都收敛到 file-mode,但此前只被 manager / worker 的间接测试覆
-// 盖 —— 这里把互斥合约 (jsonl.ts 工厂) 直接钉死:
-//   1. file-mode 落点 = traceFilePath 本身 (不再拼 <dir>/<convId>.jsonl);
-//   2. 双键同传 fail-loud;
-//   3. 双键同缺 fail-loud;
-//   4. 目录模式 rotation 不作用于 file-mode。
+// Direct unit tests for file-mode (`traceFilePath`). Both the main session and
+// per-agent sinks converge on file-mode, but until now only manager/worker
+// indirect tests covered it — this pins the mutual-exclusion contract of the
+// jsonl.ts factory:
+//   1. file-mode sink = traceFilePath itself (no <dir>/<convId>.jsonl join);
+//   2. passing both keys fails loud;
+//   3. passing neither key fails loud;
+//   4. directory-mode rotation never applies to file-mode.
 // ---------------------------------------------------------------------------
 
 describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", () => {
@@ -1187,7 +1194,7 @@ describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", (
       >;
       assert.equal(line["conversation_id"], "fixed-id");
       assert.equal(line["record_type"], "tool_call");
-      // 绝不产生 <dir>/<convId>.jsonl 目录模式形状的额外文件。
+      // Must never produce extra files shaped like directory mode (<dir>/<convId>.jsonl).
       assert.equal(existsSync(join(dir, "subagents", "fixed-id.jsonl")), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1223,9 +1230,9 @@ describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", (
       const svc = createJsonlTraceService({
         traceFilePath: target,
         conversationId: "rot",
-        // 目录模式下的保守上限 (rotation.ts 默认 5MB) —— 用极小值证明
-        // file-mode 根本不进 maybeRotate 分支: 若轮转生效,首次写入就会
-        // 产出 trace.1.jsonl。
+        // Conservative cap for directory mode (rotation.ts default 5MB) —
+        // the tiny value proves file-mode never enters maybeRotate: if rotation
+        // applied, the first write would already produce trace.1.jsonl.
         rotation: { maxFileBytes: 1 },
       });
       await svc.recordToolCall(SAMPLE_TOOL);

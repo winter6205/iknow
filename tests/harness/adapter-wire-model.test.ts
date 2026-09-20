@@ -1,15 +1,17 @@
 /**
- * ADR-0094 T1 / spec SC1-SC3, SC7：`createAdapterFromEnv` 的 wire-model 解析。
+ * ADR-0094: wire-model resolution in `createAdapterFromEnv`.
  *
- * 物理世界 = Anthropic SDK 请求 body 的 `model` 字段 = providers.models[].id
- * （不含 provider 前缀）。本文件用本地 capture server 走**真实 SDK 请求**，
- * 拿到 wire 上的 `model`，黑盒证明三个装配点（build-engine / thinking-override /
- * subagent worker）只把路由 ID 的尾段（首个 `/` 之后）放上 wire，provider id
- * 不出现在 wire 上。
+ * Ground truth = the `model` field of the Anthropic SDK request body, which
+ * must equal providers.models[].id (no provider prefix). This file sends real
+ * SDK requests through a local capture server and asserts on the wire `model`:
+ * all three assembly points (build-engine / thinking-override / subagent
+ * worker) put only the route ID's tail (after the first `/`) on the wire;
+ * the provider id never appears there.
  *
- * 装配点的 unit / type sanity 测已在 `tests/subagent/worker.test.ts` D 段覆盖；
- * worker 走同一个 `wireModelFromRoute` SSOT，本文件选 build-engine 当
- * 代表性 wire 观测面。
+ * Unit/type sanity for the worker assembly is covered in
+ * `tests/subagent/worker.test.ts`; the worker shares the same
+ * `wireModelFromRoute` SSOT, so build-engine serves as the representative
+ * wire observation surface here.
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -22,7 +24,7 @@ import {
   type HttpCapture,
 } from "../_helpers/http-capture.ts";
 
-/** 与生产同形的 IknowEnv 字面（model / baseUrl / apiKey 是本文件唯一参与字段）。 */
+/** IknowEnv literal shaped like production; model / baseUrl / apiKey are the only fields this file asserts on. */
 function makeEnv(opts: {
   readonly baseUrl: string;
   readonly model: string;
@@ -51,7 +53,7 @@ function makeEnv(opts: {
   };
 }
 
-/** 走一次真实 adapter 请求（非流式臂；state.messages 空是合法请求）。 */
+/** Drive one real adapter request (non-streaming arm; empty state.messages is a valid request). */
 async function stepOnce(adapter: LoopAdapter): Promise<void> {
   await adapter.step(
     { messages: [], turnCount: 0 } as Parameters<LoopAdapter["step"]>[0],

@@ -1,24 +1,27 @@
 /**
- * build-engine bash factory 接线 (ADR-0092)。
+ * buildHarnessEngine bash-factory wiring (ADR-0092).
  *
- * 取代 T4 的 installRoot 透传断言:闭世界读白名单随全局档退役 ——
- * `--bind / /` 让项目工具链本就可见,引擎两处 createDefaultAciRegistry
- * 不再把 `sessionRoots.installRoot` 送进 bash 工厂。installRoot 仍保留为
- * worker bootstrap(tsx loader)的锚,但那不经 bash 工厂。
+ * Replaces the old installRoot pass-through assertion: the closed-world read
+ * whitelist was retired with the global tier, so `--bind / /` already exposes
+ * the project toolchain and neither createDefaultAciRegistry call feeds
+ * `sessionRoots.installRoot` into the bash factory. installRoot remains the
+ * worker-bootstrap (tsx loader) anchor, but that path never goes through the
+ * bash factory.
  *
- * 仍然真实的命题:两处构造点(chat 首次 / ask 路径)都向 bash 工厂透传
- * liveTaskRoot,且不透传任何 installRoot 选项。
+ * Still-true proposition: both construction points (chat first / ask path)
+ * thread liveTaskRoot to the bash factory and pass no installRoot option.
  *
- * 手法:module-mock bash.js(registry 的 named import 落到 spy;registry 本体
- * 保持真实,与 tests/harness/aci/registry-workspace-root.test.ts 同款),
- * buildHarnessEngine 走真实装配。
+ * Technique: module-mock bash.js so the registry's named import resolves to
+ * the spy while the registry itself stays real (same pattern as
+ * tests/harness/aci/registry-workspace-root.test.ts); buildHarnessEngine runs
+ * the real assembly.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// registry.ts 的 named import 在 load 时解析到本 spy;其余工厂保持真实。
+// registry.ts's named import resolves to this spy at load time; all other factories stay real.
 vi.mock("../../src/harness/aci/tools/bash.js", () => ({
   createBashTool: vi.fn(() => ({
     name: "bash",
@@ -92,7 +95,7 @@ afterEach(async () => {
   );
 });
 
-/** bash 工厂调用里属于引擎构造点(registry 会透传 liveTaskRoot)的那部分。 */
+/** The bash-factory calls belonging to engine construction points (the registry threads liveTaskRoot through). */
 function engineBashCalls(): Array<{ opts: Record<string, unknown> }> {
   return vi
     .mocked(createBashTool)
@@ -130,8 +133,8 @@ async function buildChat(opts: BuildChatOpts): Promise<BuiltEngine> {
     cwd: productRoot,
     workspaceRoot,
     productRoot,
-    // 本文件验 bash 工厂接线,不验溢出退场 / 索引降档(专测见
-    // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+    // This file verifies bash factory wiring, not tool overflow or index
+    // demotion (dedicated tests: build-engine-tool-overflow.test.ts, disclosure-index-align/).
     skipCountTokens: true,
     ...(opts.installRoot !== undefined
       ? { installRoot: opts.installRoot }
@@ -173,7 +176,7 @@ describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
       workspaceRoot: root,
       productRoot: root,
       installRoot: INSTALL,
-      // 同上:验 bash 工厂接线,不验溢出 / 索引降档。
+      // Same as above: verifies bash factory wiring, not overflow or index demotion.
       skipCountTokens: true,
     });
     const calls = engineBashCalls();
@@ -185,10 +188,11 @@ describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
   });
 
   it("threads the resolved userHome as homeRoot to the bash factory (ADR-0092 SC11)", async () => {
-    // 工作区档 home ro-bind 的源端必须是本层 resolve 的 `userHome`
-    // (opts.userHome ?? homedir())—— 否则 `userHome` 测试缝只改 settings /
-    // persona / state,却改不动围栏的 home ro-bind 源端,围栏会挂到真实用户
-    // home 上。断言:工厂收到的 homeRoot 逐字等于传入的 userHome。
+    // The workspace-tier home ro-bind source must be the `userHome` resolved
+    // at this layer (opts.userHome ?? homedir()) — otherwise the `userHome`
+    // test seam would only move settings/persona/state while the fence's
+    // ro-bind source still pointed at the real user home. Assert: the
+    // homeRoot received by the factory equals the passed userHome verbatim.
     const productRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-home-"));
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "iknow-bash-wire-home-task-")
@@ -220,11 +224,13 @@ describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
   });
 
   it("threads the fsMode holder by identity, never a frozen snapshot (D2)", async () => {
-    // D2 batch snapshot 纪律:装配层只透传 holder 对象,handler 入口才
-    // `fsMode?.get()` 读一次 —— 运行期 `/config` 翻档必须对下一次 bash 调用
-    // 生效。若装配层在此处 `.get()` 求值成字符串(或另造快照),翻档就再也
-    // 到不了 bash 工厂。断言:工厂收到的 fsMode 是同一个 holder 对象,翻档后
-    // 它自己读到新值。
+    // Batch snapshot discipline: the assembly layer passes the holder object
+    // through; only the handler entry reads `fsMode?.get()` once — a runtime
+    // `/config` tier flip must take effect on the next bash call. If assembly
+    // evaluated `.get()` to a string here (or made its own snapshot), the
+    // flip could never reach the bash factory. Assert: the fsMode received by
+    // the factory is the same holder object, and after a flip it reads the
+    // new value.
     const productRoot = await mkdtemp(
       join(tmpdir(), "iknow-bash-wire-fsmode-")
     );

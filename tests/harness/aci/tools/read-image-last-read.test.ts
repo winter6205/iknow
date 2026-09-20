@@ -1,15 +1,21 @@
 /**
- * read_image 不入 last-read ledger（specs/read-image-vision.md SC10 / 假设 10）。
+ * read_image never enters the last-read ledger (specs/read-image-vision.md).
  *
- * 不变式：成功 `read_image` 不把 path 写入 last-read ledger —— read_image
- * 工厂在签名层面就不接 ledger，本测试用真实 ledger host 锁住这一产品决定：
- *   - 读图后 host 不产生任何会话桶，图 path 查表为空；
- *   - 读过图不改变无关文本文件的 write_file 闸行为（先 read_file 文本入账 →
- *     read_image 图 → write_file 该文本仍放行）；
- *   - 读过图的 png 覆写仍被拒——本工具不入账，闸对图 path 恒 fail-closed。
+ * Invariant: a successful `read_image` does not write its path into the
+ * last-read ledger — the read_image factory does not even accept a ledger at
+ * the signature level; this test pins that product decision against a real
+ * ledger host:
+ *   - after an image read the host has produced no session bucket at all and
+ *     the image path looks up empty;
+ *   - reading an image does not change write_file gate behavior for unrelated
+ *     text files (read_file the text first to register it → read_image the
+ *     image → write_file on that text still passes);
+ *   - overwriting a png that was read is still rejected — the tool registers
+ *     nothing, so the gate stays fail-closed for image paths.
  *
- * 账本 host 走真实实现（`createLastReadLedgerHost`），入账用真实 read_file
- * handler（样板同 write-file-last-read.test.ts）—— 不 stub 账本。
+ * The ledger host is the real implementation (`createLastReadLedgerHost`)
+ * and registration uses the real read_file handler (same scaffolding as
+ * write-file-last-read.test.ts) — no ledger stubs.
  */
 
 import assert from "node:assert/strict";
@@ -42,7 +48,8 @@ afterEach(async () => {
   );
 });
 
-// 真实 PNG 魔数（read-image.test.ts 同形状），保证 handler 成功臂入账判定成立。
+// Real PNG magic bytes (same shape as read-image.test.ts) so the handler's
+// success path is genuinely reached.
 const PNG_BYTES = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03,
 ]);
@@ -54,8 +61,9 @@ describe("read_image — SC10 不入 last-read ledger", () => {
     await writeFile(png, PNG_BYTES);
 
     const ledger = createLastReadLedgerHost();
-    // read_image 工厂签名不接 ledger；ctx 仍带 conversationId，证明不是
-    // 「因没传 id 才不入账」，而是路径本身不进表。
+    // The read_image factory takes no ledger; ctx still carries a
+    // conversationId to prove the path is not registered because it never
+    // enters the table, not because an id was missing.
     const block = (await createReadImageTool(root).handler(
       { path: "pic.png" },
       { conversationId: "conv-a" }
@@ -82,7 +90,7 @@ describe("read_image — SC10 不入 last-read ledger", () => {
       { conversationId: "conv-a" }
     );
 
-    // 无关文本文件的闸行为不因读过图而改变。
+    // Gate behavior on an unrelated text file is unchanged by the image read.
     const writer = createWriteFileTool(root, { lastReadLedger: ledger });
     await writer.handler(
       { path: "notes.txt", content: "updated text\n" },
@@ -90,7 +98,8 @@ describe("read_image — SC10 不入 last-read ledger", () => {
     );
     assert.equal(await readFile(text, "utf8"), "updated text\n");
 
-    // 图 path 覆写仍被拒：read_image 根本没入账，非空覆写闸 fail-closed。
+    // Overwriting the image path is still rejected: read_image registered
+    // nothing, so the non-empty-overwrite gate fails closed.
     await assert.rejects(
       () =>
         writer.handler(

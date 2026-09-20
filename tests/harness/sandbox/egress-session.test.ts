@@ -1,31 +1,37 @@
 /**
- * Tests for `egress/session.ts` — T4 egress session lifecycle（ADR-0107 换装后形态）。
+ * Tests for `egress/session.ts` — egress session lifecycle in its post-ADR-0107
+ * shape.
  *
- * 钉住的不变式（来自 ADR-0097「代理生命周期 / dispose 契约」+ spec §Ownership /
- * dispose contract + spec §Failure paths + specs/egress-ssh-bridge.md T1/T3 +
- * ADR-0107 §Decision 5）：
- *   - start 成功 → spec.env 含 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
- *     与 http_proxy / https_proxy / all_proxy / no_proxy 小写别名；
- *     代理 URL 嵌 auth userinfo（O1 清偿：宿主代理配了 proxyAuthToken，
- *     无 userinfo 的 URL 在沙箱内 CONNECT 必 407 死路）；
- *   - spec.unixSocketPath = 工厂返回路径，且代理 server **直接 listen 该
- *     unix socket**（ADR-0107：宿主无 socat 桥、无 TCP —— session 存续期
- *     socket 文件真实在场，dispose 后消失）；
- *   - spec.sandboxLocalPort = 沙箱内固定监听号（T1：解除宿主/沙箱同号巧合
- *     耦合）；
- *   - spec.relayAssetsDir = 自带中继资产目录（fence `--ro-bind` 目标）；
- *   - spec.innerBridgeScript = 逐字内层中继前导（`<node> <中继脚本> <sock>
- *     <port> &` + trap kill EXIT，换装对应旧 socat TCP-LISTEN 单桥形态）；
- *   - 中继产品依赖缺席（resolver 返 undefined）→ typed
- *     `EgressRelayUnavailableError`，指引是**本产品依赖**且**绝不含
- *     socat/apt 装包字样**（ADR-0107 SC13 换装对应验收）；
- *   - dispose 幂等：重复调用不抛、不报错；
- *   - 异常路径释放：resolver 缺席时 dispose 无副作用（无 session 可清理）；
- *   - 每 session token 独立（防宿主其他进程直连绕过 filter）。
+ * Pinned invariants (from ADR-0097's proxy lifecycle / dispose contract, the
+ * spec's ownership/dispose and failure-path sections, specs/egress-ssh-bridge.md,
+ * and ADR-0107 Decision 5):
+ *   - start succeeds → spec.env carries HTTP_PROXY / HTTPS_PROXY / ALL_PROXY /
+ *     NO_PROXY plus the lowercase aliases; the proxy URL embeds auth userinfo
+ *     (with proxyAuthToken configured, a userinfo-less URL would dead-end at
+ *     CONNECT with 407 inside the sandbox);
+ *   - spec.unixSocketPath = the factory-returned path and the proxy server
+ *     listens directly on that unix socket (ADR-0107: no host socat bridge, no
+ *     TCP — the socket file really exists while the session lives and disappears
+ *     after dispose);
+ *   - spec.sandboxLocalPort = the fixed in-sandbox listen port (breaking the
+ *     old host/sandbox same-port coincidence coupling);
+ *   - spec.relayAssetsDir = the bundled relay asset dir (the fence `--ro-bind` target);
+ *   - spec.innerBridgeScript = the verbatim inner relay preamble (`<node> <relay
+ *     script> <sock> <port> &` + trap kill EXIT), the rework counterpart of the
+ *     old single socat TCP-LISTEN bridge;
+ *   - relay product dependency missing (resolver returns undefined) → typed
+ *     `EgressRelayUnavailableError` whose guidance names **this product
+ *     dependency** and never mentions socat/apt installation (ADR-0107);
+ *   - dispose is idempotent: repeated calls neither throw nor error;
+ *   - failure-path release: with the resolver absent, dispose has no side
+ *     effects (nothing to clean up);
+ *   - one independent token per session (prevents other host processes from
+ *     bypassing the filter via direct connection).
  *
- * 注入策略：relayResolver / socketPathFactory / createHttpProxyServer 全部
- * 入参化，让本测试不依赖宿主 node 布局与资产落位；代理 server 真起（裸
- * node:http listen unix socket）。
+ * Injection strategy: relayResolver / socketPathFactory / createHttpProxyServer
+ * are all parameterized so the test depends on neither the host node layout nor
+ * asset placement; the proxy server is real (plain node:http listening on a
+ * unix socket).
  */
 
 import {
@@ -64,7 +70,7 @@ afterEach(() => {
   }
 });
 
-/** 固定假中继路径集 —— 单测不查宿主存在性（resolver seam 直给）。 */
+/** Fixed fake relay path set — unit tests never probe host existence (resolver seam given directly). */
 function fakeRelay(dir: string): EgressRelayPaths {
   const relayDir = join(dir, "vendor", "egress-relay");
   return {
@@ -75,7 +81,7 @@ function fakeRelay(dir: string): EgressRelayPaths {
   };
 }
 
-/** session 存续期内 unix socket 上真有一次可应答的代理连接（真 listen 证据）。 */
+/** While the session lives, the unix socket really answers one proxied request (proof of real listen). */
 function probeSocketReply(socketPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const sock = connect({ path: socketPath });
@@ -120,8 +126,9 @@ describe("createEgressSession — lifecycle", () => {
     expect(err).toBeInstanceOf(EgressRelayUnavailableError);
     const e = err as EgressRelayUnavailableError;
     expect(e.detail).toContain("egress relay");
-    // ADR-0107 §Decision 5：指引 = 本产品依赖，**绝不含 socat/apt 装包字样**
-    // （旧「Install socat … apt install」文案随换装退役，反向钉死不回潮）。
+    // ADR-0107 Decision 5: guidance = this product dependency, and it must never
+    // mention socat/apt installation (the old "Install socat … apt install" text
+    // retired with the rework; pinned in reverse so it cannot return).
     expect(e.message).toMatch(/iknow|install root/i);
     expect(e.message).not.toMatch(/socat/i);
     expect(e.message).not.toMatch(/\bapt\b/i);
@@ -140,26 +147,27 @@ describe("createEgressSession — lifecycle", () => {
       socketPathFactory: (id) => join(dir, `egress-${id}.sock`),
     });
     try {
-      // ADR-0107：宿主侧不再 spawn 任何桥进程 —— 代理 server 本体
-      // listen unix socket，session 存续期 socket 在场且可应答。
+      // ADR-0107: the host side spawns no bridge process at all — the proxy
+      // server itself listens on the unix socket, which exists and answers for
+      // the session's lifetime.
       expect(session.spec.unixSocketPath).toMatch(/\.sock$/);
       expect(existsSync(session.spec.unixSocketPath)).toBe(true);
       const reply = await probeSocketReply(session.spec.unixSocketPath);
-      // 无 Proxy-Authorization 的请求被上游 checkAuth 拒 → 状态行回来即
-      // 证明「裸 http Server 直接听在 unix socket 上」的换装形态成立。
+      // a request without Proxy-Authorization is rejected by the upstream
+      // checkAuth → getting a status line back proves the reworked shape: a bare
+      // http Server listening directly on the unix socket.
       expect(reply).toMatch(/^HTTP\/1\.[01] (403|407)/);
 
-      // spec 形状
-      // T1（O3 同号耦合解除）：sandboxLocalPort 是「沙箱内固定监听号」，
-      // 恒等于常量。
+      // spec shape: sandboxLocalPort is the fixed in-sandbox listen port (the
+      // host/sandbox same-port coupling is gone) and always equals the constant.
       expect(session.spec.sandboxLocalPort).toBe(SANDBOX_HTTP_PROXY_PORT);
       expect(SANDBOX_HTTP_PROXY_PORT).toBe(3128);
-      // 中继资产目录进 spec（fence ro-bind 消费面）。
+      // the relay assets dir enters the spec (consumed as the fence ro-bind target).
       expect(session.spec.relayAssetsDir).toBe(relay.relayDir);
 
-      // env 含 HTTP_PROXY 三键 + 小写别名 + NO_PROXY；URL 嵌 auth userinfo
-      // （O1 清偿：token = session 的 randomBytes(32) hex，经 checkAuth 的
-      // Basic 密码位校验；用户名固定 label）。
+      // env carries the proxy keys + lowercase aliases + NO_PROXY; the URL embeds
+      // auth userinfo (token = the session's randomBytes(32) hex, checked at the
+      // Basic password position by checkAuth; the username is a fixed label).
       const env = session.spec.env;
       expect(env.HTTP_PROXY).toMatch(
         /^http:\/\/iknow:[0-9a-f]{64}@127\.0\.0\.1:3128$/
@@ -172,18 +180,19 @@ describe("createEgressSession — lifecycle", () => {
       expect(env.https_proxy).toBe(env.HTTPS_PROXY);
       expect(env.no_proxy).toBe(env.NO_PROXY);
 
-      // T3（ADR-0107 新冻结形态 + review Low 引号统一）：GIT_SSH_COMMAND 的
-      // ProxyCommand = 自带 CONNECT 隧道件，token 不进 argv（从 HTTP_PROXY
-      // env 走）；node / 脚本路径逐一走 shellSingleQuote（与
-      // buildInnerBridgeScript 同策略），外层双引号由 git split_cmdline
-      // 剥除、内层单引号由 ssh ProxyCommand 的 /bin/sh 处理。
+      // GIT_SSH_COMMAND under ADR-0107's frozen form: ProxyCommand = the bundled
+      // CONNECT tunnel piece, token kept out of argv (carried via the HTTP_PROXY
+      // env); node / script paths each go through shellSingleQuote (same policy as
+      // buildInnerBridgeScript); git split_cmdline strips the outer double quotes
+      // and ssh ProxyCommand's /bin/sh handles the inner single quotes.
       expect(env.GIT_SSH_COMMAND).toMatch(
         /^ssh -F \/dev\/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand="'\/test-root\/bin\/node' '.+egress-http-connect\.mjs' %h %p"$/
       );
       expect(env.GIT_SSH_COMMAND).not.toMatch(/socat|proxyauth/i);
 
-      // 内层中继前导逐字形状：单桥（node 中继 3128 → unix socket）+ trap kill
-      // EXIT。不断言围栏内真监听（那是 probe:sandbox 端到端分支的职责）。
+      // verbatim shape of the inner relay preamble: single bridge (node relay on
+      // 3128 → unix socket) + trap kill EXIT. No assertion of real in-fence
+      // listening (that is the probe:sandbox end-to-end branch's job).
       expect(session.spec.innerBridgeScript).toBe(
         buildInnerBridgeScript(
           relay.nodePath,
@@ -196,10 +205,10 @@ describe("createEgressSession — lifecycle", () => {
       expect(session.spec.innerBridgeScript).toContain(
         'trap "kill %1 2>/dev/null; exit" EXIT'
       );
-      // 1080 / SOCKS 段已被操作员裁定摘出本分支（子弹 2），不得出现。
+      // The 1080/SOCKS stage was cut from this line by operator decision and must not appear.
       expect(session.spec.innerBridgeScript).not.toContain("1080");
 
-      // session id 是 16 hex chars
+      // the session id is 16 hex chars
       expect(session.id).toMatch(/^[0-9a-f]{16}$/);
     } finally {
       await session.dispose();
@@ -219,16 +228,16 @@ describe("createEgressSession — lifecycle", () => {
     });
     const sockPath = session.spec.unixSocketPath;
     expect(existsSync(sockPath)).toBe(true);
-    // 第一次 dispose 不抛 + 真收资源（server 关闭、socket 删除）
+    // first dispose does not throw and really reclaims resources (server closed, socket removed)
     await session.dispose();
     expect(existsSync(sockPath)).toBe(false);
-    // 第二、三次同样不抛（finally-safe）
+    // second and third calls likewise do not throw (finally-safe)
     await session.dispose();
     await session.dispose();
   });
 
   it("cleans up stale socket on startup (spec §Failure paths)", async () => {
-    // 预置一个 stale socket 文件 —— 模拟上次会话未释放。
+    // pre-place a stale socket file — simulating a previous session that never released it.
     const dir = scratchDir();
     const stalePath = join(dir, "egress-stale.sock");
     writeFileSync(stalePath, "");
@@ -240,11 +249,12 @@ describe("createEgressSession — lifecycle", () => {
         commandLabel: "test:stale",
       },
       relayResolver: () => fakeRelay(dir),
-      socketPathFactory: () => stalePath, // 注入固定路径（与 stale 一致）
+      socketPathFactory: () => stalePath, // fixed injected path (same as the stale file)
     });
     try {
-      // session 起来了即说明 stale 被清掉且 listen 成功占位（不抛 = 真换装
-      // 了 socket 文件 —— 旧空文件不存在监听语义）。
+      // the session coming up already proves the stale file was cleared and the
+      // listen took its place (no throw = the socket file was really replaced —
+      // the old empty file carried no listening semantics).
       expect(session.spec.unixSocketPath).toBe(stalePath);
       const reply = await probeSocketReply(stalePath);
       expect(reply).toMatch(/^HTTP\/1\.[01] /);
@@ -254,11 +264,12 @@ describe("createEgressSession — lifecycle", () => {
   });
 
   it("tightens the unix socket to 0600 after listen (local exposure hardening)", async () => {
-    // review 修复（安全 Medium）：socket 落共享 /tmp，node 默认 mode =
-    // 0777 & ~umask（常为 0755/0777），本地他用户可 connect。token 经
-    // bwrap --setenv argv 短暂全局可见（/proc cmdline，已知残余面，见
-    // session.ts 威胁模型注释），所以 socket 文件权限是 filter 旁路的
-    // **唯一有效防线** —— 必须收紧到仅 owner 可读写。
+    // the socket lands in shared /tmp and node's default mode is 0777 & ~umask
+    // (often 0755/0777), so other local users could connect. The token is briefly
+    // globally visible via bwrap --setenv argv (/proc cmdline; a known residual
+    // surface, see the threat-model note in session.ts), so the socket file mode
+    // is the only effective defense against filter bypass — it must be tightened
+    // to owner read/write only.
     const dir = scratchDir();
     const session = await createEgressSession({
       policy: {
@@ -278,8 +289,9 @@ describe("createEgressSession — lifecycle", () => {
   });
 
   it("generates a fresh token per session (isolation between concurrent sessions)", async () => {
-    // 仅观察 sandboxLocalPort + id + token（经 env URL 露出）不同；
-    // server 侧 proxyAuthToken 不经 spec 暴露，行为不变形。
+    // only observe that sandboxLocalPort + id + token (surfaced via the env URL)
+    // differ; the server-side proxyAuthToken is not exposed through spec, so no
+    // behavior is distorted.
     const dir = scratchDir();
     const session1: EgressSession = await createEgressSession({
       policy: {
@@ -304,8 +316,8 @@ describe("createEgressSession — lifecycle", () => {
       expect(session1.spec.unixSocketPath).not.toBe(
         session2.spec.unixSocketPath
       );
-      // token 独立：两 session 的代理 URL userinfo 必不同（防跨 session
-      // 直连绕过 filter）。
+      // per-session token independence: the two proxy URLs' userinfo must differ
+      // (blocks cross-session direct-connection filter bypass).
       expect(new URL(session1.spec.env.HTTP_PROXY).password).not.toBe(
         new URL(session2.spec.env.HTTP_PROXY).password
       );
@@ -341,10 +353,11 @@ describe("buildProxyEnv", () => {
   });
 
   it("injects GIT_SSH_COMMAND verbatim per ADR-0107 re-skinned T3 form", () => {
-    // 逐字符 = specs/egress-ssh-bridge.md §T3 新冻结形态：`-F /dev/null`
-    // （assumption 4：围栏内 /etc/ssh/ssh_config.d 报 Bad owner or
-    // permissions）、mux 中和、ProxyCommand = 自带 CONNECT 隧道件（token
-    // 不进串，经 HTTP_PROXY env 同源）。
+    // character-exact = the frozen form in specs/egress-ssh-bridge.md: `-F /dev/null`
+    // (assumption 4: inside the fence, /etc/ssh/ssh_config.d errors "Bad owner or
+    // permissions"), mux neutralized, ProxyCommand = the bundled CONNECT tunnel
+    // piece (token stays out of the string, arriving via the HTTP_PROXY env from
+    // the same source).
     const env = buildProxyEnv(3128, "t0k3n", relay);
     expect(env.GIT_SSH_COMMAND).toBe(
       "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
@@ -353,8 +366,9 @@ describe("buildProxyEnv", () => {
   });
 
   it("proxy URLs track sandboxLocalPort (no hardcoded port drift)", () => {
-    // 旧形态的端口跟随钉子（ProxyCommand 内 proxyport=）随 ADR-0107 换装
-    // 移到三键 URL：端口漂移会让代理 env 与内层中继脱钩，同样必须红。
+    // the old form's port-following pin (proxyport= inside ProxyCommand) moved to
+    // the three URL keys with the ADR-0107 rework: port drift would decouple the
+    // proxy env from the inner relay just as badly, so it must still go red.
     const env = buildProxyEnv(3129, "t0k3n", relay);
     expect(env.HTTP_PROXY).toContain("@127.0.0.1:3129");
     expect(env.NO_PROXY).toBe("127.0.0.1,localhost");
@@ -373,10 +387,11 @@ describe("buildInnerBridgeScript", () => {
         "'/usr/bin/node' '/opt/iknow/vendor/egress-relay/egress-tcp-relay.mjs' " +
           "'/tmp/e-abc.sock' 3128 >/dev/null 2>&1 &",
         'trap "kill %1 2>/dev/null; exit" EXIT',
-        // 就绪轮询消化 node 中继冷启动竞态（T5 实测：裸 curl 首发
-        // ECONNREFUSED exit 7）；探测失败不拦截用户命令（fail-closed 保持）。
+        // the readiness poll absorbs the node relay's cold-start race (observed:
+        // the first bare curl hit ECONNREFUSED exit 7); a failed probe must not
+        // block the user's command (fail-closed is preserved).
         "for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/3128) " +
-          '2>/dev/null && break; sleep 0.1; done',
+          "2>/dev/null && break; sleep 0.1; done",
       ].join("\n")
     );
   });
@@ -398,7 +413,7 @@ describe("buildInnerBridgeScript", () => {
       "/opt/ev'il/egress-tcp-relay.mjs",
       "/tmp/it's-a-sock.sock"
     );
-    // 单引号包裹 + 内部 `'` 以 `'\''` 断开重开（POSIX 标准 escape 形态）。
+    // single-quote wrapping with inner `'` closed-and-reopened as `'\''` (the POSIX standard escape form).
     expect(script).toContain(`'/usr/bi'\\''n/node'`);
     expect(script).toContain(`'/opt/ev'\\''il/egress-tcp-relay.mjs'`);
     expect(script).toContain(`'/tmp/it'\\''s-a-sock.sock'`);

@@ -1,22 +1,24 @@
 /**
- * 449b 三级流集成测试 (B4-B9 共用追加文件, #449b evidence-first loop)。
+ * Three-stage flow integration tests for the evidence-first loop.
  *
- * B4 范围 (本文件首组用例): evidence-first 前级接线进 produceObservation 缝 —
- * 三态映射到既有闭环 Verdict:
- *   - EVIDENCE_SUFFICIENT → { verdict: "pass", exitCode: 0 } 零判官零重跑
- *     (SC2 / SC3: 即便 config.command 已配, runVerify spy 0 调用);
- *   - EVIDENCE_CONTRADICTED → true-failure 走既有真失败处置 (trend 放行继续 /
- *     maxRounds 截停), record.verdict = "true-failure", 不落 evidenceVerdict;
- *   - EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官 / 命令既有机制),
- *     record 落 evidenceVerdict="EVIDENCE_INSUFFICIENT" + gamingSignals (Postel)。
- *
- * 后续 bullet (B5 补跑信封 / B7 四态停法 / B9 只读复断言) 追加用例到此文件。
+ * First group: the evidence-first front stage wired into the
+ * produceObservation seam — the three checker states map onto the existing
+ * closed-loop Verdict:
+ *   - EVIDENCE_SUFFICIENT → { verdict: "pass", exitCode: 0 }, zero judge
+ *     spawns and zero reruns (even when config.command is set: runVerify spy
+ *     stays at 0 calls);
+ *   - EVIDENCE_CONTRADICTED → true-failure, handled by the existing
+ *     true-failure path (trend allows continue / maxRounds stops it),
+ *     record.verdict = "true-failure", no evidenceVerdict persisted;
+ *   - EVIDENCE_INSUFFICIENT → falls through to the original
+ *     produceObservation (judge / command mechanisms unchanged), record
+ *     carries evidenceVerdict="EVIDENCE_INSUFFICIENT" + gamingSignals (Postel).
  *
  * messages fixture: claimIndex is the messages index of the last assistant
  * with non-empty text (same backward scan as deriveFinalText), not verify
  * round. GREEN_FIRST keeps bash at index 0 and the claim at index 1 so the
  * window still includes that run. Fixtures that pin "evidence must live in
- * messages[0]" as B4 semantics belong in claim-window.test.ts (SC1).
+ * messages[0]" as evidence-first semantics belong in claim-window.test.ts.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -46,7 +48,7 @@ import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.js
 import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
 import { textBlock, toolUse, writeFile } from "./evidence-checker/_fixtures.js";
 
-/* ------------------------------ 测试替身 ------------------------------ */
+/* ------------------------------ test doubles ------------------------------ */
 
 const EMPTY_TRACE: LoopTrace = Object.freeze({
   turns: Object.freeze([]),
@@ -69,7 +71,7 @@ const EMPTY_TRACE: LoopTrace = Object.freeze({
 
 const VITEST_GREEN = " ✓ Tests  3 passed (3)\n";
 
-/** 构造 bash tool_use + tool_result 块对 (vitest 绿摘要, 退 0, 框架摘要命中)。 */
+/** bash tool_use + tool_result pair (vitest green summary, exit 0, framework summary matched). */
 function bashGreenBlocks(toolUseId: string): AnthropicContentBlock[] {
   return [
     toolUse(toolUseId, "npx vitest run"),
@@ -81,7 +83,7 @@ function bashGreenBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
-/** 构造 bash tool_use + tool_result 块对 (vitest 失败, 退 1, 不命中绿摘要)。 */
+/** bash tool_use + tool_result pair (vitest failure, exit 1, no green summary). */
 function bashFailBlocks(toolUseId: string): AnthropicContentBlock[] {
   return [
     toolUse(toolUseId, "npx vitest run"),
@@ -93,7 +95,7 @@ function bashFailBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
-/** 绿 bash (index 0) + assistant claim (index 1) → SUFFICIENT。 */
+/** Green bash (index 0) + assistant claim (index 1) → SUFFICIENT. */
 const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   {
     role: "assistant",
@@ -102,9 +104,10 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-/** 判官路径 probe 成功: write_file 到 pyproject.toml (B5 D2 标志文件) → probeVerifyCommand
- *  返回 "pytest"; 无 bash 测试证据 → INSUFFICIENT + probe 命中 → 触发补跑信封。
- *  pyproject.toml 非测试文件 → 无 CONTRADICTED、无 gamingSignals。 */
+/** Judge-path probe success: write_file to pyproject.toml (a probe marker file)
+ *  → probeVerifyCommand returns "pytest"; no bash test evidence → INSUFFICIENT +
+ *  probe hit → rerun envelope triggered. pyproject.toml is not a test file →
+ *  no CONTRADICTED, no gamingSignals. */
 const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
   {
     role: "assistant",
@@ -120,10 +123,10 @@ const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented but no tests")] },
 ];
 
-/** INSUFFICIENT + 有 run (exit≠0) + 软信号: bash fail + git commit --no-verify。
- *  bash 失败跑在 messageIndex 0 (claim assistant later → 计入 runs), hasContradiction=false
- *  (无 rm/write_file 清空测试文件), computeVerdict 因 exit 1 落 INSUFFICIENT,
- *  gamingSignals 经 collectGamingSignals 透传。 */
+/** INSUFFICIENT + a run (exit≠0) + soft signal: bash fail + git commit --no-verify.
+ *  The failed bash sits at messageIndex 0 (claim assistant later → counted in runs);
+ *  hasContradiction=false (no rm/write_file clearing test files); computeVerdict
+ *  lands INSUFFICIENT on exit 1; gamingSignals pass through via collectGamingSignals. */
 const INSUFFICIENT_WITH_SIGNAL_MESSAGES: AnthropicNativeMessage[] = [
   {
     role: "assistant",
@@ -143,11 +146,11 @@ const INSUFFICIENT_WITH_SIGNAL_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-/** CONTRADICTED: 绿 bash (index 0) + write_file 清空测试文件 (任意位置) →
- *  hasContradiction 二进制硬否决。checker reasons 归一化签名
- *  buildFailureSignature({ exitCode: 1, outputText: "test files cleared or
- *  removed (binary contradiction)", countRegex: undefined }) → 无 FAIL 行 →
- *  signature = "exit=1"。 */
+/** CONTRADICTED: green bash (index 0) + write_file clearing a test file (any
+ *  position) → hasContradiction binary hard veto. The checker reasons normalized
+ *  signature buildFailureSignature({ exitCode: 1, outputText: "test files
+ *  cleared or removed (binary contradiction)", countRegex: undefined }) → no
+ *  FAIL lines → signature = "exit=1". */
 const CONTRADICTED_MESSAGES: AnthropicNativeMessage[] = [
   {
     role: "assistant",
@@ -167,7 +170,7 @@ function makeNative(opts: {
   return { role: opts.role, content: [{ type: "text", text: opts.text }] };
 }
 
-/** stubRun: 确定性 run() 替身返回形状 (与 verify-loop.test.ts 同款)。 */
+/** Deterministic run() stub return shape (same as verify-loop.test.ts). */
 function stubRun(opts: {
   readonly text: string;
   readonly userText: string;
@@ -198,7 +201,8 @@ interface RecordedCall {
   readonly lastUserText: string | undefined;
 }
 
-/** 脚本化 runFn 替身: 逐次返回脚本文本, 记录每次调用的历史形状。 */
+/** Scripted runFn stub: returns script text call by call and records the
+ *  history shape (prior length, last user text) of each invocation. */
 function makeRecordingRunFn(
   script: ReadonlyArray<string>,
   opts: {
@@ -229,7 +233,7 @@ function makeRecordingRunFn(
   return { runFn, calls: () => calls };
 }
 
-/** 单条 RunOutcome (固定 messages; 单轮 verify-loop 适用)。 */
+/** A single RunOutcome with fixed messages (suits the single-round verify-loop). */
 function makeSingleOutcome(
   messages: AnthropicNativeMessage[],
   stopReason: RunResult["stopReason"] = "completed"
@@ -246,7 +250,8 @@ function makeSingleOutcome(
   };
 }
 
-/** 首轮返回固定 messages (含 evidence transcript); 后续轮走 priorMessages。 */
+/** First call returns the fixed messages (including the evidence transcript);
+ *  later calls continue from priorMessages. */
 function makeEvidenceRunFn(
   firstMessages: AnthropicNativeMessage[],
   opts: {
@@ -281,7 +286,7 @@ function makeEvidenceRunFn(
   return { runFn, calls: () => calls };
 }
 
-/** 判官 JSON 序列化进 status:"ok" envelope 的 result 字段。 */
+/** Judge JSON serialized into the result field of a status:"ok" envelope. */
 function okEnvelope(result: unknown): ClassifierEnvelope {
   return {
     status: "ok",
@@ -298,8 +303,9 @@ function passEnvelope(reason: string): ClassifierEnvelope {
   });
 }
 
-/** 构造一个调用 spy + 返回脚本的 runClassifier 替身 (与 classifier-loop 同款)。
- *  #449b B6: spy 额外捕获 evidenceContext (判官输入升级断言面)。 */
+/** runClassifier stub that spies on calls and returns scripted envelopes
+ *  (same as classifier-loop). The spy also captures evidenceContext, the
+ *  assertion surface for judge-input upgrades. */
 function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   readonly runClassifier: RunClassifierFn;
   readonly calls: () => ReadonlyArray<{
@@ -333,7 +339,8 @@ function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   return { runClassifier, calls: () => calls };
 }
 
-/** 脚本化 runVerify 替身: 逐次消费处理器, 记录命令串。耗尽即抛错。 */
+/** Scripted runVerify stub: consumes handlers one by one and records command
+ *  strings; throws once the script is exhausted. */
 function makeScriptedVerify(
   script: ReadonlyArray<
     () => { exitCode: number; stdout: string; stderr: string }
@@ -378,7 +385,7 @@ function defaultOptions(over: {
   };
 }
 
-/* ------------------------------ B4: evidence-first 三级流 ------------------------------ */
+/* ------------------------------ evidence-first three-stage flow ------------------------------ */
 
 describe("evidence-first three-stage flow", () => {
   it("SUFFICIENT: 零判官零重跑直接 PASS (rounds=1, runVerify spy 0 调用)", async () => {
@@ -404,7 +411,8 @@ describe("evidence-first three-stage flow", () => {
     assert.equal(out.records.length, 1);
     assert.equal(out.records[0]!.verdict, "pass");
     assert.equal(out.records[0]!.finalOutcome, "passed");
-    // Postel: SUFFICIENT 不落 evidenceVerdict / gamingSignals (仅 INSUFFICIENT 写盘)。
+    // Postel discipline: SUFFICIENT leaves evidenceVerdict / gamingSignals off
+    // the record (only INSUFFICIENT persists them).
     assert.equal(out.records[0]!.evidenceVerdict, undefined);
     assert.equal(out.records[0]!.gamingSignals, undefined);
   });
@@ -506,9 +514,10 @@ describe("evidence-first three-stage flow", () => {
   });
 
   it("CONTRADICTED: 真失败处置 (trend 放行 continue), record.verdict=true-failure 不落 evidenceVerdict", async () => {
-    // round 1: CONTRADICTED → true-failure → trend 兜底 continue → inject 信封 →
-    // runFn call 2 → stopReason=maxTurns → outcome "failed" (第二轮非 completed
-    // 原样透传, 不进 evidence-first 前级)。
+    // Round 1: CONTRADICTED → true-failure → trend lets it through (continue) →
+    // envelope injected → runFn call 2 → stopReason=maxTurns → outcome "failed"
+    // (a non-completed second round passes through verbatim and never enters the
+    // evidence-first prefix).
     const { runFn, calls } = makeEvidenceRunFn(CONTRADICTED_MESSAGES, {
       stopReasonFor: (call) => (call === 0 ? "completed" : "maxTurns"),
     });
@@ -551,7 +560,8 @@ describe("evidence-first three-stage flow", () => {
       undefined,
       "CONTRADICTED 不落 evidenceVerdict (Postel)"
     );
-    // 真失败同构: 修正轮注入 [VALIDATION FAILED] 信封 (call 1 的 lastUserText)。
+    // Same shape as a true failure: the correction round gets the
+    // [VALIDATION FAILED] envelope injected (call 1's lastUserText).
     assert.equal(
       calls()[1]!.lastUserText?.includes("[VALIDATION FAILED]"),
       true,
@@ -560,13 +570,14 @@ describe("evidence-first three-stage flow", () => {
   });
 });
 
-/* ------------------------------ B5: evidence-rerun envelope + 1-attempt cap ------------------------------ */
+/* ------------------------------ evidence-rerun envelope + 1-attempt cap ------------------------------ */
 
 describe("evidence-first rerun (B5)", () => {
   const RERUN_INSTRUCTION =
     "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
 
-  /** 逐次返回脚本文本消息的 runFn (记录每次 priorMessages), 供补跑轮次断言。 */
+  /** runFn returning scripted message arrays call by call (records each call's
+   *  priorMessages), for asserting the rerun round sequence. */
   function scriptedRunFn(script: ReadonlyArray<AnthropicNativeMessage[]>): {
     readonly runFn: VerifyLoopOptions["runFn"];
     readonly priors: () => ReadonlyArray<ReadonlyArray<AnthropicNativeMessage>>;
@@ -600,9 +611,10 @@ describe("evidence-first rerun (B5)", () => {
   }
 
   it("补跑 1 次上限: 判官路径 INSUFFICIENT + probe 成功 → 补跑一轮 → 仍 INSUFFICIENT → 落判官", async () => {
-    // 判官路径 (command="") + probeable fixture (pyproject.toml → "pytest")。
-    // call 0 (round 1) 与 call 1 (补跑轮, round 2) 都是 PROBE_OK: 两轮均
-    // INSUFFICIENT → 补跑 cap 用尽后落判官 (runClassifier 被调, exit 0 → pass)。
+    // Judge path (command="") plus a probeable fixture (pyproject.toml → "pytest").
+    // Call 0 (round 1) and call 1 (rerun round, round 2) both return PROBE_OK:
+    // INSUFFICIENT both times → once the rerun cap is spent, defer to the judge
+    // (runClassifier called once; exit 0 → pass).
     const { runFn, priors } = scriptedRunFn([
       PROBE_OK_MESSAGES,
       PROBE_OK_MESSAGES,
@@ -620,7 +632,8 @@ describe("evidence-first rerun (B5)", () => {
         config: { command: "" },
       })
     );
-    // round 1 INSUFFICIENT + probe "pytest" 命中 → 注入补跑信封 (末条), rerunAttempts=1。
+    // Round 1: INSUFFICIENT + probe hit "pytest" → rerun envelope injected as the
+    // last message, rerunAttempts=1.
     const round1Text = lastUserText(priors()[1]!);
     assert.equal(
       round1Text.startsWith("[VERIFY: rerun needed]"),
@@ -632,7 +645,7 @@ describe("evidence-first rerun (B5)", () => {
       true,
       "补跑命令来自 probe (pyproject.toml → pytest)\n---\n" + round1Text
     );
-    // round 2 仍 INSUFFICIENT + cap 用尽 → 落判官 (恰 1 次, pass → passed)。
+    // Round 2 still INSUFFICIENT + cap spent → defer to judge (exactly 1 call, pass → passed).
     assert.equal(classifierCalls().length, 1, "补跑用尽后落判官恰 1 次");
     assert.equal(verify.callCount(), 0, "判官路径零命令重跑");
     assert.equal(out.outcome, "passed");
@@ -648,8 +661,9 @@ describe("evidence-first rerun (B5)", () => {
   });
 
   it("补跑后 SUFFICIENT: 补跑轮绿证据 → PASS 零判官零重跑", async () => {
-    // 判官路径 (command="") + probeable fixture: round 1 PROBE_OK (INSUFFICIENT) →
-    // 补跑; round 2 绿 bash (SUFFICIENT) → PASS, 判官/命令都不触发。
+    // Judge path (command="") + probeable fixture: round 1 PROBE_OK (INSUFFICIENT)
+    // → rerun; round 2 green bash (SUFFICIENT) → PASS without triggering the
+    // judge or a command rerun.
     const { runFn } = scriptedRunFn([PROBE_OK_MESSAGES, GREEN_FIRST_MESSAGES]);
     const verify = makeScriptedVerify([
       () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
@@ -683,8 +697,9 @@ describe("evidence-first rerun (B5)", () => {
   });
 
   it("无命令 + probe 失败 → 不补跑直接落判官", async () => {
-    // round 1: 消息含 write_file 到非标志路径 src/foo.ts → collectProbeFiles 命中
-    // 0 标志文件 → probeVerifyCommand 返回 null → 无命令 → 不补跑 → 落判官。
+    // Round 1: a write_file to a non-marker path (src/foo.ts) → collectProbeFiles
+    // hits 0 marker files → probeVerifyCommand returns null → no command →
+    // skip the rerun and defer straight to the judge.
     const PROBE_FAIL_MESSAGES: AnthropicNativeMessage[] = [
       {
         role: "assistant",
@@ -718,18 +733,20 @@ describe("evidence-first rerun (B5)", () => {
   });
 
   it("补跑信封被 buildNextPriorMessages 滤除 (round 3 prior 不含 [VERIFY: rerun needed])", async () => {
-    // 判官路径 (command="") + probeable fixture: round 1 PROBE_OK (INSUFFICIENT) →
-    // 补跑信封; round 2 CONTRADICTED → true-failure → [VALIDATION FAILED] 信封;
-    // round 3 GREEN (SUFFICIENT) → PASS。round 3 的 priorMessages 必须滤除
-    // 补跑信封 (isInjectedEnvelope 扩展), 只留 [VALIDATION FAILED] 信封 ——
-    // 模型不得重复读到已失效的旧补跑上下文。
+    // Judge path (command="") + probeable fixture: round 1 PROBE_OK
+    // (INSUFFICIENT) → rerun envelope; round 2 CONTRADICTED → true-failure →
+    // [VALIDATION FAILED] envelope; round 3 GREEN (SUFFICIENT) → PASS. Round 3's
+    // priorMessages must filter the rerun envelope out (isInjectedEnvelope
+    // extension) and keep only the [VALIDATION FAILED] one — the model must not
+    // re-read stale rerun context that has already expired.
     const { runFn, priors } = scriptedRunFn([
       PROBE_OK_MESSAGES,
       CONTRADICTED_MESSAGES,
       GREEN_FIRST_MESSAGES,
     ]);
-    // runVerify 脚本化: 本用例全程短路 (补跑 / CONTRADICTED / SUFFICIENT), 永不
-    // 落到 produceCommandObservation; 即使误触也立即返回 exit 0 而不是真的 spawn。
+    // Scripted runVerify: every path in this case short-circuits (rerun /
+    // CONTRADICTED / SUFFICIENT) and never reaches produceCommandObservation;
+    // even an accidental hit returns exit 0 instead of really spawning.
     const verify = makeScriptedVerify([
       () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
     ]);
@@ -752,13 +769,14 @@ describe("evidence-first rerun (B5)", () => {
       0,
       "判官路径零 spawn (补跑/CONTRADICTED/SUFFICIENT 全短路)"
     );
-    // round 2 prior 携带补跑信封 (交付给 round 2 的证据核对)。
+    // Round 2's prior carries the rerun envelope (evidence handed to round 2).
     assert.equal(
       allText(priors()[1]!).includes("[VERIFY: rerun needed]"),
       true,
       "round 2 收到补跑信封 (供模型补证据)"
     );
-    // round 3 prior 必须滤除补跑信封, 且末条 = [VALIDATION FAILED] 修正信封。
+    // Round 3's prior must filter the rerun envelope out, and its last message
+    // must be the [VALIDATION FAILED] correction envelope.
     assert.equal(
       allText(priors()[2]!).includes("[VERIFY: rerun needed]"),
       false,
@@ -779,22 +797,25 @@ describe("evidence-first rerun (B5)", () => {
   });
 });
 
-/* ------------------------------ B6: judge evidence-aware input + record trace ------------------------------ */
+/* ------------------------------ judge evidence-aware input + record trace ------------------------------ */
 
 /**
- * #449b B6: 判官输入升级 (EvidenceContext 证据体检单进判官)。
- *   - INSUFFICIENT 落判官时 runClassifier spy 收到 evidenceContext:
- *       checkerVerdict === "EVIDENCE_INSUFFICIENT" + reasons 非空 + 任务
- *       字段首段 = userText 原样 (SC6 task 不重绑);
- *   - record.evidenceVerdict === "EVIDENCE_INSUFFICIENT" 落 trace (CapturingTrace
- *     镜像 verify-loop.test.ts makeCapturingTrace 模式)。
+ * Judge-input upgrade: the EvidenceContext health report enters the judge.
+ *   - When INSUFFICIENT defers to the judge, the runClassifier spy receives an
+ *     evidenceContext whose checkerVerdict === "EVIDENCE_INSUFFICIENT" and
+ *     reasons is non-empty, and whose first task segment is userText verbatim
+ *     (the task is not re-bound);
+ *   - record.evidenceVerdict === "EVIDENCE_INSUFFICIENT" lands in the trace
+ *     (CapturingTrace mirrors the makeCapturingTrace pattern in
+ *     verify-loop.test.ts).
  *
- * fixture: messages 仅含 user + assistant text, 无 bash → checkEvidence
- * INSUFFICIENT, 无可探测命令 → 直接落判官 (B5 rerun cap 不触发)。
+ * Fixture: messages contain only user + assistant text, no bash → checkEvidence
+ * says INSUFFICIENT and no command is probeable → defer straight to the judge
+ * (the rerun cap never triggers).
  */
 describe("evidence-aware judge input + record trace (#449b B6)", () => {
-  /** Capturing TraceService: 镜像 verify-loop.test.ts makeCapturingTrace 模式
-   *  (recordVerification 落盘, 其它方法 no-op)。 */
+  /** Capturing TraceService mirroring makeCapturingTrace in verify-loop.test.ts
+   *  (persists recordVerification, no-ops everything else). */
   function makeCapturingTrace(): {
     readonly trace: import("../../../src/harness/trace/index.ts").TraceService;
     readonly records: () => ReadonlyArray<
@@ -831,7 +852,8 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
   }
 
   it("INSUFFICIENT 落判官: spy 收到 evidenceContext (checkerVerdict=INSUFFICIENT + reasons 非空)", async () => {
-    // 判官路径 (command="") + 无 bash 无探测 → INSUFFICIENT → 直落判官。
+    // Judge path (command="") + no bash and nothing probeable → INSUFFICIENT →
+    // defer straight to the judge.
     const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) =>
       stubRun({
         text: "implemented but no test output",
@@ -880,7 +902,8 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
   });
 
   it("INSUFFICIENT 落判官 + 软信号: evidenceContext.reasons 含信号", async () => {
-    // bash 失败 (INSUFFICIENT_WITH_SIGNAL_MESSAGES) + 无探测 → 直落判官。
+    // bash failure (INSUFFICIENT_WITH_SIGNAL_MESSAGES) + nothing probeable →
+    // defer straight to the judge.
     const { runFn } = makeEvidenceRunFn(INSUFFICIENT_WITH_SIGNAL_MESSAGES);
     const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
       passEnvelope("weak evidence but pass"),
@@ -918,7 +941,8 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
       });
     const { runClassifier } = makeClassifierSpy([passEnvelope("pass")]);
     const capture = makeCapturingTrace();
-    // defaultOptions 是本地 helper, 旧签名不接 trace; B6 用例直接构造 options。
+    // defaultOptions is a local helper whose older signature takes no trace;
+    // this case builds options directly.
     const opts: VerifyLoopOptions = {
       runFn,
       userText: "implement goal",
@@ -941,12 +965,14 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
   });
 
   it("rerunAttempted 派生: 补跑一轮后落判官 → evidenceContext.rerunAttempted=true (消息扫描)", async () => {
-    // 判官路径 (command="") + probeable fixture (pyproject.toml → pytest):
-    // round 1 INSUFFICIENT + probe 命中 → 补跑; round 2 仍 INSUFFICIENT + cap
-    // 用尽 → 落判官。spy 收到的 evidenceContext.rerunAttempted=true
-    // (消息扫描 [VERIFY: rerun needed] 前缀派生)。
-    // makeEvidenceRunFn: 后续轮 messages = prior (含补跑信封) + user + assistant,
-    // 模拟生产 run() 把 priorMessages 并入 next turn 消息历史。
+    // Judge path (command="") + probeable fixture (pyproject.toml → pytest):
+    // round 1 INSUFFICIENT + probe hit → rerun; round 2 still INSUFFICIENT with
+    // the cap spent → defer to the judge. The evidenceContext the spy receives
+    // has rerunAttempted=true, derived by scanning messages for the
+    // [VERIFY: rerun needed] prefix.
+    // makeEvidenceRunFn: later rounds' messages = prior (rerun envelope included)
+    // + user + assistant, mimicking how production run() folds priorMessages
+    // into the next turn's history.
     const { runFn } = makeEvidenceRunFn(PROBE_OK_MESSAGES);
     const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
       passEnvelope("still no test evidence"),
@@ -972,24 +998,25 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
   });
 });
 
-/* ------------------------------ B7: 判官四态停法 (unverified/abort/pass) ------------------------------ */
+/* ------------------------------ judge four-state stop (unverified/abort/pass) ------------------------------ */
 
 /**
- * #449b B7: runClassifierOnce 四态映射 + unverified/abort 停法 (SC7/SC8)。
- *   - 判官 unverified → { verdict: "unstable", signature: "classifier-unverified",
+ * runClassifierOnce four-state mapping + how unverified/abort stop the loop.
+ *   - judge unverified → { verdict: "unstable", signature: "classifier-unverified",
  *     reason: "unverified" } → decideRoundAction stop → outcome=unstable,
- *     零信封注入 (runFn 恰 1 次, 无第 2 轮);
- *   - 判官 abort (schema 降级) / transport 错 → { verdict: "unstable",
+ *     zero envelope injection (runFn exactly 1 call, no round 2);
+ *   - judge abort (schema downgrade) / transport error → { verdict: "unstable",
  *     signature: "classifier-abort" / "classifier-transport-error",
- *     reason: "abort" } → outcome=unstable, 零信封注入 (reason 与 unverified
- *     区分落盘, SC7);
- *   - 判官 pass → outcome=passed + reason 缺席 (Postel, pass 不落 reason)。
+ *     reason: "abort" } → outcome=unstable, zero envelope injection (the
+ *     persisted reason distinguishes abort from unverified);
+ *   - judge pass → outcome=passed + no reason (Postel: pass never persists one).
  *
- * fixture: 判官路径 (command="") + 无 bash 无探测 (text-only) → INSUFFICIENT
- * 直落判官, 不触发补跑信封 (probeVerifyCommand([]) = null)。
+ * Fixture: judge path (command="") + text-only, no bash and nothing probeable
+ * → INSUFFICIENT defers straight to the judge, no rerun envelope
+ * (probeVerifyCommand([]) = null).
  */
 describe("judge four-state stop behavior (#449b B7)", () => {
-  /** text-only 判官路径 runFn: 每次调用都返回 completed (含 priorMessages)。 */
+  /** Text-only judge-path runFn: every call returns completed (records priorMessages). */
   function judgePathRunFn(): {
     readonly runFn: VerifyLoopOptions["runFn"];
     readonly calls: () => ReadonlyArray<RecordedCall>;
@@ -1050,9 +1077,11 @@ describe("judge four-state stop behavior (#449b B7)", () => {
       "unstable",
       "decideRoundAction stop finalOutcome"
     );
-    // 0 信封注入: unstable 走 stop, 不进 buildFailureEnvelope (decideRoundAction
-    // 只在 continue 调它); runFn 恰 1 次 = 无第 2 轮。首轮无 priorMessages →
-    // lastUserText 为 undefined (无任何注入), 用 ?? "" 归一后断言无信封文本。
+    // Zero envelope injection: unstable takes the stop path, so
+    // buildFailureEnvelope is never built (decideRoundAction only calls it on
+    // continue); runFn called exactly once = no round 2. With no priorMessages
+    // on the first round, lastUserText is undefined (nothing injected);
+    // normalize with ?? "" before asserting the absence of envelope text.
     assert.equal(calls().length, 1, "runFn 只调 1 次, 无修正/补跑轮");
     assert.equal(
       (calls()[0]!.lastUserText ?? "").includes("[VALIDATION FAILED]"),
@@ -1064,7 +1093,8 @@ describe("judge four-state stop behavior (#449b B7)", () => {
       false,
       "unverified 不注入补跑信封 (无 probe 命令, text-only fixture)"
     );
-    // 终局消息历史也无任何信封 (unstable 停法零注入, 与 classifier-loop SC5 同款断言面)。
+    // The final message history carries no envelope either (the unstable stop
+    // injects nothing, same assertion surface as classifier-loop.test.ts).
     const allUserText = out.result.messages
       .filter((m) => m.role === "user")
       .map((m) =>
@@ -1168,10 +1198,11 @@ describe("judge four-state stop behavior (#449b B7)", () => {
   });
 
   it("判官 unverified: evidenceVerdict 仍是 checker 态 EVIDENCE_INSUFFICIENT (INSUFFICIENT 轮 B4 合并, Postel)", async () => {
-    // unverified 是判官态, 不是 checker 态: evidenceVerdict 反映的是 B4 前级
-    // checkEvidence 的 INSUFFICIENT (判官只在 INSUFFICIENT 分支被调), 两者是
-    // 不同字段, 并存于 record —— judge reason=unverified + checker
-    // evidenceVerdict=INSUFFICIENT 互不覆盖。
+    // unverified is a judge state, not a checker state: evidenceVerdict reflects
+    // the upstream checkEvidence verdict (the judge is only ever called on the
+    // INSUFFICIENT branch). The two are distinct fields that coexist on the
+    // record — judge reason=unverified and checker
+    // evidenceVerdict=INSUFFICIENT never overwrite each other.
     const { runFn } = judgePathRunFn();
     const { runClassifier } = makeClassifierSpy([
       okEnvelope({ kind: "unverified", reason: "cannot decide" }),
@@ -1220,27 +1251,34 @@ describe("judge four-state stop behavior (#449b B7)", () => {
   });
 });
 
-/* ------------------------------ B9: SC9 只读判官 + 补跑 abort + 命令路径冻结 ------------------------------ */
+/* ------------------------------ read-only judge + abort during rerun + command-path freeze ------------------------------ */
 
 /**
- * #449b B9 三级流集成测试收口 (plan B9):
- *   - SC9 只读判官集成层复断言: runVerifyLoop → createRunClassifierFromManager
- *     → stubManager 捕获 spawn def —— 声明面 (disallowedTools 5 项 / systemPrompt
- *     零 evidenceContext 泄漏) 在真实装配路径下完整保留, task === userText
- *     (evidenceContext 不拼进 def.task);
- *   - 补跑中 abort: round 1 INSUFFICIENT + probe 命中 → rerun 分支第 2 次 runFn
- *     挂起 → 用户 abort → while 顶部检查点收敛 outcome=aborted, records 零伪造
- *     (rerun 轮未 produceObservation), runFn 恰 2 次 (无 stale 第三轮);
- *   - 命令路径冻结重申: SUFFICIENT + config.command 已配 → runVerify spy 0 +
- *     runClassifier spy 0 + outcome passed (入口级 1 例, B4 既有机制防回归)。
+ * Closing integration tests for the three-stage flow:
+ *   - Read-only judge re-asserted at the integration layer: runVerifyLoop →
+ *     createRunClassifierFromManager → stubManager captures the spawn def — the
+ *     declaration surface (derived disallowedTools / zero evidenceContext
+ *     leakage into systemPrompt) survives intact under the real assembly path,
+ *     and task === userText (evidenceContext is never concatenated into
+ *     def.task);
+ *   - abort during a rerun: round 1 INSUFFICIENT + probe hit → the rerun
+ *     branch's 2nd runFn call hangs → user aborts → the checkpoint at the top of
+ *     the while loop converges to outcome=aborted with zero fabricated records
+ *     (the rerun round never produced an observation), runFn called exactly
+ *     twice (no stale third round);
+ *   - command-path freeze re-stated: SUFFICIENT + a configured config.command →
+ *     runVerify spy 0 + runClassifier spy 0 + outcome passed (one entry-level
+ *     case guarding the existing short-circuit against regressions).
  */
 
 /**
- * #357 T2 — 判官 allow-list 推导真值（与 judge-input.test.ts 同源同公式）。
+ * Truth of the judge allow-list derivation (same source and formula as
+ * judge-input.test.ts).
  *
- * 判官白名单基线 = {read_file, grep, glob}（spec 357 Objective 2 「只许本地
- * 纯只读」）。fail-closed: deny = 全量面 − 白名单。加白名单 = 显式改白名单常量
- * + operator 拍板，不接受运行时配置。
+ * The judge whitelist baseline = {read_file, grep, glob}: the judge may only
+ * use local, purely read-only tools. fail-closed: deny = full toolset −
+ * whitelist. Widening the whitelist means explicitly editing the whitelist
+ * constant plus operator sign-off; runtime configuration is not accepted.
  */
 const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "read_file",
@@ -1248,13 +1286,13 @@ const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "glob",
 ]);
 
-/** 镜像 = ACI_TOOLSET_NAMES − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+/** Mirror = ACI_TOOLSET_NAMES − whitelist baseline (same derivation formula as run-classifier-adapter). */
 const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze(
   [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
 );
 
 describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
-  /** makeStubManager 镜像 (judge-input.test.ts): spawn 捕获 def, waitFor 回 pass 信封。 */
+  /** Mirror of the judge-input.test.ts stub manager: spawn captures the def, waitFor returns a pass envelope. */
   function makeCapturingManager(): {
     readonly manager: SubAgentManager;
     readonly captured: () => SubAgentDefinition | undefined;
@@ -1295,7 +1333,8 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
       abortTask() {
         return false;
       },
-      // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+      // The interface gained a read-only enumeration surface; the fake
+      // implements it to stay structurally compatible.
       listSubagents() {
         return [];
       },
@@ -1310,7 +1349,8 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
   }
 
   it("INSUFFICIENT 落判官: def 声明面完整保留 + task 二段 (SC9 集成层复断言)", async () => {
-    // 判官路径 (command="") + text-only (无 bash 无探测) → INSUFFICIENT 直落判官。
+    // Judge path (command="") + text-only (no bash, nothing probeable) →
+    // INSUFFICIENT defers straight to the judge.
     const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) =>
       stubRun({
         text: "implemented but no test output",
@@ -1334,9 +1374,10 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
     assert.equal(out.rounds, 1);
     const def = captured();
     assert.ok(def !== undefined, "判官 seam 必须 spawn");
-    // SC9 复断言: 声明面 disallowedTools = 全量面 − 白名单基线（#357 T2
-    // allow-list 推导）。实际工具面 = 468 plan 负责 (worker deny-list 裁剪);
-    // 本用例只复断言声明面完整保留。
+    // Re-assertion: declared disallowedTools = full toolset − whitelist
+    // baseline (allow-list derivation). Enforcing the real tool surface is the
+    // worker's deny-list pruning job; this case only re-asserts that the
+    // declaration surface survives intact.
     assert.ok(
       def.disallowedTools !== undefined,
       "JUDGE_ROLE 必须声明 disallowedTools"
@@ -1346,7 +1387,8 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
       [...JUDGE_DISALLOWED_TOOLS].sort(),
       "disallowedTools = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE (allow-list 推导)"
     );
-    // 白名单三件必须缺席（允许判官使用）— fail-closed 推导的护栏。
+    // The three whitelisted tools must be absent (the judge may use them) —
+    // the guardrail of the fail-closed derivation.
     for (const allowed of JUDGE_ALLOWED_BASELINE) {
       assert.ok(
         !def.disallowedTools!.includes(allowed),
@@ -1358,7 +1400,7 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
       !def.task.includes("checkerVerdict"),
       "task 不含 evidenceContext JSON"
     );
-    // SC9: systemPrompt 零 evidenceContext 泄漏 (声明面零改动)。
+    // Zero evidenceContext leakage into systemPrompt (declaration surface unchanged).
     assert.equal(typeof def.systemPrompt, "string");
     assert.ok(
       !def.systemPrompt!.includes("evidence_context"),
@@ -1382,8 +1424,9 @@ describe("补跑中 abort 无 stale 信封 (#449b B9)", () => {
     const runFnHook: VerifyLoopOptions["runFn"] = async (userText, runOpts) => {
       const call = calls().length;
       if (call === 1) {
-        // 补跑轮 (rerun branch 第 2 次 runFn) 挂起, 等待用户 abort 信号
-        // (mirror classifier-abort.test.ts 在飞挂起模式)。
+        // The rerun round (rerun branch's 2nd runFn call) hangs, waiting for
+        // the user's abort signal (mirrors the in-flight hang pattern of
+        // classifier-abort.test.ts).
         resolveRerunStarted();
         await new Promise<void>((resolve) => {
           if (runOpts?.signal?.aborted) {
@@ -1397,11 +1440,14 @@ describe("补跑中 abort 无 stale 信封 (#449b B9)", () => {
       }
       return runFn(userText, runOpts);
     };
-    // 判官路径 (command="" + runClassifier 在场选 classifier-loop body, B5 补跑
-    // 信封在 runVerifyLoopBody 内); 补跑轮在飞时 abort → 判官 seam 永不消费
-    // (abort 早于 round 2 produceObservation), spy 脚本保持未消费。
+    // Judge path (command="" + the presence of runClassifier selects the
+    // classifier-loop body, where the rerun envelope lives inside
+    // runVerifyLoopBody); aborting while the rerun round is in flight means the
+    // judge seam is never consumed (the abort arrives before round 2's
+    // produceObservation), so the spy's script stays unconsumed.
     const { runClassifier } = makeClassifierSpy([]);
-    // defaultOptions 不接 signal, 直接构造 options (B6 trace 前置例同款写法)。
+    // defaultOptions does not accept signal, so options are built directly
+    // (same style as the trace case above).
     const opts: VerifyLoopOptions = {
       runFn: runFnHook,
       userText: "implement goal",
@@ -1446,9 +1492,12 @@ describe("补跑中 abort 无 stale 信封 (#449b B9)", () => {
 
 describe("命令路径冻结复跑 (#449b B9)", () => {
   it("SUFFICIENT + config.command 已配 → runVerify spy 0 + runClassifier spy 0 + outcome passed (入口级)", async () => {
-    // B4 既有机制 (G3: 证据充分短路零重跑, 即便配 command) 的入口级复跑: 双 spy 0
-    // 一次断言齐, 防监管路径 (.command-./.classifier-.) 接线回归。B4 用例已覆盖
-    // 命令 / 判官两路各自 spy 0; 本条仅在 the-loop 入口合并重申。
+    // Entry-level re-run of an existing mechanism: sufficient evidence
+    // short-circuits to zero reruns even with command configured. Asserting both
+    // spies at 0 in one place guards the supervisor-path wiring
+    // (.command-./.classifier-.) against regressions. The command and judge
+    // paths each already have spy-0 coverage elsewhere; this case only
+    // re-asserts the joint at the-loop entry.
     const { runFn } = makeEvidenceRunFn(GREEN_FIRST_MESSAGES);
     const verify = makeScriptedVerify([
       () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),

@@ -1,18 +1,22 @@
 /**
- * rg argv 构造 + 语言类型词表单测（SC12「argv 构造」；契约 D4；SC10）。
+ * rg argv construction + language type-table unit tests.
  *
- * 锁的不变式：
- *   - 三种出法各自的 argv 形状（paths → `-l`；count → `--count`；
- *     content → `--line-number`）。
- *   - `--null` 常开（路径分隔符由 NUL 承担，见 rg-output.ts）。
- *   - `context` 只在 content 出法转成 `-C N`；`paths` / `count` 不带。
- *   - `glob` / `type` 与 `path` 并列生效（D4）。
- *   - 遍历语义与 Node 扫对齐：`--no-ignore` / `--hidden` / 两条排除 glob /
- *     `--max-filesize` / `--crlf`（D6 / SC9；取舍见 argv.ts 注释）。
- *   - **不给 rg 任何模式对齐开关**（ADR-0089）：`--engine=auto` 与
- *     `--no-unicode` 都不在 argv 里。两者都是「把 rg 掰向 JS」的杠杆 ——
- *     禁用是回归钉子，见对应用例。
- *   - 未知 `type` 是 typed 错误，且**文案与坏正则不同**（SC10）。
+ * Invariants locked:
+ *   - each output mode's argv shape (paths → `-l`; count → `--count`;
+ *     content → `--line-number`).
+ *   - `--null` always on (NUL carries the path delimiter, see rg-output.ts).
+ *   - `context` becomes `-C N` only in content mode; paths / count never
+ *     carry it.
+ *   - `glob` / `type` take effect alongside `path` (orthogonal narrowing).
+ *   - traversal semantics aligned with the Node scan: `--no-ignore` /
+ *     `--hidden` / two exclusion globs / `--max-filesize` / `--crlf`
+ *     (trade-offs documented in argv.ts's comments).
+ *   - **no pattern-alignment switches handed to rg** (ADR-0089): neither
+ *     `--engine=auto` nor `--no-unicode` appears in argv. Both were levers
+ *     for "bending rg toward JS" — their absence is a regression pin, see
+ *     the matching cases.
+ *   - an unknown `type` is a typed error whose **message differs from a bad
+ *     regex**'s.
  */
 
 import assert from "node:assert/strict";
@@ -46,7 +50,7 @@ function spec(overrides: Partial<QuerySpec> = {}): QuerySpec {
   };
 }
 
-/** 搜索路径按生产口径喂**相对**形态（cwd = workspace 根，见 rg-engine）。 */
+/** Search paths are fed in the **relative** production shape (cwd = workspace root, see rg-engine). */
 function argv(specOverrides: Partial<QuerySpec> = {}): string[] {
   return buildRgArgs(spec(specOverrides), ".", 2000);
 }
@@ -56,10 +60,10 @@ describe("buildRgArgs — 出法", () => {
     const args = argv({ output: "paths" });
 
     assert.ok(args.includes("-l"));
-    // 出法互斥：content / count 的旗标不得混入。
+    // Output modes are exclusive: content / count flags must not leak in.
     assert.equal(args.includes("--line-number"), false);
     assert.equal(args.includes("--count"), false);
-    // 尾部始终是 `-- <pattern> <path>`（路径按生产口径相对 workspace）。
+    // The tail is always `-- <pattern> <path>` (path relative to workspace per production convention).
     assert.deepEqual(args.slice(-3), ["--", "hit", "."]);
   });
 
@@ -72,13 +76,16 @@ describe("buildRgArgs — 出法", () => {
   });
 
   it("`--engine=auto` 不在 argv 里：引擎方言不由本工具切换（ADR-0089）", () => {
-    // 回归钉子。历史上这里常开 `--engine=auto`，好让 rg 在 Rust 默认引擎
-    // 编不过时退到 PCRE2、把接受集凑近 JS `RegExp`。ADR-0089 废掉了那条
-    // 「两条引擎同判」合同：rg 在场时匹配只出 rg，rg 自己编不过的 pattern
-    // 由 rg 以 rc=2 报出（handler 转 `search engine rejected the query`）；
-    // rg 缺席时 Node 用 JS `RegExp` 出结果，命中集允许与 rg 不同。
-    // `--engine=auto` 是那条已废对齐路的唯一开关 —— 它若回来，rg 路径会
-    // 重新悄悄换引擎，令同一 pattern 的接受与否取决于本工具而非 rg 自己。
+    // Regression pin. Historically `--engine=auto` was always on here so rg
+    // could drop to PCRE2 when the Rust default engine failed to compile,
+    // bending the accept set toward JS `RegExp`. ADR-0089 abolished that
+    // "both engines same verdict" contract: with rg present, matching comes
+    // only from rg, and patterns rg itself cannot compile are reported by rg
+    // with rc=2 (the handler maps them to `search engine rejected the
+    // query`); with rg absent, Node uses JS `RegExp` and the hit set may
+    // differ. `--engine=auto` is the sole switch of that retired alignment
+    // path — if it returns, the rg path silently swaps engines again and
+    // whether a pattern is accepted depends on this tool rather than rg itself.
     for (const output of ["content", "paths", "count"] as const) {
       assert.equal(
         argv({ output }).includes("--engine=auto"),
@@ -86,7 +93,8 @@ describe("buildRgArgs — 出法", () => {
         `${output} 不得带 --engine=auto`
       );
     }
-    // 任何 pattern 都不行，包括历史上靠它才收下的 look-around。
+    // No pattern may bring it back, including look-arounds historically
+    // accepted only thanks to it.
     for (const pattern of ["(?=hit)hit", "\\Z", "\\N", "\\h"]) {
       assert.equal(
         argv({ pattern }).includes("--engine=auto"),
@@ -97,15 +105,18 @@ describe("buildRgArgs — 出法", () => {
   });
 
   it("`--no-unicode` 不在 argv 里：不把 rg 的类语义掰成 ASCII（ADR-0089）", () => {
-    // 回归钉子。历史上这里按 `keepsUnicodeMode()` 给 `\d` / `\w` / `\b`
-    // 一类 pattern 加 `--no-unicode`，好让 rg 的 Unicode 词类退到 JS 的
-    // ASCII 口径。那是与 `--engine=auto` 同一种杠杆：拿 rg 的开关去凑两条
-    // 引擎的「一致」，代价是 rg 侧**正确的** Unicode 行为被改坏。
-    // 实测（rg 15.1.0，vendor 二进制）：`rg '\w'` 命中 `漢字`，
-    // `rg --no-unicode '\w'` 不命中；`rg '\d'` 命中 `٣٤`，加了开关不命中。
-    // ADR-0089 收窄合同后：rg 按自己的默认 Unicode 语义跑，Node 按 JS 语义
-    // 跑，命中集**允许不同**。这条开关若回来，rg 路径会重新被掰成 ASCII 方言，
-    // 同一 pattern 的命中集取决于本工具而非 rg 自己。
+    // Regression pin. Historically `--no-unicode` was added here per
+    // `keepsUnicodeMode()` for `\d` / `\w` / `\b`-style patterns so rg's
+    // Unicode classes degenerated to JS's ASCII measure. Same species of
+    // lever as `--engine=auto`: using rg's switches to fabricate
+    // "consistency" between the engines, at the cost of breaking rg's
+    // **correct** Unicode behavior. Measured (rg 15.1.0, vendored binary):
+    // `rg '\w'` matches CJK ideographs, `rg --no-unicode '\w'` does not;
+    // `rg '\d'` matches Arabic-Indic digits, with the switch it does not. After ADR-0089 narrowed the
+    // contract: rg runs its default Unicode semantics, Node runs JS
+    // semantics, and the hit sets are **allowed to differ**. If this switch
+    // returns, the rg path is bent back into an ASCII dialect and a
+    // pattern's hit set depends on this tool rather than rg itself.
     for (const output of ["content", "paths", "count"] as const) {
       assert.equal(
         argv({ output }).includes("--no-unicode"),
@@ -113,7 +124,8 @@ describe("buildRgArgs — 出法", () => {
         `${output} 不得带 --no-unicode`
       );
     }
-    // 任何 pattern 都不行 —— 包括历史上正是靠它才切过去的那些类。
+    // No pattern may bring it back — including the very classes historically
+    // switched through it.
     for (const pattern of ["\\d", "\\w+", "\\bfoo\\b", "[\\d]+", "hit"]) {
       assert.equal(
         argv({ pattern }).includes("--no-unicode"),
@@ -124,12 +136,16 @@ describe("buildRgArgs — 出法", () => {
   });
 
   it("rg 专有 pattern 原样透传：本层不改写、不转义、不预判 JS 合法性（ADR-0089）", () => {
-    // 回归钉子。rg 接受而 JS 拒绝的构造（PCRE2 命名组 / inline flag / `\p{L}`）
-    // 必须**逐字节**到达 rg：本层若替它们转义或改写，rg 收到的就不是用户给的
-    // 那条 pattern；`--engine=auto` 若回来，这些 pattern 又会被偷偷换引擎。
-    // 与「rg 路径不预判 JS 合法性」是同一合同的两道防线（另一道在 handler：
-    // 共享入口不再无条件 `compilePattern`）。尾部按生产口径是
-    // `-- <pattern> <path>` —— 断言 pattern 那一段逐字节等于输入。
+    // Regression pin. Constructs rg accepts but JS rejects (PCRE2 named
+    // groups / inline flags / `\p{L}`) must reach rg **byte for byte**: if
+    // this layer escaped or rewrote them, rg would not receive the user's
+    // pattern; if `--engine=auto` returned, these patterns would silently
+    // swap engines again. Together with "the rg path pre-judges no JS
+    // legality" this is the other line of defense for one contract (the
+    // other sits in the handler: the shared entry no longer calls
+    // `compilePattern` unconditionally). The tail is per production
+    // convention `-- <pattern> <path>` — assert the pattern segment is
+    // byte-identical to the input.
     for (const pattern of ["(?P<n>foo)", "(?i)abc", "\\p{L}"]) {
       const args = argv({ pattern });
       assert.equal(args.at(-3), "--", `${pattern} 应位于 -- 之后`);
@@ -144,8 +160,9 @@ describe("buildRgArgs — 出法", () => {
   });
 
   it("`--no-messages` 常开：文件级告警不升成整次查询失败", () => {
-    // 不可读的邻居文件让 rg 以 rc=2 收尾；没有这道开关，stderr 会被当成
-    // 「查询被拒」而整次抛错，而 Node 引擎只是跳过该文件（SC9）。
+    // An unreadable neighboring file makes rg exit with rc=2; without this
+    // flag stderr would be read as "query rejected" and fail the whole run,
+    // while the Node engine merely skips that file.
     for (const output of ["content", "paths", "count"] as const) {
       assert.ok(argv({ output }).includes("--no-messages"));
     }
@@ -155,11 +172,15 @@ describe("buildRgArgs — 出法", () => {
     const args = argv({ output: "content" });
 
     assert.deepEqual(args.slice(0, 2), ["--line-number", "--no-heading"]);
-    // 第一道闸交给 rg（否则整行 1MB 原样回传），但它的字节预算取
-    // `MAX_MATCH_LINE_COLUMNS × 4`（UTF-8 单字符最大宽度）—— 预算若等于
-    // code point 上限，`hit + 漢×1000`（3003 字节 / 1003 code point）会被 rg
-    // 截断并塞进它自己的省略标记，而投影层的 code point 闸认为没超限：两条
-    // 引擎对同一行给出不同字节数（D6/SC9）。断言从常量派生，不写死数字。
+    // The first gate is delegated to rg (otherwise a 1 MB line returns
+    // intact), but its byte budget is `MAX_MATCH_LINE_COLUMNS × 4` (max
+    // UTF-8 width per character) — at a budget equal to the code-point cap,
+    // `hit` + 1000 copies of one 3-byte CJK character (3003 bytes / 1003
+    // code points) would be truncated by
+    // rg with its own omission marker while the projection layer's
+    // code-point gate sees no overflow: the two engines would emit different
+    // byte counts for one line. The assertion derives from constants rather
+    // than hardcoding numbers.
     assert.ok(
       args.includes(
         `--max-columns=${String(
@@ -168,7 +189,8 @@ describe("buildRgArgs — 出法", () => {
       )
     );
     assert.ok(args.includes("--max-columns-preview"));
-    // 预算必须**严大于** code point 上限，否则 rg 会抢在权威闸之前动手。
+    // The budget must be **strictly greater** than the code-point cap, else
+    // rg acts before the authoritative gate.
     assert.ok(
       rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS) > MAX_MATCH_LINE_COLUMNS
     );
@@ -196,8 +218,9 @@ describe("buildRgArgs — 收窄（D4）", () => {
   it("glob → --glob <pattern>", () => {
     const args = argv({ glob: "*.ts" });
 
-    // 收窄旗标与引擎级 glob 并列出现（后者见 ignore 语义那组），
-    // 用户模式必须原样传递、不被挤压/改写。
+    // The narrowing flag sits alongside engine-level globs (the latter in the
+    // ignore-semantics group); the user pattern must pass through untouched,
+    // never squeezed or rewritten.
     assert.ok(args.includes("--glob"));
     assert.ok(args.includes("*.ts"));
     assert.equal(args[args.indexOf("--type")], undefined);
@@ -207,7 +230,8 @@ describe("buildRgArgs — 收窄（D4）", () => {
     const args = argv({ type: "ts" });
 
     assert.equal(args[args.indexOf("--type") + 1], "ts");
-    // 只给 type 时不得凭空长出用户 glob（引擎级排除 glob 是另一回事）。
+    // With type only, no user glob may materialize (engine-level exclusion
+    // globs are a separate matter).
     assert.equal(args.includes("*.ts"), false);
   });
 
@@ -228,14 +252,17 @@ describe("buildRgArgs — 收窄（D4）", () => {
 });
 
 /**
- * 引擎级遍历语义（D6 / SC9）。
+ * Engine-level traversal semantics.
  *
- * 契约要求两条引擎**接受集一致**：同一个目录树喂同一个查询，rg 与 Node 扫
- * 必须看见同一批文件。rg 默认会读 `.gitignore` / `.ignore`、跳过隐藏项、
- * 跳过 git 忽略目录；Node 侧的 `walkFiles` 只跳过 `node_modules` / `.git`。
- * 这里把差异**一次性抹平到 Node 口径**（`--no-ignore --hidden` + 两条排除
- * glob），而不是教 Node 读 gitignore 语法（negation / 目录作用域 / 层级作用
- * 域是另一件工具的体量）。判定细节见 `argv.ts` 内的中文注释。
+ * The contract demands the two engines share one **accept set**: the same
+ * directory tree with the same query must present rg and the Node scan the
+ * same batch of files. By default rg reads `.gitignore` / `.ignore`, skips
+ * hidden entries and git-ignored directories; Node's `walkFiles` only skips
+ * `node_modules` / `.git`. Here the differences are flattened **once and for
+ * all onto the Node measure** (`--no-ignore --hidden` + two exclusion
+ * globs), rather than teaching Node gitignore syntax (negation / directory
+ * scoping / hierarchical scoping would be a whole other tool's scope). See
+ * the comments inside `argv.ts` for decision details.
  */
 describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
   it("--no-ignore 常开：.gitignore / .ignore 不改变接受集", () => {
@@ -269,8 +296,9 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
   });
 
   it("含 `\\n` 路径的排除 glob 常开：行协议拆不开的记录不进遍历", () => {
-    // 排除集与 `path-representable.ts` 共用同一份常量（含 `\n` 目录的整棵
-    // 子树也要剔 —— 只按基名剔会漏掉 `a\nb/inner.txt`）。
+    // The exclude set shares one constant with `path-representable.ts` (the
+    // whole subtree of a directory containing `\n` must go too — excluding
+    // by basename alone would miss `a\nb/inner.txt`).
     const args = argv({});
 
     for (const glob of NEWLINE_PATH_EXCLUDES) {
@@ -279,10 +307,12 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
   });
 
   it("用户 glob 不能撤销工具自带的 `!**/node_modules` / `!**/.git`（D2）", () => {
-    // 顺序契约：用户 glob 先投递，工具排除后投递，rg 的 last-glob-wins 让
-    // 「跳过 node_modules / .git」成为最终胜负。用户 glob 是收窄（`*.ts`）
-    // 时仍生效，是宽放（`*` / `**`）时也不会把仓库内部的依赖目录、git 配置
-    // 吐回给模型（实测：原顺序会让 rg 把 5 条命中吐回，Node 只 3 条）。
+    // Ordering contract: user globs are submitted first, tool exclusions
+    // last, so rg's last-glob-wins makes "skip node_modules / .git" the
+    // final verdict. A narrowing user glob (`*.ts`) still works; a widening
+    // one (`*` / `**`) never hands repo-internal dependency or git-config
+    // files back to the model (measured: the old order let rg return 5 hits
+    // where Node returned only 3).
     for (const userGlob of ["*", "**", "**/*", "{*,.*}"]) {
       const args = argv({ glob: userGlob });
       const excludeNodeModules = args.lastIndexOf("!**/node_modules");
@@ -292,7 +322,7 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
       assert.ok(excludeGit > excludeNodeModules);
       assert.ok(userGlobIndex > 0);
     }
-    // 用户 glob 仍原样投递（不被挤压/改写）。
+    // User glob still passes through verbatim (not squeezed or rewritten).
     assert.ok(argv({ glob: "*.ts" }).includes("*.ts"));
   });
 });
@@ -323,13 +353,13 @@ describe("resolveTypeName — 未知 type（SC10）", () => {
         return (error as Error).message;
       }
     };
-    // 两条都是**真实**编译器产物，不是手抄的期望串。
+    // Both are **real** compiler artifacts, not hand-copied expectation strings.
     const typeError = messageOf(() => resolveTypeName("nosuchtype"));
     const regexError = messageOf(() => compilePattern("(unclosed", false));
 
     assert.notEqual(typeError, "");
     assert.notEqual(regexError, "");
-    // 不可混为「illegal regex」一种：各自关键词互不出现。
+    // Not collapsible into one "illegal regex" kind: each keyword is absent from the other's message.
     assert.equal(
       /pattern/.test(typeError),
       false,
@@ -340,7 +370,7 @@ describe("resolveTypeName — 未知 type（SC10）", () => {
       false,
       `regex error leaked type: ${regexError}`
     );
-    // 且各自都必须点名自己的失败域。
+    // And each must name its own failure domain.
     assert.ok(/type/.test(typeError));
     assert.ok(/pattern/.test(regexError));
   });

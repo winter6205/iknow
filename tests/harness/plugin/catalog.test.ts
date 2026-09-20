@@ -1,8 +1,9 @@
 /**
- * plugin/catalog.ts — 数据面单测（plans/global-plugins-loading.md §4.1 / §4.4）。
+ * plugin/catalog.ts — data-plane unit tests.
  *
- * 验证 createPluginCatalog 把 PluginInstallation[] 拆成三面数据，且每面
- * 仅在子目录/文件实际存在时产出。frozen。
+ * Verifies createPluginCatalog splits PluginInstallation[] into three
+ * surfaces, each populated only when the subdirectory/file actually exists.
+ * The result is frozen.
  */
 import assert from "node:assert/strict";
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -42,11 +43,11 @@ describe("createPluginCatalog", () => {
     mkdirSync(aHooks, { recursive: true });
     writeFileSync(path.join(aHooks, "hooks.json"), "{}");
 
-    // plugB 只有 skills/agents,没有 hooks
+    // plugB has skills/agents only, no hooks
     mkdirSync(path.join(work, "plugB", "skills"), { recursive: true });
     mkdirSync(path.join(work, "plugB", "agents"), { recursive: true });
 
-    // plugC 只有 skills（典型纯 skill 插件）
+    // plugC has skills only (the typical skill-only plugin shape)
     mkdirSync(path.join(work, "plugC", "skills"), { recursive: true });
 
     const installations: PluginInstallation[] = [

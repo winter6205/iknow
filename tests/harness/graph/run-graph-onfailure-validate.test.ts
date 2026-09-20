@@ -1,28 +1,31 @@
 /**
- * live-graph-phase2 T1 — `onFailure` 失败边 schema + 校验（spec SC4–SC5 /
- * Changes 段 / ADR-0053–0066）。
+ * `onFailure` failure-edge schema + validation (ADR-0053–ADR-0066).
  *
- * 钉住的不变式：
- *   - **合法失败边**：目标在本次 `nodes` 里（含指向自己 = 标明的单格再进
- *     入，ADR-0053 / spec Changes）→ 通过 readNodes + 校验；仅因
- *     `onFailure` 形成的圈合法（ADR-0058 / 0059：回边显式标明即认，
- *     环检测只对 `deps`）。T1 中间态：合法失败边按 deps-DAG 正常调度，
- *     失败边执行语义在 T2 落地。
- *   - **非法失败边 → typed 拒、零 spawn**：
- *       (a) 目标不在本次提交的 ids 里（SC5 / spec Changes「目标必须是
- *           本次 nodes 的某个 id」）；
- *       (b) 目标在活图账本上已冻结（done 或 failed，跨调用冻结，
- *           ADR-0060：done 永不因失败边再跑）；
- *       (c) 值非 string（数组 / 数字 —— SC5「两条失败边」在 JSON 对象
- *           里只能以非法值形态出现；schema `type: "string"` 是主合同，
- *           readNodes 是直调路径的兜底闸）。
- *   - **校验失败不留账本痕迹**：SC1 / ASSUMPTIONS #4 —— 拒绝路径绝不
- *     `ensure()`（与拓扑非法同类别）。
- *   - **阶段 1 行为不回退**（SC9）：`deps` 自依赖 / `deps` 成环仍拒；
- *     不带 `onFailure` 的 DAG 拒绝规则与阶段 1 逐条相同。
+ * Pinned invariants:
+ *   - **Legal failure edge**: the target is among this submission's `nodes`
+ *     (pointing at self = a declared single-node re-entry, ADR-0053) → passes
+ *     readNodes + validation. Cycles formed only by `onFailure` are legal
+ *     (ADR-0058 / ADR-0059: an explicitly declared back edge is accepted;
+ *     cycle detection looks at `deps` only). Legal failure edges are
+ *     scheduled as normal deps-DAGs; failure-edge execution semantics are
+ *     covered by outcome-scheduler / failure-edges tests.
+ *   - **Illegal failure edge → typed rejection, zero spawns**:
+ *       (a) the target is not among the ids of this submission;
+ *       (b) the target is already frozen in the live-graph ledger (done or
+ *           failed, frozen across calls; ADR-0060: done never re-runs via a
+ *           failure edge);
+ *       (c) the value is not a string (array / number — the schema's
+ *           `type: "string"` is the primary contract; readNodes is the
+ *           direct-call backstop).
+ *   - **Validation failure leaves no ledger trace**: rejection paths never
+ *     `ensure()` (same category as invalid topology).
+ *   - **No regression of earlier rejection rules**: `deps` self-dep and
+ *     `deps` cycles are still rejected; DAGs without `onFailure` follow the
+ *     same rules as before failure edges existed.
  *
- * 分层（complexity-anti-drift）：目标校验在 `on-failure.ts` 单点，
- * validateGraph / topo 只认 `deps`，不因失败边改 Kahn。
+ * Layering (complexity-anti-drift): target validation is centralized in
+ * `on-failure.ts`; validateGraph / topo only see `deps` and never bend Kahn
+ * for failure edges.
  */
 
 import { describe, expect, it } from "vitest";
@@ -41,7 +44,7 @@ import {
 
 const CONV = "conv-p2-t1";
 
-// ── 合法失败边 ────────────────────────────────────────────────────────
+// ── Legal failure edges ────────────────────────────────────────────────
 
 describe("run_graph onFailure 校验：合法失败边通过", () => {
   it("合法 onFailure DAG 正常通过校验并跑完 deps-DAG（T1 中间态：失败边执行语义在 T2）", async () => {
@@ -56,7 +59,7 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
       },
       { conversationId: CONV }
     );
-    // b 要等 a settle 后才 spawn，顺序 settle
+    // b waits for a to settle before spawning; settle in order.
     await waitForChildren(children, 1);
     settle(children[0]!, ok("A-OUT"));
     await waitForChildren(children, 2);
@@ -96,7 +99,7 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
       },
       { conversationId: CONV }
     );
-    // 无 deps → 两节点同波并发 spawn，settle 顺序任意
+    // No deps → both nodes spawn concurrently in one wave; settle order free.
     await waitForChildren(children, 2);
     settle(children[0]!, ok("A-OUT"));
     settle(children[1]!, ok("B-OUT"));
@@ -110,7 +113,7 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
   });
 });
 
-// ── 非法失败边：typed 拒、零 spawn ────────────────────────────────────
+// ── Illegal failure edges: typed rejection, zero spawns ────────────────
 
 describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn", () => {
   it("目标不在本次提交的 ids 里 → typed 拒、零 spawn（SC5）", async () => {
@@ -128,7 +131,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
       )
     ).rejects.toThrow(/onFailure targeting unknown node "zz"/);
     expect(children).toHaveLength(0);
-    // 拒绝路径不建账本（SC1 / ASSUMPTIONS #4）
+    // Rejection paths never create a ledger.
     expect(host.ledgerFor(CONV).exists()).toBe(false);
     await manager.shutdown();
   });
@@ -142,7 +145,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
       isEnabled: () => true,
     });
 
-    // 前置：x 在前一段跑完并冻结
+    // Precondition: x finished and froze in an earlier segment.
     const first = t.handler(
       { nodes: [{ id: "x", task: "tx" }] },
       { conversationId: CONV }
@@ -151,7 +154,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     settle(children[0]!, ok("X-OUT"));
     await first;
 
-    // 本段：onFailure 指向已冻结 done 的 x → 拒
+    // This segment: onFailure targets the frozen-done x → rejected.
     await expect(
       t.handler(
         { nodes: [{ id: "a", task: "ta", onFailure: "x" }] },
@@ -160,7 +163,8 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     ).rejects.toThrow(/onFailure targeting frozen node "x" \(done\)/);
     expect(children).toHaveLength(1);
     expect(host.ledgerFor(CONV).frozenIds()).toEqual(["x"]);
-    // 拒绝发生在第二段 —— 账本只由第一段 ensure，第二段拒绝不新建
+    // The rejection happens in the second segment — only the first segment
+    // ensured the ledger; the rejected second one creates nothing new.
     expect(host.ledgerFor(CONV).exists()).toBe(true);
     await manager.shutdown();
   });
@@ -219,7 +223,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
         )
       ).rejects.toThrow(/non-string/);
       expect(children).toHaveLength(0);
-      // 校验失败路径绝不建账本（SC1 / ASSUMPTIONS #4）
+      // Validation-failure paths never create a ledger.
       expect(host.ledgerFor(CONV).exists()).toBe(false);
       await manager.shutdown();
     }
@@ -260,7 +264,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
       isEnabled: () => true,
     });
 
-    // 前置：x 在前一段跑完冻结为 done
+    // Precondition: x finished as done and froze in an earlier segment.
     const first = t.handler(
       { nodes: [{ id: "x", task: "tx" }] },
       {
@@ -271,13 +275,12 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     settle(children[0]!, ok("X-OUT"));
     await first;
 
-    // 本段：重交已冻结 x 且带非法 onFailure —— 两类拒绝同时成立。冻结
-    // 校验（mergeResidual → resolveResidualSubgraph）先于失败边校验
-    // （validateOnFailureEdges）跑（见 handler 顺序：mergeResidual 在
-    // validateOnFailureEdges 之前），所以胜出的是
-    // `frozen id(s) cannot be re-run`，不是 `onFailure targeting frozen
-    // node`。钉住的是「哪条信息胜出」这一确定行为，防止后续调序漂移
-    // 让同一次拒绝报出不同正文。
+    // This segment: resubmit frozen x with an illegal onFailure — both rejection
+    // kinds apply. The frozen check (mergeResidual → resolveResidualSubgraph)
+    // runs before the failure-edge check (validateOnFailureEdges) in the
+    // handler, so `frozen id(s) cannot be re-run` wins over
+    // `onFailure targeting frozen node`. This pins which message deterministically
+    // wins, so a future reordering cannot make one rejection report two texts.
     await expect(
       t.handler(
         {
@@ -289,8 +292,8 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
         { conversationId: CONV }
       )
     ).rejects.toThrow(/frozen id\(s\) cannot be re-run/);
-    expect(children).toHaveLength(1); // 零新 spawn
-    // self-frozen 变体：onFailure 指向自己且自己已冻结 —— 同一优先级。
+    expect(children).toHaveLength(1); // zero new spawns
+    // Self-frozen variant: onFailure targets self and self is already frozen — same precedence.
     await expect(
       t.handler(
         { nodes: [{ id: "x", task: "tx", onFailure: "x" }] },
@@ -304,10 +307,11 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
   it("onFailure 不能洗白 deps 环：纯 deps 环上叠加合法 onFailure → 仍 topo cycle 拒、零 spawn（ADR-0059）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
-    // a deps[b] 且 onFailure:b（目标在本批，单独看是合法失败边）；
-    // b deps[a] —— deps 层面 a↔b 成环。环检测只认 deps，失败边不是
-    // Kahn 的豁免凭据（ADR-0059：未标明回边不算 —— deps 环必须靠
-    // deps 自己成 DAG，onFailure 不改拓扑）。
+    // a deps[b] with onFailure:b (target in this batch — alone a legal failure
+    // edge); b deps[a] — at the deps level a↔b forms a cycle. Cycle detection
+    // only looks at deps; failure edges are no Kahn exemption (ADR-0059: an
+    // undeclared back edge does not count — a deps cycle must become a DAG via
+    // deps itself, onFailure never changes topology).
     await expect(
       t.handler(
         {
@@ -337,7 +341,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
   });
 });
 
-// ── 阶段 1 不回退（SC9） ──────────────────────────────────────────────
+// ── No regression of the pre-failure-edge rejection rules ──────────────
 
 describe("run_graph onFailure 校验：阶段 1 拒绝规则不回退", () => {
   it("deps 自依赖仍拒（带 onFailure 的提交里同样拒）", async () => {

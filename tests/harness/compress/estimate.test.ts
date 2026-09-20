@@ -20,7 +20,7 @@ describe("estimateTokens", () => {
   it("'hello world' (11 chars) → Math.floor((11+3)/4) = 3", () =>
     assert.equal(estimateTokens("hello world"), 3));
   it("纯 emoji 串 → 按字符长度估算 (e.g. '👋🌍' = 4 chars → 1)", () => {
-    // surrogate pair 在 JS string 中算 2 code units;length = 4 → floor((4+3)/4) = 1
+    // A surrogate pair counts as 2 JS code units; length = 4 -> floor((4+3)/4) = 1
     assert.equal(estimateTokens("👋🌍"), 1);
   });
   it("超大文本 (>= 10000 字符) → length/4 楼梯,无溢出", () => {
@@ -86,7 +86,7 @@ describe("estimateMessagesTokens", () => {
       {
         role: "user",
         content: [
-          // 非法对象走固定的非零降级估算,不调用 String(array)。
+          // Malformed objects get a fixed non-zero degraded estimate; String(array) is never called.
           { type: "tool_result", tool_use_id: "u2", content: { a: 1 } },
         ],
       },
@@ -138,8 +138,9 @@ describe("estimateMessagesTokens", () => {
   });
 
   it("仅含嵌套 image、无 text 的 tool_result → 估算 > 0（SC9）", () => {
-    // SC9 不变式：纯 image tool_result 不得估成 0，否则满图会话在
-    // compact 判据下被当成无内容。公式不钉，只钉 > 0。
+    // Invariant: a pure-image tool_result must not estimate to 0, otherwise an
+    // image-heavy session looks empty to the compaction decision. The exact
+    // formula is not pinned; only > 0 is.
     const imageData =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".repeat(
         64
@@ -264,7 +265,7 @@ describe("estimateMessagesTokens", () => {
   });
 
   it("padding 应用:total × 4/3 → Math.ceil", () => {
-    // 构造恰好使 total * 4/3 非整数:total = 1 → 4/3 → ceil = 2
+    // Build a case where total * 4/3 is non-integral: total = 1 -> 4/3 -> ceil = 2
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "x" }] }, // total = 1
     ];

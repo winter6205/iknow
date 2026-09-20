@@ -1,31 +1,37 @@
 /**
- * #502 T3 — bash `background` 参数 e2e（tracer bullet）。
+ * bash `background` parameter e2e (tracer bullet).
  *
- * 覆盖计划 acceptance 要求：
- *   1. 单元面（fake manager）：background:true 命中 → handler 立即返回
- *      {task_id, log_path}，不等待子进程退出、不等待 spawn 之外的任何东西；
- *      secret 占位符命令传给 manager 的是还原后命令；危险命令照拒；
- *      backgroundManager 缺省 + background:true → ToolExecutionError；
- *      spawn_error → ToolExecutionError（kind 渲染）；前台路径（background
- *      缺省/false）走既有一字不改路径且 manager 不被调用。前台零回归由
- *      tests/harness/aci/tools/bash.test.ts 兜底。
- *   2. 真实进程 e2e（真 manager + defaultBackgroundSpawn，skipIf(!hasBwrap())
- *      守卫照 bash-sandbox.test.ts 惯例）：长驻子进程（sleep 300）→ handler
- *      毫秒级返回 task_id → 子进程在 handler 返回后仍存活（manager.status =
- *      running + 进程组探测）→ 收尾 manager.stop → 进程组消失。
- *   3. tier 语义对照：createAciExecutor 的 timeoutMsOverride 测试 seam
- *      （interrupt-routing.test.ts 先例）把 bash tier 压到 500ms —— 前台对照
- *      调用（sleep 300）被 tier 超时治理（execution_failed: timeout），而
- *      background 调用立即返 ok 且子进程存活（不被 tier 治理）。build tier
- *      真值 300s 由 TIMEOUT_TIER_MS SSOT 保证（types.ts:32-38），本测试只用
- *      seam 缩时，不实等 300s。
- *   4. fresh workspace-root 端到端（test.md 命令 handler 契约）：temp dir
- *      workspaceRoot 上 spawn → registry json 读回一致 → stop 收尾。
+ * Coverage:
+ *   1. Unit face (fake manager): background:true → handler returns
+ *      {task_id, log_path} immediately, awaiting nothing beyond the spawn itself;
+ *      secret-placeholder commands hand the manager the restored command;
+ *      dangerous commands are still rejected; missing backgroundManager +
+ *      background:true → ToolExecutionError; spawn_error → ToolExecutionError
+ *      (kind rendered); the foreground path (background absent/false) is the
+ *      untouched existing path and never touches the manager. Foreground
+ *      zero-regression is covered by tests/harness/aci/tools/bash.test.ts.
+ *   2. Real-process e2e (real manager + defaultBackgroundSpawn,
+ *      skipIf(!hasBwrap()) guard per bash-sandbox.test.ts convention): a
+ *      long-lived child (sleep 300) → handler returns task_id in ms → child
+ *      still alive after the handler returns (manager.status = running +
+ *      process-group probe) → teardown manager.stop → process group gone.
+ *   3. Tier semantics contrast: createAciExecutor's timeoutMsOverride test seam
+ *      (precedent: interrupt-routing.test.ts) squeezes the bash tier to 500ms —
+ *      the foreground contrast call (sleep 300) is governed by the tier timeout
+ *      (execution_failed: timeout), while the background call returns ok
+ *      immediately and the child survives (tier does not govern it). The real
+ *      build tier value of 300s is guaranteed by the TIMEOUT_TIER_MS SSOT
+ *      (types.ts:32-38); this test only shortens time via the seam, never
+ *      waits a real 300s.
+ *   4. Fresh workspace-root end to end (test.md command-handler contract):
+ *      spawn on a temp-dir workspaceRoot → registry json reads back consistent
+ *      → stop teardown.
  *
- * bwrap 依赖：createBashTool 构造期 requireBwrap() 守卫（bash.ts:45），故本
- * 文件与既有 bash.test.ts / bash-sandbox.test.ts 同性质 —— 有 bwrap 的本地
- * WSL 全量验证；CI 排除集应收录本文件（与 utils bash.test.ts 同级，runner 无
- * user-namespace）。
+ * bwrap dependency: createBashTool calls requireBwrap() at construction
+ * (bash.ts:45), so this file shares the nature of bash.test.ts /
+ * bash-sandbox.test.ts — verified in full on local WSL with bwrap; the CI
+ * exclude set should include this file (same class as utils bash.test.ts;
+ * runners lack user-namespace).
  */
 
 import assert from "node:assert/strict";
@@ -74,7 +80,7 @@ function hasBwrap(): boolean {
   return probe.status === 0;
 }
 
-/** fake BackgroundTaskManager —— 只观察 spawn 入参，child 永不 exit。 */
+/** fake BackgroundTaskManager — observes spawn args only; child never exits. */
 function makeFakeManager(): {
   manager: BackgroundTaskManager;
   spawn: ReturnType<typeof vi.fn>;
@@ -94,7 +100,7 @@ function makeFakeManager(): {
   return { manager, spawn };
 }
 
-/** fake ChildProcess —— EventEmitter + PassThrough,真实 fs 落盘路径用。 */
+/** fake ChildProcess — EventEmitter + PassThrough, for real fs persistence paths. */
 interface FakeChild {
   readonly stdin: PassThrough;
   readonly stdout: PassThrough;
@@ -121,9 +127,10 @@ interface BashResult {
   readonly stderr: string;
 }
 
-/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`;前台路径
- *  走既有 BashResult 契约,在 helper 多走一次 parse;background 路径返回
- *  `{ task_id, log_path }`,与 envelope 不冲突,保留原断言。 */
+/** bash handler returns an envelope `{ output, meta? }`; the foreground path
+ *  keeps the existing BashResult contract (this helper just parses once more),
+ *  while the background path returns `{ task_id, log_path }`, which does not
+ *  collide with the envelope, so the original assertions stay as they are. */
 interface BashEnvelope {
   readonly output: string;
   readonly meta?: { readonly stdout?: string; readonly stderr?: string };
@@ -132,7 +139,7 @@ function parseBashEnvelope(envelope: BashEnvelope): BashResult {
   return JSON.parse(envelope.output) as BashResult;
 }
 
-// ── 1.schema ──────────────────────────────────────────────────────────────────
+// ── 1. schema ──────────────────────────────────────────────────────────────────
 
 describe("bash background schema", () => {
   it("inputSchema 显式声明 background?: boolean（additionalProperties:false）", async () => {
@@ -151,7 +158,7 @@ describe("bash background schema", () => {
   });
 });
 
-// ── 2.单元面：fake manager ────────────────────────────────────────────────────
+// ── 2. unit face: fake manager ─────────────────────────────────────────────────
 
 describe("bash background handler（fake manager）", () => {
   it("background:true → 立即返回 {task_id, log_path}，child 永不 exit 也返回", async () => {
@@ -196,8 +203,8 @@ describe("bash background handler（fake manager）", () => {
     await tool.handler({ command: "sleep 300", background: true });
     const elapsed = Date.now() - start;
 
-    // handler 收束时间 ≈ spawn 自身延迟（150ms），远小于任何 tier
-    // （fast=5s / build=5min）。若 handler 额外 await 子进程，会远超此界。
+    // handler settles right after spawn's own delay (150ms), far below any tier
+    // (fast=5s / build=5min). If it additionally awaited the child, it would blow past this bound.
     assert.ok(
       elapsed >= 150 && elapsed < 1_500,
       `handler should settle right after spawn resolves, got ${elapsed}ms`
@@ -229,13 +236,13 @@ describe("bash background handler（fake manager）", () => {
       command: string;
       recordCommand: string;
     };
-    // #502 review-repair（#406 roundtrip）：spawn 工厂（沙箱执行）拿真值 —— 占位符不
-    // 进 spawn 调用栈之外的任何路径。
+    // roundtrip contract: the spawn factory (sandbox execution) gets the real
+    // value — the placeholder must never reach any path outside the spawn call stack.
     assert.equal(req.command, 'echo "sk-aaaaaaaaaaaaaaaaaaaa"');
     assert.equal(req.command.includes("<<<SECRET_1>>>"), false);
     assert.equal(req.command.includes("sk-aaaaaaaaaaaaaaaaaaaa"), true);
-    // recordCommand = 原始入参（占位符形态,落盘用）—— manager 据此落 registry json,
-    // 真值不上盘。
+    // recordCommand = the raw input (placeholder form, for persistence) — the
+    // manager writes it into the registry json, so the real value never hits disk.
     assert.equal(req.recordCommand, 'echo "<<<SECRET_1>>>"');
     assert.equal(req.recordCommand.includes("sk-aaaaaaaaaaaaaaaaaaaa"), false);
     assert.equal(req.recordCommand.includes("<<<SECRET_1>>>"), true);
@@ -269,7 +276,7 @@ describe("bash background handler（fake manager）", () => {
       background: true,
     })) as { task_id: string; log_path: string };
 
-    // spawn 后立即读盘 —— running 态 record 的 command 必须是占位符形态。
+    // read the disk right after spawn — the running record's command must be in placeholder form.
     const jsonPath = res.log_path.replace(/\.log$/, ".json");
     const runningRec = JSON.parse(await readFile(jsonPath, "utf8")) as {
       command: string;
@@ -282,10 +289,12 @@ describe("bash background handler（fake manager）", () => {
     assert.ok(!runningRec.command.includes("sk-aaaaaaaaaaaaaaaaaaaa"));
     assert.ok(runningRec.command.includes("<<<SECRET_1>>>"));
 
-    // settle 路径同样走 persistCommand —— 触发 exit 后 status 转 exited,
-    // 读盘 record 的 command 仍为占位符形态（不还原为真值）。settle 是
-    // 异步落盘,await waitFor 直至 json 收敛到 exited 状态（writeFile 默认
-    // O_TRUNC,settle 进行中文件可能瞬时为空,不可裸读）。
+    // the settle path also goes through persistCommand — after exit fires,
+    // status flips to exited and the on-disk record's command is still the
+    // placeholder form (never restored to the real value). Settle persists
+    // asynchronously, so waitFor until the json converges to exited
+    // (writeFile defaults to O_TRUNC; the file may be transiently empty
+    // mid-settle and cannot be read bare).
     fakeChildren[0]!.emit("exit", 0, null);
     const settledRec = await vi.waitFor(async () => {
       const rec = JSON.parse(await readFile(jsonPath, "utf8")) as {
@@ -314,10 +323,11 @@ describe("bash background handler（fake manager）", () => {
       command: string;
       recordCommand: string;
     };
-    // 无 secret registry：bash 透传 command 不还原；recordCommand 字段值与
-    // command 字面相同，manager 侧 `recordCommand ?? command` 取相同结果，
-    // 落盘行为与既有路径逐字节一致（其他手写调用方缺省 recordCommand 走
-    // `request.command` 回退，兼容性保持）。
+    // No secret registry: bash passes command through unrestored; recordCommand
+    // is literally identical to command, so the manager's
+    // `recordCommand ?? command` yields the same result and persistence is
+    // byte-identical to the existing path (hand-written callers that omit
+    // recordCommand still fall back to `request.command`, keeping compatibility).
     assert.equal(req.command, "echo plain");
     assert.equal(req.recordCommand, "echo plain");
   });
@@ -396,10 +406,11 @@ describe("bash background handler（fake manager）", () => {
   });
 });
 
-// ── 3.真实进程 e2e（真 manager + defaultBackgroundSpawn）──────────────────────
-// 注：真实 registry 落盘走 fake child（不用 defaultBackgroundSpawn）的
-// createBackgroundTaskManager+真实 fs 由 manager.test.ts 覆盖；本节聚焦
-// handler ↔ defaultBackgroundSpawn 的物理链路。
+// ── 3. real-process e2e (real manager + defaultBackgroundSpawn) ────────────────
+// Note: real registry persistence via a fake child (without
+// defaultBackgroundSpawn) through createBackgroundTaskManager + real fs is
+// covered by manager.test.ts; this section focuses on the physical chain
+// handler ↔ defaultBackgroundSpawn.
 
 describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
   it.skipIf(!hasBwrap())(
@@ -423,13 +434,13 @@ describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
       const elapsed = Date.now() - start;
 
       assert.match(res.task_id, /^bg-[0-9a-f]{12}$/);
-      // 毫秒级返回：bwrap 启动链 + registry 落盘，远小于任何 tier（fast=5s）。
+      // millisecond-level return: bwrap launch chain + registry persistence, far below any tier (fast=5s).
       assert.ok(
         elapsed < 3_000,
         `handler should return in ms after background spawn, got ${elapsed}ms`
       );
 
-      // registry json 落盘 + 读回一致（spawn → registry 同步契约）
+      // registry json persisted + reads back consistent (spawn → registry sync contract)
       const jsonPath = res.log_path.replace(/\.log$/, ".json");
       const rec = JSON.parse(await readFile(jsonPath, "utf8")) as {
         status: string;
@@ -441,12 +452,12 @@ describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
       assert.equal(rec.owner_pid, process.pid);
       const pgid = rec.pgid;
 
-      // 子进程在 handler 返回后仍存活：manager 内存态 running + 进程组探测
+      // child still alive after the handler returned: manager in-memory running + process-group probe
       const st = await manager.status(res.task_id);
       assert.equal(st.status, "running");
       assert.doesNotThrow(() => process.kill(-pgid, 0), "进程组应存活");
 
-      // 收尾：host 侧 stop → 进程组消失
+      // teardown: host-side stop → process group gone
       await manager.stop(res.task_id);
       await waitForGroupExit(pgid);
       const after = await manager.status(res.task_id);
@@ -489,7 +500,7 @@ describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
   );
 });
 
-// ── 4.tier 语义对照：timeoutMsOverride 把 bash tier 压到 500ms ────────────────
+// ── 4. tier semantics contrast: timeoutMsOverride squeezes the bash tier to 500ms ─
 
 describe("bash background tier 对照（timeoutMsOverride seam）", () => {
   const hasBwrapHere = hasBwrap();
@@ -523,8 +534,9 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
         get: (n: string) => (n === "bash" ? toolFoo : undefined),
         all: () => Object.freeze([toolFoo]) as ReadonlyArray<typeof toolFoo>,
       }),
-      // 测试 seam：build tier 真值 300s 由 TIMEOUT_TIER_MS SSOT 保证，
-      // 此处只缩时测试 tier 治理语义，不实等 300s。
+      // Test seam: the real build-tier value of 300s is guaranteed by the
+      // TIMEOUT_TIER_MS SSOT; here we only shorten time to test tier-governance
+      // semantics, without waiting a real 300s.
       timeoutMsOverride,
     });
     const start = Date.now();
@@ -583,7 +595,7 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
           log_path: string;
         };
         assert.match(payload.task_id, /^bg-[0-9a-f]{12}$/);
-        // 子进程在 500ms tier 早已越过之后仍存活 —— background 不被 tier 治理。
+        // the child outlives the long-passed 500ms tier — background is not tier-governed.
         const st = await manager.status(payload.task_id);
         assert.equal(st.status, "running");
         const jsonPath = payload.log_path.replace(/\.log$/, ".json");
@@ -598,7 +610,7 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
   );
 });
 
-/** 进程组消失轮询（kill(-pgid,0) ESRCH 即组已消失）。 */
+/** Poll for process-group disappearance (kill(-pgid,0) raising ESRCH = group gone). */
 async function waitForGroupExit(pgid: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {

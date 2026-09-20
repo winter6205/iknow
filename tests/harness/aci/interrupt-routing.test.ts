@@ -1,24 +1,29 @@
 /**
- * 124 / T5 — per-tool timeoutTier + interruptBehavior routing 验收套件。
+ * Per-tool timeoutTier + interruptBehavior routing acceptance suite.
  *
- * 覆盖（来自 issue #124 SC13 / SC14 / SC15 / SC16 / SC17）：
- *   - SC17 tier 映射:fast=5s / default=30s / build=300s / long=1800s;
- *     engine 传入的 timeoutMs 被工具 tier 覆盖。
- *   - SC17 interruptBehavior:
- *       cancel 工具 → caller signal 透传到 ctx.signal;aborted 时归一为 cancelled
- *       block 工具 → caller signal 不透传;handler 跑完后转 cancelled(无 partial)
- *   - SC13 bash real spawn:partial stdout 在 cancellation 下被保留
- *   - SC15 block 工具完成不被 caller abort 打断;caller abort 后返 cancelled
- *   - SC16 单 call tier timeout 不再停回合(ADR-0091):只失败该条 result,
- *     回合 continue;回合 timeout 只认 signal.reason==="timeout" 的时钟 abort
- *   - computeToolStopFlags:结果标签 inert;signal.reason 严格 equal 判定
+ * Coverage (from the interrupt-routing issue's scenarios):
+ *   - tier mapping: fast=5s / default=30s / build=300s / long=1800s;
+ *     timeoutMs passed by the engine is overridden by the tool's tier.
+ *   - interruptBehavior:
+ *       cancel tools → caller signal passes through to ctx.signal; on abort,
+ *       normalized to cancelled
+ *       block tools → caller signal not passed through; after the handler
+ *       finishes, converted to cancelled (no partial)
+ *   - bash real spawn: partial stdout retained under cancellation
+ *   - block-tool completion is not interrupted by caller abort; after caller
+ *     abort the result is cancelled
+ *   - a single-call tier timeout no longer stops the turn (ADR-0091): only
+ *     that one result fails, the turn continues; turn timeout only honors a
+ *     clock abort with signal.reason==="timeout"
+ *   - computeToolStopFlags: result labels are inert; signal.reason compared by strict equal
  *
- * 实现策略：
- *   - tier 测试使用 createAciExecutor 的 `timeoutMsOverride` 测试 seam,
- *     不必等 5 分钟即可验证"工具 tier 是权威"覆盖。
- *   - bash SC13 使用真 spawn;fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped
- *     stdout 的 libuv 用户态缓冲),abort 前用 waitForPidFile 屏障等 fixture
- *     落 marker,断言 partial stdout 含 "line N"。
+ * Implementation strategy:
+ *   - tier tests use createAciExecutor's `timeoutMsOverride` test seam, so
+ *     "the tool tier is authoritative" is verified without waiting 5 minutes.
+ *   - the bash partial-output test uses real spawn; the fixture writes fd 1
+ *     directly via fs.writeSync (bypassing Node piped stdout's libuv
+ *     user-space buffer) and waitForPidFile barriers until the fixture drops
+ *     its marker before abort, then asserts partial stdout contains "line N".
  */
 
 import assert from "node:assert/strict";
@@ -68,7 +73,7 @@ afterEach(async () => {
   );
 });
 
-/** 构造一个最小 AciToolDef,带可观测 ctx.signal 的 handler。 */
+/** Minimal AciToolDef whose handler records whether ctx.signal aborted. */
 function makeTool(opts: {
   readonly name: string;
   readonly interruptBehavior: "cancel" | "block";
@@ -121,7 +126,7 @@ function makeCatalog(tools: AciToolDef[]) {
   });
 }
 
-/** 顶层 inner executor — 直接执行单个 handler 调用,不绕 permission middleware。 */
+/** Inner executor: invokes one handler directly, no permission middleware. */
 function makeInner(): Executor {
   return Object.freeze({
     executeAll: async (
@@ -142,7 +147,7 @@ function makeInner(): Executor {
         }
         try {
           const payload = await def.handler(call.input, undefined);
-          // 模拟 Executor.safeContent:payload → JSON text block
+          // mirrors Executor.safeContent: payload -> JSON text block
           const text =
             typeof payload === "string" ? payload : JSON.stringify(payload);
           out.push({
@@ -180,12 +185,13 @@ describe("SC17 — tier 映射覆盖 engine 传入的 timeoutMs", () => {
       name: "fastie",
       interruptBehavior: "cancel",
       timeoutTier: "fast",
-      resolveAfterMs: 5_000, // 模拟一个真正需要 ~5s 的 handler
+      resolveAfterMs: 5_000, // a handler that genuinely takes ~5s
     });
     (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
       makeCatalog([tool]);
     const inner = makeInner();
-    // 测试 seam:timeoutMsOverride 把 fast tier 缩到 200ms,模拟一个真实超时。
+    // Test seam: timeoutMsOverride shrinks the fast tier to 200ms so a real
+    // timeout fires without waiting out the full 5s.
     const aciExec = createAciExecutor({
       inner,
       catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
@@ -197,7 +203,7 @@ describe("SC17 — tier 映射覆盖 engine 传入的 timeoutMs", () => {
       { id: "u1", name: "fastie", input: {} },
     ]);
     const elapsed = Date.now() - start;
-    // 应在 200~500ms 内超时(未走完整 5000ms)
+    // must hit the 200ms override, never the full 5s tier
     assert.ok(
       elapsed < 1_000,
       `elapsed=${elapsed}ms, expected tier fast timeout`
@@ -228,7 +234,7 @@ describe("SC17 — tier 映射覆盖 engine 传入的 timeoutMs", () => {
     const results = await aciExec.executeAll(
       [{ id: "u1", name: "defaultie", input: {} }],
       undefined,
-      // 模拟 engine 仍按老路径传 600_000;但 tier 覆盖它。
+      // engine still passes 600_000 the old way; tier mapping must override it
       600_000
     );
     const elapsed = Date.now() - start;
@@ -242,7 +248,7 @@ describe("SC17 — tier 映射覆盖 engine 传入的 timeoutMs", () => {
 
 describe("SC17 — interruptBehavior routing", () => {
   it("cancel 工具: caller signal 透传 → handler 观察到 aborted → 归一为 cancelled", async () => {
-    // handler 记录执行期间是否观察到 signal abort(透传验证)。
+    // handler records whether it saw the signal abort, proving pass-through
     let handlerSawAbort = false;
     const tool: AciToolDef = Object.freeze({
       name: "cancelie",
@@ -270,7 +276,7 @@ describe("SC17 — interruptBehavior routing", () => {
     });
     (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
       makeCatalog([tool]);
-    // inner 把 signal 透传给 handler 的 ctx.signal(真实 Executor 行为)。
+    // inner forwards the signal into ctx.signal, like the real Executor
     const inner: Executor = Object.freeze({
       executeAll: async (
         calls: ReadonlyArray<ToolCall>,
@@ -310,9 +316,9 @@ describe("SC17 — interruptBehavior routing", () => {
       [{ id: "u1", name: "cancelie", input: {} }],
       controller.signal
     );
-    // cancel 工具:caller signal 透传到 handler(handler 观察到 aborted)。
+    // cancel tool: caller signal must reach the handler
     assert.equal(handlerSawAbort, true, "cancel 工具应透传 caller signal");
-    // 收尾归一为 cancelled。
+    // and the final result is normalized to cancelled
     assert.equal(results[0]!.kind, "execution_failed");
     if (results[0]!.kind === "execution_failed") {
       assert.equal(results[0]!.message, "cancelled");
@@ -594,7 +600,7 @@ describe("SC17 — interruptBehavior routing", () => {
   });
 
   it("block 工具: caller signal 不透传 → handler 干净完成;caller abort 后转 cancelled(无 partial)", async () => {
-    // block 工具:resolve 在 100ms,但我们在 20ms caller abort。
+    // block tool resolves at 100ms while the caller aborts at 20ms
     const tool = makeTool({
       name: "blockie",
       interruptBehavior: "block",
@@ -610,7 +616,7 @@ describe("SC17 — interruptBehavior routing", () => {
         signal?: AbortSignal
       ): Promise<ReadonlyArray<ToolExecutionResult>> => {
         const call = calls[0]!;
-        // 把传入的 signal 暴露给 handler ctx.signal,handler 观察是否 abort
+        // watch whether the handler ever receives an aborted signal
         signal?.addEventListener("abort", () => {
           signalSawAbort = true;
         });
@@ -738,11 +744,13 @@ describe("SC13 — bash real spawn partial output preserved", () => {
     async () => {
       const cwd = await makeScratch("interrupt-routing-bash-");
       const tool = createBashTool(cwd);
-      // 写脚本到 cwd 再 `node <file>` — "node" 在 allowlist,文件内容不进
-      // bash 解析,完全规避 shell metachar(`;` / `(` / `|` / `&&`)。
-      // fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped stdout 的 libuv
-      // 用户态缓冲)+ marker 屏障:先等 fixture 把行写出并落 marker,再 abort,
-      // 消除"console.log 缓冲未 flush 就随 SIGTERM 丢失"的时序 flake。
+      // The script lives in cwd and runs via `node <file>`: "node" is on the
+      // allowlist and the file contents never enter bash parsing, so shell
+      // metachars (`;` / `(` / `|` / `&&`) are fully avoided. The fixture
+      // writes fd 1 directly with fs.writeSync (bypassing libuv's userspace
+      // buffering of piped stdout) and drops a pid marker; aborting only
+      // after the marker appears removes the flake where buffered output is
+      // lost to SIGTERM before flush.
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
@@ -796,9 +804,9 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         ): Promise<ReadonlyArray<ToolExecutionResult>> => {
           const call = calls[0]!;
           const payload = await bashTool.handler(call.input, { signal });
-          // 模拟真实 Executor.safeContent envelope 判别(#693 T4 D4):bash
-          // handler 返回 `{ output, meta? }` → 只取 output 字符串进 model
-          // tool_result,meta 不入模型可见 payload。
+          // mirrors the real Executor.safeContent envelope discrimination: a
+          // bash handler returns `{ output, meta? }` and only the output
+          // string reaches the model-visible tool_result; meta never does.
           const text =
             typeof payload === "string"
               ? payload
@@ -821,9 +829,9 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         timeoutMsOverride: 5_000,
       });
       const controller = new AbortController();
-      // executeAll 必须先启动(bash 进程由此产生),fixture 才可能落 marker;
-      // 若先 waitForPidFile 再 executeAll,marker 永远不出现(进程还没 spawn)。
-      // 启动后不 await,等 marker → abort → 再收执行结果,与 test 1 同构。
+      // executeAll must be started first — it spawns the bash process that
+      // writes the marker — then awaited: marker → abort → collect results,
+      // same shape as the test above.
       const execution = aciExec.executeAll(
         [
           {
@@ -912,11 +920,11 @@ describe("SC15 — block 工具完成不被 caller abort 打断(已在上文覆�
       [{ id: "u1", name: "block-file", input: {} }],
       caller.signal
     );
-    // 文件应被写入(handler 没被中断)
+    // the handler ran to completion, so the marker exists
     const { readFile } = await import("node:fs/promises");
     const content = await readFile(marker, "utf8");
     assert.equal(content, "ok");
-    // 但 final result 仍是 cancelled(block 完成后我们归一)
+    // the caller still gets a cancelled result once the blocked tool finishes
     assert.equal(results[0]!.kind, "execution_failed");
     if (results[0]!.kind === "execution_failed") {
       assert.equal(results[0]!.message, "cancelled");
@@ -926,8 +934,8 @@ describe("SC15 — block 工具完成不被 caller abort 打断(已在上文覆�
 
 describe("SC16 — computeToolStopFlags:回合 timeout 只认 signal 时钟标记(ADR-0091)", () => {
   it("ADR-0091 SC3:单条 result 标签 'timeout'(无 signal)不再停回合", () => {
-    // 单 call 工具超时(ACI 档位钟)只失败该条 tool_result,不是回合钟 ——
-    // 结果标签对 timedOut 完全无影响,回合必须继续。
+    // A per-call tier timeout fails only that tool_result; the turn clock is
+    // the sole source of timedOut, so the turn must keep going.
     const r: ToolExecutionResult = {
       kind: "execution_failed",
       toolUseId: "u1",
@@ -1005,8 +1013,8 @@ describe("SC16 — computeToolStopFlags:回合 timeout 只认 signal 时钟标�
   });
 
   it("reason 'subagent-timeout' 不是回合钟 → cancelled(SIGTERM 收尾不回归)", () => {
-    // worker.ts SIGTERM handler 用 "subagent-timeout" abort;worker 期望该
-    // abort 落 stopReason=cancelled 再走自身收尾信封,绝不升级为 timeout。
+    // worker.ts aborts with "subagent-timeout" on SIGTERM and expects that to
+    // land as stopReason=cancelled for its own teardown envelope, never as timeout.
     const controller = new AbortController();
     controller.abort("subagent-timeout");
     const flags = computeToolStopFlags({
@@ -1035,7 +1043,7 @@ describe("encodeToolResults — partial 输出编码", () => {
       assert.equal(block.tool_use_id, "u1");
       assert.equal(block.is_error, true);
       const contents = block.content;
-      // 三个 text 块:error / partial stdout / partial stderr
+      // three text blocks: error / partial stdout / partial stderr
       assert.equal(contents.length, 3);
       assert.equal(
         (contents[0] as { text: string }).text,
@@ -1093,14 +1101,14 @@ describe("encodeToolResults — partial 输出编码", () => {
   });
 });
 
-/** bwrap 探测:真 spawn 测试用 skipIf 守卫;argv 纯逻辑测试不受影响。 */
+/** Guards the real-spawn tests; the pure-argv cases run with or without bwrap. */
 function hasBwrap(): boolean {
   return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
-/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`,本测试断言
- *  handler 直接返回的 partial stdout(SC13)。helper 在 envelope 与既有
- *  { code, stdout, stderr } 契约之间转译,断言 strength 不降。 */
+/** The bash handler answers with an envelope `{ output, meta? }`, so this
+ *  helper translates between it and the `{ code, stdout, stderr }` shape the
+ *  partial-stdout assertions use; assertion strength is unchanged. */
 interface BashResult {
   readonly code: number;
   readonly stdout: string;
@@ -1137,9 +1145,9 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
         ): Promise<ReadonlyArray<ToolExecutionResult>> => {
           const call = calls[0]!;
           const payload = await bashTool.handler(call.input, { signal });
-          // 模拟真实 Executor.safeContent envelope 判别(#693 T4 D4):bash
-          // handler 返回 `{ output, meta? }` → 只取 output 字符串进 model
-          // tool_result,meta 不入模型可见 payload。
+          // mirrors the real Executor.safeContent envelope discrimination: a
+          // bash handler returns `{ output, meta? }` and only the output
+          // string reaches the model-visible tool_result; meta never does.
           const text =
             typeof payload === "string"
               ? payload
@@ -1155,10 +1163,10 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
           ];
         },
       });
-      // 真实 bash tier = build(5 min);测试 seam 把它压到 500ms,验证 tier
-      // timeout 权威覆盖 + partial salvage(SC13)。500ms 保留对 bwrap→node
-      // 启动链(p90≈220ms,重载下 max≈310ms)的余量,避免 tier 先于 fixture
-      // 产出就命中 → partial 为空 的时序 flake。
+      // Real bash tier is build (5 min); the seam compresses it to 500ms to
+      // exercise tier-timeout authority plus partial salvage. 500ms keeps headroom
+      // over the bwrap→node startup chain (p90≈220ms, ≈310ms under load) so the
+      // timer cannot fire before the fixture has written anything.
       const aciExec = createAciExecutor({
         inner,
         catalog: makeCatalog([bashTool]),
@@ -1169,7 +1177,7 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
         { id: "u1", name: "bash", input: { command: "node echo-loop.cjs" } },
       ]);
       const elapsed = Date.now() - start;
-      // 应在 ~500ms + salvage 内收尾,远小于自然耗时(50 行瞬间写出)。
+      // must finish within ~500ms + salvage, far below natural runtime.
       assert.ok(
         elapsed < 4_000,
         `expected tier timeout (~300ms + salvage), got ${elapsed}ms`
@@ -1191,10 +1199,11 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
 
 describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不停回合", () => {
   it("AciExecutor tier timeout → 该条 result 仍 execution_failed timeout,回合 continue 并消费后续模型回应", async () => {
-    // 真 loop engine + 真 Executor(createExecutor)+ stub model:单 call 撞
-    // ACI fast 档超时,但 signal 未 abort —— 该条 tool_result 仍是
-    // execution_failed "timeout"(ADR-0005),回合不得因此判 timeout(ADR-0091);
-    // stub 的第二个回应被继续消费,run 以 completed 收场。
+    // Real loop engine + real Executor (createExecutor) + stub model: one call
+    // exceeds the ACI fast tier while the signal is never aborted, so that
+    // tool_result still reports execution_failed "timeout" (ADR-0005) but the
+    // turn must not be classified as timed out (ADR-0091); the stub's second
+    // response is consumed and the run ends completed.
     const slowToolDef: AciToolDef = Object.freeze({
       name: "slow",
       description: "stub slow tool",
@@ -1215,7 +1224,7 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
     const aciExec = createAciExecutor({
       inner,
       registry: reg,
-      timeoutMsOverride: 50, // fast 真值 5s;压到 50ms
+      timeoutMsOverride: 50, // real fast tier is 5s; compressed to 50ms
     });
     const model = createStubModel({
       responses: [
@@ -1233,12 +1242,12 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
       maxTurns: 5,
       toolTimeoutMs: 50,
     });
-    // 回合继续:第二个模型回应被消费 → completed,turnCount 递增,非 timeout。
+    // the turn continues: the second model response is consumed → completed
     assert.equal(result.stopReason, "completed");
     assert.notEqual(result.stopReason, "timeout");
     assert.equal(result.turnCount, 2);
     assert.equal(result.finalText, "done");
-    // 权威历史:user / assistant(tool_use) / user(tool_result) / assistant(text)。
+    // authoritative history: user / assistant(tool_use) / user(tool_result) / assistant(text).
     assert.equal(result.messages.length, 4);
     const trBlock = result.messages[2]!.content[0]! as {
       type: string;
@@ -1252,10 +1261,10 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
   }, 10_000);
 
   it("SC3/grep-wave-survive: 一波 ≥2 tool_use, 单条 execution_failed timeout 仍把 ok 兄弟的 tool_result 交给模型, 回合 continue", async () => {
-    // SC3/grep-wave-survive: 同波两条 tool_use, 其中恰好一条撞档位钟
-    // → execution_failed "timeout", 另一条 ok; signal 未 abort →
-    // 回合 continue, 两个 tool_result 都进权威历史 (模型仍能用 ok 那条
-    // 写终答). 该 invariant 由 ADR-0091 与本测试共同钉死。
+    // Two tool_use in one wave, exactly one hits the tier clock
+    // → execution_failed "timeout", the other is ok; the signal is never aborted →
+    // the turn continues and both tool_results reach the authoritative history
+    // (the model can still answer from the ok one). ADR-0091 pins this invariant.
     const slowToolDef: AciToolDef = Object.freeze({
       name: "slow",
       description: "stub slow tool",
@@ -1288,7 +1297,7 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
     const aciExec = createAciExecutor({
       inner,
       registry: reg,
-      timeoutMsOverride: 50, // fast 真值 5s;压到 50ms 让 slow 撞档位钟
+      timeoutMsOverride: 50, // real fast tier is 5s; 50ms makes slow hit the tier clock
     });
     const model = createStubModel({
       responses: [
@@ -1309,11 +1318,11 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
       maxTurns: 5,
       toolTimeoutMs: 50,
     });
-    // (a) 回合 continue → stopReason "completed", turnCount = 2.
+    // (a) the turn continues → stopReason "completed", turnCount = 2.
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 2);
-    // (b) tool_result user message 同时含两条结果 —— is_error 必有一条 true,
-    //     另一条 false, 且 ok 那条文本含 fast tool 真实载荷.
+    // (b) the tool_result user message carries both results — exactly one is_error
+    //     true, the other not, and the ok block keeps the fast tool's real payload.
     const trMsg = result.messages[2]!;
     assert.equal(trMsg.role, "user");
     const blocks = trMsg.content as ReadonlyArray<{
@@ -1328,14 +1337,14 @@ describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不�
     const fastBlock = byId.get("u-fast")!;
     assert.equal(slowBlock.is_error, true);
     assert.equal(slowBlock.content[0]!.text, "[execution_failed] timeout");
-    // ok result 不挂 is_error 键 (tool-result.ts:22-27), 故 strict equal
-    // false 不成立; 按 invariant 改为 "not true".
+    // ok results omit the is_error key entirely (tool-result.ts), so compare
+    // against true instead of asserting strict equality with false.
     assert.notEqual(fastBlock.is_error, true);
     assert.ok(
       fastBlock.content[0]!.text.includes("fast-ok"),
       `expected fast tool payload in ok tool_result, got: ${fastBlock.content[0]!.text}`
     );
-    // (c) trace: 一回合两个 toolCalls, 一条 execution_failed "timeout", 一条 ok.
+    // (c) trace: one turn with two toolCalls — one execution_failed "timeout", one ok.
     const toolTurn = trace.turns.find((t) => t.toolCalls.length > 0)!;
     assert.ok(toolTurn, "expected a turn trace carrying the tool calls");
     assert.equal(toolTurn.cancelKind, "none");

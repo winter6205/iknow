@@ -1,16 +1,19 @@
 /**
- * #449b B6 — 判官输入升级 (EvidenceContext 证据体检单进判官)。
+ * Judge-input upgrade: EvidenceContext (the evidence checklist) reaches the judge.
  *
- * 覆盖维度 (spec 449 Code Style G5-3 + Testing Strategy):
- *   - SC6: task = userText 逐字节 (不重绑); evidenceContext 不拼进 task;
- *   - SC9 复断言: JUDGE_ROLE 声明面 disallowedTools 5 项原样 + systemPrompt 不
- *     泄漏 evidenceContext (声明零改动);
- *   - 既有契约破口修复: lambda 解构 finalText 不再静默丢弃;
- *   - 空/非法边界: evidenceContext 空形状 (reasons=[]、executedCommands=[]、
- *     evidenceSummary="") → 判官仍可跑 (spec Testing Strategy 空非法行)。
+ * Coverage:
+ *   - task = userText byte-for-byte (no re-binding); evidenceContext is never
+ *     concatenated into task;
+ *   - JUDGE_ROLE declaration side: the derived disallowedTools stays as-is
+ *     and systemPrompt must not leak evidenceContext (declaration frozen);
+ *   - fix for an existing contract breach: the lambda destructuring finalText
+ *     no longer silently drops it;
+ *   - empty/invalid boundary: empty-shape evidenceContext (reasons=[],
+ *     executedCommands=[], evidenceSummary="") still lets the judge run.
  *
- * 沿用 run-classifier-adapter.ts 的 SubAgentManager seam: stub manager 仅需
- * 实现 spawn + waitFor 两面 (其它方法 stub 为 no-op, TypeScript 结构化类型)。
+ * Reuses the SubAgentManager seam from run-classifier-adapter.ts: the stub
+ * manager only implements spawn + waitFor (other methods are no-ops, relying
+ * on TypeScript structural typing).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -23,9 +26,9 @@ import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.js
 import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
 import { ACI_TOOLSET_NAMES } from "../../../src/harness/aci/tools/registry.ts";
 
-/* ------------------------------ 测试替身 ------------------------------ */
+/* ------------------------------ test doubles ------------------------------ */
 
-/** 判官 pass envelope (满足 parseClassifierResult 三态契约)。 */
+/** Judge pass envelope (satisfies the parseClassifierResult three-state contract). */
 const PASS_JUDGE_JSON = JSON.stringify({
   kind: "pass",
   reason: "verified",
@@ -33,9 +36,9 @@ const PASS_JUDGE_JSON = JSON.stringify({
 });
 
 interface StubManagerOpts {
-  /** 自定义 waitFor 返回 (默认 = judge pass envelope)。 */
+  /** Custom waitFor return (default = judge pass envelope). */
   readonly envelope?: SubAgentEnvelope;
-  /** 自定义 spawn handler (默认 = 捕获 def 返回 t1)。 */
+  /** Custom spawn handler (default = capture def and return t1). */
   readonly onSpawn?: (def: SubAgentDefinition) => { readonly taskId: string };
 }
 
@@ -84,7 +87,8 @@ function makeStubManager(opts: StubManagerOpts = {}): {
     abortTask() {
       return false;
     },
-    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    // The manager interface gained a read-only enumeration surface; the fake
+    // implements it to stay structurally compatible.
     listSubagents() {
       return [];
     },
@@ -93,13 +97,14 @@ function makeStubManager(opts: StubManagerOpts = {}): {
 }
 
 /**
- * #357 T2 — 判官 allow-list 推导真值。
+ * Judge allow-list derivation ground truth.
  *
- * 判官白名单基线（spec 357 Objective 2 + plans T2 acceptance 2）：
- * 「只许本地纯只读」= read_file / grep / glob。fail-closed 推导：
+ * Judge whitelist baseline — "local pure read-only only" = read_file / grep /
+ * glob. fail-closed derivation:
  *   disallowedTools = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE
  *
- * 加白名单 = 显式改 JUDGE_ALLOWED_BASELINE 常量 + operator 拍板。
+ * Widening the whitelist = explicitly changing the JUDGE_ALLOWED_BASELINE
+ * constant with operator sign-off.
  */
 const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "read_file",
@@ -107,12 +112,12 @@ const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "glob",
 ]);
 
-/** 推导真值 = 全量 ACI 工具面 − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+/** Derived ground truth = full ACI tool surface − whitelist baseline (same formula as run-classifier-adapter). */
 const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze(
   [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
 );
 
-/* ------------------------------ B6: evidence-aware judge input ------------------------------ */
+/* ------------------------------ evidence-aware judge input ------------------------------ */
 
 describe("createRunClassifierFromManager — evidence-aware judge input (#449b B6)", () => {
   it("SC6: evidenceContext 缺席时 def.task = userText 逐字节 (零 append)", async () => {
@@ -226,13 +231,13 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     });
     const def = captured()!;
     assert.equal(def.excludeFromHostDrain, true, "判官结果不得进 host-drain");
-    // fail-closed: 全量面减去白名单三件 = 全量面 − {read_file, grep, glob}。
+    // fail-closed: full ACI surface minus the 3 whitelist items = surface − {read_file, grep, glob}.
     assert.deepEqual(
       [...def.disallowedTools].sort(),
       [...JUDGE_DISALLOWED_TOOLS].sort(),
       "disallowedTools must equal ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE"
     );
-    // 白名单三件必须缺席（允许判官使用）。
+    // The 3 whitelist tools must be absent (the judge is allowed to use them).
     for (const allowed of JUDGE_ALLOWED_BASELINE) {
       assert.ok(
         !def.disallowedTools!.includes(allowed),
@@ -242,11 +247,12 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
   });
 
   it("#357 T2: 白名单为空时判官零工具可装配（pure-text 路径边界）", () => {
-    // 推导公式: deny = 全量面 − 白名单。白名单 = ∅ → deny = 全量面。
-    // 这条 spec Testing Strategy「白名单空 → 判官零工具仍可装配」边界条件
-    // 由本测试守护（fail-closed 推导边界）。判官工厂实际产物是 deny 数组,
-    // 真零工具的运行时验证在 worker-tool-surface.test.ts C 段「deny 全量」
-    // 已覆盖等价语义——此处仅锁推导公式正确性。
+    // Derivation formula: deny = full surface − whitelist. whitelist = ∅ → deny
+    // = full surface. This guards the "empty whitelist → judge still assembles
+    // with zero tools" boundary (fail-closed derivation edge). The judge factory
+    // actually produces a deny array; the real zero-tool runtime verification is
+    // covered by worker-tool-surface.test.ts section C ("deny everything") —
+    // this test only pins the derivation formula's correctness.
     const emptyAllow: ReadonlyArray<string> = Object.freeze([]);
     const computedDeny = [...ACI_TOOLSET_NAMES].filter(
       (n) => !emptyAllow.includes(n)
@@ -289,7 +295,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
   it("JUDGE_ROLE 声明面零改动: evidenceContext 在场/缺席 systemPrompt 不变", async () => {
     const { manager, captured } = makeStubManager();
     const runClassifier = createRunClassifierFromManager({ manager });
-    // 缺席
+    // absent
     await runClassifier({
       task: "x",
       summary: "",
@@ -297,7 +303,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
       cwd: "/tmp",
     });
     const def1 = captured()!;
-    // 在场
+    // present
     await runClassifier({
       task: "x",
       summary: "",
@@ -320,9 +326,11 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
   });
 
   it("finalText 契约修复: lambda 收到 finalText 不抛错且 spawn 被调", async () => {
-    // B6 修复既有契约破口: 当前 adapter 解构丢弃 finalText, 现须确认 lambda
-    // 收到 finalText 不抛错 + spawn 正常调用 (finalText 消费语义按 adapter
-    // 现状 —— summary 已带 finalText, adapter 不需再消费亦可接受)。
+    // Fixes an existing contract breach: the old adapter dropped finalText in
+    // destructuring. Here we only confirm the lambda accepts finalText without
+    // throwing and spawn is called normally (consumption follows the adapter's
+    // current state — summary already carries finalText, so the adapter need
+    // not consume it again).
     const { manager, captured } = makeStubManager();
     const runClassifier = createRunClassifierFromManager({ manager });
     const result: ClassifierEnvelope = await runClassifier({
@@ -365,7 +373,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
   });
 });
 
-/* ------------------------------ #357 code-review fix: 判官 sandboxRoot 继承 ------------------------------ */
+/* ------------------------------ judge sandboxRoot inheritance ------------------------------ */
 
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
@@ -377,13 +385,15 @@ import { createSubAgentManager } from "../../../src/harness/subagent/manager.js"
 import type { WorkerEnvelope } from "../../../src/harness/subagent/envelope.js";
 
 /**
- * #357 code-review fix 回归测试（Standards+Spec 双轴 Medium）：
- * 判官 def 不显式传 sandboxRoot → manager 单点校验走 SC8 继承路径。
+ * Regression test: the judge def omits sandboxRoot → the manager's single-point
+ * validation inherits the parent sandbox root.
  *
- * 修复前形态：adapter 把 `sandboxRoot: cwd`（= process.cwd()）钉进 def ——
- * serve 显式 sandboxRoot 配置下 cwd ≠ manager parent root，判官 spawn 每轮
- * 被 T1 校验拒绝（SubAgentSandboxRootError）→ catch 吞成 crashed envelope，
- * verify 静默空转。修复后：字段省略 → envelope.sandboxRoot = parent root。
+ * Before the fix: the adapter pinned `sandboxRoot: cwd` (= process.cwd()) into
+ * the def — under an explicit serve sandboxRoot config, cwd ≠ the manager
+ * parent root, so every judge spawn was rejected by sandbox-root validation
+ * (SubAgentSandboxRootError); the catch swallowed it into a crashed envelope
+ * and verify silently spun. After the fix: field omitted →
+ * envelope.sandboxRoot = parent root.
  */
 describe("#357 判官 spawn 锚 — 省略 sandboxRoot 走 SC8 继承（parent ≠ cwd 场景）", () => {
   it("真实 manager（parent sandboxRoot ≠ process.cwd()）→ 判官 spawn 成功且继承父根", async () => {
@@ -406,8 +416,9 @@ describe("#357 判官 spawn 锚 — 省略 sandboxRoot 走 SC8 继承（parent �
             exitCode: null,
             signalCode: null,
           });
-          // spawn 后异步 emit 合法 pass envelope → manager completed 终态，
-          // waitFor 快速收敛（不挂 120s 缺省 timeout）。
+          // Emit a valid pass envelope asynchronously after spawn → manager
+          // reaches the completed terminal state and waitFor converges fast
+          // (never hangs on the 120s default timeout).
           setImmediate(() => {
             stdout.write(
               JSON.stringify({
@@ -426,8 +437,9 @@ describe("#357 判官 spawn 锚 — 省略 sandboxRoot 走 SC8 继承（parent �
         manager,
         timeoutMs: 10_000,
       });
-      // cwd 显式传 process.cwd()（≠ parent）——修复前该值会被钉进 def.sandboxRoot
-      // 触发越界拒绝；修复后 adapter 不消费 cwd。
+      // cwd is explicitly process.cwd() (≠ parent) — before the fix this value
+      // was pinned into def.sandboxRoot and rejected as out-of-bounds; after the
+      // fix the adapter does not consume cwd.
       const result = await runClassifier({
         task: "judge the work",
         summary: "",

@@ -4,7 +4,7 @@
  * - createTtyAskUser uses readline against supplied streams (mocked).
  * - createFailClosedAskUser always returns false.
  * - createNoAskUser always returns true.
- * - createServeAskUser: #115 H3 — FAIL-CLOSED after bounded timeout; only
+ * - createServeAskUser: FAIL-CLOSED after bounded timeout; only
  *   approves via resolveAsk(id, true). Replaces the prior auto-approve stub.
  */
 
@@ -241,9 +241,10 @@ describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
   });
 
   it("pendingAll 视图字段集 = {id, tool, summaryHint}（输入侧额外 key 不外泄到视图）", async () => {
-    // ADR-0097:批准面只有一条链,视图不携带任何按输入改写的审批轴字段。
-    // 即便 input 里带了未知 key(如遗留 network),视图字段集保持不变 ——
-    // 前端渲染面因此不存在第二套标记分支。
+    // ADR-0097: the approval surface has exactly one chain; the view carries no
+    // input-rewritten approval-axis fields. Even if input holds an unknown key
+    // (e.g. the legacy network), the view field set stays fixed — the frontend
+    // render surface therefore has no second marker branch.
     const h = createServeAskUser({ timeoutMs: 1_000 });
     const p = h.ask({
       tool: "bash",

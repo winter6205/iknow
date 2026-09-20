@@ -1,25 +1,27 @@
 /**
- * T5 (ADR-0071 / SC8 + L2):
- * build-engine 的 subagentsDir 注入缝 —— SC1 生产装配面
- * (cli.ts chat path + hub.ts ensureDeps)。
+ * build-engine's subagentsDir injection seam (ADR-0071), covering the
+ * production assembly surface (cli.ts chat path + hub.ts ensureDeps).
  *
- * 契约（plans/358 §SC1 + spec AC,迁到 T5 后语义）：
- *   1. buildHarnessEngine({ subagentsDir }) → 内置 createSubAgentManager
- *      收到该 subagentsDir；通过 fake spawn 工厂触发 spawn 后, 真实 JSONL
- *      落在 `<subagentsDir>/agent-<taskId>.jsonl` 含三类事件。
- *   2. 缺省 subagentsDir → manager 走 NoopTraceService（byte-stable,等价
- *      旧 subagentTrace 缺省形态）。
+ * Contract:
+ *   1. buildHarnessEngine({ subagentsDir }) → the builtin
+ *      createSubAgentManager receives that subagentsDir; after triggering a
+ *      spawn via the fake spawn factory, real JSONL lands at
+ *      `<subagentsDir>/agent-<taskId>.jsonl` containing three event types.
+ *   2. Absent subagentsDir → the manager falls back to NoopTraceService
+ *      (byte-stable, equivalent to the old default subagentTrace shape).
  *
- * 与 tests/subagent/manager-trace.test.ts 的差异：后者直接构造 manager,
- * 注入 trace + fake spawn 工厂；本文件验证 build-engine 的 subagentsDir
- * 装配链 —— opts.subagentsDir 正确传入 manager。
+ * Difference from tests/subagent/manager-trace.test.ts: that file constructs
+ * the manager directly with an injected trace + fake spawn factory; this one
+ * verifies build-engine's assembly chain — opts.subagentsDir reaching the
+ * manager.
  *
- * Mock 策略：vi.mock 整模块（同步 fake — `vi.hoisted` 共享 state），
- * 让 build-engine.ts 的 `import { createSubAgentManager }` 解析到 spy，
- * spy 把 spawn 工厂替换为 fake（不启真实 worker）。ESM live binding 特性
- * 下 vi.spyOn(module, "createSubAgentManager") 只改 namespace 不改
- * import binding（详见 tests/harness/aci/registry-workspace-root.test.ts
- * 注释）；模块级 vi.mock 才是正确的拦截方式。
+ * Mock strategy: vi.mock the whole module (sync fake via `vi.hoisted` shared
+ * state) so build-engine.ts's `import { createSubAgentManager }` resolves to
+ * the spy, and the spy swaps the spawn factory for a fake (no real worker).
+ * Under ESM live bindings, vi.spyOn(module, "createSubAgentManager") only
+ * mutates the namespace, not the import binding (see the comment in
+ * tests/harness/aci/registry-workspace-root.test.ts); a module-level vi.mock
+ * is the correct interception point.
  */
 
 import assert from "node:assert/strict";
@@ -39,12 +41,15 @@ import type { ChildProcess } from "node:child_process";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 
-// 隔离仓库根 .mcp.json 的 iknow-trace server(schema compile validator 在
-// 单测环境不可达，触发的 30s 装配期窗口与 tsx 子进程噪声都是同一条依赖面的
-// 副作用) —— 走 build-engine 已留的 createMcpManager / createMcpClient 测试缝。
-// 同时 stub 真实 SDK countTokens 网络调用(127.0.0.1:9999 死端口)。其它 MCP
-// 形态不动。stub scope 与不变式仍真实：trace 注入 / NoopTrace 默认 /
-// diagnosticsDir 透传 / query_trace 走 diagnosticsDir 树。
+// Isolate the repo-root .mcp.json's iknow-trace server (its schema-compile
+// validator is unreachable in the unit-test environment, and the resulting
+// 30s assembly window plus tsx child-process noise are side effects of the
+// same dependency surface) — through build-engine's existing
+// createMcpManager / createMcpClient test seams. Also stub the real SDK
+// countTokens network call (127.0.0.1:9999 is a dead port). Other MCP shapes
+// stay untouched. Stub scope vs. still-real invariants: trace injection /
+// NoopTrace default / diagnosticsDir pass-through / query_trace reading the
+// diagnosticsDir tree.
 const fakeMcpClient = (_server: unknown): McpClientHandle => ({
   connect: async () => {},
   listTools: async () => [],
@@ -56,8 +61,9 @@ const fakeMcpClient = (_server: unknown): McpClientHandle => ({
   readResource: async () => ({ contents: [] }),
 });
 
-// Module mock 必须先于 buildHarnessEngine 的 dynamic import。vi.hoisted
-// 共享 state 解决 vi.mock 工厂被 hoisted 与 fakeChildren 变量声明顺序问题。
+// The module mock must precede buildHarnessEngine's dynamic import.
+// vi.hoisted shared state resolves the ordering between the hoisted vi.mock
+// factory and the fakeChildren variable declaration.
 const mockState = vi.hoisted(() => ({
   fakeChildren: [] as Array<{
     stdin: PassThrough;
@@ -187,17 +193,21 @@ afterEach(async () => {
   rmSync(scratchDir, { recursive: true, force: true });
 });
 
-// ── SC1 生产装配面 ──────────────────────────────────────────────────────
+// ── production assembly surface ─────────────────────────────────────────
 
-// 共享 seam：每个 buildHarnessEngine 调用点都注入这一组，截断仓库根
-// .mcp.json 的 iknow-trace server（schema compile + tsx 子进程噪声 +
-// 30s firstTurnReady 窗口）以及真实 SDK countTokens 网络调用。
+// Shared seam: injected into every buildHarnessEngine call site, cutting off
+// the repo-root .mcp.json's iknow-trace server (schema compile + tsx
+// child-process noise + 30s firstTurnReady window) and the real SDK
+// countTokens network call.
 //
-// `countTokens` 用固定小值 stub（而非 skipCountTokens）是刻意的：本文件验
-// subagentsDir / NoopTrace / query_trace 的接线，溢出判定走哪条分支与断言
-// 无关 —— 固定值让判定落在确定性的「未超阈」分支，不依赖装配期真调死端口
-// 的失败路径。要验溢出/索引降档两条路径的专测见
-// build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
+// Stubbing `countTokens` with a fixed small value (rather than
+// skipCountTokens) is deliberate: this file verifies the subagentsDir /
+// NoopTrace / query_trace wiring, and which overflow branch is taken is
+// irrelevant to the assertions — the fixed value pins the decision to the
+// deterministic "below threshold" branch instead of relying on the failure
+// path of a live call to a dead port during assembly. Dedicated tests for
+// the overflow and index-demotion paths:
+// build-engine-tool-overflow.test.ts and disclosure-index-align/.
 const traceSeam = {
   createMcpManager: (opts: Parameters<typeof createMcpManager>[0]) =>
     createMcpManager({
@@ -217,16 +227,17 @@ describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
       ...traceSeam,
     });
 
-    // 1. manager 在场 + createSubAgentManager 被调用, 收到的 subagentsDir opt ===
-    //    我们注入的（验证 buildHarnessEngine opts.subagentsDir 透传到
-    //    createSubAgentManager({subagentsDir})）。
+    // 1. manager present + createSubAgentManager called, receiving exactly
+    //    the subagentsDir we injected (proves buildHarnessEngine's
+    //    opts.subagentsDir is threaded to createSubAgentManager({subagentsDir})).
     expect(built.subagentManager).toBeDefined();
     expect(mockState.captureCallCount).toBe(1);
     expect(mockState.capturedSubagentsDir).toBe(scratchDir);
 
-    // 2. spawn def → per-agent JSONL 含 subagent_spawn / _state_change /
-    //    _stop 三类事件（mirror manager-trace.test.ts:339,但落点在
-    //    `<subagentsDir>/agent-<taskId>.jsonl` 而不是 `subagent.jsonl`）。
+    // 2. spawn def → per-agent JSONL containing the three event types
+    //    subagent_spawn / _state_change / _stop (mirrors
+    //    manager-trace.test.ts:339, but lands at
+    //    `<subagentsDir>/agent-<taskId>.jsonl` instead of `subagent.jsonl`).
     const manager = built.subagentManager!;
     const { taskId } = manager.spawn({ task: "do thing" });
     expect(mockState.fakeChildren.length).toBe(1);
@@ -256,8 +267,9 @@ describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
     });
     expect(built.subagentManager).toBeDefined();
     expect(mockState.captureCallCount).toBe(1);
-    // T5: subagentsDir 缺省 + opts.trace 已退役 → manager 走 NoopTrace,
-    // 不写盘(验证 byte-stable 默认行为, 等价旧 subagentTrace 缺省形态)。
+    // subagentsDir absent + opts.trace retired → manager uses NoopTrace and
+    // writes nothing to disk (byte-stable default behavior, equivalent to
+    // the old default subagentTrace shape).
     expect(mockState.capturedSubagentsDir).toBeUndefined();
     expect(mockState.capturedTraceOpt).toBeUndefined();
   });
@@ -275,7 +287,7 @@ describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
 
   it("subagentDiagnosticsDir → query_trace reads that tree, not workspaceRoot/trace", async () => {
     const customDir = mkdtempSync(join(tmpdir(), "iknow-query-trace-dir-"));
-    // T6 (SC16): 会话落两级树 `<baseDir>/projects/<slug>/<convId>/trace.jsonl`。
+    // A session lands in a two-level tree: `<baseDir>/projects/<slug>/<convId>/trace.jsonl`.
     const convDir = join(
       customDir,
       "projects",

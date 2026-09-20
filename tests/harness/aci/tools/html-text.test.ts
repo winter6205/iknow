@@ -1,17 +1,19 @@
 /**
- * html-text 共享原语单元测试。
+ * Unit tests for the shared html-text primitives.
  *
- * 此前 htmlToText / cleanHtml / decodeEntities 仅经 web-fetch / web-search
- * 工具测试间接覆盖（基础实体解码 / script 跳过）。本文件补 pathological HTML
- * 边界，固化正则 parser 的行为契约（与 upstream HTMLParser 状态机的差异
- * 属已知偏离，本测试锁定当前行为，便于后续评估是否换 DOM parser）。
+ * htmlToText / cleanHtml / decodeEntities were previously covered only
+ * indirectly via web-fetch / web-search tool tests (basic entity decoding /
+ * script skipping). This file adds pathological HTML edges and pins the
+ * behavior contract of the regex parser (deviations from the upstream
+ * HTMLParser state machine are known; locking current behavior supports a
+ * later assessment of switching to a DOM parser).
  *
- * 覆盖维度：
- *   - 基础：纯文本 / 空输入 / 单标签 / 嵌套标签
- *   - script/style 块跳过：含 '<' 字符串 / 深度嵌套 / 自闭合变体
- *   - 实体：命名 + 数字十进制 + 十六进制 + 漏分号 + 越界码点 + 双重编码
- *   - 空白折叠：连续空白 / 混合换行制表符 / nbsp 折叠
- *   - 畸形：未闭合标签 / 标签内 '<' / 属性含 '>' / 注释 / CDATA
+ * Coverage:
+ *   - basics: plain text / empty input / single tag / nested tags
+ *   - script/style skipping: strings containing '<' / deep nesting / self-closing variants
+ *   - entities: named + decimal + hex + missing semicolon + out-of-range code points + double encoding
+ *   - whitespace folding: runs of whitespace / mixed newlines and tabs / nbsp folding
+ *   - malformed: unclosed tags / '<' inside tags / '>' inside attributes / comments / CDATA
  */
 
 import assert from "node:assert/strict";
@@ -78,8 +80,9 @@ describe("decodeEntities - edge cases", () => {
   });
 
   it("out-of-range code point does not crash (String.fromCodePoint throws for >0x10FFFF)", () => {
-    // 越界码点：fromCodePoint 抛 RangeError，当前实现会抛出（固化此行为）。
-    // 这是已知边界：生产 HTML 不会出现，但测试锁定失败模式而非静默吞错。
+    // Out-of-range code point: fromCodePoint throws RangeError and the current
+    // implementation propagates it (pinned behavior). Known edge — never in
+    // production HTML — but the test locks the failure mode instead of swallowing it.
     assert.throws(
       () => decodeEntities("&#x110000;"),
       (err: unknown) => err instanceof RangeError
@@ -153,10 +156,11 @@ describe("htmlToText - whitespace folding", () => {
   });
 
   it("collapses \r and \f to spaces but preserves \\n (paragraph boundary)", () => {
-    // 设计选择（对齐 upstream HTMLParser 状态机行为）：换行符 \n 保留为
-    // 段落边界；\r / \f / \v 与水平空白合并为单个空格。这样输出对 LLM
-    // 更可读（保留段落结构），且与 upstream web_fetch_tool 一致。
-    // 单 \n 不被合并（"a\nb" 留作段落分隔），双 \n 才折叠。
+    // Design choice (aligned with the upstream HTMLParser state machine): \n
+    // is kept as a paragraph boundary; \r / \f / \v fold into a single space
+    // with horizontal whitespace. The output stays readable for the LLM
+    // (paragraph structure preserved) and matches upstream web_fetch_tool.
+    // A lone \n is never merged ("a\nb" stays a paragraph split); only \n\n folds.
     assert.equal(htmlToText("a\nb\rc\fd"), "a\nb c d");
   });
 
@@ -173,19 +177,21 @@ describe("htmlToText - whitespace folding", () => {
 
 describe("htmlToText - malformed input", () => {
   it("unclosed tag: strips up to the last '>'", () => {
-    // 正则 <[^>]+> 贪婪到第一个 '>'；未闭合标签剩余文本原样保留。
+    // The regex <[^>]+> stops at the first '>'; leftover text of an unclosed
+    // tag is kept verbatim.
     const out = htmlToText("<p>hello world");
     assert.equal(out, "hello world");
   });
 
   it("'<' inside text (not a tag) is preserved", () => {
-    // 'a < b' 中 '<' 后无字母 + '>'，正则不匹配为标签，原样保留。
+    // In 'a < b' the '<' is not followed by a tag + '>', so the regex does not
+    // match and the text is kept verbatim.
     assert.equal(htmlToText("a < b"), "a < b");
   });
 
   it("attribute value containing '>' is split early", () => {
-    // data-x="a>b" 中第一个 '>' 出现在属性值内，正则会在那里截断标签。
-    // 固化此行为：不崩溃，输出含标签后的文本。
+    // In data-x="a>b" the first '>' sits inside the attribute value, so the
+    // regex cuts the tag there. Pinned: no crash, text after the tag survives.
     const html = '<a data-x="a>b">link</a> tail';
     const out = htmlToText(html);
     assert.ok(out.includes("link"));
@@ -193,13 +199,14 @@ describe("htmlToText - malformed input", () => {
   });
 
   it("HTML comment is stripped as a tag", () => {
-    // <!-- comment --> 的 '<' 到 '>' 被当普通标签剥离，内容残留为文本。
-    // 固化当前行为（与 DOM parser 不同：注释文本可能泄漏）。
+    // <!-- comment --> is stripped as a plain '<'..'>' tag and its content
+    // leaks as text. Pinned current behavior (a DOM parser would differ:
+    // comment text may leak).
     const html = "<p>x</p><!-- secret note --><p>y</p>";
     const out = htmlToText(html);
     assert.ok(out.includes("x"));
     assert.ok(out.includes("y"));
-    // 注释是否泄漏是已知偏离，仅断言不崩溃 + 主文本保留。
+    // Whether the comment leaks is a known deviation; only assert no crash + main text preserved.
   });
 
   it("CDATA section is handled without crashing", () => {
@@ -212,7 +219,7 @@ describe("htmlToText - malformed input", () => {
 
 describe("htmlToText - robustness", () => {
   it("handles deeply nested tags (no exponential backtracking)", () => {
-    // 构造 200 层嵌套 div，确保正则在合理时间内完成。
+    // 200-level nested divs: the regex must finish in reasonable time.
     const depth = 200;
     const open = "<div>".repeat(depth);
     const close = "</div>".repeat(depth);
@@ -221,7 +228,7 @@ describe("htmlToText - robustness", () => {
     const out = htmlToText(html);
     const elapsed = Date.now() - t0;
     assert.equal(out, "core");
-    // 经验阈值：正则 parser 应在 < 100ms 完成（防 ReDoS 退化）。
+    // Heuristic timing guard against ReDoS regression.
     assert.ok(elapsed < 500, `deeply nested took ${elapsed}ms`);
   });
 

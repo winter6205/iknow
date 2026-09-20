@@ -1,14 +1,14 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：partition-by-coupling.test.ts。
+ * PROTOTYPE — multi-task graph orchestration: partition-by-coupling.test.ts.
  *
- * 覆盖：
- *   1. 空任务列表 → 空 GraphSpec。
- *   2. 单一任务 + 单一 module → 无 deps。
- *   3. 多个任务触碰同 module → 相邻加边（成链，不成团）。
- *   4. 多任务跨 module → 各自独立 wave 并行。
- *   5. 多 module 链：auth-ui 同时触碰 auth + ui，分发到两个 module 链。
- *   6. partitionByCoupling + topoWaves 组合：耦合的串行、解耦的并行。
- *   7. sameWave helper 正确判定同 / 不同 wave。
+ * Covers:
+ *   1. Empty task list → empty GraphSpec.
+ *   2. Single task + single module → no deps.
+ *   3. Multiple tasks touching the same module → edges only between adjacent ones (chain, not clique).
+ *   4. Tasks across modules → independent parallel waves.
+ *   5. Multi-module chain: auth-ui touches auth + ui → fans out into both module chains.
+ *   6. partitionByCoupling + topoWaves composition: coupled tasks serialize, decou ones parallelize.
+ *   7. sameWave helper correctly decides same / different wave.
  */
 
 import { describe, it } from "vitest";
@@ -73,7 +73,7 @@ describe("partitionByCoupling", () => {
   });
 
   it("multi-module task fans out into multiple chains", () => {
-    // t-auth-ui 触碰 auth + ui → 它与 t-auth 链（auth），与 t-ui 链（ui）。
+    // t-auth-ui touches auth + ui → it joins the auth chain (auth) and the ui chain (ui).
     const tasks: CouplingTask[] = [
       { id: "t-auth", touches: ["auth"] },
       { id: "t-auth-ui", touches: ["auth", "ui"] },
@@ -81,12 +81,12 @@ describe("partitionByCoupling", () => {
     ];
     const spec = partitionByCoupling(tasks);
     const byId = new Map(spec.nodes.map((n) => [n.id, n]));
-    // auth module 链：t-auth → t-auth-ui (按输入顺序)
+    // auth-module chain: t-auth → t-auth-ui (input order)
     assert.deepEqual(byId.get("t-auth-ui")!.deps, ["t-auth"]);
-    // ui module 链：t-auth-ui → t-ui（inputIndex 排序后 deps 含 t-auth-ui）
-    // 因为 t-auth-ui 已经在 inputIndex 中排前，deps 含 t-auth-ui 合法。
+    // ui-module chain: t-auth-ui → t-ui (after inputIndex sort, deps include t-auth-ui).
+    // t-auth-ui sorts earlier in inputIndex, so the dep is legitimate.
     assert.ok(byId.get("t-ui")!.deps.includes("t-auth-ui"));
-    // 验证 topoWaves：t-auth 与 t-ui 不在同一 wave（中间隔着 t-auth-ui）。
+    // topoWaves check: t-auth and t-ui are not in the same wave (t-auth-ui sits between them).
     const waves = topoWaves(spec);
     assert.equal(waves.length, 3);
     assert.deepEqual(waves[0], ["t-auth"]);
@@ -95,7 +95,7 @@ describe("partitionByCoupling", () => {
   });
 
   it("complex 5-task mixed scenario from C1 (research report)", () => {
-    // 复制 proto-c-coupling 的 C1_TASKS，但本测试只关注 partition 行为。
+    // Ported from proto-c-coupling's C1_TASKS; this test only checks partition behavior.
     const tasks: CouplingTask[] = [
       { id: "t-auth", touches: ["auth"] },
       { id: "t-auth-ui", touches: ["auth", "ui"] },
@@ -107,16 +107,16 @@ describe("partitionByCoupling", () => {
     const waves = topoWaves(spec);
     const wave0 = waves[0] ?? [];
 
-    // auth-coupled separated: t-auth 与 t-auth-ui 不在同一 wave。
+    // auth-coupled separated: t-auth and t-auth-ui are not in the same wave.
     assert.equal(sameWave("t-auth", "t-auth-ui", waves), false);
-    // ui-coupled separated: t-auth-ui 与 t-ui 不在同一 wave。
+    // ui-coupled separated: t-auth-ui and t-ui are not in the same wave.
     assert.equal(sameWave("t-auth-ui", "t-ui", waves), false);
-    // db-coupled separated: t-db 与 t-db-test 不在同一 wave。
+    // db-coupled separated: t-db and t-db-test are not in the same wave.
     assert.equal(sameWave("t-db", "t-db-test", waves), false);
-    // wave0 含 t-db 与 auth 链起点（disjoint parallel）。
+    // wave0 contains t-db and the auth-chain head (disjoint parallel).
     assert.ok(wave0.includes("t-db"));
     assert.ok(wave0.some((id) => id.startsWith("t-auth")));
-    // 总层数 < 5（解耦并行带来合并）。
+    // total wave count < 5 thanks to decoupled parallelism.
     assert.ok(waves.length < 5, `expected <5 waves, got ${waves.length}`);
   });
 

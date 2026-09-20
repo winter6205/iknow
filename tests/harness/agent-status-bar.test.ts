@@ -1,12 +1,13 @@
 /**
- * T1 (#645) / ADR-0028 / plans/agent-status-bar.md: 状态栏 —— 每次即将调用
- * 模型前,把代码现算的现势(last_tool + 未勾 todo 段)以 user 消息追加在
- * 当时 messages 尾;旧栏保留、不 splice、不写 deps.system。
+ * ADR-0028: the status bar — before each upcoming model call, freshly
+ * computed current state (last_tool + unchecked todo lines) is appended as a
+ * user message at the tail of the live messages; old bars are kept, never
+ * spliced, and deps.system is not written.
  *
- * 验收 ①–⑦ 逐条对应 plans/agent-status-bar.md T1 Acceptance;⑧(既有 loop
- * 停止语义测试不降级)由 tests/harness/loop-engine.test.ts /
- * tests/harness/compress/integration.test.ts / tests/harness/loop-engine-commit.test.ts
- * 全量运行守住(本文件不重复其断言)。
+ * Each acceptance section below maps to one spec point; the "existing loop
+ * stop-semantics tests must not degrade" requirement is held by the full runs
+ * of tests/harness/loop-engine.test.ts, tests/harness/compress/integration.test.ts
+ * and tests/harness/loop-engine-commit.test.ts (not re-asserted here).
  */
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -39,12 +40,13 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
 // ---------------------------------------------------------------------------
-// 本文件私有 fixtures(makeTodoDir / makeSpyAdapter / okEchoTool / bar 文本
-// 提取与解析等共享部分见 tests/harness/_agent-status-fixtures.ts)
+// This file's private fixtures; shared parts (makeTodoDir / makeSpyAdapter /
+// okEchoTool / bar text extraction & parsing) live in
+// tests/harness/_agent-status-fixtures.ts
 // ---------------------------------------------------------------------------
 
-// build-engine / worker 装配用例直接 mkdtemp 的 tmp 目录(makeTodoDir 的
-// 目录由共享模块自己登记并清理)。
+// tmp dirs that the build-engine / worker assembly cases mkdtemp directly
+// (makeTodoDir registers and cleans its own dirs inside the shared module).
 const tempDirs: string[] = [];
 
 afterAll(async () => {
@@ -72,7 +74,8 @@ function failTool(name: string): ReturnType<typeof createStubTool> {
 }
 
 // ---------------------------------------------------------------------------
-// AC ① 同一用户回合内每个模型调用前各追加一条新栏,历史栏保留
+// A new bar is appended before every model call within one user turn;
+// historical bars are retained.
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: append-before-every-model-call", () => {
@@ -96,7 +99,7 @@ describe("agent status bar T1: append-before-every-model-call", () => {
           toolCalls: [{ id: "t2", name: "echo", input: { value: "b" } }],
         }),
       },
-      // 第三步:无工具的纯文本收尾 —— 该步请求同样以新栏收尾。
+      // Step 3: plain-text wrap-up with no tool call — its request must still end with a fresh bar.
       {
         kind: "reply",
         result: assistantResult({ texts: ["done"], toolCalls: [] }),
@@ -114,7 +117,7 @@ describe("agent status bar T1: append-before-every-model-call", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(captured.length, 3);
 
-    // 每步请求的最后一条消息都是当时的栏(user role,<agent_status> 文本)。
+    // Each step's request ends with that step's bar (user role, `<agent_status>` text).
     for (let i = 0; i < captured.length; i++) {
       const tail = textOfLastMessage(captured[i]!);
       assert.ok(
@@ -123,18 +126,18 @@ describe("agent status bar T1: append-before-every-model-call", () => {
       );
     }
 
-    // 历史栏保留:第 k 步请求里能数到 k 条栏(追加、不 splice)。
+    // History preserved: the k-th request contains exactly k bars (append-only, no splice).
     assert.equal(barTexts(captured[0]!).length, 1);
     assert.equal(barTexts(captured[1]!).length, 2);
     assert.equal(barTexts(captured[2]!).length, 3);
 
-    // 第一步注入的栏文本在第 2/3 步请求里逐字节仍在(未改写)。
+    // The bar text injected at step 1 is still byte-identical in steps 2/3 (never rewritten).
     const bar1 = barTexts(captured[0]!)[0]!;
     assert.ok(barTexts(captured[2]!).includes(bar1));
 
-    // 栏随权威历史流到 RunResult.messages。
+    // Bars flow into RunResult.messages together with the authoritative history.
     assert.equal(barTexts(result.messages).length, 3);
-    // 栏消息是 user role。
+    // Bar messages carry the user role.
     const barMsg = result.messages.find(
       (m) => m.role === "user" && m.content.some(isBarBlock)
     );
@@ -143,7 +146,8 @@ describe("agent status bar T1: append-before-every-model-call", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ② 空槽不广告:缺席 / 空文件 / 全勾 / 读失败 → 无 todo 段,回合不失败
+// Empty slots are not advertised: absent / empty file / all checked / read
+// failure → no todo section, and the turn must not fail.
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: empty slots are not advertised", () => {
@@ -206,7 +210,7 @@ describe("agent status bar T1: empty slots are not advertised", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ③ todo 段只投影未勾行
+// The todo section projects unchecked lines only.
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: todo section projects unchecked lines only", () => {
@@ -218,8 +222,9 @@ describe("agent status bar T1: todo section projects unchecked lines only", () =
         "some prose line that is not a checkbox",
         "- [ ] beta task",
         "- [x] another done",
-        // 畸形行:裸 "- [ ]" 后无空格 —— 账本语法(ITEM_LINE)不接受,解析
-        // 时被跳过;它也不占 id 序号(投影锚在语法 SSOT,不是行前缀)。
+        // Malformed line: bare "- [ ]" with no trailing space — the ledger grammar
+        // (ITEM_LINE) rejects it, so parsing skips it; it also consumes no id slot
+        // (projection anchors on the grammar SSOT, not on a line prefix).
         "- [ ]malformed-no-space",
       ].join("\n") + "\n"
     );
@@ -249,7 +254,8 @@ describe("agent status bar T1: todo section projects unchecked lines only", () =
 });
 
 // ---------------------------------------------------------------------------
-// AC ④ 同一跳 update 掉最后一条未勾 → 新栏去 todo 段,旧栏不动(真实 todo_write)
+// Recompute per hop: when the last unchecked item is resolved via update, the
+// new bar drops the todo section while the old bar stays untouched (real todo_write).
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: recompute per hop (real todo_write)", () => {
@@ -267,7 +273,7 @@ describe("agent status bar T1: recompute per hop (real todo_write)", () => {
             {
               id: "t1",
               name: "todo_write",
-              // 种子是 legacy 行 → parse 合成 id t1,update 按 id 命中。
+              // The seed is a legacy line → parse synthesizes id t1; the update matches by id.
               input: { mode: "update", id: "t1", status: "completed" },
             },
           ],
@@ -290,11 +296,11 @@ describe("agent status bar T1: recompute per hop (real todo_write)", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(captured.length, 2);
 
-    // 第一步(栏注入时尚未 update):栏带 todo 段,含那条未勾行。
+    // Step 1 (bar injected before the update): carries the todo section with that unchecked line.
     const barBefore = barTexts(captured[0]!)[0]!;
     assert.deepEqual(parseBar(barBefore).todoLines, ["- [ ] [t1] Task A"]);
 
-    // 第二步:新栏(尾部)无 todo 段;旧栏在同一请求里逐字节不变。
+    // Step 2: the new (tail) bar has no todo section; the old bar is byte-identical in the same request.
     const tailBar = textOfLastMessage(captured[1]!);
     assert.ok(tailBar !== undefined);
     assert.deepEqual(parseBar(tailBar).todoLines, []);
@@ -306,7 +312,8 @@ describe("agent status bar T1: recompute per hop (real todo_write)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ⑤ last_tool:首跳 idle;工具成功 → 工具名;多工具批取最后一个成功名
+// last_tool: idle on the first hop; a successful tool sets its name; in a
+// multi-tool batch the last successful name wins.
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: last_tool semantics", () => {
@@ -317,7 +324,7 @@ describe("agent status bar T1: last_tool semantics", () => {
     const reg = createRegistry([alpha, beta]);
     const exec = createExecutor(reg);
     const { adapter, captured } = makeSpyAdapter([
-      // 第 1 步:批 [beta(失败), alpha(成功)] → 最后成功名 = alpha。
+      // Step 1: batch [beta (fails), alpha (succeeds)] → last success = alpha.
       {
         kind: "reply",
         result: assistantResult({
@@ -328,7 +335,7 @@ describe("agent status bar T1: last_tool semantics", () => {
           ],
         }),
       },
-      // 第 2 步:批 [alpha(成功), beta(失败)] → 仍 alpha(失败者不更新)。
+      // Step 2: batch [alpha (succeeds), beta (fails)] → still alpha (failures never update).
       {
         kind: "reply",
         result: assistantResult({
@@ -339,7 +346,7 @@ describe("agent status bar T1: last_tool semantics", () => {
           ],
         }),
       },
-      // 第 3 步:批 [beta(失败)] 无成功 → 保持原值 alpha。
+      // Step 3: batch [beta (fails)] with no success → keep the previous value alpha.
       {
         kind: "reply",
         result: assistantResult({
@@ -363,19 +370,20 @@ describe("agent status bar T1: last_tool semantics", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(captured.length, 4);
 
-    // 首跳(本回合尚未跑过工具)= idle。
+    // First hop (no tool has run in this turn) = idle.
     assert.equal(parseBar(barTexts(captured[0]!)[0]!).lastTool, "idle");
-    // 批 [beta 失败, alpha 成功] → alpha。
+    // Batch [beta fails, alpha succeeds] → alpha.
     assert.equal(parseBar(textOfLastMessage(captured[1]!)!).lastTool, "alpha");
-    // 批 [alpha 成功, beta 失败] → alpha(失败永不更新)。
+    // Batch [alpha succeeds, beta fails] → alpha (failure never updates).
     assert.equal(parseBar(textOfLastMessage(captured[2]!)!).lastTool, "alpha");
-    // 批 [beta 失败](无成功)→ 保持 alpha。
+    // Batch [beta fails] (no success) → stays alpha.
     assert.equal(parseBar(textOfLastMessage(captured[3]!)!).lastTool, "alpha");
   });
 });
 
 // ---------------------------------------------------------------------------
-// AC ⑥ compact 发生在本跳 → 栏追加在 compact 之后(请求里最新一条栏在尾)
+// When a compact happens in this hop, the bar is appended after it (the
+// newest bar in the request is the last message).
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: bar lands after compact", () => {
@@ -418,14 +426,14 @@ describe("agent status bar T1: bar lands after compact", () => {
     assert.equal(captured.length, 2, "first attempt + one compacted retry");
 
     const retry = captured[1]!;
-    // 重试请求最后一条消息 = compact 之后追加的新栏(含 todo 段)。
+    // The retry request's last message = the fresh bar appended after compaction (with the todo section).
     const tailBar = textOfLastMessage(retry);
     assert.ok(tailBar !== undefined, "retry request must end with a fresh bar");
     assert.deepEqual(parseBar(tailBar).todoLines, [
       "- [ ] [t1] survive compact",
     ]);
 
-    // 边界占位(reactive compact 的 fallback 路径)在新栏之前。
+    // The boundary placeholder (reactive compact's fallback path) precedes the new bar.
     const placeholderIndex = retry.findIndex((m) =>
       m.content.some(
         (b) =>
@@ -443,10 +451,10 @@ describe("agent status bar T1: bar lands after compact", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ⑦ ask / worker 路径不注入栏
+// ask / worker paths do not inject the bar.
 // ---------------------------------------------------------------------------
 
-/** Deterministic env — 与 tests/harness/build-engine.test.ts makeEnv 同形。 */
+/** Deterministic env — same shape as makeEnv in tests/harness/build-engine.test.ts. */
 function makeEnv(apiKey: string | undefined): IknowEnv {
   return {
     llm: {
@@ -488,9 +496,9 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
         result: assistantResult({ texts: ["done"], toolCalls: [] }),
       },
     ]);
-    // worker.ts createWorkerDeps 构造的 deps 不含 agentStatus —— 本用例按
-    // 同一形状(字段缺席)驱动 loop;装配源头的缺席由下方真实 createWorkerDeps
-    // 用例钉死。
+    // worker.ts createWorkerDeps builds deps without agentStatus — this case drives
+    // the loop with the same shape (field absent); the absence at the assembly
+    // source is pinned by the real createWorkerDeps case below.
     const { result } = await run("go", {
       adapter,
       executor: exec,
@@ -511,9 +519,9 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
   });
 
   it("⑦ 真实 createWorkerDeps 装配输出 agentStatus === undefined(装配源头钉死)", async () => {
-    // 与 tests/subagent/bash-mode-channel.test.ts hermeticOpts / mcp
-    // zero-linkage-guard.test.ts 同款最省缝:stub model + 空 skill catalog +
-    // noop trace + tmp userHome/cwd,装配期零真实 IO / 网络。
+    // The leanest seam, same style as hermeticOpts in tests/subagent/bash-mode-channel.test.ts
+    // and tests/harness/mcp/zero-linkage-guard.test.ts: stub model + empty skill catalog +
+    // noop trace + tmp userHome/cwd — zero real IO or network during assembly.
     const tmp = await mkdtemp(join(tmpdir(), "iknow-agent-status-worker-"));
     tempDirs.push(tmp);
     const deps = await createWorkerDeps({
@@ -538,9 +546,9 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
     tempDirs.push(tmp);
     const todoDir = join(tmp, "todos");
 
-    // 本用例验 agentStatus 的 surface 门禁,不验溢出退场 / 索引降档
-    // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-    // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+    // This case verifies the agentStatus surface gating only, not tool overflow or
+    // index demotion (dedicated tests: build-engine-tool-overflow.test.ts, disclosure-index-align/).
+    // countTokens is bypassed at assembly time; see the BuildEngineOpts.skipCountTokens comment for the seam's semantics.
     const ask = await buildHarnessEngine({
       env: makeEnv("sk-agent-status-t1"),
       askUser: createNoAskUser(),
@@ -573,19 +581,21 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ⑨ #903 SC4 / ADR-0028 / ADR-0046:状态栏只投影现行 todo 账本(`todos.md`)
-// 的未勾行;todo_write replace 把旧现行改名为同目录快照
-// (`todos.<unixMs>.<hex>.md`)时,快照里仍开着的旧项**绝不**出现在栏文本里。
-// 实现天然满足(`readOpenTodoLines` 只 readFile 现行 `todos.md`,无 glob /
-// 无 readdir / 不读快照),但本条 invariant 由真实 replace 写出的快照钉死
-// —— 防实现漂移成「读根目录拼历史」。
+// ADR-0028 / ADR-0046: the bar projects only unchecked lines of the current
+// todo ledger (`todos.md`). When todo_write replace renames the previous
+// current file to a same-directory snapshot (`todos.<unixMs>.<hex>.md`),
+// still-open old items in that snapshot must NEVER appear in the bar text.
+// The implementation satisfies this naturally (`readOpenTodoLines` only
+// readFile's the current `todos.md` — no glob, no readdir, no snapshot reads),
+// but this invariant is pinned by snapshots written through the real replace
+// path, guarding against drift into "concatenate history from the root dir".
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: replace does not leak snapshot lines into the bar", () => {
   it("⑨ replace 后 readOpenTodoLines 只含新未勾项;快照里仍开着的旧项不出现", async () => {
-    // T3 / SC4:真实 todo_write 路径,真实 conversationId(per-conversation
-    // ledger)。先 add 两条旧项 → 现行非空;再 replace 两条新项 → 旧现行
-    // 改名为同目录快照;断言 readOpenTodoLines 只含新项。
+    // Real todo_write path with a real conversationId (per-conversation ledger):
+    // add two old items → current non-empty; replace with two new items → the old
+    // current is renamed to a same-dir snapshot; assert readOpenTodoLines holds only the new items.
     const todoDir = await makeTodoDir();
     const todoWrite = createTodoWriteTool({ todoDir });
     const ctx = { conversationId: "conv-bar-snapshot-leak" };
@@ -597,8 +607,9 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
       ctx
     );
 
-    // 1. 快照真的存在 —— 否则该测试会因「replace 失败没建快照」而
-    //    假阳;真实 replace 应已把旧现行改名为同目录快照。
+    // 1. The snapshot really exists — otherwise this test would false-pass due to
+    //    "replace failed and created no snapshot"; a real replace renames the old
+    //    current into a same-dir snapshot.
     const dir = join(todoDir, ctx.conversationId);
     const { readdir } = await import("node:fs/promises");
     const snapshotNames = (await readdir(dir)).filter((n) =>
@@ -610,14 +621,14 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
       "exactly one snapshot file expected after replace on non-empty current"
     );
 
-    // 2. 快照里仍开着的旧项不进 readOpenTodoLines。
+    // 2. Still-open old items inside the snapshot never enter readOpenTodoLines.
     const openLines = await readOpenTodoLines(todoDir, ctx.conversationId);
     assert.deepEqual(
       [...openLines],
       ["- [ ] [t1] new-1", "- [ ] [t2] new-2"],
       `bar must only project current ledger, got: ${[...openLines].join(" | ")}`
     );
-    // 防御:旧项的字面字符串不在返回里(快照留在磁盘上,栏读现行)。
+    // Backstop: the old items' literal strings are absent from the return (the snapshot stays on disk; the bar reads the current file).
     assert.ok(
       !openLines.some((l) => l.includes("old-keep-open")),
       `snapshot open lines must not surface in bar, got: ${[...openLines].join(" | ")}`
@@ -625,22 +636,22 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
   });
 
   it("⑨ 同目录手工塞快照文件(模拟脏目录)→ readOpenTodoLines 仍只读现行", async () => {
-    // 更强一档:不依赖 todo_write replace 真的产出快照(避免与该工具实现
-    // 偶合),手工在 per-conversation 目录里塞一份快照形态的文件,断言栏
-    // 不被污染。直接钉 readOpenTodoLines 的「只 readFile 现行 todos.md」
-    // 不变式。
+    // Stronger still: does not depend on todo_write replace actually producing a
+    // snapshot (avoiding coupling to that tool's implementation) — hand-place
+    // snapshot-shaped files into the per-conversation dir and assert the bar stays
+    // clean, directly pinning readOpenTodoLines' "only readFile the current todos.md" invariant.
     const todoDir = await makeTodoDir();
     const conversationId = "conv-bar-dirty-snapshots";
     const dir = join(todoDir, conversationId);
     const { mkdir } = await import("node:fs/promises");
     await mkdir(dir, { recursive: true });
-    // 现行:两条新未勾项。
+    // Current file: two open items.
     await writeFile(
       join(dir, "todos.md"),
       "- [ ] live-1\n- [ ] live-2\n",
       "utf8"
     );
-    // 快照(手工塞):含「旧-未勾」与「旧-已勾」—— 两条形态都不该出现。
+    // Snapshots (hand-placed): one still-open and one already-checked old line — neither shape may appear.
     await writeFile(
       join(dir, "todos.1700000000000.deadbeefcafe.md"),
       "- [ ] ghost-still-open\n- [x] ghost-already-checked\n",
@@ -658,8 +669,7 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
       ["- [ ] [t1] live-1", "- [ ] [t2] live-2"],
       `dirty snapshot dir must not leak into bar projection, got: ${[...openLines].join(" | ")}`
     );
-    // 关键词兜底:快照字面不进栏(快照形态文件名 + 行内 ghost 字面都
-    // 不应在结果里)。
+    // Keyword backstop: no snapshot text reaches the bar (snapshot-shaped file names and the ghost line literals must all be absent from the result).
     assert.ok(
       !openLines.some((l) => l.includes("ghost")),
       `snapshot text must not surface, got: ${[...openLines].join(" | ")}`
@@ -667,16 +677,16 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
   });
 
   it("⑨ 无 conversationId(legacy shared-root 形态)→ 同样只读现行 todos.md,不读同目录快照", async () => {
-    // 向后兼容面:不传 conversationId 时解析的是 `<todoDir>/todos.md`
-    // (与 todo_write handler 在 ctx.conversationId 缺席时落同一条路径);
-    // 不变式同样成立 —— 栏不读快照。
+    // Backward-compat surface: without a conversationId the path resolves to
+    // `<todoDir>/todos.md` (the same path the todo_write handler lands on when
+    // ctx.conversationId is absent); the invariant holds the same way — the bar never reads snapshots.
     const todoDir = await makeTodoDir();
     await writeFile(
       join(todoDir, "todos.md"),
       "- [ ] live-shared-root\n",
       "utf8"
     );
-    // 手工塞同目录快照。
+    // Hand-placed same-dir snapshot.
     await writeFile(
       join(todoDir, "todos.1700000000000.aaaabbbbcccc.md"),
       "- [ ] ghost-shared-root\n",
@@ -693,13 +703,14 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
 });
 
 // ---------------------------------------------------------------------------
-// SC10: 状态栏只投影未完成条目(pending + in_progress),completed 永不进栏;
-// 投影行取自账本语法 SSOT(parseLedger / formatLedgerLine),legacy 无 id 行
-// 由解析器补 id 后按规范形态呈现。
+// The bar projects only unfinished items (pending + in_progress); completed
+// never enters. Projected lines come from the ledger grammar SSOT (parseLedger
+// / formatLedgerLine); legacy id-less lines get an id synthesized by the parser
+// and are rendered in canonical form.
 // ---------------------------------------------------------------------------
 
 describe("agent status bar SC10: unfinished items only", () => {
-  /** 读真实 todos.md 的投影(不走模型回合 —— 本节钉投影本身)。 */
+  /** Read the projection of a real todos.md (no model turn — this section pins the projection itself). */
   async function projectLines(seed: string): Promise<readonly string[]> {
     const todoDir = await makeTodoDir(seed);
     return readOpenTodoLines(todoDir);

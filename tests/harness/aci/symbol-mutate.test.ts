@@ -1,25 +1,31 @@
 /**
- * symbol-mutate applier — WorkspaceEdit 不可应用片段的 typed 拒绝
- * （plan `lsp-silent-degradation` T4）。
+ * symbol-mutate applier — typed rejection of WorkspaceEdit fragments that
+ * this tool set cannot apply.
  *
- * **钉住的不变式**：语言服务器给出的 `WorkspaceEdit` 只要含本工具集**应用
- * 不了**的东西（file operation / 无法归一成 `TextDocumentEdit` 的条目 /
- * 形状非法的 `TextEdit`），`rename_symbol` 必须 typed 失败并点名是哪一种，
- * **不得部分应用** —— 半套 rename 落盘比整体失败更坏：workspace 留在
- * 「一半改了、一半没改」的状态，模型与人都看不出来。
+ * **Locked invariant**: whenever a language server's `WorkspaceEdit`
+ * contains anything **unappliable** here (file operation / an entry that
+ * cannot be normalized into a `TextDocumentEdit` / malformed `TextEdit`),
+ * `rename_symbol` must fail typed and name which kind it is — **never
+ * partially apply**. A half-applied rename on disk is worse than a total
+ * failure: the workspace is left "half renamed, half not", invisible to
+ * both model and human.
  *
- * **四处同形静默丢弃**（ACR error-handling-enforcer 逐点列出，同一批修）：
- *   - `normalizeWorkspaceEdit` 对 `CreateFile` / `RenameFile` / `DeleteFile`
- *     的 `continue`（file operation 被当成「不存在」）；
- *   - 两个 `flatMap` 静默丢掉 `normalizeTextEdit` 拒绝的条目；
- *   - `normalizeTextEdit` 的裸 `return []`（真正的吞点是它）；
- *   - length-0 `continue` 把「server 送回 N 条、全被丢弃」与「server 说没有
- *     可改的地方」压成同一种结果 —— 前者是响应损坏，后者是 LSP 合法响应
- *     （server 允许返回空 `changes`），必须分开。
+ * Four same-shaped silent drops, enumerated point by point by the
+ * error-handling-enforcer review and fixed in one batch:
+ *   - `normalizeWorkspaceEdit`'s `continue` over `CreateFile` /
+ *     `RenameFile` / `DeleteFile` (file operations treated as "absent");
+ *   - two `flatMap`s silently dropping entries rejected by `normalizeTextEdit`;
+ *   - `normalizeTextEdit`'s bare `return []` (the real swallowing point);
+ *   - the length-0 `continue` collapsed "server sent N edits, all dropped"
+ *     with "server says there is nothing to change" — the former is a
+ *     corrupted response, the latter a legal LSP response (an empty
+ *     `changes` is allowed); they must be separated.
  *
- * **回归边界**：纯文本编辑路径逐字节不变（见 happy path 与「空 edits 不是
- * 失败」两组）。本文件同时直测归一化函数与 handler 面：handler 面证明失败
- * 真的不落盘，函数面证明各种 kind 各自可判。
+ * **Regression boundary**: the pure text-edit path is byte-for-byte
+ * unchanged (see the happy path and the "empty edits are not a failure"
+ * group). This file tests both the normalization function and the handler
+ * surface directly: the handler surface proves failures really do not write
+ * to disk; the function surface proves each kind stays distinguishable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -33,8 +39,8 @@ const { mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
 }));
 
-// 只替换 getClientDetailed（真实 tsserver / vscode-jsonrpc 不落地）；
-// 其余 lsp/client.js 导出保留真实实现。
+// Mock only getClientDetailed (no real tsserver / vscode-jsonrpc runs);
+// every other lsp/client.js export keeps its real implementation.
 vi.mock("../../../src/harness/lsp/client.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../src/harness/lsp/client.js")>();
@@ -52,7 +58,7 @@ import {
 
 const DOCUMENT_SYMBOL = "textDocument/documentSymbol";
 
-/** `Foo/bar` 的符号树：改名目标 = 第 0 行第 6 列的 `foo`。 */
+/** Symbol tree for `Foo/bar`: the rename target is the `foo` at line 0, character 6. */
 const SAMPLE_SYMBOL_TREE = [
   {
     name: "Foo",
@@ -80,7 +86,7 @@ const FILE_BODY = [
   "}",
 ].join("\n");
 
-/** 只改第 0 行 `foo` 的合法 TextEdit。 */
+/** A valid TextEdit that changes only the `foo` on line 0. */
 const FOO_EDIT = {
   range: {
     start: { line: 0, character: 6 },
@@ -94,7 +100,7 @@ interface FakeClient {
   readonly client: unknown;
 }
 
-/** 与 `lsp.test.ts` 同一套 fake 客户端形态（真实工具链路的假传输层）。 */
+/** Same fake-client shape as `lsp.test.ts` (fake transport under the real tool chain). */
 function makeFakeClient(renameResult: unknown): FakeClient {
   const calls: Array<{ method: string; params: unknown }> = [];
   return {
@@ -129,7 +135,8 @@ let otherFile: string;
 
 beforeEach(async () => {
   mockGetClientDetailed.mockReset();
-  // 真实临时目录：失败路径的断言面是「盘上没被写」，不是「函数没被调用」。
+  // Real temp dir: failure paths assert "nothing written on disk", not
+  // "the function was not called".
   workDir = await mkdtemp(path.join(os.tmpdir(), "symbol-mutate-"));
   await mkdir(path.join(workDir, "src"), { recursive: true });
   mainFile = path.join(workDir, "src", "a.ts");
@@ -164,7 +171,7 @@ async function runRename(
   }
 }
 
-// ── 回归边界：纯文本编辑路径逐字节不变 ──────────────────────────────────────
+// ── Regression boundary: the text-only edit path is unchanged byte for byte ─
 
 describe("text-only WorkspaceEdit path is unchanged", () => {
   it("applies cross-file text edits to disk and reports files + edit count", async () => {
@@ -212,8 +219,9 @@ describe("text-only WorkspaceEdit path is unchanged", () => {
   });
 
   it("keeps a legitimately empty WorkspaceEdit a no-op, not a failure", async () => {
-    // LSP 允许 server 返回空 edits（「没有可改的地方」）；模型需要知道改名
-    // 实际没发生，但这不是响应损坏 —— 仍是成功的 no-op 回执。
+    // LSP allows the server to return empty edits ("nothing to change");
+    // the model must learn the rename effectively did not happen, but this
+    // is not a corrupted response — still a successful no-op receipt.
     for (const empty of [
       { changes: {} },
       { documentChanges: [] },
@@ -235,7 +243,7 @@ describe("text-only WorkspaceEdit path is unchanged", () => {
   });
 });
 
-// ── 失败路径：不可应用的片段必须整体拒绝，且不落盘 ──────────────────────────
+// ── Failure paths: unappliable fragments must be rejected wholesale, nothing on disk ─
 
 describe("unsupported WorkspaceEdit fragments are rejected, never partially applied", () => {
   it("rejects a CreateFile / RenameFile / DeleteFile documentChanges entry by kind", async () => {
@@ -251,7 +259,8 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
       const { outcome, value } = await runRename({
         documentChanges: [
           op,
-          // 同一个响应里还夹着一条**合法**文本编辑 —— 部分应用的诱惑源。
+          // The same response also carries one **legal** text edit — the
+          // temptation source for partial application.
           { textDocument: { uri: uriOf(mainFile) }, edits: [FOO_EDIT] },
         ],
       });
@@ -262,7 +271,7 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
         "file-operation"
       );
       expect((value as Error).message, op.kind).toContain(op.kind);
-      // 部分应用 = 半套 rename；合法的那条也不许落盘。
+      // Partial application = half a rename; even the legal edit must not reach disk.
       expect(await readFile(mainFile, "utf8"), op.kind).toBe(FILE_BODY);
       expect(await readFile(otherFile, "utf8"), op.kind).toBe("foo();\n");
     }
@@ -303,7 +312,8 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
   });
 
   it("distinguishes 'server sent zero edits' from 'every edit was malformed'", async () => {
-    // 空数组 = 合法 no-op（上一组已钉）；非空、但每条都归一不了 = 响应损坏。
+    // Empty array = legal no-op (pinned by the previous group); non-empty
+    // yet every edit un-normalizable = corrupted response.
     const { outcome, value } = await runRename({
       changes: { [uriOf(mainFile)]: [null, "nope"] },
     });
@@ -324,7 +334,8 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
   });
 
   it("rejects edits whose uri is not a file URL (unresolvable target)", async () => {
-    // 归一化能过、落盘前解不出路径：同样应用不了 → typed 失败，不静默丢。
+    // Normalization passes but the path cannot be resolved before writing:
+    // still unappliable → typed failure, never a silent drop.
     const { outcome, value } = await runRename({
       documentChanges: [
         {
@@ -334,8 +345,9 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
       ],
     });
     expect(outcome).toBe("rejected");
-    // 归因是「uri 落不成文件路径」而非「payload 坏了」：条目形状本身合法，
-    // 两类给模型的行动提示不同，故分开记 kind。
+    // Attribution is "the uri cannot become a file path", not "the payload
+    // is broken": the entry shape itself is legal, and the two kinds give
+    // the model different action hints, so they get distinct kinds.
     expect((value as WorkspaceEditUnsupportedError).kind).toBe(
       "unresolvable-uri"
     );
@@ -364,7 +376,8 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
   });
 
   it("leaves the missing-server sentinel untouched when no client is available", async () => {
-    // 回归边界：归一化之前的分支不受本票影响（哨兵仍是哨兵，不是 typed 失败）。
+    // Regression boundary: branches before normalization are unaffected by
+    // this change (the sentinel stays a sentinel, not a typed failure).
     mockGetClientDetailed.mockResolvedValue({
       failure: { reason: "no-server" },
     });
@@ -375,7 +388,7 @@ describe("unsupported WorkspaceEdit fragments are rejected, never partially appl
   });
 });
 
-// ── 归一化函数面：各种 kind 各自可判（不落到盘） ────────────────────────────
+// ── Normalization function surface: each kind stays distinguishable (no disk writes) ─
 
 describe("normalizeWorkspaceEdit rejection contract", () => {
   const uri = "file:///work/src/a.ts";
@@ -396,9 +409,11 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
   });
 
   it("keeps a missing / null WorkspaceEdit an empty result (not corruption)", () => {
-    // server 返 null = 拒绝了这次 rename，handler 层已前置译成同作用域冲突的
-    // typed 失败（makeRenameSymbolTool 的 result === null 分支）；归一化只需
-    // 对这两种「合法缺席」不抛。`{}` 同理：两个形态字段都不在场 = 零条目。
+    // A null from the server = the rename was refused; the handler already
+    // translates it upstream into a typed same-scope-conflict failure
+    // (makeRenameSymbolTool's result === null branch). Normalization only
+    // needs to not throw on these "legally absent" shapes. Same for `{}`:
+    // neither shape field present = zero entries.
     expect(normalizeWorkspaceEdit(null)).toEqual([]);
     expect(normalizeWorkspaceEdit(undefined)).toEqual([]);
     expect(normalizeWorkspaceEdit({})).toEqual([]);
@@ -469,9 +484,10 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
   });
 
   it("rejects an unreadable envelope instead of normalizing it to zero edits", () => {
-    // 信封读不出来 = 这次响应不可用，与「server 说没有可改的地方」是两回事：
-    // 后者是合法 no-op，前者必须 typed 失败，否则 handler 会把
-    // `renamed: true, editCount: 0` 报成成功。
+    // An unreadable envelope = this response is unusable, a different thing
+    // from "the server says nothing to change": the latter is a legal no-op,
+    // the former must be a typed failure — otherwise the handler would
+    // report `renamed: true, editCount: 0` as success.
     for (const raw of ["nope", 42, [goodEdit]]) {
       const thrown = captureThrow(() =>
         normalizeWorkspaceEdit(raw)
@@ -482,7 +498,8 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
   });
 
   it("rejects a present-but-wrong-shaped changes / documentChanges", () => {
-    // 两种形态都「在场」却读不出条目：不能当作「没有条目」静默放过。
+    // Both shape fields are "present" yet yield no readable entries: must
+    // not be silently passed as "zero entries".
     for (const raw of [
       { documentChanges: "not-an-array" },
       { documentChanges: { textDocument: { uri }, edits: [goodEdit] } },
@@ -498,9 +515,10 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
   });
 
   it("normalizes a non-file uri without judging it (resolution happens at apply time)", () => {
-    // 归一化只认形状，不解析 uri —— 解析落在 applyWorkspaceEdit 的
-    // groupEditsByPath，那里才判得出「落不成文件路径」并抛 unresolvable-uri
-    // （见上方 runRename 落盘路径那条）。
+    // Normalization checks shape only and never resolves uris — resolution
+    // lives in applyWorkspaceEdit's groupEditsByPath, which is where
+    // "cannot become a file path" is detected and unresolvable-uri is
+    // thrown (see the runRename disk-path case above).
     expect(
       normalizeWorkspaceEdit({
         documentChanges: [
@@ -511,7 +529,7 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
   });
 });
 
-/** 执行并捕获 throw；不抛则返回 undefined（比 expect(...).toThrow 更能逐条判 kind）。 */
+/** Run and capture a throw; undefined if none (lets each case assert its kind individually, unlike expect(...).toThrow). */
 function captureThrow(fn: () => unknown): unknown {
   try {
     fn();

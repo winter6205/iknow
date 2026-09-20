@@ -1,20 +1,27 @@
 /**
- * T5 (`specs/skill-index-increment.md` / ADR-0098) — 送模型前的技能索引增量。
+ * Skill-index delta injection before the model call
+ * (`specs/skill-index-increment.md` / ADR-0098).
  *
- * 本文件钉住的不变式（SC 出处见每条测名）：
- *   - SC1 无新建 → 零追加（messages 长度不变、末条仍是本轮 query）；
- *   - SC2 有新建 → messages **最末**一条 user 文本为 `<available_skills>`
- *     且**只含**该新 name（含完整 description）；本轮 query / 栏在它前面；
- *   - SC3 同一新 name 第二轮不再追加；
- *   - SC4 compact 之后不因「messages 里增量不见了」再追加；
- *   - SC7 slash 信封（skill-load）装了正文，该 name 未进场 → 下一轮仍补 delta；
- *   - rescan 失败 → 不注入；落盘失败 → 不注入；
- *   - 注入消息经 `pendingInjected.record` → 随下一批 commit flush（#888 纪律）。
+ * Invariants pinned here (SC numbers name the criterion in each test title):
+ *   - SC1 no new skill → zero appends (messages length unchanged, last entry
+ *     is still this turn's query);
+ *   - SC2 new skill → the **last** user text in messages is an
+ *     `<available_skills>` block containing **only** that new name (with full
+ *     description); this turn's query sits before it;
+ *   - SC3 the same new name is not appended again in the second round;
+ *   - SC4 after compact, no re-append just because "the delta vanished from
+ *     messages";
+ *   - SC7 a slash envelope (skill-load) carries the body but the name has not
+ *     entered the ledger → the next round still appends the delta;
+ *   - rescan failure → no injection; ledger persist failure → no injection;
+ *   - injected messages go through `pendingInjected.record` → flushed with
+ *     the next commit batch (the commit-discipline rule).
  *
- * 双轨 assert（`.claude/rules/test.md`「Trace as the integration-test assert
- * surface」）：本套件用 `trace` 记录 turn 序（真实 `createJsonlTraceService` +
- * `createJsonlTraceReader` 双读），另配 `createNoopTraceService` 基线
- * deepEqual —— trace 观测不改变 harness 行为本身。
+ * Dual-track assert (`.claude/rules/test.md` "Trace as the integration-test
+ * assert surface"): this suite records the turn sequence via `trace` (real
+ * `createJsonlTraceService` + `createJsonlTraceReader` double read) against a
+ * `createNoopTraceService` baseline deepEqual — trace observation never
+ * changes harness behavior itself.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,7 +69,7 @@ async function makeRoot(tag: string): Promise<string> {
   return dir;
 }
 
-/** 落一个 user 级 skill（`<userHome>/.iknow/skills/<name>/SKILL.md`）。 */
+/** Plant a user-level skill (`<userHome>/.iknow/skills/<name>/SKILL.md`). */
 async function plantSkill(
   userHome: string,
   name: string,
@@ -96,14 +103,17 @@ async function makeFixture(tag: string): Promise<Fixture> {
 }
 
 /**
- * 真装配的增量缝：rescan 现行技能根 + 落盘进场史（T4/T6 两个真模块），
- * 与生产 `build-engine` 将来注入的形态同构 —— 不 mock 任何判定。
+ * A fully-assembled delta seam: rescans the live skill roots and persists the
+ * entry ledger (both are the real production modules) — structurally the
+ * same shape `build-engine` will inject. No decision logic is mocked.
  *
- * 会话锚按装配缝的契约从 `delta(conversationId)` **调用参数**取：本 fixture
- * 只服务单会话（`conversationId` 给了默认值），因此锚在调用期解析成同一个
- * 已建好的 ledger；换个锚会落到另一份 ledger 上（生产 `build-engine` 的
- * `createSkillIndexDeltaSeam` 负责该映射，本助手把它显式化 —— 传错锚即
- * 测试失败，而不是静默复用）。
+ * Per the assembly contract, the seam reads the conversation anchor from its
+ * own `delta(conversationId)` **call argument**. This fixture serves a single
+ * conversation (`conversationId` has a default), so each call resolves to the
+ * same pre-built ledger. A different anchor would land on a different ledger
+ * (production `createSkillIndexDeltaSeam` owns that mapping; this helper
+ * makes it explicit — a wrong anchor fails the test loudly instead of
+ * silently reusing state).
  */
 async function makeDeltaSeam(
   fixture: Fixture,
@@ -111,9 +121,9 @@ async function makeDeltaSeam(
   conversationId = "conv-loop-delta"
 ): Promise<{
   seam: SkillIndexDeltaSeam;
-  /** 该缝每次被调用时收到的会话锚（按调用序）—— 契约：= deps.conversationId。 */
+  /** Conversation anchors received on each seam call (call order) — contract: = deps.conversationId. */
   anchors: Array<string | undefined>;
-  /** 必须同时注入 deps 的会话锚（缝按它解析 per-conversation 进场史）。 */
+  /** The conversation anchor that must also be injected into deps (the seam resolves the per-conversation ledger through it). */
   conversationId: string;
   ledgerNames: () => readonly string[];
 }> {
@@ -128,8 +138,9 @@ async function makeDeltaSeam(
     projectIdentityRoot: fixture.projectIdentityRoot,
     env: {},
   });
-  // 锚只记录、不在缝内 assert —— 缝抛出的错会被 loop-engine 的吞咽臂
-  // 变成「本轮不贴」，测试会以一个看不出原因的 listing 缺失失败。
+  // Anchors are only recorded, never asserted inside the seam — an error
+  // thrown by the seam would be swallowed by loop-engine into "no listing
+  // this turn", failing as an unexplained missing listing.
   const anchors: Array<string | undefined> = [];
   return {
     seam: {
@@ -160,7 +171,7 @@ function baseDeps(
   };
 }
 
-/** messages 里全部 user 文本（按出现序，text block 连接）。 */
+/** All user texts in messages (appearance order, text blocks joined). */
 function userTexts(messages: ReadonlyArray<AnthropicNativeMessage>): string[] {
   const out: string[] = [];
   for (const m of messages) {
@@ -176,7 +187,7 @@ function userTexts(messages: ReadonlyArray<AnthropicNativeMessage>): string[] {
 const isListing = (text: string): boolean =>
   text.startsWith("<available_skills>");
 
-/** build-engine 缝用例的 env（与 agent-status-bar / disclosure-index-align 同法）。 */
+/** Env for the build-engine seam cases (same recipe as the sibling harness suites). */
 function makeEnv(apiKey: string): IknowEnv {
   return {
     llm: {
@@ -208,8 +219,9 @@ afterAll(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 装配缝（build-engine）：可选、同门、per-conversation 叶子 —— SC2/SC3 的
-// 「生产形态真的接得上」那一半（判定与注入在循环侧的证明见上）。
+// Assembly seam (build-engine): optional, same-module, per-conversation leaf —
+// the "production wiring really connects" half of SC2/SC3 (the decision and
+// injection proofs on the loop side are the suites below).
 // ---------------------------------------------------------------------------
 
 describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", () => {
@@ -220,7 +232,7 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
     const todoDir = join(tmp, "todos");
     await mkdir(userHome, { recursive: true });
     await mkdir(todoDir, { recursive: true });
-    // 开场冻表里已有 alpha（装配期扫描到）。
+    // The opening frozen table already contains alpha (scanned at assembly).
     await plantSkill(userHome, "alpha", "description: Alpha skill");
 
     const built = await buildHarnessEngine({
@@ -237,13 +249,15 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
     const seam = built.deps.skillIndexDelta;
     assert.ok(seam !== undefined, "chat + todoDir → 缝必须在场");
 
-    // SC1「开场冻表字节不变」：取两次增量（含一次贴出 beta 之后）——
-    // system 冻表在两次之间必须逐字节相同，且 rollout 后**不含** beta
-    // （冻表是装配期冻结的，增量只走 messages）。
+    // SC1 "the opening frozen table is byte-stable": pull the delta twice
+    // (once after beta is surfaced) — the system frozen table must be
+    // byte-identical in between and must **not** contain beta afterwards
+    // (the table freezes at assembly; deltas only travel through messages).
     const systemBefore = await built.deps.system?.();
     assert.ok(systemBefore !== undefined);
     assert.match(systemBefore, /^alpha: Alpha skill$/m, "开场冻表含 alpha");
-    // rescan 持有者透出给 host 的 reload 面（plugin 根换血落在同一台上）。
+    // The rescan holder is surfaced to the host's reload face (plugin-root
+    // swaps land on the same instance).
     assert.ok(
       built.skillRescanner !== undefined,
       "non-ask 装配必须透出同一个 rescan 持有者"
@@ -254,11 +268,13 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
       "未解析插件根 → 空列表（不是 undefined）"
     );
 
-    // 冻表名不在增量里（开场已进场）—— initialNames 来自装配期 holder。
+    // Frozen-table names never appear as delta (they entered at open) —
+    // initialNames comes from the assembly-time holder.
     const first = await seam.delta("conv-build-1");
     assert.deepEqual(first.added, [], "开场冻表名不算新建");
 
-    // 装配后（会话内）新建的技能 → 下一次取增量必须贴出来（SC2 的装配面）。
+    // A skill created after assembly (mid-session) → the next delta pull must
+    // surface it (the assembly-side face of SC2).
     await plantSkill(userHome, "beta", "description: Beta skill");
     const second = await seam.delta("conv-build-1");
     assert.deepEqual(second.added, ["beta"]);
@@ -267,13 +283,15 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
       "<available_skills>\nbeta: Beta skill\n</available_skills>"
     );
 
-    // 同一 name 第二轮不再贴（SC3 的装配面：per-conversation 落盘史生效）。
+    // The same name is not re-surfaced in round two (assembly-side face of
+    // SC3: the per-conversation persisted ledger takes effect).
     const third = await seam.delta("conv-build-1");
     assert.deepEqual(third.added, [], "同一会话第二轮无新建");
 
-    // 换会话 = 另一份进场史（另一个落点文件），但冻表名对**每个**会话都是
-    // 开场已进场（同一台引擎的 system 冻表对所有会话相同）—— 故只有 beta
-    // 是那个会话的「新建」。
+    // Switching conversations = a different ledger (a different on-disk file),
+    // but frozen-table names have already entered at open for **every**
+    // conversation (one engine's system table is shared across conversations)
+    // — so only beta counts as "new" for that conversation.
     const otherConv = await seam.delta("conv-build-2");
     assert.deepEqual(
       otherConv.added,
@@ -286,8 +304,9 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
       "新会话的史同样落盘、第二轮不再贴"
     );
 
-    // 走过 beta 的 rescan + 两次贴出后，冻表字节仍与开场逐字节相同，
-    // 且仍不含 beta —— 「增量不改冻表」是 SC1 的另一半。
+    // After beta's rescan + two surfacing rounds, the frozen table is still
+    // byte-identical to the opening one and still excludes beta — "the delta
+    // never edits the frozen table" is the other half of SC1.
     const systemAfter = await built.deps.system?.();
     assert.equal(
       systemAfter,
@@ -339,10 +358,13 @@ describe("T5 装配缝 — build-engine 的 skillIndexDelta（可选 seam）", (
 });
 
 // ---------------------------------------------------------------------------
-// T8 / SC11 — plugin / MCP 不自动 skill-diff。整包靠**显式 reload 或新会话**：
-//   - 未 reload：插件包与 MCP 配置在盘上变化 → delta 恒为空（不进 turn 前 diff）；
-//   - 显式 reload（host 在同一台 engine 的 `setPluginSkillDirs` 换血）后，
-//     多出来的**模型索引**名仍走同一条 T5 delta（不改 system 冻表）。
+// SC11 — plugin / MCP changes never auto skill-diff. A package goes live only
+// via **explicit reload or a new session**:
+//   - without reload: plugin-package and MCP-config changes on disk → the
+//     delta stays empty (no pre-turn diff);
+//   - after an explicit reload (the host swaps roots on the same engine via
+//     `setPluginSkillDirs`), the extra model-index-eligible names still travel
+//     the same delta path (the system frozen table is not edited).
 // ---------------------------------------------------------------------------
 
 describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
@@ -358,7 +380,8 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
     await mkdir(pluginRoot, { recursive: true });
     await mkdir(join(userHome, ".iknow"), { recursive: true });
 
-    // 装配期：插件根在场但**空**（包还没装）→ 冻结的根列表为空。
+    // At assembly: the plugin root exists but is **empty** (no package
+    // installed yet) → the frozen root list is empty.
     const built = await buildHarnessEngine({
       env: makeEnv("sk-skill-delta-t8"),
       askUser: createNoAskUser(),
@@ -367,7 +390,7 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       userHome,
       cwd: tmp,
       skipCountTokens: true,
-      // settings.plugins.roots = 显式插件根（测试缝；否则默认探本机 ~/.iknow/plugins）。
+      // settings.plugins.roots = explicit plugin roots (test seam; otherwise the default probes this machine's ~/.iknow/plugins).
       settings: { plugins: { roots: [pluginRoot] } },
     });
     builtEngines.push(built);
@@ -381,8 +404,9 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "装配期无包 → 冻结根列表为空"
     );
 
-    // 会话进行中：新装一个插件包（ledger 给出精确名 + installPath，
-    // `skills/` 下有一个**有 description** = 模型索引合格的技能）。
+    // Mid-session: install a new plugin package (the ledger supplies the exact
+    // name + installPath, and `skills/` holds one **described** =
+    // model-index-eligible skill).
     await writeFile(
       join(pluginRoot, "installed_plugins.json"),
       JSON.stringify({
@@ -391,8 +415,9 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       }),
       "utf8"
     );
-    // 插件 skill 落点 = `<installPath>/skills/<name>/SKILL.md`（scanner 的
-    // plugin 根直指 `skills/`，与 user 级 `.iknow/skills/` 不同）。
+    // Plugin skill landing spot = `<installPath>/skills/<name>/SKILL.md` (the
+    // scanner's plugin root points straight at `skills/`, unlike the user-level
+    // `.iknow/skills/`).
     const pluginSkillDir = join(installed, "skills", "plugin-skill");
     await mkdir(pluginSkillDir, { recursive: true });
     await writeFile(
@@ -400,7 +425,8 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "---\nname: plugin-skill\ndescription: From plugX\n---\n\nbody\n",
       "utf8"
     );
-    // 同时改 MCP 配置（skill 缝不读 mcp.json，两件事必须都不产生 delta）。
+    // Also change the MCP config (the skill seam never reads mcp.json; neither
+    // change may produce a delta).
     await writeFile(
       join(userHome, ".iknow", "mcp.json"),
       JSON.stringify({
@@ -409,7 +435,8 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "utf8"
     );
 
-    // SC11 主句：未 reload → 新装的包与 MCP 变化都不进 turn 前 diff。
+    // SC11's main clause: without reload, neither the newly installed package
+    // nor the MCP change enters the pre-turn diff.
     assert.deepEqual(
       await seam.delta("conv-t8"),
       { added: [], text: "" },
@@ -421,8 +448,9 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "未 reload → rescan 缝持有的 plugin 根列表不被自动重解析"
     );
 
-    // 非空洞前提：包在盘上、确实解析得出来 —— 上面那个空 delta 只可能
-    // 归因于「没换血」，不是「包不存在 / 解析不出来」。
+    // Non-vacuity premise: the package is on disk and really resolvable — the
+    // empty delta above can only be attributed to "no root swap", not to
+    // "the package is missing / unresolvable".
     const { enabled } = await resolvePluginCatalog({
       roots: [pluginRoot],
       plugins: {},
@@ -433,14 +461,16 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "前提：包在盘上且解析得出来"
     );
 
-    // 显式 reload：host 把这一轮重新解析出的**完整**根列表整体换血到同一台。
+    // Explicit reload: the host swaps the **complete** freshly resolved root
+    // list into the same engine instance.
     const reloadedDirs = enabled.map((p) => ({
       dir: join(p.root, "skills"),
       plugin: p.name,
     }));
     built.skillRescanner.setPluginSkillDirs(reloadedDirs);
 
-    // 换血后：新合格 skill 走同一条 T5 delta（SC8 的 reload 侧）。
+    // After the swap: a newly eligible skill travels the same delta path
+    // (reload side of SC8).
     const after = await seam.delta("conv-t8");
     assert.deepEqual(after.added, ["plugX:plugin-skill"]);
     assert.equal(
@@ -448,7 +478,8 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
       "<available_skills>\nplugX:plugin-skill: From plugX\n</available_skills>"
     );
 
-    // 「不改 system 冻表」的另一半：reload 只影响 delta 面，冻表不含新名。
+    // The other half of "never edit the system frozen table": reload only
+    // affects the delta face; the frozen table excludes the new name.
     const systemAfter = await built.deps.system?.();
     assert.doesNotMatch(
       systemAfter!,
@@ -459,7 +490,7 @@ describe("T8 — plugin / MCP 不自动 skill-diff（SC11）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SC1 / SC2 / SC3 — 只追加新建 + 落位 messages 最末
+// SC1 / SC2 / SC3 — append only new entries, placed at the very end of messages
 // ---------------------------------------------------------------------------
 
 describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
@@ -468,7 +499,8 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
     await plantSkill(fixture.userHome, "alpha", "description: Alpha skill");
     const { seam, anchors, conversationId } = await makeDeltaSeam(fixture);
 
-    // 模型第一轮：调一次工具（制造第二个模型调用窗口，便于观察「下一轮」）。
+    // Model round one: call one tool (opens a second model-call window so the
+    // "next round" is observable).
     const adapter = createStubModel({
       responses: [
         assistantResult({
@@ -484,7 +516,7 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
     );
 
     const texts = userTexts(result.messages);
-    // 最后一条 user 文本 = 增量 listing（在本轮 query 之后）。
+    // Last user text = the delta listing (after this turn's query).
     const last = texts[texts.length - 1]!;
     assert.equal(
       last,
@@ -492,15 +524,17 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
       "messages 最末一条 user 文本必须只含新建行 + 完整 description"
     );
     assert.equal(texts[0], "go", "本轮 query 仍在增量之前（最末 = delta）");
-    // 冻表（system）不在 loop-engine 手上 —— 但注入路径只碰 messages:
-    // 第一轮之后 messages 里除首条 query 外没有第二条 listing。
+    // The frozen table (system) is not loop-engine's business — but the
+    // injection path only touches messages: after round one, messages hold no
+    // second listing besides the opening query.
     assert.equal(
       texts.filter(isListing).length,
       1,
       "只有一条 listing 被注入（不是每轮重复）"
     );
-    // 缝收到的会话锚 = deps.conversationId（两次模型调用各一次）—— 这是
-    // 「进场史按会话落点」的唯一来源，锚错了会读到别的会话的史。
+    // The anchor the seam receives = deps.conversationId (once per model call)
+    // — the only source of "the ledger lands per conversation"; a wrong anchor
+    // would read another conversation's ledger.
     assert.deepEqual(
       anchors,
       [conversationId, conversationId],
@@ -511,7 +545,7 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
   it("SC1：无新建 → 零追加（messages 里没有任何 listing；末条仍是本轮 query）", async () => {
     const fixture = await makeFixture("sc1");
     await plantSkill(fixture.userHome, "alpha", "description: Alpha skill");
-    // 冻表已含 alpha → 进场史初值含它 → 无新建。
+    // The frozen table already contains alpha → the ledger starts with it → no new entries.
     const { seam, conversationId } = await makeDeltaSeam(fixture, ["alpha"]);
 
     const adapter = createStubModel({
@@ -541,8 +575,8 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
     const firstAdapter = createStubModel({
       responses: [assistantResult({ texts: ["first"], toolCalls: [] })],
     });
-    // 两次 run 用同一会话锚（同一 session 的两轮）—— 与 serve 的 per-run
-    // runDeps 形态一致。
+    // Both runs share one conversation anchor (two rounds of the same session)
+    // — matching serve's per-run runDeps shape.
     const first = await run(
       "one",
       baseDeps(firstAdapter, { skillIndexDelta: seam, conversationId })
@@ -583,8 +617,9 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
     );
     assert.deepEqual(first.ledgerNames(), ["alpha"]);
 
-    // session 恢复：新建 ledger（同 projectDir / conversationId）自动载入史。
-    // 同一会话锚跨两次 run —— 恢复后 loop-engine 拿到的锚仍是它。
+    // Session restore: a fresh ledger over the same projectDir /
+    // conversationId auto-loads the history. One anchor spans both runs —
+    // after restore loop-engine still passes the same anchor.
     const restored = await makeDeltaSeam(fixture);
     assert.deepEqual(restored.ledgerNames(), ["alpha"], "落盘史被载回");
     const secondAdapter = createStubModel({
@@ -602,7 +637,7 @@ describe("T5 技能索引增量注入 — SC1/SC2/SC3", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SC4 — compact 之后不重挂 listing
+// SC4 — after compact, no re-appended listing
 // ---------------------------------------------------------------------------
 
 describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
@@ -611,9 +646,10 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
     await plantSkill(fixture.userHome, "alpha", "description: Alpha skill");
     const { seam, conversationId, ledgerNames } = await makeDeltaSeam(fixture);
 
-    // 每次 `delta()` 的返回值按调用序记下 —— 判定面（第二个模型调用看到
-    // 的 added）直接可见，不必从 messages 反推（compact 可能把第一条
-    // 注入的 listing 留在尾部，从 messages 数看不出「有没有重贴」）。
+    // Record every `delta()` return in call order — the decision face (the
+    // `added` the second model call sees) is directly visible, no need to
+    // reverse-infer from messages (compact may leave the first injected
+    // listing in the tail; counting messages can't tell "re-appended or not").
     const deltaResults: Array<readonly string[]> = [];
     const spySeam: SkillIndexDeltaSeam = {
       delta: async (anchor) => {
@@ -623,7 +659,7 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
       },
     };
 
-    // 第一次模型调用抛 PromptTooLongError（reactive 触发）→ 压缩后重试。
+    // The first model call throws PromptTooLongError (reactive trigger) → compact, then retry.
     let attempt = 0;
     const adapter: LoopEngineDeps["adapter"] = Object.freeze({
       encodeUserText: (t: string) => ({
@@ -635,7 +671,7 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
         attempt += 1;
         if (attempt === 1) throw new PromptTooLongError("synthetic");
         if (request.tools === undefined) {
-          // full-compact 摘要轮：空文本 → placeholder 压缩产物。
+          // full-compact summary turn: empty text → placeholder compaction product.
           return assistantResult({
             texts: [],
             toolCalls: [],
@@ -650,7 +686,7 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
       },
     });
 
-    // 够长的 prior，让 reactive 压缩有东西可压（尾部保留策略生效）。
+    // Prior long enough for reactive compaction to have something to compact (tail-keep policy engages).
     const longPrior: AnthropicNativeMessage[] = Array.from(
       { length: 12 },
       (_, i) => ({
@@ -680,7 +716,7 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
       [["alpha"], []],
       "第二次判定（compact 重试那一拍）必须返回空 —— 判定读落盘史，不读 messages"
     );
-    // 只被追加过一次：全部 commit 批里 listing 恰一条。
+    // Appended exactly once: across all commit batches there is just one listing.
     const listings = committed
       .flat()
       .filter(
@@ -700,14 +736,14 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SC7 / 失败处置
+// SC7 / failure handling
 // ---------------------------------------------------------------------------
 
 describe("T5 技能索引增量注入 — SC7 / 失败处置", () => {
   it("SC7：slash 信封（skill-load）装了正文但 name 未进场 → 下一轮仍补 delta", async () => {
     const fixture = await makeFixture("sc7");
     await plantSkill(fixture.userHome, "alpha", "description: Alpha skill");
-    // 进场史空（slash 信封不写史 —— T4 明确不提供信封侧写入通道）。
+    // The ledger is empty (the slash envelope never writes it — the envelope side deliberately offers no write channel).
     const { seam, conversationId, ledgerNames } = await makeDeltaSeam(
       fixture,
       []
@@ -717,7 +753,7 @@ describe("T5 技能索引增量注入 — SC7 / 失败处置", () => {
     const adapter = createStubModel({
       responses: [assistantResult({ texts: ["ok"], toolCalls: [] })],
     });
-    // 本轮 query 就是 skill-load 信封形态（slash 装载后模型看到的正文）。
+    // This turn's query is itself a skill-load envelope (the body the model sees after slash loading).
     const { result } = await run(
       '[skill-load name="alpha"]\n<body>\n\n继续',
       baseDeps(adapter, { skillIndexDelta: seam, conversationId })
@@ -762,7 +798,7 @@ describe("T5 技能索引增量注入 — SC7 / 失败处置", () => {
     const fixture = await makeFixture("write-fail");
     await plantSkill(fixture.userHome, "alpha", "description: Alpha skill");
     const { seam, conversationId, ledgerNames } = await makeDeltaSeam(fixture);
-    // 载入之后把目录段占成文件 → 原子写 ENOTDIR。
+    // After loading, replace the directory segment with a file → the atomic write hits ENOTDIR.
     await rm(join(fixture.projectDir, "conv-loop-delta"), {
       recursive: true,
       force: true,
@@ -792,7 +828,7 @@ describe("T5 技能索引增量注入 — SC7 / 失败处置", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #888 纪律：注入消息随下一批 commit flush
+// Commit discipline: injected messages flush with the next commit batch
 // ---------------------------------------------------------------------------
 
 describe("T5 注入消息的 commit 纪律（#888 同形）", () => {
@@ -840,7 +876,7 @@ describe("T5 注入消息的 commit 纪律（#888 同形）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 双轨：真实 trace 记录 vs NoopTrace 基线
+// Dual track: real trace recording vs the NoopTrace baseline
 // ---------------------------------------------------------------------------
 
 describe("T5 双轨 assert — 索引进场不依赖也不改变 trace 观测", () => {
@@ -855,8 +891,9 @@ describe("T5 双轨 assert — 索引进场不依赖也不改变 trace 观测", 
         responses: [assistantResult({ texts: ["done"], toolCalls: [] })],
       });
 
-    // 两条 run 各自独立 session（进场史只落一次，第二次就不贴了 —— 那正是
-    // SC3；本用例要比的是「同一输入下 trace 观测不改变行为」）。
+    // Each run gets its own session (the ledger lands once; the second run
+    // shows no listing — that is exactly SC3; what this case compares is
+    // "trace observation never changes behavior for the same input").
     const tracedSeam = await makeDeltaSeam(fixture, [], "conv-trace");
     const withTrace = await run(
       "go",
@@ -884,8 +921,9 @@ describe("T5 双轨 assert — 索引进场不依赖也不改变 trace 观测", 
       noop.result.messages,
       "trace 观测不改变注入行为本身（NoopTrace 基线）"
     );
-    // 第二轨：真读盘 —— trace 文件含本 run 的 turn 记录（reader.query 的
-    // kind 过滤是消费面 SSOT，不自己解析 JSONL）。
+    // Second track: read the disk for real — the trace file contains this
+    // run's turn records (reader.query's kind filter is the consumption-face
+    // SSOT; don't parse JSONL by hand).
     const reader = createJsonlTraceReader({
       filePath: join(traceDir, "with-trace.jsonl"),
     });

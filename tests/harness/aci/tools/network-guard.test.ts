@@ -1,20 +1,20 @@
 /**
- * network-guard（SSRF 安全出口层）单元测试。
+ * network-guard (the SSRF egress-safety layer) unit tests.
  *
- * 行为真值：utils/network_guard.py（DIRECT 模式裁剪版，
- * 见 ACR corrective #2：不移植 PROXY / SYNTHETIC_DNS）。
+ * Behavioral ground truth: utils/network_guard.py (a DIRECT-mode trimmed port;
+ * PROXY / SYNTHETIC_DNS were deliberately not ported).
  *
- * 覆盖契约：
- *   - validateHttpUrl：仅 http/https、必须有 host、拒绝嵌入凭据
- *   - IP 字面量全局性：loopback / private / link-local / CGNAT / 多播 / 保留段拒绝
- *   - 主机名规则：localhost / *.local / *.internal / 单标签拒绝
- *   - DNS 解析：解析结果含非公网 IP → 拒绝；解析失败 → could not resolve
- *   - fetchPublicResponse：非 2xx 拒绝、重定向逐跳重验（≤5 跳）、重定向到私网拒绝
- *   - 错误消息带 `${tool} failed:` 前缀（对齐 "web_fetch failed: ..."）
- *   - abort / timeout 边界
- *   - 并发：两个独立 deps 的调用 Promise.all 扇出互不干扰
+ * Contract coverage:
+ *   - validateHttpUrl: http/https only, host required, embedded credentials rejected
+ *   - IP-literal globality: loopback / private / link-local / CGNAT / multicast / reserved ranges rejected
+ *   - hostname rules: localhost / *.local / *.internal / single-label rejected
+ *   - DNS resolution: any non-public resolved IP → reject; lookup failure → could not resolve
+ *   - fetchPublicResponse: non-2xx rejected, redirects re-validated per hop (≤5 hops), redirect into private space rejected
+ *   - error messages carry the `${tool} failed:` prefix (matches "web_fetch failed: ...")
+ *   - abort / timeout boundaries
+ *   - concurrency: Promise.all fan-out of two independent deps calls does not interfere
  *
- * 全部离线：fetch / lookup 均注入 stub，不触网。
+ * Fully offline: fetch / lookup are injected stubs, no network touched.
  */
 
 import assert from "node:assert/strict";
@@ -34,7 +34,7 @@ import {
   type GuardLookupFn,
 } from "../../../../src/harness/aci/tools/network-guard.ts";
 
-const PUBLIC_IP = "93.184.216.34"; // example.com — 测试桩的"公网"解析结果
+const PUBLIC_IP = "93.184.216.34"; // example.com — the stub's "public" resolution result
 
 const okLookup: GuardLookupFn = async () => [PUBLIC_IP];
 
@@ -79,8 +79,8 @@ describe("validateHttpUrl — URL 语法防线", () => {
   });
 
   it("rejects URLs without a host", () => {
-    // WHATWG URL："http://" 直接 Invalid URL（无 host）；
-    // "http:///path" 会被解析为 host="path"，走单标签主机名防线拒绝。
+    // WHATWG URL: "http://" is directly Invalid URL (no host);
+    // "http:///path" parses as host="path" and is rejected by the single-label hostname rule instead.
     assert.throws(() => validateHttpUrl("http://"), ToolExecutionError);
   });
 
@@ -141,7 +141,7 @@ describe("fetchPublicResponse — IP 字面量防线", () => {
       { tool: "web_fetch", timeoutMs: 1_000 }
     );
     assert.equal(res.body, "hello");
-    assert.deepEqual(calls, []); // 字面量不查 DNS
+    assert.deepEqual(calls, []); // IP literals skip DNS entirely
   });
 });
 
@@ -321,7 +321,7 @@ describe("fetchPublicResponse — HTTP 语义", () => {
         ),
       "too many redirects"
     );
-    assert.equal(hop, 6); // 初始 1 次 + 5 次跟随
+    assert.equal(hop, 6); // 1 initial request + 5 followed redirects
   });
 
   it("resolves relative redirect locations against the current URL", async () => {
@@ -472,9 +472,10 @@ describe("fetchPublicResponse — 并发扇出（ACR corrective #3）", () => {
 
 describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径）", () => {
   it("proxyUrl 非法(非 http/https)时构造时同步抛 ToolExecutionError", () => {
-    // SSRF 防线对齐 `validate_http_url(resolved_proxy)`:
-    // proxy URL 在 ProxyAgent 构造前必须通过 httpUrlViolation 校验,
-    // 校验发生在工厂同步路径上,早于 fetch 闭包第一次调用。
+    // SSRF defense mirrors `validate_http_url(resolved_proxy)`:
+    // the proxy URL must pass httpUrlViolation before ProxyAgent is constructed,
+    // and that check runs on the factory's synchronous path, before the first
+    // call of the fetch closure.
     assert.throws(
       () => createDefaultGuardDeps({ proxyUrl: "ftp://proxy.local:7897" }),
       (err: unknown) =>
@@ -496,8 +497,8 @@ describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径
   });
 
   it("proxyUrl 合法时返回的 deps 结构完整", () => {
-    // dispatcher 装配被触发。仅验证返回的 deps 结构合法。
-    // 实网络行为(走 ProxyAgent 出网)在 smoke 脚本里测,避免测试挂代理。
+    // The dispatcher wiring is triggered; only the returned deps shape is validated here.
+    // Real network behavior (egress via ProxyAgent) is covered by smoke scripts, keeping tests off any proxy.
     const deps = createDefaultGuardDeps({
       proxyUrl: "http://127.0.0.1:7897",
     });
@@ -512,7 +513,7 @@ describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径
   });
 
   it("向后兼容旧的字符串 userAgent 签名", () => {
-    // createDefaultGuardDeps(ua?: string) 旧调用点不应因新增 opts 形态破坏。
+    // Existing createDefaultGuardDeps(ua?: string) call sites must not break under the new opts form.
     const deps = createDefaultGuardDeps("legacy-ua/1.0");
     assert.equal(typeof deps.fetch, "function");
   });
@@ -520,7 +521,7 @@ describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径
 
 describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () => {
   it("DEFAULT_USER_AGENT 形如浏览器串并带 iknow 后缀", () => {
-    // 防回退到纯产品 UA（实测被 Cloudflare 202 challenge 拦截）。
+    // Guards against regressing to a bare product UA (observed in practice to be blocked by Cloudflare 202 challenges).
     assert.match(DEFAULT_USER_AGENT, /^Mozilla\/5\.0/);
     assert.ok(DEFAULT_USER_AGENT.includes("AppleWebKit"));
     assert.ok(DEFAULT_USER_AGENT.includes("Chrome/"));
@@ -529,19 +530,18 @@ describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () 
 
   it("生产默认 fetch 携带 DEFAULT_USER_AGENT 头", async () => {
     const deps = createDefaultGuardDeps();
-    // 用一个拦截 fetch 的间接验证：deps.fetch 是真实 globalThis.fetch 的包装，
-    // 但我们只断言 UA 已在闭包中固定。改用一个能观测 header 的 stub 不可能
-    // （createDefaultGuardDeps 内部闭包持有 fetch），所以改为构造一个相同
-    // 闭包语义的微缩验证：createDefaultGuardDeps(ua) 的 fetch 会用该 ua。
-    // 这里仅验证默认值传递路径：显式传 ua 后，deps 结构完整。
+    // deps.fetch wraps the real globalThis.fetch and its closure cannot be
+    // introspected for headers, so this verifies only the UA propagation path:
+    // passing ua explicitly still yields a well-formed deps.
     const custom = createDefaultGuardDeps("custom-ua/9.9");
     assert.equal(typeof custom.fetch, "function");
     assert.equal(typeof custom.lookup, "function");
   });
 
   it("ua 参数缺省时回退到 DEFAULT_USER_AGENT", () => {
-    // 不直接观测 headers（globalThis.fetch 闭包不可内省），而是验证
-    // createDefaultGuardDeps() 无参调用不抛 + 返回有效 deps。
+    // Headers are not observed directly (the globalThis.fetch closure is not
+    // introspectable); verify instead that the no-arg call does not throw and
+    // returns usable deps.
     const deps = createDefaultGuardDeps();
     assert.ok(deps.fetch !== undefined);
     assert.ok(deps.lookup !== undefined);
@@ -564,7 +564,10 @@ describe("decoded body byte cap", () => {
     );
     assert.equal(contentLengthExceedsCap("-1", MAX_DECODED_BODY_BYTES), false);
     assert.equal(
-      contentLengthExceedsCap(String(MAX_DECODED_BODY_BYTES + 1), MAX_DECODED_BODY_BYTES),
+      contentLengthExceedsCap(
+        String(MAX_DECODED_BODY_BYTES + 1),
+        MAX_DECODED_BODY_BYTES
+      ),
       true
     );
   });
@@ -583,7 +586,8 @@ describe("decoded body byte cap", () => {
     assert.throws(
       () => assertDecodedBodyLimit(huge),
       (err: unknown) =>
-        err instanceof ToolExecutionError && err.message.includes("body exceeds")
+        err instanceof ToolExecutionError &&
+        err.message.includes("body exceeds")
     );
   });
 
@@ -599,7 +603,8 @@ describe("decoded body byte cap", () => {
     await assert.rejects(
       () => readUtf8WithByteLimit(stream, cap),
       (err: unknown) =>
-        err instanceof ToolExecutionError && err.message.includes("body exceeds")
+        err instanceof ToolExecutionError &&
+        err.message.includes("body exceeds")
     );
   });
 
@@ -639,4 +644,3 @@ describe("decoded body byte cap", () => {
     );
   });
 });
-

@@ -1,22 +1,26 @@
 /**
- * #128 verify 分类器 — 并发/中断边界测试 (T6, spec SC5 并发维度)。
+ * Verify classifier — concurrency / interruption boundary tests.
  *
- * spec/128-verify-classifier.md §Testing Strategy 边界行 + 并发不变量论证:
- *   - verify-loop 是串行循环, 每轮至多一个分类器在飞, 两轮间无竞态窗口;
- *   - 唯一并发维度 = abort 与分类器在飞并存: 用户在等待 worker 回包时 Ctrl+C,
- *     闭环须立即停止 (不等待 worker 回包), in-flight closeout 不残留 stale 信封。
+ * Boundary rows + concurrency-invariant argument from the spec's testing strategy:
+ *   - verify-loop is a serial loop: at most one classifier is in flight per round,
+ *     so there is no race window between two rounds;
+ *   - the only concurrency dimension is abort coexisting with an in-flight
+ *     classifier: the user presses Ctrl+C while waiting for the worker's reply —
+ *     the loop must stop immediately (not wait for the reply) and the in-flight
+ *     closeout must not leave a stale envelope behind.
  *
- * 本文件覆盖 classifier-loop.test.ts 未覆盖的 abort × 时序边界:
- *   - 分类器在飞 (seam 永不 resolve) → abort → outcome=aborted;
- *   - 同上 + message 历史无 stale `[VALIDATION FAILED]` 信封注入
- *     (用户 abort 不触发 fail→inject 链路);
- *   - pre-loop abort (await runFn 之前 signal 已 aborted) → 分类器 seam 未被调用;
- *   - abort 在分类器返回后、下一次 runFn 之前 → outcome=aborted (race 边界)。
- *   - runVerifyLoop 断言 target: assert.equal(out.outcome, "aborted") 全绿退出 0。
+ * Covers abort × timing boundaries not covered by classifier-loop.test.ts:
+ *   - classifier in flight (seam never resolves) → abort → outcome=aborted;
+ *   - same + no stale `[VALIDATION FAILED]` envelope injected into message history
+ *     (a user abort must not trigger the fail→inject chain);
+ *   - pre-loop abort (signal already aborted before awaiting runFn) → classifier
+ *     seam never called;
+ *   - abort after the classifier returns but before the next runFn → outcome=aborted
+ *     (race boundary).
  *
- * DI 缝: 镜像 classifier-loop.test.ts (makeRecordingRunFn / makeClassifierSpy /
- * defaultOptions / okEnvelope) + verify-loop.test.ts SC11 abort 模式
- * (AbortController + signal 经 defaultOptions 传入)。
+ * DI seams: mirror classifier-loop.test.ts (makeRecordingRunFn / makeClassifierSpy /
+ * defaultOptions / okEnvelope) plus the abort pattern of verify-loop.test.ts
+ * (AbortController + signal passed via defaultOptions).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,7 +38,7 @@ import type {
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 
-/* ------------------------------ 测试 fixture (镜像 classifier-loop.test.ts) ------------------------------ */
+/* ------------------------------ test fixtures (mirrors classifier-loop.test.ts) ------------------------------ */
 
 const EMPTY_TRACE: LoopTrace = Object.freeze({
   turns: Object.freeze([]),
@@ -86,7 +90,7 @@ function stubRun(opts: {
   };
 }
 
-/** run() 委托返回形状 (与 verify-loop.ts 的 RunOutcome 同构)。 */
+/** Shape returned by the delegated run() (structurally identical to RunOutcome in verify-loop.ts). */
 interface RunOutcome {
   readonly result: RunResult;
   readonly trace: LoopTrace;
@@ -98,7 +102,7 @@ interface RecordedCall {
   readonly lastUserText: string | undefined;
 }
 
-/** 脚本化 runFn 替身: 逐次返回脚本文本, 记录每次调用的历史形状 (同 T3 测试)。 */
+/** Scripted runFn stub: returns script text call by call and records each call's history shape. */
 function makeRecordingRunFn(
   script: ReadonlyArray<string>,
   opts: {
@@ -129,7 +133,7 @@ function makeRecordingRunFn(
   return { runFn, calls: () => calls };
 }
 
-/** 判官 JSON 序列化进 status:"ok" envelope 的 result 字段。 */
+/** Serializes the judge JSON into the result field of a status:"ok" envelope. */
 function okEnvelope(result: unknown): ClassifierEnvelope {
   return {
     status: "ok",
@@ -155,7 +159,7 @@ function failEnvelope(reason: string, missing: string[]): ClassifierEnvelope {
   });
 }
 
-/** 构造一个调用 spy + 返回脚本的 runClassifier 替身 (同 T3 测试)。 */
+/** runClassifier stub that spies on calls and returns the scripted envelopes. */
 function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   readonly runClassifier: RunClassifierFn;
   readonly calls: () => ReadonlyArray<{
@@ -207,7 +211,7 @@ function defaultOptions(over: {
   };
 }
 
-/** message 历史中所有 user 文本的拼接。 */
+/** All user-role texts in the message history. */
 function allUserText(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string[] {
@@ -218,7 +222,7 @@ function allUserText(
     );
 }
 
-/* ------------------------------ SC5 并发维度: abort × 分类器在飞 ------------------------------ */
+/* ------------------------------ concurrency boundary: abort × in-flight classifier ------------------------------ */
 
 describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)", () => {
   it("分类器在飞 (seam 永不 resolve) → abort → outcome=aborted, 不等 worker 回包", async () => {
@@ -230,7 +234,7 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
     });
     const runClassifier: RunClassifierFn = async (args) => {
       resolveSpawnStarted();
-      // 永不 resolve: 模拟 worker 在飞 (seam 等待子代理回包)。
+      // never resolves: simulates an in-flight worker (seam awaiting the subagent reply).
       await new Promise<void>((resolve) => {
         if (args.signal?.aborted) {
           resolve();
@@ -238,8 +242,8 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
         }
         args.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
-      // 用户 abort 触发时 worker 被杀 → seam 以 AbortError reject
-      // (verify-loop 在 catch 内先查 signal.aborted → aborted, 不判 unstable)。
+      // when the user aborts, the worker is killed → the seam rejects with AbortError
+      // (verify-loop checks signal.aborted first inside catch → aborted, not unstable).
       throw new Error("AbortError: subagent aborted");
     };
 
@@ -254,11 +258,12 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
     controller.abort();
     const out = await promise;
 
-    // "不等待 worker 回包"的合同由 runClassifierOnce 的 abort 检查点保证:
-    // seam 挂起期间 signal.aborted 一旦置位, await 即 settle → catch 内先查
-    // signal → {aborted:true}, 不等 seam 主动返回 (verify-loop.ts:478/488)。
-    // 此处不用定时器 race 断言 (会引入 flakiness); seam 的挂起 + 迟 reject
-    // 已证明 closeout 不依赖 worker 回包。
+    // The "never wait for the worker reply" contract is held by the abort checkpoints
+    // in runClassifierOnce: while the seam is suspended, once signal.aborted is set the
+    // await settles and the catch sees signal → {aborted:true} without waiting for the
+    // seam to return. Asserted without a timer race (which would be flaky); the
+    // suspended seam plus late rejection already proves the closeout does not depend on
+    // the worker reply.
     assert.equal(
       out.outcome,
       "aborted",
@@ -289,9 +294,9 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
         }
         args.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
-      // seam 在 abort 后返回一个 fail envelope —— verify-loop 必须先查
-      // signal.aborted (runClassifierOnce 第 2 个 abort 检查点), 不得
-      // 消费该 stale fail 走进 fail→inject 链路。
+      // The seam returns a fail envelope after the abort — verify-loop must check
+      // signal.aborted first (the second abort checkpoint in runClassifierOnce) and
+      // must not consume this stale fail into the fail→inject chain.
       return failEnvelope("stale failure", ["stale item"]);
     };
 
@@ -311,7 +316,7 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
       "aborted",
       "abort 后 seam 迟到回包不得覆盖 abort 判定"
     );
-    // 用户 abort 不该触发 fail→inject 链路: 历史无任何 [VALIDATION FAILED] 信封。
+    // A user abort must not trigger the fail→inject chain: no [VALIDATION FAILED] envelope anywhere in history.
     assert.ok(
       allUserText(out.result.messages).every(
         (t) => !t.includes("[VALIDATION FAILED]")
@@ -321,12 +326,12 @@ describe("SC5 并发维度: 分类器在飞时用户 abort (in-flight closeout)"
   });
 });
 
-/* ------------------------------ SC5 并发维度: abort × 时序窗口 ------------------------------ */
+/* ------------------------------ concurrency boundary: abort × timing windows ------------------------------ */
 
 describe("SC5 并发维度: abort × 时序窗口", () => {
   it("abort 在 await runFn 之前 (pre-loop) → outcome=aborted, 分类器 seam 未被调用", async () => {
     const controller = new AbortController();
-    controller.abort(); // 首轮 runFn await 之前 signal 已 aborted。
+    controller.abort(); // signal already aborted before the first runFn await.
     const { runFn, calls: runFnCalls } = makeRecordingRunFn(["done"]);
     const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
       passEnvelope("should not be called"),
@@ -352,11 +357,12 @@ describe("SC5 并发维度: abort × 时序窗口", () => {
   });
 
   it("abort 在分类器返回后、下一轮 runFn 在飞时 → outcome=aborted (race 边界)", async () => {
-    // 镜像 verify-loop.test.ts SC11 abort 模式: 第 2 轮 runFn 挂起等待 abort
-    // (与 SC11 的 runVerify 挂起同构)。第 1 轮分类器 fail → 注入信封继续,
-    // 第 2 轮 runFn 在飞时用户 abort → while 顶部 abort 检查点收敛。
+    // Mirrors the abort pattern in verify-loop.test.ts: the second runFn suspends
+    // until abort (same shape as the suspended runVerify there). Round 1 classifier
+    // fails → envelope injected and the loop continues; the user aborts while round
+    // 2's runFn is in flight → the loop-top abort checkpoint converges.
     const controller = new AbortController();
-    // 仅首轮脚本 "v1" 被消费: runFnHook 拦截 call=1 并挂起直到 abort。
+    // Only the first scripted call consumes "v1": runFnHook intercepts call 1 and suspends until abort.
     const { runFn, calls: runFnCalls } = makeRecordingRunFn(["v1"]);
     let resolveSecondStarted!: () => void;
     const secondStarted = new Promise<void>((resolve) => {
@@ -408,8 +414,8 @@ describe("SC5 并发维度: abort × 时序窗口", () => {
     assert.equal(out.rounds, 1);
     assert.equal(out.records.length, 1, "仅首轮判定有记录");
     assert.equal(out.records[0]!.verdict, "true-failure");
-    // 该 abort 是"已完成 fail 轮后的用户中断": 历史含首轮注入的
-    // classifier 失败信封 (第二轮信封尚未产生, 无 stale 累积)。
+    // This abort is a user interruption after a completed fail round: history still
+    // holds round 1's injected classifier envelope (round 2 never produced one).
     const envelopes = allUserText(out.result.messages).filter((t) =>
       t.includes("[VALIDATION FAILED]")
     );

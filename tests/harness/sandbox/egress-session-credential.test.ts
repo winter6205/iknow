@@ -1,22 +1,25 @@
 /**
  * tests/harness/sandbox/egress-session-credential.test.ts
  *
- * specs/egress-credential-sentinel.md T2 —— session 装配步骤（Step 1.5）
- * 与 fence spec 扩展。
+ * specs/egress-credential-sentinel.md — session assembly step 1.5 (credential
+ * minting) and the fence-spec extension.
  *
- * 钉住的不变式：
- *   - 名册在场 → spec.env = 代理三键之上追加凭据假值与 CA_TRUST_VARS
- *     （invariant 1 通道 = egress env 增量）；spec.binds = masked store /
- *     trust bundle / masked-file 盖 bind（invariant 9 落位由 bwrap 侧钉）；
- *   - 铸造在起代理之前：CA 装载 / 装配期 assert 失败 = 代理未起、
- *     session 不存在（F4「不起带部分代换的 session」的 session 面判据）；
- *   - 名册缺席 → 不装载 CA、不铸造（spec.binds 缺席）；
- *   - SC9 后半：中继依赖缺席（Step 1 失败，ADR-0107）→ 凭据层随 session
- *     整体缺席，无假值半注入（loadEgressCa 未被调 = registry/store 未构造）。
+ * Pinned invariants:
+ *   - roster present → spec.env appends the credential fakes and CA_TRUST_VARS on
+ *     top of the three proxy keys (invariant 1: the channel is an egress env
+ *     delta); spec.binds carries the masked store / trust bundle / masked-file
+ *     overlay (invariant 9 placement is pinned on the bwrap side);
+ *   - minting happens before the proxy starts: a CA-load or assembly-time assert
+ *     failure means no proxy and no session (the session-side criterion of "never
+ *     start a session with partial substitution");
+ *   - roster absent → no CA load, no minting (spec.binds absent);
+ *   - relay dependency absent (assembly step 1 fails, ADR-0107) → the whole
+ *     credential layer is absent with the session and no fakes are half-injected
+ *     (loadEgressCa not called = registry/store never constructed).
  *
- * 注入策略沿用 egress-session.test.ts：relayResolver 假路径集 /
- * createHttpProxyServer seam；loadEgressCa / hostEnv 为 T2 新增 seam。
- * fixture 全为生成假凭据。
+ * Injection strategy follows egress-session.test.ts: fake relayResolver path set /
+ * createHttpProxyServer seam; loadEgressCa and hostEnv are the newly added seams.
+ * All fixtures are generated fake credentials.
  */
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
@@ -53,7 +56,7 @@ afterEach(async () => {
     rmSync(p, { recursive: true, force: true });
 });
 
-/** 固定假中继路径集 —— 单测不查宿主存在性（resolver seam 直给）。 */
+/** Fixed fake relay path set — unit tests never probe host existence (resolver seam given directly). */
 function fakeRelay(): EgressRelayPaths {
   const relayDir = "/test-root/vendor/egress-relay";
   return {
@@ -64,7 +67,7 @@ function fakeRelay(): EgressRelayPaths {
   };
 }
 
-/** 生成的假凭据 + 假 CA（trust bundle 文件真写，路径消费面用）。 */
+/** Generated fake credentials + fake CA (the trust bundle file is really written, since paths are consumed). */
 function fixture(): {
   roster: EgressCredentialRoster;
   realEnvToken: string;
@@ -132,19 +135,19 @@ describe("createEgressSession — T2 铸造步骤", () => {
     });
     sessions.push(session);
 
-    // 代理键仍在（buildProxyEnv 之上追加，不替换）。
+    // the proxy keys remain (appended on top of buildProxyEnv, not replaced).
     assert.match(
       session.spec.env.HTTP_PROXY ?? "",
       new RegExp(`^http://[^@]+@127\\.0\\.0\\.1:${SANDBOX_HTTP_PROXY_PORT}$`)
     );
-    // invariant 1 通道：GH_TOKEN = 假值，真值不进。
+    // invariant 1 channel: GH_TOKEN = fake value; the real value never enters.
     assert.match(session.spec.env.GH_TOKEN ?? "", /^fake_value_/);
     assert.ok(!Object.values(session.spec.env).includes(f.realEnvToken));
     assert.ok(!Object.values(session.spec.env).includes(f.realFileToken));
-    // Assumption 11：CA_TRUST_VARS 全量指向 trust bundle。
+    // Assumption 11: every CA_TRUST_VARS entry points at the trust bundle.
     for (const name of CA_TRUST_VARS)
       assert.equal(session.spec.env[name], f.caLoad.ca.trustBundlePath);
-    // F8 装配期 bind 完整性：bundle 自 bind + masked-file 盖行在场。
+    // assembly-time bind integrity: bundle self-bind + masked-file overlay present.
     const binds = session.spec.binds ?? [];
     assert.ok(
       binds.some(
@@ -154,7 +157,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
     const masked = binds.find((b) => b.dest === f.hostsPath);
     assert.ok(masked, "masked 盖行（dest=真路径）进 bind 表");
     assert.notEqual(masked.src, f.hostsPath);
-    // CA key 不进表（SC8 消费面）。
+    // the CA key never enters the bind table.
     assert.ok(
       !binds.some(
         (b) => b.src === f.caLoad.ca.keyPath || b.dest === f.caLoad.ca.keyPath
@@ -229,7 +232,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
       }),
       EgressRelayUnavailableError
     );
-    // Step 1 先于 Step 1.5：registry/store 根本未构造 = 无半注入态。
+    // assembly step 1 precedes step 1.5: registry/store were never constructed = no half-injection state.
     assert.equal(caCalled, false);
   });
 });

@@ -1,28 +1,37 @@
 /**
  * tests/harness/sandbox/egress-session-substitution.test.ts
  *
- * specs/egress-credential-sentinel.md T3 —— 代理代换接线 + dispose。
+ * specs/egress-credential-sentinel.md — proxy substitution wiring + dispose.
  *
- * 钉住的不变式：
- *   - invariant 2：代换只发生在 filter 放行之后的转发腿（不改判定、不再
- *     记违例）；destHost 命中该 sentinel 所属条目 injectHosts 才代换；
- *     漏门方向恒为「假值出去 = 认证失败」；
- *   - invariant 3 / SC4：批准门新批域不进入任何条目 injectHosts（洗出防护）；
- *   - invariant 5 / Assumption 7：明文臂零代换（mutateHeadersPlaintext /
- *     getBodySubstitutionsPlaintext 永不接线）；CONNECT 非 TLS 字节 →
- *     opaque tunnel 臂不动（不配 getMitmSocketPath，分流全在包内既有实现）；
- *   - Assumption 5：shouldTerminateTLS 缺省全终止；豁免域 ∧ 存在可注入
- *     凭据 → reason `tls-exempt-injectable`（F6）；
- *   - F5：Content-Encoding 请求体跳过代换 → reason `substitution-skipped`
- *     进 violationSink 旁路诊断档，与域判定拒绝 / infra 故障四类信号互不
- *     混淆（SC6 方向断言：真值绝不入违例记录）；
- *   - dispose：registry.clear() + MaskedFileStore.dispose() + trust bundle
- *     临时件清理；正常 / 异常（unix socket listen 失败先起代理）同一释放
- *     通道；幂等。
+ * Pinned invariants:
+ *   - invariant 2: substitution happens only on the forwarding leg after the
+ *     filter has admitted the request (the decision is unchanged, no extra
+ *     violation is recorded); a substitution fires only when destHost matches
+ *     the entry's own injectHosts; the gate-miss direction is always "the fake
+ *     value goes out = auth failure";
+ *   - invariant 3: domains newly approved by the approval gate never enter any
+ *     entry's injectHosts (credential-washout protection);
+ *   - invariant 5 / Assumption 7: the plaintext arm gets zero substitution
+ *     (mutateHeadersPlaintext / getBodySubstitutionsPlaintext are never wired);
+ *     non-TLS CONNECT bytes → the opaque-tunnel arm is untouched (no
+ *     getMitmSocketPath configured; all demultiplexing stays in the package's
+ *     existing implementation);
+ *   - Assumption 5: shouldTerminateTLS terminates everything by default;
+ *     exempt host ∧ an injectable credential exists → reason
+ *     `tls-exempt-injectable`;
+ *   - a Content-Encoding request body skips substitution → reason
+ *     `substitution-skipped` lands in the violationSink's bypass-diagnosis
+ *     tier, never confused with the other signal classes — domain denial /
+ *     infra failure (direction assertion: real values never enter violation
+ *     records);
+ *   - dispose: registry.clear() + MaskedFileStore.dispose() + trust-bundle temp
+ *     cleanup; the normal path and the failure path (proxy already started,
+ *     unix socket listen fails) share one release channel; idempotent.
  *
- * 注入策略沿用 egress-session-credential.test.ts：createHttpProxyServer
- * seam 捕获 options 不真起代理；onCredentialMint seam 观测 session 私有
- * registry / store。fixture 全为生成假凭据，真值不经测试面。
+ * Injection strategy follows egress-session-credential.test.ts: the
+ * createHttpProxyServer seam captures options without starting a proxy; the
+ * onCredentialMint seam observes the session-private registry / store. All
+ * fixtures are generated fake credentials; real values never cross the test surface.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -72,7 +81,7 @@ afterEach(async () => {
     rmSync(p, { recursive: true, force: true });
 });
 
-/** 固定假中继路径集 —— 单测不查宿主存在性（resolver seam 直给）。 */
+/** Fixed fake relay path set — unit tests never probe host existence (resolver seam given directly). */
 function fakeRelay(): EgressRelayPaths {
   const relayDir = "/test-root/vendor/egress-relay";
   return {
@@ -92,7 +101,7 @@ interface Fixture {
   readonly caLoad: EgressCaLoad;
 }
 
-/** 生成的假凭据 + 假 CA（trust bundle 单独子目录，dispose 判据清晰）。 */
+/** Generated fake credentials + fake CA (trust bundle in its own subdir, so dispose has a clean criterion). */
 function fixture(): Fixture {
   const dir = scratchDir();
   const bundleDir = join(dir, "mitm-bundle");
@@ -124,7 +133,8 @@ function fixture(): Fixture {
       ],
       envVars: [
         { name: "GH_TOKEN", injectHosts: GITHUB_HOSTS },
-        // 独立条目：injectHosts 只覆盖豁免域（F6 用），与 github 域正交。
+        // Separate entry: injectHosts covers only the exempt domain (used by the
+        // tls-exempt-injectable case), orthogonal to the github domains.
         { name: "EXTRA_TOKEN", injectHosts: ["pinned.example.com"] },
       ],
     },
@@ -150,7 +160,7 @@ interface Opened {
   readonly cred: EgressCredentialResources;
 }
 
-/** 打开 session 并捕获 proxy options + credential resources（不真起代理）。 */
+/** Open a session and capture proxy options + credential resources (no real proxy started). */
 async function openSession(
   f: Fixture,
   extra: {
@@ -249,7 +259,8 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
   it("批准门新批域不进入任何条目 injectHosts（invariant 3 / SC4 洗出防护）", async () => {
     const f = fixture();
     const { opts, cred } = await openSession(f, {
-      // 非空基底（allowlist-empty 档不配批准语义）；evil.example.com 为首见新域。
+      // non-empty base (the allowlist-empty tier carries no approval semantics);
+      // evil.example.com is the first-seen new domain.
       allowedDomains: ["api.example.com"],
       approvalGate: createEgressApprovalGate({
         askApproval: async () => true,
@@ -257,11 +268,12 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     });
     const fake = cred.mint.envVars.GH_TOKEN ?? "";
 
-    // 批准门放行 evil.example.com（新批域）。
+    // the approval gate admits evil.example.com (a newly approved domain).
     const allowed = await opts.filter(443, "evil.example.com", {} as never);
     assert.equal(allowed, true);
 
-    // 但 GH_TOKEN 条目的 injectHosts 不含它 → 假值原样转发，绝不代换。
+    // but the GH_TOKEN entry's injectHosts excludes it → the fake value forwards
+    // verbatim; substitution never fires.
     const headers: Record<string, string | string[]> = {
       authorization: `Bearer ${fake}`,
     };
@@ -279,10 +291,12 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const { opts } = await openSession(f);
     assert.equal(opts.mutateHeadersPlaintext, undefined);
     assert.equal(opts.getBodySubstitutionsPlaintext, undefined);
-    // AWS SigV4 远期不入首期（spec Out-of-scope）。
+    // AWS SigV4 is out of scope for the first phase (spec Out-of-scope).
     assert.equal(opts.planSigv4, undefined);
-    // CONNECT 非 TLS 字节 → opaque tunnel 臂不动（ssh-bridge 依赖声明）：
-    // 本仓不配 getMitmSocketPath，非 TLS sniff 分流全在包内既有实现。
+    // non-TLS CONNECT bytes → the opaque-tunnel arm is untouched (per the
+    // ssh-bridge dependency declaration): this repo never configures
+    // getMitmSocketPath; non-TLS sniff demultiplexing stays in the package's
+    // existing implementation.
     assert.equal(opts.getMitmSocketPath, undefined);
   });
 
@@ -298,7 +312,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const f = fixture();
     const { session, opts, cred } = await openSession(f);
     const fake = cred.mint.envVars.GH_TOKEN ?? "";
-    // 包内次序：CONNECT 先 shouldTerminateTLS(hostname, port) 后 mutateHeaders。
+    // in-package order: CONNECT calls shouldTerminateTLS(hostname, port) before mutateHeaders.
     opts.shouldTerminateTLS!("github.com", 443);
 
     const headers: Record<string, string | string[]> = {
@@ -307,7 +321,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
       authorization: `Bearer ${fake}`,
     };
     opts.mutateHeaders?.(headers, "github.com");
-    // 头仍代换（F5 只跳体扫描）；痕记录的是体跳过。
+    // headers are still substituted (only the body scan is skipped); the trace records the body skip.
     assert.equal(headers.authorization, `Bearer ${f.realEnvToken}`);
 
     const violations = session.violationSink.drain();
@@ -325,7 +339,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const f = fixture();
     const { session, opts, cred } = await openSession(f);
     const fake = cred.mint.envVars.GH_TOKEN ?? "";
-    // 注入域外的压缩请求：无可跳过的代换 → 无痕。
+    // a compressed request outside the inject domains has no substitution to skip → no trace.
     opts.mutateHeaders?.(
       {
         "content-encoding": "gzip",
@@ -334,7 +348,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
       },
       "api.example.com"
     );
-    // 未声明体（无 content-length / transfer-encoding）→ 包不会建 transform → 无痕。
+    // no declared body (no content-length / transfer-encoding) → the package builds no transform → no trace.
     opts.mutateHeaders?.({ "content-encoding": "gzip" }, "github.com");
     assert.equal(session.violationSink.size(), 0);
   });
@@ -354,11 +368,11 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     assert.equal(drained[0].host, "pinned.example.com");
     assert.ok(!JSON.stringify(drained).includes(f.realExtraToken));
 
-    // 豁免但无凭据条目指向它 → 不终止且无痕（豁免本身不是违例）。
+    // exempt but no credential entry points at it → not terminated, and no trace (exemption itself is not a violation).
     assert.equal(opts.shouldTerminateTLS!("bare.example.net", 443), false);
     assert.equal(sink.size(), 0);
 
-    // 非豁免域不受影响（缺省全终止）。
+    // non-exempt domains are unaffected (terminate everything by default).
     assert.equal(opts.shouldTerminateTLS!("github.com", 443), true);
   });
 
@@ -370,9 +384,9 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
       tlsExemptHosts: ["pinned.example.com"],
     });
     const fake = "fake_value_signaltest";
-    // 1) 域判定拒绝（filter）。
+    // 1) domain-decision denial (filter).
     await Promise.resolve(opts.filter(443, "blocked.example", {} as never));
-    // 2) 代换跳过（F5）。
+    // 2) substitution-skipped trace.
     opts.shouldTerminateTLS!("github.com", 443);
     opts.mutateHeaders?.(
       {
@@ -382,9 +396,9 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
       },
       "github.com"
     );
-    // 3) 豁免注入（F6）。
+    // 3) exempt-domain injection trace.
     opts.shouldTerminateTLS!("pinned.example.com", 443);
-    // 4) infra 故障（既有通道）。
+    // 4) infra failure (existing channel).
     sink.record({
       kind: "egress_violation",
       host: "egress-seam",
@@ -395,7 +409,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
 
     const all = sink.drain();
     const reasons = new Set(all.map((v) => v.reason));
-    // blocked.example 不在允许集且无批准门 → 非交互 fail-closed（no-approval-inlet）。
+    // blocked.example is not in the allow set and there is no approval gate → non-interactive fail-closed (no-approval-inlet).
     assert.deepEqual([...reasons].sort(), [
       "infra-unavailable",
       "no-approval-inlet",
@@ -404,7 +418,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     ]);
     assert.equal(all.length, 4);
     const text = renderEgressViolations(all);
-    // 域判定拒绝走 [network_denied]；两条代换诊断走 [egress_diagnostic] 旁路档。
+    // domain denial renders as `[network_denied]` ("network denied"); the two substitution diagnostics go to the `[egress_diagnostic]` ("egress diagnostic") bypass tier.
     assert.match(text, /\[network_denied\] blocked\.example:443/);
     assert.match(text, /\[egress_diagnostic\] github\.com:443/);
     assert.match(text, /\[egress_diagnostic\] pinned\.example\.com:443/);
@@ -452,14 +466,14 @@ describe("T3 dispose —— registry / masked store / trust bundle 三资源同�
       "trust bundle 临时件清理（bundle 目录随 disposeMitmCA 删除）"
     );
 
-    // 释放后代换失效：假值原样（registry 已清 = 无对可换，方向 fail-safe）。
+    // after release substitution is inert: the fake value passes through (registry cleared = no pair to substitute; fail-safe direction).
     const headers: Record<string, string | string[]> = {
       authorization: "Bearer fake_value_gone",
     };
     opts.mutateHeaders?.(headers, "github.com");
     assert.equal(headers.authorization, "Bearer fake_value_gone");
 
-    await session.dispose(); // 幂等：不抛
+    await session.dispose(); // idempotent: does not throw
   });
 
   it("异常路径（unix socket listen 失败、代理已起）→ 三资源同样释放，不留 stale", async () => {
@@ -475,7 +489,7 @@ describe("T3 dispose —— registry / masked store / trust bundle 三资源同�
           credentials: f.roster,
         },
         relayResolver: fakeRelay,
-        // listen 必然失败：socket 父目录不存在（ENOENT）→ Step 3 typed 清理通道。
+        // listen is guaranteed to fail: the socket's parent directory does not exist (ENOENT) → typed cleanup channel.
         socketPathFactory: (id) =>
           join(scratchDir(), "no-such-dir", `egress-${id}.sock`),
         createHttpProxyServer: (opts) => {

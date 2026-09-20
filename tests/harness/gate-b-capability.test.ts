@@ -1,5 +1,6 @@
 /**
- * Gate B 扫描器契约：扫可执行面（含字符串 / import），不扫注释用词。
+ * Gate B scanner contract: only the executable surface (strings / imports)
+ * is scanned; wording inside comments is never a leak.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

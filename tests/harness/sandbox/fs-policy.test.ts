@@ -11,16 +11,18 @@ import {
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
- * ADR-0092 global-mode fs-policy contract (post-Round-2 dead-surface removal).
+ * ADR-0092 global-mode fs-policy contract (dead-surface removal).
  *
- * 闭世界(读/写白名单 + assertWithin / SENSITIVE_PATHS / isSensitive)退役,
- * policy 只剩一面:
- *   - `tmpRoot()`:本 identity 的会话 tmp 宿主路径(供 `$TMPDIR` 与写工具
- *     可写根用),不是 guest `/tmp` 的 bind 目标。
+ * With the closed world (read/write allowlists + assertWithin / SENSITIVE_PATHS
+ * / isSensitive) retired, the policy keeps a single surface:
+ *   - `tmpRoot()`: this identity's session-tmp host path (used for `$TMPDIR`
+ *     and writable tool roots), not a bind target for a guest `/tmp`.
  *
- * 没有 home / workspaceRoot 状态锚谓词、没有白名单、没有 isSensitive 表面;
- * 写保护由 bwrap 挂载层(host root + 系统前缀只读重绑)与权限链 + hard-wall
- * 共同承担。合同输入只有 `tmpDir`(空白或盘上缺席 → typed fail-loud,不 spawn)。
+ * There are no home / workspaceRoot state-anchor predicates, no allowlists, no
+ * isSensitive surface; write protection is carried by the bwrap mount layer
+ * (host root + read-only system-prefix rebinding) plus the permission chain and
+ * the hard wall. The only contract input is `tmpDir` (blank or absent on disk →
+ * typed fail-loud, no spawn).
  */
 
 describe("createFsPolicy — global-mode tmpRoot (ADR-0092)", () => {
@@ -50,7 +52,7 @@ describe("createFsPolicy — global-mode tmpRoot (ADR-0092)", () => {
   it("exposes only tmpRoot — the closed-world root axes and isSensitive are gone", () => {
     const policy = policyFor();
     assert.equal(policy.tmpRoot(), resolve(tmp));
-    // 闭世界退役面 + Round-2 placeholder 谓词 must all be gone — 残留即回归。
+    // every retired closed-world accessor and the retired placeholder predicates must be gone — any survivor is a regression.
     const surface = policy as unknown as Record<string, unknown>;
     for (const retired of [
       "writeRoots",

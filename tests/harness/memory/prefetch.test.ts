@@ -159,10 +159,11 @@ describe("formatPrefetchOverlay", () => {
   });
 
   it("carries the no-procedure discipline line: injected bodies are records, not this turn's instructions", () => {
-    // 不变式（SSOT: specs/casual-ask-context-hygiene.md 纪律句语义 + 本票
-    // spec 修订把 MEMORY_PREFETCH_DISCIPLINE 纳入锁定）：overlay 正文是
-    // 过去工作的记录而非本轮指令——convention 条目描述的流程不得因词面
-    // 撞上问句就被执行。锁定文本按全文匹配，与 catalog 纪律句同强度。
+    // Invariant: an overlay body is a record of past work, not this turn's
+    // instructions — a flow described by a convention entry must never be
+    // executed just because its wording lexically collides with the question.
+    // MEMORY_PREFETCH_DISCIPLINE is locked by full-text match, at the same
+    // strength as the catalog discipline line.
     const hits = selectPrefetchHits("bar", [entry()]);
     const text = formatPrefetchOverlay(hits);
     assert.ok(text.includes(MEMORY_PREFETCH_DISCIPLINE));
@@ -300,7 +301,7 @@ describe("selectPrefetchHits session-level dedup (excludeIds)", () => {
     // Same memory id across an in-conversation update: the bumped revision
     // shares nothing lexically with the injected one, so an id+updated_at (or
     // content) fingerprint would let it back in. Keying on id alone must
-    // still drop it (契约: 条目更新不重灌).
+    // still drop it (contract: an entry update must not re-inject).
     const injectedRevision = entry({
       id: "mem-1",
       title: "Favorite snack",
@@ -455,7 +456,7 @@ describe("recordInjectedMemoryIds (post-attach bookkeeping)", () => {
   });
 });
 
-// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+// -- capability observations (read-side filtering) ----------------------------
 //
 // A capability snapshot ("web_search is unavailable in this sandbox") records
 // one environment at one moment. Handed back as memory it outranks the live

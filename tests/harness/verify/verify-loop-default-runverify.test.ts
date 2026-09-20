@@ -1,12 +1,12 @@
 /**
- * verify-loop 缺省 runVerify 装配 (ADR-0092)。
+ * Default runVerify assembly for verify-loop (ADR-0092).
  *
- * 锁的是透传那一段:VerifyLoopOptions.cwd 到达 makeDefaultRunVerify 入参。
- * Round-2 dead-surface 退役:`home` 选项在 VerifyLoopOptions / runVerify
- * 都已删除(无人消费,缺省即进程真实 cwd)。
- * T4 的 `options.installRoot` 透传随闭世界前端退役(ADR-0092):全局档
- * `--bind / /` 让项目工具链根本就可见,不再有 installRoot 读白名单需要
- * 喂给缺省 runVerify。
+ * Pins the pass-through leg: VerifyLoopOptions.cwd reaches makeDefaultRunVerify's
+ * input. The retired `home` option was deleted from VerifyLoopOptions / runVerify
+ * (no consumers; the default is the process's real cwd). installRoot pass-through
+ * retired with the closed-world front end (ADR-0092): global-mode `--bind / /`
+ * makes the project toolchain visible anyway, so there is no installRoot read
+ * allowlist left to feed the default runVerify.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -160,9 +160,10 @@ describe("runVerifyLoop — default runVerify assembly threads cwd", () => {
   });
 
   it("absent fsMode / homeRoot / tmpDir put no key on the runVerify opts (V1 baseline)", async () => {
-    // 缺席时必须不打这些 key —— 与既有调用方(未接 fs 档)的入参形状逐字节
-    // 一致;「传 undefined」与「不传」在下游 `?? "global"` 下虽等价,但入参
-    // 形状本身是测试缝的契约(见 cwd 同款断言)。
+    // When absent these keys must not be set at all — byte-identical input
+    // shape with legacy callers (no fs-mode wired). "Passing undefined" vs
+    // "not passing" is equivalent under the downstream `?? "global"`, but the
+    // input shape itself is the test-seam contract (same assertion style as cwd).
     const cwd = mkdtempSync(join(tmpdir(), "verify-loop-nofsmode-"));
     SCRATCH.push(cwd);
 

@@ -1,25 +1,29 @@
 /**
- * T3 (plans/worktree-live-task-root.md §6) — session-roots SSOT 契约测试。
+ * session-roots SSOT contract tests.
  *
- * 目标：钉住 `src/harness/session-roots.ts` 现有契约，作为 T4 活化 `taskRoot`
- * 前的安全网。**不改 src/ 任何一行**——只是把现状固化下来，约束后面任何
- * 重构都要通过这一关。
+ * Purpose: pin the current contract of `src/harness/session-roots.ts` as a
+ * safety net before `taskRoot` rebinding is ever activated. **Not a single
+ * line of src/ changes here** — it only freezes today's behavior so any
+ * later refactor must pass this gate.
  *
- * 覆盖范围（对应 T3 Acceptance 逐条点名）：
- *  - 四角色归位（happy path / 任一角色缺 / 任一角色非法）
- *  - 缺根 → `SessionRootError kind:"missing_root"`
- *  - 相对 / 空白 / 含 NUL → `SessionRootError kind:"invalid_root"`
- *  - **绝不回退 `process.cwd()`**（doc :30-31）
- *  - `stripTrailingSeparators` 保 posix `/` 与 win32 `C:\` 根本身（:108-119）
- *  - `resolveInstallRoot` 锚 `import.meta.url`，且进程级缓存不给 reset 缝
- *    （:168-171）
- *  - 跨 rebind 不变的三条（`productRoot` / `projectIdentityRoot` /
- *    `installRoot`）有测试点名，作为 T4 之后不回归的锚（D3）。
- *  - 并发类：同一波内多次读 `resolveSessionRoots` 拿到等值结果（D2 的机制
- *    在 T4 才上，本测试先把"纯函数 → 等值"这条钉住）。
+ * Coverage:
+ *  - four-role resolution (happy path / any role missing / any role invalid)
+ *  - missing root → `SessionRootError kind:"missing_root"`
+ *  - relative / blank / NUL-containing → `SessionRootError kind:"invalid_root"`
+ *  - **never falls back to `process.cwd()`**
+ *  - `stripTrailingSeparators` keeps the posix `/` and win32 `C:\` roots
+ *    themselves
+ *  - `resolveInstallRoot` anchors on `import.meta.url` and keeps a
+ *    process-level cache with no reset seam
+ *  - the three cross-rebind invariant roles (`productRoot` /
+ *    `projectIdentityRoot` / `installRoot`) get named tests, so they cannot
+ *    silently regress later
+ *  - concurrency: many reads of `resolveSessionRoots` in one stretch return
+ *    deeply equal results (the pure-function → equality guarantee is pinned
+ *    here up front, ahead of any same-wave snapshot mechanism).
  *
- * 不写实现测试：所有断言针对 src/harness/session-roots.ts 的**导出行为**，
- * 不进入私有实现细节。
+ * No implementation tests: all assertions target the **exported behavior**
+ * of src/harness/session-roots.ts, never private internals.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, existsSync, statSync } from "node:fs";
@@ -87,8 +91,8 @@ describe("resolveSessionRoots — happy path", () => {
   });
 
   it("is a pure function: same input → deeply equal output across many calls", () => {
-    // D2 的最终形态在 T4 才上；先把"纯函数 → 等值"这条钉住，保证之后任何
-    // 同一波 snapshot 实现的退化都会被这一关拦下来。
+    // Pin the "pure function → deeply equal" guarantee up front, so any later
+    // same-wave snapshot implementation that regresses gets caught by this gate.
     const input = makeInput();
     const first = resolveSessionRoots(input);
     for (let i = 0; i < 32; i++) {
@@ -103,10 +107,11 @@ describe("resolveSessionRoots — happy path", () => {
 });
 
 describe("resolveSessionRoots — cross-rebind invariant roles (D3 anchors)", () => {
-  // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot 必须**不**
-  // 由 taskRoot 推导，也不得自动 rebind。它们仅由装配层传进来的值决定。
-  // 这里把这条契约钉成测试：调同样 input，taskRoot 怎么变，另三根**不动**
-  // —— 这三根是"跨 rebind 不变"角色。
+  // Stable-root list: productRoot / projectIdentityRoot / installRoot must
+  // **never** be derived from taskRoot or auto-rebound; they are decided only
+  // by the values the assembly layer passes in. Pin that contract as a test:
+  // with the same input, however taskRoot changes, the other three roots
+  // **stay put** — they are the "cross-rebind invariant" roles.
 
   it("productRoot stays at the supplied value regardless of taskRoot rebinding", () => {
     const before = resolveSessionRoots(makeInput({ taskRoot: "/repo/wt/a" }));
@@ -146,10 +151,10 @@ describe("resolveSessionRoots — cross-rebind invariant roles (D3 anchors)", ()
   });
 
   it("productRoot and projectIdentityRoot are independent slots (not derived from each other)", () => {
-    // ADR-0037 §4 / session-roots.ts :16-20：项目身份根与 productRoot
-    // 分开是因为 `--workspace-root <dir>` 重定向档下 `dir ≠ cwd`。
-    // 这条契约：不传 productRoot 但传 projectIdentityRoot（反之亦然），
-    // 必须 fail-closed（missing_root），不得由另一槽位推导。
+    // ADR-0037: the project-identity root is kept separate from productRoot
+    // because under `--workspace-root <dir>` redirection `dir ≠ cwd`.
+    // Contract here: supplying projectIdentityRoot without productRoot (or
+    // vice versa) must fail closed (missing_root); neither slot derives the other.
     expect(() =>
       resolveSessionRoots(
         makeInput({
@@ -207,11 +212,11 @@ describe("resolveSessionRoots — missing_root per role", () => {
   }
 
   it("never falls back to process.cwd() when a role is undefined", () => {
-    // doc :30-31 明文：缺根 / 空白 / 相对 / 无法规范化一律 fail-closed，
-    // 绝不回退 process.cwd()。这里把这条钉成测试：
-    // 1) 切到一个全新 temp dir；
-    // 2) productRoot 缺席 → 必须 throw，不得静默拿 cwd 兜住；
-    // 3) 切回原 cwd，避免污染同进程后续测试。
+    // Explicit contract: missing / blank / relative / non-normalizable roots
+    // all fail closed and NEVER fall back to process.cwd(). Pin it as a test:
+    // 1) chdir into a fresh temp dir;
+    // 2) productRoot absent → must throw, never silently borrow cwd;
+    // 3) chdir back to avoid polluting later tests in the same process.
     const freshCwd = mkdtempSync(path.join(tmpdir(), "iknow-t3-cwd-"));
     const originalCwd = process.cwd();
     process.chdir(freshCwd);
@@ -221,7 +226,7 @@ describe("resolveSessionRoots — missing_root per role", () => {
         resolveSessionRoots(
           makeInput({
             productRoot: undefined,
-            // 其它三根仍按 happy path 传，确保仅 productRoot 触发缺根
+            // pass the other three roots as in the happy path so only productRoot triggers missing_root
           })
         );
       } catch (err) {
@@ -238,7 +243,7 @@ describe("resolveSessionRoots — missing_root per role", () => {
   });
 
   it("never falls back to process.cwd() even if cwd looks absolute", () => {
-    // 强化版：cwd 本身是绝对路径，更容易伪装成"合理的兜底"——仍然必须 throw。
+    // Stronger form: an absolute cwd looks like a plausible fallback — still must throw.
     const originalCwd = process.cwd();
     const altCwd = mkdtempSync(path.join(tmpdir(), "iknow-t3-cwd2-"));
     process.chdir(altCwd);
@@ -324,8 +329,8 @@ describe("resolveSessionRoots — invalid_root per role", () => {
     }
     expect(caught).toBeInstanceOf(SessionRootError);
     const detail = (caught as SessionRootError).detail;
-    expect(detail).toContain("…"); // 截断符
-    // 截断后 ≤ MAX_ROOT_DETAIL_CHARS + 引号 + 省略号
+    expect(detail).toContain("…"); // truncation ellipsis
+    // after truncation the detail is at most MAX_ROOT_DETAIL_CHARS + quotes + ellipsis
     expect(detail.length).toBeLessThan(longRel.length);
   });
 });
@@ -379,8 +384,8 @@ describe("normalizeRootCandidate — public surface", () => {
 });
 
 describe("stripTrailingSeparators — posix (via normalizeRootCandidate)", () => {
-  // 私有函数，通过 normalizeRootCandidate 观察 :108-119 的契约：
-  // 「去掉结尾分隔符，但保留文件系统根本身」。
+  // Private helper; its contract is observed through normalizeRootCandidate:
+  // strip trailing separators but keep the filesystem root itself.
 
   it("filesystem root `/` is preserved", () => {
     expect(normalizeRootCandidate("/")).toEqual({ ok: true, root: "/" });
@@ -393,23 +398,24 @@ describe("stripTrailingSeparators — posix (via normalizeRootCandidate)", () =>
   });
 
   it("path.parse root length is the contract boundary", () => {
-    // 间接断言：stripTrailingSeparators 用 `path.parse(p).root` 做"是否已到
-    // 根本身"判定。验证一个长度等于 root 的路径被原样保留。
+    // Indirect assertion: stripTrailingSeparators uses `path.parse(p).root`
+    // as the "is this already the root itself" check. Verify a path whose
+    // length equals the root is preserved verbatim.
     const root = path.parse("/").root; // "/"
     expect(normalizeRootCandidate(root)).toEqual({ ok: true, root });
   });
 });
 
 describe("stripTrailingSeparators — win32 (mocked path module)", () => {
-  // 在 linux CI 上 src/harness/session-roots.ts 用的是平台 path。要验证
-  // win32 分支（`C:\` 保留、`C:\foo\` 去尾），必须 mock `node:path` 为
-  // `path.win32`。每次只对一组测试做这个替换，之后清理。
+  // On Linux CI src/harness/session-roots.ts uses the platform path. To
+  // verify the win32 branch (keep `C:\`, trim `C:\foo\`) `node:path` must be
+  // mocked as `path.win32`, scoped to this test group and cleaned up after.
   beforeEach(() => {
     vi.resetModules();
     vi.doMock("node:path", () => {
-      // src/harness/session-roots.ts 用 `import path from "node:path"`
-      // (default import)。vi.doMock 把整个模块替换为工厂返回值，所以我们
-      // 必须把 win32 同时作为 default 与命名空间导出。
+      // src/harness/session-roots.ts uses `import path from "node:path"`
+      // (default import). vi.doMock replaces the whole module with the
+      // factory result, so win32 must be exported both as default and namespace.
       const win32 = path.win32 as unknown as Record<string, unknown> & {
         default: unknown;
       };
@@ -462,21 +468,21 @@ describe("resolveInstallRoot — anchor to import.meta.url + process-level cache
   });
 
   it("is anchored to import.meta.url of session-roots.ts, not to cwd or any session root", () => {
-    // 显式 invariant：resolveInstallRoot 的查找起点是本模块文件自身所在的目录，
-    // 不是 process.cwd()，也不是任何 task worktree。resolveInstallRoot 沿
-    // 目录树向上找 package.json，因此返回值不一定是 here 本身 —— 但一定
-    // 是 here 的某个祖先。把 result 也 realpath 一下避免 normalize 引发的
-    // 大小写 / 软链偏差。
+    // Explicit invariant: resolveInstallRoot starts its walk at this module's
+    // own directory — not process.cwd(), not any task worktree. It walks up
+    // the tree looking for package.json, so the result need not be `here`
+    // itself but must be an ancestor of `here`. realpath the result too, to
+    // dodge case / symlink skew introduced by normalization.
     const here = path.dirname(fileURLToPath(import.meta.url));
     const realHere = realpathSync(here);
     const realRoot = realpathSync(resolveInstallRoot());
-    // realRoot 是 realHere 的某个祖先目录：把 realRoot + sep 当前缀查就行。
+    // realRoot is an ancestor of realHere: a prefix check on realRoot + sep suffices.
     expect(
       realHere.startsWith(realRoot + path.sep) || realHere === realRoot
     ).toBe(true);
-    // 锁住：本仓库的 installRoot 一定有 src/ 与 tests/ 在其下 —— 这是与
-    // "锚在 import.meta.url" 互为表里的可观测形态（从 src/ 子树向上找必然
-    // 落到包根）。
+    // Locked in: this repo's installRoot always has src/ and tests/ beneath
+    // it — the observable twin of the "anchored to import.meta.url" claim
+    // (a walk up from the src/ subtree necessarily lands on the package root).
     expect(
       existsSync(path.join(realRoot, "src", "harness", "session-roots.ts"))
     ).toBe(true);
@@ -485,24 +491,25 @@ describe("resolveInstallRoot — anchor to import.meta.url + process-level cache
 
   it("the resolved root is the iknow package root (src/ 之上有 package.json)", () => {
     const root = resolveInstallRoot();
-    // 该根应是本仓库 package.json 所在目录：包名是 iknow（顶层 src/ 与
-    // tests/ 的共同祖先）。
+    // The root should be this repo's package.json directory: the iknow
+    // package root, the common ancestor of top-level src/ and tests/.
     const pkg = path.join(root, "package.json");
     expect(existsSync(pkg)).toBe(true);
-    // sanity: 根是目录而非文件
+    // sanity: the root is a directory, not a file
     expect(statSync(root).isDirectory()).toBe(true);
   });
 
   it("process-level cache: multiple calls return the same string instance", async () => {
-    // :168-171 「进程级缓存不给 reset 缝」。我们验证：
-    //  (a) 多次调用返回**严格相等**的字符串（同一引用，不只是 deep-equal）；
-    //  (b) 模块没有导出 reset 函数。
+    // Process-level cache with no reset seam. Verify:
+    //  (a) repeated calls return the **strictly equal** string (same
+    //      reference, not just deep-equal);
+    //  (b) the module exports no reset function.
     const a = resolveInstallRoot();
     const b = resolveInstallRoot();
     const c = resolveInstallRoot();
     expect(a).toBe(b);
     expect(b).toBe(c);
-    // 导出面没有 reset / clear / uncache 之类的入口。
+    // The export surface offers no reset / clear / uncache entry point.
     const mod = await import("../../src/harness/session-roots.ts");
     const exportedNames = Object.keys(mod);
     for (const name of exportedNames) {
@@ -513,8 +520,8 @@ describe("resolveInstallRoot — anchor to import.meta.url + process-level cache
   });
 
   it("is unaffected by chdir of process.cwd() (regression of import.meta.url anchor)", () => {
-    // 把 cwd 切到一个完全无关的临时目录，installRoot 必须**不变**——它锚在
-    // import.meta.url，不是 process.cwd()。
+    // Chdir to a completely unrelated temp dir: installRoot must **not
+    // change** — it is anchored to import.meta.url, not process.cwd().
     const before = resolveInstallRoot();
     const originalCwd = process.cwd();
     const alt = mkdtempSync(path.join(tmpdir(), "iknow-t3-install-"));
@@ -537,7 +544,7 @@ describe("quoteRoot — diagnostic truncation", () => {
     const out = quoteRoot(value, 10);
     expect(out.startsWith("'")).toBe(true);
     expect(out.endsWith("…'")).toBe(true);
-    // 引号内展示部分长度 = limit + 省略号
+    // shown length inside the quotes = limit + ellipsis
     expect(out.length).toBe(10 + 1 /* … */ + 2 /* quotes */);
   });
 
@@ -556,8 +563,9 @@ describe("MAX_ROOT_DETAIL_CHARS — diagnostic constant", () => {
 });
 
 describe("SessionRoots — readonly shape (D3 typed contract)", () => {
-  // 类型层契约：编译期由 TS 校验；运行期这里给一个最小烟雾测试，确认
-  // 返回对象确实有这四个键（避免以后有人不小心 delete 字段）。
+  // Type-level contract: TS enforces it at compile time; at runtime a minimal
+  // smoke test confirms the returned object really has the four role keys
+  // (guards against someone accidentally deleting a field later).
   it("returned object has exactly the four role keys", () => {
     const roots: SessionRoots = resolveSessionRoots(makeInput());
     expect(Object.keys(roots).sort()).toEqual(
@@ -567,13 +575,13 @@ describe("SessionRoots — readonly shape (D3 typed contract)", () => {
 });
 
 // --------------------------------------------------------------------------
-// T4 (plans/worktree-live-task-root.md §6 T4) — live taskRoot holder + single
-// writer wiring. Zero behavior change in T4 (no consumer reads), so the
-// tests below pin the structural invariants the holder + wrap must keep:
+// live taskRoot holder + single-writer wiring. The holder has no consumer yet
+// (zero behavior change), so the tests below pin the structural invariants
+// the holder + wrap must keep:
 //   - read() returns the initial snapshot,
 //   - writeLiveTaskRoot updates the cell in-place,
-//   - D2 batch snapshot: many synchronous reads see the same string value,
-//   - D3 stable-root list is NOT carried by the cell (only `taskRoot` is),
+//   - batch snapshot: many synchronous reads in one stretch see one string,
+//   - stable roots are NOT carried by the cell (only `taskRoot` is),
 //   - withLiveTaskRootWrite: seam resolves → cell written + value returned,
 //   - withLiveTaskRootWrite: seam throws → cell **unchanged** + error
 //     propagates unchanged (no write, no rollback),
@@ -595,7 +603,7 @@ describe("LiveTaskRoot — T4 holder", () => {
   });
 
   it("concurrent reads within one synchronous stretch return the same value (D2 batch snapshot)", () => {
-    // D2: a wave of tool calls shares one snapshot. We exercise the
+    // A wave of tool calls shares one snapshot. We exercise the
     // underlying mechanism here — JS single-threaded closure reads are
     // atomic, so a tight loop of reads always sees the current value with
     // no partial-update window.
@@ -615,13 +623,13 @@ describe("LiveTaskRoot — T4 holder", () => {
   });
 
   it("cell shape carries only taskRoot — D3 stable roots are not exposed (no other slots)", () => {
-    // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot /
-    // mcpConfigRoot / stateAnchor / memoryDir / todoDir / traceDir 全部保持
-    // 装配期冻结。LiveTaskRoot 只承载 taskRoot 一个值，且 LiveTaskRoot 接口
-    // 不暴露任何 setter (single writer 由 writeLiveTaskRoot 独占)。
+    // Stable-root list: productRoot / projectIdentityRoot / installRoot /
+    // mcpConfigRoot / stateAnchor / memoryDir / todoDir / traceDir all stay
+    // frozen at assembly time. LiveTaskRoot carries only taskRoot, and its
+    // interface exposes no setter (writeLiveTaskRoot is the single writer).
     const cell: LiveTaskRoot = createLiveTaskRoot("/repo/wt/conv-1");
     expect(cell.read()).toBe("/repo/wt/conv-1");
-    // Public 接口面只剩 read；setter 不会跨导出面泄漏。
+    // The public surface is just read; no setter leaks across the export surface.
     type PublicSurface = keyof LiveTaskRoot;
     const publicKeys: PublicSurface[] = ["read"];
     expect(publicKeys).toEqual(["read"]);
@@ -638,7 +646,7 @@ describe("withLiveTaskRootWrite — T4 single-writer seam wrap", () => {
   });
 
   it("seam throws typed error → cell UNCHANGED (no write, no rollback) + error propagates", async () => {
-    // D1: 包装点只在缝成功 resolve 时写。失败不写、不回滚，typed error 原样冒泡。
+    // The wrapper writes only when the seam resolves successfully. On failure: no write, no rollback; the typed error propagates verbatim.
     const cell = createLiveTaskRoot("/repo");
     const typedErr = Object.assign(new Error("foreign_worktree"), {
       kind: "foreign_worktree",
@@ -686,9 +694,10 @@ describe("withLiveTaskRootWrite — T4 single-writer seam wrap", () => {
   });
 
   it("wrap is a no-op for a non-async seam (still returns the value, still writes)", async () => {
-    // Seam 形如 (ctx) => Promise<string>；即使 seam 立即 resolve 也仍走
-    // await 路径，写入依旧发生。回归保护：之前的 wrap 实现如果误用
-    // seam(...args).then(...) 会绕过 await 的写入，本测试拦截。
+    // The seam is (ctx) => Promise<string>; even a seam that resolves
+    // immediately goes through the await path, so the write still happens.
+    // Regression guard: an earlier wrap that misused seam(...args).then(...)
+    // would bypass the awaited write; this test catches that.
     const cell = createLiveTaskRoot("/repo");
     const wrapped = withLiveTaskRootWrite(
       ((_ctx: unknown) => Promise.resolve("/repo/wt/conv-9")) as (

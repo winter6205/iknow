@@ -1,5 +1,5 @@
 /**
- * T4 LoopEngine instrumentation tests (GH #64).
+ * LoopEngine trace instrumentation tests.
  */
 
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -174,8 +174,9 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     const turn0ToolId = turn0Tool["tool_call_id"] as string;
     const turn1LlmId = turn1Llm["llm_call_id"] as string;
     assert.equal(turn0Tool["parent_llm_call_id"], turn0LlmId);
-    // 不变式: tool_call 落盘必带 arguments(trace 观测侧需要查"哪个工具写了什么"),
-    // argumentsCaptured 必须为 true 且 arguments 内容与模型发出的 input 一致。
+    // Invariant: a persisted tool_call always carries arguments (the trace
+    // consumer needs "which tool wrote what"), argumentsCaptured must be true,
+    // and arguments must match the model-issued input.
     assert.equal(turn0Tool["arguments_captured"], true);
     assert.deepEqual(turn0Tool["arguments"], { value: "ping" });
     assert.equal(turn0Tool["result_captured"], false);
@@ -447,8 +448,9 @@ describe("T4 criterion 5/19: error paths", () => {
     });
     assert.equal(result.stopReason, "timeout");
     const lines = parseJsonl(join(tmpDir, "test-conv-timeout.jsonl"));
-    // plan T4 / ADR-0011:异常停后跑一轮 best-effort 收尾摘要,usage 照落
-    // 一条独立的 status=ok llm_call(stub 无 usage → 不抄 *_tokens,Postel)。
+    // ADR-0011: after an abnormal stop, one best-effort closing-summary round
+    // runs and its usage lands as a separate status=ok llm_call (stub has no
+    // usage → no *_tokens copied, Postel).
     assert.equal(lines.length, 3);
     assert.equal(lines[0]!["status"], "error");
     const llmError = lines[0]!["error"] as { type: string };
@@ -513,7 +515,8 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    // 即使 stub 自带 usage,error 分支 recordLlmCall 不抄入(ADR-0008 Decision 3)。
+    // Even with usage on the stub, the error branch of recordLlmCall does not
+    // copy it (ADR-0008 Decision 3).
     const usage: TokenUsage = {
       inputTokens: 999,
       outputTokens: 888,
@@ -642,13 +645,14 @@ describe("T3 (v2): session L1 root record (recordSession instrumentation)", () =
     });
     assert.equal(result.stopReason, "completed");
     const lines = parseJsonl(join(tmpDir, "sess-root.jsonl"));
-    // 1 session 根 + 2 llm_call + 1 tool_call + 2 turn = 6 行。
+    // 1 session root + 2 llm_call + 1 tool_call + 2 turn = 6 rows.
     assert.equal(lines.length, 6);
     const sessions = lines.filter((l) => l["record_type"] === "session");
     assert.equal(sessions.length, 1, "exactly one session root record per run");
-    // session 根记录在 run 末尾写盘(endedAt/durationMs/status 需 run 完成后
-    // 才诚实确定,红线禁估算值),故物理上是文件最后一行;断言其存在且含
-    // agentVersion 即可,不锁定物理位置。
+    // The session root record is written at the end of the run (endedAt /
+    // durationMs / status can only be reported honestly after the run;
+    // estimated values are a red line), so it is physically the last line.
+    // Assert existence and agentVersion only; do not pin the physical position.
     const root = sessions[0]!;
     assert.equal(root["record_type"], "session");
     assert.equal(root["agent_version"], "0.22.0");
@@ -734,12 +738,13 @@ describe("T3 (v2): session L1 root record (recordSession instrumentation)", () =
   });
 });
 // ---------------------------------------------------------------------------
-// arguments 落盘形态 — tool_call 写侧必须带 arguments(view.input 全量落盘,
-// 与 messages 同走 mask 管线)
+// arguments persistence shape — the tool_call writer must include arguments
+// (view.input fully persisted, going through the same mask pipeline as messages)
 // ---------------------------------------------------------------------------
 describe("tool_call arguments 落盘形态", () => {
-  // #406 A4: 输出 mask 兜底链路在本 describe 内共享同一个 secret 槽位,需
-  // 在每个用例前后清理避免污染。#406 先例:jsonl.test.ts:719-720 beforeEach/afterEach。
+  // The output-mask fallback shares one secret slot across this describe, so
+  // clear it before/after each case to avoid cross-test pollution (same
+  // pattern as the beforeEach/afterEach in jsonl.test.ts).
   beforeEach(() => clearActiveExtraSecrets());
   afterEach(() => clearActiveExtraSecrets());
 
@@ -849,9 +854,10 @@ describe("tool_call arguments 落盘形态", () => {
   });
 
   it("secret mask:出现在 arguments 中的密钥值在落盘行被遮蔽", async () => {
-    // 不变式: tool_call arguments 与 llm_call messages 走同一 writeLine mask 链路
-    // (jsonl.ts:185 对整行 JSON.stringify 调用 currentOutputMask().mask);若
-    // arguments 含 registry 密钥值, 落盘文件应包含 *** 且不含真值。
+    // Invariant: tool_call arguments and llm_call messages share the same
+    // writeLine mask path (jsonl.ts masks the whole stringified row via
+    // currentOutputMask().mask); if arguments contain a registry secret value,
+    // the written file must contain *** and never the real value.
     setActiveExtraSecrets(["sk-tool-arg-secret"]);
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-mask-"));
     const write = createStubTool({
@@ -899,7 +905,7 @@ describe("tool_call arguments 落盘形态", () => {
       !raw.includes("sk-tool-arg-secret"),
       `落盘行不应含 registry 真值（实际=${raw}）`
     );
-    // arguments key 仍在(真值仅被 mask, key 结构未变)。
+    // The arguments key is still there (only the value was masked; key structure unchanged).
     const lines = parseJsonl(filePath);
     const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
     assert.equal(toolCall["arguments_captured"], true);
@@ -907,9 +913,9 @@ describe("tool_call arguments 落盘形态", () => {
   });
 
   it("tool 无 input(undefined):arguments key 缺席而非 null", async () => {
-    // 不变式: Postel(ADR-0003 D9) — 可选字段仅存在时落盘;view.input 为 undefined
-    // 时 JSON.stringify 丢弃 undefined → arguments key 应在 JSONL 行中缺席,
-    // 不是 null, 也不是 arguments_captured=false。
+    // Invariant: Postel (ADR-0003 D9) — optional fields are persisted only when
+    // present; with view.input undefined, JSON.stringify drops it → the arguments
+    // key must be absent from the JSONL row, not null, not arguments_captured=false.
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-empty-"));
     const noInput = createStubTool({
       name: "noInput",
@@ -917,7 +923,7 @@ describe("tool_call arguments 落盘形态", () => {
     });
     const reg = createRegistry([noInput]);
     const exec = createExecutor(reg);
-    // 模型声明 tool_call 但 input 缺省(由 stub-model 透传 undefined)。
+    // The model declares a tool_call with input omitted (stub-model passes undefined through).
     const model = createStubModel({
       responses: [
         assistantResult({
@@ -946,9 +952,10 @@ describe("tool_call arguments 落盘形态", () => {
     });
     const lines = parseJsonl(join(tmpDir, "args-empty.jsonl"));
     const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
-    // arguments_captured=true 表明执行侧已尝试捕获(忠实于 Postel),但因
-    // view.input===undefined → toSnakeCaseRecord 透传 → JSON.stringify 丢弃 →
-    // 行中 arguments key 缺席("arguments" not in keys),不是 null。
+    // arguments_captured=true shows the executor did attempt capture (faithful
+    // to Postel), but view.input===undefined → toSnakeCaseRecord passthrough →
+    // JSON.stringify drops it → the arguments key is absent from the row
+    // ("arguments" not in keys), not null.
     assert.equal(toolCall["arguments_captured"], true);
     const keys = Object.keys(toolCall);
     assert.ok(

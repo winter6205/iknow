@@ -10,8 +10,9 @@ import {
 } from "./_fixtures.js";
 
 /**
- * T4 CONTRADICTED (spec SC6): 清空/删除测试文件 → CONTRADICTED; 数字类信号
- * (断言减少) 永不 CONTRADICTED (反向断言, 落 gaming-soft.test.ts)。
+ * CONTRADICTED: emptying/deleting test files after green → CONTRADICTED.
+ * Numeric signals (fewer assertions) never CONTRADICTED — that counter-case
+ * lives in gaming-soft.test.ts.
  */
 
 describe("CONTRADICTED — write_file 清空测试文件 / bash rm 测试文件", () => {

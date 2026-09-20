@@ -1,14 +1,17 @@
 /**
- * #224 W4:identity 装配层 工具名录段注入缝 单测。
+ * Unit tests for the identity assembly's tool-catalog injection seam.
  *
- * 本期为空壳接线 — 验证三件事:
- *  1) seam 缺席 → 输出与既有流水线字节级一致 (KV 缓存稳定契约)。
- *  2) seam 提供且返回非空名录 → 追加名录段;基底段保留 + 顺序不变。
- *  3) seam 返回空数组 / undefined → 跳过;字节级与缺席一致。
+ * This phase wires an empty shell — verifies three things:
+ *  1) seam absent → output byte-identical to the existing pipeline
+ *     (KV-cache stability contract).
+ *  2) seam present returning a non-empty catalog → catalog segment appended;
+ *     base segments kept, order unchanged.
+ *  3) seam returning [] / undefined → skipped; byte-identical to absent.
  *
- * 测试策略:不读 ~/.iknow/(临时 HOME,user.md / state.json 均缺席,
- * user_profile + bootstrap 自然返回 undefined),所以 segments 必有
- * IKNOW_IDENTITY_DEFAULT + IKNOW_SOUL_DEFAULT 两段,便于锚定顺序断言。
+ * Test strategy: never read ~/.iknow/ (temp HOME, user.md / state.json both
+ * absent, so user_profile + bootstrap naturally return undefined). Therefore
+ * segments always contain exactly IKNOW_IDENTITY_DEFAULT +
+ * IKNOW_SOUL_DEFAULT as anchors for the order assertions.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -28,8 +31,9 @@ let workDir: string;
 beforeAll(async () => {
   origHome = process.env.HOME;
   workDir = await mkdtemp(join(tmpdir(), "iknow-tool-list-seam-"));
-  // 故意 mkdir 但**不** initIknowWorkspace —— user.md 与 state.json 均缺席,
-  // user_profile / bootstrap 自然返回 undefined,基底只有 identity + soul。
+  // Deliberately mkdir but do NOT initIknowWorkspace — user.md and
+  // state.json both absent, so user_profile / bootstrap return undefined and
+  // the base is only identity + soul.
   await mkdir(join(workDir, ".iknow"), { recursive: true });
   process.env.HOME = workDir;
 });
@@ -43,7 +47,7 @@ function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
     userHome: workDir,
-    bootstrapActive: false, // 关掉 BOOTSTRAP 段,基底只剩 identity + soul
+    bootstrapActive: false, // disable BOOTSTRAP segment; base is identity + soul only
   };
 }
 
@@ -51,7 +55,7 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
   it("seam absent (no toolList field) → output is baseline", async () => {
     const out = await assembleIdentityContext(baseCtx());
     expect(out).toBeDefined();
-    // 基底恒等段必须出现
+    // base identity segments must appear
     expect(out).toContain(IKNOW_IDENTITY_DEFAULT);
     expect(out).toContain(IKNOW_SOUL_DEFAULT);
   });
@@ -80,16 +84,16 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
       toolList: () => ["bash", "read_file", "glob"],
     });
     expect(out).toBeDefined();
-    // 基底恒等段保留
+    // base identity segments kept
     expect(out).toContain(IKNOW_IDENTITY_DEFAULT);
     expect(out).toContain(IKNOW_SOUL_DEFAULT);
-    // 名录段文本存在
+    // catalog segment text present
     expect(out).toContain("Available tools:");
     expect(out).toContain("bash");
     expect(out).toContain("read_file");
     expect(out).toContain("glob");
-    // 顺序 LOCKED:基底段 < 名录段。基底 identity < soul(既有),
-    // 名录段 append 在最末。
+    // LOCKED order: base segments < catalog segment. Base identity < soul
+    // (pre-existing); the catalog segment is appended last.
     const idxIdentity = out!.indexOf(IKNOW_IDENTITY_DEFAULT);
     const idxSoul = out!.indexOf(IKNOW_SOUL_DEFAULT);
     const idxHeader = out!.indexOf("Available tools:");
@@ -110,7 +114,7 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
     expect(out).toContain("Available tools:");
     expect(out).toContain("alpha");
     expect(out).toContain("beta");
-    // 基底段仍在
+    // base segments still present
     expect(out).toContain(IKNOW_IDENTITY_DEFAULT);
   });
 
@@ -129,7 +133,8 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
     const a = await resolverBaseline();
     const b = await resolverSeamUndef();
     expect(b).toBe(a);
-    // 且确认不含名录段(守 KV 缓存稳定契约:build-engine 暂不传 → 不渲染)
+    // and confirm no catalog segment (KV-cache stability contract: build-engine
+    // does not pass the seam yet → nothing renders)
     expect(a).not.toContain("Available tools:");
   });
 });

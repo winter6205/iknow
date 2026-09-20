@@ -1,20 +1,23 @@
 /**
- * B4 / ADR-0043 §4 — manager.start({firstTurnReadyTimeoutMs}) +
- * onManualReconnect(cb) seam 与超时缺席契约。
+ * ADR-0043 — manager.start({firstTurnReadyTimeoutMs}) + onManualReconnect(cb)
+ * seams and the timeout-absence contract.
  *
- * 行为真值:
- *   - start({firstTurnReadyTimeoutMs: 30_000}) = 阻塞至超时(或全员 connected);
- *     窗口内连上的零破坏进首轮装配,超时者停止自动重试、session 缺席。
- *   - onManualReconnect(cb) = 用户手动重连成功 → cb(serverName, toolNames);
- *     cb 调用由测试侧直接驱动。
+ * Behavioral ground truth:
+ *   - start({firstTurnReadyTimeoutMs: 30_000}) blocks until the window expires
+ *     (or every server is connected); servers that connect inside the window
+ *     join first-turn assembly untouched, laggards stop auto-retrying and are
+ *     absent from the session.
+ *   - onManualReconnect(cb): user-triggered reconnect succeeds →
+ *     cb(serverName, toolNames); cb invocation is driven directly by tests.
  *
- * 测试矩阵:
- *   ① start() 默认无参 = 后台启动(改前行为,fire-and-forget);
- *   ② start({firstTurnReadyTimeoutMs}) = 阻塞至超时或全 connected;
- *   ③ fake-timer 超时场景:一个 server 一直接不上 → start 等至超时后 resolve;
- *   ④ 窗口内连上的 server:resolve 时已 connected → 进目录(占位,目录内容由
- *      装配侧 wired,本测试仅验 manager 状态机)。
- *   ⑤ onManualReconnect 注册回调 → 单测驱动 cb 收到 (server, toolNames)。
+ * Test matrix:
+ *   1. start() with no args = background launch (pre-change behavior, fire-and-forget);
+ *   2. start({firstTurnReadyTimeoutMs}) = block until timeout or all connected;
+ *   3. fake-timer case: one server never connects → start resolves after the window;
+ *   4. a server connected inside the window is already connected at resolve →
+ *      enters the directory (directory content is wired on the assembly side;
+ *      this test only pins the manager state machine);
+ *   5. onManualReconnect registers a cb → unit test drives cb with (server, toolNames).
  */
 import assert from "node:assert/strict";
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -28,7 +31,7 @@ interface FakeTimers {
   readonly dispose: () => void;
 }
 
-/** Set up vi.useFakeTimers + 让 microtask 队列能 resolve promise。 */
+/** Set up vi.useFakeTimers while letting the microtask queue resolve promises. */
 function makeFakeTimers(): FakeTimers {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   return {
@@ -41,7 +44,7 @@ function makeFakeTimers(): FakeTimers {
   };
 }
 
-/** 一个 connect 等到外部 `release` 才成功;listTools 立即返空。 */
+/** connect succeeds only after an external `release`; listTools returns empty immediately. */
 function makeGatedClient(opts: {
   readonly neverResolve?: boolean;
   readonly tools?: readonly { name: string }[];
@@ -109,10 +112,10 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
         return makeGatedClient({ neverResolve: true }).handle;
       },
     });
-    // 不传 opts → 旧签名 path:返回一个立即 resolve 的 promise,
-    // 不阻塞调用方。
+    // No opts → old signature path: returns a promise that resolves
+    // immediately without blocking the caller.
     const promise = mgr.start();
-    // microtask flush 后 promise 必须已 resolve。
+    // After a microtask flush the promise must already be resolved.
     await Promise.resolve();
     assert.equal(
       promise.constructor.name,
@@ -144,26 +147,28 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
           server.name === "fast" ? fastHandle : slowHandle,
       });
 
-      // 在 fake-timer 下手动 release fast,slow 永不连上。
+      // Under fake timers, release "fast" manually; "slow" never connects.
       const startPromise = mgr.start({
-        firstTurnReadyTimeoutMs: 100, // 100ms 远小于 5s connect timeout
+        firstTurnReadyTimeoutMs: 100, // far below the 5s connect timeout
       });
-      // 先推进 50ms,释放 fast 让它连接,然后再推进剩余等到超时。
+      // Advance 50ms, release fast so it connects, then advance past the window.
       await ft.advance(50);
       releaseByName.get("fast")!();
       await ft.advance(60);
-      // 此时 fast 应已 connected,慢的仍 pending(自身 connect-timeout 未到);但
-      // firstTurnReady 超时已到 → 整体 resolve。slow 不会因为 firstTurnReady 提
-      // 前进入 failed(slow 的 own connect-timeout 未到);它从本会话的工具面退出
-      // —— 装配层不再把它列入目录。这是"session 缺席"契约。
+      // Now fast should be connected and slow still pending (its own
+      // connect-timeout hasn't fired), but the firstTurnReady window has
+      // expired → overall resolve. firstTurnReady must not push slow into
+      // failed early (its own connect-timeout is still pending); it simply
+      // leaves this session's tool surface — the assembly layer no longer
+      // lists it in the directory. That is the "session absence" contract.
       await startPromise;
 
       const status = mgr.status();
       const fast = status.find((s) => s.name === "fast")!;
       const slow = status.find((s) => s.name === "slow")!;
       assert.equal(fast.state, "connected");
-      // "firstTurnReady window 内未连上" = 缺席(已不参与目录);其自身仍处于
-      // pending 直到 own timeoutMs。
+      // "not connected within the firstTurnReady window" = absent (no longer
+      // in the directory); its own state stays pending until its own timeoutMs.
       assert.equal(slow.state, "pending");
       await mgr.shutdown();
     } finally {
@@ -179,8 +184,9 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
       const mgr = createMcpManager({
         config: [STUB_CONFIG, PROGRESS_CONFIG],
         workspaceRoot: "/tmp/work",
-        // own per-server connect-timeout 5s,远大于 firstTurnReady 50ms。
-        // firstTurnReady 到点 → 不等 own connect-timeout,整体 resolve。
+        // Per-server own connect-timeout of 5s, far above firstTurnReady's
+        // 50ms. When firstTurnReady fires, start resolves without waiting for
+        // the own connect-timeout.
         timeoutMsOverride: 5_000,
         registerExternal: () => {},
         createClient: () => handle,
@@ -188,12 +194,13 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
 
       const startPromise = mgr.start({ firstTurnReadyTimeoutMs: 50 });
       await ft.advance(60);
-      // 首轮窗口到点 → startPromise settle。
+      // The first-turn window expires → startPromise settles.
       await startPromise;
       const status = mgr.status();
       for (const s of status) {
-        // 首轮等待窗口期满 → session 缺席(状态仍是 pending,因其 own
-        // connect-timeout 未到;从装配角度 = 缺席/不参与目录)。
+        // First-turn window elapsed → session absence (state is still
+        // pending since its own connect-timeout hasn't fired; from the
+        // assembly angle = absent / not in the directory).
         assert.equal(
           s.state,
           "pending",
@@ -214,8 +221,8 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
       const mgr = createMcpManager({
         config: [STUB_CONFIG],
         workspaceRoot: "/tmp/work",
-        // 极短的 own connect-timeout,确保 firstTurnReady 窗口期内 own
-        // timeout 也能到点 → failed。
+        // Very short own connect-timeout so it fires within the firstTurnReady
+        // window too → failed.
         timeoutMsOverride: 30,
         registerExternal: () => {},
         createClient: () => handle,
@@ -225,7 +232,7 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
       await ft.advance(60);
       await startPromise;
       const status = mgr.status().find((s) => s.name === "slow")!;
-      // own connect-timeout < firstTurnReady → own timeout 先到 → failed。
+      // own connect-timeout < firstTurnReady → own timeout fires first → failed
       assert.equal(status.state, "failed");
       await mgr.shutdown();
     } finally {
@@ -255,7 +262,7 @@ describe("manager.start({firstTurnReadyTimeoutMs}) seam", () => {
       createClient: () => handle,
     });
     await mgr.start(); // no opts
-    // 即时连接的 client → connected 应该立刻 settled。
+    // Instant-connect client → `connected` should settle immediately.
     await Promise.resolve();
     expect(connected).toBe(true);
     await mgr.shutdown();
@@ -290,8 +297,9 @@ describe("manager.onManualReconnect(cb) seam", () => {
       events.push({ server, tools: [...tools] });
     });
 
-    // 单测无法触发真手动重连,但 cb 的 register 形态已验;只在 manager 暴露
-    // 一个内部 hook 帮助测试时,可在此直接触发。本期 B4 仅验 seam 注册语义。
+    // A unit test cannot trigger a real manual reconnect; the cb registration
+    // shape is what's pinned here. This pass verifies seam registration
+    // semantics only.
     expect(
       typeof (mgr as unknown as { onManualReconnect: unknown })
         .onManualReconnect

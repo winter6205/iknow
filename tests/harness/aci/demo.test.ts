@@ -1,14 +1,14 @@
 /**
- /**
- * ACI Layer 2：端到端测试。
+ * ACI Layer 2: end-to-end tests.
  *
- * 经 run() + createAciExecutor 端到端验证：
- *   (a) read-only 场景 stopReason=completed；
- *   (b) 危险命令 deny 路径产生 is_error 的 tool_result；
- *   (c) edit_file 坏补丁被拒（文件内容未变）后正确补丁成功。
+ * Verified end-to-end via run() + createAciExecutor:
+ *   (a) read-only scenario → stopReason=completed;
+ *   (b) the dangerous-command deny path yields an is_error tool_result;
+ *   (c) an edit_file bad patch is rejected (file content unchanged), then a
+ *       correct patch succeeds.
  *
- * #141 工具层重写：用 6 工具集（bash / read_file / glob / grep / edit_file /
- * write_file），与 demo.ts 装配同步。
+ * Tool-layer rewrite: uses the 6-tool set (bash / read_file / glob / grep /
+ * edit_file / write_file), in sync with demo.ts's assembly.
  */
 
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -36,7 +36,7 @@ import { createGrepTool } from "../../../src/harness/aci/tools/grep.ts";
 import { createEditFileTool } from "../../../src/harness/aci/tools/edit-file.ts";
 import { createWriteFileTool } from "../../../src/harness/aci/tools/write-file.ts";
 
-/* ── helper: 构造 AssistantTurnResult（与 demo.ts 同一形状）── */
+/* ── helper: build AssistantTurnResult (same shape as demo.ts) ── */
 
 interface AssistantResultOpts {
   readonly texts: string[];
@@ -66,7 +66,7 @@ function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
   };
 }
 
-/* ── helper: 装配 registry + 装饰执行器 ── */
+/* ── helper: assemble registry + decorated executor ── */
 
 function assemble(scratchDir: string): {
   reg: ReturnType<typeof createAciRegistry>;
@@ -85,7 +85,7 @@ function assemble(scratchDir: string): {
   return { reg, exec };
 }
 
-/* ── helper: 在 messages 中按 tool_use_id 查找 tool_result ── */
+/* ── helper: find a tool_result in messages by tool_use_id ── */
 
 function findToolResult(opts: {
   messages: ReadonlyArray<AnthropicNativeMessage>;
@@ -101,7 +101,7 @@ function findToolResult(opts: {
   return undefined;
 }
 
-/* ── helper: 提取 tool_result 的首个 text 块 ── */
+/* ── helper: extract the first text block of a tool_result ── */
 
 function toolResultText(
   result: Extract<AnthropicContentBlock, { type: "tool_result" }>
@@ -109,13 +109,13 @@ function toolResultText(
   return (result.content as Array<{ text?: string }>)[0]?.text ?? "";
 }
 
-/* ── scratch 生命周期 ── */
+/* ── scratch lifecycle ── */
 
 let scratch: string;
 
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "iknow-aci-demo-test-"));
-  // 基础样例文件（足够覆盖三条断言所需）
+  // Base sample files (enough to cover the three assertions)
   writeFileSync(join(scratch, "alpha.ts"), "export const alpha = 1;\n");
   writeFileSync(join(scratch, "beta.ts"), "export const beta = 2;\n");
   writeFileSync(join(scratch, "edit-me.ts"), "const x = 1;\nconsole.log(x);\n");
@@ -130,11 +130,12 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/* ── 测试 ── */
+/* ── tests ── */
 
 describe("demo 端到端 — 经 run() + createAciExecutor", () => {
   it("(a) read-only 场景 stopReason=completed", async () => {
-    // 工作流对齐 ADR-0004：glob 发现 + read_file 精读（无状态、显式 offset）。
+    // Workflow aligned with ADR-0004: glob discovery + read_file deep read
+    // (stateless, explicit offset).
     const { reg, exec } = assemble(scratch);
     const model = createStubModel({
       responses: [
@@ -149,7 +150,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
             {
               id: "a-read-1",
               name: "read_file",
-              // 续读必须显式 offset=50（契约 Y1 read_file 无状态）
+              // continued reads must pass an explicit offset=50 (read_file is stateless)
               input: { path: "big-file.txt", offset: 0, limit: 50 },
             },
           ],
@@ -180,7 +181,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 3);
 
-    // glob 返回字母序相对路径，含 alpha.ts / beta.ts / edit-me.ts
+    // glob returns lexicographically ordered relative paths, including alpha.ts / beta.ts / edit-me.ts
     const globResult = findToolResult({
       messages: result.messages,
       toolUseId: "a-glob",
@@ -191,7 +192,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(globText.includes("alpha.ts"));
     assert.ok(globText.includes("beta.ts"));
 
-    // read_file 第 1 次：offset=0，返回行号格式 `<n>.padStart(6)\t<line>`
+    // read_file call 1: offset=0, line-number format `<n>.padStart(6)\t<line>`
     const read1 = findToolResult({
       messages: result.messages,
       toolUseId: "a-read-1",
@@ -205,7 +206,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(read1Text.includes("line 1"));
     assert.ok(read1Text.includes("line 50"));
 
-    // read_file 第 2 次：offset=50，承接上下文，line 51 开始
+    // read_file call 2: offset=50, continues context, starts at line 51
     const read2 = findToolResult({
       messages: result.messages,
       toolUseId: "a-read-2",
@@ -254,8 +255,8 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
       maxTurns: 10,
     });
 
-    // deny 路径产生 is_error tool_result
-    // bash 工具内 throw ToolExecutionError，executor 用 [execution_failed] 信封。
+    // The deny path yields an is_error tool_result
+    // The bash tool throws ToolExecutionError; the executor wraps it in an [execution_failed] envelope.
     const dangerResult = findToolResult({
       messages: result.messages,
       toolUseId: "b-danger",
@@ -273,7 +274,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
       `expected hard-wall or allowlist denial, got: ${dangerText}`
     );
 
-    // 安全命令成功（is_error 未设置）
+    // Safe command succeeds (is_error unset)
     const safeResult = findToolResult({
       messages: result.messages,
       toolUseId: "b-safe",
@@ -281,7 +282,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(safeResult);
     assert.equal(safeResult.is_error, undefined);
     const safeText = toolResultText(safeResult);
-    // bash 输出结构化 {code, stdout, stderr}（Y1b 保结构化）
+    // bash output is structured {code, stdout, stderr} (kept structured, not flattened)
     assert.ok(
       safeText.includes("hello"),
       `expected safe command output, got: ${safeText}`
@@ -297,7 +298,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
 
     const model = createStubModel({
       responses: [
-        // 坏补丁：括号不配对 -> lint rejected
+        // Bad patch: unbalanced parens -> lint rejected
         assistantResult({
           texts: [],
           toolCalls: [
@@ -312,7 +313,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
             },
           ],
         }),
-        // 正确补丁
+        // Correct patch
         assistantResult({
           texts: [],
           toolCalls: [
@@ -341,7 +342,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
       maxTurns: 10,
     });
 
-    // 坏补丁被拒（is_error=true，message 含 lint rejected）
+    // Bad patch rejected (is_error=true, message contains lint rejected)
     const badResult = findToolResult({
       messages: result.messages,
       toolUseId: "c-bad",
@@ -351,10 +352,10 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     const badText = toolResultText(badResult);
     assert.ok(badText.includes("lint rejected"));
 
-    // 坏补丁期间文件内容未变（good 还没执行）
-    // 注意：此处 readFileSync 在 run() 完成后调用，good 已执行——
-    // 所以我们在 good 执行前已无直接观察点。改用 messages 中 good 的
-    // tool_result 验证成功，并在 (c) 末尾断言最终文件被改写。
+    // Note: readFileSync here runs after run() completes, so the good patch
+    // has already executed — there is no direct observation point before it.
+    // We verify the good patch's success via its tool_result in messages,
+    // then assert at the end of (c) that the final file was rewritten.
     const goodResult = findToolResult({
       messages: result.messages,
       toolUseId: "c-good",
@@ -362,8 +363,9 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(goodResult, "expected tool_result for c-good");
     assert.equal(goodResult.is_error, undefined);
 
-    // T4 #298 集成回归:append-only messages 里 good 的 tool_result 文本
-    // 只含 output 文案,不含 meta JSON(oldContent / newContent 决不漏进模型面)。
+    // Integration regression: in the append-only messages, the good patch's
+    // tool_result text carries only the output prose, never the meta JSON
+    // (oldContent / newContent must not leak into the model surface).
     const goodText = toolResultText(goodResult);
     assert.ok(goodText.includes("occurrence(s)"), "output text present");
     assert.ok(!goodText.includes("oldContent"), "meta must NOT leak");
@@ -373,7 +375,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
       "old full content NOT in model"
     );
 
-    // 最终断言：文件已被正确补丁改写（说明坏补丁被拒后才执行 good）
+    // Final assertion: the file was rewritten by the correct patch (proving the bad patch was rejected first)
     const after = readFileSync(filePath, "utf8");
     assert.notEqual(after, before, "file should be modified by good patch");
     assert.ok(after.includes("const x = foo(1);"));

@@ -1,6 +1,6 @@
 /**
- * #196 IKNOW T4: build-engine 4 入口 surface → deps.system → assembleIdentityContext
- * 链路集成测试。
+ * Integration test for the build-engine entry chain:
+ * surface → deps.system → assembleIdentityContext.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
@@ -18,9 +18,11 @@ import { createNoAskUser } from "../../../src/harness/permission/ask-user.ts";
 import { initializeIknowWorkspace } from "../../../src/harness/identity/index.js";
 import type { IknowEnv } from "../../../src/config/env.ts";
 
-// 每条用例都真装配一次 buildHarnessEngine（真实 identity 装配 + skill 扫描），
-// 单跑约 3s、全量并发（forks×3）下可超 vitest 默认 5s —— 与
-// hub-worktree-isolation / build-engine 同款放宽，避免把装配耗时误报成失败。
+// Every case really assembles buildHarnessEngine once (real identity
+// assembly + skill scan): ~3s standalone, and under full parallelism
+// (forks×3) it can exceed vitest's default 5s — relaxed the same way as
+// hub-worktree-isolation / build-engine so assembly time is not misread
+// as a failure.
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
 function makeEnv(apiKey: string | undefined): IknowEnv {
@@ -39,19 +41,20 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined },
-    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传给 deps.compress。
+    // IknowCompressEnv is required (build-engine forwards it to deps.compress).
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    // Subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
   };
 }
 
 let origHome: string | undefined;
 let workDir: string;
-// ADR-0019 (T2): 显式注入 workspaceRoot = workDir 只服务 memory/sessions;
-// persona seed 走 HOME 测试缝 (userHome = workDir)。
+// ADR-0019: explicitly injecting workspaceRoot = workDir only serves
+// memory/sessions; persona seeding goes through the HOME test seam
+// (userHome = workDir).
 
 beforeAll(async () => {
   origHome = process.env.HOME;
@@ -72,11 +75,13 @@ async function buildSystem(surface: "chat" | "tui" | "ask" | "serve") {
     env: makeEnv("sk-test-identity-" + surface),
     askUser: createNoAskUser(),
     surface,
-    // ADR-0019 (T2):per-root identity seed 锚 workDir,默认 cwd 已不适用。
+    // ADR-0019: per-root identity seeding anchors on workDir; the old cwd
+    // default no longer applies.
     workspaceRoot: workDir,
-    // 本文件验的是 deps.system 的 identity 装配,不碰溢出判定/索引降档。
-    // countTokens 走真 adapter 会打到不可达的 fixture baseUrl,SDK 自带
-    // maxRetries=2 + 退避,每次装配白烧 ~2.5s。
+    // This file verifies deps.system's identity assembly only, not overflow
+    // eviction / index demotion. countTokens through the real adapter would
+    // hit the unreachable fixture baseUrl; the SDK's built-in maxRetries=2 +
+    // backoff would burn ~2.5s per assembly for nothing.
     skipCountTokens: true,
   });
   return (await (deps.system as () => Promise<string | undefined>)()) ?? "";
@@ -137,9 +142,11 @@ describe("buildHarnessEngine surface → deps.system", () => {
   });
 
   it("second skip: BOOTSTRAP.md deleted → system excludes bootstrap", async () => {
-    // rev 2026-08-11 隐式完成:agent 引导对话后 rm BOOTSTRAP.md。
-    // ADR-0019 (T2):显式 workspaceRoot=workDir,与 buildSystem 的 per-root
-    // identity seam 同锚(默认 iknowWorkspaceRoot() = cwd 不再指向 workDir)。
+    // Implicit completion: the agent rm's BOOTSTRAP.md after the guidance
+    // conversation.
+    // ADR-0019: explicit workspaceRoot=workDir shares the same per-root
+    // identity-seam anchor as buildSystem (the default
+    // iknowWorkspaceRoot() = cwd no longer points at workDir).
     await initializeIknowWorkspace({ workspace: join(workDir, ".iknow") });
     await unlink(join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"));
     const out = await buildSystem("chat");
@@ -150,9 +157,11 @@ describe("buildHarnessEngine surface → deps.system", () => {
   });
 
   it("default surface (no opts.surface) is chat → bootstrap active when file present", async () => {
-    // rev 2026-08-11 文件驱动:BOOTSTRAP.md 存在 → 注入。上一测试 unlink 了文件,
-    // 这里重建 seed 的文件(bs=true 已翻,但文件缺失→不注入;重建文件→注入)。
-    // ADR-0019 (T2):workspaceRoot=workDir 锚 per-root identity(默认 cwd 已不适用)。
+    // File-driven: BOOTSTRAP.md present → injected. The previous test
+    // unlink'ed the file; here we re-seed it (bs=true already flipped, but a
+    // missing file → no injection; recreated file → injection).
+    // ADR-0019: workspaceRoot=workDir anchors per-root identity (the old cwd
+    // default no longer applies).
     await initializeIknowWorkspace({ workspace: join(workDir, ".iknow") });
     await writeFile(
       join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"),

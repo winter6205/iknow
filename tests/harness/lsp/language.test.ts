@@ -1,9 +1,10 @@
 /**
- * LANGUAGE_EXTENSIONS 表 + languageIdFor 查表单测 — spec 302-lsp-multilang（T3，#304 决策4）。
+ * LANGUAGE_EXTENSIONS table + languageIdFor lookup unit test.
  *
- * 表驱动覆盖：
- *   1. 每扩展名 → languageId 映射（.ts/.mts/.cts/.tsx/.jsx/.py/.pyi/.yaml/.yml/.json/.dockerfile）；
- *   2. 回退 typescript：无扩展名文件（含 Dockerfile 全文件名）、未知扩展名。
+ * Table-driven coverage:
+ *   1. each extension → languageId mapping (.ts/.mts/.cts/.tsx/.jsx/.py/.pyi/.yaml/.yml/.json/.dockerfile);
+ *   2. fallback to typescript: extension-less files (including the full
+ *      filename Dockerfile) and unknown extensions.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,7 +35,7 @@ describe("LANGUAGE_EXTENSIONS", () => {
 
 describe("languageIdFor", () => {
   const table: ReadonlyArray<[file: string, expected: string]> = [
-    // 每扩展名映射（表驱动）
+    // per-extension mapping (table-driven)
     ["a.ts", "typescript"],
     ["a.mts", "typescript"],
     ["a.cts", "typescript"],
@@ -46,7 +47,8 @@ describe("languageIdFor", () => {
     ["a.yml", "yaml"],
     ["a.json", "json"],
     ["a.dockerfile", "dockerfile"],
-    // Dockerfile（无扩展名全文件名）→ dockerfile；与 resolveServer basename 路由一致
+    // Dockerfile (extension-less full filename) → dockerfile; matches the
+    // basename routing in resolveServer
     ["Dockerfile", "dockerfile"],
     ["/proj/Dockerfile", "dockerfile"],
     [".dockerfile", "dockerfile"],

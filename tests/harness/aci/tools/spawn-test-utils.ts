@@ -1,10 +1,12 @@
 /**
- * 进程类工具测试共享助手（bash / helpers 的进程树 kill 断言复用）。
+ * Shared helpers for process-oriented tool tests (reused by the bash /
+ * helpers process-tree kill assertions).
  *
- * waitForPidFile：子进程启动后把自身 pid 写入文件，测试侧轮询读取
- * （fixture 约定：sh -c 'echo $$ > <file>; ...'）。
- * waitForProcessExit：轮询 process.kill(pid, 0)，ESRCH 即确认进程已死。
- * 两者都带 2s 上限，防止测试挂死。
+ * waitForPidFile: the child writes its own pid to a file after startup and
+ * the test polls it (fixture convention: sh -c 'echo $$ > <file>; ...').
+ * waitForProcessExit: polls process.kill(pid, 0); ESRCH confirms the
+ * process is dead.
+ * Both cap at 2s so a test can never hang.
  */
 
 import { readFile } from "node:fs/promises";

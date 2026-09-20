@@ -1,16 +1,16 @@
 /**
- * bash sandbox 物理/逻辑双轨测试（T4 配套回归）。
+ * bash sandbox: physical (bwrap fence) + logical (validator) dual-track regression.
  *
- * 覆盖：
- *   - bash.timeout.partialOutput   real spawn，验证 cancellation 命中后
- *                                    partial stdout 不被丢弃（SC13）。
- *   - bash.bwrap.argvHasUnshareNet  纯逻辑，构造 fence argv 并断言关键旗标。
- *   - bash.missingBwrap.failLoud    bwrap 不在 PATH 时 fail-loud。
- *   - bash.readonly 双闸             real spawn，validator 抛 typed error +
- *                                    fence 把 cwd 写操作打成 EROFS。
+ * Covers:
+ *   - bash.timeout.partialOutput   real spawn — partial stdout survives a
+ *                                    cancellation.
+ *   - bash.bwrap.argvHasUnshareNet  pure logic — build fence argv and assert key flags.
+ *   - bash.missingBwrap.failLoud    fail loud when bwrap is absent from PATH.
+ *   - bash.readonly dual gates      real spawn — validator throws a typed error and
+ *                                    the fence turns cwd writes into EROFS.
  *
- * 守护：hasBwrap() 守卫在没有 bwrap 的 CI 环境 skip 真实 spawn 测试，
- * argv 纯逻辑测试不受影响。
+ * Guard: the hasBwrap() check skips real-spawn tests on CI without bwrap;
+ * the pure-logic argv tests are unaffected.
  */
 
 import assert from "node:assert/strict";
@@ -35,9 +35,9 @@ async function makeScratch(prefix: string): Promise<string> {
   return path;
 }
 
-// T3 闭世界适配:合同根(taskRoot/tmp)盘上校验 → argv 纯逻辑测试的 fixture
-// 用真实目录(模块级一次,afterAll 清理),不再用不存在的 "/workspace" +
-// "/tmp/job" 假路径。
+// Closed-world fixture: contract roots (taskRoot/tmp) are validated on disk,
+// so the pure-logic argv tests use real directories (created once at module
+// level, cleaned in afterAll) instead of fake paths like "/workspace" + "/tmp/job".
 const ARGV_FIXTURE_CWD = mkdtempSync(join(tmpdir(), "bash-sandbox-argv-"));
 
 afterAll(() => {
@@ -57,9 +57,10 @@ function hasBwrap(): boolean {
   return probe.status === 0;
 }
 
-/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`,本测试套件按
- *  既有 BashResult 契约断言业务语义(SC13 partial / readonly 双闸 etc.)。
- *  helper 在 envelope 与 BashResult 之间转译,断言 strength 不降。 */
+/** The bash handler returns an envelope `{ output, meta? }`; this suite
+ *  asserts business semantics against the existing BashResult contract
+ *  (partial stdout under cancellation, readonly dual gates, etc.). The
+ *  helper translates between envelope and BashResult, keeping assertion strength. */
 interface BashResult {
   readonly code: number;
   readonly stdout: string;
@@ -86,13 +87,14 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
 
     assert.equal(argv[0], "bwrap");
     assert.ok(argv.includes("--unshare-net"));
-    // ADR-0092 全局档:宿主根 `/` 打底 + 系统前缀只读重绑。
+    // ADR-0092 global mode: bind the host root `/` as the base, then re-bind
+    // system prefixes read-only.
     const rootBindIdx = argv.findIndex(
       (arg, index) => arg === "--bind" && argv[index + 1] === "/"
     );
     assert.notEqual(rootBindIdx, -1, "expected --bind / / in argv");
     assert.equal(argv[rootBindIdx + 2], "/");
-    // --ro-bind /etc /etc (三个连续 argv 项),位于 `/` 之后。
+    // `--ro-bind /etc /etc` (three consecutive argv items), after the `/` bind.
     const etcIdx = argv.indexOf("/etc");
     assert.notEqual(etcIdx, -1);
     assert.deepEqual(argv.slice(etcIdx - 1, etcIdx + 2), [
@@ -104,7 +106,7 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       etcIdx > rootBindIdx,
       "system ro-bind follows the host-root bind"
     );
-    // 全局档:无 guest /tmp mount、无 tmpfs、无可写 cwd bind。
+    // Global mode: no guest /tmp mount, no tmpfs, no writable cwd bind.
     assert.equal(argv.includes("--tmpfs"), false);
     assert.equal(
       argv.findIndex(
@@ -113,16 +115,17 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       -1,
       "global mode has no per-root writable cwd bind"
     );
-    // 敏感路径 tmpfs 罩发射删除;fs-policy 的 isSensitive / protected-state
-    // 谓词随 Round-2 placeholder 一并退役(无人消费),fs-policy 只承载 tmpRoot,
-    // 不塑形 argv。
+    // Global mode must not emit the sensitive-path tmpfs overlay; the
+    // isSensitive / protected-state predicates retired along with the Round-2
+    // placeholder (no consumers), so fs-policy only carries tmpRoot and does
+    // not shape argv.
     assert.equal(
       argv.includes(`${homedir()}/.ssh`),
       false,
       "global mode must not emit the sensitive-path tmpfs overlay"
     );
     // --clearenv precedes every --setenv so the fence inherits only the
-    // whitelisted entries, never the host env (#225).
+    // whitelisted entries, never the host env.
     const clearenvIdx = argv.indexOf("--clearenv");
     assert.notEqual(clearenvIdx, -1, "expected --clearenv in argv");
     const setenvIdxs = argv
@@ -139,19 +142,20 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
 
 describe("bash.missingBwrap.failLoud", () => {
   it("createBashTool throws with 'bwrap' in the message when bwrap is not on PATH", () => {
-    // 直接修改 PATH 让 bwrap 找不到(createBashTool 内的 requireBwrap 用
-    // spawnSync("bwrap", ["--version"]) 探测,继承 process.env.PATH)。
+    // Override PATH so bwrap cannot be found (requireBwrap inside
+    // createBashTool probes with spawnSync("bwrap", ["--version"]), which
+    // inherits process.env.PATH).
     const savedPath = process.env.PATH;
     const fakeEmptyDir = "/tmp/iknow-no-bwrap-" + String(Date.now());
     process.env.PATH = fakeEmptyDir;
     try {
-      // sanity:在 fake PATH 下 bwrap 应找不到
+      // sanity: bwrap should be unfindable under the fake PATH
       const probe = spawnSync("bwrap", ["--version"], {
         stdio: "ignore",
         env: { ...process.env, PATH: fakeEmptyDir },
       });
       if (probe.status === 0) {
-        // fake PATH 居然还能找到 bwrap — 跳过
+        // bwrap was still found under the fake PATH — skip
         return;
       }
       assert.throws(
@@ -171,11 +175,13 @@ describe("bash.timeout.partialOutput", () => {
     async () => {
       const cwd = await makeScratch("bash-partial-");
       const tool = createBashTool(cwd);
-      // 写脚本到 cwd 再 `node <file>` — "node" 在 allowlist;脚本内容
-      // 不进 bash 解析,完全规避 shell metachar(`;` / `(` / `|`)。
-      // fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped stdout 的 libuv
-      // 用户态缓冲)+ marker 屏障:先等 fixture 把行写出并落 marker,再 abort,
-      // 消除"console.log 缓冲未 flush 就随 SIGTERM 丢失"的时序 flake。
+      // Write the script into cwd then `node <file>` — "node" is on the
+      // allowlist; the script body never goes through bash parsing, fully
+      // sidestepping shell metachars (`;` / `(` / `|`). The fixture writes
+      // fd 1 directly via fs.writeSync (bypassing the libuv userspace buffer
+      // on Node's piped stdout) plus a marker barrier: wait for the fixture
+      // to emit its lines and drop the marker before aborting, removing the
+      // timing flake where a buffered console.log line would be lost to SIGTERM.
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
@@ -263,10 +269,11 @@ describe("bash.bwrap.hostPrefixes (real spawn)", () => {
 });
 
 describe("bash.readonly 双闸 (real spawn)", () => {
-  // Phase 0 验收:"explore 角色 bash 写操作被 validator 拦 + fence EROFS 兜底"。
-  // 两闸的分工只有真跑 bwrap 才看得出来 —— validator 是策略闸(命令层),
-  // fence 是物理闸(内核层)。既有 bash-readonly.test.ts 覆盖策略闸的命令
-  // taxonomy,这里补的是 fence 那一闸真的落到 EROFS。
+  // Acceptance intent: "an explore-role bash write is blocked by the validator,
+  // with the fence's EROFS as backstop." Only a real bwrap run shows how the two
+  // gates divide labour — the validator is the policy gate (command layer), the
+  // fence the physical gate (kernel layer). bash-readonly.test.ts already covers
+  // the policy gate's command taxonomy; this adds proof the fence gate really lands EROFS.
   it.skipIf(!hasBwrap())(
     "validator 闸:readonly 模式的写命令抛 ReadonlyViolationError,文件不落地",
     async () => {
@@ -348,8 +355,9 @@ describe("bash.readonly 双闸 (real spawn)", () => {
     "fence 闸:validator 关掉后写 cwd 仍被 EROFS 硬拒(兜底不依赖 validator)",
     async () => {
       const cwd = await makeScratch("bash-ro-fence-");
-      // bashMode 缺省 = validator 不介入,只留 cwdReadonly 这一层 ——
-      // 模拟"validator 漏了"的形态,验证物理闸独立成立。
+      // bashMode absent = the validator does not intervene; only the
+      // cwdReadonly layer remains — simulating a "validator missed it" shape
+      // to prove the physical gate stands on its own.
       const tool = createBashTool(cwd, { cwdReadonly: true });
       for (const command of ["echo hi > out2.txt", "touch out3.txt"]) {
         const result = parseBashEnvelope(
@@ -382,8 +390,9 @@ describe("bash.readonly 双闸 (real spawn)", () => {
 });
 
 describe("bash.fence.networkIsolation (argv shape, no spawn)", () => {
-  // ADR-0097: fence 层不存在按调用的网络开关 —— `--unshare-net` 是常量,
-  // netns 隔离是唯一网络控制轴(出口由 egress 缝 unix socket 代理)。
+  // ADR-0097: there is no per-call network switch at the fence layer —
+  // `--unshare-net` is a constant, netns isolation is the only network control
+  // axis (egress is proxied through a unix socket by the egress seam).
   function fenceArgv(): readonly string[] {
     const cwd = ARGV_FIXTURE_CWD;
     return createBwrapFence({

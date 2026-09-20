@@ -1,15 +1,19 @@
-// disclosure-index-align T1 — build-engine deps.system 接线测试：MCP 名字目录段经
-// 唯一授权缝（createIknowSystemResolver opts.mcp）注入。
+// build-engine deps.system wiring test: the MCP name-directory section is
+// injected through the single authorized seam (createIknowSystemResolver
+// opts.mcp).
 //
-// 链路：project 级 mcp.json → createMcpManager（真）+ stub client（即时连接，
-// 两工具）→ registerExternal 入 catalog → deps.system() 装配期快照
-// (manager.status() + reg.catalog.all()) → 名字目录段渲染。
+// Chain: project-level mcp.json → createMcpManager (real) + stub client
+// (instant connect, two tools) → registerExternal into the catalog →
+// deps.system() assembly-time snapshot (manager.status() +
+// reg.catalog.all()) → name-directory rendering.
 //
-// T1 contract（specs/disclosure-index-align.md Does #1 / SC1 + SC2）：
-//  - 每工具行：`- <name>` 或 `- <name>: <short desc>`（首行 + 限 120 字 + …）；
-//  - 描述缺席 → 只渲染工具名（契约允许态）；
-//  - 末行引导 = "Call a listed tool directly to load its schema and use it."；
-//  - 无 mcp 配置（零连接服务）→ 段整体缺席，<available_skills> 不受影响。
+// Contract:
+//  - per tool line: `- <name>` or `- <name>: <short desc>` (first line,
+//    capped at 120 chars + ellipsis);
+//  - missing description → bare tool name rendered (a contract-legal state);
+//  - trailing guidance = "Call a listed tool directly to load its schema and use it.";
+//  - no mcp config (zero connected servers) → section absent entirely,
+//    <available_skills> unaffected.
 
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -47,7 +51,7 @@ function makeEnv(apiKey: string): IknowEnv {
   };
 }
 
-/** 即时连接的内存假 client：connect 立即成功，listTools 返回注入的工具。 */
+/** In-memory fake client: connect resolves instantly, listTools returns the injected tools. */
 function makeInstantClient(tools: readonly McpTool[]): McpClientHandle {
   return {
     connect: async () => {},
@@ -61,7 +65,7 @@ function makeInstantClient(tools: readonly McpTool[]): McpClientHandle {
   };
 }
 
-/** project 级 mcp.json 植入（<cwd>/.iknow/mcp.json，T3 两级合并的 project 档）。 */
+/** Plant a project-level mcp.json at <cwd>/.iknow/mcp.json (project tier of the two-level merge). */
 async function plantMcpConfig(cwd: string, servers: string[]): Promise<void> {
   const entries = servers
     .map((name) => `"${name}": { "type": "stdio", "command": "node" }`)
@@ -74,7 +78,7 @@ async function plantMcpConfig(cwd: string, servers: string[]): Promise<void> {
   );
 }
 
-/** 轮询等待指定服务进入目标状态（后台连接是 fire-and-forget，SC8）。 */
+/** Poll until the named server reaches the target state (background connect is fire-and-forget). */
 async function waitForState(
   built: BuiltEngine,
   server: string,
@@ -116,9 +120,10 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      // 断言看的是名字目录段的渲染形态(含描述),不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // Assertions target the name-directory rendering shape (with
+      // descriptions); overflow eviction / index downgrade have dedicated
+      // tests (build-engine-tool-overflow.test.ts).
+      // Assembly-time countTokens is bypassed; see the BuildEngineOpts.skipCountTokens comment for seam semantics.
       skipCountTokens: true,
       createMcpClient: () =>
         makeInstantClient([
@@ -143,22 +148,23 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
     expect(systemText).toBeDefined();
     expect(systemText).toContain("<mcp_name_directory>");
     expect(systemText).toContain("stubsvc");
-    // alpha 有描述 → '- <name>: <short desc>'，首行原样
+    // alpha has a description → '- <name>: <short desc>', first line verbatim
     expect(systemText).toContain(
       "- mcp__stubsvc__alpha: Alpha tool does many useful things"
     );
-    // beta 无描述 → 裸名（无 ": ..."）
+    // beta has no description → bare name (no ": ...")
     expect(systemText).toMatch(/^- mcp__stubsvc__beta$/m);
     expect(systemText).not.toMatch(/^- mcp__stubsvc__beta:/m);
-    // schema 不进名字目录（披露分层：schema 须 tool_search 按需）
+    // schema never enters the name directory (disclosure tiering: schema is
+    // loaded on demand via tool_search)
     expect(systemText).not.toContain("inputSchema");
-    // 末行引导改为 "Call a listed tool directly..."
+    // trailing guidance is now "Call a listed tool directly..."
     expect(systemText).toContain(
       "Call a listed tool directly to load its schema and use it."
     );
-    // 旧 tool_search 强制引导已撤
+    // old mandatory tool_search guidance removed
     expect(systemText).not.toContain("Use tool_search");
-    // 旧概览段已撤除
+    // old overview section removed
     expect(systemText).not.toContain("<mcp_tools_overview>");
   }, 30_000);
 
@@ -173,7 +179,7 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验服务名 '-' 的服务段归属,不验溢出 / 索引降档。
+      skipCountTokens: true, // as above: pins service-segment ownership for '-' in server names, not overflow / downgrade.
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -191,8 +197,9 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
 
     const systemText = await built.deps.system?.();
     expect(systemText).toContain("stub-svc");
-    // 注册形态 = mcp__<原始服务名>__<sanitize(工具名)>；若投影侧
-    // sanitize 服务段，此行会静默缺席。
+    // Registration shape = mcp__<raw server name>__<sanitize(tool name)>;
+    // if the projection side sanitized the server segment, this line would
+    // silently disappear.
     expect(systemText).toContain("- mcp__stub-svc__alpha: Dashed server tool");
   }, 30_000);
 
@@ -206,7 +213,7 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验零连接服务时段缺席,不验溢出 / 索引降档。
+      skipCountTokens: true, // as above: pins section absence with zero connected servers, not overflow / downgrade.
       createMcpClient: () => makeInstantClient([]),
     });
     shutdowns.push(async () => {
@@ -217,7 +224,8 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
     expect(systemText).toBeDefined();
     expect(systemText).not.toContain("<mcp_name_directory>");
     expect(systemText).not.toContain("<mcp_tools_overview>");
-    // skills 段装配不受影响（无 fixture skill → 空清单显式语句仍在）
+    // skills section assembly unaffected (no fixture skills → the explicit
+    // empty-list statement is still present)
     expect(systemText).toContain("<available_skills>");
   }, 30_000);
 });

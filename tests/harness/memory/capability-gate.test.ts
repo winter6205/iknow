@@ -1,8 +1,7 @@
 /**
- * runtime-capability-memory-gate T2: capability-gate.ts tests.
+ * Tests for capability-gate.ts.
  *
- * Spec: specs/runtime-capability-memory-gate.md (Classifier fixtures — 合同,
- * 不是实现菜谱). ADR-0086.
+ * The classifier fixtures pin the contract, not an implementation recipe. ADR-0086.
  *
  * The gate exists because a recalled capability observation ("web_search is
  * unavailable in this sandbox") outranks the live tool result and stops the
@@ -13,7 +12,7 @@
  * Five boundary classes:
  *   empty      — no capability signal → null (nothing to reject)
  *   negative   — the spec's MUST-reject fixtures, including when relabeled
- *   overflow   — an oversized capability body still rejects (SC3)
+ *   overflow   — an oversized capability body still rejects
  *   concurrent — the predicate is pure: repeated calls agree, no IO
  *   exception  — not applicable (total function over strings; no throw path)
  */
@@ -231,7 +230,7 @@ describe("detectCapabilityObservation — boundary classes", () => {
     assert.equal(detectCapabilityObservation({ title: "", body: "" }), null);
   });
 
-  // overflow (SC3): an oversized capability body still rejects.
+  // overflow: an oversized capability body still rejects.
   it("rejects an oversized capability body (SC3 overflow)", () => {
     const filler = "本仓库的约定与说明文字。".repeat(4000);
     const reason = detectCapabilityObservation({
@@ -253,7 +252,7 @@ describe("detectCapabilityObservation — boundary classes", () => {
     );
   });
 
-  // SC2-empty: the gate is pure — calling it never creates a file.
+  // The gate is pure — calling it never creates a file.
   it("writes nothing to an empty store (SC2-empty)", async () => {
     const { mkdtemp, readdir, rm } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");

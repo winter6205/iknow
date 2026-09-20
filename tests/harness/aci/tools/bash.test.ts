@@ -39,10 +39,10 @@ describe("createBashTool — schema and metadata", () => {
 
     assert.equal(tool.name, "bash");
     assert.equal(schema.type, "object");
-    // ADR-0097:出网经 egress 缝,无按调用 opt-in 字段 —— 输入面只有这两个。
+    // ADR-0097: egress goes through a dedicated seam, no per-call opt-in field — the input surface is just these two.
     assert.deepEqual(schema.properties, {
       command: { type: "string" },
-      // #502 T3:background?: boolean(缺省 false = 前台,行为不变)
+      // background?: boolean (default false = foreground, behavior unchanged)
       background: {
         type: "boolean",
         description:
@@ -67,8 +67,8 @@ describe("createBashTool — schema and metadata", () => {
     assert.equal(tool.exemptFromOutputCap, undefined);
   });
 
-  // ADR-0092: bash description 两句 —— 进项目写 taskRoot;不必进仓的
-  // scratch 写会话 tmp 目录($TMPDIR,跟当前身份同寿命,不是交付)。
+  // ADR-0092: the bash description is two sentences — writes into the project go to
+  // taskRoot; scratch that need not enter the repo goes to the session tmp dir ($TMPDIR, lives as long as the current identity, not a delivery destination).
   it("description documents project writes at taskRoot and the session tmp dir ($TMPDIR)", async () => {
     const cwd = await makeScratch("bash-desc-tmp-");
     const tool = createBashTool(cwd);
@@ -115,7 +115,7 @@ describe("bash — execution", () => {
 
 describe("bash — permission gates", () => {
   it("no longer rejects non-allowlist commands at handler level (ask flow + bwrap)", async () => {
-    // 白名单降级为 ask：handler 不再拦截非白名单命令，执行期边界由 bwrap 承担。
+    // The allowlist was downgraded to an ask flow: the handler no longer blocks non-allowlisted commands; bwrap enforces the boundary at execution time.
     const cwd = await makeScratch("bash-allowlist-");
     const result = await runBash(cwd, "sh -c true");
     assert.equal(result.code, 0);
@@ -188,18 +188,20 @@ describe("bash — cancellation", () => {
   }, 5_000);
 
   /**
-   * 钉住的不变式：pipe-free + SIGTERM-immune 的后代不得活过一次已取消的调用。
+   * Pinned invariant: a pipe-free, SIGTERM-immune descendant must not survive a cancelled call.
    *
-   * 理由：`close` 是「直系 child 及其 stdio 管道关闭」的事件，不是「进程组清空」
-   * 的事件。后代既不持有管道（`> /dev/null` / stdio:"ignore"）又对 SIGTERM 免疫
-   * （`trap '' TERM`、自带 handler、不可中断的系统调用）时，直系 child 一退
-   * `close` 立即到达，而同一进程组里的后代仍在跑。断言面因此必须是「工具调用
-   * 交付之后，后代进程本身消失」，而不是「直系 child 消失」—— 后者在这类形状下
-   * 本来就成立，钉不住本不变式。
+   * Why: `close` fires when the direct child and its stdio pipes close, not when the
+   * process group empties. If a descendant holds no pipe (`> /dev/null` / stdio:"ignore")
+   * and ignores SIGTERM (`trap '' TERM`, its own handler, uninterruptible syscall),
+   * `close` arrives the moment the direct child exits while group descendants keep
+   * running. So the assertion face must be "the descendant process itself disappears
+   * after the call returns", not "the direct child disappears" — the latter holds
+   * trivially in this shape and cannot pin the invariant.
    *
-   * 确定性：shell 阻塞在 `wait`，后代不停就不会退出，所以 abort 一定落在
-   * 调用真正在飞的时候；后代先装好 SIGTERM handler 再写 pid 文件，故
-   * waitForPidFile 同时是「handler 已就位」的屏障（不用固定 sleep）。
+   * Determinism: the shell blocks in `wait` and cannot exit while the descendant lives,
+   * so the abort always lands while the call is genuinely in flight; the descendant
+   * installs its SIGTERM handler before writing the pid file, so waitForPidFile doubles
+   * as the "handler installed" barrier (no fixed sleep).
    */
   it("leaves no surviving descendant after an abort, when the descendant ignores SIGTERM and holds no pipe", async () => {
     const cwd = await makeScratch("bash-cancel-escapee-");
@@ -209,7 +211,7 @@ describe("bash — cancellation", () => {
     const execution = tool.handler(
       {
         command: [
-          // 免疫 SIGTERM + 不持有 stdio 管道 + 先装 handler 再落 pid。
+          // SIGTERM-immune + holds no stdio pipe + installs handler before writing the pid file.
           'node -e \'process.on("SIGTERM",()=>{});require("fs").writeFileSync("desc.pid",String(process.pid));setInterval(()=>{},1000)\' > /dev/null 2>&1 &',
           "wait",
         ].join("\n"),
@@ -226,8 +228,8 @@ describe("bash — cancellation", () => {
     controller.abort();
     await execution;
 
-    // 调用已交付 —— 后代必须已经（或即将）消失。轮询上限内仍为活态即判失败；
-    // Z（zombie，内核已终止只差收割）算已死。
+    // The call has returned — the descendant must be gone (or on its way). Still alive at the polling cap fails;
+    // Z (zombie: killed by the kernel, awaiting reap) counts as dead.
     assert.equal(
       await waitForDescendantGone(descendantPid),
       true,
@@ -236,15 +238,16 @@ describe("bash — cancellation", () => {
   }, 15_000);
 });
 
-/** 活态判定：Z（zombie）与 ESRCH / 无 /proc 条目都算「不在运行」。 */
+/** Liveness check: Z (zombie) and ESRCH / missing /proc entry all count as "not running". */
 async function descendantRunning(pid: number): Promise<boolean> {
   const state = readProcState(pid);
   return state !== undefined && state !== "Z";
 }
 
 /**
- * 有界轮询后代消失（每 20ms 一次，上限 5s）。不用固定 sleep：进程组信号
- * 与收割是异步的，固定等待要么伪绿（等待过长）要么 flaky（等待过短）。
+ * Bounded polling for descendant disappearance (every 20ms, capped at 5s). No fixed sleep:
+ * process-group signalling and reaping are async, so a fixed wait is either falsely green
+ * (too long) or flaky (too short).
  */
 async function waitForDescendantGone(pid: number): Promise<boolean> {
   const deadline = Date.now() + 5_000;
@@ -255,7 +258,7 @@ async function waitForDescendantGone(pid: number): Promise<boolean> {
   return false;
 }
 
-/** /proc/<pid>/stat 的 state 字段（第 3 字段；comm 可能含空格故先跳过括号）。 */
+/** state field of /proc/<pid>/stat (3rd field; comm may contain spaces, so skip past the closing paren first). */
 function readProcState(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -271,10 +274,10 @@ interface BashResult {
   readonly stderr: string;
 }
 
-/** #693 T4 D4:bash handler 自 T4 起返回 envelope `{ output, meta? }`,模型视野
- *  仅见 `output` 字段里 JSON 化的 code/stdout/stderr（形状不变）。本测试文件
- *  保持「接口 = BashResult 旧形」契约,在 helper 层多走一次 parse —— 业务
- *  断言不被 envelope 包装影响。 */
+/** Since the envelope change the bash handler returns `{ output, meta? }`; the model only
+ *  sees code/stdout/stderr JSON-stringified inside `output` (shape unchanged). This test
+ *  file keeps the "interface = legacy BashResult" contract by doing one extra parse in the
+ *  helper layer — business assertions are unaffected by the envelope wrapper. */
 interface BashEnvelope {
   readonly output: string;
   readonly meta?: { readonly stdout?: string; readonly stderr?: string };
@@ -291,12 +294,12 @@ async function runBash(cwd: string, command: string): Promise<BashResult> {
 }
 
 // ---------------------------------------------------------------------------
-// #406 T3: bash 占位符还原层（restore 在 spawn 前执行）
+// bash placeholder-restore layer (restore runs before spawn)
 // ---------------------------------------------------------------------------
-// bwrap 0.11.1 在本测试环境可用（既有 execution describe 已真实 spawn）。
-// A1:registry 注册 sk- 真值后，命令含 <<<SECRET_1>>> → 还原后 spawn → stdout 含真值。
-// A2:命令含未注册 <<<SECRET_MISSING>>> → 原样传给 bash 不抛错，bash 把字面
-//    当命令名回显到 stderr（command not found）→ stderr 含字面（graceful）。
+// bwrap 0.11.1 is available in this test environment (the execution describe above really spawns).
+// Registered secret + command containing <<<SECRET_1>>> → restored, then spawned → stdout sees the real value (later masked).
+// Command containing an unregistered <<<SECRET_MISSING>>> → passed to bash verbatim without
+//    throwing; bash echoes the literal as a missing command name to stderr (command not found) → graceful.
 describe("#406 T3 — bash 占位符还原层", () => {
   it("A1：注册值还原 —— stdout 不含占位符（restore 命中）", async () => {
     const cwd = await makeScratch("bash-restore-");
@@ -310,9 +313,9 @@ describe("#406 T3 — bash 占位符还原层", () => {
       })) as BashEnvelope
     );
 
-    // 注：M1 输出遮罩在 restore 后跑，stdout 此时已是 ***（掩盖真值）。
-    // 本用例 assert restore 命中（占位符消失 + 真值被 mask 替代），不
-    // 重复 M1 的语义。
+    // Note: the M1 output mask runs after restore, so stdout already shows *** (real value hidden).
+    // This case asserts restore hit (placeholder gone + real value replaced by the mask); it
+    // does not re-test M1 semantics.
     assert.equal(result.code, 0);
     assert.equal(
       result.stdout.includes("<<<SECRET_1>>>"),
@@ -340,8 +343,8 @@ describe("#406 T3 — bash 占位符还原层", () => {
       })) as BashEnvelope
     );
 
-    // 同上：restore 命中后被 mask 遮成 *** ***；本用例仅 assert 两个
-    // 占位符都已被还原（stdout 不含占位符字面）。
+    // Same as above: after restore the mask collapses them to `*** ***`; this case only asserts
+    // both placeholders were restored (stdout contains no placeholder literal).
     assert.equal(result.code, 0);
     assert.equal(
       result.stdout.includes("<<<SECRET_1>>>") ||
@@ -359,8 +362,8 @@ describe("#406 T3 — bash 占位符还原层", () => {
     const registry = createSecretRegistry();
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    // 引号内占位符保证 bash 不把它当 here-string 重定向；restore 只还原已注册
-    // 占位符，未注册的 <<<SECRET_MISSING>>> 原样进入 bash 并输出到 stdout。
+    // The placeholder sits inside quotes so bash does not treat it as a here-string redirect; restore only
+    // replaces registered placeholders, and the unregistered <<<SECRET_MISSING>>> enters bash verbatim and is echoed to stdout.
     const result = parseBashEnvelope(
       (await tool.handler({
         command: 'echo "<<<SECRET_MISSING>>>"',
@@ -393,15 +396,15 @@ describe("#406 T3 — bash 占位符还原层", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #406 T3: bash 输出遮罩（output mask 接入 handler return 前）
+// bash output mask (applied before the handler returns)
 // ---------------------------------------------------------------------------
-// 约束：
-//   - mask 构造在 handler 内每次现取（registry 值可跨 turn 变化；不模块级缓存）
-//   - 缺席 secretRegistry → 不 mask、不 crash
-//   - envelope 形态：顶层恰 { output: string, meta?: { stdout?, stderr? } },
-//     output 字段里 JSON 化 code/stdout/stderr（模型视野字节不变），
-//     meta 是观测旁路（TUI 5 行尾窗用，不进模型 tool_result）
-//   - registry 在场但空 → mask identity，输出原样
+// Constraints:
+//   - the mask is built fresh inside each handler call (registry values can change across turns; no module-level cache)
+//   - absent secretRegistry → no mask, no crash
+//   - envelope shape: exactly { output: string, meta?: { stdout?, stderr? } } at the top level;
+//     output holds JSON-stringified code/stdout/stderr (model-visible bytes unchanged),
+//     meta is an observability side channel (for the TUI tail window, not in the model tool_result)
+//   - registry present but empty → identity mask, output unchanged
 describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () => {
   it("M1：registry 在场 + 命令经占位符还原路径 → stdout 真值被遮罩为 ***", async () => {
     const cwd = await makeScratch("bash-mask-stdout-");
@@ -458,7 +461,7 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
 
   it("M2：缺席 secretRegistry → 输出原样、不 crash", async () => {
     const cwd = await makeScratch("bash-mask-absent-");
-    const tool = createBashTool(cwd); // 不传 secretRegistry
+    const tool = createBashTool(cwd); // no secretRegistry passed
     const secret = "sk-live-超密值-no-mask";
 
     const result = parseBashEnvelope(
@@ -486,23 +489,23 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
       command: 'echo "<<<SECRET_1>>>"',
     })) as BashEnvelope;
 
-    // 顶层：必含 `output`(模型视野字符串);`meta` 是观测旁路(stdout/stderr
-    // 走此处,不进模型 tool_result);顶层不再有 code/stdout/stderr 字段。
+    // Top level: must contain `output` (the model-visible string); `meta` is the observability side channel
+    // (stdout/stderr live there, not in the model tool_result); code/stdout/stderr no longer sit at the top level.
     assert.deepEqual(Object.keys(result).sort(), ["meta", "output"]);
     assert.equal(typeof result.output, "string");
     assert.equal(typeof result.meta, "object");
 
-    // 解析 envelope 内嵌的 code/stdout/stderr 仍维持原 M3 语义(形状不变,
-    // 断言 strength 不降): code=0,stdout="***\n",stderr="",且 envelope
-    // 内的 stdout/stderr 同步被遮罩(不绕过 output mask)。
+    // Parsing the envelope-embedded code/stdout/stderr preserves the original M3 semantics (shape unchanged,
+    // assertion strength not reduced): code=0, stdout="***\n", stderr="", and the stdout/stderr inside the
+    // envelope are masked in sync (the output mask cannot be bypassed).
     const parsed = parseBashEnvelope(result);
     assert.deepEqual(parsed, {
       code: 0,
       stdout: "***\n",
       stderr: "",
     });
-    // meta.stdout / meta.stderr 是输出旁路,与 envelope.output 内的字段
-    // 字节一致(mask 同步覆盖两侧,避免 model/tool/UI 三视角漂移)。
+    // meta.stdout / meta.stderr are the output side channel, byte-identical to the fields inside
+    // envelope.output (the mask covers both sides so the model/tool/UI views never drift apart).
     assert.equal(result.meta?.stdout, parsed.stdout);
     assert.equal(result.meta?.stderr, parsed.stderr);
   });
@@ -510,7 +513,7 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
   it("M4：registry 在场但值为空（边界） → mask identity，输出原样不 crash", async () => {
     const cwd = await makeScratch("bash-mask-empty-registry-");
     const tool = createBashTool(cwd, {
-      secretRegistry: createSecretRegistry(), // 空 registry
+      secretRegistry: createSecretRegistry(), // empty registry
     });
 
     const result = parseBashEnvelope(
@@ -527,7 +530,7 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
   it("M4：注册空串（边界） → mask identity，输出原样不 crash", async () => {
     const cwd = await makeScratch("bash-mask-empty-string-");
     const registry = createSecretRegistry();
-    registry.register(""); // 空串注册
+    registry.register(""); // empty-string registered
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
     const result = parseBashEnvelope(

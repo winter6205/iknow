@@ -1,9 +1,11 @@
 /**
- * T3 Executor:串行 / 无短路 / 无自动重试。
+ * Executor: serial / no short-circuit / no auto-retry.
  *
- * 015 强制:按 assistant content blocks 中 tool calls 出现顺序串行执行;
- * 某个调用失败不短路该回合剩余调用;失败立即回填,不自动重试;严格校验
- * 失败时不调用工具,只形成可修正 ToolExecutionResult。
+ * Contract: tool calls run serially in their appearance order inside the
+ * assistant content blocks; one failing call does not short-circuit the
+ * remaining calls of the turn; failures are backfilled immediately with no
+ * auto-retry; strict-validation failure does not invoke the tool and only
+ * produces a correctable ToolExecutionResult.
  */
 
 import { describe, it } from "vitest";
@@ -646,13 +648,15 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
 });
 
 describe("createExecutor (ADR-0083 装配期输出闸豁免声明)", () => {
-  // ADR-0083:豁免是**装配期静态声明**,落 Foundation `ToolDef` 可选字段;
-  // executor 读到 true 时原样交付(不截断、不追加 marker)。契约 X 只管
-  // 「不信任 payload 内声称的截断字段」——本字段是工具定义属性,不是任何
-  // 一次输出的元数据。未声明 / 显式 false 的工具行为与声明前逐字节相同。
+  // ADR-0083: the exemption is a static **assembly-time declaration**, an optional field on
+  // Foundation `ToolDef`; when executor reads true it delivers verbatim (no truncation, no
+  // appended marker). Contract X only governs "do not trust truncation fields claimed inside a
+  // payload" — this field is a tool-definition property, not metadata of any single output.
+  // Tools undeclared / explicitly false behave byte-identically to before the declaration.
   //
-  // 断言面取「交付文本身份」而非块类型:豁免下 `text` 与 handler 返回逐字节
-  // 相等是本合同的核心命题,字符串相等同时覆盖长度与内容。
+  // The assertion surface takes "delivered-text identity" rather than block type: under the
+  // exemption, `text` equaling the handler return byte-for-byte is the core proposition, and
+  // string equality covers both length and content.
   const deliveredText = (
     r: { kind: string; payload?: readonly AnthropicContentBlock[] } | undefined
   ): string | undefined => {
@@ -661,7 +665,7 @@ describe("createExecutor (ADR-0083 装配期输出闸豁免声明)", () => {
   };
 
   it("声明的工具:超长 payload 原样交付(逐字节相等、> 20000、无截断标记)", async () => {
-    const big = "技能正文".repeat(6000); // 24000 字符,远超 20000 兜底闸
+    const big = "技能正文".repeat(6000); // 24000 chars, far above the 20000 fallback gate
     assert.ok(big.length > 20000);
     const exempt: ToolDef = {
       name: "exempt-long",
@@ -755,8 +759,8 @@ describe("createExecutor (ADR-0083 装配期输出闸豁免声明)", () => {
       handler: () => big,
     };
     const reg = createRegistry([declared]);
-    // 结构面:声明是 ToolDef 上的声明字段,经 Object.freeze({ ...def }) 不变
-    // (cast-free 读:类型上可见,不依赖影子契约)。
+    // Structural side: the declaration is a declared field on ToolDef, surviving Object.freeze({ ...def })
+    // (cast-free read: visible in the type, not relying on a shadow contract).
     assert.equal(reg.get("declared")?.exemptFromOutputCap, true);
     const exec = createExecutor(reg);
     const results = await exec.executeAll([
@@ -841,17 +845,17 @@ describe("failure tool_result structural discriminator (Fix D)", () => {
 });
 
 describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
-  // (a) S6 契约 X 反例：handler 返回带 truncated:false 谎言的 JSON-compatible
-  // 对象。Executor 不信任对象里的截断字段，按实际序列化长度自截。
+  // Contract X counterexample: handler returns a JSON-compatible object whose truncated:false is a
+  // lie. Executor distrusts the claimed truncation field and self-truncates by actual serialized length.
   it("contract X counterexample (S6): executor 不信 truncated:false — 按实际序列化长度自截 + 注入 marker", async () => {
     const liar: ToolDef = {
       name: "liar-truncated-false",
       description: "S6 反例：声称未截断但实际超长",
       inputSchema: { type: "object", additionalProperties: false },
       handler: () => ({
-        truncated: false, // 谎言：handler 声称未截断
-        total: 100, // 谎言：handler 声称的原始长度与实际无关
-        text: "x".repeat(25000), // 实际 25000 字符远超 OUTPUT_HARD_CAP
+        truncated: false, // lie: handler claims not truncated
+        total: 100, // lie: claimed original length is unrelated to reality
+        text: "x".repeat(25000), // actually 25000 chars, far above OUTPUT_HARD_CAP
       }),
     };
     const exec = createExecutor(createRegistry([liar]));
@@ -861,10 +865,10 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     assert.equal(results[0]!.kind, "ok");
     const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
     assert.ok(text !== undefined);
-    // Executor 按字符硬截到 OUTPUT_HARD_CAP；不信对象里 truncated:false。
+    // Executor hard-caps by char count to OUTPUT_HARD_CAP; the object's truncated:false is not trusted.
     assert.ok(text!.length <= 20000, `text length ${text!.length} > 20000`);
-    // Self-truncation 的决定性证据：executor 自己的 marker 出现在 text 里
-    // —— 即使对象声称未截断，executor 仍按序列化实测注入 marker。
+    // Decisive evidence of self-truncation: executor's own marker appears in the text
+    // — even though the object claims no truncation, executor injects the marker from measured serialization.
     assert.ok(
       text!.includes("executor: 输出超长已截断"),
       `executor marker must appear even when object lies truncated:false — got: ${text!.slice(
@@ -872,15 +876,15 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
         80
       )}…`
     );
-    // Marker 自带原始序列化长度字段，进一步证明 executor 自测过。
+    // The marker itself carries the original serialized length, further proving executor measured it.
     assert.ok(
       /原长 \d+ 字符/.test(text!),
       "marker must report actual measured serialized length"
     );
   });
 
-  // (a2) T4 #298 side-channel: handler 返回 envelope `{ output, meta }` —
-  // executor 仅取 output 字符串进 model tool_result;meta 永不进模型面。
+  // Observability side-channel (ADR-0004): handler returns envelope `{ output, meta }` —
+  // executor takes only the output string into the model tool_result; meta never reaches the model face.
   it("T4 envelope: handler returns { output, meta } → model tool_result text is exactly output, meta 不进 payload", async () => {
     const envelope: ToolDef = {
       name: "envelope",
@@ -900,14 +904,14 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     assert.deepEqual(payload, [
       { type: "text", text: "[edit_file] replaced 1 occurrence(s) in a.ts" },
     ]);
-    // 决定性反证:meta 里没有一处泄漏进 model-facing payload 序列化文本。
+    // Decisive counter-check: no fragment of meta leaks into the model-facing payload serialization text.
     assert.ok(!payload[0]!.text.includes("oldContent"));
     assert.ok(!payload[0]!.text.includes("newContent"));
     assert.ok(!payload[0]!.text.includes("const a = 1"));
   });
 
-  // (a3) T4 #298: 相同 envelope 走 toAnthropicToolResults — tool_result content
-  // 只含 output 字符串,不含 meta JSON(模型路径回归)。
+  // Same envelope through toAnthropicToolResults — tool_result content
+  // holds only the output string, never the meta JSON (model-path regression).
   it("T4 envelope: toAnthropicToolResults tool_result content is only output, no meta", async () => {
     const envelope: ToolDef = {
       name: "envelope2",
@@ -935,8 +939,8 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     assert.ok(!b.content[0]!.text.includes("newContent"));
   });
 
-  // (a4) review-Low:envelope 守卫 reject-fast — meta 形状非法时整体不算
-  // envelope（meta 丢弃，整个对象走 generic JSON.stringify 序列化）。
+  // Envelope guard reject-fast — when meta's shape is illegal the whole object does not count as an
+  // envelope (meta is dropped, the entire object goes through generic JSON.stringify serialization).
   it("reject-fast: meta.oldContent 非 string → 不算 envelope，meta 丢弃、整体序列化", async () => {
     const badMeta: ToolDef = {
       name: "bad-meta-old",
@@ -944,7 +948,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       inputSchema: { type: "object", additionalProperties: false },
       handler: () => ({
         output: "plain text",
-        meta: { oldContent: 123 }, // 非法：oldContent 非 string
+        meta: { oldContent: 123 }, // illegal: oldContent is not a string
       }),
     };
     const exec = createExecutor(createRegistry([badMeta]));
@@ -954,9 +958,9 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     assert.equal(results[0]!.kind, "ok");
     const r = results[0];
     if (r.kind !== "ok") throw new Error("expected ok");
-    // 非 envelope → meta 侧信道不产生（undefined，未提升）。
+    // Not an envelope → no meta side-channel is produced (undefined, not promoted).
     assert.equal(r.meta, undefined);
-    // 整体对象走 generic JSON.stringify（不是只取 output 的 envelope 路径）。
+    // The whole object goes through generic JSON.stringify (not the envelope path that extracts only output).
     const text = r.payload[0]!.text;
     assert.equal(
       text,
@@ -971,7 +975,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       inputSchema: { type: "object", additionalProperties: false },
       handler: () => ({
         output: "plain text",
-        meta: [1, 2], // 非法：meta 必须是纯对象
+        meta: [1, 2], // illegal: meta must be a plain object
       }),
     };
     const exec = createExecutor(createRegistry([arrMeta]));
@@ -993,7 +997,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       inputSchema: { type: "object", additionalProperties: false },
       handler: () => ({
         output: "plain text",
-        meta: { newContent: 99 }, // 非法：newContent 非 string
+        meta: { newContent: 99 }, // illegal: newContent is not a string
       }),
     };
     const exec = createExecutor(createRegistry([badNew]));
@@ -1011,9 +1015,9 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     );
   });
 
-  // (b) S7a 契约 Y1 反例：非 bash 工具返回 {code, stdout, stderr} 形态
-  // 对象，executor 走 generic JSON.stringify 序列化（plain-string wire），
-  // 不给该对象任何结构化语义；这是契约 Y1 的真值。
+  // Contract Y1 counterexample: a non-bash tool returns a {code, stdout, stderr}-shaped
+  // object; executor runs generic JSON.stringify serialization (plain-string wire),
+  // granting the object no structured semantics; that is contract Y1's truth value.
   it("contract Y1 counterexample (S7a): 非 bash 工具返回 {code,stdout,stderr} → plain-string JSON wire (generic)", async () => {
     const bashLike: ToolDef = {
       name: "bash_like",
@@ -1027,14 +1031,14 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     ]);
     assert.equal(results[0]!.kind, "ok");
     const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
-    // Generic 序列化路径：plain-string 协议，无结构化语义。
+    // Generic serialization path: plain-string protocol, no structured semantics.
     assert.equal(text, JSON.stringify({ code: 0, stdout: "hi", stderr: "" }));
   });
 });
 
 describe("createExecutor (path-image-vision T1: read_image image 直通臂)", () => {
-  // SDK ImageBlockParam 形状（specs/read-image-vision.md 假设 1/6）：
-  // image block 只活在 tool_result.content，不进顶层 AnthropicContentBlock 联合。
+  // SDK ImageBlockParam shape (specs/read-image-vision.md assumption 1/6):
+  // the image block lives only inside tool_result.content, never in the top-level AnthropicContentBlock union.
   const pngBlock = {
     type: "image",
     source: { type: "base64", media_type: "image/png", data: "iVBORw0KGg==" },
@@ -1136,7 +1140,10 @@ describe("createExecutor (path-image-vision T1: read_image image 直通臂)", ()
     };
     assert.equal(b.is_error, true);
     assert.deepEqual(b.content, [
-      { type: "text", text: "[execution_failed] [read_image] unsupported image format" },
+      {
+        type: "text",
+        text: "[execution_failed] [read_image] unsupported image format",
+      },
     ]);
   });
 
@@ -1147,9 +1154,7 @@ describe("createExecutor (path-image-vision T1: read_image image 直通臂)", ()
         join(root, "px.png"),
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
       );
-      const exec = createExecutor(
-        createRegistry([createReadImageTool(root)])
-      );
+      const exec = createExecutor(createRegistry([createReadImageTool(root)]));
       const results = await exec.executeAll([
         { id: "tu1", name: "read_image", input: { path: "px.png" } },
       ]);
@@ -1169,7 +1174,12 @@ describe("createExecutor (path-image-vision T1: read_image image 直通臂)", ()
       assert.equal(b.content[0]!.type, "image");
       assert.equal(b.content[0]!.source!.type, "base64");
       assert.equal(b.content[0]!.source!.media_type, "image/png");
-      assert.equal(b.content[0]!.source!.data, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"));
+      assert.equal(
+        b.content[0]!.source!.data,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString(
+          "base64"
+        )
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

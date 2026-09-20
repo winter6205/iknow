@@ -1,26 +1,31 @@
 /**
- * live-graph-phase1 T4 — 合同锁（spec SC9–SC12 / ADR-0052 / 0065 / 0067）。
+ * Contract locks (ADR-0052 / ADR-0065 / ADR-0067).
  *
- * 四块，各自钉住一条不变式：
+ * Four blocks, each pinning one invariant:
  *
- *   - **SC9 无外环次数闸（ADR-0052）**：连续多次（≥3）合法剩余子图提交
- *     全部跑完 —— 不存在「第 N 次外环」这类会写进行为的失败。走真
- *     `SubAgentManager`（fake spawn + 假 child，与 run-graph-residual.test.ts
- *     同模式），链式 + 扇出混合提交。
- *   - **SC10 阻塞 + 无 wait（ADR-0065）**：inputSchema 仍
- *     `additionalProperties: false`、根属性恰为 {nodes}、全 schema 无
- *     `wait`；直调 handler 带 `wait` → typed 拒、零 spawn（readNodes
- *     直调防御层）。阻塞语义由既有 executor 测试（handler await runGraph
- *     后才 condense）+ `aci.isConcurrencySafe === false` 钉住。
- *   - **SC11 onFailure 两道防御层（live-graph-phase2 T1）**：阶段 1 的
- *     「看见失败标记就拒」（ADR-0067，phase-1 scoped）由 phase-2 spec
- *     Changes 取代 —— `onFailure` 是已声明属性，合法形（目标在本次
- *     nodes 里）两道防御层都放行；非法形（值非 string、目标未知或
- *     已冻结）typed 拒、零 spawn。根属性面不变：根带 `onFailure` 仍拒。
- *     校验细则见 run-graph-onfailure-validate.test.ts。
- *   - **工具说明（spec Inherits/Changes 末条）**：DESCRIPTION 必须让模型
- *     知道剩余子图语义（只交还要跑的节点、已终态 id 冻结、跨调用 deps
- *     可省略已完成节点、取消后未完成 id 可再交）。
+ *   - No outer-loop attempt gate (ADR-0052): many consecutive legal residual
+ *     subgraph submissions (≥3) all run to completion — there is no "Nth
+ *     outer loop" failure that could ever be written into behavior. Uses a
+ *     real `SubAgentManager` (fake spawn + fake child, same pattern as
+ *     run-graph-residual.test.ts), mixing chained and fan-out submissions.
+ *   - Blocking + no `wait` (ADR-0065): inputSchema keeps
+ *     `additionalProperties: false`, root properties are exactly {nodes}, and
+ *     the whole schema has no `wait`; calling the handler directly with
+ *     `wait` → typed rejection, zero spawns (the readNodes direct-call
+ *     defense layer). Blocking semantics are pinned by the existing executor
+ *     tests (handler awaits runGraph before condensing) plus
+ *     `aci.isConcurrencySafe === false`.
+ *   - onFailure has two defense layers: phase-1's "reject on sight of the
+ *     failure marker" (ADR-0067, phase-1 scoped) is superseded — `onFailure`
+ *     is now a declared property, and legal shapes (target present in this
+ *     batch's nodes) pass both layers; illegal shapes (non-string value,
+ *     unknown or frozen target) get typed rejection, zero spawns. The root
+ *     surface is unchanged: a root-level `onFailure` is still rejected.
+ *     Validation details live in run-graph-onfailure-validate.test.ts.
+ *   - Tool description: DESCRIPTION must teach the model the residual-subgraph
+ *     semantics (submit only nodes still to run, terminal ids freeze,
+ *     cross-call deps may omit completed nodes, unfinished ids are
+ *     resubmittable after cancel).
  */
 
 import { describe, expect, it } from "vitest";
@@ -41,7 +46,7 @@ import {
 
 const CONV = "conv-t4";
 
-// ── SC9：无外环次数闸（ADR-0052） ─────────────────────────────────────
+// ── No outer-loop attempt gate (ADR-0052) ──────────────────────────────
 
 describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () => {
   it("链式 4 段剩余子图提交全部跑完（a→b→c→d），每段恰多 spawn 1 个 child", async () => {
@@ -67,14 +72,15 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
         { conversationId: CONV }
       );
       await waitForChildren(children, before + 1);
-      // 每段只 spawn 本次提交的那个节点 —— 已冻结上游不重演
+      // Each segment spawns only its own submitted node — frozen upstreams never rerun.
       expect(children).toHaveLength(before + 1);
       settle(children[before]!, ok(step.output));
       const out = parse(await pending);
       expect(out.nodes).toEqual([
         { id: step.id, status: "done", output: step.output },
       ]);
-      // 数据沿边流动：本段 task 文本接到上一段的产出（首段除外）
+      // Data flows along edges: this segment's task receives the previous
+      // segment's output (except the first).
       if (i > 0) {
         expect(children[before]!.written.join("")).toContain(
           chain[i - 1]!.output
@@ -82,7 +88,8 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
       }
     }
 
-    // 4 段全绿后账本冻结全部 4 个 id —— 没有「第 N 次外环」拒绝
+    // All four segments green → ledger froze all four ids — no "Nth outer
+    // loop" rejection exists.
     expect(host.ledgerFor(CONV).frozenIds()).toEqual(["a", "b", "c", "d"]);
     await manager.shutdown();
   });
@@ -96,7 +103,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
       isEnabled: () => true,
     });
 
-    // 前置：a done（第 1 段）
+    // Precondition: a done (segment 1).
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -105,7 +112,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
     settle(children[0]!, ok("A-OUT"));
     await first;
 
-    // 第 2 段：扇出 b、c（都 deps [a]，a 省略）→ 同波并发
+    // Segment 2: fan out b, c (both deps [a], a omitted) → same-wave concurrency.
     const second = tool.handler(
       {
         nodes: [
@@ -122,7 +129,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
     const secondOut = parse(await second);
     expect(secondOut.waveCount).toBe(1);
 
-    // 第 3 段：汇合 d（deps [b, c]）→ 接到两边产出
+    // Segment 3: join node d (deps [b, c]) → receives both upstream outputs.
     const third = tool.handler(
       { nodes: [{ id: "d", task: "td", deps: ["b", "c"] }] },
       { conversationId: CONV }
@@ -137,7 +144,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
       { id: "d", status: "done", output: "D-OUT" },
     ]);
 
-    // 第 4 段：继续提交 e —— 第 6 段之外再交也照跑（闸不存在）
+    // Segment 4: keep submitting e — later segments still run (no gate exists).
     const fourth = tool.handler(
       { nodes: [{ id: "e", task: "te", deps: ["d"] }] },
       { conversationId: CONV }
@@ -153,7 +160,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
   });
 });
 
-// ── SC10：阻塞 + 无 wait（ADR-0065） ──────────────────────────────────
+// ── Blocking + no wait (ADR-0065) ──────────────────────────────────────
 
 describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   const tool = createRunGraphTool({
@@ -197,9 +204,10 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   });
 
   it("ACI 元数据钉住阻塞语义：isConcurrencySafe false + unbounded（与既有测试互证）", () => {
-    // ADR-0065：一段图在跑时父代理不能并行干别的 —— executor 层的单例
-    // 波次由 isConcurrencySafe=false 保证；handler await settle 后才
-    // condense 由 run-graph-executor.test.ts 的波次断言钉住。
+    // ADR-0065: while one graph segment runs, the parent agent must not work
+    // in parallel — the executor-layer single wave is guaranteed by
+    // isConcurrencySafe=false; handler-await-before-condense is pinned by the
+    // wave assertions in run-graph-executor.test.ts.
     expect(tool.aci.isConcurrencySafe).toBe(false);
     expect(tool.aci.timeoutTier).toBe("unbounded");
   });
@@ -224,10 +232,10 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   });
 });
 
-// ── SC11：onFailure 两道防御层（live-graph-phase2 T1 / ADR-0067 取代） ─
+// ── onFailure two defense layers (supersedes ADR-0067's reject-on-sight) ─
 
 describe("run_graph 合同锁：SC11 onFailure schema + 直调兜底（两道防御层）", () => {
-  /** 与 executor 同源的 schema 路径：registry 构造期编译同一份 inputSchema。 */
+  /** Same schema source as the executor: the registry compiles the one inputSchema at construction. */
   function schemaValidator() {
     const tool = createRunGraphTool({
       manager: { spawn: () => ({ taskId: "x" }) } as unknown as SubAgentManager,
@@ -297,7 +305,7 @@ describe("run_graph 合同锁：SC11 onFailure schema + 直调兜底（两道防
       ],
     };
     const pending = t.handler(input, { conversationId: CONV });
-    // b 要等 a settle 后才 spawn，顺序 settle
+    // b waits for a to settle before spawning; settle in order.
     await waitForChildren(children, 1);
     settle(children[0]!, ok("A-OUT"));
     await waitForChildren(children, 2);
@@ -338,7 +346,7 @@ describe("run_graph 合同锁：SC11 onFailure schema + 直调兜底（两道防
   });
 });
 
-// ── 工具说明：剩余子图语义（spec Inherits/Changes 末条） ─────────────
+// ── Tool description: residual-subgraph semantics ───────────────────────
 
 describe("run_graph 合同锁：DESCRIPTION 覆盖剩余子图语义", () => {
   const tool = createRunGraphTool({
@@ -348,14 +356,14 @@ describe("run_graph 合同锁：DESCRIPTION 覆盖剩余子图语义", () => {
 
   it("说明包含剩余子图 / 账本合并 / 冻结 / 取消四类关键词", () => {
     const d = tool.description.toLowerCase();
-    // (a) 只交还要跑的节点（剩余子图）
+    // (a) submit only the nodes still to run (residual subgraph)
     expect(d).toContain("residual subgraph");
-    // (b) 已终态 id 冻结、再交被拒
+    // (b) terminal ids freeze; resubmission is rejected
     expect(d).toContain("frozen");
-    // (c) 跨调用 deps 可省略已完成节点 —— host 合并账本
+    // (c) cross-call deps may omit completed nodes — the host merges the ledger
     expect(d).toContain("ledger");
     expect(d).toContain("omit");
-    // (d) 取消后未完成 id 可再交
+    // (d) unfinished ids are resubmittable after cancel
     expect(d).toContain("cancel");
   });
 
@@ -367,11 +375,13 @@ describe("run_graph 合同锁：DESCRIPTION 覆盖剩余子图语义", () => {
   });
 
   it("说明不把无边并行当 run_graph 用例（与通知文分工同向）", () => {
-    // 分工 SSOT = graph/notification.ts：run_graph 的用例是「相互依赖的
-    // 有序拆分」；单发或无依赖多任务走 spawn_subagent（「a graph with no
-    // edges buys nothing over parallel spawns」）。description 若反向邀请
-    // 无边并行，模型在 graph ON 下会优先选错入口 —— 这条钉住与 SSOT 同向
-    // 的分工，使回归不必只靠真模型轨迹集兜。
+    // Division-of-labor SSOT = graph/notification.ts: run_graph's use case is
+    // "an ordered split of interdependent work"; single or dependency-free
+    // multi-task goes to spawn_subagent ("a graph with no edges buys nothing
+    // over parallel spawns"). If the description invited edge-less parallel
+    // work instead, the model would pick the wrong entry point while graph
+    // mode is ON — this pins the same direction as the SSOT so regressions do
+    // not rely solely on real-model trajectory sets.
     const d = tool.description.toLowerCase();
     expect(d).not.toContain("or parallel sub-agent work");
     expect(d).toContain("no ordering");

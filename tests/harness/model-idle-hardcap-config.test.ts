@@ -1,12 +1,13 @@
 /**
- * #742 T1:idle / 硬顶的配置链 —— `IKNOW_LLM_IDLE_TIMEOUT_MS` /
- * `IKNOW_LLM_HARD_CAP_MS`(env)> `settings.llm.idleTimeoutMs` /
- * `settings.llm.hardCapMs` > 代码默认值。
+ * Config chain for the idle / hard-cap clocks:
+ * `IKNOW_LLM_IDLE_TIMEOUT_MS` / `IKNOW_LLM_HARD_CAP_MS` (env) >
+ * `settings.llm.idleTimeoutMs` / `settings.llm.hardCapMs` > code defaults.
  *
- * 放在 tests/harness/ 而不是 tests/config/:这两个旋钮的语义属于
- * harness 的模型调用双钟(CONTEXT「model-call idle / 模型调用硬顶」),
- * 与 loop-engine 侧的 `model-idle-hardcap.test.ts` 同一票据、同处查阅。
- * 校验纪律仍镜像既有 `llm.timeoutMs`(有限正整数,drop-not-throw)。
+ * Lives in tests/harness/ rather than tests/config/ because these two knobs
+ * are semantics of the harness's model-call dual clocks (model-call idle /
+ * hard cap), reviewed together with the loop-engine side in
+ * `model-idle-hardcap.test.ts`. Validation discipline mirrors the existing
+ * `llm.timeoutMs` (finite positive integer, drop-not-throw).
  */
 
 import {
@@ -63,9 +64,10 @@ describe("#742 T1 env: idle / 硬顶默认值", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  // T2 (#transport-continue-persist): 流式臂默认 idle 升到 minute-scale (~5 min)。
-  // 不变式:idle 仍严格 < 硬顶、硬顶有限,且硬顶仍远大于 timeoutMs 默认 5 min —
-  // 任何一处跌破都视为 spec 漂移。
+  // Per specs/transport-continue-persist.md, the streaming arm's default idle
+  // moved to minute-scale (~5 min). Invariants: idle stays strictly < hard
+  // cap, the cap stays finite, and it remains far above the 5-min timeoutMs
+  // default — any breach here means spec drift.
   it("默认 idle=300000(5 min)、硬顶=900000(15 min)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.idleTimeoutMs, 300_000);
@@ -84,9 +86,10 @@ describe("#742 T1 env: idle / 硬顶默认值", () => {
     assert.ok(env.llm.hardCapMs! > env.llm.timeoutMs);
   });
 
-  // T2 (#transport-continue-persist): 默认 idle 在 minute-scale 区间 [60s, 600s]
-  // — spec invariant 3 的强钉：从原 120s(短、长思维任务易被误杀)升到 5 min,
-  // 防 spec 漂移回落。
+  // Default idle sits in the minute-scale range [60s, 600s] — the hard pin of
+  // specs/transport-continue-persist.md invariant 3: raised from the old 120s
+  // (too short; long thinking tasks were mis-killed) to 5 min, guarding
+  // against a drift back down.
   it("默认 idle 落在 minute-scale 区间 [60s, 600s](spec 不变式)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     const idle = env.llm.idleTimeoutMs!;

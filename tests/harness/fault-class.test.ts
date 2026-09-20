@@ -1,7 +1,7 @@
 /**
- * #672 T1: FaultClass 策略表（G2 in/out）。
+ * FaultClass policy table (G2 in/out).
  *
- * 纯分类，不接传输重试循环、不接环检测。
+ * Pure classification only — no transport retry loop, no loop detection.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -104,8 +104,9 @@ describe("classifyFault G2 table", () => {
     );
   });
 
-  // ADR-0111 不变式 (a):stream_incomplete 与 clock_timeout 同判据 —— 不可见 =
-  // 本次 attempt 无任何模型输出增量,整 step 重试安全;已出字不自动重试。
+  // ADR-0111 invariant (a): stream_incomplete shares the clock_timeout
+  // criteria — while invisible (no model output delta this attempt), retrying
+  // the whole step is safe; once text has streamed out, no auto-retry.
   it("stream_incomplete: 不可见 → retry;可见 → none(已出字不重试)", () => {
     assert.equal(
       classifyFault({ kind: "stream_incomplete", visible: false }),

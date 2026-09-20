@@ -1,9 +1,11 @@
 /**
- * T4 stubs:确定性替身,仅供测试。
+ * Deterministic test-only stubs.
  *
- * stub-model 接受脚本化 responses 数组(每次 step 调用消费下一条);
- * stub-tool 接受 args 返回可控成功 / 失败 / 异常;完全确定性,无时间 / 随机 /
- * IO 依赖;不进生产装配路径(src/cli/runtime.ts、src/session-api/ 不 import)。
+ * stub-model takes a scripted responses array (each step call consumes the
+ * next one); stub-tool takes args and returns controllable success / failure
+ * / exception; fully deterministic, no time / randomness / IO dependency;
+ * never enters production assembly paths (src/cli/runtime.ts and
+ * src/session-api/ do not import them).
  */
 
 import { describe, it } from "vitest";
@@ -76,8 +78,8 @@ describe("createStubModel", () => {
   });
 });
 
-// 017:helper for fixture AssistantTurnResult —— 与上面 createStubModel
-// 第一个测试同款,确保新的 delay/ signal 用例拿到一致的 r1 形状。
+// Helper building the fixture AssistantTurnResult — same shape as the first
+// createStubModel test above, so the new delay/signal cases get a consistent r1.
 const buildR1 = (): AssistantTurnResult => {
   const native: AnthropicNativeMessage = {
     role: "assistant",

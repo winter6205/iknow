@@ -1,21 +1,29 @@
 /**
- * specs/egress-credential-sentinel.md T1 —— egress 域凭据名册装配单测。
+ * specs/egress-credential-sentinel.md — assembly unit tests for the
+ * egress-domain credential roster.
  *
- * 钉住的不变式：
- *  - 内置 github 名册两条目逐字（SSOT 单文件）：`GH_TOKEN` env 条目 +
- *    `~/.config/gh/hosts.yml` 文件条目（structured extract 掩码形态），
- *    injectHosts = `github.com` / `*.github.com` / `*.githubusercontent.com`
- *    （spec 凭据名册表逐字，Assumption 6 静态钉）；
- *  - 用户段只做收窄/追加：同名（envVars）/ 同路径（files）用户条目替换
- *    内置条目（收窄），其余追加；内置条目 injectHosts 永不因用户段扩张；
- *  - 无 injectHosts 条目 → 不铸造 + warn 痕（Assumption 6：不吃包的
- *    allowedDomains 缺省；本仓适配层显式拒铸并留痕）；
- *  - invariant 3 数据形状钉：批准门新批域不进任何条目 injectHosts ——
- *    名册只来自「内置常量 + settings 段」两源，装配函数无 allowedDomains
- *    / 批准集入参（签名面即防线）；
- *  - EgressPolicyInput.credentials 接线：生产装配恒产 policy（preset spec
- *    invariant 3：段缺席 = builtin preset-only，session 必起），credentials
- *    不决定起停、只随 policy 数据形状走（egress 域不反向 import config）。
+ * Pinned invariants:
+ *  - the two built-in github roster entries verbatim (SSOT single file): a
+ *    `GH_TOKEN` env entry + a `~/.config/gh/hosts.yml` file entry (structured
+ *    extract mask form), injectHosts = `github.com` / `*.github.com` /
+ *    `*.githubusercontent.com` (verbatim from the spec roster table,
+ *    Assumption 6 static pin);
+ *  - the user section only narrows/appends: a user entry with the same name
+ *    (envVars) or path (files) replaces the builtin entry (narrowing), the
+ *    rest are appended; user edits never expand a builtin entry's
+ *    injectHosts;
+ *  - an entry without injectHosts → no minting + warn trace (Assumption 6:
+ *    does not silently consume the package allowedDomains default; this
+ *    repo's adapter layer explicitly refuses to mint and leaves a trace);
+ *  - invariant 3 data-shape pin: newly approved domains from the approval
+ *    gate enter no entry's injectHosts — the roster comes only from "builtin
+ *    constants + settings section", and the assembly function takes no
+ *    allowedDomains / approval-set parameter (the signature is the defense);
+ *  - EgressPolicyInput.credentials wiring: production assembly always
+ *    produces a policy (preset spec invariant 3: absent section = builtin
+ *    preset-only, session must start); credentials never decides start/stop,
+ *    it only rides the policy data shape (the egress domain never imports
+ *    config in reverse).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -190,8 +198,9 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
       } as unknown as IknowSettings,
       commandLabel: "bash:fg",
     });
-    // preset spec invariant 3：段缺席不再返 undefined —— builtin 窄集
-    // session 必起；credentials 仍不决定起停，随 policy 注入。
+    // preset spec invariant 3: an absent section no longer returns undefined —
+    // the builtin narrow-set session must start; credentials still never decides
+    // start/stop, it rides the policy injection.
     const policy = factory();
     assert.ok(policy !== undefined);
     assert.equal(policy!.allowlistSource, "builtin");
@@ -220,7 +229,7 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
       commandLabel: "bash:fg",
     });
     const policy = factory();
-    // 段在场 = 去重(preset ∪ 用户增量)，preset 前置（spec T1 合并语义）。
+    // section present = dedup(preset ∪ user additions), preset kept in front (spec merge semantics).
     assert.deepEqual(policy!.allowedDomains, [
       ...BUILTIN_PRESET_ALLOWED_DOMAINS,
       "example.com",

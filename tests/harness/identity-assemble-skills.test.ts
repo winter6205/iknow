@@ -1,10 +1,13 @@
-// #337 T6: <available_skills> 加性段单测。
+// <available_skills> additive-segment unit tests.
 //
-// 行为真值 (spec 337-skill-mcp-extension.md § Code Style + T6 acceptance)：
-//   - 加性段（LOCKED 循环后追加），不触碰 IKNOW_ASSEMBLY_ORDER（数组引用不变）。
-//   - 名字序渲染；空清单显式语句（如 "No skills installed"）。
-//   - disabled 不出现（SC3）。
-//   - 段文本跨 turn 字节稳定（同输入二次调用字符串相等，KV 缓存契约）。
+// Behavior ground truth:
+//   - Additive segment (appended after the LOCKED loop); IKNOW_ASSEMBLY_ORDER
+//     is untouched (array reference unchanged).
+//   - Rendered in name order; an empty catalog still emits an explicit
+//     statement (e.g. "No skills installed").
+//   - Disabled entries never appear.
+//   - Segment text is byte-stable across turns (equal input → identical
+//     string on a second call, KV-cache contract).
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -99,9 +102,10 @@ describe("<available_skills> additive segment", () => {
     const out = await assembleIdentityContext({
       ...baseCtx(),
       skills: () => [
-        // 降档后的形态：description 字段整体缺席。
+        // Demoted shape: the description field is absent altogether.
         { name: "demoted" },
-        // 空串 / 纯空白 同规则（与 McpToolSummary / 退场内建段一致）。
+        // Empty string / whitespace-only follow the same rule (consistent with
+        // McpToolSummary and the built-in eviction segments).
         { name: "blank", description: "" },
         { name: "spaces", description: "   " },
         { name: "kept", description: "still described" },
@@ -109,12 +113,13 @@ describe("<available_skills> additive segment", () => {
     });
 
     expect(out).toBeDefined();
-    // 名字永不删 → 三条降档条目的名字都在，且都是裸名行（无 ": ..."）。
+    // Names are never deleted → all demoted entries keep a bare name line
+    // (no ": ...").
     for (const name of ["demoted", "blank", "spaces"]) {
       expect(out).toMatch(new RegExp(`^${name}$`, "m"));
       expect(out).not.toMatch(new RegExp(`^${name}:`, "m"));
     }
-    // 未降档条目仍带描述。
+    // Non-demoted entries still carry their description.
     expect(out).toContain("kept: still described");
   });
 

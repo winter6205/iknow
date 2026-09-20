@@ -1,13 +1,14 @@
 /**
- * GoalRecord / recordGoal (T4, #458 goal 生命周期 — T12 数据契约落定).
+ * GoalRecord / recordGoal (goal lifecycle data contract).
  *
- * 契约（对齐 verification.test.ts 装配方式：captureWriter + always-throw writer）:
- * 1. jsonl sink 写入 GoalRecord: 行形状 (record_type="goal" / goal_id 承载调用方 id /
- *    snake_case 顶层 key / conversation_id 实例绑定 / 无重复 id 载体)
- * 2. 可选字段缺席 (status / text / textLen) → 不写 key (Postel)
- * 3. 完整 record (含 status/text/textLen) round-trip: 值保留 + snake_case key
- * 4. always-throw writer → 返回 undefined, 不抛 (@throws never)
- * 5. noop 实现返回 undefined (零副作用)
+ * Contracts (mirrors verification.test.ts wiring: captureWriter + always-throw writer):
+ * 1. jsonl sink writes GoalRecord rows: row shape (record_type="goal" / goal_id
+ *    carries the caller-supplied id / snake_case top-level keys / conversation_id
+ *    instance-bound / no duplicate id carrier)
+ * 2. absent optional fields (status / text / textLen) → key omitted (Postel)
+ * 3. full record (with status/text/textLen) round-trip: values kept, snake_case keys
+ * 4. always-throw writer → returns undefined, never throws (@throws never)
+ * 5. noop implementation returns undefined (zero side effects)
  */
 
 import { describe, it } from "vitest";
@@ -20,7 +21,7 @@ import { createNoopTraceService } from "../../../src/harness/trace/noop.ts";
 import type { GoalRecord } from "../../../src/harness/trace/types.ts";
 
 const SAMPLE_GOAL: GoalRecord = {
-  // id / sessionId / ts 由调用方提供 (plan T4 §Decisions 定稿字段)。
+  // id / sessionId / ts are caller-provided (settled contract fields).
   id: "goal-1",
   sessionId: "sess-goal-1",
   action: "pin",
@@ -59,16 +60,16 @@ describe("createJsonlTraceService — recordGoal", () => {
     assert.equal(parsed.record_type, "goal");
     assert.equal(parsed.goal_id, "goal-1");
     assert.equal(parsed.conversation_id, "conv-goal");
-    // snake_case 顶层 key
+    // snake_case top-level keys
     assert.equal(parsed.session_id, "sess-goal-1");
     assert.equal(parsed.action, "pin");
     assert.equal(parsed.status, "active");
     assert.equal(parsed.text, "实现 goal 生命周期");
     assert.equal(parsed.text_len, 9);
     assert.equal(parsed.ts, SAMPLE_GOAL.ts);
-    // conversationId → conversation_id (顶层 snake_case 转换也覆盖该字段)
+    // conversationId → conversation_id (top-level snake_case covers this field too)
     assert.equal(parsed.conversationId, undefined);
-    // 单 id 载体: 顶层不重复落 id (id 已由 goal_id 承载)
+    // Single id carrier: no duplicate top-level id (goal_id already carries it)
     assert.equal(parsed.id, undefined);
   });
 

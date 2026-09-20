@@ -7,16 +7,16 @@ import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.j
 import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
 
 /**
- * T2 exit code 双路解析 + fail-closed (spec SC4 / A9)。
+ * Exit-code dual-path parsing + fail-closed.
  *
- * 双路解析 (bash.ts:79-83 → executor.ts:46 文本契约):
- *   - 结构化 JSON {code, stdout, stderr} → exitCode = code;
- *   - 非 JSON 文本 ^Exit code (\d+) 正则回退 → code;
- *   - is_error: true + [execution_failed] 前缀 → null。
- * fail-closed (A8): 空输入 / 无 bash / 畸形 shape 全不 crash → INSUFFICIENT。
+ * Dual-path parsing (the text contract produced by the bash executor):
+ *   - structured JSON {code, stdout, stderr} → exitCode = code;
+ *   - non-JSON text: ^Exit code (\d+) regex fallback → code;
+ *   - is_error: true with the `[execution_failed]` prefix → null.
+ * fail-closed: empty input / no bash / malformed shapes never crash → INSUFFICIENT.
  */
 
-/** 单条 bash run + tool_result 的完整 transcript 骨架。 */
+/** Skeleton transcript: one bash run (tool_use + tool_result) between task and done. */
 function transcript(blocks: AnthropicContentBlock[]): AnthropicNativeMessage[] {
   return [
     message("user", textBlock("task")),

@@ -1,34 +1,33 @@
 /**
- * #119 T7: integration test — loop-engine compress 接线端到端。
+ * Integration test — loop-engine compress wiring, end to end.
  *
- * Spec: specs/119-compression-landing.md (SC7 / SC11 / SC12 / Q3 / Q4) +
- * plan T7 bullet。
+ * Builds a scripted long conversation with a stub model (run() never calls a
+ * real LLM) and verifies:
+ *   a. deps.compress absent -> zero behavior change (no compaction, no boundary placeholder);
+ *   b. deps.compress present + low threshold -> compactMessages fires, messages
+ *      shrink, and the system seam (deps.system) is untouched;
+ *   c. after compaction every tool_use<->tool_result pair stays intact;
+ *   d. turnCount anchor: no repeat firing within one turn, lastCompactTurn holds
+ *      the anchor (extreme-length conversation + low threshold -> compaction
+ *      happens >= 1 and <= N/2 times);
+ *   e. deps.compress.thresholdTokens = undefined -> default floor(0.95 × window)
+ *      (ADR-0100); huge contextWindow -> no trigger; tiny contextWindow -> triggers.
  *
- * 用 stub model 构造固定回合的长对话(run() 不调真实 LLM),验证:
- *   a. deps.compress 缺席 → 行为零变化(不触发压缩,无边界占位符);
- *   b. deps.compress 就位 + 低阈值 → 触发 compactMessages,messages 变短,
- *      且 system 缝(deps.system)不受影响(SC12);
- *   c. 压缩后 tool_use↔tool_result 配对完整(SC11);
- *   d. turnCount 锚点:同一轮不重复触发,lastCompactTurn 守锚
- *      (极端长对话 + 低阈值 → 压缩 ≥1 次 ≤ N/2 次);
- *   e. deps.compress.thresholdTokens = undefined → 缺省推导 floor(0.95 × window)
- *      (ADR-0100);极大 contextWindow → 不触发;极小 contextWindow → 触发。
+ * No real-LLM token values are hardcoded; only estimate-function semantics
+ * (constant layer) + custom thresholds simulate triggering.
  *
- * 不硬编码真实 LLM token value;只用 estimate 函数语义(constant 层) +
- * 自定义 threshold 模拟触发。
- *
- * #604 T1 (SC1-SC5) supersedes #458 T7 (SC11): compact 边界渲染缝。
- * `deps.boundaryAttachment` 可选闭包在 compact 触发时把渲染文本追加为一条
- * user 消息(放在 boundary placeholder 之后)。两处 compact 调用点
- * (reactive line 717 / proactive line 1339)共用 `applyCompactAttachment`
- * helper:渲染源由 taskFocus 字段(#458 T7)改为 hub 注入的
- * `renderRecentUserTasksBoundary` 现抽现贴(取最近 ≤3 句合格用户任务原话)。
- * 本文件只测 `applyCompactAttachment` 缝本身,不动 hub 闭包。
- *   f. proactive compact + boundaryAttachment → messages[0]=placeholder,
- *      messages[1]=attachment user 消息,messages[2+]=保留尾部;
- *   g. boundaryAttachment 缺席 → 仅 placeholder(byte-stable);
- *   h. reactive compact 路径同样命中(共享 helper);
- *   i. 普通 turn(阈值未达)→ boundaryAttachment 不调用(no-op)。
+ * Compact boundary rendering seam: `deps.boundaryAttachment` is an optional
+ * closure that, on compaction, appends rendered text as one user message right
+ * after the boundary placeholder. Both compact call sites (reactive and
+ * proactive) share the `applyCompactAttachment` helper; its render source is a
+ * hub-injected `renderRecentUserTasksBoundary` that freshly extracts up to the
+ * 3 most recent eligible user task utterances. This file tests only the
+ * `applyCompactAttachment` seam, not the hub closure:
+ *   f. proactive compact + boundaryAttachment -> messages[0]=placeholder,
+ *      messages[1]=attachment user message, messages[2+]=kept tail;
+ *   g. boundaryAttachment absent -> placeholder only (byte-stable);
+ *   h. the reactive compact path hits the same shared helper;
+ *   i. ordinary turn (threshold not reached) -> boundaryAttachment never called (no-op).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -47,10 +46,11 @@ import {
 } from "../../../src/harness/compress/index.ts";
 import { PromptTooLongError } from "../../../src/harness/errors.ts";
 
-// #467 step 2:compact 触发的"边界"消息可以是旧的纯截断占位符
-// (COMPACTION_BOUNDARY_PLACEHOLDER)或新的 LLM 摘要轮(SUMMARY_PREAMBLE + 摘要
-// 内容)。同一断言需要兼容两种形态 — 用 isCompactBoundaryMessage 判定。
-// 保留对 placeholder 的兼容性以便老契约断言不破(blue-green 过渡)。
+// The compact-triggered "boundary" message can be either the old pure-truncation
+// placeholder (COMPACTION_BOUNDARY_PLACEHOLDER) or the new LLM summary round
+// (SUMMARY_PREAMBLE + summary text). One predicate must accept both forms —
+// isCompactBoundaryMessage. Placeholder compatibility is kept so older
+// contract assertions don't break (blue-green transition).
 const SUMMARY_PREAMBLE_FRAGMENT =
   "This session is being continued from a previous conversation";
 function isCompactBoundaryMessage(m: AnthropicNativeMessage): boolean {
@@ -62,7 +62,7 @@ function isCompactBoundaryMessage(m: AnthropicNativeMessage): boolean {
         b.text.startsWith(SUMMARY_PREAMBLE_FRAGMENT))
   );
 }
-/** #467 step 2:LLM 摘要轮 user 消息(SUMMARY_PREAMBLE + 摘要内容)。 */
+/** LLM summary-round user message (SUMMARY_PREAMBLE + summary text). */
 function isSummaryMessage(m: AnthropicNativeMessage | undefined): boolean {
   if (m === undefined || m.role !== "user") return false;
   return m.content.some(
@@ -86,15 +86,16 @@ import type { LoopAdapter } from "../../../src/harness/loop-engine.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import type { ToolExecutionResult } from "../../../src/harness/tools/types.ts";
 
-/** 每回合 inflate 的文本量:让 estimate 在 ~5 回合内越过低阈值(≈1000)。 */
-const BIG_TEXT = "payload ".repeat(40); // ~320 chars → ~80 tokens/回合
-const TOOL_RESULT_TEXT = "tool-result-body ".repeat(60); // tool_result 也 inflate
+/** Per-turn text volume: makes the estimate cross the low threshold (~1000) in ~5 turns. */
+const BIG_TEXT = "payload ".repeat(40); // ~320 chars → ~80 tokens/turn
+const TOOL_RESULT_TEXT = "tool-result-body ".repeat(60); // tool_result inflates too
 
 const TURNS = 100;
 
 /**
- * 构造 N 回合 tool-call 长对话 + 1 条 completed 收尾的脚本化 stub responses。
- * 每回合 assistant 携带大 text + 一个 tool_use;tool_result 由 executor 产出。
+ * Scripted stub responses: an N-turn tool-call conversation + one completed
+ * closing turn. Each turn's assistant carries a big text + one tool_use;
+ * tool_result is produced by the executor.
  */
 function buildResponses(n: number) {
   const responses = [];
@@ -106,7 +107,7 @@ function buildResponses(n: number) {
       })
     );
   }
-  // 收尾:纯文本 completed(无 tool call)。
+  // Closer: plain-text completed (no tool call).
   responses.push(
     assistantResult({
       texts: ["completed"],
@@ -117,7 +118,7 @@ function buildResponses(n: number) {
   return responses;
 }
 
-/** 统计 messages 内 tool_use 块。 */
+/** Count tool_use blocks across messages. */
 function toolUses(
   messages: ReadonlyArray<{
     readonly content: ReadonlyArray<AnthropicContentBlock>;
@@ -132,7 +133,7 @@ function toolUses(
   return out;
 }
 
-/** 统计 messages 内 tool_result 的 tool_use_id。 */
+/** Collect tool_use_ids of tool_result blocks across messages. */
 function toolResultIds(
   messages: ReadonlyArray<{
     readonly content: ReadonlyArray<AnthropicContentBlock>;
@@ -147,7 +148,7 @@ function toolResultIds(
   return out;
 }
 
-/** 断言 completion 收尾消息仍保留(不可 mutate 尾部)。 */
+/** Assert the completion closing message survives (the tail must never be mutated). */
 function assertCompletionTail(
   messages: ReadonlyArray<{
     readonly content: ReadonlyArray<AnthropicContentBlock>;
@@ -181,9 +182,9 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       maxTurns: 10,
     });
     assert.equal(result.stopReason, "completed");
-    // 3 回合 tool-call:user + 3×(assistant+user tool_result) + assistant 收尾。
+    // 3 tool-call turns: user + 3×(assistant + user tool_result) + assistant closer.
     assert.equal(result.messages.length, 1 + 3 * 2 + 1);
-    // 无边界占位符 → 未压缩。
+    // No boundary placeholder -> compaction never ran.
     const serialized = JSON.stringify(result.messages);
     assert.ok(
       !serialized.includes(COMPACTION_BOUNDARY_PLACEHOLDER),
@@ -199,7 +200,8 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       executor,
       registry,
       maxTurns: TURNS + 1,
-      // SC12:system 缝独立于压缩;装配一个返回常量的 resolvers 验证不被触碰。
+      // The system seam is independent of compaction; wire a constant-returning
+      // resolver to prove it is untouched.
       system: async () => {
         systemCalls++;
         return "SYSTEM-PROMPT-CONST";
@@ -207,19 +209,19 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 压缩发生:边界消息出现(placeholder 或 LLM 摘要轮皆可,#467 step 2)。
+    // Compaction happened: a boundary message appears (placeholder or LLM summary round both qualify).
     assert.ok(
       result.messages.some(isCompactBoundaryMessage),
       "低阈值 + 长对话必须触发压缩 (placeholder 或 summary)"
     );
-    // 压缩后 messages 显著短于未压缩的 1+200+1=202 条。
+    // After compaction, messages are far shorter than the uncompressed 1+200+1=202.
     assert.ok(
       result.messages.length < 50,
       `压缩后 messages 应大幅变短,实际 ${result.messages.length}`
     );
-    // system 缝照常被调用(压缩不干扰 system 注入)。
+    // The system seam is still called normally (compaction doesn't disturb system injection).
     assert.ok(systemCalls > 0, "deps.system 必须仍被调用");
-    // 尾部 completed 保留。
+    // The completed tail survives.
     assertCompletionTail(result.messages);
   });
 
@@ -253,8 +255,8 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 边界消息(placeholder 或 summary)出现次数 = 压缩次数(每次 compact 插入
-    // 一条边界消息,#467 step 2 摘要轮也是边界消息)。
+    // Boundary messages (placeholder or summary) count = compaction count (each
+    // compact inserts exactly one boundary message; summary rounds count too).
     const boundaryCount = result.messages.filter(
       isCompactBoundaryMessage
     ).length;
@@ -263,8 +265,9 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       boundaryCount <= Math.floor(TURNS / 2),
       `压缩次数 ${boundaryCount} 应 ≤ ${Math.floor(TURNS / 2)}(turnCount 锚点守约)`
     );
-    // S10 freeze gate:压缩结果与 appendMessage 一样冻结每条 + content 块,
-    // 后续回路修改应静默失败(strict mode)。
+    // Freeze gate: compaction results freeze each message and its content
+    // blocks just like appendMessage, so later loop mutations fail silently
+    // (strict mode).
     assert.ok(Object.isFrozen(result.messages), "messages 数组应被冻结");
     for (const m of result.messages) {
       assert.ok(Object.isFrozen(m), `message ${m.role} 应被冻结`);
@@ -273,7 +276,7 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
   });
 
   it("thresholdTokens=undefined → 缺省推导 floor(0.95×window);极大 window 不触发,极小 window 触发", async () => {
-    // (a) 极大 contextWindow → 缺省阈值巨大 → 不触发。
+    // (a) Huge contextWindow -> enormous default threshold -> no trigger.
     const bigModel = createStubModel({ responses: buildResponses(5) });
     const big = await run("hello", {
       adapter: bigModel,
@@ -290,8 +293,9 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       "极大 contextWindow + 缺省阈值不得触发压缩"
     );
 
-    // (b) 极小 contextWindow → 缺省闸 = floor(0.95 × 2000) = 1900,夹具的 5 轮
-    // 对话 estimate 远大于它 → 触发。95% 比例不因 window 小而把闸抬到不触发。
+    // (b) Tiny contextWindow -> default gate = floor(0.95 × 2000) = 1900, and
+    // the fixture's 5-turn conversation estimates far above it -> triggers.
+    // The 95% ratio never lifts the gate out of triggering just because the window is small.
     const smallModel = createStubModel({ responses: buildResponses(5) });
     const small = await run("hello", {
       adapter: smallModel,
@@ -306,11 +310,12 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       "极小 contextWindow + 缺省阈值必须触发压缩 (placeholder 或 summary)"
     );
 
-    // (c) 语义自检:缺省闸是**正比例**,不是旧余量公式的负数巧合 —— 极小
-    // window 的触发来自 estimate 越过 floor(0.95 × window)。
+    // (c) Semantics self-check: the default gate is a positive ratio, not the
+    // old buffer formula's negative coincidence — the tiny-window trigger comes
+    // from the estimate crossing floor(0.95 × window).
     assert.equal(getAutoCompactThreshold(2000, undefined), 1_900);
     assert.ok(getAutoCompactThreshold(2000, undefined) > 0);
-    // 极大 window 的缺省闸仍在估算之上 → 与 (a) 的「不触发」同源。
+    // The huge window's default gate still sits above the estimate -> same root cause as (a)'s no-trigger.
     assert.ok(
       getAutoCompactThreshold(10_000_000, undefined) >
         estimateMessagesTokens(big.result.messages)
@@ -322,7 +327,7 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
   });
 });
 
-// -- #458 T7 (SC11): compact 边界 boundaryAttachment 渲染缝 --------------------
+// -- compact boundary: boundaryAttachment rendering seam ----------------------
 
 /** Construct a minimal prior-message array. */
 const text = (value: string): AnthropicNativeMessage => ({
@@ -331,11 +336,12 @@ const text = (value: string): AnthropicNativeMessage => ({
 });
 
 /**
- * #467 step 2:proactive compact → LLM 摘要成功路径专用 adapter。
- * 非 compact 步(tools 已传)按脚本消费;compact 摘要步(tools === undefined)
- * 返回 `<analysis>…</analysis><summary>SUMMARY-OVER-DROPPED</summary>`,
- * 让 runFullCompact 走 summarized 分支 → buildCompactedMessages 输出
- * `SUMMARY_PREAMBLE + 摘要内容` 的 user 消息在 messages[0]。
+ * Dedicated adapter for the proactive compact -> LLM summary success path.
+ * Non-compact steps (tools passed) consume the script; the compact summary
+ * step (tools === undefined) returns
+ * `<analysis>…</analysis><summary>SUMMARY-OVER-DROPPED</summary>` so
+ * runFullCompact takes the summarized branch -> buildCompactedMessages emits
+ * the `SUMMARY_PREAMBLE + summary text` user message at messages[0].
  */
 function makeCompactSummaryAdapter(opts: {
   readonly responses: ReadonlyArray<AssistantTurnResult>;
@@ -347,10 +353,11 @@ function makeCompactSummaryAdapter(opts: {
       role: "user",
       content: [{ type: "text", text: t }],
     }),
-    // 必须产出真实 tool_result 块:本 adapter 会跑完整 tool 回合,preserveToolPairs
-    // 依赖 tool_result 块做配对守门。空数组会让 tool_use 悬空,splitForCompaction
-    // 抛 "missing tool_result"(与 flaky adapter 不同,那里 compact 发生在首个
-    // tool 回合前,从不带悬空 tool_use 进入 split)。
+    // Must produce real tool_result blocks: this adapter runs full tool turns
+    // and preserveToolPairs relies on tool_result blocks for the pairing guard.
+    // An empty array would orphan tool_use and make splitForCompaction throw
+    // "missing tool_result" (unlike the flaky adapter, where compact happens
+    // before the first tool turn so split never sees orphaned tool_use).
     encodeToolResults: (
       results: ReadonlyArray<ToolExecutionResult>
     ): AnthropicContentBlock[] => toAnthropicToolResults(results),
@@ -359,8 +366,9 @@ function makeCompactSummaryAdapter(opts: {
       request: { readonly tools?: unknown }
     ): Promise<AssistantTurnResult> => {
       if (request.tools === undefined) {
-        // 与 stub-model 同款判别:只有带 full-compact prompt 的 no-tools 步
-        // 才算摘要步;收尾摘要(epilogue SUMMARY_PROMPT)会经正常 queue 消费。
+        // Same discrimination as stub-model: only a no-tools step carrying the
+        // full-compact prompt is a summary step; the epilogue SUMMARY_PROMPT is
+        // consumed via the normal queue.
         const lastUserText = [...state.messages]
           .reverse()
           .find((m) => m.role === "user")
@@ -398,9 +406,9 @@ function makeCompactSummaryAdapter(opts: {
 }
 
 /**
- * Reactive path 触发器：first attempt throws PromptTooLongError, second
- * attempt returns success。模拟"压缩前模型拒绝 → reactive 触发压缩 →
- * 压缩后模型接受"。
+ * Reactive-path trigger: the first attempt throws PromptTooLongError, the
+ * second returns success — simulating "model rejects before compaction ->
+ * reactive triggers compaction -> model accepts after compaction".
  */
 function makeFlakyAdapter(opts: {
   readonly retryText: string;
@@ -420,9 +428,10 @@ function makeFlakyAdapter(opts: {
       if (opts.attemptCount.value === 1) {
         throw new PromptTooLongError("synthetic 400 prompt-too-long");
       }
-      // #467 step 2:full-compact 摘要轮步进无 tools(request.tools === undefined)。
-      // 摘要步返回空文本 → runFullCompact 报 empty_response → 回退 placeholder,
-      // 测试意图(验证 fallback 路径)保持;摘要成功路径由专门用例覆盖。
+      // The full-compact summary round runs without tools (request.tools === undefined).
+      // The summary step returns empty text -> runFullCompact reports empty_response ->
+      // fallback placeholder; the test intent (verifying the fallback path) is kept,
+      // and the summary-success path has its own dedicated cases.
       if (request.tools === undefined) {
         return assistantResult({
           texts: [],
@@ -458,8 +467,9 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       boundaryAttachment: () => "focus@now\n---\nhist1",
     });
     assert.equal(result.stopReason, "completed");
-    // SC11:#467 step 2:boundary 可能是 LLM 摘要轮或 placeholder; attachment user
-    // 消息紧跟其后(buildCompactedMessages / fallback 都遵循此 layout)。
+    // The boundary may be an LLM summary round or a placeholder; the attachment
+    // user message follows immediately after it (both buildCompactedMessages and
+    // the fallback honor this layout).
     assert.ok(
       isCompactBoundaryMessage(result.messages[0]!),
       "messages[0] must be compact boundary (placeholder 或 summary)"
@@ -468,7 +478,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       role: "user",
       content: [{ type: "text", text: "focus@now\n---\nhist1" }],
     });
-    // 保留尾部:最终 assistant 收尾仍在。
+    // Kept tail: the final assistant closer is still present.
     assertCompletionTail(result.messages);
   });
 
@@ -482,12 +492,12 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 边界消息出现(确认 compact 真触发):placeholder 或 LLM 摘要轮皆可。
+    // A boundary message appears (confirming compaction really fired): placeholder or LLM summary round both qualify.
     assert.ok(
       isCompactBoundaryMessage(result.messages[0]!),
       "messages[0] must be compact boundary (placeholder 或 summary)"
     );
-    // messages[1] 不应是 attachment 文本;它要么是保留尾部要么是后续 assistant。
+    // messages[1] must not be attachment text; it is either the kept tail or a later assistant turn.
     const second = result.messages[1];
     assert.ok(second, "messages[1] must exist (kept tail or assistant)");
     const secondText = second.content
@@ -508,7 +518,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       executor,
       registry,
       maxTurns: 10,
-      // 极大 contextWindow → 缺省闸 floor(0.95 × 1e7) 远超 estimate → 不触发。
+      // Huge contextWindow -> default gate floor(0.95 × 1e7) far above the estimate -> no trigger.
       compress: { contextWindow: 10_000_000, thresholdTokens: undefined },
       boundaryAttachment: () => {
         calls++;
@@ -529,7 +539,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
   });
 
   it("reactive compact + boundaryAttachment → placeholder 后追加 attachment(共享 helper)", async () => {
-    // 12 条 prior + 1 user text → compactMessages 产出 placeholder + DEFAULT_KEEP_RECENT kept。
+    // 12 prior messages + 1 user text -> compactMessages yields placeholder + DEFAULT_KEEP_RECENT kept.
     const longPrior = Array.from({ length: 12 }, (_, i) =>
       text(`prior-${i} ${"z".repeat(20)}`)
     );
@@ -552,15 +562,16 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // #467 step 2:applyCompactAttachment 全程多一次 adapter 调用(runFullCompact
-    // 摘要步 + PromptTooLongError 触发 + 重试成功),full-compact 失败 → fallback
-    // placeholder,几何 (placeholder + attachment + kept + retry) 保持不变。
+    // applyCompactAttachment adds one extra adapter call overall (runFullCompact
+    // summary step + PromptTooLongError trigger + successful retry); full-compact
+    // fails -> fallback placeholder, and the geometry
+    // (placeholder + attachment + kept + retry) stays unchanged.
     assert.equal(
       attemptCount.value,
       3,
       "首次抛 PromptTooLongError → 摘要步 + 重试成功"
     );
-    // SC11:placeholder + attachment + DEFAULT_KEEP_RECENT kept + 1 retry assistant。
+    // Geometry: placeholder + attachment + DEFAULT_KEEP_RECENT kept + 1 retry assistant.
     assert.equal(
       result.messages.length,
       1 + 1 + DEFAULT_KEEP_RECENT + 1,
@@ -576,7 +587,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       role: "user",
       content: [{ type: "text", text: "focus@now\n---\nhist1" }],
     });
-    // 收尾为 retry 成功的 assistant 文本。
+    // The closer is the retry's successful assistant text.
     const finalText = result.finalText;
     assert.ok(
       finalText !== null && finalText.includes("done after compact"),
@@ -584,13 +595,14 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
     );
   });
 
-  // -- #467 step 2:proactive compact → LLM 摘要成功注入 -------------------------
+  // -- proactive compact -> LLM summary success injection ----------------------
 
   it("proactive compact → 摘要成功 → messages[0] 为 SUMMARY_PREAMBLE + 摘要内容,attachment 紧随", async () => {
-    // 12 条 prior 每条撑到 ~360 chars → estimate 总估量 > 1000 阈值，proactive
-    // 在 run 入口第一次模型调用前即触发压缩（不需要任何 tool 续跑拍到达
-    // gate）。adapter 在 compact 摘要步(tools === undefined)返回结构化摘要；
-    // 模型步只消费 completed 收尾脚本。
+    // 12 prior messages of ~360 chars each -> total estimate > 1000 threshold,
+    // so proactive compaction fires before run's first model call (no tool
+    // continuation turn needed to reach the gate). The adapter returns a
+    // structured summary on the compact summary step (tools === undefined);
+    // model steps only consume the completed-closer script.
     const longPrior = Array.from({ length: 12 }, (_, i) =>
       text(`prior-${i} ${"z".repeat(350)}`)
     );
@@ -611,14 +623,15 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // 摘要轮 ≥1 次 → 钉住"摘要成功路径被真实接通"。成功压缩把 lastCompactTurn
-    // 记为当时 turnCount，同一轮不再重复扫描。
+    // Summary rounds >= 1 pins that the summary-success path is really wired up.
+    // A successful compaction records lastCompactTurn as the current turnCount,
+    // so the same turn is never re-scanned.
     assert.ok(
       adapter.compactSteps.value >= 1,
       "摘要轮至少 1 次,否则 LLM 摘要成功路径未被触发"
     );
 
-    // messages[0] = SUMMARY_PREAMBLE + 摘要内容(LLM 摘要成功路径)。
+    // messages[0] = SUMMARY_PREAMBLE + summary text (LLM summary success path).
     assert.ok(
       isSummaryMessage(result.messages[0]!),
       "messages[0] 必须是 LLM 摘要轮 user 消息"
@@ -628,22 +641,23 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       firstText.includes("SUMMARY-OVER-DROPPED"),
       "摘要内容进入 messages[0]"
     );
-    // messages[1] = boundaryAttachment 渲染文本(与 fallback 路径几何一致)。
+    // messages[1] = boundaryAttachment rendered text (same geometry as the fallback path).
     assert.deepStrictEqual(result.messages[1], {
       role: "user",
       content: [{ type: "text", text: "focus@now\n---\nhist1" }],
     });
-    // 保留尾部:最终 assistant 收尾仍在。
+    // Kept tail: the final assistant closer is still present.
     assertCompletionTail(result.messages);
   });
 
   it("plan compress-trigger-gate T5: messages ≤ DEFAULT_KEEP_RECENT 但 token 超阈值 → 触发 full summary 路径,不静默 no-op", async () => {
-    // 5 条 prior(≤ keepRecent=6)各 50k chars → estimate ≈ 100k tokens >> threshold=1000
-    // → evaluateCompactTrigger 应返回 action: 'compact_via_full_summary'。
-    // 超阈 prior 在 run 入口首呼前即开火，无需 tool 续跑拍。
-    // 旧 splitForCompaction-only 路径在这场景下会 no-op(slicedFrom=0) +
-    // lastCompactTurn 不更新 → 形成"每轮重检但不压缩"死循环;
-    // 本 case 钉住新路径会真触发 runFullCompact 走 LLM 摘要。
+    // 5 priors (≤ keepRecent=6) of 50k chars each -> estimate ≈ 100k tokens >> threshold=1000
+    // -> evaluateCompactTrigger must return action: 'compact_via_full_summary'.
+    // Over-threshold priors fire before run's first call, no tool continuation turn needed.
+    // The old splitForCompaction-only path would no-op here (slicedFrom=0) and
+    // never update lastCompactTurn -> a "re-check every turn, never compact"
+    // livelock; this case pins that the new path really drives runFullCompact
+    // through the LLM summary.
     const longPrior = Array.from({ length: 5 }, (_, i) =>
       text(`prior-${i} ${"x".repeat(50_000)}`)
     );
@@ -663,17 +677,17 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // 关键断言:全量摘要轮至少 1 次 → 证明 proactive 没卡在 no-op 死循环
+    // Key assertion: full-summary rounds >= 1, proving proactive isn't stuck in the no-op livelock.
     assert.ok(
       adapter.compactSteps.value >= 1,
       `messages ≤ keepRecent 但 token 超阈值时必须触发 full summary 路径,实际 compactSteps=${adapter.compactSteps.value}`
     );
-    // messages[0] 应为 LLM 摘要轮(SUMMARY_PREAMBLE + 摘要内容),而不是保留原 5 条
+    // messages[0] should be the LLM summary round (SUMMARY_PREAMBLE + summary text), not the original 5 kept priors.
     assert.ok(
       isSummaryMessage(result.messages[0]!),
       "messages[0] 必须是 LLM 摘要轮 user 消息(full summary 路径落点)"
     );
-    // 保留尾部:最终 assistant 收尾仍在(proactive 触发后 run() 仍能完成)
+    // Kept tail: the final assistant closer survives (run() still completes after proactive compaction)
     assertCompletionTail(result.messages);
   });
 });

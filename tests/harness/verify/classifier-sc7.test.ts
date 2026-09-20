@@ -1,19 +1,18 @@
 /**
- * #128 verify 分类器 — SC7 回归语义反转测试 (T6, spec §SC9)。
+ * Regression test for the semantic inversion of the transparent-close baseline.
  *
- * spec/128-verify-classifier.md SC9:
- *   未配 `verify.command` 时闭环**不再透明关闭**（对照 128 spec SC7 废除新语义）
- *   ——分类器路径行为 ≠ 裸 run 逐字节一致。
+ * With `verify.command` unset the closed loop no longer closes transparently:
+ * classifier-path behaviour ≠ byte-identical to a bare run.
  *
- * 本文件对照 verify-loop.test.ts 既有的"透明关闭"基线
- * （command="" + 未装配 seam → outcome=disabled, result 与裸 run 逐字节一致）
- * 验证反转：command="" + 装配 runClassifier seam → 分类器接管闭环,
- *   outcome=passed / failed / aborted (而非 disabled), 行为 ≠ 裸 run。
+ * Contrast with the "transparent close" baseline in verify-loop.test.ts
+ * (command="" + seam unwired → outcome=disabled, result byte-identical to a bare
+ * run): once a runClassifier seam is wired, the classifier takes over the loop
+ * and the outcome becomes passed / failed / aborted instead of disabled.
  *
- * 校验目标:
- *   - 真 spawn 一个产出 pass verdict 的 stub → outcome=passed, enabled=true;
- *   - 结果逐字节不等于裸 run (classification 记录 + rounds 存在);
- *   - 对照 SC7 旧语义的 disabled 基线, 证明分类器接管 (非逐字节一致)。
+ * Validation targets:
+ *   - actually spawn a stub producing a pass verdict → outcome=passed, enabled=true;
+ *   - the result is not byte-equal to a bare run (classification records + rounds exist);
+ *   - against the old disabled baseline, prove the classifier took over.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -31,7 +30,7 @@ import type {
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 
-/* ------------------------------ 测试 fixture (镜像 classifier-loop.test.ts) ------------------------------ */
+/* ------------------------------ test fixtures (mirrors classifier-loop.test.ts) ------------------------------ */
 
 const EMPTY_TRACE: LoopTrace = Object.freeze({
   turns: Object.freeze([]),
@@ -83,13 +82,13 @@ function stubRun(opts: {
   };
 }
 
-/** run() 委托返回形状 (与 verify-loop.ts 的 RunOutcome 同构)。 */
+/** Shape returned by the delegated run() (structurally identical to RunOutcome in verify-loop.ts). */
 interface RunOutcome {
   readonly result: RunResult;
   readonly trace: LoopTrace;
 }
 
-/** 裸 run 基线替身: 复用 stubRun, 只调一次 (SC7 旧语义的对照基准)。 */
+/** Bare-run baseline stub: reuses stubRun and calls exactly once (the contrast baseline for transparent close). */
 function makeBare(
   text: string,
   userText: string
@@ -101,7 +100,7 @@ function makeBare(
   return { runFn: async () => bare, bare };
 }
 
-/** 脚本化 runFn 替身: 逐次返回脚本文本, 记录每次调用的历史形状 (同 T3 测试)。 */
+/** Scripted runFn stub: returns script text call by call and records each call's history shape. */
 function makeRecordingRunFn(script: ReadonlyArray<string>): {
   readonly runFn: VerifyLoopOptions["runFn"];
   readonly calls: () => ReadonlyArray<RecordedCall>;
@@ -131,14 +130,14 @@ function makeRecordingRunFn(script: ReadonlyArray<string>): {
   return { runFn, calls: () => calls };
 }
 
-/** 每次 runFn 调用的历史形状 (与 classifier-loop.test.ts / verify-loop.test.ts 同构)。 */
+/** History shape of each runFn call (same as in classifier-loop.test.ts / verify-loop.test.ts). */
 interface RecordedCall {
   readonly userText: string;
   readonly priorCount: number;
   readonly lastUserText: string | undefined;
 }
 
-/** 判官 JSON 序列化进 status:"ok" envelope 的 result 字段。 */
+/** Serializes the judge JSON into the result field of a status:"ok" envelope. */
 function okEnvelope(result: unknown): ClassifierEnvelope {
   return {
     status: "ok",
@@ -155,7 +154,7 @@ function passEnvelope(reason: string): ClassifierEnvelope {
   });
 }
 
-/** 构造一个调用 spy + 返回脚本的 runClassifier 替身 (同 T3 测试)。 */
+/** runClassifier stub that spies on calls and returns the scripted envelopes. */
 function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   readonly runClassifier: RunClassifierFn;
   readonly calls: () => ReadonlyArray<{
@@ -204,7 +203,7 @@ function defaultOptions(over: {
   };
 }
 
-/* ------------------------------ SC9: SC7 透明关闭的语义反转 ------------------------------ */
+/* ------------------------------ semantic inversion of transparent close ------------------------------ */
 
 describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明关闭 (回归反转)", () => {
   it("未配 command + 真 spawn 产出 pass verdict → outcome=passed (而非 disabled)", async () => {
@@ -230,7 +229,8 @@ describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明�
   it("闭环状态反转 (SC9): 未配 command + 分类器接管 → passed/enabled/rounds/records 全翻转; 终局 result 仍逐字节透传 (既有约束)", async () => {
     const userText = "implement goal";
     const text = "implemented the requested feature";
-    // 对照基准: 未装配分类器 seam (SC7 旧语义) → 裸 run 逐字节透传。
+    // Contrast baseline: no classifier seam wired (old transparent-close) →
+    // bare run passed through byte-identical.
     const { runFn: bareRunFn, bare } = makeBare(text, userText);
     const bareOut = await runVerifyLoop({
       runFn: bareRunFn,
@@ -247,7 +247,7 @@ describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明�
     assert.deepEqual(bareOut.result, bare.result, "裸 run result 逐字节一致");
     assert.equal(bareOut.rounds, 0);
 
-    // 被断言方: 装配分类器 seam → 同一输入下 outcome=passed 而非 disabled。
+    // Asserted side: classifier seam wired → same input yields outcome=passed, not disabled.
     const { runFn } = makeRecordingRunFn([text]);
     const { runClassifier } = makeClassifierSpy([
       passEnvelope("evidence present"),
@@ -273,9 +273,10 @@ describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明�
       "分类器路径的判定轮记录 (证据: verdict=pass)"
     );
     assert.equal(out.records[0]!.verdict, "pass");
-    // pass 终局返回触发轮 run 结果原样 (result/trace 与裸 run 逐字节一致是
-    // 既有约束, 不证明透明关闭) —— 反转证据是闭环状态
-    // (enabled/rounds/records/outcome) 而非 message 历史。
+    // A pass terminal returns the triggering run's result verbatim (result/trace
+    // byte-identical to a bare run is a pre-existing constraint and does not
+    // prove transparent close) — the inversion evidence is the loop state
+    // (enabled/rounds/records/outcome), not the message history.
     assert.deepEqual(
       out.result.messages,
       bareOut.result.messages,
@@ -314,10 +315,11 @@ describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明�
   });
 
   it("零配置视角: config 无 command 字段 (VerifyConfig command 缺失) → 分类器接管, 非逐字节一致", async () => {
-    // 零配置 = 装配层 resolveVerifyConfig(undefined) 已产出 { command: "" };
-    // 再进一层: command 字段完全缺席 (verify-loop 内部 `(config.command ?? "").trim()`
-    // 兜底) 也必须走分类器接管 —— 与空串字面同语义 (spec Objective 零配置闭环
-    // 不再透明关闭)。
+    // Zero config: resolveVerifyConfig(undefined) already yields { command: "" };
+    // one step further — command field entirely absent (verify-loop's internal
+    // `(config.command ?? "").trim()` fallback) — must also take the classifier
+    // path, same semantics as the empty string (the closed loop no longer
+    // closes transparently).
     const userText = "implement goal";
     const text = "implemented the requested feature";
     const { runFn: bareRunFn, bare } = makeBare(text, userText);

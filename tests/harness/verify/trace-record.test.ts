@@ -1,18 +1,21 @@
 /**
- * VerificationRecord 扩展 (B3, #449b evidence-first loop).
+ * VerificationRecord extension for the evidence-first loop.
  *
- * 契约:
- * 1. verify 域 VerificationRecord 增 evidenceVerdict / gamingSignals 两个可选字段 +
- *    reason 字段保留 string 但新增 REASON_UNVERIFIED / REASON_ABORT_TYPED 字面常量 +
- *    VerifyReasonKind 判别类型 (判别用, reason 字段本身仍是 string)。
- * 2. trace 域 VerificationRecord 镜像同三字段; evidenceVerdict 在 trace 侧 = 同名字面
- *    字符串联合 (EVIDENCE_SUFFICIENT / EVIDENCE_CONTRADICTED / EVIDENCE_INSUFFICIENT) —
- *    trace bounded context 不 import verify 域类型 (文件头先例 + plan §Decisions)。
- * 3. 双轨 assert: createJsonlTraceService + createNoopTraceService
- *    - jsonl 行含 evidence_verdict / gaming_signals / reason 键 (snake_case 自动转)
- *    - 可选字段缺省 (无 evidenceVerdict / gamingSignals) → 行不含这两个键 (Postel)
- *    - noop 返回 undefined (零副作用)
- * 4. 真实 FS round-trip: 写 → re-read → 字段保留。
+ * Contract:
+ * 1. verify-domain VerificationRecord gains optional evidenceVerdict /
+ *    gamingSignals; reason stays a string but adds the REASON_UNVERIFIED /
+ *    REASON_ABORT_TYPED literals plus the VerifyReasonKind discriminated type
+ *    (for discrimination only — the field itself remains string).
+ * 2. trace-domain VerificationRecord mirrors the same three fields; on the
+ *    trace side evidenceVerdict is the same-name string union (EVIDENCE_SUFFICIENT
+ *    / EVIDENCE_CONTRADICTED / EVIDENCE_INSUFFICIENT) — the trace bounded
+ *    context must not import verify-domain types.
+ * 3. Double-track assert: createJsonlTraceService + createNoopTraceService
+ *    - jsonl lines carry evidence_verdict / gaming_signals / reason keys (auto snake_case)
+ *    - absent optional fields (no evidenceVerdict / gamingSignals) → those keys
+ *      are not emitted (Postel)
+ *    - noop returns undefined (zero side effects)
+ * 4. Real-FS round-trip: write → re-read → fields preserved.
  */
 
 import { describe, it } from "vitest";
@@ -29,7 +32,7 @@ import {
   REASON_UNVERIFIED,
 } from "../../../src/harness/verify/types.ts";
 
-// 双轨 fixture (verify 域 + trace 域镜像同形态)
+// Dual-track fixtures (verify domain + mirrored trace-domain shape)
 const SAMPLE_VERIFY_FULL: VerifyVerificationRecord = {
   id: "ver-b3-1",
   sessionId: "sess-b3-1",
@@ -90,7 +93,7 @@ function captureWriter(): {
 }
 
 // -----------------------------------------------------------------------------
-// verify 域 — 类型形状
+// verify domain — type shape
 // -----------------------------------------------------------------------------
 describe("verify/types — VerificationRecord 扩展 (B3)", () => {
   it("字面常量 REASON_UNVERIFIED === 'unverified'", () => {
@@ -129,7 +132,7 @@ describe("verify/types — VerificationRecord 扩展 (B3)", () => {
 });
 
 // -----------------------------------------------------------------------------
-// trace 域 — jsonl 落盘 snake_case 转换 + 真实 FS round-trip
+// trace domain — jsonl snake_case conversion + real-FS round-trip
 // -----------------------------------------------------------------------------
 describe("createJsonlTraceService — recordVerification B3 新字段", () => {
   it("evidenceVerdict / gamingSignals / reason 完整 round-trip: snake_case key 落盘 + 值保留", async () => {
@@ -146,10 +149,10 @@ describe("createJsonlTraceService — recordVerification B3 新字段", () => {
     assert.equal(parsed.evidence_verdict, "EVIDENCE_INSUFFICIENT");
     assert.deepEqual(parsed.gaming_signals, ["assertion count dropped"]);
     assert.equal(parsed.reason, "abort");
-    // snake_case 转换不影响其他字段
+    // snake_case conversion must not affect other fields
     assert.equal(parsed.verdict, "true-failure");
     assert.equal(parsed.record_type, "verification");
-    // 反向: camelCase key 不出现 (单 id 载体纪律保持)
+    // Conversely: no camelCase keys appear (single id-carrier discipline holds)
     assert.equal(parsed.evidenceVerdict, undefined);
     assert.equal(parsed.gamingSignals, undefined);
   });
@@ -168,7 +171,7 @@ describe("createJsonlTraceService — recordVerification B3 新字段", () => {
       "evidence_verdict must be absent"
     );
     assert.ok(!("gaming_signals" in parsed), "gaming_signals must be absent");
-    // reason 在 minimal 里也没填, 也不应出现
+    // reason is also unset in the minimal record and must not appear
     assert.ok(!("reason" in parsed), "reason must be absent when undefined");
   });
 
@@ -199,7 +202,7 @@ describe("createJsonlTraceService — recordVerification B3 新字段", () => {
 });
 
 // -----------------------------------------------------------------------------
-// trace 域 — noop 零副作用
+// trace domain — noop, zero side effects
 // -----------------------------------------------------------------------------
 describe("createNoopTraceService — recordVerification B3 新字段", () => {
   it("B3 全字段 record → 返回 undefined (零副作用, 无 IO)", async () => {

@@ -1,14 +1,15 @@
 /**
- * #467 step 2:full-compact — LLM 结构化摘要压缩(替代纯截断)单元测试。
+ * Full-compact — LLM structured-summary compaction (replacing pure truncation),
+ * unit tests.
  *
- * 覆盖 5 个导出函数(backlog 要求)+ 5 类边界(defensive contract):
- *   1. buildCompactPrompt —— 正常路径 + customInstructions 注入(trim 后空/非空)
- *   2. extractCompactSummary —— 有/无 <summary> 标签、analysis 剥离、空输入
- *   3. splitForCompaction —— 正常切分 + tool_use↔tool_result 配对补全 +
- *      无可压缩窗口(空 / ≤ keepRecent / slicedFrom=0)→ undefined
- *   4. buildCompactedMessages —— Summary 前导 + 可选 boundaryText(空串剔除)
- *   5. runFullCompact —— summarized / empty_response / timeout / adapter_failed /
- *      signal_aborted 全 variant 覆盖 + 超时 abort 真实取消
+ * Covers the 5 exported functions + 5 boundary classes (defensive contract):
+ *   1. buildCompactPrompt — happy path + customInstructions injection (blank vs non-blank after trim)
+ *   2. extractCompactSummary — with/without <summary> tags, analysis stripping, empty input
+ *   3. splitForCompaction — normal split + tool_use<->tool_result pair repair +
+ *      no compactable window (empty / <= keepRecent / slicedFrom=0) -> undefined
+ *   4. buildCompactedMessages — summary prefix + optional boundaryText (empty string dropped)
+ *   5. runFullCompact — summarized / empty_response / timeout / adapter_failed /
+ *      signal_aborted full variant coverage + real cancellation on timeout abort
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -61,7 +62,7 @@ function assistantTurn(
   };
 }
 
-/** 简易 CompactAdapter:记录调用次数,按脚本返回对应结果。 */
+/** Simple CompactAdapter: counts calls, returns scripted results in order. */
 function makeAdapter(
   script: Array<
     | AssistantTurnResult
@@ -114,13 +115,13 @@ describe("buildCompactPrompt", () => {
 
   it("安全保留指令固化在模板内(两个 security 追加)", () => {
     const prompt = buildCompactPrompt();
-    // analysis 段 security 指令
+    // security instruction in the analysis section
     assert.ok(
       prompt.includes(
         "Note any security-relevant instructions or constraints the user stated"
       )
     );
-    // section 6 security 指令
+    // security instruction in section 6
     assert.ok(
       prompt.includes("Preserve any security-relevant instructions verbatim")
     );
@@ -153,11 +154,12 @@ describe("extractCompactSummary", () => {
     assert.equal(out, "a\n\nb");
   });
 
-  // #467 follow-up 回归:i467 real-LLM smoke 抓到 MiniMax-M3 真实模型把
-  // `<analysis>` 文本写在 `<summary>` 块内(或未闭合)→ 旧实现只 pre-strip
-  // 一次,scratchpad 文本泄漏进权威摘要。修复后对 base 再 strip 一次(含
-  // unclosed tail),无论 model 把 analysis 写在 summary 块外还是块内都能
-  // 干净剥离。
+  // Regression found by a real-LLM smoke run: a model wrote `<analysis>` text
+  // inside the `<summary>` block (or left it unclosed), and the old
+  // implementation stripped only once up front, leaking scratchpad text into
+  // the authoritative summary. The fix strips the base again (including an
+  // unclosed tail), so analysis is cleanly removed whether the model writes it
+  // outside or inside the summary block.
   it("<analysis> 写在 <summary> 块内也被剥离(真实模型 leak 修复)", () => {
     const raw =
       "<summary>\n" +
@@ -209,13 +211,14 @@ describe("splitForCompaction", () => {
   });
 
   it("tool_use 跨边界 → 向前补全配对,配对完整性守门(SC11)", () => {
-    // 构造:丢弃区含调用,保留区首条是其 tool_result → 必须把 tool_use 并入 kept。
+    // Case: the dropped region contains the call while kept's first message is
+    // its tool_result -> the tool_use must be pulled into kept.
     const t1 = "call-1";
     const messages = [
       text("a"),
       text("b"),
       text("c"),
-      toolUse(t1), // 这个 tool_use 落在丢弃区(slicedFrom=6 之前)
+      toolUse(t1), // this tool_use falls into the dropped region (before slicedFrom)
       text("d"),
       text("e"),
       toolResult(t1),
@@ -223,8 +226,9 @@ describe("splitForCompaction", () => {
       text("g"),
       text("h"),
     ];
-    // length 10 > keepRecent 6 → 默认 earliestIndex = 4(idx4 = text d)。
-    // tool_result(id=t1) 在 idx6 保留区内 → 回扫找出 tool_use(idx3) 并入 kept。
+    // length 10 > keepRecent 6 -> default earliestIndex = 4 (idx4 = text d).
+    // tool_result(id=t1) sits at idx6 inside kept -> back-scan finds its
+    // tool_use (idx3) and merges it into kept.
     const split = splitForCompaction(messages);
     assert.ok(split !== undefined);
     assert.ok(
@@ -235,7 +239,7 @@ describe("splitForCompaction", () => {
       ),
       "tool_use 必须随其 tool_result 一起保留(SC11 配对)"
     );
-    // kept 内所有 tool_use 都有配对 tool_result(守门不变式)。
+    // Every tool_use in kept has its paired tool_result (pairing-guard invariant).
     const keptUseIds = new Set<string>();
     const keptResultIds = new Set<string>();
     for (const m of split.kept) {
@@ -350,11 +354,12 @@ describe("runFullCompact", () => {
   });
 
   it("adapter_failed:失败分支不泄漏注入的 timeout timer(review-fix Medium)", async () => {
-    // 修复前:catch 分支设 adapterSettled=true 但不 clearTimeout,外部 finally
-    // 因 !adapterSettled 为 false 而跳过清理 → 注入的 timeout timer 挂在
-    // event loop。修复后:finally 块在 IIFE 内统一清 timer,失败路径不残留。
-    // 注:timeoutMs 缺席时本来就不装 timer;此测试显式注入 timeoutMs=5000
-    // 触发 timer,验证失败分支仍正确清理。
+    // Before the fix: the catch branch set adapterSettled=true but never
+    // clearTimeout, and the outer finally skipped cleanup because !adapterSettled
+    // was false -> the injected timeout timer stayed on the event loop. After:
+    // a single finally inside the IIFE clears the timer, so failure paths leak nothing.
+    // Note: with timeoutMs absent no timer is armed at all; this test explicitly
+    // injects timeoutMs=5000 to force a timer and verify the failure branch still cleans up.
     const throwAdapter = makeAdapter([{ throw: new Error("boom") }]);
     const timersBefore = process
       .getActiveResourcesInfo()
@@ -365,7 +370,7 @@ describe("runFullCompact", () => {
       timeoutMs: 5000,
     });
     assert.equal(out.kind, "adapter_failed");
-    // 让 microtask 队列清空,确保任何 pending setTimeout 都已登记。
+    // Drain the microtask queue so any pending setTimeout has registered.
     await new Promise((r) => setTimeout(r, 0));
     const timersAfter = process
       .getActiveResourcesInfo()
@@ -397,15 +402,16 @@ describe("runFullCompact", () => {
     });
     assert.equal(out.kind, "signal_aborted");
     assert.equal(called, false, "已 abort 时不得发起模型调用");
-    // 入口已 abort:不发起模型调用 = 不 emit compaction_started。
+    // Already aborted at entry: no model call is made = no compaction_started emitted.
     assert.deepEqual(events, []);
   });
 
   it("无默认 client-side 超时:timeoutMs 缺席 → 无 timer,adapter settle 即出 outcome(Claude Code 语义)", async () => {
-    // 参考 Claude Code:压缩等模型自然完成,不设紧凑 timeout;上限 = SDK
-    // 默认 HTTP timeout + 用户 signal。timeoutMs 缺席时不得装 timer ——
-    // 验证:慢 adapter(80ms,超旧 25s 语义下会触发 timeout)返回 summarized,
-    // 且全程无 Timeout 句柄被注册(getActiveResourcesInfo 增量 = 0)。
+    // Claude Code semantics: compaction waits for the model to finish naturally
+    // with no tight timeout; the ceiling is the SDK's default HTTP timeout plus
+    // the user signal. With timeoutMs absent no timer may be armed — verified by
+    // a slow adapter (80ms; the old 25s semantics would have fired a timeout)
+    // returning summarized while getActiveResourcesInfo shows zero new Timeout handles.
     const timersBefore = process
       .getActiveResourcesInfo()
       .filter((r) => r === "Timeout").length;
@@ -443,9 +449,10 @@ describe("runFullCompact", () => {
     assert.ok(aborted, "注入 timeoutMs 必须 abort 真实 adapter 调用");
   });
 
-  // #467 T4:wait 逻辑参考 Claude Code — 压缩生命周期事件透传。
-  // 宿主层据此渲染 "Compacting…" 指示器 + 展示摘要生成进度
-  // (adapter 流式臂的 text_delta 经 request.onStream 直透)。
+  // Wait logic follows Claude Code: compaction lifecycle events pass through.
+  // The host renders a "Compacting…" indicator and shows summary-generation
+  // progress from them (the adapter's streaming text_delta arm is forwarded
+  // via request.onStream).
   describe("wait logic 事件生命周期 (Claude Code UX)", () => {
     it("summarized:emits compaction_started + compaction_completed, observer 错误被吞咽", async () => {
       const events: { type: string; payload?: unknown }[] = [];
@@ -469,12 +476,12 @@ describe("runFullCompact", () => {
         dropped,
         onStream: (e) => {
           events.push({ type: e.type, payload: e });
-          throwing(); // 必须不反流回压缩逻辑
+          throwing(); // must never flow back into compaction logic
         },
       });
       assert.equal(out.kind, "summarized");
-      // compaction_started → compaction_completed 两事件;completed 携带
-      // summaryLen + durationMs;started 携带 droppedCount。
+      // Two events: compaction_started -> compaction_completed; completed
+      // carries summaryLen + durationMs; started carries droppedCount.
       const types = events.map((e) => e.type);
       assert.deepEqual(types, ["compaction_started", "compaction_completed"]);
       const started = events[0]?.payload as {
@@ -519,19 +526,22 @@ describe("runFullCompact", () => {
       assert.equal(events[1]?.reason, "adapter_failed");
     });
 
-    // #550 替换原「onStream → adapter.step request.onStream 直透」用例:
-    // 直透会让压缩摘要 text_delta 泄漏进宿主主回答草稿(渲染污染 latent
-    // bug,issue #550)。新契约 = 包装透传:text_delta 重映射为
-    // compaction_text_delta,thinking_delta 吞咽,其余事件原样透传。
-    // 覆盖不变或更强:旧用例只 assert 引用相等,新用例 assert 完整路由语义。
+    // Replaces the old "onStream -> adapter.step request.onStream passthrough"
+    // case: plain passthrough leaked compaction-summary text_delta into the
+    // host's main answer draft (rendering pollution). New contract = wrapped
+    // passthrough: text_delta is remapped to compaction_text_delta,
+    // thinking_delta is swallowed, all other events pass through unchanged.
+    // Coverage is equal or stronger: the old case only asserted reference
+    // equality; this one asserts the full routing semantics.
     it("onStream → adapter.step request.onStream 包装(text_delta → compaction_text_delta;thinking 吞咽)", async () => {
       const observed: Array<{ type: string; text?: string }> = [];
       const adapter: CompactAdapter = {
         encodeUserText: (userText: string): AnthropicNativeMessage =>
           text(userText),
         step: async (_state, request): Promise<AssistantTurnResult> => {
-          // 模拟 adapter 在压缩上下文内的流式输出:摘要 text_delta +
-          // thinking_delta(模型 scratchpad)+ 其他事件。
+          // Simulate the adapter's streaming output inside the compaction
+          // context: summary text_deltas + thinking_delta (model scratchpad) +
+          // other events.
           request.onStream?.({ type: "text_delta", text: "摘要第一段" });
           request.onStream?.({ type: "thinking_delta", text: "内部思考" });
           request.onStream?.({ type: "text_delta", text: "摘要第二段" });
@@ -551,8 +561,8 @@ describe("runFullCompact", () => {
           }
         },
       });
-      // 摘要 text_delta 全部重映射为 compaction_text_delta —— 宿主据此路由
-      // 到独立压缩草稿,不进主回答区。
+      // All summary text_deltas are remapped to compaction_text_delta — the
+      // host routes these to a separate compaction draft, never the main answer.
       assert.deepEqual(
         observed.filter((e) => e.type.includes("text")),
         [
@@ -560,7 +570,7 @@ describe("runFullCompact", () => {
           { type: "compaction_text_delta", text: "摘要第二段" },
         ]
       );
-      // thinking_delta 吞咽(scratchpad 不暴露)+ 无裸 text_delta 泄漏。
+      // thinking_delta swallowed (scratchpad not exposed) + no bare text_delta leaks.
       assert.ok(
         !observed.some((e) => e.type === "thinking_delta"),
         "压缩 thinking_delta 不得透到宿主"
@@ -590,16 +600,17 @@ describe("runFullCompact", () => {
     });
 
     it("中途 abort:opts.signal 中途 abort → signal_aborted,emit compaction_started 但不 emit completed/failed", async () => {
-      // Claude Code 体感:压缩中 Esc/Ctrl+C = 立刻退出 + 会话原样。
-      // runFullCompact 必须把中途取消映射为 signal_aborted(让 caller 决定
-      // 不做 fallback 截断),且不发 compaction_completed / compaction_failed
-      // —— completed 让宿主误以为成功,failed 让宿主误以为异常停。
+      // Claude Code feel: Esc/Ctrl+C mid-compaction = immediate exit, session kept as-is.
+      // runFullCompact must map mid-flight cancellation to signal_aborted (so the
+      // caller skips fallback truncation), and must not emit compaction_completed /
+      // compaction_failed — completed would mislead the host into thinking success,
+      // failed into thinking an abnormal stop.
       const events: string[] = [];
       const adapter: CompactAdapter = {
         encodeUserText: (userText: string): AnthropicNativeMessage =>
           text(userText),
         step: async (_state, _request, signal) => {
-          // 挂起到 abort。
+          // Hang until abort.
           await new Promise<never>((_, reject) => {
             signal?.addEventListener("abort", () => {
               reject(new DOMException("aborted", "AbortError"));
@@ -609,10 +620,11 @@ describe("runFullCompact", () => {
         },
       };
       const controller = new AbortController();
-      // 关键时序:不先 await;先发起 runFullCompact(同步 emit compaction_started
-      // 并把 adapter.step 挂起到 abort 监听),然后 controller.abort() 触发
-      // composite signal → adapter 抛 AbortError → race resolved with
-      // adapter_failed → opts.signal?.aborted 检查覆盖为 signal_aborted。
+      // Key sequencing: don't await first; start runFullCompact (which
+      // synchronously emits compaction_started and parks adapter.step on the
+      // abort listener), then controller.abort() fires the composite signal ->
+      // adapter throws AbortError -> race resolves with adapter_failed -> the
+      // opts.signal?.aborted check overrides it to signal_aborted.
       const outPromise = runFullCompact({
         adapter,
         dropped,
@@ -620,7 +632,7 @@ describe("runFullCompact", () => {
         timeoutMs: 5000,
         onStream: (e) => events.push(e.type),
       });
-      // 让 microtask 跑一拍,确保 adapter.step 已注册 abort listener。
+      // Let one microtask turn run so adapter.step has registered its abort listener.
       await new Promise((r) => setTimeout(r, 0));
       controller.abort();
       const out = await outPromise;
@@ -629,8 +641,9 @@ describe("runFullCompact", () => {
         "signal_aborted",
         "mid-flight user abort 必须映射为 signal_aborted(caller 走 keep-state 路径)"
       );
-      // 事件序列:started(同步段)→ cancelled 终态收尾(宿主据此清除指示器);
-      // completed / failed 不 emit——取消非失败(spec-reviewer 契约修复)。
+      // Event sequence: started (sync segment) -> cancelled terminal (host
+      // clears its indicator on it); completed / failed are not emitted —
+      // cancellation is not failure.
       assert.deepEqual(events, ["compaction_started", "compaction_cancelled"]);
     });
 
@@ -647,7 +660,7 @@ describe("runFullCompact", () => {
           usage,
         }),
       ]);
-      // 不传 onStream:必须不抛,outcome 仍是 summarized。
+      // Without onStream: must not throw, outcome stays summarized.
       const out = await runFullCompact({ adapter, dropped });
       assert.equal(out.kind, "summarized");
       if (out.kind === "summarized") {

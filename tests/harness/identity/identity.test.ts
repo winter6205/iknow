@@ -1,6 +1,6 @@
 /**
- * #196 IKNOW T6:identity / soul 段拼装 + 认知 vs 人格边界 (SC 11-14) +
- * "identity before soul" 顺序 (SC 29) + 文件级 drift guard。
+ * identity / soul segment assembly + the cognition-vs-personality boundary +
+ * the "identity before soul" order + a file-level drift guard.
  */
 import { describe, it, expect } from "vitest";
 import { IKNOW_IDENTITY_DEFAULT } from "../../../src/harness/identity/identity.ts";
@@ -9,19 +9,19 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 describe("identity vs soul boundary (SSOT)", () => {
-  // SC 11: identity 段不含 core truths (认知层 Name/Kind/Signature only)
+  // identity carries no core truths (cognition layer: Name/Kind/Signature only)
   it("identity does NOT contain 'core truths' (cognition layer is Name/Kind/Signature only)", () => {
     expect(IKNOW_IDENTITY_DEFAULT.toLowerCase()).not.toContain("core truths");
   });
-  // SC 12: soul 段不含 Name 字段
+  // soul carries no Name field
   it("soul does NOT contain 'name:' (personality layer is behavior only)", () => {
     expect(IKNOW_SOUL_DEFAULT.toLowerCase()).not.toMatch(/name\s*:/);
   });
-  // SC 13: identity 不含 vibe
+  // identity carries no vibe
   it("identity does NOT contain 'vibe'", () => {
     expect(IKNOW_IDENTITY_DEFAULT.toLowerCase()).not.toContain("vibe");
   });
-  // SC 14: soul 不含 signature
+  // soul carries no signature
   it("soul does NOT contain 'signature'", () => {
     expect(IKNOW_SOUL_DEFAULT.toLowerCase()).not.toContain("signature");
   });
@@ -41,23 +41,26 @@ describe("identity and soul const string shape", () => {
   });
 });
 
-/** 提取源文件中 const 模板字符串的**正文**（先剥离文件顶 JSDoc 注释块，
- *  再匹配第一个反引号模板——避免把顶注释里的 `specs/...` 引用当成模板内容）。
- *  注释可合法提到边界词（如 soul.ts 顶明示"不含 Signature"），不算 drift。 */
+/** Extract only the **body** of the const template string in a source file:
+ *  first strip the file-top JSDoc block, then match the first backtick
+ *  template — so `specs/...` references inside top comments are not mistaken
+ *  for template content. Comments may legitimately mention boundary words
+ *  (e.g. soul.ts's header states it excludes Signature); that is not drift. */
 function constTemplateBody(file: string): string {
   const raw = readFileSync(
     join(process.cwd(), "src/harness/identity", file),
     "utf8"
   );
-  // 剥掉文件顶 JSDoc /** ... */（如果有）
+  // strip the file-top JSDoc /** ... */ block (if present)
   const stripped = raw.replace(/^\s*\/\*\*[\s\S]*?\*\/\s*/, "");
   const match = stripped.match(/`([\s\S]*?)`\.trim\(\)/);
   return (match?.[1] ?? "").toLowerCase();
 }
 
 describe("file-level boundary check (drift guard)", () => {
-  // 只检查 const 模板正文（SSOT 实际内容），不读顶注释——注释如 soul.ts 顶
-  // 明示"不含 Name / Kind / Signature"以说明边界，是合法文档，不算 drift。
+  // Check only the const template body (the SSOT content), not top comments —
+  // soul.ts's header states it excludes Name / Kind / Signature to document
+  // the boundary; that is legal documentation, not drift.
   it("identity.ts const body does NOT contain 'core truths' (drift guard)", () => {
     expect(constTemplateBody("identity.ts")).not.toContain("core truths");
   });
@@ -75,7 +78,7 @@ describe("file-level boundary check (drift guard)", () => {
  * Soul Continuity must NOT direct the agent to read/update `~/.iknow/user.md`
  * via tool calls — the workspace root isolates read_file/glob, and bash
  * hard-wall rejects compound commands, so any such instruction triggers a
- * cascade of [失败] rows and the agent never answers the user. Continuity
+ * cascade of `[失败]` ("failed") rows and the agent never answers the user. Continuity
  * must point at the host-managed profile instead.
  */
 describe("soul Continuity: does not direct agent to read/update ~/.iknow", () => {
@@ -85,8 +88,8 @@ describe("soul Continuity: does not direct agent to read/update ~/.iknow", () =>
   it("does not say 'update' as an agent action against user.md", () => {
     expect(constTemplateBody("soul.ts")).not.toMatch(/update\s+it\s+when/i);
   });
-  // rev 2026-08-11: /profile done 宿主斜杠命令已删（chat-session / app.tsx / hub），
-  // soul 若再引用会让 agent 幻想它存在。
+  // The "/profile done" host slash command was removed (chat-session /
+  // app.tsx / hub); a soul reference would make the agent hallucinate it.
   it("does not reference the removed '/profile done' host slash command", () => {
     expect(constTemplateBody("soul.ts")).not.toContain("/profile done");
   });

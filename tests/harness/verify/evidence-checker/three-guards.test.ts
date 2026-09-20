@@ -10,9 +10,10 @@ import {
 } from "./_fixtures.js";
 
 /**
- * T3 三防 (spec SC5): 弱绿四形态 / 吞失败四 pattern / 时效 + doc-only 豁免。
- * 弱绿与吞失败 → 证据作废 → INSUFFICIENT; 时效窗口内代码编辑 → stale →
- * INSUFFICIENT; doc-only 编辑豁免 → 仍 SUFFICIENT。
+ * Three guards: weak-green shapes / failure-swallowing patterns / staleness
+ * + doc-only exemption. Weak green and swallowed failures void the evidence →
+ * INSUFFICIENT; a code edit inside the post-green window → stale →
+ * INSUFFICIENT; doc-only edits are exempt → still SUFFICIENT.
  */
 
 describe("弱绿四形态 → 非 SUFFICIENT (A6)", () => {

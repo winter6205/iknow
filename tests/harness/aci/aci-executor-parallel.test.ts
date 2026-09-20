@@ -1,22 +1,22 @@
 /**
- * ACI executor 装饰层 — 并行调度（spec #653 T2 / P 包）。
+ * ACI executor decorator layer — parallel scheduling.
  *
- * 覆盖 SC AC46/47/48/49：
- *  - AC46: 两个 `isConcurrencySafe: true` stub 墙钟重叠(concurrent)。
- *  - AC47: `isConcurrencySafe: false` stub 与另一调用执行区间不相交。
- *  - AC48: `executeAll([])` → `[]`。
- *  - AC49: 第一个 handler throw → 第一个 execution_failed,第二个仍有结果。
+ * Authenticates:
+ *  - two `isConcurrencySafe: true` stubs overlap in wall-clock time (concurrent).
+ *  - an `isConcurrencySafe: false` stub never intersects another call's interval.
+ *  - `executeAll([])` returns `[]`.
+ *  - a throwing handler fails only its own call; the next call still gets a result.
  *
- * 另覆盖：
- *  - overflow: 8 个安全 stub 仍按序全部 settle。
- *  - safe + unsafe 交错:unsafe 单独,相邻 safe 重叠。
- *  - permission deny:被拒调用不进入并行集;并行的两个 safe 仍重叠。
+ * Also covers:
+ *  - overflow: 8 safe stubs all settle in input order.
+ *  - safe + unsafe interleaving: unsafe runs alone, adjacent safe calls overlap.
+ *  - permission deny: denied calls never enter the parallel set; safe calls still overlap.
  *
- * 行为契约(per-call 不变):
- *  - 每个 call 仍走 preToolUse → checkPermission → inner → postToolUse,
- *    只是同一 wave 中安全的 call 启动时间可重叠。
- *  - 结果顺序 = 输入 calls 顺序。
- *  - catalog miss 的 call 单独处理(保守:不当 safe,不影响既有行为)。
+ * Per-call contract (unchanged by parallelism):
+ *  - every call still runs preToolUse → checkPermission → inner → postToolUse;
+ *    only start times of safe calls in the same wave may overlap.
+ *  - result order = input call order.
+ *  - catalog-miss calls are treated conservatively (not safe; existing behavior intact).
  */
 
 import { describe, it } from "vitest";
@@ -79,20 +79,20 @@ function makeCatalog(tools: AciToolDef[]): AciCatalog {
 }
 
 /**
- * Recording executor:每个 call 记录 start/end;handler 在返回前可注入 sleep
- * 以制造并发窗口供重叠断言用。
+ * Recording executor: logs start/end per call; an injectable pre-return sleep
+ * widens execution windows so overlap assertions can actually observe the concurrency.
  */
 function makeRecordingExecutor(opts: {
-  /** per-call 异步 sleep ms 映射;未列则 0。 */
+  /** per-call async sleep in ms; 0 when absent. */
   readonly sleepMsById?: Record<string, number>;
-  /** per-call handler 抛出;未列则正常返回。 */
+  /** per-call handler rejection; normal return when absent. */
   readonly throwById?: Record<string, Error>;
 }): {
   executor: Executor;
   intervals: IntervalRecord[];
   /**
-   * 计算「在调用 recordStart(record) 时,有多少其它 call 也在 in-flight」
-   * —— 第二个 snapshot 用于排查重叠是否真实发生(而非顺序误判)。
+   * At each call's start snapshot, how many other calls were also in-flight —
+   * a second signal that overlap truly happened (not a sequencing misread).
    */
   inFlightById: Map<string, number>;
 } {
@@ -102,7 +102,7 @@ function makeRecordingExecutor(opts: {
     executeAll: async (
       batch: ReadonlyArray<ToolCall>
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-      // 记录每个 call 的并发计数(在它 start 时)
+      // count concurrent in-flight calls at each call's start
       for (const c of batch) {
         const cur = inFlightById.get(c.id) ?? 0;
         inFlightById.set(c.id, cur + 1);
@@ -127,8 +127,8 @@ function makeRecordingExecutor(opts: {
             payload: [{ type: "text" as const, text: `done:${c.name}` }],
           });
         } catch (err) {
-          // executor.runOne 内部把 throw 归一为 execution_failed,
-          // 但这里我们直接构造失败结果以匹配 aci-executor 的 catch 行为。
+          // runOne normally normalizes a throw into execution_failed; build the
+          // failure result directly here to match aci-executor's catch behavior.
           const message =
             err instanceof Error ? err.message : "execution_failed";
           results.push({
@@ -151,7 +151,7 @@ function makeRecordingExecutor(opts: {
   return { executor, intervals, inFlightById };
 }
 
-/** 「墙钟重叠」:interval A 起点早于 interval B 终点且反之亦然。 */
+/** Wall-clock overlap: each interval starts before the other one ends. */
 function overlaps(a: IntervalRecord, b: IntervalRecord): boolean {
   if (a.id === b.id) return false;
   return a.start < b.end && b.start < a.end;
@@ -174,7 +174,7 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
   });
 
   it("AC46 concurrent: 两个 isConcurrencySafe:true stub 墙钟重叠", async () => {
-    // 每个 stub sleep 80ms;若串行则总耗时 ≥160ms,重叠则 ≤ ~120ms。
+    // each stub sleeps 80ms; serial would take ≥160ms, overlap ≤ ~120ms.
     const { executor, intervals } = makeRecordingExecutor({
       sleepMsById: { a: 80, b: 80 },
     });
@@ -202,7 +202,7 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
       overlaps(intervalA, intervalB),
       `expected intervals to overlap; got A=${JSON.stringify(intervalA)} B=${JSON.stringify(intervalB)}`
     );
-    // 重叠时总时长应明显小于串行 160ms;留 30ms 余量应对调度抖动。
+    // with overlap the total is well under the 160ms serial bound; 30ms slack absorbs scheduling jitter.
     assert.ok(
       elapsed < 140,
       `expected overlap (≤140ms), got ${elapsed}ms (serial ≥160ms)`
@@ -210,7 +210,7 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
   });
 
   it("AC47 negative: isConcurrencySafe:false 与另一调用不相交", async () => {
-    // safe stub sleep 50ms;unsafe 单独跑 30ms —— 串行总耗时 ≥80ms,且区间不相交。
+    // safe stub sleeps 50ms; unsafe runs alone for 30ms — serial total ≥80ms, intervals disjoint.
     const { executor, intervals } = makeRecordingExecutor({
       sleepMsById: { u: 30, s: 50 },
     });
@@ -255,7 +255,7 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
   });
 
   it("overflow: 8 个 safe stub 按序全部 settle,不 hang", async () => {
-    // 每个 safe sleep 20ms;若全串行 ≥160ms,全并行 ≤ ~60ms。
+    // each safe sleeps 20ms; fully serial ≥160ms, fully parallel ≤ ~60ms.
     const ids = Array.from({ length: 8 }, (_, i) => `s${i}`);
     const sleepMap: Record<string, number> = {};
     for (const id of ids) sleepMap[id] = 20;
@@ -283,13 +283,13 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     );
     assert.ok(results.every((r) => r.kind === "ok"));
 
-    // 重叠总时长上限:8 × 20ms 串行 = 160ms;若明显小于此值 ⇒ 真并行。
+    // serial bound is 8 × 20ms = 160ms; well under it ⇒ real parallelism.
     assert.ok(
       elapsed < 140,
       `expected ≤140ms with overlap; got ${elapsed}ms (serial ≥160ms)`
     );
 
-    // pairwise:任意两条的 interval 都应重叠(同 wave 并行)。
+    // pairwise: every pair of intervals overlaps (same wave).
     for (let i = 0; i < ids.length; i++) {
       for (let j = i + 1; j < ids.length; j++) {
         const a = intervals.find((iv) => iv.id === ids[i]!)!;
@@ -323,16 +323,16 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     assert.equal(results[0]!.kind, "execution_failed");
     assert.equal(results[1]!.toolUseId, "good");
     assert.equal(results[1]!.kind, "ok");
-    // 隔离:good 的区间独立 settle,不被 bad 的 throw 干扰。
+    // isolation: good settles independently of bad's throw.
     const intervalGood = intervals.find((i) => i.id === "good")!;
     assert.ok(intervalGood.end > intervalGood.start);
   });
 
   it("safe + unsafe 交错:unsafe 单独,相邻 safe 重叠,顺序保持", async () => {
     // calls: [safe_a, unsafe, safe_b, safe_c]
-    // 期望:safe_a 单独(wave 1,只有一个 safe);unsafe 单独(wave 2);
-    //       safe_b + safe_c 同 wave 重叠(wave 3)。
-    // 注入 askUser:true 让 bash 走 allow 分支(默认 ask → 默认 approve)。
+    // expected: safe_a alone (wave 1, single safe), unsafe alone (wave 2),
+    //           safe_b + safe_c overlapping in wave 3.
+    // askUser:true routes bash through the allow branch (default ask → approve).
     const { executor, intervals } = makeRecordingExecutor({
       sleepMsById: {
         safe_a: 20,
@@ -362,28 +362,28 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     );
     assert.ok(results.every((r) => r.kind === "ok"));
     const getI = (id: string) => intervals.find((i) => i.id === id)!;
-    // unsafe 与任何其它 call 不相交
+    // unsafe must not intersect any other call
     for (const id of ["safe_a", "safe_b", "safe_c"]) {
       assert.ok(
         !overlaps(getI("unsafe"), getI(id)),
         `unsafe must not overlap with ${id}`
       );
     }
-    // safe_b 与 safe_c 必须重叠(同 wave)
+    // safe_b and safe_c must overlap (same wave)
     assert.ok(
       overlaps(getI("safe_b"), getI("safe_c")),
       `safe_b and safe_c must overlap`
     );
-    // 顺序约束:unsafe 必在 safe_a 之后、safe_b 之前
+    // ordering: unsafe strictly after safe_a and before safe_b
     assert.ok(getI("safe_a").end <= getI("unsafe").start);
     assert.ok(getI("unsafe").end <= getI("safe_b").start);
   });
 
   it("permission deny: 被拒调用不进入并行集,并行的两个 safe 仍重叠", async () => {
-    // 用 policy.byName 让 bash deny(read-only 默认 allow,被 deny 覆盖)。
-    // 三调用:[grep_safe_1, bash_denied, grep_safe_2]。
-    // 期望:bash_denied 立即归一为 execution_failed,不进入并行集;
-    //       grep_safe_1 与 grep_safe_2 同 wave 重叠。
+    // policy.byName denies bash (read-only defaults to allow; deny overrides).
+    // calls: [grep_safe_1, bash_denied, grep_safe_2]
+    // expected: bash_denied normalizes to execution_failed immediately and never
+    //           enters the parallel set; the two greps overlap in one wave.
     const { executor, intervals } = makeRecordingExecutor({
       sleepMsById: { grep_safe_1: 40, grep_safe_2: 40 },
     });
@@ -418,14 +418,14 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
       )
     );
 
-    // denied 调用根本没进入 inner(spy 也不应记录)
+    // the denied call never reaches inner (the spy records no interval for it)
     const intervalDenied = intervals.find((i) => i.id === "bash_denied");
     assert.equal(
       intervalDenied,
       undefined,
       "denied call must NOT reach the inner executor"
     );
-    // 两个 safe 必须重叠
+    // the two safe calls must overlap
     const intervalG1 = intervals.find((i) => i.id === "grep_safe_1")!;
     const intervalG2 = intervals.find((i) => i.id === "grep_safe_2")!;
     assert.ok(
@@ -461,13 +461,14 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
   });
 
   it("catalog miss(unknown tool): 当作 unsafe(单元素 wave),不参与并行", async () => {
-    // 未知工具不应被默认放行到并行集(保守契约):
-    // 既保持既有「catalog 查不到 → 委托 inner」语义,也确保不破坏顺序。
+    // Unknown tools must not be defaulted into the parallel set (conservative
+    // contract): keep the existing "catalog miss → delegate to inner" semantics
+    // without breaking result order.
     const { executor, intervals } = makeRecordingExecutor({
       sleepMsById: { safe_known: 30, unknown: 30, safe_known_2: 30 },
     });
     const tools = [makeSafeTool("safe_known")];
-    const catalog = makeCatalog(tools); // 没有 unknown
+    const catalog = makeCatalog(tools); // "unknown" is not registered
     const aciExec = createAciExecutor({ inner: executor, catalog });
 
     const results = await aciExec.executeAll([
@@ -477,11 +478,11 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     ]);
 
     assert.equal(results.length, 3);
-    // unknown 走 inner(catalog miss path),结果来自 spy。
+    // unknown goes through inner (catalog miss path); the result comes from the spy.
     assert.ok(results.every((r) => r.kind === "ok"));
-    // 既定契约:catalog miss 时把 call 视作 unsafe(单独 wave),但仍顺序执行。
-    // 显式断言:三个 interval 之间 pairwise 可能重叠或不重叠
-    // —— 关键是结果顺序稳定。
+    // Contract: on catalog miss the call is treated as unsafe (solo wave) but
+    // still executed in order; the key invariant is stable result ordering,
+    // so interval overlap between pairs is not asserted either way.
     assert.deepEqual(
       results.map((r) => r.toolUseId),
       ["safe_known", "unknown", "safe_known_2"]
@@ -489,7 +490,7 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     const safe1 = intervals.find((i) => i.id === "safe_known")!;
     const unk = intervals.find((i) => i.id === "unknown")!;
     const safe2 = intervals.find((i) => i.id === "safe_known_2")!;
-    // unknown 不与 safe_known / safe_known_2 重叠(单独 wave)
+    // unknown overlaps neither safe call (solo wave)
     assert.ok(
       !overlaps(unk, safe1),
       "unknown must not overlap with safe_known"

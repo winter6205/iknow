@@ -1,24 +1,26 @@
 /**
- * web_fetch 工具单元测试。
+ * web_fetch unit tests.
  *
- * 行为真值：web_fetch_tool.py 形态（SSRF 层复用 network-guard）。
+ * Behavioral ground truth: the web_fetch_tool.py shape (the SSRF layer reuses
+ * network-guard).
  *
- * 覆盖契约（ADR 测试规范 6 项 + ACR 5 类边界）：
- *   - 工厂签名 createWebFetchTool(deps?) → AciToolDef，name === "web_fetch"
- *   - inputSchema: url 必填 + max_chars?(默认 8000, ge 500, le 16000) +
- *     start_chars?(默认 0, ge 0) + additionalProperties:false
- *   - aci 元数据: category=read-only, isConcurrencySafe=true,
+ * Contract coverage:
+ *   - factory signature createWebFetchTool(deps?) → AciToolDef, name === "web_fetch"
+ *   - inputSchema: url required + max_chars?(default 8000, ge 500, le 16000) +
+ *     start_chars?(default 0, ge 0) + additionalProperties:false
+ *   - aci metadata: category=read-only, isConcurrencySafe=true,
  *     interruptBehavior=cancel, timeoutTier=default
- *   - 成功路径：URL/Status/Content-Type 头 + UNTRUSTED_BANNER 防注入横幅 + body
- *   - html→text：跳过 script/style、实体解码、折叠空白
- *   - 非 html content-type → body 原样返回（不解 HTML）
- *   - max_chars 截断 → "\n...[truncated]" 后缀（合法范围 500..16000）
- *   - Window 行在横幅之前；returned 等于横幅后、截断标记前的正文字符数
- *   - 空输入 / 非法 URL → ToolExecutionError
- *   - 非 2xx → ToolExecutionError
- *   - 并发扇出（Promise.all + 独立 stub）
+ *   - happy path: URL/Status/Content-Type header + UNTRUSTED_BANNER anti-injection banner + body
+ *   - html→text: skip script/style, decode entities, fold whitespace
+ *   - non-html content-type → body returned verbatim (no HTML parsing)
+ *   - max_chars truncation → "\n...[truncated]" suffix (legal range 500..16000)
+ *   - Window line precedes the banner; returned equals the body character count
+ *     after the banner and before the truncation marker
+ *   - empty input / invalid URL → ToolExecutionError
+ *   - non-2xx → ToolExecutionError
+ *   - concurrency fan-out (Promise.all + independent stubs)
  *
- * 全部离线：deps.fetch / deps.lookup 注入 stub。
+ * Fully offline: deps.fetch / deps.lookup are injected stubs.
  */
 
 import assert from "node:assert/strict";
@@ -212,7 +214,7 @@ describe("createWebFetchTool — truncation and max_chars validation", () => {
       max_chars: 500,
     })) as string;
     assert.ok(out.endsWith("\n...[truncated]"));
-    // banner 之后的正文恰为 500 字符 + 截断标记（精确等值断言）
+    // The body after the banner is exactly 500 chars + the truncation marker (exact-equality assertion)
     const bodyPart = out.split(UNTRUSTED_BANNER)[1] ?? "";
     assert.equal(bodyPart, "\n\n" + "x".repeat(500) + "\n...[truncated]");
   });

@@ -1,15 +1,16 @@
 /**
- * wayfinder #440 Stream B — T9 list_mcp_resources 工具单测（M1/M2 决议）。
+ * list_mcp_resources unit tests.
  *
- * 覆盖 5 类输入：
- *  1. 正常路径（无 server 聚合 / 指定 server / 含 perServer state）
- *  2. 空输入（无任何 resources → `(no resources)` 占位；空 perServer）
- *  3. 非法 / 负值（input 非对象 / server 非字符串 / cursor 非字符串）
- *  4. 溢出 / 边界（多个 server 聚合 / cursor 透传）
- *  5. 并发 / 异常（manager 抛 typed error → handler 透传）
+ * Covers 5 input classes:
+ *  1. happy path (aggregate without server / given server / with perServer state)
+ *  2. empty input (no resources at all → `(no resources)` placeholder; empty perServer)
+ *  3. invalid input (non-object input / non-string server / non-string cursor)
+ *  4. overflow / boundaries (aggregation across several servers / cursor pass-through)
+ *  5. concurrency / exceptions (typed error from manager passes through)
  *
- * 注：handler 经 AciRegistry 出口（catalog.get("list_mcp_resources").handler）
- * 验证。manager 通过 stub getManager 注入（不启真子进程）。
+ * Note: the handler is exercised through the AciRegistry exit
+ * (catalog.get("list_mcp_resources").handler). The manager is injected via a
+ * stubbed getManager (no real subprocess is started).
  */
 import { describe, expect, it } from "vitest";
 
@@ -25,9 +26,10 @@ import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createListMcpResourcesTool } from "../../../../src/harness/aci/tools/list-mcp-resources.ts";
 
 /**
- * Fake McpManager —— 仅暴露 listResources / readResource 两个方法；测试可
- * 注入预期返回值或触发 typed error。其余接口方法（start/reload/shutdown/status）
- * 在本测试无关，stub 抛 "not used"。
+ * Fake McpManager — exposes only listResources / readResource; tests inject
+ * the expected return value or trigger a typed error. The remaining interface
+ * methods (start/reload/shutdown/status) are irrelevant here; the stubs reject
+ * with "not used".
  */
 function makeFakeManager(
   listImpl?: (opts?: ListResourcesOpts) => Promise<ListResourcesResult>,
@@ -66,7 +68,7 @@ function samplePerServer(
 }
 
 // =========================================================================
-// 1. 正常路径
+// 1. Happy path
 // =========================================================================
 
 describe("createListMcpResourcesTool — normal path", () => {
@@ -92,9 +94,9 @@ describe("createListMcpResourcesTool — normal path", () => {
 
     expect(capturedOpts).toEqual({ signal: undefined });
     const lines = out.split("\n");
-    // 3 resources → 3 lines + 空行 + `--- perServer ---` + 2 perServer lines
+    // 3 resources → 3 lines + empty line + `--- perServer ---` + 2 perServer lines
     expect(lines).toHaveLength(3 + 1 + 1 + 2);
-    // 前 3 行：每行一个 JSON resource
+    // the first 3 lines: one JSON resource each
     expect(JSON.parse(lines[0]!)).toMatchObject({
       server: "alpha",
       uri: "x://a/1",
@@ -145,7 +147,7 @@ describe("createListMcpResourcesTool — normal path", () => {
     });
     expect(out).toContain("x://b/1");
     expect(out).toContain("CURSOR_BETA_2");
-    // perServer tail 仍保留（与 p04 同形态）
+    // the perServer tail is still kept
     expect(out).toContain("--- perServer ---");
   });
 
@@ -154,10 +156,10 @@ describe("createListMcpResourcesTool — normal path", () => {
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
     expect(tool.name).toBe("list_mcp_resources");
     expect(tool.description).toContain("list_mcp_resources");
-    // 正面引导关键词：list / aggregate / pass server / read_mcp_resource
+    // positive prompting keywords: list / aggregate / pass server / read_mcp_resource
     expect(tool.description.toLowerCase()).toContain("list");
     expect(tool.description.toLowerCase()).toContain("read");
-    // 不含负面禁令词
+    // no negative prohibition words
     const banWords = /\b(do not|don'?t|never|avoid|should not|must not)\b/i;
     expect(tool.description).not.toMatch(banWords);
   });
@@ -176,7 +178,7 @@ describe("createListMcpResourcesTool — normal path", () => {
 });
 
 // =========================================================================
-// 2. 空输入
+// 2. Empty input
 // =========================================================================
 
 describe("createListMcpResourcesTool — empty input", () => {
@@ -202,7 +204,7 @@ describe("createListMcpResourcesTool — empty input", () => {
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
 
     const out = await tool.handler({}, undefined);
-    // perServer 信息保留：资源是 0 时仍展示 perServer 状态
+    // perServer info survives: with zero resources the perServer status is still shown
     expect(out).toContain("--- perServer ---");
     expect(out).toContain("alpha");
     expect(out).toContain("beta");
@@ -216,7 +218,7 @@ describe("createListMcpResourcesTool — empty input", () => {
           server: "alpha",
           uri: "x://a/1",
           name: "a1",
-          // description / mimeType 缺席 → 不应在 JSON 出现
+          // description / mimeType absent → must not appear in the JSON
         },
       ],
       perServer: [samplePerServer("alpha", "connected")],
@@ -228,14 +230,14 @@ describe("createListMcpResourcesTool — empty input", () => {
     const parsed = JSON.parse(firstLine);
     expect(parsed).not.toHaveProperty("description");
     expect(parsed).not.toHaveProperty("mimeType");
-    // perServer nextCursor 缺席 → 不出现
+    // perServer nextCursor absent → does not appear
     const perServerLine = JSON.parse(out.split("\n").at(-1)!);
     expect(perServerLine).not.toHaveProperty("nextCursor");
   });
 });
 
 // =========================================================================
-// 3. 非法 / 负值
+// 3. Invalid input
 // =========================================================================
 
 describe("createListMcpResourcesTool — invalid input", () => {
@@ -280,7 +282,7 @@ describe("createListMcpResourcesTool — invalid input", () => {
     });
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
     await tool.handler({ server: "" }, undefined);
-    // 空串 server 视为缺席 → 不传 server 字段
+    // an empty-string server counts as absent → the server field is not passed
     expect(capturedOpts).toBeDefined();
     expect(capturedOpts).not.toHaveProperty("server");
   });
@@ -309,7 +311,7 @@ describe("createListMcpResourcesTool — invalid input", () => {
 });
 
 // =========================================================================
-// 4. 溢出 / 边界
+// 4. Overflow / boundaries
 // =========================================================================
 
 describe("createListMcpResourcesTool — overflow / boundaries", () => {
@@ -351,7 +353,7 @@ describe("createListMcpResourcesTool — overflow / boundaries", () => {
 });
 
 // =========================================================================
-// 5. 并发 / 异常
+// 5. Concurrency / exceptions
 // =========================================================================
 
 describe("createListMcpResourcesTool — concurrent / exception", () => {

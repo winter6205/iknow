@@ -1,15 +1,17 @@
 /**
- * spec agent-status-instruction-echo T2 / plans 子弹 2：真实用户消息甄别谓词。
+ * Real-user-message discrimination predicate (agent-status-instruction-echo spec).
  *
- * 认证面（spec invariant 2 / F2 / F6 / 提取规则 / SC2「零 LLM」）：
- *   - 尾栏在场 → 跳过栏取真消息；
- *   - 全部宿主注入形态（drain / graph / MCP 重连 / skill delta / verify /
- *     LOOP_DETECTED / compact 三缝）在场 → 跳过；
- *   - skill-load 信封计入真消息但取 `\n\n` 后 remainder 首行，remainder 空 → 前扫；
- *   - prefetch overlay 剥净取原文；marker 出现在原文内部取**最后一个** marker 之后段（F6）；
- *   - 首行为空 → 该条无有效指令行，继续前扫（F2）；
- *   - 100 码点截断（CJK + emoji 代理对不劈半、不加省略号）；
- *   - 零抛错（空输入 / 全注入 / 纯 tool_result）。
+ * Certified surface (spec invariant 2 + the extraction rules + "zero LLM"):
+ *   - trailing bar present → skip it and take the real message;
+ *   - any host-injection shape present (drain / graph / MCP reconnect /
+ *     skill delta / verify / LOOP_DETECTED / the three compact seams) → skip;
+ *   - skill-load envelopes count as real messages but take the first line of
+ *     the remainder after `\n\n`; empty remainder → keep scanning backwards;
+ *   - strip the prefetch overlay to get the original text; when a marker
+ *     appears inside the original text, take the segment after the LAST marker;
+ *   - empty first line → that message yields no instruction line, keep scanning backwards;
+ *   - 100-codepoint truncation (CJK + emoji surrogate pairs never split, no ellipsis appended);
+ *   - zero throws (empty input / all-injected / pure tool_result).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -47,7 +49,9 @@ function userMsg(text: string): AnthropicNativeMessage {
   }) as AnthropicNativeMessage;
 }
 
-function userMsgWithBlocks(texts: ReadonlyArray<string>): AnthropicNativeMessage {
+function userMsgWithBlocks(
+  texts: ReadonlyArray<string>
+): AnthropicNativeMessage {
   return Object.freeze({
     role: "user",
     content: Object.freeze(texts.map((text) => ({ type: "text", text }))),
@@ -75,13 +79,13 @@ const BAR = buildAgentStatusText({
   openTodoLines: ["- [ ] [t1] do the thing"],
 });
 
-/** loop-engine appendMcpReconnect 的实际产出形态（模板现拼）。 */
+/** The actual production shape of loop-engine appendMcpReconnect (template filled live). */
 const MCP_RECONNECT_TEXT = MCP_RECONNECT_NOTIFICATION_TEMPLATE.replace(
   "<server>",
   "github"
 ).replace("<tools>", "create_issue, list_prs");
 
-/** 全部宿主注入的现行全集样本（甄别名册逐条）。 */
+/** Full current sample set of host injections (one roster entry per case). */
 const HOST_INJECTIONS: ReadonlyArray<readonly [string, string]> = [
   ["agent_status 栏", BAR],
   ["graph change on", renderGraphModeChangeNotification("on")],
@@ -107,7 +111,7 @@ const HOST_INJECTIONS: ReadonlyArray<readonly [string, string]> = [
   ],
 ];
 
-// -- 甄别谓词 -----------------------------------------------------------------
+// -- discrimination predicate -----------------------------------------------------
 
 describe("isHostInjectedUserText（注入名册）", () => {
   for (const [label, text] of HOST_INJECTIONS) {
@@ -122,7 +126,9 @@ describe("isHostInjectedUserText（注入名册）", () => {
 
   it("正文中间出现 <agent_status> 子串不误伤（前缀判定）", () => {
     assert.equal(
-      isHostInjectedUserText("请看这段引用：<agent_status>last_tool: x</agent_status>"),
+      isHostInjectedUserText(
+        "请看这段引用：<agent_status>last_tool: x</agent_status>"
+      ),
       false
     );
   });
@@ -154,7 +160,7 @@ describe("stripMemoryPrefetchOverlay", () => {
   });
 });
 
-// -- 提取谓词 -----------------------------------------------------------------
+// -- extraction predicate -----------------------------------------------------
 
 describe("extractLatestRealUserInstruction", () => {
   it("尾栏在场 → 跳过栏取真消息首行", () => {
@@ -184,23 +190,16 @@ describe("extractLatestRealUserInstruction", () => {
 
   it("空 messages / 仅 assistant → null，零抛错", () => {
     assert.equal(extractLatestRealUserInstruction([]), null);
-    assert.equal(
-      extractLatestRealUserInstruction([assistantMsg("hi")]),
-      null
-    );
+    assert.equal(extractLatestRealUserInstruction([assistantMsg("hi")]), null);
   });
 
   it("纯 tool_result user 消息无文本 → 跳过", () => {
     const msgs = [userMsg("有字的"), toolResultMsg()];
-    assert.equal(
-      extractLatestRealUserInstruction(msgs)?.instruction,
-      "有字的"
-    );
+    assert.equal(extractLatestRealUserInstruction(msgs)?.instruction, "有字的");
   });
 
   it("prefetch overlay 骑在用户 turn 上 → 剥净取原文", () => {
-    const overlay =
-      "Possibly relevant memory (advisory)\n\n### 旧事\nrecord";
+    const overlay = "Possibly relevant memory (advisory)\n\n### 旧事\nrecord";
     const msgs = [userMsg(`${overlay}${MEMORY_PREFETCH_END}改用 sqlite`)];
     assert.equal(
       extractLatestRealUserInstruction(msgs)?.instruction,
@@ -220,7 +219,9 @@ describe("extractLatestRealUserInstruction", () => {
 
   it("skill-load 信封带 remainder → 取 remainder 首行", () => {
     const msgs = [
-      userMsg('[skill-load name="deploy"]\nSKILL BODY LINE1\nSKILL BODY LINE2\n\n先跑 lint'),
+      userMsg(
+        '[skill-load name="deploy"]\nSKILL BODY LINE1\nSKILL BODY LINE2\n\n先跑 lint'
+      ),
     ];
     assert.equal(
       extractLatestRealUserInstruction(msgs)?.instruction,
@@ -291,7 +292,7 @@ describe("extractLatestRealUserInstruction", () => {
     const r = extractLatestRealUserInstruction(msgs);
     assert.equal(r?.instruction, expected);
     assert.equal(Array.from(r!.instruction).length, 100);
-    // 不劈半： lone surrogate 不允许出现（每个代理对完整）
+    // No splitting: lone surrogates must not appear (every surrogate pair stays whole).
     assert.doesNotMatch(r!.instruction, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
     assert.doesNotMatch(r!.instruction, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
     assert.ok(!r!.instruction.includes("…"));
@@ -318,12 +319,20 @@ describe("extractLatestRealUserInstruction", () => {
   });
 });
 
-// -- 既有 graph 常量在场 sanity（名册与 SSOT 不漂移） ---------------------------
+// -- sanity that existing graph constants are present (roster and SSOT do not drift) ----
 
 describe("名册锚点漂移锁", () => {
   it("graph 三常量均以 <graph_mode> 开头（谓词依赖的前提）", () => {
-    assert.ok(IKNOW_GRAPH_MODE_ON_NOTIFICATION.trimStart().startsWith("<graph_mode>"));
-    assert.ok(IKNOW_GRAPH_MODE_OFF_NOTIFICATION.trimStart().startsWith("<graph_mode>"));
-    assert.ok(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.trimStart().startsWith("<graph_mode>"));
+    assert.ok(
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION.trimStart().startsWith("<graph_mode>")
+    );
+    assert.ok(
+      IKNOW_GRAPH_MODE_OFF_NOTIFICATION.trimStart().startsWith("<graph_mode>")
+    );
+    assert.ok(
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.trimStart().startsWith(
+        "<graph_mode>"
+      )
+    );
   });
 });

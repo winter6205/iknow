@@ -1,11 +1,14 @@
 /**
- * 搜索侧的文件准入单测（D5 行窗 + D3 context 共用的 fs 边界）。
+ * File-admission unit tests on the search side (the fs boundary shared by
+ * the `also` line window and context lines).
  *
- * 锁的不变式：**两条引擎的接受集来自同一条准入线**。rg 引擎自己不做二进制
- * 判定（它的 64 KiB 窗口在 `-l` / `--count` / `content` 三种出法下对同一个
- * 文件给出不同结论），Node 扫也不做 —— 两边都走 `readWorkspaceLines` /
- * `isTextFile`。所以「含 NUL 的文件不可搜」这条口径只在这里定义一次，任何
- * 一边私自放宽都会在这里的用例上暴露。
+ * Invariant locked: **both engines' accept sets come from one admission
+ * line**. The rg engine doesn't decide binary-ness itself (its 64 KiB window
+ * gives different verdicts for the same file across `-l` / `--count` /
+ * content output modes), and the Node scan doesn't either — both go through
+ * `readWorkspaceLines` / `isTextFile`. So "files containing NUL are not
+ * searchable" is defined exactly once here; loosening it on one side shows
+ * up in these cases.
  */
 
 import assert from "node:assert/strict";
@@ -38,7 +41,7 @@ afterEach(async () => {
   }
 });
 
-/** 在 `root` 下写一个文件（自动建父目录）。 */
+/** Write a file under `root` (parent dirs created automatically). */
 async function put(root: string, rel: string, data: string | Buffer) {
   const abs = join(root, rel);
   await mkdir(join(abs, ".."), { recursive: true });
@@ -53,7 +56,8 @@ describe("containsNul — 整文件判据（不做 8 KiB 窗口截断）", () =>
   it("NUL 在早期 / 窗口之外 / 末尾 都算二进制", () => {
     const nul = Buffer.from([0]);
     assert.equal(containsNul(Buffer.concat([Buffer.from("a"), nul])), true);
-    // 远在 8 KiB 窗口之外：旧实现的窗口截断会漏判（rg 的 64 KiB 窗口同理）。
+    // Far beyond the 8 KiB window: the old windowed implementation missed
+    // these (same trap applies to rg's 64 KiB window).
     assert.equal(
       containsNul(
         Buffer.concat([Buffer.from("a"), Buffer.alloc(70_000, 0x61), nul])
@@ -117,7 +121,8 @@ describe("readWorkspaceLines — 行切分与准入", () => {
 
   it("显式文件豁免：allowOversize 时按 MAX_EXPLICIT_FILE_BYTES 放行", async () => {
     const root = await scratch();
-    // 1 MiB + 1：递归拒读，显式点名可读（rg 的 --max-filesize 只管遍历期）。
+    // 1 MiB + 1: recursive walk refuses, explicitly named file reads
+    // (rg's --max-filesize only governs the traversal phase).
     await put(root, "big.ts", "x".repeat(MAX_TEXT_FILE_BYTES + 1));
 
     const lines = await readWorkspaceLines(root, "big.ts", {
@@ -217,7 +222,7 @@ describe("admittedPaths — 批量准入（rg 引擎的复核面）", () => {
     for (let i = 0; i < total; i += 1) {
       await put(root, `f${String(i)}.ts`, "hit\n");
     }
-    // 每第 10 个塞 NUL，跨过并发批次边界仍要被剔除。
+    // Every 10th file gets a NUL: still removed across concurrency batch boundaries.
     for (let i = 0; i < total; i += 10) {
       await put(
         root,

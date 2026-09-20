@@ -1,15 +1,15 @@
 /**
- * permission-executor → AskUser 单链装配契约。
+ * permission-executor → AskUser single-chain assembly contract.
  *
- * ask 决策的调用形状（ADR-0097：批准面只有一条链）：
- *   - ask 决策 → askUser 恰好被调一次,ctx 带 tool / input / summaryHint;
- *   - summaryHint 唯一来源是 summarizeInput 的 JSON 截断形态(80 字符封顶),
- *     不存在第二套按输入改写的 hint;
-
- *   - askUser 拒绝 → typed `[user_denied]`,inner 零调用;
- *   - askUser 抛异常 → fail-closed 拒绝(绝不能因提示面故障放行副作用)。
+ * Ask-decision call shape (ADR-0097: the approval surface has exactly one chain):
+ *   - ask decision → askUser is called exactly once with ctx {tool, input, summaryHint};
+ *   - summaryHint's only source is summarizeInput's truncated JSON (capped at 80 chars);
+ *     no second input-rewritten hint exists;
+ *   - askUser denial → typed `[user_denied]`, inner never called;
+ *   - askUser throw → fail-closed denial (a prompt-surface failure must never let
+ *     a side effect through).
  *
- * 集成驱动：createPermissionExecutor + 捕获型 askUser spy。
+ * Integration driver: createPermissionExecutor + a capturing askUser spy.
  */
 
 import { describe, it } from "vitest";

@@ -1,12 +1,13 @@
 /**
- * D5 行窗过滤单测（SC8）。
+ * `also` line-window filtering unit tests.
  *
- * 契约要点：`also` 是**过滤**不是展示。主词命中后只在 ±within_lines 行窗内
- * 找第二段；窗内没有 → 该主词命中当没中。不做裸跨行正则。
+ * Contract: `also` is a **filter**, not a display feature. After a primary
+ * hit, the second needle is sought only within ±within_lines; no hit in the
+ * window → the primary hit doesn't count. No bare multi-line regex.
  *
- * 本层与引擎无关：输入「文件 → 行数组」，输出保留下来的主词命中行号。
- * 两种引擎（rg / Node）共用它，因此 SC9 的「Node 全语义」自动继承同一套
- * 判定。
+ * This layer is engine-agnostic: input is "file → array of lines", output is
+ * the kept primary-hit line numbers. Both engines (rg / Node) share it, so
+ * Node full-semantics parity inherits the same verdicts for free.
  */
 
 import assert from "node:assert/strict";
@@ -28,7 +29,7 @@ describe("filterHitsByAlsoWindow — 窗内 / 窗外", () => {
   ];
 
   it("第二段在窗内 → 回报", () => {
-    // 主词在第 2 行，withinLines=3 → 窗 = [1..5]，also 在第 5 行命中。
+    // Primary on line 2, withinLines=3 → window = [1..5]; also hits line 5.
     const kept = filterHitsByAlsoWindow({
       matches: [{ path: "a.ts", line: 2, text: "primary hit" }],
       also: /also hit/,
@@ -40,7 +41,7 @@ describe("filterHitsByAlsoWindow — 窗内 / 窗外", () => {
   });
 
   it("第二段在窗外 → 不回报", () => {
-    // 主词第 2 行、withinLines=1 → 窗 = [1..3]，also 在第 5 行 → 窗外。
+    // Primary on line 2, withinLines=1 → window = [1..3]; also on line 5 → outside.
     const kept = filterHitsByAlsoWindow({
       matches: [{ path: "a.ts", line: 2, text: "primary hit" }],
       also: /also hit/,
@@ -52,7 +53,7 @@ describe("filterHitsByAlsoWindow — 窗内 / 窗外", () => {
   });
 
   it("窗是闭区间（边界行算命中）", () => {
-    // 主词第 2 行、withinLines=3 → 窗上界 = 5 → 边界命中。
+    // Primary on line 2, withinLines=3 → window upper bound = 5 → boundary counts.
     const kept = filterHitsByAlsoWindow({
       matches: [{ path: "a.ts", line: 2, text: "primary hit" }],
       also: /also hit/,
@@ -114,7 +115,7 @@ describe("filterHitsByAlsoWindow — 窗内 / 窗外", () => {
       readLines: () => lines,
     });
 
-    // 第 1 行窗 [1..2] 命中；第 3 行窗 [2..4] 命中（also 在第 2 行）。
+    // Line 1 window [1..2] hits; line 3 window [2..4] hits (also on line 2).
     assert.deepEqual(
       kept.map((h) => h.line),
       [1, 3]

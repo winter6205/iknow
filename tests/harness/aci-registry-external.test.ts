@@ -36,17 +36,18 @@ describe("ACI registry external registration — ADR-0083 输出闸豁免不可�
     registry.registerExternal([dirty]);
 
     const stored = registry.catalog.get(dirty.name);
-    // 结构闸：存储的 def 上不再有该键，executor 的 safeContent 结构上读不到。
+    // Structural gate: the stored def no longer carries the key, so the
+    // executor's safeContent cannot read it.
     assert.ok(stored !== undefined);
     assert.equal("exemptFromOutputCap" in stored!, false);
     assert.equal(stored!.exemptFromOutputCap, undefined);
-    // 剥离 ≠ 拒绝：handler 身份保留，注册未被拒。
+    // Stripping is not rejection: handler identity is kept, registration succeeds.
     assert.equal(stored!.handler, dirty.handler);
     assert.equal(stored!.aci.category, "read-only");
   });
 
   it("未携带声明的 mcp__ def → 原样存储（对象身份不变）", () => {
-    // 既有身份契约（catalog.get(name) === 注册入参）不得因剥离而漂移。
+    // Existing identity contract (catalog.get(name) === registered input) must not drift due to stripping.
     const registry = createAciRegistry([makeTool("read_file")]);
     const external = makeTool("mcp__server__lookup");
 
@@ -56,8 +57,8 @@ describe("ACI registry external registration — ADR-0083 输出闸豁免不可�
   });
 
   it("内建工具路径不受剥离影响：createAciRegistry 入参保留声明（豁免 home = 内建装配期声明）", () => {
-    // ADR-0083 的豁免只对 mcp__ 外部源设结构闸；内建 def 的声明经
-    // createRegistry 冻结快照原样存活（skill 工具即此路径）。
+    // ADR-0083 gates only the mcp__ external source; builtin declarations
+    // survive the createRegistry frozen snapshot as-is (the skill tool path).
     const builtin = Object.freeze({
       ...makeTool("skill"),
       exemptFromOutputCap: true,
@@ -142,7 +143,7 @@ describe("ACI registry external registration", () => {
 
     registry.unregisterExternal([external.name]);
 
-    // 三个下游视图都从 externalByExt live 读，应同步收敛
+    // All three downstream views read from the live externalByExt map and converge together.
     assert.equal(registry.catalog.get(external.name), undefined);
     assert.equal(registry.discover(external.name), undefined);
     assert.deepEqual(
@@ -162,7 +163,7 @@ describe("ACI registry external registration", () => {
     registry.registerExternal([external]);
     registry.unregisterExternal([external.name]);
 
-    // unregister 清掉了名字 → Gate2 duplicate 不再触发，同名可重新注册
+    // unregister frees the name, so the duplicate gate no longer fires and re-registration is allowed.
     assert.doesNotThrow(() => registry.registerExternal([external]));
     assert.equal(registry.catalog.get(external.name), external);
   });
@@ -173,30 +174,30 @@ describe("ACI registry external registration", () => {
     assert.doesNotThrow(() =>
       registry.unregisterExternal(["mcp__never__registered", "mcp__a__x"])
     );
-    // 未注册名字被忽略后，仍可正常注册
+    // Unregistered names are ignored; registration still works afterwards.
     assert.doesNotThrow(() =>
       registry.registerExternal([makeTool("mcp__a__x")])
     );
   });
 
   it("B4 isDiscovered:未 discover 的名字返 false,discover 后返 true", () => {
-    // B4 / ADR-0043 §2:permission-executor 据此拒绝未 discover 即调的
-    // mcp__ 工具调用。catalog 上同形暴露 isDiscovered,供闸门读取。
+    // ADR-0043: permission-executor uses this to reject mcp__ calls made without
+    // prior discovery. catalog exposes isDiscovered in the same shape for the gate.
     const registry = createAciRegistry([makeTool("read_file")]);
     const external = makeTool("mcp__server__check");
 
     registry.registerExternal([external]);
 
-    // 未 discover：catalog.isDiscovered 返 false（gate 拒调）
+    // Not yet discovered: false (the gate blocks the call).
     assert.equal(registry.catalog.isDiscovered?.(external.name), false);
     assert.equal(registry.isDiscovered(external.name), false);
 
-    // discover 标记后：返 true（gate 放行）
+    // After discover: true (the gate lets the call through).
     registry.discover(external.name);
     assert.equal(registry.catalog.isDiscovered?.(external.name), true);
     assert.equal(registry.isDiscovered(external.name), true);
 
-    // 未注册的名字也返 false（不抛）
+    // Never-registered names also return false (no throw).
     assert.equal(registry.isDiscovered("mcp__ghost__unknown"), false);
   });
 });
@@ -213,7 +214,7 @@ describe("2020-12 $schema inputSchema — 经 adapter 剥顶层后可过宿主 d
   it("raw 带顶层 $schema 的 def 被 compile 闸拒；toAciToolDef 转换后的同名 def 注册成功", () => {
     const registry = createAciRegistry([makeTool("read_file")]);
 
-    // 负对照：证明拒因就是 $schema（同名尚未占用，非 duplicate 路径）。
+    // Negative control: proves the rejection cause is $schema itself (the name is free, not a duplicate path).
     const raw = makeTool("mcp__server__lookup");
     assert.throws(
       () =>

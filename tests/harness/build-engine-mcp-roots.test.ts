@@ -1,13 +1,13 @@
 /**
- * T5 (plans/worktree-mcp-rebind-lifecycle.md) — buildHarnessEngine 单点根接线。
+ * buildHarnessEngine single-root MCP wiring.
  *
- * 验收:
- *  1. 一次 resolveMcpRoots 的返回值同时驱动 loadMcpConfig、createMcpManager cwd、
- *     ACI/sandbox FS root 与 BuiltEngine.mcpRoots。
- *  2. 显式 sandboxRoot 与解析出的 workspaceRoot 不一致 → root_mismatch，
- *     且不调用 createMcpManager / 不 spawn。
- *  3. ask 不装配 MCP（无 manager / 无 mcpRoots / 无 mcp__*）。
- *  4. 缺根 / 非法根在任何 MCP side effect 之前 fail-closed。
+ * Acceptance:
+ *  1. One resolveMcpRoots return value drives loadMcpConfig, createMcpManager
+ *     cwd, the ACI/sandbox FS root, and BuiltEngine.mcpRoots.
+ *  2. An explicit sandboxRoot that disagrees with the resolved workspaceRoot →
+ *     root_mismatch, with no createMcpManager call and nothing spawned.
+ *  3. ask does not wire MCP (no manager / no mcpRoots / no mcp__* tools).
+ *  4. A missing or invalid root fails closed before any MCP side effect.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -82,7 +82,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
     roots.push(productRoot, workspaceRoot);
 
     await plantProjectMcp(productRoot, "from-product");
-    // task worktree 放一份诱饵配置 — 不得被读。
+    // Plant a decoy config in the task worktree — it must never be read.
     await plantProjectMcp(workspaceRoot, "from-task");
 
     const captured: McpManagerOptions[] = [];
@@ -94,9 +94,10 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
       cwd: productRoot,
       workspaceRoot,
       productRoot,
-      // 本文件验 mcpRoots 派生与 fail-closed 门禁,不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies mcpRoots derivation and the fail-closed gate, not
+      // tool overflow or index demotion (dedicated tests:
+      // build-engine-tool-overflow.test.ts, disclosure-index-align/).
+      // Assembly-time countTokens is bypassed; see the BuildEngineOpts.skipCountTokens comment for seam semantics.
       skipCountTokens: true,
       createMcpManager: (opts) => {
         captured.push(opts);
@@ -127,7 +128,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
     expect(names).toContain("from-product");
     expect(names).not.toContain("from-task");
 
-    // ACI FS root = resolved workspaceRoot：越界路径 fail-closed。
+    // ACI FS root = resolved workspaceRoot: out-of-root paths fail closed.
     const readFile = built.deps.registry.get("read_file");
     expect(readFile).toBeDefined();
     await expect(
@@ -156,7 +157,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
         workspaceRoot,
         productRoot,
         sandboxRoot: foreignSandbox,
-        skipCountTokens: true, // 同上:验 fail-closed,不验溢出 / 索引降档。
+        skipCountTokens: true, // Same as above: verifies fail-closed, not overflow or index demotion.
         createMcpManager: (opts) => {
           managerCalls += 1;
           return createMcpManager(opts);
@@ -186,7 +187,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
       cwd: root,
       workspaceRoot: root,
       productRoot: root,
-      skipCountTokens: true, // 同上:验 ask surface 门禁,不验溢出 / 索引降档。
+      skipCountTokens: true, // Same as above: verifies the ask-surface gate, not overflow or index demotion.
       createMcpManager: (opts) => {
         managerCalls += 1;
         return createMcpManager(opts);
@@ -214,7 +215,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
         cwd: tmpdir(),
         workspaceRoot: "relative/not/absolute",
         productRoot: tmpdir(),
-        skipCountTokens: true, // 同上:验 fail-closed,不验溢出 / 索引降档。
+        skipCountTokens: true, // Same as above: verifies fail-closed, not overflow or index demotion.
         createMcpManager: (opts) => {
           managerCalls += 1;
           return createMcpManager(opts);

@@ -512,7 +512,7 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
     );
   });
 
-  // SC10 boundary: "≥ 30 天" — exactly 30 days archives, 29 does not.
+  // Boundary: ">= 30 days" — exactly 30 days archives, 29 does not.
   it("archives at exactly 30 days but keeps a 29-day disabled entry hot", async () => {
     await put("edge30", { disabled: true, updated_at: daysAgo(30) });
     await put("edge29", { disabled: true, updated_at: daysAgo(29) });
@@ -601,7 +601,7 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
     );
   });
 
-  // MEMORY.md policy (spec: "对应行删除或忽略失效链" — this impl deletes the line).
+  // MEMORY.md policy (the spec allowed either deleting the matching line or ignoring dead links — this impl deletes the line).
   it("removes the archived slug's line from MEMORY.md and keeps other lines", async () => {
     await put("stale", { disabled: true, updated_at: daysAgo(31) });
     await put("keep", { updated_at: daysAgo(1) });

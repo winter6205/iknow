@@ -1,28 +1,32 @@
 /**
  * tests/harness/egress-entry-wiring.test.ts
  *
- * specs/egress-credential-sentinel.md T6 —— 入口形态接线 + yolo 姿态显式。
+ * specs/egress-credential-sentinel.md — entry-point wiring + explicit yolo posture.
  *
- * 钉住的不变式：
- *   - 凭据装配函数入口（`mintEgressCredentialLayer`）显式姿态分支：
- *     `no-fence`（yolo / 围栏整体退场）→ 不铸造、不注入，返回
- *     `{ skipped: "no-fence" }` + 诊断痕（F9 / Assumption 9 不静默，
- *     离线可查证「宿主真值直达、无存在面保护」）；`fenced` → 委托
- *     `mintEgressCredentials`（T2 形状逐字）；
- *   - isolation OFF（settings.isolation.network 缺席）：装配层同样留
- *     `skipped: no-fence` 痕（SC9 反命门：不许「看起来有保护实则无」）；
- *   - 三装配点（bash 前台 / background manager / verify 单例）经同一
- *     `createEgressSession` 缝获得凭据层：各面只透传 `{ policy }`，
- *     对凭据零分支代码（policy.credentials 恒等透传）；
- *   - background 挂 settle() 的释放通道（dispose 生产实现覆盖
- *     registry/store 已由 T3 session 测试钉）；
- *   - EgressRelayUnavailableError 路径：凭据层随 session 缺席（缝未被调 /
- *     egress spec 不落 fence），fence env 无假值键，infra 文案不变
- *     （不新增冒充）；
- *   - `createEgressSession` 缝扩展保持加性形状：三面对 opts 的期望只有
- *     `{ policy }` 一键，ssh-bridge plan 可在同一 opts 形状上加字段接线。
+ * Pinned invariants:
+ *   - the credential assembly entry (`mintEgressCredentialLayer`) branches on
+ *     posture explicitly: `no-fence` (yolo / fence fully disarmed) → no
+ *     minting, no injection, returns `{ skipped: "no-fence" }` plus a
+ *     diagnostic trace (never silent — offline-verifiable "host values reach
+ *     through with no presence-side protection"); `fenced` → delegates to
+ *     `mintEgressCredentials`;
+ *   - isolation OFF (settings.isolation.network absent): assembly leaves the
+ *     same `skipped: no-fence` trace — never "looks protected, actually not";
+ *   - all three assembly points (bash foreground / background manager /
+ *     verify singleton) get the credential layer through one
+ *     `createEgressSession` seam: each passes only `{ policy }` with zero
+ *     credential branching (policy.credentials identity passthrough);
+ *   - background releases through the settle()-hooked dispose channel
+ *     (registry/store cleanup inside dispose is pinned by session tests);
+ *   - EgressRelayUnavailableError path: credential layer absent with the
+ *     session (seam never called / egress spec never lands on the fence), no
+ *     fake-value keys in fence env, infra message unchanged (no new
+ *     masquerading);
+ *   - the `createEgressSession` seam keeps an additive shape: each side
+ *     expects only `{ policy }` in opts, so the ssh-bridge plan can wire
+ *     extra fields on the same opts shape.
  *
- * 全部 fixture 为生成假值；宿主真值 / .env* 不进任何输入或断言。
+ * All fixtures are synthetic values; real host values / .env* never enter any input or assertion.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -33,18 +37,18 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** 模块级捕获盒（vi.hoisted：mock 工厂在 import 期即引用）。 */
+/** Module-level capture box (vi.hoisted: mock factories reference it at import time). */
 const h = vi.hoisted(() => ({
-  /** createBwrapFence（index 导出）收到的 opts 序列。 */
+  /** opts received by createBwrapFence (index export). */
   fenceOpts: [] as Record<string, unknown>[],
-  /** runInSandbox（index 与 runner 两处导出）收到的 args 序列。 */
+  /** args received by runInSandbox (exported from index and runner). */
   runArgs: [] as Record<string, unknown>[],
-  /** createEgressSession（index 导出）收到的 opts 序列。 */
+  /** opts received by createEgressSession (index export). */
   egressCalls: [] as Record<string, unknown>[],
-  /** createEgressSession 行为（测试逐例改写）。 */
+  /** createEgressSession behavior (rewritten per test case). */
   egressImpl: (_opts: unknown): Promise<unknown> =>
     Promise.reject(new Error("not configured")),
-  /** runInSandbox 返回值（测试逐例改写）。 */
+  /** runInSandbox return value (rewritten per test case). */
   runResult: { exitCode: 0, stdout: "", stderr: "" },
 }));
 
@@ -69,7 +73,7 @@ vi.mock("../../src/harness/sandbox/index.ts", async () => {
   };
 });
 
-// bash.ts 直接 import runInSandbox from sandbox/runner.js —— 一并替换。
+// bash.ts imports runInSandbox directly from sandbox/runner.js — replace that too.
 vi.mock("../../src/harness/sandbox/runner.ts", async () => {
   const mod = await vi.importActual<
     typeof import("../../src/harness/sandbox/runner.ts")
@@ -121,7 +125,7 @@ afterEach(async () => {
     rmSync(p, { recursive: true, force: true });
 });
 
-/** 假凭据名册（fixture，非宿主真值）。 */
+/** Fake credential roster (fixture, not real host values). */
 function rosterFixture(): EgressCredentialRoster {
   return {
     files: [],
@@ -129,7 +133,7 @@ function rosterFixture(): EgressCredentialRoster {
   };
 }
 
-/** 测试用 MitmCA 替身：mint 入口只消费 trustBundlePath / bind 源（T2 fixture 同款）。 */
+/** Test MitmCA stand-in: the mint entry consumes only trustBundlePath / bind sources. */
 function fakeCa(): MitmCA {
   const dir = scratchDir();
   const bundlePath = join(dir, "trust-bundle.pem");
@@ -144,7 +148,7 @@ function fakeCa(): MitmCA {
   } as unknown as MitmCA;
 }
 
-/** mint 层 stub session spec：模拟 T2 铸造后的 fence env 增量（假值）。 */
+/** Stub session spec for the mint layer: simulates post-mint fence env increments (synthetic values). */
 function mintedSpec(): EgressSession["spec"] {
   return {
     unixSocketPath: "/tmp/iknow-t6-stub.sock",
@@ -180,7 +184,7 @@ function stubSession(opts?: { readonly spec?: EgressSession["spec"] }): {
   };
 }
 
-// ── 1. 凭据装配入口姿态分支（credential-assembly.ts / F9）──────────────────
+// ── 1. Credential-assembly entry posture branch (credential-assembly.ts) ────
 
 describe("T6 凭据装配入口姿态分支", () => {
   it("posture no-fence → 不铸造不注入：返回 skipped 痕 + registry 未构造 + 诊断留痕", () => {
@@ -190,12 +194,12 @@ describe("T6 凭据装配入口姿态分支", () => {
       onDiagnostic: (m) => diagnostics.push(m),
     });
     assert.deepEqual(out, { skipped: "no-fence" });
-    // registry / store / envVars / binds 均不在场 = 未构造。
+    // registry / store / envVars / binds all absent = nothing constructed.
     assert.equal("registry" in out, false);
     assert.equal("store" in out, false);
     assert.equal("envVars" in out, false);
     assert.equal("binds" in out, false);
-    // 不静默：诊断痕在场且离线可查证（canonical marker）。
+    // Not silent: diagnostic trace present and offline-verifiable (canonical marker).
     assert.equal(diagnostics.length, 1);
     assert.match(diagnostics[0]!, /skipped: no-fence/);
   });
@@ -216,7 +220,7 @@ describe("T6 凭据装配入口姿态分支", () => {
     assert.ok(out.registry);
     assert.ok(out.store);
     assert.ok(out.envVars.GH_TOKEN);
-    // 假值空间：注入 env 值是 fake_value_…，非宿主真值。
+    // Fake-value space: injected env values are fake_value_…, not real host values.
     assert.match(out.envVars.GH_TOKEN!, /^fake_value_/);
     assert.notEqual(out.envVars.GH_TOKEN, hostEnv.GH_TOKEN);
     out.store.dispose();
@@ -224,12 +228,12 @@ describe("T6 凭据装配入口姿态分支", () => {
 
   it("no-fence 痕文案 = SSOT 常量（装配层与入口共用，离线 grep 单点）", () => {
     assert.match(noFenceCredentialTrace(), /skipped: no-fence/);
-    // 痕里绝不带凭据材料。
+    // The trace must never carry credential material.
     assert.doesNotMatch(noFenceCredentialTrace(), /GH_TOKEN|token\s*[:=]/i);
   });
 });
 
-// ── 2. network 段缺席 = builtin preset 在岗（assembly.ts）────────────────────
+// ── 2. network section absent = builtin preset on duty (assembly.ts) ────────
 
 describe("T6 network 段缺席 → builtin preset 在岗（不再 no-fence）", () => {
   it("settings.isolation.network 缺席 → 工厂恒返 builtin preset policy，无 no-fence 痕（fence 在场）", () => {
@@ -239,17 +243,15 @@ describe("T6 network 段缺席 → builtin preset 在岗（不再 no-fence）", 
       commandLabel: "bash",
       onWarn: (m) => warns.push(m),
     });
-    // preset spec invariant 3：段缺席不再返 undefined —— builtin 窄集
-    // fence 在场，「无存在面保护」姿态只剩 yolo / isolation OFF 接线方
-    // （第 1 节钉子），本分支无 no-fence 痕可登。
+    // Preset-spec invariant: an absent section no longer returns undefined —
+    // the builtin narrow fence is on, so the "no presence-side protection"
+    // posture remains only for yolo / isolation-OFF wiring (pinned in section
+    // 1); this branch has no no-fence trace to log.
     const policy = factory() as EgressPolicyInput;
     assert.ok(policy);
     assert.equal(policy.allowlistSource, "builtin");
     assert.ok(policy.allowedDomains.includes("github.com"));
-    assert.equal(
-      warns.filter((w) => /no-fence/.test(w)).length,
-      0
-    );
+    assert.equal(warns.filter((w) => /no-fence/.test(w)).length, 0);
   });
 
   it("network 在场 → 无 skipped 痕（铸造路径不误报姿态）", () => {
@@ -269,7 +271,7 @@ describe("T6 network 段缺席 → builtin preset 在岗（不再 no-fence）", 
   });
 });
 
-// ── 3. 三装配点 wiring（工厂注入 seam）─────────────────────────────────────
+// ── 3. Three assembly points wiring (factory-injection seam) ────────────────
 
 describe("T6 前台 bash 装配点", () => {
   it("policy.credentials 在场 → 缝收到逐字 { policy }（keys 只有 policy，roster 恒等透传），fence 挂 egress spec，finally dispose", async () => {
@@ -295,7 +297,7 @@ describe("T6 前台 bash 装配点", () => {
     assert.deepEqual(Object.keys(opts), ["policy"]);
     const policy = opts.policy as EgressPolicyInput;
     assert.equal(policy.credentials, roster);
-    // fence 装配零分支：egress = session.spec 恒等透传。
+    // Zero branching in fence assembly: egress = session.spec identity passthrough.
     assert.equal(h.fenceOpts.length, 1);
     assert.equal(h.fenceOpts[0]!.egress, session.spec);
     assert.equal(dispose.mock.calls.length, 1);
@@ -342,12 +344,12 @@ describe("T6 前台 bash 装配点", () => {
     assert.equal("egress" in h.fenceOpts[0]!, false);
     const env = h.fenceOpts[0]!.env as Record<string, string>;
     assert.equal("GH_TOKEN" in env, false);
-    // infra 文案不冒充凭据层话术。
+    // The infra message must not masquerade as credential-layer wording.
     assert.equal(h.fenceOpts.length >= 1, true);
   });
 });
 
-/** fake ChildProcess（manager settle 事件驱动）。 */
+/** Fake ChildProcess (event-driven manager settle). */
 function makeFakeChild(pid = 424242): EventEmitter & Record<string, unknown> {
   const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
   child.stdin = new PassThrough();
@@ -399,8 +401,8 @@ describe("T6 background 装配点", () => {
     );
     assert.equal(capturedSpec[0], session.spec);
     assert.equal(dispose.mock.calls.length, 0);
-    // child exit → settle → dispose（release channel 既有档位；
-    // dispose 生产实现覆盖 registry/store 释放已由 T3 session 测试钉）。
+    // child exit → settle → dispose (existing release-channel tier;
+    // registry/store cleanup inside the real dispose is pinned by session tests).
     spawned[0]!.emit("exit", 0, null);
     await new Promise<void>((r) => setImmediate(r));
     assert.equal(dispose.mock.calls.length, 1);
@@ -461,7 +463,7 @@ describe("T6 verify 装配点（模块级单例）", () => {
   });
 });
 
-// ── 4. 各面对凭据零分支代码（静态钉）───────────────────────────────────────
+// ── 4. Zero credential branching at each assembly point (static pin) ────────
 
 describe("T6 三装配点对凭据零分支", () => {
   const files = [
@@ -471,7 +473,7 @@ describe("T6 三装配点对凭据零分支", () => {
   ];
   it.each(files)("%s 源码不含 credential/sentinel/mint 标识", (rel) => {
     const src = readFileSync(join(process.cwd(), rel), "utf8");
-    // 注释里允许出现（解释性引用），只钉代码面：剥掉块/行注释后再查。
+    // Allowed in comments (explanatory references); pin the code surface only: strip block/line comments first.
     const code = src
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");

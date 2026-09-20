@@ -1,20 +1,21 @@
 /**
- * B7 / spec model-prefix-layering SC2 — 断言②总装矩阵:同一会话相邻两轮
- * 装配 `promptTools()` + `deps.system()` deep-equal,五场景收齐:
+ * Full-assembly prefix-stability matrix: for one session, the adjacent turns'
+ * `promptTools()` + `deps.system()` must be deep-equal, across five scenarios:
  *
- *   a. MCP 连上(注入小窗口:窗口内连上 / 窗口超时两种)
- *   b. graph 关 → 开 → 关(连续三次相邻轮全 deep-equal)
- *   c. 会话内记忆文件落盘(B2 快照语义:落盘前后 deep-equal)
- *   d. compact 重装配(reactive compact 路径;spec §G5:messages 会废,
- *      tools + system 必须不变)
- *   e. git 块静态(会话级闭包缓存:多次 system() deep-equal + git 仓库
- *      内容变化后仍不变)
+ *   a. MCP connects (injection window: connect-inside-window / window-timeout)
+ *   b. graph off → on → off (three consecutive adjacent turns all deep-equal)
+ *   c. memory file lands mid-session (session snapshot semantics: equal before/after)
+ *   d. compact re-assembly (reactive compact path; messages may change,
+ *      tools + system must not)
+ *   e. git block static (session-level closure cache: multiple system() calls
+ *      deep-equal, still unchanged after repo content changes)
  *
- * 各场景的单场景契约分别在 tests/harness/mcp/prefix-stability.test.ts (B4)、
- * tests/harness/graph/run-graph-assembly.test.ts (B3)、
- * tests/harness/memory/refresh.test.ts (B2)、
- * tests/harness/identity/git-segment.test.ts (B5) 钉死;本文件收全矩阵,
- * 不重复其单点断言,只断言相邻轮 deep-equal。
+ * The per-scenario contracts are already pinned in
+ * tests/harness/mcp/prefix-stability.test.ts,
+ * tests/harness/graph/run-graph-assembly.test.ts,
+ * tests/harness/memory/refresh.test.ts, and
+ * tests/harness/identity/git-segment.test.ts; this file completes the matrix
+ * without repeating their point assertions — only adjacent-turn deep-equal.
  */
 import assert from "node:assert/strict";
 import { describe, it, expect, afterEach } from "vitest";
@@ -55,18 +56,21 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// a. MCP 连上 — 窗口内连上 / 窗口超时(实测 = 真实 manager 状态机 + B4 缝)
+// a. MCP connects — in-window / window-timeout (real manager state machine + firstTurnReady seam)
 // ---------------------------------------------------------------------------
 
 /**
- * 窗口长度不是本场景的被测对象 —— 被测的是「窗口到点那一刻目录定稿、
- * 之后不再回写」。故 a-ii / a-iii 经 `mcpFirstTurnReadyTimeoutMs` 缝注入
- * 小窗口,让同一条真实窗口轮询路径快速走完;**不得**用 fake timer 快进
- * (与 build-engine 内部非 timer 等待点实测相冲),也不把窗口调成 0
- * (0 会让「窗口内连上」与「窗口超时」两分支不可区分)。
+ * The window length is not what this scenario tests — what is tested is
+ * "the directory freezes the moment the window expires and is never written
+ * back afterwards". So a-ii / a-iii inject a small window through the
+ * `mcpFirstTurnReadyTimeoutMs` seam and let the real window-polling path run
+ * quickly; fake timers must NOT be used (they conflict with build-engine's
+ * non-timer awaits) and the window must not be 0 (that would make the
+ * connect-inside-window and window-timeout branches indistinguishable).
  *
- * 单 server 自身的 connect 超时仍走 `makeMatrixEnv().mcp.connectTimeoutMs`
- * = 60s:窗口 < connect 超时 ⇒ 到点即缺席(a-ii / a-iii 的实测路径)。
+ * A single server's own connect timeout still comes from
+ * `makeMatrixEnv().mcp.connectTimeoutMs` = 60s: window < connect timeout ⇒
+ * absent at expiry (the measured path for a-ii / a-iii).
  */
 const MATRIX_FIRST_TURN_WINDOW_MS = 150;
 
@@ -87,14 +91,14 @@ describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
       mcpFirstTurnReadyTimeoutMs: MATRIX_FIRST_TURN_WINDOW_MS,
     });
     try {
-      // 装配期已 await firstTurnReady → fastsvc 应已 connected。
+      // Assembly already awaited firstTurnReady → fastsvc should be connected.
       const status = built.mcpManager!.status();
       assert.equal(
         status.find((s) => s.name === "fastsvc")!.state,
         "connected"
       );
 
-      // 相邻两轮(同 round 自比 + 再取一轮):目录已定稿 → deep-equal。
+      // Adjacent turns (compare the round with itself + take one more turn): directory already frozen → deep-equal.
       await assertAdjacentTurnsStable(built, "a-i adjacent turns");
       const system = await built.deps.system!();
       assert.ok(system!.includes("<mcp_name_directory>"));
@@ -106,10 +110,13 @@ describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
   }, 20_000);
 
   it("a-ii 窗口超时 server 迟到连上 → 目录不回写,相邻轮 system 仍 deep-equal(产品 bug 已修)", async () => {
-    // spec §4:超时者本会话缺席(不进名字目录)。#378 flip-back 会让迟到
-    // 连接翻回 connected 并 registerExternal(tools 侧 lazy 不进 visible
-    // 前缀,tools 不抖);目录若现读 manager.status() 则会渗回 → system 抖。
-    // B7 实证该抖动后修复:名字目录在 firstTurnReady 窗口 resolve 后冻结。
+    // The spec says a server that times out is absent for the whole session
+    // (never enters the name directory). A flip-back would turn a late
+    // connection back to connected and call registerExternal (on the tools
+    // side lazy schemas keep it out of the visible prefix, so tools don't
+    // shift); if the directory read manager.status() live it would leak back
+    // in → system would wobble. That wobble was demonstrated and fixed: the
+    // name directory freezes once the firstTurnReady window resolves.
     const { root, cleanup } = await makeTempRoot("mcp-late");
     cleanupRoots.push(cleanup);
     await plantMcpConfig(root, ["latesvc"]);
@@ -128,7 +135,7 @@ describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
       const before = await built.deps.system!();
       assert.ok(!before!.includes("latesvc"), "窗口超时 → 缺席,不进目录");
 
-      // 迟到连上(装配期窗口早已到点;测试直接 release 闸门)。
+      // Late connect (the assembly window already expired; the test releases the gate directly).
       gated.release();
       await new Promise((r) => setTimeout(r, 100));
 
@@ -161,8 +168,8 @@ describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
       mcpFirstTurnReadyTimeoutMs: MATRIX_FIRST_TURN_WINDOW_MS,
     });
     try {
-      // server 自身 connect 永不 resolve(自己的 connect 超时 60s 远大于
-      // 注入的窗口)→ 窗口到点即缺席。
+      // The server's own connect never resolves (its 60s connect timeout far exceeds
+      // the injected window) → absent the moment the window expires.
       const system = await built.deps.system!();
       assert.ok(!system!.includes("<mcp_name_directory>"));
       await assertAdjacentTurnsStable(built, "a-iii adjacent turns");
@@ -173,7 +180,7 @@ describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// b. graph 关 → 开 → 关 — 连续三次相邻轮全 deep-equal
+// b. graph off → on → off — three consecutive adjacent turns all deep-equal
 // ---------------------------------------------------------------------------
 
 describe("断言② 场景 b — graph 翻图(关→开→关)", () => {
@@ -192,20 +199,20 @@ describe("断言② 场景 b — graph 翻图(关→开→关)", () => {
       graphMode: mode,
     });
     try {
-      // 关 → 开
+      // off → on
       await assertAdjacentTurnsStable(built, "b off→on", () => {
         mode.setEnabled(true);
         built.graphAssembly!.beginRound();
       });
-      // 开 → 关
+      // on → off
       await assertAdjacentTurnsStable(built, "b on→off", () => {
         mode.setEnabled(false);
         built.graphAssembly!.beginRound();
       });
-      // 再关一轮(关 → 关)
+      // one more off turn (off → off)
       await assertAdjacentTurnsStable(built, "b off→off");
 
-      // run_graph 常驻在 tools(常驻注册,翻图不减员)
+      // run_graph stays resident in tools (registered permanently; graph flips never remove it)
       const names = built.deps.promptTools!().map((t) => t.name);
       assert.ok(names.includes("run_graph"));
     } finally {
@@ -215,7 +222,7 @@ describe("断言② 场景 b — graph 翻图(关→开→关)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// c. 会话内记忆文件落盘 — B2 快照语义
+// c. memory file landing mid-session — session snapshot semantics
 // ---------------------------------------------------------------------------
 
 describe("断言② 场景 c — 会话内记忆文件落盘", () => {
@@ -238,7 +245,7 @@ describe("断言② 场景 c — 会话内记忆文件落盘", () => {
       const system0 = await built.deps.system!();
       assert.ok(system0!.includes("b7-memory-project"));
 
-      // 会话内记忆文件落盘(ADR-0031 auto-memory 产物形态)
+      // A memory file lands mid-session (ADR-0031 auto-memory product shape)
       const { serializeMemoryEntry } =
         await import("../../../src/harness/memory/frontmatter.ts");
       const { defaultMemoryEntry } =
@@ -257,7 +264,7 @@ describe("断言② 场景 c — 会话内记忆文件落盘", () => {
         }),
         "utf8"
       );
-      // 再补一个静态层 mid-session 变更(曾经会把 catalog 拖进前缀的机制)
+      // Also mutate a static layer mid-session (the very mechanism that once dragged the catalog into the prefix)
       await writeFile(join(root, "AGENTS.md"), "b7-memory-project-v2", "utf8");
 
       const system1 = await built.deps.system!();
@@ -276,14 +283,15 @@ describe("断言② 场景 c — 会话内记忆文件落盘", () => {
 });
 
 // ---------------------------------------------------------------------------
-// d. compact 重装配 — spec §G5:messages 会废,tools + system 必须不变
+// d. compact re-assembly — messages may change, tools + system must not
 // ---------------------------------------------------------------------------
 
 describe("断言② 场景 d — compact 重装配", () => {
   it("d-i reactive compact(PromptTooLongError)前后 tools + system deep-equal", async () => {
-    // 真实装配链(deps.system / promptTools 即 build-engine 产物),adapter
-    // 换成 stub:第一回合抛 PromptTooLongError 触发 reactive compact,第二
-    // 回合纯文本收尾。compact 只重排 messages,tools/system 缝不读 messages。
+    // Real assembly chain (deps.system / promptTools are build-engine products);
+    // the adapter is a stub: turn 1 throws PromptTooLongError to trigger
+    // reactive compact, turn 2 closes with plain text. Compact only rewrites
+    // messages — the tools/system seams never read messages.
     const { root, cleanup } = await makeTempRoot("compact");
     cleanupRoots.push(cleanup);
     await mkdir(join(root, "home"), { reactive: true } as never);
@@ -301,7 +309,7 @@ describe("断言② 场景 d — compact 重装配", () => {
     const toolsBefore = built.deps.promptTools!();
     const systemBefore = await built.deps.system!();
 
-    // 长历史(触发 splitForCompaction 丢前缀)+ 压缩门槛 + reactive 触发器。
+    // Long history (makes splitForCompaction drop the prefix) + compression threshold + reactive trigger.
     const bigText = "payload ".repeat(120);
     let stepCount = 0;
     const stubModel = {
@@ -340,12 +348,12 @@ describe("断言② 场景 d — compact 重装配", () => {
     });
 
     assert.equal(result.stopReason, "completed");
-    // compact 确实发生:messages 数量远小于输入(1 + 12)。
+    // compact really happened: message count far below the input (1 + 12).
     assert.ok(
       result.messages.length < 13,
       `compact 应截短 messages,实际 ${result.messages.length}`
     );
-    // 断言② core:compact 前后 tools + system 逐字节不变。
+    // Core of this assertion: tools + system byte-identical across compact.
     assert.deepEqual(
       built.deps.promptTools!().map((t) => t.name),
       toolsBefore.map((t) => t.name)
@@ -362,7 +370,7 @@ describe("断言② 场景 d — compact 重装配", () => {
 });
 
 // ---------------------------------------------------------------------------
-// e. git 块静态 — 会话级闭包缓存
+// e. git block static — session-level closure cache
 // ---------------------------------------------------------------------------
 
 describe("断言② 场景 e — git 块静态(仓库内容变化后仍不变)", () => {
@@ -370,7 +378,7 @@ describe("断言② 场景 e — git 块静态(仓库内容变化后仍不变)",
     const { spawnSync } = await import("node:child_process");
     const gitOk =
       spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
-    if (!gitOk) return; // git 不在 PATH 时跳过(与 B5 同退让)
+    if (!gitOk) return; // skipped when git is not on PATH (same concession as the unit-level git tests)
 
     const repo = await mkdtemp(join(tmpdir(), "iknow-b7-git-repo-"));
     cleanupRoots.push(async () => rm(repo, { recursive: true, force: true }));
@@ -408,7 +416,7 @@ describe("断言② 场景 e — git 块静态(仓库内容变化后仍不变)",
     assert.equal(s1, s0);
     assert.ok(s0!.includes(GIT_SEGMENT_TITLE));
 
-    // 仓库内容变化:新 commit + 新文件 —— 闭包快照不重采。
+    // Repo content changes: new commit + new file — the closure snapshot never re-samples.
     await writeFile(join(repo, "b.txt"), "two\n", "utf8");
     git(["add", "."]);
     git(["commit", "-q", "-m", "c2"]);
@@ -464,7 +472,8 @@ describe("断言② 场景 e — git 块静态(仓库内容变化后仍不变)",
 });
 
 // ---------------------------------------------------------------------------
-// 矩阵收口:五场景一致性冒烟(非 deep-equal,只断言矩阵覆盖形态)
+// Matrix close-out: consistency smoke for the five scenarios (not
+// deep-equal; only asserts the matrix's coverage shapes)
 // ---------------------------------------------------------------------------
 
 describe("断言② 矩阵收口", () => {

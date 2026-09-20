@@ -1,18 +1,22 @@
 /**
- * client.ts 三件套缓存单测 — spec 251-lsp-tool（§ S9）。
+ * Unit tests for client.ts's three-piece cache (spec 251-lsp-tool).
  *
- * 覆盖 4 边界：
- *   1. same-root reuse：同 root 两次 getClient → spawn 只一次，缓存复用。
- *   2. broken memory：fakeServer.spawn 返 undefined → 永久 broken，spawn 不重试。
- *   3. inflight dedup：并发两次 → 共享同一 spawn Promise。
- *   4. cancel via $/cancelRequest：cancelRequest 发 `$/cancelRequest` 通知，**不杀**进程。
+ * Four boundaries covered:
+ *   1. same-root reuse: two getClient on one root → spawn once, cache reused.
+ *   2. broken memory: fakeServer.spawn returns undefined → permanently broken,
+ *      spawn not retried.
+ *   3. inflight dedup: two concurrent calls → share one spawn Promise.
+ *   4. cancel via $/cancelRequest: cancelRequest sends the `$/cancelRequest`
+ *      notification and does **not** kill the process.
  *
- * 测试策略：vscode-jsonrpc/node 无官方 mock，用 `vi.mock`（通过 `vi.hoisted`
- * 安全捕获引用）stub `createMessageConnection`；通过 `opts.server` 注入 fakeServer
- * 以避免触碰真实 tsserver / typescript-language-server。
+ * Strategy: vscode-jsonrpc/node has no official mock, so `vi.mock` (with
+ * `vi.hoisted` to safely capture references) stubs `createMessageConnection`;
+ * a fakeServer is injected via `opts.server` to avoid touching the real
+ * tsserver / typescript-language-server.
  *
- * 注：模块级三件套（clients/broken/inflight）跨测试共享 —— 每个测试用唯一
- * fakeServer.id 隔离 key，防 cross-test 缓存命中污染。
+ * Note: the module-level three-piece cache (clients/broken/inflight) is shared
+ * across tests — each test uses a unique fakeServer.id to isolate keys and
+ * prevent cross-test cache-hit pollution.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
@@ -31,7 +35,7 @@ import {
   Typescript,
 } from "../../../src/harness/lsp/server.ts";
 
-// ── 模块级 mock（vi.hoisted 保证 mock 工厂能引用这些） ────────────────────────
+// ── module-level mocks (vi.hoisted lets the mock factories reference these) ──
 
 const {
   mockSendRequest,
@@ -75,14 +79,14 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-// 动态导入 —— 必须在 mock 安装之后。
+// Dynamic imports — must come after the mocks are installed.
 import {
   getClient,
   cancelRequest,
   signalToCancellationToken,
 } from "../../../src/harness/lsp/client.ts";
 
-// ── fakeServer + fake child 工厂 ──────────────────────────────────────────────
+// ── fakeServer + fake child factories ─────────────────────────────────────────
 
 function makeFakeChildProcess(pid = 12345) {
   const stdin = new PassThrough();
@@ -99,9 +103,9 @@ function makeFakeChildProcess(pid = 12345) {
 }
 
 interface FakeServerOpts {
-  /** spawn factory：默认返回 ok 句柄；置 `undefined` 模拟 spawn 失败。 */
+  /** spawn factory: by default returns an ok handle; set `undefined` to simulate spawn failure. */
   spawn?: (root: string) => Promise<unknown>;
-  /** 共享 root 解析（默认固定 "/root"，让同一 id 下所有 file 共享 key）。 */
+  /** shared root resolver (default fixed "/root", so all files under one id share the key). */
   root?: (file: string) => Promise<string | undefined>;
 }
 
@@ -137,7 +141,7 @@ beforeEach(() => {
   mockDispose.mockReset();
   mockCreateConnection.mockClear();
   mockSpawn.mockClear();
-  // initialize 握手默认返能力对象。
+  // The initialize handshake returns a capabilities object by default.
   mockSendRequest.mockResolvedValue({ capabilities: {} });
 });
 
@@ -155,10 +159,10 @@ describe("getClient same-root reuse", () => {
     const second = await getClient(ctx, "/root/b.ts", { server });
 
     expect(first).toBeDefined();
-    expect(second).toBe(first); // 同一 client 实例（同一 root 同一 server.id）
-    expect(calls.spawn).toBe(1); // spawn 只一次
+    expect(second).toBe(first); // same client instance (same root, same server.id)
+    expect(calls.spawn).toBe(1); // spawn happens once
     expect(mockCreateConnection).toHaveBeenCalledTimes(1);
-    // initialize 握手只发了一次。
+    // the initialize handshake was sent only once.
     expect(mockSendRequest).toHaveBeenCalledTimes(1);
     expect(mockSendRequest).toHaveBeenCalledWith(
       "initialize",
@@ -169,12 +173,14 @@ describe("getClient same-root reuse", () => {
   });
 });
 
-// ── 1b. initialized 通知（T6 生产正确性修复）──────────────────────────────
+// ── 1b. the `initialized` notification (production-correctness fix) ───────────
 //
-// 锚点 client.ts spawnClient：initialize 响应后必须补发 `initialized` 通知，
-// pyright 实测不 gate——收不到 initialized 则忽略后续所有请求；tsserver 不 gate
-// 所以 TS 原本正常，补发对 tsserver 兼容。断言：spawnClient 发 initialize 后
-// 恰好补发一次 initialized 通知（探针不再另行补发，避免 double-init）。
+// Anchor client.ts spawnClient: after the initialize response, an `initialized`
+// notification must be sent. In practice pyright does gate — with no
+// `initialized` it ignores all subsequent requests; tsserver does not gate, so
+// TS worked already and the extra notification is compatible with it. Assert:
+// spawnClient sends exactly one `initialized` after initialize (the probe does
+// not re-send, avoiding double-init).
 
 describe("spawnClient sends initialized after initialize", () => {
   it("sends exactly one `initialized` notification after the initialize handshake", async () => {
@@ -186,7 +192,7 @@ describe("spawnClient sends initialized after initialize", () => {
     const initCalls = mockSendNotification.mock.calls.filter(
       (c) => c[0] === "initialized"
     );
-    expect(initCalls).toHaveLength(1); // 恰好一次，不 double-init
+    expect(initCalls).toHaveLength(1); // exactly once, no double-init
     expect(initCalls[0][1]).toEqual({});
   });
 });
@@ -196,7 +202,7 @@ describe("spawnClient sends initialized after initialize", () => {
 describe("getClient broken memory", () => {
   it("returns undefined on spawn failure and does not retry", async () => {
     const { server, calls } = makeFakeServer("broken", {
-      spawn: async () => undefined, // 模拟 typescript-language-server 缺失
+      spawn: async () => undefined, // simulate typescript-language-server missing
     });
 
     const first = await getClient(ctx, "/root/x.ts", { server });
@@ -204,7 +210,7 @@ describe("getClient broken memory", () => {
 
     expect(first).toBeUndefined();
     expect(second).toBeUndefined();
-    expect(calls.spawn).toBe(1); // broken 之后不重试
+    expect(calls.spawn).toBe(1); // no retry once broken
   });
 });
 
@@ -223,8 +229,9 @@ describe("getClient inflight dedup", () => {
     const p1 = getClient(ctx, "/root/conc.ts", { server });
     const p2 = getClient(ctx, "/root/conc.ts", { server });
 
-    // 让两个 getClient 都跨过 root await 阶段，inflight.set 完成、p2 命中 inflight。
-    // 此时 spawn 仅触发一次（p1 那次），p2 直接复用 inflight Promise。
+    // Let both getClient calls cross the root-await stage so inflight.set
+    // completes and p2 hits inflight. At this point spawn has fired once (p1's);
+    // p2 reuses the inflight Promise directly.
     await vi.waitFor(() => expect(calls.spawn).toBe(1));
 
     const child = makeFakeChildProcess();
@@ -235,7 +242,7 @@ describe("getClient inflight dedup", () => {
 
     const [c1, c2] = await Promise.all([p1, p2]);
     expect(c1).toBeDefined();
-    expect(c2).toBe(c1); // 同一实例（共享一次 spawn）
+    expect(c2).toBe(c1); // same instance (shared one spawn)
     expect(calls.spawn).toBe(1);
   });
 });
@@ -250,7 +257,7 @@ describe("cancelRequest", () => {
     expect(client).toBeDefined();
     if (!client) throw new Error("expected client from fakeServer");
 
-    // spyOn 需要方法已存在（fake child 已带 stub `kill: () => true`）。
+    // spyOn needs the method to already exist (the fake child carries a stub `kill: () => true`).
     const killSpy = vi.spyOn(client.process, "kill");
 
     await cancelRequest(client, 42);
@@ -262,14 +269,15 @@ describe("cancelRequest", () => {
   });
 });
 
-// ── 5. sendRequest 实参数目（回归 #-32602）──────────────────────────────────
+// ── 5. sendRequest argument count (regression -32602) ─────────────────────────
 //
-// 复现：lsp.ts handler 调 `client.sendRequest(method, params, token)`，token 来自
-// `signalToCancellationToken(execCtx.signal).token`（可能为 undefined）。改动前
-// 包装层 `sendRequest: (method, params, token) => connection.sendRequest(method,
-// params, token)` **总是**传 3 个实参 → vscode-jsonrpc `numberOfParams=2` → 把
-// named params 包成位置数组 `[params, null]` 发出 → tsserver 返 -32602。
-// 修复：token 缺席时只传 2 个实参（named params 单参）。
+// Repro: the lsp.ts handler calls `client.sendRequest(method, params, token)`,
+// where token comes from `signalToCancellationToken(execCtx.signal).token` (may
+// be undefined). Before the fix the wrapper `sendRequest: (method, params,
+// token) => connection.sendRequest(method, params, token)` **always** passed 3
+// arguments → vscode-jsonrpc saw numberOfParams=2 → wrapped the named params
+// into a positional array `[params, null]` → tsserver returned -32602. Fix:
+// when the token is absent, pass only 2 arguments (named params as one arg).
 
 describe("client sendRequest param arity (regression -32602)", () => {
   function makeParams() {
@@ -291,7 +299,7 @@ describe("client sendRequest param arity (regression -32602)", () => {
 
     await client.sendRequest("textDocument/definition", makeParams());
 
-    // 关键断言：只有 2 个实参（method + params），**没有**第 3 个 token 实参。
+    // Key assertion: only 2 arguments (method + params), **no** 3rd token argument.
     expect(mockSendRequest).toHaveBeenCalledTimes(1);
     const call = mockSendRequest.mock.calls[0];
     expect(call).toHaveLength(2);
@@ -309,7 +317,7 @@ describe("client sendRequest param arity (regression -32602)", () => {
     mockSendRequest.mockReset();
     mockSendRequest.mockResolvedValue([]);
 
-    // 真实 token：signalToCancellationToken 返回的 source.token（Q2/A9 cancel 路径）。
+    // A real token: the source.token returned by signalToCancellationToken (cancel path).
     const cancel = signalToCancellationToken(new AbortController().signal);
     try {
       await client.sendRequest(
@@ -330,18 +338,20 @@ describe("client sendRequest param arity (regression -32602)", () => {
   });
 });
 
-// ── 6. spawn throw 漏洞回归（exception）──────────────────────────────────────
+// ── 6. spawn-throw gap regression (exception) ────────────────────────────────
 //
-// 漏洞（修复前 client.ts:92-105）：spawnClient(...).then(...).finally(...) 无
-// .catch → spawn 抛错时 throw 传播为 rejection、never 触达 `broken.add` →
-// broken 不记忆该 key → 下次调用重试 spawn、rejection 逃逸成 unhandled。
+// Gap (client.ts:92-105 before the fix): spawnClient(...).then(...).finally(...)
+// had no .catch → when spawn threw, the throw propagated as a rejection and
+// never reached `broken.add` → the key was not memoized as broken → the next
+// call retried spawn and the rejection escaped as unhandled.
 //
-// 修复：task 链加 `.catch(() => { broken.add(key); return undefined; })` —— 把
-// spawn throw 归一为不可用，与 spawn return undefined 同路径（broken 记忆、
-// 返 undefined、handler 转哨兵）。
+// Fix: add `.catch(() => { broken.add(key); return undefined; })` to the task
+// chain — normalize a spawn throw into "unavailable", same path as spawn
+// returning undefined (memoize broken, return undefined, handler maps to a
+// sentinel).
 //
-// 此测试是漏洞回归：把 .catch 删掉就会变红（断言 getClient 不 rejects、spawn
-// 不被重试、broken 记忆生效）。
+// This test is the gap regression: remove the .catch and it turns red (assert
+// getClient does not reject, spawn is not retried, broken memo holds).
 
 describe("getClient spawn exception", () => {
   it("spawn throw is treated as unavailable (memoized broken, no retry, no unhandled rejection)", async () => {
@@ -351,21 +361,21 @@ describe("getClient spawn exception", () => {
       },
     });
 
-    // 第一次：spawn 抛错 → getClient 归一为 undefined（不向上抛 unhandled）。
+    // First: spawn throws → getClient normalizes to undefined (no unhandled throw upward).
     const first = await getClient(ctx, "/root/a.ts", { server });
     expect(first).toBeUndefined();
     expect(calls.spawn).toBe(1);
 
-    // 第二次：broken 记忆生效，不再重试 spawn（spawn 仍是 1）。
+    // Second: broken memo holds, spawn is not retried (spawn count stays 1).
     const second = await getClient(ctx, "/root/b.ts", { server });
     expect(second).toBeUndefined();
     expect(calls.spawn).toBe(1);
   });
 });
 
-// ── 7. signalToCancellationToken 已 aborted signal 立即 cancel（exception）───
+// ── 7. signalToCancellationToken: an already-aborted signal cancels immediately (exception) ─
 //
-// 锚点 client.ts:194-196：`if (signal.aborted) source.cancel()` 分支。
+// Anchor client.ts:194-196: the `if (signal.aborted) source.cancel()` branch.
 
 describe("signalToCancellationToken", () => {
   it("aborted signal cancels token immediately", () => {
@@ -375,14 +385,15 @@ describe("signalToCancellationToken", () => {
     const { token, dispose } = signalToCancellationToken(ac.signal);
 
     expect(token.isCancellationRequested).toBe(true);
-    // dispose 是 no-op（listener 从未注册，remove 不抛）。
+    // dispose is a no-op (the listener was never registered, so remove does not throw).
     expect(() => dispose()).not.toThrow();
   });
 });
 
-// ── 8. token=null 仍走 3 实参（negative）─────────────────────────────────────
+// ── 8. token=null still takes the 3-arg path (negative) ──────────────────────
 //
-// 锚点 client.ts:164：`token !== undefined` 判断。null ≠ undefined → 走 3 参分支。
+// Anchor client.ts:164: the `token !== undefined` test. null ≠ undefined → the
+// 3-arg branch is taken.
 
 describe("client sendRequest arity — null token", () => {
   it("null token still forwards 3 args (only undefined omits)", async () => {
@@ -408,10 +419,11 @@ describe("client sendRequest arity — null token", () => {
   });
 });
 
-// ── 9. child 缺 stdout/stdin → 视为不可用，broken 记忆（empty/exception）──────
+// ── 9. child missing stdout/stdin → treated unavailable, memoized broken (empty/exception) ─
 //
-// 锚点 client.ts:125：`if (!child.stdout || !child.stdin) return undefined;`
-// 返回 undefined → 走 broken 记忆，后续不重试。
+// Anchor client.ts:125: `if (!child.stdout || !child.stdin) return undefined;`
+// Returning undefined goes into the memoized-broken path, so later calls do not
+// retry.
 
 describe("getClient missing child stdio", () => {
   it("getClient treats missing child stdout/stdin as unavailable", async () => {
@@ -432,19 +444,20 @@ describe("getClient missing child stdio", () => {
 
     expect(first).toBeUndefined();
     expect(second).toBeUndefined();
-    expect(calls.spawn).toBe(1); // broken 记忆，不重试
+    expect(calls.spawn).toBe(1); // memoized broken, no retry
   });
 });
 
-// ── 10. 首次并发失败 → 后续见 broken 不重试（concurrent）─────────────────────
+// ── 10. first concurrent call fails → later calls see broken and never retry (concurrent) ─
 //
-// 锚点 client.ts:92-103：两个并发 getClient 同 key，spawn 返 undefined（broken
-// 路径）→ 两者都 undefined、spawn 只一次、第三次见 broken 不再 spawn。
+// Anchor client.ts:92-103: two concurrent getClient on the same key, spawn
+// returns undefined (the broken path) → both undefined, spawn once, the third
+// call sees broken and does not spawn.
 
 describe("getClient concurrent first-call failure", () => {
   it("concurrent first-call failure memoizes broken so later calls never retry", async () => {
     const { server, calls } = makeFakeServer("concfail", {
-      spawn: async () => undefined, // broken 路径
+      spawn: async () => undefined, // the broken path
     });
 
     const [c1, c2] = await Promise.all([
@@ -456,13 +469,13 @@ describe("getClient concurrent first-call failure", () => {
     expect(c1).toBeUndefined();
     expect(c2).toBeUndefined();
     expect(third).toBeUndefined();
-    expect(calls.spawn).toBe(1); // 并发只 spawn 一次；broken 后第三也不重试
+    expect(calls.spawn).toBe(1); // concurrent → one spawn; after broken the third never retries
   });
 });
 
-// ── 11. cancelRequest 透传 NaN id（empty/negative）───────────────────────────
+// ── 11. cancelRequest forwards a NaN id (empty/negative) ─────────────────────
 //
-// 锚点 client.ts:214-218：`{ id: reqId }` 原样透传，不 throw。
+// Anchor client.ts:214-218: `{ id: reqId }` forwarded verbatim, no throw.
 
 describe("cancelRequest NaN id", () => {
   it("cancelRequest forwards NaN id", async () => {
@@ -474,8 +487,9 @@ describe("cancelRequest NaN id", () => {
 
     await cancelRequest(client, NaN);
 
-    // spawnClient 握手先发一次 `initialized` 通知（T6 生产正确性修复），
-    // 这里只断言 `$/cancelRequest` 那次（过滤掉握手通知）。
+    // spawnClient's handshake already sent one `initialized` notification (the
+    // production-correctness fix); here assert only the `$/cancelRequest` one
+    // (filter out the handshake notification).
     const cancelCalls = mockSendNotification.mock.calls.filter(
       (c) => c[0] === "$/cancelRequest"
     );
@@ -484,20 +498,20 @@ describe("cancelRequest NaN id", () => {
   });
 });
 
-// ── 12. getClient root=undefined → undefined,不 spawn（empty）────────────────
+// ── 12. getClient root=undefined → undefined, no spawn (empty) ───────────────
 //
-// 锚点 client.ts:84-85：`if (!root) return undefined;` 在 spawn 之前早返。
+// Anchor client.ts:84-85: `if (!root) return undefined;` early-returns before spawn.
 
 describe("getClient root undefined (empty)", () => {
   it("returns undefined without spawning when root resolves to undefined", async () => {
     const { server, calls } = makeFakeServer("root-empty", {
-      root: async () => undefined, // 无 LSP 服务（如 file 不在扩展名列表 / 跨出 workdir）
+      root: async () => undefined, // no LSP server (file outside the extension list / beyond workdir)
     });
 
     const client = await getClient(ctx, "/root/a.ts", { server });
 
     expect(client).toBeUndefined();
-    expect(calls.spawn).toBe(0); // 早返,绝不 spawn
+    expect(calls.spawn).toBe(0); // early return, never spawns
     expect(mockCreateConnection).not.toHaveBeenCalled();
   });
 
@@ -513,9 +527,10 @@ describe("getClient root undefined (empty)", () => {
   });
 });
 
-// ── 13. 缺 stderr 不影响连接建立（negative）──────────────────────────────────
+// ── 13. missing stderr does not block connection setup (negative) ────────────
 //
-// 锚点 client.ts:124-127：stdio 检查只看 stdout/stdin；stderr 走可选 `?.resume()`。
+// Anchor client.ts:124-127: the stdio check looks only at stdout/stdin; stderr
+// goes through an optional `?.resume()`.
 
 describe("getClient child with undefined stderr (negative)", () => {
   it("succeeds when only stderr is missing (stdout/stdin present)", async () => {
@@ -546,10 +561,10 @@ describe("getClient child with undefined stderr (negative)", () => {
   });
 });
 
-// ── 14. 1000 并发同 key → 单次 spawn,共享同一实例（overflow/concurrent）──────
+// ── 14. 1000 concurrent calls on the same key → one spawn, one shared instance (overflow/concurrent) ─
 //
-// 锚点 client.ts:90-105：inflight 去重。1000 并发同 (root,id) 只 spawn 一次,
-// 全部返回同一 client 实例。
+// Anchor client.ts:90-105: inflight dedup. 1000 concurrent calls with the same
+// (root,id) spawn once and all return the same client instance.
 
 describe("getClient 1000 concurrent same key (overflow)", () => {
   it("dedupes 1000 concurrent first-call spawns into a single shared client", async () => {
@@ -575,16 +590,17 @@ describe("getClient 1000 concurrent same key (overflow)", () => {
     });
 
     const results = await Promise.all(pending);
-    expect(calls.spawn).toBe(1); // 1000 并发共享一次 spawn
+    expect(calls.spawn).toBe(1); // 1000 concurrent share one spawn
     for (const r of results) expect(r).toBeDefined();
-    for (const r of results) expect(r).toBe(results[0]); // 同实例
+    for (const r of results) expect(r).toBe(results[0]); // same instance
   });
 });
 
-// ── 15. dispose 并发：释放一个 client 不影响另一 key 的 client（concurrent）───
+// ── 15. dispose concurrency: releasing one client leaves another key's client intact (concurrent) ─
 //
-// 锚点 client.ts:173：dispose 只调 connection.dispose（释放连接,不杀进程,
-// 不与三件套缓存交互）。两 key 各自独立 client,dispose 一个不波及另一个。
+// Anchor client.ts:173: dispose only calls connection.dispose (releases the
+// connection, does not kill the process, does not touch the three-piece cache).
+// Two keys each have an independent client; disposing one does not affect the other.
 
 describe("dispose isolation across keys (concurrent)", () => {
   it("disposing one client leaves another key's client usable", async () => {
@@ -604,7 +620,7 @@ describe("dispose isolation across keys (concurrent)", () => {
     clientA.dispose();
     expect(mockDispose).toHaveBeenCalledTimes(1);
 
-    // clientB 仍可发请求（dispose 只释放 clientA 的连接）。
+    // clientB can still issue requests (dispose released only clientA's connection).
     mockSendRequest.mockReset();
     mockSendRequest.mockResolvedValue([]);
     await clientB.sendRequest("textDocument/definition", { x: 1 });
@@ -612,9 +628,9 @@ describe("dispose isolation across keys (concurrent)", () => {
   });
 });
 
-// ── 16. signalToCancellationToken：live signal 后 abort → token 变 cancelled ──
+// ── 16. signalToCancellationToken: live signal aborted later → token becomes cancelled ─
 //
-// 锚点 client.ts:190-198：注册 abort listener,abort 时 source.cancel()。
+// Anchor client.ts:190-198: registers an abort listener; source.cancel() on abort.
 
 describe("signalToCancellationToken live abort (exception)", () => {
   it("token becomes cancellation-requested after signal aborts", async () => {
@@ -632,23 +648,24 @@ describe("signalToCancellationToken live abort (exception)", () => {
     const { token, dispose } = signalToCancellationToken(ac.signal);
     dispose();
     ac.abort();
-    // listener 已移除 → token 不被 cancel。
+    // The listener was removed → the token is not cancelled.
     expect(token.isCancellationRequested).toBe(false);
   });
 });
 
-// ── 17. ensureOpen 幂等（textDocument/didOpen 只发一次/文件）───────────────
+// ── 17. ensureOpen idempotency (didOpen sent exactly once per file) ──────────
 //
-// 锚点 client.ts:LspClient.ensureOpen。tsserver 对未打开文件不建 project,
-// 符号类操作全返空;handler 每次请求前 ensureOpen。本测试验证 client.ts 的
-// 幂等缓存:同文件重复 ensureOpen 只发一次 didOpen;不同文件各自发一次。
-// 用真实 spawnClient 链路(置 fake spawn 返回可读 .ts 文件 child)。
+// Anchor client.ts:LspClient.ensureOpen. tsserver builds no project for a file that
+// was never opened, so symbol queries return empty; the handler calls ensureOpen
+// before every request. This section pins the idempotent cache: repeated ensureOpen
+// on one file sends didOpen once; distinct files each send their own.
+// Uses the real spawnClient path (fake spawn returning a readable child for .ts files).
 
 describe("ensureOpen idempotency", () => {
   it("dedupes same-file ensureOpen but didOpens distinct files", async () => {
-    // 真实文件：mkdtempSync 写两个 .ts 文件,ensureOpen 必须能读到。
-    // handler 层经 client.ensureOpen(file) → readFile(file),因此文件必须
-    // 在 disk 上存在(EACCES 会让 readFile 拒绝)。
+    // Real files: mkdtempSync writes two .ts files that ensureOpen must read.
+    // The handler goes client.ensureOpen(file) → readFile(file), so the files
+    // must exist on disk (EACCES would make readFile reject).
     const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -684,10 +701,10 @@ describe("ensureOpen idempotency", () => {
       mockSendNotification.mockReset();
       mockSendNotification.mockResolvedValue(undefined);
 
-      // 同一文件 ensureOpen 两次 → 只发一次 didOpen(幂等缓存)。
+      // ensureOpen twice on one file → didOpen sent once (idempotent cache).
       await client.ensureOpen(fileA);
       await client.ensureOpen(fileA);
-      // 不同文件 → 各自发一次。
+      // Distinct files → one didOpen each.
       await client.ensureOpen(fileB);
 
       const didOpenCalls = mockSendNotification.mock.calls.filter(
@@ -698,7 +715,7 @@ describe("ensureOpen idempotency", () => {
         const p = c[1] as { textDocument: { uri: string } };
         return p.textDocument.uri;
       });
-      // pathToFileURL 编码空格/特殊字符;此处只有 ASCII,直接断言后缀。
+      // pathToFileURL encodes spaces/special chars; only ASCII here, so assert the suffix directly.
       expect(uris[0]).toMatch(/\/a\.ts$/);
       expect(uris[1]).toMatch(/\/b\.ts$/);
     } finally {
@@ -707,9 +724,10 @@ describe("ensureOpen idempotency", () => {
   });
 
   it("100 concurrent ensureOpen on same never-opened file sends didOpen only once", async () => {
-    // 回归:ensureOpen 早期实现 check-then-act 跨 await readFile → 并发 100
-    // 次同文件调用,各通过 has 检查、各发一次 didOpen(version:1 重复)。
-    // 修复:openedUris.add(uri) 在 await 之前占位;readFile 失败回滚。
+    // Regression: the early ensureOpen did check-then-act across `await readFile`,
+    // so 100 concurrent same-file calls each passed the has-check and each sent
+    // its own didOpen (duplicate version:1). Fix: openedUris.add(uri) claims the
+    // slot before the await; a readFile failure rolls it back.
     const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -754,8 +772,9 @@ describe("ensureOpen idempotency", () => {
   });
 
   it("readFile failure rolls back openedUris (next call retries)", async () => {
-    // 锚点 client.ts:ensureOpen 先 add 占位 → readFile 失败 → delete 回滚。
-    // 不回滚则失败文件永久 cache 污染,后续 ensureOpen 早返,handler 走假阳性。
+    // Anchor client.ts: ensureOpen claims the slot via add → readFile fails → delete rolls back.
+    // Without the rollback the failed file poisons the cache forever: later ensureOpen calls
+    // return early and the handler proceeds on a false positive.
     const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -787,33 +806,36 @@ describe("ensureOpen idempotency", () => {
       mockSendNotification.mockReset();
       mockSendNotification.mockResolvedValue(undefined);
 
-      // 删文件 → readFile 抛 ENOENT → ensureOpen reject 且 cache 回滚。
+      // Delete the file → readFile throws ENOENT → ensureOpen rejects and the cache rolls back.
       rmSync(file, { force: true });
       await expect(client.ensureOpen(file)).rejects.toThrow();
 
-      // 写回文件 → 再次 ensureOpen 应真发 didOpen(非占位命中)。
+      // Write the file back → the next ensureOpen must really send didOpen (not hit a stale claim).
       writeFileSync(file, "export const y = 2;\n", "utf8");
       await client.ensureOpen(file);
 
       const didOpens = mockSendNotification.mock.calls.filter(
         (c) => c[0] === "textDocument/didOpen"
       );
-      expect(didOpens).toHaveLength(1); // 回滚后真的发了一次
+      expect(didOpens).toHaveLength(1); // After the rollback, didOpen really went out once.
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
-// ── 17b. withDocumentOpen：请求级 refcount 打开/关闭 ────────────────────────
+// ── 17b. withDocumentOpen: request-scoped refcount open/close ────────────────
 //
-// 锚点 spec 251-lsp-tool.md「生命周期 / EXIT 合同 § 打开文档生命周期」+
-// client.ts:LspClient.withDocumentOpen：
-//   - 请求级 refcount：同 uri 重叠请求共享一次 didOpen，归零发 didClose；
-//   - 归零同时丢弃打开记录（version）与该 uri 的诊断缓存；
-//   - 两次调用之间文件不对 server 保持打开，下次请求重新 didOpen（读到最新文本）。
-// 复用 ensureOpen section 的真实文件 + fakeServer 手法；notification 序列是
-// 断言面（didOpen → fn → didClose），fn 内置探针记录调用时是否已打开。
+// Anchors spec 251-lsp-tool.md (document-open lifecycle under the EXIT contract) +
+// client.ts:LspClient.withDocumentOpen:
+//   - request-level refcount: overlapping requests on one uri share a single didOpen;
+//     reaching zero sends didClose;
+//   - reaching zero also drops the open record (version) and that uri's diagnostics cache;
+//   - between calls the file is not kept open for the server; the next request re-didOpens
+//     and therefore reads the latest text.
+// Reuses the ensureOpen section's real-file + fakeServer technique; the notification
+// sequence is the assertion surface (didOpen → fn → didClose), with probes inside fn
+// recording whether the document was open at call time.
 
 describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   function makeScopedFixture(id: string, fileName = "a.ts") {
@@ -841,7 +863,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
     return { dir, file, server };
   }
 
-  /** 已发出的 notification 序列（method 名数组，按发送顺序）。 */
+  /** Sequence of notifications sent so far (method names, in send order). */
   function notificationSeq(): string[] {
     return mockSendNotification.mock.calls.map((c) => String(c[0]));
   }
@@ -850,7 +872,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
     return mockSendNotification.mock.calls.filter((c) => c[0] === method);
   }
 
-  /** 手动放行的 gate（不用 sleep：交错点全部由测试显式控制）。 */
+  /** Manually released gate (no sleeps: every interleaving point is explicitly controlled). */
   function deferred(): { promise: Promise<void>; resolve: () => void } {
     let resolve!: () => void;
     const promise = new Promise<void>((r) => {
@@ -885,8 +907,9 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("closes even when fn throws (exception safety)", async () => {
-    // 现有 handler 全有 throw 路径（超时 / RPC error / ToolExecutionError）——
-    // fn 抛错必须走 finally 归零，否则打开记录与 server 侧文档永久泄漏。
+    // Every existing handler has throw paths (timeout / RPC error / ToolExecutionError) —
+    // a throwing fn must still drop the count via finally, or the open record and the
+    // server-side document leak forever.
     const { dir, file, server } = makeScopedFixture("throw");
     try {
       const client = await getClient(ctx, file, { server });
@@ -904,7 +927,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
         "textDocument/didOpen",
         "textDocument/didClose",
       ]);
-      // 归零后打开记录已丢弃 → 下次请求重新 didOpen（非假阳性复用）。
+      // The open record was dropped at zero → the next request re-didOpens (no false-positive reuse).
       expect(client.getOpenVersion(pathToFileURL(file).href)).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -948,10 +971,10 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
         return "second";
       });
 
-      // 两者都已进入作用域：共享一次 didOpen。
+      // Both scopes are entered: they share one didOpen.
       await bothEntered;
       expect(callsOf("textDocument/didOpen")).toHaveLength(1);
-      // 第二位先退出（refcount 2→1，不应 didClose），再放第一位（1→0，恰好一次）。
+      // The second exits first (refcount 2→1, no didClose yet), then the first (1→0, exactly one didClose).
       releaseSecond?.();
       await expect(second).resolves.toBe("second");
       expect(callsOf("textDocument/didClose")).toHaveLength(0);
@@ -965,17 +988,20 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("second scope entering while the first is suspended in pre-body alignment still sees the document open", async () => {
-    // 回归（S16「重叠作用域内文档始终处于打开态」）：修复前 withDocumentOpen 在
-    // `await openDocument` / `await alignToDisk` 两个 await 之后才 refs++，于是
-    // 第一个作用域在请求前对齐（alignToDisk 的 didChange）挂起时尚未占位 ——
-    // 第二个作用域看到条目、自行占位、跑完 body 并在归零时同步 delete；第一个
-    // resume 后 `openDocs.get` 已 undefined，**空手进 body**（文档已关窗口，
-    // getDocumentFingerprint 返回 undefined）。
+    // Regression: the document must stay open throughout overlapping scopes. Before
+    // the fix, withDocumentOpen did refs++ only after the `await openDocument` /
+    // `await alignToDisk` awaits, so while the first scope was suspended in
+    // pre-request alignment (alignToDisk's didChange) it had not claimed a slot —
+    // the second scope saw the entry, claimed it, ran its body and synchronously
+    // deleted at zero; when the first resumed, `openDocs.get` was already undefined
+    // and it **entered its body empty-handed** (the document sat in a closed window,
+    // getDocumentFingerprint returned undefined).
     //
-    // 交错全部由显式 gate 控制（不用 sleep）：didOpen 回执里把盘上 mtime 推后，
-    // 让第一个作用域的 alignToDisk 必然发 didChange 并挂在 gate 上；等第二个
-    // 作用域完整跑完再放行，断言两个 body 都看到文档在册，且 didOpen /
-    // didClose 各恰好一次。
+    // All interleaving is explicitly gated (no sleeps): the didOpen reply bumps the
+    // on-disk mtime so the first scope's alignToDisk must send a didChange and hang
+    // on the gate; only after the second scope completes fully is it released, then
+    // both bodies are asserted to see the document registered, with didOpen /
+    // didClose exactly once each.
     const { dir, file, server } = makeScopedFixture("align-race");
     const uri = pathToFileURL(file).href;
     try {
@@ -987,8 +1013,9 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
       let mtimeBumped = false;
       mockSendNotification.mockImplementation(async (method: string) => {
         if (method === "textDocument/didOpen" && !mtimeBumped) {
-          // 条目已登记（mtime 已记旧值），在其返回前推后盘上 mtime ——
-          // 使第一个作用域紧接着的 alignToDisk 必须发 didChange（可控挂起点）。
+          // The entry is registered (stale mtime recorded); bumping the on-disk mtime
+          // before it returns forces the first scope's following alignToDisk to send a
+          // didChange — a controllable suspension point.
           mtimeBumped = true;
           const later = new Date(Date.now() + 5000);
           utimesSync(file, later, later);
@@ -1001,7 +1028,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
         openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
         return "first";
       });
-      // 等对齐的 didChange 发出（挂起中）——此刻第一个作用域尚未进 body。
+      // Wait for the alignment didChange to be sent (suspended) — the first scope has not entered its body yet.
       await vi.waitFor(() =>
         expect(callsOf("textDocument/didChange")).toHaveLength(1)
       );
@@ -1018,7 +1045,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
       expect(openedInBody).toEqual([true, true]);
       expect(callsOf("textDocument/didOpen")).toHaveLength(1);
       expect(callsOf("textDocument/didClose")).toHaveLength(1);
-      // 归零后无残留：下次作用域重新 didOpen。
+      // No residue after zero: the next scope re-didOpens.
       expect(client.getDocumentFingerprint(uri)).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1026,10 +1053,12 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("scope whose fresh open is closed by a last exit reopens instead of entering empty-handed", async () => {
-    // H1 修复形状的另一半：占位判定与「重新 open」必须闭环。第一个作用域挂在
-    // didOpen 上（尚未占位）时，第二个作用域占位、跑完并归零 —— 归零关闭是
-    // 合法的（此刻确实无 ref 持有者）；第一个 resume 后必须**重开**并重新占位，
-    // 而不是空手进 body。didOpen / didClose 各两次即该交错的正确结果。
+    // The other half of the fix shape: the claim check and the "re-open" must close the
+    // loop. While the first scope hangs on didOpen (no claim yet), the second scope
+    // claims, runs and drops to zero — closing at zero is legitimate there (no ref
+    // holder at that moment); when the first resumes it must **re-open** and reclaim,
+    // not enter its body empty-handed. Two didOpen / two didClose is the correct
+    // outcome of this interleaving.
     const { dir, file, server } = makeScopedFixture("inflight-scope");
     const uri = pathToFileURL(file).href;
     try {
@@ -1047,7 +1076,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
         openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
         return "first";
       });
-      // 等第一次 didOpen 发出（挂起中）——此刻条目已在册，但尚无 ref。
+      // Wait for the first didOpen to be sent (suspended) — the entry is registered by now, but no ref holds it.
       await vi.waitFor(() =>
         expect(callsOf("textDocument/didOpen")).toHaveLength(1)
       );
@@ -1084,20 +1113,21 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
 
       const opens = callsOf("textDocument/didOpen");
       expect(opens).toHaveLength(2);
-      // 第二次 didOpen 携带的是**盘上最新文本**（不是首次的陈旧缓冲）。
+      // The second didOpen carries the **latest on-disk text** (not the first call's stale buffer).
       const second = opens[1][1] as {
         textDocument: { text: string; version: number };
       };
       expect(second.textDocument.text).toBe("export const a = 2;\n");
-      expect(second.textDocument.version).toBe(1); // 重新打开，version 重新计数
+      expect(second.textDocument.version).toBe(1); // Reopened: version restarts at 1
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("drops the uri diagnostics entry when refcount reaches zero", async () => {
-    // spec：归零时同时丢弃该 uri 的打开记录与该 uri 的诊断缓存 —— 否则下次
-    // 请求会用上一轮（可能已过期）的 push diagnostics 假阳性返回。
+    // Spec: reaching zero drops both the open record and the diagnostics cache for that
+    // uri — otherwise the next request would return false positives from a possibly
+    // stale round of pushed diagnostics.
     const { dir, file, server } = makeScopedFixture("diag-drop");
     try {
       const client = await getClient(ctx, file, { server });
@@ -1125,8 +1155,8 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("nested scopes on distinct files keep each open until its own exit", async () => {
-    // 多文件批量（lsp_diagnostics files）逐文件嵌套时 refcount 按 uri 独立：
-    // 内层归零不得关掉外层的文件。
+    // When a multi-file batch (lsp_diagnostics files) nests per file, the refcount is
+    // per-uri: the inner scope reaching zero must not close the outer scope's file.
     const { dir, file, server } = makeScopedFixture("nested");
     const fileB = join(dir, "b.ts");
     writeFileSync(fileB, "export const b = 1;\n", "utf8");
@@ -1138,7 +1168,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
 
       await client.withDocumentOpen(file, async () => {
         await client.withDocumentOpen(fileB, async () => undefined);
-        // 内层退出后 fileB 已 didClose，但外层 file 仍打开（无 didClose）。
+        // After the inner scope exits, fileB got its didClose but the outer file stays open (no didClose).
         expect(callsOf("textDocument/didClose")).toHaveLength(1);
       });
       expect(callsOf("textDocument/didClose")).toHaveLength(2);
@@ -1149,22 +1179,23 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("aligns an already-open document to disk before the next request (mtime change → didChange)", async () => {
-    // spec 251「盘外变更对齐」：无 watcher；仍打开的 uri 在下次请求前 stat
-    // mtime，变了就重读全文发 full-sync didChange —— 否则预热 pin 住的文档
-    // 会用旧文本服务后续请求。
+    // Spec 251 "off-disk change alignment": there is no watcher; for a still-open uri,
+    // the next request stats mtime first and, if it changed, re-reads the whole file
+    // and sends a full-sync didChange — otherwise a warmup-pinned document would serve
+    // later requests with stale text.
     const { dir, file, server } = makeScopedFixture("mtime");
     try {
       const client = await getClient(ctx, file, { server });
       if (!client) throw new Error("expected client");
-      await client.ensureOpen(file); // pin：保持打开
+      await client.ensureOpen(file); // pin: stays open
       mockSendNotification.mockReset();
       mockSendNotification.mockResolvedValue(undefined);
 
-      // 未变更 → 不对齐（不产生冗余 didChange）。
+      // Unchanged → no alignment (never a redundant didChange).
       await client.withDocumentOpen(file, async () => undefined);
       expect(callsOf("textDocument/didChange")).toHaveLength(0);
 
-      // 盘外变更（不经 edit_file / notifier）：内容 + mtime 都变。
+      // Off-disk change (not via edit_file / notifier): both content and mtime change.
       writeFileSync(file, "export const a = 9;\n", "utf8");
       utimesSync(
         file,
@@ -1180,7 +1211,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
         contentChanges: { text: string }[];
       };
       expect(payload.contentChanges[0].text).toBe("export const a = 9;\n");
-      expect(payload.textDocument.version).toBe(2); // didOpen=1 → 对齐后 +1
+      expect(payload.textDocument.version).toBe(2); // didOpen=1 → +1 after alignment
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1196,7 +1227,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
 
       await client.withDocumentOpen(file, async () => undefined);
 
-      // 请求级打开每次都现读盘 → 无需（也不应）多发一次 didChange。
+      // Request-scoped opens read the disk fresh each time → no extra didChange needed (or wanted).
       expect(callsOf("textDocument/didOpen")).toHaveLength(1);
       expect(callsOf("textDocument/didChange")).toHaveLength(0);
     } finally {
@@ -1205,9 +1236,10 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
   });
 
   it("ensureOpen concurrency placeholder still holds under refcount", async () => {
-    // 回归（沿用 17 节的两个已有断言面）：refcount 化后 ensureOpen 的
-    // 「先占位再 await readFile」语义与 readFile 失败回滚必须原样成立 ——
-    // 100 并发同文件只发一次 didOpen；读失败回滚后下次真发。
+    // Regression (reusing section 17's two existing assertion surfaces): after the
+    // refcount change, ensureOpen's "claim before await readFile" semantics and its
+    // readFile-failure rollback must hold unchanged — 100 concurrent same-file calls
+    // send one didOpen; after a read failure rolls back, the next call really sends.
     const { dir, file, server } = makeScopedFixture("ensure-regress");
     try {
       const client = await getClient(ctx, file, { server });
@@ -1220,17 +1252,18 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
       );
       expect(callsOf("textDocument/didOpen")).toHaveLength(1);
 
-      // 裸 ensureOpen 不释放：打开记录在场（预热用途，见 client.ts doc comment）。
+      // A bare ensureOpen does not release: the open record stays (warmup use; see client.ts doc comment).
       expect(client.getOpenVersion(pathToFileURL(file).href)).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  // notifyChange 与 withDocumentOpen 共用同一套打开记录 / fixture：未打开分支
-  // 直接复用请求级作用域语义（didOpen → 立即 didClose），已打开分支只发
-  // full-sync didChange。两者是「编辑同步」的两条腿，放同一 describe 复用
-  // fixture 与 notification 断言面。
+  // notifyChange and withDocumentOpen share the same open records / fixture: the
+  // not-open branch directly reuses request-scoped semantics (didOpen → immediate
+  // didClose); the already-open branch sends only a full-sync didChange. Both are
+  // the two legs of "edit sync", kept in one describe to share fixture and the
+  // notification assertion surface.
 
   it("notifyChange on a never-opened file opens then immediately closes (didOpen → didClose)", async () => {
     const { dir, file, server } = makeScopedFixture("notify-fresh");
@@ -1250,7 +1283,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
       expect(callsOf("textDocument/didOpen")).toHaveLength(1);
       expect(callsOf("textDocument/didClose")).toHaveLength(1);
       expect(callsOf("textDocument/didChange")).toHaveLength(0);
-      // 两次调用之间不对 server 保持打开：无残留打开记录。
+      // Not kept open for the server between calls: no leftover open record.
       expect(client.getDocumentFingerprint(uri)).toBeUndefined();
       expect(client.getOpenVersion(uri)).toBeUndefined();
     } finally {
@@ -1264,7 +1297,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
     try {
       const client = await getClient(ctx, file, { server });
       if (!client) throw new Error("expected client");
-      await client.ensureOpen(file); // pin：保持打开
+      await client.ensureOpen(file); // pin: stays open
       mockSendNotification.mockReset();
       mockSendNotification.mockResolvedValue(undefined);
 
@@ -1281,7 +1314,7 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
       expect(payload.contentChanges).toEqual([
         { text: "export const a = 7;\n" },
       ]);
-      // 已打开分支不重开也不关闭。
+      // The already-open branch neither re-opens nor closes.
       expect(callsOf("textDocument/didOpen")).toHaveLength(0);
       expect(callsOf("textDocument/didClose")).toHaveLength(0);
       expect(client.getOpenVersion(uri)).toBe(2);
@@ -1290,26 +1323,30 @@ describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
     }
   });
 });
-// ── 18. getClient dispatch（spec 302-lsp-multilang § client.ts，#304 决策1）───
+// ── 18. getClient dispatch by file extension ─────────────────────────────────
 //
-// `getClient` 不再硬编默认 `Typescript`，改按 `file` 扩展名经 `resolveServer`
-// 路由到对应 server；`opts.server` 注入点语义从「默认 server」变「覆盖 dispatch
-// 结果」；无匹配扩展名 → early-return `undefined`。
+// `getClient` no longer hardcodes a default `Typescript`; it routes `file` by
+// extension through `resolveServer` to the matching server. The `opts.server`
+// injection point changed meaning from "the default server" to "override the
+// dispatch result"; an extension with no match → early-return `undefined`.
 //
-// 策略：路由测试用**真实 server**（Pyright/YamlLS/JsonLS/DockerfileLS/Typescript）
-// 但对其 `spawn` 用 `vi.spyOn` 替换——返回值走 spawnClient 的 initialize 握手，
-// 需要真实 `child.stdout`/`child.stdin` 可读流，因此 spy 用 `makeFakeChildProcess()`
-// 伪造。`mockSpawn`（node:child_process 拦截）验证 dispatch 正确走到 spawn，
-// 且**不 fork**（每次调用 spy 计数恒定）。
+// Strategy: routing tests use **real server** instances
+// (Pyright/YamlLS/JsonLS/DockerfileLS/Typescript) but replace their `spawn` via
+// `vi.spyOn` — the return value goes through spawnClient's initialize handshake,
+// which needs real readable `child.stdout`/`child.stdin` streams, so the spy
+// fabricates them with `makeFakeChildProcess()`. `mockSpawn` (intercepting
+// node:child_process) verifies dispatch really reaches spawn and **does not
+// fork** (the spy count stays constant per call).
 //
-// 三件套缓存跨测试共享：Pyright/Typescript 的 NearestRoot 需要磁盘标记文件，
-// 每个测试用 `mkdtempSync` 独立目录（root 唯一 → key 唯一），避开 cross-test
-// 缓存命中污染。
+// The clients/broken/inflight cache is shared across tests: Pyright/Typescript's
+// NearestRoot needs on-disk marker files, so each test uses its own `mkdtempSync`
+// directory (unique root → unique key) to avoid cross-test cache-hit pollution.
 
 describe("getClient dispatch by extension (spec 302)", () => {
-  // real server 的 root 需要磁盘标记文件（Pyright/Typescript 的 NearestRoot）；
-  // 每个测试用 mkdtempSync 独立目录（root 唯一 → key 唯一），避开三件套
-  // cross-test 缓存命中污染。spawn 用 vi.spyOn 拦截 → 不触真实 bin。
+  // A real server's root needs on-disk marker files (Pyright/Typescript NearestRoot);
+  // each test uses its own mkdtempSync directory (unique root → unique key) to avoid
+  // cross-test cache-hit pollution on the three-piece cache. spawn is intercepted via
+  // vi.spyOn → the real binaries are never touched.
   function fakeSpawnFor() {
     const impl = async () => {
       const child = makeFakeChildProcess(
@@ -1323,8 +1360,8 @@ describe("getClient dispatch by extension (spec 302)", () => {
     return vi.fn(impl);
   }
 
-  // 断言：getClient 经 resolveServer 路由到 expected，spawn 只调一次，
-  // initialize 握手 rootUri 命中该 server 的 root。
+  // Assertion helper: getClient routes via resolveServer to expected, spawn is called
+  // exactly once, and the initialize handshake's rootUri hits that server's root.
   async function assertRoutesTo(
     file: string,
     expected: LspServerInfo,
@@ -1343,7 +1380,7 @@ describe("getClient dispatch by extension (spec 302)", () => {
           rootUri: expect.stringContaining(dir),
         })
       );
-      expect(spawnStub).toHaveBeenCalledTimes(1); // dispatch 正确且只 spawn 一次
+      expect(spawnStub).toHaveBeenCalledTimes(1); // dispatch correct, spawn called once
     } finally {
       spy.mockRestore();
     }
@@ -1378,11 +1415,12 @@ describe("getClient dispatch by extension (spec 302)", () => {
   });
 
   it("routes Dockerfile (no ext) to DockerfileLS (root = ctx.directory)", async () => {
-    // 注：`resolveServer` 用 `path.extname(file) || file` 回退——无扩展名时用
-    // **全文件名**当 key。`path.extname("/proj/Dockerfile")` 为 `""` → 回退全路径
-    // `/proj/Dockerfile`，不匹配 DockerfileLS.extensions["Dockerfile"]。当前
-    // 契约只支持裸文件名 `"Dockerfile"`（T2 resolveServer 行为，见 server.test.ts
-    // 217 行）；全路径 Dockerfile 路由缺口见汇报。此处测真实契约（裸名）。
+    // Note: `resolveServer` falls back to `path.extname(file) || file` — with no
+    // extension it uses the **full file name** as the key. `path.extname("/proj/Dockerfile")`
+    // is `""` → the fallback is the full path `/proj/Dockerfile`, which does not match
+    // DockerfileLS.extensions["Dockerfile"]. The current contract only supports the bare
+    // file name `"Dockerfile"` (see server.test.ts); the full-path Dockerfile routing
+    // gap is reported separately. This test pins the real contract (bare name).
     const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-docker-"));
     try {
       await assertRoutesTo("Dockerfile", DockerfileLS, dir, dir);
@@ -1423,22 +1461,23 @@ describe("getClient dispatch by extension (spec 302)", () => {
     const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-override-"));
     writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
     try {
-      // file 按扩展名本会路由到 Pyright，但 opts.server 覆盖 → fakeServer 生效。
+      // By extension, file would route to Pyright, but opts.server overrides → fakeServer takes effect.
       const client = await getClient(
         { directory: join(dir, "..") },
         join(dir, "app.py"),
         { server }
       );
       expect(client).toBeDefined();
-      expect(calls.spawn).toBe(1); // fakeServer.spawn 被调用（而非 Pyright）
+      expect(calls.spawn).toBe(1); // fakeServer.spawn invoked (not Pyright's)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("dispatch layer does not fork spawn: concurrent same file dedupes into one spawn", async () => {
-    // 与 187-210 行 inflight 去重同源，但走 dispatch 路径（不传 opts.server）：
-    // 同 .py 文件并发两次 → Pyright.spawn 只一次，返回同一 client 实例。
+    // Same source as the inflight dedup tests above, but via the dispatch path
+    // (no opts.server): two concurrent requests for the same .py file → Pyright.spawn
+    // called once, both calls get the same client instance.
     const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-conc-"));
     writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
     const file = join(dir, "app.py");
@@ -1463,8 +1502,8 @@ describe("getClient dispatch by extension (spec 302)", () => {
       });
       const [c1, c2] = await Promise.all([p1, p2]);
       expect(c1).toBeDefined();
-      expect(c2).toBe(c1); // 同一实例（dispatch 层共享一次 spawn）
-      expect(spawnStub).toHaveBeenCalledTimes(1); // 不 fork
+      expect(c2).toBe(c1); // Same instance (dispatch layer shares one spawn)
+      expect(spawnStub).toHaveBeenCalledTimes(1); // No fork
     } finally {
       spy.mockRestore();
     }

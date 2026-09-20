@@ -15,13 +15,14 @@ import { ToolExecutionError } from "../../../src/harness/errors.js";
 import type { EgressFenceSpec } from "../../../src/harness/sandbox/egress/session.js";
 
 /**
- * ADR-0092 全局档 bwrap argv 形态。
+ * ADR-0092 global-mode bwrap argv shape.
  *
- * 固定骨架:`--bind / /`(宿主真实路径可见可写) → 系统前缀 `--ro-bind`
- * (/usr /bin /lib /lib64 /etc + 盘上 /opt /snap) → 可选 `--ro-bind cwd cwd`
- * (cwdReadonly) → `--proc /proc` → `--dev-bind /dev /dev`。无 guest /tmp
- * bind、无 `--tmpfs`、无可写 home 打底 / 每身份可写根表。会话 tmp 保持宿主
- * 路径,不参与 argv。
+ * Fixed skeleton: `--bind / /` (host paths visible and writable) → system
+ * prefixes `--ro-bind` (/usr /bin /lib /lib64 /etc plus /opt /snap when
+ * present on disk) → optional `--ro-bind cwd cwd` (cwdReadonly) →
+ * `--proc /proc` → `--dev-bind /dev /dev`. No guest /tmp bind, no `--tmpfs`,
+ * no writable-home base or per-identity writable root table. Session tmp
+ * stays on its host path and never enters argv.
  */
 
 const FIX_ROOT = mkdtempSync(join(homedir(), ".iknow-bwrap-global-"));
@@ -37,7 +38,7 @@ afterAll(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
 
-/** `verb <target> <target>` 三元组的全部位置。 */
+/** All positions of the `verb <target> <target>` triple. */
 function tripleIndices(
   argv: readonly string[],
   verb: string,
@@ -83,17 +84,17 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     assert.equal(argv[1], "--unshare-user-try");
     assert.equal(argv[2], "--unshare-net");
     assert.equal(argv[3], "--die-with-parent");
-    // 1. 宿主根 `/` 是第一个 mount,且必须是最后一挂的基础(此处是唯一 `/` 挂载)。
+    // 1. host root `/` is the first mount and the base the last mount wins over (the only `/` mount here).
     const rootBindIdx = assertTriple(argv, "--bind", "/", "host root bind");
     assert.equal(rootBindIdx, 4, "`--bind / /` is the first mount token");
-    // 2. 系统块:固定前缀全部 --ro-bind,位于 / 之后、顺序递增。
+    // 2. system block: all fixed prefixes are --ro-bind, after `/`, in strictly increasing order.
     let cursor = rootBindIdx;
     for (const target of READ_ONLY_SYSTEM_PATHS) {
       const idx = assertTriple(argv, "--ro-bind", target, `system ${target}`);
       assert.ok(idx > cursor, `${target} keeps the system block order`);
       cursor = idx;
     }
-    // 3. 盘上可选的 /opt /snap ro-bind 也在系统块内。
+    // 3. optional on-disk /opt /snap ro-binds belong to the same system block.
     for (const prefix of OPTIONAL_HOST_RO_PREFIXES) {
       if (existsSync(prefix)) {
         const idx = assertTriple(
@@ -112,11 +113,11 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
         );
       }
     }
-    // 4. proc/dev 收尾,均在 mount 块之后。
+    // 4. proc/dev close the block, both after all mounts.
     const procIdx = argv.indexOf("--proc");
     const devIdx = argv.indexOf("--dev-bind");
     assert.ok(procIdx > cursor && devIdx > procIdx);
-    // 5. --clearenv 先于全部 --setenv,且在 dev-bind 之后。
+    // 5. --clearenv precedes every --setenv and comes after dev-bind.
     const clearenvIdx = argv.indexOf("--clearenv");
     assert.ok(clearenvIdx > devIdx, "--clearenv follows the mount block");
     const setenvIndices = argv
@@ -126,7 +127,7 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     for (const idx of setenvIndices) {
       assert.ok(clearenvIdx < idx, "--clearenv must precede every --setenv");
     }
-    // 6. chdir + 命令收尾。
+    // 6. chdir then the command tail.
     const chdirIdx = argv.indexOf("--chdir");
     assert.ok(chdirIdx > clearenvIdx);
     assert.equal(argv[chdirIdx + 1], TASK);
@@ -140,7 +141,7 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
       false,
       "per-invocation tmpfs is retired (ADR-0092)"
     );
-    // 不存在任何以 /tmp 为终点或源点的 bind(guest /tmp 别名退役)。
+    // no bind may use the session tmp as source or `/tmp` as target (the guest-/tmp alias is retired).
     for (let i = 0; i + 2 < argv.length; i++) {
       if (argv[i] === "--bind" || argv[i] === "--ro-bind") {
         assert.notEqual(
@@ -155,7 +156,7 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
         );
       }
     }
-    // cwd 在全局档下由 `/` 挂载天然可写 —— 不再是显式 --bind cwd cwd。
+    // in global mode cwd is writable via the `/` mount itself — no explicit `--bind cwd cwd` anymore.
     assert.equal(
       tripleIndices(argv, "--bind", TASK).length,
       0,
@@ -177,7 +178,7 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
       roIdx > rootBindIdx,
       "the ro cwd override must follow `--bind / /` (last mount wins)"
     );
-    // 系统块仍在 ro cwd 之前。
+    // the system block still precedes the ro cwd override.
     const etcIdx = assertTriple(argv, "--ro-bind", "/etc", "system /etc");
     assert.ok(etcIdx < roIdx, "cwd ro override follows the system block");
     const procIdx = argv.indexOf("--proc");
@@ -217,7 +218,7 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
   });
 });
 
-// ── issue 1059 / ADR-0109:UNBOUND_FENCE 段 ──────────────────────────────────
+// ── ADR-0109: UNBOUND_FENCE segment ─────────────────────────────────────────
 
 const MAIN = mkdtempSync(join(tmpdir(), "bwrap-unbound-main-"));
 const PAD = mkdtempSync(join(tmpdir(), "bwrap-unbound-pad-"));
@@ -257,17 +258,33 @@ function unboundArgv(spec: UnboundSpec): readonly string[] {
 
 describe("createBwrapFence — UNBOUND_FENCE 段 (issue 1059)", () => {
   it("emits --ro-bind main after every writable bind, then re-binds the tmp pad writable, all before --proc/--dev-bind", () => {
-    const argv = unboundArgv({ unboundFence: { mainCheckout: MAIN, tmpPad: PAD } });
+    const argv = unboundArgv({
+      unboundFence: { mainCheckout: MAIN, tmpPad: PAD },
+    });
     const rootBindIdx = assertTriple(argv, "--bind", "/", "host root bind");
-    const roMainIdx = assertTriple(argv, "--ro-bind", MAIN, "unbound main ro-bind");
+    const roMainIdx = assertTriple(
+      argv,
+      "--ro-bind",
+      MAIN,
+      "unbound main ro-bind"
+    );
     const padIdx = assertTriple(argv, "--bind", PAD, "tmp pad rw rebind");
     const procIdx = argv.indexOf("--proc");
     const devIdx = argv.indexOf("--dev-bind");
     assert.ok(procIdx > 0 && devIdx > procIdx);
-    // last-mount-wins 合同:rw 打底 → 主 checkout 覆盖为 ro → pad 再翻回 rw → proc/dev
-    assert.ok(rootBindIdx < roMainIdx, "main ro-bind follows the writable host-root bind");
-    assert.ok(roMainIdx < padIdx, "the tmp pad rebind sits ON TOP of the main ro-bind");
-    assert.ok(padIdx < procIdx, "the whole unbound block precedes --proc/--dev-bind");
+    // last-mount-wins contract: rw base → main checkout overridden ro → pad flipped back rw → proc/dev
+    assert.ok(
+      rootBindIdx < roMainIdx,
+      "main ro-bind follows the writable host-root bind"
+    );
+    assert.ok(
+      roMainIdx < padIdx,
+      "the tmp pad rebind sits ON TOP of the main ro-bind"
+    );
+    assert.ok(
+      padIdx < procIdx,
+      "the whole unbound block precedes --proc/--dev-bind"
+    );
     // exactly one of each — no duplicate segments
     assert.equal(tripleIndices(argv, "--ro-bind", MAIN).length, 1);
     assert.equal(tripleIndices(argv, "--bind", PAD).length, 1);
@@ -282,7 +299,10 @@ describe("createBwrapFence — UNBOUND_FENCE 段 (issue 1059)", () => {
     const roMainIdx = assertTriple(argv, "--ro-bind", MAIN, "main ro-bind");
     const padIdx = assertTriple(argv, "--bind", PAD, "pad rw rebind");
     const procIdx = argv.indexOf("--proc");
-    assert.ok(roCwdIdx < roMainIdx, "cwdReadonly mount precedes the unbound block");
+    assert.ok(
+      roCwdIdx < roMainIdx,
+      "cwdReadonly mount precedes the unbound block"
+    );
     assert.ok(roMainIdx < padIdx && padIdx < procIdx);
   });
 

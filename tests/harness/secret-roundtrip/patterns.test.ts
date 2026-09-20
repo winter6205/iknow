@@ -1,13 +1,14 @@
 /**
- * patterns.test.ts — T1 secret-roundtrip SSOT — patterns.ts 验收。
+ * patterns.test.ts — SSOT acceptance tests for secret-roundtrip patterns.ts.
  *
- * 覆盖 plan #406 §3 T1:
- *   A1: 7 类内置模式各自命中（与原 secrets-guard 等价 — 单源 SSOT）
- *   A4: compilePatterns("([", "sk-[A-Z]+") → 1 编入 + 1 剔除（非法正则剔除，
- *        其余正常生效 — Constraints (a) flatMap 错误剔除语义）
- *   反例：compilePatterns([]) → 空编译集（dropped 也是空）
- *   createCompiledPatterns 工厂 = DEFAULT + extras 合并编译
- *   默认模式无真实密钥（grep 断言 — 占位正则形态 only）
+ * Coverage:
+ *   - all 7 builtin pattern classes hit individually (equivalent to the original
+ *     secrets-guard — single-source SSOT);
+ *   - compilePatterns("([", "sk-[A-Z]+") -> 1 compiled + 1 dropped (invalid
+ *     regex dropped, the rest stay effective);
+ *   - counter-example: compilePatterns([]) -> empty compiled set (dropped empty too);
+ *   - createCompiledPatterns factory = DEFAULT + extras merged in one compile;
+ *   - default patterns contain no real secret (grep assertion — placeholder regex shapes only).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -19,12 +20,12 @@ import {
 } from "../../../src/harness/secret-roundtrip/patterns.js";
 
 describe("DEFAULT_SECRET_PATTERNS — 正例（7 类内置模式）", () => {
-  // compilePatterns() 不带 g 也会命中（不带 g 也能用 .test() 检测 — 见 test）。
-  // 为统一断言，使用 compilePatterns 做一次非 g 编译（patterns.ts 用 g，
-  // 这里只关心 .test 命中 — g 不影响是否存在匹配点）。
+  // compilePatterns() hits without the g flag too (.test() works either way).
+  // Compile once without g for uniform assertions (patterns.ts uses g; here we
+  // only care about .test hits — g does not change whether a match position exists).
   const { compiled } = compilePatterns(DEFAULT_SECRET_PATTERNS);
-  // 强制去掉 g 后缀以跑 .test 单点断言（compilePatterns 用 g 是为 recognize
-  // 迭代扫描设计的；.test 在带 g 标志下仍会推进 lastIndex）。
+  // Force-strip the g suffix for single-point .test assertions (compilePatterns
+  // uses g for recognize's iterative scanning; .test still advances lastIndex under g).
   const cases: Array<{ label: string; re: RegExp; sample: string }> = [
     {
       label: "私钥块 -----BEGIN RSA PRIVATE KEY-----",
@@ -79,7 +80,7 @@ describe("DEFAULT_SECRET_PATTERNS — 反例（无害文本不命中）", () => 
   it("普通 bash 命令不命中任何模式", () => {
     const sample = "ls -la /tmp && echo hello world";
     for (const { re } of compiled) {
-      // lastIndex 重置保证每次 .test() 都从 0 开始
+      // Reset lastIndex so every .test() starts from 0
       re.lastIndex = 0;
       assert.equal(re.test(sample), false, `${re.source} 不应命中`);
     }
@@ -99,7 +100,7 @@ describe("compilePatterns — 边界（异常类边界 / 非法正则剔除）",
     assert.equal(compiled.length, 1);
     assert.equal(dropped.length, 1);
     assert.equal(dropped[0], "([");
-    // 存活正则仍能正常工作
+    // The surviving regex still works normally
     assert.equal(compiled[0]!.re.test("sk-ABCDE"), true);
   });
 
@@ -126,11 +127,12 @@ describe("compilePatterns — 边界（异常类边界 / 非法正则剔除）",
   });
 
   it("overflow：超长输入字符串在 patterns.ts 阶段不抛（stress no-throw）", () => {
-    // compilePatterns 不接触 text，只编译正则。stress test 验证 no-throw。
-    // 原 fixture "sk-AAAAAAAAAAAAAA" 仅 14 个 A，不满足 sk-[...]{20,}（需要 ≥20）→
-    // 非 sk- 模式在纯 sk- 串里也没有匹配，任何模式对无匹配输入都返回 false，
-    // `=== true` 断言不可能成立。改为含全部 7 类形态的超长串，使每条模式都真命中
-    // （fixture 修错，断言强度不变）。
+    // compilePatterns never touches text, it only compiles regexes; the stress test verifies no-throw.
+    // The old fixture "sk-AAAAAAAAAAAAAA" had only 14 A's, failing sk-[...]{20,} (needs ≥20);
+    // no non-sk- pattern matches a pure sk- string either, so for a no-match input every
+    // pattern returns false and a `=== true` assertion could never hold. Use an oversized
+    // string containing all 7 shapes so each pattern truly matches (fixture fix, assertion
+    // strength unchanged).
     const chunk = [
       "-----BEGIN RSA PRIVATE KEY-----",
       "sk-" + "A".repeat(40),
@@ -158,7 +160,7 @@ describe("createCompiledPatterns — 工厂", () => {
     const compiled = createCompiledPatterns(["MY_[0-9]{6}"]);
     assert.equal(compiled.length, 8);
     assert.equal(compiled[7]!.source, "MY_[0-9]{6}");
-    // 头部仍是默认集第一条
+    // The head is still the first default pattern
     assert.equal(compiled[0]!.source, DEFAULT_SECRET_PATTERNS[0]);
   });
   it("返回的是冻结的 ReadonlyArray", () => {
@@ -168,9 +170,9 @@ describe("createCompiledPatterns — 工厂", () => {
 });
 
 describe("DEFAULT_SECRET_PATTERNS — 占位形态 only（无真实密钥）", () => {
-  // 安全约束：默认集只能是占位正则源串，绝不含真实 sk-/AKIA 密钥。
-  // 实施性 grep：每个源串都应以某种占位形态匹配自身（priv-key-block / sk- / AKIA / ghp_ /
-  // github_pat_ / xox / id_ 形态），但不出现 base64 高熵 24+ 连续串等真实密钥特征。
+  // Safety constraint: the default set must contain placeholder regex source strings only, never a real sk-/AKIA key.
+  // Enforcement grep: every source string matches itself under some placeholder shape (priv-key-block / sk- / AKIA / ghp_ /
+  // github_pat_ / xox / id_ forms), with no real-key traits such as 24+ consecutive base64 characters.
   it("无默认源串含 24+ 连续 base64 字符（真实 key 形态）", () => {
     const realKey = /[A-Za-z0-9+\/]{24,}/;
     for (const src of DEFAULT_SECRET_PATTERNS) {

@@ -1,18 +1,18 @@
 /**
- * B4 / ADR-0043 前缀稳定 (SC2 + SC3) — MCP 工具面变更时相邻轮
- * tools + system deep-equal。
+ * ADR-0043 prefix stability — across MCP tool-surface changes, adjacent turns'
+ * tools + system must stay deep-equal.
  *
- * 行为真值:
- *   - MCP 工具 schema 不进首轮 promptTools():toAciToolDef 已 stamp
- *     `lazy: true`,visibleSchemas 仅含非 lazy 注册序前缀 + 已发现 lazy
- *     工具尾部追加(registerExternal 路径)。
- *   - MCP 工具名字目录进 system,会话内恒定:connected 后第一轮定稿,
- *     之后相邻轮字节相同。
- *   - `registerExternal` 后 inner.list() 冻结(S10 守门已 assert)。
- *   - 未 discover 的 mcp__ 工具调用 = ToolExecutionError(模板钉死)
- *     (本文件不重复验证,见 manager.test.ts tool-not-loaded)。
- *
- * 这些断言是 B4 实施「之前」的写法 → 改 is lazy 后相邻轮同 form。
+ * Behavioral ground truth:
+ *   - MCP tool schemas never enter the first turn's promptTools():
+ *     toAciToolDef stamps `lazy: true`, so visibleSchemas holds only the
+ *     non-lazy registration-order prefix plus discovered lazy tools appended
+ *     at the tail (registerExternal path).
+ *   - The MCP tool name directory lives in system and is constant within a
+ *     session: finalized on the first turn after connected; later adjacent
+ *     turns are byte-identical.
+ *   - After `registerExternal`, inner.list() is frozen.
+ *   - Invoking an undiscovered mcp__ tool = ToolExecutionError (verified in
+ *     manager.test.ts tool-not-loaded, not repeated here).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -40,8 +40,8 @@ function makeBuiltIn(name: string): AciToolDef {
 }
 
 function makeLazyMcp(name: string): AciToolDef {
-  // MCP manager.registerTools → toAciToolDef 的契约形态:lazy + category=write +
-  // interruptBehavior=cancel + tier=long(toAciToolDef SSOT)。
+  // Contract shape of MCP manager.registerTools → toAciToolDef: lazy +
+  // category=write + interruptBehavior=cancel + tier=long (toAciToolDef SSOT).
   return Object.freeze({
     name,
     description: `mcp ${name}`,
@@ -71,7 +71,7 @@ describe("MCP 工具面变更时 prefix deep-equal (SC2 / ADR-0043)", () => {
 
     const before = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(before, ["bash", "read_file"]);
-    // inner.list() 冻结:registerExternal 不会改变构造期快照
+    // inner.list() is frozen: registerExternal never changes the construction-time snapshot
     assert.equal(reg.inner.list().length, 2);
   });
 
@@ -89,7 +89,7 @@ describe("MCP 工具面变更时 prefix deep-equal (SC2 / ADR-0043)", () => {
     reg.discover("mcp__svc__alpha");
 
     const after = reg.visibleSchemas().map((t) => t.name);
-    // 非 lazy 前缀逐位稳定,discovered lazy 工具尾部追加
+    // Non-lazy prefix stable position-by-position; discovered lazy tools append at the tail
     assert.deepEqual(after, [
       "bash",
       "read_file",
@@ -97,20 +97,20 @@ describe("MCP 工具面变更时 prefix deep-equal (SC2 / ADR-0043)", () => {
       "mcp__svc__alpha",
     ]);
 
-    // 再调一次 visibleSchemas (相邻轮模型询问) — 字节级零变化
+    // Call visibleSchemas again (next-turn model query) — zero byte-level change
     const again = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(again, after);
   });
 
   it("相邻两轮 promptTools() + system() deep-equal — 连接前后不抖动场景", () => {
-    // 模拟 SC2 场景一:相邻两轮都处于 connected 之后,目录稳定;
-    // tools + system 字节级 deep-equal。
+    // Both adjacent turns sit after connected with a stable directory;
+    // tools + system are byte-level deep-equal.
     const reg = createAciRegistry([
       makeBuiltIn("bash"),
       makeBuiltIn("read_file"),
     ]);
     reg.registerExternal([makeLazyMcp("mcp__svc__ping")]);
-    reg.discover("mcp__svc__ping"); // 模型走 tool_search 加载
+    reg.discover("mcp__svc__ping"); // the model loads it via tool_search
 
     const toolsTurn1 = reg.visibleSchemas();
     const systemTurn1 =

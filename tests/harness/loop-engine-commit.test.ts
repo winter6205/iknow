@@ -1,22 +1,25 @@
 /**
- * #620 T3 (spec session-jsonl-resume D4):turn 内 commit —— assistant 消息与
- * 每个 tool_result 落权威历史后,立刻经 host 注入的 `commitMessages` 钩子上盘;
- * loop-engine 自身零 IO(Gate B:无 session-api 类型 / 无 store IO 入内核)。
+ * In-turn commit: once the assistant message and each tool_result land in the
+ * authoritative history, they flush to disk immediately through the
+ * host-injected `commitMessages` hook; loop-engine itself performs zero IO
+ * (Gate B: no session-api types / no store IO inside the kernel).
  *
- * 覆盖:
- *   1. acceptance(plan T3 验收):stub 两工具串行,第一个 tool_result 已
- *      commit 后中断(第二次 tool_result commit 抛错模拟崩溃)→ 盘上 JSONL
- *      有 assistant 事件与第一条 tool_result,无第二条;
- *   2. ordering/content:commit 序列 = [assistant] → [user(tr_a)] →
- *      [user(tr_b)] → [assistant final];tool_result 事件内容与进权威历史的
- *      encoded block 逐块一致(encodeToolResults 是逐元素 map);内存侧仍是
- *      单条 user message 装全部 tool_result(byte-identical 纪律);
- *   3. failure policy:assistant commit 抛错 → MessageCommitError(cause
- *      保留)中止 run,工具阶段不执行;不重试、不吞咽;
- *   4. static guard:loop 路径源码(loop-engine.ts / tools/executor.ts /
- *      index.ts)无 store IO 词(appendEvents / store.save / writeFile /
- *      appendFile / readFile / checkpoint / session-api import);全
- *      src/harness 无 appendEvents / store.save 引用。
+ * Coverage:
+ *   1. acceptance: stub with two sequential tools; abort after the first
+ *      tool_result commit (second commit throws to simulate a crash) → on-disk
+ *      JSONL holds the assistant event and the first tool_result, not the second;
+ *   2. ordering/content: commit sequence = [assistant] → [user(tr_a)] →
+ *      [user(tr_b)] → [assistant final]; tool_result event content matches the
+ *      encoded blocks entering authoritative history block-by-block
+ *      (encodeToolResults is an element-wise map); in memory all tool_results
+ *      still sit in a single user message (byte-identical discipline);
+ *   3. failure policy: assistant commit throws → run aborts with
+ *      MessageCommitError (cause preserved) before the tool phase; no retry,
+ *      no swallowing;
+ *   4. static guard: loop-path sources (loop-engine.ts / tools/executor.ts /
+ *      index.ts) contain no store-IO vocabulary (appendEvents / store.save /
+ *      writeFile / appendFile / readFile / checkpoint / session-api import);
+ *      all of src/harness has no appendEvents / store.save references.
  */
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -48,7 +51,7 @@ import {
 
 // -- fixtures ----------------------------------------------------------------
 
-// D2 boundary fixture: shape-compatible with AnthropicNativeMessage without
+// Boundary fixture: shape-compatible with AnthropicNativeMessage without
 // pulling a deep import graph (mirror of session-store.test.ts shape helpers).
 function assistantMsgShape(text: string): AnthropicNativeMessage {
   return {
@@ -91,7 +94,7 @@ function emptySessionFile(id: string): SessionFileV1 {
   };
 }
 
-/** 两工具串行的 stub 装配:alpha → "result-a",beta → "result-b"。 */
+/** Stub wiring with two sequential tools: alpha → "result-a", beta → "result-b". */
 function twoToolDeps(opts: {
   readonly commitMessages?: LoopEngineDeps["commitMessages"];
   readonly onToolRun?: (name: string) => void;
@@ -139,7 +142,7 @@ function twoToolDeps(opts: {
   };
 }
 
-// -- 1. acceptance: 边跑边写,半截 turn 盘上可见 ------------------------------
+// -- 1. acceptance: commit-as-you-run, mid-turn state visible on disk --------
 
 describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
   it("盘上 JSONL 有 assistant 事件与第一条 tool_result,无第二条", async () => {
@@ -149,7 +152,7 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
       projectDir: sessionDir,
       conversationId: id,
     });
-    // host 侧前置:会话 JSONL 已存在(hub createSession / chat bootstrap 语义)。
+    // Host-side precondition: the conversation JSONL already exists (hub createSession / chat bootstrap semantics).
     await store.save({ id, file: emptySessionFile(id) });
 
     const boom = new Error("simulated crash on second tool_result commit");
@@ -159,7 +162,7 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
       messages: ReadonlyArray<AnthropicNativeMessage>
     ): Promise<void> => {
       calls += 1;
-      if (calls === 3) throw boom; // 第 2 条 tool_result 的 commit = 崩溃点
+      if (calls === 3) throw boom; // second tool_result's commit = crash point
       committed.push(messages);
       await store.appendEvents({ id, events: messages });
     };
@@ -176,19 +179,19 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
       }
     );
 
-    // commit 恰好被调 3 次:assistant、tr_a、tr_b(崩溃);前两次已落盘。
+    // commit called exactly 3 times: assistant, tr_a, tr_b (crash); the first two already flushed.
     assert.equal(calls, 3);
     const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
     assert.equal(log.events.length, 2);
-    // e0 = assistant(含两个 tool_use),e1 = 第一条 tool_result 的 user message。
+    // e0 = assistant (carrying two tool_uses); e1 = the first tool_result's user message.
     assert.equal(log.events[0]!.id, "e0");
     assert.equal(log.events[0]!.parent, null);
     assert.equal(log.events[0]!.message.role, "assistant");
     assert.equal(log.events[1]!.id, "e1");
     assert.equal(log.events[1]!.parent, "e0");
     assert.equal(log.events[1]!.message.role, "user");
-    // 盘上 tool_result 块 = encoded form(与进权威历史的块同形)。
+    // On-disk tool_result block = encoded form (same shape as what enters authoritative history).
     assert.deepEqual(log.events[1]!.message.content, [
       {
         type: "tool_result",
@@ -196,13 +199,13 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
         content: [{ type: "text", text: "result-a" }],
       },
     ]);
-    // head 指向第一条 tool_result;第二条 tool_result 绝不在盘上。
+    // head points at the first tool_result; the second tool_result must never reach disk.
     assert.equal(log.head, "e1");
     assert.ok(
       !raw.includes('"tool_use_id":"b"'),
       "second tool_result must NOT be on disk"
     );
-    // 投影 = 崩溃时刻的权威 transcript 前缀。
+    // projection = the authoritative transcript prefix as of the crash moment.
     const projected = projectSessionLog(log);
     assert.equal(projected.messages.length, 2);
     assert.equal(projected.messages[0]!.role, "assistant");
@@ -220,8 +223,8 @@ describe("T3 ordering: commit 序列与内容", () => {
       thinkingMs?: number
     ): Promise<void> => {
       commits.push([...messages]);
-      // D2:thinkingMs 仅在 assistant commit 批次携带;tool_result 批次
-      // thinkingMs === undefined(committed[1] / [2])。
+      // thinkingMs is carried only on assistant commit batches; tool_result
+      // batches see thinkingMs === undefined (committed[1] / [2]).
       if (messages[0]?.role === "assistant") {
         assert.equal(
           thinkingMs,
@@ -240,7 +243,7 @@ describe("T3 ordering: commit 序列与内容", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 2);
 
-    // 4 次 commit,每次恰好一条消息,顺序与权威历史一致。
+    // 4 commits, exactly one message each, ordered as in authoritative history.
     assert.equal(commits.length, 4);
     for (const batch of commits) assert.equal(batch.length, 1);
     assert.equal(commits[0]![0]!.role, "assistant");
@@ -248,16 +251,16 @@ describe("T3 ordering: commit 序列与内容", () => {
     assert.equal(commits[2]![0]!.role, "user");
     assert.equal(commits[3]![0]!.role, "assistant");
 
-    // 内存侧 byte-identical 纪律:两个 tool_result 仍合并在单条 user message。
+    // Memory-side byte-identical discipline: both tool_results still merged into one user message.
     assert.equal(result.messages.length, 4);
     const memoryToolMsg = result.messages[2]!;
     assert.equal(memoryToolMsg.role, "user");
     assert.equal(memoryToolMsg.content.length, 2);
 
-    // 盘上(钩子所见)块与内存块逐块一致 —— encoded form 同源。
+    // Blocks seen by the hook (disk side) match the memory blocks block-by-block — same encoded-form source.
     assert.deepEqual(commits[1]![0]!.content[0], memoryToolMsg.content[0]);
     assert.deepEqual(commits[2]![0]!.content[0], memoryToolMsg.content[1]);
-    // assistant / final assistant 与内存同形。
+    // assistant / final assistant same shape as memory.
     assert.deepEqual(commits[0]![0], result.messages[1]);
     assert.deepEqual(commits[3]![0], result.messages[3]);
   });
@@ -296,13 +299,14 @@ describe("T3 failure policy: commit 失败", () => {
   });
 });
 
-// -- 4. D2 (tui-display-consistency): thinkingMs commit seam -------------------
+// -- 4. thinkingMs commit seam ------------------------------------------------
 
 describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", () => {
-  // D2 stub harness: stub 流式臂在 step 返回前手工注入 thinkingMs(adapter
-  // 内部测量是真实 SDK 流式路径,stub 模型不模拟;此处直接给 stub-model 的
-  // AssistantTurnResult 写值,模拟"adapter 已测量"的形态,验证 commit 缝 +
-  // hub 接线的端到端形态)。
+  // Stub harness: the stub streaming arm stamps thinkingMs manually before
+  // step returns (real measurement lives in the SDK streaming path inside the
+  // adapter, which the stub model does not simulate; writing the value on
+  // stub-model's AssistantTurnResult mimics "adapter already measured" to
+  // verify the commit-seam + hub wiring end to end).
   function stubWithThinkingMs(
     thinkingMsByStep: ReadonlyArray<number | undefined>
   ): AssistantTurnResult[] {
@@ -353,7 +357,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
     };
     await run("go", deps);
 
-    // 3 个 commit:assistant(1500) → tool_result user → assistant final(2300)。
+    // 3 commits: assistant(1500) → tool_result user → assistant final(2300).
     assert.deepEqual(committedThinking, [1500, undefined, 2300]);
     const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
@@ -408,7 +412,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
     };
     await run("go", deps);
 
-    // 全部 undefined → 全部 缺席。
+    // All undefined → all absent.
     assert.deepEqual(committedThinking, [undefined, undefined, undefined]);
     const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
@@ -419,7 +423,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
         `event ${event.id} must NOT carry thinkingMs when adapter measures undefined`
       );
     }
-    // Load projection 走 spread-discipline:全链均无 → 不挂 key。
+    // Load projection follows spread discipline: nothing carries it → no key.
     const projected = projectSessionLog(log);
     assert.equal(
       "thinkingMs" in projected,
@@ -429,8 +433,9 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
   });
 
   it("边界非法(thinkingMs <= 0 / 非有限数) → appendEvents 过滤不挂 key", async () => {
-    // 通过 store 层(commit 缝不引入校验,store 入口过滤)验证边界形态:
-    // 直接调 store.appendEvents,传入非法值 → 不挂 key。
+    // Boundary shape verified at the store layer (the commit seam adds no
+    // validation; the store entry filters): call store.appendEvents directly
+    // with illegal values → no key stamped.
     const { store, sessionDir } = await storeFor();
     const id = "d2-boundary";
     await store.save({ id, file: emptySessionFile(id) });
@@ -452,9 +457,9 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
         .split("\n")
         .filter((l) => l.trim().length > 0)
         .map((l) => JSON.parse(l) as Record<string, unknown>);
-      // 找 appended message record(type:"message") —— save() 写过 0 events
-      // 但留旧 head:null,appendEvents 追加 message + 新 head,所以 message
-      // 不一定在 lines[1],用 filter 定位。
+      // Find the appended message record (type:"message") — save() wrote 0
+      // events but left a stale head:null, then appendEvents adds message + new
+      // head, so the message is not necessarily at lines[1]; locate via filter.
       const messageRecord = lines.find((l) => l?.["type"] === "message") as
         Record<string, unknown> | undefined;
       assert.ok(messageRecord, "appended message record must exist in JSONL");
@@ -467,7 +472,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
   });
 });
 
-// -- 4. static guard: loop 路径零 store IO -------------------------------------
+// -- 4. static guard: zero store IO on the loop path --------------------------
 
 describe("T3 static guard: harness 零 IO 守门", () => {
   const HARNESS_DIR = join(import.meta.dirname, "..", "..", "src", "harness");

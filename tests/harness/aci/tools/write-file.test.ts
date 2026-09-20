@@ -109,7 +109,7 @@ describe("write_file — successful writes", () => {
 
     assert.equal(result.meta.newContent, content);
     assert.equal(result.meta.oldContent, "");
-    // output 是纯文案,不含 meta JSON(oldContent / newContent 不进 model 面)。
+    // output is plain text, no meta JSON (oldContent / newContent never reach the model face).
     assert.ok(!result.output.includes("oldContent"));
     assert.ok(!result.output.includes("newContent"));
   });
@@ -193,9 +193,11 @@ describe("write_file — rejection and containment", () => {
 
 describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)", () => {
   it("SC4: 写 /tmp 绝对路径仍拒——文案含活 taskRoot 路径与「/tmp 非交付落点」说明", async () => {
-    // SC4: bash 围栏允许 /tmp（进程临时面），但耐久写只落 taskRoot。
-    // 失败文案必须把这两件事都说清：当前写根 = 活 taskRoot（含路径），
-    // /tmp 不是交付落点 —— 模型据此用相对路径重试，而不是把交付物写进 /tmp。
+    // The bash fence permits /tmp (process temp face), but durable writes land
+    // only in taskRoot. The failure message must spell out both facts: the
+    // current write root = live taskRoot (path included) and /tmp is not a
+    // delivery destination — so the model retries with a relative path instead
+    // of writing deliverables into /tmp.
     const root = await makeScratch("write-file-sc4-");
     const tool = createWriteFileTool(root);
 
@@ -220,7 +222,7 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
   });
 
   it("SC5: 相对活 taskRoot 的合法路径（含尚未存在的子目录）可完成写入", async () => {
-    // SC5: 目标父目录不存在 ≠ outside；create_directories 默认建目录后落盘。
+    // A missing target parent dir ≠ outside; create_directories defaults to creating dirs before writing.
     const root = await makeScratch("write-file-sc5-missing-subdir-");
     const cell: LiveTaskRoot = createLiveTaskRoot(root);
     const tool = createWriteFileTool(cell);
@@ -234,7 +236,7 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
   });
 
   it("SC5: create_directories=false 时缺父目录是 typed「parent directory does not exist」，不是 outside", async () => {
-    // SC5: 可执行错误必须可区分于 containment 拒绝——文案不得含 outside。
+    // An actionable error must stay distinguishable from a containment rejection — the message must not contain "outside".
     const root = await makeScratch("write-file-sc5-nodir-");
     const tool = createWriteFileTool(root);
 
@@ -253,7 +255,7 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
   });
 
   it("表 B overflow: 极深相对路径仍在 taskRoot 下——写入成功，不报 outside", async () => {
-    // 表 B overflow（工具面）：前缀裁决按整条链生效，极深合法路径不炸成 outside。
+    // Overflow on the tool face: prefix adjudication applies along the whole chain, so a very deep legal path must not blow up as "outside".
     const root = await makeScratch("write-file-sc5-deep-");
     const tool = createWriteFileTool(root);
     const deepRel =
@@ -267,8 +269,9 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
 
 describe("write_file — no patch-level lint (W4: whole-file content written verbatim)", () => {
   it("accepts content with balanced braces/brackets and unclosed chars inside comments and strings", async () => {
-    // 整文件写入不需要 patch 级 lint;只有 edit_file 才走 lintPatch
-    // 这里含合法代码片段(平衡括号)+ 注释/字符串里看似不闭合的字符(实为字面量)
+    // Whole-file writes need no patch-level lint; only edit_file goes through lintPatch.
+    // The content below mixes legitimate code (balanced brackets) with chars inside
+    // comments/strings that look unclosed but are literals.
     const root = await makeScratch("write-file-allow-");
     const file = join(root, "ok.ts");
     const content = [
@@ -297,7 +300,7 @@ describe("write_file — no patch-level lint (W4: whole-file content written ver
   });
 
   it("does not emit 'lint rejected' messages for legitimate whole-file content", async () => {
-    // 整文件通过 - 不抛 ToolExecutionError
+    // The whole file passes — no ToolExecutionError thrown.
     const root = await makeScratch("write-file-no-lint-");
     const tool = createWriteFileTool(root);
 
@@ -334,21 +337,22 @@ describe("write_file — handler input validation", () => {
 });
 
 describe("createWriteFileTool — live taskRoot (T5)", () => {
-  // T5 (plans/worktree-live-task-root.md §6) — write_file 与 edit_file 在
-  // **handler 调用时**取根（不再闭包冻结装配期根）。门禁未翻 ⇒ 装配期根未翻转
-  // 时行为与今日逐字节一致；本组用例覆盖以下三件：
-  //   (a) LiveTaskRoot 参数 + 翻转 cell → 第二次调用落到新根；
-  //   (b) 一次 handler 内 resolve 与写入用同一个根值（D2 batch 快照的
-  //       per-call 单读；cell.read() 在 handler 入口被调一次）；
-  //   (c) 字符串参数的行为与今日逐字节一致（已由既有测试覆盖；这里钉
-  //       出工厂与 handler 共存的两条 cell 字面量）。
+  // write_file, like edit_file, resolves the root **at handler call time**
+  // (no more assembly-time root frozen in a closure). While the cell never
+  // flips, behavior stays byte-identical to the string-root form; these cases
+  // cover:
+  //   (a) LiveTaskRoot param + a flipped cell → the second call lands on the new root;
+  //   (b) within one handler call, resolve and write use the same root value
+  //       (per-call single read; cell.read() is called once at handler entry);
+  //   (c) the string param behaves byte-identically to today (already covered
+  //       by existing tests; here we pin the coexistence of both factory forms).
   it("(a) handler reads root at call time — rebind mid-lifecycle writes to new root", async () => {
     const initialRoot = await makeScratch("write-file-live-initial-");
     const reboundRoot = await makeScratch("write-file-live-rebound-");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
     const tool = createWriteFileTool(cell);
 
-    // 第一次调用：写在 initialRoot
+    // First call: writes into initialRoot
     await tool.handler({ path: "first.ts", content: "first\n" });
     assert.equal(
       await readFile(join(initialRoot, "first.ts"), "utf8"),
@@ -356,17 +360,17 @@ describe("createWriteFileTool — live taskRoot (T5)", () => {
     );
     assert.equal(await doesNotExist(join(reboundRoot, "first.ts")), true);
 
-    // rebind —— 模拟 host seam 成功 resolve 后 cell 被翻转
+    // rebind — simulates the cell flipping after the host seam resolves successfully
     writeLiveTaskRoot(cell, reboundRoot);
 
-    // 第二次调用：写在 reboundRoot
+    // Second call: writes into reboundRoot
     await tool.handler({ path: "second.ts", content: "second\n" });
     assert.equal(
       await readFile(join(reboundRoot, "second.ts"), "utf8"),
       "second\n"
     );
     assert.equal(await doesNotExist(join(initialRoot, "second.ts")), true);
-    // 第一次写仍在那棵老树，没被搬走
+    // The first write is still in the old tree, not moved
     assert.equal(
       await readFile(join(initialRoot, "first.ts"), "utf8"),
       "first\n"
@@ -374,18 +378,19 @@ describe("createWriteFileTool — live taskRoot (T5)", () => {
   });
 
   it("(b) within one handler call, resolve and write use the same root snapshot (D2)", async () => {
-    // D2:一次 handler 调用 resolve 与写入用同一个根值（不得 resolve 用新根、
-    // 写入用旧根）。这里用一个会被翻转的 cell —— handler 必须先把根快照下来
-    // 再用快照值 resolve；handler 进行中翻 cell，handler 内的写入必须仍落
-    // 入先 resolve 的同一根。
+    // Within one handler call, resolve and write must use the same root value
+    // (never resolve against the new root while writing to the old one). The
+    // cell here flips mid-flight: the handler must snapshot the root first and
+    // resolve with that snapshot; a flip during the handler must still land
+    // writes in the originally resolved root.
     const initialRoot = await makeScratch("write-file-d2-initial-");
     const reboundRoot = await makeScratch("write-file-d2-rebound-");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
     const tool = createWriteFileTool(cell);
 
-    // 钩 cell.read：在第一次 read 之后立即翻 cell；handler 内部任何后续 read
-    // 都会看到 reboundRoot —— 所以 handler 必须把第一次 read 的结果钉在局部
-    // 变量上复用。
+    // Hook cell.read: flip the cell right after the first read; any later read
+    // inside the handler would see reboundRoot — so the handler must pin the
+    // first read's result in a local and reuse it.
     const origRead = cell.read;
     let reads = 0;
     cell.read = () => {
@@ -399,9 +404,9 @@ describe("createWriteFileTool — live taskRoot (T5)", () => {
 
     await tool.handler({ path: "d2.ts", content: "snapshotted\n" });
 
-    // handler 必须只读 cell 一次（D2 per-call 快照）
+    // The handler must read the cell exactly once (per-call snapshot)
     assert.equal(reads, 1, "handler must snapshot cell.read() exactly once");
-    // 写入必须落在 initialRoot（snapshot 时的值），不是 reboundRoot
+    // The write must land in initialRoot (the snapshotted value), not reboundRoot
     assert.equal(
       await readFile(join(initialRoot, "d2.ts"), "utf8"),
       "snapshotted\n"
@@ -410,8 +415,9 @@ describe("createWriteFileTool — live taskRoot (T5)", () => {
   });
 
   it("(c) factory accepts LiveTaskRoot and a string is byte-identical to today", async () => {
-    // 门禁未翻（T10 才翻）⇒ 装配期根 = `sandboxRoot` 是 cell 初值；用 string
-    // 直接传与 LiveTaskRoot 包同一字面量行为逐字节一致。
+    // While the cell never flips, the assembly-time root = `sandboxRoot` is the
+    // cell's initial value; passing a plain string and wrapping the same
+    // literal in a LiveTaskRoot behave byte-identically.
     const root = await makeScratch("write-file-byte-");
     const stringTool = createWriteFileTool(root);
     const cellTool = createWriteFileTool(createLiveTaskRoot(root));
@@ -426,7 +432,7 @@ describe("createWriteFileTool — live taskRoot (T5)", () => {
     })) as { output: string };
 
     assert.equal(r1.output, r2.output);
-    // byte-for-byte：路径呈现、字节数都一致
+    // byte-for-byte: path rendering and byte count both identical
     assert.ok(r1.output.startsWith("[write_file] wrote 1 bytes to "));
   });
 });

@@ -182,7 +182,7 @@ describe("createSystemResolver", () => {
     expect(next).not.toContain("removed-content");
   });
 
-  // -- ADR-0042 SC6: catalog + promote 段随快照冻结 ---------------------------
+  // -- ADR-0042: catalog + promote segments freeze with the snapshot ----------
 
   it("freezes the catalog segment against a memory file landing mid-session (SC6)", async () => {
     const base = await makeContext();
@@ -197,7 +197,7 @@ describe("createSystemResolver", () => {
     expect(first).toContain("Snapshotted entry");
 
     await tick();
-    // auto-memory 落盘 mid-session (ADR-0031): catalog must stay byte-identical.
+    // auto-memory flushed to disk mid-session (ADR-0031): catalog must stay byte-identical.
     await seedMemoryEntry(ctx.memoryDir, "bbbbbbbbbbbb", "Late entry");
     // A concurrent static-layer touch is the mechanism that used to drag the
     // fresh catalog into the prefix (ADR-0042 Context / R4); under the
@@ -300,7 +300,7 @@ describe("createSystemResolver", () => {
     await expect(resolver()).resolves.toContain("project-v1");
   });
 
-  // -- review #121: 并发去重 + 装配失败不毒化缓存 -----------------------------
+  // -- concurrent dedupe + assembly failure must not poison the cache ---------
 
   it("dedupes concurrent first-call assembly (no duplicate discover/assemble)", async () => {
     const ctx = await makeContext();
@@ -309,14 +309,15 @@ describe("createSystemResolver", () => {
       "concurrent-v1"
     );
     const resolver = createSystemResolver(ctx);
-    // 同一 tick 内派发多个并发调用 —— serve 多会话共享同一 resolver 时会发生。
+    // Fire several concurrent calls in the same tick — happens when serve's
+    // multiple sessions share one resolver.
     const results = await Promise.all([
       resolver(),
       resolver(),
       resolver(),
       resolver(),
     ]);
-    // 所有并发调用应返回同一字符串,且底层 assemble 只触发一次（in-flight dedupe）。
+    // All concurrent calls return the same string and the underlying assemble fires once (in-flight dedupe).
     expect(new Set(results).size).toBe(1);
     expect(spiedAssemble).toHaveBeenCalledTimes(1);
   });
@@ -324,26 +325,30 @@ describe("createSystemResolver", () => {
   it("does not freeze a failed assembly (next call retries, then freezes)", async () => {
     const ctx = await makeContext();
     await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "retry-v1");
-    // 第一次装配失败 + 第二次成功
+    // First assembly fails, second succeeds
     mockedAssemble
       .mockRejectedValueOnce(new Error("transient failure"))
       .mockResolvedValueOnce("retry-success-content");
     const resolver = createSystemResolver(ctx);
     await expect(resolver()).rejects.toThrow("transient failure");
-    // 快照只在成功取值后建立 → 失败调用不毒化,下次调用重新 discovery + assemble
+    // The snapshot is only established after a successful read -> a failed call
+    // does not poison; the next call redoes discovery + assembly
     expect(await resolver()).toBe("retry-success-content");
-    // 成功那次才是冻结点：此后不再装配。
+    // The successful call is the freeze point: no assembly afterwards.
     expect(await resolver()).toBe("retry-success-content");
     expect(spiedAssemble).toHaveBeenCalledTimes(2);
   });
 
-  // -- live autoExtract 开关（memory-toggle-live）----------------------------
+  // -- live autoExtract toggle -------------------------------------------------
   //
-  // ADR-0042 会话级快照的成立前提是「输入构造上不可能在会话内变」。TUI
-  // /memory 面板打破了该前提：flags 是宿主持有的可变盒子，提交时翻转。
-  // resolver 因此必须读 flags 的**当前值**决定 catalog 装配（flags 在场时
-  // 覆盖 ctx.autoExtract），并暴露 invalidate() 让显式用户动作把快照作废，
-  // 下一轮重装配。这不是放弃 ADR-0042：无翻转时快照语义逐字节不变。
+  // ADR-0042's session-level snapshot rests on the premise that inputs cannot
+  // change within a session by construction. The TUI /memory panel breaks that
+  // premise: flags are a mutable box held by the host, flipped on commit. The
+  // resolver therefore must read the flags' **current value** to decide catalog
+  // assembly (when flags are present they override ctx.autoExtract), and expose
+  // invalidate() so an explicit user action voids the snapshot and the next
+  // turn re-assembles. This is not abandoning ADR-0042: without a flip, snapshot
+  // semantics stay byte-identical.
 
   it("overrides ctx.autoExtract from live flags on every resolve (flags: false hides the catalog)", async () => {
     const base = await makeContext();
@@ -406,7 +411,7 @@ describe("createSystemResolver", () => {
     mockedAssemble.mockRejectedValueOnce(new Error("early failure"));
     const resolver = createSystemResolver(ctx);
     await expect(resolver()).rejects.toThrow("early failure");
-    // 失败态下 invalidate 不改变「失败不毒化」契约。
+    // In a failed state, invalidate() does not change the "failure never poisons" contract.
     expect(() => resolver.invalidate()).not.toThrow();
     mockedAssemble.mockResolvedValueOnce("late-success");
     expect(await resolver()).toBe("late-success");

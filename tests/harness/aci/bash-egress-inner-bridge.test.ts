@@ -1,20 +1,22 @@
 /**
  * tests/harness/aci/bash-egress-inner-bridge.test.ts
  *
- * specs/egress-ssh-bridge.md T1 —— 前台 fence 命令链的**内层桥前导**接线。
+ * specs/egress-ssh-bridge.md — inner bridge preamble in the foreground fence
+ * command chain.
  *
- * 钉住的不变式：
- *   - egress session 在场 → `bash -c` 的 payload =
- *     `<spec.innerBridgeScript>\n<finalCommand>`（前导 = 自带 node 中继
- *     单桥 TCP-LISTEN→UNIX + trap kill EXIT，ADR-0107 换装；O3「全仓无
- *     内层监听装配」的清偿点在消费侧的第一处）；
- *   - 无 egress（factory 缺席 / 返 undefined / session start 失败）→
- *     payload 与 V1 baseline **byte-identical**（`<finalCommand>` 逐字节，
- *     无任何前导残留 —— invariant 3「无缝 = 无桥」的 argv 面）。
+ * Pinned invariants:
+ *   - with an egress session present, the `bash -c` payload =
+ *     `<spec.innerBridgeScript>\n<finalCommand>` (the preamble is the
+ *     bundled-node relay's single TCP-LISTEN→UNIX bridge + trap kill EXIT per
+ *     ADR-0107 — the consumer-side anchor of "no inner listener assembly in
+ *     the repo");
+ *   - no egress (factory absent / returns undefined / session start fails) →
+ *     payload byte-identical to the V1 baseline (`<finalCommand>` verbatim,
+ *     zero preamble residue — the argv face of "no seam = no bridge").
  *
- * 驱动方式：模块级 vi.mock("node:child_process") 拦截 runInSandbox 的
- * spawn（同 bash-global-mode-visibility.test.ts 先例），捕获 fence argv，
- * 不真起 bwrap 子进程、不真监听。
+ * Driving: module-level vi.mock("node:child_process") intercepts runInSandbox's
+ * spawn (precedent: bash-global-mode-visibility.test.ts) to capture the fence
+ * argv, without starting real bwrap children or listeners.
  */
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
@@ -70,7 +72,7 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
-/** 取前台 spawn 的 `bash -c` payload（argv 中 "-c" 后一项）。 */
+/** Get the `bash -c` payload of the foreground spawn (argv item after "-c"). */
 async function driveForeground(
   tool: ReturnType<typeof createBashTool>,
   command: string
@@ -121,11 +123,11 @@ describe("bash 前台命令链内层桥前导 (egress-ssh-bridge T1)", () => {
     });
     const payload = await driveForeground(tool, "echo hi");
     assert.equal(payload, `${STUB_SCRIPT}\necho hi`);
-    // 前导含单桥中继与 trap（形状 SSOT 在 session.ts 的构建器，此处钉接线）。
+    // the preamble contains the single-bridge relay and the trap (shape SSOT is the builder in session.ts; this pins the wiring).
     assert.ok(payload.includes("egress-tcp-relay.mjs"));
     assert.ok(payload.includes(" 3128 "));
     assert.ok(payload.includes('trap "kill %1 2>/dev/null; exit" EXIT'));
-    // ADR-0107：旧宿主装包依赖字样不得回潮。
+    // ADR-0107: the old host-package-dependency wording must not resurface.
     assert.ok(!payload.toLowerCase().includes("socat"));
   });
 
@@ -146,10 +148,11 @@ describe("bash 前台命令链内层桥前导 (egress-ssh-bridge T1)", () => {
 });
 
 /**
- * F4 known_hosts 指引接线（review Spec Medium）：egress session 在场 +
- * 命令非零退出 + stderr 命中 ssh 首次未见主机形态 → 框架在回灌 stderr
- * 末尾补一行宿主侧指引（ssh-keyscan / -o UserKnownHostsFile= 组合写法）。
- * 不命中 / 无 session = envelope stderr byte-identical（零误报纪律）。
+ * known_hosts guidance wiring: egress session present + command exits
+ * non-zero + stderr matches the ssh first-unknown-host shape → the framework
+ * appends one host-side guidance line (ssh-keyscan / -o UserKnownHostsFile=
+ * combined form) at the end of the fed-back stderr.
+ * No match / no session = envelope stderr byte-identical (zero false-positive discipline).
  */
 function makeFailingChild(args: {
   readonly stderrText: string;
@@ -210,7 +213,7 @@ describe("F4 known_hosts 指引回灌（ssh 类失败文案面）", () => {
     assert.match(stderr, /ssh-keyscan/);
     assert.match(stderr, /UserKnownHostsFile=/);
     assert.ok(!stderr.includes("StrictHostKeyChecking=no"));
-    // meta 旁路与 output 同文（TUI 取数面一致）。
+    // the meta bypass carries the same text as output (consistent with the TUI data surface).
   });
 
   it("egress 在场 + 非 ssh 失败 stderr → byte-identical（零误报）", async () => {

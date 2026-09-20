@@ -1,17 +1,18 @@
 /**
- * `--glob` 的 Node 引擎实现（D4 / SC9「Node 全语义」）。
+ * Node-engine implementation of `--glob` ("Node full semantics" parity).
  *
- * 为什么要单独测：`glob` 是 `type` 之外的第二个收窄维度，rg 引擎交给 rg 自
- * 己判，Node 引擎走这里 —— 两边不等价就是 SC9 失败。而这条路径在工具级测试
- * 里只被 `*.ts` / `sub/*.ts` 两个模式覆盖，`?` / `[...]` / `!` 否定 / 未闭合
- * `[` 这些分支没有别的地方钉住。
+ * Why test it separately: `glob` is the second narrowing dimension besides
+ * `type`; the rg engine delegates to rg itself while the Node engine goes
+ * through this module — any divergence fails parity. Tool-level tests only
+ * cover `*.ts` / `sub/*.ts`, leaving `?` / `[...]` / `!` negation / unclosed
+ * `[` untested elsewhere.
  *
- * 语义以 ripgrep 实测为准（不是自创规则）：
- *   - 不含 `/` → 按**基名**匹配任意深度；
- *   - 含 `/` → 锚定搜索根；
- *   - `*` / `?` 段内通配，`**` 跨段；
- *   - `[...]` 字符类区分大小写；
- *   - `!` 前缀是否定，与正模式并列时先收后剔。
+ * Semantics follow ripgrep as measured (not invented rules):
+ *   - no `/` in pattern → match by **basename** at any depth;
+ *   - contains `/` → anchored to the search root;
+ *   - `*` / ``? wildcard within a segment, `**` crosses segments;
+ *   - `[...]` character classes are case-sensitive;
+ *   - `!` prefix negates; with positive patterns, collect first then remove.
  */
 
 import assert from "node:assert/strict";
@@ -47,7 +48,8 @@ describe("matchOne — 锚定与基名", () => {
   it("`*` 收下任意真实基名（空 pattern 在解析层已被拒，不流到这里）", () => {
     assert.equal(matchOne("a.ts", "*"), true);
     assert.equal(matchOne("x/y/a.ts", "*"), true);
-    // 目录本身不是候选（walk 只产出文件），但带尾斜杠的路径也可判。
+    // Directories are never candidates (walk yields files only), but a
+    // trailing-slash path is still evaluable.
     assert.equal(matchOne("x/y/", "*"), true);
   });
 });
@@ -91,7 +93,7 @@ describe("matchOne — 段内元字符", () => {
         /glob/.test(error.message) &&
         /unclosed/.test(error.message)
     );
-    // 在 pattern 中间同样拒。
+    // Rejected mid-pattern too.
     assert.throws(() => assertValidGlob("a[b"), /unclosed/);
     assert.throws(() => assertValidGlob("x[!]y"), /unclosed/);
   });
@@ -103,8 +105,8 @@ describe("matchOne — 段内元字符", () => {
   });
 
   it("`[1]` 是字符类、不是字面 `[1]`（rg 实测口径）", () => {
-    // 直觉会以为 `x[1].ts` 匹配字面文件名 `x[1].ts`；rg 实际按字符类解，
-    // 匹配的是 `x1.ts`。这条钉住「按 rg 而非按直觉」。
+    // Intuition says `x[1].ts` matches the literal file `x[1].ts`; rg parses
+    // it as a character class, matching `x1.ts`. This pins "follow rg, not intuition".
     assert.equal(matchOne("x1.ts", "x[1].ts"), true);
     assert.equal(matchOne("x[1].ts", "x[1].ts"), false);
   });
@@ -128,10 +130,12 @@ describe("matchOne — brace 交替（rg 实测口径）", () => {
     assert.equal(matchOne("a.ts", "{a,}.ts"), true);
     assert.equal(matchOne("b.ts", "{a,}.ts"), false);
     assert.equal(matchOne(".ts", "{a,}.ts"), true);
-    // `{,}` 展开为空模式：空路径才可能命中，真实文件名不命中。
+    // `{,}` expands to an empty pattern: only an empty path could hit, real
+    // file names never do.
     assert.equal(matchOne("a.ts", "{,}.ts"), false);
     assert.equal(matchOne(".ts", "{,}.ts"), true);
-    // 备选里的 `/` 让整条锚定（见下），空备选仍不产生可命中的候选。
+    // A `/` inside an alternate anchors the whole pattern (see below); the
+    // empty alternate still yields no hittable candidate.
     assert.equal(matchOne("z.ts", "{sub,/}z.ts"), false);
   });
 
@@ -145,8 +149,8 @@ describe("matchOne — brace 交替（rg 实测口径）", () => {
   });
 
   it("不做 shell 区间展开：`{1..3}` 是**字面 `1..3`**（花括号只被剥掉）", () => {
-    // rg 实测：`{1..3}` 不展开成 1/2/3，而是等价于 `1..3` —— 命中名为
-    // `1..3` 的文件，不命中 `1` / `2` / `3`，也不命中字面 `{1..3}`。
+    // Measured with rg: `{1..3}` does not expand to 1/2/3 but equals `1..3` —
+    // matches a file named `1..3`, not `1` / `2` / `3`, nor the literal `{1..3}`.
     assert.equal(matchOne("1", "{1..3}"), false);
     assert.equal(matchOne("2", "{1..3}"), false);
     assert.equal(matchOne("1..3", "{1..3}"), true);
@@ -172,8 +176,9 @@ describe("matchOne — brace 交替（rg 实测口径）", () => {
 
 describe("matchOne — 锚定是整条模式的性质（brace 不改判）", () => {
   it("只要原文含 `/` 就锚定，哪怕它在 brace 备选里", () => {
-    // rg 实测：`{a,sub/only}.ts` 同时命中根下 a.ts 与 sub/only.ts；
-    // 而 `{sub/nope,zz}.ts` 不命中 sub/zz.ts（整体锚定，基名收缩失效）。
+    // Measured with rg: `{a,sub/only}.ts` hits both root a.ts and sub/only.ts;
+    // `{sub/nope,zz}.ts` does not hit sub/zz.ts (whole pattern anchors, basename
+    // fallback disabled).
     assert.equal(matchOne("a.ts", "{a,sub/only}.ts"), true);
     assert.equal(matchOne("sub/only.ts", "{a,sub/only}.ts"), true);
     assert.equal(matchOne("sub/zz.ts", "{sub/nope,zz}.ts"), false);
@@ -241,17 +246,18 @@ describe("matchesGlobSet — `!` 否定", () => {
   });
 
   it("裸 `!` → 一条都不收（不是「无正模式→全收」）", () => {
-    // 实测 rg 15.1.0：单条 `--glob '!'` rc=1（空模式不匹配任何真实路径），
-    // 同树 `--glob '!*'` 也是 rc=1。集合语义下若把它当「没有正模式」，就会
-    // 反转成列出全仓 —— 正是 Node 与 rg 分歧的那个方向。
+    // Measured with rg 15.1.0: a lone `--glob '!'` is rc=1 (empty pattern
+    // matches no real path); `--glob '!*'` on the same tree is also rc=1. If
+    // set semantics treated it as "no positive pattern", it would invert into
+    // listing the whole repo — exactly the direction Node and rg diverge.
     for (const path of ["a.ts", "sub/c.ts", "anything.txt", "!"]) {
       assert.equal(matchesGlobSet(path, ["!"]), false, path);
     }
   });
 
   it("`\\!x` 是转义后的字面 `!`，仍是正模式（不是否定）", () => {
-    // 实测 rg 15.1.0：`--glob '!bang.ts'` 不剔 `!bang.ts`（回全仓）、
-    // `--glob '\!bang.ts'` 只回 `!bang.ts`。
+    // Measured with rg 15.1.0: `--glob '!bang.ts'` does not remove `!bang.ts`
+    // (returns the whole repo); `--glob '\!bang.ts'` returns only `!bang.ts`.
     assert.equal(matchesGlobSet("!bang.ts", ["\\!bang.ts"]), true);
     assert.equal(matchesGlobSet("a.ts", ["\\!bang.ts"]), false);
     assert.equal(matchesGlobSet("!bang.ts", ["!bang.ts"]), true);
@@ -259,12 +265,14 @@ describe("matchesGlobSet — `!` 否定", () => {
 });
 
 /**
- * 尾随 `/` 的模式（Finding 3）。
+ * Trailing-`/` patterns.
  *
- * rg 实测（15.1.0）：`sub/`、`a.ts/`、双星尾斜杠与 `//`、`sub//c.ts` 一样
- * 一个文件都不选 —— 空段只能匹配空名字，目录本身不是候选文件。
- * 旧实现把尾随空段 pop 掉，于是 `sub/` 退化成 `sub`、通配尾斜杠退化成通配，
- * 在 Node 路径收下一整个仓库而 rg 路径回空。
+ * Measured with rg (15.1.0): `sub/`, `a.ts/`, double-star trailing slash,
+ * `//`, and `sub//c.ts` all select zero files — an empty segment can only
+ * match an empty name, and directories themselves are not candidate files.
+ * The old implementation popped the trailing empty segment, so `sub/`
+ * degraded to `sub` and wildcard-with-slash degraded to wildcard, letting
+ * the Node path collect the whole repo where the rg path returned empty.
  */
 describe("matchOne — 尾随空段不剔除", () => {
   it("尾随 `/` 的正模式不匹配任何文件", () => {
@@ -276,7 +284,8 @@ describe("matchOne — 尾随空段不剔除", () => {
   });
 
   it("否定形态的尾随 `/` 同样按子目录剔除（`!sub/` 剔掉 sub 全子树）", () => {
-    // rg 实测：`--glob '!sub/'` 剔掉 sub/ 下的一切（含深层），`!deep/` 同理。
+    // Measured with rg: `--glob '!sub/'` removes everything under sub/ (deep
+    // included); same for `!deep/`.
     assert.equal(matchesGlobSet("a.ts", ["!sub/"]), true);
     assert.equal(matchesGlobSet("sub/c.ts", ["!sub/"]), false);
     assert.equal(matchesGlobSet("sub/deep/d.ts", ["!sub/"]), false);
@@ -290,7 +299,8 @@ describe("matchOne — 尾随空段不剔除", () => {
   });
 
   it("完整文件名 + 尾随 `/` 不是「匹配该名字」（`!a.ts/` 不剔 a.ts）", () => {
-    // rg 实测：`--glob '!a.ts/'` 回全仓（含 a.ts）—— 它不匹配任何路径。
+    // Measured with rg: `--glob '!a.ts/'` returns the whole repo (a.ts
+    // included) — it matches no path at all.
     assert.equal(matchesGlobSet("a.ts", ["!a.ts/"]), true);
     assert.equal(matchesGlobSet("sub/c.ts", ["!a.ts/"]), true);
   });

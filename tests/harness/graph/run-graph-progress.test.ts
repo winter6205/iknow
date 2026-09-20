@@ -1,7 +1,8 @@
 /**
- * run_graph → host 图进度快照（spec SC3 / plan T1）。
+ * run_graph → host graph-progress snapshots.
  *
- * 进度只经 onWave/onNode 累加后 safeEmitStream；测试不读会话 JSONL。
+ * Progress is accumulated only via onWave/onNode then emitted through
+ * safeEmitStream; tests never read the session JSONL.
  */
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";

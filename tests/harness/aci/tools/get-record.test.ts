@@ -26,27 +26,26 @@ import {
 import { TRACE_OUTPUT_BACKSTOP } from "../../../../src/traceserver/output-backstop.ts";
 
 /**
- * `get_record` on the ACI face (plan `trace-mcp-read-side-split` T6,
- * spec SC16 / SC18 / SC20 and the 内容轴 column of the 边界类 × 三面 table).
+ * `get_record` on the ACI face — the content axis of the trace read-side tools.
  *
  * Reading, windowing and serialization are the shared core's and are pinned in
  * `tests/traceserver/`. What this file owns is the face: ACI metadata, the
  * schema bounds the executor's ajv gate enforces, and the domain-error → typed
  * error translation carrying **this face's** tool name.
  *
- * Why the SC20 mapping tests live here and not on the MCP face (plan §catch-arm
- * 通则, ACR 四轮): the MCP thin face wraps its whole handler in one catch that
- * renders any thrown error as `isError` text (`src/trace-mcp/server.ts`), so an
- * **unmapped** error still looks handled from that side — the test would pass
- * whether or not the arm exists. Only the ACI face distinguishes a translated
- * `ToolExecutionError` from a bare `Error` escaping through `throw error`, so
- * one test per raisable kind is written against this face.
+ * Why the kind-mapping tests live here and not on the MCP face: the MCP thin
+ * face wraps its whole handler in one catch that renders any thrown error as
+ * `isError` text (`src/trace-mcp/server.ts`), so an **unmapped** error still
+ * looks handled from that side — the test would pass whether or not the arm
+ * exists. Only the ACI face distinguishes a translated `ToolExecutionError`
+ * from a bare `Error` escaping through `throw error`, so one test per raisable
+ * kind is written against this face.
  */
 
 const scratchPaths: string[] = [];
 const RESULT_TEXT = "tool output secret";
 const OVERSIZE_NOTE_CHARS = 25_000;
-/** T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。 */
+/** Sessions live in the two-level tree `<dir>/projects/<slug>/<convId>/trace.jsonl`. */
 const TEST_PROJECT_SLUG = "test-project-aci-get-record";
 
 function makeTraceDir(prefix = "iknow-get-record-aci-"): string {
@@ -72,7 +71,7 @@ afterEach(() => {
   }
 });
 
-/** 一条带单个 tool_result part（`RESULT_TEXT`，18 字符）的可寻址记录。 */
+/** An addressable record carrying one tool_result part (`RESULT_TEXT`, 18 chars). */
 function toolResultRow(
   conversationId: string,
   llmCallId: string,
@@ -113,9 +112,10 @@ function makeRecordDir(): string {
 }
 
 /**
- * 最大合法窗 + 一条本身就超过 backstop 的记录标量。用来证「ACI 面没有任何工具级
- * 字符帽」：本夹具的返回体远超 `TRACE_OUTPUT_BACKSTOP`，任何在薄皮上施加的帽都会
- * 立刻把它切掉。
+ * Largest legal window + a record scalar that alone exceeds the backstop.
+ * Proves the ACI face applies no tool-level character cap: this fixture's
+ * payload far exceeds `TRACE_OUTPUT_BACKSTOP`, so any cap imposed on the thin
+ * face would immediately cut it.
  */
 function makeWideRecordDir(): string {
   const dir = makeTraceDir("iknow-get-record-aci-wide-");
@@ -127,7 +127,7 @@ function makeWideRecordDir(): string {
   return dir;
 }
 
-/** 扫到 `TRACE_RECORD_ID_SCAN_LIMIT` 仍未命中：与行轴同法写满 10 001 行，不注入 reader。 */
+/** Scan to `TRACE_RECORD_ID_SCAN_LIMIT` with no hit: fills 10,001 rows like the record-axis case, no injected reader. */
 function makeScanCapDir(): string {
   const dir = makeTraceDir("iknow-get-record-aci-scan-");
   const rows = Array.from({ length: 10_001 }, (_, index) => ({
@@ -155,10 +155,11 @@ describe("get_record ACI tool", () => {
   it("reuses the core's description verbatim and claims no character cap (SC7)", () => {
     const tool = createGetRecordTool(makeRecordDir());
 
-    // 单源：两张皮共用核里那一份文案，本面不得自己拼一段。
+    // Single source: both faces share the core's one description; this face must not compose its own.
     assert.equal(tool.description, GET_RECORD_DESCRIPTION);
-    // SC7 第三条判据：description 不含任何字符帽表述。文案不提帽很容易，容易的是
-    // 日后有人「顺手补一句最多 N 字符」，所以这里正向锁一次而不是靠 review 记着。
+    // The description must contain no character-cap wording. Wording without a cap is easy
+    // today; the risk is someone later appending "at most N characters", so pin it positively
+    // here instead of relying on review.
     assert.match(tool.description, /exactly count characters/);
     assert.doesNotMatch(tool.description, /capped at \d+ characters/i);
     assert.doesNotMatch(tool.description, /at most \d+ characters/i);
@@ -175,7 +176,7 @@ describe("get_record ACI tool", () => {
 
     assert.equal(schema.type, "object");
     assert.equal(schema.additionalProperties, false);
-    // Assumption 4：本面没有「缺省 = 最近活跃会话」，两个 id 都是必填。
+    // Assumption 4: no "default = most recently active session" on this face — both ids are required.
     assert.deepEqual(schema.required, ["conversation_id", "record_id"]);
     assert.deepEqual(Object.keys(schema.properties).sort(), [
       "conversation_id",
@@ -193,8 +194,9 @@ describe("get_record ACI tool", () => {
       default: GET_RECORD_DEFAULT_COUNT,
     });
 
-    // 「同值」不能只写在 schema 里：核必须用同一对界复查，否则薄皮漏守时没人守。
-    // 这里越界走的是 handler（executor 之前那一层），消息形状即核的 `validation`。
+    // "Same bounds" cannot live only in the schema: the core must re-check with the same
+    // pair, otherwise a thin-face slip goes unguarded. This out-of-range call goes through
+    // the handler (the layer before the executor), so the message shape is the core's `validation`.
     await assert.rejects(
       () =>
         tool.handler({
@@ -221,15 +223,16 @@ describe("get_record ACI tool", () => {
     });
     const validator = reg.inner.getValidator("get_record");
 
-    // append-only 仍生效：get_record 之后的工具仅限尾部 append 的常驻读工具
-    // read_image（read-image-vision T2 / SC6）+ host 缝条件化装配的几件
-    // （task-worktree-lifecycle 的 list/remove + subagent stop/continue；
-    // 本 registry 未供任何 host 缝 / manager → 它们全数缺席）。三轴顺序
-    // （目录 → 行 → 内容）由 append 顺序体现，后来者不能悄悄把它打乱。
-    // 断言用索引而非硬编码下标，从 SSOT 派生「内容轴之后还有谁」。
+    // append-only still holds: after get_record only tail-appended residents may
+    // follow — read_image (resident read tool) plus host-seam-conditioned tools
+    // (task-worktree list/remove and subagent stop/continue; this registry supplies
+    // no host seam / manager → they are all absent). The three-axis order
+    // (directory → record → content) is expressed by append order and later
+    // additions must not reshuffle it. Assertions derive from indexOf on the SSOT
+    // rather than hardcoded subscripts, answering "who else comes after the content axis".
     const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
     const afterContentAxis = ACI_TOOLSET_NAMES.slice(getRecordIdx + 1);
-    // 本场景（无 host 缝）下：get_record 之后入注册表的只剩常驻的 read_image。
+    // In this scenario (no host seam): only the resident read_image remains after get_record.
     assert.ok(getRecordIdx > 0, "get_record 必须在 list_sessions 之后");
     const presentNames = reg.inner.list().map((d) => d.name);
     assert.deepEqual(
@@ -239,9 +242,9 @@ describe("get_record ACI tool", () => {
     );
     assert.equal(reg.catalog.get("get_record")?.name, "get_record");
     assert.ok(validator, "the registry must compile a validator for the tool");
-    // 界真的由 ajv 执行：每条测都钉住一条具体边界,不只是写在 schema 里。
-    assert.equal(validator!({ conversation_id: "c1" }), false); // record_id 必填
-    assert.equal(validator!({ record_id: "r" }), false); // conversation_id 必填
+    // The bounds are really enforced by ajv: every assertion pins a concrete boundary, not just text in the schema.
+    assert.equal(validator!({ conversation_id: "c1" }), false); // record_id required
+    assert.equal(validator!({ record_id: "r" }), false); // conversation_id required
     assert.equal(validator!({ conversation_id: "c1", record_id: "r" }), true);
     assert.equal(
       validator!({ conversation_id: "c1", record_id: "r", count: 0 }),
@@ -267,17 +270,17 @@ describe("get_record ACI tool", () => {
       validator!({ conversation_id: "c1", record_id: "r", byte_window: 1 }),
       false
     );
-    // append-only SSOT 纪律:内容轴之后还能 append,但只能是常驻读工具
-    // read_image（read-image-vision T2）或条件化装配件（host 缝 /
-    // subagentManager 缝）。此断言让「之后还能 append 但不得插队」
-    // 成为可测不变式。
+    // append-only SSOT discipline: tools may still be appended after the content
+    // axis, but only resident read tools (read_image) or conditioned assembly
+    // pieces (host seam / subagentManager seam). This assertion turns "may append
+    // after, must never cut in line" into a testable invariant.
     const allowedTailNames = new Set([
       "read_image",
       "list-worktrees",
       "remove-worktree",
-      // plan subagent-stop-and-continue T2/T4:stop / continue 与 spawn / result
-      // 同门（subagentManager 条件化装配）—— 本 registry 未供 manager，尾段
-      // 收敛为 [read_image] 的上文断言仍认证「条件化件全数缺席」。
+      // stop / continue share the subagentManager-conditioned family with spawn /
+      // result — this registry supplies no manager, so the tail converges to
+      // [read_image] and the assertion above still certifies "all conditioned pieces absent".
       "subagent_stop",
       "subagent_continue",
     ]);
@@ -289,12 +292,13 @@ describe("get_record ACI tool", () => {
     }
   });
 
-  // ── SC20：本面可抛的每个 kind 一条映射测 ───────────────────────────────
-  // 六条 = plan typed-error 表的五个 kind + reader 既有的 `io_error`
-  // （`TraceReadError`，src/traceserver/types.ts）。每条都要求错误真被翻译成
-  // `ToolExecutionError` 子类并带上调用方下一步要用的字段；少一条臂就是 ACI 面上
-  // 泄漏一个裸 `Error`，而 MCP 面的兜底 catch 会把这种泄漏照显示成 `isError` 文本
-  // （plan §catch-arm 通则），所以只有这里能证明臂存在。
+  // ── One mapping test per error kind this face can raise ─────────────────
+  // Six cases = the five typed-error kinds + the reader's existing `io_error`
+  // (`TraceReadError`, src/traceserver/types.ts). Each requires the error to be
+  // genuinely translated into a `ToolExecutionError` subclass carrying the
+  // fields the caller needs next; a missing arm means a bare `Error` leaks on
+  // the ACI face, and the MCP face's catch-all would render that leak as
+  // `isError` text — only this face can prove the arm exists.
 
   it("maps `validation` instead of leaking it bare", async () => {
     const tool = createGetRecordTool(makeRecordDir());
@@ -326,9 +330,10 @@ describe("get_record ACI tool", () => {
       (error: unknown) => {
         assert.ok(error instanceof GetRecordWindowOverflowError);
         assert.ok(error instanceof ToolExecutionError);
-        // 判据是「窗必须整个落在 part 内」（plan 第 14 条），所以正确回答是
-        // 「改坐标就能读全」，不是「顺手给一页截好的」：任何 part 正文出现在错误里
-        // 都意味着本 kind 存在的理由被实现自己推翻了。
+        // The criterion is "the window must land wholly inside the part", so the right
+        // answer is "fix the coordinates and read in full", not "hand over a truncated
+        // page": any part body appearing in the error would mean the implementation
+        // overturns this kind's very reason to exist.
         assert.ok(!error.message.includes(RESULT_TEXT));
         assert.ok(!error.message.includes("secret"));
         assert.equal(error.kind, "window_overflow");
@@ -363,8 +368,9 @@ describe("get_record ACI tool", () => {
   });
 
   it("maps `session_not_found` separately from `record_not_found`", async () => {
-    // 两条主张不同：「这个会话没被读到」vs「读完了，没有这条」。合成一个 kind 就会
-    // 把前者说成后者，所以各占一条测（plan 第 14 条把该 kind 从 T7 前移到 T6）。
+    // Two different claims: "this session was never read" vs "read it fully, no such
+    // record". Merging them into one kind would state the former as the latter, so each
+    // gets its own test.
     const tool = createGetRecordTool(makeRecordDir());
 
     await assert.rejects(
@@ -400,12 +406,13 @@ describe("get_record ACI tool", () => {
           "get_record: record_id scan exhausted after 10000 records before finding 'past-scan-cap'",
       "expected a mapped record_scan error"
     );
-    // 扫帽分支要写满并扫完 10 001 行：与行轴同一条测一样超时放宽（实测同夹具
-    // 单跑约 4~6 s），不动 vitest.config.ts 的全局 testTimeout。
+    // The scan-cap branch writes and exhausts 10,001 rows: same relaxed timeout as the
+    // record-axis twin (measured ~4-6s standalone with this fixture), without touching
+    // the global testTimeout in vitest.config.ts.
   }, 120_000);
 
   it("maps the reader's `io_error` (TraceReadError) instead of leaking it bare", async () => {
-    // T6 (SC14–SC17): under the two-level tree, `findConversationTraceFile` stat
+    // Under the two-level tree, `findConversationTraceFile` stat
     // requires a *file* at `<convDir>/trace.jsonl` (a directory named like the
     // file no longer passes the discovery gate — it now reads as
     // session_not_found). The deterministic io_error left on this OS is a
@@ -429,9 +436,9 @@ describe("get_record ACI tool", () => {
       () => tool.handler({ conversation_id: "c1", record_id: "llm-target" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
-        // 本 kind 刻意复用基类：IO 失败不是参数问题，所以不带 `field`；仓库的
-        // `ToolExecutionError` 本身没有 `kind` 通道（同 query_trace / list_sessions
-        // 对 IO 的裁定）。
+        // This kind deliberately reuses the base class: IO failure is not a parameter
+        // problem, so no `field`; the repo's `ToolExecutionError` has no `kind` channel
+        // either (same verdict as query_trace / list_sessions for IO).
         !(error instanceof GetRecordValidationError) &&
         !(error instanceof GetRecordNotFoundError) &&
         !(error instanceof GetRecordSessionNotFoundError) &&
@@ -443,10 +450,12 @@ describe("get_record ACI tool", () => {
   });
 
   it("prefixes its own tool name over a core that names no tool (SC16)", async () => {
-    // 前缀归薄皮、核消息归核（plan §前缀归属）。两头都在这里钉：核那侧证明消息里
-    // 一个工具名都没有（所以薄皮漏加前缀就是真的没人点名），薄皮这侧证明恰好加一次
-    // （漏了 `strip` 就会打双前缀）。五个便宜 kind 逐个比对；record_scan 要扫满
-    // 10 001 行，它的完整消息已由上面那条测逐字钉住。
+    // The prefix belongs to the thin face, the message to the core. Both ends are pinned
+    // here: the core side shows the message names no tool at all (so a thin face that
+    // forgets the prefix leaves the error unnamed), the thin-face side shows it is added
+    // exactly once (dropping `strip` would double-prefix). All five cheap kinds are
+    // compared one by one; record_scan must scan 10,001 rows and its full message is
+    // already pinned verbatim by the test above.
     const dir = makeRecordDir();
     const core = createGetRecordCore({ traceDir: dir });
     const face = createGetRecordTool(dir);
@@ -498,13 +507,15 @@ describe("get_record ACI tool", () => {
   });
 
   it("applies no tool-level character cap on this face (SC7)", async () => {
-    // ADR-0006 D6：工具级管「读多少」（这里是 `count` 这个 read unit），executor
-    // 管「输出不超多少」。所以本面既不得给自己加帽，也不得提前套 MCP 面那个
-    // `TRACE_OUTPUT_BACKSTOP` —— 加了就是 ADR-0006:29 禁止的双层截断。
+    // ADR-0006 D6: the tool level owns "how much to read" (here the `count` read unit);
+    // the executor owns "how much output may be". So this face must neither add its own
+    // cap nor pre-apply the MCP face's `TRACE_OUTPUT_BACKSTOP` — doing either would be
+    // the double truncation ADR-0006 forbids.
     //
-    // 夹具故意让返回体远超 `TRACE_OUTPUT_BACKSTOP`（一条 25 000 字符的记录标量 +
-    // 一个满额窗），于是「薄皮自己没帽」这件事在这里是可伪的：任何在 ACI 面上施加
-    // 的帽都会让下面的整发返回断言红。
+    // The fixture deliberately pushes the payload far beyond `TRACE_OUTPUT_BACKSTOP`
+    // (a 25,000-char record scalar + a full-size window), so "the thin face has no cap"
+    // is falsifiable here: any cap applied on the ACI face reddens the full-return
+    // assertions below.
     const tool = createGetRecordTool(makeWideRecordDir());
     const output = (await tool.handler({
       conversation_id: "c1",
@@ -524,7 +535,7 @@ describe("get_record ACI tool", () => {
       part_chars: number;
       record: { oversize_note: string };
     };
-    // `count` 是真正的 read unit：满额窗一字不差地回来。
+    // `count` is the real read unit: the full-size window comes back uncut.
     assert.equal(body.text.length, GET_RECORD_MAX_COUNT);
     assert.equal(body.count, GET_RECORD_MAX_COUNT);
     assert.equal(body.part_chars, GET_RECORD_MAX_COUNT);
@@ -535,8 +546,8 @@ describe("get_record ACI tool", () => {
 
 describe("get_record ACI tool -- role projection (v1.2)", () => {
   it("carries role on detail=messages manifest parts through the ACI face (v1.2 判据 a)", async () => {
-    // v1.2 判据 (a): detail=messages 清单臂每个 part 携带所属 message 的 role.
-    // 通过 ACI 工具调用路径验证投影的 part 列表中每条都带 role.
+    // In detail=messages, every manifest part carries the role of its owning message.
+    // Verified through the ACI tool-call path so the projected part list is what's checked.
     const dir = makeTraceDir("iknow-get-record-aci-role-");
     writeSession(dir, "c-role", [
       {
@@ -567,7 +578,7 @@ describe("get_record ACI tool -- role projection (v1.2)", () => {
       parts: Array<{ role?: string; message_index?: number }>;
     };
 
-    // 3 parts, roles 跟随所属 message: [user, assistant, user]
+    // 3 parts, roles follow the owning message: [user, assistant, user]
     assert.equal(body.parts.length, 3);
     assert.equal(body.parts[0]?.role, "user");
     assert.equal(body.parts[1]?.role, "assistant");
@@ -575,8 +586,8 @@ describe("get_record ACI tool -- role projection (v1.2)", () => {
   });
 
   it("omits role on detail=tool_results manifest parts (tool_result 按定义在 user 侧)", async () => {
-    // v1.2 判据 (a) 收尾: tool_results parts 上**不加** role (与 messages
-    // 臂对照, 钉住「缺席」而非 null/undefined).
+    // Counterpart for the messages arm: tool_results parts must NOT carry role —
+    // pinned as "absent", not null/undefined.
     const tool = createGetRecordTool(makeRecordDir());
 
     const output = (await tool.handler({
@@ -595,7 +606,8 @@ describe("get_record ACI tool -- role projection (v1.2)", () => {
   });
 
   it("window arm response carries no role key on the ACI face (四禁)", async () => {
-    // 窗正文寻址已有 message_index, role 在清单臂给出. 窗臂不添 role.
+    // Window content addressing already carries message_index; role comes from the
+    // manifest arm. The window arm adds no role.
     const tool = createGetRecordTool(makeRecordDir());
 
     const output = (await tool.handler({

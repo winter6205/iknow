@@ -4,9 +4,9 @@
  * Tests for the `compileDeclarativePermissions` compiler (ADR-0090).
  *
  * Boundary classes covered:
- *   - SC4 (Bash): specifier → regex, compound-command segmentation, wrapper
+ *   - Bash: specifier → regex, compound-command segmentation, wrapper
  *     stripping, `:*` tail, `*` token boundary, family membership.
- *   - SC5 (Read/Edit): gitignore-style paths, anchor modes (`//`, `~/`, `/`,
+ *   - Read/Edit: gitignore-style paths, anchor modes (`//`, `~/`, `/`,
  *     relative), depth semantics (deny/ask any-depth, allow top-level),
  *     Read deny widening to write tools.
  *   - Syntax parsing: family aliases, `Tool(*)` ≡ bare `Tool`, literal
@@ -53,7 +53,7 @@ function compileOne(
 }
 
 /* -----------------------------------------------------------------------------
- * SC4 — Bash specifier matching
+ * Bash specifier matching
  * -------------------------------------------------------------------------- */
 
 describe("SC4: Bash specifier matching", () => {
@@ -206,7 +206,7 @@ describe("Bash: family aliases and tool-name slot", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * SC5 — Read / Edit path matching
+ * Read / Edit path matching
  * -------------------------------------------------------------------------- */
 
 describe("SC5: Read / Edit path matching", () => {
@@ -682,7 +682,7 @@ describe("Order: deny group precedes allow; first match in same group wins", () 
       ["deny", "ask", "allow"],
       "all three decisions compile as command globs"
     );
-    // 命令 glob 语义:匹配命令文本,而非 input 的 network 字段。
+    // Command-glob semantics: matches the command text, not the input's network field.
     assert.equal(
       rules[0]!.match(makeInput("bash", { command: "network:true" })),
       true,

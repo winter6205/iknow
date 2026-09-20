@@ -1,11 +1,10 @@
 /**
- * #121 T3: promote.ts tests (loadUsageSidecar / recordRecall / eligibleForPromote /
+ * Tests for promote.ts (loadUsageSidecar / recordRecall / eligibleForPromote /
  * listPromotableEntries).
  *
- * Spec: specs/121-memory-injection.md (Testing Strategy promote half — usage.json
- * 不存在 → 创建 / 计数累加 / 跨 ≥2 distinct session_id 触发 / disabled / ttl_days
- * 过期; SC 10 promote sidecar cap ≤4000 字符按 importance 降序填充). Project
- * Structure promote.ts.
+ * Coverage (promote half): usage.json absent -> create / count accumulation /
+ * trigger across ≥2 distinct session_id / disabled / ttl_days expiry; the
+ * promote sidecar cap is ≤4000 chars, filled in descending importance order.
  *
  * promote.ts owns the usage.json sidecar (explicit read/write only) and the
  * promote eligibility gate (recall_count ≥ 2 distinct session_id).

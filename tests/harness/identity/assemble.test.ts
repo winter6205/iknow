@@ -1,6 +1,6 @@
 /**
- * #228 / SC16: memory_layer slot 降级契约 — 对齐 #196 readUserProfile 模式
- * (assemble.ts:117-131)：resolver throw → warn + skip + 不毒化下一 turn。
+ * memory_layer slot degrade contract — mirrors the readUserProfile pattern in
+ * assemble.ts: resolver throw → warn + skip + no poisoning of the next turn.
  */
 import { describe, expect, it, vi, afterEach } from "vitest";
 import {
@@ -11,8 +11,8 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// #861 renamed the discovery root: `cwd` is display-only and must never be
-// where AGENTS.md / rules are discovered (ADR-0037 §4).
+// The discovery root was renamed: `cwd` is display-only and must never be
+// where AGENTS.md / rules are discovered (ADR-0037).
 describe("projectIdentityRoot drives static instructions", () => {
   it("项目说明书取自 projectIdentityRoot 而非展示用 cwd", async () => {
     const identityRoot = await mkdtemp(join(tmpdir(), "iknow-identity-root-"));
@@ -51,7 +51,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
     try {
       const marker = "PROJECT_STATIC_INSTRUCTIONS";
       await writeFile(join(cwd, "AGENTS.md"), marker);
-      // projectIdentityRoot is required since #861/#862 — the static
+      // projectIdentityRoot is required — the static
       // instruction path runs assembleStaticSystemPrompt, which reads
       // AGENTS.md from projectIdentityRoot, not from cwd. The cwd here
       // doubles as both the displayed project path and the discovery root.
@@ -100,8 +100,8 @@ describe("memory_layer slot — resolver 降级契约", () => {
       },
     });
     const out = (await resolver()) ?? "";
-    expect(out).toContain("iknow Identity"); // identity 层不受影响
-    expect(out).not.toContain("resolver boom"); // 错误内容不入 prompt
+    expect(out).toContain("iknow Identity"); // identity layer unaffected
+    expect(out).not.toContain("resolver boom"); // error content never enters the prompt
     expect(warn).toHaveBeenCalled();
     const warnMsg = warn.mock.calls.map((c) => c.join(" ")).join(" ");
     expect(warnMsg).toContain("memory_layer resolver failed");
@@ -121,7 +121,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
   });
 });
 
-// #584 T2: persona files live only under userHome/.iknow (ignore workspaceRoot).
+// Persona files live only under userHome/.iknow (workspaceRoot is ignored).
 describe("assemble persona root is userHome (issue #584 T2)", () => {
   it("empty: missing user.md skips user_profile segment", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-assemble-empty-"));

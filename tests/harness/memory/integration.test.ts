@@ -380,7 +380,7 @@ describe("session-level snapshot", () => {
     );
 
     await tick();
-    // auto-memory 落盘 mid-session (ADR-0031) — the prefix must not budge.
+    // auto-memory flushed to disk mid-session (ADR-0031) — the prefix must not budge.
     const lateSave = createMemorySaveTool({
       memoryDir: p.memoryDir,
       now: () => FIXED_TS,

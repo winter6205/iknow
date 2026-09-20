@@ -1,15 +1,16 @@
 /**
- * wayfinder #440 Stream B — T10 read_mcp_resource 工具单测（M1/M2 决议）。
+ * read_mcp_resource unit tests.
  *
- * 覆盖 5 类输入：
- *  1. 正常路径（text 内容 / blob 内容 / 多个 contents 项）
- *  2. 空输入（manager 返回空 contents）
- *  3. 非法 / 负值（input 非对象 / server 缺失 / uri 缺失 / 类型错）
- *  4. 溢出 / 边界（大 blob / text / 空串）
- *  5. 并发 / 异常（manager 抛 typed error 透传；非 typed error 包装；并发 read）
+ * Covers 5 input classes:
+ *  1. happy path (text content / blob content / multiple contents entries)
+ *  2. empty input (manager returns empty contents)
+ *  3. invalid input (non-object input / missing server / missing uri / wrong types)
+ *  4. overflow / boundaries (large blob / large text / empty string)
+ *  5. concurrency / exceptions (typed error from manager passes through;
+ *     non-typed error gets wrapped; concurrent reads)
  *
- * 注：manager 通过 stub getManager 注入（不启真子进程）；handler 出口
- * 直接调 tool.handler()（T11 装配未启用，独立可测）。
+ * Note: the manager is injected via a stubbed getManager (no real subprocess);
+ * tests call tool.handler() directly, so the tool is testable standalone.
  */
 import { describe, expect, it } from "vitest";
 
@@ -53,7 +54,7 @@ function blob(uri: string, b64: string): McpResourceContent {
 }
 
 // =========================================================================
-// 1. 正常路径
+// 1. Happy path
 // =========================================================================
 
 describe("createReadMcpResourceTool — normal path", () => {
@@ -84,7 +85,7 @@ describe("createReadMcpResourceTool — normal path", () => {
       mimeType: "text/plain",
       text: "hello world",
     });
-    // 互斥：blob 不应出现
+    // Mutually exclusive: no blob alongside text
     expect(parsed.contents[0]).not.toHaveProperty("blob");
   });
 
@@ -108,7 +109,7 @@ describe("createReadMcpResourceTool — normal path", () => {
       mimeType: "application/octet-stream",
       blob: b64,
     });
-    // 互斥：text 不应出现
+    // Mutually exclusive: no text alongside blob
     expect(parsed.contents[0]).not.toHaveProperty("text");
   });
 
@@ -119,7 +120,7 @@ describe("createReadMcpResourceTool — normal path", () => {
       contents: [
         text("a://1", "first"),
         text("a://2", "second"),
-        { uri: "a://3", mimeType: "text/plain" }, // 仅 metadata
+        { uri: "a://3", mimeType: "text/plain" }, // metadata only
       ],
     }));
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
@@ -159,7 +160,7 @@ describe("createReadMcpResourceTool — normal path", () => {
 });
 
 // =========================================================================
-// 2. 空输入
+// 2. Empty input
 // =========================================================================
 
 describe("createReadMcpResourceTool — empty input", () => {
@@ -194,7 +195,7 @@ describe("createReadMcpResourceTool — empty input", () => {
 });
 
 // =========================================================================
-// 3. 非法 / 负值
+// 3. Invalid input
 // =========================================================================
 
 describe("createReadMcpResourceTool — invalid input", () => {
@@ -268,7 +269,7 @@ describe("createReadMcpResourceTool — invalid input", () => {
 });
 
 // =========================================================================
-// 4. 溢出 / 边界
+// 4. Overflow / boundaries
 // =========================================================================
 
 describe("createReadMcpResourceTool — overflow / boundaries", () => {
@@ -315,7 +316,7 @@ describe("createReadMcpResourceTool — overflow / boundaries", () => {
 });
 
 // =========================================================================
-// 5. 并发 / 异常
+// 5. Concurrency / exceptions
 // =========================================================================
 
 describe("createReadMcpResourceTool — concurrent / exception", () => {
@@ -347,7 +348,8 @@ describe("createReadMcpResourceTool — concurrent / exception", () => {
     });
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
     const ctrl = new AbortController();
-    // ADR-0039 推翻 M3 的旧决议：manager 已支持 signal，handler 应透传 ctx.signal。
+    // ADR-0039 overrides the earlier decision: the manager supports signal now,
+    // so the handler must pass ctx.signal through.
     await tool.handler({ server: "a", uri: "x://u" }, { signal: ctrl.signal });
     expect(received).toBe(ctrl.signal);
   });

@@ -1,25 +1,30 @@
 /**
- * Tests for egress proxy + filter behavior — T4 真实代理行为（不 mock 上游件）。
+ * Tests for egress proxy + filter behavior — real proxy behavior with
+ * unmocked upstream pieces.
  *
- * 钉住的不变式（来自 specs/network-egress-allowlist.md §SC2/SC3/SC4 + ADR-0097）：
- *   - 命中允许集 → 代理 dial 直连上游（用本地 http.Server 上游模拟外站），
- *     收到 200 响应（SC2 路径）；
- *   - 未命中允许集 → 403 + 违例记录里有 {host, reason:"not-in-allowlist"}
- *     （SC3 路径，本仓 filter 侧记录是唯一权威拒绝观测点）；
- *   - denied 集优先于 allowed：命中 denied pattern 即拒，即便 allowed 也命中；
- *   - 地址守卫：allowedDomains 命中但 DNS 解析到 denied 档（10.0.0.0/8 私网）
- *     → 403（SC4 路径）；
- *   - 节点配置：真起 http-proxy（@anthropic-ai/sandbox-runtime 件）+ filter 用真
- *     decideEgress + 真 allowedDomains 小集。
+ * Pinned invariants (from specs/network-egress-allowlist.md + ADR-0097):
+ *   - allowlist hit → the proxy dials the upstream directly (a local
+ *     http.Server stands in for the outside site) and a 200 response arrives;
+ *   - allowlist miss → 403 + a violation record {host,
+ *     reason:"not-in-allowlist"} (this repo's filter side is the only
+ *     authoritative refusal observation point);
+ *   - denied beats allowed: a denied pattern hit refuses even when allowed
+ *     also matches;
+ *   - address guard: allowedDomains hit but DNS resolves into a denied range
+ *     (10.0.0.0/8 private) → 403;
+ *   - wiring: a real http-proxy (@anthropic-ai/sandbox-runtime piece) + a
+ *     filter using the real decideEgress with a small real allowedDomains set.
  *
- * 注：本测试**不**经内层中继——它只验宿主侧代理 + filter 逻辑（裸 http
- * server listen unix socket 的端到端由 probe 承担）。沙箱内侧
- * 半桥（O3 欠账）已由 egress-ssh-bridge T1 清偿（ADR-0107 换装为自带
- * node 中继）：内层脚本装配在
- * `egress-session.test.ts`（buildInnerBridgeScript / spec 形状 / auth env）
- * 与 `bash-egress-inner-bridge.test.ts`（前台命令链前导 + 无缝
- * byte-identical 基线）钉形，端到端可达性由 `npm run probe:sandbox`
- * 的 egress 类别承担（经真内层中继的端到端正探针，ADR-0107）。
+ * Note: this test does **not** go through the inner relay — it verifies only
+ * the host-side proxy + filter logic (end-to-end of a bare http server on a
+ * unix socket is carried by probes). The sandbox-side inner half-bridge was
+ * retired by the egress-ssh-bridge work (ADR-0107 replaced it with the
+ * bundled node relay): inner-script assembly is pinned in
+ * `egress-session.test.ts` (buildInnerBridgeScript / spec shape / auth env)
+ * and `bash-egress-inner-bridge.test.ts` (foreground command-chain preamble +
+ * seamless byte-identical baseline), and end-to-end reachability is carried
+ * by the egress category of `npm run probe:sandbox` (a real inner-relay
+ * positive probe, ADR-0107).
  */
 
 import { createServer, type Server as HttpServer } from "node:http";
@@ -37,8 +42,9 @@ import {
 } from "../../../src/harness/sandbox/egress/violations.js";
 
 /**
- * 起一个本地 HTTP 上游（假装是外站）—— 返回 200 + body。
- * 监听 127.0.0.1（不绑 0.0.0.0，避免对外暴露监听面）。
+ * Start a local HTTP upstream (standing in for an outside site) — returns
+ * 200 + body. Listens on 127.0.0.1 (never 0.0.0.0, to avoid exposing a
+ * listening surface to the outside).
  */
 function startUpstream(): Promise<HttpServer> {
   return new Promise((resolve, reject) => {
@@ -52,7 +58,8 @@ function startUpstream(): Promise<HttpServer> {
 }
 
 /**
- * 把代理 server + filter + 上游绑到一起；返回 [proxyPort, sink, upstream]。
+ * Bind the proxy server + filter + upstream together; returns
+ * { proxyPort, sink, upstream, token }.
  */
 async function setupProxyWithFilter(opts: {
   readonly allowedDomains: readonly string[];
@@ -99,16 +106,19 @@ async function setupProxyWithFilter(opts: {
 }
 
 /**
- * 透过代理发一个 CONNECT 请求（模拟 curl 经 HTTP_PROXY）—— proxy 解 CONNECT
- * 后直连上游，body 由上游返回。
+ * Send a request through the proxy (simulating curl via HTTP_PROXY) — after
+ * the proxy resolves CONNECT it dials the upstream directly and the body comes
+ * from the upstream.
  *
- * 走 HTTP CONNECT 形态：客户端发 `CONNECT host:port HTTP/1.1` 给代理，
- * 代理回 `HTTP/1.1 200 Connection Established` 后客户端开始 raw TCP 写
- * HTTP 请求。本测试简化：用 absolute-URI 形态发 HTTP 代理请求
- * （`GET http://host:port/path HTTP/1.1`），代理会直接 forward 到上游。
+ * The real shape is HTTP CONNECT: the client sends `CONNECT host:port HTTP/1.1`
+ * to the proxy, and after `HTTP/1.1 200 Connection Established` it starts
+ * writing raw HTTP over the tunnel. This test simplifies with the absolute-URI
+ * proxy form (`GET http://host:port/path HTTP/1.1`), which the proxy forwards
+ * straight to the upstream.
  *
- * 代理要求 `Proxy-Authorization: Basic base64("srt:<token>")`
- * （spec:proxyAuthToken 实现）,缺则返 407。本测试用注入的 token。
+ * The proxy requires `Proxy-Authorization: Basic base64("srt:<token>")`
+ * (spec:proxyAuthToken implementation) and answers 407 without it. This test
+ * uses the injected token.
  */
 function sendAbsoluteUriRequest(args: {
   proxyPort: number;
@@ -171,14 +181,14 @@ describe("egress proxy + filter behavior", () => {
 
   it("allowed host → 200 + body reaches upstream (SC2 path)", async () => {
     const setup = await setupProxyWithFilter({
-      // 上游地址用 'localhost' 字面量（filter 收到的是字面，spec：客户端
-      // 字面与上游一致）—— filter 需把 'localhost' 放行。
+      // The upstream address uses the 'localhost' literal (the filter sees the literal itself;
+      // spec: client literal matches the upstream) — the filter must pass 'localhost'.
       allowedDomains: ["localhost"],
       deniedDomains: [],
     });
     proxyClose = () => setup.upstream; // unused, just to keep var alive
 
-    // 拿 proxy port 透传到客户端
+    // pass the proxy port through to the client
     const res = await sendAbsoluteUriRequest({
       proxyPort: setup.proxyPort,
       targetHost: "localhost",
@@ -245,7 +255,7 @@ describe("egress proxy + filter behavior", () => {
       allowedDomains: ["allowed.example"],
       deniedDomains: [],
     });
-    // 三个连续被拒
+    // three consecutive denials
     await sendAbsoluteUriRequest({
       proxyPort: setup.proxyPort,
       targetHost: "evil1.example",

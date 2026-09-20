@@ -1,22 +1,24 @@
 /**
  * tests/harness/aci/bash-egress-typed-failure.test.ts
  *
- * T5 tier 1→mid 端到端走读（specs/network-egress-allowlist.md §Violation
- * feedback channel 第 3 跳「前缀与 tier 入口」+ SC3 验收点）。
+ * Tier 1→mid end-to-end walkthrough (specs/network-egress-allowlist.md,
+ * violation feedback channel: prefix and tier entry).
  *
- * **钉住的不变式（来自 spec §T5 选定形态(a)+ §假绿警告）**：
- *   - bash handler 在 egress session 记录违例时抛 `ToolExecutionError`，
- *     message 含 `[network_denied]` 前缀 —— 由 executor `buildFailureResult`
- *     路径包成 `kind: "execution_failed"`；
- *   - 把该 result 喂给既有 `categorizeResult` → tier == "mid"；
- *   - **不**直接构造 `kind: "execution_failed"` 假绿 —— message 必须从
- *     bash handler 的真实返回流出来（spec 点名
- *     `violation-handling.test.ts:269-279` 为反面教材）。
+ * Pinned invariants (spec-selected shape + false-green warning):
+ *   - when the egress session records a violation, the bash handler throws
+ *     `ToolExecutionError` with the `[network_denied]` prefix in the message —
+ *     the executor's `buildFailureResult` path wraps it as
+ *     `kind: "execution_failed"`;
+ *   - feeding that result to the existing `categorizeResult` → tier == "mid";
+ *   - do NOT hand-construct `kind: "execution_failed"` (false green) — the
+ *     message must flow out of the bash handler's real return path (the spec
+ *     names `violation-handling.test.ts:269-279` as the counter-example).
  *
- * 测试不依赖真中继 / bwrap：使用 bash tool 的
- * `createEgressSessionFactory` 测试 seam（生产不传）注入 stub session，
- * stub 在构造时主动 record 一条违例；bash handler drain → throw → executor
- * 包装 → categorizeResult 全链路。
+ * No real relay / bwrap dependency: the bash tool's
+ * `createEgressSessionFactory` test seam (never passed in production) injects
+ * a stub session that proactively records one violation at construction;
+ * then the full chain runs: bash handler drain → throw → executor wrap →
+ * categorizeResult.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -49,13 +51,15 @@ afterAll(() => {
 });
 
 /**
- * 构造 stub `createEgressSession` —— 不真起中继 / proxy，直接构造一个
- * session 形状，spec 用空 fence 占位（bash handler 在 fence 装配期会读
- * `spec` 的 `unixSocketPath` / `sandboxLocalPort` / `env`；不真起桥仍
- * 满足装配要求，因为 runSandbox 不会去 dial）。
+ * Builds a stub `createEgressSession` — no real relay / proxy: it returns a
+ * session-shaped object whose spec holds empty fence placeholders (the bash
+ * handler reads `spec.unixSocketPath` / `sandboxLocalPort` / `env` during
+ * fence assembly; skipping the real bridge still satisfies assembly because
+ * runSandbox never dials the socket).
  *
- * 同时 stub 在构造时主动 record 一条 `not-in-allowlist` 违例到 sink，
- * bash handler drain 时会取到 → throw typed failure。
+ * The stub also proactively records one `not-in-allowlist` violation into the
+ * sink at construction, so the bash handler's drain picks it up → throws a
+ * typed failure.
  */
 function makeStubEgressSessionFactory(args: {
   readonly host: string;
@@ -78,7 +82,7 @@ function makeStubEgressSessionFactory(args: {
       unixSocketPath: "/tmp/iknow-egress-stub.sock",
       sandboxLocalPort: 0,
       env: {},
-      // T1 起 EgressFenceSpec 必含内层桥前导；stub 不真监听，前导置空。
+      // EgressFenceSpec requires an inner-bridge preamble; this stub never listens, so it stays empty.
       innerBridgeScript: "",
       relayAssetsDir: "/test/iknow/vendor/egress-relay",
     };
@@ -109,8 +113,9 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
       createEgressSessionFactory: stub as never,
     });
 
-    // 真实 executor + registry 装配 —— 走 buildOkResult / buildFailureResult
-    // 真实路径，不在测试里手搓 `kind: "execution_failed"` 假绿。
+    // Real executor + registry wiring — exercise the actual
+    // buildOkResult / buildFailureResult path, no hand-made
+    // `kind: "execution_failed"` false green inside the test.
     const registry = createRegistry([tool]);
     const inner = createExecutor(registry);
     const { executor } = buildViolationWiring(inner, {
@@ -129,24 +134,26 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     expect(results).toHaveLength(1);
     const r = results[0]!;
 
-    // 真走 bash handler → executor 真实路径 —— result 是 execution_failed
-    // (typed-error catch → buildFailureResult)。message 含 [network_denied]
-    // 前缀（直接从 handler 抛的 ToolExecutionError.message 流出来）。
+    // Really flows through bash handler → executor: the result is
+    // execution_failed (typed-error catch → buildFailureResult) and the
+    // message carries the [network_denied] prefix, streamed straight from the
+    // ToolExecutionError.message thrown by the handler.
     expect(r.kind).toBe("execution_failed");
     const message = (r as { message: string }).message;
     expect(message).toContain("[network_denied]");
     expect(message).toContain("evil.example:443");
     expect(message).toContain("isolation.network.allowedDomains");
-    // 「命令已跑完但出网被拒」语义
+    // Semantics: the command ran to completion but its egress was denied.
     expect(message).toContain("command ran to completion");
-    // exit code 旁路（partial stdout/stderr）—— 当前 runInSandbox 已 spawn
-    // 真 bwrap 跑 `true` —— 不会触发，但 stub session 让违例路径先 throw
-    // 在 runSandbox 之前。本测试用 `curl ...` 命令，runSandbox 真起来会
-    // 跑 curl；curl 在 bwrap 内被 `--unshare-net` 隔断，exit 非零 —— 但
-    // 我们关心的不是 exit code（typed failure 才是观察面）。
+    // The exit-code bypass (partial stdout/stderr) does not trigger here: the
+    // stub session makes the violation path throw before runSandbox. The
+    // `curl ...` command would really run inside bwrap under `--unshare-net`
+    // and exit non-zero, but the observation surface is the typed failure,
+    // not the exit code.
 
-    // 喂给既有 categorizeResult —— 必须命中 mid tier（spec §假绿警告：
-    // 这里 message 是从 bash handler 真实返回流出来的，不是手搓）。
+    // Feed the existing categorizeResult — it must land in the mid tier (the
+    // spec's false-green warning: the message streamed out of the real bash
+    // handler return, not hand-made).
     const cat = categorizeResult({
       name: "bash",
       input: { command: "curl -sS https://evil.example/x" },
@@ -159,8 +166,8 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
   });
 
   it("infra failure (egressStartError) → handler 抛 ToolExecutionError,message 显式标 'infrastructure fault' 不给配置键指引", async () => {
-    // 让 stub 在构造时抛 EgressRelayUnavailableError 形态 —— bash handler
-    // 把它当 startError 走 infra 路径。
+    // Make the stub throw at construction — the bash handler treats it as a
+    // startError and takes the infra path.
     const stub = (async () => {
       throw new Error(
         "egress seam unavailable for this call: stub bridge dead"
@@ -195,14 +202,15 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     expect(r.kind).toBe("execution_failed");
     const message = (r as { message: string }).message;
     expect(message).toContain("[network_denied]");
-    // infra 与域判定拒绝文案可区分(spec §三类信号 + §Failure paths)
+    // Infra faults and domain-policy denials stay textually distinguishable
+    // (specs/network-egress-allowlist.md: three signals + failure paths).
     expect(message).toContain("egress seam unavailable");
     expect(message).toContain("infrastructure fault");
-    // 修复指引:infra → 不给配置键指引(避免误导)
+    // Repair guidance: an infra fault must not cite config keys (misleading).
     expect(message).not.toContain("isolation.network.allowedDomains");
     expect(message).not.toContain("configure isolation.network");
 
-    // 同样 mid tier(前缀命中 `networkDenied` 分支)
+    // Same mid-tier routing (the prefix hits the networkDenied branch).
     const cat = categorizeResult({
       name: "bash",
       input: {},
@@ -213,9 +221,10 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
   });
 
   it("drain 空 + 无 startError → handler 维持 V1 ok 形状(byte-identical 于 T4 前)", async () => {
-    // stub session: drain 空(不 record 任何违例) —— handler 应走 V1 ok
-    // 形状,抛 ToolExecutionError 路径不进入。这条用例验证「违例 / startError
-    // 均空时维持 ok」是 T5 升级后保留的不变式(回归基线)。
+    // A stub session whose drain is empty (nothing recorded): the handler must
+    // keep the V1 ok shape and never enter the ToolExecutionError throw path.
+    // This pins "violations / startError both empty ⇒ still ok" as an
+    // invariant preserved by the typed-failure upgrade (regression baseline).
     const stub = (async () => {
       const sink = createEgressViolationSink();
       return Object.freeze({
@@ -242,7 +251,7 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
 
     const ctx: ToolExecutionContext = { conversationId: "conv-empty" };
     const out = await tool.handler({ command: "true" }, ctx);
-    // V1 ok 形状:envelope { output, meta? }
+    // V1 ok shape: envelope { output, meta? }
     expect(out).toBeTypeOf("object");
     const envelope = out as {
       output: string;
@@ -254,21 +263,24 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
       stdout: string;
       stderr: string;
     };
-    // exit code 来自 bwrap runInSandbox —— 通常 0 (true 命令)
+    // Exit code comes from the bwrap runInSandbox — normally 0 for `true`.
     expect(typeof parsed.code).toBe("number");
-    // stderr 不含 typed failure 文案前缀
+    // stderr carries no typed-failure prefix
     expect(parsed.stderr).not.toContain("[network_denied]");
   });
 
   it("EgressRelayUnavailableError typed-error catch 契约 → typed failure message 含产品依赖指引，且不含 socat/apt 装包字样 (ADR-0107)", async () => {
-    // typed-error catch 契约(code-quality.md):startEgressSessionForCall 的 catch
-    // 必须先识别判别联合的具体类型。对 EgressRelayUnavailableError 这种携带
-    // detail + remediationHint 的 typed 错误直接构造结构化 startError /
-    // infraHint;透传到 renderEgressFailureMessage 的 infraHint 后,typed
-    // failure message 必须让模型/TUI 看到「缺哪个产品依赖 + 怎么修」
-    // (SC13 验收点 + spec §三类信号可区分)。ADR-0107 换装:指引是产品依赖
-    // 语义（重装 iknow / 修复安装根），**旧「apt install socat」文案不得回潮**
-    // —— 本钉子由「含装包字样」反转为「绝不含装包字样」。
+    // Typed-error catch contract (code-quality.md): the catch in
+    // startEgressSessionForCall must first discriminate the concrete type of
+    // the union. For EgressRelayUnavailableError — a typed error carrying
+    // detail + remediationHint — it builds a structured startError /
+    // infraHint directly; once that reaches renderEgressFailureMessage's
+    // infraHint, the typed failure message must show the model/TUI which
+    // product dependency is missing and how to repair it. ADR-0107 reskin:
+    // the hint carries product-dependency semantics (repair or reinstall the
+    // iknow install root) and the old "apt install socat" text must never
+    // resurface — this pin was inverted from "contains packaging text" to
+    // "never contains it".
     const stubThrowRelayUnavailable = (async () => {
       throw new EgressRelayUnavailableError(
         "this install cannot resolve its bundled egress relay (node runtime or vendor/egress-relay assets missing)",
@@ -303,22 +315,22 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     expect(r.kind).toBe("execution_failed");
     const message = (r as { message: string }).message;
 
-    // typed-error 渲染契约:typed failure message 必须含产品依赖指引,
-    // 不被 plain object 的 [object Object] 吞掉。
+    // Typed-error rendering contract: the message must carry the
+    // product-dependency guidance, not be swallowed into [object Object].
     expect(message).toContain("[network_denied]");
-    // 产品依赖语义显式出现(非 [object Object])
+    // Product-dependency semantics appear explicitly (not [object Object]).
     expect(message).toContain("bundled egress relay");
     expect(message).toContain("no extra system package");
-    // ADR-0107:旧装包文案钉死不回潮
+    // ADR-0107: the old packaging-install text is pinned out for good.
     expect(message.toLowerCase()).not.toContain("socat");
     expect(message.toLowerCase()).not.toContain("apt install");
-    // infra/域判定分离仍然成立:不出现域判定修复指引
+    // Infra/domain separation still holds: no domain-repair hint appears.
     expect(message).not.toContain("isolation.network.allowedDomains");
     expect(message).not.toContain("configure isolation.network");
-    // infra 三字语义保留
+    // The infrastructure-fault wording is preserved.
     expect(message).toContain("infrastructure fault");
 
-    // 中 tier 路由保持(prefix 命中 networkDenied → mid)
+    // Mid-tier routing is kept (prefix hits networkDenied → mid).
     const cat = categorizeResult({
       name: "bash",
       input: {},
@@ -329,8 +341,9 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
   });
 
   it("allowlistSource 透传 → typed failure message 标注 'Current allowlist source'", async () => {
-    // 验证 T5 阶段虽未接 T6 真值,但 allowlistSource 透传链路通:装配面
-    // 注入 → typed failure 渲染管线消费 → 文案含来源标注。
+    // Even without the real approval-gate value wired in, the allowlistSource
+    // pass-through chain must be live: assembly-side injection → typed-failure
+    // rendering consumes it → the text carries the source annotation.
     const stub = makeStubEgressSessionFactory({
       host: "evil.example",
       port: 443,
@@ -372,9 +385,9 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
   });
 
   it("session 档真生产者：caller 未设 source + 交互批准面在场 → 包装层 fallback 标注 session (T2 钉死表)", async () => {
-    // bash 工厂包装层是 "session" 档的唯一真生产者：caller（assembly）
-    // 只产 builtin / persisted 两档，未显式设 source 且 askApproval 在场
-    // 时由包装层补 "session"。
+    // The bash factory wrapper is the only true producer of the "session"
+    // tier: the caller (assembly) produces only builtin / persisted. When the
+    // source is unset and askApproval is present, the wrapper fills in "session".
     const stub = makeStubEgressSessionFactory({
       host: "evil.example",
       port: 443,

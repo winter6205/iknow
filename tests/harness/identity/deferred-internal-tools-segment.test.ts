@@ -1,14 +1,18 @@
 /**
- * B6 / ADR-0043 §3 + disclosure-index-align T4 — `<deferred_internal_tools>`
- * 段渲染与 wiring 单测。
+ * `<deferred_internal_tools>` segment rendering + wiring unit tests
+ * (ADR-0043 tool-surface disclosure tiering).
  *
- * 钉住的不变式:
- *   1. 段函数(deferredInternalToolsSegment)是纯渲染:空数组 → 段缺席;
- *      非空 → 标签 + 字母序 + **名+描述**(spec ASSUMPTIONS #5:退场内建件
- *      进索引档为名+描述,不剥描述)+ 直呼引导句;描述缺席 → 裸名(与 MCP
- *      目录同形规则)。核心件不在列由 build-engine 守门,本函数不二次过滤。
- *   2. assembleIdentityContext 注入缝的降级契约:缝缺席 / 返回空 / 解析抛错
- *      → 段缺席(字节级零变化,对齐 mcp 段)。
+ * Pinned invariants:
+ *   1. The segment function (deferredInternalToolsSegment) is pure rendering:
+ *      empty array → segment absent; non-empty → tag + alphabetical order +
+ *      name + description (per the spec's assumptions, retired built-ins enter
+ *      the index tier as name + description; the description is not stripped)
+ *      + the direct-call guidance line; description absent → bare name (same
+ *      rule as the MCP catalog). That core pieces stay off the list is gated by
+ *      build-engine; this function does not re-filter.
+ *   2. Degrade contract of the assembleIdentityContext injection seam: seam
+ *      absent / returns empty / resolver throws → segment absent (byte-level
+ *      zero change, matching the MCP segment).
  */
 
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -64,19 +68,21 @@ describe("deferredInternalToolsSegment — 纯渲染", () => {
     assert.ok(out!.includes("<deferred_internal_tools>"));
     assert.ok(out!.includes("</deferred_internal_tools>"));
     const lines = out!.split("\n");
-    // T4 契约:退场件带描述(不剥描述、不走 search)。
+    // Contract: retired items carry their description (not stripped, no search
+    // round-trip).
     assert.ok(lines.includes("- list_sessions: List the trace sessions."));
     assert.ok(
       lines.includes("- query_trace: Query local JSONL trace records.")
     );
     assert.ok(lines.includes("- web_fetch: Fetch a single web page."));
-    // 字母序断言
+    // alphabetical-order assertion
     const idxLs = lines.findIndex((l) => l.startsWith("- list_sessions"));
     const idxQt = lines.findIndex((l) => l.startsWith("- query_trace"));
     const idxWf = lines.findIndex((l) => l.startsWith("- web_fetch"));
     assert.ok(idxLs < idxQt);
     assert.ok(idxQt < idxWf);
-    // 直呼引导(与 MCP 目录同一 SSOT):不提 tool_search。
+    // direct-call guidance (same SSOT as the MCP catalog): does not mention
+    // tool_search.
     assert.ok(out!.includes(DIRECT_CALL_GUIDANCE));
     assert.ok(!out!.includes("tool_search"));
   });
@@ -114,7 +120,8 @@ describe("deferredInternalToolsSegment — 纯渲染", () => {
   it("同名重复 → 段内重复出现(渲染层不去重,数据来源是 SSOT)", () => {
     const out = deferredInternalToolsSegment([{ name: "x" }, { name: "x" }]);
     assert.ok(out !== undefined);
-    // 重复不报错(数据层会负责 SSOT,渲染层不二次过滤)
+    // duplicates are not an error (the data layer owns the SSOT; the render
+    // layer does not re-filter)
     const count = (out!.match(/^- x$/gm) ?? []).length;
     assert.equal(count, 2);
   });

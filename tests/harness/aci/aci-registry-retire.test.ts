@@ -1,16 +1,17 @@
 /**
- * B6 / ADR-0043 §3 — AciRegistry.retireBuiltin seam 单测。
+ * ADR-0043 — AciRegistry.retireBuiltin seam unit tests.
  *
- * 测四个不变式：
- *   1. **可见性收敛**:retireBuiltin 后被退场的 def 不再出现在 visibleSchemas
- *      (默认未 discover 时 = 不可见,符合 lazy 纪律)。
- *   2. **catalog 一致**:catalog.get() 返新 def(`aci.lazy: true`);inner
- *      get() 也返新 def(executor 路由仍可达 —— tool_search 后由 discover
- *      把名字 push 进 discovered 集,visibleSchemas 走 discoveredTail 把
- *      它带回 prefix 之后)。
- *   3. **幂等**:同一名字多次 retireBuiltin 不报错,不重复写。
- *   4. **核心件二次守门**:retireBuiltin 不对未在 byName 的名字报错(静默
- *      忽略,与 unregisterExternal 同形态)。
+ * Four invariants:
+ *   1. **Visibility convergence**: after retireBuiltin the retired def is gone
+ *      from visibleSchemas (not yet discovered = invisible, per lazy discipline).
+ *   2. **Catalog consistency**: catalog.get() returns the new def (`aci.lazy: true`);
+ *      the executor routing stays reachable — after tool_search, discover() pushes
+ *      the name into the discovered set and visibleSchemas brings it back via
+ *      discoveredTail after the prefix.
+ *   3. **Idempotence**: repeated retireBuiltin of the same name neither throws nor
+ *      double-writes.
+ *   4. **Silent miss**: retireBuiltin does not throw for names absent from byName
+ *      (ignored quietly, same shape as unregisterExternal).
  */
 
 import { describe, it } from "vitest";
@@ -50,7 +51,7 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
       makeTool("query_trace", { deferrable: true }),
       makeTool("web_search", { deferrable: true }),
     ]);
-    // 退场前:query_trace / web_search 都在 visible
+    // before retiring: query_trace / web_search are both visible
     let names = reg.visibleSchemas().map((t) => t.name);
     assert.ok(names.includes("query_trace"));
     assert.ok(names.includes("web_search"));
@@ -58,7 +59,7 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
 
     reg.retireBuiltin(["query_trace", "web_search"]);
 
-    // 退场后:只剩 bash(visibleSchemas 过滤 lazy + 未 discover)
+    // after retiring: only bash remains (visibleSchemas filters lazy + undiscovered)
     names = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(names, ["bash"]);
   });
@@ -69,11 +70,11 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
       makeTool("query_trace", { deferrable: true }),
     ]);
     reg.retireBuiltin(["query_trace"]);
-    // 模拟 tool_search 命中
+    // simulate a tool_search hit
     const def = reg.discover("query_trace");
     assert.ok(def !== undefined);
     assert.equal(def?.aci.lazy, true);
-    // visibleSchemas 应在尾部带回
+    // visibleSchemas should bring it back at the tail
     const names = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(names, ["bash", "query_trace"]);
   });
@@ -84,14 +85,15 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
       makeTool("query_trace", { deferrable: true }),
     ]);
     reg.retireBuiltin(["query_trace"]);
-    // catalog.get 是 tool_search 检索源(discover 用 byName 拿 def,byName 已
-    // 被 retireBuiltin 更新)。inner 是构造期冻结快照 —— executor 走 inner
-    // 解析,retired 不进 visibleSchemas 故 promptTools 不报,executor 不需要
-    // 解析(模型调不动)。inner.get 行为不在 B6 关注面上(只验 catalog)。
+    // catalog.get is tool_search's retrieval source (discover() resolves the def
+    // via byName, which retireBuiltin has already updated). inner is a frozen
+    // construction-time snapshot — retired tools never enter visibleSchemas, so
+    // the model cannot invoke them and the executor need not resolve them;
+    // inner.get behavior is out of scope here (only the catalog is verified).
     const fromCat = reg.catalog.get("query_trace");
     assert.ok(fromCat !== undefined);
     assert.equal(fromCat?.aci.lazy, true);
-    // isDiscovered 仍 false(discover 还没调)
+    // discover() has not been called yet, so isDiscovered stays false
     assert.equal(reg.isDiscovered("query_trace"), false);
   });
 
@@ -100,7 +102,7 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
       makeTool("query_trace", { deferrable: true }),
     ]);
     reg.retireBuiltin(["query_trace"]);
-    // 再调一次不应抛
+    // repeat calls must not throw
     reg.retireBuiltin(["query_trace"]);
     reg.retireBuiltin(["query_trace"]);
     const def = reg.catalog.get("query_trace");
@@ -109,9 +111,9 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
 
   it("未在 byName 的名字静默忽略(不抛)", () => {
     const reg = createAciRegistry([makeTool("bash")]);
-    // ghost 名(不在 byName)= 静默;已注册的名字(在 byName)走正常 stamp 路径
+    // a ghost name (not in byName) is silent; registered names still take the normal stamp path
     reg.retireBuiltin(["ghost_tool"]);
-    // bash 不动 —— ghost_tool 不影响其他名字
+    // bash untouched — ghost_tool must not affect other names
     const names = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(names, ["bash"]);
   });
@@ -129,13 +131,14 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
       makeTool("query_trace", { deferrable: true }),
     ]);
     reg.retireBuiltin(["query_trace"]);
-    // catalog.all() live 读 byName —— retireBuiltin 更新 byName 槽位后,
-    // all() 返回的必须是与 get() 一致的 lazy 版 def,而非构造期冻结的旧 def。
+    // catalog.all() reads byName live — after retireBuiltin updates the byName
+    // slot, all() must return the same lazy def as get(), not the frozen
+    // construction-time def.
     const inAll = reg.catalog.all().find((t) => t.name === "query_trace");
     assert.ok(inAll !== undefined);
     assert.equal(inAll.aci.lazy, true);
     assert.equal(reg.catalog.get("query_trace")?.aci.lazy, true);
-    // 名称集合一致:all() 与 byName 覆盖同一批内建名。
+    // name sets agree: all() covers exactly the built-in names in byName.
     assert.deepEqual(
       reg.catalog
         .all()

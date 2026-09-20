@@ -1,18 +1,20 @@
 /**
- * #128 verify 分类器 — verify-loop 命令缺失分支集成测试 (T3)。
+ * Verify classifier — integration test for the command-absent branch of verify-loop.
  *
- * spec/128-verify-classifier.md:
- *   - SC1/A1: command 缺失 → spawn 分类器; command 已配 → 分类器不 spawn (路径 X 独占);
- *   - SC6/A6: 仅 StopReason=completed 触发; maxTurns/cancelled/timeout/protocolError/
- *     emptyFinalResponse 原样透传不触发;
- *   - SC5/A5: abort / transport 错 / schema 错 → outcome=unstable (fail-open);
- *     true classifier fail → 注入失败信封继续;
- *   - maxRounds 兜底在分类器路径下仍生效。
+ * Contract under test:
+ *   - command absent → classifier spawns; command configured → classifier never
+ *     spawns (the command path is exclusive);
+ *   - only StopReason=completed triggers it; maxTurns / cancelled / timeout /
+ *     protocolError / emptyFinalResponse pass through untouched;
+ *   - abort / transport error / schema error → outcome=unstable (fail-open);
+ *     a true classifier fail → inject a failure envelope and continue;
+ *   - the maxRounds backstop still applies on the classifier path.
  *
- * DI 缝: 与 VerifyLoopOptions.runVerify 同位注入 runClassifier 替身 (返回固定
- * ClassifierEnvelope)。生产装配层 (build-engine 侧, 不在本 ticket) 把 SubAgentManager
- * 适配到 runClassifier seam —— 进程隔离 (A2) 由 seam 实现承担, verify-loop 只做编排。
- * 测试只验证 verify-loop 编排层契约, 不验证 spawn/信封文本 (信封文本是 T4 交付)。
+ * DI seam: runClassifier is injected alongside VerifyLoopOptions.runVerify and
+ * returns fixed ClassifierEnvelopes. Production assembly (build-engine side)
+ * adapts SubAgentManager to the seam — process isolation is the seam
+ * implementation's job; verify-loop only orchestrates. These tests pin the
+ * orchestration contract, not the envelope text.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -31,7 +33,7 @@ import type {
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 
-/* ------------------------------ 测试 fixture ------------------------------ */
+/* ------------------------------ test fixtures ------------------------------ */
 
 const EMPTY_TRACE: LoopTrace = Object.freeze({
   turns: Object.freeze([]),
@@ -52,7 +54,7 @@ const EMPTY_TRACE: LoopTrace = Object.freeze({
   }),
 });
 
-/** stubRun: 确定性 run() 替身返回形状 (与 verify-loop.test.ts 同款)。 */
+/** stubRun: deterministic run() stub return shape (same as verify-loop.test.ts). */
 function stubRun(opts: {
   readonly text: string;
   readonly userText: string;
@@ -84,7 +86,7 @@ function makeNative(opts: {
   return { role: opts.role, content: [{ type: "text", text: opts.text }] };
 }
 
-/** run() 委托返回形状 (与 verify-loop.ts 的 RunOutcome 同构)。 */
+/** Shape returned by the delegated run() (structurally identical to RunOutcome in verify-loop.ts). */
 interface RunOutcome {
   readonly result: RunResult;
   readonly trace: LoopTrace;
@@ -96,7 +98,7 @@ interface RecordedCall {
   readonly lastUserText: string | undefined;
 }
 
-/** 脚本化 runFn 替身: 逐次返回脚本文本, 记录每次调用的历史形状。 */
+/** Scripted runFn stub: returns script text call by call and records each call's history shape. */
 function makeRecordingRunFn(
   script: ReadonlyArray<string>,
   opts: {
@@ -127,7 +129,7 @@ function makeRecordingRunFn(
   return { runFn, calls: () => calls };
 }
 
-/** 判官 JSON 序列化进 status:"ok" envelope 的 result 字段。 */
+/** Serializes the judge JSON into the result field of a status:"ok" envelope. */
 function okEnvelope(result: unknown): ClassifierEnvelope {
   return {
     status: "ok",
@@ -157,7 +159,7 @@ function abortEnvelope(reason: string): ClassifierEnvelope {
   return okEnvelope({ kind: "abort", reason });
 }
 
-/** 构造一个调用 spy + 返回脚本的 runClassifier 替身。 */
+/** runClassifier stub that spies on calls and returns the scripted envelopes. */
 function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   readonly runClassifier: RunClassifierFn;
   readonly calls: () => ReadonlyArray<{
@@ -209,7 +211,7 @@ function defaultOptions(over: {
   };
 }
 
-/* ------------------------------ SC1 command-absent → spawn classifier ------------------------------ */
+/* ------------------------------ command-absent → spawn classifier ------------------------------ */
 
 describe("SC1: command 缺失 → spawn 分类器（A1 填空）", () => {
   it("只调一次 runFn + 一次 classifier，classification=pass → outcome=passed", async () => {
@@ -262,7 +264,7 @@ describe("SC1: command 缺失 → spawn 分类器（A1 填空）", () => {
   });
 });
 
-/* ------------------------------ SC6 仅 completed 触发分类器 ------------------------------ */
+/* ------------------------------ only completed triggers the classifier ------------------------------ */
 
 describe("SC6: 仅 StopReason=completed 触发分类器（A6 completed-only）", () => {
   const cases: ReadonlyArray<{
@@ -300,7 +302,7 @@ describe("SC6: 仅 StopReason=completed 触发分类器（A6 completed-only）",
   }
 });
 
-/* ------------------------------ SC5 abort/transport/schema → unstable ------------------------------ */
+/* ------------------------------ abort/transport/schema → unstable ------------------------------ */
 
 describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open）", () => {
   it("classifier abort → outcome=unstable, 不注入信封, 不继续", async () => {
@@ -313,7 +315,7 @@ describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open�
 
     assert.equal(out.outcome, "unstable");
     assert.equal(out.rounds, 1);
-    // abort = 判官跑完了但判不了，不注入失败信封。
+    // abort means the judge ran but could not decide: no failure envelope injected.
     const envUser = out.result.messages.filter(
       (m) =>
         m.role === "user" &&
@@ -399,7 +401,7 @@ describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open�
     });
     const runClassifier: RunClassifierFn = async (args) => {
       resolveSpawnStarted();
-      // 挂起直到用户 abort (seam 侧等待 worker 回包)。
+      // suspends until the user aborts (the seam is waiting for the worker reply).
       await new Promise<void>((resolve) => {
         if (args.signal?.aborted) {
           resolve();
@@ -407,7 +409,7 @@ describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open�
         }
         args.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
-      // 用户 abort 触发时 worker 被杀 → seam 以 AbortError reject。
+      // when the user aborts, the worker is killed → the seam rejects with AbortError.
       throw new Error("AbortError: subagent aborted");
     };
 
@@ -428,7 +430,7 @@ describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open�
       "在飞 abort 必须判 aborted 而非 unstable"
     );
     assert.equal(out.rounds, 1);
-    // in-flight closeout: 不残留 stale 注入信封。
+    // in-flight closeout: no stale injected envelope left behind.
     const envUser = out.result.messages.filter(
       (m) =>
         m.role === "user" &&
@@ -440,7 +442,7 @@ describe("SC5: abort / transport / schema 错 → outcome=unstable（fail-open�
   });
 });
 
-/* ------------------------------ A5 true classifier fail → 注入 + 继续 ------------------------------ */
+/* ------------------------------ true classifier fail → inject + continue ------------------------------ */
 
 describe("A5: true classifier fail → 注入失败信封 + 继续下一轮", () => {
   it("fail → 第二轮 runFn 携带注入的信封重跑, 第二轮 classifier pass → outcome=passed", async () => {
@@ -460,7 +462,7 @@ describe("A5: true classifier fail → 注入失败信封 + 继续下一轮", ()
     assert.equal(classifierCalls().length, 2, "每轮各 spawn 一次分类器");
     assert.equal(out.outcome, "passed");
     assert.equal(out.rounds, 2);
-    // 第二轮 runFn 收到 priorMessages (注入的信封), 且首轮 runFn 无 prior。
+    // round 2's runFn receives priorMessages (the injected envelope); round 1 has none.
     assert.equal(
       runFnCalls()[0]?.priorCount,
       0,
@@ -470,8 +472,8 @@ describe("A5: true classifier fail → 注入失败信封 + 继续下一轮", ()
       (runFnCalls()[1]?.priorCount ?? 0) > 0,
       "第二轮 runFn 必携带注入信封 (A5 注入继续)"
     );
-    // 信封为 T4 buildClassifierEnvelope 产物 (A8 fixed-shape): 固定标记 +
-    // source=classifier + task + missing[] + reason + 固定尾行。
+    // The envelope is buildClassifierEnvelope's fixed-shape output: fixed marker +
+    // source=classifier + task + missing[] + reason + fixed trailer.
     const envelope = runFnCalls()[1]?.lastUserText ?? "";
     assert.ok(
       envelope.includes("[VALIDATION FAILED]"),
@@ -519,7 +521,7 @@ describe("A5: true classifier fail → 注入失败信封 + 继续下一轮", ()
   });
 });
 
-/* ------------------------------ maxRounds 兜底 ------------------------------ */
+/* ------------------------------ maxRounds backstop ------------------------------ */
 
 describe("maxRounds 兜底在分类器路径下仍生效", () => {
   it("maxRounds=2 + classifier 全 fail → outcome=failed, 轮数=2（不超上限）", async () => {
@@ -538,7 +540,7 @@ describe("maxRounds 兜底在分类器路径下仍生效", () => {
   });
 });
 
-/* ------------------------------ classifier input 形状 (A3) ------------------------------ */
+/* ------------------------------ classifier input shape ------------------------------ */
 
 describe("classifier input shape — verify-loop 透传 { task, summary, finalText }（A3）", () => {
   it("task=userText, finalText=last run().finalText, summary=非空 run 摘要", async () => {
@@ -558,7 +560,7 @@ describe("classifier input shape — verify-loop 透传 { task, summary, finalTe
     assert.equal(calls().length, 1);
     assert.equal(calls()[0]?.task, "deploy to staging");
     assert.equal(calls()[0]?.finalText, "implemented the requested feature");
-    // summary = completed run 的 finalText 内容摘要 (判官看到模型最终声称的内容)。
+    // summary = content digest of the completed run's finalText (the judge sees what the model finally claimed).
     assert.equal(
       calls()[0]?.summary,
       "implemented the requested feature",
@@ -567,7 +569,7 @@ describe("classifier input shape — verify-loop 透传 { task, summary, finalTe
   });
 });
 
-/* ------------------------------ 既有测试兼容性 ------------------------------ */
+/* ------------------------------ compatibility with existing tests ------------------------------ */
 
 describe("command 已配时分类器路径不参与（与既有 verify-loop 测试兼容）", () => {
   it("注入 runClassifier + command 已配 → 走既有命令路径, 分类器不触发", async () => {
@@ -597,7 +599,7 @@ describe("command 已配时分类器路径不参与（与既有 verify-loop 测�
   });
 });
 
-/* ------------------------------ SC10: 每轮判定落 Trace（分类器分支字段） ------------------------------ */
+/* ------------------------------ per-round verdict lands in the Trace (classifier-branch fields) ------------------------------ */
 
 describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 VerificationRecord", () => {
   it("fail round → trace.recordVerification 收到含分类器字段的记录", async () => {
@@ -630,7 +632,7 @@ describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 Verific
     });
 
     assert.equal(out.outcome, "passed");
-    // fail + pass 各一轮 → 两条记录。
+    // one fail round + one pass round → two records.
     assert.equal(captured.length, 2);
     const failRecord = captured[0]!;
     assert.equal(failRecord["verdict"], "true-failure");
@@ -641,7 +643,7 @@ describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 Verific
       "fail round 记录应含 evidence 数组"
     );
     assert.equal((failRecord["evidence"] as unknown[])[0]?.["command"], "noop");
-    // pass 轮记录不含分类器 fail 字段。
+    // the pass record carries none of the classifier fail fields.
     const passRecord = captured[1]!;
     assert.equal(passRecord["verdict"], "pass");
   });

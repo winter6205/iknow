@@ -1,26 +1,31 @@
 /**
- * #653 / T1 — 前台 / 后台 bash 沙箱纪律对齐 (argv 隔离轴集合相等)。
+ * Foreground / background bash sandbox discipline parity (argv isolation-axis
+ * set equality).
  *
- * 覆盖 spec SC lines 44-45 (positive + negative):
- *   - SC44 positive:同一 fixture 输入下，前台与后台 bwrap argv 在隔离轴上
- *     集合相等(cwdReadonly 开与关各至少一例)。
- *   - SC45 negative:产品 `bash` `background:true` 路径的 spawn argv 包含
- *     bwrap(或测试替身证明调用了与前台同一围栏构造缝);不存在「仅
- *     `nodeSpawn(command)` 无围栏」的产品分支。
+ * Coverage:
+ *   - positive: under the same fixture input, foreground and background bwrap
+ *     argv are set-equal on the isolation axes (at least one case each with
+ *     cwdReadonly on and off).
+ *   - negative: the product `bash` `background:true` path's spawn argv contains
+ *     bwrap (or a test double proves it goes through the same fence-construction
+ *     seam as the foreground); no "bare `nodeSpawn(command)` without fence"
+ *     product branch may exist.
  *
- * ADR-0092:默认档从闭世界换成全局档 —— 宿主 `/` 打底 + 系统前缀只读重绑,
- * 不再有 guest `/tmp` pad bind;前台后台共用同一 fence 构造缝。
+ * ADR-0092: the default tier moved from closed-world to global mode — host `/`
+ * base bind + read-only system-prefix rebinding; no guest `/tmp` pad bind
+ * anymore; foreground and background share the same fence-construction seam.
  *
- * ADR-0097:网络轴在 fence 层是**常量**(netns 恒断,无 per-call opt-in),
- * 出口由 egress 缝 unix socket 代理。网络轴不是 argv 集合的可变维度 ——
- * 前后台 `--unshare-net` 都恒在。
+ * ADR-0097: the network axis is a **constant** at fence layer (netns always
+ * severed, no per-call opt-in); egress goes through the egress-seam unix
+ * socket proxy. The network axis is not a mutable dimension of the argv set —
+ * `--unshare-net` is always present on both sides.
  *
- * 驱动方式:
- *   - 前台:调 createBwrapFence,env 走产品缝(filter + cwdReadonly 时
- *     GIT_OPTIONAL_LOCKS=0,镜像 bash.ts,禁止只传 cwdReadonly 旗标
- *     而漏 fenceEnv)。
- *   - 后台:用模块级 vi.mock("node:child_process", ...) 拦截 spawn,
- *     直接调 defaultBackgroundSpawn 拿真实 fence.argv。
+ * Driving:
+ *   - foreground: call createBwrapFence with env built through the product seam
+ *     (filter + GIT_OPTIONAL_LOCKS=0 when cwdReadonly, mirroring bash.ts; never
+ *     pass only the cwdReadonly flag while dropping fenceEnv).
+ *   - background: module-level vi.mock("node:child_process", ...) intercepts
+ *     spawn; call defaultBackgroundSpawn directly to capture the real fence.argv.
  */
 
 import { EventEmitter } from "node:events";
@@ -48,10 +53,11 @@ import {
   createFsPolicy,
 } from "../../../src/harness/sandbox/index.ts";
 
-// 必须先于 manager 导入:模块级 vi.mock 会被 vitest hoist,但写在这里
-// 也让读者直观看到拦截点 —— manager.ts defaultBackgroundSpawn 内部走
-// `import { spawn as nodeSpawn } from "node:child_process"`,我们拦截的
-// 就是这个 node:child_process 模块的 spawn。
+// Must precede the manager import: module-level vi.mock is hoisted by vitest,
+// but placing it here also shows the interception point plainly — manager.ts's
+// defaultBackgroundSpawn internally does
+// `import { spawn as nodeSpawn } from "node:child_process"`, and that module's
+// spawn is exactly what we intercept.
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -60,8 +66,8 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-// 在 mock 设置之后再 import manager —— 这样 manager.ts 引用的 spawn 是
-// mock 之后的版本。
+// Import the manager after the mock is set up — the spawn manager.ts references
+// is then the mocked version.
 const childProcessMock = await import("node:child_process");
 const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
 
@@ -70,8 +76,8 @@ const { defaultBackgroundSpawn } =
 const { ToolExecutionError } = await import("../../../src/harness/errors.ts");
 
 /**
- * fake ChildProcess — EventEmitter + PassThrough streams + fake pid。
- * 让 spawn 工厂 fake 出 child 但不走真实 detach,捕获 argv。
+ * Fake ChildProcess — EventEmitter + PassThrough streams + fake pid.
+ * Lets the spawn factory fake a child without real detach, so argv can be captured.
  */
 function makeFakeChild(pid = 99001) {
   const kill = vi.fn(() => true);
@@ -88,12 +94,12 @@ function makeFakeChild(pid = 99001) {
 }
 
 /**
- * 镜像 bash.ts foreground fence 装配(ADR-0092 全局档)。
- * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
- *   (产品缝 bash.ts,post-filter additive)
- * - fence 选项:cwdReadonly 由 opts 透传;网络轴无 opt-in(`--unshare-net`
- *   是常量)
- * - fsPolicy:全局档只承载 tmpRoot,不塑形 argv mount
+ * Mirrors bash.ts foreground fence assembly (ADR-0092 global mode).
+ * - env: envIsolation.filter(...), then GIT_OPTIONAL_LOCKS=0 when cwdReadonly
+ *   (product seam bash.ts, post-filter additive)
+ * - fence options: cwdReadonly passes through from opts; no network opt-in
+ *   (`--unshare-net` is a constant)
+ * - fsPolicy: global mode carries only tmpRoot, it does not shape argv mounts
  */
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
@@ -115,22 +121,23 @@ function foregroundFenceArgv(opts: {
 }
 
 /**
- * 关键隔离旗标集合(spec SC line 44):从 argv 投影成集合,确保比较的是隔离
- * 维度而非 argv 顺序 / 拼写差异。
+ * The key isolation-flag set: project argv into a set so the comparison covers
+ * isolation dimensions, not argv order or spelling differences.
  *
- * ADR-0097:网络轴不在集合里——`--unshare-net` 是常量,既为 fg 又为 bg,
- * 加入集合也恒等,不参与差异比较。函数保留以备未来轴扩展时复用。
+ * ADR-0097: the network axis is deliberately out of the set — `--unshare-net`
+ * is a constant for both fg and bg, so including it stays identically true and
+ * it never drives a diff. The function is kept for future axis expansion.
  */
 function isolationAxisFlags(argv: readonly string[]): Set<string> {
   const flags = new Set<string>();
-  // 网络轴 `--unshare-net` 恒在(不参与对称性比较,与下文各轴独立)。
+  // Network axis: --unshare-net always present (trivially equal on both sides).
   if (argv.includes("--unshare-net")) flags.add("unshare-net");
-  // ADR-0021 生命周期轴
+  // lifecycle axis (ADR-0021)
   if (argv.includes("--unshare-user-try")) flags.add("unshare-user-try");
   if (argv.includes("--die-with-parent")) flags.add("die-with-parent");
-  // env 隔离轴
+  // env isolation axis
   if (argv.includes("--clearenv")) flags.add("clearenv");
-  // ADR-0092 全局档:宿主根 `/` 打底 + 系统前缀只读重绑。
+  // ADR-0092 global mode: host root `/` base bind + read-only system rebinding.
   if (argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/")) {
     flags.add("host-root-bind");
   }
@@ -144,12 +151,12 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
       flags.add(`ro-bind:${path}`);
     }
   }
-  // cwd 只读重绑 verb(--ro-bind);全局档无可写 --bind cwd 形态。
+  // cwd read-only rebinding verb (--ro-bind); global mode has no writable --bind cwd form.
   if (argv.some((arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD)) {
     flags.add("cwd-ro-bind");
   }
-  // GIT_OPTIONAL_LOCKS=0 (foreground cwdReadonly 注入,bash.ts)。
-  // 扫全部 --setenv 三元组:indexOf 会命中 PATH 等先出现的键,漏掉本轴。
+  // GIT_OPTIONAL_LOCKS=0 (injected by foreground cwdReadonly, bash.ts).
+  // Scan every --setenv triple: indexOf would hit earlier keys like PATH and miss this axis.
   for (let i = 0; i < argv.length; i++) {
     if (
       argv[i] === "--setenv" &&
@@ -164,10 +171,10 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
 }
 
 /**
- * 驱动 real defaultBackgroundSpawn,通过 vi.mock 拦截 child_process.spawn
- * 捕获 argv(不真启子进程)。
+ * Drives the real defaultBackgroundSpawn, capturing argv via the vi.mock
+ * interception of child_process.spawn (no real child is started).
  *
- * ADR-0097:后台 fence 无网络入参 —— `--unshare-net` 恒在。
+ * ADR-0097: the background fence takes no network input — `--unshare-net` is constant.
  */
 async function backgroundFenceArgv(opts: {
   readonly cwd: string;
@@ -180,7 +187,7 @@ async function backgroundFenceArgv(opts: {
     env: { PATH: "/bin" },
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   });
-  // spawn 被调一次 —— 第一次参数(argv)就是 fence.argv 的展开形式。
+  // spawn is called once — its first argument (argv) is the expansion of fence.argv.
   const call = spawnMock.mock.calls[0];
   expect(call).toBeDefined();
   // spawn(cmd, args, opts) — argv = [cmd, ...args]
@@ -197,9 +204,9 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
-// ── SC line 44:argv 隔离轴集合相等 ─────────────────────────────────────────
+// ── argv isolation-axis set equality ────────────────────────────────────────
 
-// 合同根(cwd)盘上校验 → fixture 用真实目录。
+// The contract root (cwd) is validated on disk → the fixture uses a real directory.
 const CWD = mkdtempSync(join(tmpdir(), "bash-fence-parity-"));
 
 afterAll(() => {
@@ -207,9 +214,10 @@ afterAll(() => {
 });
 
 describe("bash fence parity (foreground vs background argv isolation axis SETS)", () => {
-  // ADR-0097:网络轴不在隔离维度里 —— `--unshare-net` 恒在,fg / bg 不存在
-  // 网络输入差异。fixture 矩阵即 cwdReadonly 的两种取值,二者各自钉住
-  // 「前后台隔离轴集合逐条相等」。
+  // ADR-0097: the network axis is outside the isolation dimensions —
+  // `--unshare-net` is constant, so fg / bg have no network-input difference.
+  // The fixture matrix is just cwdReadonly's two values, each pinning
+  // "fg/bg isolation-axis sets equal entry by entry".
   const fixtures = [
     { cwdReadonly: true, label: "ro:true" },
     { cwdReadonly: false, label: "ro:false" },
@@ -265,7 +273,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   });
 
   it("ADR-0097: both fg and bg argv carry --unshare-net (constant netns isolation)", async () => {
-    // 钉住 SC1(--unshare-net 恒在)的 fg / bg 形态;fg / bg 同步恒等。
+    // Pins `--unshare-net` constantly present on both fg and bg sides.
     const fg = foregroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
@@ -320,7 +328,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   });
 });
 
-// ── ADR-0092 全局档:宿主根 + 系统前缀只读重绑的前后台 parity ──────────────
+// ── ADR-0092 global mode: fg/bg parity of host root + read-only system rebinding ──
 
 describe("bash fence parity — global-mode mounts (host root + system ro-binds)", () => {
   function roBindIndex(argv: readonly string[], root: string): number {
@@ -387,7 +395,7 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
   });
 });
 
-// ── SC line 45 (negative):产品 bash background:true 路径走围栏构造缝 ──────
+// ── negative: the product bash background:true path goes through the fence-construction seam ──
 
 describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () => {
   it("bg spawn argv[0] === 'bwrap' (产品路径不裸 spawn 命令)", async () => {
@@ -405,7 +413,7 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       "bwrap",
       "spawn cmd must be bwrap, not the raw bash command"
     );
-    // argv 至少包含宿主根 bind + --clearenv(隔离护栏存在)。
+    // The argv carries at least the host-root bind + --clearenv (isolation guardrails present).
     const argv = call?.[1] as readonly string[];
     assert.ok(argv.includes(CWD), "argv must include cwd");
     assert.ok(
@@ -430,11 +438,14 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
   });
 
   it("bg spawn workspace 档漏传 homeRoot → typed fail-loud（不静默退化成全局档）", async () => {
-    // 后台是独立调用点(defaultBackgroundSpawn):workspace 档下 req.homeRoot
-    // 缺席时若跳过 home ro-bind,后台围栏静默退回全局档(home 可写)而前台
-    // 仍是工作区档 —— 违反沙箱纪律 G3(前后台隔离轴集合相等)且无信号。
-    // 判别力:修复前 manager.ts 的 `fsMode === "workspace" && homeRoot !==
-    // undefined` 预过滤让这里静默 spawn(测试红);修复后 bwrap 抛 typed。
+    // Background is an independent call site (defaultBackgroundSpawn): in
+    // workspace mode, if req.homeRoot were absent and the home ro-bind silently
+    // skipped, the background fence would degrade to global mode (home writable)
+    // while foreground stays workspace-mode — violating the fg/bg parity
+    // discipline with no signal. Discriminative power: before the fix,
+    // manager.ts's `fsMode === "workspace" && homeRoot !== undefined`
+    // pre-filter let this spawn silently (test red); after the fix bwrap throws
+    // a typed error.
     spawnMock.mockImplementation(() => makeFakeChild());
     await assert.rejects(
       () =>
@@ -443,7 +454,7 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
           cwd: CWD,
           env: { PATH: "/bin" },
           fsMode: "workspace",
-          // homeRoot 缺席 —— 缺口本身。
+          // homeRoot absent — that omission is the gap under test.
         }),
       (err: unknown) =>
         err instanceof ToolExecutionError && /homeRoot/.test(err.message),
@@ -455,7 +466,8 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       "no child may be spawned from a fence that failed to assemble"
     );
 
-    // 判别力对照:homeRoot 在场时同一调用点正常 spawn,argv 带 home ro-bind。
+    // Discriminating control: with homeRoot present the same call site spawns
+    // normally and the argv carries the home ro-bind.
     await defaultBackgroundSpawn({
       command: "echo hi",
       cwd: CWD,

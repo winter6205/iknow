@@ -1,11 +1,13 @@
 /**
- * read_file — 会话 tmp 是一等读根（ADR-0092 同一身份解析）。
+ * read_file — the session tmp pad is a first-class read root (same identity
+ * resolution as ADR-0092).
  *
- * 与 write_file 的 `sessionTmpRoot` 走同一条 `resolveSessionFenceTmp` 身份：
- * 垫底（显式 tmpDir 或 projectDir+conversationId 解析出的
- * `<sessionFolder>/fence-tmp`）上的文件可读，即使垫底不在 `~/.iknow`
- * extraReadRoots 下。guest `/tmp/...` 字面量仍 typed 拒绝、不 alias（SC4）。
- * 无 tmpDir/projectDir 的 legacy 工厂调用行为逐字节不变。
+ * Shares `resolveSessionFenceTmp` identity with write_file's `sessionTmpRoot`:
+ * files on the pad (`<sessionFolder>/fence-tmp`, resolved from an explicit
+ * tmpDir or from projectDir+conversationId) are readable even when the pad
+ * is outside `~/.iknow` extraReadRoots. Guest literal `/tmp/...` paths are
+ * still typed-rejected and never aliased. Legacy factory calls without
+ * tmpDir/projectDir are byte-for-byte unchanged.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -103,7 +105,8 @@ describe("read_file — session tmp pad as first-class read root", () => {
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
     );
-    // 不 alias：读 /tmp 字面量不得触碰 / 制造垫底上的文件。
+    // No aliasing: reading a literal /tmp path must not touch or create
+    // files on the pad.
     assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad original\n");
   });
 

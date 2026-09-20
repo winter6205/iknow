@@ -1,13 +1,15 @@
 /**
- * F-4 parentTurnId 填实 — `TurnRecord.id` 调用方预生成槽。
+ * `TurnRecord.id`: a caller-pregenerated id slot so parentTurnId is real.
  *
- * 背景：`parent_turn_id` 要能被 `?parent_turn_id=` 精确 join 回 turn 行，前提是
- * 写侧在**发出子代理埋点之前**就已经知道本回合的 turn id。原实现在
- * `recordTurn` 里 randomUUID —— 那时工具阶段早已跑完，子代理拿不到这个值。
+ * Context: `parent_turn_id` must join back to the turn row via
+ * `?parent_turn_id=`, which requires the writer to know the turn id **before
+ * emitting subagent records**. The old implementation randomUUID'd inside
+ * `recordTurn` — by then the tool phase was long over and subagents could
+ * never see the value.
  *
- * 本文件锁的契约：
- * 1. 调用方给 `id` → 落盘 `turn_id` 逐字等于它，且不额外落 `id` 键；
- * 2. 调用方不给 `id` → 仍由实现生成 UUID（既有行为不变，向后兼容）。
+ * Contracts locked here:
+ * 1. Caller supplies `id` → the persisted `turn_id` equals it verbatim, and no extra `id` key is written;
+ * 2. Caller omits `id` → the implementation still generates a UUID (existing behavior, backward compatible).
  */
 
 import { describe, it, beforeEach, afterEach } from "vitest";

@@ -1,20 +1,22 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：graph-prototype.test.ts。
+ * PROTOTYPE — multi-task graph orchestration: graph-prototype.test.ts.
  *
- * 集成测试：≥2 nodes 的 graph 走真 SubAgentManager（fake spawn 工厂 +
- * 假 child）+ createSubAgentNodeExecutor + runGraph，验证：
- *   1. ≥2 节点并发执行（同 wave 内 Promise.all）；
- *   2. 节点成功 → envelope.result 作为 NodeOutcome.output；
- *   3. 节点失败 → 失败分支下游被 skipped，独立分支不受影响；
- *   4. trace 三类事件（subagent_spawn / subagent_state_change / subagent_stop）
- *      全部落盘（≥2 节点 × 3 类 ≥ 6 行）；
- *   5. **trace double-track 基线（test.md:55-58）**：NoopTraceService 注入时
- *      runGraph 的可观测行为（statuses / results / waveCount）与带 trace 形态
- *      deepEqual — 证明 trace 是观察面，不参与业务判定。
+ * Integration test: a ≥2-node graph runs through the real SubAgentManager
+ * (fake spawn factory + fake child) + createSubAgentNodeExecutor + runGraph,
+ * verifying:
+ *   1. ≥2 nodes execute concurrently (Promise.all within one wave);
+ *   2. node success → envelope.result becomes NodeOutcome.output;
+ *   3. node failure → downstream on the failed branch is skipped, independent branches unaffected;
+ *   4. all three trace event types (subagent_spawn / subagent_state_change / subagent_stop)
+ *      persist (≥2 nodes × 3 types ≥ 6 lines);
+ *   5. **trace double-track baseline (test.md rule)**: with NoopTraceService
+ *      injected, runGraph's observable behavior (statuses / results /
+ *      waveCount) deepEquals the traced form — trace is an observation
+ *      surface, never part of business decisions.
  *
- * 边界：与 tests/subagent/manager-trace.test.ts 同模式（fake spawn + fake
- * child）。本测试额外验证 runGraph ↔ SubAgentManager 的 seam 桥接正确，
- * 不重做 manager 自身的单测职责。
+ * Boundary: same pattern as tests/subagent/manager-trace.test.ts (fake spawn +
+ * fake child). This test additionally verifies the runGraph ↔ SubAgentManager
+ * seam bridging, without re-doing the manager's own unit-test duties.
  */
 
 import assert from "node:assert/strict";
@@ -87,11 +89,11 @@ function emitEnvelope(child: FakeChild, env: SubAgentEnvelope): void {
   child.emit("exit", 0, null);
 }
 
-// ─── 测试工厂 ────────────────────────────────────────────────────────────
+// ─── test factory ────────────────────────────────────────────────────────
 //
-// 直接用 makeManagerWithTrace 内联 closure 装配 fake spawn，避免暴露工厂函数
-// 接口面。子代理生命周期由 manager 闭包接管，caller 按 children[] 顺序
-// emitEnvelope(taskResults[i]) 即可。
+// fake spawn is assembled inline via a closure in makeManagerWithTrace to keep
+// the factory surface minimal. The manager closure owns the sub-agent
+// lifecycle; callers just emitEnvelope(taskResults[i]) in children[] order.
 
 function makeManagerWithTrace(
   trace: ReturnType<typeof createJsonlTraceService>
@@ -112,12 +114,12 @@ function makeManagerWithTrace(
 }
 
 async function flushMicrotasks(): Promise<void> {
-  // safeTrace + writeLine 的双层 microtask flush。
+  // Two-layer microtask flush for safeTrace + writeLine.
   await new Promise((resolve) => setImmediate(resolve));
   await Promise.resolve();
 }
 
-/** 阻塞等待 children 数量到 target（避免 emit 时 spawn 还未同步入栈）。 */
+/** Block until children reaches target (so an emit never races a not-yet-pushed spawn). */
 async function waitForChildren(
   children: FakeChild[],
   target: number
@@ -133,7 +135,7 @@ async function waitForChildren(
   });
 }
 
-// ─── 1. ≥2 节点并发执行 + 成功路径 ────────────────────────────────────────
+// ─── 1. ≥2 nodes concurrent + success path ────────────────────────────────
 
 describe("graph prototype integration (≥2 nodes concurrent)", () => {
   it("2 nodes parallel → both done, output = envelope.result", async () => {
@@ -156,7 +158,7 @@ describe("graph prototype integration (≥2 nodes concurrent)", () => {
         ],
       };
       const runPromise = runGraph(spec, exec);
-      // 两个 children 同时挂起 → emit 双 done。
+      // Both children are pending at once → emit two dones.
       emitEnvelope(children[0]!, okEnvelope("result-a"));
       emitEnvelope(children[1]!, okEnvelope("result-b"));
       const out = await runPromise;
@@ -177,7 +179,7 @@ describe("graph prototype integration (≥2 nodes concurrent)", () => {
         assert.equal(rB.output, "result-b");
       }
 
-      // 真实 JSONL 至少 6 行 subagent_*（2 spawn + 2 state_change + 2 stop）。
+      // Real JSONL has at least 6 subagent_* lines (2 spawn + 2 state_change + 2 stop).
       const filePath = join(scratchDir, "conv-graph-proto.jsonl");
       const lines = readFileSync(filePath, "utf8").split("\n").filter(Boolean);
       const subagentLines = lines
@@ -193,7 +195,7 @@ describe("graph prototype integration (≥2 nodes concurrent)", () => {
   });
 });
 
-// ─── 2. 失败 skip 下游 + 独立分支不受影响 ─────────────────────────────────
+// ─── 2. failure skips downstream + independent branch unaffected ──────────
 
 describe("graph prototype integration (failure skip downstream)", () => {
   it("branch A fail → A-leaves skipped, branch B done", async () => {
@@ -221,13 +223,13 @@ describe("graph prototype integration (failure skip downstream)", () => {
       };
       const runPromise = runGraph(spec, exec);
 
-      // wave 0 spawns root-a + root-b；emitter 顺序按 children 入栈序
-      // （spec 输入序 → root-a 在前 → root-b 在后）。
+      // Wave 0 spawns root-a + root-b; emit in children push order
+      // (spec input order → root-a first → root-b second).
       await waitForChildren(children, 2);
       emitEnvelope(children[0]!, failEnvelope("root-a boom"));
       emitEnvelope(children[1]!, okEnvelope("root-b ok"));
-      // leaf-a 因 root-a 失败被 skipped（scheduler findFailedUpstream），
-      // 不会 spawn。leaf-b 等 root-b done 后进 wave 1。
+      // leaf-a is skipped because root-a failed (scheduler findFailedUpstream),
+      // so it never spawns. leaf-b enters wave 1 after root-b is done.
       await waitForChildren(children, 3);
       emitEnvelope(children[2]!, okEnvelope("leaf-b ok"));
       const out = await runPromise;
@@ -238,7 +240,7 @@ describe("graph prototype integration (failure skip downstream)", () => {
       assert.equal(out.statuses["leaf-a"], "skipped");
       assert.equal(out.statuses["root-b"], "done");
       assert.equal(out.statuses["leaf-b"], "done");
-      // leaf-a 不 spawn（被 skipped）→ 实际只有 3 个 children。
+      // leaf-a is skipped (never spawned) → only 3 children total.
       assert.equal(children.length, 3, "leaf-a 不应被 spawn");
     } finally {
       rmSync(scratchDir, { recursive: true, force: true });
@@ -246,11 +248,11 @@ describe("graph prototype integration (failure skip downstream)", () => {
   });
 });
 
-// ─── 3. trace double-track 基线 ──────────────────────────────────────────
+// ─── 3. trace double-track baseline ───────────────────────────────────────
 
 describe("graph prototype integration (trace double-track baseline)", () => {
   it("NoopTraceService 注入 → runGraph 行为与带 trace 形态 deepEqual", async () => {
-    // 带 trace
+    // traced run
     const scratchDir = mkdtempSync(join(tmpdir(), "iknow-graph-noop-"));
     try {
       const trace = createJsonlTraceService({
@@ -302,7 +304,7 @@ describe("graph prototype integration (trace double-track baseline)", () => {
       emitEnvelope(noopChildren[2]!, okEnvelope("c"));
       const outNoop = await pN;
 
-      // 业务可观测面 deepEqual（trace 只是观察面，不参与判定）。
+      // Business-observable surface deepEquals (trace is only an observation surface, not part of decisions).
       assert.equal(outWithTrace.waveCount, outNoop.waveCount);
       assert.deepEqual(
         Object.keys(outWithTrace.statuses).sort(),

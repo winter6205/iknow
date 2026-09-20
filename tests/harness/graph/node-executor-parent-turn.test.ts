@@ -1,13 +1,14 @@
 /**
- * F-4 parentTurnId 填实 — graph 节点派发路径。
+ * parentTurnId wiring — graph node dispatch path.
  *
- * graph 是 `manager.spawn` 的第二个写侧入口（第一个是 `spawn_subagent` 工具）。
- * 派发方给出归属回合时，该回合身份必须同时出现在两处：
- *   - 节点 def → manager 的 spawn / state_change / stop 三类 record；
- *   - executor 自己发的 `subagent_step` dispatch / settle 两条。
- * 否则按 `?parent_turn_id=` 下钻只能捞到半张编排图。
+ * graph is the second write-side caller of `manager.spawn` (first is the
+ * `spawn_subagent` tool). When the dispatcher supplies an owning turn, that
+ * turn identity must appear in both places:
+ *   - the node def → manager's spawn / state_change / stop records;
+ *   - the executor's own two `subagent_step` records (dispatch / settle).
+ * Otherwise `?parent_turn_id=` drill-down only sees half the orchestration graph.
  *
- * 没有归属回合（当前 `/graph run` 是回合之外的 slash 命令）→ 两处都缺席该键。
+ * No owning turn (current `/graph run` is a slash command outside a turn) → the key is absent in both places.
  */
 
 import assert from "node:assert/strict";

@@ -1,14 +1,14 @@
 /**
- * createNoopTraceService (T2, GH #64)。
+ * createNoopTraceService contract checks.
  *
- * 验证 7 项契约:
- * 1. 返回 TraceService, 仅 3 个公开方法
+ * Seven contracts:
+ * 1. Returns a TraceService with only its public methods
  * 2. recordLlmCall → resolves undefined
  * 3. recordToolCall → resolves undefined
  * 4. recordTurn → resolves undefined
- * 5. 零副作用 (scratch dir + console spy)
- * 6. undefined parentLlmCallId 也不抛
- * 7. 工厂重复调用 → 实例彼此独立
+ * 5. Zero side effects (scratch dir + console spy)
+ * 6. No throw even when parentLlmCallId is undefined
+ * 7. Repeated factory calls → mutually independent instances
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";

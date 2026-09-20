@@ -105,18 +105,18 @@ describe("resolveWithinRoot", () => {
   });
 
   it("expands a leading ~ to the home directory (not the workspace)", async () => {
-    // W4: `~/foo.ts` 必须解析到 $HOME 而非项目根下的字面 `~` 目录
+    // `~/foo.ts` must resolve to $HOME, not to a literal `~` directory under the project root
     const root = await makeScratch("aci-helper-root-");
     const home = homedir();
     const expected = join(home, "foo.ts");
     let resolved: string;
     if (await exists(expected)) {
-      // 安全路径:home 下已存在该文件 → 直接断言
+      // safe path: the file already exists under home → assert directly
       resolved = await resolveWithinRoot(root, "~/foo.ts");
     } else {
-      // home 下不存在 → resolveWithinRoot 会因 "outside workspace" 抛出。
-      // 我们借此断言:它没有把 `~` 当字面目录建到工作区里(即没解析成
-      // <root>/~/<user>/foo.ts),而是把 ~ 展开到了 $HOME。
+      // not under home → resolveWithinRoot throws "outside workspace".
+      // We use that to assert it did not treat `~` as a literal directory inside the
+      // workspace (i.e. did not resolve to <root>/~/<user>/foo.ts) but expanded ~ to $HOME.
       await assert.rejects(
         resolveWithinRoot(root, "~/foo.ts"),
         ToolExecutionError
@@ -177,7 +177,7 @@ describe("resolveWithinRoot", () => {
       }),
       join(pad, "ok.txt")
     );
-    // 会话 tmp 目录自身也是一个合法的写目标(独立 containment root)。
+    // The session tmp dir itself is also a legal write target (an independent containment root).
     assert.equal(
       await resolveWithinRoot(root, pad, { sessionTmpRoot: pad }),
       pad
@@ -227,17 +227,17 @@ describe("resolveWithinRoot", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
-// path-outside 错误文案必须含当前写根，使模型能用相对路径重试。改绑后
-// `root` 即活 `taskRoot` (= 写根)，文案必须明示「current write root」以让
-// 模型用相对路径重试（现有文字只列「not under <root>」，不带 remap 引导）。
+// (ADR-0037) path-outside error text must name the current write root so the
+// model can retry with a relative path. After rebinding, `root` IS the live
+// `taskRoot` (= write root), so the text must state "current write root"
+// (the old wording only listed "not under <root>" with no retry guidance).
 //
-// 五类边界自检（empty / negative / overflow / concurrent / exception）：
-//   - empty: 文案仍含 root 字符串（不丢信息）；
-//   - negative: 相对路径越界（如 `../escape`）同样含 root 字符串；
-//   - overflow: 极长 root 完整出现（不被截断）；
-//   - concurrent: 多次串行调用，每次文案互不污染；
-//   - exception: extraWriteRoots 救不回的越界文案仍含 root 字符串。
+// Five boundary classes self-checked:
+//   - empty: text still contains the root string (no information lost);
+//   - negative: relative traversal (e.g. `../escape`) also contains the root string;
+//   - overflow: a very long root appears in full (not truncated);
+//   - concurrent: repeated serial calls never contaminate each other's text;
+//   - exception: traversal that extraWriteRoots cannot rescue still contains the root string.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 §4 (e))", () => {
@@ -248,8 +248,8 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
       resolveWithinRoot(root, join(outside, "file.ts")),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
-        // 文案必须含写根路径本身 + "current write root" 标识
-        // (模型据此用相对路径重试)
+        // the text must contain the write-root path itself + the "current write root" marker
+        // (so the model can retry with a relative path)
         return (
           error.message.includes("current write root") &&
           error.message.includes(root)
@@ -284,9 +284,9 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
   });
 
   it("overflow: 极长 root 完整出现在文案中（不被 truncate 截断到无意义）", async () => {
-    // overflow 验证目标：文案里 root 字符串完整出现（不被截断到无意义）。
-    // 将 root 控制在 OS PATH_MAX 之内,但构造一条足够长的真实目录链
-    // （30 层 * 8 字符 = 240 字符的有效路径长度，足以验证"不被截断"语义）。
+    // overflow target: the root string appears in full in the text (never truncated to meaninglessness).
+    // Keep root within the OS PATH_MAX but build a genuinely long directory chain
+    // (30 levels * 8 chars = 240-char effective path, enough to verify the "not truncated" semantics).
     const realRoot = await makeScratch("aci-helper-wr-overflow-");
     const longTail = Array.from({ length: 30 }, () => "abcdefgh").join("/");
     const longRoot = join(realRoot, longTail);
@@ -301,8 +301,8 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
         return true;
       }
     );
-    // 文案必须显式含 'current write root' 标识 + 含 longTail 的尾部（证明
-    // 极长 root 没被截断）。
+    // The text must explicitly contain the 'current write root' marker + the longTail (proving
+    // the very long root was not truncated).
     assert.ok(
       captured.includes("current write root"),
       "极长 root 路径必须含 'current write root' 标识"
@@ -317,7 +317,7 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
     const root = await makeScratch("aci-helper-wr-conc-");
     const outside1 = await makeScratch("aci-helper-wr-conc-1-");
     const outside2 = await makeScratch("aci-helper-wr-conc-2-");
-    // 串行两次,各自文案必须含同一 root。
+    // Two serial calls; each text must contain the same root.
     for (const outside of [outside1, outside2]) {
       await assert.rejects(
         resolveWithinRoot(root, join(outside, "file.ts")),
@@ -344,12 +344,14 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T2 / T3 (plans/session-scratch-path-space.md / 加强版 A / ADR-0092 SC4):
-// path-outside 拒绝文案按目标形态劈 EXIT —— 交付越界保持 taskRoot 重试引导
-// (ADR-0037 §4 (e))；OS `/tmp` 被拒时改指本身份会话 tmp 的展开 `$TMPDIR`
-// 绝对路径、不再要求「相对 taskRoot 重试」（草稿越界不是交付问题）。仅当
-// 垫底上 `<sessionScratch>/X` 已存在时补近邻 canonical 路径 —— 仍不 alias：
-// 不读不写不重定向，只是文案提示，垫底内容必须不变。
+// (ADR-0092, hardened variant) path-outside rejection text splits by target
+// shape — delivery traversal keeps the taskRoot retry guidance (ADR-0037);
+// when OS `/tmp` is rejected, point instead at the expanded `$TMPDIR` absolute
+// path of this identity's session tmp dir and drop the "retry relative to
+// taskRoot" hint (a draft escape is not a delivery problem). Only when
+// `<sessionScratch>/X` already exists on the pad, add the neighbor canonical
+// path — still no aliasing: no read, no write, no redirect, just a text hint;
+// pad content must stay unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-0092 SC4 / 加强版 A)", () => {
@@ -369,7 +371,7 @@ describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-009
         );
       }
     );
-    // SC4 不 alias：拒绝本身不得在垫底制造该文件。
+    // no aliasing: the rejection itself must not create the file on the pad.
     assert.equal(await exists(join(pad, "draft.txt")), false);
   });
 
@@ -377,11 +379,11 @@ describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-009
     const parent = await makeScratch("aci-helper-t2-deliv-");
     const root = join(parent, "root");
     await mkdir(root);
-    // 文案嵌入的是 realpath 后的写根 —— 断言用同一 canonical 口径
-    // （tmpdir 含 symlink 的宿主上不假失败）。
+    // The text embeds the realpath-resolved write root — assert with the same canonical
+    // form (so hosts where tmpdir contains symlinks don't false-fail).
     const realRoot = await realpath(root);
     const pad = await makeScratch("aci-helper-t2-deliv-pad-");
-    // 目标真实存在父目录（/etc）且落在 OS /tmp 与会话 tmp 之外 → 交付越界面。
+    // The target's real parent exists (/etc) and sits outside OS /tmp and the session tmp dir → the delivery-escape face.
     const outside = "/etc/iknow-t2-delivery-miss.txt";
 
     await assert.rejects(
@@ -431,7 +433,7 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
       !captured.includes("Retry with a path relative to the taskRoot"),
       "草稿越界不许再引导相对 taskRoot 重试"
     );
-    // 只是文案提示：不读不写不重定向，垫底内容逐字节不变。
+    // Just a text hint: no read, no write, no redirect — pad content stays byte-identical.
     assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad-content\n");
   });
 
@@ -467,8 +469,8 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
       resolveWithinRoot(root, "/tmp/", { sessionTmpRoot: pad }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
-        // 近邻存在性只针对被拒路径自身的相对段；"/tmp/" 无段 → 不得把
-        // 垫底里碰巧存在的 ok.txt 当近邻提示出去。
+        // Neighbor existence only considers relative segments of the rejected path itself;
+        // "/tmp/" has none → must not surface the pad's coincidental ok.txt as a neighbor hint.
         return (
           error.message.includes(realPad) &&
           !error.message.includes(join(realPad, "ok.txt")) &&
@@ -481,17 +483,19 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T4 (plans/session-fg-handoff-interrupt.md Locked sentence 4 / ADR-0037 §4):
-// 写/读/改/搜 的 workspace 解析相对活 taskRoot。相对路径第一段、或绝对前缀，
-// 等于当前树 leaf / 树路径 → 剥掉再解析；已在 taskRoot 下的绝对路径不再 join。
-// 判定只在根是 task worktree 形状时生效（主 checkout 逐字节不变），且剥完仍要
-// 过既有 containment —— 不为同名套娃留逃生口（树内真有同名目录时同一结果）。
+// Write/read/edit/search workspace resolution is relative to the live taskRoot.
+// When the first segment of a relative path, or an absolute prefix, equals the
+// current tree leaf / tree path → strip it before resolving; absolute paths
+// already under taskRoot are not re-joined. The rule only applies when the root
+// is a task-worktree shape (main checkout behavior byte-identical), and after
+// stripping the result must still pass existing containment — no escape hatch
+// for same-name nesting (when a same-named dir truly exists in the tree, same result).
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", () => {
   const LEAF = "ai-news-digest";
 
-  /** 活 taskRoot 形状：`<repo>/.iknow/worktrees/<leaf>`（isTaskWorktreePath SSOT）。 */
+  /** Live taskRoot shape: `<repo>/.iknow/worktrees/<leaf>` (isTaskWorktreePath SSOT). */
   async function makeTree(): Promise<string> {
     const repo = await makeScratch("aci-helper-tree-");
     const tree = join(repo, ".iknow", "worktrees", LEAF);
@@ -502,7 +506,7 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
   it("relative leaf-prefixed path and the bare path resolve to the same tree-root file", async () => {
     const tree = await makeTree();
     await writeFile(join(tree, "index.html"), "tree root\n");
-    // 同名套娃目录真的存在（内含不同正文）：leaf 回显仍指树根，无逃生口。
+    // A same-named nested dir really exists (with different content): the leaf echo still points at the tree root, no escape hatch.
     await mkdir(join(tree, LEAF), { recursive: true });
     await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
 
@@ -520,7 +524,7 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
     const tree = await makeTree();
     await writeFile(join(tree, "index.html"), "tree root\n");
 
-    // 绝对形态 = 树路径前缀 + leaf 回显（相对剥叶形态的绝对写法）。
+    // Absolute form = tree-path prefix + leaf echo (the absolute spelling of the relative strip-leaf form).
     assert.equal(
       await resolveWithinRoot(tree, join(tree, LEAF, "index.html")),
       join(tree, "index.html")
@@ -534,7 +538,7 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
     const kept = join(tree, "src", "page.ts");
 
     assert.equal(await resolveWithinRoot(tree, kept), kept);
-    // 缺失写目标（最近存在祖先 = 树根）同样逐字节不变。
+    // A missing write target (nearest existing ancestor = tree root) is likewise returned byte-identical.
     assert.equal(
       await resolveWithinRoot(tree, join(tree, "assets", "new.css")),
       join(tree, "assets", "new.css")
@@ -547,7 +551,7 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
     await mkdir(join(tree, LEAF), { recursive: true });
     await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
 
-    // 已归一化路径不得因 `./` 前缀绕过剥叶而落进同名套娃目录。
+    // A normalized path must not bypass leaf-stripping via the `./` prefix and land in the same-named nested dir.
     assert.equal(
       await resolveWithinRoot(tree, `./${LEAF}/index.html`),
       join(tree, "index.html")
@@ -560,8 +564,8 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
     await mkdir(join(tree, LEAF), { recursive: true });
     await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
 
-    // 判据是「词法归一化后第一段等于 leaf」：任何等价写法都不许落回套娃目录，
-    // 否则一个字符的前缀就能绕过剥叶。
+    // The criterion is "after lexical normalization the first segment equals the leaf": no
+    // equivalent spelling may fall back into the nested dir, otherwise a one-char prefix would bypass leaf-stripping.
     assert.equal(
       await resolveWithinRoot(tree, `sub/../${LEAF}/index.html`),
       join(tree, "index.html")
@@ -570,8 +574,8 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
 
   it("the bare leaf itself is left alone (prefix form only)", async () => {
     const tree = await makeTree();
-    // `ai-news-digest` 单独一段不是回显：树内真有同名目录时照旧解析到它，
-    // 缺失则按既有规则拼到树根下 —— 两者都不是「剥成空路径」。
+    // A lone `ai-news-digest` segment is not an echo: when a same-named dir really exists in the
+    // tree, resolve to it as before; when missing, join under the tree root by the existing rule — neither is "stripped to empty".
     await mkdir(join(tree, LEAF), { recursive: true });
     assert.equal(await resolveWithinRoot(tree, LEAF), join(tree, LEAF));
     assert.equal(
@@ -588,7 +592,7 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
 
   it("a non-worktree root does not strip a same-named first segment", async () => {
     const repo = await makeScratch("aci-helper-main-");
-    // 主 checkout 里同名目录：根不是 task worktree 形状 → 不剥。
+    // Same-named dir in the main checkout: root is not a task-worktree shape → no stripping.
     const root = join(repo, LEAF);
     await mkdir(join(root, LEAF), { recursive: true });
     await writeFile(join(root, LEAF, "index.html"), "real subdir\n");
@@ -614,8 +618,8 @@ describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", ()
   it("~/... is still expanded to home, never rewritten into the tree", async () => {
     const tree = await makeTree();
 
-    // $HOME 不在树内 → 无论 ~/foo.ts 是否存在，都必须按既有越界文案拒绝，
-    // 不得因剥前缀被改写成树内相对路径。
+    // $HOME is not inside the tree → whether or not ~/foo.ts exists, it must be rejected with
+    // the existing outside-root text; prefix stripping must never rewrite it into a tree-relative path.
     await assert.rejects(
       resolveWithinRoot(tree, "~/foo.ts"),
       (error: unknown) =>
@@ -672,9 +676,9 @@ describe("spawnWithStopSignal", () => {
   }, 5_000);
 
   it("escalates from SIGTERM to SIGKILL after the configurable grace period", async () => {
-    // 触发 SIGTERM 前必须等 sh 装好 `trap '' TERM`,否则在 spawn→exec 的
-    // 启动窗口里,SIGTERM 会先于 trap 装入命中 sh,导致 close 报 SIGTERM(issue #199)。
-    // sh 在 trap 后才写自己的 pid 到 marker,waitForPidFile 充当确定性屏障。
+    // Before firing SIGTERM we must wait for sh to install `trap '' TERM`, otherwise during the
+    // spawn→exec startup window SIGTERM hits sh before the trap is in place and close reports SIGTERM.
+    // sh writes its own pid to the marker only after the trap, so waitForPidFile acts as the determinism barrier.
     const root = await makeScratch("aci-helper-escalate-");
     const trapReadyFile = join(root, "trap-ready");
     const controller = new AbortController();
@@ -732,10 +736,10 @@ describe("spawnWithStopSignal", () => {
 });
 
 describe("lintPatch", () => {
-  // 以下断言从 tools-mutating.test.ts（已删）迁移而来——lintPatch 从
-  // 旧工具文件迁到 helpers.ts（T4），写入类工具单元覆盖由 edit-file.test.ts /
-  // bash.test.ts 承接，本组断言保留 lintPatch 单元覆盖（状态机正确性 +
-  // Windows 路径字面量）。
+  // These assertions migrated from tools-mutating.test.ts (deleted) when lintPatch moved from
+  // the old tool files to helpers.ts; write-tool unit coverage is carried by edit-file.test.ts /
+  // bash.test.ts, and this group keeps the lintPatch unit coverage (state-machine correctness +
+  // Windows path literals).
   it("accepts balanced parentheses / brackets / braces", () => {
     assert.deepEqual(lintPatch("foo(bar) [baz] {qux}"), { ok: true });
   });
@@ -770,7 +774,7 @@ describe("lintPatch", () => {
   });
 
   it("accepts escaped quotes (\\\" / \\' do not break pairing)", () => {
-    // 字符串字面量 "a \\\" b" 内部带 \" 转义,不影响配对
+    // string literal "a \\\" b" carries an inner \" escape that must not break pairing
     assert.deepEqual(lintPatch(`"a \\\" b"`), { ok: true });
     assert.deepEqual(lintPatch(`'a \\\' b'`), { ok: true });
   });

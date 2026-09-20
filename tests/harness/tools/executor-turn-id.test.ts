@@ -1,11 +1,12 @@
 /**
- * F-4 parentTurnId 填实 — `ctx.turnId` 从 executor 透到 handler。
+ * parentTurnId is filled in — `ctx.turnId` passes from executor through to handler.
  *
- * `conversationId` 回答「哪个会话」，`turnId` 回答「哪一回合」。前者装配期定死、
- * 后者每回合翻新，所以它只能顺着 `executeAll` 走 —— 工具（`spawn_subagent`）
- * 是在回合的工具阶段里被调用的，那是它唯一能拿到当前回合身份的地方。
+ * `conversationId` answers "which conversation" (fixed at assembly time);
+ * `turnId` answers "which turn" (refreshed every turn), so it can only ride
+ * along `executeAll` — tools (`spawn_subagent`) are invoked inside the turn's
+ * tool phase, the only place they can learn the current turn identity.
  *
- * 覆盖三层包装：基础 executor / permission 包装 / violation 包装。
+ * Covers the three wrapper layers: base executor / permission wrapper / violation wrapper.
  */
 
 import assert from "node:assert/strict";

@@ -1,6 +1,6 @@
 /**
- * #196 IKNOW T6:BOOTSTRAP 首启触发 + state.json 写入 (SC 24/27);
- * bootstrap_seeded false→true 唯一迁移路径。
+ * BOOTSTRAP first-start trigger + state.json write;
+ * bootstrap_seeded false→true is the only transition path.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
@@ -55,10 +55,12 @@ describe("bootstrap state machine", () => {
 });
 
 /**
- * rev 2026-08-11:BOOTSTRAP 从对话脚本(14cd709 应急设计,断言"不要诱导工具")
- * 改为文件模板。新语义 — agent 用 ACI 工具(read_file / write_file / edit_file)
- * 读写 `~/.iknow/`,引导完成后自己 rm BOOTSTRAP.md(文件驱动隐式完成)。
- * 断言同步翻转:prompt 应 *诱导* 用工具、不再提 /profile done。
+ * BOOTSTRAP changed from a conversation script (a stopgap asserting
+ * "do not lead the agent to tools") into a file template. New semantics —
+ * the agent reads/writes `~/.iknow/` with ACI tools (read_file / write_file /
+ * edit_file) and rm's BOOTSTRAP.md itself once guidance is done (file-driven
+ * implicit completion). Assertions flipped accordingly: the prompt should
+ * *encourage* tool use and no longer mention /profile done.
  */
 describe("BOOTSTRAP_TEMPLATE: file-driven tool guide", () => {
   it("instructs agent to update ~/.iknow/user.md with tools", () => {

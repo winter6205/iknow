@@ -1,13 +1,13 @@
 /**
- * 019 T3 demo 工具单元测试。
+ * Demo-tool unit tests.
  *
- * 覆盖:
- *  - createEchoTool / createGetTimeTool 通过 createRegistry 构造期校验
- *    (ajv strict + additionalProperties:false 编译过)
- *  - handler 在严格校验后返回正确 payload
- *    (echo input {text:"hi"} -> "hi";get_time -> ISO 字符串)
- *  - schema 拒绝额外字段,Executor 路径返回 validation_failed
- *    (echo + {extra:1};get_time + {tz:"x"})
+ * Coverage:
+ *  - createEchoTool / createGetTimeTool pass createRegistry construction-time
+ *    validation (ajv strict + additionalProperties:false compiles)
+ *  - handlers return correct payloads after strict validation
+ *    (echo input {text:"hi"} -> "hi"; get_time -> ISO string)
+ *  - schema rejects extra fields; the Executor path returns validation_failed
+ *    (echo + {extra:1}; get_time + {tz:"x"})
  */
 
 import { describe, it, expect } from "vitest";

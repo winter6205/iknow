@@ -1,14 +1,16 @@
 /**
- * #742 T1:流式臂模型调用的 idle 重置钟 + 有限硬顶,在 loop-engine 上的归属。
+ * Idle-reset clock + finite hard cap for streaming-arm model calls, as owned
+ * by loop-engine.
  *
- * 合同(plans/model-idle-thinking-peek.md Task 1 + docs/CONTEXT.md
- * 「model-call idle / 模型调用硬顶」):
- *   - 仅流式臂(adapter.streamMode)启用 idle;`stream=off` 与改前单钟一致;
- *   - idle / 硬顶都落既有 `StopReason: timeout`(cancelKind `timerTimeout`),
- *     不新增停因;
- *   - 用户 abort 仍是 `cancelled`,signal 优先;
- *   - 包装后的 `onStream` 必须原样转发给宿主回调,观察者异常照 safeEmitStream
- *     吞咽,不反流。
+ * Contract (docs/CONTEXT.md "model-call idle"):
+ *   - idle is enabled only on the streaming arm (adapter.streamMode);
+ *     `stream=off` behaves exactly like the pre-change single clock;
+ *   - both idle and hard cap land on the existing `StopReason: timeout`
+ *     (cancelKind `timerTimeout`) — no new stop reasons;
+ *   - user abort still wins as `cancelled` (signal takes priority);
+ *   - the wrapped `onStream` must forward verbatim to the host callback, and
+ *     observer exceptions keep being swallowed by safeEmitStream without
+ *     flowing back into the model turn.
  */
 
 import { describe, it } from "vitest";
@@ -33,10 +35,12 @@ function makeNative(role: "user" | "assistant", text: string) {
 }
 
 /**
- * 本文件替身:首个 step 按固定节奏向 `request.onStream` 打增量,`resolveAfterMs`
- * 缺席 = 永不 settle(交给两根钟裁决)。第二个及之后的 step 是 run() 的收尾摘要
- * 轮,立即返回空文本,避免摘要拖慢用例。emit 处 try/catch 对齐 stub-model 的 D3
- * 纪律(替身不得让观察者异常反流)。
+ * Local stand-in: the first step pushes deltas to `request.onStream` at a
+ * fixed cadence; with `resolveAfterMs` absent it never settles (the two clocks
+ * decide). Second and later steps are run()'s closing-summary turns returning
+ * empty text immediately so the summary doesn't slow cases down. The emit is
+ * wrapped in try/catch to match the stub-model discipline (a stand-in must not
+ * let observer exceptions flow back).
  */
 function createDeltaAdapter(opts: {
   readonly event?: HarnessStreamEvent;
@@ -66,7 +70,7 @@ function createDeltaAdapter(opts: {
         try {
           request.onStream?.(opts.event ?? THINKING);
         } catch {
-          // 替身遵守 D3:观察者异常不得反向破坏模型回合。
+          // The stand-in honors the no-backflow rule: observer exceptions must not break the model turn.
         }
       }, opts.everyMs);
       try {
@@ -113,7 +117,7 @@ describe("#742 T1: 流式臂 idle 重置", () => {
       executor,
       registry,
       maxTurns: 1,
-      // 今日单钟 40ms —— 改前它会在第 40ms 砍掉这次仍在出字的调用。
+      // Single legacy clock at 40ms — pre-change it would have cut this still-producing call at 40ms.
       modelTimeoutMs: 40,
       modelIdleTimeoutMs: 200,
       modelHardCapMs: 2_000,
@@ -206,7 +210,7 @@ describe("#742 T1: 流式臂 idle 重置", () => {
     const adapter = createDeltaAdapter({
       everyMs: 15,
       emitCount: 100,
-      // streamMode 缺席 = stream=off / 离线替身。
+      // streamMode absent = stream=off / offline stand-in.
     });
     const { result, trace } = await run("x", {
       adapter,
@@ -244,7 +248,7 @@ describe("#742 T1: onStream 包装的转发纪律", () => {
         executor,
         registry,
         maxTurns: 1,
-        // 今日单钟 40ms:包装缺席时这次调用会被砍掉,转发断言也就无从谈起。
+        // Single clock at 40ms: without the wrapping this call would be cut off and the forwarding assertions moot.
         modelTimeoutMs: 40,
         modelIdleTimeoutMs: 2_000,
         modelHardCapMs: 5_000,
@@ -319,18 +323,20 @@ describe("#742 T1: onStream 包装的转发纪律", () => {
 });
 
 /**
- * transport-continue-persist T1 / spec inv 1 + SC1:
- * 不可见 idle 到点 → 整次调用重发(至少一次);已出字 → 不重发。
+ * specs/transport-continue-persist.md invariant 1:
+ * invisible idle expiry -> the whole call is re-dispatched (at least once);
+ * already-produced output -> never re-dispatched.
  *
- * 替身纪律:`createDeltaAdapter` 首个 step 永不 settle(交给两根钟裁决),
- * 第二及之后的 step 返回收尾摘要空文本。要验「重发」必须让第一根钟到点后
- * 下一次 race 真能 settle,故用 `createStallAdapter`:第 1 次 step 永不 settle
- * (卡死),第 2 次 step 立刻成功 —— 这正是「连接卡死后重发」的真实形态。
+ * Stand-in discipline: `createDeltaAdapter`'s first step never settles (the
+ * clocks decide) and later steps return the closing summary. To verify a real
+ * re-dispatch the next race must be able to settle after the clock fires, so
+ * `createStallAdapter` is used: step #1 hangs forever, step #2 succeeds
+ * immediately — the true shape of "re-send after a stalled connection".
  */
 function createStallAdapter(opts: {
   readonly emitFirstAttempt?: HarnessStreamEvent;
   readonly firstAttemptEveryMs?: number;
-  /** 首发增量次数;有限次才有「出字之后重新静默」→ idle 真能到点。 */
+  /** Finite emit count on the first attempt: only "output then silence again" lets idle actually expire. */
   readonly firstAttemptEmitTicks?: number;
   readonly streamMode?: boolean;
   readonly firstAttemptResolveAfterMs?: number;
@@ -348,14 +354,15 @@ function createStallAdapter(opts: {
       },
       signal?: AbortSignal
     ) => {
-      // 只计主回路调用:异常停后 best-effort 收尾摘要轮 request 无 tools
-      // (runSummaryWithTimeout 的 request = {}),它换不来「重发」的语义。
+      // Count main-loop calls only: after an abnormal stop, the best-effort
+      // summary turn gets a tools-less request (runSummaryWithTimeout's
+      // request = {}), which carries no "re-dispatch" semantics.
       if (request.tools === undefined) {
         return assistantResult({ texts: [], supplierStop: "success" });
       }
       calls += 1;
       if (calls > 1) {
-        // 重发成功:带文本才落 completed(空文本会被判 emptyFinalResponse)。
+        // Re-dispatch succeeded: it must carry text to land as completed (empty text would be flagged emptyFinalResponse).
         return assistantResult({ texts: ["retried"], supplierStop: "success" });
       }
       let ticker: ReturnType<typeof setInterval> | undefined;
@@ -371,7 +378,7 @@ function createStallAdapter(opts: {
           try {
             request.onStream?.(opts.emitFirstAttempt!);
           } catch {
-            // D3:观察者异常不得反流。
+            // No backflow: observer exceptions must not break the stream.
           }
         }, opts.firstAttemptEveryMs ?? 5);
       }
@@ -413,7 +420,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
       modelHardCapMs: 5_000,
       summaryTimeoutMs: 50,
     });
-    // 第一次 step 卡死 → idle 到点 → 重发;第二次 step 立即成功 → completed。
+    // Step 1 stalls → idle expires → re-dispatch; step 2 succeeds immediately → completed.
     assert.equal(calls(), 2);
     assert.equal(result.stopReason, "completed");
   });
@@ -454,7 +461,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
       streamMode: true,
       emitFirstAttempt: THINKING,
       firstAttemptEveryMs: 10,
-      // 有限次增量:出字之后重新静默,idle 才会到点(否则增量一路重置 idle)。
+      // Finite deltas: after output goes silent again, idle can expire (otherwise deltas keep resetting idle).
       firstAttemptEmitTicks: 2,
     });
     const { result, trace } = await run("x", {
@@ -463,9 +470,11 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
       registry,
       maxTurns: 1,
       modelTimeoutMs: 5_000,
-      // idle 预算必须显著大于"增量送达 + 重排"的耗时:该用例断言的是
-      // 「已出字不重发」,若增量投递慢于 idle 到点,判据会退化成不可见重发,
-      // 测的就不是这条不变式了(负载下曾复现 calls()===2)。
+      // The idle budget must comfortably exceed "delta delivery + rescheduling"
+      // time: this case asserts "already-produced output is not re-dispatched".
+      // If delta delivery were slower than idle expiry, the verdict would
+      // degrade into invisible re-send and stop testing this invariant
+      // (calls()===2 was once reproducible under load).
       modelIdleTimeoutMs: 400,
       modelHardCapMs: 5_000,
       summaryTimeoutMs: 50,
@@ -480,7 +489,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
 
   it("退避后仍不可见 → 有界重发,第 5 次尝试耗尽仍落 timeout", async () => {
     const { registry, executor } = harness();
-    // 每次 step 都卡死:idle 到点 → 重发,直到预算耗尽。
+    // Every step stalls: idle expires → re-send, until the budget is exhausted.
     let calls = 0;
     const adapter: LoopAdapter = Object.freeze({
       streamMode: true,
@@ -491,7 +500,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
         request: { tools?: unknown },
         signal?: AbortSignal
       ) => {
-        // 只计主回路调用(摘要轮 request 无 tools)。
+        // Count main-loop calls only (summary turns have no tools in request).
         if (request.tools === undefined) {
           return assistantResult({ texts: [], supplierStop: "success" });
         }
@@ -519,11 +528,10 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
       modelIdleTimeoutMs: 20,
       modelHardCapMs: 5_000,
       summaryTimeoutMs: 50,
-      // transport-continue-persist T1:退避表默认秒级,测试里压到 1ms
-      // 保持用例秒级完成(退避表本身由 transport-retry.test.ts 钉死)。
+      // transport-continue-persist: the backoff table defaults to seconds; tests compress it to 1ms so cases finish in seconds (the table itself is pinned by transport-retry.test.ts).
       transportRetryDelayMs: () => 1,
     });
-    // 预算 5:第 1 次 + 4 次重发全部耗尽 → timeout,不再第 6 次。
+    // Budget 5: first attempt + 4 re-sends all exhausted → timeout, no 6th.
     assert.equal(calls, TRANSPORT_MAX_ATTEMPTS);
     assert.equal(result.stopReason, "timeout");
     assert.equal(
@@ -544,7 +552,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
         request: { tools?: unknown },
         signal?: AbortSignal
       ) => {
-        // 只计主回路调用(摘要轮 request 无 tools)。
+        // Count main-loop calls only (summary turns have no tools in request).
         if (request.tools === undefined) {
           return assistantResult({ texts: [], supplierStop: "success" });
         }
@@ -575,7 +583,7 @@ describe("transport-continue-persist T1: 不可见 idle 可重试", () => {
         modelIdleTimeoutMs: 20,
         modelHardCapMs: 5_000,
         summaryTimeoutMs: 50,
-        // 退避拉到足够长,确保 abort 落在退避窗口内而非下一次 attempt 中。
+        // Stretch the backoff long enough that the abort lands inside the backoff window, not mid-attempt.
         transportRetryDelayMs: () => 5_000,
       },
       controller.signal
@@ -627,14 +635,16 @@ describe("#742 T1: raceModel 直测的 idle 选项", () => {
   });
 
   /**
-   * transport-continue-persist T1:timerTimeout 支必带 `clockAbort`,且它与
-   * 刻在 `childSignal.reason` 上的是**同一个值**(`onExpire` 先 abort 再
-   * settle)—— 重发判定消费前者、translate 层消费后者,分叉会让「谁到点」
-   * 与「谁被归类」各说各话。
+   * timerTimeout outcomes must carry `clockAbort`, and it must be the exact
+   * same value stamped on `childSignal.reason` (`onExpire` aborts first, then
+   * settles) — the re-send decision consumes the former and the translate
+   * layer the latter; a fork would let "which clock fired" and "what got
+   * classified" disagree.
    *
-   * `source` 两值都钉死,是因为它刻意**不参与** `classifyFault`(见
-   * `FaultEvent.clock_timeout`),读错值不会在 classify 处露头:只有这里
-   * 直接断言才拦得住 idle / hardCap 互换。
+   * Both `source` values are pinned here deliberately: `source` is not an
+   * input to `classifyFault` (see `FaultEvent.clock_timeout`), so reading the
+   * wrong value never surfaces there — only this direct assertion catches an
+   * idle / hardCap swap.
    */
   it("clockAbort 与 childSignal.reason 同值:两根钟各自的 source 都带到 outcome", async () => {
     const { registry, executor } = harness();
@@ -667,7 +677,7 @@ describe("#742 T1: raceModel 直测的 idle 选项", () => {
       return { outcome, reason: handle.childSignal.reason as unknown };
     };
 
-    // 无增量 → idle 先到点:source 是 idle,visible=false(可重发那格)。
+    // No deltas → idle fires first: source is idle, visible=false (the re-sendable cell).
     const idle = await raceOnce({
       idleTimeoutMs: 40,
       hardCapMs: 5_000,
@@ -680,7 +690,7 @@ describe("#742 T1: raceModel 直测的 idle 选项", () => {
     });
     assert.deepEqual(idle.reason, idle.outcome.clockAbort);
 
-    // 增量持续重置 idle → 硬顶先到点:source 是 hardCap,visible=true。
+    // Deltas keep resetting idle → the hard cap fires first: source is hardCap, visible=true.
     const hard = await raceOnce({
       idleTimeoutMs: 5_000,
       hardCapMs: 60,

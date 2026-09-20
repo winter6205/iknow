@@ -1,22 +1,25 @@
 /**
- * T5 (#653 G1 / 包1-感知): `env_snapshot` 流事件 —— 与 `agent_status` 平行的
- * 独立事件流(人读 chrome 的数据源),在「每次即将调用模型前」的回合边界发出。
+ * `env_snapshot` stream event — an independent event stream parallel to
+ * `agent_status` (data source for human-readable chrome), emitted at each turn
+ * boundary "just before a model call".
  *
- * 验收映射:
- *   ① 事件携带完整 EnvSnapshot 字段(cwd / gitBranch / dirtyCount /
- *      diffPreview),与 agent_status 事件物理隔离(不同 type,字段零重叠);
- *   ② emit 时序:每次 appendAgentStatusBar 之后(同一回合边界计算点),
- *      且先于该次模型调用到达(entrySamples 同款采样交叉断言);
- *   ③ readEnvSnapshot 失败(degraded)→ 事件仍发,cwd 在场、git/diff 字段
- *      全 null —— 不 throw、不吞事件;
- *   ④ deps.envSnapshot 缺席 → 零事件(byte-identical 纪律:ask / worker /
- *      既有 stub 装配零行为变化);
- *   ⑤ 观察者 throw 不反流(safeEmitStream 契约);
- *   ⑥ env_snapshot 不进 messages(栏纯度反向契约:请求尾消息不含 cwd/git)。
+ * Acceptance mapping:
+ *   ① the event carries the full EnvSnapshot fields (cwd / gitBranch /
+ *      dirtyCount / diffPreview), physically isolated from agent_status
+ *      (different type, zero field overlap);
+ *   ② emit ordering: after each appendAgentStatusBar (same turn-boundary
+ *      computation point) and before that model call lands (entrySamples-style
+ *      sampling cross-assertion);
+ *   ③ readEnvSnapshot failure (degraded) → event still emitted, cwd present,
+ *      git/diff fields all null — never throws, never swallows the event;
+ *   ④ deps.envSnapshot absent → zero events (byte-identical discipline: ask /
+ *      worker / existing stub assemblies see zero behavior change);
+ *   ⑤ observer throw must not backflow (safeEmitStream contract);
+ *   ⑥ env_snapshot never enters messages (bar-purity reverse contract: request
+ *      tail contains no cwd/git).
  *
- * spec: specs/653-horizon-pkg1-perception.md §"环境现势";
- * 决议: docs/design/DESIGN-ENVIRONMENT-PRESENT.md(平行独立流,不复用
- * agent_status);plan: plans/653-horizon-pkg1-perception.md T5。
+ * Design: docs/design/DESIGN-ENVIRONMENT-PRESENT.md (parallel independent
+ * stream, not reusing agent_status).
  */
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -37,7 +40,7 @@ import {
 } from "../../src/harness/session-roots.ts";
 
 // ---------------------------------------------------------------------------
-// 本文件私有 fixtures
+// File-private fixtures
 // ---------------------------------------------------------------------------
 
 const tempDirs: string[] = [];
@@ -62,7 +65,7 @@ async function makeTodoDir(initialContent?: string): Promise<string> {
   return tmp;
 }
 
-/** 事件收集器:env_snapshot 与 agent_status 分开记(type 双流互斥采样)。 */
+/** Event collector: env_snapshot and agent_status recorded separately (two-stream sampling by mutually exclusive types). */
 interface EnvProbe {
   readonly onStream: (event: HarnessStreamEvent) => void;
   readonly envSnapshots: Extract<
@@ -89,7 +92,7 @@ function makeEnvProbe(): EnvProbe {
   return { onStream, envSnapshots, agentStatusEvents };
 }
 
-/** 把 messages 里所有 text block 拼成一段(供「不进 messages」反向断言)。 */
+/** Concatenate every text block across messages (for the "never enters messages" reverse assertion). */
 function allText(messages: ReadonlyArray<AnthropicNativeMessage>): string {
   return messages
     .map((m) =>
@@ -98,18 +101,18 @@ function allText(messages: ReadonlyArray<AnthropicNativeMessage>): string {
     .join("\n");
 }
 
-/** T9:live reader seam —— 把当前 process cwd 暴露为活 readCwd。 */
+/** Live reader seam — expose the current process cwd as a live readCwd. */
 function envSnapshotLiveCwd(): { readCwd: () => string } {
   return { readCwd: () => process.cwd() };
 }
 
-/** T9:直接喂一个非 git 目录的 live reader(degraded 形态测试专用)。 */
+/** Feed a live reader pointing at a non-git directory directly (degraded-shape test only). */
 function envSnapshotLiveNonGit(nonGitDir: string): { readCwd: () => string } {
   return { readCwd: () => nonGitDir };
 }
 
 // ---------------------------------------------------------------------------
-// AC ① 事件形状:EnvSnapshot 字段齐全,与 agent_status 物理隔离
+// Event shape: full EnvSnapshot fields, physically isolated from agent_status
 // ---------------------------------------------------------------------------
 
 describe("HarnessStreamEvent env_snapshot variant", () => {
@@ -149,8 +152,9 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
       ev.snapshot.diffPreview === null ||
         typeof ev.snapshot.diffPreview === "string"
     );
-    // 反向契约:与 agent_status 字段零重叠(env_snapshot 不带 lastTool /
-    // openTodoLines)。agent_status 字段缺席检查另见 ②(同回合并存)。
+    // Reverse contract: zero field overlap with agent_status (env_snapshot
+    // carries no lastTool / openTodoLines). Co-presence in the same turn is
+    // covered by the ordering test.
     assert.ok(!("lastTool" in ev));
     assert.ok(!("openTodoLines" in ev));
   });
@@ -190,17 +194,19 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
     );
 
     assert.equal(result.stopReason, "completed");
-    // 2 次模型调用 → 2 条 env_snapshot + 2 条 agent_status(同款回合边界
-    // 节律,平行独立)。captured.length === 2 证明调用确实发生。
+    // 2 model calls → 2 env_snapshot + 2 agent_status (same turn-boundary
+    // cadence, parallel and independent). captured.length === 2 proves the
+    // calls actually happened.
     assert.equal(probe.envSnapshots.length, 2);
     assert.equal(probe.agentStatusEvents.length, 2);
     assert.equal(captured.length, 2);
   });
 
   it("③ readEnvSnapshot 抛错 → emit env_snapshot 含 cwd 但 git/diff = null (不 throw)", async () => {
-    // degraded 形态由 deps.envSnapshot.cwd 指向非 git 目录驱动:
-    // readEnvSnapshot 对非 git 工作区收敛为全 null 字段(永不 throw 契约,
-    // T4 已测);本用例钉死 loop-engine 对 degraded 快照照常 emit、不 throw。
+    // Degraded shape driven by deps.envSnapshot.cwd pointing at a non-git
+    // directory: readEnvSnapshot converges to all-null git fields there
+    // (never-throws contract, pinned by the reader tests); this case pins
+    // that loop-engine still emits the degraded snapshot without throwing.
     const nonGitDir = await makeTmpDir("iknow-env-nongit-");
     const echo = okEchoTool();
     const reg = createRegistry([echo]);
@@ -291,7 +297,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
     );
 
     assert.equal(result.stopReason, "completed");
-    // hostile 仅抛 env_snapshot;agentStatus 缺席 → 无栏,尾消息仅 stub user prompt。
+    // hostile throws only on env_snapshot; agentStatus absent → no bar, tail message is just the stub user prompt.
     assert.equal(captured.length, 1);
   });
 
@@ -328,11 +334,12 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
   });
 
   it("⑦ appendEnvSnapshot 现读 live taskRoot —— rebind 后下一波 envSnapshot 反映新根 (T9)", async () => {
-    // T9 (ADR-0037 §4):env_snapshot 必须读到活 taskRoot,而不是装配期
-    // 钉死的静态 cwd。装配层缝入的 readCwd 是个闭包,每次即将调模型前
-    // 现读 LiveTaskRoot.read() —— 这样 rebind 后下一波 tool calls 的人读
-    // 面 (TUI cwd / git 摘要) 跟随活根,而 system prompt 仍钉在稳定根,
-    // KV 缓存前缀字节不变。
+    // ADR-0037: env_snapshot must read the LIVE taskRoot, not a statically
+    // pinned assembly-time cwd. The injected readCwd closure re-reads
+    // LiveTaskRoot.read() before every model call — so after a rebind, the
+    // human-facing view of the next wave (TUI cwd / git summary) follows the
+    // live root while the system prompt stays on the stable root and the KV
+    // cache prefix bytes are unchanged.
     const initialRoot = "/repo/main";
     const reboundRoot = "/repo/.iknow/worktrees/conv-1";
     const liveTaskRoot = createLiveTaskRoot(initialRoot);
@@ -347,7 +354,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
       },
     ]);
 
-    // rebind 发生在装配之后、本回合即将调模型前 —— 用缝入的 readCwd 现读。
+    // rebind happens after assembly and before this turn's model call — the injected readCwd reads live.
     writeLiveTaskRoot(liveTaskRoot, reboundRoot);
     await run(
       "go",
@@ -356,7 +363,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         executor: exec,
         registry: reg,
         maxTurns: 5,
-        // 装配期不再持有静态 cwd;readCwd 是本测试刻意验证的调用时 live reader。
+        // Assembly no longer holds a static cwd; readCwd is the call-time live reader this test deliberately exercises.
         envSnapshot: { readCwd: liveTaskRoot.read },
       },
       undefined,

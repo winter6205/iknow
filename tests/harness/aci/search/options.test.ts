@@ -1,14 +1,15 @@
 /**
- * grep flag 解析层单测（SC12 职责 1；契约 D2–D5）。
+ * grep flag parsing layer unit tests.
  *
- * 锁的不变式：
- *   - 只传 pattern → output=paths / offset=0 / head_limit=50 / context=0 /
- *     ignoreCase=false（D2 默认 + D3 默认 50）；别名 `files_with_matches`
- *     在解析层归一为 paths，不产生第四种出法。
- *   - `head_limit` 硬顶 2000；`limit` 是**退役名**，出现即 typed 拒绝
- *     （D3「不叫 limit」；避免与 read_file 行窗撞名）。
- *   - 空 / 负 / 非法整数的边界一律 typed 拒绝（defensive 五类之空与非法）。
- *   - `also` 在场才解析 `within_lines`，默认 5（D5）。
+ * Invariants locked:
+ *   - pattern only → output=paths / offset=0 / head_limit=50 / context=0 /
+ *     ignoreCase=false; the alias `files_with_matches` normalizes to paths at
+ *     the parsing layer, never creating a fourth output mode.
+ *   - `head_limit` is hard-capped at 2000; `limit` is a **retired name** —
+ *     its presence is a typed reject (chosen to avoid colliding with
+ *     read_file's line-window param).
+ *   - Empty / negative / illegal-integer boundaries are typed rejects.
+ *   - `within_lines` is only parsed when `also` is present, default 5.
  */
 
 import assert from "node:assert/strict";
@@ -45,7 +46,8 @@ describe("parseQuerySpec — 默认面", () => {
     assert.equal(spec.also, undefined);
     assert.equal(spec.glob, undefined);
     assert.equal(spec.type, undefined);
-    // withinLines 只在 also 在场时有意义；无 also 时保持默认常量不参与行为。
+    // withinLines only matters when `also` is present; without it the default
+    // constant stays inert.
     assert.equal(spec.withinLines, DEFAULT_WITHIN_LINES);
   });
 
@@ -61,7 +63,8 @@ describe("parseQuerySpec — 默认面", () => {
   });
 
   it("`files_with_matches` 是 paths 的入参别名，在解析层归一（D2）", () => {
-    // 别名只换标签、不产生第四种出法：解析产物与 paths 逐字段相同。
+    // The alias only relabels; no fourth output mode: parse result is
+    // field-for-field identical to paths.
     assert.deepEqual(
       parseQuerySpec({ pattern: "a", output: "files_with_matches" }),
       parseQuerySpec({ pattern: "a", output: "paths" })
@@ -70,7 +73,7 @@ describe("parseQuerySpec — 默认面", () => {
       parseQuerySpec({ pattern: "a", output: "files_with_matches" }).output,
       "paths"
     );
-    // paths 的 context 归零规则同样适用于别名（不是 content）。
+    // paths' context-zeroing rule applies to the alias too (not content).
     assert.equal(
       parseQuerySpec({
         pattern: "a",
@@ -139,7 +142,7 @@ describe("parseQuerySpec — head_limit 语义（D3）", () => {
         /head_limit/.test(error.message) &&
         /limit/.test(error.message)
     );
-    // 缺席 = 正常（不误伤）。
+    // Absent = fine (no false positives).
     assert.doesNotThrow(() => rejectRetiredLimitField({ pattern: "a" }));
     assert.doesNotThrow(() =>
       rejectRetiredLimitField({ pattern: "a", head_limit: 5 })
@@ -147,10 +150,11 @@ describe("parseQuerySpec — head_limit 语义（D3）", () => {
   });
 
   it("`grep_limit` 同样是退役名：typed 拒绝且文案点名 head_limit", () => {
-    // 契约 D3 明说「不叫 `limit`，不叫 `grep_limit`」。schema 的
-    // `additionalProperties: false` 只拦新装配，直呼工具 / 旧装配仍可能带
-    // 进来 —— 只拦 `limit` 会让 `grep_limit` 静默失效（模型以为限了条数，
-    // 实际拿默认 50 条）。
+    // The contract says explicitly: "not `limit`, not `grep_limit`".
+    // Schema `additionalProperties: false` only guards fresh assembly; direct
+    // tool calls / stale assemblies can still bring them in — rejecting only
+    // `limit` would let `grep_limit` fail silently (the model thinks it capped
+    // rows while actually getting the default 50).
     assert.throws(
       () => rejectRetiredLimitField({ pattern: "a", grep_limit: 200 }),
       (error: unknown) =>
@@ -205,11 +209,12 @@ describe("parseQuerySpec — 空 / 非法输入", () => {
   });
 
   it("语法坏的 glob 在解析层被拒（两条引擎同成败，不取决于谁在跑）", () => {
-    // rg 对未闭合 `[` 是 rc=2 整次失败；若只在 Node 引擎里当字面量处理，
-    // 同一个 glob 就会「自带引擎在场时报错、起不来时静默回空」（SC9）。
+    // rg fails the whole run with rc=2 on an unclosed `[`; if only the Node
+    // engine treated it as a literal, the same glob would "error when rg is
+    // present, silently return empty when it isn't".
     rejects({ pattern: "a", glob: "[.ts" }, /glob/);
     rejects({ pattern: "a", glob: "a[b" }, /unclosed/);
-    // `[]]` 合法（紧跟 `[` 的 `]` 是字面成员），不得误伤。
+    // `[]]` is legal (a `]` right after `[` is a literal member); no false rejects.
     assert.equal(parseQuerySpec({ pattern: "a", glob: "[]]" }).glob, "[]]");
   });
 });

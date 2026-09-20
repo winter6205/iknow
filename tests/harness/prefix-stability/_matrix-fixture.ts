@@ -1,11 +1,12 @@
 /**
- * B7 / spec model-prefix-layering SC2 断言② 总装矩阵共享 fixture。
+ * Shared fixture for the full-assembly prefix-stability matrix (assertion 2).
  *
- * 每个场景用最小 harness 装配(stub adapter / stub client / 真 registry +
- * resolver),断言「场景事件发生前」与「发生后」相邻两轮的
- * `promptTools()` + `deps.system()` deep-equal。工具面比较元素级
- * (name + schema 逐字段),system 全文 JSON 序列化比较(与 B4
- * prefix-stability.test.ts 同形态)。
+ * Each scenario assembles a minimal harness (stub adapter / stub client /
+ * real registry + resolver) and asserts that `promptTools()` + `deps.system()`
+ * are deep-equal for the two adjacent turns before and after the scenario
+ * event. Tool-surface comparison is element-wise (name + every schema field);
+ * system is compared via full JSON serialization (same shape as
+ * tests/harness/mcp/prefix-stability.test.ts).
  */
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ import type { ToolDef } from "../../../src/harness/tools/types.ts";
 import assert from "node:assert/strict";
 
 // ---------------------------------------------------------------------------
-// 基础 env / client 替身
+// Basic env / client stand-ins
 // ---------------------------------------------------------------------------
 
 export function makeMatrixEnv(): IknowEnv {
@@ -70,7 +71,7 @@ export function makeInstantClient(
   };
 }
 
-/** 一个 connect 等到外部 release 才成功的 client(场景 a 窗口控制)。 */
+/** A client whose connect only succeeds after an external release (scenario-a window control). */
 export function makeGatedClient(): {
   handle: McpClientHandle;
   release: () => void;
@@ -101,7 +102,7 @@ export function makeGatedClient(): {
   return { handle, release: releaseGate };
 }
 
-/** 一个 connect 永不 resolve 的 client(场景 a 超时分支)。 */
+/** A client whose connect never resolves (scenario-a timeout branch). */
 export function makeNeverResolvingClient(): McpClientHandle {
   return {
     connect: async () => {
@@ -118,12 +119,13 @@ export function makeNeverResolvingClient(): McpClientHandle {
 }
 
 // ---------------------------------------------------------------------------
-// 断言② 双面断言 helpers
+// Assertion-2 dual-surface helpers
 // ---------------------------------------------------------------------------
 
 /**
- * 元素级 tools 比较:名字数组 deep-equal + 每个 ToolDef JSON 序列化
- * deep-equal(handler 函数序列化为 undefined,两轮同形 → 等价比较仍严格)。
+ * Element-wise tools comparison: name arrays deep-equal + every ToolDef
+ * JSON-serialized deep-equal (handler functions serialize to undefined, so
+ * both turns stay shape-identical and the comparison remains strict).
  */
 export function assertToolsDeepEqual(
   before: ReadonlyArray<ToolDef>,
@@ -152,7 +154,7 @@ export function assertSystemDeepEqual(
   assert.equal(after, before, `${label}: system 必须逐字节一致`);
 }
 
-/** 一次相邻两轮断言:取 before 快照 → 场景事件 → 取 after 快照 → deep-equal。 */
+/** One adjacent-two-turn assertion: snapshot before → scenario event → snapshot after → deep-equal. */
 export async function assertAdjacentTurnsStable(
   built: BuiltEngine,
   label: string,
@@ -168,7 +170,7 @@ export async function assertAdjacentTurnsStable(
 }
 
 // ---------------------------------------------------------------------------
-// 临时目录 helper
+// Temp-directory helpers
 // ---------------------------------------------------------------------------
 
 export async function makeTempRoot(
@@ -184,7 +186,7 @@ export async function makeTempRoot(
   };
 }
 
-/** chat 表面最小装配(tmp home / tmp cwd,无 MCP 配置)。 */
+/** Minimal chat-surface assembly (tmp home / tmp cwd, no MCP config). */
 export async function buildMinimalChatEngine(
   root: string,
   extra: Parameters<typeof buildHarnessEngine>[0] extends infer O
@@ -203,7 +205,7 @@ export async function buildMinimalChatEngine(
   return built;
 }
 
-/** 写入一份 .iknow/mcp.json。 */
+/** Write a .iknow/mcp.json with the given server names. */
 export async function plantMcpConfig(
   root: string,
   servers: readonly string[]

@@ -57,7 +57,7 @@ describe("worktree tool golden set (fixtures)", () => {
     assertFixtureRunnable(sc4);
     assert.equal(sc4.expectedFirstTool, "list-worktrees");
     assert.match(sc4.userPrompt, /哪些|列出/);
-    // SC4 是 list 夹具：输入不得把 create 当作期望首工具。
+    // The list fixture must never treat create as its expected first tool.
     assert.notEqual(sc4.expectedFirstTool, "create-worktree");
   });
 });
@@ -123,8 +123,8 @@ describe("worktree tool registered names (SC1)", () => {
   });
 
   it("gate hint names the registered create tool (exact literal, SC5)", () => {
-    // 精确字面：前缀匹配放过 `create-worktree-something` 一类漂移，
-    // 而 SC5 要求回执点名的就是注册名本身。
+    // Exact literal: prefix matching would let `create-worktree-something`
+    // style drift pass, while the receipt must name the registered tool itself.
     assert.equal(CREATE_WORKTREE_TOOL_HINT, "create-worktree ACI tool");
   });
 });

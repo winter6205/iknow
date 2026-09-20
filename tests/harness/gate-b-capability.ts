@@ -1,12 +1,15 @@
 /**
  * Gate B capability scanner (tests only).
  *
- * 守的是 conditional remediation 能力不进 harness 可执行面：
- * checkpoint 落盘 / token-cost 护栏 / OTel 导出 / 把 session-api 拖进内核。
- * #672：可执行面允许 FaultClass `retry`（传输重试装饰器在 T2）。
- * 用 TypeScript AST：标识符与字符串（含 import 路径、模板）会扫；注释 / JSDoc / 正则字面量不扫。
+ * Keeps conditional remediation capabilities out of the harness executable
+ * surface: checkpoint persistence / token-cost guards / OTel export /
+ * dragging session-api into the kernel. The executable surface does allow
+ * the FaultClass `retry` (transport retry decorator).
+ * Uses the TypeScript AST: identifiers and strings (import paths, templates
+ * included) are scanned; comments / JSDoc / regex literals are not.
  *
- * 永不抛错。未闭合 `/*` EXIT：其余当作注释，不进入 AST 标识符。
+ * Never throws. An unclosed `/*` EXIT: everything after it is treated as a
+ * comment and never reaches AST identifiers.
  */
 import ts from "typescript";
 

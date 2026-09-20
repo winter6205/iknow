@@ -24,14 +24,16 @@ describe("sandbox secret literal guard", () => {
   });
 });
 
-// ── ADR-0097:fence secret env 半区不依赖网络轴 ─────────────────────────────
-// 网络轴在 fence 层已整体退场(`--unshare-net` 恒在);secret env 处理路径
-// 与默认分支恒字节一致(envIsolation.filter 截断 host 侧命中,任何 fence 选项
-// 都不再引入新通道)。本 suite 留作回归:任何「fence 形态变化都可能引入
-// env 通道」的回归被它捕获。
+// ── ADR-0097: the fence secret-env half-surface does not depend on the network axis ──
+// The network axis has fully retired from the fence layer (`--unshare-net` is
+// constant); the secret-env handling path stays byte-identical with the default
+// branch (envIsolation.filter truncates host-side hits, and no fence option can
+// reintroduce a channel). This suite remains as a regression net: any future
+// "fence shape change smuggling an env channel" regression gets caught here.
 //
-// T3 闭世界适配:合同根(taskRoot/tmp)盘上校验 → fixtures 用真实目录
-// (mkdtemp),不再用不存在的 "/workspace" + "/tmp/job" 假路径。
+// Closed-world adaptation: contract roots (taskRoot/tmp) are validated on disk →
+// fixtures use real directories (mkdtemp), no more fake "/workspace" +
+// "/tmp/job" paths.
 const FIXTURE_CWD = mkdtempSync(join(tmpdir(), "secrets-no-leak-cwd-"));
 
 afterAll(() => {
@@ -40,9 +42,9 @@ afterAll(() => {
 
 describe("sandbox secret env path (network axis retired)", () => {
   function buildArgv(): readonly string[] {
-    // 模拟 bash.ts 装配期的环境:bwrap fence 接收的 env 是经 envIsolation.filter
-    // 截断过的 process.env。注入一个 SECRET_PATTERN 形态的环境变量,断言它
-    // 不会出现在 --setenv 列表里。
+    // mirror bash.ts's assembly-time environment: the env the bwrap fence
+    // receives is process.env truncated by envIsolation.filter. Inject a
+    // SECRET_PATTERN-shaped env var and assert it never appears in the --setenv list.
     const rawEnv = {
       PATH: "/bin",
       HOME: homedir(),
@@ -69,13 +71,13 @@ describe("sandbox secret env path (network axis retired)", () => {
 
   it("fence argv 不含 secret env 名/值,且 --unshare-net 恒在", () => {
     const argv = buildArgv();
-    // 网络轴恒断:secret env 半区与 netns 形状互不依赖(ADR-0097 SC1)。
+    // the network axis is always cut: the secret-env half-surface and the netns shape are independent (ADR-0097)
     assert.equal(
       argv.includes("--unshare-net"),
       true,
       "--unshare-net is constant (spec SC1)"
     );
-    // secret env 名/值都不在 argv 里
+    // neither the secret env name nor its value is in argv
     const flat = argv.join("\n");
     assert.equal(
       flat.includes("SANDBOX_NET_SECRET_KEY"),

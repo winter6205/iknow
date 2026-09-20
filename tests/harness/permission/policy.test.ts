@@ -1,11 +1,11 @@
 /**
  * New permission module — policy.test.ts.
  *
- * SC1 — sensitive paths + dangerous commands deny even with permissive session grants.
- * SC2 — category defaults (read-only → allow, write → ask, execute → ask, collaborate → ask).
- * SC3 — override order: session > project > code; hard-wall un-overrideable.
- * SC4 — ask-inlet / hook_blocked prefix (placeholder; full askUser check in executor test).
- * SC5 — deny zero side effect (verified in permission-executor.test.ts spy).
+ * - Sensitive paths + dangerous commands deny even with permissive session grants.
+ * - Category defaults (read-only → allow, write → ask, execute → ask, collaborate → ask).
+ * - Override order: session > project > code; hard-wall un-overrideable.
+ * - ask-inlet / hook_blocked prefix (placeholder; full askUser check in executor test).
+ * - Deny has zero side effect (verified in permission-executor.test.ts spy).
  */
 
 import { describe, it } from "vitest";
@@ -44,7 +44,7 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
 }
 
 /* -----------------------------------------------------------------------------
- * SC1 — Hard-walls un-overrideable (sensitive paths + dangerous commands)
+ * Hard-walls un-overrideable (sensitive paths + dangerous commands)
  * -------------------------------------------------------------------------- */
 
 describe("SC1: hard-walls un-overrideable", () => {
@@ -91,7 +91,7 @@ describe("SC1: hard-walls un-overrideable", () => {
   });
 
   it("'echo ${ANTHROPIC_AUTH_TOKEN}' indirect-expansion bypass attempt → hard-wall deny", () => {
-    // W4: 纯 $VAR 读取放行，但 ${...} 间接引用仍是危险模式 → hard-wall deny
+    // plain $VAR reads are allowed, but ${...} indirect expansion remains a dangerous pattern → hard-wall deny
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: "echo ${ANTHROPIC_AUTH_TOKEN}" },
@@ -104,9 +104,11 @@ describe("SC1: hard-walls un-overrideable", () => {
   });
 
   it("execute with non-allowlist command (printenv) falls through to ask", () => {
-    // 非白名单但非危险的命令不再 hard-wall：落入 execute 类别默认 ask，
-    // 由用户决定是否放行（bwrap 沙箱是执行期边界）。
-    // 注意：SC1 的 policy 带 allow-all session 规则会直接放行，这里用默认 policy。
+    // Commands that are neither allow-listed nor dangerous are no longer hard-walled:
+    // they fall through to the execute category default ask, leaving the decision to
+    // the user (the bwrap sandbox is the runtime boundary).
+    // Note: the hard-wall describe above has an allow-all session rule that would let
+    // this through directly, so this case uses the default policy.
     const plain = createPermissionPolicy();
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
@@ -121,7 +123,7 @@ describe("SC1: hard-walls un-overrideable", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * SC2 — Category defaults
+ * Category defaults
  * -------------------------------------------------------------------------- */
 
 describe("SC2: category defaults", () => {
@@ -173,7 +175,7 @@ describe("SC2: category defaults", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * SC2.5 — code-layer allow for memory_save (self-write to agent memory lib)
+ * Code-layer allow for memory_save (self-write to agent memory lib)
  *
  * Why: `memory_save` writes into the home-project-tree memory library — the agent's own
  * memory library, not the user's workspace. Treating it like `edit_file` /
@@ -253,7 +255,7 @@ describe("SC2.5: code-layer allow for memory_save (agent self-write)", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * SC3 — Override order + hard-wall un-overrideable
+ * Override order + hard-wall un-overrideable
  * -------------------------------------------------------------------------- */
 
 describe("SC3: override order", () => {
@@ -323,14 +325,14 @@ describe("SC3: override order", () => {
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
     });
-    // Even with session=allow, the hard-wall denies — Q5 acceptance test.
+    // Even with session=allow, the hard-wall denies.
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("[hard_wall]"));
   });
 });
 
 /* -----------------------------------------------------------------------------
- * SC4 — hard-wall reason prefix is distinct
+ * Hard-wall reason prefix is distinct
  * -------------------------------------------------------------------------- */
 
 describe("SC4: reason prefixes are distinct", () => {
@@ -351,9 +353,9 @@ describe("SC4: reason prefixes are distinct", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * SC5 — deny path produces structured outcome, executor applies prefix
+ * Deny path produces structured outcome, executor applies prefix
  *
- * Executor level SC5 (zero-side-effect) is exercised in permission-executor.test.ts.
+ * The executor-level zero-side-effect check is exercised in permission-executor.test.ts.
  * -------------------------------------------------------------------------- */
 
 describe("SC5: deny returns structured PermissionOutcome", () => {
@@ -393,8 +395,8 @@ describe("policy.ts is sync (askUser is the executor's job)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #440 T5 / ADR-0085: todo_write D7 权限规则 — read 子模式 bypass ask
-//         (read-only), add / update 走 category default ask (write)。
+// ADR-0085 D7: todo_write permission rules — the read sub-mode bypasses ask
+//         (read-only); add / update follow the category default ask (write).
 // ---------------------------------------------------------------------------
 
 describe("SC7: #440 T5 todo_write read 子模式 bypass ask (read-only), add/update 走默认 ask", () => {
@@ -437,7 +439,7 @@ describe("SC7: #440 T5 todo_write read 子模式 bypass ask (read-only), add/upd
     assert.ok(out.reason.includes("write"));
   });
 
-  // #903 SC5:replace 是 write 默认 ask;read 子模式豁免不适用(仅 read bypass)。
+  // replace is a write, so the category default ask applies; the read sub-mode exemption covers read only.
   it("todo_write replace mode → ask (write category 默认;read 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
@@ -448,14 +450,14 @@ describe("SC7: #440 T5 todo_write read 子模式 bypass ask (read-only), add/upd
     });
     assert.equal(out.decision, "ask");
     assert.ok(out.reason.includes("write"));
-    // 不应命中 read bypass(decision=allow / reason 含 read)
+    // must not hit the read bypass (decision=allow / reason contains read)
     assert.ok(!out.reason.includes("todo_write read mode"));
   });
 
   it("todo_write replace mode 在 full_auto mode → ask(layered rule 先于 mode, write ask 路径仍生效)", () => {
-    // 验证 code-layer 没有给 replace 写专属 ask rule,所以 full_auto 仍
-    // 走 mode 路径放行。spec 决议:replace 默认 ask;full_auto 下 model 显式
-    // 同意可执行。
+    // The code layer has no replace-specific ask rule, so full_auto still releases
+    // via the mode path. Spec decision: replace defaults to ask; under full_auto the
+    // model's explicit consent makes it executable.
     const fullAuto = createPermissionPolicy({ mode: "full_auto" });
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),

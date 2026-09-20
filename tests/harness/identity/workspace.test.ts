@@ -1,6 +1,6 @@
 /**
- * #196 IKNOW T6:roundtrip (SC 26) + JSON corrupt (SC 31) + schema invalid
- * (SC 32) + user.md missing (SC 33) + eager/idempotent。
+ * State roundtrip + JSON corrupt + schema invalid
+ * + user.md missing + eager/idempotent behavior of the iknow workspace.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
@@ -80,7 +80,8 @@ describe("initializeIknowWorkspace roundtrip", () => {
   });
 
   it("exception: mkdir failure throws typed IknowIdentityError (write_failed)", async () => {
-    // 在 path 中放一个普通文件占位,mkdir recursive 会抛 ENOTDIR → 触发 catch
+    // A regular file sits in the path, so recursive mkdir throws ENOTDIR →
+    // exercises the catch
     await writeFile(join(workDir, "blocker"), "not a dir");
     await expect(
       initializeIknowWorkspace({
@@ -95,7 +96,8 @@ describe("initializeIknowWorkspace roundtrip", () => {
       initializeIknowWorkspace({ workspace: fresh }),
       initializeIknowWorkspace({ workspace: fresh }),
     ]);
-    // 两个都返回 schema_version=1 的有效 state(谁后写谁的,但都合法)
+    // Both return a valid schema_version=1 state (last writer wins, but both
+    // results are legal)
     expect(a.state.schema_version).toBe(1);
     expect(b.state.schema_version).toBe(1);
     const final = await readIknowState(fresh);
@@ -112,12 +114,12 @@ describe("initializeIknowWorkspace roundtrip", () => {
     expect(init.state.schema_version).toBe(1);
     expect(init.state.bootstrap_seeded).toBe(true);
 
-    // 重新读取应当也是合法 seed
+    // Re-reading must also see a legal seed
     const reread = await readIknowState(ws);
     expect(reread.schema_version).toBe(1);
     expect(reread.bootstrap_seeded).toBe(true);
 
-    // 备份文件 .corrupt.<hex> 存在
+    // The backup file .corrupt.<hex> exists
     const entries = await readdir(ws);
     const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
     expect(backups.length).toBe(1);
@@ -152,14 +154,14 @@ describe("initializeIknowWorkspace roundtrip", () => {
     const re = await initializeIknowWorkspace({ workspace: ws });
     expect(re.state.bootstrap_seeded).toBe(true);
 
-    // 不应有 .corrupt.* 备份(文件本来就合法)
+    // No .corrupt.* backup should exist (the file was already valid)
     const entries = await readdir(ws);
     const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
     expect(backups.length).toBe(0);
   });
 });
 
-// ── #196 rev 2026-08-11 T2: seed BOOTSTRAP.md(对齐 ohmo initialize_workspace) ──
+// ── seed BOOTSTRAP.md (mirroring ohmo's initialize_workspace) ──
 describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
   it("first init: writes BOOTSTRAP.md + flips bootstrap_seeded=true", async () => {
     const ws = join(workDir, "seed-bootstrap");
@@ -191,14 +193,14 @@ describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
     const ws = join(workDir, "seed-bootstrap-seeded");
     await initializeIknowWorkspace({ workspace: ws });
     expect((await readIknowState(ws)).bootstrap_seeded).toBe(true);
-    // 模拟 agent 完成引导后 rm BOOTSTRAP.md
+    // Simulate the agent rm-ing BOOTSTRAP.md after finishing guidance
     await unlink(join(ws, "BOOTSTRAP.md"));
 
     const re = await initializeIknowWorkspace({ workspace: ws });
     expect(re.state.bootstrap_seeded).toBe(true);
 
-    // bs=true(已 seed 标记),不重新 seed BOOTSTRAP.md
-    // → 文件保持缺失 → 装配层读文件不注入 → 隐式完成
+    // bs=true (already-seeded flag) → no re-seed of BOOTSTRAP.md
+    // → file stays missing → assembly reads nothing → implicit completion
     await expect(readFile(join(ws, "BOOTSTRAP.md"), "utf8")).rejects.toThrow();
   });
 
@@ -215,7 +217,7 @@ describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
   });
 });
 
-// ── rev 2026-08-21: seed/read path alignment (issue #584) ──
+// ── seed/read path alignment ──
 //
 // Persona files live at `<userHome>/.iknow`. `opts.workspace` on
 // initializeIknowWorkspace is the fake-home test seam (the `.iknow` dir),
@@ -252,7 +254,7 @@ describe("initializeIknowWorkspace seed/read path alignment (rev 2026-08-21)", (
   });
 });
 
-// ── rev 2026-08-21: 默认 fallback 单元测试 ──
+// ── default-fallback unit tests ──
 //
 // vi.mock of node:os works in this test runner (vitest with hoisting), unlike
 // the earlier failed attempt that tried vi.spyOn. ESM namespaces are normally
@@ -279,7 +281,7 @@ const FAKE_ROOT = `${FAKE_HOME}/.iknow`;
 
 describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
   beforeAll(async () => {
-    // 清掉旧测试残留,确保本次跑是从干净状态开始
+    // Clear leftovers from earlier runs so this run starts clean
     await rm(FAKE_ROOT, { recursive: true, force: true });
     await mkdir(FAKE_HOME, { recursive: true });
   });
@@ -293,7 +295,7 @@ describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
     const init = await initializeIknowWorkspace();
 
     expect(init.root).toBe(FAKE_ROOT);
-    // user.md 应该被 seed 在 <homedir>/.iknow/user.md
+    // user.md must be seeded at <homedir>/.iknow/user.md
     const userContent = await readFile(join(init.root, "user.md"), "utf8");
     expect(userContent).toBe(USER_TEMPLATE);
   });
@@ -306,7 +308,7 @@ describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
 
     expect(next.bootstrap_seeded).toBe(true);
     expect(next.schema_version).toBe(1);
-    // 文件必须落在 <homedir>/.iknow/state.json
+    // The file must land at <homedir>/.iknow/state.json
     const stateRaw = JSON.parse(
       await readFile(join(FAKE_ROOT, "state.json"), "utf8")
     );
@@ -348,7 +350,7 @@ describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
   });
 
   it("readIknowState() (no arg) reads from <homedir>/.iknow/state.json", async () => {
-    // 直接在期望路径写一份已知 state,然后 no-arg 读取
+    // Write a known state directly at the expected path, then read no-arg
     await rm(FAKE_ROOT, { recursive: true, force: true });
     await mkdir(FAKE_ROOT, { recursive: true });
     await writeFile(

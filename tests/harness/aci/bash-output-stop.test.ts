@@ -1,34 +1,38 @@
 /**
- * #502 T4 — bash_output / bash_stop ACI 工具（Track A 模型操作面）。
+ * bash_output / bash_stop ACI tools (model-facing operations surface).
  *
- * 覆盖计划 acceptance（plans/bash-service-loop.md T4）：
- *   1. happy path（fake manager）：bash_output 返回 `{text, status, exit_code,
- *      task_id}` JSON；bash_stop 调用 manager.stop(task_id) 后返回
- *      `{task_id, status:"stopped"}`。
- *   2. typed-error passthrough：fake manager 抛 `{kind, context}` typed object →
- *      工具渲染 `${kind}: ${context}` 装进 ToolExecutionError（code-quality.md
- *      typed-error catch 契约，禁 [object Object]）；空串 task_id 透传 →
- *      empty_task_id；未知 task_id → task_not_found。
- *   3. max_bytes clamp（T4 定稿，clamp-path-with-annotation）：缺席 / <=0 →
- *      DEFAULT_LOG_MAX_BYTES（12KB，manager.ts SSOT）；> MAX_LOG_READ_BYTES
- *      （100KB）→ 钳到上限，不抛错。manager 入参断言锁定收敛值。
- *   4. 真实物理截断（real registry + real manager + fake child）：log 超默认
- *      窗口 → tool.handler({task_id}) → text 长度 ≤ DEFAULT 且等于原文尾部
- *      （tail 语义，非抛错）。max_bytes 覆盖默认窗口同路径验证。
- *   5. bash_stop 幂等（kill_race 语义，T2 定稿）：对已终态任务二次 stop 不抛。
- *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 全长且
- *      `toEqual(ACI_TOOLSET_NAMES)`（件数以数组为真值，本文件断言处为准）；
- *      backgroundManager 缺席 → bash_output / bash_stop 排除（不含 graphAssembly
- *      时 run_graph 同步缺席），bash 保留（T3 常驻透传语义）。
- *      symbol-primary-aci T5 后：旧 10 lsp_* 已退役（件数因此下调）；
- *      disclosure-index-align T2 后：skill_search 已退役（件数再下调）。
- *   7. permission shape（checkPermission direct-call，permission.test.ts 先例）：
- *      bash_output read-only → 默认 allow；bash_stop write → ask（#502 票明说
- *      「bash_stop ask」）。
+ * Acceptance coverage:
+ *   1. happy path (fake manager): bash_output returns `{text, status, exit_code,
+ *      task_id}` JSON; bash_stop calls manager.stop(task_id) then returns
+ *      `{task_id, status:"stopped"}`.
+ *   2. typed-error passthrough: fake manager throws a `{kind, context}` typed
+ *      object → the tool renders `${kind}: ${context}` into a
+ *      ToolExecutionError (code-quality.md typed-error catch contract, never
+ *      `[object Object]`); empty-string task_id passes through →
+ *      empty_task_id; unknown task_id → task_not_found.
+ *   3. max_bytes clamp (clamp-path-with-annotation): absent / <=0 →
+ *      DEFAULT_LOG_MAX_BYTES (12KB, manager.ts SSOT); > MAX_LOG_READ_BYTES
+ *      (100KB) → clamped to the cap, no throw. Manager-argument assertions
+ *      pin the converged value.
+ *   4. real physical truncation (real registry + real manager + fake child):
+ *      log beyond the default window → tool.handler({task_id}) → text length
+ *      ≤ DEFAULT and equal to the tail of the original (tail semantics, not a
+ *      throw). max_bytes overriding the default window uses the same path.
+ *   5. bash_stop idempotence (kill_race semantics): a second stop of an
+ *      already-terminal task does not throw.
+ *   6. assembly consistency: fully-conditional assembly (backgroundManager +
+ *      graph overlay) → full length and `toEqual(ACI_TOOLSET_NAMES)` (the
+ *      array is the count SSOT; assertions derive from it, no hardcoded
+ *      totals); backgroundManager absent → bash_output / bash_stop excluded,
+ *      bash kept (resident pass-through semantics).
+ *   7. permission shape (checkPermission direct-call, permission.test.ts
+ *      precedent): bash_output read-only → default allow; bash_stop write →
+ *      ask.
  *
- * bwrap 依赖：createDefaultAciRegistry → createBashTool 构造期 requireBwrap()
- * 守卫（bash.ts:56），d9-description-guard.test.ts 先例 —— mock runner.js
- * requireBwrap 为 no-op 保持 CI-portable（本地 WSL 有 bwrap 自可直跑）。
+ * bwrap dependency: createDefaultAciRegistry → createBashTool runs a
+ * requireBwrap() guard at construction time (bash.ts:56); per the
+ * d9-description-guard.test.ts precedent, runner.js requireBwrap is mocked to
+ * a no-op to stay CI-portable (local WSL with bwrap can run it directly).
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
@@ -77,7 +81,7 @@ import type { McpManager } from "../../../src/harness/mcp/manager.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
-/** fake manager —— 只观察 output/stop 入参；真实物理截断走下方 real manager。 */
+/** fake manager — observes output/stop args only; real physical truncation goes through the real manager below. */
 function makeFakeManager(): {
   manager: BackgroundTaskManager;
   output: ReturnType<typeof vi.fn>;
@@ -94,7 +98,7 @@ function makeFakeManager(): {
   return { manager, output, stop };
 }
 
-/** fake SubAgentManager —— 装配期断言用（镜像 registry.test.ts fixture）。 */
+/** fake SubAgentManager — for assembly-time assertions (mirrors registry.test.ts fixture). */
 const fakeSubagentManager = {
   spawn: () => ({ taskId: "fake-id" }),
   queryBuffer: () => ({ status: "not_found" as const }),
@@ -108,7 +112,7 @@ const fakeSubagentManager = {
   subscribe: () => () => {},
 } as unknown as SubAgentManager;
 
-/** fake McpManager —— 装配期断言用（镜像 registry.test.ts fixture）。 */
+/** fake McpManager — for assembly-time assertions (mirrors registry.test.ts fixture). */
 const fakeMcpManager: McpManager = {
   start: () => Promise.resolve(),
   reload: () => Promise.resolve(),
@@ -118,7 +122,7 @@ const fakeMcpManager: McpManager = {
   readResource: () => Promise.reject(new Error("fake: read not stubbed")),
 } as unknown as McpManager;
 
-/** fake BackgroundTaskManager —— 装配期断言用（Gate 3 镜像过滤）。 */
+/** fake BackgroundTaskManager — for assembly-time assertions (registry mirror filtering). */
 const fakeBackgroundManager = {
   spawn: vi.fn(),
   status: vi.fn(),
@@ -126,7 +130,7 @@ const fakeBackgroundManager = {
   stop: vi.fn(async () => undefined),
 } as unknown as BackgroundTaskManager;
 
-/** fake ChildProcess（沿用 manager.test.ts 先例：EventEmitter + PassThrough）。 */
+/** fake ChildProcess (manager.test.ts precedent: EventEmitter + PassThrough). */
 interface FakeChild {
   readonly stdin: PassThrough;
   readonly stdout: PassThrough;
@@ -152,7 +156,7 @@ function makeFakeChild(pid = 23456): FakeChild {
   }) as unknown as FakeChild;
 }
 
-/** real manager 装配（真实 fs 落盘，fake spawn 工厂不真启进程）。 */
+/** Real manager assembly (persists to real fs; the fake spawn factory starts no real process). */
 const tempRoots: string[] = [];
 async function makeRealManager(): Promise<{
   manager: BackgroundTaskManager;
@@ -179,13 +183,13 @@ afterEach(async () => {
   );
 });
 
-/** 最小合法 env（仅 web 字段；registry 工厂只消费 env.web）。 */
+/** Minimal valid env (web fields only; the registry factory consumes only env.web). */
 function makeWebEnv(): Pick<IknowEnv, "web"> {
   return { web: { searchUrl: undefined, proxy: undefined } };
 }
 
-/** worktree isolation host fakes（仅用于 createDefaultAciRegistry 装配期
- * 断言；handler 路径单测在各自工具目录下，不在本文件）。 */
+/** Worktree isolation host fakes (createDefaultAciRegistry assembly-time
+ * assertions only; handler-path unit tests live under each tool's own directory, not here). */
 const fakeWorktreeProvision: CreateWorktreeProvisionFn = async () =>
   "/tmp/fake-worktree";
 const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
@@ -205,7 +209,7 @@ const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
     branchDeleted: false,
   });
 
-/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree host seams）→ 44 件全量。 */
+/** Full conditional assembly opts (five condition keys + backgroundManager + graph overlay + worktree host seams) → complete toolset (count = ACI_TOOLSET_NAMES). */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -216,9 +220,9 @@ function fullAssemblyOpts() {
     todoDir: "/tmp/root/session-1/todos",
     mcpManager: fakeMcpManager,
     backgroundManager: fakeBackgroundManager,
-    // D-α T3:graph overlay 在场 → run_graph 入注册表（末位第 31 件）。
+    // graph overlay present → run_graph joins the registry.
     graphAssembly: { enabled: () => true },
-    // worktree isolation (ADR-0037):3 件装配路径到场,handler 不触发。
+    // worktree isolation (ADR-0037): host seams present for assembly; handlers not triggered.
     worktreeProvision: fakeWorktreeProvision,
     worktreeEnter: fakeWorktreeEnter,
     worktreeExit: fakeWorktreeExit,
@@ -227,7 +231,7 @@ function fullAssemblyOpts() {
   };
 }
 
-// ── 1. happy path（fake manager）──────────────────────────────────────────────
+// ── 1. happy path (fake manager) ─────────────────────────────────────────────
 
 describe("bash_output happy path（fake manager）", () => {
   it("返回 {text, status, exit_code, task_id} JSON，缺省 max_bytes → DEFAULT", async () => {
@@ -249,7 +253,7 @@ describe("bash_output happy path（fake manager）", () => {
       task_id: "bg-0123456789ab",
     });
     assert.equal(output.mock.calls[0]?.[0], "bg-0123456789ab");
-    // 缺省 max_bytes → manager 收到默认窗口（12KB）。
+    // max_bytes absent → manager receives the default window (12KB).
     assert.equal(output.mock.calls[0]?.[1], DEFAULT_LOG_MAX_BYTES);
   });
 
@@ -286,7 +290,7 @@ describe("bash_output happy path（fake manager）", () => {
     assert.equal(output.mock.calls[0]?.[1], MAX_LOG_READ_BYTES);
     assert.equal(JSON.parse(result as string).text, "x");
 
-    // 临界值（恰好等于上限）原样透传（不额外钳）。
+    // Boundary value (exactly the cap) passes through unchanged (no extra clamping).
     await tool.handler({
       task_id: "bg-0123456789ab",
       max_bytes: MAX_LOG_READ_BYTES,
@@ -295,7 +299,7 @@ describe("bash_output happy path（fake manager）", () => {
   });
 });
 
-// ── 2. typed-error passthrough（fake manager）────────────────────────────────
+// ── 2. typed-error passthrough (fake manager) ────────────────────────────────
 
 describe("bash_output / bash_stop typed-error passthrough", () => {
   it("task_not_found → ToolExecutionError 渲染 `${kind}: ${context}`（kind 判别）", async () => {
@@ -372,7 +376,7 @@ describe("bash_output / bash_stop typed-error passthrough", () => {
   });
 });
 
-// ── 3. bash_stop happy path + 幂等（fake manager）─────────────────────────────
+// ── 3. bash_stop happy path + idempotence (fake manager) ─────────────────────
 
 describe("bash_stop happy path（fake manager）", () => {
   it("manager.stop 收到 task_id；返回 {task_id, status:'stopped'}；二次 stop 不抛", async () => {
@@ -386,21 +390,21 @@ describe("bash_stop happy path（fake manager）", () => {
     });
     assert.equal(stop.mock.calls[0]?.[0], "bg-0123456789ab");
 
-    // 幂等语义（fake）：对已收敛任务的二次 stop 直接成功（mock resolve）。
+    // Idempotence (fake): a second stop of an already-settled task succeeds directly (mock resolve).
     await tool.handler({ task_id: "bg-0123456789ab" });
     assert.equal(stop.mock.calls.length, 2);
   });
 });
 
-// ── 4. 真实物理截断（real registry + real manager + fake child）──────────────
+// ── 4. real physical truncation (real registry + real manager + fake child) ──
 
 describe("bash_output 真实物理截断（real manager）", () => {
   it("log 超默认窗口 → text 长度 = DEFAULT_LOG_MAX_BYTES（tail 语义,且 head/tail 可区分时验证 head 被裁）", async () => {
     const { manager, spawned } = await makeRealManager();
     const { task_id } = await manager.spawn({ command: "tail", cwd: "." });
 
-    // head/tail 用不同字节,让物理截断可观察:HEAD_* 头部字节在原文前段,
-    // TAIL_* 尾部字节在原文末尾;slice(-limit) 应保留 TAIL_*,不保留 HEAD_*。
+    // Distinct head/tail bytes make physical truncation observable: HEAD_* sits at
+    // the front of the original, TAIL_* at the end; slice(-limit) must keep TAIL_* and drop HEAD_*.
     const head = "HEAD__HEAD__HEAD__HEAD__HEAD__HEAD__HEAD__HEAD__"; // 56 chars
     const tail = "TAIL__TAIL__TAIL__TAIL__TAIL__TAIL__TAIL__TAIL__"; // 56 chars
     const paddingLen = DEFAULT_LOG_MAX_BYTES + 5000;
@@ -419,11 +423,11 @@ describe("bash_output 真实物理截断（real manager）", () => {
     };
     assert.equal(result.status, "exited");
     assert.equal(result.exit_code, 0);
-    // 物理截断:输出恰好等于默认窗口(input > DEFAULT → 截断到 DEFAULT)。
+    // Physical truncation: output is exactly the default window (input > DEFAULT → truncated to DEFAULT).
     assert.equal(result.text.length, DEFAULT_LOG_MAX_BYTES);
-    // tail:末段保留(最后字符是原文最后一个 'l',与原文末尾 TAIL_ 对齐)。
+    // tail: the final segment is kept (last char matches the original's trailing TAIL_*).
     assert.equal(result.text.endsWith(tail), true);
-    // 物理截断:头段被裁(原文前段 HEAD_ 不出现在输出里)。
+    // Physical truncation: the head segment is cut (leading HEAD_* absent from output).
     assert.equal(result.text.includes(head), false);
   });
 
@@ -450,7 +454,7 @@ describe("bash_output 真实物理截断（real manager）", () => {
     assert.equal(st.status, "exited");
 
     const tool = createBashStopTool({ backgroundManager: manager });
-    // 对已终态 stop × 2：幂等成功，不抛。
+    // stop × 2 on an already-terminal task: idempotent success, no throw.
     await tool.handler({ task_id });
     await tool.handler({ task_id });
     const st2 = await manager.status(task_id);
@@ -458,7 +462,7 @@ describe("bash_output 真实物理截断（real manager）", () => {
   });
 });
 
-// ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
+// ── 5. assembly consistency (registry + conditional gating) ──────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
   it("全条件装配（含 backgroundManager + graph overlay）→ ACI_TOOLSET_NAMES 全长，顺序 = SSOT", () => {
@@ -471,12 +475,12 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
   });
 
   it("backgroundManager 缺席 → bash_output / bash_stop 排除（全长 − 2 bg − 5 worktree），bash 保留（T3 常驻）", () => {
-    // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻 —
-    // 仅 subagentManager 缺席才不在注册表(graphAssembly 缺席由 handler
-    // isEnabled 缺省恒关守门,工具面成员不变)。本测试传 subagentManager →
-    // run_graph 在场;不传 worktree host seams → 5 件缺席;读侧三轴
-    // (query_trace / list_sessions / get_record) 无装配条件仍在场。
-    // 件数从 SSOT 派生：ACI_TOOLSET_NAMES 全长 − 2(bg) − 5(worktree)。
+    // run_graph is resident — absent from the registry only when subagentManager is
+    // absent (with graphAssembly absent the handler's default-off isEnabled gates it;
+    // tool-surface membership is unchanged). This test passes subagentManager →
+    // run_graph present; omitting worktree host seams → 5 worktree tools absent; the
+    // read-side trio (query_trace / list_sessions / get_record) has no assembly
+    // condition and stays. Count derived from the SSOT: full ACI_TOOLSET_NAMES − 2(bg) − 5(worktree).
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -490,15 +494,15 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
     assert.equal(names.length, ACI_TOOLSET_NAMES.length - 2 - 5);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
-    // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。
+    // bash is resident: with backgroundManager absent, the parameter-level capability is decided by the handler at runtime.
     assert.equal(names.includes("bash"), true);
-    // ADR-0041:run_graph 常驻(subagentManager 在场)→ 工具面成员在场,
-    // handler isEnabled 缺省恒关守门。
+    // run_graph is resident (subagentManager present) → present on the tool surface,
+    // guarded by the handler's default-off isEnabled.
     assert.equal(names.includes("run_graph"), true);
   });
 });
 
-// ── 6. permission shape（checkPermission direct-call）───────────────────────
+// ── 6. permission shape (checkPermission direct-call) ────────────────────────
 
 describe("bash_output / bash_stop permission shape", () => {
   it("bash_output read-only → 默认 allow；bash_stop write → ask（#502 明示）", () => {

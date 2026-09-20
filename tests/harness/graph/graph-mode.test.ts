@@ -1,13 +1,12 @@
 /**
- * D-α V1 graph mode T2 — graph mode overlay（ADR-0030 / spec SC1 · SC3）。
+ * Graph mode overlay tests (ADR-0030).
  *
- * 覆盖：
- *   1. 模式正交：`PERMISSION_MODES` 仍只有三值，Graph 不进枚举；
- *   2. Shift+Tab 三态轮 `Default → Auto → Graph → Default`，进 Graph 冻结
- *      当时 permission，plan 不进轮；
- *   3. holder：`/graph on|off` 与 Shift+Tab 改同一个 `GraphModeContext`；
- *   4. 初值链：settings > 默认关（env 不是人机 SSOT，不参与）；
- *   5. `/graph` 命令语义 + 文案（三入口共用单点）。
+ * Covers:
+ *   1. Orthogonality: `PERMISSION_MODES` stays three-valued; Graph is not an enum member;
+ *   2. Shift+Tab tri-state cycle `Default → Auto → Graph → Default`; entering Graph freezes the current permission, plan is not in the cycle;
+ *   3. holder: `/graph on|off` and Shift+Tab mutate the same `GraphModeContext`;
+ *   4. initial-value chain: settings > default-off (env is not the human-facing SSOT, excluded);
+ *   5. `/graph` command semantics + wording (single point shared by three entry points).
  */
 
 import assert from "node:assert/strict";
@@ -102,11 +101,10 @@ describe("graph mode: applyShiftTabAgentModeFlip（键位守卫 + 双 holder）"
     assert.equal(permission.get(), "default");
     assert.equal(graph.get().enabled, false);
 
-    assert.deepEqual(seen.map((s) => agentModeLabel(s)), [
-      "Auto",
-      "Graph",
-      "Default",
-    ]);
+    assert.deepEqual(
+      seen.map((s) => agentModeLabel(s)),
+      ["Auto", "Graph", "Default"]
+    );
   });
 
   it("非 Shift+Tab 键 / Ctrl+Tab / Meta+Tab → no-op", () => {
@@ -157,7 +155,10 @@ describe("graph mode: holder + 初值链", () => {
   it("resolveGraphMode: settings.enabled > 默认关", () => {
     assert.equal(resolveGraphMode().enabled, false);
     assert.equal(resolveGraphMode({ settings: {} }).enabled, false);
-    assert.equal(resolveGraphMode({ settings: { enabled: true } }).enabled, true);
+    assert.equal(
+      resolveGraphMode({ settings: { enabled: true } }).enabled,
+      true
+    );
     assert.equal(
       resolveGraphMode({ settings: { enabled: false } }).enabled,
       false
@@ -248,7 +249,7 @@ describe("graph mode: /graph 命令语义（三入口共享单点）", () => {
     const graph = createGraphModeContext();
     applyGraphCommand(graph, ["on"]);
     assert.equal(graph.get().enabled, true);
-    // 同一 holder：一次 Shift+Tab（此时 Graph 态）回 Default 即关掉它
+    // Same holder: one Shift+Tab from the Graph state returns to Default, which turns it off
     applyShiftTabAgentModeFlip({
       key: { name: "tab", shift: true },
       permission,

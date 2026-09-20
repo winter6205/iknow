@@ -1,5 +1,5 @@
 /**
- * #483 D9 description audit — regression guard.
+ * D9 description audit — regression guard.
  *
  * Spec: docs/handoff/2026-08-17-wayfinder-440-decisions.md D6/D9 paradigm:
  * tool descriptions must use positive-trigger phrasing (when to use, what
@@ -17,14 +17,14 @@
  *
  * The guard fails fast if any future description edit accidentally
  * re-introduces an imperative ("do not", "never", …) or a CJK blocklist
- * word ("不要", "禁止", …). Mirrors the #440 T6 D9 style block already
- * pinned in tests/harness/aci/tools/todo-write.test.ts:533-546.
+ * word ("不要", "禁止", …). Mirrors the style block already pinned in
+ * tests/harness/aci/tools/todo-write.test.ts.
  *
  * Isolation: pure in-memory fixture (no real fs mutations); mkdtemp dirs
  * are scratch anchors only (the tools themselves are not invoked).
  *
  * CI portability: createBashTool calls requireBwrap() at assembly time
- * (bash.ts:45) and the CI runner has no bubblewrap. Mock requireBwrap to
+ * (bash.ts) and the CI runner has no bubblewrap. Mock requireBwrap to
  * a no-op instead of stubbing createBashTool (the registry-workspace-root
  * pattern): the guard must audit the REAL bash description, so the factory
  * stays real and only the host-capability probe is replaced. requireBwrap
@@ -64,14 +64,15 @@ import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exi
 import type { ListWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-worktrees.js";
 import type { RemoveWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-worktree.js";
 
-/** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533.
+/** 12-word blocklist — mirrors the list in tests/harness/aci/tools/todo-write.test.ts.
  *
- * 纪律判据（#502 T7）：本表只封禁面向模型的负面祈使（do not / never / 不要…）。
- * 风险/拒绝类描述词（reject / out of scope / guard…）是工具行为的客观约束陈述
- * （web_fetch 的 SSRF guard rejects、edit_file 的 lint rejects、memory_save 的
- * negative-form reject），不面向模型下禁令，且 D9 paradigm（#440 D6/D9）允许
- * 「inline governance constraints」表述；新增此类词会触发四处既有描述越界改
- * 写，超出 T7 范围，故不扩 blocklist。 */
+ * Discipline verdict: this table bans only model-facing negative imperatives
+ * (do not / never / 不要…). Risk/refusal description words (reject / out of
+ * scope / guard…) are objective statements of tool behavior (web_fetch's SSRF
+ * guard rejects, edit_file's lint rejects, memory_save's negative-form reject)
+ * — they issue no prohibition to the model, and the guard paradigm allows
+ * "inline governance constraints" wording. Adding such words would force
+ * out-of-scope rewrites of four existing descriptions, so the blocklist stays closed. */
 const NEGATIVE_PHRASES: ReadonlyArray<string> = [
   "do not",
   "don't",
@@ -87,13 +88,15 @@ const NEGATIVE_PHRASES: ReadonlyArray<string> = [
   "切勿",
 ];
 
-/** #502 T7 d9 扩面：正面引导构造（trigger verb）白名单。description 必须
- *  命中至少一个 — 锁写作形态是「何时用 / 与什么配对」而非负面祈使。与
- *  todo-write.test.ts:554-562 的 positive-keys 同思路但放工具集级别。
- *  选词原则：覆盖现有 ACI 工具的动词光谱（use / pair / read / run / fetch
- *  / search / discover / load / list / poll / maintain / capture / delegate
- *  / resolve / apply / create / terminate / return）— 任何 description 命中
- *  之一即过，当前文案均命中（手算已确认，vitest 兜底）。 */
+/** Positive-guidance construct (trigger verb) whitelist. A description must
+ *  match at least one — pinning the writing form to "when to use / what to
+ *  pair with" instead of negative imperatives. Same idea as the positive-keys
+ *  in todo-write.test.ts, but lifted to toolset level.
+ *  Word-choice principle: cover the verb spectrum of the existing ACI tools
+ *  (use / pair / read / run / fetch / search / discover / load / list / poll /
+ *  maintain / capture / delegate / resolve / apply / create / terminate /
+ *  return) — any description matching one passes; all current wording matches
+ *  (hand-checked, with vitest as the backstop). */
 const POSITIVE_TRIGGER_PATTERN =
   /\b(use|pair|read|run|fetch|search|discover|load|list|poll|maintain|capture|delegate|resolve|apply|create|terminate|return)\b/i;
 
@@ -111,10 +114,10 @@ const fakeSubagentManager = {
   drainCompleted: () => [],
   listActive: () => [],
   abortTask: () => false,
-  // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+  // The interface gained read-only enumeration methods — the fake completes them to stay structurally compatible.
   getCapacity: () => 15,
   listSubagents: () => [],
-  // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
+  // SubAgentManager interface extension: subscribe (mailbox contract)
   subscribe: () => () => {},
 } as unknown as SubAgentManager;
 
@@ -128,7 +131,7 @@ const fakeMcpManager: McpManager = {
   readResource: () => Promise.reject(new Error("fake: read not stubbed")),
 } as unknown as McpManager;
 
-/** #502 T4 fake backgroundManager — sufficient for assembly (handler 永不触达)。 */
+/** Fake backgroundManager — sufficient for assembly (the handler is never reached). */
 const fakeBackgroundManager: BackgroundTaskManager = {
   spawn: () => Promise.reject(new Error("fake: spawn not stubbed")),
   status: () => Promise.reject(new Error("fake: status not stubbed")),
@@ -139,8 +142,8 @@ const fakeBackgroundManager: BackgroundTaskManager = {
   onConversationDeleted: () => undefined,
 } as unknown as BackgroundTaskManager;
 
-/** ADR-0037 worktree isolation host fakes —— sufficient for assembly。
- * handler 路径单测在各自工具目录下,本文件只验证 description D9 闸门。 */
+/** ADR-0037 worktree isolation host fakes — sufficient for assembly.
+ * Handler-path unit tests live in each tool's own directory; this file only audits the description guard. */
 const fakeWorktreeProvision: CreateWorktreeProvisionFn = async () =>
   "/tmp/fake-worktree";
 const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
@@ -161,13 +164,13 @@ const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
   });
 
 describe("#483 D9 — regression guard: every ACI tool description avoids NEGATIVE_PHRASES", () => {
-  // review C1: 默认路径 ledger-aware 后，spawn_subagent 描述会从
-  // createMergedCatalogResolver() 自解析，构造 prose list 时拼上
-  // <home>/.iknow/plugins 下所有插件 agent 的 description。本 guard
-  // 测的是**工具自身的固定文案**（do not / never 等负面祈使），不
-  // 应被本机已装插件 agent 文案污染 —— 显式注入 builtin-only
-  // resolver 让 prose list 只含 builtin，与本机环境解耦（registry
-  // 装配缝的 `agentCatalog` opt，review C1 接线）。
+  // Once the default path became ledger-aware, spawn_subagent's description self-resolves
+  // from createMergedCatalogResolver() and appends the descriptions of every plugin agent
+  // under <home>/.iknow/plugins when building the prose list. This guard tests the tool's
+  // OWN fixed wording (negative imperatives like do not / never) and must not be polluted
+  // by locally installed plugin agent wording — inject a builtin-only resolver explicitly
+  // so the prose list contains only builtins, decoupled from this machine (the
+  // `agentCatalog` option at the registry assembly seam).
   const builtinOnlyCatalog = {
     list: () => resolveAgentCatalog(),
     get: (id: string) => getAgentEntry(id),
@@ -183,9 +186,9 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     todoDir: "/tmp/root/session-1/todos",
     mcpManager: fakeMcpManager,
     backgroundManager: fakeBackgroundManager,
-    // D-α T3:graph overlay 在场 → run_graph 入注册表（描述同受 D9 闸门约束）。
+    // With the graph overlay present → run_graph joins the registry (its description is bound by the same guard).
     graphAssembly: { enabled: () => true },
-    // worktree isolation (ADR-0037):3 件条件化装配,host 缝在场才入注册表。
+    // worktree isolation (ADR-0037): conditioned assembly of the 3 tools — they join the registry only when the host seam is present.
     worktreeProvision: fakeWorktreeProvision,
     worktreeEnter: fakeWorktreeEnter,
     worktreeExit: fakeWorktreeExit,
@@ -221,13 +224,14 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     }
   );
 
-  // ── Spec Layer 1 item 1 / SC4：dispatch lesson 的 STATIC 锁 ──────────────
-  // spawn_subagent description 内的 dispatch lesson 以模块常量
-  // SPAWN_DISPATCH_LESSON 为唯一 SSOT：此处断言 description 逐字嵌入该常量
-  // （重新手打的副本会漂移），并逐条钉住「模型可见面必须说清的四条纪律」的
-  // 语义 —— 删句即 RED，措辞本身不受约束。黄金集名册里 subagent 行只有
-  // STATIC/SEAM 档（见 docs/guides/prompt-development.md 与 commit 正文的
-  // 缺口登记），本 STATIC 锁即该档的全部覆盖。
+  // ── STATIC lock for the dispatch lesson ─────────────────────────────────
+  // The dispatch lesson inside spawn_subagent's description has exactly one source
+  // of truth, the module constant SPAWN_DISPATCH_LESSON: this asserts the
+  // description embeds that constant verbatim (a re-typed copy would drift), and
+  // pins each of the four disciplines the model-visible face must state clearly —
+  // deleting a sentence goes RED, the wording itself stays unconstrained. In the
+  // golden-set roster the subagent row only has STATIC/SEAM coverage (see
+  // docs/guides/prompt-development.md); this STATIC lock is that row's full coverage.
   it("spawn_subagent description carries the four dispatch disciplines — Layer 1 item 1", () => {
     const spawn = reg.catalog.all().find((t) => t.name === "spawn_subagent");
     expect(spawn).toBeDefined();
@@ -236,12 +240,12 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(lessonStart).toBeGreaterThan(-1);
     const lesson = desc.slice(lessonStart);
 
-    expect(lesson).toMatch(/explore/i); // 先探后写
-    // operator 工作流并发纪律：数字上限 + concurrent/workers 语义，按语义判
+    expect(lesson).toMatch(/explore/i); // explore before writing
+    // operator-workflow concurrency discipline: a numeric cap + concurrent/workers semantics, judged by meaning
     expect(lesson).toMatch(SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN);
-    expect(lesson).toContain("create-worktree"); // 隔离先建树
-    expect(lesson).toMatch(/skill catalog/i); // 先查 skill catalog
-    // 纪律句不得退化成硬闸承诺：15 的硬上限仍只由既有段落声明一次。
+    expect(lesson).toContain("create-worktree"); // isolation builds the tree first
+    expect(lesson).toMatch(/skill catalog/i); // consult the skill catalog first
+    // The discipline sentence must not degrade into a hard-cap promise: the 15 hard limit stays declared exactly once by the existing paragraph.
     expect(desc.match(/at capacity/gi) ?? []).toHaveLength(1);
   });
 
@@ -253,8 +257,8 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     ).toEqual([]);
   });
 
-  // ── #502 T7 d9 扩面（扩张不削弱） ─────────────────────────────────────
-  // 既有 blocklist / 全条件装配断言全部保留。
+  // ── Guard extension (broaden without weakening) ────────────────────────
+  // All existing blocklist / conditional-assembly assertions are kept.
 
   it("every tool description carries positive-guidance substance (> 30 chars) — d9 扩面", () => {
     const tooShort = reg.catalog
@@ -280,10 +284,10 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     ).toEqual([]);
   });
 
-  // T7 核心：bash 顶层 description 必须把「长驻服务 → background:true /
-  // bash_output / bash_stop」的正面回路写进模型可见字段（schema 字段描述
-  // 只是第二道防线；模型在工具选择阶段读顶层 description）。本断言锁三
-  // 件套关键词，RED 在 description 补强前触发，GREEN 在补强后。
+  // Core: the bash top-level description must state the positive loop "long-lived
+  // server → background:true / bash_output / bash_stop" in the model-visible field (the
+  // schema field description is only the second line of defense; the model reads the
+  // top-level description at tool-selection time). This assertion locks the trio keywords.
   it('bash description documents the background-loop trio ("background: true" / "bash_output" / "bash_stop") — T7 核心', () => {
     const bash = reg.catalog.all().find((t) => t.name === "bash");
     expect(bash).toBeDefined();
@@ -293,7 +297,7 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(desc).toContain("bash_stop");
   });
 
-  // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated
+  // The pre-D9 baseline would have included bash's "Don't have a dedicated
   // tool" and a number of imperative "do not" / "never" fragments. After the
   // audit, what this file pins is that every tool in the assembled catalog is
   // positive-trigger phrased (the it.each blocklist assertions higher up) plus
@@ -303,18 +307,20 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(reg.catalog.all()).toHaveLength(ACI_TOOLSET_NAMES.length);
   });
 
-  // ── ADR-0084 / D7：写闸与 read 窗的说明书义务（无轨迹集时的 STATIC 锁）─
-  // read_file / write_file 本次改了 description 与失败文案，黄金集名册里这两
-  // 件没有轨迹集（见 docs/guides/prompt-development.md 与 commit 正文的缺口
-  // 登记）。轨迹集缺失期间，至少把「模型可见面必须说清的新契约」钉在
-  // STATIC 层：写闸要模型先 read_file、read 窗不得再宣称默认 200 行。
+  // ── ADR-0084 D7: write-gate and read-window documentation duties (STATIC lock while no trajectory set exists) ─
+  // read_file / write_file changed description and failure text in this pass; the
+  // golden-set roster has no trajectory set for these two (see
+  // docs/guides/prompt-development.md and the gap registry in the commit body). Until a
+  // trajectory set exists, pin at least the new contracts the model-visible face must
+  // state clearly at the STATIC layer: the write gate requires read_file first, and the
+  // read window must no longer advertise a default of 200 lines.
   it("write_file description names read_file as the freshness precondition — ADR-0084 D7", () => {
     const writeFile = reg.catalog.all().find((t) => t.name === "write_file");
     expect(writeFile).toBeDefined();
     const desc = writeFile!.description.toLowerCase();
     expect(desc).toContain("read_file");
     expect(desc).toContain("edit_file");
-    // 空文件 / 新建免检必须写在模型可见面，否则模型会对新建也先做一次无谓读。
+    // The empty-file / brand-new exemption must be on the model-visible face, otherwise the model would do a pointless read before creating.
     expect(desc).toContain("brand-new");
   });
 
@@ -325,16 +331,16 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(desc).toContain("end of file");
     expect(desc).toContain("16000");
     expect(desc).toContain("offset");
-    // 旧契约的默认 200 行不得再出现在模型可见面。
+    // The old contract's default of 200 lines must no longer appear on the model-visible face.
     expect(desc).not.toContain("default 200");
     expect(desc).not.toContain("200 lines");
-    // 单行超页预算时的行内截断没有 offset 续读路径 —— 模型可见面必须说清，
-    // 否则模型会照续读提示在同一 offset 上打转（ADR-0006 D4 无静默截断）。
+    // Inline truncation of an over-budget line has no offset continuation path — the
+    // model-visible face must say so, or the model would loop on the same offset following the continuation hint (ADR-0006 D4, no silent truncation).
     expect(desc).toContain("truncation marker");
     expect(desc).toContain("not reachable via offset paging");
   });
 
-  // ── #1030: create-worktree description matches the taskWorktreePath SSOT.
+  // ── create-worktree description matches the taskWorktreePath SSOT.
   // A valid kebab-case label IS the leaf; without one the leaf is the
   // conversation id. Identity (gitdir sidecar) is decoupled from the folder
   // name. The description must NOT promise a `<label>--<conversationId>`
@@ -355,9 +361,9 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(desc).toContain("identity");
   });
 
-  // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**
-  // 行文——出现「line N / character M」类必填措辞即回到坐标主路径，spec
-  // 「禁止把第几行第几列当作这些工具的主入参」被破坏。
+  // Symbol-query tool descriptions must be written around symbol identity — any
+  // "line N / character M" mandatory phrasing regresses to the coordinate path and breaks
+  // the spec rule against line/column as the primary input for these tools.
   it("symbol query tool descriptions describe symbol identity, not line/character — T2", () => {
     const symbolTools = [
       "find_symbol",
@@ -381,13 +387,13 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
       offenders,
       `coordinate phrasing leaked into: ${offenders.map((o) => o.name).join(", ")}`
     ).toEqual([]);
-    // 反向：每件都点名 symbol / symbol_path（identity-first 措辞在场）。
+    // Counter-check: every tool description mentions symbol (identity-first phrasing present).
     const withoutIdentity = reg.catalog
       .all()
       .filter((t) => symbolTools.includes(t.name))
       .filter((t) => !/symbol/i.test(t.description));
     expect(withoutIdentity.map((t) => t.name)).toEqual([
-      // 诊断按文件提问，无符号身份可谈（spec 列表里它就是文件级工具）。
+      // Diagnostics are asked per file — no symbol identity to speak of (the spec lists it as a file-level tool).
       "get_diagnostics_for_file",
     ]);
   });

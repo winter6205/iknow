@@ -1,16 +1,19 @@
 /**
- * T3 / ADR-0046 §3 — permission-executor gate:未 discover() 的 mcp__ 工具
- * 被直呼 → hydrate(本轮 discover(name) → 下一轮 visibleSchemas 尾部追加
- * schema);input 通过 schema → 直接执行;否则返非 error 文本投影。
+ * ADR-0046 — permission-executor gate: calling an mcp__ tool that has not been
+ * discover()ed hydrates it (discover(name) this round → schema appended to the
+ * tail of visibleSchemas next round); if input passes the schema the call runs
+ * directly, otherwise a non-error text projection is returned.
  *
- * 行为真值:
- *   - mcp__ 工具被 catalog.get 命中,registry.isDiscovered(name) === false,
- *     discover 副作用被触发 → gate.proceed(走 input 校验后再放行/投影);
- *   - pre-hook / askUser / inner 仍按原路径(闸门放行才进,投影短路时零调用);
- *   - discover(name) 之后再调 → 闸门直接放行,正常 inner 执行(无 hydrate 重复);
- *   - 非 mcp__ 工具(普通 built-in / dynamic non-mcp)→ 不受此闸门影响;
- *   - catalog.isDiscovered / catalog.discover 缺席(非 ACI registry 装配路径)
- *     → 闸门放过,与 T3 之前 byte-stable。
+ * Behaviour ground truth:
+ *   - the mcp__ tool hits catalog.get, registry.isDiscovered(name) === false,
+ *     the discover side-effect fires → gate.proceed (input validated, then released or projected);
+ *   - pre-hook / askUser / inner keep their original paths (entered only once the
+ *     gate releases; zero calls when the projection short-circuits);
+ *   - after discover(name), the next call passes the gate directly and inner runs
+ *     normally (no repeated hydrate);
+ *   - non-mcp__ tools (built-in / dynamic non-mcp) are unaffected;
+ *   - when catalog.isDiscovered / catalog.discover are absent (non-ACI registry
+ *     assembly path) the gate lets calls through, byte-stable with the pre-gate behaviour.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -78,22 +81,23 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       { id: "u1", name: "mcp__svc__ping", input: {} },
       undefined
     );
-    // T3:不该返 blocked,不该含 "not loaded" 模板字面。
+    // must not return blocked and must not contain the "not loaded" template literal.
     assert.equal(gate.kind, "proceed");
     if (gate.kind === "proceed") {
       assert.equal(gate.def?.name, "mcp__svc__ping");
     }
-    // gateOne 不调 inner;inner 由 runAllowed 路径驱动。
+    // gateOne does not call inner; inner is driven by the runAllowed path.
     assert.equal(innerCalls.length, 0, "gateOne 必须零调用 inner");
 
-    // T3:discover 副作用已发生(discover 注入生效)。
+    // the discover side-effect has fired (injected discover takes effect).
     assert.ok(discovered.has("mcp__svc__ping"));
   });
 
   it("未 discover + 非法 input → blocked + kind: ok + 文本投影 schema;inner 零调用", async () => {
-    // input 校验在 hydrate 路径失败时,闸门返 ok 文本投影(非 error,
-    // is_error = false);discover 副作用照发(spec:discover 必须发生在
-    // 执行前 → 模型下一轮拿到 schema 才能正确补 input)。
+    // When input validation fails on the hydrate path, the gate returns an ok text
+    // projection (not an error; is_error = false). The discover side-effect still
+    // fires: discover must happen before execution so the model receives the schema
+    // next round and can fix its input.
     const def = makeMcpTool("mcp__svc__ping");
     const reg = createRegistry([def]);
     const discovered = new Set<string>();
@@ -109,8 +113,8 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       },
     });
 
-    // 该 fixture 的 makeMcpTool inputSchema = { type: object, additionalProperties: false }
-    // → `extra` 必拒 → ajv 失败。
+    // makeMcpTool's inputSchema here is { type: object, additionalProperties: false }
+    // → `extra` is always rejected → ajv fails.
     const gate = await perm.gateOne(
       { id: "u1b", name: "mcp__svc__ping", input: { extra: "bad" } },
       undefined
@@ -119,7 +123,7 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
     if (gate.kind === "blocked") {
       assert.equal(gate.result.kind, "ok");
       assert.equal(gate.result.toolUseId, "u1b");
-      // 投影文本 = JSON.stringify({name, description, inputSchema})
+      // projected text = JSON.stringify({name, description, inputSchema})
       const payload = (
         gate.result as unknown as { payload: Array<{ text: string }> }
       ).payload;
@@ -132,9 +136,9 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       assert.ok(parsed.description);
       assert.ok(parsed.inputSchema);
     }
-    // inner 仍零调用(闸门在 pre-hook 之前已 short-circuit)。
+    // inner still has zero calls (the gate short-circuited before the pre-hook).
     assert.equal(innerCalls.length, 0);
-    // discover 副作用照样发生(下一轮 schema 进 promptTools)。
+    // discover still fires (schema enters promptTools next round).
     assert.ok(discovered.has("mcp__svc__ping"));
   });
 
@@ -158,7 +162,7 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
     assert.equal(gate.kind, "proceed");
     assert.equal(innerCalls.length, 0, "gateOne 不调 inner;inner 由上层驱动");
 
-    // 模拟上层 runAllowed 路径:proceed → 真跑 inner,handler 应返 ok。
+    // simulate the upstream runAllowed path: proceed → run inner for real.
     if (gate.kind === "proceed") {
       const [result] = await inner.executeAll([
         { id: "u2", name: "mcp__svc__ping", input: {} },
@@ -181,7 +185,7 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       }),
     });
     const reg = createRegistry([builtin]);
-    // isDiscovered 不注入 → 闸门放过(非 ACI registry 装配的兼容路径)。
+    // isDiscovered not injected → the gate lets it through (non-ACI registry compat path).
     const { executor: inner, calls: innerCalls } = makeInnerSpy();
     const perm = createPermissionRuntime({
       inner,
@@ -195,7 +199,7 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       undefined
     );
     assert.equal(gate.kind, "proceed");
-    // 非 mcp__ 名字不走模板,也不要求 discovered。
+    // non-mcp__ names skip the template and need not be discovered.
     assert.equal(innerCalls.length, 0);
   });
 

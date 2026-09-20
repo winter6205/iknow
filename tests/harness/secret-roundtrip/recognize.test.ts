@@ -1,22 +1,23 @@
 /**
- * recognize.test.ts — T1 secret-roundtrip SSOT — recognize.ts 验收。
+ * recognize.test.ts — SSOT acceptance tests for secret-roundtrip recognize.ts.
  *
- * 覆盖 plan #406 §3 T1:
- *   A1: recognize("sk-...") 无 registry → matched 1 + <<<SECRET_1>>> 替换
- *   A2: 同 registry 二次 recognize 同值 → matched 0 + 同一占位符（去重验证）
- *   A3: restore 跨模块还原（echo <<<SECRET_1>>> → echo sk-...）
- *   A4/A5: patterns.test.ts / 全量 suite 覆盖（本文件不重复）
+ * Coverage:
+ *   recognize("sk-...") without registry → matched 1 + <<<SECRET_1>>> replacement
+ *   second recognize of the same value on one registry → matched 0 + same placeholder (dedup check)
+ *   restore cross-module round-trip (echo <<<SECRET_1>>> → echo sk-...)
+ *   pattern-compilation and full-suite aspects are covered by patterns.test.ts / the whole suite, not repeated here
  *
- * 边界（per test.md + defensive-contract 5 类输入）:
- *   - empty：空文本 → matched [] + replaced ""
- *   - negative：无密钥文本 → matched [] + replaced 原样 verbatim
- *   - overflow：25_000 字符文本含密钥 → 不抛且正确替换（recognize 不截断，
- *     与 secrets-guard 的 20_000 截断是不同契约——此处扫全量用户文本）
- *   - concurrent：同文本两个不同 secret → 各占唯一 ID + matched 2
- *   - exception：非法自定义 pattern 静默剔除（构造不抛），默认模式仍生效
- *   - dedup：同值出现 3 次 → matched 1（注册一次），三处全替换同一占位符
- *   - 占位符前缀安全（restore 交叉验证）：SECRET_1 不部分命中 SECRET_10
- *   - re-entrancy：g-flag 有状态 lastIndex 复位，registry 跨多轮复用不漏匹配
+ * Boundaries (defensive contract, five input classes):
+ *   - empty: empty text → matched [] + replaced ""
+ *   - negative: text without secrets → matched [] + replaced verbatim
+ *   - overflow: 25_000-char text containing a secret → no throw, correct replacement
+ *     (recognize never truncates — a different contract from secrets-guard's
+ *     20_000 truncation, since this scans full user text)
+ *   - concurrent: two different secrets in one text → each gets a unique ID + matched 2
+ *   - exception: invalid custom patterns silently dropped (construction never throws), defaults still effective
+ *   - dedup: same value appearing 3 times → matched 1 (registered once), all three replaced with the same placeholder
+ *   - placeholder prefix safety (cross-checked via restore): SECRET_1 never partially matches SECRET_10
+ *   - re-entrancy: stateful g-flag lastIndex is reset, a registry reused across rounds misses no match
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -47,14 +48,14 @@ describe("recognize — A2 + A3：共享 registry 去重 + restore 跨模块还�
     assert.equal(first.replaced, "<<<SECRET_1>>>");
 
     const second = recognize(SECRET, reg);
-    assert.equal(second.matched.length, 0); // 已在 registry → 不重复计数
-    assert.equal(second.replaced, "<<<SECRET_1>>>"); // 占位符去重复用
-    assert.equal(reg.size, 1); // 只注册 1 条
+    assert.equal(second.matched.length, 0); // already in the registry → not double-counted
+    assert.equal(second.replaced, "<<<SECRET_1>>>"); // dedup reuses the placeholder
+    assert.equal(reg.size, 1); // only 1 entry registered
   });
 
   it('A3：restore("echo <<<SECRET_1>>>", registry) === "echo sk-..."', () => {
     const reg = createSecretRegistry();
-    recognize(SECRET, reg); // 走识别层注册，跨模块集成验证
+    recognize(SECRET, reg); // registers through the recognize layer; cross-module integration check
     assert.equal(restore("echo <<<SECRET_1>>>", reg), `echo ${SECRET}`);
   });
 });
@@ -105,7 +106,7 @@ describe("recognize — 边界：concurrent（同文本多个不同 secret）", 
 describe("recognize — 边界：exception（非法自定义 pattern 静默剔除）", () => {
   it('createSecretRegistry({ patterns: ["("] }) 构造不抛，默认模式仍生效', () => {
     const reg = createSecretRegistry({ patterns: ["("] });
-    assert.equal(reg.patterns.length, 7); // 仅 DEFAULT，非法 extras 未入列
+    assert.equal(reg.patterns.length, 7); // DEFAULT only, invalid extras not admitted
     const r = recognize("sk-aaaaaaaaaaaaaaaaaaaa", reg);
     assert.equal(r.matched.length, 1);
     assert.equal(r.replaced, "<<<SECRET_1>>>");
@@ -118,7 +119,7 @@ describe("recognize — 边界：dedup（同值多次出现）", () => {
     const text =
       "sk-aaaaaaaaaaaaaaaaaaaa sk-aaaaaaaaaaaaaaaaaaaa sk-aaaaaaaaaaaaaaaaaaaa";
     const r = recognize(text, reg);
-    assert.equal(r.matched.length, 1); // 只注册一次
+    assert.equal(r.matched.length, 1); // registered once
     assert.equal(r.replaced, "<<<SECRET_1>>> <<<SECRET_1>>> <<<SECRET_1>>>");
     assert.equal(reg.size, 1);
   });
@@ -128,11 +129,11 @@ describe("recognize — 边界：占位符前缀安全 + re-entrancy", () => {
   it("占位符前缀安全：SECRET_1 不部分命中 SECRET_10（restore 交叉验证）", () => {
     const reg = createSecretRegistry();
     for (let i = 0; i < 10; i++) reg.register(`v${i + 1}`);
-    // recognize-level smoke：<<<SECRET_N>>> 不是密钥形态 → 原样保留、不误识别
+    // recognize-level smoke: <<<SECRET_N>>> is not secret-shaped → kept verbatim, never misrecognized
     const r = recognize("<<<SECRET_1>>> and <<<SECRET_10>>>", reg);
     assert.deepEqual(r.matched, []);
     assert.equal(r.replaced, "<<<SECRET_1>>> and <<<SECRET_10>>>");
-    // restore 边界：split/join 全字面匹配，SECRET_1 不误伤 SECRET_10
+    // restore boundary: split/join matches full literals, SECRET_1 never harms SECRET_10
     assert.equal(restore("<<<SECRET_1>>> + <<<SECRET_10>>>", reg), "v1 + v10");
   });
 
@@ -142,7 +143,7 @@ describe("recognize — 边界：占位符前缀安全 + re-entrancy", () => {
     assert.equal(r1.matched.length, 1);
     assert.equal(r1.replaced, "<<<SECRET_1>>>");
 
-    // 若 lastIndex 未复位，第二次 exec 会从错误位置开始而漏匹配
+    // If lastIndex were not reset, the second exec would start at the wrong offset and miss the match
     const r2 = recognize("sk-bbbbbbbbbbbbbbbbbbbb", reg);
     assert.equal(r2.matched.length, 1);
     assert.equal(r2.replaced, "<<<SECRET_2>>>");

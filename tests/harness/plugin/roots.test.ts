@@ -1,17 +1,18 @@
 /**
- * plugin/roots.ts — discovery 层单测（plans/global-plugins-loading.md §3 / §12 T1）。
+ * plugin/roots.ts — discovery-layer unit tests.
  *
- * 覆盖：
- *   - resolvePluginRoots 顺序合并去重 + 不存在根静默跳过；
- *   - env IKNOW_PLUGIN_ROOTS（path.delimiter 分隔）；
- *   - settings.plugins.roots；
- *   - 默认 <home>/.iknow/plugins；
- *   - discoverPlugins ledger 优先（user scope / 末项 fallback / installPath
- *     非绝对 / 不可读 / 损坏 JSON → fallback / 多版本 / 命名带 @）；
- *   - 目录扫描兜底（直接布局 + 嵌套 <plugin>/<version> 布局）；
- *   - 跳过 node_modules / .git / 隐藏 / 含 : / 符号链接；
- *   - disabled 过滤；
- *   - enumeratePluginAgentDirs（sync 路径）—— 直接 + 嵌套两种布局。
+ * Covers:
+ *   - resolvePluginRoots ordered merge + dedupe, silently skipping missing roots;
+ *   - env IKNOW_PLUGIN_ROOTS (path.delimiter separated);
+ *   - settings.plugins.roots;
+ *   - default <home>/.iknow/plugins;
+ *   - discoverPlugins ledger precedence (user scope / last-entry fallback /
+ *     non-absolute installPath / unreadable / corrupt JSON → fallback /
+ *     multiple versions / names containing @);
+ *   - directory-scan fallback (direct layout + nested <plugin>/<version> layout);
+ *   - skipping node_modules / .git / hidden / names containing : / symlinks;
+ *   - disabled filtering;
+ *   - enumeratePluginAgentDirs (sync path) — both direct and nested layouts.
  */
 import assert from "node:assert/strict";
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -40,14 +41,14 @@ afterEach(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-/** 在 work 下创建目录, 返回绝对路径。 */
+/** Create a directory under work and return its absolute path. */
 function dir(...parts: string[]): string {
   const d = path.join(work, ...parts);
   mkdirSync(d, { recursive: true });
   return d;
 }
 
-/** 在 path 处写字符串（utf8）。 */
+/** Write a string file at path (utf8). */
 function file(p: string, body: string): void {
   writeFileSync(p, body, "utf8");
 }
@@ -79,14 +80,15 @@ describe("resolvePluginRoots", () => {
 
     const result = resolvePluginRoots({
       userHome: home,
-      pluginRoots: [explicitRoot, settingsRoot], // 显式 + settings 重叠 → 去重
+      pluginRoots: [explicitRoot, settingsRoot], // explicit + settings overlap → deduped
       env: { IKNOW_PLUGIN_ROOTS: [envRoot, defaultRoot].join(path.delimiter) },
       settings,
     });
 
-    // 顺序：explicit > env > settings > default；
-    // settingsRoot 在 pluginRoots 已被加 → settings 阶段去重不再加；
-    // defaultRoot 在 env 已被加 → default 阶段去重不再加。
+    // Order: explicit > env > settings > default;
+    // settingsRoot was already added via pluginRoots → deduped at the
+    // settings stage; defaultRoot was already added via env → deduped at the
+    // default stage.
     assert.deepEqual(result, [
       path.resolve(explicitRoot),
       path.resolve(settingsRoot),
@@ -97,7 +99,7 @@ describe("resolvePluginRoots", () => {
 
   it("根不存在 → 静默跳过（不告警）", () => {
     const home = dir("home");
-    const missing = dir("missing"); // 立即删掉
+    const missing = dir("missing"); // deleted right away
     rmSync(missing, { recursive: true, force: true });
     const result = resolvePluginRoots({
       userHome: home,
@@ -256,7 +258,7 @@ describe("discoverPlugins — directory scan fallback", () => {
   it("嵌套布局: <root>/<plugin>/<version>/agents", async () => {
     const root = dir("scan-root");
     dir("scan-root", "plugA", "0.2.0", "agents");
-    dir("scan-root", "plugA", "0.2.0", "skills"); // 双组件也成立
+    dir("scan-root", "plugA", "0.2.0", "skills"); // dual-component layout still holds
     const result = await discoverPlugins(root);
     assert.equal(result.length, 1);
     assert.equal(result[0]?.name, "plugA");
@@ -284,7 +286,7 @@ describe("discoverPlugins — directory scan fallback", () => {
     try {
       symlinkSync(good, path.join(root, "symlink-good"), "dir");
     } catch {
-      // WSL 某些环境不允许创建目录符号链接 → skip 该断言分支。
+      // Some WSL environments disallow dir symlinks → skip that assertion branch.
     }
     const result = await discoverPlugins(root);
     const names = result.map((p) => p.name).sort();
@@ -294,11 +296,11 @@ describe("discoverPlugins — directory scan fallback", () => {
 
 describe("discoverPlugins — disabled filter (review C2)", () => {
   it("ledger 解析后, 同步 enumeratePluginAgentDirs 嵌套布局下的 disabled 过滤", () => {
-    // review C2: 之前 `opts.disabled` 检查只在直接布局生效，嵌套
-    // <root>/<plugin>/<version>/agents 漏检。修复后一处检查 gate
-    // 两种布局。
+    // Previously opts.disabled was only checked in the direct layout, missing
+    // nested <root>/<plugin>/<version>/agents. Now a single check gates both
+    // layouts.
     const root = dir("sync-root");
-    // 写一份 ledger，installPath 指向一个**带嵌套版本目录**的目录
+    // Write a ledger whose installPath points into a directory with a nested version dir
     const pluginAInstall = dir("sync-root", "plugA", "0.1.0");
     const pluginBInstall = dir("sync-root", "plugB", "0.2.0");
     mkdirSync(path.join(pluginAInstall, "agents"), { recursive: true });
@@ -328,7 +330,7 @@ describe("discoverPlugins — disabled filter (review C2)", () => {
     const out = enumeratePluginAgentDirs([root], {
       disabled: new Set(["plugA"]),
     });
-    // 嵌套布局下 plugA 也被过滤
+    // plugA is filtered in the nested layout too
     assert.equal(out.length, 1);
     assert.equal(out[0]!.plugin, "plugB");
     assert.equal(
@@ -353,7 +355,7 @@ describe("enumeratePluginAgentDirs (sync path)", () => {
   it("直接布局: <root>/<plugin>/agents", () => {
     const root = dir("sync-root");
     dir("sync-root", "plugA", "agents");
-    dir("sync-root", "plugB", "skills"); // 只有 skills → 跳过
+    dir("sync-root", "plugB", "skills"); // skills only → skipped
     const out = enumeratePluginAgentDirs([root]);
     assert.equal(out.length, 1);
     assert.equal(out[0]!.plugin, "plugA");
@@ -372,8 +374,9 @@ describe("enumeratePluginAgentDirs (sync path)", () => {
   });
 
   it("ledger 优先 (review C1): 根下无 scan 可见插件, 但 ledger 指向其他位置 → 以 ledger 名加载", () => {
-    // 真实 ledger-only 布局: <root> 下无任何 plugin 目录，installPath
-    // 指向完全不同的位置 (模拟 cache/<marketplace>/<plugin>/<ver>/)
+    // Realistic ledger-only layout: <root> contains no plugin directories at
+    // all and installPath points somewhere entirely different (simulating
+    // cache/<marketplace>/<plugin>/<ver>/)
     const root = dir("sync-root");
     const pluginInstall = dir("cache", "ledgerplug", "0.1.0");
     mkdirSync(path.join(pluginInstall, "agents"), { recursive: true });

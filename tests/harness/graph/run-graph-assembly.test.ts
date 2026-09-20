@@ -1,26 +1,30 @@
 /**
- * ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻注册 +
- * handler-level gate。
+ * `run_graph` resident registration + handler-level gate.
  *
- * 三层分开测,对应 plan B3 的三条验收 + 一个边界 + spec SC5:
- *   1. **装配快照**(`createGraphAssembly`):overlay 是会话级可变 holder,
- *      但 handler gate 仍按 `enabled()` 单点判定 —— 装配层不热替换,
- *      同 round 工具面与 system 字节稳定。
- *   2. **常驻条件装配**(`ACI_TOOLSET_NAMES` append-only +
- *      `createDefaultAciRegistry` Gate 3 镜像过滤):`run_graph` 仅在
- *      `subagentManager` 缺席时缺席;`graphAssembly` 缺席不再触发工具缺席
- *      —— 装配层恒在场(handler isEnabled 缺省恒关守门)。
- *   3. **切换提示 SSOT**(`renderGraphModeChangeNotification` +
- *      `IKNOW_GRAPH_MODE_*_NOTIFICATION`):开/关两条 `<graph_mode>` 单行
- *      静态文本,字节级恒定(KV cache 兼容 + 模型 grep 形态)。
- *   4. **buildHarnessEngine SC5 集成**:关图 promptTools 含 `run_graph`
- *      不过滤、handler 拒绝;开图同 round 即可调用(无 beginRound 门);
- *      system 段逐字节稳定(关→开→关邻轮 deep-equal);
- *      messages 尾部出现切换提示(开/关两种文本)。
+ * Four layers tested separately:
+ *   1. **Assembly snapshot** (`createGraphAssembly`): the overlay is a
+ *      session-level mutable holder, but the handler gate still decides at
+ *      the single point `enabled()` — the assembly layer never hot-swaps, so
+ *      within a round the tool surface and system bytes stay stable.
+ *   2. **Conditional resident assembly** (`ACI_TOOLSET_NAMES` append-only +
+ *      `createDefaultAciRegistry` Gate 3 mirror filtering): `run_graph` is
+ *      absent only when `subagentManager` is absent; an absent
+ *      `graphAssembly` no longer removes the tool — the assembly layer is
+ *      always present (handler isEnabled defaults to closed).
+ *   3. **Mode-change notification SSOT** (`renderGraphModeChangeNotification`
+ *      + `IKNOW_GRAPH_MODE_*_NOTIFICATION`): on/off are two single-line
+ *      static `<graph_mode>` texts, byte-constant (KV-cache compatible +
+ *      stable grep shape for the model).
+ *   4. **buildHarnessEngine integration**: with graph off, promptTools still
+ *      contains `run_graph` and the handler rejects; with graph on it is
+ *      callable in the same round (no beginRound gate); system segments stay
+ *      byte-stable (off→on→off adjacent rounds deep-equal); mode-change
+ *      notifications appear at the messages tail (on/off texts).
  *
- * 编排指引文已从 system 段撤出(并入切换提示),故 assemble.ts 不再导出
- * `orchestration` 缝 / `IKNOW_GRAPH_ORCHESTRATION_TEXT`(B3 关键边界:
- * system 段不再因 graph 状态变化)。
+ * Orchestration guidance was withdrawn from the system segment (merged into
+ * the change notification), so assemble.ts no longer exports the
+ * `orchestration` seam / `IKNOW_GRAPH_ORCHESTRATION_TEXT` (key boundary: the
+ * system segment never changes with graph state).
  */
 import { describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -59,7 +63,7 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
   return { web: { searchUrl: undefined, proxy: undefined } };
 }
 
-/** 装配期够用的 fake manager(handler 路径不在本文件覆盖,见 T4)。 */
+/** Minimal fake manager sufficient for assembly-time tests (handler paths are covered in run-graph-ledger.test.ts). */
 const fakeSubagentManager = {
   spawn: () => ({ taskId: "fake-id" }),
   queryBuffer: () => ({ status: "not_found" as const }),
@@ -70,11 +74,11 @@ const fakeSubagentManager = {
   abortTask: () => false,
   getCapacity: () => 15,
   listSubagents: () => [],
-  // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
+  // master SubAgentManager interface extension: subscribe (mailbox contract)
   subscribe: () => () => {},
 } as unknown as SubAgentManager;
 
-// ── 1. 装配快照 ───────────────────────────────────────────────────────────
+// ── 1. assembly snapshot ──────────────────────────────────────────────────
 
 describe("createGraphAssembly — per-round 装配快照", () => {
   it("初值取 holder 当前值(settings 默认关 → enabled() false)", () => {
@@ -93,13 +97,13 @@ describe("createGraphAssembly — per-round 装配快照", () => {
     const assembly: GraphAssembly = createGraphAssembly(mode);
 
     mode.setEnabled(true);
-    expect(assembly.enabled()).toBe(false); // in-flight round 不热替换
+    expect(assembly.enabled()).toBe(false); // in-flight round never hot-swaps
 
     expect(assembly.beginRound()).toBe(true);
     expect(assembly.enabled()).toBe(true);
 
     mode.setEnabled(false);
-    expect(assembly.enabled()).toBe(true); // 同上,本 round 冻结
+    expect(assembly.enabled()).toBe(true); // same as above: frozen for this round
     expect(assembly.beginRound()).toBe(false);
     expect(assembly.enabled()).toBe(false);
   });
@@ -111,23 +115,21 @@ describe("createGraphAssembly — per-round 装配快照", () => {
   });
 });
 
-// ── 2. 常驻条件装配 ───────────────────────────────────────────────────────
+// ── 2. resident conditional assembly ──────────────────────────────────────
 
 describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only(worktree 3 件 + 10 件符号查询 + 5 件符号改 + 目录轴读 + 内容轴读 + 任务树 lifecycle 2 件,不重排既有件)", () => {
-    // 长度 45(plan subagent-stop-and-continue T2/T4 append subagent_stop +
-    // subagent_continue 后;
-    // disclosure-index-align T2 删 skill_search,前移一位);
-    // 实际 idx(基线实测):
-    //   idx 19 = run_graph(ADR-0041 起常驻)
+    // Length 45; the actual indices are taken from the registry (append-only
+    // discipline, pinned against reordering):
+    //   idx 19 = run_graph (resident)
     //   idx 20 = query_trace
-    //   idx 21..23 = worktree 3 件
-    //   idx 24..33 = 10 件符号查询
-    //   idx 34..38 = 5 件符号改
-    //   idx 39 = list_sessions(T5b 目录轴读)
-    //   idx 40 = get_record(T6 内容轴读)
+    //   idx 21..23 = worktree tools
+    //   idx 24..33 = symbol-query tools
+    //   idx 34..38 = symbol-edit tools
+    //   idx 39 = list_sessions (catalog-axis read)
+    //   idx 40 = get_record (content-axis read)
     //   idx 41 = list-worktrees, idx 42 = remove-worktree
-    //   idx 43 = subagent_stop(ADR-0101), idx 44 = subagent_continue(ADR-0102)
+    //   idx 43 = subagent_stop (ADR-0101), idx 44 = subagent_continue (ADR-0102)
     expect(ACI_TOOLSET_NAMES[19]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[20]).toBe("query_trace");
     expect(ACI_TOOLSET_NAMES[21]).toBe("create-worktree");
@@ -154,8 +156,9 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
   });
 
   it("subagentManager 缺席 → run_graph 缺席(ask / worker 装配路径);graphAssembly 缺席不影响注册表成员", () => {
-    // ADR-0041:装配层唯一缺席条件 = subagentManager 缺席。graphAssembly 缺席
-    // → run_graph 仍在注册表(handler isEnabled 缺省恒关守门,SC5 实测)。
+    // Resident-registration boundary: the only absence condition at assembly
+    // time is a missing subagentManager. With graphAssembly absent, run_graph
+    // still registers (handler isEnabled defaults to closed).
     const noSubagent = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -165,7 +168,7 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
       "run_graph"
     );
 
-    // 仅 graphAssembly 在场(subagentManager 缺席)→ run_graph 仍在缺席集合。
+    // graphAssembly present but subagentManager absent → run_graph stays in the absent set.
     const graphOnly = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -178,8 +181,8 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
   });
 
   it("subagentManager 在场(graphAssembly 是否在场不影响)→ run_graph 入注册表", () => {
-    // 双形态对比:graphAssembly 缺席 vs 在场,注册表成员应 byte-identical
-    // (handler isEnabled 闭包按 assembly 在场与否透传不同值,工具面成员不变)。
+    // Two-form comparison: graphAssembly absent vs present — registry membership
+    // must be byte-identical (the isEnabled closure differs per assembly, but the tool surface does not).
     const base = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -197,8 +200,8 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     const withGraphNames = withGraph.inner.list().map((d) => d.name);
     expect(baseNames).toContain("run_graph");
     expect(withGraphNames).toContain("run_graph");
-    // 成员集逐字相同(graphAssembly 缺席仅让 handler isEnabled 透传 undefined
-    // → 缺省恒关,不增减工具)。
+    // Membership sets are literally identical (an absent graphAssembly only makes
+    // the handler isEnabled pass undefined → defaults closed; no tool added or removed).
     expect(withGraphNames).toEqual(baseNames);
     expect(base.catalog.get("run_graph")).toBeDefined();
     expect(withGraph.catalog.get("run_graph")).toBeDefined();
@@ -243,8 +246,9 @@ describe("createRunGraphTool — 工具描述符", () => {
   });
 
   it("description 显式声明 graph mode 守门(让模型知道关图调会被拒)", () => {
-    // ADR-0041:工具 description 兜底宣告(handler gate 之外给模型一个
-    // 静态 hint,避免其在关图状态下尝试调再被 typed 拒绝)。
+    // Description fallback announcement: besides the handler gate, give the
+    // model a static hint so it does not call while graph mode is off only to
+    // be typed-rejected.
     expect(tool.description.toLowerCase()).toContain("graph mode is on");
     expect(tool.description.toLowerCase()).toContain("off");
   });
@@ -268,8 +272,8 @@ describe("createRunGraphTool — 工具描述符", () => {
   });
 
   it("isEnabled 缺省 = 恒关(直接构造工具的测试必须显式传 isEnabled 守门)", async () => {
-    // fail-closed:不传 isEnabled → 默认恒关 → handler 拒绝。这是 ADR-0041
-    // 工具常驻后,handler 是唯一守门,fail-closed 安全姿态。
+    // fail-closed: no isEnabled → defaults closed → handler rejects. Since the
+    // tool is resident, the handler is the only gate; fail-closed is the safe posture.
     const noGate = createRunGraphTool({ manager: fakeSubagentManager });
     await expect(
       noGate.handler({ nodes: [{ id: "a", task: "t" }] })
@@ -277,7 +281,7 @@ describe("createRunGraphTool — 工具描述符", () => {
   });
 });
 
-// ── 3. 切换提示 SSOT ─────────────────────────────────────────────────────
+// ── 3. mode-change notification SSOT ────────────────────────────────────
 
 describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () => {
   it("开图通知含编排指引 + 一句 'graph mode is now on' 开头", () => {
@@ -286,7 +290,7 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
     expect(text.startsWith("<graph_mode>")).toBe(true);
     expect(text.endsWith("</graph_mode>")).toBe(true);
     expect(text).toContain("Graph mode is now on");
-    // 旧 IKNOW_GRAPH_ORCHESTRATION_TEXT 的内容并入此条(run_graph 编排指引)。
+    // The former IKNOW_GRAPH_ORCHESTRATION_TEXT content merged into this one (run_graph orchestration guidance).
     expect(text).toContain("run_graph");
     expect(text).toContain("spawn_subagent");
   });
@@ -301,9 +305,10 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
   });
 
   it("isGraphModeText 覆盖三条 notification 常量（生产者本家的人读谓词）", () => {
-    // specs/tui-human-display.md D8 / SC7：谓词与常量同处一文件（SSOT），
-    // TUI / CLI 消费侧不必各自重写 `<graph_mode>` 前缀。三条常量全命中，
-    // 正文里中段提到标签的用户文本不误伤（前缀判定，与 isAgentStatusText 同款）。
+    // Predicate and constants live in one file (SSOT) so TUI / CLI consumers
+    // need not rewrite the `<graph_mode>` prefix. All three constants match;
+    // user text merely mentioning the tag mid-body is not caught (prefix test,
+    // same shape as isAgentStatusText).
     for (const text of [
       IKNOW_GRAPH_MODE_ON_NOTIFICATION,
       IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -318,7 +323,7 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
   });
 
   it("两条静态文本在会话内字节恒定(无 per-turn 插值,KV cache 契约)", () => {
-    // 同一 change 调用两次 → 同字节;两条文本不等(一开一关)。
+    // Same change called twice → same bytes; the two texts differ (on vs off).
     expect(renderGraphModeChangeNotification("on")).toBe(
       renderGraphModeChangeNotification("on")
     );
@@ -338,13 +343,14 @@ describe("graph mode 每 run 短现势 — SSOT 静态文本(ADR-0081)", () => {
     expect(t.endsWith("</graph_mode>")).toBe(true);
     expect(t).toContain("run_graph");
     expect(t).toContain("spawn_subagent");
-    // 必须是活动图语言(spec §11),不能叫 DAG。
+    // Must use activity-graph wording, never call it a DAG.
     expect(t.toLowerCase()).not.toContain("dag");
   });
 
   it("短现势在会话内字节恒定(KV cache 尾部追加兼容,无 per-turn 插值)", () => {
-    // 无插值占位符(模板槽位会让会话内字节漂移,KV cache 契约),
-    // 也不把 agent_status 栏文本反向混入(SC6)。
+    // No interpolation placeholders (template slots would drift bytes within a
+    // session, breaking the KV-cache contract), and no agent_status bar text
+    // mixed in reverse.
     expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("{{");
     expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("<server>");
     expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("<tools>");
@@ -370,9 +376,10 @@ describe("assembleIdentityContext — orchestration 段撤出(关键边界)", ()
   } as const;
 
   it("不再接受 orchestration 缝(类型契约本身已撤除),assemble 出的 system 不含 'run_graph'", async () => {
-    // ADR-0041 / plans/model-prefix-layering.md B3:orchestration 段从 system
-    // 撤出 —— model 端读 graph 状态的唯一通道 = loop-engine 消息尾追加的
-    // `<graph_mode>` 单行文本。assemble.ts 不再导出该缝 / 不再消费。
+    // Orchestration segment withdrawn from system — the model's only channel
+    // to read graph state is the `<graph_mode>` single-line text appended at
+    // the messages tail by loop-engine. assemble.ts no longer exports or
+    // consumes that seam.
     const text = await assembleIdentityContext({ ...baseCtx });
     expect(text).toBeDefined();
     expect(text).not.toContain("run_graph");
@@ -380,15 +387,15 @@ describe("assembleIdentityContext — orchestration 段撤出(关键边界)", ()
   });
 
   it("开/关图产出同一 system 文本(开关对 system 字节零影响,KV cache 前缀稳定)", async () => {
-    // 由 build-engine 装配的两条路径产出的 system 应 byte-identical
-    // —— 装配层不再读 graph 状态。
+    // Both assembly paths must produce byte-identical system text —
+    // the assembly layer no longer reads graph state.
     const off = await assembleIdentityContext({ ...baseCtx });
     const on = await assembleIdentityContext({ ...baseCtx });
     expect(on).toBe(off);
   });
 });
 
-// ── 4. buildHarnessEngine SC5 集成 ────────────────────────────────────────
+// ── 4. buildHarnessEngine integration ─────────────────────────────────────
 
 describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () => {
   async function withEngine(
@@ -405,9 +412,9 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
       memory: { enabled: false },
       userHome: home,
       cwd,
-      // 本文件验 graph 常驻工具面与 handler gate,不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies the resident tool surface and handler gate, not
+      // overflow eviction / index demotion (see build-engine-tool-overflow.test.ts).
+      // countTokens is bypassed at assembly time; seam semantics: BuildEngineOpts.skipCountTokens.
       skipCountTokens: true,
       ...(graphMode ? { graphMode } : {}),
     });
@@ -422,56 +429,61 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
 
   it("graphMode 缺席 → registry 仍含 run_graph(常驻);promptTools 暴露给模型看", async () => {
     await withEngine(undefined, (built) => {
-      // ADR-0041:即使 graphMode 缺席(subagentManager 在场 → run_graph 常驻),
-      // 工具面仍含 run_graph(handler isEnabled 缺省恒关守门)。
+      // ADR-0041: even without graphMode (subagentManager present → run_graph
+      // is resident), the tool surface still lists run_graph (the handler's
+      // isEnabled defaults to a closed gate).
       expect(built.deps.registry.list().map((d) => d.name)).toContain(
         "run_graph"
       );
       expect(built.deps.promptTools!().map((d) => d.name)).toContain(
         "run_graph"
       );
-      // graphAssembly 缺席 → deps.graphModeChange / graphModePresence 两缝
-      // 同 gate 同时缺席(loop-engine 不参与切换判定,消息尾不追加任何
-      // graph_mode 单行文本)。
+      // Without graphAssembly, the graphModeChange and graphModePresence seams
+      // are absent together (loop-engine never decides mode switches and
+      // appends no graph_mode single-line text to message tails).
       expect(built.deps.graphModeChange).toBeUndefined();
       expect(built.deps.graphModePresence).toBeUndefined();
     });
   });
 
   it("SC5 graph 关 → 开 → 关:promptTools 与 system 字节逐字不变", async () => {
-    // ADR-0041 关键边界:邻轮(同会话内任意 graph 翻转序列)promptTools 与
-    // system 必须 byte-identical —— 翻图不再是缓存抖动源;模型面读 graph
-    // 状态的通道仅剩 messages 尾部追加的 `<graph_mode>` 单行文本。
+    // ADR-0041 key boundary: across adjacent rounds (any in-session graph
+    // toggle sequence) promptTools and system must stay byte-identical —
+    // toggling the graph is no longer a cache-jitter source; the model's only
+    // channel for graph state is the `<graph_mode>` line appended to messages.
     const mode = createGraphModeContext();
     await withEngine(mode, async (built) => {
       const visible = (): ReadonlyArray<string> =>
         built.deps.promptTools!().map((d) => d.name);
       const systemOff = await built.deps.system!();
 
-      // 关图 → 开图 → 关图:每次翻键后做一次 beginRound() 让快照生效,
-      // 但 promptTools 与 system 都应该 byte-identical(常驻 + 段撤出)。
+      // off → on → off, taking a fresh snapshot via beginRound() after each
+      // toggle: promptTools and system must stay byte-identical (resident tool
+      // list + withdrawn system section).
       mode.setEnabled(true);
       built.graphAssembly!.beginRound();
       const systemOn = await built.deps.system!();
-      expect(visible()).toEqual(visible()); // 同 round 自比
+      expect(visible()).toEqual(visible()); // self-comparison within one round
 
       mode.setEnabled(false);
       built.graphAssembly!.beginRound();
       const systemOffAgain = await built.deps.system!();
 
-      // SC5 强契约:翻图不破坏 system / tools 字节序。
+      // Strong contract: graph toggling never disturbs system / tools bytes.
       expect(systemOn).toBe(systemOff);
       expect(systemOffAgain).toBe(systemOff);
-      // system 全文不含 'run_graph'(段已撤出,内容走 messages 尾追加)。
+      // 'run_graph' is absent from system entirely (its section is withdrawn;
+      // content ships via message-tail appends instead).
       expect(systemOn).not.toContain("run_graph");
       expect(systemOff).not.toContain("run_graph");
     });
   });
 
   it("graphMode 在场 → graphModeChange 与 graphModePresence 两缝同 gate 接线且同源 assembly", async () => {
-    // ADR-0080 装配契约:build-engine 永远同 gate 同源接线两缝 ——
-    // presence 缝与 change 缝指向同一 graphAssembly(presence 的保守
-    // 零注入 guard 依赖这一同源前提;错配 = 装配 bug)。
+    // Assembly contract: build-engine always wires both seams under the same
+    // gate and from the same source — the presence seam and the change seam
+    // point at one graphAssembly (presence's conservative zero-injection guard
+    // relies on this same-source premise; a mismatch = assembly bug).
     const mode = createGraphModeContext();
     await withEngine(mode, (built) => {
       expect(built.graphAssembly).toBeDefined();
@@ -485,19 +497,21 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
   });
 
   it("registry.catalog 中 run_graph 的 isEnabled gate 按 graphAssembly 透传", async () => {
-    // 静态查 registry catalog:同一 factory 在开/关两种 graphAssembly 下
-    // 都返回 run_graph 定义 —— handler 的 isEnabled 闭包捕获 assembly。
+    // Static registry-catalog check: one factory yields the run_graph
+    // definition under both on and off graphAssembly — the handler's isEnabled
+    // closure captures the assembly, not the registry.
     const offMode = createGraphModeContext();
     await withEngine(offMode, async (built) => {
       const tool = built.deps.registry.get("run_graph");
       expect(tool).toBeDefined();
-      // 关键:registry 层不再过滤 —— handler 才是守门。
-      // 同 round 内翻键 + beginRound 后,工具定义不变(常驻)。
+      // Key point: the registry no longer filters — the handler is the gate.
+      // Toggling the key inside one round plus beginRound leaves tool
+      // definitions unchanged (residency).
       const onMode = createGraphModeContext({ enabled: true });
-      // 用 onMode 重建一次引擎,验证 isEnabled 透传(简化为同 deps 的
-      // graphAssembly 切换观察;此处只验证「工具仍在表 + 仍是同一 name」。
+      // Observing a graphAssembly swap under identical deps; here that only
+      // means "tool still listed, still the same name".
       expect(tool?.name).toBe("run_graph");
-      void onMode; // 占位:同 round 翻键不影响 registry(常驻契约)
+      void onMode; // placeholder: in-round toggling never affects the registry (residency contract)
     });
   });
 });

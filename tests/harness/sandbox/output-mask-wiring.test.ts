@@ -1,7 +1,7 @@
 /**
  * tests/harness/sandbox/output-mask-wiring.test.ts
  *
- * SC20 wiring tests: verify the previously-unused `createOutputMask` +
+ * Wiring tests: verify the previously-unused `createOutputMask` +
  * `currentSecretValues` are now actually masking the consumer-side output
  * boundaries (cli format, session-api hub.toTurnDto, jsonl trace writer).
  *
@@ -10,15 +10,16 @@
  * that contains the sentinel; assert the output contains `***` and NOT the
  * sentinel. Env is restored in afterEach for isolation.
  *
- * settings-model-extension：masking 的 secret 变量名不再来自 env.llm.apiKeyEnv
- * （字段已退役），由 env-isolation 的 configuredSecretNames 解析：
- *   - settings.llm.apiKey `${VAR}` 占位符指向的变量名；
- *   - 兜底：process.env 中命中 SECRET_PATTERN(/API[_-]?KEY|SECRET|TOKEN|
- *     PASSWD|PASSWORD|PRIVATE[_-]?KEY/i) 的变量名。
- * 本测试通过 installTestSettingsSource 把 settings.llm.apiKey 设为
- * `${IKNOW_SC20_TEST_SECRET}`，并把 SENTINEL 注入该变量 ——
- * configuredSecretNames 收 `IKNOW_SC20_TEST_SECRET`，currentSecretValues 返
- * [SENTINEL]，遮蔽生效。
+ * For the masking side, secret variable names no longer come from
+ * env.llm.apiKeyEnv (that field retired); they are resolved by env-isolation's
+ * configuredSecretNames:
+ *   - the variable names pointed to by settings.llm.apiKey `${VAR}` placeholders;
+ *   - fallback: names in process.env matching SECRET_PATTERN
+ *     (/API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i).
+ * This test sets settings.llm.apiKey to `${IKNOW_SC20_TEST_SECRET}` via
+ * installTestSettingsSource and injects SENTINEL into that variable —
+ * configuredSecretNames collects the variable name, currentSecretValues returns
+ * [SENTINEL], and masking takes effect.
  */
 import { describe, it, afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
@@ -64,7 +65,7 @@ function mkResult(over: Partial<RunResult> = {}): RunResult {
     messages: [],
     turnCount: 1,
     stopReason: "completed",
-    // #160 T4:RunResult.lastUsage 必填字段;mkResult 默认 null(无 usage 视图)。
+    // RunResult.lastUsage is a required field; mkResult defaults it to null (no usage view).
     lastUsage: null,
     ...over,
   };

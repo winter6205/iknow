@@ -1,13 +1,12 @@
 /**
- * #121 T6: buildMessageParams system-field injection (spec SC 1 + Testing
- * Strategy buildMessageParams half).
+ * buildMessageParams system-field injection.
  *
  * `buildMessageParams(opts, state, request)` gained an optional `system?`
  * string that is included in the returned MessageCreateParams only when the
  * caller supplies a non-empty value (ask path passes none → behavior is
  * byte-identical to before; KV cache prefix stability is preserved).
  *
- * The function is exported (T6) so these tests import it directly and assert
+ * The function is exported so these tests import it directly and assert
  * on the actual params object that would be sent to the SDK.
  */
 import { describe, it } from "vitest";
@@ -125,7 +124,7 @@ describe("buildMessageParams — system field (#121 T6 / SC 1)", () => {
         !wireRoles.includes("system"),
         "system-role messages must never reach the SDK wire body"
       );
-      // user / assistant 项数量与顺序保持(打断的 system 项只进 transcript 展示层)。
+      // user / assistant entries keep their count and order (the interrupting system entry only reaches the transcript display layer).
       assert.deepEqual(wireRoles, ["user", "assistant", "user"]);
     });
 

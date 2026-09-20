@@ -1,20 +1,21 @@
 /**
- * Tests for `aci/tools/bash.ts` T6 首次域名批准流接线
- * (specs/network-egress-allowlist.md §首次域名批准流 + SC10)。
+ * Tests for `aci/tools/bash.ts` first-domain approval-flow wiring
+ * (specs/network-egress-allowlist.md).
  *
- * 钉住的不变式(spec §Boundaries 「首次域名批准流」 + §Failure paths 三行 +
- * §Input-contract classes「首次域名批准」行 + §三类信号可区分):
- *   - bash tool 装配 askApproval 时,egressPolicyFactory 返回的 policy 自动
- *     带上 `approvalGate`(由 bash 工厂闭包期构造,跨调用共享同一会话级集);
- *   - stub session 内 filter 调用 gate 后:批准 → 返回 true + 不记违例;
- *     拒绝 → 返回 false + 记 `denied-by-user` 违例;
- *     gate 缺席 → not-in-allowlist 记 `no-approval-inlet` 违例;
- *   - askApproval 抛异常 → fail-closed(等价于拒绝:记 `denied-by-user`);
- *   - 同 host 第二次调用 → 不再调 askApproval(gate 内部集合命中)。
+ * Pinned invariants:
+ *   - when the bash tool is assembled with askApproval, the policy returned by
+ *     egressPolicyFactory automatically carries an `approvalGate` (built in the
+ *     bash factory closure, shared across calls as one session-level set);
+ *   - driving the gate from the filter path: approve → true + no violation
+ *     recorded; deny → false + `denied-by-user` violation;
+ *     gate absent → not-in-allowlist host recorded as `no-approval-inlet`;
+ *   - askApproval throwing → fail-closed (equivalent to deny: `denied-by-user`);
+ *   - second call for the same host → askApproval not called again (gate's
+ *     in-session set hit).
  *
- * 本测试不真起中继/proxy —— 使用 `createEgressSessionFactory` 注入 stub
- * session,stub 内部把 filter 回调提取出来让我们驱动(filter 在 stub session
- * 构造期即被调用一次,暴露给测试断言),直接验 filter→gate→违例的链路。
+ * No real relay/proxy is started — a stub session injected via
+ * `createEgressSessionFactory` captures the policy at construction so the test
+ * drives filter → gate → violation directly.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -37,11 +38,9 @@ afterAll(() => {
 });
 
 /**
- * Stub session —— 暴露一个可在测试里手动触发的 filter 回调(不真起中继
- * / proxy / 路径守卫)。每次 invokeFilter 即模拟一次 CONNECT 请求。
- *
- * 把 policyInput 持有的 approvalGate 直接拉出来调,模拟「代理 filter 看到
- * host → 调 gate.askIfUnknown(host) → 决定放行/拒绝」。
+ * Stub session factory — captures the policy so tests can trigger its gate
+ * manually (no real relay / proxy / path guard started). Calling the captured
+ * gate mimics "proxy filter sees a host → gate.askIfUnknown(host) → allow/deny".
  */
 function makeDrivenEgressSessionFactory(): {
   factory: (opts: EgressSessionOptions) => Promise<EgressSession>;
@@ -69,7 +68,7 @@ function makeDrivenEgressSessionFactory(): {
   return { factory, captured };
 }
 
-/** 与既有 typed-failure 测试一致的 bash envelope 形状解析。 */
+/** Same bash envelope shape parsing as the existing typed-failure tests. */
 interface BashEnvelope {
   readonly output: string;
 }
@@ -84,9 +83,9 @@ function parseBashEnvelope(envelope: BashEnvelope): BashResult {
 
 describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
   it("egressPolicyFactory 缺席 + askApproval 在场 → handler 仍走 V1 路径(egress 不起)", async () => {
-    // askApproval 在场但 egressPolicyFactory 缺席 → bash 工厂不构造 gate
-    // (gate 只在 policy 路径上注入),V1 baseline:handler 走无 egress 缝路径,
-    // stub 不被调。
+    // askApproval present but egressPolicyFactory absent → the bash factory
+    // builds no gate (the gate is injected only on the policy path); V1
+    // baseline: the handler takes the no-egress path and the stub is never called.
     const { factory } = makeDrivenEgressSessionFactory();
     const tool = createBashTool(FIX_CWD, {
       askApproval: async () => true,
@@ -101,11 +100,12 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
   });
 
   it("askApproval 缺席 + egressPolicyFactory 返 policy → handler 不带 gate,filter 走 no-approval-inlet", async () => {
-    // 没注入 askApproval → approvalGate 在工厂闭包期为 undefined → policy
-    // 上不挂 gate。本测试通过 stub session + 直接读 captured.policy 验证。
+    // No askApproval injected → approvalGate is undefined in the factory
+    // closure, so the policy carries no gate. Verified via the stub session +
+    // captured.policy.
     const { factory, captured } = makeDrivenEgressSessionFactory();
     const tool = createBashTool(FIX_CWD, {
-      // 注意:故意不传 askApproval。
+      // deliberately omit askApproval.
       egressPolicyFactory: () => ({
         allowedDomains: ["github.com"],
         deniedDomains: [],
@@ -115,9 +115,10 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
     });
     await tool.handler({ command: "true" }, { conversationId: "conv-no-ask" });
     expect(captured.policy?.approvalGate).toBeUndefined();
-    // 此时若直接调 filter(not-in-allowlist 域) → 记 no-approval-inlet。
-    // filter 已绑在 stub session 内,这里只验 policy shape 即可,完整
-    // filter 行为由 session.ts 单测覆盖。
+    // Invoking the filter on a not-in-allowlist host would now record
+    // no-approval-inlet. The filter is bound inside the real session; here
+    // only the policy shape is verified — full filter behavior is covered by
+    // session.ts unit tests.
   });
 
   it("askApproval 在场 + egressPolicyFactory 返 policy → captured.policy 挂 gate + allowlistSource fallback = session", async () => {
@@ -128,7 +129,7 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
         allowedDomains: ["github.com"],
         deniedDomains: [],
         commandLabel: "test:gate-wired",
-        // 故意不传 allowlistSource —— bash 工厂应自动 fallback 到 "session"
+        // deliberately omit allowlistSource — the bash factory should fall back to "session"
       }),
       createEgressSessionFactory: factory as never,
     });
@@ -158,8 +159,8 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
   });
 
   it("跨调用同 host → gate 命中 allowed 集,不再调 askApproval", async () => {
-    // 真实创建 session(走 stub factory)—— 第二次调用仍命中同一 bash tool
-    // 实例下的同一 gate。
+    // Real session creation through the stub factory — the second call still
+    // hits the same gate under the same bash tool instance.
     const askApproval = vi.fn(async () => true);
     const { factory, captured } = makeDrivenEgressSessionFactory();
     const tool = createBashTool(FIX_CWD, {
@@ -171,24 +172,24 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
       }),
       createEgressSessionFactory: factory as never,
     });
-    // 第一次调用 —— 在 factory 内 captured.policy 注入,后续断言。
+    // First call — captured.policy is injected inside the factory for later assertions.
     await tool.handler({ command: "true" }, { conversationId: "c1" });
     const gate = captured.policy?.approvalGate;
     expect(gate).toBeDefined();
-    // 直接驱动 gate(模拟 filter 行为) — 两次不同 conversationId 但
-    // 同一 bash tool 实例共享同一 gate。
+    // Drive the gate directly (mimicking the filter): two different
+    // conversationIds, but the same bash tool instance shares one gate.
     const r1 = await gate!.askIfUnknown("github.com");
     expect(r1).toBe(true);
     expect(askApproval).toHaveBeenCalledTimes(1);
     const r2 = await gate!.askIfUnknown("github.com");
     expect(r2).toBe(true);
-    expect(askApproval).toHaveBeenCalledTimes(1); // 仍 1 —— gate 命中
+    expect(askApproval).toHaveBeenCalledTimes(1); // still 1 — gate set hit
     expect(gate!.allowedThisSession()).toContain("github.com");
   });
 
   it("askApproval 抛 → gate fail-closed,违例 reason `denied-by-user`", async () => {
-    // 通过 stub 直接驱动 filter-like 行为：调用 gate + sink.record，
-    // 模仿 session.ts:filter 拒绝路径的 sink.record 调用。
+    // Drive filter-like behavior directly through the gate, mirroring the
+    // sink.record call on session.ts's filter-denial path.
     const { factory, captured } = makeDrivenEgressSessionFactory();
     const tool = createBashTool(FIX_CWD, {
       askApproval: async () => {
@@ -212,9 +213,9 @@ describe("bash handler — T6 首次域名批准流接线 (SC10)", () => {
 
 describe("bash handler — egress typed failure 反映 denied-by-user", () => {
   it("filter 拒绝(denied-by-user) → handler 抛 typed failure + message 含 denied-by-user 文案", async () => {
-    // 不走 stub filter —— 直接 stub 出 sink 内有一条 denied-by-user 违例,
-    // 走 bash handler typed failure 管线。message 渲染对齐 violations.ts
-    // 的 `denied-by-user` case。
+    // Skip the stub filter — inject a sink already holding one denied-by-user
+    // violation and run the bash handler typed-failure pipeline. Message
+    // rendering aligns with the `denied-by-user` case in violations.ts.
     const stub = (async (
       opts: EgressSessionOptions
     ): Promise<EgressSession> => {
@@ -226,7 +227,7 @@ describe("bash handler — egress typed failure 反映 denied-by-user", () => {
         reason: "denied-by-user",
         command: "curl evil.example",
       });
-      // 假装 policyInput 已被 gate 注入(占位,本测试不消费 filter 行为)。
+      // policyInput placeholder — this test does not consume filter behavior.
       void opts;
       return Object.freeze({
         id: "stub",

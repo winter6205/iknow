@@ -1,9 +1,10 @@
 /**
- * ADR-0092 — 主会话围栏 tmp(SC2 / SC3)。
+ * ADR-0092 — main-session fence tmp.
  *
- * 会话 tmp 保持宿主路径 `<sessionFolder>/fence-tmp/`(方向名不动),但**不再**
- * bind 到 guest Linux `/tmp`;`$TMPDIR` 必须等于该宿主路径。写盘落在宿主,
- * 不进 taskRoot。
+ * The session tmp keeps its host path `<sessionFolder>/fence-tmp/` (the
+ * direction name is unchanged) but is **no longer** bound to the guest Linux
+ * `/tmp`; `$TMPDIR` must equal that host path. Writes land on the host, never
+ * inside taskRoot.
  */
 
 import assert from "node:assert/strict";

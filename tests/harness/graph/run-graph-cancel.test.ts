@@ -1,16 +1,16 @@
 /**
- * live-graph-phase1 T3 — 取消保留已 done（spec SC8）。
+ * Cancellation preserves already-done nodes.
  *
- * 走真 `SubAgentManager`（fake spawn + 假 child，与 run-graph-residual.test.ts
- * 同模式）。覆盖：
+ * Uses the real `SubAgentManager` (fake spawn + fake child, same pattern as
+ * run-graph-residual.test.ts). Covers:
  *
- *   - SC8：a→b 链在 a done 后 abort → a 冻结（含产出，`outputOf` 可读）、
- *     b 不冻结（abort 的 failed 只是取消症状，整段可再交）；handler typed
- *     取消拒绝，不把半图当成功 condense；随后只交 b（deps: [a]）→ b 真
- *     spawn、读到 a 的账本产出、成功。
- *   - SC8 边界：signal 在 spawn 前已 aborted → 零冻结、零 spawn、typed 取消。
- *   - SC6 回归钉：非取消的正常 settle 里 failed 仍冻结（T3 只改 abort 路径，
- *     正常失败冻结语义不变）。
+ *   - a→b chain aborted after a is done → a frozen (with output, `outputOf`
+ *     readable), b not frozen (the abort-induced failed is only a cancel
+ *     symptom; the whole segment can be resubmitted); the handler rejects with
+ *     a typed cancellation and never condenses a half graph as success; then
+ *     submitting only b (deps: [a]) → b really spawns, reads a's ledger output, succeeds.
+ *   - boundary: signal already aborted before spawn → zero freezes, zero spawns, typed cancel.
+ *   - regression pin: in non-cancel normal settles, failed still freezes (only the abort path changed; normal failure-freeze semantics unchanged).
  */
 
 import { describe, expect, it } from "vitest";
@@ -28,7 +28,7 @@ import {
 
 const CONV = "conv-t3";
 
-// ── SC8：a done 后 abort → a 冻结、b 不冻、b 可再交 ───────────────────
+// ── abort after a is done → a frozen, b unfrozen, b resubmittable ───────
 
 describe("run_graph 取消保留已 done：SC8", () => {
   it("a→b 链 abort：a 冻结含产出、b 不冻；typed 取消拒绝；随后只交 b 真 spawn 并接到 a 的产出", async () => {
@@ -40,10 +40,11 @@ describe("run_graph 取消保留已 done：SC8", () => {
       isEnabled: () => true,
     });
     const controller = new AbortController();
-    // 确定性锚：scheduler 的 onNode(a, done) 触发的 graph_progress 事件是
-    // 「a 已被 runGraph 记为 done」的 ground truth —— abort 必须等它，否则
-    // waitFor 的 25ms 轮询间隙里 abort 会把 a 也打成 failed（取消症状），
-    // 测的就不是「a 真 done 后取消」了。
+    // Determinism anchor: the graph_progress event fired by the scheduler's
+    // onNode(a, done) is ground truth for "runGraph has recorded a as done" —
+    // abort must wait for it, otherwise during waitFor's 25ms polling gap the
+    // abort would also mark a failed (cancel symptom) and the test would no
+    // longer cover "cancel after a truly done".
     const events: Array<{
       type: string;
       snapshot?: { nodes: Array<{ id: string; status: string }> };
@@ -83,30 +84,33 @@ describe("run_graph 取消保留已 done：SC8", () => {
     await waitForChildren(children, 1);
     settle(children[0]!, ok("A-OUTPUT"));
     await doneA;
-    // a 已被 scheduler 记为 done、b 的 wave 还没开 —— 此刻取消。b 的结果
-    // 无论走 spawn 前预检查（failed）还是 waitFor abort，都不能冻成 done。
+    // a is recorded done by the scheduler, b's wave hasn't started — cancel now.
+    // b's outcome, whether via the pre-spawn check (failed) or waitFor abort,
+    // must not freeze as done.
     controller.abort();
 
-    // handler typed 取消拒绝 —— 半图不当成功 condense（ADR-0065 / SC8）。
+    // Handler typed cancellation — a half graph is never condensed as success.
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/cancel/i);
 
-    // SC8：已 done 的 a 冻结且产出可读；b 未冻结。
+    // The done node a is frozen with readable output; b is not frozen.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.isFrozen("a")).toBe(true);
     expect(ledger.statusOf("a")).toBe("done");
     expect(ledger.outputOf("a")).toBe("A-OUTPUT");
     expect(ledger.isFrozen("b")).toBe(false);
 
-    // 剩余子图：只交 b（deps: [a]，a 已 done 从账本满足）→ b 真 spawn、
-    // task 文本接到 a 的产出 —— 证明 b 可再交且 a 的产出沿边流动。
+    // Residual subgraph: submit only b (deps: [a]; a's done is satisfied from the
+    // ledger) → b really spawns and its task text carries a's output — proving b
+    // is resubmittable and a's output flows along the edge.
     const childrenBefore = children.length;
     const second = tool.handler(
       { nodes: [{ id: "b", task: "tb", deps: ["a"] }] },
       { conversationId: CONV }
     );
     await waitForChildren(children, childrenBefore + 1);
-    // b 是本段唯一新 spawn：a 不重演（账本冻结），b 不因 abort 被误冻。
+    // b is the only new spawn in this segment: a never replays (ledger-frozen),
+    // and b was not mis-frozen by the abort.
     expect(children).toHaveLength(childrenBefore + 1);
     const bPayload = children[childrenBefore]!.written.join("");
     expect(bPayload).toContain('"task":"tb');
@@ -131,7 +135,7 @@ describe("run_graph 取消保留已 done：SC8", () => {
       isEnabled: () => true,
     });
     const controller = new AbortController();
-    controller.abort(); // 进 handler 前就已取消
+    controller.abort(); // already cancelled before the handler runs
 
     await expect(
       tool.handler(
@@ -157,14 +161,14 @@ describe("run_graph 取消保留已 done：SC8", () => {
     ).rejects.toThrow(/cancel/i);
 
     expect(children).toHaveLength(0);
-    // 账本已建（校验通过后 ensure），但没有 id 被冻结 —— 全部可再交。
+    // Ledger exists (ensure ran after validation passed) but no id is frozen — all resubmittable.
     expect(host.ledgerFor(CONV).exists()).toBe(true);
     expect(host.ledgerFor(CONV).frozenIds()).toEqual([]);
     await manager.shutdown();
   });
 });
 
-// ── phase2 C5：失败边图上的调用侧取消 ─────────────────────────────────
+// ── Caller-side cancellation over failure-edge graphs ─────────────────
 
 describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
   it("self-onFailure 第 2 次再进入 settle ok 之后 abort：typed cancel 拒、a 冻结 done（末次结局胜出）", async () => {
@@ -176,8 +180,9 @@ describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
       isEnabled: () => true,
     });
     const controller = new AbortController();
-    // onNode 回调不可直接拿（handler 内部接 progress）—— 用 graph_progress
-    // 事件流作「a 第二次进入已 settle ok」的锚（与上方 SC8 测试同模式）。
+    // The onNode callback is not directly observable (the handler wires it to
+    // progress internally) — use the graph_progress event stream as the anchor
+    // for "a's second entry has settled ok" (same pattern as the test above).
     const events: Array<{
       type: string;
       snapshot?: { nodes: Array<{ id: string; status: string }> };
@@ -209,21 +214,22 @@ describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
         },
       }
     );
-    // 首进 failed → self 失败边 kick a(2)
+    // First entry fails → the self failure edge kicks a(2).
     await waitForChildren(children, 1);
     settle(children[0]!, fail("crashed"));
-    // a(2) settle ok —— graph_progress 事件里 a 出现 done（onNode 末次
-    // 触发即此）。abort 打在 a(2) 已落定之后。
+    // a(2) settles ok — "done" for a shows up in graph_progress (the last
+    // onNode fire). The abort lands only after a(2) has settled.
     await waitForChildren(children, 2);
     settle(children[1]!, ok("A-RETRY"));
     await doneA;
     controller.abort();
 
-    // handler typed 取消拒绝（abort 后 no-new-entries 使调度收敛）。
+    // The handler rejects with a typed cancel (after abort, no-new-entries
+    // makes the scheduler converge).
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/cancel/i);
-    // cancel 规则「仅冻 done」：a 的末次结局 done（末次覆盖前次）→
-    // 冻结 done、产出可读 —— 取消不吞真结局。
+    // Cancel rule "freeze done only": a's last outcome is done (last wins) →
+    // done is frozen and readable — cancellation never swallows a real result.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.statusOf("a")).toBe("done");
     expect(ledger.outputOf("a")).toBe("A-RETRY");
@@ -244,18 +250,19 @@ describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
       { nodes: [{ id: "a", task: "ta", onFailure: "a" }] },
       { signal: controller.signal, conversationId: CONV }
     );
-    // 首进 ok（真 done，冻结候选）
+    // First entry fails (crash).
     await waitForChildren(children, 1);
     settle(children[0]!, fail("crashed"));
-    // self 失败边 kick a(2)（再进入波）；在 a(2) 落定**之前** abort。
+    // The self failure edge kicks a(2) (re-entry wave); abort lands **before** a(2) settles.
     await waitForChildren(children, 2);
     controller.abort();
-    // a(2) 仍按其真实结局落定 —— settle failed（取消症状 failed）。
+    // a(2) still settles by its real outcome — failed (the cancel symptom).
     settle(children[1]!, fail("still-crashed"));
 
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/cancel/i);
-    // cancel 规则：abort 症状 failed 不冻结 —— a 未冻，下一段可再交。
+    // Cancel rule: an abort-symptom "failed" is never frozen — a stays
+    // unfrozen and may be resubmitted in the next segment.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.isFrozen("a")).toBe(false);
     await manager.shutdown();

@@ -1,22 +1,27 @@
 /**
- * live-graph-phase1 T2 — 剩余子图合并 + 按 id 冻结（spec SC5–SC7 / ADR-0050）。
+ * Residual-subgraph merge + per-id freezing (ADR-0050).
  *
- * 走真 `SubAgentManager`（fake spawn + 假 child，与 run-graph-ledger.test.ts
- * 同模式 —— 不 mock manager，否则要验的「真 spawn / 零 spawn / 产出沿边流动」
- * 就被 mock 掉）。覆盖：
+ * Uses a real `SubAgentManager` (fake spawn + fake child, same pattern as
+ * run-graph-ledger.test.ts — mocking the manager would mock away exactly
+ * "real spawn / zero spawns / output flowing along edges"). Coverage:
  *
- *   - SC5：A done 后第二段只交 B（deps: [A]，A 节点省略）→ host 不重跑 A、
- *     B 真 spawn 且 task 文本接到 A 的账本产出；混合提交（dep 同时指向账本
- *     frozen-done 与本次新节点）两边产出都接到；再交 `id: A` → typed 拒、零 spawn。
- *   - SC6：failed id 再交 → typed 拒、零 spawn（整段提交一起拒，连带同段
- *     新节点也不 spawn）；dep 指向 frozen-failed id → typed 拒（阶段 1 失败
- *     再试 = 新 id，spec ASSUMPTIONS #3）。
- *   - SC7：因上游失败被 skipped 的 id 出现在后续剩余子图 → 真 spawn，
- *     其下游还能接到它的产出。
- *   - ADR-0066 回归（spec SC12）：dep 指向未知且未冻结的 id → 仍按
- *     unknown-dep typed 拒、零 spawn（合并语义不得吞掉未知 id）。
- *   - ADR-0065 串行契约：`aci.isConcurrencySafe === false` 钉住 —— 同一会话
- *     第二段 run_graph 由 ACI executor 的单例波次保证等第一段 settle。
+ *   - After A is done, a second segment submits only B (deps: [A], A
+ *     omitted) → the host does not rerun A, B really spawns and its task
+ *     text receives A's ledger output; mixed submissions (a dep pointing at
+ *     both a ledger frozen-done node and a new node in this segment) get
+ *     both outputs; resubmitting `id: A` → typed rejection, zero spawns.
+ *   - Failed ids also freeze: resubmitting a failed id → typed rejection,
+ *     zero spawns (the whole segment is rejected, so new nodes in it never
+ *     spawn); a dep on a frozen-failed id → typed rejection (retry after
+ *     failure requires a new id).
+ *   - An id skipped by upstream failure may re-spawn in a later residual
+ *     subgraph, and its downstream still receives its output.
+ *   - ADR-0066 regression: a dep on an unknown, unfrozen id is still
+ *     rejected as unknown-dep with zero spawns (merge semantics must never
+ *     swallow unknown ids).
+ *   - ADR-0065 serialisation contract: `aci.isConcurrencySafe === false` is
+ *     pinned — the ACI executor's single-flight wave makes a second
+ *     run_graph in the same session wait for the first to settle.
  */
 
 import { describe, expect, it } from "vitest";
@@ -35,7 +40,7 @@ import {
 
 const CONV = "conv-t2";
 
-// ── SC5：剩余子图 —— A done 后只交 B ──────────────────────────────────
+// ── Residual subgraph: submit B after A is done ────────────────────────
 
 describe("run_graph 剩余子图合并：SC5", () => {
   it("A done 后只交 B（deps: [A]，A 省略）→ A 不重跑、B 真 spawn 且 task 接到 A 的账本产出", async () => {
@@ -47,7 +52,7 @@ describe("run_graph 剩余子图合并：SC5", () => {
       isEnabled: () => true,
     });
 
-    // 第一段：A done，产出 "A-OUTPUT"
+    // Segment 1: A done with output "A-OUTPUT".
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -59,24 +64,26 @@ describe("run_graph 剩余子图合并：SC5", () => {
       { id: "a", status: "done", output: "A-OUTPUT" },
     ]);
 
-    // 第二段：只交 B，deps 指向本次提交里没有的 A —— 必须被账本满足。
-    // manager / host 都延续（同一会话第二段），children 数组跨段累计。
+    // Segment 2: only B, whose deps name A — absent from this submission, so
+    // the ledger must satisfy it. manager / host persist across segments of one
+    // conversation; the children array accumulates.
     const childrenBefore = children.length;
     const second = tool.handler(
       { nodes: [{ id: "b", task: "tb", deps: ["a"] }] },
       { conversationId: CONV }
     );
     await waitForChildren(children, childrenBefore + 1);
-    // host 没有为 A 起新 spawn：新增的 1 个 child 是 B，不是 A 的重演
+    // No new spawn for A: the one extra child is B, not A rerun.
     expect(children).toHaveLength(childrenBefore + 1);
     const bPayload = children[childrenBefore]!.written.join("");
-    // 数据沿边流动的活图版：B 的 task 里必须出现 A 的账本产出
+    // Output flows along edges in the live-graph sense: A's ledger output must appear in B's task.
     expect(bPayload).toContain('"task":"tb');
     expect(bPayload).toContain("A-OUTPUT");
     settle(children[childrenBefore]!, ok("B-OUT"));
 
     const secondOut = parse(await second);
-    // 浓缩只含本次提交的节点；B 的剩余 deps 在合并层被剔除 → wave 0
+    // The condensed result covers only this submission's nodes; B's residual
+    // deps are dropped at merge time → wave 0.
     expect(secondOut.waveCount).toBe(1);
     expect(secondOut.nodes).toEqual([
       { id: "b", status: "done", output: "B-OUT" },
@@ -96,7 +103,7 @@ describe("run_graph 剩余子图合并：SC5", () => {
       isEnabled: () => true,
     });
 
-    // 第一段：A done
+    // Segment 1: A done.
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -105,7 +112,7 @@ describe("run_graph 剩余子图合并：SC5", () => {
     settle(children[0]!, ok("A-OUTPUT"));
     await first;
 
-    // 第二段：c（根）+ b（deps: [a, c]）—— a 来自账本，c 来自本次提交
+    // Segment 2: c (root) + b (deps: [a, c]) — a comes from the ledger, c from this submission.
     const second = tool.handler(
       {
         nodes: [
@@ -115,11 +122,11 @@ describe("run_graph 剩余子图合并：SC5", () => {
       },
       { conversationId: CONV }
     );
-    // wave 0 只有 c（b 的剩余 deps 是 [c]，必须等 c）
+    // wave 0 is c only (b's remaining dep is [c], so b must wait).
     await waitForChildren(children, 2);
     expect(children).toHaveLength(2);
     settle(children[1]!, ok("C-OUT"));
-    // wave 1 跑 b
+    // wave 1 runs b.
     await waitForChildren(children, 3);
     const bPayload = children[2]!.written.join("");
     expect(bPayload).toContain("A-OUTPUT");
@@ -170,7 +177,7 @@ describe("run_graph 剩余子图合并：SC5", () => {
   });
 });
 
-// ── SC6：失败也冻 ─────────────────────────────────────────────────────
+// ── Failed ids also freeze ─────────────────────────────────────────────
 
 describe("run_graph 剩余子图合并：SC6 失败也冻", () => {
   it("failed id 再交（与同段新节点一起）→ 整段 typed 拒绝、零 spawn", async () => {
@@ -182,7 +189,7 @@ describe("run_graph 剩余子图合并：SC6 失败也冻", () => {
       isEnabled: () => true,
     });
 
-    // 第一段：boom failed（冻结）
+    // Segment 1: boom fails (and freezes).
     const first = tool.handler(
       { nodes: [{ id: "boom", task: "will fail" }] },
       { conversationId: CONV }
@@ -192,7 +199,8 @@ describe("run_graph 剩余子图合并：SC6 失败也冻", () => {
     await first;
     expect(host.ledgerFor(CONV).isFrozen("boom")).toBe(true);
 
-    // 第二段：boom 重试 + 无辜新节点 fresh 同段提交 → 整段拒（零 spawn，fresh 也不起）
+    // Segment 2: boom retry plus innocent new node "fresh" in one submission →
+    // the whole segment is rejected (zero spawns; "fresh" never launches either).
     const childrenBefore = children.length;
     await expect(
       tool.handler(
@@ -255,7 +263,7 @@ describe("run_graph 剩余子图合并：SC6 失败也冻", () => {
   });
 });
 
-// ── SC7：skipped 未冻 ─────────────────────────────────────────────────
+// ── Skipped ids stay unfrozen ──────────────────────────────────────────
 
 describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
   it("skipped id 出现在后续剩余子图 → 真 spawn，其下游接到它的产出", async () => {
@@ -267,7 +275,7 @@ describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
       isEnabled: () => true,
     });
 
-    // 第一段：boom failed → after（deps: [boom]）被 skipped（不冻结）
+    // Segment 1: boom fails → after (deps: [boom]) is skipped (not frozen).
     const first = tool.handler(
       {
         nodes: [
@@ -287,7 +295,7 @@ describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
     });
     expect(host.ledgerFor(CONV).isFrozen("after")).toBe(false);
 
-    // 第二段：after（skipped 未冻，可再交）+ tail（deps: [after]）→ 都真 spawn
+    // Segment 2: after (skipped, unfrozen → resubmittable) + tail (deps: [after]) → both really spawn.
     const second = tool.handler(
       {
         nodes: [
@@ -298,7 +306,7 @@ describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
       { conversationId: CONV }
     );
     await waitForChildren(children, 2);
-    // 第一段的 1 个 child 是 boom；本段 wave 0 是 after（无剩余依赖）
+    // Segment 1's single child was boom; this segment's wave 0 is after (no remaining deps).
     expect(children).toHaveLength(2);
     settle(children[1]!, ok("AFTER-OUT"));
     await waitForChildren(children, 3);
@@ -318,7 +326,7 @@ describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
   });
 });
 
-// ── ADR-0066 回归 + 串行契约 ──────────────────────────────────────────
+// ── ADR-0066 regression + serialisation contract ───────────────────────
 
 describe("run_graph 剩余子图合并：校验边界不因合并放松", () => {
   it("dep 指向未知且未冻结的 id → 仍 unknown-dep typed 拒、零 spawn（ADR-0066 / spec SC12）", async () => {
@@ -330,7 +338,7 @@ describe("run_graph 剩余子图合并：校验边界不因合并放松", () => 
       isEnabled: () => true,
     });
 
-    // 先建账本（a done）
+    // Create the ledger first (a done).
     const first = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV }
@@ -339,7 +347,8 @@ describe("run_graph 剩余子图合并：校验边界不因合并放松", () => 
     settle(children[0]!, ok("A"));
     await first;
 
-    // 活图已存在后再交 ghost 依赖 —— 合并语义不得把它当「账本满足」
+    // With a live graph already present, resubmit a ghost dep — merge
+    // semantics must never treat it as "satisfied by the ledger".
     const childrenBefore = children.length;
     await expect(
       tool.handler(

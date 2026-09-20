@@ -1,25 +1,30 @@
 /**
- * ADR-0081 — 每个 run() 开头贴一次短现势(取代 ADR-0080 每跳)。
+ * ADR-0081 — post the short presence line once per run() (replacing the old per-hop design).
  *
- * 钉死不变式:
- *   SC1 holder 已 on → 一次 run / 两 hop(两次同 deps 的 step(),或
- *        多 hop run)→ 仅第一 hop 贴一句短 `<graph_mode>`(含 run_graph
- *        + spawn 指引);第二 hop 不再追加。短句短于长 ON。
- *   SC2 holder off / 从未开过 → 零短现势。
- *   SC3 ask/worker(seam 缺席)→ 零短现势、零长翻转句。
- *   SC4 同 round 中途翻 holder 不出现新短现势;下一次 run() 才按新值。
- *   SC5 同 run 已贴长 ON → 该 hop 不叠短句,同 run 后续 hop 也不贴;
- *        新 run()(latch 在 run() 开头重置)在 lastSeen=true 时可贴一条短。
- *   SC6 短句不出现在 system 字符串、不进 <agent_status> 栏正文。
- *   SC7 PromptTooLong compact 重试是同一 run → 不追加第二句短现势
- *        (0081:无 compact 专用再注入)。仍必须发生 retry。
- *   SC8 关 overlay 时 tools 面仍列 run_graph(回归即可,本文件复检一份)。
+ * Pinned invariants:
+ *   - holder already on → one run / two hops (two step() calls sharing deps,
+ *     or a multi-hop run) → only the first hop posts one short
+ *     `<graph_mode>` line (with run_graph + spawn guidance); the second hop
+ *     adds nothing. The short line is shorter than the long ON notice.
+ *   - holder off / graph never opened → zero short presence lines.
+ *   - ask/worker (seam absent) → zero presence, zero long flip notices.
+ *   - flipping the holder mid-round adds no new presence line; only the next
+ *     run() sees the new value.
+ *   - long ON notice already posted in this run → that hop does not stack the
+ *     short line, nor do later hops in the same run; a fresh run() (the latch
+ *     resets at run() entry) may post one short line when lastSeen=true.
+ *   - the short line never appears in the system string, nor in the
+ *     <agent_status> bar body.
+ *   - PromptTooLong compact retry is the same run → no second presence line
+ *     (no compact-specific re-injection); the retry must still happen.
+ *   - with the overlay off, the tools list still includes run_graph (regression check).
  *
- * 两次连续 step() 共用同一 deps = 同一 run() 的两 hop
- * (实现会把 run 作用域 latch 放在 deps.graphModePresence,run() 开头重置)。
+ * Two consecutive step() calls sharing one deps = two hops of the same run()
+ * (the implementation keeps the run-scoped latch on deps.graphModePresence and
+ * resets it at run() entry).
  *
- * 形态镜像 `tests/harness/loop-engine/graph-mode-reconnect.test.ts`:
- * stub adapter + 空 executor + 空 registry。
+ * Shape mirrors `tests/harness/loop-engine/graph-mode-reconnect.test.ts`:
+ * stub adapter + empty executor + empty registry.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -56,7 +61,7 @@ function makeAssistantMsg(text: string): AnthropicNativeMessage {
   return { role: "assistant", content: [{ type: "text", text }] };
 }
 
-/** 纯文本 stub adapter:每次 step 返回一条 assistant 文本(无工具调用)。 */
+/** Plain-text stub adapter: each step returns one assistant text (no tool calls). */
 function makeTextAdapter(responses: string[]): LoopAdapter & {
   steps: Array<{ messages: ReadonlyArray<AnthropicNativeMessage> }>;
 } {
@@ -84,7 +89,7 @@ function makeTextAdapter(responses: string[]): LoopAdapter & {
   };
 }
 
-/** 空 executor + registry(纯文本路径不触工具)。 */
+/** Empty executor + registry (the text-only path never touches tools). */
 const emptyExecutor: Executor = Object.freeze({
   executeAll: async () => [],
 });
@@ -93,7 +98,7 @@ const emptyRegistry: Registry = Object.freeze({
   get: () => undefined,
 });
 
-/** 单布尔 graph mode holder。 */
+/** Single-boolean graph mode holder. */
 function makeGraphModeHolder(): {
   ctx: GraphModeContext;
   set: (enabled: boolean) => void;
@@ -105,7 +110,7 @@ function makeGraphModeHolder(): {
   return { ctx, set: (v: boolean) => (enabled = v) };
 }
 
-/** 收 role=user 的所有消息文本。 */
+/** Collect the text of all role=user messages. */
 function collectUserTexts(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string[] {
@@ -119,14 +124,14 @@ function collectUserTexts(
   return out;
 }
 
-/** 收含 `<graph_mode>` 标记的 user 消息文本。 */
+/** Collect user message texts containing the `<graph_mode>` marker. */
 function presenceHits(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string[] {
   return collectUserTexts(messages).filter((t) => t.includes("<graph_mode>"));
 }
 
-/** 同时装 graphModeChange 与 graphModePresence 的标准 seam。 */
+/** Standard deps wiring both graphModeChange and graphModePresence seams. */
 function buildDeps(opts: {
   adapter: LoopAdapter;
   assembly: ReturnType<typeof createGraphAssembly>;
@@ -153,7 +158,7 @@ function buildDeps(opts: {
 }
 
 // =========================================================================
-// SC2 / SC3 — 关着 / 缺席 → 零短现势
+// Off / never opened / seam absent → zero short presence lines
 // =========================================================================
 
 describe("loop engine ADR-0081 SC2: holder off → 零短现势", () => {
@@ -168,7 +173,7 @@ describe("loop engine ADR-0081 SC2: holder off → 零短现势", () => {
 
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
-    // 零 `<graph_mode>` user 消息。
+    // Zero `<graph_mode>` user messages.
     assert.equal(presenceHits(result.messages).length, 0);
   });
 
@@ -183,7 +188,7 @@ describe("loop engine ADR-0081 SC2: holder off → 零短现势", () => {
 
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
-    // 只有用户首条 Q,没有任何 graph_mode 文本。
+    // Only the user's initial Q; no graph_mode text at all.
     const userTexts = collectUserTexts(result.messages);
     assert.equal(userTexts.length, 1);
     assert.equal(userTexts[0], "Q");
@@ -198,7 +203,7 @@ describe("loop engine ADR-0081 SC3: ask/worker(seam 缺席)→ 零短现势、�
       executor: emptyExecutor,
       registry: emptyRegistry,
       maxTurns: 5,
-      // graphModeChange / graphModePresence 全缺席。
+      // graphModeChange / graphModePresence both absent.
     };
 
     const { result } = await run("Q", deps);
@@ -207,9 +212,10 @@ describe("loop engine ADR-0081 SC3: ask/worker(seam 缺席)→ 零短现势、�
   });
 
   it("graphModePresence 在场但 graphModeChange 缺席(装配错配)→ 保守零注入", async () => {
-    // build-engine 永远同 gate 同源接线两缝;presence 在场 / change 缺席的
-    // 错配只能来自装配 bug。此时 presence 缝保守零注入(overlay 缺席 =
-    // 零注入姿态),而不是脱离 change 的翻转语义独立生效。
+    // build-engine always wires the two seams from one gated source, so a
+    // mismatch (presence present / change absent) can only come from an
+    // assembly bug. There the presence seam stays conservative: overlay
+    // absent = zero-injection posture, never flip semantics acting alone.
     const holder = makeGraphModeHolder();
     const assembly = createGraphAssembly(holder.ctx);
     holder.set(true);
@@ -220,34 +226,34 @@ describe("loop engine ADR-0081 SC3: ask/worker(seam 缺席)→ 零短现势、�
       executor: emptyExecutor,
       registry: emptyRegistry,
       maxTurns: 5,
-      // 仅装 presence 不装 change —— 装配错配,必须零追加而非 panic。
+      // Only presence wired, change absent — assembly mismatch; must add nothing instead of panicking.
       graphModePresence: { assembly, appendedThisRun: { value: false } },
     };
 
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
-    // 真零追加:holder on 也不贴短句;除首条 Q 外无任何 user 文本。
+    // Truly zero additions: holder on still posts nothing; no user text beyond the initial Q.
     assert.equal(presenceHits(result.messages).length, 0);
     assert.deepEqual(collectUserTexts(result.messages), ["Q"]);
   });
 });
 
 // =========================================================================
-// SC1 — 开着:一次 run / 两 hop → 仅第一 hop 一条短 `<graph_mode>`
+// Holder on: one run / two hops → exactly one short `<graph_mode>` at the first hop
 // =========================================================================
 
 describe("loop engine ADR-0081 SC1: holder on 一 run 两 hop → 恰好一条短现势", () => {
   it("用同 deps 连续两次 step() → 仅第一 hop 贴短 <graph_mode>", async () => {
     const holder = makeGraphModeHolder();
-    holder.set(true); // 初始即 on —— createGraphAssembly 内部 beginRound 拍快照 = true
+    holder.set(true); // on from the start — createGraphAssembly's internal beginRound snapshots true
     const assembly = createGraphAssembly(holder.ctx);
     const lastSeenEnabled: { value: boolean | undefined } = {
-      value: true, // 已观察过 on,跳过初值观察 → step1 就该贴短现势
+      value: true, // on already observed → skip initial-value observation; step1 should post presence
     };
     const adapter = makeTextAdapter(["a1", "a2", "a3"]);
     const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
 
-    // 同 deps 两次 step = 同一 run 的两 hop;0081 只在第一 hop 贴一次。
+    // Two steps on the same deps = two hops of one run; posted only at the first hop.
     let state: LoopState = { messages: [makeUserMsg("Q")], turnCount: 0 };
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
@@ -257,20 +263,20 @@ describe("loop engine ADR-0081 SC1: holder on 一 run 两 hop → 恰好一条�
     assert.equal(t2.kind, "stop");
     const s2 = t2 as { kind: "stop"; finalState: LoopState };
 
-    // step1 末尾一条短现势;step2 不再追加(累计仍 1)。
+    // One presence line ends step1; step2 adds nothing (cumulative still 1).
     const hits1 = presenceHits(s1.finalState.messages);
     const hits2 = presenceHits(s2.finalState.messages);
     assert.equal(hits1.length, 1, "step1 末尾贴一条短现势");
     assert.equal(hits2.length, 1, "同 run 第二 hop 不得再贴短现势");
 
-    // 内容形态:静态文本,字节级恒定。
+    // Content shape: static text, byte-constant.
     for (const t of hits2) {
       assert.equal(t, IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION);
       assert.ok(t.includes("<graph_mode>"));
       assert.ok(t.includes("run_graph"));
       assert.ok(t.includes("spawn_subagent"));
     }
-    // SC1:短句短于长 ON。
+    // The presence line must be shorter than the long ON notice.
     assert.ok(
       IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.length <
         IKNOW_GRAPH_MODE_ON_NOTIFICATION.length,
@@ -310,7 +316,7 @@ describe("loop engine ADR-0081 SC1: holder on 一 run 两 hop → 恰好一条�
     holder.set(true);
     const assembly = createGraphAssembly(holder.ctx);
     const lastSeenEnabled: { value: boolean | undefined } = {
-      value: true, // 已观察过 → step1 直接贴,无需走初值路径
+      value: true, // already observed → step1 posts directly, no initial-value path
     };
     const adapter = makeTextAdapter(["a1", "a2"]);
     let seenSystem: string | undefined;
@@ -331,20 +337,20 @@ describe("loop engine ADR-0081 SC1: holder on 一 run 两 hop → 恰好一条�
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
     const s1 = t1 as { kind: "stop"; finalState: LoopState };
-    // SC6:system 不含短句。
+    // The system string must not contain the short line.
     assert.equal(seenSystem?.includes("<graph_mode>"), false);
     assert.equal(
       seenSystem?.includes(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION),
       false
     );
-    // 短句仍是独立 user 消息。
+    // The short line is still a standalone user message.
     const hits = presenceHits(s1.finalState.messages);
     assert.equal(hits.length, 1, "单 hop 恰好一条短现势");
   });
 });
 
 // =========================================================================
-// SC4 — 同 round 中途翻 holder 不出现新短现势;下一 run() 才按新值
+// Flipping the holder mid-round adds nothing; only the next run() sees the new value
 // =========================================================================
 
 describe("loop engine ADR-0081 SC4: 同 round 中途翻 holder 不出现新短现势", () => {
@@ -357,29 +363,29 @@ describe("loop engine ADR-0081 SC4: 同 round 中途翻 holder 不出现新短�
     const adapter = makeTextAdapter(["a1", "a2", "a3"]);
     const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
 
-    // 用 step API 逐步驱动:
-    // step1 期间 holder.set(true)(模拟 Shift+Tab 翻键),
-    // 但**不**调 beginRound —— 同 round 冻结旧快照(assembly.enabled() === false)。
+    // Drive step-by-step via the step API:
+    // during step1 holder.set(true) (simulating a Shift+Tab toggle),
+    // but **no** beginRound — the round keeps its frozen old snapshot (assembly.enabled() === false).
     let state: LoopState = { messages: [makeUserMsg("Q")], turnCount: 0 };
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
     const s1 = t1 as { kind: "stop"; finalState: LoopState };
-    // step1:零短现势(holder 初始关,即便中途翻也不改 round 快照)。
+    // step1: zero presence lines (holder starts off; a mid-round flip never changes the round snapshot).
     assert.equal(presenceHits(s1.finalState.messages).length, 0);
 
-    // 同 round:翻 holder,但不 beginRound → enabled() 仍是 false。
+    // Same round: flip holder without beginRound → enabled() stays false.
     holder.set(true);
     assert.equal(assembly.enabled(), false);
 
-    // step2 同样零短现势 —— enabled() 仍为 false。
+    // step2 likewise zero presence — enabled() still false.
     state = s1.finalState;
     const t2 = await step(state, deps);
     const s2 = t2 as { kind: "stop"; finalState: LoopState };
     assert.equal(presenceHits(s2.finalState.messages).length, 0);
-    // 重要:lastSeenEnabled 仍为 false(step1 只观察不写翻转)。
+    // Key: lastSeenEnabled stays false (step1 only observes, never writes a flip).
     assert.equal(lastSeenEnabled.value, false);
 
-    // 下一轮(beginRound 拍新快照)→ enabled() === true,后续 step 才出现短现势。
+    // Next round (beginRound takes a fresh snapshot) → enabled() === true; only later steps see presence.
     assembly.beginRound();
     state = s2.finalState;
     const t3 = await step(state, deps);
@@ -392,7 +398,7 @@ describe("loop engine ADR-0081 SC4: 同 round 中途翻 holder 不出现新短�
 });
 
 // =========================================================================
-// SC5 — 同一拍长 ON 与短现势不并存
+// The long ON notice and the short presence line never coexist in one beat
 // =========================================================================
 
 describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势", () => {
@@ -405,7 +411,7 @@ describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势
     const adapter = makeTextAdapter(["a1", "a2", "a3"]);
     const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
 
-    // step1:初值观察,零追加。
+    // step1: initial-value observation, zero additions.
     let state: LoopState = { messages: [makeUserMsg("Q")], turnCount: 0 };
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
@@ -413,12 +419,12 @@ describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势
     assert.equal(presenceHits(s1.finalState.messages).length, 0);
     assert.equal(lastSeenEnabled.value, false);
 
-    // 翻 on + beginRound —— 同 round 两次模型调用之间翻键,
-    // 这是「当拍长 ON」的发生条件(assembly.enabled() 从 false→true)。
+    // Flip on + beginRound — toggling between two model calls of one round
+    // is the condition for "this beat's long ON" (assembly.enabled() goes false→true).
     holder.set(true);
     assembly.beginRound();
 
-    // step2:翻检测 → 长 ON 写入 + 短现势不叠(SC5)。
+    // step2: flip detected → long ON written; short presence is NOT stacked.
     state = s1.finalState;
     const t2 = await step(state, deps);
     const s2 = t2 as { kind: "stop"; finalState: LoopState };
@@ -432,7 +438,7 @@ describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势
     assert.equal(onCount, 1, "当拍长 ON 出现一次");
     assert.equal(presenceCount, 0, "当拍已贴长 ON → 不叠短现势");
 
-    // step3(同 deps = 同 run,enabled()=true,lastSeenEnabled=true)→ 仍不贴短。
+    // step3 (same deps = same run, enabled()=true, lastSeenEnabled=true) → still no short line.
     state = s2.finalState;
     const t3 = await step(state, deps);
     const s3 = t3 as { kind: "stop"; finalState: LoopState };
@@ -442,7 +448,7 @@ describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势
     ).length;
     assert.equal(presenceCount3, 0, "同 run 已贴长 ON → 后续 hop 也不贴短现势");
 
-    // 新 run() 开头重置 latch;holder on + lastSeen=true → 可贴一条短。
+    // A fresh run() resets the latch at entry; holder on + lastSeen=true → one short line may post.
     const { result: nextRun } = await run("Q2", deps);
     assert.equal(nextRun.stopReason, "completed");
     assert.equal(
@@ -454,16 +460,16 @@ describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势
 });
 
 // =========================================================================
-// SC7 — compact 重试属同一 run,不二次注入
+// Compact retry is the same run → no second injection
 // =========================================================================
 
 describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第二句短现势", () => {
   it("PromptTooLongError → compact 重试发生,且全程至多一条短现势", async () => {
     const holder = makeGraphModeHolder();
-    holder.set(true); // 初始 on —— 模拟会话里早就开了 graph
+    holder.set(true); // on from the start — session had graph enabled long ago
     const assembly = createGraphAssembly(holder.ctx);
     const lastSeenEnabled: { value: boolean | undefined } = { value: true };
-    // 已观察过 on(step 0 末 = true)。
+    // on already observed (end of step 0 = true).
 
     const seenMessages: ReadonlyArray<AnthropicNativeMessage>[] = [];
     let stepCalls = 0;
@@ -474,7 +480,7 @@ describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第
         stepCalls += 1;
         seenMessages.push(state.messages);
         if (stepCalls === 1) {
-          // 首调抛 PromptTooLong → reactive compact + retry。
+          // First call throws PromptTooLong → reactive compact + retry.
           const { PromptTooLongError } =
             await import("../../../src/harness/errors.ts");
           throw new PromptTooLongError("synthetic 400 prompt-too-long");
@@ -510,7 +516,7 @@ describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第
     assert.equal(result.stopReason, "completed");
     assert.ok(stepCalls >= 3, "reactive retry 必须发生");
 
-    // 0081:compact 重试是同一 run,不得再贴第二句(无 compact 专用再注入)。
+    // Compact retry stays within the same run — no second line (no compact-specific re-injection).
     const retrySeen = seenMessages[seenMessages.length - 1];
     assert.ok(retrySeen);
     const retryHits = presenceHits(retrySeen);
@@ -529,7 +535,7 @@ describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第
 });
 
 // =========================================================================
-// SC6 / SC8 — 短句不进禁区;tools 常驻不变
+// No forbidden-zone leakage; the tools list stays constant
 // =========================================================================
 
 describe("loop engine ADR-0081 SC6 / SC8: 不进禁区 + tools 常驻", () => {
@@ -546,7 +552,7 @@ describe("loop engine ADR-0081 SC6 / SC8: 不进禁区 + tools 常驻", () => {
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
 
-    // SC6.a:短句所在 user 消息 ≠ assistant 回合(必须是独立 user 消息)。
+    // The short line rides a standalone user message, never assistant content.
     for (const m of result.messages) {
       const texts = m.content
         .map((b) => (b.type === "text" ? b.text : ""))
@@ -555,8 +561,8 @@ describe("loop engine ADR-0081 SC6 / SC8: 不进禁区 + tools 常驻", () => {
         assert.equal(m.role, "user");
       }
     }
-    // SC6.b:agent_status 栏文本用 '<agent_status>' 标记;与 '<graph_mode>' 互不重叠。
-    // 简单防御性检查:presence 文本不含 agent_status 反向泄漏。
+    // The agent_status bar uses the '<agent_status>' marker; '<graph_mode>' never overlaps it.
+    // Simple defensive check: no reverse leak of agent_status inside the presence text.
     assert.equal(
       IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.includes("<agent_status>"),
       false
@@ -564,10 +570,10 @@ describe("loop engine ADR-0081 SC6 / SC8: 不进禁区 + tools 常驻", () => {
   });
 
   it("SC8: graphModePresence 缝在场 / 缺席,模型收到的 tools 面字节相同", async () => {
-    // graphModePresence 是 messages 缝,不动 registry / promptTools ——
-    // 用含 run_graph 的 registry 对比 presence 缝在场 vs 缺席两次 run,
-    // adapter 实际收到的 tools 名称序列必须逐字相同(tools 面不随
-    // presence 缝抖动)。
+    // graphModePresence is a messages-only seam and never touches registry /
+    // promptTools — run the same registry (containing run_graph) twice with
+    // the seam present vs absent; the tools name sequence the adapter
+    // actually receives must be identical (the tools face does not wobble).
     const runGraphTool: ToolDef = {
       name: "run_graph",
       description: "run_graph stub",

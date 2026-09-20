@@ -1,18 +1,23 @@
 /**
- * #178 T5 (#147 D6) — trace `stream` boolean reflects the actual LLM call mode.
+ * Trace `stream` boolean reflects the actual LLM call mode.
  *
- * Acceptance (§5 plan):
+ * Expected:
  *   - streaming arm  → trace JSONL `stream: true`;
  *   - non-streaming  → trace JSONL `stream: false` (regression guard).
  *
- * "Mode" 在 loop-engine 不可观测; 设计 B:adapter 通过只读 `streamMode?: boolean`
- * 属性向 loop-engine 申报所走的臂(loop-engine 在 stepWithTrace 内取一次,写入
- * recordLlmCall 两处 site)。Stub / offline / 非流式臂无 streamMode → 缺省 false。
+ * The "mode" is not observable inside loop-engine; design B has the adapter
+ * declare which arm it took via a read-only `streamMode?: boolean` property
+ * (loop-engine reads it once in stepWithTrace and writes it at both
+ * recordLlmCall sites). Stub / offline / non-streaming arms lack streamMode
+ * → defaults to false.
  *
- * 流式臂端到端测试用最小 fake SDK client(只接 messages.stream;不依赖真实网络,
- * 也不用 T3 的重型 makeFakeStream —— 本文件按 DAMP 原则最小克隆)。error-site
- * 用例用永挂 finalMessage 触发 raceModel timerTimeout,证明 error 分支也按实际
- * 模式翻转(该分支无 AssistantTurnResult,AssistantTurnResult 字段方案天然覆盖不到)。
+ * The streaming end-to-end test uses a minimal fake SDK client (only
+ * messages.stream; no real network, and not the heavier makeFakeStream —
+ * this file clones it minimally per the DAMP principle). The error-site case
+ * hangs finalMessage forever so raceModel's timerTimeout wins, proving the
+ * error branch also flips by actual mode (that branch has no
+ * AssistantTurnResult, so an AssistantTurnResult-field design would
+ * structurally miss it).
  */
 import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
@@ -44,7 +49,7 @@ afterEach(() => {
   }
 });
 
-/** 良构 SdkMessage(stream arm finalMessage 的终态载体)。 */
+/** Well-formed SdkMessage (terminal payload returned by the stream arm's finalMessage). */
 function wellShapedFinalMessage(text: string): SdkMessage {
   return {
     id: "msg_t5_stream",
@@ -59,9 +64,9 @@ function wellShapedFinalMessage(text: string): SdkMessage {
 }
 
 /**
- * 最小 fake SDK client:只实现 `messages.stream`。`finalMessage()` 立即 resolve
- * 良构消息;loop-engine 不透传 onStream,wireStreamEvents 提前返回,`on()` 永不
- * 被调用。
+ * Minimal fake SDK client: implements only `messages.stream`. `finalMessage()`
+ * resolves a well-formed message immediately; loop-engine never forwards
+ * onStream, wireStreamEvents returns early, so `on()` is never called.
  */
 function makeOneShotStreamClient(final: SdkMessage): unknown {
   return {
@@ -80,7 +85,7 @@ function makeOneShotStreamClient(final: SdkMessage): unknown {
   };
 }
 
-/** Error-site 用:finalMessage 永挂,让 raceModel 的 timerTimeout 胜出。 */
+/** For the error site: finalMessage hangs forever so raceModel's timerTimeout wins. */
 function makeHangingStreamClient(): unknown {
   return {
     messages: {
@@ -92,8 +97,9 @@ function makeHangingStreamClient(): unknown {
         finalMessage: () => Promise<SdkMessage>;
       } => ({
         on: (): unknown => undefined,
-        // 永不 settle:raceModel timer 胜出时本 promise 未完成,adapter arm settle
-        // 不触发,error site 走 timerTimeout 分支。
+        // Never settles: when the raceModel timer wins this promise is still
+        // pending, the adapter arm's settle does not fire, so the error site
+        // takes the timerTimeout branch.
         finalMessage: (): Promise<SdkMessage> =>
           new Promise<SdkMessage>(() => {}),
       }),
@@ -225,7 +231,8 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       registry: reg,
       maxTurns: 5,
       modelTimeoutMs: 20,
-      // plan T4:fake 流永挂 — 缩短摘要独立超时,避免 run() 被 15s default 拖住。
+      // The fake stream hangs, so shorten the closing-summary timeout to keep
+      // run() from being dragged by the 15s default.
       summaryTimeoutMs: 20,
       trace: createJsonlTraceService({
         filePath: tmpDir,
@@ -236,8 +243,8 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
     const lines = parseJsonl(join(tmpDir, "conv-t5-stream-timeout.jsonl"));
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
-    // error site 也按实际模式翻转:流式臂 in-flight 被 timer 终止 → 实际模式是
-    // streaming,记录 stream: true。
+    // The error site also flips by actual mode: the streaming arm is killed
+    // mid-flight by the timer → the actual mode is streaming, recorded stream: true.
     assert.equal(llm!["stream"], true);
     assert.equal(llm!["status"], "error");
   });

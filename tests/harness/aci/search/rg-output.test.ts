@@ -1,16 +1,19 @@
 /**
- * rg stdout 解析层单测（SC12 职责 3「行解析」；契约 D2/D3）。
+ * rg stdout parsing layer unit tests.
  *
- * rg 以 `--null` 调用（`path\0line:text\n`）—— 路径里的冒号不再污染分列，
- * 这是 D3「parser 分列」在输入侧的前提。本文件锁：
- *   - `path\0line:text` 切分：路径含 `:` 仍正确。
- *   - 内容含 `:` / 空内容 / 空行不丢行。
- *   - 空 stdout → 无命中（不是一条空命中）。
- *   - 路径以 `./` 开头时被剥掉。
- *   - 行内容按 MAX_MATCH_LINE_COLUMNS 截断并带 `...[truncated]` 标记（旧契约保持）。
+ * rg is invoked with `--null` (`path\0line:text\n`) — colons in paths no
+ * longer poison column splitting, the input-side precondition for parser
+ * column split. This file locks:
+ *   - `path\0line:text` slicing: correct even when the path contains `:`.
+ *   - content with `:` / empty content / empty lines lose no rows.
+ *   - empty stdout → no hits (not one empty hit).
+ *   - leading `./` stripped from paths.
+ *   - line content truncated at MAX_MATCH_LINE_COLUMNS with a
+ *     `...[truncated]` marker (old contract kept).
  *
- * 定界符写作 `\u0000` 转义而非裸 NUL 字节：裸字节会让 git 把本文件判成
- * binary，diff 不可读、review 失效。
+ * The delimiter is written as the `\u0000` escape, not a raw NUL byte: a raw
+ * byte makes git classify this file as binary, killing diff readability and
+ * review.
  */
 
 import assert from "node:assert/strict";
@@ -28,7 +31,7 @@ import {
   truncateRgContent,
 } from "../../../../src/harness/aci/search/rg-output.ts";
 
-/** `path\0line:text` 的一条记录（末尾带换行，与 rg 输出同形）。 */
+/** One `path\0line:text` record (trailing newline, same shape as rg output). */
 function record(path: string, line: string, text: string): string {
   return `${path}\u0000${line}:${text}\n`;
 }
@@ -79,9 +82,9 @@ describe("parseRgNullLines — path\\0line:text", () => {
   });
 
   it("形状损坏的记录被跳过，不静默产生假命中", () => {
-    // 无 NUL（未按 --null 输出）→ 跳过整条，不猜。
+    // No NUL (not emitted per --null) → skip the whole record, never guess.
     assert.deepEqual(parseRgNullLines("a.ts:3:x\n"), []);
-    // NUL 后有非数字行号 → 跳过。
+    // Non-numeric line number after the NUL → skip.
     assert.deepEqual(parseRgNullLines("a.ts\u0000bad:x\n"), []);
   });
 
@@ -103,7 +106,7 @@ describe("parseRgNullLines — path\\0line:text", () => {
 
     const text = hits[0]!.text;
     assert.ok(!text.includes("�"), "must not emit replacement chars");
-    // 截断后仍全是完整 emoji（无孤立 surrogate）。
+    // After truncation everything is still a complete emoji (no lone surrogate).
     for (const ch of text.replace(RG_TRUNCATION_MARKER, "")) {
       assert.ok(ch === "😀");
     }
@@ -111,14 +114,17 @@ describe("parseRgNullLines — path\\0line:text", () => {
 });
 
 /**
- * rg 传输层的省略标记（Finding 1 的根因面）。
+ * rg's transport-layer omission marker (root-cause surface).
  *
- * rg 的**触发**按字节、**切片**按 code point，两个单位不同；本工具的口径只有
- * code point（`MAX_MATCH_LINE_COLUMNS`）。预算取 4 倍（UTF-8 单字符最大宽度）
- * 后，未超限的行至多被切到 8000 code point（切点落在字符中间时干脆不切），
- * 超限的行则由权威闸收口 —— 两种情形都必须先把残留标记剥掉，最终形状才由
- * code point 闸唯一决定。这组用例钉住剥取谓词本身：既不漏剥（标记进正文），
- * 也不误剥（正文里真的以标记文本结尾的行）。
+ * rg **triggers** on bytes but **slices** on code points — different units;
+ * this tool's measure is code points only (`MAX_MATCH_LINE_COLUMNS`). With a
+ * 4x budget (max UTF-8 width per character), rows under the limit are cut at
+ * most to 8000 code points (cut points landing mid-character simply aren't
+ * cut), and over-limit rows are closed by the authoritative gate — in both
+ * cases the residual marker must be stripped first so the final shape is
+ * decided solely by the code-point gate. These cases pin the stripping
+ * predicate itself: neither under-strip (marker leaking into the body) nor
+ * over-strip (bodies that genuinely end with the marker text).
  */
 describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时候剥", () => {
   it("预算 = code point 上限 × 4（UTF-8 单字符最大宽度）", () => {
@@ -126,7 +132,8 @@ describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时�
       rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS),
       MAX_MATCH_LINE_COLUMNS * 4
     );
-    // 严大于上限：等于上限时 rg 会抢在权威闸之前截断非 ASCII 行。
+    // Strictly greater than the cap: at equality rg would truncate
+    // non-ASCII lines before the authoritative gate gets a chance.
     assert.ok(
       rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS) > MAX_MATCH_LINE_COLUMNS
     );
@@ -147,11 +154,12 @@ describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时�
   });
 
   it("标记在、正文却没被切（切割点落在多字节字符中间）→ 仍要剥标记", () => {
-    // 实测 15.1.0：触发按字节、切片按 code point，两个单位不同，所以
-    // 「有标记」不等于「被切过」—— 这类行 rg 只追加标记、正文原样回传。
-    // 标记必须剥掉，否则它会被下游的 code point 闸当成正文再截一次，两条
-    // 引擎的正文尾巴就不同了（D6/SC9）。
-    const line = "hit" + "漢".repeat(2_700); // 8103 字节 / 2703 cp
+    // Measured on 15.1.0: trigger counts bytes, slicing counts code points —
+    // different units, so "marker present" ≠ "line was cut". On such lines rg
+    // only appends the marker and returns the body untouched. The marker must
+    // be stripped, else the downstream code-point gate treats it as body text
+    // and truncates again, diverging the two engines' line tails.
+    const line = "hit" + "漢".repeat(2_700); // 8103 bytes / 2703 cp
     assert.ok(
       Buffer.byteLength(line, "utf8") >=
         rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS)
@@ -160,22 +168,26 @@ describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时�
   });
 
   it("CRLF：尾随 \\r 计入触发基数（正文 7999 字节 + \\r 恰好达线）", () => {
-    // 实测 15.1.0：rg 把 `\r` 算进「行超长」的字节数，却不在正文里回显它。
-    // 剥标记时若不把这一个字节补回去，7999 字节的行就会漏剥。
+    // Measured on 15.1.0: rg counts `\r` toward the "line too long" byte
+    // total but never echoes it in the body. Stripping the marker without
+    // adding that byte back would under-strip 7999-byte lines.
     const head = "x".repeat(rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS) - 1);
     const marked = `${head}${RG_PREVIEW_MARKER}`;
     assert.equal(stripRgPreviewMarker(marked, 1), head);
-    // 对照：不补这 1 字节时同一正文差一口气达线 —— 不剥。
+    // Control: without that 1 byte the same body just misses the threshold — no strip.
     assert.equal(stripRgPreviewMarker(marked), marked);
   });
 });
 
 /**
- * rg 解析路径的入口（`parseRgNullLines` / 上下文分列都把内容交给它）。
+ * Entry to rg's parse paths (`parseRgNullLines` / context column split both
+ * hand content here).
  *
- * 它比共用展示闸多一件事：洗掉**传输层痕迹**。这些痕迹只在 rg 的输出里存在，
- * 所以清洗不能下移到共用闸 —— 否则 Node 路径会把「正文里真实存在的同类文本」
- * 一起削掉（两条引擎对同一文件给出不同正文）。
+ * It does one thing more than the shared display gate: wash off **transport
+ * artifacts**. Those exist only in rg's output, so the cleaning cannot move
+ * down to the shared gate — otherwise the Node path would also shave "the
+ * same text genuinely present in the body" (two engines, different bodies
+ * for one file).
  */
 describe("truncateRgContent — 先洗传输层痕迹，再过 code point 闸", () => {
   it("尾随 \\r 剥掉（Node 侧 splitLines 已剥，两条引擎不得差一个不可见字符）", () => {
@@ -183,8 +195,9 @@ describe("truncateRgContent — 先洗传输层痕迹，再过 code point 闸", 
   });
 
   it("CRLF 边界行：7999 字节 / 2000 cp 的正文原样保留（不因漏剥而多截一刀）", () => {
-    // 这行 + `\r` 恰好 8000 字节 → rg 加标记；正文 2000 cp 未超权威上限。
-    // Node 侧看到同一行原样保留，rg 侧也必须原样保留。
+    // This line + `\r` is exactly 8000 bytes → rg adds the marker; the body's
+    // 2000 cp stay under the authoritative cap. Node sees the line kept as
+    // is, so the rg side must keep it as is too.
     const line = `€${"😀".repeat(1_999)}`;
     assert.equal(Array.from(line).length, MAX_MATCH_LINE_COLUMNS);
     assert.equal(
@@ -204,16 +217,19 @@ describe("truncateRgContent — 先洗传输层痕迹，再过 code point 闸", 
 });
 
 /**
- * 二进制提示记录（Finding 2）。
+ * Binary-notice records.
  *
- * rg 的检测窗口是 64 KiB 且同一文件在不同出法下结论不同（实测 15.1.0：NUL
- * 在 70 KB 处的文件 `-l` 列出、`--count` 略过、`content` 吐 WARNING）。提示行
- * 与 `path:line:text` 同形，不显式识别就会被解析成假命中；本工具的口径是
- * 「二进制文件不搜」，提示一律丢弃。
+ * rg's detection window is 64 KiB and the same file gets different verdicts
+ * per output mode (measured on 15.1.0: a file with NUL at 70 KB is listed by
+ * `-l`, skipped by `--count`, and emits WARNING in content mode). Notice
+ * lines share the `path:line:text` shape, so without explicit recognition
+ * they parse as fake hits; this tool's stance is "binary files are not
+ * searched" — notices are always dropped.
  */
 describe("isRgBinaryNotice — 二进制提示不是命中行", () => {
   it("识别两种原文（无 NUL 的 `path: ...` 与含 NUL 的 `path\\0 ...`）", () => {
-    // 实测 15.1.0 原文：提示行不带 NUL（rg 只在输出内容记录时用 NUL 定界）。
+    // Verbatim from 15.1.0: notice lines carry no NUL (rg delimits with NUL
+    // only for content records).
     assert.equal(
       isRgBinaryNotice(
         'bin.ts: binary file matches (found "\\0" byte around offset 8)'
@@ -226,7 +242,7 @@ describe("isRgBinaryNotice — 二进制提示不是命中行", () => {
       ),
       true
     );
-    // `--null` 定界形态（同一条提示的另一种姿态）。
+    // Same notice in its `--null`-delimited guise.
     assert.equal(
       isRgBinaryNotice(
         'bin.ts\u0000binary file matches (found "\\0" byte around offset 8)'

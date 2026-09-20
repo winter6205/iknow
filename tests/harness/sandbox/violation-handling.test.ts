@@ -1,7 +1,7 @@
 /**
  * tests/harness/sandbox/violation-handling.test.ts
  *
- * Three-tier violation handling (T6 / #123 Q4) — counter, kill hook, wiring.
+ * Three-tier violation handling — counter, kill hook, wiring.
  *
  * Boundary classes covered:
  *  - normal: mid N=1,2 don't kill; N=3 kills; reset works
@@ -266,9 +266,9 @@ describe("categorizeResult", () => {
     );
   });
 
-  // `[network_denied] → mid` 的端到端走读由
-  // `tests/harness/aci/bash-egress-typed-failure.test.ts` 承担(真实
-  // egress 违例 → typed failure → categorizeResult),此处不再另造字符串。
+  // The end-to-end walk of `[network_denied] → mid` is covered by
+  // tests/harness/aci/bash-egress-typed-failure.test.ts (real egress violation →
+  // typed failure → categorizeResult); no second string fixture here.
   it("[network_denied] → mid", () => {
     assert.equal(
       categorizeResult({
@@ -306,8 +306,9 @@ describe("categorizeResult", () => {
   });
 
   it("categorizeResult reads only the message, never the tool input", () => {
-    // 分类面与输入面解耦:同一 [user_denied] message 在任意 input 形状下都落
-    // low tier,不存在按 input 字段改判的隐藏分支。
+    // Categorization is decoupled from the input surface: the same
+    // [user_denied] message lands on the low tier under any input shape; there is
+    // no hidden branch that re-tiers by input fields.
     assert.equal(
       categorizeResult({
         name: "bash",
@@ -386,8 +387,8 @@ describe("wireKillSessionNotification", () => {
   });
 
   it("falls back gracefully on malformed JSON (fail-safe: unknown kill reason → high)", () => {
-    // M3 fix: malformed JSON previously downgraded to "mid"; we now treat
-    // an unparseable kill reason as the worst tier ("high"). The line still
+    // Malformed JSON previously downgraded to "mid"; we now treat an
+    // unparseable kill reason as the worst tier ("high"). The line still
     // carries the raw reason in `message=` for diagnosis.
     const sinkCalls: string[] = [];
     const onKill = wireKillSessionNotification({

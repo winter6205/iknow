@@ -1,13 +1,18 @@
 /**
- * D-α T4 —— `run_graph` handler 接到已有执行层（spec SC4/SC5）。
+ * `run_graph` handler wired to the real execution layer.
  *
- * 走真 `SubAgentManager`（fake spawn + 假 child，与 graph-prototype.test.ts
- * 同模式），因为这一刀要证的正是「工具真的驱动了 manager」，用 fake manager
- * 会把要验的东西 mock 掉。四件事：
- *   1. 带 dep 边的图按波次跑完，上游产出真的进了下游的 task 文本；
- *   2. 拓扑非法 → typed 拒绝且 **零 spawn**（校验在任何 spawn 之前）；
- *   3. 节点失败 → 下游 skipped、独立分支照跑，整体仍是一份浓缩结果；
- *   4. 打满 manager 并发上限 → 走既有 `SubAgentCapacityError`，不另起 per-graph budget。
+ * Uses a real `SubAgentManager` (fake spawn + fake child, same pattern as
+ * graph-prototype.test.ts) because the point is exactly "the tool really
+ * drives the manager" — a fake manager would mock away what needs proving.
+ * Four things:
+ *   1. A graph with dep edges runs wave by wave; upstream output really
+ *      reaches the downstream task text;
+ *   2. Invalid topology → typed rejection with **zero spawns** (validation
+ *      precedes any spawn);
+ *   3. Node failure → downstream skipped, independent branches keep running,
+ *      result is still one condensed payload;
+ *   4. Hitting the manager's concurrency cap → the existing
+ *      `SubAgentCapacityError`; no per-graph budget is invented.
  */
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
@@ -32,7 +37,7 @@ interface FakeChild {
   readonly signalCode: NodeJS.Signals | null;
   emit: (event: string | symbol, ...args: unknown[]) => boolean;
   once: (event: string | symbol, ...args: unknown[]) => unknown;
-  /** 累积写进 stdin 的 payload（manager 的 worker 载荷）。 */
+  /** Payload accumulated on stdin (the manager's worker payload). */
   readonly written: string[];
 }
 
@@ -123,7 +128,7 @@ describe("run_graph handler — 带 dep 边的图", () => {
       ],
     });
 
-    // wave 0 只有 research —— 有 dep 的节点必须等,不能同波起。
+    // wave 0 is research only — nodes with deps must wait, never start in the same wave.
     await waitForChildren(children, 1);
     expect(children).toHaveLength(1);
     settle(children[0]!, ok("FACT-42"));
@@ -131,8 +136,9 @@ describe("run_graph handler — 带 dep 边的图", () => {
     await waitForChildren(children, 2);
     const downstreamPayload = children[1]!.written.join("");
     expect(downstreamPayload).toContain("write it up");
-    // 数据沿边流动:上游 result 必须出现在下游 worker 的载荷里,否则
-    // 「有依赖」只剩排序,没有信息传递。
+    // Data flows along edges: the upstream result must appear in the
+    // downstream worker's payload, or "having deps" is mere ordering with no
+    // information transfer.
     expect(downstreamPayload).toContain("FACT-42");
     settle(children[1]!, ok("DRAFT"));
 
@@ -260,7 +266,7 @@ describe("run_graph handler — 节点失败沿 deps fail-fast", () => {
     expect(byId.get("solo")!.status).toBe("done");
     expect(byId.get("after")!.status).toBe("skipped");
     expect(byId.get("after")!.reason).toContain("boom");
-    // 下游没跑 → 只 spawn 了两个节点。
+    // The downstream never ran → only two spawns.
     expect(children).toHaveLength(2);
     await manager.shutdown();
   });
@@ -283,10 +289,10 @@ describe("run_graph handler — 调用侧取消", () => {
     await waitForChildren(children, 1);
     controller.abort();
     await expect(pending).rejects.toThrow(/cancel/i);
-    // 上游被打断 → 下游那一波不该再 spawn。
+    // Upstream aborted → the downstream wave must not spawn.
     expect(children).toHaveLength(1);
-    // 被 abort 的任务已进 kill 链，shutdown 要等 SIGKILL 兜底（5s）走完 ——
-    // 故本例的超时放宽到 15s，其余用例都在毫秒级。
+    // The aborted task entered the kill chain; shutdown waits for the SIGKILL
+    // fallback (~5s) — hence this case's 15s timeout; the rest run in ms.
     await manager.shutdown();
   }, 15_000);
 });
@@ -302,7 +308,8 @@ describe("run_graph handler — 共用全局 cap（不另起 per-graph budget）
       })),
     });
     await waitForChildren(children, 4);
-    // 第 5 个 spawn 被容量拒 —— manager 并发上限是项目唯一权威，图层不复制一份。
+    // The 5th spawn is refused by capacity — the manager's concurrency cap is
+    // the project's single authority; the graph layer never duplicates it.
     expect(children).toHaveLength(4);
     for (const child of children) settle(child, ok("fine"));
 

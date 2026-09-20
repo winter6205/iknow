@@ -1,7 +1,7 @@
 /**
- * evidence-checker 测试共享 fixture (Dup Code 收敛, Fowler #2)。
- * 6 个测试文件共用 toolUse/toolResult/textBlock/message/greenTranscript;
- * VITEST_GREEN 是 vitest 绿摘要标准 fixture。
+ * Shared fixtures for the evidence-checker tests (deduplicated across the six
+ * test files): toolUse/toolResult/textBlock/message/greenTranscript.
+ * VITEST_GREEN is the standard vitest green-summary fixture.
  */
 import type {
   AnthropicContentBlock,
@@ -51,8 +51,9 @@ export function message(
 export const VITEST_GREEN = " ✓ Tests  3 passed (3)\n";
 
 /**
- * 标准绿证据 transcript: task → bash(tool_use + tool_result 绿摘要) → done。
- * tail 可追加绿后编辑等 message (时效/soft 信号场景)。
+ * Standard green-evidence transcript: task → bash (tool_use + tool_result with
+ * a green summary) → done. `tail` appends post-green messages (staleness /
+ * soft-signal scenarios).
  */
 export function greenTranscript(
   command: string,
@@ -72,7 +73,7 @@ export function greenTranscript(
   ];
 }
 
-/** 绿 bash run 块 (tool_use + tool_result) 供 CONTRADICTED 场景组合。 */
+/** Green bash run pair (tool_use + tool_result) for composing CONTRADICTED scenarios. */
 export function greenRun(id: string): AnthropicContentBlock[] {
   return [
     toolUse(id, "npx vitest run"),

@@ -1,12 +1,10 @@
 /**
- * #128 verify 分类器 (子代理 LLM 判官) 纯函数模块单测。
+ * Unit tests for the verify classifier (sub-agent LLM judge) pure-function module.
  *
- * Spec: specs/128-verify-classifier.md §Code Style (ClassifierResult 三态联合)
- *      + §Boundaries (pass→abort 降级; schema 错→abort; 宿主侧截断)。
- *
- * 覆盖：解析合法三态 / pass 空 evidence 降级 / missing 仅 fail / schema 残缺→abort /
- *       非对象→abort / truncateClassifierOutput 2000 chars 边界（4-byte emoji 边界
- *       与 surrogate-pair 安全）。
+ * Covers the three-state union parsing contract: pass with empty evidence
+ * downgrades to abort; `missing` is only legal on fail; schema defects and
+ * non-object input abort; host-side truncation at 2000 code points keeps
+ * 4-byte emoji and surrogate pairs intact.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -63,7 +61,7 @@ describe("parseClassifierResult — 降级规则 (#128 A4 末尾 + SC4)", () => 
   it("fail：missing 缺省 → 视为空数组", () => {
     const raw = { kind: "fail", reason: "stuff missing", evidence: [] };
     const out = parseClassifierResult(JSON.stringify(raw));
-    expect(out.kind).toBe("abort"); // fail 空 evidence 也视为 abort（与 pass 同一规则）
+    expect(out.kind).toBe("abort"); // fail with empty evidence also aborts (same rule as pass)
   });
 
   it("missing 仅在 fail 出现 → pass/missing 组合拒收（kind=abort）", () => {
@@ -170,25 +168,25 @@ describe("truncateClassifierOutput — 宿主侧 2000 chars 截断 (#128 A8 + SC
   });
 
   it("4-byte emoji 不切 surrogate pair", () => {
-    // U+1F600 (😀) 在 UTF-16 是 surrogate pair（2 code units）但 1 code point。
+    // U+1F600 (😀) is a surrogate pair (2 code units) but 1 code point in UTF-16.
     const s = "😀".repeat(2500);
     const out = truncateClassifierOutput(s);
     expect([...out].length).toBe(2000);
-    // 不应出现孤立 high surrogate
+    // No lone high surrogate may appear
     for (let i = 0; i < out.length; i++) {
       const cp = out.codePointAt(i)!;
       if (cp >= 0xd800 && cp <= 0xdbff) {
-        // high surrogate 必须有跟随 low surrogate
+        // A high surrogate must be followed by a low surrogate
         const next = out.codePointAt(i + 1);
         expect(next).toBeGreaterThanOrEqual(0xdc00);
         expect(next).toBeLessThanOrEqual(0xdfff);
-        i++; // 跳过 low surrogate
+        i++; // skip the low surrogate
       }
     }
   });
 });
 
-/* ------------------------------ #449b B7: unverified 第 4 态 ------------------------------ */
+/* ------------------------------ unverified: the 4th state ------------------------------ */
 
 describe("parseClassifierResult — unverified 第 4 态 (#449b B7 SC7)", () => {
   const VALID_UNVERIFIED: ClassifierResult = {

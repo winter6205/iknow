@@ -1,19 +1,20 @@
 /**
- * T3 (#647) / ADR-0028 / plans/agent-status-bar.md bullet T3: `agent_status`
- * 流事件 —— 与 `<agent_status>` 栏同一计算点、同一份快照数据(harness → TUI
- * 只读最新现势的读口;UI 不另建账本)。
+ * ADR-0028: the `agent_status` stream event — same computation point and same
+ * snapshot data as the `<agent_status>` bar (harness → TUI reads only the
+ * latest live state through this surface; the UI never keeps its own ledger).
  *
- * 验收映射:
- *   ① 每次即将调用模型前发出 `agent_status` 事件,字段与当次注入的栏内容
- *      一致(同一份现势,同 run 内交叉断言);
- *   ② 无未勾项 → 事件仍发(openTodoLines 空 + lastTool),与栏一致;
- *   ③ deps.agentStatus 缺席(ask / worker 形状)→ 无栏也无事件;
- *   ④ 栏纯度:事件恰带栏的数据字段(lastTool / openTodoLines / 条件在场
- *      instruction,无 text、无 in-flight),栏文本与 T1 构造器
- *      buildAgentStatusText 逐字节一致;
- *   ⑤ 观察者 throw 不反流(safeEmitStream 契约),回合照常完成、栏照常注入;
- *   ⑥ reactive compact 后的重试调用前同样发事件(栏在 compact 后落位的
- *      同一计算点)。
+ * Acceptance mapping:
+ *   - one `agent_status` event before each upcoming model call, fields matching
+ *     the bar injected for that call (same live state, cross-asserted within one run);
+ *   - no unchecked items → the event is still emitted (openTodoLines empty + lastTool), consistent with the bar;
+ *   - deps.agentStatus absent (ask / worker shape) → no bar and no event;
+ *   - bar purity: the event carries exactly the bar's data fields (lastTool /
+ *     openTodoLines / conditionally-present instruction; no text, no in-flight),
+ *     and the bar text is byte-identical to the buildAgentStatusText output;
+ *   - observer throws do not backflow (safeEmitStream contract) — the turn
+ *     completes as usual and the bar is still injected;
+ *   - the event is also emitted before a reactive-compact retry call (the same
+ *     computation point where the bar lands after compact).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,15 +35,16 @@ import {
 } from "./_agent-status-fixtures.ts";
 
 // ---------------------------------------------------------------------------
-// 本文件私有 fixtures(makeTodoDir / makeSpyAdapter / okEchoTool / bar 文本
-// 提取与解析等共享部分见 tests/harness/_agent-status-fixtures.ts;共享
-// makeSpyAdapter 的 sampleAtEntry 扩展缝即本套件的 eventsAtEntry 采样)
+// This file's private fixtures; shared parts (makeTodoDir / makeSpyAdapter /
+// okEchoTool / bar text extraction & parsing) live in
+// tests/harness/_agent-status-fixtures.ts — the shared makeSpyAdapter's
+// sampleAtEntry seam is exactly this suite's eventsAtEntry sampling.
 // ---------------------------------------------------------------------------
 
-/** 事件收集器:只记 agent_status 事件(其余类型计数,不解读)。 */
+/** Event collector: records only agent_status events (other types are counted, never interpreted). */
 interface EventProbe {
   readonly onStream: (event: HarnessStreamEvent) => void;
-  /** 按到达序的 agent_status 事件原样对象(供字段级断言)。 */
+  /** agent_status event objects as-is, in arrival order (for field-level asserts). */
   readonly agentStatusEvents: HarnessStreamEvent &
     {
       type: "agent_status";
@@ -66,7 +68,8 @@ function tailBar(messages: ReadonlyArray<AnthropicNativeMessage>): string {
 }
 
 // ---------------------------------------------------------------------------
-// AC ① 事件与栏同一份现势:每次模型调用前各一条,字段与当次注入的栏一致
+// Events and bars share one live state: one event before each model call,
+// fields identical to the bar injected for that call.
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: same snapshot as the injected bar", () => {
@@ -115,11 +118,11 @@ describe("agent_status stream event T3: same snapshot as the injected bar", () =
       2,
       "one agent_status event per model call"
     );
-    // 事件先于它所服务的模型调用到达(第 k 次调用入口已见 k 条)。
+    // Each event arrives before the model call it serves (call #k already sees k events at entry).
     assert.equal(entrySamples[0], 1);
     assert.equal(entrySamples[1], 2);
 
-    // 交叉断言(同一份现势):事件字段 === 当次请求尾栏解析结果。
+    // Cross-assertion (same live state): event fields === parsed tail bar of that request.
     const ev1 = probe.agentStatusEvents[0]!;
     const ev2 = probe.agentStatusEvents[1]!;
     assert.equal(ev1.lastTool, "idle");
@@ -131,7 +134,7 @@ describe("agent_status stream event T3: same snapshot as the injected bar", () =
       lastTool: ev1.lastTool,
       todoLines: [...ev1.openTodoLines],
     });
-    // echo 工具成功后 → last_tool 更新为 echo;todos.md 未变 → 未勾行同前。
+    // After echo succeeds → last_tool becomes echo; todos.md unchanged → same unchecked lines.
     assert.equal(ev2.lastTool, "echo");
     assert.deepEqual(ev2.openTodoLines, ev1.openTodoLines);
     assert.deepEqual(parseBar(tailBar(captured[1]!)), {
@@ -142,7 +145,7 @@ describe("agent_status stream event T3: same snapshot as the injected bar", () =
 });
 
 // ---------------------------------------------------------------------------
-// AC ② 无未勾项:事件仍发(openTodoLines 空 + lastTool),与栏一致
+// No unchecked items: the event is still emitted (openTodoLines empty + lastTool), consistent with the bar.
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: empty slots still emit", () => {
@@ -184,12 +187,12 @@ describe("agent_status stream event T3: empty slots still emit", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ③ deps.agentStatus 缺席(ask / worker 形状)→ 无栏也无事件
+// deps.agentStatus absent (ask / worker shape) → no bar and no event.
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: gating follows the bar", () => {
   it("③ 无 agentStatus 字段 → onStream 在场也不发任何 agent_status 事件", async () => {
-    // AC③ 是 deps 缺席语义:文件是否在场无关,不建 todos fixture。
+    // This is deps-absence semantics: whether the file exists is irrelevant, so no todos fixture is built.
     const echo = okEchoTool();
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
@@ -229,7 +232,8 @@ describe("agent_status stream event T3: gating follows the bar", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ④ 栏纯度:事件恰带栏的数据字段;栏文本与 T1 构造器逐字节一致
+// Bar purity: the event carries exactly the bar's data fields; bar text is
+// byte-identical to the builder output.
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: bar purity", () => {
@@ -270,9 +274,9 @@ describe("agent_status stream event T3: bar purity", () => {
     assert.equal(probe.agentStatusEvents.length, 2);
     for (let i = 0; i < probe.agentStatusEvents.length; i++) {
       const ev = probe.agentStatusEvents[i]!;
-      // run("go") 的 prompt 即最新真实用户消息 → spec T3 后事件加性带
-      // instruction 字段;子弹 4 后 reconcile 结算在场(首跳 true、次跳
-      // false)——字段恰为栏的数据字段(不含栏 text、不含 in-flight)。
+      // run("go")'s prompt is the latest real user instruction, so the event additively
+      // carries the instruction field; reconcile settles one-shot (true on the first hop,
+      // false after) — the fields are exactly the bar's data fields (no bar text, no in-flight).
       assert.equal(ev.instruction, "go");
       assert.equal(ev.reconcile, i === 0, "reconcile 一次性结算同源同形");
       assert.deepEqual(
@@ -280,7 +284,7 @@ describe("agent_status stream event T3: bar purity", () => {
         ["instruction", "lastTool", "openTodoLines", "reconcile", "type"],
         "event carries exactly the bar's data fields"
       );
-      // 栏文本逐字节 === T1 构造器对同一份事件字段的重放输出。
+      // Bar text byte-for-byte === replaying the same event fields through the bar builder.
       const rebuilt = buildAgentStatusText({
         lastTool: ev.lastTool,
         openTodoLines: ev.openTodoLines,
@@ -331,7 +335,8 @@ describe("agent_status stream event T3: bar purity", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC ⑥ reactive compact 重试:栏在 compact 后落位的同一计算点同样发事件
+// Reactive compact retry: the event is emitted at the same computation point
+// where the bar lands after compact.
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: reactive compact retry", () => {

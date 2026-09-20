@@ -1,22 +1,27 @@
 /**
- * egress-ssh-bridge T6 —— 私钥可读性现状钉子（assumption 5 地面化）。
+ * Private-key readability pin for specs/egress-ssh-bridge.md (grounds Assumption 5).
  *
- * 真起 bwrap 断言（形态镜像 bash-workspace-mode-fence.test.ts 的
- * `it.skipIf(!hasBwrap())`；本机 WSL 有 bwrap，CI 排除集另管）：
- *   - global 档：围栏内 `test -r ~/.ssh/id_ed25519` 可读（`--bind / /`
- *     打底，key 可写可见是本档既定姿态）；
- *   - workspace 档：home `--ro-bind`（bwrap.ts workspaceMountArgs）下同一
- *     fixture key **可读**（可见非闭世界）、对 key 的**写**必败（EROFS），
- *     且宿主侧文件内容事后逐字节不变（写没有旁路落到别的副本）。
+ * Real-bwrap assertions (shape mirrors bash-workspace-mode-fence.test.ts's
+ * `it.skipIf(!hasBwrap())`; local WSL has bwrap, the CI exclusion set is handled
+ * separately):
+ *   - global tier: `test -r ~/.ssh/id_ed25519` reads fine inside the fence
+ *     (`--bind / /` is the base layer; key writable-and-visible is this tier's
+ *     intended posture);
+ *   - workspace tier: under the home `--ro-bind` (bwrap.ts workspaceMountArgs) the
+ *     same fixture key IS readable (visible, not closed-world); any WRITE to the
+ *     key MUST fail (EROFS), and the host-side file content is byte-identical
+ *     afterwards (no write bypassed into some other copy).
  *
- * 纪律（specs/egress-ssh-bridge.md / ADR-0107）：
- *   - fixture key 一律 `ssh-keygen -t ed25519 -N ""` 生成于 tmpdir，
- *     **绝不使用 / 读取 / 复制操作员真实 `~/.ssh` 私钥**；HOME 经围栏
- *     env 显式重定向到 fixture home，不动真 home；
- *   - 本文件不断言 key 内容、不输出私钥字节。
+ * Discipline (specs/egress-ssh-bridge.md / ADR-0107):
+ *   - fixture keys are always generated in tmpdir via
+ *     `ssh-keygen -t ed25519 -N ""`; NEVER use / read / copy the operator's real
+ *     `~/.ssh` private keys. HOME is redirected to the fixture home explicitly
+ *     through the fence env, leaving the real home untouched;
+ *   - this file never asserts key content and never prints private-key bytes.
  *
- * 「key 进围栏的姿态 = 出口域限制兜底」（ADR-0105 §Decision 5）：可读性
- * 本身不是漏洞面，风险收敛于 egress 域判定；此处只钉 fs 事实。
+ * "The key-in-fence posture relies on egress domain limits as the backstop"
+ * (ADR-0105 Decision 5): readability itself is not the vulnerability surface — the
+ * risk converges on egress domain decisions. This file pins fs facts only.
  */
 
 import assert from "node:assert/strict";
@@ -53,7 +58,7 @@ let TASK = "";
 let TMP = "";
 
 beforeAll(() => {
-  // bwrap 缺席 = 整组 skip（CI 形态），fixture 无从谈起，不生成。
+  // bwrap absent = whole group skipped (CI shape); fixtures are moot, don't generate.
   if (!hasBwrap()) return;
   FAKE_HOME = scratchDir("iknow-t6-home-");
   TASK = scratchDir("iknow-t6-task-");
@@ -85,7 +90,7 @@ function runFence(
     command: "bash",
     args: ["-c", script],
     fsPolicy: createFsPolicy({ tmpDir: TMP, mode }),
-    // HOME 显式重定向到 fixture home（不动操作员真 home）。
+    // HOME redirected explicitly to the fixture home (operator's real home untouched).
     env: { HOME: FAKE_HOME, PATH: "/usr/bin:/bin" },
     cwd: TASK,
     ...(mode === "workspace"

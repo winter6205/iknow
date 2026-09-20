@@ -1,6 +1,5 @@
 /**
- * T3 (plans/worktree-isolation-model-provision.md) — mutate gate at the
- * harness seam, model-provision contract (ADR-0037 amendment 2026-08-30):
+ * Mutate gate at the harness seam, model-provision contract (ADR-0037 amendment):
  *
  *   - ON + session NOT yet bound (main-repo root): the mutate is BLOCKED and
  *     the gate NEVER provisions — no `provision()` call, hence no
@@ -13,14 +12,14 @@
  *     onto one adjudication; failures stay typed and fail-closed).
  *   - OFF → byte-identical to today (gate transparent).
  *
- * issue 1059 / ADR-0109: bash left the gate's enforcement surface — in the
+ * ADR-0109: bash left the gate's enforcement surface — in the
  * unbound state every string bash command passes and the main checkout is
  * protected physically by the fence's `--ro-bind` (argv + EROFS reflow are
  * pinned in tests/harness/sandbox/ and tests/harness/aci/). The clauses
  * above apply to the remaining FILE_WRITE-class / root_flip semantics.
  *
  * The git layer (`createTaskWorktree`) is unchanged and stays covered with
- * real git — it serves the session-api provisioner and the T4 ACI tool.
+ * real git — it serves the session-api provisioner and the create-worktree ACI tool.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -50,7 +49,7 @@ import {
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
-// SC6 guard: the readonly-mode SSOT must stay untouched by the gate split.
+// Guard: the readonly-mode SSOT must stay untouched by the gate split.
 import {
   ReadonlyViolationError,
   validateReadonlyCommand,
@@ -206,7 +205,7 @@ describe("createTaskWorktree", () => {
     expect(await readdir(plain)).toEqual(before);
   });
 
-  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-worktree.md):
+  // ADR-0037 amendment:
   // a bare gitdir is a USABLE git repo — the probe is `rev-parse
   // --git-common-dir`, not `--is-inside-work-tree`, so `git worktree add` runs
   // and succeeds. The old "bare → not_a_git_repo" classification was narrower
@@ -463,7 +462,7 @@ describe("createTaskWorktree", () => {
   // only reaches this exit on older versions (git >= 2.53 infers --orphan),
   // so the stub pins what the live-git case cannot — a gitdir that probes
   // clean but whose `worktree add` fails maps to worktree_add_failed, never
-  // not_a_git_repo (plans/bare-repo-create-worktree.md T2 acceptance).
+  // not_a_git_repo (version-independent acceptance).
   it("empty bare whose worktree add fails maps to worktree_add_failed (stubbed, version-independent)", async () => {
     const runner: GitRunner = async (args) => {
       if (args[0] === "worktree") {
@@ -565,7 +564,7 @@ describe("classifyCall", () => {
     expect(read("date '+%Y-%m-%d' && ls -la /tmp 2>&1 | head -30")).toBe(
       "read"
     );
-    // the issue #1059 misfire cohort (cd / curl / gh / sleep) must never
+    // the historical misfire cohort (cd / curl / gh / sleep) must never
     // receive a gate notice again
     expect(read("curl -s https://example.invalid")).toBe("read");
     expect(read("gh pr list")).toBe("read");
@@ -594,7 +593,7 @@ describe("classifyCall", () => {
     );
   });
 
-  // SC6 guard: the readonly bash-mode SSOT is a separate consumer with
+  // Guard: the readonly bash-mode SSOT is a separate consumer with
   // deliberately stricter semantics (no `>` at all, no background `&`). The
   // gate's workspace-write classifier must not relax that table.
   it("validateReadonlyCommand still rejects 'ls 2>&1' (bash readonly mode unchanged)", () => {
@@ -629,12 +628,11 @@ describe("classifyCall", () => {
     }
   });
 
-  // T1 (plans/worktree-live-task-root.md §6 T1) — fail-open closure: the
-  // 5 symbol-mutate tools in `aci/tools/symbol-mutate.ts` write to disk via
+  // Fail-open closure: the 5 symbol-mutate tools in `aci/tools/symbol-mutate.ts` write to disk via
   // `writeFile` (lsp/applyWorkspaceEdit, see symbol-mutate.ts:333) but are
-  // NOT in the legacy `ALWAYS_MUTATE_TOOLS` 2-name set, so before T1 they
+  // NOT in the legacy `ALWAYS_MUTATE_TOOLS` 2-name set, so they once
   // slipped past the isolation gate and edited the main repo directly.
-  // After T1 the classifier SSOT is `FILE_WRITE_TOOL_NAMES` from
+  // Now the classifier SSOT is `FILE_WRITE_TOOL_NAMES` from
   // `symbol-mutate.ts` (the single source of truth for "writes the workspace");
   // the gate routes on that, so each name below must be a mutate.
   it("T1 fail-open closure — every symbol-mutate tool is classified mutate (each name has its own assert)", () => {
@@ -656,8 +654,8 @@ describe("classifyCall", () => {
     }
   });
 
-  // T1 fail-closed: the classifier's bash branch already fails closed to
-  // mutate on a non-string command (see the bash test above). The T1
+  // Fail-closed: the classifier's bash branch already fails closed to
+  // mutate on a non-string command (see the bash test above). This
   // surface also adds `spawn_subagent`'s role metadata — a missing /
   // unknown role must default to mutate (mirroring
   // `__invalid_subagent_type__` in build-engine.ts:855-858). The
@@ -720,7 +718,7 @@ describe("unboundFenceErofsGuidance — EROFS reflow builder (ADR-0109)", () => 
     expect(guidance).toContain("next wave of tool calls in this run");
     // the attempted path rides verbatim — the model sees WHICH path was hit
     expect(guidance).toContain("/repo/f.txt");
-    // ADR-0037 §7.5 wording discipline
+    // ADR-0037 wording discipline
     expect(guidance!.toLowerCase()).not.toContain("next turn");
   });
 
@@ -730,8 +728,8 @@ describe("unboundFenceErofsGuidance — EROFS reflow builder (ADR-0109)", () => 
     );
     // path clue rides verbatim
     expect(guidance).toContain("/repo/.git/index.lock");
-    // 文案区分:gitdir 命中给专属指引(先建树、在 task 树提交),
-    // 不与普通文件写共用含糊文案。
+    // Distinct wording: a gitdir hit gets dedicated guidance (create the tree
+    // first, commit inside the task tree), never the vague text shared with plain file writes.
     expect(guidance).toContain("git metadata");
     expect(guidance).toContain("git command from inside the task tree");
     expect(guidance).not.toContain("re-issue this same command");
@@ -864,7 +862,7 @@ describe("task worktree naming", () => {
   });
 });
 
-// -- mainCheckoutOf (T6 productRoot derivation from a session root) ------------
+// -- mainCheckoutOf (productRoot derivation from a session root) ---------------
 
 describe("mainCheckoutOf", () => {
   it("strips the task-worktree suffix to the owning main checkout", () => {
@@ -876,8 +874,8 @@ describe("mainCheckoutOf", () => {
   });
 
   it("is identity on roots that are not task-worktree-shaped", () => {
-    // 未改绑的会话根、主仓下的普通目录、手工建的无关 worktree —— 都原样返回，
-    // 不猜、不上溯、不回退 process.cwd()。
+    // Un-rebound session roots, plain directories under the main repo, unrelated hand-made worktrees —
+    // all returned as-is: no guessing, no upward walk, no fallback to process.cwd().
     expect(mainCheckoutOf("/repo")).toBe("/repo");
     expect(mainCheckoutOf("/repo/.iknow")).toBe("/repo/.iknow");
     expect(mainCheckoutOf("/repo/.iknow/worktrees")).toBe(
@@ -1055,9 +1053,9 @@ describe("createWorktreeIsolationExecutor", () => {
     // passed every substring ban above while only saying "the tool exists".
     expect(message).toContain("To write, ");
     // semantic (b): re-issue guidance — the same call, retried after binding,
-    // is the way forward (spec锁定语义「再重试这一次调用」)
+    // is the way forward (spec-pinned wording 「再重试这一次调用」 = "re-issue this same call")
     expect(message).toContain("re-issue this same call");
-    // ADR-0037 §7.5 wording discipline: next-WAVE-of-tool-calls-in-this-run,
+    // ADR-0037 wording discipline: next-WAVE-of-tool-calls-in-this-run,
     // never "next turn"
     expect(message).toContain("next wave of tool calls in this run");
     expect(message.toLowerCase()).not.toContain("next turn");
@@ -1248,7 +1246,7 @@ describe("createWorktreeIsolationExecutor", () => {
   });
 });
 
-// -- ADR-0096 T3 — live switch holder -----------------------------------------
+// -- ADR-0096 — live switch holder --------------------------------------------
 
 describe("createWorktreeOnMutateHolder (ADR-0096 T3)", () => {
   it("get() returns the injected initial value", () => {
@@ -1309,7 +1307,7 @@ describe("createWorktreeIsolationExecutor — live switch holder", () => {
     const after = await gate.executeAll([writeCall("c1")]);
     expect(after[0]!.kind).toBe("execution_failed");
     expect(after[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
-    // never auto-provision (ADR-0037 §1 preserved): no provision(), no write
+    // never auto-provision (ADR-0037 preserved): no provision(), no write
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(1);
   });

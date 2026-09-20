@@ -1,23 +1,26 @@
 /**
- * #361 T8 (ADR-0014 决策 3 / 6):subagent coordinator 加性段。
+ * Sub-agent coordinator additive segment (ADR-0014 decisions 3 & 6).
  *
- *  行为真值 (docs/plans/361-subagent-v1.5-foreground-spawn-contract.md
- *  「引导层（T8）硬约束」节):
+ *  Behavior ground truth ("guidance layer" hard constraints):
  *
- *   - 加性段:置于 IKNOW_ASSEMBLY_ORDER 六段 LOCKED 之后、skills / projectPath
- *     加性段之末,不触碰 LOCKED 顺序;复用 projectPathSegment / skillsSegment
- *     加性段模式 (缺席 → 字节级零变化,守 KV 缓存稳定契约)。
+ *   - Additive segment: placed after the six LOCKED segments of
+ *     IKNOW_ASSEMBLY_ORDER, at the tail of the skills / projectPath additive
+ *     segments; the LOCKED order is never touched. Reuses the
+ *     projectPathSegment / skillsSegment additive pattern (absent → byte-level
+ *     zero change, upholding the KV-cache stability contract).
  *
- *   - 注入条件:仅 subagentManager 装配时 (build-engine 经
- *     createIknowSystemResolver opts.coordinatorText 传入 IKNOW_COORDINATOR_TEXT);
- *     ask (surface !== chat / tui / serve,无 manager) 不传入 → 段缺席。
+ *   - Injection condition: only when subagentManager is assembled (build-engine
+ *     passes IKNOW_COORDINATOR_TEXT via createIknowSystemResolver
+ *     opts.coordinatorText); ask surfaces (not chat / tui / serve, no manager)
+ *     pass nothing → the segment is absent.
  *
- *   - 文案含验收 6 硬挂钩 (model 实际可见的 system prompt 含):
- *       proactive (proactively) · parallelizable · blocks until finished
- *     真链路 messages_captured 断言 model 实际 system prompt 含 proactive
- *     关键词即挂此段。
+ *   - The copy carries the model-visible hard hooks in the assembled system
+ *     prompt: proactive (proactively) · parallelizable · blocks until finished.
+ *     A real-link messages_captured assertion that the model's actual system
+ *     prompt contains the "proactive" keyword hangs on this segment.
  *
- *   - 措辞用 "Default contract today" 为 V2 追加异步纪律段留空间。
+ *   - The wording "Default contract today" leaves room for a future async
+ *     discipline segment in V2.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -88,8 +91,8 @@ describe("coordinator 加性段 — seam 缺席 / 字节级零变化", () => {
   });
 
   it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 6 段)", () => {
-    // IKNOW-symbol-primary T1: "usage" 段(代码主路径走符号工具 + grep 三类回退
-    // + edit_file 让位)在 soul 与 user_profile 之间。
+    // The "usage" segment (code primary path uses symbol tools + grep
+    // three-category fallback + edit_file defers) sits between soul and user_profile.
     expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
       "identity",
       "soul",
@@ -103,8 +106,9 @@ describe("coordinator 加性段 — seam 缺席 / 字节级零变化", () => {
 
 describe("coordinator 加性段 — seam 提供时渲染", () => {
   it("coordinatorText 提供 → 段渲染,含 ## Sub-agent coordination 标题 + 测试本地正文", async () => {
-    // #558 T2: seam 用例改用测试本地短字符串,不依赖生产 IKNOW_COORDINATOR_TEXT
-    // 内容（默认路径已停注入,生产常量只作 SSOT 文案验收,C 类用例守门）。
+    // Seam cases use a test-local short string, independent of the production
+    // IKNOW_COORDINATOR_TEXT content (default-path injection is off; the
+    // production constant only serves as the SSOT copy for the keyword cases).
     const localText = "explicit coordinator seam text for T2 regression";
     const out = await assembleIdentityContext({
       ...baseCtx(),
@@ -113,8 +117,9 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
     expect(out).toBeDefined();
     expect(out).toContain("## Sub-agent coordination");
     expect(out).toContain(localText);
-    // 验收 6 硬挂钩:这些是 seam 渲染契约,与 IKNOW_COORDINATOR_TEXT 内容解耦
-    // (coordinatorSegment 只渲染标题 + 原文)。
+    // These hard hooks are the seam-render contract, decoupled from the
+    // IKNOW_COORDINATOR_TEXT content (coordinatorSegment renders only
+    // title + verbatim body).
     expect(out).not.toContain("proactively");
     expect(out).not.toContain("parallelizable");
   });
@@ -127,9 +132,9 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
     });
     const idxCoord = out!.indexOf("## Sub-agent coordination");
     expect(idxCoord).toBeGreaterThanOrEqual(0);
-    // projectPath 段先于 coordinator
+    // projectPath segment precedes coordinator
     expect(out!.indexOf("## Project path")).toBeLessThan(idxCoord);
-    // LOCKED 段 (identity) 先于 coordinator
+    // LOCKED segment (identity) precedes coordinator
     expect(out!.indexOf("iknow Identity")).toBeLessThan(idxCoord);
   });
 
@@ -206,21 +211,22 @@ describe("IKNOW_COORDINATOR_TEXT — SSOT 文案验收", () => {
   });
 
   it("ADR 决策 3 五要点覆盖:两工具 + 何时派 + 前景默认阻塞 + 并行 + 结果处置", () => {
-    // ① 两工具是谁
+    // (1) which two tools
     expect(IKNOW_COORDINATOR_TEXT).toContain("spawn_subagent");
     expect(IKNOW_COORDINATOR_TEXT).toContain("subagent_result");
-    // ② 何时派:多步探索 / 独立验证 / 可并行工作
+    // (2) when to spawn: multi-step exploration / independent verification / parallelizable work
     expect(IKNOW_COORDINATOR_TEXT).toContain("multi-step exploration");
     expect(IKNOW_COORDINATOR_TEXT).toContain("independent verification");
-    // ③ 前景默认"阻塞等待结果"
+    // (3) foreground default blocks for the result
     expect(IKNOW_COORDINATOR_TEXT).toContain("blocks until finished");
     expect(IKNOW_COORDINATOR_TEXT).toMatch(/same turn/);
-    // ④ 一回合多 spawn 并行
+    // (4) multiple spawns run in parallel within one turn
     expect(IKNOW_COORDINATOR_TEXT).toMatch(
       /multiple spawn_subagent calls in one turn/
     );
     expect(IKNOW_COORDINATOR_TEXT).toMatch(/concurrently/);
-    // ⑤ 结果处置:envelope 直接 / 失败是数据读 reason + summary
+    // (5) result handling: read the envelope directly; a failure is data —
+    // read reason + summary
     expect(IKNOW_COORDINATOR_TEXT).toMatch(/status: "ok"/);
     expect(IKNOW_COORDINATOR_TEXT).toMatch(/status: "failed"/);
     expect(IKNOW_COORDINATOR_TEXT).toContain("reason");

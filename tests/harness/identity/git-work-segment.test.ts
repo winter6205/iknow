@@ -1,12 +1,15 @@
 /**
- * git 作业加性纪律段（specs/git-work.md）。
+ * Additive git-work discipline segment.
  *
- * 行为真值:
- *   - 加性段，不触碰 IKNOW_ASSEMBLY_ORDER 六段 LOCKED。
- *   - isolation ON → chat / tui / serve 含标题与本地作业要点。
- *   - ask 即使传入 gitWorkDiscipline 也不注入（无工作树工具）。
- *   - gate 缺席 / OFF → 段缺席，不写空串，不补「如何用 git」教程。
- *   - 正文不含 push / network / force-push。
+ * Behavior ground truth:
+ *   - Additive segment; the six IKNOW_ASSEMBLY_ORDER segments stay LOCKED.
+ *   - isolation ON → chat / tui / serve include the title and local-work
+ *     points.
+ *   - ask injects nothing even when gitWorkDiscipline is passed (it has no
+ *     worktree tools).
+ *   - gate absent / OFF → segment absent; never an empty string, never a
+ *     "how to use git" tutorial.
+ *   - body mentions no push / network / force-push.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";

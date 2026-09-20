@@ -150,16 +150,18 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
 });
 
 // ---------------------------------------------------------------------------
-// #903 SC6: replace 的 per-conversation 隔离
+// replace's per-conversation isolation
 //
-// replace 比 add/check 多两个可跨会话泄漏的写动作：① 改名旧现行为快照、
-// ② 原子写新现行。两者都必须停在调用方自己的会话目录里 —— 一次 replace
-// 不得清空、覆盖或快照掉另一会话的账本。isolation 只在
-// `resolveConversationTodoPath` 一处派生（SSOT），本节把该不变式钉在 replace
-// 分支上。
+// replace has two write actions beyond add/check that could leak across
+// sessions: (1) renaming the old current file into a snapshot and (2) the
+// atomic write of the new current file. Both must stay inside the caller's
+// own session directory — one replace must never clear, overwrite, or
+// snapshot another session's ledger. Isolation is derived in exactly one
+// place, `resolveConversationTodoPath` (SSOT); this section pins that
+// invariant on the replace branch.
 // ---------------------------------------------------------------------------
 
-/** 某会话目录下的快照文件名（`todos.<unixMs>.<hex>.md`）。 */
+/** Snapshot file names inside a session directory (`todos.<unixMs>.<hex>.md`). */
 async function snapshotsOf(conversationId: string): Promise<string[]> {
   const { readdir } = await import("node:fs/promises");
   const entries = await readdir(join(todoDir, conversationId));
@@ -181,14 +183,14 @@ describe("todo_write replace per-conversation isolation", () => {
 
     await tool.handler({ mode: "replace", items: ["a-new-1"] }, { ...CALL_A });
 
-    // conv-a：换表 + 自己目录里一份快照。
+    // conv-a: table swapped + one snapshot in its own directory.
     assert.equal(
       await currentOf(CALL_A.conversationId),
       "- [ ] [t1] a-new-1\n"
     );
     assert.equal((await snapshotsOf(CALL_A.conversationId)).length, 1);
 
-    // conv-b：现行逐字节不动 + 目录里没有任何快照。
+    // conv-b: current file byte-identical + no snapshot in its directory.
     assert.equal(
       await currentOf(CALL_B.conversationId),
       "- [ ] [t1] b-keeps-this\n"
@@ -209,7 +211,7 @@ describe("todo_write replace per-conversation isolation", () => {
     assert.equal(aSnaps.length, 1);
     assert.equal(bSnaps.length, 1);
 
-    // 各自快照只含自己的旧内容 —— 快照写到了正确的会话目录。
+    // Each snapshot contains only its own old content — snapshots land in the correct session directory.
     const aSnapshot = await readFile(
       join(todoDir, CALL_A.conversationId, aSnaps[0]),
       "utf8"
@@ -221,14 +223,14 @@ describe("todo_write replace per-conversation isolation", () => {
     assert.equal(aSnapshot, "- [ ] [t1] a-v1\n");
     assert.equal(bSnapshot, "- [ ] [t1] b-v1\n");
 
-    // 现行同样各自独立。
+    // The current files stay independent the same way.
     assert.equal(await currentOf(CALL_A.conversationId), "- [ ] [t1] a-v2\n");
     assert.equal(await currentOf(CALL_B.conversationId), "- [ ] [t1] b-v2\n");
   });
 
   it("replace 清空(items=[])只清空调用方,另一会话的未勾项仍在 list 与栏里", async () => {
-    // 最容易泄漏的一刀：清空。若路径解析漏了 conversationId，另一会话的
-    // 账本会被一起清掉。
+    // The leak-prone cut: clearing. If path resolution ever drops the
+    // conversationId, the other session's ledger gets wiped along with it.
     const tool = createTodoWriteTool({ todoDir });
     await add(tool, "a-will-be-cleared", { ...CALL_A });
     await add(tool, "b-survives", { ...CALL_B });
@@ -247,7 +249,7 @@ describe("todo_write replace per-conversation isolation", () => {
     assert.equal(seenByA, "");
     assert.equal(seenByB, "- [ ] [t1] b-survives\n");
 
-    // 栏投影同源：conv-b 的未勾项不受 conv-a 清空影响。
+    // The panel projection reads the same source: conv-b's open items are unaffected by conv-a's clear.
     assert.deepEqual(
       await readOpenTodoLines(todoDir, CALL_A.conversationId),
       []
@@ -258,19 +260,20 @@ describe("todo_write replace per-conversation isolation", () => {
   });
 
   it("有 conversationId 的 replace 不碰 legacy 根 todos.md", async () => {
-    // 向后契约的另一半：per-conversation replace 不得把根账本改名成快照。
+    // The other half of the backward-compat contract: a per-conversation
+    // replace must never rename the root ledger into a snapshot.
     const tool = createTodoWriteTool({ todoDir });
-    await add(tool, "legacy root item"); // 无 ctx → 根 todos.md
+    await add(tool, "legacy root item"); // no ctx → root todos.md
     await add(tool, "a-old", { ...CALL_A });
 
     await tool.handler({ mode: "replace", items: ["a-new"] }, { ...CALL_A });
 
-    // 根账本逐字节不动。
+    // Root ledger byte-identical.
     assert.equal(
       await readFile(join(todoDir, TODOS_FILE), "utf8"),
       "- [ ] [t1] legacy root item\n"
     );
-    // 根目录下没有快照文件（快照应落在 conv-a 子目录）。
+    // No snapshot files in the root directory (snapshots belong under conv-a).
     const { readdir } = await import("node:fs/promises");
     const rootEntries = await readdir(todoDir);
     assert.deepEqual(

@@ -1,22 +1,23 @@
 /**
- * T2 (#252): SDK prompt-too-long 400 → PromptTooLongError 翻译 (reactive compact 地基)。
+ * SDK prompt-too-long 400 → PromptTooLongError translation (foundation for
+ * reactive compaction).
  *
- * 翻译条件 (spec 252 `:93-98`):
+ * Translation condition:
  *   `instanceof APIError && status === 400 && /prompt.*length|too long/i.test(message)`
- *   → `throw new PromptTooLongError(e.message)`;其余错误原样 rethrow。
+ *   → `throw new PromptTooLongError(e.message)`; every other error is rethrown untouched.
  *
- * PromptTooLongError extends ProtocolError — 故 loop-engine.ts:431 的
- * `instanceof ProtocolError` 分支能命中 (T3 reactive 分支依赖)。
+ * PromptTooLongError extends ProtocolError, so loop-engine's
+ * `instanceof ProtocolError` branch catches it (the reactive branch relies on this).
  *
- * 覆盖 (每臂 × 3 类 = 6):
- *   - 非流式臂 (`messages.create`): 400 prompt-too-long → 翻译;其他 400 → 原样;
- *     非 400 → 原样。
- *   - 流式臂 (`finalMessage()` reject): 400 prompt-too-long → 翻译;其他 400 →
- *     原样;非 400 → 原样。
- *   - 异常类边界:PromptTooLongError instanceof ProtocolError, `.name` 正确。
+ * Coverage (each arm × 3 classes = 6):
+ *   - non-stream arm (`messages.create`): 400 prompt-too-long → translated;
+ *     other 400 → verbatim; non-400 → verbatim.
+ *   - stream arm (`finalMessage()` reject): 400 prompt-too-long → translated;
+ *     other 400 → verbatim; non-400 → verbatim.
+ *   - error-class boundary: PromptTooLongError instanceof ProtocolError, `.name` correct.
  *
- * 用 fake SDK client 装配,不连真实网络 (对齐 anthropic-adapter.test.ts /
- * anthropic-adapter-stream.test.ts 既有先例)。
+ * Fake SDK client, no real network (mirrors anthropic-adapter.test.ts /
+ * anthropic-adapter-stream.test.ts precedent).
  */
 
 import { describe, it } from "vitest";
@@ -39,7 +40,7 @@ function userMsg(text: string): AnthropicNativeMessage {
 
 const initState = (): LoopState => ({ messages: [], turnCount: 0 });
 
-/** 真实 Anthropic 400 prompt-too-long 错误体:request_too_large。 */
+/** Real Anthropic 400 prompt-too-long error body: request_too_large. */
 function sdkTooLongError(): APIError {
   return new APIError(
     400,
@@ -49,7 +50,7 @@ function sdkTooLongError(): APIError {
   );
 }
 
-/** SDK 实际对 400 抛 BadRequestError —— instanceof APIError 为 true。 */
+/** For 400 the SDK actually throws BadRequestError — instanceof APIError still true. */
 function sdkBadRequestOther(): APIError {
   return new BadRequestError(
     400,
@@ -70,7 +71,7 @@ function sdkServerError(): APIError {
 
 type SdkClient = Parameters<typeof createRealAnthropicAdapter>[0]["client"];
 
-/** 非流式臂 fake client:messages.create 拒指定错误。 */
+/** Non-stream arm fake client: messages.create rejects with the given error. */
 function nonStreamClient(rejectErr: unknown): SdkClient {
   return {
     messages: {
@@ -79,7 +80,7 @@ function nonStreamClient(rejectErr: unknown): SdkClient {
   } as unknown as SdkClient;
 }
 
-/** 流式臂 fake client:messages.stream 返回 fake stream,finalMessage() reject。 */
+/** Stream arm fake client: messages.stream returns a fake stream whose finalMessage() rejects. */
 function streamClient(rejectErr: unknown): SdkClient {
   return {
     messages: {
@@ -106,7 +107,7 @@ function adapterFromClient(
   });
 }
 
-// ─── 非流式臂 (`messages.create`) ───────────────────────────────────────────
+// ─── non-stream arm (`messages.create`) ──────────────────────────────────────
 
 describe("PromptTooLongError translation — non-stream arm (create)", () => {
   it("400 prompt-too-long → throws PromptTooLongError (wraps SDK message)", async () => {
@@ -140,7 +141,7 @@ describe("PromptTooLongError translation — non-stream arm (create)", () => {
   });
 });
 
-// ─── 流式臂 (`finalMessage()` reject) ──────────────────────────────────────
+// ─── stream arm (`finalMessage()` reject) ────────────────────────────────────
 
 describe("PromptTooLongError translation — stream arm (finalMessage reject)", () => {
   it("400 prompt-too-long reject → throws PromptTooLongError", async () => {
@@ -174,7 +175,7 @@ describe("PromptTooLongError translation — stream arm (finalMessage reject)", 
   });
 });
 
-// ─── 异常类边界 ─────────────────────────────────────────────────────────────
+// ─── error-class boundary ────────────────────────────────────────────────────
 
 describe("PromptTooLongError class boundary", () => {
   it("is a ProtocolError subclass (loop-engine instanceof ProtocolError branch hits)", () => {

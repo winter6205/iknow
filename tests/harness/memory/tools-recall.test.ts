@@ -386,7 +386,7 @@ describe("memory_recall — read-only contract (ADR-0044 SC4)", () => {
   });
 });
 
-// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+// -- capability observations (read-side filtering) ----------------------------
 //
 // The read side must not hand a capability snapshot back to the model (spec
 // SC7): the live tool result is authoritative. The `disabled` gate stays

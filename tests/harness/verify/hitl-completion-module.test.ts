@@ -1,5 +1,5 @@
 /**
- * Plan T1: HITL completion module skips the completion-facing LLM judge.
+ * HITL completion module skips the completion-facing LLM judge.
  * Checker still runs (SUFFICIENT / CONTRADICTED / rerun); produceObservation
  * does not spawn. Named EXIT reason, no new StopReason.
  */
@@ -173,7 +173,7 @@ function hitlOptions(over: {
   };
 }
 
-/** goal 功能 (`/goal`) uses completionMode: "auto" — not PermissionMode 自动模式. */
+/** The `/goal` feature uses completionMode: "auto" — not the PermissionMode `自动模式` ("auto mode"). */
 function autoOptions(over: {
   readonly runFn: VerifyLoopOptions["runFn"];
   readonly runClassifier: RunClassifierFn;

@@ -1,8 +1,7 @@
 /**
- * T5–T10 Loop Engine fixture matrix S1–S11。
- * 017 T5 续段 S12–S17(signal / timeout / trace 守门)。
- *
- * 每条 fixture 一次确定性 run,行为由 stub-model + stub-tool 驱动。
+ * Loop-engine fixture matrix, covering the termination / signal / timeout /
+ * trace-gate paths. Each fixture is one deterministic run driven by a
+ * stub-model + stub-tool.
  */
 
 import { APIUserAbortError } from "@anthropic-ai/sdk";
@@ -390,7 +389,7 @@ describe("loop engine S9: protocol error turn", () => {
     const reg = createRegistry([tool]);
 
     // Executor spy: counts executeAll invocations and delegates to a real
-    // executor. S9 严格要求:bad turn 不进历史,且不触发工具执行。
+    // executor. Strict requirement: a bad turn never enters history and never triggers tool execution.
     let executorCallCount = 0;
     const realExec = createExecutor(reg);
     const executorSpy = Object.freeze({
@@ -464,9 +463,9 @@ describe("loop engine S9: protocol error turn", () => {
     assert.equal(result.finalText, null);
   });
 
-  // ADR-0094 SC4-SC5 (viewport API error): SDK APIError-like cause →
-  // RunResult.apiError 字段挂上 `{status, message}` 摘要;非 transport
-  // 失败 → 字段缺席(byte-stable)。
+  // ADR-0094 (viewport API error): an SDK APIError-like cause makes
+  // RunResult.apiError carry a `{status, message}` summary; non-transport
+  // failures → the field is absent (byte-stable).
   it("TransportRetryExhaustedError with APIError-like cause surfaces apiError summary on RunResult", async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
@@ -496,7 +495,7 @@ describe("loop engine S9: protocol error turn", () => {
     assert.equal(result.stopReason, "protocolError");
     assert.equal(result.messages.length, 1);
     assert.equal(result.finalText, null);
-    // apiError 字段挂上 SDK APIError 的 status + JSON 消息。
+    // The apiError field carries the SDK APIError's status + JSON message.
     assert.deepEqual(result.apiError, {
       status: 404,
       message:
@@ -1200,8 +1199,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const { result, trace } = await p;
     assert.equal(result.stopReason, "cancelled");
     assert.equal(result.turnCount, 0);
-    // ADR-0108 无 prefix 分支：本步没有任何可钉住的流式块 → 不落 assistant，
-    // cancelled 仍写 user + interrupt system message（钉住块留史由 keep 面测试认证）。
+    // ADR-0108 no-prefix branch: this step has no pinnable streaming block → no assistant
+    // is landed; cancelled still writes user + interrupt system message (pinned-block
+    // history retention is certified by the keep-path tests).
     assert.equal(result.messages.length, 2);
     assert.equal(result.messages[0]!.role, "user");
     assert.equal(result.messages[1]!.role, "system");
@@ -1224,7 +1224,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
   });
 
   it("T4 #392: completed path does NOT append system interrupt (#392 G3 #388)", async () => {
-    // 守卫:非 cancelled 停因不能 append system 消息(只 cancelled 触发)。
+    // Guard: a non-cancelled stop reason must not append a system message (only cancelled triggers it).
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -1289,7 +1289,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const { result, trace } = await p;
     assert.equal(result.stopReason, "cancelled");
     // History grew: seed user + assistant(tool_use) + user(tool_result)
-    // + system interrupt (#392 T4, transcript 一等公民, append 在末尾)。
+    // + system interrupt (first-class transcript entry, appended at the tail).
     assert.equal(result.messages.length, 4);
     assert.equal(result.messages[1]!.role, "assistant");
     assert.equal(result.messages[2]!.role, "user");
@@ -1356,9 +1356,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
         }),
       ],
     });
-    // Handler 慢于 toolTimeoutMs → Executor 的 per-call race 先命中,该条
-    // result 落 execution_failed "timeout"(ADR-0005);signal 未 abort,
-    // 故 loop 不得把回合判 timeout(ADR-0091)。
+    // Handler slower than toolTimeoutMs → the Executor's per-call race hits
+    // first and that result lands as execution_failed "timeout" (ADR-0005);
+    // the signal never aborts, so the loop must not judge the turn as timeout (ADR-0091).
     const slowToolDef: ToolDef = Object.freeze({
       name: "slow",
       description: "stub slow",
@@ -1377,7 +1377,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       maxTurns: 5,
       toolTimeoutMs: 20,
     });
-    // 回合继续并消费第二个模型回应 → completed,非 timeout。
+    // The turn continues and consumes the second model response → completed, not timeout.
     assert.equal(result.stopReason, "completed");
     assert.notEqual(result.stopReason, "timeout");
     assert.equal(result.turnCount, 2);
@@ -1390,15 +1390,15 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     };
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
-    // 工具回合(index 0)的 trace:未按 timeout 停,cancelKind 为 none,
-    // 但该条 toolCalls 仍是 execution_failed "timeout"。
+    // Trace of the tool turn (index 0): not stopped as timeout, cancelKind none,
+    // but its toolCalls entry is still execution_failed "timeout".
     const toolTurn = trace.turns.find((t) => t.toolCalls.length > 0)!;
     assert.ok(toolTurn, "expected a turn trace carrying the tool call");
     assert.equal(toolTurn.cancelKind, "none");
     assert.equal(toolTurn.toolCalls.length, 1);
     assert.equal(toolTurn.toolCalls[0]!.kind, "execution_failed");
     assert.equal(toolTurn.toolCalls[0]!.message, "timeout");
-    // 末回合 = completed 的纯文本收尾,cancelKind 仍 none。
+    // Last turn = the completed plain-text wrap-up, cancelKind still none.
     const last = trace.turns[trace.turns.length - 1]!;
     assert.equal(last.cancelKind, "none");
     assert.equal(last.toolCalls.length, 0);
@@ -1423,12 +1423,12 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
       controller.signal
     );
-    // 回合钟以 reason 恰为 "turn-timeout" 的 abort 抵达 → 才落回合 timeout (ADR-0091)。
+    // Only an abort whose reason is exactly "turn-timeout" lands the turn as timeout (ADR-0091).
     setTimeout(() => controller.abort("turn-timeout"), 10);
     const { result, trace } = await p;
     assert.equal(result.stopReason, "timeout");
-    // timeout 不 append system interrupt(仅 cancelled 触发):seed user +
-    // assistant(tool_use) + user(tool_result)。
+    // timeout does not append a system interrupt (only cancelled triggers it):
+    // seed user + assistant(tool_use) + user(tool_result).
     assert.equal(result.messages.length, 3);
     const last = trace.turns[trace.turns.length - 1]!;
     assert.equal(last.cancelKind, "timerTimeout");
@@ -1455,12 +1455,12 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
       controller.signal
     );
-    // 无 reason 的 caller abort(TUI/quit/SIGINT 形状)不得升级为 timeout。
+    // A reason-less caller abort (TUI/quit/SIGINT shape) must not escalate to timeout.
     setTimeout(() => controller.abort(), 10);
     const { result, trace } = await p;
     assert.equal(result.stopReason, "cancelled");
     assert.notEqual(result.stopReason, "timeout");
-    // cancelled 追加 system interrupt → 4 条。
+    // cancelled appends the system interrupt → 4 messages.
     assert.equal(result.messages.length, 4);
     assert.equal(result.messages[3]!.role, "system");
     const last = trace.turns[trace.turns.length - 1]!;
@@ -1532,7 +1532,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       0
     );
     assert.equal(trace.totals.toolErrorTotals.ok, okCount);
-    // S16 payload guard: NO toolCalls entry has input/output/payload.
+    // Payload guard: NO toolCalls entry has input/output/payload.
     for (const t of trace.turns) {
       for (const entry of t.toolCalls) {
         assert.equal("input" in entry, false);
@@ -1586,8 +1586,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    // T4:前两次 step(raceModel 直测 + run 主回路)走 abort+throw;后续
-    // (摘要轮次)立刻返回空文本结果,best-effort 跳过避免测试挂起。
+    // The first two steps (raceModel direct test + run main loop) abort+throw;
+    // later ones (summary rounds) return an empty-text result immediately,
+    // best-effort skip to avoid hanging the test.
     let stepCalls = 0;
     const adapter = Object.freeze({
       encodeUserText: (text: string) => makeNative({ role: "user", text }),
@@ -1637,8 +1638,8 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
     let receivedSignal: AbortSignal | undefined;
-    // T4:首次 step = 主回路(捕获 race composite);后续 step = 摘要轮次,
-    // 立即返回空文本避免被 200ms setTimeout 拖慢并污染 receivedSignal 断言。
+    // First step = main loop (captures the race composite); later steps = summary
+    // rounds, returning empty text immediately to avoid the 200ms setTimeout drag and polluting the receivedSignal assertion.
     let stepCalls = 0;
     const adapter = Object.freeze({
       encodeUserText: (text: string) => makeNative({ role: "user", text }),
@@ -1716,7 +1717,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
   });
 
   it("T2-new-5 (#98): childAbort() wins the race -> outcome.source === hostCancel", async () => {
-    // 025 #98:hostCancel 覆盖。adapter.step 永不 settle,childAbort() 先胜出。
+    // hostCancel coverage: adapter.step never settles, childAbort() wins the race first.
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
@@ -1724,7 +1725,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       encodeUserText: (text: string) => makeNative({ role: "user", text }),
       encodeToolResults: () => [],
       step: async () => {
-        // 永不 resolve:模拟一个挂起的 HTTP 请求。
+        // Never resolves: simulates a hung HTTP request.
         await new Promise<void>(() => undefined);
         return assistantResult({ texts: ["unreachable"] });
       },
@@ -1736,9 +1737,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       state,
       deps,
       signal: undefined,
-      timeoutMs: 5000, // 足够长,确保 timer 不先触发
+      timeoutMs: 5000, // long enough that the timer never fires first
     });
-    // childAbort() 在 adapter settle 之前调用 → hostCancel 胜出。
+    // childAbort() is called before the adapter settles → hostCancel wins.
     handle.childAbort();
     const outcome = await handle.outcome;
     assert.equal(outcome.source, "hostCancel");
@@ -1805,19 +1806,22 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
 });
 
 /**
- * #152 T5:loop 级 thinking 保留与回传(规则层 STUB/LOOP)。
+ * Loop-level thinking retention and replay (rule layer STUB/LOOP).
  *
- * 验收:
- *   1. 含 thinking 的 assistant 回合 → state.messages(append-only,全字段:thinking 文本 +
- *      signature;redacted 的 data);
- *   2. 下一轮 replay 的请求消息原样含 thinking blocks(回传 = 权威历史本身);
- *   3. LoopTrace 严格不含 payload(上下文词条锁);trace 不塞 thinking 内容;
- *   4. `projection.texts` 不含 thinking 文本(Q3 决议:thinking 非面向用户正文);
- *   5. `run().result.finalText` 派生不变。
+ * Acceptance:
+ *   1. an assistant turn containing thinking → state.messages (append-only,
+ *      full fields: thinking text + signature; redacted's data);
+ *   2. the next replay's request messages contain the thinking blocks verbatim
+ *      (replay = the authoritative history itself);
+ *   3. LoopTrace strictly excludes payload (context term lock); trace never
+ *      carries thinking content;
+ *   4. `projection.texts` excludes thinking text (thinking is not user-facing body);
+ *   5. `run().result.finalText` derivation unchanged.
  *
- * 切片:本文件不验证 thinking 展示开关(那是 Part B 的 cmd/format 关注点)。这里只
- * 断言权威历史层(结果 messages[?].content)的字段级深保留 + 下一次 step 入参
- * 对原 thinking blocks 的 byte-identical 回传。
+ * Slice: this file does not verify the thinking display switch (a cmd/format
+ * concern elsewhere). It only asserts field-level deep retention in the
+ * authoritative history layer (result messages[?].content) plus byte-identical
+ * replay of the original thinking blocks into the next step's input.
  */
 describe("loop engine T5 #152: thinking 保留与回传", () => {
   it("thinking + text + tool_use → append-only 进 state.messages 全字段", async () => {
@@ -1861,10 +1865,10 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
     });
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 2);
-    // 切到 assistant role 上: messages[1] 是含 thinking 的回合。
+    // On the assistant role: messages[1] is the turn carrying thinking.
     const assistant1 = result.messages[1]!;
     assert.equal(assistant1.role, "assistant");
-    // 块序:thinking → text → tool_use(Q2 决议要求)。
+    // Block order: thinking → text → tool_use (required by the agreed rule).
     assert.equal(assistant1.content.length, 3);
     const b0 = assistant1.content[0] as {
       type: "thinking";
@@ -1879,9 +1883,9 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
     const b2 = assistant1.content[2] as { type: "tool_use"; id: string };
     assert.equal(b2.type, "tool_use");
     assert.equal(b2.id, "t1");
-    // result.finalText 派生不变(纯文本拼接)。
+    // result.finalText derivation unchanged (plain-text concatenation).
     assert.equal(result.finalText, "final");
-    // 整树仍冻结。
+    // The whole tree remains frozen.
     assert.equal(Object.isFrozen(result.messages), true);
     assert.equal(Object.isFrozen(assistant1), true);
     assert.equal(Object.isFrozen(assistant1.content), true);
@@ -1927,8 +1931,8 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
   });
 
   it("回传契约:下一轮 step 收到的 state.messages 原样含 thinking blocks", async () => {
-    // 关键断言:replay 携带的 history 与权威历史 byte-identical。
-    // 用一个 stub-model 包装,捕获每次 step 看到的 state.messages 内容。
+    // Key assertion: the history carried by replay is byte-identical to the authoritative history.
+    // Wrap with a stub-model that captures the state.messages each step sees.
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -2001,18 +2005,18 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 2);
     assert.equal(capturedMessages.length, 2);
-    // Step 1 看到的初始 messages(还没 +thinking 块)= [user(go)]。
+    // Messages seen at step 1 (before the thinking block is appended) = [user(go)].
     assert.equal(capturedMessages[0]!.length, 1);
     assert.equal(capturedMessages[0]![0]!.role, "user");
-    // Step 2 看到的 messages 应包含第一次 reply 的 thinking block —— 这就是回传契约。
-    // state.messages 在 step 入口是上一步已 append 的全部历史,不含本步正在生成的
-    // assistant 回合(append-after-success)。
+    // Messages seen at step 2 must include the first reply's thinking block — that is the replay contract.
+    // At step entry, state.messages is the full history appended by previous steps,
+    // excluding the assistant turn this step is generating (append-after-success).
     const turn2Seen = capturedMessages[1]!;
-    // 期望 = [user(go), assistant1(think+text+tool_use), user(tool_result)] = 3 条。
+    // Expected = [user(go), assistant1(think+text+tool_use), user(tool_result)] = 3 messages.
     assert.equal(turn2Seen.length, 3);
     const assistantTurn1 = turn2Seen[1]!;
     assert.equal(assistantTurn1.role, "assistant");
-    // 原样含 thinking block:thinking 文本 + signature byte-identical。
+    // Contains the thinking block verbatim: thinking text + signature byte-identical.
     const tBlock = assistantTurn1.content[0] as {
       type: "thinking";
       thinking: string;
@@ -2021,26 +2025,27 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
     assert.equal(tBlock.type, "thinking");
     assert.equal(tBlock.thinking, "First turn reasoning.");
     assert.equal(tBlock.signature, "sig_first_turn");
-    // order: thinking 先于 text 先于 tool_use(Q2 块序要求)。
+    // Order: thinking before text before tool_use (required block order).
     const t1 = assistantTurn1.content[1] as { type: "text"; text: string };
     assert.equal(t1.text, "done");
     const t2 = assistantTurn1.content[2] as { type: "tool_use"; id: string };
     assert.equal(t2.type, "tool_use");
     assert.equal(t2.id, "t1");
-    // turn2 也必须含上一回合的 tool_result(user message)。
+    // turn2 must also carry the previous turn's tool_result (user message).
     const toolResultMsg = turn2Seen[2]!;
     assert.equal(toolResultMsg.role, "user");
     assert.equal(toolResultMsg.content[0]!.type, "tool_result");
-    // step2 入口看到的 messages 必须是 run.result.messages 的前缀(回传 = 权威历史)。
-    // run 结果多一条 assistant("all good"),所以前缀长度匹配 + 逐条 deepEqual。
+    // The messages seen at step2 entry must be a prefix of run.result.messages (replay = authoritative history).
+    // The run result has one extra assistant ("all good"), so match prefix length + per-message deepEqual.
     for (let i = 0; i < turn2Seen.length; i++) {
       assert.deepEqual(turn2Seen[i], result.messages[i]);
     }
   });
 
   it("replay 与 run().result.messages 对齐(head→head byte-equality of seen vs produced)", async () => {
-    // 设计意图:回传 = 权威历史本身。把 step 看到的消息数组的 deep-snapshot 与
-    // run 返回的 result.messages 进行 deep-equal,确保两者是同一棵冻结树。
+    // Design intent: replay = the authoritative history itself. Deep-equal the
+    // deep-snapshot of the messages array the step saw against run's
+    // result.messages, proving both are the same frozen tree.
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -2110,10 +2115,10 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
       maxTurns: 5,
     });
     assert.ok(captured, "captured must be defined");
-    // captured 是 step2 入口的权威历史(step 入口 = 上回合 append 后的状态),
-    // 即 result.messages 的前缀(后者多 step2 自己产出的 assistant 回合)。
-    // 回传 = 权威历史本身:逐条 deepEqual 证明 replay 发送的就是权威历史,
-    // 没有任何裁剪/重排/字段丢失。
+    // captured is the authoritative history at step2 entry (step entry = state after the previous append),
+    // i.e. a prefix of result.messages (which additionally has step2's own assistant turn).
+    // Replay = the authoritative history itself: per-message deepEqual proves the replay
+    // sent exactly the authoritative history with no truncation/reordering/field loss.
     assert.equal(captured!.length, 3);
     assert.equal(result.messages.length, 4);
     for (let i = 0; i < captured!.length; i++) {
@@ -2123,7 +2128,7 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
         `replay message ${i} must deep-equal authoritative history entry`
       );
     }
-    // 进一步:thinking block 在 captured[1] 头部,完整保留。
+    // Further: the thinking block is at the head of captured[1], fully retained.
     const assistantTurn = captured![1]!;
     const t0 = assistantTurn.content[0] as {
       type: "thinking";
@@ -2161,7 +2166,7 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
       maxTurns: 5,
     });
     assert.equal(result.stopReason, "completed");
-    // finalText 不含 thinking 文本。
+    // finalText contains no thinking text.
     assert.equal(result.finalText, "final answer");
     assert.ok(
       result.finalText !== null &&
@@ -2171,7 +2176,7 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
   });
 
   it("LoopTrace 严格不含 thinking payload(上下文词条锁)", async () => {
-    // 上下文锁:trace 只记录结构性元数据,绝不进 input/output/text/payload 等字段。
+    // Context lock: the trace records only structural metadata, never input/output/text/payload fields.
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -2205,7 +2210,7 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
       !serialized.includes("sig_trace_leak"),
       "trace JSON must NOT contain thinking signature"
     );
-    // 每个 turn 仍无 input / output / payload 字段(对照 S16 的硬约束)。
+    // Each turn still has no input / output / payload fields (the hard constraint from the trace-gate section).
     for (const t of trace.turns) {
       for (const tc of t.toolCalls) {
         assert.equal("input" in tc, false);
@@ -2230,7 +2235,7 @@ describe("T4 onStream pass-through (D3)", () => {
     });
     const registry = createRegistry([echo]);
     const executor = createExecutor(registry);
-    // 两个模型回合各自 emit:turn1 = tool_call_start,turn2 = text_delta×2。
+    // The two model turns each emit: turn1 = tool_call_start, turn2 = text_delta×2.
     const expected: ReadonlyArray<HarnessStreamEvent> = [
       { type: "tool_call_start", name: "echo", id: "t1" },
       { type: "text_delta", text: "hel" },
@@ -2323,13 +2328,13 @@ describe("T4 onStream pass-through (D3)", () => {
 });
 
 /**
- * #160 T4 (ADR-0008 Decision 5):RunResult.lastUsage = 最后一次成功模型调用的
- * usage;run 无成功模型调用时为 null。
+ * ADR-0008 Decision 5: RunResult.lastUsage = the usage of the last successful
+ * model call; null when the run had no successful model call.
  *
- * 验收锚点(双源裁决 #160 Resolution Q4 + ADR-0008 Decision 5):
- *   (a) 多轮 run(均带 usage)→ lastUsage = 最后一次成功调用的值;
- *   (b) 纯 stub 无 usage 的 run → lastUsage === null;
- *   (c) 首轮成功带 usage、随后失败(ProtocolError)→ lastUsage 保留首轮 usage。
+ * Acceptance anchors:
+ *   (a) multi-turn run (all with usage) → lastUsage = the last successful call's value;
+ *   (b) plain stub run without usage → lastUsage === null;
+ *   (c) first turn succeeds with usage, then fails (ProtocolError) → lastUsage keeps the first turn's usage.
  */
 describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () => {
   it("multi-turn run with usage: lastUsage reflects the last successful model call", async () => {
@@ -2384,7 +2389,7 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
     assert.equal(result.lastUsage!.outputTokens, 5);
     assert.equal(result.lastUsage!.cacheCreationInputTokens, 1);
     assert.equal(result.lastUsage!.cacheReadInputTokens, 2);
-    // 整对象 deepEqual,确保是 usage2(最后成功调用)而非 usage1。
+    // Whole-object deepEqual, ensuring it is usage2 (the last successful call), not usage1.
     assert.deepEqual(result.lastUsage, usage2);
   });
 
@@ -2412,8 +2417,8 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
   });
 
   it("first call succeeds with usage then later call fails: lastUsage keeps the last successful usage", async () => {
-    // 仅 1 个脚本响应(含 usage);第二轮 stub-model 脚本耗尽抛 ProtocolError →
-    // stopReason=protocolError,lastUsage 保留首轮的 usage。
+    // Only 1 scripted response (with usage); on round 2 the stub-model script is exhausted and throws ProtocolError →
+    // stopReason=protocolError, lastUsage keeps the first round's usage.
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -2454,15 +2459,15 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
 });
 
 /**
- * #224 W1: LoopEngineDeps.promptTools 注入缝(S2 行为中性)。
+ * LoopEngineDeps.promptTools injection seam (behavior-neutral).
  *
- * 用 spy-adapter 包住 stub-model,记录每次 step 收到的 request.tools:
- *   - 未传 promptTools → adapter.step 收到 registry.list()(同顺同内容);
- *   - 传 subset promptTools → adapter.step 收到的就是该数组。
+ * A spy-adapter wraps the stub-model and records the request.tools each step receives:
+ *   - no promptTools → adapter.step gets registry.list() (same order, same content);
+ *   - a subset promptTools → adapter.step gets exactly that array.
  */
 
 // ---------------------------------------------------------------------------
-// plan T3 / ADR-0013: reactive compact (PromptTooLongError → compact + retry)
+// ADR-0013: reactive compact (PromptTooLongError → compact + retry)
 // ---------------------------------------------------------------------------
 describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
   it("deps.compress 缺席 → PromptTooLongError 不触发 reactive compact,落 protocolError 分支", async () => {
@@ -2488,10 +2493,10 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       registry: reg,
       maxTurns: 5,
     });
-    // deps.compress 缺席 → reactive 入口不激活,直接 ProtocolError 分支。
+    // deps.compress absent → the reactive entry never activates, straight to the ProtocolError branch.
     assert.equal(result.stopReason, "protocolError");
-    // stepCalls = 主回路 1 次 + 异常停收尾摘要 epilogue 再尝试 1 次(均抛
-    // PromptTooLongError → catch-all 跳过)。reactive compact 未触发。
+    // stepCalls = 1 main-loop call + 1 more attempt from the abnormal-stop
+    // epilogue summary (both throw PromptTooLongError → skipped by catch-all). Reactive compact never triggered.
     assert.equal(stepCalls, 2);
   });
 
@@ -2515,10 +2520,10 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
         if (stepCalls === 1) {
           throw new PromptTooLongError("synthetic 400 prompt-too-long");
         }
-        // #467 step 2:full-compact 摘要轮(tools === undefined)返回空文本 →
-        // empty_response → fallback placeholder。本测试关心 fallback 路径下的
-        // reactive compact + retry 几何,摘要成功路径由 integration.test.ts
-        // 单独覆盖。
+        // Step 2: the full-compact summary round (tools === undefined) returns empty text →
+        // empty_response → fallback placeholder. This test cares about the
+        // reactive compact + retry geometry on the fallback path; the
+        // summary-success path is covered separately by integration.test.ts.
         if (request.tools === undefined) {
           return assistantResult({
             texts: [],
@@ -2534,9 +2539,10 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       },
     });
 
-    // 12 条 prior → state.messages = 13 条 → reactive compactMessages 裁到
-    // 边界占位 + 6 末尾。proactive 不触发:estimate << threshold(window 200000
-    // 的缺省闸 floor(0.95×)=190000,显式阈值 10000 更保险 < window)。
+    // 12 prior messages → state.messages = 13 → reactive compactMessages trims
+    // to boundary placeholder + 6 tail. Proactive does not trigger: estimate <<
+    // threshold (default gate on window 200000 is floor(0.95×)=190000; the
+    // explicit threshold 10000 is safer and still < window).
     const longPrior = Array.from({ length: 12 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i}` })
     );
@@ -2554,10 +2560,10 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // #467 step 2:1 throw + 1 full-compact 摘要步(fallback → placeholder)+ 1 retry success。
+    // Step 2: 1 throw + 1 full-compact summary step (fallback → placeholder) + 1 retry success.
     assert.equal(stepCalls, 3);
-    // reactive compact 生效:13 条 → 边界占位 + 6 末尾;加 user(Q) 已含在 13 内,
-    // 收尾 assistant +1。13 → (1 + 6) + 1(assistant) = 8。
+    // Reactive compact took effect: 13 → boundary placeholder + 6 tail; user(Q) already among the 13,
+    // final assistant +1. 13 → (1 + 6) + 1(assistant) = 8.
     assert.equal(
       result.messages.length,
       1 + 6 + 1,
@@ -2600,14 +2606,14 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       maxTurns: 5,
       compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
     });
-    // 1 首次 throw → compactMessages + retry → 2 仍 throw → attempted=true
-    // → runModelPhase 落 modelStop(protocolError);stepWithTrace 记录 turn error。
+    // 1 first throw → compactMessages + retry → 2 still throws → attempted=true
+    // → runModelPhase lands modelStop(protocolError); stepWithTrace records the turn error.
     assert.equal(result.stopReason, "protocolError");
-    assert.equal(stepCalls, 2); // 首次 + 一次压缩重试
+    assert.equal(stepCalls, 2); // first + one compression retry
   });
 
   it("PromptTooLongError 是 ProtocolError 子类 — 单次错误分支不破坏 ProtocolError 兜底", async () => {
-    // 验证依赖 instanceof ProtocolError 的其它分支未受影响。
+    // Verify the other branches relying on instanceof ProtocolError are unaffected.
     const { ProtocolError } = await import("../../src/harness/errors.ts");
     assert.ok(ProtocolError !== undefined);
     const err = new PromptTooLongError("x");
@@ -2618,14 +2624,14 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// plan compress-trigger-gate T3: proactive compact 接入 evaluateCompactTrigger +
-// full-summary fallback(messages ≤ DEFAULT_KEEP_RECENT 时降级到 runFullCompact)
+// Proactive compact wired into evaluateCompactTrigger + full-summary fallback
+// (falls back to runFullCompact when messages ≤ DEFAULT_KEEP_RECENT)
 // ---------------------------------------------------------------------------
 
-/** plan T3 stub:full-summary adapter — 区分"摘要步"与"普通 step"。
- *  - 摘要步:`tools === undefined` 且 state 最后一条 user 含 BASE_COMPACT_PROMPT
- *    → 按 `compactOutcomes` 脚本消费("summarized" / "adapter_failed");
- *  - 普通 step:消费 `stepScripts` 队列(tool call / completion)。 */
+/** Full-summary adapter stub — distinguishes "summary steps" from "normal steps".
+ *  - Summary step: `tools === undefined` and the last user message in state contains
+ *    BASE_COMPACT_PROMPT → consumed per the `compactOutcomes` script ("summarized" / "adapter_failed");
+ *  - Normal step: consumes the `stepScripts` queue (tool call / completion). */
 function makeFullSummaryAdapter(opts: {
   readonly stepScripts: ReadonlyArray<AssistantTurnResult>;
   readonly compactOutcomes: ReadonlyArray<"summarized" | "adapter_failed">;
@@ -2640,9 +2646,9 @@ function makeFullSummaryAdapter(opts: {
       role: "user",
       content: [{ type: "text", text: t }],
     }),
-    // 必须产出真实 tool_result 块:evaluateCompactTrigger 内部调
-    // preserveToolPairs 做 tool_use↔tool_result 配对守门,空数组会让
-    // tool_use 悬空 → throw "missing tool_result"(实测抓到的失败)。
+    // Must produce real tool_result blocks: evaluateCompactTrigger internally calls
+    // preserveToolPairs for tool_use↔tool_result pairing; an empty array would leave
+    // tool_use dangling → throw "missing tool_result" (a failure caught in practice).
     encodeToolResults: (
       results: ReadonlyArray<ToolExecutionResult>
     ): AnthropicContentBlock[] => toAnthropicToolResults(results),
@@ -2651,8 +2657,8 @@ function makeFullSummaryAdapter(opts: {
       request: { readonly tools?: unknown }
     ): Promise<AssistantTurnResult> => {
       if (request.tools === undefined) {
-        // full-compact 摘要步:仅当 user 文本含 compact prompt 才算;
-        // 否则是收尾摘要 epilogue,走 queue 消费。
+        // Full-compact summary step: only counts when the user text contains the compact prompt;
+        // otherwise it's the epilogue summary, consumed from queue.
         const lastUserText = [...state.messages]
           .reverse()
           .find((m) => m.role === "user")
@@ -2671,7 +2677,7 @@ function makeFullSummaryAdapter(opts: {
           if (outcome === "adapter_failed") {
             throw new Error("synthetic adapter_failed for test");
           }
-          // "summarized"(or undefined → 兜底为 summarized)
+          // "summarized" (or undefined → defaults to summarized)
           return assistantResult({
             texts: [
               `<analysis>scratch</analysis><summary>${summaryText}</summary>`,
@@ -2693,9 +2699,9 @@ function makeFullSummaryAdapter(opts: {
   });
 }
 
-/** plan proactive-compact-run-entry T2 夹具:包住 makeFullSummaryAdapter,
- * 记录每次「普通 step」(request.tools 在场)看到的 state.messages,
- * 用于断言首呼前 proactive 压缩是否已生效。摘要步不带 tools,不计入。 */
+/** Fixture wrapping makeFullSummaryAdapter: records the state.messages seen at each
+ * "normal step" (request.tools present), to assert whether proactive compression
+ * took effect before the first call. Summary steps carry no tools and are not counted. */
 function makeRunEntryCapturingAdapter(opts: {
   readonly stepScripts: ReadonlyArray<AssistantTurnResult>;
   readonly compactOutcomes: ReadonlyArray<"summarized" | "adapter_failed">;
@@ -2731,11 +2737,11 @@ function messageText(m: AnthropicNativeMessage): string {
 
 describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proactive", () => {
   it("prior 估量超闸 + 本 run 首次回复即 completed → 第一次 step 看到的已是压缩后历史", async () => {
-    // 锁句1/2 + plan T2 Acceptance:run() 起始 turnCount=0 不是豁免。
-    // 2 条 50000-char prior → estimate ≈ 33334 ≥ threshold 10000,
-    // 且 3 messages ≤ DEFAULT_KEEP_RECENT → compact_via_full_summary。
-    // 若首步前已压,普通 step 只会看到摘要产物(1 条 SUMMARY_PREAMBLE 消息),
-    // 而不是超闸 prior 原样。
+    // run() starting at turnCount=0 is not exempt.
+    // 2 prior messages of 50000 chars → estimate ≈ 33334 ≥ threshold 10000,
+    // and 3 messages ≤ DEFAULT_KEEP_RECENT → compact_via_full_summary.
+    // If compression happened before the first step, normal steps only see the
+    // summary product (1 SUMMARY_PREAMBLE message), not the over-gate prior verbatim.
     const longPrior = Array.from({ length: 2 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
     );
@@ -2766,7 +2772,11 @@ describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proact
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    assert.equal(adapter.normalStepMessages.length, 1, "本 run 只跑一次普通 step");
+    assert.equal(
+      adapter.normalStepMessages.length,
+      1,
+      "本 run 只跑一次普通 step"
+    );
     const firstCall = adapter.normalStepMessages[0]!;
     assert.equal(
       firstCall.length,
@@ -2782,8 +2792,8 @@ describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proact
   });
 
   it("prior 未超阈 → 首呼 messages 条数与内容与压缩前完全一致(不压)", async () => {
-    // 锁句3:未过 token 闸 → noop,本步照常调模型。首呼必须原样看到
-    // 3 条 prior + 1 条 user("Q"),无任何 compact 注入。
+    // Below the token gate → noop, the step calls the model as usual. The first
+    // call must see 3 prior + 1 user("Q") verbatim, with no compact injection.
     const shortPrior = Array.from({ length: 3 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} short` })
     );
@@ -2820,14 +2830,19 @@ describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proact
       [...shortPrior.map(messageText), "Q"],
       "未超阈时首呼 messages 必须与压缩前逐条一致"
     );
-    assert.equal(adapter.compactCalls.value, 0, "未超阈不得调用任何 compact 步骤");
+    assert.equal(
+      adapter.compactCalls.value,
+      0,
+      "未超阈不得调用任何 compact 步骤"
+    );
   });
 
   it("首步压缩成功后同一 turnCount 不重复扫描 → 有限 step 完成,compact 恰 1 次", async () => {
-    // 锁句2:成功压缩后锚点=当时 turnCount,防「同一 turnCount 上已成功压过」
-    // 的重复扫描;后续每步 gate 因 estimate 已低于闸走 noop。
-    // 若锚点更新或 noop 早退失效,compactOutcomes 队列耗尽后仍会被再次调用
-    // 计入 compactCalls — 断言恰 1 次即钉住不死循环。
+    // After a successful compact the anchor = current turnCount, preventing
+    // re-scans "already compacted at this turnCount"; each later gate step goes
+    // noop because the estimate is below the gate. If the anchor update or noop
+    // early-exit failed, compactCalls would keep counting after queue exhaustion
+    // — asserting exactly 1 pins the no-infinite-loop property.
     const longPrior = Array.from({ length: 2 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
     );
@@ -2862,31 +2877,39 @@ describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proact
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    assert.equal(adapter.compactCalls.value, 1, "compact 恰一次 — 成功后不重复扫描");
-    assert.equal(adapter.normalStepMessages.length, 2, "有限 2 次普通 step 即完成");
+    assert.equal(
+      adapter.compactCalls.value,
+      1,
+      "compact 恰一次 — 成功后不重复扫描"
+    );
+    assert.equal(
+      adapter.normalStepMessages.length,
+      2,
+      "有限 2 次普通 step 即完成"
+    );
   });
 });
 
 describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback", () => {
   it("messages.length=5 + 高 token 估算 → proactive 触发 full summary 路径,无死循环", async () => {
-    // 2 条 prior:每条 50000 chars → 单条 estimate = floor((50000+3)/4) = 12500;
-    // 2 条 raw total ≈ 25000;estimateMessagesTokens = ceil(25000 * 4/3) ≈ 33334。
-    // threshold=10000 远低于 estimate → evaluateCompactTrigger 必返回 full_summary。
-    // 关键路径推导(plans/proactive-compact-run-entry.md 锁句1:run 首步也检):
-    // run() 初始 state = 2 prior + 1 user("Q") = 3 messages。
-    // Iter 1:turnCount=0 > 锚点初值(-1)→ gate 进入,3 messages ≤ keepRecent
-    //   → compact_via_full_summary 成功 → state = [摘要 1 条],锚点=0;
-    //   step 1(tool call)→ state=3,turnCount=1。
-    // Iter 2:gate(1>0)→ 摘要+tool 尾巴 estimate ≪ 10000 → noop;
-    //   step 2(tool call)→ state=5,turnCount=2。
-    // Iter 3:gate(2>1)→ 5 ≤ 6 但 estimate 已低 → noop;step 3 completion → stop。
-    // 钉住的不变式:full_summary 成功一次后锚点更新、后续 gate 走 noop,
-    // 绝不出现「每次都重新触发又无效」的死循环。
+    // 2 prior messages of 50000 chars each → per-message estimate = floor((50000+3)/4) = 12500;
+    // 2 messages raw total ≈ 25000; estimateMessagesTokens = ceil(25000 * 4/3) ≈ 33334.
+    // threshold=10000 far below the estimate → evaluateCompactTrigger must return full_summary.
+    // Key path derivation (run's first step is also checked):
+    // run()'s initial state = 2 prior + 1 user("Q") = 3 messages.
+    // Iter 1: turnCount=0 > anchor init(-1)→ gate entered, 3 messages ≤ keepRecent
+    //   → compact_via_full_summary succeeds → state = [1 summary], anchor=0;
+    //   step 1(tool call)→ state=3, turnCount=1.
+    // Iter 2: gate(1>0)→ summary + tool tail estimate ≪ 10000 → noop;
+    //   step 2(tool call)→ state=5, turnCount=2.
+    // Iter 3: gate(2>1)→ 5 ≤ 6 but estimate already low → noop; step 3 completion → stop.
+    // Pinned invariant: after one full_summary success the anchor updates and later
+    // gates go noop — never a "re-triggered every time to no effect" loop.
     const longPrior = Array.from({ length: 2 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
     );
     const adapter = makeFullSummaryAdapter({
-      // step 1: tool call(compact 成功后首个普通 step)
+      // step 1: tool call (first normal step after compact succeeds)
       // step 2: tool call(gate noop)
       // step 3: completion(final turn)
       stepScripts: [
@@ -2923,14 +2946,14 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // T3 acceptance:runFullCompact 的 LLM 调用 = 1(成功一次后 lastCompactTurn 更新,
-    // 下一轮 gate 估 token 已低 → noop)。若旧路径死循环,此处会 >1。
+    // runFullCompact's LLM calls = 1 (after one success lastCompactTurn updates,
+    // the next gate's token estimate is low → noop). The old looping path would exceed 1 here.
     assert.equal(
       adapter.compactCalls.value,
       1,
       "compact 只调一次 — 摘要成功后 lastCompactTurn 更新,下一轮 gate 走 noop"
     );
-    // 摘要成功后 messages[0] = SUMMARY_PREAMBLE + FULL-SUMMARY。
+    // After the summary succeeds, messages[0] = SUMMARY_PREAMBLE + FULL-SUMMARY.
     const firstText = result.messages[0]!.content.filter(
       (b): b is { type: "text"; text: string } => b.type === "text"
     )
@@ -2947,25 +2970,26 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
   });
 
   it("连续 2 轮 token 超阈值 + 条数不足 → 摘要失败不更新锚点,下一轮再尝试(不死循环)", async () => {
-    // Setup:2 条 prior(1 LONG 50000 chars + 1 SHORT)+ 1 user("Q") = 3 初始
-    // messages,estimate ≫ 10000 阈值且 3 ≤ keepRecent → gate 判 full_summary。
-    // 关键路径推导(plans/proactive-compact-run-entry.md 锁句1-2:run 首步也检,
-    // 锚点只在成功压缩时更新):
-    //   Iter 1:turnCount=0 > 锚点(-1)→ full_summary 第 1 次失败
-    //     (adapter_failed)→ applyFullCompactSummary 返回 state 不变 → 锚点保持 -1;
-    //     step 1(tool call)→ state=5,turnCount=1。
-    //   Iter 2:gate(1 > -1)→ 5 ≤ 6 → full_summary 第 2 次成功 → state=[摘要],
-    //     锚点=1;step 2(tool call)→ state=3,turnCount=2。
-    //   Iter 3:gate(2 > 1)→ estimate 已低 → noop;step 3 completion → stop。
-    // 钉住的不变式:压缩失败绝不更新锚点 — 下一拍必须重新进 gate 再尝试,
-    // 既不吞失败成成功 step,也不因锚点误更新而永不重试。
+    // Setup: 2 prior(1 LONG 50000 chars + 1 SHORT)+ 1 user("Q") = 3 initial
+    // messages, estimate ≫ the 10000 threshold and 3 ≤ keepRecent → gate decides full_summary.
+    // Key path derivation (run's first step is also checked; the anchor updates
+    // only on a successful compaction):
+    //   Iter 1: turnCount=0 > anchor(-1)→ full_summary 1st attempt fails
+    //     (adapter_failed)→ applyFullCompactSummary returns state unchanged → anchor stays -1;
+    //     step 1(tool call)→ state=5, turnCount=1.
+    //   Iter 2: gate(1 > -1)→ 5 ≤ 6 → full_summary 2nd attempt succeeds → state=[summary],
+    //     anchor=1; step 2(tool call)→ state=3, turnCount=2.
+    //   Iter 3: gate(2 > 1)→ estimate already low → noop; step 3 completion → stop.
+    // Pinned invariant: a failed compaction never updates the anchor — the next
+    // tick must re-enter the gate and retry; neither swallowing the failure as a
+    // successful step nor never retrying due to a wrongly-updated anchor.
     const longPrior = [
       makeNative({ role: "user", text: `prior-0 ${"x".repeat(50_000)}` }),
       makeNative({ role: "user", text: "prior-1 short" }),
     ];
     const adapter = makeFullSummaryAdapter({
-      // step 1: tool call(第 1 次 compact 失败后,state 原样)
-      // step 2: tool call(第 2 次 compact 成功后,state=[摘要])
+      // step 1: tool call (after the 1st compact fails, state unchanged)
+      // step 2: tool call (after the 2nd compact succeeds, state=[summary])
       // step 3: completion(final turn)
       stepScripts: [
         assistantResult({
@@ -3001,14 +3025,14 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // compact 被调 2 次:第 1 次失败 → 锚点不更新 → 下一拍重检成功。
-    // 若失败也更新锚点("调过就跳过"),此处会 =1;正确实现 =2。
+    // compact is called twice: the 1st fails → anchor not updated → the next tick re-checks and succeeds.
+    // If failures also updated the anchor ("skip once tried"), this would be 1; the correct implementation = 2.
     assert.equal(
       adapter.compactCalls.value,
       2,
       "失败不更新 lastCompactTurn → 下一轮重检 → 再尝试,非死循环"
     );
-    // 最终 messages[0] = 第二次摘要成功后的 SUMMARY_PREAMBLE + FULL-SUMMARY。
+    // Final messages[0] = SUMMARY_PREAMBLE + FULL-SUMMARY after the 2nd summary succeeds.
     const firstText = result.messages[0]!.content.filter(
       (b): b is { type: "text"; text: string } => b.type === "text"
     )
@@ -3022,14 +3046,16 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
 });
 
 // ---------------------------------------------------------------------------
-// plan manual-compact-trigger T1: 手动 /compact 绕开 auto token 门 — 反向断言
-// 锁住「loop-engine proactive 路径不受影响」:估算低于缺省阈值时仍不主动压缩。
+// Manual /compact bypasses the auto token gate — reverse assertion locking that
+// the loop-engine proactive path is unaffected: still no proactive compaction
+// when the estimate is below the default threshold.
 // ---------------------------------------------------------------------------
 describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 proactive 不开火", () => {
   it("3 条 prior + 缺省阈值(167k)+ 短 step 文本 → messages 不含任何 compact 痕迹", async () => {
-    // 反向断言:proactive 仍走 evaluateCompactTrigger,缺省阈值 ≈ 167k 时短
-    // 历史远低于阈值 → noop,既不调 runFullCompact 也不调 compactMessages
-    // (即:无 preamble 摘要、无 boundary placeholder、adapter step 次数 = 期望 1)。
+    // Reverse assertion: proactive still goes through evaluateCompactTrigger; with the
+    // default threshold ≈ 167k a short history is far below → noop, calling neither
+    // runFullCompact nor compactMessages
+    // (i.e. no preamble summary, no boundary placeholder, adapter step count = expected 1).
     const prior = Array.from({ length: 3 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} short` })
     );
@@ -3041,7 +3067,7 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
           supplierStop: "success",
         }),
       ],
-      compactOutcomes: [], // proactive 不应触发,空队列(若被调会 throw)
+      compactOutcomes: [], // proactive must not trigger; empty queue (any call would throw)
     });
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
@@ -3054,23 +3080,23 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
         executor: exec,
         registry: reg,
         maxTurns: 3,
-        // thresholdTokens 故意缺席 → getAutoCompactThreshold 走
-        // floor(0.95 × 200000) = 190000,远高于 3 条 prior + 1 user 的估算。
+        // thresholdTokens deliberately absent → getAutoCompactThreshold uses
+        // floor(0.95 × 200000) = 190000, far above the estimate of 3 prior + 1 user.
         compress: { contextWindow: 200_000 },
       },
       undefined,
       { priorMessages: prior }
     );
     assert.equal(result.stopReason, "completed");
-    // 关键断言 1:makeFullSummaryAdapter 的 compactOutcomes 队列为空 —
-    // 任何 compact 步骤都会 shift 一次并最终 throw "exhausted"。若 step 1
-    // 之前没有调用,说明 proactive gate 走 noop,完全没碰 full-compact 路径。
+    // Key assertion 1: makeFullSummaryAdapter's compactOutcomes queue is empty —
+    // any compact step would shift once and eventually throw "exhausted". If
+    // nothing was called before step 1, the proactive gate went noop and never touched the full-compact path.
     assert.equal(
       adapter.compactCalls.value,
       0,
       "短历史 + 缺省阈值下 proactive 不应触发任何 compact 步骤"
     );
-    // 关键断言 2:messages 文本不含任何 compact 产物 — 不含 preamble / placeholder。
+    // Key assertion 2: message text contains no compact artifact — no preamble / placeholder.
     const allText = result.messages
       .map((m) =>
         m.content
@@ -3087,13 +3113,13 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
       !allText.includes("[compaction boundary"),
       "messages 中不得含 boundary placeholder(未走 windowed)"
     );
-    // 历史应 = 3 prior + 1 user + 1 assistant text(无任何 compact 注入)。
+    // History should be = 3 prior + 1 user + 1 assistant text (no compact injection).
     assert.equal(result.messages.length, 5);
   });
 });
 
 // ---------------------------------------------------------------------------
-// plan T4 / ADR-0011: 收尾摘要 epilogue (stop_summary 事件)
+// ADR-0011: closing-summary epilogue (stop_summary event)
 // ---------------------------------------------------------------------------
 describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
   it("protocolError 后 emit stop_summary;摘要不进 _messages;原始停因 = protocolError", async () => {
@@ -3113,7 +3139,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
         if (stepCalls === 1) {
           throw new ProtocolError("synthetic protocol error for summary test");
         }
-        // 摘要轮次:返回一段非空 text。
+        // Summary round: returns a non-empty text.
         return assistantResult({
           texts: ["summary text from epilogue"],
           toolCalls: [],
@@ -3129,8 +3155,8 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
       undefined,
       { onStream: (event) => received.push(event) }
     );
-    // 主回路 protocolError → stop;run() 调 epilogueSummary → 第二次 adapter.step
-    // 返回收尾文本 → stop_summary emit;原始停因 = protocolError(run 不续循环)。
+    // Main loop protocolError → stop; run() calls epilogueSummary → the second adapter.step
+    // returns the closing text → stop_summary emitted; the original stop reason stays protocolError (run does not resume the loop).
     assert.equal(result.stopReason, "protocolError");
     assert.equal(stepCalls, 2);
     const summary = received.find((e) => e.type === "stop_summary");
@@ -3139,7 +3165,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
       (summary as { type: "stop_summary"; text: string }).text,
       "summary text from epilogue"
     );
-    // 历史无 stop_summary 注入 — 只有 user(go) 种子消息(bad turn 未 append)。
+    // No stop_summary injected into history — only the user(go) seed message (the bad turn was not appended).
     assert.equal(result.messages.length, 1);
     assert.equal(result.messages[0]!.role, "user");
   });
@@ -3157,7 +3183,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
         }),
       ],
     });
-    // maxTurns=undefined + 一次成功 → completed,不进异常停 → 无 summary 事件。
+    // maxTurns=undefined + one success → completed, no abnormal stop → no summary event.
     const received: HarnessStreamEvent[] = [];
     const { result } = await run(
       "hi",
@@ -3191,7 +3217,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
 
-    // stub-scripted: 2 次 echo 调用,然后摘要轮(texts 非空)。
+    // stub-scripted: 2 echo calls, then a summary round (texts non-empty).
     const model = createStubModel({
       responses: [
         assistantResult({
@@ -3224,7 +3250,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
         return true;
       }
     );
-    // 收尾摘要 emit 一次 stop_summary。
+    // The closing summary emits stop_summary once.
     const summary = received.find((e) => e.type === "stop_summary");
     assert.ok(summary, "expected stop_summary event before re-throw");
     assert.equal(
@@ -3247,7 +3273,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
 
-    // stub 脚本 1 次 echo 调用(用尽),不再有响应 → 摘要 adapter.step 抛 ProtocolError。
+    // The stub script has 1 echo call (exhausted), no more responses → the summary adapter.step throws ProtocolError.
     const model = createStubModel({
       responses: [
         assistantResult({
@@ -3270,7 +3296,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
         return true;
       }
     );
-    // 摘要失败被 catch-all 吞;stop_summary 不 emit。
+    // The summary failure is swallowed by catch-all; stop_summary is not emitted.
     assert.ok(
       !received.some((e) => e.type === "stop_summary"),
       "summary failure must not emit stop_summary"
@@ -3291,7 +3317,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
 
-    // 3 次 echo 响应(预算 maxTurns=2 → throw 前用掉前 2 次;摘要无响应 → catch)。
+    // 3 echo responses (budget maxTurns=2 → the first 2 are spent before the throw; summary has no response → catch).
     const model = createStubModel({
       responses: [
         assistantResult({
@@ -3316,10 +3342,10 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
       ),
       (err: unknown) => err instanceof MaxTurnsExceeded
     );
-    // controller.abort() 之前 — 摘要级 signal 检查(signal 尚未 abort)。
-    // 为测"concurrent abort",在摘要尝试前 abort:
+    // Before controller.abort() — the summary-level signal check (signal not yet aborted).
+    // To test "concurrent abort", abort before the summary attempt:
     controller.abort();
-    // 摘要不应被 emit(此处 stub 队列已空,即便 signal 未 abort 也会 catch-all 跳过)。
+    // The summary must not be emitted (the stub queue is empty here; even with the signal unaborted, catch-all skips it).
     assert.ok(
       !received.some((e) => e.type === "stop_summary"),
       "no stop_summary emitted on summary-skip path"
@@ -3327,8 +3353,8 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
   });
 
   it("摘要 usage 照落 trace LlmCallRecord(status ok);摘要轮不计 turns", async () => {
-    // 直接观察 trace:timeout 后 epilogue 写一条额外 llm_call ok,
-    // 不写 turn(turns 计数仍守主循环)。
+    // Observe the trace directly: after timeout the epilogue writes one extra llm_call ok,
+    // but no turn (the turns count still tracks only the main loop).
     const { mkdtempSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -3363,9 +3389,9 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
       trace,
     });
     assert.equal(result.stopReason, "timeout");
-    // 主循环 turn: turnCount=0 时模型阶段 timeout → turn trace 1 条。
+    // Main-loop turn: model phase times out at turnCount=0 → 1 turn trace entry.
     assert.equal(runTrace.turns.length, 1);
-    // JSONL:error llm_call + turn + summary ok llm_call = 3。
+    // JSONL: error llm_call + turn + summary ok llm_call = 3 lines.
     const lines = readFileSync(join(tmpDir, "t4-sum.jsonl"), "utf8")
       .trim()
       .split("\n")
@@ -3453,7 +3479,7 @@ describe("loop engine #224 W1: promptTools injection seam", () => {
         }),
       ],
     });
-    // subset 数组:只暴露 echo,不暴露 noop(模拟"当前 turn 应进 prompt 的工具集")。
+    // Subset array: exposes only echo, not noop (simulates "the tool set that should enter the prompt for the current turn").
     const subsetTools: ReadonlyArray<ToolDef> = [echo];
     const capturedTools: unknown[] = [];
     const spyAdapter = Object.freeze({
@@ -3480,13 +3506,14 @@ describe("loop engine #224 W1: promptTools injection seam", () => {
       subsetTools,
       "tools must be exactly the promptTools() array when provided"
     );
-    // 与 registry.list() 不同:验证注入确被消费,而非回退全量。
+    // Unlike registry.list(): verify the injection is really consumed, not falling back to the full set.
     assert.notDeepEqual(capturedTools[0], reg.list());
   });
 });
 
 // ---------------------------------------------------------------------------
-// #406 T2: secret roundtrip 识别层 —— run() 用户文本进 LLM 前占位符替换
+// Secret roundtrip recognition layer — run() replaces user text with
+// placeholders before it reaches the LLM
 // ---------------------------------------------------------------------------
 describe("loop engine #406 T2: secret roundtrip 识别层", () => {
   it("T2-A1: secretRegistry 在场 → 首条 user 消息文本为占位符，明文不出现", async () => {
@@ -3516,7 +3543,7 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
     assert.equal(first.role, "user");
     const text = (first.content[0] as { type: "text"; text: string }).text;
     assert.equal(text, "这是 <<<SECRET_1>>>，帮我测");
-    // 明文绝不出现在任何编码消息中（含 assistant 回复、tool_result 等全树）
+    // Plaintext never appears in any encoded message (whole tree incl. assistant replies, tool_results, etc.)
     for (const m of result.messages) {
       const serialized = JSON.stringify(m);
       assert.ok(
@@ -3524,7 +3551,7 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
         "raw secret must not appear in any encoded message"
       );
     }
-    // registry 恰好记录 1 条
+    // The registry records exactly 1 entry
     assert.equal(secretRegistry.size, 1);
     assert.equal(
       secretRegistry.resolve("<<<SECRET_1>>>"),
@@ -3559,7 +3586,7 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
     ).text;
     assert.equal(firstUserText, "用 <<<SECRET_1>>> 处理");
 
-    // 二次 run：同一 registry + priorMessages 续传，新文本只含占位符
+    // Second run: same registry + priorMessages continuation, new text contains only the placeholder
     const model2 = createStubModel({
       responses: [
         assistantResult({
@@ -3582,19 +3609,19 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
       undefined,
       { priorMessages: firstRun.result.messages }
     );
-    // prior 消息原样保留占位符（首轮已替换 → 一路都是占位符）
+    // Prior messages keep the placeholder verbatim (already replaced in the first round → placeholder all the way through)
     const priorUserText = (
       secondRun.result.messages[0]!.content[0] as { type: "text"; text: string }
     ).text;
     assert.equal(priorUserText, "用 <<<SECRET_1>>> 处理");
-    // 新 user 消息 = 用户文本 verbatim（占位符形态不触发任何密钥 pattern）
+    // New user message = user text verbatim (the placeholder shape triggers no secret pattern)
     const newUserText = (
       secondRun.result.messages[2]!.content[0] as { type: "text"; text: string }
     ).text;
     assert.equal(newUserText, secondUserText);
-    // 占位符文本在 recognize 层 matched 为空（A2 去重验证）
+    // Placeholder text matches nothing at the recognize layer (dedup verification)
     assert.deepEqual(recognize(secondUserText, secretRegistry).matched, []);
-    // registry 不重复注册（size 仍 1）
+    // The registry does not re-register (size still 1)
     assert.equal(secretRegistry.size, 1);
     assert.equal(
       secretRegistry.resolve("<<<SECRET_1>>>"),
@@ -3603,7 +3630,7 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
   });
 
   it("T2-A3: 自定义 patterns 扩展被接线 — DEFAULT 与 extras 都在 roundtrip 中识别", async () => {
-    // API-level：createCompiledPatterns 合并 DEFAULT 7 + extras 1 = 8
+    // API-level: createCompiledPatterns merges DEFAULT 7 + extras 1 = 8
     assert.equal(createCompiledPatterns(["MY_[0-9]{6}"]).length, 8);
     const secretRegistry = createSecretRegistry({ patterns: ["MY_[0-9]{6}"] });
     assert.equal(secretRegistry.patterns.length, 8); // DEFAULT 7 + custom 1
@@ -3633,8 +3660,8 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
     const text = (
       result.messages[0]!.content[0] as { type: "text"; text: string }
     ).text;
-    // 扫描按 pattern 序：sk-（DEFAULT[1]）先注册 → SECRET_1；MY_（extras[0]）
-    // 后注册 → SECRET_2；输出按源文本位置重排 → MY_ 在前得 SECRET_2。
+    // Scanning follows pattern order: sk- (DEFAULT[1]) registers first → SECRET_1; MY_ (extras[0])
+    // registers later → SECRET_2; output is reordered by source-text position → MY_ comes first with SECRET_2.
     assert.equal(text, "<<<SECRET_2>>> + <<<SECRET_1>>>");
     assert.equal(secretRegistry.size, 2);
     assert.equal(
@@ -3663,12 +3690,12 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
       executor: exec,
       registry: reg,
       maxTurns: 5,
-      // 故意不传 secretRegistry → legacy 路径
+      // Deliberately omit secretRegistry → the legacy path
     });
     const text = (
       result.messages[0]!.content[0] as { type: "text"; text: string }
     ).text;
-    assert.equal(text, userText); // verbatim 明文
+    assert.equal(text, userText); // verbatim plaintext
   });
 
   it("T2 bonus: 占位符本身不被识别为密钥 — 模型可安全引用 <<<SECRET_N>>>", async () => {
@@ -3681,24 +3708,26 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #653 T3: loop tool 阶段对连续安全 tool_use 真批处理
-// (spec AC51 / AC52; #620 per-result commit preserved)
+// Loop tool phase: true batching of consecutive concurrency-safe tool_use
+// (per-result commit contract preserved)
 // ---------------------------------------------------------------------------
 //
-// 设计:runToolPhase 把 toolCallViews 按 registry.get(name).aci.isConcurrencySafe
-// 分组成 wave。size ≥ 2 的 wave 单次 executeAll([N]) 触发并发;size 1 的 wave
-// 保持原状(逐调用 executeAll([one]) 语义)。每个结果 settle 后立即 commit
-// (经 host 钩子上盘),与既有 #620 契约一致。
+// Design: runToolPhase groups toolCallViews into waves by
+// registry.get(name).aci.isConcurrencySafe. Waves of size ≥ 2 fire one
+// executeAll([N]) for real concurrency; size-1 waves keep the old
+// per-call executeAll([one]) semantics. Each result commits immediately
+// after it settles (flushed to disk via the host hook), per the existing contract.
 //
-// 关键断言:
-//   - AC51:连续安全 tool_use 重叠执行;结果写入顺序与 tool_use 顺序一致;
-//          ≥8 安全 stub 全 settle 不 hang。
-//   - AC52:runToolPhase 不再对全部 isConcurrencySafe:true 调用逐个
-//          executeAll([one]) —— T3 是驱动侧变化(从 [one] 改为 [N])。
+// Key assertions:
+//   - Consecutive safe tool_use calls overlap; write order matches tool_use order;
+//     ≥8 safe stubs all settle without hanging.
+//   - runToolPhase no longer issues executeAll([one]) per call for all
+//     isConcurrencySafe:true calls — the change is on the driver side ([one] → [N]).
 //
-// 测试约定:AciToolDef 通过 registry 暴露 aci 字段(registry 透传工具对象,
-// 包括 aci 字段;loop 用 (def as { aci?: ... }).aci 读取)。Stub tool 通过
-// 直接构造 AciToolDef(非 createStubTool)接入 aci 元数据。
+// Test convention: AciToolDef exposes the aci field through the registry (the
+// registry passes tool objects through, incl. aci; the loop reads it as
+// (def as { aci?: ... }).aci). Stub tools attach aci metadata by constructing
+// AciToolDef directly (not createStubTool).
 
 interface WaveInterval {
   readonly batchSize: number;
@@ -3745,7 +3774,7 @@ function makeUnsafeTool(name: string): ToolDef {
 }
 
 function makePlainTool(name: string): ToolDef {
-  // 无 aci 元数据(registry miss → 保守默认 unsafe)。
+  // No aci metadata (registry miss → conservative default: unsafe).
   return Object.freeze({
     name,
     description: `plain ${name}`,
@@ -3767,8 +3796,8 @@ function makeWaveRecordingExecutor(opts?: {
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const start = Date.now();
       const results: ToolExecutionResult[] = [];
-      // 真实并发:逐 call 启动(setTimeout 不阻塞其它 call),Promise.all 收口。
-      // 这里不模拟 sleep —— 由 handler 自己注入;此 spy 仅记录 batch 元数据。
+      // Real concurrency: launch per call (setTimeout does not block other calls), collect via Promise.all.
+      // No sleep simulated here — handlers inject their own; this spy only records batch metadata.
       for (const c of batch) {
         const thrown = opts?.throwById?.[c.id];
         if (thrown !== undefined) {
@@ -3833,8 +3862,8 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
     const elapsed = Date.now() - t0;
     assert.equal(result.stopReason, "completed");
     assert.equal(result.messages.length, 4);
-    // 关键断言:AC52 —— executeAll 仅被调 1 次,batchSize=3(连续安全批)。
-    // 旧路径(逐个 [one])会让 batchSize 全部 = 1 且调用次数 = 3。
+    // Key assertion: executeAll is called exactly once with batchSize=3 (one consecutive-safe batch).
+    // The old per-call path would give all batchSize=1 with 3 calls.
     assert.equal(
       intervals.length,
       1,
@@ -3842,7 +3871,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
     );
     assert.equal(intervals[0]!.batchSize, 3);
     assert.deepEqual([...intervals[0]!.ids], ["a", "b", "c"]);
-    // 顺序保持:tool_result 块序 = tool_use 顺序。
+    // Order preserved: tool_result block order = tool_use order.
     const resultBlocks = result.messages[2]!.content.filter(
       (b) => b.type === "tool_result"
     );
@@ -3852,7 +3881,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       ),
       ["a", "b", "c"]
     );
-    // 并发开销:3 × 30ms 串行 ≥ 90ms;并发下应明显更短(留 10ms 余量应对调度)。
+    // Concurrency timing: 3 × 30ms serial ≥ 90ms; concurrent should be clearly shorter (10ms headroom for scheduling).
     assert.ok(
       elapsed < 80,
       `expected overlap (≤80ms), got ${elapsed}ms (serial ≥90ms)`
@@ -3888,11 +3917,11 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       maxTurns: 5,
     });
     assert.equal(result.stopReason, "completed");
-    // 关键断言:executeAll 仅 1 次调用,batchSize=8(全安全批)。
+    // Key assertion: executeAll called exactly once with batchSize=8 (all-safe batch).
     assert.equal(intervals.length, 1);
     assert.equal(intervals[0]!.batchSize, 8);
     assert.deepEqual([...intervals[0]!.ids], ids);
-    // 顺序保持:8 条 tool_result 按输入顺序。
+    // Order preserved: 8 tool_results follow the input order.
     const blocks = result.messages[2]!.content.filter(
       (b) => b.type === "tool_result"
     );
@@ -3905,10 +3934,10 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
   });
 
   it("unsafe 调用单独成 wave(singleton),不参与并行集", async () => {
-    // 模式 [safe_a, unsafe_b, safe_c, safe_d] →
-    // 期望 wave1=[safe_a](仅 1 个 safe),
-    //       wave2=[unsafe_b](单元素),
-    //       wave3=[safe_c, safe_d](2 个连续 safe)。
+    // Pattern [safe_a, unsafe_b, safe_c, safe_d] →
+    // expected wave1=[safe_a] (only 1 safe),
+    //          wave2=[unsafe_b] (singleton),
+    //          wave3=[safe_c, safe_d] (2 consecutive safe).
     const tools = [
       makeSafeTool("safe_x", { sleepMs: 20 }),
       makeUnsafeTool("bash"),
@@ -3940,12 +3969,12 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       maxTurns: 5,
     });
     assert.equal(result.stopReason, "completed");
-    // 3 个 wave:singleton [a] / singleton [u] / pair [c, d]。
+    // 3 waves: singleton [a] / singleton [u] / pair [c, d].
     assert.equal(intervals.length, 3);
     assert.deepEqual([...intervals[0]!.ids], ["a"]);
     assert.deepEqual([...intervals[1]!.ids], ["u"]);
     assert.deepEqual([...intervals[2]!.ids], ["c", "d"]);
-    // 顺序保持:tool_result 顺序 = tool_use 顺序。
+    // Order preserved: tool_result order = tool_use order.
     const blocks = result.messages[2]!.content.filter(
       (b) => b.type === "tool_result"
     );
@@ -3989,7 +4018,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       maxTurns: 5,
     });
     assert.equal(result.stopReason, "completed");
-    // 旧路径契约:每个 unsafe / plain 工具单独 wave(逐个 [one])。
+    // Old-path contract: each unsafe / plain tool gets its own wave (per-call [one]).
     assert.equal(intervals.length, 3);
     for (const iv of intervals) {
       assert.equal(iv.batchSize, 1);
@@ -4002,10 +4031,10 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
   });
 
   it("混合 safe + unsafe: unsafe 仍是 wave-breaker", async () => {
-    // 5 调用:[safe_1, safe_2, unsafe, safe_3]
-    // 期望:wave1=[safe_1, safe_2](连续 2 个 safe),
-    //       wave2=[unsafe](单元素,breaker),
-    //       wave3=[safe_3](单元素 safe)。
+    // 5 calls: [safe_1, safe_2, unsafe, safe_3]
+    // expected: wave1=[safe_1, safe_2] (2 consecutive safe),
+    //           wave2=[unsafe] (singleton, breaker),
+    //           wave3=[safe_3] (singleton safe).
     const tools = [makeSafeTool("s"), makeUnsafeTool("u")];
     const reg = createRegistry(tools);
     const { executor, intervals } = makeWaveRecordingExecutor();
@@ -4074,10 +4103,10 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       maxTurns: 5,
     });
     assert.equal(result.stopReason, "completed");
-    // 单 wave,3 calls。
+    // Single wave, 3 calls.
     assert.equal(intervals.length, 1);
     assert.equal(intervals[0]!.batchSize, 3);
-    // 顺序保持:a → bad → c;1st / 3rd 走 ok,2nd 走 execution_failed。
+    // Order preserved: a → bad → c; 1st / 3rd go ok, 2nd goes execution_failed.
     const blocks = result.messages[2]!.content.filter(
       (b) => b.type === "tool_result"
     );
@@ -4105,9 +4134,9 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
   });
 
   it("safe wave 中 commit crash on 3rd:盘上 1st+2nd tool_result,无 3rd", async () => {
-    // 验证 T3 wave 行为的 #620 兼容:wave 内 commit 串行,前 N-1 commit 落盘,
-    // 第 N 个 throw 时盘上恰好 N-1 条 tool_result。3-safe-call wave + crash on
-    // 3rd commit = 1st + 2nd on disk,3rd 缺席(行为与 wave 串行 commit 一致)。
+    // Per-result-commit compatibility with wave behavior: commits within a wave are serial, the first N-1 commit to disk;
+    // when the Nth throws, exactly N-1 tool_results are on disk. 3-safe-call wave + crash on
+    // 3rd commit = 1st + 2nd on disk, 3rd absent (consistent with serial wave commits).
     const tools = [
       makeSafeTool("s_a"),
       makeSafeTool("s_b"),
@@ -4151,13 +4180,13 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
         return true;
       }
     );
-    // 4 次 commit:assistant + tr_a + tr_b + tr_c(崩溃);前 3 落盘。
+    // 4 commits: assistant + tr_a + tr_b + tr_c (crash); the first 3 land on disk.
     assert.equal(calls, 4);
     assert.equal(committed.length, 3);
     assert.equal(committed[0]![0]!.role, "assistant");
     assert.equal(committed[1]![0]!.role, "user");
     assert.equal(committed[2]![0]!.role, "user");
-    // 顺序保持:tr_a 在 tr_b 之前。
+    // Order preserved: tr_a before tr_b.
     const trA = committed[1]![0]!.content[0] as {
       type: "tool_result";
       tool_use_id: string;
@@ -4168,7 +4197,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
     };
     assert.equal(trA.tool_use_id, "a");
     assert.equal(trB.tool_use_id, "b");
-    // 盘上 JSONL:无 tr_c。
+    // On-disk JSONL: no tr_c.
     const trCContent = JSON.stringify(committed);
     assert.ok(
       !trCContent.includes('"tool_use_id":"c"'),
@@ -4248,9 +4277,10 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
   });
 
   it("并发 onSettled 重入: commit 不重叠、批次不丢 (worker transcript race 回归)", async () => {
-    // 复现 worker 崩溃根因: 同一 assistant 消息的并行 tool_use 让两个 onSettled
-    // 回调各自触发 flushPrefix, 在 commit 的 await 处交叠 → 并发 read-modify-write.
-    // 主会话有 hub serialize queue 兜底, worker transcript 没有 → 重复 event id.
+    // Reproduces the worker crash root cause: parallel tool_use in the same assistant
+    // message makes two onSettled callbacks each trigger flushPrefix, overlapping at the
+    // commit's await → concurrent read-modify-write. The main session has the hub
+    // serialize queue as a backstop; the worker transcript does not → duplicate event id.
     const tools = [makeSafeTool("s_a"), makeSafeTool("s_b")];
     const reg = createRegistry(tools);
     const executor = Object.freeze({
@@ -4271,7 +4301,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
           toolUseId: c.id,
           payload: [{ type: "text" as const, text: `executed:${c.name}` }],
         }));
-        // 故意交错: 回调 A 挂起在 commit 的 await 时让回调 B settle。
+        // Deliberate interleaving: callback A parks at the commit's await while callback B settles.
         const pA = onSettled?.(results[0]!, 0);
         await new Promise((r) => setTimeout(r, 10));
         const pB = onSettled?.(results[1]!, 1);
@@ -4309,7 +4339,7 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
           (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
         );
       if (ids.length > 0) {
-        // tool_result commit 挂起 20ms, 给交错窗口。
+        // tool_result commit parks for 20ms, opening the interleaving window.
         await new Promise((r) => setTimeout(r, 20));
         committedToolResults.push(...ids);
       }
@@ -4323,25 +4353,28 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       commitMessages,
     });
     assert.equal(result.stopReason, "completed");
-    // 核心不变式: commit 永不并发重叠。
+    // Core invariant: commits never overlap concurrently.
     assert.equal(
       maxInFlight,
       1,
       `expected serial commits, got maxInFlight=${maxInFlight}`
     );
-    // 不丢批次且按 tool_use 顺序。
+    // No batch is lost and the order follows tool_use order.
     assert.deepEqual(committedToolResults, ["a", "b"]);
   });
 });
 
 /**
- * ADR-0108 interrupt frozen prefix keep —— 模型在途 cancelled closeout keep 面。
+ * ADR-0108 interrupt frozen-prefix keep — the keep path for in-flight model
+ * cancellation closeout.
  *
- * 夹具适配器（tests/_helpers/stream-keep-fixtures.ts 共享）按脚本 step 依次:
- * 先同步 emit text_delta(与墙上 draft 同源字节),
- * 再返回脚本结果或悬挂至 signal abort(模拟模型在途永不交付)。悬挂由 raceModel
- * 的 callerAbort 胜出收场,不等待完整 model step。脚本耗尽后的调用(收尾摘要轮)
- * 立即返回空结果,避免测试挂起。
+ * The fixture adapter (shared from tests/_helpers/stream-keep-fixtures.ts)
+ * follows scripted steps: first it synchronously emits text_delta (the same
+ * bytes as the wall-clock draft), then returns the scripted result or hangs
+ * until signal abort (simulating a never-delivering in-flight model). The hang
+ * resolves when raceModel's callerAbort wins, without waiting for the full
+ * model step. Calls after the script is exhausted (the closing summary round)
+ * return empty results immediately to avoid test hangs.
  */
 const makeStreamingAdapter = (
   steps: ReadonlyArray<StreamKeepStep>
@@ -4378,16 +4411,16 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
     assert.equal(result.messages.length, 3);
     assert.equal(result.messages[0]!.role, "user");
     assert.equal(result.messages[1]!.role, "assistant");
-    assert.equal(textOf(result.messages[1]!), "## Head\n\nFirst paragraph.\n\n");
+    assert.equal(
+      textOf(result.messages[1]!),
+      "## Head\n\nFirst paragraph.\n\n"
+    );
     assert.equal(result.messages[2]!.role, "system");
     assert.equal(textOf(result.messages[2]!), "Interrupted by user.");
-    // invariant 7 顺序:先 assistant(可带 pending 注入)commit,再 interrupt。
+    // Ordering: commit assistant (possibly carrying pending injections) first, then interrupt.
     assert.deepEqual(
       batches.map((b) => b.map((m) => m.role)),
-      [
-        ["assistant"],
-        ["system"],
-      ]
+      [["assistant"], ["system"]]
     );
   });
 
@@ -4395,7 +4428,9 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
     const reg = createRegistry([
       createStubTool({ name: "noop", next: () => ({}) }),
     ]);
-    const adapter = makeStreamingAdapter([{ deltas: ["Single growing block"] }]);
+    const adapter = makeStreamingAdapter([
+      { deltas: ["Single growing block"] },
+    ]);
     const batches: AnthropicNativeMessage[][] = [];
     const controller = new AbortController();
     const p = run(
@@ -4490,7 +4525,7 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
     setTimeout(() => controller.abort(), 10);
     const { result } = await p;
     assert.equal(result.stopReason, "cancelled");
-    // user, assistant(## A + tool_use), user(tool_result), assistant(## B 前缀), system
+    // user, assistant(## A + tool_use), user(tool_result), assistant(## B prefix), system
     assert.deepEqual(
       result.messages.map((m) => m.role),
       ["user", "assistant", "user", "assistant", "system"]
@@ -4498,17 +4533,18 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
     const turnOne = result.messages.filter(
       (m) => m.role === "assistant" && textOf(m).includes("## A")
     );
-    assert.equal(turnOne.length, 1); // 已完成回合不重复 keep
+    assert.equal(turnOne.length, 1); // a completed turn is not kept twice
     assert.equal(textOf(result.messages[3]!), "## B\n\nbody b\n\n");
     assert.equal(textOf(result.messages[4]!), "Interrupted by user.");
   });
 
   it("SC7 / invariant 4: abort while tool in flight after delivered turn -> guard blocks re-keep (four-message shape)", async () => {
-    // 钉住 closeoutInFlightStop 的 modelInFlight 守卫:模型已交付带 tool_call
-    // 的回合(流式 text_delta 已随正常路径 append 为 assistant)后,工具在途
-    // 取消时 closeout 不得再把缓冲里同一段文本二次 keep 成重复 assistant,
-    // 否则 SC7 四条消息形状(user/assistant(tool_use)/user(tool_result)/
-    // system)静默回退成五条。
+    // Pins closeoutInFlightStop's modelInFlight guard: once the model has delivered a
+    // tool_call turn (streamed text_delta already appended as assistant via the normal
+    // path), cancelling while tools are in flight must not let closeout keep the same
+    // buffered text a second time as a duplicate assistant — otherwise the agreed
+    // four-message shape (user/assistant(tool_use)/user(tool_result)/system) would
+    // silently regress to five.
     const slowTool = createStubSignalTool({ name: "slow", delayMs: 100 });
     const reg = createRegistry([slowTool]);
     const adapter = makeStreamingAdapter([
@@ -4531,7 +4567,7 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
       },
       controller.signal
     );
-    // 模型步瞬时完成,10ms 时落在 slow 工具(100ms)在途窗口内。
+    // The model step completes instantly; at 10ms we are inside the slow tool's (100ms) in-flight window.
     setTimeout(() => controller.abort(), 10);
     const { result } = await p;
     assert.equal(result.stopReason, "cancelled");
@@ -4539,7 +4575,7 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
       result.messages.map((m) => m.role),
       ["user", "assistant", "user", "system"]
     );
-    // 已交付回合只有一份:无第二个 assistant、无 keep 前缀文本泄漏。
+    // The delivered turn exists exactly once: no second assistant, no keep-prefix text leak.
     assert.equal(
       result.messages.filter((m) => m.role === "assistant").length,
       1
@@ -4575,7 +4611,7 @@ describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
       assert.ok(err instanceof MessageCommitError);
       return true;
     });
-    // 只尝试过 prefix commit;不得再 commit interrupt(孤儿 interrupt 禁止)。
+    // Only the prefix commit was attempted; the interrupt must not be committed again (orphan interrupt forbidden).
     assert.deepEqual(
       attempted.map((b) => b.map((m) => m.role)),
       [["assistant"]]
@@ -4607,14 +4643,17 @@ describe("ADR-0108 model-in-flight timeout keeps frozen prefix, never user-cance
     assert.equal(result.stopReason, "timeout");
     assert.equal(result.messages.length, 2);
     assert.equal(result.messages[0]!.role, "user");
-    assert.equal(textOf(result.messages[1]!), "## Head\n\nFirst paragraph.\n\n");
-    // ADR-0091:钟 abort ≠ user cancel —— 不得出现 interrupt system 消息。
+    assert.equal(
+      textOf(result.messages[1]!),
+      "## Head\n\nFirst paragraph.\n\n"
+    );
+    // ADR-0091: timer abort ≠ user cancel — no interrupt system message may appear.
     assert.ok(!result.messages.some((m) => m.role === "system"));
     assert.ok(
       !result.messages.some((m) => textOf(m) === "Interrupted by user."),
       "timeout must not carry the user-cancel copy"
     );
-    // keep 刀只 commit assistant;interrupt 批次不存在。
+    // The keep path commits only the assistant; no interrupt batch exists.
     assert.deepEqual(
       batches.map((b) => b.map((m) => m.role)),
       [["assistant"]]
@@ -4627,7 +4666,9 @@ describe("ADR-0108 model-in-flight timeout keeps frozen prefix, never user-cance
     const reg = createRegistry([
       createStubTool({ name: "noop", next: () => ({}) }),
     ]);
-    const adapter = makeStreamingAdapter([{ deltas: ["Single growing block"] }]);
+    const adapter = makeStreamingAdapter([
+      { deltas: ["Single growing block"] },
+    ]);
     const batches: AnthropicNativeMessage[][] = [];
     const { result } = await run("x", {
       adapter,

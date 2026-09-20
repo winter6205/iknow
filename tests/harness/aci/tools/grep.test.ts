@@ -1,44 +1,53 @@
 /**
- * grep 工具 — 搜面契约（specs/aci-file-search-surface.md D2–D7 / SC4–SC10）。
+ * grep tool — search-surface contract.
  *
- * 覆盖策略（ADR-0089 后）：单引擎的形状 / 渲染 / 分页 / glob / type / `also`
- * / context 等行为在 **rg** 这条生产默认路径上钉一遍；Node 降级路径在专属
- * describe 块里用 `engineBinaryPath` 指向不存在路径驱动 `unavailable → nodeScan`，
- * 钉「ENOENT 时仍能搜、调用不拒绝、分页 / context / count 同形」。两条引擎
- * 不被强行同判（命中集允许不同），见「grep — SC9 自带引擎缺席 → Node 遍历
- * + JS RegExp」块的注释。
+ * Coverage strategy (post ADR-0089): shape / rendering / paging / glob / type /
+ * `also` / context behaviour is pinned once on the **rg** path (the production
+ * default); the Node fallback path gets its own describe block driven by pointing
+ * `engineBinaryPath` at a nonexistent path (`unavailable → nodeScan`) to pin
+ * "searching still works on ENOENT, calls are not rejected, paging / context /
+ * count keep the same shape". The two engines are not forced through identical
+ * assertions (their hit sets may differ) — see the comments in the
+ * `grep — SC9 自带引擎缺席 → Node 遍历 + JS RegExp` ("engine absent → Node
+ * traversal + JS RegExp") block.
  *
- * 引擎选择（`GrepEngine`）：
- *   - `node`  —— `engineBinaryPath` 指向不存在的路径：驱动 D6 降级（不走真
- *                rg，所以测试只验 Node 路径的形状）。
- *   - `rg`    —— 真实安装根二进制。
+ * Engine selection (`GrepEngine`):
+ *   - `node` —— `engineBinaryPath` points at a nonexistent path: drives the
+ *                fallback (never invokes real rg, so those tests verify the Node
+ *                path shape only).
+ *   - `rg`   —— the real binary under the install root.
  *
- * **引擎在场是硬前置**：本文件覆盖 rg 的生产路径，而 rg 的命中 / argv /
- * `--crlf` / 遍历语义必须在真二进制上验。缺席 = 整文件 fail，文案点名修复
- * 命令 `npm run install:search-engine`，不提供「跳过继续」的分支。
+ * **Engine presence is a hard precondition**: this file covers rg's production
+ * path, and rg's hits / argv / `--crlf` / traversal semantics can only be
+ * verified against the real binary. Absent engine = whole file fails, with the
+ * fix command `npm run install:search-engine` named in the message; there is no
+ * "skip and continue" branch.
  *
- * CI 形状：本文件已在 test-fast / test-full 的 `--exclude` 名单里（两个 job
- * 都跑在无网 runner 上，装不了二进制），硬前置因此不会把 CI 变红；CI 守卫
- * `scripts/ci-check-test-excludes.ts` 仍是这条排除的 SSOT。
+ * CI shape: both CI jobs run offline, so this file is already in test-fast /
+ * test-full's `--exclude` lists and the hard precondition cannot redden CI;
+ * `scripts/ci-check-test-excludes.ts` remains the SSOT for that exclusion.
  *
- * 覆盖契约：
- *   - D2 出法：paths（默认，唯一相对路径）/ content（`path:line:text`）/
- *     count（`path:条数` + `total:` = 切片前总数）；入参别名
- *     `files_with_matches` 归一为 paths（不是第四种出法）。
- *   - D3 分页：`offset` + `head_limit`（默认 50、硬顶 2000）切**已排序**名单；
- *     排序在切片前；越过末尾且本次有命中 → 精确 `No entries at this offset`；
- *     无匹配 → 空串。`limit` 是退役名（typed 拒绝，文案点名 head_limit）。
- *   - D4 收窄：`path` / `glob` / `type` 并列；未知 type 与坏正则是两种 typed
- *     错误，文案互不包含对方关键词（SC10）。
- *   - D5 行窗：`also` + `within_lines` 是**过滤**；窗内没有第二段 → 该命中
- *     不算（SC8）。
- *   - D6 / SC9 / ADR-0089：
- *       - rg 在场：匹配只出 rg（不再 JS 再滤）；rg 自己 rc=2 → handler 转
- *         `search engine rejected the query`，不是合成的「两边对齐」错误。
- *       - rg 缺席：Node 遍历 + JS `RegExp`，调用仍成功。
- *   - SC4/SC5/SC6/SC7 各自的形状断言。
- *   - 旧契约保持：containment 越界拒绝、abort typed 拒绝、超长行截断、
- *     aci 元数据。
+ * Coverage contract:
+ *   - Output faces: paths (default, relative paths only) / content
+ *     (`path:line:text`) / count (`path:count` + `total:` = pre-slice total);
+ *     the input alias `files_with_matches` normalizes to paths (not a fourth
+ *     output face).
+ *   - Paging: `offset` + `head_limit` (default 50, hard cap 2000) slice the
+ *     **sorted** list; sorting happens before slicing; past the end with hits
+ *     present → exact `No entries at this offset`; no matches → empty string.
+ *     `limit` is a retired name (typed rejection naming head_limit).
+ *   - Narrowing: `path` / `glob` / `type` in parallel; unknown type and bad
+ *     regex are two typed errors whose messages never contain each other's
+ *     keywords.
+ *   - Line window: `also` + `within_lines` is a **filter**; a hit with no second
+ *     segment inside the window is dropped.
+ *   - Fallback / ADR-0089:
+ *       - rg present: matches come from rg only (no second JS filter); rg's own
+ *         rc=2 → handler emits `search engine rejected the query`, not a
+ *         synthesized "both engines agree" error.
+ *       - rg absent: Node traversal + JS `RegExp`, calls still succeed.
+ *   - Legacy contract retained: containment rejection, abort typed rejection,
+ *     over-long line truncation, aci metadata.
  */
 
 import assert from "node:assert/strict";
@@ -82,10 +91,11 @@ afterEach(async () => {
 });
 
 /**
- * 本机安装根上钉死的引擎二进制。
+ * The engine binary pinned to the local install root.
  *
- * D6 的对照臂，**硬前置**：缺席即整文件 fail（不是 skip），文案给出修复命令。
- * 覆盖 `undefined`（该平台无资产）与「路径在、文件不在」两种缺席形态。
+ * The control arm for the fallback, **hard precondition**: absent = whole file
+ * fails (not skip), message gives the fix command. Covers both absence shapes:
+ * `undefined` (no asset for this platform) and "path present, file missing".
  */
 const installedEngine: string | undefined = engineBinaryPath(
   resolveInstallRoot(),
@@ -109,17 +119,20 @@ if (installedEngine === undefined || !existsSync(installedEngine)) {
 }
 
 /**
- * 两条引擎的构造器。
+ * Constructors for both engines.
  *
- * `node` 用「安装根二进制不存在」驱动 D6 降级（不是注入假 spawn —— 那会绕过
- * 真实的 `runRgEngine → isUnavailable → nodeScan` 接线）。
+ * `node` drives the fallback by "binary missing from the install root" (no fake
+ * spawn injection — that would bypass the real
+ * `runRgEngine → isUnavailable → nodeScan` wiring).
  *
- * ADR-0089 之后两引擎不再被同一条断言表比对：每条用例按它想验的路径选
- * `rg` / `node` / 两者都需要（前者直接 `toolFor(root, "rg")`，后者在
- * `bothEngines` 里各跑一遍）。`bothEngines` 现在仍存在 —— 形状 / 渲染 /
- * 体积 / glob / type 等下游共用分派不挑引擎，两条路径都得验；handler 级
- * 接受集差异（`\s` / `\n` / look-around / 类转义的 Unicode 口径）则走单引擎
- * 用例。
+ * Post ADR-0089 the two engines are no longer compared against one shared
+ * assertion table: each case picks `rg` / `node` / both according to the path it
+ * wants to verify (the first two call `toolFor(root, "rg")` directly; cases
+ * needing both run inside `bothEngines`). `bothEngines` still exists — shape /
+ * rendering / size / glob / type and other shared downstream dispatch is
+ * engine-agnostic and must be verified on both paths; handler-level accepted-set
+ * divergences (`\s` / `\n` / look-around / class-escape Unicode handling) go
+ * through single-engine cases.
  */
 const ENGINES = [{ name: "node" }, { name: "rg" }] as const;
 
@@ -138,13 +151,13 @@ function toolFor(
       ? { ...extra }
       : {
           ...extra,
-          // D6 判据：安装根没有这条二进制 → Node 降级。
+          // Binary missing from the install root → Node fallback.
           engineBinaryPath: join(root, "__no_such_engine__", "rg"),
         };
   return createGrepTool(root, deps);
 }
 
-/** 同一组断言在两条引擎上各跑一遍：覆盖下游共用分派（与引擎路径无关的部分）。 */
+/** Run the same assertions once per engine: covers the shared downstream dispatch (engine-agnostic parts). */
 async function bothEngines(
   body: (
     makeTool: (root: string) => ReturnType<typeof createGrepTool>
@@ -155,7 +168,7 @@ async function bothEngines(
   }
 }
 
-// ───────────────────────── schema / aci 形状 ─────────────────────────
+// ───────────────────────── schema / aci shape ─────────────────────────
 
 describe("createGrepTool — schema/aci shape", () => {
   it("name === 'grep'", async () => {
@@ -165,11 +178,11 @@ describe("createGrepTool — schema/aci shape", () => {
   });
 
   it("inputSchema enforces pattern required，且退役字段的 typed 指引可达模型（D4）", async () => {
-    // 反证式：原 schema 的 `additionalProperties:false` 会让 ajv 的
-    // `must NOT have additional properties` 抢先于 handler 的
-    // `rejectRetiredLimitField` 命中，SC10 承诺的指引进不了模型。
-    // 这里钉「经 createExecutor → executeAll 的生产路径」拿到的是那条指引，
-    // 而不是 ajv 的泛化消息。
+    // Counter-proof: with `additionalProperties:false` in the schema, ajv's
+    // `must NOT have additional properties` would fire before the handler's
+    // `rejectRetiredLimitField`, so the retired-field guidance promised to the
+    // model would never reach it. Pin that the production path
+    // (createExecutor → executeAll) yields that guidance, not ajv's generic message.
     const root = await makeScratch("grep-shape-");
     const tool = createGrepTool(root);
     const schema = tool.inputSchema as Record<string, unknown>;
@@ -216,8 +229,9 @@ describe("createGrepTool — schema/aci shape", () => {
       "count",
       "files_with_matches",
     ]);
-    // SSOT 漂移守卫：enum 必须从 `GREP_OUTPUT_VALUES` 派生。别名只加进归一表
-    // 而漏进 enum 时，ajv 会抢在 `readOutput` 之前拒掉它 —— 这条让漂移 fail loud。
+    // SSOT drift guard: the enum must derive from `GREP_OUTPUT_VALUES`. If an
+    // alias is added to the normalization table but not the enum, ajv rejects it
+    // before `readOutput` — this makes that drift fail loud.
     assert.deepEqual(schema.properties.output.enum, [...GREP_OUTPUT_VALUES]);
     assert.equal(schema.properties.output.default, "paths");
     assert.equal(schema.properties.glob.type, "string");
@@ -256,8 +270,9 @@ describe("createGrepTool — schema/aci shape", () => {
   });
 
   it("不带输出闸豁免声明（ADR-0083 只对 skill 内建落值）", async () => {
-    // grep 命中大文件时仍受 20000 兜底闸 + 引导语约束（用更精确 pattern /
-    // 缩小路径重调是可成立的恢复路径）。
+    // grep output on large files still goes through the 20000 fallback cap +
+    // guidance (re-calling with a tighter pattern / narrower path is a viable
+    // recovery path).
     const root = await makeScratch("grep-shape-");
     const tool = createGrepTool(root);
 
@@ -265,7 +280,7 @@ describe("createGrepTool — schema/aci shape", () => {
   });
 });
 
-// ───────────────────────── D2 出法 ─────────────────────────
+// ───────────────────────── output faces ─────────────────────────
 
 describe("grep — D2 出法", () => {
   it("默认 output=paths：唯一相对路径、无 `:行号:` 匹配行、条数 ≤50（SC4）", async () => {
@@ -348,9 +363,10 @@ describe("grep — D2 出法", () => {
   });
 
   it("别名通过生产校验闸（ajv → executor）后才到 handler 归一（SC1）", async () => {
-    // 反证式：schema 枚举不含别名时，executor 在 handler 之前就回
-    // `validation_failed`，别名永远到不了 `readOutput` 的归一逻辑。这条用例
-    // 走 createAciRegistry + createExecutor 的生产路径，钉住别名真的过了闸。
+    // Counter-proof: if the schema enum lacked the alias, the executor would
+    // return `validation_failed` before the handler, so the alias never reaches
+    // `readOutput`'s normalization. This case runs the production path
+    // (createAciRegistry + createExecutor) to pin that the alias really passes.
     const root = await makeScratch("grep-alias-schema-");
     await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
@@ -505,7 +521,7 @@ describe("grep — D2 出法", () => {
   });
 });
 
-// ───────────────────────── D3 分页 / 排序 ─────────────────────────
+// ───────────────────────── paging / sorting ─────────────────────────
 
 describe("grep — D3 分页（head_limit）", () => {
   it("head_limit 默认 50：250 条命中只回前 50 条", async () => {
@@ -613,7 +629,7 @@ describe("grep — D3 分页（head_limit）", () => {
   it("排序（path 再行号）发生在切片之前：乱序输入也给出稳定分页", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-sort-");
-      // 文件名刻意让 readdir / rg 线程顺序与字典序不一致。
+      // Filenames deliberately make readdir / rg thread order differ from lexicographic order.
       await writeFile(join(root, "z.ts"), "hit z1\nhit z2\n", "utf8");
       await writeFile(join(root, "a.ts"), "hit a1\n", "utf8");
       await writeFile(join(root, "m.ts"), "hit m1\n", "utf8");
@@ -661,7 +677,7 @@ describe("grep — D3 分页（head_limit）", () => {
   });
 });
 
-// ───────────────────────── D4 收窄 / SC10 两种 typed 错误 ─────────────────────────
+// ───────────────────────── narrowing / the two typed errors ─────────────────────────
 
 describe("grep — D4 glob / type 收窄", () => {
   it("glob 无斜杠 → 任意深度的基名匹配", async () => {
@@ -748,8 +764,9 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 
   it("坏正则（Node 路径）→ typed 拒绝点名 pattern，不含关键词 type（SC10）", async () => {
-    // Node 降级路径自己的坏正则失败域：`compilePattern` typed 拒绝，文案点名
-    // pattern 原文；与未知 type 的失败域互不混同（SC10）。
+    // The Node fallback's own bad-regex failure domain: `compilePattern`
+    // rejects with a typed error naming the pattern text; disjoint from the
+    // unknown-type failure domain.
     const root = await makeScratch("grep-bad-regex-node-");
     await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
@@ -763,9 +780,10 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 
   it("坏正则（rg 路径）→ rg 子进程自己的 rc=2（typed），不含关键词 type（SC10）", async () => {
-    // rg 路径的坏正则失败域来自 rg 子进程 rc=2（ADR-0089：rg 自己的 pattern
-    // 错误由 rg 自己报，共享入口不预判）。handler 转成 typed
-    // `search engine rejected the query`；与未知 type 的失败域仍互不混同。
+    // The rg path's bad-regex failure domain is rg's own rc=2 (ADR-0089: rg
+    // reports its own pattern errors, the shared entry does not pre-judge).
+    // The handler maps it to typed `search engine rejected the query`; still
+    // disjoint from the unknown-type failure domain.
     const root = await makeScratch("grep-bad-regex-rg-");
     await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
@@ -779,9 +797,11 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 
   it("type 非法时先于 pattern 判定（类型检查在参数规范化期，与引擎无关）", async () => {
-    // SC10 要求两类失败域各自可辨。`type` 的合法性检查放在
-    // `parseQuerySpec`（两条引擎共同入口）而不是 argv 构造期 —— 后者只在
-    // 自带引擎在场时才跑到，同一份输入会因为引擎起不起得来而换一种报错。
+    // The two failure domains must stay distinguishable. `type` validity is
+    // checked in `parseQuerySpec` (the shared entry for both engines) rather
+    // than during argv construction — the latter only runs when the bundled
+    // engine is present, so the same input would error differently depending on
+    // whether the engine starts.
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-two-errors-");
       const messages: string[] = [];
@@ -797,8 +817,9 @@ describe("grep — D4 glob / type 收窄", () => {
         }
       }
 
-      // 两条输入都该报 type：pattern 的好坏不改变「类型未知」这个更早的拒绝。
-      // 只坏 pattern 的那条（`alpha` 合法）在别处已单独覆盖 → 报 pattern。
+      // Both inputs must report the type error: pattern validity never changes
+      // the earlier "unknown type" rejection. The bad-pattern-only case
+      // (`alpha` is valid) is covered elsewhere → reports pattern.
       assert.ok(/type/.test(messages[0]!), `第一条应报 type: ${messages[0]}`);
       assert.ok(/type/.test(messages[1]!), `第二条应报 type: ${messages[1]}`);
       assert.equal(
@@ -810,52 +831,59 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 });
 
-// ───────────── ADR-0089 接受集差异（handler 级，rg / Node 各自实测） ─────────────
+// ───────────── ADR-0089 acceptance-set divergence (handler level, rg / Node each measured) ─────────────
 //
-// 旧的「grep — 两引擎正则语义对齐（D6/SC9/SC10）」块整体退役：那些用例断言
-// 的是「同一个 pattern 在两条引擎上必须给出同一条 typed 拒绝」，是 D6 旧合同。
-// ADR-0089 收窄合同：rg 在场时匹配只出 rg，rg 自己的 rc=2 按 rg 自己的错误
-// （`search engine rejected the query`）处理；Node 降级路径不再模仿 rg 默认
-// 引擎拒绝集（lookaround / `\p{...}` / `\s` 等在无 rg 机器上可能更宽，文档与
-// 测试视为特性）。下面用单引擎用例钉住每条路径**实测**到的行为；跨引擎相等
-// 断言（`assert.equal(fromNode, fromRg)`）已按要求删除 —— 那条不变式已作废。
+// The old cross-engine regex-semantics alignment block is retired: those cases
+// asserted "the same pattern must give the same typed rejection on both
+// engines", which was the old contract. ADR-0089 narrows it: when rg is
+// present, matches come from rg only and rg's rc=2 is handled as rg's own error
+// (`search engine rejected the query`); the Node fallback no longer imitates
+// rg's default rejection set (lookaround / `\p{...}` / `\s` etc. may be wider
+// on machines without rg — docs and tests treat that as a feature). Single-
+// engine cases below pin each path's **measured** behavior; cross-engine
+// equality assertions (`assert.equal(fromNode, fromRg)`) were removed because
+// that invariant is void.
 //
-// 保留的共用不变量（与 engine 选择无关，仍在两条路径上验）：
-//   - glob / type 收窄与否定 glob 的语义（D4）；
-//   - 用户 glob 不能撤销工具自带的 `!**/node_modules` / `!**/.git`（D2）；
-//   - `.` / 非 ASCII 字面量在两条引擎上都走 code point 语义（rg 默认就是，
-//     Node 走 `u` flag）；
-//   - rg 侧不再被任何 argv 开关掰成 ASCII 口径（`--no-unicode` 已退役 ——
-//     见 `tests/harness/aci/search/argv.test.ts` 的回归钉子）。
+// Retained shared invariants (independent of engine choice, verified on both paths):
+//   - glob / type narrowing and negative-glob semantics;
+//   - a user glob cannot undo the tool's own `!**/node_modules` / `!**/.git`;
+//   - `.` / non-ASCII literals use code-point semantics on both engines (rg by
+//     default, Node via the `u` flag);
+//   - no argv flag bends rg back to ASCII (`--no-unicode` is retired — see the
+//     regression pins in `tests/harness/aci/search/argv.test.ts`).
 //
-// rg 路径下的 `\d` / `\w` / `\b` 在默认 Unicode 语义下会认非 ASCII 类成员
-// （`\w` 命中 `漢字`、`\d` 命中 `٣٤`）—— 这与 Node 路径（JS 无 `u` 已停在
-// ASCII）的行为**有意不同**。ADR-0089 接受这种命中集差异。下面那块「
-// `\d` / `\w` / `\b`」用例钉的就是这条新合同。
+// On the rg path, `\d` / `\w` / `\b` accept non-ASCII class members under
+// default Unicode semantics (`\w` hits CJK text, `\d` hits Arabic-Indic
+// digits) — **deliberately different** from the Node path (JS without `u`
+// stays ASCII). ADR-0089 accepts
+// this hit-set divergence. The `\d` / `\w` / `\b` cases below pin that new
+// contract.
 describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   it("rg 路径：`\\d` / `\\w` / `\\b` 走默认 Unicode 口径（命中非 ASCII 类）", async () => {
-    // rg 一律按自己的默认 Unicode 语义跑（ADR-0089）：`\\w` 认 `漢字`、
-    // `\\d` 认 `٣٤`、`\\b` 把 `é` 当词字符。这是新合同 —— 本工具不再用
-    // `--no-unicode` 把 rg 掰向 ASCII。Node 路径走 JS 的 ASCII 口径（无
-    // `u` 时停在 [0-9] / [A-Za-z0-9_]），命中集因此**有意不同**，那是
-    // 同一判据在两侧投影的差异，不是跨引擎对齐。
+    // rg always runs with its default Unicode semantics (ADR-0089): `\\w`
+    // matches CJK, `\\d` matches Arabic-Indic digits, `\\b` treats `é` as a
+    // word character. That is the new contract — this tool no longer bends rg
+    // toward ASCII with `--no-unicode`. The Node path uses JS's ASCII
+    // semantics (without `u` it stays in [0-9] / [A-Za-z0-9_]), so the hit sets
+    // are **deliberately different** — a projection difference, not
+    // cross-engine alignment.
     const root = await makeScratch("grep-rg-unicode-classes-");
     await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
     await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
     await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
     await writeFile(join(root, "kanji.txt"), "漢字\n", "utf8");
 
-    // `\\d` 命中 `٣٤` 与 `42`：两条都在结果里（rg 默认 Unicode 类）。
+    // `\\d` matches both the Arabic-Indic and ASCII digits (rg default Unicode classes).
     assert.equal(
       await toolFor(root, "rg").handler({ pattern: "\\d" }),
       "arabic.txt\nascii.txt"
     );
-    // `\\w` 命中 `漢字`：CJK 是 rg 的词字符。
+    // `\\w` matches the CJK file: CJK are rg's word characters.
     assert.equal(
       await toolFor(root, "rg").handler({ pattern: "\\w" }),
       "arabic.txt\nascii.txt\nefe.txt\nkanji.txt"
     );
-    // `\\bfoo\\b` 在 `éfoo` 上不命中：`é` 是词字符，前缀无边界。
+    // `\\bfoo\\b` does not match in `éfoo`: `é` is a word character, no leading boundary.
     assert.equal(
       await toolFor(root, "rg").handler({ pattern: "\\bfoo\\b" }),
       ""
@@ -863,19 +891,19 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("Node 路径：`\\d` / `\\w` / `\\b` 停在 ASCII 类口径（与 rg 有意不同）", async () => {
-    // JS 无 `u` 时 `\\d` / `\\w` 按 ASCII 走 —— 与 rg 默认 Unicode 口径有意
-    // 不同。本工具**不**用 argv 把 rg 掰过来凑这个一致。
+    // JS without `u` treats `\\d` / `\\w` as ASCII — deliberately different from
+    // rg's default Unicode semantics. This tool does **not** bend rg via argv to force agreement.
     const root = await makeScratch("grep-node-ascii-classes-");
     await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
     await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
     await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
 
-    // `\\d` 不吃 `٣٤`：只命中 ASCII 数字。
+    // `\\d` does not eat the Arabic-Indic digits: ASCII digits only.
     assert.equal(
       await toolFor(root, "node").handler({ pattern: "\\d" }),
       "ascii.txt"
     );
-    // `\\bfoo\\b` 在 `éfoo` 上命中（`é` 是非词字符，前缀有边界）。
+    // `\\bfoo\\b` matches in `éfoo` (`é` is a non-word character, leading boundary exists).
     assert.equal(
       await toolFor(root, "node").handler({ pattern: "\\bfoo\\b" }),
       "efe.txt"
@@ -883,10 +911,11 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("rg 在场 + `\\w` 命中 CJK：钉 ADR-0089 的新合同（rg 默认 Unicode 口径）", async () => {
-    // 回归钉子：本工具**不再**用 `--no-unicode` 把 rg 掰成 ASCII。`\\w` 在
-    // rg 默认语义下认 CJK 词字符。验证：用真二进制跑这条用例，命中应包含
-    // 那个仅含 CJK 内容的文件。若本工具重新加了 `--no-unicode`，该文件
-    // 会从结果里消失 —— 这条钉子就是拦那一类回归。
+    // Regression pin: this tool **no longer** uses `--no-unicode` to force rg
+    // into ASCII. `\\w` accepts CJK word characters under rg's default
+    // semantics. Run against the real binary: the hit set must include the
+    // CJK-only file. If `--no-unicode` ever returns, that file disappears from
+    // the results — this pin catches exactly that regression class.
     const root = await makeScratch("grep-rg-cjk-word-");
     await writeFile(join(root, "kanji-only.txt"), "漢字\n", "utf8");
 
@@ -897,12 +926,13 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("rg 在场：rg 接受而 JS 拒绝的 pattern 走通 rg 路径（ADR-0089）", async () => {
-    // 回归钉子：rg 路径**不预判**主 pattern 的 JS 合法性。`(?P<n>abc)` 是
-    // PCRE2 命名组 —— rg 接受、JS `RegExp` 拒绝（"Invalid group"）。
-    // 旧 handler 在共享入口 `compilePattern` 处抛 ToolExecutionError，把这条
-    // 合法 rg 查询也拒掉，与「有 rg 只信 rg」的合同相反。修复后 rg 子进程
-    // 自己跑这条 pattern 并给出命中，handler 把命中回给模型、不抛错。
-    // `(?i)abc` 是 inline flag —— 同性质：rg 接受、JS 拒绝。
+    // Regression pin: the rg path does **not** pre-judge the main pattern's JS
+    // validity. `(?P<n>abc)` is a PCRE2 named group — rg accepts it, JS
+    // `RegExp` rejects ("Invalid group"). The old handler threw
+    // ToolExecutionError in the shared `compilePattern`, rejecting even this
+    // valid rg query — contrary to the "when rg is present, trust only rg"
+    // contract. Now the rg child runs the pattern itself and returns hits; the
+    // handler passes them back without throwing. `(?i)abc` (inline flag) is the same shape.
     const root = await makeScratch("grep-adr-rg-only-pattern-");
     await writeFile(join(root, "a.txt"), "abc ABC\n", "utf8");
 
@@ -918,10 +948,10 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("rg 缺席：JS 拒绝的 pattern 在 Node 路径上仍 typed 拒绝（SC10）", async () => {
-    // 反向钉子：rg 路径放宽**不**意味着 Node 路径也放宽。Node 路径在
-    // `compilePattern` 处 typed 拒绝 `(?P<n>abc)`，文案点名 pattern 原文、
-    // 不含 type 关键词（与未知 type 的失败域互不混同，SC10）。这是 Node
-    // 路径**自己的**合同，不依赖 rg 子进程。
+    // Reverse pin: relaxing the rg path does **not** relax the Node path. Node
+    // still rejects `(?P<n>abc)` typed at `compilePattern`, the message names
+    // the pattern text and contains no `type` keyword (failure domains stay
+    // disjoint). This is the Node path's **own** contract, independent of the rg child.
     const root = await makeScratch("grep-adr-node-only-pattern-");
     await writeFile(join(root, "a.txt"), "abc ABC\n", "utf8");
 
@@ -950,10 +980,12 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("rg 缺席 + pattern `\\n` → 空结果、无错误（Node 静默回空的边界）", async () => {
-    // 本工具按行搜索：Node 侧把文件按 `\n` 切行、行内容里不含 LF，所以
-    // 「只能匹配行终止符」的 pattern **永远匹配不到**。ADR-0089 接受这个
-    // 静默空结果（旧合同要在共享入口 typed 拒绝它，理由是「rg 可能报每个
-    // 文件」—— 那条对齐理由已废）。这里钉住：调用**成功**且回空，不抛。
+    // This tool searches line by line: Node splits files on `\n` and line
+    // content never contains LF, so a pattern that "can only match the line
+    // terminator" **never matches**. ADR-0089 accepts this silent empty result
+    // (the old contract typed-rejected it at the shared entry reasoning "rg
+    // might report every file" — that alignment rationale is void). Pin: the
+    // call **succeeds** and returns empty, no throw.
     const root = await makeScratch("grep-adr-node-lineterm-");
     await writeFile(join(root, "a.txt"), "alpha\nbeta\n", "utf8");
 
@@ -965,9 +997,10 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("rg 缺席 + `\\s` → 成功出命中（Node 允许比 rg 宽）", async () => {
-    // 实测：`\s` 在 BOM（U+FEFF）上 rg 空、Node 命中 —— 两条路径的空白表
-    // 天生不同。旧合同要入口拒绝 `\s` / `\S`；ADR-0089 之后 Node 路径直接
-    // 跑 JS 的 Unicode 空白表，宽出来的部分算特性。
+    // Measured: on a BOM (U+FEFF) `\s` gives rg empty but Node a hit — the two
+    // paths' whitespace tables differ by nature. The old contract rejected
+    // `\s` / `\S` at the entry; post ADR-0089 the Node path just uses JS's
+    // Unicode whitespace table, and the extra width is a feature.
     const root = await makeScratch("grep-adr-node-ws-");
     await writeFile(join(root, "bom.txt"), "﻿alpha\n", "utf8");
 
@@ -977,8 +1010,8 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
     })) as string;
     assert.match(result, /bom\.txt:1:/);
 
-    // 对照：同一语料 rg 路径回空（它不把 BOM 当 `\s`）。两条路径的答案不同
-    // 是允许的，不是回归。
+    // Control: on the same corpus the rg path returns empty (BOM is not `\s`
+    // there). Different answers between paths are allowed, not a regression.
     const fromRg = await toolFor(root, "rg").handler({
       pattern: "\\s",
       output: "content",
@@ -987,9 +1020,9 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("look-around：rg 在场 rc=2 / rg 缺席 Node 出命中", async () => {
-    // 去掉 `--engine=auto` 之后 rg 的 Rust 默认引擎**拒绝** look-around
-    // （这是 ADR-0089 的直接后果：不再为了凑对齐去换 PCRE2）。两条路径的
-    // 行为各自钉一条。
+    // After dropping `--engine=auto`, rg's Rust default engine **rejects**
+    // look-around (a direct consequence of ADR-0089: no PCRE2 swap to force
+    // alignment). Each path's behavior gets its own pin.
     const root = await makeScratch("grep-adr-lookaround-");
     await writeFile(join(root, "a.txt"), "hit x\nhit y\n", "utf8");
 
@@ -1012,10 +1045,11 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("`type` + `glob` 并列：肯定 glob 覆盖 type、否定 glob 与 type 交集（D3）", async () => {
-    // 复现：原 Node 侧是 AND（两者都要满足），rg 的实测规则是「肯定 glob 在场
-    // → type 完全被忽略；只有否定 glob → type 仍生效」（逐条实测，不是文档）。
-    // 这条规则与引擎无关（`parseQuerySpec` + `glob-match` 共用），两侧都要
-    // 保持同形 —— 单引擎已足够钉住规则本身，rg 那条是生产默认路径。
+    // Measured rule: the old Node side was a plain AND; rg's actual rule is
+    // "positive glob present → type is ignored entirely; negative glob only →
+    // type still applies" (verified case by case, not from docs). The rule is
+    // engine-independent (`parseQuerySpec` + `glob-match` are shared), so both
+    // paths keep the same shape — rg here is the production default path.
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-type-glob-");
       await mkdir(join(root, "sub"), { recursive: true });
@@ -1024,7 +1058,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
       await writeFile(join(root, "top.ts"), "needle\n", "utf8");
       await writeFile(join(root, "top.js"), "needle\n", "utf8");
 
-      // 肯定 glob 在场 → type 让位：glob 决定纳入集。
+      // Positive glob present → type yields: the glob decides the inclusion set.
       assert.equal(
         await makeTool(root).handler({
           pattern: "needle",
@@ -1041,7 +1075,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
         }),
         "sub/b.js"
       );
-      // 否定 glob 在场 → type 仍生效。
+      // Negative glob present → type still applies.
       assert.equal(
         await makeTool(root).handler({
           pattern: "needle",
@@ -1050,12 +1084,12 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
         }),
         "top.ts"
       );
-      // 只给 type：按词表判。
+      // type only: decided by the extension table.
       assert.equal(
         await makeTool(root).handler({ pattern: "needle", type: "ts" }),
         "sub/a.ts\ntop.ts"
       );
-      // 只给 glob：按 glob 判。
+      // glob only: decided by the glob.
       assert.equal(
         await makeTool(root).handler({ pattern: "needle", glob: "sub/*" }),
         "sub/a.ts\nsub/b.js"
@@ -1064,10 +1098,11 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("用户 glob 不能撤销工具自带的遍历排除（D2）", async () => {
-    // 复现：原顺序把用户 glob 排在工具的 `!**/node_modules` / `!**/.git` 之
-    // 后，rg 的 last-glob-wins 让宽放 glob（`*` / `**` / `{*,.*}`）撤销了这两
-    // 条排除 → rg 命中 5 条（含 node_modules / .git），Node 仍按 walkFiles
-    // 的 3 条。修复后：用户 glob 先投递、工具排除后投递，两条引擎都仍排除。
+    // Regression: the old order placed user globs after the tool's
+    // `!**/node_modules` / `!**/.git`, and rg's last-glob-wins let broad globs
+    // (`*` / `**` / `{*,.*}`) undo those exclusions → rg returned 5 hits
+    // (including node_modules / .git) while Node kept walkFiles' 3. Fixed:
+    // user globs go first, tool exclusions last, so both engines still exclude.
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-glob-override-");
       await mkdir(join(root, "src"), { recursive: true });
@@ -1083,11 +1118,11 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
       await writeFile(join(root, ".git/config"), "needle\n", "utf8");
       await writeFile(join(root, "README.md"), "needle\n", "utf8");
 
-      // 基线（无 glob）：两条引擎都不带 node_modules / .git。
+      // Baseline (no glob): neither engine surfaces node_modules / .git.
       const baseline = await makeTool(root).handler({ pattern: "needle" });
       assert.ok(typeof baseline === "string", "baseline");
 
-      // 宽放 glob 在两种引擎下都仍要排除 node_modules / .git。
+      // Broad globs must still exclude node_modules / .git on both engines.
       for (const glob of ["*", "**", "**/*", "{*,.*}"]) {
         for (const output of ["paths", "content", "count"] as const) {
           const result = await makeTool(root).handler({
@@ -1102,7 +1137,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
         }
       }
 
-      // 收窄 glob（`*.txt` / `src/*`）仍按用户意图收窄。
+      // Narrowing globs (`*.txt` / `src/*`) still narrow as the user intends.
       const narrowed = ["src/needle.txt", "src/other.txt"];
       for (const glob of ["*.txt", "src/*"]) {
         const result = await makeTool(root).handler({
@@ -1118,11 +1153,11 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   it("`.` / 非 ASCII 字面量没被字节语义切坏（留 Unicode 模式）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-unicode-mode-");
-      // `.` 必须能吃下一个多字节字符（字节语义下 `a.c` 不匹配 `aéc`）。
+      // `.` must consume one whole multibyte char (byte semantics would fail `a.c` vs `aéc`).
       await writeFile(join(root, "aec.txt"), "aéc\n", "utf8");
 
       assert.equal(await makeTool(root).handler({ pattern: "a.c" }), "aec.txt");
-      // 非 ASCII 字面量同理：字节语义下 `漢` 是三个字节，`漢` 自己该命中。
+      // Same for non-ASCII literals: byte semantics would split the CJK char into three bytes.
       await writeFile(join(root, "kanji.txt"), "漢字\n", "utf8");
       assert.equal(
         await makeTool(root).handler({ pattern: "漢" }),
@@ -1132,8 +1167,9 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 
   it("`ignoreCase` × 非 ASCII 两条路径都放行（不再入口拒绝）", async () => {
-    // ADR-0089 之后不再预筛：rg 用 `-i` 自己的折叠表、Node 用 JS `iu` / `i`，
-    // 实测这条查询两条路径都能命中 `café`。CJK 无大小写同理。
+    // Post ADR-0089 there is no pre-filter: rg folds with `-i`'s own table,
+    // Node with JS `iu` / `i`; this query hits `café` on both paths. CJK has no
+    // case, same reasoning.
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ignore-case-");
       await writeFile(join(root, "a.txt"), "café\n漢字\n", "utf8");
@@ -1146,7 +1182,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
         }),
         "a.txt:1:café"
       );
-      // CJK 无大小写，折叠与否不影响。
+      // CJK has no case folding, so it is unaffected either way.
       assert.equal(
         await makeTool(root).handler({
           pattern: "漢",
@@ -1159,7 +1195,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
   });
 });
 
-// ───────────────────────── D5 行窗（SC8） ─────────────────────────
+// ───────────────────────── line window (also + within_lines) ─────────────────────────
 
 describe("grep — D5 also + within_lines 行窗", () => {
   it("窗内存在第二段 → 该主词命中被保留", async () => {
@@ -1202,13 +1238,13 @@ describe("grep — D5 also + within_lines 行窗", () => {
   it("within_lines 默认 5：半径 5 内命中、半径外不命中", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-also-default-");
-      // 第 1 行是主词；第二段在第 6 行（半径 5 的闭区间内）。
+      // Line 1 is the primary hit; the second segment is on line 6 (inside the radius-5 closed window).
       await writeFile(
         join(root, "in.ts"),
         `hit\n${"x\n".repeat(4)}second\n`,
         "utf8"
       );
-      // 第二段在第 7 行（半径 5 之外）。
+      // The second segment is on line 7 (outside the radius-5 window).
       await writeFile(
         join(root, "out.ts"),
         `hit\n${"x\n".repeat(5)}second\n`,
@@ -1257,7 +1293,7 @@ describe("grep — D5 also + within_lines 行窗", () => {
   });
 });
 
-// ───────────────────────── SC6 context 不脏行 ─────────────────────────
+// ───────────────────────── context lines stay clean ─────────────────────────
 
 describe("grep — SC6 content + context 不脏行", () => {
   it("上下文行用 `-` 分列、组间插 `--`，都不长成 `path:line:text`", async () => {
@@ -1308,9 +1344,10 @@ describe("grep — SC6 content + context 不脏行", () => {
   it("上下文内容带 `:N:` 也不长出假命中（真假只由行号后那一个字符决定）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ctx-tricky-");
-      // 上下文行的**内容**本身长得像一条记录：SC6 要求它不被读成命中。
-      // 这是 `path-line-text` 形态挡不住的形状 —— 那段前缀里允许任意字符，
-      // `a.ts:1-see x:9:fake` 会被 `^[^:]*:\d+:` 读成一条真命中。
+      // A context line's **content** itself looks like a record: it must not be
+      // read back as a hit. `path-line-text` shape alone cannot block this —
+      // that segment allows arbitrary characters, so `a.ts:1-see x:9:fake`
+      // would be parsed as a real hit by `^[^:]*:\d+:`.
       await writeFile(join(root, "a.ts"), "see x:9:fake\nhit\n", "utf8");
 
       const result = (await makeTool(root).handler({
@@ -1320,9 +1357,9 @@ describe("grep — SC6 content + context 不脏行", () => {
       })) as string;
       const out = result.split("\n");
 
-      // 匹配行之外没有第二种 `path:整数:` 形状：前缀由路径+行号构成，
-      // 冒充 `path:整数:` 需要内容里的冒号去补第三个字段 —— 而那一位
-      // 被 `-` 占据。
+      // Outside match lines there is no second `path:int:` shape: the prefix is
+      // path+line-number, and faking `path:int:` would need a content colon to
+      // fill the third field — a slot occupied by `-`.
       const matchLines = out.filter((line) => /^[^:]*:\d+:/.test(line));
       assert.deepEqual(matchLines, ["a.ts:2:hit"]);
       assert.ok(out.includes("a.ts:1-see x:9:fake"));
@@ -1332,7 +1369,7 @@ describe("grep — SC6 content + context 不脏行", () => {
   it("context 分页单位是组：offset=1 跳到下一组（相邻窗合并不另起组）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ctx-page-");
-      // 第 1 行与第 9 行的命中窗（半径 1）不相接 → 两个组。
+      // Hit windows at lines 1 and 9 (radius 1) do not touch → two groups.
       await writeFile(
         join(root, "a.ts"),
         "hit one\n" + "x\n".repeat(7) + "hit two\n",
@@ -1359,7 +1396,7 @@ describe("grep — SC6 content + context 不脏行", () => {
   });
 
   it("context 组的顺序是 (path, line) 而非引擎遍历序（切片前排序）", async () => {
-    // 组名册若不排序，offset 落在哪一组取决于 rg 的线程调度 / readdir 顺序。
+    // An unsorted group roster would make "which group offset lands in" depend on rg's thread scheduling / readdir order.
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ctx-order-");
       for (const name of ["z.ts", "a.ts", "m.ts"]) {
@@ -1380,7 +1417,7 @@ describe("grep — SC6 content + context 不脏行", () => {
   });
 });
 
-// ───────────────────────── 自带引擎缺席 → Node 降级（D6 / SC9） ─────────────────────────
+// ───────────────────────── engine absent → Node fallback ─────────────────────────
 
 describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
   it("安装根二进制不存在时不 typed 拒绝该调用，而是 Node 扫出同样的结果", async () => {
@@ -1407,8 +1444,8 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
       engineBinaryPath: join(root, "__no_such_engine__", "rg"),
     });
 
-    // context 的分页单位是**组**：`head_limit: 1` 取第一组（两处命中窗
-    // 相接 → 合并成一组），组内条目全给。
+    // Context paging works on **groups**: `head_limit: 1` takes the first group
+    // (the two touching hit windows merge into one) and yields all its entries.
     assert.equal(
       (await node.handler({
         pattern: "hit",
@@ -1463,14 +1500,16 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
   });
 });
 
-// ───────────── 行协议可表示性（含 `\n` 的路径在两条引擎上都不出现） ─────────────
+// ───────────── line-protocol representability (paths containing `\n` never surface on either engine) ─────────────
 
 describe("grep — 含换行的路径（行协议不可表示）", () => {
   /**
-   * 三种出法都是行协议（每行一条记录），路径里的 `\n` 会把一条记录拆成两条。
-   * 实测 rg 15.1.0 的坏法与 Node 不同但同样坏：rg 侧前半段长成一条**假命中**
-   * （`name.txt:1:<正文>`，磁盘上并没有这个文件），Node 侧原样吐出带换行的
-   * 路径。口径是「两条引擎都跳过它」，且干净邻居照常报告。
+   * All three output faces are line protocols (one record per line), so a `\n`
+   * in a path splits one record into two. Measured on rg 15.1.0: it breaks
+   * differently from Node but equally badly — rg's first half renders as a
+   * **fake hit** (`name.txt:1:<text>` for a file that does not exist on disk),
+   * Node emits the newline-carrying path verbatim. The stance: both engines
+   * skip such paths, and clean neighbors are still reported.
    */
   async function makeTree(prefix: string): Promise<string> {
     const root = await makeScratch(prefix);
@@ -1506,8 +1545,8 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
           false,
           `${label} 漏出含换行路径: ${JSON.stringify(out)}`
         );
-        // 假命中：rg 会把 `nl\nname.txt` 的记录拆成 `name.txt:1:needle`。
-        // 磁盘上没有 `name.txt`，这条绝不能出现。
+        // Fake hit: rg splits the `nl\nname.txt` record into `name.txt:1:needle`.
+        // No `name.txt` exists on disk — this must never appear.
         assert.equal(
           /(^|\n)name\.txt:/.test(out),
           false,
@@ -1519,7 +1558,7 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
           `${label} 漏出含换行目录下的路径: ${JSON.stringify(out)}`
         );
       }
-      // 干净邻居照常报告（跳过不等于整次查询空）。
+      // Clean neighbors are still reported (skipping ≠ emptying the whole query).
       assert.equal(paths, "plain.txt");
       assert.equal(content, "plain.txt:1:needle plain");
     });
@@ -1539,9 +1578,10 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
   });
 
   it("显式点名含换行的文件 / 目录 → 空结果（不是假命中）", async () => {
-    // rg 的 `--glob` 排除**不作用于显式点名的路径参数**（实测 15.1.0），
-    // 所以这条靠 `rg-engine` 在 exec 前的可表示性短路 —— 少了它，点名
-    // `nl\nname.txt` 会吐出 `name.txt:1:needle here` 这条假命中。
+    // rg's `--glob` exclusions do **not** apply to explicitly named path
+    // arguments (measured on 15.1.0), so this relies on the representability
+    // short-circuit in `rg-engine` before exec — without it, naming
+    // `nl\nname.txt` would emit the fake hit `name.txt:1:needle here`.
     await bothEngines(async (makeTool) => {
       const root = await makeTree("grep-nl-explicit-");
       const tool = makeTool(root);
@@ -1556,7 +1596,7 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
           assert.equal(out, "", `${path} / ${output} 应为空: ${out}`);
         }
       }
-      // 对照：干净文件照常搜得到。
+      // Control: clean files remain searchable.
       assert.equal(
         await tool.handler({ pattern: "needle", path: "plain.txt" }),
         "plain.txt"
@@ -1565,7 +1605,7 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
   });
 });
 
-// ───────────────────────── 大小写 / 正则 ─────────────────────────
+// ───────────────────────── case / regex ─────────────────────────
 describe("grep — 大小写与正则语义", () => {
   it("默认大小写敏感", async () => {
     await bothEngines(async (makeTool) => {
@@ -1622,10 +1662,10 @@ describe("grep — 大小写与正则语义", () => {
   });
 
   it("look-around 在 rg 上以 rc=2 报错（rg 自己的拒绝，不是合成的对齐门）", async () => {
-    // ADR-0089 之后 rg 的 Rust 默认引擎**拒绝** look-around（不再为了凑
-    // 对齐去换 PCRE2）。这条错误**来自 rg 子进程**，handler 转成
-    // `search engine rejected the query`。验收对象是 handler 错误文案，
-    // 不是 rg 的内部报错原文。
+    // Post ADR-0089 rg's Rust default engine **rejects** look-around (no PCRE2
+    // swap to force alignment). This error **comes from the rg child**; the
+    // handler maps it to `search engine rejected the query`. The acceptance
+    // target is the handler's message, not rg's internal text.
     const root = await makeScratch("grep-lookaround-rg-");
     await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
 
@@ -1642,9 +1682,10 @@ describe("grep — 大小写与正则语义", () => {
   });
 
   it("look-around 在 rg 缺席（Node 路径）上正常出命中", async () => {
-    // ADR-0089 的核心特性：Node 路径用 JS `RegExp` 跑 look-around 合法
-    // pattern，调用**成功**。这条用例与上一条配对，钉住「同一个 pattern 的
-    // rg-rc=2 / Node-OK 不再是回归 —— 是 ADR-0089 接受的特性」。
+    // Core ADR-0089 feature: the Node path runs look-around patterns via JS
+    // `RegExp` and the call **succeeds**. Paired with the previous case, this
+    // pins that the same pattern's rg-rc=2 / Node-OK is no longer a regression
+    // — it is an ADR-0089-accepted feature.
     const root = await makeScratch("grep-lookaround-node-");
     await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
 
@@ -1653,12 +1694,12 @@ describe("grep — 大小写与正则语义", () => {
       output: "content",
     })) as string;
 
-    // 前瞻只留 `hit y`；`hit x` 被排除。
+    // The lookahead keeps only `hit y`; `hit x` is excluded.
     assert.equal(result, "a.ts:2:hit y");
   });
 });
 
-// ───────────────────────── 超长行 ─────────────────────────
+// ───────────────────────── over-long lines ─────────────────────────
 
 describe("grep — 超长匹配行截断", () => {
   it("截断长命中且不丢同文件的后续命中", async () => {
@@ -1685,23 +1726,24 @@ describe("grep — 超长匹配行截断", () => {
 });
 
 /**
- * 显式文件豁免的体积上界（Finding 4）。
+ * Size ceiling for the explicit-file exemption.
  *
- * 「显式点名的文件不受 `--max-filesize` 约束」这条豁免是为对齐 rg 语义而设
- * （遍历期才管体积），但豁免若无上界，`{path: "<巨型文件>"}` 就是无界读。
- * 上界取 `MAX_EXPLICIT_FILE_BYTES`，由 `file-lines.ts` 单点定义 —— 两条引
- * 擎都从这里取值，所以这条口径与引擎选择无关，单引擎用例已足够钉住。
+ * "Explicitly named files bypass `--max-filesize`" exists to match rg semantics
+ * (size is only gated during traversal), but an unbounded exemption would make
+ * `{path: "<huge file>"}` an unbounded read. The ceiling is
+ * `MAX_EXPLICIT_FILE_BYTES`, defined once in `file-lines.ts` — both engines read
+ * it from there, so the limit is engine-independent and a single-engine case suffices.
  */
 describe("grep — 显式文件的体积上界", () => {
   it("界内显式点名照搜（rg），界外被上界挡掉", async () => {
     const root = await makeScratch("grep-explicit-cap-");
-    // 界内：1 MiB + 1（超过遍历闸，但远在显式上界之内）。
+    // Inside: 1 MiB + 1 (over the traversal gate, well within the explicit ceiling).
     await writeFile(
       join(root, "inside.ts"),
       `${"x".repeat(1_100_000)}\nhit inside\n`,
       "utf8"
     );
-    // 界外：上界 + 1 字节。
+    // Outside: ceiling + 1 byte.
     await writeFile(
       join(root, "beyond.ts"),
       `${"x".repeat(MAX_EXPLICIT_FILE_BYTES)}\nhit beyond\n`,
@@ -1717,7 +1759,7 @@ describe("grep — 显式文件的体积上界", () => {
     })) as string;
     assert.match(inside, /inside\.ts:2:hit inside/);
 
-    // 界外：超过显式上界 → 命中行读不到 → 命中集空（与 rg 一致）。
+    // Outside: over the explicit ceiling → the hit line is unreadable → empty hit set (matches rg).
     const beyond = (await tool.handler({
       pattern: "hit",
       path: "beyond.ts",
@@ -1725,7 +1767,7 @@ describe("grep — 显式文件的体积上界", () => {
     })) as string;
     assert.equal(beyond, "");
 
-    // 遍历期走 `--max-filesize` 闸也看不见它。
+    // During traversal the `--max-filesize` gate hides it too.
     const glob = await tool.handler({ pattern: "hit", glob: "beyond.ts" });
     assert.equal(glob, "");
   });
@@ -1761,7 +1803,7 @@ describe("grep — 显式文件的体积上界", () => {
   });
 });
 
-// ───────────────────────── 入口校验 / containment / abort ─────────────────────────
+// ───────────────────────── entry validation / containment / abort ─────────────────────────
 
 describe("grep — 空 / 非法输入", () => {
   it("pattern 缺失 / 空串 / 非串一律 typed 拒绝", async () => {
@@ -1779,10 +1821,11 @@ describe("grep — 空 / 非法输入", () => {
   });
 
   it("生产校验闸（ajv → executor）先于 handler 拒掉未知 output（SC1）", async () => {
-    // 两道防线分工：schema 的 `enum` 是 model-visible 合法值清单（executor 在
-    // handler 之前按它拦），handler 里的 `readOutput` 是直呼工具 / schema 缺席
-    // 时仍 fail-closed 的第二道。这条钉住生产路径的失败域是 `validation_failed`
-    // 且带 `/output` 定位，不会静默走到 handler。
+    // Division of the two defenses: the schema `enum` is the model-visible list
+    // of legal values (the executor blocks against it before the handler), and
+    // `readOutput` in the handler is the second, fail-closed line for direct
+    // tool calls / missing schema. This pins that the production failure domain
+    // is `validation_failed` located at `/output`, never silently reaching the handler.
     const root = await makeScratch("grep-executor-bad-output-");
     const tool = createGrepTool(root, {
       engineBinaryPath: join(root, "__no_such_engine__", "rg"),
@@ -1869,8 +1912,9 @@ describe("grep — abort", () => {
     const root = await makeScratch("grep-abort-");
     await writeFile(join(root, "huge.txt"), "a".repeat(2_000_000));
 
-    // abort 语义与引擎无关，但**必须**在真引擎上验：这条路径走的是
-    // spawnWithStopSignal 的中断接线，Node 扫不经过它。
+    // Abort semantics are engine-independent, but **must** be verified on the
+    // real engine: this path uses spawnWithStopSignal's interruption wiring,
+    // which the Node scan never goes through.
     const tool = toolFor(root, "rg");
     const controller = new AbortController();
     controller.abort();
@@ -1912,26 +1956,30 @@ describe("grep — abort", () => {
   }, 5_000);
 });
 
-// ───────────── SC5 大仓范围闸（两条引擎同判；确定性，不看墙钟） ─────────────
+// ───────────── large-repo scope gate (both engines share the verdict; deterministic, no wall clock) ─────────────
 
 /**
- * `specs/grep-wave-survive.md` SC5：`path` 指向过大树、且没有缩小 `glob` 时，
- * grep 在档位钟之前回一条短 typed 错误（范围太大 / 请收窄），该失败是普通
- * `execution_failed` tool_result，**不是**回合 timeout。
+ * When `path` points at an overly large tree with no narrowing `glob`, grep
+ * returns a short typed error (scope too large / narrow it) before any timeout
+ * budget applies; the failure is an ordinary `execution_failed` tool_result,
+ * **not** a turn timeout.
  *
- * 产物是「文件数」而不是墙钟：闸必须确定性 —— 见 `scope-guard.ts` 的实测依据
- * （同一棵 54k 文件的树 rg 用 17.8s，墙钟阈值会随主机速度两头误判）。
+ * The gate verdict is "file count", not wall clock, so it stays deterministic —
+ * see the measured rationale in `scope-guard.ts` (rg spent 17.8s on the same
+ * 54k-file tree; a wall-clock threshold would misfire in both directions
+ * depending on host speed).
  *
- * 夹具体量刻意小于生产上限 `GREP_SCOPE_FILE_LIMIT`（10,000）：真的造一万个
- * 文件只是把测试拖慢，不增加认证力。两条引擎都读同一个 `scopeFileLimit`
- * 接缝，所以「rg 与 Node 对同一个 `path` 同判」这条**引擎同判**仍然被钉住。
+ * The fixture is deliberately far below the production limit
+ * `GREP_SCOPE_FILE_LIMIT` (10,000): creating ten thousand real files only slows
+ * the suite without adding proof. Both engines read the same `scopeFileLimit`
+ * seam, so the **shared verdict** on the same `path` stays pinned.
  */
 describe("grep — SC5 大仓范围闸", () => {
-  /** 闸以下的夹具：远小于生产上限，却大于注入的小闸。 */
+  /** Sub-gate fixture: far below the production limit, above the injected small gate. */
   const FIXTURE_FILES = 8;
   const SMALL_LIMIT = 4;
 
-  /** 造一棵含 `count` 个文件的树；返回其根。 */
+  /** Build a tree containing `count` files; return its root. */
   async function hugeTree(prefix: string, count: number): Promise<string> {
     const root = await makeScratch(prefix);
     await Promise.all(
@@ -1958,10 +2006,12 @@ describe("grep — SC5 大仓范围闸", () => {
   });
 
   it("闸先于引擎：拒绝时 rg 根本不被 spawn（确定性「早于档位钟」）", async () => {
-    // 「早于档位钟」的确定性证据不是墙钟 —— 夹具只有 8 个文件，任何时钟比较
-    // 都测不出东西，还会随主机速度抖动。真正的判据是**顺序**：范围闸在
-    // resolveEngineResult 之前，所以被拒时引擎一次都不能起。spawn 间谍把这条
-    // 顺序钉死（rg 路径才有子进程；Node 降级路径本就不 spawn）。
+    // The deterministic evidence for "before the timeout budget" is not wall
+    // clock — the fixture has only 8 files, so any clock comparison measures
+    // nothing and jitters with host speed. The real criterion is **order**: the
+    // scope gate runs before resolveEngineResult, so on rejection the engine
+    // must never start. The spawn spy pins that order (only the rg path has
+    // children; the Node fallback never spawns anyway).
     const root = await hugeTree("grep-scope-order-", FIXTURE_FILES);
     let spawnCalls = 0;
     const tool = createGrepTool(root, {
@@ -1999,8 +2049,9 @@ describe("grep — SC5 大仓范围闸", () => {
   });
 
   it("否定 glob 不豁免（它不缩小遍历范围），仍按范围闸拒绝", async () => {
-    // SC5 只点名**缩小** glob；否定 glob（`!f1.txt`）不缩纳入集，只剔个别文件，
-    // 遍历成本照付 —— 与 `glob-match.ts` 的集合语义一致。
+    // The gate only accepts **narrowing** globs; a negative glob (`!f1.txt`)
+    // does not shrink the inclusion set, it drops individual files — traversal
+    // cost is paid anyway, consistent with `glob-match.ts` set semantics.
     const root = await hugeTree("grep-scope-neg-", FIXTURE_FILES);
     for (const engine of ENGINES) {
       const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
@@ -2025,8 +2076,9 @@ describe("grep — SC5 大仓范围闸", () => {
   });
 
   it("上限之内的树（两条引擎）→ 行为与今天一致（SC5 小夹具不变）", async () => {
-    // SSOT：测试引用导出的常量而不是硬编码数字；这里钉住它确实是个有限上限，
-    // 且远大于回归夹具（否则小夹具会误触闸）。
+    // SSOT: tests reference the exported constant, not a hardcoded number; pin
+    // that it really is a finite ceiling and far above the regression fixtures
+    // (otherwise small fixtures would trip the gate).
     assert.ok(
       Number.isInteger(GREP_SCOPE_FILE_LIMIT) &&
         GREP_SCOPE_FILE_LIMIT > FIXTURE_FILES,
@@ -2047,8 +2099,9 @@ describe("grep — SC5 大仓范围闸", () => {
   });
 
   it("闸判定与墙钟无关：同一输入重复跑给出同样的错（确定性）", async () => {
-    // 反证式：若闸是 timer 型（快主机放行、慢主机拒绝），同一夹具不可能稳定
-    // 地两次都抛。注入的小上限让这条在任何主机上都确定。
+    // Counter-proof: if the gate were timer-based (fast hosts pass, slow hosts
+    // reject), the same fixture could not throw deterministically twice. The
+    // injected small ceiling makes this case deterministic on any host.
     const root = await hugeTree("grep-scope-det-", FIXTURE_FILES);
     const tool = toolFor(root, "node", { scopeFileLimit: SMALL_LIMIT });
     for (let i = 0; i < 2; i += 1) {

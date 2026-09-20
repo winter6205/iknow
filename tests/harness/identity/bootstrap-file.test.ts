@@ -1,12 +1,12 @@
 /**
- * #196 rev 2026-08-11:BOOTSTRAP_TEMPLATE 是文件模板(对齐 ohmo BOOTSTRAP.md),
- * 含 "When done" 删除提示;bootstrapFilePath 返回正确路径。
+ * BOOTSTRAP_TEMPLATE is a file template (mirroring ohmo's BOOTSTRAP.md) with
+ * a "When done" deletion notice; bootstrapFilePath returns the correct path.
  *
- * T1 Acceptance:
- * 1. BOOTSTRAP_TEMPLATE 是 string,含 Goals / Style / When done 三节
- * 2. 结尾对齐 ohmo "This file can be deleted when done. If it is gone later,
- *    do not assume it should come back."
- * 3. bootstrapFilePath(workspace) 返回 <workspace>/BOOTSTRAP.md
+ * Certified:
+ * 1. BOOTSTRAP_TEMPLATE is a string with Goals / Style / When done sections
+ * 2. it ends with ohmo's "This file can be deleted when done. If it is gone
+ *    later, do not assume it should come back."
+ * 3. bootstrapFilePath(workspace) returns <workspace>/BOOTSTRAP.md
  */
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
@@ -34,8 +34,9 @@ describe("BOOTSTRAP_TEMPLATE (rev 2026-08-11 file template)", () => {
   });
 
   it("directs agent to read ~/.iknow/ with read_file + write via bash", () => {
-    // rev 2026-08-11:read_file 放行 ~/.iknow/(extraReadRoots);write_file/edit_file
-    // 保持 cwd-scoped(操作员裁决)——agent 用 bash 写/删,bwrap 把整个 home --bind。
+    // read_file is allowed on ~/.iknow/ (extraReadRoots); write_file/edit_file
+    // stay cwd-scoped (operator decision) — the agent writes/deletes via bash
+    // and bwrap --binds the whole home.
     expect(BOOTSTRAP_TEMPLATE).toMatch(/read_file/);
     expect(BOOTSTRAP_TEMPLATE).toMatch(/write_file/);
     expect(BOOTSTRAP_TEMPLATE).toMatch(/edit_file/);
@@ -44,7 +45,8 @@ describe("BOOTSTRAP_TEMPLATE (rev 2026-08-11 file template)", () => {
   });
 
   it("does NOT instruct /profile done (rev 2026-08-11 removes the host hook)", () => {
-    // 旧 /profile done 是 14cd709 应急设计;新机制是 agent 自己 rm 文件
+    // The old /profile done was a stopgap; the new mechanism has the agent
+    // rm the file itself.
     expect(BOOTSTRAP_TEMPLATE).not.toMatch(/\/profile\s+done/);
   });
 });
@@ -58,7 +60,7 @@ describe("bootstrapFilePath (rev 2026-08-11)", () => {
   });
 
   it("uses path.join (no manual slash concat)", () => {
-    // 防 OS-specific 分隔符 bug
+    // guards against OS-specific separator bugs
     expect(bootstrapFilePath("/a")).toBe(join("/a", "BOOTSTRAP.md"));
     expect(bootstrapFilePath("/a/")).toBe(join("/a/", "BOOTSTRAP.md"));
   });

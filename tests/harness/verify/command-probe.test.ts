@@ -2,13 +2,15 @@ import { describe, expect, it } from "vitest";
 import { probeVerifyCommand } from "../../../src/harness/verify/command-probe.js";
 
 /**
- * D2 自动探测矩阵 (spec SC8 / A10):
- *   - 五类标志文件各命中正确命令 (pyproject.toml / pytest.ini /
+ * Auto-probe matrix:
+ *   - each marker file hits the right command (pyproject.toml / pytest.ini /
  *     package.json+vitest / package.json+jest / go.mod / Cargo.toml);
- *   - 冲突: 多标志 (pyproject+go.mod) / 同 package.json 双 dep (vitest+jest) /
- *     分处两个条目 (一条 vitest + 一条 jest) / 内容+标志混合 → null;
- *   - 无标志 / 空数组 / 解析失败 / 形状不符 → null (fail-closed);
- *   - 同一候选重复命中 (pyproject+pytest.ini) → 仍返回该命令 (不冲突)。
+ *   - conflict → null: multiple markers (pyproject+go.mod), both vitest+jest
+ *     deps in one package.json, split across two content entries, or content
+ *     mixed with a marker;
+ *   - no marker / empty input / parse failure / unexpected shape → null (fail-closed);
+ *   - the same candidate hit twice (pyproject+pytest.ini) still returns that
+ *     command (not a conflict).
  */
 
 describe("D2 自动探测 - 标志文件命中", () => {

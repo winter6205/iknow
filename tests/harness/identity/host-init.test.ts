@@ -1,5 +1,5 @@
 /**
- * Tests for the host-side init script hook (W1).
+ * Tests for the host-side init script hook.
  *
  * Covers:
  *  - Default path resolution (opts → env → ~/.iknow/init.sh).
@@ -9,7 +9,7 @@
  *  - Timeout kill → ran=true, exitCode=null, warn set.
  *  - Explicit scriptPath:null → skip + warn="skipped (explicit null)".
  *  - Verbose env flag surfaces success.
- *  - runHostInitScriptSafe never throws (降级契约).
+ *  - runHostInitScriptSafe never throws (degrade contract).
  */
 
 import { describe, it } from "vitest";
@@ -154,9 +154,9 @@ describe("runHostInitScriptSafe (W1)", () => {
     const prevVerbose = process.env.IKNOW_HOST_INIT_VERBOSE;
     delete process.env.IKNOW_HOST_INIT_VERBOSE;
     try {
-      // 只断言降级契约(never throws + 返回正确 result);stderr 输出走
-      // 真实 process.stderr(避免 vitest worker 下 process.stderr.write
-      // mock 与宿主模块不可靠的时序问题)。
+      // Assert only the degrade contract (never throws + correct result);
+      // stderr goes to the real process.stderr, since mocking
+      // process.stderr.write is unreliable under vitest workers.
       const result = await runHostInitScriptSafe({ scriptPath: script });
       assert.equal(result.ran, true);
       assert.equal(result.exitCode, 13);

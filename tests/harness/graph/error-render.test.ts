@@ -1,19 +1,20 @@
 /**
- * `formatNodeError` 渲染契约单测（code-quality.md typed-error catch 契约）。
+ * `formatNodeError` rendering contract (code-quality.md typed-error catch rule).
  *
- * 钉住的不变式：
- *   - **判别联合 `{kind, context}`**：`{kind: "not_found", context: {...}}`
- *     渲染为 `` `not_found: ${context-stringified}` ``，让 kind 与 context
- *     完整可见 —— 禁止 plain object 被打成 `[object Object]`。
- *   - **未知 kind**：缺 / 非字符串的 kind → 退化为 `"unknown: ..."`；
- *     仍带原 err JSON 兜底。
- *   - **Error 子类**：`new Error("x")` → `"x"`，无 `[object Object]`。
- *   - **plain object / primitive**：永不出现 `[object Object]`；fallback
- *     路径必须能给出可读字符串（哪怕只是 `String(err)` 的可读形式）。
+ * Pinned invariants:
+ *   - **Discriminated union `{kind, context}`**: `{kind: "not_found", context: {...}}`
+ *     renders as `` `not_found: ${context-stringified}` `` so both kind and
+ *     context stay visible — a plain object must never collapse to
+ *     `[object Object]`.
+ *   - **Unknown kind**: missing / non-string kind → degrades to
+ *     `"unknown: ..."`, still falling back to the original err JSON.
+ *   - **Error subclass**: `new Error("x")` → `"x"`, no `[object Object]`.
+ *   - **plain object / primitive**: `[object Object]` must never appear;
+ *     the fallback path always yields a readable string.
  *
- * 加一条连线断言：调度器 executor 抛出 typed plain-object 错误时，浓缩
- * 结果里失败节点的 error 字段必须带 kind 前缀（review F5 / code-quality
- * 契约）。
+ * Plus one wiring assertion: when the executor throws a typed plain-object
+ * error, the failed node's error field in the condensed result must carry
+ * the kind prefix (code-quality contract).
  */
 
 import { describe, expect, it } from "vitest";
@@ -80,8 +81,8 @@ describe("formatNodeError — typed-error catch 契约", () => {
   });
 
   it("连线：executor 抛 typed plain-object 错误 → 调度器把它落 failed，error 字段带 kind 前缀", async () => {
-    // stub 调度器级：直接构造 typed-error 异常，确认 outcomes[].error
-    // 渲染携带 kind。
+    // Scheduler-level wiring: throw a typed-error directly and confirm the
+    // outcomes[].error rendering carries the kind.
     const entries: string[] = [];
     const exec: NodeExecutor = async (id) => {
       entries.push(id);
@@ -93,8 +94,8 @@ describe("formatNodeError — typed-error catch 契约", () => {
     const { execution } = await runGraphWithFailureEdges(spec, exec);
     expect(entries).toEqual(["x"]);
     expect(execution.statuses.x).toBe("failed");
-    // 结果的 error 字段就是 formatNodeError(throw 出的对象) —— 带
-    // kind 前缀，避免 [object Object]。
+    // The result's error field is formatNodeError(thrown object) — with the
+    // kind prefix, never `[object Object]`.
     const result = execution.results.x;
     expect(result?.status).toBe("failed");
     if (result?.status === "failed") {
@@ -111,14 +112,15 @@ describe("formatNodeError — typed-error catch 契约", () => {
       { conversationId: "conv-err" }
     );
     await waitForChildren(children, 1);
-    // 写一份 typed envelope 让 manager 走 envelope → executor 把它当
-    // failed 落定（executor 读 envelope.status==="failed" → 不抛异常、
-    // 直接 return {status:"failed", error}）。error 字段就是 envelope
-    // 的 summary/reason 渲染（不在 formatNodeError 路径里）。这条 wire
-    // 断言确保 handler 路径上 typed 内容能正常流到浓缩结果。
+    // Write a typed envelope so the manager settles it as failed (the
+    // executor reads envelope.status==="failed" → returns
+    // {status:"failed", error} without throwing). The error field is the
+    // envelope's summary/reason rendering, not the formatNodeError path.
+    // This wiring check ensures typed content flows through to the
+    // condensed result on the handler path.
     settle(
       children[0]!,
-      fail("canned") // 普通 envelope 错误
+      fail("canned") // plain envelope error
     );
     const out = parse(await pending);
     expect(out.nodes[0]).toMatchObject({ id: "z", status: "failed" });

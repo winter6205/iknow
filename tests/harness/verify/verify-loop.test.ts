@@ -1,16 +1,21 @@
 /**
- * verify-loop 主循环 + 集成测试 (T7, GH #128 失败自动修正闭环)。
+ * verify-loop main loop + integration tests: the automatic fix-up closed loop.
  *
- * spec 11 条 binary Success Criteria 逐条成测试 + 边界 (spec:94):
- *  - 空输出 (exit≠0, 退化签名比对, 不误判 pass);
- *  - exec 启动失败 (spawn error → exit 127 → 真失败分支);
- *  - 真实沙箱默认装配 (runInSandbox 经 bwrap 执行, hasBwrap 守卫)。
+ * Each binary success criterion gets its own test, plus edge cases:
+ *  - empty output (exit!=0 falls back to degraded signature comparison, never
+ *    misjudged as pass);
+ *  - exec launch failure (spawn error -> exit 127 -> true-failure branch);
+ *  - real-sandbox default assembly (runInSandbox executes via bwrap, guarded
+ *    by hasBwrap).
  *
- * 编排:
- *  - runFn 缝: 真实 run() + createStubModel (SC1/SC8) 或确定性脚本替身;
- *  - runVerify 缝: 脚本化假验证命令 (不依赖真实 bash 沙箱);
- *  - 确认阶梯每轮固定 初始 + 全量复跑 (+ 单跑, 仅 rerunTemplate 配置);
- *  - 假验证输出按 FAIL 行生成失败签名与失败数, 与 verdict.ts 语义一致。
+ * Orchestration:
+ *  - runFn seam: real run() + stub model, or a deterministic scripted stand-in;
+ *  - runVerify seam: scripted fake verification commands (no real bash sandbox
+ *    dependency);
+ *  - the confirmation ladder runs initial + full rerun on every failing round
+ *    (plus a single-file rerun only when rerunTemplate is configured);
+ *  - fake verification output yields failure signatures and counts from FAIL
+ *    lines, consistent with verdict.ts semantics.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -42,7 +47,7 @@ import type { LoopEngineDeps } from "../../../src/harness/loop-engine.ts";
 import { run } from "../../../src/harness/loop-engine.ts";
 import { assistantResult, makeDeps, makeNative } from "../../cli/_fixtures.ts";
 
-/* ------------------------------ 测试替身 ------------------------------ */
+/* ------------------------------ test doubles ------------------------------ */
 
 const EMPTY_TRACE: LoopTrace = Object.freeze({
   turns: Object.freeze([]),
@@ -98,7 +103,7 @@ interface RecordedCall {
   readonly lastUserText: string | undefined;
 }
 
-/** 脚本化 runFn 替身: 逐次返回脚本文本, 记录每次调用的历史形状。 */
+/** Scripted runFn stub: returns script text call by call and records the history shape of each invocation. */
 function makeRecordingRunFn(
   script: ReadonlyArray<string>,
   opts: {
@@ -129,7 +134,7 @@ function makeRecordingRunFn(
   return { runFn, calls: () => calls };
 }
 
-/** 脚本化 runVerify 替身: 逐次消费处理器, 记录命令串。耗尽即抛错。 */
+/** Scripted runVerify stub: consumes handlers one by one and records command strings; throws when exhausted. */
 function makeScriptedVerify(script: ReadonlyArray<() => SandboxRunResult>): {
   readonly runVerify: VerifyLoopOptions["runVerify"];
   readonly callCount: () => number;
@@ -150,8 +155,9 @@ function makeScriptedVerify(script: ReadonlyArray<() => SandboxRunResult>): {
 }
 
 /**
- * 确认阶梯展开: 每轮 exit≠0 时"初始 + 全量复跑"各消耗一次验证调用;
- * exit 0 (pass) 不触发复跑。单跑 (rerunTemplate) 由测试手动追加。
+ * Confirmation-ladder expansion: every exit!=0 round consumes one verification
+ * call each for the initial run and the full rerun; exit 0 (pass) triggers no
+ * rerun. Single-file reruns (rerunTemplate) are appended manually by tests.
  */
 function expandRounds(
   roundSpecs: ReadonlyArray<SandboxRunResult>
@@ -164,14 +170,14 @@ function expandRounds(
   return out;
 }
 
-/** finalText 驱动验证: 验证结果随模型最后一回合文本变化。 */
+/** Final-text-driven verification: the verify result follows the model's last-turn text. */
 function makeFinalTextVerify(opts: {
   readonly failWhen: (finalText: string | null) => boolean;
   readonly failOutput: string;
   readonly failExit?: number;
 }): {
   readonly runVerify: VerifyLoopOptions["runVerify"];
-  /** runFn 委托把 finalText 回传给此 sink, 验证替身据此判定成败。 */
+  /** The runFn delegation feeds finalText into this sink; the verify stub judges success/failure from it. */
   readonly sink: (t: string | null) => void;
 } {
   let lastText: string | null = null;
@@ -193,7 +199,7 @@ function makeFinalTextVerify(opts: {
   };
 }
 
-/** 真实 run() 委托: 消费 stub model 脚本响应, 并把 finalText 回传给验证。 */
+/** Real run() delegation: consumes stub-model scripted responses and feeds finalText back to the verifier. */
 function makeRealRunFn(
   deps: LoopEngineDeps,
   finalTextSink: (t: string | null) => void
@@ -207,7 +213,7 @@ function makeRealRunFn(
   };
 }
 
-/** 捕获 TraceService 记录 (SC8)。 */
+/** TraceService stand-in that captures VerificationRecord and SandboxCmdRecord writes. */
 function makeCapturingTrace(): {
   readonly trace: TraceService;
   readonly records: () => ReadonlyArray<TraceVerificationRecord>;
@@ -281,7 +287,7 @@ function defaultOptions(over: {
   };
 }
 
-/* ------------------------------ SC1 先错后对 ------------------------------ */
+/* ------------------------------ fail first, pass later ------------------------------ */
 
 describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
   it("完成→验证失败→注入→修正→复验通过→判完成", async () => {
@@ -321,7 +327,7 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
     assert.equal(out.records[1]!.verdict, "pass");
     assert.equal(out.records[1]!.action, "stop");
     assert.equal(out.records[1]!.finalOutcome, "passed");
-    // 修正轮前一轮的失败被注入为一条 user 消息 (append-only)。
+    // The failed round's outcome is injected before the fix round as one user message (append-only).
     const envelopeUser = out.result.messages.find(
       (m) =>
         m.role === "user" &&
@@ -330,14 +336,16 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
         )
     );
     assert.ok(envelopeUser !== undefined, "历史必须含验证失败注入信封");
-    // ADR-0112 Does #1 / invariant 2:verify 信封是宿主注入 commit，须带
-    // 非模型可见出处戳（否则出站时 [VALIDATION FAILED] 官方前缀锚被自家
-    // 转译剥掉）。
+    // ADR-0112 Decision 1 / invariant 2: the verify envelope is a host-injected
+    // commit and must carry a provenance stamp invisible to the model —
+    // otherwise the outbound [VALIDATION FAILED] official prefix anchor gets
+    // stripped by our own transcription layer.
     assert.equal(envelopeUser.hostInjected, true);
   });
 
   it("多轮 continue 后历史只含一条信封 (stale 信封收敛, code-review High 修复)", async () => {
-    // 3 轮真失败 + 1 轮通过: 失败数递减 (progress 放行), 中间 3 轮都应 continue。
+    // Three true-failure rounds + one passing round: fail counts decrease (trend progress lets
+    // them through), so all three middle rounds continue.
     const { runFn, calls } = makeRecordingRunFn([
       "wrong1",
       "wrong2",
@@ -347,8 +355,9 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
     let verifyCall = 0;
     const runVerify: VerifyLoopOptions["runVerify"] = async () => {
       verifyCall += 1;
-      // 失败数递减 (3→2→1) 驱动趋势 progress 放行; 每轮 exit≠0 触发确认阶梯
-      // (初始 + 全量复跑各一击, 同签名但 failedCount 递减 → 不 stuck)。
+      // Decreasing fail counts (3→2→1) drive the trend's progress release; each exit!=0
+      // round triggers the confirmation ladder (initial + full rerun, same signature but
+      // decreasing failedCount → never stuck).
       const failCount = 3 - Math.floor((verifyCall - 1) / 2);
       if (verifyCall <= 6) {
         const lines = Array.from(
@@ -365,7 +374,7 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
 
     assert.equal(out.outcome, "passed");
     assert.equal(out.rounds, 4);
-    // 中间 continue 轮每轮 runFn 看到的最后 user 消息只含一条信封 (非累积)。
+    // Each middle continue round's runFn sees a last user message holding exactly one envelope (no accumulation).
     const envelopeCounts = calls().map((c) => {
       const text = c.lastUserText ?? "";
       return (text.match(/\[VALIDATION FAILED\]/g) ?? []).length;
@@ -375,7 +384,7 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
       [0, 1, 1, 1],
       "首轮无信封; 之后每轮只带最新一条信封 (旧的被滤除)"
     );
-    // 最终历史只含一条信封 (不残留多轮 stale 信封)。
+    // The final history holds a single envelope (no stale multi-round leftovers).
     const finalEnvelopeCount = out.result.messages.filter((m) =>
       m.content.some(
         (b) => b.type === "text" && b.text.includes("[VALIDATION FAILED]")
@@ -385,7 +394,7 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
   });
 });
 
-/* ------------------------------ SC2 捕获无漏网 ------------------------------ */
+/* ------------------------------ no true failure escapes as pass ------------------------------ */
 
 describe("SC2: 捕获无漏网 — 真失败/不稳定永不判完成", () => {
   it("真失败 (同签名停滞) → outcome failed, 永不 passed", async () => {
@@ -425,7 +434,7 @@ describe("SC2: 捕获无漏网 — 真失败/不稳定永不判完成", () => {
   });
 });
 
-/* ------------------------------ SC3 flaky ------------------------------ */
+/* ------------------------------ flaky: full rerun green, no fix round ------------------------------ */
 
 describe("SC3: flaky — 全量复跑通过不触发修正轮", () => {
   it("exit≠0 + 全量复跑通过 → 判 pass, 只 run 一次", async () => {
@@ -446,7 +455,7 @@ describe("SC3: flaky — 全量复跑通过不触发修正轮", () => {
   });
 });
 
-/* ------------------------------ SC4 套件干扰 ------------------------------ */
+/* ------------------------------ suite interference: single rerun green ------------------------------ */
 
 describe("SC4: 套件干扰 — 单跑通过判不稳定", () => {
   it("全量复跑仍挂 + 单跑通过 → unstable, 不修正", async () => {
@@ -469,12 +478,12 @@ describe("SC4: 套件干扰 — 单跑通过判不稳定", () => {
     assert.equal(out.records[0]!.verdict, "unstable");
     assert.equal(out.records[0]!.action, "stop");
     assert.equal(out.records[0]!.finalOutcome, "unstable");
-    // 单跑命令: {files} 被替换为签名提取的失败用例名。
+    // Single-file rerun command: {files} is replaced by the failing test name extracted from the signature.
     assert.equal(verify.commands()[2], `npx jest ${FAIL_LINE}`);
   });
 });
 
-/* ------------------------------ SC5 趋势三规则 ------------------------------ */
+/* ------------------------------ trend rules ------------------------------ */
 
 describe("SC5: 趋势三规则", () => {
   it("同签名连续两轮 → 停 (stuck)", async () => {
@@ -505,7 +514,7 @@ describe("SC5: 趋势三规则", () => {
     );
     assert.equal(out.outcome, "failed");
     assert.equal(out.rounds, 3);
-    // r1 (1) → 首次 best; r2 (2) → 单轮震荡放行; r3 (3) → 连续两轮退化停。
+    // r1 (1) sets the first best; r2 (2) is a one-round oscillation, allowed; r3 (3) is two consecutive regressions → stop.
     assert.equal(out.records[2]!.action, "stop");
     assert.equal(out.records[2]!.finalOutcome, "failed");
   });
@@ -531,7 +540,7 @@ describe("SC5: 趋势三规则", () => {
   });
 });
 
-/* ------------------------------ SC6 耗尽处置 ------------------------------ */
+/* ------------------------------ exhaustion handling ------------------------------ */
 
 describe("SC6: 耗尽处置", () => {
   it("report 模式: 停止且报告含轮数 + 最终输出", async () => {
@@ -568,7 +577,7 @@ describe("SC6: 耗尽处置", () => {
     );
     assert.equal(out.outcome, "escalated");
     assert.equal(out.rounds, 4, "escalate 给新预算继续, 总预算不重置");
-    // 升级指令在第 2 轮耗尽后注入 (第 3 次 runFn 的 lastUserText)。
+    // The escalate instruction is injected after round 2 exhausts the budget (the 3rd runFn's lastUserText).
     assert.equal(
       calls()[1]!.lastUserText?.includes("[VALIDATION FAILED]"),
       true
@@ -595,7 +604,7 @@ describe("SC6: 耗尽处置", () => {
     const { runFn } = makeRecordingRunFn(
       Array.from({ length: n + 1 }, (_, i) => `w${i}`)
     );
-    // 每轮不同签名 + 失败数恒定 1 → 趋势一直放行, 只能被兜底上限截停。
+    // Distinct signature per round + constant fail count 1 → the trend keeps releasing; only the backstop round limit stops the loop.
     const verify = makeScriptedVerify(
       expandRounds(Array.from({ length: n }, (_, i) => failN(`s${i}`, 1)))
     );
@@ -614,12 +623,13 @@ describe("SC6: 耗尽处置", () => {
   });
 });
 
-/* ------------------------------ SC7 未配置 ------------------------------ */
+/* ------------------------------ unconfigured passthrough ------------------------------ */
 
 describe("SC7: 未配 verify.command → 行为与现状逐字节一致", () => {
   it("只调 runFn 一次, 不执行验证, 结果透传", async () => {
-    // runFn 替身直接造出"裸 run 形状"的引用 (独立于闭环内那次调用),
-    // 供逐字节对比 —— 只调一次闭环内的 runFn, 不计替身自跑。
+    // The stub builds a "bare run" outcome reference up front, independent of the
+    // loop's call, for the byte-for-byte comparison; only the loop's own runFn
+    // invocation is counted, not this construction.
     const makeBare = (): RunOutcome =>
       stubRun({ text: "hello", userText: "hi" });
     const bare = makeBare();
@@ -655,7 +665,7 @@ describe("SC7: 未配 verify.command → 行为与现状逐字节一致", () => 
   });
 });
 
-/* ------------------------------ SC8 TraceService ------------------------------ */
+/* ------------------------------ TraceService records ------------------------------ */
 
 describe("SC8: 每轮判定写 TraceService VerificationRecord", () => {
   it("先错后对两轮: 字段含轮次/三态/签名/趋势/终态", async () => {
@@ -695,24 +705,24 @@ describe("SC8: 每轮判定写 TraceService VerificationRecord", () => {
     assert.equal(r2.exitCode, 0);
     assert.equal(r2.action, "stop");
     assert.equal(r2.finalOutcome, "passed");
-    // 写盘记录与返回值 records 同源 (trace 已落盘)。
+    // The persisted records and the returned records share one source (trace is on disk).
     assert.equal(out.records.length, 2);
 
-    // spec:67 / plan §Decisions: 每次验证命令执行落 SandboxCmdRecord,
-    // parentTurnId 挂触发本轮验证的 completed turn id。
+    // Every verification command execution writes a SandboxCmdRecord whose
+    // parentTurnId points at the completed turn that triggered the round's verification.
     const cmds = capture.sandboxCmds();
     assert.ok(cmds.length >= 2, "至少初始 + 全量复跑两条 SandboxCmdRecord");
     assert.equal(cmds[0]!.command, "npm test");
     assert.equal(cmds[0]!.exitCode, 1);
     assert.equal(cmds[0]!.status, "ok");
     assert.match(cmds[0]!.parentTurnId, /^[0-9]+$|^round-/);
-    // 复验通过那轮的验证命令 exit 0。
+    // The verification command of the passing re-check exits 0.
     const lastCmd = cmds[cmds.length - 1]!;
     assert.equal(lastCmd.exitCode, 0);
   });
 });
 
-/* ------------------------------ SC9 仅 completed 触发 ------------------------------ */
+/* ------------------------------ only completed triggers verification ------------------------------ */
 
 describe("SC9: 仅 StopReason=completed 触发验证", () => {
   const cases: ReadonlyArray<{
@@ -750,13 +760,13 @@ describe("SC9: 仅 StopReason=completed 触发验证", () => {
   }
 });
 
-/* ------------------------------ SC10 超时 ------------------------------ */
+/* ------------------------------ verification timeout ------------------------------ */
 
 describe("SC10: 验证命令超时判不稳定", () => {
   it("超时不判真失败, 不触发修正轮", async () => {
     const { runFn } = makeRecordingRunFn(["implemented"]);
     const runVerify: VerifyLoopOptions["runVerify"] = async (_cmd, ctx) => {
-      // 挂起直至信号 abort (timeout 或用户取消都会走到这里)。
+      // Hang until the signal aborts (timeout and user cancellation both land here).
       await new Promise<void>((resolve) => {
         if (ctx?.signal?.aborted) {
           resolve();
@@ -781,7 +791,7 @@ describe("SC10: 验证命令超时判不稳定", () => {
   });
 });
 
-/* ------------------------------ SC11 abort ------------------------------ */
+/* ------------------------------ user abort terminates the loop ------------------------------ */
 
 describe("SC11: 用户 abort 终止整个闭环 (in-flight closeout)", () => {
   it("验证 in-flight 时 abort → outcome aborted, 历史含已注入信封", async () => {
@@ -795,10 +805,10 @@ describe("SC11: 用户 abort 终止整个闭环 (in-flight closeout)", () => {
     const runVerify: VerifyLoopOptions["runVerify"] = async (_cmd, ctx) => {
       verifyCall += 1;
       if (verifyCall <= 2) {
-        // 第 1 轮: 初始 + 全量复跑均失败。
+        // Round 1: initial run and full rerun both fail.
         return { exitCode: 1, stdout: FAIL_OUTPUT, stderr: "" };
       }
-      // 第 2 轮: 验证 in-flight, 等待用户 abort。
+      // Round 2: verification in flight, waiting for the user's abort.
       resolveSecondStarted();
       await new Promise<void>((resolve) => {
         if (ctx?.signal?.aborted) {
@@ -825,7 +835,7 @@ describe("SC11: 用户 abort 终止整个闭环 (in-flight closeout)", () => {
     assert.equal(out.outcome, "aborted");
     assert.equal(out.rounds, 2, "第 2 轮已开始验证");
     assert.equal(out.records.length, 1, "abort 不伪造未完成轮的记录");
-    // in-flight closeout: 返回当前 result, 消息历史含第 1 轮注入的信封。
+    // In-flight closeout: return the current result; the message history still holds the round-1 envelope.
     const allUserText = out.result.messages
       .filter((m) => m.role === "user")
       .map((m) =>
@@ -838,7 +848,7 @@ describe("SC11: 用户 abort 终止整个闭环 (in-flight closeout)", () => {
   });
 });
 
-/* ------------------------------ 边界 ------------------------------ */
+/* ------------------------------ edge cases ------------------------------ */
 
 describe("边界: 空输出 / exec 启动失败 / 真实沙箱", () => {
   it("空输出 + exit≠0 → 退化签名比对, 不误判 pass", async () => {

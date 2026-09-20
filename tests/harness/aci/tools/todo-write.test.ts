@@ -1,6 +1,6 @@
 /**
- * #440 T2 + ADR-0085 / specs/agent-control-surface.md Slice C: todo_write tool
- * factory tests (mode routing, ledger shape, typed errors).
+ * ADR-0085: todo_write tool factory tests (mode routing, ledger shape, typed
+ * errors).
  *
  * Spec: docs/adr/0085-todo-ledger-id-and-three-ops.md. Modes are the three
  * operations — read / add / update — plus the whole-table escape hatch
@@ -10,12 +10,12 @@
  * Scope:
  *   - factory shape (name / schema / aci metadata)
  *   - mode = "read": missing file → ""; current items with id / subject / status
- *   - mode = "add": one item or many; appends (never overwrites); receipt names
- *     the new ids (SC7)
+ *   - mode = "add": one item or many; appends (never overwrites); receipt
+ *     names the new ids
  *   - mode = "update": by id — subject / status / delete; unknown id → typed
- *     error, file untouched (SC8)
+ *     error, file untouched
  *   - mode = "replace": whole-table swap + same-directory snapshot
- *   - SC11: empty add / empty subject / over-limit → typed error, file
+ *   - empty add / empty subject / over-limit → typed error, file
  *     byte-identical (no half-write)
  *   - id stability across delete+add and across reload
  *
@@ -61,7 +61,7 @@ afterEach(async () => {
   await rm(todoDir, { recursive: true, force: true });
 });
 
-/** 某目录下形如 `todos.<unixMs>.<hex>.md` 的快照文件名(SSOT — 与 replace 路径产出的命名形态对齐)。 */
+/** Snapshot file names matching `todos.<unixMs>.<hex>.md` in a directory (SSOT — aligned with the naming produced by the replace path). */
 async function listSnapshotNames(dir: string): Promise<string[]> {
   const entries = await readdir(dir);
   return entries.filter((n) => /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n));
@@ -81,11 +81,11 @@ describe("createTodoWriteTool — tool shape", () => {
     assert.equal(schema.additionalProperties, false);
     assert.equal(props.mode.type, "string");
     assert.deepEqual(props.mode.enum, ["read", "add", "update", "replace"]);
-    // add: 单条 item 或一次多条 items(G2 决议:多步计划一次写完)。
+    // add: one `item` or several `items` at once (multi-step plans are written in one call).
     assert.equal(props.item.type, "string");
     assert.equal(props.items.type, "array");
     assert.deepEqual(props.items.items, { type: "string" });
-    // update: 目标 id + 至少一个改动字段(delete 是更新操作,不是第四态)。
+    // update: target id + at least one changed field (delete is an update, not a fourth state).
     assert.equal(props.id.type, "string");
     assert.equal(props.subject.type, "string");
     assert.equal(props.status.type, "string");
@@ -163,7 +163,7 @@ describe("createTodoWriteTool — mode=add", () => {
     );
   });
 
-  // SC7: 一次 add 多条 → 现行 N 条 pending,回执含 N 个 id。
+  // One add call with N items → N pending entries in the current ledger, receipt names N ids.
   it("multi-item: one call appends N pending items and the receipt names N ids (SC7)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler({
@@ -180,7 +180,7 @@ describe("createTodoWriteTool — mode=add", () => {
     ]);
     assert.equal(content, expected);
 
-    // read 回读同形:N 条 pending。
+    // read returns the same shape: N pending items.
     const readBack = await tool.handler({ mode: "read" });
     assert.equal(readBack, expected);
   });
@@ -291,7 +291,7 @@ describe("createTodoWriteTool — mode=update", () => {
     );
   });
 
-  // SC8: 未知 id → typed error,现行不动。
+  // Unknown id → typed error; the current ledger stays untouched.
   it("unknown id → typed error naming the id; file untouched (SC8)", async () => {
     const tool = await seed();
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
@@ -420,13 +420,14 @@ describe("createTodoWriteTool — mode=update", () => {
 });
 
 // -- mode = replace ----------------------------------------------------------
-// ADR-0046: replace 主路径 — 把现行 todos.md 换成新列表,旧文件留同目录
-// 快照(`todos.<unixMs>.<hex>.md`);read 仍只读现行。降级为整表逃生口。
+// ADR-0046: replace swaps the current todos.md for a new list and keeps the old
+// file as a same-directory snapshot (`todos.<unixMs>.<hex>.md`); read still
+// only shows the current ledger. replace serves as the whole-table escape hatch.
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — mode=replace", () => {
   it("fresh conversationId + items=[A,B] → 现行恰好两条 pending(新 id);回执短字符串", async () => {
-    // 真实 per-conversation 路径 + fresh conversationId(不预存文件)。
+    // Real per-conversation path + fresh conversationId (no pre-existing file).
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler(
       { mode: "replace", items: ["A", "B"] },
@@ -540,7 +541,7 @@ describe("createTodoWriteTool — mode=replace", () => {
   });
 
   it("items=[] → 现行变为空文件,合法态;旧内容进快照", async () => {
-    // 空 items 是合法操作:把整张列表清空(逃生口的清空语义保留)。
+    // Empty items is a legal operation: it clears the whole list (the escape hatch keeps clear semantics).
     const ctx = { conversationId: "conv-replace-clear" };
     const currentPath = resolveConversationTodoPath({
       projectDir: todoDir,
@@ -656,8 +657,8 @@ describe("createTodoWriteTool — mode=replace", () => {
   });
 
   it("replace items 整文件超 64 KB → typed error,旧文件保留", async () => {
-    // 整文件 64 KB 上限对 replace 同样适用。limit 校验应在 rename 之前,
-    // 失败时现行与目录都不动。
+    // The 64 KB whole-file cap applies to replace too. The limit check must run
+    // before the rename; on failure neither the current ledger nor the directory changes.
     const ctx = { conversationId: "conv-replace-huge" };
     const currentPath = resolveConversationTodoPath({
       projectDir: todoDir,
@@ -671,8 +672,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
-    // 构造一组会让最终文件超 64 KB 的 items:每条 ≤ 500 codepoints(通过
-    // per-item 校验),但累计 bytes > 64 KB。id 前缀 + 500 字节 ≈ 512 字节/条。
+    // Build items whose final file exceeds 64 KB: each ≤ 500 codepoints (passes
+    // the per-item check) but total bytes > 64 KB (~512 bytes/line incl. id prefix).
     const items: string[] = [];
     for (let i = 0; i < 140; i++) items.push("y".repeat(500));
 
@@ -746,7 +747,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     const ctx = { conversationId: "conv-replace-twice" };
     await tool.handler({ mode: "add", items: ["v1-a", "v1-b"] }, ctx);
     await tool.handler({ mode: "replace", items: ["v2-a"] }, ctx);
-    // 注入一点时间偏移确保 unixMs 不撞(在极快机器上仍可命中 hex 兜底)。
+    // Small time offset ensures unixMs doesn't collide (on very fast machines the hex fallback may still be exercised).
     await new Promise((r) => setTimeout(r, 5));
     await tool.handler({ mode: "add", item: "v2-b" }, ctx);
     await tool.handler({ mode: "replace", items: ["v3-a"] }, ctx);
@@ -758,15 +759,17 @@ describe("createTodoWriteTool — mode=replace", () => {
     assert.notEqual(snapshotNames[0], snapshotNames[1]);
   });
 
-  // #903 T2 exception 半写不变量:replace 路径下 snapshot rename 成功(snapshot
-  // 已落盘旧全文),但 writeTodosAtomic 内部 writeFile/rename 失败时的
-  // 不变量:typed-error 抛出,快照仍为旧全文,现行 todos.md 不应是半截——
-  // 原子写半截路径由 writeTodosAtomic 的 tmp + rename 保证不存在。
-  // 注入点:走 `randomBytes` 测试 seam —— writeTodosAtomic 的执行顺序是
+  // Partial-write invariant for the exception path: when replace's snapshot
+  // rename succeeds (old full text persisted as snapshot) but writeTodosAtomic
+  // fails inside writeFile/rename, the invariants are: a typed error is thrown,
+  // the snapshot keeps the old full text, and the current todos.md is never a
+  // half-written file — writeTodosAtomic's tmp + rename makes partial paths
+  // impossible.
+  // Injection point: the `randomBytes` test seam — writeTodosAtomic runs
   //   mkdir(parent) → random(6) → writeFile(tmp) → rename(tmp→filePath)
-  // 自定义 randomBytes 在第二次调用时(snapshot 用了 1 次,atomic write 用
-  // 第 2 次)把 dir chmod 0o555,使随后的 writeFile / rename 抛 EACCES,
-  // snapshot 已经成功,现行不会被部分写入。
+  // The custom randomBytes chmods the dir to 0o555 on the second call (snapshot
+  // uses 1, atomic write uses the 2nd), so the following writeFile / rename throw
+  // EACCES while the snapshot has already succeeded; the current ledger is never partially written.
 
   it("snapshot rename 成功 → atomic write 写错 → typed-error,快照保留旧全文,现行不动", async () => {
     const ctx = { conversationId: "conv-replace-snap-ok-write-fail" };
@@ -786,14 +789,15 @@ describe("createTodoWriteTool — mode=replace", () => {
     let randomCalls = 0;
     const deterministicRandom: (n: number) => Buffer = (n: number) => {
       randomCalls += 1;
-      // 第二次调用 = writeTodosAtomic 的 random(6)。此时 snapshot 已完成,
-      // mkdir(parent) 已递归 no-op。chmod 让随后的 writeFile / rename 抛
-      // EACCES,落入 catch 路径(typed-error,unlink tmp 失败也吞掉)。
+      // Second call = writeTodosAtomic's random(6). Snapshot is done and
+      // mkdir(parent) is a recursive no-op. The chmod makes the following
+      // writeFile / rename throw EACCES, entering the catch path (typed error;
+      // a failing tmp unlink is also swallowed).
       if (randomCalls === 2) {
-        // 同步 chmod:EACCES 直接生效;restore 在 finally 里做。
+        // Synchronous chmod: EACCES takes effect immediately; restore happens in finally.
         chmodSync(dir, 0o555);
       }
-      // 全 0xAA buffer → hex "aaaaaaaaaaaaaaaaaaaaaa"。
+      // All-0xAA buffer → hex "aaaaaaaaaaaaaaaaaaaaaa".
       return Buffer.alloc(n, 0xaa);
     };
 
@@ -815,7 +819,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     }
     assert.equal(randomCalls, 2, "snapshot random + atomic-write random");
 
-    // 不变量 ①:快照已落盘且内容 = 旧全文。
+    // Invariant 1: snapshot is persisted with content = the old full text.
     const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1, "exactly one snapshot present");
     assert.equal(
@@ -823,12 +827,13 @@ describe("createTodoWriteTool — mode=replace", () => {
       initialContent
     );
 
-    // 不变量 ②:现行 todos.md 不存在(原文件已被 snapshot rename 移走,
-    // atomic write 失败 → 现行未创建)。这是"无半截"的实证:现行不是部分
-    // 新内容,而是根本不存在。
+    // Invariant 2: the current todos.md does not exist (the original file was
+    // renamed away by the snapshot, and the atomic write failed → nothing
+    // created). This is the "no half-write" evidence: the current file is not
+    // partial new content — it simply does not exist.
     assert.equal(await fileExists(currentPath), false);
 
-    // 不变量 ③:无 .tmp 残留(atomic write 的 catch 路径 unlink tmpPath)。
+    // Invariant 3: no `.tmp` leftovers (the atomic write catch path unlinks tmpPath).
     const postEntries = await readdir(dir);
     assert.equal(
       postEntries.filter((e) => e.endsWith(".tmp")).length,
@@ -837,9 +842,11 @@ describe("createTodoWriteTool — mode=replace", () => {
     );
   });
 
-  // #903 T2 exception 半写不变量:replace 路径的 snapshotCurrentTodos rename
-  // 抛错时,现行 todos.md 保持旧内容(原子 rename 失败 → 源路径不动),
-  // 同目录没有快照文件落地,无 .tmp 残留。注入点:子目录只读。
+  // Partial-write invariant for the exception path: when replace's
+  // snapshotCurrentTodos rename throws, the current todos.md keeps its old
+  // content (a failed atomic rename leaves the source untouched), no snapshot
+  // file lands in the directory, and there are no `.tmp` leftovers. Injection
+  // point: read-only subdirectory.
 
   it("snapshot rename 失败 → typed-error,现行保持旧内容,无快照无 tmp", async () => {
     const ctx = { conversationId: "conv-replace-snapshot-fail" };
@@ -856,8 +863,9 @@ describe("createTodoWriteTool — mode=replace", () => {
     });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
-    // 子目录去掉 w 权限 → snapshot rename 写不进 todos.<…>.md 报 EACCES。
-    // mkdir(join(filePath, "..")) 在已存在子目录上 recursive no-op,不会先抛。
+    // Remove w on the subdirectory → the snapshot rename cannot write
+    // todos.<…>.md and throws EACCES. mkdir(join(filePath, "..")) is a
+    // recursive no-op on the existing directory, so it does not throw first.
     await chmod(dir, 0o555);
     let threw = false;
     try {
@@ -879,7 +887,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     }
     assert.ok(threw, "replace rejected (snapshot rename EACCES)");
 
-    // 不变量:现行仍是旧内容 + 无快照 + 无 .tmp。
+    // Invariant: current still holds the old content + no snapshot + no .tmp.
     assert.equal(await readFile(currentPath, "utf8"), initialContent);
     assert.equal(
       (await listSnapshotNames(dir)).length,
@@ -893,10 +901,11 @@ describe("createTodoWriteTool — mode=replace", () => {
     );
   });
 
-  // #903 T2 exception 半写不变量:replace 路径下 readTodos 抛错(非 ENOENT)
-  // 时,无 snapshot、无新 todos.md、无 .tmp 残留。注入点:把 filePath
-  // 预置为目录而不是文件 → readFile 抛 EISDIR,落入 readTodos catch 包装
-  // 成 "[todo_write] read failed: ..." typed-error,先于 snapshot 抛错。
+  // Partial-write invariant for the exception path: when replace's readTodos
+  // throws (non-ENOENT), there is no snapshot, no new todos.md, and no `.tmp`
+  // leftovers. Injection point: pre-create filePath as a directory instead of a
+  // file → readFile throws EISDIR, which readTodos's catch wraps into the
+  // "[todo_write] read failed: ..." typed error before any snapshot happens.
 
   it("readTodos 在 replace 抛错 → typed-error,无 snapshot、无 tmp、无新文件", async () => {
     const ctx = { conversationId: "conv-replace-read-fail" };
@@ -906,7 +915,7 @@ describe("createTodoWriteTool — mode=replace", () => {
       projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
-    // 把 filePath 预置为目录(覆盖现有 file)→ readFile 抛 EISDIR。
+    // Pre-create filePath as a directory (replacing any file) → readFile throws EISDIR.
     await mkdir(currentPath, { recursive: true });
 
     const tool = createTodoWriteTool({ todoDir });
@@ -1024,12 +1033,13 @@ describe("createTodoWriteTool — typed-error catch", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #440 T3 — governance limits + atomic write
+// Governance limits + atomic write
 //
-// D4 决议：文件上限 64 KB；单条上限 500 codepoints；负面措辞拒绝**不做**
-// （todo 条目"别忘了跑测试"是合法任务；只有 memory_save 拒绝负面措辞）。
-// 原子写：tmp + rename（mirror memory_save writeSlugAtomic）；写失败
-// 清理 tmp，崩溃中途不污染既有 todos.md。
+// Decided: file cap 64 KB; per-item cap 500 codepoints; rejecting negative
+// phrasing is deliberately **not** done (a todo like "don't forget to run the
+// tests" is a legitimate task; only memory_save rejects negative phrasing).
+// Atomic write: tmp + rename (mirrors memory_save's writeSlugAtomic); failures
+// clean up the tmp file, so a mid-write crash never pollutes an existing todos.md.
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
@@ -1059,7 +1069,7 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     const content = await readFile(join(todoDir, "todos.md"), "utf8");
     assert.match(content, /^- \[ \] \[t1\] 中+$/m);
 
-    // 数组里任一元素超限 → 整次 add typed error,不半写。
+    // Any element over the limit → the whole add fails typed, no partial write.
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
       tool.handler({ mode: "add", items: ["fine", "中".repeat(501)] }),
@@ -1116,8 +1126,9 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
   });
 
   it("串行 add 不丢更新：3 个串行 await add → 3 条全在文件中", async () => {
-    // D6 决议：主 loop 单写者；loop engine 串行 tool call（isConcurrencySafe:
-    // false）。本测试断言在串行调用下所有 add 都落地、顺序保持。
+    // Decided: single writer in the main loop — the loop engine serializes
+    // tool calls (isConcurrencySafe: false). This asserts that under serial
+    // calls every add lands and order is preserved.
     const tool = createTodoWriteTool({ todoDir });
     assert.equal(
       await tool.handler({ mode: "add", item: "first" }),
@@ -1186,10 +1197,11 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SC11: empty / overflow — typed failure and NO half-write.
+// Empty / overflow inputs — typed failure and NO half-write.
 //
-// 每个用例先建立一个非空现行,失败后逐字节比对:现行既不能变成半截新内
-// 容,也不能被清空。
+// Each case first builds a non-empty current ledger, then compares
+// byte-for-byte after the failure: the ledger must neither become a
+// half-written new content nor get cleared.
 // ---------------------------------------------------------------------------
 
 describe("SC11 — empty / overflow typed failure leaves the ledger byte-identical", () => {
@@ -1327,7 +1339,7 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-// -- pure helpers (exported for T3) ------------------------------------------
+// -- pure helpers (exported) -------------------------------------------------
 
 describe("codepointLength — pure helper", () => {
   it("ASCII: byte length === codepoint length", () => {
@@ -1345,11 +1357,12 @@ describe("codepointLength — pure helper", () => {
   });
 });
 
-// -- T5: typed-error catch 渲染契约（code-quality.md §typed-error catch 契约）
-// 渲染端必须能从 catch 侧区分 typed-error 与 plain object —— 禁止
-// `err instanceof Error ? err.message : String(err)`（plain Error 会丢
-// 掉 name / className 区分；plain object 会打成 [object Object]）。本组
-// 测试断言 throw 端 + 通用 catch 模板的输出形态。
+// -- Typed-error catch rendering contract (code-quality.md)
+// The rendering side must distinguish typed errors from plain objects at the
+// catch site — `err instanceof Error ? err.message : String(err)` is banned
+// (a plain Error loses the name / className distinction; a plain object
+// prints as [object Object]). This group asserts the throw side plus the
+// output shape of the generic catch template.
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.md)", () => {
@@ -1397,9 +1410,9 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
   });
 
   it("通用 catch 模板正确提取 message(模拟 code-quality.md 渲染契约)", () => {
-    // 模拟 catch 侧:
+    // Simulated catch side:
     //   } catch (err) { return err instanceof Error ? err.message : String(err); }
-    // 对 ToolExecutionError 应回 message(不是 [object Object]); name 应保留。
+    // ToolExecutionError must yield its message (not [object Object]); name is kept.
     function renderCatch(err: unknown): string {
       return err instanceof Error ? err.message : String(err);
     }
@@ -1414,9 +1427,10 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
   });
 
   it("plain object (非 Error 子类): catch 端 String(err) 应避免丢 [object Object]", () => {
-    // 反向断言:若 throw 端出现 plain object(漏 instanceof Error 检查),
-    // catch 用 String(err) 会打成 [object Object] —— 此处仅文档化契约,
-    // 不复现 bug,但保留断言防回归。
+    // Counter-assertion: if the throw side ever emits a plain object (bypassing
+    // the instanceof Error check), catch renders it via String(err) as
+    // [object Object]. This documents the contract only — no bug replay — but
+    // keeps the assertion as a regression pin.
     const plain = { kind: "tool_error", reason: "x" };
     const rendered = String(plain);
     assert.equal(rendered, "[object Object]");
@@ -1424,18 +1438,23 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0085 / SC9: actor capability —— worker 与父会话共用同一本账。
+// ADR-0085: actor capability — worker and parent share one ledger.
 //
-// 契约(ADR-0085「同一主会话内子代理与父共用账本」):
-//   - worker 可 read / update 父会话账本(scoped write 的 update 仍合法);
-//   - worker `add` 是**工具自身**的 typed 拒绝(ToolExecutionError +
-//     [todo_write] 前缀),不是静默丢弃、不是「工具不在场」——工具必须在
-//     worker 工具面上,模型才能读到拒绝原因;
-//   - 执行的拒绝不依赖权限层(worker 装配用 no-ask askUser → 权限层恒真)。
+// Contract (ADR-0085 `同一主会话内子代理与父共用账本`, "sub-agents share
+// the parent's ledger within one main session):
+//   - a worker may read / update the parent ledger (update is still legal
+//     under a scoped write);
+//   - worker `add` is rejected as a typed error **by the tool itself**
+//     (ToolExecutionError + [todo_write] prefix) — not a silent drop, not
+//     "tool absent"; the tool must stay on the worker's tool surface so the
+//     model can read the rejection reason;
+//   - the runtime rejection does not rely on the permission layer (worker
+//     assembly uses a no-ask askUser, so the permission layer is always true).
 //
-// 缝形状:worker 进程的 executor 不合成 ctx.conversationId(worker deps 无
-// conversationId),故 deps.actor.conversationId 是回退源;父会话仍以
-// ctx.conversationId 为准(显式传入者优先)。
+// Seam shape: the worker process's executor does not synthesize
+// ctx.conversationId (worker deps carry none), so deps.actor.conversationId
+// is the fallback source; the parent still resolves via ctx.conversationId
+// (an explicitly passed one takes priority).
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
@@ -1450,7 +1469,8 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
         assert.ok(err instanceof ToolExecutionError, "typed error 形态");
         const message = (err as Error).message;
         assert.match(message, /^\[todo_write\]/);
-        // 模型必须能读出「为什么被拒 + 还能做什么」——不是静默丢弃。
+        // The model must be able to read "why rejected + what it can still
+        // do" — not a silent drop.
         assert.match(message, /parent-only/);
         assert.match(message, /read.*update|update.*read/);
         return true;
@@ -1477,7 +1497,8 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
   });
 
   it("canAdd:false → read / update 仍作用于 actor.conversationId 指向的父账本", async () => {
-    // 父会话先写一本账(ctx.conversationId 路径,与 worker 的是同一本)。
+    // The parent session writes a ledger first (via the ctx.conversationId
+    // path — the same book the worker points at).
     const parent = createTodoWriteTool({ todoDir });
     const receipt = await parent.handler(
       { mode: "add", item: "shared item" },
@@ -1485,7 +1506,8 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
     );
     const id = /Added 1 item: (t\d+)/.exec(String(receipt))![1]!;
 
-    // worker 装配形态:无 ctx.conversationId,靠 deps.actor 回退。
+    // Worker assembly shape: no ctx.conversationId — relies on the
+    // deps.actor fallback.
     const worker = createTodoWriteTool({
       todoDir,
       actor: { conversationId: "conv-parent", canAdd: false },
@@ -1525,7 +1547,7 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
         { conversationId: "conv-from-ctx" }
       )
       .catch(() => undefined);
-    // ctx 路径缺文件 → unknown id;deps 路径文件必然缺席。
+    // The ctx path has no file → unknown id; the deps file must be absent.
     await assert.rejects(
       readFile(
         resolveConversationTodoPath({
@@ -1549,7 +1571,8 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
   });
 
   it("replace 在 canAdd:false 下照常可用(整表逃生口是 update 族,不被 actor 裁剪)", async () => {
-    // ADR-0085 只说「添加仅父会话」;replace 是整表逃生口,不在 add 语义内。
+    // ADR-0085 only restricts *adding* to the parent session; replace is the
+    // whole-table escape hatch and is not part of add semantics.
     const tool = createTodoWriteTool({
       todoDir,
       actor: { conversationId: "conv-parent", canAdd: false },
@@ -1560,14 +1583,17 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #440 T6: D9 正面引导式 description —— 只写正面触发,无负面禁令。
-// 纪律约束：「正面触发条件自排除简单任务」(D9 决策),禁止 "do not" /
-// "avoid" / "simple task" / "never" 等负面措辞（grilling 修正后模型决策
-// 噪声会变多）。description 字面在 ToolDef.description 字段,经 registry
-// catalog 暴露给模型 promptTools —— 测试用 reg.inner.get 拿 def.description
-// 锁形态(系统 prompt grep 锚点 = ToolDef.description)。
+// Positive-trigger description — only affirmative triggers, no negative
+// prohibitions. The discipline: the trigger conditions themselves exclude
+// simple tasks; the wording bans "do not" / "avoid" / "simple task" /
+// "never" (negative phrasing only adds decision noise for the model). The
+// description literal lives in ToolDef.description and reaches the model via
+// registry catalog -> promptTools, so the test reads def.description through
+// reg.inner.get to pin its shape (the system-prompt grep anchor is
+// ToolDef.description).
 //
-// ADR-0085 起 vocabulary 是三件事:read / add / update(+ replace 逃生口)。
+// Since ADR-0085 the vocabulary is three modes: read / add / update
+// (plus the replace escape hatch).
 // ---------------------------------------------------------------------------
 
 const NEGATIVE_PHRASES = [
@@ -1615,11 +1641,13 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
     assert.ok(desc.includes("read"));
     assert.ok(desc.includes("add"));
     assert.ok(desc.includes("update"));
-    // replace 逃生口也在正面描述里
+    // the replace escape hatch is part of the affirmative description too
     assert.ok(desc.includes("replace"));
-    // id 寻址是 update 的入参事实,模型要能从 description 读出来。
+    // id addressing is an update input fact the model must read off the
+    // description.
     assert.ok(desc.includes("id"));
-    // 三个 status 值在校验层,description 至少点名 status 轴。
+    // the three status values live in the validation layer; the description
+    // at least names the status axis.
     assert.ok(desc.includes("status"));
     assert.ok(desc.includes("delete"));
   });
@@ -1637,7 +1665,8 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
     assert.ok(factoryDesc.length > 20, "description should be informative");
   });
 
-  // -- #646 T2: 跳过条件句(下一步就能做完用户这句 → 直接做完,不建清单) ----
+  // -- Skip clause: if the next step finishes the user's request outright,
+  //    just do it — no list. ------------------------------------------------
 
   it("#646 T2: description 含跳过条件句(正面表述仍是多步骤跨多轮才建清单)", () => {
     const desc = readDescription();
@@ -1664,16 +1693,17 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
 });
 
 // ---------------------------------------------------------------------------
-// specs/todo-write-mode-copy.md SC1–SC7:
-// tool description 与 schema 必须按 mode 分述,字段 description 钉住绑定关系。
-// 钉住的目标不变式(SSOT = spec SC1–SC7,源自 ADR-0085 / ADR-0046 / G2 / D9):
-//   - description 分句把 read/add/update/replace 各说一遍;update 句点名
-//     delete:true + id(ADR-0085:删除是 update 族);add 句点名 item 与
-//     items(G2);replace 句点名 items 而非单数 item(ADR-0046)。
-//   - schema 每个字段都挂 description,且 description 内文把字段钉到对应
-//     mode(add ↔ item / items;update ↔ id / subject / status / delete;
-//     replace ↔ items)。
-//   - handler 层 typed 拒绝文案逐字节不变(SC3)。
+// The tool description and schema must describe each mode separately, and
+// every field description pins its binding to the owning mode. Pinned
+// invariants (SSOT, derived from ADR-0085 / ADR-0046):
+//   - the description spells out read/add/update/replace one sentence each;
+//     the update sentence names delete:true + id (ADR-0085: delete belongs
+//     to the update family); the add sentence names item and items; the
+//     replace sentence names items, never the singular item (ADR-0046).
+//   - every schema field carries a description, and that description binds
+//     the field to its mode (add ↔ item / items; update ↔ id / subject /
+//     status / delete; replace ↔ items).
+//   - the handler-layer typed rejection text stays byte-identical.
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书 (SC1–SC7)", () => {
@@ -1681,10 +1711,10 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     return createTodoWriteTool({ todoDir });
   }
 
-  // SC2: 删除绑定 update,不是第五 mode。
+  // Delete is bound to update, not a fifth mode.
   it("SC2 description 同段同时点出 update / delete:true / id(删除属 update 族,非独立 mode)", () => {
     const description = readTool().description;
-    // normalize 空格后,按 `.` 拆句。
+    // Normalize whitespace, then split the description into sentences on `.`.
     const sentences = description
       .replace(/\s+/g, " ")
       .split(".")
@@ -1712,7 +1742,8 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // SC3: replace 句点名 items(整张表),不得提及单数 item。
+  // The replace sentence must name items (the whole new table); the singular
+  // item must not appear.
   it("SC3 replace 句点名 items(整张新表),不出现单数 item", () => {
     const description = readTool().description;
     assert.match(
@@ -1726,7 +1757,7 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // add 分述写明 item/items(单条 / 多条两种形态)。
+  // The add sentence names both item and items (single / batch forms).
   it("add 分述句同时点名 item 与 items", () => {
     const description = readTool().description;
     const sentences = description
@@ -1742,7 +1773,7 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // SC4: schema 字段 description 非空,且与对应 mode 绑定。
+  // Schema field descriptions must be non-empty and bound to their mode.
   it("SC4 schema 字段 description 非空且绑定到对应 mode", () => {
     const schema = readTool().inputSchema;
     const props = schema.properties as Record<string, { description?: string }>;
@@ -1754,7 +1785,7 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
         `${f} 必须挂非空 description`
       );
     }
-    // 绑定关系(case-insensitive):
+    // Binding relations (case-insensitive):
     assert.ok(
       props.item.description!.toLowerCase().includes("add"),
       `item.description 应绑定 add,got: ${props.item.description}`
@@ -1774,7 +1805,8 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // SC1: mode 枚举 SSOT 不因说明书改写漂移(仍是四值)。
+  // Rewriting the description must not drift the mode enum SSOT (still four
+  // values).
   it("SC1 regression guard: mode 枚举仍为 read/add/update/replace 四值", () => {
     assert.deepEqual(
       [...TODO_WRITE_MODES],
@@ -1782,7 +1814,7 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // SC3 handler 层 typed 拒绝:replace 不接受 item。
+  // Handler-layer typed rejection: replace does not accept item.
   it("SC3 handler: mode=replace 携带 item 字段 → typed 拒绝", async () => {
     const tool = readTool();
     let caught: unknown;
@@ -1800,7 +1832,8 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
     );
   });
 
-  // SC5: 重写的 description 仍守 D9 正面引导(无负面禁令),正向关键词在场。
+  // The rewritten description still follows the positive-guidance discipline
+  // (no negative prohibitions) and keeps the positive keywords present.
   it("SC5 regression guard: description 仍含 multi-step", () => {
     assert.ok(readTool().description.includes("multi-step"));
   });

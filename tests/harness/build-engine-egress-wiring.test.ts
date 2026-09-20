@@ -1,20 +1,23 @@
 /**
- * build-engine egress 装配接线（ADR-0097 / T7）。
+ * buildHarnessEngine egress assembly wiring (ADR-0097).
  *
- * 钉住的不变式：交互入口（chat）的 bash 工厂必须拿到
- *   - `egressPolicyFactory`（允许集全集 = preset ∪ settings.isolation.network
- *     用户增量，ADR-0104；段缺席 → preset-only builtin 档，工厂恒返
- *     policy = egress session 必起，闭合 0097 生命周期表落差）；
- *   - `askApproval`（既有 AskUser 转写为 `(host) => Promise<boolean>`，T6
- *     批准流的 ask inlet）。
+ * Pinned invariant: the interactive entry (chat) bash factory must receive
+ *   - `egressPolicyFactory` (allowlist = preset ∪ user additions from
+ *     settings.isolation.network, ADR-0104; when the section is absent the
+ *     factory still returns a preset-only builtin policy, so the egress
+ *     session always starts, closing the ADR-0097 lifecycle-table gap);
+ *   - `askApproval` (the existing AskUser transcribed as
+ *     `(host) => Promise<boolean>` — the approval flow's ask inlet).
  *
- * TUI 实测回归（2026-09-17）：R1 repair 只接了消费侧（bash.ts / manager /
- * verify），装配源头（build-engine → registry → createBashTool）漏接 ——
- * 交互入口的允许集永远读不到、批准流不可达。本测试钉住源头接线不回退。
+ * Regression backstory: an earlier fix only wired the consuming side
+ * (bash.ts / manager / verify) and missed the assembly source
+ * (build-engine → registry → createBashTool) — the interactive entry could
+ * never read the allowlist and the approval flow was unreachable. This test
+ * pins the source-side wiring against regressions.
  *
- * 手法：module-mock bash.js（registry 的 named import 落到 spy；registry
- * 本体保持真实），buildHarnessEngine 走真实装配 —— 与
- * build-engine-bash-wiring.test.ts 同款。
+ * Technique: module-mock bash.js (the registry's named import lands on the
+ * spy; the registry itself stays real) while buildHarnessEngine runs real
+ * assembly — same pattern as build-engine-bash-wiring.test.ts.
  */
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -137,7 +140,7 @@ async function buildChat(opts: BuildOpts): Promise<BuiltEngine> {
   return built;
 }
 
-/** bash 工厂调用里属于引擎构造点（registry 透传 liveTaskRoot）的那部分。 */
+/** The bash-factory calls belonging to engine construction points (the registry threads liveTaskRoot through). */
 function engineBashCallOpts(): Record<string, unknown>[] {
   return vi
     .mocked(createBashTool)
@@ -186,18 +189,20 @@ describe("buildHarnessEngine — egress 装配接线 (ADR-0097 / T7)", () => {
   });
 
   it("settings.isolation.network 缺省 → factory 恒返 preset-only policy（断言反转：旧行为 undefined；ADR-0104 生命周期落差闭合）", async () => {
-    // T3 臂③ / spec SC5 生命周期表闭合钉（invariant 3 显式引用，不另立
-    // 文字例外）：ADR-0097 §生命周期表「允许集非空或批准流可问才起」+
-    // ADR-0104 §Consequences「副作用（正向）」——旧实现在无 network 段时
-    // 工厂返 undefined ⇒ session 不起 ⇒ 首见批准门「死在入口」。本测试是
-    // 该旧行为的回归反转记录：非 `undefined` 断言 + 下方 askApproval 在岗
-    // 接线共同钉死落差已闭合，不得回退。
+    // Regression-flip pin for the lifecycle-table gap (spec invariant 3
+    // references it explicitly; no separate textual exception): the old
+    // implementation returned undefined from the factory when the network
+    // section was absent ⇒ the egress session never started ⇒ first-sight
+    // domain approval was dead at the inlet. The not-`undefined` assertion
+    // plus the askApproval wiring below together pin the gap closed; it must
+    // not regress.
     await buildChat({});
     const calls = engineBashCallOpts();
     expect(calls.length).toBeGreaterThan(0);
     const factory = calls[0]!.egressPolicyFactory as () => unknown;
-    // ADR-0097 §生命周期表条件一「允许集非空」经 preset 恒真 ⇒ 生产装配
-    // 路径不可达 undefined 分支（spec invariant 3）。
+    // ADR-0097 lifecycle-table condition 1 (allowlist non-empty) is always
+    // true thanks to the preset ⇒ the undefined branch is unreachable on the
+    // production assembly path (spec invariant 3).
     expect(factory()).not.toBeUndefined();
     const policy = factory() as {
       allowedDomains: string[];

@@ -1,20 +1,17 @@
 /**
- * #653 G1 / 包1-感知 T4 — 环境现势快照（cwd + git 摘要 + diff 要点）:
+ * Environment live snapshot (cwd + git summary + diff preview):
  *
- *   - 纯构造器 `parseEnvSnapshot`:无 IO、无随机依赖,接收 git / diff 的
- *     字符串输出 → EnvSnapshot(branch / status / dirtyCount / diffPreview)。
- *   - 截断工具 `truncateByCodepoints`:按 Unicode codepoint 计数(不是
- *     UTF-16 code unit 也不是字节),超过上限追加 `[truncated N chars]`
- *     标记(末尾仍 ≤ 上限 + marker 长度)。
- *   - IO 读取器 `readEnvSnapshot`:DI 注入 `exec`,默认走 node 子进程
- *     跑 git,永不 throw — cwd 不可解析 / git 不可用 / 超时 → git 字段全
- *     null、cwd 保留。
+ *   - Pure constructor `parseEnvSnapshot`: no IO, no randomness; takes git /
+ *     diff string output → EnvSnapshot(branch / status / dirtyCount / diffPreview).
+ *   - `truncateByCodepoints`: counts Unicode codepoints (not UTF-16 code
+ *     units, not bytes); over the cap appends a `[truncated N chars]` marker
+ *     (final length still ≤ cap + marker length).
+ *   - IO reader `readEnvSnapshot`: `exec` injected via DI, defaults to git in
+ *     node child processes, never throws — unresolvable cwd / git unavailable
+ *     / timeout → all git fields null, cwd kept.
  *
- * 与 `agent-status.ts` 同形:纯计算 + IO 读取器分列,失败态收敛为 null
- * 字段,绝不抛进模型回合。
- *
- * spec: specs/653-horizon-pkg1-perception.md §"环境现势";plan:
- * plans/653-horizon-pkg1-perception.md T4。
+ * Same shape as `agent-status.ts`: pure computation and IO reader split;
+ * failure states collapse into null fields and never throw into a model turn.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -27,7 +24,7 @@ import {
 } from "../../src/harness/env-snapshot.ts";
 
 // ---------------------------------------------------------------------------
-// parseEnvSnapshot — 纯函数
+// parseEnvSnapshot — pure function
 // ---------------------------------------------------------------------------
 
 describe("parseEnvSnapshot", () => {
@@ -55,16 +52,16 @@ describe("parseEnvSnapshot", () => {
     });
     assert.equal(snap.cwd, "/repo");
     assert.equal(snap.gitBranch, "main");
-    // 2 modified + 2 untracked = 4 dirty 行
+    // 2 modified + 2 untracked = 4 dirty lines
     assert.equal(snap.dirtyCount, 4);
     assert.equal(snap.degradeReason, null);
-    // status 文本保留逐行(便于人读面诊断)
+    // status text is kept line-by-line for human-readable diagnostics
     assert.ok(snap.gitStatus !== null);
     assert.ok(snap.gitStatus!.includes("M src/harness/agent-status.ts"));
     assert.ok(
       snap.gitStatus!.includes("?? tests/harness/env-snapshot.test.ts")
     );
-    // diffPreview 透传原文本(截断由调用层按 maxDiffChars 控制)
+    // diffPreview passes raw text through; truncation is the caller's job via maxDiffChars
     assert.equal(snap.diffPreview, diffStdout);
   });
 
@@ -106,7 +103,7 @@ describe("parseEnvSnapshot", () => {
 });
 
 // ---------------------------------------------------------------------------
-// truncateByCodepoints — 截断 + marker
+// truncateByCodepoints — truncation + marker
 // ---------------------------------------------------------------------------
 
 describe("truncateByCodepoints", () => {
@@ -120,19 +117,18 @@ describe("truncateByCodepoints", () => {
   it("2001 codepoints → 截断 + marker, 总长 ≤ 上限", () => {
     const s = "a".repeat(MAX_ENV_DIFF_CHARS + 1);
     const out = truncateByCodepoints(s, MAX_ENV_DIFF_CHARS);
-    // SPEC SC 字面:总长 = 主体 + marker 严格 ≤ cap (overflow 边界)。
+    // Hard contract: body + marker must stay strictly within cap (overflow boundary).
     assert.ok(
       Array.from(out).length <= MAX_ENV_DIFF_CHARS,
       `total ${Array.from(out).length} > cap ${MAX_ENV_DIFF_CHARS}`
     );
-    // marker 报告主体实际丢弃数 (主体上限 = cap - marker预算,丢弃数 =
-    // codepoint 总数 - bodyCap)。
+    // Marker reports the actual dropped count (bodyCap = cap - marker budget;
+    // dropped = total codepoints - bodyCap).
     assert.ok(out.endsWith(`[truncated 23 chars]`));
   });
 
   it("unicode 多字节字符:按 codepoint 计数(Array.from length),不是 UTF-16 长度", () => {
-    // 汉字 '你' 是 U+4F60,JS .length = 1 (单 BMP),Array.from(s).length = 1
-    // emoji '𝕏' (U+1D54F) 是 astral plane,JS .length = 2 (UTF-16 surrogate pair)
+    // '你' is U+4F60: JS .length = 1 (BMP only); '𝕏' (U+1D54F) is astral: .length = 2 (surrogate pair)
     const emoji = "\u{1D54F}"; // 1 codepoint, 2 UTF-16 code units
     const s = emoji.repeat(MAX_ENV_DIFF_CHARS + 1);
     assert.equal(
@@ -146,8 +142,7 @@ describe("truncateByCodepoints", () => {
       "sanity: codepoint count is single"
     );
     const out = truncateByCodepoints(s, MAX_ENV_DIFF_CHARS);
-    // SPEC SC 字面:总长 = 主体 + marker 严格 ≤ cap。marker 计入预算后
-    // 主体短于 cap,但总长 ≤ cap。
+    // Hard contract: body + marker ≤ cap; the marker eats into the body budget.
     assert.ok(
       Array.from(out).length <= MAX_ENV_DIFF_CHARS,
       `total ${Array.from(out).length} > cap ${MAX_ENV_DIFF_CHARS}`
@@ -167,7 +162,7 @@ describe("truncateByCodepoints", () => {
 });
 
 // ---------------------------------------------------------------------------
-// readEnvSnapshot — IO 读取器(DI exec),永不 throw
+// readEnvSnapshot — IO reader (DI exec), never throws
 // ---------------------------------------------------------------------------
 
 interface ExecStub {
@@ -176,7 +171,7 @@ interface ExecStub {
     args: readonly string[],
     cwd: string
   ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
-  /** 记录调用次数,断言只在应该跑 git 的路径里跑(默认 exec)。 */
+  /** Call log, to assert git only runs on paths that should reach it (default exec). */
   readonly calls: ReadonlyArray<{
     readonly cmd: string;
     readonly args: readonly string[];
@@ -223,12 +218,12 @@ describe("readEnvSnapshot (DI exec)", () => {
     assert.equal(snap.dirtyCount, 2);
     assert.ok(snap.diffPreview !== null);
     assert.ok(snap.diffPreview!.includes("diff --git a/src/foo.ts"));
-    // git status 与 diff 各被调用一次;完整 argv 钉死(spec 防 `-z` 与解析器
-    // 不匹配的回归,因 `-z` 让 NUL 分隔的整段变成单行,branch 解析会带尾部
-    // NUL、dirtyCount 恒 0)。
+    // status and diff each called once; full argv pinned (guards against a
+    // `-z` regression: NUL-separated output collapses to one line, branch
+    // parsing picks up a trailing NUL and dirtyCount stays 0).
     assert.equal(stub.calls.length, 2);
     assert.deepEqual(stub.calls[0]!.args, ["status", "--porcelain=v1", "-b"]);
-    // diff 必须带 `--no-pager` + `--no-color`,且 subcommand = "diff"。
+    // diff must carry `--no-pager` + `--no-color` with subcommand = "diff".
     assert.ok(stub.calls[1]!.args.includes("diff"));
     assert.ok(stub.calls[1]!.args.includes("--no-pager"));
     assert.ok(stub.calls[1]!.args.includes("--no-color"));
@@ -237,7 +232,7 @@ describe("readEnvSnapshot (DI exec)", () => {
 
   it("ENOENT:exec 抛错 → 不 throw,git 字段全 null,cwd 保留", async () => {
     const stub = makeExecStub(async () => {
-      // 模拟 git 二进制缺失:Node child_process.spawn 在 ENOENT 时异步 reject
+      // Simulate a missing git binary: child_process.spawn rejects asynchronously with ENOENT
       const err: NodeJS.ErrnoException = new Error(
         "spawn git ENOENT"
       ) as NodeJS.ErrnoException;
@@ -290,7 +285,7 @@ describe("readEnvSnapshot (DI exec)", () => {
   });
 
   it("超长 diff(> MAX_ENV_DIFF_CHARS codepoints)→ truncate + marker 长度受控", async () => {
-    // 生成 3000 个 codepoint(混 BMP + astral),diff 输出应当被截到 ≤ 上限 + marker。
+    // 3000 codepoints (mixed BMP + astral); diff output must shrink to ≤ cap + marker.
     const longLine = "啊".repeat(MAX_ENV_DIFF_CHARS + 1000);
     const stub = makeExecStub(async (cmd, args) => {
       if (cmd === "git" && args[0] === "status") {
@@ -304,13 +299,13 @@ describe("readEnvSnapshot (DI exec)", () => {
     const snap = await readEnvSnapshot({ cwd: "/repo", exec: stub.exec });
     assert.ok(snap.diffPreview !== null);
     const preview = snap.diffPreview!;
-    // marker 报告被丢掉的字符数 (主体实际丢弃 = codepoints.total - bodyCap,
-    // 其中 bodyCap = cap - marker预算)。
+    // Marker reports the dropped count (dropped = total codepoints - bodyCap,
+    // where bodyCap = cap - marker budget).
     assert.ok(
       preview.endsWith("[truncated 1022 chars]"),
       `expected marker; got tail: ${JSON.stringify(preview.slice(-40))}`
     );
-    // SPEC SC 字面:截断后整段输出 = 主体 + marker ≤ cap。
+    // Hard contract: truncated output = body + marker ≤ cap.
     assert.ok(
       Array.from(preview).length <= MAX_ENV_DIFF_CHARS,
       `total ${Array.from(preview).length} > cap ${MAX_ENV_DIFF_CHARS}`
@@ -337,7 +332,7 @@ describe("readEnvSnapshot (DI exec)", () => {
     assert.ok(snap.diffPreview !== null);
     const preview = snap.diffPreview!;
     assert.ok(preview.endsWith("[truncated 421 chars]"));
-    // SPEC SC 字面:总长 = 主体 + marker ≤ cap = 100。
+    // Hard contract: body + marker ≤ cap = 100.
     assert.ok(
       Array.from(preview).length <= 100,
       `total ${Array.from(preview).length} > cap 100`

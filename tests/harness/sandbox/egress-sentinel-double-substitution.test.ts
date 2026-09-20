@@ -1,20 +1,23 @@
 /**
  * tests/harness/sandbox/egress-sentinel-double-substitution.test.ts
  *
- * specs/egress-credential-sentinel.md T5 —— 双重代换防护（invariant 6）
- * 装配层夹具：
- *   ④ 子串契约违例 fixture：铸两个嵌套假值 → typed
- *      EgressCredentialMintError（kind=sentinel_substring_contract，走
- *      ToolExecutionError 同一失败通道，不起带部分代换的 session）；
- *      message hygiene：错误文案不回显任何 sentinel / 真值材料。
- *   ⑤ 「真值含假值前缀」构造体过 body transform → 替换产物不回扫、
- *      real value 永不回扫（body-substitution.js:94-115 的
- *      earliest-position-then-advance 语义 + carry 跨 chunk 边界）；
- *      headers 代换 split/join 单向（credential-sentinel.js:203）。
+ * Double-substitution protection (invariant 6 of
+ * specs/egress-credential-sentinel.md), assembly-layer fixtures:
+ *   - substring-contract violation: mint two nested fake values → typed
+ *     EgressCredentialMintError (kind=sentinel_substring_contract) travelling the
+ *     same ToolExecutionError failure channel, so no session starts with a partial
+ *     substitution; message hygiene: the error text echoes no sentinel and no
+ *     real-value material.
+ *   - a crafted "real value prefixed by a fake value" through the body transform
+ *     → substitution output is never rescanned and the real value never re-enters
+ *     the scan (earliest-position-then-advance semantics in body-substitution.js
+ *     plus the carry across chunk boundaries); header substitution is one-way
+ *     split/join (credential-sentinel.js).
  *
- * T2 已钉「违例被检出」（egress-credential-mint.test.ts F4 段）；本文件
- * 是其补强钉：失败通道类型 + 文案卫生 + 代换引擎不回扫的字节级判据。
- * 全部 fixture 为生成假凭据，宿主真值 / .env* 不进任何输入或断言。
+ * egress-credential-mint.test.ts already pins that violations are detected; this
+ * file hardens it: failure-channel type + message hygiene + the byte-level
+ * no-rescan criterion of the substitution engine. All fixtures are generated fake
+ * credentials — no host real values or .env* enter any input or assertion.
  */
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -29,8 +32,8 @@ import {
   matchesDomainPattern,
   SentinelRegistry,
 } from "../../../src/harness/sandbox/egress/upstream.js";
-// 测试专用深路径（SC10 只钉 src/；body transform 未经 upstream re-export，
-// T5 diff 仅测试文件不扩 upstream —— 先例：egress-proxy-behavior.test.ts）。
+// Test-only deep path: the body transform is not re-exported through upstream and
+// this stays test-only without extending upstream (precedent: egress-proxy-behavior.test.ts).
 import { createBodySubstitutionTransform } from "@anthropic-ai/sandbox-runtime/dist/sandbox/body-substitution.js";
 
 const HOSTS = ["github.com", "*.github.com", "*.githubusercontent.com"];
@@ -39,12 +42,12 @@ function fakeSentinel(): string {
   return `fake_value_${randomUUID()}`;
 }
 
-/** 生成的假「真值」fixture（非任何真实凭据）。 */
+/** Generated fake "real value" fixture (never an actual credential). */
 function fakeReal(tag: string): string {
   return `gho_FAKEONLY_${tag}_${randomBytes(8).toString("hex")}`;
 }
 
-/** 跑一帧 body transform：按给定 chunk 序列喂入，收集全部输出。 */
+/** Run one body-transform pass: feed the given chunk sequence, collect all output. */
 async function runBodyTransform(
   pairs: ReadonlyArray<{ sentinel: Buffer; realValue: Buffer }>,
   chunks: readonly string[]
@@ -76,9 +79,9 @@ describe("T5④ F4 违例 fixture —— 嵌套假值 = 装配失败 typed 错�
       err = e;
     }
     assert.ok(err instanceof EgressCredentialMintError);
-    assert.ok(err instanceof ToolExecutionError); // session 同一失败通道
+    assert.ok(err instanceof ToolExecutionError); // the same failure channel a session uses
     assert.equal(err.kind, "sentinel_substring_contract");
-    // 文案卫生：不回显 sentinel 本身，更不携带任何真值材料。
+    // message hygiene: echoes no sentinel itself, let alone any real-value material.
     assert.ok(!err.message.includes(inner));
     assert.ok(!err.message.includes(outer));
     assert.ok(!err.message.includes(realInner));
@@ -95,9 +98,10 @@ describe("T5④ F4 违例 fixture —— 嵌套假值 = 装配失败 typed 错�
 });
 
 describe("T5⑤ 双重代换防护 —— 替换产物不回扫、real value 永不回扫", () => {
-  // 构造体：real 以某 sentinel 为前缀 —— 若代换后回扫输出，real 头部的
-  // sentinel 会再次被代换 → 无限扩张 / 重复 suffix。单向语义下输出恰为
-  // 一次代换产物。
+  // Construction: the real value is prefixed by a sentinel — rescanning the output
+  // would substitute the sentinel sitting at the real value's head again → unbounded
+  // growth / duplicated suffix. Under one-way semantics the output is exactly one
+  // substitution product.
   const sentinel = fakeSentinel();
   const real = `${sentinel}_REAL`;
   const pairs = [
@@ -112,21 +116,21 @@ describe("T5⑤ 双重代换防护 —— 替换产物不回扫、real value 永
     const expected = `prefix ${real} middle ${real} suffix`;
     const out = await runBodyTransform(pairs, [input]);
     assert.equal(out, expected);
-    // 不回扫的直接判据：无级联扩张产物。
+    // direct no-rescan criterion: no cascading-growth output.
     assert.ok(!out.includes(`${sentinel}_REAL_REAL`));
     assert.equal(out.split("_REAL").length - 1, 2);
   });
 
   it("body transform 跨 chunk：sentinel 被切在边界仍整替，且不回扫", async () => {
     const input = `A${sentinel}B`;
-    // 切在 sentinel 中段，逼 carry hold-back 路径。
+    // split mid-sentinel to force the carry hold-back path.
     const cut = 1 + Math.floor(sentinel.length / 2);
     const out = await runBodyTransform(pairs, [
       input.slice(0, cut),
       input.slice(cut),
     ]);
     assert.equal(out, `A${real}B`);
-    assert.equal(out.split(sentinel).length - 1, 1); // 仅 real 头部一次
+    assert.equal(out.split(sentinel).length - 1, 1); // once only, inside the real value's prefix
   });
 
   it("headers 代换 split/join 单向：real 含 sentinel 前缀也只替一轮", () => {
@@ -137,8 +141,8 @@ describe("T5⑤ 双重代换防护 —— 替换产物不回扫、real value 永
     };
     registry.substituteInHeaders(headers, "github.com", matchesDomainPattern);
     assert.equal(headers.authorization, `Bearer ${real}`);
-    // 单向判据：输出里 sentinel 只出现一次（来自 real 自身前缀），
-    // 无二次代换造成的 _REAL 扩张。
+    // one-way criterion: the sentinel appears exactly once in the output (from the
+    // real value's own prefix), no _REAL growth from a second substitution round.
     assert.equal(headers.authorization!.split(sentinel).length - 1, 1);
     assert.ok(!headers.authorization!.includes("_REAL_REAL"));
   });

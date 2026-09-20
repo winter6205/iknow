@@ -1,22 +1,27 @@
 /**
- * egress-preset-allowlist T1 装配单测 —— spec `specs/egress-preset-allowlist.md`
- * T1 / SC1 / SC2 / SC3 / F1 / F3 + ADR-0104 §Decision 1-2。
+ * Assembly unit tests for the egress preset allowlist
+ * (specs/egress-preset-allowlist.md, ADR-0104 Decision 1-2).
  *
- * 覆盖装配契约:
- *   1. 段缺席 → 工厂恒返 preset-only policy(allowlistSource "builtin"),
- *      不再返 undefined(ADR-0104 闭合 0097 生命周期表落差;undefined 分支
- *      仅留给调用方显式不装配的测试 / yolo 豁免路径)。
- *   2. 段在场 → allowedDomains = 去重(preset ∪ 用户增量),preset 前置次序;
- *      deniedDomains 只取用户层;allowlistSource "persisted"。
- *   3. 段在场但两列表皆空 → 不缩档(preset 仍在场)。
- *   4. F1:用户 deny `*.github.com` 砍掉 preset 子域后 apex 仍在(deny 优先
- *      与 `*.x` 不含 apex 的不对称)。
- *   5. F3:settings 段 shape 非法被 parse 层丢弃 → preset-only(builtin)。
- *   6. preset 清单逐字 = ADR-0107 §Decision 2 十四条目(源自 ADR-0104 §Decision 1
- *      六条目扩表; SSOT 单文件 frozen), 且不含已知模型供应商域 / 容器镜像仓库 /
- *      GitLab·Bitbucket(§Decision 3 反向断言)。
- *   7. 工厂返回类型保持 `() => EgressPolicyInput | undefined` 不缩
- *      (background / verify 消费面类型零改动)。
+ * Assembly contracts covered:
+ *   1. Section absent → the factory always returns a preset-only policy
+ *      (allowlistSource "builtin"), never undefined (ADR-0104 closes the
+ *      ADR-0097 lifecycle-table gap; the undefined branch is reserved for
+ *      callers that explicitly opt out of assembly — tests / yolo paths).
+ *   2. Section present → allowedDomains = dedup(preset ∪ user additions)
+ *      with the preset kept in front order; deniedDomains taken from the
+ *      user layer only; allowlistSource "persisted".
+ *   3. Section present but both lists empty → the profile does not shrink
+ *      (the preset is still in effect).
+ *   4. Deny asymmetry: a user deny of `*.github.com` cuts preset subdomains
+ *      while the apex remains (deny precedence vs "`*.x` not matching apex").
+ *   5. A settings section with an invalid shape is dropped by the parse
+ *      layer → preset-only (builtin).
+ *   6. The preset list verbatim = the 14 entries of ADR-0107 Decision 2
+ *      (extended from ADR-0104 Decision 1's six entries; SSOT single frozen
+ *      file), and covers no known model-provider domain / container image
+ *      registry / GitLab·Bitbucket (negative assertion, Decision 3).
+ *   7. The factory return type stays `() => EgressPolicyInput | undefined`,
+ *      never narrowed (zero type churn on background / verify consumers).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -42,27 +47,32 @@ function makeSettings(
 describe("BUILTIN_PRESET_ALLOWED_DOMAINS (ADR-0107 §Decision 2 清单 SSOT)", () => {
   it("frozen 数组,14 条目逐字 = ADR-0107 §Decision 2 清单", () => {
     assert.ok(Object.isFrozen(BUILTIN_PRESET_ALLOWED_DOMAINS));
-    assert.deepEqual([...BUILTIN_PRESET_ALLOWED_DOMAINS], [
-      "github.com",
-      "*.github.com",
-      "*.githubusercontent.com",
-      "registry.npmjs.org",
-      "registry.yarnpkg.com",
-      "pypi.org",
-      "files.pythonhosted.org",
-      "crates.io",
-      "static.crates.io",
-      "index.crates.io",
-      "proxy.golang.org",
-      "sum.golang.org",
-      "playwright.download.prss.microsoft.com",
-      "cdn.playwright.dev",
-    ]);
+    assert.deepEqual(
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS],
+      [
+        "github.com",
+        "*.github.com",
+        "*.githubusercontent.com",
+        "registry.npmjs.org",
+        "registry.yarnpkg.com",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "crates.io",
+        "static.crates.io",
+        "index.crates.io",
+        "proxy.golang.org",
+        "sum.golang.org",
+        "playwright.download.prss.microsoft.com",
+        "cdn.playwright.dev",
+      ]
+    );
   });
 
   it("不含已知模型供应商域 / 容器镜像仓库 / GitLab·Bitbucket (ADR-0107 §Decision 2 不进档反向断言, SC2)", () => {
-    // 围栏内有 provider key,预放行 = secret 直传通道 —— 显式不入档;
-    // 容器镜像仓库与 GitLab/Bitbucket 走用户增量或批准门,同样不入档。
+    // A provider key lives inside the fence, so pre-allowing = a direct
+    // secret channel — explicitly kept out of the profile; container image
+    // registries and GitLab/Bitbucket go through user additions or the
+    // approval gate, likewise out of the preset.
     const providerDomains = [
       "anthropic.com",
       "openai.com",
@@ -100,9 +110,10 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
     });
     const policy = factory();
     assert.ok(policy !== undefined);
-    assert.deepEqual([...policy!.allowedDomains], [
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-    ]);
+    assert.deepEqual(
+      [...policy!.allowedDomains],
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS]
+    );
     assert.deepEqual([...policy!.deniedDomains], []);
     assert.equal(policy!.commandLabel, "bash:fg");
     assert.equal(policy!.allowlistSource, "builtin");
@@ -116,26 +127,31 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
     const policy = factory();
     assert.ok(policy !== undefined);
     assert.equal(policy!.allowlistSource, "builtin");
-    assert.deepEqual([...policy!.allowedDomains], [
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-    ]);
+    assert.deepEqual(
+      [...policy!.allowedDomains],
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS]
+    );
   });
 
   it("F3: settings 段 shape 非法被 parse 层丢弃 → preset-only builtin (旧行为是无 session)", () => {
-    // 非法段经 settings 层 parseIsolationNetwork 丢弃留痕后为 undefined,
-    // 工厂路径必须退到 preset-only 而非无 session。
+    // An invalid section is dropped (with a trace) by parseIsolationNetwork at
+    // the settings layer, leaving undefined; the factory path must degrade to
+    // preset-only, not to "no session".
     const discarded = parseIsolationNetwork("not-an-object");
     assert.equal(discarded, undefined);
     const factory = createEgressPolicyFactory({
-      settings: { isolation: { network: discarded } } as unknown as IknowSettings,
+      settings: {
+        isolation: { network: discarded },
+      } as unknown as IknowSettings,
       commandLabel: "bash:fg",
     });
     const policy = factory();
     assert.ok(policy !== undefined);
     assert.equal(policy!.allowlistSource, "builtin");
-    assert.deepEqual([...policy!.allowedDomains], [
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-    ]);
+    assert.deepEqual(
+      [...policy!.allowedDomains],
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS]
+    );
   });
 
   it("段在场 → 去重(preset ∪ 用户增量), preset 前置次序, source persisted", () => {
@@ -149,11 +165,11 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
     });
     const policy = factory();
     assert.ok(policy !== undefined);
-    assert.deepEqual([...policy!.allowedDomains], [
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-      "example.com",
-    ]);
-    // deniedDomains 只取用户层, preset 不贡献 deny
+    assert.deepEqual(
+      [...policy!.allowedDomains],
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS, "example.com"]
+    );
+    // deniedDomains comes from the user layer only; the preset contributes no denies
     assert.deepEqual([...policy!.deniedDomains], ["internal.example.com"]);
     assert.equal(policy!.allowlistSource, "persisted");
   });
@@ -169,12 +185,13 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
     });
     const policy = factory();
     assert.ok(policy !== undefined);
-    assert.deepEqual([...policy!.allowedDomains], [
-      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
-    ]);
+    assert.deepEqual(
+      [...policy!.allowedDomains],
+      [...BUILTIN_PRESET_ALLOWED_DOMAINS]
+    );
     assert.deepEqual([...policy!.deniedDomains], []);
     assert.equal(policy!.allowlistSource, "persisted");
-    // 经工厂路径 allowlist-empty 不可达
+    // via the factory path an empty allowlist is unreachable
     const decision = decideEgress({
       host: "example.com",
       port: 443,
@@ -194,7 +211,7 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
       commandLabel: "bash:fg",
     });
     const policy = factory()!;
-    // deny 只取用户层; preset 的 *.github.com 仍在 allowed, 但 deny 优先
+    // Deny comes from the user layer only; the preset's *.github.com stays in allowed, but deny wins
     assert.equal(policy.allowlistSource, "persisted");
     const sub = decideEgress({
       host: "api.github.com",
@@ -203,7 +220,7 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
       deniedDomains: policy.deniedDomains,
     });
     assert.deepEqual(sub, { outcome: "deny", reason: "denied" });
-    // `*.x` 不含 apex (0097 实测语义): apex 未被砍, 不对称钉死
+    // `*.x` does not cover apex (ADR-0097 observed semantics): apex is not cut, the asymmetry is pinned
     const apex = decideEgress({
       host: "github.com",
       port: 443,
@@ -255,9 +272,11 @@ describe("createEgressPolicyFactory (T1 合并装配)", () => {
   });
 
   it("工厂返回类型保持 () => EgressPolicyInput | undefined 不缩", () => {
-    // 类型钉子: 消费面(bash.ts:135 / background / verify)声明的宽签名
-    // 必须继续兼容; 若本函数签名收窄, 该行赋值虽仍编译, 但 undefined
-    // 分支的调用方豁免路径(测试/yolo)由显式 `undefined` 常量保持可用。
+    // Type pin: the widened signature declared by consumers (bash.ts /
+    // background / verify) must stay compatible; if this factory's signature
+    // narrowed, the assignment would still compile, but the undefined-branch
+    // caller exemption paths (tests / yolo) stay available via an explicit
+    // `undefined` constant.
     const factory: () => EgressPolicyInput | undefined =
       createEgressPolicyFactory({
         settings: makeSettings(undefined),
@@ -312,7 +331,7 @@ describe("decideEgress 直喂合并结果 (T1 判定层钉子)", () => {
   });
 
   it("ADR-0107 扩表 apex/子域不对称: golang.org apex 与 pypi 子域不命中 (只写登记面, 不误扩整域)", () => {
-    // 清单只列 proxy./sum. 两个 golang 子域与 pypi.org apex 本身:
+    // The list registers only the proxy./sum. golang subdomains and the pypi.org apex itself:
     assert.deepEqual(decide("golang.org"), {
       outcome: "deny",
       reason: "not-in-allowlist",

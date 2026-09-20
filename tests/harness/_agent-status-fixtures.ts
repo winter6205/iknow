@@ -1,5 +1,5 @@
 /**
- * Shared agent-status test fixtures (#645 T1 / #647 T3).
+ * Shared agent-status test fixtures.
  *
  * Not collected by vitest on purpose (no `.test.ts` suffix) — mirrors the
  * `tests/cli/_fixtures.ts` convention: the spy-adapter pattern that records
@@ -7,8 +7,8 @@
  * stream-event suite cannot fork.
  *
  * Used by:
- *   - tests/harness/agent-status-bar.test.ts (T1: bar append contract)
- *   - tests/harness/agent-status-stream.test.ts (T3: agent_status stream event)
+ *   - tests/harness/agent-status-bar.test.ts (bar append contract)
+ *   - tests/harness/agent-status-stream.test.ts (agent_status stream event)
  */
 import { afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -30,8 +30,9 @@ import { assistantResult } from "../cli/_fixtures.ts";
 // -- tmp todoDir lifecycle -----------------------------------------------------
 
 /**
- * 每个用例独立的 todoDir(tmpdir);initialContent 缺省 = 不写 todos.md。
- * 目录由本模块登记,afterAll 统一清理(hook 在各导入测试文件各自注册一次)。
+ * A per-case todoDir (under tmpdir); omitting initialContent = no todos.md.
+ * Dirs are registered by this module and cleaned up in afterAll (the hook is
+ * registered once per importing test file).
  */
 const tempDirs: string[] = [];
 
@@ -57,30 +58,33 @@ export type StepAction =
   | { readonly kind: "promptTooLong" };
 
 /**
- * 扩展缝:每次(带 tools 的)模型调用入口回调(在 captured 记录之后、脚本
- * 消费之前)。返回值按调用序记入 `entrySamples`(T3 stream 套件用它采样
- * 「调用入口时已到达的 agent_status 事件数」;T1 bar 套件不传 → 恒空)。
+ * Extension seam: a callback at the entry of every (tools-bearing) model call
+ * (after the captured record, before the script is consumed). Return values are
+ * recorded in `entrySamples` in call order (the stream-event suite samples "how
+ * many agent_status events had arrived at call entry"; the bar suite passes no
+ * hooks → always empty).
  */
 export interface SpyAdapterHooks<TSample = unknown> {
   readonly sampleAtEntry?: () => TSample;
 }
 
 /**
- * Spy adapter:捕获每次(带 tools 的)模型调用看到的 state.messages,
- * 按脚本回放 reply / PromptTooLongError。tools 缺席的调用(compact 摘要轮 /
- * 收尾摘要轮)返回空文本,不消耗脚本、不记 captured(栏 / 事件只挂主回路
- * 模型调用)。
+ * Spy adapter: captures the state.messages seen by each (tools-bearing) model
+ * call and replays reply / PromptTooLongError from the script. Calls without
+ * tools (compact-summary / wrap-up-summary rounds) return empty text, consume
+ * no script step and record nothing in captured (bars / events only attach to
+ * main-loop model calls).
  */
 export function makeSpyAdapter<TSample = unknown>(
   actions: ReadonlyArray<StepAction>,
   hooks?: SpyAdapterHooks<TSample>
 ): {
   readonly adapter: LoopAdapter;
-  /** 每次带 tools 的模型调用看到的 messages(按调用序)。 */
+  /** Messages seen by each tools-bearing model call (in call order). */
   readonly captured: ReadonlyArray<ReadonlyArray<AnthropicNativeMessage>>;
-  /** 每次带 tools 的模型调用看到的 request.system(缺席 = undefined;守「注入不进 system」)。 */
+  /** request.system seen by each tools-bearing model call (absent = undefined; guards "injection never enters system"). */
   readonly systemsCaptured: ReadonlyArray<string | undefined>;
-  /** hooks.sampleAtEntry 按调用序的返回值;未传 hooks → 恒空数组。 */
+  /** Return values of hooks.sampleAtEntry in call order; no hooks → always empty array. */
   readonly entrySamples: ReadonlyArray<TSample>;
 } {
   const captured: ReadonlyArray<AnthropicNativeMessage>[] = [];
@@ -154,7 +158,7 @@ export function okEchoTool(name = "echo"): ReturnType<typeof createStubTool> {
   });
 }
 
-// -- bar 文本提取 / 解析 ----------------------------------------------------------
+// -- bar text extraction / parsing ------------------------------------------------
 
 export function isBarBlock(
   b: AnthropicContentBlock
@@ -162,7 +166,7 @@ export function isBarBlock(
   return b.type === "text" && b.text.startsWith("<agent_status>");
 }
 
-/** 收集 messages 里全部栏文本(按出现序)。 */
+/** Collect all bar texts in messages (in appearance order). */
 export function barTexts(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string[] {

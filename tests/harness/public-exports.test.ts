@@ -1,18 +1,22 @@
 /**
- * T12 public-export + Gate B capability gate smoke test.
+ * Public-export + Gate B capability gate smoke test.
  *
- * Success Criteria 16 (spec):
- *   - src/harness/index.ts 公共导出 run / createLoopEngine /
- *     createAnthropicAdapter 等 Foundation 自治运行时入口;
- *   - 016:src/harness/ 不含 Gate B 能力(当时禁:重试 / 取消 / 超时 /
- *     trace / checkpoint / 并发调度)。
- *   - 017:取消 / 超时 / trace / setTimeout / AbortController 经 spec+plan+ACR
- *     授权为物理必需层;守门对齐条件式修复层——禁止 checkpoint 落盘 /
- *     token-cost 护栏 / OTel 导出提前入内核(扫可执行面,不扫注释用词)。
- *   - #672 T1: FaultClass 闭集含 `retry`，可执行面允许该标识符。
- *   - #160 / ADR-0008(accepted):TokenUsage 域类型经 spec+plan+ACR 授权为显示路径
- *     观测字段;token-cost 护栏(runtime ledger / CostTracker)仍禁——
- *     ADR-0008 Decision 1 明示否决。
+ * Pinned criteria:
+ *   - src/harness/index.ts publicly exports the Foundation-owned runtime
+ *     entries: run / createLoopEngine / createAnthropicAdapter and friends;
+ *   - src/harness/ carries no Gate B capabilities (retry / cancel / timeout /
+ *     trace / checkpoint / concurrency scheduling were all barred at the gate);
+ *   - cancel / timeout / trace / setTimeout / AbortController are later
+ *     authorized as the physically-necessary layer; the guard tracks the
+ *     conditional-repair layer instead — checkpoint persistence, token-cost
+ *     guardrails, and early OTel export into the kernel stay banned (scan the
+ *     executable surface, not comment wording);
+ *   - the FaultClass closed set includes `retry`, so that identifier is
+ *     allowed on the executable surface;
+ *   - ADR-0008 (accepted): the TokenUsage domain type is authorized as an
+ *     observability field on the display path; token-cost guardrails (runtime
+ *     ledger / CostTracker) remain banned — ADR-0008 Decision 1 explicitly
+ *     rejects them.
  */
 
 import { describe, it } from "vitest";

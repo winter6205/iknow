@@ -1,26 +1,30 @@
 /**
- * egress-ssh-bridge T6 —— `SSH_AUTH_SOCK` 条件形态（默认**关**）的形状钉子。
+ * Shape pins for the conditional `SSH_AUTH_SOCK` form (default **off**), per
+ * specs/egress-ssh-bridge.md, ADR-0105 Decision 5 and ADR-0107 Decision 5 (ssh
+ * auth sock probe).
  *
- * 钉住的不变式（specs/egress-ssh-bridge.md §T6 + ADR-0105 §Decision 5 +
- * ADR-0107 §Decision 5（ssh auth sock 探针）：
- *   - 关态（默认，调用方不传 `sshAuthSockPath`）：`SSH_AUTH_SOCK` 在围栏
- *     env 与 argv 中都不存在——宿主 agent 值恒不进围栏（env 白名单外 +
- *     session 不注入）；
- *   - 开态 = 宿主 agent socket 路径经同段 `--bind`（egress bind 段内：
- *     workspaceMounts 之后、cwdReadonly/proc/dev 之前，last-mount-wins 序）+
- *     `SSH_AUTH_SOCK` 入 `spec.env`（`--clearenv` 后 `--setenv` 单通道）；
- *   - 与 egress 桥同 dispose 通道：`session.dispose()` 关掉 unix 监听 +
- *     删自有 egress socket；agent socket 路径**非 session 所有**，dispose
- *     不得删宿主 agent socket；
- *   - fail-closed + F5 指引：开态但 agent socket 缺失（无 agent / 路径
- *     不存在）→ typed `SshAgentUnavailableError`（infra 归类），失败信息
- *     含「宿主侧 `ssh-add` 或无口令 key」一行；抛错发生在起 server /
- *     listen 之前（不留「有 bind 无缝」半开形态）；
- *   - F8 归类：agent socket 连不上属 infra 非域拒绝——凭据缝不经 filter，
- *     违例 sink 恒空（不开第二违例面）。
+ * Pinned invariants:
+ *   - off (default, caller passes no `sshAuthSockPath`): `SSH_AUTH_SOCK` exists
+ *     in neither the fence env nor argv — the host agent's value never enters
+ *     the fence (outside the env allowlist + the session injects nothing);
+ *   - on = the host agent socket path gets a `--bind` in the same segment (the
+ *     egress bind segment: after workspaceMounts, before cwdReadonly/proc/dev,
+ *     last-mount-wins ordering) + `SSH_AUTH_SOCK` enters `spec.env` (single
+ *     channel: `--setenv` after `--clearenv`);
+ *   - same dispose channel as the egress bridge: `session.dispose()` closes the
+ *     unix listener + deletes the session-owned egress socket; the agent socket
+ *     path is **not session-owned**, so dispose must never delete the host agent socket;
+ *   - fail-closed guidance: on but the agent socket is missing (no agent / path
+ *     does not exist) → typed `SshAgentUnavailableError` (infra-classified), and
+ *     the failure message carries the one-line guidance of host-side `ssh-add`
+ *     or a passphrase-less key; the throw happens before server start / listen
+ *     (never leaving a half-open "bind without seam" shape);
+ *   - classification: an unreachable agent socket is infra, not a domain denial —
+ *     the credential seam never passes through the filter, so the violation sink
+ *     stays empty (no second violation surface is opened).
  *
- * 注入策略同 `egress-session.test.ts`：relayResolver /
- * socketPathFactory 全 mock，不依赖宿主 node 布局与资产落位。
+ * Injection strategy same as `egress-session.test.ts`: relayResolver /
+ * socketPathFactory fully mocked, no dependency on host node layout or asset placement.
  */
 
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -50,7 +54,7 @@ afterEach(() => {
   }
 });
 
-/** 固定假中继路径集（形态抄 egress-session.test.ts）。 */
+/** Fixed fake relay path set (shape copied from egress-session.test.ts). */
 const STUB_RELAY: EgressRelayPaths = {
   nodePath: "/test-root/bin/node",
   relayDir: "/test-root/vendor/egress-relay",
@@ -58,7 +62,7 @@ const STUB_RELAY: EgressRelayPaths = {
   connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
 };
 
-/** 建一个「存在」的 agent socket fixture（缝形状只需 existsSync 通过）。 */
+/** Build an "existing" agent socket fixture (the seam shape only needs existsSync to pass). */
 function fakeAgentSocket(dir: string): string {
   const p = join(dir, "host-ssh-agent.sock");
   writeFileSync(p, "", "utf8");
@@ -86,9 +90,10 @@ async function makeSession(opts: {
 }
 
 /**
- * 用 session 的真 spec 装一个**工作区档 + cwdReadonly** 的完整围栏 argv：
- * workspaceMounts / egress bind / cwdReadonly 三层齐备，才能钉 agent bind
- * 的段内落位（openspec invariant 7 / argv 顺序纪律）。
+ * Assemble a full fence argv in workspace mode + cwdReadonly from the session's
+ * real spec: all three layers (workspaceMounts / egress bind / cwdReadonly) must
+ * be present to pin the agent bind's in-segment placement (invariant 7 / argv
+ * order discipline).
  */
 function fenceArgvFor(session: EgressSession): {
   readonly argv: readonly string[];
@@ -161,9 +166,9 @@ describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
       );
       const agentBindIdx = tripleIdx(argv, "--bind", agent);
       const procIdx = argv.indexOf("--proc");
-      // 段内落位：workspaceMounts(home) < egress socket bind < 中继资产
-      // ro-bind < agent bind < proc/dev（ADR-0107 段内次序：缝主体 →
-      // 自带件 → 条件凭据）。
+      // in-segment placement: workspaceMounts(home) < egress socket bind < relay
+      // assets ro-bind < agent bind < proc/dev (ADR-0107 segment order: seam body
+      // → bundled pieces → conditional credential).
       expect(homeRoIdx).toBeGreaterThan(-1);
       expect(egressSocketIdx).toBeGreaterThan(homeRoIdx);
       expect(relayRoIdx).toBeGreaterThan(egressSocketIdx);
@@ -187,14 +192,14 @@ describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
       sshAuthSockPath: agent,
     });
     const egressSocketPath = session.spec.unixSocketPath;
-    // server 本体 listen unix socket —— session 存续期文件真实在场。
+    // the server itself listens on the unix socket — the file really exists while the session lives.
     expect(existsSync(egressSocketPath)).toBe(true);
 
     await session.dispose();
     expect(existsSync(egressSocketPath)).toBe(false);
-    // agent socket 非 session 所有 —— dispose 不得删宿主路径
+    // the agent socket is not session-owned — dispose must never delete the host path
     expect(existsSync(agent)).toBe(true);
-    // 幂等（ADR-0097 dispose 契约）
+    // idempotent (ADR-0097 dispose contract)
     await session.dispose();
     expect(existsSync(agent)).toBe(true);
   });
@@ -226,8 +231,8 @@ describe("SSH_AUTH_SOCK 条件形态 — fail-closed 与归类", () => {
     expect((err as SshAgentUnavailableError).message).toContain(
       "宿主侧 `ssh-add` 或无口令 key"
     );
-    // fail-fast：抛错在 socket 路径分配 / 起 server 之前（不留「有 bind
-    // 无缝」半开形态）。
+    // fail-fast: the throw happens before socket path allocation / server start
+    // (never leaving a half-open "bind without seam" shape).
     expect(socketPathUsed).toBeUndefined();
   });
 
@@ -236,7 +241,7 @@ describe("SSH_AUTH_SOCK 条件形态 — fail-closed 与归类", () => {
       sshAuthSockPath: fakeAgentSocket(scratchDir()),
     });
     try {
-      // 凭据缝不经 filter：session 存续期无任何域判定发生 → drain 为空。
+      // the credential seam never passes through the filter: no domain decision happens during the session → drain is empty.
       expect(session.violationSink.drain()).toEqual([]);
     } finally {
       await session.dispose();

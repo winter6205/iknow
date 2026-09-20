@@ -1,21 +1,22 @@
 /**
- * B3 / B4 (ADR-0041 + ADR-0043 §4) — loop-engine 环境级事件追加缝集成测试。
+ * ADR-0043 — integration tests for the loop-engine environment-level event-append seams.
  *
- * H1 (model-prefix-layering code-review): MCP 手动重连链路红绿 ——
- *   deps.mcpReconnect.takePending 产出事件 → 下一 step 的 messages 尾部
- *   追加一条 role=user 的单行静态通知(MCP_RECONNECT_NOTIFICATION_TEMPLATE,
- *   `<server>` / `<tools>` 插值);pending 空 → 零追加;tools/system 字节
- *   不变(SC4 第三句的红绿二元)。
+ * MCP manual reconnect:
+ *   deps.mcpReconnect.takePending yields events → before the next step, one
+ *   role=user single-line static notification is appended at the messages
+ *   tail (MCP_RECONNECT_NOTIFICATION_TEMPLATE interpolated with `<server>` /
+ *   `<tools>`); empty pending → zero additions; tools/system bytes unchanged.
  *
- * H2 (SC5 红绿): graph 模式切换提示 ——
- *   - 初值观察(lastSeenEnabled=undefined)只记初值,零追加;
- *   - 两 step 之间翻 graphAssembly → 第二 step 前 messages 尾部出现
- *     `<graph_mode>` 开图提示(IKNOW_GRAPH_MODE_ON_NOTIFICATION);
- *   - 再翻回 → 关图提示(IKNOW_GRAPH_MODE_OFF_NOTIFICATION);
- *   - reactive-compact 重试前二次检测同断言。
+ * Graph-mode switch notice:
+ *   - initial observation (lastSeenEnabled=undefined) only records the value, zero additions;
+ *   - flipping graphAssembly between two steps → before the second step the
+ *     `<graph_mode>` on-notice (IKNOW_GRAPH_MODE_ON_NOTIFICATION) appears at
+ *     the messages tail;
+ *   - flipping back → off notice (IKNOW_GRAPH_MODE_OFF_NOTIFICATION);
+ *   - the same assertion applies to the second detection before a reactive-compact retry.
  *
- * 两条缝共用的红绿判据:文本断言引用 SSOT 常量(graph/notification.ts /
- * loop-engine.ts 模板),不走字面。
+ * Shared pass/fail criteria for both seams: text assertions reference the
+ * SSOT constants (graph/notification.ts / loop-engine.ts templates), never literals.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -47,7 +48,7 @@ function makeUserMsg(text: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
 }
 
-/** 纯文本 stub adapter:每 step 返回一条 assistant 文本(无工具调用)。 */
+/** Plain-text stub adapter: each step returns one assistant text turn (no tool calls). */
 function makeTextAdapter(responses: string[]): LoopAdapter & {
   steps: Array<{ messages: ReadonlyArray<AnthropicNativeMessage> }>;
 } {
@@ -78,7 +79,7 @@ function makeTextAdapter(responses: string[]): LoopAdapter & {
   };
 }
 
-/** 空 executor + registry(纯文本路径不触工具)。 */
+/** Empty executor + registry (the plain-text path never touches tools). */
 const emptyExecutor: Executor = Object.freeze({
   executeAll: async () => [],
 });
@@ -87,7 +88,7 @@ const emptyRegistry: Registry = Object.freeze({
   get: () => undefined,
 });
 
-/** 单布尔 graph mode holder(镜像 GraphModeContext 最小形态)。 */
+/** Single-boolean graph mode holder (mirrors the minimal GraphModeContext shape). */
 function makeGraphModeHolder(): {
   ctx: GraphModeContext;
   set: (enabled: boolean) => void;
@@ -99,7 +100,7 @@ function makeGraphModeHolder(): {
   return { ctx, set: (v: boolean) => (enabled = v) };
 }
 
-/** 收集 run 产物里 role=user 且含给定标记文本的消息。 */
+/** Collect role=user messages from run output whose text contains the given marker. */
 function userMessagesContaining(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   marker: string
@@ -115,7 +116,7 @@ function userMessagesContaining(
 }
 
 // =========================================================================
-// H1 — MCP manual reconnect → messages 尾追加(红绿二元)
+// MCP manual reconnect → tail-append to messages (pass/fail binary)
 // =========================================================================
 
 describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追加", () => {
@@ -136,7 +137,7 @@ describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追�
       },
     };
 
-    // 模拟 manager.onManualReconnect 回调(TUI/CLI reload 成功路径)。
+    // Simulate the manager.onManualReconnect callback (TUI/CLI reload success path).
     pending.push({
       server: "svc",
       tools: ["mcp__svc__echo", "mcp__svc__ping"],
@@ -145,7 +146,8 @@ describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追�
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
 
-    // 红绿判据:messages 尾部出现一条 role=user 的静态通知(SSOT 模板插值)。
+    // Pass/fail criterion: one static role=user notification (SSOT template, interpolated)
+    // appears at the messages tail.
     const hits = userMessagesContaining(result.messages, "reconnected");
     assert.equal(hits.length, 1);
     assert.equal(
@@ -155,11 +157,11 @@ describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追�
         "mcp__svc__echo, mcp__svc__ping"
       )
     );
-    // 通知在用户首条消息之后(transcript 尾部追加,前缀不动)。
+    // The notice comes after the user's first message (tail append; prefix untouched).
     assert.ok(result.messages.length >= 3);
     assert.equal(result.messages[0]?.role, "user");
 
-    // takePending 一次性消费:第二条 step 无重复追加。
+    // takePending consumes once: no duplicate append on the second step.
     assert.equal(
       userMessagesContaining(result.messages, "reconnected").length,
       1
@@ -179,8 +181,8 @@ describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追�
     };
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
-    // 只有无缝基线的 user(Q) + assistant 两条件(用户消息 + 模型回合),
-    // 无任何通知消息。
+    // Baseline without the seam: exactly the two user/assistant message groups
+    // (user input + model turn), no notification messages.
     const userMsgs = result.messages.filter((m) => m.role === "user");
     assert.equal(userMsgs.length, 1);
     assert.deepEqual(userMsgs[0]?.content, [{ type: "text", text: "Q" }]);
@@ -188,7 +190,7 @@ describe("loop engine H1: mcpReconnect seam → <mcp_reconnect> 静态通知追�
 });
 
 // =========================================================================
-// H2 — graph 模式切换提示(SC5 红绿)
+// Graph-mode switch notice
 // =========================================================================
 
 describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", () => {
@@ -207,16 +209,17 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
       graphModeChange: { assembly, lastSeenEnabled },
     };
 
-    // run 的每轮 step 前 assembly.enabled() 读同一 holder;step 之间不翻键。
-    // 初值观察:第一 step 只记 lastSeenEnabled,零追加 —— run 里没有模拟
-    // 「第一步之前翻键」的通道,直接断言整段 run 的消息形态。
+    // Each round before a step, assembly.enabled() reads the same holder;
+    // no flip happens between steps here. Initial observation: first step
+    // records lastSeenEnabled only, zero additions — run has no channel for
+    // "flip before the first step", so assert the message shape of the whole run.
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
     assert.equal(
       userMessagesContaining(result.messages, "<graph_mode>").length,
       0
     );
-    // 初值已被记录。
+    // The initial value was recorded.
     assert.equal(lastSeenEnabled.value, false);
   });
 
@@ -235,17 +238,18 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
       graphModeChange: { assembly, lastSeenEnabled },
     };
 
-    // step1(初值观察,零追加) → 翻开(重拍 round 快照,镜像 host 在下一
-    // run 边界 beginRound 的生产行为) → step2(追加 on 提示) → 翻回 →
-    // step3(追加 off 提示)。assembly.enabled() 只读 beginRound 拍的
-    // round 快照(src/harness/graph/assembly.ts),所以每次翻键后必须
-    // beginRound 才能让 seam 观察到新值。
+    // step1 (initial observation, zero additions) → flip on (re-snapshot the
+    // round, mirroring the host calling beginRound at the next run boundary)
+    // → step2 (append on-notice) → flip back → step3 (append off-notice).
+    // assembly.enabled() only reads the round snapshot taken by beginRound
+    // (src/harness/graph/assembly.ts), so each flip must be followed by
+    // beginRound before the seam observes the new value.
     let state: LoopState = {
       messages: [makeUserMsg("Q")],
       turnCount: 0,
     };
 
-    // step 1:初值观察。messages 不变(零追加)。
+    // step 1: initial observation; messages unchanged (zero additions).
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
     assert.equal(
@@ -255,11 +259,11 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
     );
     assert.equal(lastSeenEnabled.value, false);
 
-    // 翻开 graph + 拍新 round 快照。
+    // Flip graph on + take a fresh round snapshot.
     holder.set(true);
     assembly.beginRound();
 
-    // step 2:翻转检测 → messages 尾部出现 <graph_mode> on 提示。
+    // step 2: flip detected → <graph_mode> on-notice at the messages tail.
     state = {
       messages: (t1 as { finalState: LoopState }).finalState.messages,
       turnCount: (t1 as { finalState: LoopState }).finalState.turnCount,
@@ -272,7 +276,7 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
     );
     assert.equal(onHits.length, 1);
     assert.equal(onHits[0], IKNOW_GRAPH_MODE_ON_NOTIFICATION);
-    // 是 user 消息。
+    // It is a user message.
     const last = s2.finalState.messages[s2.finalState.messages.length - 1];
     const beforeAssistant =
       s2.finalState.messages[s2.finalState.messages.length - 2];
@@ -285,11 +289,11 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
     );
     assert.ok(last);
 
-    // 翻回关 + 拍新 round 快照。
+    // Flip back off + take a fresh round snapshot.
     holder.set(false);
     assembly.beginRound();
 
-    // step 3:翻转检测 → 追加 off 提示(与 on 提示共存,尾部追加)。
+    // step 3: flip detected → append off-notice (coexists with the on-notice, tail-appended).
     const t3 = await step(
       {
         messages: s2.finalState.messages,
@@ -309,7 +313,7 @@ describe("loop engine H2: graphModeChange seam → <graph_mode> 切换提示", (
 });
 
 // =========================================================================
-// H2 补充 — reactive-compact 重试前的二次检测
+// Graph-mode re-detection before a reactive-compact retry
 // =========================================================================
 
 describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", () => {
@@ -320,7 +324,7 @@ describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", 
       value: undefined,
     };
 
-    // 记录每次 adapter.step 看到的 messages(重试时模型实际所见)。
+    // Record the messages each adapter.step sees (what the model actually sees on retry).
     const seenMessages: ReadonlyArray<AnthropicNativeMessage>[] = [];
     let stepCalls = 0;
     const flakyAdapter: LoopAdapter = {
@@ -330,16 +334,17 @@ describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", 
         stepCalls += 1;
         seenMessages.push(state.messages);
         if (stepCalls === 1) {
-          // 首次调用抛 PromptTooLong → reactive compact + retry;
-          // 抛错瞬间翻键并重拍 round 快照,模拟「同 round 两次模型调用
-          // 之间 host 翻键」(ADR-0041)→ compact retry 前二次检测命中。
+          // First call throws PromptTooLong → reactive compact + retry.
+          // Flip the key and re-snapshot the round at the throw site, simulating
+          // "the host flips between two model calls in the same round" → the
+          // second detection before compact retry hits.
           holder.set(true);
           assembly.beginRound();
           const { PromptTooLongError } =
             await import("../../../src/harness/errors.ts");
           throw new PromptTooLongError("synthetic 400 prompt-too-long");
         }
-        // compact 后的重试返回纯文本。
+        // The retry after compact returns plain text.
         const text = "after compact";
         const native: AnthropicNativeMessage = {
           role: "assistant",
@@ -364,8 +369,9 @@ describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", 
       graphModeChange: { assembly, lastSeenEnabled },
     };
 
-    // 长历史(> DEFAULT_KEEP_RECENT)让 reactive compact 有压缩空间
-    // (压缩产物 messages 引用不变 → 不触发 retry 的短路分支被绕开)。
+    // A long history (> DEFAULT_KEEP_RECENT) gives reactive compact room to
+    // compress (the compressed messages keep the same reference → the retry's
+    // short-circuit branch is bypassed).
     const prior = Array.from({ length: 12 }, (_, i) =>
       makeUserMsg(`prior-${i}`)
     );
@@ -374,12 +380,12 @@ describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", 
       priorMessages: prior,
     });
     assert.equal(result.stopReason, "completed");
-    // 三次 adapter.step:① 首调抛 PromptTooLong;② runFullCompact 摘要
-    // (同一 deps.adapter);③ compact 后的 retry。
+    // Three adapter.step calls: (1) first call throws PromptTooLong;
+    // (2) runFullCompact summary (same deps.adapter); (3) retry after compact.
     assert.ok(stepCalls >= 3, "reactive retry 必须发生(至少三次 adapter.step)");
 
-    // 重试模型调用看到的第一条新消息 = <graph_mode> on 提示(在压缩产物
-    // 之后追加,早于 assistant)。
+    // The first new message the retried model call sees = the <graph_mode>
+    // on-notice (appended after the compacted output, before the assistant turn).
     const retrySeen = seenMessages[seenMessages.length - 1];
     assert.ok(retrySeen);
     const onHits = userMessagesContaining(retrySeen, "<graph_mode>");

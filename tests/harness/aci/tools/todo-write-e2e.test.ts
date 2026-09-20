@@ -1,25 +1,28 @@
 /**
- * #440 T7: todo_write 端到端 — 真实 executor 路径 + fresh todoDir（不预存
- * todos.md 文件），覆盖：
+ * todo_write end-to-end — real executor path + fresh todoDir (no pre-existing
+ * todos.md), covering:
  *
- *   a. happy path: read / add / update 三件事全跑通,todos.md 落盘内容
- *      形态正确（`- [ ] [tN] item` / `- [x] [tN] item` 形态持久化）
- *   b. typed-error catch 渲染契约（code-quality.md §typed-error catch 契约）：
- *      executor 对 ToolExecutionError 渲染 message 含 `[todo_write]` 前缀,
- *      保留 error.name === "ToolExecutionError" 区分,合法态（mode=read
- *      缺文件 → ""）与真实故障（empty item / unknown id update / 超 64KB）
- *      严格分流。schema 校验失败（mode 枚举外 / 非对象 input）走 AJV 层
- *      validation_failed,与 handler 层 ToolExecutionError execution_failed
- *      区分（typed-error catch 契约:按 kind 分流）。
+ *   a. happy path: read / add / update all work, and the persisted todos.md has
+ *      the right shape (`- [ ] [tN] item` / `- [x] [tN] item`)
+ *   b. the typed-error catch rendering contract (code-quality.md): for a
+ *      ToolExecutionError the executor renders a message with the
+ *      `[todo_write]` prefix while keeping error.name ===
+ *      "ToolExecutionError", strictly separating legal states (mode=read with
+ *      missing file → "") from real faults (empty item / unknown-id update /
+ *      >64KB). Schema failures (bad mode enum / non-object input) go through
+ *      the AJV layer as validation_failed, distinguished from handler-layer
+ *      ToolExecutionError execution_failed (dispatch by kind).
  *
- * #903 SC6: `mode=replace` 在**真实 executor + 真实 conversationId** 路径上
- * 跑通 —— conversationId 由 `executeAll` 第 4 个位置参数流经 permission
- * runtime → inner executor → `ctx.conversationId` → handler,账本落在
- * per-conversation 目录（`resolveConversationTodoPath`），而非共享根。unit 层
- * 直呼 `tool.handler(input, ctx)` 绕过了这条装配链,故此处单独钉住：装配链
- * 断了(conversationId 丢失)时账本会退回根 todos.md,unit 测试仍全绿。
+ * `mode=replace` on the **real executor + real conversationId** path —
+ * conversationId flows from `executeAll`'s 4th positional argument through the
+ * permission runtime → inner executor → `ctx.conversationId` → handler, so the
+ * ledger lands in the per-conversation directory
+ * (`resolveConversationTodoPath`) rather than the shared root. Unit-level
+ * direct `tool.handler(input, ctx)` calls bypass this assembly chain, hence the
+ * separate pin here: if the chain breaks (conversationId lost), the ledger
+ * silently reverts to the root todos.md while unit tests stay green.
  *
- * 隔离：mkdtemp todoDir；tests 不共享 fs 状态。
+ * Isolation: mkdtemp todoDir; tests share no fs state.
  */
 import { afterAll, describe, it, expect } from "vitest";
 import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
@@ -51,7 +54,7 @@ afterAll(async () => {
   }
 });
 
-/** 从 executor result.payload 提取字符串文本（AJV 内容块 [{type,text}] 形态）。 */
+/** Extract the string text from an executor result payload (AJV content-block [{type,text}] shape). */
 function readText(payload: unknown): string {
   if (typeof payload === "string") return payload;
   if (
@@ -67,10 +70,11 @@ function readText(payload: unknown): string {
 }
 
 /**
- * 装配 todo_write 单工具真实 executor:createAciRegistry 单工厂 → reg.inner
- * 冻结快照 → createExecutor(reg.inner) → createAciExecutor 装饰层（含
- * permission policy,默认 write category → ask → todo_write read mode
- * bypass ask via code-built-in rule,add/update 在本 happy path 不触发）。
+ * Assemble a real single-tool todo_write executor: createAciRegistry single
+ * factory → reg.inner frozen snapshot → createExecutor(reg.inner) →
+ * createAciExecutor decoration (permission policy included; default write
+ * category → ask → todo_write read mode bypasses ask via the code-built-in
+ * rule; add/update never triggers ask in these happy paths).
  */
 function buildE2EHarness(todoDir: string): {
   readonly exec: ReturnType<typeof createAciExecutor>;
@@ -95,7 +99,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     ]);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
-      // 合法态:文件不存在 → 空字符串(typed-error catch 契约:合法态 ≠ 故障)
+      // Legal state: missing file → empty string (typed-error catch contract: legal ≠ fault)
       expect(readText(result.payload)).toBe("");
     }
   });
@@ -112,15 +116,15 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     ]);
     expect(addResult.kind).toBe("ok");
     if (addResult.kind === "ok") {
-      // SC7:回执点名新 id。
+      // The receipt names the new id.
       expect(readText(addResult.payload)).toBe("Added 1 item: t1");
     }
 
-    // 落盘文件正确
+    // File on disk is correct
     const onDisk = await readFile(join(todoDir, "todos.md"), "utf8");
     expect(onDisk).toBe("- [ ] [t1] ship T7\n");
 
-    // read mode 回读 → 同一内容
+    // read mode reads back → same content
     const [listResult] = await exec.executeAll([
       { id: "t7-list-1", name: "todo_write", input: { mode: "read" } },
     ]);
@@ -134,7 +138,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
 
-    // 先 add 一条
+    // First add one item
     await exec.executeAll([
       {
         id: "t7-check-add",
@@ -143,7 +147,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
       },
     ]);
 
-    // update status=completed → 翻为 closed(id 由 add 回执给出)
+    // update status=completed → flips to closed (id comes from the add receipt)
     const [checkResult] = await exec.executeAll([
       {
         id: "t7-check-1",
@@ -153,10 +157,12 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     ]);
     expect(checkResult.kind).toBe("ok");
     if (checkResult.kind === "ok") {
-      expect(readText(checkResult.payload)).toBe("Updated t1: status=completed");
+      expect(readText(checkResult.payload)).toBe(
+        "Updated t1: status=completed"
+      );
     }
 
-    // 落盘文件正确
+    // File on disk is correct
     const onDisk = await readFile(join(todoDir, "todos.md"), "utf8");
     expect(onDisk).toBe("- [x] [t1] first task\n");
   });
@@ -182,7 +188,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
       },
       { id: "t7-mix-4", name: "todo_write", input: { mode: "read" } },
     ]);
-    // 全 ok
+    // All ok
     for (const r of results) {
       expect(r.kind).toBe("ok");
     }
@@ -196,14 +202,15 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     const [result] = await exec.executeAll([
       { id: "t7-bad-mode", name: "todo_write", input: { mode: "bogus" } },
     ]);
-    // typed-error catch 契约: schema 校验失败 ≠ handler ToolExecutionError,
-    // 走 AJV validation_failed kind(内层 executor)。
+    // typed-error catch contract: a schema failure ≠ handler ToolExecutionError;
+    // it goes through the AJV validation_failed kind (inner executor).
     expect(result.kind).toBe("validation_failed");
     if (result.kind === "validation_failed") {
-      // 错误消息含 AJV 错误描述(不保证 [todo_write] 前缀 — AJV 层不带工具名前缀,
-      // handler 层 ToolExecutionError 才带)。记录契约分流:
-      //   - validation_failed → AJV 层(无 [todo_write] 前缀)
-      //   - execution_failed → handler 层 ToolExecutionError([todo_write] 前缀)
+      // The message carries AJV's error description (no `[todo_write]` prefix
+      // guaranteed — the AJV layer omits the tool prefix; only handler-layer
+      // ToolExecutionError carries it). Recorded dispatch:
+      //   - validation_failed → AJV layer (no [todo_write] prefix)
+      //   - execution_failed  → handler-layer ToolExecutionError ([todo_write] prefix)
       expect(result.message).toBeDefined();
     }
   });
@@ -211,7 +218,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
   it("typed-error: add 缺 item (空串) → execution_failed + `[todo_write]` 前缀", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
-    // item: "" 满足 schema (type:string) 但 handler 拒绝(非空校验)
+    // item: "" passes the schema (type: string) but the handler rejects it (non-empty check)
     const [result] = await exec.executeAll([
       {
         id: "t7-no-item",
@@ -221,7 +228,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     ]);
     expect(result.kind).toBe("execution_failed");
     if (result.kind === "execution_failed") {
-      // typed-error catch 渲染契约:message 含 [todo_write] 前缀 + 描述
+      // typed-error catch rendering contract: message carries the [todo_write] prefix + description
       expect(result.message).toMatch(/^\[todo_write\]/);
       expect(result.message).toContain("non-empty");
     }
@@ -248,7 +255,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
   it("typed-error: 文件超 64KB → execution_failed + `file would exceed 65536 bytes`", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
-    // 先 seed 一个接近上限的文件(158 行 × ~414 字节 = 65304 bytes)
+    // First seed a file close to the cap (158 lines × ~414 bytes = 65304 bytes)
     const seedItem = "x".repeat(400);
     for (let i = 0; i < 158; i++) {
       await exec.executeAll([
@@ -259,7 +266,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
         },
       ]);
     }
-    // 再 add 一条 400-char item → 必超 64 KB
+    // Then add one more 400-char item → guaranteed over 64 KB
     const [result] = await exec.executeAll([
       {
         id: "t7-overflow",
@@ -276,17 +283,19 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #903 SC6: replace 走真实 executor + 真实 conversationId
+// replace on the real executor + real conversationId
 //
-// 与 todo-write.test.ts 的 replace 用例的区别（不重复）：unit 层直呼
-// `tool.handler(input, ctx)` 自带 ctx；这里 conversationId 只作为
-// `executeAll(calls, signal, timeoutMs, conversationId)` 的位置参数交给装配
-// 链，由 permission runtime → inner executor 合成 `ctx.conversationId`。因此
-// 本节钉住的不变式是「装配链把 conversationId 送到了 replace 分支」——
-// 断链时账本静默退回共享根 todos.md，unit 层察觉不到。
+// Difference from the replace cases in todo-write.test.ts (no duplication):
+// there, unit-level direct `tool.handler(input, ctx)` calls bring their own
+// ctx; here conversationId only enters as the positional argument of
+// `executeAll(calls, signal, timeoutMs, conversationId)` and travels the
+// assembly chain — permission runtime → inner executor synthesizes
+// `ctx.conversationId`. So the invariant pinned here is "the assembly chain
+// delivers conversationId to the replace branch": on a broken chain the ledger
+// silently falls back to the shared-root todos.md, invisible to unit tests.
 // ---------------------------------------------------------------------------
 
-/** per-conversation 目录下的快照文件名（`todos.<unixMs>.<hex>.md`）。 */
+/** Snapshot file name inside the per-conversation directory (`todos.<unixMs>.<hex>.md`). */
 async function listSnapshots(currentPath: string): Promise<string[]> {
   const entries = await readdir(dirname(currentPath));
   return entries.filter((n) => /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n));
@@ -302,7 +311,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
       conversationId,
     });
 
-    // 现行非空：两条未勾项，经真实 executor 落盘。
+    // Non-empty current ledger: two unchecked items, persisted via the real executor.
     const addResults = await exec.executeAll(
       [
         {
@@ -322,13 +331,15 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     );
     for (const r of addResults) expect(r.kind).toBe("ok");
 
-    // 账本必须落在 per-conversation 目录 —— 证明 conversationId 真的流到了
-    // handler（断链则会写共享根 todos.md）。
+    // The ledger must land in the per-conversation directory — proving
+    // conversationId really reached the handler (a broken chain would write the shared-root todos.md).
     const beforeReplace = await readFile(currentPath, "utf8");
-    expect(beforeReplace).toBe("- [ ] [t1] old-step-1\n- [ ] [t2] old-step-2\n");
+    expect(beforeReplace).toBe(
+      "- [ ] [t1] old-step-1\n- [ ] [t2] old-step-2\n"
+    );
     expect(await listSnapshots(currentPath)).toHaveLength(0);
 
-    // replace：整表换新。
+    // replace: swap the whole table.
     const [replaceResult] = await exec.executeAll(
       [
         {
@@ -343,23 +354,23 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     );
     expect(replaceResult.kind).toBe("ok");
     if (replaceResult.kind === "ok") {
-      // D5 短回执，与 add/check 同形。
+      // Short receipt, same shape as add/update.
       expect(readText(replaceResult.payload)).toBe("Updated todos.md");
     }
 
-    // 现行恰好是新两行未勾项(id 从 t1 重新编号 — 整表是新表)。
+    // The current ledger is exactly the two new unchecked items (ids renumbered from t1 — the whole table is new).
     expect(await readFile(currentPath, "utf8")).toBe(
       "- [ ] [t1] new-step-1\n- [ ] [t2] new-step-2\n"
     );
 
-    // 快照落盘且内容 === replace 之前的现行全文。
+    // A snapshot is persisted with content === the pre-replace full ledger.
     const snapshots = await listSnapshots(currentPath);
     expect(snapshots).toHaveLength(1);
     expect(
       await readFile(join(dirname(currentPath), snapshots[0]), "utf8")
     ).toBe(beforeReplace);
 
-    // list 只读新现行，不含快照正文。
+    // read only shows the new current ledger, no snapshot bodies.
     const [listResult] = await exec.executeAll(
       [{ id: "e2e-rep-list", name: "todo_write", input: { mode: "read" } }],
       undefined,
@@ -375,8 +386,8 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
   });
 
   it("replace 后 add/update 语义不变：新现行上继续 add + update 首个未勾项", async () => {
-    // SC6 回归：replace 不是终态 —— 换表之后 add/update 仍在**新**现行上工作，
-    // 不会误碰快照。
+    // Regression: replace is not terminal — after the swap, add/update keep
+    // working on the **new** current ledger and never touch the snapshot.
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-then-addcheck";
@@ -417,7 +428,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     expect(await readFile(currentPath, "utf8")).toBe(
       "- [x] [t1] fresh-a\n- [ ] [t2] fresh-b\n- [ ] [t3] fresh-c\n"
     );
-    // 快照仍是 replace 当时的旧全文，后续 add/update 不回写快照。
+    // The snapshot stays the old full text from the replace moment; later add/update never write back into it.
     const snapshots = await listSnapshots(currentPath);
     expect(snapshots).toHaveLength(1);
     expect(
@@ -426,9 +437,10 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
   });
 
   it("typed-error: replace 带 item 字段 → execution_failed + `[todo_write]` 前缀,现行不动", async () => {
-    // 字段互斥错误经真实 executor 渲染为 execution_failed（handler 层 typed
-    // error），不是 AJV validation_failed —— schema 允许 item/items 并存，
-    // per-mode 互斥只有 handler 知道。
+    // The field-mutual-exclusion error renders as execution_failed through the
+    // real executor (handler-layer typed error), not AJV validation_failed —
+    // the schema tolerates item/items coexisting; only the handler knows the
+    // per-mode exclusion.
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-mixed-fields";
@@ -468,7 +480,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
       expect(result.message).toContain("does not accept item");
     }
 
-    // 失败不半写：现行保持旧内容，无快照。
+    // Failure leaves no half-write: current keeps the old content, no snapshot.
     expect(await readFile(currentPath, "utf8")).toBe("- [ ] [t1] keep-me\n");
     expect(await listSnapshots(currentPath)).toHaveLength(0);
   });

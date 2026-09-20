@@ -1,13 +1,18 @@
 /**
- * NearestRoot + resolveServer 单测 — spec 251-lsp-tool + spec 302-lsp-multilang（T2）。
+ * NearestRoot + resolveServer unit tests (specs/251-lsp-tool.md, multi-language
+ * extension routing).
  *
- * 覆盖 4 块：
- *   1. NearestRoot exclude 可选：省略 exclude 时无排除（含 lockfile 就返回）、
- *      exclude 命中跳过、上界 stop 保留、跨 ctx.directory 拒绝、不可读目录存活。
- *   2. resolveServer 扩展名路由：.py→Pyright、.yaml→YamlLS、.json→JsonLS、
- *      Dockerfile（无扩展名全文件名）→DockerfileLS、.ts→Typescript、无匹配→undefined。
- *   3. overflow：SERVERS 空数组时 `SERVERS.find` 返回 undefined 不 throw。
- *   4. 局部常量语义：TS lockfile/exclude 不再是导出顶层常量，测试用显式数组注入。
+ * Four areas:
+ *   1. NearestRoot exclude is optional: omitting it excludes nothing (returns
+ *      the ancestor once a lockfile is found); an exclude hit skips the
+ *      candidate; the ctx.directory upper-bound stop holds; lockfiles above
+ *      the stop are rejected; unreadable directories don't crash the walk.
+ *   2. resolveServer extension routing: .py→Pyright, .yaml→YamlLS,
+ *      .json→JsonLS, Dockerfile (extension-less, full-file-name match) →
+ *      DockerfileLS, .ts→Typescript, no match→undefined.
+ *   3. overflow: with SERVERS empty, `SERVERS.find` returns undefined, no throw.
+ *   4. local-constant semantics: TS lockfile/exclude are no longer exported
+ *      top-level constants; tests inject explicit arrays.
  */
 import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
@@ -26,7 +31,8 @@ import {
   DockerfileLS,
 } from "../../../src/harness/lsp/server.js";
 
-// 显式局部数组（TS_LOCKFILES/TS_EXCLUDE 已移为 server.ts 内就近局部常量，不再导出，#305 决策2）。
+// Explicit local arrays: TS_LOCKFILES/TS_EXCLUDE are now local constants near
+// their use site inside server.ts and no longer exported.
 const lockfiles = [
   "package-lock.json",
   "bun.lockb",
@@ -79,10 +85,10 @@ describe("NearestRoot", () => {
   it("exclude 可选 #1 — 省略 exclude 且含 lockfile → 返回该祖先（无排除）", async () => {
     const root = await makeSandbox();
     await writeFile(join(root, "package-lock.json"), "{}");
-    // 省略 exclude 参数：即使目录含 deno.json 也不排除。
+    // Omitting the exclude arg: deno.json in the directory no longer excludes.
     await writeFile(join(root, "deno.json"), "{}");
 
-    const find = NearestRoot(lockfiles); // exclude 省略
+    const find = NearestRoot(lockfiles); // exclude omitted
     const result = await find(join(root, "src", "foo.ts"), {
       directory: root,
     });
@@ -104,7 +110,7 @@ describe("NearestRoot", () => {
   it("cross ctx.directory rejected: lockfile 在 ctx.directory 之上 → undefined", async () => {
     const root = await makeSandbox();
     const sub = join(root, "nested");
-    await writeFile(join(root, "package-lock.json"), "{}"); // 位于 ctx.directory 之上
+    await writeFile(join(root, "package-lock.json"), "{}"); // above ctx.directory
 
     const find = NearestRoot(lockfiles, excludeDeno);
     const result = await find(join(sub, "foo.ts"), {
@@ -118,7 +124,7 @@ describe("NearestRoot", () => {
     const root = await makeSandbox();
     const sub = join(root, "nested");
     await mkdir(sub);
-    await writeFile(join(root, "package-lock.json"), "{}"); // 位于 stop 之上
+    await writeFile(join(root, "package-lock.json"), "{}"); // above the stop
     const find = NearestRoot(lockfiles, excludeDeno);
     const result = await find(join(root, "x.ts"), { directory: sub });
 
@@ -139,7 +145,7 @@ describe("NearestRoot", () => {
   });
 });
 
-// ── 鉴权补充：NearestRoot 边界（overflow / negative）─────────────────────────
+// ── NearestRoot boundary edges (overflow / negative) ─────────────────────────
 
 describe("NearestRoot overflow / negative edges", () => {
   it("deep ancestor chain: lockfile found at a deep ancestor returns it", async () => {
@@ -191,7 +197,7 @@ describe("NearestRoot overflow / negative edges", () => {
   });
 });
 
-// ── resolveServer 扩展名路由（spec 302-lsp-multilang § S4）──────────────────
+// ── resolveServer extension routing ──────────────────────────────────────────
 
 describe("resolveServer", () => {
   it("routes .py → Pyright", () => {
@@ -219,9 +225,9 @@ describe("resolveServer", () => {
   });
 
   it("routes extension-less Dockerfile with full path → DockerfileLS", () => {
-    // handler 层传 `params.file` 是完整路径（如 `/proj/Dockerfile`）。
-    // `path.extname("/proj/Dockerfile")` 为空 → 回退用 basename 命中
-    // `Dockerfile`（不能回退全路径，否则 `"/proj/Dockerfile"` 永不匹配）。
+    // The handler passes `params.file` as a full path (e.g. `/proj/Dockerfile`).
+    // `path.extname("/proj/Dockerfile")` is empty → fall back to basename to
+    // match `Dockerfile` (falling back to the full path would never match).
     assert.equal(resolveServer("/proj/Dockerfile"), DockerfileLS);
     assert.equal(resolveServer("/a/b/c/Dockerfile"), DockerfileLS);
   });
@@ -246,7 +252,7 @@ describe("resolveServer", () => {
   });
 });
 
-// ── overflow：SERVERS 空数组 → find 返回 undefined 不 throw ────────────────
+// ── overflow: empty SERVERS → find returns undefined, no throw ───────────────
 
 describe("SERVERS overflow / find semantics", () => {
   it("find over empty array returns undefined (不 throw)", () => {
@@ -256,14 +262,15 @@ describe("SERVERS overflow / find semantics", () => {
   });
 
   it("SERVERS.find 无匹配也返回 undefined（不 throw）", () => {
-    // 用真实 SERVERS 验证：传入一个不可能命中的扩展名。
+    // Verified against the real SERVERS: pass an extension that can never match.
     const result = SERVERS.find((s) => s.extensions.includes(".unknown"));
     assert.equal(result, undefined);
   });
 
   it("resolveServer is defensive: 空数组等价场景不抛错", () => {
-    // resolveServer 内部用 `SERVERS.find(...)`；find 对空/无匹配数组均返回
-    // undefined 而非 throw。此断言直接锁定该语义（与上述 overflow 呼应）。
+    // resolveServer internally uses `SERVERS.find(...)`; find returns
+    // undefined (never throws) for empty or non-matching arrays. This
+    // assertion pins that semantics directly, echoing the overflow cases.
     const result = resolveServer("no.such-ext");
     assert.equal(result, undefined);
   });

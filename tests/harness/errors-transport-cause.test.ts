@@ -1,9 +1,10 @@
 /**
- * ADR-0094 / SC4-SC5 (viewport API error): summarizeTransportCause helper.
+ * ADR-0094 (viewport API error): summarizeTransportCause helper.
  *
- * 钉住 SDK-agnostic 形态:任何 unknown → 安全 `{ status?, message }` 或
- * `undefined`。SDK APIError 形态 = `{ status:number, message:string, name:"APIError" }`,
- * 但本 helper 不耦合该类型,只做结构化读取。
+ * Pins the SDK-agnostic shape: any unknown → safe `{ status?, message }` or
+ * `undefined`. The SDK APIError shape is `{ status:number, message:string,
+ * name:"APIError" }`, but this helper does not couple to that type — it only
+ * reads structurally.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -43,7 +44,7 @@ describe("summarizeTransportCause (ADR-0094 SC4)", () => {
     const summary = summarizeTransportCause(cause);
     assert.notEqual(summary, undefined);
     assert.equal(summary?.status, 500);
-    // 非空,因为 message="" 会回退到 String(cause)
+    // non-empty: message="" falls back to String(cause)
     assert.ok((summary?.message ?? "").length > 0);
   });
 
@@ -85,9 +86,11 @@ describe("summarizeTransportCause (ADR-0094 SC4)", () => {
     assert.ok((summary?.message ?? "").length > 0);
   });
 
-  // 真实 4xx throw 路径（ADR-0094 实测补刀）:SDK APIError 把网关 JSON 错误
-  // 体挂在 `error` 字段;裸 APIError（非瞬态 HTTP 不包 TransportRetryExhausted）
-  // 直达 TUI catch,服务商原文必须从嵌套体提取,而不是 SDK 的 HTTP 描述。
+  // Real 4xx throw path (ADR-0094): the SDK attaches the gateway JSON error
+  // body to the `error` field; a bare APIError (non-transient HTTP is not
+  // wrapped in TransportRetryExhausted) reaches the TUI catch directly, so the
+  // provider's original text must be extracted from the nested body, not the
+  // SDK's generic HTTP description.
   it("SDK APIError shape with nested error body → provider message wins", () => {
     const cause = {
       name: "APIError",
@@ -141,9 +144,10 @@ describe("summarizeTransportCause (ADR-0094 SC4)", () => {
 });
 
 /**
- * ADR-0111 Decision 2(c): `transportApiErrorOf` 覆盖面扩到
- * ModelStreamIncompleteError —— 兑现不变式「apiError 在场 ⇔ 带 cause 的
- * 瞬时模型流/传输失败」。cause 摘要复用 summarizeTransportCause（同一提取面）。
+ * ADR-0111 Decision 2(c): widen `transportApiErrorOf` coverage to
+ * ModelStreamIncompleteError — honoring the invariant "apiError present ⇔
+ * transient model-stream / transport failure carrying a cause". The cause
+ * summary reuses summarizeTransportCause (same extraction surface).
  */
 describe("transportApiErrorOf (ADR-0111 D2c)", () => {
   it("ModelStreamIncompleteError with Error cause → { message } 摘要（cause 原文）", () => {

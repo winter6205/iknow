@@ -1,47 +1,53 @@
 /**
- * spec agent-status-instruction-echo T5 轨迹夹具（黄金集 <agent_status> 面）。
+ * Trajectory fixture for the agent-status-instruction-echo spec (golden set,
+ * `<agent_status>` surface).
  *
- * 固定输入 = 非空 stale todo 账本 + 与其冲突的 pivot 指令进场；
- * 可判定行为 = 模型下一跳首工具为 `todo_write`（先对齐账本再继续新方向），
- * 而非沿用旧任务轨迹（事故依据 conversation `ee13c787`）。
+ * Fixed input = a non-empty stale todo ledger plus a conflicting pivot
+ * instruction arriving; the decidable behavior = the model's first tool on the
+ * next hop is `todo_write` (reconcile the ledger before continuing the new
+ * direction), instead of carrying on the old task trajectory (incident basis:
+ * conversation `ee13c787`).
  *
- * 黄金集四件的落点（SSOT：docs/guides/prompt-development.md 名册行）：
- *   - STATIC 锁   = tests/harness/agent-status-instruction-golden.test.ts
- *   - SEAM 锁     = tests/harness/agent-status-instruction-bar.test.ts（T3 回显）
- *                    + tests/harness/agent-status-reconcile.test.ts（T4 结算）
- *   - 轨迹集离线半边 = tests/harness/agent-status-instruction-golden.test.ts
- *   - 真模型半边  = archive/tests-real-llm/agent-status-instruction-echo.test.ts
- *                    （`npm run test:real-llm`；缺 key → 如实 Not run）
+ * Placement of the four golden-set artifacts (SSOT: roster row in
+ * docs/guides/prompt-development.md):
+ *   - STATIC lock   = tests/harness/agent-status-instruction-golden.test.ts
+ *   - SEAM lock     = tests/harness/agent-status-instruction-bar.test.ts (echo into the bar)
+ *                    + tests/harness/agent-status-reconcile.test.ts (settlement)
+ *   - offline half of the trajectory set = tests/harness/agent-status-instruction-golden.test.ts
+ *   - real-model half = archive/tests-real-llm/agent-status-instruction-echo.test.ts
+ *                    (`npm run test:real-llm`; missing key → honest Not run)
  *
- * 共处纪律照 tests/harness/graph/graph-mode-notification.fixtures.ts：
- * 夹具与被锁行为同目录区，不另开总柜。
+ * Co-location discipline follows tests/harness/graph/graph-mode-notification.fixtures.ts:
+ * fixtures live beside the behavior they lock, not in a separate master cabinet.
  *
- * prompt 只描述新方向的工作，绝不点名 `todo_write` 或对齐机制：把模型
- * 转向账本的唯一文案是栏里的 reconcile 常量行（SSOT：
- * src/harness/agent-status.ts 的 AGENT_STATUS_RECONCILE_LINE）。prompt 若
- * 点名工具，轨迹即空转（verdict vacuous）。
+ * The prompt describes only the new direction's work and never names
+ * `todo_write` or the reconciliation mechanism: the only text that steers the
+ * model to the ledger is the reconcile constant line in the bar (SSOT:
+ * AGENT_STATUS_RECONCILE_LINE in src/harness/agent-status.ts). If the prompt
+ * named the tool, the trajectory verdict would be vacuous.
  */
 
 export type AgentStatusInstructionFixtureId =
-  | "a1-pivot-arrival-first-tool-todo-write";
+  "a1-pivot-arrival-first-tool-todo-write";
 
 export interface AgentStatusInstructionFixture {
   readonly id: AgentStatusInstructionFixtureId;
-  /** Vitest `-t` 子串；夹具可单独跑。 */
+  /** Vitest `-t` substring; the fixture can run standalone. */
   readonly title: string;
   /**
-   * 播种进 `<todoDir>/todos.md` 的 stale 账本（旧方向的未完成条目）。
-   * 真模型臂以 `conversationId: undefined` 装配 → 栏读根 todos.md
-   * （与 readOpenTodoLines 的 legacy shared-root 形态同一 SSOT 解析）。
+   * Stale ledger seeded into `<todoDir>/todos.md` (unfinished items of the old
+   * direction). The real-model arm assembles with `conversationId: undefined`
+   * → the bar reads the root todos.md (same SSOT resolution as
+   * readOpenTodoLines' legacy shared-root form).
    */
   readonly staleLedger: string;
-  /** 作为真实用户消息进 run() 的 pivot 指令。 */
+  /** The pivot instruction entering run() as a real user message. */
   readonly pivotPrompt: string;
-  /** pivot 进场后下一跳首工具的可判定 verdict。 */
+  /** Decidable verdict: first tool on the hop following the pivot's arrival. */
   readonly expectedFirstTool: "todo_write";
 }
 
-/** prompt 命中即 verdict 空转的 token（机制归栏文案，不归用户指令）。 */
+/** Prompt tokens that would make the verdict vacuous (the mechanism belongs to the bar text, not the user instruction). */
 export const AGENT_STATUS_FIXTURE_FORBIDDEN_PROMPT_TOKENS: readonly string[] =
   Object.freeze([
     "todo_write",

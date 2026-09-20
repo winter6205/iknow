@@ -1,16 +1,20 @@
 /**
- * Task 4 (plans/session-scratch-path-space.md) — 写工具成功回执对会话 tmp
- * 垫底给出 canonical 宿主路径。
+ * Write-tool success receipts give the canonical host path for the session
+ * tmp pad.
  *
- * 认证的不变式：
- *   1. 写入落在会话 tmp 垫底（taskRoot 之外）时，回执含该文件的**绝对宿主
- *      路径**（resolveWithinRoot 返回的 canonical target 本身，模型可直接
- *      抄回 read_file/edit_file），不含 `../` 链，也不含把垫底假装成
- *      taskRoot 相对路径的形态。
- *   2. taskRoot 内交付写（相对 / 绝对两种入参形态）回执逐字节维持既有的
- *      相对 taskRoot 短形式 —— 不回退。
- *   3. edit_file 垫底写回执已含绝对路径 —— 既有实现满足，此处作回归钉子。
- *   4. meta side-channel（oldContent/newContent）不受回执改动影响。
+ * Invariants authenticated:
+ *   1. A write landing on the session tmp pad (outside taskRoot): the receipt
+ *      contains the file's absolute host path (the canonical target returned
+ *      by resolveWithinRoot, directly copyable back into read_file/edit_file),
+ *      with no `../` chains and no form pretending the pad is a taskRoot
+ *      relative path.
+ *   2. Delivery writes inside taskRoot (relative or absolute input form):
+ *      the receipt keeps the existing short taskRoot-relative form byte for
+ *      byte — no regression.
+ *   3. edit_file pad-write receipts already contain the absolute path — the
+ *      existing implementation satisfies this; kept here as a regression nail.
+ *   4. The meta side-channel (oldContent/newContent) is unaffected by the
+ *      receipt change.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -25,7 +29,7 @@ import { ensureMainSessionFenceTmpForConversation } from "../../../../src/harnes
 
 const scratchPaths: string[] = [];
 
-/** mkdtemp + realpath：后续断言全部走 canonical 口径，兼容 tmpdir 含 symlink 的宿主。 */
+/** mkdtemp + realpath: all later assertions use canonical paths, tolerating hosts whose tmpdir contains symlinks. */
 async function makeScratch(prefix: string): Promise<string> {
   const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   scratchPaths.push(path);
@@ -67,7 +71,7 @@ describe("write_file — 回执对会话 tmp 给出 canonical 宿主路径", () 
 
     assert.equal(receipt.output.includes(absTarget), true);
     assert.equal(receipt.output.includes(".."), false);
-    // meta side-channel 不回退
+    // meta side-channel must not regress
     assert.deepEqual(receipt.meta, { oldContent: "", newContent: "scratch\n" });
     assert.equal(await readFile(absTarget, "utf8"), "scratch\n");
   });

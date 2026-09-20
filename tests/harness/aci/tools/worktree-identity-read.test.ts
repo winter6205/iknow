@@ -93,8 +93,9 @@ describe("rebound task roots can read the stable project identity root", () => {
       },
     });
 
-    // D2：grep 默认出法是 paths（只回相对路径），行内容要显式 output=content。
-    // 本用例锁的不变式是「identity root 可达」，不是出法默认值。
+    // grep defaults to output=paths (relative paths only); line content needs
+    // an explicit output=content. This case pins "identity root is reachable",
+    // not the default output mode.
     const grepResult = String(
       await grep.handler({
         pattern: "identity",

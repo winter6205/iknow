@@ -1,20 +1,24 @@
 /**
- * live-graph-phase1 — handler 级 host 隔离 / 匿名账本路径边界。
+ * Handler-level host isolation / anonymous-ledger path boundaries.
  *
- * 覆盖 host 在 handler 入口的两个真实边界（host 单元层在
- * `tests/harness/graph/live-graph-ledger.test.ts` 覆盖，但 handler
- * 在 `mergeResidual` / `ensure` / `freezeResults` 路径上的接线
- * 是单独的契约——本文件只补真缺口的接线，源代码零改动）：
+ * Covers the two real boundaries at the handler entry point (the host unit
+ * layer is covered in `tests/harness/graph/live-graph-ledger.test.ts`, but
+ * the handler's wiring through `mergeResidual` / `ensure` / `freezeResults`
+ * is a separate contract — this file only fills that wiring gap, with zero
+ * source changes):
  *
- *   1. **跨会话隔离**：同一 host 同时挂两个 conversationId，冻结互不可见。
- *   2. **`conversationId === undefined` 落到匿名账本**：stub / 直调路径
- *      handler 仍冻结，冻结集合与其它会话互不污染（host 层 `size()` 不
- *      计入匿名，但实际冻结仍生效）。
- *   3. **缺 `nodes` 根字段**：handler typed 拒、零 spawn（与「空 nodes」
- *      「未知节点」同一 EXIT 类别，但走的是根字段缺失而非根字段名错）。
+ *   1. **Cross-session isolation**: one host carrying two conversationIds —
+ *      their freezes are mutually invisible.
+ *   2. **`conversationId === undefined` lands in the anonymous ledger**:
+ *      direct/stub handler calls still freeze, and the frozen set does not
+ *      pollute other sessions (host-level `size()` excludes the anonymous
+ *      ledger, but freezing itself still takes effect).
+ *   3. **Missing `nodes` root field**: the handler rejects with a typed
+ *      error and zero spawns (same EXIT category as "empty nodes" /
+ *      "unknown node", but via a missing root field rather than a wrong one).
  *
- * 走真 `SubAgentManager`（fake spawn + 假 child），与
- * `run-graph-ledger.test.ts` 同模式。
+ * Uses a real `SubAgentManager` (fake spawn + fake child), same pattern as
+ * `run-graph-ledger.test.ts`.
  */
 
 import { describe, expect, it } from "vitest";
@@ -37,7 +41,7 @@ describe("run_graph handler：host 跨会话隔离", () => {
       isEnabled: () => true,
     });
 
-    // conv-A 上冻结 a
+    // Freeze "a" under conv-A.
     const aPending = tool.handler(
       { nodes: [{ id: "a", task: "ta" }] },
       { conversationId: CONV_A }
@@ -46,7 +50,7 @@ describe("run_graph handler：host 跨会话隔离", () => {
     settle(children[0]!, ok("A-OUT"));
     await aPending;
 
-    // conv-B 上冻结 b —— 共享 host 但不共享账本
+    // Freeze "b" under conv-B — shared host, separate ledgers.
     const bPending = tool.handler(
       { nodes: [{ id: "b", task: "tb" }] },
       { conversationId: CONV_B }
@@ -63,8 +67,9 @@ describe("run_graph handler：host 跨会话隔离", () => {
     expect(bLedger.isFrozen("b")).toBe(true);
     expect(bLedger.isFrozen("a")).toBe(false);
 
-    // 跨会话再交不冻结 id 不应拒 —— a 在 conv-A 冻结，对 conv-B 不存在。
-    // 同 id 在不同会话各自结算，正是隔离的承诺。
+    // Resubmitting an id that is frozen only in the other session must not be
+    // rejected: "a" frozen in conv-A does not exist for conv-B. The same id
+    // settling independently per session is exactly the isolation promise.
     await manager.shutdown();
   });
 });
@@ -79,10 +84,10 @@ describe("run_graph handler：conversationId undefined 匿名账本", () => {
       isEnabled: () => true,
     });
 
-    // 1) 走匿名账本路径（handler 直调 / stub 场景常用）。
+    // 1) Anonymous-ledger path (common for direct handler / stub calls).
     const anonPending = tool.handler(
       { nodes: [{ id: "x", task: "tx" }] }
-      // 不传 ctx → conversationId === undefined
+      // no ctx passed → conversationId === undefined
     );
     await waitForChildren(children, 1);
     settle(children[0]!, ok("X-OUT"));
@@ -91,10 +96,10 @@ describe("run_graph handler：conversationId undefined 匿名账本", () => {
     const anon = host.ledgerFor(undefined);
     expect(anon.isFrozen("x")).toBe(true);
     expect(anon.outputOf("x")).toBe("X-OUT");
-    // 匿名账本不计入 size。
+    // The anonymous ledger is not counted in size().
     expect(host.size()).toBe(0);
 
-    // 2) 同一 id 在不同会话无冻结（隔离）。
+    // 2) The same id is unfrozen in a named session (isolation).
     const aPending = tool.handler(
       { nodes: [{ id: "x", task: "tx-again" }] },
       { conversationId: CONV_A }
@@ -117,7 +122,7 @@ describe("run_graph handler：conversationId undefined 匿名账本", () => {
       isEnabled: () => true,
     });
 
-    // 直调 handler 路径：根字段缺失（非根字段名错、非空数组）。
+    // Direct handler call: root field missing (not a wrong-named root, not an empty array).
     await expect(
       tool.handler({} as Record<string, unknown>, {
         conversationId: CONV_A,
@@ -129,7 +134,7 @@ describe("run_graph handler：conversationId undefined 匿名账本", () => {
       })
     ).rejects.toThrow(/non-empty array/i);
 
-    // nodes 显式 undefined 同样按空数组拒。
+    // An explicitly undefined nodes is rejected like an empty array.
     await expect(
       tool.handler({ nodes: undefined } as Record<string, unknown>, {
         conversationId: CONV_A,
@@ -137,7 +142,7 @@ describe("run_graph handler：conversationId undefined 匿名账本", () => {
     ).rejects.toThrow(/non-empty array/i);
 
     expect(children).toHaveLength(0);
-    // 验证失败绝不创建账本（与 run-graph-ledger.test.ts SC1 一致）。
+    // Validation failure must never create a ledger (consistent with run-graph-ledger.test.ts).
     expect(host.ledgerFor(CONV_A).exists()).toBe(false);
     await manager.shutdown();
   });

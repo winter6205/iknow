@@ -1,20 +1,22 @@
 /**
- * LSP 工具集单测 — spec 251-lsp-tool（§ Testing Strategy：8 件 operation handler
- * 输入校验 / lsp_diagnostics handler）。
+ * Unit tests for the LSP tool set — specs/251-lsp-tool.md testing strategy:
+ * input validation of the 8 operation handlers + lsp_diagnostics handler.
  *
- * 覆盖：
- *   1. ajv 拒非法类型（file=number 等）→ ToolExecutionError。
- *   2. ajv 拒缺参（position op 缺 line/character）→ ToolExecutionError。
- *   3. 无 client（getClient 返 undefined）→ `"(no LSP server available for file)"`。
- *   4. 10 件 inputSchema 必需字段：position op 含 file/line/character；
- *      file-only（document_symbol / workspace_symbol / diagnostics）仅 file。
- *   5. 契约 Y1：mock client.sendRequest 返回对象 → handler 输出 JSON 字符串，非对象。
- *   6. lsp_diagnostics 无 position schema（仅 file 必填）。
- *   7. aci 元数据：read-only / isConcurrencySafe=false / interruptBehavior=cancel /
- *      timeoutTier=default。
+ * Coverage:
+ *   1. ajv rejects wrong types (file=number etc.) → ToolExecutionError.
+ *   2. ajv rejects missing params (position op lacking line/character) → ToolExecutionError.
+ *   3. no client (getClient returns undefined) → `"(no LSP server available for file)"`.
+ *   4. required fields of the 10 inputSchemas: position ops require file/line/character;
+ *      file-only (document_symbol / workspace_symbol / diagnostics) require file only.
+ *   5. object results are serialized: mock client.sendRequest returns an object →
+ *      handler output is a JSON string, not an object.
+ *   6. lsp_diagnostics has no position schema (file is the only required field).
+ *   7. aci metadata: read-only / isConcurrencySafe=false / interruptBehavior=cancel /
+ *      timeoutTier=default.
  *
- * Mock 策略：模块级 `vi.mock` stub `getClient`（对齐 client.test.ts 的 vi.hoisted
- * 捕获引用手法），避免触碰真实 tsserver / vscode-jsonrpc。
+ * Mocking: module-level `vi.mock` stubs `getClient` (same vi.hoisted
+ * reference-capture approach as client.test.ts), so no real tsserver /
+ * vscode-jsonrpc is touched.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,17 +27,18 @@ const { mockGetClient, mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
 }));
 
-// 动态导入必须在 mock 安装之后（对齐 client.test.ts）。
-// 只替换 getClient；signalToCancellationToken 保留真实实现（token 布线测试需要）。
+// The dynamic imports must run after the mock is installed (as in client.test.ts).
+// Only getClient is replaced; signalToCancellationToken keeps the real
+// implementation (the token-wiring tests need it).
 vi.mock("../../../src/harness/lsp/client.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../src/harness/lsp/client.js")>();
   return {
     ...actual,
     getClient: (...args: unknown[]) => mockGetClient(...args),
-    // 二期 B3：工具层统一走 getClientDetailed（哨兵分层）；默认实现委托
-    // mockGetClient（保住既有 toHaveBeenCalledWith 断言），client 缺失时
-    // 归一为 no-server failure。
+    // The tool layer goes through getClientDetailed (sentinel tiering); this
+    // default delegates to mockGetClient so existing toHaveBeenCalledWith
+    // assertions keep working, and a missing client normalizes to a no-server failure.
     getClientDetailed: (...args: unknown[]) => mockGetClientDetailed(...args),
   };
 });
@@ -67,8 +70,9 @@ function makeFakeClient(
 ) {
   const calls: Array<{ method: string; params: unknown }> = [];
   const opened: string[] = [];
-  // 请求级作用域（spec 251 生命周期合同）：fake 记录开/关事件，供
-  // 「didOpen 窗口罩住整次请求」断言使用；`opened` 保留为该窗口的进入侧。
+  // Request-scoped lifecycle (spec 251): the fake records open/close events so
+  // tests can assert the didOpen window covers the whole request; `opened` is
+  // the entry side of that window.
   const closed: string[] = [];
   return {
     calls,
@@ -77,16 +81,18 @@ function makeFakeClient(
     client: {
       connection: {} as never,
       process: {} as never,
-      // spec 251「initialize 能力广告 + 缺方法哨兵」：工具层在发 RPC 前查
-      // server capabilities 是否**显式** `provider: false`。默认空对象 =
-      // 全部缺席 → 照发（缺席 ≠ 不支持）。
+      // initialize capability advertisement + method-not-found sentinel: the
+      // tool layer checks server capabilities for an **explicit** `provider:
+      // false` before sending RPC. Default empty object = all absent → send
+      // anyway (absent ≠ unsupported).
       getServerCapabilities: () => capabilities,
-      // #251:handler 层在每次请求前先 ensureOpen(发 didOpen) 建 tsserver
-      // project。fake 记录打开的文件,供「先打开再请求」断言使用。
+      // Each handler ensureOpens (sends didOpen) before the request so the
+      // tsserver project exists; the fake records which files were opened.
       ensureOpen: async (file: string) => {
         opened.push(file);
       },
-      // spec 251：请求级作用域 —— 打开窗口覆盖 fn 全程（含抛错路径）。
+      // spec 251: request-scoped scope — the open window covers all of fn,
+      // including the throwing path.
       withDocumentOpen: async <T>(
         file: string,
         fn: () => Promise<T>
@@ -103,11 +109,12 @@ function makeFakeClient(
         return responder(method, params);
       },
       sendNotification: async () => undefined,
-      // #251:lsp_diagnostics 读 push 缓存(latest-wins),fake 默认空数组;
-      // 需要覆盖时在测试里 `client.getDiagnosticsEntry = () => ({ items })`。
+      // lsp_diagnostics reads the push cache (latest-wins); the fake defaults
+      // to empty. Tests override with `client.getDiagnosticsEntry = () => ({ items })`.
       getDiagnostics: (_uri: string) => [] as ReadonlyArray<unknown>,
-      // 二期 B1:诊断 entry（含 pushVersion）+ didChange 版本。默认"首推已到、
-      // 未编辑"（openVersion=1）→ 等待逻辑立即返回空 items。
+      // Diagnostics entry (with pushVersion) + didChange version. Default
+      // "first push arrived, no edits" (openVersion=1) → the wait logic
+      // returns empty items immediately.
       getDiagnosticsEntry: (_uri: string) =>
         ({ items: [] as ReadonlyArray<unknown> }) as
           | {
@@ -116,9 +123,10 @@ function makeFakeClient(
             }
           | undefined,
       getOpenVersion: (_uri: string) => 1,
-      // 符号解析层的缓存键：同步给 server 的文本内容指纹（client.ts
-      // LspClient.getDocumentFingerprint）。默认恒定 → 两次解析命中同一快照；
-      // 需要模拟盘外改写时由测试覆写本函数。
+      // Cache key for symbol resolution: fingerprint of the synced doc text
+      // (client.ts LspClient.getDocumentFingerprint). Constant by default →
+      // two resolutions hit the same snapshot; tests override this to
+      // simulate out-of-band disk edits.
       getDocumentFingerprint: (_uri: string): string | undefined => "fp-1",
       dispose: () => undefined,
     },
@@ -143,11 +151,12 @@ const POSITION_OPS = [
   "lsp_outgoing_calls",
 ] as const;
 
-// lsp_workspace_symbol 的 file / query 均改为可选（lsp-optimization plan T3），
-// 不再属于 file-only 组；其 schema 断言见下方专用 describe。
+// lsp_workspace_symbol has file / query both optional, so it is no longer in
+// the file-only group; its own schema assertions are in a dedicated describe below.
 const FILE_ONLY_OPS = ["lsp_document_symbol", "lsp_diagnostics"] as const;
 
-// lsp_workspace_symbol 单列（plan T3 后 schema 独立），但仍属 10 件全集。
+// lsp_workspace_symbol listed separately (its schema is standalone), but still
+// part of the full 10-tool set.
 const ALL_TOOL_NAMES = [
   ...POSITION_OPS,
   ...FILE_ONLY_OPS,
@@ -157,7 +166,8 @@ const ALL_TOOL_NAMES = [
 beforeEach(() => {
   mockGetClient.mockReset();
   mockGetClientDetailed.mockReset();
-  // 默认：detailed 委托 mockGetClient（同参透传），undefined → no-server failure。
+  // Default: detailed delegates to mockGetClient (same args passed through);
+  // undefined → no-server failure.
   mockGetClientDetailed.mockImplementation(async (...args: unknown[]) => {
     const client = (await mockGetClient(...args)) as unknown;
     return client ? { client } : { failure: { reason: "no-server" as const } };
@@ -576,17 +586,17 @@ describe("lsp_diagnostics", () => {
     const out = await byName(tools, "lsp_diagnostics").handler({
       file: "/work/src/a.ts",
     });
-    // 生产实现 lsp.ts:316 过滤 `severity >= 1`：负值 -1 与 0 都被滤掉，
-    // 仅保留 severity=1。断言两者都被丢弃、1 保留。
+    // the production filter keeps `severity >= 1`, so both -1 and 0 are
+    // dropped and only severity=1 survives.
     expect(out).not.toContain("neg msg");
     expect(out).not.toContain("zero msg");
     expect(out).toContain("err msg");
   });
 });
 
-// ── stringifyResult(undefined) → ""（empty）─────────────────────────────────
+// ── stringifyResult(undefined) → "" ─────────────────────────────────────────
 //
-// 锚点 lsp.ts:91：`if (result === undefined) return "";`（契约 Y1 纯字符串）。
+// Anchor in lsp.ts: `if (result === undefined) return "";` (pure-string output).
 
 describe("undefined sendRequest result", () => {
   it("undefined sendRequest result renders empty string", async () => {
@@ -602,11 +612,11 @@ describe("undefined sendRequest result", () => {
   });
 });
 
-// ── handler 层 cancel token 布线（empty/concurrent）─────────────────────────
+// ── handler-layer cancel token wiring ───────────────────────────────────────
 //
-// 锚点 lsp.ts:198-206（makeOperationTool）与 238-258（makeCallHierarchyCallTool）：
-// `execCtx?.signal` 存在时桥接成 token 作为第 3 实参传给 client.sendRequest，
-// 请求完成后 `cancel?.dispose()`。
+// Anchored on lsp.ts makeOperationTool and makeCallHierarchyCallTool: when
+// `execCtx?.signal` exists it is bridged into a token passed as the 3rd
+// argument to client.sendRequest, and `cancel?.dispose()` runs after the request.
 
 describe("handler cancel token wiring", () => {
   it("position tool forwards cancellation token and disposes after request", async () => {
@@ -615,7 +625,7 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
-      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      // capability absent → send anyway (absent ≠ unsupported).
       getServerCapabilities: () => ({}),
       ensureOpen: async () => undefined,
       withDocumentOpen: async <T>(
@@ -635,9 +645,9 @@ describe("handler cancel token wiring", () => {
 
     const tools = createLspToolSet(ctx);
     const signal = new AbortController().signal;
-    // dispose 会 removeEventListener("abort", onAbort) → 断言已移除。
+    // dispose() runs removeEventListener("abort", onAbort) → assert removal.
     const removeSpy = vi.spyOn(signal, "removeEventListener");
-    // 传入 execCtx.signal → 桥接 token → 第 3 实参非 undefined。
+    // given execCtx.signal → bridged token → 3rd argument is defined.
     await byName(tools, "lsp_definition").handler(
       { file: "/work/src/a.ts", line: 1, character: 0 },
       { signal }
@@ -645,10 +655,10 @@ describe("handler cancel token wiring", () => {
 
     expect(gotMethod).toEqual(["textDocument/definition"]);
     expect(sentArgs).toHaveLength(1);
-    // 第 3 实参是 vscode-jsonrpc CancellationToken（非 undefined）。
+    // the 3rd argument is a vscode-jsonrpc CancellationToken.
     expect(sentArgs[0]).toBeDefined();
     expect(sentArgs[0]).toHaveProperty("isCancellationRequested", false);
-    // cancel.dispose() 被调用 → "abort" listener 已移除。
+    // cancel.dispose() was called → the "abort" listener is removed.
     expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
@@ -658,7 +668,7 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
-      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      // capability absent → send anyway (absent ≠ unsupported).
       getServerCapabilities: () => ({}),
       ensureOpen: async () => undefined,
       withDocumentOpen: async <T>(
@@ -681,29 +691,30 @@ describe("handler cancel token wiring", () => {
 
     const tools = createLspToolSet(ctx);
     const signal = new AbortController().signal;
-    // call-hierarchy handler 内两次 sendRequest 各自桥接 token；每次桥接后
-    // finally 调 cancel.dispose() → removeEventListener("abort", fn)。
-    // spy 整个 signal 的 removeEventListener：必须被调用 ≥2 次。
+    // the call-hierarchy handler bridges a token for each of its two
+    // sendRequests and calls cancel.dispose() in finally after each →
+    // removeEventListener("abort", fn). Spy on the signal's
+    // removeEventListener: it must be called at least twice.
     const removeSpy = vi.spyOn(signal, "removeEventListener");
     await byName(tools, "lsp_incoming_calls").handler(
       { file: "/work/src/a.ts", line: 2, character: 1 },
       { signal }
     );
 
-    // 两次 sendRequest 都收到 token（非 undefined）。
+    // both sendRequests received a token (not undefined).
     expect(sentTokens).toHaveLength(2);
     for (const t of sentTokens) expect(t).toBeDefined();
-    // cancel.dispose() 每次 sendRequest 后都被调 → 移除 "abort" listener。
+    // cancel.dispose() ran after each sendRequest → "abort" listeners removed.
     expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });
 
-// ── 边界补充：aci/tools/lsp.ts（overflow / negative / empty / exception）─────
-// 复用既有 makeFakeClient / mockGetClient 基建;覆盖:
-//   - lsp_diagnostics 诊断封顶截断细节(total 25 → 显示 20,截断标注)
-//   - MAX_SAFE_INTEGER line/character 放行
-//   - 空字符串 file 放行
-//   - sendRequest 抛错 → 契约 Y1 纯字符串(非抛 ToolExecutionError)
+// ── boundary cases: aci/tools/lsp.ts (overflow / negative / empty / exception)
+// Reuses the existing makeFakeClient / mockGetClient infrastructure. Covers:
+//   - lsp_diagnostics cap/truncation detail (total 25 → show 20 + truncation note)
+//   - MAX_SAFE_INTEGER line/character pass through
+//   - empty-string file passes through
+//   - sendRequest throwing → handler still returns a plain string, no throw
 
 describe("lsp_diagnostics cap at exactly 20 (overflow)", () => {
   it("renders exactly 20 lines and reports total when over cap", async () => {
@@ -729,7 +740,7 @@ describe("lsp_diagnostics cap at exactly 20 (overflow)", () => {
       file: "/work/src/a.ts",
     });
     const shown = (out.match(/^error/gm) ?? []).length;
-    expect(shown).toBe(20); // 封顶 20 条
+    expect(shown).toBe(20); // capped at 20 entries
     expect(out).toContain("total 30");
     expect(out).toContain("(10 more issue(s) truncated");
   });
@@ -836,8 +847,9 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
     ).getDiagnosticsEntry = () => undefined;
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
-    // plan T3 后 getDiagnostics=undefined 会触发读前等待（deadline 2s）——
-    // 用 fake 时钟直接推到 deadline,避免真等 2s。
+    // With the read-ahead wait in place, getDiagnosticsEntry=undefined triggers
+    // a bounded wait (DIAGNOSTICS_WAIT_MS) — drive fake timers to the deadline
+    // instead of really waiting.
     vi.useFakeTimers();
     try {
       const p = byName(tools, "lsp_diagnostics").handler({
@@ -854,19 +866,20 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
   });
 });
 
-// ── handler 层 ensureOpen（textDocument/didOpen）布线 ──────────────────────
+// ── handler-layer ensureOpen (textDocument/didOpen) wiring ──────────────────
 //
-// 锚点 client.ts:LspClient.ensureOpen + lsp.ts 各 handler：tsserver 对未打开
-// 文件不建 project,符号类操作(definition/document_symbol/workspace_symbol/
-// hover/implementation/call_hierarchy/diagnostics)全返空。handler 必须在
-// 每次 sendRequest / getDiagnostics 前 ensureOpen(file),fake 客户端的
-// ensureOpen 推入 opened[] 用于断言。
+// Anchored on client.ts LspClient.ensureOpen + each lsp.ts handler: tsserver
+// builds no project for files it never opened, so symbol operations
+// (definition/document_symbol/workspace_symbol/hover/implementation/
+// call_hierarchy/diagnostics) all return empty. Handlers must ensureOpen(file)
+// before every sendRequest / getDiagnostics; the fake client pushes into
+// opened[] for the assertions.
 //
-// 覆盖:
-//   - 各 handler 调 ensureOpen(file) 一次
-//   - 同一 handler 调两次：第二次不发新 didOpen(fake 自身做了去重)
-//   - 跨 handler 同一 file：第一次打开后,第二次走 fake 的去重缓存
-//   - ensureOpen 在 sendRequest 之前(handler await 顺序)
+// Coverage:
+//   - each handler calls ensureOpen(file) once
+//   - calling the same handler twice: the second didOpen dedupe lives in the real client
+//   - same file across handlers
+//   - ensureOpen happens before sendRequest (await ordering)
 
 describe("handler ensureOpen before request (textDocument/didOpen)", () => {
   it("lsp_definition calls ensureOpen with the file", async () => {
@@ -940,20 +953,21 @@ describe("handler ensureOpen before request (textDocument/didOpen)", () => {
       line: 2,
       character: 1,
     });
-    // 两次调用 → 两次 ensureOpen(fake 是空 opened 累加器,自身去重属 client.ts)。
-    // 此处断言：handler 把 ensureOpen 嵌入到流程中,不被 call-hierarchy 多步吞掉。
+    // two calls → two ensureOpen entries (the fake just accumulates; dedupe
+    // is the real client.ts job). This asserts the handler keeps ensureOpen in
+    // its flow instead of letting the multi-step call-hierarchy path swallow it.
     expect(opened).toEqual(["/work/src/a.ts", "/work/src/a.ts"]);
   });
 
   it("didOpen window covers the request (open → request → close)", async () => {
-    // spec 251 生命周期合同：handler 不再裸 ensureOpen，而走请求级作用域 —
-    // didOpen 窗口必须罩住 sendRequest 全程，退出即 didClose（两次调用之间
-    // 文件不对 server 保持打开）。
+    // spec 251 lifecycle contract: handlers no longer call ensureOpen bare but
+    // use request-scoped opening — the didOpen window must wrap the whole
+    // sendRequest and close on exit (the file is not left open between calls).
     const sequence: string[] = [];
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
-      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      // capability absent → send anyway (absent ≠ unsupported).
       getServerCapabilities: () => ({}),
       ensureOpen: async (_file: string) => {
         sequence.push("didOpen");
@@ -988,11 +1002,13 @@ describe("handler ensureOpen before request (textDocument/didOpen)", () => {
   });
 });
 
-// ── lsp_workspace_symbol 新 schema（lsp-optimization plan T3）────────────────
+// ── lsp_workspace_symbol relaxed schema ─────────────────────────────────────
 //
-// file 改可选（工作区级查询无需文件锚点）、新增可选 query（旧实现恒 ""）。
-// 覆盖：无 required / additionalProperties:false / query 透传 buildParams /
-// file 缺省走 SERVERS 序试探（首试探 = Typescript 伪路径）/ 非法 query 拒绝。
+// file is now optional (a workspace-level query needs no file anchor) and
+// query is a new optional field (the old implementation always sent "").
+// Covers: no required fields / additionalProperties:false / query passes
+// through buildParams / missing file probes SERVERS in order (first probe is
+// the TypeScript pseudo-path) / invalid query rejected.
 
 describe("lsp_workspace_symbol schema (plan T3)", () => {
   it("schema has no required fields but keeps additionalProperties:false", () => {
@@ -1014,7 +1030,7 @@ describe("lsp_workspace_symbol schema (plan T3)", () => {
     expect(out).toBe("[]");
     expect(calls[0].method).toBe("workspace/symbol");
     expect(calls[0].params).toEqual({ query: "" });
-    // file 缺省 → 不 ensureOpen（无文件可打开）。
+    // no file → nothing to open, so ensureOpen must not be called.
     expect(opened).toEqual([]);
   });
 
@@ -1023,7 +1039,7 @@ describe("lsp_workspace_symbol schema (plan T3)", () => {
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     await byName(tools, "lsp_workspace_symbol").handler({ query: "foo" });
-    // 首个试探：Typescript.extensions[0] = ".ts" 拼在 ctx.directory 下。
+    // First probe: Typescript.extensions[0] = ".ts" joined under ctx.directory.
     expect(mockGetClient).toHaveBeenCalledWith(
       ctx,
       "/work/iknow-workspace.ts",
@@ -1057,10 +1073,11 @@ describe("lsp_workspace_symbol schema (plan T3)", () => {
   });
 });
 
-// ── 输出封顶（lsp-optimization plan T3）───────────────────────────────────────
+// ── output size cap ─────────────────────────────────────────────────────────
 //
-// stringifyResult 封顶 MAX_RESULT_BYTES（48KB）：>48KB 输入截断 + footer，
-// N 为完整字节数。只截 stringify 后的结果。
+// stringifyResult caps output at MAX_RESULT_BYTES (48KB): larger input is
+// truncated and gets a footer, N being the exact byte count. Only the
+// stringified result is truncated.
 
 describe("stringifyResult cap (plan T3)", () => {
   it("truncates oversized results with a byte-count footer", async () => {
@@ -1077,16 +1094,16 @@ describe("stringifyResult cap (plan T3)", () => {
       JSON.stringify({ blob: big }, null, 2),
       "utf8"
     );
-    // footer 格式：`...[truncated, N of M bytes shown]`，N = 实际展示字节数。
+    // Footer format: `...[truncated, N of M bytes shown]`, N = bytes actually shown.
     const match = /\.\.\.\[truncated, (\d+) of (\d+) bytes shown\]$/.exec(out);
     expect(match).not.toBeNull();
     expect(match?.[2]).toBe(String(total));
-    // N = 展示正文的精确字节数 = out 总字节 - footer（含换行）字节。
+    // N = exact bytes of the shown body = out's total bytes - footer bytes (incl. newline).
     const footer = `\n...[truncated, ${match?.[1]} of ${match?.[2]} bytes shown]`;
     expect(match?.[1]).toBe(
       String(Buffer.byteLength(out, "utf8") - Buffer.byteLength(footer, "utf8"))
     );
-    // 展示正文 ≤ 48KB（cap），footer 有限长 → 总输出封顶在 cap + footer 内。
+    // shown body ≤ 48KB cap and the footer is bounded → total stays near the cap.
     expect(Number(match?.[1])).toBeLessThanOrEqual(MAX_RESULT_BYTES);
     expect(Buffer.byteLength(out, "utf8")).toBeLessThan(MAX_RESULT_BYTES + 200);
   });
@@ -1105,13 +1122,14 @@ describe("stringifyResult cap (plan T3)", () => {
   });
 });
 
-// ── lsp_diagnostics 读前等待（lsp-optimization plan T3）───────────────────────
+// ── lsp_diagnostics read-ahead wait ─────────────────────────────────────────
 //
-// ensureOpen 后 push 诊断尚未到达 → 立即读会误报空。fake 时钟驱动轮询：
-//   - 首查即有 → 立即返回（不进 timer）；
-//   - 轮询期间到达 → 等到内容；
-//   - deadline 到 → 用现有内容（undefined → 空渲染）；
-//   - signal aborted → 立即结束等待。
+// After ensureOpen the pushed diagnostics may not have arrived yet, so reading
+// immediately would wrongly report empty. Fake timers drive the poll:
+//   - first poll already has data → return without any timer;
+//   - data arrives during polling → wait for it;
+//   - deadline reached → use whatever exists (undefined → empty render);
+//   - signal aborted → end the wait at once.
 
 describe("lsp_diagnostics wait for first push (plan T3)", () => {
   function diagItem(message: string) {
@@ -1166,7 +1184,7 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
-      await vi.advanceTimersByTimeAsync(250); // 2 次 100ms 轮询后第 3 查命中
+      await vi.advanceTimersByTimeAsync(250); // 3rd poll hits after two 100ms polls
       const out = await p;
       expect(out).toContain("late err");
       expect(polls).toBe(3);
@@ -1224,11 +1242,11 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
         { file: "/work/src/a.ts" },
         { signal: ac.signal }
       ) as Promise<string>;
-      ac.abort(); // 首查未命中 → 等 abort 提前结束,不等满 deadline
+      ac.abort(); // first poll missed → abort ends the wait before the deadline
       await vi.advanceTimersByTimeAsync(100);
       const out = await p;
       expect(out).toContain("<diagnostics");
-      // 只消费了 abort 前挂起的那次 100ms sleep,远未到 deadline。
+      // only the single 100ms sleep pending at abort time was consumed.
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1236,17 +1254,18 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
   });
 });
 
-// ── per-request 超时（lsp-optimization plan T1，工具层实现）──────────────────
+// ── per-request timeout (implemented at the tool layer) ─────────────────────
 //
-// timer 到 DEFAULT_LSP_REQUEST_TIMEOUT_MS → CancellationTokenSource.cancel()
-// （真实 vscode-jsonrpc token 语义：cancel 时自动向 server 发 $/cancelRequest，
-// 不杀进程）→ pending sendRequest reject → 工具转译为 ToolExecutionError。
+// The timer fires at DEFAULT_LSP_REQUEST_TIMEOUT_MS → CancellationTokenSource.cancel()
+// (real vscode-jsonrpc token semantics: cancelling sends $/cancelRequest to the
+// server without killing the process) → the pending sendRequest rejects → the
+// tool translates it into a ToolExecutionError.
 
 describe("per-request timeout (plan T1)", () => {
   it("cancels via token at 20s and throws ToolExecutionError with timeout message", async () => {
     const { client } = makeFakeClient(() => undefined);
-    // hang 住的 sendRequest：仅在 token 被 cancel 时 reject（模拟
-    // vscode-jsonrpc 对被取消 pending request 的 RequestCancelled 拒绝）。
+    // A hanging sendRequest: it only rejects once the token is cancelled
+    // (mirroring vscode-jsonrpc's RequestCancelled for a cancelled pending request).
     (client as unknown as { sendRequest: unknown }).sendRequest = (
       _method: string,
       _params: unknown,
@@ -1291,10 +1310,11 @@ describe("per-request timeout (plan T1)", () => {
   });
 });
 
-// ── 二期 B2：批量诊断（files）─────────────────────────────────────────────────
+// ── batch diagnostics (files) ───────────────────────────────────────────────
 //
-// 覆盖：互斥报错（上方 schema describe）/ 封顶 10 / 分组输出（每文件一段
-// `<diagnostics file=...>`，段落间空行）/ 无 server 文件降级为哨兵段。
+// Covers: mutual-exclusion error (in the schema describe above) / cap of 10 /
+// grouped output (one `<diagnostics file=...>` segment per file, blank line
+// between segments) / a no-server file degrading into a sentinel segment.
 
 describe("lsp_diagnostics batch files (B2)", () => {
   function diagItem(message: string) {
@@ -1325,7 +1345,7 @@ describe("lsp_diagnostics batch files (B2)", () => {
     expect(out).toContain('<diagnostics file="/work/src/a.ts">');
     expect(out).toContain('<diagnostics file="/work/src/b.ts">');
     expect(out).toContain("batch err");
-    // 段落间空行：`</diagnostics>\n\n<diagnostics`。
+    // segments separated by a blank line: `</diagnostics>\n\n<diagnostics`.
     expect(out).toContain("</diagnostics>\n\n<diagnostics");
   });
 
@@ -1345,7 +1365,7 @@ describe("lsp_diagnostics batch files (B2)", () => {
       }
     ).getDiagnosticsEntry = () => ({ items: [diagItem("ok err")] });
     mockGetClient
-      .mockResolvedValueOnce(undefined) // 第一个文件无 server
+      .mockResolvedValueOnce(undefined) // no server for the first file
       .mockResolvedValueOnce(fake.client);
     const tools = createLspToolSet(ctx);
     const out = (await byName(tools, "lsp_diagnostics").handler({
@@ -1357,7 +1377,7 @@ describe("lsp_diagnostics batch files (B2)", () => {
   });
 });
 
-// ── 二期 B1：编辑后诊断收敛（pushVersion 追平 openVersion）───────────────────
+// ── post-edit diagnostics convergence (pushVersion catches up to openVersion)
 
 describe("lsp_diagnostics edit-aware wait (B1)", () => {
   function diagItem(message: string) {
@@ -1372,7 +1392,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
     vi.useFakeTimers();
     try {
       const { client } = makeFakeClient(() => undefined);
-      let openVersion = 2; // 编辑过（didChange 后）
+      let openVersion = 2; // the doc was edited (didChange sent)
       let entry:
         | {
             readonly items: ReadonlyArray<unknown>;
@@ -1398,10 +1418,11 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
-      // 轮询进行中：server 基于新内容重推（pushVersion 追平 openVersion）。
+      // Mid-poll: the server re-pushes based on the new content (pushVersion
+      // catches up with openVersion).
       await vi.advanceTimersByTimeAsync(150);
       entry = { items: [diagItem("fresh")], pushVersion: 2 };
-      // 再推一轮 timer：让下一次 100ms 轮询读到 fresh entry 后返回。
+      // Advance timers once more so the next 100ms poll sees the fresh entry.
       await vi.advanceTimersByTimeAsync(100);
       const out = await p;
       expect(out).toContain("fresh");
@@ -1440,7 +1461,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
       }) as Promise<string>;
       await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS + 100);
       const out = await p;
-      expect(out).toContain("stale"); // deadline 到 → 用现有内容
+      expect(out).toContain("stale"); // deadline reached → render what exists
     } finally {
       vi.useRealTimers();
     }
@@ -1474,7 +1495,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
   });
 });
 
-// ── 二期 B3：哨兵分层（no-server / no-root / spawn-failed）───────────────────
+// ── sentinel tiering (no-server / no-root / spawn-failed) ───────────────────
 
 describe("tiered no-server sentinel (B3)", () => {
   it("no-root failure renders the missing-root-marker message", async () => {
@@ -1536,7 +1557,7 @@ describe("tiered no-server sentinel (B3)", () => {
   });
 });
 
-// ── 二期 B7：requestTimeoutMs 从 ctx 消费─────────────────────────────────────
+// ── requestTimeoutMs consumed from ctx ──────────────────────────────────────
 
 describe("ctx.requestTimeoutMs consumption (B7)", () => {
   it("times out at the ctx-configured deadline instead of the 20s default", async () => {
@@ -1605,8 +1626,9 @@ describe("isLspFailureSentinel (probe FAIL detection, B3 closeout)", () => {
   });
 
   it("does not treat the method-not-found sentinel as a failure (capability gap ≠ call failure)", () => {
-    // spec 251：-32601 是 server 能力缺口（该 method 没有实现），不是调用
-    // 失败、更不是 spawn 失败 —— probe 据此 skip，故不得计入 FAIL。
+    // Per spec 251, -32601 is a server capability gap (method unimplemented),
+    // not a call failure and certainly not a spawn failure — the probe skips on
+    // this basis, so it must never count as FAIL.
     const sentinel = renderMethodNotFound("textDocument/references", "yaml");
     expect(isMethodNotFoundSentinel(sentinel)).toBe(true);
     expect(isLspFailureSentinel(sentinel)).toBe(false);
@@ -1640,7 +1662,7 @@ describe("method-not-found sentinel (-32601 capability gap)", () => {
   });
 
   it("position tool returns the sentinel instead of throwing when the server lacks the method", async () => {
-    // -32601 → 哨兵（不算 spawn 失败）；不是 ToolExecutionError。
+    // -32601 → sentinel (not counted as spawn failure); not a ToolExecutionError.
     const err = Object.assign(
       new Error("Unhandled method textDocument/definition"),
       {
@@ -1679,14 +1701,16 @@ describe("method-not-found sentinel (-32601 capability gap)", () => {
       character: 0,
     });
     expect(isMethodNotFoundSentinel(out)).toBe(true);
-    // prepare 就缺能力 → 不该再发第二个请求（缺席 ≠ 不支持，但显式缺口就此收手）。
+    // prepare already lacks the capability → no second request (absence ≠
+    // unsupported, but an explicit gap stops here).
     expect(calls.map((c) => c.method)).toEqual([
       "textDocument/prepareCallHierarchy",
     ]);
   });
 
   it("other RPC errors still propagate (capability gap detection is narrow)", async () => {
-    // -32602（参数错）等**参数层**错误不是能力缺口：必须照旧抛，不得被哨兵吞。
+    // -32602 (invalid params) and similar **param-layer** errors are not
+    // capability gaps: they must still throw, never be swallowed by the sentinel.
     const err = Object.assign(new Error("invalid params"), { code: -32602 });
     const { client } = makeFakeClient(() => {
       throw err;
@@ -1703,15 +1727,16 @@ describe("method-not-found sentinel (-32601 capability gap)", () => {
   });
 });
 
-// ── initialize 能力声明闸门（spec 251 § initialize 能力广告）─────────────────
+// ── initialize capability gate (spec 251, initialize capability advertisement)
 //
-// 契约（S18 / plan T4）：server 在 initialize 结果里**显式**声明 provider
-// `false` → 确定没有该能力，不发 RPC，直接返回缺方法哨兵；声明**缺席**
-// （undefined）或 `true` → 照发 —— typescript-language-server 实测不声明
-// `callHierarchyProvider` 却实现了 call hierarchy，把缺席当不支持会误伤
-// TS 的 call hierarchy（probe 10/10 保底面）。
+// Contract: a server that **explicitly** declares a provider `false` in its
+// initialize result definitely lacks that capability → skip the RPC and return
+// the method-not-found sentinel. When the key is **absent** (undefined) or
+// `true` → send the RPC anyway — typescript-language-server measurably omits
+// `callHierarchyProvider` yet implements call hierarchy, so treating absence
+// as unsupported would break TS call hierarchy (the probe's 10/10 floor).
 //
-// 「发没发 RPC」用 calls 长度断言（fake 记录每次 sendRequest）。
+// "Was the RPC sent?" is asserted via calls length (the fake records each sendRequest).
 
 describe("initialize capability gate (explicit false → no RPC)", () => {
   it("returns the sentinel without sending RPC when the provider is explicitly false", async () => {
@@ -1731,16 +1756,16 @@ describe("initialize capability gate (explicit false → no RPC)", () => {
       character: 0,
     });
     expect(isMethodNotFoundSentinel(out)).toBe(true);
-    // 显式 false → 连 RPC 都不发（不是发了等 -32601）。
+    // explicit false → not even an RPC is sent (not send-and-wait-for -32601).
     expect(calls).toHaveLength(0);
   });
 
   it("still sends RPC when the provider key is absent (absence ≠ unsupported)", async () => {
-    // TS call hierarchy 的回归保护：typescript-language-server 不声明
-    // callHierarchyProvider 却实现了 call hierarchy。
+    // Regression guard for TS call hierarchy: typescript-language-server does
+    // not declare callHierarchyProvider yet implements call hierarchy.
     const { client, calls } = makeFakeClient(
       () => [{ name: "foo" }],
-      {} // 能力全缺席
+      {} // all capabilities absent
     );
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
@@ -1786,18 +1811,19 @@ describe("initialize capability gate (explicit false → no RPC)", () => {
       character: 0,
     });
     expect(isMethodNotFoundSentinel(out)).toBe(true);
-    // prepare 被闸门挡下 → 后段 incomingCalls 更不会发。
+    // the gate blocks prepare → the follow-up incomingCalls is even less likely to be sent.
     expect(calls).toHaveLength(0);
   });
 });
 
-// ── probe 判定（scripts/lsp-probe.ts）对哨兵 = skip ─────────────────────────
+// ── probe verdict (scripts/lsp-probe.ts): sentinel = skip ───────────────────
 //
-// spec 251「initialize 能力广告 + 缺方法哨兵」：工具层把 -32601 / 显式 false
-// 转成哨兵**返回**后，probe 的 safeCall 看到的是 ok + 哨兵（不再是 error
-// detail）。probe 的判定核心 classifyProbeResult 必须把这条路径与逃逸的
-// MethodNotFound RPC error 合流成同一 skip 语义 —— 否则哨兵被当普通非空
-// 字符串误报 ✓（#265 类假阳性），能力缺口就不再被承认。
+// Once the tool layer converts -32601 / explicit false into a returned
+// sentinel, the probe's safeCall sees ok + sentinel (no longer an error
+// detail). classifyProbeResult must merge that path with an escaped
+// MethodNotFound RPC error into the same skip semantics — otherwise the
+// sentinel is mistaken for a plain non-empty string and reported ✓ (a false
+// positive), and the capability gap goes unacknowledged.
 
 describe("probe verdict: method-not-found sentinel skips like a MethodNotFound error", () => {
   it("treats the tool-level sentinel result as a skip (not a pass, not a failure)", () => {
@@ -1845,8 +1871,8 @@ describe("probe verdict: method-not-found sentinel skips like a MethodNotFound e
       classifyProbeResult({ kind: "ok", value: '[{"uri":"a.ts"}]' }).kind
     ).toBe("pass");
     expect(classifyProbeResult({ kind: "ok", value: "" }).kind).toBe("fail");
-    // 分层失败哨兵（B3）：no-server / no-root / spawn-failed 三条文案都必须
-    // 判 FAIL，否则 no-server 文件被当成有结果。
+    // Tiered failure sentinels: the no-server / no-root / spawn-failed texts
+    // must all verdict FAIL, otherwise a no-server file looks like it had results.
     for (const value of [
       "(no LSP server configured for /work/a.yml; supported extensions: .ts, .yml)",
       "(no LSP project root found above /work/a.ts within /work; missing root marker for typescript)",
@@ -1864,20 +1890,24 @@ describe("probe verdict: method-not-found sentinel skips like a MethodNotFound e
   });
 });
 
-// ── 符号族走同一道门控入口（spec 251 § initialize 能力广告 + 缺方法哨兵）─────
+// ── symbol tools go through the same gate (spec 251 initialize capability
+//    advertisement + method-not-found sentinel) ──────────────────────────────
 //
-// 背景（review M1）：符号解析层（symbol-resolver.ts）曾直连
-// `client.sendRequest("textDocument/documentSymbol")`，绕过 lsp.ts 的能力
-// 闸门与 -32601 哨兵 —— server 显式声明 `documentSymbolProvider: false` 时
-// 照发 RPC，回 -32601 则抛错被 executor 记 `execution_failed`，而 spec 251
-// 要求两条路径都收敛到同一哨兵、**不算** spawn 失败。documentSymbol 是
-// 所有 symbol-* 工具（含 symbol-mutate）的入口，故影响面是整个符号族。
+// Background: the symbol-resolution layer (symbol-resolver.ts)
+// used to call `client.sendRequest("textDocument/documentSymbol")` directly,
+// bypassing lsp.ts's capability gate and the -32601 sentinel — with
+// `documentSymbolProvider: false` declared explicitly it still sent the RPC,
+// and a -32601 reply threw an error that the executor recorded as
+// `execution_failed`, while spec 251 requires both paths to converge on the
+// same sentinel and **not** count as spawn failure. documentSymbol is the
+// entry point of every symbol-* tool (including symbol-mutate), so the blast
+// radius was the whole symbol family.
 //
-// 下面每条都以「符号工具 handler 的真实输出」为断言面（而非 resolver 内部
-// 函数），锁的是契约：显式 false 零 RPC + 哨兵串；-32601 → 哨兵串不抛；
-// 其余 RPC 错误仍上抛（门控是窄的）。
+// Each case below asserts on the real output of the symbol tool handler (not
+// resolver internals), pinning the contract: explicit false → zero RPC + sentinel string;
+// -32601 → sentinel string, no throw; other RPC errors still propagate (the gate is narrow).
 
-/** symbol 工具的统一调用面：handler 入参 `{ file, symbol_path }`。 */
+/** Common symbol-tool call surface: handler input `{ file, symbol_path }`. */
 const SYMBOL_INPUT = { file: "/work/src/a.ts", symbol_path: "Foo/bar" };
 
 function createSymbolQueryToolSetForTest(): ReadonlyArray<AciToolDef> {
@@ -1888,7 +1918,8 @@ function createSymbolMutateToolSetForTest(): ReadonlyArray<AciToolDef> {
   return createSymbolMutateToolSet({ ctx });
 }
 
-/** 改工具各有特化必填字段；本组测试只关心「是否发 RPC / 是否返哨兵」。 */
+/** Mutate tools each have specialized required fields; this group only cares
+ *  about "does it send RPC / does it return the sentinel". */
 function mutateInput(name: string): Record<string, unknown> {
   switch (name) {
     case "rename_symbol":
@@ -1904,8 +1935,8 @@ function mutateInput(name: string): Record<string, unknown> {
 }
 
 /**
- * 走 `resolveSymbolPosition`（= 经 resolver 发 documentSymbol 解析符号树）的
- * 符号工具 —— M1 的失守面正在这条链路上。
+ * Symbol tools that go through `resolveSymbolPosition` (= resolving the symbol
+ * tree via the resolver's documentSymbol) — the gap lived exactly on this chain.
  */
 const SYMBOL_RESOLVER_TOOL_NAMES = [
   "find_declaration",
@@ -1917,7 +1948,8 @@ const SYMBOL_RESOLVER_TOOL_NAMES = [
   "list_outgoing_calls",
 ] as const;
 
-/** 不走 resolver 的三个符号查询工具，排除理由必须逐条可查（不能整体略过）。 */
+/** The three symbol-query tools that skip the resolver; each exclusion reason
+ *  must stay individually auditable (no blanket omissions). */
 const SYMBOL_NON_RESOLVER_TOOL_NAMES = [
   { name: "find_symbol", why: "workspace/symbol 直接提问，不解析符号身份" },
   {
@@ -1947,7 +1979,7 @@ const SAMPLE_SYMBOL_TREE = [
   },
 ];
 
-/** resolver 与 get_symbols_overview 都只认这一条 method 作为符号树来源。 */
+/** The resolver and get_symbols_overview both accept only this method as the symbol-tree source. */
 const DOCUMENT_SYMBOL = "textDocument/documentSymbol";
 
 function methodNotFoundError(method: string): Error {
@@ -1957,8 +1989,9 @@ function methodNotFoundError(method: string): Error {
 }
 
 /**
- * 符号树响应 + 一次业务请求响应的复合 responder。
- * 业务 method 一律回空数组（工具只要走通即可，断言点在哨兵/RPC 面上）。
+ * Composite responder: symbol tree + business-request replies. Business
+ * methods always answer an empty array (the tool just has to get through; the
+ * assertions live on the sentinel/RPC surface).
  */
 function symbolResponder(
   tree: unknown = SAMPLE_SYMBOL_TREE
@@ -1968,8 +2001,9 @@ function symbolResponder(
 
 describe("symbol tools share the initialize capability gate (explicit false → no RPC)", () => {
   it("classifies every symbol query tool as resolver or non-resolver (no silent gaps)", () => {
-    // SSOT：新符号工具若既不进 resolver 组也不进排除组，本断言先红 —— 否则
-    // 新增工具会悄悄漏出「能力闸门」覆盖，正是 M1 的失守形态。
+    // SSOT: a new symbol tool that lands in neither the resolver group nor the
+    // exclusion group turns this assertion red first — otherwise it silently
+    // escapes capability-gate coverage, exactly the original failure shape.
     const classified = [
       ...SYMBOL_RESOLVER_TOOL_NAMES,
       ...SYMBOL_NON_RESOLVER_TOOL_NAMES.map((e) => e.name),
@@ -2034,7 +2068,8 @@ describe("symbol tools share the initialize capability gate (explicit false → 
   });
 
   it("still sends the RPC when documentSymbolProvider is absent (absence ≠ unsupported)", async () => {
-    // TS 实测不声明部分 provider 却实现了对应能力：缺席必须照发。
+    // TS measurably omits some provider declarations yet implements the
+    // capability: absence must still send.
     const { client, calls } = makeFakeClient(symbolResponder(), {});
     mockGetClient.mockResolvedValue(client);
     const tools = createSymbolQueryToolSetForTest();
@@ -2063,7 +2098,8 @@ describe("symbol tools convert -32601 into the sentinel (no ToolExecutionError)"
     expect(isMethodNotFoundSentinel(out)).toBe(true);
     expect(isLspFailureSentinel(out)).toBe(false);
     expect(out).toContain(DOCUMENT_SYMBOL);
-    // 解析就缺能力 → 业务请求不再发（fail-fast，不再撞第二个缺口）。
+    // resolution itself lacks the capability → no business request (fail fast,
+    // don't hit a second gap).
     expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
   });
 
@@ -2107,7 +2143,8 @@ describe("symbol tools convert -32601 into the sentinel (no ToolExecutionError)"
   });
 
   it("keeps other RPC errors propagating (gate is narrow)", async () => {
-    // -32602（参数错）不是能力缺口：不得被哨兵吞成"成功"。
+    // -32602 (invalid params) is not a capability gap: the sentinel must not
+    // swallow it into a fake "success".
     const err = Object.assign(new Error("invalid params"), { code: -32602 });
     const { client } = makeFakeClient(() => {
       throw err;
@@ -2134,12 +2171,13 @@ describe("symbol tools convert -32601 into the sentinel (no ToolExecutionError)"
   });
 });
 
-// ── 符号树快照缓存键 = 内容指纹（review L5）──────────────────────────────────
+// ── symbol-tree snapshot cache keyed by content fingerprint ─────────────────
 //
-// fetchDocumentSymbols 的缓存键从 getOpenVersion 改为
-// getDocumentFingerprint（请求级打开下 version 每次从 1 起重来，无法区分
-// 「同一文件的两次打开」）。下面两条锁住语义：内容变 → 重取；内容不变 →
-// 同一个 client 上只发一次 documentSymbol。
+// fetchDocumentSymbols switched its cache key from getOpenVersion to
+// getDocumentFingerprint: with request-scoped opening the version restarts at
+// 1 every time, so it cannot distinguish two opens of the same file. The two
+// cases below pin the semantics: content changed → re-fetch; unchanged →
+// documentSymbol sent exactly once on the same client.
 
 describe("symbol snapshot cache keyed by document fingerprint", () => {
   it("re-fetches documentSymbol when the content fingerprint changes", async () => {
@@ -2156,7 +2194,8 @@ describe("symbol snapshot cache keyed by document fingerprint", () => {
     await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
     expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(1);
 
-    // 盘外改写：解析窗口外文件内容变了 → 指纹变 → 必须重取符号树。
+    // Out-of-band edit: the file's content changed outside the resolution
+    // window → different fingerprint → the symbol tree must be re-fetched.
     fingerprint = "fp-2";
     await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
     expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(2);
@@ -2170,7 +2209,8 @@ describe("symbol snapshot cache keyed by document fingerprint", () => {
     await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
     await byName(tools, "get_hover").handler(SYMBOL_INPUT);
 
-    // 两次解析、同一份文本 → documentSymbol 只发一次；业务请求各发一次。
+    // two resolutions, same text → documentSymbol sent once; each business
+    // request still goes out.
     expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(1);
     expect(calls.map((c) => c.method)).toEqual([
       DOCUMENT_SYMBOL,
@@ -2180,27 +2220,31 @@ describe("symbol snapshot cache keyed by document fingerprint", () => {
   });
 });
 
-// ── find_symbol 无 `file`：无 project 锚点返分层哨兵（plan T3）─────────────────
+// ── find_symbol without `file`: no project anchor → layered sentinel ─────────
 //
-// 根因（实测，docs/guides/lsp-client-analysis.md §8）：`workspace/symbol` 的搜索
-// 集合由 server 当前 project graph 决定，graph 又由它最后触碰的那个文件决定
-// ——锚点落在 tsconfig `include` 外时 tsserver 只建 inferred project（该文件 +
-// import closure）。无 `file` 的调用方拿不到锚点（生产形状实测 40s 全程 `[]`，
-// 同查询带 `file` 锚点 ~7s 出 4 命中），于是 `[]` 同时表示「真没这个符号」与
-// 「查询链路没有 project 上下文」——正是本 plan 要杀的那一类静默退化。
+// Root cause (measured, docs/guides/lsp-client-analysis.md): the search set of
+// `workspace/symbol` is decided by the server's current project graph, and the
+// graph by the file it last touched — an anchor outside tsconfig `include`
+// leaves tsserver with only an inferred project (that file + import closure).
+// A caller without `file` has no anchor (production shape measured 40s of
+// all-`[]`, while the same query with a `file` anchor returned 4 hits in ~7s),
+// so `[]` would mean both "the symbol truly doesn't exist" and "the query path
+// had no project context" — precisely the silent degradation to eliminate.
 //
-// 契约：`[]` 只表示「查到了、真没这个符号」；无锚点的可观测形态
-// （tsserver 抛 `No Project.` / 无 project 上下文下返空数组）收敛到同一条哨兵。
-// 哨兵**不**进 `isLspFailureSentinel` 三前缀家族（§8.7 决定）：那三条的语义是
-// 「这次调用没打成」，本条调用打成了（RPC 有响应），把它记成 probe FAIL 是
-// 错误分类，且 probe 从不进这条分岔（§7.1）。消费者是模型，它需要的是
-// 「结论不可信，换条路」，不是「LSP 坏了」。
+// Contract: `[]` now means only "searched-and-absent"; the no-anchor observable
+// shapes (tsserver's `No Project.` throw / empty result without project context)
+// converge into one sentinel. It deliberately does NOT join the
+// `isLspFailureSentinel` three-prefix family: those mean "the call never
+// happened", but this call did get an RPC response, so recording it as a probe
+// FAIL would misclassify it — and the probe never reaches this branch anyway.
+// The consumer is the model, which needs "this conclusion is not trustworthy,
+// take another route", not "LSP is broken".
 
-/** §8.7 定稿文案 1 —— 无 project 锚点（`ctx.directory` 按家族惯例插值）。 */
+/** Agreed final wording for no project anchor (`ctx.directory` interpolated per family convention). */
 const NO_ANCHOR_SENTINEL =
   "(LSP workspace/symbol has no project anchor under /work; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)";
 
-/** tsserver 的 `No Project.` 抛出形态（typescript.js ThrowNoProject，实测）。 */
+/** tsserver's `No Project.` throw shape (typescript.js ThrowNoProject, measured). */
 function noProjectError(): Error {
   return Object.assign(
     new Error(
@@ -2236,8 +2280,9 @@ describe("find_symbol without `file`: no project anchor returns the layered sent
   });
 
   it("classifies the sentinel as neither failure nor method-not-found (probe verdict = pass)", async () => {
-    // §8.7 决定：家族不加第四条前缀分支。三条失败前缀的语义是「调用没打成」，
-    // 本条调用打成了 —— 记 FAIL 是错误分类；probe 也从不进这条分岔（§7.1）。
+    // Decided: no fourth prefix branch joins the family. The three failure
+    // prefixes mean "the call never happened"; this call did get a response —
+    // recording FAIL would misclassify it, and the probe never enters this branch.
     const { client } = makeFakeClient(() => {
       throw noProjectError();
     });
@@ -2267,9 +2312,11 @@ describe("find_symbol without `file`: no project anchor returns the layered sent
   it("names the coverage caveat in the tool description (the always-on model-visible surface)", () => {
     const tools = createSymbolQueryToolSetForTest();
     const desc = byName(tools, "find_symbol").description;
-    // description 是模型可见装配面（黄金集名册 tool description 行）：无 `file`
-    // 的搜索只覆盖 server 已加载的 project，`file` 才是锚点 —— 该警示常驻
-    // description（在选择工具之前就送达），否则模型会把部分结果当全量结果。
+    // description is the always model-visible surface (the tool description
+    // line in the golden roster): a search without `file` only covers the
+    // already-loaded project — `file` is the anchor. The warning must live in
+    // description (delivered before tool selection), otherwise the model treats
+    // partial results as complete.
     expect(desc).toContain("without `file`");
     expect(desc).toContain(
       "only covers the project the server has already loaded"
@@ -2278,10 +2325,11 @@ describe("find_symbol without `file`: no project anchor returns the layered sent
   });
 });
 
-// ── find_symbol 无 `file`：锚点有效时 `[]` 仍是「真没这个符号」（plan T3）──────
+// ── find_symbol without `file`: with a valid anchor, `[]` still means absent ─
 //
-// 本组是上组的对照面：哨兵不得吞掉健康路径。`[]` 的新契约 = searched-and-absent；
-// 带 `file` 的路径（含 `file` 在场时的 `[]`）逐字节不变。
+// Control group for the one above: the sentinel must not swallow the healthy
+// path. The new contract for `[]` is searched-and-absent, and `file`-anchored
+// results (including `[]` with `file` present) stay byte-identical.
 
 describe("find_symbol: `[]` means searched-and-absent once an anchor is in play (T3)", () => {
   it("keeps the empty array when `file` is present and the symbol is genuinely absent", async () => {
@@ -2294,7 +2342,8 @@ describe("find_symbol: `[]` means searched-and-absent once an anchor is in play 
     });
     expect(out).toBe("[]");
     expect(calls[0].method).toBe("workspace/symbol");
-    // file 在场 → 请求级打开窗口罩住整次请求（行为不变）。
+    // with `file` present the request-scoped open window covers the whole
+    // request (behavior unchanged).
     expect(opened).toEqual(["/work/src/a.ts"]);
   });
 
@@ -2311,8 +2360,9 @@ describe("find_symbol: `[]` means searched-and-absent once an anchor is in play 
   });
 
   it("still surfaces method-not-found when the workspace dispatch lands on a server without workspace/symbol", async () => {
-    // 缺方法不是无锚点：server 明确说「我不实现」时透传缺方法哨兵
-    // （能力缺口是 server 的固有特性，模型据此改用别的工具）。
+    // A missing method is not a missing anchor: when the server explicitly
+    // says "I don't implement this", pass through the method-not-found sentinel
+    // (a capability gap is inherent to the server; the model switches tools on it).
     const { client } = makeFakeClient(() => {
       throw methodNotFoundError("workspace/symbol");
     });
@@ -2325,8 +2375,9 @@ describe("find_symbol: `[]` means searched-and-absent once an anchor is in play 
   });
 
   it("keeps the no-server sentinel when the workspace dispatch finds no client", async () => {
-    // 无 server ≠ 无锚点：一条都探不到时仍是失败哨兵（probe 记 FAIL），
-    // 不得被降级成「结论不可信」的软提示。
+    // no-server ≠ no-anchor: when no client is probed at all it stays a failure
+    // sentinel (probe records FAIL); it must not be downgraded to the soft
+    // "conclusion not trustworthy" hint.
     mockGetClient.mockResolvedValue(undefined);
     const tools = createSymbolQueryToolSetForTest();
     const out = (await byName(tools, "find_symbol").handler({
@@ -2377,7 +2428,8 @@ describe("find_symbol: `[]` means searched-and-absent once an anchor is in play 
   });
 
   it("does not swallow a cancellation-flavoured error when no deadline fired", async () => {
-    // 无超时 → RequestCancelled（executor abort 等）照旧上抛，不被救成哨兵。
+    // With no deadline fired, a RequestCancelled (executor abort etc.) still
+    // propagates; it must not be rescued into the sentinel.
     const { client } = makeFakeClient(() => {
       throw new Error("Request cancelled");
     });

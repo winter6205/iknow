@@ -1,15 +1,18 @@
 /**
- * model-prefix-layering B1 (spec Boundaries #1, plan B1):
+ * Usage-segment assembly tests.
  *
- *   1. T0 usage 段修复:resolveSegment 补 case "usage" → IKNOW_USAGE_DEFAULT,
- *      所有 surface (chat / tui / serve / ask) 同注入。装配产物必含 usage 段
- *      文本 (代码 LOCKED, IKNOW-symbol-primary T1)。
- *   2. 断言 ① —— 声明↔产物一致性:IKNOW_ASSEMBLY_ORDER 每个声明段必须出现
- *      在装配产物,或属于显式条件段清单 (本 bullet 初版:bootstrap / memory_layer)。
- *      条件段清单为组装不变量 —— 新加条件段必须在此说明缺席条件;不加说明
- *      = 该段必须无条件在场 (LOCKED 段的行为契约)。
+ *   1. resolveSegment must have a "usage" case → IKNOW_USAGE_DEFAULT,
+ *      injected on every surface (chat / tui / serve / ask). Assembled
+ *      output always contains the usage text (code LOCKED).
+ *   2. Declaration-vs-output consistency: every segment declared in
+ *      IKNOW_ASSEMBLY_ORDER must appear in the assembled output, or be
+ *      listed in the explicit conditional-segment manifest.
+ *      The manifest is an assembly invariant — a new conditional segment
+ *      must document its absence condition here; without a documented
+ *      condition = the segment must always be present (LOCKED contract).
  *
- * 锚点:从 IKNOW_ASSEMBLY_ORDER + SSOT 常量派生,不硬编码段名数组。
+ * Anchors: derived from IKNOW_ASSEMBLY_ORDER + SSOT constants; no hardcoded
+ * segment-name arrays.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -41,8 +44,9 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-/** Default 测试 ctx:surface=ask 的等价最小集 (bootstrapActive=false / memoryEnabled=false)。
- *  T0 用例需要 bootstrap 缺席以让 "bootstrap" 进条件段清单。 */
+/** Default test ctx: the ask-surface equivalent minimal set
+ *  (bootstrapActive=false / memoryEnabled=false). Bootstrap absence is needed
+ *  so "bootstrap" stays in the conditional-segment manifest. */
 function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
@@ -53,7 +57,7 @@ function baseCtx(): AssemblyContext {
   };
 }
 
-/** Chat/tui/serve 等价 ctx:bootstrapActive=true + memoryEnabled=false。 */
+/** Chat/tui/serve equivalent ctx: bootstrapActive=true + memoryEnabled=false. */
 function chatCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
@@ -150,8 +154,9 @@ describe("usage 段 — 装配产物 (T0 修复)", () => {
 });
 
 describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
-  /** 条件段清单 (初版):segment 名 → 缺席条件。SSOT 集中在 describe 顶部,
-   *  后续 bullet 在此追加 + 注明引用。 */
+  /** Conditional-segment manifest: segment name → absence condition. The SSOT
+   *  lives at the top of this describe; new entries append here with a source
+   *  note. */
   const CONDITIONAL_SEGMENTS: Record<string, string> = {
     bootstrap:
       "bootstrapActive=false → 段缺席 (ask surface);或 BOOTSTRAP.md 文件缺失/空 → 段缺席 (chat/tui/serve)",
@@ -159,34 +164,37 @@ describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
       "userHome/.iknow/user.md 缺失/空 → 段缺席 (assemble.ts:346-361 readUserProfile 行为契约)",
     memory_layer:
       "memoryEnabled=false → 段缺席 (或 memoryResolver 缺席/抛错 → warn + skip)",
-    // B5 (plans/model-prefix-layering.md §9) 引入 git 块:加性段 (ctx.git 缝),
-    // 缝缺席 / provider 退化 (非 git 仓库 / git 不可用) → 段缺席。
-    // 见 src/harness/identity/git-snapshot.ts GIT_SEGMENT_TITLE = "## Git"。
+    // The git block is an additive segment (ctx.git seam): seam absent /
+    // provider degraded (not a git repo / git unavailable) → segment absent.
+    // See src/harness/identity/git-snapshot.ts GIT_SEGMENT_TITLE = "## Git".
     git: "ctx.git 缝缺席 → 段缺席;或 git 快照退化 (cwd 不可用 / 非 git 仓库 / git 不可用) → provider 返 undefined → 段缺席",
-    // B4 (ADR-0043 §3) 引入 MCP 名字目录:加性段 (ctx.mcp 缝),
-    // 缝缺席 / 过滤后无 connected 服务 → 段缺席。
-    // 见 src/harness/identity/assemble.ts mcpNameDirectorySegment。
+    // The MCP name directory (ADR-0043) is an additive segment (ctx.mcp seam):
+    // seam absent / no connected service after filtering → segment absent.
+    // See src/harness/identity/assemble.ts mcpNameDirectorySegment.
     mcp_name_directory:
       "ctx.mcp 缝缺席 (ask / 无 manager) → 段缺席;或快照过滤后无 state=connected 服务 → 段缺席",
   };
 
-  /** SSOT 派生锚点:从 IKNOW_ASSEMBLY_ORDER 各段的 SSOT 常量 / 渲染特征派生
-   *  出现条件。user_profile 用 user.md 缺席语义作为缺席条件 (已读 userHome,
-   *  无 user.md → undefined → 段整体不出现)。 */
+  /** SSOT-derived anchors: each segment's presence condition comes from its
+   *  SSOT constant / render signature. user_profile uses user.md-absence
+   *  semantics as its absence condition (userHome read, no user.md →
+   *  undefined → the whole segment is absent). */
   const ANCHORS: Record<(typeof IKNOW_ASSEMBLY_ORDER)[number], string> = {
     identity: IKNOW_IDENTITY_DEFAULT,
     soul: IKNOW_SOUL_DEFAULT,
     usage: IKNOW_USAGE_DEFAULT,
-    user_profile: "User Profile", // user.md 模板头 (模板从 ~/.iknow/user.md 读)
-    bootstrap: "First Contact", // BOOTSTRAP.md 模板头
-    memory_layer: "memory_recall", // memory 通道标识
+    user_profile: "User Profile", // user.md template header (read from ~/.iknow/user.md)
+    bootstrap: "First Contact", // BOOTSTRAP.md template header
+    memory_layer: "memory_recall", // memory channel marker
   };
 
   it("condition-segment manifest covers all expected conditional kinds", () => {
-    // 清单覆盖 IKNOW_ASSEMBLY_ORDER 中本测试预期为条件段的所有成员,
-    // 防止新增 LOCKED 段默默归入条件段集合而漏登记。git / mcp_name_directory
-    // 是加性段(不在 IKNOW_ASSEMBLY_ORDER 内),登记在此消除断言①与 spec
-    // 清单的偏差(缝缺席 → 段缺席,缺席条件如上)。
+    // The manifest covers every IKNOW_ASSEMBLY_ORDER member this test expects
+    // to be conditional, preventing a newly added LOCKED segment from silently
+    // slipping into the conditional set unregistered. git / mcp_name_directory
+    // are additive segments (not in IKNOW_ASSEMBLY_ORDER); registering them
+    // here removes the drift between this check and the spec manifest
+    // (seam absent → segment absent, conditions above).
     expect(Object.keys(CONDITIONAL_SEGMENTS).sort()).toEqual(
       [
         "bootstrap",
@@ -209,17 +217,18 @@ describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
   it("ask-like ctx: user_profile 段因 user.md 缺席而缺席 (条件段清单扩展)", async () => {
     const out = await assembleIdentityContext(baseCtx());
     expect(out).toBeDefined();
-    // user_profile 是 IKNOW_ASSEMBLY_ORDER 第 4 段,但当前行为是
-    // userHome/.iknow/user.md 不存在 → 段缺席。这是已存在契约 (assemble.ts:346-361),
-    // 视为条件段 (缺席条件 = user.md missing/empty),在此登记。
+    // user_profile is the 4th IKNOW_ASSEMBLY_ORDER segment, but current
+    // behavior is: userHome/.iknow/user.md missing → segment absent. This is a
+    // pre-existing contract, so it is registered here as conditional
+    // (absence condition = user.md missing/empty).
     expect(out).not.toContain("User Profile");
   });
 
   it("chat-like ctx (bootstrapActive=true 但无 BOOTSTRAP.md): bootstrap 缺席属条件段清单", async () => {
     const out = await assembleIdentityContext(chatCtx());
     expect(out).toBeDefined();
-    // bootstrapActive=true 但 BOOTSTRAP.md 不存在 → 段缺席 (assemble.ts:367-386)。
-    // bootstrap 进条件段清单 (缺席条件 = file missing),登记于此。
+    // bootstrapActive=true but BOOTSTRAP.md absent → segment absent.
+    // bootstrap is registered as conditional (absence condition = file missing).
     expect(out).not.toContain("First Contact");
   });
 
@@ -239,8 +248,10 @@ describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
       const anchor = ANCHORS[seg];
       const conditional = seg in CONDITIONAL_SEGMENTS;
       const present = out!.includes(anchor);
-      // 命题:每段要么在场,要么属于条件段清单。两者不互斥 (条件段也可在场),
-      // 但 LOCKED 段绝不可"既缺席又不在条件段清单中"。
+      // Proposition: every segment is either present or in the conditional
+      // manifest. The two are not exclusive (a conditional segment may be
+      // present), but a LOCKED segment must never be both absent and absent
+      // from the conditional manifest.
       if (!present) {
         expect(
           conditional,

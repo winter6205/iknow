@@ -1,5 +1,6 @@
 /**
- * #672 T3: 工具环检测纯函数 — empty / negative / overflow / concurrent 窗口 / fail-open。
+ * Tool-loop detection pure functions — empty / negative / overflow /
+ * concurrent window / fail-open.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -24,13 +25,11 @@ const okText = (text: string): ToolExecutionResult => ({
 });
 
 /**
- * read_image 成功臂的 payload 是 executor 下转型（as AnthropicContentBlock[]）
- * 后携带的 image block —— image 不在该联合内，构造测试数据同样需要下转型。
+ * read_image's success-arm payload carries an image block after executor
+ * downcasts it (as AnthropicContentBlock[]) — image is not in that union, so
+ * building test data needs the same downcast.
  */
-const okImage = (
-  mediaType: string,
-  data: string
-): ToolExecutionResult => ({
+const okImage = (mediaType: string, data: string): ToolExecutionResult => ({
   kind: "ok",
   toolUseId: "x",
   payload: [
@@ -128,39 +127,70 @@ describe("isStalledToolLoop", () => {
 });
 
 /**
- * path-image-vision 修复 R2：read_image 成功臂的 payload 携带 ≤1.4MB base64
- * image block（executor 下转型塞进 AnthropicContentBlock[]）。resultKey 必须
- * 仍对「相同图像重复出现」判等（loop 语义不变），但不得携带像素本体。
+ * read_image's success-arm payload carries an image block of up to ~1.4MB
+ * base64 (executor downcasts it into AnthropicContentBlock[]). resultKey
+ * must still treat "the same image repeated" as equal (loop semantics
+ * unchanged), but must not carry the pixel bytes themselves.
  */
 describe("image block resultKey fingerprint", () => {
-  // 256KiB 伪随机像素 → base64 约 341K 字符，模拟 read_image 真实 payload 量级。
+  // 256KiB of constant-fill bytes → ~341K base64 chars, simulating read_image's real payload scale.
   const bigData = Buffer.alloc(256 * 1024, 0xab).toString("base64");
   const otherData = Buffer.alloc(256 * 1024, 0xcd).toString("base64");
 
   it("resultKey 不收像素：data 原文不出现在 resultKey 与 events 序列化中", () => {
-    const e = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
+    const e = ev(
+      "read_image",
+      { path: "a.png" },
+      okImage("image/png", bigData),
+      0
+    );
     assert.equal(e.normalizable, true);
     assert.ok(!e.resultKey.includes(bigData));
     assert.ok(!JSON.stringify(e).includes(bigData));
-    // 指纹仍保留媒体类型信息供判等
+    // The fingerprint still keeps media-type info for equality decisions
     assert.ok(e.resultKey.includes("image/png"));
   });
 
   it("字节相同的图像 → resultKey 相等（loop 判等语义不变）", () => {
-    const a = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
-    const b = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 1);
+    const a = ev(
+      "read_image",
+      { path: "a.png" },
+      okImage("image/png", bigData),
+      0
+    );
+    const b = ev(
+      "read_image",
+      { path: "a.png" },
+      okImage("image/png", bigData),
+      1
+    );
     assert.equal(a.resultKey, b.resultKey);
   });
 
   it("像素不同的图像 → resultKey 不等（内容哈希判等不误伤进展）", () => {
-    const a = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
-    const b = ev("read_image", { path: "a.png" }, okImage("image/png", otherData), 1);
+    const a = ev(
+      "read_image",
+      { path: "a.png" },
+      okImage("image/png", bigData),
+      0
+    );
+    const b = ev(
+      "read_image",
+      { path: "a.png" },
+      okImage("image/png", otherData),
+      1
+    );
     assert.notEqual(a.resultKey, b.resultKey);
   });
 
   it("同像素不同 media_type → resultKey 不等（指纹含 media_type）", () => {
     const a = ev("read_image", { path: "a" }, okImage("image/png", bigData), 0);
-    const b = ev("read_image", { path: "a" }, okImage("image/jpeg", bigData), 1);
+    const b = ev(
+      "read_image",
+      { path: "a" },
+      okImage("image/jpeg", bigData),
+      1
+    );
     assert.notEqual(a.resultKey, b.resultKey);
   });
 
@@ -169,7 +199,7 @@ describe("image block resultKey fingerprint", () => {
       ev("read_image", { path: "a.png" }, okImage("image/png", bigData), p)
     );
     assert.equal(isStalledToolLoop(events), true);
-    // events 整体序列化必须远小于 5 份像素本体（不吞 base64 的可观测代理）
+    // Serialized events must stay far below 5 copies of the pixel bytes (observable proxy for "base64 not swallowed")
     assert.ok(JSON.stringify(events).length < bigData.length);
   });
 

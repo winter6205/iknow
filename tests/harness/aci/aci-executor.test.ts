@@ -1,6 +1,6 @@
 /**
- * ACI 原型 Layer 0：aci-executor 单元测试。
- * 覆盖：deny 不调 inner（spy）/ allow 委托 / 顺序保持 / 未知工具交 inner。
+ * ACI Layer 0: aci-executor unit tests.
+ * Covers: deny never reaches inner (spy) / allow delegates / order preserved / unknown tools go to inner.
  */
 
 import { describe, it } from "vitest";
@@ -47,7 +47,7 @@ function makeCatalog(tools: AciToolDef[]): AciCatalog {
   });
 }
 
-/** 记录每次 executeAll 调用的 spy Executor。 */
+/** Spy Executor that records every executeAll invocation. */
 function makeSpyExecutor(): {
   executor: Executor;
   calls: ToolCall[][];
@@ -91,7 +91,7 @@ describe("createAciExecutor — deny 路径不调 inner", () => {
         `expected hard-wall denial, got: ${r.message}`
       );
     }
-    // inner 从未被调用
+    // inner was never called
     assert.equal(calls.length, 0);
   });
 });
@@ -170,7 +170,7 @@ describe("createAciExecutor — 顺序保持", () => {
     assert.equal(results[0]!.kind, "execution_failed");
     assert.equal(results[1]!.kind, "ok");
     assert.equal(results[1]!.toolUseId, "y");
-    // inner 只为 y 调用了一次
+    // inner was called once, for y only
     assert.equal(calls.length, 1);
     assert.equal(calls[0]![0]!.id, "y");
   });
@@ -179,14 +179,14 @@ describe("createAciExecutor — 顺序保持", () => {
 describe("createAciExecutor — 未知工具交 inner", () => {
   it("catalog 查不到 → 委托 inner（inner 产 tool_not_found）", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
-    const catalog = makeCatalog([]); // 空 catalog
+    const catalog = makeCatalog([]); // empty catalog
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
       { id: "u1", name: "nonexistent", input: {} },
     ]);
 
-    // spy 返回 ok（模拟 inner 行为）；关键是 inner 被调用了
+    // spy returns ok (mimics inner); what matters is that inner was invoked
     assert.equal(results.length, 1);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]![0]!.name, "nonexistent");
@@ -245,9 +245,9 @@ describe("createAciExecutor — 自定义 policy", () => {
 });
 
 describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y1b 例外）", () => {
-  // inner spy 返回 bash 形态 ok payload（{stdout, stderr} JSON 文本），
-  // 模拟被中断前已 flush 的 partial。partial salvage 只对 name==="bash" 的
-  // 工具生效（extractBashPartial def?.name !== "bash" → undefined）。
+  // The inner spy returns a bash-shaped ok payload (JSON text of {stdout, stderr})
+  // to simulate a partial flushed before cancellation. Partial salvage applies
+  // only to name==="bash" tools (extractBashPartial: def?.name !== "bash" → undefined).
   function makePartialSpy(): {
     executor: Executor;
     calls: ToolCall[][];
@@ -288,7 +288,7 @@ describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const controller = new AbortController();
-    controller.abort(); // 调用前已 abort
+    controller.abort(); // already aborted before the call
     const results = await aciExec.executeAll(
       [{ id: "u1", name: "non_bash_tool", input: {} }],
       controller.signal
@@ -299,7 +299,7 @@ describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y
     assert.equal(r.kind, "execution_failed");
     if (r.kind === "execution_failed") {
       assert.equal(r.message, "cancelled");
-      // 决定性：非 bash 工具不产 partial（即便 payload 是 bash 形态）
+      // decisive: a non-bash tool yields no partial even with a bash-shaped payload
       assert.equal(
         (r as { partial?: unknown }).partial,
         undefined,
