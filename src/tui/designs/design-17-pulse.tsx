@@ -1,47 +1,41 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-17-pulse.tsx
+ * Design 17 — Concentric Pulse thinking panel (demo gallery candidate).
  *
- * 思考面板设计 17：同心圆靶心脉冲风（demo gallery candidate）。
+ * - Bullseye vocabulary: the current level is a solid core `●` flanked by
+ *   two rings that light up with the pulse (`⊙` at peak, `·` at trough);
+ *   the 5 levels form a row of identical targets breathing in sync, with
+ *   only the current one's gold core lit. A bottom `● currentLevel`
+ *   anchor row repeats the same signal so narrow terminals never lose
+ *   the focal point.
+ * - Breathing pulse (ambient, visible only when Auto off): current ring
+ *   color breathes between pal.running and pal.logoGold via one
+ *   non-loop timeline + item-level `loop:true, alternate:true`
+ *   (1200ms inOutSine). A second property `fade` rides the same rhythm;
+ *   above a 0.4 threshold the ring glyph flips `·`→`⊙` and gains BOLD —
+ *   the outer circle solidifies as the pulse brightens.
+ * - Entry (one-shot): panel opacity 0→1, marginTop -1→0, 450ms outExpo.
+ * - Level-confirm (triggered): currentIndex change → ring flashes `◎`
+ *   (heavy circle, "pulse outer ring expanding") with scale
+ *   1→1.22→1, 300ms outBack; the scale value gates the glyph
+ *   (>1.05 → `◎`, else `⊙`/`·`). The two tweens are staggered with an
+ *   explicit startTime so they never overwrite the same target property.
+ * - Auto dot: `●` on (breathing running↔logoGold) / `○` off (static
+ *   pal.dim). Color swap 220ms outExpo; dot glow 1000ms inOutSine.
+ * - With Auto on the 5 levels are visually disabled (cores revert to `⊙`,
+ *   rings fixed `·`, all pal.dim) so focus shifts to the Auto dot;
+ *   switching back eases the levels into the breathing state over 800ms
+ *   outQuad.
+ * - Focus cursor (INVERSE badge on focusIndex, pal.accent) and current
+ *   core (currentIndex, pal.running BOLD) are strictly orthogonal.
+ * - Rounded border: pal.border idle → pal.running when the picker is open.
  *
- * 设计要点
- *  - 同心圆 / 靶心词汇：当前档同心圆 = 实心核心 `●` 外扩两圈（脉冲亮起时
- *    `⊙`，脉冲谷底 `·`），档位名水平排成 5 节；5 节同构同步呼吸，群靶中
- *    当前档金核独亮——「靶心 + 同心圆外环」即主题。额外在面板底部放一行
- *    `● currentLevel` 「锚定靶心」，与水平条当前档正交冗余，确保窄屏
- *    下视觉焦点不丢。
- *  - 呼吸脉冲（常驻，仅 Auto off 视觉生效）：当前档同心圆外环颜色在
- *    `pal.running`(金) ↔ `pal.logoGold`(粉金) 间明暗呼吸，useTimeline
- *    单实例 + item 层 `loop:true, alternate:true` 无限 ping-pong，
- *    1200ms inOutSine；同时另一属性 `fade` 走同节奏，超过 0.4 门限时
- *    把外环字符从 `·` 切到 `⊙`、并叠加 BOLD——呼吸亮起，外圈实心化。
- *  - 入场（一次性）：整面板 opacity 0 → 1、marginTop -1 → 0，
- *    450ms outExpo。
- *  - Enter 确认靶心落定（触发式）：currentIndex 变化 → 同心圆外环字符
- *    短时闪现 `◎`（重圈，模拟「脉冲外圈放大」），scale 1 → 1.22 → 1，
- *    300ms outBack，scale 数值驱动字符门限（>1.05 用 `◎`，否则 `⊙`/`·`）。
- *    Timeline 用 `add(target, props, startTime=tl.currentTime + 300ms)`
- *    显式错开两次 tween，避免两个 once 重复覆盖同一 target 属性。
- *  - Auto 圆点开关：`●`（开，pal.running↔pal.logoGold 呼吸变亮）/
- *    `○`（关，pal.dim 平铺）。Auto 切色 220ms outExpo；呼吸亮色
- *    1000ms inOutSine 常驻。
- *  - Auto 开时 5 档视觉禁用（核心字符回退 `⊙`，外圈固定 `·`，颜色全部
- *    pal.dim），把视觉焦点让给 Auto 圆点呼吸；关时 800ms outQuad 复位
- *    到呼吸初态。
- *  - 焦点游标与当前档严格正交：游标走 focusIndex（INVERSE 徽标
- *    `pal.accent`），金核心走 currentIndex（pal.running BOLD），两套
- *    互不绑定。
- *  - 面板圆角边框 `rounded`：pal.border idle → pal.running 焦点
- *    （model.open）。
+ * Animation budget: ≤ 2 ambient loops (level ring breathing + Auto dot
+ * breathing). Both always run but render conditions make only one
+ * visible at a time, so at most 2 channels ever stack. Entry / confirm /
+ * color-swap are one-shots.
  *
- * 动效预算：常驻 ≤ 2（当前档同心圆呼吸 + Auto 圆点呼吸）—— 两条都常驻
- * 循环，但渲染条件决定谁可见（autoOn 关时同心圆渲染、autoOn 开时圆点渲
- * 染），不会同时视觉叠加成 3 条。入场 / 靶心落定 / 切色均为一次性触发，
- * 不计入常驻。
- *
- * 颜色纪律：所有颜色 100% 来自 `tuiPalette`（theme.ts），未新增颜色
- * 常量；当前档核心 pal.running(金)，外环脉冲 pal.logoGold(粉金)，正文
- * pal.text，辅助 pal.dim。
+ * Colors come 100% from tuiPalette; no new constants.
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -55,45 +49,46 @@ import {
   type ThinkingDesignProps,
 } from "./_contract.js";
 
-/** 5 档名展示（把 `xhigh` 拆成可读的 `x-high`）。 */
+/** 5 level labels (`xhigh` rendered as the more readable `x-high`). */
 const LEVEL_LABELS: ReadonlyArray<string> = EFFORT_LEVELS.map((level) =>
   level === "xhigh" ? "x-high" : level
 );
 
-/** 键位提示行。 */
+/** Key hint row. */
 const HINT =
   "[← →] 切档  ·  [Tab/Space] 切 Auto  ·  [Enter] 确认  ·  [Esc] 取消";
 
-/** 当前档同心圆呼吸单程时长（alternate ping-pong 一轮 = 2×该值）。 */
+/** Current-level ring breathing half-cycle (full ping-pong = 2×). */
 const PULSE_MS = 1200;
-/** Auto 圆点呼吸单程时长（仅 Auto on 视觉生效）。 */
+/** Auto dot breathing half-cycle (visible only when Auto on). */
 const AUTO_DOT_PULSE_MS = 1000;
-/** 面板入场时长（outExpo，一次性）。 */
+/** Panel entry duration (outExpo, one-shot). */
 const ENTRY_MS = 450;
-/** 靶心落定单段时长（outBack，触发式；总 = 2 × CONFIRM_MS）。 */
+/** Confirm-scale half duration (outBack, triggered; total = 2 × CONFIRM_MS). */
 const CONFIRM_MS = 300;
-/** Auto 圆点切色时长（outExpo，触发式）。 */
+/** Auto dot color-swap duration (outExpo, triggered). */
 const AUTO_DOT_SWAP_MS = 220;
-/** 呼吸复位时长（Auto 切换回 off 时，outQuad，触发式）。 */
+/** Ring reset duration (when Auto flips back off, outQuad, triggered). */
 const PULSE_RESET_MS = 800;
 
-/** 常驻 timeline duration：非 loop，永远够长，绕开 loop:true 的
- *  resetItems 重捕获初值陷阱（见 design-3-crt 注释）；无限循环靠
- *  item 层 `loop:true, alternate:true` 达成。 */
+/** Ambient timeline duration: non-loop but always long enough, dodging
+ *  the loop:true resetItems initial-value re-capture trap (see
+ *  design-3-crt notes); infinite looping comes from item-level
+ *  `loop:true, alternate:true`. */
 const INFINITE_MS = 3_600_000;
 
-/** 外圈淡入层 BOLD 门限（0..1，BOLD 下表示「外圈亮起」）。 */
+/** Ring fade-in BOLD threshold (0..1; past it the outer ring lights up). */
 const RING_BOLD_THRESHOLD = 0.4;
-/** 靶心落定字符门限（scale > 该值时外环 = `◎` 重圈）。 */
+/** Confirm glyph threshold (scale above it → ring becomes `◎` heavy circle). */
 const CONFIRM_RING_THRESHOLD = 1.05;
 
-/** 6 位 hex (`#rrggbb`) → 整数 RGB。 */
+/** 6-digit hex (`#rrggbb`) → integer RGB. */
 function parseHex(hex: string): { r: number; g: number; b: number } {
   const v = Number.parseInt(hex.slice(1), 16);
   return { r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff };
 }
 
-/** 两 hex 色按 t (0..1) 线性插值（RGB 空间），t 越界 clamp。 */
+/** Linear RGB interpolation between two hex colors; t clamped to 0..1. */
 function mixHex(a: string, b: string, t: number): string {
   const k = Math.max(0, Math.min(1, t));
   const pa = parseHex(a);
@@ -105,20 +100,21 @@ function mixHex(a: string, b: string, t: number): string {
   return `#${hex}`;
 }
 
-/** 设计 17 主面板：hooks + 渲染。 */
+/** Design 17 main panel: hooks + rendering. */
 function PulsePanel(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model, cols } = props;
   const { autoOn, currentIndex, focusIndex, open } = model;
 
-  // useTimeline 每次 render 都 new 一个 Timeline 实例，但只有首个会被
-  // engine 注册与驱动；用 ref 锁住首个实例，后续 add 都作用在它上面。
+  // useTimeline news a fresh Timeline each render but only the first is
+  // registered and driven by the engine; pin that one in a ref so every
+  // later .add() lands on it.
   const initialTimeline = useTimeline({ duration: INFINITE_MS });
   const timelineRef = useRef<Timeline | null>(null);
   if (timelineRef.current === null) timelineRef.current = initialTimeline;
   const tl = timelineRef.current;
 
-  // timeline 直接改写这些 ref，setState 仅作 force 重渲触发器。
+  // The timeline mutates these refs in place; setState is only a force re-render trigger.
   const [, force] = useState(0);
   const entryRef = useRef<{ opacity: number; marginTop: number }>({
     opacity: 0,
@@ -129,9 +125,10 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
   const dotPulseRef = useRef<{ v: number }>({ v: autoOn ? 1 : 0 });
   const scaleRef = useRef<{ s: number }>({ s: 1 });
 
-  // ── 常驻：当前档同心圆呼吸 + Auto 圆点呼吸 ──
-  // 两条都常驻循环，渲染条件决定谁可见（见下方 showLevels / autoOn 分支），
-  // 不互相 play/pause，避免 resetItems 触发初值重捕获。
+  // ── Ambient: current-level ring breathing + Auto dot breathing ──
+  // Both loop forever; render conditions decide which one is visible
+  // (see showLevels / autoOn branches below). They never play/pause each
+  // other, avoiding a resetItems initial-value re-capture.
   useEffect(() => {
     tl.add(pulseRef.current, {
       ring: 1,
@@ -150,11 +147,11 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
       loop: true,
       onUpdate: () => force((x) => x + 1),
     });
-    // mount-only；unmount 时 useTimeline 自动 pause + engine.unregister。
+    // mount-only; useTimeline auto-pauses + engine-unregisters on unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tl]);
 
-  // ── 入场（一次性触发）：opacity 0→1、marginTop -1→0。 ──
+  // ── Entry (one-shot): opacity 0→1, marginTop -1→0. ──
   useEffect(() => {
     tl.add(entryRef.current, {
       opacity: 1,
@@ -166,10 +163,12 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
     });
   }, [tl]);
 
-  // ── 触发：Auto 切换门控 ──
-  //  on → 把 ring/dot 视觉态复位（圆点 = running，环 = 0，环可见性
-  //   靠 showLevels=false 渲染屏蔽；圆点颜色由 dotRef 切色 effect 接续）。
-  //  off → 把 ring 从 0 缓拉到 1（呼吸复位），dot 颜色由切色 effect 接续。
+  // ── Trigger: Auto toggle gating ──
+  //  on  → reset ring/dot visual state (dot = running, ring = 0; ring
+  //    visibility suppressed by showLevels=false; dot color picked up by
+  //    the dot-swap effect).
+  //  off → ease ring from 0 up to 1 (breathing reset); dot color picked
+  //    up by the swap effect.
   const prevAutoRef = useRef<boolean>(autoOn);
   useEffect(() => {
     if (prevAutoRef.current === autoOn) return;
@@ -193,7 +192,7 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
     }
   }, [autoOn, tl]);
 
-  // ── 触发：Auto 圆点切色（autoOn 变化 → dim ↔ running）。 ──
+  // ── Trigger: Auto dot color swap (autoOn change → dim ↔ running). ──
   const dotSwapPrevRef = useRef<boolean>(autoOn);
   useEffect(() => {
     if (dotSwapPrevRef.current === autoOn) return;
@@ -207,10 +206,11 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
     });
   }, [autoOn, tl]);
 
-  // ── 触发：Enter 确认靶心落定（currentIndex 变化 → scale 1→1.22→1） ──
-  // 用显式 startTime 把两段 outBack 错开，避免两次 once 同 startTime
-  // 并发导致属性相互覆盖。item 到期（completed）后 `once:true` 自动从
-  // items 数组 splice 出去，下次 currentIndex 变化时再重新 add，互不干扰。
+  // ── Trigger: Enter confirm (currentIndex change → scale 1→1.22→1) ──
+  // Explicit startTime staggers the two outBack tweens so two once items
+  // sharing one startTime can't overwrite each other's property. After an
+  // item completes, `once:true` splices it out of the items array, so the
+  // next currentIndex change re-adds cleanly without interference.
   const prevIndexRef = useRef<number>(currentIndex);
   useEffect(() => {
     if (prevIndexRef.current === currentIndex) return;
@@ -236,7 +236,8 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
     );
   }, [currentIndex, tl]);
 
-  // ── 派生值（ref 被 timeline 原地改写，force setState 后读到最新） ──
+  // ── Derived values (refs mutated in place by the timeline; the forced
+  //  setState re-render reads the latest) ──
   const ringBright = pulseRef.current.ring;
   const ringBold = pulseRef.current.fade > RING_BOLD_THRESHOLD;
   const ringColor = mixHex(pal.running, pal.logoGold, ringBright);
@@ -247,8 +248,8 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
   const borderColor = open ? pal.running : pal.border;
   const showLevels = !autoOn;
   const autoDesc = autoOn
-    ? "自适应档位 · server picks" // 自适应档位
-    : "手动档位 · concrete effort"; // 手动档位
+    ? "自适应档位 · server picks" // adaptive level
+    : "手动档位 · concrete effort"; // manual level
 
   return (
     <box
@@ -261,7 +262,7 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
       opacity={entry.opacity}
       marginTop={entry.marginTop}
     >
-      {/* 标题：⊙ 装饰 + THINKING */}
+      {/* Title: ⊙ ornament + THINKING */}
       <text>
         <span fg={pal.running} attributes={TextAttributes.BOLD}>
           {"⊙ "}
@@ -271,7 +272,7 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
         </span>
       </text>
 
-      {/* Auto 行：圆点开关 + 状态说明（呼吸亮色 = on）。 */}
+      {/* Auto row: dot toggle + state label (glowing breath = on). */}
       <text>
         <span fg={autoOn ? dotGlow : dotColor} attributes={TextAttributes.BOLD}>
           {autoOn ? "●" : "○"}
@@ -282,16 +283,17 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
         </span>
       </text>
 
-      {/* 5 档：当前档 = 金核心实心 + 外圈呼吸；其余 = 空心 ⊙。
-          Auto on 时 5 档全部禁用（dim + 外环固定 `·`）。 */}
+      {/* 5 levels: current = solid gold core + breathing ring; others = hollow ⊙.
+          With Auto on all 5 are disabled (dim + ring fixed `·`). */}
       <box flexDirection="row" alignItems="center">
         {LEVEL_LABELS.map((label, i) => {
           const current = showLevels && i === currentIndex;
           const focused = showLevels && i === focusIndex;
           const dim = !showLevels;
           const core = dim ? "⊙" : current ? "●" : "⊙";
-          // 外环字符门限：dim 时固定 `·`，否则按 pulse/fade + 靶心落定 scale
-          // 选 `◎`（重圈，落定瞬间）/ `⊙`（亮环，呼吸亮）/ `·`（暗环）。
+          // Ring glyph threshold: `·` when dim; otherwise chosen by pulse/fade +
+          // confirm scale: `◎` (heavy ring, at confirm), `⊙` (bright ring, peak),
+          // `·` (dark ring, trough).
           const ringCh = dim
             ? "·"
             : current
@@ -305,7 +307,7 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
           const ringColorAt = dim ? pal.dim : current ? ringColor : pal.dim;
           return (
             <box key={label} flexDirection="row" alignItems="center" gap={0}>
-              {/* 焦点游标（picker 打开时 INVERSE 徽标，正交于当前档金核心） */}
+              {/* Focus cursor (INVERSE badge while picker open, orthogonal to the current-level gold core) */}
               <span
                 fg={focused ? pal.accent : pal.dim}
                 attributes={
@@ -348,8 +350,8 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
         })}
       </box>
 
-      {/* 锚定靶心行：当前档单独一行 `● currentLevel`，
-          提示「这是当前档」+「外环呼吸在此」。Auto on 时整行隐藏。 */}
+      {/* Anchor bullseye row: current level on its own line `● currentLevel`,
+          reinforcing "this is current" + "the ring breathes here". Hidden when Auto on. */}
       {showLevels && (
         <box flexDirection="row" alignItems="center" marginTop={0}>
           <span fg={pal.running} attributes={TextAttributes.BOLD}>
@@ -362,7 +364,7 @@ function PulsePanel(props: ThinkingDesignProps): ReactNode {
         </box>
       )}
 
-      {/* 键位提示 */}
+      {/* Key hints */}
       <text fg={pal.dim}>{HINT}</text>
     </box>
   );

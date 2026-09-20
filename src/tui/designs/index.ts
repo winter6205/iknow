@@ -1,11 +1,9 @@
 /**
- * src/tui/designs/index.ts
+ * Registry for the thinking-panel design variants (demo gallery data source).
  *
- * 思考面板 15 版设计注册中心（demo gallery 数据源）。
- *
- * 5 版初稿 + 10 版炫酷变体；纯预览用，不影响 app.tsx / slash.ts / theme.ts /
- * contract.ts 既有行为。每个 design 实现 ThinkingDesign 契约（_contract.ts），
- * 聚合导出供 scripts/tui-designs-preview.tsx 统一装配展示。
+ * Preview only — no effect on existing app.tsx / slash.ts / theme.ts /
+ * contract.ts behavior. Each design implements the ThinkingDesign contract
+ * (_contract.ts); the aggregate export feeds scripts/tui-designs-preview.tsx.
  */
 import type { ThinkingDesign } from "./_contract.js";
 import { design1 } from "./design-1-restrained.js";
@@ -28,7 +26,7 @@ import { design23 } from "./design-23-static-gray.js";
 import { design24 } from "./design-24-breathing.js";
 import { design25 } from "./design-25-flow-edge.js";
 
-/** 全部 19 版设计（顺序 = gallery 展示顺序；按数字键 1-9 + +/- 翻页）。 */
+/** All designs (order = gallery display order; number keys 1-9 + +/- to page). */
 export const THINKING_DESIGNS: readonly ThinkingDesign[] = Object.freeze([
   design1,
   design2,

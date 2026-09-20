@@ -1,53 +1,36 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-19-capsule.tsx
+ * Design 19 — Capsule Neon thinking panel (reverse-video capsule buttons).
  *
- * 思考面板设计 19：反白胶囊按钮（Capsule Neon）。
+ * - Rounded border; pal.running gold focus frame while the picker is open.
+ * - The 5 concrete-effort levels render as equal-width 8-column capsules
+ *   `[  label  ]` with the label centered in a 6-column inner box; the fixed metric
+ *   makes slide alignment between capsules trivial.
+ * - Current capsule (brackets included) uses TextAttributes.INVERSE:
+ *   fg pal.bgRunning gray-green / bg pal.running↔pal.logoGold gradient
+ *   pulse. INVERSE swaps fg↔bg (SGR 7), so the capsule reads as gold text
+ *   on gray-green — a pressed metal button. fg owns the (static) capsule
+ *   background, bg owns the (pulsing) glyph color, so the glow timeline
+ *   animates exactly one prop value.
+ * - Level change slides the overlay capsule: an absolutely positioned box
+ *   whose translateX tweens old→new x over 200ms inOutQuad. translateX is
+ *   only ever written by the mount effect and the timeline — never a JSX
+ *   prop, since the reconciler would overwrite the setter with the stale
+ *   prop on re-render. The parent row's height comes from the 5 in-flow
+ *   texts, so the absolute overlay lands exactly on the button row.
+ * - Focus cursor ▲ and current capsule are separate concepts: the
+ *   capsule is the stable confirmed state; the cursor is an
+ *   accent↔dim pulsing triangle showing the "pending" position while
+ *   the picker is open.
+ * - Auto toggle: ●/○ dot plus the `[ AUTO ]` capsule itself going
+ *   INVERSE (same glow) when on; the 5 level capsules then render
+ *   double-dim (pal.dim + DIM attribute).
+ * - Animation budget: ≤ 2 ambient — capsule glow (1400ms alternate
+ *   inOutSine) and cursor pulse (700ms alternate inOutSine). The two are
+ *   mutually exclusive by autoOn (whichever capsule holds the glow).
  *
- * 视觉风格 5 要素（任务约束）：
- *  1. 圆角边框 `borderStyle="rounded"`，打开时 `pal.running` 金色焦点框。
- *  2. 5 档 concrete effort 全部渲染为等宽 8 列胶囊 `[  低   ]` 形态
- *     （label 居中 padding 到 6 列内容），clear caption +
- *     等宽布局让"胶囊从旧档滑到新档"动效的对位零成本。
- *  3. 当前档：整胶囊（连括号）用 `TextAttributes.INVERSE` 反白 — fg
- *     `pal.bgRunning` 灰绿 / bg `pal.running` 金 ↔ `pal.logoGold` 粉
- *     金渐变脉冲；INVERSE 终端 swap 出"金底灰字"被按下的反白胶囊。
- *  4. 切档动效：胶囊 overlay（绝对定位 `<box>` + `translateX`）从旧
- *     currentIndex x 位 → 新 currentIndex x 位，200ms ease `inOutQuad` —
- *     useTimeline 持有实例 + 每次 currentIndex 变化 resetItems + add
- *     translateX（initialValues 由 timeline 自动捕获起点）。
- *  5. 焦点游标 ▲ 与当前档是两个独立概念：当前档是稳定的 INVERSE 胶囊
- *     （确认后位置稳定），焦点游标是单独的 `accent ↔ dim` 颜色脉冲
- *     三角，作为 picker 打开时 ←/→ 移动的"待确认"指示。
- *  6. Auto 圆点开关以 ●/○ 形态切换 + 整胶囊 `[ AUTO ]` 在 autoOn 时
- *     整胶囊 INVERSE 压下（与当前档胶囊同款 glow），5 档 disabled 走
- *     `pal.dim` + `TextAttributes.DIM` 双 dim。
- *  7. 动效预算：常驻 ≤ 2 — 反白胶囊 glow `pal.running ↔ pal.logoGold`
- *     1400ms alternate inOutSine + 焦点游标 `pal.accent ↔ pal.dim`
- *     700ms alternate inOutSine。Auto 切换时 5 档 disabled，焦点跳
- *     到 Auto；常驻两路互斥（autoOn 决定哪条 capsule 持有 glow）。
- *
- * 反白胶囊怎么用 INVERSE：`<span fg={pal.bgRunning} bg={glowColor}
- * attributes={TextAttributes.INVERSE}>{label}</span>`。INVERSE 是终
- * 端反白（SGR 7 reverse video），swap fg ↔ bg — 所见 cell 的渲染文本
- * 色 = bg prop 颜色，渲染背景 = fg prop 颜色。`bg` 接 `pal.running`
- * 金（或其脉冲值）→ 渲染文本金色；`fg` 接 `pal.bgRunning` 灰绿 →
- * 渲染背景灰绿；整个胶囊被压成"金 label 字符 × 灰绿底"，像一颗金属
- * 按钮被按下。换 fg 调胶囊底色（常驻灰绿），bg 调胶囊文本色（脉冲
- * 金↔粉金），glow 时间线只动一个 prop 数值。
- *
- * 滑动对位怎么挂钩：胶囊是顶层 `<box width="100%" flexDirection="row"
- * gap={2}>` 内的 5 个 `<text>`；`!autoOn` 时同 row 多挂一个
- * `<box ref={capsuleRef} position="absolute" left={0} top={0}>` 装
- * 反白胶囊文字。`translateX` 只由 mount (`x(currentIndex)` 初始化) +
- * `useTimeline` 的 `add({translateX: x(new), duration: 200, ease:
- * "inOutQuad"})` 驱动，永不在 JSX prop 出现（reconciler 在每次
- * re-render 会用旧值覆盖 setter）。父 row 高度由 5 个 in-flow `<text>`
- * 撑起 = 1 行，absolute overlay 落在 top=0 与按钮行同高度。
- *
- * 颜色纪律：所有颜色 100% 来自 `tuiPalette`（theme.ts），未新增任
- * 何颜色常量；hex 字符串由 OpenTUI 渲染器按终端能力降级，应用层不
- * 写 ANSI。
+ * Colors come 100% from tuiPalette; the renderer degrades hex by terminal
+ * capability — no hand-written ANSI.
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -60,24 +43,24 @@ import { useTimeline } from "@opentui/react";
 import { tuiPalette } from "../theme.js";
 import { type ThinkingDesign, type ThinkingDesignProps } from "./_contract.js";
 
-// ── 常量 ──────────────────────────────────────────────────────────────
-/** 切档滑动时长（inOutQuad）。 */
+// ── Constants ─────────────────────────────────────────────────────────
+/** Slide duration on level change (inOutQuad). */
 const SLIDE_MS = 200;
-/** 反白胶囊 glow 单程时长（alternate ping-pong = 2 × 单程）。 */
+/** Capsule glow half-cycle (alternate ping-pong = 2 × half). */
 const GLOW_MS = 1400;
-/** 焦点游标颜色脉冲单程时长。 */
+/** Focus cursor color pulse half-cycle. */
 const CURSOR_MS = 700;
-/** 面板入场 fade 时长。 */
+/** Panel entry fade duration. */
 const ENTRY_MS = 280;
 
-/** 等宽胶囊宽度（含两侧方括号）。 */
+/** Capsule width including brackets. */
 const BUTTON_W = 8;
-/** 胶囊之间间距。 */
+/** Gap between capsules. */
 const GAP = 2;
-/** 单步宽度 = 胶囊宽 + 间距。 */
+/** One step = capsule width + gap. */
 const STEP = BUTTON_W + GAP;
 
-/** 5 档中文标签 + 视觉宽度（终端列数）。 */
+/** 5 Chinese level labels + display width (terminal columns). */
 const LEVEL_LABELS: ReadonlyArray<{ label: string; width: number }> = [
   { label: "低", width: 2 },
   { label: "中", width: 2 },
@@ -86,20 +69,20 @@ const LEVEL_LABELS: ReadonlyArray<{ label: string; width: number }> = [
   { label: "最大", width: 4 },
 ];
 
-/** Auto 胶囊宽度 4 内容居中。 */
+/** AUTO label centered in a 4-column capsule. */
 const AUTO_LABEL = "AUTO";
 const AUTO_WIDTH = 4;
 
-/** 焦点游标 ▲ 在胶囊行内的列偏移（对准 8 宽胶囊中心）。 */
+/** Column offset of the ▲ cursor inside the capsule row (aimed at the 8-wide capsule center). */
 const LEVEL_CURSOR_X = (i: number): number => i * STEP + 4;
-/** Auto 胶囊中心列（在 Auto dot 行内：dot(1) + gap(1) + capsule[] 中心 4 = 6）。 */
+/** AUTO capsule center column (dot(1) + gap(1) + center of `[ AUTO ]` ≈ 6). */
 const AUTO_CURSOR_X = 6;
 
-// ── 文本工具 ──────────────────────────────────────────────────────────
+// ── Text utils ────────────────────────────────────────────────────────
 /**
- * 把 label 居中 padding 到 6 列内容内，返回完整 8 列胶囊
- * 字符串 `[<inner>]`。所有 5 档字符串拼接后等宽，相邻胶囊对位
- * 精确到 1 列，translateX 滑动动画的对位计算零成本。
+ * Center `label` inside the 6-column inner box and return the full 8-column
+ * capsule `[<inner>]`. All capsule strings share one width, so slide
+ * alignment between neighbors is exact to a single column.
  */
 function capsuleText(label: string, width: number): string {
   const inner = 6;
@@ -111,8 +94,8 @@ function capsuleText(label: string, width: number): string {
 
 const AUTO_CAPSULE = capsuleText(AUTO_LABEL, AUTO_WIDTH);
 
-// ── 颜色工具 ──────────────────────────────────────────────────────────
-/** `#rrggbb` → [r, g, b]∈[0,1]³。 */
+// ── Color utils ───────────────────────────────────────────────────────
+/** `#rrggbb` → [r, g, b]∈[0,1]³. */
 function hexToRgb(hex: string): readonly [number, number, number] {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
   if (!m) return [1, 1, 1];
@@ -124,7 +107,7 @@ function hexToRgb(hex: string): readonly [number, number, number] {
   ] as const;
 }
 
-/** 两色按 t∈[0,1] 线性混合 → `#rrggbb`。供 glow / cursor 脉冲用。 */
+/** Linear mix of two colors at t∈[0,1] → `#rrggbb`; used by glow / cursor pulses. */
 function mixHex(a: string, b: string, t: number): string {
   const [ar, ag, ab] = hexToRgb(a);
   const [br, bg, bb] = hexToRgb(b);
@@ -135,7 +118,7 @@ function mixHex(a: string, b: string, t: number): string {
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
 }
 
-// ── 渲染组件 ──────────────────────────────────────────────────────────
+// ── Rendering component ───────────────────────────────────────────────
 function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model } = props;
@@ -144,15 +127,15 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
   const focusIndex = model.focusIndex;
   const open = model.open;
 
-  // refs —— 见头注释：translateX/opacity 仅由 mount/timeline 写，不进 JSX prop。
+  // refs — see header: translateX/opacity are written only by mount/timeline, never JSX props.
   const panelRef = useRef<BoxRenderable | null>(null);
   const capsuleRef = useRef<BoxRenderable | null>(null);
 
-  // 三个 useTimeline 实例：锁住首 render 的 injected Timeline（后续 render
-  // 产生的新实例未被 engine 注册，仅 ref 持有首实例；autoplay 行为由
-  // useTimeline 内部的首 render effect 触发）。
+  // Three useTimeline instances: keep the first-render injected Timelines
+  // (later renders' fresh instances are never registered with the engine;
+  // autoplay fires from useTimeline's internal first-render effect).
   const glowTimeline = useTimeline({
-    duration: GLOW_MS * 2, // alternate ping-pong 一轮 = 2 × 单程
+    duration: GLOW_MS * 2, // one alternate ping-pong round = 2 × half-cycle
     loop: true,
     autoplay: true,
   });
@@ -176,18 +159,18 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
   });
   const tl = tlRefs.current;
 
-  // 状态：被 timeline onUpdate 驱动。
+  // State driven by timeline onUpdate callbacks.
   const [capsuleFg, setCapsuleFg] = useState<string>(pal.running);
   const [cursorColor, setCursorColor] = useState<string>(pal.accent);
 
   const glowRef = useRef<{ p: number }>({ p: 0 });
   const cursorRef = useRef<{ p: number }>({ p: 0 });
 
-  // mount-only：注册三个常驻/一次性动效 + 初始化胶囊 translateX。
+  // mount-only: register the ambient/one-shot animations + initialize capsule translateX.
   useEffect(() => {
     const panel = panelRef.current;
 
-    // 1) 反白胶囊 glow：alternate 脉冲驱动 capsuleFg（renderable cell bg）。
+    // 1) Capsule glow: alternate pulse driving capsuleFg (renderable cell bg).
     tl.glow.add(glowRef.current, {
       duration: GLOW_MS,
       ease: "inOutSine",
@@ -199,7 +182,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
       },
     });
 
-    // 2) 焦点游标颜色脉冲：accent ↔ dim。
+    // 2) Focus cursor color pulse: accent ↔ dim.
     tl.cursor.add(cursorRef.current, {
       duration: CURSOR_MS,
       ease: "inOutSine",
@@ -211,8 +194,8 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
       },
     });
 
-    // 3) 面板入场 fade：opacity 0 → 1（panel.opacity prop 永远 0，timeline
-    //    写 renderable 数值，reconciler 跳过 prop 同值 set）。
+    // 3) Panel entry fade: opacity 0 → 1 (the panel's JSX opacity prop stays 0;
+    //    the timeline writes the renderable directly, so the reconciler skips it).
     if (panel) {
       tl.glow.add(panel, {
         opacity: 1,
@@ -222,17 +205,17 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
       });
     }
 
-    // 4) 初始化胶囊 translateX。
+    // 4) Initialize the capsule translateX.
     const capsule = capsuleRef.current;
     if (capsule) {
       capsule.translateX = currentIndex * STEP;
     }
 
-    // cleanup 由 useTimeline 内部 unmount 效应统一处理（pause + unregister）。
+    // Cleanup is handled uniformly by useTimeline's internal unmount effect (pause + unregister).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 切档 slide：currentIndex 变化 → 重置 slide timeline + 写入新 translateX。
+  // Slide on level change: currentIndex change → reset slide timeline + tween to the new translateX.
   const prevIndexRef = useRef<number>(currentIndex);
   useEffect(() => {
     const capsule = capsuleRef.current;
@@ -248,7 +231,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
     tl.slide.play();
   }, [currentIndex, tl]);
 
-  // autoOn 切换：胶囊 overlay 重 remount，重置 translateX + 暂停 slide。
+  // autoOn toggle: the overlay remounts, so reset translateX + pause slide.
   useEffect(() => {
     if (autoOn) {
       tl.slide.pause();
@@ -263,20 +246,20 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
     tl.slide.resetItems();
   }, [autoOn, currentIndex, tl]);
 
-  // 派生
+  // Derived
   const borderColor = open ? pal.running : pal.border;
   const descText = autoOn ? "adaptive" : "concrete effort";
   const hintText = autoOn
     ? "[Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消"
     : "[←/→] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消";
 
-  // 焦点游标 x：focusIndex === -1 时指向 Auto 胶囊（picker 打开时）；>= 0
-  // 时指向对应档位胶囊中心。
+  // Cursor x: focusIndex === -1 points at the AUTO capsule (when picker open);
+  // >= 0 points at the matching level capsule's center.
   const cursorX =
     focusIndex === -1 ? AUTO_CURSOR_X : LEVEL_CURSOR_X(focusIndex);
   const cursorVisible = open;
 
-  // 当前档反向胶囊的字符串（autoOn 时该 overlay 不渲染，引用不到）。
+  // Inverse capsule string for the current level (this overlay is not rendered when autoOn, so never read).
   const curLabel = LEVEL_LABELS[currentIndex] ?? LEVEL_LABELS[1]!;
   const curCapsuleText = capsuleText(curLabel.label, curLabel.width);
 
@@ -290,7 +273,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
       paddingY={0}
       opacity={0}
     >
-      {/* 标题 */}
+      {/* Title */}
       <text>
         <span fg={pal.running} attributes={TextAttributes.BOLD}>
           {"◈ THINKING"}
@@ -298,7 +281,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
         <span fg={pal.dim}>{"  │  CAPSULE PICKER"}</span>
       </text>
 
-      {/* Auto 行：圆点 + Auto 胶囊 + 描述 */}
+      {/* Auto row: dot + AUTO capsule + description */}
       <box flexDirection="row" marginTop={0}>
         <text wrapMode="none">
           <span
@@ -323,7 +306,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
         </text>
       </box>
 
-      {/* 5 档胶囊行 + 反白胶囊 overlay（!autoOn 时） */}
+      {/* 5-capsule row + inverse capsule overlay (when !autoOn) */}
       <box
         width="100%"
         flexDirection="row"
@@ -359,7 +342,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
         )}
       </box>
 
-      {/* 焦点游标 ▲（当前档与游标是独立概念：游标 ≠ current） */}
+      {/* Focus cursor ▲ (cursor ≠ current: they are independent concepts) */}
       {cursorVisible && (
         <box marginTop={0}>
           <text wrapMode="none">
@@ -370,7 +353,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
         </box>
       )}
 
-      {/* 键位提示 */}
+      {/* Key hints */}
       <box marginTop={0}>
         <text fg={pal.dim}>{hintText}</text>
       </box>
@@ -378,7 +361,7 @@ function CapsuleDesign(props: ThinkingDesignProps): ReactNode {
   );
 }
 
-// ── 导出 ──────────────────────────────────────────────────────────────
+// ── Export ────────────────────────────────────────────────────────────
 export const design19: ThinkingDesign = {
   meta: {
     id: "design-19-capsule",

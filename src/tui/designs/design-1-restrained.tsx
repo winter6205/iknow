@@ -1,44 +1,50 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-1-restrained.tsx
+ * Thinking panel, variant 1: Restrained Business (demo gallery candidate).
  *
- * 思考面板 · 5 版设计之 1：克制商务风（Restrained Business，demo gallery 候选）。
+ * Visual discipline:
+ *  - Monochrome accent only: `pal.running` gold + `pal.dim` gray +
+ *    `pal.accent` white; no gradient ramps — color transitions go through
+ *    opacity blending (Auto dot ● gold ↔ ○ gray).
+ *  - Rounded border (`borderStyle="rounded"`, consistent with the whole
+ *    TUI): `pal.border` gray when idle, `pal.running` gold when focused
+ *    (model.open).
+ *  - Restrained motion, 100–250ms, no bounce / spring / looping pulses:
+ *      · panel entry fade: opacity 0 → 1, 150ms, ease "inOutQuad";
+ *      · gold anchor slide on Enter confirm: translateX from old
+ *        currentIndex to new, 200ms, ease "outQuad"; the anchor is a
+ *        stable-state indicator, while the focus cursor (`pal.accent`
+ *        BOLD) only reflects focusIndex and never slides (orthogonal);
+ *      · Auto dot color transition: ● gold ↔ ○ gray, 150ms, ease
+ *        "inOutSine".
  *
- * 视觉纪律：
- *  - 单色强调：`pal.running` 金 + `pal.dim` 灰层次 + `pal.accent` 白；不引入
- *    渐变色阶，颜色过渡只走 opacity 叠印（Auto 圆点 ● 金 ↔ ○ 灰）。
- *  - 圆角边框 `borderStyle="rounded"`（与全 TUI 圆角线框体系一致）：
- *    `pal.border` 灰 idle，`pal.running` 金 焦点（model.open）。
- *  - 动效克制，100–250ms，无弹跳 / 无弹性 / 无循环脉冲：
- *      · 面板入场 fade：opacity 0 → 1，150ms，ease "inOutQuad"；
- *      · Enter 确认时金锚点滑动：translateX 由旧 currentIndex 位 → 新位，
- *        200ms，ease "outQuad"；金锚点是稳定状态指示，焦点游标
- *        `pal.accent` BOLD 仅反映 focusIndex，不参与滑动（正交）；
- *      · Auto 圆点开/关颜色渐变：● 金 ↔ ○ 灰，150ms，ease "inOutSine"。
+ * Animation wiring (learned from design-4-minimal's lazy-ref +
+ * engine.register model):
+ *  - `useTimeline` news up a Timeline on every render but only registers
+ *    the first with the engine (@opentui/react useTimeline); later
+ *    instances are unregistered and never advanced by engine.update, so
+ *    animations fail silently. Hence all three timelines are lazy-created
+ *    via `useRef` (same instance kept), registered in the mount effect,
+ *    and `pause + unregister`ed on unmount (cancel-on-close).
+ *  - Gold anchor: absolute `<box>` + translateX. translateX is **never** a
+ *    React prop (the reconciler would overwrite the setter with the stale
+ *    value on every re-render); it is driven only by imperative assignment
+ *    at mount and the timeline's `add({translateX: target})`.
+ *  - Panel fade-in: target = whole panel `BoxRenderable.opacity` (native
+ *    Renderable support). The panel `<box>` starts with `opacity={0}` as a
+ *    prop; the timeline writes each frame. The reconciler only sets when
+ *    old and new props differ (updateProperties diff), so React never
+ *    resets opacity mid-fade.
+ *  - Auto dot: `<text opacity={dotBlend}>` wraps two `<span>`s: ● gold +
+ *    ○ gray; text opacity is React state, the timeline's onUpdate uses
+ *    `animation.progress` (already ease-mapped to [0,1]) to `setDotBlend`
+ *    → React re-render → blended transition. No mixHex interpolation
+ *    needed.
  *
- * 动效挂钩（学习 design-4-minimal 的 ref 懒创建 + engine.register 模型）：
- *  - `useTimeline` 每次 render 都 new 一个 Timeline 实例，但只把第一个注册
- *    到 engine（@opentui/react index.js useTimeline）；后续 render 产生的
- *    实例未注册、engine.update 不会推进，动画静默失败。因此三条 timeline
- *    全部用 `useRef` 懒创建（保持同一实例），mount effect 里
- *    `engine.register`，unmount 时 `pause + unregister`（cancel-on-close）。
- *  - 金锚点：absolute `<box>` + translateX。translateX **绝不**作为 React
- *    prop（reconciler 每次 re-render 会用旧值覆盖 setter），仅由 mount
- *    时的 imperative 赋值与 timeline 的 `add({translateX: target})` 驱动。
- *  - 面板 fade-in：target = 整面板 `BoxRenderable.opacity`（Renderable 原生
- *    支持，setter 在 chunk-node-0yw3x5m7.js）。panel `<box>` 用 `opacity={0}`
- *    作初始 prop；timeline 每帧写入新值。reconciler 只在新旧 prop 不等时才
- *    set（updateProperties），所以 fade 期间 React 不会重置 opacity（详见
- *    chunk-5mwd1gcw.js updateProperties diff）。
- *  - Auto 圆点：`<text opacity={dotBlend}>` 包裹两个 `<span>`：● 金 + ○ 灰；
- *    text 的 opacity 走 React state，timeline 的 onUpdate 用 `animation.progress`
- *    （已是 ease 处理后 [0,1]，Timeline.d.ts）`setDotBlend` 驱动 state →
- *    React re-render → 叠印渐变。无需 mixHex 颜色插值。
- *
- * 面板结构（7 行）：圆角边框（顶/底各 1 行）+ 标题 THINKING + Auto 行 +
- * 档位行（5 档横排 + 金锚点 `▸ 档 ◂` 绝对定位叠加）+ 档位可视化条
- * `▁▂▃▄▅▆▇█`（8 格，当前档段金）+ 键位提示行。元素 1/7 同体 —— 圆角
- * 边框的顶行与底行就是上下边框，5 条内容行填在中间。
+ * Panel structure (7 rows): rounded border (top/bottom rows) + title
+ * THINKING + Auto row + level row (5 levels inline + gold anchor
+ * `▸ level ◂` absolutely overlaid) + level visualization bar
+ * `▁▂▃▄▅▆▇█` (8 cells, current level segment in gold) + key hint row.
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -53,27 +59,28 @@ import type {
   ThinkingDesignProps,
 } from "./_contract.js";
 
-/** 面板入场 fade 时长（inOutQuad）。 */
+/** Panel entry fade duration (inOutQuad). */
 const FADE_MS = 150;
-/** Enter 确认金锚点滑动时长（outQuad）。 */
+/** Gold anchor slide duration on Enter confirm (outQuad). */
 const SLIDE_MS = 200;
-/** Auto 圆点开/关颜色渐变时长（inOutSine）。 */
+/** Auto dot on/off color transition duration (inOutSine). */
 const DOT_MS = 150;
 
-/** 8 格渐高 unicode block（低→高）。 */
+/** 8-cell ascending unicode blocks (low → high). */
 const BLOCKS: ReadonlyArray<string> = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
-/** 档位名展示标签（把 `xhigh` 拆成可读的 `x-high`）。 */
+/** Level display labels (renders `xhigh` readably as `x-high`). */
 const LEVEL_LABELS: ReadonlyArray<string> = EFFORT_LEVELS.map((level) =>
   level === "xhigh" ? "x-high" : level
 );
 
-/** 键位提示行（dot 分隔）。 */
+/** Key hint line (dot-separated). */
 const HINT: string = "←/→ 档位 · Tab/Space Auto · Enter 确认 · Esc 取消";
 
 /**
- * 当前档的可视化条金色段（4 块滑窗；5 档 × 4 块 ≈ 8 格）。
- * from/to 为 0-based 闭区间，且 to 钳制到 7（即 BLOCKS.length-1）。
+ * Gold segment of the current level's visualization bar (4-block sliding
+ * window; 5 levels × 4 blocks ≈ 8 cells).
+ * from/to are 0-based inclusive, with to clamped to 7 (BLOCKS.length-1).
  */
 function goldSegment(currentIndex: number): {
   readonly from: number;
@@ -86,11 +93,12 @@ function goldSegment(currentIndex: number): {
 }
 
 /**
- * 档位锚点绝对定位 X（相对档位行 content-start）。
- * 行结构：`"  " + labels.join("  ") + "  "`（两端 2 格 phantom margin），
- * 把 `▸ name ◂` 锚点恰好落在 `sep + name + sep` 的三段：前缀 2 格占左
- * sep、`name` 占中、后缀 2 格占右 sep。首尾锚的 X = sum_{j<k}(len(j)+2)；
- * 5 档分别落在 0 / 5 / 13 / 19 / 27（见 LEVEL_LABELS 长度）。
+ * Absolute X of the level anchor (relative to level-row content-start).
+ * Row structure: `"  " + labels.join("  ") + "  "` (2-cell phantom margins
+ * at both ends), so the `▸ name ◂` anchor spans exactly `sep + name + sep`:
+ * the 2-cell prefix covers the left sep, `name` the center, the 2-cell
+ * suffix the right sep. First/last anchor X = sum_{j<k}(len(j)+2); the 5
+ * levels land at 0 / 5 / 13 / 19 / 27 (see LEVEL_LABELS lengths).
  */
 function anchorX(currentIndex: number): number {
   const clamped = Math.max(0, Math.min(EFFORT_LEVELS.length - 1, currentIndex));
@@ -101,13 +109,13 @@ function anchorX(currentIndex: number): number {
   return x;
 }
 
-/** 面板主组件：hooks（3 条懒创建 timeline + mount 注册）+ 渲染。 */
+/** Main panel component: hooks (3 lazy timelines + mount registration) + render. */
 function Panel(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model, cols } = props;
   const { autoOn, currentIndex, focusIndex, open } = model;
 
-  // refs —— 见文件头说明，translateX 仅由 imperative 赋值 + timeline 驱动。
+  // refs — see file header: translateX driven only by imperative assignment + timeline.
   const panelRef = useRef<BoxRenderable | null>(null);
   const anchorRef = useRef<BoxRenderable | null>(null);
   const fadeTlRef = useRef<Timeline | null>(null);
@@ -120,11 +128,11 @@ function Panel(props: ThinkingDesignProps): ReactNode {
   if (dotTlRef.current === null)
     dotTlRef.current = new Timeline({ autoplay: false });
 
-  // Auto 圆点叠印进度 [0,1]：● 在上（opacity = dotOn），○ 在下常显。
+  // Auto dot blend progress [0,1]: ● on top (opacity = dotOn), ○ below always visible.
   const [dotOn, setDotOn] = useState<number>(autoOn ? 1 : 0);
 
-  // mount/unmount：注册三条 timeline、定位初始锚点、推入场 fade；
-  // cleanup 全部反注册（cancel-on-close）。
+  // mount/unmount: register three timelines, place initial anchor, kick
+  // entry fade; cleanup unregisters everything (cancel-on-close).
   useEffect(() => {
     const fade = fadeTlRef.current;
     const slide = slideTlRef.current;
@@ -160,11 +168,11 @@ function Panel(props: ThinkingDesignProps): ReactNode {
         engine.unregister(dot);
       }
     };
-    // 仅 mount/unmount；model 不进 deps。
+    // mount/unmount only; model stays out of deps.
   }, []);
 
-  // Enter 确认金锚点滑动：currentIndex 变化 → 200ms outQuad 滑到 anchorX。
-  // 不动 focusIndex（焦点游标是白色 BOLD，由下方 spans 直接渲染）。
+  // Gold anchor slide on Enter confirm: currentIndex change → 200ms outQuad to anchorX.
+  // focusIndex untouched (focus cursor is white BOLD, rendered directly by spans below).
   const prevIndexRef = useRef<number>(model.currentIndex);
   useEffect(() => {
     const anchor = anchorRef.current;
@@ -181,7 +189,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
     tl.play();
   }, [model.currentIndex]);
 
-  // Auto 圆点颜色渐变：autoOn 切换 → 150ms inOutSine，dotOn 0↔1。
+  // Auto dot color transition: autoOn toggle → 150ms inOutSine, dotOn 0↔1.
   const prevAutoRef = useRef<boolean>(model.autoOn);
   useEffect(() => {
     const tl = dotTlRef.current;
@@ -218,12 +226,12 @@ function Panel(props: ThinkingDesignProps): ReactNode {
       opacity={0}
       width={Math.max(1, cols)}
     >
-      {/* 标题行 */}
+      {/* title row */}
       <text fg={pal.running} attributes={TextAttributes.BOLD}>
         THINKING
       </text>
 
-      {/* Auto 行：●/○ 叠印 + 状态说明 */}
+      {/* Auto row: ●/○ blend + state note */}
       <box flexDirection="row">
         <text>
           <span>{"Auto  "}</span>
@@ -241,8 +249,9 @@ function Panel(props: ThinkingDesignProps): ReactNode {
         </text>
       </box>
 
-      {/* 档位行：5 档横排（首尾 phantom margin 让锚点首尾档不超界） +
-         金锚点绝对定位叠加（translateX 由 timeline 驱动） */}
+      {/* level row: 5 levels inline (phantom margins at both ends keep the
+         first/last anchor in bounds) + gold anchor absolutely overlaid
+         (translateX driven by timeline) */}
       <box width="100%" flexDirection="row">
         <text wrapMode="none">
           {LEVEL_LABELS.map((label, i) => {
@@ -283,7 +292,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
         </box>
       )}
 
-      {/* 档位可视化条 8 格 */}
+      {/* level visualization bar, 8 cells */}
       <text wrapMode="none">
         {BLOCKS.map((block, i) => {
           const lit = !autoOn && i >= seg.from && i <= seg.to;
@@ -294,7 +303,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
           );
         })}
       </text>
-      {/* 键位提示（独立行，避免与档位条挤爆窄终端） */}
+      {/* key hints (own row, so they don't crowd the level bar in narrow terminals) */}
       <text>
         <span fg={pal.dim}>{HINT}</span>
       </text>
@@ -302,7 +311,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
   );
 }
 
-/** 键路由：本设计不需定制键位（demo 默认覆盖 ←/→/Tab/Space/Enter/Esc）。 */
+/** Key routing: this design needs no custom keys (demo defaults cover ←/→/Tab/Space/Enter/Esc). */
 function reduceKey(_event: KeyEvent, _model: PickerModel): PickerEvent | null {
   return null;
 }

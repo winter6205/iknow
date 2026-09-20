@@ -1,39 +1,43 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-3-crt.tsx
+ * Thinking panel, variant 3: retro terminal / CRT phosphor (demo gallery
+ * candidate).
  *
- * 思考面板 · 5 版设计之 3：复古终端 / CRT 磷光风（demo gallery 候选）。
+ * Design highlights:
+ *  - Primary `pal.add` (green #2ea043) as phosphor; the current level adds
+ *    `pal.bgRunning` / `pal.running` emphasis.
+ *  - Single border (thin line, retro terminal feel) in `pal.add`; the
+ *    whole panel fg slowly oscillates between `pal.add` ↔ `pal.bgRunning`
+ *    (1500ms alternate inOutSine) to simulate CRT noise breathing — done
+ *    via timeline + numeric interpolation (`mixHex`), not fg string
+ *    stepping.
+ *  - Title `[ THINKING ]` in brackets, revealed typewriter-style
+ *    left-to-right (60ms/char) through a `useTimeline` + `call` delay
+ *    chain; useTimeline auto `pause + unregister` on unmount
+ *    (cancel-on-close).
+ *  - 5-level `#` density ramp (`#` … `#####`, low → high); the current
+ *    level's `#` carries `TextAttributes.INVERSE` to mimic "cursor
+ *    selection".
+ *  - Auto dot `●` (on) / `○` (off): when on, the char gets
+ *    `TextAttributes.BLINK` toggled by an 80ms alternate linear timeline
+ *    (on terminals without BLINK support the fg still pulses; on
+ *    supporting terminals the native blink rate wins — both paths run in
+ *    parallel; see trade-off notes below).
+ *  - Entry: outer `box` `marginTop -3 → 0` slide-down, 280ms outQuad, no
+ *    bounce.
+ *  - Key hint row: `*` separated (terminal style).
  *
- * 设计要点：
- *  - 主色 `pal.add`（绿 #2ea043）模拟磷光；当前档强调叠加 `pal.bgRunning` / `pal.running`。
- *  - single 边框（细单线，复古终端感），边框色 `pal.add`；
- *    整面板 fg 在 `pal.add` ↔ `pal.bgRunning` 间缓慢微调（1500ms alternate
- *    inOutSine），模拟 CRT 噪点呼吸——本实现走 timeline + 数值插值
- *    （`mixHex`）而非 fg 字符串比较。
- *  - 标题 `[ THINKING ]` 中括号包裹，字符从左到右逐字打字机显现
- *    （60ms / 字符），由 `useTimeline` + `call` 延迟链驱动；
- *    useTimeline 在 unmount 时自动 `pause + unregister`，实现
- *    cancel-on-close。
- *  - 5 档 `#` 密度阶梯（`#` / `##` / `###` / `####` / `#####`，低→高），
- *    当前档 `#` 挂 `TextAttributes.INVERSE` 模拟"光标选中"。
- *  - Auto 圆点 `●`（开）/ `○`（关）：开时整字符用 `TextAttributes.BLINK`，
- *    通过 80ms alternate linear 时间轴持续 toggle（实测在不支持
- *    BLINK 的终端里至少能拿到 fg 闪烁的视觉反馈；支持的终端由终端
- *    自身按原生速率闪烁——两路并行，下文"闪烁 vs BLINK"取舍详述）。
- *  - 入场：外层 `box` `marginTop -3 → 0` 滑落 280ms outQuad，无弹跳。
- *  - 键位提示行：`*` 分隔（终端风格）。
- *
- * 取舍笔记（闪烁 vs BLINK）：
- *  - "CRT 噪点"与"Auto 圆点"是两种效果：
- *      · CRT 噪点 = 颜色微调（fg 数值插值），timeline 驱动 →
- *        所有终端都看得到，因为 fg 是必渲染属性；
- *      · Auto 圆点 = 原生终端 BLINK 属性 + timeline 持续 toggle →
- *        支持 BLINK 的终端由终端自身闪烁（视觉最准），不支持
- *        BLINK 的终端（多数现代 GUI 终端默认关）timeline 仍按
- *        80ms alternate 翻 `TextAttributes.BLINK` 位——视觉降级为
- *        "不可见"，但 fg 仍为 `pal.add`，对没看到闪烁的用户不破坏
- *        可读性。如果后续要兜底，可以在 BLINK 关闭的检测下换成
- *        fg 颜色插值——本设计先保留原生路径。
+ * Trade-off notes (blink vs BLINK attribute):
+ *  - "CRT noise" and "Auto dot" are two different effects:
+ *      · CRT noise = fg numeric interpolation, timeline-driven → visible
+ *        on all terminals, since fg always renders;
+ *      · Auto dot = native BLINK attribute + continuous timeline toggle →
+ *        BLINK-capable terminals blink natively (most accurate);
+ *        terminals with BLINK off (most modern GUI terminals) still get
+ *        the 80ms attribute flip — visually degraded to invisible, but fg
+ *        stays `pal.add` so readability is unaffected. If a fallback is
+ *        ever needed, swap to fg interpolation when BLINK is detected
+ *        off; this design keeps the native path for now.
  */
 import { useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
@@ -45,16 +49,16 @@ import {
   type ThinkingDesignProps,
 } from "./_contract.js";
 
-/** 打字机标题（中括号包裹，等宽终端风）。 */
+/** Typewriter title (bracketed, monospace terminal feel). */
 const CRT_TITLE = "[ THINKING ]";
 const TYPE_STEP_MS = 60;
 
-/** 5 档 `#` 密度阶梯（低→高），由档位数派生避免与 EFFORT_LEVELS 漂移。 */
+/** 5-level `#` density ramp (low → high), derived from level count so it can't drift from EFFORT_LEVELS. */
 const LEVEL_HASHES: ReadonlyArray<string> = EFFORT_LEVELS.map((_, i) =>
   "#".repeat(i + 1)
 );
 
-/** 键位提示行（`*` 分隔，终端风格）。 */
+/** Key hint tokens (`*` separated, terminal style). */
 const CRT_HINT_TOKENS: ReadonlyArray<string> = [
   " tab/space toggle auto ",
   " arrows change level ",
@@ -62,29 +66,29 @@ const CRT_HINT_TOKENS: ReadonlyArray<string> = [
   " esc cancel ",
 ];
 
-/** "足够长"timeline duration（1h），绕开 `loop: true` 的 resetItems 重捕获初值陷阱：
- *  - 用 item 层的 `loop: true, alternate: true` 做无限循环；
- *  - timeline 层 duration 给够大并保持非 loop，update 不会触发
- *    `resetItems`，item 的 initialValues 不会被重新捕获（动画值不会
- *    卡在循环末态）。 */
+/** "Long enough" timeline duration (1h), dodging the `loop: true` resetItems re-capture trap:
+ *  - infinite looping lives on the item (`loop: true, alternate: true`);
+ *  - the timeline-level duration is large and non-looping, so update
+ *    never triggers `resetItems` and item initialValues are never
+ *    re-captured (animation value can't get stuck at the loop end state). */
 const INFINITE_MS = 3_600_000;
 
-/** 面板入场滑动时长（outQuad，无弹跳）。 */
+/** Panel entry slide duration (outQuad, no bounce). */
 const ENTER_MS = 280;
 
-/** CRT 噪点单程时长（alternate → 一上一下 = 2×该值）。 */
+/** CRT noise one-way duration (alternate → full up-down cycle = 2× this). */
 const CRT_FLICKER_MS = 1500;
 
-/** Auto 圆点 BLINK toggle 单程时长（alternate → 完整闪烁周期 2×该值）。 */
+/** Auto dot BLINK toggle one-way duration (alternate → full blink period = 2× this). */
 const DOT_BLINK_MS = 80;
 
-/** 6 位 hex (`#rrggbb`) → 整数 RGB（忽略 alpha）。 */
+/** 6-digit hex (`#rrggbb`) → integer RGB (alpha ignored). */
 function parseHex(hex: string): { r: number; g: number; b: number } {
   const v = parseInt(hex.slice(1), 16);
   return { r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff };
 }
 
-/** 线性插值两支 `pal.*` hex 色，t∈[0,1]；返回值始终 6 位 `#rrggbb`。 */
+/** Linear interpolation between two `pal.*` hex colors, t∈[0,1]; always returns a 6-digit `#rrggbb`. */
 function mixHex(a: string, b: string, t: number): string {
   const k = Math.max(0, Math.min(1, t));
   const pa = parseHex(a);
@@ -97,9 +101,10 @@ function mixHex(a: string, b: string, t: number): string {
 }
 
 /**
- * Auto 开时挂载的 BLINK 圆点。Auto 关时整个组件不渲染——利用
- * React unmount + `useTimeline` 的 effect cleanup 实现 cancel-on-close：
- * timeline 自动 `pause + engine.unregister`，不会泄漏 driver tick。
+ * BLINK dot mounted only while Auto is on. When Auto is off the whole
+ * component unmounts — React unmount + `useTimeline` effect cleanup gives
+ * cancel-on-close: the timeline is auto `pause + engine.unregister`ed, so
+ * no driver tick leaks.
  */
 function CrtBlinkDot(): ReactNode {
   const pal = tuiPalette;
@@ -128,14 +133,14 @@ function CrtBlinkDot(): ReactNode {
   );
 }
 
-/** 复古终端 / CRT 磷光风主面板。组件内部用 hooks（timeline 驱动
- *  入场、打字机、CRT 噪点），再由 `design3.render` 装配导出。 */
+/** Retro terminal / CRT phosphor main panel. Hooks inside drive entry,
+ *  typewriter and CRT noise; assembled and exported by `design3.render`. */
 function CrtPanel(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model, cols } = props;
   const { autoOn, currentIndex } = model;
 
-  // 入场：marginTop -3 → 0 滑落 280ms outQuad。
+  // Entry: marginTop -3 → 0 slide-down, 280ms outQuad.
   const enterTl = useTimeline({ duration: ENTER_MS });
   const [enterY, setEnterY] = useState(-3);
   useEffect(() => {
@@ -150,7 +155,7 @@ function CrtPanel(props: ThinkingDesignProps): ReactNode {
     );
   }, []);
 
-  // 打字机：每 TYPE_STEP_MS 追加一个字符，timeline call 延迟链。
+  // Typewriter: append one char per TYPE_STEP_MS via timeline call delay chain.
   const typeTl = useTimeline({
     duration: CRT_TITLE.length * TYPE_STEP_MS + 120,
   });
@@ -161,8 +166,8 @@ function CrtPanel(props: ThinkingDesignProps): ReactNode {
     }
   }, []);
 
-  // CRT 噪点：整面板 fg 在 pal.add ↔ pal.bgRunning 间微调。
-  // 量化到 1/32 阶以减少 onUpdate 每帧 setState 的重渲染频率。
+  // CRT noise: panel-wide fg oscillates pal.add ↔ pal.bgRunning.
+  // Quantized to 1/32 steps to cut per-frame setState re-render frequency.
   const flickerTl = useTimeline({ duration: INFINITE_MS });
   const [flicker, setFlicker] = useState(0);
   useEffect(() => {

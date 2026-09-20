@@ -1,41 +1,47 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-7-fill-slot.tsx
+ * Thinking-effort panel — Design 7: Fill Slot.
  *
- * Thinking-effort 思考面板 — Design 7：填充滑杆（Fill Slot）。
+ * Visual style elements:
+ *  1. Whole bar `▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░`: strong contrast between the
+ *     bright (traveled) and dark (untraveled) halves; bright char count is
+ *     computed dynamically as `Math.round((currentIndex + 1) / 5 *
+ *     totalChars)`, so the 5 levels map to 5 equidistant fill points.
+ *  2. Top Auto dot `◐` / `◑` glass half-fill: auto on = ◐ bright
+ *     (pal.running), off = ◑ dark (pal.dim); on toggle dotColor mix
+ *     0↔1 in 200ms outExpo.
+ *  3. Slider is a `◂──▸` bracket at the end of the filled part (not a ●
+ *     dot): it tracks the fill tail smoothly, sliding 180ms outQuad on
+ *     switch, while the bright `▓` region extends/retracts **continuously**
+ *     — fillProgress interpolates via `target.progress`, bright char count
+ *     recomputed each frame with `Math.round(progress)`, avoiding
+ *     discrete 5/10/14/19/24 jumps.
+ *  4. Rounded border (`borderStyle="rounded"`) + borderColor cycling over
+ *     4 color tokens `logoInk → running → logoGold → running` (8s linear,
+ *     adjacent frames RGB-interpolated) for a glass flow-light border.
+ *  5. Entry: fill charges 0 → currentIndex's filledTarget in 400ms
+ *     outExpo (battery-charging feel); slider translateX is pushed from 0
+ *     to filledTarget in sync.
+ *  6. Auto coupling: on auto, fillColorMix→1 (bright region turns gray =
+ *     pal.dim) and slider opacity→0 fades out; off auto restores from the
+ *     current position (fillColorMix→0, slider opacity→1 fades in).
  *
- * 视觉风格要素（与任务描述一一对齐）：
- *  1. 整条进度条 `▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░` 亮（已走）vs 暗（未走）两段
- *     对比度强；亮区字符数按 `Math.round((currentIndex + 1) / 5 * totalChars)`
- *     动态计算（验收口径公式），5 档对应 5 个等距填充点。
- *  2. 顶部 Auto 圆点 `◐` / `◑` 玻璃半填充：开 auto = ◐ 亮（pal.running），
- *     关 auto = ◑ 暗（pal.dim），切 auto 时 dotColor mix 0↔1 200ms outExpo。
- *  3. 滑块为 `◂──▸` 框选已填充部分末端（不是 ● 圆点）：跟随填充末端
- *     平滑移动；切档 180ms outQuad 平滑滑，亮 `▓` 区随滑块伸缩**连续填充**
- *     ——fillProgress 通过 `target.progress` 连续插值，亮字符数按
- *     `Math.round(progress)` 逐帧重算，避免 5/10/14/19/24 离散跳变。
- *  4. 圆角边框 `borderStyle="rounded"` + borderColor 在 4 帧色 token
- *     `logoInk → running → logoGold → running` 间循环（8s linear，相邻
- *     帧 RGB 插值），制造玻璃流光边框。
- *  5. 入场：填充从 0 充到 currentIndex 的 filledTarget 400ms outExpo，
- *     类似电池充电动画；滑块 translateX 同步从 0 推到 filledTarget。
- *  6. Auto 联动：开 auto 时 fillColorMix→1（亮区转灰 = pal.dim），滑块
- *     opacity→0 淡出；关 auto 时从当前位置恢复（fillColorMix→0 恢复亮，
- *     滑块 opacity→1 淡入）。
+ * Color discipline: every color comes 100% from `tuiPalette` (theme.ts),
+ * no new color constants; the OpenTUI renderer degrades hex strings by
+ * terminal capability, the app layer never writes ANSI.
  *
- * 颜色纪律：所有颜色 100% 来自 `tuiPalette`（theme.ts），未新增任何颜色
- * 常量；hex 字符串由 OpenTUI 渲染器按终端能力降级，应用层不写 ANSI。
- *
- * 动效挂钩（结合 design-1 / design-5 的成熟模式）：
- *  - 填充进度 timeline + Auto 联动 timeline：采用 design-1 的 `new Timeline`
- *    + `engine.register` / `unregister` 模式，按 mount-only 注册、按 prop
- *    变化在 effect 内 `resetItems + add + play` 触发，避免 useTimeline 每次
- *    render 返回新实例的引用漂移陷阱。
- *  - 边框流光 timeline：采用 design-5 的 `useTimeline({ loop: true })` +
- *    `useRef` 首 render 锁定模式，item 不 loop 而由 Timeline.loop 在周期末
- *    resetItems 前由 onComplete 把 phase 归零，下周期重新从 0 插值。
- *  - 滑块 translateX 由 onUpdate 内同步赋值给 `sliderRef.current.translateX`
- *    （绝对 box，OOG React reconciler 不干预），确保与 fillProgress 完全同步。
+ * Animation wiring (combining the mature design-1 / design-5 patterns):
+ *  - Fill-progress timeline + auto-coupling timeline use design-1's
+ *    `new Timeline` + `engine.register` / `unregister` model: registered
+ *    mount-only, and on prop changes the effect runs `resetItems + add +
+ *    play`, avoiding useTimeline's per-render new-instance reference drift.
+ *  - Border flow timeline uses design-5's `useTimeline({ loop: true })` +
+ *    `useRef` first-render lock: the item itself doesn't loop; instead
+ *    onComplete zeroes the phase before Timeline.loop's end-of-cycle
+ *    resetItems, so the next cycle re-interpolates from 0.
+ *  - Slider translateX is assigned inside onUpdate to
+ *    `sliderRef.current.translateX` (absolute box, outside React
+ *    reconciler control), keeping it exactly in sync with fillProgress.
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -44,17 +50,17 @@ import { useTimeline } from "@opentui/react";
 import { tuiPalette } from "../theme.js";
 import type { ThinkingDesign, ThinkingDesignProps } from "./_contract.js";
 
-// ── 时长 / 周期常量 ────────────────────────────────────────────────────
-/** 边框 4 相位全角周期（与 design-5 / 8s 对齐）。 */
+// ── duration / cycle constants ─────────────────────────────────────────
+/** Border 4-phase full cycle (aligned with design-5's 8s). */
 const BORDER_CYCLE_MS = 8000;
-/** 入场充电动效时长 + outExpo。 */
+/** Entry charge animation duration + outExpo. */
 const ENTRY_MS = 400;
-/** 切档滑块平滑动效时长 + outQuad。 */
+/** Switch slider slide duration + outQuad. */
 const SLIDE_MS = 180;
-/** Auto 联动 mix 渐变时长 + outExpo。 */
+/** Auto-coupling mix transition duration + outExpo. */
 const AUTO_MS = 200;
 
-// ── 边框流光 4 相位 token（按周期轮换，相邻相位 RGB 插值） ──────────
+// ── border flow 4-phase tokens (cycled, adjacent phases RGB-interpolated) ──
 const FLOW_STOPS: ReadonlyArray<string> = [
   tuiPalette.logoInk,
   tuiPalette.running,
@@ -62,7 +68,7 @@ const FLOW_STOPS: ReadonlyArray<string> = [
   tuiPalette.running,
 ];
 
-// ── 颜色工具（与 design-5 同款，独立 inline） ────────────────────────
+// ── color utils (same as design-5, kept inline on purpose) ─────────────
 interface Rgb {
   readonly r: number;
   readonly g: number;
@@ -98,7 +104,7 @@ function mixHex(a: string, b: string, t: number): string {
   });
 }
 
-/** 由 phase（实数，0..FLOW_STOPS.length）查表 + 与下一档 mix，输出 borderColor。 */
+/** Look up by phase (real number, 0..FLOW_STOPS.length) and mix toward the next stop → borderColor. */
 function flowBorderColor(phase: number): string {
   const phases = FLOW_STOPS.length;
   const idx = Math.floor(phase);
@@ -109,26 +115,29 @@ function flowBorderColor(phase: number): string {
   return mixHex(a, b, f);
 }
 
-// ── 渲染组件 ──────────────────────────────────────────────────────────
+// ── render component ──────────────────────────────────────────────────
 function FillSlotRender(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model, cols } = props;
   const { autoOn, currentIndex } = model;
 
-  // 进度条总字符数（按 panel cols 自适应，留出余量给滑块溢出 + 边距）。
-  // 公式边界：cols < 24 → 12 字符下界；cols >= 36 → 24 字符上界。
+  // Total bar chars (adapts to panel cols, leaving headroom for slider
+  // overflow + margins). Bounds: cols < 24 → 12 chars floor; cols >= 36 →
+  // 24 chars ceiling.
   const totalChars = Math.max(12, Math.min(24, cols - 12));
 
-  // 5 档对应填充字符数（任务验收口径公式）。
+  // Filled char count per level (5 levels).
   const filledTarget = (idx: number): number =>
     Math.round(((idx + 1) / 5) * totalChars);
 
   // ── Refs ───────────────────────────────────────────────────────────
-  // 填充进度：连续值，由 timeline 原地改写。亮区字符数 / 滑块 translateX
-  // 都依赖它，所以一处真相驱动两处渲染。
+  // Fill progress: continuous value, rewritten in place by the timeline.
+  // Bright char count and slider translateX both depend on it — one
+  // source of truth drives two render outputs.
   const fillProgressRef = useRef<{ progress: number }>({ progress: 0 });
-  // Auto 联动 mix：fillColorMix（亮区运行色→灰）/ dotColorMix（暗→运行）/
-  // sliderOpacity（1→0 淡出）。三个量同步 tween。
+  // Auto-coupling mixes: fillColorMix (bright run-color → gray) /
+  // dotColorMix (dark → run) / sliderOpacity (1→0 fade-out). All three
+  // tween in lockstep.
   const autoMixRef = useRef<{
     fillColorMix: number;
     dotColorMix: number;
@@ -138,9 +147,9 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     dotColorMix: autoOn ? 1 : 0,
     sliderOpacity: autoOn ? 0 : 1,
   });
-  // 滑块 box ref（imperative translateX 驱动）。
+  // Slider box ref (imperative translateX drive).
   const sliderRef = useRef<BoxRenderable | null>(null);
-  // 索引 / Auto 切换检测前值（避免重复触发 tween）。
+  // Previous index / auto values for change detection (avoid re-triggering tweens).
   const prevIndexRef = useRef<number>(currentIndex);
   const prevAutoRef = useRef<boolean>(autoOn);
 
@@ -150,22 +159,22 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
   const [, forceAuto] = useState(0);
 
   // ── Timelines ──────────────────────────────────────────────────────
-  // 填充进度 timeline：懒创建一次（每次 render 不会重置），用
-  // `engine.register` 手动挂入 timeline engine（design-1 同款）。
+  // Fill-progress timeline: lazy-created once (never reset per render),
+  // manually attached via `engine.register` (design-1 style).
   const fillTlRef = useRef<Timeline | null>(null);
   if (fillTlRef.current === null) {
     fillTlRef.current = new Timeline({ autoplay: false });
   }
   const fillTl = fillTlRef.current;
 
-  // Auto 联动 timeline：同上。
+  // Auto-coupling timeline: same as above.
   const autoTlRef = useRef<Timeline | null>(null);
   if (autoTlRef.current === null) {
     autoTlRef.current = new Timeline({ autoplay: false });
   }
   const autoTl = autoTlRef.current;
 
-  // 边框流光 timeline：useTimeline + useRef 首 render 锁定（design-5 同款）。
+  // Border flow timeline: useTimeline + first-render useRef lock (design-5 style).
   const initialBorderTl = useTimeline({
     duration: BORDER_CYCLE_MS,
     loop: true,
@@ -176,7 +185,7 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
   }
   const borderTl = borderTlRef.current;
 
-  // mount-only：注册 / 反注册 fillTl + autoTl（cancel-on-close）。
+  // mount-only: register / unregister fillTl + autoTl (cancel-on-close).
   useEffect(() => {
     engine.register(fillTl);
     engine.register(autoTl);
@@ -189,9 +198,10 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 边框流光相位循环 ────────────────────────────────────────────────
-  // 与 design-5 同：item 不 loop，靠 Timeline.loop 在周期末 resetItems 前
-  // 由 onComplete 归零 target.phase，下周期重新从 0 插值（无 capture 漂移）。
+  // ── border flow phase cycle ─────────────────────────────────────────
+  // Same as design-5: the item doesn't loop; onComplete zeroes
+  // target.phase before Timeline.loop's end-of-cycle resetItems, so the
+  // next cycle re-interpolates from 0 (no capture drift).
   useEffect(() => {
     const target = { phase: 0 };
     borderTl.add(target, {
@@ -208,10 +218,10 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     });
   }, [borderTl]);
 
-  // ── 入场（mount-only）：填充 0 → filledTarget，400ms outExpo 电池充电 ──
-  // 滑块 translateX 同步由 onUpdate 内推 box.renderable，与 fillProgress
-  // 完美同步（on mutating 后立刻调 forceFill 触发 re-render → render 读
-  // progress → 重新计算 filled / sliderX）。
+  // ── entry (mount-only): fill 0 → filledTarget, 400ms outExpo battery charge ──
+  // Slider translateX stays in sync via the forceFill → re-render chain
+  // (after onUpdate mutates, forceFill triggers render → render reads
+  // progress → recomputes filled / sliderX).
   useEffect(() => {
     const target = fillProgressRef.current;
     fillTl.resetItems();
@@ -227,10 +237,11 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 切档：currentIndex 变化 → 填充进度 tween 到新 filledTarget ─────
-  // 180ms outQuad。tween 期间 `target.progress` 连续插值，亮 `▓` 字符数
-  // 按 Math.round(progress) 逐帧重算 → 亮区**连续伸缩**（不是 5/10/14/19/24
-  // 离散跳变）。滑块 translateX 同步。
+  // ── switch: currentIndex change → tween fill progress to new filledTarget ──
+  // 180ms outQuad. During the tween `target.progress` interpolates
+  // continuously and the bright `▓` count is recomputed per frame with
+  // Math.round(progress) → the bright region extends/retracts
+  // **continuously** (no discrete 5/10/14/19/24 jumps). Slider translateX in sync.
   useEffect(() => {
     if (prevIndexRef.current === currentIndex) return;
     prevIndexRef.current = currentIndex;
@@ -247,11 +258,12 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     fillTl.play();
   }, [currentIndex, fillTl]);
 
-  // ── Auto 联动：autoOn 变化 → fillColorMix / dotColorMix / sliderOpacity
-  // 同步 tween 200ms outExpo。auto on：亮区转灰（pal.running → pal.dim）
-  // + 滑块 opacity → 0 淡出；auto off：从当前位置恢复（mix 复位 + 滑块
-  // opacity 淡入）。三个量在同一 tween item 内同步，不分 timeline，避免
-  // 多 timeline 推进节奏不齐的偏差。
+  // ── auto coupling: autoOn change → fillColorMix / dotColorMix /
+  // sliderOpacity tween together, 200ms outExpo. Auto on: bright region
+  // turns gray (pal.running → pal.dim) + slider opacity → 0; auto off:
+  // restore from current position (mix reset + slider fades in). All three
+  // values live in one tween item, not separate timelines, so their
+  // pacing can never drift apart.
   useEffect(() => {
     if (prevAutoRef.current === autoOn) return;
     prevAutoRef.current = autoOn;
@@ -270,12 +282,13 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     autoTl.play();
   }, [autoOn, autoTl]);
 
-  // ── 派生值（ref 被 timeline 原地改写，force setState 后读到最新） ──
+  // ── derived values (refs rewritten in place by timelines; latest after forced setState) ──
   const progress = fillProgressRef.current.progress;
   const filled = Math.max(0, Math.min(totalChars, Math.round(progress)));
   const unfilled = totalChars - filled;
-  // 滑块 translateX = 填充末端位置（= filled 字符数）。上界钳制到
-  // cols - 6 防止极窄终端下 4 字符滑块溢出 panel 边界。
+  // Slider translateX = fill tail position (= filled char count). Clamped
+  // to cols - 6 so the 4-char slider can't overflow the panel on very
+  // narrow terminals.
   const sliderX = Math.max(0, Math.min(filled, cols - 6));
   const fillColor = mixHex(
     pal.running,
@@ -289,9 +302,9 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
     ? "adaptive (server picks effort)"
     : "concrete effort";
 
-  // ── 滑块 translateX 跟随进度（每次 re-render 后同步推 box.renderable）──
-  // useEffect 无 deps，每次 render 都同步一次；onUpdate 的 forceFill 触发的
-  // re-render 也会跑到这里，确保滑块位置 = 填充末端。
+  // ── slider translateX follows progress (pushed to box.renderable after every re-render) ──
+  // useEffect with no deps syncs once per render; the forceFill re-renders
+  // from onUpdate also pass through here, keeping slider = fill tail.
   useEffect(() => {
     if (sliderRef.current) {
       sliderRef.current.translateX = sliderX;
@@ -307,7 +320,7 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
       paddingY={0}
       width={Math.max(1, cols)}
     >
-      {/* 标题 ◆─ Thinking（装饰前缀金、内容文白） */}
+      {/* title ◆─ Thinking (gold decorative prefix, plain content) */}
       <text>
         <span fg={pal.running}>{"◆─ "}</span>
         <span fg={pal.text} attributes={TextAttributes.BOLD}>
@@ -315,22 +328,22 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
         </span>
       </text>
 
-      {/* Auto 行：◐/◑ + AUTO + 描述（dot color tweens dim ↔ running） */}
+      {/* Auto row: ◐/◑ + AUTO + description (dot color tweens dim ↔ running) */}
       <text>
         <span fg={dotColor}>{`${autoGlyph}  `}</span>
         <span fg={pal.dim}>AUTO</span>
         <span fg={pal.dim}>{`  ·  ${autoDesc}`}</span>
       </text>
 
-      {/* 进度条：亮 ▓ + 暗 ░ 两段，对比度强。亮区字符数 = filled（动态算） */}
+      {/* progress bar: bright ▓ + dark ░ halves, strong contrast; bright count = filled (computed) */}
       <text wrapMode="none">
         <span fg={fillColor}>{"▓".repeat(filled)}</span>
         <span fg={pal.dim}>{"░".repeat(unfilled)}</span>
       </text>
 
-      {/* 滑块 ◂──▸ 框选已填充部分末端：absolute 定位的 box，translateX
-          跟随 fillProgress（即跟随填充末端移动）。auto on 时 opacity→0
-          淡出；auto off 时 opacity→1 淡入。 */}
+      {/* slider ◂──▸ bracketing the fill tail: absolutely positioned box,
+          translateX follows fillProgress (i.e. the fill tail). opacity→0
+          fades out when auto on; opacity→1 fades back in when auto off. */}
       <box width="100%" flexDirection="row">
         <box
           ref={sliderRef}
@@ -348,7 +361,7 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
         </box>
       </box>
 
-      {/* 键位提示（auto on 时省略 [← →]）。 */}
+      {/* key hints ([← →] omitted when auto on) */}
       <text fg={pal.dim}>
         {autoOn
           ? "[Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消"
@@ -358,7 +371,7 @@ function FillSlotRender(props: ThinkingDesignProps): ReactNode {
   );
 }
 
-// ── 导出 ──────────────────────────────────────────────────────────────
+// ── export ────────────────────────────────────────────────────────────
 export const design7: ThinkingDesign = {
   meta: {
     id: "design-7-fill-slot",

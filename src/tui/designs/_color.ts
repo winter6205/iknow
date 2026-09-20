@@ -1,23 +1,23 @@
 /**
- * src/tui/designs/_color.ts
+ * Shared color math for design-25-family panels (thinking-picker /
+ * memory-picker / compact-progress).
  *
- * design-25 系面板共享的颜色数学（thinking-picker / memory-picker /
- * compact-progress）。
+ * mixHex / gradAt / triangleWindow / flowBorderColor were inlined in
+ * thinking-picker.tsx, memory-picker.tsx and private copies in each
+ * design-*; all copies had to stay byte-identical or panel colors drifted.
+ * This file is the single implementation. Design gallery files keep their
+ * own inline copies by convention: each design is self-contained and
+ * independently previewable.
  *
- * 抽出来的原因：`mixHex` / `gradAt` / `triangleWindow` / `flowBorderColor`
- * 曾各自内联在 thinking-picker.tsx 与 memory-picker.tsx（外加各 design-* 的
- * 私有副本），三处必须逐字一致——任何一处漂移都会让面板换色。收敛到本文件
- * 后只有一份实现（design gallery 文件按该目录合同保持各自 inline 副本不
- * 动：每个 design 自包含、可独立预览）。
- *
- * 纯函数，无 React 依赖（tuiPalette 只作常量读取），可独立单测。
+ * Pure functions, no React dependency (tuiPalette read as constants only);
+ * unit-testable standalone.
  */
 import { tuiPalette } from "../theme.js";
 
-/** 边框流光 4 相位周期（design-5/25 同款）。 */
+/** Border flow: 4-phase cycle. */
 export const BORDER_CYCLE_MS = 8_000;
 
-/** hex → [r,g,b]（0..1）。非法输入回退 [1,1,1]。 */
+/** hex → [r,g,b] (0..1). Falls back to [1,1,1] on invalid input. */
 export function hexToRgb(hex: string): readonly [number, number, number] {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
   if (!m) return [1, 1, 1];
@@ -29,7 +29,7 @@ export function hexToRgb(hex: string): readonly [number, number, number] {
   ] as const;
 }
 
-/** a/b 按 t∈[0,1] 线性插值（越界 clamp）。 */
+/** Linear interpolation of a/b over t in [0,1] (clamped). */
 export function mixHex(a: string, b: string, t: number): string {
   const tt = Math.max(0, Math.min(1, t));
   const [ar, ag, ab] = hexToRgb(a);
@@ -42,14 +42,14 @@ export function mixHex(a: string, b: string, t: number): string {
     .padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
 }
 
-/** 3-stop 线性渐变 logoInk(0) → running(0.5) → logoGold(1)，design-25 同款。 */
+/** 3-stop linear gradient logoInk(0) → running(0.5) → logoGold(1). */
 export function gradAt(t: number): string {
   const k = Math.max(0, Math.min(1, t));
   if (k <= 0.5) return mixHex(tuiPalette.logoInk, tuiPalette.running, k * 2);
   return mixHex(tuiPalette.running, tuiPalette.logoGold, (k - 0.5) * 2);
 }
 
-/** 三角窗：中心 c、半宽 hw → [0,1] 强度（hw 外为 0）。 */
+/** Triangle window: center c, half-width hw → [0,1] intensity (0 outside hw). */
 export function triangleWindow(i: number, c: number, hw: number): number {
   if (hw <= 0) return 0;
   const d = Math.abs(i - c);
@@ -57,7 +57,7 @@ export function triangleWindow(i: number, c: number, hw: number): number {
   return 1 - d / hw;
 }
 
-/** 边框流光：相位 p ∈ [0, 4]，相邻 2 相位 RGB 插值。 */
+/** Border flow color: phase p in [0, 4], interpolate between adjacent phase RGBs. */
 export function flowBorderColor(phase: number): string {
   const n = 4;
   const idx = Math.floor(phase) % n;

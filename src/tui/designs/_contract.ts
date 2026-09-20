@@ -1,34 +1,35 @@
 /**
- * src/tui/designs/_contract.ts
+ * Shared contract for the 5 thinking-panel design variants (demo gallery
+ * interface).
  *
- * 思考面板 5 版设计的共享合同（demo gallery 接口契约）。
+ * Each design implements `ThinkingDesign`: pure rendering, pure key routing,
+ * independently testable. The demo gallery entry assembles them; the user
+ * presses 1-5 to switch and see the actual rendering.
  *
- * 每个 design 必须实现 `ThinkingDesign` 接口：纯渲染、纯键路由、可独立测
- * 试；由 demo gallery 入口统一装配，用户按 1-5 切换查看实际渲染效果。
- *
- * 不动既有 app.tsx / slash.ts / theme.ts / contract.ts；本目录纯预览用，
- * 仅作为后续 picker 形态选型的视觉/动效候选池。
+ * This directory is preview-only (existing app.tsx / slash.ts / theme.ts /
+ * contract.ts untouched): a visual/animation candidate pool for later picker
+ * form-factor selection.
  */
 import type { ReactElement } from "react";
 import type { KeyEvent } from "@opentui/core";
 
-/** 5 档 concrete effort（不含自适应档；自适应档 = 顶部 Auto 圆点开关）。 */
+/** 5 concrete effort levels (no adaptive level; adaptive = top Auto dot toggle). */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
-/** Picker 模型态（demo 自管；模拟真实使用时的双向状态）。 */
+/** Picker model state (demo-managed; simulates real two-way state). */
 export interface PickerModel {
-  /** Auto 圆点开关：true = effort=""（跟随 env/provider 默认），false = concrete 档位。 */
+  /** Auto dot toggle: true = effort="" (follow env/provider default), false = concrete level. */
   readonly autoOn: boolean;
-  /** 当前生效档位索引（0..4）。 */
+  /** Active level index (0..4). */
   readonly currentIndex: number;
-  /** Picker 内焦点游标位置（0..4，autoOn=true 时为 -1 表示游标在 Auto）。 */
+  /** Focus cursor inside the picker (0..4; -1 when autoOn means cursor is on Auto). */
   readonly focusIndex: number;
-  /** Picker 是否打开（demo 内 toggle）。 */
+  /** Whether the picker is open (toggled inside demo). */
   readonly open: boolean;
 }
 
-/** Picker 模型事件（demo 模拟交互产生）。 */
+/** Picker model events (produced by simulated demo interaction). */
 export type PickerEvent =
   | { type: "open" }
   | { type: "close" }
@@ -36,10 +37,10 @@ export type PickerEvent =
   | { type: "cancel" }
   | { type: "left" }
   | { type: "right" }
-  | { type: "tab" } // 切 Auto
-  | { type: "space" }; // 切 Auto（与 Tab 等价）
+  | { type: "tab" } // toggle Auto
+  | { type: "space" }; // toggle Auto (same as Tab)
 
-/** Picker 模型 reducer 纯函数（demo 与 design 解耦）。 */
+/** Pure reducer for PickerModel (decouples demo from designs). */
 export function reducePickerModel(
   model: PickerModel,
   event: PickerEvent
@@ -60,7 +61,7 @@ export function reducePickerModel(
     case "cancel":
       return { ...model, open: false };
     case "confirm": {
-      // Auto on → 维持 effort=""；off → 选 focusIndex
+      // Auto on → keep effort=""; off → take focusIndex
       if (model.autoOn)
         return { ...model, open: false, currentIndex: model.currentIndex };
       return { ...model, open: false, currentIndex: model.focusIndex };
@@ -90,7 +91,7 @@ export function reducePickerModel(
   }
 }
 
-/** Picker 默认态：Auto off, 档位 medium (index=1)。 */
+/** Default picker state: Auto off, level medium (index=1). */
 export const DEFAULT_PICKER_MODEL: PickerModel = {
   autoOn: false,
   currentIndex: 1, // medium
@@ -98,27 +99,28 @@ export const DEFAULT_PICKER_MODEL: PickerModel = {
   open: false,
 };
 
-/** Design 渲染输出：含面板 + 文档式辅助（标题、说明、键位提示）。
- *  demo gallery 会把它铺到 demo 屏幕：左侧面板，右侧说明 + 控制。 */
+/** Design render output: panel + doc-style aids (title, notes, key hints).
+ *  Demo gallery lays it out on screen: panel left, notes + controls right. */
 export interface ThinkingDesignProps {
   readonly model: PickerModel;
   readonly cols: number;
 }
 
-/** Design 元数据（demo gallery 列表展示）。 */
+/** Design metadata (shown in demo gallery list). */
 export interface ThinkingDesignMeta {
   readonly id: string;
   readonly name: string;
-  readonly tag: string; // 一句话风格标签（中文）
-  readonly summary: string; // 设计要点（demo 右侧展示）
+  readonly tag: string; // one-line style tag (Chinese)
+  readonly summary: string; // design highlights (shown on demo right side)
 }
 
-/** Design 完整契约：元数据 + 渲染组件 + 可选键路由。
- *  键路由可选（demo 可提供全局默认行为）；提供则可定制非标准键位。 */
+/** Full design contract: metadata + render component + optional key routing.
+ *  Key routing is optional (demo provides global defaults); supply it to
+ *  customize non-standard keys. */
 export interface ThinkingDesign {
   readonly meta: ThinkingDesignMeta;
   readonly render: (props: ThinkingDesignProps) => ReactElement;
-  /** 可选：自定义键路由；返回 null 走 demo 默认（←/→ 档位/Tab+Space Auto/Enter 确认/Esc 取消）。 */
+  /** Optional custom key routing; return null to fall back to demo defaults (←/→ level / Tab+Space Auto / Enter confirm / Esc cancel). */
   readonly reduceKey?: (
     event: KeyEvent,
     model: PickerModel

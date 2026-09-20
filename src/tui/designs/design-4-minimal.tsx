@@ -1,49 +1,54 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-4-minimal.tsx
+ * Design 4 — minimal flat (close to Claude Code / Linear flavor).
  *
- * Design #4 — 极简扁平风（接近 Claude Code / Linear 风味）。
+ * Visual discipline:
+ *  - Nearly no decoration: monochrome `pal.text` (body) + `pal.running`
+ *    (focus gold) + `pal.dim` (secondary).
+ *  - No block chars / dots / `[]` ornaments: plain level names with a `>`
+ *    prefix.
+ *  - Auto row uses text states `[auto]` / `[manual]`, no dot.
+ *  - One horizontal line at top and bottom (box
+ *    `border = ["top","bottom"]`, `borderStyle="single"`).
+ *  - Generous whitespace: paddingX=2, flex gap=1 between rows.
  *
- * 视觉纪律：
- *  - 几乎无装饰：单色 `pal.text`（正文）+ `pal.running`（焦点金）+ `pal.dim`（次级）。
- *  - 不画块字符 / 圆点 / `[]` 装饰：纯文本档位名 + `>` 字符前缀。
- *  - Auto 行用 `[auto]` / `[manual]` 文本态开关，无圆点。
- *  - 顶/底各 1 行水平线（box `border` = `["top","bottom"]`，`borderStyle="single"`）。
- *  - 整体留白大：paddingX=2，行间用 flex gap=1。
+ * Animation (only one family):
+ *  - Panel-wide fade-in: opacity 0 → 1, 200ms, ease "inOutQuad".
+ *  - Horizontal slide of the current-level `>` on switch: translateX from
+ *    old offset → new, 150ms, ease "outQuad".
  *
- * 动效（仅 1 个）：
- *  - 整面板 fade-in：opacity 0 → 1，200ms，ease "inOutQuad"。
- *  - 当前档 `>` 指示切换时横向滑移：translateX 由旧 offset → 新 offset，
- *    150ms，ease "outQuad"。
+ * How the translateX wiring works:
+ *  - `useRef<TextRenderable>(null)` grabs the `>` `<text>` Renderable
+ *    (OpenTUI `<text ref>` uses the same reconciler path as
+ *    `<scrollbox ref>` — see the sbRef pattern in chat-view.tsx).
+ *  - `useTimeline` news up a fresh Timeline every render but only
+ *    registers the first one with the engine in its mount effect. That is
+ *    fine for one-shot mount-time animations, but here the `>` slide must
+ *    `timeline.add(...)` on every currentIndex change — an unregistered
+ *    fresh instance is never advanced by `engine.update` and the
+ *    animation fails silently. So both slide/fade Timelines are lazy-
+ *    created in `useRef` (instance kept), registered via
+ *    `engine.register(timeline)` in a dedicated mount effect, and cleaned
+ *    up with `pause()` + `unregister()` on unmount.
+ *  - Trigger chain: currentIndex change → `useEffect` →
+ *    `slideRef.current.resetItems()` clears old animations →
+ *    `slideRef.current.add(indicatorRef.current, { translateX: newX,
+ *    duration: 150, ease: "outQuad" })` → `play()`. The scheduler calls
+ *    `engine.update(deltaTime)` → `timeline.update` → writes the target's
+ *    `translateX` setter (OpenTUI Renderable supports set translateX)
+ *    until `currentTime >= duration` fires `onComplete`.
+ *  - Fade-in uses the other Timeline: at mount `add(panelRef.current,
+ *    { opacity: 1, duration: 200, ease: "inOutQuad" })`; the initial
+ *    `opacity={0}` comes from the container prop.
+ *  - translateX formula: `levelOffset(i)` accumulates preceding level
+ *    name widths + GAP, so `>` lands exactly 1 cell before the current
+ *    name (at rest `>` is at x=0 with 1 leading space and levels starting
+ *    at x=2, hence `>` target = levelOffset(i) ↔ `> medium` with one
+ *    space between).
  *
- * 动效挂钩说明（translateX 这条线）：
- *  - `useRef<TextRenderable>(null)` 拿到 `>` 指示 `<text>` 的 Renderable 实例
- *    （OpenTUI `<text ref>` 走的是与 `<scrollbox ref>` 同样的 reconciler 路径，
- *    详见 chat-view.tsx sbRef 模式）。
- *  - `useTimeline` 每次 render 会 `new Timeline(options)` 出一个新实例，但只
- *    在 mount effect 里注册第一个到 engine（@opentui/react/index.js:136）。该
- *    模型在「动画一次性、mount 期 add」时没问题，但本设计 `>` 滑移需要每次
- *    currentIndex 变化时 `timeline.add(...)` —— 新 render 的 slideTimeline 实
- *    例未被注册、`engine.update` 不会推进它，动画静默失败。
- *    因此 slide/fade 两条 Timeline 都用 `useRef` 懒创建（保持同一实例），在
- *    独立 mount effect 里 `engine.register(timeline)` 注册，unmount 时
- *    `pause()` + `unregister()` 清理。
- *  - 触发链：currentIndex 变化 → `useEffect` 跑 → `slideRef.current.resetItems()`
- *    清旧动画 → `slideRef.current.add(indicatorRef.current, { translateX:
- *    newX, duration: 150, ease: "outQuad" })` 推入新动画 → `play()` 启动。
- *    Timeline 调度器每帧 `engine.update(deltaTime)` → `timeline.update` → 写
- *    target 的 `translateX` setter（OpenTUI Renderable 支持 set translateX）
- *    → 推进直到 `currentTime >= duration` 触发 `onComplete`。
- *  - fade-in 走另一条 Timeline：mount 时 `add(panelRef.current, { opacity: 1,
- *    duration: 200, ease: "inOutQuad" })`，初始 `opacity={0}` 由 container prop
- *    给出。
- *  - translateX 公式：`levelOffset(i)`（按字符数累加前序档位宽 + GAP）让
- *    `>` 精准落在当前档名字前 1 格（rest 态 `>` 在 x=0、prefix 1 空格、档位
- *    起始 x=2，故 `>` 目标 = levelOffset(i) ↔ result `> medium` 中间 1 空格）。
- *
- * 边框方案：box `border={["top","bottom"]}` + `borderStyle="single"` +
- * `borderColor={pal.border}`。左/右不画，只留顶/底水平线（OpenTUI BoxRenderable
- * 支持 `border: BorderSides[]` 只画指定边）。
+ * Border approach: box `border={["top","bottom"]}` +
+ * `borderStyle="single"` + `borderColor={pal.border}`. Left/right draw
+ * nothing (OpenTUI BoxRenderable supports `border: BorderSides[]`).
  */
 import { useEffect, useRef } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -62,15 +67,15 @@ import type {
   ThinkingDesignProps,
 } from "./_contract.js";
 
-/** 档位之间用 3 空格分隔（与 brief 字面 "low   medium..." 对齐）。 */
+/** 3 spaces between level names (matches the rendered "low   medium..." layout). */
 const GAP = "   ";
 
-/** 当前档 `>` 字符前缀的渲染色（autoOn 时无 `>`，回退 dim 灰占位 1 格）。 */
+/** Render color of the current-level `>` prefix (no `>` when autoOn; falls back to a 1-cell dim placeholder). */
 function indicatorColor(model: PickerModel): string {
   return model.autoOn ? tuiPalette.dim : tuiPalette.running;
 }
 
-/** 档位名之间的累计横向偏移（按字符数计算 `>` 该落到哪一格）。 */
+/** Cumulative horizontal offset between level names (which column the `>` should land on). */
 function levelOffset(index: number): number {
   let x = 0;
   for (let k = 0; k < index && k < EFFORT_LEVELS.length; k++) {
@@ -82,9 +87,9 @@ function levelOffset(index: number): number {
 function Panel(props: ThinkingDesignProps): ReactNode {
   const { model } = props;
 
-  // 两条独立 timeline：fade-in 一次性（autoplay=true），slide 每次 currentIndex
-  // 变化重置重放（autoplay=false）。useRef 懒创建保持同一实例，绕过
-  // useTimeline 每次 render 换实例的坑。
+  // Two independent timelines: fade-in is one-shot, slide resets and
+  // replays on every currentIndex change. useRef lazy-creation keeps the
+  // same instance, avoiding useTimeline's per-render new-instance trap.
   const fadeTimelineRef = useRef<Timeline | null>(null);
   const slideTimelineRef = useRef<Timeline | null>(null);
 
@@ -95,7 +100,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
     slideTimelineRef.current = new Timeline({ autoplay: false });
   }
 
-  // mount 时把两条 timeline 注册到 engine；unmount 反注册。
+  // Register both timelines with the engine at mount; unregister on unmount.
   useEffect(() => {
     const fade = fadeTimelineRef.current;
     const slide = slideTimelineRef.current;
@@ -116,7 +121,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
   const panelRef = useRef<BoxRenderable | null>(null);
   const indicatorRef = useRef<TextRenderable | null>(null);
 
-  // 入场 fade-in：mount 推一条 opacity 0 → 1。
+  // Entry fade-in: push one opacity 0 → 1 at mount.
   useEffect(() => {
     if (!panelRef.current || !fadeTimelineRef.current) return;
     const fade = fadeTimelineRef.current;
@@ -129,7 +134,7 @@ function Panel(props: ThinkingDesignProps): ReactNode {
     fade.play();
   }, [fadeTimelineRef]);
 
-  // 当前档切换时 `>` 横向滑移（`>` 绑定 currentIndex；focusIndex 走 BOLD）。
+  // `>` horizontal slide on level switch (`>` binds to currentIndex; focusIndex uses BOLD).
   useEffect(() => {
     if (!indicatorRef.current || !slideTimelineRef.current) return;
     const slide = slideTimelineRef.current;

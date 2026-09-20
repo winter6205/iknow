@@ -1,57 +1,58 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/design-2-neon.tsx
+ * Thinking-effort panel — Design 2: Cyber Neon (NEON-GRID).
  *
- * Thinking-effort 思考面板 — Design 2：动感赛博风（NEON-GRID）。
+ * One of the visual candidates in the demo gallery. Each design is pure
+ * rendering on top of `_contract.ts`'s `PickerModel`; this file only adds
+ * styles and animation, touching no production module.
  *
- * 5 版视觉候选之一（demo gallery 通过 1-5 切换）。每个 design 纯渲染 +
- * 复用 `_contract.ts` 的 `PickerModel` 接口；本文件只新增样式与动效，
- * 不触碰 `app.tsx` / `slash.ts` / `theme.ts` / `bundled.ts`（demo
- * gallery 聚合体），改 picker 形态时按 #343 选型流程。
+ * Visual style elements:
+ *  1. heavy border (`BorderStyle="heavy"`).
+ *  2. Border color breathes: `pal.running` ↔ `pal.logoGold`, 2000ms
+ *     alternate, ease "inOutSine".
+ *  3. Entry: box `marginTop` -2 → 0, 400ms ease "outBack" spring-back;
+ *     entry animation runs once at mount (one-shot onComplete cleanup).
+ *  4. Title row `⚡ THINKING` (`pal.running` BOLD) + scanline decoration
+ *     `═══ · ═══ · ═══` (`pal.logoGold`).
+ *  5. 5-level color ramp: low=pal.add / medium=pal.accent /
+ *     high=pal.running / xhigh=pal.logoGold / max=pal.error. The level
+ *     visualization bar uses 5 height-ascending `▁▂▃▄▅▆▇█` chars (evenly
+ *     sampled from 8 steps). When focused (picker open = `model.open`),
+ *     all uniformly switch to `pal.running` BOLD.
+ *  6. Current-level underline pulse: `BOLD|UNDERLINE` ↔ `BOLD`, 800ms
+ *     alternate, ease "inOutSine". When Auto is on, this slot is yielded
+ *     to the Auto dot breathing.
+ *  7. Auto dot `●` breathes `pal.running` ↔ `pal.logoGold`, 1000ms
+ *     alternate, ease "inOutSine" (only when Auto on).
+ *  8. Current-level pointer `▲` (U+25B2) directly below the current level
+ *     char (only when Auto off).
+ *  9. Key hints: [←/→] switch level · [Tab/Space] toggle Auto ·
+ *     [Enter] confirm · [Esc] cancel (`[←/→]` omitted when Auto on).
  *
- * 视觉风格5要素（任务约束）：
- *  1. heavy 粗线边框（BorderStyle="heavy"）。
- *  2. 边框色在 `pal.running` ↔ `pal.logoGold` 之间 2000ms alternate
- *     ease "inOutSine" 持续脉冲（呼吸）。
- *  3. 入场 box 自身 `marginTop` 从 -2 → 0，400ms ease "outBack" 弹性
- *     回弹；入场动画仅 mount 时一次（一次性 onComplete 卸载）。
- *  4. title 行 `⚡ THINKING`（`pal.running` BOLD）+ 扫描线装饰
- *     `═══ · ═══ · ═══`（`pal.logoGold`）。
- *  5. 5 档递进色阶：低=pal.add / 中=pal.accent / 高=pal.running /
- *     极高=pal.logoGold / 顶=pal.error。该 5 档可视化条共 5 个高度
- *     递增的 `▁▂▃▄▅▆▇█` 字符（8 阶内均匀取 5 阶）。focused 时（picker
- *     打开 = `model.open`）全部统一升 `pal.running` BOLD。
- *  6. 当前档字符下划线脉冲：`BOLD|UNDERLINE` ↔ `BOLD`，800ms alternate
- *     ease "inOutSine"。Auto on 时本动画时空槽让给 Auto 圆点呼吸。
- *  7. Auto 圆点 `●` 在 `pal.running` ↔ `pal.logoGold` 之间 1000ms
- *     alternate ease "inOutSine" 呼吸（仅 Auto on 时）。
- *  8. 当前档指针 `▲`（U+25B2）居当前档字符正下方（仅 Auto off 时）。
- *  9. 键位提示：[←/→] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 ·
- *     [Esc] 取消（Auto on 时省 `[←/→]`）。
+ * Persistent animation budget: base ≤ 2 (border breathing + current-level
+ * underline pulse). When Auto is on it switches to "border breathing +
+ * Auto dot breathing" — still exactly 2 slots. Entry is one-shot. The
+ * level-switch flash uses plain React state + setTimeout (no timeline, not
+ * counted as "persistent").
  *
- * 动效常驻预算：基础态 ≤ 2（边框呼吸 + 当前档下划线脉冲）。Auto on
- * 时切换为「边框呼吸 + Auto 圆点呼吸」两路，时空槽正好等于 2。入场
- * 一次性。切档 flash 走纯 React state + setTimeout（不挂 timeline，
- * 不计入"常驻"）。
+ * Period non-resonance check:
+ *   border 2000ms / underline 800ms / dot 1000ms.
+ *   LCM(2000, 800, 1000) = 4000ms; mod 4000ms the phases never align at
+ *   extremes at once, avoiding additive visual flicker. Each timeline
+ *   duration is 2× item duration (one alternate ping-pong round = 2 ×
+ *   item duration), so `loop=true`'s resetItems lands exactly at the
+ *   start — no visible jump.
  *
- * 周期非整数倍校验：
- *   边框周期 2000ms / 下划线周期 800ms / 圆点周期 1000ms。
- *   LCM(2000, 800, 1000) = 4000ms；模 4000ms 各相位不同时对齐于极
- *   端，避免视觉叠加闪点。各自的 timeline duration 取 2× item
- *   duration（alternate ping-pong 一轮 = 2 × item duration），在
- *   `timeline.loop=true` 触发的 resetItems 时恰好回到起点，无可见
- *   跳变。
+ * Color discipline: every color comes 100% from `tuiPalette` (theme.ts),
+ * no new color constants; the OpenTUI renderer degrades hex strings by
+ * terminal capability, the app layer never writes ANSI.
  *
- * 颜色纪律：所有颜色 100% 来自 `tuiPalette`（theme.ts），未新增任
- * 何颜色常量；hex 字符串由 OpenTUI 渲染器按终端能力降级，应用层不
- * 写 ANSI。
- *
- * `useTimeline` 注意事项（来自 @opentui/react 0.5.1）：hook 实现的
- * mount 副作用 `useEffect(..., [])` 只在首次 render 执行，并把该
- * 次返回的 Timeline 注入 engine + play；后续 render 返回的是全新
- * Timeline（不会被 engine 处理）。因此本组件用 `useRef(useTimeline
- * 调用结果)` 捕获首 render 实例，所有 `.add()` / `.pause()` / `.play()`
- * 都在 stable ref 上调用，避开 hook 引用漂移。
+ * `useTimeline` caveat (@opentui/react 0.5.1): the hook's mount effect
+ * runs only on the first render and registers that Timeline with the
+ * engine; later renders return brand-new Timelines the engine ignores. So
+ * this component captures the first-render instance in `useRef` and calls
+ * all `.add()` / `.pause()` / `.play()` on the stable ref to avoid hook
+ * reference drift.
  */
 import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
@@ -65,11 +66,11 @@ import {
   type ThinkingDesign,
 } from "./_contract.js";
 
-// ── 常量 ──────────────────────────────────────────────────────────────
+// ── constants ─────────────────────────────────────────────────────────
 const FIVE_BARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
 const FIVE_BARS_HEIGHT = FIVE_BARS.length; // 8
 
-/** 5 档色阶（用 `tuiPalette` 现有 token，禁止新增色）。 */
+/** 5-level color ramp (existing `tuiPalette` tokens only; no new colors). */
 const COLORS = [
   tuiPalette.add, // low
   tuiPalette.accent, // medium
@@ -78,14 +79,14 @@ const COLORS = [
   tuiPalette.error, // max
 ] as const;
 
-/** 周期（毫秒）—— 故意互不谐振（见头注释）。 */
+/** Pulse periods in ms — deliberately non-resonant (see header). */
 const BORDER_PULSE_MS = 2000;
 const UNDERLINE_PULSE_MS = 800;
 const DOT_PULSE_MS = 1000;
 const ENTRY_MS = 400;
 
-// ── 颜色工具 ──────────────────────────────────────────────────────────
-/** `#rrggbb` → [r, g, b]∈[0,1]³。供 `mixHex` 用。 */
+// ── color utils ───────────────────────────────────────────────────────
+/** `#rrggbb` → [r, g, b]∈[0,1]³. Used by `mixHex`. */
 function hexToRgb(hex: string): readonly [number, number, number] {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
   if (!m) return [1, 1, 1];
@@ -97,9 +98,9 @@ function hexToRgb(hex: string): readonly [number, number, number] {
   ] as const;
 }
 
-/** 两色按 t∈[0,1] 线性混合 → `#rrggbb` 字符串。border 脉冲 / dot
- *  呼吸通过该函数把单项 0..1 数值映射回 hex 字符串喂给 `borderColor`
- *  / `fg` prop。 */
+/** Linear mix of two colors over t∈[0,1] → `#rrggbb` string. The border
+ *  pulse / dot breathing map a single 0..1 value back to a hex string for
+ *  the `borderColor` / `fg` prop. */
 function mixHex(a: string, b: string, t: number): string {
   const [ar, ag, ab] = hexToRgb(a);
   const [br, bg, bb] = hexToRgb(b);
@@ -109,45 +110,45 @@ function mixHex(a: string, b: string, t: number): string {
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
 }
 
-/** 边框与 dot 用的同一调色板（pal.running ↔ pal.logoGold）—— 同
- *  一函数生成不同语义字符串，避免 shadowing 资源。 */
+/** Shared palette pair for border and dot (pal.running ↔ pal.logoGold) —
+ *  one function generating strings with different semantics, no duplicated helpers. */
 const mixRunningGold = (t: number): string =>
   mixHex(tuiPalette.running, tuiPalette.logoGold, t);
 
-// ── 渲染组件 ────────────────────────────────────────────────────────
+// ── render component ─────────────────────────────────────────────────
 function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
   const pal = tuiPalette;
   const { model } = props;
   const autoOn = model.autoOn;
   const currentIndex = model.currentIndex;
-  const focused = model.open; // picker 打开 = focus 态
+  const focused = model.open; // picker open = focused state
   const levels = EFFORT_LEVELS as readonly EffortLevel[];
 
-  // ── 入场动画 ─────────────────────────────────────────────────────
+  // ── entry animation ──────────────────────────────────────────────
   const [entryShift, setEntryShift] = useState<number>(-2);
   const entryTargetRef = useRef<{ shift: number }>({ shift: -2 });
 
-  // ── 边框呼吸（常驻） ─────────────────────────────────────────────
+  // ── border breathing (persistent) ────────────────────────────────
   const [borderColor, setBorderColor] = useState<string>(pal.running);
   const borderTargetRef = useRef<{ p: 0 }>({ p: 0 });
 
-  // ── 当前档下划线脉冲（Auto off 时常驻） ──────────────────────────
+  // ── current-level underline pulse (persistent when Auto off) ─────
   const [underlineOn, setUnderlineOn] = useState<boolean>(false);
   const underlineTargetRef = useRef<{ p: 0 }>({ p: 0 });
 
-  // ── Auto 圆点呼吸（Auto on 时常驻） ──────────────────────────────
+  // ── Auto dot breathing (persistent when Auto on) ─────────────────
   const [dotColor, setDotColor] = useState<string>(pal.running);
   const dotTargetRef = useRef<{ p: 0 }>({ p: 0 });
 
-  // ── 切档 flash（轻量） ───────────────────────────────────────────
+  // ── level-switch flash (lightweight) ─────────────────────────────
   const [flashOn, setFlashOn] = useState<boolean>(false);
 
-  // ── Timeline 引用 ────────────────────────────────────────────────
-  // 每个 useTimeline 内部 mount effect 仅处理首 render 的 Timeline
-  // ；后续 render 返回的是引擎未注册的 fresh 对象。`useRef` 的初始
-  // 值在每次 render 重新求值，但 `.current` 仅保留首 render 引用，
-  // 因此 `.add()` / `.pause()` / `.play()` 全部落到引擎持有的实例
-  // 上。
+  // ── timeline refs ────────────────────────────────────────────────
+  // Each useTimeline's internal mount effect only registers the
+  // first-render Timeline; later renders return fresh objects the engine
+  // never sees. `useRef`'s initializer re-evaluates every render but
+  // `.current` keeps the first-render reference, so `.add()` / `.pause()`
+  // / `.play()` all hit the engine-owned instances.
   const entryTimeline = useTimeline({
     duration: ENTRY_MS,
     autoplay: true,
@@ -180,10 +181,10 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
   });
   const tl = tlRefs.current;
 
-  // ── mount-only effect：挂载动画项（一次性，不重挂） ─────────────
-  // deps = [tl]（stable ref 首 render 引用），确保本 effect 仅在
-  // 组件 mount 时跑一次，避免后续 render 因 entryTimeline 等是
-  // 新对象而触发 `.add()` 累积。
+  // ── mount-only effect: attach animation items (once, never re-attached)
+  // deps = [tl] (stable first-render ref), guaranteeing this effect runs
+  // only at mount, so later renders don't accumulate `.add()` calls on
+  // fresh entryTimeline objects.
   useEffect(() => {
     tl.entry.add(entryTargetRef.current, {
       duration: ENTRY_MS,
@@ -227,9 +228,10 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
         setDotColor(mixRunningGold(v));
       },
     });
-    // 初始 gating：Auto on 才挂 dot 圆点；Auto off 才挂下划线脉冲。
-    // 用 useTimeline 的 autoplay 在所有 timeline 上先 play，再按
-    // autoOn 立刻 pause 不需要的，符合「常驻 ≤2」预算。
+    // Initial gating: dot breathing only when Auto on; underline pulse
+    // only when Auto off. useTimeline autoplays all timelines, then we
+    // immediately pause the unwanted one — keeping the "persistent ≤2"
+    // budget.
     if (autoOn) {
       tl.underline.pause();
       setUnderlineOn(false);
@@ -237,11 +239,11 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
       tl.dot.pause();
       setDotColor(pal.running);
     }
-    // 注：mount-only；cleanup 留给 useTimeline 内部 unmount 效应。
+    // Note: mount-only; cleanup is handled by useTimeline's internal unmount effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tl]);
 
-  // ── autoOn 切换 gating（空间槽保证 ≤2 动画） ─────────────────────
+  // ── autoOn switch gating (keeps animation slot budget ≤2) ─────────
   useEffect(() => {
     if (autoOn) {
       tl.underline.pause();
@@ -254,7 +256,7 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
     }
   }, [autoOn, tl, pal.running]);
 
-  // ── 切档 flash：当前档变化时 150ms 颜色高亮再还原 ─────────────
+  // ── switch flash: 150ms color highlight when current level changes ─
   const prevIndexRef = useRef<number>(currentIndex);
   useEffect(() => {
     if (prevIndexRef.current === currentIndex) return;
@@ -264,22 +266,22 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
     return () => clearTimeout(t);
   }, [currentIndex]);
 
-  // ── 派生：当前档字符属性 ────────────────────────────────────────
+  // ── derived: current-level char attributes ───────────────────────
   const currentAttr = ((): number => {
     let base = TextAttributes.BOLD;
     if (!autoOn && underlineOn) base |= TextAttributes.UNDERLINE;
     return base;
   })();
 
-  // ── 扫描线装饰 ───────────────────────────────────────────────────
+  // ── scanline decoration ──────────────────────────────────────────
   const scanline = `═══ · ═══ · ═══`;
 
-  // ── 键位提示 ─────────────────────────────────────────────────────
+  // ── key hints ────────────────────────────────────────────────────
   const hintLines = autoOn
     ? `[Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消`
     : `[←/→] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消`;
 
-  // ── 5 档可视化条字符（8 阶 → 5 阶均匀映射） ─────────────────────
+  // ── 5-level bar chars (even 8-step → 5-step mapping) ─────────────
   const barOf = (levelIdx: number): string => {
     const h = Math.min(
       FIVE_BARS_HEIGHT - 1,
@@ -288,8 +290,9 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
     return FIVE_BARS[h] ?? "█";
   };
 
-  // ── 当前档颜色（focused 态下所有档统一升 pal.running；平时按
-  //  5 档色阶）。flash 期间短时切 pal.accent 增加视觉反馈。 ─────
+  // ── current-level color (when focused all levels unify to
+  //  pal.running; otherwise the 5-level ramp). During the flash the
+  //  current level briefly switches to pal.accent for extra feedback.
   const colorOf = (i: number, isCurrent: boolean): string => {
     if (isCurrent && flashOn) return pal.accent;
     if (focused) return pal.running;
@@ -305,7 +308,7 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
       paddingX={1}
       paddingY={0}
     >
-      {/* 标题行：⚡ THINKING + 扫描线 */}
+      {/* title row: ⚡ THINKING + scanline */}
       <box flexDirection="row">
         <text>
           <span fg={pal.running} attributes={TextAttributes.BOLD}>
@@ -318,7 +321,7 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
         </text>
       </box>
 
-      {/* Auto 行 */}
+      {/* Auto row */}
       <box flexDirection="row" marginTop={0}>
         <text>
           {autoOn ? (
@@ -334,7 +337,7 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
         </text>
       </box>
 
-      {/* 5 档可视化条 */}
+      {/* 5-level visualization bar */}
       <box flexDirection="row" marginTop={0}>
         <text>
           {levels.map((level, i) => {
@@ -351,7 +354,7 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
         </text>
       </box>
 
-      {/* 档位名 */}
+      {/* level names */}
       <box flexDirection="row" marginTop={0}>
         <text>
           {levels.map((level, i) => {
@@ -368,10 +371,10 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
         </text>
       </box>
 
-      {/* 当前档指针（仅 Auto off 时） */}
+      {/* current-level pointer (Auto off only) */}
       {!autoOn && <CurrentPointer index={currentIndex} count={levels.length} />}
 
-      {/* 键位提示 */}
+      {/* key hints */}
       <box flexDirection="row" marginTop={0}>
         <text fg={pal.dim}>{hintLines}</text>
       </box>
@@ -379,11 +382,12 @@ function Design2Neon(props: { readonly model: PickerModel }): ReactNode {
   );
 }
 
-// ── 当前档指针（▲ 居当前档字符正下方） ────────────────────────────────
+// ── current-level pointer (▲ centered under the current level char) ───
 /**
- * 条形行字符宽度 1，字符之间的分隔符宽 1（单空格），故索引 i 之前
- * 累计空白 = i * 2 个 ASCII 字符位置。指针行总宽 = (count - 1) * 2 + 1
- * 与条形行对齐（首尾 `▲` 下方紧贴首末字符）。
+ * Bar-row chars are 1 wide with 1-wide separators (single space), so the
+ * accumulated offset before index i is i * 2 ASCII columns. The pointer
+ * row is (count - 1) * 2 + 1 wide, aligned with the bar row (leading/
+ * trailing `▲` sit right under the first/last char).
  */
 function CurrentPointer(props: {
   readonly index: number;
@@ -405,7 +409,7 @@ function CurrentPointer(props: {
   );
 }
 
-// ── 导出 ────────────────────────────────────────────────────────────
+// ── export ───────────────────────────────────────────────────────────
 export const design2: ThinkingDesign = {
   meta: {
     id: "design-2-neon",

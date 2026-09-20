@@ -1,14 +1,14 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/designs/gallery.tsx
+ * Thinking-panel design gallery (demo assembly surface).
  *
- * 思考面板设计画廊（demo 装配面）。
+ * Left: the selected design panel rendered live from `PickerModel`
+ * (interactive: ←/→ switch level, Tab/Space toggle Auto, Enter confirm,
+ * Esc close, Space open).
+ * Right: design metadata (id / name / tag / summary) + control hints.
  *
- * 左侧：当前选中的 design 面板按 `PickerModel` 实时渲染（可交互：←/→ 切档、
- * Tab/Space 切 Auto、Enter 确认、Esc 关闭、Space 打开）。
- * 右侧：design 元数据（id / name / tag / summary）+ 控制提示。
- *
- * 纯演示；复用 `_contract.ts` 的 `reducePickerModel` 纯函数驱动模型态。
+ * Demo only; drives model state via the pure `reducePickerModel` from
+ * `_contract.ts`.
  */
 import { useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
@@ -21,14 +21,14 @@ import {
 } from "./_contract.js";
 import { tuiPalette } from "../theme.js";
 
-/** 左侧面板占宽（demo 屏左栏）。 */
+/** Left panel width (demo left column). */
 const PANEL_COLS = 62;
 
-/** 底部控制提示行（对应 useKeyboard 绑定的键）。 */
+/** Bottom control hint line (matches the useKeyboard bindings). */
 const GALLERY_HINT =
   "[1-9] 跳设计 · [+/-] 上下翻(19版) · [←/→] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 关闭 · [q] 退出";
 
-/** 触发左侧面板的模型态变化（键 → 模型事件）。 */
+/** Map keys to model events that drive the left panel. */
 function keyToPickerEvent(name: string): PickerEvent | null {
   switch (name) {
     case "left":
@@ -59,7 +59,7 @@ export function DesignGallery(props: {
     autoOn: false,
     currentIndex: 1, // medium
     focusIndex: 1,
-    open: true, // 打开即展示
+    open: true, // show immediately on open
   });
 
   const design = THINKING_DESIGNS[designIndex]!;
@@ -69,7 +69,7 @@ export function DesignGallery(props: {
       onQuit();
       return;
     }
-    // 设计切换：数字 1-9 直接跳；+ 下一版 / - 上一版（循环到 15）
+    // design switching: digits 1-9 jump directly; + next / - previous (cyclic)
     const name = e.name ?? "";
     if (/^[1-9]$/.test(name)) {
       const idx = Number(name) - 1;
@@ -90,7 +90,7 @@ export function DesignGallery(props: {
       return;
     }
     if (e.ctrl || e.meta) return;
-    // picker 键事件
+    // picker key events
     const event = keyToPickerEvent(e.name ?? "");
     if (event !== null) {
       setModel((m) => reducePickerModel(m, event));
@@ -101,18 +101,18 @@ export function DesignGallery(props: {
 
   return (
     <box flexDirection="column" width={cols} marginTop={1}>
-      {/* 顶部设计序号 / 总览条 */}
+      {/* top design index / overview bar */}
       <text fg={pal.dim}>
         {`设计 ${designIndex + 1} / ${THINKING_DESIGNS.length}`}
       </text>
 
       <box flexDirection="row" gap={2} marginTop={1}>
-        {/* 左栏：当前 design 面板 */}
+        {/* left column: current design panel */}
         <box width={leftCols} flexDirection="column">
           <design.render model={model} cols={leftCols} />
         </box>
 
-        {/* 右栏：design 元数据 */}
+        {/* right column: design metadata */}
         <box flexDirection="column" width={Math.max(20, cols - leftCols - 4)}>
           <text fg={pal.running} attributes={TextAttributes.BOLD}>
             {design.meta.name}
@@ -132,7 +132,7 @@ export function DesignGallery(props: {
         </box>
       </box>
 
-      {/* 底部控制提示 */}
+      {/* bottom control hints */}
       <box marginTop={1}>
         <text fg={pal.dim}>{GALLERY_HINT}</text>
       </box>
@@ -140,7 +140,7 @@ export function DesignGallery(props: {
   );
 }
 
-/** EFFORT_LEVELS 短名（demo 展示用）。 */
+/** Short names for EFFORT_LEVELS (demo display). */
 const LEVEL_NAMES = ["low", "medium", "high", "xhigh", "max"] as const;
 function levelName(index: number): string {
   return LEVEL_NAMES[index] ?? String(index);

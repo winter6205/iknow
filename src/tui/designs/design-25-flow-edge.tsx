@@ -2,34 +2,40 @@
 /**
  * src/tui/designs/design-25-flow-edge.tsx
  *
- * 思考面板 · Design 25：design-5 框架 + 流动水线边界底色（design-22 底色变体 C）。
+ * Thinking panel · Design 25: design-5 frame + flowing waterline edge color
+ * (base-color variant C of design-22).
  *
- * 与 design-22 的唯一区别在**底色叙事**：design-22 让一条 shimmer 光带扫过整条
- * 已填充区；本版把光完全收束到「当前档段 / 未填充段」的那条边界上，做成一条
- * 宽 2 段（segLen × 2）的柔光过渡带——像水位线一样在边界左右轻微流动，读者
- * 一眼就能看出"水位停在哪一档、并且还在动"。
+ * Sole difference from design-22 is the **fill narrative**: design-22 sweeps a
+ * shimmer band across the whole filled region; this version collapses all the
+ * light onto the boundary between the "current segment / unfilled segment",
+ * making a 2-segment-wide (segLen × 2) soft-glow transition band — like a
+ * waterline flowing slightly left/right at the boundary, so the reader sees at
+ * a glance "which level the water has reached, and it's still moving".
  *
- * 帧结构（与 design-22 完全一致，沿用 design-5）：
- *   [圆角边框 borderColor 4 token 循环流光]
- *     ◆─ Thinking                ← 标题
- *     ◑  AUTO · 手动档位         ← 自动圆点 + 描述
+ * Frame structure (identical to design-22, reusing design-5):
+ *   [rounded border, 4-token flowing color]
+ *     ◆─ Thinking                ← title
+ *     ◑  AUTO · <desc>           ← auto dot + description
  *
- *     ████████████████████      ← 进度条（灰阶填充 + 边界水线）
+ *     ████████████████████      ← progress bar (gray fill + boundary waterline)
  *
- *     low   medium   high   xhigh   max   ← 5 档几何居中标签
- *     [←/→] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消
+ *     low   medium   high   xhigh   max   ← 5 geometry-centred labels
+ *     [←/→] level · [Tab/Space] Auto · [Enter] confirm · [Esc] cancel
  *
- * 进度条几何：完全复用 `_geometry.ts`（5 段等宽 + labelPad 居中），与 design-22
- * 逐列对齐，方便并排比较底色方案。
+ * Bar geometry: fully reuses `_geometry.ts` (5 equal segments + labelPad
+ * centring), column-aligned with design-22 for side-by-side comparison.
  *
- * 底色（灰阶 + 单一 accent 水线，无黄绿）：
- *   - 已填充段（[0, currentIndex]）：dim → text 稳定灰渐变，**无 shimmer**
- *   - 边界水线：中心 = 当前档段最右一列，三角窗半宽 = segLen（左右各铺一段）
- *     强度 glowEdge ∈ [0,1] → 底色向 `mixHex(pal.text, pal.accent, glowEdge*0.65)`
- *     过渡；水线中心随 2400 ms alternate 相位在 ±0.2*segLen 内左右晃动
- *   - 未填充段（> currentIndex）：`pal.border` 暗灰轨 + dim 字符（保持"干"的观感）
- *   - autoOn → 整条退化为均匀暗灰轨，水线停止，标签全部 dim
- *   - 保留 design-22 的边框 4 相位流光（8000 ms）
+ * Fill (gray + a single accent waterline, no yellow-green):
+ *   - filled segment ([0, currentIndex]): dim → text stable gray gradient, **no shimmer**
+ *   - boundary waterline: centre = rightmost column of the current segment,
+ *     triangular-window half-width = segLen (spans one segment each side);
+ *     strength glowEdge ∈ [0,1] → base mixes toward
+ *     `mixHex(pal.text, pal.accent, glowEdge*0.65)`; the crest sways ±0.2*segLen
+ *     with a 2400 ms alternate phase
+ *   - unfilled segment (> currentIndex): `pal.border` dark track + dim glyph
+ *     (keeps a "dry" look)
+ *   - autoOn → whole bar degrades to a uniform dark track, waterline stops, all labels dim
+ *   - keeps design-22's border 4-phase flow (8000 ms)
  */
 import {
   useEffect,
@@ -49,21 +55,21 @@ import {
   segmentLen,
 } from "./_geometry.js";
 
-// ── 常量 ──────────────────────────────────────────────────────────────
-/** 边框流光 4 相位周期（design-5 同款）。 */
+// ── Constants ─────────────────────────────────────────────────────────
+/** Border flow 4-phase cycle (same as design-5). */
 const BORDER_CYCLE_MS = 8_000;
-/** 入场动画。 */
+/** Entry animation. */
 const ENTRY_DURATION_MS = 400;
-/** Auto 圆点切换渐变。 */
+/** Auto dot cross-fade. */
 const AUTO_DOT_DURATION_MS = 200;
-/** 边界水线左右流动一趟的时长（alternate ping-pong 单程）。 */
+/** One left/right sweep of the boundary waterline (alternate ping-pong single pass). */
 const EDGE_FLOW_MS = 2400;
-/** 水线晃动幅度（相对 segLen 的半幅，± 0.2 段）。 */
+/** Waterline sway amplitude (half-width relative to segLen, ± 0.2 segments). */
 const EDGE_SWAY = 0.9;
-/** 水线最亮处向 accent 的混合上限。 */
+/** Upper bound of the waterline crest's mix toward accent. */
 const EDGE_MIX = 1;
 
-// ── 颜色工具（design-5/16/22 同款 palette mix） ──────────────────────
+// ── Color utils (same palette mix as design-5/16/22) ──────────────────
 function hexToRgb(hex: string): readonly [number, number, number] {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
   if (!m) return [1, 1, 1];
@@ -87,14 +93,14 @@ function mixHex(a: string, b: string, t: number): string {
     .padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
 }
 
-/** 3-stop 线性渐变 logoInk(0) → running(0.5) → logoGold(1)，design-16 同款。 */
+/** 3-stop linear gradient logoInk(0) → running(0.5) → logoGold(1), same as design-16. */
 function gradAt(t: number): string {
   const k = Math.max(0, Math.min(1, t));
   if (k <= 0.5) return mixHex(tuiPalette.logoInk, tuiPalette.running, k * 2);
   return mixHex(tuiPalette.running, tuiPalette.logoGold, (k - 0.5) * 2);
 }
 
-/** 三角窗：中心 c、半宽 hw → [0,1] 强度（hw 外为 0）。 */
+/** Triangular window: centre c, half-width hw → [0,1] strength (0 outside hw). */
 function triangleWindow(i: number, c: number, hw: number): number {
   if (hw <= 0) return 0;
   const d = Math.abs(i - c);
@@ -102,7 +108,7 @@ function triangleWindow(i: number, c: number, hw: number): number {
   return 1 - d / hw;
 }
 
-/** 边框流光：相位 p ∈ [0, 4]，相邻 2 相位 RGB 插值。 */
+/** Border flow: phase p ∈ [0, 4], RGB lerp between adjacent phases. */
 function flowBorderColor(phase: number): string {
   const n = 4;
   const idx = Math.floor(phase) % n;
@@ -118,13 +124,13 @@ function flowBorderColor(phase: number): string {
   return mixHex(a, b, f);
 }
 
-// ── 渲染主组件 ──────────────────────────────────────────────────────
+// ── Main render component ───────────────────────────────────────────
 function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
   const pal = tuiPalette;
   const { model, cols } = props;
   const { autoOn, currentIndex, focusIndex, open } = model;
 
-  // ── Timeline 引用（useRef 锁首 render 实例，design-5/22 同款） ──
+  // ── Timeline ref (lock the first-render instance via useRef, same as design-5/22) ──
   const initialTimeline = useTimeline({
     duration: BORDER_CYCLE_MS,
     loop: true,
@@ -141,11 +147,11 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
   if (edgeRef.current === null) edgeRef.current = edgeFirst;
   const tlEdge = edgeRef.current;
 
-  // ── 常驻动效 state（每帧 setState） ──
+  // ── Ambient state (setStates each frame) ──
   const [borderPhase, setBorderPhase] = useState(0);
-  const [edgePhase, setEdgePhase] = useState(0.5); // 水线相位 0..1..0
+  const [edgePhase, setEdgePhase] = useState(0.5); // waterline phase 0..1..0
 
-  // ── 入场 + Auto 联动 ref（timeline 直接 mutate，force setState 触发重渲） ──
+  // ── Entry + Auto refs (timeline mutates directly; force setState re-renders) ──
   const entryRef = useRef<{ marginTop: number; opacity: number }>({
     marginTop: -2,
     opacity: 0,
@@ -153,7 +159,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
   const autoMixRef = useRef<{ mix: number }>({ mix: autoOn ? 1 : 0 });
   const [, force] = useState(0);
 
-  // 边框流光相位：8s 线性循环（onComplete 归零避免 reset 陷阱）
+  // Border flow phase: 8s linear loop (onComplete zeroes the target to dodge the reset trap)
   useEffect(() => {
     const target = { phase: 0 };
     tl.add(target, {
@@ -170,7 +176,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     });
   }, [tl]);
 
-  // 常驻：水线相位 0→1→0（alternate ping-pong），驱动边界左右小幅流动
+  // Ambient: waterline phase 0→1→0 (alternate ping-pong), drives the small left/right boundary flow
   useEffect(() => {
     const target = { p: 0 };
     tlEdge.add(target, {
@@ -183,7 +189,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     });
   }, [tlEdge]);
 
-  // 入场动效：marginTop -2 → 0、opacity 0 → 1
+  // Entry: marginTop -2 → 0, opacity 0 → 1
   useEffect(() => {
     const target = entryRef.current;
     tl.once(target, {
@@ -195,7 +201,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     });
   }, [tl]);
 
-  // Auto 圆点切色：dim ↔ running 200ms outExpo
+  // Auto dot color switch: dim ↔ running, 200ms outExpo
   useEffect(() => {
     const target = autoMixRef.current;
     const currentMix = target.mix;
@@ -209,42 +215,42 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     });
   }, [autoOn, tl]);
 
-  // ── 进度条几何（共享 _geometry.ts） ──
-  //   border 左右 2 列 + paddingX 各 1 列 = 4 列固定开销
+  // ── Progress-bar geometry (shared _geometry.ts) ──
+  //   border left/right 2 cols + paddingX 1 each = 4 cols of fixed overhead
   const innerCols = Math.max(SEG_COUNT, cols - 4);
   const barLen = floorTo5BarLen(innerCols);
   const segLen = segmentLen(barLen);
 
-  // ── 派生值 ──
+  // ── Derived values ──
   const entry = entryRef.current;
   const autoDotGlyph = autoOn ? "◐" : "◑";
   const autoDotColor = mixHex(pal.dim, pal.running, autoMixRef.current.mix);
   const autoDesc = autoOn ? "自适应档位" : "手动档位";
 
-  /** 水线中心列：当前档段最右一列 ± 0.2*segLen 的缓慢晃动。 */
+  /** Waterline crest column: rightmost column of the current segment ± a slow 0.2*segLen sway. */
   const edgeCenter =
     currentIndex * segLen + segLen - 1 + (edgePhase - 0.5) * segLen * EDGE_SWAY;
 
-  /** 字符 i 的视觉颜色：稳定灰阶填充 + 边界柔光水线。 */
+  /** Char i's visual color: stable gray fill + soft boundary waterline glow. */
   function colorAt(i: number): { bg: string; fg: string } {
     if (autoOn) return { bg: pal.border, fg: pal.dim };
     const segIdx = Math.min(SEG_COUNT - 1, Math.floor(i / segLen));
     if (segIdx > currentIndex) {
-      // 未填充暗灰轨（水线不越界，保持"干"的观感）
+      // Unfilled dark track (waterline stays in-bounds, keeps the "dry" look)
       return { bg: pal.border, fg: pal.dim };
     }
-    // 已填充段：3-stop 紫渐变基色（与 design-22/23/24 同步保留紫调）
+    // Filled segment: 3-stop purple gradient base (keeps the purple feel synced with design-22/23/24)
     const filledEnd = (currentIndex + 1) * segLen;
     const base = gradAt(i / Math.max(1, filledEnd));
-    // 边界水线：半宽 = segLen 的三角窗，越靠近边界越向 logoGold 过渡
+    // Boundary waterline: triangular window of half-width segLen; closer to the edge, more it transitions toward logoGold
     const glowEdge = triangleWindow(i, edgeCenter, segLen);
     const crest = mixHex(pal.logoInk, pal.logoGold, glowEdge * EDGE_MIX);
-    const bg = mixHex(base, crest, glowEdge); // 中心点直接 crest = logoGold
+    const bg = mixHex(base, crest, glowEdge); // at the centre, directly crest = logoGold
     const fg = mixHex(bg, pal.logoInk, 0.5);
     return { bg, fg };
   }
 
-  // ── 档位标签样式：焦点游标 ▸◂（移动中）/ 当前档提亮（已确认）/ 其余 dim ──
+  // ── Level-label styles: focus cursor ▸◂ (moving) / current brightened (confirmed) / rest dim ──
   const labels = ["low", "medium", "high", "xhigh", "max"] as const;
   function labelFor(i: number): { text: string; fg: string; bold: boolean } {
     const text = labels[i]!;
@@ -255,7 +261,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     return { text, fg: pal.dim, bold: false };
   }
 
-  // ── 档位标签行节点：labelPad 把标签居中到段中点，逐段拼成 barLen 宽 ──
+  // ── Label-row nodes: labelPad centers each label on its segment midpoint, concatenated to barLen width ──
   const labelNodes: ReactNode[] = [];
   for (let i = 0; i < labels.length; i++) {
     const seg = labelFor(i);
@@ -273,12 +279,12 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
     labelNodes.push(<span key={`t${i}`}>{" ".repeat(pad)}</span>);
   }
 
-  // ── 键位提示（按当前 auto 状态分支） ──
+  // ── Key hints (branch on the current auto state) ──
   const hint = autoOn
     ? "[Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消"
     : "[← →] 切档 · [Tab/Space] 切 Auto · [Enter] 确认 · [Esc] 取消";
 
-  // ── 渲染 ──
+  // ── Render ──
   return (
     <box
       flexDirection="column"
@@ -290,7 +296,7 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
       opacity={entry.opacity}
       width={Math.max(1, cols)}
     >
-      {/* 标题 ◆─ Thinking（design-5 同款） */}
+      {/* Title ◆─ Thinking (same as design-5) */}
       <text>
         <span fg={pal.running}>{"◆─ "}</span>
         <span fg={pal.text} attributes={TextAttributes.BOLD}>
@@ -298,14 +304,14 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
         </span>
       </text>
 
-      {/* Auto 行：◐/◑ + AUTO + 描述（design-5 同款） */}
+      {/* Auto row: ◐/◑ + AUTO + description (same as design-5) */}
       <text>
         <span fg={autoDotColor}>{`${autoDotGlyph}  `}</span>
         <span fg={pal.dim}>AUTO</span>
         <span fg={pal.dim}>{`  ·  ${autoDesc}`}</span>
       </text>
 
-      {/* 进度条：稳定灰阶填充 + 当前档边界流动水线（铺满内宽） */}
+      {/* Bar: stable gray fill + flowing waterline at the current level's edge (spans the inner width) */}
       <text wrapMode="none">
         {Array.from({ length: barLen }, (_, i) => {
           const { bg, fg } = colorAt(i);
@@ -317,16 +323,16 @@ function FlowEdgeRender(props: ThinkingDesignProps): ReactNode {
         })}
       </text>
 
-      {/* 档位标签行：5 档各居中到段中点（几何对齐，断点对档位） */}
+      {/* Label row: each of 5 levels centered on its segment midpoint (geometry-aligned, breakpoints match levels) */}
       <text wrapMode="none">{labelNodes}</text>
 
-      {/* 键位提示 */}
+      {/* Key hints */}
       <text fg={pal.dim}>{hint}</text>
     </box>
   );
 }
 
-// ── 导出 ──────────────────────────────────────────────────────────────
+// ── Export ────────────────────────────────────────────────────────────
 export const design25: ThinkingDesign = {
   meta: {
     id: "design-25-flow-edge",
