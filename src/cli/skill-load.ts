@@ -1,19 +1,21 @@
 /**
- * src/cli/skill-load.ts
+ * CLI-side skill-load surface. CLI shares the same slash-entry semantics as
+ * TUI / Web: the loadable skill set includes description-less and
+ * `disable-model-invocation` entries, resolution goes through the catalog,
+ * the remainder is sliced by typed token length, the static command list
+ * takes precedence, and agents stay out of slash.
  *
- * CLI 人侧 skill-load 面（spec skill-index-increment T3）：CLI 与 TUI / Web
- * 共用**同一 slash 入口语义** —— 可加载技能全集（含无 description、含
- * `disable-model-invocation`）、catalog 解析、remainder 按输入 token 长度、
- * 静态词表优先、agents 不进 slash。
+ * Relationship to TUI: `src/tui/slash.ts::parseSkillLoad` implements the
+ * same semantics there, but `src/cli` and `src/tui` are sibling hosts that
+ * must not import each other (both are host surfaces; either direction
+ * creates a false dependency). This module depends only on the pure
+ * function surface (`harness/skill/body.ts` assembly SSOT + minimal
+ * parsing/projection), no readline / React / OpenTUI, so chat-session and
+ * tests can consume it directly.
  *
- * 与 TUI 的关系：TUI 的 `src/tui/slash.ts::parseSkillLoad` 是同语义实现，
- * 但 `src/cli` 与 `src/tui` 是并列 host，不互相 import（架构分层：两者都
- * 是宿主面，谁 import 谁都会造出假依赖）。本模块只依赖纯函数面
- * （`harness/skill/body.ts` 的装配 SSOT + 极小的解析/投影），不依赖 readline
- * / React / OpenTUI，可被 chat-session 与测试直接消费。
- *
- * 信封形态单点在 `buildSkillLoadText`（src/harness/skill/body.ts）—— 本模块
- * 不自行拼字符串，三入口（TUI / Web / CLI）byte 级一致由该函数保证。
+ * The envelope shape has a single home in `buildSkillLoadText`
+ * (src/harness/skill/body.ts) — this module never assembles strings itself;
+ * byte-level equality across TUI / Web / CLI is that function's guarantee.
  */
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import {
@@ -24,12 +26,13 @@ import {
 import type { SkillCatalog, SkillEntry } from "../harness/skill/catalog.js";
 
 /**
- * skill 最小投影（与 TUI `SkillEntryLike` 同形 —— 两个 host 各自持有本地
- * 类型，解耦 slash 解析与 harness catalog 类型）。
+ * Minimal skill projection (same shape as the TUI's `SkillEntryLike` — each
+ * host keeps a local type to decouple slash parsing from harness catalog
+ * types).
  *
- * `aliases` 是插件技能的**唯一**裸名别名（catalog 已丢冲突者）；调用方从
- * catalog 投影后塞入。本模块只消费，不自行拆 `:`（spec
- * tui-skill-slash-catalog invariant 1）。
+ * `aliases` holds the only bare-name aliases of plugin skills (the catalog
+ * already dropped conflicting ones); callers project from the catalog before
+ * passing in. This module consumes them as-is and never splits `:` itself.
  */
 export interface CliSkillEntryLike {
   readonly name: string;
@@ -38,13 +41,16 @@ export interface CliSkillEntryLike {
 }
 
 /**
- * CLI 静态词表（与 `src/cli/slash.ts` 的 `applySlashCommand` 分派表同源）。
- * 这里只列**命令名**用于「静态优先」判定 —— 值论文案不进本模块（那是
- * slash.ts 的 HELP_TEXT / 各 apply* 的职责）。
+ * CLI static command set (same source as the `applySlashCommand` dispatch
+ * table in `src/cli/slash.ts`). Command names only, used for the
+ * static-wins check — help copy stays in slash.ts (HELP_TEXT / apply*
+ * handlers).
  *
- * 不 import `src/cli/slash.ts` 的 switch：那是 dispatch 实现，不是可判定的
- * 名集；从 switch 反推名字集会在未来新增命令时静默漏判。本集合是显式
- * 声明，新增 CLI 命令时**必须**同步（测试 `静态词表优先` 钉住该契约）。
+ * Not derived by importing slash.ts's switch: that is dispatch
+ * implementation, not a decidable name set, and back-deriving names from a
+ * switch silently misses future commands. This set is an explicit
+ * declaration; new CLI commands must be added here in lockstep (a test
+ * pins the static-precedence contract).
  */
 export const CLI_STATIC_COMMANDS: ReadonlySet<string> = new Set([
   "help",
@@ -61,22 +67,24 @@ export const CLI_STATIC_COMMANDS: ReadonlySet<string> = new Set([
   "goal",
 ]);
 
-/** 首 token 小写形（`/Echo` 与 `/echo` 同判）。算法 SSOT 在 harness
- *  （`slashHeadPrefix`）；本名是 CLI 宿主的既有出口（tests 消费）。 */
+/** Lowercased first token (`/Echo` and `/echo` match alike). Algorithm SSOT
+ *  in harness (`slashHeadPrefix`); this name is the CLI host's existing
+ *  export (consumed by tests). */
 export function slashPrefix(text: string): string {
   return slashHeadPrefix(text);
 }
 
 /**
- * remainder = 首 token 之后的剩余段（trim）。**按 typed token 长度切** ——
- * 用 `skill.name.length` 会在裸名输入里吃掉 remainder 前缀（spec SC9 明令
- * 禁止）。算法 SSOT 在 harness（`slashTailRemainder`）。
+ * Remainder after the first token (trimmed). Sliced by the **typed token**
+ * length — slicing with `skill.name.length` would swallow the remainder
+ * prefix on bare-name input. Algorithm SSOT in harness
+ * (`slashTailRemainder`).
  */
 export function slashRemainder(raw: string): string {
   return slashTailRemainder(raw);
 }
 
-/** 可匹配的全部首 token 小写形：规范名 + 唯一裸名别名。 */
+/** All matchable lowercased heads: canonical name + unique bare-name aliases. */
 function headLowers(skill: CliSkillEntryLike): ReadonlyArray<string> {
   return [skill.name, ...(skill.aliases ?? [])].map((head) =>
     head.toLowerCase()
@@ -84,10 +92,12 @@ function headLowers(skill: CliSkillEntryLike): ReadonlyArray<string> {
 }
 
 /**
- * 精确命中技能名 → `{name, remainder}`；静态词表命中 / 未命中 → undefined。
+ * Exact skill-name hit -> `{name, remainder}`; static-list hit or miss ->
+ * undefined.
  *
- * `name` 恒返回**规范名**（catalog entry 的 `name`），不是用户 typed 的裸名
- * —— 后续 `catalog.get` / 落盘信封都据此收敛到同一形态。
+ * `name` is always the **canonical name** (catalog entry's `name`), never
+ * the user-typed bare alias — downstream `catalog.get` and the persisted
+ * envelope converge on one form.
  */
 export function parseSkillLoad(
   raw: string,
@@ -106,9 +116,9 @@ export function parseSkillLoad(
 }
 
 /**
- * catalog 投影：可加载技能面 + **唯一裸名别名**。算法本体收敛在 harness
- * （`projectSlashEntries` —— plan T3「harness 可复用的 slash 投影」，TUI /
- * CLI / hub 同一实现）；本函数只保留 CLI 宿主的名字与形状。
+ * Catalog projection: loadable skill surface + unique bare-name aliases.
+ * The algorithm itself lives in harness (`projectSlashEntries`), shared by
+ * TUI / CLI / hub; this function only keeps the CLI host's name and shape.
  */
 export function toCliSkillEntries(
   catalog: SkillCatalog
@@ -117,9 +127,10 @@ export function toCliSkillEntries(
 }
 
 /**
- * 装配一条 skill-load 发送文本。`entry === undefined`（catalog miss）→
- * `undefined`；正文读失败向上抛（不吞 —— 与 TUI / hub 同档：读盘失败是
- * 真实故障，不伪装成成功）。
+ * Assemble one skill-load message text. `entry === undefined` (catalog
+ * miss) -> `undefined`; body read failures rethrow (no swallowing — same
+ * policy as TUI / hub: a read error is a real fault, not disguised as
+ * success).
  */
 export async function buildCliSkillLoad(opts: {
   readonly name: string;

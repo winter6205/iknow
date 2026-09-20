@@ -1,19 +1,22 @@
 /**
- * T2 (#175): 流式草稿共享层 — 把 harness `HarnessStreamEvent` 累积为带遮蔽的
- * 当前文本,供 chat REPL(stdout)和 TUI(`useSyncExternalStore` 订阅)同源消费。
+ * Shared streaming-draft layer: accumulates harness `HarnessStreamEvent`s
+ * into the masked current text, consumed from one source by the chat REPL
+ * (stdout) and the TUI (`useSyncExternalStore` subscription).
  *
- * 设计要点(D4 裁决):
- * - `rawBuffer` 增量累积文本;`masked()` 每次调用**全量**重 mask。
- *   跨 delta 边界的截断密钥(如 `sk-` + `abc123`)在累积完成后被
- *   `createOutputMask(currentSecretValues()).mask(rawBuffer)` 整段捕获,
- *   自然满足 D4 「跨边界密钥」验收。rawBuffer 是回合内文本(几百~几千字),
- *   O(N) 重 mask 可接受;不增量优化。
- * - **不在模块级缓存 mask 实例**:`currentSecretValues()` 每次现取 process.env
- *   (对齐 `src/cli/format.ts` 的 start-of-run snapshot 语义,但 stream-draft
- *   跨回合连续,故每读一次 env),保持「无记忆化 seam」。
- * - listener 用 `Set` 去重;unsubscribe 幂等;同一 listener 多次 subscribe
- *   只触发一次。
- * - 无 fd / 无 React 依赖,纯字符串 + Set 状态。
+ * Design points:
+ * - `rawBuffer` accumulates text incrementally; `masked()` re-masks the
+ *   **whole** buffer per call. A secret truncated across delta boundaries
+ *   (e.g. `sk-` + `abc123`) is captured whole once accumulation completes,
+ *   since masking runs on the full `rawBuffer`. The buffer holds one turn's
+ *   text (hundreds to thousands of chars), so O(N) re-masking is
+ *   acceptable; no incremental optimization.
+ * - **No module-level mask instance cache**: `currentSecretValues()` reads
+ *   process.env fresh each call (aligned with `src/cli/format.ts`
+ *   start-of-run snapshot semantics; stream-draft spans turns, so env is
+ *   re-read per access), keeping the no-memoization-seam property.
+ * - Listeners live in a `Set` for dedup; unsubscribe is idempotent; the
+ *   same listener subscribed twice still fires once.
+ * - No fds, no React dependency; pure string + Set state.
  */
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import {
@@ -26,28 +29,31 @@ export interface StreamDraft {
   raw(): string;
   masked(): string;
   /**
-   * 冻结当前 answer 缓冲为一段（TUI live 交错用）。当前 raw 为空则 no-op。
-   * CLI 不调用；masked() 仍为各段拼接后的全量遮蔽。
+   * Freeze the current answer buffer as a segment (TUI live interleaving).
+   * No-op when the raw buffer is empty. CLI never calls it; masked() is
+   * still the full mask over all segments concatenated.
    */
   sealText(): void;
-  /** 已冻结的文本段数（不含当前未 seal 缓冲）。 */
+  /** Number of sealed segments (excluding the current unsealed buffer). */
   sealedCount(): number;
-  /** 已冻结段 + 当前缓冲（若非空），各自遮蔽。同步可读，不经 subscribe。 */
+  /** Sealed segments + current buffer (if non-empty), each masked. Synchronously readable, no subscribe needed. */
   maskedSegments(): ReadonlyArray<string>;
-  /** T3 (#175): thinking 增量累积的原始文本(独立于 answer 的 rawBuffer)。 */
+  /** Raw text accumulated from thinking deltas (separate from the answer rawBuffer). */
   thinkingRaw(): string;
-  /** T3: thinking 原始文本遮蔽后的可渲染串(SC20 一致性,密钥不裸出)。 */
+  /** thinking raw text after masking, renderable (secrets never surface unmasked). */
   thinkingMasked(): string;
   /**
-   * 首次 thinking_delta 到现在的耗时秒数（无 thinking 返回 0）。`now` 参数
-   * 仅供测试注入时钟（缺省 Date.now()）。
+   * Seconds from the first thinking_delta until now (0 when no thinking).
+   * The `now` parameter exists only for test clock injection (default
+   * Date.now()).
    *
-   * 计时起点 = **首条 thinking_delta**（惰性打点，唯一来源，2026-08-14）——
-   * 思考秒数 = 纯思考时长，**不含** turn 启动 → 首 delta 的等待时段。运行总
-   * 时长是另一概念，由 app 层 mode 行 / `Crunched for X` 统计（turn 起点
-   * 打点）。此前的 turn 起点显式打点（markThinkingStart，含等待时段的
-   * 「计时同步」修复）已移除：等待 ≠ 思考，两概念混计会让「思考了 N 秒」
-   * 虚高（用户澄清「运行时长并不是思考时间」）。
+   * Timer start = **first thinking_delta** (lazily stamped, the only
+   * source): thinking seconds = pure thinking time, excluding the
+   * turn-start -> first-delta wait. Total runtime is a separate concept
+   * measured at app layer (mode line / `Crunched for X` from the turn-start
+   * stamp). The earlier explicit turn-start stamp — which folded the wait
+   * into the count — was removed: waiting is not thinking, and conflating
+   * them inflates "thought for N seconds".
    */
   thinkingSeconds(now?: number): number;
   reset(): void;
@@ -57,50 +63,58 @@ export interface StreamDraft {
 export function createStreamDraft(): StreamDraft {
   let rawBuffer = "";
   const sealedRaw: string[] = [];
-  // T3 (#175): thinking buffer 与 answer text buffer 分离 — 两者各自累积 /
-  // 遮蔽,互不污染。thinking 不进 answer rawBuffer(终稿 thinking blocks 是
-  // SSOT,流式 thinking 只是临时展示层)。
+  // The thinking buffer is separate from the answer text buffer — each
+  // accumulates and masks on its own. Thinking never enters the answer
+  // rawBuffer (final thinking blocks are the SSOT; streaming thinking is a
+  // transient display layer).
   let thinkingBuffer = "";
-  // 首次 thinking 打点时刻（毫秒）—— 折叠行渲染「思考了 N 秒」用。
-  // 唯一来源：首条 thinking_delta 惰性打点（2026-08-14）—— 思考秒数 =
-  // 纯思考时长（首 delta → answer 开始），不含 turn 启动 → 首 delta 的
-  // 等待时段（等待 ≠ 思考，运行总时长由 app 层 mode 行 / Crunched 统计）。
+  // Timestamp (ms) of the first thinking stamp — rendered by the collapsed
+  // line "thought for N seconds". Only source: lazily set on the first
+  // thinking_delta. Thinking seconds = pure thinking duration (first delta
+  // -> answer start); the turn-start -> first-delta wait is excluded
+  // (waiting is not thinking; total runtime is tracked at app layer).
   let thinkingStartedAt: number | null = null;
   const listeners = new Set<() => void>();
 
-  // T5 (#175): 渲染节流 —
-  //  - 缓冲在 append 内**同步**更新(raw()/masked() 随时为当前值,REPL 的
-  //    feed 依赖 append 后立即 masked() 同步写出);
-  //  - 但 listener 通知走 50ms trailing timer 批处理,避免每 delta 全树重渲染
-  //    (TUI 每 notify 一次 setDraftsMasked → 全 ChatView re-render + markdown
-  //    重解析);
-  //  - 累积 ≥ 384 字符立即 flush(不等 50ms) — 大量文本不淤积;
-  //  - timer.unref():定时器不阻塞进程退出(回合结束 / Ctrl+C 时进程可即时退出)。
-  //  - reset 取消 pending timer — 中断后不再有迟到 notify 触发已卸载的 UI。
+  // Render throttling:
+  //  - the buffer updates **synchronously** inside append (raw()/masked()
+  //    are always current; the REPL feed relies on masked() being readable
+  //    right after append);
+  //  - listener notification is batched through a 50ms trailing timer so a
+  //    per-delta notify does not re-render the whole TUI tree
+  //    (setDraftsMasked -> full ChatView re-render + markdown re-parse);
+  //  - accumulating >= 384 chars flushes immediately (skip the 50ms window)
+  //    so large text never piles up unshown;
+  //  - timer.unref(): the timer must not hold the process open (it can exit
+  //    right after a turn ends / Ctrl+C);
+  //  - reset cancels the pending timer — no late notify into an unmounted UI
+  //    after an interrupt.
   const THROTTLE_MS = 50;
   const EARLY_FLUSH_CHARS = 384;
   let notifyTimer: ReturnType<typeof setTimeout> | null = null;
-  // 自上次 flush 以来累积的字符数(跨 delta 边界累加,用于早 flush 判定)。
+  // Chars accumulated since the last flush (accumulated across delta
+  // boundaries for the early-flush check).
   let pendingChars = 0;
 
   const flush = (): void => {
     notifyTimer = null;
     pendingChars = 0;
-    // D3 纪律: 观察者异常不得反向破坏数据生产者(也不得阻断其他 listener)。
-    // 单 listener throw 隔离 — 与 anthropic-adapter wireStreamEvents safeEmit
-    // 同源契约;stream-draft 作为共享层,无法假设所有消费者自带 try/catch
-    // (e.g. TUI React listener),因此在 SSOT 层兜底。
+    // Observer exceptions must never break the data producer (nor block
+    // other listeners). Per-listener throw isolation — same contract as
+    // safeEmit in anthropic-adapter wireStreamEvents; as a shared layer,
+    // stream-draft cannot assume consumers bring their own try/catch (e.g.
+    // TUI React listeners), so the SSOT layer absorbs it.
     for (const listener of listeners) {
       try {
         listener();
       } catch {
-        // swallow — D3
+        // swallow (isolation contract above)
       }
     }
   };
 
   const scheduleNotify = (): void => {
-    if (notifyTimer !== null) return; // 已有 pending 批处理,累积进同一批
+    if (notifyTimer !== null) return; // a batch is already pending; accumulate into it
     notifyTimer = setTimeout(flush, THROTTLE_MS);
     (notifyTimer as ReturnType<typeof setTimeout>).unref?.();
   };
@@ -115,7 +129,8 @@ export function createStreamDraft(): StreamDraft {
 
   const appendText = (text: string): void => {
     pendingChars += text.length;
-    // ≥384 字符立即 flush — 大文本不等 50ms 窗口,避免用户感知延迟。
+    // >= 384 chars flushes immediately — large text must not wait out the
+    // 50ms window (user-visible latency).
     if (pendingChars >= EARLY_FLUSH_CHARS) {
       cancelPending();
       flush();
@@ -134,9 +149,10 @@ export function createStreamDraft(): StreamDraft {
   return {
     append(event: HarnessStreamEvent): void {
       if (event.type === "text_delta") {
-        // 思考阶段结束于正文起点：清空 thinkingBuffer，让 ChatView 收起
-        // 流式思考面板。下一轮 thinking_delta 会重新累积，并渲染在已
-        // 返回正文（live tail drafts）之下，而不是顶层一直挂着。
+        // The thinking phase ends where the answer begins: clear
+        // thinkingBuffer so ChatView collapses the streaming thinking panel.
+        // The next thinking_delta accumulates fresh and renders below the
+        // already-returned text (live tail drafts), not pinned at the top.
         closeThinkingPhase();
         rawBuffer += event.text;
         appendText(event.text);
@@ -145,15 +161,18 @@ export function createStreamDraft(): StreamDraft {
         thinkingBuffer += event.text;
         appendText(event.text);
       } else if (event.type === "tool_call_start") {
-        // streaming-thinking-close-on-tool-call:工具调用起点 = 思考阶段
-        // 结束。thinkingBuffer 必须立即清空,让 ChatView 的流式 thinking
-        // 面板条件 `deferredThinkingDrafts.length > 0` 失效 → 面板收起,
-        // 不必等整轮 turn 完成才消失(用户反馈「顶部思考面板一直堆积」)。
-        // 不重置 thinkingStartedAt —— 折叠行「思考了 N 秒」反映整个 turn
-        // 的思考时长,跨多个 thinking 段累加;后续若有新 thinking_delta,append
-        // 会自然进入 thinkingBuffer 重新累积(同助手回合内多段思考常见)。
-        // 同时取消节流 timer 并同步 flush,让 listener 立刻收到通知,
-        // 跳过 50ms 节流窗口(思考阶段切换是状态切换,延迟可见属 bug)。
+        // Closing the thinking phase on tool-call start: a tool call ends
+        // the thinking phase. Clear thinkingBuffer immediately so the
+        // ChatView streaming-thinking condition
+        // `deferredThinkingDrafts.length > 0` goes false -> panel collapses
+        // without waiting for the whole turn (user feedback: the top
+        // thinking panel kept piling up). Do NOT reset thinkingStartedAt —
+        // the collapsed "thought for N seconds" reflects the whole turn's
+        // thinking across multiple segments; later thinking_delta events
+        // re-accumulate into thinkingBuffer naturally (multi-segment
+        // thinking within one assistant turn is common). Also cancel the
+        // throttle timer and flush synchronously: a thinking-phase switch
+        // is a state change, and delaying its visibility would be a bug.
         closeThinkingPhase();
       }
     },
@@ -198,7 +217,7 @@ export function createStreamDraft(): StreamDraft {
       thinkingBuffer = "";
       thinkingStartedAt = null;
       cancelPending();
-      // 复位立即通知一次(清 UI 的草稿面板),不等节流窗口。
+      // Reset notifies immediately (clears UI draft panels), skipping the throttle window.
       flush();
     },
     subscribe(listener: () => void): () => void {

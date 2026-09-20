@@ -1,13 +1,15 @@
 /**
  * Runtime bootstrap for CLI: env + harness engine.
  *
- * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
- * LoopEngine)。ACI 装饰层工具集 8 件（bash / read_file / grep / glob /
- * edit_file / write_file / web_fetch / web_search），与 permission
- * policy byName 键对齐（ADR-0004 / ADR-0006）。
+ * The CLI ask/chat product path runs on the harness foundation (real
+ * Anthropic adapter + LoopEngine). The ACI tool set has 8 tools (bash /
+ * read_file / grep / glob / edit_file / write_file / web_fetch /
+ * web_search), aligned with permission-policy byName keys (ADR-0004 /
+ * ADR-0006).
  *
- * 工具装配本身已下沉到 `src/harness/build-engine.ts`（SSOT）：CLI 与 serve
- * 共享同一份 8 件工具集,本模块只做 bundle 装配(env/session)并转发。
+ * Tool assembly itself lives in `src/harness/build-engine.ts` (SSOT): CLI
+ * and serve share the same 8-tool set; this module only assembles the
+ * bundle (env/session) and forwards.
  */
 import {
   buildHarnessEngine as buildCoreEngine,
@@ -82,90 +84,103 @@ export async function prepareRuntime(): Promise<RuntimeBundle> {
 export type { BuiltEngine } from "../harness/build-engine.js";
 
 /**
- * CLI ask/chat 产品路径的 harness 装配(020 新主路径)。
+ * Harness assembly for the CLI ask/chat product path.
  *
  * Thin wrapper around `buildHarnessEngine` in `src/harness/build-engine.ts`:
  * pulls `env` from the CLI runtime bundle and forwards. Tool assembly
- * itself (ACI 8 件 + Anthropic adapter + permission middleware) is the
- * harness layer's responsibility so CLI and serve cannot drift.
+ * itself (the 8 ACI tools + Anthropic adapter + permission middleware) is
+ * the harness layer's responsibility so CLI and serve cannot drift.
  *
- * #162 三入口装配 askUser：`askUser: AskUser` 是必传参数；缺则启动 throw
- * `ask_inlet_missing`（在 `buildHarnessEngine` 内部抛）。
+ * `askUser: AskUser` is a required parameter for all three entry points;
+ * when missing, startup throws `ask_inlet_missing` (thrown inside
+ * `buildHarnessEngine`).
  */
 /**
- * CLI wrapper 的装配 opts（导出以便宿主 **标注** 自己的 opts 字面量）。
+ * CLI wrapper assembly opts (exported so hosts can **annotate** their own
+ * opts literals).
  *
- * 为什么必须标注：宿主写了本接口没声明的字段会被静默丢掉，而未标注的 `const`
- * 不触发 TS 的 excess-property 检查（review round 3 实测：`projectIdentityRoot`
- * 在 `iknow chat` 上整条失效）。
+ * Why annotation is mandatory: an unannotated `const` skips TS
+ * excess-property checks, so a field the interface does not declare is
+ * silently dropped (observed: `projectIdentityRoot` went dead end-to-end on
+ * `iknow chat`).
  *
- * 反方向（本接口声明了、转发漏接）编译器管不了，所以转发**不再手写白名单**：
- * 除三个需要变形的字段外，其余按 rest 整体透传，新字段自动跟上
- * （review round 4：手写白名单只关住了一个方向）。
+ * The other direction (declared here, missing from forwarding) is not
+ * compiler-checked either, so forwarding no longer uses a manual whitelist:
+ * apart from the three fields needing reshaping, everything passes through
+ * as rest, and new fields follow automatically.
  */
 export interface CliBuildEngineOpts {
   askUser: AskUser;
   surface?: "chat" | "tui" | "ask" | "serve";
-  /** #194 T6:memory 层开关透传(ask 显式关,chat 显式开;缺席默认 true)。 */
+  /** Memory-layer switch passthrough (ask explicitly off, chat explicitly on; absent defaults to true). */
   memory?: { readonly enabled: boolean };
-  /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
-   *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
+  /** Permission-mode context. The chat REPL passes a mutable context
+   *  (flippable via /permissions); ask/serve pass a static context (never
+   *  set, same type). Absent -> engine default. */
   permissionMode?: PermissionModeContext;
-  /** D-α T3 / ADR-0030: graph 编排 overlay holder 透传（chat 传可变
-   *  context；ask 不传 → run_graph 与编排段都不装配）。 */
+  /** ADR-0030: graph orchestration overlay holder passthrough (chat passes
+   *  a mutable context; ask passes none -> run_graph and the orchestration
+   *  segment are not assembled). */
   graphMode?: GraphModeContext;
-  /** #440 T1-fix + #950 T2:host 注入的 session-scoped todoDir,语义为「会话项目根」
-   *  (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`)。todo_write 在主
-   *  loop 装配时消费,per-conv 文件路径在调用期由 `resolveConversationTodoPath`
-   *  派生(SSOT 在 todo-write.ts)。chat/ask CLI 入口由调用方解析后透传。 */
+  /** Host-injected session-scoped todoDir, semantically the "session
+   *  project root" (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`).
+   *  todo_write consumes it at main-loop assembly; the per-conversation file
+   *  path is derived at call time by `resolveConversationTodoPath` (SSOT in
+   *  todo-write.ts). chat/ask CLI entry points resolve it and forward. */
   todoDir?: string;
-  /** ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
-   *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
-   *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
+  /** ADR-0019: per-root state anchor — the CLI `--workspace-root` flag
+   *  forwards to build-engine (the `[explicit, env, cwd]` priority chain
+   *  runs at the build-engine layer). Each CLI entry point
+   *  (runChat/runOneShot/runTui/runServe) resolves then forwards. */
   workspaceRoot?: string;
   /**
-   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
-   * 跨 rebind 原样透传；`resolveMcpRoots` 由此派生 `mcpConfigRoot`。wrapper
-   * 只透传，不从 `process.cwd()` 重算。
+   * Stable main checkout root (worktree MCP rebind lifecycle): captured at
+   * first assembly and forwarded verbatim across rebinds; `resolveMcpRoots`
+   * derives `mcpConfigRoot` from it. The wrapper only forwards — never
+   * recomputes from `process.cwd()`.
    */
   productRoot?: string;
   /**
-   * Review round 2/3 (ADR-0037 §4): 项目身份根 —— 宿主启动时钉一次，跨 rebind
-   * 原样透传。wrapper 只透传，不从 `process.cwd()` 重算；判在场用
-   * `!== undefined` 而非真值 —— 空串必须透下去触 SSOT 的 fail-closed，
-   * 真值判会把它吞掉，装配层继而静默退 `mainCheckoutOf(cwd)`
-   * （review round 4 实测）。
+   * ADR-0037: project identity root — pinned once by the host at startup,
+   * forwarded verbatim across rebinds. The wrapper only forwards, never
+   * recomputes from `process.cwd()`; presence is tested with
+   * `!== undefined`, not truthiness — an empty string must reach the SSOT's
+   * fail-closed; a truthiness test would swallow it and assembly would
+   * silently degrade to `mainCheckoutOf(cwd)` (observed).
    */
   projectIdentityRoot?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   subagentDiagnosticsDir?: string;
   /**
-   * Review High-1 (2026-08-29 / ADR-0037): worktree isolation host 缝 ——
-   * 透传给 build-engine。开关本体由 build-engine 从 `settings` 在启动加载点
-   * 读取（硬要求 9）；ON 时 chat 引擎的 mutate 被门禁拦截，provision 负责
-   * 建 task worktree + 仅本会话根改绑。缺席 → 不包装（行为与今日一致）。
+   * ADR-0037: worktree isolation host seam — forwarded to build-engine.
+   * The toggle itself is read by build-engine from `settings` at the
+   * startup load point; when ON, chat-engine mutates are gated and
+   * provision creates the task worktree + rebinds this session's roots
+   * only. Absent -> no wrapping (behaves as before).
    */
   worktreeIsolation?: import("../harness/isolation/worktree-gate.js").WorktreeIsolationHostOpts;
   /**
-   * Review High-2 (2026-08-29 / 硬要求 9): 启动装配的 settings 对象透传。
-   * rebind 后 per-root 重建（chat rebuildDeps 缝）复用同一对象 —— worktree
-   * 内 `.iknow/` 缺席（gitignore），绝不隐式重载 project settings。缺席 →
-   * build-engine 自行缺省加载。
+   * Startup-assembly settings object passthrough. Per-root rebuilds after
+   * rebind (chat rebuildDeps seam) reuse the same object — `.iknow/` is
+   * absent inside the worktree (gitignored), so never implicitly reload
+   * project settings. Absent -> build-engine loads defaults.
    */
   settings?: import("../config/settings.js").IknowSettings;
   /**
-   * Review High-1: 引擎根覆盖（per-root 重建时传 task worktree 路径）。
-   * 缺省 = process.cwd()（与 build-engine 缺省一致）。
+   * Engine root override (task-worktree path on per-root rebuild).
+   * Default = process.cwd() (same as build-engine).
    */
   cwd?: string;
 }
 
 /**
- * 抹掉值为 `undefined` 的键（`exactOptionalPropertyTypes` 下「键在但值是
- * undefined」与「键不在」类型不同）。只看 `undefined`，不做真值过滤。
+ * Drop keys whose value is `undefined` (under `exactOptionalPropertyTypes`,
+ * "key present with value undefined" differs from "key absent"). Only
+ * `undefined` is filtered; no truthiness filtering.
  *
- * 返回类型是「每个键可选、且值不含 `undefined`」——不是 `T`：删键后必填字段
- * 可能已不在，cast 回 `T` 是不成立的（review round 5）。
+ * The return type is "every key optional, values excluding `undefined`" —
+ * not `T`: after dropping keys a required field may be gone, so casting
+ * back to `T` would be unsound.
  */
 function withoutUndefined<T extends object>(
   value: T
@@ -179,16 +194,16 @@ export async function buildHarnessEngine(
   bundle: RuntimeBundle,
   opts: CliBuildEngineOpts
 ): Promise<BuiltEngine> {
-  // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
-  // explicit flag 或 env SSOT 任一存在时,在 entry 集中走 resolver 拿到
-  // typed WorkspaceRootError(打印友好);否则透传 undefined 让 build-engine
-  // 走 cwd fallback。
+  // CLI-entry conditional workspaceRoot resolve: when the explicit flag or
+  // the env SSOT exists, resolve once here to obtain a typed
+  // WorkspaceRootError (print-friendly); otherwise forward undefined and
+  // let build-engine fall back to cwd.
   //
-  // 数据池默认锚点(plan home-project-tree / ADR-0087):会话池默认恒为
-  // `~/.iknow`,**不**再随 cwd / workspaceRoot 分片(`<cwd>/.iknow` 形态已
-  // 退役)。本字段只影响 per-root 状态锚(记忆库 / skill seam / 项目
-  // `AGENTS.md` 发现),与会话池根互不干涉 —— 见
-  // plans/workspace-root-launch.md T5 决策。
+  // Data-pool default anchor (ADR-0087): the session pool root is always
+  // `~/.iknow`, no longer sharded by cwd / workspaceRoot (the
+  // `<cwd>/.iknow` form is retired). This field only affects the per-root
+  // state anchor (memory library / skill seam / project `AGENTS.md`
+  // discovery) and is independent of the session pool root.
   const envWsRoot = bundle.env.workspaceRoot;
   const resolvedWorkspaceRoot =
     opts.workspaceRoot !== undefined || envWsRoot !== undefined
@@ -198,24 +213,28 @@ export async function buildHarnessEngine(
           env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
         })
       : undefined;
-  // #196 IKNOW T5 + issue #584: seed persona at `<homedir>/.iknow` only.
-  // `--workspace-root` / cwd must not receive user.md. Failures warn, do
-  // not block (build-engine repeats this with the userHome seam).
+  // Seed the persona at `<homedir>/.iknow` only; `--workspace-root` / cwd
+  // must not receive user.md. Failures warn and do not block (build-engine
+  // repeats this via the userHome seam).
   await initIknowWorkspaceSafe();
-  // W1: 宿主侧执行用户初始化脚本(默认 ~/.iknow/init.sh,可被
-  // IKNOW_HOST_INIT_SCRIPT 覆盖)。spawn 由宿主进程发起,不经过 agent
-  // bash 工具 → 无权限确认、无 allowlist 限制。文件不存在则 skip;
-  // 失败 warn + 不阻塞装配(降级契约)。先后顺序:先 initIknowWorkspaceSafe
-  // (seed 模板),再 runHostInitScriptSafe(用户脚本),用户脚本可读模板。
+  // Host-side user init script (default ~/.iknow/init.sh, overridable via
+  // IKNOW_HOST_INIT_SCRIPT). The spawn comes from the host process,
+  // bypassing the agent bash tool -> no permission prompt, no allowlist.
+  // Missing file -> skip; failure -> warn, assembly continues (degraded
+  // contract). Order matters: initIknowWorkspaceSafe (seed templates)
+  // first, then runHostInitScriptSafe, so user scripts can read templates.
   await runHostInitScriptSafe();
-  // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活;
-  // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内;
-  // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions;
-  // workspaceRoot (ADR-0019 T2) 透传到 per-root identity / memoryDir seam;
-  // todoDir (#440 T1-fix) 透传到 registry 让 todo_write 在场(surface !== ask 限定)。
-  // 只有这三个字段需要 wrapper 变形（env 换源 / surface 兜默认 / workspaceRoot
-  // 走 entry 层 resolver），其余一律 rest 整体透传 —— 白名单一手写，接口加了
-  // 新字段而转发漏接就是编译全绿的静默丢弃（review round 4）。
+  // surface forwards to buildCoreEngine, which decides whether the BOOTSTRAP
+  // segment activates; the memory switch forwards, its two branches live in
+  // buildCoreEngine; permissionMode forwards to policy.mode, the chat REPL
+  // holds the context flipped by /permissions; workspaceRoot (ADR-0019)
+  // forwards to per-root identity / memoryDir seams; todoDir forwards to the
+  // registry so todo_write is present (surface !== ask only).
+  // Only these three fields need wrapper reshaping (env source swap /
+  // surface default / workspaceRoot entry resolver); everything else passes
+  // through as rest — a hand-written whitelist guards only one direction, so
+  // adding a field here and missing it in forwarding would be a
+  // compile-green silent drop.
   const {
     askUser,
     surface,
@@ -223,13 +242,14 @@ export async function buildHarnessEngine(
     ...passthrough
   } = opts;
   return buildCoreEngine({
-    // 显式给了 `undefined` 的键必须抹掉:`exactOptionalPropertyTypes` 下
-    // `{ cwd: undefined }` 与「没有 cwd」不是一回事。值本身不做真值过滤 ——
-    // 空串要透下去触各根的 fail-closed，不能在这里被吞。
+    // Keys explicitly given `undefined` must be dropped: under
+    // `exactOptionalPropertyTypes`, `{ cwd: undefined }` is not "no cwd".
+    // Values themselves are not truthiness-filtered — empty strings must
+    // reach each root's fail-closed and must not be swallowed here.
     ...withoutUndefined(passthrough),
-    // 透传**之后**再写 wrapper 自己负责的字段:rest 里若混进 `env` 等本层
-    // 注入的键（本接口没声明，但类型只在字面量上挡得住），也覆盖不掉注入值
-    // （review round 5）。
+    // Wrapper-owned fields go **after** the spread: if a key the interface
+    // does not declare but this layer injects (e.g. `env`) sneaks into rest
+    // via a non-annotated literal, the explicit field still wins.
     env: bundle.env,
     askUser,
     surface: surface ?? "chat",
@@ -240,30 +260,32 @@ export async function buildHarnessEngine(
 }
 
 /**
- * #337 T8 / #356 T6 生命周期钩子 — 把 `shutdown` 句柄挂到进程退出事件上。
+ * Lifecycle hook — bind the `shutdown` handle to process exit events.
  *
- * 长程 CLI 入口（chat REPL / serve / tui）持有 MCP manager 后台连接 +
- * subagent manager 子进程池,进程退出前必须显式关闭 stdio 子进程 + 取消
- * in-flight 调用（SC11 / SC16 / SC12）。T6 起 `BuiltEngine.shutdown` 是
- * 组合句柄（Promise.all([mcpManager?.shutdown(), subagentManager?.shutdown()])） —
- * 顺序 mcpManager first → subagentManager second（两者无共享可变状态,
- * Promise.all 并发;顺序仅语义标注,非严格串行）。本钩子保持调用
- * shutdown 一次即可,不再展开。
- * ask 入口 manager 未创建 → shutdown 缺席 → 本函数直接返回 no-op 句柄,
- * 调用方无需特判。
+ * Long-lived CLI entries (chat REPL / serve / tui) hold MCP manager
+ * background connections plus the subagent manager child-process pool;
+ * before exit they must close stdio children and cancel in-flight calls.
+ * `BuiltEngine.shutdown` is a combined handle
+ * (Promise.all([mcpManager?.shutdown(), subagentManager?.shutdown()])) —
+ * mcpManager first / subagentManager second is a semantic annotation only
+ * (no shared mutable state, Promise.all runs concurrently). This hook just
+ * calls shutdown once. The ask entry never creates managers -> shutdown is
+ * absent -> this function returns a no-op handle; callers need no
+ * special-casing.
  *
- * 参数类型故意放宽为结构 `{ readonly shutdown?: () => Promise<void> }` —
- * `BuiltEngine` / `SessionHub` / TUI 入口本地 subagent 句柄都满足;
- * 注册钩子只关心 shutdown 一次调用,deps/engine 形态与本函数无关。
+ * The parameter type is deliberately structural
+ * `{ readonly shutdown?: () => Promise<void> }` — `BuiltEngine`,
+ * `SessionHub`, and TUI-local subagent handles all satisfy it; the hook
+ * only cares about one shutdown call.
  *
- * 用法:
+ * Usage:
  *   const built = await buildHarnessEngine(...);
- *   registerShutdown(built);  // chat:hook 一次即可
+ *   registerShutdown(built);  // chat: hook once
  *   const { hub } = await startSessionServe(...);
- *   registerShutdown(hub);    // serve:hub 暴露 built.shutdown
+ *   registerShutdown(hub);    // serve: hub exposes built.shutdown
  *
- * `dispose()` 用于测试或一次性清理场景主动调用（不影响已经绑定的进程
- * 信号监听器,后者由进程退出触发）。
+ * `dispose()` is for tests or one-shot cleanup (bound signal listeners are
+ * unaffected and still fire on process exit).
  */
 export function registerShutdown(built: {
   readonly shutdown?: () => Promise<void>;
@@ -271,14 +293,17 @@ export function registerShutdown(built: {
   readonly dispose: () => Promise<void>;
 } {
   let shuttingDown = false;
-  // #365 DRIFT-1 (源自 #356 review-High4):re-kill one-shot —— 首次信号
-  // dispose 完成后,重发一次让外部处理器(chat-session 的 onSigint 计数器
-  // 等)有机会强退;但无外部处理器(serve / 纯 registerShutdown) 时,
-  // unconditional re-kill 会与自身 handler 互踢成 microtask 死循环(vitest
-  // process.emit 同步路径掩盖;node/bun 真实信号投递实测挂死)。reKilled
-  // 守门:首次信号入口即置位;第二次信号落地后 force-exit,不再 re-kill。
-  // re-kill 放到 setImmediate,让 handler 先回到事件循环,降低 Unix 同
-  // 信号合并导致二次 SIGINT/SIGTERM 丢失。
+  // Re-kill one-shot: after the first signal's dispose completes, re-send
+  // it once so external handlers (e.g. chat-session's onSigint counter) get
+  // a chance to force-exit. With no external handler (serve / plain
+  // registerShutdown), unconditional re-kill ping-pongs with our own
+  // handler into a microtask loop (vitest's synchronous process.emit path
+  // masks it; hangs observed under real node/bun signal delivery).
+  // `reKilled` guards this: set on entry for the first signal; the second
+  // signal lands as a hard exit without re-killing. The re-kill goes
+  // through setImmediate so the handler returns to the event loop first,
+  // reducing the chance that Unix same-signal coalescing loses the second
+  // SIGINT/SIGTERM.
   let reKilled = false;
   const dispose = async (): Promise<void> => {
     if (shuttingDown) return;
@@ -297,7 +322,7 @@ export function registerShutdown(built: {
   };
   const onSignal = (sig: NodeJS.Signals): void => {
     if (reKilled) {
-      // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
+      // Second signal exits directly (user force-kill semantics), no waiting for the close fallback.
       const code = sig === "SIGINT" ? 130 : sig === "SIGTERM" ? 143 : 128;
       process.exit(code);
       return;
@@ -311,7 +336,7 @@ export function registerShutdown(built: {
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
-  // once:true — process.beforeExit 每轮触发,我们只在最后一刻跑一次。
+  // once:true — process.beforeExit fires each loop turn; run dispose only at the last moment.
   process.once("beforeExit", () => {
     void dispose();
   });

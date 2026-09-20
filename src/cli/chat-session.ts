@@ -156,180 +156,206 @@ export type ChatSessionOpts = {
   /**
    * Quiet pipe mode: no turn markers on stderr.
    * Default: true when `IKNOW_CHAT_QUIET=1`, else false.
-   * Interactive TTY ignores this (still uses prompt + optional 思考中).
+   * Interactive TTY ignores this (still uses prompt + optional Thinking…
+   * spinner).
    */
   quiet?: boolean;
   /**
-   * #152 T5:thinking 可见开关(env flag 落点)。默认 false。
-   * 来源 `IKNOW_CHAT_SHOW_THINKING=on|off`(env.ts SSOT)。开启时人类投影
-   * 在答案文本前展示 thinking;`projection.texts` / `finalText` / LoopTrace /
-   * session-store 均不受影响。
+   * Thinking visibility toggle for the human projection (env-driven).
+   * Default false; source `IKNOW_CHAT_SHOW_THINKING=on|off` (env.ts SSOT).
+   * When on, thinking is shown before the answer text; `projection.texts` /
+   * `finalText` / LoopTrace / session-store are unaffected.
    */
   showThinking?: boolean;
   /**
-   * W2: 权限模式上下文。`/permissions` 斜杠命令通过它就地翻 mode,
-   * 不重建引擎。ask/serve 不传。
+   * Permission-mode context. `/permissions` flips the mode in place without
+   * rebuilding the engine. Not passed by ask/serve.
    */
   permissionMode?: PermissionModeContext;
   /**
-   * D-α / ADR-0030: graph 编排 overlay 的会话 holder。Shift+Tab 三态轮与
-   * `/graph on|off` 改的是同一个它；装配层读它决定下一次 run() 是否露出
-   * `run_graph`。ask 不传（无 overlay）。
+   * ADR-0030: session holder for the graph-orchestration overlay. The
+   * Shift+Tab tri-state cycle and `/graph on|off` mutate this same object;
+   * the assembly layer reads it to decide whether the next run() exposes
+   * `run_graph`. ask does not pass it (no overlay).
    */
   graphMode?: GraphModeContext;
   /**
-   * ADR-0092 / SC13: filesystem isolation 档 holder（与 GraphModeContext
-   * 平行 —— 三入口一份单点）。`/config` 就地翻它；引擎装配读的也是同一个
-   * 它（`BuildEngineOpts.fsMode` → bash 工厂 per-call 读）。ask 不传
-   * （无 fs 档 → `/config` 提示未接线）。
+   * ADR-0092: filesystem isolation mode holder (parallel to
+   * GraphModeContext — one shared point across the three entry points).
+   * `/config` flips it in place; the engine assembly reads the same object
+   * (`BuildEngineOpts.fsMode` → bash factory per-call read). ask does not
+   * pass it (no fs mode → `/config` reports unwired).
    */
   fsMode?: FsModeContext;
   /**
-   * issue 1059 (G3):worktree-on-mutate 活 holder —— host 传
-   * `BuiltEngine.worktreeOnMutate`（引擎装配透出的单例，bash 门禁读同一个
-   * 它）。chat 的 verify 围栏经 `chatVerifyFenceOpts` 透传给 runVerifyLoop，
-   * 与 bash 工具面在 UNBOUND_FENCE 轴上判定同源。缺席（ask / 未接线的 host
-   * 注入缝）→ key 不产出，verify 走 V1 baseline，逐字节不变。
+   * worktree-on-mutate live holder — host passes
+   * `BuiltEngine.worktreeOnMutate` (the singleton surfaced by engine
+   * assembly; the bash gate reads the same one). chat's verify fence
+   * forwards it to runVerifyLoop via `chatVerifyFenceOpts`, so verify and
+   * the bash tool face judge the UNBOUND_FENCE axis from the same source.
+   * Absent (ask / unwired host seam) → the key is not produced, verify
+   * falls back to the V1 baseline, byte-for-byte unchanged.
    */
   worktreeOnMutate?: WorktreeGateReader;
   /**
-   * D-α T3: graph 装配快照（`BuiltEngine.graphAssembly`）。chat 的一个
-   * round = 一条用户查询行；host 在跑 run() 之前拍一次快照，翻键因此
-   * 「下一次 run() 才生效」。缺席 = 未接 overlay（工具与编排段都不存在）。
+   * Graph assembly snapshot (`BuiltEngine.graphAssembly`). One chat round =
+   * one user query line; the host takes a snapshot before run(), so mode
+   * flips only take effect on the next run(). Absent = overlay not wired
+   * (neither the tool nor the orchestration segment exists).
    */
   graphAssembly?: GraphAssembly;
   /**
-   * live-graph-phase1 T1 / ADR-0051:活图账本 host。与 graphMode 平行挂在
-   * 会话 runtime 上（overlay 开关不销毁它）；`/reset` 与进程退出销毁。
-   * ask 不传（无活图）。注意：这是**会话级**对象 —— rebind 重建引擎时
-   * **不** rewire（与 graphMode 同理），否则 reset 语义跨 rebind 漂移。
+   * Live-graph ledger host, attached to the session runtime parallel to
+   * graphMode (the overlay toggle does not destroy it); `/reset` and process
+   * exit do. ask does not pass it (no live graph). Session-scoped: a rebind
+   * engine rebuild deliberately does **not** rewire it (same as graphMode),
+   * otherwise reset semantics would drift across rebinds.
    */
   liveGraphLedger?: LiveGraphLedgerHost;
   /**
-   * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
-   * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
-   * SessionStore 加载既有 messages 作为初始历史;load 失败(typed)则保留
-   * 该 id 作为锚点继续,但 messages 从空开始。undefined = 每次新开随机
-   * UUID,行为与 T2 完全相同。
+   * `--resume <id>` anchors an existing conversationId to continue. When
+   * set, runChatSession uses it as the conversationId (writing back to the
+   * same checkpoint file) and tries to load existing messages from
+   * SessionStore as the initial history; a typed load failure keeps the id
+   * as an anchor but starts messages empty. undefined = a fresh random UUID
+   * per session.
    */
   resumeId?: string;
   /**
-   * review-fix (H2):调用方注入的 REPL 级 conversationId。给定时直接作为本
-   * 会话锚点 (cli.ts 在 runChat 入口算一次并显式透传: --resume 时 =
-   * resumeId,否则 = randomUUID()),runChatSession 内部不再二次生成 —— 让
-   * subagentsDir、checkpoint 文件、trace 锚点共用同一会话文件夹 (与 cli.ts
-   * 同源 SSOT,见 #950 T2 / ADR-0071 Decision 2 + T5 SC8)。
-   * 缺省 (ask / 旧测试 seam) → `resumeId ?? randomUUID()` 行为不变
-   * (byte-stable 退路)。
+   * Caller-injected REPL-level conversationId. When given it is used
+   * directly as the session anchor (cli.ts computes it once at runChat entry
+   * and passes it explicitly: = resumeId with --resume, otherwise
+   * randomUUID()); runChatSession no longer generates a second one — this
+   * keeps subagentsDir, the checkpoint file, and the trace anchor sharing
+   * one conversation folder (same SSOT as cli.ts, see ADR-0071).
+   * Default (ask / legacy test seam) → `resumeId ?? randomUUID()`, the
+   * byte-stable fallback, unchanged.
    */
   conversationId?: string;
   /**
-   * #356 T7:host drain — chat 入口每轮 runHarness 之前,调
-   * `drainPendingSubagents(subagentManager)` 把 completed 浓缩 envelope
-   * 拼入 next turn 的 priorMessages。ask 入口无 manager → 不传。
+   * Host drain — before each runHarness the chat entry calls
+   * `drainPendingSubagents(subagentManager)` and folds the condensed
+   * completed envelopes into the next turn's priorMessages. The ask entry
+   * has no manager → not passed.
    */
   readonly subagentManager?: SubAgentManager;
   /**
-   * #128 T8:验证闭环配置 (settings.verify 段经 cli.ts 构造)。
-   * command 缺失 (含 verify 段完全缺失) → `{ command: "" }` 仍非 undefined ——
-   * subagentManager 在场时 runClassifier 接管 (每轮 completed 后 spawn 判官,
-   * spec #128 Objective); 未装配 subagentManager (ask 形态) → verify-loop
-   * 透明关闭向后兼容 (SC7)。command 已配 → 每轮 run 被 runVerifyLoop 包裹。
+   * Verify-loop config (settings.verify section, constructed in cli.ts).
+   * A missing command (including a wholly missing verify section) still
+   * yields a non-undefined `{ command: "" }` — with subagentManager present
+   * the runClassifier takes over (spawning the judge after each
+   * completion); without it (ask shape) the verify loop stays transparently
+   * off for backward compatibility. With a configured command, every run is
+   * wrapped by runVerifyLoop.
    */
   readonly verifyConfig?: VerifyConfig;
   /**
-   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子(`BuiltEngine.autoMemory`)。
-   * 缺席(默认 OFF / ask 表面)→ 不调,行为逐字节不变。
+   * ADR-0031: auto-memory host hook (`BuiltEngine.autoMemory`). Absent
+   * (default OFF / ask surface) → never called, behavior byte-for-byte
+   * unchanged.
    */
   readonly autoMemory?: AutoMemoryHook;
   /**
    * auto-memory low-trust read: prepend scored bodies onto the user turn.
-   * Absent (default OFF / ask) → query is passed through unchanged. T1:
-   * hosts pass `excludeIds` (session-level dedup) via the second argument.
+   * Absent (default OFF / ask) → query is passed through unchanged. Hosts
+   * pass `excludeIds` (session-level dedup) via the second argument.
    */
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
-   * Review High-1 (2026-08-29 / ADR-0037): per-root 引擎重建缝。chat REPL 的
-   * deps 装配一次；T3 门禁 rebind 后会话文件 workspaceRoot 指向 task
-   * worktree，下一回合由本缝以新根重建（cli.ts runChat 提供 —— 用同一装配
-   * opts + 同一启动 settings 对象重跑 buildHarnessEngine，硬要求 9）。
-   * 缺席（ask / tests）→ 无重建检测，行为零变化。
+   * ADR-0037: per-root engine rebuild seam. The chat REPL's deps are
+   * assembled once; after a rebind the session file's workspaceRoot
+   * points at the task worktree, and the next turn rebuilds the engine at
+   * the new root through this seam (provided by cli.ts runChat — rerun
+   * buildHarnessEngine with the same assembly opts + the same startup
+   * settings object). Absent (ask / tests) → no rebuild detection, zero
+   * behavior change.
    *
-   * 收敛修复（2026-08-29）：返回完整句柄 bundle（RebuiltChatEngine，对齐
-   * TUI buildEngine 缝 / hub per-root 路径形状）—— 只回 deps 会把重建引擎
-   * 的 shutdown / subagentManager 等句柄丢在缝里（split-brain + 泄漏）。
+   * Returns the full handle bundle (RebuiltChatEngine, matching the TUI
+   * buildEngine seam / hub per-root path shape) — returning only deps would
+   * drop the rebuilt engine's shutdown / subagentManager handles in the
+   * seam (split-brain + leaks).
    */
   readonly rebuildDeps?: (root: string) => Promise<RebuiltChatEngine>;
   /**
-   * Review High-1:`opts.deps` 装配时的引擎根（sandboxRoot = process.cwd()）。
-   * rebind 检测基准：会话文件 workspaceRoot 偏离它时触发重建。缺席 → 不检测。
+   * Engine root at the time `opts.deps` was assembled (sandboxRoot =
+   * process.cwd()). Rebind detection baseline: rebuild triggers when the
+   * session file's workspaceRoot deviates from it. Absent → no detection.
    */
   readonly engineRoot?: string;
   /**
-   * 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— cli.ts 的
-   * registerShutdown 闭包读 `current`（只挂一次信号钩子），refresh 在
-   * rebind 切换点收口旧引擎后把重建引擎 shutdown 写入 current（SC11/SC16：
-   * SIGINT/SIGTERM 必须收口**活跃**引擎，而非停留在初始引擎）。
+   * Active-engine shutdown handle box — cli.ts's registerShutdown closure
+   * reads `current` (signal hooks installed once); refresh closes out the
+   * old engine at the rebind switch point and writes the rebuilt engine's
+   * shutdown into current (SIGINT/SIGTERM must always reach the **active**
+   * engine, never the stale initial one).
    */
   readonly engineShutdown?: { current?: () => Promise<void> };
   /** T1: resolved workspace root used by fresh checkpoint bootstraps. */
   readonly workspaceRoot?: string;
   /**
-   * review-fix (M2 / ADR-0087):显式 `--data-dir` 的会话池根。
-   * `undefined` → `resolveServeDataDir()` 缺省 `~/.iknow` —— **不是** cwd 分片。
-   * cli.ts runChat 透传 `parsed.dataDir`,使 `iknow chat --data-dir <alt>`
-   * 的 checkpoint / resume 落 `<alt>` 而非静默写 `~/.iknow`(ADR-0087
-   * «显式 dataDir = 独立池»)。ask / 旧测试不传 → 缺省池根。
+   * ADR-0087: session-pool root for an explicit `--data-dir`.
+   * `undefined` → `resolveServeDataDir()` defaults to `~/.iknow` — **not** a
+   * cwd shard. cli.ts runChat passes `parsed.dataDir`, so
+   * `iknow chat --data-dir <alt>` writes checkpoints / resume under `<alt>`
+   * instead of silently under `~/.iknow` (explicit dataDir = isolated pool).
+   * ask / legacy tests don't pass it → default pool root.
    */
   readonly dataDir?: string;
   /**
-   * T4 (plans/write-situation-disclosure.md):worktree isolation 档判定
-   *（`buildHarnessEngine` 启动加载点一次性读取的 `isolationEnabled`，与门
-   * 禁武装同源）。`refreshChatDepsForRebind` 用它算 rebind 一次性写根段
-   * 的处境枚举 —— 隔离 ON + rebind 到非树形根时仍按 `no_writable_root`
-   * 披露（兜底，对齐 spec skill-load-write-root.md 合同 6 amend）。缺席
-   * → 默认 false（旧形态 = `writable_main`，与改造前 byte-equal；测试 /
-   * ask 入口不接本缝）。
+   * Worktree isolation flag (one-time read at `buildHarnessEngine` startup,
+   * same source as gate arming). `refreshChatDepsForRebind` uses it to
+   * compute the situation enum for the one-shot post-rebind write-root
+   * segment — with isolation ON and a rebind to a non-tree root it still
+   * discloses `no_writable_root` (conservative fallback, aligned with the
+   * skill-load write-root contract). Absent → default false (legacy shape =
+   * `writable_main`, byte-equal to before the change; tests / ask don't wire
+   * this seam).
    */
   readonly isolationOn?: boolean;
   /**
-   * spec skill-index-increment T3：可加载技能面 catalog（cli.ts runChat
-   * 传 `built.skillCatalog`）。在场 → `/skill-name [remainder]` 走
-   * skill-load 信封装配（CLI 与 TUI / Web 同一入口）。缺席（ask / 旧测试）
-   * → 技能名落回未知命令分支，行为逐字节不变。
+   * Loadable-skills catalog (cli.ts runChat passes
+   * `built.skillCatalog`). Present → `/skill-name [remainder]` goes through
+   * the skill-load envelope assembly (same entry as TUI / Web). Absent (ask
+   * / legacy tests) → skill names fall back to the unknown-command branch,
+   * behavior byte-for-byte unchanged.
    */
   readonly skillCatalog?: SkillCatalog;
   /**
-   * spec skill-index-increment SC8：可加载面「当时热」的重扫缝（cli.ts
-   * runChat 传 `built.skillRescanner`）。在场 → 每条**非空 slash 行**解析
-   * 技能名前用现行根重扫一次，装配之后新装的技能当场可见（不必等下一个
-   * turn）；缺席（ask / 旧测试）→ 候选恒为装配期快照，行为逐字节不变。
+   * Hot rescan seam for the loadable surface (cli.ts runChat passes
+   * `built.skillRescanner`). Present → before resolving a skill name on
+   * every non-empty slash line, rescan with the current root, so skills
+   * installed after assembly are visible immediately (no need to wait for
+   * the next turn); absent (ask / legacy tests) → candidates stay the
+   * assembly-time snapshot, behavior byte-for-byte unchanged.
    *
-   * 与 `skillCatalog` 同时在场才有意义（无 catalog 则技能名一律落未知命令
-   * 分支，重扫无用）；缺席 catalog 时本缝被忽略。
+   * Only meaningful together with `skillCatalog` (without a catalog every
+   * skill name hits the unknown-command branch and rescanning is
+   * pointless); ignored when the catalog is absent.
    */
   readonly skillRescanner?: SkillRescanner;
 };
 
 /**
- * 收敛修复（2026-08-29）：rebuildDeps 缝的返回 bundle —— deps 之外还带
- * 重建引擎的 host 句柄，形状对齐 TUI `buildEngine` 缝 / hub per-root 路径。
- * T11 收敛：原 6 字段私有同形拷贝改为 `EngineBundle` SSOT 别名，三个 host
- * 共用同一类型,语义漂移消失。
+ * rebuildDeps seam return bundle — beyond deps it carries the rebuilt
+ * engine's host handles, shaped like the TUI `buildEngine` seam / hub
+ * per-root path. This is the `EngineBundle` SSOT alias shared by the three
+ * hosts, so no private copy can drift semantically.
  */
 export type RebuiltChatEngine = EngineBundle & {
   /**
-   * spec skill-index-increment T3：重建引擎的 skillCatalog（`BuiltEngine`
-   * 的超集字段，`EngineBundle` 本身不透出——那层是六字段 host 句柄面）。
-   * 可选：旧缝（只回 EngineBundle 的调用方）不提供 → refresh 保持 ctx 上
-   * 的原 catalog（旧根的技能集，可见降级而非静默切换）。
+   * The rebuilt engine's skillCatalog (a `BuiltEngine` superset field;
+   * `EngineBundle` itself doesn't surface it — that's the six-field host
+   * handle surface). Optional: legacy seams (returning only EngineBundle)
+   * omit it → refresh keeps the ctx's original catalog (the old root's
+   * skill set; a visible degradation rather than a silent swap).
    */
   readonly skillCatalog?: SkillCatalog;
   /**
-   * spec skill-index-increment SC8：重建引擎的 rescan 缝（`BuiltEngine`
-   * 同源字段）。与 `skillCatalog` 必须**同台换血** —— 只换 catalog 会让
-   * 「当场热」的候选来自旧根的扫描台。可选：旧缝不提供 → 保持原 rescanner
-   * （与 catalog 同款可见降级；不会静默变成「无重扫」）。
+   * The rebuilt engine's rescan seam (`BuiltEngine` same field). Must be
+   * swapped **together with** `skillCatalog` — swapping only the catalog
+   * would draw "hot" candidates from the old root's scan seam. Optional:
+   * legacy seams omit it → keep the original rescanner (same visible
+   * degradation as the catalog; never silently becomes "no rescan").
    */
   readonly skillRescanner?: SkillRescanner;
 };
@@ -337,46 +363,50 @@ export type RebuiltChatEngine = EngineBundle & {
 export type ChatLineContext = {
   deps: LoopEngineDeps;
   state: CliChatState;
-  /** #152 T5:thinking 可见开关(与 ChatSessionOpts.showThinking 同源)。 */
+  /** Thinking visibility toggle (same source as ChatSessionOpts.showThinking). */
   showThinking?: boolean;
-  /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
+  /** Permission-mode context (passed through by runChatSession; /permissions flips it). */
   permissionMode?: PermissionModeContext;
-  /** D-α: graph 编排 overlay holder(由 runChatSession 透传,/graph 与
-   *  Shift+Tab 翻它)。 */
+  /** Graph-orchestration overlay holder (passed through by runChatSession;
+   *  flipped by /graph and Shift+Tab). */
   graphMode?: GraphModeContext;
-  /** ADR-0092 / SC13: filesystem isolation 档 holder(由 runChatSession
-   *  透传,/config 翻它)。 */
+  /** ADR-0092: filesystem isolation mode holder (passed through by
+   *  runChatSession; /config flips it). */
   fsMode?: FsModeContext;
-  /** issue 1059 (G3): worktree-on-mutate 活 holder(同
-   *  ChatSessionOpts.worktreeOnMutate,runChatSession 透传)。verify 围栏与
-   *  bash 门禁的 UNBOUND_FENCE 轴同源判定;缺席 → key 不产出。 */
+  /** worktree-on-mutate live holder (same as
+   *  ChatSessionOpts.worktreeOnMutate, passed through by runChatSession).
+   *  verify fence and the bash gate share the UNBOUND_FENCE judgment;
+   *  absent → key not produced. */
   worktreeOnMutate?: WorktreeGateReader;
-  /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
+  /** Graph assembly snapshot (passed through by runChatSession; taken once
+   *  before a query line runs). */
   graphAssembly?: GraphAssembly;
   /**
-   * live-graph-phase1 T1:活图账本 host(同 ChatSessionOpts.liveGraphLedger,
-   * runChatSession 透传)。会话级 —— `/reset` 销毁,进程退出 destroyAll。
+   * Live-graph ledger host (same as ChatSessionOpts.liveGraphLedger, passed
+   * through by runChatSession). Session-scoped — destroyed by `/reset`;
+   * destroyAll on process exit.
    */
   liveGraphLedger?: LiveGraphLedgerHost;
   /**
-   * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
-   * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
-   * 缺省(pipe / tests)→ signal=undefined,行为零变化。
+   * REPL-level AbortController wired into run()'s signal — the first SIGINT
+   * while busy aborts the in-flight turn, which resolves with stopReason
+   * "cancelled". Default (pipe / tests) → signal=undefined, zero change.
    */
   abortController?: AbortController;
   /**
-   * T2: checkpoint 落盘的 SessionStore(默认 ~/.iknow 池,与 serve/TUI 同池
-   * — #120 Q6 精神)。与 `state.conversationId` 同时存在时,post-run 走
-   * decideCheckpointPersist → appendCheckpoint → 原子写。缺省(ask/tests)→
-   * 跳过持久化,行为零变化。
+   * SessionStore for post-run checkpoints (default ~/.iknow pool, shared
+   * with serve/TUI). When present alongside `state.conversationId`,
+   * post-run goes decideCheckpointPersist → appendCheckpoint → atomic
+   * write. Default (ask/tests) → skip persistence, zero change.
    */
   checkpointStore?: SessionStore;
   /** T1: resolved root persisted when a fresh checkpoint file is bootstrapped. */
   workspaceRoot?: string;
   /**
-   * #356 T7:同 ChatSessionOpts.subagentManager,runChatSession 透传。
-   * 缺席(undefined)= 不调 drain,行为零变化。可变 —— rebind 重建后由
-   * refreshChatDepsForRebind 换血到重建引擎的 manager（split-brain 修复）。
+   * Same as ChatSessionOpts.subagentManager, passed through by
+   * runChatSession. Absent (undefined) = no drain, zero change. Mutable —
+   * after a rebind rebuild, refreshChatDepsForRebind swaps it to the
+   * rebuilt engine's manager (split-brain fix).
    */
   subagentManager?: SubAgentManager;
   /**
@@ -385,11 +415,13 @@ export type ChatLineContext = {
    */
   pendingSubagentDrain?: string;
   /**
-   * 一次性写根段（specs/skill-load-write-root.md T5）：rebind 重建成功后由
-   * refreshChatDepsForRebind 置入（writeRootSegment 文案），下一次查询行 /
-   * subagent wake 组 priorMessages 时拼到末尾并清空。仅改绑后一次，非每条
-   * 用户消息；不进 system / env_snapshot。run 失败 / cancelled 时该通知
-   * **即弃不重投**（刻意选择：写根是幂等引导，下一次 rebind 才重新给）。
+   * One-shot write-root notice segment: set by refreshChatDepsForRebind
+   * after a successful rebind (writeRootSegment text); appended to the end
+   * of the priorMessages for the next query line / subagent wake and then
+   * cleared. Fires once after rebind, not on every user message; never
+   * enters system / env_snapshot. On run failure / cancellation the notice
+   * is **discarded, not redelivered** (deliberate: the write root is
+   * idempotent guidance; the next rebind reissues it).
    */
   pendingWriteRootNotice?: string;
   /**
@@ -398,108 +430,132 @@ export type ChatLineContext = {
    */
   onSubagentManagerRebound?: () => void;
   /**
-   * #128 T8:同 ChatSessionOpts.verifyConfig,runChatSession 透传。
-   * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
+   * Same as ChatSessionOpts.verifyConfig, passed through by
+   * runChatSession. Absent (undefined) = run is not wrapped, behavior
+   * byte-for-byte unchanged (only test / unwired assembly paths).
    */
   readonly verifyConfig?: VerifyConfig;
   /**
-   * auto-memory T4:同 ChatSessionOpts.autoMemory,runChatSession 透传。
-   * 缺席 = 不调钩子,行为零变化。可变 —— rebind 重建后随活跃引擎换血。
+   * Same as ChatSessionOpts.autoMemory, passed through by runChatSession.
+   * Absent = hook not called, zero change. Mutable — follows the active
+   * engine on rebind rebuilds.
    */
   autoMemory?: AutoMemoryHook;
   /**
-   * auto-memory low-trust read: same ChatSessionOpts field, runChatSession 透传.
-   * T1: hosts pass `excludeIds` (session-level dedup) via the second argument.
-   * 可变 —— rebind 重建后随活跃引擎换血。
+   * Auto-memory low-trust read: same ChatSessionOpts field, passed through
+   * by runChatSession. Hosts pass `excludeIds` (session-level dedup) via
+   * the second argument. Mutable — follows the active engine on rebind
+   * rebuilds.
    */
   overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
-   * auto-memory T1: session-level prefetch dedup state — per-conversation
-   * sets of already-injected memory ids. Allocated lazily by processChatLine
-   * (runChatSession 的 ctx 存活整个 REPL,天然 per-conversation);测试可省略。
+   * Auto-memory session-level prefetch dedup state — per-conversation sets
+   * of already-injected memory ids. Allocated lazily by processChatLine
+   * (the runChatSession ctx lives for the whole REPL, naturally
+   * per-conversation); optional in tests.
    */
   prefetchInjectedIds?: Map<string, Set<string>>;
   /**
-   * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
+   * CLI _client_ idle/busy-guard for continue. Shared mutable box
    * so a concurrent processChatLine can refuse continue without aborting the
    * in-flight turn (EXIT busy_stop_first).
    */
   clientBusy?: { value: boolean };
   /**
-   * Review High-1: per-root 引擎重建缝（runChatSession 装配；同
-   * ChatSessionOpts.rebuildDeps）。缺席 → processChatLine 不做重建检测。
-   * 返回 RebuiltChatEngine bundle（句柄 rewire 见 refreshChatDepsForRebind）。
+   * Per-root engine rebuild seam (assembled by runChatSession; same as
+   * ChatSessionOpts.rebuildDeps). Absent → processChatLine does no rebuild
+   * detection. Returns the RebuiltChatEngine bundle (handle rewiring in
+   * refreshChatDepsForRebind).
    */
   rebuildDeps?: (root: string) => Promise<RebuiltChatEngine>;
   /**
-   * Review High-1: 当前 deps 绑定的引擎根（可变 —— 重建后随新根更新）。
+   * Engine root the current deps are bound to (mutable — updated with the
+   * new root after rebuilds).
    */
   engineRoot?: string;
   /**
-   * 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒（同
-   * ChatSessionOpts.engineShutdown，runChatSession 透传）。缺席（ask/tests）
-   * → 重建时不做 shutdown 收口/换血，行为与上一版一致。
+   * Active-engine shutdown handle box (same as
+   * ChatSessionOpts.engineShutdown, passed through by runChatSession).
+   * Absent (ask/tests) → rebuilds skip shutdown closeout/handoff, behavior
+   * matches the previous version.
    */
   engineShutdown?: { current?: () => Promise<void> };
   /**
-   * Review High-1: 重建 deps 的包装缝（runChatSession 提供 wrapChatDeps ——
-   * violation executor + conversationId + commitMessages 与初始装配同语义）。
-   * 缺席 → 重建结果仅收敛 conversationId（tests）。
+   * Wrapper seam for rebuilt deps (runChatSession provides wrapChatDeps —
+   * violation executor + conversationId + commitMessages with the same
+   * semantics as initial assembly). Absent → rebuild results only converge
+   * conversationId (tests).
    */
   wrapRebuiltDeps?: (base: LoopEngineDeps) => LoopEngineDeps;
   /**
-   * T4 (plans/write-situation-disclosure.md)：worktree isolation 档（与
-   * `ChatSessionOpts.isolationOn` 同源 —— runChatSession 透传）。用于
-   * `refreshChatDepsForRebind` 计算 rebind 一次性写根段的处境枚举。不会随
-   * rebind 变化（settings 启动读取，启动后只读）。缺席 → 默认 false
-   * （旧形态 = `writable_main`；tests / ask 不接本缝）。
+   * Worktree isolation flag (same source as
+   * `ChatSessionOpts.isolationOn` — passed through by runChatSession). Used
+   * by `refreshChatDepsForRebind` to compute the situation enum of the
+   * one-shot post-rebind write-root segment. Never changes across rebinds
+   * (settings read at startup, read-only afterwards). Absent → default
+   * false (legacy shape = `writable_main`; tests / ask don't wire this
+   * seam).
    */
   isolationOn?: boolean;
   /**
-   * spec skill-index-increment T3：可加载技能面 catalog（`BuiltEngine`
-   * 的 skillCatalog）。在场时 `/skill-name [remainder]` 走 skill-load 信封
-   * 装配（与 TUI / Web 同一入口语义）；缺席（ask / 旧测试）→ 技能名落回
-   * 未知命令分支，行为与今日逐字节一致。
+   * Loadable-skills catalog (`BuiltEngine`'s skillCatalog). Present →
+   * `/skill-name [remainder]` goes through skill-load envelope assembly
+   * (same entry semantics as TUI / Web); absent (ask / legacy tests) →
+   * skill names fall back to the unknown-command branch, byte-identical to
+   * today.
    *
-   * 可变 —— rebind 重建后由 `refreshChatDepsForRebind` 换血到重建引擎的
-   * catalog（否则 slash 面停留在旧根的技能集 = split-brain）。
+   * Mutable — refreshChatDepsForRebind swaps it to the rebuilt engine's
+   * catalog after rebinds (otherwise the slash surface stays on the old
+   * root's skill set = split-brain).
    */
   skillCatalog?: SkillCatalog;
   /**
-   * spec skill-index-increment SC8：可加载面「当时热」的重扫缝（同
-   * `ChatSessionOpts.skillRescanner`，runChatSession 透传）。在场 → 每条
-   * 非空 slash 行解析技能名前以现行根重扫一次，装配后新装的技能当场可见。
+   * "Hot at the moment" rescan seam for the loadable surface (same as
+   * `ChatSessionOpts.skillRescanner`, passed through by runChatSession).
+   * Present → rescan with the current root before resolving a skill name on
+   * each non-empty slash line, so newly installed skills after assembly are
+   * visible immediately.
    *
-   * 可变 —— rebind 重建后与 `skillCatalog` **同台**换血（只换其一 = 新根的
-   * 候选配旧根的重扫台，split-brain）。
+   * Mutable — swapped **together with** `skillCatalog` on rebind (swapping
+   * only one = new-root candidates on the old root's scan seam,
+   * split-brain).
    */
   skillRescanner?: SkillRescanner;
 };
 
 /**
- * Review High-1 (2026-08-29): rebind 检测 —— 会话文件 workspaceRoot 偏离
- * ctx.engineRoot（上一回合 T3 门禁建树改绑落盘）→ 以新根重建。失败可见
- * 降级（保持旧 deps，stale 引擎门禁继续 fail-closed，绝不静默放行写旧根）。
- * rebuildDeps / checkpointStore 缺席（ask / tests）→ no-op。
+ * Rebind detection — when the session file's workspaceRoot deviates from
+ * ctx.engineRoot (an isolation gate rebound and persisted the root during
+ * the previous turn), rebuild at the new root. Failure degrades visibly
+ * (keep the old deps; the stale engine's gate stays fail-closed, never
+ * silently allowing writes to the old root). rebuildDeps / checkpointStore
+ * absent (ask / tests) → no-op.
  *
- * 收敛修复（2026-08-29 第二轮 review）：重建成功后把 RebuiltChatEngine
- * bundle 的句柄 rewire 进 ctx —— subagentManager / graphAssembly /
- * autoMemory / overlayMemoryPrefetch 全部指向重建引擎（否则 drain 旧
- * manager 而活跃引擎 spawn 进新 manager = split-brain 丢结果；/graph 快照
- * 反映旧装配）。shutdown 收口取舍：**旧引擎先收口，再把重建引擎 shutdown
- * 写入 ctx.engineShutdown.current**（组合收口被否 —— registerShutdown 只
- * 挂一次信号钩子，闭包读 current 单值，历史句柄列表会让信号路径重复关
- * 已废弃引擎）。旧引擎切换前先等待仍在运行的后台子代理完成并 drain
- * 其终态结果，交给下一次主模型 run；等待失败的 task id 会在 shutdown
- * 前以 stderr 明确告知，随后仍按既有生命周期收口旧引擎。
+ * After a successful rebuild, the RebuiltChatEngine bundle's handles are
+ * rewired into ctx — subagentManager / graphAssembly / autoMemory /
+ * overlayMemoryPrefetch all point at the rebuilt engine (otherwise drain
+ * reads the old manager while the active engine spawns into the new one =
+ * split-brain result loss; /graph snapshots would reflect the old
+ * assembly). Shutdown closeout order: **close out the old engine first,
+ * then write the rebuilt engine's shutdown into
+ * ctx.engineShutdown.current** (a combined closeout was rejected —
+ * registerShutdown installs signal hooks once and its closure reads the
+ * single `current` value; a historical handle list would let the signal
+ * path re-close already-retired engines). Before switching, wait for the
+ * old engine's still-running background subagents to finish and drain
+ * their terminal results into the next primary-model run; task ids whose
+ * wait failed are reported on stderr before shutdown, and the old engine
+ * is still closed out per its existing lifecycle.
  */
 /**
- * split-brain 修复：重建引擎接管后，把 host 侧句柄全部指向它 —— drain /
- * `/graph` 快照 / auto-memory / overlay prefetch / 技能面随活跃引擎走。
+ * Split-brain fix: after the rebuilt engine takes over, point all
+ * host-side handles at it — drain / `/graph` snapshots / auto-memory /
+ * overlay prefetch / skill surface follow the active engine.
  *
- * 单职责抽出自 `refreshChatDepsForRebind`（S5 门：该函数已 long，再加分支
- * 即越线）；每项都是「重建产物 → ctx 槽位」的搬运，判据一致 —— 提供者
- * 缺席时保持原值。
+ * Extracted from `refreshChatDepsForRebind` under single responsibility
+ * (that function was already long); each item is a "rebuilt artifact → ctx
+ * slot" transfer with the same rule — when the provider is absent, keep
+ * the original value.
  */
 function swapHostHandlesToRebuiltEngine(
   ctx: ChatLineContext,
@@ -509,17 +565,20 @@ function swapHostHandlesToRebuiltEngine(
   ctx.graphAssembly = rebuilt.graphAssembly;
   ctx.autoMemory = rebuilt.autoMemory;
   ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
-  // spec skill-index-increment T3：slash 技能面随活跃引擎走 —— 换血后
-  // `/skill` 候选 / 正文读取用的是新根的技能集（旧缝不提供该字段时保持
-  // 原 catalog，见 RebuiltChatEngine.skillCatalog 注释）。
+  // Skill surface follows the active engine — after handoff, `/skill`
+  // candidates / body reads use the new root's skill set (when the legacy
+  // seam omits the field, keep the original catalog; see
+  // RebuiltChatEngine.skillCatalog).
   if (rebuilt.skillCatalog !== undefined) {
     ctx.skillCatalog = rebuilt.skillCatalog;
   }
-  // spec skill-index-increment SC8：rebind 后「当场热」的缝也必须指向**新台**
-  // —— catalog 换了新的、重扫却还留在旧根的 rescan 台上，「新根装的技能」
-  // 与「旧根的重扫结果」会在下一次 `/` 行上互相打架（catalog 热了但候选来自
-  // 旧根）。缺席（旧缝不提供该字段）→ 保持原 rescanner（与 catalog 同款
-  // 可见降级，不静默切成无重扫）。
+  // The rescan seam must also point at the **new** seam post-rebind — a
+  // fresh catalog with rescan still on the old root would make "skills
+  // installed on the new root" and "rescan results from the old root"
+  // fight each other on the next `/` line (candidates hot but sourced from
+  // the old root). Absent (legacy seam) → keep the original rescanner
+  // (same visible degradation as the catalog; never silently drops
+  // rescanning).
   if (rebuilt.skillRescanner !== undefined) {
     ctx.skillRescanner = rebuilt.skillRescanner;
   }
@@ -539,9 +598,11 @@ export async function refreshChatDepsForRebind(
     const file = await store.load(conversationId);
     newRoot = file.workspaceRoot;
   } catch (err) {
-    // typed not_found = 会话文件缺席的正常形态 → 无 rebind 信号，静默
-    // （门禁兜底仍 fail-closed）。其余错误（io_error / parse_failed /
-    // schema_invalid…）是真实 IO 异常 —— 可见降级（保持旧 deps），不无声吞。
+    // typed not_found = the normal shape of an absent session file → no
+    // rebind signal, stay silent (the gate's fail-closed backstop still
+    // holds). Other errors (io_error / parse_failed / schema_invalid…) are
+    // real IO faults — degrade visibly (keep the old deps), never swallow
+    // silently.
     if (
       typeof err === "object" &&
       err !== null &&
@@ -567,9 +628,11 @@ export async function refreshChatDepsForRebind(
     );
     return;
   }
-  // 切换点：旧引擎先收口（await，失败仅警告 —— 收口失败不阻断新引擎接管），
-  // 再换血 ctx 句柄 + shutdown 盒。此顺序保证信号路径任意时刻读 current
-  // 都指向「已收口旧引擎之后的活跃引擎」，不存在双引擎同时持有句柄窗口。
+  // Switch point: close out the old engine first (await; failure warns
+  // only — a closeout fault must not block the new engine taking over),
+  // then swap ctx handles + the shutdown box. This ordering guarantees the
+  // signal path always reads `current` pointing at "the active engine after
+  // the old one was closed" — no window where both engines hold handles.
   const previousManager = ctx.subagentManager;
   if (previousManager !== undefined) {
     const closeout = await drainPendingSubagentsBeforeShutdown(
@@ -626,18 +689,21 @@ export async function refreshChatDepsForRebind(
       }\n`
     );
   }
-  // 写根段（specs/skill-load-write-root.md T5 合同 7）：改绑成功且**活写根
-  // ≠ 身份根**时，下一次主模型 run 再给一次当前写根（与 worker prior /
-  // skill trailer 同一 helper 文案）。身份根判定 = mainCheckoutOf(newRoot)
-  //（纯路径派生，与装配期 projectIdentityRoot 同源）：exit-worktree
-  // 回主仓时两根相同，注入的「写根在上 / Project path 只读」文案会自相
-  // 矛盾 → 不置入。仅在重建成功走到这里；重建失败 / 根未变化的提前
-  // return 不经过。
+  // Write-root segment: when rebind succeeded and **the live write root ≠
+  // the identity root**, give the next primary-model run the current write
+  // root once (same helper text as worker prior / skill trailer). Identity
+  // root = mainCheckoutOf(newRoot) (pure path derivation, same source as
+  // assembly-time projectIdentityRoot): on exit-worktree back to the main
+  // repo the two roots coincide, and the injected "write root is up /
+  // Project path read-only" text would contradict itself → don't set it.
+  // Only reached on successful rebuild; rebuild failure / unchanged-root
+  // early returns skip this.
   //
-  // T4 (write-situation-disclosure)：处境枚举 = writeSituation(isolationOn,
-  // newRoot)。隔离 OFF 一律 `writable_main`（与改造前逐字节相等）；隔离
-  // ON + 树形 → `writable_tree`（同字节相等）；隔离 ON + 非树形 → ③ 态
-  // 披露（保守兜底，rebind 真要回主仓时上方 `mainCheckoutOf` 已先拒）。
+  // Situation enum = writeSituation(isolationOn, newRoot). Isolation OFF is
+  // always `writable_main` (byte-equal to before the change); isolation ON +
+  // tree root → `writable_tree` (also byte-equal); isolation ON + non-tree
+  // root → the third state's disclosure (conservative fallback; a genuine
+  // return to the main repo is already rejected above by `mainCheckoutOf`).
   ctx.pendingWriteRootNotice =
     newRoot !== mainCheckoutOf(newRoot)
       ? (writeRootSegment(
@@ -676,10 +742,12 @@ function acknowledgeChatSubagentDrain(
 }
 
 /**
- * drain 前缀 user 消息(wake / query 行两处 commit 共用)。
- * ADR-0112 Does #1:drain 浓缩是宿主注入 commit —— 盖非模型可见出处戳,
- * 出站投影才按官方帧透传 "## Sub-agent " 前缀锚。段内所有文本块
- * (drain / 写根通知)都来自宿主,整条盖戳语义成立。
+ * Drain-prefixed user message (shared by wake / query-line commits).
+ * ADR-0112: the condensed drain is a host-injected commit — stamped with a
+ * non-model-visible provenance mark; only the outbound projection forwards
+ * it as the official "## Sub-agent " prefix anchor. Every text block in the
+ * segment (drain / write-root notice) comes from the host, so stamping the
+ * whole message is sound.
  */
 function hostDrainMessage(
   texts: ReadonlyArray<string>
@@ -697,7 +765,7 @@ export type ProcessChatLineResult = {
   /** Material for stdout (answers, slash info/help/reset). */
   output: string;
   /**
-   * #195: status line extracted from `formatRunHuman` (human projection only;
+   * Status line extracted from `formatRunHuman` (human projection only;
    * `undefined` for JSON projection or slash commands). The streaming chat
    * host uses this when the answer text has already been streamed to stdout
    * as the final output — emitting it avoids re-rendering the answer.
@@ -707,7 +775,7 @@ export type ProcessChatLineResult = {
   stderr?: string;
   /** True when this line was a user query that ran the agent. */
   ranQuery?: boolean;
-  /** T6: a silent subagent handoff failed; no completion was fabricated. */
+  /** A silent subagent handoff failed; no completion was fabricated. */
   wakeFailure?: SubagentWakeError;
 };
 
@@ -715,27 +783,32 @@ export interface ProcessChatLineOpts {
   readonly line: string;
   readonly ctx: ChatLineContext;
   /**
-   * #179 T6 (#147 D3):流式事件观察者回调,原样透传给 run() opts。
-   * 交互 REPL 用它做增量预览(spinner 接缝);pipe/ask 不接(undefined 透传,
-   * 行为零变化)。回调异常在 loop 引擎层吞咽(观察者不破坏回合)。
+   * Streaming-event observer callback, passed through to run() opts
+   * verbatim. The interactive REPL uses it for incremental preview (spinner
+   * seam); pipe/ask don't wire it (undefined passthrough, zero change).
+   * Observer callback exceptions are swallowed at the loop-engine layer
+   * (observers must not break turns).
    */
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }
 
 /**
- * #449 B8 (SC5, 修订 per #473): chat 端 verify-loop task 公式的纯读盘 +
- * helper。`goal.text ?? query` (empty-goal-skip 同纪律)。
+ * Pure disk-read + helper for the chat-side verify-loop task formula:
+ * `goal.text ?? query` (same discipline as empty-goal-skip).
  *
- * 历史: taskFocus 段曾在 #473 从 verify 输入中移除(#605 T2 已将整段
- * session.taskFocus 字段及 seed 生命周期彻底退休), 仅 goal 字段驱动。
+ * History: a taskFocus segment was once removed from verify input; the
+ * whole session.taskFocus field and its seed lifecycle have since been
+ * retired, so only the goal field drives it.
  *
- * 失败语义 (plan T1 named EXIT):
- * - store 缺席 / conversationId === null → HITL; userText = query。
- *   不把 query 当完成向判官 task。
- * - store.load 成功且 goal.text 非空 → auto; userText = goal.text。
- * - store.load 成功且无 goal / 空 goal.text → HITL; userText = query。
- * - store.load 抛任何错误 (含 not_found) → HITL; userText = query。
- *   禁止 fail-open 把 query 当判官 task。
+ * Failure semantics (named EXIT paths):
+ * - store absent / conversationId === null → HITL; userText = query.
+ *   Never treat the query as the judge's task for a completion.
+ * - store.load succeeds with non-empty goal.text → auto; userText =
+ *   goal.text.
+ * - store.load succeeds with missing / empty goal.text → HITL;
+ *   userText = query.
+ * - store.load throws anything (incl. not_found) → HITL; userText = query.
+ *   Fail-open (query as judge task) is forbidden.
  */
 async function resolveVerifyDispatch(
   store: SessionStore | undefined,
@@ -929,7 +1002,8 @@ async function runSkipAppendAndPresent(opts: {
     ) {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
-    // auto-memory T4: `/continue` 也是一轮完成的 turn,与主路径同待遇。
+    // auto-memory: `/continue` is also a completed turn; treat it like the
+    // main path.
     notifyAutoMemory({
       hook: ctx.autoMemory,
       stopReason: result.stopReason,
@@ -973,7 +1047,7 @@ async function runSkipAppendAndPresent(opts: {
 }
 
 /**
- * T4: consume a terminal subagent handoff without inventing a user input.
+ * Consume a terminal subagent handoff without inventing a user input.
  * The drain is a prior user message for the model, but it never goes through
  * the readline/input-history path.
  */
@@ -988,8 +1062,9 @@ export async function runChatSubagentWake(opts: {
   if (box.value) return { quit: false, output: "" };
   box.value = true;
   ctx.graphAssembly?.beginRound();
-  // 写根段（specs/skill-load-write-root.md T5）：wake 是 rebind 后可能先于
-  // 用户查询到达的主模型 run —— 与查询行同型消费一次性槽位，消费即清空。
+  // Write-root segment: wake is a primary-model run that may arrive before
+  // a user query post-rebind — consume the one-shot slot the same way query
+  // lines do; consuming clears it.
   const wakeWriteRootNotice = ctx.pendingWriteRootNotice;
   if (wakeWriteRootNotice !== undefined) {
     ctx.pendingWriteRootNotice = undefined;
@@ -1135,21 +1210,28 @@ async function maybeContinueFromPendingNl(opts: {
 }
 
 /**
- * spec skill-index-increment SC8：slash 候选的**现行** catalog。
+ * The **current** catalog for slash candidates.
  *
- * 装配期 catalog 是冻结快照（`ctx.skillCatalog` 只在 rebind 换血），技能装
- * 上去后要等下一次 rebind 才进候选 —— SC8 要求「安装 / reload 当下 `/` 已含
- * 新条目」。重扫缝在场时现场重扫取现行 `loadable()`；缝缺席（ask / 旧测试）
- * 或重扫失败 → 缓存快照（人侧 slash 不因一次 IO 故障变空，EXIT：可见降级）。
+ * The assembly-time catalog is a frozen snapshot (`ctx.skillCatalog` only
+ * refreshes on rebind), so newly installed skills wait for the next rebind
+ * to enter candidates — but the surface should include new entries the
+ * moment they are installed / reloaded. When the rescan seam is present,
+ * rescan live and return the current `loadable()`; seam absent (ask / legacy
+ * tests) or rescan failure → the cached snapshot (the human-side slash
+ * surface must not go empty because of one IO fault; EXIT: visible
+ * degradation).
  *
- * 刷新点选在 **非静态 slash 行**（`trySkillLoadLine`），不是每次按键：CLI 的
- * 候选是「输入 `/name` + Enter 后解析」形态（无逐键补全），逐键重扫只会引入
- * 输入延迟而不改变任何可观察结果；「当场」= 下一行 slash 生效，正是 SC8 要的
- * 「不必等下一 turn」。静态词表行（`/help` 等）在 `parseSkillLoad` 里就短路，
- * 重扫对它们没有可观察作用，故调用方先判静态再进来 —— 不为一条 `/quit` 扫盘。
+ * The refresh point is **non-static slash lines** (`trySkillLoadLine`), not
+ * every keystroke: the CLI resolves candidates as "type `/name` + Enter"
+ * (no per-key completion), so per-key rescans would only add input latency
+ * without changing any observable result; "immediately" = effective on the
+ * next slash line. Static-vocabulary lines (`/help` etc.) short-circuit
+ * inside `parseSkillLoad`, so rescans have no observable effect on them —
+ * callers check for static first, never scanning the disk for a `/quit`.
  *
- * 降级只报**非 ENOENT** 那类真故障（`SkillRescanError`）—— 技能根重扫时
- * 正好缺席是合法空态（scanner 的既有纪律），不该刷屏。
+ * Degradation reports only real faults (non-ENOENT `SkillRescanError`) — a
+ * skill root happening to be absent during rescan is a legal empty state
+ * (existing scanner discipline) and shouldn't spam.
  */
 async function slashCandidateCatalog(
   ctx: ChatLineContext,
@@ -1161,10 +1243,11 @@ async function slashCandidateCatalog(
     return await rescanner.rescan();
   } catch (err) {
     if (!(err instanceof SkillRescanError)) throw err;
-    // EXIT: typed rescan 失败 → 退回缓存 catalog（不抛给 REPL：一次 IO
-    // 故障不该让已装技能变成 unknown command），但降级必须可见。
-    // 渲染归 `errorMessage`（code-quality.md typed-error catch 契约禁止
-    // `instanceof Error ? … : String(…)`）。
+    // EXIT: typed rescan failure → fall back to the cached catalog (never
+    // throw to the REPL: one IO fault must not turn installed skills into
+    // unknown command), but the degradation must be visible. Rendering
+    // belongs to `errorMessage` (the typed-error catch contract forbids
+    // `instanceof Error ? … : String(…)`).
     writeErr(
       `[skill] slash 候选刷新失败，沿用装配期快照: ${errorMessage(err)}\n`
     );
@@ -1173,14 +1256,17 @@ async function slashCandidateCatalog(
 }
 
 /**
- * spec skill-index-increment T3：slash 行上的技能名解析与信封装配（单一职责
- * 抽出自 `processChatLine`，S5 门）。
+ * Skill-name parsing and envelope assembly on slash lines (single-
+ * responsibility extraction from `processChatLine`).
  *
- * 静态词表优先由 `parseSkillLoad` 内部保证（命中 `CLI_STATIC_COMMANDS` →
- * undefined，调用方落回 `processSlash`）。返回 `undefined` 表示「这行不是
- * skill-load」——调用方继续走 slash 分派；返回结果对象表示本行已被消费。
+ * Static-vocabulary precedence is guaranteed inside `parseSkillLoad` (a hit
+ * on `CLI_STATIC_COMMANDS` → undefined, caller falls back to
+ * `processSlash`). Returning `undefined` means "this line is not a
+ * skill-load" — the caller continues slash dispatch; a returned result
+ * object means the line was consumed.
  *
- * catalog 缺席（ask / 旧测试）→ 恒 `undefined`，行为与今日逐字节一致。
+ * Catalog absent (ask / legacy tests) → always `undefined`, behavior
+ * identical to today.
  */
 async function trySkillLoadLine(
   line: string,
@@ -1189,44 +1275,52 @@ async function trySkillLoadLine(
 ): Promise<ProcessChatLineResult | undefined> {
   const cached = ctx.skillCatalog;
   if (cached === undefined) return undefined;
-  // SC8：静态词表行（/help /quit …）在 parseSkillLoad 里就短路，重扫对它们
-  // 没有任何可观察作用 —— 不为一条 /quit 扫一遍盘。
+  // Static-vocabulary lines (/help /quit …) short-circuit inside
+  // parseSkillLoad — rescanning has no observable effect on them, so don't
+  // scan the disk for a single /quit.
   const prefix = slashPrefix(line);
   if (prefix === "" || CLI_STATIC_COMMANDS.has(prefix)) return undefined;
-  // SC8：候选取自**现行** catalog（rescan 缝在场时现场重扫；缺席 / 失败 →
-  // 缓存快照）。解析与取正文用同一份 —— 否则会出现「候选命中但 get 落空」
-  // 的假 unknown。
+  // Candidates come from the **current** catalog (live rescan when the seam
+  // is present; absent / failed → cached snapshot). Parsing and body reads
+  // use the same instance — otherwise "candidate hits but get misses" fake
+  // unknowns appear.
   const catalog = await slashCandidateCatalog(ctx, cached);
-  // 热 catalog 内存续（正文读 / 后续行）：换血只在成功那一支发生。
+  // Keep the hot catalog in memory (body read / later lines): the swap
+  // happens only on the success branch.
   ctx.skillCatalog = catalog;
   const skillLoad = parseSkillLoad(line, toCliSkillEntries(catalog));
   if (skillLoad === undefined) return undefined;
   const entry = catalog.get(skillLoad.name);
-  // catalog 里没有（parseSkillLoad 命中的是投影条目但 get 失败）—— 与 TUI
-  // 同档：明确提示，不静默落回未知命令。
+  // Not in the catalog (parseSkillLoad matched a projected entry but get
+  // failed) — same tier as TUI: prompt explicitly, never silently fall back
+  // to unknown command.
   if (entry === undefined) {
     return { quit: false, output: `技能 ${skillLoad.name} 不可用（不存在）。` };
   }
   try {
-    // 信封与 TUI / Web 同源（buildSkillLoadText）；正文读失败向上抛到 REPL
-    // 的错误面，不伪装成成功。
+    // The envelope is same-source as TUI / Web (buildSkillLoadText); a
+    // body-read failure propagates to the REPL error surface, never
+    // disguised as success.
     const sendText = await buildCliSkillLoad({
       name: skillLoad.name,
       remainder: skillLoad.remainder,
       entry,
     });
-    // 复用查询行路径：turn 落盘 / 持久化 / 中断语义全部与普通提问一致
-    // （skill-load 就是一条机器装配的 user 消息）。line 换成信封 ——
-    // runChatQueryLine 内部再 parseChatLine 一次，信封不以 "/" 开头故走
-    // query 分支，正是我们要的语义。
+    // Reuse the query-line path: turn commits / persistence / interruption
+    // semantics all match ordinary questions (skill-load is just a
+    // machine-assembled user message). Swap the line for the envelope —
+    // runChatQueryLine re-runs parseChatLine internally, and the envelope
+    // doesn't start with "/" so it hits the query branch, exactly the
+    // semantics we want.
     return await runChatQueryLine({
       line: sendText,
       ctx,
       ...(onStream !== undefined ? { onStream } : {}),
     });
   } catch (err) {
-    // 读盘 / 装配失败是真实故障（与 TUI / hub 同档：不伪装成成功）。
-    // 复用 formatChatError（IknowError → `错误 [code]: msg`）。
+    // Disk-read / assembly failures are real faults (same tier as TUI /
+    // hub: never disguised as success). Reuse formatChatError (IknowError
+    // renders as an error line with its code).
     return { quit: false, output: formatChatError(err) };
   }
 }
@@ -1246,12 +1340,14 @@ export async function processChatLine(
   }
 
   if (parsedLine.kind === "slash") {
-    // spec skill-index-increment T3：技能名先于静态分派试解析（helper 内
-    // 保证静态词表优先）。undefined = 不是 skill-load，继续 slash 分派。
+    // Skill names are tried before static slash dispatch (static precedence
+    // guaranteed inside the helper). undefined = not a skill-load; continue
+    // slash dispatch.
     const skillLoadLine = await trySkillLoadLine(line, ctx, opts.onStream);
     if (skillLoadLine !== undefined) return skillLoadLine;
-    // 收敛修复（2026-08-29）：slash 行不跑引擎 → 跳过 rebind 检测，省掉
-    // 每条 slash 行的 store.load IO。检测挪到引擎行路径（含 continue 行）。
+    // Slash lines don't run the engine → skip rebind detection, saving a
+    // store.load per slash line. Detection lives on the engine-line path
+    // (incl. continue lines).
     return processSlash({
       command: parsedLine.command,
       args: parsedLine.args,
@@ -1260,10 +1356,12 @@ export async function processChatLine(
     });
   }
 
-  // Review High-1 (2026-08-29): rebind 检测 —— T3 门禁在上一回合把会话根改绑
-  // 到 task worktree 后，本行开跑前以新根重建 deps（仅 chat 生产装配了
-  // rebuildDeps 时生效；ask / tests 缺席 → no-op）。重建失败可见降级。
-  // 位置：引擎行路径（slash 行已在上方返回，不做 store.load IO）。
+  // Rebind detection — after an isolation gate rebound the session root to
+  // a task worktree on the previous turn, rebuild deps at the new root
+  // before this line starts (only effective when chat production wires
+  // rebuildDeps; ask / tests absent → no-op). Rebuild failure degrades
+  // visibly. Placement: engine-line path (slash lines returned above, no
+  // store.load IO).
   await refreshChatDepsForRebind(ctx);
 
   const query = parsedLine.text;
@@ -1275,9 +1373,11 @@ export async function processChatLine(
   });
   if (fromNl !== undefined) return fromNl;
 
-  // 机器装配的 skill-load 消息跳过用户输入长度上限（与 hub.ts validateText
-  // 同根因：78KB 的 SKILL.md 一次性加载会撞 8000 上限；与模型侧 tool result
-  // 通道无字符上限对称 —— 都是机器装配而非手打用户文本）。
+  // Machine-assembled skill-load messages skip the user-input length cap
+  // (same root cause as hub.ts validateText: a 78KB SKILL.md loaded at once
+  // would hit the 8000 cap; symmetric with the model-side tool-result
+  // channel having no character cap — both are machine-assembled, not typed
+  // user text).
   if (exceedsUserInputCap(query, MAX_MESSAGE_CHARS)) {
     return {
       quit: false,
@@ -1296,7 +1396,7 @@ export async function processChatLine(
 }
 
 /**
- * auto-memory T1: per-conversation injected-id set for the chat path, lazily
+ * auto-memory: per-conversation injected-id set for the chat path, lazily
  * recovered from ctx.state.messages on first attach — the same messages that
  * seedResumeMessages seeded on `--resume` (cold start from checkpoint /
  * session JSONL). Empty set is cached too; recovery failure degrades to an
@@ -1315,29 +1415,37 @@ function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
 }
 
 /**
- * ADR-0092 / SC11–SC13: chat 的 verify 调用点与 bash 工具面同档所需的 opts。
+ * Opts the chat verify call site needs to match the bash tool surface
+ * (ADR-0092).
  *
- * 与 `session-api/hub.ts` 的同名接缝同款：holder **per-call 现读**（`/config`
- * 翻档对下一次 verify 生效，不是装配期快照）；`homeRoot` 取 `homedir()` ——
- * chat 的引擎装配（cli.ts 的 `buildHarnessEngine`）不注入 `userHome`，故
- * build-engine 内的 `opts.userHome ?? homedir()` 落在后者，两处同源。
+ * Same shape as the like-named seam in `session-api/hub.ts`: the holder is
+ * **read per call** (a `/config` flip takes effect on the next verify, not
+ * an assembly-time snapshot); `homeRoot` = `homedir()` — chat's engine
+ * assembly (cli.ts's `buildHarnessEngine`) doesn't inject `userHome`, so
+ * build-engine's `opts.userHome ?? homedir()` lands on the latter, same
+ * source in both places.
  *
- * holder 缺席（ask 入口 / 未接线）→ `fsMode` / `homeRoot` 两个 key 都不产出，
- * runVerifyLoop 走全局档 baseline，与今日逐字节一致。
+ * Holder absent (ask entry / unwired) → neither `fsMode` nor `homeRoot` key
+ * is produced, runVerifyLoop uses the global-mode baseline, identical to
+ * today.
  *
- * ADR-0092 / SC12：`tmpDir` 与 holder 正交、**恒**解析 —— 它是两档共用的
- * `$TMPDIR` 来源（SC2），与 bash 工具面同款（bash handler 也无条件把
- * `TMPDIR: tmpDir` 注入 fence env）。解析走 bash 面**同一个** helper
- * （`resolveSessionFenceTmp`），不在本面独立推导第三份：项目根取
- * `ctx.checkpointStore.getProjectDir()`（cli.ts 的 `todoProjectDir` 同源，
- * 即 registry 喂给 bash 的 `projectDir`），叶子取 `state.conversationId`。
- * 宿主是 null/缺失（ask / tests / 未接线）→ 不产出该 key，verify-loop 回退
- * 进程 `tmpdir()`（fallback 不是目标态）。
+ * `tmpDir` is orthogonal to the holder and **always** resolved — it feeds
+ * the `$TMPDIR` shared by both modes, same as the bash surface (the bash
+ * handler unconditionally injects `TMPDIR: tmpDir` into the fence env).
+ * Resolution uses the **same** helper as the bash surface
+ * (`resolveSessionFenceTmp`), not a third independent derivation: project
+ * root from `ctx.checkpointStore.getProjectDir()` (same source as cli.ts's
+ * `todoProjectDir`, i.e. the `projectDir` the registry feeds bash), leaf
+ * from `state.conversationId`. Host null/absent (ask / tests / unwired) →
+ * the key is not produced and verify-loop falls back to process `tmpdir()`
+ * (a fallback, not the target state).
  *
- * issue 1059 (G3)：`worktreeOnMutate` holder 与上面三缝正交、按 key 独立
- * 产出 —— 它是引擎装配透出的单例（chat host 传 `built.worktreeOnMutate`），
- * verify 围栏经 `makeDefaultRunVerify` 与 bash 工具面在 UNBOUND_FENCE 轴上
- * 判定同源。缺席（host 未透传 / 旧注入缝）→ key 不出现，逐字节不变。
+ * `worktreeOnMutate` holder is orthogonal to the three seams above and
+ * keyed independently — the singleton surfaced by engine assembly (chat
+ * host passes `built.worktreeOnMutate`), so the verify fence judges the
+ * UNBOUND_FENCE axis from the same source as the bash surface via
+ * `makeDefaultRunVerify`. Absent (host didn't pass it / legacy injection
+ * seam) → key absent, byte-unchanged.
  */
 function chatVerifyFenceOpts(ctx: ChatLineContext): {
   readonly fsMode?: FsIsolationMode;
@@ -1371,13 +1479,15 @@ async function runChatQueryLine(
   }
   const query = parsedLine.text;
 
-  // D-α T3 / ADR-0030:round 边界 —— 一条用户查询行 = 一次 run()。这里拍
-  // graph 装配快照,之后本行内的所有 run()(含 verify / auto-loop 的多轮)
-  // 共用同一工具面。Shift+Tab 与 `/graph` 在这之后翻,要等下一行才生效。
+  // Round boundary (ADR-0030): one user query line = one run(). Snapshot the
+  // graph assembly here; every run() on this line (incl. verify / auto-loop
+  // multi-rounds) shares the same tool surface. Shift+Tab and `/graph` flips
+  // after this point take effect only on the next line.
   ctx.graphAssembly?.beginRound();
 
-  // plan T1: HITL vs /goal auto 分派。仅 verifyConfig 在场时读盘;
-  // 缺席分支直接走 runHarness(query, ...),不引入额外 IO。
+  // HITL vs /goal auto dispatch. Read the disk only when verifyConfig is
+  // present; the absent branch goes straight to runHarness(query, ...) with
+  // no extra IO.
   const verifyDispatch =
     ctx.verifyConfig === undefined
       ? undefined
@@ -1386,10 +1496,13 @@ async function runChatQueryLine(
           ctx.state.conversationId,
           query
         );
-  // plan T6:stop_summary 事件观察 — 经 wrapper 包一层,捕获异常停的收尾
-  // 摘要文本。host 的 onStream(若有)只接到 text_delta / tool_call_start 等
-  // 业务事件,避免预览 sink 双打印。摘要由 loop-engine run() 在返回/重抛前
-  // emit,故摘要轮不计 maxTurns。变量提到 try 外:catch 块也要读它。
+  // stop_summary observation — a wrapper captures the closing-summary text
+  // emitted on abnormal stops. The host's onStream (if any) only receives
+  // business events like text_delta / tool_call_start, avoiding a
+  // double-print in the preview sink. The loop-engine run() emits the
+  // summary before returning / rethrowing, so summary rounds don't count
+  // toward maxTurns. Variable hoisted outside try: the catch block reads it
+  // too.
   let stopSummary: string | undefined;
   const wrappedOnStream:
     | ((event: import("../harness/index.js").HarnessStreamEvent) => void)
@@ -1402,7 +1515,7 @@ async function runChatQueryLine(
         };
   const outputs: string[] = [];
   let lastStatusLine: string | undefined;
-  // auto-memory T1: session-level prefetch dedup — exclude ids already
+  // auto-memory: session-level prefetch dedup — exclude ids already
   // injected in this conversation (lazy resume recovery from ctx.state.messages
   // on first attach) and record what this turn actually injects (overlay-
   // bearing attach results only; identity fallbacks add nothing).
@@ -1421,12 +1534,13 @@ async function runChatQueryLine(
   try {
     return await runAutoLoopSteps({
       run: async () => {
-        // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
-        // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
-        // completed → priorMessages 不变 (行为零变化)。
+        // Host drain — condense the manager's completed subagent results
+        // into a user message, appended to the end of this run's
+        // priorMessages. Empty manager / nothing completed → priorMessages
+        // unchanged (zero behavior change).
         const pendingDrain = await collectChatSubagentDrain(ctx);
-        // 写根段（specs/skill-load-write-root.md T5）：rebind 后一次性
-        // 注入，拼在 drain 之后（若有），消费即清空。
+        // Write-root segment: injected once after rebind, concatenated after
+        // the drain (if any), cleared on consumption.
         const writeRootNotice = ctx.pendingWriteRootNotice;
         if (writeRootNotice !== undefined) {
           ctx.pendingWriteRootNotice = undefined;
@@ -1441,14 +1555,17 @@ async function runChatQueryLine(
                 hostDrainMessage(tailTexts),
               ])
             : ctx.state.messages;
-        // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
-        // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 runHarness
-        // 调用逐字节不变 (仅未接线路径)。runVerifyLoop 的 runFn 透传 onStream →
-        // wrappedOnStream 捕获 stop_summary 的既有语义保持;trace 未注入 (chat 无
-        // trace service), VerificationRecord 不落盘 (T7 已处理 trace 可选)。
-        // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
-        // 闭包必须兜底 chat 侧的 priorMessages 与 wrappedOnStream, 否则多轮
-        // 历史丢失 + 流式预览失效。
+        // When verifyConfig is non-undefined (incl. an empty command
+        // string), run is wrapped by runVerifyLoop (advisor shape, zero
+        // engine changes); absent → the bare runHarness call is
+        // byte-unchanged (only the unwired path). runVerifyLoop's runFn
+        // passes onStream → wrappedOnStream, keeping the stop_summary
+        // capture semantics; no trace is injected (chat has no trace
+        // service) so VerificationRecord isn't persisted (trace is
+        // optional). Note: runVerifyLoop's first-round runFn omits
+        // priorMessages / onStream — the closure must supply chat's
+        // priorMessages and wrappedOnStream, or multi-turn history is lost
+        // and streaming preview breaks.
         const runOutcome =
           verifyDispatch !== undefined && ctx.verifyConfig !== undefined
             ? await runVerifyLoop({
@@ -1472,12 +1589,14 @@ async function runChatQueryLine(
                 sessionId: ctx.state.conversationId ?? "chat",
                 signal: ctx.abortController?.signal,
                 cwd: process.cwd(),
-                // ADR-0092 / SC11–SC13:verify 命令的围栏与 bash 工具面同档
-                // （holder per-call 现读；缺席 → 全局档 baseline）。
+                // The verify command's fence matches the bash tool surface
+                // (holder read per call; absent → global baseline).
                 ...chatVerifyFenceOpts(ctx),
-                // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-                // (command 缺失/空串时分类器接管, spec Objective); 缺席 (ask 形态)
-                // → undefined, verify-loop 自然走透明关闭向后兼容 (SC7)。
+                // Production wiring: subagentManager present → enable
+                // classifier fill-in (when command is missing/empty the
+                // classifier takes over); absent (ask shape) → undefined,
+                // verify-loop naturally stays transparently off for
+                // backward compatibility.
                 runClassifier:
                   ctx.subagentManager === undefined
                     ? undefined
@@ -1504,9 +1623,11 @@ async function runChatQueryLine(
                 return outcome;
               });
         const { result, trace } = runOutcome;
-        // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
-        // cancelled 判定与 decideCheckpointPersist 一致(delta>0 → "已保存"),
-        // 保证「状态行文案」与「实际落盘」一致;非 cancelled → undefined(无前缀)。
+        // Ctrl+C interrupt feedback — prompt whether the checkpoint was
+        // saved, only when cancelled. The cancelled judgment matches
+        // decideCheckpointPersist (delta>0 → "已保存"), keeping the
+        // status-line text consistent with the actual write; non-cancelled →
+        // undefined (no prefix).
         const interruptNote =
           result.stopReason === "cancelled"
             ? shouldPersistCheckpoint(result, priorMessages)
@@ -1514,9 +1635,11 @@ async function runChatQueryLine(
               : "未落checkpoint"
             : undefined;
         const human = !ctx.state.jsonMode;
-        // #128 M3: verify 最终判定 (failed/unstable/escalated) surface 到 chat 输出,
-        // 避免"模型声称完成但验证没过"仍显示正常完成 (SC2/SC6 交付面)。
-        // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (无报告, 行为不变)。
+        // Surface the verify final verdict (failed/unstable/escalated) to
+        // chat output, so "model claims done but verification didn't pass"
+        // doesn't render as a normal completion. Only the verify branch has
+        // outcome/rounds; the bare run branch has none (no report, behavior
+        // unchanged).
         const verifyReport =
           "outcome" in runOutcome
             ? formatChatVerifyReport(runOutcome.outcome, runOutcome.rounds)
@@ -1545,11 +1668,14 @@ async function runChatQueryLine(
         return { result, runOutcome, priorMessages };
       },
       persist: async (s) => {
-        // T2: post-run checkpoint 落盘(mirrors hub.ts conditionalSave)。Ask/serve/
-        // tests 没接 checkpointStore → 跳过,行为零变化(pipe / ask 一支不动)。
-        // run resolve 后才落盘 —— throw 路径(下文 catch)不进此处,刻意保持 #120
-        // 裁决("MaxTurnsExceeded 不 save"由 catch 分支自然实现:run 没 resolve 即
-        // 没有可用的 turnCount / messages,appendCheckpoint 也不可能产生 delta>0)。
+        // Post-run checkpoint write (mirrors hub.ts conditionalSave).
+        // Ask/serve/tests don't wire checkpointStore → skip, zero change
+        // (pipe / ask untouched). Persist only after run resolves — throw
+        // paths (the catch below) never reach here, deliberately
+        // implementing the prior ruling ("MaxTurnsExceeded does not save"
+        // falls out naturally from the catch branch: an unresolved run has
+        // no usable turnCount / messages, and appendCheckpoint can't
+        // produce delta>0).
         if (ctx.checkpointStore && ctx.state.conversationId !== null) {
           await persistChatSessionCheckpoint({
             store: ctx.checkpointStore,
@@ -1564,8 +1690,8 @@ async function runChatQueryLine(
         }
         // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
         // (all append an assistant message). maxTurns no longer returns here —
-        // plan T3 / ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
-        // (T6) without appending anything. protocolError and emptyFinalResponse
+        // ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
+        // without appending anything. protocolError and emptyFinalResponse
         // return finalState with NO assistant message appended, so continuing on
         // them would feed a dangling user message to the model next turn and
         // poison the loop — drop context on those two. CliChatState owned by host
@@ -1577,8 +1703,9 @@ async function runChatQueryLine(
         ) {
           ctx.state.messages = Object.freeze([...s.result.messages]);
         }
-        // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
-        // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask)→ 整句 no-op。
+        // ADR-0031: hand each turn's result to the hook, which owns the
+        // completed gate + N-turn gate. Hook absent (default OFF / ask) →
+        // the whole call is a no-op.
         notifyAutoMemory({
           hook: ctx.autoMemory,
           stopReason: s.result.stopReason,
@@ -1616,9 +1743,10 @@ async function runChatQueryLine(
   } catch (err) {
     await applyChatAutoError(ctx, err);
     if (err instanceof MaxTurnsExceeded) {
-      // plan T3 + T6 / ADR-0011:maxTurns 超限是强制感知信号 — 接住 throw,
-      // 呈现「已达上限」stderr + 收尾摘要(若有)。摘要经上面的 wrapper 捕获
-      // (loop-engine 在重抛前 emit stop_summary)。
+      // ADR-0011: maxTurns overflow is a forced-awareness signal — catch
+      // the throw and present the "limit reached" stderr + closing summary
+      // (if any). The summary is captured by the wrapper above (loop-engine
+      // emits stop_summary before rethrowing).
       const notice = maxTurnsNotice(err, stopSummary);
       return {
         quit: false,
@@ -1712,9 +1840,9 @@ async function processSlash(opts: {
       return { quit: false, output: "", stderr: effect.text };
 
     case "reset":
-      // live-graph-phase1 T1 / ADR-0051:reset 销毁活图账本 —— 之后同一
-      // 会话再 run_graph 可重用旧 id 并真正 spawn（SC3）。账本缺席（ask /
-      // 测试未接）→ no-op。
+      // reset destroys the live-graph ledger — afterwards a re-run of
+      // run_graph in the same session can reuse old ids and truly spawn.
+      // Ledger absent (ask / tests unwired) → no-op.
       if (ctx.liveGraphLedger !== undefined) {
         const convId = ctx.state.conversationId;
         if (convId !== null) {
@@ -1730,9 +1858,9 @@ async function processSlash(opts: {
       });
 
     case "permissions": {
-      // W2: 权限模式查询/切换。无 ctx.permissionMode(ask/serve 不传)→
-      // 显示 "not available"。空 args / "status" → 显示当前 mode;
-      // 合法 mode → set;非法 → 错误文案。
+      // Permission-mode query/switch. Without ctx.permissionMode (ask/serve
+      // don't pass it) → show "not available". Empty args / "status" → show
+      // the current mode; valid mode → set; invalid → error text.
       const modeCtx = ctx.permissionMode;
       const target = (effect.args[0] ?? "").toLowerCase();
       if (!modeCtx) {
@@ -1770,9 +1898,10 @@ async function processSlash(opts: {
     }
 
     case "graph":
-      // D-α graph mode: 编排 overlay 查询/切换。语义与文案走
-      // harness/graph/mode.ts 单点(TUI / serve 同源);chat 只决定文案落
-      // stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
+      // Graph-mode query/switch for the orchestration overlay. Semantics and
+      // text are single-sourced in harness/graph/mode.ts (same source for
+      // TUI / serve); chat only decides stdout vs stderr. Holder absent (ask
+      // doesn't install it) → unavailable notice.
       return applyHolderSlash(
         ctx.graphMode,
         (h) => applyGraphCommand(h, effect.args),
@@ -1780,12 +1909,14 @@ async function processSlash(opts: {
       );
 
     case "config":
-      // ADR-0092 / SC13: fs isolation 档查询/切换。语义与文案走
-      // harness/sandbox/fs-mode.ts 单点(TUI / serve 同源);chat 只决定
-      // 文案落 stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
-      // 与 /graph 一致:只翻 holder,不落 settings —— chat 无 settings 写回
-      // 通道(TUI 的持久化面是 onPersistFsMode;SC13 的 settings 路径是启动
-      // 读取面,不是 REPL 命令的职责)。
+      // Filesystem isolation mode query/switch (ADR-0092). Semantics and
+      // text are single-sourced in harness/sandbox/fs-mode.ts (same source
+      // for TUI / serve); chat only decides stdout vs stderr. Holder absent
+      // (ask doesn't install it) → unavailable notice. Like /graph: flips
+      // the holder only, never persists to settings — chat has no settings
+      // write-back channel (the TUI's persistence face is onPersistFsMode;
+      // the settings path is the startup read surface, not a REPL command's
+      // job).
       return applyHolderSlash(
         ctx.fsMode,
         (h) => applyFsModeCommand(h, effect.args),
@@ -1793,13 +1924,15 @@ async function processSlash(opts: {
       );
 
     case "goal": {
-      // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
-      // status / clear 走 typed-error catch 契约:not_found 是 fresh
-      // conversation 的合法态(非错误,stderr 静默 + 友好 output),其它
-      // typed 错误(parse_failed / schema_invalid / io_error / write_failed /
-      // concurrent_write)渲染 `${kind}: ${conversation_id}`。pin 先经
-      // validateGoalText 长度/空校验,非 null → stderr 错误不落盘。
-      // recordGoal 由 hub.clearGoal 统一落(clear 分支)。
+      // /goal has three faces — status / clear / pin(<text>).
+      // status / clear follow the typed-error catch contract: not_found is
+      // the legal state of a fresh conversation (not an error; silent
+      // stderr + friendly output), other typed errors (parse_failed /
+      // schema_invalid / io_error / write_failed / concurrent_write) render
+      // `${kind}: ${conversation_id}`. pin first passes validateGoalText
+      // length/empty checks; non-null → stderr error, nothing written.
+      // recordGoal is emitted uniformly by hub.clearGoal on the clear
+      // branch.
       const store = ctx.checkpointStore;
       const conversationId = ctx.state.conversationId;
       if (!store || !conversationId) {
@@ -1840,10 +1973,12 @@ async function processSlash(opts: {
 }
 
 /**
- * holder 缺席 → 该入口不提供该控件;否则走 SSOT apply,按 ok 决定文案落
- * stdout / stderr。`/graph` 与 `/config` 只差 holder + apply + 缺席文案 ——
- * 语义与字面仍由各自 SSOT(harness/graph/mode.ts、harness/sandbox/fs-mode.ts)
- * 单点承担,本函数只做 host 侧载体分流。
+ * Holder absent → this entry doesn't offer the control; otherwise run the
+ * SSOT apply and route the text to stdout / stderr by ok. `/graph` and
+ * `/config` differ only in holder + apply + absent text — semantics and
+ * literals stay with their respective SSOTs (harness/graph/mode.ts,
+ * harness/sandbox/fs-mode.ts); this function only dispatches the host-side
+ * carrier.
  */
 function applyHolderSlash<T>(
   holder: T | undefined,
@@ -1859,8 +1994,8 @@ function applyHolderSlash<T>(
     : { quit: false, output: "", stderr: result.text };
 }
 
-/** #458 T6: /goal status —— 回显当前 goal.text;not_found =
- *  fresh conversation 合法态「未设置 goal」。 */
+/** /goal status — echo the current goal.text; not_found = the legal
+ *  fresh-conversation state "no goal set". */
 async function goalStatus(
   store: SessionStore,
   conversationId: string
@@ -1888,10 +2023,11 @@ async function goalStatus(
   return { quit: false, output: `goal: ${goalText}` };
 }
 
-/** #458 T6: /goal clear —— hub.clearGoal 语义的 chat 侧镜像(经 store 原子写
- *  goal 清空);not_found = fresh conversation 合法态「无 goal 可清」。
- *  注:CLI chat 入口不装配 SessionHub,recordGoal trace 发射点由 hub 统一落
- *  (T5),CLI 路径无 trace 副作用是既有事实。 */
+/** /goal clear — chat-side mirror of hub.clearGoal semantics (goal cleared
+ *  via an atomic store write); not_found = the legal fresh-conversation
+ *  state "nothing to clear". Note: the CLI chat entry doesn't assemble
+ *  SessionHub; recordGoal trace emission lives in hub, so no trace side
+ *  effect on the CLI path is an existing fact. */
 async function goalClear(
   store: SessionStore,
   conversationId: string
@@ -1931,9 +2067,10 @@ async function goalClear(
   return { quit: false, output: "goal cleared" };
 }
 
-/** #458 T6: /goal pin —— validateGoalText 非 null → stderr 错误不落盘;
- *  合法 → pinGoal 原子写(#408 T3 路径同形态)。fresh conversation 也走
- *  not_found 合法态(从零 pin,构造最小 SessionFileV1)。 */
+/** /goal pin — non-null validateGoalText → stderr error, nothing written;
+ *  valid → atomic write via pinGoal (same path shape). Fresh conversations
+ *  also take the not_found legal state (pin from zero, constructing a
+ *  minimal SessionFileV1). */
 async function goalPin(
   store: SessionStore,
   conversationId: string,
@@ -1963,8 +2100,9 @@ async function goalPin(
   );
 }
 
-/** load-or-fresh:not_found 是 fresh conversation 合法态 → 返回最小
- *  SessionFileV1(从零 pin);其它 typed 错误 → 返回 stderr 渲染结果。 */
+/** load-or-fresh: not_found is the legal fresh-conversation state → return
+ *  a minimal SessionFileV1 (pin from zero); other typed errors → return a
+ *  stderr-rendered result. */
 async function loadGoalTarget(
   store: SessionStore,
   conversationId: string,
@@ -1999,7 +2137,7 @@ async function loadGoalTarget(
   }
 }
 
-/** 最小合法 SessionFileV1(形状与 persistChatSessionCheckpoint 的重建一致)。 */
+/** Minimal legal SessionFileV1 (shape consistent with persistChatSessionCheckpoint's reconstruction). */
 function freshSessionFile(
   conversationId: string,
   workspaceRoot: string
@@ -2032,7 +2170,7 @@ function requireSessionWorkspaceRoot(
   return workspaceRoot;
 }
 
-/** pinGoal + 原子写;save 失败 → typed-error 渲染,不 crash。 */
+/** pinGoal + atomic write; save failure → typed-error rendering, no crash. */
 async function savePinnedGoal(
   store: SessionStore,
   conversationId: string,
@@ -2064,9 +2202,10 @@ async function savePinnedGoal(
   return { quit: false, output: `goal pinned: ${text}` };
 }
 
-/** #458 T6: typed-error catch 契约 —— 渲染 `${kind}: ${conversation_id}`。
- *  只接受 SessionStore typed 错误(判别联合的 kind);未知 throw 是 store 契约
- *  外意外,原样重抛(防御性,不静默吞)。 */
+/** Typed-error catch contract — render `${kind}: ${conversation_id}`.
+ *  Only accepts SessionStore typed errors (the discriminated union's kind);
+ *  unknown throws are surprises outside the store contract and are rethrown
+ *  as-is (defensive, never silently swallowed). */
 function typedGoalError(err: unknown, conversationId: string): string {
   if (isSessionStoreErrorKind(err)) {
     const kind = (err as SessionStoreError).kind;
@@ -2086,25 +2225,29 @@ function formatChatError(err: unknown): string {
 }
 
 /**
- * T4: `--resume <id>` 的消息 seed 辅助 —— runChatSession 在构造 state 之前
- * 调用,从 SessionStore 加载既有 messages 作为初始历史(processChatLine 的
- * `prior = ctx.state.messages` 自然看到该历史,首轮续跑无需额外接线)。
+ * Message-seeding helper for `--resume <id>` — runChatSession calls it
+ * before constructing state, loading existing messages from SessionStore as
+ * the initial history (processChatLine's `prior = ctx.state.messages`
+ * naturally sees them; the first continued turn needs no extra wiring).
  *
- * 纯 IO(唯一 IO 是 `store.load`)+ 纯映射,无 Sidekiq、无 harness 依赖,
- * 便于单测。导出是因为测试要直接验证五种 typed 错误的边界处理。
+ * Pure IO (the only IO is `store.load`) + pure mapping, no harness deps,
+ * easy to unit-test. Exported so tests can verify typed-error boundary
+ * handling directly.
  *
- * **失败语义**:SessionStore.load 只抛 typed SessionStoreError(not_found |
- * parse_failed | schema_invalid | io_error,见 session-store.ts:58)。所有
- * typed 错误均**非阻塞** —— 返回空 messages + 触发 warn 回调(stderr 一行);
- * 调用方保留 conversationId 锚点,使后续 checkpoint 仍写回同一 `<id>.jsonl`,
- * 而非碎片化成新 id。未知 throw(防御性 —— store 只抛 typed)→ 原样重抛。
+ * **Failure semantics**: SessionStore.load only throws typed
+ * SessionStoreError (not_found | parse_failed | schema_invalid | io_error).
+ * All typed errors are **non-blocking** — return empty messages + a warn
+ * callback (one stderr line); callers keep the conversationId anchor so
+ * later checkpoints still write back to the same `<id>.jsonl` instead of
+ * fragmenting into a new id. Unknown throws (defensive — the store only
+ * throws typed) are rethrown as-is.
  */
 export async function seedResumeMessages(opts: {
   readonly store: SessionStore | undefined;
   readonly id: string | undefined;
 }): Promise<{
   messages: ReadonlyArray<AnthropicNativeMessage>;
-  /** 缺省 = 无失败需要通知(undefined 即不调用);存在时调用方应执行以落 stderr。 */
+  /** Default = nothing to report (undefined → not called); when present, the caller should run it to emit stderr. */
   warn?: () => void;
 }> {
   if (opts.store === undefined || opts.id === undefined) {
@@ -2115,7 +2258,8 @@ export async function seedResumeMessages(opts: {
     return { messages: file.messages };
   } catch (err) {
     if (!isSessionStoreErrorKind(err)) {
-      // 防御性:store 契约只抛 typed 错误,出现未知异常应当外暴而不是静默吞咽。
+      // Defensive: the store contract only throws typed errors; unknown
+      // exceptions must surface, never be silently swallowed.
       throw err;
     }
     const kind = (err as SessionStoreError).kind;
@@ -2127,29 +2271,34 @@ export async function seedResumeMessages(opts: {
 }
 
 /**
- * T2: chat REPL 的 post-run checkpoint 落盘 —— `src/session-api/hub.ts`
- * conditionalSave 的 chat 侧镜像。纯 IO(load/save 原子写),决策全权委托
- * `session-api/store/checkpoint.ts` 的纯函数(tri-state SSOT,不在本文件
- * 复制规则):
+ * Post-run checkpoint write for the chat REPL — chat-side mirror of
+ * `src/session-api/hub.ts` conditionalSave. Pure IO (load / atomic save);
+ * all decisions delegate to the pure functions in
+ * `session-api/store/checkpoint.ts` (tri-state SSOT; rules are not
+ * duplicated here):
  *
- *   - `decideCheckpointPersist(result, priorMessages)` 给出三种结果:
- *     "none"(零增量 cancelled / 无 user 增量的 protocolError 等)→ 早退不写;
- *     "full" → 落 result.messages 全量;"partial_user_only" → 只把本 run delta
- *     里真正的 user query(isTurnQuery,与 hub 同源)接到盘上,失败的 assistant
- *     不进历史(spec invariant 8 / SC4)。
- *   - `toInterruptReason` 把 StopReason 映射为 checkpoint label(cancelled /
- *     timeout / protocolError / maxTurns;completed 等 → null,不 append 记录)。
- *   - `appendCheckpoint` 内建 delta=0/负值 no-op 守门(records.messagesCount >
- *     session.messages.length 才 append)。
+ *   - `decideCheckpointPersist(result, priorMessages)` returns three kinds:
+ *     "none" (zero-delta cancelled / protocolError without a user delta) →
+ *     early return, no write; "full" → persist all of result.messages;
+ *     "partial_user_only" → append only the real user queries (isTurnQuery,
+ *     same source as hub) from this run's delta; failed assistant turns
+ *     never enter history (spec invariant).
+ *   - `toInterruptReason` maps StopReason to a checkpoint label (cancelled /
+ *     timeout / protocolError / maxTurns; completed etc. → null, no record
+ *     appended).
+ *   - `appendCheckpoint` has a built-in delta<=0 no-op guard (appends only
+ *     when records.messagesCount > session.messages.length).
  *
- * **累计 turnCount**:镜像 hub 的 `session.turnCount + result.turnCount`
- * 约定 —— 若该 conversationId 已有盘上文件,新记录从既有 turnCount 继续编号,
- * T4 --resume 才能读到连续的快照序列。
+ * **Cumulative turnCount**: mirrors hub's `session.turnCount +
+ * result.turnCount` convention — when the conversationId already has an
+ * on-disk file, new records continue numbering from its turnCount, so
+ * --resume reads a contiguous snapshot series.
  *
- * **错误处理**(ACR):所有失败复用 SessionStore 既有 typed kinds(write_failed /
- * not_found / parse_failed / schema_invalid),绝不新造 kind;失败经
- * `opts.warn?.(line)` 到 stderr 并 continue,绝不 crash REPL、绝不阻塞退出
- * (第二次 Ctrl+C 只 bounded-wait 1s)。
+ * **Error handling**: all failures reuse SessionStore's existing typed
+ * kinds (write_failed / not_found / parse_failed / schema_invalid), never
+ * invent new ones; failures go to stderr via `opts.warn?.(line)` and
+ * continue — never crash the REPL, never block exit (the second Ctrl+C
+ * only bounded-waits 1s).
  */
 export async function persistChatSessionCheckpoint(opts: {
   readonly store: SessionStore;
@@ -2159,7 +2308,7 @@ export async function persistChatSessionCheckpoint(opts: {
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   /** Resolved root for a new conversation bootstrap. */
   readonly workspaceRoot?: string;
-  /** 落盘失败 / 读坏文件时的 stderr 通知(缺省静默 — 观察者纪律)。 */
+  /** stderr notice on write failure / corrupted file (silent by default — observer discipline). */
   readonly warn?: (line: string) => void;
 }): Promise<void> {
   const {
@@ -2178,9 +2327,10 @@ export async function persistChatSessionCheckpoint(opts: {
     try {
       session = await store.load(conversationId);
     } catch (err) {
-      // not_found → 首次落盘,以当前文件构造全新 v3 文件(#120 v2 字段齐备);
-      // parse_failed / schema_invalid → 该 conversationId 的既有文件不可用,
-      // 以当前进度重建(不可用文件不应阻断本次 turn 落盘)。
+      // not_found → first write: build a brand-new v3 file with the current
+      // fields; parse_failed / schema_invalid → the existing file for this
+      // conversationId is unusable, rebuild from current progress (an
+      // unusable file must not block this turn's write).
       session = {
         schemaVersion: CURRENT_SCHEMA_VERSION,
         conversation_id: conversationId,
@@ -2198,10 +2348,12 @@ export async function persistChatSessionCheckpoint(opts: {
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
     const interruptReason = toInterruptReason(result.stopReason);
-    // "partial_user_only" 的落盘内容:盘上既有历史 + 本 run delta 里真正的 user
-    // query。isTurnQuery 是 turn 边界 SSOT(tool_result-only / drain / status
-    // 消息不是 query),逐字镜像 hub.conditionalSave 的同名 splice —— 复制规则
-    // 会让两入口在下次规则变动时漂移。失败的 assistant 永不进盘。
+    // What "partial_user_only" persists: on-disk history + the real user
+    // queries in this run's delta. isTurnQuery is the turn-boundary SSOT
+    // (tool_result-only / drain / status messages are not queries); verbatim
+    // mirror of hub.conditionalSave's like-named splice — duplicating the
+    // rule would let the two entries drift on the next change. Failed
+    // assistant turns never hit disk.
     const persistedMessages =
       decision.kind === "partial_user_only"
         ? [
@@ -2211,9 +2363,10 @@ export async function persistChatSessionCheckpoint(opts: {
               .filter((m) => isTurnQuery(m)),
           ]
         : result.messages;
-    // appendCheckpoint 的 delta=0 守门比较 record.messagesCount 与
-    // session.messages.length —— 必须在把 post-run messages 合入**之前**计算
-    // (否则 delta=0 永远 false、守门永不触发;镜像 hub.conditionalSave 同序)。
+    // appendCheckpoint's delta=0 guard compares record.messagesCount
+    // against session.messages.length — this must be computed **before**
+    // merging post-run messages in (otherwise delta=0 is never reached and
+    // the guard never fires; same ordering as hub.conditionalSave).
     const withCheckpoint =
       interruptReason === null
         ? session
@@ -2236,7 +2389,8 @@ export async function persistChatSessionCheckpoint(opts: {
     };
     await store.save({ id: conversationId, file: updated });
   } catch (err) {
-    // 失败即警告,绝不重抛 / 绝不 crash REPL。typed kind 原样透出供排查。
+    // Failures warn only — never rethrow / never crash the REPL. Typed
+    // kinds pass through verbatim for diagnosis.
     const kind = isSessionStoreErrorKind(err)
       ? `[${(err as SessionStoreError).kind}]`
       : "";
@@ -2246,17 +2400,20 @@ export async function persistChatSessionCheckpoint(opts: {
   }
 }
 
-/* ---------------- turn 内 commit 钩子(T3) ---------------- */
+/* ---------------- in-turn commit hook ---------------- */
 
 /**
- * chat 路径的 turn 内 commit 钩子:把 harness 产出的消息即时 append 到会话
- * JSONL 日志。chat 路径无 serialize 队列,沿用裸 store IO 现状。
+ * Chat-path in-turn commit hook: append harness-produced messages to the
+ * session JSONL log immediately. The chat path has no serialize queue;
+ * bare store IO as today.
  *
- * 首个 commit 时 JSONL 可能不存在(新会话 run 前不预写文件,或 T1 前的
- * legacy .json-only 会话):此时先 bootstrap 建文件/迁出再 append。
- * bootstrap 历史来源:盘上可 load(legacy 迁移)→ 以盘为准;不可 load
- * (全新会话)→ 用 getPriors() 的内存消息(本轮 run 前的历史)。
- * 底层 store IO 失败以 typed store error 传播,不吞。
+ * On the first commit the JSONL may not exist (new sessions don't pre-write
+ * the file before run, or legacy .json-only sessions): bootstrap the file /
+ * migrate first, then append. Bootstrap history source: loadable on disk
+ * (legacy migration) → disk is authoritative; not loadable (brand-new
+ * session) → use getPriors()' in-memory messages (history before this run).
+ * Underlying store IO faults propagate as typed store errors, never
+ * swallowed.
  */
 export function createChatSessionCommitHook(opts: {
   readonly store: SessionStore;
@@ -2272,19 +2429,22 @@ export function createChatSessionCommitHook(opts: {
       await store.appendEvents({ id: conversationId, events: [...messages] });
       return;
     } catch (err) {
-      // 仅 typed store error(JSONL 缺失/legacy/损坏)走 bootstrap;其余原样抛。
+      // Only typed store errors (JSONL missing / legacy / corrupted)
+      // bootstrap; anything else rethrows.
       if (!isSessionStoreErrorKind(err)) throw err;
     }
     let base: SessionFileV1;
     let priors: ReadonlyArray<AnthropicNativeMessage>;
     try {
       base = await store.load(conversationId);
-      // 盘上已有权威历史(legacy .json 迁移):以盘为准,不用 getPriors —
-      // 否则空 priors 会把既有历史冲掉。
+      // The disk already holds authoritative history (legacy .json
+      // migration): trust the disk, not getPriors — empty priors would
+      // otherwise wipe existing history.
       priors = base.messages;
     } catch {
-      // 与 persistChatSessionCheckpoint 的 not_found 分支同形态:v3 全新文件,
-      // 历史取 getPriors(本轮 run 前的内存消息)。
+      // Same shape as persistChatSessionCheckpoint's not_found branch: a
+      // brand-new v3 file whose history comes from getPriors (in-memory
+      // messages before this run).
       const now = new Date().toISOString();
       base = {
         schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -2345,45 +2505,57 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
 }
 
 /**
- * #179 T6 + #195:TTY 流式最终输出接缝。
+ * TTY streaming final-output seam.
  *
- * 返回 `{ feed, textStreamed }`(替代 #195 前的裸回调),作为
- * `processChatLine` 的 `onStream`:
- *   - `feed` 把 harness 流式事件按"stdout 直出最终答案 / stderr 工具过程行"
- *     分流路由:
- *     - `text_delta` → 经 `opts.writeOut` 写为 stdout 的**最终输出**(增量
- *       滚动);首个 delta 到来时先经 `opts.writeErr` 写 `\r\x1b[K` 清掉
- *       stderr 上的 `Thinking…` spinner(one-shot);同时翻转 `textStreamed`
- *       为 `true`(经 getter 暴露,host 据此决定回合结束只补状态行)。
- *     - 工具调用 → **延迟 flush**：CLI 的事件序是 `tool_call_start {name,id}`
- *       之后才有 `tool_input_delta {id,partialJson}`，且**没有
- *       input-complete 事件**。start 时就画只能得到裸工具名（D1 要求要点
- *       可见），故此处暂存 pending 调用、按 id 累积增量 JSON，等第一个
- *       「不是该 id 增量」的事件到达时 flush **恰一行** —— 由共享
- *       `formatToolStatusLine`（`src/shared/tool-line.ts`，与 TUI 同一函数）
- *       拼装：`read_file · Read a.ts` / `Running 1 shell command… · ls`。
- *       增量 JSON 不完整 → 走 `summarizePartialInput` 的原样截断，仍一行、
- *       不 throw（input 未到 → name-only 行）。**不**翻转 `textStreamed`
- *       （纯提示,不承载答案）。
- *   - `textStreamed` 反映是否有答案文本已流式(stdout)过。
+ * Returns `{ feed, textStreamed }` (replacing the earlier bare callback),
+ * used as `processChatLine`'s `onStream`:
+ *   - `feed` routes harness stream events by "final answer straight to
+ *     stdout / tool-progress lines to stderr":
+ *     - `text_delta` → written via `opts.writeOut` as stdout's **final
+ *       output** (rolling increments); on the first delta, first write
+ *       `\r\x1b[K` via `opts.writeErr` to clear the `Thinking…` spinner on
+ *       stderr (one-shot); also flip `textStreamed` to `true` (exposed via
+ *       getter so the host can decide to emit only the status line at turn
+ *       end).
+ *     - Tool calls → **deferred flush**: the CLI event order is
+ *       `tool_call_start {name,id}` followed only then by
+ *       `tool_input_delta {id,partialJson}`, with **no input-complete
+ *       event**. Drawing at start would yield a bare tool name (progress
+ *       points must be visible), so stage the pending call here,
+ *       accumulate the incremental JSON by id, and flush **exactly one
+ *       line** when the first non-increment event for that id arrives —
+ *       assembled by the shared `formatToolStatusLine`
+ *       (`src/shared/tool-line.ts`, same function as TUI):
+ *       `read_file · Read a.ts` / `Running 1 shell command… · ls`.
+ *       Incomplete increment JSON → `summarizePartialInput` verbatim
+ *       truncation, still one line, no throw (no input at all → name-only
+ *       line). Does **not** flip `textStreamed` (pure prompt, carries no
+ *       answer).
+ *   - `textStreamed` reflects whether answer text has been streamed (to
+ *     stdout).
  *
- * #195 修复要点:答案文本只直出一次到 stdout(不再回写 stderr 预览再被
- * `formatRunHuman` 二次渲染 —— 多行答案双打印的根因)。`textStreamed`
- * 让 host 知道要不要在回合结束时跳过 `output` 的文本部分。
+ * The answer text is emitted to stdout exactly once (no more stderr preview
+ * rewrites that `formatRunHuman` would render a second time — the root
+ * cause of multi-line double-printing). `textStreamed` tells the host
+ * whether to skip the text part of `output` at turn end.
  *
- * 写入错误被吞咽(观察者不得反向破坏回合;D3 与 safeTrace 纪律)。
- * pipe / 非 TTY 路径不构造本 sink(零输出变化回归保护)。
+ * Write errors are swallowed (observers must not break turns; safeTrace
+ * discipline). pipe / non-TTY paths never construct this sink (zero-output-
+ * change regression protection).
  */
 export interface StreamPreviewSink {
   readonly feed: (event: HarnessStreamEvent) => void;
   readonly textStreamed: boolean;
 }
 
-/** 运行中工具调用的人读行（D1 单源在 `src/shared/tool-line.ts`）。
- *  pending 的 input 累积是流式半成品 → 传 `running: true`，与 TUI live 行
- *  同一语义（write_file 的行数这类「只有 input 齐了才可信」的量被省略）。
- *  增量 JSON 不完整（CLI 常见：分片未拼完）→ 共享
- *  `summarizePartialInput` 原样截断；空 → 裸 `name` 行仍立得住。 */
+/** Human-readable line for an in-flight tool call; single source of truth is
+ *  `src/shared/tool-line.ts` (shared with the TUI). The pending input
+ *  accumulator is a streaming half-product → pass `running: true`, same
+ *  semantics as the TUI live line (quantities like write_file's line count,
+ *  only trustworthy once the input is complete, get omitted).
+ *  Partial JSON is often incomplete at the CLI (slices not yet joined) → the
+ *  shared `summarizePartialInput` truncates as-is; when empty, a bare `name`
+ *  line still stands. */
 function formatCliToolLine(name: string, partialJson: string): string {
   const detail = summarizePartialInput(name, partialJson);
   return formatToolStatusLine({
@@ -2395,23 +2567,26 @@ function formatCliToolLine(name: string, partialJson: string): string {
 }
 
 export function createStreamPreviewSink(opts: {
-  /** 答案文本 → stdout 最终输出。交互 REPL 传 `process.stdout.write`。 */
+  /** Answer text → stdout final output. Interactive REPL passes `process.stdout.write`. */
   readonly writeOut: (chunk: string) => void;
-  /** spinner 清除 + 工具过程行 → stderr。交互 REPL 传 `process.stderr.write`。 */
+  /** Spinner clearing + tool progress lines → stderr. Interactive REPL passes `process.stderr.write`. */
   readonly writeErr: (chunk: string) => void;
 }): StreamPreviewSink {
   let textStreamed = false;
-  // T5 (#198): 流式草稿经 stream-draft 累积,stdout 写的是 `masked()` 增量
-  // (SC20 遮蔽,不再裸写密钥)。`lastWrittenLen` 记录已写出位置,避免每次
-  // append 重复写出已写内容。
-  // 已知边界(D4 裁决):`masked()` 是"全量重 mask",不维护尾部余量 —— 跨
-  // delta 截断的密钥片段(如 `sk-` 先到、`abc123` 后到)会在累积完成前以
-  // 片段形式裸写出。SC20 完整密钥命中场景正常遮蔽。
+  // The streaming draft accumulates via stream-draft; stdout receives the
+  // `masked()` deltas (secrets are redacted, never written raw).
+  // `lastWrittenLen` tracks the written position so each append emits only
+  // the new tail.
+  // Known boundary (adjudicated): `masked()` re-masks the full accumulation
+  // and keeps no tail slack — a secret fragment split across deltas (e.g.
+  // `sk-` arrives first, `abc123` later) can flash raw until the pieces
+  // join. Complete-key hits are masked normally.
   const streamDraft = createStreamDraft();
   let lastWrittenLen = 0;
-  // 延迟 flush 的 pending 工具调用（D1）。同一时刻至多一个 —— harness loop
-  // 串行，start 与它的增量之间不会插入另一个 start；真插入时先行 flush
-  // （恰一行/调用，不丢行）。
+  // Deferred-flush pending tool call. At most one at a time — the harness
+  // loop is serial, so no second start can slip between a start and its
+  // input deltas; if one ever does, the prior one is flushed first
+  // (exactly one line per call, no lost lines).
   let pending: {
     readonly id: string;
     readonly name: string;
@@ -2426,10 +2601,12 @@ export function createStreamPreviewSink(opts: {
   const feed = (event: HarnessStreamEvent): void => {
     try {
       if (event.type === "text_delta") {
-        // 任何非「当前 pending 的 input 增量」事件都是关闭点（见上）。
+        // Anything other than the current pending call's input delta is a
+        // closing point (see above).
         flushPending();
         if (!textStreamed) {
-          // 清掉 `Thinking…` spinner(one-shot);首个 delta 之后不再清除。
+          // Clear the `Thinking…` spinner (one-shot); no clearing after the
+          // first delta.
           opts.writeErr("\r\x1b[K");
         }
         streamDraft.append(event);
@@ -2443,25 +2620,29 @@ export function createStreamPreviewSink(opts: {
         return;
       }
       if (event.type === "tool_input_delta") {
-        // 只累积当前 pending 调用的增量；其他 id（异常序）不 flushing、
-        // 不丢当前行（保持「一个调用恰一行」）。
+        // Accumulate deltas only for the current pending call; other ids
+        // (out-of-order) neither trigger a flush nor lose the current line
+        // (keeps "exactly one line per call").
         if (pending !== null && pending.id === event.id) {
           pending.json += event.partialJson;
         }
         return;
       }
-      // 其余事件（tool_call_start / thinking_delta / stop_summary / …）都是
-      // 关闭点：先 flush 上一件，再处理本事件。
+      // All other events (tool_call_start / thinking_delta / stop_summary /
+      // …) are closing points: flush the previous item first, then handle
+      // this one.
       flushPending();
       if (event.type === "tool_call_start") {
         if (!textStreamed) {
           opts.writeErr("\r\x1b[K");
         }
-        // 只登记 pending，不落行 —— input 增量还没到（上）。
+        // Only register the pending call, emit no line yet — its input
+        // deltas have not arrived (see above).
         pending = { id: event.id, name: event.name, json: "" };
       }
     } catch {
-      // 观察者写入失败不得影响回合交付(stderr/stdout 断流等;D3)。
+      // Observer write failures must never affect turn delivery (stderr /
+      // stdout breakage etc.).
     }
   };
   return {
@@ -2473,11 +2654,13 @@ export function createStreamPreviewSink(opts: {
 }
 
 /**
- * `ChatLineContext` 的装配（单职责抽出自 `runChatSession`，S5 门：主函数
- * 只保留会话生命周期编排，逐项搬运留在这里）。
+ * Assembles `ChatLineContext` (extracted single-responsibility from
+ * `runChatSession`: the main function keeps only session lifecycle
+ * orchestration, while field-by-field plumbing lives here).
  *
- * 条件展开（`...(x !== undefined ? {k: x} : {})`）是既有纪律：可选缝缺席时
- * 键不出现，下游 `"k" in ctx` 判定与 byte-equal 断言才成立。
+ * Conditional spreads (`...(x !== undefined ? {k: x} : {})`) follow existing
+ * discipline: when an optional seam is absent the key must not appear, so
+ * downstream `"k" in ctx` checks and byte-equal assertions hold.
  */
 function assembleChatSessionContext(input: {
   readonly opts: ChatSessionOpts;
@@ -2506,38 +2689,43 @@ function assembleChatSessionContext(input: {
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
     overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
-    // T4 (write-situation-disclosure)：写处境判定用的隔离档，refresh
-    // 算 rebind 一次性写根段的处境枚举。缺席 → 默认 false（旧形态 =
-    // writable_main，与改造前 byte-equal）。
+    // Isolation flag used for write-situation determination; refresh uses it
+    // to enumerate the write-root situation for one-shot rebind segments.
+    // Absent → defaults to false (legacy shape = writable_main, byte-equal
+    // with pre-refactor behavior).
     ...(opts.isolationOn !== undefined
       ? { isolationOn: opts.isolationOn }
       : {}),
-    // issue 1059 (G3)：门禁 holder —— 缺席（ask / host 未透传 built 句柄）
-    // → 键不出现，chatVerifyFenceOpts 不产出 worktreeOnMutate。
+    // Verify-gate holder — absent (ask / host did not forward the built
+    // handles) → key not present, chatVerifyFenceOpts produces no
+    // worktreeOnMutate.
     ...(opts.worktreeOnMutate !== undefined
       ? { worktreeOnMutate: opts.worktreeOnMutate }
       : {}),
-    // spec skill-index-increment T3：可加载技能面 —— 缺席（ask / 旧测试）
-    // → slash 技能名落未知命令，行为逐字节不变。可变：rebind 换血见
-    // refreshChatDepsForRebind。
+    // Loadable-skills surface — absent (ask / old tests) → slash skill names
+    // fall through to unknown-command, behavior byte-identical. Mutable:
+    // rebind swaps it via refreshChatDepsForRebind.
     ...(opts.skillCatalog !== undefined
       ? { skillCatalog: opts.skillCatalog }
       : {}),
-    // spec skill-index-increment SC8：可加载面「当场热」的缝 —— 缺席
-    // （ask / 旧测试）→ 候选恒为装配期快照，行为逐字节不变。
+    // Seam making the loadable surface "hot at once" — absent (ask / old
+    // tests) → candidates stay the assembly-time snapshot, behavior
+    // byte-identical.
     ...(opts.skillRescanner !== undefined
       ? { skillRescanner: opts.skillRescanner }
       : {}),
-    // Review High-1 (2026-08-29):rebind 检测缝 —— 会话文件 workspaceRoot 偏离
-    // engineRoot 时以新根重建 deps（包装语义与初始装配同源，见 wrapChatDeps）。
+    // Rebind-detection seam — when the session file's workspaceRoot drifts
+    // from engineRoot, rebuild deps with the new root (wrapping semantics
+    // come from the same source as initial assembly, see wrapChatDeps).
     ...(opts.rebuildDeps
       ? {
           rebuildDeps: opts.rebuildDeps,
           engineRoot: opts.engineRoot,
           wrapRebuiltDeps: input.wrapChatDeps,
-          // 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— refresh 在
-          // 切换点收口旧引擎 + 把重建引擎 shutdown 写入 current（cli.ts 的
-          // registerShutdown 闭包读 current）。
+          // Box holding the live engine's shutdown handle — refresh closes
+          // out the old engine at the swap point and writes the rebuilt
+          // engine's shutdown into current (cli.ts's registerShutdown closure
+          // reads current).
           ...(opts.engineShutdown
             ? { engineShutdown: opts.engineShutdown }
             : {}),
@@ -2550,38 +2738,45 @@ function assembleChatSessionContext(input: {
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
-  // T2 + T4: REPL 级 conversationId。`--resume <id>` 锚定既有 checkpoint
-  // 文件 id;缺省(undefined)= 新开会话随机 UUID(`randomUUID` 与 cli.ts ask
-  // 入口同源,确保 token 形态一致)。
-  // review-fix (H2):调用方 (cli.ts) 显式注入的 conversationId 优先 —— 单一
-  // 来源,避免 cli.ts 的 subagentsDir 派生与本层 checkpoint 派生各拿一个 id
-  // (双源分裂)。缺省退路保持 `resumeId ?? randomUUID()` byte-stable。
+  // REPL-level conversationId. `--resume <id>` anchors to the existing
+  // checkpoint file's id; default (undefined) = new session with a random
+  // UUID (`randomUUID` comes from the same source as cli.ts's ask entry, so
+  // token shape is consistent).
+  // Caller-injected conversationId (from cli.ts) wins — single source, so
+  // cli.ts's subagentsDir derivation and this layer's checkpoint derivation
+  // never end up with two different ids (split-brain). The default fallback
+  // stays `resumeId ?? randomUUID()`, byte-stable.
   const conversationId = opts.conversationId ?? opts.resumeId ?? randomUUID();
 
-  // T2: REPL 级 AbortController + SessionStore 注入 ctx;ask/pipe 入口仍
-  // 共享同一 ctx,缺省情况下 signal/store 不会走持久化路径(向 ask 开放零变化)。
-  // store 默认池 = ~/.iknow,与 serve/TUI 同池(#120 Q6 精神);tests / ask
-  // 入口传 opts.deps 不带 store 路径,持久化天然跳过。
-  // **T4 顺序调整**:checkpointStore 提前到 state 构造之前 —— resume 路径要先
-  // load 既有文件再 seed state.messages;依赖图(store 与 state)允许此顺序。
+  // REPL-level AbortController + SessionStore injected into ctx; ask/pipe
+  // entries share the same ctx, and by default signal/store never reach the
+  // persistence path (zero change exposed to ask).
+  // Default store pool = ~/.iknow, same pool as serve/TUI; tests / ask
+  // entries pass opts.deps without a store path, so persistence is skipped
+  // naturally. Ordering: checkpointStore is constructed before state — the
+  // resume path must load the existing file first, then seed
+  // state.messages; the store/state dependency graph permits this order.
   const abortController = new AbortController();
-  // T1 (session-folder-consolidation): store namespace keys by
-  // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
-  // review-fix (M2 / ADR-0087): 池根跟 `opts.dataDir`(显式 `--data-dir` 否则
-  // `~/.iknow`)—— 与 cli.ts runChat 的 worktreeProvisioner / todoDir / tasksDir
-  // 同一池,`iknow chat --data-dir <alt>` 不再静默写 `~/.iknow`。
+  // The store namespace keys by projectIdentityRoot, not cwd.
+  // The pool root follows `opts.dataDir` (explicit `--data-dir`, else
+  // `~/.iknow`) — the same pool cli.ts runChat uses for
+  // worktreeProvisioner / todoDir / tasksDir, so `iknow chat --data-dir <alt>`
+  // no longer silently writes to `~/.iknow`.
   const checkpointStore = new SessionStore(
     resolveServeDataDir(opts.dataDir),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
 
-  // T4: resume 时从既有 checkpoint 文件加载初始消息历史(seed)。
-  //   - `opts.resumeId === undefined` → 零 IO,空 messages,行为与 T2 完全一致。
-  //   - load 成功 → messages 来自文件,首轮续跑 processChatLine 的 prior 直接
-  //     看到历史,无需任何额外接线。
-  //   - load 失败(typed)→ messages 空 + 一行 stderr 警告;**仍保留
-  //     conversationId 锚点** —— 后续 turn 的 checkpoint 写回同一 `<id>.jsonl`,
-  //     不会碎片化成新 id。未知异常(防御性)→ 原样重抛。
+  // On resume, load the initial message history (seed) from the existing
+  // checkpoint file:
+  //   - `opts.resumeId === undefined` → zero IO, empty messages, behavior
+  //     identical to a fresh session.
+  //   - load OK → messages come from the file; the first turn's
+  //     processChatLine prior already sees the history, no extra wiring.
+  //   - typed load failure → empty messages + one stderr warning; the
+  //     conversationId anchor is still kept — later turns' checkpoints write
+  //     back to the same `<id>.jsonl` instead of fragmenting into a new id.
+  //     Unknown (defensive) errors rethrow as-is.
   const { messages: seeded, warn: resumeWarn } = await seedResumeMessages({
     store: opts.resumeId !== undefined ? checkpointStore : undefined,
     id: opts.resumeId,
@@ -2595,11 +2790,11 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     conversationId,
   };
 
-  // T6: wrap the executor with the violation kill-session hook so tool
-  // results get observed against the three-tier counter (#123 Q4). When the
-  // counter escalates, wireKillSessionNotification writes the stderr line
-  // and sets process.exitCode = 1; the REPL then closes after the current
-  // turn (kill = exit the session, per spec §OQ4 "杀会话").
+  // Wrap the executor with the violation kill-session hook so tool results
+  // get observed against the three-tier counter. When the counter
+  // escalates, wireKillSessionNotification writes the stderr line and sets
+  // process.exitCode = 1; the REPL then closes after the current turn
+  // (kill = exit the session).
   const counter = createViolationCounter();
   const killRef: { fired: boolean } = { fired: false };
   const notify = wireKillSessionNotification({ sink: writeErr });
@@ -2607,9 +2802,10 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     killRef.fired = true;
     notify(reason);
   };
-  // Review High-1 (2026-08-29):deps 包装收拢成闭包 —— 初始装配与 rebind 后
-  // 的 per-root 重建共用同一套包装语义（violation executor + conversationId
-  // + commitMessages 钩子），重建不漂移。
+  // Deps wrapping is collapsed into one closure — initial assembly and the
+  // per-root rebuild after rebind share the same wrapping semantics
+  // (violation executor + conversationId + commitMessages hook), so rebuilds
+  // cannot drift.
   const commitHook = createChatSessionCommitHook({
     store: checkpointStore,
     conversationId,
@@ -2626,14 +2822,17 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
       counter,
       onKill,
     }),
-    // CliChatState.conversationId:string | null;LoopEngineDeps.conversationId:
-    // string | undefined —— null 用 ?? undefined 收敛到 undefined 缺省语义
-    // （不过滤，与 ADR-0021 D1.4 backward-compat 路径对齐）。
+    // CliChatState.conversationId is string | null; LoopEngineDeps
+    // .conversationId is string | undefined — collapse null via ?? undefined
+    // into the undefined-default semantics (no filtering, aligned with
+    // ADR-0021's backward-compat path).
     conversationId: state.conversationId ?? undefined,
-    // #620 T3:turn 内 commit —— chat 路径无 serialize 队列,直调 store(沿用
-    // 裸 store IO 现状)。getPriors 读 live state.messages(= 本轮 run 前的历史,
-    // 与 hub bootstrap 的 session.messages 同语义;当前轮 user query 仍由收尾
-    // checkpoint 落盘)。调用方已注入 commitMessages 时以调用方为准。
+    // In-turn commit — the chat path has no serialize queue, so call the
+    // store directly (keeping the current bare store IO). getPriors reads
+    // live state.messages (= history before this run, same semantics as the
+    // hub bootstrap's session.messages; the current turn's user query is
+    // still persisted by the closing checkpoint). A caller-injected
+    // commitMessages takes precedence.
     commitMessages: base.commitMessages ?? commitHook,
   });
   const wrappedDeps: LoopEngineDeps = wrapChatDeps(opts.deps);
@@ -2689,8 +2888,9 @@ async function runInteractive(opts: {
   let sigintCount = 0;
   /** Coalesce same-tick dual delivery (process + readline) without timed debounce. */
   let sigintCoalesce = false;
-  /** B1: 首次 Ctrl+C 空闲分支的提示 —— 明确「空闲不打断」语义,避免用户误以为
-   *  当前 turn 被打断。busy 分支文案保持不变(见 onSigint)。 */
+  /** First-Ctrl+C idle-branch notice — makes the "idle does not interrupt"
+   *  semantics explicit, so users don't think the current turn got aborted.
+   *  The busy branch's wording stays unchanged (see onSigint). */
   const printIdleCtrlCNotice = (): void => {
     writeErr("\n当前无运行中的 turn（Ctrl+C 空闲时不打断）；/quit 退出");
   };
@@ -2705,10 +2905,11 @@ async function runInteractive(opts: {
 
     sigintCount += 1;
     if (sigintCount === 1) {
-      // T2: busy 时第一次 Ctrl+C 打断 in-flight turn。controller.signal 由
-      // processChatLine 透传到 run(),signal.abort → run 以 stopReason
-      // "cancelled" resolve → post-run 路径落 checkpoint(recoverable)。
-      // 空闲时不 abort(避免污染下一次 turn),直接重绘 prompt。
+      // When busy, the first Ctrl+C interrupts the in-flight turn.
+      // controller.signal is passed through processChatLine into run();
+      // signal.abort → run resolves with stopReason "cancelled" → the
+      // post-run path persists the checkpoint (recoverable). When idle, do
+      // not abort (avoid polluting the next turn), just redraw the prompt.
       if (busy) {
         writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
         ctx.abortController?.abort();
@@ -2716,7 +2917,8 @@ async function runInteractive(opts: {
         printIdleCtrlCNotice();
         rl.prompt(true);
       } else {
-        // closed 兜底:仍提示退出路径(与改前「无条件打印」一致)。
+        // closed fallback: still show the exit path (matches the pre-change
+        // "unconditional print").
         writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
       }
       return;
@@ -2732,10 +2934,11 @@ async function runInteractive(opts: {
     } catch {
       // EXIT: interface may already be closed
     }
-    // T2: bounded 1s 等在飞的 turn(含 processChatLine 内已 await 的
-    // persistChatSessionCheckpoint)完成,再 process.exit(130)。绝不在
-    // 退出钩子上阻塞(save 失败由 persist 内部 warn+continue)。
-    // 1s 上限 —— 即便 turn 卡住也强制退出,REPL 不挂。
+    // Wait at most 1s for the in-flight turn (including the
+    // persistChatSessionCheckpoint already awaited inside processChatLine)
+    // to finish, then process.exit(130). Never block on the exit hook (save
+    // failures are handled warn+continue inside persist). The 1s cap forces
+    // exit even if the turn is stuck, so the REPL never hangs.
     void Promise.race([
       chain.catch(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, 1000)),
@@ -2761,7 +2964,8 @@ async function runInteractive(opts: {
   const handle = async (line: string): Promise<void> => {
     busy = true;
     let showThinking = false;
-    // #195:流式最终输出 sink(函数级作用域,供 try 内赋值、catch 兜底清行)。
+    // Streaming final-output sink (function-level scope, so it can be
+    // assigned inside try and the catch can fall back to clearing the line).
     let preview: StreamPreviewSink | null = null;
     try {
       // Pause input so the next prompt cannot appear mid-turn.
@@ -2770,17 +2974,19 @@ async function runInteractive(opts: {
       const looksLikeQuery =
         line.trim().length > 0 && !line.trim().startsWith("/");
       // Thinking… spinner only when stderr is a TTY (never spam pipes /
-      // redirected logs). 文案来自 shared/tool-line（D1：与 TUI
-      // `formatThinkingLive` 同一函数，CLI 不另写中文字面量）。
+      // redirected logs). The text comes from shared/tool-line (same
+      // `formatThinkingLive` function the TUI uses; the CLI does not write
+      // its own literal for it).
       showThinking = looksLikeQuery && Boolean(process.stderr.isTTY);
 
       if (showThinking) {
         process.stderr.write(formatThinkingLive());
       }
 
-      // #179 T6 + #195:流式最终输出(仅 stderr TTY 时;与 Thinking… 同门槛)。
-      // 答案文本经 feed 直出 stdout 作为最终输出;首个 delta 自动清 spinner。
-      // textStreamed 供回合结束判断(见下方 #195 分支)。
+      // Streaming final output (only when stderr is a TTY; same gate as the
+      // Thinking… spinner). Answer text goes straight to stdout via feed as
+      // the final output; the first delta clears the spinner automatically.
+      // textStreamed drives the turn-end branch below.
       if (showThinking) {
         preview = createStreamPreviewSink({
           writeOut: (chunk) => process.stdout.write(chunk),
@@ -2810,8 +3016,9 @@ async function runInteractive(opts: {
       }
 
       if (preview) {
-        // Sink 自己管 spinner 清除(首个 delta 时);这里兜底无 delta 的回合
-        // (空响应 / 异常等)。一次即可。
+        // The sink manages spinner clearing itself (on the first delta);
+        // this is the fallback for turns with no delta (empty response /
+        // error etc.). Once is enough.
         clearErrLine();
       }
 
@@ -2819,9 +3026,11 @@ async function runInteractive(opts: {
         writeErr(result.stderr);
       }
       if (result.output) {
-        // #195:已流式 → 答案文本已在 stdout,只补状态行 + 分隔符(避免双打印)。
-        // 未流式(preview=null OR preview 但无 text_delta → 空响应 / 非流式
-        // 臂)→ 整体写 `result.output`,保持 pipe / 非 TTY / ask 零变化。
+        // Already streamed → the answer text is on stdout; only add the
+        // status line + separator (avoid double-printing). Not streamed
+        // (preview=null OR preview but no text_delta → empty response /
+        // non-streaming arm) → write `result.output` whole, keeping pipe /
+        // non-TTY / ask unchanged.
         if (preview?.textStreamed && result.statusLine !== undefined) {
           writeOut(result.statusLine);
           writeOut(TTY_ANSWER_SEP);
@@ -2842,8 +3051,8 @@ async function runInteractive(opts: {
         return;
       }
 
-      // T6: violation escalation fired mid-turn → kill the session after
-      // this turn completes (notification already written by onKill).
+      // Violation escalation fired mid-turn → kill the session after this
+      // turn completes (notification already written by onKill).
       if (killRef?.fired === true) {
         closed = true;
         rl.close();
@@ -2914,28 +3123,32 @@ async function runInteractive(opts: {
   };
   wakeController = createWakeController();
 
-  // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
-  // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
-  // stdin 已 emit keypress，keypress 里 shift+tab = key.name==="tab" &&
-  // key.shift。
+  // Shift+Tab flips the permission mode (default ↔ full_auto; plan is only
+  // reachable via `/permissions plan`, never through the cycle). The REPL
+  // uses readline: with terminal:true stdin already emits keypress, where
+  // shift+tab = key.name==="tab" && key.shift.
   //
-  // busy 期间（turn in-flight）readline 会调 `rl.pause()` 暂停 stdin，
-  // 此时 keypress 不会送达 — 仅空闲期（prompt 等待输入时）按 Shift+Tab
-  // 生效。busy-time 模式切换仅在 TUI 入口可达（ink useInput 不走
-  // readline，不受 pause 影响）。这是已知边界、注释诚实记录。
+  // While busy (turn in-flight) readline's `rl.pause()` suspends stdin, so
+  // keypress never arrives — Shift+Tab only takes effect while idle (prompt
+  // awaiting input). Busy-time mode switching is reachable only through the
+  // TUI entry (ink useInput bypasses readline, unaffected by pause). This
+  // is a known boundary, recorded honestly here.
   //
-  // 守卫 `!key.ctrl && !key.meta`：避免误触（Ctrl+Tab / Meta+Tab 各有
-  // 用途）。守卫 + flip 副作用走共享 helper `applyShiftTabModeFlip`
-  // （modes.ts；TUI 也用它），避免双份实现。
+  // The `!key.ctrl && !key.meta` guard avoids misfires (Ctrl+Tab / Meta+Tab
+  // each have their own use). Guard + flip side effects go through the
+  // shared helper `applyShiftTabAgentModeFlip` (modes.ts; the TUI uses it
+  // too) to avoid a second implementation.
   //
-  // handler 捕获到命名常量以便 rl.close 时 off（不积攒）。
+  // The handler is captured in a named constant so rl.close can off it
+  // (nothing accumulates).
   const keypressHandler = (
     _ch: unknown,
     key?: { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean }
   ): void => {
     if (closed) return;
-    // D-α / ADR-0030: 三态轮 Default → Auto → Graph → Default。graph holder
-    // 缺席时退化成既有单轴 permission 轮（零行为变化）。
+    // ADR-0030: three-state cycle Default → Auto → Graph → Default. When
+    // the graph holder is absent it degrades to the existing single-axis
+    // permission cycle (zero behavior change).
     applyShiftTabAgentModeFlip({
       key,
       permission: opts.ctx.permissionMode,
@@ -2973,7 +3186,8 @@ async function runInteractive(opts: {
       wakeController?.dispose();
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
-      // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。
+      // Unregister the Shift+Tab keypress listener; same place as SIGINT
+      // cleanup (nothing accumulates).
       process.stdin.off("keypress", keypressHandler);
       // Normal /quit or EOF: wait for in-flight turn then farewell.
       // Forced second Ctrl+C uses process.exit(130) and never reaches here.
@@ -2989,7 +3203,7 @@ async function runInteractive(opts: {
 async function runPiped(opts: {
   readonly ctx: ChatLineContext;
   readonly quiet: boolean;
-  /** T6: violation escalation closes the pipe loop after the current turn. */
+  /** Violation escalation closes the pipe loop after the current turn. */
   readonly killRef?: { fired: boolean };
 }): Promise<void> {
   const { ctx, quiet, killRef } = opts;
@@ -3013,7 +3227,8 @@ async function runPiped(opts: {
       writeErr(`── turn ${turn} ──`);
     }
 
-    // Never print 思考中 on pipe (quiet product / script friendly).
+    // Never print the Thinking… spinner on pipe (quiet product / script
+    // friendly).
     const result = await processChatLine({ line, ctx });
 
     if (result.stderr) {
@@ -3026,7 +3241,7 @@ async function runPiped(opts: {
     if (result.quit) {
       break;
     }
-    // T6: violation escalation fired mid-turn → stop reading further lines.
+    // Violation escalation fired mid-turn → stop reading further lines.
     if (killRef?.fired === true) {
       break;
     }

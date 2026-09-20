@@ -11,11 +11,12 @@ export type CliCommand =
   | "trace"
   | "tui"
   /**
-   * #356 subagent worker headless 重入 (双下划线前缀区别产品形态,spec
-   * Boundaries Never)。本命令不暴露在 printUsage / getVersion 公共展示路径;
-   * 仅由父代理通过 child_process.spawn 触发,operator 不直调。
-   * argv 早 flag `--subagent-worker` 在 parseArgs for-loop 最前面检测,
-   * 一旦命中立即返回 baseParsed,不再走任何产品分支。
+   * Subagent worker headless re-entry (double-underscore prefix separates it
+   * from product forms). Not exposed in printUsage / getVersion public
+   * paths; triggered only by the parent agent via child_process.spawn, never
+   * called directly by the operator. The early flag `--subagent-worker` is
+   * detected at the very top of the parseArgs for-loop: on a hit we return
+   * baseParsed immediately, skipping every product branch.
    */
   | "__subagent_worker__";
 
@@ -47,53 +48,56 @@ export type ParsedCli = {
   maxBytes?: number;
   /**
    * Trace output directory for ask/serve/tui (--trace-out flag).
-   * Resolution: flag > IKNOW_TRACE_OUT env > "./trace/" (ADR-0003 D3/D4).
-   * T2 后语义为目录：实际写 <traceOut>/<conversationId>.jsonl。
+   * Resolution: flag > IKNOW_TRACE_OUT env > "./trace/" (ADR-0003).
+   * Directory semantics: actual writes go to
+   * <traceOut>/<conversationId>.jsonl.
    */
   traceOut?: string;
   /**
    * Session pool root for serve (--data-dir flag).
-   * Undefined → serve defaults to ~/.iknow (spec #120 SC 1).
+   * Undefined -> serve defaults to ~/.iknow.
    */
   dataDir?: string;
   /**
-   * Workspace root for per-root state (--workspace-root flag, T1).
+   * Workspace root for per-root state (--workspace-root flag).
    * Resolved by `resolveWorkspaceRoot({explicit, cwd, env})` in the
    * build-engine / tui-deps layer. CLI here only stores the raw flag
    * value; resolver applies priority chain + validation.
    */
   workspaceRoot?: string;
   /**
-   * `tui [session-id]` 可选位置参数（#146 SC 2：直连 resume 该会话）。
+   * Optional positional parameter for `tui [session-id]` — resume that
+   * session directly.
    */
   sessionId?: string;
   /**
-   * plan T5: 单次会话最大循环轮数上限(可选正整数)。
-   * `undefined`(默认)= 无限;
-   * 显式配置时由 host(loop-engine 等)按需解释。
-   * 缺失值 / 非整数 / < 1 抛错。
+   * Max loop turns for a single run (optional positive integer).
+   * `undefined` (default) = unlimited; explicit values are interpreted by
+   * the host (loop-engine etc.). Missing value / non-integer / < 1 throws.
    */
   maxTurns?: number;
   /**
-   * T7: `--no-open` 关闭 `iknow trace` 启动后的自动开浏览器（CI/headless）。
-   * 缺省 false = 默认自动 open。
+   * `--no-open` disables the auto browser-open after `iknow trace` starts
+   * (CI/headless). Default false = auto-open.
    */
   noOpen: boolean;
   /**
-   * ADR-0020 D2.2: `iknow trace --separate` escape hatch — 保留 #183 独立
-   * 进程模式（默认 24881）。缺省 false = 默认探测 `iknow serve` 后指向
-   * 同进程 /trace 面板（D2.1）。
+   * ADR-0020: `iknow trace --separate` escape hatch — keeps the
+   * standalone-process mode (default port 24881). Default false = probe
+   * `iknow serve` and point at the same-process /trace panel.
    */
   separate: boolean;
   /**
-   * T4: `iknow chat --resume <id>` 锚定既有 conversationId 续跑。解析保持
-   * command-agnostic(后续 ask/serve/tui 可独立决策是否消费);仅 chat 入口
-   * 实际消费。`undefined`(默认)= 新开会话(随机 UUID)。
+   * `iknow chat --resume <id>` anchors an existing conversationId to
+   * continue. Parsing stays command-agnostic (ask/serve/tui may each decide
+   * to consume it later); only the chat entry consumes it for now.
+   * `undefined` (default) = new session (random UUID).
    */
   resumeId?: string;
   /**
-   * `iknow tui --auto-mode`：启动即 full_auto 权限模式（跳过工具 ask 弹窗）。
-   * 缺省 false。仅 tui 入口消费；其它命令解析保留字段但不读。
+   * `iknow tui --auto-mode`: launch in full_auto permission mode (skip
+   * tool-ask prompts). Default false. Only the tui entry consumes it; other
+   * commands keep the parsed field but never read it.
    */
   autoMode: boolean;
 };
@@ -112,11 +116,12 @@ export type ParseArgsOptions = {
  * - no positionals + !interactive → help
  * - ask / bare query with empty text → missingQuery (caller exits 1)
  *
- * #356 early flag: `--subagent-worker` 在 for-loop 最前面检测(早于
- * `-h` / `--version` / 既有 flag 分支)。一旦命中立即返回
- * `baseParsed({command:"__subagent_worker__", fields:{...defaults}})`,
- * 不进入任何产品形态分支。子代理由父进程 spawn 后 stdin 喂 envelope,
- * CLI argv 不再包含 chat/ask/serve/tui 等 sub-command。
+ * Early flag: `--subagent-worker` is checked at the very top of the
+ * for-loop (before `-h` / `--version` / existing flag branches). A hit
+ * returns `baseParsed({command:"__subagent_worker__",
+ * fields:{...defaults}})` immediately, entering no product branch. The
+ * parent process spawns the worker and feeds the envelope over stdin, so
+ * the worker argv carries no chat/ask/serve/tui sub-command.
  */
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
@@ -138,10 +143,11 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    // #356 early flag:在 for-loop 最前面检测,一旦命中 → 立即返回 worker
-    // command。早 flag 语义覆盖后续任何 argv 项(即便用户同时塞了
-    // chat/ask/serve/tui 也以 worker 优先,operator 不直调,只为父进程 spawn)。
-    // 不在 printUsage / getVersion 公共展示路径露出。
+    // Early flag: checked at the top of the for-loop; a hit returns the
+    // worker command immediately. Early-flag semantics override every later
+    // argv item (even if chat/ask/serve/tui are also present, worker wins —
+    // the operator never calls it directly, it exists only for
+    // parent-process spawn). Not shown in printUsage / getVersion.
     if (a === "--subagent-worker") {
       return baseParsed({
         command: "__subagent_worker__",
@@ -232,16 +238,16 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       }
       maxTurns = n;
     } else if (a === "--no-open") {
-      // T7: 布尔 flag（无实参），关闭 trace 自动开浏览器（CI/headless）。
+      // Boolean flag (no value): disables trace auto browser-open (CI/headless).
       noOpen = true;
     } else if (a === "--separate") {
-      // ADR-0020 D2.2: 布尔 flag（无实参），trace 保留独立进程模式。
+      // Boolean flag (no value): trace keeps the standalone-process mode (ADR-0020).
       separate = true;
     } else if (a === "--auto-mode") {
-      // TUI: 启动即 full_auto（跳过工具 ask）。布尔 flag，无实参。
+      // TUI: start in full_auto (skip tool asks). Boolean flag, no value.
       autoMode = true;
     } else if (a === "--resume") {
-      // T4: 值式 flag —— 缺失 / 空串 / 纯空白均拒绝（镜像 --port 风格）。
+      // Value flag — missing / empty / whitespace-only are rejected (mirrors --port style).
       const raw = argv[++i];
       if (raw === undefined) {
         throw new Error("--resume requires a conversation id argument");
@@ -328,8 +334,8 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   if (head === "trace") {
-    // ADR-0020 D2: default mode probes `iknow serve` → default port 8787
-    // (serve's port); `--separate` keeps the #183 standalone default 24881.
+    // ADR-0020: default mode probes `iknow serve` → default port 8787
+    // (serve's port); `--separate` keeps the standalone default 24881.
     // Sentinel-based: only override when the user did not pass --port, so
     // `iknow trace --port 9999` is honored verbatim.
     const tracePort = portSet ? port : separate ? 24881 : 8787;

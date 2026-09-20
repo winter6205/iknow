@@ -1,21 +1,29 @@
 /**
- * ADR-0102 T3 — 工人 transcript IO 的生产实现（cli 入口注入缝）。
+ * Production worker transcript IO for the subagent worker (ADR-0102),
+ * injected from the CLI entry seam.
  *
- * 存在理由 = Gate B 方向约束：codec 与 typed-error 词汇住在
- * session-api/store/worker-transcript（复用 SessionFileV1 读路径 = store
- * load/save 缝），而消费者 worker 在 src/harness —— harness 可执行面不得
- * import session-api（tests/harness/public-exports.test.ts 钉死）。所以
- * 装配点放在这里：`__subagent_worker__` dispatch（cli.ts）构造实例、以窄
- * 接口传给 runSubagentWorker。
+ * Rationale = Gate B direction constraint: the codec and typed-error
+ * vocabulary live in session-api/store/worker-transcript (reusing the
+ * SessionFileV1 read path = store load/save seam), while the consumer
+ * worker lives in src/harness — harness executables must not import
+ * session-api (pinned by tests/harness/public-exports.test.ts). So
+ * assembly happens here: the `__subagent_worker__` dispatch (cli.ts)
+ * constructs the instance and passes it to runSubagentWorker through a
+ * narrow interface.
  *
- * 错误折叠只认一个合法态：`not_found` = 新工人无账 → `absent`；其余 typed
- * kind（io_error / parse_failed / schema_invalid / write_failed）原样上抛
- * —— 损坏的账绝不能被读成无账（否则 fresh seed 会覆盖既有内容）。
+ * Error folding recognises exactly one legal state: `not_found` = fresh
+ * worker with no ledger -> `absent`; every other typed kind (io_error /
+ * parse_failed / schema_invalid / write_failed) rethrows — a corrupt
+ * ledger must never read as absent (a fresh seed would overwrite existing
+ * content).
  *
- * 路径护栏在工厂入口接线（`isWorkerTranscriptPathSafe` 的调用点）：envelope
- * 是 untrusted 输入面，相对路径 / 空串 typed 拒绝（schema_invalid），不给
- * 「父没算好路径」留静默写到 process.cwd() 的通道。抛错发生在任何 fs 触碰
- * 之前，经 wireWorkerTranscript 原样上抛 → worker 进程 exit 2（协议层崩溃）。
+ * The path guard is wired at the factory entry (the
+ * `isWorkerTranscriptPathSafe` call site): the envelope is an untrusted
+ * input surface; relative paths / empty strings are rejected typed
+ * (schema_invalid), leaving no silent channel to write into
+ * process.cwd() when the parent mis-computed the path. The throw happens
+ * before any fs touch and propagates through wireWorkerTranscript ->
+ * worker process exit 2 (protocol-layer crash).
  */
 import {
   appendWorkerTranscript,
@@ -34,10 +42,12 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
       field: "transcript_path",
     } satisfies SessionStoreError;
   }
-  // WHY: appendWorkerTranscript 是 read-modify-write 且 store 层刻意无锁
-  // （架构纪律：锁在装配边界，ADR-0110 单写者契约），worker loop 的并发
-  // flushPrefix 交错会造出重复 event id → worker exit 2。装配点在此串行化，
-  // 队列语义（FIFO、reject 不卡链）见 util/serial-queue。
+  // WHY: appendWorkerTranscript is read-modify-write and the store layer
+  // deliberately holds no lock (architecture discipline: locks live at the
+  // assembly boundary, ADR-0110 single-writer contract). Interleaved
+  // concurrent flushPrefix calls from the worker loop would produce duplicate
+  // event ids -> worker exit 2. Serialize at this assembly point; queue
+  // semantics (FIFO, reject without stalling the chain) in util/serial-queue.
   const serialize = createSerialQueue();
   return {
     loadMessages: () =>

@@ -1,6 +1,6 @@
 /**
  * CLI usage / version strings (stdout).
- * Bilingual (中文 + English) product help for humans and scripts.
+ * Bilingual (Chinese + English) product help for humans and scripts.
  */
 import { readPackageVersion } from "../shared/package-version.js";
 

@@ -1,34 +1,38 @@
 /**
- * CLI 端 slash-command 解析 + dispatch。
+ * CLI-side slash-command parsing + dispatch.
  *
- * 与并行旧模块的差异(Q1 + Q3 决议收口):
- * - 不再导任何 mode 相关符号(CLI 不再有 mode 概念;`/mode` case + 对应
- *   处理函数已删);Session API 仍消费旧 fork,020 一字不动。
- * - 状态类型收敛到本文件维护:仅保留 host 必需的 `messages` /
- *   `jsonMode` / `session` 三字段。
- * - 命令字段名更新:`json_mode` → `jsonMode`,`turns.length` →
- *   `messages.length`,旧 `last_priors` 行删除。
- * - `/reset` 改清 messages,不动 session。
+ * Divergences from the parallel legacy module:
+ * - No mode-related symbols are exported (the CLI has no agent-mode
+ *   concept; the `/mode` case and its handlers are gone). The Session API
+ *   still consumes the old fork, untouched.
+ * - State types converge here: only the host-required `messages` /
+ *   `jsonMode` / `session` fields remain.
+ * - Field renames: `json_mode` -> `jsonMode`, `turns.length` ->
+ *   `messages.length`; the legacy `last_priors` line is gone.
+ * - `/reset` clears messages, keeps the session.
  *
- * 此文件是 `CliChatState` 类型在 CLI 端的唯一 home(后续 `chat-session.ts`
- * 与 `cli.ts` 共引此类型,避免重复定义)。
+ * This file is the single home of `CliChatState` on the CLI side
+ * (`chat-session.ts` and `cli.ts` import it from here).
  */
 import type { AnthropicNativeMessage } from "../harness/index.js";
 import type { SessionContext } from "../shared/schema.js";
 import { parseGoalPinInput } from "../session-api/goal-auto.js";
 
 /**
- * CLI host 维护的最小对话状态。
+ * Minimal conversation state maintained by the CLI host.
  *
- * grilling #120 Q3 裁决：全链路使用 `ReadonlyArray` + `Object.freeze`。
- * host 通过整体替换并冻结来维护 append-only 历史，禁止原地修改；这是
- * append-only 纪律在 host 层的落法。`jsonMode` 决定 ask/chat 输出走哪一支投影;`session` 透传 harness
- * (SessionContext 由 Session API 装配)。
+ * Whole-chain rule: `ReadonlyArray` + `Object.freeze`. The host maintains
+ * append-only history by wholesale replacement plus freezing; in-place
+ * mutation is banned — this is how append-only discipline lands at the host
+ * layer. `jsonMode` picks which ask/chat output projection runs; `session`
+ * passes through to the harness (SessionContext assembled by the Session API).
  *
- * `conversationId` (T2) — 由 runChatSession 在入口处一次性生成（`randomUUID`），
- * 作为该 REPL 会话的会话文件夹名（`<池根>/projects/<slug>/<id>/`，ADR-0071/0087）。
- * T4 `--resume` 会复用同一字段在重启时锚定同一文件。Tests / makeState 默认 `null`
- * 标识"无 checkpoint 落盘路径"，processChatLine 据此跳过持久化分支。
+ * `conversationId` — generated once by runChatSession at entry
+ * (`randomUUID`) as this REPL session's session-folder name
+ * (`<pool root>/projects/<slug>/<id>/`, ADR-0071/0087). `--resume` reuses
+ * the same field to anchor the same file across restarts. Tests /
+ * makeState default to `null`, meaning "no checkpoint persistence path";
+ * processChatLine skips the persistence branch accordingly.
  */
 export type CliChatState = {
   messages: ReadonlyArray<AnthropicNativeMessage>;
@@ -50,23 +54,24 @@ export type SlashEffect =
   | { type: "info"; text: string }
   | { type: "error"; text: string }
   | { type: "reset"; message: string }
-  /** T3 (#689): host runs skip-append continue; never a user task sentence. */
+  /** Host runs skip-append continue; never a user task sentence. */
   | { type: "continue" }
   /**
-   * W2: 权限模式查询/切换。args[0] ∈ {"", "status", "default", "plan",
-   * "full_auto", "help"}。空 / "status" → host 显示当前 mode;其它 → host
-   * 调用 modeContext.set(args[0])。
+   * Permission-mode query/toggle. args[0] ∈ {"", "status", "default", "plan",
+   * "full_auto", "help"}. Empty / "status" -> host shows the current mode;
+   * otherwise host calls modeContext.set(args[0]).
    */
   | { type: "permissions"; args: string[] }
   /**
-   * #458 T6: 会话级 goal 三面。/goal <text> 由 host 持久化为 session.goal
-   * （source=user_pin）；/goal status 显示当前 goal；/goal clear 清空 goal。
-   * 三态统一由 host 侧 processSlash 的 case "goal" 按 action 分派。
-   * 空 args / "status" → status；"clear" → clear；其它 →
-   * pin <text>（join+trim）。大小写敏感（"CLEAR" ≠ clear → pin）。
+   * Session-level goal surface. /goal <text> is persisted by the host as
+   * session.goal (source=user_pin); /goal status shows the current goal;
+   * /goal clear empties it. All three dispatch from the host-side
+   * processSlash "goal" case on `action`.
+   * Empty args / "status" -> status; "clear" -> clear; anything else ->
+   * pin <text> (join+trim). Case-sensitive ("CLEAR" ≠ clear -> pin).
    *
-   * 注：taskFocus 段已随 #605 T2 整段退休；status / clear 仅回显 / 清空
-   * goal。
+   * Note: the taskFocus segment has been retired entirely; status / clear
+   * only echo / clear the goal.
    */
   | {
       type: "goal";
@@ -75,15 +80,17 @@ export type SlashEffect =
       maxTurns?: number;
     }
   /**
-   * D-α graph mode: 编排 overlay 查询/切换。args 原样透传 —— 解析与文案由
-   * `harness/graph/mode.ts` 的 `applyGraphCommand` 单点承担（chat / TUI /
-   * serve 三入口共用同一份语义）。host 持有 GraphModeContext。
+   * Graph-mode orchestration overlay query/toggle. args pass through
+   * verbatim — parsing and copy live in one place, `applyGraphCommand` in
+   * `harness/graph/mode.ts` (chat / TUI / serve share that semantics). The
+   * host holds the GraphModeContext.
    */
   | { type: "graph"; args: string[] }
   /**
-   * ADR-0092 / SC13: filesystem isolation 档查询/切换。args 原样透传 ——
-   * 解析与文案由 `harness/sandbox/fs-mode.ts` 的 `applyFsModeCommand` 单点
-   * 承担（chat / TUI / serve 三入口共用同一份值域）。host 持有 FsModeContext。
+   * ADR-0092: filesystem isolation tier query/toggle. args pass through
+   * verbatim — parsing and copy live in one place, `applyFsModeCommand` in
+   * `harness/sandbox/fs-mode.ts` (chat / TUI / serve share that value
+   * domain). The host holds the FsModeContext.
    */
   | { type: "config"; args: string[] };
 
@@ -145,7 +152,7 @@ export interface ApplySlashCommandOpts {
 /**
  * Apply a slash command. Mutates `ctx.state` for `/json` and `/reset`.
  *
- * No `mode_change` variant — CLI no longer has an agent-mode concept (Q3).
+ * No `mode_change` variant — CLI no longer has an agent-mode concept.
  */
 export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
   const { command, args, ctx } = opts;
@@ -177,19 +184,22 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       return { type: "continue" };
 
     case "permissions":
-      // W2: 权限模式查询/切换。纯解析,实际 set 落在 host(它持有
-      // PermissionModeContext)。
+      // Permission-mode query/toggle. Pure parsing here; the actual set
+      // lands in the host (it holds PermissionModeContext).
       return { type: "permissions", args };
 
     case "graph":
-      // graph 编排 overlay 查询/切换。args 不在此解析 —— 值域与文案是三入口
-      // 共享的单点(harness/graph/mode.ts),host 持有 GraphModeContext 并调它。
+      // Graph orchestration overlay query/toggle. args are not parsed here —
+      // the value domain and copy are a single point shared by the three
+      // entry points (harness/graph/mode.ts); the host holds GraphModeContext
+      // and calls it.
       return { type: "graph", args };
 
     case "config":
-      // ADR-0092 / SC13:filesystem isolation 档查询/切换。args 不在此解析
-      // —— 值域与文案是三入口共享的单点(harness/sandbox/fs-mode.ts),host
-      // 持有 FsModeContext 并调 applyFsModeCommand。
+      // ADR-0092: filesystem isolation tier query/toggle. args are not
+      // parsed here — the value domain and copy are a single point shared by
+      // the three entry points (harness/sandbox/fs-mode.ts); the host holds
+      // FsModeContext and calls applyFsModeCommand.
       return { type: "config", args };
 
     case "goal":
@@ -210,11 +220,12 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
 }
 
 /**
- * #458 T6: /goal 三面 —— status / clear / pin(<text>)。
- * status / clear 区分大小写(小写才触发；大写按 <text> pin,因为 <text>
- * 本身可能以大写开头)。空 args → status(回显)；其它 → pin text = join+trim。
- * 纯解析:实际 IO(读盘 / 清空 / 持久化)落在 host(chat-session 持有
- * checkpointStore + validateGoalText)。
+ * /goal three faces — status / clear / pin(<text>).
+ * status / clear are case-sensitive (lowercase only triggers; uppercase
+ * pins as <text>, since user text may legitimately start uppercase).
+ * Empty args -> status (echo); anything else -> pin with text = join+trim.
+ * Pure parsing: real IO (read / clear / persist) happens in the host
+ * (chat-session holds checkpointStore + validateGoalText).
  */
 function applyGoalCommand(args: string[]): SlashEffect {
   const sub = args[0] ?? "";

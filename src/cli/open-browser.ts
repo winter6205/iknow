@@ -1,27 +1,28 @@
 /**
- * 跨平台打开浏览器（T7 自动 open，零新增 runtime deps）。
+ * Cross-platform browser open (trace auto-open; zero new runtime deps).
  *
- * 用 node:child_process.spawn 调各平台默认打开命令：
+ * Shells out via node:child_process.spawn to the platform default:
  *   - macOS   `open <url>`
- *   - Windows `cmd /c start "" <url>`（start 内建，需经 cmd）
- *   - Linux/其他 UN*X `xdg-open <url>`
+ *   - Windows `cmd /c start "" <url>` (start is a cmd builtin)
+ *   - Linux/other UN*X `xdg-open <url>`
  *
- * fail-fast 由调用方 runTrace 负责（检测到旧 ./trace.jsonl 就抛错不启动）；
- * 这里只做 fire-and-forget 打开，spawn 失败（如 headless 无 xdg-open、WSL 无
- * 图形环境）静默忽略 —— 自动 open 是启动体验的锦上添花，不应让 CLI 因打不开
- * 浏览器而崩。spawn 失败分两种：同步 throw（spawn 同步段）与异步 'error' 事件
- * （如 EACCES 找不到可执行文件）—— 两者都要兜住，缺一都会把 CLI 带崩。
+ * Fail-fast is the caller's job (runTrace throws on a stale ./trace.jsonl
+ * before starting). Opening here is fire-and-forget: spawn failures
+ * (headless without xdg-open, WSL without a GUI) are silently ignored — the
+ * CLI must never crash because a browser could not open. Spawn fails in two
+ * flavours: a synchronous throw and an asynchronous 'error' event (e.g.
+ * EACCES on the executable); both must be caught or the CLI dies.
  */
 import { spawn } from "node:child_process";
 
 export interface OpenBrowserOptions {
-  /** 测试 seam：注入假 spawn，避免 CI 真开浏览器。缺省用 node 实现。 */
+  /** Test seam: inject a fake spawn so CI never opens a real browser. Defaults to the node implementation. */
   readonly spawnProcess?: typeof spawn;
-  /** 是否真正打开（false 时 no-op）。缺省 true。 */
+  /** Whether to actually open (false = no-op). Default true. */
   readonly enabled?: boolean;
 }
 
-/** 解析当前平台对应的打开命令（cmd + args，不含 URL）。测试可注入 spawn 以断言。 */
+/** Resolve the platform's open command (cmd + args, without URL). Tests inject spawn to assert on it. */
 export function openCommandForPlatform(
   platform: NodeJS.Platform = process.platform
 ): { cmd: string; args: string[] } {
@@ -29,14 +30,14 @@ export function openCommandForPlatform(
     return { cmd: "open", args: [] };
   }
   if (platform === "win32") {
-    // `start` 是 cmd 内建，必须经 cmd /c 调用；首个 "" 是窗口标题占位。
+    // `start` is a cmd builtin, only reachable via cmd /c; the first "" is the window-title placeholder.
     return { cmd: "cmd", args: ["/c", "start", ""] };
   }
-  // linux / freebsd / 其他 UN*X
+  // linux / freebsd / other UN*X
   return { cmd: "xdg-open", args: [] };
 }
 
-/** 打开 url；spawn 失败静默 ignore（不 throw、不崩进程）。 */
+/** Open url; spawn failures are silently ignored (no throw, no crashed process). */
 export function openBrowser(url: string, opts: OpenBrowserOptions = {}): void {
   if (opts.enabled === false) return;
   const { cmd, args } = openCommandForPlatform();
@@ -46,14 +47,15 @@ export function openBrowser(url: string, opts: OpenBrowserOptions = {}): void {
       stdio: "ignore",
       detached: true,
     });
-    // EACCES / ENOENT 等以异步 'error' 事件发射，不监听会变成 unhandled
-    // error 把整个 CLI 带崩（trace 已在服务，不应因开浏览器而死）。fail-safe：
-    // 吞掉错误，浏览器打不开就静默放弃，与下方同步 catch 语义一致。
+    // EACCES / ENOENT etc. surface as an async 'error' event; unhandled, it
+    // takes down the whole CLI (the trace is already serving — dying over a
+    // browser is wrong). Fail-safe: swallow it, same semantics as the sync
+    // catch below.
     child.on("error", () => {});
-    // unref：打开浏览器是 fire-and-forget，不持有事件循环，trace 进程
-    // Ctrl+C 后不会因 child 挂起阻止退出。
+    // unref: opening the browser is fire-and-forget; don't hold the event
+    // loop, so Ctrl+C can exit the trace process without waiting on the child.
     child.unref();
   } catch {
-    // spawn 同步段失败（如 spawn 本身 throw）→ 不打开，不阻塞 CLI 启动。
+    // spawn threw synchronously -> skip opening, never block CLI startup.
   }
 }
