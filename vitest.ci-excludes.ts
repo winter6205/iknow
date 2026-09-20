@@ -64,6 +64,9 @@ export const CI_EXCLUDES: readonly string[] = [
   // cat / grep / sed / rg before asserting the ledger entries — on a runner
   // without user-namespace it throws already at assembly time.
   "tests/harness/aci/tools/bash-last-read.test.ts",
+  // ADR-0117 替岗拒绝 bash 臂：createBashTool 装配期 requireBwrap，且行窗
+  // 仍读 / echo 反例等用例真实 spawn bwrap —— runner 无 user-namespace。
+  "tests/harness/aci/tools/role-substitution.test.ts",
   "tests/harness/aci/tools/grep.test.ts",
   "tests/harness/aci/tools/query-trace.test.ts",
   "tests/harness/aci/tools/list-sessions.test.ts",
