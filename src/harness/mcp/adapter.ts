@@ -26,11 +26,12 @@ export interface ToAciToolDefOptions {
 
 const EMPTY_INPUT_SCHEMA = { type: "object", properties: {} } as const;
 
-// 宿主 registry 的 Ajv 只 bundle draft-07 元模式；zod4 / MCP SDK 2.0 生成的
-// inputSchema 带顶层 2020-12 `$schema`，compile 会被拒（#1058）。只剥顶层这
-// 一处；无该键时返回原引用，保对象身份与 EMPTY_INPUT_SCHEMA 兜底语义。
-// 已知限制：其余 2020-12 特有关键字（如 tuple 的 `prefixItems`）原样透传，
-// draft-07 视角下可能被误读；当前已知消费方（zod4 常规关键字）不受影响。
+// The host registry's Ajv bundles only the draft-07 meta-schema, while zod4 / MCP
+// SDK 2.0 emit a top-level 2020-12 `$schema` that compile rejects. Strip only this
+// top-level key; when absent, return the original reference to keep object identity
+// and the EMPTY_INPUT_SCHEMA fallback semantics. Known limitation: other 2020-12-only
+// keywords (e.g. tuple `prefixItems`) pass through and may be misread under a
+// draft-07 view; current consumers (plain zod4 keywords) are unaffected.
 function stripTopLevelSchemaKeyword(
   schema: Record<string, unknown>
 ): Record<string, unknown> {
@@ -86,12 +87,11 @@ export function toAciToolDef(opts: ToAciToolDefOptions): AciToolDef {
 }
 
 function sanitizeSegment(value: string): string {
-  // 仅替换不可用于工具名的字符；**连字符 / 点保留**（deps.ts 的
-  // mcpServerOfToolName 反解依赖这一点：配置 server 名 `codebase-memory`
-  // 必须原样保留，面板 status.name 才能与工具归属对得上 —— #361 Phase D
-  // 看板 bug 根因：此前 `-` 被替换成 `_`，导致 `mcp__codebase_memory__*`
-  // 反解出 `codebase_memory`，与 status.name `codebase-memory` 永不匹配，
-  // 列表工具数恒 0、详情页空白）。
+  // Replace only characters invalid in a tool name; hyphens and dots are kept
+  // because deps.ts `mcpServerOfToolName` reverse-parses the tool name to recover
+  // the config server name (e.g. `codebase-memory`). Mapping `-` to `_` would make
+  // the parsed name never match the panel's status.name, so the server would show
+  // zero tools and a blank detail page.
   return value.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 

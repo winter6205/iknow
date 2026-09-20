@@ -1,14 +1,17 @@
 /**
- * #672 T2: 有界传输重试，装饰 ModelAdapter.step。
+ * Bounded transport retry, decorating ModelAdapter.step.
  *
- * 不进 loop 状态机、不绑 SDK maxRetries。供应商 adapter 只负责把 thrown
- * 译成 FaultEvent；本模块只根据 classifyFault === "retry" 退避。
+ * It does not enter the loop state machine and does not piggyback on SDK
+ * maxRetries. Vendor adapters only translate thrown errors into FaultEvents;
+ * this module only backs off when classifyFault === "retry".
  *
- * transport-continue-persist T1 / spec inv 4:退避从毫秒级抬到**秒级指数**
- * (1s / 2s / 4s / 8s,上限 16s),尝试次数 3 → 5(settings 无该旋钮,取
- * spec 允许的 5–10 下沿);`retry-after` 在场时不得早于服务器给的时刻重发。
- * 时钟到点(不可见 idle/硬顶)的重试不在这里 —— 它由 loop-engine 重新发起
- * 整次 race(见 runModelPhase),本模块只暴露同一份退避表供其复用。
+ * The backoff is a seconds-scale exponential table (1s / 2s / 4s / 8s, cap
+ * 16s) with 5 attempts (no settings knob exists; this is the low end of the
+ * spec-permitted 5–10). When `retry-after` is present, a resend must not
+ * happen earlier than the server's time. Clock-scheduled retries (idle /
+ * hard-cap wakeups) are NOT here — loop-engine re-runs the whole race for
+ * those (see runModelPhase); this module only exposes the same backoff table
+ * for it to reuse.
  */
 
 import { classifyFault, type FaultEvent } from "../fault-class.js";
@@ -19,26 +22,28 @@ import { safeEmitStream } from "../stream.js";
 export { TransportRetryExhaustedError };
 
 /**
- * spec inv 4 的有界尝试预算。settings 今日没有该旋钮（不新开），取 spec
- * 许可区间 5–10 的下沿：至少能扛过「一次部署抖动 + 一条慢链路」，又不至于
- * 把一次坏回合拖到分钟级。
+ * Bounded attempt budget. No settings knob today (not adding one); the low
+ * end of the spec-permitted 5–10: enough to ride out "one deploy hiccup + one
+ * slow link" without dragging a bad turn into the minutes range.
  */
 export const TRANSPORT_MAX_ATTEMPTS = 5;
 
-/** 秒级指数退避表（第 n 次失败后等 `TRANSPORT_BACKOFF_MS[n-1]`）。 */
+/** Seconds-scale exponential table (after the n-th failure wait `TRANSPORT_BACKOFF_MS[n-1]`). */
 export const TRANSPORT_BACKOFF_MS: readonly number[] = [
   1_000, 2_000, 4_000, 8_000,
 ];
 
-/** 单次退避上限；`retry-after` 更长时也压到这里（不无限等）。 */
+/** Single-backoff cap; a longer `retry-after` is also clamped here (never wait unboundedly). */
 export const TRANSPORT_BACKOFF_CAP_MS = 16_000;
 
 /**
- * 第 `attempt` 次失败后的退避时长:表值逐次翻倍、封顶 `CAP`。
+ * Delay after the `attempt`-th failure: table value doubling per step, capped at `CAP`.
  *
- * `retryAfterMs`(adapter 从 `retry-after` 头翻出的毫秒)在场时取两者较大值,
- * 再封顶 —— 早于服务器给的时刻重发等于白烧一次 attempt;但仍受 `CAP` 约束,
- * 避免一个畸大的 header 把回合挂死。非有限 / 负数视为缺席。
+ * When `retryAfterMs` (milliseconds the adapter read from the `retry-after`
+ * header) is present, take the larger of the two, then cap — resending
+ * before the server's time burns an attempt for nothing; still bounded by
+ * `CAP` so an absurd header can't hang the turn. Non-finite / negative
+ * values are treated as absent.
  */
 export function backoffDelayMs(
   attempt: number,
@@ -57,7 +62,7 @@ export function backoffDelayMs(
 }
 
 export type TransportRetryOptions = {
-  /** `signal` = 本次 attempt 的 signal(时钟 abort 的来源标记在其 reason 上)。 */
+  /** `signal` = this attempt's signal (clock-abort origin is marked on its reason). */
   readonly translate: (err: unknown, signal?: AbortSignal) => FaultEvent;
   readonly maxAttempts?: number;
   readonly backoffMs?: readonly number[];
@@ -97,12 +102,12 @@ export async function sleepWithAbort(
   });
 }
 
-/** 人读 fault 短码（`llm_http: 429` / `llm_network`）——仅 transport_retry 事件文案用。 */
+/** Human-readable fault short code (`llm_http: 429` / `llm_network`) — used only in transport_retry event text. */
 function statusOf(fault: FaultEvent): string {
   return fault.kind === "llm_http" ? `llm_http: ${fault.status}` : fault.kind;
 }
 
-/** 本次失败后的退避:秒级指数表,`retry-after` 在场则取较大值(仍封顶)。 */
+/** Backoff after this failure: exponential seconds table; `retry-after` takes precedence if larger (still capped). */
 function delayFor(
   fault: FaultEvent,
   attempt: number,
@@ -140,9 +145,10 @@ export function withTransportRetry<T extends Pick<ModelAdapter, "step">>(
           }
           throw err;
         }
-        // Bug（2026-09-07）:重试进度不再静默 —— 退避前向宿主流事件通道发
-        // transport_retry（detail 供「连接重试」类指示文案）。观察者错误被
-        // safeEmitStream 吞掉,绝不反流回重试路径。
+        // Retry progress is not silent: before backing off, emit a
+        // transport_retry event on the host stream (detail feeds the
+        // "reconnecting" indicator text). Observer errors are swallowed by
+        // safeEmitStream and never flow back into the retry path.
         safeEmitStream(request.onStream, {
           type: "transport_retry",
           attempt,

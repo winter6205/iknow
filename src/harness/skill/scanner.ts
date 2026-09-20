@@ -21,9 +21,9 @@ type SkillEnv = Readonly<Record<string, string | undefined>>;
 type Warn = (message: string) => void;
 
 /**
- * #global-plugins T1：插件 skill 目录条目 —— scanner 必须能区分 entry
- * 来自哪条插件根，以便给 SkillEntry.namespace 字段打标签。`dir` 是插件
- * 的 `<root>/skills`，`plugin` 是该插件的命名空间前缀（即插件名）。
+ * Plugin skill dir entry — the scanner must know which plugin root an entry
+ * came from to tag `SkillEntry.namespace`. `dir` is the plugin's
+ * `<root>/skills`; `plugin` is its namespace prefix (the plugin name).
  */
 export interface PluginSkillDir {
   readonly dir: string;
@@ -33,31 +33,32 @@ export interface PluginSkillDir {
 export interface SkillScannerOptions {
   userHome: string;
   /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): the session's
-   * `projectIdentityRoot` — the project the user is working on, pinned once
-   * at startup and stable across worktree rebinds. Project skills are project
-   * identity, so a worktree rebind must not move the scan onto the
-   * gitignored task worktree (where the directory is simply absent).
+   * ADR-0037: the session's `projectIdentityRoot` — the project the user is
+   * working on, pinned once at startup and stable across worktree rebinds.
+   * Project skills are project identity, so a rebind must not move the scan
+   * onto the gitignored task worktree (where the dir is simply absent).
    */
   projectIdentityRoot: string;
   env: SkillEnv;
   warn?: Warn;
   /**
-   * #global-plugins T1：插件 skill 目录列表（绝对路径），每条带命名空间。
-   * 扫描顺序 = user < project < **插件** < IKNOW_SKILL_DIRS（§4.2）——
-   * 插件 skill 后于用户/项目但先于 env IKNOW_SKILL_DIRS 注册到 index，
-   * env 路径上的同名 skill 最终覆盖插件 skill（更高优先级）。
+   * Plugin skill dirs (absolute), each with its namespace. Scan order =
+   * user < project < plugin < IKNOW_SKILL_DIRS — plugin skills register
+   * after user/project but before env dirs, so a same-named skill in an env
+   * dir overrides a plugin skill (higher priority).
    *
-   * 缺省：空数组 —— 行为与今日逐字节一致（既有测试不变）。
+   * Default: empty array — behavior identical to before.
    */
   pluginSkillDirs?: readonly PluginSkillDir[];
   /**
-   * `skill-index-increment` T6：真 IO 故障（非 ENOENT）的观察缝。每次故障
-   * 回调一次，**在 warn 之后**（warn 面不变）。缺席 = 既有行为逐字节不变：
-   * 故障只 warn + 跳过，扫描不抛（装配期纪律）。
+   * Observer seam for real IO failures (non-ENOENT), fired once per failure
+   * **after** the existing warn (warn surface unchanged). Without it, failures
+   * just warn + skip and the scan never throws (assembly-time discipline).
    *
-   * 注入者（`skill/rescan.ts`）据此把残缺扫描升级成 typed 错误 —— 「贴给
-   * 模型前」的容错取舍与「装配期不阻塞」相反，两条纪律靠本缝共存。
+   * The injector (`skill/rescan.ts`) upgrades a partial scan to a typed
+   * error — the opposite trade-off, since results pasted to the model must
+   * not be misread as "these skills were deleted". Both disciplines coexist
+   * through this seam.
    */
   onIoFailure?: (failure: SkillIoFailure) => void;
 }
@@ -67,27 +68,29 @@ export interface SkillScanner {
 }
 
 /**
- * `skill-index-increment` T6：真 IO 故障（非 ENOENT）的观察通道。
+ * Observation channel for real IO failures (non-ENOENT).
  *
- * scanner 既有纪律是「坏根/坏文件 → warn + 跳过，扫描不阻塞」（装配期
- * 不能让一个不可读目录掀掉整次 build）。rescan 缝需要相反的取舍：把
- * **当时热**的结果贴给模型前，残缺的扫描结果会被误读成「这些技能被删了」，
- * 所以故障必须能被调用方看见并按 typed 错误处置。两条纪律共存的办法是
- * 把「记一笔」与「怎么处置」分开：scanner 照旧包住 IO 故障（不抛），
- * 但把每次故障经本回调**原样**报给注入的观察者；不注入 = 既有 warn 行为
- * 逐字节不变（`SkillScannerOptions.onIoFailure` 缺省 absent）。
+ * The scanner's standing discipline is "bad root / bad file → warn + skip,
+ * never block the scan" (one unreadable dir must not sink a whole build).
+ * The rescan path needs the opposite: a partial scan pasted to the model
+ * could be misread as deleted skills, so failures must be visible to the
+ * caller and treatable as a typed error. Both disciplines coexist by
+ * separating "record it" from "react to it": the scanner still swallows IO
+ * errors but reports each one verbatim through this callback. Without an
+ * injector, behavior is byte-identical to the warn-only status quo.
  */
 export interface SkillIoFailure {
   /**
-   * `root_unreadable` = 技能根目录本身 readdir 失败（整根缺席）；
-   * `file_unreadable` = 单个 SKILL.md readFile 失败（该技能缺席）。
+   * `root_unreadable` = readdir of the skill root itself failed (whole root
+   * missing); `file_unreadable` = one SKILL.md readFile failed (that skill
+   * missing).
    */
   readonly kind: "root_unreadable" | "file_unreadable";
-  /** 故障路径：根目录，或 `<dir>/SKILL.md`。 */
+  /** The failing path: a root dir, or `<dir>/SKILL.md`. */
   readonly path: string;
-  /** 底层 errno（`EACCES` / `EIO` …）；非 errno 故障退化为 `undefined`。 */
+  /** Underlying errno (`EACCES` / `EIO` …); undefined for non-errno throws. */
   readonly code: string | undefined;
-  /** `Error#message`（非 Error 抛出物退化 `String(err)`）。 */
+  /** `Error#message` (or `String(err)` for non-Error throws). */
   readonly cause: string;
 }
 
@@ -100,21 +103,23 @@ export async function scanSkillDirs(
 ): Promise<SkillEntry[]> {
   const warn = options.warn ?? console.warn;
   /**
-   * 唯一把 IO 故障转成观察事件的出口：先按既有纪律 warn + 跳过，再把
-   * 事实原样交给可选观察者。两件事都做 —— warn 是既有装配期观测面
-   * （测试与 log 都依赖），回调是 rescan 缝的 typed 出口。
+   * The single exit that turns IO failures into observation events: keep the
+   * existing warn + skip discipline, then hand the raw fact to the optional
+   * observer. Both — warn is the established assembly-time surface (tests and
+   * logs depend on it); the callback is rescan's typed exit.
    */
   const reportIoFailure: ReportIoFailure = (failure, message) => {
     warn(message);
     options.onIoFailure?.(failure);
   };
   const index = new Map<string, SkillEntry>();
-  // 裸名别名 → 首次占据该裸名的 entry（design §4.2：裸名冲突 → 只
-  // 留规范名 + warn）。review C5：scanner 在建 entry 时负责 warn（既
-  // 维护 single 入口也避免下游 catalog 接口污染）；catalog 内部的
-  // bareIndex 行为不变（同 hashmap 第二次 set 静默 noop）。
+  // Bare alias → the entry that first claimed that bare name (bare-name
+  // conflict → keep only the canonical name + warn). The scanner warns while
+  // entries are built, keeping a single warn entry point and a clean catalog
+  // interface; the catalog's internal bareIndex behavior is unchanged
+  // (second set into the same map is a silent noop).
   const bareOwner = new Map<string, SkillEntry>();
-  // 第一轮：user / project / plugin → 写入 index（同名后者赢，即 plugin 覆盖 user/project）
+  // Round 1: user / project / plugin → index (later same-name wins, so plugin overrides user/project)
   for (const root of scanRoots(options)) {
     for (const entry of await scanRoot(
       root.dir,
@@ -126,7 +131,7 @@ export async function scanSkillDirs(
       index.set(entry.name, entry);
     }
   }
-  // 第二轮：IKNOW_SKILL_DIRS（最高优先级，最后写入覆盖插件）
+  // Round 2: IKNOW_SKILL_DIRS (highest priority, last write overrides plugins)
   for (const dir of extrasDirs(options.env)) {
     for (const entry of await scanRoot(dir, undefined, warn, reportIoFailure))
       index.set(entry.name, entry);
@@ -135,9 +140,9 @@ export async function scanSkillDirs(
 }
 
 /**
- * 裸名别名归属登记（review C5：scanner 在 entry 落地时负责 warn，
- * 维护 single 入口 + 避免下游 catalog 接口污染）。本函数只对插件
- * entry 触发；user / project entry 无 namespace 跳过。
+ * Register bare-alias ownership (the scanner warns as entries land, keeping
+ * one entry point). Only plugin entries reach here; user/project entries have
+ * no namespace and return immediately.
  */
 function registerBareAlias(
   entry: SkillEntry,
@@ -153,9 +158,9 @@ function registerBareAlias(
     bareOwner.set(bare, entry);
     return;
   }
-  // EXIT: 裸名别名已被更早的 entry（builtin / user / 其它插件）
-  // 占下 → 丢别名（catalog 内部仍登记 canonical，但
-  // bareIndex 不再指向本条）+ warn 一次。规范名保留。
+  // EXIT: the bare alias was claimed by an earlier entry (builtin / user /
+  // another plugin) → drop the alias (the catalog still indexes the canonical
+  // name, but bareIndex no longer points here) + warn once. Canonical kept.
   const prior = bareOwner.get(bare)!;
   warn(
     `skill bare alias '${bare}' already taken by '${prior.name}'; namespace entry '${entry.name}' keeps canonical only`
@@ -186,7 +191,7 @@ function scanRoots({
   ];
 }
 
-/** 拆出 env IKNOW_SKILL_DIRS 列表，独立于常规根序以便优先级控制。 */
+/** Split env IKNOW_SKILL_DIRS, kept separate from the regular root order for priority control. */
 function extrasDirs(env: SkillEnv): string[] {
   return (env.IKNOW_SKILL_DIRS ?? "")
     .split(delimiter)
@@ -196,10 +201,11 @@ function extrasDirs(env: SkillEnv): string[] {
 }
 
 /**
- * 扫描单个根。`namespace` 在常规 user/project 根下为 undefined（命名空间
- * 字段不入 SkillEntry，entry.name 即 frontmatter 名 / 目录 basename）；插件
- * 根下走 namespace 分支，entry.name 拼装为 `<namespace>:<bare>` 规范名
- * （design §4.2），namespace 字段打标签供 catalog 索引裸名别名。
+ * Scan a single root. `namespace` is undefined for regular user/project roots
+ * (no namespace field; entry.name is the frontmatter name / dir basename).
+ * Plugin roots pass a namespace: entry.name becomes the canonical
+ * `<namespace>:<bare>`, and the namespace field lets the catalog index bare
+ * aliases.
  */
 async function scanRoot(
   root: string,
@@ -226,8 +232,8 @@ async function scanRoot(
     const parsed = await readSkill(dir, warn, reportIoFailure);
     if (parsed === undefined) continue;
     if (namespace !== undefined) {
-      // 插件 skill：entry.name 取自 frontmatter（首选）或目录 basename 作
-      // 裸名；catalog 索引要求 name 字段已是规范名 `<plugin>:<bare>`。
+      // Plugin skill: bare name from frontmatter (preferred) or dir basename;
+      // the catalog index expects the canonical `<plugin>:<bare>` name.
       const bare =
         typeof parsed.frontmatter.name === "string" && parsed.frontmatter.name
           ? parsed.frontmatter.name
@@ -331,13 +337,13 @@ function scalar(raw: string): string | number | boolean | null {
   return raw !== "" && Number.isFinite(number) ? number : raw;
 }
 
-/** 故障观察缝的内部签名：一次故障同时给出结构化事实与既有 warn 文案。 */
+/** Internal seam signature: one failure yields both the structured fact and the existing warn text. */
 type ReportIoFailure = (failure: SkillIoFailure, message: string) => void;
 
 /**
- * 原始抛出物 → `SkillIoFailure`。`code` 只在抛出物是真 Error 且带
- * `code` 字段时取值（errno 形态）；其余（非 Error / 无 code）退化为
- * `undefined` —— 调用方按 `kind` + `path` 分型，不依赖 code 必然在场。
+ * Raw thrown value → `SkillIoFailure`. `code` is taken only from real Errors
+ * carrying a `code` field (errno shape); everything else degrades to
+ * undefined — callers classify by `kind` + `path`, never assuming a code.
  */
 function toIoFailure(
   kind: SkillIoFailure["kind"],

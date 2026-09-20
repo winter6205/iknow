@@ -1,18 +1,20 @@
 /**
- * Foundation 公共类型 (014 拥有;spec Code Style 区对齐)。
+ * Foundation shared types for the model-adapter bounded context.
  *
- * 这些类型构成 016 Gate A 的核心接口形状,Loop Engine 和 Model Adapter
- * 都依赖此处的定义。注意:`AnthropicNativeMessage` 等 wire 协议类型
- * 仅由 Model Adapter 解释并产出,Loop Engine 不读取、不构造供应商原生字段。
+ * These types are the core interface shapes both the loop engine and the
+ * model adapter depend on. Note: wire-protocol types like
+ * `AnthropicNativeMessage` are interpreted and produced ONLY by the model
+ * adapter — the loop engine never reads or constructs vendor-native fields.
  *
- * #176 T3：`ModelAdapter.step` 的 `request` 参数含可选 `onStream` 观察者
- * 回调（流式事件契约 SSOT `../stream.ts`，#147 D3）；仅流式臂消费,非流式
- * 臂忽略,缺省时行为与现状逐字节一致。
+ * `ModelAdapter.step`'s `request` carries an optional `onStream` observer
+ * (streaming event contract SSOT `../stream.ts`); only the streaming arm
+ * consumes it — non-streaming arms ignore it, and when absent, behavior is
+ * byte-identical to before.
  */
 
 import type { HarnessStreamEvent } from "../stream.js";
 
-/** Anthropic 原生 content block(由 Model Adapter 解释)。 */
+/** Anthropic native content block (interpreted by the model adapter). */
 export type AnthropicContentBlock =
   | { type: "text"; text: string }
   | {
@@ -30,79 +32,82 @@ export type AnthropicContentBlock =
   | { type: "thinking"; thinking: string; signature: string }
   | { type: "redacted_thinking"; data: string };
 
-/** Anthropic 原生消息角色。 */
+/** Anthropic native message role. */
 export type AnthropicRole = "user" | "assistant" | "system";
 
-/** Anthropic 原生消息(权威历史 append-only 单元)。 */
+/** Anthropic native message (the append-only unit of authoritative history). */
 export interface AnthropicNativeMessage {
   readonly role: AnthropicRole;
   readonly content: ReadonlyArray<AnthropicContentBlock>;
   /**
-   * ADR-0112 T2:宿主注入 commit 出处戳。**非模型可见** —— 出站投影
-   * (`outbound-projection.ts`)在序列化前剥除,wire JSON 中绝不出现;
-   * 官方帧外形(`<agent_status>` / 前缀锚)只允许出现在带戳消息。
-   * 盘上真源可携带该字段(store 校验允许未知顶层字段透传),戳随 JSONL
-   * 链存活保证 resume 后同一历史出同一 wire 前缀(KV 稳定)。
+   * ADR-0112: host-injection commit stamp. NOT model-visible — the outbound
+   * projection (`outbound-projection.ts`) strips it before serialization, so
+   * it never appears in wire JSON; official frame shapes
+   * (`<agent_status>` / prefix anchors) are only allowed on stamped messages.
+   * On-disk truth may carry the field (store validation passes unknown
+   * top-level fields through), and the stamp surviving the JSONL chain keeps
+   * the same history producing the same wire prefix after resume (KV stable).
    */
   readonly hostInjected?: true;
 }
 
-/** Foundation 运行时权威状态(013 冻:唯一事实来源,不许第二份副本)。 */
+/** Runtime authoritative state (single source of truth — no second copy). */
 export interface LoopState {
-  /** Anthropic 原生 messages,append-only,immutable 追加。 */
+  /** Anthropic native messages, append-only immutable growth. */
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
-  /** 每完成一个 assistant 回合(含纯文本完成)+1。 */
+  /** +1 per completed assistant turn (including plain-text completion). */
   readonly turnCount: number;
 }
 
-/** 016 Q3 五类停止原因 + 017 新增信号原因(append-only,不重排)。 */
+/** Stop reasons (append-only union, never reorder). */
 export type StopReason =
-  | "completed" // 成功停止 + 无 tool call + 至少一段非空文本
-  | "maxTurns" // turnCount 到达上限
-  | "nonSuccessStop" // 截断/拒绝等合法但未完成的供应商结果
-  | "protocolError" // assistant 回合协议结构错误,整回合不进入历史
-  | "emptyFinalResponse" // 供应商报告成功停止但无可展示文本,不进入权威历史
-  | "cancelled" // 017: signal abort(type-only;runtime deferred to T5)
-  | "timeout" // 017: timeoutMs hit(type-only;runtime deferred to T5)
-  | "fused"; // #672 T3: 本 run 工具环停滞（只追加，不重排既有七值）
+  | "completed" // success stop + no tool call + at least one non-empty text
+  | "maxTurns" // turnCount hit its ceiling
+  | "nonSuccessStop" // legitimate but unfinished vendor result (truncation/refusal)
+  | "protocolError" // assistant turn structurally invalid; turn excluded from history
+  | "emptyFinalResponse" // vendor reports success stop but no displayable text; excluded from history
+  | "cancelled" // signal abort
+  | "timeout" // timeoutMs hit
+  | "fused"; // this run fused on tool-loop stall (appended only; earlier values stable)
 
-/** 016 Q1 状态机 Transition(判别联合,向后兼容扩展)。 */
+/** State-machine transition (discriminated union, backward-compatible). */
 export type Transition =
   | { kind: "continue"; nextState: LoopState }
   | { kind: "stop"; reason: StopReason; finalState: LoopState };
 
-/** 一次 run 的对外结果。 */
+/** External result of one run. */
 export interface RunResult {
-  /** 从最后成功 assistant 回合的 text blocks 派生(非权威)。 */
+  /** Derived from the last successful assistant turn's text blocks (non-authoritative). */
   readonly finalText: string | null;
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly turnCount: number;
   readonly stopReason: StopReason;
   /**
-   * #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 token usage(供显示面
-   * 消费;TUI 经 hub-bridge 直读 RunResult)。必填字段:null = run 无成功模型
-   * 调用(或所有成功调用的 usage 均缺席)。双源裁决(#160 Resolution Q4 +
-   * ADR-0008 Decision 5),不复用 undefined 字段缺席语义——后者仅约束
-   * LlmCallRecord 落盘面(Postel,ADR-0008 Decision 3)。
+   * ADR-0008: token usage of the last successful model call (for display;
+   * the TUI reads it via hub-bridge straight from RunResult). Required field:
+   * null = the run had no successful model call (or all had absent usage).
+   * Deliberately not an optional field — absence semantics are reserved for
+   * the LlmCallRecord persistence surface (Postel, ADR-0008).
    */
   readonly lastUsage: TokenUsage | null;
   /**
-   * ADR-0094 SC4-SC5 (viewport API error): transport 失败时的网关侧摘要
-   * (status + 消息文本),由 loop-engine catch TransportRetryExhaustedError
-   * 后提炼 cause 写入;非 transport 失败 → 字段缺席 (byte-stable,与 lastUsage
-   * 不同语义 —— 后者是必填 null)。hub.toTurnDto 透传到 TurnAnswerDto.apiError,
-   * TUI 据此渲染「API error (status): message」提示。
+   * ADR-0094: gateway-side summary (status + message text) when transport
+   * failed — extracted from the cause after loop-engine catches
+   * TransportRetryExhaustedError; absent for non-transport failures
+   * (byte-stable; different semantics from lastUsage, which is required null).
+   * hub.toTurnDto forwards it to TurnAnswerDto.apiError so the TUI can
+   * render an "API error (status): message" notice.
    */
   readonly apiError?: { readonly status?: number; readonly message: string };
 }
 
-/** assistant 回合投影:有序 text + 有序 tool call,保持原生顺序(014 投影)。 */
+/** Assistant-turn projection: ordered texts + ordered tool calls, native order kept. */
 export interface AssistantProjection {
-  /** 原生 assistant 回合原文,原样保留用于历史追加。 */
+  /** Raw native assistant message, preserved verbatim for history appends. */
   readonly nativeMessage: AnthropicNativeMessage;
-  /** 有序 text 投影(从原生 content blocks 按出现顺序筛出)。 */
+  /** Ordered text projection (text blocks in appearance order). */
   readonly texts: ReadonlyArray<string>;
-  /** 有序 tool call 投影(身份 + 工具名 + 原始 input)。 */
+  /** Ordered tool-call projection (id + tool name + raw input). */
   readonly toolCalls: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
@@ -110,39 +115,40 @@ export interface AssistantProjection {
   }>;
 }
 
-/** 014 Adapter 公共回合结果(对应一次原生 assistant 回合)。 */
+/** Adapter turn result (one native assistant turn). */
 export interface AssistantTurnResult {
-  /** 014 校验通过后的原生 assistant 消息,可被 Loop 原子追加。 */
+  /** Validated native assistant message, atomically appendable by the loop. */
   readonly nativeMessage: AnthropicNativeMessage;
-  /** 014 投影(text + tool calls,保持原生顺序)。 */
+  /** Projection (texts + tool calls, native order preserved). */
   readonly projection: AssistantProjection;
-  /** Adapter 解释后的供应商停止原因(成功 / 截断 / 拒绝 等)。 */
+  /** Vendor stop reason as interpreted by the adapter (success / truncation / refusal / other). */
   readonly supplierStop: "success" | "truncation" | "refusal" | "other";
-  /** 014 中是否需要工具(存在合法 tool call 即需要)。 */
+  /** Whether tools are needed (any valid tool call ⇒ true). */
   readonly needsTools: boolean;
-  /** 是否为 `EmptyFinalResponse`(成功停止但无 text block)。 */
+  /** EmptyFinalResponse? (success stop but no text block). */
   readonly isEmptyFinalResponse: boolean;
   /**
-   * #160 / ADR-0008 Decision 2+4: 一次成功 assistant 回合的 token 使用量投影
-   * (sealed passthrough, 与 `supplierStop` 同构)。SDK usage 整体缺失 → 字段
-   * 缺席(不写 null / 不写 {0,0,...});loop-engine 在 `recordLlmCall` 抄入
-   * `LlmCallRecord`,`RunResult.lastUsage` 持有最后一次成功值。
-   * stub 路径没有 usage,字段缺席是设计语义。
+   * ADR-0008: token usage of one successful assistant turn (sealed
+   * passthrough, same shape as `supplierStop`). Entire SDK usage missing →
+   * field absent (no null, no {0,0,...}); loop-engine copies it into
+   * `LlmCallRecord` at `recordLlmCall`, and `RunResult.lastUsage` holds the
+   * last successful value. Stub paths have no usage — absence is by design.
    */
   readonly usage?: TokenUsage;
   /**
-   * D2 (tui-display-consistency):本 assistant 回合的思考时长(ms)。
-   * 测量点 anthropic-adapter 流式臂 stepStreamArm —— 首条 thinking_delta 至
-   * 首个非思考增量(text_delta / tool_call_start / tool_input_delta)的墙上
-   * 时钟差。边界形态钉死:`thinkingMs <= 0` 或非有限数 → undefined
-   * (store 落盘入口再过滤一次,绝不落 0 / NaN / Infinity)。非流式臂不产
-   * 出(字段缺席 = 旧会话兼容 + 无思考回合)。Postel 纪律:`thinkingMs` 缺
-   * 席 = 测不到,字段不存在(不写 null)。
+   * Thinking duration of this assistant turn in ms. Measured in the
+   * anthropic-adapter streaming arm: wall clock from the first thinking_delta
+   * to the first non-thinking delta (text_delta / tool_call_start /
+   * tool_input_delta). Edge forms are pinned: `thinkingMs <= 0` or
+   * non-finite → undefined (the store entry filters again; 0 / NaN / Infinity
+   * are never persisted). Non-streaming arms don't produce it (absent =
+   * old-session compatibility + no-thinking turns). Postel: absent means
+   * "not measurable" — the field simply doesn't exist (never null).
    */
   readonly thinkingMs?: number;
 }
 
-/** 对齐 Anthropic SDK Usage 的 token 四字段(ADR-0008 Decision 2)。 */
+/** Token quartet aligned with the Anthropic SDK Usage (ADR-0008). */
 export interface TokenUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -151,17 +157,19 @@ export interface TokenUsage {
 }
 
 /**
- * B6 / ADR-0043 §3:countTokens 入参面 —— SDK 0.115 `client.messages.
- * countTokens` 投影到 harness 域。**只读 token 计数**(无流式臂、无 tool_call
- * 校验),装配层首轮溢出治理专用。
+ * ADR-0043: input for countTokens — the SDK's `client.messages.countTokens`
+ * projected into the harness domain. Read-only token counting (no streaming
+ * arm, no tool_call validation), used only by the assembly layer's first-turn
+ * overflow governance.
  *
- * 字段最小投影:
- *   - `tools` = 当前 visibleSchemas()(非 lazy + 已发现的 lazy;B4 §2 已有)
- *   - `system` = 当前 system 文本(可选;与 step request.system 同源)
- *   - `messages` = 当前消息历史(可选;首轮 = 空 messages,典型 0 消息)
+ * Minimal field projection:
+ *   - `tools` = current visibleSchemas() (non-lazy + discovered lazy)
+ *   - `system` = current system text (optional; same source as step request.system)
+ *   - `messages` = current history (optional; first turn = empty, typically 0 messages)
  *
- * 真实 adapter 实现此方法;stub / 离线 adapter / 不可用端点 → 字段缺席
- * (undefined),装配层判定 → 跳过本会话(skip 语义,见 `tool-overflow.ts`)。
+ * Real adapters implement this; stub / offline adapters / unavailable
+ * endpoints → field absent (undefined), and the assembly layer skips this
+ * session (see `tool-overflow.ts`).
  */
 export interface CountTokensInput {
   readonly tools?: ReadonlyArray<unknown>;
@@ -170,42 +178,45 @@ export interface CountTokensInput {
 }
 
 /**
- * B6 / ADR-0043 §3:countTokens 响应最小投影 —— 实测 token 数。装配层
- * 与 `contextWindow * 0.1` 比较判定溢出。**不**返回 SDK 完整 Usage
- * (本接口面向溢出治理,不需要 cache_creation 等其他字段)。
+ * ADR-0043: minimal countTokens response projection — the measured token
+ * count, compared against `contextWindow * 0.1` for overflow. Deliberately
+ * NOT the full SDK Usage (overflow governance needs no cache fields).
  */
 export interface CountTokensResult {
-  /** SDK `MessageTokensCount.input_tokens`(countTokens 仅这一字段)。 */
+  /** SDK `MessageTokensCount.input_tokens` (the only field countTokens returns). */
   readonly inputTokens: number;
 }
 
-/** Model Adapter 接口(014 拥有)。 */
+/** Model adapter interface. */
 export interface ModelAdapter {
-  /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
+  /** Atomic validate + project: returns AssistantTurnResult or throws ProtocolError. */
   readonly step: (
     state: LoopState,
-    // #176 T3:可选 onStream — 流式事件观察者(#147 D3),仅流式臂消费;
-    // 离线 adapter / 非流式臂忽略此字段。
+    // Optional onStream — streaming-event observer, consumed by the streaming
+    // arm only; offline adapters / non-streaming arms ignore it.
     request: {
       tools?: unknown;
       onStream?: (event: HarnessStreamEvent) => void;
     },
-    signal?: AbortSignal // 017: run 第三参原样透传,离线实现可忽略(type-only;runtime deferred to T5)
+    signal?: AbortSignal // run's third argument passed through verbatim; offline implementations may ignore it
   ) => Promise<AssistantTurnResult>;
   /**
-   * B6 / ADR-0043 §3:**可选** countTokens 钩子(溢出治理专用)。
+   * ADR-0043: OPTIONAL countTokens hook (overflow governance only).
    *
-   * 真实 Anthropic adapter (`createRealAnthropicAdapter`) 实现本方法 —
-   * 透传 SDK `client.messages.countTokens({ messages, model, system?,
-   * tools? })` 实测 token 数。**Stub / 离线 adapter 不实现**;字段缺席
-   * (`undefined`) → 装配层跳过本会话(全部 deferrable 内建件保持常驻)+
-   * `console.warn` 记录,首轮不抛错、不重试(ADR-0043 §3 钉死语义)。
+   * The real Anthropic adapter (`createRealAnthropicAdapter`) implements it,
+   * passing `{ messages, model, system?, tools? }` to SDK
+   * `client.messages.countTokens` for a measured count. Stub / offline
+   * adapters don't; when absent (`undefined`) the assembly layer skips this
+   * session (all deferrable built-ins stay resident) + `console.warn` — no
+   * throw, no retry on the first turn (pinned semantics).
    *
-   * 契约:
-   *   - `tools` 数组 = harness `ToolDef[]`(与 `step` request.tools 同源,
-   *     离线/真实 adapter 各自翻译为 SDK `Tool[]` / `MessageCountTokensTool[]`)。
-   *   - 返回 `inputTokens` 必须为有限正数;否则视为失败(与 catch 同语义)。
-   *   - SDK 错误(APIError / 4xx/5xx)→ throw;装配层 catch 后 skip 本会话。
+   * Contract:
+   *   - `tools` = harness `ToolDef[]` (same source as step request.tools;
+   *     offline/real adapters translate to their SDK shapes).
+   *   - Returned `inputTokens` must be a finite positive number, otherwise
+   *     treated as failure (same semantics as catch).
+   *   - SDK errors (APIError / 4xx/5xx) → throw; the assembly layer catches
+   *     and skips this session.
    */
   readonly countTokens?: (
     input: CountTokensInput

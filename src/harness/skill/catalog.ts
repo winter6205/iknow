@@ -24,9 +24,10 @@ export interface SkillEntry {
   license?: string;
   metadata?: string;
   /**
-   * #global-plugins T1：插件 skill 的命名空间（= 插件名）。常规 skill
-   * 缺席 → undefined。catalog 在裸名别名上优先 canonical，冲突时丢别名
-   * （scanner 在建 entry 时负责 warn，catalog 接口不暴露 warn 通道）。
+   * Namespace of a plugin skill (= plugin name); undefined for plain skills.
+   * The catalog prefers the canonical name over the bare alias; on conflict
+   * the alias is dropped (the scanner warns when building entries — the
+   * catalog interface exposes no warn channel).
    */
   namespace?: string;
 }
@@ -36,54 +37,53 @@ export interface SkillCatalog {
   get(name: string): SkillEntry | undefined;
   all(): SkillEntry[];
   /**
-   * **技能模型索引面**：有 description 且未 disable 的条目，name 排序 ——
-   * 即允许进 `<available_skills>`（开场冻表 / 会话内增量）并允许 `skill()`
-   * 灌正文的资格集。
+   * Model-facing skill index: entries with a description and not disabled,
+   * sorted by name — the set allowed into `<available_skills>` (frozen at
+   * session start + in-session deltas) and allowed to load bodies via `skill()`.
    *
-   * **这不是 slash 列表**：人侧 slash 候选走 `loadable()`（可加载技能面，
-   * 含无 description、含 disable）。无 description 或 disable 的技能是既有
-   * 语义（ADR-0046 / #337 的可用性判定），本方法行为未变宽。
+   * This is NOT the slash list: human slash candidates come from `loadable()`
+   * (which includes description-less and disabled entries — the long-standing
+   * availability semantics). Behavior here was never widened.
    *
-   * @deprecated 新代码请具名调用 `modelIndex()`（同一面，名字自解释）；
-   * 本方法保留给既有消费方（build-engine / hub / worker / TUI），避免一次
-   * 改名同时改动多模块。ADR-0098。
+   * @deprecated Prefer `modelIndex()` (same face, self-explaining name). Kept
+   * for existing consumers (build-engine / hub / worker / TUI). ADR-0098.
    */
   available(): SkillEntry[];
   getBodyPath(name: string): string | undefined;
 }
 
 /**
- * ADR-0098 / `specs/skill-index-increment.md`：`available()` 一名两义（既
- * 当模型索引用、又当 slash 列表用）的拆清。两个面各自具名，`createSkillCatalog`
- * 的返回类型即本接口。
+ * ADR-0098 / `specs/skill-index-increment.md`: splitting `available()`, which
+ * used to mean two things (model index AND slash list). Each face now has its
+ * own name; `createSkillCatalog` returns this interface.
  *
- * 之所以**不**把两个方法直接加进 `SkillCatalog`：现存多处 `SkillCatalog`
- * 对象字面量（如 `src/tui/app.tsx` 的空 catalog fallback）需要逐处补齐才
- * 能通过类型检查；本切片只动 catalog 层，故以**加宽返回类型**的方式暴露新
- * API —— 结构性兼容 `SkillCatalog`，既有赋值/传参不受影响，消费新面的调用
- * 方按需把自己的标注放宽到本类型。
+ * The two methods are deliberately NOT added to `SkillCatalog` itself:
+ * existing `SkillCatalog` object literals (e.g. the TUI's empty-catalog
+ * fallback) would each need updating to typecheck. Instead the return type is
+ * widened — structurally compatible with `SkillCatalog`, so existing
+ * assignments are unaffected; consumers of the new faces widen their own
+ * annotations to this type as needed.
  */
 export interface SkillCatalogFaces extends SkillCatalog {
-  /**
-   * **技能模型索引面**（与 `available()` 同一面）。每次返回**新数组**。
-   */
+  /** Model-facing skill index (same face as `available()`). Returns a new array each call. */
   modelIndex(): SkillEntry[];
   /**
-   * **可加载技能面**：磁盘上有可加载 SKILL.md 的全部 canonical 条目 ——
-   * 含无 description、含 disable；不含 bare 别名重复项（`all()` 已只有
-   * canonical）。人侧 slash（TUI / Web / CLI 同一入口）据此派生候选。
+   * Loadable-skill face: every canonical entry with a loadable SKILL.md on
+   * disk — including description-less and disabled ones; bare aliases are
+   * never duplicated (`all()` is canonical-only). Human slash candidates for
+   * TUI / Web / CLI derive from this.
    *
-   * `get(name)` 仍按名取条目（canonical 优先再 bare，含 disabled），不受
-   * 本面影响。每次返回**新数组**。
+   * `get(name)` still resolves by name (canonical first, then bare, disabled
+   * included), independent of this face. Returns a new array each call.
    */
   loadable(): SkillEntry[];
 }
 
 /**
- * 模型索引资格的**单一权威判据**（docs/CONTEXT.md「技能模型索引」）：有
- * description 且未 `disable-model-invocation`。`modelIndex()` 的过滤器与
- * `skill()` 工具的门（`src/harness/aci/tools/skill.ts`）都调这里，避免两处
- * 各写一遍判据后漂移。`reason` 供拒绝文案分型（两类出路不同）。
+ * Single authoritative predicate for model-index eligibility: has a
+ * description and is not `disable-model-invocation`. Both `modelIndex()`'s
+ * filter and the `skill()` tool gate call this, so the two can never drift.
+ * `reason` distinguishes the two rejection kinds (different remedies).
  */
 export function modelIndexIneligibility(
   entry: SkillEntry
@@ -93,15 +93,16 @@ export function modelIndexIneligibility(
   return undefined;
 }
 
-/** 便捷谓词面：`modelIndexIneligibility(entry) === undefined`。 */
+/** Convenience predicate: `modelIndexIneligibility(entry) === undefined`. */
 export function isModelIndexEligible(entry: SkillEntry): boolean {
   return modelIndexIneligibility(entry) === undefined;
 }
 
 /**
- * #global-plugins T1：从 "<plugin>:<name>" 还原裸名（仅当 name 形如该
- * 形态）。不匹配 → undefined。与 scanner 的命名合同一致：namespace 必须是
- * entry.name 的 `<namespace>:` 前缀；bare 为空串也算不匹配（无意义裸名）。
+ * Recover the bare name from `"<plugin>:<name>"` (only when the entry name
+ * has that shape); no match → undefined. Consistent with the scanner's naming
+ * contract: namespace must be a `<namespace>:` prefix of entry.name; an empty
+ * bare part also counts as no match (a meaningless bare name).
  */
 export function stripNamespace(
   entryName: string,
@@ -113,17 +114,19 @@ export function stripNamespace(
   return bare.length > 0 ? bare : undefined;
 }
 
-/** 两面共用的排序：name 升序。list 面排序不依赖 `readdir` 顺序（ext4 下
- *  不保证字典序），人侧候选与模型索引才都是确定的。 */
+/** Shared sort for both faces: ascending by name. Sorting (instead of relying
+ *  on `readdir` order, which is not lexicographic on ext4) keeps human
+ *  candidates and the model index deterministic. */
 const byName = (a: SkillEntry, b: SkillEntry): number =>
   a.name.localeCompare(b.name);
 
 export function createSkillCatalog(
   entries: readonly SkillEntry[]
 ): SkillCatalogFaces {
-  // 双索引：canonical = 规范名（插件 skill 即 "<plugin>:<name>"）；裸名别名
-  // 只在 canonical 未被占用的前提下登记（先到者赢；冲突 → 丢别名）。
-  // listing 只出 canonical 一条 → all/modelIndex/loadable/search 不会重复。
+  // Dual index: canonical = the full name (plugin skills: "<plugin>:<name>");
+  // bare aliases are registered only when the canonical slot is free
+  // (first-come wins; conflict → alias dropped). The index holds canonical
+  // entries only, so all/modelIndex/loadable/search never double-count.
   const index = new Map<string, SkillEntry>();
   const bareIndex = new Map<string, SkillEntry>();
   for (const entry of entries) {
@@ -165,17 +168,19 @@ export function createSkillCatalog(
 }
 
 /**
- * slash 投影层（plan T3「harness 可复用的 slash 投影」—— TUI / CLI / hub
- * 三宿主同一算法的**单一**实现；web 因 tsconfig include 边界仍持本地镜像，
- * 镜像份数从 3 降到 1+web）。
+ * Slash projection — the single implementation shared by TUI / CLI / hub
+ * (web keeps a local mirror due to its tsconfig include boundary).
  *
- * 语义（与既有三份实现逐字一致，收敛时未改任何行为）：
- *   - 候选集 = `loadableOf(catalog)`：可加载面（含无 description、含
- *     disable），结构性兼容测试注入的精简 catalog（无 `loadable` → `all()`）；
- *   - 别名 = 唯一裸名：`stripNamespace` 还原 + `get(bare) === entry` 登记
- *     判据 + 全部首 token 小写折叠进占用表，占用者不唯一 → 整组不发别名
- *     （宁可不可用，不可歧义）；
- *   - 产出恒用规范名（invariant 2：展示与补全都用 `plugin:skill`）。
+ * Semantics (verbatim-compatible with the three implementations it replaced):
+ *   - candidate set = `loadableOf(catalog)`: the loadable face (description-
+ *     less and disabled entries included), structurally compatible with
+ *     lean test-injected catalogs (no `loadable` → falls back to `all()`);
+ *   - alias = unique bare name only: `stripNamespace` + a
+ *     `get(bare) === entry` registration check + case-folded occupancy table
+ *     of all first tokens; a contested bare name drops the alias entirely for
+ *     the whole group (unavailable is better than ambiguous);
+ *   - output always uses the canonical name (display and completion both use
+ *     `plugin:skill`).
  */
 export interface SkillSlashEntry {
   readonly name: string;
@@ -184,8 +189,9 @@ export interface SkillSlashEntry {
 }
 
 /**
- * 结构性取**可加载技能面**：真实现走 `loadable()`（T1 新增面），测试注入
- * 的 `SkillCatalog` 字面量退 `all()`。三宿主此前各写一份 3 行体，收敛于此。
+ * Structurally fetch the loadable face: real implementations use
+ * `loadable()`; test-injected `SkillCatalog` literals fall back to `all()`.
+ * Previously each of the three hosts wrote these 3 lines itself.
  */
 export function loadableOf(catalog: SkillCatalog): ReadonlyArray<SkillEntry> {
   const withFaces = catalog as Partial<SkillCatalogFaces>;
@@ -193,9 +199,10 @@ export function loadableOf(catalog: SkillCatalog): ReadonlyArray<SkillEntry> {
 }
 
 /**
- * slash 候选投影的**唯一裸名别名**算法（别名典）。产出 `SkillSlashEntry[]`
- * —— 各宿主再按需切片成自己的最小形状（TUI `SkillEntryLike` / CLI
- * `CliSkillEntryLike` 同形，宿主本地类型保持，只共享算法）。
+ * Slash-candidate projection with the unique-bare-name alias algorithm.
+ * Produces `SkillSlashEntry[]`; each host then slices it into its own minimal
+ * shape (TUI `SkillEntryLike` / CLI `CliSkillEntryLike` are isomorphic —
+ * hosts keep their local types and share only the algorithm).
  */
 export function projectSlashEntries(
   catalog: SkillCatalog
@@ -231,8 +238,8 @@ export function projectSlashEntries(
 }
 
 /**
- * slash 输入的首 token 小写形（`/xxx...` → `xxx`）。`/Echo` 与 `/echo`
- * 同判 —— 人侧匹配语义的大小写折叠单点。
+ * Lowercased first token of a slash input (`/xxx...` → `xxx`). `/Echo` and
+ * `/echo` compare equal — the single case-folding point for human matching.
  */
 export function slashHeadPrefix(text: string): string {
   if (!text.startsWith("/")) return "";
@@ -240,9 +247,9 @@ export function slashHeadPrefix(text: string): string {
 }
 
 /**
- * remainder = 首 token 之后的剩余段（trim）。**按 typed token 长度切** ——
- * 用 `skill.name.length` 会在裸名输入里吃掉 remainder 前缀（spec SC9
- * 明令禁止）。
+ * remainder = everything after the first token (trimmed). Split by the
+ * *typed* token's length — using the skill's canonical name length would eat
+ * the head of the remainder when a bare alias was typed (forbidden by spec).
  */
 export function slashTailRemainder(raw: string): string {
   const text = raw.trim();

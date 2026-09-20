@@ -1,27 +1,27 @@
 /**
- * T7 (#344) — MCP manager：连接生命周期 + 状态机 + registerExternal 接线。
+ * MCP manager: connection lifecycle + state machine + registerExternal wiring.
  *
- * 围绕一个小抽象 `McpClientHandle`，把 `@modelcontextprotocol/client`
- * 的 `Client` + `StdioClientTransport` 包成可注入的协议形态。生产路径
- * 默认用 `createRealClient`（同文件末），单测用内存假 client，不启真 server。
+ * Wraps the SDK `Client` + `StdioClientTransport` behind an injectable
+ * `McpClientHandle`. Production defaults to `createRealClient` (bottom of this
+ * file); unit tests inject an in-memory fake, so no real server is spawned.
  *
- * 状态机（per server）：
- *   pending → connected   connect + 首次 listTools 完成，registerExternal(defs)
- *   pending → failed      connect/listTools 抛错或超时（默认 60s，可注入）
- *   pending → disabled    config.status === "disabled"，不建 client
- *   connected → failed    onclose 回调命中（不重连）
- *   connected → connected list_changed 触发增量重注册
+ * Per-server state machine:
+ *   pending → connected   connect + first listTools done, registerExternal(defs)
+ *   pending → failed      connect/listTools threw or timed out (default 60s, injectable)
+ *   pending → disabled    config.status === "disabled", no client created
+ *   connected → failed    onclose fired (no reconnect)
+ *   connected → connected list_changed triggers incremental re-registration
  *
- * 并发语义（SC15 / SC16）：
- *   - list_changed：handler 在 in-flight callTool 期间到达 → 重注册仅追加
- *     新名字（同名跳过），但**不打断** callTool；callTool 通过 `signal`
- *     解除 await（manager 持有 AbortController）。
- *   - shutdown：取消 in-flight callTool 的 signal + 调 client.close +
- *     spawn 出来的 stdio 子进程 SIGTERM。in-flight 调用以 `abort` 错误
- *     终结（不会 resolve 成功，也不会悬挂）。
+ * Concurrency:
+ *   - list_changed arriving during an in-flight callTool: re-registration only
+ *     appends new names (duplicates skipped) and never interrupts the call;
+ *     callTool awaits through a manager-held AbortController `signal`.
+ *   - shutdown: aborts in-flight callTool signals, closes the client, and
+ *     SIGTERMs the spawned stdio child. In-flight calls settle as `abort`
+ *     errors — never as false success, never hanging.
  *
- * 不用 schema-normalize：见 D1 探针结论 + spec 假设 9（ajv strict × MCP
- * inputSchema 三组形态全 PASS）。registerExternal 走 T1 已有的 ajv 实例。
+ * No schema normalization: MCP inputSchema shapes were probed against ajv
+ * strict and all pass; registerExternal reuses the existing ajv instance.
  */
 import path from "node:path";
 
@@ -43,10 +43,10 @@ import { toAciToolDef } from "./adapter.js";
 import type { McpServerConfig, McpStdioServer } from "./config.js";
 
 // ---------------------------------------------------------------------------
-// 公共类型
+// Public types
 // ---------------------------------------------------------------------------
 
-/** 每个 server 的状态机拍快照。 */
+/** Per-server state-machine snapshot. */
 export type McpServerState = "pending" | "connected" | "failed" | "disabled";
 
 export interface McpServerStatus {
@@ -56,23 +56,21 @@ export interface McpServerStatus {
   readonly error?: string;
 }
 
-/** 注册阶段一对 server + 工具。 */
+/** One server + tool pair at registration. */
 export interface McpToolEntry {
   readonly server: string;
   readonly tool: SdkTool;
 }
 
-/** 调用一次的入参 + 返回。 */
+/** Result wrapper for one tool call. */
 export interface McpCallResult {
   readonly result: SdkCallToolResult;
 }
 
 /**
- * wayfinder #440 Stream B T8 — MCP resource 通道共享类型（manager 层 ↔ 工具层共享）。
- *
- * 与 p04 commit 2 同形：McpResource / McpResourceContent / McpPerServerState /
- * ListResourcesOpts / ListResourcesResult / ReadResourceResult 全部 readonly,
- * 聚合循环里 push 进 mutable 形态再冻结返回（见 MutableListResourcesResult）。
+ * MCP resource-channel types shared between manager and tool layer.
+ * All public shapes are readonly; the aggregation loop pushes into a mutable
+ * form and freezes before returning (see MutableListResourcesResult).
  */
 export interface McpResource {
   readonly server: string;
@@ -106,7 +104,7 @@ export interface ListResourcesResult {
   readonly perServer: ReadonlyArray<McpPerServerState>;
 }
 
-/** 内部 mutable 形态 — 聚合循环里 push；返回前冻结成 ListResourcesResult。 */
+/** Internal mutable form — the aggregation loop pushes here; frozen into ListResourcesResult before return. */
 interface MutableListResourcesResult {
   resources: McpResource[];
   perServer: McpPerServerState[];
@@ -119,15 +117,16 @@ export interface ReadResourceResult {
 }
 
 /**
- * 抽象的 MCP client 句柄。让单测注入 stub，避免启动真子进程。
- *  - `connect()` → 建立到 server 的会话；
- *  - `listTools()` → 拉取工具清单；
+ * Abstract MCP client handle so unit tests can inject a stub without spawning
+ * a real child process.
+ *  - `connect()` → establish the session to the server;
+ *  - `listTools()` → fetch the tool list;
  *  - `callTool(name, args, { timeout, signal, resetTimeoutOnProgress })`
- *  - `close()` → 关闭会话；
- *  - `onListChanged(tools)` → server 推送的工具变更；
- *  - `onClose()` → SDK 端连接关闭通知（用于触发 failed 不重连）；
- *  - `listResources({ cursor, signal })` → SDK 原语 `resources/list`（T8）。
- *  - `readResource(uri, { signal })` → SDK 原语 `resources/read`（T8）。
+ *  - `close()` → close the session;
+ *  - `onListChanged(tools)` → server-pushed tool changes;
+ *  - `onClose()` → SDK-side connection-close notification (drives failed, no reconnect);
+ *  - `listResources({ cursor, signal })` → SDK primitive `resources/list`;
+ *  - `readResource(uri, { signal })` → SDK primitive `resources/read`.
  */
 export interface McpClientHandle {
   readonly connect: () => Promise<void>;
@@ -145,9 +144,9 @@ export interface McpClientHandle {
   readonly onListChanged: (cb: (tools: readonly SdkTool[]) => void) => void;
   readonly onClose: (cb: () => void) => void;
   /**
-   * T8 — list resources exposed by the server. Optional `cursor` for pagination.
-   * Returns SDK `{ resources, nextCursor? }` shape — manager 透传到调用方，仅做
-   * 服务端归并。
+   * List resources exposed by the server. Optional `cursor` for pagination.
+   * Returns the SDK `{ resources, nextCursor? }` shape — the manager passes it
+   * through and only merges per-server results.
    */
   readonly listResources: (opts?: {
     readonly cursor?: string;
@@ -157,8 +156,8 @@ export interface McpClientHandle {
     readonly nextCursor?: string;
   }>;
   /**
-   * T8 — read a specific resource by URI. Returns SDK `{ contents }` shape
-   * (TextResourceContents | BlobResourceContents 联合)。
+   * Read a specific resource by URI. Returns the SDK `{ contents }` shape
+   * (TextResourceContents | BlobResourceContents union).
    */
   readonly readResource: (
     uri: string,
@@ -168,40 +167,41 @@ export interface McpClientHandle {
   ) => Promise<{ readonly contents: readonly SdkResourceContents[] }>;
 }
 
-/** createClient / createRealClient 共用的 stdio transport 参数。 */
+/** Shared stdio transport params for createClient / createRealClient. */
 export interface McpTransportOpts {
-  /** stdio 子进程 cwd（= resolver 返回的 workspaceRoot）。 */
+  /** stdio child cwd (= the resolver-returned workspaceRoot). */
   readonly cwd: string;
 }
 
 export interface McpManagerOptions {
-  /** T3 产物的两级合并 server 列表。 */
+  /** Two-level merged server list from config loading. */
   readonly config: readonly McpServerConfig[];
   /**
-   * T4 — resolver 返回的当前 session/task root。stdio child 的 cwd，
-   * 也是 MCP 工具 FS root。缺席 / 空白 / 非绝对 → 构造期抛
-   * `McpLifecycleError`（`missing_cwd` / `invalid_cwd`），绝不回退
-   * `process.cwd()`。
+   * Resolver-returned current session/task root. Used as the stdio child cwd
+   * and as the MCP tools' FS root. Missing / blank / non-absolute → the
+   * constructor throws `McpLifecycleError` (`missing_cwd` / `invalid_cwd`);
+   * never falls back to `process.cwd()`.
    */
   readonly workspaceRoot: string;
-  /** T1 的 registerExternal 缝，把 mcp__ 工具追加进 ACI registry。 */
+  /** Seam to append mcp__ tools into the ACI registry. */
   readonly registerExternal: (defs: readonly AciToolDef[]) => void;
   /**
-   * reload 缝：按名撤回旧 slot 已注册的 mcp__* 工具。缺席时 reload
-   * 静默跳过 unregister（stale 名会残留 externalByExt，重名 register
-   * 触发 Gate2 duplicate —— 生产装配必须注入）。
+   * Reload seam: withdraw the old slot's registered mcp__* tools by name.
+   * Without it, reload silently skips unregistering and stale names remain in
+   * externalByExt, so a same-name re-register trips the registry's duplicate
+   * gate — production assembly must inject this.
    */
   readonly unregisterExternal?: (names: readonly string[]) => void;
   /**
-   * 连接超时毫秒（#378 根因 B：默认 60_000，缓解 npx cold start；生产装配点
-   * 经 env 注入）。测试可注入短超时。
+   * Connect timeout in ms (default 60_000 to tolerate npx cold starts;
+   * production assembly injects it via env). Tests may inject a short timeout.
    */
   readonly timeoutMsOverride?: number;
-  /** 工具调用超时（adapter 把 tier=long 映射到 30 min，这里给单测覆盖口）。 */
+  /** Tool-call timeout override (adapter maps tier=long to 30 min; hook for unit tests). */
   readonly callTimeoutMsOverride?: number;
   /**
-   * 抽象 client 工厂；测试覆盖；生产 = `createRealClient`。
-   * 第二参 `transport.cwd` 恒等于 manager 持有的 `workspaceRoot`。
+   * Abstract client factory; overridden in tests; production = `createRealClient`.
+   * The second arg `transport.cwd` always equals the manager-held `workspaceRoot`.
    */
   readonly createClient?: (
     server: McpServerConfig,
@@ -210,31 +210,36 @@ export interface McpManagerOptions {
 }
 
 /**
- * #631 T2 / #124 / ADR-0043 §4:首轮就绪等待选项。
+ * ADR-0043: first-turn readiness options.
  *
- * `firstTurnReadyTimeoutMs` (ms) — build-engine 装配期等待 MCP 连接
- * 全部 ready（connected 或 failed）的窗口。B4 钉死：
- *   - 窗口内连上的 server 进首轮装配（注册到 ACI registry,session 在册）；
- *   - 窗口内未连上的 server = session 缺席（不进目录,不进 tools）；
- *   - 窗口到点整体 resolve,装配照常发首轮 —— 缺席者本会话不再有自动重试。
+ * `firstTurnReadyTimeoutMs` (ms) — window during which build-engine assembly
+ * waits for all MCP connections to settle (connected or failed):
+ *   - servers connected within the window enter first-turn assembly (registered
+ *     in the ACI registry, listed for the session);
+ *   - servers not connected within the window are absent from the session —
+ *     neither in the directory nor in tools;
+ *   - when the window expires the wait resolves and the first turn proceeds;
+ *     absent servers get no automatic retry in this session.
  *
- * 缺席 (undefined) = 改前行为,fire-and-forget,build-engine 不等。
+ * Absent (undefined) = fire-and-forget: build-engine does not wait.
  */
 export interface McpStartOptions {
   readonly firstTurnReadyTimeoutMs?: number;
 }
 
 /**
- * #658 / ADR-0043 §4:手动重连通知 seam — 用户手动重连成功后,
- * 告知 loop-engine 追加一条 user 消息 (与 graphModeChange 同形态)。
+ * ADR-0043: manual-reconnect notification seam — after a user-triggered
+ * reconnect succeeds, tell loop-engine to append a user message (same shape as
+ * graphModeChange).
  *
- * cb 形参:
- *   - `serverName`:刚连上的 server 配置名;
- *   - `toolNames`:该 server 暴露的 mcp__${server}__${tool} 完整名字清单。
+ * Callback args:
+ *   - `serverName`: config name of the server just connected;
+ *   - `toolNames`: the full `mcp__${server}__${tool}` names it exposes.
  *
- * 回调仅被"成功的重连"驱动一次;多次注册 = 多个 cb 同源触发。触发点在
- * manager 内部:`reload` 之后每个「新连上」(本 reload 代内 pending/failed →
- * connected)的 slot 派发一次;`start()` 初次连接路径不派发(初连不是重连)。
+ * Fired once per successful reconnect; multiple registrations share the same
+ * trigger. Dispatch lives inside the manager: after `reload`, once per slot
+ * that turns connected (from pending/failed) within that reload generation.
+ * `start()`'s initial connect never dispatches — first connect is not a reconnect.
  */
 export type McpManualReconnectListener = (
   serverName: string,
@@ -242,57 +247,62 @@ export type McpManualReconnectListener = (
 ) => void;
 
 /**
- * B4 钉死模板:未 discover 的 mcp__ 工具调用 → ToolExecutionError(本常量值)。
- *
- * SSOT — aci-executor 与 permission-executor 在 mcp__ 工具调用入口(registry miss +
- * catalog hit 但 discover 遗漏)处抛同形错误,测试只引用常量不走字面。
- * ADR-0043 §2:与 run_graph 关图 EXIT 同形态(typed + 模板钉死)。
+ * SSOT for the error surfaced when an mcp__ tool is called before discovery.
+ * aci-executor and permission-executor throw the same shape at their mcp__
+ * entry points (registry miss + catalog hit but discover skipped); tests
+ * reference this constant instead of the literal. Typed and template-pinned
+ * per ADR-0043.
  */
 export const MCP_TOOL_NOT_LOADED_MESSAGE =
   "tool <name> not loaded — call tool_search first";
 
 export interface McpManager {
   /**
-   * 启动连接。两种语义:
-   *   - `opts` 缺席 = 改前路径,后台化启动,立即 resolve（不阻塞 build 主路径）。
-   *   - `opts.firstTurnReadyTimeoutMs` 在场 = 阻塞至全 server
-   *     connected/failed 或超时。B4 装配期使用,缺席 server 本会话不进目录。
+   * Start connections. Two modes:
+   *   - `opts` absent = background start, resolves immediately (never blocks
+   *     the build path).
+   *   - `opts.firstTurnReadyTimeoutMs` present = block until every server is
+   *     connected/failed or the window expires; servers that miss the window
+   *     stay out of this session's tool directory.
    *
-   * 同一 manager 多次调用 = 让既有后台任务继续跑(无副作用)。rebuild 引擎
-   * 时请走 `shutdown` + 新建 manager,manager 不维护跨 start 的串行约束。
+   * Calling start() again on the same manager lets existing background tasks
+   * continue (no side effects). To rebuild, go through `shutdown` + a fresh
+   * manager — the manager keeps no cross-start serialization.
    */
   readonly start: (opts?: McpStartOptions) => Promise<void>;
   /**
-   * B4 / ADR-0043 §4:手动重连成功回调(可多次注册)。调用发生在重连
-   * 完成、tool 已 registerExternal 入 ACI registry 之后。本 seam 是
-   * loop-engine 消息追加缝的消费源(由 build-engine 装配期 wire)。
+   * ADR-0043: manual-reconnect success callback (multi-register). Fires after
+   * the reconnect completes and the tools are registered into the ACI
+   * registry. This seam is consumed by loop-engine's message-append hook
+   * (wired during build-engine assembly).
    */
   readonly onManualReconnect: (cb: McpManualReconnectListener) => void;
   /**
-   * 重载 server 集：收集旧 slots 已注册工具名 → unregisterExternal 撤回 →
-   * shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
-   * 幂等：未 start / 已 shutdown 也能调用。reload 返回前不阻塞在连接上
-   * （内部 start() fire-and-forget，与既有 start 同语义）。
+   * Reload the server set: collect old slots' registered tool names →
+   * unregisterExternal them → shutdown all → clear slots → rebuild from new
+   * config → start(). Idempotent: callable before start or after shutdown.
+   * Returns without blocking on connections (the internal start() is
+   * fire-and-forget, same semantics as start itself).
    */
   readonly reload: (config: readonly McpServerConfig[]) => Promise<void>;
-  /** 关闭所有 client + 取消 in-flight + SIGTERM stdio 子孙。 */
+  /** Close all clients, cancel in-flight calls, SIGTERM stdio children. */
   readonly shutdown: () => Promise<void>;
-  /** 当前状态拍快照（按 name 字母序）。 */
+  /** Snapshot of current states (alphabetical by name). */
   readonly status: () => readonly McpServerStatus[];
   /**
-   * T8 — list resources across all connected servers (or one if `server`
-   * specified). Aggregates per-server `listResources` calls,按 server 字母序
-   * 合并 `resources` 数组,并附 `perServer` 状态快照（含 `nextCursor`）。
-   * 未连接的 server 跳过，不抛；调用方用 `perServer[].state` 自检。SDK
-   * 抛错 → 该 server 抛 ToolExecutionError。
+   * List resources across all connected servers (or just one if `server` is
+   * specified). Aggregates per-server `listResources` calls in alphabetical
+   * order and attaches a `perServer` state snapshot (with `nextCursor`).
+   * Unconnected servers are skipped without throwing — callers check
+   * `perServer[].state`. An SDK error surfaces as ToolExecutionError.
    */
   readonly listResources: (
     opts?: ListResourcesOpts
   ) => Promise<ListResourcesResult>;
   /**
-   * T8 — read a resource by server + URI。`server` 与 `uri` 都必填。
-   * server 未配置 → 抛 ToolExecutionError。server 存在但未 connected /
-   * failed → 抛 ToolExecutionError（携带 slot 当前 state 上下文）。
+   * Read a resource by server + URI; both required. Unknown server →
+   * ToolExecutionError. Known but not connected → ToolExecutionError carrying
+   * the slot's current state.
    */
   readonly readResource: (
     server: string,
@@ -302,7 +312,7 @@ export interface McpManager {
 }
 
 // ---------------------------------------------------------------------------
-// 内部状态
+// Internal state
 // ---------------------------------------------------------------------------
 
 interface Slot {
@@ -310,58 +320,61 @@ interface Slot {
   state: McpServerState;
   error?: string;
   /**
-   * 超时标记（#378 根因 A）：仅 connect 超时路径（L-setTimeout 回调）设置。
-   * 用于把"超时后迟到成功"与"真失败"区分开：bootSlot 在
-   * 同一任务内允许把 failed 翻回 connected（flip-back），真失败不可翻。
-   * flip-back 成功或正常 connected 后必须清除（见 bootSlot）。
+   * Timeout marker set only by the connect-timeout path (the setTimeout
+   * callback). Separates "late success after a timeout" from a real failure:
+   * bootSlot may flip failed back to connected only when this is set; real
+   * failures are terminal. Cleared after a successful flip-back (see bootSlot).
    */
   timedOut?: boolean;
   handle?: McpClientHandle;
-  /** shutdown 时 abort 所有在途 callTool。 */
+  /** Aborts all in-flight callTool calls on shutdown. */
   callAbort?: AbortController;
-  /** 当前已注册工具的本地 mirror，用于 list_changed 增量 diff（不重复注册同名）。 */
+  /** Local mirror of registered tool names, for list_changed incremental diff (duplicates skipped). */
   registered?: Set<string>;
-  /** 后台 connect 任务引用，shutdown 时取消（abort 不会 cancel promise，仅作诊断）。 */
+  /** Background connect task; kept for diagnostics only (abort does not cancel the promise). */
   bg?: Promise<void>;
   /**
-   * 手动重连通知标记：true = 本 slot 由 reload 路径 rebuild 产出。bootSlot
-   * 内该 slot 翻到 connected（首次连上或 #378 flip-back）时按它派发一次
-   * `notifyManualReconnect`。构造期 rebuildSlots(初装)恒 false —— 初次
-   * 连接不是重连，不播报。
+   * Manual-reconnect arming: true = this slot was rebuilt via reload. When the
+   * slot turns connected (fresh connect or a timeout flip-back), bootSlot
+   * dispatches `notifyManualReconnect` once. Never armed at construction —
+   * the initial connect is not a reconnect.
    */
   notifyReconnect?: boolean;
 }
 
 // ---------------------------------------------------------------------------
-// 工厂
+// Factory
 // ---------------------------------------------------------------------------
 
-// 与 src/config/env.ts 的 IKNOW_MCP_CONNECT_TIMEOUT_MS 默认(60_000)对齐——
-// 生产装配点(deps.ts / build-engine.ts)均经 env 注入 timeoutMsOverride,
-// 此处兜底给独立调用 createMcpManager 且未注入的测试/脚本用, 避免双默认漂移。
+// Keep in sync with the IKNOW_MCP_CONNECT_TIMEOUT_MS default (60_000) in
+// src/config/env.ts. Production assembly (deps.ts / build-engine.ts) injects
+// timeoutMsOverride via env; this fallback only serves standalone
+// createMcpManager callers (tests/scripts) and prevents dual-default drift.
 const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
-const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long 档（参见 aci/types.ts TIMEOUT_TIER_MS）
+const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long tier (see TIMEOUT_TIER_MS in aci/types.ts)
 
 export function createMcpManager(opts: McpManagerOptions): McpManager {
   const workspaceRoot = requireWorkspaceRoot(opts.workspaceRoot);
   const timeoutMs = opts.timeoutMsOverride ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const callTimeoutMs = opts.callTimeoutMsOverride ?? DEFAULT_CALL_TIMEOUT_MS;
 
-  /** 按 name 索引 slot。 */
+  /** Slots indexed by name. */
   const slots = new Map<string, Slot>();
 
   /**
-   * 生命周期代数：shutdown / reload 入口递增。bootSlot 捕获启动时的代数，
-   * 迟到的 connect/listTools/list_changed 若代数已变 → 跳过注册与 flip-back
-   * （T4：late connect 不能越过已终结的 manager 生命周期）。
+   * Lifecycle generation: incremented by shutdown / reload. bootSlot captures
+   * the generation at start; a late connect/listTools/list_changed from an
+   * older generation must skip registration and flip-back — late connects may
+   * not cross a terminated manager lifecycle.
    */
   let bootGeneration = 0;
 
   /**
-   * 按 config 重置 slots —— 构造器 + reload 共用（reload 先 await
-   * shutdown 终结旧 slots，再调本函数清空 + 重建）。字母序保证
-   * 测试稳定性。`fromReload` = true 时新 slot 带重连通知标记
-   * （reload 后连上的 server 派发 manual-reconnect 通知）。
+   * Reset slots from config — shared by the constructor and reload (reload
+   * first awaits shutdown to end the old slots, then clears and rebuilds
+   * here). Alphabetical order keeps tests stable. `fromReload` arms the new
+   * slots so servers that connect after a reload dispatch a manual-reconnect
+   * notification.
    */
   function rebuildSlots(
     config: readonly McpServerConfig[],
@@ -381,7 +394,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
 
   rebuildSlots(opts.config);
 
-  /** 把 slot 的工具列表通过 registerExternal 追加（增量 diff）。 */
+  /** Push the slot's tools through registerExternal (incremental diff). */
   function registerTools(slot: Slot, tools: readonly SdkTool[]): void {
     const seen = slot.registered ?? new Set<string>();
     slot.registered = seen;
@@ -399,8 +412,8 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
             if (!handle) {
               throw new Error(`MCP server ${slot.config.name} not connected`);
             }
-            // 把 caller 的 signal + slot 的 shutdown signal 合并，
-            // shutdown() 取消时在途 callTool 收到 abort（SC16）。
+            // Merge the caller's signal with the slot's shutdown signal so an
+            // in-flight callTool receives abort when shutdown() runs.
             const sig = mergeAbort(callOpts?.signal, slot.callAbort?.signal);
             const result = await handle.callTool(toolName, args, {
               timeout: callOpts?.timeout ?? callTimeoutMs,
@@ -416,13 +429,14 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     if (defs.length > 0) opts.registerExternal(defs);
   }
 
-  /** 把 slot 标 failed + warn 一行。 */
+  /** Mark the slot failed and warn one line. */
   function markFailed(slot: Slot, reason: string): void {
     if (slot.state === "failed" || slot.state === "disabled") return;
     slot.state = "failed";
-    // 如果 createRealClient 接管了子进程 stderr（stderr: "pipe"），失败时
-    // 把缓冲尾段附进 error —— 便于排查 server 启动失败/协议异常根因。
-    // stub client（manager.test.ts 用）无 _stderrTail，保持纯 reason。
+    // When createRealClient captures the child's stderr (stderr: "pipe"),
+    // append the buffered tail on failure — the key evidence for startup /
+    // protocol root causes. Stub clients have no _stderrTail, so the reason
+    // stays pure there.
     const tail = (
       slot.handle as unknown as { _stderrTail?: () => string } | undefined
     )?._stderrTail?.();
@@ -434,10 +448,10 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * 手动重连通知：slot 翻到 connected 且带 reload 重连标记时派发一次。
-   * 工具名 = `mcp__${server}__${tool}`（与 registerExternal 的命名一致）。
-   * 派发后清除标记（fire-once：一次重连一次通知，list_changed 增量
-   * 重注册不重复播报）。
+   * Dispatch the manual-reconnect notification once when an armed slot reaches
+   * connected. Tool names follow registerExternal's `mcp__${server}__${tool}`
+   * scheme. The marker is cleared on dispatch — one reconnect, one notice;
+   * list_changed incremental re-registration never re-announces.
    */
   function notifyReconnectIfArmed(slot: Slot, tools: readonly SdkTool[]): void {
     if (slot.notifyReconnect !== true) return;
@@ -448,7 +462,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     );
   }
 
-  /** 后台启动某一个 server。 */
+  /** Boot one server in the background. */
   function bootSlot(slot: Slot): Promise<void> {
     const gen = bootGeneration;
     const transportOpts: McpTransportOpts = { cwd: workspaceRoot };
@@ -466,15 +480,16 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     slot.callAbort = new AbortController();
 
     const timeoutHandle = setTimeout(() => {
-      // 超时先设标记再标 failed：bootSlot 靠它判断"迟到成功可否翻回"（#378）。
-      // 真抛错路径不设此标记 —— 失败即定型，不翻。
-      // 生命周期已终结（shutdown/reload）则跳过：避免把已 failed 槽再写超时残因。
+      // Set the marker before failing so bootSlot can tell whether a late
+      // success may flip back. Real throw paths never set it — failed is
+      // terminal there. If the lifecycle already ended (shutdown/reload),
+      // skip: don't write a stale timeout reason into an ended slot.
       if (gen !== bootGeneration) return;
       slot.timedOut = true;
       markFailed(slot, "connect timeout");
     }, timeoutMs);
 
-    // 注册 onclose → failed（不重连）。list_changed → 增量重注册。
+    // onclose → failed (no reconnect). list_changed → incremental re-registration.
     created.onClose(() => {
       if (gen !== bootGeneration) return;
       if (slot.state !== "connected") return;
@@ -486,7 +501,8 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       try {
         registerTools(slot, tools);
       } catch (err) {
-        // 重注册冲突 → warn but 不破坏本 server；已注册的留任。
+        // Re-registration conflict → warn but keep this server alive; already
+        // registered tools stay.
         console.warn(
           `[mcp/manager] server '${slot.config.name}' list_changed re-registration skipped: ${errorMessage(
             err
@@ -504,38 +520,42 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         markFailed(slot, errorMessage(err));
         return;
       }
-      // 生命周期已终结：迟到 connect 不得继续 listTools / 注册 / flip-back。
+      // Lifecycle ended: a late connect must not continue to listTools / registration / flip-back.
       if (gen !== bootGeneration) {
         clearTimeout(timeoutHandle);
         return;
       }
-      // connect 期间可能已被超时器标 failed。仅"超时后迟到成功"允许继续走
-      // listTools（flip-back 入口，#378 根因 A）；真失败（无 timedOut 标记）
-      // 一律 return —— failed 定型。
+      // The timeout may have marked failed during connect. Only "late success
+      // after a timeout" may proceed to listTools (the flip-back entry); a real
+      // failure (no timedOut marker) always returns — failed is terminal.
       if (slot.state !== "pending") {
         if (slot.state !== "failed" || !slot.timedOut) {
           clearTimeout(timeoutHandle);
           return;
         }
-        // timedOut 标记不清除：flip-back 成功由第二守卫负责清除，
-        // 若 listTools 真抛错则 catch 保持 failed（标记残留无影响）。
+        // The timedOut marker stays for now: the flip-back-success guard below
+        // clears it; if listTools really throws, the catch keeps failed and a
+        // stale marker is harmless.
       }
       try {
         const tools = await created.listTools();
         clearTimeout(timeoutHandle);
         if (gen !== bootGeneration) return;
         if (slot.state !== "pending") {
-          // 超时后迟到成功：同一 bootSlot 任务内翻回 connected。
-          // registerTools 由 `registered` 集合去重，重复调用幂等。
+          // Late success after a timeout: flip back to connected within this
+          // same bootSlot task. registerTools dedupes via `registered`, so
+          // repeat calls are idempotent.
           if (slot.state === "failed" && slot.timedOut) {
             registerTools(slot, tools);
             slot.state = "connected";
             delete slot.timedOut;
-            // 恢复 connected 时清掉 error：status() 只在 failed+error 时
-            // 填 error，避免把超时残因带到已恢复的连接上。
+            // Clear the error on recovery: status() only fills error for
+            // failed slots, so a stale timeout reason should not ride along on
+            // an already-restored connection.
             delete slot.error;
-            // flip-back 到 connected 同样算「重连成功」（reload 后缺席
-            // 的 server 第二次机会命中），按标记派发。
+            // A flip-back counts as a successful reconnect too (a server
+            // absent after reload got its second chance), so dispatch per the
+            // arming marker.
             notifyReconnectIfArmed(slot, tools);
           }
           return;
@@ -552,8 +572,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * 后台启动所有非 disabled slot。start / reload 共用。
-   * 不 await —— 返回的 tasks 仅用于静默吞错，连接在后台完成（SC8）。
+   * Boot every non-disabled slot in the background; shared by start / reload.
+   * Not awaited — the collected tasks only swallow errors silently; the
+   * connections finish in the background.
    */
   function bootstrapAll(): void {
     const tasks: Promise<void>[] = [];
@@ -566,14 +587,15 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * B4 / ADR-0043 §4:阻塞等待全部非 disabled slot 进入终态(connected/failed)
-   * 或超时至 `timeoutMs`。终态判定由 polling 完成 — bootSlot 是 fire-and-forget,
-   * 内部用 timeoutMs(单 server)与 connect/listTools 异常决定 slot 终结;
-   * 本 helper 在外部套一层 race 来给 first-turn-ready 一个固定的窗口。
+   * ADR-0043: block until all non-disabled slots reach a terminal state
+   * (connected/failed) or `timeoutMs` elapses. Terminality is detected by
+   * polling — bootSlot is fire-and-forget and decides each slot's fate from
+   * its own per-server timeout and connect/listTools errors; this helper only
+   * wraps that in a fixed race window for first-turn readiness.
    *
-   * 缺席者不重试,本会话不进名字目录。
-   *
-   * `disabled` slot 全程跳过(polling 门),不影响终态判定。
+   * Absent servers get no retry and stay out of this session's name directory.
+   * `disabled` slots are skipped throughout (polling gate) and never block the
+   * terminal check.
    */
   function awaitFirstTurnReady(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
@@ -600,20 +622,21 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * 手动重连通知 seam：单/多 cb 注册,内部保存,fire-once 语义由 caller 决定
-   * (reload / 手动重连 UI 路径最终会调 `notifyManualReconnect(serverName,
-   * toolNames)` —— B4 仅装配接线,不消费派发;派发入口放在 manager 内部以
-   * 留好单一注入点)。
+   * Manual-reconnect listener seam: callbacks stored here; fire-once semantics
+   * belong to the dispatch site. The dispatch entry stays inside the manager
+   * to keep a single injection point.
    */
   const manualReconnectListeners = new Set<McpManualReconnectListener>();
   function onManualReconnect(cb: McpManualReconnectListener): void {
     manualReconnectListeners.add(cb);
   }
   /**
-   * 内部派发入口:由 reload 的「重连成功」路径触发。best-effort 调用所有
-   * cb,cb 抛错不破坏其他 cb(observer only,不应反向影响 manager 状态)。
-   * start() 初次连接不派发 —— 通知语义只覆盖「用户手动重连成功」,
-   * 首轮缺席者经手动 reload 第二次连上时才对模型播报。
+   * Internal dispatch: triggered by reload's reconnect-success path. Calls
+   * every listener best-effort — a throwing listener must not break the
+   * others (observer only, never reverse-affects manager state). start()'s
+   * initial connect never dispatches: the notice covers only user-triggered
+   * reconnects, so a first-turn absentee is announced only when a manual
+   * reload reconnects it.
    */
   function notifyManualReconnect(
     serverName: string,
@@ -623,7 +646,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       try {
         cb(serverName, toolNames);
       } catch {
-        // cb 抛错吞咽 — observer only。
+        // Swallow listener errors — observer only.
       }
     }
   }
@@ -636,17 +659,21 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   async function reload(config: readonly McpServerConfig[]): Promise<void> {
-    // 先在 shutdown/rebuild 前抓旧 slots 已注册工具全名（mcp__<server>__<tool>）：
-    // slot.registered 属于 slot，rebuildSlots 的 slots.clear() 会把它一并清掉，
-    // 漏抓将导致外部 registry 残留 stale 名（重名 register 触发 Gate2 duplicate）。
-    // disabled / 未连接过的 slot 无 registered，flat 后为空，unregister 幂等忽略。
+    // Capture every old slot's registered names (mcp__<server>__<tool>) before
+    // shutdown/rebuild: `registered` lives on the slot and slots.clear() would
+    // wipe it along with the slots. Missing this leaves stale names in the
+    // external registry, where a same-name re-register trips the duplicate
+    // gate. Disabled / never-connected slots have nothing registered; the
+    // flat-mapped list is then empty and unregister is idempotent.
     const oldNames: string[] = [];
     for (const slot of slots.values()) {
       if (slot.registered) oldNames.push(...slot.registered);
     }
-    // shutdown 取消 in-flight + close + 标 failed —— 旧状态彻底终结后，撤回
-    // 这些名字的外部注册（此后不再有 call 穿过 stale 名）。unregisterExternal
-    // 缺席（未注入装配）静默跳过，保证幂等。
+    // shutdown cancels in-flight calls, closes clients and marks failed —
+    // only once the old state is fully terminated do we withdraw these names
+    // from the external registry (no call can slip through a stale name
+    // afterwards). A missing unregisterExternal (unwired assembly) skips
+    // silently to keep reload idempotent.
     await shutdown();
     opts.unregisterExternal?.(oldNames);
     rebuildSlots(config, true);
@@ -654,19 +681,20 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   async function shutdown(): Promise<void> {
-    // 先递增代数，阻断一切在途 bootSlot / list_changed 的迟到注册。
+    // Bump the generation first to block all late registrations from in-flight
+    // bootSlot / list_changed callbacks.
     bootGeneration += 1;
     const tasks: Promise<void>[] = [];
     for (const slot of slots.values()) {
       if (slot.state === "disabled") continue;
       const handle = slot.handle;
       const abort = slot.callAbort;
-      // 取消所有 in-flight 调用
+      // Cancel all in-flight calls
       if (abort) abort.abort();
       if (handle) {
         tasks.push(
           handle.close().catch((err) => {
-            // close 失败仅 warn
+            // close failure only warns
             console.warn(
               `[mcp/manager] server '${slot.config.name}' close error: ${errorMessage(
                 err
@@ -677,9 +705,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       }
     }
     await Promise.allSettled(tasks);
-    // 在 handle.close() 完成前 SIGTERM 由 createRealClient 的 close 路径负责；
-    // SDK 的 StdioClientTransport.close() 自带 SIGTERM 兜底（destroy child），
-    // 这里再加一层兜底：直接拿 transport.pid 发 SIGTERM。
+    // createRealClient's close path SIGTERMs before handle.close() returns;
+    // the SDK's StdioClientTransport.close() already destroys the child as a
+    // built-in fallback. One more layer here: SIGTERM transport.pid directly.
     for (const slot of slots.values()) {
       const child = (
         slot.handle as unknown as { _stdioPid?: number } | undefined
@@ -688,7 +716,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         try {
           process.kill(child, "SIGTERM");
         } catch {
-          /* ESRCH 等忽略 */
+          /* ignore ESRCH etc. */
         }
       }
     }
@@ -715,18 +743,19 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
             }
       );
     }
-    // 按 name 字母序输出，确保测试稳定
+    // Alphabetical by name for test stability
     out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
   }
 
   // -------------------------------------------------------------------------
-  // T8 — resource 通道 (list/read)
+  // Resource channel (list/read)
   // -------------------------------------------------------------------------
 
   /**
-   * 把单个 slot 的 resources 聚合进 out。未 connected slot → perServer 记录
-   * 当前 state（不抛）；SDK 抛错 → 抛 ToolExecutionError（屏蔽 SDK 类型）。
+   * Aggregate one slot's resources into `out`. A non-connected slot records its
+   * current state in perServer (no throw); an SDK error surfaces as
+   * ToolExecutionError (shielding SDK error types).
    */
   async function collectSlotResources(
     slot: Slot,
@@ -744,8 +773,8 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     try {
       result = await slot.handle.listResources({
         cursor: opts?.cursor,
-        // 把 caller 的 signal + slot 的 shutdown signal 合并，与 callTool 路径一致：
-        // shutdown() 取消时在途 listResources 收到 abort（SC16）。
+        // Merge caller + shutdown signals, same as the callTool path: an
+        // in-flight listResources receives abort when shutdown() runs.
         signal: mergeAbort(opts?.signal, slot.callAbort?.signal),
       });
     } catch (err) {
@@ -769,7 +798,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     });
   }
 
-  /** 按 server 名找 slot 并校验 connected；失败抛 ToolExecutionError。 */
+  /** Find the slot by server name and verify it is connected; throws ToolExecutionError otherwise. */
   function lookupConnectedSlot(server: string, op: string): Slot {
     if (!server) {
       throw new ToolExecutionError(`mcp ${op}: server name is required`);
@@ -787,17 +816,18 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * 聚合 listResources：`server` 缺省 → 全 server；指定 → 仅该 server。
-   * 跳过未 connected 的 slot（不抛，perServer 暴露当前 state）。
-   * SDK 抛错 → 抛 ToolExecutionError（manager 层屏蔽 SDK 错误类型）。
-   * `cursor` 透传给每个 server；不分页聚合（SDK 内部 listResources
-   * 在 `cursor` 缺席时已自动聚合，cursor 存在时按 page 协议透传）。
+   * Aggregate listResources: no `server` → all servers; specified → only that
+   * one. Unconnected slots are skipped (no throw — perServer exposes their
+   * state). SDK errors surface as ToolExecutionError, translated at this layer.
+   * `cursor` is passed through to each server; there is no cross-page
+   * aggregation (the SDK's listResources already aggregates when `cursor` is
+   * absent and forwards verbatim per page when present).
    */
   async function listResources(
     opts?: ListResourcesOpts
   ): Promise<ListResourcesResult> {
     const out: MutableListResourcesResult = { resources: [], perServer: [] };
-    // 按 name 字母序遍历，确保聚合顺序测试稳定
+    // Alphabetical by name so aggregation order is test-stable
     const ordered = [...slots.values()].sort((a, b) =>
       a.config.name.localeCompare(b.config.name)
     );
@@ -809,9 +839,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   /**
-   * 读单个 server 的 resource URI。server 未配置（config 内不存在）
-   * → 抛 ToolExecutionError "not configured"。server 存在但未 connected
-   * → 抛 ToolExecutionError（带当前 state）。SDK 抛错 → 抛 ToolExecutionError。
+   * Read one resource URI from one server. Unknown server → ToolExecutionError
+   * "not configured"; known but not connected → ToolExecutionError carrying the
+   * current state. SDK errors surface as ToolExecutionError.
    */
   async function readResource(
     server: string,
@@ -827,8 +857,8 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     let raw: { readonly contents: readonly SdkResourceContents[] };
     try {
       raw = await slot.handle!.readResource(uri, {
-        // 把 caller 的 signal + slot 的 shutdown signal 合并，与 callTool 路径一致：
-        // shutdown() 取消时在途 readResource 收到 abort（SC16）。
+        // Merge caller + shutdown signals, same as the callTool path: an
+        // in-flight readResource receives abort when shutdown() runs.
         signal: mergeAbort(opts?.signal, slot.callAbort?.signal),
       });
     } catch (err) {
@@ -853,8 +883,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     readResource,
   };
 
-  // 测试钩子：暴露 slot 内 handle 数组（用于 in-flight callTool + 触发 list_changed）。
-  // live getter：每次读时从 slots 收集当前 handle，避免静态快照过期。
+  // Test hook: expose the slots' handles (for in-flight callTool + triggering
+  // list_changed). Live getter — collects current handles from slots on each
+  // read, so the view never goes stale.
   Object.defineProperty(manager, "_handles", {
     get() {
       const arr: McpClientHandle[] = [];
@@ -867,21 +898,21 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
 }
 
 // ---------------------------------------------------------------------------
-// 生产路径 — 真 SDK client + stdio transport（单测用 stub）
+// Production path — real SDK client + stdio transport (unit tests use stubs)
 // ---------------------------------------------------------------------------
 
 /**
- * 生产 client 工厂。把 MCP SDK 的 `Client` + `StdioClientTransport` 包成
- * McpClientHandle。list_changed 在 constructor 通过 `Client` 的
- * `listChanged.tools.onChanged` 订阅；onclose 通过 transport 的
- * `onclose` 监听。
+ * Production client factory: wraps the MCP SDK's `Client` +
+ * `StdioClientTransport` as an McpClientHandle. list_changed is subscribed in
+ * the constructor via `Client`'s `listChanged.tools.onChanged`; onclose via
+ * the transport's `onclose`.
  *
- * 仅 stdio 走此路径；remote (url) 暂不实现，registerTo 时 manager 应当
- * 过滤掉 remote，或上层装配层把 remote 视为 disabled（spec 假设 9 + T7
- * 验收 bound）。
+ * Only stdio is wired here; remote (url) servers are not implemented — the
+ * caller must filter them out or treat them as disabled at assembly time.
  *
- * `opts.cwd` 是 stdio 子进程工作目录（= manager 的 workspaceRoot）；相对
- * command / 相对 args 路径均相对此根解析，不继承 `process.cwd()`。
+ * `opts.cwd` is the stdio child's working directory (= the manager's
+ * workspaceRoot); relative command / args paths resolve against it and never
+ * inherit `process.cwd()`.
  */
 export function createRealClient(
   server: McpServerConfig,
@@ -893,10 +924,11 @@ export function createRealClient(
     );
   }
 
-  // stderr: "pipe"（默认 "inherit"）—— 见下：MCP server 子进程的结构化日志
-  // （如 codebase-memory-mcp 的 slog 行 `level=info msg=mcp.request ...`）默认
-  // 直通父进程 stderr，TUI 运行期会把父进程 stderr 画进渲染区/底栏。接管后
-  // 缓冲尾段，正常状态丢弃，仅 markFailed 时附进 error 保留诊断价值。
+  // stderr: "pipe" (default "inherit"): MCP servers often log structurally to
+  // stderr (e.g. codebase-memory-mcp's slog lines `level=info msg=mcp.request
+  // ...`), which would otherwise stream into the parent's stderr and get drawn
+  // into the TUI render area / status bar. Capturing lets us discard the
+  // buffer while healthy and keep the tail for diagnostics only on markFailed.
   const transport = new SdkStdioTransport({
     command: (server as McpStdioServer).entry.command,
     args: [...((server as McpStdioServer).entry.args ?? [])],
@@ -907,9 +939,10 @@ export function createRealClient(
     stderr: "pipe",
   });
 
-  // stderr 环形缓冲：仅保留最近一段（2KB），失败时供 markFailed 附尾段。
-  // SDK 在 stderr:"pipe" 时于构造器立即创建 PassThrough（_stderrStream），
-  // 这里可以直接挂 data 监听器，无需等 spawn。
+  // Stderr ring buffer: keep only the latest segment (2KB) for markFailed to
+  // append. With stderr:"pipe" the SDK creates its PassThrough (_stderrStream)
+  // in the transport constructor already, so the data listener attaches here
+  // without waiting for spawn.
   const MAX_STDERR_TAIL = 2048;
   let stderrTail = "";
   transport.stderr?.on("data", (chunk: unknown) => {
@@ -917,7 +950,8 @@ export function createRealClient(
     stderrTail = (stderrTail + s).slice(-MAX_STDERR_TAIL);
   });
 
-  // SDK 内部通过 Client._onclose 触发 transport close；这里再 hook 一次保险。
+  // The SDK fires transport close through Client._onclose internally; hook it
+  // once more here as insurance.
   transport.onclose = () => {
     closeCallbacks.forEach((cb) => cb());
   };
@@ -946,8 +980,9 @@ export function createRealClient(
     }
   );
 
-  // 记录 pid（关闭信号路径回退）—— SDK transport.start() 之后 transport.pid 可读。
-  // 这里在 connect 后再绑定，避免 start 前 get pid 返回 null。
+  // Record that connect finished (fallback for the close-signal path) —
+  // transport.pid only becomes readable after the SDK's transport.start(), so
+  // bind after connect instead of reading the pid before start (which is null).
   let started = false;
   const originalConnect = sdk.connect.bind(sdk);
   (sdk as unknown as { connect: typeof sdk.connect }).connect = (async (
@@ -976,7 +1011,7 @@ export function createRealClient(
       );
       return { result };
     },
-    // T8 — 转发 resources/list + resources/read SDK 原语
+    // Forward the resources/list + resources/read SDK primitives
     listResources: async (opts) => {
       const result = await sdk.listResources(
         { cursor: opts?.cursor } as never,
@@ -1002,7 +1037,8 @@ export function createRealClient(
       try {
         await sdk.close();
       } finally {
-        // 兜底 SIGTERM 子进程（spec SC11：stdio 子孙必须收到 SIGTERM）
+        // Fallback SIGTERM for the stdio child — spawned descendants must
+        // always receive it.
         if (started && transport.pid) {
           try {
             process.kill(transport.pid, "SIGTERM");
@@ -1020,10 +1056,10 @@ export function createRealClient(
     },
   };
 
-  // 暴露 pid 以便 manager.shutdown 兜底（再次 SIGTERM）
+  // Expose the pid so manager.shutdown can SIGTERM again as a backstop
   (handle as unknown as { _stdioPid: number | undefined })._stdioPid =
     transport.pid ?? undefined;
-  // 暴露 stderr 尾段，供 manager 在 markFailed 时附进 error（诊断价值）。
+  // Expose the stderr tail so manager can append it into error on markFailed (diagnostics).
   (handle as unknown as { _stderrTail: () => string })._stderrTail = () =>
     stderrTail;
 
@@ -1035,9 +1071,10 @@ export function createRealClient(
 // ---------------------------------------------------------------------------
 
 /**
- * 构造期校验 manager 的 workspaceRoot。缺席 → `missing_cwd`；空白 / 非绝对
- * / 含 NUL → `invalid_cwd`。不做 process.cwd() 回退；规范化与 roots.ts 同形
- * （manager 只消费已解析的 workspaceRoot，不引入 productRoot）。
+ * Constructor-time validation of the manager's workspaceRoot. Missing →
+ * `missing_cwd`; blank / non-absolute / contains NUL → `invalid_cwd`. No
+ * process.cwd() fallback; normalization mirrors roots.ts (the manager only
+ * consumes an already-resolved workspaceRoot, never introduces productRoot).
  */
 function requireWorkspaceRoot(value: string | undefined): string {
   if (typeof value !== "string") {
@@ -1060,7 +1097,7 @@ function requireWorkspaceRoot(value: string | undefined): string {
       "workspaceRoot must be an absolute path"
     );
   }
-  // 去掉结尾分隔符，但保留文件系统根本身。
+  // Strip trailing separators, but keep the filesystem root itself.
   const { root } = path.parse(normalized);
   let out = normalized;
   while (
@@ -1077,8 +1114,9 @@ function sanitize(value: string): string {
 }
 
 /**
- * ResourceContents 是 TextResourceContents | BlobResourceContents 联合
- * —— 仅透传存在的字段,类型守卫后在对象文案层统一形态。
+ * ResourceContents is a TextResourceContents | BlobResourceContents union —
+ * pass through only the fields that exist, normalizing the object shape after
+ * the type guards.
  */
 function projectResourceContent(c: SdkResourceContents): McpResourceContent {
   const text = (c as { text?: string }).text;
@@ -1092,9 +1130,9 @@ function projectResourceContent(c: SdkResourceContents): McpResourceContent {
 }
 
 /**
- * 合并两个 AbortSignal:任一被 abort → 结果被 abort。
- * 任一为 undefined → 返回另一个的引用。
- * package.json engines.node >= 20 → AbortSignal.any 一定可用（无 fallback）。
+ * Merge two AbortSignals: the result aborts when either does.
+ * If one side is undefined, return the other reference.
+ * package.json engines.node >= 20 → AbortSignal.any is always available (no fallback).
  */
 function mergeAbort(
   a: AbortSignal | undefined,
@@ -1103,7 +1141,7 @@ function mergeAbort(
   if (!a && !b) return undefined;
   if (!a) return b;
   if (!b) return a;
-  // 两者都已 aborted → 直接返回 a(行为等价)
+  // Either side already aborted → return a directly (behaviorally equivalent)
   if (a.aborted || b.aborted) return a;
   return AbortSignal.any([a, b]);
 }

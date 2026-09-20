@@ -1,26 +1,26 @@
 /**
- * T3 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 两级 config 解析器。
+ * Two-level MCP config resolver.
  *
- * 加载顺序:用户级 `~/.iknow/mcp.json` → 项目级 `<mcpConfigRoot>/.iknow/mcp.json`,
- * 同名 server 项目级 **条目级整体覆盖** 用户级(无字段级深合并,
- * SC1 — 整段对象替换)。每条 server 通过 `{type:"stdio"|"remote"}` 判别
- * 联合校验;`disabled:true` 或 `enabled:false` → status=disabled。
- * 坏条目跳过 + warn 恰好一行,reason **绝不包含 env/command 字段值**
- * (SC7)。
+ * Load order: user-level `~/.iknow/mcp.json` → project-level
+ * `<mcpConfigRoot>/.iknow/mcp.json`. A same-named server at project level replaces
+ * the user-level entry wholesale (object substitution, no field-level deep merge).
+ * Each server is validated as a discriminated union on `{type:"stdio"|"remote"}`;
+ * `disabled:true` or `enabled:false` → status=disabled. Invalid entries are skipped
+ * with exactly one warn line whose reason never contains env/command field values.
  *
- * 项目级路径**只**由调用方注入的 `mcpConfigRoot`(稳定 product/main checkout)
- * 派生,绝不读 task worktree / `process.cwd()`。
+ * The project-level path derives ONLY from the caller-injected `mcpConfigRoot`
+ * (the stable product/main checkout), never from a task worktree or `process.cwd()`.
  *
- * Never 区:不读 `~/.claude.json` / `.kiro/settings/mcp.json`(G2 D1 决议)。
+ * Never read `~/.claude.json` / `.kiro/settings/mcp.json`.
  *
- * 设计要点:
- *  - 路径参数化(`{ home, mcpConfigRoot }`),不读真实 ~/.iknow,测试用 tmp fixture。
- *  - 顶层形态兼容:既认 `mcpServers` 包裹,也认顶层直接是 server map。
- *  - 文件缺失 → 该级空集,继续。
- *  - 非缺失 IO / JSON 损坏 / 顶层非对象 → 抛 `McpLifecycleError`
- *    kind `config_load_failed`(启动边界可 catch 后降级为无 MCP)。
- *  - 缺 type 时按 `url` 字段存在判 remote,否则 stdio(容错策略)。
- *  - 输出数组按 server 名字母序,便于上层做差分 / diff 稳定。
+ * Design points:
+ *  - Paths are parameterized (`{ home, mcpConfigRoot }`) so tests use tmp fixtures.
+ *  - Top-level shape tolerance: accepts an `mcpServers` wrapper or a bare server map.
+ *  - Missing file → that level is empty, continue.
+ *  - Non-ENOENT IO / broken JSON / non-object top level → throw `McpLifecycleError`
+ *    kind `config_load_failed` (the startup boundary may catch it and degrade to no MCP).
+ *  - Missing `type` → infer remote from the presence of `url`, else stdio.
+ *  - Output array sorted alphabetically by server name for stable upstream diffing.
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -28,22 +28,22 @@ import path from "node:path";
 import { McpLifecycleError } from "../errors.js";
 
 /**
- * 单个 MCP server 的源(user 级 / project 级)。
+ * Source level of an MCP server entry (user / project).
  *
- * 两级覆盖方向固定:project 覆盖 user。`source` 标记结果来源,
- * 上层(manager / 装配层)可以据此做策略(如 project-only server
- * 在不同 cwd 不可见时不入装配)。
+ * Override direction is fixed: project wins over user. `source` marks which level
+ * the final entry came from, letting the upper layers (manager / assembly) apply
+ * policies, e.g. excluding project-only servers when they are invisible from cwd.
  */
 export type McpServerSource = "user" | "project";
 
 /**
- * 判别联合:`kind` 决定 `entry` 形态。
+ * Discriminated union: `kind` determines the `entry` shape.
  *
- * `kind:"stdio"` → `entry.command` 必填,`entry.url` 不存在。
- * `kind:"remote"` → `entry.url` 必填,`entry.command` 不存在。
+ * `kind:"stdio"` → `entry.command` required, `entry.url` absent.
+ * `kind:"remote"` → `entry.url` required, `entry.command` absent.
  *
- * 保留 `env` / `args` 等可选字段透传(交给 adapter / manager 解释),
- * 本模块只校验"形态正确",不深查 env/args 的具体值。
+ * Optional fields (`env` / `args` ...) are passed through for the adapter / manager
+ * to interpret; this module only validates shape, not env/args values.
  */
 export type McpServerConfig = McpStdioServer | McpRemoteServer;
 
@@ -73,21 +73,22 @@ export interface McpRemoteEntry {
   readonly url: string;
 }
 
-/** loadMcpConfig 顶层结果。 */
+/** Top-level result of loadMcpConfig. */
 export interface McpConfigResult {
-  /** 按 name 字母序合并后的所有 server(坏条目已剔除)。 */
+  /** All servers after merging and dropping invalid entries, sorted alphabetically by name. */
   readonly servers: readonly McpServerConfig[];
 }
 
 /**
- * 加载器入参。
+ * Loader inputs.
  *
- * - `home` ≡ `~`(用户级读 `<home>/.iknow/mcp.json`)
- * - `mcpConfigRoot` ≡ 稳定 product/main checkout(项目级读
- *   `<mcpConfigRoot>/.iknow/mcp.json`);**不是** task worktree / process.cwd()
+ * - `home` ≡ `~` (user level reads `<home>/.iknow/mcp.json`)
+ * - `mcpConfigRoot` ≡ stable product/main checkout (project level reads
+ *   `<mcpConfigRoot>/.iknow/mcp.json`); NOT a task worktree or process.cwd()
  *
- * 两个字段都强制必填,避免运行时隐式读 process.env / process.cwd() 造成
- * 跨机器不可重现。调用方按 resolver 返回的 `mcpConfigRoot` 注入。
+ * Both are mandatory to prevent implicit process.env / process.cwd() reads that
+ * would break cross-machine reproducibility. Callers inject the `mcpConfigRoot`
+ * returned by the roots resolver.
  */
 export interface LoadMcpConfigOpts {
   readonly home: string;
@@ -95,14 +96,15 @@ export interface LoadMcpConfigOpts {
 }
 
 /**
- * 主入口。读两级 mcp.json,合并 + 校验 + 坏条目隔离 + warn 一行。
+ * Main entry: read both mcp.json levels, then merge + validate + isolate
+ * invalid entries + one warn line each.
  *
- * 失败模式:
- *  - 任一文件缺失 → 该级为空,继续。
- *  - 非缺失 IO / JSON 损坏 / 顶层非对象 / server map 非对象 →
- *    抛 `McpLifecycleError`(`config_load_failed`)。
+ * Failure modes:
+ *  - Either file missing → that level is empty, continue.
+ *  - Non-ENOENT IO / broken JSON / non-object top level or server map →
+ *    throw `McpLifecycleError` (`config_load_failed`).
  *    // EXIT: config load failed → no MCP manager, preserve harness startup
- *  - 单个 server 条目坏 → warn 一行,该条目跳过,其他继续。
+ *  - A single invalid server entry → one warn line, skip it, others continue.
  */
 export async function loadMcpConfig(
   opts: LoadMcpConfigOpts
@@ -113,9 +115,10 @@ export async function loadMcpConfig(
   const userEntries = await readLevelConfig(userPath, "user");
   const projectEntries = await readLevelConfig(projectPath, "project");
 
-  // 条目级整体覆盖:project 的同名条目**整段替换** user。
-  // 关键:不做字段级深合并(SC1)。
-  // `source` 也必须随覆盖重写,反映"最终来自哪一级",而不是首次出现的级。
+  // Entry-level wholesale override: a project entry with the same name replaces
+  // the user one entirely (object substitution, no field-level deep merge).
+  // `source` is rewritten along with it, reflecting the final winning level
+  // rather than the first occurrence.
   const merged = new Map<
     string,
     { entry: RawServerEntry; source: McpServerSource }
@@ -124,11 +127,11 @@ export async function loadMcpConfig(
     merged.set(name, { entry, source: "user" });
   }
   for (const [name, entry] of projectEntries) {
-    merged.set(name, { entry, source: "project" }); // 整段替换,不去 merge
+    merged.set(name, { entry, source: "project" }); // wholesale replace, never merge
   }
 
   const servers: McpServerConfig[] = [];
-  // 按 name 字母序输出,跨进程稳定(便于上层 diff / 日志 / 装配顺序稳定)。
+  // Alphabetical output keeps ordering stable across processes (upstream diff / logs / assembly).
   const names = [...merged.keys()].sort();
   for (const name of names) {
     const slot = merged.get(name);
@@ -141,7 +144,7 @@ export async function loadMcpConfig(
 }
 
 // ---------------------------------------------------------------------------
-// 内部 — 单级读取 + 形态校验
+// Internal — single-level read + shape validation
 // ---------------------------------------------------------------------------
 
 interface RawServerEntry {
@@ -163,7 +166,7 @@ async function readLevelConfig(
     raw = await fs.readFile(filePath, "utf8");
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") return new Map(); // 缺失 → 空级,降级
+    if (e.code === "ENOENT") return new Map(); // missing file → empty level, degrade
     // EXIT: config load failed → no MCP manager, preserve harness startup
     throw new McpLifecycleError(
       "config_load_failed",
@@ -193,10 +196,10 @@ async function readLevelConfig(
     );
   }
 
-  // 顶层形态:优先 `mcpServers` 包裹;若不存在,回退到"顶层直接是 server map"。
+  // Prefer the `mcpServers` wrapper; otherwise accept a bare top-level server map.
   const obj = parsed as Record<string, unknown>;
   const inner = obj["mcpServers"];
-  const mapSource = inner !== undefined ? inner : obj; // 兼容形态
+  const mapSource = inner !== undefined ? inner : obj; // shape compatibility
   if (
     typeof mapSource !== "object" ||
     mapSource === null ||
@@ -227,14 +230,14 @@ function parseServerEntry(
   raw: RawServerEntry,
   source: McpServerSource
 ): McpServerConfig | null {
-  // status:`enabled` / `disabled` 由 disabled / enabled 字段决定。
-  // 优先级:enabled 优先(spec 没有明说但惯例如此,单测断言此契约)。
+  // status: driven by the `disabled` / `enabled` fields.
+  // `enabled` wins when both are present (convention; unit tests pin this contract).
   let status: "enabled" | "disabled" = "enabled";
   if (raw.disabled === true) status = "disabled";
   if (raw.enabled === false) status = "disabled";
   if (raw.enabled === true) status = "enabled";
 
-  // 形态推断:type 缺省时按 url 存在与否推断(测试断言 SC 兼容形态)。
+  // Shape inference: when `type` is absent, decide from whether `url` is present.
   const typeRaw = raw.type;
   const hasUrl = typeof raw.url === "string" && raw.url.length > 0;
   const hasCommand = typeof raw.command === "string" && raw.command.length > 0;
@@ -254,7 +257,7 @@ function parseServerEntry(
     kind = "remote";
   } else if (typeRaw === undefined) {
     if (hasUrl) kind = "remote";
-    else kind = "stdio"; // 缺 type + 无 url → 当 stdio,继续校验 command
+    else kind = "stdio"; // no type + no url → treat as stdio, command validation still applies
   } else {
     warnEntry(name, `unknown type "${String(typeRaw)}"`);
     return null;
@@ -262,7 +265,7 @@ function parseServerEntry(
 
   if (kind === "stdio") {
     if (!hasCommand) {
-      // 缺 type 走 stdio 推断但仍缺 command → 坏条目
+      // inferred as stdio but still missing command → invalid entry
       warnEntry(name, "stdio entry missing command");
       return null;
     }
@@ -292,7 +295,7 @@ function parseServerEntry(
 }
 
 // ---------------------------------------------------------------------------
-// 内部 — 归一化
+// Internal — normalization
 // ---------------------------------------------------------------------------
 
 function normalizeStringArray(
@@ -322,12 +325,12 @@ function normalizeStringRecord(
 }
 
 // ---------------------------------------------------------------------------
-// 内部 — warn(SC7:reason 不含 env / command 字段值)
+// Internal — warn (reason must not leak env / command field values)
 // ---------------------------------------------------------------------------
 
 /**
- * 单条目坏掉时 warn。reason 模板只放字段名/类型描述,
- * 绝不拼 env[k]=v 或 command="..." 等敏感字段值。
+ * Warn once for an invalid entry. The reason template carries only field
+ * names / type descriptions — never values like env[k]=v or command="...".
  */
 function warnEntry(name: string, reason: string): void {
   console.warn(`[mcp/config] server '${name}' skipped: ${reason}`);

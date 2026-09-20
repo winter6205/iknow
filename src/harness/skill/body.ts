@@ -1,14 +1,14 @@
-// #337 T6: skill 正文装配 (`src/harness/skill/body.ts`)。
+// Skill body assembly (`src/harness/skill/body.ts`).
 //
-// 装配形态（spec 337-skill-mcp-extension.md § Code Style + SC6）：
-//   - 正文 = frontmatter 剥离后正文 + `Base directory: <abs dir>` 提示行
-//     + `<skill_files>` 段（glob `**/*` 排除 SKILL.md、排序、采样 ≤10、
-//     绝对路径、"file list is sampled" 提示）。
-//   - references/ 不递归（SC6）。
-//   - 字节级稳定：同输入二次调用字符串相等（KV 缓存契约）。
+// Assembly shape:
+//   - body = frontmatter-stripped text + a `Base directory: <abs dir>` hint
+//     line + a `<skill_files>` segment (recursive walk excluding SKILL.md,
+//     sorted, sampled ≤10, absolute paths, with a "file list is sampled" hint).
+//   - references/ is not recursed.
+//   - Byte-stable: same input twice yields the same string (KV-cache contract).
 //
-// 本模块依赖注入 `readDir` / `readFile` 形 test seam（默认 `node:fs/promises`）
-// 便于单测在 tmp 目录构造 SKILL.md / 辅助文件 + 走全路径；不引入 glob 依赖。
+// `readDir` / `readFile` are injectable test seams (default `node:fs/promises`)
+// so tests can build a SKILL.md tree in a tmp dir; no glob dependency.
 import { readdir, readFile } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { join, sep } from "node:path";
@@ -18,25 +18,27 @@ import type { WriteSituation } from "../session-roots.js";
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
-/** skill_files 段最大采样数（spec SC6）。 */
+/** Max sampled entries in the skill_files segment. */
 export const SKILL_FILES_SAMPLE_LIMIT = 10;
 
-/** references/ 目录名 — 此目录不递归进 skill_files。 */
+/** references/ dir — excluded from the skill_files walk. */
 const REFERENCES_DIR = "references";
 
 /**
- * 337 装配形态双标记（skill-body-short-circuit spec）：成功全文 tool_result
- * 必然同时含 `Base directory:` 与 `</skill_files>`。recognizer（ACI skill()
- * 二次短路）与装配 SSOT 共源 —— 改装配形态必须同步这两个字面量。
+ * The two markers that define the assembled full-body shape: a successful
+ * full-text tool_result always contains both `Base directory:` and
+ * `</skill_files>`. Shared by the recognizer (skill() second-load short
+ * circuit) and the assembly SSOT — changing the assembly shape must update
+ * these literals together.
  */
 export const SKILL_BODY_MARKERS = {
-  /** createSkillBody 渲染的 `Base directory: <dir>` 提示行前缀。 */
+  /** Prefix of the `Base directory: <dir>` hint line rendered by createSkillBody. */
   baseDirectory: "Base directory:",
-  /** `<skill_files>` 段闭合标签。 */
+  /** Closing tag of the `<skill_files>` segment. */
   skillFilesClose: "</skill_files>",
 } as const;
 
-/** SKILL.md 文件名 — 不出现在 skill_files 清单里。 */
+/** SKILL.md file name — never listed inside skill_files. */
 const SKILL_BODY_FILE = "SKILL.md";
 
 export interface SkillBodyFs {
@@ -53,43 +55,44 @@ export interface SkillBodyOptions {
   readonly entry: SkillEntry;
   readonly dir: string;
   /**
-   * ADR-0079 — skill 正文不再挂写根 trailer（与 337 SC6 形态逐字节一致：
-   * frontmatter 剥离 + Base directory 行 + `<skill_files>` 段）。
-   * 写处境披露的权威路径迁到 worker prior（`src/harness/subagent/worker.ts`
-   * 与 `chat-session.ts` rebind 通知）—— 共用同一 helper `writeRootSegment`，
-   * 但不再追加进 skill 正文装配结果。SkillBodyOptions 不再接受 `writeSituation` /
-   * `taskRoot` 字段。
+   * ADR-0079 — the skill body no longer carries a write-root trailer (keeping
+   * the byte-exact shape: frontmatter stripped + Base directory line +
+   * `<skill_files>` segment). Write-situation disclosure moved to the worker
+   * prior (`src/harness/subagent/worker.ts`) and the `chat-session.ts` rebind
+   * notification — both share the same `writeRootSegment` helper but no longer
+   * append it to the skill body. SkillBodyOptions no longer accepts
+   * `writeSituation` / `taskRoot`.
    */
   readonly fs?: SkillBodyFs;
 }
 
 /**
- * 单一权威格式来源（SSOT）—— skill-load 消息前缀必须经此常量。三处共
- * 用同一字面量：
- *   - TUI 装配（`src/tui/app.tsx:1780`，经 `buildSkillLoadText`）
- *   - Web 装配（`web/src/hooks/use-slash-commands.ts:251`，跨 workspace
- *     边界所以本侧无法 import 留本地常量 + SSOT 注释）
- *   - hub/chat-session 长度校验（经 `isSkillLoadText` / `exceedsUserInputCap`）
+ * The single authoritative format (SSOT) for the skill-load message prefix.
+ * Three places share this literal: TUI assembly (via `buildSkillLoadText`),
+ * web assembly (`web/src/hooks/use-slash-commands.ts`, which keeps a local
+ * constant because of the workspace boundary, with an SSOT comment pointing
+ * here), and the hub/chat-session length check (via `isSkillLoadText` /
+ * `exceedsUserInputCap`).
  *
- * 任何放宽都会让超长 skill-load 撞 `MAX_MESSAGE_CHARS = 8000`（78KB 的
- * SKILL.md 加载会立即触发）。
+ * Any relaxation lets oversized skill-loads hit `MAX_MESSAGE_CHARS = 8000`
+ * (loading a 78KB SKILL.md would trip it immediately).
  */
 export const SKILL_LOAD_PREFIX = '[skill-load name="';
 
 /**
- * TUI `session-state.ts:319` 显示跳过谓词用的短前缀 —— 语义略宽于
- * `SKILL_LOAD_PREFIX`：识别任何 `[skill-load ...]` 形态以从用户可见历史中
- * 屏蔽（含潜在的 `[skill-load reload=...]` 等未来变体）。与具体闭合形态
- * 的判定（`SKILL_LOAD_PREFIX`）保持两套，避免混淆两套语义。
+ * Short prefix used by the TUI's skip-display predicate — intentionally
+ * broader than `SKILL_LOAD_PREFIX`: hides any `[skill-load ...]` shape (
+ * including future variants) from user-visible history. Kept separate from
+ * the closed-form check (`SKILL_LOAD_PREFIX`) so the two semantics don't mix.
  */
 export const SKILL_LOAD_PREFIX_SHORT = "[skill-load ";
 
 /**
- * 装配一条标准 skill-load 消息。返回形态：
+ * Assemble one standard skill-load message:
  *   `[skill-load name="<name>"]\n<body>[+"\n\n<remainder>" if non-empty]`
- * 与 `src/tui/app.tsx:1780-1782` 与 `web/src/hooks/use-slash-commands.ts:251-253`
- * 现有 byte 级行为完全一致（web 因跨 workspace 边界无法共用，保留其本地拼
- * 接但 SSOT 注释指向本函数）。
+ * Byte-identical to the existing TUI and web assembly behavior (web keeps its
+ * local concatenation across the workspace boundary, with an SSOT comment
+ * pointing here).
  */
 export function buildSkillLoadText(
   name: string,
@@ -102,32 +105,31 @@ export function buildSkillLoadText(
 }
 
 /**
- * 判定 `text` 是否为闭合形态的机器装配 skill-load 消息。前缀匹配
- * `SKILL_LOAD_PREFIX`，且 `name="..."` 必须用双引号闭合（拒绝半截前缀）。
- * 用于 hub/chat-session 的用户输入长度上限豁免判定。
+ * Is `text` a closed-form, machine-assembled skill-load message? Matches
+ * `SKILL_LOAD_PREFIX` and requires the `name="..."` closing quote (rejects
+ * half-typed prefixes). Used for the user-input length-cap exemption.
  */
 export function isSkillLoadText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed.startsWith(SKILL_LOAD_PREFIX)) return false;
-  // SKILL_LOAD_PREFIX 长度 = "[skill-load name=\"".length。
-  // 闭合形态：`name="..."` 至少要有引号闭合（暂不约束 name 内容字符集，
-  // 与 TUI/Web 装配形态一致即可 —— 装配路径已固定 `${name}` 是 catalog 条目名）。
+  // Closed form requires the quote after `name="`; no constraint on name
+  // characters (assembly always injects a catalog entry name, so this just
+  // mirrors the TUI/web assembly shape).
   const after = trimmed.slice(SKILL_LOAD_PREFIX.length);
   return after.includes('"');
 }
 
 /**
- * 组合守卫：`text` 是否应触发「长度超限」拒绝判定。封装 trim 策略 +
- * skill-load 豁免 + 上限比较三处共用逻辑，避免 hub 与 chat-session 两侧
- * 重复同一表达式。返回值语义：
- *   - 非空 skill-load 消息 → 永不拒绝（即使超长）
- *   - 其余超长 → 拒绝
- *   - 空 → 由调用方另行判空；本函数对空文本返回 false（不拒绝，因空已
- *     在 validateText 的非空校验里被拦截）。
+ * Combined guard: should `text` be rejected for being too long? Encapsulates
+ * trim policy + skill-load exemption + cap comparison so hub and chat-session
+ * don't duplicate the expression. Semantics:
+ *   - non-empty skill-load messages are never rejected (even when long);
+ *   - other over-cap text is rejected;
+ *   - empty text returns false (emptiness is caught by validateText upstream).
  *
- * 上限值由调用方传入（默认 8000，对齐 session-api `MAX_MESSAGE_CHARS`）。
- * 本函数刻意不 import 该常量以遵守 Gate B：`src/harness/` 是底层能力
- * 模块，不可反向依赖 `src/session-api/`。
+ * The cap is passed in (default 8000, matching session-api `MAX_MESSAGE_CHARS`).
+ * This file deliberately does not import that constant: `src/harness/` is a
+ * low-level module and must not depend back on `src/session-api/`.
  */
 export function exceedsUserInputCap(text: string, cap: number = 8000): boolean {
   const query = text.trim();
@@ -136,7 +138,7 @@ export function exceedsUserInputCap(text: string, cap: number = 8000): boolean {
   return query.length > cap;
 }
 
-/** 剥离 frontmatter：返回去掉 `---\n...\n---\n` 块之后剩余正文。 */
+/** Strip frontmatter: return the text after the `---\n...\n---\n` block. */
 export function stripFrontmatter(raw: string): string {
   const match = FRONTMATTER.exec(raw);
   if (!match) return raw;
@@ -144,36 +146,39 @@ export function stripFrontmatter(raw: string): string {
 }
 
 /**
- * T4 (plans/write-situation-disclosure.md) — 「当前写根」段文案 SSOT，按
- * 处境三态渲染。skill 正文 trailer、子代理 worker prior
- * （`priorMessagesFromEnvelope`）、chat-session rebind 一次性通知
- * （`refreshChatDepsForRebind`）三处共用同一份字节。spec
- * skill-load-write-root.md 合同 1「文案只有一份」。
+ * SSOT wording for the "current write root" segment, rendered per situation.
+ * Shared verbatim by the skill body trailer, the subagent worker prior
+ * (`priorMessagesFromEnvelope`), and the chat-session one-shot rebind
+ * notification (`refreshChatDepsForRebind`) — there is only one copy of this
+ * text.
  *
- * 语义（spec SC1-SC3 / ADR-0069 Decision 2/3）：
- *   - `writable_main`（隔离 OFF）/ `writable_tree`（隔离 ON + 树形根）→
- *     返回与改造前**逐字节相等**的写根段（含 `current write root ...`）。
- *     形状判断由调用方的 `writeSituation(isolationOn, root)` 承担，本函数
- *     不重复判定（SC4 依赖方向钉死：`body.ts` 不 import `isolation/`）。
- *   - `no_writable_root`（隔离 ON + 非树形根）→ ③ 态披露：仅陈述事实，
- *     **不点名** `create-worktree`（ADR-0069 D3：trailer 在装配时
- *     进上下文，早于任何写意图；点名工具 = 对每个未绑会话推一次建树），
- *     **不嵌入** `taskRoot`（无可写对象，指向根是错的）。
+ * Semantics:
+ *   - `writable_main` (isolation off) / `writable_tree` (isolation on +
+ *     tree-shaped root) → byte-identical to the pre-refactor segment
+ *     (including `current write root ...`). Shape judgment is the caller's
+ *     (`writeSituation(isolationOn, root)`); this function does not re-check
+ *     (body.ts must not import `isolation/`).
+ *   - `no_writable_root` (isolation on + non-tree root) → fact-only
+ *     disclosure: it does NOT name `create-worktree` (the trailer enters
+ *     context at assembly time, before any write intent; naming the tool
+ *     would push every unbound session toward creating a worktree) and does
+ *     NOT embed `taskRoot` (there is nothing writable; pointing at a root
+ *     would be wrong).
  *
- * empty 臂：`taskRoot` 空 / 空白 + `writable_main` / `writable_tree` → null
- * （不渲染「写根 = 」半句，A 表 empty 臂）；`no_writable_root` + 空根 → 仍
- * 返回披露（披露与根无关，typed 不 throw）。
+ * Empty arm: blank `taskRoot` + writable situations → null (don't render a
+ * "write root = " half-sentence); `no_writable_root` + empty root still
+ * returns the disclosure (it doesn't depend on any root).
  */
 export function writeRootSegment(
   situation: WriteSituation,
   taskRoot: string
 ): string | null {
-  // ③ 态：纯披露，不嵌入根。SC3 / ADR-0069 D3 — trailer 在装配时进上下文，
-  // 早于任何写意图；点名工具 = 对每个未绑会话推一次建树（更激进）。
+  // Disclosure-only arm: facts, no root embedded — the trailer reaches the
+  // model before any write intent exists.
   if (situation === "no_writable_root") {
     return NO_WRITE_ROOT_DISCLOSURE;
   }
-  // ① / ②: 与改造前逐字节相等（SC2 硬约束）。
+  // Writable arms: byte-identical to the pre-refactor segment.
   const root = taskRoot.trim();
   if (root.length === 0) return null;
   return (
@@ -183,9 +188,10 @@ export function writeRootSegment(
 }
 
 /**
- * ③ 态披露文案（spec SC3 / ADR-0069 D3）：陈述「隔离开着、未绑树、主仓对
- * 文件改动只读、此刻无可写根」四个事实，不点名建树工具，不嵌入任何根。
- * 静态字面量（不随绑定 / 隔离开关漂移），便于单测做字节断言。
+ * No-writable-root disclosure: states four facts (isolation on, no worktree
+ * bound, main checkout read-only for mutations, nothing writable right now)
+ * without naming the worktree-creation tool or embedding any root. Static
+ * literal so tests can assert it byte-for-byte.
  */
 const NO_WRITE_ROOT_DISCLOSURE =
   `Worktree isolation is on for this session but no task worktree is bound: ` +
@@ -193,13 +199,13 @@ const NO_WRITE_ROOT_DISCLOSURE =
   `root in scope right now.`;
 
 /**
- * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段）。
- * 同输入两次调用字符串相等（KV 缓存契约）。
+ * Assemble the skill body (frontmatter stripped + Base directory line +
+ * `<skill_files>` segment). Same input twice yields the same string (KV-cache
+ * contract).
  *
- * ADR-0079 — 不再追加写根 trailer。写处境披露的权威路径迁到 worker prior
- * （`src/harness/subagent/worker.ts` 与 `src/cli/chat-session.ts` rebind 通知），
- * 共用同一 helper `writeRootSegment`。skill 正文装配只保留 skill 自身的两
- * 段（Base directory 行 + skill_files 段），与 #337 SC6 形态逐字节一致。
+ * ADR-0079 — no write-root trailer is appended anymore; write-situation
+ * disclosure lives in the worker prior (`src/harness/subagent/worker.ts`) and
+ * the chat-session rebind notification, sharing the `writeRootSegment` helper.
  */
 export async function createSkillBody(
   options: SkillBodyOptions
@@ -218,7 +224,7 @@ export async function createSkillBody(
   return segments.join("\n\n");
 }
 
-/** 列出 skill 目录下除 SKILL.md + references/ 之外的所有文件（绝对路径，排序）。 */
+/** All files under the skill dir except SKILL.md and references/ (absolute paths, sorted). */
 async function collectSkillFiles(
   dir: string,
   fs: SkillBodyFs
@@ -244,21 +250,21 @@ async function walk(
   for (const entry of entries) {
     const child = join(current, entry.name);
     if (entry.isDirectory()) {
-      // SC6: references/ 不递归
+      // references/ is not recursed
       if (entry.name === REFERENCES_DIR) continue;
-      // 跳过常见依赖/隐藏目录，避免大仓库遍历（spec 未强制，按最小原则）
+      // Skip common dependency/hidden dirs to avoid walking huge trees
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       await walk(root, child, collected, fs);
       continue;
     }
     if (!entry.isFile()) continue;
-    // SKILL.md 排除
+    // SKILL.md is excluded from its own file list
     if (current === root && entry.name === SKILL_BODY_FILE) continue;
     collected.push(child);
   }
 }
 
-/** 渲染 `<skill_files>` 段：每行一个绝对路径；>10 个时截断 + sampled 提示。 */
+/** Render the `<skill_files>` segment: one absolute path per line; >10 → truncate + sampled hint. */
 function renderSkillFiles(files: ReadonlyArray<string>): string {
   const sampled = files.slice(0, SKILL_FILES_SAMPLE_LIMIT);
   const truncated = files.length > SKILL_FILES_SAMPLE_LIMIT;
@@ -270,5 +276,5 @@ function renderSkillFiles(files: ReadonlyArray<string>): string {
   return `<skill_files>\n${body}${hint}\n</skill_files>`;
 }
 
-// 触发 `sep` 不被未用导入警告（不同平台 path 拼接可能引入差异，备用）
+// Keep `sep` imported without warning (reserved for platform-specific joins).
 void sep;

@@ -1,53 +1,59 @@
 /**
- * T2 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 双根解析器。
+ * MCP dual-root resolver — the single point where MCP roots are derived.
  *
- * 唯一根策略点:session worktree rebind 前后,MCP 的 stdio cwd / 工具 FS root
- * 与配置根都由这里派生,调用方(config / manager / build-engine / hub / CLI /
- * TUI)只消费返回值,不再自行拼路径、读 `process.cwd()` 或判断 task worktree。
+ * Across a session worktree rebind, the stdio child cwd / tool FS root and the
+ * config root all come from here; callers (config / manager / build-engine / hub /
+ * CLI / TUI) only consume the returned values — never compose paths themselves,
+ * read `process.cwd()`, or detect task worktrees.
  *
- *  - `workspaceRoot`:当前 session/task root——stdio child 的 cwd,也是工具 FS root;
- *    rebind 后指向 `<productRoot>/.iknow/worktrees/<conversationId>`。
- *  - `mcpConfigRoot`:**只**由稳定的 `productRoot`(首次装配捕获的主 checkout)
- *    派生,跨 rebind 不变;项目级配置只读 `<mcpConfigRoot>/.iknow/mcp.json`。
+ *  - `workspaceRoot`: the current session/task root — cwd for stdio children and
+ *    the tool FS root; after rebind it points to
+ *    `<productRoot>/.iknow/worktrees/<conversationId>`.
+ *  - `mcpConfigRoot`: derives ONLY from the stable `productRoot` (the main checkout
+ *    captured at first assembly) and never changes across rebinds; project-level
+ *    config is read from `<mcpConfigRoot>/.iknow/mcp.json`.
  *
- * 纯函数:不读 git、不碰文件系统、不持会话状态。缺根 / 空白 / 相对 /
- * 无法规范化 / 与既有根不一致一律 fail-closed 抛 `McpLifecycleError`
- * (kinds 见 `src/harness/errors.ts`),**绝不**回退 `process.cwd()`。
+ * Pure function: no git, no filesystem, no session state. Missing roots / blank /
+ * relative / non-normalizable values / mismatch with an established root all fail
+ * closed by throwing `McpLifecycleError` (kinds in `src/harness/errors.ts`);
+ * never fall back to `process.cwd()`.
  */
 import path from "node:path";
 
 import { McpLifecycleError } from "../errors.js";
 import type { McpLifecycleErrorKind } from "../errors.js";
 
-/** 诊断里回显根值的上限:长路径也要保持有限诊断。 */
+/** Cap for root values echoed in diagnostics: keep messages bounded even for long paths. */
 const MAX_ROOT_DETAIL_CHARS = 120;
 
-/** resolver 的唯一输出:两个已规范化的绝对根。 */
+/** The resolver's only output: two normalized absolute roots. */
 export interface McpRoots {
   readonly workspaceRoot: string;
   readonly mcpConfigRoot: string;
 }
 
 export interface ResolveMcpRootsInput {
-  /** 当前 session/task root(rebind 后是 task worktree)。 */
+  /** Current session/task root (a task worktree after rebind). */
   readonly workspaceRoot: string | undefined;
-  /** 首次装配捕获的稳定主 checkout root;`mcpConfigRoot` 的唯一来源。 */
+  /** Stable main checkout captured at first assembly; the only source of `mcpConfigRoot`. */
   readonly productRoot: string | undefined;
   /**
-   * 已固定的根(显式 sandbox / ACI FS root,或 reload 时 active manager 的 cwd)。
-   * 传入即参与校验:与解析出的 `workspaceRoot` 不一致 → `root_mismatch`。
+   * An already-pinned root (explicit sandbox / ACI FS root, or the active manager's
+   * cwd on reload). When present it joins validation: different from the resolved
+   * `workspaceRoot` → `root_mismatch`.
    */
   readonly expectedWorkspaceRoot?: string | undefined;
 }
 
 /**
- * 解析双根。任何校验失败都在 config 读取 / spawn / 工具执行之前抛出。
+ * Resolve the dual roots. Every validation failure throws before any config read,
+ * process spawn, or tool execution.
  *
- * kind 分工:
- *  - 根缺席(未提供 / 非字符串)→ `missing_cwd`
- *  - `workspaceRoot`(含 `expectedWorkspaceRoot`)空白 / 非绝对 / 无法规范化 → `invalid_cwd`
- *  - `productRoot` 空白 / 非绝对 / 无法规范化 → `invalid_config_root`
- *  - `expectedWorkspaceRoot` 与解析结果不同 → `root_mismatch`
+ * Kind assignment:
+ *  - root absent (not provided / non-string) → `missing_cwd`
+ *  - `workspaceRoot` (incl. `expectedWorkspaceRoot`) blank / relative / non-normalizable → `invalid_cwd`
+ *  - `productRoot` blank / relative / non-normalizable → `invalid_config_root`
+ *  - `expectedWorkspaceRoot` differs from the resolved value → `root_mismatch`
  */
 export function resolveMcpRoots(input: ResolveMcpRootsInput): McpRoots {
   const workspaceRoot = normalizeRoot(
@@ -79,7 +85,7 @@ export function resolveMcpRoots(input: ResolveMcpRootsInput): McpRoots {
   return { workspaceRoot, mcpConfigRoot };
 }
 
-/** 缺席 → `missing_cwd`;在场但不可用 → 调用方指定的 invalid kind。 */
+/** Absent → `missing_cwd`; present but unusable → the invalid kind chosen by the caller. */
 function normalizeRoot(
   value: string | undefined,
   label: string,
@@ -110,7 +116,7 @@ function normalizeRoot(
   return normalized;
 }
 
-/** 去掉结尾分隔符,但保留文件系统根本身(posix `/`、win32 `C:\`)。 */
+/** Strip trailing separators, but keep the filesystem root itself (posix `/`, win32 `C:\`). */
 function stripTrailingSeparators(p: string): string {
   const { root } = path.parse(p);
   let out = p;
@@ -123,7 +129,7 @@ function stripTrailingSeparators(p: string): string {
   return out;
 }
 
-/** 诊断回显:截断到有限长度,避免超长路径撑爆错误消息。 */
+/** Diagnostic echo: truncate to a bounded length so huge paths cannot blow up error messages. */
 function quoteRoot(value: string, limit: number): string {
   const shown = value.length > limit ? `${value.slice(0, limit)}…` : value;
   return `'${shown}'`;
