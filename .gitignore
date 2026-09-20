@@ -201,3 +201,7 @@ plans/
 docs/audits/
 docs/wayfinder/
 docs/integration-materials.env.example
+
+# Phase 1 batch2: archived to winter6205/iknow-archive
+.kiro/
+.evals/

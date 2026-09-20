@@ -1,6 +1,0 @@
-id: "016"
-description: "#121 记忆文件分层注入验收"
-test_command: npx vitest run tests/harness/memory/ tests/harness/build-message-params.test.ts
-success: "pass"
-budget:
-  max_turns: 1

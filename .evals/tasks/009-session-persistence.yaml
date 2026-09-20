@@ -1,6 +1,0 @@
-id: "009"
-description: "#120 会话持久化验收"
-test_command: npx vitest run tests/session-api/
-success: "pass"
-budget:
-  max_turns: 1

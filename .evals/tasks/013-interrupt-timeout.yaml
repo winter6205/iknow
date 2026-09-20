@@ -1,5 +1,0 @@
-id: "013-interrupt-timeout"
-tier: medium
-repo: .
-test_command: bash -e -c 'npx vitest run tests/harness/aci/interrupt-routing.test.ts'
-prompt: "Run `bash .evals/run.sh --task 013-interrupt-timeout`. Confirms interruptBehavior + tier routing acceptance suite passes."

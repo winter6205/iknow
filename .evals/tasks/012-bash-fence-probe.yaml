@@ -1,7 +1,0 @@
-id: 012-bash-fence-probe
-tier: slow
-repo: .
-test_command: |
-  set -e
-  npm run probe:sandbox
-prompt: "Run `bash .evals/run.sh --task 012-bash-fence-probe`. Confirms bwrap physical fence probe runs all 6 categories green."

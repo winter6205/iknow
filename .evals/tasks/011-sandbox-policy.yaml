@@ -1,5 +1,0 @@
-id: "011-sandbox-policy"
-tier: medium
-repo: .
-test_command: bash -e -c 'npx vitest run tests/harness/sandbox/'
-prompt: "Run `bash .evals/run.sh --task 011-sandbox-policy`. Confirms sandbox policy layer acceptance suite passes."
