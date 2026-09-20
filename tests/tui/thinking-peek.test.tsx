@@ -2,24 +2,31 @@
 /**
  * tests/tui/thinking-peek.test.tsx
  *
- * plans/model-idle-thinking-peek.md T2：TUI 未展开折叠态在思考**进行中**
- * 露出正文末 ≤3 行，turn 结束后流式 thinking 面板整体消失。
+ * Contract while thinking is in progress: the collapsed (unexpanded) TUI
+ * peeks the last <=3 lines of thinking body; when the turn ends the whole
+ * streaming thinking panel disappears.
  *
- * 合同（计划 T2 Acceptance）：
- *  - 未展开 + 思考进行中：可见 `思考中…` 摘要行 **且** 可见正文末行
- *    （≤ THINKING_PEEK_MAX_LINES = 3，取末尾）；更早的正文行不出现；
- *  - turn 结束（runState 非 running-fg）→ 整个流式 thinking 面板消失；
- *  - Ctrl+O / `thinkingExpanded` 全开路径不变（Markdown 全文）；
- *  - 折叠态面板高度与思考全文长度无关 —— 预览是 ≤3 行的窗口，不是全文
- *    （行高不把预览当全文高度）。
+ * Acceptance:
+ *  - collapsed + thinking running: `思考中…` summary line is visible **and**
+ *    the tail body lines are visible (<= THINKING_PEEK_MAX_LINES = 3, taken
+ *    from the end); earlier body lines must not appear;
+ *  - turn ended (runState not running-fg) -> the whole streaming thinking
+ *    panel disappears;
+ *  - Ctrl+O / `thinkingExpanded` full-open path unchanged (full Markdown);
+ *  - collapsed panel height is independent of thinking length -- the peek is
+ *    a <=3-line window, not the full text (row height must not treat the
+ *    peek as full-text height).
  *
- * D3 (tui-display-consistency)：原「思考冻结（answer 已开始）→ 折回仅
- * 摘要行 `思考了 N 秒`」用例随 `thinkingFrozenSeconds` 副通道一同下线
- * —— running 期间不再有冻结分支，折叠态恒 `思考中…`；turn 结束后由
- * 末条 assistant 消息的落盘 thinkingMs 接手（见
- * `chat-view-thinking-tool-fold.test.tsx`）。本文件不再持有该用例。
+ * The former "thinking frozen (answer started) -> fold back to summary-only
+ * `思考了 N 秒`" case was retired together with the `thinkingFrozenSeconds`
+ * side channel -- there is no frozen branch while running; collapsed state
+ * always shows `思考中…`; after the turn ends the last assistant message's
+ * persisted thinkingMs takes over (see
+ * `chat-view-thinking-tool-fold.test.tsx`). This file no longer holds that
+ * case.
  *
- * 文案断言只对 think-fold.ts 的输出，不在测试里另抄模板字符串。
+ * Wording assertions use think-fold.ts output only; no template strings are
+ * copied into the tests.
  */
 import { createRef } from "react";
 import { expect, test } from "bun:test";
@@ -40,7 +47,7 @@ import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 const COLS = 60;
 const ROWS = 16;
 
-/** 五行思考正文：前两行是「更早的行」，末三行是预览应命中的窗口。 */
+/** Five thinking body lines: the first two are "earlier lines" that must stay hidden; the last three are the peek window. */
 const THINKING_FIVE_LINES = [
   "早行甲-不应出现",
   "早行乙-不应出现",
@@ -178,12 +185,14 @@ test("折叠态面板高度与思考全文长度无关：预览 ≤3 行，不�
 });
 
 test("running：已返回正文草稿时，流式思考不抢正文槽位（活动块 spec 下 unanchored 块与 draft 段栈序）", async () => {
-  // T7 退役旧 `live activity group` 之后，live 思考由 unanchored 块 +
-  // thinking panel 双通道呈现；unanchored 块锚在 messages.length 之后，
-  // 紧跟 tailSlots 之上 —— draftSegments 段作为 TailSlotDraft 仍按
-  // draftEpoch 在 tailSlots 内排序。栈序详见 transcript-tail.tsx 与
-  // activity-block.ts（liveThinking 块）。本测试只校基本不丢件：
-  // 草稿在帧、Thinking… 在帧、互相不抑制。
+  // After the old `live activity group` was retired, live thinking is shown
+  // via two channels: the unanchored block plus the thinking panel. The
+  // unanchored block anchors after messages.length, directly above tailSlots
+  // -- draftSegments as TailSlotDraft still order within tailSlots by
+  // draftEpoch. Stack order details live in transcript-tail.tsx and
+  // activity-block.ts (liveThinking block). This test only checks the basic
+  // no-loss contract: draft in frame, Thinking… in frame, neither suppresses
+  // the other.
   const returned = "RETURNED-SEGMENT-UNIQUE";
   const setup = await testRender(
     <ChatView

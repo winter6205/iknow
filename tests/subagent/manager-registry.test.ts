@@ -269,7 +269,7 @@ describe("createSubagentManagerRegistry", () => {
     registry.register({ ...second, abortTask: secondAbort });
 
     expect(registry.abortTask("second-live")).toBe(true);
-    // taskId 归属唯一 manager：第一个报告 false 后继续问下一个。
+    // taskId belongs to exactly one manager: keep asking the next after the first reports false.
     expect(firstAbort).toHaveBeenCalledWith("second-live");
     expect(secondAbort).toHaveBeenCalledWith("second-live");
   });
@@ -280,10 +280,10 @@ describe("createSubagentManagerRegistry", () => {
     registry.register({ ...withSeam, abortTask: () => false });
 
     expect(registry.abortTask("ghost")).toBe(false);
-    // 无 manager（ask surface）→ 空操作，不抛错。
+    // no manager (ask surface) → no-op, no throw.
     const empty = createSubagentManagerRegistry();
     expect(empty.abortTask("ghost")).toBe(false);
-    // 结构兼容的 wake/read-only view（无 abort seam）→ 跳过，不伪造 kill。
+    // structurally compatible wake/read-only view (no abort seam) → skipped, no fake kill.
     const seamLess = createSubagentManagerRegistry();
     seamLess.register(readManager(() => []));
     expect(seamLess.abortTask("ghost")).toBe(false);

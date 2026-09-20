@@ -1,14 +1,17 @@
 /**
- * ADR-0084 / ADR-0090 / spec Slice B SC5 — worker 与主链共用同一份项目权限规则。
+ * ADR-0084 / ADR-0090 — the worker shares the main chain's project permission rules.
  *
- * 不变式：worker 是同一会话的子代理面，项目 `permissions` 声明式列表必须与
- * 主链同源 —— 否则被主链 deny 的调用可从 worker 绕行（权限平权）。读根 =
- * `projectIdentityRoot`（worker 无 sessionRoots，身份根经 IKNOW_PRODUCT_ROOT
- * wire 送达 / 缺席回落 cwd）。
+ * Invariant: the worker is the subagent face of the same session, so the
+ * project `permissions` declarative list must come from the same source as
+ * the main chain — otherwise a call denied by the main chain could bypass via
+ * the worker (permission parity). Read root = `projectIdentityRoot` (workers
+ * have no sessionRoots; the identity root arrives via the IKNOW_PRODUCT_ROOT
+ * wire, falling back to cwd when absent).
  *
- * 手法：真实 createWorkerDeps 装配 + 真实 executor + 真实 read_file handler；
- * 项目 fixture 走 tmp 目录。bwrap 在 PATH 时 bash 工厂会 requireBwrap（本机
- * 有），但本文件只调 read_file，不触发围栏执行。
+ * Method: real createWorkerDeps assembly + real executor + real read_file
+ * handler; project fixtures live in tmp dirs. When bwrap is on PATH the bash
+ * factory calls requireBwrap (present on this machine), but this file only
+ * invokes read_file and never triggers fence execution.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -40,9 +43,10 @@ const TEST_ENV = {
 } as unknown as IknowEnv;
 
 /**
- * 项目 `permissions` 段（ADR-0090 声明式）：deny 命中任意深度 `secret.txt`
- * 的读工具调用。deny 的单段路径在工作根下任意深度命中，故 `Read(secret.txt)`
- * 覆盖工作根顶层的 `<root>/secret.txt`（旧 `path_contains` 语义的等价表达）。
+ * Project `permissions` section (ADR-0090 declarative): denies read tool
+ * calls on any `secret.txt` at any depth. A single-segment deny path matches
+ * at any depth under the workspace root, so `Read(secret.txt)` covers
+ * `<root>/secret.txt` at the top level (equivalent to the old `path_contains` semantics).
  */
 const DENY_SECRET_SECTION = {
   deny: ["Read(secret.txt)"],
@@ -52,7 +56,7 @@ async function scratch(): Promise<string> {
   return mkdtemp(join(tmpdir(), "iknow-worker-proj-perm-"));
 }
 
-/** 铺 `<root>/.iknow/settings.json` + 两个可读文件。 */
+/** Lay down `<root>/.iknow/settings.json` + two readable files. */
 async function plantProject(
   root: string,
   settings: Record<string, unknown>
@@ -108,10 +112,10 @@ describe("createWorkerDeps — 项目权限源与主链同源（ADR-0084 / SC5�
     const denied = await readFileResult(deps, join(root, "secret.txt"));
     expect(denied.kind).toBe("execution_failed");
     expect(denied.message).toMatch(/\[permission_denied\]/);
-    // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+    // The compile-time-generated reason echoes the declarative rule verbatim (no id / reason stored in the file).
     expect(denied.message).toMatch(/Read\(secret\.txt\)/);
 
-    // 选择性：未命中的路径仍走 read-only 类别默认 allow。
+    // Selectivity: unmatched paths still get the read-only category default allow.
     const allowed = await readFileResult(deps, join(root, "ok.txt"));
     expect(allowed.kind).toBe("ok");
   });
@@ -121,8 +125,9 @@ describe("createWorkerDeps — 项目权限源与主链同源（ADR-0084 / SC5�
     const taskRoot = await scratch();
     roots.push(identityRoot, taskRoot);
     await plantProject(identityRoot, { permissions: DENY_SECRET_SECTION });
-    // cwd 侧（task worktree）铺一份**放行**的诱饵 settings：读错根会让 deny
-    // 消失，测试因此能区分「读了身份根」与「读了 cwd」。
+    // Plant an **allowing** decoy settings on the cwd side (task worktree):
+    // reading the wrong root would make the deny vanish, so the test
+    // distinguishes "read the identity root" from "read the cwd".
     await plantProject(taskRoot, {
       permissions: { allow: ["Read(secret.txt)"] },
     });
@@ -130,7 +135,7 @@ describe("createWorkerDeps — 项目权限源与主链同源（ADR-0084 / SC5�
     const deps = await workerAt(identityRoot, taskRoot);
     const result = await readFileResult(deps, join(taskRoot, "secret.txt"));
     expect(result.kind).toBe("execution_failed");
-    // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+    // The compile-time-generated reason echoes the declarative rule verbatim (no id / reason stored in the file).
     expect(result.message).toMatch(/Read\(secret\.txt\)/);
   });
 

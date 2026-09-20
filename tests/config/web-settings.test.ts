@@ -1,16 +1,16 @@
 /**
- * settings-web-backend: `settings.web.searchBackend` — web_search 后端选择的
- * settings 来源（用户要求：全局 settings 可设，不依赖 shell env / .env.local）。
+ * settings-web-backend: `settings.web.searchBackend` — the settings source for web_search
+ * backend selection (settable in global settings, independent of shell env / .env.local).
  *
  * Contract pinned here:
- *  - settings 解析：闭集 "bing"|"exa"|"tavily"|"brave"；非法值 drop-not-throw
- *    （镜像 parseIsolation 纪律），被丢弃字段不参与覆盖；非对象段 → undefined。
- *  - 合并（ADR-0084）：`web` 属用户层键 → 项目文件的 web 段被允许名单丢弃、
- *    永不覆盖 user；启动发一条含键名的警告。
- *  - env 回退链：env > settings.web.searchBackend > 默认 "bing"（对齐 #353
- *    maxTurns 先例）；env 未设返回 undefined 而非折叠成显式 "bing"。
- *  - env 非法值仍抛 typed `WebEnvConfigError("invalid_search_backend")`
- *    （schema reject 比 silent fallback 更显眼，#826 T1 纪律不变）。
+ *  - settings parse: closed set "bing"|"exa"|"tavily"|"brave"; invalid values drop-not-throw
+ *    (mirroring parseIsolation discipline), dropped fields never override; non-object section → undefined.
+ *  - merge (ADR-0084): `web` is a user-layer key → the project file's web section is
+ *    dropped by the allowlist and never overrides user; startup emits one warning naming the key.
+ *  - env fallback chain: env > settings.web.searchBackend > default "bing" (mirrors the
+ *    maxTurns precedent); unset env returns undefined rather than folding into an explicit "bing".
+ *  - an invalid env value still throws typed `WebEnvConfigError("invalid_search_backend")`
+ *    (schema rejection is louder than silent fallback — that discipline stands).
  */
 import {
   afterAll,
@@ -51,8 +51,8 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-// 闭集双份（env.ts SSOT / settings.ts 环避免）的 parity 守卫：漂移在此显红，
-// 而非静默 drop / accept（code-review finding：注释"类型系统兜住"只覆盖一半）。
+// Parity guard for the duplicated closed set (env.ts SSOT / settings.ts import-cycle avoidance):
+// drift turns red here instead of silently dropping or accepting values.
 describe("web.searchBackend 闭集 parity", () => {
   it("settings 闭集与 env SSOT 同值域（sort 后 deepEqual）", () => {
     assert.deepEqual(
@@ -62,7 +62,7 @@ describe("web.searchBackend 闭集 parity", () => {
   });
 });
 
-// 防 ambient 污染：镜像 env.test.ts 的 ENV_KEYS 清理纪律，未设断言才确定。
+// Guard against ambient env pollution: mirrors env.test.ts's ENV_KEYS cleanup discipline so unset assertions are trustworthy.
 const ENV_KEYS = [SEARCH_BACKEND_ENV_KEY] as const;
 beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -96,7 +96,7 @@ async function makeSettings(
   return { home, cwd };
 }
 
-/** env.test.ts 同款 fixture：极简 settings（model fail-fast 需 model 来源）。 */
+/** Same fixture as env.test.ts: minimal settings (model fail-fast needs a model source). */
 function withModel(s: Record<string, unknown>): Record<string, unknown> {
   return { ...withTestLlmProvider(), ...s };
 }
@@ -256,8 +256,8 @@ describe("loadIknowEnv — web.searchBackend 回退链", () => {
         assert.fail("expected loadIknowEnv to throw");
       } catch (err) {
         assert.ok(isWebEnvConfigError(err));
-        // typed-error payload 契约：varName / value / expected 必须齐备，
-        // 否则渲染侧拿不到 kind 的承重字段（code-quality.md typed-error 纪律）。
+        // typed-error payload contract: varName / value / expected must all be present,
+        // else the renderer lacks the load-bearing fields of the kind (typed-error discipline).
         assert.equal(err.varName, SEARCH_BACKEND_ENV_KEY);
         assert.equal(err.value, "google");
         assert.deepEqual(err.expected, [...SEARCH_BACKEND_VALUES]);

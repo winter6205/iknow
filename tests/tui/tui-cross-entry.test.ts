@@ -1,16 +1,16 @@
 /**
  * tests/tui/tui-cross-entry.test.ts
  *
- * #343 T6-C：SC 8 Q6 验收 TUI 半边（镜像 tests/session-api/cross-entry-consistency
- * 的 serve 半边）。TUI bridge ↔ 独立 serve 风格 hub 共享同一 SessionStore
- * 池：
- *   Step 1  TUI bridge 建档 + postMessage N 轮
- *   Step 2  独立 hub load：messages / turnCount / title / schemaVersion 一致
- *   Step 3  独立 hub 续跑第 N+1 轮保存
- *   Step 4  TUI bridge 再读：N+1 可见
+ * Cross-entry consistency acceptance, TUI half (mirrors the serve half in
+ * tests/session-api/cross-entry-consistency). The TUI bridge and an
+ * independent serve-style hub share one SessionStore pool:
+ *   Step 1  TUI bridge creates the session + postMessage N turns
+ *   Step 2  independent hub load: messages / turnCount / title / schemaVersion agree
+ *   Step 3  independent hub runs turn N+1 and saves
+ *   Step 4  TUI bridge re-reads: N+1 visible
  *
- * 纯逻辑（不依赖 React/TUI 渲染），仅 exercises hub-bridge + SessionHub
- * 跨进程一致语义。bun:test（D2 裁决）。
+ * Pure logic (no React/TUI rendering), only exercises hub-bridge + SessionHub
+ * cross-process consistency semantics. bun:test.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -51,7 +51,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
   });
 
   test("TUI 写入的会话，独立入口读回并续跑，反之亦然（SC 8）", async () => {
-    // TUI 侧：bridge（α 直连，注入 stub deps）
+    // TUI side: bridge (direct wiring, stub deps injected)
     const tuiDeps = makeDeps([
       assistantResult({ texts: ["第一轮答复"] }),
       assistantResult({ texts: ["第二轮答复"] }),
@@ -63,12 +63,12 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
       inflight: createInflightRegistry(),
     });
 
-    // Step 1：TUI 建档 + 2 轮
+    // Step 1: TUI creates the session + 2 turns
     const id = await bridge.ensureSession(undefined);
     await bridge.postMessage({ conversationId: id, text: "第一个问题" });
     await bridge.postMessage({ conversationId: id, text: "第二个问题" });
 
-    // Step 2：独立 hub（模拟另一进程）load 断言一致
+    // Step 2: independent hub (simulating another process) load and assert consistency
     const serveStore = new SessionStore(baseDir, projectIdentityRoot);
     const serveHub = new SessionHub({
       store: serveStore,
@@ -78,8 +78,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     const serveView = await serveHub.getSession(id);
     expect(serveView.session.conversation_id).toBe(id);
     expect(serveView.session.turn_count).toBe(2);
-    // 磁盘 JSONL 头记录直读交叉核对（SSOT = 文件; #629 去掉 .json 镜像;
-    // T1 后权威 JSONL 在 `<projectDir>/<conversationId>/` 会话文件夹内）。
+    // Cross-check against the on-disk JSONL header read directly (SSOT = the
+    // file; the .json mirror was removed; the authoritative JSONL lives inside
+    // the `<projectDir>/<conversationId>/` session folder).
     const dir = resolveConversationDir({ projectDir, conversationId: id });
     const jsonlRaw = readFileSync(join(dir, `${id}.jsonl`), "utf8");
     const raw = parseSessionJsonl(jsonlRaw).header as {
@@ -89,21 +90,22 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
       cwd: string;
       workspaceRoot: string;
     };
-    // schemaVersion 不断言硬编码数字（曾写死 2，schema 演进到 5 后腐烂）——
-    // 与 SSOT 常量对齐，演进时自动跟随。
+    // Don't assert schemaVersion as a hardcoded number (once pinned to 2, rotted
+    // once the schema evolved to 5) — align with the SSOT constant so it follows
+    // future evolution automatically.
     expect(raw.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(raw.turnCount).toBe(2);
     expect(raw.title).toBe("第一个问题");
     expect(raw.cwd).toBe(baseDir);
     expect(raw.workspaceRoot).toBe(baseDir);
 
-    // Step 3：独立 hub 续跑第 N+1 轮
+    // Step 3: independent hub runs turn N+1
     await serveHub.postMessage({ conversationId: id, text: "第三个问题" });
 
-    // Step 4：TUI bridge 再读：N+1 可见
+    // Step 4: TUI bridge re-reads: N+1 visible
     const file = await bridge.loadSessionFile(id);
     expect(file.turnCount).toBe(3);
-    expect(file.title).toBe("第一个问题"); // title = 首条 user，不随轮变
+    expect(file.title).toBe("第一个问题"); // title = first user message, stable across turns
     const assistantTexts = file.messages
       .filter((m) => m.role === "assistant")
       .flatMap((m) =>
@@ -112,7 +114,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
           .map((b) => b.text)
       );
     expect(assistantTexts).toEqual(["第一轮答复", "第二轮答复", "第三轮答复"]);
-    // TUI 列表视图数据源（SC 13：list() title 字段）
+    // Data source for the TUI list view (list() title field)
     const list = await bridge.listSessions();
     expect(list).toHaveLength(1);
     expect(list[0]!.title).toBe("第一个问题");

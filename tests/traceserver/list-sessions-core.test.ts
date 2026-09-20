@@ -26,8 +26,8 @@ import { TraceQueryValidationError } from "../../src/traceserver/query-trace-err
 import { TraceReadError } from "../../src/traceserver/types.ts";
 
 /**
- * Shared core behind `list_sessions` (plan `trace-mcp-read-side-split` T5b,
- * spec SC6 / SC16 / the 目录轴 column of the 边界类 × 三面 table).
+ * Shared core behind `list_sessions` (the directory axis of the
+ * boundary-class × three-face contract).
  *
  * Why this tool exists at all: `query_trace` reads exactly one file
  * (`conversation_id ?? newestConversationId`), so it structurally cannot see the
@@ -300,16 +300,16 @@ describe("list_sessions core — what it answers", () => {
     const page = JSON.parse(text) as Page;
 
     assert.deepEqual(Object.keys(page), ["sessions", "limit", "offset"]);
-    // plan §序列化 defines the tool face as "array + the coordinates the caller
-    // gave"; the table's overflow cell reads "drop the tail + hand back the
-    // continuation coordinate". Echoing the effective values (default included)
+    // The tool face is "array + the coordinates the caller gave"; on overflow
+    // the face drops the tail and hands back the continuation coordinate.
+    // Echoing the effective values (default included)
     // is what lets a caller test `sessions.length < limit` without remembering
     // what it sent, and `offset + sessions.length` is the next page's start.
     assert.deepEqual(
       { limit: page.limit, offset: page.offset },
       { limit: 1, offset: 0 }
     );
-    // 契约 X still forbids the tool reporting truncation of its own accord:
+    // The no-self-reporting contract still forbids the tool reporting truncation of its own accord:
     // offset/limit are read-unit coordinates, not truncation signals.
     for (const banned of ["total", "truncated", "response_truncated"]) {
       assert.ok(!text.includes(banned), `"${banned}" leaked into the response`);
@@ -509,7 +509,7 @@ describe("list_sessions core — paging", () => {
   });
 
   it("picks up a session the writer appends between two page reads", async () => {
-    // Concurrent class, append half (the table's "写侧 append 期间取索引"): the
+    // Concurrent class, append half (index read while the writer appends): the
     // index exists to be read while runs are still landing on disk, so a cached
     // snapshot would hide exactly the sessions a caller is waiting for.
     const traceDir = makeTraceDir();

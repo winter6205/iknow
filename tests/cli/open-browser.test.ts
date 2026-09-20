@@ -1,12 +1,13 @@
 /**
- * openBrowser fail-safe 测试（T7 自动 open 的健壮性）。
+ * openBrowser fail-safe tests (robustness of the auto-open feature).
  *
- * 覆盖（S2 defensive contract）：
- *   - 正常路径：按平台 spawn 正确命令，child unref。
- *   - 失败路径：spawn 异步 'error' 事件（EACCES/ENOENT）被吞掉，openBrowser
- *     不 throw 也不崩进程（曾因未监听 'error' 变成 unhandled error 带崩 CLI）。
- *   - 失败路径：spawn 同步 throw 被 catch，不向上传播。
- *   - enabled=false → no-op 不 spawn。
+ * Coverage (defensive contract):
+ *   - happy path: spawns the correct per-platform command, child unref'd.
+ *   - failure path: async spawn 'error' events (EACCES/ENOENT) are swallowed;
+ *     openBrowser neither throws nor crashes the process (an unmonitored
+ *     'error' once became an unhandled error that took down the CLI).
+ *   - failure path: a synchronous spawn throw is caught, not propagated.
+ *   - enabled=false → no-op, no spawn.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -16,14 +17,14 @@ import {
   openCommandForPlatform,
 } from "../../src/cli/open-browser.ts";
 
-/** 模拟 spawn 返回值：ChildProcess 子集（on + unref）。 */
+/** Fake spawn return: a ChildProcess subset (on + unref). */
 function fakeChild() {
   const child = new EventEmitter();
   (child as unknown as { unref(): void }).unref = () => {};
   return child as EventEmitter & { unref(): void };
 }
 
-// -- 平台命令解析 --------------------------------------------------------------
+// -- platform command resolution -----------------------------------------------
 
 describe("openCommandForPlatform", () => {
   it("darwin → open", () => {
@@ -46,7 +47,7 @@ describe("openCommandForPlatform", () => {
   });
 });
 
-// -- 正常路径 ------------------------------------------------------------------
+// -- happy path ------------------------------------------------------------------
 
 describe("openBrowser — 正常路径", () => {
   it("spawns 平台命令 + url，并 unref child", () => {
@@ -66,18 +67,18 @@ describe("openBrowser — 正常路径", () => {
     assert.equal(spawned?.cmd, "xdg-open");
     assert.deepEqual(spawned?.args, ["http://x/"]);
     assert.equal(unrefCalled, true);
-    // 挂上了 'error' 监听（本用例的关键守卫：监听存在才能吞掉异步错误）。
+    // An 'error' listener is attached (the key guard here: only a listener can swallow the async error).
     assert.equal(child.listenerCount("error") >= 1, true);
   });
 });
 
-// -- 失败路径 ------------------------------------------------------------------
+// -- failure paths ----------------------------------------------------------------
 
 describe("openBrowser — 失败路径", () => {
   it("异步 'error' 事件（EACCES/ENOENT）被吞掉，不 throw、不崩进程", () => {
     const child = fakeChild();
     const fakeSpawn = () => child;
-    // 同步返回 child；随后异步发射 EACCES（真实场景：找不到 xdg-open）。
+    // Returns the child synchronously; EACCES fires async afterwards (real case: xdg-open missing).
     openBrowser("http://x/", { spawnProcess: fakeSpawn as never });
     const err = Object.assign(new Error("spawn xdg-open EACCES"), {
       errno: -13,
@@ -85,7 +86,7 @@ describe("openBrowser — 失败路径", () => {
       syscall: "spawn",
       path: "xdg-open",
     });
-    // 若 error 未被监听，emit 会 throw（unhandled）；监听后静默吞掉。
+    // Without a listener, emit would throw (unhandled); with one it is silently swallowed.
     assert.doesNotThrow(() => child.emit("error", err));
   });
 

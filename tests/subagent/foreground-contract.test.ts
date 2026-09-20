@@ -1,18 +1,17 @@
 /**
- * #361 / ADR-0014 — T11 边界测试 (契约「测试冲突清单」7 项逐条落实)。
+ * ADR-0014 foreground-contract boundary tests, one describe per contract item:
  *
- *   C1: 注入 cap=4 时第 5 个并发 spawn → capacity ToolExecutionError
- *   C2: drain 空/多/运行中立即空返/异常不抛 (host-drain non-blocking)
- *   C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
- *   C4: drain 不读取运行中任务且永不抛
- *   C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled
- *   T13: PER_TASK_TIMEOUT_MS 对齐 (default 2 h = 7_200_000 ms)
- *   T12: messages_captured 三处置 true + coordinator 段 proactive 断言
+ *   C1: injected cap=4, 5th concurrent spawn → capacity ToolExecutionError
+ *   C2: drain on empty / multiple / running returns immediately; never throws (host-drain non-blocking)
+ *   C3: waitFor abort → SubAgentAbortError; aborting an already-terminal task has no side effect
+ *   C4: drain never reads running tasks and never throws
+ *   C5: wait:true returns a failed envelope as ok; abort → execution_failed:cancelled
+ *   T13: PER_TASK_TIMEOUT_MS alignment (default 2 h = 7_200_000 ms)
+ *   T12: messages_captured true in all three recordLlmCall sites + coordinator-segment proactive assertion
  *
- * 时序:implementer A (subagent 层) 逐文件合入 manager.ts(已) / host-drain.ts /
- * spawn-subagent-tool.ts。C1/C3/T13 的 manager 面已就绪;handler 面已就绪。
- * 本文件断言按当前 V1.5 / T2 契约编写。T12 messages_captured 已在
- * loop-engine.ts 落地 → 绿。
+ * Assertions are written against the current V1.5 contract, covering the
+ * manager surface, host-drain.ts, and spawn-subagent-tool.ts handler surface.
+ * messages_captured landed in loop-engine.ts → green.
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,15 +33,16 @@ import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts"
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
-// SC14 归因测用真 registry + 真 executor —— 归因链的 executor 段不可 fake
-// （fake 会把「executor 如何归一 message」变成测试自己写的同义反复）。
+// Full-chain attribution uses the real registry + real executor — the executor
+// leg of the attribution chain must not be faked (a fake would turn "how the
+// executor normalizes the message" into a tautology written by the test itself).
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 
-/** PER_TASK_TIMEOUT_MS 默认 2 小时(契约 T13; #358 spec Assumptions 1)。 */
+/** PER_TASK_TIMEOUT_MS defaults to 2 hours (contract Assumptions 1). */
 const PER_TASK_TIMEOUT_MS_DEFAULT = 120 * 60 * 1000;
 
-/** 最小完整 SubAgentManager fake:缺省成员全 no-op,测试按需覆盖。 */
+/** Minimal complete SubAgentManager fake: all members default to no-op; tests override as needed. */
 function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
   return {
     spawn: () => ({ taskId: "unused" }),
@@ -52,14 +52,15 @@ function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
-    // #358 T7: 接口新增只读枚举面 —— baseManager 一处补全覆盖全部 over-spread 实例。
+    // Read-only enumeration surface added to the interface — cover it once
+    // here so every over-spread instance gets it.
     getCapacity: () => 15,
     listSubagents: () => [],
     ...over,
   };
 }
 
-/** fake spawn 工厂:真启一个立即退出 0 的进程,以满足 manager 内部 .kill()/.on("exit")。 */
+/** Fake spawn factory: really spawns a process that exits 0 immediately, to satisfy the manager's internal .kill()/.on("exit"). */
 function makeFakeSpawnFactory(): SubAgentSpawn {
   return () =>
     spawn(process.execPath, ["-e", "process.exit(0)"], {
@@ -67,7 +68,7 @@ function makeFakeSpawnFactory(): SubAgentSpawn {
     });
 }
 
-/** 占槽用:子进程保持 running,避免无信封 exit(0) 立刻放槽。 */
+/** Slot-filler: child stays running, so a no-envelope exit(0) doesn't release the slot immediately. */
 function makeLiveSpawnFactory(): SubAgentSpawn {
   return () =>
     spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], {
@@ -188,7 +189,7 @@ describe("C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
     const controller = new AbortController();
     const envelope = await fakeManager.waitFor("tid", 5000, controller.signal);
     expect(envelope.status).toBe("ok");
-    controller.abort(); // resolve 后再 abort 不应引发 unhandledRejection
+    controller.abort(); // aborting after resolve must not cause unhandledRejection
     expect(true).toBe(true);
   });
 });
@@ -250,8 +251,9 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
   });
 
   it("failure tool_result 同样含非空 locator", async () => {
-    // SC13 之后 reason=timeout 不再是 ok 数据，故本条用非超时失败
-    // （crashed）认证「失败 envelope 仍带 locator」这个原不变式。
+    // reason=timeout is no longer ok data under the current contract, so this
+    // case uses a non-timeout failure (crashed) to certify the original
+    // invariant: a failed envelope still carries the locator.
     const failedEnvelope: SubAgentEnvelope = {
       status: "failed",
       reason: "crashed",
@@ -277,8 +279,9 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
 
 describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled", () => {
   it("wait:true + 非超时失败 envelope（crashed）→ handler 解析为 envelope (status failed)", async () => {
-    // SC13 边界：只有墙钟超时改判非 ok；crashed / maxTurnsExceeded /
-    // protocolError 是「任务结局是数据」，仍走 ok envelope（C5）。
+    // Boundary: only wall-clock timeout is re-judged non-ok; crashed /
+    // maxTurnsExceeded / protocolError mean "task outcome is data" and still
+    // travel as an ok envelope (C5).
     const failedEnvelope: SubAgentEnvelope = {
       status: "failed",
       reason: "crashed",
@@ -353,8 +356,9 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
   });
 
   it("wait:true + WaitTimeoutError + queryBuffer running → ToolExecutionError（SC13：不得为 ok）", async () => {
-    // SC13 / plan task 7：墙钟到期时 worker 未终态，没有可读的终态交差 ——
-    // 父可见 tool result kind 必须非 ok，模型才能把它与「跑完但失败」区分。
+    // When the wall clock expires the worker is not terminal — there is no
+    // readable terminal handoff — so the parent-visible tool result kind must
+    // be non-ok, letting the model distinguish it from "ran to completion but failed".
     const fakeManager = baseManager({
       spawn: () => ({ taskId: "tid" }),
       queryBuffer: () => ({ status: "running" }) as const,
@@ -371,28 +375,32 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     }
     expect(caught).toBeInstanceOf(ToolExecutionError);
     const message = (caught as ToolExecutionError).message;
-    // 模型必须能读出 taskId + 超时事实。
+    // The model must be able to read taskId + the timeout fact.
     expect(message).toContain("tid");
     expect(message).toContain("wall-clock timeout");
-    // 不得撞 loop-engine 的整回合停因字面量（loop-engine.ts:1605-1618）——
-    // 撞了会把单个子任务的墙钟误升级为整回合 cancelled / timeout。
+    // Must not collide with loop-engine's whole-turn stop-reason literals
+    // (loop-engine.ts:1605-1618) — a collision would mis-escalate one
+    // subtask's wall clock into a whole-turn cancelled / timeout.
     expect(message).not.toBe("cancelled");
     expect(message).not.toBe("timeout");
   });
 });
 
 /**
- * SC14 全链路归因（真 manager + 真 executor，不 fake 归因链上的任何一臂）：
+ * Full-chain attribution (real manager + real executor, no fake on any leg of
+ * the attribution chain):
  *
- *   操作员强杀（abortTask）→ waitFor reject SubAgentAbortError
- *   → handler 转 ToolExecutionError（操作员强杀文本）
- *   → executor 因 `outerSignal.aborted === false` **不**归一，message 原样
- *   透出（要归一成严格 `"cancelled"` 需要调用方 signal 真 abort，强杀不是）
- *   → 模型读到的就是那句「task X 被操作员杀掉，没有完成结果」。
+ *   operator force-kill (abortTask) → waitFor rejects SubAgentAbortError
+ *   → handler converts to ToolExecutionError (operator-kill text)
+ *   → executor does **not** normalize because `outerSignal.aborted === false`;
+ *     the message passes through verbatim (strict `"cancelled"` normalization
+ *     requires a real caller-signal abort; a force-kill is not one)
+ *   → the model reads exactly "task X killed by operator, no completed result".
  *
- * 反面锚点（SC13 不回归）：同一条链的墙钟臂（worker SIGTERM 收尾 →
- * reason:"timeout" 信封）仍给 `"wall-clock timeout"` 归因；调用侧 abort 臂
- * （Ctrl+C）仍归一为严格 `"cancelled"`。三种归因互不撞脸。
+ * Counter-anchor (no regression on the wall-clock contract): the same chain's
+ * wall-clock leg (worker SIGTERM epilogue → reason:"timeout" envelope) still
+ * attributes `"wall-clock timeout"`; the caller-side abort leg (Ctrl+C) still
+ * normalizes to strict `"cancelled"`. The three attributions never look alike.
  */
 describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeout）", () => {
   function makeLiveWorkerManager(taskTimeoutMs: number): SubAgentManager {
@@ -402,7 +410,7 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
     });
   }
 
-  /** 与 LoopEngineDeps 的调用形态同形：真实 name/input + 调用方 signal。 */
+  /** Same call shape as LoopEngineDeps: real name/input + caller signal. */
   const spawnCall = {
     id: "call-1",
     name: "spawn_subagent",
@@ -412,12 +420,14 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
   it("abortTask → ToolExecutionError（操作员强杀文本），且不是墙钟归因", async () => {
     const mgr = makeLiveWorkerManager(60_000);
     const tool = createSpawnSubAgentTool({ manager: mgr });
-    // 与生产同形：操作员强杀不 abort 调用方 signal（那是 Ctrl+C / quit 的事）。
+    // Same as production: an operator force-kill does not abort the caller's
+    // signal (that is Ctrl+C / quit's job).
     const signal = new AbortController().signal;
     const executor = createExecutor(createRegistry([tool]));
 
     const pending = executor.executeAll([spawnCall], signal);
-    // 等 spawn 真发生（child 在场）再强杀，模拟操作员在 running 行按 Ctrl+X。
+    // Wait until the spawn really happens (child present), then force-kill —
+    // simulating the operator pressing Ctrl+X on a running line.
     const live = await waitForActive(mgr);
     expect(live.length).toBe(1);
     expect(mgr.abortTask(live[0]!)).toBe(true);
@@ -425,21 +435,24 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
     const [result] = await pending;
     expect(result!.kind).toBe("execution_failed");
     const failed = result as { kind: "execution_failed"; message: string };
-    // 模型可见归因：识别为 cancelled，且能读出是操作员杀的（不是超时）。
+    // Model-visible attribution: recognized as cancelled, and readable as an
+    // operator kill (not a timeout).
     expect(failed.message).toContain("cancelled");
     expect(failed.message).toContain("operator killed");
     expect(failed.message).toContain(live[0]!);
     expect(failed.message).not.toContain("wall-clock timeout");
-    // loop-engine.computeToolStopFlags 的整回合判据是 strict-equal：撞字面量
-    // 会把「一个子任务被强杀」误升级成整回合 stop。
+    // loop-engine.computeToolStopFlags uses strict-equal for its whole-turn
+    // check: colliding with the literal would mis-escalate "one subtask was
+    // force-killed" into a whole-turn stop.
     expect(failed.message).not.toBe("cancelled");
     expect(failed.message).not.toBe("timeout");
     await mgr.shutdown();
   }, 30_000);
 
   it("SC13 不回归：真墙钟到期仍归因 wall-clock timeout（不是 cancelled）", async () => {
-    // 真 manager 的 per-task 钟到点 → 写 reason:"timeout" 信封 + SIGTERM；
-    // 与操作员强杀走不同代码路径（timeoutTimer），归因必须保持 timeout。
+    // The real manager's per-task clock fires → writes a reason:"timeout"
+    // envelope + SIGTERM; a different code path from the operator force-kill
+    // (timeoutTimer), so attribution must stay timeout.
     const mgr = makeLiveWorkerManager(400);
     const tool = createSpawnSubAgentTool({ manager: mgr });
     const executor = createExecutor(createRegistry([tool]));
@@ -457,15 +470,17 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
   }, 30_000);
 
   it("SC14 回归锚点：worker 收到 SIGTERM 写回 reason:timeout 信封时，归因仍是强杀而不是墙钟", async () => {
-    // 忠实复刻真 worker 的 SIGTERM 收尾（worker.ts:881-944）：真 worker 收到
-    // SIGTERM 会 abort("subagent-timeout") → 自跑收尾轮 → 写回 reason:"timeout"
-    // 的失败信封。修复前 abortTask 只发 SIGTERM、从不 settle 在飞 waitFor，
-    // 父侧只能拿到这个 timeout 信封 —— 强杀被读成墙钟到期。修复后拒绝先于
-    // SIGTERM 发生，信封再写回也不改变归因。
+    // Faithful replica of the real worker's SIGTERM epilogue (worker.ts:881-944):
+    // a real worker receiving SIGTERM aborts("subagent-timeout") → runs its own
+    // epilogue turn → writes back a failed envelope with reason:"timeout".
+    // Before the fix, abortTask only sent SIGTERM and never settled the
+    // in-flight waitFor, so the parent could only get this timeout envelope —
+    // a force-kill read as wall-clock expiry. After the fix, the rejection
+    // precedes SIGTERM, so a later envelope write-back cannot change attribution.
     const worker = makeSigtermEpilogueWorkerSpawn();
     const mgr = createSubAgentManager({
       spawn: worker.spawn,
-      taskTimeoutMs: 60_000, // 墙钟 timer 远未到点：归因只可能来自强杀路径
+      taskTimeoutMs: 60_000, // wall-clock timer far from firing: attribution can only come from the force-kill path
     });
     const tool = createSpawnSubAgentTool({ manager: mgr });
     const executor = createExecutor(createRegistry([tool]));
@@ -474,7 +489,7 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
       [spawnCall],
       new AbortController().signal
     );
-    await worker.ready; // 等 handler 装好（真 worker 同样在 run() 前进场）
+    await worker.ready; // wait for the handler to be installed (a real worker also arms before run())
     const live = await waitForActive(mgr);
     expect(live.length).toBe(1);
     expect(mgr.abortTask(live[0]!)).toBe(true);
@@ -489,10 +504,12 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
 });
 
 /**
- * 忠实 SIGTERM 收尾 worker：收到 SIGTERM 写回 `reason:"timeout"` 失败信封后
- * 退出 0（worker.ts:938-944 的同形最小复刻）。stderr 的 READY 是就绪握手 ——
- * 真 worker 在 run() 之前就装好 handler（worker.ts:885），探针/测试必须等
- * handler 就位再杀，否则测到的是默认信号处置而非收尾路径。
+ * Faithful SIGTERM-epilogue worker: on SIGTERM it writes back a
+ * `reason:"timeout"` failed envelope then exits 0 (minimal same-shape replica
+ * of worker.ts:938-944). READY on stderr is the readiness handshake — the real
+ * worker installs its handler before run() (worker.ts:885), so probes/tests
+ * must wait for the handler before killing, otherwise they measure the default
+ * signal disposition instead of the epilogue path.
  */
 function makeSigtermEpilogueWorkerSpawn(): {
   spawn: SubAgentSpawn;
@@ -524,7 +541,7 @@ function makeSigtermEpilogueWorkerSpawn(): {
   return { spawn: spawnFn, ready };
 }
 
-/** 轮询至 manager 有 live 任务（executor 的 spawn 是异步派发的一跳）。 */
+/** Poll until the manager has a live task (executor's spawn is one async dispatch hop). */
 async function waitForActive(
   mgr: SubAgentManager
 ): Promise<ReadonlyArray<string>> {
@@ -542,15 +559,17 @@ describe("T13: PER_TASK_TIMEOUT_MS 默认 2 小时", () => {
   });
 
   it("manager waitFor 缺省 timeoutMs = PER_TASK_TIMEOUT_MS(与前台 wait 对齐)", async () => {
-    // manager.waitFor 缺省签名 = PER_TASK_TIMEOUT_MS(7200s)——不再 30s。
+    // manager.waitFor's default signature = PER_TASK_TIMEOUT_MS (7200s) — no longer 30s.
     const mgr = createSubAgentManager({ spawn: makeFakeSpawnFactory() });
     const { taskId } = mgr.spawn({ task: "t" });
-    // waitFor 缺省 7200s:进程已 exit 0 → 立即 resolve;断言不抛即可,证明
-    // 缺省路径可用。真实 7200s 语义由常量断言覆盖。
+    // waitFor defaults to 7200s: the process already exited 0 → resolves
+    // immediately; asserting no throw proves the default path is usable. The
+    // real 7200s semantics are covered by the constant assertion.
     const p = mgr.waitFor(taskId);
     expect(p).toBeInstanceOf(Promise);
-    // 防止 shutdown 主动拒绝 waitFor 时形成 unhandled rejection:test 不关心
-    // 该 promise 的结果(只关心 waitFor 签名 = Promise)。
+    // Prevent an unhandled rejection if shutdown actively rejects waitFor:
+    // the test doesn't care about this promise's result (only that the waitFor
+    // signature is a Promise).
     p.catch(() => {});
     await mgr.shutdown();
   });

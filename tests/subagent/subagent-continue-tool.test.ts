@@ -1,24 +1,28 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T4 — `subagent_continue` ACI 工具单测。
+ * ADR-0102 — `subagent_continue` ACI tool unit tests.
  *
- * 覆盖票面（ACR input-contract-tests + plan T4 acceptance / 锁句 4–6）：
- *   - 空 / 非 string `task_id`、空 / 非 string `message` → ToolExecutionError；
- *   - 未知 id 拒；running 拒（不往 in-flight loop 塞话）；
- *   - 无工人 transcript 拒（completed/failed 终态但没有账）；
- *   - per-agent trace 在场**不算** transcript（不从 trace 倒灌，锁句 6）；
- *   - 跨会话拒（所有权判定先于任何再拉起）；
- *   - 并发顶与 spawn 同源：满 → SubAgentCapacityError → ToolExecutionError（锁句 5）；
- *   - completed / failed + transcript + 下一句 → 新进程、同 `task_id` 句柄、
- *     payload.task = 下一句、transcriptPath 与首跑同路径（rewind head 由
- *     worker 侧 T3 的 present 臂消费，测试钉 manager 交付的账地址不变）；
- *   - 身份与能力字段沿用原 def（role / model / conversationId 归属），
- *     回合字段（parentTurnId / toolUseId / 前景排除位）按本跳重算；
- *   - wait 契约与 spawn 相同：`wait:false` 即返 {task_id}；前景（省略 wait）
- *     当跳返回投影信封。
+ * Coverage:
+ *   - empty / non-string `task_id`, empty / non-string `message` → ToolExecutionError;
+ *   - unknown id rejected; running rejected (never inject into an in-flight loop);
+ *   - terminal but no worker transcript rejected;
+ *   - a per-agent trace on disk does **not** count as a transcript (no backfill from trace);
+ *   - cross-conversation rejected (ownership verdict precedes any re-launch);
+ *   - concurrency ceiling shares spawn's source: full → SubAgentCapacityError →
+ *     ToolExecutionError;
+ *   - completed / failed + transcript + next message → new process, same `task_id`
+ *     handle, payload.task = next message, transcriptPath identical to first run
+ *     (the rewind head is consumed worker-side; tests pin that the ledger address
+ *     delivered by manager stays unchanged);
+ *   - identity and capability fields carry over from the original def (role / model /
+ *     conversationId ownership); per-turn fields (parentTurnId / toolUseId /
+ *     foreground exclusion) are recomputed for this hop;
+ *   - wait contract identical to spawn: `wait:false` returns {task_id} immediately;
+ *     foreground (wait omitted) returns the projected envelope for this hop.
  *
- * manager 用真实 createSubAgentManager + fake child（沿用 T2 先例）；transcript
- * 文件按 T3 落点 `<subagents>/<taskId>/<taskId>.jsonl` 手工落盘 —— manager 的
- * 闸 = 存在性（账内容真值由 worker 侧 load 路径认证，见 worker-transcript.test.ts）。
+ * manager = real createSubAgentManager + fake child; transcript files are written
+ * manually at `<subagents>/<taskId>/<taskId>.jsonl` — manager's gate is mere
+ * existence (ledger content truth is certified worker-side, see
+ * worker-transcript.test.ts).
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -74,7 +78,7 @@ function makeFakeChild(): FakeChild {
   return child;
 }
 
-/** 真实 manager（subagentsDir 在场 → 账三键派生齐）+ fake spawn 记录每次拉起。 */
+/** Real manager (subagentsDir present → all three ledger keys derived) + fake spawn recording every launch. */
 function makeManagerHarness(
   opts: { readonly maxConcurrentWorkers?: number } = {}
 ) {
@@ -122,7 +126,7 @@ async function waitForTerminal(
   throw new Error(`task ${taskId} never reached terminal state`);
 }
 
-/** 跑到 completed 终态的工人，返回 taskId。 */
+/** A worker run to completed terminal state; returns taskId. */
 async function spawnCompleted(
   harness: ReturnType<typeof makeManagerHarness>,
   def: SubAgentDefinition
@@ -252,7 +256,7 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
       { manager, invocations },
       { task: "traced", conversationId: "c1" } as SubAgentDefinition
     );
-    // 只造 trace 形态（agent-<taskId>.jsonl），不造 transcript（<taskId>.jsonl）。
+    // Write only the trace form (agent-<taskId>.jsonl), not the transcript (<taskId>.jsonl).
     mkdirSync(join(subagentsDir, taskId), { recursive: true });
     writeFileSync(
       join(subagentsDir, taskId, `agent-${taskId}.jsonl`),
@@ -294,7 +298,7 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
         return true;
       }
     );
-    // 无 ctx.conversationId 的调用面同样不能碰带归属的账。
+    // A call surface without ctx.conversationId likewise must not touch an owned ledger.
     await assert.rejects(
       () => Promise.resolve(tool.handler({ task_id: taskId, message: "hijack" })),
       ToolExecutionError
@@ -321,7 +325,7 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
         }
       );
     }
-    // 拒绝路径不消费额度、不起进程。
+    // rejection paths consume no quota and launch no process.
     assert.equal(harness.invocations.length, 1);
   });
 
@@ -333,7 +337,7 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
       { task: "first", conversationId: "c1" } as SubAgentDefinition
     );
     harness.writeTranscript(done);
-    // 占满唯一额度：第二个工人 running。
+    // fill the only quota slot: a second worker is running.
     harness.manager.spawn({
       task: "occupier",
       conversationId: "c1",
@@ -349,7 +353,7 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
         return true;
       }
     );
-    // spawn(2) + 无 resume 的第三次拉起。
+    // two spawns, no third launch via resume.
     assert.equal(harness.invocations.length, 2);
   });
 });
@@ -375,14 +379,15 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
 
     assert.equal(harness.invocations.length, 2);
     const second = harness.invocations[1]!;
-    assert.equal(second.taskId, taskId); // 对外句柄不变（ADR-0102 Decision 4）
+    assert.equal(second.taskId, taskId); // external handle unchanged (ADR-0102 Decision 4)
     assert.equal(second.payload.task, "next sentence");
     assert.equal(second.payload.transcriptPath, firstPayload.transcriptPath);
     assert.equal(second.payload.role, firstPayload.role);
-    // 旧终态被新记录替换：句柄仍在跑新进程。
+    // the old terminal state is replaced by the new record: the handle now runs a fresh process.
     assert.equal(harness.manager.queryBuffer(taskId).status, "running");
 
-    // 后景臂的终态照常进 host drain（前景排除位不残留 —— resumeDefinition 重算）。
+    // The background arm's terminal state enters host drain as usual (no stale foreground
+    // exclusion bit — resumeDefinition recomputes it).
     emitOkEnvelope(second.child, "resumed done");
     await waitForTerminal(harness.manager, taskId);
     const drained = harness.manager.drainCompleted("c1");
@@ -413,8 +418,9 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
   });
 
   it("failed(modelTransient) + transcript 在场 → 闸放行续跑（ADR-0102 Decision 1：闸只认寿命与账，不看 reason）", async () => {
-    // ADR-0111 Consequences：modelTransient 落 failed 态即走 ADR-0102 通道，
-    // 无需新机制 —— 本测试钉住闸产品码天然放行的行为（不改闸）。
+    // ADR-0111 Consequences: modelTransient landing in failed state uses the ADR-0102
+    // channel, no new mechanism needed — this test pins the gate passing naturally
+    // (the gate itself is unchanged).
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });
     const { taskId } = harness.manager.spawn({
@@ -471,13 +477,13 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
       { conversationId: "c1", turnId: "turn-9", toolUseId: "toolu-9" }
     );
     const nextDef = harness.invocations[1]!.def;
-    // 身份与能力字段 = 原 catalog 角色再 run()。
+    // identity and capability fields = the original catalog role re-run()
     assert.equal(nextDef.role, "explore");
     assert.equal(nextDef.model, "m-test");
     assert.equal(nextDef.maxTurns, 7);
     assert.equal(nextDef.conversationId, "c1");
     assert.equal(nextDef.task, "deeper please");
-    // 回合字段挂新值；上一跳的前景排除位不残留（后景 wait:false）。
+    // turn fields take new values; the previous hop's foreground exclusion bit does not linger (background wait:false).
     assert.equal(nextDef.parentTurnId, "turn-9");
     assert.equal(nextDef.toolUseId, "toolu-9");
     assert.notEqual(nextDef.excludeFromHostDrain, true);
@@ -501,7 +507,7 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
     const envelope = (await pending) as SubAgentEnvelope;
     assert.equal(envelope.status, "ok");
     assert.equal(envelope.result, "continued answer");
-    // 前景当跳交付 → 终态排除出 host drain（互斥与 spawn 同契约）。
+    // foreground-hop delivery → terminal state excluded from host drain (same mutual-exclusion contract as spawn).
     await waitForTerminal(harness.manager, taskId);
     assert.deepEqual(
       harness.manager.drainCompleted("c1").map((d) => d.taskId),

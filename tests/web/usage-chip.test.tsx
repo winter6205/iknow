@@ -1,14 +1,15 @@
 /**
  * tests/web/usage-chip.test.tsx
  *
- * UsageChip 渲染断言 — 三档色阈值 × usage null → 按 0 渲染（首回合前
- * 状态条常驻；contextWindow null → 不渲染）× cache null 当 0 ×
- * title 明细。百分比计算断言语义迁移自已退役的
- * context-usage-strip.test.tsx（组件整体退役，非降断言）：
- * 分子 = inputTokens + cacheReadInputTokens + cacheCreationInputTokens，
- * 分母 = contextWindow，pct = round(used/window×100)。
+ * UsageChip render asserts — three color-tier thresholds × usage null renders as 0
+ * (status strip stays resident before the first turn; contextWindow null renders
+ * nothing) × cache null treated as 0 × hover title details. The percentage math was
+ * migrated semantically from the retired context-usage-strip.test.tsx (component
+ * retired whole, not weakened asserts): numerator = inputTokens +
+ * cacheReadInputTokens + cacheCreationInputTokens, denominator = contextWindow,
+ * pct = round(used/window×100).
  *
- * renderToStaticMarkup 模式沿用 tests/web 既有约定（node env，无 DOM 框架）。
+ * renderToStaticMarkup follows the existing tests/web convention (node env, no DOM framework).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -16,7 +17,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { UsageChip } from "../../web/src/components/UsageChip.tsx";
 import type { TokenUsage } from "../../web/src/api/types.ts";
 
-/** 构造一个 TokenUsage，cache 字段默认 0。 */
+/** Build a TokenUsage; cache fields default to 0. */
 function usage(
   inputTokens: number,
   caches: { read?: number | null; creation?: number | null } = {}
@@ -84,7 +85,7 @@ describe("UsageChip — null / 缺失", () => {
 
 describe("UsageChip — cache nulls 当 0（迁移自 context-usage-strip）", () => {
   it("cacheReadInputTokens=null + cacheCreationInputTokens=null → used = input only", () => {
-    // input=30, cache null → used=30 / 100 → pct=30。
+    // input=30, cache null → used=30 / 100 → pct=30
     const html = render({
       usage: {
         inputTokens: 30,
@@ -98,7 +99,7 @@ describe("UsageChip — cache nulls 当 0（迁移自 context-usage-strip）", (
   });
 
   it("cache 部分字段 null：另一个非 null 仍计入", () => {
-    // input=20, cacheRead=30, cacheCreation=null → used=50 / 200 → pct=25。
+    // input=20, cacheRead=30, cacheCreation=null → used=50 / 200 → pct=25
     const html = render({
       usage: {
         inputTokens: 20,

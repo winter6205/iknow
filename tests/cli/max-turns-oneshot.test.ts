@@ -1,15 +1,16 @@
 /**
  * tests/cli/max-turns-oneshot.test.ts
  *
- * plan T6: ask oneshot 的 maxTurns 纯函数呈现层。
+ * Pure-function maxTurns render layer for the ask oneshot path.
  *
- * runOneShot 在 cli.ts 内(main() side-effect 不可 import),故纯函数
- * maxTurnsNotice / maxTurnsEnvelope 下沉到 src/cli/max-turns.ts,这里直接测。
+ * runOneShot lives inside cli.ts (main()'s side effects make it
+ * un-importable), so the pure functions maxTurnsNotice / maxTurnsEnvelope
+ * were sunk into src/cli/max-turns.ts and are tested directly here.
  *
- * 断言:
- *   - maxTurnsNotice:stderr 通知行 + output 摘要;摘要缺席 → output 空;
- *   - maxTurnsEnvelope:JSON envelope(error / turnsRan / reason / message /
- *     stopSummary);stopSummary 缺席 → 字段缺席(byte-stable)。
+ * Assertions:
+ *   - maxTurnsNotice: stderr notice line + output summary; summary absent → empty output;
+ *   - maxTurnsEnvelope: JSON envelope (error / turnsRan / reason / message /
+ *     stopSummary); stopSummary absent → field absent (byte-stable).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

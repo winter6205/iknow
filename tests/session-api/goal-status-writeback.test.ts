@@ -1,23 +1,23 @@
 /**
- * #458 T5 (SC8): verify-loop outcome → goal.status write-back + recordGoal trace.
+ * verify-loop outcome → goal.status write-back + recordGoal trace.
  *
  * The hub is the ONLY writer of goal.status. The OUTCOME_TO_STATUS data table
  * maps each VerifyLoopOutcome to a target status:
  *
  *   passed    → "achieved"
  *   aborted   → "aborted"
- *   escalated → "aborted"   (NEW in #458 SC8; pre-#458 kept active)
- *   failed    → "active"    (no status change; trace 留痕)
- *   unstable  → "active"    (no status change; trace 留痕)
- *   disabled  → undefined   (no status change; trace 留痕)
+ *   escalated → "aborted"
+ *   failed    → "active"    (no status change; trace-only)
+ *   unstable  → "active"    (no status change; trace-only)
+ *   disabled  → undefined   (no status change; trace-only)
  *
  * `applyTransition` runs only when target is a valid forward edge from current
- * (T3 assertValidTransition rejects self-transitions, so active→active etc.
+ * (assertValidTransition rejects self-transitions, so active→active etc.
  * are no-ops). recordGoal fires for every outcome with a goal present
- * (write-back trace 留痕 even when no status change).
+ * (trace written even when no status change).
  *
  * Fixture: a user-pinned active goal (source === "user_pin") survives
- * sanitize-on-load (#605 T2 unconditionally drops the legacy `taskFocus`
+ * sanitize-on-load (sanitize unconditionally drops the legacy `taskFocus`
  * key, but never touches a user-pinned `goal`).
  *
  * Trace assertions: writeback recordGoal writes a JSONL line via the real
@@ -96,9 +96,10 @@ let traceDir: string;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-goalstatus-"));
-  // traceOut 指向同一个临时根; hub-violation.test.ts 同模式。
+  // traceOut points at the same temp root; same pattern as
+  // hub-violation.test.ts.
   traceDir = baseDir;
-  // T3 (SC6): hub.store.projectDir 用作 trace 锚点基底; 与 hub 共派生。
+  // hub.store.projectDir is the trace anchor base, derived jointly with hub.
   resolveProjectSessionDir(baseDir, process.cwd());
   store = new SessionStore(baseDir, process.cwd());
 });
@@ -109,8 +110,9 @@ afterAll(async () => {
 
 const activeGoal: GoalState = {
   text: "Type-system-validate-LSP",
-  // SC8: fixture 用 user_pin (sanitize 保留 user_pin 顶点, user_initial 顶点会
-  // 被 T2 sanitize 迁移到 taskFocus); writeback 路径只作用于显式 pin 的 goal。
+  // Fixture uses user_pin (sanitize keeps the user_pin vertex; a
+  // user_initial vertex would be migrated to taskFocus); the write-back
+  // path only acts on explicitly pinned goals.
   source: "user_pin",
   status: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
@@ -159,8 +161,9 @@ async function load(id: string): Promise<SessionFileV1> {
 async function readWritebackGoalRecord(
   conversationId: string
 ): Promise<Record<string, unknown>> {
-  // T3 (SC6): 读侧从 `<projectDir>/<convId>/trace.jsonl` 派生, 与 hub 写侧
-  // 共 `resolveConversationTraceFilePath` —— 同 convId 必然同文件。
+  // The reader derives `<projectDir>/<convId>/trace.jsonl`, sharing
+  // `resolveConversationTraceFilePath` with the hub writer — same convId
+  // always means the same file.
   const projectDir = store.getProjectDir();
   const tracePath = resolveConversationTraceFilePath({
     projectDir,
@@ -264,9 +267,10 @@ describe("goal.status write-back on verify-loop outcome (#458 T5 SC8)", () => {
 
 describe("VALID_GOAL_TRANSITIONS defensive guard on write-back (post-#605)", () => {
   it("achieved goal + outcome 'failed' → 非法反向边被 assertValidTransition 拦截, status 保持 achieved, recordGoal 留痕(status: active)", async () => {
-    // #458 T3 SC5 assertValidTransition 守卫(独立于 taskFocus 生命周期):
-    // OUTCOME_TO_STATUS target='active' 对 achieved 状态是反向边,write-back
-    // 分支经 assertValidTransition 拦截,goal 不变,仅 recordGoal trace 留痕。
+    // assertValidTransition guard on write-back (independent of any
+    // lifecycle): OUTCOME_TO_STATUS target='active' is a backward edge from
+    // achieved; the write-back branch is intercepted, the goal stays
+    // unchanged, and only the recordGoal trace line is written.
     setOutcome("failed");
     const id = "t5-achieved-failed";
     await seedSession(id, {

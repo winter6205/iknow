@@ -1,17 +1,17 @@
 /**
  * tests/tui/session-state.test.ts
  *
- * #343 T6-A 测试：从 archive/tui-ink/tests/session-state.test.ts 迁回 tests/tui/，
- * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
+ * Ported back from archive/tui-ink/tests/session-state.test.ts, rewritten for bun:test
+ * (tests/tui/ runs on bun:test).
  *
- * #146 状态机转换表（Q1a 裁决）全组合：
- *  - 任何会话态可自由切换；running-fg 被切走 → running-bg；
- *  - 切回 running-bg → running-fg；idle 不变；
- *  - Esc 仅 running-fg 可打断（canInterrupt；2026-09-18 键位迁移自 Ctrl+C）；
- *  - turnFinished 落回 idle + 消息整体冻结替换（ReadonlyArray 纪律）。
+ * Session state machine transition table, full combination coverage:
+ *  - any session can be attached freely; running-fg switched away → running-bg;
+ *  - switching back running-bg → running-fg; idle unchanged;
+ *  - Esc interrupts only in running-fg (canInterrupt; key later migrated from Ctrl+C);
+ *  - turnFinished falls back to idle + messages replaced as one frozen whole (ReadonlyArray discipline).
  *
- * T3：TuiSessionState / TurnFinishedInput 增 lastUsage 字段（上下文用量显示）。
- * 字段缺席（init）= null；turnFinished 把 hub 回执透传；Object.freeze 纪律保持。
+ * TuiSessionState / TurnFinishedInput carry a lastUsage field (context-usage display).
+ * Field absent at init = null; turnFinished passes the hub receipt through; Object.freeze discipline holds.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -102,7 +102,7 @@ describe("session-state: 三态转换表（Q1a）", () => {
     const draft = createDraftSession();
     const started = turnStarted(draft);
     expect(started.runState).toBe("running-fg");
-    // 重复起跑（调用方 bug）不抛错、不变
+    // a duplicate start (caller bug) neither throws nor changes anything
     expect(turnStarted(started)).toBe(started);
   });
 
@@ -282,7 +282,7 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
       role: "user",
       content: [{ type: "text", text: "你好" }],
     });
-    // 其余会话字段原样保留。
+    // all other session fields kept verbatim.
     expect(echoed.conversationId).toBe(draft.conversationId);
     expect(echoed.turnCount).toBe(draft.turnCount);
     expect(echoed.runState).toBe(draft.runState);
@@ -301,7 +301,7 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
     expect(Object.isFrozen(echoed)).toBe(true);
     expect(Object.isFrozen(echoed.messages)).toBe(true);
     expect(Object.isFrozen(echoed.messages[0]!)).toBe(true);
-    // 原状态未被突变。
+    // the original state was not mutated.
     expect(draft.messages).toHaveLength(0);
   });
 
@@ -317,10 +317,10 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
   });
 
   test("plans T5：displayText 与 sent 分离 —— echo 仅追加 displayText，不含 sent 正文", () => {
-    // skill-load 场景：sent 含技能正文（进模型历史确定性生效），displayText
-    // 是 buildSkillLoadText 形态的精简版（empty body + 同样 remainder），
-    // 让 render 层 projectSkillLoadUserText 抽到同样的 {name, remainder} —
-    // 运行中 echo 与落盘后的 transcript 显示一致。
+    // skill-load scenario: sent carries the full skill body (deterministically effective in model
+    // history), displayText is the trimmed buildSkillLoadText shape (empty body + same remainder),
+    // so the render layer's projectSkillLoadUserText extracts the same {name, remainder} —
+    // the in-flight echo and the on-disk transcript display agree.
     const draft = createDraftSession();
     const sent = '[skill-load name="echo"]\n# 回声技能\nfull body\n\n帮我做 X';
     const displayText = '[skill-load name="echo"]\n\n帮我做 X';
@@ -331,14 +331,14 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
       role: "user",
       content: [{ type: "text", text: displayText }],
     });
-    // 显式断言：echo 形态不含 sent 正文（核心去耦保证）。
+    // explicit assertion: the echo form never contains the sent body (core decoupling guarantee).
     expect(
       only.content[0]!.type === "text" ? only.content[0]!.text : ""
     ).not.toContain("# 回声技能");
     expect(
       only.content[0]!.type === "text" ? only.content[0]!.text : ""
     ).not.toContain("full body");
-    // 与 sent 不共享（sent 仍由 sendTurn 走 postMessage → 模型历史）。
+    // not shared with sent (sent still goes through sendTurn → postMessage → model history).
     expect(sent).not.toBe(displayText);
   });
 });
@@ -364,7 +364,7 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
       cacheCreationInputTokens: null,
       cacheReadInputTokens: null,
     };
-    // 构造一个已跑过 turn、持有 lastUsage 的 idle 会话。
+    // build an idle session that already ran a turn and holds lastUsage.
     const afterTurn = turnFinished(turnStarted(createDraftSession()), {
       conversationId: "conv-1",
       messages: [msg("问"), msg("答", "assistant")],
@@ -392,7 +392,7 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
       ],
     });
     expect(compacted.updatedAt).toBe("2026-08-06T00:00:00.000Z");
-    // 关键语义：压缩不是 turn，lastUsage / lastStopReason 保留。
+    // key semantics: compaction is not a turn, lastUsage / lastStopReason are kept.
     expect(compacted.lastUsage).toEqual(lastUsage);
     expect(compacted.lastStopReason).toBe("completed");
     expect(Object.isFrozen(compacted.messages)).toBe(true);
@@ -406,7 +406,7 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
       updatedAt: "2026-08-06T00:00:00.000Z",
       jsonMode: false,
     });
-    expect(result).toBe(running); // 原对象引用，无替换
+    expect(result).toBe(running); // same object reference, no replacement
   });
 });
 
@@ -435,7 +435,7 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
       reconcile: true,
     });
     expect(isTuiHiddenUserMessage(msg(bar))).toBe(true);
-    // 真实用户消息含 instruction:/reconcile: 字样 → 不误伤（新段不影响前缀判定）
+    // a real user message containing instruction:/reconcile: → no false positive (new sections do not affect the prefix check)
     expect(isTuiHiddenUserMessage(msg("instruction: 这行开头的真实问题"))).toBe(
       false
     );
@@ -445,9 +445,9 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
   });
 
   test("graph_mode 三条现势通知为 hidden（切换 ON/OFF + 每 run presence）；普通 query 否", () => {
-    // spec D8 / SC7：与 agent_status 同纪律 —— 生产者本家谓词
-    // （src/harness/graph/notification.ts 的 isGraphModeText）判 hidden，
-    // 三条常量全走同一前缀，TUI 不画 ❯ 气泡。
+    // same discipline as agent_status — the producer's own predicate
+    // (isGraphModeText in src/harness/graph/notification.ts) decides hidden;
+    // all three constants share one prefix, the TUI draws no ❯ bubble for them.
     for (const text of [
       IKNOW_GRAPH_MODE_ON_NOTIFICATION,
       IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -456,8 +456,8 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
       expect(isGraphModeText(text)).toBe(true);
       expect(isTuiHiddenUserMessage(msg(text))).toBe(true);
     }
-    // 伪造形态：只在正文里提到 `<graph_mode>`（非行首）不算信封 —— 谓词
-    // 与 agent_status 同款 trimStart 前缀判定，不误伤用户正文。
+    // forged shape: mentioning `<graph_mode>` only inside the body (not line-start) is not an
+    // envelope — the predicate uses the same trimStart prefix check as agent_status, no user text collateral.
     expect(
       isTuiHiddenUserMessage(msg("为什么 transcript 里有 <graph_mode> 标签？"))
     ).toBe(false);
@@ -483,10 +483,10 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
   });
 
   test("skill-index delta listing 为 hidden（ADR-0098 第五类注入信封）；普通 query 否", () => {
-    // spec SC1–SC4 / ADR-0098：增量 listing 是 host 注入的模型历史，不是
-    // 操作员键入 —— TUI 不画 ❯ 气泡。生产者本家谓词（src/harness/skill/
-    // index-delta.ts 的 isSkillIndexDeltaText）必须命中自己的常量，消费侧
-    // 只调谓词、不自己写前缀检查（与 graph_mode 用例同款双断言）。
+    // ADR-0098: the delta listing is host-injected model history, not operator
+    // keystrokes — the TUI draws no ❯ bubble. The producer's own predicate (isSkillIndexDeltaText
+    // in src/harness/skill/index-delta.ts) must hit its own constant; the consumer side only calls
+    // the predicate, never rewrites a prefix check (same double-assertion shape as the graph_mode case).
     expect(isSkillIndexDeltaText(SKILL_INDEX_DELTA_PREFIX)).toBe(true);
     expect(
       isTuiHiddenUserMessage(
@@ -495,8 +495,8 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
         )
       )
     ).toBe(true);
-    // 前导空白容忍（同款 trimStart 纪律；经 loop-engine 追加时无前导空白，
-    // 但 seedInputHistory 走 stripPrefetchOverlay + trim 后仍是同一形态）。
+    // leading-whitespace tolerance (same trimStart discipline; appends via loop-engine carry no
+    // leading whitespace, but seedInputHistory runs stripPrefetchOverlay + trim and stays the same shape).
     expect(
       isTuiHiddenUserMessage(
         msg(
@@ -504,8 +504,8 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
         )
       )
     ).toBe(true);
-    // 伪造形态：正文里提到 `<available_skills>`（非行首）不算信封 —— 不误伤
-    // 用户话（与 agent_status / graph_mode 同款边界）。
+    // forged shape: mentioning `<available_skills>` inside the body (not line-start) is not an
+    // envelope — no user text collateral (same boundary as agent_status / graph_mode).
     expect(
       isTuiHiddenUserMessage(
         msg("为什么 transcript 里有 <available_skills> 这段？")
@@ -515,8 +515,8 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
   });
 
   test("delta listing 不进 ↑ 历史（seedInputHistory 跳过第五类注入）", () => {
-    // ↑ recall 只回放操作员真键入的 query：恢复会话后 listing 不得变成可
-    // 回放条目（spec Boundaries「不进 ❯ 气泡 / CLI ↑ 历史」）。
+    // ↑ recall replays only queries the operator actually typed: after session restore the
+    // listing must not become a replayable entry.
     const messages: ReadonlyArray<AnthropicNativeMessage> = [
       msg("真实问题"),
       msg(

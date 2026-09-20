@@ -1,8 +1,7 @@
 /**
- * serve-workspace T2 — GET /api/v1/workspaces/browse endpoint.
+ * GET /api/v1/workspaces/browse endpoint.
  *
- * Covers the new subdirectory-probe endpoint surface introduced by
- * `serve-workspace-folder-browse.md` (plan T2):
+ * Covers the subdirectory-probe surface:
  *  - pure function `listSubdirectories(root)` returns `{ ok, entries }` or
  *    `{ ok: false, kind, message }`.
  *  - HTTP route `GET /api/v1/workspaces/browse?root=<abs-existing-dir>`:
@@ -18,8 +17,8 @@
  *        excluded, deny-list (`node_modules`) excluded, symlinks NOT
  *        followed (Dirent.isDirectory() check on lstat semantics).
  *
- * 5 类边界 (from ticket acceptance): 空目录 / 不存在 / 非绝对 / 隐藏过滤 /
- * 无权限. Each gets an isolated fixture + a deterministic assertion.
+ * Five boundary cases: empty dir / missing / non-absolute / hidden filtering /
+ * permission-denied. Each gets an isolated fixture + a deterministic assertion.
  *
  * Note: testing strategy — use real node:fs on mkdtemp temp dirs (no
  * memfs / mock-fs — the project tests use real fs consistently), and
@@ -53,10 +52,10 @@ import { listSubdirectories } from "../../src/session-api/browse-workspaces.ts";
 
 // -- shared fixtures --------------------------------------------------------
 
-/** 临时根目录 cleanup stack。 */
+/** Temp-root cleanup stack. */
 const tempRoots: string[] = [];
 
-/** mkdtemp + 登记清理。 */
+/** mkdtemp + register for cleanup. */
 async function freshDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   tempRoots.push(dir);
@@ -97,16 +96,16 @@ describe("listSubdirectories — pure function surface", () => {
 
   it("隐藏目录 (.git / .claude / .hidden / …) 与 deny-list (node_modules) 不进 entries", async () => {
     const root = await freshDir("iknow-browse-hide-");
-    // 期望保留的子目录（按字母序排序）。
+    // Subdirs expected to survive (alphabetical order).
     await mkdir(join(root, "alpha"));
     await mkdir(join(root, "beta"));
-    // 期望被隐藏的子目录。
+    // Hidden subdirs, expected excluded.
     await mkdir(join(root, ".git"));
     await mkdir(join(root, ".claude"));
     await mkdir(join(root, ".hidden"));
-    // 期望被 deny-list 排除的子目录。
+    // Deny-listed subdir, expected excluded.
     await mkdir(join(root, "node_modules"));
-    // 期望被过滤的普通文件（不是目录）。
+    // Plain file, not a dir, expected filtered.
     await writeFile(join(root, "regular-file.txt"), "hi", "utf8");
 
     const out = await listSubdirectories(root);
@@ -116,7 +115,7 @@ describe("listSubdirectories — pure function surface", () => {
         out.entries.map((e) => e.name),
         ["alpha", "beta"]
       );
-      // path 必须严格 = join(root, name)。
+      // path must strictly equal join(root, name).
       assert.equal(out.entries[0]?.path, join(root, "alpha"));
       assert.equal(out.entries[1]?.path, join(root, "beta"));
     }
@@ -126,14 +125,14 @@ describe("listSubdirectories — pure function surface", () => {
     const root = await freshDir("iknow-browse-sym-");
     const realDir = await freshDir("iknow-browse-real-");
     await symlink(realDir, join(root, "linked"));
-    // 一个真子目录（对照）。
+    // A real subdir as control.
     await mkdir(join(root, "real-child"));
 
     const out = await listSubdirectories(root);
     assert.equal(out.ok, true);
     if (out.ok === true) {
-      // symlink 不跟（withFileTypes 的 Dirent.isDirectory() 在 lstat 下为 false），
-      // 只剩真子目录。
+      // Symlinks are not followed (Dirent.isDirectory() is false under
+      // lstat), leaving only the real subdir.
       assert.deepEqual(
         out.entries.map((e) => e.name),
         ["real-child"]
@@ -143,7 +142,7 @@ describe("listSubdirectories — pure function surface", () => {
 
   it("排序按 name 字母序（与 `readdir` 自然序一致）", async () => {
     const root = await freshDir("iknow-browse-sort-");
-    // 故意打乱顺序建目录。
+    // Create dirs deliberately out of order.
     for (const name of ["zebra", "alpha", "mango", "banana"]) {
       await mkdir(join(root, name));
     }
@@ -282,9 +281,9 @@ describe("GET /api/v1/workspaces/browse — HTTP route", () => {
   });
 
   it("permission denied (chmod 000) → 422 validation, kind=validation（不是 500）", async () => {
-    // EACCES 的可执行位丢失时 readdir 会拒绝。父目录保留 070 以确保临时清理
-    // 仍可走 force / chmod 回退路径（rm -rf 在 0o000 仍可能成功，但 mkdir 父
-    // 目录已 0o700 是为了避免影响其它测试）。
+    // readdir fails once the executable bit is stripped via EACCES. The
+    // parent keeps 070 so temp cleanup can still take the force / chmod
+    // fallback path.
     const parent = await freshDir("iknow-browse-perm-parent-");
     const sealed = join(parent, "sealed");
     await mkdir(sealed, { mode: 0o700 });
@@ -296,15 +295,16 @@ describe("GET /api/v1/workspaces/browse — HTTP route", () => {
       const { status, body } = await getJson(
         `/api/v1/workspaces/browse?root=${qs}`
       );
-      // 严格断言:不允许把 fs EACCES 直接吐 500 → 必须在协议层归类为
-      // typed validation（与"非绝对/不存在"语义统一，给前端的契约可预测）。
+      // Strict: raw fs EACCES must not surface as 500 — the protocol layer
+      // classifies it as typed validation, same contract as non-absolute /
+      // missing, so the frontend can rely on it.
       assert.equal(status, 422);
       assertNestedError({ body, kind: "validation" });
     } finally {
-      // 恢复权限，确保 cleanup 能 rm。如果 chmod 失败（例如 chmod-only
-      // FUSE / 容器挂载），让全局 afterEach 的 rm 也尽量走 force / 忽略
-      // 失败路径 —— 测试的核心契约已验（断言 422 已抛），清理失败不应
-      // 掩盖业务断言。仍然保留 .catch 防止 cleanup 抛错阻塞后续测试。
+      // Restore permissions so cleanup can rm. If chmod fails (e.g.
+      // chmod-only FUSE / container mount), the global afterEach rm still
+      // tries force and ignores failure — cleanup errors must not mask the
+      // business assertions already proven above.
       await chmod(sealed, 0o700).catch((err) => {
         console.warn(
           `[browse-workspaces.test] chmod restore failed for ${sealed}:`,
@@ -315,8 +315,8 @@ describe("GET /api/v1/workspaces/browse — HTTP route", () => {
   });
 
   it("path separator in entry.path is platform-correct (POSIX = /)", async () => {
-    // 文档化路径拼接行为；CI 在 Linux 上,实际就是 POSIX 分隔符,但断言用
-    // path.sep 而不是硬编码 '/',确保 Windows / WSL 兼容。
+    // Documents path-join behavior: CI on Linux yields POSIX separators, but
+    // assert with path.sep instead of hardcoded '/' for Windows / WSL safety.
     const root = await freshDir("iknow-browse-sep-");
     await mkdir(join(root, "only"));
     const qs = encodeURIComponent(root);

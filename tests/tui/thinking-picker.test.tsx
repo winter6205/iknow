@@ -2,21 +2,24 @@
 /**
  * tests/tui/thinking-picker.test.tsx
  *
- * design-25 thinking-picker（双面板版）T1 + T2 测试：
- *  - effortToIndex / indexToEffort SSOT 映射（5 档 concrete + "" 往返幂等、
- *    越界兜底）；
- *  - THINKING_LEVELS 复用 slash.ts ADJUSTABLE_EFFORT_LEVELS（同引用，不重复定义）；
- *  - reduceThinkingSwitchKey 键路由纯函数（开关面板：toggle / commit / ignore）；
- *  - reduceThinkingEffortKey 键路由纯函数（档位面板：move clamp / fix / commit）；
- *  - ThinkingPicker 渲染 smoke（T2，design-25 视觉）——用真实
- *    createCliRenderer（memory buffered）+ getRealCharBytes 抓纯文本，
- *    不用 testRender（animated box 在 testRender 下首帧空白，见本分支
- *    design-25 验证记录）。
- *  - app 层集成：/thinking 打开开关面板（Enter 固定不关闭 / Esc 保存退出写
- *    state）；/effort <level> 打开档位面板（移档 + Enter 固定不关闭 / Esc 保存
- *    退出写 state）。
+ * Thinking picker (dual-panel) tests:
+ *  - effortToIndex / indexToEffort SSOT mapping (5 concrete levels + ""
+ *    round-trip idempotence, out-of-range fallback);
+ *  - THINKING_LEVELS reuses slash.ts ADJUSTABLE_EFFORT_LEVELS (same
+ *    reference, no duplicate definition);
+ *  - reduceThinkingSwitchKey pure key-routing (switch panel: toggle / commit / ignore);
+ *  - reduceThinkingEffortKey pure key-routing (effort panel: move clamp / fix / commit);
+ *  - ThinkingPicker render smoke -- uses a real
+ *    createCliRenderer (memory buffered) + getRealCharBytes to grab plain
+ *    text, not testRender (the animated box renders blank on the first frame
+ *    under testRender).
+ *  - app-layer integration: /thinking opens the switch panel (Enter fixes
+ *    without closing / Esc saves-and-exits writing state); /effort <level>
+ *    opens the effort panel (move + Enter fixes without closing / Esc saves
+ *    and exits writing state).
  *
- * 纯函数单测无需 OpenTUI mock；渲染 smoke 需真实渲染器（Linux bun）。
+ * Pure-function units need no OpenTUI mock; the render smoke needs a real
+ * renderer (Linux bun).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -70,7 +73,7 @@ function key(patch: Partial<ModalKeyEvent["key"]>): ModalKeyEvent {
   return { input: "", key: { ...noKey, ...patch } };
 }
 
-// -- effortToIndex / indexToEffort（SSOT 映射） ---------------------------------
+// -- effortToIndex / indexToEffort (SSOT mapping) -------------------------------
 
 describe("effortToIndex / indexToEffort（SSOT 映射）", () => {
   test("5 档 concrete + 空串 往返幂等", () => {
@@ -110,7 +113,7 @@ describe("effortToIndex / indexToEffort（SSOT 映射）", () => {
   });
 
   test("effortToDisplayIndex 往返：commit 直接 Enter 时空串映射为 medium", () => {
-    // /effort 打开、默认 effort="" → 展示聚焦 medium → Enter 固定 medium
+    // /effort opens with default effort="" -> display focuses medium -> Enter fixes medium
     expect(indexToEffort(effortToDisplayIndex(""))).toBe("medium");
   });
 
@@ -120,14 +123,14 @@ describe("effortToIndex / indexToEffort（SSOT 映射）", () => {
   });
 });
 
-// -- committedThinkingPatch（T3，settings 双向持久化 payload 投影） -----------
+// -- committedThinkingPatch (settings two-way persistence payload projection) -----------
 
 describe("committedThinkingPatch（commit payload 投影）", () => {
   test("thinking 面板 enabled=true → { thinking: 'adaptive' } 且无 effort 键", () => {
     const patch = committedThinkingPatch({ kind: "thinking", enabled: true });
     expect(patch).not.toBeNull();
     expect(patch!.thinking).toBe("adaptive");
-    expect("thinkingEffort" in patch!).toBe(false); // 开关面板不碰档位（记忆保留）
+    expect("thinkingEffort" in patch!).toBe(false); // switch panel never touches the level (memory preserved)
   });
 
   test("thinking 面板 enabled=false → { thinking: 'off' }", () => {
@@ -150,14 +153,15 @@ describe("committedThinkingPatch（commit payload 投影）", () => {
   });
 
   test("effort 面板 concrete 档 → 按 currentIndex（已固定档）映射五档", () => {
-    // 五档全跑：currentIndex 才是 Enter 固定后的 committed 档（Esc 保存退出
-    // 写它），focusedIndex 只是移动中预览不参与投影。
+    // All five levels: currentIndex is the committed level after Enter (Esc
+    // saves and exits writing it); focusedIndex is only the in-motion preview
+    // and never participates in the projection.
     const levels = ["low", "medium", "high", "xhigh", "max"] as const;
     for (let i = 0; i < levels.length; i++) {
       expect(
         committedThinkingPatch({
           kind: "effort",
-          focusedIndex: 2, // 与 committed 分离：焦点不代表已提交档
+          focusedIndex: 2, // deliberately apart from committed: focus is not the committed level
           currentIndex: i,
           autoOn: false,
         })
@@ -166,8 +170,9 @@ describe("committedThinkingPatch（commit payload 投影）", () => {
   });
 
   test("当前判别联合下 null 分支不可达（防御）", () => {
-    // ThinkingPickerState 只有 kind:"thinking" | "effort" 两变体，default 分支
-    // 只在未来新增变体时触发——用类型断言把未知 kind 喂进去验证兜底语义。
+    // ThinkingPickerState has only kind:"thinking" | "effort" variants; the
+    // default branch fires only if a future variant is added -- feed an unknown
+    // kind via type assertion to verify the fallback semantics.
     const unreachable = {
       kind: "future-kind",
     } as unknown as ThinkingPickerState;
@@ -175,7 +180,7 @@ describe("committedThinkingPatch（commit payload 投影）", () => {
   });
 });
 
-// -- reduceThinkingSwitchKey（开关面板：Space/Tab toggle · Enter fix · Esc commit） ---
+// -- reduceThinkingSwitchKey (switch panel: Space/Tab toggle · Enter fix · Esc commit) ---
 
 describe("reduceThinkingSwitchKey（开关面板）", () => {
   test("Space → toggle（翻转面板内开关预览）", () => {
@@ -227,8 +232,8 @@ describe("reduceThinkingSwitchKey（开关面板）", () => {
   });
 });
 
-// -- reduceThinkingEffortKey（档位面板：←/→ move clamp · Space/Tab toggleAuto ·
-//    Enter fix · Esc commit）-
+// -- reduceThinkingEffortKey (effort panel: ←/→ move clamp · Space/Tab toggleAuto ·
+//    Enter fix · Esc commit) -
 
 describe("reduceThinkingEffortKey（档位面板）", () => {
   test("focused=2 → → move index=3（xhigh）", () => {
@@ -315,9 +320,9 @@ describe("reduceThinkingEffortKey（档位面板）", () => {
   });
 });
 
-// -- ThinkingPicker 渲染 smoke（T2，design-25 视觉，真实渲染器） ---------------
+// -- ThinkingPicker render smoke (real renderer, visual contract) ---------------
 
-/** 测试专用 stdout（Writable + isTTY + columns/rows），不碰 process.stdout。 */
+/** Test-only stdout (Writable + isTTY + columns/rows); never touches process.stdout. */
 class TestWriteStream extends Writable {
   readonly isTTY = true;
   columns: number;
@@ -335,7 +340,7 @@ class TestWriteStream extends Writable {
   }
 }
 
-/** 打开 memory-buffered 真实渲染器并挂载 ThinkingPicker，返回一帧纯文本。 */
+/** Open a memory-buffered real renderer, mount ThinkingPicker, return one plain-text frame. */
 async function renderPickerText(
   state: ThinkingPickerState,
   cols = 80
@@ -365,13 +370,14 @@ async function renderPickerText(
   } finally {
     act(() => root.unmount());
     renderer.destroy();
-    // 断言失败也要恢复全局，避免污染后续用例（review Low#5）
+    // Restore the global even on assertion failure to avoid polluting later cases.
     globalThis.IS_REACT_ACT_ENVIRONMENT = false;
   }
 }
 
-/** 帧中「任一物理行同时含 [Esc] 与 保存退出」——hint 在窄终端可能折行，
- *  [Esc 保存退出] 不保证同一行连续出现；放宽为跨行存在性断言。 */
+/** True if any physical line contains both `[Esc]` and `保存退出` ("save and exit") --
+ *  the hint may wrap on narrow terminals, so `[Esc 保存退出]` is not guaranteed
+ *  contiguous on one line; relaxed to a cross-line existence assertion. */
 function frameHasSaveEscHint(frame: string): boolean {
   return frame
     .split("\n")
@@ -384,10 +390,10 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
     expect(frame).toContain("思考开关");
     expect(frame).toContain("ON");
     expect(frame).toContain("思考已开启");
-    expect(frame).toContain("◐"); // 开启圆点亮起
-    expect(frame).not.toContain("█"); // 纯开关面板无进度条（用户点名）
-    expect(frame).toContain("╭"); // 圆角边框顶
-    expect(frame).toContain("╰"); // 圆角边框底
+    expect(frame).toContain("◐"); // switch dot lit (ON)
+    expect(frame).not.toContain("█"); // pure switch panel has no progress bar (user-requested)
+    expect(frame).toContain("╭"); // rounded border top
+    expect(frame).toContain("╰"); // rounded border bottom
   });
 
   test("开关面板 OFF：OFF + 思考已关闭，无进度条", async () => {
@@ -395,8 +401,8 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
     expect(frame).toContain("思考开关");
     expect(frame).toContain("OFF");
     expect(frame).toContain("思考已关闭");
-    expect(frame).toContain("◑"); // 关闭圆点熄灭
-    expect(frame).not.toContain("█"); // 纯开关面板无进度条
+    expect(frame).toContain("◑"); // switch dot dim (OFF)
+    expect(frame).not.toContain("█"); // pure switch panel has no progress bar
   });
 
   test("档位面板：标题「思考强度」+ 5 档标签 + ▸ high ◂ 焦点游标", async () => {
@@ -412,9 +418,9 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
       expect(frame).toContain(label);
     }
     expect(frame).toContain("▸ high ◂");
-    expect(frame).toContain("█"); // 档位面板保留进度条
-    expect(frame).toContain("╭"); // 圆角边框顶
-    expect(frame).toContain("╰"); // 圆角边框底
+    expect(frame).toContain("█"); // effort panel keeps the progress bar
+    expect(frame).toContain("╭"); // rounded border top
+    expect(frame).toContain("╰"); // rounded border bottom
   });
 
   test("档位面板：焦点游标与已固定档分离（focus 与 committed 并存）", async () => {
@@ -424,7 +430,7 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
       currentIndex: 1,
       autoOn: false,
     });
-    // 焦点游标在 xhigh（移动中预览），已固定档 medium 也同时提亮。
+    // Focus cursor on xhigh (in-motion preview); the committed level medium is also highlighted at the same time.
     expect(frame).toContain("▸ xhigh ◂");
     expect(frame).toContain("medium");
   });
@@ -440,16 +446,17 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
     expect(frame).toContain("自适应");
     expect(frame).not.toContain("手动档位");
     for (const label of ["low", "medium", "high", "xhigh", "max"]) {
-      expect(frame).toContain(label); // 5 档标签仍在（灰显展示）
+      expect(frame).toContain(label); // 5 level labels still present (greyed out)
     }
-    expect(frame).not.toContain("▸"); // auto 态无焦点游标
-    expect(frame).toContain("█"); // 进度条仍在（整条暗灰轨）
+    expect(frame).not.toContain("▸"); // no focus cursor in auto state
+    expect(frame).toContain("█"); // progress bar still present (fully dim track)
   });
 
   test("面板固定宽：cols 变化不影响面板宽度，且靠左对齐（不占满屏宽）", async () => {
-    // PICKER_WIDTH 固定 + alignSelf flex-start → 面板宽不随终端 cols 变，
-    // 且贴左缘（顶行以圆角 ╭ 开头）。getRealCharBytes 会把帧每行 pad 到终端
-    // 宽，故用 trimEnd 后的真实面板宽断言。
+    // PICKER_WIDTH fixed + alignSelf flex-start -> panel width does not follow
+    // terminal cols, and hugs the left edge (top row starts with the rounded
+    // ╭). getRealCharBytes pads every frame row to terminal width, so assert
+    // on the real panel width after trimEnd.
     const narrow = await renderPickerText(
       { kind: "effort", focusedIndex: 1, currentIndex: 1, autoOn: false },
       60
@@ -464,9 +471,9 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
     expect(topWide).toBeDefined();
     expect(topNarrow!.trimEnd().length).toBe(topWide!.trimEnd().length);
     expect(topNarrow!.trimEnd().length).toBe(PICKER_WIDTH);
-    // 靠左对齐：顶行以圆角边框起点 ╭ 开头（非空白前置填充）。
+    // Left-aligned: top row starts with the rounded border origin ╭ (no leading whitespace fill).
     expect(topNarrow!.startsWith("╭")).toBe(true);
-    // 不占满屏宽：真实面板宽 < 终端 cols。
+    // Does not span full width: real panel width < terminal cols.
     expect(topNarrow!.trimEnd().length).toBeLessThan(60);
   });
 
@@ -488,12 +495,12 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
       currentIndex: 0,
       autoOn: true,
     });
-    expect(frameHasSaveEscHint(effortAuto)).toBe(true); // auto 态 hint 同物理行
+    expect(frameHasSaveEscHint(effortAuto)).toBe(true); // auto-state hint shares the same physical line
   });
 
   test("开关面板不含档位标签（低/中/高档名不可见，纯开关）", async () => {
     const frame = await renderPickerText({ kind: "thinking", enabled: true });
-    // 开关面板是纯 ON/OFF：5 档标签不应出现。
+    // The switch panel is pure ON/OFF: the 5 level labels must not appear.
     expect(frame).not.toContain("▸ low ◂");
     expect(frame).not.toContain("手动档位");
   });
@@ -505,7 +512,7 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
       currentIndex: 0,
       autoOn: false,
     });
-    // 档位面板必开思考：ON/OFF 开关标签不应出现。
+    // The effort panel always has thinking on: ON/OFF switch labels must not appear.
     expect(frame).not.toContain("ON");
     expect(frame).not.toContain("OFF");
     expect(frame).not.toContain("思考已开启");
@@ -513,13 +520,14 @@ describe("ThinkingPicker 渲染（design-25 视觉 smoke）", () => {
   });
 });
 
-// -- app 层集成（T3，双面板 + 固定不退出） -----------------------------------
+// -- app-layer integration (dual panel + fix without exiting) -------------------
 
 /**
- * 用真实 TuiApp + stub bridge 跑 picker 端到端。
+ * Drive the picker end-to-end with a real TuiApp + stub bridge.
  *
- * 为什么不用 renderPickerText 的独立渲染器：面板交互（/thinking 打开 → 键路由
- * → commit 写 state）必须走 app.tsx 的 useKeyboard 短路，用 TuiApp mount。
+ * Why not renderPickerText's standalone renderer: panel interaction (/thinking
+ * opens -> key routing -> commit writes state) must go through app.tsx's
+ * useKeyboard short-circuit, so mount TuiApp.
  */
 async function untilFrame(
   setup: TestRendererSetup,
@@ -666,7 +674,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
       8000,
       "picker-open"
     );
-    // defaultThinking 未设 → thinkingEnabled=false → 开关面板 seed OFF。
+    // defaultThinking unset -> thinkingEnabled=false -> switch panel seeds OFF.
     expect(frame).toContain("OFF");
     expect(frame).toContain("思考已关闭");
     await app.destroy();
@@ -679,22 +687,23 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考开关"), 8000, "open");
 
-    // Space：OFF → ON（◑→◐ 圆点亮起）。
+    // Space: OFF -> ON (◑→◐ dot lights up).
     await app.pressSpace();
     await untilFrame(app.setup, (f) => f.includes("ON"), 8000, "preview-on");
 
-    // Enter：固定当前预览 ON（不翻转、面板保持打开——核心新增断言：Enter 不
-    // 关闭面板，也不翻转开关，仅"选定固定"）。
+    // Enter: fixes the current preview ON (no toggle, panel stays open -- the
+    // core new assertion: Enter neither closes the panel nor toggles the
+    // switch, it only "selects and fixes").
     await app.pressEnter();
     const afterEnter = app.setup.captureCharFrame();
     expect(afterEnter).toContain("思考开关");
     expect(afterEnter).toContain("ON");
 
-    // Esc：保存退出（写 thinkingEnabled=true），面板关闭。
+    // Esc: save-and-exit (writes thinkingEnabled=true), panel closes.
     await app.pressEscape();
     await untilFrame(app.setup, (f) => !f.includes("思考开关"), 8000, "closed");
 
-    // /info 反射：enabled=true + effort="" → adaptive (auto)。
+    // /info reflection: enabled=true + effort="" -> adaptive (auto).
     await app.typeText("/info");
     await app.pressEnter();
     const frame = await untilFrame(
@@ -711,13 +720,13 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     const app = await mountAppAsync([]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /effort low → 档位面板打开并直接固定 low（seed focus=fixed=low）。
+    // /effort low -> effort panel opens already fixed on low (seed focus=fixed=low).
     await app.typeText("/effort low");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考强度"), 8000, "open");
     expect(app.setup.captureCharFrame()).toContain("▸ low ◂");
 
-    // →→：0 (low) → 1 (medium) → 2 (high)；Enter 固定 high，面板保持打开。
+    // →→: 0 (low) -> 1 (medium) -> 2 (high); Enter fixes high, panel stays open.
     await app.pressRight();
     await app.pressRight();
     await untilFrame(app.setup, (f) => f.includes("▸ high ◂"), 8000, "focus");
@@ -726,7 +735,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     expect(afterEnter).toContain("思考强度");
     expect(afterEnter).toContain("high");
 
-    // Esc：保存退出（写 thinkingEffort=high + 隐式 enabled），面板关闭。
+    // Esc: save-and-exit (writes thinkingEffort=high + implicit enabled), panel closes.
     await app.pressEscape();
     await untilFrame(app.setup, (f) => !f.includes("思考强度"), 8000, "closed");
 
@@ -746,8 +755,8 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     const app = await mountAppAsync([]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /effort 无参 + thinkingEffort="" → 面板打开并呈现自适应态（AUTO · 自适应，
-    // 5 档灰显无光标）。
+    // /effort with no arg + thinkingEffort="" -> panel opens showing auto state
+    // (AUTO · 自适应, 5 levels greyed with no cursor).
     await app.typeText("/effort");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考强度"), 8000, "open");
@@ -756,8 +765,8 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     expect(open).toContain("AUTO");
     expect(open).not.toContain("▸");
 
-    // Esc 保存退出：auto 态 → 写 thinkingEffort="" + 隐式 enabled（保持 auto，
-    // 不静默降 medium）。
+    // Esc save-and-exit: auto state -> writes thinkingEffort="" + implicit
+    // enabled (stays auto, no silent downgrade to medium).
     await app.pressEscape();
     await untilFrame(app.setup, (f) => !f.includes("思考强度"), 8000, "closed");
 
@@ -777,13 +786,13 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     const app = await mountAppAsync([]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /effort 无参 + thinkingEffort="" → 面板打开呈自适应态。
+    // /effort with no arg + thinkingEffort="" -> panel opens in auto state.
     await app.typeText("/effort");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考强度"), 8000, "open");
     expect(app.setup.captureCharFrame()).toContain("自适应");
 
-    // Tab：auto → 手动选档（面板灰显消失，焦点游标回到 seed=medium ▸ medium ◂）。
+    // Tab: auto -> manual level select (grey-out disappears, cursor returns to seed=medium ▸ medium ◂).
     await app.pressTab();
     await untilFrame(
       app.setup,
@@ -793,7 +802,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     );
     expect(app.setup.captureCharFrame()).not.toContain("自适应");
 
-    // Esc 保存退出：手动态写已固定 concrete 档（seed=medium → medium）。
+    // Esc save-and-exit: manual state writes the fixed concrete level (seed=medium -> medium).
     await app.pressEscape();
     await untilFrame(app.setup, (f) => !f.includes("思考强度"), 8000, "closed");
 
@@ -816,7 +825,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考开关"), 8000, "open");
 
-    // 无任何切换直接 Esc → 保存退出（无 cancel 路径），面板关闭。
+    // Esc with no toggle at all -> save-and-exit (no cancel path), panel closes.
     await app.pressEscape();
     await untilFrame(app.setup, (f) => !f.includes("思考开关"), 8000, "closed");
 
@@ -833,8 +842,9 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
   }, 30_000);
 
   test("#19 开关面板打开时 Ctrl+O → 折叠/展开不被吞", async () => {
-    // 高终端（60 行）：picker 打开后 chrome 预算吃掉 8 行，viewport 仍需足够
-    // 高度容纳消息区 [思考] 折叠行 / 展开的 thinking 全文。
+    // Tall terminal (60 rows): after the picker opens, the chrome budget eats
+    // 8 rows, so the viewport still needs enough height to hold the message
+    // area's [思考] fold line / expanded thinking full text.
     const app = await mountAppAsync(
       [
         assistantResult({
@@ -845,16 +855,16 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
       60
     );
     await untilFrame(app.setup, (f) => f.includes("Version"));
-    // 走一轮 turn 拿到含 thinking 块的 committed 消息。
+    // Run one turn to get a committed message with a thinking block.
     await app.typeText("hi");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("正式回答"), 8000, "reply");
-    // 折叠态：思考全文不可见。
+    // Collapsed: thinking full text not visible.
     let frame = app.setup.captureCharFrame();
     expect(frame.includes("[思考]")).toBe(false);
     expect(frame).not.toContain("链上推理");
 
-    // 打开开关面板 + Ctrl+O → 折叠态翻转（思考全文展开可见）。
+    // Open the switch panel + Ctrl+O -> fold toggles (thinking full text expands into view).
     await app.typeText("/thinking");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考开关"), 8000, "open");
@@ -865,9 +875,9 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
       8000,
       "fold-expanded"
     );
-    expect(frame).toContain("思考开关"); // 面板仍在（Ctrl+O 未吞键也未关面板）
+    expect(frame).toContain("思考开关"); // panel still open (Ctrl+O neither swallows the key nor closes the panel)
 
-    // 再 Ctrl+O → 折叠回去（全文不可见，不回落 [思考]）。
+    // Ctrl+O again -> fold back (full text hidden, does not fall back to [思考]).
     await app.pressCtrlO();
     frame = await untilFrame(
       app.setup,
@@ -876,7 +886,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
       "fold-collapsed"
     );
     expect(frame.includes("[思考]")).toBe(false);
-    expect(frame).toContain("思考开关"); // 面板仍在
+    expect(frame).toContain("思考开关"); // panel still open
     await app.destroy();
   }, 30_000);
 
@@ -887,8 +897,10 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考开关"), 8000, "open");
 
-    // Ctrl+C：无选区 → 复制提示「无选区：先按住鼠标左键拖选文本…」，且面板
-    // 不关（Ctrl+C 已是纯复制，2026-09-18 键位迁移）。
+    // Ctrl+C: no selection -> copy hint `无选区：先按住鼠标左键拖选文本…` ("no selection: drag-select with the left mouse button first…")
+    // ("no selection: hold left mouse button and drag to select text…"), and
+    // the panel does not close (Ctrl+C is now pure copy, after the keybinding
+    // migration).
     await app.pressCtrlC();
     const frame = await untilFrame(
       app.setup,
@@ -896,7 +908,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
       8000,
       "copy-hint"
     );
-    expect(frame).toContain("思考开关"); // picker 分支不吞 ctrl 组合键
+    expect(frame).toContain("思考开关"); // picker branch does not swallow ctrl combos
     await app.destroy();
   }, 30_000);
 });

@@ -1,15 +1,18 @@
 /**
  * tests/tui/think-fold.test.ts
  *
- * thinking 折叠行 / 流式行文案纯函数单测（think-fold.ts）。
+ * Pure-function unit tests for the thinking fold line / streaming line wording
+ * (think-fold.ts).
  *
- * 人读合同（specs/tui-human-display.md D1/D2 + CONTEXT `live tool line` /
- * `unit fold`）：进行中行恒定英文 `Thinking…`（无实时秒数），结束态行
- * `Thought for <duration>`（无 `[思考]` 前缀、无中文）。秒数缺失 / 非正 /
- * 非有限 → 空串（不回落括号标签，也不造 0 秒行）。
+ * Human-readable contract (see docs/CONTEXT.md `live tool line` / `unit
+ * fold`): the in-progress line is always the English `Thinking…` (no live
+ * seconds); the finished line is `Thought for <duration>` (no `[思考]`
+ * ("[thinking]") prefix, no Chinese). Missing / non-positive / non-finite
+ * seconds → empty string (no bracket-label fallback, no synthetic 0-second line).
  *
- * 本文件钉住的纯函数是 TUI 唯一文案源；渲染层（chat-view / message-blocks）
- * 只调本模块，禁止另写模板字符串。
+ * The pure functions pinned here are the TUI's sole wording source; the render
+ * layer (chat-view / message-blocks) must only call this module — no
+ * re-implemented template strings.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -57,11 +60,12 @@ describe("formatThinkingFold（历史结束态折叠行文案）", () => {
 });
 
 describe("pinThinkingSeconds（已删除 — spec D3）", () => {
-  // D3 (tui-display-consistency):`pinThinkingSeconds` 已删除 —— 折叠行思考
-  // 秒数改读落盘 `thinkingMs`（`turn-activity.sumThinkingMsInRange`），
-  // TUI 内存不再钉秒。原有单测随函数删除而删除（语义变更：旧入参边界
-  // 全部不再相关），由 `turn-activity.test.ts` 的
-  // `sumThinkingMsInRange` / `thinkingMsToSeconds` 单测覆盖新数据通路。
+  // `pinThinkingSeconds` was deleted: the fold line's thinking seconds now read
+  // the persisted `thinkingMs` (`turn-activity.sumThinkingMsInRange`) — the TUI
+  // no longer pins seconds in memory. Its old unit tests were deleted with the
+  // function (semantic change: every old input boundary is no longer
+  // meaningful), superseded by the `sumThinkingMsInRange` /
+  // `thinkingMsToSeconds` tests in `turn-activity.test.ts`.
   test("placeholder: removed-by-spec-D3", () => {
     expect(typeof formatThinkingLive()).toBe("string");
   });

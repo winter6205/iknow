@@ -1,5 +1,5 @@
 /**
- * T5 (#622 / spec session-jsonl-resume): rewind 改 head、旧链保留。
+ * rewind moves the head pointer; the old chain is retained.
  *
  * Locked here (store level):
  *   - rewindToAnchor moves the persisted head pointer to an earlier

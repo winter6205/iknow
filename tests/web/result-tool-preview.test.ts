@@ -1,12 +1,13 @@
 /**
  * tests/web/result-tool-preview.test.ts
  *
- * Web-side mirror of TUI's `resultToolPreview` rule（src/tui/tool-summary.ts T4 D4）。
- * D6 web 一致性：5 行尾部窗口 + 溢出 `… +N 行` + ANSI 透传 + 空 / 全空白 /
- * ANSI-only 不渲染。
+ * Web-side mirror of the TUI `resultToolPreview` rule (src/tui/tool-summary.ts).
+ * Web must stay consistent: 5-line tail window + overflow `… +N 行` ("+N lines")
+ * + ANSI passthrough + empty / all-whitespace / ANSI-only render nothing.
  *
- * 测试形态同构 `tests/tui/tool-summary.test.ts` 「resultToolPreview」describe
- * block（输出形态同源，便于规则一致性审计）。
+ * Test shape mirrors the "resultToolPreview" describe block in
+ * `tests/tui/tool-summary.test.ts` (same output shape, so rule-consistency
+ * audits can diff them directly).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -67,14 +68,14 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     assert.equal(p.kind, "result");
     if (p.kind !== "result") return;
     assert.equal(p.lines.length, RESULT_PREVIEW_WINDOW);
-    // 尾部 5 行:line-7..line-11
+    // tail 5 lines: line-7..line-11
     assert.equal(p.lines[0], "line-7");
     assert.equal(p.lines[4], "line-11");
     assert.equal(p.hiddenLineCount, 7);
   });
 
   it("bash 含 stderr 的 JSON envelope → 头尾拼接 + 尾部截断", () => {
-    // 8 行 (5 stdout + 3 stderr) → 5 tail = stderr 3 + stdout 末 2
+    // 8 lines (5 stdout + 3 stderr) → tail 5 = 3 stderr + last 2 stdout
     const stdout = Array.from({ length: 5 }, (_, i) => `out-${i}`).join("\n");
     const stderr = "err-0\nerr-1\nerr-2";
     const p = resultToolPreview(
@@ -142,13 +143,13 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     );
     assert.equal(p.kind, "result");
     if (p.kind !== "result") return;
-    // 颜色码不重新染色 → 原样透传,行内仍含 ESC 序列。
+    // color codes are not re-styled → passed through verbatim, lines still contain ESC sequences
     assert.equal(p.lines[0], "\x1b[31mERROR\x1b[0m line");
     assert.equal(p.lines[1], "\x1b[32mOK\x1b[0m line");
   });
 
   it("bash 单行 ANSI-strip 保护:整段 ANSI 不计列", () => {
-    // 8 行：line-0..line-7 → 取尾部 5 → line-3..line-7
+    // 8 lines: line-0..line-7 → keep tail 5 → line-3..line-7
     const stdout = Array.from({ length: 8 }, (_, i) =>
       i % 2 === 0 ? `\x1b[31mline-${i}\x1b[0m` : `line-${i}`
     ).join("\n");
@@ -165,7 +166,7 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 
   it("bash ANSI 序列不被切断（行级截断不切字符,仅按行数）", () => {
-    // 单行含多个 SGR:行内整体保留
+    // single line with multiple SGR sequences: kept intact within the line
     const stdout = "\x1b[31m\x1b[1m\x1b[4mUNDERLINE_RED_BOLD\x1b[0m";
     const p = resultToolPreview(
       "bash",

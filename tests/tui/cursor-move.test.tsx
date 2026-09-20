@@ -2,24 +2,32 @@
 /**
  * tests/tui/cursor-move.test.tsx
  *
- * PR #431/#436 用户反馈「输入框虽然能做到换行拉伸，但 ↑/↓ 无法移动光标跨行」。
+ * User feedback: "the input box can wrap and grow, but ↑/↓ cannot move the
+ * cursor across lines".
  *
- * 根因：`src/tui/prompt-input.tsx` handleKeyDown 的 up/down 分支无条件
- * `preventDefault()` 并走 hint cursor / 历史召回 —— 多行输入时光标无法跨行。
- * OpenTUI textarea 原生 move-up/move-down 动作本身是*视觉行*移动
- * （moveCursorUp → editorView.moveUpVisual，见 @opentui/core 0.5.1
- * EditBufferRenderable.moveCursorUp），因此多行时↑/↓应放行给原生处理。
+ * Root cause: handleKeyDown's up/down branch in `src/tui/prompt-input.tsx`
+ * unconditionally `preventDefault()`s and routes to hint cursor / history
+ * recall — so with multi-line input the cursor cannot cross lines. OpenTUI
+ * textarea's native move-up/move-down actions already move by visual line
+ * (moveCursorUp → editorView.moveUpVisual, see @opentui/core 0.5.1
+ * EditBufferRenderable.moveCursorUp), so with multi-line input ↑/↓ should be
+ * left to the native handler.
  *
- * 覆盖（回归保护）：
- *  1) 多行输入：光标在第 2/3 行按 ↑ → 光标跨到上一行（不调历史召回）；
- *  2) 多行输入：光标在首行按 ↓ → 光标跨到下一行（不调历史召回）；
- *  3) 单行输入：按 ↑ → 走历史召回（替换输入内容，光标位置不变，回归保护）；
- *  4) hint 可见时（输入以 / 开头）：↑/↓ 走 hint cursor（不触发历史/原生移动）；
- *  5) 单行输入光标在末行按 ↓ → 不越界、不报错（历史恢复草稿仅在有历史时）。
+ * Coverage (regression guard):
+ *  1) multi-line: cursor on line 2/3 pressing ↑ → cursor moves up a line
+ *     (history recall not called);
+ *  2) multi-line: cursor on first line pressing ↓ → cursor moves down a line
+ *     (history recall not called);
+ *  3) single-line: ↑ → history recall (replaces input content, cursor position
+ *     unchanged, regression guard);
+ *  4) when hints are visible (input starts with /): ↑/↓ drive hint cursor
+ *     (no history / native move);
+ *  5) single-line, cursor on last line pressing ↓ → no overflow, no error
+ *     (history restoring a draft only happens when history exists).
  *
- * 观察手段：`setup.renderer.getCursorState()` 的屏幕 x/y（光标在文本区
- * 内部移动时 y 变化）；历史召回通过输入框内容变化（占位消失/内容替换）
- * 区分于原生光标移动。
+ * Observation: getCursorState()'s screen x/y (y changes as the cursor moves
+ * inside the text area); history recall is distinguished from a native cursor
+ * move by the input content changing (placeholder gone / content replaced).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -44,7 +52,7 @@ interface DrivenApp {
   readonly destroy: () => Promise<void>;
   readonly typeText: (text: string) => Promise<void>;
   readonly pressArrow: (dir: "up" | "down") => Promise<void>;
-  /** 光标屏幕坐标 {x,y}（getCursorState，y=0 为屏顶）。 */
+  /** Cursor screen coords {x,y} (getCursorState; y=0 is the top of the screen). */
   readonly cursor: () => { x: number; y: number };
 }
 
@@ -82,7 +90,7 @@ async function mountAppAsync(
       height: 30,
       exitOnCtrlC: false,
       consoleMode: "disabled",
-      // Shift+Enter 需携带 shift 修饰（kitty 协议编码 [13;2u）。
+      // Shift+Enter must carry the shift modifier (kitty protocol encodes [13;2u).
       kittyKeyboard: true,
     }
   );
@@ -115,7 +123,7 @@ async function mountAppAsync(
   };
 }
 
-/** 等屏内出现期望文本（frame 轮询，avoid waitForVisualIdle 卡死）。 */
+/** Wait until the expected text appears on screen (frame polling; avoids waitForVisualIdle hangs). */
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
@@ -139,7 +147,7 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const app = await mountAppAsync([assistantResult({ texts: ["reply-a"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 输入三行（Shift+Enter 分隔）。
+    // Type three lines (Shift+Enter separates them).
     await app.typeText("第一行");
     app.setup.mockInput.pressEnter({ shift: true });
     await new Promise((r) => setTimeout(r, 100));
@@ -150,12 +158,12 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     await app.setup.renderOnce();
     await app.typeText("第三行");
 
-    // 光标在末尾（第 3 行）。按 ↑ → 光标应跨到第 2 行（y 变小）。
+    // Cursor at the end (line 3). Press ↑ → cursor should cross to line 2 (y decreases).
     const before = app.cursor();
     await app.pressArrow("up");
     const after = app.cursor();
     expect(after.y).toBeLessThan(before.y);
-    // 输入内容不变（未触发历史召回 —— 历史为空，若走历史会是 no-op）。
+    // Input content unchanged (history recall not triggered — history is empty, so history would be a no-op).
     const frame = app.setup.captureCharFrame();
     expect(frame).toContain("第三行");
     expect(frame).toContain("第二行");
@@ -167,7 +175,7 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const app = await mountAppAsync([assistantResult({ texts: ["reply-b"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 输入两行，光标在行尾（第 2 行）。↑ 先到第 1 行，再 ↓ 回第 2 行。
+    // Type two lines, cursor at end of line 2. ↑ goes to line 1, then ↓ back to line 2.
     await app.typeText("甲行");
     app.setup.mockInput.pressEnter({ shift: true });
     await new Promise((r) => setTimeout(r, 100));
@@ -178,9 +186,9 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const up = app.cursor();
     await app.pressArrow("down");
     const down = app.cursor();
-    // ↑ 后 y 减小，↓ 后 y 恢复（跨行移动，非历史召回）。
+    // After ↑ y decreases, after ↓ y recovers (cross-line move, not history recall).
     expect(down.y).toBeGreaterThan(up.y);
-    // 内容不变。
+    // Content unchanged.
     const frame = app.setup.captureCharFrame();
     expect(frame).toContain("甲行");
     expect(frame).toContain("乙行");
@@ -202,7 +210,7 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     await app.setup.renderOnce();
     await app.typeText("z行");
 
-    // 光标在末行 → 按 ↓ 不越界（y 不变），内容不变。
+    // Cursor on the last line → pressing ↓ does not overflow (y unchanged), content unchanged.
     const atEnd = app.cursor();
     await app.pressArrow("down");
     const afterDown = app.cursor();
@@ -210,7 +218,7 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const frameEnd = app.setup.captureCharFrame();
     expect(frameEnd).toContain("z行");
 
-    // ↑ 到首行，再 ↑ 不越界（内容不变）。
+    // ↑ to the first line, another ↑ does not overflow (content unchanged).
     await app.pressArrow("up");
     await app.pressArrow("up");
     await app.pressArrow("up");
@@ -225,19 +233,19 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const app = await mountAppAsync([assistantResult({ texts: ["reply-d"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 种一条历史。
+    // Seed one history entry.
     await app.typeText("hist-line");
     app.setup.mockInput.pressEnter();
     await new Promise((r) => setTimeout(r, 100));
     await app.setup.renderOnce();
 
-    // 新输入（单行草稿），然后 ↑ → 召回 hist-line。
+    // New input (single-line draft), then ↑ → recalls hist-line.
     await app.typeText("draft-new");
     const before = app.cursor();
     await app.pressArrow("up");
     await untilFrame(app.setup, (f) => f.includes("hist-line"), 8000, "recall");
     const after = app.cursor();
-    // 单行内上下移动：y 不变（历史召回只换内容不挪光标）。
+    // Single-line up/down movement: y unchanged (history recall swaps content without moving the cursor).
     expect(after.y).toBe(before.y);
 
     await app.destroy();
@@ -247,8 +255,9 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
     const app = await mountAppAsync([assistantResult({ texts: ["reply-e"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 输入 "/" 触发 hint 候选（不种历史 —— 历史种子会渲染进消息流干扰 frame 断言；
-    // 历史回归路径由上面「单行输入按 ↑」用例覆盖）。
+    // Typing "/" triggers hint candidates (no history seeded — a history seed
+    // would render into the message stream and disturb frame assertions; the
+    // history regression path is covered by the "single-line ↑" case above).
     await app.typeText("/");
     const frameHint = await untilFrame(
       app.setup,
@@ -257,7 +266,7 @@ describe("T9-fix：多行输入 ↑/↓ 移动光标跨行（PR #431/#436）", (
       "hint-shown"
     );
     expect(frameHint).not.toContain("hist-x");
-    // ↑/↓ 不把输入框内容换成历史（hint 优先），也不挪光标。
+    // ↑/↓ must not replace the input content with history (hints take priority), and must not move the cursor.
     const before = app.cursor();
     await app.pressArrow("up");
     await app.pressArrow("down");

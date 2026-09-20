@@ -1,21 +1,26 @@
 /**
- * D-α V1 graph mode T5 —— 「这是一张图，不是一次 spawn」的 e2e（spec SC5）。
+ * Graph mode e2e: "a graph, not one spawn", through the full wiring chain
+ * (`buildHarnessEngine` + real `SubAgentManager` + JSONL trace). The model
+ * side is a stub: turn 1 emits `run_graph` (two nodes, one dep edge), turn 2
+ * finishes with the condensed result. Deliberately **not** calling the
+ * execution layer from the host — what must be proven is that after entering
+ * graph mode the model really has the tool and the handler isEnabled gate
+ * correctly guards it while graph is off.
  *
- * 走完整装配链（`buildHarnessEngine` + 真 `SubAgentManager` + JSONL trace），
- * 模型侧是 stub：第一回合发 `run_graph`（两个节点、一条 dep 边），第二回合
- * 收浓缩结果收尾。刻意**不**由 host 直接调执行层 —— 要证的正是「用户进了
- * graph mode 之后，模型手上确实有这件工具 + handler isEnabled gate 在
- * graph 关时正确守门」。
+ * Four assertions:
+ *   1. with graph off promptTools still contains run_graph (resident) and
+ *      the system text never contains `run_graph` — orchestration guidance
+ *      was withdrawn from system and appended to the messages tail as a
+ *      one-line `<graph_mode>` text (stable KV-cache prefix + the single
+ *      model-facing channel for graph state);
+ *   2. one `run_graph` starts **2** workers — not a single spawn;
+ *   3. upstream output really reaches the downstream node's task text
+ *      (data flows along the dep edge);
+ *   4. spawn / state_change / stop events are all present in the JSONL
+ *      (observation floor).
  *
- * ADR-0041 / plans/model-prefix-layering.md B3 后的断言四件：
- *   1. graph 关着时 promptTools 仍含 run_graph(常驻)，system 文本永远不含
- *      `run_graph` —— 编排指引文已撤出 system,改走 loop-engine 消息尾追加
- *      `<graph_mode>` 单行文本(KV cache 前缀稳定 + 模型面看图状态唯一通道);
- *   2. 一次 `run_graph` 起了 **2 个** worker —— 不是一次 spawn;
- *   3. 上游产出真的进了下游节点的 task 文本(dep 边有数据在流);
- *   4. JSONL 里 spawn / state_change / stop 三事件齐全(SC5 观测地板)。
- *
- * 不依赖真 LLM key —— 缺 key 的 live 路径是另一回事，本条 stub 路径必须绿。
+ * No real LLM key needed — the keyless live path is a separate concern;
+ * this stub path must stay green.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -71,12 +76,13 @@ function parseJsonl(filePath: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-/** 上游节点的产出 —— 下游 task 里能否看见它，就是「有没有 dep 边」的判据。 */
+/** Upstream node's output — whether it shows up in the downstream task is the dep-edge test. */
 const UPSTREAM_OUTPUT = "FACT-42";
 
 /**
- * 假 worker：真起子进程（manager 的进程模型不 mock），按收到的 task 决定
- * 吐什么信封 —— 上游吐 FACT-42，下游把它抄回来。
+ * Fake worker: really spawns subprocesses (the manager's process model is not
+ * mocked) and picks its envelope from the received task — upstream emits
+ * FACT-42, downstream copies it back.
  */
 function makeWorkerSpawn(
   tasks: string[]
@@ -121,7 +127,7 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       await manager.shutdown();
     });
 
-    // 用户还没进 graph mode —— holder 默认关。
+    // User has not entered graph mode — holder defaults to off.
     const graphMode = createGraphModeContext();
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-graph-e2e"),
@@ -131,9 +137,11 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       cwd: root,
       subagentManager: manager,
       graphMode,
-      // 本文件验 graph mode 的 run() 现势与工具面,不验溢出退场 / 索引降档
-      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies graph mode's run() liveness and tool surface, not
+      // overflow eviction / index downgrade (dedicated tests:
+      // build-engine-tool-overflow.test.ts, disclosure-index-align/).
+      // countTokens bypassed during wiring; seam semantics are on
+      // BuildEngineOpts.skipCountTokens.
       skipCountTokens: true,
     });
     cleanup.push(async () => {
@@ -142,8 +150,9 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
     const graphAssembly = built.graphAssembly;
     assert.ok(graphAssembly, "graphMode 在场时必须透出装配快照");
 
-    // ① 关着的那次 run():工具面仍含 run_graph(常驻,handler isEnabled 缺省
-    // 恒关守门);system 文本永远不含 `run_graph`(编排段已撤出,B3 关键边界)。
+    // ① run() while graph is off: tool surface still has run_graph (resident;
+    // the handler isEnabled gate keeps it shut by default); system text never
+    // contains `run_graph` (orchestration withdrawn — the key boundary).
     graphAssembly.beginRound();
     const toolsOff = (built.deps.promptTools?.() ?? []).map((t) => t.name);
     assert.ok(
@@ -156,8 +165,9 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       `graph 关着 system 不该有编排段(B3 关键边界,内容已撤出):${systemOff}`
     );
 
-    // 用户 Shift+Tab / `/graph on` —— 下一次装配生效(同 round 工具面不变,
-    // 翻键只影响 handler isEnabled 闭包透传)。
+    // User presses Shift+Tab / `/graph on` — takes effect on the next
+    // assembly (this round's tool surface is unchanged; the flag only feeds
+    // the handler isEnabled closure).
     graphMode.setEnabled(true);
     graphAssembly.beginRound();
     const toolsOn = (built.deps.promptTools?.() ?? []).map((t) => t.name);
@@ -165,19 +175,20 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       toolsOn.includes("run_graph"),
       `graph 开着仍露 run_graph(handler 接受调通):${toolsOn.join(",")}`
     );
-    // ADR-0041 SC5:翻图 system 字节保持 —— 内容(开图编排指引)走 messages
-    // 尾部追加的 `<graph_mode>` 单行文本(loop-engine appendGraphModeChange),
-    // 不再进 system 段。
+    // System bytes stay stable across the graph toggle: the content
+    // (graph-on orchestration guidance) travels in the one-line
+    // `<graph_mode>` text appended to the messages tail
+    // (loop-engine appendGraphModeChange), never in the system prompt.
     const systemOn = (await built.deps.system?.()) ?? "";
     assert.equal(systemOn, systemOff, "graph 翻转不破坏 system 字节");
     assert.ok(
       !systemOn.includes("run_graph"),
       `graph 开着 system 仍不该含 run_graph:${systemOn}`
     );
-    // 编排段不得把模块路径写进模型 prompt(spec Boundaries)。
+    // Orchestration guidance must not leak module paths into the model prompt.
     assert.ok(!systemOn.includes("src/harness/graph"));
 
-    // ② 模型这一回合发 run_graph：两节点、一条 dep 边。
+    // ② This turn the model emits run_graph: two nodes, one dep edge.
     const stub = createStubModel({
       responses: [
         assistantResult({
@@ -220,7 +231,7 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.finalText, "graph settled");
 
-    // ③ 两个 worker（不是一次 spawn），且上游产出进了下游 task。
+    // ③ Two workers (not one spawn), and upstream output reached the downstream task.
     assert.equal(tasks.length, 2, `expected 2 spawns, got ${tasks.length}`);
     assert.equal(tasks[0], "collect the facts");
     assert.ok(
@@ -228,12 +239,12 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       `下游 task 必须带上游产出:${tasks[1]}`
     );
 
-    // 浓缩结果回到父代理这一回合。
+    // The condensed result comes back into the parent agent's turn.
     const joined = seenToolResults.join("\n");
     assert.match(joined, /research/);
     assert.match(joined, new RegExp(UPSTREAM_OUTPUT));
 
-    // ④ trace 三事件（spawn / state_change / stop），且 run_graph 落 tool_call。
+    // ④ Three trace events (spawn / state_change / stop), and run_graph lands as a tool_call.
     const lines = parseJsonl(join(traceDir, "graph-e2e.jsonl"));
     const byType = (t: string): Array<Record<string, unknown>> =>
       lines.filter((l) => l["record_type"] === t);
@@ -245,7 +256,7 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       toolCalls.includes("run_graph"),
       `tool_call 应含 run_graph:${toolCalls.join(",")}`
     );
-    // 图里没有一次 spawn_subagent —— 编排走的是 run_graph 这条路。
+    // No single spawn_subagent in the trace — orchestration went through run_graph.
     assert.ok(!toolCalls.includes("spawn_subagent"));
   }, 60_000);
 });

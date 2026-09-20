@@ -134,15 +134,18 @@ function toolRoundTrips(pairCount: number, chars: number): unknown[] {
 const NARROWING_PAGE_MESSAGES = toolRoundTrips(2, 500);
 
 /**
- * 一页要多少条记录才真越过 `TRACE_OUTPUT_BACKSTOP`（实测本夹具：一条投影记录
- * ≈ 1,200 字符 ⇒ 24 条 ≈ 28.8 KB，收窄后 16 条 ≈ 19.3 KB）。宽度是夹具的属性，
- * 预算是核与 MCP 面共用的那一个值，所以这里只引用常量，不再抄一份数字。
+ * How many records make one page actually cross `TRACE_OUTPUT_BACKSTOP`
+ * (measured with this fixture: one projected record ≈ 1,200 chars ⇒ 24 ≈
+ * 28.8 KB, narrowed to 16 ≈ 19.3 KB). Width is a fixture property; the budget
+ * is the single value shared by core and the MCP face, so only the constant
+ * is referenced here, not a copied number.
  */
 const NARROWING_PAGE_RECORD_COUNT = 24;
 
 /**
- * 一条记录要多少个 400 字符字段才单独装不进预算（实测 ≈ 416 字符/字段 ⇒ 60 个
- * ≈ 25.1 KB > `TRACE_OUTPUT_BACKSTOP`）。收不窄到零的判据要吃这个宽度。
+ * How many 400-char fields make one record alone too wide for the budget
+ * (measured ≈ 416 chars/field ⇒ 60 ≈ 25.1 KB > `TRACE_OUTPUT_BACKSTOP`).
+ * The "narrowing never reaches zero" criterion has to eat this width.
  */
 const UNFITTABLE_FIELD_COUNT = 60;
 
@@ -195,7 +198,7 @@ function envelope(json: string): ToolPageEnvelope {
 }
 
 /**
- * SC14 blob-mode fixture (T7 SC18 实跑暴露的读侧残余): write `message` as a
+ * Blob-mode fixture (the read-side residue a live run exposed): write `message` as a
  * content-level blob reference exactly the way the writer side
  * (`src/harness/trace/jsonl.ts:toBlobReferences`) does — blob file at
  * `<convDir>/blobs/<sha>` with payload `{"kind":"str"|"blocks","v":content}`,
@@ -230,10 +233,11 @@ const MARKER = "...[truncated]";
 
 describe("query_trace traceserver core (T7)", () => {
   describe("assistant projection (v1.2)", () => {
-    // spec v1.2 判据 (b): llm_call 投影新增 `last_assistant_preview` = 最后一条
-    // role==="assistant" 消息的预览，截断帽沿复用既有 `preview()` 的
-    // QUERY_TRACE_PREVIEW_CAP=400。无 assistant 消息的 llm_call -> 字段**缺席**
-    // （合法态，非错误）。
+    // Role-projection criterion (b): the llm_call projection gains
+    // `last_assistant_preview` = the preview of the LAST role==="assistant"
+    // message, truncation cap reusing the existing `preview()`'s
+    // QUERY_TRACE_PREVIEW_CAP=400. An llm_call with no assistant message ->
+    // field **absent** (a legal state, not an error).
     it("carries last_assistant_preview taken from the LAST assistant message, not the first", async () => {
       // Two distinct assistant messages, each with text content that names itself
       // -- a sliding window over the assistant tail has to land on the second
@@ -352,8 +356,8 @@ describe("query_trace traceserver core (T7)", () => {
     });
 
     it("caps last_assistant_preview at QUERY_TRACE_PREVIEW_CAP with the same marker", async () => {
-      // v1.2 判据 (b): 帽沿与 last_message_preview 同款 -- preview() 的同一段
-      // 截断语义, 同一 cap, 同一 marker. assistant 文本 500 字符, 截到 400 + 标记.
+      // Same cap as last_message_preview: one `preview()` truncation path,
+      // same cap, same marker. 500-char assistant text → 400 + marker.
       const traceDir = makeTraceDir();
       const assistantText = "a".repeat(500);
       writeSession(
@@ -397,13 +401,14 @@ describe("query_trace traceserver core (T7)", () => {
     });
   });
 
-  // SC14 in blob mode (T7 SC18 实跑暴露): 之前 inline-content 单测都过
-  // （full-mode-baseline 钉死历史 inline 形态）, 但实跑走真实写侧
-  // `createJsonlTraceService` 落的是 SC10 content-level ref 形态
-  // (`{role, content:{sha,bytes}}`), `preview()` 直接 `JSON.stringify` 把
-  // `{"sha":...}` 塞进 preview —— SC14 「preview 为正文且不含 sha 字面量」
-  // 撞穿。下面的用例钉死 blob 模式下三个 preview 字段全部走 deref 后的
-  // inline 形态, 不得再含 `sha` 字面量, 且 `last_assistant_preview` 必须在场。
+  // Blob-mode previews: the inline-content tests all passed (full-mode-baseline
+  // pins the historical inline shape), but a live run through the real writer
+  // `createJsonlTraceService` stores content-level refs
+  // (`{role, content:{sha,bytes}}`), and `preview()` then `JSON.stringify`'d
+  // `{"sha":...}` straight into the preview — breaking the "preview is prose,
+  // no sha literal" rule. The cases below pin that in blob mode all three
+  // preview fields use the dereferenced inline shape, never contain a `sha`
+  // literal, and `last_assistant_preview` must be present.
   describe("blob-mode preview deref (SC14, T7 SC18)", () => {
     it("first/last_message_preview + last_assistant_preview are deref prose, no sha literal", async () => {
       const traceDir = makeTraceDir();
@@ -433,8 +438,8 @@ describe("query_trace traceserver core (T7)", () => {
       );
       const record = parsed.records[0] ?? {};
 
-      // SC14: 三个 preview 都不含 "sha" 字面量 —— 解引用后的 inline 形态
-      // 一定走 `{role, content:"..."}`, 不得再带 blob 引用字符串。
+      // None of the three previews may contain a "sha" literal — the
+      // dereferenced inline shape is always `{role, content:"..."}`.
       const fp = record["first_message_preview"];
       const lp = record["last_message_preview"];
       const ap = record["last_assistant_preview"];
@@ -453,9 +458,9 @@ describe("query_trace traceserver core (T7)", () => {
         !/sha/.test(ap as string),
         `last_assistant_preview still contains "sha" literal: ${ap}`
       );
-      // 解引用后 content 是字符串, 序列化形态 = `{role, content:"..."}`
-      // —— 与既有 last_assistant_preview inline 形态 (query-trace-core
-      // 单测) 同形, 不引入新形状。
+      // After deref, content is a string, so the serialized form =
+      // `{role, content:"..."}` — same shape as the existing inline
+      // last_assistant_preview tests, no new shape introduced.
       assert.equal(
         ap,
         JSON.stringify({ role: "assistant", content: assistantText }),
@@ -469,8 +474,9 @@ describe("query_trace traceserver core (T7)", () => {
     });
 
     it("survives a missing blob file: messages_count 0, three previews absent (empty boundary)", async () => {
-      // 缺 blob 不抛进 turn (写侧 EXIT 继承) → preview 一律缺席, 形态
-      // 与 messages:[] 边界同形 —— 合法态, 不是错误。
+      // A missing blob must not throw into the turn (writer-side EXIT is
+      // inherited) → previews are all absent, same shape as the messages:[]
+      // boundary — a legal state, not an error.
       const traceDir = makeTraceDir();
       const ghost = {
         role: "user",

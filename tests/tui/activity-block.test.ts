@@ -1,14 +1,15 @@
 /**
  * tests/tui/activity-block.test.ts
  *
- * specs/tui-activity-block.md S2–S7 / S9 / S10：过程块纯派生
- * （messages + 未提交 live runs → activity blocks）的夹具。
- * 5 类边界：empty / negative / overflow / concurrent / exception。
+ * Fixture for specs/tui-activity-block.md S2–S7 / S9 / S10: pure derivation of
+ * activity blocks (messages + uncommitted live runs → activity blocks).
+ * Boundary classes: empty / negative / overflow / concurrent / exception.
  *
- * 数据构造助手与 tests/tui/turn-activity.test.ts 对齐（user / toolResult /
- * assistant 内容块）。失败判定不另造分类表：走真实 `toolResultStatusMap` +
- * `deriveSlot` 复刻 ChatView 的 `inFoldCountOf`（同一 SSOT），这样夹具断言的
- * 就是生产接线会看到的形态。
+ * Data-builder helpers align with tests/tui/turn-activity.test.ts. Failure
+ * detection does not build a second taxonomy: it reuses the real
+ * `toolResultStatusMap` + `deriveSlot` and replicates ChatView's
+ * `inFoldCountOf` (same SSOT), so fixture assertions see exactly what
+ * production wiring sees.
  */
 import { describe, expect, test } from "bun:test";
 import type {
@@ -26,11 +27,11 @@ import {
   type LiveToolStatus,
 } from "../../src/tui/live-tool-state.js";
 import { deriveSlot, isLiveNoise } from "../../src/tui/tool-settled.js";
-// 注：未直接用 deriveSlot，保留 import 仅为该文件原有调用；下面已用
-// isLiveNoise 统一走 live-signal revision #3/#4 入口。
+// deriveSlot import kept for this file's existing call sites; fold checks
+// below route through isLiveNoise as the single live-signal entry.
 import { toolResultStatusMap } from "../../src/tui/tool-summary.js";
 
-// ── 数据构造（与 tests/tui/turn-activity.test.ts 对齐）─────────────
+// ── data builders (aligned with tests/tui/turn-activity.test.ts) ────
 
 function user(text: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
@@ -81,26 +82,26 @@ function liveRun(
   return { id, name, status, input };
 }
 
-/** ChatView `inFoldCountOf` 的同源复刻：只数 live noise；失败 / web_* 排除。 */
+/** Same-source replica of ChatView `inFoldCountOf`: counts live noise only; failures / web_* excluded. */
 function chatViewResolver(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): (call: Readonly<{ id: string; name: string }>) => boolean {
   const statusMap = toolResultStatusMap(messages);
   return (call) => {
     if (!isLiveNoise(call.name)) return false;
-    if (!statusMap.has(call.id)) return true; // 未配对 = running
-    return statusMap.get(call.id) !== true; // 失败横切
+    if (!statusMap.has(call.id)) return true; // unpaired = running
+    return statusMap.get(call.id) !== true; // failure cuts across
   };
 }
 
 interface Fixture {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
-  /** visible 下标 → thinkingMs（缺省 0）。 */
+  /** visible index → thinkingMs (default 0). */
   readonly thinkingMs?: ReadonlyArray<number>;
   readonly start?: number;
   readonly liveThinking?: boolean;
   readonly liveRuns?: ReadonlyArray<LiveToolRun>;
-  /** 缺省 = ChatView 同源 resolver（需要 tool_result 配对才计数）。 */
+  /** Default = ChatView same-source resolver (counts only when tool_result is paired). */
   readonly inFoldCountOf?: (
     call: Readonly<{ id: string; name: string }>
   ) => boolean;
@@ -144,7 +145,7 @@ describe("deriveActivityBlocks（empty）", () => {
   });
 });
 
-// ── S2 焊：思考 + 相邻安静工具 ─────────────────────────────────────
+// ── S2 weld: thinking + adjacent quiet tools ─────────────────────────
 
 describe("S2 焊成立（思考 + 相邻安静工具）", () => {
   test("思考后直接安静工具 → 时长与 called 焊在同一标题", () => {
@@ -192,7 +193,7 @@ describe("S2 焊成立（思考 + 相邻安静工具）", () => {
   });
 });
 
-// ── S3 切开：中间有正文 ───────────────────────────────────────────
+// ── S3 split: body text in between ───────────────────────────────────
 
 describe("S3 切开成立（正文夹在思考与安静工具之间）", () => {
   test("思考 → 正文 → 安静工具 → `Thought for` / 正文 / `called` 三段分离", () => {
@@ -210,7 +211,7 @@ describe("S3 切开成立（正文夹在思考与安静工具之间）", () => {
       ["Thought for 5s", { messageIndex: 1, contentBlockIndex: 0 }],
       ["called read_file × 1", { messageIndex: 1, contentBlockIndex: 2 }],
     ]);
-    // 正文本身不进任何标题（正文由渲染层原位画）。
+    // Body text never enters any title (the render layer draws it in place).
     for (const title of titles(blocks)) {
       expect(title).not.toContain("正文段落");
     }
@@ -249,7 +250,7 @@ describe("S4 calling → called 转移", () => {
       messageIndex: 1,
       contentBlockIndex: 0,
     });
-    // 预览文本由 formatRunningToolLine 单源产出（不在此另拼模板串）。
+    // Preview text comes from formatRunningToolLine as single source (no duplicated template here).
     expect(blocks[0]?.slot).toEqual({
       kind: "tool-preview",
       text: formatRunningToolLine(run),
@@ -315,7 +316,7 @@ describe("S4 calling → called 转移", () => {
   });
 });
 
-// ── S5 新消息开新块 ───────────────────────────────────────────────
+// ── S5 one block per new message ─────────────────────────────────────
 
 describe("S5 新消息开新块", () => {
   test("两条 assistant → 两块；第二条不改第一块计数", () => {
@@ -373,7 +374,7 @@ describe("S5 新消息开新块", () => {
   });
 });
 
-// ── S6 失败件不进块计数 ───────────────────────────────────────────
+// ── S6 failed items are not counted in blocks ────────────────────────
 
 describe("S6 失败件不进块计数", () => {
   test("失败安静工具不计数：只留时长段", () => {
@@ -417,12 +418,12 @@ describe("S6 失败件不进块计数", () => {
   });
 });
 
-// ── live-signal revision：live noise / live signal 划分（specs/tui-activity-block.md
-//  live-signal revision #3/#4/#5/#8）───────────────────────────────────────
+// ── live-signal split: live noise / live signal (specs/tui-activity-block.md
+//  live-signal revisions) ──────────────────────────────────────────────
 
 describe("live-signal revision：weldable = live noise only", () => {
   test("live web_search running → 不画 'calling web_search × 1' 块（live signal 实卡）", () => {
-    // spec revision #4：web_search / web_fetch 永不进 `calling`/`called`。
+    // Per spec, web_search / web_fetch never enter `calling`/`called`.
     const blocks = derive({
       messages: [user("q")],
       liveRuns: [liveRun("t1", "web_search", "running", { query: "hi" })],
@@ -431,7 +432,7 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("live grep running → 'calling grep × 1' 块 + tool-preview 槽", () => {
-    // spec revision #3：grep 是 live noise，进 unanchored 块。
+    // Per spec, grep is live noise and enters unanchored blocks.
     const run = liveRun("t1", "grep", "running", { pattern: "foo" });
     const blocks = derive({ messages: [user("q")], liveRuns: [run] });
     expect(blocks).toHaveLength(1);
@@ -443,7 +444,7 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("live 簇 grep + web_search 同段 → web_search 不在 title 计数", () => {
-    // spec revision #4：web_search 不进计数 → 块标题只列 noise 名。
+    // web_search is not counted → block title lists noise names only.
     const blocks = derive({
       messages: [user("q")],
       liveRuns: [
@@ -455,10 +456,11 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("history 已落 grep（tool_result 配对）+ 仍 running → 'calling grep' 进块", () => {
-    // 历史 tool_use 已进 transcript，但 liveRuns 同 id 仍 running →
-    // 块由 history 累积 + resolveLiveRunning 命中（id 匹配）→ calling。
-    // 用 `inFoldCountOf: () => true` 复刻 ChatView 生产解析器在 unpaired
-    // 路径下走 `isLiveNoise`（grep 仍属 noise → 真）的语义。
+    // Historical tool_use is already in the transcript, but the same-id
+    // liveRun is still running → block accumulates from history +
+    // resolveLiveRunning hit (id match) → calling.
+    // `inFoldCountOf: () => true` replicates ChatView's production resolver
+    // taking the `isLiveNoise` path for unpaired calls (grep is noise → true).
     const messages = [
       user("q"),
       assistant([thinkingBlock(), toolUseBlock("t1", "grep")]),
@@ -474,7 +476,7 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("history 失败 grep（tool_result is_error）→ 不进块计数（仍走 failure overlay）", () => {
-    // 失败件 = 横切，spec S4 / failure overlay。S6 已锁「失败安静工具不计数」。
+    // Failed items cut across (spec S4 / failure overlay); S6 already pins "failed quiet tools are not counted".
     const messages = [
       user("q"),
       assistant([thinkingBlock(), toolUseBlock("t1", "grep")]),
@@ -485,9 +487,10 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("history web_search 落定 → 不进块计数（live-signal 实卡路径）", () => {
-    // live-signal revision #4：web_search 永不进 `calling`/`called` ——
-    // 即使已配对（settled）也走实卡。块由 thinking 撑起，标题仅时长；
-    // 实卡标题 `Search <query>` 在 MessageBlocks 抽出（不属块）。
+    // web_search never enters `calling`/`called` — even when settled it
+    // renders as a real card. Block is carried by thinking; title shows
+    // duration only; the card title `Search <query>` is extracted in
+    // MessageBlocks (not part of the block).
     const messages = [
       user("q"),
       assistant([thinkingBlock(), toolUseBlock("t1", "web_search")]),
@@ -498,10 +501,10 @@ describe("live-signal revision：weldable = live noise only", () => {
   });
 
   test("history unpaired web_search 仍在跑 → 不进块（live noise 谓词挡 live）", () => {
-    // live noise 谓词在 ChatView `inFoldCountOf` 端只服务「unpaired」
-    // 分支：statusMap 没该 id → 走 `isLiveNoise` → web_search 假 →
-    // 不进 `calling`。本测试用 `inFoldCountOf` 走 `isLiveNoise` 同源
-    // （不复刻 `chatViewResolver`，否则仍走旧 `settledClassOf`）。
+    // The live-noise predicate serves only the "unpaired" branch in
+    // ChatView's `inFoldCountOf`: statusMap lacks the id → `isLiveNoise` →
+    // web_search false → no `calling`. This test wires `inFoldCountOf`
+    // through `isLiveNoise` directly (not `chatViewResolver`, which requires pairing).
     const messages = [
       user("q"),
       assistant([thinkingBlock(), toolUseBlock("t1", "web_search")]),
@@ -512,12 +515,12 @@ describe("live-signal revision：weldable = live noise only", () => {
       liveRuns: [liveRun("t1", "web_search", "running", { query: "hi" })],
       inFoldCountOf: (call) => isLiveNoise(call.name),
     });
-    // 无 noise 工具 → 块由 thinking 段撑起，标题仅时长；无 calling 计数。
+    // No noise tools → block carried by thinking, title shows duration only, no calling count.
     expect(titles(blocks)).toEqual(["Thought for 5s"]);
   });
 });
 
-// ── S7 keep / accent 仍块外 ───────────────────────────────────────
+// ── S7 keep / accent stay outside blocks ─────────────────────────────
 
 describe("S7 keep / accent 仍是块外实卡（只作隔开因素）", () => {
   test("keep（bash）隔开焊接，自身不进块", () => {
@@ -559,7 +562,7 @@ describe("S7 keep / accent 仍是块外实卡（只作隔开因素）", () => {
   });
 });
 
-// ── S9 槽位交接 ───────────────────────────────────────────────────
+// ── S9 slot handoff ──────────────────────────────────────────────────
 
 describe("S9 槽位交接：思考让位", () => {
   test("思考在流 → 槽归思考、标题 Thinking…", () => {
@@ -582,16 +585,17 @@ describe("S9 槽位交接：思考让位", () => {
   });
 
   test("liveThinking + 非 history noise run → 本批顺序 noise 在前、思考块在后", () => {
-    // Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–2）：
-    // 同一 burst 内 `appendLiveBlocks` 把 noise 簇先 push、思考块后 push。
-    // 还在流的思考段是本批最底；它驱动的那批动作若已出现则位于它上面。
+    // Thinking-at-bottom ordering: within one burst `appendLiveBlocks`
+    // pushes the noise cluster first and the thinking block last. A
+    // still-streaming thinking segment sits at the bottom of the batch;
+    // actions it drove, if already present, sit above it.
     const run = liveRun("tu-g-burst", "grep", "running", { pattern: "foo" });
     const blocks = derive({
       messages: [user("q")],
       liveRuns: [run],
       liveThinking: true,
     });
-    // 思考块 LAST：noise（calling grep × 1）在前，Thinking… 在后。
+    // Thinking block LAST: noise (calling grep × 1) first, Thinking… after.
     expect(blocks.map((block) => block.title)).toEqual([
       "calling grep × 1",
       "Thinking…",
@@ -601,7 +605,7 @@ describe("S9 槽位交接：思考让位", () => {
   });
 });
 
-// ── S10 边界四类 ──────────────────────────────────────────────────
+// ── S10 boundary cases ───────────────────────────────────────────────
 
 describe("S10 边界四类", () => {
   test("无思考无工具 → 无块", () => {
@@ -646,9 +650,10 @@ describe("S10 边界四类", () => {
     const messages = [
       assistant([thinkingBlock(), toolUseBlock("t1", "some_new_tool")]),
     ];
-    // `derive` 默认走 `chatViewResolver`（要求 tool_result 配对）。本用例
-    // 验证「未注册名也走 retract」—— 直接调 `deriveActivityBlocks`，让模块
-    // 自带的 `inFoldCountOf` 缺省（alwaysInFold）兜底。
+    // `derive` defaults to `chatViewResolver` (requires tool_result pairing).
+    // This case checks that unregistered names also fold — call
+    // `deriveActivityBlocks` directly so the module's built-in `inFoldCountOf`
+    // default (alwaysInFold) applies.
     expect(
       deriveActivityBlocks({
         messages,

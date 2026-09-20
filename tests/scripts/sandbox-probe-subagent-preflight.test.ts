@@ -1,11 +1,13 @@
 /**
- * scripts/sandbox-probe-subagent.ts 的上游预检契约。
+ * Upstream preflight contract for scripts/sandbox-probe-subagent.ts.
  *
- * 为什么需要:预检决定整个探针跑不跑。它必须和 worker 说同一种协议 ——
- * worker 走 `new Anthropic({ baseURL: env.llm.baseUrl })`,SDK 打的是
- * `${baseUrl}/v1/messages` + `x-api-key`。预检若改打 OpenAI 形态的
- * `${baseUrl}/chat/completions` + Bearer,在 Anthropic 形态的网关上恒 404,
- * 探针永远 not-run,且把 404 误报成 "429/quota"。
+ * Why it matters: the preflight decides whether the whole probe runs. It must
+ * speak the same protocol as the worker — the worker uses
+ * `new Anthropic({ baseURL: env.llm.baseUrl })`, so the SDK hits
+ * `${baseUrl}/v1/messages` + `x-api-key`. If the preflight instead used the
+ * OpenAI-shaped `${baseUrl}/chat/completions` + Bearer, it would 404 forever on
+ * an Anthropic-shaped gateway: the probe never runs, and the 404 gets
+ * mis-reported as "429/quota".
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -59,8 +61,8 @@ describe("sandbox-probe-subagent 上游预检", () => {
     assert.equal(classifyPreflightStatus(429), "quota");
     assert.equal(classifyPreflightStatus(401), "unauthorized");
     assert.equal(classifyPreflightStatus(403), "unauthorized");
-    // 404 是"端点打错了",不是配额 —— 旧实现把它一并叫 429/quota,
-    // 于是在 Anthropic 形态网关上误导排查方向整整 10 分钟。
+    // 404 means "wrong endpoint", not quota — the old implementation lumped it
+    // into 429/quota, sending debugging in the wrong direction on Anthropic-shaped gateways.
     assert.equal(classifyPreflightStatus(404), "not-found");
     assert.equal(classifyPreflightStatus(500), "unavailable");
   });

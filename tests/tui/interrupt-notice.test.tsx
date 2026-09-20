@@ -2,25 +2,28 @@
 /**
  * tests/tui/interrupt-notice.test.tsx
  *
- * B1: 用户打断（2026-09-18 键位迁移后为 Esc）反馈 —— app.tsx runTurnOnce 的
- * notice 双分支断言。
+ * User-interrupt (Esc) feedback — asserts both notice branches of
+ * runTurnOnce in app.tsx.
  *
- * 用 fake bridge 注入已解析的 TuiPostResult(interrupted=true/false),直接驱动
- * runTurnOnce 的 notice 呈现:
- *   - interrupted === true  → notice「已打断，checkpoint 已保存」
- *   - interrupted === false → notice「已打断（无新内容，未落 checkpoint）」
+ * A fake bridge injects a resolved TuiPostResult (interrupted=true/false) to
+ * drive the notice rendering directly:
+ *   - interrupted === true  → `已打断，checkpoint 已保存` ("interrupted, checkpoint saved")
+ *   - interrupted === false → `已打断（无新内容，未落 checkpoint）` ("interrupted (no new content, no checkpoint written)")
  *
- * 为什么 fake bridge 而非真实 bridge + 打断键序列:
- *   TUI 的打断键序列(提交 turn → Esc → abort → cancelled 落盘)涉及时序
- *   (delayMs / abort 竞态),用真实 bridge 断言「interrupted 双分支文案」会把
- *   时序噪声带进通知文案测试;而 `interrupted` 的 wire 产生已在 hub 层
- *   (tests/session-api/hub.test.ts B1 用例)与 hub-bridge 透传(既有
- *   hub-bridge.test.ts 模式)分别钉死。本测只钉 app 层的 notice 映射。
+ * Why a fake bridge instead of real bridge + interrupt key sequence:
+ *   the TUI interrupt sequence (submit turn → Esc → abort → cancelled
+ *   persisted) involves timing (delayMs / abort races); asserting the
+ *   two-branch wording through the real bridge would drag timing noise into
+ *   a notice-copy test. The wire-side production of `interrupted` is already
+ *   pinned at the hub layer (interrupt cases in tests/session-api/hub.test.ts)
+ *   and in the hub-bridge passthrough (existing hub-bridge.test.ts patterns).
+ *   This test pins only the app-layer notice mapping.
  *
- * fake bridge 需满足 TuiApp 全部调用面(listSessions / ensureSession /
- * postMessage / loadSessionFile / compactSession / rewindSession /
- * inflight / contextWindow)。消息渲染走 loadSessionFile 返回的空文件
- * (turnFinished 落盘刷新),notice 是唯一断言面。
+ * The fake bridge must satisfy every TuiApp call surface (listSessions /
+ * ensureSession / postMessage / loadSessionFile / compactSession /
+ * rewindSession / inflight / contextWindow). Message rendering reads the
+ * empty file returned by loadSessionFile (refresh after turnFinished
+ * persists), so the notice is the only assertion surface.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -54,9 +57,9 @@ async function untilFrame(
 interface FakeBridgeOptions {
   readonly stopReason: "cancelled" | "completed";
   readonly interrupted?: boolean;
-  /** cancelled + delta>0 → 落盘含 checkpoint;delta=0 → 空文件。 */
+  /** cancelled + delta>0 → persisted file contains a checkpoint; delta=0 → empty file. */
   readonly persistCheckpoint: boolean;
-  /** 模拟底层 handler 未响应 signal，status notification 应保留到收尾。 */
+  /** The low-level handler ignores the signal; the status notification should survive until wrap-up. */
   readonly backgroundRunning?: boolean;
 }
 
@@ -81,13 +84,13 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     turnCount: 0,
     jsonMode: false,
     lastUsage: null,
-    // cancelled 时 hub 一定带 interrupted;completed 走 undefined(字段缺席)。
+    // On cancelled the hub always carries interrupted; completed leaves it undefined (field absent).
     ...(opts.stopReason === "cancelled" && opts.interrupted !== undefined
       ? { interrupted: opts.interrupted }
       : {}),
   };
   const bridge: TuiBridge = {
-    hub: undefined as never, // 本测不消费 hub
+    hub: undefined as never, // not consumed by this test
     store: undefined as never,
     ensureSession: async (id) => id ?? "conv-b1",
     postMessage: async ({ onStream }) => {
@@ -134,7 +137,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
       throw new Error("continueSession unused in interrupt-notice tests");
     },
     rewindSession: async (id, _head) => {
-      // 返回未修改文件(TuiApp 未在 rewind 分支;满足类型面即可)。
+      // Returns the unmodified file (TuiApp never hits the rewind branch; just satisfies the type surface).
       void id;
       return file;
     },
@@ -186,7 +189,7 @@ async function mount(opts: FakeBridgeOptions): Promise<{
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
     typeText: async (text: string) => {
-      // 预热 + 清空(与 app.test.tsx 同模式)。
+      // Warm up + clear the input (same pattern as app.test.tsx).
       setup.mockInput.pressKey("/");
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
@@ -235,7 +238,7 @@ describe("TUI 打断 notice 双分支（B1）", () => {
       8000,
       "interrupted-true"
     );
-    // false 分支文案不得误现。
+    // The false-branch wording must not leak in.
     expect(app.setup.captureCharFrame()).not.toContain("未落 checkpoint");
 
     await new Promise((r) => setTimeout(r, 500));
@@ -260,7 +263,7 @@ describe("TUI 打断 notice 双分支（B1）", () => {
       8000,
       "interrupted-false"
     );
-    // true 分支文案不得误现。
+    // The true-branch wording must not leak in.
     expect(app.setup.captureCharFrame()).not.toContain("checkpoint 已保存");
 
     await new Promise((r) => setTimeout(r, 500));

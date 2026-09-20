@@ -1,18 +1,19 @@
 /**
- * TUI 装配层（`src/tui/deps.ts`）的 subagent trace 接线（#704 onto #721 master，
- * T5 升级为 per-agent 形态）。
+ * Subagent trace wiring in the TUI assembly layer (`src/tui/deps.ts`), in the
+ * per-agent form.
  *
- * T5 (ADR-0071 / SC8 + L2): 父会话文件夹归并
- * 后,子代理 lifecycle / content trace 改走 per-agent 形态 —
- * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`(派生公式
- * `resolveSubagentTraceDir({projectDir, conversationId})`)。
+ * ADR-0071: after the parent session-folder merge, subagent
+ * lifecycle / content trace uses the per-agent layout —
+ * `<parent session folder>/subagents/agent-<taskId>.jsonl` (derivation formula
+ * `resolveSubagentTraceDir({projectDir, conversationId})`).
  *
- * 测试锁:
- *   - 配 conversationId → spawn 三事件落 `<subagentsDir>/agent-<taskId>.jsonl`
- *     (subagentsDir 由 `<projectDir>/<conversationId>/subagents/` 派生);
- *   - traceOut 仍透传给 diagnosticsDir (stderr pointer), 见 TUI 装配层
- *     `opts.traceOut` 兼容形态;
- *   - 不配 → manager 走 NoopTrace, 不写盘。
+ * Test locks:
+ *   - conversationId set → spawn's three events land in
+ *     `<subagentsDir>/agent-<taskId>.jsonl` (subagentsDir derived from
+ *     `<projectDir>/<conversationId>/subagents/`);
+ *   - traceOut is still passed through to diagnosticsDir (stderr pointer), via
+ *     the assembly layer's `opts.traceOut` compatibility shape;
+ *   - unset → manager falls back to NoopTrace, nothing written to disk.
  */
 
 import assert from "node:assert/strict";
@@ -148,9 +149,9 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
     });
     shutdown = deps.shutdown;
 
-    // subagentsDir 由 TUI 装配层经 (projectDir, conversationId) 派生,
-    // 测试通过 mockState.capturedSubagentsDir 拿到实际值,避免硬编码
-    // resolveProjectSessionDir 的 `<basename>-<sha1[:12]>` 后缀。
+    // subagentsDir is derived by the TUI assembly layer from (projectDir, conversationId);
+    // the test reads the actual value via mockState.capturedSubagentsDir to avoid hardcoding
+    // resolveProjectSessionDir's `<basename>-<sha1[:12]>` suffix.
     assert.ok(
       mockState.capturedSubagentsDir !== undefined,
       "TUI 必须把 subagentsDir 注入 manager"
@@ -198,12 +199,13 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
   });
 
   it("不配 conversationId → TUI 派生一个 fallback conversationId, subagentsDir 仍注入 manager", async () => {
-    // T5 (ADR-0071 / SC8): TUI 入口要求
-    // 每条 spawn 都能定位到 <父会话文件夹>/subagents/。即便 caller 不传
-    // conversationId,装配层也得落一个(用 randomUUID() 兜底)让 per-agent
-    // 形态可写 —— 不再依赖 caller 配/不配。验证 capturedSubagentsDir
-    // 派生路径以 /subagents 收尾(与 conversationId 段无关:manager 拿到
-    // 派生后的 dir, 就会建目录)。
+    // ADR-0071: the TUI entry requires every spawn to locate
+    // <parent session folder>/subagents/. Even when the caller omits
+    // conversationId, the assembly layer falls back to randomUUID() so the
+    // per-agent layout is always writable — no longer dependent on caller
+    // configuration. Verify the derived capturedSubagentsDir ends with
+    // /subagents (independent of the conversationId segment: once the manager
+    // gets the derived dir, it creates it).
     const deps = await buildTuiDeps(makeBundle("sk-test-tui-trace-off"), {
       askUser: createNoAskUser(),
       userHome: join(fixtureRoot, "home"),
@@ -211,8 +213,8 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
     });
     shutdown = deps.shutdown;
 
-    // 没传 conversationId → TUI 内部 randomUUID 兜底, 仍然 derive
-    // subagentsDir 并注入 manager(captured 字段非空)。
+    // No conversationId passed → the TUI falls back to an internal randomUUID, still
+    // deriving subagentsDir and injecting it into the manager (captured field non-empty).
     assert.ok(
       mockState.capturedSubagentsDir !== undefined,
       "TUI 必须给 manager 一个 subagentsDir,即便 caller 没传 conversationId"
@@ -223,7 +225,7 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
       `subagentsDir 应以 /subagents 收尾, 实际 ${mockState.capturedSubagentsDir}`
     );
 
-    // diagnosticsDir 缺省回落到 subagentsDir(stderr pointer 跟父目录走)
+    // diagnosticsDir defaults to falling back to subagentsDir (the stderr pointer follows the parent dir)
     assert.equal(
       mockState.capturedDiagnosticsDir,
       mockState.capturedSubagentsDir

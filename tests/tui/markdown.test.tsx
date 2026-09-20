@@ -1,13 +1,15 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/markdown.test.tsx — #343 T2 Markdown 渲染验收（bun:test）。
+ * tests/tui/markdown.test.tsx — Markdown rendering acceptance (bun:test).
  *
- * 覆盖 specs/321 SC4（captureSpans 着色断言：bold / em / code /
- * strikethrough）+ Testing Strategy 五类边界中的 empty（空 / 纯空白输入）、
- * negative（未闭合 fence / 超长无换行单行 / 非法 table）、overflow（表格
- * 超宽压缩 + clipOneLine 语义截断）；围栏代码块 c4（深灰底 + 语法高亮）
- * 着色契约：背景色、关键字/字符串/注释分色、无边框字符 ┌┐└┘、无 title、
- * diff 行 +/- 复用 palette.add/del。
+ * Covers the captureSpans coloring assertions (bold / em / code /
+ * strikethrough) plus the empty (blank / whitespace-only input), negative
+ * (unclosed fence / ultra-long single line without newline / malformed
+ * table) and overflow (over-wide table compression + clipOneLine
+ * semantic truncation) boundary classes; fenced code block coloring
+ * contract (dark-gray background + syntax highlighting): background color,
+ * keyword/string/comment color separation, no border chars ┌┐└┘, no title,
+ * diff lines' +/- reuse palette.add/del.
  */
 import { expect, test } from "bun:test";
 import { act, useState } from "react";
@@ -21,7 +23,7 @@ type Setup = Awaited<ReturnType<typeof testRender>>;
 
 const WIDTH = 40;
 
-/** 渲染 markdown 并等一帧；调用方负责 destroy。 */
+/** Render the markdown and wait one frame; the caller owns destroy. */
 async function renderMd(mdText: string, width = WIDTH): Promise<Setup> {
   const setup = await testRender(<Markdown text={mdText} width={width} />, {
     width,
@@ -31,7 +33,7 @@ async function renderMd(mdText: string, width = WIDTH): Promise<Setup> {
   return setup;
 }
 
-/** captureSpans 全帧 span 扫描：找第一个满足谓词的 span。 */
+/** Full-frame captureSpans sweep: find the first span satisfying the predicate. */
 function findSpan(
   setup: Setup,
   pred: (span: {
@@ -50,14 +52,15 @@ function findSpan(
   return undefined;
 }
 
-/** captureCharFrame 逐行拆分。 */
+/** Split the captureCharFrame output line by line. */
 function frameLines(setup: Setup): string[] {
   return setup.captureCharFrame().split("\n");
 }
 
 /**
- * 两块内容行「之间」的空白行数。锚点用内容子串定位，只数两锚点之间的
- * 区间——testRender 固定高度的帧尾填充行不参与计数。
+ * Count blank lines *between* two content rows. Anchors are located by
+ * content substring and only the interval between the two anchors is
+ * counted — testRender's fixed-height trailing padding rows are excluded.
  */
 function blankLinesBetween(
   setup: Setup,
@@ -76,19 +79,19 @@ function blankLinesBetween(
   return lines.slice(a + 1, b).filter((l) => l.trim() === "").length;
 }
 
-/** 首个内容行之前的空白行数（前导空白）。 */
+/** Blank lines before the first content row (leading whitespace). */
 function leadingBlankLines(setup: Setup): number {
   const lines = frameLines(setup);
   const first = lines.findIndex((l) => l.trim() !== "");
   return first < 0 ? 0 : first;
 }
 
-/** RGBA 颜色相等（r/g/b 三通道，alpha 略）。 */
+/** RGBA color equality (r/g/b channels; alpha ignored). */
 function rgbaEq(a: RGBA, b: RGBA): boolean {
   return a.r === b.r && a.g === b.g && a.b === b.b;
 }
 
-// ── SC4：captureSpans 着色断言（bold / em / code / strikethrough）──
+// ── captureSpans coloring assertions (bold / em / code / strikethrough) ──
 
 test("bold：strong 片段带 BOLD 属性位", async () => {
   const setup = await renderMd("前缀 **BOLDWORD** 后缀");
@@ -135,7 +138,7 @@ test("strikethrough：del 片段带 STRIKETHROUGH 属性位", async () => {
   await setup.renderer.destroy();
 });
 
-// ── overflow：表格超宽压缩 + clipOneLine 语义 ──────────────────────
+// ── overflow: over-wide table compression + clipOneLine semantics ─────────
 
 test("超宽表格压缩到容器宽度内且单元格被截断", async () => {
   const longA = "a".repeat(60);
@@ -147,21 +150,21 @@ test("超宽表格压缩到容器宽度内且单元格被截断", async () => {
   ].join("\n");
   const setup = await renderMd(md);
   const frame = setup.captureCharFrame();
-  // 压缩后仍是表格结构（列分隔线在）。
+  // Still table structure after compression (column separators present).
   expect(frame).toContain("│");
-  // clipOneLine 语义：超长单元格被截断并以 … 收尾。
+  // clipOneLine semantics: over-long cells are truncated and end with …
   expect(frame).toContain("…");
-  // 原始超长内容不整串出现（已被压缩裁切）。
+  // The raw over-long content never appears in full (compressed/clipped).
   expect(frame.includes(longA)).toBe(false);
   expect(frame.includes(longB)).toBe(false);
-  // 帧内每一行的可视宽度不超过容器宽度（不溢出）。
+  // Every frame line fits the container width (no overflow).
   for (const line of frameLines(setup)) {
     expect(line.length).toBeLessThanOrEqual(WIDTH);
   }
   await setup.renderer.destroy();
 });
 
-// ── negative：畸形 markdown 不崩不溢出 ─────────────────────────────
+// ── negative: malformed markdown neither crashes nor overflows ────────────
 
 test("未闭合 fence 渲染不崩且内容可见", async () => {
   const setup = await renderMd("```ts\nconst a = 1;\nconst b = 2;");
@@ -187,19 +190,19 @@ test("非法 table（列数不齐）渲染不崩", async () => {
   await setup.renderer.destroy();
 });
 
-// ── 围栏代码块 c4（深灰底 + 语法高亮）着色契约 ─────────────────────
+// ── fenced code block c4 (dark-gray bg + syntax highlight) coloring contract ─
 
-/** c4 代码块背景色断言：所有 span 都携带 codeBlockBg 背景。 */
+/** c4 background assertion: every span carries the codeBlockBg background. */
 test("代码块 c4：所有 span 携带 codeBlockBg 背景色", async () => {
   const setup = await renderMd("```ts\nconst x = 1;\n```");
   const expectedBg = RGBA.fromHex(tuiPalette.codeBlockBg);
   const { lines } = setup.captureSpans();
-  // 至少有 span（不是空块）。
+  // At least some spans (not an empty block).
   expect(lines.some((l) => l.spans.length > 0)).toBe(true);
   for (const line of lines) {
     for (const s of line.spans) {
       if (s.text.trim() !== "" || s.text === "") {
-        // code 行内所有 span 背景 = codeBlockBg（含 padding 空格与 trailing 填充）。
+        // Every span inside a code line has bg = codeBlockBg (incl. padding spaces and trailing fill).
         expect(rgbaEq(s.bg, expectedBg)).toBe(true);
       }
     }
@@ -207,7 +210,7 @@ test("代码块 c4：所有 span 携带 codeBlockBg 背景色", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 关键字着色：export 走 syntaxKeyword。 */
+/** c4 keyword coloring: export uses syntaxKeyword. */
 test("代码块 c4：关键字走 syntaxKeyword 紫色", async () => {
   const setup = await renderMd("```ts\nexport const x = 1;\n```");
   const expected = RGBA.fromHex(tuiPalette.syntaxKeyword);
@@ -216,7 +219,7 @@ test("代码块 c4：关键字走 syntaxKeyword 紫色", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 字符串着色：双引号字符串走 syntaxString。 */
+/** c4 string coloring: double-quoted strings use syntaxString. */
 test("代码块 c4：字符串走 syntaxString 橙色", async () => {
   const setup = await renderMd('```ts\nconst s = "hello";\n```');
   const expected = RGBA.fromHex(tuiPalette.syntaxString);
@@ -225,7 +228,7 @@ test("代码块 c4：字符串走 syntaxString 橙色", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 注释着色：`// ...` 走 syntaxComment + DIM + ITALIC。 */
+/** c4 comment coloring: `// ...` uses syntaxComment + DIM + ITALIC. */
 test("代码块 c4：注释走 syntaxComment 绿 + DIM + ITALIC", async () => {
   const setup = await renderMd("```ts\n// greeting\nconst a = 1;\n```");
   const expected = RGBA.fromHex(tuiPalette.syntaxComment);
@@ -241,7 +244,7 @@ test("代码块 c4：注释走 syntaxComment 绿 + DIM + ITALIC", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 数字着色：字面数字走 syntaxNumber。 */
+/** c4 number coloring: literal numbers use syntaxNumber. */
 test("代码块 c4：数字走 syntaxNumber 浅青", async () => {
   const setup = await renderMd("```ts\nconst n = 42;\n```");
   const expected = RGBA.fromHex(tuiPalette.syntaxNumber);
@@ -250,7 +253,7 @@ test("代码块 c4：数字走 syntaxNumber 浅青", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 默认字色：非 token 的 plain 文本走 codeDefault #d4d4d4（不是 #66b8ae）。 */
+/** c4 default foreground: non-token plain text uses codeDefault #d4d4d4 (not #66b8ae). */
 test("代码块 c4：plain 文本走 codeDefault 字色", async () => {
   const setup = await renderMd("```ts\nplainword\n```");
   const expected = RGBA.fromHex(tuiPalette.codeDefault);
@@ -262,7 +265,7 @@ test("代码块 c4：plain 文本走 codeDefault 字色", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 无边框字符（borderStyle 不再是 single → 无 ┌┐└┘）。 */
+/** c4 has no border characters (borderStyle is no longer single → no ┌┐└┘). */
 test("代码块 c4：无边框字符 ┌┐└┘", async () => {
   const setup = await renderMd("```ts\nconst x = 1;\n```");
   const frame = setup.captureCharFrame();
@@ -270,25 +273,26 @@ test("代码块 c4：无边框字符 ┌┐└┘", async () => {
   expect(frame.includes("┐")).toBe(false);
   expect(frame.includes("└")).toBe(false);
   expect(frame.includes("┘")).toBe(false);
-  // 同时无 single 横线（避免误把 ─ 来自其它字符算进边框——c4 完全无边框）。
+  // Also no single-line horizontal rule chars (so ─ from other sources is never
+  // miscounted as a border — c4 has no border at all).
   expect(frame.includes("─")).toBe(false);
   await setup.renderer.destroy();
 });
 
-/** c4 无 title：语言标签不在边框行（c4 不画 lang，c5 才前置）。 */
+/** c4 has no title: the language tag never sits on a border line (c4 does not render lang on the frame). */
 test("代码块 c4：无语言标签出现在边框行", async () => {
   const setup = await renderMd("```ts\nconst x = 1;\n```");
   const frame = setup.captureCharFrame();
-  // 边框行 = 单线框 `─` + title 模式（c4 无边框 → 必然无 `─ ts` 这种行）。
+  // Border line = single-line box `─` + title pattern (c4 has no border → no `─ ts` line is possible).
   const titleLine = frameLines(setup).find(
     (l) => l.includes("─") && l.includes("ts")
   );
   expect(titleLine).toBeUndefined();
-  // `ts` 仍可作为代码内容出现一次（语言标识符），但不能挂边框字符。
+  // `ts` may still appear once as code content (a language identifier), but never attached to border chars.
   await setup.renderer.destroy();
 });
 
-/** c4 diff：行首 +/- 复用 palette.add/del。 */
+/** c4 diff: leading +/- reuse palette.add/del. */
 test("代码块 c4 diff：+ 行首 add 绿，- 行首 del 红", async () => {
   const setup = await renderMd(
     "```diff\n+ const a = 1;\n- const b = 2;\n const c = 3;\n```"
@@ -319,7 +323,7 @@ test("围栏显示窗：33 行只挂前 32 行并提示 +1 more lines", async ()
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("FENCE_LINE_32");
-  // docs/CONTEXT.md `fence display cap`：溢出文案 = `+N more lines`。
+  // docs/CONTEXT.md `fence display cap`: overflow copy = `+N more lines`.
   expect(frame).toContain("+1 more lines");
   expect(frame.includes("FENCE_LINE_33")).toBe(false);
   expect(blankLinesBetween(setup, "FENCE_LINE_32", "+1 more lines")).toBe(0);
@@ -342,33 +346,33 @@ test("围栏显示窗：32 行全挂且无溢出提示", async () => {
   await setup.renderer.destroy();
 });
 
-/** c4 空行不塌缩：含空行的代码块行数 ≥ 内容行 + padding + margin。 */
+/** c4 blank lines do not collapse: a code block with blank lines keeps ≥ content lines + padding + margin rows. */
 test("代码块 c4：含空行的代码块不塌缩行高", async () => {
   const setup = await renderMd("```ts\nconst a = 1;\n\nconst b = 2;\n```");
   const frame = setup.captureCharFrame();
-  // "const a" 与 "const b" 两行内容都在。
+  // Both "const a" and "const b" content lines are present.
   expect(frame).toContain("const a = 1;");
   expect(frame).toContain("const b = 2;");
   await setup.renderer.destroy();
 });
 
-/** tokenizeCodeLine 单测：直接验证正则 + 捕获组语义，不经 JSX 渲染。 */
+/** tokenizeCodeLine unit tests: verify regex + capture-group semantics directly, without JSX rendering. */
 test("tokenizeCodeLine：comment / string / number / keyword 分色", () => {
   const tokens = tokenizeCodeLine('// greet\nexport const s = "hi"; // tail');
-  // 期望切出：comment `// greet\n`, keyword `export`, keyword `const`,
-  // plain ` s = `, string `"hi"`, plain `; // tail`。
+  // Expected splits: comment `// greet\n`, keyword `export`, keyword `const`,
+  // plain ` s = `, string `"hi"`, plain `; // tail`.
   const kinds = tokens.map((t) => t.kind);
   expect(kinds).toContain("comment");
   expect(kinds).toContain("keyword");
   expect(kinds).toContain("string");
   expect(kinds).toContain("plain");
-  // 关键字出现至少两次（export + const）。
+  // The keyword appears at least twice (export + const).
   const kwCount = tokens.filter((t) => t.kind === "keyword").length;
   expect(kwCount).toBeGreaterThanOrEqual(2);
-  // string 捕获组包含引号。
+  // The string capture group includes the quotes.
   const strTok = tokens.find((t) => t.kind === "string");
   expect(strTok?.text).toBe('"hi"');
-  // comment 捕获组以 `//` 开头。
+  // The comment capture group starts with `//`.
   const cmtTok = tokens.find((t) => t.kind === "comment");
   expect(cmtTok?.text.startsWith("//")).toBe(true);
 });
@@ -388,7 +392,7 @@ test("tokenizeCodeLine：纯 plain 行 → 一个 plain token", () => {
   expect(tokens).toEqual([{ kind: "plain", text: "hello world" }]);
 });
 
-// ── empty 边界：空字符串 / 纯空白输入渲染不崩 ──────────────────────
+// ── empty boundary: empty string / whitespace-only input renders without crashing ─
 
 test("空字符串渲染不崩", async () => {
   const setup = await testRender(<Markdown text="" width={WIDTH} />, {
@@ -415,7 +419,7 @@ test("纯空白输入渲染不崩", async () => {
   await setup.renderer.destroy();
 });
 
-// ── 盘古之白（pangu spacing）：CJK ↔ ASCII 字母数字边界插半角空格 ───
+// ── pangu spacing: insert a half-width space at CJK ↔ ASCII alnum boundaries ─
 
 test("盘古之白：段落文本中英数字边界插空格", async () => {
   const setup = await renderMd("美股4月，CNBC的页面价格是100元");
@@ -423,7 +427,7 @@ test("盘古之白：段落文本中英数字边界插空格", async () => {
   expect(frame).toContain("美股 4 月");
   expect(frame).toContain("CNBC 的页面");
   expect(frame).toContain("价格是 100 元");
-  // 幂等输入不变：原文无空格形态不整串出现。
+  // Idempotence: the original unspaced form never appears as a whole string.
   expect(frame.includes("美股4月")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -447,7 +451,7 @@ test("盘古之白：codespan 内不插空格", async () => {
 test("盘古之白：代码围栏块内不插空格", async () => {
   const setup = await renderMd("```ts\nconst 数=1;\n```");
   const frame = setup.captureCharFrame();
-  // 代码块内 CJK ↔ 数字边界保持原样，不插空格。
+  // Inside code blocks the CJK ↔ digit boundary stays verbatim, no inserted spaces.
   expect(frame).toContain("const 数=1;");
   expect(frame.includes("数 =1")).toBe(false);
   expect(frame.includes("数= 1")).toBe(false);
@@ -457,16 +461,16 @@ test("盘古之白：代码围栏块内不插空格", async () => {
 test("盘古之白：blockquote 内 codespan 不插空格，外围照常插", async () => {
   const setup = await renderMd("> 涨幅10元 `中a文123` 尾注2行");
   const frame = setup.captureCharFrame();
-  // codespan 内容保持原样（「代码内容不碰」契约）。
+  // codespan content stays verbatim (the "never touch code content" contract).
   expect(frame).toContain("中a文123");
   expect(frame.includes("中 a 文")).toBe(false);
-  // blockquote 外围中文照常插空格。
+  // Around the codespan, blockquote text still gets spaces as usual.
   expect(frame).toContain("涨幅 10 元");
   expect(frame).toContain("尾注 2 行");
   await setup.renderer.destroy();
 });
 
-// ── 盘古之白负向锚点：排除项刻意不插空格 ────────────────────────────
+// ── pangu negative anchors: excluded contexts deliberately get no spaces ────
 
 test("盘古之白负向：表格单元格不插空格（列宽紧凑优先）", async () => {
   const setup = await renderMd(
@@ -488,7 +492,7 @@ test("盘古之白负向：html 块不插空格", async () => {
   await setup.renderer.destroy();
 });
 
-// ── 块间距：容器 gap 唯一 SSOT，相邻块恰空一行 ──────────────────────
+// ── block spacing: the container gap is the sole SSOT; adjacent blocks get exactly one blank line ─
 
 test("块间距：相邻两段之间恰 1 行空白", async () => {
   const setup = await renderMd("第一段\n\n第二段");
@@ -546,7 +550,7 @@ test("围栏显示窗：超长未闭合围栏不超过 32 行源码", async () =
   await setup.renderer.destroy();
 });
 
-// ── html 块显示窗：与 fence 同一 32 行帽（无界 <style> 不整块挂树）──
+// ── html block display window: same 32-line cap as fences (unbounded <style> must not mount wholly) ─
 
 test("html 块显示窗：>32 行 html 只挂前 32 行并提示 +N more lines", async () => {
   const body = Array.from(
@@ -559,13 +563,13 @@ test("html 块显示窗：>32 行 html 只挂前 32 行并提示 +N more lines",
   );
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  // 窗内恰 32 行：`<style>` + 前 31 行正文（HTML_CAP_LINE_31 是最后一行）。
+  // Exactly 32 lines in the window: `<style>` + the first 31 body lines (HTML_CAP_LINE_31 is the last).
   expect(frame).toContain("<style>");
   expect(frame).toContain("HTML_CAP_LINE_31");
   expect(frame).toContain("+10 more lines");
   expect(frame.includes("HTML_CAP_LINE_32")).toBe(false);
   expect(frame.includes("HTML_CAP_LINE_40")).toBe(false);
-  // html 块之后的正文不受截行影响（会话正文仍是全文）。
+  // Body text after the html block is unaffected by line truncation (session body stays complete).
   expect(frame).toContain("尾段");
   await setup.renderer.destroy();
 });

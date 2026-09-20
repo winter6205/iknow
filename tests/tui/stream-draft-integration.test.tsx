@@ -2,24 +2,27 @@
 /**
  * tests/tui/stream-draft-integration.test.tsx
  *
- * #343 T6-C：流式草稿端到端接线（spec SC8 — draft 累积 / commit / abort /
- * thinking / tool 配对 / 三段一致 UI == harness context == 落盘）。
+ * End-to-end streaming-draft wiring (draft accumulate / commit / abort /
+ * thinking / tool pairing; UI == harness context == on-disk session).
  *
- * 装配：mountAppAsync + stub deps streamEventsByStep 注入脚本化流式事件
- * （text_delta / thinking_delta / tool_call_start / tool_input_delta /
- * stop_summary）。
+ * Assembly: mountAppAsync + stubbed deps streamEventsByStep injecting scripted
+ * stream events (text_delta / thinking_delta / tool_call_start /
+ * tool_input_delta / stop_summary).
  *
- * 覆盖：
- *  1. stop_summary onStream 事件 → notice 区呈现摘要文本；
- *  2. text_delta 流式 → turn 完成 → 落盘 assistant 文本 + draft 中间态由
- *     StreamDraft.masked() 渲染（中间态由 hint cursor 断言较 fragile，本测
- *     聚焦「stream 事件能流到 onStream → notice / draft 的路径打通」）；
- *  3. T5：tool_call_start + tool_input_delta×N → running 帧含 partial 参数
- *     摘要（运行中增量实时显示），turn 完成后 finalText 落盘。
+ * Coverage:
+ *  1. stop_summary onStream event → the notice area shows the summary text;
+ *  2. text_delta streaming → turn completes → persisted assistant text; the
+ *     draft intermediate state is rendered by StreamDraft.masked() (asserting
+ *     it via the hint cursor is fragile, so this test focuses on "stream
+ *     events flow into onStream → notice / draft paths are connected");
+ *  3. tool_call_start + tool_input_delta×N → running frames carry the partial
+ *     args summary (live incremental display), and finalText persists once the
+ *     turn completes.
  *
- * 注：本测聚焦流式契约接线完整性（spec SC8）；UI == harness context ==
- * 落盘三段一致由 session-state / sessionHub / StreamDraft 共同保证，
- * 端到端断言在 tui-cross-entry.test.ts + app.test.tsx 覆盖。
+ * Note: this file pins the streaming-contract wiring only; the UI == harness
+ * context == on-disk consistency is guaranteed jointly by session-state /
+ * sessionHub / StreamDraft, with end-to-end assertions in
+ * tui-cross-entry.test.ts + app.test.tsx.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -52,7 +55,7 @@ import type { ToolExecutionResult } from "../../src/harness/tools/types.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import { createStreamDraft } from "../../src/cli/stream-draft.js";
 
-/** 事件发出后延迟返回的窗口（abort 透传）：工具运行中稳定阶段。 */
+/** Delay window after the event fires (abort pass-through): the stable tool-running phase. */
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {
@@ -71,7 +74,7 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** 用内联 adapter + noop 工具装配 LoopEngineDeps（createTuiBridge 消费）。 */
+/** Assemble LoopEngineDeps with an inline adapter + a noop tool (consumed by createTuiBridge). */
 function buildToolDeps(adapter: ModelAdapter): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);
@@ -188,7 +191,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // stop_summary 摘要应进入 notice 区
+    // the stop_summary digest should land in the notice area
     await untilFrame(
       app.setup,
       (f) => f.includes("TUI 流式收尾摘要"),
@@ -196,7 +199,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "stop-summary"
     );
 
-    // turn 完成
+    // turn done
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
 
     await app.destroy();
@@ -218,10 +221,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // turn 完成
+    // turn done
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
 
-    // 落盘验证：stream events 流经 → turn 正常完成
+    // persistence check: stream events flowed through → turn completed normally
     const list = await app.bridge.listSessions();
     expect(list).toBeDefined();
     expect(list.length).toBe(1);
@@ -229,7 +232,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     const sessionId = list[0]!.conversation_id;
     const file = await app.bridge.loadSessionFile(sessionId);
     expect(file.turnCount).toBe(1);
-    // assistant 文本（来自 finalText）：stub response 注入 "final-reply"
+    // assistant text (from finalText): the stub response injects "final-reply"
     const assistantTexts = file.messages
       .filter((m) => m.role === "assistant")
       .flatMap((m) =>
@@ -243,12 +246,14 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("thinking 留存：turn 结束 → 末条 assistant 折叠行显示 Thought for Ns", async () => {
-    // 需求：thinking 秒数结束后留存界面而不是消失。turn 结束后流式面板消失，
-    // app 层在 runTurnOnce finally 快照 thinkingSeconds → 历史消息末条 assistant
-    // 折叠行显示 `Thought for <duration>`（spec D2 英文 unit fold；秒数接棒，
-    // 不随草稿清空丢失）。
-    // 内联 adapter：发 thinking_delta 后 await 3000ms 再返回 → thinkingStartedAt
-    // 打点后经 ≥1s，thinkingSeconds() 在 finally 快照时 > 0。
+    // Requirement: the thinking seconds survive the turn end instead of
+    // vanishing. The streaming panel disappears when the turn ends, so the app
+    // layer snapshots thinkingSeconds in runTurnOnce's finally → the last
+    // assistant history fold-line shows `Thought for <duration>` (English unit
+    // fold; the seconds carry over and are not lost when the draft clears).
+    // Inline adapter: emit thinking_delta, then await 3000ms before returning →
+    // ≥1s elapses after thinkingStartedAt, so thinkingSeconds() > 0 at the
+    // finally snapshot.
     const thinkingAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -268,10 +273,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
           thinkingBlocks: [
             { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
           ],
-          // D3 (tui-display-consistency):stub adapter 注入 thinkingMs,
-          // 由 hub → store.appendEvents → projectSessionLog 写入落盘并行
-          // 数组;ChatView 末条 assistant 折叠行从 session.thinkingMs 读秒数
-          // 留存(取代已删除的 in-memory pinThinkingSeconds 副通道)。
+          // The stub adapter injects thinkingMs; hub → store.appendEvents →
+          // hub → store.appendEvents → projectSessionLog writes it into the
+          // persisted parallel arrays; the ChatView last-assistant fold line
+          // reads the seconds from session.thinkingMs for persistence
+          // (replacing the deleted in-memory pinThinkingSeconds side channel).
           thinkingMs: 3000,
         });
       },
@@ -299,10 +305,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // turn 完成。
+    // turn done.
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
-    // 末条 assistant 折叠行显示 `Thought for <duration>` 留存（N≥1，3s delay
-    // 保证秒数>0；spec D2 英文 unit fold）。
+    // The last-assistant fold line persists `Thought for <duration>` (N≥1; the
+    // 3s delay guarantees seconds>0; English unit fold).
     await untilFrame(
       app.setup,
       (f) => /Thought for \d+s/.test(f),
@@ -314,14 +320,16 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("纯思考时长：思考秒数不含 turn 启动 → 首 thinking_delta 等待时段（惰性打点）", async () => {
-    // 场景：请求发出后等待首 thinking_delta 的「等待思考」时段**不计入**思考
-    // 秒数。计时起点 = 首条 thinking_delta 惰性打点（唯一来源，2026-08-14）——
-    // 思考秒数 = 纯思考时长（首 delta → answer 开始）。用户澄清「运行时长并
-    // 不是思考时间」，等待时段由 app 层 mode 行 / `Crunched for X` 统计。
-    // 本测用内联 adapter：延迟 2600ms（等待时段）→ 发出 thinking_delta → 再
-    // 延迟 1500ms → 返回。期望：turn 完成后的折叠行留存秒数 ≈1（纯思考时长，
-    // 不含等待 2.6s；旧 turn 起点打点语义会 ≥4）。1500ms 窗口比 1000ms 加宽
-    // floor 边界余量，降低 CI 时钟抖动下的 flake 概率。
+    // Scenario: the "waiting for thinking" span between sending the request and
+    // the first thinking_delta must NOT count into the thinking seconds.
+    // Timing origin = lazy stamp on the first thinking_delta (its only source) —
+    // thinking seconds = pure thinking duration (first delta → answer start);
+    // the waiting span is accounted by the app-layer mode line / `Crunched for
+    // X`. Inline adapter: delay 2600ms (waiting span) → emit thinking_delta →
+    // delay 1500ms → return. Expect: the persisted fold-line seconds after the
+    // turn ≈ 1 (pure thinking, excluding the 2.6s wait; the old turn-start
+    // stamping would give ≥4). The 1500ms window is wider than the 1000ms floor
+    // boundary for slack against CI clock jitter.
     const thinkingAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -345,9 +353,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
           thinkingBlocks: [
             { type: "thinking", thinking: "等待后思考…", signature: "sig-2" },
           ],
-          // D3:stub adapter 注入纯思考时长 1500ms(等待 2.6s 不计入,因
-          // thinkingMs 由 anthropic-adapter 流式臂首 thinking_delta 惰性
-          // 打点起算 —— 见 spec D2 测量点)。
+          // The stub adapter injects the pure thinking duration of 1500ms (the
+          // 2.6s wait is excluded, because thinkingMs starts from the lazy stamp
+          // on the first thinking_delta of the anthropic-adapter streaming arm —
+          // that is the measurement point).
           thinkingMs: 1500,
         });
       },
@@ -375,9 +384,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // turn 完成后历史折叠行留存秒数 ≈1（首 delta 惰性打点起算，纯思考时长
-    // 1500ms；等待 2.6s 不计入）。CI 抖动容忍到 2；旧 turn 起点打点语义
-    // 会 ≥4 —— `[12]` 即证明等待时段已被排除。
+    // After the turn completes, the history fold-line persists seconds ≈1
+    // (counted from the lazy first-delta stamp; pure thinking 1500ms; the 2.6s
+    // wait excluded). CI jitter tolerated up to 2; the old turn-start stamping
+    // would give ≥4 — `[12]` is exactly the proof the waiting span is excluded.
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(
       app.setup,
@@ -390,25 +400,27 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("首 thinking_delta 惰性打点：thinkingSeconds() 基于首 delta 时刻计算", async () => {
-    // 单元级集成：createStreamDraft 直接验证计时起点 = 首条 thinking_delta
-    // 时刻（惰性打点，无 turn 起点显式打点通道）。8000ms 后秒数 =8（纯思考
-    // 时长，不含 turn 启动等待）。`Date.now()` 于 append 之后求值 → 恒晚于
-    // 打点时刻，elapsed ≥ 8000ms 成立，断言确定性成立。
+    // Unit-level integration: createStreamDraft directly verifies timing origin
+    // = the first thinking_delta moment (lazy stamp; no turn-start explicit
+    // stamping channel). After 8000ms seconds = 8 (pure thinking duration, no
+    // turn-start waiting). `Date.now()` is evaluated after append → always at or
+    // after the stamp moment, so elapsed ≥ 8000ms holds and the assertion is deterministic.
     const draft = createStreamDraft();
     draft.append({ type: "thinking_delta", text: "想" });
-    expect(draft.thinkingSeconds()).toBe(0); // 刚打点未满 1s
+    expect(draft.thinkingSeconds()).toBe(0); // just stamped, under 1s
     expect(draft.thinkingSeconds(Date.now() + 8000)).toBe(8);
     expect(draft.thinkingSeconds(Date.now() + 8_500)).toBe(8);
-    // reset → 清零。
+    // reset → cleared to zero.
     draft.reset();
     expect(draft.thinkingSeconds()).toBe(0);
   });
 
   test("tool_call_start → LiveToolRun running 过程行实时追加", async () => {
-    // 时序说明（T7 修复）：stub-model 的 streamEventsByStep 在 delay 之后
-    // 发出事件、随即返回 → turn 立即完成 → running 窗口太短抓不到。
-    // 这里用内联 adapter：发出 tool_call_start 后 await 3000ms 再返回，
-    // 制造「工具运行中、turn 未完成」的稳定窗口（archive 同款模式）。
+    // Timing note: the stub-model's streamEventsByStep emits events after the
+    // delay and returns immediately → the turn completes at once and the
+    // running window is too short to catch. The inline adapter here awaits
+    // 3000ms after tool_call_start before returning, manufacturing a stable
+    // "tool running, turn unfinished" window.
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -454,8 +466,9 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // LiveToolRun 流式阶段：render 含 running 过程行（spec D1，无 `[运行中]`；
-    // noop 无 input → detail 空 → 行内只有工具名）。
+    // LiveToolRun streaming phase: render contains running process lines (no
+    // `[运行中]` ("running") marker; noop has no input → empty detail → the line
+    // carries only the tool name).
     await untilFrame(
       app.setup,
       (f) => f.includes("noop"),
@@ -463,7 +476,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "tool-running"
     );
 
-    // turn 完成 → 落盘终稿（finalText 而非 draft 中间态）。
+    // turn done → final text persisted (finalText, not the draft intermediate state).
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(
       app.setup,
@@ -476,8 +489,9 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("T5: tool_call_start + tool_input_delta×N → running 帧含 partial 参数，完成后含最终参数", async () => {
-    // 内联 adapter：emit tool_call_start + tool_input_delta×N 后 await 3000ms
-    // 再返回 → 「工具运行中、turn 未完成」稳定窗口内 partial 摘要应出现。
+    // Inline adapter: emit tool_call_start + tool_input_delta×N, then await
+    // 3000ms before returning → the partial digest should appear within the
+    // stable "tool running, turn unfinished" window.
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -533,7 +547,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // running 阶段：partial 参数已累积 → 摘要行含 `git status`（parse 成功）。
+    // running phase: partial args already accumulated → digest line contains `git status` (parse succeeded).
     await untilFrame(
       app.setup,
       (f) => f.includes("Running 1 shell command…") && f.includes("git status"),
@@ -541,7 +555,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "tool-partial-rendered"
     );
 
-    // turn 完成 → 落盘终稿（finalText 而非 draft 中间态）。
+    // turn done → final text persisted (finalText, not the draft intermediate state).
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(
       app.setup,
@@ -554,12 +568,13 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("事件混排：草稿前工具在上、草稿后开始的工具在下（draftEpoch）", async () => {
-    // 内联 adapter：tool_call_start(早 retract) → text_delta → tool_call_start(晚 keep)。
-    // T7（specs/tui-activity-block.md S4/S6）：retract 类（web_search）单独进
-    // unanchored 活动块；keep 类（bash）走 tail `liveToolRunsBox` 与 draft 段
-    // 交错。本测试同时校验两路：
-    //  (a) web_search 进 unanchored 块（块标题 + 预览槽 `web_search · Search ?`）；
-    //  (b) keep bash 的过程行与 draft 段同 epoch 顺序（先 tool 后 draft）。
+    // Inline adapter: tool_call_start(early retract) → text_delta → tool_call_start(late keep).
+    // Per specs/tui-activity-block.md S4/S6: retract-class (web_search) goes
+    // alone into the unanchored activity block; keep-class (bash) goes through
+    // the tail `liveToolRunsBox` interleaved with draft segments. This test
+    // checks both routes:
+    //  (a) web_search enters the unanchored block (block title + preview slot `web_search · Search ?`);
+    //  (b) keep bash's process line and the draft segment share epoch order (tool first, then draft).
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -619,16 +634,17 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "mixed-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // live-signal revision #4：web_search 走 live signal 实卡 —— 不再
-    // 出 `calling web_search × 1` 块标题；tail 卡 = `web_search · Search …`。
+    // live-signal real card: web_search no longer emits the
+    // `calling web_search × 1` block title; tail card = `web_search · Search …`.
     expect(frame.includes("calling web_search × 1")).toBe(false);
     expect(frame).toContain("web_search · Search");
-    // (b) bash keep 类走 tail 工具卡，过程行 = `Running 1 shell command…`。
+    // (b) keep-class bash goes through the tail tool card; process line = `Running 1 shell command…`.
     expect(frame).toContain("Running 1 shell command…");
-    // 草稿文本在帧里可见。
+    // Draft text is visible in the frame.
     expect(frame).toContain("order-probe-draft");
-    // tail 卡（web_search）先出现：live signal 件的过程行在帧早期位置，
-    // keep bash 的过程行与草稿同 epoch —— 两者都在 tail 卡之后。
+    // The tail card (web_search) comes first: the live-signal card's process line
+    // sits early in the frame, while keep bash's process line shares its epoch
+    // with the draft — both come after the tail card.
     const iEarly = frame.indexOf("web_search · Search");
     const iDraft = frame.indexOf("order-probe-draft");
     const iLate = frame.indexOf("Running 1 shell command…");
@@ -642,10 +658,12 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("事件混排：tool→text→tool→text 第二段草稿在后续工具之下", async () => {
-    // T7：web_search（retract）进 unanchored 块；bash（keep）+ 两段草稿在
-    // tail 按 epoch 交错（晚起的 keep bash 若挂 epoch 1，落在第二段草稿
-    // 之后；缺省 epoch 0 则与首段草稿同 epoch —— tools-first 路径）。本
-    // 测用缺省 epoch（晚起 bash 仍走 epoch 0），断言尾序在尾内稳定。
+    // web_search (retract) goes into the unanchored block; bash (keep) + the two
+    // draft segments interleave by epoch in the tail (if the late bash were
+    // tagged epoch 1 it would land after the second draft segment; the default
+    // epoch 0 puts it in the same epoch as the first segment — the tools-first
+    // path). This test uses the default epoch (late bash stays epoch 0) and
+    // asserts the tail order is stable within the tail.
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -707,8 +725,8 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "two-segment-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // live-signal revision #4：web_search tail 卡先出现（`web_search · Search`），
-    // 两段草稿 + bash 都在 tail 卡之后。
+    // The web_search tail card appears first (`web_search · Search`);
+    // both draft segments + bash come after it.
     const iEarly = frame.indexOf("web_search · Search");
     const iFirst = frame.indexOf("order-seg-one");
     const iLate = frame.indexOf("Running 1 shell command…");
@@ -719,10 +737,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     expect(iSecond).toBeGreaterThanOrEqual(0);
     expect(iEarly).toBeLessThan(iFirst);
     expect(iEarly).toBeLessThan(iSecond);
-    // 两段草稿与 bash 都在 tail 卡之后；同一帧里不丢件。
+    // Both draft segments and bash are after the tail card; nothing dropped in the same frame.
     expect(iFirst).toBeGreaterThanOrEqual(0);
     expect(iSecond).toBeGreaterThanOrEqual(0);
-    // web_search 不进块标题。
+    // web_search never enters a block title.
     expect(frame.includes("calling web_search × 1")).toBe(false);
 
     await app.destroy();

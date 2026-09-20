@@ -1,11 +1,9 @@
 /**
  * tests/tui/slash.test.ts
  *
- * #343 T6-A 测试：从 archive/tui-ink/tests/slash.test.ts 迁回 tests/tui/，
- * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
- *
- * #146 slash 词表解析（SC 12：TUI 自建词表，不复用 chat processChatLine）：
- * 11 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
+ * Slash-vocabulary parsing (bun:test): the TUI owns its command list and does
+ * not reuse chat's processChatLine. Covers every static command + unknown
+ * /xxx + plain messages + empty input + /reset being unreachable by design.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -116,9 +114,10 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 /**
- * 词表 SSOT：`slashSuggestions("/")` 是词表的完整投影（空前缀 → 全部静态命令，
- * 保持插入顺序）。测试据此派生「有几条命令」「末位是哪条」，而非硬编码条数 /
- * 下标 —— 词表追加新命令时只有这一处推导跟着走，断言不需逐个手改。
+ * Vocabulary SSOT: `slashSuggestions("/")` is the full projection of the
+ * command list (empty prefix → all static commands, insertion order). Tests
+ * derive "how many commands" / "which is last" from it instead of hardcoded
+ * counts or indices — appending a command moves only this one derivation.
  */
 function vocabularyCommands(): ReadonlyArray<string> {
   return slashSuggestions("/").map((c) =>
@@ -132,17 +131,17 @@ describe("helpLines", () => {
     for (const command of vocabularyCommands()) {
       expect(joined).toContain(`/${command}`);
     }
-    // 2026-09-18 键位迁移：Esc = 打断（双击回退），Ctrl+C = 复制选中。
+    // key split: Esc = interrupt (double-press = rewind), Ctrl+C = copy selection.
     expect(joined).toContain("Esc");
     expect(joined).toContain("打断前台运行中的 turn");
     expect(joined).toContain("Ctrl+C");
     expect(joined).toContain("复制选中文本");
-    // #321 B1 fix-session：Ctrl+Y 已移除（拖选仅高亮，右键才复制）。
+    // Ctrl+Y was removed (drag-select only highlights; right-click copies).
     expect(joined).not.toContain("Ctrl+Y");
-    // #321 B1 鼠标拖选提示（拖选高亮 → 右键复制到剪贴板）。
+    // mouse drag-select hint (drag highlights → right-click copies to clipboard).
     expect(joined).toContain("鼠标拖选");
     expect(joined).toContain("右键复制到剪贴板");
-    // 无 emoji（词表层面自检）：不含常见 emoji 码区字符
+    // no emoji (vocabulary self-check): common emoji code ranges must be absent
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 });
@@ -287,8 +286,9 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
   });
 
   test("无前缀命中的 skill 不出现", () => {
-    // Task 4：typed `/echo` 精确命中唯一 skill → 消歧列表为空（zzz 既不
-    // 命中前缀也不该出现；不再返回 echo 自身——已无歧义可消）。
+    // typed `/echo` exact-hits the only skill → disambiguation list is empty
+    // (zzz matches neither the prefix nor anything else; echo itself is no
+    // longer returned — there is nothing left to disambiguate).
     expect(
       slashSuggestions("/echo", [
         { name: "echo", description: "回声" },
@@ -339,13 +339,15 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0 匹配 → null；≥2 匹
 });
 
 /**
- * fix/tui-input-issues：slashComplete 三态语义（shell-like 部分补全）。
- *  1) 唯一匹配 → `/{label} `（带尾随空格，原契约不变）；
- *  2) 0 匹配 → null；
- *  3) ≥2 匹配 → 候选补全形（`/{command}` / `/{skill.name}` 原始大小写）的
- *     最长公共前缀（LCP）有进展（长于已输入前缀，或等长但大小写不同 →
- *     规范化为候选大小写）→ 返回 LCP **不带尾随空格**（bash 式部分补全，
- *     剩余歧义由 hint UI 展示）；无进展 → null。
+ * slashComplete tri-state semantics (shell-like partial completion):
+ *  1) unique match → `/{label} ` (trailing space; original contract unchanged);
+ *  2) 0 matches → null;
+ *  3) ≥2 matches → if the longest common prefix (LCP) of the candidate
+ *     completion forms (`/{command}` / `/{skill.name}`, original casing) makes
+ *     progress (longer than the typed prefix, or same length but different
+ *     casing → normalize to the candidate's casing), return the LCP **without
+ *     trailing space** (bash-style partial completion; the hint UI shows the
+ *     remaining ambiguity); no progress → null.
  */
 describe("slashComplete: 三态语义（唯一 → 尾随空格；多匹配 → LCP 部分补全）", () => {
   test('"/q" → "/quit "（唯一匹配 + 尾随空格，回归守卫）', () => {
@@ -391,9 +393,9 @@ describe("slashComplete: 三态语义（唯一 → 尾随空格；多匹配 → 
   });
 
   test("等长但大小写不同 → 规范化为候选大小写 + 尾随空格：'/Echo' → '/Echo '（非 null）", () => {
-    // Task 4 守卫：typed 是某候选的精确命中（仅大小写不同）+ 存在更长兄弟
-    // → slashComplete 必须返回尾随空格形式（与 unique 精确命中同契约），便
-    // 于用户追加 remainder。
+    // guard: typed is an exact hit of one candidate (case differs only) and a
+    // longer sibling exists → slashComplete must return the trailing-space form
+    // (same contract as a unique exact hit) so the user can append the remainder.
     expect(
       slashComplete("/Echo", [
         { name: "Echo", description: "回声" },
@@ -494,8 +496,8 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
 });
 
 /**
- * T6 (D5):/thinking — 切换当前会话 thinking 折叠面板展开态。
- * 词表新增第 7 条;与 IKNOW_CHAT_SHOW_THINKING 对齐(chat 端折叠摘要)。
+ * /thinking — toggles the current session's thinking-fold panel.
+ * Vocabulary entry aligned with IKNOW_CHAT_SHOW_THINKING (chat-side fold summary).
  */
 describe("T6 /thinking 词表", () => {
   test("/thinking → command thinking", () => {
@@ -535,9 +537,9 @@ describe("T6 /thinking 词表", () => {
 });
 
 /**
- * #321 B1 fix-session 右键复制 — 移除 /copy 命令（#237 取消）；
- * 拖选仅高亮，右键才复制到剪贴板；Ctrl+Y 复制已移除。
- * helpLines 只保留鼠标拖选 + 右键复制说明。
+ * right-click copy — /copy command removed (cancelled upstream); drag-select
+ * only highlights, right-click copies to clipboard; Ctrl+Y copy removed.
+ * helpLines keeps only the drag-select + right-click-copy notes.
  */
 describe("#321 B1 右键复制：词表移除 /copy + Ctrl+Y", () => {
   test("/copy → unknown（不在词表）", () => {
@@ -559,7 +561,7 @@ describe("#321 B1 右键复制：词表移除 /copy + Ctrl+Y", () => {
   });
 });
 
-/** /compact — 手动压缩当前会话上下文（保留尾部，裁剪早期消息）。 */
+/** /compact — manually compact the current session context (keep tail, trim early messages). */
 describe("/compact 词表", () => {
   test("/compact → command compact", () => {
     expect(parseTuiInput("/compact")).toEqual({
@@ -594,7 +596,7 @@ describe("/compact 词表", () => {
   test("/help 覆盖 /compact 且无 emoji", () => {
     const joined = helpLines().join("\n");
     expect(joined).toContain("/compact");
-    // help 行与 column 对齐（/compact 后 3 空格起描述）。
+    // help rows align by column (description starts 3 spaces after /compact).
     expect(joined).toContain(
       "/compact   Compact context (keep tail, trim early messages)"
     );
@@ -603,8 +605,8 @@ describe("/compact 词表", () => {
 });
 
 /**
- * #337 Phase C：/skill-name [提示词] 解析 —— 精确命中 skill 名 → {name,
- * remainder}；命中静态命令 / 不匹配 → undefined（静态命令优先）。
+ * /skill-name [prompt] parsing — exact skill-name hit → {name, remainder};
+ * static-command hit / no match → undefined (static commands take priority).
  */
 describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
   const SKILLS = [
@@ -612,10 +614,11 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
     { name: "code-review", description: "代码审查" },
   ];
 
-  /** spec tui-skill-slash-catalog SC1：插件技能规范名之外，slash 还要认
-   *  catalog 登记的唯一裸名别名（`SkillEntryLike.aliases` = app.tsx 的
-   *  catalog 投影）。canonical / bare 命中同一 entry，返回的 name 恒为规范
-   *  名（invariant 2：展示与加载都优先 canonical）。 */
+  /** spec tui-skill-slash-catalog SC1: besides the plugin skill's canonical
+   *  name, slash also accepts the unique bare alias registered in the catalog
+   *  (`SkillEntryLike.aliases` = the catalog projection in app.tsx). A
+   *  canonical / bare hit resolves to the same entry, and the returned name is
+   *  always canonical (invariant 2: canonical preferred for display and load). */
   const PLUGIN_SKILLS = [
     {
       name: "arthurpower:using-agent-skills",
@@ -682,7 +685,8 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
   });
 
   test("字面量单斜杠 `/` → undefined（spec 入参契约：空 token 不成技能）", () => {
-    // `/` trim 后首 token 是空串，不是任何技能名；也不能被当成静态命令。
+    // after trim the first token of `/` is empty — not any skill name, and it
+    // must not be mistaken for a static command either.
     expect(parseSkillLoad("/", SKILLS)).toBeUndefined();
     expect(parseTuiInput("/")).toEqual({ kind: "unknown", raw: "/" });
   });
@@ -708,8 +712,8 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
   });
 
   test("invariant 5：裸名 token 后的 remainder 按**输入 token 长度**切，不按 canonical 长度", () => {
-    // `using-agent-skills` = 18 字符（+`/` = 19），canonical token 31 ——
-    // 用 skill.name.length 切会吃掉 remainder 前缀。
+    // `using-agent-skills` = 18 chars (+`/` = 19); the canonical token is 31 —
+    // cutting by skill.name.length would eat into the remainder's prefix.
     expect(parseSkillLoad("/using-agent-skills do X", PLUGIN_SKILLS)).toEqual({
       name: "arthurpower:using-agent-skills",
       remainder: "do X",
@@ -770,15 +774,17 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
 });
 
 /**
- * spec tui-skill-slash-catalog invariant 2：/help 名册只列 canonical 名 ——
- * 投影带上唯一裸名别名后，helpLines 的 `/<name>  加载技能` 段仍不出现裸名
- * （给人看的一律 `plugin:skill`）。
+ * spec tui-skill-slash-catalog invariant 2: the /help roster lists canonical
+ * names only — once the projection carries unique bare aliases, helpLines'
+ * `/<name>  加载技能` ("load skill") section still shows no bare names
+ * (human-facing entries are always `plugin:skill`).
  */
 describe("skillNamesForHelp: 带别名的 catalog 投影只吐 canonical 名", () => {
   test("aliases 不进 /help 名册", () => {
-    // 真组合：真实 catalog → 投影（真的带上裸名别名）→ 名册。手写字面量
-    // 喂不进投影，若投影哪天把裸名当 name 发出去（违反 invariant 2），
-    // 手工 fixture 的写法仍然绿。
+    // real composition: real catalog → projection (which really carries the
+    // bare alias) → roster. A hand-written literal bypasses the projection: if
+    // the projection ever emitted a bare name as `name` (violating invariant
+    // 2), a hand-made fixture would still be green.
     const catalog = createSkillCatalog([
       {
         name: "arthurpower:using-agent-skills",
@@ -801,7 +807,7 @@ describe("skillNamesForHelp: 带别名的 catalog 投影只吐 canonical 名", (
     ]);
     const names = skillNamesForHelp(projected);
     expect(names).toEqual(["arthurpower:using-agent-skills", "echo"]);
-    // helpLines 消费该名册：整行是 canonical 形态，裸名不成行。
+    // helpLines consumes the roster: full rows use the canonical form; bare names get no row.
     const joined = helpLines(names!).join("\n");
     expect(joined).toContain("/arthurpower:using-agent-skills  加载技能");
     expect(joined).not.toContain("\n/using-agent-skills  加载技能");
@@ -813,10 +819,12 @@ describe("skillNamesForHelp: 带别名的 catalog 投影只吐 canonical 名", (
 });
 
 /**
- * spec tui-skill-slash-catalog：route A 的别名投影落在 app.tsx（不动 harness
- * catalog 接口）。契约 = 别名集合在 `slash.ts` 的 `skillHeadLowers` 所用的
- * 同一 case-folding 下唯一 —— 撞车整组丢弃（宁可不可用，不可歧义）；判据与
- * 匹配若分歧，同一次按键在两种输入大小写下会落到两个条目。
+ * spec tui-skill-slash-catalog: route A puts the alias projection in app.tsx
+ * (the harness catalog interface stays untouched). Contract = the alias set is
+ * unique under the same case-folding `skillHeadLowers` in `slash.ts` uses —
+ * colliding groups are dropped wholesale (unavailable beats ambiguous); if the
+ * uniqueness judgment and the matcher ever diverged, one keypress would land
+ * on two different entries depending on input case.
  */
 describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
   const entry = (
@@ -851,7 +859,7 @@ describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
     ]);
     expect(toSlashEntries(catalog)).toEqual([
       { name: "plugA:shared", description: "描述", aliases: ["shared"] },
-      // 撞车方只有 canonical 可达：别名缺席，不是空数组。
+      // the colliding side is canonical-only: alias absent, not an empty array.
       { name: "plugB:shared", description: "描述" },
     ]);
     expect(catalog.get("shared")?.name).toBe("plugA:shared");
@@ -863,13 +871,14 @@ describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
         entry("plugA:Shared", "plugA"),
         entry("plugB:shared", "plugB"),
       ]);
-      // catalog 侧：裸名 Map 大小写敏感 → 两个大小写不同的裸名各占一槽。
+      // catalog side: the bare-name Map is case-sensitive → two differently-cased
+      // bare names each occupy a slot.
       expect(catalog.get("Shared")?.name).toBe("plugA:Shared");
       expect(catalog.get("shared")?.name).toBe("plugB:shared");
-      // 但 slash 匹配把两边都折成 "shared"（skillHeadLowers）→ 若投影只
-      // 登记「大小写精确唯一」的那条，用户输入 /shared 会落到 plugB:shared，
-      // 而 /Shared 落到 plugA:Shared —— 同一 case-folding 下两种答案。
-      // 契约：整组丢弃。
+      // but slash matching folds both to "shared" (skillHeadLowers). If the
+      // projection registered only the case-exact-unique entry, typing /shared
+      // would land on plugB:shared while /Shared lands on plugA:Shared — two
+      // answers under one case-folding. Contract: drop the whole group.
       expect(toSlashEntries(catalog)).toEqual([
         { name: "plugA:Shared", description: "描述" },
         { name: "plugB:shared", description: "描述" },
@@ -882,9 +891,9 @@ describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
         entry("plug:echo", "plug"),
       ]);
       expect(catalog.get("plug:echo")?.name).toBe("plug:echo");
-      // catalog 的裸名 Map 容忍 "Echo" 与 "echo" 共存 → 旧判据会把
-      // plug:echo 的裸名别名登记成 "echo"，与无 namespace 的 "Echo" 在
-      // slash 侧折成同一 token。
+      // catalog's bare-name Map tolerates "Echo" and "echo" coexisting; the old
+      // judgment would register plug:echo's bare alias as "echo", which folds
+      // into the same token as the namespace-free "Echo" on the slash side.
       expect(toSlashEntries(catalog)).toEqual([
         { name: "Echo", description: "描述" },
         { name: "plug:echo", description: "描述" },
@@ -901,10 +910,12 @@ describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
 });
 
 /**
- * spec skill-index-increment SC5/SC6（T3）：人侧 slash 走**可加载技能面**
- * （`catalog.loadable()`）—— 无 description 与 `disable-model-invocation` 的
- * 条目都进候选；投影取自 loadable 面而非模型索引面（后者只含有 description
- * 且未 disable 的条目）。本 describe 钉投影这一环（app.tsx:toSlashEntries）。
+ * spec skill-index-increment SC5/SC6: the human-side slash uses the
+ * **loadable-skills surface** (`catalog.loadable()`) — entries with no
+ * description and with `disable-model-invocation` both become candidates; the
+ * projection comes from the loadable surface, not the model-index surface
+ * (the latter holds only described, non-disabled entries). This describe pins
+ * the projection step (app.tsx:toSlashEntries).
  */
 describe("toSlashEntries: 可加载技能面（含无 description / disable）", () => {
   const entry = (over: Partial<SkillEntry> & { name: string }): SkillEntry => ({
@@ -915,8 +926,9 @@ describe("toSlashEntries: 可加载技能面（含无 description / disable）",
 
   test("无 description 的条目进 slash 投影（description 保持 undefined）", () => {
     const catalog = createSkillCatalog([entry({ name: "no-desc" })]);
-    // 模型索引面不含它（无 description），可加载面含它 —— 两面的分叉正是
-    // SC5 的语义：进 slash、不进模型索引。
+    // the model-index surface excludes it (no description) while the loadable
+    // surface includes it — that split is exactly SC5's semantics: in slash,
+    // not in the model index.
     expect(catalog.available().map((e) => e.name)).toEqual([]);
     expect(catalog.loadable().map((e) => e.name)).toEqual(["no-desc"]);
     expect(toSlashEntries(catalog)).toEqual([{ name: "no-desc" }]);
@@ -964,7 +976,7 @@ describe("toSlashEntries: 可加载技能面（含无 description / disable）",
   });
 });
 
-/** #337 Phase C：SlashCandidate 版按 cursor 补全（静态命令 | skill 通用）。 */
+/** SlashCandidate-based cursor completion (static commands | skills alike). */
 describe("slashCompleteFromCandidates: 按 cursor 补全 SlashCandidate", () => {
   const MIXED: ReadonlyArray<SlashCandidate> = [
     { kind: "command", command: "sessions" },
@@ -987,9 +999,9 @@ describe("slashCompleteFromCandidates: 按 cursor 补全 SlashCandidate", () => 
 });
 
 /**
- * #361 Phase D：/mcp 词表收口（append-only 末位，词表 9 → 10）。
- * 静态命令，与 parseSkillLoad 正交（命中静态词表返回 undefined，不抢
- * skill-load）；hint 描述 + helpLines 真描述。
+ * /mcp vocabulary closure (append-only at the tail). A static command,
+ * orthogonal to parseSkillLoad (static hit → undefined, never steals
+ * skill-load); real hint description + helpLines entry.
  */
 describe("#361 Phase D /mcp 词表", () => {
   test("/mcp → command mcp", () => {
@@ -1008,7 +1020,8 @@ describe("#361 Phase D /mcp 词表", () => {
   });
 
   test('"/m" 前缀 → memory / mcp / model 三个候选（按词表插入顺序）', () => {
-    // /m 是三个命令的共享前缀：memory 与 mcp 在词表中相邻，model 追加在尾。
+    // /m is the shared prefix of three commands: memory and mcp are adjacent
+    // in the vocabulary; model is appended at the tail.
     const commands = slashSuggestions("/m").map((c) =>
       c.kind === "command" ? c.command : c.name
     );
@@ -1045,7 +1058,7 @@ describe("#361 Phase D /mcp 词表", () => {
     expect(joined).toContain("/mcp");
     expect(joined).toContain("查看 MCP 服务看板");
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
-    // 静态命令优先：/mcp 精确命中词表 → parseSkillLoad 返回 undefined。
+    // static commands win: /mcp exact-hits the vocabulary → parseSkillLoad returns undefined.
     expect(
       parseSkillLoad("/mcp", [{ name: "mcp-helper", description: "x" }])
     ).toBeUndefined();
@@ -1053,10 +1066,10 @@ describe("#361 Phase D /mcp 词表", () => {
 });
 
 /**
- * #377 系列 /effort：调整思考强度。词表新增第 8 条（紧邻 /thinking 之后），
-
- * 命令本身无 arg 语义（parseTuiInput 仍判 command），level 由 parseEffortLevel
- * 单独解析：/effort <low|medium|high|xhigh|max>（5 档 concrete，不含 ""/auto）。
+ * /effort: adjust thinking effort, inserted right after /thinking.
+ * The command itself takes no arg (parseTuiInput still yields command); the
+ * level is parsed separately by parseEffortLevel:
+ * /effort <low|medium|high|xhigh|max> (5 concrete tiers, no ""/auto).
  */
 describe("#377 系列 /effort 词表", () => {
   test("/effort → command effort（parseTuiInput 仍判 command）", () => {
@@ -1167,11 +1180,12 @@ describe("#377 系列 /effort 词表", () => {
 });
 
 /**
- * ADR-0092 / SC13: `/config`（filesystem isolation 档切换） — 词表层断言。
- * 命令 SSOT 在 `src/harness/sandbox/fs-mode.ts`（T7 持有文件主体；T8 追加
- * `parseConfigCommand` / `applyFsModeCommand` / `formatFsModeStatus` /
- * `splitConfigArgs` + `ConfigCommand` / `FsModeCommandResult` / `FS_MODE_USAGE_TEXT`）。
- * 本 describe 只锁 slash.ts 词表面，与命令 SSOT 单测互补。
+ * ADR-0092: `/config` (filesystem isolation mode switch) — vocabulary-level
+ * assertions. The command SSOT lives in `src/harness/sandbox/fs-mode.ts`
+ * (`parseConfigCommand` / `applyFsModeCommand` / `formatFsModeStatus` /
+ * `splitConfigArgs` + `ConfigCommand` / `FsModeCommandResult` / `FS_MODE_USAGE_TEXT`).
+ * This describe locks only the slash.ts vocabulary surface, complementing the
+ * command SSOT's unit tests.
  */
 describe("/config 词表（ADR-0092 / SC13）", () => {
   test("parseTuiInput 认 /config（带参也命中同一命令）", () => {
@@ -1221,7 +1235,7 @@ describe("/config 词表（ADR-0092 / SC13）", () => {
   });
 });
 
-/** T4 (#690): /continue — 续跑未完成工具环（skip-append）。 */
+/** /continue — resume an unfinished tool loop (skip-append). */
 describe("/continue 词表", () => {
   test("/continue → command continue", () => {
     expect(parseTuiInput("/continue")).toEqual({
@@ -1302,8 +1316,8 @@ describe("/memory 词表", () => {
 });
 
 /**
- * /model 词表（ADR-0093 / specs/tui-model-command.md SC7）：新增命令必须走
- * 词表原路（parse → 候选 → 补全 → help / hint），不另开旁路。
+ * /model vocabulary (ADR-0093): a new command must go the regular vocabulary
+ * route (parse → candidates → completion → help / hint), no side channels.
  */
 describe("/model 词表", () => {
   test("/model → command model", () => {
@@ -1384,13 +1398,14 @@ describe("/model 词表", () => {
 });
 
 /**
- * Task 4（plans/tui-chrome-interaction.md）：slash hint 仅作**消歧**。
- *  - 唯一精确命中（skill 或静态命令）→ 空列表（即便没有更长兄弟）。
- *  - 精确命中 + 空格/remainder → 空列表（即便有更长兄弟）。
- *  - 前缀歧义（`/way` → 两个 skill）→ 列表保留。
- *  - 精确命中无空格但有更长兄弟 → 只显示更长兄弟，不显示已完整的名字。
- *  - mixed-case 精确命中仍隐藏（大小写不敏感匹配契约）。
- *  Tab/Enter 路径（slashComplete）保持不变 —— 见下方 slashComplete 测试。
+ * The slash hint list is for **disambiguation only**:
+ *  - unique exact hit (skill or static command) → empty list (even with no longer sibling).
+ *  - exact hit + space/remainder → empty list (even with longer siblings).
+ *  - prefix ambiguity (`/way` → two skills) → list kept.
+ *  - exact hit without a space but with a longer sibling → show only the
+ *    longer sibling, not the already-complete name.
+ *  - mixed-case exact hit still hidden (case-insensitive matching contract).
+ * Tab/Enter path (slashComplete) unchanged — see the slashComplete tests below.
  */
 describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only）", () => {
   test("unique `/skillname`（skill 唯一精确命中，无 remainder）→ 0 hint rows", () => {
@@ -1417,7 +1432,7 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
   });
 
   test("unique `/static-cmd`（静态命令唯一精确命中）→ 0 hint rows", () => {
-    // /quit 在 prefix=/q 时唯一 → 完整命中 /quit 后必须隐藏。
+    // /quit is unique at prefix=/q → once /quit is fully typed it must hide.
     expect(slashSuggestions("/quit")).toEqual([]);
   });
 
@@ -1453,7 +1468,7 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
   });
 
   test("前缀歧义 `/e`（exit + effort 两个静态命令）→ 列表保留", () => {
-    // 回归守卫：保留 /e 的二义性行为（不与 Task 4 冲突）。
+    // regression guard: keep /e's ambiguity behavior (no conflict with the disambiguation rule).
     expect(slashSuggestions("/e")).toEqual([
       { kind: "command", command: "exit" },
       { kind: "command", command: "effort" },
@@ -1479,15 +1494,15 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
   });
 
   test("精确命中 + 更长兄弟（静态命令：/comp 不会精确命中任何命令 → 保留 prefix 行为）", () => {
-    // /comp 是 compact 的前缀（不是精确），slashSuggestions 必须保留。
+    // /comp is a prefix of compact (not an exact hit) → slashSuggestions must keep it.
     expect(slashSuggestions("/comp")).toEqual([
       { kind: "command", command: "compact" },
     ]);
   });
 
   test("精确命中静态命令 + 同前缀 skill 兄弟 → 只显示 skill 兄弟", () => {
-    // typed `/compact`：精确命中静态 compact（已完整），但 skill compact-wizard
-    // 仍以 compact 为前缀（更长兄弟）→ 只保留它。
+    // typed `/compact`: exact hit on static compact (already complete), but skill
+    // compact-wizard still extends compact (longer sibling) → keep only it.
     expect(
       slashSuggestions("/compact", [
         { name: "code-review", description: "代码审查" },
@@ -1534,7 +1549,7 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
       { kind: "skill", name: "way-foo", description: "foo" },
       { kind: "skill", name: "way-bar", description: "bar" },
     ]);
-    // 再次调用 a 应返回相同结果（无状态）。
+    // calling again must return the same result (stateless).
     expect(slashSuggestions("/echo", skills)).toEqual(a);
   });
 
@@ -1572,11 +1587,13 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
 });
 
 /**
- * spec tui-skill-slash-catalog SC1 / SC3：裸名别名进候选 + Tab 补全。
- *  - 前缀过滤同时看 canonical 与 aliases（大小写不敏感）；
- *  - **只**发规范名候选（同一 skill 不因裸名多出一条 —— 否则唯一命中会
- *    退化成 ≥2 匹配的 LCP 分支，Tab 补不出尾随空格）；
- *  - Tab（slashComplete）唯一裸名匹配 → 补出规范名 + 尾随空格。
+ * spec tui-skill-slash-catalog SC1 / SC3: bare aliases enter candidates + Tab
+ * completion.
+ *  - prefix filtering looks at both canonical and aliases (case-insensitive);
+ *  - emit **only** the canonical candidate (one skill must not appear twice via
+ *    its bare name — otherwise a unique hit degrades into the ≥2-match LCP
+ *    branch and Tab can't produce the trailing space);
+ *  - Tab (slashComplete) on a unique bare-name match → canonical name + trailing space.
  */
 describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", () => {
   const PLUGIN_SKILLS = [
@@ -1630,9 +1647,10 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
   });
 
   test("canonical 与裸名同时前缀命中 → 只发一条候选（重复条会把唯一匹配退化成 LCP）", () => {
-    // 插件名与裸名共享前缀（code:code-review / code-review）：若按「名字命中
-    // 一次 push 一条」，同一 skill 会出两条候选 → matches.length = 2 → Tab
-    // 走 LCP 分支，补不出尾随空格。
+    // plugin name and bare name share the prefix (code:code-review /
+    // code-review): pushing once per name-match would yield two candidates for
+    // one skill → matches.length = 2 → Tab takes the LCP branch and can't
+    // produce the trailing space.
     const overlapping = [
       {
         name: "code:code-review",
@@ -1640,7 +1658,7 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
         aliases: ["code-review"],
       },
     ];
-    // toMatchObject 对数组同时钉条数（多一条即 fail）。
+    // toMatchObject on an array also pins the row count (one extra row fails).
     expect(slashSuggestions("/code", overlapping)).toMatchObject([
       { kind: "skill", name: "code:code-review", description: "审查" },
     ]);
@@ -1715,10 +1733,11 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
   });
 
   test("agents 不进斜杠：真实插件布局里 agents 目录不进 skill catalog", async () => {
-    // spec invariant 6 / CONTEXT 「agents 不进斜杠」。装配 = 真实插件布局：
-    // 同一插件下 skills/ 与 agents/ 并列，scanner 只吃 skills 根 —— 若哪天
-    // 扫描把 agents 目录一起收进 catalog（或 slash 侧另开一条 agent 路径），
-    // 下面的断言即失败。
+    // spec invariant 6 / CONTEXT 「agents 不进斜杠」 ("agents never enter the
+    // slash"). Assembly = real plugin layout: skills/ and agents/ side by side
+    // under one plugin, the scanner only consumes the skills root — if a future
+    // scan swept agents/ into the catalog (or slash opened its own agent path),
+    // the assertions below fail.
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-agents-"));
     const skillsRoot = join(root, "arthurpower", "skills");
     await mkdir(join(skillsRoot, "using-agent-skills"), { recursive: true });
@@ -1743,8 +1762,10 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
       }).scan();
       const catalog = createSkillCatalog(entries);
       const projected = toSlashEntries(catalog);
-      // agent 名不在投影：canonical 或裸名都进不了候选/补全。
-      // catalog 本身不含 agent：agents/ 是另一条发现路径，不进 skill 扫描。
+      // agent names absent from the projection: neither canonical nor bare can
+      // enter candidates/completion.
+      // the catalog itself holds no agents: agents/ is a separate discovery
+      // path, outside the skill scan.
       expect(catalog.all().map((e) => e.name)).toEqual([
         "arthurpower:using-agent-skills",
       ]);
@@ -1769,10 +1790,11 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
 });
 
 /**
- * Task 4 守卫：Tab/Enter 路径（slashComplete + slashCompleteFromCandidates）
- * 保持不变 —— 即使 slashSummary 返回空，slashComplete 也必须按原契约
- * 工作（`/echo` 唯一精确命中 → `/echo `）。这意味着 slashComplete 必须
- * 使用独立于 slashSummary 的全量候选枚举，Tab 行为不被显示过滤影响。
+ * Guard: the Tab/Enter path (slashComplete + slashCompleteFromCandidates)
+ * stays unchanged — even when slashSummary returns empty, slashComplete must
+ * work by the original contract (`/echo` unique exact hit → `/echo `). So
+ * slashComplete must enumerate full candidates independently of slashSummary;
+ * Tab behavior is never affected by the display filter.
  */
 describe("Task 4 守卫：slashComplete 不受显示过滤影响", () => {
   test("unique `/echo` → `/echo `（精确命中 + 尾随空格）", () => {
@@ -1829,9 +1851,9 @@ describe("Task 4 守卫：slashComplete 不受显示过滤影响", () => {
 });
 
 /**
- * Task 4 守卫：slashCompleteFromCandidates 的 cursor 行为。
- * 这是 hint UI 按选中项补全路径 —— 消费方（app.tsx）传入过滤后的
- * slashSummary 列表，所以 cursor 越界处理必须保持。
+ * Guard: slashCompleteFromCandidates cursor behavior. This is the hint UI's
+ * complete-by-selected-entry path — the consumer (app.tsx) passes the filtered
+ * slashSummary list, so out-of-range cursor handling must stay intact.
  */
 describe("Task 4 守卫：slashCompleteFromCandidates 保持原契约", () => {
   test("空列表 + cursor=0 → null", () => {

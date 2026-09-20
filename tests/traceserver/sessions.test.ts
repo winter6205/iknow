@@ -156,9 +156,10 @@ describe("listSessions — agent_version extraction", () => {
   });
 
   it("extracts agent_version when the session root is the LAST line (run-end write)", () => {
-    // 真实 writer(loop-engine run 末尾 recordSession)把 session 根写在最后一行,
-    // 首行是 llm_call/turn。读首行会使 agent_version 恒 absent —— 这是 SC-R 18
-    // 修复的回归靶:必须扫描全文件找 record_type==="session"。
+    // The real writer (recordSession at run end in loop-engine) writes the session
+    // root as the LAST line, with llm_call/turn first. Reading only the first
+    // line would leave agent_version permanently absent — the regression target
+    // of this fix: scan the whole file for record_type==="session".
     writeSessionFile(
       "uuid-last",
       '{"record_type":"llm_call","llm_call_id":"l1"}\n' +
@@ -379,7 +380,7 @@ describe("listSessions — wire shape", () => {
   });
 });
 
-// -- 最近会话推导（panel 与 tool 共用的唯一 owner） -----------------------------
+// -- newest-session derivation (the single owner shared by panel and tool) ------
 
 function touch(conversationId: string, atEpochSeconds: number): void {
   const at = new Date(atEpochSeconds * 1000);
@@ -458,7 +459,7 @@ describe("newestConversationId — the default both faces share (SC-R 12)", () =
   });
 });
 
-// -- 分页顺序（list_sessions tool face 的确定性页） -----------------------------
+// -- paging order (the deterministic page of the list_sessions tool face) -------
 
 /**
  * `sessionsByRecency` is `listSessions` turned into a page order. It lives beside
@@ -478,7 +479,7 @@ describe("sessionsByRecency — the deterministic page order", () => {
     atEpochSeconds: number,
     body = sessionLine()
   ): void {
-    // T6 (SC16): the dir is the **baseDir** (parent of `projects/`). Each
+    // The dir is the **baseDir** (parent of `projects/`). Each
     // session sits under `<baseDir>/projects/<slug>/<convId>/trace.jsonl`
     // with its own project sub-tree, so the mtime setters can target each
     // session without aliasing.

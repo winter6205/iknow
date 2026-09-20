@@ -2,22 +2,26 @@
 /**
  * tests/tui/paste-fast-no-loss.test.tsx
  *
- * #B01 回归：外置语音输入快速 paste 不丢字 / 不错位。
+ * Regression: fast paste from external voice input must not drop or misplace chars.
  *
- * 2026-08-21 用户实测报告：外置语音输入把识别好的文字一次性传到 TUI 输入框
- * 时（典型 5ms 间隔连续多段），文字被吞或错位覆盖。根因：app.tsx usePaste
- * handler 调 `setInputValue((prev) => prev + text)` 但不 `event.preventDefault`，同
- * 一 paste 事件被 path A（global usePaste）和 path B（textarea native
- * handlePaste）双驱动改 inputValue，跨 React 18 commit 周期错位导致中间
- * 段被吞；叠加 `useEffect[props.value]` 反复 setText 重置 buffer → 错位覆盖。
+ * User field report: when voice input pushed recognized text into the TUI
+ * input in one burst (typically several segments at 5ms intervals), segments
+ * were swallowed or overwritten out of order. Root cause: the app.tsx usePaste
+ * handler called `setInputValue((prev) => prev + text)` without
+ * `event.preventDefault`, so one paste event drove inputValue twice — path A
+ * (global usePaste) and path B (textarea native handlePaste) — misaligned
+ * across React 18 commit cycles, swallowing middle segments; compounded by
+ * `useEffect[props.value]` repeatedly setText-ing (resetting the buffer) →
+ * misaligned overwrite.
  *
- * 修复：usePaste handler 在 arm 窗口外路径开头 `event.preventDefault()`，
- * 阻断 emitWithPriority 的 renderable listener，让 path A 单源负责 paste。
+ * Fix: the usePaste handler calls `event.preventDefault()` at the top of the
+ * out-of-arm-window path, blocking emitWithPriority's renderable listener, so
+ * path A is the single source for paste.
  *
- * 覆盖：
- *  1. 连续 4 段 paste（间隔 5ms，模拟语音输入吐字）→ buffer 包含全部 4 段；
- *  2. 单次 paste → buffer 包含 paste 内容（与 copy-paste-block.test.tsx case 3
- *     一致，防止过度修复破坏基本路径）。
+ * Coverage:
+ *  1. four back-to-back pastes (5ms apart, simulating voice output) → buffer holds all 4;
+ *  2. single paste → buffer holds the pasted content (matches
+ *     copy-paste-block.test.tsx case 3, guarding against over-fix breaking the basic path).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -87,9 +91,10 @@ describe("B01: fast paste 不丢字 / 不错位", () => {
   test("连续 4 段 paste (50ms 间隔) → buffer 包含全部 4 段", async () => {
     const setup = await renderApp();
     try {
-      // 模拟外置语音输入：4 段短文本间隔 50ms 连续 paste（真实语音设备
-      // 典型 50-200ms 间隔）。修复前会复现「中间段被吞」—— path A 与 path B
-      // 双驱动时 React 18 commit 周期错位导致丢字。
+      // simulate external voice input: 4 short segments pasted back to back at
+      // 50ms (real devices typically 50-200ms). Before the fix this
+      // reproduced "middle segments swallowed" — path A + path B double-driving
+      // loses chars across React 18 commit cycles.
       const segments = ["第一段", "第二段", "第三段", "第四段"];
       for (const seg of segments) {
         await setup.mockInput.pasteBracketedText(seg);
@@ -100,12 +105,12 @@ describe("B01: fast paste 不丢字 / 不错位", () => {
       await setup.waitForVisualIdle();
 
       const { plainText } = findPromptInputTextarea(setup);
-      // 关键断言：4 段全部进 buffer，没有「第二段」或「第四段」被吞。
+      // key assertion: all 4 segments reach the buffer, none swallowed.
       expect(plainText).toContain("第一段");
       expect(plainText).toContain("第二段");
       expect(plainText).toContain("第三段");
       expect(plainText).toContain("第四段");
-      // 顺序保持：paste 顺序进 buffer。
+      // order preserved: segments enter the buffer in paste order.
       const order = [
         plainText.indexOf("第一段"),
         plainText.indexOf("第二段"),

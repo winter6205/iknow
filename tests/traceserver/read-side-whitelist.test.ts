@@ -59,7 +59,7 @@ describe("T7 traceserver read-side contract", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "iknow-traceserver-t7-"));
-    // T6 (SC16): 会话落两级树 `<tmpDir>/projects/<slug>/c1/trace.jsonl`。
+    // The session lands in the two-level tree `<tmpDir>/projects/<slug>/c1/trace.jsonl`.
     tracePath = join(
       tmpDir,
       "projects",

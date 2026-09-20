@@ -1,16 +1,17 @@
 /**
- * spec/network-egress-allowlist.md SC12 配置层契约:
- *  - 空 allowedDomains → 全拒（fail-closed），空数组是合法态不是错误
- *  - 非字符串条目 / trim 后为空 / allowed 中裸 `*` → 丢弃该条目 + 警告
- *  - `:port` 越界（0 / >65535 / 非数字 / 空）→ 拒绝该条目 + 警告
- *  - 非法条目不影响同批合法条目（逐条判定）
- *  - deniedDomains 同款纪律，裸 `*` 也丢弃
- *  - 项目层出现 `isolation.network` → 整体不生效（沿用现有
- *    filterProjectSettingsKeys 对整个 isolation 段的丢弃警告，不重复发）
- *  - 解析体冻结 / persist 往返保真
- *  - onWarn 消息以 `[settings] ...` 前缀，对齐既有纪律
+ * specs/network-egress-allowlist.md SC12 config-layer contract:
+ *  - empty allowedDomains → deny all (fail-closed); an empty array is a legal state, not an error
+ *  - non-string entries / blank after trim / bare `*` in allowed → drop that entry + warning
+ *  - out-of-range `:port` (0 / >65535 / non-numeric / empty) → reject that entry + warning
+ *  - invalid entries never affect legal ones in the same batch (per-entry decision)
+ *  - deniedDomains follows the same discipline; bare `*` is also dropped
+ *  - `isolation.network` at the project layer → inert wholesale (reuses the
+ *    existing filterProjectSettingsKeys discard warning for the whole isolation
+ *    section; never duplicated)
+ *  - parsed body frozen / persist round-trip fidelity
+ *  - onWarn messages carry the `[settings] ...` prefix, aligned with existing discipline
  *
- * 只做配置层形态合法判定；`*.x` 通配语义留给 T3。
+ * Only config-layer shape legality is decided here; `*.x` wildcard semantics belong to the matching layer.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -219,7 +220,7 @@ describe("settings.isolation.network — invalid entries dropped with onWarn", (
   });
 
   it(":port 越界 / 非法值 → 拒绝该条目 + 警告（不透传为永不匹配）", async () => {
-    // 端口：0 / 65536 / 非数字 / 空 / 负数
+    // ports: 0 / 65536 / non-numeric / empty / negative
     const { home, cwd } = await makeSettings(
       {
         isolation: {
@@ -230,7 +231,7 @@ describe("settings.isolation.network — invalid entries dropped with onWarn", (
               "example.com:abc",
               "example.com:",
               "example.com:-1",
-              "example.com", // 这条合法
+              "example.com", // this one is legal
             ],
           },
         },
@@ -299,7 +300,7 @@ describe("settings.isolation.network — invalid entries dropped with onWarn", (
         .isolation,
       { network: { allowedDomains: [] } }
     );
-    // 三条非法 → 三条警告
+    // three invalid → three warnings
     assert.equal(warnings.length, 3);
   });
 
@@ -361,11 +362,11 @@ describe("settings.isolation.network — project layer discard (SC9)", () => {
       cwd,
       onWarn: (m) => warnings.push(m),
     });
-    // user 值胜出
+    // user value wins
     assert.deepEqual(settings.isolation, {
       network: { allowedDomains: ["example.com"] },
     });
-    // 既有 filterProjectSettingsKeys 对整个 isolation key 发一条警告 —— 不重复发 network 级警告
+    // existing filterProjectSettingsKeys emits one warning for the whole isolation key — no network-level warning duplication
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /"isolation"/);
     assert.doesNotMatch(warnings[0]!, /network/);
@@ -506,11 +507,11 @@ describe("settings.isolation.network — interaction with other isolation fields
   });
 
   it("字段增删不影响 isolation 段缺席的「全空 → undefined」判定", async () => {
-    // per-field 独立：所有 isolation 子段字段非法 → isolation 段不产。
+    // per-field independent: every isolation sub-field invalid → no isolation section produced.
     const { home, cwd } = await makeSettings(
       {
         isolation: {
-          network: { allowedDomains: ["*"] }, // 整条丢掉 → allowedDomains 为空 → 仍保留 network 段
+          network: { allowedDomains: ["*"] }, // whole entry dropped → allowedDomains empty → network section still kept
         },
       },
       {}
@@ -521,7 +522,7 @@ describe("settings.isolation.network — interaction with other isolation fields
       cwd,
       onWarn: (m) => warnings.push(m),
     });
-    // allowedDomains 全部丢 → 段保留为空数组事实（合法 fail-closed 态）
+    // allowedDomains all dropped → section kept as the empty-array fact (legal fail-closed state)
     assert.deepEqual(settings.isolation, { network: { allowedDomains: [] } });
     assert.equal(warnings.length, 1);
   });

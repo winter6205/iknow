@@ -1,9 +1,11 @@
 /**
- * spec session-list-title — GET /api/v1/sessions 消费面：
- *  - `SessionListItem.title` 是主行字段（渲染逻辑测试见 SessionSidebar.test.ts
- *    的 sidebarLineText——web 包无 DOM 测试框架，spec A8/A10）。
- *  - listSessions 的空会话过滤继续按 lastFinalText 命中，不因主行改读
- *    title 而放宽（Does not「中途反复改题、列表双行」；过滤行为不变）。
+ * specs/session-list-title.md — consumer surface of GET /api/v1/sessions:
+ *  - `SessionListItem.title` is the primary row field (rendering tests live in
+ *    SessionSidebar.test.ts's sidebarLineText — the web package has no DOM
+ *    test framework).
+ *  - listSessions' empty-session filtering still keys on lastFinalText and is
+ *    not relaxed by the primary row switching to title (avoids "title churn
+ *    showing two rows"; filter behavior unchanged).
  *
  * Fetch-stub pattern from tests/web/subagents-api.test.ts /
  * continue-session-client.test.ts.

@@ -168,7 +168,7 @@ describe("useSessionChat compact()", () => {
     vi.clearAllMocks();
   });
 
-  /** 建立 ready 会话（health + createSession），返回 hook。 */
+  /** Boot a ready session (health + createSession) and return the hook. */
   function bootReady() {
     vi.mocked(api.health).mockResolvedValue({
       ok: true,
@@ -223,7 +223,7 @@ describe("useSessionChat compact()", () => {
     assert.equal(result, true);
     assert.equal(hook.getCurrent()?.session?.turn_count, 1);
     assert.equal(hook.getCurrent()?.messages.length, 1);
-    assert.equal(hook.getCurrent()?.phase, "ready"); // 不置 loading
+    assert.equal(hook.getCurrent()?.phase, "ready"); // does not flip to loading
 
     Renderer.updateContainer(null, hook.root, null, () => undefined);
   });
@@ -271,8 +271,8 @@ describe("useSessionChat compact()", () => {
     await act(async () => {
       await assert.rejects(() => hook.getCurrent()?.compact(), /compact boom/);
     });
-    // compact 是轻操作：失败不置全局 error StateBlock（由 App 局部提示），
-    // 会话 phase/消息保持不变。
+    // compact is a lightweight op: failure must not set the global error
+    // StateBlock (App surfaces a local notice); session phase/messages stay intact.
     assert.equal(hook.getCurrent()?.phase, "ready");
     assert.equal(hook.getCurrent()?.error, null);
 
@@ -460,7 +460,7 @@ describe("useSessionChat pushNotice()", () => {
     assert.equal(messages[0]?.role, "notice");
     assert.equal(messages[0]?.text, "已压缩上下文");
     assert.notEqual(messages[0]?.id, messages[1]?.id);
-    // 不调任何 wire API。
+    // No wire API is called.
     assert.equal(vi.mocked(api.postMessage).mock.calls.length, 0);
 
     Renderer.updateContainer(null, hook.root, null, () => undefined);
@@ -486,12 +486,12 @@ describe("useSessionChat pushNotice()", () => {
 });
 
 /**
- * serve-workspace T9b: 进站总是 fresh-on-mount, 不读 / 不写 localStorage。
- * serve T9a auto-bind 后 `createSession` 在 default workspace 下永远成功,
- * 因此 bootstrap 路径简化为 health → createAndAdopt, 不再有 stored 恢复 +
- * 404 fallback 路径。
+ * Bootstrap is always fresh-on-mount: no localStorage reads or writes.
+ * Once auto-bind landed, `createSession` under the default workspace always
+ * succeeds, so the bootstrap path simplifies to health → createAndAdopt, with no
+ * stored-restore + 404 fallback path anymore.
  *
- * localStorage mock 模式参考 tests/web/workspace-groups-storage.test.ts。
+ * localStorage mock pattern follows tests/web/workspace-groups-storage.test.ts.
  */
 describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
   beforeEach(() => {
@@ -502,9 +502,9 @@ describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
   });
 
   /**
-   * 安装一个计数版 localStorage: getItem/setItem/removeItem 都可被断言。
-   * 初始带一条历史 key "iknow:conversation_id" → "stale-id", 验证
-   * bootstrap 不会读取它 (旧行为的回归测试)。
+   * Install a counting localStorage: getItem/setItem/removeItem are all assertable.
+   * Guards the regression that bootstrap never reads the legacy key
+   * "iknow:conversation_id" even if a stale id was stored by the old behavior.
    */
   function installCountingLocalStorage() {
     const calls = {
@@ -560,7 +560,7 @@ describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
       await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
     });
 
-    // T9b 关键契约: 进站一次 getItem 都不发, 不读 stored conversation id。
+    // Key contract: bootstrap issues zero getItem calls, never reads a stored conversation id.
     assert.equal(
       calls.getItem.length,
       0,
@@ -580,7 +580,7 @@ describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
       await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
     });
 
-    // 旧 key 应被废弃: bootstrap / newSession / setConversation 一概不写。
+    // Legacy keys are retired: bootstrap / newSession / setConversation never write.
     assert.equal(
       calls.setItem.length,
       0,
@@ -600,11 +600,11 @@ describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
       await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
     });
 
-    // 路径: health → createSession → applySession。
+    // Path: health → createSession → applySession.
     assert.equal(vi.mocked(api.health).mock.calls.length, 1);
     assert.equal(vi.mocked(api.createSession).mock.calls.length, 1);
-    // T9b 已删: 旧 stored-restore 路径不再调 getSessionHistory (除非
-    // setConversation 显式切旧会话)。
+    // The removed stored-restore path must not call getSessionHistory (unless
+    // setConversation explicitly switches to an existing session).
     assert.equal(vi.mocked(api.getSessionHistory).mock.calls.length, 0);
     assert.equal(hook.getCurrent()?.session?.conversation_id, "c-fresh");
     assert.equal(hook.getCurrent()?.phase, "ready");
@@ -629,8 +629,8 @@ describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
       await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "error"));
     });
 
-    // T9b: 进站失败路径不再尝试从 localStorage 恢复旧会话 — 错误直接
-    // 暴露给用户重试, 不静默 fallback。
+    // The bootstrap failure path no longer attempts a localStorage restore — the
+    // error surfaces for user retry instead of a silent fallback.
     assert.equal(calls.getItem.length, 0);
     assert.ok(
       hook.getCurrent()?.error?.includes("default workspace unavailable"),

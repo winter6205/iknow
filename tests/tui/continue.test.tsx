@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/react */
 /**
- * T4 (#690): TUI /continue + pending NL + busy-guard。
+ * TUI /continue + pending NL + busy-guard.
  *
- * bun:test。真实 store + conversationId；谓词 SSOT = load，不是 lastStopReason。
+ * bun:test. Real store + conversationId; the predicate SSOT is load, not
+ * lastStopReason.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
@@ -80,8 +81,9 @@ function sessionFile(
     conversation_id: id,
     title: "do",
     cwd: workspaceRoot,
-    // de87ff07 起 unbound session 拒绝执行（requireBoundRoot）：种子 session
-    // 必须带 workspaceRoot，否则 /continue 与 pending NL 在执行前置即被拒。
+    // Unbound sessions are refused execution (requireBoundRoot): the seed
+    // session must carry workspaceRoot, else /continue and pending NL are
+    // rejected at the pre-execution gate.
     workspaceRoot,
     sanitized_at: new Date().toISOString(),
     messages: [...messages],
@@ -178,8 +180,9 @@ async function mountContinueApp(opts: {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
     typeText: async (text: string) => {
-      // mockInput 走 stdin 异步解析；连发过快会丢键（实测 /continue → /onine
-      // → 未知命令，untilFrame 永远等不到 nothing_pending）。
+      // mockInput parses stdin asynchronously; firing too fast drops keys
+      // (observed: /continue → /onine → unknown command, and untilFrame
+      // never sees nothing_pending).
       const inputLanded = (frame: string): boolean =>
         frame.includes(`❯ ${text}`) || frame.includes(`❯ ${text} `);
       const clear = async (): Promise<void> => {
@@ -587,8 +590,9 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "seed");
     await app.typeText("/compact");
     await app.pressEnter();
-    // compact 在途标记 = design-25 进度面板标题（Compacting）；面板在
-    // promise 前建立，故此处即「压缩在跑」的可视证据。
+    // The compact in-flight marker is the progress panel title
+    // (Compacting); the panel mounts before the promise, so this is the
+    // visible evidence that "compaction is running".
     await untilFrame(
       app.setup,
       (f) => f.includes("Compacting"),
@@ -632,9 +636,11 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
         8000,
         "interrupt-notice"
       );
-      // T3 (SC6): 主会话 trace 锚在 `<projectDir>/<convId>/trace.jsonl`
-      // （session-store.ts `resolveConversationTraceFilePath`），traceOut 仅
-      // 供 subagent 聚合流使用。读侧用 bridge.store 派生同一 SSOT 路径。
+      // The main-session trace is anchored at
+      // `<projectDir>/<convId>/trace.jsonl` (session-store.ts
+      // `resolveConversationTraceFilePath`); traceOut serves only the
+      // subagent aggregate stream. The read side derives the same SSOT path
+      // from bridge.store.
       const conversationDirs = readdirSync(app.bridge.store.getProjectDir());
       expect(conversationDirs).toHaveLength(1);
       const tracePath = join(

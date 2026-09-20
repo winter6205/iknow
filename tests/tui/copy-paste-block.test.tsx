@@ -2,22 +2,29 @@
 /**
  * tests/tui/copy-paste-block.test.tsx
  *
- * #343 v3 follow-up：right-up 复制与终端 paste-byte 互斥回归测试。
+ * Right-up copy vs terminal paste-byte race, regression.
  *
- * 根因（用户实测，2026-08-21）：iTerm2 / WezTerm / kitty 等终端在 mouse
- * right-up 时**自动**把"系统剪贴板当前内容"paste 到 stdin；OSC52 写剪贴板与
- * 终端发起 paste 是同一刻触发的两条独立链路 —— paste 字节里的内容是 OSC52
- * 覆盖前的旧系统剪贴板内容（不是当前选区），通过 usePaste 写进输入框。表现
- * 为"右键复制生效 + 右键粘贴把上一次复制别处的旧内容贴到输入框"。
+ * Root cause (user-observed): on mouse right-up, terminals such as
+ * iTerm2 / WezTerm / kitty automatically paste the current system clipboard
+ * into stdin. The OSC52 clipboard write and the terminal-initiated paste are
+ * two independent paths firing at the same instant — the paste bytes carry
+ * the OLD system clipboard (pre-OSC52 overwrite), not the current selection,
+ * and usePaste writes it into the input box. Symptom: "right-click copy
+ * works + right-click pastes some stale content copied elsewhere into the
+ * input".
  *
- * 修复：right-up 触发 doCopy 后设置 `pasteArmedUntilRef = Date.now() + 250`，
- * usePaste 收到 PasteEvent 时若在 arm 窗口内 → preventDefault 吞掉，不进
- * setInputValue。窗口外（用户主动 Cmd+V）保持原行为不变。
+ * Fix: after right-up triggers doCopy, set `pasteArmedUntilRef =
+ * Date.now() + 250`; when usePaste receives a PasteEvent inside the arm
+ * window → preventDefault and swallow it, never reaching setInputValue.
+ * Outside the window (user-initiated Cmd+V) the old behavior is unchanged.
  *
- * 覆盖：
- *  1. arm 窗口内的 paste 被吞（right-up 复制 → 立即 paste → inputValue 不增）；
- *  2. arm 窗口外的 paste 不受影响（right-up 后等 300ms → paste → 正常进入）；
- *  3. 没有 right-up 的 paste 直接生效（与本修复正交，回归保护）。
+ * Coverage:
+ *  1. paste inside the arm window is swallowed (right-up copy → immediate
+ *     paste → inputValue does not grow);
+ *  2. paste outside the arm window is unaffected (right-up, wait 300ms →
+ *     paste → goes through normally);
+ *  3. paste without any right-up works directly (orthogonal to this fix,
+ *     regression guard).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -59,15 +66,13 @@ async function renderApp() {
   return setup;
 }
 
-/** 读取 PromptInput 当前输入框文本（PromptInput 是受控组件，inputValue 是 SSOT）。
- *  通过 setup.renderer 上 PromptInput 的内部 textarea getter 拿当前值。
- *  这里我们换一种思路：直接读 PromptInput 的 onChange prop 拦截，记录初始
- *  inputValue 增长 —— 通过 setInputValue 增量比对。
- *
- *  实测最简单 —— 让用户先 right-up 复制某段，然后发 paste，断言 frame 内的
- *  notice 文案 + 输入框视觉变化。但 frame 截图不可靠读输入框文本，故走更
- *  直接的路径：注入 paste，断言 inputValue（受控）通过 setInputValue(prev =>
- *  prev + text) 后被加了多少 —— 我们的代码里 inputValue 只通过 paste 增长。
+/** PromptInput is a controlled component, so inputValue is the SSOT for the
+ *  input text. We could read it via the internal textarea getter on
+ *  setup.renderer, but here we take a simpler, more direct route: inject a
+ *  paste and assert on what the controlled inputValue grew by (through
+ *  setInputValue(prev => prev + text)). Frame screenshots cannot reliably read
+ *  input-box text, and in our code inputValue only grows via paste, so
+ *  asserting the frame does or does not contain the pasted string is enough.
  */
 describe("right-click 复制与 paste 互斥（#343 v3）", () => {
   test("arm 窗口内的 paste 被吞：right-up 复制后立即发 paste，inputValue 不增长", async () => {
@@ -77,12 +82,12 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
       setup.renderer as unknown as { currentSelection: unknown }
     ).currentSelection = fakeSelection(selectedText);
 
-    // 1) right-up 触发复制 → arm 250ms 窗口
+    // 1) right-up triggers copy → arms the 250ms window
     await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
     await setup.waitForVisualIdle();
-    // 复制 doCopy 是同步（OSC52 写字节），立即走完 → arm 已置
+    // doCopy is synchronous (OSC52 writes bytes) and completes immediately → arm is set
 
-    // 2) arm 窗口内立刻发 paste（终端 right-up 的 paste byte 模拟）
+    // 2) send a paste right inside the arm window (simulates the terminal's right-up paste byte)
     await setup.mockInput.pasteBracketedText(
       "旧剪贴板的内容（不应该进输入框）"
     );
@@ -90,10 +95,10 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
     await new Promise((r) => setTimeout(r, 50));
     await setup.waitForVisualIdle();
 
-    // 3) 期望：notice 显示"已复制"，输入框无 paste 内容（不被旧内容污染）
+    // 3) expect: notice shows `已复制` ("copied"); the input box has no paste content (not polluted by stale content)
     const frame = setup.captureCharFrame();
     expect(frame).toMatch(/已复制|已写入/);
-    // 断言：frame 不应包含粘贴的"旧剪贴板的内容…"字样（输入框不增长）
+    // assert: the frame must not contain the pasted `旧剪贴板的内容` text (inputValue does not grow)
     expect(frame).not.toContain("旧剪贴板的内容");
 
     setup.renderer.destroy();
@@ -106,15 +111,15 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
       setup.renderer as unknown as { currentSelection: unknown }
     ).currentSelection = fakeSelection(selectedText);
 
-    // 1) right-up 触发复制 → arm 250ms
+    // 1) right-up triggers copy → arms 250ms
     await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
     await setup.waitForVisualIdle();
 
-    // 2) 等过 arm 窗口
+    // 2) wait past the arm window
     await new Promise((r) => setTimeout(r, 300));
     await setup.waitForVisualIdle();
 
-    // 3) 此时发 paste 应正常进入输入框
+    // 3) a paste now should enter the input box normally
     await setup.mockInput.pasteBracketedText("用户主动粘贴");
     await setup.waitForVisualIdle();
     await new Promise((r) => setTimeout(r, 30));
@@ -122,7 +127,7 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
 
     const frame = setup.captureCharFrame();
     expect(frame).toMatch(/已复制|已写入/);
-    // 输入框现在应有"用户主动粘贴"
+    // the input box should now contain `用户主动粘贴`
     expect(frame).toContain("用户主动粘贴");
 
     setup.renderer.destroy();
@@ -131,16 +136,16 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
   test("未触发 right-up 直接 paste：粘贴正常进入输入框", async () => {
     const setup = await renderApp();
 
-    // 无 right-up 直接发 paste —— 应正常进入输入框
+    // paste sent directly with no right-up — should enter the input box normally
     await setup.mockInput.pasteBracketedText("纯粘贴文本");
     await setup.waitForVisualIdle();
     await new Promise((r) => setTimeout(r, 30));
     await setup.waitForVisualIdle();
 
     const frame = setup.captureCharFrame();
-    // 不应有 "已复制 / 已写入"（没有触发复制）
+    // no `已复制` / `已写入` (copy was not triggered)
     expect(frame).not.toMatch(/已复制|已写入/);
-    // 输入框应有"纯粘贴文本"
+    // the input box should contain `纯粘贴文本`
     expect(frame).toContain("纯粘贴文本");
 
     setup.renderer.destroy();
@@ -153,14 +158,14 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
       setup.renderer as unknown as { currentSelection: unknown }
     ).currentSelection = fakeSelection(selectedText);
 
-    // 先触发 left-drag-RELEASE（selection 事件）→ cachedSelectionTextRef 填充；
-    // 与 v2 同源。fakeSelection 没 isDragging 等字段，但 useSelectionHandler
-    // 只调 selection.getSelectedText()，单测不需要触发拖选——直接用现有
-    // cachedSelectionTextRef 模拟：通过 emit("selection", ...) 触发一次。
+    // Emit a left-drag-RELEASE (selection event) first to fill
+    // cachedSelectionTextRef. fakeSelection lacks isDragging and other fields,
+    // but useSelectionHandler only calls selection.getSelectedText(), so the
+    // unit test does not need a real drag — emit("selection", ...) is enough.
     setup.renderer.emit("selection", fakeSelection(selectedText));
     await setup.waitForVisualIdle();
 
-    // 按 Ctrl+C：选区非空 → 复制（Ctrl+C 纯复制语义，不触发打断）
+    // Press Ctrl+C: non-empty selection → copy (pure-copy semantics, no interrupt side effect)
     setup.mockInput.pressCtrlC();
     await setup.waitForVisualIdle();
     await new Promise((r) => setTimeout(r, 50));
@@ -174,7 +179,7 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
 
   test("Ctrl+C：无选区时提示复制用法（不再指向打断）", async () => {
     const setup = await renderApp();
-    // 显式置空 currentSelection + cachedSelectionTextRef（默认就是空）
+    // Explicitly null currentSelection + cachedSelectionTextRef (empty by default anyway)
     (
       setup.renderer as unknown as { currentSelection: unknown }
     ).currentSelection = null;

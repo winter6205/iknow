@@ -1,5 +1,7 @@
 /**
- * #179 T6 (#147 D0/D3) — chat 增量渲染接缝。
+ * tests/cli/chat-stream-preview.test.ts
+ *
+ * Chat incremental-render seam.
  *
  * Three guarantees, driven through the real harness stub path (no TTY needed):
  *   1. `processChatLine` forwards its optional `onStream` to `run()`, so a
@@ -129,8 +131,9 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
       name: "bash",
       id: "toolu_bash_remaining",
     });
-    // input 增量未到之前不落行：CLI 的 start 事件不携带 input，只有
-    // tool_input_delta 齐了才画得出 detail（D1 合同）。
+    // No line is emitted before the input deltas arrive: the CLI start event
+    // carries no input, so detail is only drawable once tool_input_delta is
+    // complete.
     assert.ok(err.every((chunk) => !chunk.includes("bash")));
     sink.feed({
       type: "tool_input_delta",
@@ -222,12 +225,11 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
   });
 
   it("documented SC20 boundary: truncated secret split across deltas leaks the first fragment", () => {
-    // streamDraft.masked() is a full re-mask (T2 design) with no trailing
-    // surplus, so a secret split across deltas ("sk-" then "abc123") is written
-    // as the bare fragment "sk-" on the first delta, before the full masking
-    // catches it. This pins the KNOWN behavior (not a bug fix): the complete
-    // secret "sk-abc123" is never emitted, and once both deltas arrive the
-    // accumulated secret is masked.
+    // streamDraft.masked() is a full re-mask with no trailing surplus, so a
+    // secret split across deltas ("sk-" then "abc123") is written as the bare
+    // fragment "sk-" on the first delta, before the full masking catches it. This
+    // pins the KNOWN behavior (not a bug fix): the complete secret "sk-abc123" is
+    // never emitted, and once both deltas arrive the accumulated secret is masked.
     const original = process.env.ANTHROPIC_AUTH_TOKEN;
     process.env.ANTHROPIC_AUTH_TOKEN = "sk-abc123";
     try {
@@ -253,7 +255,7 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
       // Once the full secret accumulates, the masked output shrinks (9 chars
       // -> "***" = 3 chars), so lastWrittenLen already covers the masked
       // position and no further slice is emitted. The "***" marker therefore
-      // never reaches stdout for this cross-delta split (D4 documented edge).
+      // never reaches stdout for this cross-delta split (documented edge).
       assert.equal(sink.textStreamed, true);
     } finally {
       if (original === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
@@ -271,13 +273,14 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
   });
 });
 
-/** stderr 行中「工具行」的判定：CLI 只往 stderr 写工具过程行与 spinner 清除
- *  序列，其余（答案文本）走 stdout。过滤掉纯清行序列后按顺序取工具行。 */
+/** How to pick "tool lines" out of stderr: the CLI writes only tool-progress
+ *  lines and the spinner-clear sequence to stderr; everything else (answer text)
+ *  goes to stdout. Drop pure clear sequences, then take tool lines in order. */
 function toolLinesOf(err: ReadonlyArray<string>): ReadonlyArray<string> {
   return err.filter((chunk) => chunk.includes("\n")).map((c) => c.trim());
 }
 
-/** 驱动一次工具调用：start → input 增量 → 关闭（下一个非增量事件）。 */
+/** Drive one tool call: start → input deltas → close (next non-delta event). */
 function feedToolCall(
   sink: StreamPreviewSink,
   opts: {
@@ -298,7 +301,7 @@ function feedToolCall(
   sink.feed(opts.closeWith);
 }
 
-/** 与 shared 模块同源的期望行（不手抄模板字符串）。 */
+/** Expected line sourced from the shared module (no hand-copied template). */
 function expectedLine(
   name: string,
   input: unknown,
@@ -320,7 +323,8 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     const lines = toolLinesOf(err);
     assert.equal(lines.length, 1);
     assert.equal(lines[0], expectedLine("bash", { command: "npm test" }));
-    // 生产面同源闸：tui 侧 re-export 与 shared 逐字节一致（同一函数对象）。
+    // Production-surface sameness gate: the tui re-export is the very same
+    // function object as the shared one.
     assert.equal(tuiFormatToolStatusLine, formatToolStatusLine);
     assert.equal(tuiFormatThinkingLive, formatThinkingLive);
   });
@@ -390,7 +394,7 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
         `${c.name}: same source as shared summarizer`
       );
     }
-    // bash 前缀本身来自 shared 常量（不是 CLI 侧新字面量）。
+    // The bash prefix comes from the shared constant, not a new CLI-side literal.
     assert.ok(BASH_RUNNING_PREFIX.startsWith("Running 1 shell command"));
   });
 
@@ -410,8 +414,8 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     });
     const lines = toolLinesOf(err);
     assert.equal(lines.length, 2);
-    // 不完整 JSON：走 summarizePartialInput 的原样截断（同一共享函数），
-    // 行仍成立、detail 部分可见。
+    // Incomplete JSON: summarizePartialInput truncates it verbatim (same shared
+    // function), so the line still holds with partial detail visible.
     assert.ok(lines[0]!.startsWith("read_file · "));
     assert.ok(lines[0]!.includes("src/partial"));
     assert.equal(lines[1], "mystery_tool");
@@ -436,7 +440,8 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     assert.equal(lines.length, 2, "one line per tool call");
     assert.equal(lines[0], "read_file · Read a.ts");
     assert.equal(lines[1], "Running 1 shell command… · pwd");
-    // 同 id 的多个增量不产生多行（累积到关闭时才 flush）。
+    // Multiple deltas under the same id produce no extra lines (they accumulate
+    // until the close flushes them).
     const joined = err.join("");
     assert.equal(joined.split("Running 1 shell command… · pwd").length - 1, 1);
   });
@@ -448,7 +453,7 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     for (const frag of ['{"comma', 'nd":"git ', 'status"}']) {
       sink.feed({ type: "tool_input_delta", id: "tu-frag", partialJson: frag });
     }
-    // 增量期间不落行。
+    // No line while deltas are still arriving.
     assert.ok(err.every((chunk) => !chunk.includes("bash")));
     sink.feed({ type: "stop_summary", text: "done" });
     const lines = toolLinesOf(err);
@@ -501,7 +506,7 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
       id: "tu-other",
       partialJson: '{"command":"nope"}',
     });
-    // 未关闭：不落行（其他 id 的增量不构成关闭点）。
+    // Not closed: no line (deltas under another id are not a close point).
     assert.ok(err.every((chunk) => !chunk.includes("bash")));
     sink.feed({
       type: "tool_input_delta",
@@ -519,8 +524,10 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
       new URL("../../src/cli/chat-session.ts", import.meta.url),
       "utf8"
     );
-    // 只看代码：注释里提旧文案（如「清掉 Thinking… spinner」沿革说明）不算
-    // 生产面（同 tests/tui/tool-summary.test.ts 的 readFileSync 闸纪律）。
+    // Code only: mentions of the old wording inside comments (e.g. the "清掉
+    // Thinking… spinner" ("clear the Thinking… spinner") history note) are not the
+    // production surface (same readFileSync gate discipline as
+    // tests/tui/tool-summary.test.ts).
     const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     assert.ok(!code.includes("调用工具"), "raw tool-name dump retired");
     assert.ok(!code.includes("思考中"), "Chinese spinner retired (D1)");

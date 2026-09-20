@@ -1,12 +1,14 @@
 /**
  * tests/tui/turn-fold-lines.test.ts
  *
- * T7（specs/tui-activity-block.md）：旧 unit fold 派生（`buildFoldLinesBySegmentIndex`
- * 等）随活动块单时态退役，其穷尽用例归档在 `archive/tests/tui/turn-fold-lines.test.ts`。
- * 本文件只保留**仍存活导出**的覆盖 —— 这些函数仍有生产调用
- * （`message-row.tsx` / `chat-view.tsx`），不得随旧形态一起失去测试。
+ * The old unit-fold derivations (`buildFoldLinesBySegmentIndex` etc.) were
+ * retired with the activity-block single-tense change (specs/tui-activity-block.md);
+ * their exhaustive cases live in `archive/tests/tui/turn-fold-lines.test.ts`.
+ * This file keeps coverage for the **still-live exports** only — they have
+ * production callers (`message-row.tsx` / `chat-view.tsx`) and must not lose
+ * tests along with the old shape.
  *
- * 体例同 `tests/tui/turn-activity.test.ts`（bun:test，数据构造助手对齐）。
+ * Same style as `tests/tui/turn-activity.test.ts` (bun:test, shared data helpers).
  */
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -20,7 +22,7 @@ import {
   shouldShowLiveThinkingPanel,
 } from "../../src/tui/turn-fold-lines.js";
 
-// ── 数据构造（与 tests/tui/turn-activity.test.ts 对齐）─────────────
+// ── Data helpers (aligned with tests/tui/turn-activity.test.ts) ────────────
 
 function user(text: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
@@ -53,7 +55,7 @@ function assistantText(text: string): AnthropicNativeMessage {
   return { role: "assistant", content: [{ type: "text", text }] };
 }
 
-// ── 仍存活导出的覆盖（T7 后） ───────────────────────────────────
+// ── Coverage for still-live exports ───────────────────────────────
 
 describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", () => {
   test("empty：thinkingDraft 空 → 无 panel（无草稿不画）", () => {
@@ -84,9 +86,10 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
   });
 
   test("concurrent：已画 unit fold 不是关闭信号（有折叠 + 有草稿 → 仍 true）", () => {
-    // docs/CONTEXT.md open unit _Avoid_：「已画折叠不是关 thinking panel 的
-    // 信号」。T4 live-signal revision：toolRunning 闸已退役（锁句 7）——
-    // 该判定只看 running + draft 长度，与 tool running 无关。
+    // docs/CONTEXT.md open unit _Avoid_: 「已画折叠不是关 thinking panel 的
+    // 信号」 ("a drawn fold is not a signal to close the thinking panel").
+    // The toolRunning gate was later retired — this check looks only at
+    // running + draft length, independent of tool running state.
     expect(
       shouldShowLiveThinkingPanel({
         running: true,
@@ -96,10 +99,11 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
   });
 
   test("locked-sentence-7：tool running 不再让位思考", () => {
-    // T4 live-signal revision 锁句 7：删「任意 tool running 关思考」闸。
-    // 思考槽位主权 = 该 burst 尚未关闭（draft 非空）；tool running 不再
-    // 影响本判定。生产路径改走 `liveThinking` 字段（`draftMasked.length
-    // > 0`），本函数只承担纯函数语义文档。
+    // The "any tool running closes thinking" gate was deleted. Thinking-slot
+    // sovereignty = the burst is not yet closed (draft non-empty); tool running
+    // no longer affects this check. The production path goes through the
+    // `liveThinking` field (`draftMasked.length > 0`); this function only
+    // carries the pure-function semantics documentation.
     expect(
       shouldShowLiveThinkingPanel({
         running: true,
@@ -173,14 +177,15 @@ describe("makeThinkingMsAtVisibleFromSource", () => {
     const fn = makeThinkingMsAtVisibleFromSource([null, 1500], [0, 1]);
     expect(fn(0)).toBe(0);
     expect(fn(1)).toBe(1500);
-    expect(fn(99)).toBe(0); // sourceIndexOfVisible 缺席 → fallback 0
+    expect(fn(99)).toBe(0); // no mapping for the index → fallback 0
   });
 
   test("sourceIndexOfVisible 缺席（undefined）→ 视作 visibleIndex 兜底", () => {
     const fn = makeThinkingMsAtVisibleFromSource([1000, 2000, 3000], [0]);
     expect(fn(0)).toBe(1000);
-    // visibleIndex=5 越界 sourceIndexOfVisible（length=1），fallback 到
-    // visibleIndex 5 → thinkingMs[5] 越界 → 0（与 sumThinkingMsInRange 同兜底）。
+    // visibleIndex=5 is out of range for sourceIndexOfVisible (length=1), so it
+    // falls back to visibleIndex 5 → thinkingMs[5] out of range → 0 (same
+    // fallback as sumThinkingMsInRange).
     expect(fn(5)).toBe(0);
   });
 });
@@ -218,7 +223,7 @@ describe("segmentActivityBlocks / firstPartThinkingBlocks", () => {
       entries: [],
     };
     const blocks = segmentActivityBlocks(message, seg, 1, 4);
-    // filter tool_use：去掉中间的 text 块，只剩 tool_use × 2
+    // keep only tool_use blocks in range, dropping the interleaved text block
     expect(blocks.map((b) => b.type)).toEqual(["tool_use", "tool_use"]);
   });
 
@@ -240,7 +245,7 @@ describe("segmentActivityBlocks / firstPartThinkingBlocks", () => {
   });
 });
 
-// ── segmentActivityBlocks 越界保护 ────────────────────────────────
+// ── segmentActivityBlocks out-of-range guards ─────────────────────
 
 describe("segmentActivityBlocks（exception / 越界）", () => {
   test("text segment + blockIndex 越界 → 返回空数组（不是 undefined）", () => {
@@ -248,7 +253,7 @@ describe("segmentActivityBlocks（exception / 越界）", () => {
     const seg = {
       kind: "text" as const,
       messageIndex: 0,
-      contentBlockIndex: 99, // 越界
+      contentBlockIndex: 99, // out of range
     };
     const blocks = segmentActivityBlocks(message, seg, 99, 99);
     expect(blocks).toEqual([]);

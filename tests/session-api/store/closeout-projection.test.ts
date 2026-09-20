@@ -1,6 +1,5 @@
 /**
- * T4 (#621 / spec session-jsonl-resume D5–D6): load/resume 补未配对 tool_use
- * (process closeout)。
+ * load/resume backfills unpaired tool_use (process closeout).
  *
  * When the on-disk JSONL head chain contains an assistant event with tool_use
  * block(s) not followed by matching tool_result(s) — the crash shape of a
@@ -16,7 +15,8 @@
  *     semantics: the text must NOT contain `Interrupted by user.` (that system
  *     sentence belongs to the harness `cancelled` path, not this one).
  *   - Mutating tools (bash / edit_file / write_file — spec-named set) carry
- *     the check-before-rerun instruction (先检查副作用是否已生效,未生效再重跑);
+ *     the check-before-rerun instruction (`先检查副作用是否已生效,未生效再重跑`
+ *     — "first check whether the side effect already landed; rerun only if not");
  *     read-only tools (grep, read_file, glob, …) must NOT contain it.
  *   - Multiple orphan tool_uses in one assistant event each get a paired
  *     result; a partially-answered turn (T3's per-tool commit shape) only

@@ -2,16 +2,19 @@
 /**
  * tests/tui/modal.test.tsx
  *
- * #343 T4：TUI modal 渲染槽（OpenTUI 版 ModalHost + SelectModal +
- * reduceModalKey）。覆盖：
- *  - reduceModalKey 纯函数：y/a/n hotkey 直选（大小写不敏感）、↑↓ 导航
- *    clamp、Enter 选中当前、Esc dismiss、ctrl/meta 与无匹配字符 ignore、
- *    通用 select 同机制（hotkey 可自定义）；
- *  - selectModalRows 行账：窄终端标题 / 描述 / 选项按视觉宽度折行计入；
- *  - ModalHost 渲染：permission 盒子（标题 / 三选项 / 键位提示）、通用
- *    select 盒子、无 modal → 空帧；
- *  - 行账不变式（归档语义重写）：captureCharFrame 实测盒子高度（╭→╰
- *    边框行数）=== selectModalRows 预测（宽 / 窄终端，CJK 描述）。
+ * TUI modal render slot (OpenTUI ModalHost + SelectModal + reduceModalKey).
+ * Coverage:
+ *  - reduceModalKey pure function: y/a/n hotkey direct select (case
+ *    insensitive), ↑↓ navigation clamp, Enter picks current, Esc dismisses,
+ *    ctrl/meta and unmatched chars ignored, generic select uses the same
+ *    mechanism (customizable hotkeys);
+ *  - selectModalRows row accounting: title / description / options counted
+ *    with visual-width wrapping on narrow terminals;
+ *  - ModalHost render: permission box (title / three options / key hint),
+ *    generic select box, no modal → empty frame;
+ *  - row-accounting invariant: measured box height via captureCharFrame
+ *    (border lines ╭→╰) === selectModalRows prediction (wide / narrow
+ *    terminal, CJK description).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -79,14 +82,14 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
   test("↑/↓ 移动选中索引并 clamp", () => {
     expect(reduceModalKey(key("", { upArrow: true }), permModal)).toEqual({
       type: "move",
-      index: 0, // 已在 0 → clamp
+      index: 0, // already at 0 → clamp
     });
     const down = reduceModalKey(key("", { downArrow: true }), permModal);
     expect(down).toEqual({ type: "move", index: 1 });
     const atEnd = { options: PERMISSION_ANSWERS, selectedIndex: 2 };
     expect(reduceModalKey(key("", { downArrow: true }), atEnd)).toEqual({
       type: "move",
-      index: 2, // 末尾 → clamp
+      index: 2, // at last index → clamp
     });
     expect(
       reduceModalKey(key("", { upArrow: true }), {
@@ -146,7 +149,7 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
   test("宽终端：权限 modal = 边框 2 + 标题 1 + 描述 1 + 选项 3 + 提示 1", () => {
     const ask = { tool: "bash", summaryHint: "ls -la" };
     expect(permissionModalRows(ask, 100)).toBe(8);
-    // 无描述 → 少 1 行。
+    // no description → one row fewer.
     expect(permissionModalRows({ tool: "bash", summaryHint: "" }, 100)).toBe(7);
   });
 
@@ -161,8 +164,8 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
       { tool: "bash", summaryHint: longHint },
       44
     );
-    expect(narrow).toBeGreaterThan(wide); // 折行后行数增加
-    // 描述折行可手算：inner=40，hint 视觉宽 60 → 2 行；宽终端 1 行 → 差 1。
+    expect(narrow).toBeGreaterThan(wide); // wrapping adds rows
+    // describable by hand: inner=40, hint visual width 60 → 2 rows; wide terminal 1 row → diff 1.
     expect(narrow - wide).toBe(1);
   });
 
@@ -177,12 +180,12 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
       },
       80
     );
-    // 边框 2 + 标题 1 + 选项 2 + 默认提示 1 = 6。
+    // borders 2 + title 1 + options 2 + default hint 1 = 6.
     expect(rows).toBe(6);
   });
 });
 
-/** 帧中 modal 盒子实测高度：顶框行（含 ╭）到底框行（含 ╰）的行数。 */
+/** Measured modal box height in the frame: lines from top border (╭) to bottom border (╰). */
 function modalBoxHeight(frame: string): number {
   const lines = frame.split("\n");
   const top = lines.findIndex((l) => l.includes("╭"));
@@ -222,7 +225,7 @@ describe("ModalHost 渲染", () => {
     expect(frame).toContain("[n]");
     expect(frame).toContain("拒绝");
     expect(frame).toContain("Esc 收起");
-    // 选中项标记落在第一项。
+    // the selection marker lands on the first option.
     expect(frame).toContain("❯ [y]");
     await setup.renderer.destroy();
   });
@@ -286,7 +289,7 @@ describe("ModalHost 渲染", () => {
         height,
         `cols=${cols} 实测 ${height} === 预测 ${permissionModalRows(ask, cols)}`
       ).toBe(permissionModalRows(ask, cols));
-      // 双重核对：内容描述重算一致（渲染 / 行账同源守卫）。
+      // double check: recomputed from content description (render / row-accounting share one source).
       expect(selectModalRows(permissionModalContent(ask), cols)).toBe(
         permissionModalRows(ask, cols)
       );

@@ -1,16 +1,18 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T3 — 工人 transcript 写盘链测试。
+ * ADR-0102 — worker transcript disk-write chain tests.
  *
- * 三面各钉一条不变式：
- *   A. manager payload：spawn 时 transcriptPath 与 per-agent trace 分家
- *      （同目录不同文件，不覆盖 `agent-<taskId>.jsonl`），并覆盖空父 id /
- *      无目录装配的退化边界（锁句 3、6）。
- *   B. worker runWorkerOnce：接线在场 → seed + commit 批边跑边落账，
- *      load 投影含本次对话事件；缺席 → 零调用（byte-stable 旧形态）。
- *   C. fence-tmp 枚举：工人账不进 trace record 名单。
+ * One invariant pinned per surface:
+ *   A. manager payload: at spawn, transcriptPath is separate from the
+ *      per-agent trace (same directory, different file; never overwrites
+ *      `agent-<taskId>.jsonl`), plus degraded edges for empty parent id /
+ *      assembly without a directory.
+ *   B. worker runWorkerOnce: wiring present -> seed + commit batches land
+ *      while running, and the load projection contains this conversation's
+ *      events; absent -> zero calls (byte-stable legacy shape).
+ *   C. fence-tmp enumeration: worker transcripts never enter the trace-record list.
  *
- * 存储 codec 与 listSessions 不收录的断言在
- * tests/session-api/worker-transcript-store.test.ts（同一缝的另一半）。
+ * Storage codec and listSessions-exclusion assertions live in
+ * tests/session-api/worker-transcript-store.test.ts (the other half of the same seam).
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -44,7 +46,7 @@ import {
 } from "../../src/session-api/store/index.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 
-// ── fake child（沿用 manager.test.ts 先例）───────────────────────────────────
+// ── fake child (follows the manager.test.ts precedent) ──────────────────────
 
 function makeFakeChild(): ChildProcess {
   return Object.assign(new EventEmitter(), {
@@ -85,7 +87,7 @@ function okEnvelope(result = "ok"): SubAgentEnvelope {
   return { status: "ok", summary: result, result };
 }
 
-// ── minimal stub deps (与 graceful-timeout.test.ts 同构) ─────────────────────
+// ── minimal stub deps (same shape as graceful-timeout.test.ts) ──────────────
 
 function makeDeps(adapter: ModelAdapter): LoopEngineDeps {
   return {
@@ -110,7 +112,7 @@ function scriptedAdapter(text: string): ModelAdapter {
   } as unknown as ModelAdapter;
 }
 
-/** 生产同一实现的测试拷贝：store 缝 → runWorkerOnce 的窄 IO。 */
+/** Test copy of the production implementation: store seam -> the narrow IO of runWorkerOnce. */
 function storeBackedTranscriptIo(): WorkerTranscriptIOFactory {
   return (loc) => ({
     loadMessages: async () => {
@@ -163,8 +165,9 @@ describe("ADR-0102 T3 — manager payload 的 transcriptPath（与 trace 分家�
       join(subagentsDir, taskId, `agent-${taskId}.jsonl`)
     );
     assert.notEqual(payload.traceFilePath, payload.transcriptPath);
-    // spawn 时刻：布局目录已建，工人账尚未写（worker 边跑边 append）；
-    // per-agent trace 文件独立存在（不覆盖 / 不共用）。
+    // At spawn time: the layout directory exists but the worker transcript is
+    // unwritten (the worker appends while running); the per-agent trace file
+    // exists independently (never overwritten / never shared).
     assert.ok(existsSync(join(subagentsDir, taskId)));
     assert.ok(!existsSync(payload.transcriptPath!));
     assert.ok(existsSync(payload.traceFilePath!));
@@ -237,8 +240,8 @@ describe("ADR-0102 T3 — runWorkerOnce 边跑边 append 工人账", () => {
         .filter((b) => b.type === "text")
         .map((b) => (b as { text: string }).text)
     );
-    // 初始历史（write-root prior 段 + task user）经 seed 落账，
-    // assistant 终稿经 commit 落账 —— 投影两条都在。
+    // Initial history (write-root prior segment + task user) lands via seed,
+    // the assistant final lands via commit — the projection contains both.
     assert.ok(
       texts.some((t) => t.includes("inspect the repo")),
       `transcript must contain the task user message; got ${JSON.stringify(texts)}`
@@ -308,7 +311,7 @@ describe("ADR-0102 T3 — runWorkerOnce 边跑边 append 工人账", () => {
       transcriptIo: io,
     });
     const afterSecond = await loadWorkerTranscript({ transcriptPath, taskId: "t4" });
-    // 续跑前账本原样作 prefix + 新 user 一句 + 新 assistant 一轮。
+    // The prior ledger stays a byte-exact prefix + one new user turn + one new assistant round.
     assert.equal(afterSecond.messages.length, 4);
     const texts = afterSecond.messages.flatMap((m) =>
       m.content

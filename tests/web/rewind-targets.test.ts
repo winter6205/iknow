@@ -1,5 +1,5 @@
 /**
- * Web rewind 锚点与 TUI 共用 GET rewind-targets 数据模型（head 事件 id）。
+ * Web rewind anchors share the GET rewind-targets data model (head event id) with the TUI.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";

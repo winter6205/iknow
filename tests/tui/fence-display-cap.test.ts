@@ -1,8 +1,10 @@
 /**
- * tests/tui/fence-display-cap.test.ts — 围栏显示窗纯函数 5 类边界。
+ * tests/tui/fence-display-cap.test.ts — 5 boundary classes for the fence
+ * display-window pure function.
  *
- * spec EXIT：empty / 非法窗宽退回 32 / overflow 只留窗内行 + N /
- * concurrent 两次调用互不影响 / 非数组或非字符串行 → TypeError。
+ * EXIT classes: empty / invalid window width falls back to 32 / overflow keeps
+ * only in-window lines + N / concurrent — two calls don't interfere /
+ * non-array or non-string lines → TypeError.
  */
 import { describe, expect, test } from "bun:test";
 import {

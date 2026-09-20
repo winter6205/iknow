@@ -69,15 +69,16 @@ async function connectFixture(traceDir?: string): Promise<{
 }
 
 /**
- * 一条只多了一个标量 `pad` 的记录（没有 messages，所以行轴预览里不会掺进别的截断
- * 标记）。「越 4000 那条线的单条记录原样可读」认证的就是它。
+ * One record padded with just an extra scalar `pad` (no messages, so the row-axis
+ * preview contains no other truncation marks). "A single record past the 4000 line
+ * reads back verbatim" is certified by exactly this.
  */
 const PADDED_CONVERSATION = "padded-conversation";
 
 function writePaddedTraceDir(pad: number): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-pad-"));
   scratchPaths.push(traceDir);
-  // T6 (SC16): 会话落两级树 `<traceDir>/projects/<slug>/<convId>/trace.jsonl`。
+  // Sessions land in the two-level tree `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
   const convDir = join(
     traceDir,
     "projects",
@@ -100,7 +101,7 @@ function writePaddedTraceDir(pad: number): string {
   return traceDir;
 }
 
-/** 行轴：整页文本。 */
+/** Row axis: the whole page as text. */
 async function callPaddedQueryTrace(client: Client): Promise<string> {
   const result = await client.callTool({
     name: "query_trace",
@@ -111,16 +112,16 @@ async function callPaddedQueryTrace(client: Client): Promise<string> {
 
 const WINDOW_CONVERSATION = "window-conversation";
 const WINDOW_RECORD_ID = "llm-window";
-/** 窗正文的长度。它在三次探针里都不变，变的只有读它的 `count`。 */
+/** Length of the window body. It stays constant across the three probes; only the `count` reading it changes. */
 const WINDOW_PART_CHARS = 16_001;
 /**
- * 把量级垫到 backstop 附近的记录标量。9 700 + 标定用的 `count: 10_000` 让标定那一发
- * 自己**不**撞帽（撞了量到的就是切完的长度），同时把目标 `count`（≈10 050）留在
- * `GET_RECORD_MAX_COUNT` 之内。
+ * Record scalar padded to near the backstop. 9 700 + the calibration `count: 10_000`
+ * keep the calibration probe itself **off** the cap (hitting it would measure the cut
+ * length), while leaving the target `count` (≈10 050) within `GET_RECORD_MAX_COUNT`.
  */
 const WINDOW_SCALAR_PAD = 9_700;
 
-/** 一条带定宽标量与一条 16 001 字符 tool_result part 的记录。 */
+/** A record with a fixed-width scalar and one 16 001-char tool_result part. */
 function writeWindowTraceDir(scalarPad: number): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-window-"));
   scratchPaths.push(traceDir);
@@ -158,7 +159,7 @@ function writeWindowTraceDir(scalarPad: number): string {
   return traceDir;
 }
 
-/** 内容轴：读 `count` 个字符的窗，返回 face 交回去的文本。 */
+/** Content axis: read a `count`-character window, return the text the face hands back. */
 async function callWindow(client: Client, count: number): Promise<string> {
   const result = await client.callTool({
     name: "get_record",
@@ -174,12 +175,14 @@ async function callWindow(client: Client, count: number): Promise<string> {
 }
 
 /**
- * 斜率为 1 的旋钮：`text` 是回复的**最后一个键**，所以 `count` 加一 = 未切文本加一
- * —— 标量 `pad`、`part_chars`、回显的 `from_char`/`part_index` 都不随之变，正文里也
- * 没有会被 `JSON.stringify` 转义膨胀的字符。唯一的例外是十进制进位（`count` 从 9 999
- * 到 10 000 会给长度白加一个字符），所以整条线只在**同一个位数**内成立：下面用位数
- * 相等把它圈出来。有了这条 1:1，才能喂「未切文本恰好 N 个字符」—— backstop 的判据就
- * 压在 N 那条线上，差一个字符结论就翻。
+ * The slope-1 knob: `text` is the **last key** of the response, so `count` + 1 =
+ * uncut text + 1 — the scalar `pad`, `part_chars`, and echoed `from_char`/`part_index`
+ * stay constant, and the body has no characters that JSON.stringify would escape-open.
+ * The one exception is a decimal carry (`count` crossing 9 999 → 10 000 adds a free
+ * character to length), so the line holds only **within one digit count**; the band
+ * check below enforces equal digit counts. With this 1:1 in hand we can feed "uncut
+ * text of exactly N characters" — the backstop's verdict sits on the N line itself,
+ * off by one and the conclusion flips.
  */
 const CALIBRATION_COUNT = 10_000;
 
@@ -192,7 +195,7 @@ async function measureWindowOverhead(client: Client): Promise<number> {
   return measured.length - CALIBRATION_COUNT;
 }
 
-/** 标定的有效区间：目标 count 与标定值同位数，且是本面读得出来的窗。 */
+/** Calibration band: target count shares CALIBRATION_COUNT's digit count and is a window this face can actually read. */
 function assertInCalibrationBand(count: number): number {
   assert.ok(
     String(count).length === String(CALIBRATION_COUNT).length &&
@@ -206,7 +209,7 @@ function assertInCalibrationBand(count: number): number {
   return count;
 }
 
-/** 让本面**未切**的 handler 文本正好 `wanted` 个字符，返回 face 交回去的文本。 */
+/** Make this face's **uncut** handler text exactly `wanted` characters; return the text the face hands back. */
 async function probeAtTextLength(wanted: number): Promise<string> {
   const connected = await connectFixture(
     writeWindowTraceDir(WINDOW_SCALAR_PAD)
@@ -221,7 +224,7 @@ async function probeAtTextLength(wanted: number): Promise<string> {
   }
 }
 
-/** 斜率检查：同一份夹具里 `count` 加一，未切回复正好加一。 */
+/** Slope check: in the same fixture, `count` + 1 yields an uncut response exactly +1. */
 async function measuredSlope(): Promise<number> {
   const connected = await connectFixture(
     writeWindowTraceDir(WINDOW_SCALAR_PAD)
@@ -237,8 +240,7 @@ async function measuredSlope(): Promise<number> {
 
 describe("trace MCP server", () => {
   it("registers the three read-side faces in axis order and marks all read-only", async () => {
-    // SC6 的白名单：目录轴 → 行轴 → 内容轴（`server.ts` 的 registerTool 顺序即
-    // tools/list 顺序）。含且仅含这三件，且三件都带 readOnlyHint。
+    // The whitelist's axis order: catalog → row → content (`server.ts`'s registerTool order is the tools/list order). Exactly these three, each carrying readOnlyHint.
     const connected = await connectFixture();
     try {
       const result = await connected.client.listTools();
@@ -268,10 +270,11 @@ describe("trace MCP server", () => {
 
       assert.equal(text?.type, "text");
       if (text?.type !== "text") throw new Error("expected text content");
-      // T6 让 4000 这个数字退场（plan 第 5 条），所以小夹具上的
-      // `length <= 4_000` 认证的是核心**不再提供**的保证 —— 一条恒真的帽断言。改钉
-      // 本测真正主张的事：这一页远在面的预算之内，因此一字未动（没有任何截断标记）。
-      // 「越 4000 的单条整发返回」与「超预算才切」两条判据各有专门的测在下面。
+      // The 4000 number was retired, so on a small fixture `length <= 4_000` would
+      // certify a guarantee the core **no longer provides** — a tautological cap
+      // assertion. Re-pinned to what this test actually claims: this page is far
+      // inside the face's budget, hence byte-for-byte untouched (no truncation mark).
+      // "One record past 4000 returns whole" and "cut only past budget" each have dedicated tests below.
       expect(text.text.length).toBeLessThan(TRACE_OUTPUT_BACKSTOP);
       expect(text.text.endsWith(TRACE_BACKSTOP_MARKER)).toBe(false);
       expect(text.text).toContain("llm-2");
@@ -288,10 +291,10 @@ describe("trace MCP server", () => {
   });
 
   it("returns one record past the retired 4000 line whole and parseable (SC7)", async () => {
-    // SC7 的行为断言半边：「一条超 4000 的记录必须原样可读」。帽不再是任何工具的
-    // 参数，所以越线本身不能改变返回 —— 唯一会改变返回的是本面的 backstop，而它
-    // 在 20 000 那条线上，不在这条线上。T7 删了 `total`（属面板分页），所以这里
-    // 不再读这个字段。
+    // The behavioral half of SC7: "a record over 4000 must read back verbatim". The cap
+    // is no longer a parameter of any tool, so crossing the line itself cannot change the
+    // return — only this face's backstop changes returns, and it sits on the 20 000 line,
+    // not this one. `total` was deleted (it belonged to panel paging), so no such field is read here.
     const traceDir = writePaddedTraceDir(6_000);
     const connected = await connectFixture(traceDir);
     try {
@@ -302,7 +305,7 @@ describe("trace MCP server", () => {
       const body = JSON.parse(text) as {
         records: Array<{ pad?: string }>;
       };
-      // 字段整发回来：既没被删（v1.0 `compactRecord` 的静默降级），也没被裁短。
+      // The field comes back whole: neither dropped (v1.0's silent `compactRecord` degradation) nor trimmed short.
       expect(body.records[0]?.pad).toEqual("a".repeat(6_000));
     } finally {
       await connected.close();
@@ -505,7 +508,7 @@ describe("trace MCP server — list_sessions", () => {
         type: "text",
         // The SDK quotes the bound back in its own sentence, so the number here
         // is the schema's, not this test's: `LIST_SESSIONS_MAX_LIMIT` moved
-        // 200 → 128 in plan `trace-mcp-read-side-split` T6. Interpolating it keeps
+        // 200 → 128 in the read-side-split work. Interpolating it keeps
         // the claim (the face refuses one past its declared maximum, in the SDK's
         // wording) without pinning a value the core owns.
         text: `Input validation error: Invalid arguments for tool list_sessions: limit: Too big: expected number to be <=${LIST_SESSIONS_MAX_LIMIT}`,
@@ -516,7 +519,7 @@ describe("trace MCP server — list_sessions", () => {
   });
 });
 
-/** 本面每条回复都是单个 text block；失败时那唯一的 block 就是给调用方的消息。 */
+/** Every response on this face is a single text block; on failure that sole block is the message to the caller. */
 function firstText(result: unknown): string {
   const content = (result as { content?: unknown }).content;
   assert.ok(Array.isArray(content), "expected a content array");
@@ -528,9 +531,11 @@ function firstText(result: unknown): string {
 
 describe("trace MCP server — get_record", () => {
   it("answers a character window and echoes the effective coordinates (SC8)", async () => {
-    // 接线要单独钉：三件工具共用一个 handler 工厂，所以「名字注册对了、核接错了」
-    // 这种缺陷白名单测看不见。窗臂的判据本身（恰好 count 个字符、坐标回显生效值）
-    // 归 tests/traceserver/；这里只认证据到了调用方手里仍是原样。
+    // The wiring needs its own pin: all three tools share one handler factory, so a
+    // "name registered right, core wired wrong" defect is invisible to the whitelist
+    // test. The window arm's criteria themselves (exactly count chars, echo of
+    // effective coordinates) belong to tests/traceserver/; here we only certify the
+    // evidence reaches the caller unchanged.
     const connected = await connectFixture();
     try {
       const result = await connected.client.callTool({
@@ -538,8 +543,9 @@ describe("trace MCP server — get_record", () => {
         arguments: {
           conversation_id: "conversation-1",
           record_id: "llm-2",
-          // 窗臂由 `part_index` 的**存在**选定（第 14 条）：只给 from_char/count 落在
-          // 清单臂上，那是被拒而不是被忽略 —— 下面那条 SC16 测正好钉这件事。
+          // The window arm is selected by the **presence** of `part_index`: giving only
+          // from_char/count lands on the manifest arm — rejected, not ignored — which the
+          // SC16 test below pins exactly.
           part_index: 0,
           from_char: 8,
           count: 4,
@@ -557,14 +563,16 @@ describe("trace MCP server — get_record", () => {
         part_chars: number;
         text: string;
       };
-      // part 0 是 llm-2 唯一的 tool_result 全文 "private tool output"（19 字符）。
+      // part 0 is llm-2's only tool_result in full: "private tool output" (19 chars).
       expect(body.matched_on).toBe("llm_call_id");
       expect(body.detail).toBe("tool_results");
       expect([body.part_index, body.from_char, body.count]).toEqual([0, 8, 4]);
       expect(body.part_chars).toBe(19);
       expect(body.text).toBe("tool");
-      // `text` 排在最后一个键不是排版偏好：本面的 backstop 从尾部切，键序决定了被切
-      // 到的是正文还是回显坐标（后者必须留下，调用方才能只改小 count 重发）。
+      // `text` being the last key is not a formatting preference: this face's backstop
+      // cuts from the tail, so key order decides whether the cut lands on the body or
+      // the echoed coordinates (the latter must survive so the caller can simply lower
+      // count and retry).
       expect(Object.keys(body).at(-1)).toBe("text");
     } finally {
       await connected.close();
@@ -572,14 +580,17 @@ describe("trace MCP server — get_record", () => {
   });
 
   it("names get_record on every error that leaves the face catch arm (SC16)", async () => {
-    // 三条不需要大夹具的 catch-arm 路线：`a/b` 过 zod 而由核拒；`record_not_found`
-    // 干脆是核自己造的错误；只给窗坐标不给 `part_index` 落在清单臂上被拒（两臂由
-    // `part_index` 的**存在**选定，未用的坐标是拒不是忽略）。三条的消息都必须带
-    // 本面工具名 —— 共用的核**故意**不在消息里提名工具（那会把另外两条轴说错），
-    // 前缀只可能来自这张皮。
+    // Three catch-arm routes that need no large fixture: `a/b` passes zod and is rejected
+    // by the core; `record_not_found` is an error the core itself constructs; window
+    // coordinates without `part_index` land on the manifest arm and are rejected (the two
+    // arms are selected by the **presence** of `part_index`; unused coordinates are
+    // rejected, not ignored). All three messages must carry this face's tool name — the
+    // shared core **deliberately** omits tool names from its messages (that would
+    // misattribute the other two axes), so the prefix can only come from this skin.
     //
-    // 本面**故意**不带 `kind`（MCP 没有 ACI 那样的结构化通道，拼进文本会改掉 SC16
-    // 的形状；记为后续票）。这里把「不带」也钉住，免得有人顺手补上。
+    // This face **deliberately** carries no `kind` (MCP has no ACI-style structured
+    // channel; folding it into text would change SC16's shape; filed as a follow-up).
+    // The absence is pinned here too, so nobody helpfully adds it.
     const connected = await connectFixture();
     try {
       const rejected = await connected.client.callTool({
@@ -620,10 +631,11 @@ describe("trace MCP server — get_record", () => {
 });
 
 describe("trace MCP server — role projection (v1.2)", () => {
-  // spec v1.2 判据落地后, 经 stdio MCP 调用路径验证两张皮共用的投影:
-  // query_trace 行轴投影携带 last_assistant_preview;
-  // get_record(detail=messages) 清单臂 parts 携带 role.
-  // 两张皮经共享核自动继承, 这里钉住 MCP 这层也能看到这些字段.
+  // After the role-projection spec landed, verify over the stdio MCP call path the
+  // projection shared by both skins: query_trace's row-axis projection carries
+  // last_assistant_preview; get_record(detail=messages)'s manifest parts carry role.
+  // Both skins inherit automatically via the shared core; this pins that the MCP
+  // layer also exposes these fields.
 
   it("query_trace llm_call projection carries last_assistant_preview", async () => {
     const fixture = createTraceFixture();
@@ -641,8 +653,8 @@ describe("trace MCP server — role projection (v1.2)", () => {
       const body = JSON.parse(text.text) as {
         records: Array<Record<string, unknown>>;
       };
-      // fixture 在 conversation-1 第二条记录 llm-2 上有一条 assistant 消息,
-      // 内容是一个 tool_use block. last_assistant_preview 应该是其 JSON 字符串.
+      // The fixture has an assistant message on conversation-1's second record llm-2,
+      // containing one tool_use block. last_assistant_preview should be its JSON string.
       const llm2 = body.records.find(
         (record) => record.llm_call_id === "llm-2"
       );
@@ -711,8 +723,8 @@ describe("trace MCP server — role projection (v1.2)", () => {
         parts: Array<{ role?: string; message_index?: number }>;
       };
 
-      // llm-2 fixture: 3 条消息 [user, assistant, user], 每条单 part.
-      // role 跟随 message: [user, assistant, user].
+      // llm-2 fixture: 3 messages [user, assistant, user], one part each.
+      // role follows the message: [user, assistant, user].
       assert.equal(body.parts.length, 3);
       assert.equal(body.parts[0]?.role, "user");
       assert.equal(body.parts[1]?.role, "assistant");
@@ -723,8 +735,8 @@ describe("trace MCP server — role projection (v1.2)", () => {
   });
 
   it("get_record default detail=tool_results manifest parts carry no role", async () => {
-    // v1.2 判据 (a) 收尾: detail=tool_results 的 part 上**不加** role.
-    // 通过 MCP 路径钉住「缺席」而非 null/undefined.
+    // Closing the role-projection criteria: detail=tool_results parts carry **no** role.
+    // Pinned via the MCP path as "absent", not null/undefined.
     const fixture = createTraceFixture();
     fixtures.push(fixture);
     const connected = await connectFixture();
@@ -743,7 +755,7 @@ describe("trace MCP server — role projection (v1.2)", () => {
       const body = JSON.parse(text.text) as {
         parts: Array<Record<string, unknown>>;
       };
-      // llm-2 有 1 个 projected tool_result.
+      // llm-2 has 1 projected tool_result.
       assert.equal(body.parts.length, 1);
       assert.ok(
         !("role" in body.parts[0]!),
@@ -756,31 +768,36 @@ describe("trace MCP server — role projection (v1.2)", () => {
 });
 
 describe("trace MCP server — output backstop", () => {
-  // 帽只在**这条**皮上必须有：进程内那条路后面还有 executor 的 `OUTPUT_HARD_CAP`
-  // （契约 X 的唯一截断权威），stdio 这条路没有任何东西在它之后再看一眼文本。
-  // 判据是「marker 计入预算 → 返回长度严格 ≤ `TRACE_OUTPUT_BACKSTOP`」，而它只能在
-  // 边界两侧各喂一次才被证伪。值的同源锁定在 tests/traceserver/output-backstop.test.ts
-  // （那里可以跨边界跑 executor），本文件不重复钉一个纯常量。
+  // The cap must exist on **this** skin only: the in-process route still has the
+  // executor's `OUTPUT_HARD_CAP` behind it (the sole truncation authority of
+  // contract X), while the stdio route has nothing inspecting the text afterwards.
+  // The criterion is "marker counts toward the budget → returned length strictly
+  // ≤ `TRACE_OUTPUT_BACKSTOP`", falsifiable only by probing both sides of the
+  // boundary. Value-source locking lives in tests/traceserver/output-backstop.test.ts
+  // (where the executor can run across the boundary); this file does not re-pin a bare constant.
 
   it("leaves text at exactly the budget whole and cuts it one character later", async () => {
     const whole = await probeAtTextLength(TRACE_OUTPUT_BACKSTOP);
     const cut = await probeAtTextLength(TRACE_OUTPUT_BACKSTOP + 1);
     const head = TRACE_OUTPUT_BACKSTOP - TRACE_BACKSTOP_MARKER.length;
 
-    // 标定本身：斜率必须是 1。两个同位数的相邻 count，未切回复正好差一个字符 ——
-    // 否则下面「20 000 未切 / 20 001 已切」比的就不是同一条线上的两个相邻点。
+    // The calibration itself: slope must be 1. Two adjacent same-digit-count counts must
+    // yield uncut responses exactly one character apart — otherwise the "20 000 uncut /
+    // 20 001 cut" comparison below is not comparing adjacent points on the same line.
     expect(await measuredSlope()).toBe(0);
 
-    // 20 000：一字未动，因此仍是可解析的 JSON，也没有任何截断标记。
+    // 20 000: untouched, hence still parseable JSON with no truncation marker.
     expect(whole).toHaveLength(TRACE_OUTPUT_BACKSTOP);
     expect(whole.endsWith(TRACE_BACKSTOP_MARKER)).toBe(false);
-    // 20 001：切完正好等于预算 —— marker 不计入的话就是 20 014，那条不变式即破。
+    // 20 001: cut to exactly the budget — if the marker did not count, it would be 20 014 and the invariant breaks.
     expect(cut).toHaveLength(TRACE_OUTPUT_BACKSTOP);
     expect(cut.length).toBeLessThanOrEqual(TRACE_OUTPUT_BACKSTOP);
     expect(cut.endsWith(TRACE_BACKSTOP_MARKER)).toBe(true);
-    // 切在预算末位，且留下的就是原文的头。两条回复除了各自回显的 `count` 数字（本来
-    // 就该差一位）之外是逐字符对齐的，所以那个字段两侧都可以直接比；标记紧前面仍是
-    // 正文的 `z` 串，说明被切掉的是尾部，不是中间（「摘要 + 标记」是另一种切法）。
+    // Cut at the budget's last position, keeping exactly the original head. The two
+    // responses align character-for-character apart from their echoed `count` digits
+    // (which should differ by one anyway), so that field can be compared directly on
+    // both sides; the 20 chars just before the marker are still body `z`s, proving the
+    // tail was cut, not the middle ("summary + marker" would be a different cut).
     const echoStart = whole.indexOf('"count":') + '"count":'.length;
     const echoEnd = whole.indexOf(",", echoStart);
     expect(echoEnd).toBeGreaterThan(echoStart);
@@ -790,8 +807,9 @@ describe("trace MCP server — output backstop", () => {
   });
 
   it("caps a far-oversized response to the same budget", async () => {
-    // 不标定，只要「远远越帽」：把量级垫到 ~100 000（定宽标量 ~84 000 + 一窗 16 000
-    // 正文 = 本面能读的最大窗），返回长度仍必须正好等于预算。
+    // No calibration, just "far past the cap": pad the magnitude to ~100 000 (fixed-width
+    // scalar ~84 000 + a 16 000 body window = the largest window this face can read); the
+    // returned length must still equal the budget exactly.
     const connected = await connectFixture(writeWindowTraceDir(84_000));
     try {
       const huge = await callWindow(connected.client, GET_RECORD_MAX_COUNT);
@@ -804,9 +822,10 @@ describe("trace MCP server — output backstop", () => {
   });
 
   it("caps the error arm too, with the tool-name prefix still in front", async () => {
-    // 两条臂都过 backstop（`readOnlyToolHandler` 里写了两次）。这条测把「错误也可能
-    // 超预算」说清楚：一个 30 000 字符的 record_id 会被核原样回抄进消息，切完仍然
-    // 以 `get_record: ` 开头 —— 前缀在头部，所以它活下来；正文在尾部，所以被切。
+    // Both arms pass through the backstop (written twice inside `readOnlyToolHandler`).
+    // This makes "errors can exceed the budget too" explicit: a 30 000-char record_id is
+    // echoed verbatim by the core into the message; after cutting it still starts with
+    // `get_record: ` — the prefix survives at the head, the body is cut at the tail.
     const connected = await connectFixture();
     try {
       const failed = await connected.client.callTool({
@@ -828,13 +847,14 @@ describe("trace MCP server — output backstop", () => {
   });
 });
 
-/** 只造 schema，不碰文件系统：三件工具的工厂都是惰性的。 */
+/** Schema only, no filesystem touched: all three tool factories are lazy. */
 const SC18_ONLY_TRACE_DIR = "/iknow-sc18-schema-only";
 
 /**
- * SC18 要的是一张表（每件工具各一条 diff），而不是三份复制粘贴的断言。
- * `boundedField` / `maximum` 逐件点名「这一件唯一的上界由核声明」，缺了它就得靠
- * 下面那个循环，而循环在两边同时掉界时会一声不响。
+ * This needs a table (one diff per tool), not three copy-pasted assertions.
+ * `boundedField` / `maximum` name per tool "this tool's sole upper bound is declared
+ * by the core"; without them we'd rely on the loop below, which goes silent when both
+ * faces drop a bound simultaneously.
  */
 const PARAMETER_PLANE: ReadonlyArray<{
   readonly name: string;
@@ -866,13 +886,14 @@ const PARAMETER_PLANE: ReadonlyArray<{
 ];
 
 describe("the three read-side faces agree on the parameter plane (SC18)", () => {
-  // spec SC18：每件工具各一条 diff 断言，任何一面都不能悄悄挪动一个界。桥写在测里
-  // 是故意的 —— `src/trace-mcp/` 不得 import ACI registry（SC12），于是只有调用方
-  // 视角的比对能说这两份声明仍然一致。
+  // One diff assertion per tool: no face may quietly move a bound. Writing the bridge
+  // inside the test is deliberate — `src/trace-mcp/` must not import the ACI registry,
+  // so only a caller-perspective comparison can say the two declarations still agree.
   //
-  // 两处合法差异点名而不抹平：ACI 侧每个轴带 `default`（本 SDK 不 surface 它），
-  // zod 给未声明上界的 `.int()` 挂上隐式 `Number.MAX_SAFE_INTEGER` 上界（只在
-  // `offset` / `message_index` 这类字段现身），所以 maximum 只在 ACI 声明它的地方比。
+  // Two legitimate differences are named, not smoothed over: each ACI axis carries a
+  // `default` (this SDK does not surface it), and zod attaches an implicit
+  // `Number.MAX_SAFE_INTEGER` maximum to `.int()` without a declared bound (visible only
+  // on fields like `offset` / `message_index`), so maximum is compared only where ACI declares it.
   it.each(PARAMETER_PLANE)(
     "$name publishes the same properties, bounds and required-ness on both faces",
     async ({ name, aciSchema, boundedField, maximum }) => {
@@ -887,8 +908,8 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
         );
         expect(mcpSchema.additionalProperties).toBe(false);
         expect(aciSchema.additionalProperties).toBe(false);
-        // required-ness 一起比：内容轴那两个 id 只有**两面都**必填才是合同
-        // （Assumption 4）。
+        // required-ness compared together: the content axis's two ids are contractual
+        // only if **both faces** require them.
         expect([...(mcpSchema.required ?? [])].sort()).toEqual(
           [...(aciSchema.required ?? [])].sort()
         );
@@ -900,7 +921,7 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
             expect(mcpField.maximum).toEqual(aciField.maximum);
           }
         }
-        // 这条循环会在两边同时掉界时一声不响，所以逐个点名真正的界。
+        // The loop above goes silent when both faces drop a bound together, so name the real bound per tool.
         expect(aciSchema.properties[boundedField]?.maximum).toBe(maximum);
         expect(mcpSchema.properties[boundedField]?.maximum).toBe(maximum);
       } finally {
@@ -910,9 +931,10 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
   );
 
   it("keeps the content axis the only face with required arguments", async () => {
-    // 上面逐件比过「两面一致」，还差一条「必填这件事只在内容轴」的断言：目录轴与
-    // 行轴保留「缺省=最近活跃会话」，本轴把它关掉了。数组顺序即三轴顺序，与 SC6 的
-    // 注册顺序同源。
+    // The per-tool comparison above proves the faces agree; still needed: "required-ness
+    // exists only on the content axis". The catalog and row axes keep "omitted = most
+    // recently active session"; this axis switched it off. Array order is the three-axis
+    // order, same source as the registration order.
     expect(
       PARAMETER_PLANE.map((face) => face.aciSchema.required ?? [])
     ).toEqual([[], ["conversation_id"], ["conversation_id", "record_id"]]);
@@ -920,8 +942,8 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
 });
 
 describe("trace MCP server — query_trace contains (trace-mcp-args-search task)", () => {
-  // SC18 schema diff 测在两条面 schema 上都会看到 contains, 自然通过。补一条
-  // 端到端: MCP 面输入 contains → 核 (reader) → 结果。
+  // The schema-diff test sees `contains` on both faces' schemas and passes naturally.
+  // Add one end-to-end: MCP face input contains → core (reader) → result.
   it("propagates contains to the core and returns the matching record", async () => {
     const connected = await connectFixture();
     try {
@@ -949,9 +971,9 @@ describe("trace MCP server — query_trace contains (trace-mcp-args-search task)
   });
 
   it("rejects an empty contains via zod .strict() as SDK schema-rejection", async () => {
-    // MCP 面的 .strict() 不拒 contains 本身 (它是 schema 的合法属性), 但
-    // 核抛 TraceQueryValidationError — 此处验面 catch arm 把它前缀成
-    // `query_trace: ...` 后回到调用方手里。
+    // The MCP face's .strict() does not reject `contains` itself (a legitimate schema
+    // property), but the core throws TraceQueryValidationError — here we verify the face's
+    // catch arm prefixes it as `query_trace: ...` before it reaches the caller.
     const connected = await connectFixture();
     try {
       const failed = await connected.client.callTool({

@@ -2,14 +2,16 @@
 /**
  * tests/tui/copy-flow-flaky.test.tsx
  *
- * #343 follow-up: 验证「拖选后右键复制」真实链路在 TUI 中不会丢选区。
- * 现有 copy-flow.test.tsx 的「完整右键」用例只在 (5,5) 点击一下，
- * 但用户报告「有时候」失败。
+ * Follow-up to copy-flow: verifies the real "drag-select then right-click
+ * copy" path never loses the selection in the TUI. The existing
+ * "full right-click" case in copy-flow.test.tsx only clicks once at (5,5),
+ * while users reported intermittent failures.
  *
- * 本测试覆盖若干坐标位置 + 极端边角，验证不同 hit-test 命中点都不应触发
- * clearSelection。如果某个点位失败——即 OpenTUI 的 hitTest 返回 0
- * (maybeRenderable 为 null) — 那就是根因：dispatchMouseEvent 没被调用，
- * preventDefault 没机会跑，clearSelection 直接清掉选区。
+ * This test covers several coordinate positions + extreme corners, checking
+ * that no hit-test landing point triggers clearSelection. If a point fails
+ * — i.e. OpenTUI's hitTest returns 0 (maybeRenderable null) — that is the
+ * root cause: dispatchMouseEvent never runs, preventDefault gets no chance,
+ * and clearSelection wipes the selection outright.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -49,7 +51,7 @@ async function renderApp() {
 }
 
 describe("TuiApp 右键复制（多坐标点位）", () => {
-  // 含 (0,0)、边角、远离文本区域
+  // Includes (0,0), corners, and points far from text regions.
   for (const [x, y] of [
     [5, 5],
     [40, 10],
@@ -75,8 +77,8 @@ describe("TuiApp 右键复制（多坐标点位）", () => {
       const frame = setup.captureCharFrame();
       const sel = (setup.renderer as unknown as { currentSelection: unknown })
         .currentSelection;
-      // 期望：选区被 handleMouseUp 清掉（这是设计意图），
-      // 且显示「已复制」或「已写入」
+      // Expected: the selection is cleared by handleMouseUp (by design),
+      // and the frame shows `已复制` ("copied") or `已写入` ("written").
       expect(frame).toMatch(/已复制|已写入/);
       expect(frame).not.toContain("无选区");
       await setup.renderer.destroy();

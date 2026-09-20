@@ -1,13 +1,14 @@
 /**
- * serve-workspace T4 — workspace 组折叠态 localStorage 模块单测 (node + vitest)。
+ * Unit tests for the workspace-group collapsed-state localStorage module (node + vitest).
  *
- * 镜像 `tests/web/thinking-settings.test.ts` 模式。覆盖：
- * - key 编码（base64 包含 workspaceRoot，避免路径含 "/" 破坏 localStorage 形态）
- * - loadCollapsed 默认值（未存 / 解析失败 → false）
- * - saveCollapsed 落盘正确（仅非活跃组）
- * - SSR-safe（window/localStorage 缺席时 no-op / 返回默认值）
+ * Mirrors `tests/web/thinking-settings.test.ts`. Covers:
+ * - key encoding (workspaceRoot is base64'd so "/" in paths cannot break the
+ *   localStorage key shape)
+ * - loadCollapsed defaults (unset / parse failure → false)
+ * - saveCollapsed persistence correctness (non-active groups only)
+ * - SSR-safety (no-op / default values when window/localStorage are absent)
  *
- * 通过 `globalThis.localStorage` 注入 fake store（node env 无 localStorage）。
+ * A fake store is injected via `globalThis.localStorage` (node env has none).
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
@@ -56,7 +57,7 @@ describe("collapseKey — 编码（避免 '/' 破坏 key 形态）", () => {
     const k = collapseKey("/home/winner/projects/iknow");
     assert.ok(k.startsWith("sidebar.workspaceGroups."), `key prefix: ${k}`);
     assert.ok(k.length > "sidebar.workspaceGroups.".length);
-    // base64 中不含 '/'（即 root 内的 '/' 不会破坏 key 解析）
+    // base64 output contains no '/', so slashes inside the root cannot break key parsing
     const tail = k.slice("sidebar.workspaceGroups.".length);
     assert.ok(!tail.includes("/"), `tail should not contain '/': ${tail}`);
     assert.ok(!tail.includes(" "), `tail should not contain ' ': ${tail}`);
@@ -78,7 +79,7 @@ describe("collapseKey — 编码（避免 '/' 破坏 key 形态）", () => {
 
 describe("loadCollapsed — 读取（SSR-safe / 容错）", () => {
   it("localStorage 缺席 → 默认 false", () => {
-    // 不注入 localStorage, 模拟 SSR/Node
+    // no localStorage injected — simulates SSR/Node
     assert.equal(loadCollapsed("/x"), false);
   });
 
@@ -107,7 +108,7 @@ describe("loadCollapsed — 读取（SSR-safe / 容错）", () => {
 
   it("localStorage.getItem 抛错 → 容错回落 false", () => {
     const fake = installLocalStorage();
-    // 让 getItem 抛错
+    // make getItem throw
     const stub: Storage = {
       getItem: () => {
         throw new Error("boom");
@@ -122,7 +123,7 @@ describe("loadCollapsed — 读取（SSR-safe / 容错）", () => {
     };
     vi.stubGlobal("localStorage", stub);
     assert.equal(loadCollapsed("/x/y"), false);
-    // 恢复
+    // restore happens in afterEach
     void fake;
   });
 });
@@ -143,27 +144,30 @@ describe("saveCollapsed — 落盘（仅非活跃组 / 容错）", () => {
   it("localStorage.setItem 抛错 (quota) → no-op 不抛", () => {
     const fake = installLocalStorage();
     fake.failNext = true;
-    // 不应抛
+    // must not throw
     saveCollapsed("/x/y", true);
   });
 
   it("localStorage 缺席 → no-op 不抛", () => {
-    // 不注入 localStorage
+    // no localStorage injected
     saveCollapsed("/x/y", true);
   });
 });
 
 /**
- * serve-workspace T7b — CollapsedStateStore 单测（M3 lazy init）。
+ * CollapsedStateStore unit tests (lazy per-key init).
  *
- * 关键契约：
- *  - 首次 `lookup(key)` 从 localStorage 读默认值（活跃组强制 false），之后
- *    保留内存值，不再 re-read localStorage。
- *  - `toggle(key)` 翻转内存值 + 落盘；返回新状态供 React overrides 用。
- *  - 多个 key 之间独立 — 第二次 lookup 不同 key 也会读 localStorage。
+ * Key contracts:
+ *  - The first `lookup(key)` reads the default from localStorage (active groups
+ *    forced to false); afterwards the in-memory value is kept and localStorage
+ *    is never re-read.
+ *  - `toggle(key)` flips the in-memory value and persists it; returns the new
+ *    state for the React overrides.
+ *  - Keys are independent — a second lookup on a different key still reads localStorage.
  *
- * 这是 useWorkspaceGroups React hook 的纯逻辑底座；hook 在 useRef 里持有
- * store 实例，配合 overrides state 让 groups 数组引用变化不再触发状态重置。
+ * This is the pure-logic base of the useWorkspaceGroups React hook; the hook
+ * holds the store instance in a useRef, and together with overrides state this
+ * stops groups-array reference changes from resetting collapse state.
  */
 describe("CollapsedStateStore — lazy per-key init (T7b M3)", () => {
   it("首次 lookup 一个 key → 从 localStorage 读默认值", () => {
@@ -181,31 +185,31 @@ describe("CollapsedStateStore — lazy per-key init (T7b M3)", () => {
   });
 
   it("同一 key 二次 lookup → 保留内存值，不重读 localStorage", () => {
-    // 模拟"toggle 后立即 refresh"：用户先 toggle 把状态改成 true 落盘，
-    // 然后某种操作让 localStorage 里的值被改成 false。如果 store 在二次
-    // lookup 时重读 localStorage，会丢用户的 toggle。T7b 修这个 bug。
+    // Scenario "toggle then immediate refresh": the user toggles to true (persisted),
+    // then something rewrites the localStorage value to false. If the second lookup
+    // re-read localStorage, the user's toggle is lost — lazy per-key init prevents it.
     const fake = installLocalStorage();
     fake.data.set(collapseKey("/a"), "true");
     const store = new CollapsedStateStore();
     assert.equal(store.lookup("/a", false), true);
-    // 用户 toggle：内存值翻转 + 落盘
+    // user toggle: flip in-memory value + persist
     const next = store.toggle("/a", false);
-    assert.equal(next, false); // 从 true 翻到 false
-    assert.equal(store.lookup("/a", false), false); // 内存值是 false
-    // 模拟外部因素（用户清缓存 / 别的 tab 写入）让 localStorage 与内存值反向
+    assert.equal(next, false); // flipped true → false
+    assert.equal(store.lookup("/a", false), false); // in-memory value is false
+    // simulate an external actor (cache clear / another tab) driving localStorage against memory
     fake.data.set(collapseKey("/a"), "true");
-    // 二次 lookup 必须仍返回内存值（false），不能被 localStorage 反向覆盖
+    // second lookup must still return the in-memory value (false), not be overwritten by localStorage
     assert.equal(store.lookup("/a", false), false);
   });
 
   it("toggle 翻转 + 落盘", () => {
     installLocalStorage();
     const store = new CollapsedStateStore();
-    assert.equal(store.lookup("/a", false), false); // 初始 false
+    assert.equal(store.lookup("/a", false), false); // starts false
     const next = store.toggle("/a", false);
     assert.equal(next, true);
     assert.equal(store.lookup("/a", false), true);
-    assert.equal(loadCollapsed("/a"), true); // 落盘
+    assert.equal(loadCollapsed("/a"), true); // persisted
   });
 
   it("toggle 反向 — 回到 false", () => {
@@ -224,21 +228,21 @@ describe("CollapsedStateStore — lazy per-key init (T7b M3)", () => {
     const store = new CollapsedStateStore();
     assert.equal(store.lookup("/a", false), true);
     assert.equal(store.lookup("/b", false), false);
-    // toggle /a 不应影响 /b
+    // toggling /a must not affect /b
     store.toggle("/a", false);
     assert.equal(store.lookup("/b", false), false);
   });
 
   it("新 key 首次 lookup（active=false）→ localStorage 缺席时返回 false", () => {
-    // 不注入 localStorage — 模拟 SSR / privacy mode
+    // no localStorage injected — simulates SSR / privacy mode
     const store = new CollapsedStateStore();
     assert.equal(store.lookup("/never/seen", false), false);
   });
 
   it("用 vi.useFakeTimers 不影响 lazy init 语义", () => {
-    // bullet 要求 fake-timer 覆盖；新实现无 setTimeout/setInterval，但
-    // 仍然跑一遍 fake timer 走读，确认不会因 timing 退化到旧 useEffect
-    // wipe-out 路径。
+    // fake-timer coverage: the implementation has no setTimeout/setInterval, but we
+    // still walk fake timers to confirm timing never regresses to the old useEffect
+    // wipe-out path.
     installLocalStorage();
     saveCollapsed("/a", true);
     vi.useFakeTimers();
@@ -247,7 +251,7 @@ describe("CollapsedStateStore — lazy per-key init (T7b M3)", () => {
       assert.equal(store.lookup("/a", false), true);
       store.toggle("/a", false);
       vi.advanceTimersByTime(1000);
-      // 状态保留 + 落盘
+      // state retained + persisted
       assert.equal(store.lookup("/a", false), false);
       assert.equal(loadCollapsed("/a"), false);
     } finally {

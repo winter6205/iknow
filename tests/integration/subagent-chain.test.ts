@@ -1,28 +1,29 @@
 /**
- * #356 T7 — subagent 父子进程链集成测试 (SC2 / SC11 / SC16)。
+ * SubAgentManager parent↔child process chain integration test.
  *
- * 不真 spawn iknow worker 子进程 (避免依赖真 LLM key — worker 装配 real
- * Anthropic adapter 需要 key)。改为 spawn 一个真 fake 二进制
- * (`process.execPath -e "process.stdout.write(JSON.stringify(...)+'\\n')"`),
- * 由 SubAgentManager 解析其 stdout,验证 queryBuffer 状态收敛到 completed。
+ * Does not spawn a real iknow worker (that would need a real LLM key — worker
+ * assembly wires a real Anthropic adapter). Instead it spawns a real fake
+ * binary (`process.execPath -e "process.stdout.write(JSON.stringify(...)+'\\n')"`),
+ * lets SubAgentManager parse its stdout and verifies queryBuffer converges to
+ * completed.
  *
- * 注意: fake 脚本必须用 `process.stdout.write` 精确输出 newline-JSON —
- * `console.log(JSON.stringify(...))` 会对 JSON 字符串做 util.inspect,产出
- * 单引号非 JSON 格式,manager 侧 parse 会按 protocolError 处理。
+ * Note: the fake script must emit newline-JSON via `process.stdout.write` —
+ * `console.log(JSON.stringify(...))` runs util.inspect on the string, producing
+ * single-quoted non-JSON that the manager side treats as protocolError.
  *
- * 覆盖:
- *   1. fake 二进制 emit 合法 envelope → manager queryBuffer → completed (status:ok)
- *   2. 多行 stdout (首行合法 envelope + 多余行) → 首行 parsed (D1 首条独立 JSON)
- *   3. fake 二进制立即 exit 2 (无 stdout envelope) → manager queryBuffer → crashed
- *   4. exit 0 + 无 envelope → failed protocolError 并释放槽位
- *   5. shutdown 后 buffer 清空 → not_found
- *   6. 非法 envelope (缺 result) → failed reason=protocolError
- *   7. (plan T5) 断流 e2e: failed(modelTransient)+transcript → 真闸放行
- *      continue → 第二 stub 成功 → 父侧 completed
+ * Covers:
+ *   1. fake binary emits a valid envelope → manager queryBuffer → completed (status:ok)
+ *   2. multi-line stdout (valid first envelope + extra lines) → first line parsed (D1: first standalone JSON)
+ *   3. fake binary exits 2 immediately (no stdout envelope) → manager queryBuffer → crashed
+ *   4. exit 0 + no envelope → failed protocolError, slot released
+ *   5. buffer cleared after shutdown → not_found
+ *   6. invalid envelope (missing result) → failed reason=protocolError
+ *   7. stream-break e2e: failed(modelTransient)+transcript → real continue gate
+ *      admits → second stub succeeds → parent sees completed
  *
- * 真 worker 子进程链路 (node <iknow-bin> --subagent-worker) 的 stdout-wire 行为
- * 已由 cli.ts dispatch + worker.test.ts 的 runWorkerOnce 覆盖;本测试专注
- * manager ↔ 子进程 spawn 协议的集成收敛。
+ * The real worker chain (node <iknow-bin> --subagent-worker) stdout-wire
+ * behavior is covered by cli.ts dispatch + runWorkerOnce in worker.test.ts;
+ * this test focuses on manager ↔ spawn-protocol convergence.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -51,12 +52,12 @@ const OK_ENVELOPE = JSON.stringify({
   result: "fake result body",
 });
 
-/** 生成 node -e 脚本: 精确输出 newline-JSON (避免 console.log 的 util.inspect)。 */
+/** node -e script that emits newline-JSON exactly (avoids console.log's util.inspect). */
 function printJsonScript(json: string): string {
   return `process.stdout.write(${JSON.stringify(json + "\n")})`;
 }
 
-/** 等 child exit 完成 (manager 侧 stdout 解析是同步事件,exit 后 buffer 已定)。 */
+/** Wait for child exit (manager-side stdout parsing is synchronous, so the buffer is settled once exited). */
 function waitExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (typeof child.exitCode === "number" || child.signalCode !== null) {
@@ -85,8 +86,9 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
   });
 
   it("多行 stdout → 逐行 parse,最后一条 wins (manager 逐行处理,取最后 envelope)", async () => {
-    // manager 的 stdout 解析是逐行 (split on newline,每行 parseParentEnvelope),
-    // 每条 envelope 覆盖前一条 → 最后一条 wins (与 manager.test.ts 同语义)。
+    // The manager parses stdout line by line (split on newline, each line through
+    // parseParentEnvelope); each envelope overwrites the previous one → last wins
+    // (same semantics as manager.test.ts).
     const first = JSON.stringify({
       status: "ok",
       summary: "first",
@@ -106,9 +108,10 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
   });
 
   it("D1 acceptance 3: parseParentEnvelope 只取首条独立 JSON (内嵌 newline)", async () => {
-    // envelope.ts 的 parseEnvelope 用 input.split("\n", 1)[0] — 多 newline 的
-    // 单条输入只 parse 首行,第二条独立 JSON 被忽略。这是 envelope 层语义,
-    // 与 manager 的逐行 stdout 处理互补。
+    // parseEnvelope in envelope.ts uses input.split("\n", 1)[0] — a single input
+    // with multiple newlines parses only the first line; a second standalone
+    // JSON is ignored. That is envelope-layer semantics, complementary to the
+    // manager's line-by-line stdout handling.
     const { parseParentEnvelope } =
       await import("../../src/harness/subagent/envelope.ts");
     const env = parseParentEnvelope(
@@ -183,10 +186,11 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     const secret = "T2_FAKE_SECRET_9f8e7d6c";
     setActiveExtraSecrets([secret]);
     try {
-      // T5 (ADR-0071 / SC8 + L2): per-agent 形态 ——
-      // subagentsDir 注入 manager 后, lifecycle / content trace 落
-      // `<subagentsDir>/agent-<taskId>.jsonl`(取代 `<traceOut>/subagent.jsonl`
-      // 聚合单文件, conversationId:"subagent" 假 scope 已退役)。
+      // ADR-0071 per-agent layout: once subagentsDir is injected into the
+      // manager, lifecycle / content trace lands in
+      // `<subagentsDir>/agent-<taskId>.jsonl` (replacing the
+      // `<traceOut>/subagent.jsonl` aggregate single file; the
+      // conversationId:"subagent" fake scope is retired).
       const subagentsDir = join(diagnosticsDir, "subagents");
       const fake = spawn(
         process.execPath,
@@ -318,7 +322,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
   });
 
   it("非法 envelope (缺 result) → failed reason=protocolError", async () => {
-    const bad = JSON.stringify({ status: "ok", summary: "s" }); // 缺 result
+    const bad = JSON.stringify({ status: "ok", summary: "s" }); // missing result
     const fake = spawn(process.execPath, ["-e", printJsonScript(bad)], {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -331,9 +335,10 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     await mgr.shutdown();
   });
 
-  // plan T5 demo:整链走真实 manager + 真实 ADR-0102 续跑闸 + 真实子进程,
-  // 不 mock 闸。stub-1 = T4 产物 (边跑边 append 工人 transcript → 交
-  // failed(modelTransient) 信封 + exit 0, 上游瞬时可续);stub-2 = 续跑成功。
+  // The whole chain uses the real manager + the real ADR-0102 continue gate +
+  // real subprocesses; the gate is not mocked. stub-1 = the transient-failure worker (appends
+  // the worker transcript while running, then emits failed(modelTransient) +
+  // exit 0, i.e. upstream-transient and resumable); stub-2 = the resumed run succeeding.
   it("断流 e2e:modelTransient+transcript → 闸放行 continue → 第二 stub 成功 → 父侧 completed", async () => {
     const root = mkdtempSync(join(tmpdir(), "iknow-transient-e2e-"));
     const subagentsDir = join(root, "subagents");
@@ -354,9 +359,9 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       spawn: (_def, _taskId) => {
         launches += 1;
         if (launches === 1) {
-          // 断流 stub:收 stdin payload → 按 ADR-0102 Decision 3 落工人
-          // transcript(append) → 发射 T4 的 failed(modelTransient) 信封。
-          // 不调 process.exit:自然退出保 stdout flush (本文件 fake 先例)。
+          // Stream-break stub: read the stdin payload → per ADR-0102 Decision 3
+          // persist the worker transcript (append) → emit the failed(modelTransient)
+          // envelope. No process.exit: natural exit keeps stdout flushed (fake precedent in this file).
           const script =
             `let d="";` +
             `process.stdin.on("data",(c)=>{d+=c});` +
@@ -370,7 +375,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
             stdio: ["pipe", "pipe", "pipe"],
           });
         }
-        // 续跑 stub:成功交差 (transcript head 加载真值由 worker 侧测试认证)。
+        // Resume stub: succeeds (truth of transcript-head loading is certified by worker-side tests).
         return spawn(process.execPath, ["-e", printJsonScript(okEnv)], {
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -387,7 +392,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       if (first.status === "failed") {
         assert.equal(first.reason, "modelTransient");
       }
-      // 工人账由 stub-1 真实落盘 —— 闸的存在性判据吃真文件。
+      // The worker's ledger is truly written by stub-1 — the gate's existence check reads the real file.
       assert.equal(
         existsSync(join(subagentsDir, taskId, `${taskId}.jsonl`)),
         true
@@ -399,7 +404,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       )) as { status: string; result: string };
       assert.equal(launches, 2);
       assert.equal(resumed.status, "ok");
-      // 父可见面 = projectParentVisibleEnvelope 短交差 (summary 派生 handoff)。
+      // Parent-visible surface = projectParentVisibleEnvelope's short handoff (summary-derived handoff).
       assert.match(resumed.result, /resumed done/);
     } finally {
       await mgr.shutdown();

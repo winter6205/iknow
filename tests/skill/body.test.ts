@@ -1,14 +1,14 @@
-// #337 T6: skill 正文装配 (src/harness/skill/body.ts) 单测。
+// Unit tests for skill body assembly (src/harness/skill/body.ts).
 //
-// 行为真值 (spec 337-skill-mcp-extension.md § Code Style + SC6 + ADR-0079)：
-//   - 正文 = frontmatter 剥离 + `Base directory: <abs dir>` 提示行
-//     + `<skill_files>` 段（glob `**/*` 排除 SKILL.md、排序、采样 ≤10、
-//     绝对路径、"file list is sampled" 提示）。
-//   - references/ 不递归：references/* 不出现在 skill_files 段里。
-//   - 字节级稳定：同输入二次调用字符串相等（KV 缓存契约）。
-//   - ADR-0079：装配结果不再追加写根 trailer（与 337 SC6 形态逐字节一致）。
-//     写处境披露的权威路径迁到 worker prior + chat-session rebind 一次性通
-//     知，共用同一 helper `writeRootSegment`（仍 export，本文件继续覆盖）。
+// Behavioral truth (ADR-0079):
+//   - body = frontmatter stripped + `Base directory: <abs dir>` line
+//     + `<skill_files>` segment (glob `**/*` excluding SKILL.md, sorted,
+//     sampled ≤10, absolute paths, "file list is sampled" hint).
+//   - references/ is not recursed: references/* never appear in skill_files.
+//   - byte-stable: same input → identical string on repeat calls (KV cache contract).
+//   - ADR-0079: assembly no longer appends the write-root trailer. Write-situation
+//     disclosure moved to the worker prior + chat-session rebind one-shot notice,
+//     sharing the `writeRootSegment` helper (still exported, covered below).
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -59,14 +59,14 @@ afterEach(async () => {
 
 describe("isSkillLoadText", () => {
   it("matches the canonical skill-load prefix used by TUI and Web senders", () => {
-    // 与 src/tui/app.tsx:1780、web/src/hooks/use-slash-commands.ts:251 拼接形态一致。
+    // Matches the exact concatenation form in src/tui/app.tsx:1780 and web/src/hooks/use-slash-commands.ts:251.
     const text = `[skill-load name="foo"]\n${"x".repeat(500)}`;
     expect(isSkillLoadText(text)).toBe(true);
   });
 
   it("matches when wrapped in surrounding whitespace (predicate trims)", () => {
-    // 真实路径里 hub.ts validateText 已在内部 trim 一次；本谓词再做 trim
-    // 是为对称 chat-session.ts 的非 trim 调用点。
+    // hub.ts validateText already trims internally; this predicate trims again
+    // for symmetry with the non-trimming call site in chat-session.ts.
     expect(isSkillLoadText(`   [skill-load name="foo"]\nbody`)).toBe(true);
     expect(isSkillLoadText(`\n[skill-load name="foo"]`)).toBe(true);
   });
@@ -79,23 +79,23 @@ describe("isSkillLoadText", () => {
   });
 
   it("does not match a prefix that is missing the opening quote", () => {
-    // 防御性：无引号的 `[skill-load name=foo]` 会被误判为合法，但与 TUI/Web
-    // 拼接形态不一致 —— 形态变更时应让两侧显式失败，而不是静默通过。
+    // Defensive: `[skill-load name=foo]` without quotes would pass as valid, but it
+    // does not match the TUI/Web concatenation form — a form change must fail
+    // loudly on both sides, not silently pass.
     expect(isSkillLoadText("[skill-load name=foo]\nbody")).toBe(false);
   });
 
   it("does not match a literal prefix with a space (literal-only match)", () => {
-    // 谓词内部 trim 是为对称 chat-session.ts 未 trim 的调用点；
-    // 故首字符前的空格会被吃掉，但「前缀内容变形」仍应被拒。
-    // 这里验证的不是 trim 行为（见同行 case），而是 trim 后是否仍含
-    // 严格 `[skill-load name="` 前缀。
+    // The internal trim only absorbs leading whitespace; a mutated prefix must
+    // still be rejected. This checks the strict `[skill-load name="` prefix after
+    // trimming, not the trim itself (covered by the case above).
     expect(isSkillLoadText(' [skill-load name="foo"]\nbody')).toBe(true);
     expect(isSkillLoadText('[skill-loadname="foo"]\nbody')).toBe(false);
     expect(isSkillLoadText('[Skill-load name="foo"]\nbody')).toBe(false);
   });
 
-  // Review Medium 3：闭合形态断言。半截前缀（仅 `[skill-load name="` 后无闭合
-  // 双引号）必须被拒，避免手打恶意文本绕过豁免。
+  // Closing-form guard: a half prefix (no closing quote after `[skill-load name="`)
+  // must be rejected, so hand-typed text cannot bypass the exemption.
   it("rejects a half-prefix with no closing quote (review Medium 3)", () => {
     expect(isSkillLoadText('[skill-load name="' + "x".repeat(50_000))).toBe(
       false
@@ -113,8 +113,8 @@ describe("isSkillLoadText", () => {
 
 describe("buildSkillLoadText (SSOT)", () => {
   it("matches byte-level the inline assembly in TUI app.tsx:1780-1782", () => {
-    // 与 src/tui/app.tsx:1780 拼接形态 byte 级一致 —— 同一字符串的两次构造
-    // 应完全相等（KV 缓存契约）。
+    // Byte-identical to the inline assembly in src/tui/app.tsx:1780 — two
+    // constructions of the same string must be equal (KV cache contract).
     const name = "echo";
     const body = "skill body content";
     const remainder = "user follow-up";
@@ -164,13 +164,13 @@ describe("exceedsUserInputCap (shared guard)", () => {
   });
 
   it("returns false for skill-load messages even when extremely long (exempt)", () => {
-    // 78KB SKILL.md 一次性加载必须豁免；这里用 50KB 模拟典型大 skill。
+    // A one-shot load of a 78KB SKILL.md must be exempt; 50KB here simulates a typical large skill.
     const text = `[skill-load name="big"]\n${"x".repeat(50_000)}`;
     expect(exceedsUserInputCap(text, MAX_MESSAGE_CHARS)).toBe(false);
   });
 
   it("uses cap parameter (caller passes the SSOT MAX_MESSAGE_CHARS)", () => {
-    // 直接传更小的 cap 验证函数尊重参数；不依赖隐式默认 8000。
+    // Pass a smaller cap directly to prove the function honors the parameter; no reliance on an implicit 8000 default.
     expect(exceedsUserInputCap("x".repeat(11), 10)).toBe(true);
     expect(exceedsUserInputCap("x".repeat(10), 10)).toBe(false);
   });
@@ -293,10 +293,11 @@ describe("createSkillBody", () => {
   });
 
   it("is byte-stable across repeat calls regardless of any external taskRoot-shaped inputs", async () => {
-    // ADR-0079 — createSkillBody 不再吃 taskRoot / writeSituation 字段；
-    // 装配面只读 entry + dir + fs。同输入两次调用字符串相等（KV 缓存契约），
-    // 与外部 taskRoot 形态无关。本用例锁住「外部即便试图塞入 taskRoot 形
-    // 状的入参也不会被装配面读走」这条不变式 —— 守门 helper 退场后的回归。
+    // ADR-0079 — createSkillBody no longer takes taskRoot / writeSituation;
+    // assembly reads only entry + dir + fs, and same input twice yields equal
+    // strings (KV cache contract) regardless of external taskRoot-shaped inputs.
+    // This pins "taskRoot-shaped arguments cannot be read by the assembly face"
+    // — a regression guard after the gatekeeping helper retired.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-stable-tr-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -305,19 +306,19 @@ describe("createSkillBody", () => {
     const a = await createSkillBody({ entry: entry(dir, "echo"), dir });
     const b = await createSkillBody({ entry: entry(dir, "echo"), dir });
     expect(b).toBe(a);
-    // 末段必须是 </skill_files>，不再追加写根段。
+    // The last segment must be </skill_files>; no write-root trailer is appended.
     expect(a.trimEnd().endsWith("</skill_files>")).toBe(true);
     expect(a).not.toContain("current write root");
   });
 });
 
-// ADR-0079 — createSkillBody 不再追加写根 trailer。skill-load 消息正文末段
-// 始终是 </skill_files>（与 337 SC6 形态逐字节一致）；写根披露的权威路径
-// 迁到 worker prior（subagent/worker.ts）+ chat-session rebind 一次性通知
-// （chat-session.ts:503-509），共用同一 helper `writeRootSegment`（仍 export
-// 在 body.ts —— 见 `writeRootSegment — T4 按处境三态渲染` describe 的保留
-// 测试）。本 describe 钉住「装配面不挂写根」这条不变式，并覆盖历史 taskRoot
-// / writeSituation 形态的入参即便仍被传入也不会出现在正文里。
+// ADR-0079 — createSkillBody no longer appends the write-root trailer: a skill-load
+// message body always ends at </skill_files>. Write-root disclosure now lives in the
+// worker prior (subagent/worker.ts) and the chat-session rebind one-shot notice
+// (chat-session.ts:503-509), sharing the exported `writeRootSegment` helper (see the
+// retained tests in the `writeRootSegment — T4 按处境三态渲染` describe).
+// This describe pins "assembly never attaches a write root", including legacy
+// taskRoot / writeSituation inputs that may still be passed in.
 describe("createSkillBody 写根不挂正文（ADR-0079）", () => {
   it("无 taskRoot / writeSituation 入参 → 末段是 </skill_files>，与 337 SC6 形态逐字节一致", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-miss-"));
@@ -333,16 +334,16 @@ describe("createSkillBody 写根不挂正文（ADR-0079）", () => {
   });
 
   it("即便传入 taskRoot 形态入参 → 装配面只读 entry + dir，正文仍无写根段", async () => {
-    // 守门 ADR-0079：装配面与外部写处境输入解耦。即便消费方路径（slash /
-    // skill() / loadSkillBody）未来若误传 taskRoot / writeSituation 形态入参
-    // —— 装配面必须 fail-closed，不允许它们出现在正文里。
+    // Gatekeeping ADR-0079: assembly is decoupled from external write-situation
+    // inputs. If consumer paths (slash / skill() / loadSkillBody) ever mis-pass
+    // taskRoot / writeSituation fields, assembly must fail closed and never render them.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-legacy-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
 
-    // 用 `as unknown as SkillBodyOptions` 绕过类型——模拟旧调用方传入
-    // taskRoot / writeSituation 形态的兜底；装配面必须忽略这些字段。
+    // `as unknown as SkillBodyOptions` bypasses types to simulate legacy callers
+    // passing taskRoot / writeSituation; the assembly face must ignore these fields.
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
@@ -370,15 +371,16 @@ describe("createSkillBody 写根不挂正文（ADR-0079）", () => {
     expect(text.length).toBeGreaterThan(90_000);
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
     expect(text).not.toContain("current write root");
-    // 装配出的完整 skill-load 消息仍享受长度豁免（trailer 退场不影响此契约）
+    // The full assembled skill-load message keeps the length exemption; trailer removal does not affect this contract.
     const loadText = buildSkillLoadText("echo", text);
     expect(isSkillLoadText(loadText)).toBe(true);
     expect(exceedsUserInputCap(loadText, MAX_MESSAGE_CHARS)).toBe(false);
   });
 
   it("非 tree 形根 + no_writable_root 形态入参同样被忽略（fail-closed 守门）", async () => {
-    // 旧装配面会按处境枚举渲染 ③ 态披露；新装配面已不挂 trailer，连披露
-    // 也不渲染 —— 披露的权威路径迁到 worker prior + chat-session rebind。
+    // The old assembly rendered situation-enum ③ disclosure; the new one attaches
+    // no trailer and renders no disclosure at all — the authoritative path moved to
+    // worker prior + chat-session rebind.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-no-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -400,17 +402,17 @@ describe("createSkillBody 写根不挂正文（ADR-0079）", () => {
   });
 });
 
-// T4 (plans/write-situation-disclosure.md) — writeRootSegment 改为按处境
-// 渲染；①② 两态与改造前逐字节相等（SC2 硬约束，前缀缓存与
-// skill-load-write-root SC2 守门）；③ 态是新披露，不点名建树工具（SC3 /
-// ADR-0069 Decision 3「trailer 在 skill 装配时进上下文，早于任何写意图；
-// 点名工具 = 对每个未绑会话推一次建树」）。empty 臂 typed 不 throw
-//（A 表 empty 臂：不渲染出「写根 = 」这种半句）。
+// writeRootSegment renders per situation: states ① and ② must stay byte-identical to
+// the pre-change form (hard constraint for prefix caching and the skill-load-write-root
+// gate); state ③ is a new disclosure that must not name any tree-creation tool — the
+// trailer enters context at assembly time, before any write intent, and naming a tool
+// would push tree creation onto every unbound session. The empty arm is typed and does
+// not throw (never render a half sentence like "写根 = " — "write root = ").
 describe("writeRootSegment — T4 按处境三态渲染", () => {
   const TREE_ROOT = "/repo/.iknow/worktrees/conv1234";
   const MAIN_ROOT = "/home/user/project";
 
-  // 旧形态 helper 锚（= ①/② 在新版里必须逐字节等于它）。SC2 硬约束。
+  // Legacy-form helper anchor: states ①/② must equal it byte for byte (hard constraint).
   const legacy = (root: string): string | null => {
     const trimmed = root.trim();
     if (trimmed.length === 0) return null;
@@ -433,9 +435,9 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
   });
 
   it("② writable_tree + 非树形根 → 仍按 (situation, root) 渲染；与旧形态逐字节相等（形状判定归 writeSituation，不在渲染面重复）", () => {
-    // 渲染面只按枚举分支，不在内部再调 isTaskWorktreePath（spec SC4 钉死
-    // 依赖方向：body.ts 不 import isolation）。形状判定由 writeSituation()
-    // 在调用方做；渲染面拿到的就是 typed enum。
+    // The renderer branches only on the enum and must not call isTaskWorktreePath
+    // internally (dependency direction: body.ts does not import isolation). Shape
+    // detection happens at the caller via writeSituation(); the renderer receives a typed enum.
     expect(writeRootSegment("writable_tree", MAIN_ROOT)).toBe(
       legacy(MAIN_ROOT)
     );
@@ -445,23 +447,23 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
     const out = writeRootSegment("no_writable_root", TREE_ROOT);
     expect(out).not.toBeNull();
     expect(out).not.toContain("current write root");
-    // 也不嵌入 taskRoot（无可写根 → 不能告诉模型去写哪个根）
+    // Also must not embed taskRoot (no writable root → cannot tell the model which root to write).
     expect(out).not.toContain(TREE_ROOT);
   });
 
   it("③ no_writable_root → 含「无可写根 / 主仓对文件改动只读」语义（spec SC3）", () => {
     const out = writeRootSegment("no_writable_root", MAIN_ROOT)!;
-    // 至少含「read-only」与「main」或「主仓」等价表述 —— 语义断言
+    // At least "read-only" plus "main" or an equivalent phrasing — semantic assertion
     expect(out.toLowerCase()).toMatch(/read[- ]?only/);
-    // 「no writable root」语义（spec SC3 明文）
+    // "no writable root" semantics
     expect(out.toLowerCase()).toMatch(/(no.{0,3}writable|writable.{0,3}root)/);
   });
 
   it("③ no_writable_root → 不点名 create-worktree（SC3 / ADR-0069 D3：trailer 在装配时进上下文，早于写意图）", () => {
     const out = writeRootSegment("no_writable_root", TREE_ROOT)!;
     expect(out).not.toContain("create-worktree");
-    // 也不含其他可能的推销字面（具体的「create-*」建树工具 + 「run」动词 +
-    // 「re-issue this call」重发引导 —— 全部留给回执面）
+    // No other advisory literals either (specific "create-*" tree tools, the "run"
+    // verb, "re-issue this call" re-send guidance — all left to the receipt surface)
     expect(out).not.toMatch(/create-\w+/);
     expect(out).not.toMatch(/\bre-issue\b/i);
     expect(out).not.toMatch(/\bcall\b/i);
@@ -480,7 +482,7 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
   });
 
   it("empty 臂：no_writable_root + 空 / 空白根 → 仍返回③ 态披露（typed，不抛；披露与根无关）", () => {
-    // ③ 态本身就不嵌入 taskRoot —— 空根与空根同形态；披露照样给出。
+    // State ③ never embeds taskRoot — empty and blank roots render identically; the disclosure still appears.
     const out1 = writeRootSegment("no_writable_root", "");
     const out2 = writeRootSegment("no_writable_root", "   ");
     expect(out1).not.toBeNull();
@@ -491,12 +493,13 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
   });
 });
 
-// ADR-0079 — createSkillBody 不再吃 writeSituation / taskRoot，装配面彻底与
-// 写处境判定解耦。本 describe 锁住「即便历史形态的入参（taskRoot + write-
-// Situation 同进同出 / 处境翻转）被传入，也绝不渲染任何写根段或 ③ 态披露」
-// 这条不变式 —— 写处境的权威路径迁到 worker prior（src/harness/subagent/
-// worker.ts）+ chat-session rebind 一次性通知（src/cli/chat-session.ts:
-// 503-509），共用同一 helper `writeRootSegment`（覆盖见上一个 describe）。
+// ADR-0079 — createSkillBody no longer takes writeSituation / taskRoot; assembly is
+// fully decoupled from write-situation judgment. This describe pins: even legacy-shaped
+// inputs (taskRoot + writeSituation passed together, or flipped situations) must never
+// render a write-root segment or ③ disclosure. The authoritative disclosure path is the
+// worker prior (src/harness/subagent/worker.ts) + the chat-session rebind one-shot
+// notice (src/cli/chat-session.ts:503-509), sharing the `writeRootSegment` helper
+// (covered by the previous describe).
 describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
   it("无 taskRoot / writeSituation 入参 → 末段是 </skill_files>，与 337 SC6 形态逐字节一致", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-miss-"));
@@ -511,8 +514,8 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
   });
 
   it("writable_tree 形态入参 + 树形根 → 正文不出现 'current write root'", async () => {
-    // 守门：旧 T4 装配口会渲染 trailer；新装配面即便被传入同形态入参也
-    // 不渲染。
+    // Gatekeeping: the old assembly rendered the trailer; the new one must not
+    // render it even given identical inputs.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-tree-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -557,14 +560,14 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
   });
 
   it("no_writable_root 形态入参（隔离 ON 未绑树典型）→ 正文不出现 ③ 态披露", async () => {
-    // 守门：旧 T4 装配口会渲染 ③ 态披露；新装配面即便被传入同形态入参也
-    // 不渲染。③ 态披露的权威路径迁到 worker prior + chat-session rebind。
+    // Gatekeeping: the old assembly rendered ③ disclosure; the new one must not
+    // render it even given identical inputs. ③ disclosure moved to worker prior + chat-session rebind.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-no-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
 
-    const taskRoot = "/home/user/project"; // 非树形 = 主仓根
+    const taskRoot = "/home/user/project"; // non-tree path = main repo root
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
@@ -575,8 +578,9 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
     });
 
     expect(text).not.toContain("current write root");
-    // #981 / ADR-0079：skill 正文装配不再追加写根段（trailer 已删除），
-    // 故不再断言「③ 态披露在正文末段」；此处只钉死不点名建树工具。
+    // ADR-0079: skill body assembly no longer appends a write-root segment (the trailer
+    // was deleted), so no "③ disclosure at the end of the body" assertion here; this only
+    // pins that no tree tool is named.
     expect(text).not.toContain("no writable root");
     expect(text).not.toContain("create-worktree");
     expect(text).not.toContain(taskRoot);
@@ -631,9 +635,9 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
   });
 
   it("处境翻转（② → ③）不再改变装配字节 —— 写处境彻底不再流入装配面", async () => {
-    // ADR-0069 Consequences 的旧翻转语义（② → ③ → 字节变化 → prompt cache
-    // miss）在 ADR-0079 后不存在：装配面既不吃 ② 也不吃 ③ → 翻转 = 同字节。
-    // 这条变更把 prompt cache miss 收紧到「只来自 skill 自身内容漂移」一处。
+    // The old flip semantics (② → ③ → byte change → prompt cache miss) no longer exist
+    // after ADR-0079: assembly consumes neither ② nor ③, so a flip yields identical bytes.
+    // This change tightens prompt cache misses to a single source: skill content drift itself.
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-flip-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");

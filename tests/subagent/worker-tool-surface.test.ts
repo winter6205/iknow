@@ -1,24 +1,28 @@
 /**
- * #468 T3 — Sub-agent worker 工具面端到端断言
- * （声明面 = 实际面 / 判官只读 / 向后兼容）。
+ * Sub-agent worker tool surface end-to-end assertions
+ * (declared face = actual face / judge read-only / backward compatibility).
  *
- * 走真实 `createWorkerDeps` 装配路径（不引入 stub 替身 registry），
- * 用 stub-model + noop trace + 空 skill catalog 保持 hermetic —— 不真发
- * LLM / 不写盘 / 不扫 fs。
+ * Walks the real `createWorkerDeps` assembly path (no stub-registry
+ * stand-in), keeping it hermetic with stub-model + noop trace + empty skill
+ * catalog — no real LLM calls / no disk writes / no fs scans.
  *
- * 断言形状（依 spec Code Style 既定 + Boundaries Always）：
- *   - AciRegistry.inner（executor 实际可执行面，构造期冻结快照，loop-engine
- *     通过 deps.registry.list() 读）+ AciRegistry.visibleSchemas（模型
- *     promptTools 可见面，deps.promptTools() 读）双面同步 —— 声明面 =
- *     实际面由构造保证（registry.ts:280-296 def-list 期裁剪 + buildWorkerToolSurface
- *     幂等兜底），非事后修补。
+ * Assertion shape (per the established Code Style + Boundaries Always):
+ *   - AciRegistry.inner (the executor's actual executable face, a frozen
+ *     snapshot at construction, read by loop-engine via deps.registry.list())
+ *     + AciRegistry.visibleSchemas (the model-visible promptTools face, read
+ *     via deps.promptTools()) stay in sync on both faces — declared face =
+ *     actual face is guaranteed by construction (def-list pruning at
+ *     registry.ts:280-296 + buildWorkerToolSurface as an idempotent backstop),
+ *     not by after-the-fact patching.
  *
- * worker 装配特征：createWorkerDeps 不传 subagentManager / memoryDir /
- * todoDir / mcpManager / backgroundManager / graphAssembly（worker.ts:141-146
- * + #502 T3 旁注）→ 9 件条件化缺席（具体名单见下方 WORKER_BASE_SURFACE 注释）。
- * 本测试额外显式传 `skillCatalog: createSkillCatalog([])` 让 skill /
- * skill_search 在场以保持全量面可断言。具体件数 = WORKER_BASE_SURFACE.length,
- * 以数组为 source of truth（旧 10 件 lsp_* 已退役，不在 WORKER_BASE_SURFACE 中）。
+ * Worker assembly traits: createWorkerDeps passes no subagentManager /
+ * memoryDir / todoDir / mcpManager / backgroundManager / graphAssembly
+ * (worker.ts:141-146) -> 9 conditionally-absent tools (see the
+ * WORKER_BASE_SURFACE comment below for the roster). This test additionally
+ * passes `skillCatalog: createSkillCatalog([])` explicitly so skill /
+ * skill_search stay present to keep the full surface assertable. Exact count
+ * = WORKER_BASE_SURFACE.length, with the array as source of truth (the old
+ * 10 lsp_* tools have retired and are not in WORKER_BASE_SURFACE).
  */
 
 import assert from "node:assert/strict";
@@ -56,15 +60,15 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * #357 T2 — 镜像 JUDGE_ROLE 真值源（run-classifier-adapter.ts:35-41 module-private，
- * 不可 import，drift 由本测试守护）。
+ * Mirror of the JUDGE_ROLE source of truth (run-classifier-adapter.ts:35-41
+ * is module-private, unimportable; drift is guarded by this test).
  *
- * 判官 allow-list 推导（fail-closed）：
+ * Judge allow-list derivation (fail-closed):
  *   deny = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE
  *
- * 与真值源同源：若 JUDGE_ROLE 白名单真值漂移，本测试失败 = 显式信号。
- * 加白名单 = 显式改 JUDGE_ALLOWED_BASELINE 常量 + operator 拍板（spec 357
- * Objective 2 + plans T2 acceptance 2）。
+ * Same source as the truth: if the JUDGE_ROLE whitelist drifts, this test
+ * failing is the explicit signal. Widening the whitelist = an explicit edit
+ * to JUDGE_ALLOWED_BASELINE + operator sign-off.
  */
 const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "read_file",
@@ -72,12 +76,12 @@ const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
   "glob",
 ]);
 
-/** 镜像 = 全量面 − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+/** Mirror = full surface − whitelist baseline (same derivation as run-classifier-adapter). */
 const JUDGE_DENY: ReadonlyArray<string> = Object.freeze(
   [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
 );
 
-/** 测试用 minimal IknowEnv —— createWorkerDeps 路径类型要求，不真发请求。 */
+/** Minimal test IknowEnv — required by createWorkerDeps typing; no real requests. */
 const TEST_ENV: IknowEnv = {
   llm: {
     apiKey: "test-key",
@@ -97,22 +101,23 @@ const TEST_ENV: IknowEnv = {
 };
 
 /**
- * worker 装配后 "全量面" 名集（无 deny-list 时）。具体件数 =
- * `WORKER_BASE_SURFACE.length`，以数组为 source of truth（注释里不写加法
- * 叙事 — 加法易漂）。T5 旧 10 lsp_* 已退役；WORKER_BASE_SURFACE 不再含
- * lsp_* 名。
+ * The "full surface" name set after worker assembly (no deny-list). Exact
+ * count = `WORKER_BASE_SURFACE.length`, with the array as source of truth
+ * (no addition narratives in comments — they drift). The old 10 lsp_* tools
+ * retired; WORKER_BASE_SURFACE no longer contains lsp_* names.
  *
- * 条件化缺席（worker 不装配,详见 #468 + D6 决议）：
- *   - memory_recall / memory_save（memoryDir 缺席）
- *   - spawn_subagent / subagent_result（subagentManager 缺席）
- *   - todo_write（todoDir 缺席）
- *   - list_mcp_resources / read_mcp_resource（mcpManager 缺席）
- *   - bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）
- *   - run_graph（graphAssembly 缺席,D-α T3）
+ * Conditional absences (not assembled for workers):
+ *   - memory_recall / memory_save (no memoryDir)
+ *   - spawn_subagent / subagent_result (no subagentManager)
+ *   - todo_write (no todoDir)
+ *   - list_mcp_resources / read_mcp_resource (no mcpManager)
+ *   - bash_output / bash_stop (no backgroundManager)
+ *   - run_graph (no graphAssembly)
  *
- * 本测试通过显式注 skillCatalog 把 skill 计入（条件化：skillCatalog 在场
- * 时入注册表;disclosure-index-align T2 / SC5 删 skill_search 后只剩 1 件）,
- * 具体件数以 WORKER_BASE_SURFACE 数组长度为准。
+ * This test injects skillCatalog explicitly so skill counts toward the set
+ * (conditional: registered only when skillCatalog is present; after
+ * skill_search's removal only 1 remains); exact count is governed by the
+ * WORKER_BASE_SURFACE array length.
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "bash",
@@ -126,8 +131,8 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "tool_search",
   "skill",
   "query_trace",
-  // symbol-primary-aci T2:符号查询 10 件常驻（不依赖 manager，与 lsp.ts SSOT
-  // 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
+  // 10 symbol-query tools resident (no manager dependency, share lspCtx with
+  // the lsp.ts SSOT; the old 10 lsp_* tools already retired).
   "find_symbol",
   "find_declaration",
   "find_referencing_symbols",
@@ -138,43 +143,45 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "prepare_call_hierarchy",
   "list_incoming_calls",
   "list_outgoing_calls",
-  // symbol-primary-aci T4:符号改 5 件常驻（category=write；与查询同门共享
-  // lspCtx；onEdit 走 worker 装配层的 lspNotifier.invalidate 接缝，
-  // 写盘后 textDocument/didChange 与 edit_file 同链路）。
+  // 5 symbol-mutate tools resident (category=write; share lspCtx with the query
+  // face; onEdit goes through the worker assembly layer's lspNotifier.invalidate
+  // seam — after a disk write, textDocument/didChange follows the same chain as edit_file).
   "rename_symbol",
   "replace_symbol_body",
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
-  // trace-mcp-read-side-split T5b — operator 裁定：list_sessions 入 worker 基础面。
-  // 理由与 query_trace 同门：worker 拿到的 conversation_id 是否真存在，只有目录轴
-  // 能答；category=read-only、无装配条件（任何 surface 都建 traceDir），故不条件化。
-  // 位置在末位 = registry.list() 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
+  // Operator ruling: list_sessions joins the worker base surface.
+  // Same rationale as query_trace: only the directory axis can answer whether
+  // the conversation_id a worker holds really exists; category=read-only, no
+  // assembly conditions (every surface builds traceDir), hence unconditional.
+  // Placed last = registry.list() follows ACI_TOOLSET_NAMES' append-only order.
   "list_sessions",
-  // trace-mcp-read-side-split T6 — get_record 沿用 T5b 为 list_sessions 立的那条
-  // operator 裁定，同门进 worker 基础面：worker 手里已有 conversation_id /
-  // record_id 时，「这条记录到底长什么样、要不要继续下钻」只有内容轴能答，
-  // 缺了它 worker 只能靠 query_trace 的行投影猜。category=read-only、无装配条件
-  // （任何 surface 都建 traceDir），故不条件化。位置在末位 = registry.list()
-  // 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
+  // get_record follows the same operator ruling made for list_sessions: when a
+  // worker already holds conversation_id / record_id, only the content axis can
+  // answer "what does this record actually look like, should I keep drilling" —
+  // without it the worker can only guess from query_trace row projections.
+  // category=read-only, no assembly conditions (every surface builds traceDir),
+  // hence unconditional. Placed last = registry.list() follows
+  // ACI_TOOLSET_NAMES' append-only order.
   "get_record",
-  // read-image-vision T2 (spec SC6) — read_image 常驻（category=read-only、
-  // 无装配条件），随 ACI_TOOLSET_NAMES 尾部 append 进 worker 基础面；
-  // 不在默认 deny 名单，worker 不经 disallowedTools 剥离。
+  // read_image is resident (category=read-only, no assembly conditions),
+  // appended after ACI_TOOLSET_NAMES' tail into the worker base surface;
+  // it is not in the default deny list and workers never strip it via disallowedTools.
   "read_image",
 ]);
 
 // ---------------------------------------------------------------------------
-// Parameterized helper —— 双面断言（inner + visibleSchemas）
+// Parameterized helper — dual-face assertions (inner + visibleSchemas)
 // ---------------------------------------------------------------------------
 
 /**
- * 收集 worker 装配后的工具面双面名集（inner 协议 registry + promptTools
- * 模型可见），断言：
- *   - 所有 `denied` 名在双面均缺席（声明面 = 实际面）
- *   - 所有 `kept` 名在双面均在场（保留工具不被误裁）
+ * Collect both tool-surface name sets after worker assembly (inner protocol
+ * registry + promptTools model-visible) and assert:
+ *   - every `denied` name is absent on both faces (declared = actual)
+ *   - every `kept` name is present on both faces (kept tools are not pruned by mistake)
  *
- * Reused across normal / failure / boundary / judge 四类（per plan T3 acceptance 3）。
+ * Reused across normal / failure / boundary / judge cases.
  */
 function assertSurface(
   deps: LoopEngineDeps,
@@ -199,7 +206,7 @@ function assertSurface(
   }
 }
 
-/** hermetic 装配缝：stub-model + 空 skill catalog + noop trace + stub system。 */
+/** Hermetic assembly seam: stub-model + empty skill catalog + noop trace + stub system. */
 function hermeticOpts(
   extra?: Partial<CreateWorkerDepsOptions>
 ): CreateWorkerDepsOptions {
@@ -215,13 +222,14 @@ function hermeticOpts(
 }
 
 // ---------------------------------------------------------------------------
-// A. 正常 / happy path —— declared deny-list 全生效（声明面 = 实际面）
+// A. Happy path — declared deny-list fully effective (declared face = actual face)
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 正常路径 — declared deny-list 全生效", () => {
   it("deny JUDGE 禁项（allow-list 推导）→ inner+visibleSchemas 双面 = 白名单三件", async () => {
-    // #357 T2 判官 allow-list 推导：deny = 全量面 − {read_file, grep, glob}，
-    // 装配后双面仅剩白名单三件。fail-closed：白名单外一律禁。
+    // Judge allow-list derivation: deny = full surface − {read_file, grep, glob};
+    // after assembly both faces hold only the three whitelisted tools.
+    // fail-closed: anything outside the whitelist is denied.
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
@@ -245,7 +253,7 @@ describe("worker tool surface: 正常路径 — declared deny-list 全生效", (
 });
 
 // ---------------------------------------------------------------------------
-// B. 失败路径 —— 宽容模式（buildWorkerToolSurface 静默跳过未知名）
+// B. Failure path — lenient mode (buildWorkerToolSurface silently skips unknown names)
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 失败路径 — 未知名宽容忽略（lenient）", () => {
@@ -255,7 +263,7 @@ describe("worker tool surface: 失败路径 — 未知名宽容忽略（lenient�
         disallowedTools: ["bash", "foo_tool_does_not_exist"],
       })
     );
-    // 已知项被裁，未知名被宽容忽略（buildWorkerToolSurface 语义）。
+    // Known entries pruned, unknown names ignored leniently (buildWorkerToolSurface semantics).
     assertSurface(deps, ["bash"], ["read_file", "grep", "glob", "tool_search"]);
   });
 
@@ -273,7 +281,7 @@ describe("worker tool surface: 失败路径 — 未知名宽容忽略（lenient�
 });
 
 // ---------------------------------------------------------------------------
-// C. 边界 —— undefined / 空 / deny-all
+// C. Boundaries — undefined / empty / deny-all
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
@@ -318,8 +326,9 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
   });
 
   it("deny 全量实际工具 → inner+promptTools 双面为空, createWorkerDeps 不 crash", async () => {
-    // Gate 3 镜像过滤：deny 全量后 toolsetNames 与 factories 键集同时为空
-    // （都=∅），由构造期保证不抛，run 路径可走纯文本回答。
+    // Gate 3 mirror filtering: after denying everything, toolsetNames and the
+    // factories key set are empty simultaneously (both = ∅), guaranteed
+    // throw-free by construction; the run path can fall back to text-only answers.
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...WORKER_BASE_SURFACE] })
     );
@@ -329,14 +338,15 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
 });
 
 // ---------------------------------------------------------------------------
-// D. 权限 / 判官只读 —— JUDGE_ROLE allow-list 推导（SC3 + SC4 权限行）
+// D. Permissions / judge read-only — JUDGE_ROLE allow-list derivation
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", () => {
   it("判官面双面恰为白名单三件（inner.list() 与 promptTools() = {read_file, grep, glob}）", async () => {
-    // #357 T2：判官 deny = 全量面 − {read_file, grep, glob}，装配后双面
-    // 恰为白名单三件（fail-closed allow-list）。与「A 正常」测试重叠语义但
-    // 独立断言 —— 显式命名让判官白名单变更时定位到此用例。
+    // Judge deny = full surface − {read_file, grep, glob}; after assembly both
+    // faces hold exactly the three whitelisted tools (fail-closed allow-list).
+    // Overlaps semantically with the "A normal" tests but is asserted
+    // independently — explicit naming pins this case when the whitelist changes.
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
@@ -365,10 +375,11 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
   });
 
   it("白名单外工具在 reg.catalog 也缺席（catalog 双层防护 / executor + permission middleware）", async () => {
-    // 单独调一次 createDefaultAciRegistry 验证 catalog 端（registry.inner 不直接
-    // 暴露 catalog，但 createWorkerDeps 内部已用 createDefaultAciRegistry，
-    // 故这里通过其返回的 registry 内层结构拿 catalog —— 仅在 catalog 暴露
-    // 时断言；不暴露则只锁 inner + visibleSchemas 双面）。
+    // Call createDefaultAciRegistry separately to verify the catalog side
+    // (registry.inner does not expose catalog directly, but createWorkerDeps
+    // already uses createDefaultAciRegistry internally, so here we reach the
+    // catalog through the returned registry's inner structure — assert only
+    // when catalog is exposed; otherwise lock just the inner + visibleSchemas faces).
     const { createDefaultAciRegistry } =
       await import("../../src/harness/aci/tools/registry.ts");
     const reg = createDefaultAciRegistry({
@@ -377,8 +388,9 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
       skillCatalog: createSkillCatalog([]),
       disallowedTools: [...JUDGE_DENY],
     });
-    // 双面已通过 worker 装配路径覆盖；catalog 是次级断言（permission 中间件
-    // 与延迟加载共用，缺席即 catalog.get 也返回 undefined）。
+    // Both faces are already covered via the worker assembly path; catalog is a
+    // secondary assertion (shared by the permission middleware and lazy
+    // loading — absence there means catalog.get also returns undefined).
     for (const denied of JUDGE_DENY) {
       assert.equal(
         reg.catalog.get(denied),
@@ -480,8 +492,9 @@ describe("worker tool surface: T3 catalog deny contract", () => {
           sandboxRoot: root,
           disallowedTools: [...FILE_WRITE_TOOL_NAMES],
           role: "explore",
-          // T6: 缺 isolationOn 时,manager 默认按隔离 OFF + sandboxRoot(非
-          // 树形) → writable_main;与改造前 worker prior 形态逐字节相等。
+          // Without isolationOn, manager defaults to isolation OFF +
+          // sandboxRoot (non-tree) -> writable_main; byte-equal to the pre-change
+          // worker prior shape.
           writeSituation: "writable_main",
         })
       );
@@ -493,13 +506,14 @@ describe("worker tool surface: T3 catalog deny contract", () => {
 });
 
 // ---------------------------------------------------------------------------
-// E. 空 / 非法 / 旧 wire —— WorkerEnvelope 缺 disallowedTools（向后兼容 SC6）
+// E. Empty / invalid / legacy wire — WorkerEnvelope without disallowedTools
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 向后兼容 — 旧 wire 无 disallowedTools 字段", () => {
   it("WorkerEnvelope 缺 disallowedTools → createWorkerDeps 透传 undefined → 双面 = 全量面", async () => {
-    // 旧 wire 不带 disallowedTools 字段（manager.ts 序列化前可能未声明 deny-list，
-    // 或更早版本 envelope 完全缺字段）—— 手构 envelope 模拟。
+    // Legacy wire carries no disallowedTools field (manager.ts may serialize
+    // without a declared deny-list, or an older envelope lacks the field
+    // entirely) — simulate with a hand-built envelope.
     const oldEnvelope: WorkerEnvelope = {
       task: "investigate legacy wire",
       sandboxRoot: "/tmp/sb",
@@ -524,32 +538,35 @@ describe("worker tool surface: 向后兼容 — 旧 wire 无 disallowedTools 字
 });
 
 // ---------------------------------------------------------------------------
-// F. 并发 —— N/A（worker 装配是进程启动期一次性同步裁剪，无并发窗口）
-//     spec Testing Strategy "并发 N/A（worker 装配是进程启动期一次性同步裁剪）"。
+// F. Concurrency — N/A (worker assembly is a one-shot synchronous prune at
+//    process start; no concurrent window)
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 并发 N/A — 占位说明", () => {
   it("worker 装配路径同步一次性, 无并发窗口", () => {
-    // 注释占位 —— 详见 spec Testing Strategy。
-    // worker 装配路径 = createWorkerDeps 内 createDefaultAciRegistry 同步调用，
-    // def-list 期裁剪在 createAciRegistry(tools) 之前（构造期保证 inner 是
-    // 冻结快照 aci-registry.ts:20）。无并发窗口，无需并发用例。
+    // Comment placeholder — worker assembly = the synchronous
+    // createDefaultAciRegistry call inside createWorkerDeps; def-list pruning
+    // happens before createAciRegistry(tools) (construction guarantees inner is
+    // a frozen snapshot, aci-registry.ts:20). No concurrent window, no concurrency case needed.
     assert.equal(true, true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0085 / SC9 — worker 与父会话共用同一本账（原 #440 D6「worker 无
-// todo_write」契约已被 ADR-0085 推翻）。
+// ADR-0085 — worker and parent session share the same ledger (the old
+// "worker has no todo_write" contract is superseded by ADR-0085).
 //
-// 新不变式（替代旧四条）：
-//   1. envelope.todoLedger 在场 → todo_write **在** worker 双面工具面上
-//      （不是「工具缺席」——模型要读得到 `add` 的拒绝原因）；
-//   2. worker 的 read / update 落在父会话账本（同一个 todos.md 文件）；
-//   3. worker 的 `add` 是工具自身的 typed 拒绝（ToolExecutionError +
-//      `[todo_write]` 前缀），文件不动；
-//   4. 两个父会话的账本互不交叉（每 conversationId 一本，id 不串）。
-//   5. envelope 缺 todoLedger（旧 wire）→ 仍退回缺席形态，byte-stable。
+// New invariants (replacing the old four):
+//   1. envelope.todoLedger present -> todo_write **is** on the worker's dual
+//      tool surface (not "tool absent" — the model must be able to read the
+//      refusal reason for `add`);
+//   2. the worker's read / update land on the parent session's ledger (the
+//      same todos.md file);
+//   3. the worker's `add` is a typed refusal by the tool itself
+//      (ToolExecutionError + `[todo_write]` prefix), file untouched;
+//   4. two parent sessions' ledgers never cross (one book per conversationId, ids don't mix).
+//   5. envelope lacks todoLedger (legacy wire) -> falls back to the absent
+//      shape, byte-stable.
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", () => {
@@ -561,8 +578,8 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
   });
 
   it("envelope.todoLedger 缺席（旧 wire）→ inner + promptTools 双面均不含 todo_write", async () => {
-    // 旧 wire / 跨版本 resume 形态：worker 工具面维持 ADR-0085 之前的 25 件，
-    // 不因新字段的存在而漂移。
+    // Legacy wire / cross-version resume shape: the worker tool surface keeps
+    // its pre-ADR-0085 roster, never drifting due to the new field's existence.
     const deps = await buildWorkerWithFullSkillCatalog();
     assertSurface(deps, ["todo_write"], [...WORKER_BASE_SURFACE]);
   });
@@ -574,7 +591,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
         todoLedger: { projectDir: todoDir, conversationId: "conv-parent" },
       });
       assertSurface(deps, [], [...WORKER_BASE_SURFACE, "todo_write"]);
-      // 双面件数 = 基础面 + 1（todo_write 是唯一增量）。
+      // Dual-face count = base surface + 1 (todo_write is the only increment).
       assert.equal(deps.registry.list().length, WORKER_BASE_SURFACE.length + 1);
     } finally {
       await rm(todoDir, { recursive: true, force: true });
@@ -585,7 +602,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
     const todoDir = await mkdtemp(join(tmpdir(), "iknow-sc9-shared-"));
     try {
       const conversationId = "conv-parent-shared";
-      // 父会话先写两条（父路径 = 同一 projectDir + 同一 conversationId）。
+      // Parent session writes two entries first (parent path = same projectDir + same conversationId).
       const parent = createTodoWriteTool({ todoDir, actor: { canAdd: true } });
       await parent.handler(
         { mode: "add", items: ["parent step 1", "parent step 2"] },
@@ -598,8 +615,9 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
       const tool = deps.registry.get("todo_write");
       assert.ok(tool, "worker surface 必须含 todo_write");
 
-      // worker 无 ctx（worker 进程 executor 不合成 conversationId）——
-      // 路径由 deps.actor.conversationId 回退解析到父账本。
+      // Worker has no ctx (the worker process executor never synthesizes a
+      // conversationId) — the path falls back to deps.actor.conversationId,
+      // resolving to the parent ledger.
       const seen = (await tool.handler({ mode: "read" })) as string;
       assert.match(seen, /\[t1\] parent step 1/);
       assert.match(seen, /\[t2\] parent step 2/);
@@ -611,7 +629,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
       });
       assert.equal(receipt, "Updated t1: status=completed");
 
-      // 父会话回读：看到 worker 的更动 —— 同一本账（物理文件即父会话路径）。
+      // Parent readback: sees the worker's edits — same ledger (the physical file is the parent session's path).
       const parentView = (await parent.handler(
         { mode: "read" },
         { conversationId }
@@ -661,7 +679,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
         }
       );
 
-      // 拒绝发生在任何写盘之前：父账本只有父会话那一条。
+      // The refusal happens before any disk write: the parent ledger holds only the parent session's entry.
       const onDisk = await readFile(
         resolveConversationTodoPath({ projectDir: todoDir, conversationId }),
         "utf8"
@@ -687,7 +705,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
         { conversationId: convB }
       );
 
-      // A 的 worker（装配锚点 = A 的 conversationId）。
+      // A's worker (assembly anchor = A's conversationId).
       const depsA = await buildWorkerLedgerDeps({
         todoLedger: { projectDir: todoDir, conversationId: convA },
       });
@@ -698,9 +716,9 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
       assert.match(seenByA, /A-item/);
       assert.ok(!seenByA.includes("B-item"), "A 的 worker 不得看见 B 的账本");
 
-      // A 的 worker 用 B 的 id 去 update → 在 A 的账本里 t1 是 A 的条目，
-      // 故此处以「B 账本逐字节不动」为判据（id 空间本就会重叠，文件轴才是
-      // 隔离轴）。
+      // A's worker updates using B's id -> in A's ledger t1 is A's own entry,
+      // so the criterion here is "B's ledger untouched byte for byte" (id
+      // spaces overlap by design; the file axis is the isolation axis).
       await toolA.handler({ mode: "update", id: "t1", status: "completed" });
 
       const pathA = resolveConversationTodoPath({
@@ -719,7 +737,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
         "B 的账本不得被 A 的 worker 触碰"
       );
 
-      // B 的 worker 同样看不到 A 的更动之外的任何 A 内容。
+      // B's worker likewise sees nothing of A beyond none of A's edits.
       const depsB = await buildWorkerLedgerDeps({
         todoLedger: { projectDir: todoDir, conversationId: convB },
       });
@@ -735,11 +753,12 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
 });
 
 /**
- * 走真实 createWorkerDeps 装配：注入 stub-model + 空 skill catalog 让
- * skill 静态在场（Gate 3 锁,disclosure-index-align T2 删 skill_search 后只剩
- * 1 件），不加 subagentManager 与 memoryDir（worker 装配特征）。默认不传
- * todoLedger —— 旧 wire 形态（ADR-0085 之前的 worker 工具面）。
- * 返回值含 deps.registry（executor 真实可见）+ deps.promptTools（模型可见）。
+ * Walks the real createWorkerDeps assembly: inject stub-model + empty skill
+ * catalog so skill is statically present (after skill_search's removal only 1
+ * remains), without subagentManager or memoryDir (worker assembly traits).
+ * By default no todoLedger — legacy wire form (the pre-ADR-0085 worker tool
+ * surface). The return value carries deps.registry (what the executor really
+ * sees) + deps.promptTools (what the model sees).
  */
 async function buildWorkerWithFullSkillCatalog(
   extra?: Partial<CreateWorkerDepsOptions>
@@ -747,14 +766,14 @@ async function buildWorkerWithFullSkillCatalog(
   return createWorkerDeps(workerBaseOpts(extra));
 }
 
-/** ADR-0085 SC9 用例专用：装配锚定父会话账本的 worker registry。 */
+/** ADR-0085 ledger cases only: assemble a worker registry anchored to the parent session's ledger. */
 async function buildWorkerLedgerDeps(extra: {
   readonly todoLedger: { projectDir: string; conversationId: string };
 }): Promise<LoopEngineDeps> {
   return buildWorkerWithFullSkillCatalog(extra);
 }
 
-/** createWorkerDeps 的最小 hermetic opts（stub-model + 空 skill + noop trace）。 */
+/** Minimal hermetic createWorkerDeps opts (stub-model + empty skill + noop trace). */
 function workerBaseOpts(
   extra?: Partial<CreateWorkerDepsOptions>
 ): CreateWorkerDepsOptions {
@@ -788,8 +807,9 @@ function workerBaseOpts(
 }
 
 /**
- * ADR-0092 — bash + 写工具 description：进项目写 taskRoot；不必进仓的
- * scratch 写会话 tmp 目录($TMPDIR)。写根段仍只说交付根。
+ * ADR-0092 — bash + write-tool descriptions: project writes go into taskRoot;
+ * scratch writes go to the session tmp dir ($TMPDIR) without needing repo
+ * entry. The write-root segment still only names the delivery root.
  */
 describe("ADR-0092 — bash / write-tool descriptions name the session tmp", () => {
   it("bash, write_file, and edit_file point scratch writes at the session tmp dir ($TMPDIR)", async () => {

@@ -47,10 +47,11 @@ function resolveTsxCli(): string {
 const tsxCli = resolveTsxCli();
 
 /**
- * T5 (ADR-0071 / SC8): 递归搜 dataDir/projects
- * 下任意 slug/convId/subagents 子目录,返回第一个存在的 subagents 目录。
- * cli 测试把 HOME 重定向到 scratch 后, projectDir 含 basename 加 12 位
- * sha1 后缀不可硬编码; walker 形态直接拿真实路径。
+ * ADR-0071: recursively search dataDir/projects for any
+ * slug/convId/subagents subdirectory and return the first existing one. Once the
+ * CLI test redirects HOME to a scratch dir, projectDir carries a basename plus a
+ * 12-char sha1 suffix and cannot be hardcoded; the walker shape just takes the
+ * real path.
  */
 function findSubagentsDir(dataDir: string): string | undefined {
   const projectsDir = join(dataDir, "projects");
@@ -115,8 +116,9 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
   it("writes spawn/state_change/stop to trace/subagent.jsonl without traceOut", async () => {
     scratch = mkdtempSync(join(tmpdir(), "iknow-cli-chat-trace-"));
     const home = join(scratch, "home");
-    // ADR-0084：llm 是用户层键 → fixture 必须落在子进程 HOME 解析到的用户层
-    // （childEnv.HOME = <scratch>/home）；项目文件里的 llm 会被允许名单丢弃。
+    // ADR-0084: llm is a user-level key → the fixture must sit in the user layer
+    // the child process resolves via HOME (childEnv.HOME = <scratch>/home); llm in
+    // the project file is dropped by the allowlist.
     mkdirSync(join(home, ".iknow"), { recursive: true });
 
     let requestCount = 0;
@@ -142,12 +144,13 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     );
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    // #1029: provider route must exist in llm.providers — legacy
+    // The provider route must exist in llm.providers — the legacy
     // { model: "test-model", apiKey } shape no longer resolves post-ADR-0093
-    // (typed `provider_model_not_registered`)。监听端口动态分配,
-    // 所以在 server.address() 拿到端口后,把 baseUrl 拼到 settings 落盘。
-    // llmSettingsJson 自身不接受 baseUrl 覆盖,此处沿用 TEST_LLM_PROVIDER
-    // 的 id/apiKeyEnv/models 形态,只改 baseUrl 指向本测试自建的 stub listener。
+    // (typed `provider_model_not_registered`). The listener port is allocated
+    // dynamically, so baseUrl is written into settings only after
+    // server.address() reveals it. llmSettingsJson itself accepts no baseUrl
+    // override, so the TEST_LLM_PROVIDER id/apiKeyEnv/models shape is kept and
+    // only baseUrl is repointed at this test's own stub listener.
     writeFileSync(
       join(home, ".iknow", "settings.json"),
       JSON.stringify({
@@ -205,13 +208,14 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       requestCount >= 2,
       `the parent and worker should call the stub model (stdout=${stdout}, stderr=${stderr})`
     );
-    // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle /
-    // content trace 改走 per-agent 形态 — `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
-    // 本测试把 HOME 重定向到 `<scratch>/home` → dataDir 落到
-    // `<scratch>/home/.iknow`, projectDir 落到
-    // `<scratch>/home/.iknow/projects/<basename>-<sha1[:12]>/<convId>/subagents/`。
-    // 用 readdirSync 找 `agent-*.jsonl` 文件, 不硬编码路径(避免依赖
-    // resolveProjectSessionDir 的 `<basename>-<sha1[:12]>` 后缀)。
+    // ADR-0071: subagent lifecycle / content trace uses the per-agent shape
+    // `<parent session folder>/subagents/agent-<taskId>.jsonl`. This test
+    // redirects HOME to `<scratch>/home` → dataDir at `<scratch>/home/.iknow`,
+    // projectDir at
+    // `<scratch>/home/.iknow/projects/<basename>-<sha1[:12]>/<convId>/subagents/`.
+    // agent-*.jsonl files are located via readdirSync instead of a hardcoded path
+    // (no dependency on resolveProjectSessionDir's `<basename>-<sha1[:12]>`
+    // suffix).
     const dataDir = join(home, ".iknow");
     const subagentsRoot = findSubagentsDir(dataDir);
     assert.ok(

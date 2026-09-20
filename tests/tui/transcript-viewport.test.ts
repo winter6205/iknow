@@ -1,10 +1,11 @@
 /**
  * tests/tui/transcript-viewport.test.ts
  *
- * ChatView 视口挂载纯函数：决定哪一段 messages 进 OpenTUI 树。
- * 高度来自调用方传入的实测/占位，本模块不估算 markdown 行数。
- * 同时测 `listenScrollBoxTop`（订阅 OpenTUI `verticalScrollBar` `change`）
- * 与 `shouldCommitScrollTop`（量化 React 提交，spec invariant 8）。
+ * ChatView viewport-mount pure functions: decide which slice of messages
+ * enters the OpenTUI tree. Heights come from caller-supplied measurements /
+ * placeholders; this module never estimates markdown line counts. Also tests
+ * `listenScrollBoxTop` (subscribing to OpenTUI `verticalScrollBar` `change`)
+ * and `shouldCommitScrollTop` (quantized React commits).
  */
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
@@ -104,8 +105,8 @@ describe("selectViewportMountWindow", () => {
   });
 
   test("overflow: 内容全部落在视口+overscan 内 → 与全量 map 等价", () => {
-    // spec invariant 4：内容全部落在「视口 + overscan」内时，结果必须与
-    // 全量 visibleMessages.map 相同（全挂、零 spacer）。
+    // Invariant 4: when all content fits within "viewport + overscan", the
+    // result must equal the full visibleMessages.map (everything mounted, zero spacers).
     const messages = ids(3);
     const w = selectViewportMountWindow(messages, {
       scrollTop: 0,
@@ -120,9 +121,8 @@ describe("selectViewportMountWindow", () => {
   });
 
   test("overflow: 超过一屏但不足三屏 → 仍按视口+overscan 切片", () => {
-    // spec invariant 4：挂载范围只看 scrollTop + 视口 + overscan，禁止
-    // 「内容总高低于 N 个视口则全量挂载」的固定 N 屏短路。20 条 × 4 行 =
-    // 80 行 > 视口 12，窗口仍短于总条数。
+    // Invariant 4: the mount range depends only on scrollTop + viewport + overscan;
+    // "if total content height is below N viewports then mount everything" short-circuits are banned. 20 items x 4 rows = 80 rows > viewport 12, yet the window is still shorter than the total count.
     const messages = ids(20);
     const heights = uniformHeights(20, 4);
     const top = selectViewportMountWindow(messages, {
@@ -148,28 +148,31 @@ describe("selectViewportMountWindow", () => {
   });
 
   test("overscan: 默认小于一屏（视口 >= 2 行），显式值不再被抬到一屏", () => {
-    // spec invariant 4 / EXIT：viewport.height >= 2 时默认 overscan 严格小于
-    // 一屏；显式传入的小值被尊重（小于默认 → 取默认）。
+    // Invariant 4 / EXIT: when viewport.height >= 2 the default overscan is
+    // strictly less than one screen; an explicit smaller value is respected
+    // (below default -> default is taken).
     for (const vh of [2, 4, 12, 40, 200]) {
       expect(defaultViewportOverscan(vh)).toBeLessThan(vh);
     }
-    // 退化：视口 <= 1 行不存在「小于一屏」的正 overscan，实现取可达最小
-    // 值 1（`Math.max(1, ...)`），该值不小于视口。spec
-    // `specs/tui-transcript-viewport.md`（overscan / 提交量化条）显式记录
-    // 此退化，不得被读成「恒小于一屏」。
+    // Degenerate: with viewport <= 1 there is no positive overscan "smaller
+    // than one screen"; the implementation takes the reachable minimum 1
+    // (`Math.max(1, ...)`), a value not below the viewport. This degeneration
+    // is recorded explicitly and must not be read as "always less than one screen".
     expect(defaultViewportOverscan(1)).toBe(1);
     expect(defaultViewportOverscan(0)).toBe(1);
     const viewportHeight = 40;
     const overscan = defaultViewportOverscan(viewportHeight);
     expect(overscan).toBeGreaterThan(0);
     expect(overscan).toBeLessThan(viewportHeight);
-    // 量化步长 ≤ overscan（亚阈值滚动不会让挂载窗口追不上视口）；
-    // 且 ≤ 一次滚轮步长（滚轮一步必须能推动窗口；单次滚轮能否提交由
-    // chat-view-scroll.test.tsx 的行为测试认证）。
+    // Quantized step ≤ overscan (sub-threshold scrolling never leaves the mount
+    // window behind the viewport); and ≤ one wheel step (a single wheel tick
+    // must be able to move the window; whether one wheel event commits is
+    // certified by the behavior test in chat-view-scroll.test.tsx).
     expect(resolveScrollCommitStep(viewportHeight)).toBeLessThanOrEqual(overscan);
 
-    // 显式更小的 overscan 被抬到默认（overscan < 默认 → 默认），
-    // 显式更大的被原样尊重。窗口长度用整段挂载高度反查（height ÷ 4）。
+    // An explicit smaller overscan is raised to the default (overscan < default
+    // → default); an explicit larger one is respected verbatim. Window length is
+    // derived from total mounted height (height ÷ 4).
     const explicitSmall = selectViewportMountWindow(ids(50), {
       scrollTop: 0,
       viewportHeight,
@@ -178,8 +181,9 @@ describe("selectViewportMountWindow", () => {
     });
     expect(explicitSmall.mounted.length).toBeLessThan(50);
     expect(explicitSmall.spacerAfter).toBe((50 - explicitSmall.mounted.length) * 4);
-    // 默认 overscan = 视口/4 = 10 行 → 窗口覆盖视口 + overscan = 50 行；
-    // 每条 4 行 → 挂载 ceil(50/4) = 13 条（区间右端取覆盖到 50 行的首条）。
+    // Default overscan = viewport/4 = 10 rows → window covers viewport +
+    // overscan = 50 rows; 4 rows per item → mount ceil(50/4) = 13 items (the
+    // right edge takes the first item covering up to row 50).
     expect(explicitSmall.mounted.length).toBe(
       Math.ceil((viewportHeight + overscan) / 4)
     );
@@ -214,8 +218,9 @@ describe("selectViewportMountWindow", () => {
     ]);
     expect(a.mounted[0]).toBe("m-0");
     expect(a.mounted.length).toBeLessThan(100);
-    // 5 条 × 4 行 = 20 行 > 视口 12 + 两侧 overscan → 窗口切片（不再整段全挂）；
-    // 本节只认证两次调用互不影响。
+    // 5 items × 4 rows = 20 rows > viewport 12 + overscan both sides → window
+    // slicing (no more whole-segment mount); this section only certifies the
+    // two calls do not interfere.
     expect(b.mounted.length).toBeLessThan(5);
     expect(b.mounted[0]).toBe("m-0");
     expect(b.spacerBefore).toBe(0);
@@ -264,8 +269,9 @@ describe("shouldCommitScrollTop / resolveScrollCommitStep", () => {
   });
 
   test("overflow: 坏步长退化为最小量子 1（不会退化成 0 或无穷）", () => {
-    // step 非有限 / <1 → 1 行：整行位移仍提交（不因坏参数吞掉真实滚动），
-    // 亚行位移不作为提交（最小量子就是 1 行）。
+    // step non-finite / <1 → 1 row: a whole-row displacement still commits
+    // (bad params must not swallow real scrolling); a sub-row displacement does
+    // not commit (the minimum quantum is one row).
     for (const step of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(shouldCommitScrollTop(40, 41, { step, maxScrollTop: 100 })).toBe(
         true
@@ -277,12 +283,12 @@ describe("shouldCommitScrollTop / resolveScrollCommitStep", () => {
   });
 
   test("亚阈值连续 change 不提交；跨步长/贴底/置顶提交", () => {
-    expect(shouldCommitScrollTop(40, 42, OPTS)).toBe(false); // 上滚 2 行
-    expect(shouldCommitScrollTop(40, 37.1, OPTS)).toBe(false); // 下滚 <3 行
-    expect(shouldCommitScrollTop(40, 43, OPTS)).toBe(true); // 跨一个量化步长
+    expect(shouldCommitScrollTop(40, 42, OPTS)).toBe(false); // scrolled up 2 rows
+    expect(shouldCommitScrollTop(40, 37.1, OPTS)).toBe(false); // scrolled down <3 rows
+    expect(shouldCommitScrollTop(40, 43, OPTS)).toBe(true); // crosses one quantized step
     expect(shouldCommitScrollTop(40, 37, OPTS)).toBe(true);
-    expect(shouldCommitScrollTop(40, 100, OPTS)).toBe(true); // 贴底
-    expect(shouldCommitScrollTop(40, 99, OPTS)).toBe(true); // 贴底（亚阈值也提交）
+    expect(shouldCommitScrollTop(40, 100, OPTS)).toBe(true); // at bottom
+    expect(shouldCommitScrollTop(40, 99, OPTS)).toBe(true); // at bottom (commits even sub-threshold)
   });
 
   test("concurrent: 纯函数两次调用互不影响 // N/A: pure", async () => {

@@ -1,21 +1,28 @@
 /**
  * tests/tui/chrome-focus.test.ts
  *
- * plans/tui-chrome-interaction.md T6：chrome-focus reducer 纯函数单测。
+ * Pure-function unit tests for the chrome-focus reducer.
  *
- * 不变量（reducer 一字不可破）：
- *   1) 焦点状态：`input` | `subagent(row)` | `graph` —— reducer 独享；
- *   2) input 上 Down → 第一个 subagent 行（有则）/ graph（无 subagent 但有快照）；
- *      无 subagent 也无 graph → 原地 input（empty 边界）。
- *   3) subagent(0) 上 Up → input；subagent(last) 上 Down → graph（有则）/ 原地；
- *   4) graph 上 Up → 最后一个 subagent 行（有则）/ input（无 subagent）。
- *   5) 其他键（return / escape / tab / 普通字符）→ 焦点不变（reducer 只认 Down/Up，
- *      Escape / Tab / Enter 仍由其他 reducer / 组件处理；reducer 不抢键）。
- *   6) 缺 snapshot / 空 panel → 该环跳过（empty / exception）。
- *   7) 任意 inputs 都是 readonly；reducer 是纯函数：相同 inputs → 相同 output。
- *   8) row clamp：subagent 行数变化时 row 越界回 clamp 到 [0, count-1] / 切 input。
+ * Invariants (the reducer must never break a single one):
+ *   1) focus states: `input` | `subagent(row)` | `graph` — owned solely by
+ *      the reducer;
+ *   2) Down from input → first subagent row (if any) / graph (no subagents
+ *      but a snapshot exists); neither → stays at input (empty boundary).
+ *   3) Up from subagent(0) → input; Down from subagent(last) → graph (if
+ *      any) / stays;
+ *   4) Up from graph → last subagent row (if any) / input (no subagents).
+ *   5) any other key (return / escape / tab / plain chars) → focus unchanged
+ *      (the reducer only recognizes Down/Up; Escape / Tab / Enter stay with
+ *      other reducers / components; the reducer never steals keys).
+ *   6) missing snapshot / empty panel → that hop is skipped (empty /
+ *      exception).
+ *   7) all inputs are readonly; the reducer is pure: same inputs → same
+ *      output.
+ *   8) row clamp: when the subagent row count changes, an out-of-range row
+ *      clamps back to [0, count-1] / switches to input.
  *
- * wiring 在 T7；本轮 reducer 只被纯函数测试覆盖。PromptInput 不在本轮改动。
+ * Wiring lives in the app layer; this reducer is covered only by
+ * pure-function tests here. PromptInput is not involved.
  */
 import { describe, expect, test } from "bun:test";
 import {

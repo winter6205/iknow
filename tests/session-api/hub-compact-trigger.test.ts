@@ -1,11 +1,12 @@
 /**
- * plan manual-compact-trigger T1: 手动 /compact 视作已过 auto-compact
- * token 门。覆盖 session-api hub.compactSession 在「短会话 + 缺省 167k
- * 阈值 / 0 消息 / abort / fresh conversationId」等场景下的 reason 透传
- * 与落盘契约,与 loop-engine proactive 行为互不串扰(后者有独立测试
- * 见 `tests/harness/loop-engine.test.ts` 的 compress-trigger-gate 块)。
+ * Manual /compact counts as already past the auto-compact token gate.
+ * Covers session-api hub.compactSession reason pass-through and
+ * persistence contract across scenarios (short session + default 167k
+ * threshold / 0 messages / abort / fresh conversationId), without
+ * cross-talk with loop-engine proactive behavior (that has its own tests
+ * in the compress-trigger-gate block of `tests/harness/loop-engine.test.ts`).
  *
- * 真实 SessionStore + temp dir(命令 handler 集成测试契约)。
+ * Real SessionStore + temp dir (command-handler integration test contract).
  */
 import { afterAll, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -140,18 +141,24 @@ async function seedSession(
 }
 
 describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token 门", () => {
-  // 本组用例钉住的不变式:manual /compact 视作已过 token 门 — 短会话(消息
-  // 数 > keepRecent)必须压缩并落盘;proactive gate 仍走 evaluateCompactTrigger
-  // (SSOT: src/harness/compress/index.ts),`below_token_threshold` 仅是那条
-  // 路径的判据字面量。hub 手动入口空会话走 messages_too_few 幂等 noop。
+  // Invariant pinned by this group: manual /compact counts as already past
+  // the token gate — a short session (message count > keepRecent) must
+  // compact and persist; the proactive gate still goes through
+  // evaluateCompactTrigger (SSOT: src/harness/compress/index.ts), and
+  // `below_token_threshold` is only the decision literal on that path.
+  // The hub manual entry with an empty session takes the messages_too_few
+  // idempotent noop.
 
   it("缺省阈值(thresholdTokens 缺席) + 8 短消息(> keepRecent=6)→ compacted:true + 落盘 + updatedAt bump", async () => {
-    // 验收 T1 acceptance 第一条:manual /compact 视作已过 token 门 — 短会话
-    // (消息数 > keepRecent)必须压缩并落盘,即便 token 估算远低于缺省阈值。
-    // 注:此处 reason 取决于 LLM 摘要成败 — 走 windowed 路径但 makeOkAdapter
-    // 返回 "ok" → summarized,所以 reason 走 "full_summary";windowed 路径
-    // 的纯截断场景见 makeThrowingAdapter 那条(messages_too_few)与下面那条
-    // 走 splitForCompaction 落到 placeholder 后 reason=windowed 的反向测试。
+    // First acceptance case: manual /compact counts as past the token gate
+    // — a short session (message count > keepRecent) must compact and
+    // persist even when the token estimate is far below the default
+    // threshold. Note: the reason here depends on LLM summary success —
+    // the windowed path is taken but makeOkAdapter returns "ok" →
+    // summarized, so reason is "full_summary"; the pure-truncation windowed
+    // case is the makeThrowingAdapter entry (messages_too_few) and the
+    // reverse test below, where splitForCompaction lands on a placeholder
+    // and reason=windowed.
     const { store } = await storeFor();
     const id = "manual-windowed-default-threshold";
     const messages = Array.from({ length: 8 }, (_, i) => ({
@@ -162,10 +169,10 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
 
     const hub = new SessionHub({
       store,
-      // thresholdTokens 故意缺席 → getAutoCompactThreshold 缺省 =
-      // floor(0.95 × contextWindow) = 190000。manual /compact 视作已过门,
-      // 不调 evaluateCompactTrigger,直接走 splitForCompaction → windowed 支
-      // (8 > 6 keepRecent → dropped=2, kept=6)。
+      // thresholdTokens deliberately absent → getAutoCompactThreshold default
+      // = floor(0.95 × contextWindow) = 190000. Manual /compact counts as
+      // past the gate, skips evaluateCompactTrigger, and goes straight to
+      // splitForCompaction → windowed branch (8 > 6 keepRecent → dropped=2, kept=6).
       deps: {
         ...makeCompactDeps({ adapter: makeOkAdapter("ok") }),
         compress: { contextWindow: 200_000 },
@@ -176,8 +183,8 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
 
     expect(res.compacted).toBe(true);
     assert.equal(res.beforeCount, 8);
-    // 8 条 > keepRecent=6 → dropped=2, kept=6。LLM 摘要成功 → 1 条 preamble+summary
-    // user + 6 kept = 7 条。
+    // 8 > keepRecent=6 → dropped=2, kept=6. LLM summary succeeds → 1 preamble+summary
+    // user + 6 kept = 7 messages.
     assert.equal(res.afterCount, 7);
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 7);
@@ -185,10 +192,10 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
   });
 
   it("缺省阈值 + 8 短消息 + runFullCompact 失败 → 落 placeholder → compacted:true + reason:windowed", async () => {
-    // 8 条 > keepRecent=6,默认阈值 ≈ 167k(手动不查),token 估 ≪ 167k。
-    // 让 runFullCompact 抛错 → nextMessages 走 compactMessages(before) 截断 +
-    // boundary placeholder(8 条 → placeholder + 6 kept = 7)。reason=windowed
-    // (useCompactMessages=true → 走 windowed 文案)。
+    // 8 > keepRecent=6, default threshold ≈ 167k (not checked manually), token estimate ≪ 167k.
+    // Make runFullCompact throw → nextMessages goes through compactMessages(before) truncation +
+    // boundary placeholder (8 → placeholder + 6 kept = 7). reason=windowed
+    // (useCompactMessages=true → windowed wording).
     const { store } = await storeFor();
     const id = "manual-windowed-placeholder";
     const messages = Array.from({ length: 8 }, (_, i) => ({
@@ -223,9 +230,10 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
   });
 
   it("缺省阈值 + 3 短消息(≤ keepRecent)→ compacted:true + reason:full_summary(非 below_token_threshold noop)", async () => {
-    // 验收 T1 acceptance 第三条:manual /compact 视作已过 token 门 — 消息不
-    // 超过尾窗但非空时仍必须压缩(full_summary 支,与 auto 开火后同效),
-    // 不是 noop。LLM 摘要成功 → 1 条 preamble+summary user 消息。
+    // Third acceptance case: manual /compact counts as past the token gate
+    // — messages not exceeding the tail window but non-empty must still
+    // compact (full_summary branch, same effect as after auto fires), not a
+    // noop. LLM summary succeeds → 1 preamble+summary user message.
     const { store } = await storeFor();
     const id = "manual-full-summary-short";
     const messages = Array.from({ length: 3 }, (_, i) => ({
@@ -248,20 +256,22 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
     expect(res.compacted).toBe(true);
     assert.equal(res.reason, "full_summary");
     assert.equal(res.beforeCount, 3);
-    // 3 条 ≤ keepRecent=6 → 整段视为 dropped,kept=[],摘要成功只产 1 条
-    // preamble+summary user 消息。
+    // 3 ≤ keepRecent=6 → the whole segment is dropped, kept=[]; a successful
+    // summary yields only 1 preamble+summary user message.
     assert.equal(res.afterCount, 1);
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 1);
     const firstText = textOf(loaded.messages[0]!);
     assert.ok(firstText.includes("This session is being continued"));
     assert.ok(firstText.includes("sum-body"));
-    // ADR-0112 Does #1:compact 续传摘要在 hub 手动入口同样是宿主 commit。
+    // ADR-0112: the compact continuation summary is also a host commit at
+    // the hub manual entry.
     assert.equal(loaded.messages[0]!.hostInjected, true);
   });
 
   it("空会话(0 消息)→ compacted:false + reason:messages_too_few + 不落盘 + updatedAt 不变", async () => {
-    // 验收 T1 acceptance 第二条:同配置下空会话仍 compacted:false 且 updatedAt 不变。
+    // Second acceptance case: an empty session under the same config stays
+    // compacted:false with updatedAt unchanged.
     const { store } = await storeFor();
     const id = "manual-empty";
     await seedSession(store, id, []);
@@ -278,7 +288,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
     assert.equal(res.reason, "messages_too_few");
     assert.equal(res.beforeCount, 0);
     assert.equal(res.afterCount, 0);
-    // 不落盘:store 文件内容应与 before 一致(消息数=0,updatedAt 不变)。
+    // Not persisted: the store file must equal the before state (0 messages, unchanged updatedAt).
     const after = await store.load(id);
     assert.equal(after.messages.length, 0);
     assert.equal(after.updatedAt, beforeUpdatedAt, "updatedAt 必须不变");
@@ -338,8 +348,9 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
   });
 
   it("signal abort 中途取消 → cancelled:true + compacted:false + 不落盘 + updatedAt 不变(契约 #548)", async () => {
-    // 验收 T1 边界:abort 既有契约保留 — 与「未压缩」区分(cancelled:true),
-    // 走 keep-state 路径,不落盘、不 bump updatedAt、不 fallback 截断。
+    // Abort boundary: the existing contract holds — distinguished from "not
+    // compacted" via cancelled:true, keeps state, no persist, no updatedAt
+    // bump, no fallback truncation.
     const { store } = await storeFor();
     const id = "manual-abort";
     const messages = Array.from({ length: 5 }, () => ({
@@ -418,7 +429,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
   });
 });
 
-// -- compact 不回盖标题事件 (session-list-title T3 / ADR-0113) -----------------
+// -- compact must not overwrite title events (specs/session-list-title.md / ADR-0113) --
 
 describe("compact 与标题事件: header title 只做缓存", () => {
   it("有 title 事件: compact 后 header/读路径仍为事件正文, preamble 不成标题", async () => {
@@ -433,7 +444,7 @@ describe("compact 与标题事件: header title 只做缓存", () => {
       id,
       file: {
         ...(await store.load(id)),
-        title: "msg-0", // 占位 = extractTitle(首条 user)
+        title: "msg-0", // placeholder = extractTitle(first user msg)
       },
     });
     await store.appendTitle({ id, text: "事件标题" });
@@ -450,13 +461,13 @@ describe("compact 与标题事件: header title 只做缓存", () => {
     const res = await hub.compactSession(id);
     expect(res.compacted).toBe(true);
 
-    // compact 后首条 user 是 SUMMARY_PREAMBLE；标题必须仍是事件正文。
+    // After compact the first user message is SUMMARY_PREAMBLE; the title must remain the event text.
     const loaded = await store.load(id);
     assert.equal(loaded.title, "事件标题");
     const firstText = textOf(loaded.messages[0]!);
     assert.notEqual(loaded.title, extractTitle(loaded.messages));
     assert.ok(!loaded.title.includes(firstText.slice(0, 20)));
-    // 盘上 header 缓存同样未被 extractTitle 回盖，且 title 记录存活。
+    // The on-disk header cache is likewise not re-covered by extractTitle, and the title record survives.
     const lines = (
       await readFile(join(store.getProjectDir(), id, `${id}.jsonl`), "utf8")
     )

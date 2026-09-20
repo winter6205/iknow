@@ -2,14 +2,16 @@
 /**
  * tests/tui/list-view-scroll.test.tsx
  *
- * #343 T4：会话列表「搜索 + 视口翻页」行为（OpenTUI 版，归档语义重写）：
- *  - listEntryMatches 纯函数：title / lastFinalText 子串匹配、不区分大小写、
- *    空白 query 匹配全部；
- *  - 视口窗口：rows 预算内只渲染「搜索框 + 表头 + 可视行」，会话超过视口时
- *    滚动指示出现、超出部分不渲染（杜绝整帧溢出）；
- *  - 交互（mockInput 驱动）：键入搜索过滤、↑↓ 移出视口边缘触发翻页、
- *    PageUp/PageDown 翻页、Home/End 跳顶/跳底、Esc 清空搜索 vs 返回聊天、
- *    Enter 打开（onOpen 回调带 index）。
+ * Session-list "search + viewport paging" behavior:
+ *  - listEntryMatches pure function: substring match on title / lastFinalText,
+ *    case-insensitive, blank query matches everything；
+ *  - viewport window: within the rows budget only "search box + header +
+ *    visible rows" render; when sessions exceed the viewport a scroll
+ *    indicator appears and the overflow is not rendered (prevents whole-frame overflow);
+ *  - interaction (mockInput-driven): typing filters, ↑↓ moving past a
+ *    viewport edge triggers paging, PageUp/PageDown pages, Home/End jump
+ *    top/bottom, Esc clears the search vs. returns to chat, Enter opens
+ *    (onOpen callback carries the index).
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -20,8 +22,9 @@ import {
   type TuiListEntry,
 } from "../../src/tui/list-view.js";
 
-/** 轮询式帧等待：mockInput 字节经 stdin 异步解析，逐 pass renderOnce 直到谓词
- *  成立（setup.waitFor* 在 scheduler idle 时会提前 break，不适合键入场景）。 */
+/** Polling frame waiter: mockInput bytes parse asynchronously through stdin,
+ *  so renderOnce each pass until the predicate holds (setup.waitFor* breaks
+ *  early when the scheduler is idle, unsuitable for typing). */
 async function untilFrame(
   setup: Awaited<ReturnType<typeof testRender>>,
   pred: (frame: string) => boolean,
@@ -117,13 +120,13 @@ test("视口窗口：rows 预算内有限可视行，超出部分不渲染", asy
   const frame = setup.captureCharFrame();
   expect(frame).toContain("搜索会话");
   expect(frame).toContain("会话列表");
-  // 行账 SSOT：视口 6 行（rows=11 → viewHeight=6）= 伪条目 + 5 会话可见。
+  // Row accounting SSOT: 6-row viewport (rows=11 → viewHeight=6) = pseudo-entry + 5 visible sessions.
   expect(frame).toContain("+ 新建会话");
   expect(frame).toContain("会话 00 的摘要");
   expect(frame).toContain("会话 04 的摘要");
-  // 第 6 个会话（index 5）起被视口裁掉。
+  // From the 6th session (index 5) on, rows are clipped by the viewport.
   expect(frame).not.toContain("会话 05 的摘要");
-  // 底部滚动指示出现。
+  // Bottom scroll indicator appears.
   expect(frame).toContain("↓ 更多");
   await setup.renderer.destroy();
 });
@@ -176,11 +179,11 @@ test("Esc 清空搜索（非返回）；再 Esc 返回聊天视图", async () =>
   await setup.renderOnce();
   await setup.mockInput.typeText("04");
   await untilFrame(setup, (f) => f.includes("会话 04 的摘要"));
-  // Esc → 清空搜索，全量回来，且未触发 onBack。
+  // Esc → clears the search, the full list returns, and onBack is not triggered.
   setup.mockInput.pressEscape();
   await untilFrame(setup, (f) => f.includes("会话 00 的摘要"));
   expect(backCalled).toBe(0);
-  // 再 Esc → 返回聊天。
+  // Esc again → back to the chat view.
   setup.mockInput.pressEscape();
   await untilFrame(setup, () => backCalled === 1);
   expect(backCalled).toBe(1);
@@ -201,19 +204,19 @@ test("Backspace 删除搜索字符", async () => {
 test("↑↓ 移出视口边缘翻页；Home/End 跳顶/跳底", async () => {
   const setup = await renderList(manyEntries, { rows: 11 });
   await setup.renderOnce();
-  // 初始视口 6 行（rows=11 → viewHeight=6）：伪条目 + 会话00..04。
+  // Initial viewport is 6 rows (rows=11 → viewHeight=6): pseudo-entry + sessions 00..04.
   let frame = setup.captureCharFrame();
   expect(frame).toContain("会话 00 的摘要");
   expect(frame).not.toContain("会话 05 的摘要");
-  // 连续 ↓ 越过视口下缘 → 触发翻页，光标到 index 8（会话07）。
+  // Repeated ↓ past the viewport bottom triggers paging; cursor reaches index 8 (session 07).
   for (let i = 0; i < 8; i++) setup.mockInput.pressArrow("down");
   frame = await untilFrame(setup, (f) => f.includes("会话 05 的摘要"));
   expect(frame).toContain("会话 07 的摘要");
-  // End → 跳底：末尾会话可见，底部指示消失。
+  // End → jump to bottom: last session visible, bottom indicator gone.
   setup.mockInput.pressKey("END");
   frame = await untilFrame(setup, (f) => f.includes("会话 19 的摘要"));
   expect(frame).not.toContain("↓ 更多");
-  // Home → 跳顶：回到 会话00，顶部指示消失。
+  // Home → jump to top: back to session 00, top indicator gone.
   setup.mockInput.pressKey("HOME");
   frame = await untilFrame(setup, (f) => f.includes("会话 00 的摘要"));
   expect(frame).not.toContain("↑ 更多");
@@ -223,11 +226,11 @@ test("↑↓ 移出视口边缘翻页；Home/End 跳顶/跳底", async () => {
 test("PageDown/PageUp 整页翻页（滚动指示随之出现 / 消失）", async () => {
   const setup = await renderList(manyEntries, { rows: 11 });
   await setup.renderOnce();
-  // viewHeight=6：PageDown 一次 → scrollTop=6，会话 05 起可见且顶部指示出现。
+  // viewHeight=6: one PageDown → scrollTop=6, sessions from 05 become visible and the top indicator appears.
   setup.mockInput.pressKey("\u001b[6~"); // PageDown
   let frame = await untilFrame(setup, (f) => f.includes("会话 06 的摘要"));
   expect(frame).toContain("↑ 更多");
-  // PageUp 回到顶。
+  // PageUp back to the top.
   setup.mockInput.pressKey("\u001b[5~"); // PageUp
   frame = await untilFrame(setup, (f) => f.includes("会话 00 的摘要"));
   expect(frame).not.toContain("↑ 更多");

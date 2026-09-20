@@ -1,9 +1,11 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/logo-persists.test.tsx — #343 T1：多帧渲染后 banner 眼字形仍在。
+ * tests/tui/logo-persists.test.tsx — the banner glyph survives multi-frame renders.
  *
- * 旧 ink 时代的回归语义：scrollback 重绘 / 多次 render 不应把启动 banner
- * 冲掉。OpenTUI 下连续 renderOnce 模拟多帧，逐帧断言眼字形与版本行存在。
+ * Regression semantics from the ink era: scrollback repaints / repeated
+ * renders must not wipe the startup banner. Under OpenTUI, consecutive
+ * renderOnce calls simulate multiple frames; each frame must still contain
+ * the glyph and the version line.
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";

@@ -1,5 +1,5 @@
 /**
- * T2 (#619 / spec session-jsonl-resume D7): 旧 JSON 在下一次 save 迁成 JSONL。
+ * Legacy `.json` sessions migrate to JSONL on the next save.
  *
  * Migration trigger point: SessionStore.save(). Save writes the
  * `<id>.jsonl` authority unconditionally, so a legacy-only `.json` session

@@ -2,11 +2,12 @@
 /**
  * tests/tui/model-picker.test.tsx
  *
- * /model 模型选择面板：reducer 纯函数 + 行账 + design-25 渲染 smoke。
+ * /model picker panel: reducer pure functions + row accounting + render smoke.
  *
- * 键位语义（spec SC8 + Glossary「/model(TUI)」条）：↑/↓ 移焦点（clamp）、
- * Enter 选定、Esc 关闭（无 cancel/放弃路径 —— 焦点移动不产生 staged 状态，
- * 故 Esc 既非「保存退出」也非「放弃修改」）、Space/Tab/←→ 忽略。
+ * Key semantics (Glossary 「/model(TUI)」 entry): ↑/↓ move focus (clamp),
+ * Enter selects, Esc closes (no cancel/discard path — focus moves stage
+ * nothing, so Esc is neither "save and quit" nor "discard changes"),
+ * Space/Tab/←→ ignored.
  */
 import { describe, expect, test } from "bun:test";
 import { Readable, Writable } from "node:stream";
@@ -165,10 +166,11 @@ describe("reduceModelPickerKey", () => {
   });
 
   test("注册表 ≥13 条：焦点恒在可见窗口内（↓ 到底不越界，游标不会走出渲染区）", () => {
-    // 渲染只出前 MODEL_PICKER_MAX_ROWS 项（13 条时第 13 项只在「…1 more」
-    // 计数里）。若 clamp 用 entryCount-1，一路按 ↓ 会把游标推到渲染区外 ——
-    // 看不见焦点，Enter 却作用在它上面。逐次按键走一遍并逐步校验。
-    const visible = MODEL_PICKER_MAX_ROWS; // 可见条目数（= 窗口上界）
+    // only the first MODEL_PICKER_MAX_ROWS entries render (with 13 entries the
+    // 13th only appears in the "…1 more" counter). If clamp used
+    // entryCount-1, holding ↓ would push the cursor out of the rendered area —
+    // invisible focus that Enter still commits. Step through keys and check each move.
+    const visible = MODEL_PICKER_MAX_ROWS; // rendered entry count (= window upper bound)
     let index = 0;
     for (let i = 0; i < 20; i++) {
       const action = reduceModelPickerKey(key({ downArrow: true }), {
@@ -177,20 +179,21 @@ describe("reduceModelPickerKey", () => {
       });
       expect(action.kind).toBe("move");
       index = action.kind === "move" ? action.index : index;
-      // 两条不变式：不越出可见窗口（游标有处可画）+ 指向的条目确实被渲染。
+      // two invariants: never leave the visible window (cursor has a place to draw) + the pointed entry is actually rendered.
       expect(index).toBeLessThan(visible);
       expect(index).toBeGreaterThanOrEqual(0);
     }
-    // 走到底停在窗口末项（11），而非隐藏的第 13 项（12）。
+    // walking to the bottom stops at the window's last item (11), not the hidden 13th (12).
     expect(index).toBe(visible - 1);
-    // 窗口外 seed（当前 model 正好是隐藏项）→ 任一方向键把焦点拉回可见区末项
-    // （clamp 幂等：越界下标无论从哪个方向按都停在窗口边缘）。
+    // seeding outside the window (current model happens to be hidden) → any
+    // arrow pulls focus back to the window's last item (clamp is idempotent:
+    // an out-of-range index stops at the window edge from either direction).
     for (const arrow of [{ downArrow: true }, { upArrow: true }] as const) {
       expect(
         reduceModelPickerKey(key(arrow), { focusedIndex: 12, entryCount: 13 })
       ).toEqual({ kind: "move", index: visible - 1 });
     }
-    // 空 / 单条注册表仍恒 0（窗口上界 ≥ 0，不为负）。
+    // empty / single-entry registries still pin to 0 (window upper bound ≥ 0, never negative).
     for (const entryCount of [0, 1]) {
       expect(
         reduceModelPickerKey(key({ downArrow: true }), {
@@ -203,7 +206,7 @@ describe("reduceModelPickerKey", () => {
 });
 
 describe("modelPickerRows（行账）", () => {
-  // 逐项列账：边框 2 + 标题 1 + 内容行 + 键位提示 1（与 memoryPickerRows 同款）。
+  // itemized accounting: borders 2 + title 1 + content rows + key hint 1 (same shape as memoryPickerRows).
   const CHROME = 2 + 1 + 1;
 
   test("1 条 → 边框 2 + 标题 1 + 内容 1 + 键位提示 1", () => {
@@ -236,17 +239,18 @@ describe("modelPickerRows（行账）", () => {
   });
 
   test("行账为逐项尺寸：1 条 = 边框 2 + 标题 1 + 内容 1 + overflow 0 + 提示 1 = 5", () => {
-    // 钉住真实分解值（非 CHROME 派生式）：marginBottom=1 由渲染盒声明、不入本
-    // 函数 —— 它由 chromeReserveRows 的 pickerRows 槽 +1 入账（tests/tui/
-    // chrome-budget.test.ts），故本值必须是 5 而非 6。
+    // pin the real decomposed value (not a CHROME-derived formula):
+    // marginBottom=1 is declared by the render box and excluded from this
+    // function — it is accounted by chromeReserveRows' pickerRows slot +1
+    // (tests/tui/chrome-budget.test.ts), so this value must be 5, not 6.
     expect(modelPickerRows(1)).toBe(5);
     expect(modelPickerRows(13)).toBe(13 - 12 + modelPickerRows(12));
   });
 });
 
-// -- 渲染 smoke（design-25 视觉，真实渲染器） ---------------------------------
+// -- render smoke (real renderer) ------------------------------------------------
 
-/** 测试专用 stdout（Writable + isTTY + columns/rows），不碰 process.stdout。 */
+/** Test-only stdout (Writable + isTTY + columns/rows); never touches process.stdout. */
 class TestWriteStream extends Writable {
   readonly isTTY = true;
   columns: number;
@@ -264,7 +268,7 @@ class TestWriteStream extends Writable {
   }
 }
 
-/** 打开 memory-buffered 真实渲染器并挂载 ModelPicker，返回一帧纯文本。 */
+/** Open a memory-buffered real renderer, mount ModelPicker, return one plain-text frame. */
 async function renderPickerText(
   state: ModelPickerState,
   cols = 80
@@ -314,8 +318,8 @@ describe("ModelPicker 渲染（design-25 视觉 smoke）", () => {
     expect(frame).toContain("minimax-cn/MiniMax-M3");
     expect(frame).toContain("volcengine-ark/deepseek-v3-250324");
     expect(frame).toContain("volcengine-ark/doubao-pro-256k");
-    expect(frame).toContain("╭"); // 圆角边框顶
-    expect(frame).toContain("╰"); // 圆角边框底
+    expect(frame).toContain("╭"); // rounded border top
+    expect(frame).toContain("╰"); // rounded border bottom
   });
 
   test("label 存在时附显示名；缺省时只渲染路由 ID", async () => {
@@ -341,7 +345,7 @@ describe("ModelPicker 渲染（design-25 视觉 smoke）", () => {
       .find((l) => l.includes("deepseek-v3-250324"));
     expect(focusedLine).toBeDefined();
     expect(focusedLine).toContain("▸ ");
-    // 焦点只此一处：其余条目行不带游标。
+    // focus exists in exactly one place: no other entry line carries the cursor.
     const cursorLines = frame
       .split("\n")
       .filter((l) => l.includes("▸ ") && l.includes("/"));

@@ -22,21 +22,23 @@ import {
 const scratchPaths: string[] = [];
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-// dist/ 是 gitignore 的构建产物，本文件不在测试体内自行 build（那是整项目
-// tsc，会与同批 fork 抢 CPU）。谁提供 dist：`npm test` 的 pretest 已先跑
-// 一次 `npm run build`；直跑 `npx vitest run <file>` 时由调用方先 build。
-// 真依赖 dist 的两条用例（bin 与 dist main 的启动面）在产物缺失时用
-// ctx.skip(note) 显式跳过并把原因上屏 —— dist 存在时必须真跑，skip 只
-// 认「产物不存在」这一个条件，不掩盖其他失败。
+// dist/ is a gitignored build artifact; this file does not build inside the test body
+// (that would be a full-project tsc competing for CPU with sibling forks). Who provides
+// dist: `npm test`'s pretest already runs `npm run build` first; when running
+// `npx vitest run <file>` directly, the caller builds first. The two cases that truly
+// depend on dist (the bin and dist-main startup faces) use ctx.skip(note) when the
+// artifact is missing, skipping explicitly and putting the reason on screen — when dist
+// exists they must really run; skip recognizes only "artifact absent" and hides no other failure.
 const distMainPath = join(repoRoot, "dist", "trace-mcp", "main.js");
 const distMissingNote =
   "dist/trace-mcp/main.js 不存在（dist/ 不随 checkout 存在）：" +
   "先跑 `npm run build`（`npm test` 已由 pretest 代为构建）。";
 
-// 这四条用例各自真 spawn 一个 node 进程（tsx 加载 / 进 dist），冷启动在负载
-// 机上可达数秒，vitest 默认 5s 会把正常冷启动误判成超时。给足预算而不是把
-// 超时当失败信号。上限取「进程就绪 + tools/list 往返」两段之和：test 级预算
-// 必须大于 helper 内等待响应的预算，否则先撞的是 helper 的 reject。
+// These four cases each spawn a real node process (tsx-loaded or dist); cold start can
+// take seconds on a loaded machine, and vitest's default 5s would misread a normal cold
+// start as timeout. Give a real budget instead of treating timeout as a failure signal.
+// The ceiling is "process ready + tools/list round-trip" summed: the test-level budget
+// must exceed the helper's in-body response wait, or the helper's reject fires first.
 const TOOLS_LIST_RESPONSE_TIMEOUT_MS = 20_000;
 const SPAWN_TEST_TIMEOUT_MS = 30_000;
 
@@ -74,8 +76,8 @@ describe("trace MCP startup", () => {
   it(
     "starts through the built package bin symlink and serves tools/list",
     async (ctx) => {
-      // bin 入口 scripts/iknow-trace-mcp.cjs 只做转发，真实入口是
-      // dist/trace-mcp/main.js —— 没有产物就没有可启动的服务。
+      // The bin entry scripts/iknow-trace-mcp.cjs only forwards; the real entry is
+      // dist/trace-mcp/main.js — no artifact, no service to start.
       ctx.skip(!existsSync(distMainPath), distMissingNote);
 
       const packageJson = JSON.parse(
@@ -104,8 +106,8 @@ describe("trace MCP startup", () => {
         const result = response.result as {
           tools?: Array<{ name?: string }>;
         };
-        // 建好的 stdio 进程真的把三件都端出来（in-process 那两条面测碰不到 dist）。
-        // 顺序即三轴顺序：目录 → 行 → 内容。
+        // The spawned stdio process really serves all three (the in-process face tests never touch dist).
+        // Order is the three-axis order: catalog → row → content.
         expect(result.tools?.map((tool) => tool.name)).toEqual([
           "list_sessions",
           "query_trace",
@@ -121,7 +123,7 @@ describe("trace MCP startup", () => {
   it(
     "starts when the built main module is invoked through a symlink",
     async (ctx) => {
-      // 这条面测的就是构建产物本身（symlink 只是调用形态）。
+      // This face test targets the build artifact itself (the symlink is just an invocation form).
       ctx.skip(!existsSync(distMainPath), distMissingNote);
 
       const mainPath = distMainPath;
@@ -183,8 +185,8 @@ describe("trace MCP startup", () => {
   it(
     "serves tools/list through the dev wrapper from any cwd (T8)",
     async () => {
-      // plan `trace-mcp-read-side-split` T8: `.iknow/mcp.json` invokes the MCP
-      // server through `scripts/iknow-trace-mcp-dev.cjs`. That wrapper resolves
+      // `.iknow/mcp.json` invokes the MCP server through
+      // `scripts/iknow-trace-mcp-dev.cjs`. That wrapper resolves
       // both the script directory and the trace directory relative to itself,
       // so the host's cwd does not enter the equation. This test spawns the
       // wrapper from a foreign cwd (an empty temp dir) and asserts the same
@@ -219,7 +221,7 @@ describe("trace MCP startup", () => {
         const result = response.result as {
           tools?: Array<{ name?: string }>;
         };
-        // 三轴顺序：目录 → 行 → 内容。
+        // Three-axis order: catalog → row → content.
         expect(result.tools?.map((tool) => tool.name)).toEqual([
           "list_sessions",
           "query_trace",

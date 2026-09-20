@@ -1,17 +1,17 @@
 /**
  * tests/tui/rules-discovery-bun.test.ts
  *
- * bun 回归测试（D2 裁决：tests/tui 由 bun:test 驱动）：rules 发现对缺失目录
- * 的容忍契约在 **bun 运行时** 下必须成立。
+ * bun regression: rules discovery must tolerate missing directories under the
+ * **bun runtime** too (tests/tui runs on bun:test).
  *
- * 根因背景：bun 的 `fs.promises.opendir` 是 lazy 的——目录不存在时 opendir
- * 本身不抛（Node 下 eager 抛），ENOENT（syscall "scandir"）在 `for await`
- * 迭代 Dir 时才浮出。discovery.ts 的 safeDir 若只 guard opendir，bun 下
- * `listRulesFiles(<missing>)` 会把 ENOENT 炸进 buildTuiDeps 装配链 →
- * `bun test tests/tui/` 15 个 buildTuiDeps 测试集体失败（master 级
- * pre-existing，2026-09-06 基线确证）。契约本身见
- * tests/harness/memory/discovery.test.ts（vitest/node 侧同名用例）：
- * 缺失 rules 目录 = 空规则集，不抛。
+ * Root cause: bun's `fs.promises.opendir` is lazy — a nonexistent directory
+ * does not throw at opendir itself (Node throws eagerly); the ENOENT (syscall
+ * "scandir") only surfaces while `for await` iterates the Dir. If safeDir in
+ * discovery.ts guarded only opendir, `listRulesFiles(<missing>)` would blow
+ * ENOENT into the buildTuiDeps assembly chain → all 15 buildTuiDeps tests in
+ * `bun test tests/tui/` fail together (pre-existing on master). The contract
+ * itself lives in tests/harness/memory/discovery.test.ts (vitest/node side,
+ * same cases): a missing rules dir = empty rule set, no throw.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -25,7 +25,7 @@ describe("listRulesFiles — 缺失目录容忍（bun lazy opendir 回归）", (
   test("user scope：userHome 不存在 → 空数组，不抛", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-rules-bun-"));
     roots.push(root);
-    // <root>/home 从不创建 —— 整个 userHome 缺席
+    // <root>/home is never created — the whole userHome is absent
     const out = await listRulesFiles(join(root, "home"), "user");
     expect(out).toEqual([]);
   });

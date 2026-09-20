@@ -1,17 +1,18 @@
 /**
  * tests/tui/deps-isolation.test.ts
  *
- * Review High-1 / High-2 (2026-08-29, plans/worktree-isolation-on-mutate.md):
- * TUI 入口（buildTuiDeps → buildHarnessEngine）必须与 serve hub 的两条装配
- * 路径行为一致：
- *   - High-1: opts.worktreeIsolation（host provision 缝）透传到 build-engine
- *     → 开关 ON 时 mutate 被门禁拦截（首个 mutate 不落主仓），不再是「TUI
- *     入口零拦截直写」。
- *   - High-2: opts.settings（启动装配的 IknowSettings 对象）透传 → 开关读取
- *     用启动装配结果；rebind 后 per-root 重建的引擎复用同一对象（run.tsx 的
- *     buildEngine 缝复用同一 depsOpts），worktree 内 `.iknow/` 缺席也绝不
- *     隐式重载 settings（硬要求 9）。
- * bun:test（tests/tui 由 bun 驱动，D2 裁决）。
+ * The TUI entry (buildTuiDeps → buildHarnessEngine) must match the serve hub's
+ * two assembly paths:
+ *   - opts.worktreeIsolation (the host provision seam) passes through to
+ *     build-engine → with the switch ON, mutate is gated (the first mutate does
+ *     not land in the main repo), no longer "TUI entry writes straight through
+ *     with zero gating".
+ *   - opts.settings (the IknowSettings object assembled at startup) passes
+ *     through → switch reads use the startup assembly result; after rebind, the
+ *     per-root rebuilt engine reuses the same object (run.tsx's buildEngine seam
+ *     reuses the same depsOpts), so a missing `.iknow/` inside the worktree must
+ *     never implicitly reload settings.
+ * bun:test (tests/tui is driven by bun).
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -23,7 +24,7 @@ import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 import type { IknowSettings } from "../../src/config/settings.js";
 
-/** 最小合法 RuntimeBundle（与 deps-tools.test.ts 同形；只读 env 字段）。 */
+/** Minimal valid RuntimeBundle (same shape as deps-tools.test.ts; reads only the env field). */
 function makeBundle(): RuntimeBundle {
   const env: IknowEnv = {
     llm: {
@@ -70,12 +71,12 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
       askUser: createNoAskUser(),
       userHome: join(root, "home"),
       cwd: root,
-      // High-2：启动装配的 settings 对象（isolation ON）注入
+      // settings object assembled at startup (isolation ON) injected
       settings: { isolation: { worktreeOnMutate: true } } as IknowSettings,
       worktreeIsolation: {
         provision: async ({ conversationId, root: sessionRoot }) => {
           calls.push({ conversationId, root: sessionRoot });
-          // 模拟 rebind：返回与引擎根不同的 task worktree 路径 → 拦截
+          // simulate rebind: return a task worktree path distinct from the engine root → gate
           return join(
             sessionRoot,
             ".iknow",
@@ -95,12 +96,13 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
 
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
-    // T3 model-provision 契约：主仓 unbound mutate 直接拦截，gate NEVER
-    // provisions —— 建 task worktree 是模型的职责（create-worktree
-    // ACI 工具），block 文案必须指向它。
+    // model-provision contract: an unbound mutate in the main repo is gated
+    // directly, the gate NEVER provisions — creating the task worktree is the
+    // model's job (the create-worktree ACI tool), so the block message must
+    // point at it.
     expect(calls).toEqual([]);
     expect(result.message).toContain("create-worktree");
-    // 主仓零写入（门禁拦截在工具执行前）
+    // zero writes to the main repo (gating happens before tool execution)
     expect(await Bun.file(join(root, "hello.txt")).exists()).toBe(false);
   });
 
@@ -149,7 +151,7 @@ describe("buildTuiDeps — T6 productRoot passthrough (worktree-mcp-rebind-lifec
     );
     expect(depsSrc).toMatch(/readonly productRoot\?:\s*string/);
     expect(depsSrc).toMatch(/opts\.productRoot/);
-    // reload 不得再用裸 cwd 当 mcpConfigRoot
+    // reload must not use the bare cwd as mcpConfigRoot again
     const reloadIdx = depsSrc.indexOf("const reload");
     expect(reloadIdx).toBeGreaterThanOrEqual(0);
     const reloadBlock = depsSrc.slice(reloadIdx, reloadIdx + 400);

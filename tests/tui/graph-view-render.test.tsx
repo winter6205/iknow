@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/react */
 /**
- * run_graph chrome / 分组视图渲染（spec SC1 / SC2 A7-A8）。
- * 测真实 panel 投影，不 grep app.tsx 源码。
+ * run_graph chrome / grouped-view rendering.
+ * Tests the real panel projection; does not grep app.tsx source.
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";

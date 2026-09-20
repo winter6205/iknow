@@ -11,21 +11,25 @@ import { createSubAgentMailbox } from "../../src/harness/subagent/mailbox.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 /**
- * plans/session-fg-handoff-interrupt Locked sentence 3 / T5 ——
- * `SessionHub.abortSessionForegroundWork` 的扇出语义（SSOT 层）。
+ * `SessionHub.abortSessionForegroundWork` fan-out semantics (SSOT layer).
  *
- * 命题（每条对应票面验收的一个面）：
- *   - 只扇 `conversationId` 本会话的行（其它会话的前景 worker 不动）；
- *   - 只扇 `foreground === true` 的行（`wait:false` 后景不动 —— 该标志是
- *     「父侧 in-band 等待」population，Postel：false / 缺席一律不杀）；
- *   - 只扇 live（starting | running）行，且返回值是**真正**被 abort 的
- *     taskId（abortTask 返回 false 的竞态终态不列入）；
- *   - 返回本会话 live 前景 taskId，供调用方归因。
+ * Propositions:
+ *   - Only rows of `conversationId`'s own conversation are fanned out
+ *     (foreground workers of other conversations stay untouched);
+ *   - Only `foreground === true` rows are fanned out (`wait:false`
+ *     background stays untouched — the flag marks the "parent-side in-band
+ *     wait" population; Postel: false / absent are never killed);
+ *   - Only live (starting | running) rows are fanned out, and the return
+ *     value is the **actually** aborted taskIds (race-terminal rows where
+ *     abortTask returned false are excluded);
+ *   - Returns this conversation's live foreground taskIds for caller
+ *     attribution.
  *
- * 为什么用真 SessionHub（而不是 fake）：hub 的 conversationId 解析 +
- * 无 manager 空数组语义是产品路径的一部分；manager fake 只保留本票不测的
- * 部分（spawn / waitFor）。真 manager 的 abortTask 行为归
- * tests/subagent/manager.test.ts。
+ * Why a real SessionHub (not a fake): hub's conversationId resolution plus
+ * the no-manager empty-array semantics are part of the product path; the
+ * manager fake only covers what this layer does not test (spawn /
+ * waitFor). Real manager abortTask behavior belongs to
+ * tests/subagent/manager.test.ts.
  */
 
 interface ManagerRig {
@@ -126,8 +130,9 @@ describe("abortSessionForegroundWork — 本会话前景扇出", () => {
     const { hub, baseDir } = await makeHub(rig);
     dirs.push(baseDir);
 
-    // hub 层不看父 turn 的 runState（那是 app 的字段）；这里钉的是
-    // 「无父 aborter 在场时扇出仍然工作」的下半段契约。
+    // The hub layer does not inspect the parent turn's runState (that is an
+    // app field); this pins the lower half of the contract: fan-out still
+    // works with no parent aborter present.
     expect(hub.abortSessionForegroundWork("conv-a")).toEqual(["late"]);
     expect(rig.abortCalls).toEqual(["late"]);
   });
@@ -182,16 +187,19 @@ describe("abortSessionForegroundWork — 本会话前景扇出", () => {
   });
 
   it("judge / graph-node 同 population（role 在场）→ 同一扇出命中，无 role carve-out", async () => {
-    // 票面明示：扇出选中**全部** foreground 行，judge / graph-node 不豁免。
-    // 它们的 def 与 wait:true 的 spawn_subagent 同走 excludeFromHostDrain
-    // （manager.ts 的 foreground 注释），故此处以 role 在场但 conversationId
-    // 在场的行钉「选目标只看 foreground，不看 role」。
+    // The fan-out selects **all** foreground rows; judge / graph-node are
+    // not exempt. Their defs share excludeFromHostDrain with wait:true
+    // spawn_subagent (see manager.ts's foreground comment), so rows here
+    // carry role + conversationId to pin "target selection looks only at
+    // foreground, never at role".
     //
-    // 结构性边界（不在本方法内可修）：生产里 judge
-    // (run-classifier-adapter.ts) 与 graph-node (graph/node-executor.ts) 的
-    // def **不填 conversationId**，因此会话作用域的 listSubagents(id) 看不见
-    // 它们 —— 那不是 role carve-out，而是上游缺 conversationId 传播。修它要
-    // 动 harness/graph + harness/verify（本票 ownership 之外）。
+    // Structural boundary (not fixable inside this method): in production,
+    // judge (run-classifier-adapter.ts) and graph-node (graph/
+    // node-executor.ts) defs do NOT fill conversationId, so
+    // conversation-scoped listSubagents(id) cannot see them — that is not a
+    // role carve-out but missing upstream conversationId propagation.
+    // Fixing it would touch harness/graph + harness/verify, outside this
+    // test's ownership.
     const rig = makeManagerRig([
       info("judge", {
         state: "running",

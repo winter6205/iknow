@@ -2,13 +2,13 @@
 /**
  * tests/tui/run-stats.test.ts
  *
- * mode 行右侧运行时长 + 压缩耗时纯函数单测（run-stats.ts）。
+ * Unit tests for the pure formatters behind the run duration (right side of the mode line) + compaction time (run-stats.ts).
  */
 import { describe, expect, test } from "bun:test";
 import { formatCrunched, formatRunDuration } from "../../src/tui/run-stats.js";
 
-// M1 fixup：本 describe 与 subagent-panel 投影共用 `formatRunDuration` 单源 —
-// panel 的 formatElapsedSec 已删除（此前字节重复），其边界用例并入本块保持覆盖。
+// this describe and the subagent-panel projection share one `formatRunDuration` source —
+// the panel's formatElapsedSec was deleted (byte duplicate before), its boundary cases merged here to keep coverage.
 describe("formatRunDuration（subagent-panel 投影共用 SSOT）", () => {
   test("不足 1 分钟：仅秒", () => {
     expect(formatRunDuration(0)).toBe("0s");

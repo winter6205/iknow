@@ -1,8 +1,9 @@
 /**
- * tests/tui/pangu.test.ts — panguSpacing 纯函数单测（bun:test）。
+ * tests/tui/pangu.test.ts — panguSpacing pure-function unit tests (bun:test).
  *
- * 覆盖：CJK ↔ ASCII 字母数字边界插半角空格、幂等、纯中文/纯英文不变、
- * 空/空白输入、en dash 不拆、全角标点旁不插。
+ * Coverage: half-width space insertion at CJK ↔ ASCII alnum boundaries,
+ * idempotence, pure-Chinese/pure-English unchanged, empty/whitespace input,
+ * en dash not split, no insertion beside full-width punctuation.
  */
 import { expect, test } from "bun:test";
 import {
@@ -10,7 +11,7 @@ import {
   panguSpacingKeepingCodespans,
 } from "../../src/tui/pangu.js";
 
-// ── 正常路径：CJK ↔ ASCII 字母/数字边界插空格 ───────────────────────
+// ── happy path: insert space at CJK ↔ ASCII letter/digit boundaries ───────
 
 test("中文与数字相邻：美股4月 → 美股 4 月", () => {
   expect(panguSpacing("美股4月")).toBe("美股 4 月");
@@ -24,7 +25,7 @@ test("双向边界：价格是100元 → 价格是 100 元", () => {
   expect(panguSpacing("价格是100元")).toBe("价格是 100 元");
 });
 
-// ── 幂等：已有空格不重复插 ──────────────────────────────────────────
+// ── idempotent: existing spaces are not duplicated ────────────────────────
 
 test("幂等：美股 4 月 保持不变", () => {
   expect(panguSpacing("美股 4 月")).toBe("美股 4 月");
@@ -35,7 +36,7 @@ test("幂等：重复调用结果不变", () => {
   expect(panguSpacing(once)).toBe(once);
 });
 
-// ── 不变输入：纯中文 / 纯英文 / 空 ──────────────────────────────────
+// ── unchanged input: pure Chinese / pure English / empty ──────────────────
 
 test("纯中文不变", () => {
   expect(panguSpacing("今天天气很好")).toBe("今天天气很好");
@@ -53,13 +54,13 @@ test("纯空白原样返回", () => {
   expect(panguSpacing("   \t\n ")).toBe("   \t\n ");
 });
 
-// ── 边界：en dash 不拆，只在 CJK 边界插 ─────────────────────────────
+// ── boundary: en dash not split, insert only at CJK edges ─────────────────
 
 test("en dash 范围不拆：4–6月 → 4–6 月", () => {
   expect(panguSpacing("4–6月")).toBe("4–6 月");
 });
 
-// ── 全角标点旁不插空格 ──────────────────────────────────────────────
+// ── no space insertion beside full-width punctuation ───────────────────────
 
 test("全角标点（。，、「」）旁不插空格", () => {
   expect(panguSpacing("结束。好的、很好「测试」，就这样")).toBe(
@@ -71,7 +72,7 @@ test("标点与 ASCII 混合：只在 CJK 边界插", () => {
   expect(panguSpacing("价格是100。")).toBe("价格是 100。");
 });
 
-// ── CJK 字符类覆盖：扩展 A / 兼容表意 / 〇；不含全角字母数字 ────────
+// ── CJK char-class coverage: Ext-A / compatibility ideographs / 〇; full-width alnum excluded ──
 
 test("〇（U+3007）参与边界插空格", () => {
   expect(panguSpacing("公元〇年abc")).toBe("公元〇年 abc");
@@ -85,7 +86,7 @@ test("全角字母数字（ＡＢＣ１２３）不视为 ASCII，不插空格",
   expect(panguSpacing("美股１２３月")).toBe("美股１２３月");
 });
 
-// ── codespan 保护：blockquote 原始行专用（行内 `...` 段不碰）─────────
+// ── codespan protection: blockquote raw lines only (inline `...` spans untouched) ──
 
 test("codespan 保护：codespan 内不插，外围照常插", () => {
   expect(panguSpacingKeepingCodespans("涨幅10元 `中a文123` 尾注2行")).toBe(

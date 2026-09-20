@@ -1,14 +1,15 @@
 /**
- * #361 / ADR-0014 Decision 6 验收 — subagent 工具 trace 落点 (e2e stub-model)。
+ * ADR-0014 Decision 6 acceptance — subagent tool trace landing (e2e stub-model).
  *
- * 链路同 tests/e2e/subagent-acceptance.test.ts:buildHarnessEngine (surface=chat)
- * + 注入 fake subagent manager + JsonlTraceService。stub-model turn 1 给
- * tool_use(spawn_subagent, wait:false) → 真实 tool handler → fake manager 同步
- * 返 task_id → 关闭。turn 2 stub model final。解析 JSONL 断言:
- *   1. 出现 tool_call 行,tool_name === "spawn_subagent";
- *   2. 出现 llm_call 行,messages_captured=true,messages 数组非空。
+ * Same chain as tests/e2e/subagent-acceptance.test.ts: buildHarnessEngine
+ * (surface=chat) + injected fake subagent manager + JsonlTraceService.
+ * stub-model turn 1 yields tool_use(spawn_subagent, wait:false) → real tool
+ * handler → fake manager returns task_id synchronously → close. Turn 2 stub
+ * final. Parse the JSONL and assert:
+ *   1. a tool_call line with tool_name === "spawn_subagent" appears;
+ *   2. llm_call lines with messages_captured=true and a non-empty messages array appear.
  *
- * 不依赖真 LLM key(`npm test` 可跑)。
+ * No real LLM key required (`npm test` covers it).
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -48,9 +49,9 @@ function makeEnv(apiKey: string): IknowEnv {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connection timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    // Subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
   };
 }
@@ -79,7 +80,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       await rm(traceDir, { recursive: true, force: true });
     });
 
-    // fake spawn: node -e stdout 立即吐一个 ok envelope
+    // fake spawn: node -e writes one ok envelope to stdout immediately
     const fakeOkEnvelope = JSON.stringify({
       status: "ok",
       summary: "hello from fake subagent",
@@ -103,25 +104,28 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
-      // 本文件验 subagent trace 接入,不验溢出退场 / 索引降档(专测见
-      // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies subagent trace wiring, not overflow eviction or
+      // index downgrade (dedicated tests: build-engine-tool-overflow.test.ts,
+      // disclosure-index-align/). countTokens bypassed during wiring; seam
+      // semantics are on BuildEngineOpts.skipCountTokens.
       skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // JsonlTraceService 接入 buildHarnessEngine 已有的 deps(ACI/registry 同款)。
-    // 把 trace 覆盖到 deps 上,确保 run() 内 recordLlmCall / recordToolCall 走它。
+    // Attach JsonlTraceService to buildHarnessEngine's existing deps (same
+    // pattern as ACI/registry). Override trace on deps so recordLlmCall /
+    // recordToolCall inside run() go through it.
     const trace = createJsonlTraceService({
       filePath: traceDir,
       conversationId: "subagent-foreground-trace",
     });
     const deps: LoopEngineDeps = { ...built.deps, trace };
 
-    // stub-model: turn1 给 tool_use(spawn_subagent, wait:false);turn2 给 final
-    // text。后景臂 = 信封仍走 host drain(前景 wait:true 的通道互斥另测)。
+    // stub-model: turn1 yields tool_use(spawn_subagent, wait:false); turn2
+    // final text. Background arm = envelopes still go through host drain
+    // (foreground wait:true channel exclusion is tested separately).
     const innerStub = createStubModel({
       responses: [
         assistantResult({
@@ -149,15 +153,15 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     assert.equal(t1.stopReason, "completed");
     assert.equal(t1.finalText, "drained result seen by model");
 
-    // wait:false 立即返 {task_id},run() 可能在 fake binary 吐信封之前就收尾。
-    // 同步契约见 tests/_helpers/await-terminal.ts（不拿 drain 读侧当同步,
-    // 那是本 file 的断言对象）。
+    // wait:false returns {task_id} at once, so run() may finish before the fake binary emits.
+    // Sync contract: tests/_helpers/await-terminal.ts (using the drain read
+    // side as sync would defeat what this file asserts).
     await awaitAllTasksTerminal(fakeMgr);
 
     const drained = await drainPendingSubagents(fakeMgr);
     assert.ok(drained.length > 0, "background task should be drained");
 
-    // 解析 JSONL
+    // Parse the JSONL
     const jsonlPath = join(traceDir, "subagent-foreground-trace.jsonl");
     const lines = parseJsonlFile(jsonlPath);
     assert.ok(lines.length >= 2, "expected llm_call + tool_call minimum");
@@ -167,7 +171,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     assert.equal(toolCalls.length, 1);
     assert.equal(toolCalls[0]!["tool_name"], "spawn_subagent");
 
-    // 2. llm_call(messages_captured=true, messages 非空)
+    // 2. llm_call(messages_captured=true, non-empty messages)
     const llmCalls = lines.filter((l) => l["record_type"] === "llm_call");
     assert.ok(llmCalls.length >= 2);
     for (const llm of llmCalls) {
@@ -207,7 +211,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
-      skipCountTokens: true, // 同上:验 trace drain,不验溢出 / 索引降档。
+      skipCountTokens: true, // same as above: trace/drain only, not overflow / index downgrade.
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
@@ -243,20 +247,23 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     const { result } = await run("go", { ...deps, adapter });
     assert.equal(result.stopReason, "completed");
 
-    // wait:false 不阻塞 run;等 fake binary emit 完成再读 drain。
-    // 同步契约见 tests/_helpers/await-terminal.ts。
+    // wait:false does not block run; wait for the fake binary to finish emitting before reading drain.
+    // Sync contract: tests/_helpers/await-terminal.ts.
     await awaitAllTasksTerminal(fakeMgr);
 
     const drained = await drainPendingSubagents(fakeMgr);
-    // 本行钉的是**后景臂**(wait:false):host drain 仍把浓缩信封交出、并写进
-    // 下一轮 run() 的 priorMessages(chat-session.ts 同款拼法)。前景臂
-    // (wait:true) 当跳 tool_result 交付、不进 drain,由
-    // tests/subagent/foreground-drain-exclusion.test.ts 覆盖,此处不重复。
+    // This line pins the **background arm** (wait:false): host drain still
+    // hands over the condensed envelope and writes it into the next run()'s
+    // priorMessages (same splice as chat-session.ts). The foreground arm
+    // (wait:true) delivers via the same-step tool_result and never enters
+    // drain — covered by
+    // tests/subagent/foreground-drain-exclusion.test.ts, not repeated here.
     assert.ok(drained.length > 0, "background task should still be drained");
 
-    // 模拟 chat-session.ts 在下一轮 run() 之前把 drained 拼入 priorMessages。
-    // 不再发模型调用 —— 仅断言 priorMessages 流经 host drain 后仍可被
-    // 下一次 run() 消费。tool_name 落 trace 在前一个测试已覆盖。
+    // Mimic chat-session.ts splicing drained into priorMessages before the next run().
+    // No further model call — only assert priorMessages, after flowing through
+    // host drain, remain consumable by the next run(). tool_name landing is
+    // already covered by the previous test.
     const priorMessages: LoopState["messages"] = [
       { role: "user", content: [{ type: "text", text: drained }] },
     ];

@@ -1,20 +1,22 @@
 /**
- * env.ts thinking/effort env read + 非法值回退 (#151 T4)。
+ * env.ts thinking/effort env reads + fallback on invalid values.
  *
- * 验证 IKNOW_LLM_THINKING / IKNOW_LLM_THINKING_EFFORT 的解析:
- *  - 默认 off / 空 effort;
- *  - 合法值原样透传;
- *  - 非法值回退(THINKING 非法 → off;EFFORT 非法 → 空)。
+ * Verifies parsing of IKNOW_LLM_THINKING / IKNOW_LLM_THINKING_EFFORT:
+ *  - default off / empty effort;
+ *  - legal values pass through unchanged;
+ *  - invalid values fall back (THINKING invalid → off; EFFORT invalid → empty).
  *
- * 不构造真实 .env 文件,直接通过 process.env 控制输入(loadIknowEnv 读
- * process.env > .env.local > .env;此处只设 process.env,无需 .env)。
+ * No real .env file is constructed; inputs go through process.env directly
+ * (loadIknowEnv reads process.env > .env.local > .env; only process.env is set here).
  *
- * 末尾追加 ADR-0093 provider 解析组（`llm.providers` 唯一 LLM 承载 +
- * apiKeyEnv 缺席 typed 抛）：provider 路径的 key **只读 process.env**，
- * 不走 fileMap（该组单独写 `.env.local` 负例钉这一点）。
+ * The appended ADR-0093 provider group pins: `llm.providers` is the sole LLM
+ * carrier + typed throw when apiKeyEnv is absent. The provider path reads the key
+ * from **process.env only**, never from fileMap (that group writes a separate
+ * `.env.local` negative case to pin this).
  *
- * compress 组另钉 ADR-0100：缺省 **策略预算窗口** = 256000，且 TUI 与 health
- * 的显示分母缺省引用同一常量（不得各写一份数字）。
+ * The compress group additionally pins ADR-0100: the default **strategy budget
+ * window** = 256000, and the TUI and health display denominators reference the
+ * same default constant (no duplicated literals).
  */
 
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -38,10 +40,12 @@ import {
 } from "../../src/config/settings.ts";
 
 /**
- * #353 review: 既有 env 测试不测 settings，统一注入最小 settings 以隔离
- * 真实 `~/.iknow/settings.json` / `<cwd>/.iknow/settings.json`（避免本地配置
- * 污染导致断言非确定）。loadIknowEnv 传 settings 时跳过文件读取。
- * 含最小 `llm.model`（env loader fail-fast：model 必须有来源，否则 loader 抛错）。
+ * Existing env tests do not read settings: inject a minimal settings to isolate
+ * the real `~/.iknow/settings.json` / `<cwd>/.iknow/settings.json` (local config
+ * pollution would make assertions non-deterministic). When loadIknowEnv is passed
+ * settings it skips file reads.
+ * Includes a minimal `llm.model` (env loader fail-fast: model must have a source,
+ * otherwise the loader throws).
  */
 const TEST_LLM_PROVIDER = {
   id: "test",
@@ -68,17 +72,17 @@ const ENV_KEYS = [
   "IKNOW_LLM_THINKING",
   "IKNOW_LLM_THINKING_EFFORT",
   "IKNOW_CHAT_SHOW_THINKING",
-  // #179 T6: streaming arm env (default on, invalid → on).
+  // streaming arm env (default on, invalid → on).
   "IKNOW_LLM_STREAM",
   "IKNOW_WEB_SEARCH_URL",
-  // #119 T1: compression config env keys.
+  // compression config env keys.
   "IKNOW_MODEL_CONTEXT_WINDOW",
   "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
-  // plan T5: maxTurns env (optional int; unset → undefined = 无限).
+  // maxTurns env (optional int; unset → undefined = unlimited).
   "IKNOW_LLM_MAX_TURNS",
-  // #378 根因 B: MCP 连接超时 env (int; 非法 → fallback 60_000)。
+  // MCP connect timeout env (int; invalid → fallback 60_000).
   "IKNOW_MCP_CONNECT_TIMEOUT_MS",
-  // #358 T1: settings 双字段通道 — llm.timeoutMs (per-call) + subagent.taskTimeoutMs (per-task)。
+  // settings dual-field channel — llm.timeoutMs (per-call) + subagent.taskTimeoutMs (per-task).
   "IKNOW_LLM_TIMEOUT_MS",
   "IKNOW_LLM_IDLE_TIMEOUT_MS",
   "IKNOW_LLM_HARD_CAP_MS",
@@ -263,9 +267,11 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
   });
 
   it("缺省分母与 auto-compact 闸同源 (ADR-0100):未设 env/settings → 256000 与 floor(0.95×256000)", () => {
-    // CONTEXT **策略预算窗口** / **auto-compact token gate**:显示分母与闸问同一
-    // 数字。三处缺省（env 派生值 / TUI ContextBar / health 投影）各写一份字面量
-    // 时，任何一处漂移都会让「显示 95% 却还没压缩」这类不一致重新出现。
+    // CONTEXT **strategy budget window** / **auto-compact token gate**: the display
+    // denominator and the gate consult the same number. If the three defaults (env
+    // derived value / TUI ContextBar / health projection) each wrote their own
+    // literal, drift in any one would reintroduce inconsistencies like
+    // "display shows 95% but compaction hasn't fired".
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, DEFAULT_STRATEGY_CONTEXT_WINDOW);
     assert.equal(TUI_DEFAULT_CONTEXT_WINDOW, DEFAULT_STRATEGY_CONTEXT_WINDOW);
@@ -670,7 +676,7 @@ describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
 });
 
 describe("loadIknowEnv — maxOutputTokens default", () => {
-  // 默认值选 32000 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
+  // Full rationale for the 32000 default: see the fallback comment in src/config/env.ts.
   beforeEach(() => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
@@ -877,9 +883,10 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   });
 
   it("未传 settings 时自动读取用户层 .iknow/settings.json（真实文件集成）", async () => {
-    // ADR-0084：llm 属用户层键 → 只有 <home>/.iknow/settings.json 是配置来源；
-    // 项目文件里的 llm 被允许名单丢弃。home 须显式注入：POSIX 上 os.homedir()
-    // 确实跟随 $HOME，靠它虽能工作但隐式、易被破坏（见 loader 注释）。
+    // ADR-0084: llm is a user-layer key → only <home>/.iknow/settings.json is a
+    // config source; llm in the project file is dropped by the allowlist. home must
+    // be injected explicitly: on POSIX os.homedir() does follow $HOME, which works
+    // but is implicit and easy to break (see loader comment).
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-"));
     const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-settings-home-"));
     const settingsDir = join(tmpHome, ".iknow");
@@ -895,7 +902,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
         },
       })
     );
-    // 项目文件同时在场且 llm 值不同 → 必须被丢弃，不参与 env。
+    // Project file present at the same time with different llm values → must be dropped, not entering env.
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
@@ -975,8 +982,9 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     );
 
     try {
-      // llm 是用户层键：项目文件不再覆盖 user（旧 ADR-0015 project > user
-      // 对 llm 已退役）；显式注入 home 让 user 文件真实参与装配。
+      // llm is a user-layer key: the project file no longer overrides user (the old
+      // ADR-0015 project > user is retired for llm); inject home explicitly so the
+      // user file genuinely participates in assembly.
       const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
       assert.equal(env.llm.model, "test/user-model");
     } finally {
@@ -997,16 +1005,16 @@ describe("loadIknowEnv — settings merge (#353)", () => {
         providers: [TEST_LLM_PROVIDER],
       },
     });
-    // 非法 env = 未设（envOptionalInt/envInt 回退纪律），继续走 settings 回退。
+    // Invalid env = unset (envOptionalInt/envInt fallback discipline); continue via settings fallback.
     assert.equal(env.llm.maxTurns, 33);
     assert.equal(env.compress.contextWindow, 330000);
     assert.equal(env.compress.thresholdTokens, 220000);
   });
 
   it("settings 值经 loadIknowEnv 进入装配入口（serve/hub/runtime 同源）", async () => {
-    // serve.ts:88 / hub.ts:762 / runtime.ts:52 均直接调 loadIknowEnv()，
-    // settings 自动读取后经同一链路流入 LoopEngineDeps / HealthResponse。
-    // ADR-0084：llm 为用户层键 → fixture 写 <home>/.iknow/settings.json。
+    // serve.ts / hub.ts / runtime.ts all call loadIknowEnv() directly, so settings
+    // read from file flow through the same path into LoopEngineDeps / HealthResponse.
+    // ADR-0084: llm is a user-layer key → the fixture writes <home>/.iknow/settings.json.
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-serve-settings-"));
     const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-serve-home-"));
     await mkdir(join(tmpHome, ".iknow"), { recursive: true });
@@ -1025,7 +1033,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
       assert.equal(env.llm.maxTurns, 9);
       assert.equal(env.compress.contextWindow, 900000);
-      // thresholdTokens 未设 → undefined（proactive compact 关）。
+      // thresholdTokens unset → undefined (proactive compact off).
       assert.equal(env.compress.thresholdTokens, undefined);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
@@ -1204,15 +1212,16 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
   });
 
   it("settings.llm.fallback 非法值由 settings 层丢弃，env 侧回退 []", async () => {
-    // 经真实 settings 文件链路：fallback 非法数组在 parseLlm 被丢弃
-    // （drop-not-throw）→ mergedSettings.llm.fallback 缺席 → env.llm.fallback = []。
-    // 隔离 home（loadIknowEnv 显式传 emptyHome），避免真实 ~/.iknow/settings.json
-    // 的 fallback 泄漏进断言（#395 引入 home 注入缝，#406 复用）。
+    // Through the real settings-file path: an invalid fallback array is dropped in
+    // parseLlm (drop-not-throw) → mergedSettings.llm.fallback absent → env.llm.fallback = [].
+    // Isolate home (loadIknowEnv gets an explicit emptyHome) so a fallback leaking
+    // from the real ~/.iknow/settings.json cannot pollute the assertion (home
+    // injection seam introduced here and reused since).
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
     await mkdir(join(emptyHome, ".iknow"), { recursive: true });
-    // ADR-0084：llm 为用户层键 → 非法 fallback 的承载文件是 user settings。
+    // ADR-0084: llm is a user-layer key → the carrier file for the invalid fallback is user settings.
     await writeFile(
       join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
@@ -1248,8 +1257,8 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
   });
 
   it("子代理在相同 project cwd 自装配时继承 settings（跨进程模拟）", async () => {
-    // ADR-0084：llm 是用户层键 → 继承锚点是 <home>/.iknow/settings.json；
-    // 子代理进程走 loadIknowEnv(同 cwd, undefined, 同 home) → 读同一文件。
+    // ADR-0084: llm is a user-layer key → the inheritance anchor is <home>/.iknow/settings.json;
+    // the subagent process calls loadIknowEnv(same cwd, undefined, same home) → reads the same file.
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
@@ -1266,8 +1275,8 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
       })
     );
     try {
-      // 模拟子代理进程：显式注入隔离 home（POSIX 上 os.homedir() 确实跟随
-      // $HOME，靠它虽能工作，但隐式、易被破坏）。
+      // Simulate the subagent process: inject an isolated home explicitly (on POSIX
+      // os.homedir() does follow $HOME, which works but is implicit and easy to break).
       const env = loadIknowEnv(tmpCwd, undefined, emptyHome);
       assert.equal(env.llm.maxTurns, 77);
       assert.equal(env.compress.contextWindow, 600000);
@@ -1278,17 +1287,20 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
   });
 
   it("子代理在隔离 cwd（无 settings、无 model）→ fail-fast 抛错（不继承）", async () => {
-    // 子代理被 spawn 到 tmpCwdEmpty（隔离 cwd）+ emptyHome（空 user 层）
-    // → loadIknowEnv(tmpCwdEmpty, undefined, emptyHome) 的 settings 链上无
-    // 任何 llm.model，env 也未设 IKNOW_LLM_MODEL（该 env 支已退役）→ model
-    // 无来源，fail-fast 抛错（不静默回退）。emptyHome 经 loadIknowEnv 显式透传
-    // （POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作，但隐式、易被破坏）。
+    // The subagent is spawned into tmpCwdEmpty (isolated cwd) + emptyHome (empty
+    // user layer) → no llm.model anywhere on the loadIknowEnv settings chain, and
+    // IKNOW_LLM_MODEL is unset (that env path is retired) → model has no source,
+    // fail-fast throws (no silent fallback). emptyHome is passed explicitly through
+    // loadIknowEnv (on POSIX os.homedir() does follow $HOME, which works but is
+    // implicit and easy to break).
     //
-    // 注：tmpCwdWith 的项目文件 fixture（llm.model）自 ADR-0084 起已完全不
-    // 生效——llm 是用户层键，project 值被允许名单丢弃；即便子代理 cwd 相同也
-    // 读不到。它对本用例断言始终是旁观道具（loadIknowEnv 只读 tmpEmpty +
-    // emptyHome），现属 vestigial fixture，保留只为体现「主代理项目 settings
-    // 含 model，子代理仍不继承」的场景原貌。
+    // Note: the tmpCwdWith project-file fixture (llm.model) has been entirely inert
+    // since ADR-0084 — llm is a user-layer key and project values are dropped by the
+    // allowlist; the subagent could not read it even with the same cwd. It is only a
+    // bystander prop for this case's assertion (loadIknowEnv reads just tmpEmpty +
+    // emptyHome) and is now a vestigial fixture, kept solely to preserve the
+    // scenario shape "main agent's project settings contain model, subagent still
+    // does not inherit".
     const tmpWith = await mkdtemp(join(tmpdir(), "iknow-subagent-with-"));
     const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home2-"));
@@ -1406,9 +1418,10 @@ describe("loadIknowEnv — llm.apiKey 旧路径退役", () => {
 });
 
 describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
-  // provider 命中路径的 key 只读 process.env（spec 明文），故用独立 var 名，
-  // 且测后清理；fileMap 侧刻意不提供任何回退（见「只读 process.env」用例）。
-  // IKNOW_LLM_BASE_URL / IKNOW_TEST_API_KEY 不在 ENV_KEYS 里，也必须在本组内清理。
+  // Keys on the provider-hit path are read from process.env only, so a distinct var
+  // name is used and cleaned up after each test; the fileMap side deliberately
+  // provides no fallback (see the "process.env only" case).
+  // IKNOW_LLM_BASE_URL / IKNOW_TEST_API_KEY are not in ENV_KEYS and must also be cleaned within this group.
   const PROVIDER_KEYS = [
     "MINIMAX_CN_API_KEY",
     "VOLCENGINE_ARK_API_KEY",
@@ -1432,7 +1445,7 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
     models: [{ id: "MiniMax-M3" }],
   };
 
-  /** 注册表最小夹具：providers 段合法（models 非空）才不被 settings 层 drop。 */
+  /** Minimal registry fixture: the providers section must be legal (models non-empty) or the settings layer drops it. */
   function settingsWithProviders(
     model: string,
     providers: ReadonlyArray<Record<string, unknown>>,
@@ -1569,14 +1582,14 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
       assert.fail("expected loadIknowEnv to throw");
     } catch (err) {
       assert.ok(isLlmProviderConfigError(err));
-      // payload 承重字段齐备（否则渲染侧拿不到 provider / env 名）。
+      // All load-bearing payload fields present (otherwise the render side cannot get provider / env name).
       assert.equal(err.providerId, "minimax-cn");
       assert.equal(err.apiKeyEnv, "MINIMAX_CN_API_KEY");
       assert.equal(
         formatLlmProviderConfigError(err),
         "provider_api_key_missing: minimax-cn (env MINIMAX_CN_API_KEY unset)"
       );
-      // plain object 形态：callers 必须走守卫，instanceof Error 会打成 [object Object]。
+      // Plain-object shape: callers must go through the guard; instanceof Error would render [object Object].
       assert.equal(err instanceof Error, false);
       assert.equal(Object.prototype.toString.call(err), "[object Object]");
     }
@@ -1618,8 +1631,8 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
   });
 
   it("apiKeyEnv 是 Object.prototype 自有键（constructor）→ typed 抛（不 TypeError）", () => {
-    // process.env.constructor 命中 Object.prototype → 函数而非 string；
-    // 若不收窄会 raw.trim is not a function（M2 同族原型注入）。
+    // process.env.constructor hits Object.prototype → a function, not a string;
+    // without narrowing this would raw.trim is not a function (M2-family prototype injection).
     assert.throws(
       () =>
         loadIknowEnv(
@@ -1774,11 +1787,12 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0094 T1 / SC1-SC3 SC7：wire-model 解析 SSOT。
+// ADR-0094: wire-model resolution SSOT.
 //
-// wire = models[].id（provider id 只解析 baseUrl/apiKey/headers，不上 wire）。
-// 注册表命中时 wire = tail（首个 `/` 之后，含后续 `/`）;miss 由
-// loadIknowEnv 在装配前 typed 抛，不会进 wire 函数。
+// wire = models[].id (the provider id only resolves baseUrl/apiKey/headers and
+// never goes on the wire). On registry hit, wire = tail (after the first `/`,
+// including later `/`); a miss is thrown typed by loadIknowEnv before assembly,
+// so it never reaches the wire function.
 // ---------------------------------------------------------------------------
 
 describe("wireModelFromRoute — wire = models[].id (ADR-0094 T1)", () => {

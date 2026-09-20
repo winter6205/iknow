@@ -4,7 +4,7 @@
  *
  * Three guarantees pinned:
  *   1. Multi-turn pipe: same ctx reused across queries strictly grows the
- *      `messages` history (host 续传 priorMessages via `run`'s 4th arg).
+ *      `messages` history (the host resumes via `run`'s 4th arg priorMessages).
  *   2. `/reset` clears `messages` but preserves the `session` object.
  *   3. `/status` reflects `state.messages.length` (NOT the old `turns.length`).
  *

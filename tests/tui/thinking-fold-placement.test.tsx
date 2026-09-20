@@ -2,24 +2,32 @@
 /**
  * tests/tui/thinking-fold-placement.test.tsx
  *
- * 不变式(CONTEXT.md unit fold,2026-09-08 操作员纠正):思考**按段原位折叠**
- * —— 一段思考完成 → 在该段原位折一行 `Thought for <duration>` → 随后正文或工具;
- * 同一用户任务里下一段思考再折一行。秒数来自对应 assistant 消息自己的
- * thinkingMs(per-message 并行数组),不跨段归并:
- *  (a) 有秒数的段各画各的 `Thought for <duration>`,无秒数段不画该行、不回落
- *      `[思考]`(只画工具计数行,若 retract 在场);
- *  (b) 不得把 final assistant 的秒数贴到前段 / 末位工具簇(旧
- *      thinking-fold-placement fallback 是误读,已删除);
- *  (c) 同一 assistant 消息内的多个 tools 簇(tool → text → tool)共享
- *      同一 thinkingMs → 同消息内不重复画(去重单位 = 同一消息内的重复
- *      展示,不是「整回合至多一次」);
- *  (d) per-message ThinkingSummary 与 fold 行不重复画同一秒数;
- *  (e) turn 仍在 running 时,前段已落定的工具折叠行在后段思考开始后仍在。
+ * Invariant (docs/CONTEXT.md `unit fold`, operator correction): thinking folds
+ * **in place per segment** — a thinking segment completes → folds into one
+ * `Thought for <duration>` line at its own position → then text or tools;
+ * the next thinking segment within the same user task folds another line.
+ * Seconds come from the corresponding assistant message's own thinkingMs
+ * (per-message parallel array), never merged across segments:
+ *  (a) each segment with seconds draws its own `Thought for <duration>`;
+ *      segments without seconds draw no such line and never fall back to
+ *      `[思考]` ("[thinking]") (only the tool-count line, if retract is present);
+ *  (b) the final assistant's seconds must not be pasted onto an earlier
+ *      segment / trailing tool cluster (the old thinking-fold-placement
+ *      fallback was a misreading and has been deleted);
+ *  (c) multiple tool clusters (tool → text → tool) inside one assistant
+ *      message share the same thinkingMs → no duplicate within the message
+ *      (dedup unit = repeated display within one message, not "at most once
+ *      per turn");
+ *  (d) per-message ThinkingSummary and the fold line must not draw the same
+ *      seconds twice;
+ *  (e) while the turn is still running, the earlier segment's settled tool
+ *      fold line survives after the next thinking segment begins.
  *
- * 数据真相:loop-engine 每个 assistant commit 点各传一次
- * `turnResult.thinkingMs`(src/harness/loop-engine.ts:2021-2025),
- * thinkingMs 并行数组与 messages 一一对应 —— 每条 assistant 消息独立持有
- * 自己的思考时长;历史会话经 session-api/store/jsonl 重建同一并行数组。
+ * Data ground truth: loop-engine passes `turnResult.thinkingMs` once per
+ * assistant commit point (src/harness/loop-engine.ts:2021-2025); the
+ * thinkingMs parallel array is index-aligned with messages — each assistant
+ * message independently owns its thinking duration; history sessions rebuild
+ * the same parallel array via session-api/store/jsonl.
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -58,10 +66,11 @@ function sessionWith(
 }
 
 test("两轮思考→工具:跨消息不合并,每条 assistant 自有块 + 各自 Thought for <自己的 ms>", async () => {
-  // 不变式（specs/tui-activity-block.md S5「下一条 assistant 新块」+ 决策表
-  // 重写条目）：跨消息工具簇不再合并 —— 每条 assistant 自有过程块，asst-1
-  // 自己的 thinkingMs 留在自己的块标题；asst-final 的 thinkingMs 不串位到
-  // asst-1；bash keep 仍不进折叠（反命题：keep 不计数）。
+  // Invariant (specs/tui-activity-block.md S5 "new message opens new block" +
+  // the decision-table rewrite entry): tool clusters no longer merge across
+  // messages — each assistant owns its process block; asst-1's own thinkingMs
+  // stays in its own block title; asst-final's thinkingMs must not bleed into
+  // asst-1; bash keep still never folds in (counter-proposition: keep is not counted).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "多步任务" }] },
     {
@@ -101,9 +110,9 @@ test("两轮思考→工具:跨消息不合并,每条 assistant 自有块 + 各�
   // messages: user(0) asst-1(1) tool_result(2) asst-final(3) tool_result(4)
   const thinkingMs: ReadonlyArray<number | null> = [
     null,
-    12000, // asst-1 自己的 12s
+    12000, // asst-1's own 12s
     null,
-    30000, // asst-final 自己的 30s
+    30000, // asst-final's own 30s
     null,
   ];
   const setup = await testRender(
@@ -119,35 +128,38 @@ test("两轮思考→工具:跨消息不合并,每条 assistant 自有块 + 各�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // (1) asst-1 的块 = `Thought for 12s, called read_file × 1`（焊：思考 +
-  //     相邻 read_file retract，中间无 text / keep / 失败）。
+  // (1) asst-1 block = `Thought for 12s, called read_file × 1` (welded:
+  //     thinking + adjacent read_file retract, no text / keep / failure between).
   const think12Idx = lines.findIndex((l) => l.includes("Thought for 12s"));
   expect(think12Idx).toBeGreaterThanOrEqual(0);
   expect(lines[think12Idx]).toContain("read_file × 1");
-  // (2) asst-final 的块 = `Thought for 30s`（思考后是 bash keep，keep 不
-  //     焊入；只时长段）。
+  // (2) asst-final block = `Thought for 30s` (thinking followed by bash keep;
+  //     keep does not weld in; duration-only segment).
   const think30Idx = lines.findIndex((l) => l.includes("Thought for 30s"));
   expect(think30Idx).toBeGreaterThanOrEqual(0);
   expect(think30Idx).toBeGreaterThan(think12Idx);
-  // (3) bash keep 不进折叠计数 → 不得出现 `bash × N` 行。
+  // (3) bash keep never enters the fold count → no `bash × N` line allowed.
   expect(lines.findIndex((line) => line.includes("bash × "))).toBe(-1);
-  // (4) 「完成总结」出现在 asst-final 附近（asst-final 自己的正文）；块标题
-  //     按 spec 钉在消息末尾（MessageBlocks 之后），因此 summary 行可在 30s
-  //     行之前或之后，但必须与 30s 行同处 asst-final 段（think12 之后）。
+  // (4) 「完成总结」("summary done") appears near asst-final (asst-final's own
+  //     text); per spec the block title is pinned at the message end (after
+  //     MessageBlocks), so the summary line may come before or after the 30s
+  //     line, but must share the asst-final region (after think12).
   const summaryIdx = lines.findIndex((line) => line.includes("完成总结"));
   expect(summaryIdx).toBeGreaterThan(think12Idx);
   expect(summaryIdx).not.toBe(-1);
-  // (5) 各段秒数互不串位：12s 只在 asst-1 出现一次，30s 只在 asst-final 出现一次。
+  // (5) Seconds stay in their own segments: 12s appears once in asst-1, 30s once in asst-final.
   expect(lines.filter((l) => /Thought for \d+s/.test(l))).toHaveLength(2);
   await setup.renderer.destroy();
 });
 
 test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串位不重复", async () => {
-  // 不变式 (a)(d):thinkingMs 是落盘 per-message 并行数组,每条 assistant
-  // 消息独立持有 ms。跨消息工具簇投影(anchor 移到最新 assistant)下,
-  // 簇折叠行取 anchor 自身时长(25s);前段(asst-1)的 12s 由其
-  // per-message ThinkingSummary 原位承担 —— 12s 不得贴到 final 簇,
-  // 25s 不得漂到 asst-1 位置,二者各出现一次、顺序与消息顺序一致。
+  // Invariants (a)(d): thinkingMs is a persisted per-message parallel array;
+  // each assistant message independently owns its ms. Under the cross-message
+  // tool-cluster projection (anchor moves to the latest assistant), the
+  // cluster fold line takes the anchor's own duration (25s); the earlier
+  // segment (asst-1)'s 12s is carried in place by its per-message
+  // ThinkingSummary — 12s must not be pasted onto the final cluster, 25s must
+  // not drift to asst-1's position; each appears once, ordered like the messages.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -185,9 +197,9 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   ];
   const thinkingMs: ReadonlyArray<number | null> = [
     null,
-    12000, // asst-1:12s
+    12000, // asst-1: 12s
     null,
-    25000, // asst-2:25s
+    25000, // asst-2: 25s
     null,
   ];
   const setup = await testRender(
@@ -203,8 +215,8 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // (1) `Thought for 12s` 与 `Thought for 25s` 各出现一次、按消息顺序。
-  //     新合同：每条 assistant 自有块，跨消息不合并。
+  // (1) `Thought for 12s` and `Thought for 25s` each appear once, in message order.
+  //     New contract: each assistant owns its block, no cross-message merging.
   const think12Idx = lines.findIndex((line) =>
     line.includes("Thought for 12s")
   );
@@ -214,11 +226,11 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   expect(think12Idx).toBeGreaterThanOrEqual(0);
   expect(think25Idx).toBeGreaterThanOrEqual(0);
   expect(think12Idx).toBeLessThan(think25Idx);
-  // (2) 恰好两行时长（各段一次，无重复；无中文残留）。
+  // (2) Exactly two duration lines (once per segment, no duplicates; no Chinese residue).
   expect(lines.filter((l) => /Thought for \d+s/.test(l))).toHaveLength(2);
   expect(frame.includes("思考了")).toBe(false);
-  // (3) asst-1 的 read_file retract 焊在 asst-1 自己的块标题
-  //     （`Thought for 12s, called read_file × 1`）；bash keep 不进块。
+  // (3) asst-1's read_file retract welds onto asst-1's own block title
+  //     (`Thought for 12s, called read_file × 1`); bash keep stays out of the block.
   const readIdx = lines.findIndex((line) => line.includes("read_file × 1"));
   expect(readIdx).toBeGreaterThanOrEqual(0);
   expect(lines[readIdx]).toContain("Thought for 12s");
@@ -227,11 +239,13 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
 });
 
 test("final 仅有 text:其思考时长由 per-message ThinkingSummary 原位承担,不外挂到前段折叠行", async () => {
-  // 不变式 (b):final 只含 text(无 tool_use) → 无 final 侧 tools 簇;
-  // 前段 read_file 簇按自身 anchor(无 ms)只画计数行。final 的 30s 在
-  // 它自己的消息块原位显示(per-message ThinkingSummary),不得贴到前段
-  // read_file 折叠行(旧 fallback 残留行为),也不得丢失 —— 前段计数行
-  // 因此**不带**时长段(两行互不焊接)。
+  // Invariant (b): final contains only text (no tool_use) → no final-side
+  // tools cluster; the earlier read_file cluster, by its own anchor (no ms),
+  // draws only the count line. Final's 30s displays in place in its own
+  // message block (per-message ThinkingSummary), never pasted onto the
+  // earlier read_file fold line (leftover of the old fallback), and never
+  // lost — so the earlier count line carries **no** duration segment (the two
+  // lines never weld).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -278,11 +292,11 @@ test("final 仅有 text:其思考时长由 per-message ThinkingSummary 原位承
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // (1) `Thought for 30s` 恰好一次,值 = final 自身 thinkingMs。
+  // (1) `Thought for 30s` exactly once, value = final's own thinkingMs.
   const thinkLines = lines.filter((l) => /Thought for \d+s/.test(l));
   expect(thinkLines).toHaveLength(1);
   expect(thinkLines[0]).toContain("Thought for 30s");
-  // (2) 前段折叠行只有计数(不焊接 final 时长);时长行在它之后。
+  // (2) The earlier fold line is count-only (final's duration not welded); the duration line comes after it.
   const readCountIdx = lines.findIndex((line) =>
     line.includes("read_file × 1")
   );
@@ -290,16 +304,17 @@ test("final 仅有 text:其思考时长由 per-message ThinkingSummary 原位承
   expect(readCountIdx).toBeGreaterThanOrEqual(0);
   expect(thinkIdx).toBeGreaterThan(readCountIdx);
   expect(lines[readCountIdx]).not.toContain("Thought for");
-  // (3) 无 [思考] 回落。
+  // (3) No `[思考]` ("[thinking]") fallback.
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("hidden agent_status 插在 tool_result 与 final 之间：thinkingMs 按盘上消息下标取值,各段秒数不丢", async () => {
-  // 不变式 (a):session.thinkingMs 与 messages 一一对应;ChatView 用过滤
-  // 后的 visibleIndex 时必须映射回盘上下标,否则 final 的 30s 读到
-  // status 槽的 null → `Thought for` 消失。前段折叠行(无 ms)只画
-  // 计数行;final 的时长原位显示。
+  // Invariant (a): session.thinkingMs is index-aligned with messages; when
+  // ChatView uses a filtered visibleIndex it must map back to the on-disk
+  // index, otherwise final's 30s reads the status slot's null and
+  // `Thought for` vanishes. The earlier fold line (no ms) draws the count
+  // line only; final's duration displays in place.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -362,8 +377,9 @@ test("hidden agent_status 插在 tool_result 与 final 之间：thinkingMs 按�
 });
 
 test("hidden agent_status + 仅 keep 工具：无 retract 计数行时,仍要画出 `Thought for`", async () => {
-  // 不变式 (a):bash 是 keep → 不进折叠计数;final 的 12s 由 per-message
-  // ThinkingSummary 原位承担(下标映射错误时整行消失)。
+  // Invariant (a): bash is keep → not in the fold count; final's 12s is
+  // carried in place by the per-message ThinkingSummary (with an index-mapping
+  // bug the whole line vanishes).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -426,9 +442,11 @@ test("hidden agent_status + 仅 keep 工具：无 retract 计数行时,仍要画
 });
 
 test("running 中间态:前段已落定的工具折叠行,在后段思考开始后仍在", async () => {
-  // 不变式 (e):同一用户任务内,前段(asst-1)的 read_file 簇已落定并折出
-  // 计数行;下一段思考开始流式(live thinking draft 非空)时,前段折叠行
-  // 不得被 running 闸或 live 面板吞掉 —— 已完成单元照折,各段各画各的。
+  // Invariant (e): within one user task, asst-1's read_file cluster has already
+  // settled and folded its count line; when the next thinking segment starts
+  // streaming (live thinking draft non-empty), the earlier fold line must not
+  // be swallowed by the running gate or the live panel — completed units fold
+  // as usual, each segment draws its own.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -463,27 +481,29 @@ test("running 中间态:前段已落定的工具折叠行,在后段思考开始�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 前段已落定的折叠行仍在(retract 计数)。
+  // The earlier segment's settled fold line is still there (retract count).
   expect(frame).toContain("read_file × 1");
-  // 无 [思考] 回落;前段思考正文(折叠态)不摊开。
+  // No `[思考]` fallback; the earlier thinking body (folded) stays unfolded.
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("先读文件")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("多段渲染 (content-order)：text 段无 fold 行但 message 的 thinkingMs 已被 tools 段 fold 行覆盖 → text 段不重复画 ThinkingSummary", async () => {
-  // 不变式 (d) 的 content-order 强化：同一 assistant 拆出多段（text →
-  // tools），tools 段 fold 行已显示 `Thought for Ns · read_file × 1`，
-  // text 段（partIndex===0，挂 thinkingSeconds）**不得**再画一份独立的
-  // `Thought for Ns`。message-row.tsx 在 #986 拆分时把 `messageThinkingMs`
-  // 硬编码成 0 喂给 TurnFoldSegment，导致 content-order 分支的
-  // `shownThinkingMsValues.has(...)` 子句失效 → text 段 ThinkingSummary
-  // 不去重 → 屏幕上看到两条 `Thought for Ns`（一条 fold 行、一条摘要）。
+  // Invariant (d) hardened for content-order: one assistant splits into
+  // multiple segments (text → tools); once the tools segment's fold line
+  // already shows `Thought for Ns · read_file × 1`, the text segment
+  // (partIndex===0, carries thinkingSeconds) must **not** draw another
+  // standalone `Thought for Ns`. When message-row.tsx was split, it hardcoded
+  // `messageThinkingMs` to 0 for TurnFoldSegment, disabling the
+  // `shownThinkingMsValues.has(...)` clause in the content-order branch → the
+  // text segment's ThinkingSummary stopped deduping → two `Thought for Ns`
+  // lines on screen (one fold line, one summary).
   //
-  // 数据构造：assistant 自身带 `thinking + text + tool_use(read_file)`,
-  // tool_result 在其后。activitySegments = [text(0), tools(1)] →
-  // renderInContentOrder 走 content-order 分支 → text 段是 partIndex 0
-  // （挂 thinkingSeconds）,tools 段是 partIndex 1（不挂）。
+  // Fixture: the assistant itself carries `thinking + text + tool_use(read_file)`,
+  // tool_result follows. activitySegments = [text(0), tools(1)] →
+  // renderInContentOrder takes the content-order branch → text segment is
+  // partIndex 0 (carries thinkingSeconds), tools segment is partIndex 1 (does not).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -518,16 +538,17 @@ test("多段渲染 (content-order)：text 段无 fold 行但 message 的 thinkin
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // (1) `Thought for 12s` 只出现一次：tools 段 fold 行（`Thought for 12s
-  //     · read_file × 1`）焊在同一行；text 段 ThinkingSummary 必须被 hide
-  //     掉（message-row.tsx TurnFoldSegment 内 hideSegmentThinking 走
-  //     `messageThinkingMs > 0 && shownThinkingMsValues.has(...)`）。
+  // (1) `Thought for 12s` appears exactly once: welded on the same line of
+  //     the tools-segment fold line (`Thought for 12s · read_file × 1`); the
+  //     text segment's ThinkingSummary must be hidden (in message-row.tsx's
+  //     TurnFoldSegment, hideSegmentThinking runs
+  //     `messageThinkingMs > 0 && shownThinkingMsValues.has(...)`).
   const thinkLines = lines.filter((l) => /Thought for \d+s/.test(l));
   expect(thinkLines).toHaveLength(1);
   expect(thinkLines[0]).toContain("Thought for 12s");
-  // (2) read_file 计数行必须在场（content-order 路径下 fold 行挂 tools 段）。
+  // (2) The read_file count line must be present (on the content-order path the fold line hangs on the tools segment).
   expect(frame).toContain("read_file × 1");
-  // (3) text 段正文仍在（hideThinking 只去 ThinkingSummary，不动 text block）。
+  // (3) The text segment body is still there (hideThinking removes only ThinkingSummary, never the text block).
   expect(frame).toContain("先说结论");
   await setup.renderer.destroy();
 });

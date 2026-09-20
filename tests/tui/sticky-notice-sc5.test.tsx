@@ -2,20 +2,26 @@
 /**
  * tests/tui/sticky-notice-sc5.test.tsx
  *
- * spec `specs/transport-continue-persist.md` SC5 / 不变式 3：异常停 notice 是
- * **sticky** —— 在屏直到用户明确动作（关掉 / 发下一条消息），无 TTL 自动收回。
+ * spec `specs/transport-continue-persist.md` SC5 / invariant 3: the
+ * abnormal-stop notice is **sticky** — it stays on screen until an explicit
+ * user action (dismiss / send the next message); no TTL auto-retract.
  *
- * 两条不变式（本文件是唯一钉它们的地方）：
- *  1. 无 TTL —— 跨过静默计时器多个周期后 notice 原样在屏；
- *  2. 只有用户明确动作（发下一条消息）清它，清除与「又跑完一轮」无因果。
+ * Two invariants (this file is the only place pinning them):
+ *  1. no TTL — after several silence-timer cycles the notice is on screen, unchanged;
+ *  2. only an explicit user action (next message) clears it; the clearing is
+ *     not causally tied to "another turn finished".
  *
- * 计时注入：`streamingSilenceNoticeMs`（组件既有测试注入口）压到 150ms。
- * 该计时器是 turn 结束后仍可能触碰 notice 的定时源，周期缩到 150ms 后，
- * 任何「定时器把 notice 收回去 / 改写成等待文案」的回归都会在数百毫秒内
- * 暴露，无需真实秒级睡眠；测试再以 50ms 步长 pump 大量帧覆盖多个计时周期。
+ * Timing injection: `streamingSilenceNoticeMs` (the component's existing test
+ * injection seam) squeezed to 150ms. That timer is the only scheduled source
+ * that can still touch the notice after a turn ends; with the cycle shrunk to
+ * 150ms, any regression where "a timer retracts the notice / rewrites it to
+ * waiting text" surfaces within hundreds of milliseconds, no real second-scale
+ * sleeps needed; the test then pumps many frames at a 50ms step to cover
+ * several timer cycles.
  *
- * 测法与 error-stop-notice.test.tsx 同模式：fake bridge 注入已解析的
- * TuiPostResult，只钉 app 层 notice 生命周期；wire 产生与透传在 hub 层钉死。
+ * Same pattern as error-stop-notice.test.tsx: a fake bridge injects a resolved
+ * TuiPostResult, pinning only the app-layer notice lifecycle; wire generation
+ * and pass-through are pinned at the hub layer.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -34,18 +40,21 @@ import { createPermissionModeContext } from "../../src/harness/permission/index.
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
-/** 异常停 notice 的稳定子串（abnormalStopNoticeLines → apiErrorNoticeLine）。 */
+/** Stable substring of the abnormal-stop notice (abnormalStopNoticeLines → apiErrorNoticeLine). */
 const ABNORMAL_NOTICE_NEEDLE = "API error (404)";
-/** 流式静默 notice 的稳定子串（STREAMING_SILENCE_NOTICE_LINES）。 */
+/** Stable substring of the streaming-silence notice (STREAMING_SILENCE_NOTICE_LINES). */
 const SILENCE_NOTICE_NEEDLE = "Waiting for model output";
 /**
- * 注入的静默阈值：~1/133 于默认 20s。turn 结束后仍可能触碰 notice 的定时源
- * 只有它，周期压到 150ms 才能用亚秒级观察窗覆盖多个计时周期。
+ * Injected silence threshold: ~1/133 of the 20s default. The silence timer is
+ * the only scheduled source that can still touch the notice after a turn ends,
+ * so squeezing the cycle to 150ms lets a sub-second observation window cover
+ * many timer cycles.
  */
 const INJECTED_SILENCE_MS = 150;
 /**
- * sticky 存活观察窗：以 50ms 步长 pump 帧（非单次长睡），累计 ≥ 16 个注入
- * 阈值周期 —— 任何定时驱动的自动收回 / 文案改写都会落在窗内。
+ * Sticky-survival observation window: pump frames in 50ms steps (not one long
+ * sleep), totaling ≥ 16 injected-threshold cycles — any timer-driven
+ * auto-retract / text rewrite lands inside the window.
  */
 const STICKY_SURVIVAL_WINDOW_MS = 2500;
 const PUMP_STEP_MS = 50;
@@ -77,7 +86,7 @@ async function until(
   }
 }
 
-/** 多帧 pump：每步渲染一次，让任何挂着的定时器都有机会落地。 */
+/** Pump many frames: render once per step so any pending timer gets a chance to land. */
 async function pumpFrames(setup: TestRendererSetup, ms: number): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -86,13 +95,13 @@ async function pumpFrames(setup: TestRendererSetup, ms: number): Promise<void> {
   }
 }
 
-/** 单个 turn 的剧本；缺席字段走默认（等待 + 按 stopReason 收尾）。 */
+/** Script for one turn; absent fields take defaults (wait + finish by stopReason). */
 interface TurnScript {
   readonly stopReason: TuiPostResult["stopReason"];
   readonly apiError?: { readonly status?: number; readonly message: string };
-  /** 非空 → 该 turn 返回前阻塞于此 promise（模拟 turn 仍在飞）。 */
+  /** non-empty → this turn blocks on this promise before returning (simulates an in-flight turn). */
   readonly gate?: Promise<void>;
-  /** 该 turn 进入 postMessage 时置位（测试据此断定 turn 已在飞）。 */
+  /** set when this turn enters postMessage (lets the test prove the turn is in flight). */
   readonly entered?: { value: boolean };
 }
 
@@ -207,8 +216,9 @@ async function mount(opts: {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
     typeText: async (text: string) => {
-      // mockInput 走 stdin 异步解析；连发过快会丢键。以输入行回显
-      // (`❯ <text>`) 作落地判据，未落地则清空重打。
+      // mockInput parses stdin asynchronously; typing too fast drops keys. The
+      // input-line echo (`❯ <text>`) is the landing proof; retype after clearing
+      // if it never lands.
       const inputLanded = (frame: string): boolean =>
         frame.includes(`❯ ${text}`) || frame.includes(`❯ ${text} `);
       const clear = async (): Promise<void> => {
@@ -277,17 +287,20 @@ describe("TUI sticky 异常停 notice（spec SC5）", () => {
 
     await app.typeText("go");
     await app.pressEnter();
-    // 阳性对照：注入的静默阈值确实在跑（turn 在飞时先落等待文案）。
-    // 没有这一步，下面的存活窗可能因计时器根本没武装而空过。
+    // Positive control: the injected silence threshold really fires (the
+    // waiting text lands while the turn is in flight). Without this, the
+    // survival window below could pass vacuously if the timer was never armed.
     await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_NEEDLE), 4000);
-    // 收尾通知（processChatLine 尾段的 turn 结算）完成后 notice 才落定。
+    // The notice lands only after the closing notification (turn settlement at
+    // the tail of processChatLine) completes.
     await untilFrame(
       app.setup,
       (f) => f.includes(ABNORMAL_NOTICE_NEEDLE),
       8000
     );
 
-    // 存活窗内逐帧断言：任一帧丢失即失败（不是只看窗尾）。
+    // Frame-by-frame assertions inside the survival window: any dropped frame
+    // fails (not just a window-end check).
     const start = Date.now();
     let pumped = 0;
     while (Date.now() - start < STICKY_SURVIVAL_WINDOW_MS) {
@@ -296,12 +309,14 @@ describe("TUI sticky 异常停 notice（spec SC5）", () => {
       pumped += 1;
       const frame = app.setup.captureCharFrame();
       expect(frame).toContain(ABNORMAL_NOTICE_NEEDLE);
-      // 静默计时器已在 turn 收尾 finally 里拆除：不得把异常停文案改写回
-      // 「仍在等待」（sticky notice 的文案只由新的明确状态覆盖，不被过期
-      // 计时器回头改）。
+      // The silence timer is already torn down in the turn's finally block: it
+      // must not rewrite the abnormal-stop text back to "still waiting" (a
+      // sticky notice's text is only overwritten by a new explicit state, never
+      // revisited by an expired timer).
       expect(frame).not.toContain(SILENCE_NOTICE_NEEDLE);
     }
-    // 观察窗确实覆盖了多个注入阈值周期（防止 pump 逻辑退化成空转）。
+    // The window really covers several injected-threshold cycles (guards the
+    // pump logic against degenerating into a no-op).
     expect(pumped * PUMP_STEP_MS).toBeGreaterThanOrEqual(
       INJECTED_SILENCE_MS * 8
     );
@@ -340,16 +355,17 @@ describe("TUI sticky 异常停 notice（spec SC5）", () => {
         8000
       );
 
-      // (a) 空闲期不自动消失：跨过 silence 默认阈值无意义的时间量后仍在屏。
+      // (a) no auto-dismiss while idle: still on screen after a time span past any meaningful silence threshold.
       await pumpFrames(app.setup, 600);
       expect(app.setup.captureCharFrame()).toContain(ABNORMAL_NOTICE_NEEDLE);
 
-      // (b) 光敲字（草稿）不算明确动作：notice 必须还在。
+      // (b) typing alone (a draft) is not an explicit action: the notice must remain.
       await app.typeText("go2");
       expect(app.setup.captureCharFrame()).toContain(ABNORMAL_NOTICE_NEEDLE);
 
-      // (c) 用户动作 = 提交。清除发生在动作当刻 —— 此刻第二轮仍被 gate 挡在
-      // 飞行中，任何「靠时间 / 靠本轮收尾」的解释都不成立。
+      // (c) user action = submit. The clearing happens at the moment of the
+      // action — the second turn is still gated in flight, so "time passed /
+      // this turn settled" explanations cannot hold.
       await app.pressEnter();
       await until(() => secondTurnEntered.value, 8000, "second-turn-inflight");
       await app.setup.renderOnce();
@@ -357,7 +373,7 @@ describe("TUI sticky 异常停 notice（spec SC5）", () => {
       expect(inFlight).not.toContain(ABNORMAL_NOTICE_NEEDLE);
       expect(inFlight).not.toContain(SILENCE_NOTICE_NEEDLE);
 
-      // (d) 新一轮正常收尾不回填旧异常停文案（sticky 只到用户动作为止）。
+      // (d) a new turn settling normally does not backfill the old abnormal-stop text (stickiness ends at the user action).
       releaseGate();
       await until(() => app.inflight.ids().size === 0, 8000, "second-settled");
       await pumpFrames(app.setup, 300);

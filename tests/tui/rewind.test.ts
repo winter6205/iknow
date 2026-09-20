@@ -1,11 +1,11 @@
 /**
  * tests/tui/rewind.test.ts
  *
- * T6 (checkpoint-rewind) 测试：slash 词表 / sessionRewound reducer /
- * bridge.rewindSession 集成 / 双 Esc debounce / rewind-picker 纯函数。
+ * checkpoint-rewind tests: slash vocabulary / sessionRewound reducer /
+ * bridge.rewindSession integration / double-Esc debounce / rewind-picker pure functions.
  *
- * bun:test 驱动（D2 裁决：tests/tui 由 bun 驱动）。集成用例用 mkdtemp 隔离
- * SessionStore（绝不写真实 ~/.iknow）。
+ * Driven by bun:test (tests/tui runs under bun). Integration cases isolate
+ * SessionStore via mkdtemp (never write the real ~/.iknow).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -71,7 +71,7 @@ const assistantMsg = (
   content: blocks as AnthropicNativeMessage["content"],
 });
 
-/** 3-turn 会话（turn0/1 带 tool 配对）+ 2 条 checkpoint，供集成用例播种。 */
+/** 3-turn session (turn0/1 with tool pairing) + 2 checkpoints, seeds integration cases. */
 function sampleFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
   return {
     schemaVersion: 3,
@@ -118,7 +118,7 @@ function sampleFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
 
 const ISO = "2026-08-11T00:00:00.000Z";
 
-// -- slash 词表 ---------------------------------------------------------------
+// -- slash vocabulary ---------------------------------------------------------
 
 describe("slash: /rewind 词表四触点", () => {
   test("/rewind → command rewind", () => {
@@ -152,7 +152,7 @@ describe("slash: /rewind 词表四触点", () => {
 
   test('"/r" 前缀候选含 rewind', async () => {
     const { slashSuggestions } = await import("../../src/tui/slash.js");
-    // #337 Phase C: slashSuggestions 返回 SlashCandidate 判别联合对象。
+    // slashSuggestions returns SlashCandidate discriminated-union objects.
     expect(slashSuggestions("/r")).toContainEqual({
       kind: "command",
       command: "rewind",
@@ -223,7 +223,7 @@ describe("sessionRewound（/rewind 落盘后刷新）", () => {
   });
 
   test("keepTurns=0 回退后：messages=[] turnCount=0 runState=idle", () => {
-    // 1-turn 会话回退到起点：盘上截空 → UI 整体反射为空会话（非 no-op）。
+    // rewinding a 1-turn session to the start truncates the file to empty → UI reflects an empty session (not a no-op).
     const session = attachSession({
       ...sampleFile(),
       messages: [userMsg("q1"), assistantMsg([text("a1")])],
@@ -241,12 +241,12 @@ describe("sessionRewound（/rewind 落盘后刷新）", () => {
   });
 });
 
-// -- buildRewindTargets / reduceRewindKey（picker 纯函数） ----------------------
+// -- buildRewindTargets / reduceRewindKey (picker pure functions) --------------
 
 describe("buildRewindTargets（L3 锚点投影）", () => {
   test("空会话 / 无完成 turn → 空数组（L0 空态）", () => {
     expect(buildRewindTargets({ ...sampleFile(), messages: [] })).toEqual([]);
-    // 只有 assistant 消息（无 query 起始）→ 0 turn
+    // assistant-only messages (no query opener) → 0 turns
     expect(
       buildRewindTargets({
         ...sampleFile(),
@@ -271,8 +271,8 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("只单条 user 消息无 reply → 也列 keepTurns=0", () => {
-    // 仅一条用户消息（无 assistant 回复）仍有 1 个 turn 起点，keepTurns=0
-    // 锚点照常列出（完整文本填入输入框）。
+    // a single user message (no assistant reply) still gives 1 turn start; the
+    // keepTurns=0 anchor is listed as usual (full text refills the input box).
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1")],
@@ -283,7 +283,7 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("空 messages turnCount=0 → 真 L0 空态", () => {
-    // 无 user 消息 → splitTurns 空 → 空数组（宿主走 L0 空态，零 store IO）。
+    // no user message → splitTurns empty → empty array (host takes the L0 empty state, zero store IO).
     expect(
       buildRewindTargets({ ...sampleFile(), messages: [], turnCount: 0 })
     ).toEqual([]);
@@ -347,8 +347,9 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("悬空 tool_result-only user 消息不开新 turn（splitTurns 语义）", () => {
-    // [q1, t-orphan tool_result]：tool_result-only user 消息是 continuation 不是
-    // query → splitTurns 只有 1 个 turn → 只列 keepTurns=0 锚点（label=q1）。
+    // [q1, t-orphan tool_result]: a tool_result-only user message is a
+    // continuation, not a query → splitTurns yields 1 turn → only the
+    // keepTurns=0 anchor is listed (label=q1).
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1"), userToolResult("t-orphan")],
@@ -364,8 +365,8 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("keepTurns=0 锚点 anchoredAt 合取 turnIndex=0 快照", () => {
-    // 起点锚点（turnIndex=0）命中 checkpoints 快照时 anchoredAt 非空——
-    // 与 i≥1 的锚点同规则合取，不再恒为 ""。
+    // when the start anchor (turnIndex=0) matches a checkpoints snapshot,
+    // anchoredAt is non-empty — same conjunctive rule as i≥1 anchors, no longer always "".
     const targets = buildRewindTargets({
       ...sampleFile(),
       checkpoints: [
@@ -381,21 +382,22 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("非-checkpoint 锚点在 messageCreatedAt 有值 → fallback 到入账时刻（非空 anchoredAt）", () => {
-    // appendEvents stamping 之后 load 出的文件：messageCreatedAt 与 messages
-    // 一一对应。无 checkpoint 快照的锚点显示消息入账时刻，不再恒为 ""。
+    // files loaded after appendEvents stamping: messageCreatedAt maps 1:1 to
+    // messages. Anchors without a checkpoint snapshot show the message's
+    // recorded time, no longer always "".
     const file = {
       ...sampleFile(),
       messageCreatedAt: [
-        "2026-08-20T10:00:00.000Z", // q1 (turn 0 起点, 索引 0)
+        "2026-08-20T10:00:00.000Z", // q1 (turn 0 start, index 0)
         null, // assistant tool_use
         null, // tool_result
         null, // assistant done
-        "2026-08-20T11:00:00.000Z", // q2 (turn 1 起点, 索引 4)
+        "2026-08-20T11:00:00.000Z", // q2 (turn 1 start, index 4)
         null, // a2
-        "2026-08-20T12:00:00.000Z", // q3 (turn 2 起点, 索引 6)
+        "2026-08-20T12:00:00.000Z", // q3 (turn 2 start, index 6)
         null, // a3
       ] as ReadonlyArray<string | null>,
-      // 无任何 checkpoint：全部走 fallback 段。
+      // no checkpoints at all: everything takes the fallback leg.
       checkpoints: [],
     };
     const targets = buildRewindTargets(file);
@@ -406,8 +408,8 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
   });
 
   test("checkpoint 优先于 messageCreatedAt（两段 fallback 第一段命中即返回）", () => {
-    // 同一锚点既有 checkpoint.interruptedAt 又有 messageCreatedAt：
-    // 显示中断时刻，不被入账时刻覆盖。
+    // same anchor has both checkpoint.interruptedAt and messageCreatedAt:
+    // the interruption time shows, not overwritten by the recorded time.
     const file = {
       ...sampleFile(),
       messageCreatedAt: [
@@ -432,13 +434,13 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     const targets = buildRewindTargets(file);
     expect(targets[0]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
     expect(targets[1]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
-    // turnIndex 2 命中 checkpoint → interruptedAt 胜出。
+    // turnIndex 2 matches a checkpoint → interruptedAt wins.
     expect(targets[2]!.anchoredAt).toBe("2026-08-11T09:30:00.000Z");
   });
 
   test('messageCreatedAt 缺席（旧文件）→ 非-checkpoint 锚点仍为 ""（现状不退化）', () => {
-    // 旧文件没有 messageCreatedAt key：fallback 读 undefined → ""，
-    // fmtAnchored 渲染空串——与 stamping 之前的行为完全一致。
+    // old files lack the messageCreatedAt key: fallback reads undefined → "",
+    // fmtAnchored renders an empty string — exactly the pre-stamping behavior.
     const targets = buildRewindTargets({ ...sampleFile(), checkpoints: [] });
     expect(targets.map((t) => t.head)).toEqual([null, "e3", "e5"]);
     for (const t of targets) {
@@ -577,15 +579,15 @@ describe("reduceRewindKey（选择器键路由）", () => {
   });
 });
 
-// -- rewindPickerContent（picker 渲染形状 — 锁真值 parity） -------------------
+// -- rewindPickerContent (picker render shape — pins ground-truth parity) ------
 
 describe("rewindPickerContent（picker 渲染形状）", () => {
   test("3-turn 会话：选项 label = 锚点用户消息真实文本（不再用「保留前 N 轮」抽象标签）", () => {
     const targets = buildRewindTargets(sampleFile());
     const content = rewindPickerContent(targets, 0, false);
-    // 3 条用户消息各一行，主 label 必须是真实文本
+    // 3 user messages, one option each; the main label must be the real text
     expect(content.options.map((o) => o.label)).toEqual(["q1", "q2", "q3"]);
-    // 不含「回到会话起点」或「保留前」字面
+    // no 「回到会话起点」 or 「保留前」 literals
     for (const opt of content.options) {
       expect(opt.label).not.toContain("回到会话起点");
       expect(opt.label).not.toMatch(/保留前/);
@@ -612,8 +614,8 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
   });
 
   test("1-turn 会话 keepTurns=0 锚点照常渲染（label = 首条消息 q1）", () => {
-    // turnCount=1 也列出 keepTurns=0（真实截空回退），picker 正常渲染，
-    // 不再走「空数组 → L0 空态」分支。
+    // turnCount=1 still lists keepTurns=0 (a real truncate-to-empty rewind); the
+    // picker renders normally, no longer via the "empty array → L0 empty state" branch.
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1")],
@@ -624,7 +626,7 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
   });
 
   test("label 截 40（userMessageText 截 80 后再截 40）", () => {
-    // 2-turn 文件首条消息 200 字：userMessageText 截到 80，picker label 再截 40。
+    // 2-turn file whose first message is 200 chars: userMessageText truncates to 80, picker label truncates again to 40.
     const long = "x".repeat(200);
     const targets = buildRewindTargets({
       ...sampleFile(),
@@ -637,7 +639,7 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
   });
 });
 
-// -- 双 Esc debounce（纯函数） --------------------------------------------------
+// -- double-Esc debounce (pure function) --------------------------------------
 
 describe("isDoubleEsc（1000ms debounce 窗口）", () => {
   test("间隔 999ms → 命中（≤ 窗口）", () => {
@@ -657,7 +659,7 @@ describe("isDoubleEsc（1000ms debounce 窗口）", () => {
   });
 });
 
-// -- bridge.rewindSession 集成（tmpdir 池，镜像 checkpoint.test.ts 七条） ------
+// -- bridge.rewindSession integration (tmpdir pool, mirrors checkpoint.test.ts) -
 
 describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读回）", () => {
   let baseDir: string;
@@ -701,8 +703,8 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   }
 
   test("resolveRewindAnchor（available=1 边界）keepTurns=0 → 空 transcript 头（非 no-op）", () => {
-    // available=1 时 keepTurns=0 与 available 不等 → 真实回退到起点：
-    // headIndex=-1（head 落 null）、turnCount=0 —— 不是 no-op。
+    // available=1 with keepTurns=0 differs from available → real rewind to start:
+    // headIndex=-1 (head becomes null), turnCount=0 — not a no-op.
     const out = resolveRewindAnchor(
       [userMsg("q1"), assistantMsg([text("a1")])],
       0
@@ -715,16 +717,16 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     await seedFile(sampleFile());
     const bridge = makeBridge();
     const out = await bridge.rewindSession("conv-rewind", "e3");
-    // turn0 结束于索引 4（tool 配对完整）。
+    // turn0 ends at index 4 (tool pairing complete).
     expect(out.messages.length).toBe(4);
     expect(out.messages[0]!.content[0]!.type).toBe("text");
-    // 落盘可读回（同一文件）。
+    // readable back from disk (same file).
     const reloaded = await bridge.loadSessionFile("conv-rewind");
     expect(reloaded.messages.length).toBe(4);
   });
 
   test("bridge.rewindSession（1-turn 文件）keepTurns=0 → 真实截空落盘", async () => {
-    // 集成路径：1-turn 会话回退到起点 → 盘上 messages=[]/turnCount=0/checkpoints=[]。
+    // integration path: 1-turn session rewound to start → on disk messages=[]/turnCount=0/checkpoints=[].
     await seedFile({
       ...sampleFile(),
       messages: [userMsg("q1"), assistantMsg([text("a1")])],
@@ -735,7 +737,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
     expect(out.checkpoints).toEqual([]);
-    // 落盘可读回（同一切口读到截空文件）。
+    // readable back from disk (same cut-off file seen through another entry point).
     const reloaded = await bridge.loadSessionFile("conv-rewind");
     expect(reloaded.messages).toHaveLength(0);
     expect(reloaded.turnCount).toBe(0);
@@ -764,7 +766,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
         messagesCount: 4,
         interruptedAt: "2026-08-11T00:00:00.000Z",
         interruptReason: "cancelled",
-        // T5 (D3): 存活快照按事件 id 重锚（messagesCount 4 → 链上第 4 条 = e3）。
+        // surviving snapshot re-anchors by event id (messagesCount 4 → 4th item on chain = e3).
         anchorEventId: "e3",
       },
     ]);
@@ -795,8 +797,8 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   });
 
   test("空会话 + keepTurns>0 → no-op（不崩）", async () => {
-    // 空会话 = messages:[] 且 turnCount=0；rewindFile 钳制到 target=available=0，
-    // target === available 走 no-op 分支（mirror checkpoint.test.ts 用例）。
+    // empty session = messages:[] and turnCount=0; rewindFile clamps to target=available=0,
+    // target === available takes the no-op branch (same shape as checkpoint.test.ts cases).
     await seedFile({ ...sampleFile(), messages: [], turnCount: 0 });
     const bridge = makeBridge();
     const out = await bridge.rewindSession("conv-rewind", null);
@@ -828,10 +830,9 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
 
   test("错误路径：save write_failed → typed kind 透传（不新造）", async () => {
     await seedFile(sampleFile());
-    // 用同名目录占住 `${id}.jsonl.tmp` 路径 → persistHeadMove 的 writeFile
-    // 失败 → write_failed。（#629 之前是 `${id}.json.tmp`，对应旧镜像写
-    // 路径；现在权威 JSONL 走 `${id}.jsonl.tmp`。T1 后权威文件位于
-    // `<projectDir>/<id>/` 会话文件夹内，占位目录同步迁入。）
+    // occupy the `${id}.jsonl.tmp` path with a directory of that name → persistHeadMove's writeFile
+    // fails → write_failed. The authoritative JSONL goes through `${id}.jsonl.tmp`;
+    // the authoritative file lives inside the `<projectDir>/<id>/` session folder.
     const dir = resolveConversationDir({
       projectDir,
       conversationId: "conv-rewind",

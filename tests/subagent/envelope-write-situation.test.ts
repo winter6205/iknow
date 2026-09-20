@@ -1,14 +1,12 @@
 /**
- * T6 (plans/write-situation-disclosure.md) — WorkerEnvelope 新增处境枚举
- * 字段 `writeSituation`（ADR-0069 D2; spec SC4 / OQ1）。
+ * WorkerEnvelope's new situation enum field `writeSituation` (wire-additive).
  *
  * Acceptance:
- *   - envelope 上 writeSituation 是 optional + 三态枚举;
- *   - 旧 envelope（无 writeSituation 字段）仍可被 ajv 接受,wire 向后兼容;
- *   - WORKER_SCHEMA 锁 enum = writable_main / writable_tree / no_writable_root
- *     —— 与枚举类型 `WriteSituation` 同源;
- *   - OQ1 采纳 (b): 旧 envelope 解析后 writeSituation === undefined
- *     (typed skip 的判定源)。
+ *   - writeSituation on the envelope is optional + a three-state enum;
+ *   - old envelopes (no writeSituation field) are still accepted by ajv — wire backward compatible;
+ *   - WORKER_SCHEMA locks enum = writable_main / writable_tree / no_writable_root
+ *     —— same source as the `WriteSituation` enum type;
+ *   - old envelopes parse to writeSituation === undefined (the typed-skip decision source).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -21,8 +19,8 @@ import { writeRootSegment } from "../../src/harness/skill/body.ts";
 
 describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
   it("envelope 缺 writeSituation（旧 wire）→ 解析成功,writeSituation = undefined", () => {
-    // 旧 worker bootstrap / 跨版本 resume: envelope 上没有 writeSituation。
-    // ajv 接受 → worker 据此走 typed skip(OQ1 采纳 (b))。
+    // Old worker bootstrap / cross-version resume: no writeSituation on the
+    // envelope. ajv accepts it → the worker performs a typed skip accordingly.
     const json = JSON.stringify({ task: "x", sandboxRoot: "/tmp/sb" });
     const env = parseWorkerEnvelope(json);
     assert.equal(env.writeSituation, undefined);
@@ -59,7 +57,7 @@ describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
   });
 
   it("envelope.writeSituation = 非法值（不在三态枚举内）→ ajv 拒收", () => {
-    // 与 status / reason 同样锁 enum —— 防止任意字符串污染。
+    // Locked to an enum like status / reason — prevents arbitrary-string pollution.
     const json = JSON.stringify({
       task: "x",
       sandboxRoot: "/tmp/sb",
@@ -91,9 +89,9 @@ describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
   });
 
   it("WriteSituation 类型契约：writable_main / writable_tree / no_writable_root", () => {
-    // 静态类型守卫: WriteSituation 三态在编译期穷尽。本断言保证这三态在
-    // session-roots.ts 一直存在 —— 防止有人误删枚举成员造成 worker 渲染
-    // 路径分支缺失。
+    // Static type guard: the three WriteSituation states are exhaustive at compile
+    // time. This assertion ensures they keep existing in session-roots.ts — guards
+    // against someone deleting an enum member and leaving a worker render path branchless.
     const allSituations: ReadonlyArray<WriteSituation> = [
       "writable_main",
       "writable_tree",
@@ -104,9 +102,9 @@ describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
 });
 
 /**
- * T8 (plans/parent-visible-tmp.md) — 写处境 / 写根段仍只点名交付根
- * （ADR-0069：不把 `/tmp` 揉进写根段）。Boundaries 两句落在 bash / 写工具
- * description，不进本段。
+ * The write-situation / write-root segment still names only the delivery root
+ * (do not fold `/tmp` into the write-root segment). The two boundary sentences
+ * live in the bash / write-tool descriptions, not in this segment.
  */
 describe("T8 write-root segment names the delivery root only (ADR-0069)", () => {
   it("writeRootSegment 三态都不提 /tmp（交付根路径本身也不在 /tmp 下）", () => {

@@ -1,5 +1,5 @@
 /**
- * run_graph 语义分组纯函数（spec A5 / SC2 / plan T3）。
+ * run_graph semantic grouping pure functions.
  */
 import { describe, expect, test } from "bun:test";
 import type { GraphProgressSnapshot } from "../../src/harness/graph/progress.js";

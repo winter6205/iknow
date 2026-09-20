@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 /**
- * manual-compact-trigger T2 — useChatCompact 文案分支。
+ * useChatCompact notice-copy branches.
  *
- * 认证的不变式:手动压缩路径的呈现不得引用「auto token 门未过」语义
- * (「上下文未达压缩阈值」类文案禁止出现)。compacted=false 时按 reason
- * 语义归并为「没有可压缩的上下文」(T1 后手动路径 no-op 只剩
- * messages_too_few 一支:空会话幂等或压缩整体失败)。
+ * Invariant asserted: the manual-compaction path must never surface "auto token
+ * gate not reached" semantics (copy like `上下文未达压缩阈值` ("context below
+ * compaction threshold") is forbidden). When compacted=false the reason collapses
+ * to `没有可压缩的上下文` ("nothing to compact"): on the manual path the only
+ * remaining no-op is messages_too_few (empty-session idempotence or whole
+ * compaction failure).
  */
 import assert from "node:assert/strict";
 import { describe, expect, it, vi } from "vitest";

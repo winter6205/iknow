@@ -1,14 +1,16 @@
 /**
- * F-4 parentTurnId 填实 — 端到端验收（stub-model，不需要真 LLM key）。
+ * parentTurnId back-fill — end-to-end acceptance (stub-model, no real LLM key needed).
  *
- * 这是本票唯一能证明"槽填实了"的测试：一条链上同时有真实的 loop-engine 回合、
- * 真实的 `spawn_subagent` 工具、真实的 SubAgentManager 埋点、真实的 JSONL 文件，
- * 最后用 traceserver 的读侧按 `parentTurnId` 反查。
+ * The only test that proves the slot is really filled: one chain carries a
+ * real loop-engine turn, the real `spawn_subagent` tool, real SubAgentManager
+ * instrumentation, and a real JSONL file; finally the traceserver reader
+ * queries back by `parentTurnId`.
  *
- * 断言两件事：
- * 1. 子代理三类 record 的 `parent_turn_id` === 同一份 JSONL 里 turn 行的 `turn_id`
- *    （两边同源，不是各写各的字符串）；
- * 2. `reader.query({ parentTurnId })` 能按该值把这些行捞回来。
+ * Asserts two things:
+ * 1. `parent_turn_id` on the three subagent record types === the `turn_id` of
+ *    a turn row in the same JSONL (both sides share one source, not
+ *    independently written strings);
+ * 2. `reader.query({ parentTurnId })` retrieves exactly those rows by that value.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -80,7 +82,7 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
       conversationId,
     });
 
-    // fake worker: 立刻吐一个 ok envelope 后退出 → manager 走完整生命周期。
+    // fake worker: emits one ok envelope then exits -> manager runs its full lifecycle.
     const okEnvelope = JSON.stringify({
       status: "ok",
       summary: "fake subagent done",
@@ -92,7 +94,7 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
         ["-e", `process.stdout.write(${JSON.stringify(okEnvelope + "\n")})`],
         { stdio: ["pipe", "pipe", "pipe"] }
       );
-    // manager 与 loop-engine 共用同一个 trace 实例 → 同一份 JSONL。
+    // manager and loop-engine share one trace instance -> one JSONL file.
     const fakeMgr = createSubAgentManager({ spawn: fakeSpawn, trace });
 
     const built = await buildHarnessEngine({
@@ -102,9 +104,10 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
-      // 本文件验 parent turn id 透传,不验溢出退场 / 索引降档(专测见
-      // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies parent turn id propagation, not overflow eviction
+      // or index downgrade (dedicated tests: build-engine-tool-overflow.test.ts,
+      // disclosure-index-align/). countTokens bypassed during wiring; seam
+      // semantics are on BuildEngineOpts.skipCountTokens.
       skipCountTokens: true,
     });
     cleanup.push(async () => {
@@ -136,7 +139,7 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
 
     const { result } = await run("go", deps);
     assert.equal(result.stopReason, "completed");
-    // manager 的埋点是 fire-and-forget（safeTrace），等它落盘。
+    // manager instrumentation is fire-and-forget (safeTrace); wait for it to flush to disk.
     await new Promise((r) => setTimeout(r, 200));
 
     const jsonlPath = join(traceDir, `${conversationId}.jsonl`);
@@ -161,7 +164,7 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
     const parentTurnId = [...parentTurnIds][0];
     assert.equal(typeof parentTurnId, "string");
 
-    // 该 id 必须真的是这份 JSONL 里某一条 turn 行的 turn_id —— 反向追溯的全部意义。
+    // The id must genuinely be some turn row's turn_id in this same JSONL — the whole point of reverse tracing.
     const turnRows = rows.filter((r) => r["record_type"] === "turn");
     assert.ok(turnRows.length >= 1);
     const matched = turnRows.filter((r) => r["turn_id"] === parentTurnId);
@@ -170,13 +173,13 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
       1,
       `parent_turn_id ${parentTurnId} must join to exactly one turn row`
     );
-    // 派发子代理的那一回合就是跑了工具的那一回合。
+    // The turn that spawned the subagent is the turn that executed the tool.
     assert.ok(
       Array.isArray(matched[0]!["tool_call_ids"]) &&
         (matched[0]!["tool_call_ids"] as unknown[]).length >= 1
     );
 
-    // 读侧：traceserver 按 parentTurnId 精确过滤能捞回同一批行。
+    // Reader side: traceserver's exact parentTurnId filter retrieves the same batch of rows.
     const reader = createJsonlTraceReader({ filePath: jsonlPath });
     const queried = reader.query({ parentTurnId: parentTurnId as string });
     assert.equal(queried.total, subagentRows.length);

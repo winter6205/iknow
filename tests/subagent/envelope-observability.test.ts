@@ -1,13 +1,12 @@
 /**
- * D-α V1 graph mode T1 — 观测地板：`envelope.fileRefs` 真写 + `stop_reason`
- * additive（spec `specs/545-d-alpha-graph-mode.md` SC5 / plan T1）。
+ * Observability floor: `envelope.fileRefs` real writes + additive `stop_reason`.
  *
- * 覆盖三条：
- *   1. `deriveFileRefs` 从权威历史的 `tool_use` 块里按 write 类工具收 `path`；
- *   2. `toOkEnvelope` / `toFailedEnvelope` 落 `stop_reason`（additive，不进
- *      `status` / `reason` 两个冻结枚举）；
- *   3. `PARENT_SCHEMA` 接受带 `stop_reason` 的信封（`additionalProperties:
- *      false` 下不声明就会被判成 ProtocolError）。
+ * Covers three things:
+ *   1. `deriveFileRefs` collects `path` from write-class tools' `tool_use` blocks in the authoritative history;
+ *   2. `toOkEnvelope` / `toFailedEnvelope` set `stop_reason` (additive, not in
+ *      the two frozen enums `status` / `reason`);
+ *   3. `PARENT_SCHEMA` accepts envelopes carrying `stop_reason` (under
+ *      `additionalProperties: false`, an undeclared field would be a ProtocolError).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";

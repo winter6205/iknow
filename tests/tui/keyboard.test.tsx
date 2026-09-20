@@ -2,19 +2,19 @@
 /**
  * tests/tui/keyboard.test.tsx
  *
- * #343 T5：键盘 / 粘贴接线回归测试，覆盖 OpenTUI
- * `useKeyboard` + `usePaste` 协议：
- *  - 普通键（press key "a"）→ 走 T6 状态机路径，**T5 暂不消费**；
- *    仅断言不崩 + 帧稳定。
- *  - 修饰键组合：ctrl+c 在 useKeyboard handler 中分流到
- *    各自的处理函数（Ctrl+C → notice）；
- *  - Bracketed paste：mockInput.pasteBracketedText(text) → usePaste
- *    触发 → 受控 inputValue 更新 → 输入框显示文本（不再显示
- *    「输入消息…」placeholder）。
- *  - Kitty 协议：testRender 默认 kittyKeyboard: true 启 Kitty 解析
- *    路径（OpenTUI 内置），不测协议字节。
+ * Keyboard / paste wiring regression tests, covering the OpenTUI
+ * `useKeyboard` + `usePaste` protocols:
+ *  - plain keys (press key "a") flow through the input state machine；
+ *    early phases did not consume them — assert only no-crash + stable frame；
+ *  - modifier combos: ctrl+c is routed inside the useKeyboard handler to its
+ *    own handler (Ctrl+C → notice)；
+ *  - bracketed paste: mockInput.pasteBracketedText(text) → usePaste fires →
+ *    controlled inputValue updates → the input box shows the text (no longer
+ *    the `输入消息…` "type a message…" placeholder).
+ *  - Kitty protocol: testRender defaults to kittyKeyboard: true, enabling the
+ *    Kitty parsing path (built into OpenTUI); protocol bytes are not tested.
  *
- * 异步纪律：setup.waitForVisualIdle() 是唯一异步等待入口。
+ * Async discipline: setup.waitForVisualIdle() is the only async wait entry point.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -95,9 +95,11 @@ async function renderAppWithInitialSession(
 }
 
 /**
- * 键事件落地 + 渲染稳定：mockInput 字节经 stdin 异步解析，OpenTUI 对快速连
- * 键可能在同一渲染批内派发多事件 — 先等 visualIdle，再小延迟让 state 更新
- * 落地，再等一次 idle 收敛。键盘类测试的统一等待入口（避免各处散写）。
+ * Key-event landing + render stabilization: mockInput bytes parse
+ * asynchronously through stdin, and OpenTUI may dispatch multiple events in
+ * one render batch for rapid keypresses — wait visualIdle first, add a small
+ * delay for state updates to land, then wait idle again to converge. The
+ * unified wait entry for keyboard-style tests (avoids scattering copies).
  */
 async function settle(
   setup: Awaited<ReturnType<typeof testRender>>
@@ -108,9 +110,10 @@ async function settle(
 }
 
 /**
- * 条件轮询帧（picker 面板打开时动效常驻，waitForVisualIdle 永不 idle —— 用
- * renderOnce + captureCharFrame 轮询，与 thinking-picker.test.tsx 的
- * untilFrame 同构）。pred 命中返回该帧。
+ * Conditional frame polling (while a picker panel is open its animation keeps
+ * running, so waitForVisualIdle never goes idle — poll with renderOnce +
+ * captureCharFrame, same shape as thinking-picker.test.tsx's untilFrame).
+ * Returns the frame once the predicate matches.
  */
 async function waitFrame(
   setup: Awaited<ReturnType<typeof testRender>>,
@@ -128,8 +131,8 @@ async function waitFrame(
   throw new Error(`waitFrame timeout (${label}):\n${setup.captureCharFrame()}`);
 }
 
-/** T8 多行输入专用装配：完整 mount（TuiApp + bridge + stub deps 单轮回复）。
- *  可选 width：窄终端场景（窄于 COLS，但须 ≥ app 层 cols 下限 40）。 */
+/** Multiline-input wiring: full mount (TuiApp + bridge + stub deps, single-round reply).
+ *  Optional width: narrow-terminal scenario (narrower than COLS, but must be ≥ the app-layer cols floor of 40). */
 async function renderMultilineApp(opts: { readonly width?: number } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-multiline-"));
   const bridge = createTuiBridge({
@@ -162,8 +165,9 @@ async function renderMultilineApp(opts: { readonly width?: number } = {}) {
       height: ROWS,
       exitOnCtrlC: false,
       consoleMode: "disabled",
-      // T8：Shift+Enter 需携带 shift 修饰 —— 走 kitty 协议（encodeKittySequence
-      // 会编码 [13;2u = shift+return）；legacy 模式 shift 修饰丢失。
+      // Shift+Enter must carry the shift modifier — via the kitty protocol
+      // (encodeKittySequence encodes [13;2u = shift+return); the shift
+      // modifier is lost in legacy mode.
       kittyKeyboard: true,
     }
   );
@@ -174,7 +178,7 @@ async function renderMultilineApp(opts: { readonly width?: number } = {}) {
   return { setup, bridge };
 }
 
-/** T8 多行输入专用 typeText：不走「/」预热（会触发 slash 候选），直接逐字符。 */
+/** Multiline typeText: skips the "/" pre-warm (which would trigger slash candidates), types char by char directly. */
 async function typeMultilineText(
   setup: Awaited<ReturnType<typeof testRender>>,
   text: string
@@ -187,7 +191,7 @@ async function typeMultilineText(
   await setup.renderOnce();
 }
 
-/** 完整 mount + 含 thinking 块的一轮 turn：供 Ctrl+O toggle 可见态断言。 */
+/** Full mount + one turn containing a thinking block: for Ctrl+O toggle visibility assertions. */
 async function renderAppWithThinking() {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-kbd-"));
   const bridge = createTuiBridge({
@@ -226,7 +230,7 @@ async function renderAppWithThinking() {
   await new Promise((r) => setTimeout(r, 500));
   await setup.waitForVisualIdle();
   await setup.waitForVisualIdle();
-  // 提交一条消息走一轮 turn（含 thinking 块）。
+  // Submit one message through a full turn (including the thinking block).
   setup.mockInput.pressKey("/");
   await new Promise((r) => setTimeout(r, 100));
   await setup.renderOnce();
@@ -241,7 +245,7 @@ async function renderAppWithThinking() {
   await new Promise((r) => setTimeout(r, 100));
   await setup.renderOnce();
   setup.mockInput.pressEnter();
-  // 等 turn 落盘 → 消息渲染含 thinking 折叠行。
+  // Wait for the turn to persist → message render includes the thinking fold line.
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
@@ -256,7 +260,7 @@ async function renderAppWithThinking() {
 test("首帧渲染：占位「输入消息…」可见，notice 区域为空", async () => {
   const setup = await renderApp();
   const frame = setup.captureCharFrame();
-  // 输入框（PromptInput）边框可见 + 占位符存在（#377 起中文占位）。
+  // Input box (PromptInput) border visible + placeholder present (now a Chinese placeholder).
   expect(frame).toContain("╭");
   expect(frame).toContain("输入消息");
   await setup.renderer.destroy();
@@ -264,28 +268,30 @@ test("首帧渲染：占位「输入消息…」可见，notice 区域为空", a
 
 test("普通键（pressKey 'a'）：T6 PromptInput 消费，渲染仍稳定不崩", async () => {
   const setup = await renderApp();
-  // T6 PromptInput 字符插入：a 进入 inputValue → 输入框显示。
+  // PromptInput character insertion: a enters inputValue → the input box shows it.
   setup.mockInput.pressKey("a");
   await settle(setup);
   expect(() => setup.captureCharFrame()).not.toThrow();
-  // 输入框里能看到 a 字符（替换占位；border/padding 让 "❯" 与 "a" 之间有视觉分隔）。
+  // The "a" character is visible in the input box (replacing the placeholder; border/padding put visual space between "❯" and "a").
   const frame = setup.captureCharFrame();
   expect(frame).toMatch(/❯.*a/);
   await setup.renderer.destroy();
 });
 
 test("修饰键 ctrl+c：useKeyboard handler 分流到复制分支（无选区 → 复制提示，stderr 零输出）", async () => {
-  // stderr 零输出是防回归核心：处置日志曾是裸 process.stderr.write，会以
-  // 裸字节画进 alternate-screen 的输入框区域，看起来像「提示词注入输入框」。
+  // Zero stderr output is the core regression guard: disposition logs used to be raw
+  // process.stderr.write, drawing raw bytes into the alternate-screen input box area
+  // and looking like "prompt injection into the input box".
   const stderr = captureStderr();
   const setup = await renderApp();
   try {
     setup.mockInput.pressCtrlC();
     await settle(setup);
     const frame = setup.captureCharFrame();
-    // 无选区 → 复制提示「无选区：先按住鼠标左键拖选文本，再按 Ctrl+C 复制。」
+    // No selection → copy hint `无选区：先按住鼠标左键拖选文本，再按 Ctrl+C 复制。` ("no selection: drag-select with the left mouse button first, then Ctrl+C to copy")
+    // ("no selection: drag-select text with the left mouse button first, then Ctrl+C to copy")
     expect(frame).toContain("无选区");
-    // 空闲复制 = 无副作用：不向 stderr 写任何东西（含 OpenTUI 的诊断流）。
+    // Idle copy = no side effects: nothing written to stderr (incl. OpenTUI's diagnostic stream).
     expect(stderr.lines.join("")).toBe("");
   } finally {
     await setup.renderer.destroy();
@@ -294,8 +300,9 @@ test("修饰键 ctrl+c：useKeyboard handler 分流到复制分支（无选区 �
 });
 
 test("Esc：canInterrupt 为真但 controller 缺席时静默无副作用", async () => {
-  // 不变式：running-fg 但 aborter 已摘（turn finally 收尾竞态）→ 不崩、
-  // 不误伤、无输出。观测面 = 帧 + stderr（controller_missing 处置日志已删）。
+  // Invariant: running-fg but the aborter was already removed (turn-finally wrap-up
+  // race) → no crash, no friendly fire, no output. Observation surface = frame +
+  // stderr (the controller_missing disposition log was deleted).
   const stderr = captureStderr();
   const initialSession = Object.freeze({
     ...createDraftSession(),
@@ -315,11 +322,11 @@ test("Esc：canInterrupt 为真但 controller 缺席时静默无副作用", asyn
 
 test("其他修饰键（shift+tab、meta+c）：不触发复制/打断分支，无 notice", async () => {
   const setup = await renderApp();
-  // shift+tab：测试 T5 状态机外键被吞、不产生 notice（完整状态机归 T6）。
+  // shift+tab: keys outside the input state machine are swallowed and produce no notice.
   setup.mockInput.pressTab({ shift: true });
   await settle(setup);
   const frame = setup.captureCharFrame();
-  // 不应出现复制提示或打断 notice
+  // Neither the copy hint nor an interrupt notice should appear
   expect(frame).not.toContain("无选区");
   await setup.renderer.destroy();
 });
@@ -330,7 +337,7 @@ test("bracketed paste：pasteBracketedText → 输入框显示粘贴文本", asy
   await setup.mockInput.pasteBracketedText(text);
   await settle(setup);
   const frame = setup.captureCharFrame();
-  // 粘贴的文本应出现在输入框（替代「输入消息…」占位）。
+  // The pasted text should appear in the input box (replacing the `输入消息…` placeholder).
   expect(frame).toContain(text);
   await setup.renderer.destroy();
 });
@@ -378,32 +385,32 @@ test("pressArrow(方向键)：不崩不消费", async () => {
 
 test("pressBackspace：T6 PromptInput 消费，输入框删除最后一个字符", async () => {
   const setup = await renderApp();
-  // 先 paste 文本，再 backspace：T6 PromptInput 接 backspace，文本删一字符。
+  // Paste text first, then backspace: PromptInput handles backspace, deleting one character.
   await setup.mockInput.pasteBracketedText("to-keep");
   await settle(setup);
   setup.mockInput.pressBackspace();
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 删掉了最后一个字符 "p"，剩下 "to-kee"
+  // The last character "p" is deleted, leaving "to-kee"
   expect(frame).toContain("to-kee");
   await setup.renderer.destroy();
 });
 
 test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
-  // 需要含 thinking 块的 assistant 答复：折叠态隐藏全文，展开态显示全文。
-  // thinking 全文。用完整 mount（TuiApp + bridge）走一轮 turn，然后 Ctrl+O
-  // 两次断言可见态翻转。
+  // Needs an assistant reply with a thinking block: collapsed state hides the full
+  // thinking text, expanded state shows it. Use the full mount (TuiApp + bridge) for
+  // one turn, then Ctrl+O twice to assert visibility flips.
   const { setup } = await renderAppWithThinking();
-  // 折叠态：思考全文不可见；无秒数时不画 [思考]。
+  // Collapsed: full thinking text not visible; without seconds, [思考] is not drawn.
   let frame = setup.captureCharFrame();
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).not.toContain("链上推理");
-  // 第一次 Ctrl+O → 展开（toggleThinking false → true）：思考全文可见。
+  // First Ctrl+O → expand (toggleThinking false → true): full thinking text visible.
   setup.mockInput.pressKey("o", { ctrl: true });
   await settle(setup);
   frame = setup.captureCharFrame();
   expect(frame).toContain("链上推理");
-  // 第二次 Ctrl+O → 折叠（true → false）：思考全文再次不可见。
+  // Second Ctrl+O → collapse (true → false): full thinking text hidden again.
   setup.mockInput.pressKey("o", { ctrl: true });
   await settle(setup);
   frame = setup.captureCharFrame();
@@ -412,7 +419,7 @@ test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
   await setup.renderer.destroy();
 });
 
-/** /effort 测试专用装配：含 pre-warm 打字的 TuiApp mount。 */
+/** /effort-only wiring: TuiApp mount with pre-warm typing. */
 async function renderEffortApp() {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-effort-"));
   const bridge = createTuiBridge({
@@ -448,9 +455,9 @@ async function renderEffortApp() {
   return setup;
 }
 
-/** pre-warm 打字（对齐 app.test.tsx / renderAppWithThinking 模式：
- *  先按一个无害键启动 mockInput 解析器，再 Backspace 清掉，再真正输入，
- *  避免首字符被吞）。 */
+/** Pre-warm typing (matching app.test.tsx / renderAppWithThinking: press a
+ *  harmless key first to start the mockInput parser, Backspace it away, then
+ *  type for real — avoids the first character being swallowed). */
 async function typeEffortText(
   setup: Awaited<ReturnType<typeof testRender>>,
   text: string
@@ -475,19 +482,19 @@ describe("/effort 思考强度调整", () => {
     const setup = await renderEffortApp();
     await typeEffortText(setup, "/effort high");
     setup.mockInput.pressEnter();
-    // 面板打开后动效常驻 → 用 waitFrame 轮询（waitForVisualIdle 永不 idle）。
+    // Once the panel is open its animation persists → poll with waitFrame (waitForVisualIdle never goes idle).
     const frame = await waitFrame(
       setup,
       (f) => f.includes("思考强度"),
       8000,
       "panel-open"
     );
-    // /effort high → 档位面板打开（seed focus=fixed=high → ▸ high ◂）。
+    // /effort high → level panel opens (seed focus=fixed=high → ▸ high ◂).
     expect(frame).toContain("▸ high ◂");
-    // 不再设「思考档位设为 …（已启用）」notice。
+    // No more "思考档位设为 …（已启用）" ("thinking level set to … (enabled)") notice.
     expect(frame).not.toContain("思考档位");
 
-    // Enter：固定（focus 已固定为 high），面板保持打开（核心新增断言）。
+    // Enter: commits the level (focus already fixed to high); the panel stays open (core new assertion).
     setup.mockInput.pressEnter();
     const afterEnter = await waitFrame(
       setup,
@@ -497,7 +504,7 @@ describe("/effort 思考强度调整", () => {
     );
     expect(afterEnter).toContain("思考强度");
 
-    // Esc：保存退出（写 thinkingEffort=high + 隐式 enabled），面板关闭。
+    // Esc: save and exit (writes thinkingEffort=high + implicit enabled), panel closes.
     setup.mockInput.pressEscape();
     await waitFrame(setup, (f) => !f.includes("思考强度"), 8000, "saved-exit");
     await setup.renderer.destroy();
@@ -509,7 +516,7 @@ describe("/effort 思考强度调整", () => {
     setup.mockInput.pressEnter();
     await settle(setup);
     const frame = setup.captureCharFrame();
-    // 非法档位 → 提示可用档位（low medium high xhigh max）+ 用法。
+    // Invalid level → lists available levels (low medium high xhigh max) + usage.
     expect(frame).toContain("low");
     expect(frame).toContain("high");
     expect(frame).toContain("xhigh");
@@ -522,15 +529,16 @@ describe("/effort 思考强度调整", () => {
     const setup = await renderEffortApp();
     await typeEffortText(setup, "/effort");
     setup.mockInput.pressEnter();
-    // 无参 → 打开档位面板（标题「思考强度」可见），不再走 notice；当前
-    // thinkingEffort="" → 面板呈自适应态（AUTO · 自适应，无档位游标）。
+    // No argument → open the level panel (title `思考强度` "thinking intensity" visible),
+    // no longer via notice; current thinkingEffort="" → panel shows adaptive state
+    // (AUTO · 自适应, no level cursor).
     const frame = await waitFrame(
       setup,
       (f) => f.includes("思考强度"),
       8000,
       "panel-open"
     );
-    expect(frame).not.toContain("/effort <level>"); // 不提示可用档位
+    expect(frame).not.toContain("/effort <level>"); // no available-levels hint
     expect(frame).toContain("自适应");
     expect(frame).toContain("AUTO");
     await setup.renderer.destroy();
@@ -539,8 +547,8 @@ describe("/effort 思考强度调整", () => {
 
 test("同一 tick 快速连发两个字符：输入框同时含两字", async () => {
   const setup = await renderApp();
-  // 无中间 await，模拟同一 tick 连发；原生 input onInput 回报全量字符串，
-  // 从根上消除旧实现「首字被吃」的竞态。
+  // No intermediate await, simulating same-tick bursts; the native input onInput
+  // reports the full string, eliminating the old "first char eaten" race at the root.
   setup.mockInput.pressKey("你");
   setup.mockInput.pressKey("好");
   await settle(setup);
@@ -567,7 +575,7 @@ test("T8 Shift+Enter：换行不提交，输入框保留两行文本", async () 
   setup.mockInput.pressEnter({ shift: true });
   await settle(setup);
   await typeMultilineText(setup, "第二行");
-  // 未提交：帧里两行文本仍可见（Shift+Enter 只换行不提交）。
+  // Not submitted: both text lines remain visible in the frame (Shift+Enter only inserts a newline, never submits).
   const frame = setup.captureCharFrame();
   expect(frame).toContain("第一行");
   expect(frame).toContain("第二行");
@@ -581,7 +589,7 @@ test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
   await settle(setup);
   await typeMultilineText(setup, "第二行");
   setup.mockInput.pressEnter();
-  // 等 turn 落盘 → 会话 title 含换行分隔的两行文本。
+  // Wait for the turn to persist → the session title contains the two newline-separated lines.
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
@@ -596,18 +604,23 @@ test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
 
 describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）", () => {
   /**
-   * 根因（T8 迁移回归，prompt-input.tsx 受控同步 effect）：`ta.setText()` 会
-   * 完全重置 buffer 并把光标挪到 offset 0 —— 旧 `<input>` value setter 自带
-   * 的 `cursorOffset = newValue.length` 恢复步骤在迁移时被丢掉。↑ 历史召回 /
-   * Tab 补全 / rewind 回填等程序写入后：Backspace 在 offset 0 是原生 no-op
-   * （「删不掉」），继续输入前插到开头（「光标跳到首字符」）。
+   * Root cause (multiline-input migration regression, prompt-input.tsx
+   * controlled sync effect): `ta.setText()` fully resets the buffer and moves
+   * the cursor to offset 0 — the old `<input>` value setter's built-in
+   * `cursorOffset = newValue.length` restoration step was lost in migration.
+   * After programmatic writes (↑ history recall / Tab completion / rewind
+   * backfill): Backspace at offset 0 is a native no-op ("cannot delete"), and
+   * further typing prepends at the start ("cursor jumps to the first char").
    *
-   * 观察手段：消息流会渲染用户消息全文（转录一份），输入框再渲染一份 ——
-   * 用帧内出现次数的变化区分两份（转录份恒在，输入框份随编辑变化）；追加
-   * 场景用「行尾紧跟新字符」的独占子串断言（转录里行尾后无该字符）。
+   * Observation technique: the message stream renders the full user text
+   * (transcript copy) and the input box renders another copy — distinguish
+   * them by the change of the in-frame occurrence count (transcript copy is
+   * constant, input-box copy changes with editing); for append scenarios use
+   * the exclusive substring "end-of-line immediately followed by the new
+   * char" (the transcript has no such char after the line end).
    */
 
-  /** 帧内子串出现次数（区分消息流转录份与输入框渲染份）。 */
+  /** Occurrence count of a substring in the frame (separates transcript copy from input-box copy). */
   function countOccurrences(frame: string, needle: string): number {
     let count = 0;
     let idx = frame.indexOf(needle);
@@ -618,7 +631,7 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     return count;
   }
 
-  /** 等 turn 落盘（inflight 清空），同上方 T8 Enter 提交用例的轮询。 */
+  /** Wait for the turn to persist (inflight drained), same polling as the Enter-submit case above. */
   async function waitTurnDone(
     setup: Awaited<ReturnType<typeof testRender>>,
     bridge: ReturnType<typeof createTuiBridge>
@@ -640,16 +653,16 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     await typeMultilineText(setup, "第二行");
     setup.mockInput.pressEnter();
     await waitTurnDone(setup, bridge);
-    // 提交后输入框清空：占位符（输入消息或 /help）重新可见。
+    // After submit the input box clears: the placeholder (输入消息 or /help) becomes visible again.
     await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
-    // ↑ 召回：占位符消失（输入框恢复完整多行文本，光标位置不影响帧）。
+    // ↑ recall: placeholder disappears (input box restores the full multiline text; cursor position doesn't affect the frame).
     setup.mockInput.pressArrow("up");
     await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
-    // 基线：消息流转录 1 份 + 输入框 1 份（≥2 同时防「召回失败」的空转通过）。
+    // Baseline: transcript 1 copy + input box 1 copy (≥2 also guards against a vacuous "recall failed" pass).
     const before = countOccurrences(setup.captureCharFrame(), "第二行");
     expect(before).toBeGreaterThanOrEqual(2);
-    // Backspace：光标应在末尾 → 删掉「行」，输入框那份消失（计数 -1）。
-    // 修复前光标被 setText 重置到 offset 0 → 原生 backspace no-op，计数不变。
+    // Backspace: cursor should be at the end → deletes 「行」, the input-box copy disappears (count -1).
+    // Before the fix setText reset the cursor to offset 0 → native backspace no-op, count unchanged.
     setup.mockInput.pressBackspace();
     await waitFrame(
       setup,
@@ -671,8 +684,9 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
     setup.mockInput.pressArrow("up");
     await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
-    // 输入 X：光标在末尾 → X 追加在「第二行」之后。转录份行尾后无 X，
-    // 「第二行X」只能来自输入框的追加位；修复前 X 前插成「X第一行」。
+    // Type X: cursor at the end → X appends after 「第二行」. The transcript copy has
+    // no X after the line end, so "第二行X" can only come from the input box's append
+    // position; before the fix X prepended as "X第一行".
     setup.mockInput.pressKey("X");
     await waitFrame(setup, (f) => f.includes("第二行X"), 8000, "append-at-end");
     expect(setup.captureCharFrame()).not.toContain("X第一行");
@@ -680,27 +694,30 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
   }, 30_000);
 
   test("窄终端 CJK：wrap 超长中文行召回后 Backspace 删掉末字符（setCursor 视觉列 clamp 到真实行尾）", async () => {
-    // spec 回归：prompt-input setText 后的光标恢复是「窄终端 CJK」承重场景 —
-    // 修复前若直接 `cursorOffset = value.length`，视觉列口径下（CJK 计 2 列）
-    // 会把光标设到行中，Backspace 删错字符；此处 width=44（窄但高于 app 层
-    // cols 下限 40 → 输入框内宽 38）验证 setCursor 越界自动 clamp 到真实行尾。
-    // 24 字中文 = 48 视觉列 > 38 → wrap 2 行，触发 wrap-aware ↑ 历史召回 +
-    // 末行行尾光标恢复路径。
+    // Regression: cursor restoration after prompt-input setText is the load-bearing
+    // "narrow-terminal CJK" case — before the fix, a naive `cursorOffset = value.length`
+    // in visual-column terms (CJK counts as 2 columns) placed the cursor mid-line, so
+    // Backspace deleted the wrong char. Here width=44 (narrow but above the app-layer
+    // cols floor of 40 → input box inner width 38) verifies setCursor's out-of-range
+    // auto-clamp to the real line end. 24 Chinese chars = 48 visual columns > 38 →
+    // wraps to 2 lines, exercising the wrap-aware ↑ history recall + last-line
+    // cursor-restoration path.
     const { setup, bridge } = await renderMultilineApp({ width: 44 });
     const wrapped = "我是一段超过窄终端列宽需要折行的中文输入内容显示";
     await typeMultilineText(setup, wrapped);
     setup.mockInput.pressEnter();
     await waitTurnDone(setup, bridge);
     await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
-    // ↑ 召回 wrap 长行（wrap-aware 越界判定 → 历史召回）。
+    // ↑ recalls the wrapped long line (wrap-aware out-of-range decision → history recall).
     setup.mockInput.pressArrow("up");
     await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
     const before = countOccurrences(
       setup.captureCharFrame(),
       wrapped.slice(-2)
     );
-    // Backspace 应删掉末字符（光标 clamp 在末行行尾）；若光标停行中会删错
-    // 字符 → 末两字份数不变 → waitFrame 超时。
+    // Backspace should delete the last char (cursor clamped at the last line's end); a
+    // cursor parked mid-line deletes the wrong char → the last-two-chars count stays the
+    // same → waitFrame times out.
     setup.mockInput.pressBackspace();
     await waitFrame(
       setup,
@@ -721,7 +738,7 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
     const before = countOccurrences(setup.captureCharFrame(), "hello");
     expect(before).toBeGreaterThanOrEqual(2);
-    // Backspace：删掉末尾 'o' → 输入框变 "hell"，"hello" 计数 -1（转录份保留）。
+    // Backspace: deletes the trailing 'o' → the input box becomes "hell", "hello" count -1 (transcript copy retained).
     setup.mockInput.pressBackspace();
     await waitFrame(
       setup,

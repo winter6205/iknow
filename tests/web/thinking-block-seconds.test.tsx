@@ -2,17 +2,18 @@
 /**
  * tests/web/thinking-block-seconds.test.tsx
  *
- * D2 (tui-display-consistency) wire surface — ThinkingBlock 渲染落盘
- * 秒数 (spec SC8 / D6):
+ * Thinking seconds on the wire surface — ThinkingBlock renders the persisted
+ * thinking duration:
  *
- *  - `thinkingMs > 0` → meta 行末尾挂「 · 思考了 N 秒」(Math.ceil(ms/1000),
- *    与 src/tui/think-fold.ts formatThinkingFold / turn-activity.ts
- *    thinkingMsToSeconds 同 posture);
- *  - `thinkingMs` 缺席 (旧会话 / Postel) → 只显示条目计数 + 已加密计数,
- *    与 spec SC8 「旧数据只显示工具计数」一致 (web 侧 thinking 块挂条
- *    目计数;工具计数在 toolCalls 区;此处 thinking 块按现有 meta 形态渲染);
- *  - AgentCard 把 `answer.thinkingMs` 透传到 ThinkingBlock;
- *  - 250ms 边界 → 1 秒 (与 TUI 同 posture)。
+ *  - `thinkingMs > 0` → meta line ends with ` · 思考了 N 秒` ("thought for N seconds",
+ *    Math.ceil(ms/1000), same posture as src/tui/think-fold.ts formatThinkingFold /
+ *    turn-activity.ts thinkingMsToSeconds);
+ *  - `thinkingMs` absent (legacy sessions / Postel) → show only the entry count +
+ *    redacted count, matching the spec rule "legacy data shows tool counts only"
+ *    (on web the thinking block carries the entry count; tool counts live in the
+ *    toolCalls area; the thinking block keeps its existing meta form);
+ *  - AgentCard passes `answer.thinkingMs` through to ThinkingBlock;
+ *  - 250ms boundary → 1 second (same posture as TUI).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -76,14 +77,14 @@ describe("ThinkingBlock — D2 wire surface 落盘秒数 (SC8)", () => {
       <ThinkingBlock thinking={thinking} thinkingMs={0} />
     );
     assert.equal(/思考了\s+\d+\s*秒/.test(html), false);
-    // meta 行只显示条目数
+    // meta line shows the entry count only
     assert.ok(html.includes("2"));
   });
 
   it("thinkingMs 缺席 (旧会话 / Postel) → 只显示条目计数,无「思考了 N 秒」", () => {
     const html = renderToStaticMarkup(<ThinkingBlock thinking={thinking} />);
     assert.equal(/思考了\s+\d+\s*秒/.test(html), false);
-    // meta 行仍存在,显示条目数
+    // meta line is still rendered, showing the entry count
     assert.ok(html.includes("2"));
   });
 

@@ -1,16 +1,18 @@
 /**
- * CLI slash skill-load — spec skill-index-increment T3（CLI 纳入与 TUI/Web
- * 同一 slash 入口）。此前 CLI 只有静态词表（`parseChatLine` → 未知命令
- * error），技能名一律落进 unknown 分支；本切片让 `/skill-name [remainder]`
- * 走可加载技能面并装配 skill-load 信封。
+ * CLI slash skill-load — spec skill-index-increment (CLI joins the same slash
+ * entry as TUI/Web). Previously CLI had only a static word list
+ * (`parseChatLine` → unknown-command error) and every skill name fell into the
+ * unknown branch; this slice makes `/skill-name [remainder]` resolve against
+ * the loadable-skill surface and assemble the skill-load envelope.
  *
- * 钉住的不变式：
- *   - 信封 byte 形态 = `buildSkillLoadText`（SSOT `src/harness/skill/body.ts`），
- *     与 TUI / hub 同源；
- *   - remainder 按 **typed token 长度**（裸名不被 canonical 长度吃掉）；
- *   - 静态词表优先（`/help` 永不落进 skill 分支）；
- *   - 未知名仍是未知命令（不误判 / 不静默）；
- *   - agents 不进 slash（CLI 侧无 agent 面，技能面即 catalog 面）。
+ * Pinned invariants:
+ *   - envelope byte shape = `buildSkillLoadText` (SSOT `src/harness/skill/body.ts`),
+ *     same source as TUI / hub;
+ *   - remainder is cut by the **typed token length** (a bare name must not be
+ *     eaten by the canonical form's length);
+ *   - static word list takes priority (`/help` never falls into the skill branch);
+ *   - unknown names remain unknown commands (no misjudgment, no silence);
+ *   - agents never enter slash (CLI has no agent surface; the skill surface is the catalog surface).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -133,7 +135,7 @@ describe("cli skill-load 端到端 — processChatLine 走信封装配", () => {
     const result = await processChatLine({ line: "/nope", ctx });
     assert.equal(result.quit, false);
     assert.equal(result.ranQuery, undefined);
-    // 未知命令走 stderr（processSlash 的 error 分支），不是 output。
+    // Unknown commands go to stderr (processSlash's error branch), not output.
     assert.ok(
       (result.stderr ?? "").includes("Unknown command"),
       `未知名必须回未知命令，实际 stderr：${result.stderr}`

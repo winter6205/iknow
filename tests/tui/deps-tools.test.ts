@@ -1,20 +1,16 @@
 /**
  * tests/tui/deps-tools.test.ts
  *
- * #343 T6-A 测试：从 archive/tui-ink/tests/deps-tools.test.ts 迁回 tests/tui/，
- * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
+ * Locks the TUI entry tool surface = full buildHarnessEngine assembly
+ * (buildTuiDeps delegates to it). Expected set is derived from the
+ * `ACI_TOOLSET_NAMES` SSOT, minus host-seam-conditional tools excluded in
+ * this scenario. Any entry point that drops a registration fails here
+ * immediately. Also verifies onToolEvent fires at the executor layer via
+ * deps.executor.
  *
- * #365 T2：buildTuiDeps 委托 buildHarnessEngine({surface:"tui"}) → 装配 SSOT 化。
- * Tracer bullet 升级:锁定 TUI 入口工具面 = buildHarnessEngine 全装配,期望
- * 集从 `ACI_TOOLSET_NAMES` SSOT 派生(本场景下剥 6 件 host 缝条件化工具),
- * 且 onToolEvent 钩子经 deps.executor 在 executor 层真实触发(T1 观测缝验收)。
- * 任何入口漏注册的工具都让此测试立即报警。
- *
- * #337 Phase B：buildTuiDeps 装配 skill catalog → 21→23 件（追加 skill（disclosure-index-align T2 删 skill_search 后只剩 1 件），静态装配经 reg.inner.list() 透出）。skill catalog 即便为空
- * 也会通过 createDefaultAciRegistry 注入 skill 一件
- * （ACI_TOOLSET_NAMES Gate 3 锁）。本测试注入 tmp userHome/cwd（mkdtemp）
- * 隔离真实 ~/.iknow / cwd——worktree 已提交的 .iknow/mcp.json 含真实
- * stdio server，不隔离会触发 subprocess 启动、拖慢且污染测试环境。
+ * Tests inject a tmp userHome/cwd (mkdtemp) to isolate the real ~/.iknow
+ * and the committed .iknow/mcp.json — without isolation the real stdio MCP
+ * server would spawn subprocesses and pollute the test environment.
  */
 import { afterEach, describe, expect, test, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -26,7 +22,7 @@ import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.js";
 import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 
-/** 最小合法 RuntimeBundle — buildTuiDeps 委托 build-engine,只读 env 字段,其余 stub。 */
+/** Minimal valid RuntimeBundle — buildTuiDeps delegates to build-engine and reads only `env`; the rest is stubbed. */
 function makeBundle(
   envOverrides: Partial<IknowEnv["web"]> = {}
 ): RuntimeBundle {
@@ -49,29 +45,29 @@ function makeBundle(
       proxy: undefined,
       ...envOverrides,
     },
-    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传。test fixture
-    // 默认 contextWindow=200000, thresholdTokens 缺省推导。
+    // IknowCompressEnv is required and passed through by build-engine;
+    // fixture uses contextWindow=200000, thresholdTokens derived by default.
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
   };
-  // buildTuiDeps 委托 buildHarnessEngine,只需 env 字段;其余 bundle 字段不读。
+  // buildHarnessEngine reads only `env`; other bundle fields are untouched.
   return { env } as unknown as RuntimeBundle;
 }
 
-// #365 T2：surface="tui" → build-engine 全装配(skillCatalog +
-// subagentManager + mcpManager + backgroundManager 均装配)。期望集
-// 从 `ACI_TOOLSET_NAMES` SSOT 派生,本测试场景下被排除的条件化工具:
+// surface="tui" → build-engine full assembly (skillCatalog + subagentManager +
+// mcpManager + backgroundManager). Expected set derives from the
+// `ACI_TOOLSET_NAMES` SSOT; conditionally-registered tools excluded here:
 //   - create-worktree / enter-worktree / exit-worktree:
-//     worktreeIsolation host 缝缺(测试 opts 不透传 worktreeIsolation)
-//   - list-worktrees / remove-worktree: 同上(同一 isolationHost
-//     缝分支下的 worktreeList / worktreeRemove)
-// ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 已常驻注册
-// (subagentManager 在场即入注册表,与 graphMode / graphAssembly 是否在场
-// 无关) —— handler isEnabled gate 缺席由缺省恒关守门,TUI 不透传 graphMode
-// 不影响工具面成员。
-// 任何新增件自动继承;append-only 仍由 registry Gate 3 镜像校验。
+//     worktreeIsolation host seam absent (test opts do not pass it)
+//   - list-worktrees / remove-worktree: same isolationHost seam branch
+// `run_graph` is now always registered whenever subagentManager is present,
+// regardless of graphMode / graphAssembly — the handler's absent isEnabled
+// gate defaults to closed, so TUI not passing graphMode does not change
+// tool-surface membership.
+// New tools are inherited automatically; append-only stays mirror-checked by
+// the registry's Gate 3 lock.
 const EXCLUDED_FOR_TUI_NO_HOST_SEAM: ReadonlyArray<string> = [
   "create-worktree",
   "enter-worktree",
@@ -84,10 +80,10 @@ const EXPECTED_TUI_TOOLSET = ACI_TOOLSET_NAMES.filter(
 );
 
 describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派生)", () => {
-  // #337 Phase B:tmp fixture 隔离真实 ~/.iknow / cwd(避免 worktree 已提交
-  // 的 .iknow/mcp.json 触发真实 stdio subprocess 启动,以及 .iknow/skills
-  // 污染 skill scanner 降级行为)。skill 静态装配(Gate 3 锁,disclosure-index-align T2 删 skill_search 后只剩 1 件):
-  // skillCatalog 提供即装两件)。
+  // tmp fixture isolates the real ~/.iknow / cwd (the committed
+  // .iknow/mcp.json would spawn real stdio subprocesses, and .iknow/skills
+  // would pollute skill-scanner degradation). skill is statically assembled
+  // (Gate 3 lock); skill_search was removed, so skillCatalog adds only it.
   const roots: string[] = [];
 
   afterEach(async () => {
@@ -109,14 +105,14 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
       .map((def) => def.name)
       .sort();
     expect(names).toEqual([...EXPECTED_TUI_TOOLSET].sort());
-    // 关键件显式断言:即使 SSOT 重排也确保这些常驻工具在 TUI surface 装配。
+    // Explicit checks for resident tools that must survive any SSOT reshuffle.
     expect(names).toContain("todo_write");
     expect(names).toContain("list_mcp_resources");
     expect(names).toContain("read_mcp_resource");
     expect(names).toContain("bash_output");
     expect(names).toContain("bash_stop");
     expect(names).toContain("query_trace");
-    // 旧 lsp_* 工具自 symbol-primary-aci T5 起退役,TUI 表面已不含它们。
+    // Old lsp_* tools retired with symbol-primary-aci; absent from the TUI surface.
     expect(names).not.toContain("lsp_definition");
     expect(names).not.toContain("lsp_diagnostics");
   });
@@ -133,15 +129,15 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
     expect(names.has("web_fetch")).toBe(true);
     expect(names.has("web_search")).toBe(true);
     expect(names.has("skill")).toBe(true);
-    // disclosure-index-align T2 / SC5:skill_search 已删,不在注册表。
+    // skill_search was deleted; it must not be in the registry.
     expect(names.has("skill_search")).toBe(false);
   });
 
   test("IKNOW_WEB_PROXY 非空时,web 工具装配抛错(fail-fast 在装配时)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-proxy-"));
     roots.push(root);
-    // 镜像 build-engine.test.ts 的同形断言 — TUI 也需 fail-fast 在装配时。
-    // #337 Phase B:buildTuiDeps 现在 async,失败经 await 转 rejection。
+    // Mirrors the same assertion in build-engine.test.ts — TUI must also fail fast at assembly.
+    // buildTuiDeps is async now, so the failure surfaces as an awaited rejection.
     await expect(
       buildTuiDeps(makeBundle({ proxy: "ftp://bad-proxy:9999" }), {
         askUser: createNoAskUser(),
@@ -152,9 +148,9 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
   });
 
   it("#558 T2: 默认 TUI 路径(自建 subagentManager)→ deps.system 不含 coordinator 段", async () => {
-    // surface="tui" → build-engine 自建 subagentManager,但 #558 T2 起
-    // 不再向 createIknowSystemResolver 透传 IKNOW_COORDINATOR_TEXT;引导
-    // 落点收敛到 spawn_subagent 工具 description (T1 SSOT)。
+    // surface="tui" → build-engine builds its own subagentManager, but
+    // IKNOW_COORDINATOR_TEXT is no longer passed to createIknowSystemResolver;
+    // coordination guidance lives solely in the spawn_subagent tool description.
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
     });
@@ -169,28 +165,28 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
   });
 });
 
-// --- #365 T2: onToolEvent 观测缝在 executor 层被触发(T1 hooks 透传验收) -----
+// --- onToolEvent observation seam fires at the executor layer -------------
 
 describe("buildTuiDeps — onToolEvent 钩子经 executor 触发(T1 观测缝)", () => {
   test("真实调用 read_file 后 stub onToolEvent 收到含 toolName/toolUseId/kind 的事件", async () => {
-    // buildTuiDeps 委托 build-engine,沙箱根 = process.cwd()(TUI 启动目录语义,
-    // buildTuiDeps 不透传 sandboxRoot)。fixture 文件必须落在 cwd 内,否则
-    // read_file 以 path outside workspace 拒绝。
+    // build-engine's sandbox root = process.cwd() (TUI startup-dir semantics;
+    // buildTuiDeps does not pass sandboxRoot). The fixture file must live under
+    // cwd or read_file rejects it with "path outside workspace".
     const root = await mkdtemp(join(process.cwd(), ".iknow-tui-hooks-"));
     const filePath = join(root, "note.txt");
     await writeFile(filePath, "hello tui hooks\n", "utf8");
 
     const events: TuiToolEvent[] = [];
-    // soleInflightId 不传 → undefined → 归因抑制;显式注入使事件能发出。
+    // Without soleInflightId → undefined → attribution suppressed; inject explicitly so events emit.
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
       soleInflightId: () => "conv-1",
       onToolEvent: (event) => {
         events.push(event);
       },
-      // #337 Phase B:userHome/cwd 注入 tmp 隔离真实 ~/.iknow + worktree 已提交
-      // 的 .iknow/mcp.json(避免 npx subprocess 启动)。fixture 文件仍在 root
-      // 内(read_file 的 cwd 语义 = root)。
+      // tmp userHome/cwd isolate the real ~/.iknow and the committed
+      // .iknow/mcp.json (avoid npx subprocess spawn). The fixture file stays
+      // inside root (read_file's cwd semantics = root).
       userHome: join(root, "home"),
       cwd: root,
     });
@@ -201,7 +197,7 @@ describe("buildTuiDeps — onToolEvent 钩子经 executor 触发(T1 观测缝)",
       ]);
       expect(result.kind).toBe("ok");
 
-      // 关键断言:钩子被触发,事件含归因 conversationId + toolName + toolUseId + kind。
+      // Key assertion: hook fired with attribution conversationId + toolName + toolUseId + kind.
       expect(events.length).toBeGreaterThan(0);
       const event = events[0];
       expect(event.conversationId).toBe("conv-1");

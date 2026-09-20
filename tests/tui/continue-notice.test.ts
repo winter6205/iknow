@@ -1,7 +1,7 @@
 /**
- * T4 (#690): /continue EXIT copy + client busy-guard 纯函数。
+ * Pure functions: /continue EXIT copy + client busy-guard.
  *
- * bun:test（tests/tui 不进 vitest 默认收集）。
+ * bun:test (tests/tui is outside vitest's default collection).
  */
 import { describe, expect, test } from "bun:test";
 import { ValidationError } from "../../src/shared/errors.js";

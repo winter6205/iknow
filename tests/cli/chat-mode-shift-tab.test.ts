@@ -1,14 +1,15 @@
 /**
  * tests/cli/chat-mode-shift-tab.test.ts
  *
- * W2 扩展：REPL Shift+Tab 翻权限模式的独立单测（不依赖真实 TTY，
- * runChatSession 的 keypress 监听内部调 applyShiftTabModeFlip）。
+ * Standalone unit test for the REPL Shift+Tab permission-mode flip: no real
+ * TTY needed, since runChatSession's keypress listener delegates to
+ * applyShiftTabModeFlip.
  *
- * 覆盖边界（计划 §Validation）：
- *  - shift+tab → default → full_auto → default 循环；
- *  - plan 按 shift+tab → 直达 full_auto（不入 default）；
- *  - 非 shift+tab（普通 tab / miss shift / ctrl / meta）→ 不消费；
- *  - ctx 缺省（ask/serve 路径）→ 短路 no-op，零回归。
+ * Boundaries covered:
+ *  - shift+tab cycles default → full_auto → default;
+ *  - shift+tab from plan jumps straight to full_auto (skips default);
+ *  - non-shift+tab (plain tab / missing shift / ctrl / meta) is not consumed;
+ *  - absent ctx (ask/serve path) short-circuits to a no-op, zero regression.
  */
 
 import { describe, it } from "vitest";
@@ -50,7 +51,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     assert.equal(get(), "full_auto");
     assert.deepEqual(flips, ["full_auto"]);
 
-    // 再按 → default
+    // second press → default
     assert.equal(
       applyShiftTabModeFlip({
         key: { name: "tab", shift: true },

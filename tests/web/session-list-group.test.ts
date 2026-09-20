@@ -1,13 +1,13 @@
 /**
- * serve-workspace T4 — Sidebar 按 workspace 分组的纯逻辑单测 (node + vitest)。
+ * Pure-logic unit tests for the sidebar's per-workspace grouping (node + vitest).
  *
- * 镜像 `tests/web/session-info.test.ts` 模式 (直接 import 纯函数, 不依赖
- * jsdom / fetch)。web 包禁装 vitest (spec A8/A10), 这些测试由根 vitest
- * 收集。
+ * Mirrors `tests/web/session-info.test.ts` (import pure functions directly, no
+ * jsdom / fetch). The web package may not install vitest, so the root vitest
+ * collects these tests.
  *
- * 覆盖 AC #1 (分组 + key + label + count) / #2 (活跃置顶 + unbound 末尾
- * + 组内 latest 倒序) / #5 (组内 session 按 sortSessionsByUpdatedDesc 不变)
- * / 边界 (空 / 全 unbound / 全 bound / 缺字段)。
+ * Covers grouping (key + label + count), active-group pinning, unbound forced
+ * last, latest-desc ordering inside and across groups, and boundaries (empty /
+ * all unbound / all bound / missing fields).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -69,10 +69,10 @@ describe("groupSessionsByWorkspace — 基本分组", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, null);
-    // 两组: active=null 时仅按"组内最新 updatedAt desc"
+    // two groups: with active=null, order only by latest in-group updatedAt desc
     const keys = groups.map((g) => g.key).sort();
     assert.deepEqual(keys, ["/r/a", "/r/b"]);
-    // 空数组: unbound 组只在有缺字段时出现
+    // no unbound group unless some sessions lack workspaceRoot
     assert.equal(
       groups.find((g) => g.key === "(未绑定)"),
       undefined
@@ -147,13 +147,13 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, "b-new");
-    // active 组(/r/b)置顶, 另一组按 latest updatedAt desc 排
+    // active group (/r/b) pinned first; the other ordered by latest updatedAt desc
     assert.equal(groups[0]?.key, "/r/b");
     assert.equal(groups[0]?.isActive, true);
   });
 
   it("活跃组在多组中不论最新与否都置顶", () => {
-    // active 组是较老的; 另一组有更新的
+    // the active group is the older one; the other group has newer sessions
     const sessions = [
       item({
         id: "old",
@@ -172,9 +172,9 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, "old");
-    assert.equal(groups[0]?.key, "/r/older"); // 活跃组置顶
+    assert.equal(groups[0]?.key, "/r/older"); // active group pinned first
     assert.equal(groups[0]?.isActive, true);
-    assert.equal(groups[1]?.key, "/r/newer"); // 其他按最新倒序
+    assert.equal(groups[1]?.key, "/r/newer"); // others sorted by latest desc
   });
 
   it("(未绑定) 组固定末尾, 即便其最新", () => {
@@ -187,7 +187,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, null);
-    // 无活跃会话 → 按组内最新倒序,但 unbound 强制末尾
+    // no active session → latest-desc ordering, but unbound is forced last
     assert.equal(groups[groups.length - 1]?.key, "(未绑定)");
   });
 
@@ -202,8 +202,8 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       item({ id: "u2", updatedAt: "2026-07-30T04:00:00.000Z" }),
     ];
     const groups = groupSessionsByWorkspace(sessions, "active");
-    assert.equal(groups[0]?.key, "/r/active"); // 活跃置顶
-    assert.equal(groups[groups.length - 1]?.key, "(未绑定)"); // 末尾
+    assert.equal(groups[0]?.key, "/r/active"); // active pinned first
+    assert.equal(groups[groups.length - 1]?.key, "(未绑定)"); // unbound last
   });
 
   it("其余组按组内最新 updatedAt 倒序", () => {
@@ -235,7 +235,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, "active");
-    // /r/active 在顶(活跃); 然后 /r/newer (latest 05:30), /r/mid, /r/older
+    // /r/active on top (active); then /r/newer (latest 05:30), /r/mid, /r/older
     assert.deepEqual(
       groups.map((g) => g.key),
       ["/r/active", "/r/newer", "/r/mid", "/r/older"]
@@ -243,9 +243,9 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
   });
 
   it("活跃组的 session 在 currentBoundRoot 不匹配时也置顶 — '找得到当前会话'优先", () => {
-    // 当前会话是 "missing" 在 /r/a; 即便另一个组 /r/b 有更新的 session。
-    // 这不应该让 active 组掉到末尾: currentConversationId 决定 isActive。
-    // (T7b M2 移除 currentBoundRoot 参数 — 该参数从未影响排序。)
+    // Current session "missing" is in /r/a, even though /r/b has newer sessions.
+    // The active group must not sink: currentConversationId alone decides isActive.
+    // (currentBoundRoot was later removed as a param — it never affected ordering.)
     const sessions = [
       item({
         id: "missing",
@@ -259,7 +259,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       }),
     ];
     const groups = groupSessionsByWorkspace(sessions, "missing");
-    assert.equal(groups[0]?.key, "/r/a"); // active 置顶
+    assert.equal(groups[0]?.key, "/r/a"); // active pinned first
     assert.equal(groups[0]?.isActive, true);
   });
 });

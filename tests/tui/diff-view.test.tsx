@@ -2,12 +2,14 @@
 /**
  * tests/tui/diff-view.test.tsx
  *
- * #343 T4：diff-view 渲染器（OpenTUI 版）：
- *  - diffRowText 三档宽度文本形状（cols>=80 双列行号 / 40–79 单列 / <40 仅 add）；
- *  - DiffView 帧渲染：hunk 头、行号列、窄终端折叠；
- *  - captureSpans 着色断言（归档 it.skip 的真上色契约，OpenTUI 下可实测）：
- *    add 行 fg 绿（#2ea043）+ 整行淡绿底（#1f3d2b），del 行 fg 红（#d73a49）
- *    + 淡红底（#3d1f24），各至少一条。
+ * diff-view renderer (OpenTUI):
+ *  - diffRowText text shapes across three width tiers (cols>=80 dual-line-number
+ *    / 40–79 single / <40 add-only);
+ *  - DiffView frame render: hunk header, line-number column, narrow-terminal folding;
+ *  - captureSpans coloring asserts (the real-color contract that was it.skip'd in
+ *    the archive, now measurable under OpenTUI): add lines fg green (#2ea043)
+ *    + full-line light-green bg (#1f3d2b), del lines fg red (#d73a49)
+ *    + light-red bg (#3d1f24), at least one each.
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -23,7 +25,7 @@ function editRows(oldText: string, newText: string): readonly DiffLine[] {
   return computeDiff("a.ts", oldText, newText);
 }
 
-/** hex → [r,g,b] 0-1 浮点（captureSpans 的 RGBA 口径）。 */
+/** hex → [r,g,b] floats 0-1 (captureSpans RGBA convention). */
 function hex01(hex: string): [number, number, number] {
   return [
     parseInt(hex.slice(1, 3), 16) / 255,
@@ -32,7 +34,7 @@ function hex01(hex: string): [number, number, number] {
   ];
 }
 
-/** 帧中是否存在一个 span：文本含 needle 且 fg（可选 bg）与 hex 匹配（±1/255）。 */
+/** Does the frame contain a span whose text includes needle with fg (and optional bg) matching hex (±1/255)? */
 function hasSpan(
   frame: CapturedFrame,
   needle: string,
@@ -58,7 +60,7 @@ function hasSpan(
   );
 }
 
-/** 帧中是否存在任一 cell 的背景色 = hex（整行遮罩可能落在文本外 cell）。 */
+/** Does any cell in the frame have bg = hex (full-row masks may land on cells outside the text)? */
 function hasBgCell(frame: CapturedFrame, bgHex: string): boolean {
   const [r, g, b] = hex01(bgHex);
   const eps = 1.5 / 255;
@@ -188,7 +190,7 @@ describe("DiffView 着色（captureSpans）", () => {
     const spans = setup.captureSpans();
     expect(hasSpan(spans, "+TWO", tuiPalette.add)).toBe(true);
     expect(hasBgCell(spans, tuiPalette.bgAdd)).toBe(true);
-    // 折叠无 del → 无淡红底。
+    // Folded: no del line → no light-red bg.
     expect(hasBgCell(spans, tuiPalette.bgDel)).toBe(false);
     await setup.renderer.destroy();
   });

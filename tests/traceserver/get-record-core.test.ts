@@ -26,9 +26,7 @@ import {
 import { TraceReadError } from "../../src/traceserver/types.ts";
 
 /**
- * Contract suite for `get_record` — the third read axis (plan
- * `trace-mcp-read-side-split` T6; **item 14 is the contract SSOT**, spec SC6 /
- * SC7 / SC8 / SC16 / SC18 / SC20).
+ * Contract suite for `get_record` — the third read axis.
  *
  * What makes this axis different from the other two: its read unit is a
  * character window the caller names, so the response is a fact about one span of
@@ -36,12 +34,13 @@ import { TraceReadError } from "../../src/traceserver/types.ts";
  * every assertion below.
  *
  *   1. A coordinate that does not take part in addressing is **rejected**, never
- *      ignored (item 14's 「参与寻址的坐标必须被回答，不被使用的坐标必须被拒」).
+ *      ignored (the contract: 「参与寻址的坐标必须被回答，不被使用的坐标必须被拒」 —
+ *      coordinates that participate in addressing must be answered, unused ones rejected).
  *   2. A window must lie entirely inside its part, so a successful call returns
  *      **exactly `count` characters** — that is what makes `count` a read unit
  *      whose response size can be budgeted in advance.
  *   3. Every failure the axis can raise is a typed error with its own `kind` and
- *      **no tool name in the message** (Assumption 5 / SC16): prefixing belongs
+ *      **no tool name in the message**: prefixing belongs
  *      to the two thin faces.
  *
  * The reader is never mocked: each case writes a real `.jsonl` under a temp dir.
@@ -49,7 +48,7 @@ import { TraceReadError } from "../../src/traceserver/types.ts";
 
 const traceDirs: string[] = [];
 /**
- * T6 (SC16): all sessions sit at
+ * All sessions sit at
  *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
  */
 const TEST_PROJECT_SLUG = "test-project-get-record-core";
@@ -92,8 +91,8 @@ function writeSession(
 }
 
 /**
- * T6 (SC10/SC14): blob dir sits at `<traceDir>/projects/<slug>/<convId>/blobs`.
- * Mirror of the writer's `JsonlTraceService` default (T3, ADR-0071 D4).
+ * The blob dir sits at `<traceDir>/projects/<slug>/<convId>/blobs`.
+ * Mirror of the writer's `JsonlTraceService` default (ADR-0071 D4).
  */
 function writeBlobFile(
   traceDir: string,
@@ -146,8 +145,8 @@ function textMessage(index: number, blocks: number, chars: number) {
 }
 
 /**
- * The rendering rule item 14 leaves to the implementation, stated here as the
- * contract the tests hold it to: a content block is addressable as the text it
+ * The rendering rule the contract leaves to the implementation, stated here as
+ * the contract the tests hold it to: a content block is addressable as the text it
  * is stored as — a bare string stays a string, anything else is its JSON text.
  * Written independently of `src/` on purpose, so changing the implementation
  * silently cannot flip these cases green.
@@ -276,7 +275,7 @@ describe("get_record core — record addressing", () => {
   });
 
   it("reports an absent session file as session_not_found, not as an empty answer", async () => {
-    // Item 14 moved this kind out of T7: reusing `record_not_found` here would
+    // This kind is deliberately not `record_not_found`: reusing it here would
     // mislabel "no such session" as "no such record" — the record may well
     // exist, it was just never looked at.
     const traceDir = makeTraceDir();
@@ -299,7 +298,7 @@ describe("get_record core — record addressing", () => {
     const core = coreFor(traceDir, [llmCallRow("c1", 1, { messages: [] })]);
 
     // Same fixture, same missing id: query_trace's list face still returns
-    // `records: []` (that path leaves in T7). Naming a record is a request that
+    // `records: []` (a silent empty list is the row axis's answer). Naming a record is a request that
     // can only be answered one of two ways, and "nothing matched" is not a
     // result — it is an error.
     await assert.rejects(
@@ -365,7 +364,7 @@ describe("get_record core — record addressing", () => {
   });
 
   it("surfaces a TraceSessionNotFoundError when the conversation folder has no trace.jsonl", async () => {
-    // T6 (SC14–SC17): the conv folder exists but carries no trace.jsonl. The
+    // The conv folder exists but carries no trace.jsonl. The
     // old layout would EISDIR a directory named `<convId>.jsonl`; the new
     // layout skips folders without the canonical name. The session is therefore
     // "not found" (vs. "session folder present but unreadable"). The test now
@@ -430,8 +429,8 @@ describe("get_record core — arm selection", () => {
           message_index: messageIndex,
           part_index: partIndex,
           chars: partText(part).length,
-          // v1.2 判据 (a): 清单臂 parts 携带所属 message 的 role. user
-          // 消息的 part 携带 "user", assistant 消息的 part 携带 "assistant".
+          // The inventory arm's parts carry their message's role: parts of a
+          // user message carry "user", parts of an assistant message carry "assistant".
           role: message.role,
         }))
       )
@@ -868,7 +867,8 @@ describe("get_record core — the window arm", () => {
         assert.equal(error.kind, "window_overflow");
         assert.equal(error.partChars, partChars);
         assert.equal(error.remaining, 1);
-        // 「不回传任何 part 字节」: the natural wrong answer is "you asked for 3
+        // 「不回传任何 part 字节」 ("return no part bytes"): the natural wrong
+        // answer is "you asked for 3
         // past the end, here are the 1 that fit". assert.rejects already proves no
         // text was returned; this proves the message does not smuggle any either.
         assert.ok(
@@ -885,7 +885,8 @@ describe("get_record core — the window arm", () => {
   });
 
   it("keeps every surface of the overflow error free of part bytes", async () => {
-    // 「不回传任何 part 字节」 as a property, not a substring spot-check. The case
+    // 「不回传任何 part 字节」 ("return no part bytes") as a property, not a
+    // substring spot-check. The case
     // above pins `message` exactly, which covers the message; it cannot see a
     // field added to the error later (a `text` holding "the part that fitted",
     // say), and such a field would ride out through whichever thin face
@@ -1089,7 +1090,7 @@ describe("get_record core — the window arm", () => {
 
 describe("get_record core — units and bounds", () => {
   it("counts UTF-16 code units, so a window may split a surrogate pair", async () => {
-    // Item 14's unit ruling, pinned as a consequence rather than a restatement:
+    // The unit ruling, pinned as a consequence rather than a restatement:
     // `chars` is `.length`, the window is `.slice`, and the only observable
     // outcome of cutting between the halves of a pair is a lone surrogate that
     // JSON.stringify then escapes. A byte-counted axis could not produce this.
@@ -1212,7 +1213,7 @@ describe("get_record core — units and bounds", () => {
   });
 
   it("exposes 400 as the default window and 16000 as the ceiling", () => {
-    // Sizes come from the plan's measurements (message p50=393, part
+    // Sizes come from the measured part distribution (message p50=393, part
     // p99=13,848, part max=43,174): the default fits a median message, the
     // ceiling fits a p99 part in one window. Neither number is a promise about
     // response size — `count` budgets body characters, and the case below is
@@ -1233,8 +1234,8 @@ describe("get_record core — units and bounds", () => {
     //      leaves the echoed coordinates standing (a caller can then re-issue with
     //      a smaller `count` without re-addressing).
     //
-    // The ceiling is deliberately **not** derived from the backstop: plan line 68
-    // is the part distribution (p99 = 13,848, max = 43,174 characters), and
+    // The ceiling is deliberately **not** derived from the backstop: it follows
+    // the part distribution (p99 = 13,848, max = 43,174 characters), and
     // `src/traceserver/get-record-core.ts` says outright that `count` budgets body
     // characters, not response size — JSON escaping alone can push a maximal
     // response past 20 000, which the case in the output-shape block measures. The
@@ -1289,7 +1290,7 @@ describe("get_record core — blobs, output shape, and description", () => {
         message_index: 0,
         part_index: 0,
         chars: partText(stored.content[0]).length,
-        // v1.2 判据 (a): blob 模式下解引用后的 role 必须出现在清单臂 part 上.
+        // In blob mode the dereferenced role must appear on the inventory part.
         role: stored.role,
       },
     ]);
@@ -1490,7 +1491,7 @@ describe("get_record core — blobs, output shape, and description", () => {
       !/capped|[0-9]+ ?characters/i.test(GET_RECORD_DESCRIPTION),
       "the description claims a character cap"
     );
-    // #483 D9: positive-trigger phrasing, no blocklist imperative. The substring
+    // Positive-trigger phrasing, no blocklist imperative. The substring
     // form matters — "whenever" contains "never".
     assert.ok(
       !/do not|don't|avoid|should not|shouldn't|never|trivial/i.test(
@@ -1509,7 +1510,7 @@ describe("get_record core — shared scan with the row axis", () => {
   it("raises record_scan rather than record_not_found once the scan cap is exhausted", async () => {
     // The two "not found" answers are different claims: one says the file holds
     // no such id, the other says the scan stopped early. get_record reads through
-    // the same single implementation query_trace uses until T7, so the cap and
+    // the same single implementation query_trace uses, so the cap and
     // the message are shared, not re-derived here.
     const traceDir = makeTraceDir();
     const rows: Record<string, unknown>[] = [];
@@ -1530,10 +1531,11 @@ describe("get_record core — shared scan with the row axis", () => {
   });
 });
 describe("get_record core — role projection (v1.2)", () => {
-  // spec v1.2 判据 (a): detail=messages 清单臂每个 part 携带所属 message 的 role。
-  // detail=tool_results 不加 role（tool_result 按定义在 user 侧）。
-  // 窗臂不加 role（窗正文寻址已有 message_index，role 在清单臂给出）。
-  // ADR-0003 LLM call messages[].role 值域：user / assistant / tool / system。
+  // Role-projection contract, criterion (a): detail=messages manifest parts carry
+  // their message's role; detail=tool_results parts do not (tool_result is by
+  // definition on the user side); window responses do not either (a window is
+  // already addressed via message_index, and role comes from the manifest arm).
+  // ADR-0003: LLM call messages[].role ranges over user / assistant / tool / system.
   it("carries role on every detail=messages manifest part (v1.2 判据 a)", async () => {
     const traceDir = makeTraceDir();
     // Two distinct roles in two messages, plus an intra-message block. The
@@ -1596,9 +1598,10 @@ describe("get_record core — role projection (v1.2)", () => {
   });
 
   it("dereferences blob messages and still exposes role on the manifest parts", async () => {
-    // ADR-0036 blob 解引用必须发生在投影之前。blob 里存的是 user 角色, 解
-    // 引用后清单臂的 part 仍应读到 user。message_index=0/part_index=0 之上
-    // 的 role 字段即解引用后的角色; 缺失则意味着 blob 路径漏了字段。
+    // ADR-0036: blob dereferencing must happen before projection, so the
+    // dereferenced user role still shows on the manifest part. The role field on
+    // message_index=0/part_index=0 is that dereferenced role; a missing field
+    // would mean the blob path dropped it.
     const traceDir = makeTraceDir();
     const stored = {
       role: "user",
@@ -1621,8 +1624,8 @@ describe("get_record core — role projection (v1.2)", () => {
   });
 
   it("window arm response carries no role key (四禁: 窗正文寻址已有 message_index)", async () => {
-    // 窗臂的判据是 SC8 维持不变: 窗响应仍不添 role. role 在清单臂给出,
-    // 窗臂只回答窗的事实. 这里钉住「未引入」, 免得有人顺手补上.
+    // Windows stay role-free: role comes from the manifest arm, a window answers
+    // only the window's facts. Pinning "not introduced" so nobody adds it casually.
     const traceDir = makeTraceDir();
     const core = coreFor(traceDir, [
       llmCallRow("c1", 1, {

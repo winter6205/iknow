@@ -1,20 +1,23 @@
 /**
  * tests/tui/verify-banner.test.ts
  *
- * T3 (#458 包2) — TUI verify 终态人读 banner:
+ * TUI verify final-state human-readable banner:
  *
- *  - HITL + auto 双模式都显示 passed / failed / unstable / escalated 4 终态;
- *  - 缺 verify → 静默(0 行,组件 render null,无虚假提示);
- *  - wire 形状非法(runtime boundary)→ degraded「验证结果不可用」+ 渲染
- *    typed-error 详情(code-quality.md typed-error 渲染契约:识别 `kind`,
- *    `${kind}: ${conversation_id}`,禁用 err.message 回退);
- *  - 行账联动 chromeReserveRows.verifyRows(baseline 7 不变);
- *  - bridge postMessage 在 TuiPostResult 上透传 verify DTO(bwrap-guard);
- *  - app.tsx 接线守卫(grep):import + chromeReserveRows 调用传入 verifyRows。
+ *  - both HITL and auto modes show the passed / failed / unstable / escalated
+ *    final states;
+ *  - verify missing → silent (0 lines, component renders null, no fake hint);
+ *  - illegal wire shape (runtime boundary) → degraded `验证结果不可用`
+ *    ("verification result unavailable") + typed-error detail rendering
+ *    (code-quality.md typed-error rendering contract: recognize `kind`,
+ *    `${kind}: ${conversation_id}`, err.message fallback forbidden);
+ *  - row accounting wired into chromeReserveRows.verifyRows (baseline 7 unchanged);
+ *  - bridge postMessage passes the verify DTO through on TuiPostResult (bwrap-guarded);
+ *  - app.tsx wiring guard (grep): import + chromeReserveRows call passes verifyRows.
  *
- * 注:全 TUI 真实 mount(端到端渲染)交给后续 plan 任务处理(verifyConfig +
- * bwrap + OpenTUI testRender 链路已较重);本套件钉住投影 + 行账 + bridge
- * 透传 + 接线 source 守卫四项 T3 契约。
+ * Note: the full-TUI real mount (end-to-end rendering) is deferred to a later
+ * task (the verifyConfig + bwrap + OpenTUI testRender chain is already heavy);
+ * this suite pins the four contracts: projection + row accounting + bridge
+ * passthrough + wiring source guard.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -45,13 +48,13 @@ import {
 } from "../../src/tui/hub-bridge.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
-/** bwrap 可用性守卫(无 bwrap → e2e 用例 skip,与 hub-verify.test.ts 同纪律)。 */
+/** bwrap availability guard (no bwrap → e2e case skips, same discipline as hub-verify.test.ts). */
 function hasBwrap(): boolean {
   return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
 // =============================================================================
-// 投影矩阵:HITL × 4 终态
+// Projection matrix: HITL × 4 final states
 // =============================================================================
 describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色", () => {
   test("passed → 「✓ 验证通过（N 轮）」fg=palette.add", () => {
@@ -122,7 +125,7 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
 });
 
 // =============================================================================
-// 投影:auto 模式视觉标记("[auto] " 前缀,文案照旧)
+// Projection: auto mode visual marker ("[auto] " prefix, wording unchanged)
 // =============================================================================
 describe("projectVerifyBanner — auto 模式视觉标记", () => {
   test("passed + auto → 「[auto] 」前缀 + 验证通过", () => {
@@ -166,7 +169,7 @@ describe("projectVerifyBanner — auto 模式视觉标记", () => {
 });
 
 // =============================================================================
-// 合法态:缺 verify → 静默(0 行,不渲染)
+// Legal state: verify missing → silent (0 lines, not rendered)
 // =============================================================================
 describe("projectVerifyBanner — 缺 verify 静默合法态", () => {
   test('slot.kind === "none" → 0 行', () => {
@@ -177,7 +180,7 @@ describe("projectVerifyBanner — 缺 verify 静默合法态", () => {
 });
 
 // =============================================================================
-// 投影失败 → degraded「验证结果不可用」(typed-error 渲染契约)
+// Projection failure → degraded `验证结果不可用` ("verification result unavailable"; typed-error rendering contract)
 // =============================================================================
 describe("projectVerifyBanner — 投影失败 degraded (typed-error 契约)", () => {
   test("kind + conversation_id → 「⚠ 验证结果不可用（kind: conv_id）」", () => {
@@ -205,7 +208,7 @@ describe("projectVerifyBanner — 投影失败 degraded (typed-error 契约)", (
 });
 
 // =============================================================================
-// 截断:cols 视觉宽度不外溢
+// Truncation: cols visual width never overflows
 // =============================================================================
 describe("projectVerifyBanner — 视觉宽度截断", () => {
   test("cols=10 极窄 → 文本宽度 ≤ cols(CJK-safe)", () => {
@@ -230,7 +233,7 @@ describe("projectVerifyBanner — 视觉宽度截断", () => {
 });
 
 // =============================================================================
-// wire 校验入口(runtime boundary):verifyFromWire
+// Wire validation entry (runtime boundary): verifyFromWire
 // =============================================================================
 describe("verifyFromWire — wire 形状 runtime 校验", () => {
   test("undefined / null → none(合法态,字节缺席)", () => {
@@ -303,7 +306,7 @@ describe("verifyFromWire — wire 形状 runtime 校验", () => {
 });
 
 // =============================================================================
-// typed-error 渲染契约(code-quality.md):describeVerifyErrorDetail
+// typed-error rendering contract (code-quality.md): describeVerifyErrorDetail
 // =============================================================================
 describe("describeVerifyErrorDetail — typed-error 渲染契约 (code-quality.md)", () => {
   test("kind + conversation_id → 「kind: conv_id」", () => {
@@ -335,14 +338,14 @@ describe("describeVerifyErrorDetail — typed-error 渲染契约 (code-quality.m
   });
 
   test("plain Error → null(契约禁止 err.message 回退)", () => {
-    // 必须识别 kind 字段 → 没有 kind → 视为 plain error → null。
-    // 上层不允许用 err.message / String(err) 渲染 (code-quality 契约)。
+    // Must recognize the kind field → no kind → treated as plain error → null.
+    // Upper layers must not render via err.message / String(err) (code-quality contract).
     expect(describeVerifyErrorDetail(new Error("secret stack"))).toBeNull();
   });
 });
 
 // =============================================================================
-// chromeReserveRows 行账联动(baseline 7 不变 + verifyRows=1 +1)
+// chromeReserveRows row accounting (baseline 7 unchanged + verifyRows=1 → +1)
 // =============================================================================
 describe("chromeReserveRows — verifyRows 行账联动", () => {
   const base = {
@@ -376,12 +379,14 @@ describe("chromeReserveRows — verifyRows 行账联动", () => {
 });
 
 // =============================================================================
-// 端到端:createTuiBridge.postMessage 透传 verify DTO
-// (T2 把"passed"挂上 wire;bridge 必须把它透到 TuiPostResult 上)
+// End-to-end: createTuiBridge.postMessage passes the verify DTO through
+// (the upstream change hooked "passed" onto the wire; the bridge must carry
+// it onto TuiPostResult)
 //
-// 时序纪律(与 tests/session-api/hub-verify.test.ts 同款):process.chdir /
-// tmpdir 建拆必须在 beforeAll / afterAll —— describe collection 阶段执行
-// chdir 会先于 test 执行被 finally 还原,导致闭环沙箱 cwd 落错目录。
+// Timing discipline (same as tests/session-api/hub-verify.test.ts): process.chdir
+// / tmpdir setup-teardown must live in beforeAll / afterAll — running chdir
+// during describe collection executes before the tests and gets restored in
+// finally, so the closed-loop sandbox cwd lands in the wrong directory.
 // =============================================================================
 describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
   let dataDir: string;
@@ -393,15 +398,16 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
   beforeAll(() => {
     dataDir = mkdtempSync(join(tmpdir(), "iknow-verify-bridge-data-"));
     workDir = mkdtempSync(join(tmpdir(), "iknow-verify-bridge-work-"));
-    // 脚本 + marker 必须落在 dataDir（= bridge workspaceRoot = verify 沙箱
-    // cwd）内：fence `--tmpfs /tmp` 后只重绑 cwd/home，兄弟 tmp 目录在沙箱
-    // 内不可见，脚本放 workDir 会被 ENOENT 收敛成 exit 127 → failed。
+    // The script + marker must live inside dataDir (= bridge workspaceRoot =
+    // verify sandbox cwd): after the fence's `--tmpfs /tmp` only cwd/home are
+    // re-bound, sibling tmp dirs are invisible inside the sandbox, and a script
+    // in workDir would ENOENT-converge to exit 127 → failed.
     marker = join(dataDir, "verify-ran.marker");
     passScript = join(dataDir, "verify-pass.sh");
     writeFileSync(passScript, `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, {
       mode: 0o755,
     });
-    // 闭环沙箱 cwd = process.cwd() → 切到隔离工作目录 (不碰真实工作区)。
+    // Closed-loop sandbox cwd = process.cwd() → switch to an isolated working dir (don't touch the real workspace).
     prevCwd = process.cwd();
     process.chdir(workDir);
   });
@@ -444,14 +450,14 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
         text: "fix it",
       });
       expect(res.verify).toEqual({ outcome: "passed", rounds: 1 });
-      // 验证命令实跑铁证:闭环沙箱执行了脚本。
+      // Hard evidence the verify command really ran: the closed-loop sandbox executed the script.
       expect(existsSync(marker)).toBe(true);
     }
   );
 });
 
 // =============================================================================
-// 接线守卫(grep):app.tsx 必须 import verify-banner + 把 verifyRows 入账
+// Wiring guard (grep): app.tsx must import verify-banner + book verifyRows
 // =============================================================================
 describe("接线守卫:app.tsx 接入 verify-banner", () => {
   const appPath = join(import.meta.dir, "..", "..", "src", "tui", "app.tsx");
@@ -463,13 +469,13 @@ describe("接线守卫:app.tsx 接入 verify-banner", () => {
 
   test("app.tsx 在 chromeReserveRows 调用中传入 verifyRows", () => {
     const src = readFileSync(appPath, "utf8");
-    // 字面量出现 verifyRows: 行键,证明已并在 chromeReserveRows 入账。
+    // The literal `verifyRows:` key appears, proving it is booked into chromeReserveRows.
     expect(src).toMatch(/verifyRows\s*:/);
   });
 });
 
 // =============================================================================
-// T3 SC2/SC5: HITL 闲聊 / 无声称点 → 人不读「验证通过」
+// HITL chit-chat / no claimed completion → the human must not read `验证通过` ("verification passed")
 // =============================================================================
 describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
   test("HITL skip + INSUFFICIENT → slot none → banner 0 行", () => {

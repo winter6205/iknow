@@ -1,15 +1,18 @@
 /**
- * ADR-0108 T4 —— interrupt frozen prefix keep 的盘面/load/prior 三面对齐。
+ * ADR-0108 — disk / load / prior three-face alignment for interrupt frozen
+ * prefix keep.
  *
- * 认证 specs/interrupt-frozen-prefix-keep.md SC3/SC4 与 input-contract 表
- * persist/load 行：
- *  - cancelled 有 freeze 前缀 → load 出 [user, assistant(prefix), interrupt]；
- *  - cancelled 无 prefix（仅还在长的块）→ load 出 [user, interrupt]；
- *  - 普通下一句 model prior 带前缀与 interrupt；
- *  - `/continue` 本次 prior 去掉末尾 interrupt、前缀仍在，盘上 interrupt 保留。
+ * Certifies specs/interrupt-frozen-prefix-keep.md SC3/SC4 and the
+ * input-contract table's persist/load rows:
+ *  - cancelled with freeze prefix → load yields [user, assistant(prefix), interrupt];
+ *  - cancelled without prefix (only a still-growing block) → load yields [user, interrupt];
+ *  - the next ordinary turn's model prior carries prefix and interrupt;
+ *  - `/continue` drops the trailing interrupt from this turn's prior, the
+ *    prefix stays, and the on-disk interrupt is kept.
  *
- * 集成纪律（项目 test.md）：接真实 SessionStore（temp dir）+ 真实
- * conversationId（fresh session 端到端走读，不预存 session 文件）。
+ * Integration discipline (project test.md): real SessionStore (temp dir) +
+ * real conversationId (fresh-session end-to-end walk, no pre-stored session
+ * file).
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -33,7 +36,7 @@ import {
 } from "../_helpers/stream-keep-fixtures.ts";
 
 const INTERRUPT_TEXT = "Interrupted by user.";
-/** 与 harness T2 夹具同字节：两块已钉住 + 一块还在长。 */
+/** Byte-identical to the harness fixture: two pinned blocks + one still growing. */
 const FROZEN_PREFIX = "## Head\n\nFirst paragraph.\n\n";
 const GROWING_TAIL = "Second parag";
 
@@ -84,7 +87,7 @@ describe("ADR-0108 T4 persist/load — cancelled 盘面形状", () => {
       }
     );
     const hub = makeHub(adapter);
-    // fresh conversationId（不预存 session 文件），端到端走读。
+    // Fresh conversationId (no pre-stored session file), end-to-end walk.
     const { session } = await hub.createSession();
     const controller = new AbortController();
     const p = hub.postMessage({
@@ -98,14 +101,14 @@ describe("ADR-0108 T4 persist/load — cancelled 盘面形状", () => {
     assert.equal(res.turn.answer.stopReason, "cancelled");
     assert.equal(res.turn.answer.interrupted, true);
 
-    // load 面（重开即 store.load）：三面同一形状的盘面。
+    // Load face (reopen = store.load): disk shape identical across the three faces.
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 3);
     assert.equal(loaded.messages[0]!.role, "user");
     assert.equal(loaded.messages[1]!.role, "assistant");
     assert.equal(textOf(loaded.messages[1]!), FROZEN_PREFIX);
     assert.ok(isInterrupt(loaded.messages[2]!));
-    // checkpoint 记录被打断轮。
+    // The checkpoint records the interrupted turn.
     assert.equal(loaded.checkpoints?.[0]?.interruptReason, "cancelled");
     assert.equal(loaded.checkpoints?.[0]?.messagesCount, 3);
   });
@@ -180,7 +183,7 @@ describe("ADR-0108 T4 prior — 下一句与 /continue", () => {
       text: "keep going with this",
     });
     assert.equal(res2.turn.answer.stopReason, "completed");
-    // 第 2 次 step 收到的 prior = 盘面全量 + 新 user 句。
+    // 2nd step's received prior = full disk state + the new user line.
     const prior = stepPriors[1] ?? [];
     assert.ok(prior.length >= 4);
     const assistantWithPrefix = prior.filter(
@@ -194,7 +197,7 @@ describe("ADR-0108 T4 prior — 下一句与 /continue", () => {
     const last = prior[prior.length - 1]!;
     assert.equal(last.role, "user");
     assert.equal(textOf(last), "keep going with this");
-    // interrupt 与前缀的相对顺序：assistant(prefix) 在 interrupt 之前。
+    // Relative order of interrupt and prefix: assistant(prefix) precedes interrupt.
     const idxAssistant = prior.findIndex(
       (m) => m.role === "assistant" && textOf(m) === FROZEN_PREFIX
     );
@@ -233,7 +236,7 @@ describe("ADR-0108 T4 prior — 下一句与 /continue", () => {
     const res = await hub.continueSession(session.conversation_id);
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal(res.turn.answer.finalText, "continue answer");
-    // continue 的本次 model prior：去掉末尾 interrupt，前缀仍在。
+    // /continue's model prior for this turn: trailing interrupt dropped, prefix kept.
     const prior = stepPriors[1] ?? [];
     assert.ok(
       !prior.some(isInterrupt),
@@ -245,7 +248,7 @@ describe("ADR-0108 T4 prior — 下一句与 /continue", () => {
       ),
       "/continue prior 必须保留 freeze 前缀 assistant"
     );
-    // 盘上：interrupt 保留且夹在前缀与本轮新 assistant 之间。
+    // On disk: the interrupt persists, sandwiched between the prefix and this turn's new assistant.
     const loaded = await store.load(session.conversation_id);
     const idxInterrupt = loaded.messages.findIndex(isInterrupt);
     const idxPrefix = loaded.messages.findIndex(

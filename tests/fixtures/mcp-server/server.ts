@@ -1,31 +1,32 @@
 /**
- * T10 (#344) — fixture stdio MCP server for integration tests.
+ * Fixture stdio MCP server for integration tests.
  *
- * 手写最小 JSON-RPC MCP stdio server（Node 子进程）。`@modelcontextprotocol/client`
- * 的 SDK 只提供 Client 端,没有 Server 类;此处实现 MCP 协议的最小子集:
+ * Hand-written minimal JSON-RPC MCP stdio server (Node child process). The
+ * `@modelcontextprotocol/client` SDK ships only a Client, no Server class, so
+ * this implements the minimal MCP protocol subset:
  *
- *   - initialize → 返回 protocolVersion + capabilities({tools:{}})+ serverInfo
- *   - notifications/initialized → 静默 ack (无 response)
- *   - tools/list → 返回 [echo / fail / slow / listchanged] 四件
- *   - tools/call → 返回三种形态(text / structuredContent / isError),
- *     覆盖 adapter wire 三分支
- *   - notifications/tools/list_changed → 触发 onListChanged
- *     (本 server 自身不发,等客户端 polling)
+ *   - initialize → returns protocolVersion + capabilities({tools:{}})+ serverInfo
+ *   - notifications/initialized → silent ack (no response)
+ *   - tools/list → the four tools [echo / fail / slow / listchanged]
+ *   - tools/call → three wire shapes (text / structuredContent / isError),
+ *     covering the adapter's three branches
+ *   - notifications/tools/list_changed → triggers onListChanged
+ *     (this server does not emit it on its own; it waits for client polling)
  *
- * **触发 list_changed 的方式**:server 监听一个 "list_changed 触发文件"
- * (默认 `<tmp>/iknow-mcp-listchanged-<pid>.flag`,由 env LISTCHANGED_FILE
- * 覆盖)。测试 touch 这个文件 → server 立即给 client 发一条
- * `notifications/tools/list_changed` notification。新工具
- * (`added-on-listchange`) 在 list_changed 之后才出现在 tools/list 响应里,
- * 实现"重读工具"的契约。
+ * **How list_changed is triggered**: the server watches a trigger file
+ * (default `<tmp>/iknow-mcp-listchanged-<pid>.flag`, overridable via env
+ * LISTCHANGED_FILE). When the test touches this file the server immediately
+ * sends the client a `notifications/tools/list_changed` notification. The new
+ * tool (`added-on-listchange`) appears in tools/list only after list_changed,
+ * implementing the "re-read tools" contract.
  *
- * **退出语义**:监听 SIGTERM/SIGINT,收到立刻 process.exit(0) 退出,
- * 满足 SC11 (stdio 子孙收到 SIGTERM 必须退出)。
+ * **Exit semantics**: SIGTERM/SIGINT listeners call process.exit right away —
+ * a stdio child must really exit on SIGTERM.
  *
- * **Framing**:newline-delimited JSON (MCP stdio spec — 参考 SDK
- * stdio.mjs ReadBuffer:buf.indexOf("\n") 拆行 + JSON.parse)。
+ * **Framing**: newline-delimited JSON (MCP stdio spec — same read-buffer
+ * approach as the SDK: split on "\n" then JSON.parse).
  *
- * **Status codes** (MCP spec, error code 保留区间):
+ * **Status codes** (MCP spec reserved error-code range):
  *   - ParseError(-32700) / InvalidRequest(-32600) / MethodNotFound(-32601)
  *   - InvalidParams(-32602) / InternalError(-32603)
  */
@@ -33,7 +34,7 @@ import { watch } from "node:fs";
 import process from "node:process";
 
 // ---------------------------------------------------------------------------
-// 工具清单
+// Tool inventory
 // ---------------------------------------------------------------------------
 
 interface ToolDef {
@@ -86,8 +87,8 @@ const BASE_TOOLS: readonly ToolDef[] = [
 ];
 
 /**
- * 只在 list_changed 之后才出现的"新工具"。
- * 设计:测试触发 list_changed → 期待工具清单多了这个。
+ * The "new tool" that appears only after list_changed.
+ * Design: the test triggers list_changed -> the tool list is expected to gain this entry.
  */
 const LISTCHANGED_ADDED_TOOL: ToolDef = {
   name: "added-on-listchange",
@@ -127,7 +128,7 @@ function err(
   );
 }
 
-/** 主动发 notification (无 id,服务端→客户端)。 */
+/** Proactively send a notification (no id, server -> client). */
 function notify(method: string, params: unknown): void {
   process.stdout.write(
     JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n"
@@ -201,26 +202,26 @@ const triggerFile =
 let triggerWatcher: ReturnType<typeof watch> | undefined;
 
 /**
- * 客户端 (test) touch triggerFile → server 立刻给 client 发
- * notifications/tools/list_changed,且内部 toolsAfterListChanged 翻为 true,
- * 后续 tools/list 返回 BASE_TOOLS + LISTCHANGED_ADDED_TOOL。
+ * When the client (test) touches triggerFile, the server immediately sends
+ * notifications/tools/list_changed and flips toolsAfterListChanged to true;
+ * subsequent tools/list returns BASE_TOOLS + LISTCHANGED_ADDED_TOOL.
  */
 function installListChangedWatcher(): void {
   try {
     triggerWatcher = watch(triggerFile, { persistent: false }, () => {
-      if (toolsAfterListChanged) return; // 单次切换,避免重复
+      if (toolsAfterListChanged) return; // one-shot switch, no repeats
       toolsAfterListChanged = true;
       try {
         notify("notifications/tools/list_changed", {});
       } catch {
-        /* stdout 关闭,忽略 */
+        /* stdout closed, ignore */
       }
     });
     triggerWatcher.on("error", () => {
-      /* 文件不存在/不可读 — 忽略 */
+      /* file missing/unreadable — ignore */
     });
   } catch {
-    // fs.watch 抛 — 忽略,list_changed 测试会自己跳过
+    // fs.watch threw — ignore; the list_changed test skips itself
   }
 }
 
@@ -233,12 +234,12 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
   const method = typeof msg.method === "string" ? msg.method : "";
   const params = (msg["params"] ?? {}) as Readonly<Record<string, unknown>>;
 
-  // 通知类 (id 缺失) — 服务端不回应
+  // Notification (no id) — server must not respond
   if (id === null && !("id" in msg)) {
-    // notifications/initialized → 静默
+    // notifications/initialized -> silent
     if (method === "notifications/initialized") return null;
     if (method === "notifications/cancelled") return null;
-    // ping 作为通知接收 → 静默
+    // ping received as notification -> silent
     if (method === "ping") return null;
     return null;
   }
@@ -267,7 +268,7 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
     const args = (params["arguments"] ?? {}) as Readonly<
       Record<string, unknown>
     >;
-    // 异步执行 — 但 respond 仍同步(本 fixture 工具都是同步的或 setTimeout 内部处理)
+    // Runs async — but the response still goes out via stdout (all fixture tools are sync or handle setTimeout internally)
     void callTool(name, args).then(
       (result) => {
         try {
@@ -286,11 +287,11 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
         }
       }
     );
-    // 响应通过 stdout.write 异步发出;此处不返回
+    // The response is emitted asynchronously via stdout.write; nothing returned here
     return null;
   }
 
-  // resources/list / prompts/list — 本 fixture 不实现
+  // resources/list / prompts/list — not implemented by this fixture
   if (method === "resources/list" || method === "prompts/list") {
     return ok(id, { resources: [], prompts: [] });
   }
@@ -299,7 +300,7 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Framing loop — 读 stdin 按 \n 切分 JSON
+// Framing loop — read stdin, split JSON on \n
 // ---------------------------------------------------------------------------
 
 let buffer = Buffer.alloc(0);
@@ -319,7 +320,7 @@ process.stdin.on("data", (chunk: Buffer) => {
         process.stdout.write(response);
       }
     } catch (e) {
-      // ParseError → 用 -32700 回复;若 id 缺失则服务端发 notification 风格的 error
+      // ParseError -> reply with -32700; if no id is present, emit an error in notification style
       const id =
         msg && typeof msg === "object" && "id" in msg
           ? ((msg as Record<string, unknown>)["id"] as number | string | null)
@@ -341,7 +342,7 @@ process.stdin.on("end", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 信号处理 — SC11 (stdio 子孙收到 SIGTERM 必须退出)
+// Signal handling — a stdio child process must exit on SIGTERM
 // ---------------------------------------------------------------------------
 
 let cleaned = false;
@@ -371,12 +372,12 @@ process.on("SIGPIPE", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 启动 — 装 trigger watcher
+// Startup — install the trigger watcher
 // ---------------------------------------------------------------------------
 
 installListChangedWatcher();
 
-// 启动 stderr 行便于调试;不污染 stdout 协议流
+// Startup stderr line aids debugging; keeps the stdout protocol stream clean
 process.stderr.write(
   `[fixture-mcp] started pid=${process.pid} trigger=${triggerFile}\n`
 );

@@ -1,13 +1,13 @@
 // @vitest-environment happy-dom
 /**
- * serve-workspace T8 review fix (M4) — usePopoverDismiss hook vitest.
+ * usePopoverDismiss hook tests (review fix).
  *
  * 4 cases cover the hook's three observable behaviors:
  *  1. open=true + Esc keydown → onClose called + focus returned to trigger.
  *  2. open=true + mousedown on body (outside popover) → onClose called +
  *     focus returned to trigger.
  *  3. open=true + mousedown on trigger (inside popover wrapper) → onClose
- *     NOT called (T8 review L1: trigger is contained by popover wrapper).
+ *     NOT called (the trigger is contained by the popover wrapper).
  *  4. open=false → effect early-returns, no listeners attached.
  *
  * Why happy-dom + @testing-library/react: the hook reads `document` to
@@ -30,9 +30,9 @@ import type { RefObject } from "react";
 import { usePopoverDismiss } from "../../web/src/hooks/use-workspace-actions.ts";
 
 /**
- * 极简 hook 容器 — renderHook 自带 React 上下文,只需一个 callback 包装。
- * 把 triggerRef / popoverRef / open / onClose 透传给 hook,返回这些 ref 给
- * 测试用例直接引用 DOM 节点。
+ * Minimal hook harness — renderHook already provides React context, only a callback
+ * wrapper is needed. Passes triggerRef / popoverRef / open / onClose through to the
+ * hook and returns the refs so test cases can reference the DOM nodes directly.
  */
 function useHarness(
   open: boolean,
@@ -48,8 +48,9 @@ function useHarness(
 }
 
 /**
- * 把 trigger 节点接进 DOM,popover wrapper 包住 trigger (L1 假定:触发器
- * 已被外层 wrapper 包裹)。返回 trigger 节点方便测试用例拿引用。
+ * Mounts the trigger node into the DOM with the popover wrapper containing it (the
+ * trigger is wrapped by the outer popover div). Returns the trigger node so test
+ * cases can hold a direct reference.
  */
 function mountHarness(): {
   trigger: HTMLButtonElement;
@@ -79,7 +80,7 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
   beforeEach(() => {
     onClose = vi.fn();
     // Spy on document.addEventListener / removeEventListener — case 4
-    // 通过监听器 attach 次数验证 effect 早返回。
+    // verifies the effect early-return via listener attach counts.
     addSpy = vi.spyOn(document, "addEventListener");
     removeSpy = vi.spyOn(document, "removeEventListener");
   });
@@ -94,13 +95,13 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
     const { trigger, cleanup } = mountHarness();
     try {
       const { result } = renderHook(() => useHarness(true, onClose));
-      // 把 harness 的 ref 钩到 DOM 节点 (harness 内部 useRef) — 渲染
-      // 期间 React 不会自动给测试组件插 DOM,故手动赋值。
+      // Wire the harness refs to the DOM nodes (useRef inside the harness) —
+      // React never auto-inserts DOM for this test component, so assign manually.
       result.current.triggerRef.current = trigger;
       result.current.popoverRef.current = trigger.parentElement;
 
-      // trigger 已经 focus 才能在 Esc 后看 activeElement 是否回到 trigger。
-      // 模拟 Esc 触发。
+      // The trigger must already hold focus to check whether activeElement returns
+      // to it after Esc. Simulate the Esc keypress.
       await act(async () => {
         const ev = new KeyboardEvent("keydown", {
           key: "Escape",
@@ -110,7 +111,7 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
       });
 
       expect(onClose).toHaveBeenCalledTimes(1);
-      // queueMicrotask focus — 等 microtask 跑完。
+      // focus is deferred via queueMicrotask — let the microtask drain.
       await act(async () => {
         await Promise.resolve();
       });
@@ -127,7 +128,7 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
       result.current.triggerRef.current = trigger;
       result.current.popoverRef.current = trigger.parentElement;
 
-      // mousedown 在 popover 之外 — 用一个独立 body 节点。
+      // mousedown outside the popover — use a standalone body node.
       const outside = document.createElement("div");
       document.body.appendChild(outside);
 
@@ -174,9 +175,9 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
 
   it("open=false → effect early-returns, no listeners attached", () => {
     renderHook(() => useHarness(false, onClose));
-    // happy-dom 上 addEventListener 不会跑 effect 内 return 路径 — 验证
-    // mousedown / keydown 监听器没被 hook 挂载。Effect 早返回时
-    // addEventListener 一次都不会被调用。
+    // On happy-dom addEventListener never runs the effect's early-return path —
+    // verify no mousedown / keydown listener was attached by the hook. When the
+    // effect early-returns, addEventListener is called zero times.
     const mouseCalls = addSpy.mock.calls.filter(
       (c) => c[0] === "mousedown"
     ).length;
@@ -184,8 +185,8 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
     expect(mouseCalls).toBe(0);
     expect(keyCalls).toBe(0);
 
-    // 进一步: 直接调 onClose (本就是同一个引用) 不会被 document 监听器
-    // 触发,验证 hook 没接任何外部入口。
+    // Further: calling onClose directly (it is the same reference) is not triggered
+    // by any document listener, proving the hook wired no external entry point.
     onClose();
     expect(onClose).toHaveBeenCalledTimes(1);
   });

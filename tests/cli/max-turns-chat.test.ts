@@ -1,18 +1,19 @@
 /**
  * tests/cli/max-turns-chat.test.ts
  *
- * plan T6: chat REPL 适配 MaxTurnsExceeded throw + stop_summary 呈现。
+ * Chat REPL adaptation to the MaxTurnsExceeded throw + stop_summary presentation.
  *
- * 场景:maxTurns=1 + scripted 两轮(tool-call 用掉第 1 轮 → 第 2 轮 step 入口
- * throw MaxTurnsExceeded)+ 摘要 epilogue 响应(摘要轮不计 maxTurns,但 stub
- * 会多调一次 adapter.step,故 script 必须提供足够多响应)。
+ * Scenario: maxTurns=1 + scripted two rounds (the tool-call uses round 1 → the
+ * round-2 step entry throws MaxTurnsExceeded) + a summary epilogue response
+ * (summary rounds don't count toward maxTurns, but the stub still calls
+ * adapter.step one extra time, so the script must provide enough responses).
  *
- * 断言:
- *   - processChatLine 返回 quit:false(REPL 继续,不退出);
- *   - stderr 含 "已达 maxTurns=1 轮上限";
- *   - output 含收尾摘要文本(stop_summary 经 onStream wrapper 捕获);
- *   - ctx.state.messages 未被替换(throw 路径不 append 任何 assistant 消息);
- *   - stop_summary 事件不向宿主 onStream 透传(避免预览 sink 双打印)。
+ * Assertions:
+ *   - processChatLine returns quit:false (the REPL continues, no exit);
+ *   - stderr contains `已达 maxTurns=1 轮上限` ("reached the maxTurns=1 round limit");
+ *   - output contains the closing summary text (stop_summary captured via the onStream wrapper);
+ *   - ctx.state.messages is not replaced (the throw path appends no assistant message);
+ *   - stop_summary events are not forwarded to the host onStream (avoids double-print in the preview sink).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -26,7 +27,7 @@ import { assistantResult, makeState } from "./_fixtures.ts";
 import type { HarnessStreamEvent } from "../../src/harness/index.ts";
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
 
-/** 构造 maxTurns=1 的 deps,executor 含 noop 工具,adapter 用 stub。 */
+/** Build deps with maxTurns=1; the executor has a noop tool, the adapter is a stub. */
 function makeMaxTurnsDeps(
   responses: Parameters<typeof createStubModel>[0]["responses"]
 ): LoopEngineDeps {
@@ -44,13 +45,14 @@ function makeCtx(deps: LoopEngineDeps): ChatLineContext {
 describe("processChatLine maxTurns (plan T6)", () => {
   it("maxTurns 超限 → stderr 通知 + output 收尾摘要 + quit:false + 不透传 stop_summary", async () => {
     const deps = makeMaxTurnsDeps([
-      // 第 1 轮:tool-call,用掉预算 maxTurns=1 → 第 2 轮 step 入口 throw。
+      // Round 1: tool-call, consuming the maxTurns=1 budget → round-2 step entry throws.
       assistantResult({
         texts: [],
         toolCalls: [{ id: "t1", name: "noop", input: {} }],
       }),
-      // 第 2 轮:摘要 epilogue 的模型响应(loop-engine 在重抛前调
-      // tryRunSummary,stub 会消费这条响应;摘要轮不计 maxTurns)。
+      // Round 2: the summary epilogue's model response (loop-engine calls
+      // tryRunSummary before rethrowing and the stub consumes this response;
+      // summary rounds don't count toward maxTurns).
       assistantResult({ texts: ["收尾摘要文本：已达上限"], toolCalls: [] }),
     ]);
     const ctx = makeCtx(deps);
@@ -65,18 +67,18 @@ describe("processChatLine maxTurns (plan T6)", () => {
     assert.match(r.stderr ?? "", /已达 maxTurns=1 轮上限/);
     assert.ok(r.output.includes("收尾摘要："), `output=${r.output}`);
     assert.ok(r.output.includes("收尾摘要文本：已达上限"));
-    // 摘要事件未被透传给宿主 onStream(stop_summary 只进 output,不双打印)
+    // The summary event is not forwarded to the host onStream (stop_summary only reaches output, no double-print)
     assert.ok(
       !received.some((e) => e.type === "stop_summary"),
       "stop_summary 不得透传给宿主回调"
     );
-    // throw 路径不 append 消息(state.messages 保持初始空)
+    // The throw path appends no messages (state.messages stays initially empty)
     assert.equal(ctx.state.messages.length, 0);
   });
 
   it("摘要缺失(epilogue 失败 / stub 响应耗尽)→ output 空、stderr 仍通知", async () => {
-    // 只 script 1 轮 tool-call:摘要 epilogue 时 stub 响应耗尽 → tryRunSummary
-    // catch-all 吞掉 → 无 stop_summary。
+    // Only round 1 (tool-call) is scripted: when the summary epilogue runs, the
+    // stub is out of responses → tryRunSummary's catch-all swallows it → no stop_summary.
     const deps = makeMaxTurnsDeps([
       assistantResult({
         texts: [],

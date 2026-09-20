@@ -2,21 +2,26 @@
 /**
  * tests/tui/compact-progress.test.tsx
  *
- * compact 进度面板（design-25 视觉）验收表：
- *  - 纯函数：reduceCompactionEvent 状态机 / compactBarFill 时间渐近估计 /
- *    compactStatusText 状态行文案 / start·settle 终态入口；
- *  - 渲染 smoke：CompactProgress 组件（真实渲染器抓帧）；
- *  - 文案英文化：compactNoticeFor 全分支英文 + chromeReserveRows compactRows
- *    入账（compact-progress.tsx 侧）。
+ * Acceptance table for the compact progress panel:
+ *  - pure functions: reduceCompactionEvent state machine / compactBarFill
+ *    asymptotic time estimate / compactStatusText status-line copy /
+ *    start·settle terminal entries;
+ *  - render smoke: CompactProgress component (frame capture via the real
+ *    renderer);
+ *  - English copy: compactNoticeFor all-English branches + chromeReserveRows
+ *    compactRows accounting (compact-progress.tsx side).
  *
- * 认证的不变式：
- *  1. 事件是快路径、promise 结果是终态权威 —— 无事件终局（pre-abort 早返回）
- *     与 catch 都必须能落到终态，不留 95% 伪在途态（plan D3.5）；
- *  2. 终态一旦确立，迟到事件一律忽略（引用相等，状态不变）；
- *  3. 读条是**时间估计不是真实进度**（harness 无进度信号，stream.ts:43-52 只有
- *     5 个离散事件）—— 上限 0.95，只有 completed 才 1.0；
- *  4. 非 compaction 事件 identity 返回（app 层据此做引用相等守卫，避免无谓
- *     re-render）。
+ * Certified invariants:
+ *  1. events are the fast path, the promise result is the terminal authority
+ *     — event-less endings (pre-abort early return) and catch must both
+ *     reach a terminal state, never leaving a 95% fake in-flight state;
+ *  2. once terminal is established, late events are ignored (reference
+ *     equality, state unchanged);
+ *  3. the bar is a **time estimate, not real progress** (the harness emits
+ *     no progress signal; stream.ts:43-52 has only 5 discrete events) —
+ *     capped at 0.95, only completed reaches 1.0;
+ *  4. non-compaction events return identity (the app layer uses this for a
+ *     reference-equality guard, avoiding pointless re-renders).
  */
 import { describe, expect, test } from "bun:test";
 import { Readable, Writable } from "stream";
@@ -71,7 +76,7 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
     expect(s1!.startedAt).toBe(T0);
     expect(s1!.terminal).toBeNull();
 
-    // 读条单调不减：elapsed 递增 → fill 非降。
+    // The bar is monotonic: increasing elapsed → non-decreasing fill.
     let prev = compactBarFill(0);
     for (const elapsed of [1_000, 4_000, 8_000, 12_000, 60_000, 600_000]) {
       const fill = compactBarFill(elapsed);
@@ -79,7 +84,8 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
       prev = fill;
     }
 
-    // 终态 completed → fill 1.0（由组件按 terminal.kind === "done" 传 flag）。
+    // Terminal completed → fill 1.0 (the component passes the flag when
+    // terminal.kind === "done").
     const done = reduceCompactionEvent(
       s1,
       { type: "compaction_completed", summaryLen: 99, durationMs: 5_000 },
@@ -101,7 +107,7 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
     expect(s).toBeDefined();
     expect(s!.droppedCount).toBe(0);
     expect(compactStatusText(s!, T0)).toBe("◐  0s · preparing");
-    // 不崩：后续事件仍可归约。
+    // No crash: later events can still be reduced.
     const done = reduceCompactionEvent(
       s,
       { type: "compaction_completed", summaryLen: 1, durationMs: 10 },
@@ -118,7 +124,8 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
       expect(fill).toBeGreaterThanOrEqual(0);
       expect(fill).toBeLessThanOrEqual(COMPACT_BAR_MAX_FILL);
     }
-    // 负 elapsed 的状态行同样钳制到 0s（startedAt 在未来）。
+    // A negative elapsed clamps the status line to 0s as well (startedAt in
+    // the future).
     const s = startCompactPanel("turn", T0);
     expect(compactStatusText(s, T0 - 5_000)).toBe("◐  0s · preparing");
   });
@@ -166,7 +173,7 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
       T0 + 2_000
     );
     expect(s.terminal?.kind).toBe("done");
-    // 迟到 started 不得把面板拉回 running。
+    // A late started must not pull the panel back to running.
     expect(
       reduceCompactionEvent(s, started(7), {
         source: "turn",
@@ -188,7 +195,7 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
     expect(b!.droppedCount).toBe(8);
     expect(a!.source).toBe("turn");
     expect(b!.source).toBe("manual");
-    // 各自终局不串号。
+    // Each ends with its own outcome, no cross-talk.
     const aDone = reduceCompactionEvent(
       a,
       { type: "compaction_completed", summaryLen: 1, durationMs: 1 },
@@ -201,7 +208,8 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
   });
 
   test("case 9 no-op：compacted:false 非 cancelled → app 立即清除（settle 不被调用；纯函数侧守住无伪造终态）", () => {
-    // no-op 路径不产生任何 compaction 事件 → reduce 收到 undefined 不建面板。
+    // The no-op path emits no compaction events → reduce receives undefined
+    // and builds no panel.
     for (const ev of [
       { type: "compaction_text_delta", text: "x" } as const,
       { type: "compaction_cancelled" } as const,
@@ -210,7 +218,7 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
         reduceCompactionEvent(undefined, ev, { source: "manual", nowMs: T0 })
       ).toBeUndefined();
     }
-    // 终态 reducer 不会无中生有。
+    // A terminal reducer never invents state from nothing.
     expect(
       reduceCompactionEvent(
         undefined,
@@ -228,9 +236,11 @@ describe("reduceCompactionEvent（状态机，plan D3）", () => {
       source: "turn",
       nowMs: T0,
     });
-    // 「需要清扫」的判据 = terminal === null（app finally 据此清除）。
+    // The "needs sweep" criterion = terminal === null (the app finally
+    // clears on it).
     expect(s!.terminal).toBeNull();
-    // settle 幂等：已终态再 settle 不变（引用相等，不重置 atMs）。
+    // settle is idempotent: settling an already-terminal state changes
+    // nothing (reference equality, atMs not reset).
     const done = settleCompactPanel(s!, "done", T0 + 1_000);
     expect(settleCompactPanel(done, "failed", T0 + 9_000)).toBe(done);
   });
@@ -292,7 +302,7 @@ describe("compactBarFill / compactStatusText / hint（纯函数 SSOT）", () => 
         reduceCompactionEvent(s, ev, { source: "turn", nowMs: T0 + 500 })
       ).toBe(s);
     }
-    // undefined + 非 compaction 事件 → 仍 undefined（不建面板）。
+    // undefined + a non-compaction event → still undefined (no panel).
     expect(
       reduceCompactionEvent(
         undefined,
@@ -322,7 +332,7 @@ describe("compactBarFill / compactStatusText / hint（纯函数 SSOT）", () => 
   test("started 已在途（非终态）→ 更新 droppedCount，保留 source/startedAt（不重置计时）", () => {
     const s = startCompactPanel("turn", T0);
     const next = reduceCompactionEvent(s, started(17), {
-      source: "manual", // 迟到的 manual 归约不得改 source（面板归属已定）
+      source: "manual", // a late manual reduce must not rewrite source (panel ownership already decided)
       nowMs: T0 + 9_000,
     });
     expect(next).not.toBe(s);
@@ -332,9 +342,10 @@ describe("compactBarFill / compactStatusText / hint（纯函数 SSOT）", () => 
   });
 });
 
-// ── 渲染 smoke（真实渲染器，design-25 视觉） ────────────────────────────────
+// ── Render smoke (real renderer) ───────────────────────────────────────────
 
-/** 测试专用 stdout（Writable + isTTY + columns/rows），不碰 process.stdout。 */
+/** Test-only stdout (Writable + isTTY + columns/rows); never touches
+ *  process.stdout. */
 class TestWriteStream extends Writable {
   readonly isTTY = true;
   columns: number;
@@ -352,7 +363,8 @@ class TestWriteStream extends Writable {
   }
 }
 
-/** 真实 memory-buffered 渲染器挂载 CompactProgress，返回一帧纯文本。 */
+/** Mount CompactProgress on a real memory-buffered renderer; return one
+ *  plain-text frame. */
 async function renderPanelText(
   state: CompactProgressState,
   cols = 80
@@ -386,7 +398,7 @@ async function renderPanelText(
   }
 }
 
-/** hex → "r,g,b"（0..255 整数），供 span 底色比较。 */
+/** hex → "r,g,b" (0..255 integers), for span background comparison. */
 function hexRgb(hex: string): string {
   return [
     parseInt(hex.slice(1, 3), 16),
@@ -396,9 +408,11 @@ function hexRgb(hex: string): string {
 }
 
 /**
- * 读条格的填充判定：字符恒为 `█`（干轨也用 █ 画），未填充格 = 干轨
- * （bg = pal.border），已填充格 = 紫渐变 / 终态色（bg 必然离开 border）。
- * 故只能按底色区分 —— 这也正是「时间估计不冒充进度」的证据面。
+ * Fill detection for bar cells: the glyph is always `█` (the dry track is
+ * drawn with █ too); unfilled cells = dry track (bg = pal.border), filled
+ * cells = purple gradient / terminal color (bg necessarily leaves border).
+ * So background is the only discriminator — which is exactly the visible
+ * proof that the time estimate does not fake progress.
  */
 function countBarCells(frame: CapturedFrame): {
   readonly filled: number;
@@ -446,8 +460,9 @@ async function renderPanelCells(
       root.render(<CompactProgress state={state} />);
     });
     await renderer.loop();
-    // 未填充格与已填充格共用 `█` 字形，唯一区分是 bg —— 直接读渲染缓冲的
-    // span 分解（fixture 用真实 createCliRenderer，无 testRender 的 setup）。
+    // Filled and unfilled cells share the `█` glyph; bg is the only
+    // discriminator — read the span breakdown of the render buffer directly
+    // (the fixture uses the real createCliRenderer, no testRender setup).
     const buffer = renderer.currentRenderBuffer;
     return countBarCells({
       cols: buffer.width,
@@ -532,14 +547,16 @@ describe("CompactProgress 渲染（design-25 视觉 smoke）", () => {
         Date.now()
       )
     );
-    // fill=1.0 走特殊分支（不经过 0.95 封顶的时间估计）→ 45 格全填充。
+    // fill=1.0 takes the special branch (skips the 0.95-capped time
+    // estimate) → all 45 cells filled.
     expect(cells.filled).toBe(45);
     expect(cells.dry).toBe(0);
   });
 
   test("在途帧读条未铺满（时间估计上限 0.95 → 至少 1 格干轨）", async () => {
-    // elapsed 极大（远超 tau）时 fill → 0.95 → 45 - ceil(45*0.95) = 2 格
-    // 保持干轨 —— 「不是真实进度」的可视证据（条永远跑不满）。
+    // With huge elapsed (far beyond tau) fill → 0.95 →
+    // 45 - ceil(45*0.95) = 2 cells stay dry — the visible proof of "not real
+    // progress" (the bar never runs full).
     const cells = await renderPanelCells({
       ...startCompactPanel("manual", Date.now() - 10 * 60_000),
       droppedCount: 5,
@@ -550,9 +567,10 @@ describe("CompactProgress 渲染（design-25 视觉 smoke）", () => {
   });
 });
 
-// ── 英文文案 + 行账（acceptance 15-18） ────────────────────────────────────
+// ── English copy + row accounting ──────────────────────────────────────────
 
-/** CJK 统一表意文字 + 全角标点（含 ·—「」），用于「外显文案已英文化」断言。 */
+/** CJK unified ideographs + fullwidth punctuation (incl. ·—「」), used by
+ *  the "user-visible copy is English" assertions. */
 const CJK_RE = /[　-〿㐀-䶿一-鿿＀-￯]/;
 
 describe("compact 外显文案英文化（acceptance 15-16）", () => {
@@ -570,7 +588,8 @@ describe("compact 外显文案英文化（acceptance 15-16）", () => {
     for (const line of lines) {
       expect(CJK_RE.test(line)).toBe(false);
     }
-    // 契约破坏分支仍抛错（exhaustiveness 不因英文化而放宽）。
+    // The contract-breach branch still throws (exhaustiveness is not
+    // relaxed by English copy).
     expect(() => compactNoticeFor("messages_too_few", true)).toThrow();
     expect(() => compactNoticeFor("windowed", false)).toThrow();
   });

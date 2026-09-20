@@ -1,13 +1,14 @@
 /**
  * tests/cli/parse-args-max-turns.test.ts
  *
- * plan T5: `--max-turns` CLI flag 解析。
- *   - 未设 → undefined（=无限，与 plan T5 默认行为一致）
- *   - 合法正整数 → 透传
- *   - 缺失值 → throws
- *   - 非整数 (0 / -1 / 1.5 / abc) → throws "Invalid --max-turns: ..."
+ * Parsing of the `--max-turns` CLI flag.
+ *   - unset → undefined (= unlimited, the default behavior)
+ *   - valid positive integer → pass-through
+ *   - missing value → throws
+ *   - non-integer (0 / -1 / 1.5 / abc) → throws "Invalid --max-turns: ..."
  *
- * 只覆盖配置解析层；不验证 LoopEngine 接线（归其他 agent 的 LoopEngineDeps 改造）。
+ * Covers the config-parsing layer only; LoopEngine wiring is verified elsewhere
+ * (LoopEngineDeps changes belong to another task).
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";

@@ -4,24 +4,26 @@ import { createStreamDraft } from "../../src/cli/stream-draft.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 
 /**
- * T2 (#175): stream-draft 共享层单测。
+ * Unit tests for the stream-draft shared layer.
  *
- * 遮蔽行为依赖 `currentSecretValues()` 现取 process.env 中命中了
- * `SECRET_PATTERN`(/API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i)
- * 的变量名下的**非空**值。`ANTHROPIC_AUTH_TOKEN` 命中该 pattern,且始终出现在
- * `configuredSecretNames()`(settings.llm.apiKey 占位符 + SECRET_PATTERN 兜底),
- * 故测试用 `ANTHROPIC_AUTH_TOKEN` 注入真实 secret 值即可被 `masked()` 捕获。
+ * The masking behavior depends on `currentSecretValues()` freshly reading
+ * process.env: the **non-empty** values of variable names matching
+ * `SECRET_PATTERN` (/API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i).
+ * `ANTHROPIC_AUTH_TOKEN` matches that pattern and always appears in
+ * `configuredSecretNames()` (settings.llm.apiKey placeholder + SECRET_PATTERN
+ * fallback), so injecting a real secret value via `ANTHROPIC_AUTH_TOKEN` is
+ * captured by `masked()`.
  *
- * 每个用例结束都恢复被改动的 env 变量,避免污染其他测试。
+ * Each case restores the env vars it changed at teardown to avoid polluting other tests.
  */
 
-/** 与 env-isolation.ts SECRET_PATTERN 同源,用于清理测试写入的密钥 env。 */
+/** Same source as env-isolation.ts SECRET_PATTERN; used to clean up secret envs written by tests. */
 const SECRET_PATTERN =
   /API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i;
 
 const SECRET = "sk-abc123";
 
-/** 记录被改写/删除的 env 变量,afterEach 统一还原。 */
+/** Records env vars overwritten/deleted; restored together in afterEach. */
 const touched = new Map<string, string | undefined>();
 
 function setSecretEnv(name: string, value: string | undefined): void {
@@ -42,7 +44,7 @@ afterEach(() => {
     else process.env[name] = original;
   }
   touched.clear();
-  // T5: 节流后通知异步,清理可能残留的 fake timer。
+  // Notifications are async after throttling; clean up any leftover fake timers.
   vi.useRealTimers();
 });
 
@@ -99,7 +101,7 @@ describe("createStreamDraft", () => {
     draft.append({ type: "text_delta", text: "案" });
     draft.append({ type: "thinking_delta", text: "继续" });
     assert.equal(draft.raw(), "答 案");
-    // text_delta 收起上一段思考；后一段 thinking_delta 是新缓冲。
+    // text_delta closes the previous thinking segment; a later thinking_delta starts a new buffer.
     assert.equal(draft.thinkingRaw(), "继续");
   });
 
@@ -114,12 +116,12 @@ describe("createStreamDraft", () => {
     const t0 = 1_000_000;
     vi.setSystemTime(t0);
     draft.append({ type: "thinking_delta", text: "想" });
-    // 首 delta 惰性打点后 7500ms → floor = 7s（计算起点 = 首 delta 时刻，
-    // 纯思考时长，不含 turn 启动→首 delta 的「等待思考」时段）。
+    // After the first delta lazily stamps t0, 7500ms → floor = 7s (measurement starts at the
+    // first delta — pure thinking time, excluding the "waiting for thinking" window from turn start).
     assert.equal(draft.thinkingSeconds(t0 + 7500), 7);
-    // 1Hz tick 快照偏小问题：1300ms 也应有秒数（floor=1，子秒不吞）。
+    // 1Hz-tick snapshot undershoot: 1300ms must also report a second (floor=1, sub-second not swallowed).
     assert.equal(draft.thinkingSeconds(t0 + 1300), 1);
-    // 未满 1s → 0（子秒）。
+    // Under 1s → 0 (sub-second).
     assert.equal(draft.thinkingSeconds(t0 + 500), 0);
   });
 
@@ -131,8 +133,8 @@ describe("createStreamDraft", () => {
     draft.append({ type: "thinking_delta", text: "先想" });
     vi.setSystemTime(t0 + 5000);
     draft.append({ type: "thinking_delta", text: "再想" });
-    // 从**首次** delta 打点起算（t0 → t0+7000 = 7s），而非第二次 delta
-    // （t0+5000 → 仅 2s）—— 惰性打点只发生一次，后续 delta 不覆盖。
+    // Measured from the **first** delta stamp (t0 → t0+7000 = 7s), not the second
+    // (t0+5000 → only 2s) — the lazy stamp happens once; later deltas don't overwrite it.
     assert.equal(draft.thinkingSeconds(t0 + 7000), 7);
   });
 
@@ -142,8 +144,8 @@ describe("createStreamDraft", () => {
     const t0 = 3_000_000;
     vi.setSystemTime(t0);
     draft.append({ type: "thinking_delta", text: "想" });
-    // 惰性打点于 append 时生效；当帧未满 1s → 0，但不吞掉计时起点——
-    // 之后随时间正常增长（3s 后 = 3，非 0/NaN）。
+    // The lazy stamp takes effect at append time; under 1s in that frame → 0, but the start
+    // point is not swallowed — it grows normally afterwards (3s later = 3, not 0/NaN).
     assert.equal(draft.thinkingSeconds(t0), 0);
     assert.equal(draft.thinkingSeconds(t0 + 3000), 3);
   });
@@ -156,7 +158,7 @@ describe("createStreamDraft", () => {
     draft.append({ type: "thinking_delta", text: "想" });
     draft.reset();
     assert.equal(draft.thinkingSeconds(), 0);
-    // reset 后不再从旧打点计算。
+    // After reset, no longer computes from the old stamp.
     assert.equal(draft.thinkingSeconds(2_000_000), 0);
   });
 
@@ -168,7 +170,7 @@ describe("createStreamDraft", () => {
       calls += 1;
     });
     draft.append({ type: "thinking_delta", text: "先想" });
-    // T5 节流:通知经 50ms timer 批处理,flush 前不触发。
+    // Throttled: notifications go through a 50ms timer batch; nothing fires before flush.
     assert.equal(calls, 0);
     vi.advanceTimersByTime(50);
     assert.equal(calls, 1);
@@ -214,16 +216,16 @@ describe("createStreamDraft", () => {
     };
     draft.subscribe(listener);
     draft.append({ type: "text_delta", text: "x" });
-    // T5:通知走 50ms 批处理;flush 前不触发。
+    // Notification goes through the 50ms batch; nothing fires before flush.
     assert.equal(calls, 0);
     vi.advanceTimersByTime(50);
     assert.equal(calls, 1);
-    const unsubscribe = draft.subscribe(listener); // 重复订阅去重
+    const unsubscribe = draft.subscribe(listener); // duplicate subscribe deduplicates
     draft.append({ type: "text_delta", text: "y" });
     vi.advanceTimersByTime(50);
     assert.equal(calls, 2);
     unsubscribe();
-    unsubscribe(); // 幂等
+    unsubscribe(); // idempotent
     draft.append({ type: "text_delta", text: "z" });
     vi.advanceTimersByTime(50);
     assert.equal(calls, 2);
@@ -240,10 +242,10 @@ describe("createStreamDraft", () => {
       healthyCalls += 1;
     });
     draft.append({ type: "text_delta", text: "x" });
-    // flush 前 healthyCalls 仍为 0(批处理未到)。
+    // healthyCalls stays 0 before flush (the batch is not due yet).
     assert.equal(healthyCalls, 0);
     vi.advanceTimersByTime(50);
-    // 必须不 throw;健康 listener 仍收到通知。
+    // Must not throw; the healthy listener still gets notified.
     assert.equal(healthyCalls, 1);
     assert.equal(draft.raw(), "x");
   });
@@ -278,11 +280,11 @@ describe("createStreamDraft", () => {
     draft.subscribe(() => {
       calls += 1;
     });
-    // 连续 300 个短 delta,跨度 <50ms → 应合并为 1 次通知(时间窗内批处理)。
+    // 300 consecutive short deltas spanning <50ms → coalesce into 1 notification (batched within the time window).
     for (let i = 0; i < 300; i++) {
       draft.append({ type: "text_delta", text: "x" });
     }
-    // 未 flush 前 0 次。
+    // Nothing fires before flush.
     assert.equal(calls, 0);
     vi.advanceTimersByTime(50);
     assert.equal(calls, 1, "300 delta 应合并为 1 次通知(非每 delta 一次)");
@@ -296,10 +298,10 @@ describe("createStreamDraft", () => {
     draft.subscribe(() => {
       calls += 1;
     });
-    // 单次 append 383 字符 → 未达阈值,不立即 flush。
+    // A single 383-char append → below threshold, no immediate flush.
     draft.append({ type: "text_delta", text: "a".repeat(383) });
     assert.equal(calls, 0);
-    // 再来 2 字符 → 累积 385 ≥ 384 → 立即 flush。
+    // 2 more chars → cumulative 385 ≥ 384 → immediate flush.
     draft.append({ type: "text_delta", text: "bb" });
     assert.equal(calls, 1, "跨 delta 累积 ≥384 字符应立即 flush");
     assert.equal(draft.raw().length, 385);
@@ -374,7 +376,7 @@ describe("createStreamDraft", () => {
     draft.append({ type: "text_delta", text: "x" });
     assert.equal(calls, 0);
     draft.reset();
-    // reset 立即 flush 一次(清 UI 草稿面板),之后 pending timer 已取消。
+    // reset flushes once immediately (clears the UI draft panel); afterwards the pending timer is cancelled.
     assert.equal(calls, 1);
     vi.advanceTimersByTime(200);
     assert.equal(calls, 1, "reset 后不应再有迟到 notify");

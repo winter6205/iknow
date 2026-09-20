@@ -1,15 +1,15 @@
 /**
- * serve-workspace T5: 顶栏 chip + picker 渲染与 API 契约断言。
+ * Render + API-contract asserts for the top-bar chip and the workspace picker.
  *
- * 覆盖：
- * - basename 4 例（POSIX / Windows 路径 + 根路径边界）
- * - /api/v1/workspace* 端点 fetch 契约（URL / method / body）
- * - WorkspaceChip 两态渲染（bound basename / unbound CTA + bg-warn-soft）
- * - WorkspacePicker 默认态（input / 信任 toggle / recents 列表）
- * - onBind payload 构造（confirmTrust 透传 + 空输入兜底）
+ * Coverage:
+ * - basename, 4 cases (POSIX / Windows paths + root-path boundary)
+ * - /api/v1/workspace* endpoint fetch contract (URL / method / body)
+ * - WorkspaceChip two-state render (bound basename / unbound CTA + bg-warn-soft)
+ * - WorkspacePicker default state (input / trust toggle / recents list)
+ * - onBind payload construction (confirmTrust pass-through + empty-input fallback)
  *
- * 沿用 renderToStaticMarkup + fetch-stub 模式（参考 tests/web/subagents-api.test.ts、
- * tests/web/usage-chip.test.tsx），无需 jsdom。
+ * renderToStaticMarkup + fetch-stub pattern (see tests/web/subagents-api.test.ts,
+ * tests/web/usage-chip.test.tsx); no jsdom needed.
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
@@ -143,7 +143,7 @@ describe("api workspace 端点（serve-workspace T3 + T5）", () => {
           }),
       })) as unknown as typeof fetch
     );
-    // hook 层 .catch 静默降级；这里直接验证 fetch 端契约
+    // the hook layer degrades silently via .catch; here we assert the fetch endpoint contract directly
     await assert.rejects(
       listTrustedWorkspaces(),
       /workspaces recents not wired/
@@ -178,7 +178,7 @@ describe("WorkspaceChip 渲染", () => {
       "must include root path in title"
     );
     assert.ok(html.includes("📁"), "must include folder glyph");
-    // bound 态不应渲染警告 CTA
+    // bound state must not render the warning CTA
     assert.ok(!html.includes("选择工作空间"), "must NOT include unbound CTA");
   });
 });
@@ -196,7 +196,7 @@ describe("WorkspacePicker 渲染", () => {
       />
     );
     assert.ok(html.includes("选择工作空间根"), "must include picker title");
-    // recents 段标题 + 内容
+    // recents section title + content
     assert.ok(
       html.includes("已存在工作空间"),
       "must include recents section title"
@@ -208,7 +208,7 @@ describe("WorkspacePicker 渲染", () => {
       html.includes("/abs/older"),
       "must include second recent full path"
     );
-    // path picker 默认折叠: input / trust / bind 不在 DOM
+    // path picker folded by default: input / trust / bind absent from the DOM
     assert.ok(
       !html.includes('aria-label="工作空间绝对路径"'),
       "must NOT render path input when picker folded"
@@ -221,7 +221,7 @@ describe("WorkspacePicker 渲染", () => {
       !html.includes("绑定"),
       "must NOT render bind button when picker folded"
     );
-    // 折叠 CTA 存在 + aria-expanded=false + aria-controls
+    // fold CTA present + aria-expanded=false + aria-controls
     assert.ok(
       html.includes("选择路径新建工作空间"),
       "must render fold CTA text"
@@ -251,7 +251,7 @@ describe("WorkspacePicker 渲染", () => {
       !html.includes("已存在工作空间"),
       "must NOT render recents section"
     );
-    // path picker 默认展开
+    // path picker expanded by default
     assert.ok(
       html.includes('aria-label="工作空间绝对路径"'),
       "must render path input when picker auto-expanded"
@@ -262,7 +262,7 @@ describe("WorkspacePicker 渲染", () => {
       html.includes('aria-expanded="true"'),
       "must mark fold CTA as expanded by default"
     );
-    // 子目录浏览器折叠按钮 (浏览器内仍需折叠, 不空请求)
+    // subdir-browser fold button (still folded inside the browser, no wasted request)
     assert.ok(
       html.includes('aria-label="浏览子目录"'),
       "must render browser toggle when picker expanded"
@@ -297,13 +297,13 @@ describe("WorkspacePicker 渲染", () => {
         onBrowseSubdirs={async () => []}
       />
     );
-    // recents <li><button> 节点不应再贴 pill 类。路径里没有 ws-path-picker 内
-    // 的子目录 list (折叠态), 所以全 html 范围内 recents 列表项不应出现 rounded-pill。
+    // recents <li><button> nodes must drop the pill class. In the folded state the path
+    // picker's subdir list is absent, so rounded-pill must not appear anywhere in the html.
     assert.ok(
       !html.includes("rounded-pill"),
       "T5: list items must drop rounded-pill (use rounded-md)"
     );
-    // 收紧 → 替换为小圆角 (rounded-md 即 Tailwind 6px, 或等效 rounded-[6px])
+    // tightened to a small radius (rounded-md = Tailwind 6px, equivalent to rounded-[6px])
     assert.ok(
       html.includes("rounded-md"),
       "must render list items with rounded-md (Tailwind 6px)"
@@ -342,12 +342,12 @@ describe("WorkspacePicker 渲染", () => {
         onBrowseSubdirs={async () => []}
       />
     );
-    // 折叠 CTA 是 <button>, aria-expanded + aria-controls 都在, 不允许 <div/span onClick>
+    // the fold CTA is a <button> with aria-expanded + aria-controls set; <div/span onClick> is not allowed
     assert.ok(
       html.includes('aria-controls="ws-path-picker-panel"'),
       "fold CTA must declare aria-controls"
     );
-    // recents 列表项也都是 <button> (静态 markup 检验 — 无 div onClick)
+    // recents list items are also <button>s (static markup check — no div onClick)
     assert.ok(
       !/<div[^>]*\sonClick=/.test(html),
       "must NOT contain <div onClick> (a11y red line)"
@@ -411,12 +411,13 @@ describe("WorkspacePicker — pickRecentForBind (recents 列表项 onBind 契约
 });
 
 /**
- * serve-workspace T8: WorkspaceChip 上下文感知 — 显示优先级
- *  1. activeWorkspaceRoot 优先（用户切到某工作空间内的会话后, chip 显示该根名）
- *  2. 否则 bound + root（picker 兜底）
- *  3. 否则 unbound CTA（warn color）
+ * WorkspaceChip context awareness — display priority:
+ *  1. activeWorkspaceRoot first (after the user switches to a session inside a
+ *     workspace, the chip shows that root's basename)
+ *  2. else bound + root (picker fallback)
+ *  3. else unbound CTA (warn color)
  *
- * 三态都用 <button> (a11y); 永远可点击触发 popover。
+ * All three states render as <button> (a11y); always clickable to open the popover.
  */
 describe("WorkspaceChip — T8 显示优先级", () => {
   it("activeWorkspaceRoot 优先 → 即使 ws.bound=false 也显示 basename", () => {
@@ -449,8 +450,9 @@ describe("WorkspaceChip — T8 显示优先级", () => {
         onOpen={() => {}}
       />
     );
-    // spec §Commands 5 "换根 = 新会话" — 用户切到新会话但 picker ws.root 还没刷新
-    // 这种临时态下, chip 显示 active 会话所在根 (优先级最高)。
+    // "switching root = new session": the user moved to a new session while the picker's
+    // ws.root has not refreshed yet — in this transient state the chip shows the active
+    // session's root (highest priority).
     assert.ok(html.includes("active"), "must render active root basename");
     assert.ok(
       !html.includes("other"),
@@ -503,11 +505,11 @@ describe("WorkspaceChip — T8 显示优先级", () => {
 });
 
 /**
- * serve-workspace T8: WorkspacePicker popover shell — a11y 三件套
+ * WorkspacePicker popover shell — the a11y trio:
  *  - role="dialog"
  *  - aria-modal="true"
- *  - aria-labelledby 指向 sr-only 标题 (h2#workspace-picker-title)
- *  - 零 div/span onClick (a11y 红线)
+ *  - aria-labelledby pointing at the sr-only title (h2#workspace-picker-title)
+ *  - zero div/span onClick (a11y red line)
  */
 describe("WorkspacePicker — T8 popover shell + a11y", () => {
   it("popover shell 含 role=dialog + aria-modal + aria-labelledby 链到 sr-only h2", () => {
@@ -586,7 +588,7 @@ describe("WorkspacePicker — T8 popover shell + a11y", () => {
         onBrowseSubdirs={async () => []}
       />
     );
-    // 第一项 recent button 应有 autofocus 锚点; 第二项无。
+    // the first recent button should carry the autofocus anchor; the second must not.
     const firstButtonMatch = html.match(
       /data-workspace-path="\/abs\/projects\/first"[^>]*data-ws-picker-autofocus/
     );
@@ -615,7 +617,7 @@ describe("WorkspacePicker — T8 popover shell + a11y", () => {
         onBrowseSubdirs={async () => []}
       />
     );
-    // path picker input 应有 autofocus 锚点。
+    // the path picker input should carry the autofocus anchor.
     assert.ok(
       html.includes('aria-label="工作空间绝对路径"'),
       "must render path input when recents empty"

@@ -1,15 +1,16 @@
 /**
- * #458 T8 (SC2 + SC4): `## GOAL:` re-pin via postMessage — post-#605 T2 字段
- * 退休后的纯 goal-pin 语义。
+ * `## GOAL:` re-pin via postMessage — pure goal-pin semantics after the
+ * taskFocus field's retirement.
  *
- * #605 T2 后 `session.taskFocus` 整段退休;本文件只覆盖 `## GOAL: <text>`
- * 触发的 user_pin 写路径(re-pin, history 累积, 空 directive 拒绝)。
- * mid-message(`hello ## GOAL: x` 不构成 pin directive)行为由
- * `chat-session-user-text.test.ts` + `chat-session` 自身覆盖,不再在本文件
- * 重复。
+ * With `session.taskFocus` fully retired, this file covers only the
+ * user_pin write path triggered by `## GOAL: <text>` (re-pin, history
+ * accumulation, empty-directive rejection). Mid-message behavior
+ * (`hello ## GOAL: x` does not form a pin directive) is covered by
+ * `chat-session-user-text.test.ts` + `chat-session` itself, not here.
  *
- * Fixture:re-pin history-accumulation tests 使用显式 `pinGoal` 构造的
- * `user_pin` 起点,绕过已退役的 first-postMessage seed path。
+ * Fixtures: re-pin history-accumulation tests use an explicit
+ * `pinGoal`-constructed `user_pin` origin, bypassing the retired
+ * first-postMessage seed path.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";

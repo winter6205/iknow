@@ -1,39 +1,40 @@
 /**
- * T13 (#440 Stream B) — fixture stdio MCP server exposing **resources** only.
+ * Fixture stdio MCP server exposing **resources** only.
  *
- * 与 tests/fixtures/mcp-server/server.ts（同形但只暴露 tools）配对：
- * 那个 server 暴露 4 个 tool (echo / fail / slow / added-on-listchange)，
- * 本 server 暴露 4 个 resource（small / large / empty / blob）—— 双 fixture
- * 分别覆盖 tools 和 resources 两条 MCP 协议路径。
+ * Paired with tests/fixtures/mcp-server/server.ts (same shape, tools only):
+ * that server exposes 4 tools (echo / fail / slow / added-on-listchange),
+ * this one exposes 4 resources (small / large / empty / blob) — the two
+ * fixtures cover the tools and resources MCP protocol paths separately.
  *
- * 用途（acceptance of plan T13）：
- *   1. spawn fixture server → createMcpManager → list_mcp_resources 聚合含
- *      至少 1 条 fixture 资源；
- *   2. read_mcp_resource 读 small://fixture → 真实 text 内容返回；
- *   3. large://fixture 触发 executor 截断行为（50_000 字符 > 20000 阈值）；
- *   4. blob://fixture 返回 base64 内容；
- *   5. empty://fixture 边界（content 长度 0）；
- *   6. shutdown SIGTERM — 子孙必须真正退出（SC11）。
+ * Usage:
+ *   1. spawn this fixture → createMcpManager → list_mcp_resources aggregate
+ *      contains at least 1 fixture resource;
+ *   2. read_mcp_resource on small://fixture → real text content returned;
+ *   3. large://fixture triggers executor truncation (50_000 chars > 20000 threshold);
+ *   4. blob://fixture returns base64 content;
+ *   5. empty://fixture boundary (content length 0);
+ *   6. SIGTERM shutdown — the process must really exit.
  *
- * 协议实现（MCP stdio 最小子集）：
- *   - initialize → 声明 capabilities 含 resources:{}
- *   - notifications/initialized → 静默 ack
- *   - resources/list → 返回固定 4 个 fixture resource
- *   - resources/read → 按 uri 路由到对应内容(text / blob)
- *   - resources/templates/list → 空（fixture 不暴露模板）
+ * Protocol implementation (minimal MCP stdio subset):
+ *   - initialize → declare capabilities including resources:{}
+ *   - notifications/initialized → silent ack
+ *   - resources/list → return the fixed 4 fixture resources
+ *   - resources/read → route by uri to content (text / blob)
+ *   - resources/templates/list → empty (fixture exposes no templates)
  *   - ping → ok({})
- *   - 任何其他方法 → -32601 MethodNotFound
+ *   - any other method → -32601 MethodNotFound
  *
- * 退出语义：SIGTERM/SIGINT/SIGPIPE 监听 → process.exit。SC11 守门。
+ * Exit semantics: SIGTERM/SIGINT/SIGPIPE listeners → process.exit.
  *
- * Framing：newline-delimited JSON (MCP stdio spec)。Framing loop 与
- * tests/fixtures/mcp-server/server.ts 同形(本 fixture 拆开是为了让 T13
- * 端到端链路失败时不污染 T10 tools 链路,fixture 隔离 = 调试隔离)。
+ * Framing: newline-delimited JSON (MCP stdio spec). The framing loop mirrors
+ * tests/fixtures/mcp-server/server.ts; this fixture is kept separate so a
+ * failure in the resources path cannot pollute the tools path (fixture
+ * isolation = debug isolation).
  */
 import process from "node:process";
 
 // ---------------------------------------------------------------------------
-// Resource 清单
+// Resource inventory
 // ---------------------------------------------------------------------------
 
 interface ResourceDef {
@@ -72,7 +73,7 @@ const FIXTURE_RESOURCES: readonly ResourceDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Resource content — 静态固定;按 uri 路由。
+// Resource content — static and fixed; routed by uri.
 // ---------------------------------------------------------------------------
 
 function resourceContent(uri: string): {
@@ -89,7 +90,7 @@ function resourceContent(uri: string): {
         text: "hello from fixture resource server",
       };
     case "large://fixture": {
-      // 50000 字符 → executor 20000 截断兜底（M3 决议：复用现有纪律）
+      // 50000 chars -> hits the executor's 20000 truncation (reuses existing discipline)
       const chunk = "ABCDEFGHIJ".repeat(5_000); // 50_000 chars
       return { uri, mimeType: "text/plain", text: chunk };
     }
@@ -139,7 +140,7 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
   const method = typeof msg.method === "string" ? msg.method : "";
   const params = (msg["params"] ?? {}) as Readonly<Record<string, unknown>>;
 
-  // 通知类 (id 缺失) — 服务端不回应
+  // Notification (no id) — server must not respond
   if (id === null && !("id" in msg)) {
     if (
       method === "notifications/initialized" ||
@@ -189,12 +190,12 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
     }
   }
 
-  // resources/templates/list — 本 fixture 不暴露
+  // resources/templates/list — not exposed by this fixture
   if (method === "resources/templates/list") {
     return ok(id, { resourceTemplates: [] });
   }
 
-  // tools/* — 本 fixture 不暴露工具,与 tools fixture 完全隔离
+  // tools/* — this fixture exposes no tools, fully isolated from the tools fixture
   if (
     method === "tools/list" ||
     method === "tools/call" ||
@@ -208,7 +209,7 @@ function handleRequest(msg: Readonly<Record<string, unknown>>): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Framing loop — 读 stdin 按 \n 切分 JSON
+// Framing loop — read stdin, split JSON on \n
 // ---------------------------------------------------------------------------
 
 let buffer = Buffer.alloc(0);
@@ -248,14 +249,14 @@ process.stdin.on("end", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 信号处理 — SC11 (stdio 子孙收到 SIGTERM 必须退出)
+// Signal handling — a stdio child process must exit on SIGTERM
 // ---------------------------------------------------------------------------
 
 process.on("SIGTERM", () => process.exit(143));
 process.on("SIGINT", () => process.exit(130));
 process.on("SIGPIPE", () => process.exit(0));
 
-// 启动 stderr 行便于调试;不污染 stdout 协议流
+// Startup stderr line aids debugging; keeps the stdout protocol stream clean
 process.stderr.write(
   `[fixture-mcp-resources] started pid=${process.pid} resources=${FIXTURE_RESOURCES.length}\n`
 );

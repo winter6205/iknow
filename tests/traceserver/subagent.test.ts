@@ -1,15 +1,16 @@
 /**
- * #358 T5 — traceserver 读侧 subagent 三类记录
- * (subagent_spawn / subagent_stop / subagent_state_change)。
+ * traceserver read side for the three subagent record types
+ * (subagent_spawn / subagent_stop / subagent_state_change).
  *
- * 写侧 T4 已落地 (src/harness/trace/jsonl.ts): 顶层 key 经 camelToSnake,
- * `subagent_id` 是显式 id 载体 (id = manager taskId)。本文件验证读侧:
- *   1. TRACE_RECORD_TYPES 白名单含三类 + parseRecordType 接受 (HTTP 200)。
- *   2. ?task_id= / ?parent_turn_id= 精确过滤, 与既有过滤 AND 组合。
- *   3. 空 task_id / parent_turn_id → ValidationError (400, field)。
- *   4. TraceQuery 无新字段 → 行为不变 (向后兼容)。
- *   5. TRACE_FIELD_DEFS 新增 subagent 列 + recordTypes 作用域正确 + 唯一性自检。
- *   6. Reader 集成: 临时 JSONL + createJsonlTraceReader, taskId 过滤命中且时间降序。
+ * The write side is settled (src/harness/trace/jsonl.ts): top-level keys go
+ * through camelToSnake, and `subagent_id` is the explicit id carrier
+ * (id = manager taskId). This file verifies the read side:
+ *   1. TRACE_RECORD_TYPES whitelist contains the three + parseRecordType accepts them (HTTP 200).
+ *   2. ?task_id= / ?parent_turn_id= exact filters, AND-combined with existing filters.
+ *   3. Empty task_id / parent_turn_id → ValidationError (400, field).
+ *   4. TraceQuery without the new fields → behavior unchanged (backward compatible).
+ *   5. TRACE_FIELD_DEFS gains the subagent columns + correct recordTypes scoping + uniqueness self-check.
+ *   6. Reader integration: temp JSONL + createJsonlTraceReader, taskId filter hits, time descending.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -108,7 +109,7 @@ function llmRow(startedAt: string): string {
   });
 }
 
-/** 文件写入顺序故意打乱 — 读侧必须按 started_at 降序还原。 */
+/** The file write order is intentionally shuffled — the read side must restore started_at descending order. */
 const lines: readonly string[] = [
   llmRow("2026-08-01T00:00:00.000Z"),
   spawnRow({
@@ -244,7 +245,7 @@ describe("GET /api/v1/traces — #358 T5 subagent queries", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "iknow-trace-subagent-http-"));
-    // T6 (SC16): 会话落两级树 `<tmpDir>/projects/<slug>/c1/trace.jsonl`。
+    // The session lands in the two-level tree `<tmpDir>/projects/<slug>/c1/trace.jsonl`.
     const convDir = join(tmpDir, "projects", "test-project-subagent", "c1");
     mkdirSync(convDir, { recursive: true });
     writeFileSync(
@@ -373,8 +374,9 @@ describe("TRACE_FIELD_DEFS — #358 T5 subagent columns", () => {
       subagentTypes,
       "subagentId scope"
     );
-    // taskId / origin 是关联列, 后加的 subagent_step 也带这两个键 (配对键仍是
-    // task_id); subagentId 刻意不覆盖 step —— step 的 id 载体是 subagentStepId。
+    // taskId / origin are correlation columns; the later-added subagent_step also carries
+    // these two keys (the pairing key stays task_id); subagentId deliberately excludes
+    // step — step's id carrier is subagentStepId.
     for (const key of ["taskId", "origin"] as const) {
       const def = byKey.get(key);
       assert.ok(def, `${key} must be declared`);

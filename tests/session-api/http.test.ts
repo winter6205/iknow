@@ -134,7 +134,7 @@ async function createSession(): Promise<string> {
     .conversation_id;
 }
 
-/** 以指定 listen 选项（model / permissionMode）重启服务器。 */
+/** Restart the server with given listen options (model / permissionMode). */
 async function restartWithOptions(
   opts: Pick<
     SessionHttpServerOptions,
@@ -264,7 +264,7 @@ describe("GET/POST /api/v1/permission-mode", () => {
 
     const p1 = await postJson({ path: "/api/v1/permission-mode", payload: {} });
     assert.deepEqual(p1.body, { mode: "full_auto" });
-    assert.equal(ctx.get(), "full_auto"); // holder 与响应一致（运行时生效）
+    assert.equal(ctx.get(), "full_auto"); // holder matches the response (effective at runtime)
 
     const p2 = await postJson({ path: "/api/v1/permission-mode", payload: {} });
     assert.deepEqual(p2.body, { mode: "default" });
@@ -598,7 +598,7 @@ describe("POST /api/v1/sessions/:id/reset", () => {
   });
 });
 
-// -- host 扩展面：skills / mcp / rewind（WebUI 映射 TUI TuiExtensions） ----
+// -- host extension face: skills / mcp / rewind (WebUI mirrors TUI TuiExtensions) --
 
 describe("GET /api/v1/skills + /mcp（deps 注入路径：空清单非 500）", () => {
   it("skills 空数组（测试注入 deps 无 catalog）", async () => {

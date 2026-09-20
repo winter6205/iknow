@@ -1,15 +1,18 @@
 /**
- * ADR-0092 / SC13 —— chat REPL 的 `/config`（三入口 slash 对等物）。
+ * ADR-0092 — chat REPL `/config` (the slash peer across the three entry points).
  *
- * 两层：
- *   1. `applySlashCommand` 把 `/config` 解析成 `{ type: "config", args }`，
- *      args 原样透传（值域与文案单点在 `harness/sandbox/fs-mode.ts`）；
- *   2. `processChatLine` 在 host 的 `fsMode` holder 上执行 `applyFsModeCommand`
- *      —— 切档 / 状态查询 / 非法参数 usage 与 TUI / serve 同一份字面；
- *      holder 缺席（ask 入口）→ stderr 提示不改状态。
+ * Two layers:
+ *   1. `applySlashCommand` parses `/config` into `{ type: "config", args }`,
+ *      passing args through verbatim (value domain and wording live in one
+ *      place: `harness/sandbox/fs-mode.ts`);
+ *   2. `processChatLine` runs `applyFsModeCommand` on the host's `fsMode`
+ *      holder — mode switch / status query / invalid-arg usage all share the
+ *      same literals as TUI and serve; holder absent (ask entry) → stderr hint,
+ *      no state change.
  *
- * 不落盘：与 `/graph` 同款只翻 holder（chat 无 settings 写回通道；TUI 的
- * 持久化面是 `onPersistFsMode`，不在本入口合同内）。
+ * Not persisted: like `/graph`, it only flips the holder (chat has no settings
+ * write-back channel; TUI's persistence surface is `onPersistFsMode`, outside
+ * this entry point's contract).
  */
 import { describe, expect, test } from "vitest";
 import assert from "node:assert/strict";
@@ -27,7 +30,7 @@ function mockCtx(overrides: Partial<SlashContext> = {}): SlashContext {
   return { state: makeState(), ...overrides };
 }
 
-/** processChatLine 只走 slash 分支时不碰 deps；给个不可调用的占位。 */
+/** When processChatLine only takes the slash branch it never touches deps; this is a non-callable placeholder. */
 const UNUSED_DEPS = {} as unknown as LoopEngineDeps;
 
 describe("/config 解析 (cli slash)", () => {
@@ -98,8 +101,9 @@ describe("/config 执行 (chat host holder)", () => {
     const ctx = { deps: UNUSED_DEPS, state: makeState() };
     const res = await processChatLine({ line: "/config fs workspace", ctx });
     assert.equal(res.output, "");
-    // 不是 "Unknown command /config"（词表漏项）—— 命令已认识，只是本入口
-    // 没注入 holder（与 /graph 缺席文案同形态）。
+    // Not "Unknown command /config" (missing from the verb table) — the command
+    // IS recognized; this entry point just has no holder injected (same shape
+    // as the /graph absent-holder message).
     assert.match(res.stderr ?? "", /^\/config: /);
     assert.doesNotMatch(res.stderr ?? "", /Unknown command/);
   });

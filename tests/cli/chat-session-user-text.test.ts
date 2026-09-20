@@ -1,21 +1,24 @@
 /**
- * #449 B8 (SC5, 修订 per #473): chat-session 端 verify-loop userText =
- * `goal.text ?? query`。taskFocus 段已从消费端移除 (#473): taskFocus 是
- * 稳定焦点锚(首次 seed 后不再变化, OQ2), 喂进每轮 verify 会让新任务被
- * 旧焦点遮蔽而误判 PASS。数据侧三段公式(`goal ?? taskFocus ?? query`,
- * SC3/#458 T8)不受影响 — 见 tests/session-api/goal-seam.test.ts SC3 块。
+ * chat-session verify-loop userText = `goal.text ?? query`.
  *
- * Hub 端同款接线已在 `tests/session-api/goal-seam.test.ts` 覆盖;本文件
- * 守护 chat 端的等价接线。chat-session 通过 `ctx.checkpointStore.load(
- * conversationId)` 读会话状态(与 `goalStatus` / `goalClear` / `goalPin`
- * 既有读盘模式一致),把 `goal.text ?? query` 套用到 verify-loop 的
- * userText 字段(仅 verifyConfig 在场时被消费)。
+ * The taskFocus segment was removed from the consumer side: taskFocus is a
+ * stable focus anchor (unchanged after the first seed), so feeding it into every
+ * verify round would let a stale focus mask a new task and mis-judge it as PASS.
+ * The data-side three-segment formula (`goal ?? taskFocus ?? query`) is
+ * unaffected —— see tests/session-api/goal-seam.test.ts.
  *
- * Mock seam: `vi.mock("../../src/harness/verify/index.ts")` 替换
- * `runVerifyLoop`,captures 入口 opts 拿 userText(沿用
- * tests/session-api/goal-seam.test.ts 同款 mock 模式)。真实 SessionStore
- * 接 tmpdir(typed-error 契约与生产一致),真实 conversationId,stub
- * model 走 makeDeps(零 bwrap / 零沙箱依赖)。
+ * The equivalent hub-side wiring is already covered by
+ * `tests/session-api/goal-seam.test.ts`; this file guards the chat side.
+ * chat-session reads session state through `ctx.checkpointStore.load(
+ * conversationId)` (same read-from-disk pattern as `goalStatus` / `goalClear` /
+ * `goalPin`) and applies `goal.text ?? query` to the verify-loop userText field
+ * (only consumed when verifyConfig is present).
+ *
+ * Mock seam: `vi.mock("../../src/harness/verify/index.ts")` replaces
+ * `runVerifyLoop` and captures the entry opts to read userText (same mock
+ * pattern as tests/session-api/goal-seam.test.ts). A real SessionStore on a
+ * tmpdir (typed-error contract as in production), a real conversationId, and a
+ * stub model via makeDeps (no bwrap / no sandbox dependency).
  */
 import {
   afterAll,
@@ -93,9 +96,9 @@ import { assistantResult, makeCtx } from "./_fixtures.ts";
 import { ensureMainSessionFenceTmpForConversation } from "../../src/harness/sandbox/fence-tmp.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 
-/** Pre-#605 legacy on-disk shape — runtime type was retired in #605 T2; we
- *  pass this through the `as SessionFileV1` cast below to exercise the
- *  sanitize-drop path (assertion: legacy taskFocus key disappears on load). */
+/** Legacy on-disk shape —— its runtime type was retired; we pass this through
+ *  the `as SessionFileV1` cast below to exercise the sanitize-drop path
+ *  (assertion: the legacy taskFocus key disappears on load). */
 interface LegacyTaskFocusState {
   text: string;
   updatedAt: string;
@@ -155,7 +158,8 @@ interface MakeChatCtxOpts {
   readonly id: string;
   readonly verifyConfig?: VerifyConfig;
   readonly withStore?: boolean;
-  /** true 时不装配 verifyConfig (进 processChatLine 的裸 runHarness 分支)。 */
+  /** When true, verifyConfig is not assembled (processChatLine takes its bare
+   *  runHarness branch). */
   readonly withoutVerifyConfig?: boolean;
 }
 
@@ -166,9 +170,9 @@ function makeChatCtx(opts: MakeChatCtxOpts): ChatLineContext {
     ...(opts.withStore !== false ? { checkpointStore: store } : {}),
   });
   if (opts.withoutVerifyConfig === true) {
-    return ctx; // verifyConfig 缺席 → runVerifyLoop 分支不可达
+    return ctx; // verifyConfig absent → the runVerifyLoop branch is unreachable
   }
-  // 默认 verifyConfig 在场 (runVerifyLoop 被调)。
+  // verifyConfig present by default (runVerifyLoop gets called).
   const verifyConfig: VerifyConfig = opts.verifyConfig ?? {
     command: "/bin/true",
   };
@@ -199,7 +203,7 @@ function capturedCompletionMode(): unknown {
 describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () => {
   it("session without goal/taskFocus → userText === query and HITL skip judge", async () => {
     const id = "chat-no-goal-baseline";
-    // 不 seed — store.load 在 resolveVerifyUserText 里抛 not_found。
+    // Not seeded —— store.load throws not_found inside resolveVerifyUserText.
     const ctx = makeChatCtx({ id });
     const r = await processChatLine({ line: "build it", ctx });
     assert.equal(r.ranQuery, true);
@@ -326,8 +330,8 @@ describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () =>
         history: [],
       },
     });
-    // verifyConfig undefined → 不进 runVerifyLoop 分支,
-    // userText 公式不可达 — 走 plain runHarness(query, ...)。
+    // verifyConfig undefined → the runVerifyLoop branch is not entered,
+    // the userText formula is unreachable —— it goes through plain runHarness(query, ...).
     const ctx = makeChatCtx({
       id,
       withoutVerifyConfig: true,
@@ -335,14 +339,15 @@ describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () =>
     const r = await processChatLine({ line: "raw query", ctx });
     assert.equal(r.ranQuery, true);
     expect(runVerifyLoopMock).not.toHaveBeenCalled();
-    // 兜底分支不被消费时无断言 — runHarness 路径与 userText 无关。
-    // 占位 sanity: 返回仍应 ranQuery (与 baseline 一致)。
+    // Nothing to assert while the fallback branch is not consumed —— the runHarness
+    // path is independent of userText. Sanity placeholder: the call must still
+    // report ranQuery (matching the baseline).
     assert.ok(r.output.length > 0);
   });
 
   it("checkpointStore 缺席 + conversationId 在场 → userText === query (ask / pipe 路径无 store, fail-open)", async () => {
     const id = "chat-no-store";
-    // checkpointStore undefined (ask / pipe / tests 不装配 store)。
+    // checkpointStore undefined (ask / pipe / tests assemble no store).
     const ctx = makeChatCtx({ id, withStore: false });
     const r = await processChatLine({ line: "fallback Q", ctx });
     assert.equal(r.ranQuery, true);
@@ -357,13 +362,14 @@ describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () =>
 });
 
 /**
- * ADR-0092 / SC12：chat 的 verify 调用点必须把会话 tmp 透传进闭环 ——
- * 否则工作区档下 `$TMPDIR` 缺席且写白名单是进程 tmpdir()，会话 tmp（落在
- * home 子树内）反被 `--ro-bind <home>` 盖住。
+ * ADR-0092: chat's verify call site must pass the session tmp through into the
+ * loop —— otherwise, in workspace mode, `$TMPDIR` is absent and the write
+ * whitelist is the process tmpdir(), while the session tmp (inside the home
+ * subtree) gets covered by `--ro-bind <home>`.
  *
- * 解析必须与 bash 工具面同源：`ctx.checkpointStore.getProjectDir()` +
- * `state.conversationId` 经 `resolveSessionFenceTmp` 派生
- * `<projectDir>/<sanitized convId>/fence-tmp`。
+ * Resolution must share one source with the bash tool surface:
+ * `ctx.checkpointStore.getProjectDir()` + `state.conversationId` derive
+ * `<projectDir>/<sanitized convId>/fence-tmp` via `resolveSessionFenceTmp`.
  */
 describe("chat-session verify-loop seam: session tmp wiring (ADR-0092 SC12)", () => {
   it("tmpDir = <projectDir>/<convId>/fence-tmp（与 bash 面同一 helper）", async () => {

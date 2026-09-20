@@ -1,7 +1,8 @@
 /**
- * T3 — worker 围栏 /tmp 垫底与主会话隔离；新布局 `subagents/<taskId>/`
- * （记录 + 垫底）。SC3 / SC7（目录）/ SC8。
- * T7 — 新 spawn 的 stderr 与记录、垫底同目录；旧 `stderr/<taskId>.log` 不迁、仍可读。
+ * Worker fence /tmp padding and main-session isolation; new layout
+ * `subagents/<taskId>/` (record + pad), plus: a new spawn's stderr sits in the
+ * same dir as record and pad, while the legacy `stderr/<taskId>.log` is never
+ * migrated and stays readable.
  */
 
 import assert from "node:assert/strict";

@@ -177,11 +177,12 @@ describe("subagent envelope schema (SC13 / D1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0085 / SC9: todoLedger wire 字段（父会话账本锚点）
+// ADR-0085: todoLedger wire field (parent-session ledger anchor)
 //
-// `additionalProperties: false` 下新字段必须显式声明,否则 ajv 把带字段的
-// envelope 判成 ProtocolError。旧 envelope（缺此字段）必须继续被接受 ——
-// 与 role / writeSituation 同形态的 wire-additive 纪律。
+// Under `additionalProperties: false` a new field must be declared
+// explicitly, or ajv flags an envelope carrying it as ProtocolError. Old
+// envelopes (without the field) must keep being accepted — wire-additive
+// discipline, same shape as role / writeSituation.
 // ---------------------------------------------------------------------------
 
 describe("WorkerEnvelope.todoLedger (ADR-0085 / SC9)", () => {
@@ -322,9 +323,11 @@ describe("subagent envelope truncation (SC10)", () => {
     assert.ok(out.summary.length > 0);
   });
 
-  // ADR-0111 Decision 2: modelTransient = 上游瞬时可续失败,与 protocolError
-  // (真协议损坏)、crashed(进程级异常死亡)在父可见文案面上必须可分辨,
-  // 且给出 ADR-0102 Decision 1 的续跑出路(闸天然放行,文案引导)。
+  // ADR-0111 Decision 2: modelTransient = transient upstream failure that can
+  // resume; it must stay distinguishable from protocolError (real wire damage)
+  // and crashed (process-level abnormal death) on the parent-visible text
+  // surface, and offer the ADR-0102 Decision 1 resume path (the gate passes
+  // naturally; the text guides).
   it("empty-summary failed reason=modelTransient → 父可见文案含续跑引导 (ADR-0111/0102)", () => {
     const out = truncateEnvelopeResult({
       status: "failed",

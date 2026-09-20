@@ -1,16 +1,17 @@
 /**
- * wayfinder #440 Stream B — T8 manager resource 通道单测（M1/M3/M4 决议）。
+ * Manager resource-channel unit tests.
  *
- * 覆盖 5 类输入（沿用 p04 stub client 形态 + 按需简化）：
- *  1. 正常路径（单 server 聚合 / 多 server 聚合 / blob 内容）
- *  2. 空输入（未 start；server="" / uri=""）
- *  3. 非法 / 负值（server 未配置；disabled server；SDK 抛错）
- *  4. 溢出 / 边界（聚合 1000 个 resources；cursor 透传）
- *  5. 并发 / 异常（两 server 并发 read；abort → typed error；state 切换失败）
+ * Covers 5 input classes (reusing the p04 stub-client shape, simplified as needed):
+ *  1. normal path (single-server aggregation / multi-server aggregation / blob content)
+ *  2. empty input (not started; server="" / uri="")
+ *  3. invalid / negative (server not configured; disabled server; SDK throws)
+ *  4. overflow / boundary (aggregate 1000 resources; cursor pass-through)
+ *  5. concurrency / exception (two servers read concurrently; abort → typed error; state-transition failure)
  *
- * 与 manager.test.ts 互补：manager.test.ts 锁状态机 / registerExternal，
- * 本文件锁资源通道的 listResources / readResource 协议路径。
- * 不复制 SC8/SC9/SC11/SC15/SC16 既有断言（不重复成本）。
+ * Complements manager.test.ts: that file locks the state machine /
+ * registerExternal; this file locks the resource channel's listResources /
+ * readResource protocol paths. Existing assertions there are not duplicated
+ * (no repeated cost).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -26,27 +27,27 @@ import {
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { McpServerConfig } from "../../src/harness/mcp/config.ts";
 
-/** T4 fixture — absolute workspace root for manager cwd contract. */
+/** Absolute workspace root for the manager cwd contract. */
 const TEST_WORKSPACE_ROOT = "/tmp/iknow-mcp-manager-resources-workspace";
 
 // ---------------------------------------------------------------------------
-// Resource stub client —— 在 manager.test.ts makeStubClient 基础上加 resource
-// 通道（listResources / readResource）；既有 callTool/listTools 不变。
+// Resource stub client — makeStubClient from manager.test.ts plus the resource
+// channel (listResources / readResource); existing callTool/listTools unchanged.
 // ---------------------------------------------------------------------------
 
 interface ResourceStubBehavior {
-  /** listResources 自定义。省略 → 用 configured `resources` + `nextCursor`。 */
+  /** Custom listResources. Omitted → uses configured `resources` + `nextCursor`. */
   listResources?: (cursor?: string) => Promise<{
     resources: readonly SdkResource[];
     nextCursor?: string;
   }>;
-  /** readResource 自定义。省略 → 命中 readMap；否则 fallbackRead。 */
+  /** Custom readResource. Omitted → hits readMap; otherwise fallbackRead. */
   readResource?: (
     uri: string
   ) => Promise<{ contents: readonly SdkResourceContents[] }>;
-  /** listResources 强制抛错。 */
+  /** Force listResources to throw. */
   failListResources?: Error;
-  /** readResource 强制抛错。 */
+  /** Force readResource to throw. */
   failReadResource?: Error;
 }
 
@@ -155,7 +156,7 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-/** 等后台 bootSlot 走完（stub connect/listTools 都是同步的，30ms 足够）。 */
+/** Wait for the background bootSlot to finish (stub connect/listTools are synchronous; 30ms is plenty). */
 async function startAndConnect(
   mgr: ReturnType<typeof createMcpManager>
 ): Promise<void> {
@@ -181,7 +182,7 @@ function sampleBlob(uri: string, b64: string): SdkResourceContents {
 }
 
 // =========================================================================
-// 1. 正常路径
+// 1. normal path
 // =========================================================================
 
 describe("manager.listResources / readResource — normal path", () => {
@@ -281,7 +282,7 @@ describe("manager.listResources / readResource — normal path", () => {
 });
 
 // =========================================================================
-// 2. 空输入
+// 2. empty input
 // =========================================================================
 
 describe("listResources / readResource — empty input", () => {
@@ -293,12 +294,12 @@ describe("listResources / readResource — empty input", () => {
       createClient: () =>
         makeResourceStub({ resources: [], readMap: new Map() }),
     });
-    // 故意不调用 start() —— slots 全在 pending
+    // deliberately no start() call — all slots remain pending
     const out = await mgr.listResources();
     expect(out.resources).toHaveLength(0);
     expect(out.perServer).toHaveLength(1);
     expect(out.perServer[0]?.state).toBe("pending");
-    // readResource 无 handle → 抛 typed error
+    // readResource without a handle → throws typed error
     await expect(mgr.readResource("never", "x://u")).rejects.toBeInstanceOf(
       ToolExecutionError
     );
@@ -336,7 +337,7 @@ describe("listResources / readResource — empty input", () => {
 });
 
 // =========================================================================
-// 3. 非法 / 负值
+// 3. invalid / negative
 // =========================================================================
 
 describe("listResources / readResource — invalid input", () => {
@@ -406,7 +407,7 @@ describe("listResources / readResource — invalid input", () => {
 });
 
 // =========================================================================
-// 4. 溢出 / 边界
+// 4. overflow / boundary
 // =========================================================================
 
 describe("listResources / readResource — overflow / boundaries", () => {
@@ -458,7 +459,7 @@ describe("listResources / readResource — overflow / boundaries", () => {
 });
 
 // =========================================================================
-// 5. 并发 / 异常
+// 5. concurrency / exception
 // =========================================================================
 
 describe("listResources / readResource — concurrent / exception", () => {
@@ -533,19 +534,19 @@ describe("listResources / readResource — concurrent / exception", () => {
     });
     await startAndConnect(mgr);
 
-    // 第一次 readResource 成功
+    // first readResource succeeds
     const first = await mgr.readResource("tw", "x://u");
     expect(first.contents[0]?.text).toBe("first");
 
-    // 模拟 server 端关闭 → manager onClose → markFailed → state="failed"
+    // simulate server-side close → manager onClose → markFailed → state="failed"
     (handles[0]!._triggerClose as () => void)();
 
-    // 等待状态切换
+    // wait for the state transition
     await new Promise((r) => setTimeout(r, 30));
     const status = mgr.status().find((s) => s.name === "tw");
     expect(status?.state).toBe("failed");
 
-    // 第二次 readResource 必须抛 typed error
+    // the second readResource must throw a typed error
     await expect(mgr.readResource("tw", "x://u")).rejects.toBeInstanceOf(
       ToolExecutionError
     );

@@ -1,16 +1,17 @@
 /**
- * `createTraceRouter` 工厂测试 (ADR-0020 D1.5, plan T2)。
+ * `createTraceRouter` factory tests (ADR-0020 D1.5).
  *
- * 工厂返回 `(req, res) => Promise<boolean>`：true = 已处理（响应已写），
- * false = 非 trace 路由（caller 继续分派）。不经 `http.createServer`，
- * 用轻量 req/res 替身直测（handler 只调 writeHead/end，不 pipe 流）。
+ * The factory returns `(req, res) => Promise<boolean>`: true = handled
+ * (response written), false = non-trace route (the caller keeps dispatching).
+ * Tested directly with lightweight req/res stand-ins, bypassing
+ * `http.createServer` (the handler only calls writeHead/end, never pipes streams).
  *
- * Categories (S2 defensive contract, plan §5 boundary classes T2 列):
- *   - happy: /api/v1/traces, /traces/fields, /traces/sessions 命中返 true
- *   - negative: 非 trace 路径 / POST → false 且不写响应
- *   - empty: 无 traceDir → /api/v1/traces 命中但 404 "no trace file configured"
- *   - concurrent: 两个 factory 实例闭包独立（各自 traceDir 不串）
- *   - exception: 非法 query → router 内部 sendError 映射 400（不抛给 caller）
+ * Categories (S2 defensive contract, boundary classes):
+ *   - happy: /api/v1/traces, /traces/fields, /traces/sessions hits return true
+ *   - negative: non-trace paths / POST → false, response untouched
+ *   - empty: no traceDir → /api/v1/traces hits but 404 "no trace file configured"
+ *   - concurrent: two factory instances have independent closures (no traceDir cross-talk)
+ *   - exception: invalid query → mapped to 400 by the router's internal sendError (never thrown to the caller)
  */
 import { afterEach, describe, expect, it } from "vitest";
 import * as http from "node:http";
@@ -19,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTraceRouter } from "../../src/traceserver/serve.ts";
 
-// -- req/res 替身（handler 只用 writeHead/end，无 pipe） ----------------------
+// -- req/res stand-ins (handler only uses writeHead/end, no pipe) -------------
 
 interface FakeRes {
   statusCode: number;
@@ -108,7 +109,7 @@ function writeSession(dir: string, convId: string): void {
   );
 }
 
-// -- 命中路由：返回 true 且写响应 ------------------------------------------------
+// -- hit routes: return true and write the response --------------------------------
 
 describe("createTraceRouter — 命中路由返 true", () => {
   it("GET /api/v1/traces → true + 200 records 形态", async () => {
@@ -160,7 +161,7 @@ describe("createTraceRouter — 命中路由返 true", () => {
   });
 });
 
-// -- 未命中：返 false 且不写响应 --------------------------------------------------
+// -- miss: return false and leave the response unwritten -----------------------------
 
 describe("createTraceRouter — 非 trace 路由返 false", () => {
   it("GET /api/v1/health → false（mounted health 归 session-api）", async () => {
@@ -202,7 +203,7 @@ describe("createTraceRouter — 非 trace 路由返 false", () => {
   });
 });
 
-// -- empty：无 traceDir ----------------------------------------------------------
+// -- empty: no traceDir --------------------------------------------------------------
 
 describe("createTraceRouter — empty（无 traceDir）", () => {
   it("GET /api/v1/traces → true + 404 no trace file configured", async () => {
@@ -233,7 +234,7 @@ describe("createTraceRouter — empty（无 traceDir）", () => {
   });
 });
 
-// -- concurrent：两实例闭包独立 ----------------------------------------------------
+// -- concurrent: two instances, closures isolated ----------------------------------
 
 describe("createTraceRouter — concurrent（实例隔离）", () => {
   it("两个 factory 各自 traceDir 不串", async () => {
@@ -269,7 +270,7 @@ describe("createTraceRouter — concurrent（实例隔离）", () => {
   });
 });
 
-// -- exception：非法 query → router 内部错误信封，不抛给 caller ----------------------
+// -- exception: invalid query → router's internal error envelope, not thrown to caller --
 
 describe("createTraceRouter — exception（错误信封内收）", () => {
   it("limit=-1 → true + 400 validation（field=limit）", async () => {

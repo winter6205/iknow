@@ -1,21 +1,25 @@
 /**
- * LSP 进程退出缝 wiring 结构钉 — TUI /quit 挂死修复。
+ * Structural pin for the LSP process-exit seam — fixes the TUI /quit hang.
  *
- * 根因（真实 PTY 复验）：warmup / lsp_* spawn 的 language server 子进程在
- * 退出链中从不被终止,stdio 管道让 Bun 事件循环在 runTui 返回 0 后永不排空
- * → /quit 挂死;手动 SIGTERM 两个 LSP 子进程后父进程立即退出（隔离实验）。
+ * Root cause (verified on a real PTY): language-server children spawned by
+ * warmup / lsp_* are never killed during exit, so their stdio pipes keep the
+ * Bun event loop from draining after runTui returns → /quit hangs; manually
+ * SIGTERM-ing the two LSP children let the parent exit immediately (isolation experiment).
  *
- * LSP 池是**进程级共享**（client.ts defaultPool,warmup spawn 缓存同源），
- * shutdownAll 会 latch shutDown（此后 getClient 一律 spawn-failed）。因此
- * 终止调用只允许出现在**宿主进程退出缝**：
- *   - TUI：shutdownExtensions（/quit + whenDestroyed 兜底 + catch 路径）与
- *     combinedShutdown（信号路径）；
- *   - chat：chatProcessShutdown（registerShutdown 信号钩 + REPL 自然退出）。
- * 引擎 shutdown（build-engine.ts）**不得**调用 —— chat rebind 收口旧引擎时
- * 会在进程中途触发,latch 后重建引擎的 LSP 永久 spawn-failed（review High）。
+ * The LSP pool is **process-level shared** (client.ts defaultPool, same cache
+ * as warmup spawns), and shutdownAll latches shutDown (every later getClient
+ * returns spawn-failed). So termination calls are only allowed in the
+ * **host-process exit seam**:
+ *   - TUI: shutdownExtensions (/quit + whenDestroyed fallback + catch path)
+ *     and combinedShutdown (signal path);
+ *   - chat: chatProcessShutdown (registerShutdown signal hook + natural REPL exit).
+ * Engine shutdown (build-engine.ts) must **not** call it — chat rebind triggers
+ * it mid-process, and after the latch a rebuilt engine's LSP is permanently
+ * spawn-failed.
  *
- * 结构性钉子（与 tests/tui/quit-shutdown.test.ts 同风格）：runTui 全路径
- * 需要真实 renderer,bun/vitest 测试环境不可注入,以源码接线断言钉缝位。
+ * Structural pin (same style as tests/tui/quit-shutdown.test.ts): runTui's
+ * full paths need a real renderer, which cannot be injected in bun/vitest
+ * test environments, so the seam is pinned via source-wiring assertions.
  */
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -39,7 +43,7 @@ describe("LSP 池终止只挂在进程退出缝", () => {
 
   it("cli.ts:chatProcessShutdown 调用 shutdownDefaultLspPool 且两缝共用", () => {
     expect(cli.includes("shutdownDefaultLspPool()")).toBe(true);
-    // 同一 chatProcessShutdown 同时接 registerShutdown（信号）与 REPL 自然退出
+    // The same chatProcessShutdown serves both registerShutdown (signals) and natural REPL exit
     expect(
       cli.includes("registerShutdown({ shutdown: chatProcessShutdown })")
     ).toBe(true);
@@ -47,9 +51,10 @@ describe("LSP 池终止只挂在进程退出缝", () => {
   });
 
   it("build-engine.ts 引擎 shutdown 不终止共享 LSP 池（rebind 安全）", () => {
-    // 引擎 shutdown 会在进程中途被调用（chat rebind 收口旧引擎）——共享池
-    // 一旦在此 latch,重建引擎的 LSP 工具永久 spawn-failed。断言无调用形式
-    // （注释提及不算接线）。
+    // Engine shutdown can run mid-process (chat rebind finalizes the old
+    // engine) — if the shared pool latches there, a rebuilt engine's LSP tools
+    // are permanently spawn-failed. Assert no call form (a mention in a
+    // comment does not count as wiring).
     expect(buildEngine.includes("shutdownDefaultLspPool()")).toBe(false);
   });
 });

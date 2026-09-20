@@ -1,16 +1,20 @@
 /**
  * tests/tui/tool-settled.test.ts
  *
- * 策略核 deriveSlot 表测（spec specs/tui-tool-settled-appearance.md SC1/SC2）：
- *  - SC1：read_file 成功收（showTitle/showPreview 同假、进折叠计数），
- *    失败横切覆盖为 error 形态（error 优先于任何 class）；
- *  - SC2 五类边界：empty（纯函数 N/A，调用方空列表语义）/ negative
- *    （未注册名缺省 retract）/ overflow（≥20 retract 各自 inFoldCount 真，
- *    摊平计数由调用方聚合）/ concurrent（running 全部逐条可见；纯函数
- *    无共享可变状态）/ exception（三类失败统一 error 形态）。
+ * Strategy-core deriveSlot table tests:
+ *  - successful read_file settles retracts (showTitle/showPreview both false,
+ *    joins the fold count); failure cuts across as the error shape (error
+ *    takes priority over any class);
+ *  - five boundary classes: empty (N/A for a pure function -- empty-list
+ *    semantics belong to callers) / negative (unregistered names default to
+ *    retract) / overflow (>=20 names each inFoldCount true; the flattened
+ *    count is aggregated by callers) / concurrent (all running tools visible
+ *    one by one; the pure function has no shared mutable state) / exception
+ *    (all three failure kinds unify to the error shape).
  *
- * 该核是单一派生 SSOT：渲染层只消费 slot（spec D7）—— 标题 / 预览 /
- * 折叠计数 / 颜色均由核派生，渲染层不自组合隐藏开关与预览。
+ * This core is the single derived SSOT: the render layer only consumes slots
+ * -- title / preview / fold count / color all derive from the core; the
+ * render layer never composes its own hiding or preview switches.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -53,8 +57,9 @@ describe("deriveSlot: SC1 单一派生", () => {
   });
 
   test("read_image 在 class 表内显式登记为 retract（缺省兜底不算登记）", () => {
-    // spec read-image-vision 假设 11：与 read_file 同类；显式登记以免
-    // summary 消费方（TOOL_SETTLED_CLASS[name] 直取）拿到 undefined 空洞。
+    // read-image-vision assumption 11: same class as read_file; registered
+    // explicitly so summary consumers (direct TOOL_SETTLED_CLASS[name] lookup)
+    // never hit an undefined hole.
     expect(
       Object.prototype.hasOwnProperty.call(TOOL_SETTLED_CLASS, "read_image")
     ).toBe(true);
@@ -68,7 +73,8 @@ describe("deriveSlot: SC1 单一派生", () => {
 
 describe("deriveSlot: keep class（留的足迹，spec D4）", () => {
   test("bash 成功 → 标题 + 折叠结果预览（KEEP_WITH_PREVIEW）", () => {
-    // docs/CONTEXT.md keep class：bash 成功留命令 + 折叠后的 result preview。
+    // docs/CONTEXT.md keep class: a successful bash keeps the command plus a
+    // folded result preview.
     expect(deriveSlot("bash", { running: false, failed: false })).toEqual({
       showTitle: true,
       showPreview: true,
@@ -78,8 +84,9 @@ describe("deriveSlot: keep class（留的足迹，spec D4）", () => {
   });
 
   test("write_file / edit_file 成功 → 标题 + 既有 6 行预览通道（不变）", () => {
-    // docs/CONTEXT.md keep class：write/edit 另留完成态 6 行预览 ——
-    // bash 收走预览的同帧，write/edit 预览足迹不得被波及。
+    // docs/CONTEXT.md keep class: write/edit additionally keep a 6-line
+    // completion preview -- on the same frame bash's preview is retracted, the
+    // write/edit preview footprint must not be affected.
     for (const name of ["write_file", "edit_file"]) {
       expect(deriveSlot(name, { running: false, failed: false })).toEqual({
         showTitle: true,
@@ -113,10 +120,11 @@ describe("deriveSlot: keep class（留的足迹，spec D4）", () => {
   });
 
   test("子代理集合单源：核内 class 表与 isSubagentTool 对注册表全集一致", () => {
-    // 策略核保持依赖无关（不 import 注册表），「谁是子代理」在核内以 class 表
-    // 条目（"subagent" class）表达、在 tool-summary 以 isSubagentTool 表达
-    // —— 两个独立名单必须对同一全集给出一致答案：任一侧单方面新增/删除一个
-    // 子代理名即失败（漂移闸）。
+    // The strategy core stays dependency-free (no registry import): "who is a
+    // subagent" is expressed inside the core via class-table entries
+    // ("subagent" class) and in tool-summary via isSubagentTool -- the two
+    // independent lists must agree over the same universe: adding or removing
+    // a subagent name on one side alone fails (drift gate).
     const universe = new Set<string>([
       ...registeredToolDisplayNames(),
       "spawn_subagent",
@@ -151,8 +159,9 @@ describe("deriveSlot: accent class（点名着色，spec D6）", () => {
 });
 
 describe("deriveSlot: SC2 五类边界", () => {
-  // empty：N/A: pure deriveSlot —— 零工具时调用方持空列表、不调核，
-  // 「零条收不画计数行」语义由调用方（折叠聚合）认证，非核职责。
+  // empty: N/A for pure deriveSlot -- with zero tools the caller holds an empty
+  // list and never calls the core; the "zero rows draw no count line" semantics
+  // is certified by the caller (fold aggregation), not the core's duty.
   test("negative: 未注册名 → 缺省 retract、无预览、不进 keep/accent", () => {
     expect(settledClassOf("mystery_tool")).toBe("retract");
     expect(
@@ -169,8 +178,9 @@ describe("deriveSlot: SC2 五类边界", () => {
       "web_fetch",
       "memory_recall",
       "tool_search",
-      // disclosure-index-align T2 / SC5:skill_search 已删,缺省走 retract 兜底
-      // （settledClassOf 未注册名缺省 retract）—— 不在声明表但历史回放可触发。
+      // skill_search was deleted; unregistered names fall back to retract
+      // (settledClassOf defaults unknown names to retract) -- not in the
+      // declared table but historical replay can still trigger it.
       "skill_search",
       "bash_output",
       "list_mcp_resources",
@@ -198,13 +208,13 @@ describe("deriveSlot: SC2 五类边界", () => {
   });
 
   test("concurrent: running 时三类样本 showTitle 真、inFoldCount 假（live 与 idle 互不串）", () => {
-    // N/A: pure deriveSlot —— 纯函数无共享可变状态，running 语义由入参表达。
+    // N/A: pure deriveSlot -- a pure function with no shared mutable state; running semantics are expressed via arguments.
     for (const name of ["bash", "read_file", "skill", "spawn_subagent"]) {
       const slot = deriveSlot(name, { running: true, failed: false });
       expect(slot.showTitle).toBe(true);
       expect(slot.inFoldCount).toBe(false);
     }
-    // retract 收类 running 期间不残留下沉态（不提前进折叠计数）。
+    // retract-class names do not linger in the sunk state while running (they do not enter the fold count early).
     expect(deriveSlot("read_file", { running: true, failed: false })).toEqual({
       showTitle: true,
       showPreview: false,
@@ -219,7 +229,7 @@ describe("deriveSlot: SC2 五类边界", () => {
         ERROR_SHAPE
       );
     }
-    // accent 工具失败时 error 覆盖 accent 色（spec D5：error 优先于 accent）。
+    // When an accent tool fails, error overrides the accent color (error has priority over accent).
     const accentFailed = deriveSlot("skill", {
       running: false,
       failed: true,
@@ -229,13 +239,12 @@ describe("deriveSlot: SC2 五类边界", () => {
 });
 
 describe("isLiveNoise（live 块入场判据，specs live-signal revision #3）", () => {
-  // settled 计数口径不变：web_search / web_fetch 仍归 retract（spec table row
-  // 2 锁）。live 块入场只走 isLiveNoise —— web_* 在 live 阶段不算 noise，进
-  // 实卡不进 unanchored 块；其余 retract 名一律进块。
+  // The settled counting rule is unchanged: web_search / web_fetch still belong to retract (locked). Live-block entry goes only through isLiveNoise -- web_* is not noise during the live phase, so it forms a real card rather than joining the unanchored block; every other retract name goes into the block.
 
   test("read_file / read_image / grep / glob / memory_recall → true（进 unanchored 块）", () => {
-    // read_image 与 read_file 同档（spec read-image-vision 假设 11）：
-    // isLiveNoise 无独立名册、由 settledClassOf 派生，本条锁派生结果。
+    // read_image is the same tier as read_file (read-image-vision assumption 11):
+    // isLiveNoise has no standalone list, it derives from settledClassOf; this
+    // case locks the derived result.
     for (const name of [
       "read_file",
       "read_image",
@@ -263,8 +272,8 @@ describe("isLiveNoise（live 块入场判据，specs live-signal revision #3）"
   });
 
   test("web_search / web_fetch 在 settledClassOf 上仍归 retract（计数口径不变）", () => {
-    // 守住 spec table row 2 锁：web_* 仍属 retract，进 settled 计数 ——
-    // live-signal revision 仅改 live 块入场判据，不动 settled 计数。
+    // Hold the lock: web_* still belongs to retract and enters the settled
+    // counting -- the live-signal revision only changes live-block entry, never the settled counting.
     expect(settledClassOf("web_search")).toBe("retract");
     expect(settledClassOf("web_fetch")).toBe("retract");
   });

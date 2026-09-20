@@ -2,13 +2,17 @@
 /**
  * tests/tui/write-file-running-count.test.tsx
  *
- * 不变式：write_file 运行行的行数只在**已知**时出现。
- *  - 运行中 `content` 还不是非空 string（缺失 / 空串 / partial 未成形）→
- *    只画 `Wrote <path>`，绝不出现 `(0 lines)`——流式中途的 0 是假计数；
- *  - 落定态（ok / failed）的空文件是真实的 0 行，仍显示 `(0 lines)`；
- *  - 运行中不把 `content` 正文流进状态行或 CodeBlock（该轮不做正文流式）。
+ * Invariant: the write_file running line shows a line count only when it is
+ * **known**.
+ *  - While running, if `content` is not yet a non-empty string (missing /
+ *    empty / partial not formed) → draw only `Wrote <path>`; `(0 lines)` must
+ *    never appear — a mid-stream 0 is a false count;
+ *  - in a settled state (ok / failed) an empty file is a real 0 lines and
+ *    still shows `(0 lines)`;
+ *  - while running, the `content` body must not stream into the status line or
+ *    CodeBlock (no body streaming within the turn).
  *
- * 五类边界：empty / negative / overflow / concurrent / exception。
+ * Five input classes: empty / negative / overflow / concurrent / exception.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -27,7 +31,7 @@ import {
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
 
-/** 运行中的 write_file 条目（partialInput 缺省 = 尚未收到任何增量）。 */
+/** A running write_file entry (partialInput omitted = no deltas received yet). */
 function runningWrite(id: string, partialInput?: string): LiveToolRun {
   return {
     id,
@@ -153,7 +157,7 @@ describe("write_file 运行行：concurrent（两个 run 的 count 隔离）", (
     expect(unknownLine).not.toContain("3 行");
     expect(unknownLine).not.toContain(FALSE_ZERO);
 
-    // 交错重算：纯函数，无共享可变边界。
+    // Interleaved recompute: pure functions, no shared mutable state.
     expect(liveToolPreviewTextLines(unknown, 80)[0]).toBe(unknownLine);
     expect(liveToolPreviewTextLines(known, 80)[0]).toBe(knownLine);
   });

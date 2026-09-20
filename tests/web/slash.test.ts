@@ -1,11 +1,11 @@
 /**
  * tests/web/slash.test.ts
  *
- * web/src/lib/slash.ts 纯函数全路径：matchSlash（合法 / 非法 / 参数 /
- * 大小写）、slashCandidates（前缀补全）、slashEnterAction（execute /
- * accept / none）、slashSubmitDecision（非法命令 notice 裁决）、
- * menuKeyEvent（菜单键盘裁决）、resolveArgCommand（带参命令值域判定）、
- * slashHelpText。
+ * Full path coverage for the pure functions in web/src/lib/slash.ts: matchSlash
+ * (valid / invalid / args / case), slashCandidates (prefix completion),
+ * slashEnterAction (execute / accept / none), slashSubmitDecision (notice
+ * decision for illegal commands), menuKeyEvent (menu keyboard decisions),
+ * resolveArgCommand (arg-command value-domain checks), slashHelpText.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -279,13 +279,14 @@ describe("menuKeyEvent — 菜单打开时的键盘裁决", () => {
   });
 
   it("Enter（非 shift）→ enter 裁决经 slashEnterAction", () => {
-    // "/th" 不完整 → accept 带参命令补全形（尾随空格）；slashEnterAction
-    // 按 value 重算候选（仅 thinking），索引须在其范围内。
+    // "/th" is incomplete → accept yields the completed arg-command form (trailing space);
+    // slashEnterAction recomputes candidates from value (only thinking), so the index must
+    // stay within that range.
     assert.deepEqual(menuKeyEvent({ ...state, selectedIndex: 0 }, "Enter"), {
       kind: "enter",
       action: { kind: "accept", text: "/thinking " },
     });
-    // 完整命令 → execute
+    // complete command → execute
     assert.deepEqual(
       menuKeyEvent(
         {
@@ -359,8 +360,8 @@ describe("T5 /continue slash 词表（web_slash_http_only）", () => {
   });
 
   it("带参 /continue extra → match 转发 arg（handler 发 usage EXIT；非 ARG_COMMANDS）", () => {
-    // continue 不进 ARG_COMMANDS：无值域、accept 不带尾随空格。
-    // matchSlash 仍转发 leftover，便于 handleCommand 发「用法：/continue」。
+    // continue is not in ARG_COMMANDS: no value domain, accept carries no trailing space.
+    // matchSlash still forwards the leftover so handleCommand can emit `用法：/continue` ("usage: /continue").
     assert.deepEqual(matchSlash("/continue extra"), {
       name: "continue",
       arg: "extra",
@@ -398,7 +399,7 @@ describe("parseSkillLoad", () => {
     assert.equal(parseSkillLoad("/help", skills), undefined);
   });
 
-  // SC9：remainder 按 typed token 长度切，不按 canonical 名长度。
+  // SC9: remainder is cut by the typed token's length, not the canonical name's length.
   it("裸名命中 canonical → remainder 不被 canonical 长度吃掉（SC9）", () => {
     const plugin = [
       {
@@ -410,7 +411,7 @@ describe("parseSkillLoad", () => {
       name: "arthurpower:using-agent-skills",
       remainder: "帮我调度",
     });
-    // canonical typed 与裸名 typed 必须收敛到同一 name + 同一 remainder。
+    // typing the canonical name and typing the bare alias must converge to the same name + remainder.
     assert.deepEqual(
       parseSkillLoad("/arthurpower:using-agent-skills 帮我调度", plugin),
       parseSkillLoad("/using-agent-skills 帮我调度", plugin)
@@ -437,7 +438,7 @@ describe("slashCandidates — 可加载技能面（含无 description，SC9）",
       { name: "no-desc" },
       { name: "with-desc", description: "有描述" },
     ];
-    // 前缀至少 1 字符才混入 skill（空前缀只出静态命令）。
+    // skills mix in only with a >=1-char prefix (empty prefix yields static commands only).
     const out = slashCandidates("/n", skills).filter((c) => c.kind === "skill");
     assert.equal(out.length, 1);
     const noDesc = out[0];

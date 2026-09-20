@@ -1,8 +1,9 @@
 /**
- * tests/shared/streaming-block-freeze.test.ts — 流式顶层块冻结纯函数。
+ * tests/shared/streaming-block-freeze.test.ts — pure function freezing top-level streaming blocks.
  *
- * spec EXIT：empty；单块无前缀；多块时后缀变长前缀 raw 稳定且边界单调增；
- * 非字符串 TypeError；两次计算无共享可变边界。
+ * EXIT criteria: empty input; single block has no prefix; with multiple blocks the
+ * prefix raw stays stable as the suffix grows and the boundary is monotonically
+ * non-decreasing; non-string input throws TypeError; two computations share no mutable boundary.
  */
 import { describe, expect, test } from "vitest";
 import { splitStreamingMarkdown } from "../../src/shared/streaming-block-freeze.js";

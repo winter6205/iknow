@@ -1,10 +1,12 @@
 /**
- * D-α T3 —— chat host 的 round 边界（spec SC2「下一次 run() 才生效」）。
+ * Round boundary in the chat host — the graph assembly freezes per round, so
+ * "the next run() is what takes effect" must pin down where the snapshot lands.
  *
- * overlay 随时可翻，装配面按 round 冻结 —— 冻结点必须落在 host 上：一次用户
- * 输入 = 一个 round。这里锁的就是那一下：查询行拍一次快照，斜杠命令与空行
- * 不拍（它们不跑 run()，拍了会把「翻完键紧接着 /graph status」这种序列的
- * 语义搅乱）。
+ * The overlay can be flipped at any time; the assembled view is frozen by
+ * round, and the freeze point must live in the host: one user input = one
+ * round. Query lines take the snapshot; slash commands and blank lines do not
+ * (they never run run(), and snapshotting them would scramble the semantics of
+ * sequences like "flip the key, then immediately /graph status").
  */
 import { describe, expect, it } from "vitest";
 import { processChatLine } from "../../src/cli/chat-session.ts";
@@ -60,7 +62,7 @@ describe("chat host — graph 装配 round 边界", () => {
     });
 
     expect(rounds()).toBe(0);
-    // holder 已翻,但还没有 round 拍过它 —— 装配面仍是关的。
+    // The holder has flipped, but no round has snapshotted it yet — the assembled view is still off.
     expect(mode.get().enabled).toBe(true);
     expect(assembly.enabled()).toBe(false);
   });

@@ -1,16 +1,19 @@
 /**
  * tests/tui/subagent-kill.test.ts
  *
- * spec Slice D / SC14（聚焦行 Ctrl+X 强杀）+ SC15 empty（无聚焦 → 空操作）
- * / plan task 8：Ctrl+X 分派纯函数。
+ * Pure dispatch function for Ctrl+X: force-kill the focused row; no focus →
+ * no-op.
  *
- * 命题：分派结果里的 taskId 必须是**面板 focusedRow 所指的那一行** ——
- * 行序与 `projectSubagentLines` 的 live 前缀同源（failed / completed 只
- * 追加在 live 之后，不参与行下标）。所以本文件的 fixture 故意把终态行
- * 穿插进数组，钉死「live 行序 ≠ 数组序」这一映射事实。
+ * Proposition: the taskId in the dispatch result must be **the row the panel's
+ * focusedRow points at** — row order shares its source with the live prefix of
+ * `projectSubagentLines` (failed / completed rows are only appended after the
+ * live ones and never take part in row indexing). Hence the fixtures here
+ * deliberately interleave terminal rows to pin the mapping fact
+ * "live row order ≠ array order".
  *
- * 同时钉死 SC15：无聚焦 / graph 聚焦 / 陈旧行（row 越界）→ `none`，
- * 分派层绝不伪造 taskId（调用方因此不会误杀别的子代理）。
+ * Also pinned: no focus / graph focus / stale row (row out of range) → `none`;
+ * the dispatch layer never fabricates a taskId (so callers cannot
+ * accidentally kill a different subagent).
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -67,8 +70,9 @@ describe("dispatchKillFocusedSubagent — 聚焦行 → 正确 taskId", () => {
   });
 
   test("终态行穿插 → 行序仍按 live 前缀（数组下标不复用）", () => {
-    // 数组序：[completed, liveA, liveB]；live 序：[liveA, liveB]。
-    // focus row 0 必须指 liveA（面板 liveIndex 同款语义），不是数组第 0 项。
+    // Array order: [completed, liveA, liveB]; live order: [liveA, liveB].
+    // Focus row 0 must mean liveA (same semantics as the panel's liveIndex),
+    // not array element 0.
     const focus: ChromeFocus = { kind: "subagent", row: 0 };
     const dispatch = dispatchKillFocusedSubagent(focus, [DONE, LIVE_A, LIVE_B]);
     expect(dispatch).toEqual({
@@ -84,7 +88,7 @@ describe("dispatchKillFocusedSubagent — 聚焦行 → 正确 taskId", () => {
       0,
       liveSubagents(subagents).length
     );
-    // 面板 live 行的 name 与 liveSubagents 的 role 一一对应（同一行序）。
+    // Panel live rows' name maps 1:1 onto liveSubagents' role (same row order).
     expect(panelLive).toHaveLength(2);
     expect(panelLive[0]?.text).toContain("explore");
     expect(panelLive[1]?.text).toContain("general-purpose");

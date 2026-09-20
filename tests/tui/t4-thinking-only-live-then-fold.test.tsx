@@ -2,15 +2,17 @@
 /**
  * tests/tui/t4-thinking-only-live-then-fold.test.tsx
  *
- * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3 +
- * specs/tui-activity-block.md Thinking-at-bottom 锁句）：思考在流期间是
- * transcript 最底（unanchored thinking 壳）；同一 burst 内 live 安静簇
- * （已冒出来的动作）画在思考上面；下一段思考作为新的最底进入 unanchored
- * —— 已经可见的工具卡 / tail 槽卡 都不被「钉在思考下面」（旧 Live-signal
- * 锁句 1 行为）。
+ * Thinking-at-bottom revision (lock clauses 1–3; also the Thinking-at-bottom
+ * lock clauses in specs/tui-activity-block.md): during streaming, thinking sits
+ * at the bottom of the transcript (unanchored thinking shell); the live quiet
+ * cluster within the same burst (actions already surfaced) draws above the
+ * thinking; the next thinking segment enters unanchored as a new bottom —
+ * already-visible tool cards / tail-slot cards are never "pinned below
+ * thinking" (the old Live-signal lock clause 1 behavior).
  *
- * `shouldShowLiveThinkingPanel` 仅作纯函数语义文档（顶层 panel 已退役，
- * 思考活在 unanchored 思考壳）。
+ * `shouldShowLiveThinkingPanel` serves only as pure-function semantic
+ * documentation (the top-level panel is retired; thinking lives in the
+ * unanchored thinking shell).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -55,10 +57,11 @@ function sessionWith(
 
 describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
   test("running + 仅思考流（无工具）→ `Thinking…` 是 transcript 最底", async () => {
-    // Thinking-at-bottom revision 锁句 1：仅思考流时 `Thinking…` 必须是
-    // transcript 最底元素（unanchored thinking 壳 + askLine 之后、Spinner 之
-    // 前）；屏上 `Thinking…` 仅出现一次；折叠态 preview 由 thinkingPeekLines
-    // 露出末 3 行。
+    // Thinking-at-bottom revision lock clause 1: with a thinking-only stream,
+    // `Thinking…` must be the bottommost transcript element (unanchored
+    // thinking shell + after askLine, before Spinner); `Thinking…` appears
+    // exactly once on screen; the collapsed preview is exposed by
+    // thinkingPeekLines as the last 3 lines.
     const setup = await testRender(
       <ChatView
         session={sessionWith(
@@ -77,14 +80,14 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
     const lines = frame.split("\n").map((l) => l.trim());
-    // 唯一一份 `Thinking…`（unanchored thinking 壳）。
+    // Single copy of `Thinking…` (unanchored thinking shell).
     expect(frame.split("Thinking…").length - 1).toBe(1);
     expect(frame).toContain(formatThinkingLive());
-    // 正文末 3 行通过 `thinkingPeekLines` 可见。
+    // Last 3 body lines visible via `thinkingPeekLines`.
     expect(frame).toContain("末行戊-应出现");
-    // 锁句 1：`Thinking…` 出现在 Spinner / 「Running …」之前，且是本帧
-    // 最底（屏上行序 = running state + crunched + 未锚定非思考 + tailSlots +
-    // askLine + 思考 + Spinner）。
+    // Lock clause 1: `Thinking…` appears before the Spinner / 「Running …」 and
+    // is the frame bottom (on-screen order = running state + crunched +
+    // unanchored non-thinking + tailSlots + askLine + thinking + Spinner).
     const thinkingIdx = lines.findIndex((l) => l.startsWith("Thinking"));
     const spinnerIdx = lines.findIndex((l) => l.includes("运行中"));
     expect(thinkingIdx).toBeGreaterThanOrEqual(0);
@@ -94,10 +97,11 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
   });
 
   test("running + 流思考 + 非 history noise run → noise 标题在 `Thinking…` 之上", async () => {
-    // Thinking-at-bottom revision 锁句 1：同一 burst 内 live 安静簇（已
-    // 冒出来的动作）画在前，思考块画在最后 —— 还在流的思考是本批最底；
-    // 它驱动的那批动作若已出现则在它上面。noise 标题必须在 `Thinking…`
-    // 之上（屏序）。
+    // Thinking-at-bottom revision lock clause 1: within one burst the live
+    // quiet cluster (already-surfaced actions) draws first, the thinking block
+    // last — thinking still streaming is the burst bottom; actions it drives,
+    // once visible, sit above it. The noise title must be above `Thinking…`
+    // (screen order).
     const liveRuns: ReadonlyArray<LiveToolRun> = [
       {
         id: "tu-g-burst",
@@ -123,7 +127,7 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // 屏序：noise 标题在 `Thinking…` 之上（noise 命中早于思考）。
+    // Screen order: noise title above `Thinking…` (noise landed before thinking).
     const noiseIdx = frame.indexOf("calling grep × 1");
     const thinkingIdx = frame.indexOf("Thinking…");
     expect(noiseIdx).toBeGreaterThanOrEqual(0);
@@ -133,11 +137,12 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
   });
 
   test("running + 流思考 + 已可见 tail 工具卡（live signal）→ `Thinking…` 在 tail 卡之下", async () => {
-    // Thinking-at-bottom revision 锁句 3：下一段思考（工具结果回来后的下一
-    // 条 assistant）出现在新的最底，低于已经可见的工具（live signal 实卡）。
-    // 本用例 live signal 工具 = web_search tail 卡（不被块消费 → 走 tail
-    // `LiveTailSlot`），第二段思考流必须挂到该卡之下 —— 屏上 `Thinking…`
-    // 的索引晚于「Search <query>」卡行。
+    // Thinking-at-bottom revision lock clause 3: the next thinking (the next
+    // assistant after tool results return) appears at a new bottom, below
+    // already-visible tools (live-signal real cards). Here the live-signal tool
+    // = web_search tail card (not consumed by the block → tail `LiveTailSlot`);
+    // the second thinking stream must hang under that card — on screen the
+    // `Thinking…` index comes after the「Search <query>」card line.
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "搜一下" }] },
       {
@@ -179,9 +184,9 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // tail 卡可见（live signal 实卡）。
+    // Tail card visible (live-signal real card).
     expect(frame).toContain("Search 今天的AI");
-    // `Thinking…` 在 tail 卡行之下。
+    // `Thinking…` below the tail card line.
     const cardIdx = frame.indexOf("Search 今天的AI");
     const thinkingIdx = frame.indexOf("Thinking…");
     expect(cardIdx).toBeGreaterThanOrEqual(0);
@@ -226,9 +231,11 @@ describe("T4 思考结束：正文离开槽、时长留标题", () => {
 
 describe("T4 shouldShowLiveThinkingPanel 让位语义改跟块槽位上下文", () => {
   test("running + 非空 thinkingDraft → 纯函数判定 `true`（toolRunning 闸已被锁句 7 退役）", () => {
-    // T4 live-signal revision：锁句 7 删「任意 tool running 关思考」闸。
-    // 该判定只承担纯函数语义文档（保留给历史夹具）；生产路径已改走
-    // `liveThinking` 字段（`draftMasked.length > 0`），不再消费此函数。
+    // Live-signal revision: lock clause 7 deleted the "any tool running
+    // closes thinking" gate. This predicate is pure-function semantic
+    // documentation only (kept for historical fixtures); the production path
+    // now uses the `liveThinking` field (`draftMasked.length > 0`) and no longer
+    // consumes this function.
     expect(
       shouldShowLiveThinkingPanel({
         running: true,

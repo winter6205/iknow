@@ -1,29 +1,40 @@
 /** @jsxImportSource @opentui/react */
 /**
- * plans/session-fg-handoff-interrupt Locked sentence 3 / T5 的 app 层接线测：
- * Esc = 当前会话**前台一切**（父 `running-fg` turn + 本会话所有前景子代理），
- * 前台有活时打断赢过双 Esc 回退判定；后景 `wait:false` 与其它会话不动。
- * 2026-09-18 键位迁移：打断自 Ctrl+C 迁入 Esc（Ctrl+C 只剩选区复制，复制
- * 用例保留在本文件作对照）。
+ * tests/tui/esc-session-foreground.test.tsx — app-layer wiring test for the
+ * session-foreground handoff interrupt contract:
+ * Esc = **everything foreground** in the current session (parent `running-fg`
+ * turn + all foreground subagents of this session); while foreground work is
+ * live, interrupt wins over the double-Esc fallback check; background
+ * `wait:false` work and other sessions are untouched. Esc took over interrupt
+ * from Ctrl+C (Ctrl+C is now selection-copy only; the copy cases stay in this
+ * file as the control).
  *
- * 分层：
- *   - 扇出语义（conversationId / foreground / live / 返回值）的 SSOT 层归
- *     tests/session-api/hub-abort-session-foreground.test.ts（真 SessionHub +
- *     fake manager）；
- *   - 本文件钉 app 的**键位→调用**与**顺序**：Esc 必须调到
- *     `bridge.abortSessionForegroundWork(本会话)` 且父 aborter 同时 abort；
- *     前台活时打断不落双 Esc picker；无前台活时 Ctrl+C 选区复制行为不变。
- *   - 「不复制」的观测面是**复制通道调用点**（mountApp 的 OSC52/fallback
- *     seam，同 tests/tui/copy-osc52-gate.test.tsx），不是 notice 文案：前台
- *     在跑时 turn 收尾会用「已打断…」覆盖复制 notice，帧上恒无「已复制」，
- *     拿它当判据等于没判（复制真的发生也绿）。seam 的可证伪性由阳性对照
- *     用例（Ctrl+C + 有选区 → 计数 = 1）钉住。
- *   - 「abort 真的抵达 wait 链」的下游一半（SubAgentAbortError 拒绝 waitFor）
- *     归 tests/tui/wait-cancel-abort.test.tsx。
+ * Layering:
+ *   - Fan-out semantics (conversationId / foreground / live / return value)
+ *     SSOT lives in
+ *     tests/session-api/hub-abort-session-foreground.test.ts (real SessionHub +
+ *     fake manager);
+ *   - this file pins the app's **key→call** mapping and **ordering**: Esc must
+ *     invoke `bridge.abortSessionForegroundWork(thisSession)` and abort the
+ *     parent aborter at the same time; with foreground work live, interrupt
+ *     must not fall through to the double-Esc picker; with no foreground work,
+ *     Ctrl+C selection-copy behavior is unchanged.
+ *   - The observability surface for "no copy" is the **copy-channel call seam**
+ *     (mountApp's OSC52/fallback seam, same as
+ *     tests/tui/copy-osc52-gate.test.tsx), not the notice text: while a
+ *     foreground turn runs, turn teardown overwrites the copy notice with
+ *     `已打断…` ("interrupted…"), so the frame never shows `已复制` ("copied") —
+ *     using it as the judge proves nothing (green even if copy really
+ *     happened). The seam's falsifiability is pinned by the positive-control
+ *     case (Ctrl+C + selection → count = 1).
+ *   - The downstream half of "abort really reaches the wait chain"
+ *     (SubAgentAbortError rejecting waitFor) lives in
+ *     tests/tui/wait-cancel-abort.test.tsx.
  *
- * 为什么用 fake bridge：本测的命题是「按键 → 调谁、什么顺序」，真 manager
- * 的 SIGTERM→SIGKILL 与 hub 过滤已有各自覆盖面（见上）。fake bridge 只把
- * 出口换成可观测的计数/字符串，其余字段与产品 TuiBridge 同形。
+ * Why a fake bridge: the proposition here is "which key calls whom, in what
+ * order"; the real manager's SIGTERM→SIGKILL and hub filtering already have
+ * their own coverage (see above). The fake bridge only swaps the outlets for
+ * observable counters/strings; all other fields mirror the product TuiBridge.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -54,13 +65,14 @@ interface ForegroundRig {
   readonly abortCalls: string[];
   readonly abortSessionCalls: string[];
   readonly wakeCalls: string[];
-  /** 由 coordinator 注入的「本会话是否有在飞前景子代理」（扇出返回值）。 */
+  /** Fan-out return value injected by the coordinator: "does this session have in-flight foreground subagents". */
   readonly abortedByFanOut: string[];
-  /** postMessage 被调用次数（真 turn 已启动的观测面）。 */
+  /** postMessage call count (proof a real turn started). */
   readonly postCount: () => number;
   /**
-   * 复制通道被走过的次数：`doCopy` 的两条出口（OSC52 命中 / 原生 fallback）
-   * 各记一次。**渲染无关**的观测面 —— 见 `mountApp` 的 seam 说明。
+   * How many times the copy channel was traversed: one count per `doCopy`
+   * outlet (OSC52 hit / native fallback). A **render-independent**
+   * observability surface — see the `mountApp` seam notes.
    */
   readonly copyCalls: () => number;
   readonly stderr: ReturnType<typeof captureStderr>;
@@ -82,9 +94,9 @@ function makeSessionFile(dataDir: string): SessionFileV1 {
 
 interface MountOptions {
   readonly session: TuiSessionState;
-  /** 扇出返回值（真实 hub 的形态 = 本会话 live 前景 taskId）。 */
+  /** Fan-out return value (real hub shape = live foreground taskId of this session). */
   readonly fanOutResult?: ReadonlyArray<string>;
-  /** 观测出口：真实 manager 的 listSubagents 投影（本测不按键时用）。 */
+  /** Observation outlet: projection of the real manager's listSubagents (unused when this test sends no keys). */
   readonly subagents?: ReadonlyArray<SubagentInfo>;
 }
 
@@ -100,8 +112,9 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     hub: undefined as never,
     store: undefined as never,
     ensureSession: async (id) => id ?? CONVERSATION_ID,
-    // 挂起不返回：turn 停在 running-fg，父 aborter 留在登记簿（abort 后
-    // promise 由 abort signal 收尾，但本测只观测 abort 是否发出）。
+    // Never resolves: the turn stays in running-fg and the parent aborter
+    // remains registered (after abort the promise settles via the abort
+    // signal; this test only observes whether the abort was issued).
     postMessage: ({ signal }) =>
       new Promise((_resolve, reject) => {
         posts += 1;
@@ -155,18 +168,21 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     { width: COLS, height: ROWS, exitOnCtrlC: false, consoleMode: "disabled" }
   );
   setupRef = setup;
-  // attachSession 经 bridge.ensureSession(conversationId) 走真 store 判定
-  // 已建档（有 id 即已存在），首帧后落 active；initialSession 的 runState 由
-  // 下方测试驱动（真跑 turn 挂起），不靠注入伪造。
+  // attachSession goes through bridge.ensureSession(conversationId) against the
+  // real store: an id means the session file exists, so it lands as active after
+  // the first frame. initialSession's runState is driven below by a real
+  // suspended turn — not forged by injection.
   await setup.waitForVisualIdle();
 
-  // ── 复制通道 seam（观测点 = 调用点，不是 notice） ────────────────────
-  // 本文件的命题含「前台活时 Ctrl+C 不得复制」。notice 不是判据：turn 收尾
-  // 会 `setNotice({lines:["已打断…"]})` 覆盖掉复制 notice，故「帧上无『已
-  // 复制』」在 running-fg 用例里恒真 —— 复制真的发生了也照样绿（空洞）。
-  // 与 tests/tui/copy-osc52-gate.test.tsx 同款 seam：在真 renderer 上替换
-  // `doCopy` 的两条出口（OSC52 与原生 fallback），任一被调即计数。计数与
-  // 渲染顺序无关，无法被 setNotice 掩盖。
+  // ── copy-channel seam (observation point = call site, not the notice) ─────
+  // This file's propositions include "Ctrl+C must not copy while foreground is
+  // live". The notice is not a valid judge: turn teardown calls
+  // `setNotice({lines:["已打断…"]})` ("interrupted…"), overwriting the copy
+  // notice, so "no `已复制` ('copied') on the frame" is vacuously true in the
+  // running-fg cases — green even if copy really happened. Same seam shape as
+  // tests/tui/copy-osc52-gate.test.tsx: on the real renderer, replace both
+  // `doCopy` outlets (OSC52 and native fallback); any call increments. The
+  // counter is render-order independent and cannot be masked by setNotice.
   const r = setup.renderer as unknown as {
     isOsc52Supported(): boolean;
     copyToClipboardOSC52(text: string): boolean;
@@ -205,7 +221,7 @@ function fakeSelection(text: string): {
   return { getSelectedText: () => text, touchedRenderables: [] };
 }
 
-/** 已建档会话（draft 会话 conversationId undefined → 扇出无会话可传）。 */
+/** An existing stored session (draft sessions have conversationId undefined → fan-out has no session to pass). */
 function session(): TuiSessionState {
   return Object.freeze({
     ...createDraftSession(),
@@ -213,7 +229,7 @@ function session(): TuiSessionState {
   });
 }
 
-/** 逐键发一条消息启动真 turn（连发会丢键：mockInput 走 stdin 异步解析）。 */
+/** Send a message key-by-key to start a real turn (burst sends drop keys: mockInput parses stdin asynchronously). */
 async function sendMessage(
   setup: TestRendererSetup,
   text: string
@@ -225,7 +241,7 @@ async function sendMessage(
   setup.mockInput.pressEnter();
 }
 
-/** 条件轮询（按键落地 + React commit 都有延迟）。 */
+/** Conditional polling (key landing and React commit both lag). */
 async function until(
   cond: () => boolean,
   ms = 8000,
@@ -246,15 +262,18 @@ async function settle(setup: TestRendererSetup): Promise<void> {
 }
 
 /**
- * 挂起一个真 turn：bridge.postMessage 永不 settle（模拟前景 turn 在飞），
- * 父 aborter 因此在册 → `canInterrupt(active)` 为真。
+ * Suspend a real turn: bridge.postMessage never settles (simulating an
+ * in-flight foreground turn), so the parent aborter is registered and
+ * `canInterrupt(active)` is true.
  *
- * 两段等待都是必须的：
- *  1. postMessage 被调 = turn 已启动（输入落地 / 建档都过了）；
- *  2. 帧上出现 mode 行的实时秒数段（` · Xs`，runState 由 turnStarted 置
- *     running-fg 后 1Hz tick 递增）—— 只有 runState 真的进了 React 态，
- *     Esc 才落到前台打断臂；不等这一格，按键可能赶在 commit 前
- *     发出而走 idle 分支（abort 永不发出 = 空洞绿灯）。
+ * Both waits are mandatory:
+ *  1. postMessage called = turn started (input landed / session stored);
+ *  2. the live seconds segment on the mode line appears in the frame
+ *     (` · Xs`, incremented by the 1Hz tick once runState flips to
+ *     running-fg via turnStarted) — only when runState really entered React
+ *     state does Esc take the foreground-interrupt arm; without this wait the
+ *     key may arrive before the commit and take the idle branch (abort never
+ *     issued = vacuously green).
  */
 async function startPendingTurn(app: ForegroundRig): Promise<void> {
   await sendMessage(app.setup, "hi");
@@ -291,15 +310,15 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
       fanOutResult: ["t-late"],
     });
     try {
-      // 不跑 turn：父 runState 停在 idle，只有 hub 侧有在飞前景子代理。
+      // No turn running: parent runState stays idle; only the hub side has in-flight foreground subagents.
       app.setup.mockInput.pressEscape();
       await until(() => app.abortSessionCalls.length > 0, 8000, "扇出未被调用");
 
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
-      // 父无 aborter（无 in-flight postMessage）→ 不崩、不误报。
+      // No parent aborter (no in-flight postMessage) → no crash, no false alarm.
       expect(app.abortCalls).toEqual([]);
       await settle(app.setup);
-      // 打断臂赢过双 Esc 回退判定：picker 没被打开（无标题行）。
+      // The interrupt arm beats the double-Esc fallback check: picker never opened (no title row).
       expect(app.setup.captureCharFrame()).not.toContain("回退到更早的回合");
     } finally {
       await app.dispose();
@@ -307,9 +326,10 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
   }, 30_000);
 
   test("父 idle + 前景子代理 live + 有选区：仍然打断，不复制", async () => {
-    // Locked sentence 3 的顺序条款在**父已 idle** 时同样成立：前台活在子代
-    // 理身上，Esc 的意图仍是打断。判据必须来自扇出的新鲜账（hub 现拉），
-    // 不能是 TUI 1Hz 投影 —— 本测用 fanOutResult 模拟 hub 的新鲜回答。
+    // The ordering clause also holds once the parent is idle: foreground work
+    // lives in subagents, and Esc still means interrupt. The judgment must come
+    // from the fresh fan-out answer (pulled live from the hub), never the TUI's
+    // 1Hz projection — this test simulates the hub's fresh answer via fanOutResult.
     const app = await mountApp({
       session: session(),
       fanOutResult: ["t-late"],
@@ -327,7 +347,7 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
 
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
       await settle(app.setup);
-      // 复制通道零调用 = Esc 无复制语义（复制只归 Ctrl+C）。
+      // Zero copy-channel calls = Esc has no copy semantics (copy belongs to Ctrl+C only).
       expect(app.copyCalls()).toBe(0);
     } finally {
       await app.dispose();
@@ -351,7 +371,7 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
       expect(app.abortCalls).toEqual([CONVERSATION_ID]);
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
       await settle(app.setup);
-      // 复制通道零调用 = Esc 无复制臂（与旧 Ctrl+C「打断优先」同判据面）。
+      // Zero copy-channel calls = Esc has no copy arm (same judge surface as the old Ctrl+C "interrupt-first" rule).
       expect(app.copyCalls()).toBe(0);
     } finally {
       await app.dispose();
@@ -359,9 +379,10 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
   }, 30_000);
 
   test("running-fg + 扇出空返回：仍以父 turn 为前台活 → 打断", async () => {
-    // 顺序判据必须是「canInterrupt(父) OR 扇出非空」，不是只看扇出。本测把
-    // 扇出压成空（无子代理可停）+ running-fg —— 若实现只信扇出返回值，
-    // 这里会落进双 Esc 回退判定而漏 abort 父 turn。
+    // The ordering rule must be "canInterrupt(parent) OR non-empty fan-out", not
+    // fan-out alone. This test forces the fan-out empty (no subagent to stop)
+    // while in running-fg — an implementation trusting only the fan-out return
+    // would fall into the double-Esc fallback here and miss aborting the parent turn.
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       await startPendingTurn(app);
@@ -377,9 +398,10 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
   }, 30_000);
 
   test("Ctrl+C 复制臂保留：有选区复制（seam 阳性对照），打断不误触", async () => {
-    // 2026-09-18 键位迁移后 Ctrl+C 只剩复制：有选区 → 复制，不打断。
-    // 同一 seam 在复制真的发生时必须计数 > 0；若不架这条阳性对照，seam
-    // 本身失效（比如 doCopy 换了出口）会让「零调用」永远绿。
+    // After the key migration Ctrl+C only copies: selection → copy, never interrupt.
+    // The same seam must count > 0 when a copy really happens; without this
+    // positive control, a broken seam (e.g. doCopy changed outlets) would make
+    // "zero calls" eternally green.
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       const selectedText = "阳性对照：这段必须被复制";
@@ -442,12 +464,15 @@ describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 �
   }, 30_000);
 
   test("双 Esc 回退（idle）：第二击在窗口内 → 走到 openRewindPicker", async () => {
-    // 门禁 input-contract 缺口：app 层「双 Esc → picker」此前只有
-    // isDoubleEsc 纯函数覆盖（tests/tui/rewind.test.ts），无端到端接线用例。
-    // 本测钉：两击都落 idle 臂（记时间戳 / 命中窗口）→ openRewindPicker 被调。
-    // fake bridge 无锚点（listRewindTargets → []）→ L0 空态 notice 上屏，
-    // 它是 openRewindPicker 的独有出口，足以证明双 Esc 路径被走到。
-    // 每击 Esc 都先空转一趟扇出（hub 只读枚举，空闲返回空无副作用）。
+    // Input-contract gate gap: the app-level "double Esc → picker" path
+    // previously had only the isDoubleEsc pure-function coverage
+    // (tests/tui/rewind.test.ts), no end-to-end wiring case. This test pins:
+    // both presses land on the idle arm (timestamp recorded / window hit) →
+    // openRewindPicker is called. The fake bridge has no anchors
+    // (listRewindTargets → []) → the L0 empty-state notice reaches the screen;
+    // it is openRewindPicker's exclusive outlet, enough to prove the double-Esc
+    // path ran. Each Esc press first idles through the fan-out (read-only hub
+    // enumeration; empty and side-effect-free when idle).
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       app.setup.mockInput.pressEscape();

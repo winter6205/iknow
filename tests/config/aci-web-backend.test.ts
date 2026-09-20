@@ -1,7 +1,8 @@
 /**
- * ACI web backend 能力表：一个后端名 → 搜走谁 / 抓走谁。
+ * ACI web backend capability table: one backend name → who serves search / who serves fetch.
  *
- * 回落只在装配期判定；传输失败不在本表。非法 id 不在本函数（env fail-loud）。
+ * Fallback is decided only at assembly time; transport failures are out of scope.
+ * Invalid ids are not handled here (env fails loud).
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

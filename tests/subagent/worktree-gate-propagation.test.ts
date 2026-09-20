@@ -1,19 +1,21 @@
 /**
- * issue 1059 / ADR-0109 —— worktree 活开关的父子传播通道（父会话 → worker）。
+ * ADR-0109 — parent→worker propagation channel for the worktree live gate.
  *
- * 通道与 fsMode（ADR-0092 SC11）完全同款：
+ * Same shape as the fsMode channel (ADR-0092):
  *   build-engine holder
  *     → `createDefaultSubAgentSpawn({ worktreeGate })`
- *     → 子进程 env `IKNOW_WORKTREE_GATE_ON`（spawn 期读 holder，"1"/"0"）
- *     → `worktreeGateOptionFromEnv(process.env)` 重建 holder
- *     → worker bash 工厂的 `worktreeOnMutate`（UNBOUND_FENCE 段的开关）。
+ *     → child env `IKNOW_WORKTREE_GATE_ON` (holder read at spawn time, "1"/"0")
+ *     → `worktreeGateOptionFromEnv(process.env)` rebuilds the holder
+ *     → worker bash factory's `worktreeOnMutate` (switch for the UNBOUND_FENCE segment).
  *
- * holder 在场即写线（"0" 也写 —— 键缺席 = 通道未接 → worker 永不建 holder
- * → 永不发段,字节不变）；非法值 → 键缺席（fail-closed,不猜父进程意图）。
+ * A present holder always writes the key ("0" included — key absence means the
+ * channel is not wired → the worker never creates a holder → never emits the
+ * segment, bytes unchanged); invalid values → key absent (fail-closed, never
+ * guess the parent's intent).
  *
- * 断言分两段（仿 fs-mode-propagation.test.ts 的 A/B 段式样）：
- *   A. 父侧写：真 spawn node 子进程读回 env 字节；
- *   B. worker 侧读：env → holder / 键缺席。
+ * Assertions in two parts (mirroring the A/B layout of fs-mode-propagation.test.ts):
+ *   A. parent-side write: a real spawned node child reads back the env bytes;
+ *   B. worker-side read: env → holder / key absent.
  */
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -33,7 +35,7 @@ async function makeScratch(prefix: string): Promise<string> {
   return path;
 }
 
-/** 父进程 ambient env 不得干扰断言（通道值只应由 spawn opts 决定）。 */
+/** The parent's ambient env must not interfere — the value comes only from spawn opts. */
 const originalEnvValue = process.env[WORKTREE_GATE_ON_ENV_KEY];
 
 afterEach(async () => {
@@ -46,7 +48,7 @@ afterEach(async () => {
   );
 });
 
-// ── A. 父侧写：spawn env ────────────────────────────────────────────────────
+// ── A. Parent-side write: spawn env ─────────────────────────────────────────
 
 interface GateHolder {
   get(): boolean;
@@ -59,8 +61,9 @@ function makeHolder(initial: boolean): GateHolder {
 }
 
 /**
- * 真 spawn 一个 node 子进程打印它看到的 env 值（fs-mode-propagation A 段
- * 同款 process.argv[1] 替换技巧）：断言的是**真实到达子进程的字节**。
+ * Spawns a real node child that prints the env value it sees (same
+ * process.argv[1] swap trick as fs-mode-propagation section A): asserts the
+ * bytes that actually reach the child.
  */
 async function spawnAndReadGateToken(
   worktreeGate: GateHolder | undefined
@@ -140,7 +143,7 @@ describe("A. createDefaultSubAgentSpawn — worktree 开关写入子进程 env",
   });
 });
 
-// ── B. worker 侧读：env 键 → holder（fail-closed）───────────────────────────
+// ── B. Worker-side read: env key → holder (fail-closed) ─────────────────────
 
 describe("B. worktreeGateOptionFromEnv — worker 侧 env → holder", () => {
   it("IKNOW_WORKTREE_GATE_ON=1 → holder get()=true（worker 可重建 UNBOUND_FENCE 段）", () => {

@@ -2,18 +2,20 @@
 /**
  * tests/tui/mcp-view.test.tsx
  *
- * #361 Phase D：MCP 服务看板（McpView）单测。参考 list-view-scroll.test.tsx
- * 形态 — testRender + mockInput 驱动键盘契约：
- *  - 列表渲染：3 server 状态（connected/failed/disabled）+ 工具数 + ↑↓
- *    cursor + Enter 切 detail；
- *  - 详情：剥离 mcp__server__ 前缀的工具短名 + description 渲染（空
- *    description 回退 `(空)`；工具超视口末尾 `… N more tools`）；
- *  - reload 触发：列表与详情模式按 r → onReload 调用 1 次 + reloading 状态；
- *  - 空状态：statuses 空 → 空提示 + reload 提示；
- *  - Esc 返回 onBack 调用 1 次。
+ * Unit tests for the MCP server dashboard (McpView). Same shape as
+ * list-view-scroll.test.tsx — testRender + mockInput driving the keyboard contract:
+ *  - list rendering: 3 server states (connected/failed/disabled) + tool
+ *    counts + ↑↓ cursor + Enter switches to detail；
+ *  - detail: tool short names with the mcp__server__ prefix stripped +
+ *    description rendering (empty description falls back to `(空)` "(empty)";
+ *    when tools exceed the viewport, a trailing `… N more tools` line)；
+ *  - reload trigger: pressing r in list or detail mode → onReload called once + reloading state；
+ *  - empty state: empty statuses → empty hint + reload hint；
+ *  - Esc back calls onBack once.
  *
- * 不测 app 端到端 /mcp 集成（fixture 装配不足；McpView 单独测覆盖渲染 +
- * 键盘契约，集成留 E2E / 手测）。
+ * No app-level /mcp end-to-end integration here (fixture wiring is
+ * insufficient; McpView unit tests cover rendering + keyboard contract,
+ * integration deferred to E2E / manual testing).
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -26,7 +28,7 @@ import { tuiPalette } from "../../src/tui/theme.js";
 import type { McpServerStatus } from "../../src/harness/mcp/manager.js";
 import type { AciToolDef } from "../../src/harness/aci/types.js";
 
-/** 轮询式帧等待（mockInput 字节经 stdin 异步解析；与 list-view 测试同款）。 */
+/** Polling frame waiter (mockInput bytes parse asynchronously through stdin; same as the list-view tests). */
 async function untilFrame(
   setup: Awaited<ReturnType<typeof testRender>>,
   pred: (frame: string) => boolean,
@@ -127,14 +129,14 @@ test("↑↓ 移动 cursor；Enter 进入 detail", async () => {
   let opened = false;
   const setup = await renderMcp({});
   await setup.renderOnce();
-  // 初始 cursor=0 → 首行带 `>`。
+  // Initial cursor=0 → first row carries `>`.
   let frame = setup.captureCharFrame();
   expect(frame).toContain("> fileserver");
-  // ↓ 到 db。
+  // ↓ moves to db.
   setup.mockInput.pressArrow("down");
   frame = await untilFrame(setup, (f) => f.includes("> db"));
   expect(frame).not.toContain("> fileserver");
-  // Enter → detail（cursor 已在 db → db 详情，含 db 工具行）。
+  // Enter → detail (cursor is on db → db detail, including db's tool rows).
   setup.mockInput.pressEnter();
   frame = await untilFrame(setup, (f) => f.includes("db · failed"));
   expect(frame).toContain("query · 数据库查询");
@@ -145,18 +147,18 @@ test("↑↓ 移动 cursor；Enter 进入 detail", async () => {
 test("详情：剥离 mcp__server__ 前缀的工具名 + description 渲染", async () => {
   const setup = await renderMcp({});
   await setup.renderOnce();
-  // 初始 cursor 在 fileserver（index 0），Enter 进详情。
+  // Initial cursor is on fileserver (index 0); Enter opens detail.
   setup.mockInput.pressEnter();
   const frame = await untilFrame(setup, (f) =>
     f.includes("fileserver · connected")
   );
-  // 工具名剥离 `mcp__<server>__` 前缀 → 只显示短名。
+  // Tool names have the `mcp__<server>__` prefix stripped → short names only.
   expect(frame).toContain("read · 读取文件");
   expect(frame).toContain("write · 写入文件");
-  // 全名不应再出现（避免行内冗余）。
+  // The full name must not appear anymore (avoids line redundancy).
   expect(frame).not.toContain("mcp__fileserver__read");
   expect(frame).not.toContain("mcp__fileserver__write");
-  // db 的工具不应出现在 fileserver 详情。
+  // db's tools must not show up in fileserver's detail.
   expect(frame).not.toContain("query");
   expect(frame).not.toContain("数据库查询");
   await setup.renderer.destroy();
@@ -176,7 +178,7 @@ test("reload 触发：按 r → onReload 调用 1 次 + reloading 状态出现",
   );
   expect(reloadCount).toBe(1);
   expect(frame).toContain("reload in progress");
-  // ~200ms 延迟后 reloading 清位。
+  // The reloading flag clears after a ~200ms delay.
   await untilFrame(setup, (f) => !f.includes("reload in progress"), 3000);
   await setup.renderer.destroy();
 });
@@ -214,11 +216,11 @@ test("详情模式 Esc 先回列表，再 Esc 回 chat（onBack 仅第二次触�
   await setup.renderOnce();
   setup.mockInput.pressEnter();
   await untilFrame(setup, (f) => f.includes("fileserver · connected"));
-  // 第一次 Esc → 回列表。
+  // First Esc → back to the list.
   setup.mockInput.pressEscape();
   await untilFrame(setup, (f) => f.includes("> fileserver"));
   expect(backCount).toBe(0);
-  // 第二次 Esc → 回 chat。
+  // Second Esc → back to chat.
   setup.mockInput.pressEscape();
   await untilFrame(setup, () => backCount === 1);
   expect(backCount).toBe(1);
@@ -235,16 +237,16 @@ test("详情模式 r 触发 reload（onReload 1 次 + reloading 提示）", asyn
   await setup.renderOnce();
   setup.mockInput.pressEnter();
   await untilFrame(setup, (f) => f.includes("fileserver · connected"));
-  // 仍在详情模式（工具短名行可见）时按 r → reload 生效。
+  // Still in detail mode (tool short-name rows visible) when r is pressed → reload fires.
   setup.mockInput.pressKey("r");
   const frame = await untilFrame(setup, (f) =>
     f.includes("reload in progress")
   );
   expect(reloadCount).toBe(1);
   expect(frame).toContain("reload in progress");
-  // 详情工具行仍在（r 不改变模式）。
+  // Detail tool rows remain (r does not change mode).
   expect(frame).toContain("read · 读取文件");
-  // ~200ms 延迟后 reloading 清位。
+  // The reloading flag clears after a ~200ms delay.
   await untilFrame(setup, (f) => !f.includes("reload in progress"), 3000);
   await setup.renderer.destroy();
 });
@@ -274,14 +276,14 @@ test("详情：工具超视口末尾 `… N more tools` 提示行", async () => 
   });
   await setup.renderOnce();
   setup.mockInput.pressEnter();
-  // rows=7 → viewHeight=3 → maxToolRows=2：只显示 2 个工具短名 + 余量提示。
+  // rows=7 → viewHeight=3 → maxToolRows=2: only 2 tool short names + a remainder hint.
   const frame = await untilFrame(setup, (f) =>
     f.includes("fileserver · connected")
   );
   expect(frame).toContain("tool0 · 第 0 个工具");
   expect(frame).toContain("tool1 · 第 1 个工具");
   expect(frame).toContain("… 6 more tools");
-  // 视口内工具短名用剥离后的名字，不带 mcp__ 前缀。
+  // Tool short names inside the viewport use stripped names, without the mcp__ prefix.
   expect(frame).not.toContain("mcp__fileserver__tool0");
   await setup.renderer.destroy();
 });
@@ -307,7 +309,7 @@ test("列表行：#378 failed 无 error → 与现状字节一致（仅 state，
   });
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  // 既有断言等价性：行内无 error 尾随文本（不渲染 error 区）。
+  // Equivalence with existing assertions: no trailing error text on the row (error area not rendered).
   expect(frame).not.toMatch(/failed[^\n]*error/);
   await setup.renderer.destroy();
 });

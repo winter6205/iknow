@@ -1,9 +1,9 @@
 /**
- * serve-workspace T3 — picker 子目录浏览器纯逻辑单测 (node + vitest)。
+ * Pure-logic unit tests for the picker's subdirectory browser (node + vitest).
  *
- * 镜像 `tests/web/session-info.test.ts` 模式 (直接 import 纯函数, 不依赖
- * jsdom / fetch)。web 包禁装 vitest (spec A8/A10), 这些测试由根 vitest
- * 收集。
+ * Mirrors `tests/web/session-info.test.ts` (import pure functions directly, no
+ * jsdom / fetch). The web package may not install vitest, so the root vitest
+ * collects these tests.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";

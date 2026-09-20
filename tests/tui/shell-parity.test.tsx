@@ -2,20 +2,19 @@
 /**
  * tests/tui/shell-parity.test.tsx
  *
- * #693 T1 D1/D7 SC1：流式与历史渲染同一段内容时，正文起始列相同、
- * 工具状态行字面量相同（消除 spec 列出的不一致：live `bash · pwd · ok`
- * vs 历史 `[完成] bash · pwd`）。
+ * Streaming and history must render the same content with the same body start
+ * column and identical tool status-line literals (killing the inconsistency:
+ * live `bash · pwd · ok` vs history `[完成] bash · pwd`).
  *
- * 验收路径：
- *  - 直接驱动 message-blocks 渲染一段「bash + text」assistant 内容，
- *    拿到历史帧；
- *  - 直接驱动 live-tool-preview 渲染等价的 bash 完成条目（run.input /
- *    detail 与上同），拿到 live 完成帧；
- *  - 两帧中：工具状态行字面量一致（去壳前后），shell 内正文起始列
- *    对齐。
+ * Acceptance path:
+ *  - drive message-blocks directly on a "bash + text" assistant segment → history frame;
+ *  - drive live-tool-preview directly on the equivalent completed bash entry (same
+ *    run.input / detail) → live completion frame;
+ *  - in both frames: tool status-line literals agree (before and after unshelling), and
+ *    the body start column inside the shell aligns.
  *
- * 注：本用例是 spec SC1 的最小化验收，全 ChatView 端到端由
- * chat-view-scroll.test.tsx / chat-view-thinking-tool-fold.test.tsx 覆盖。
+ * Note: this is the minimal acceptance check; full ChatView end-to-end is covered by
+ * chat-view-scroll.test.tsx / chat-view-thinking-tool-fold.test.tsx.
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -71,12 +70,12 @@ describe("SC1 流式/历史 工具状态行字面量一致（spec T1 D7）", () 
     const histFrame = histSetup.captureCharFrame();
     await histSetup.renderer.destroy();
 
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀,两侧都产 `bash · pwd`。
+    // success state has no `[完成]` ("completed") prefix; both sides produce `bash · pwd`.
     expect(histFrame).toContain("bash · pwd");
     expect(liveFrame).toContain("bash · pwd");
     expect(histFrame.includes("[完成]")).toBe(false);
     expect(liveFrame.includes("[完成]")).toBe(false);
-    // live 完成行不再有尾缀 ` · ok`（这是 D7 消除的不一致）。
+    // the live completion line no longer carries the ` · ok` suffix (the inconsistency removed here).
     expect(liveFrame.includes("pwd · ok")).toBe(false);
   });
 
@@ -130,8 +129,8 @@ describe("SC1 流式/历史 工具状态行字面量一致（spec T1 D7）", () 
   });
 
   test("外壳统一：MessageShell 流式草稿 与 MessageBlocks assistant 同正文起始列", async () => {
-    // 同一段 markdown 正文分别装入 MessageShell（流式草稿壳）和
-    // MessageBlocks（assistant 分支），断言两壳内正文起始列相同。
+    // load the same markdown body into MessageShell (streaming draft shell) and
+    // MessageBlocks (assistant branch) separately; assert both shells start the body at the same column.
     const text = "正文起始列一致性测试";
     const draftSetup = await testRender(
       <MessageShell>
@@ -162,8 +161,8 @@ describe("SC1 流式/历史 工具状态行字面量一致（spec T1 D7）", () 
     expect(histIdx).toBeGreaterThanOrEqual(0);
     await histSetup.renderer.destroy();
 
-    // 两壳内正文起始列相同：paddingX={1} 后均为 col 1（首列起算 0 时是 col 1）。
-    // 数字比较口径：找首行的字符偏移，按行号 + 列号（首个非空字符前的空白长度）。
+    // both shells start the body at the same column: with paddingX={1} both are col 1 (0-based first column).
+    // numeric comparison basis: find the first line's character offset as line number + column (length of blank before the first non-space char).
     function lineCol(
       frame: string,
       needle: string

@@ -1,7 +1,8 @@
 /**
- * SessionSidebar pure-helper tests (T8).
+ * SessionSidebar pure-helper tests.
  *
- * The web package has no test framework (spec A8/A10 forbid adding one), so we
+ * The web package has no test framework (project constraints forbid adding
+ * one), so we
  * test the sidebar's pure logic — extracted to web/src/lib/session-list.ts and
  * free of React/JSX — here under the root vitest (node env). The component
  * itself (SessionSidebar.tsx) is not rendered; only its helpers are.
@@ -149,9 +150,9 @@ describe("isCurrentSession", () => {
   });
 });
 
-// spec session-list-title Does #1/#6 + Does not「把 lastFinalText 显示为主行」:
-// 侧栏主行 = header title（截断 32）；title 空/纯空白走既有空态（conversation id
-// 前缀），绝不回退到 lastFinalText。
+// Per specs/session-list-title.md "Does not" (lastFinalText is never shown as the primary line):
+// sidebar primary line = header title (truncated to 32); an empty / whitespace-only
+// title falls back to the existing empty state (conversation id prefix), never to lastFinalText.
 describe("sidebarLineText", () => {
   it("有 title 时主行 = title", () => {
     const s = item({

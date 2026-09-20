@@ -2,25 +2,28 @@
 /**
  * tests/tui/environment-pane.test.tsx
  *
- * T5 (#653 G1 / 包1-感知): `EnvironmentPane` —— TUI 人读 chrome 的环境现势
- * 独立槽位投影(DESIGN 钉死名;`EnvSnapshotPane` 已退役)。
+ * `EnvironmentPane` — dedicated-slot projection of the environment's current
+ * state in TUI human-facing chrome (name fixed by the design doc;
+ * `EnvSnapshotPane` is retired).
  *
- *   - 数据唯一来源是 harness 在回合边界发出的 `env_snapshot` 流事件;
- *     `envSnapshotFromEvent` 投影:env_snapshot → EnvSnapshot(冻结);其余
- *     事件 → null。replace-on-event 与 agentStatusFromEvent 同形态。
- *   - 渲染:正常态 → cwd / gitBranch / dirtyCount / diffPreview 完整可见;
- *     超长 diffPreview(>2000 cp)→ 走 truncateByCodepoints 兜底截断,
- *     标记 `[truncated N chars]` 出现在输出中(spec 2000 cp 上限,
- *     UI 兜底再截)。
- *   - EXIT 退化态:按 degradeReason 投影 DESIGN 占位
- *     `(cwd unavailable)` / `(not a git repo)` / `(git unavailable)`。
- *   - 行账:`envSnapshotLines` 行数 → chromeReserveRows.envPaneRows
- *     (SSOT,与 agentStatusRows 同款 linkage,基线 7 不变)。
- *   - 反向契约:src/tui/environment-pane.tsx 零命中 `agent_status`
- *     (平行独立流,绝不挂 agent_status 渲染路径)。
+ *   - Single data source is the harness `env_snapshot` stream event emitted at
+ *     turn boundaries; `envSnapshotFromEvent` projects env_snapshot →
+ *     EnvSnapshot (frozen); any other event → null. Replace-on-event, same
+ *     shape as agentStatusFromEvent.
+ *   - Render: normal state → cwd / gitBranch / dirtyCount / diffPreview fully
+ *     visible; overlong diffPreview (>2000 cp) → truncateByCodepoints fallback
+ *     truncation with an `[truncated N chars]` marker in the output (2000 cp
+ *     cap, UI re-truncates as fallback).
+ *   - Degraded states project fixed placeholders per degradeReason:
+ *     `(cwd unavailable)` / `(not a git repo)` / `(git unavailable)`.
+ *   - Line accounting: envSnapshotLines row count → chromeReserveRows.envPaneRows
+ *     (SSOT, same linkage as agentStatusRows; baseline 7 unchanged).
+ *   - Negative contract: src/tui/environment-pane.tsx contains zero matches of
+ *     `agent_status` (parallel independent stream, never rides the agent_status
+ *     render path).
  *
- * 与 agent-status-panel.test.ts 同形态(bun:test + 纯函数直驱 +
- * OpenTUI renderOnce 集成)。
+ * Same shape as agent-status-panel.test.ts (bun:test + direct pure-function
+ * driving + OpenTUI renderOnce integration).
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -38,7 +41,7 @@ import type { EnvSnapshot } from "../../src/harness/env-snapshot.ts";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 
 // ---------------------------------------------------------------------------
-// fixtures:与 chatView test 等文件共用同样的快照构型。
+// fixtures: same snapshot shapes shared with chatView tests and friends.
 // ---------------------------------------------------------------------------
 
 function makeSnapshot(overrides: Partial<EnvSnapshot> = {}): EnvSnapshot {
@@ -58,7 +61,7 @@ function envSnapshotEvent(snap: EnvSnapshot): HarnessStreamEvent {
 }
 
 // ---------------------------------------------------------------------------
-// 投影:事件 → EnvSnapshot
+// projection: event → EnvSnapshot
 // ---------------------------------------------------------------------------
 
 describe("envSnapshotFromEvent: 事件 → EnvSnapshot", () => {
@@ -90,7 +93,7 @@ describe("envSnapshotFromEvent: 事件 → EnvSnapshot", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 投影:EnvSnapshot → 显示行
+// projection: EnvSnapshot → display lines
 // ---------------------------------------------------------------------------
 
 describe("envSnapshotLines: EnvSnapshot → 显示行", () => {
@@ -105,21 +108,23 @@ describe("envSnapshotLines: EnvSnapshot → 显示行", () => {
     expect(joined).toContain("/repo");
     expect(joined).toContain("main");
     expect(joined).toContain("1");
-    // diffPreview 内容(可能折叠空白后展示)——至少能命中 file path
+    // diffPreview content (may render with collapsed whitespace) — at least the file path must appear
     expect(joined).toContain("src/foo.ts");
   });
 
   test("超长 diffPreview (>2000 cp) → 截断 + marker (cols 大于上限)", () => {
-    // 3000 cp 的 ASCII diff → 经 truncateByCodepoints 兜底截到 ≤ MAX_ENV_DIFF_CHARS,
-    // 末尾追加 [truncated N chars] 标记。UI 投影层 col 预算足够宽,marker 可见。
-    // (CJK 输入虽然 codepoint 数 = 上限,但 visualWidth 翻倍 → cols=2500 时 marker
-    // 会被视觉裁剪,这是按视觉宽度截断的合理行为;ASCII 是 marker 可见的代表。)
+    // 3000 cp of ASCII diff → truncateByCodepoints caps it at MAX_ENV_DIFF_CHARS
+    // with a trailing [truncated N chars] marker. The UI projection layer's col
+    // budget is wide enough here, so the marker stays visible.
+    // (CJK input hits the cap by codepoint count but doubles visualWidth → at
+    // cols=2500 the marker would be visually clipped; that is correct
+    // visual-width truncation. ASCII is the representative case with a visible marker.)
     const longDiff = "a".repeat(3000);
     const snap = makeSnapshot({ diffPreview: longDiff });
     const lines = envSnapshotLines(snap, 2500);
     const joined = lines.map((l) => l.text).join("\n");
     expect(joined).toContain("[truncated");
-    // 标记至少报告丢弃 1000 chars(3000 - 2000)。
+    // The marker reports at least 1000 dropped chars (3000 - 2000).
     expect(joined).toMatch(/truncated\s+\d+\s+chars/);
   });
 
@@ -182,7 +187,7 @@ describe("envSnapshotLines: EnvSnapshot → 显示行", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 渲染集成:OpenTUI renderOnce 验证 EnvironmentPane 实际可见
+// render integration: OpenTUI renderOnce proves EnvironmentPane is actually visible
 // ---------------------------------------------------------------------------
 
 async function renderPane(snap: EnvSnapshot | null, cols: number) {
@@ -233,7 +238,7 @@ describe("EnvironmentPane render integration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 行账联动:envSnapshotLines ↔ chromeReserveRows.envPaneRows
+// line accounting: envSnapshotLines ↔ chromeReserveRows.envPaneRows
 // ---------------------------------------------------------------------------
 
 describe("chromeReserveRows: envPaneRows 投影联动", () => {
@@ -280,7 +285,7 @@ describe("chromeReserveRows: envPaneRows 投影联动", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 反向契约:src/tui/environment-pane.tsx 零命中 agent_status
+// negative contract: src/tui/environment-pane.tsx has zero hits of agent_status
 // ---------------------------------------------------------------------------
 
 describe("no agent_status in environment-pane: 平行独立流", () => {
@@ -319,13 +324,13 @@ describe("no agent_status in environment-pane: 平行独立流", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0037 T5: session worktree 隔离现势行（只读投影）
+// ADR-0037: session worktree isolation current-state line (read-only projection)
 // ---------------------------------------------------------------------------
 
 describe("sessionLocationLines: 会话位置行常驻（spec D7 / SC6）", () => {
   test("主仓（未绑树）→ 1 行 `路径 · 分支`；旧「仅 task 树才显示」合同作废", () => {
-    // SC6：主仓 + 非 task 路径仍渲染 1 行 —— 不得 0 行。文案 = 项目根叶子
-    // + 分支（人读 `~/projects/iknow · master` 形态）。
+    // Main repo + non-task path still renders 1 line — never 0.
+    // Text = project-root leaf + branch (human form `~/projects/iknow · master`).
     const lines = sessionLocationLines({
       projectRoot: "/home/user/projects/iknow",
       branch: "master",
@@ -336,8 +341,9 @@ describe("sessionLocationLines: 会话位置行常驻（spec D7 / SC6）", () =>
   });
 
   test("分支未知（快照尚未到）→ 仍 1 行，只画路径段（不留悬空分隔符）", () => {
-    // 启动首拍：env_snapshot 还没到 → 位置行不得因此消失（D7「禁止
-    // void envSnapshot 后 0 行」）。
+    // First frame at startup: env_snapshot hasn't arrived → the location line
+    // must not disappear because of it (rendering 0 rows after a void
+    // envSnapshot is forbidden).
     for (const branch of [undefined, null, "", "   "]) {
       const lines = sessionLocationLines({
         projectRoot: "/home/user/projects/iknow",
@@ -362,7 +368,7 @@ describe("sessionLocationLines: 会话位置行常驻（spec D7 / SC6）", () =>
       branch: "feat/x",
       cols: 80,
     });
-    // 两态都恰好 1 行 —— 绑树只换路径。
+    // Both states render exactly 1 line — binding a worktree only swaps the path.
     expect(unbound.length).toBe(1);
     expect(bound.length).toBe(1);
     expect(bound[0]!.text).toBe("repo/.iknow/worktrees/conv-1 · feat/x");
@@ -426,7 +432,8 @@ describe("EnvironmentPane: projectRoot 给定 → 常驻位置行（分支取快
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0037 T5 挂载契约:app.tsx 渲染隔离现势行并入账 envPaneRows 槽位
+// ADR-0037 mount contract: app.tsx renders the isolation current-state line and
+// accounts it into the envPaneRows slot
 // ---------------------------------------------------------------------------
 
 describe("app.tsx 位置行挂载契约（D7 / SC6）", () => {
@@ -438,7 +445,7 @@ describe("app.tsx 位置行挂载契约（D7 / SC6）", () => {
     expect(src.includes("sessionLocationLines")).toBe(true);
     expect(src.includes("resolveWorktreeChromeRoot")).toBe(true);
     expect(src.includes("liveTaskRoot")).toBe(true);
-    // 绑定判定不再决定显隐：旧投影退场。
+    // Binding no longer decides visibility: the old projection is gone.
     expect(src.includes("worktreeIsolationLines")).toBe(false);
   });
 
@@ -486,7 +493,7 @@ describe("TUI chrome 不画环境现势", () => {
   });
 });
 
-// DESIGN 验收:src/tui/ 下 EnvironmentPane 唯一 + environment-* 文件名。
+// Acceptance: EnvironmentPane is the only component name under src/tui/ and lives in an environment-* file.
 describe("EnvironmentPane 唯一组件名", () => {
   test("src/tui/ 下 EnvironmentPane / environment-pane 仅一处定义", () => {
     const tuiDir = join(import.meta.dir, "..", "..", "src", "tui");

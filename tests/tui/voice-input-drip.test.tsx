@@ -2,9 +2,10 @@
 /**
  * tests/tui/voice-input-drip.test.tsx
  *
- * 复现：语音输入引擎以「变速率逐字 / 小段」方式输入时丢字。
- * 与 paste-fast-no-loss.test.tsx（B01，bracketed paste 50ms 等间隔）区分：
- * 语音引擎可能不走 bracketed paste，而是逐 key 事件；且间隔不均匀。
+ * Reproduces dropped characters when the voice input engine feeds text as
+ * variable-rate per-key / small-chunk input. Distinct from
+ * paste-fast-no-loss.test.tsx (bracketed paste, uniform 50ms): a voice engine
+ * may skip bracketed paste and emit per-key events with uneven intervals.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -80,8 +81,9 @@ describe("voice input drip 不丢字", () => {
     }
   });
 
-  // 注意：本用例在修复前也能通过（非判别性），仅作逐 key 路径的边界覆盖；
-  // 本 bug 的判别性证据是「逐 key 变速率」与「bracketed paste 变速率」两例。
+  // Passes even before the fix (non-discriminating): boundary coverage for the
+  // per-key path only. The discriminating evidence for this bug is the
+  // variable-rate per-key and variable-rate bracketed-paste cases.
   test("逐 key 快速输入（0ms 同 tick 连发）→ 不丢字", async () => {
     const setup = await renderApp();
     try {

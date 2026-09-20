@@ -1,5 +1,5 @@
 /**
- * T2 (#688): pending predicate P0–P7 + CLI/TUI whole-line NL helper.
+ * Pending predicate P0–P7 + CLI/TUI whole-line NL helper.
  * Input = load+closeout shapes (messages + goal). Classification may ignore
  * a trailing interrupt system message without mutating the input array.
  */
@@ -157,10 +157,12 @@ describe("evaluateContinuePending cancelled_keep_interrupt", () => {
   });
 
   it("trailing interrupt after text assistant = ADR-0108 kept frozen prefix → pending", () => {
-    // 钉住的不变式：interrupt 只在 cancelled 时写入，终答后不会再生成它。
-    // ADR-0108 后「文本 assistant + interrupt」= 模型在途被打断留下的 freeze
-    // 前缀，不是完整终答 —— /continue 必须放行从前缀续跑。无 interrupt 的
-    // 文本终答仍是 nothing_pending（上方 P3 用例覆盖）。
+    // Pinned invariant: the interrupt is written only on cancellation and
+    // never re-generated after a final answer. Post ADR-0108, "text
+    // assistant + interrupt" is a frozen prefix left by a mid-flight
+    // interruption, not a complete final answer — /continue must resume
+    // from it. A text final answer without interrupt stays nothing_pending
+    // (covered by P3 above).
     const v = evaluateContinuePending({
       messages: [userText("hi"), assistantText("done"), INTERRUPT],
     });

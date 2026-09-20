@@ -1,11 +1,13 @@
 /**
- * D-α V1 graph mode T2 — chat 入口的 `/graph`（SC3 斜杠对等）。
+ * Chat entry `/graph` — the slash peer across entry points.
  *
- * 两层：
- *   1. `applySlashCommand` 把 `/graph` 解析成 `{ type: "graph", args }`，
- *      args 原样透传（值域与文案单点在 `harness/graph/mode.ts`）；
- *   2. `processChatLine` 在 host 的 `graphMode` holder 上执行，`/graph off`
- *      后 holder 回到关态；holder 缺席（ask 入口）→ stderr 提示不改状态。
+ * Two layers:
+ *   1. `applySlashCommand` parses `/graph` into `{ type: "graph", args }`,
+ *      passing args through verbatim (value domain and wording live in one
+ *      place: `harness/graph/mode.ts`);
+ *   2. `processChatLine` executes on the host's `graphMode` holder; after
+ *      `/graph off` the holder returns to the off state; holder absent (ask
+ *      entry) → stderr hint, no state change.
  */
 import { describe, expect, test } from "vitest";
 import assert from "node:assert/strict";
@@ -23,7 +25,7 @@ function mockCtx(overrides: Partial<SlashContext> = {}): SlashContext {
   return { state: makeState(), ...overrides };
 }
 
-/** processChatLine 只走 slash 分支时不碰 deps；给个不可调用的占位。 */
+/** When processChatLine only takes the slash branch it never touches deps; this is a non-callable placeholder. */
 const UNUSED_DEPS = {} as unknown as LoopEngineDeps;
 
 describe("/graph 解析 (cli slash)", () => {

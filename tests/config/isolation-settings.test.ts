@@ -1,20 +1,22 @@
 /**
- * ADR-0037 T2: `settings.isolation.worktreeOnMutate` — default-OFF setting
- * surface（plans/worktree-isolation-on-mutate.md T2）。
+ * ADR-0037: `settings.isolation.worktreeOnMutate` — default-OFF setting surface.
  *
  * Contract pinned here:
- *  - default OFF: 缺失 / 非 true / 非法值一律视为 OFF（fail-closed），mutate
- *    路径行为与今日完全一致 —— settings 层缺省不产出 isolation 段，
- *    `resolveWorktreeOnMutate` 是唯一 fail-closed 读取点（`=== true`）。
- *  - boolean-only（镜像 memory.autoExtract / graph.enabled 纪律）：非 boolean
- *    → 丢弃该字段（drop-not-throw，不转型），被丢弃字段不参与覆盖。
- *  - persist 往返：persist-settings 的 raw-merge 通道原样保留 isolation 段
- *    （写入 → persist thinking patch → 读回保真）。thinking 与 isolation 同属
- *    用户层键（ADR-0084）→ 往返锚点都是 <home>/.iknow/settings.json。
- *  - 层归属（ADR-0084）：isolation 在项目允许名单外 → 项目文件的 isolation
- *    段被丢弃、不覆盖 user 值，启动发一条含键名的警告。
+ *  - default OFF: missing / non-true / illegal values all count as OFF
+ *    (fail-closed); the mutate path behaves exactly as before — the settings
+ *    layer produces no isolation section by default, and `resolveWorktreeOnMutate`
+ *    is the sole fail-closed read point (`=== true`).
+ *  - boolean-only (mirroring memory.autoExtract / graph.enabled discipline):
+ *    non-boolean → field dropped (drop-not-throw, no coercion); dropped fields never override.
+ *  - persist round-trip: persist-settings' raw-merge channel preserves the
+ *    isolation section verbatim (write → persist thinking patch → read back intact).
+ *    thinking and isolation are both user-layer keys (ADR-0084) → the round-trip
+ *    anchor is <home>/.iknow/settings.json for both.
+ *  - layer ownership (ADR-0084): isolation is off the project allowlist → the
+ *    project file's isolation section is dropped, never overriding user values,
+ *    with one startup warning naming the key.
  *
- * 只做 settings surface：不读 git、不持会话状态、不接 harness 门禁（T3）。
+ * Settings surface only: no git reads, no session state, no harness gate wiring.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -71,7 +73,7 @@ describe("settings.isolation.worktreeOnMutate", () => {
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(settings.isolation, undefined);
     assert.equal(resolveWorktreeOnMutate(settings), false);
-    // 整个 settings 对象与今日默认一致：空文件 → 空对象，无任何新增键。
+    // The whole settings object matches today's default: empty file → empty object, no new keys.
     assert.deepEqual(settings, {});
   });
 
@@ -172,9 +174,9 @@ describe("settings.isolation.worktreeOnMutate", () => {
 });
 
 describe("settings.isolation.worktreeExclusive", () => {
-  // plans/worktree-exclusive-lock.md T2 / ADR-0070 / SC1: boolean-only；
-  // 缺失 / 非 `true` 一律按 OFF（fail-closed，镜像 resolveWorktreeOnMutate 形状）。
-  // 仅做 settings surface：不读 git、不持会话状态、不接 session-api 占用判定（T3）。
+  // ADR-0070: boolean-only; missing / non-`true` counts as OFF (fail-closed,
+  // mirroring the resolveWorktreeOnMutate shape). Settings surface only: no git
+  // reads, no session state, no session-api occupancy check.
   it("is OFF by default: absent field, resolved false, no isolation shape drift", async () => {
     const { home, cwd } = await makeSettings({}, {});
     const settings = loadIknowSettings({ home, cwd });
@@ -260,9 +262,10 @@ describe("settings.isolation.worktreeExclusive", () => {
   });
 
   it("coexists with worktreeOnMutate: both fields preserved per-segment", async () => {
-    // ADR-0070 / spec SC1: 与 worktreeOnMutate 正交、同款值域纪律；两字段同
-    // 时在场时各自解析、互不影响（isolation 属用户层键（ADR-0084），值只来自
-    // user 层；missing / non-true 按 OFF）。matrix 鉴面。
+    // ADR-0070: orthogonal to worktreeOnMutate with the same value-domain
+    // discipline; when both fields are present they parse independently without
+    // interference (isolation is a user-layer key per ADR-0084, values come only
+    // from the user layer; missing / non-true counts as OFF).
     const { home, cwd } = await makeSettings(
       {
         isolation: {
@@ -282,8 +285,9 @@ describe("settings.isolation.worktreeExclusive", () => {
   });
 
   it("matrix — worktreeOnMutate × worktreeExclusive 四档组合状态解析独立", async () => {
-    // ADR-0070 已认下 trade-off：每多一个 boolean 设置即多一档组合状态，
-    // 测试矩阵相应增加。下表枚举 2×2 = 4 档；OFF×OFF 是默认。
+    // ADR-0070 accepted the trade-off: each extra boolean setting adds one more
+    // combined state and the test matrix grows accordingly. The loop below
+    // enumerates 2×2 = 4 states; OFF×OFF is the default.
     for (const [wom, exc] of [
       [false, false],
       [false, true],
@@ -305,7 +309,7 @@ describe("settings.isolation.worktreeExclusive", () => {
       { isolation: { worktreeExclusive: true, futureFlag: "yes" } },
       {}
     );
-    // 未知字段丢弃；已知 boolean 字段保留；段不产空（仍带 worktreeExclusive）。
+    // Unknown fields dropped; known boolean fields kept; no empty section produced (worktreeExclusive remains).
     assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
       worktreeExclusive: true,
     });
@@ -320,7 +324,7 @@ describe("settings.isolation.worktreeExclusive", () => {
   });
 
   it("survives a persist cycle without losing worktreeExclusive", async () => {
-    // ADR-0084：isolation 与 llm 同为用户层键 → 往返锚点是 user 文件。
+    // ADR-0084: isolation and llm are both user-layer keys → the round-trip anchor is the user file.
     const { home, cwd, userFile } = await makeSettings(
       {
         isolation: { worktreeExclusive: true },
@@ -339,7 +343,7 @@ describe("isolation persist round-trip", () => {
   it("bootstraps isolation into a fresh settings file via persist and reads it back", async () => {
     const { home, cwd, userFile } = await makeSettings({}, {});
 
-    // 模拟操作员写入开关后，persist 往返（写入 → 读回）保真。
+    // Simulate the operator writing the switch, then verify the persist round-trip (write → read back) stays intact.
     await persistThinkingChanges(userFile, { thinking: "off" });
     await writeFile(
       userFile,
@@ -352,7 +356,7 @@ describe("isolation persist round-trip", () => {
         2
       )
     );
-    // 再走一次 persist：确认后续写回不吞掉 isolation 段。
+    // Run persist once more: a later write-back must not swallow the isolation section.
     await persistThinkingChanges(userFile, { thinking: "adaptive" });
 
     const settings = loadIknowSettings({ home, cwd });
@@ -361,16 +365,16 @@ describe("isolation persist round-trip", () => {
   });
 });
 
-// ADR-0092 / SC13：filesystem isolation 档（fsMode）— 用户层 boolean-only
-// 的可写姿态。默认 global；非法值 / 项目文件 isolation 段 → 丢弃并回落 global。
-// 不允许的项目文件 isolation 段被丢弃并告警（与 worktreeOnMutate / worktreeExclusive
-// 同款 ADR-0084 纪律）。
+// ADR-0092: filesystem isolation mode (fsMode) — the user-layer writable posture.
+// Default global; illegal values / project-file isolation sections → dropped and
+// fall back to global. Disallowed project-file isolation sections are dropped with
+// a warning (same ADR-0084 discipline as worktreeOnMutate / worktreeExclusive).
 describe("settings.isolation.fsMode", () => {
   it("缺省 global：缺席 / 非法值 → 字段不产、resolveFsIsolationMode 回落 global", async () => {
     const { home, cwd } = await makeSettings({}, {});
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(resolveFsIsolationMode(settings), "global");
-    // 字段缺席 → isolation 段不产（与 worktreeOnMutate 同款「字段全非法 / 缺席 → undefined」）。
+    // Field absent → no isolation section (same "all fields illegal / absent → undefined" shape as worktreeOnMutate).
     assert.equal(settings.isolation, undefined);
   });
 
@@ -532,9 +536,10 @@ describe("settings.isolation.fsMode", () => {
   });
 
   it("per-field 独立：任一字段非法不牵连其它字段（三字段各自留 / 丢）", async () => {
-    // parseIsolation / mergeIsolation 的合同核心：三字段独立校验、互不影响。
-    // 每列一个字段非法，断言另两字段仍在场且值不变 —— 覆盖「漏丢」「错丢」
-    // 两种方向的回归。
+    // Core of the parseIsolation / mergeIsolation contract: the three fields
+    // validate independently. With one field illegal per case, the other two must
+    // remain present and unchanged — covering regressions in both the
+    // "failed-to-drop" and "wrongly-dropped" directions.
     const { home, cwd } = await makeSettings(
       {
         isolation: {
@@ -569,9 +574,10 @@ describe("settings.isolation.fsMode", () => {
   });
 
   it("isolation 段的键集合不含 undefined 值键（`in` 为假，不只是值为 undefined）", async () => {
-    // 回归钉：per-field 合并若写成 `out.x = undefined`，键会真实存在。用户
-    // 配置只给 fsMode 时，另两键必须**不在**（`in` 运算符判否），否则消费方
-    // 的 Object.keys / 深比较看到的是「有键的 undefined」，与段缺席语义漂移。
+    // Regression pin: if per-field merge wrote `out.x = undefined`, the key would
+    // really exist. When user config supplies only fsMode, the other two keys must
+    // be **absent** (falsy `in` operator), otherwise consumers' Object.keys / deep
+    // compare see a "present key with undefined value", drifting from section-absent semantics.
     const { home, cwd } = await makeSettings(
       { isolation: { fsMode: "global" } },
       {}
@@ -584,8 +590,9 @@ describe("settings.isolation.fsMode", () => {
   });
 
   it("字段增删不影响「全空 → 段缺席」判断（结构不变量，不随字段数漂移）", async () => {
-    // parseIsolation / mergeIsolation 收尾用 Object.keys 判空，故下列输入
-    // 一律不得产出 isolation 段。增字段时这条不变量必须继续成立。
+    // parseIsolation / mergeIsolation finish with an Object.keys emptiness check,
+    // so none of the inputs below may produce an isolation section. This invariant
+    // must keep holding as fields are added.
     for (const isolation of [
       {},
       { unknownOnly: 1 },

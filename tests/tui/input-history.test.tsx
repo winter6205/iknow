@@ -2,23 +2,25 @@
 /**
  * tests/tui/input-history.test.tsx
  *
- * #343 T6-C：#279 项5 — TUI 输入历史 ↑/↓ 导航回归测试（自 archive
- * tui-ink/tests/input-history.test.tsx 迁移）。
+ * Regression tests for TUI input-history ↑/↓ navigation.
  *
- * 覆盖：
- *  1) 空历史 ↑/↓ no-op（不崩、不吞后续输入）；
- *  2) ↑ 召回 / ↓ 越界回现场（草稿 round-trip）；
- *  3) hint 候选可见时 ↑/↓ 走 hint cursor（hint 优先）；
- *  4) 连续重复去重（连提两条相同只入一条历史）。
- *  5) 会话恢复种子（fix/tui-input-issues）：initialSession 恢复 / /sessions
- *     openSessionAt 切换后 ↑ 立即可用（transcript 投影 seedInputHistory），
- *     且 per-session 隔离（A 会话提交不泄漏进 B 的 ↑ 历史）；
- *  6) Tab 补全接线：hint 游标选中非首候选 + Tab → 按选中项补全
- *     （app.tsx onTabComplete cursor>0 分支，原 length===1 && cursor===0
- *     恒不可达死代码）；/q 唯一匹配、/e LCP 无进展 no-op 回归护栏；
- *  7) 提交追加回归护栏（appendInputHistory 接线后行为不变）。
+ * Coverage:
+ *  1) empty history: ↑/↓ no-op (no crash, no swallowed input);
+ *  2) ↑ recall / ↓ past-the-newest restores the live draft (draft round-trip);
+ *  3) while hint candidates are visible, ↑/↓ drive the hint cursor (hint wins);
+ *  4) consecutive-duplicate dedup (submitting the same text twice enters history once).
+ *  5) session-resume seeding: after initialSession restore / /sessions
+ *     openSessionAt switch, ↑ works immediately (transcript projection
+ *     seedInputHistory), and history is per-session isolated (A's submits
+ *     never leak into B's ↑ history);
+ *  6) Tab completion wiring: hint cursor on a non-first candidate + Tab →
+ *     completes with the selected item (app.tsx onTabComplete cursor>0
+ *     branch — the old length===1 && cursor===0 condition was unreachable
+ *     dead code); regression guards for /q unique match and /e LCP
+ *     no-progress no-op;
+ *  7) submit-append regression guard (appendInputHistory behavior unchanged after wiring).
  *
- * 装配：mountAppAsync + stub deps（同 app.test.tsx 模式）。
+ * Assembly: mountAppAsync + stub deps (same pattern as app.test.tsx).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -89,9 +91,9 @@ interface DrivenApp {
 async function mountAppAsync(
   responses: Parameters<typeof makeDeps>[0],
   opts: {
-    /** 会话恢复（`iknow tui <id>` 等价）：mount 即 attach，不走新建 draft。 */
+    /** Session resume (equivalent to `iknow tui <id>`): attach at mount, no fresh draft. */
     readonly initialSession?: TuiSessionState;
-    /** 复用外部 dataDir（openSessionAt 用例需先在盘上播种会话文件）。 */
+    /** Reuse an external dataDir (the openSessionAt case seeds session files on disk first). */
     readonly dataDir?: string;
   } = {}
 ): Promise<DrivenApp> {
@@ -128,7 +130,7 @@ async function mountAppAsync(
       height: 30,
       exitOnCtrlC: false,
       consoleMode: "disabled",
-      // T8：Shift+Enter 需携带 shift 修饰（kitty 协议编码 [13;2u）。
+      // Shift+Enter must carry the shift modifier (kitty protocol encodes [13;2u).
       kittyKeyboard: true,
     }
   );
@@ -172,7 +174,7 @@ async function mountAppAsync(
   };
 }
 
-/** 帧内子串出现次数（区分消息流转录份与输入框渲染份，同 keyboard.test.tsx）。 */
+/** Occurrences of a substring in the frame (separates transcript copies from the input-box copy, as in keyboard.test.tsx). */
 function countOccurrences(frame: string, needle: string): number {
   let count = 0;
   let idx = frame.indexOf(needle);
@@ -183,8 +185,8 @@ function countOccurrences(frame: string, needle: string): number {
   return count;
 }
 
-/** 最小合法 SessionFileV1（user/assistant 对构成 turn；同 rewind.test.tsx
- *  sampleFile 的必填字段集），供 initialSession attach / 盘上播种复用。 */
+/** Minimal valid SessionFileV1 (a user/assistant pair forms a turn; same required-field set as sampleFile in
+ *  rewind.test.tsx), reused for initialSession attach / on-disk seeding. */
 function sessionFileWithUserMessages(
   texts: ReadonlyArray<string>,
   overrides?: { readonly id?: string; readonly updatedAt?: string }
@@ -218,7 +220,7 @@ describe("T8 多行输入：提交后清空 + 历史召回保留多行", () => {
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 输入两行（Shift+Enter 分隔）。
+    // Type two lines (Shift+Enter as separator).
     await app.typeText("第一行");
     app.setup.mockInput.pressEnter({ shift: true });
     await new Promise((r) => setTimeout(r, 100));
@@ -226,17 +228,19 @@ describe("T8 多行输入：提交后清空 + 历史召回保留多行", () => {
     await app.typeText("第二行");
     await app.pressEnter();
 
-    // turn 落盘：title 含换行。
+    // Turn persisted: title contains the newline.
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "multi-turn");
     const list = await app.bridge.listSessions();
     expect(list.length).toBe(1);
     expect(list[0]!.title).toBe("第一行\n第二行");
 
-    // 提交后输入框已清空：占位「输入消息」重新可见（提交前输入框是实际文本；
-    // 注意消息流里会渲染用户消息全文，故不能用「第一行消失」作信号）。
+    // After submit the input box is cleared: the `输入消息` ("type a message")
+    // placeholder reappears (before submit the box holds real text; note the
+    // message stream renders the full user text too, so "first line gone" is
+    // not a usable signal).
     await untilFrame(app.setup, (f) => f.includes("输入消息"), 8000, "cleared");
 
-    // 历史召回：↑ → 输入框占位消失（内容恢复完整多行文本）。
+    // History recall: ↑ → placeholder disappears (full multi-line text restored).
     await app.pressArrow("up");
     await untilFrame(
       app.setup,
@@ -256,11 +260,11 @@ describe("#279 项5：TUI 输入历史 ↑/↓ 导航", () => {
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 无历史：↑ ↓ 均 no-op → 输入框仍是占位符
+    // No history: ↑ and ↓ are both no-ops → input box still shows the placeholder
     await app.pressArrow("up");
     await app.pressArrow("down");
 
-    // 后续输入不被吞：正常提交一轮
+    // Later input is not swallowed: a full turn submits normally
     await app.typeText("after-noop");
     await app.pressEnter();
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "noop-turn");
@@ -277,20 +281,20 @@ describe("#279 项5：TUI 输入历史 ↑/↓ 导航", () => {
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 1) 种一条历史
+    // 1) seed one history entry
     await app.typeText("hist-a");
     await app.pressEnter();
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "seed-turn");
 
-    // 2) 输入半截草稿（不提交）
+    // 2) type a partial draft (never submitted)
     await app.typeText("wip-draft");
     await new Promise((r) => setTimeout(r, 100));
 
-    // 3) ↑ → 召回 "hist-a"
+    // 3) ↑ → recalls "hist-a"
     await app.pressArrow("up");
     await untilFrame(app.setup, (f) => f.includes("hist-a"), 8000, "up-recall");
 
-    // 4) ↓ → 越过最新条回输入现场：恢复草稿 "wip-draft"
+    // 4) ↓ → past the newest entry, back to the draft: "wip-draft" restored
     await app.pressArrow("down");
     await untilFrame(
       app.setup,
@@ -310,11 +314,12 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
       initialSession: attachSession(file),
     });
     await untilFrame(app.setup, (f) => f.includes("Version"));
-    // attach 后转录即含全部 user 消息。
+    // After attach the transcript already holds all user messages.
     await untilFrame(app.setup, (f) => f.includes("第二条"));
 
-    // ↑ → 输入框恢复「第二条」（最近一条）：占位消失 + 转录份之外多一份。
-    // 修复前（无种子）：↑ no-op，占位恒在 → untilFrame 超时。
+    // ↑ → input box restores "第二条" (the most recent): placeholder gone, plus
+    // one extra copy beyond the transcript copy.
+    // Before the fix (no seeding): ↑ was a no-op, placeholder always present → untilFrame times out.
     await app.pressArrow("up");
     const frame = await untilFrame(
       app.setup,
@@ -323,7 +328,7 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
     );
     expect(countOccurrences(frame, "第二条")).toBeGreaterThanOrEqual(2);
 
-    // 再 ↑ → 「第一条」（种子按 turn 顺序可完整导航）。
+    // ↑ again → "第一条" (seeding is in turn order, so navigation is complete).
     await app.pressArrow("up");
     const frame2 = await untilFrame(
       app.setup,
@@ -336,9 +341,10 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
   }, 30_000);
 
   test("openSessionAt：/sessions 切到 B 后 ↑ 召回 B 的种子，A 的输入不泄漏", async () => {
-    // 盘上只播种 B（A 仅内存 attach，不落盘）→ 列表唯一条目 = B，index 恒 1。
-    // T1 (session-folder-consolidation)：bridge 以 `deriveProjectIdentityRoot(
-    // {cwd: dataDir})` 派生根,种子必须落同一 projectDir 的 `<convId>/` 文件夹。
+    // Seed only B on disk (A is an in-memory attach, never persisted) → B is
+    // the list's sole entry, index always 1.
+    // The bridge derives its root via `deriveProjectIdentityRoot({cwd: dataDir})`,
+    // so the seed must live under the same projectDir in the `<convId>/` folder.
     const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-histswitch-"));
     const fileB = sessionFileWithUserMessages(["msg-b1", "msg-b2"], {
       id: "conv-hist-b",
@@ -366,7 +372,7 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
     });
     await untilFrame(app.setup, (f) => f.includes("msg-a2"));
 
-    // /sessions → 列表（首行「+ 新建会话」，下一行 B）。
+    // /sessions → list (first row `+ 新建会话` "new session", next row B).
     await app.typeText("/sessions");
     await app.pressEnter();
     await untilFrame(
@@ -374,17 +380,19 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
       (f) => f.includes("新建会话") && f.includes("msg-b1")
     );
 
-    // ↓ 选中 B（选中行 marker ">" 落到 B 的 title 上，状态可见后再按
-    // Enter，避免「Enter 先于 ↓ 的渲染提交 → onOpen(0) 误开新会话」竞态）
-    // → Enter → openSessionAt(1)：loadSessionFile + attach + 种子。
+    // ↓ selects B (wait until the ">" row marker visibly lands on B's title
+    // before pressing Enter, to avoid the race where Enter arrives before ↓
+    // renders and onOpen(0) wrongly opens a new session)
+    // → Enter → openSessionAt(1): loadSessionFile + attach + seeding.
     await app.pressArrow("down");
     await untilFrame(app.setup, (f) => f.includes("> msg-b1"));
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("msg-b2"));
 
-    // ↑ → 召回 B 最近一条「msg-b2」（转录 1 份 + 输入框 1 份）。
-    // 修复前：切会话不种子 → ↑ no-op（占位恒在）→ untilFrame 超时。
-    // 隔离断言：A 的输入（msg-a*）不得出现在帧内（若全局历史串户则会召回 A）。
+    // ↑ → recalls B's latest entry "msg-b2" (one transcript copy + one input-box copy).
+    // Before the fix: switching sessions did not seed → ↑ no-op (placeholder stays) → untilFrame timeout.
+    // Isolation assert: A's input (msg-a*) must not appear in the frame
+    // (a shared global history would recall A instead).
     await app.pressArrow("up");
     const frame = await untilFrame(
       app.setup,
@@ -404,15 +412,15 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("/");
-    // 空前缀 → 全词表 hint（词表序 sessions, new, quit, …）。
+    // Empty prefix → full vocabulary hint (order: sessions, new, quit, …).
     await untilFrame(
       app.setup,
       (f) => f.includes("/sessions") && f.includes("/quit")
     );
 
-    // ↓ hint 游标 → index 1（new）；Tab → 按选中项补全输入框 "/new "。
-    // plans T4：补全后的 "/new " 是 exact + remainder（空格）→ hint 全隐
-    // （消歧职责已尽），帧内只有输入框 1 份 /new。
+    // ↓ moves the hint cursor → index 1 (new); Tab completes the input to "/new ".
+    // After completion "/new " is exact + remainder (space) → hint fully hidden
+    // (its disambiguation job is done), so only the input-box copy of /new remains.
     await app.pressArrow("down");
     await app.pressTab();
     const frame = await untilFrame(
@@ -420,7 +428,7 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
       (f) => f.includes("/new") && !f.includes("/quit"),
       8000
     );
-    // 输入框非空（占位消失），hint 已隐藏 → 全帧恰 1 份 /new。
+    // Input box is non-empty (placeholder gone) and the hint is hidden → exactly 1 /new in the frame.
     expect(frame).not.toContain("输入消息");
     expect(countOccurrences(frame, "/new")).toBe(1);
 
@@ -432,12 +440,12 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("/q");
-    // 唯一候选 quit：hint 1 份 /quit（输入框还是 /q）。
+    // Sole candidate quit: hint shows one /quit (input box still /q).
     await untilFrame(app.setup, (f) => countOccurrences(f, "/quit") === 1);
 
     await app.pressTab();
-    // 补全 "/quit "：plans T4 —— exact + 尾随空格 = 已提交 remainder →
-    // hint 全隐，帧内只剩输入框 1 份 /quit。
+    // Completes "/quit ": exact + trailing space = committed remainder →
+    // hint fully hidden, only the input-box copy of /quit remains.
     await untilFrame(
       app.setup,
       (f) => f.includes("/quit ") && countOccurrences(f, "/quit") === 1,
@@ -462,7 +470,7 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
 
     await app.pressTab();
     const frame = app.setup.captureCharFrame();
-    // no-op：输入框仍 "/e"（无补全串进输入框），hint 仍双候选。
+    // no-op: input box still "/e" (no completion text inserted), hint still shows both candidates.
     expect(countOccurrences(frame, "/effort")).toBe(1);
     expect(countOccurrences(frame, "/exit")).toBe(1);
     expect(frame).not.toContain("输入消息");

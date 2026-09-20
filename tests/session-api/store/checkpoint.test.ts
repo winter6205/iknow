@@ -4,9 +4,10 @@
  * `projectMessagesToTurns` turn-slice boundary in hub.ts (skips user messages
  * that carry tool_result blocks when projecting turn starts).
  *
- * Six-path coverage (#222 test.md): 正常 / 失败 / 边界 / 空非法 / 并发（如适用） —
- * authorization is not a concept in this pure data layer; concurrency reduces
- * to immutability verification (appendCheckpoint must not mutate its inputs).
+ * Six-path coverage (per test.md): happy / failure / boundary / empty-invalid /
+ * concurrency (where applicable) — authorization is not a concept in this pure
+ * data layer; concurrency reduces to immutability verification
+ * (appendCheckpoint must not mutate its inputs).
  *
  * #120 discipline carries over: sanitize never repairs messages; for the
  * derived `checkpoints` field we follow the same load-then-normalize boundary.
@@ -70,7 +71,7 @@ const assistantMsg = (
   role: "assistant",
   content: blocks as AnthropicNativeMessage["content"],
 });
-// #392 T5:system 中断消息 helper(append-only,用作 rewind 锚点测试 fixture)
+// system-interruption message helper (append-only; used as rewind-anchor test fixture)
 const systemMsg = (body: string): AnthropicNativeMessage => ({
   role: "system",
   content: [{ type: "text", text: body }],
@@ -109,7 +110,7 @@ const ISO = "2026-08-11T00:00:00.000Z";
 // -- splitTurns (turn boundary projection) -------------------------------------
 
 describe("splitTurns — turn boundary projection", () => {
-  // 正常路径
+  // happy path
   it("returns one slice per non-tool_result user message", () => {
     const messages = [userMsg("q1"), assistantMsg([text("a1")])];
     assert.deepEqual(
@@ -143,8 +144,8 @@ describe("splitTurns — turn boundary projection", () => {
 
   it("skips subagent drain user messages when delineating turns", () => {
     // [user(q1), assistant(a1), user(drain), assistant(ack), user(q2), assistant(a2)]
-    // drain 消息不是 turn 边界（与 hub.ts projectMessagesToTurns 同源）：
-    // turn0 = [0,4)  turn1 = [4,6)
+    // drain messages are not turn boundaries (same source rule as hub.ts
+    // projectMessagesToTurns): turn0 = [0,4)  turn1 = [4,6)
     const messages = [
       userMsg("q1"),
       assistantMsg([text("a1")]),
@@ -184,7 +185,7 @@ describe("splitTurns — turn boundary projection", () => {
     assert.equal(splitTurns(messages).length, 1);
   });
 
-  // 边界 — tool_result group with no preceding query
+  // boundary — tool_result group with no preceding query
   it("treats leading tool_result user messages as a preamble (own slice, not a turn)", () => {
     // [user(tool_result t1), assistant(text)] — malformed, but defined behavior.
     // No non-tool_result user message → no turns. We document splitTurns as
@@ -193,7 +194,7 @@ describe("splitTurns — turn boundary projection", () => {
     assert.equal(splitTurns(messages).length, 0);
   });
 
-  // 空/非法输入 — only assistant messages, no queries
+  // empty/invalid input — only assistant messages, no queries
   it("returns [] when no non-tool_result user message exists", () => {
     const messages = [
       userToolResult("t1"),
@@ -203,11 +204,11 @@ describe("splitTurns — turn boundary projection", () => {
     assert.equal(splitTurns(messages).length, 0);
   });
 
-  // #392 T4 / B2:system 中断消息在场时 turn 切片不变(reviewer Medium #3)
+  // an interleaved system interruption message must not shift turn slices
   it("does not let an interleaved system message shift turn boundaries", () => {
-    // 模拟真实中断:user(q1) → assistant(tool_use) → user(tool_result) →
-    // assistant(text) 之后 append system(Interrupted by user.),再 user(q2)。
-    // system 不构成 turn —— splitTurns 只按 role==="user" 且非 tool_result 切片。
+    // Real interruption shape: user(q1) → assistant(tool_use) → user(tool_result) →
+    // assistant(text), then append system("Interrupted by user."), then user(q2).
+    // system is not a turn — splitTurns slices only on role==="user" minus tool_result.
     const messages = [
       userMsg("q1"),
       assistantMsg([toolUse("t1", "read_file", {})]),
@@ -219,7 +220,7 @@ describe("splitTurns — turn boundary projection", () => {
     ];
     const slices = splitTurns(messages);
     assert.equal(slices.length, 2);
-    // turn0 应跨过 system 项:start 0 → end 5(system 落 [4,5) 间隙,不参与切片)
+    // turn0 should span past the system entry: start 0 → end 5 (system sits in the [4,5) gap, not part of slicing)
     assert.equal(slices[0]!.start, 0);
     assert.equal(slices[0]!.end, 5);
     assert.equal(slices[1]!.start, 5);
@@ -227,7 +228,7 @@ describe("splitTurns — turn boundary projection", () => {
   });
 
   it("keeps the interrupt system message as the final element (append-only tail)", () => {
-    // 打断发生在 last turn 之后 → system 落在 messages 末尾,切片只含既有 turns
+    // interruption happens after the last turn → system sits at the tail; slices contain only the existing turns
     const messages = [
       userMsg("q1"),
       assistantMsg([text("a1")]),
@@ -236,10 +237,10 @@ describe("splitTurns — turn boundary projection", () => {
     const slices = splitTurns(messages);
     assert.equal(slices.length, 1);
     assert.equal(slices[0]!.start, 0);
-    // 唯一 query 起点是 index 0,end 延伸到 messages 末尾(含 assistant + system),
-    // 但 turn 切片只以 query 定位 —— system 不引入新 turn。
+    // The only query starts at index 0 and its end extends to the tail (assistant + system
+    // included), but turn slices are located by query only — system introduces no new turn.
     assert.equal(slices[0]!.end, 3);
-    // system 是最后一个元素,不进任何 turn slice
+    // system is the last element and belongs to no turn slice
     const last = messages[messages.length - 1]!;
     assert.equal(last.role, "system");
   });
@@ -272,7 +273,7 @@ describe("turnSliceEnd — exclusive end index of a turn", () => {
     assert.equal(turnSliceEnd(messages, -1), 0);
   });
 
-  // 空输入
+  // empty input
   it("returns 0 for empty messages + any turnIndex", () => {
     assert.equal(turnSliceEnd([], 0), 0);
     assert.equal(turnSliceEnd([], 3), 0);
@@ -302,7 +303,7 @@ describe("shouldPersistCheckpoint — predicate matrix", () => {
     assert.equal(shouldPersistCheckpoint(result, prior), false);
   });
 
-  // 失败路径 — protocolError / emptyFinalResponse never persist (维持 #120 裁决)
+  // failure path — protocolError / emptyFinalResponse never persist (existing production ruling)
   it("protocolError → do NOT persist", () => {
     const result = buildResult({
       stopReason: "protocolError",
@@ -319,7 +320,7 @@ describe("shouldPersistCheckpoint — predicate matrix", () => {
     assert.equal(shouldPersistCheckpoint(result, prior), false);
   });
 
-  // 其余 stopReason → persist
+  // remaining stopReasons → persist
   it("completed → persist", () => {
     const result = buildResult({
       stopReason: "completed",
@@ -360,7 +361,7 @@ describe("shouldPersistCheckpoint — predicate matrix", () => {
 // Spec invariant 8 / SC4 (transport-continue-persist): protocolError /
 // emptyFinalResponse persist the USER message(s) from this turn; the failed
 // assistant turn is dropped. Replaces the boolean `shouldPersistCheckpoint`
-// (#120 裁决 amended). Cancelled / timeout / completed / maxTurns /
+// (amending the earlier ruling). Cancelled / timeout / completed / maxTurns /
 // nonSuccessStop behavior is byte-stable.
 
 describe("decideCheckpointPersist — tri-state predicate (T4)", () => {
@@ -422,7 +423,8 @@ describe("decideCheckpointPersist — tri-state predicate (T4)", () => {
   it("protocolError with mixed user + assistant delta → partial_user_only (assistant dropped)", () => {
     // Defensive: if for any reason the engine appended an assistant turn
     // alongside the user delta before failing (rare; engine normally omits
-    // the failed assistant per "整回合不进历史"), the predicate still picks
+    // the failed assistant per `整回合不进历史` — "the whole turn does not
+    // enter history"), the predicate still picks
     // partial_user_only and the hub's splice filters out non-user roles.
     const prior: AnthropicNativeMessage[] = [];
     const result = buildResult({
@@ -502,7 +504,7 @@ describe("decideCheckpointPersist — tri-state predicate (T4)", () => {
 // -- appendCheckpoint ---------------------------------------------------------
 
 describe("appendCheckpoint — appends a record to session.checkpoints", () => {
-  // 正常路径
+  // happy path
   it("appends to an empty checkpoints list", () => {
     const session = baseFile();
     const record: CheckpointRecord = {
@@ -593,7 +595,7 @@ describe("appendCheckpoint — appends a record to session.checkpoints", () => {
     assert.equal(updated.checkpoints?.length ?? 0, 0);
   });
 
-  // 并发（如适用 — 不可变性）
+  // concurrency (where applicable — immutability)
   it("does not mutate the input session's checkpoints array", () => {
     const session = {
       ...baseFile(),
@@ -614,7 +616,7 @@ describe("appendCheckpoint — appends a record to session.checkpoints", () => {
 // -- resolveRewindAnchor (T5: rewindFile truncation semantics retired) ---------
 
 describe("resolveRewindAnchor — head-move target for a keepTurns rewind", () => {
-  // 正常路径
+  // happy path
   it("resolves the anchor to the last message index of the kept turns", () => {
     const messages = [
       userMsg("q1"),
@@ -645,7 +647,7 @@ describe("resolveRewindAnchor — head-move target for a keepTurns rewind", () =
     assert.equal(out.turnCount, 1);
   });
 
-  // 边界 — keepTurns >= available turns
+  // boundary — keepTurns >= available turns
   it("keepTurns >= total turns → anchor = last message (no-op head)", () => {
     const messages = [
       userMsg("q1"),
@@ -665,7 +667,7 @@ describe("resolveRewindAnchor — head-move target for a keepTurns rewind", () =
     assert.equal(out.turnCount, 0);
   });
 
-  // 空/非法输入 — empty session
+  // empty/invalid input — empty session
   it("empty session + keepTurns > 0 → headIndex -1, turnCount 0", () => {
     const out = resolveRewindAnchor([], 3);
     assert.equal(out.headIndex, -1);

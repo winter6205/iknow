@@ -1,6 +1,6 @@
 /**
  * T1 (ADR-0071) — session folder layout & resolver
- * pure-function contract tests. Covers SC1–SC4 + 输入五类表 A.
+ * pure-function contract tests. Covers the Table A five input classes.
  *
  * These tests pin the **new** contract:
  *   - `resolveProjectSessionDir(baseDir, projectIdentityRoot)` keys by
@@ -121,7 +121,7 @@ describe("resolveConversationDir", () => {
   });
 });
 
-// -- 表 A — resolveProjectSessionDir / resolveConversationDir boundary --------
+// -- Table A — resolveProjectSessionDir / resolveConversationDir boundary -----
 
 describe("表 A — empty", () => {
   it("conversationId undefined → typed fail", () => {
@@ -147,7 +147,7 @@ describe("表 A — empty", () => {
 
 describe("表 A — negative (path-hostile inputs)", () => {
   it("conversationId containing '/' cannot escape project dir (sanitize keeps it inside)", () => {
-    // Per spec: `..` 风格与含分隔符 id 不可能逃逸会话文件夹. sanitize
+    // Per spec: `..`-style and separator-bearing ids cannot escape the conversation folder. sanitize
     // replaces non-[A-Za-z0-9_-] with `_`, so a `..` becomes `__`.
     const dir = resolveConversationDir({
       projectDir: "/x/proj",
@@ -337,7 +337,7 @@ describe("SessionStore constructor — projectIdentityRoot is required", () => {
   });
 
   it("end-to-end demo — new session visible to list() and loadable via --resume path", async () => {
-    // Spec acceptance: 新建会话后 TUI 列表能看见、--resume 能续跑. This
+    // Spec acceptance: after creating a session the TUI list shows it and --resume can continue it. This
     // exercises the same data path (save → list → load) at the SessionStore
     // boundary.
     const baseDir = await mkdtemp(join(tmpdir(), "iknow-sf-resume-"));

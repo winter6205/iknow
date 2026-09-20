@@ -1,8 +1,8 @@
 /**
- * settings.hooks — Claude command 形态（PreToolUse / PostToolUse 组）。
+ * settings.hooks — Claude command shape (PreToolUse / PostToolUse groups).
  *
- * 旧 deny-only `{enabled, rules}` 不兼容：贴进来不产出 hooks 段。
- * 项目层 hooks 不进允许名单（任意 command = clone 即执行）。
+ * The old deny-only `{enabled, rules}` is incompatible: pasting it in produces no hooks section.
+ * Project-layer hooks never enters the allowlist (an arbitrary command = clone-and-execute).
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";

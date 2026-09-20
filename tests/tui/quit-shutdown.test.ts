@@ -1,14 +1,17 @@
 /**
- * TUI /quit 收口收敛修复（2026-08-29 第二轮 review）—— /quit 路径必须关掉
- * 全部引擎。shutdownExtensions 原本只调 tuiExtensions.shutdown()（初始引擎
- * 的组合句柄）；rebind 后 per-root 重建引擎的 shutdown 只挂在
- * combinedShutdown（信号路径），/quit → onQuitBridge.destroy →
- * shutdownExtensions 会漏关重建引擎。修复：shutdownExtensions 追加
- * hubRef.current.shutdown()（hub.shutdown 幂等，与信号路径重复调用无害）。
+ * TUI /quit shutdown convergence fix — the /quit path must shut down all
+ * engines. shutdownExtensions originally called only tuiExtensions.shutdown()
+ * (the combined handle of the initial engines); after rebind, per-root rebuilt
+ * engines had their shutdown attached only to combinedShutdown (the signal
+ * path), so /quit → onQuitBridge.destroy → shutdownExtensions missed the
+ * rebuilt engines. Fix: shutdownExtensions also calls
+ * hubRef.current.shutdown() (hub.shutdown is idempotent; a duplicate call
+ * alongside the signal path is harmless).
  *
- * 结构性钉子（与 chat-session-rebind "wrapRebuiltDeps" 钉同风格）：runTui
- * 全路径需要真实 renderer + runtime bundle，bun test 环境不可注入；钉
- * shutdownExtensions 闭包内的 hub shutdown 接线与 hubRef 回填点。
+ * Structural pin (same style as the chat-session-rebind "wrapRebuiltDeps"
+ * pin): the full runTui path needs a real renderer + runtime bundle that
+ * cannot be injected under bun test; pin the hub shutdown wiring inside the
+ * shutdownExtensions closure and the hubRef backfill point.
  */
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -21,10 +24,10 @@ const src = readFileSync(
 
 describe("TUI /quit 关掉全部引擎（hub.shutdown 接线）", () => {
   it("shutdownExtensions 内追加 hubRef hub.shutdown（/quit 路径收口重建引擎）", () => {
-    // shutdownExtensions 定义在 try 外 —— 必须经外层 hubRef 盒访问 bridge.hub
+    // shutdownExtensions is defined outside the try — it must reach bridge.hub via the outer hubRef box
     expect(src.includes("const hubRef")).toBe(true);
     expect(src.includes("hubRef.current?.shutdown()")).toBe(true);
-    // bridge 创建后回填 hubRef（与 bridgeRef.hub 同点）
+    // hubRef backfilled after bridge creation (same point as bridgeRef.hub)
     expect(src.includes("hubRef.current = bridge.hub")).toBe(true);
   });
 

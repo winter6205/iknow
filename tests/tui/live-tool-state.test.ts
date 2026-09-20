@@ -1,10 +1,11 @@
 /**
  * tests/tui/live-tool-state.test.ts
  *
- * #578：unmatched post_tool_use 不得 append 幽灵 live 行（与 history
- * `[失败]` 双重渲染）。OpenTUI 合同：未匹配 id 与 unmatched
- * tool_input_delta 一样 return prev。archive/tui-ink 的 append + length 2
- * 合同已倒置。匹配 id 仍 in-place ok/failed。
+ * Unmatched post_tool_use must not append a phantom live row (which would
+ * double-render with the history `[失败]` ("failed") entry). OpenTUI
+ * contract: an unmatched id returns prev, same as unmatched
+ * tool_input_delta. The archived ink-era append + length-2 contract is
+ * inverted. A matched id still flips in-place to ok/failed.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -91,10 +92,12 @@ describe("liveToolReduce (#578 unmatched post_tool_use 不 append)", () => {
 });
 
 describe("liveToolReduce (T5 完成件一律 in-place 保留,不再删除)", () => {
-  // plans/tui-live-activity-fold.md T5:旧 #589 的「成功只读直删」与
-  // chat-view 的 history-id 过滤叠加成双删 —— 历史已含该 tool_use 时
-  // MessageBlocks 按 slot 隐去标题,reducer 又抹掉 live 件,帧上空白。
-  // 落点由消费侧决定(group 计数 / unit fold 计数),reducer 只如实转态。
+  // The old "delete successful read-only runs directly" behavior, combined
+  // with chat-view's history-id filtering, produced double deletion — when
+  // history already contained the tool_use, MessageBlocks hid the title by
+  // slot while the reducer also erased the live entry, leaving blank space in
+  // the frame. Placement is decided by the consumer side (group counting /
+  // unit fold counting); the reducer only transitions state faithfully.
   test("start + ok read_file → 留在数组,状态 ok(落点由渲染侧决定)", () => {
     const started = liveToolReduce([], {
       kind: "tool_call_start",
@@ -293,11 +296,11 @@ describe("liveToolReduce draftEpoch（工具插在第 N 段草稿之后）", () 
 });
 
 describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
-  // T7（specs/tui-activity-block.md）：`liveTailSlots` 只承接 **keep / 失
-  // 败** 的 live 工具 —— retract 类（read_file / grep / web_search / 等）
-  // 由 unanchored 活动块（`appendLiveBlocks`）承接，不进 tail。失败件
-  // 仍走 tail `[失败]` 行。本 describe 改用 keep 名（bash / write_file）
-  // 验证 tail 的 epoch 交错。
+  // `liveTailSlots` only carries **keep / failed** live tools — retract-class
+  // tools (read_file / grep / web_search / etc.) are handled by the
+  // unanchored activity block (`appendLiveBlocks`) and never enter the tail.
+  // Failed runs still go through the tail `[失败]` row. This describe
+  // switches to keep names (bash / write_file) to verify tail epoch interleaving.
   const run = (id: string, name: string, draftEpoch?: number): LiveToolRun => ({
     id,
     name,
@@ -354,10 +357,11 @@ describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
   });
 
   test("live noise 名被剥掉 → 不进 tail（由 unanchored 块承接）", () => {
-    // live-signal revision #3：只有 live noise（grep / read_file / glob /
-    // memory_recall / lsp_* / 未注册名）由 unanchored 块承接。web_search /
-    // web_fetch 不再算 noise → 走 tail 实卡（live signal）。失败件
-    // （status=failed）作为例外仍走 tail `[失败]` 行。
+    // Live-signal revision: only live noise (grep / read_file / glob /
+    // memory_recall / lsp_* / unregistered names) is handled by the
+    // unanchored block. web_search / web_fetch no longer count as noise →
+    // they go through the tail as real cards (live signal). Failed runs
+    // (status=failed) are an exception and still go through the tail `[失败]` row.
     const noise = run("n", "grep");
     const liveSignal: LiveToolRun = {
       id: "ls",
@@ -379,11 +383,12 @@ describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
   });
 
   test("表外 noise 名同样被剥 —— 判定走 isLiveNoise 单一来源", () => {
-    // live-signal revision：剥除判定走 `isLiveNoise` 单一来源，不
-    // 用固定名 Set —— TOOL_SETTLED_CLASS 的 retract 类含 memory_recall /
-    // glob / lsp_* / 未注册兜底名都属 live noise，按名硬编码会漏剥 →
-    // 块与 tail 双画（specs/tui-activity-block.md Never「不另造第二套
-    // 分类表」）。web_fetch 算 live signal，不被剥。
+    // The strip decision goes through `isLiveNoise` as the single source, not
+    // a fixed-name Set — in TOOL_SETTLED_CLASS's retract class, memory_recall /
+    // glob / lsp_* and the unregistered fallback names all count as live noise;
+    // hard-coding names would miss some → double render (block + tail), which
+    // specs/tui-activity-block.md forbids ("no second classification table").
+    // web_fetch counts as live signal and is not stripped.
     const offRegistry = run("o1", "memory_recall");
     const unregistered = run("o2", "some_unregistered_tool");
     const lsp = run("o3", "lsp_references");

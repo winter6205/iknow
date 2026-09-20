@@ -1088,7 +1088,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
       !JSON.stringify(loaded.messages).includes("事件标题"),
       "title 事件不得进入 messages 投影"
     );
-    // 盘上只追加一行 title 记录，事件/head 记录不变。
+    // On disk exactly one title record is appended; event/head records unchanged.
     const lines = await readJsonlLinesById(id);
     assert.equal(lines.length, 4); // header + e0 + head + title
     assert.deepEqual(lines[3], { type: "title", text: "事件标题" });
@@ -1124,7 +1124,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
       file: sampleFile({ id, overrides: { title: "真正的问题", messages } }),
     });
     await store.appendTitle({ id, text: "lite 生成标题" });
-    // 模拟 hub conditionalSave: 每轮用 extractTitle 重算并传入 save。
+    // Mimic hub conditionalSave: each turn recomputes via extractTitle and passes it into save.
     await store.save({
       id,
       file: sampleFile({
@@ -1162,7 +1162,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
     assert.equal(file.title, "事件标题");
     const header = (await readJsonlLinesById(id))[0] as { title: string };
     assert.equal(header.title, "事件标题");
-    // title 记录跨 rewind 重写存活。
+    // The title record survives across rewind rewrites.
     assert.equal((await store.load(id)).title, "事件标题");
   });
 
@@ -1244,7 +1244,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
         overrides: { title: "首条问题", messages, turnCount: 2 },
       }),
     });
-    // save 无事件 → header 原样携带调用者 title（extractTitle 语义）。
+    // save with no title record → header carries the caller's title verbatim (extractTitle semantics).
     await store.save({
       id,
       file: sampleFile({
@@ -1254,7 +1254,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
     });
     let header = (await readJsonlLinesById(id))[0] as { title: string };
     assert.equal(header.title, "重算值");
-    // rewind 无事件 → title = extractTitle(kept)。
+    // rewind with no title record → title = extractTitle(kept).
     const { file } = await store.rewindToAnchor({ id, keepTurns: 0 });
     assert.equal(file.title, "");
     header = (await readJsonlLinesById(id))[0] as { title: string };
@@ -1262,7 +1262,7 @@ describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", (
   });
 });
 
-// -- hasTitleEvent (session-list-title T4 / ADR-0113 触发前磁盘闸) -------------
+// -- hasTitleEvent (ADR-0113 pre-trigger disk gate) ----------------------------
 
 describe("SessionStore.hasTitleEvent", () => {
   it("无标题事件 → false; appendTitle 后 → true（多条仍 true）", async () => {

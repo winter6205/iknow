@@ -2,16 +2,21 @@
 /**
  * tests/tui/subagent-card-history-host.test.tsx
  *
- * specs/tui-subagent-transcript-live.md 锁句 1/2/5/6 的**历史卡宿主**接线回归：
- * `subagentCards` 这条链（`subagentCardLinesMap` → `ChatView` memo →
- * `MessageRow` → `MessageBlocks.renderToolUseBlock`）此前只被投影单测覆盖 ——
- * 把 prop 从任一跳删掉，所有测试仍然全绿。本文件钉住「链真的接通且宿主真的
- * 按它分流」：命中卡 → 两行；未命中 / failed → 与改前逐字节一致。
+ * Regression wiring for lock clauses 1/2/5/6 of
+ * specs/tui-subagent-transcript-live.md on the **history-card host**: the
+ * `subagentCards` chain (`subagentCardLinesMap` → `ChatView` memo →
+ * `MessageRow` → `MessageBlocks.renderToolUseBlock`) was previously covered
+ * only by projection unit tests — deleting the prop at any hop kept every
+ * test green. This file pins "the chain is actually wired and the host really
+ * branches on it": matched card → two lines; unmatched / failed → byte-identical
+ * to pre-change.
  *
- * 为什么必须是渲染级断言：live tail 宿主与历史宿主共用 `SubagentCardView`，
- * 但**分流点各不相同**（`liveToolPreviewBox` 按 `run.status` 分，
- * `MessageBlocks` 按 `statusMap` 分）。只测投影函数不会发现任一分流点被
- * 短路（如 card 早退落在 `resolveToolUseView` 的 null 之后）。
+ * Why render-level assertions are required: the live-tail host and the history
+ * host share `SubagentCardView`, but their **branch points differ**
+ * (`liveToolPreviewBox` branches on `run.status`; `MessageBlocks` branches on
+ * `statusMap`). Testing only projection functions would miss any branch point
+ * being short-circuited (e.g. an early card return placed after
+ * `resolveToolUseView` returns null).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -24,7 +29,7 @@ import { tuiPalette } from "../../src/tui/theme.js";
 const COLS = 60;
 const SPAWN_ID = "toolu_history";
 
-/** 历史 turn 里那次 `spawn_subagent` 调用（卡宿主认的是 tool_use block id）。 */
+/** The `spawn_subagent` call in a history turn (the card host keys on the tool_use block id). */
 function spawnMessage(): AnthropicNativeMessage {
   return {
     role: "assistant",
@@ -96,8 +101,8 @@ describe("MessageBlocks 历史卡宿主 — subagentCards 链接通（锁句 1/2
     expect(lines.indexOf("查找文档")).toBe(
       lines.indexOf("explore running...") + 1
     );
-    // 单行标题形态（dotless `explore running`）不得同时出现 —— dual render
-    // 是两个宿主共用的失败模式。
+    // The single-line title form (dotless `explore running`) must not appear
+    // alongside — dual render is the failure mode shared by both hosts.
     expect(lines.some((l) => l === "explore running")).toBe(false);
     const detailFg = spanFg(setup, "查找文档");
     expect(detailFg).toBeDefined();
@@ -119,7 +124,8 @@ describe("MessageBlocks 历史卡宿主 — subagentCards 链接通（锁句 1/2
     ]);
     const setup = await renderWithCards(cards, new Map([[SPAWN_ID, false]]));
     const lines = frameLines(setup);
-    // 概述被完成标记顶掉是 reopen 的直接动因 —— 两行都必须在场且有序。
+    // The summary being pushed out by the completion marker is what triggered
+    // the reopen — both lines must be present and in order.
     expect(lines).toContain("explore");
     expect(lines).toContain("查找文档");
     expect(lines).toContain("✓ Done");
@@ -128,7 +134,7 @@ describe("MessageBlocks 历史卡宿主 — subagentCards 链接通（锁句 1/2
     const doneFg = spanFg(setup, "✓ Done");
     expect(doneFg).toBeDefined();
     expect(rgbaEq(doneFg!, RGBA.fromHex(tuiPalette.add))).toBe(true);
-    // 绿只属于完成标记：概述仍是 dim。
+    // Green belongs only to the completion marker: the summary stays dim.
     const detailFg = spanFg(setup, "查找文档");
     expect(detailFg).toBeDefined();
     expect(rgbaEq(detailFg!, RGBA.fromHex(tuiPalette.dim))).toBe(true);
@@ -143,16 +149,18 @@ describe("MessageBlocks 历史卡宿主 — 回落面（锁句 5/6/7）", () => 
       new Map([[SPAWN_ID, false]])
     );
     const lines = frameLines(setup);
-    // 落定态（turn 已结束）的既有形态 = `formatToolStatusLine` 的 subagent
-    // 分支 → 落定摘要 `explore`（detail-only，无 `running`、无三点）。
+    // Settled (turn finished) pre-change form = the subagent branch of
+    // `formatToolStatusLine` → settled summary `explore` (detail-only, no
+    // `running`, no ellipsis).
     expect(lines).toContain("explore");
     expect(lines.some((l) => l.includes("running"))).toBe(false);
     await setup.renderer.destroy();
   });
 
   test("未落定（statusMap 无该 id）→ 既有 live 单行 `explore running`", async () => {
-    // 改前形态的 live 分支：detail-only `{role} running`（无三点）。三点是
-    // 卡级投影独有的形态，故它同时是「卡没被消费」的判据。
+    // Pre-change live branch: detail-only `{role} running` (no ellipsis). The
+    // ellipsis is unique to card-level projection, so it doubles as the tell
+    // that "the card was not consumed".
     const setup = await renderWithCards(undefined, new Map());
     const lines = frameLines(setup);
     expect(lines.some((l) => l.includes("explore running"))).toBe(true);
@@ -192,10 +200,12 @@ describe("MessageBlocks 历史卡宿主 — 回落面（锁句 5/6/7）", () => 
     ]);
     const setup = await renderWithCards(cards, new Map([[SPAWN_ID, true]]));
     const lines = frameLines(setup);
-    // 失败横切优先：卡形态（概述 + 绿 `✓ Done`）整体让位给既有失败形态
-    // `explore`（error 色，detail-only）。子代理工具的成功与失败都走
-    // detail-only，`[失败]` 前缀只属于普通工具 —— 故断「概述与完成标记
-    // 不在 + 颜色不是绿」而非断某个失败字面。
+    // Failure overlay takes precedence: the card form (summary + green `✓ Done`)
+    // yields entirely to the existing failure form `explore` (error color,
+    // detail-only). Both success and failure of subagent tools render
+    // detail-only; the `[失败]` ("failed") prefix belongs only to ordinary
+    // tools — so assert "summary and completion marker absent + color is not
+    // green" rather than some failure literal.
     expect(lines.some((l) => l.includes("running..."))).toBe(false);
     expect(lines).not.toContain("✓ Done");
     expect(lines).not.toContain("查找文档");
@@ -208,9 +218,10 @@ describe("MessageBlocks 历史卡宿主 — 回落面（锁句 5/6/7）", () => 
 
 describe("MessageBlocks 历史卡宿主 — 空预览不塌陷", () => {
   test("detailLine 空串 → 仍占两行（role 行 + 占位行），块不压成一行", async () => {
-    // 这是「两行」的最弱形态：空 taskPreview 时若渲染层把空串直接交给
-    // <text>，Yoga 会把该行收成 0 高 → 卡塌成一行（与 prompt 侧旧 strip
-    // 的压行指纹同型）。`SubagentCardView` 用单空格占位防这一手。
+    // Weakest form of "two lines": with an empty taskPreview, handing the empty
+    // string straight to <text> lets Yoga collapse the line to 0 height → card
+    // squashes to one line (same fingerprint as the old prompt-side strip).
+    // `SubagentCardView` guards against this with a single-space placeholder.
     const cards = new Map<string, SubagentCardLines>([
       [
         SPAWN_ID,
@@ -220,7 +231,8 @@ describe("MessageBlocks 历史卡宿主 — 空预览不塌陷", () => {
     const setup = await renderWithCards(cards, new Map([[SPAWN_ID, false]]));
     const lines = frameLines(setup);
     expect(lines).toContain("explore running...");
-    // 占位行在身份行正下方仍占一行（charFrame 里为空白，故按 spans 行序断）。
+    // The placeholder line still occupies a row right below the identity line
+    // (blank in charFrame, hence asserting via spans line order).
     const spansLines = setup.captureSpans().lines;
     const roleIdx = spansLines.findIndex((l) =>
       l.spans.some((s) => s.text.includes("explore running..."))

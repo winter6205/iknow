@@ -2,23 +2,25 @@
 /**
  * tests/tui/subagent-kill-key.test.tsx
  *
- * spec Slice D / SC14 + SC15（`specs/agent-control-surface.md`）/ plan task 8
- * 的 TUI 键位测：Ctrl+X 强杀 chrome-focus 聚焦的子代理；无聚焦 → 空操作。
+ * TUI keybinding test: Ctrl+X force-kills the subagent focused by chrome-focus;
+ * no focus → no-op.
  *
- * 分层：
- *   - 「杀谁」的纯分派（行序 / 陈旧行 / 非法 row）由
- *     tests/tui/subagent-kill.test.ts 直驱覆盖；
- *   - 本文件钉 app 层接线：Down 进 subagent 环后 Ctrl+X 必须调
- *     `bridge.abortSubagentTask(聚焦行的 taskId)` 且只调一次；focus 在 input
- *     时 Ctrl+X 不调 bridge（SC15 empty）也不崩；陈旧焦点（子代理已终态）
- *     不调 bridge。
- *   - 末组用例（SC14 端到端）换真 bridge + 真 manager + 真 executor：Ctrl+X
- *     必须让父侧前景 `waitFor` 以 `SubAgentAbortError` 拒绝 —— 即上面那层
- *     fake bridge 断言不了的下游一半。
+ * Layering:
+ *   - the pure "whom to kill" dispatch (row order / stale row / illegal row) is
+ *     covered directly by tests/tui/subagent-kill.test.ts;
+ *   - this file pins the app-layer wiring: after Down enters the subagent ring,
+ *     Ctrl+X must call `bridge.abortSubagentTask(focusedRow.taskId)` exactly
+ *     once; with focus on input Ctrl+X must not call the bridge and must not
+ *     crash; stale focus (subagent already terminal) must not call the bridge.
+ *   - the last group (end-to-end) swaps in a real bridge + real manager + real
+ *     executor: Ctrl+X must make the parent-side foreground `waitFor` reject
+ *     with `SubAgentAbortError` — the downstream half the fake-bridge group
+ *     cannot assert.
  *
- * 为什么其余组用 fake bridge：真实 manager 的 SIGTERM→SIGKILL 链路归
- * tests/subagent/manager.test.ts（abortTask）与真实 bridge 的透传归
- * tests/tui/hub-bridge.test.ts；本测只钉 app 层「按键 → 调谁」。
+ * Why the other groups use a fake bridge: the real manager's SIGTERM→SIGKILL
+ * chain belongs to tests/subagent/manager.test.ts (abortTask) and real-bridge
+ * pass-through to tests/tui/hub-bridge.test.ts; this test only pins the
+ * app-layer "keypress → whom it calls".
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
@@ -41,8 +43,9 @@ import { createSessionGrants } from "../../src/harness/permission/session-grants
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.js";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
-// SC14 端到端组：真 ACI registry + 真 executor + 真 manager（只 fake worker
-// 子进程）—— 与 tests/tui/wait-cancel-abort.test.tsx 同一套装配。
+// End-to-end group: real ACI registry + real executor + real manager (only the
+// worker child process is faked) — same assembly as
+// tests/tui/wait-cancel-abort.test.tsx.
 import { createDefaultAciRegistry } from "../../src/harness/aci/tools/registry.js";
 import { createAciExecutor } from "../../src/harness/aci/aci-executor.js";
 import { createExecutor } from "../../src/harness/tools/executor.js";
@@ -53,10 +56,10 @@ import type { LoopEngineDeps } from "../../src/harness/index.js";
 const COLS = 80;
 const ROWS = 30;
 
-/** 合法最小 env（registry 只消费 web 字段）。 */
+/** Minimal valid env (the registry only consumes the web fields). */
 const webEnv = { web: { searchUrl: undefined, proxy: undefined } };
 
-/** 永不 emit 的 fake worker（只在 abort / shutdown 时被 kill）。 */
+/** Fake worker that never emits (killed only on abort / shutdown). */
 function makeFakeChild(): ChildProcess {
   return Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
@@ -68,7 +71,7 @@ function makeFakeChild(): ChildProcess {
   }) as unknown as ChildProcess;
 }
 
-/** 轮询直到 cond 为真（stdin 异步解析 + React commit 都有延迟）。 */
+/** Poll until cond is true (stdin async parsing and React commits both lag). */
 async function until(
   cond: () => boolean,
   ms = 8000,
@@ -102,7 +105,7 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
   readonly pressDown: () => Promise<void>;
   readonly pressCtrlX: () => Promise<void>;
   readonly setSubagents: (next: ReadonlyArray<SubagentInfo>) => void;
-  /** 等 1Hz subagents 轮询把 app state 刷成新投影（陈旧焦点场景必需）。 */
+  /** Wait for the 1Hz subagents poll to refresh app state (needed by the stale-focus case). */
   readonly waitForSubagentPoll: () => Promise<void>;
   readonly destroy: () => Promise<void>;
 }> {
@@ -173,10 +176,11 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
   await setup.waitForVisualIdle();
 
   /**
-   * 每次按键后等 React commit 新 state 再发下一键。120ms 在负载高的机器上
-   * 偶尔不够（Down 的 setChromeFocus 未提交 → 下一次 Down 读到旧 row，
-   * 或 Ctrl+X 读到旧 focus），故用 waitForVisualIdle 收敛而不是裸 sleep：
-   * 帧稳定即 state 已提交。
+   * After each keypress wait for React to commit new state before sending the
+   * next. A bare 120ms is occasionally not enough under load (Down's
+   * setChromeFocus uncommitted → the next Down reads a stale row, or Ctrl+X
+   * reads a stale focus), so converge via waitForVisualIdle instead of a raw
+   * sleep: a stable frame means the state has committed.
    */
   const settle = async (ms = 120): Promise<void> => {
     await new Promise((r) => setTimeout(r, ms));
@@ -199,7 +203,7 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
       current = next;
     },
     waitForSubagentPoll: async () => {
-      // 1Hz 轮询 + React commit：1200ms 覆盖一个完整 tick。
+      // 1Hz poll + React commit: 1200ms covers one full tick.
       await settle(1200);
     },
     destroy: async () => {
@@ -216,7 +220,7 @@ describe("Ctrl+X 强杀聚焦子代理（SC14 / SC15 empty）", () => {
     try {
       await app.pressCtrlX();
       expect(app.killed).toEqual([]);
-      // 无异常、界面仍在（输入框占位行仍在）。
+      // No exception, UI still there (input placeholder line present).
       expect(app.setup.captureCharFrame()).toContain("❯");
     } finally {
       await app.destroy();
@@ -236,7 +240,7 @@ describe("Ctrl+X 强杀聚焦子代理（SC14 / SC15 empty）", () => {
       await app.pressDown();
       await app.pressCtrlX();
       expect(app.killed).toEqual([{ taskId: "task-a" }]);
-      // 回执落 notice（不静默）。
+      // Receipt lands as a notice (never silent).
       expect(app.setup.captureCharFrame()).toContain("已强杀子代理");
     } finally {
       await app.destroy();
@@ -268,8 +272,9 @@ describe("Ctrl+X 强杀聚焦子代理（SC14 / SC15 empty）", () => {
     ]);
     try {
       await app.pressDown();
-      // 子代理终态：等 1Hz 轮询把 app state 刷成「无 live」投影；此时
-      // chromeFocus 的 row 0 已陈旧（clamp effect 尚未把它拉回 input）。
+      // Subagent terminal: wait for the 1Hz poll to refresh app state to the
+      // "no live" projection; chromeFocus row 0 is now stale (the clamp effect
+      // has not pulled it back to input yet).
       app.setSubagents([
         makeSubagent({
           taskId: "task-a",
@@ -288,19 +293,22 @@ describe("Ctrl+X 强杀聚焦子代理（SC14 / SC15 empty）", () => {
 });
 
 /**
- * SC14 端到端：真 bridge + 真 manager + 真 executor（只 fake worker 子进程）。
+ * End-to-end: real bridge + real manager + real executor (only the worker child
+ * process is faked).
  *
- * 上面那组用 fake bridge 只能钉「按键 → 调 abortSubagentTask(谁)」；本组补上
- * 下游一半 —— Ctrl+X 之后**父侧前景 waitFor 真的以 SubAgentAbortError 拒绝**
- * （即「父 turn 收到 cancelled」的上游事实）。做法与
- * tests/tui/wait-cancel-abort.test.tsx 的 Ctrl+C 组同形（同一套真装配），差别
- * 只在触发臂：那里 abort 调用方 signal，这里走 manager 的单任务 abortTask。
+ * The fake-bridge group above can only pin "keypress → which taskId reaches
+ * abortSubagentTask"; this group adds the downstream half — after Ctrl+X the
+ * **parent-side foreground waitFor really rejects with SubAgentAbortError**
+ * (the upstream fact behind "the parent turn receives cancelled"). Same shape
+ * as the Ctrl+C group in tests/tui/wait-cancel-abort.test.tsx (same real
+ * assembly); the only difference is the trigger arm: there it aborts via the
+ * caller's signal, here via the manager's per-task abortTask.
  */
 async function mountRealKillApp(): Promise<{
   readonly setup: TestRendererSetup;
   readonly events: string[];
   readonly waitRejected: () => unknown;
-  /** 等 React commit 新 state（focusedRow 等）再发下一键。 */
+  /** Wait for React to commit new state (focusedRow etc.) before the next key. */
   readonly settleAfterKey: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 }> {
@@ -313,7 +321,7 @@ async function mountRealKillApp(): Promise<{
     },
     taskTimeoutMs: 60_000,
   });
-  // 观测真实出口：Ctrl+X 抵达时 waitFor 必须以 SubAgentAbortError 拒绝。
+  // Observe the real exit: when Ctrl+X lands, waitFor must reject with SubAgentAbortError.
   const realWaitFor = manager.waitFor.bind(manager);
   const observedManager: typeof manager = {
     ...manager,
@@ -345,9 +353,10 @@ async function mountRealKillApp(): Promise<{
           ],
         }),
       ],
-      // 真实 adapter 对每个 tool_use 恒发 `tool_call_start`（live tail 据此
-      // 建卡）；stub 须补同一事件，否则 spawn 执行期间屏上没有承载两行的卡
-      // —— 该 e2e 的 Down 聚焦目标就无从谈起。
+      // A real adapter always emits `tool_call_start` per tool_use (the live
+      // tail builds its card from it); the stub must supply the same event or
+      // no two-line card exists on screen during spawn execution — the Down
+      // focus target of this e2e would be moot.
       streamEventsByStep: [
         [{ type: "tool_call_start", id: "spawn-1", name: "spawn_subagent" }],
       ],
@@ -381,7 +390,7 @@ async function mountRealKillApp(): Promise<{
     { width: COLS, height: ROWS, exitOnCtrlC: false, consoleMode: "disabled" }
   );
   await setup.waitForVisualIdle();
-  /** 逐键 60ms：mockInput 走 stdin 异步解析，连发会丢键。 */
+  /** 60ms per keypress: mockInput goes through async stdin parsing, bursts drop keys. */
   const typeText = async (text: string): Promise<void> => {
     for (const ch of text) {
       setup.mockInput.pressKey(ch);
@@ -397,10 +406,11 @@ async function mountRealKillApp(): Promise<{
   };
   await typeText("hi");
   await until(() => events.includes("spawn"), 8000, "spawn 未发生");
-  // specs/tui-subagent-transcript-live.md：两行画在 spawn 卡上（live tail），
-  // 卡由 `tool_call_start` 流事件建条（真实 adapter 对每个 tool_use 恒发；
-  // 本测的 stub 由 setUp 的 streamEventsByStep 补齐同一事件）。子代理行
-  // 出现 = 该卡已 join 到子代理投影，Down / Ctrl+X 的目标行已就位。
+  // specs/tui-subagent-transcript-live.md: the two lines render on the spawn
+  // card (live tail), created by the `tool_call_start` stream event (a real
+  // adapter always emits it per tool_use; this test's stub supplies it via
+  // streamEventsByStep above). Subagent line appearing = the card has joined
+  // the subagent projection, so the Down / Ctrl+X target row is in place.
   await until(
     () => /running\.\.\./.test(setup.captureCharFrame()),
     8000,

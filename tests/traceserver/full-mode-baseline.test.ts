@@ -1,19 +1,21 @@
 /**
- * SC15 / SC17 历史基线（ADR-0071 T4 实施注意第 2 条）。
+ * Historical baseline (ADR-0071 implementation note).
  *
- * fixture `full-mode-baseline.trace.jsonl` 在 T3 HEAD（blob 仍是 opt-in、默认
- * full）用**真实写侧** `createJsonlTraceService` 生成，随机 UUID 后处理为
- * 确定性 id（llm-1 / llm-2 / tool-1 / turn-1）。它固定的是旧 full 模式
- * 「模型实际所见」逐字节形状，是 T6 读侧改造时 blob 模式逐字段相等的对照物
- * （ADR-0071 SC15 / SC17）。
+ * The fixture `full-mode-baseline.trace.jsonl` was generated at the pre-blob-default
+ * HEAD (blob still opt-in, default full) with the **real write side**
+ * `createJsonlTraceService`, post-processing random UUIDs into deterministic ids
+ * (llm-1 / llm-2 / tool-1 / turn-1). It freezes the byte shape of "what the model
+ * actually saw" in legacy full mode, serving as the field-equality counterpart for the
+ * blob mode when the read side was reshaped (ADR-0071 SC15 / SC17).
  *
- * 本文件的断言值全部从该 fixture 用 T3 时的读侧投影**实测**得出后固化 ——
- * 不从写侧或读侧源码派生（改实现不可能悄悄翻转这些值）。fixture 与本测试
- * 随 T4 写侧改造**不再漂移**：它们描述的是历史 ground truth，不是当前行为。
+ * Every assertion value here was **measured** from that fixture through the read-side
+ * projection of that era, then frozen — never derived from write- or read-side source
+ * (implementation changes cannot silently flip these values). The fixture and this test
+ * no longer drift with later write-side changes: they describe historical ground truth, not current behavior.
  *
- * 会话内容（4 行）：llm-1（system 字符串 content + user block 数组 content）
- * → tool-1（bash 调用 + result）→ llm-2（累计重复 messages，含 assistant
- * tool_use + user tool_result）→ turn-1。
+ * Conversation content (4 rows): llm-1 (system string content + user block-array content)
+ * → tool-1 (bash call + result) → llm-2 (cumulative repeated messages, incl. assistant
+ * tool_use + user tool_result) → turn-1.
  */
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -35,7 +37,7 @@ const FIXTURE_PATH = join(
 );
 
 const traceDirs: string[] = [];
-/** T6 (SC16): fixture 会话落两级树 `<traceDir>/projects/<slug>/baseline-conv/trace.jsonl`。 */
+/** The fixture session lands in the two-level tree `<traceDir>/projects/<slug>/baseline-conv/trace.jsonl`. */
 const TEST_PROJECT_SLUG = "test-project-full-baseline";
 
 afterEach(() => {
@@ -44,7 +46,7 @@ afterEach(() => {
   }
 });
 
-/** 把 fixture 复制进临时 traceDir 的两级树落点，保持 `baseline-conv` 会话名。 */
+/** Copy the fixture into the two-level-tree spot of a temp traceDir, keeping the `baseline-conv` session name. */
 function makeTraceDirWithFixture(): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-full-baseline-"));
   traceDirs.push(traceDir);
@@ -87,8 +89,8 @@ describe("full-mode historical baseline (SC15/SC17 对照物)", () => {
   it("query_trace: rows come back newest-first with the exact base scalar fields", async () => {
     const core = queryCoreFor(makeTraceDirWithFixture());
     const page = await queryPage(core, {});
-    // reader 按 started_at 降序 + 稳定序：turn-1 的 started_at 与 llm-1 相同
-    // (00:00:00)，稳定序把 turn-1 排在其文件序位置（最后）。
+    // The reader sorts by started_at descending with stable order: turn-1's started_at
+    // equals llm-1's (00:00:00), and stable order keeps turn-1 at its file-order position (last).
     assert.deepEqual(
       page.records.map((r) => r.record_type),
       ["llm_call", "tool_call", "llm_call", "turn"]
@@ -105,7 +107,7 @@ describe("full-mode historical baseline (SC15/SC17 对照物)", () => {
     const core = queryCoreFor(makeTraceDirWithFixture());
     const page = await queryPage(core, { record_type: "llm_call" });
     const llm1 = page.records.find((r) => r.llm_call_id === "llm-1")!;
-    // 固化值：这些键与值是 full 模式 T3 读侧的实测输出。
+    // Frozen values: these keys and values are the measured output of the legacy full-mode read side.
     assert.equal(llm1["messages_count"], 2);
     assert.equal(
       llm1["first_message_preview"],
@@ -115,11 +117,11 @@ describe("full-mode historical baseline (SC15/SC17 对照物)", () => {
       llm1["last_message_preview"],
       '{"role":"user","content":[{"type":"text","text":"hello world"}]}'
     );
-    // llm-1 无 assistant 消息 → 字段缺席（合法态，不是 empty string）。
+    // llm-1 has no assistant message → field absent (legal state, not empty string).
     assert.ok(!("last_assistant_preview" in llm1));
     assert.equal(llm1["tool_result_count"], 0);
     assert.ok(!("tool_result_previews" in llm1));
-    // 标量字段逐字段固化（reader 原样透传）。
+    // Scalar fields frozen field by field (reader passes them through verbatim).
     assert.equal(llm1["supplier_stop"], "tool_use");
     assert.equal(llm1["input_tokens"], 120);
     assert.equal(llm1["output_tokens"], 30);
@@ -157,15 +159,15 @@ describe("full-mode historical baseline (SC15/SC17 对照物)", () => {
     assert.deepEqual(tool["arguments"], { command: "ls" });
     assert.equal(tool["result"], "file-a\nfile-b");
     assert.equal(tool["tool_name"], "bash");
-    // tool_call 投影不带 messages 计数键。
+    // tool_call projection carries no messages count key.
     assert.ok(!("messages_count" in tool));
   });
 
   it("query_trace: contains finds the inline message body (historical full-mode fact)", async () => {
     const core = queryCoreFor(makeTraceDirWithFixture());
     const page = await queryPage(core, { contains: "hello world" });
-    // full 模式下正文内联在行上 —— 这是历史事实的固化；blob 模式的 contains
-    // 语义（SC14 面）由 T6 另行判定，此处不预测。
+    // In full mode the body is inline on the row — freezing a historical fact; the blob-mode
+    // contains semantics were decided later with the read-side split, not predicted here.
     assert.deepEqual(
       page.records.map((r) => r.llm_call_id),
       ["llm-2", "llm-1"]

@@ -1,25 +1,28 @@
 /**
- * #604 T1 (SC1-SC5): hub 接线 boundaryAttachment — 集成真实 SessionHub +
- * 真实 SessionStore (mkdtemp) + 长 messages 触发 proactive compact,断言
- * attachment user 消息在 messages 内,且为最近 ≤3 句合格用户任务原文(trim
- * 后完全相等),时间顺序最新在最后。
+ * Hub wiring of boundaryAttachment — integration with real SessionHub +
+ * real SessionStore (mkdtemp) + long messages triggering proactive
+ * compact; asserts the attachment user message is inside messages and
+ * holds the verbatim text of the most recent ≤3 qualifying user tasks
+ * (exact after trim), newest last in chronological order.
  *
- * 与 `hub-taskfocus-compact.test.ts` (历史版 #458 T7 SC11)对照:旧版本断言
- * 240+history+cap720 焦点渲染形态;本版断言 `[Recent user tasks] — N` +
- * 编号列表,整句进入摘录,无截断。
+ * Contrast with `hub-taskfocus-compact.test.ts` (the old focus-rendering
+ * shape, 240+history+cap720): this version asserts
+ * `[Recent user tasks] — N` + a numbered list, full sentences into the
+ * excerpt, no truncation.
  *
- * 测试矩阵(spec acceptance):
- *   a. HITL + ≥3 句合格 user 任务 → attachment 含 3 句原文(trim 后相等),
- *      时间顺序最新在最后;
- *   b. HITL + 0 句合格(仅寒暄 / 仅 tool_result+drain / 0 句) → 不贴;
- *   c. auto 模式(goal active)→ 不贴(negative);
- *   d. HITL + 1 句合格 → reactive compact (flaky adapter 抛
- *      PromptTooLongError) → attachment 含该 1 句;
- *   e. HITL → 第二轮 compact → 第二段 attachment 不含第一段摘录文本
- *      (concurrent 自引用隔离)。
+ * Test matrix:
+ *   a. HITL + ≥3 qualifying user tasks → attachment carries all 3 verbatim
+ *      (equal after trim), newest last;
+ *   b. HITL + 0 qualifying (chit-chat / tool_result+drain only / none) → no attachment;
+ *   c. auto mode (goal active) → no attachment (negative);
+ *   d. HITL + 1 qualifying → reactive compact (flaky adapter throws
+ *      PromptTooLongError) → attachment carries that 1 task;
+ *   e. HITL → second compact round → the second attachment does not contain
+ *      the first excerpt text (self-reference isolation).
  *
- * harness 不 import session-api;`renderRecentUserTasksBoundary` 是 hub 内
- * 私有 closure,通过 `boundaryAttachment` 可选缝注入 runDeps。
+ * harness never imports session-api; `renderRecentUserTasksBoundary` is a
+ * hub-private closure injected into runDeps via the optional
+ * `boundaryAttachment` seam.
  */
 import {
   afterAll,
@@ -118,8 +121,8 @@ afterEach(() => {
 });
 
 /** Build a long user message (~33 tokens via estimate: ceil(132/4) * 4/3 ≈ 44).
- *  模板采用与原版相同的 z-pad,确保 messages 估计 token > 1000 阈值,
- *  触发 proactive compact。 */
+ *  Uses the same z-pad template as the original so the estimated message
+ *  total exceeds the 1000-token threshold and proactive compact fires. */
 function longUserMessage(index: number): AnthropicNativeMessage {
   return {
     role: "user",
@@ -163,8 +166,8 @@ function textOf(msg: AnthropicNativeMessage): string {
   return block ? block.text : "";
 }
 
-/** Flaky adapter:首次 step 抛 PromptTooLongError,后续返回正常。
- *  仿 _compact-integration.test.ts:makeFlakyAdapter 形态。 */
+/** Flaky adapter: first step throws PromptTooLongError, later steps return
+ *  normally. Shaped after makeFlakyAdapter in _compact-integration.test.ts. */
 function makeFlakyAdapter(opts: {
   readonly retryText: string;
   readonly attemptCount: { value: number };
@@ -183,8 +186,8 @@ function makeFlakyAdapter(opts: {
       if (opts.attemptCount.value === 1) {
         throw new PromptTooLongError("synthetic 400 prompt-too-long");
       }
-      // #467 step 2:full-compact 摘要轮(tools === undefined)返空文本 →
-      // fallback placeholder(保留测试几何不变式)。
+      // Summary round of full compact (tools === undefined) returns empty
+      // text → fallback placeholder (keeps the test's geometry invariant).
       if (request.tools === undefined) {
         return assistantResult({
           texts: [],
@@ -201,8 +204,8 @@ function makeFlakyAdapter(opts: {
   });
 }
 
-/** 组装 reactive compact 的 deps:flaky adapter + executor/registry +
- *  compress + maxTurns=5。 */
+/** Assemble reactive-compact deps: flaky adapter + executor/registry +
+ *  compress + maxTurns=5. */
 function makeCompactDeps(opts: {
   readonly adapter: LoopAdapter;
 }): import("../../src/harness/index.ts").LoopEngineDeps {
@@ -220,12 +223,15 @@ function makeCompactDeps(opts: {
 
 describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1 SC1-SC5)", () => {
   /**
-   * Stub responses: n 条占位续跑拍 + 1 条 completed 收尾。proactive check 在
-   * 每次模型调用前都跑，含本 run 首步（锚点初值 -1），所以超阈 prior 本身
-   * 就让压缩在 run 入口、第一次模型调用之前开火——不需要任何 tool 续跑拍
-   * 来"到达"该检查。50 条 prior（~2200 estimated tokens > 1000 阈值）足以
-   * 证明这一点。stub model 不区分 no-tools 摘要步，入口压缩的摘要步消耗第
-   * 一条脚本响应，completed 收尾消费第二条，故 n=1 即最短可跑几何。
+   * Stub responses: n placeholder continuation beats + 1 completed closer.
+   * The proactive check runs before every model call, including this run's
+   * first step (anchor initial -1), so an over-threshold prior by itself
+   * makes compaction fire at run entry, before the first model call — no
+   * tool continuation beats are needed to "reach" the check. 50 priors
+   * (~2200 estimated tokens > 1000 threshold) prove this. The stub model
+   * does not distinguish the no-tools summary step: the entry-compaction
+   * summary step consumes the first scripted response and the completed
+   * closer the second, so n=1 is the shortest runnable geometry.
    */
   function buildResponses(n: number) {
     const BIG_TEXT = "payload ".repeat(40);
@@ -250,9 +256,10 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
   it("HITL + ≥3 合格用户任务 → attachment 含 3 句原文(trim 后相等),最新在最后", async () => {
     const id = "long-with-tasks";
-    // 50 条合格用户任务(每条 ~33 tokens → estimate 总 ~2200 tokens > 1000 阈值),
-    // 超阈 prior 让 proactive compact 在 run 入口首呼前开火,短 run 即可;
-    // extractRecentUserTasks 截最近 3 句 — 即 last 3 条 prior-msg-X。
+    // 50 qualifying user tasks (~33 tokens each → estimated total ~2200
+    // tokens > 1000 threshold); the over-threshold prior makes proactive
+    // compact fire at run entry before the first call, so a short run
+    // suffices; extractRecentUserTasks keeps the last 3 — prior-msg-47..49.
     const prior: AnthropicNativeMessage[] = Array.from({ length: 50 }, (_, i) =>
       longUserMessage(i)
     );
@@ -270,8 +277,8 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     assert.equal(res.turn.answer.stopReason, "completed");
 
     const loaded = await store.load(id);
-    // attachment 必须含 TASK_EXCERPT_PREFIX(本测试的 marker;旧 taskFocus
-    // FOCUS- 标记反向 — 现在应该不出现)。
+    // The attachment must carry TASK_EXCERPT_PREFIX (this test's marker);
+    // the old taskFocus FOCUS- marker is inverted — it should now be absent.
     const attachmentMsg = loaded.messages.find((m) => {
       if (m.role !== "user") return false;
       const t = textOf(m);
@@ -288,14 +295,14 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
       "header 必须为 '<prefix> — 3'"
     );
 
-    // body 三行,原文(trim 后)相等,时间顺序最新在最后。
+    // Body: three lines, verbatim (equal after trim), newest last.
     const lines = attachmentText.split("\n").slice(1);
     assert.equal(lines.length, 3, "必须含 3 行编号列表");
     assert.equal(lines[0], "1. prior-msg-47 " + "z".repeat(120));
     assert.equal(lines[1], "2. prior-msg-48 " + "z".repeat(120));
     assert.equal(lines[2], "3. prior-msg-49 " + "z".repeat(120));
 
-    // 旧 taskFocus 标记不该出现。
+    // The old taskFocus marker must not appear.
     assert.ok(
       !attachmentText.includes("FOCUS-"),
       "旧 taskFocus 焦点渲染标记不应出现"
@@ -304,10 +311,11 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
   it("HITL + 0 句合格(仅 tool_result / drain) → 不贴 attachment", async () => {
     const id = "no-qualifying-tasks";
-    // 50 条 tool_result-only user 消息 → isTurnQuery = false → extract 返回
-    // [] → renderRecentUserTasksBoundary return undefined → boundaryAttachment
-    // 注入文本为 undefined,no-op。tool_result 正文撑到每条 ~210 chars
-    // (estimate 总 ~3500 tokens > 1000 阈值),让压缩在 run 入口首呼前开火。
+    // 50 tool_result-only user messages → isTurnQuery = false → extract
+    // returns [] → renderRecentUserTasksBoundary returns undefined → the
+    // boundaryAttachment injection text is undefined, a no-op. tool_result
+    // bodies are padded to ~210 chars each (estimated total ~3500 tokens >
+    // 1000 threshold) so compaction fires at run entry before the first call.
     const prior: AnthropicNativeMessage[] = Array.from(
       { length: 50 },
       (_, i) => ({
@@ -335,14 +343,15 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
     const loaded = await store.load(id);
     const serialized = JSON.stringify(loaded.messages);
-    // compact 仍触发(超阈 prior 在 run 入口首呼前即开火)。
+    // Compact still fires (the over-threshold prior triggers it at run
+    // entry, before the first call).
     assert.ok(
       serialized.includes("[compaction boundary — earlier messages cleared]") ||
-        // #467 step 2:full-compact 摘要成功的 LLM 摘要路径同样以 SUMMARY 开头。
+        // The LLM-summary path of a successful full compact likewise starts with SUMMARY.
         serialized.includes("This session is being continued"),
       "compact 仍应触发,placeholder 或 summary 出现在 messages"
     );
-    // 摘录哨兵不应出现 — 没有合格用户任务。
+    // The excerpt sentinel must not appear — no qualifying user tasks.
     assert.ok(
       !serialized.includes(TASK_EXCERPT_PREFIX),
       "0 句合格 → 不贴任务摘录段"
@@ -382,7 +391,8 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
         serialized.includes("This session is being continued"),
       "compact 仍应触发"
     );
-    // 自动模式 → 不注入 boundaryAttachment 闭包 → 摘录哨兵绝不出现。
+    // Auto mode → the boundaryAttachment closure is not injected → the
+    // excerpt sentinel must never appear.
     assert.ok(
       !serialized.includes(TASK_EXCERPT_PREFIX),
       "auto mode must NOT inject task excerpt attachment"
@@ -391,14 +401,15 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
   it("超长单句:整句进入摘录,不再 240/120/720 截(spec SC4)", async () => {
     const id = "long-single-task";
-    // 一条超长合格用户任务(800+ 字符)— spec 旧 240 cap 不再现,整句进入摘录。
-    // 把它放在 recent 3 的最末(extractRecentUserTasks 取最近 3 合格用户任务),
-    // 这样摘录 body 里就能出现它。
+    // One overlong qualifying user task (800+ chars) — the old 240 cap is
+    // gone; the full sentence enters the excerpt. Place it last within the
+    // recent 3 (extractRecentUserTasks takes the 3 latest qualifying tasks)
+    // so the excerpt body shows it.
     const longText = "long-task " + "a".repeat(800);
     const prior: AnthropicNativeMessage[] = [
-      // 47 条 z-pad 占位(撑 estimate 总量 > 1000 tokens 阈值)。
+      // 47 z-pad placeholders (push the estimated total over the 1000-token threshold).
       ...Array.from({ length: 47 }, (_, i) => longUserMessage(i)),
-      // 2 条短合格任务,接在 long-text 前。
+      // 2 short qualifying tasks right before the long text.
       {
         role: "user",
         content: [{ type: "text", text: "task-before-long-A" }],
@@ -407,7 +418,7 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
         role: "user",
         content: [{ type: "text", text: "task-before-long-B" }],
       },
-      // long-text 收尾(recent 3 的最新一条)。
+      // long-text closes the list (newest of the recent 3).
       {
         role: "user",
         content: [{ type: "text", text: longText }],
@@ -431,7 +442,7 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     });
     expect(attachmentMsg).toBeDefined();
     const attachmentText = textOf(attachmentMsg!);
-    // 整句进入 — 不再 240 截断。
+    // Full sentence included — no 240-char truncation anymore.
     assert.ok(
       attachmentText.includes(longText),
       "超长单句必须整句进入摘录 (旧 240 cap 不再现)"
@@ -444,10 +455,12 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
   it("HITL + 1 句合格 → reactive compact 触发 → attachment 含该 1 句", async () => {
     const id = "reactive-single-task";
-    // 12 条 prior 消息(11 条 tool_result-only 续接 + 1 条合格 longText
-    // 收尾)→ messages.length > DEFAULT_KEEP_RECENT(=6) 触发 reactive compact
-    // 路径;longText 是会话里唯一一条合格用户任务 → attachment body 只含它。
-    // 用 flaky adapter:首次抛 PromptTooLongError,后续返回成功(单 turn 完成)。
+    // 12 prior messages (11 tool_result-only continuations + 1 qualifying
+    // longText closer) → messages.length > DEFAULT_KEEP_RECENT (=6) takes
+    // the reactive-compact path; longText is the conversation's only
+    // qualifying user task → the attachment body contains just it. Flaky
+    // adapter: first call throws PromptTooLongError, later ones succeed
+    // (single-turn completion).
     const longText = "reactive-task-payload";
     const toolResultOnly = (i: number): AnthropicNativeMessage => ({
       role: "user",
@@ -460,9 +473,9 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
       ],
     });
     const prior: AnthropicNativeMessage[] = [
-      // 11 条纯 tool_result 续接消息(> DEFAULT_KEEP_RECENT=6)。
+      // 11 pure tool_result continuation messages (> DEFAULT_KEEP_RECENT=6).
       ...Array.from({ length: 11 }, (_, i) => toolResultOnly(i)),
-      // 1 条合格 longText 收尾 — 唯一可被 extractRecentUserTasks 抽取的。
+      // 1 qualifying longText closer — the only extractable task.
       { role: "user", content: [{ type: "text", text: longText }] },
     ];
     await seedSession({ id, messages: prior });
@@ -489,17 +502,18 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
   it("第二轮 compact:第二段 attachment 不含第一段摘录文本(自引用隔离 SC5)", async () => {
     const id = "two-compacts-no-self-ref";
-    // 把 prior 故意组装成:长 prior 后跟一条"上一轮摘录"(self-reference
-    // 候选)+ 一条新的合格用户任务。extractRecentUserTasks 必须把摘录段
-    // 排除(不被当作合格用户任务),只抽到合格用户任务。
+    // Prior deliberately assembled as: long prior + one "previous-round
+    // excerpt" (self-reference candidate) + a new qualifying user task.
+    // extractRecentUserTasks must exclude the excerpt segment (never count
+    // it as a qualifying user task) and pick up only the real task.
     const realTask = "real-follow-up-task";
     const previousExcerpt = `${TASK_EXCERPT_PREFIX} — 3\n1. older-task-A\n2. older-task-B\n3. older-task-C`;
     const prior: AnthropicNativeMessage[] = [
-      // 47 条 z-pad 占位(撑 estimate 总量 > 1000 tokens 阈值)。
+      // 47 z-pad placeholders (push the estimated total over the 1000-token threshold).
       ...Array.from({ length: 47 }, (_, i) => longUserMessage(i)),
-      // 上一轮 compact 已写入的摘录段(self-reference 候选)。
+      // The excerpt segment a previous compact round already wrote (self-reference candidate).
       { role: "user", content: [{ type: "text", text: previousExcerpt }] },
-      // 一条新的合格用户任务作为最近一条。
+      // A new qualifying user task as the latest entry.
       { role: "user", content: [{ type: "text", text: realTask }] },
     ];
     await seedSession({ id, messages: prior });
@@ -521,7 +535,8 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     expect(attachmentMsg).toBeDefined();
     const attachmentText = textOf(attachmentMsg!);
 
-    // 自引用隔离:body 内不能出现 previousExcerpt 内容(摘录段被排除)。
+    // Self-reference isolation: the body must not contain previousExcerpt
+    // content (the excerpt segment is excluded).
     assert.ok(
       !attachmentText.includes("older-task-A"),
       "上一轮摘录段内的合格用户任务原文不得被当作合格用户任务抽入"
@@ -535,13 +550,13 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
       "上一轮摘录段内的合格用户任务原文不得被当作合格用户任务抽入"
     );
 
-    // 真正的合格用户任务应被抽入。
+    // The genuinely qualifying user task should be extracted.
     assert.ok(
       attachmentText.includes(realTask),
       "real-follow-up-task 应被抽入摘录"
     );
 
-    // attachment 文本内 TASK_EXCERPT_PREFIX 仅出现 1 次(只在 header)。
+    // TASK_EXCERPT_PREFIX appears exactly once in the attachment text (header only).
     const occurrences = attachmentText.split(TASK_EXCERPT_PREFIX).length - 1;
     assert.equal(
       occurrences,

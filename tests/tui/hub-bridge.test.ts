@@ -1,18 +1,16 @@
 /**
- * tests/tui/hub-bridge.test.ts
+ * tests/tui/hub-bridge.test.ts (bun:test)
  *
- * #343 T6-A 测试：从 archive/tui-ink/tests/hub-bridge.test.ts 迁回 tests/tui/，
- * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
- *
- * #146 hub-bridge（α 直连）：
- *  - lazy create：draft 首条消息前不建档；ensureSession(undefined) 建档、
- *    ensureSession(id) 原样返回；启动即退出不留空壳（SC 1）；
- *  - in-flight 登记簿：soleId 归因语义（0/1/N）；postMessage 进出登记、
- *    失败路径也 unmark；
- *  - postMessage 回执投影（finalText / stopReason / turnCount）；
- *  - T3 上下文用量：bridge.contextWindow 默认与策略预算窗口 SSOT
- *    （`DEFAULT_STRATEGY_CONTEXT_WINDOW`）同源、可 override；postMessage
- *    回执的 lastUsage 透传（wire 有 → state 有；wire 无 → null）。
+ * hub-bridge (direct hub wiring):
+ *  - lazy create: no session file before the first message; ensureSession(undefined)
+ *    creates one, ensureSession(id) returns it unchanged; start-then-quit leaves no
+ *    empty shell;
+ *  - in-flight registry: soleId attribution semantics (0/1/N); postMessage marks on
+ *    entry and unmarks even on the failure path;
+ *  - postMessage receipt projection (finalText / stopReason / turnCount);
+ *  - context usage: bridge.contextWindow defaults to the strategy budget-window
+ *    SSOT (`DEFAULT_STRATEGY_CONTEXT_WINDOW`), overridable; postMessage passes
+ *    lastUsage through (wire has it → state has it; wire lacks it → null).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
@@ -93,7 +91,7 @@ describe("hub-bridge lazy create（SC 1）", () => {
     try {
       entries = await readdir(dir);
     } catch {
-      entries = []; // 目录尚不存在 = 未建档
+      entries = []; // directory absent = nothing was stored
     }
     expect(entries).toHaveLength(0);
   });
@@ -154,8 +152,8 @@ describe("hub-bridge postMessage", () => {
     expect(result.finalText).toBe("你好，世界");
     expect(result.stopReason).toBe("completed");
     expect(result.turnCount).toBe(1);
-    expect(inflight.ids().size).toBe(0); // 结束后清空
-    // 落盘可读回（共享池纪律）
+    expect(inflight.ids().size).toBe(0); // cleared after completion
+    // persisted and readable back (shared-pool discipline)
     const file = await bridge.loadSessionFile(id);
     expect(file.turnCount).toBe(1);
     expect(file.title).toBe("你好");
@@ -182,10 +180,10 @@ describe("hub-bridge postMessage", () => {
       deps: makeDeps([assistantResult({ texts: ["答复"] })]),
       inflight: createInflightRegistry(),
     });
-    // 仅建档不发消息 → list 不可见（lazy create 双保险）
+    // created but no message sent → invisible in list (second layer of lazy create)
     await bridge.hub.createSession();
     expect(await bridge.listSessions()).toHaveLength(0);
-    // 发一条 → 可见且带 title
+    // one message sent → visible, with title
     const id = await bridge.ensureSession(undefined);
     await bridge.postMessage({ conversationId: id, text: "第一个问题" });
     const list = await bridge.listSessions();
@@ -242,7 +240,7 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
       text: "你好",
     });
     expect(result.lastUsage).toEqual(usage);
-    // 既有字段不受影响。
+    // Pre-existing fields unaffected.
     expect(result.finalText).toBe("你好");
     expect(result.stopReason).toBe("completed");
     expect(result.turnCount).toBe(1);
@@ -275,7 +273,7 @@ describe("hub-bridge compactSession（/compact）", () => {
   });
 
   test("长会话 → compacted=true；短会话 → compacted=false（幂等）", async () => {
-    // 4 个 assistant 应答 → 8 条消息 > DEFAULT_KEEP_RECENT=6 → 实际压缩。
+    // 4 assistant replies → 8 messages > DEFAULT_KEEP_RECENT=6 → real compaction.
     const bridge = createTuiBridge({
       dataDir: baseDir,
       workspaceRoot: baseDir,
@@ -294,7 +292,7 @@ describe("hub-bridge compactSession（/compact）", () => {
     const compacted = await bridge.compactSession(id);
     expect(compacted.compacted).toBe(true);
 
-    // 短会话（1 turn = 2 条）→ 无需压缩。
+    // Short session (1 turn = 2 messages) → nothing to compact.
     const id2 = await bridge.ensureSession(undefined);
     await bridge.postMessage({ conversationId: id2, text: "hi" });
     expect((await bridge.compactSession(id2)).compacted).toBe(false);
@@ -310,9 +308,10 @@ describe("hub-bridge compactSession（/compact）", () => {
     await expect(bridge.compactSession("no-such-id")).rejects.toThrow();
   });
 
-  // #548:bridge.compactSession 把 opts.signal / opts.onStream 透传到
-  // SessionHub.compactSession → runFullCompact;host 收到 lifecycle 事件序列。
-  // 取消语义(返回 compacted=false, 会话保持原样)在 hub.test.ts 已覆盖。
+  // bridge.compactSession passes opts.signal / opts.onStream through to
+  // SessionHub.compactSession → runFullCompact; the host receives the lifecycle
+  // event sequence. Cancellation semantics (returns compacted=false, session
+  // untouched) are already covered in hub.test.ts.
   test("opts.signal / opts.onStream 透传到 hub(返回 boolean 不变)", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -334,13 +333,14 @@ describe("hub-bridge compactSession（/compact）", () => {
       onStream: (e) => events.push(e.type),
     });
     expect(compacted.compacted).toBe(true);
-    // stub empty_response → compaction_started + compaction_failed 序列必出。
+    // stub empty_response → the compaction_started + compaction_failed sequence must appear.
     expect(events).toContain("compaction_started");
     expect(events).toContain("compaction_failed");
   });
 
-  // #548:pre-aborted signal → runFullCompact 早退 signal_aborted → hub
-  // 走 keep-state 路径 → bridge 返回 compacted=false(取消同形)且不落盘。
+  // A pre-aborted signal → runFullCompact exits early with signal_aborted → hub
+  // takes the keep-state path → bridge returns compacted=false (same shape as
+  // cancellation) and writes nothing to disk.
   test("pre-aborted signal → compacted=false,会话保持原样", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -484,11 +484,13 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
   });
 
   test("独立参数注入 → hub 经 host-drain 消费该 manager（drain 结果拼入 run priorMessages）", async () => {
-    // #365 T3：subagentManager 是独立参数（不再经 deps.subagentManager 透传）。
-    // 验证：hub 内部持有所注入 manager，postMessage 时经 drainPendingSubagents
-    // 消费。手法：hand-rolled fake manager（drainCompleted 返回 1 条 completed）+
-    // 捕获 adapter 断言 stub-model 第一 turn 收到的 state.messages 含浓缩段。
-    // manager 未被 hub 持有 → drain 走 undefined 路径 → 无注入 → 断言失败。
+    // subagentManager is a standalone parameter (no longer passed via deps.subagentManager).
+    // Verified: the hub internally holds the injected manager and consumes it during
+    // postMessage via drainPendingSubagents. Technique: hand-rolled fake manager
+    // (drainCompleted returns 1 completed entry) + capturing adapter to assert the
+    // condensed section appears in state.messages received by stub-model's first turn.
+    // If the hub did not hold the manager → drain takes the undefined path → no
+    // injection → the assertion fails.
     const fakeMgr: SubAgentManager = {
       spawn: () => ({ taskId: "t3-task" }),
       queryBuffer: () => ({ status: "not_found" }),
@@ -506,7 +508,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
           },
         },
       ],
-      // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+      // Interface gained read-only enumeration surfaces — fake completes them to stay structurally compatible.
       getCapacity: () => 15,
       listSubagents: () => [],
       subscribe: () => () => {},
@@ -637,11 +639,12 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  // 共享的 local HTTP capture server：站在 LLM endpoint 位，记录 SDK 实际
-  // 发出的请求体。withThinkingOverride 用 real adapter（经 overrideEnv 指向
-  // capture origin），故可断言 wire 上的 thinking / output_config 字段 ——
-  // 这比 stub-model 路径强：bridge 剥掉 thinking 字段会直接在此暴露
-  // （request 无 thinking，或者根本走不到 capture（fallback 抛错））。
+  // Shared local HTTP capture server: sits in the LLM endpoint position and
+  // records the request bodies the SDK actually sends. withThinkingOverride uses
+  // the real adapter (via overrideEnv pointing at the capture origin), so the
+  // wire's thinking / output_config fields are assertable — stronger than the
+  // stub-model path: the bridge stripping thinking fields surfaces right here
+  // (request lacks thinking, or capture is never reached at all, e.g. fallback throws).
   let capture: LlmCapture | undefined;
 
   afterEach(async () => {
@@ -659,8 +662,9 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
       workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight,
-      // overrideEnv 与 run.tsx 同款透传：override 重建 adapter 时使用该 env，
-      // 不回退 process.env（reviewer blocker）。测试用它把 baseUrl 钉到 capture。
+      // overrideEnv passes through exactly as in run.tsx: the override rebuilds
+      // the adapter with this env and never falls back to process.env. Tests use
+      // it to pin baseUrl at the capture server.
       overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
     });
     const id = await bridge.ensureSession(undefined);
@@ -669,12 +673,12 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
       text: "think hard",
       thinking: { mode: "adaptive", effort: "high" },
     });
-    // 请求确实发出且只发了一次，wire 字段由 hub 原样转发。
+    // The request really went out, exactly once; wire fields forwarded verbatim by the hub.
     expect(capture.bodies.length).toBe(1);
     const body = capture.bodies[0] as Record<string, unknown>;
     expect(body.thinking).toEqual({ type: "adaptive" });
     expect(body.output_config).toEqual({ effort: "high" });
-    // 回执正常投影；inflight 进出自清。
+    // Receipt projects normally; inflight marks/unmarks cleanly.
     expect(result.finalText).toBe("ok");
     expect(result.stopReason).toBe("completed");
     expect(inflight.ids().size).toBe(0);
@@ -718,7 +722,7 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
       conversationId: id,
       text: "no override",
     });
-    // cached path 走 stub adapter → 请求不该打到 capture server。
+    // Cached path uses the stub adapter → requests must not reach the capture server.
     expect(result.finalText).toBe("cached reply");
     expect(capture.bodies.length).toBe(0);
   });
@@ -742,7 +746,7 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
         workspaceRoot: baseDir,
         deps: makeDeps([]),
         inflight: createInflightRegistry(),
-        // baseUrl 钉到 capture：透传生效 → hub 的 override 路径连上 capture。
+        // baseUrl pinned at the capture server: pass-through works → the hub's override path connects to capture.
         overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
       });
       const id = await bridge.ensureSession(undefined);
@@ -751,8 +755,9 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
         text: "override env",
         thinking: { mode: "off" },
       });
-      // 若 overrideEnv 未透传，withThinkingOverride 回退 loadIknowEnv() → 走
-      // 真实 endpoint（非 capture）或抛 ValidationError → capture 收不到请求。
+      // If overrideEnv were not passed through, withThinkingOverride would fall
+      // back to loadIknowEnv() → hit the real endpoint (not capture) or throw
+      // ValidationError → capture would receive no request.
       expect(cap.bodies.length).toBe(1);
     } finally {
       await cap.close();
@@ -776,7 +781,7 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
     expect(inflight.ids().size).toBe(0);
   });
 });
-// -- settings-hot-reload（T4）:envProvider + onEnvChange 接通 ---------------------------------
+// -- settings-hot-reload: envProvider + onEnvChange wiring ---------------------------------
 
 describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
   let baseDir: string;
@@ -795,9 +800,10 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
       const bridge = createTuiBridge({
         dataDir: baseDir,
         workspaceRoot: baseDir,
-        // deps 必须注入（SessionHub 构造守卫：无 askUser 时必须有 deps）；
-        // 首次 postMessage 用注入 stub（不联网），reloadFromEnv 后才走 envProvider
-        // 重建真实 adapter —— 这正是 T4 热更新的最小面通路。
+        // deps must be injected (SessionHub construction guard: deps required
+        // when askUser is absent); the first postMessage uses the injected stub
+        // (no network), and only after reloadFromEnv does the envProvider-rebuilt
+        // real adapter take over — exactly the minimal hot-reload surface.
         deps: makeDeps([]),
         inflight: createInflightRegistry(),
         envProvider: () =>
@@ -811,11 +817,11 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
         onEnvChange: () => {},
       });
       const id = await bridge.ensureSession(undefined);
-      // reloadFromEnv 先用当前 envProvider 建 adapter（model-t4-1）→ capture。
+      // reloadFromEnv first builds the adapter from the current envProvider (model-t4-1) → capture.
       await bridge.hub.reloadFromEnv();
       await bridge.postMessage({ conversationId: id, text: "hi" });
       expect(cap.bodies.length).toBe(1);
-      // 改 model → reloadFromEnv → 下次 postMessage wire model 变化。
+      // Change model → reloadFromEnv → the next postMessage carries a different wire model.
       currentModel = "model-t4-2";
       await bridge.hub.reloadFromEnv();
       await bridge.postMessage({ conversationId: id, text: "hi again" });
@@ -857,7 +863,7 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
   });
 });
 
-// -- listSubagents 投影（#358 T7）----------------------------------------------------
+// -- listSubagents projection ----------------------------------------------------
 
 describe("hub-bridge listSubagents 投影（#358 T7）", () => {
   test("无 subagentManager → listSubagents 恒返回空数组", () => {
@@ -865,15 +871,15 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
     });
-    // 多次调用稳定空 — 不依赖 hub 内部状态。
+    // Stable empty across calls — independent of hub internal state.
     expect(bridge.listSubagents()).toEqual([]);
     expect(bridge.listSubagents()).toEqual([]);
   });
 
   test("注入 fake manager → listSubagents 透传 manager.listSubagents() 投影", () => {
-    // 与 hub-bridge subagentManager 透传 describe 同款 fake 模式(hand-rolled
-    // SubAgentManager,字段齐 interface)。验证:bridge.listSubagents() ==
-    // manager.listSubagents() (byte-stable)。
+    // Same hand-rolled fake-SubAgentManager pattern (all interface fields) as the
+    // subagentManager pass-through describe above. Verifies:
+    // bridge.listSubagents() == manager.listSubagents() (byte-stable).
     const projection = [
       {
         taskId: "t-r",
@@ -974,8 +980,8 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Review High-1 (2026-08-29): engineRoot + buildEngine 转发 —— rebind 后
-// per-turn 引擎重建在注入 deps 的 host（TUI）上生效
+// engineRoot + buildEngine forwarding — after a rebind, per-turn engine
+// rebuild takes effect on the deps-injected host (TUI)
 // ---------------------------------------------------------------------------
 
 describe("hub-bridge engineRoot / buildEngine 转发（review High-1）", () => {
@@ -1004,11 +1010,11 @@ describe("hub-bridge engineRoot / buildEngine 转发（review High-1）", () => 
       },
     });
 
-    // 启动根：注入 deps 原样返回（今日行为不变）
+    // Startup root: injected deps returned as-is (today's behavior unchanged)
     expect(await ensure(bridge.hub, "/main")).toBe(injected);
     expect(builtAt).toEqual([]);
 
-    // rebind 后的 task worktree 根：per-root 重建经 buildEngine 缝
+    // Root of a rebound task worktree: per-root rebuild via the buildEngine seam
     const reboundRoot = "/main/.iknow/worktrees/conv-1";
     expect(await ensure(bridge.hub, reboundRoot)).toBe(rebuilt);
     expect(builtAt).toEqual([reboundRoot]);
@@ -1106,7 +1112,7 @@ describe("hub-bridge subagent manager aggregation across rebind", () => {
   });
 });
 
-// -- abortSessionForegroundWork 扇出（Locked sentence 3 / T5）------------------------
+// -- abortSessionForegroundWork fan-out (this session's foreground only) --------------------
 
 describe("hub-bridge abortSessionForegroundWork（本会话前景扇出）", () => {
   test("无 subagentManager → 空数组（不抛错）", () => {

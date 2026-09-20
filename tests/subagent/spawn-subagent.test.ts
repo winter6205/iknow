@@ -1,33 +1,30 @@
 /**
- * #356 T4 / #361 V1.5 / #556 T3 — spawn_subagent ACI 工具单测（fake
- * SubAgentManager，不真启子进程）。
+ * spawn_subagent ACI tool unit tests (fake SubAgentManager, no real child process).
  *
- * 覆盖票面（#361 前景契约反转后）：
- *   1. wait:false → handler 解析为 {task_id} JSON，manager.spawn 被调一次
- *   2. wait:true(默认) → handler 解析为 envelope（fake waitFor 立即 resolve）
- *   3. background:true → 抛 ToolExecutionError，message 含 "background:true"
- *   4. task 缺失 → 抛 ToolExecutionError
- *   5. task:123（非 string）→ 抛 ToolExecutionError
- *   6. disallowedTools 数组透传到 def
- *   7. systemPrompt 字符串透传
- *   8. model 字符串透传
- *   9. maxTurns 整数透传
- *  10. wait:false → waitFor 不被调用
- *  11. aci 元数据（timeoutTier=unbounded，ACI 不抢 manager per-task 钟）
- *  12. #556 T3/T7: subagent_type 可选参数 → def.role 透传（缺省 = general-purpose）
- *  13. #556 T3: inputSchema.subagent_type enum = catalog ids（运行时派生）
- *  14. #556 T3: description 含 prose list（catalog entries）
+ * Coverage:
+ *   1. wait:false → handler resolves to {task_id} JSON, manager.spawn called once
+ *   2. wait:true (default) → handler resolves to envelope (fake waitFor resolves immediately)
+ *   3. background:true → throws ToolExecutionError, message contains "background:true"
+ *   4. task missing / task:123 (non-string) / empty task / null input → ToolExecutionError
+ *   5. disallowedTools / systemPrompt / model / maxTurns / timeoutMs pass-through to def
+ *   6. wait:false → waitFor not called
+ *   7. aci metadata (timeoutTier=unbounded — ACI must not preempt manager's per-task clock)
+ *   8. subagent_type optional param → def.role pass-through (default = general-purpose)
+ *   9. inputSchema.subagent_type enum = catalog ids (derived at runtime)
+ *  10. description contains the prose list (catalog entries)
  *
- * 超字段 {task:"x", foo:"bar"} 的严格性由 registry 的 ajv strict 校验守门
- * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
- * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
+ * Extra fields {task:"x", foo:"bar"} strictness is enforced by the registry's ajv
+ * strict validation (createAciRegistry compiles inputSchema with
+ * additionalProperties:false); the tool handler receives already-validated input —
+ * not re-tested here.
  *
- * catalog 密闭性：factory 缺省 resolver = merged catalog（builtin +
- * `~/.iknow/agents/` 用户角色，#556 T3 默认路径契约）。断言 enum / prose list
- * 等于 builtin 的用例若读真实 home，会随运行者装了什么用户角色漂移；本文件
- * beforeEach 把 HOME 指向空 tmp 目录（`os.homedir()` 读 `$HOME`），
- * 缺省路径因此恒为纯 builtin。默认 resolver = merged 的证明在
- * tests/subagent/user-agents-wiring.test.ts（不依赖真实 home）。
+ * Catalog hermeticity: the factory default resolver = merged catalog (builtin +
+ * `~/.iknow/agents/` user roles, default path contract). Asserting enum / prose
+ * list equals builtin against the real home would drift with whatever user roles
+ * the runner has installed; beforeEach points HOME at an empty tmp dir
+ * (`os.homedir()` reads `$HOME`), so the default path is always pure builtin.
+ * The merged-default proof lives in tests/subagent/user-agents-wiring.test.ts
+ * (independent of real home).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -64,13 +61,14 @@ import { FILE_WRITE_TOOL_NAMES } from "../../src/harness/subagent/catalog.ts";
 import { resetUserAgentsCache } from "../../src/harness/subagent/user-catalog.ts";
 
 /**
- * catalog 密闭性 fixture：整个文件把 HOME 指向空 tmp 目录。
+ * Catalog-hermeticity fixture: HOME points at an empty tmp dir for the whole file.
  *
- * factory 缺省 resolver = merged catalog（builtin + home 下的用户角色），
- * 真实 home 的 `~/.iknow/agents/` 内容会渗进 enum / prose list 断言。空 HOME
- * 让缺省路径恒为纯 builtin（目录 ENOENT → 空用户集，见 user-catalog.ts）。
- * `resetUserAgentsCache()` 必须在 HOME 切换后调用：merged 结果按 resolved
- * agentsDir 记忆化，不清缓存会读到上一个 HOME 的扫描结果。
+ * The factory default resolver = merged catalog (builtin + user roles under home);
+ * real `~/.iknow/agents/` content would leak into enum / prose-list assertions.
+ * An empty HOME keeps the default path pure builtin (dir ENOENT → empty user set,
+ * see user-catalog.ts). `resetUserAgentsCache()` must be called after switching
+ * HOME: the merged result is memoized per resolved agentsDir, and without clearing
+ * the cache we would read the previous HOME's scan.
  */
 let savedHome: string | undefined;
 let hermeticHome: string;
@@ -79,7 +77,7 @@ function emptyHermeticHome(): void {
   savedHome = process.env.HOME;
   hermeticHome = mkdtempSync(join(tmpdir(), "iknow-spawn-tool-home-"));
   process.env.HOME = hermeticHome;
-  // 真实 home 的用户角色已可能被同进程早前的扫描记忆化，切 HOME 后必须重扫。
+  // user roles from the real home may already be memoized by earlier scans in this process; rescan after HOME switch
   resetUserAgentsCache();
 }
 
@@ -91,18 +89,18 @@ afterEach(() => {
   if (savedHome === undefined) delete process.env.HOME;
   else process.env.HOME = savedHome;
   rmSync(hermeticHome, { recursive: true, force: true });
-  // 缓存 key 是本文件用过的 tmp agentsDir；清掉避免污染同进程其他测试文件。
+  // cache keys are tmp agentsDirs used by this file; clear to avoid polluting other test files in-process
   resetUserAgentsCache();
 });
 
-/** ajv 实例（与仓库同款 strict + allErrors + formats）— T3 测 inputSchema 编译。 */
+/** ajv instance (same repo config: strict + allErrors + formats) — compiles inputSchema in tests. */
 function makeAjv(): Ajv.default {
   const ajv = new Ajv.default({ strict: true, allErrors: true });
   addFormats.default(ajv);
   return ajv;
 }
 
-/** fake manager：spawn 固定 taskId + 记录入参 def（spy）；其余成员面 stub。 */
+/** fake manager: spawn returns a fixed taskId + records the def argument (spy); other members are stubs. */
 function makeFakeManager() {
   const spawn = vi.fn(
     (_def: SubAgentDefinition): { readonly taskId: string } => ({
@@ -124,11 +122,11 @@ function makeFakeManager() {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
-    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    // interface gained a read-only enumeration surface — fake fills it in for structural compatibility.
     listSubagents: () => [],
-    // ADR-0096 T2: spawn_subagent tool description getter 读 capacity。
-    // 测试 fake 不接 holder → 退化到 manager.getCapacity()，这里给静态 15
-    // 与 DEFAULT 同源，让 description 断言对齐既有形态。
+    // ADR-0096: the spawn_subagent tool description getter reads capacity.
+    // Test fake without holder → falls back to manager.getCapacity(); static 15
+    // here shares its source with DEFAULT, keeping description assertions aligned.
     getCapacity: () => DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
   };
   return { manager, spawn, waitFor };
@@ -146,11 +144,11 @@ describe("spawn_subagent — 正常路径", () => {
     expect(out).toBe(JSON.stringify({ task_id: "fixed-task-id-1" }));
   });
 
-  // #361 前景契约（原 sync ≤50ms 断言已删；与 wait:true 默认互斥）。
+  // Foreground contract (old sync ≤50ms assertion removed; exclusive with the wait:true default).
   it("wait:true(默认)handler 解析为 envelope (foreground contract)", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    // C5：前景臂 tool_result = envelope（对象直返，executor 20000 截断天然复用）。
+    // Foreground arm tool_result = envelope (object returned directly; executor's 20000-char truncation is reused naturally).
     const out = await tool.handler({ task: "wait-me" });
     const parsed = out as { status: string; summary: string; result: string };
     expect(parsed.status).toBe("ok");
@@ -270,10 +268,11 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
   });
 
   it("timeoutMs 缺席 → def 省略该字段 (manager 三层链 def ?? taskTimeoutMs ?? 7200s 接管)", async () => {
-    // #358 T2 (SC4 消费点证明): 模型未给 timeoutMs 时 handler 不得把常量塞进
-    // def.timeoutMs —— 否则链条中段 env.subagent.taskTimeoutMs 永远被顶掉变
-    // 死代码。断言 def 上 timeoutMs 为 undefined (spawn 收到缺字段 def, 由
-    // manager 侧 effectiveTaskTimeoutMs 决定 SIGTERM / waitFor 缺省)。
+    // When the model omits timeoutMs, the handler must not stuff a constant into
+    // def.timeoutMs — otherwise the chain's middle env.subagent.taskTimeoutMs is
+    // always overridden and becomes dead code. Assert def.timeoutMs is undefined
+    // (spawn receives a def without the field; manager-side effectiveTaskTimeoutMs
+    // decides the SIGTERM / waitFor default).
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "t", wait: false });
@@ -319,10 +318,10 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
   });
 
   it("T5 SC8: ctx.toolUseId → def.toolUseId (Anthropic tool_use_id 透传, manager 抄到 .meta.json)", async () => {
-    // T5 (ADR-0071 / SC8): executor 把 call.id
-    // 装进 ctx.toolUseId,spawn_subagent handler 消费后写入 def.toolUseId,
-    // manager.writeMetaOnce 把它抄进 `<subagentsDir>/agent-<taskId>.meta.json`
-    // 的 toolUseId 字段,用于反查父 loop 那次工具调用。
+    // ADR-0071: executor puts call.id into ctx.toolUseId; the spawn_subagent
+    // handler consumes it into def.toolUseId, and manager.writeMetaOnce copies it
+    // into the toolUseId field of `<subagentsDir>/agent-<taskId>.meta.json`
+    // for reverse lookup of the parent loop's tool call.
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler(
@@ -349,8 +348,8 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     const tool = createSpawnSubAgentTool({ manager });
     expect(tool.name).toBe("spawn_subagent");
     expect(tool.aci.category).toBe("read-only");
-    // 前景臂寿命归 manager per-task 钟；ACI unbounded=0 不套 long(30min)
-    // 提前 abort（long < PER_TASK_TIMEOUT_MS 会砍真任务）。
+    // Foreground-arm lifetime belongs to the manager's per-task clock; ACI
+    // unbounded=0 avoids long(30min) early abort (long < PER_TASK_TIMEOUT_MS would cut real tasks).
     expect(tool.aci.timeoutTier).toBe("unbounded");
     expect(TIMEOUT_TIER_MS[tool.aci.timeoutTier]).toBe(0);
     expect(TIMEOUT_TIER_MS.long).toBeLessThan(PER_TASK_TIMEOUT_MS);
@@ -404,7 +403,7 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     };
     expect(schema.properties.sandboxRoot).toBeDefined();
     expect(schema.properties.sandboxRoot.type).toBe("string");
-    // 不进 required(可选)
+    // not in required (optional)
     expect(schema.required).not.toContain("sandboxRoot");
   });
 });
@@ -414,8 +413,8 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
     const { SubAgentSandboxRootError } =
       await import("../../src/harness/errors.ts");
     const { manager, spawn } = makeFakeManager();
-    // 让 spawn 每次都抛 typed error(mockImplementationOnce 仅触发一次,改用
-    // mockImplementation 让两次 handler 调用都覆盖到,避免第二次回到默认 mock)。
+    // make spawn throw the typed error every time (mockImplementationOnce would only
+    // cover the first call; use mockImplementation so both handler calls are covered).
     spawn.mockImplementation(() => {
       throw new SubAgentSandboxRootError({
         parentSandboxRoot: "/parent",
@@ -433,44 +432,45 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
 });
 
 /**
- * #557 T1 — spawn_subagent.description = 工具用法 SSOT。
- * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、短交差与容量），
- * 不写嵌套政策（嵌套禁止由代码保证，不在 description 表达）。
+ * spawn_subagent.description = the tool-usage SSOT.
+ * Topics: when to dispatch, blocking vs parallel, wait:false, short handoff and
+ * capacity. Nesting policy is intentionally absent (prohibition is enforced by
+ * code, not advertised in the description).
  */
 describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
   const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
   let description: string;
   beforeEach(() => {
-    // beforeEach（非 beforeAll）：HOME 密闭性 fixture 在 beforeEach 生效，
-    // beforeAll 会先于它跑，读到真实 home 的用户角色 prose。
+    // beforeEach (not beforeAll): the HOME-hermeticity fixture takes effect in
+    // beforeEach; beforeAll would run earlier and read user-role prose from the real home.
     description = createSpawnSubAgentTool({
       manager: fixtureManager(),
     }).description;
   });
 
   it("写入 5 主题：何时用 / 默认阻塞 / 独立并行 / wait:false 轮询 / 短交差与容量", () => {
-    // 1. 何时用：multi-step exploration / independent verification / parallelizable work → 派 sub-agent
+    // 1. when to use: multi-step exploration / independent verification / parallelizable work → dispatch sub-agent
     expect(description).toMatch(/multi-step exploration/);
     expect(description).toMatch(/independent verification/);
     expect(description).toMatch(/parallelizable work/);
-    // 2. 默认阻塞：wait:true → blocks until sub-agent finishes；缺省墙钟 = 2h（PER_TASK），可 timeoutMs 覆盖。禁止再写 5 min（会诱导模型传 300000）。
+    // 2. blocking by default: wait:true → blocks until sub-agent finishes; default wall clock = 2h (PER_TASK), overridable via timeoutMs. Never mention 5 min (would induce the model to pass 300000).
     expect(description).toMatch(/wait[:\s]*true/i);
     expect(description).toMatch(/blocks? until/i);
     expect(description).toMatch(/parent-visible short handoff/i);
     expect(description).not.toMatch(/5\s*min/i);
     expect(description).toMatch(/2\s*h(?:ours?)?/i);
     expect(description).toMatch(/timeoutMs/i);
-    // 3. 并行：同一 turn 多次 spawn_subagent 仅跑相互独立的自包含任务
+    // 3. parallel: multiple spawn_subagent calls in one turn only for independent, self-contained tasks
     expect(description).toMatch(/multiple.*spawn_subagent/s);
     expect(description).toMatch(/one (?:single )?turn/i);
     expect(description).toMatch(/parallel/i);
     expect(description).toMatch(/independent/i);
     expect(description).toMatch(/self-contained/i);
-    // 4. wait:false → 立即返回 {task_id},用 subagent_result 轮询
+    // 4. wait:false → returns {task_id} immediately, poll with subagent_result
     expect(description).toMatch(/wait[:\s]*false/i);
     expect(description).toMatch(/task_id/i);
     expect(description).toMatch(/subagent_result/i);
-    // 5. 父可见短交差与容量：summary / paths / status / stop_reason；超限不排队
+    // 5. parent-visible short handoff and capacity: summary / paths / status / stop_reason; over limit is not queued
     expect(description).toMatch(/summary/i);
     expect(description).toMatch(/paths?/i);
     expect(description).toMatch(/status/i);
@@ -493,11 +493,13 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).toMatch(/read-only|readonly/i);
     expect(description).not.toMatch(/sole ground truth|ground truth/i);
     expect(description).not.toMatch(/full result envelope/i);
-    // 不变式：description 不得把「fork 会话」或「每个 worker 各自 worktree」当作
-    // spawn 的能力来宣传 —— 工具没有 fork 模式、没有 worktree 参数、也没有逐
-    // worker 选树（schema 断言见下）。`create-worktree` 是另一个工具的名字
-    // （dispatch lesson 要求改文件前先建树），是唯一放行的提及形态：词形按
-    // 词边界整体封禁，任何其它 fork/worktree 用法都算宣传。
+    // Invariant: the description must not advertise "forking the conversation" or
+    // "per-worker worktree" as spawn capabilities — the tool has no fork mode, no
+    // worktree param, no per-worker tree selection (schema assertions below).
+    // `create-worktree` is another tool's name (the dispatch lesson requires
+    // building the tree before mutating files) and is the only allowed mention:
+    // word forms are banned at word boundaries, so any other fork/worktree usage
+    // counts as false advertising.
     expect(description).not.toMatch(
       /(?<!create-)\b(?:fork(?:s|ed|ing)?|worktrees?)\b/i
     );
@@ -553,16 +555,17 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
   });
 
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
-    // 嵌套禁止由代码保证,description 不应假装一个语义级 SSOT
+    // nesting prohibition is enforced by code; the description must not pose as a semantic-level SSOT for it
     expect(description).not.toMatch(/nested/i);
     expect(description).not.toMatch(/one level/i);
     expect(description).not.toMatch(/caps at/i);
   });
 
-  // ADR-0096 T2 ── description 动态反映当前 cap（holder.get() 现读）。
-  // 与既有「5 主题」描述 SSOT 不变 —— 只是 N 那段从静态字面量改 getter；
-  // 5 主题逐项断言 + dispatch lesson + omit → general-purpose 路径仍命中
-  // （这些固定段不依赖 N）。这里只断言 N 那段动态。
+  // ADR-0096 ── description reflects the current cap dynamically (holder.get() read live).
+  // The existing "5 topics" description SSOT is unchanged — only the N segment moved
+  // from a static literal to a getter; the per-topic assertions + dispatch lesson +
+  // omit → general-purpose path still hit (those fixed segments do not depend on N).
+  // Only the N segment's dynamism is asserted here.
   it('description 段含当前 holder N：holder.set(7) → description 含 "At most 7"', () => {
     const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
     const holder = createSubagentCapacityHolder(7);
@@ -571,8 +574,8 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
       capacityHolder: holder,
     }).description;
     expect(desc).toMatch(/At most 7 workers run simultaneously/);
-    // 既有 5 主题断言全部仍命中（5 min 禁用 + 2 hours 缺省 + 等）—— 锁定
-    // 「N 动态 vs 其它段静态」分界。
+    // all existing 5-topic assertions still hit (5 min banned + 2 hours default + etc.)
+    // — locking the "N dynamic vs other segments static" boundary.
     expect(desc).toMatch(/multi-step exploration/);
     expect(desc).toMatch(/summary/i);
     expect(desc).not.toMatch(/5\s*min/i);
@@ -586,11 +589,11 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
       manager: fixtureManager(),
       capacityHolder: holder,
     }).description;
-    // unlimited 形态 → 不出现 "At most N"；出现 unlimited 文案
+    // unlimited form → no "At most N"; the unlimited wording appears
     expect(desc).toMatch(/Concurrency cap is unlimited/);
     expect(desc).toMatch(/OS \/ memory budget/);
     expect(desc).not.toMatch(/At most \d+ workers/);
-    // 5 主题不变 + dispatch lesson 仍在
+    // 5 topics unchanged + dispatch lesson still present
     expect(desc).toMatch(/multi-step exploration/);
     expect(desc.indexOf(SPAWN_DISPATCH_LESSON)).toBeGreaterThan(-1);
   });
@@ -607,13 +610,13 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     holder.set(11);
     const afterFlip = tool.description;
     expect(afterFlip).toMatch(/At most 11 workers/);
-    // Object.freeze 仍生效（accessor 被锁住，无法整体替换）
+    // Object.freeze still holds (accessor is locked, cannot be wholesale replaced)
     expect(Object.isFrozen(tool)).toBe(true);
   });
 
   it("holder 缺席 → 退化到 manager.getCapacity()（既有装配路径）", () => {
-    // 装配期 manager 直造（manager.test.ts 等 makeHarness 形态）路径；
-    // 工厂不接 holder，readCapacity() 走 manager.getCapacity() 分支。
+    // Assembly-time direct-manager construction (manager.test.ts makeHarness shape):
+    // factory without holder → readCapacity() takes the manager.getCapacity() branch.
     const { manager } = makeFakeManager();
     const desc = createSpawnSubAgentTool({ manager }).description;
     // fake manager.getCapacity() = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS
@@ -624,16 +627,16 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
 });
 
 /**
- * #556 T3 — subagent_type 参数 + ajv enum (catalog ids 派生) +
- * handler 映射 → def.role。
+ * subagent_type param + ajv enum (derived from catalog ids) +
+ * handler mapping → def.role.
  *
- * 防御契约 (T3 acceptance):
- *   - subagent_type 缺省 → def.role = general-purpose（与显式 general-purpose 等价）
- *   - subagent_type 已知 → def.role 显式透传 → manager.buildWorkerPayload →
- *     envelope.role → worker 注入 catalog body persona 段 (T2 装配)
- *   - ajv enum = catalog id 列表（运行时 resolveAgentCatalog 派生）
- *   - 未知 subagent_type → ajv fail-fast（在 handler 入口之前被拒）
- *   - description prose list 段：intro + 每 entry 一行 `name: description`
+ * Defensive contract:
+ *   - subagent_type omitted → def.role = general-purpose (equivalent to explicit general-purpose)
+ *   - subagent_type known → def.role passed through explicitly → manager.buildWorkerPayload →
+ *     envelope.role → worker injects the catalog body persona section
+ *   - ajv enum = catalog id list (derived at runtime via resolveAgentCatalog)
+ *   - unknown subagent_type → ajv fail-fast (rejected before the handler entry point)
+ *   - description prose-list section: intro + one `name: description` line per entry
  */
 describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
   it("inputSchema.subagent_type 字段存在 (string + enum = catalog ids 派生)", () => {
@@ -649,7 +652,7 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const subagentType = schema.properties.subagent_type;
     expect(subagentType).toBeDefined();
     expect(subagentType.type).toBe("string");
-    // enum = catalog ids 派生（运行时不写死字面）
+    // enum derived from catalog ids (no hardcoded literal at runtime)
     const expected = resolveAgentCatalog().map((e) => e.id);
     expect(subagentType.enum).toBeDefined();
     expect([...subagentType.enum!]).toEqual(expected);
@@ -667,7 +670,7 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const tool = createSpawnSubAgentTool({ manager });
     const schema = tool.inputSchema as { required: string[] };
     expect(schema.required).not.toContain("subagent_type");
-    // required 仍只 = ["task"]（V1 baseline 保留）
+    // required stays exactly ["task"] (V1 baseline preserved)
     expect(schema.required).toEqual(["task"]);
   });
 
@@ -688,8 +691,8 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     expect(validate({ task: "x", subagent_type: "not_a_real_agent" })).toBe(
       false
     );
-    // ajv enum 错误: instancePath=/subagent_type, keyword="enum",
-    // params.allowedValues = catalog ids (ajv 拒绝原因: not in enum)。
+    // ajv enum error: instancePath=/subagent_type, keyword="enum",
+    // params.allowedValues = catalog ids (ajv rejection reason: not in enum).
     const errs = validate.errors ?? [];
     const enumErr = errs.find(
       (e) =>
@@ -697,7 +700,7 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
         (e as { keyword?: string }).keyword === "enum"
     );
     expect(enumErr).toBeDefined();
-    // params.allowedValues 含 catalog ids（从 SSOT 派生，空 home 下 = builtin）
+    // params.allowedValues contains catalog ids (derived from SSOT; under empty home = builtin)
     const allowed = (enumErr as { params?: { allowedValues?: unknown } })
       ?.params?.allowedValues;
     expect(allowed).toEqual(resolveAgentCatalog().map((e) => e.id));
@@ -747,8 +750,8 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
   });
 
   it("subagent_type 缺省 → def.role = general-purpose", async () => {
-    // T7: 不传 subagent_type 的默认角色必须与显式 general-purpose 一致，
-    // 让 worker 注入 persona 并保持完整工具面。
+    // The default role when subagent_type is omitted must equal explicit
+    // general-purpose, so the worker gets persona injection and the full tool surface.
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "no-role", wait: false });
@@ -757,7 +760,7 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
   });
 
   it("subagent_type 显式传 'general-purpose' 等价于不传", async () => {
-    // T7: 两种调用都应走 general-purpose persona 和完整工具面。
+    // both invocations must take the general-purpose persona and full tool surface
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "t", wait: false });
@@ -793,10 +796,10 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
         task: "t",
         role: "explore",
         systemPrompt: "be focused",
-        // #556 T3 + Spec review 收口: parent disallowedTools 与 catalog entry
-        // denied union (Set 去重)。explore 的 catalog 默认
-        // FILE_WRITE_TOOL_NAMES (edit_file / write_file + symbol mutate 5 项)
-        // 与 parent [spawn_subagent] merge 后长 = 1 + FILE_WRITE_TOOL_NAMES.length。
+        // parent disallowedTools are unioned (Set-deduped) with the catalog entry's
+        // deny list. explore's catalog default is FILE_WRITE_TOOL_NAMES
+        // (edit_file / write_file + 5 symbol-mutate tools); merged with the parent's
+        // [spawn_subagent] the length = 1 + FILE_WRITE_TOOL_NAMES.length.
         disallowedTools: expect.arrayContaining([
           "spawn_subagent",
           ...FILE_WRITE_TOOL_NAMES,
@@ -831,17 +834,16 @@ describe("spawn_subagent — capacity reject reaches the model as a typed tool e
 });
 
 describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools merge in wire", () => {
-  // Spec reviewer (2026-08-20 code-review) High finding:
-  //   catalog entry.disallowedTools 未流入 wire,explore 角色的
-  //   [edit_file, write_file] deny 不进入 worker tool surface。
-  //   修法: handler 在 resolvedRole 解析时捕获 catalog entry,
-  //   union(parent disallowedTools, catalog entry.disallowedTools)
-  //   后写入 def.disallowedTools (registry.ts Gate 3 deny-list
-  //   把 entry 内的工具名从 toolsetNames 剔除)。
+  // A past review High finding: catalog entry.disallowedTools did not flow into
+  // the wire, so explore's [edit_file, write_file] deny never reached the worker
+  // tool surface. Fix: the handler captures the catalog entry when resolving the
+  // role, writes union(parent disallowedTools, catalog entry.disallowedTools)
+  // into def.disallowedTools (registry.ts Gate 3 deny-list removes those names
+  // from toolsetNames).
   //
-  // catalog deny 的 extend 面 (#556 T4 收口) = FILE_WRITE_TOOL_NAMES
-  // (edit_file / write_file + 5 件 symbol mutate)。断言直接引用该 SSOT,
-  // 不再硬编码长度,避免 SSOT 扩项时此处再次 stale。
+  // The catalog deny's extension surface = FILE_WRITE_TOOL_NAMES
+  // (edit_file / write_file + 5 symbol-mutate tools). Assertions reference that
+  // SSOT directly instead of hardcoding lengths, so extending the SSOT cannot go stale here.
 
   it("subagent_type='explore' 无 parent disallowedTools → def.disallowedTools = catalog 默认 FILE_WRITE_TOOL_NAMES", async () => {
     const { manager, spawn } = makeFakeManager();
@@ -883,11 +885,11 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     await tool.handler({
       task: "dedupe-check",
       subagent_type: "explore",
-      disallowedTools: ["edit_file", "another_tool"], // edit_file 已含于 catalog
+      disallowedTools: ["edit_file", "another_tool"], // edit_file already in catalog
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    // edit_file 与 catalog 同名 → 只算一次;another_tool 为新增 1 项。
+    // edit_file shares the catalog name → counted once; another_tool adds 1.
     expect(def.disallowedTools).toHaveLength(FILE_WRITE_TOOL_NAMES.length + 1);
     expect([...def.disallowedTools!]).toEqual(
       expect.arrayContaining([...FILE_WRITE_TOOL_NAMES, "another_tool"])
@@ -935,12 +937,13 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
 
 describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)", () => {
   it("未传 catalog → factory 内部 fallback, ajv enum = builtin ids 派生 (空 home 密闭)", () => {
-    // plan 决议: dist 装配 (registry.ts) 不传 catalog, factory 内部用 default。
-    // default = merged catalog (builtin + home 用户角色), 故此处认证的命题是
-    // 「缺省 resolver 下 enum 由 builtin catalog ids 派生」——在空 HOME 隔离下
-    // merged 退化纯 builtin, 断言与 resolveAgentCatalog() 派生值一致。
-    // merged 合并语义 (user 追加 / 同名保留 builtin) 的独立认证在
-    // tests/subagent/user-agents-wiring.test.ts + user-catalog.test.ts。
+    // dist assembly (registry.ts) does not pass catalog; the factory uses its default.
+    // default = merged catalog (builtin + home user roles), so the proposition
+    // certified here is "enum derives from builtin catalog ids under the default
+    // resolver" — under empty-HOME isolation merged degrades to pure builtin, and
+    // the assertion matches the resolveAgentCatalog() derived value.
+    // Merged semantics (user additions / builtin kept on name collision) are
+    // certified separately in tests/subagent/user-agents-wiring.test.ts + user-catalog.test.ts.
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const schema = tool.inputSchema as {
@@ -956,8 +959,9 @@ describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)"
   });
 
   it("deps.catalog 显式传 fake resolver → ajv enum + prose list 都由 fake 派生", () => {
-    // 测试缝: 注入 fake resolver (list + get 双面), 验证 factory 真的在用
-    // deps.catalog 而不是内部默认 (factory 闭包 → list + get 两消费面同时生效)。
+    // test seam: inject a fake resolver (both list + get faces) to prove the factory
+    // really consumes deps.catalog rather than its internal default (factory closure →
+    // both list + get consumption faces take effect together).
     const FAKE_ENTRY = {
       id: "fake_agent",
       description: "fake agent for testing",
@@ -975,24 +979,24 @@ describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)"
       manager,
       catalog: fakeCatalog,
     });
-    // enum 由 fake list 派生
+    // enum derives from the fake list
     const schema = tool.inputSchema as {
       properties: Record<string, { enum?: ReadonlyArray<string> }>;
     };
     expect([...schema.properties.subagent_type.enum!]).toEqual(["fake_agent"]);
-    // prose list 含 fake_agent 行
+    // prose list contains the fake_agent line
     expect(tool.description).toMatch(
       /-\s*fake_agent\s*:\s*fake agent for testing/
     );
-    // 原 builtin 'explore' 不在 enum / prose (fake 完全替换)
+    // builtin 'explore' absent from enum / prose (fake fully replaces it)
     expect([...schema.properties.subagent_type.enum!]).not.toContain("explore");
     expect(tool.description).not.toMatch(/-\s*explore\s*:/);
   });
 
   it("deps.catalog 接受 resolver 双面形态 (list + get)", () => {
-    // 类型契约: deps.catalog 是 AgentCatalogResolver (双面: list() 返回
-    // ReadonlyArray<AgentCatalogEntry>, get(id) 返回 AgentCatalogEntry)。
-    // factory 接受该形态, 不要求是 builtinCatalogResolver 同款 frozen。
+    // Type contract: deps.catalog is an AgentCatalogResolver (two faces: list() returns
+    // ReadonlyArray<AgentCatalogEntry>, get(id) returns AgentCatalogEntry).
+    // The factory accepts that shape; it need not be frozen like builtinCatalogResolver.
     const fakeCatalog = {
       list: () => resolveAgentCatalog(),
       get: (id: string) => getAgentEntry(id),
@@ -1010,8 +1014,8 @@ describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries
   const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
   let description: string;
   beforeEach(() => {
-    // 同上前一个 describe：必须晚于 HOME 密闭性 fixture 生效才能取 default
-    // resolver 的快照，否则真实 home 的用户角色会混进 prose list。
+    // same as the previous describe: must run after the HOME-hermeticity fixture takes
+    // effect to snapshot the default resolver, else real-home user roles leak into the prose list.
     description = createSpawnSubAgentTool({
       manager: fixtureManager(),
     }).description;
@@ -1032,8 +1036,8 @@ describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries
   });
 
   it("prose list 在原描述之后追加 (不动现有 SSOT 段)", () => {
-    // 原描述的 "Delegate a self-contained task" 必须仍然出现在 prose
-    // list 段之前。
+    // the original description's "Delegate a self-contained task" must still appear
+    // before the prose-list section.
     const introIdx = description.indexOf("Delegate a self-contained task");
     const proseIdx = description.indexOf("Available subagent types");
     expect(introIdx).toBeGreaterThanOrEqual(0);
@@ -1072,9 +1076,10 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
   });
 
   it("exception: WaitTimeout + running → ToolExecutionError，不再合成 ok 数据（SC13）", async () => {
-    // SC13 / plan task 7：墙钟到期 + worker 未终态 = 没有可读交差，父可见
-    // tool result kind 必须非 ok。message 带 taskId + 超时事实，且不得撞
-    // loop-engine 的整回合停因字面量（"cancelled" / "timeout"）。
+    // wall-clock expiry + worker not terminal = no readable handoff; the
+    // parent-visible tool result kind must not be ok. message carries taskId + the
+    // timeout fact and must not collide with loop-engine's whole-turn stop-reason
+    // literals ("cancelled" / "timeout").
     const tool = createSpawnSubAgentTool({
       manager: managerRejectingWait({
         buffer: { status: "running" },
@@ -1096,8 +1101,9 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
   });
 
   it("exception: 终态信封 reason=timeout（per-task timer 路径）→ 同样非 ok（SC13）", async () => {
-    // 第二条超时路径：manager per-task timer 已写 failed 信封、waitFor 正常
-    // resolve —— kind 也不得为 ok（此前只有 running 分支被盯住）。
+    // Second timeout path: manager per-task timer already wrote a failed envelope and
+    // waitFor resolved normally — kind must not be ok either (previously only the
+    // running branch was watched).
     const tool = createSpawnSubAgentTool({
       manager: {
         ...makeFakeManager().manager,
@@ -1192,8 +1198,9 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
   });
 
   it("SC14: 调用方 signal 未 abort 的 SubAgentAbortError → 操作员强杀归因（不是 caller abort / 不是墙钟）", async () => {
-    // 操作员强杀（TUI Ctrl+X → manager.abortTask）不 abort ctx.signal，
-    // executor 因此不归一到严格 "cancelled"；模型可见归因全靠这句文本。
+    // Operator kill (TUI Ctrl+X → manager.abortTask) does not abort ctx.signal, so
+    // executor does not normalize to strict "cancelled"; the model-visible attribution
+    // relies entirely on this text.
     const tool = createSpawnSubAgentTool({
       manager: managerRejectingWait({
         buffer: { status: "running" },
@@ -1213,7 +1220,7 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     expect(message).toContain("task-killed-1");
     expect(message).not.toContain("caller aborted");
     expect(message).not.toContain("wall-clock timeout");
-    // 不得撞 loop-engine 整回合停因字面量（loop-engine.ts:1605-1618）。
+    // must not collide with loop-engine's whole-turn stop-reason literals (loop-engine.ts:1605-1618).
     expect(message).not.toBe("cancelled");
     expect(message).not.toBe("timeout");
   });

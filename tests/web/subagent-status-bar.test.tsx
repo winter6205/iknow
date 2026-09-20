@@ -1,11 +1,12 @@
 /**
- * #358 T8: SubagentStatusBar 渲染断言 — 空 → null，四态徽标 + preview/summary/reason。
+ * SubagentStatusBar render asserts — empty → null; four-state badges + preview/summary/reason.
  *
- * renderToStaticMarkup (tests/web/context-usage-strip.test.tsx 同款；web 包
- * 不带测试框架，root vitest 跑 node env)。组件 props-only，纯展示。
+ * renderToStaticMarkup (same pattern as tests/web/context-usage-strip.test.tsx; the
+ * web package ships no test framework, root vitest runs in node env). The component
+ * is props-only, purely presentational.
  *
- * SC8 acceptance 1：组件测试绿；SC8 acceptance 3：状态变化可见 (running →
- * 完成 / 失败) 在四态徽标 + 内容双重覆盖。
+ * Acceptance covered: component tests green, and state transitions (running →
+ * done / failed) are visible via the four-state badges + content.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -16,7 +17,7 @@ import {
 } from "../../web/src/components/SubagentStatusBar.tsx";
 import type { SubagentStatus } from "../../web/src/api/types.ts";
 
-/** 构造一个 SubagentStatus，只显式列出覆盖到的字段，其余走默认值。 */
+/** Build a SubagentStatus; only fields under test are listed explicitly, the rest take defaults. */
 function item(
   partial: Partial<SubagentStatus> & Pick<SubagentStatus, "state">
 ): SubagentStatus {
@@ -128,7 +129,7 @@ describe("SubagentStatusBar — 四态徽标", () => {
     assert.ok(html.includes("运行中"));
     assert.ok(html.includes("已完成"));
     assert.ok(html.includes("失败"));
-    // 三种 data-state 各出现一次
+    // each of the three data-states appears once
     assert.ok(html.includes('data-state="running"'));
     assert.ok(html.includes('data-state="completed"'));
     assert.ok(html.includes('data-state="failed"'));
@@ -181,7 +182,7 @@ describe("SubagentStatusBar — 终态截断（visibleSubagents）", () => {
       terminal("t6", "completed"),
       item({ state: "starting", taskId: "s1", taskPreview: "活跃乙" }),
     ];
-    // 终态 6 条 → 丢弃最早的 t1；running/starting 全保留。
+    // 6 terminal entries → drop the earliest t1; running/starting all kept.
     assert.deepEqual(
       visibleSubagents(list).map((s) => s.taskId),
       ["r1", "t2", "t3", "t4", "t5", "t6", "s1"]

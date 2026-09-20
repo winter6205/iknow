@@ -1,20 +1,20 @@
 /** @jsxImportSource @opentui/react */
 /**
- * ADR-0092 / SC13: `/config` TUI 集成（filesystem isolation 档切换）。
+ * ADR-0092: `/config` TUI integration (filesystem isolation tier switching).
  *
- * 镜像 `tests/tui/graph-mode.test.tsx` 的 DrivenApp 形态（bun:test +
- * testRender），覆盖：
- *  1. `/config fs workspace` 翻 holder 到 workspace，并触发 onPersistFsMode
- *     回调（fire-and-forget）；
- *  2. `/config status` 回显当前档（不触发 persist）；
- *  3. `/config fs invalid` → usage 文案，holder 不动，不触发 persist；
- *  4. holder 缺席 → notice「未接线」，不抛；
- *  5. Shift+Tab 不动 fs holder（与 PermissionMode 正交）。
+ * Mirrors the DrivenApp shape of `tests/tui/graph-mode.test.tsx` (bun:test +
+ * testRender), covering:
+ *  1. `/config fs workspace` flips the holder to workspace and fires the
+ *     onPersistFsMode callback (fire-and-forget);
+ *  2. `/config status` echoes the current tier (no persist);
+ *  3. `/config fs invalid` → usage text, holder untouched, no persist;
+ *  4. holder absent → `未接线` ("not wired") notice, no throw;
+ *  5. Shift+Tab leaves the fs holder alone (orthogonal to PermissionMode).
  *
- * 该测试依赖 `src/harness/sandbox/fs-mode.ts`（T7 持有主体；T8 追加
+ * Depends on `src/harness/sandbox/fs-mode.ts` (holder plus
  * `parseConfigCommand` / `applyFsModeCommand` / `formatFsModeStatus` /
- * `splitConfigArgs` + 类型 / 常量）落地，否则导入会失败——这是预期的
- * RED（与 `tests/config/fs-mode.test.ts` 同源）。T7 落地后 GREEN。
+ * `splitConfigArgs` + types / constants); without it the import fails — the
+ * expected RED shared with `tests/config/fs-mode.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -140,11 +140,11 @@ describe("TUI 词表 + holder 接通：/config", () => {
     try {
       await app.typeText("/config fs workspace");
       await app.pressEnter();
-      // holder 真翻。
+      // holder actually flipped.
       expect(fsMode.get()).toBe("workspace");
-      // persist 回调被调用一次，且参数 = 目标档。
+      // persist callback invoked once with the target tier.
       expect(persistCalls).toEqual(["workspace"]);
-      // 状态文案落在屏上（含「workspace」+「已切换/下一次」语义词）。
+      // status text lands on screen (contains "workspace" + switch/next-session wording).
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/workspace/);
       expect(frame).toMatch(/已切换|下一次/);
@@ -188,8 +188,8 @@ describe("TUI 词表 + holder 接通：/config", () => {
     try {
       await app.typeText("/config status");
       await app.pressEnter();
-      expect(fsMode.get()).toBe("workspace"); // holder 不动
-      expect(persistCalls).toBe(0); // status 不触发 persist
+      expect(fsMode.get()).toBe("workspace"); // holder untouched
+      expect(persistCalls).toBe(0); // status does not trigger persist
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/workspace/);
     } finally {
@@ -211,7 +211,7 @@ describe("TUI 词表 + holder 接通：/config", () => {
     try {
       await app.typeText("/config fs wrong");
       await app.pressEnter();
-      expect(fsMode.get()).toBe("global"); // holder 不动
+      expect(fsMode.get()).toBe("global"); // holder untouched
       expect(persistCalls).toBe(0);
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/Usage|\/config/);
@@ -222,12 +222,12 @@ describe("TUI 词表 + holder 接通：/config", () => {
 
   test("holder 缺席 → notice「未接线」，不抛", async () => {
     const permissionMode = createPermissionModeContext("default");
-    // 不传 fsMode → props.fsMode 缺席。
+    // No fsMode passed → props.fsMode absent.
     const app = await mountApp({ permissionMode });
     try {
       await app.typeText("/config fs workspace");
       await app.pressEnter();
-      // 不抛、不死锁，屏上含「未接线」语义。
+      // No throw, no deadlock; screen carries the "not wired" semantics.
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/未接线|未注入|未挂载/);
     } finally {
@@ -242,10 +242,10 @@ describe("TUI 词表 + holder 接通：/config", () => {
     try {
       await app.pressShiftTab();
       expect(permissionMode.get()).toBe("full_auto");
-      expect(fsMode.get()).toBe("global"); // fs holder 不被 Shift+Tab 翻
+      expect(fsMode.get()).toBe("global"); // Shift+Tab never flips the fs holder
       await app.pressShiftTab();
       expect(fsMode.get()).toBe("global");
-      expect(permissionMode.get()).toBe("default"); // 两态轮回到 default
+      expect(permissionMode.get()).toBe("default"); // cycling returns to default
     } finally {
       app.destroy();
     }
@@ -264,9 +264,9 @@ describe("TUI 词表 + holder 接通：/config", () => {
     try {
       await app.typeText("/config fs workspace");
       await app.pressEnter();
-      // holder 仍翻（命令 SSOT 已应用），persist 失败由 UI 兜底。
+      // holder still flips (command SSOT already applied); persist failure is caught by the UI.
       expect(fsMode.get()).toBe("workspace");
-      // 屏上落「保存失败 / persist 失败」语义。
+      // Screen lands "save failed / persist 失败" semantics.
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/失败|boom/);
     } finally {
@@ -278,7 +278,7 @@ describe("TUI 词表 + holder 接通：/config", () => {
 describe("命令 SSOT 三函数（值域闭环）", () => {
   test("applyFsModeCommand 直接调用 = TUI `/config` 走的同一条路径", () => {
     const ctx = createFsModeContext("global");
-    // 模拟 TUI:slashRemainder('/config fs workspace') → 'fs workspace'
+    // Simulates the TUI: slashRemainder('/config fs workspace') → 'fs workspace'
     // → splitConfigArgs → ['fs', 'workspace']
     const args = splitConfigArgs("fs workspace");
     const res = applyFsModeCommand(ctx, args);

@@ -1,16 +1,15 @@
 /**
- * T8 (plans/worktree-live-task-root.md §6 T8 / §5 D6) — subagent spawn-time
- * root resolution.
+ * Subagent spawn-time root resolution.
  *
- * Acceptance (plan §6 T8 / §5 D6 + ADR-0040):
+ * Acceptance (ADR-0040):
  *   1. Subagent inherits parent's `taskRoot` **at spawn time**, not at build
  *      time. `createDefaultSubAgentSpawn({ sessionRoot: getter })` reads the
  *      getter each time the spawn closure fires.
  *   2. SubAgentManager's parent-sandbox-root bound check uses the live cell
  *      as upper bound -- otherwise it would reject subroots inside a fresh
  *      rebound tree (the legacy binding to `workspaceRoot` from build-time
- *      is exactly what T8 retires).
- *   3. Before any rebind: behavior byte-identical to today (manager falls
+ *      is exactly what this retires).
+ *   3. Before any rebind: behavior byte-identical to legacy (manager falls
  *      back to `process.cwd()` upper bound; spawn closure no sessionRoot).
  *
  * ADR-0040: subagent = parent session's executor arm. The parent rebinds
@@ -52,7 +51,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 const childProcessMock = await import("node:child_process");
 const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
 
-// ── fake ChildProcess 工厂 ────────────────────────────────────────────────────
+// ── fake ChildProcess factory ─────────────────────────────────────────────────
 
 function makeFakeChild() {
   return Object.assign(new EventEmitter(), {
@@ -73,7 +72,7 @@ function makeFakeChild() {
   };
 }
 
-// ── manager 捕获 spawn ──────────────────────────────────────────────────────
+// ── manager capturing spawn ─────────────────────────────────────────────────
 
 interface CapturedSpawn {
   readonly def: SubAgentDefinition;
@@ -116,7 +115,7 @@ function captureSpawnOpts(call: readonly unknown[]): {
   return { cmd, args, opts };
 }
 
-// ── 临时目录管理 ──────────────────────────────────────────────────────────────
+// ── temp dir management ───────────────────────────────────────────────────────
 
 const tmpRoots: string[] = [];
 
@@ -138,12 +137,12 @@ beforeEach(() => {
   spawnMock.mockImplementation(() => makeFakeChild());
 });
 
-// ── 1. sessionRoot 在 spawn 闭包内读活根 ─────────────────────────────────────
+// ── 1. sessionRoot reads the live cell inside the spawn closure ───────────────
 
 describe("createDefaultSubAgentSpawn sessionRoot read at spawn time", () => {
   it("sessionRoot = getter → spawn closure reads cell current value (rebind updates cwd)", () => {
     // build-engine closure-captured `() => liveTaskRoot.read()`;
-    // 两次 spawn 之间翻 cell,第二次 spawn 必然看到新 cwd。
+    // flip the cell between two spawns; the second spawn must see the new cwd.
     const initialRoot = freshDir("iknow-sub-live-initial-");
     const reboundRoot = freshDir("iknow-sub-live-rebound-");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
@@ -152,7 +151,7 @@ describe("createDefaultSubAgentSpawn sessionRoot read at spawn time", () => {
       sessionRoot: () => cell.read(),
     });
 
-    // 第一次 spawn — cell 还是 initialRoot
+    // first spawn — cell still holds initialRoot
     spawn({ task: "pre" }, "task-pre", {
       task: "pre",
       sandboxRoot: initialRoot,
@@ -165,7 +164,7 @@ describe("createDefaultSubAgentSpawn sessionRoot read at spawn time", () => {
     // rebind
     writeLiveTaskRoot(cell, reboundRoot);
 
-    // 第二次 spawn — cell 已是 reboundRoot,closure 重读。
+    // second spawn — cell now holds reboundRoot; the closure re-reads it.
     spawn({ task: "post" }, "task-post", {
       task: "post",
       sandboxRoot: reboundRoot,
@@ -198,14 +197,15 @@ describe("createDefaultSubAgentSpawn sessionRoot read at spawn time", () => {
   });
 });
 
-// ── 2. manager parent sandboxRoot 走活根 ────────────────────────────────────
+// ── 2. manager parent sandboxRoot uses the live cell ─────────────────────────
 
 describe("SubAgentManager parent sandboxRoot upper-bound uses live cell", () => {
   it("sandboxRootCell getter — after rebind, def in OLD root is rejected", () => {
-    // T8 (D6) hard acceptance:
-    // parentSandboxRoot 由 sandboxRootCell getter 派生。rebind 后,旧根里的
-    // def.sandboxRoot 现在已落在新根之外,应被 typed 拒绝 —— 否则会误放
-    // 工作域扩大(子代理工具写到旧 tree)。
+    // Hard acceptance (ADR-0040 live-cell arm):
+    // parentSandboxRoot derives from the sandboxRootCell getter. After rebind,
+    // def.sandboxRoot inside the OLD root now falls outside the new root and
+    // must be typed-rejected — otherwise the work domain would silently widen
+    // (subagent tools writing into the old tree).
     const oldRoot = freshDir("iknow-sub-mgr-old-");
     const newRoot = freshDir("iknow-sub-mgr-new-");
     const cell: LiveTaskRoot = createLiveTaskRoot(oldRoot);
@@ -214,17 +214,17 @@ describe("SubAgentManager parent sandboxRoot upper-bound uses live cell", () => 
       sandboxRootCell: () => cell.read(),
     });
 
-    // rebind 到 newRoot。
+    // rebind to newRoot.
     writeLiveTaskRoot(cell, newRoot);
 
-    // 旧根内的 def.sandboxRoot = oldRoot 本身 ——
-    // 父上界已切到 newRoot,relative(newRoot, oldRoot) 以 ".." 起头 → typed 拒绝。
+    // def.sandboxRoot inside the old root = oldRoot itself ——
+    // parent upper bound has switched to newRoot, relative(newRoot, oldRoot) starts with ".." → typed reject.
     expect(() => manager.spawn({ sandboxRoot: oldRoot })).toThrow(
       SubAgentSandboxRootError
     );
     expect(calls).toHaveLength(0);
 
-    // 新根内的子路径必须通过。
+    // a subpath inside the new root must pass.
     const sub = join(newRoot, "work");
     mkdirSync(sub, { recursive: true });
     manager.spawn({ sandboxRoot: sub });
@@ -233,21 +233,21 @@ describe("SubAgentManager parent sandboxRoot upper-bound uses live cell", () => 
   });
 
   it("sandboxRootCell getter — before rebind, legacy behavior (parent = initial root)", () => {
-    // 未翻 cell 时,manager 的 sandboxRootCell 表现与冻结值一致。
+    // before the cell flips, manager's sandboxRootCell behaves like a frozen value.
     const parent = freshDir("iknow-sub-mgr-parent-");
     const cell: LiveTaskRoot = createLiveTaskRoot(parent);
     const { manager, calls } = makeManagerCapturingSpawn({
       sandboxRootCell: () => cell.read(),
     });
 
-    // 子路径合法 ——
+    // legal subpath ——
     const sub = join(parent, "work");
     mkdirSync(sub, { recursive: true });
     manager.spawn({ sandboxRoot: sub });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.payload.sandboxRoot).toBe(realpathSync(sub));
 
-    // 父根外拒绝 ——
+    // outside the parent root is rejected ——
     expect(() => manager.spawn({ sandboxRoot: "/etc" })).toThrow(
       SubAgentSandboxRootError
     );
@@ -255,7 +255,7 @@ describe("SubAgentManager parent sandboxRoot upper-bound uses live cell", () => 
   });
 });
 
-// ── 3. 父未 rebind 时:行为与今日一致 ────────────────────────────────────────
+// ── 3. before any parent rebind: behavior identical to legacy ────────────────
 
 describe("SubAgentManager / SubAgentSpawn before rebind: legacy parity", () => {
   it("manager opts.sandboxRoot: 传 string 时行为与今日一致", () => {
@@ -272,7 +272,7 @@ describe("SubAgentManager / SubAgentSpawn before rebind: legacy parity", () => {
   });
 
   it("manager 既无 sandboxRoot 也无 sandboxRootCell → fallback process.cwd()", () => {
-    // 兼容既有 manager.test.ts 的 makeHarness(不传 sandboxRoot)。
+    // compatible with the existing manager.test.ts makeHarness (passes no sandboxRoot).
     const { manager, calls } = makeManagerCapturingSpawn({});
     manager.spawn({});
     expect(calls).toHaveLength(1);

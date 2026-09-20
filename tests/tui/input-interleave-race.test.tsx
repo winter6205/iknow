@@ -2,19 +2,20 @@
 /**
  * tests/tui/input-interleave-race.test.tsx
  *
- * 交错输入判别性回归：语音输入（bracketed paste）与手动 keypress 交错时
- * 不丢字。
+ * Discriminating regression for interleaved input: voice input (bracketed
+ * paste) mixed with manual keypresses must not drop characters.
  *
- * 两条写入路径：
- *  - paste 路径（state-first）：app.tsx usePaste → setInputValue(prev+text)
+ * Two write paths:
+ *  - paste path (state-first): app.tsx usePaste → setInputValue(prev+text)
  *    → render → prompt-input sync effect setText；
- *  - keypress 路径（buffer-first）：字符直接进原生 textarea buffer → 同步
- *    emit content-changed → handleContentChange → onChange(ta.plainText) 绝对值
- *    替换。
+ *  - keypress path (buffer-first): characters go straight into the native
+ *    textarea buffer → synchronously emit content-changed →
+ *    handleContentChange → onChange(ta.plainText) replaces by absolute value.
  *
- * paste 的 functional update 排队未 commit 时，紧接的 keypress 绝对值
- * setState 基于旧 state 起算（不含 paste 段），commit 时 last-writer-wins
- * 把排队中的 paste 段覆盖掉 —— 中间字被吞。
+ * When the paste's functional update is queued but not committed, the next
+ * keypress's absolute-value setState is computed from stale state (missing
+ * the paste segment), and last-writer-wins at commit time overwrites the
+ * queued paste segment — middle characters get swallowed.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -74,8 +75,9 @@ describe("paste 与 keypress 交错输入不丢字", () => {
   test("paste 段后紧跟 keypress 字符 → 两段都在 buffer", async () => {
     const setup = await renderApp();
     try {
-      // 语音输入吐一段（bracketed paste），随后用户手动补一个字符 —— paste 的
-      // functional update 排队未 commit 时 keypress 绝对值 onChange 会覆盖它。
+      // Voice input emits a segment (bracketed paste), then the user manually
+      // types one more character — while the paste's functional update is
+      // queued but uncommitted, the keypress's absolute-value onChange would overwrite it.
       await setup.mockInput.pasteBracketedText("语音段甲");
       setup.mockInput.pressKey("甲");
       await setup.waitForVisualIdle();
@@ -106,7 +108,8 @@ describe("paste 与 keypress 交错输入不丢字", () => {
   test("多轮 paste/keypress 快速交错 → 全部内容按序保留", async () => {
     const setup = await renderApp();
     try {
-      // 语音输入引擎吐字模式：paste 段与个别修正 keypress 交替，间隔 <15ms。
+      // Voice-engine output pattern: paste segments alternate with single-char
+      // correction keypresses, <15ms apart.
       const script: Array<["paste" | "key", string]> = [
         ["paste", "第一"],
         ["key", "修"],

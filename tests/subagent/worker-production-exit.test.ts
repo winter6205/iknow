@@ -1,17 +1,19 @@
 /**
- * ADR-0111 T4 — 生产入口 `runSubagentWorker` 的出口分流（进程内入口走读，
- * 手法同 tests/subagent/fs-mode-propagation-entry.test.ts：真 stdin / stdout /
- * exit 替身，唯一被替身的是模型面）。
+ * ADR-0111 — exit routing of the production entry `runSubagentWorker`
+ * (in-process entry walk-through; same technique as
+ * tests/subagent/fs-mode-propagation-entry.test.ts: real stdin / stdout /
+ * exit stand-ins, only the model surface is stubbed).
  *
- * 钉住的不变式（ADR-0111 不变式 (b) + Decision 2(a)/(c)）：
- *   1. stub 断流（ModelStreamIncompleteError 直抛，visible=true 不重试）
- *      → loop 收口 protocolError + apiError → failed envelope
- *      reason=modelTransient，**exit 0**（run() 派生的结构化失败走信封，
- *      不冒用 exit 2）；stderr 无 `[subagent-worker] fatal`。
- *   2. parse 之后的装配阶段逃逸（loadIknowEnv 抛 plain-object typed error）
- *      → best-effort failed envelope 写 stdout + **exit 1**；不再冒用 2；
- *      summary 按字段渲染，不塌缩成 [object Object]
- *      （code-quality typed-error catch 契约）。
+ * Pinned invariants (ADR-0111 invariant (b) + Decision 2(a)/(c)):
+ *   1. stubbed stream cut (ModelStreamIncompleteError thrown directly,
+ *      visible=true, no retry) → loop converges on protocolError + apiError →
+ *      failed envelope reason=modelTransient, **exit 0** (structured failure
+ *      derived from run() goes through the envelope, never borrows exit 2);
+ *      stderr has no `[subagent-worker] fatal`.
+ *   2. assembly-stage escape after parse (loadIknowEnv throws a plain-object
+ *      typed error) → best-effort failed envelope on stdout + **exit 1**;
+ *      exit 2 is no longer borrowed; summary renders field by field, never
+ *      collapsing to [object Object] (typed-error catch contract).
  */
 import {
   chmodSync,
@@ -25,10 +27,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// 模型面替身：createRealAnthropicAdapter 返回 step 直接抛
-// ModelStreamIncompleteError(visible=true) 的 stub —— 复现 issue #1065 的
-// 「上游流断而未产出完整 message」形态，且不依赖真 LLM key。
-// withTransportRetry / translateAnthropicTransportFault / loop 收口保持真实现。
+// Model-surface stand-in: createRealAnthropicAdapter returns a stub whose
+// step throws ModelStreamIncompleteError(visible=true) directly — reproducing
+// the "upstream stream cut before a complete message" shape without depending
+// on a real LLM key.
+// withTransportRetry / translateAnthropicTransportFault / loop convergence stay real.
 vi.mock(
   "../../src/harness/model-adapter/anthropic-adapter.js",
   async (importOriginal) => {
@@ -91,7 +94,7 @@ function scratch(prefix: string): string {
   return path;
 }
 
-/** 只含 bwrap 替身的 PATH 前缀目录（装配期探针调用不触真沙箱）。 */
+/** PATH-prefix dir holding only a bwrap shim (assembly probes never touch the real sandbox). */
 function makeBwrapShimDir(): string {
   const dir = scratch("iknow-t4-exit-bin-");
   const shim = join(dir, "bwrap");
@@ -230,7 +233,8 @@ describe("runSubagentWorker 出口（ADR-0111 不变式 (b)：exit 2 归还）",
       installApiKey: true,
     });
     expect(result.threw).toBe(null);
-    // run() 派生的结构化失败 → exit 0（不冒用 2；exit≠0 属协议层/进程级）。
+    // Structured failure derived from run() -> exit 0 (exit 2 is not
+    // borrowed; exit != 0 belongs to the protocol/process layer).
     expect(
       result.exitCode,
       `stdout=${result.stdout} stderr=${result.stderr}`
@@ -252,8 +256,9 @@ describe("runSubagentWorker 出口（ADR-0111 不变式 (b)：exit 2 归还）",
     const result = await runWorkerEntry({
       home,
       sandboxRoot,
-      // provider `acme` 的 apiKeyEnv 显式不设 → loadIknowEnv 必抛
-      // plain-object typed error（run 阶段逃逸，非信封协议错误）。
+      // provider `acme`'s apiKeyEnv is deliberately unset → loadIknowEnv
+      // must throw a plain-object typed error (run-stage escape, not an
+      // envelope protocol error).
       settingsJson: {
         llm: {
           model: "acme/foo",
@@ -271,7 +276,7 @@ describe("runSubagentWorker 出口（ADR-0111 不变式 (b)：exit 2 归还）",
       installApiKey: false,
     });
     expect(result.threw).toBe(null);
-    // run 阶段逃逸不再冒用 exit 2（ADR-0111 不变式 (b)）。
+    // run-stage escapes no longer borrow exit 2 (ADR-0111 invariant (b)).
     expect(result.exitCode).toBe(1);
     const envelope = JSON.parse(result.stdout.trim()) as {
       status: string;

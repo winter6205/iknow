@@ -1,25 +1,24 @@
 /**
- * GREEN (systematic-debugging Phase 4 / FIX) — 非成功停因必须映射为失败信封。
+ * Non-success stop reasons must map to a failed envelope.
  *
- * 复现目标:钉死「正常任务里子代理失败」在信封层的真实形态。
+ * Pins the real envelope shape for "sub-agent fails inside a normal task".
  *
- * `runWorkerOnce` 自己的纪律(worker.ts 注释)是:
- *   「run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason
- *     形态返回(不 throw), 但 worker 必须标 failed —— 父代理 drain 收到 ok
- *     却带 protocolError stopReason 会误判子代理成功」
+ * worker.ts discipline: run() returning normally ≠ success — harness protocol
+ * errors / empty final responses come back as a stopReason (no throw), but the
+ * worker must still mark failed, otherwise the parent's drain sees ok +
+ * protocolError and misjudges the child as successful. That rule only covered
+ * `fused` / `protocolError` / `emptyFinalResponse`; two more non-success stop
+ * reasons leaked past it straight into `toOkEnvelope`:
+ *   - `nonSuccessStop` — supplier `stop_reason: "max_tokens"` (token cap hit;
+ *     mapped by anthropic-adapter to `supplierStop: "truncation"`);
+ *   - `timeout` — per-call model race expiry (loop-engine `timerTimeout`).
  *
- * 该纪律只覆盖了 `fused` / `protocolError` / `emptyFinalResponse` 三值。
- * 另外两个非成功停因漏在门外,直接落到 `toOkEnvelope`:
- *   - `nonSuccessStop` —— 供应商 `stop_reason: "max_tokens"`(token 帽撞顶,
- *     经 anthropic-adapter 映射为 `supplierStop: "truncation"`);
- *   - `timeout` —— per-call 模型调用竞速到点(loop-engine `timerTimeout`)。
+ * Both must yield `status:"failed"`, else the parent-side manager migrates to
+ * `completed` on `env.status === "ok"`.
  *
- * 两者都必须产出 `status:"failed"`，否则父侧 manager 会按
- * `env.status === "ok"` 直接迁移到 `completed`。
- *
- * 本文件保持 hermetic:只走 `runWorkerOnce` + stub-model,不碰
- * `createWorkerDeps` / `createDefaultAciRegistry`(那条链装配期要 bwrap,
- * 须进 CI --exclude 名单)。
+ * Hermetic: only `runWorkerOnce` + stub-model; avoids `createWorkerDeps` /
+ * `createDefaultAciRegistry` (that chain needs bwrap at assembly time and is
+ * on the CI --exclude list).
  */
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
@@ -29,7 +28,7 @@ import { assistantResult } from "../cli/_fixtures.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 
-/** 与 worker.test.ts 的 makeDeps 同形态:占位 registry/executor,run 短链。 */
+/** Same shape as worker.test.ts makeDeps: placeholder registry/executor, short run path. */
 function makeDeps(adapter: LoopEngineDeps["adapter"]): LoopEngineDeps {
   return {
     adapter,
@@ -91,10 +90,11 @@ describe("subagent worker: 非成功停因 → 信封状态 (Phase 4 修复)", (
   it("per-call 模型调用竞速到点 (stopReason=timeout) 不得报成 ok", async () => {
     vi.useFakeTimers();
     try {
-      // deps.timeoutMs = per-call 竞速(envelope.timeoutMs 的 per-task 寿命
-      // 不参与,见 applyEnvelopeOverrides / D8)。stub 拖过竞速窗口 → run()
-      // 返回 stopReason="timeout",且该 abort 不是 SIGTERM(controller.signal
-      // 的 reason 不是 "subagent-timeout"),故不走既有的优雅收尾分支。
+      // deps.timeoutMs = per-call race (the per-task lifetime of
+      // envelope.timeoutMs is not involved — see applyEnvelopeOverrides). The
+      // stub outlives the race window → run() returns stopReason="timeout",
+      // and that abort is not SIGTERM (the reason on controller.signal is not
+      // "subagent-timeout"), so the existing graceful-finish branch is skipped.
       const adapter = {
         ...createStubModel({
           responses: [assistantResult({ texts: ["late answer"] })],
@@ -106,7 +106,7 @@ describe("subagent worker: 非成功停因 → 信封状态 (Phase 4 修复)", (
         workerEnvelope: BASE_ENVELOPE,
         deps: { ...makeDeps(adapter), timeoutMs: 300_000 },
       });
-      // 让 run 的初始微任务(system?.() / raceModel 计时器注册)先落盘
+      // let run's initial microtasks (system?.() / raceModel timer registration) settle first
       await Promise.resolve();
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(500_000);

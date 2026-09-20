@@ -1,25 +1,22 @@
 /**
- * #357 T1 — SubAgentManager sandboxRoot 收窄校验（manager 单点 prefix-of-parent）。
+ * SubAgentManager sandboxRoot narrowing — single validation point in the manager
+ * (prefix-of-parent).
  *
- * 设计契约（spec SC1 / SC2 / SC8 + plan T1 acceptance 1-3）：
- *   - 所有 spawn 路径必经 `buildWorkerPayload` 单点校验 —— 校验失败同步抛
- *     SubAgentSandboxRootError，spawn 工厂不被调用。
- *   - 校验用 realpath 防符号链接逃逸；越界（含 ".."、绝对路径超出、symlink 出父）
- *     一律拒绝并 typed error。
- *   - 缺省行为变更：def.sandboxRoot 缺席时 envelope 写入**父 sandboxRoot**
- *     （manager 的 sandboxRoot opt），不是 process.cwd()（SC8）。
- *   - 缺省边界兼容：manager 未传 sandboxRoot opt 时，fallback 仍为 process.cwd()
- *     （manager.test.ts 既有用例的覆盖不降）。
+ * Design contract:
+ *   - Every spawn path goes through `buildWorkerPayload` validation — on failure
+ *     throw SubAgentSandboxRootError synchronously; the spawn factory is never called.
+ *   - Validation uses realpath to block symlink escape; out-of-scope requests
+ *     ("..", absolute paths beyond parent, symlinks resolving outside) are rejected
+ *     with a typed error.
+ *   - Default: when def.sandboxRoot is absent the envelope carries the **parent
+ *     sandboxRoot** (manager's sandboxRoot opt), not process.cwd().
+ *   - Compat boundary: when the manager has no sandboxRoot opt, fallback stays
+ *     process.cwd() (existing manager.test.ts coverage must not regress).
  *
- * 测试覆盖六类（spec mutate-write-contract SC6/SC7 + 「输入五类」表 B）：
- *   1 正常：合法子路径 → 通过校验、payload.sandboxRoot === resolved
- *   2 失败：越界绝对路径 → SubAgentSandboxRootError，spawnCalls.length === 0；
- *          符号链接逃逸 → realpath 解析后拒绝
- *   3 边界：相等合法（请求 = 父本身）；缺省继承父 sandboxRoot（不是 process.cwd()）
- *   4 相对：def.sandboxRoot = "sub" → resolve 通过；"../outside" → 拒绝
- *   5 不存在路径（父根下尚未存在的子路径，SC6）→ **词法放行**：spawn 正常
- *          携带 resolve(path)；`/tmp` 当 sandboxRoot（SC7）仍拒
- *   6 spawn-subagent 透传断言（独立测试文件，详见 spawn-subagent.test.ts）
+ * Coverage: valid child path passes; out-of-scope absolute path and symlink escape
+ * reject without spawning; lexical prefix pass for not-yet-existing child paths;
+ * /tmp rejection; default inheritance; relative paths; error context fields.
+ * spawn-subagent pass-through is asserted separately in spawn-subagent.test.ts.
  */
 import assert from "node:assert/strict";
 import {
@@ -45,7 +42,7 @@ import {
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { SubAgentSandboxRootError } from "../../src/harness/errors.ts";
 
-// ── fake ChildProcess 工厂（与 manager.test.ts 同形）─────────────────────────
+// ── fake ChildProcess factory (same shape as manager.test.ts) ────────────────
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -75,7 +72,7 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-/** 收 wrapper：记录 spawn 入参 + spawnCalls，供测试断言。 */
+/** Collecting wrapper: records spawn args + spawnCalls for assertions. */
 function makeHarness(
   opts: {
     readonly parentSandboxRoot?: string;
@@ -101,7 +98,7 @@ function makeHarness(
   return { manager, spawned, spawnCalls };
 }
 
-// ── helper：fresh tmpdir 父 + 子 ─────────────────────────────────────────────
+// ── helper: fresh tmpdir parent + child ─────────────────────────────────────
 
 function freshTmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -111,11 +108,11 @@ function cleanup(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch {
-    /* 忽略 */
+    /* ignore */
   }
 }
 
-// ── fixture 1:正常路径 ──────────────────────────────────────────────────────
+// ── fixture 1: happy path ───────────────────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — 正常路径", () => {
   it("合法子路径 → spawn 成功，payload.sandboxRoot === realpathSync(子路径)", () => {
@@ -136,7 +133,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 正常路径", () => {
   });
 });
 
-// ── fixture 2:越界失败 ──────────────────────────────────────────────────────
+// ── fixture 2: out-of-scope failure ─────────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", () => {
   it("越界绝对路径 (/etc) → 抛 SubAgentSandboxRootError，spawn 工厂未被调用", () => {
@@ -145,7 +142,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
       const { manager, spawnCalls, spawned } = makeHarness({
         parentSandboxRoot: parent,
       });
-      // 父 = process.cwd() 之外的真实目录；def.sandboxRoot 越界到 /etc
+      // parent = a real dir outside process.cwd(); def.sandboxRoot escapes to /etc
       assert.throws(
         () => manager.spawn({ sandboxRoot: "/etc" }),
         (err: unknown) => {
@@ -153,7 +150,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
           assert.equal(err.name, "SubAgentSandboxRootError");
           assert.ok(err.context.parentSandboxRoot.length > 0);
           assert.equal(err.context.requested, "/etc");
-          // 错误消息面向模型：含 sandboxRoot / parent 概念
+          // error message is model-facing: mentions sandboxRoot / parent concepts
           assert.match(err.message, /sandboxRoot/i);
           return true;
         }
@@ -170,7 +167,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
     const outside = freshTmpDir("sb-outside-");
     const escape = join(parent, "escape");
     try {
-      // parent/escape → outside（符号链接）
+      // parent/escape → outside (symlink)
       symlinkSync(outside, escape);
       const { manager, spawnCalls } = makeHarness({
         parentSandboxRoot: parent,
@@ -187,9 +184,10 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
   });
 
   it("ENOENT（父根下尚未存在的子路径，SC6）→ 词法放行：spawn 携带 resolve(path)", () => {
-    // spec mutate-write-contract SC6：「父根下尚未存在的子路径」**不是** outside。
-    // 词法 prefix 裁决通过即可放行；worker 侧 fs 工具对不存在路径的处理由其
-    // 自身负责，manager 不替它建目录（fail-open at validation, fail at use site）。
+    // A not-yet-existing child path under the parent root is **not** outside.
+    // Lexical prefix verdict passing is enough; handling of missing paths on the
+    // worker's fs side is the worker's own concern — the manager does not create
+    // directories for it (fail-open at validation, fail at use site).
     const parent = freshTmpDir("sb-parent-");
     try {
       const { manager, spawnCalls } = makeHarness({
@@ -198,7 +196,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
       const ghost = join(parent, "not-yet-created-dir");
       assert.doesNotThrow(() => manager.spawn({ sandboxRoot: ghost }));
       assert.equal(spawnCalls.length, 1);
-      // payload.sandboxRoot = resolve(ghost) 的词法值（不创建目录）
+      // payload.sandboxRoot = lexical resolve(ghost) value (no directory created)
       assert.equal(spawnCalls[0]!.payload.sandboxRoot, resolve(ghost));
     } finally {
       cleanup(parent);
@@ -206,8 +204,8 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
   });
 
   it("/tmp 当 sandboxRoot（SC7）→ 仍拒 outside", () => {
-    // spec mutate-write-contract SC7：/tmp 是常用逃逸候选父根不在 /tmp 之下时
-    // 仍应被 typed 拒绝；不变式：词法 prefix 判定即可，与路径是否存在无关。
+    // /tmp is a common escape candidate; when the parent root is not under /tmp it
+    // must still be typed-rejected. Invariant: lexical prefix verdict only, independent of path existence.
     const parent = freshTmpDir("sb-parent-");
     try {
       const { manager, spawnCalls } = makeHarness({
@@ -224,22 +222,23 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
   });
 
   it("symlinked 父根 + 父根下尚未存在的子路径（SC6）→ 放行，不假越界", () => {
-    // 不变式（review Medium2 回归）：ENOENT fallback 的 child 取「最近存在
-    // 祖先的 realpath + 未解析后缀」，与 parent 臂 realpath 形态对齐 ——
-    // 父根以 symlink 形态传入时（WSL /tmp → /tmpXXX 类、macOS /var →
-    // /private/var），纯词法 child 对 realpath(parent) 会假越界。
-    // spec 来源：SC6「父根下尚未存在的子路径不得报 outside」。
+    // Invariant: the ENOENT fallback builds the child as "realpath of nearest
+    // existing ancestor + unresolved suffix", aligning with the parent arm's
+    // realpath shape — when the parent root arrives as a symlink (WSL /tmp →
+    // /tmpXXX, macOS /var → /private/var), a purely lexical child against
+    // realpath(parent) would falsely report outside. A not-yet-existing child
+    // under the parent root must never report outside.
     const real = freshTmpDir("sb-real-");
     const link = join(freshTmpDir("sb-link-"), "parent-link");
     symlinkSync(real, link);
     try {
       const { manager, spawnCalls } = makeHarness({
-        parentSandboxRoot: link, // manager 内部 realpath 成 real 形态
+        parentSandboxRoot: link, // manager realpaths it to the real form internally
       });
       const ghost = join(link, "not-yet-created-dir");
       assert.doesNotThrow(() => manager.spawn({ sandboxRoot: ghost }));
       assert.equal(spawnCalls.length, 1);
-      // payload 携带 real 形态（ghost 的存在祖先 = link → realpath 成 real）
+      // payload carries the real form (ghost's existing ancestor = link → realpaths to real)
       assert.equal(
         spawnCalls[0]!.payload.sandboxRoot,
         join(realpathSync(real), "not-yet-created-dir")
@@ -251,7 +250,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
   });
 });
 
-// ── fixture 3:边界 ──────────────────────────────────────────────────────────
+// ── fixture 3: boundaries ───────────────────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — 边界", () => {
   it("def.sandboxRoot = 父本身（相等，合法）→ payload.sandboxRoot === parent", () => {
@@ -271,15 +270,15 @@ describe("SubAgentManager sandboxRoot 收窄 — 边界", () => {
   it("def.sandboxRoot 缺席 → envelope 继承父 sandboxRoot（不是 process.cwd()）(SC8)", () => {
     const parent = freshTmpDir("sb-parent-");
     try {
-      // 显式给 manager 一个 ≠ process.cwd() 的 parentSandboxRoot
+      // explicitly give the manager a parentSandboxRoot ≠ process.cwd()
       const { manager, spawnCalls } = makeHarness({
         parentSandboxRoot: parent,
       });
-      // def 不带 sandboxRoot
+      // def without sandboxRoot
       manager.spawn({ task: "do work" });
       assert.equal(spawnCalls.length, 1);
       const expected = realpathSync(parent);
-      // 关键断言：缺省 = 父 sandboxRoot，不是 process.cwd()
+      // key assertion: default = parent sandboxRoot, not process.cwd()
       assert.equal(spawnCalls[0]!.payload.sandboxRoot, expected);
       assert.notEqual(spawnCalls[0]!.payload.sandboxRoot, process.cwd());
     } finally {
@@ -288,7 +287,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 边界", () => {
   });
 
   it("manager 未传 sandboxRoot opt（直造 manager）→ fallback = process.cwd()（兼容既有测试）", () => {
-    // 既有 manager.test.ts 的 makeHarness 不传 sandboxRoot，行为兼容
+    // existing manager.test.ts makeHarness passes no sandboxRoot — behavior stays compatible
     const { manager, spawnCalls } = makeHarness();
     manager.spawn({});
     assert.equal(spawnCalls.length, 1);
@@ -299,18 +298,18 @@ describe("SubAgentManager sandboxRoot 收窄 — 边界", () => {
   });
 });
 
-// ── fixture 4:相对路径 ──────────────────────────────────────────────────────
+// ── fixture 4: relative paths ───────────────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — 相对路径", () => {
   it("相对路径 'sub' 在父内 → resolve 后通过（process.cwd 切换场景）", () => {
-    // 真实测试 'sub' 形态：直接 process.chdir 到父目录，再提交相对路径
+    // exercise the real 'sub' form: chdir into the parent dir, then submit a relative path
     const parent = freshTmpDir("sb-parent-");
     const sub = join(parent, "sub");
     mkdirSync(sub);
     const originalCwd = process.cwd();
     try {
       process.chdir(parent);
-      // 父 = parent = process.cwd()
+      // parent = parent = process.cwd()
       const { manager, spawnCalls } = makeHarness({
         parentSandboxRoot: parent,
       });
@@ -330,7 +329,7 @@ describe("SubAgentManager sandboxRoot 收窄 — 相对路径", () => {
       const { manager, spawnCalls } = makeHarness({
         parentSandboxRoot: parent,
       });
-      // 用更可靠的越界相对路径：直接 relative(parent, outside) 必含 '..'
+      // more reliable escaping relative path: relative(parent, outside) always contains '..'
       const relOutside = relative(parent, outside);
       assert.ok(relOutside.startsWith(".."));
       assert.throws(
@@ -345,12 +344,12 @@ describe("SubAgentManager sandboxRoot 收窄 — 相对路径", () => {
   });
 });
 
-// ── fixture 4b:overflow（spec 表 B）──────────────────────────────────────────
+// ── fixture 4b: overflow ────────────────────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — overflow", () => {
   it("极长相对路径仍在父根下 → 词法 prefix 裁决通过，不报笼统 outside", () => {
-    // spec mutate-write-contract 表 B overflow：长度本身不改变裁决 —— 路径
-    // 词法仍在父根下就走正常放行分支，不得因长度炸成笼统 outside。
+    // Length alone must not change the verdict — a path still lexically under the
+    // parent root takes the normal pass branch; it must not blow up into a generic outside.
     const parent = freshTmpDir("sb-parent-");
     try {
       const { manager, spawnCalls } = makeHarness({
@@ -362,7 +361,7 @@ describe("SubAgentManager sandboxRoot 收窄 — overflow", () => {
       const deepRel = deepSegments.join("/");
       assert.ok(deepRel.length > 1000);
       const deepAbs = join(parent, deepRel);
-      // 词法在父根内但不存在 → SC6 词法放行，payload 携带 resolve 值
+      // lexically inside the parent root but nonexistent → lexical pass, payload carries resolve value
       manager.spawn({ sandboxRoot: deepAbs });
       assert.equal(spawnCalls.length, 1);
       assert.equal(spawnCalls[0]!.payload.sandboxRoot, resolve(deepAbs));
@@ -372,19 +371,19 @@ describe("SubAgentManager sandboxRoot 收窄 — overflow", () => {
   });
 });
 
-// ── fixture 4c:concurrent / exception（spec 表 B）────────────────────────────
+// ── fixture 4c: concurrent / exception ──────────────────────────────────────
 
 describe("SubAgentManager sandboxRoot 收窄 — exception", () => {
-  // concurrent: // N/A: pure（buildWorkerPayload 同步校验，无共享可变状态）
+  // concurrent: N/A — pure (buildWorkerPayload validates synchronously, no shared mutable state)
 
   it("父根外绝对路径 → outside（SubAgentSandboxRootError）", () => {
-    // spec 表 B exception 1：词法在父根外 = outside，与路径是否存在无关。
+    // Exception 1: lexically outside the parent root = outside, independent of path existence.
     const parent = freshTmpDir("sb-parent-");
     try {
       const { manager, spawnCalls } = makeHarness({
         parentSandboxRoot: parent,
       });
-      // 不存在的父根外绝对路径：词法裁决即可拒绝，不依赖 realpath 成功
+      // nonexistent absolute path outside the parent root: lexical verdict rejects, no realpath needed
       assert.throws(
         () =>
           manager.spawn({
@@ -399,9 +398,9 @@ describe("SubAgentManager sandboxRoot 收窄 — exception", () => {
   });
 
   it("realpath 非 ENOENT I/O 错误（EACCES）→ 原样 rethrow，不是 SubAgentSandboxRootError", () => {
-    // spec 表 B exception 2：I/O 故障必须原样暴露，不得包装成 outside
-    // （error-handling-enforcer：ENOENT 文案与 outside 拆开后，非 ENOENT
-    // 也不能被塞进同一个 typed 错误域）。
+    // Exception 2: I/O faults must surface verbatim, never wrapped as outside
+    // (once ENOENT wording is split from outside, non-ENOENT errors must not be
+    // swept into the same typed-error domain either).
     const parent = freshTmpDir("sb-parent-");
     const inaccessible = join(parent, "inaccessible");
     mkdirSync(inaccessible);
@@ -425,14 +424,14 @@ describe("SubAgentManager sandboxRoot 收窄 — exception", () => {
       );
       assert.equal(spawnCalls.length, 0);
     } finally {
-      // 先恢复权限再清理，否则 rmSync 也 EACCES
+      // restore permissions before cleanup, otherwise rmSync also hits EACCES
       chmodSync(inaccessible, 0o755);
       cleanup(parent);
     }
   });
 });
 
-// ── fixture 5:error context 字段契约 ─────────────────────────────────────────
+// ── fixture 5: error context field contract ─────────────────────────────────
 
 describe("SubAgentSandboxRootError context 字段契约", () => {
   it("context 包含 parentSandboxRoot (resolved) + requested (原样)", () => {
@@ -474,7 +473,7 @@ describe("SubAgentSandboxRootError context 字段契约", () => {
   });
 });
 
-// ── fixture 6:createSubAgentManager opts.sandboxRoot 验证 ───────────────────
+// ── fixture 6: createSubAgentManager opts.sandboxRoot validation ────────────
 
 describe("createSubAgentManager opts.sandboxRoot 字段契约", () => {
   it("opts 缺省时不破坏 SubAgentManager 接口形状", () => {

@@ -1,23 +1,24 @@
 /**
- * T5 (ADR-0071 Decision 1 +
- * ADR-0035 同日 Amendment) — 子代理记录嵌套进父会话文件夹。
+ * ADR-0071 Decision 1 + ADR-0035 same-day amendment — sub-agent records nest
+ * under the parent conversation folder.
  *
- * SC8 + L2 + 操作员补丁:每个子代理的 lifecycle / content trace 都落
- * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,配 `.meta.json`,
- * meta 至少含 `{agentType, toolUseId, spawnDepth}`。
+ * SC8 + L2 + operator patch: each sub-agent's lifecycle / content trace lands
+ * at `<parent conversation dir>/subagents/agent-<taskId>.jsonl` with a
+ * `.meta.json` containing at least `{agentType, toolUseId, spawnDepth}`.
  *
- * Acceptance (本文件):
- *   1. 并发两个子代理 → subagents/ 下两个文件,文件名集合 == 两次 spawn
- *      返回的 taskId 集合(绝无随机 UUID 聚合单文件,绝无 conversationId:"subagent"
- *      字面聚合单文件)。
- *   2. 每个文件含 lifecycle 三类记录 (subagent_spawn / subagent_state_change /
- *      subagent_stop) 且第一行的 `subagent_id` == taskId。
- *   3. 每个文件旁有 `.meta.json`,至少含 `agentType`;toolUseId / spawnDepth
- *      缺席时按 Postel 省略对应键。
- *   4. 新 worker stderr 落在 `subagents/<taskId>/stderr.log`
- *      （旧 `subagents/stderr/<taskId>.log` 不迁）。
- *   5. `agent-*` 不直接出现在项目根(项目身份层级 = `<baseDir>/projects/<slug>`
- *      顶层不能有 agent-* 目录;spec SC8 acceptance 写法)。
+ * Acceptance (this file):
+ *   1. two concurrent sub-agents → two files under subagents/; the filename
+ *      set == the taskIds returned by the two spawns (never a random-UUID
+ *      aggregate file, never a conversationId:"subagent" literal aggregate file).
+ *   2. each file carries the three lifecycle record kinds (subagent_spawn /
+ *      subagent_state_change / subagent_stop) and line 1's `subagent_id` == taskId.
+ *   3. each file has a sibling `.meta.json` with at least `agentType`;
+ *      toolUseId / spawnDepth keys omitted per Postel when absent.
+ *   4. new worker stderr lands at `subagents/<taskId>/stderr.log`
+ *      (legacy `subagents/stderr/<taskId>.log` is not migrated).
+ *   5. `agent-*` never appears directly at the project root (the identity
+ *      layer `<baseDir>/projects/<slug>` must not contain agent-* dirs; spec
+ *      SC8 acceptance wording).
  */
 
 import assert from "node:assert/strict";
@@ -57,7 +58,7 @@ interface FakeChild {
   emit: (event: string | symbol, ...args: unknown[]) => boolean;
 }
 
-// stub process exit is sufficient — signals via node:os 等价。
+// stub process exit is sufficient — equivalent to real signals via node:os.
 type NodejsSignals = NodeJS.Signals;
 
 function makeFakeChild(): FakeChild {
@@ -98,11 +99,11 @@ let projectSlugDir: string;
 
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), "iknow-per-agent-"));
-  // 模拟父会话文件夹 = <baseDir>/projects/<slug>/<conversationId>
+  // simulate the parent conversation dir = <baseDir>/projects/<slug>/<conversationId>
   projectSlugDir = join(tempRoot, "projects", "demo-slug");
   projectDir = join(projectSlugDir, "conv-123");
   subagentsDir = join(projectDir, "subagents");
-  // mkdir 父文件夹 —— manager 写盘只建 subagents/, 父文件夹需先存在
+  // mkdir the parent dir — the manager only creates subagents/ itself; the parent must pre-exist
   mkdirSync(projectDir, { recursive: true });
 });
 
@@ -112,8 +113,8 @@ afterEach(() => {
 
 function makeManager(opts: {
   readonly subagentsDir?: string | undefined;
-  /** review-fix (M5):hub 形态装配件 —— 仅传 projectDir,manager 内派生
-   *  per-conversation 叶子。与 subagentsDir 互斥共用。 */
+  /** hub-form assembly option — pass projectDir only and the manager derives
+   *  the per-conversation leaf. Mutually exclusive with subagentsDir. */
   readonly projectDir?: string | undefined;
   readonly sandboxRoot?: string;
 }): {
@@ -150,10 +151,10 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     for (const id of taskIds) {
       const filePath = workerRecordPath(subagentsDir, id);
       assert.ok(existsSync(filePath), `expected ${filePath} on disk`);
-      // 绝无 "subagent" 字面感(已退役的 conversationId 假 scope)。
+      // never the "subagent" literal (the retired fake conversationId scope).
       assert.notEqual(id, "subagent");
-      // taskId 形如 uuid;worker content trace 之前用 randomUUID() 是因为
-      // L2 假 scope 不存在 — 现在每 task 自带独立 uuid 文件名。
+      // taskId is a uuid; the worker content trace used randomUUID() back when
+      // the L2 fake scope did not exist — now each task gets its own uuid file name.
       assert.match(
         id,
         /^[0-9a-f-]{36}$/i,
@@ -164,7 +165,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
 
     await manager.shutdown();
 
-    // 文件名集合 == taskId 集合(操作员补丁断言)
+    // filename set == taskId set (operator-patch assertion)
     const files = listSubagentRecordPaths(subagentsDir).map((p) => {
       const nestedId = p.split("/").at(-2);
       return nestedId ?? p;
@@ -193,9 +194,9 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     assert.ok(types.includes("subagent_spawn"), types.join(","));
     assert.ok(types.includes("subagent_state_change"), types.join(","));
     assert.ok(types.includes("subagent_stop"), types.join(","));
-    // 第一行的 subagent_id == taskId
+    // line 1's subagent_id == taskId
     assert.equal(lines[0]?.subagent_id, taskId);
-    // spawn 行的 task_id 也 == taskId (单点 single-emit 守门)
+    // the spawn row's task_id == taskId too (single-emit guard)
     const spawnRow = lines.find((l) => l.record_type === "subagent_spawn");
     assert.equal(spawnRow?.task_id, taskId);
   });
@@ -243,16 +244,17 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
       false,
       "toolUseId must be omitted"
     );
-    // review-fix (M6): spawnDepth 不再缺席 —— v1 禁嵌套,普通 spawn 恒为 1
-    // (见下方 M6 describe 的专用断言)。
+    // spawnDepth is never absent now — v1 forbids nesting, plain spawns always
+    // record 1 (see the dedicated assertions in the M6 describe below).
   });
 
   it("stderr.log 落在 subagents/<taskId>/, 跟随 subagentsDir", async () => {
     const { manager, spawned } = makeManager({ subagentsDir });
     const { taskId } = manager.spawn({ task: "crash" });
-    // crashed exit + stderr burst → manager emitStop 写入 stderr pointer。
-    // PassThrough stderr 必须 end() 才能触发 close —— 否则 manager 内
-    // waitForStderrClose 永不 resolve,settleCrash await 阻塞,test 超时。
+    // crashed exit + stderr burst → manager emitStop writes the stderr pointer.
+    // PassThrough stderr must be end()ed to fire close — otherwise
+    // waitForStderrClose inside the manager never resolves, settleCrash's
+    // await blocks, and the test times out.
     spawned[0]!.stderr.write("crash details\n");
     spawned[0]!.stderr.end();
     spawned[0]!.emit("exit", 2, null);
@@ -272,13 +274,13 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     const { taskId } = manager.spawn({ task: "noop" });
     emitOk(spawned[0]!, "r");
     await flushTwoTicks();
-    // 没 subagentsDir 就不该建出 subagents 目录
+    // without subagentsDir, no subagents dir should be created
     assert.equal(
       existsSync(subagentsDir),
       false,
       `subagentsDir 缺席时不该建 ${subagentsDir}`
     );
-    // 仍然能 queryBuffer(queryBuffer 不依赖落盘)
+    // queryBuffer still works (it does not depend on disk persistence)
     assert.equal(manager.queryBuffer(taskId).status, "ok");
     await manager.shutdown();
   });
@@ -287,7 +289,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     const { manager, spawned } = makeManager({ subagentsDir });
     const a = manager.spawn({ task: "a" });
     const b = manager.spawn({ task: "b" });
-    // 防 taskId 同:manager.randomUUID 保证
+    // distinct taskIds are guaranteed by manager.randomUUID
     assert.notEqual(a.taskId, b.taskId);
     emitOk(spawned[0]!, "r");
     emitOk(spawned[1]!, "r");
@@ -296,11 +298,12 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
   });
 
   it("def.toolUseId → manager 写盘 .meta.json 的 toolUseId 字段", async () => {
-    // 直接传 def.toolUseId 模拟 executor 把 ctx.toolUseId(= call.id)
-    // 装配到 def literal 后的 wire 形态。spawn-subagent-tool handler 已经
-    // 把 ctx.toolUseId 透传到 def(见 src/harness/subagent/spawn-subagent-
-    // tool.ts 的 ...(ctx?.toolUseId !== undefined ? { toolUseId: ... } : {}));
-    // manager.writeMetaOnce 消费 def.toolUseId 落盘一次。
+    // Pass def.toolUseId directly to mimic the wire shape after the executor
+    // assembles ctx.toolUseId (= call.id) into the def literal. The
+    // spawn-subagent-tool handler already forwards ctx.toolUseId into def
+    // (see src/harness/subagent/spawn-subagent-tool.ts's
+    // ...(ctx?.toolUseId !== undefined ? { toolUseId: ... } : {}));
+    // manager.writeMetaOnce consumes def.toolUseId and persists it once.
     const { manager, spawned } = makeManager({ subagentsDir });
     const { taskId } = manager.spawn({
       task: "t",
@@ -323,12 +326,14 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
 
 describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录 (两段式缝)", () => {
   /**
-   * hub serve 路径装配期(单 engine 跨会话共享)只给装配期根 projectDir
-   * (`<baseDir>/projects/<slug>`);spawn 期 def.conversationId 在场时,
-   * manager 把落点移到 per-conversation 叶子
-   * `<projectDir>/<convId>/subagents/`,与 SessionStore.delete(整删
-   * `<convId>/` 会话文件夹)的寿命边界一致 —— 会话删除时子代理记录同灭,
-   * 不在项目层留孤儿。与 todo-write 的 resolveConversationTodoPath 同构。
+   * The hub serve path is assembled (one engine shared across sessions) with
+   * only the assembly-time root projectDir (`<baseDir>/projects/<slug>`);
+   * when def.conversationId is present at spawn time, the manager moves the
+   * target to the per-conversation leaf `<projectDir>/<convId>/subagents/`,
+   * matching SessionStore.delete's lifetime boundary (it deletes the whole
+   * `<convId>/` conversation folder) — sub-agent records die with the
+   * conversation, leaving no orphans at the project layer. Same shape as
+   * todo-write's resolveConversationTodoPath.
    */
   it("def.conversationId 在场 → 记录落 <projectDir>/<convId>/subagents/, 项目层平铺不落盘", async () => {
     const { manager, spawned } = makeManager({ projectDir: projectSlugDir });
@@ -341,7 +346,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await flushTwoTicks();
     await manager.shutdown();
 
-    // per-conversation 叶子
+    // per-conversation leaf
     const convSubagentsDir = join(projectSlugDir, convId, "subagents");
     assert.ok(
       existsSync(workerRecordPath(convSubagentsDir, taskId)),
@@ -351,7 +356,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
       existsSync(workerMetaPath(convSubagentsDir, taskId)),
       `expected meta under per-conversation leaf ${convSubagentsDir}`
     );
-    // 项目层平铺(无 convId)不产生任何文件 —— 项目层无孤儿
+    // the flat project-level dir (no convId) produces no files — no orphans at the project layer
     const flatDir = join(projectSlugDir, "subagents");
     const flatEntries = existsSync(flatDir) ? readdirSync(flatDir) : [];
     assert.deepEqual(
@@ -359,7 +364,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
       [],
       `项目层平铺 ${flatDir} 必须保持空 (无孤儿), got ${flatEntries.join(",")}`
     );
-    // 且 per-conv 叶子目录不含 "agent-" 之外的错层(双层 subagents 防御)。
+    // and the per-conv leaf must not nest another misplaced layer (double-subagents defense).
     assert.equal(
       existsSync(join(convSubagentsDir, "subagents")),
       false,
@@ -381,8 +386,9 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
   });
 
   it("subagentsDir 装配(两段式缝的 cli/TUI 形态)→ def.conversationId 不再嵌第二层 convId", async () => {
-    // 装配件已含 convId 段时,spawn 期 def.conversationId 在场也直接用
-    // 装配件 —— 防止嵌出 `.../subagents/<convId>/subagents/` 错形。
+    // when the assembled path already contains the convId segment, a present
+    // def.conversationId must not nest another one — prevents the malformed
+    // `.../subagents/<convId>/subagents/` shape.
     const { manager, spawned } = makeManager({ subagentsDir });
     const { taskId } = manager.spawn({
       task: "cli-form",
@@ -424,13 +430,13 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
       readFileSync(workerMetaPath(subagentsDir, taskId), "utf8")
     ) as Record<string, unknown>;
     assert.equal(meta.agentType, "explore");
-    // v1 禁嵌套 → manager 侧 spawnDepth 恒写 1 (seam 留给将来嵌套派发)。
+    // v1 forbids nesting → the manager always writes spawnDepth 1 (seam kept for future nested dispatch).
     assert.equal(
       meta.spawnDepth,
       1,
       "普通 spawn 的 meta.spawnDepth 必须恒为 1 (v1 禁嵌套)"
     );
-    // 显式 def.spawnDepth 优先 (嵌套派发将来解开时从深层 manager 透传)。
+    // explicit def.spawnDepth wins (a deeper manager will pass it through once nested dispatch is enabled).
   });
 
   it("def.spawnDepth 显式值覆盖 v1 常量 (嵌套 seam 保留)", async () => {
@@ -454,8 +460,9 @@ describe("T5 spec SC8 acceptance — 项目根顶层不存在 agent-* 目录", (
     await flushTwoTicks();
     await manager.shutdown();
 
-    // 项目身份根 = `<baseDir>/projects/<slug>`(模拟 spec SC8 acceptance
-    // 写法:归并后 `~/.iknow/projects/**/` 顶层不存在 `agent-*` 目录)。
+    // project identity root = `<baseDir>/projects/<slug>` (mirrors the spec
+    // SC8 acceptance wording: no `agent-*` dirs at the top of the merged
+    // `~/.iknow/projects/**/` layout).
     const entries = readdirSync(projectSlugDir);
     const agentDirs = entries.filter((e) => e.startsWith("agent-"));
     assert.deepEqual(
@@ -463,7 +470,7 @@ describe("T5 spec SC8 acceptance — 项目根顶层不存在 agent-* 目录", (
       [],
       `agent-* must not exist at ${projectSlugDir}`
     );
-    // 子代理记录落 <convId>/subagents/ 下, 不在项目 slug 同级平铺
+    // sub-agent records live under <convId>/subagents/, not flat beside the project slug
     const listed = listSubagentRecordPaths(subagentsDir);
     assert.ok(
       listed.length >= 1,

@@ -1,15 +1,15 @@
 /**
- * serve-workspace T6 — Sidebar 组头"+"按钮的纯逻辑单测 (node + vitest)。
+ * Pure-logic unit tests for the "+" button on sidebar group headers (node + vitest).
  *
- * 镜像 `tests/web/session-list-group.test.ts` 模式 — 直接 import 纯函数,
- * 不依赖 jsdom / fetch。web 包禁装 vitest (spec A8/A10), 测试由根 vitest
- * 收集。
+ * Mirrors the `tests/web/session-list-group.test.ts` pattern — import pure
+ * functions directly, no jsdom / fetch. The web package may not install vitest,
+ * so the root vitest collects these tests.
  *
- * 覆盖:
- * - shouldShowPlusButton: 非 unbound 组 → true; unbound → false; 边界
- *   (active=非 unbound 也 true; active=unbound 也 false)
- * - plusButtonLabel: 文案模板 (`在 <basename> 内新建会话`), 边界 basename
- *   (空 / 含特殊字符 / 长字符串)
+ * Coverage:
+ * - shouldShowPlusButton: non-unbound group → true; unbound → false; boundary
+ *   (isActive never matters)
+ * - plusButtonLabel: label template (`在 <basename> 内新建会话`, "new session in <basename>"),
+ *   basename boundaries (empty / special chars / long string)
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -56,9 +56,9 @@ describe("shouldShowPlusButton", () => {
   });
 
   it("active + unbound → false (active 救不了 unbound, sentinel 组一律无 +)", () => {
-    // 边界: 理论上 unbound 组不可能 isActive (无 workspaceRoot 不会匹配
-    // currentConversationId 的命中模式), 但 shouldShowPlusButton 应只信
-    // isUnbound 一票, 不被 isActive 影响。
+    // Boundary: an unbound group theoretically cannot be isActive (without
+    // workspaceRoot it never matches the currentConversationId hit pattern),
+    // but shouldShowPlusButton must trust isUnbound only, unaffected by isActive.
     assert.equal(
       shouldShowPlusButton(
         group({ isActive: true, isUnbound: true, label: "(未绑定)" })
@@ -74,13 +74,13 @@ describe("plusButtonLabel", () => {
   });
 
   it("(未绑定) 组的 label 也会原样套模板 (调用方应先 shouldShowPlusButton 过滤)", () => {
-    // 该函数不感知 isUnbound — 调用方负责传过滤后的 group.label。
-    // 测试模板本身对任意 label 都稳定。
+    // The function is unaware of isUnbound — the caller must pass a filtered group.label.
+    // The template itself is stable for any label.
     assert.equal(plusButtonLabel("(未绑定)"), "在 (未绑定) 内新建会话");
   });
 
   it("空 label → 渲染 '在  内新建会话' (中间双空格; 防御性, 调用方不应传空)", () => {
-    // 不做 trim, 避免吞掉 group.label 内部的合法前后空格(罕见但宽容)。
+    // No trim, to avoid swallowing legitimate surrounding spaces in group.label (rare but lenient).
     assert.equal(plusButtonLabel(""), "在  内新建会话");
   });
 

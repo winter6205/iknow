@@ -1,12 +1,12 @@
 /**
- * T8 (plans/worktree-mcp-rebind-lifecycle.md) — MCP × rebind five-boundary matrix.
+ * MCP × rebind five-boundary matrix.
  *
  * Asserts for every class: typed kind / non-empty visible message / no secret
  * leak / promise does not hang; on failure also no tool exec on bad root and
  * no dual-register / split-brain success face.
  *
  * Gap-focused: fills empty / negative / overflow / concurrent / exception
- * cases not already locked by T1–T7 suites.
+ * cases not already locked by the other MCP suites.
  */
 import {
   afterAll,
@@ -539,11 +539,13 @@ describe("T8 matrix — concurrent", () => {
     };
     const gate = createWorktreeIsolationExecutor({
       enabled: { get: () => true },
-      // T3 model-provision 合同：provision 裁决只在 task-worktree 形状的根上
-      // 触发（改绑后 per-root 重建引擎的形态）；主仓根一律拦下不建树。
-      // T10：门禁读活根（cell 由装配层通过 createLiveTaskRoot 持有）—— 此处
-      // 直接以 task-worktree 形状的初值构造，行为与原 `root: TASK_WORKTREE`
-      // 逐字节等价（cell 初值 = 装配期 sandboxRoot）。
+      // Per the model-provision contract, the provision decision only fires on
+      // task-worktree-shaped roots (the shape of a per-root rebuilt engine after
+      // rebind); repo-main roots are always blocked, no tree built.
+      // The gate reads the live root (the cell is held by the assembly layer via
+      // createLiveTaskRoot) — constructed here directly with a task-worktree-shaped
+      // initial value, byte-equivalent to the old `root: TASK_WORKTREE` (cell
+      // initial value = assembly-time sandboxRoot).
       liveTaskRoot: createLiveTaskRoot(TASK_WORKTREE),
       provision: async () => {
         provisioned += 1;
@@ -675,8 +677,8 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
   let store: SessionStore;
 
   function git(cwd: string, ...args: string[]): string {
-    // gitTestEnv 免疫：push hook 注入的 GIT_DIR 等会让临时 repo 的 commit 钉到
-    // 父仓库（幽灵失败，见 tests/_helpers/git-env.ts 头注）。
+    // gitTestEnv immunity: GIT_DIR etc. injected by push hooks would pin the tmp
+    // repo's commit to the parent repo (ghost failure, see tests/_helpers/git-env.ts header).
     return gitIn(cwd, args);
   }
 

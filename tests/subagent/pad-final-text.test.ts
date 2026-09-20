@@ -1,19 +1,19 @@
 /**
- * Locked sentence 2 (plans/session-fg-handoff-interrupt.md) — host 落稿。
+ * Locked sentence 2 — final-text landing on the host.
  *
- * 不变式：父可见信封仍是短摘要，不是终稿。worker 终态时 **host** 把
- * `task.envelope.result`（host 手里那一份，worker 已在 wire 上折叠过的即
- * 折叠后的文本）写入该 worker pad 的稳定相对路径 `FINAL_TEXT_PAD_NAME`，
- * 信封带 `output_path`（pad 相对路径，供 `subagent_result(tmp_path)` 消费）。
+ * Invariant: the envelope visible to the parent stays a short summary, not the
+ * final text. At worker terminal state the **host** writes
+ * `task.envelope.result` (the copy the host holds — already wire-folded by the
+ * worker) to the stable relative path `FINAL_TEXT_PAD_NAME` inside that
+ * worker's pad, and the envelope carries `output_path` (pad-relative, consumed
+ * by `subagent_result(tmp_path)`).
  *
- *   - 终稿长于短信封 → pad 文件可读，内容 === 终态 assistant 正文；
- *   - `truncated: true` 仍是 `status: "ok"`、无 `reason`、文件可读
- *     （截断口径同既有 pad 读，截断**不是**任务失败）；
- *   - 空 / 全空白 result（timeout fallback 形态）→ 不落稿、`output_path` 键缺席、
- *     不伪造空文件；
- *   - pad 写失败（此处用「padRoot 是不可写路径」模拟）→ 信封照常产出、
- *     `output_path` 缺席、任务状态不变、不抛穿 locateEnvelope；
- *   - 回环：用 `output_path` 的值喂 `subagent_result(tmp_path)` 取回正文。
+ *   - final text longer than the envelope → pad file readable, content === terminal assistant body;
+ *   - `truncated: true` still means `status: "ok"`, no `reason`, file readable
+ *     (same truncation semantics as existing pad reads; truncation is **not** task failure);
+ *   - empty / whitespace-only result (timeout fallback shape) → no file written, `output_path` key absent, never fabricate an empty file;
+ *   - pad write failure (simulated here by making the pad root un-writable) → envelope still produced, `output_path` absent, task status unchanged, never throws through locateEnvelope;
+ *   - round trip: feed the `output_path` value back into `subagent_result(tmp_path)` to retrieve the body.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -116,11 +116,11 @@ describe("host pad final text (Locked sentence 2)", () => {
     const pad = workerFenceTmpPath(subagentsDir, taskId);
     assert.equal(env.output_path, FINAL_TEXT_PAD_NAME);
 
-    // 读侧走真实 inspectWorkerPad（subagent_result(tmp_path) 的同一实现）。
+    // the read side uses the real inspectWorkerPad (same implementation as subagent_result(tmp_path)).
     const read = inspectWorkerPad(pad, env.output_path);
     assert.equal(read.status, "read");
     assert.ok(read.status === "read");
-    // pad 读带 6 位行号前缀 + 200 行窗口；用窗口内首行认证逐字节一致。
+    // pad reads add a 6-digit line-number prefix and a 200-line window; assert byte-equality via the first line inside the window.
     assert.match(read.content, /^\s*1\tfinal assistant body$/m);
     assert.equal(read.truncated, false);
     assert.ok(read.content.length > "short summary".length);
@@ -149,8 +149,9 @@ describe("host pad final text (Locked sentence 2)", () => {
     assert.equal(env.output_path, FINAL_TEXT_PAD_NAME);
 
     const pad = workerFenceTmpPath(subagentsDir, taskId);
-    // 截断口径同既有 pad 读：文件里是 host 手里那一份 —— worker 已在 wire 上
-    // 折叠（>20000 字），host 不试图恢复更长原文，落稿即折叠后的正文。
+    // Same truncation semantics as existing pad reads: the file holds the
+    // host's copy — the worker already folded it on the wire (>20000 chars),
+    // the host does not try to recover the longer original; what lands is the folded body.
     const onDisk = readFileSync(join(pad, FINAL_TEXT_PAD_NAME), "utf8");
     assert.ok(onDisk.includes("report folded"));
     assert.ok(onDisk.length <= 20_000);
@@ -220,8 +221,9 @@ describe("host pad final text (Locked sentence 2)", () => {
       subagentsDir,
     });
     const { taskId } = manager.spawn({ task: "unwritable pad" });
-    // 目标文件名被一个**目录**占住 → writeFileSync EISDIR。locateEnvelope
-    // 必须吞掉它：信封照常产出、无 output_path、任务状态不变。
+    // The target file name is occupied by a **directory** → writeFileSync EISDIR.
+    // locateEnvelope must swallow it: envelope still produced, no output_path,
+    // task status unchanged.
     const pad = workerFenceTmpPath(subagentsDir, taskId);
     mkdirSync(join(pad, FINAL_TEXT_PAD_NAME), { recursive: true });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -234,7 +236,7 @@ describe("host pad final text (Locked sentence 2)", () => {
       assert.equal(env.summary, "done");
       assert.equal("output_path" in env, false);
       assert.equal(env.task_id, taskId);
-      // 真实故障被点名（warn-once 通道），不是静默伪造路径。
+      // the real failure is named (warn-once channel), not a silently fabricated path.
       assert.ok(
         warn.mock.calls.some((call) =>
           String(call[0]).includes("final text pad write skipped")

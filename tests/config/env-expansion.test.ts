@@ -1,19 +1,19 @@
 /**
- * `expandPlaceholders` 边界单测（settings-model-extension #164 第二阶段）。
+ * Boundary tests for `expandPlaceholders`.
  *
- * 纯函数测试：不接 LLM、不读真实 settings.json；只覆盖字面 / 占位符 /
- * fileMap 兜底 / 非法形态 / "yes" 过滤等分支。
+ * Pure-function tests: no LLM, no real settings.json; covers literal / placeholder /
+ * fileMap fallback / malformed forms / "yes" filtering branches.
  *
- * 与 settings.ts `isApiKeyOrPlaceholder` 守卫对齐：
- *   - `${}` / `${1VAR}` / `${VAR` 未闭合 → undefined（settings 也会丢弃这些）；
- *   - `${VAR}` / `$VAR` 形态由 expandPlaceholders 解析；
- *   - 字面密钥原样返回。
+ * Aligned with settings.ts `isApiKeyOrPlaceholder` guard:
+ *   - `${}` / `${1VAR}` / unclosed `${VAR` → undefined (settings drops these too);
+ *   - `${VAR}` / `$VAR` forms are resolved by expandPlaceholders;
+ *   - literal keys are returned as-is.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { expandPlaceholders } from "../../src/config/env.ts";
 
-/** helper：每个用例独立隔离，避免 process.env 污染影响其它用例。 */
+/** Per-case env isolation: avoids process.env pollution leaking into other cases. */
 function withCleanEnv<T>(fn: () => T): T {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(process.env)) {
@@ -165,8 +165,8 @@ describe("expandPlaceholders — 非法形态丢弃（与 settings.ts 对齐）"
   it("${VAR} 中 VAR 是关键字（如 'yes'） → undefined（dotenv 风格占位符）", () => {
     withCleanEnv(() => {
       process.env.YES = "yes";
-      // 整串 "${YES}" 不命中 API_KEY_PLACEHOLDERS（占位符列表只匹配 yes 字面），
-      // 但 trim 后值 lowercase === "yes" → 视同未设。
+      // The whole string "${YES}" does not hit API_KEY_PLACEHOLDERS (the list matches only the literal yes),
+      // but after trim the lowercased value === "yes" → treated as unset.
       assert.equal(expandPlaceholders("${YES}", {}), undefined);
     });
   });

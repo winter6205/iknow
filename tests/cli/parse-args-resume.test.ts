@@ -1,14 +1,16 @@
 /**
  * tests/cli/parse-args-resume.test.ts
  *
- * T4: `--resume <id>` flag 解析 —— chat REPL 从既有 conversationId 续跑。
- *   - 未设 → resumeId=undefined（=新开会话随机 UUID，与 T2 完全一致）
- *   - 合法 id → 透传（chat 子命令）
- *   - 缺失值 → throws "--resume requires a conversation id argument"
- *   - 空串 / 纯空白 → throws "--resume requires a non-empty conversation id"
- *   - command-agnostic：ask 也解析（host 忽略），不破坏既有命令回归
+ * Parsing of the `--resume <id>` flag — resumes the chat REPL from an existing
+ * conversationId.
+ *   - unset → resumeId=undefined (= fresh session with a random UUID)
+ *   - valid id → pass-through (chat subcommand)
+ *   - missing value → throws "--resume requires a conversation id argument"
+ *   - empty / whitespace-only → throws "--resume requires a non-empty conversation id"
+ *   - command-agnostic: ask parses it too (the host ignores it); existing commands unaffected
  *
- * 只覆盖配置解析层；不验证 runChatSession 接线（归 tests/cli/chat-session-resume.test.ts）。
+ * Covers the config-parsing layer only; runChatSession wiring is verified in
+ * tests/cli/chat-session-resume.test.ts.
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
