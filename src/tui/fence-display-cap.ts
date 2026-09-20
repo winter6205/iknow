@@ -1,8 +1,7 @@
 /**
- * src/tui/fence-display-cap.ts
- *
- * TUI markdown 围栏在 OpenTUI 树上的可见行窗（与 write/edit 完成态
- * `TOOL_PREVIEW_WINDOW` 分开）。只裁树上的行，不改 session 正文。
+ * Visible-line window for TUI markdown fences on the OpenTUI tree (separate
+ * from `TOOL_PREVIEW_WINDOW` used by write/edit completion states).
+ * Trims tree rows only; never touches session content.
  */
 export const FENCE_DISPLAY_WINDOW = 32;
 
@@ -23,7 +22,7 @@ function resolveFenceWindow(window: number | undefined): number {
   return Math.floor(window);
 }
 
-/** 围栏行显示窗：超出则只留前 N 行并给出未挂行数。 */
+/** Fence display window: keep the first N lines when over cap, report the hidden line count. */
 export function clipFenceDisplayLines(
   lines: unknown,
   window?: number

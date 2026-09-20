@@ -2,27 +2,30 @@
 /**
  * src/tui/modal.tsx
  *
- * #343 T4（自 archive/tui-ink/src/modal.tsx 迁移 ink → OpenTUI，语义不变）：
- * TUI modal 渲染槽：
- *  - `SelectModal`：通用选择 modal（标题 + 选项列表 + 选中索引 + 键位提示），
- *    纯渲染、无内部状态（选中索引 / 键路由由宿主持有）；
- *  - `ModalHost`：按 modal 判别联合分派渲染（permission / select），无活动
- *    modal 时返回 null；
- *  - 权限确认实例 = `PERMISSION_ANSWERS`（y/a/n = once/always/reject）喂给
- *    SelectModal，键路由走纯函数 `reduceModalKey`（宿主 useKeyboard 消费，
- *    OpenTUI KeyEvent 经 `modalKeyEventOf` 投影为 ModalKeyEvent）。
+ * TUI modal render slot:
+ *  - `SelectModal`: generic select modal (title + option list + selected
+ *    index + key hint), pure rendering with no internal state (the selected
+ *    index / key routing is held by the host);
+ *  - `ModalHost`: dispatches rendering on the modal discriminated union
+ *    (permission / select), returning null when no modal is active;
+ *  - the permission-confirmation instance = `PERMISSION_ANSWERS`
+ *    (y/a/n = once/always/reject) fed into SelectModal, with key routing via
+ *    the pure function `reduceModalKey` (consumed by the host's useKeyboard;
+ *    the OpenTUI KeyEvent is projected into a ModalKeyEvent by
+ *    `modalKeyEventOf`).
  *
- * 行账纪律（OpenTUI 版）：渲染与行账共用 `wrapModalLines`（wrap-ansi，
- * trim:false + hard:true）把每个逻辑行折成物理行 —— SelectModal 逐物理行
- * 渲染 `<text>`，盒子高度 = 边框 2 + 物理行数，`selectModalRows` 同式预测，
- * 两者永不漂移（tests/tui/modal.test.tsx 行账不变式实测 ╭→╰ 行数核对）。
+ * Row-accounting discipline: rendering and accounting share `wrapModalLines`
+ * (wrap-ansi, trim:false + hard:true) to fold each logical line into physical
+ * lines — SelectModal renders one `<text>` per physical line, box height = 2
+ * border rows + physical lines, and `selectModalRows` predicts with the same
+ * formula, so the two never drift.
  */
 import type { ReactNode } from "react";
 import { TextAttributes, type KeyEvent } from "@opentui/core";
 import wrapAnsi from "wrap-ansi";
 import { tuiPalette } from "./theme.js";
 
-/** 通用选择项：hotkey 直选（大小写不敏感）；description 行内补充说明。 */
+/** Generic option: hotkey direct-select (case-insensitive); description is an inline supplement. */
 export interface SelectOption {
   readonly value: string;
   readonly label: string;
@@ -30,16 +33,16 @@ export interface SelectOption {
   readonly description?: string;
 }
 
-/** SelectModal 内容描述（渲染与行账共用 SSOT）。 */
+/** SelectModal content descriptor (single source shared by rendering and row accounting). */
 export interface SelectModalContent {
   readonly title: string;
   readonly description?: string;
   readonly options: ReadonlyArray<SelectOption>;
-  /** 底部键位提示行（缺省 = 通用 ↑↓/Enter/Esc 提示）。 */
+  /** Bottom key-hint line (default = the generic ↑↓/Enter/Esc hint). */
   readonly hint?: string;
 }
 
-/** 权限确认三态：once = 本次允许；always = 总是允许（本会话）；reject = 拒绝。 */
+/** Permission confirmation tri-state: once = allow this time; always = always allow (this session); reject = deny. */
 export type PermissionAnswer = "once" | "always" | "reject";
 
 export const PERMISSION_ANSWERS: ReadonlyArray<SelectOption> = Object.freeze([
@@ -55,7 +58,7 @@ export const PERMISSION_ANSWERS: ReadonlyArray<SelectOption> = Object.freeze([
 export const PERMISSION_MODAL_HINT = "y/a/n 直选 · ↑↓ + Enter · Esc 收起";
 export const SELECT_MODAL_HINT = "↑↓ 选择 · Enter 确认 · Esc 收起";
 
-/** modal 判别联合（ModalHost 分派入口）。 */
+/** Modal discriminated union (ModalHost dispatch entry). */
 export type TuiModal =
   | {
       readonly kind: "permission";
@@ -67,7 +70,7 @@ export type TuiModal =
         readonly selectedIndex: number;
       });
 
-/** 权限 modal 的内容描述（渲染 + 行账单一来源）。 */
+/** Permission modal content descriptor (single source for rendering + row accounting). */
 export function permissionModalContent(ask: {
   readonly tool: string;
   readonly summaryHint: string;
@@ -80,23 +83,26 @@ export function permissionModalContent(ask: {
   };
 }
 
-/** 选项行纯文本（含 hotkey 前缀 + description）；渲染与行账共用。 */
+/** Option line plain text (hotkey prefix + description); shared by rendering and row accounting. */
 export function selectOptionLine(option: SelectOption): string {
   const hotkey = option.hotkey ? `[${option.hotkey}] ` : "";
   const desc = option.description ? `  ${option.description}` : "";
   return `${hotkey}${option.label}${desc}`;
 }
 
-/** 盒子内文可用宽度：终端列 - 左右边框 2 - paddingX 左右各 1。cols 极窄
- *  （<4）时归 0（不设下限——下限会在窄终端高估内宽、低估折行行数）。 */
+/** Inner text width: terminal cols - 2 border columns - 1 paddingX on each
+ *  side. When cols is extremely narrow (<4) it floors to 0 (no minimum — a
+ *  floor would overestimate inner width and underestimate wrapped rows on
+ *  narrow terminals). */
 export function selectModalInnerWidth(cols: number): number {
   return Math.max(0, cols - 4);
 }
 
 /**
- * 按折行把内文行拆成物理行：wrap-ansi + `{trim:false, hard:true}`。
- * 内宽 ≤ 0（cols<4 退化终端）无法再折 → 记 1 行。
- * 渲染（SelectModal）与行账（selectModalRows）共用本函数 —— 单一来源。
+ * Fold content lines into physical lines via wrapping: wrap-ansi with
+ * `{trim:false, hard:true}`. Inner width ≤ 0 (cols<4 degenerate terminal)
+ * cannot wrap further → counted as 1 line. Rendering (SelectModal) and row
+ * accounting (selectModalRows) share this function — single source.
  */
 export function wrapModalLines(s: string, inner: number): string[] {
   if (inner <= 0) return [s];
@@ -104,9 +110,11 @@ export function wrapModalLines(s: string, inner: number): string[] {
 }
 
 /**
- * modal 盒子实际占用的终端行数（行账 SSOT，可单测）：上下边框 2 行 +
- * 标题 / 描述 / 选项 / 键位提示折行后的行数。选中行的 `❯ ` 前缀与非选中
- * 行的两空格前缀等宽（各 2 列），折行预测按选中形态计（最宽形态）。
+ * Terminal rows the modal box actually occupies (row-accounting SSOT,
+ * unit-testable): 2 border rows + the wrapped row counts of title /
+ * description / options / key hint. The selected row's `❯ ` prefix and the
+ * unselected rows' two-space prefix are equal width (2 columns each), so the
+ * wrap prediction uses the selected form (the widest).
  */
 export function selectModalRows(
   content: SelectModalContent,
@@ -114,7 +122,7 @@ export function selectModalRows(
   selectedIndex = 0
 ): number {
   const inner = selectModalInnerWidth(cols);
-  let rows = 2; // 圆角边框：顶框线 + 底框线
+  let rows = 2; // rounded border: top + bottom frame lines
   rows += wrapModalLines(content.title, inner).length;
   if (content.description !== undefined && content.description.length > 0) {
     rows += wrapModalLines(content.description, inner).length;
@@ -128,7 +136,7 @@ export function selectModalRows(
   return rows;
 }
 
-/** 权限 modal 占行（chrome 行账入账用）。 */
+/** Permission modal row count (charged into the chrome row accounting). */
 export function permissionModalRows(
   ask: {
     readonly tool: string;
@@ -140,16 +148,18 @@ export function permissionModalRows(
   return selectModalRows(permissionModalContent(ask), cols, selectedIndex);
 }
 
-/** 选项选中行的 `❯ ` / 非选中行的两空格前缀宽度（各 2 列）。 */
+/** Width of the selected row's `❯ ` / unselected rows' two-space prefix (2 columns each). */
 const OPTION_PREFIX = "❯ ";
 
 /**
- * 通用选择 modal（纯渲染）：圆角线框 + 标题 + 可选描述 + 选项列表 +
- * 底部键位提示。selectedIndex 由宿主持有（↑↓ / Enter / hotkey / Esc 的
- * 键路由在宿主 useKeyboard，走 reduceModalKey 纯函数）。
+ * Generic select modal (pure rendering): rounded frame + title + optional
+ * description + option list + bottom key hint. selectedIndex is held by the
+ * host (the ↑↓ / Enter / hotkey / Esc key routing lives in the host's
+ * useKeyboard via the pure reduceModalKey).
  *
- * 每个逻辑行先经 wrapModalLines 折成物理行再逐行 `<text>` 渲染 —— 与
- * selectModalRows 同源，盒子高度 = 预测行数（行账不变式）。
+ * Each logical line is first folded into physical lines by wrapModalLines and
+ * rendered row-by-row as `<text>` — same source as selectModalRows, so box
+ * height = predicted row count (row-accounting invariant).
  */
 export function SelectModal(props: {
   readonly content: SelectModalContent;
@@ -187,7 +197,7 @@ export function SelectModal(props: {
     const prefix = selected ? OPTION_PREFIX : "  ";
     wrapModalLines(`${prefix}${selectOptionLine(opt)}`, inner).forEach(
       (line, i) => {
-        // 选中项首物理行：`❯ ` 前缀上 accent，其余上正文色（与非选中区分）。
+        // Selected item's first physical line: `❯ ` prefix in accent, the rest in body colour (to distinguish from unselected).
         if (selected && i === 0 && line.startsWith(OPTION_PREFIX)) {
           lines.push(
             <text key={`opt-${optIdx}-${i}`}>
@@ -233,8 +243,10 @@ export function SelectModal(props: {
 }
 
 /**
- * ModalHost：modal 渲染槽。无活动 modal → null（行账 0）；permission →
- * 权限确认三选项；select → 通用选择。宿主持状态 + 键路由，Host 只做分派渲染。
+ * ModalHost: the modal render slot. No active modal → null (0 row
+ * accounting); permission → the three-option confirmation; select → generic
+ * selection. The host holds state + key routing; Host only dispatches
+ * rendering.
  */
 export function ModalHost(props: {
   readonly modal: TuiModal | undefined;
@@ -260,10 +272,11 @@ export function ModalHost(props: {
   );
 }
 
-/** reduceModalKey / reduceThinkingSwitchKey / reduceThinkingEffortKey 的键位
- *  输入切片（宿主键事件的投影形态）。OpenTUI KeyEvent.name 值域（同
- *  parse.keypress 常量）：↑/↓ = "up"/"down"，←/→ = "left"/"right"，Enter/Esc/
- *  Tab/Space = "return"/"escape"/"tab"/"space"。 */
+/** Key-input slice for reduceModalKey / reduceThinkingSwitchKey /
+ *  reduceThinkingEffortKey (the projected form of the host's key event).
+ *  OpenTUI KeyEvent.name value domain (same as the parse.keypress constants):
+ *  ↑/↓ = "up"/"down", ←/→ = "left"/"right", Enter/Esc/Tab/Space =
+ *  "return"/"escape"/"tab"/"space". */
 export interface ModalKeyEvent {
   readonly input: string;
   readonly key: {
@@ -280,8 +293,9 @@ export interface ModalKeyEvent {
   };
 }
 
-/** OpenTUI KeyEvent → ModalKeyEvent 投影（宿主 useKeyboard 与 reduceModalKey
- *  之间的适配单源；单字符可打印键走 hotkey 直选通道）。 */
+/** OpenTUI KeyEvent → ModalKeyEvent projection (the single adapter between
+ *  the host's useKeyboard and reduceModalKey; single-char printable keys go
+ *  through the hotkey direct-select channel). */
 export function modalKeyEventOf(e: KeyEvent): ModalKeyEvent {
   return {
     input: typeof e.name === "string" && e.name.length === 1 ? e.name : "",
@@ -300,7 +314,7 @@ export function modalKeyEventOf(e: KeyEvent): ModalKeyEvent {
   };
 }
 
-/** reduceModalKey 决策结果。 */
+/** reduceModalKey decision result. */
 export type ModalKeyAction =
   | { readonly type: "move"; readonly index: number }
   | { readonly type: "select"; readonly value: string }
@@ -308,10 +322,10 @@ export type ModalKeyAction =
   | { readonly type: "ignore" };
 
 /**
- * modal 键路由纯函数（宿主 useKeyboard 消费，可单测）：
- *  - ↑/↓ 移动选中索引（clamp）；Enter 选中当前项；Esc 收起（dismiss）；
- *  - 可打印字符按 hotkey 直选（大小写不敏感）；
- *  - ctrl/meta 组合键与无匹配字符 → ignore（宿主自行决定是否吞键）。
+ * Modal key-routing pure function (consumed by the host's useKeyboard, unit-testable):
+ *  - ↑/↓ move the selected index (clamped); Enter selects the current item; Esc dismisses;
+ *  - printable characters direct-select by hotkey (case-insensitive);
+ *  - ctrl/meta combos and unmatched characters → ignore (the host decides whether to swallow the key).
  */
 export function reduceModalKey(
   event: ModalKeyEvent,

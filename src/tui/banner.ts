@@ -1,31 +1,35 @@
 /**
  * src/tui/banner.ts
  *
- * 启动 banner 文本常量 / 生成（#343 T1，OpenTUI 版）。
+ * Startup banner text constants / generators (OpenTUI port).
  *
- * 语义对齐 archive/tui-ink/src/banner.ts + banner-art.ts（智慧之眼变体 C，
- * 2026-08-06 三轮定稿）：
- *  - 眼字形 32×13 braille（EYE_LINES 字形数据原样搬入，源图
- *    docs/design/eyeshape.png 生成，勿手改）；
- *  - 版本号 SSOT = cli/usage.ts getVersion()（读 package.json，与归档
- *    version.ts 同源）；
- *  - info 栏三行 Version / Cwd / Data dir；
- *  - 眼睛放得下（≥ 32 列 + 外框）→ 13 行完整眼；只有眼睛本身放不下才
- *    单行 `◆ iknow <version>`。不要用 80 列并排总宽把完整眼整段扔掉。
+ * Semantics aligned with archive/tui-ink/src/banner.ts + banner-art.ts (the
+ * All-Seeing Eye variant C):
+ *  - eye glyph 32×13 braille (EYE_LINES glyph data moved verbatim; the source
+ *    image is generated from docs/design/eyeshape.png, never hand-edit);
+ *  - version SSOT = cli/usage.ts getVersion() (reads package.json, same source
+ *    as the archived version.ts);
+ *  - info column: three lines Version / Cwd / Data dir;
+ *  - if the eye fits (≥ 32 columns + frame) draw the full 13-row eye; only
+ *    when the eye itself cannot fit fall back to the single line
+ *    `◆ iknow <version>`. Do not let the 80-column combined width discard the
+ *    whole eye.
  *
- * 与归档版的差异：归档版输出 ANSI 上色字符串（ink 时代手动 paint）；
- * OpenTUI 下上色交给渲染器 fg 属性，本文件只产出纯文本 + 逐 cell 渐变分段
- * 结构（eyeGradientCells），不产 ANSI。渐变端点落在 theme.ts（logoInk /
- * logoGold = e2 黄昏魔法石：深蓝紫 #1a1d6e → 粉金 #ffafaf）。
+ * Difference from the archived version: it emitted ANSI-painted strings (manual
+ * paint in the ink era); under OpenTUI coloring is the renderer's fg job, so
+ * this file only yields plain text + per-cell gradient segments
+ * (eyeGradientCells), never ANSI. The gradient endpoints live in theme.ts
+ * (logoInk / logoGold = e2 twilight magic stone: deep blue-purple #1a1d6e
+ * → pink-gold #ffafaf).
  */
 import stringWidth from "string-width";
 import { getVersion } from "../cli/usage.js";
 import { padEndVisual } from "./visual.js";
 
-/** TUI 展示用版本号（SSOT = package.json，经 getVersion()）。 */
+/** Version string shown in the TUI (SSOT = package.json, via getVersion()). */
 export const VERSION: string = getVersion();
 
-// ── 眼字形（归档 banner-art.ts 原样搬入，勿手改）────────────────────
+// ── Eye glyphs (verbatim from the archived banner-art.ts, do not hand-edit)────
 
 export const EYE_LINES: ReadonlyArray<string> = [
   `⠀⢀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⡶⠋⠀⠀⠙⢶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡀⠀`,
@@ -43,17 +47,17 @@ export const EYE_LINES: ReadonlyArray<string> = [
   `⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠳⣄⠀⠀⣠⠞⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀`,
 ];
 
-// ── 布局常量（语义对齐归档 banner.ts）──────────────────────────────
+// ── Layout constants (semantics aligned with the archived banner.ts)─────────────
 
-/** banner 顶框 title（窄终端降级单行同款前缀）。 */
+/** Banner top-frame title (same prefix as the narrow-terminal single-line fallback). */
 export const BANNER_TITLE = "◆ iknow";
-/** 眼睛与 info 栏之间的间距列数。 */
+/** Gap columns between the eye and the info column. */
 const GAP = 3;
-/** key 列相对最长 key 的余量。 */
+/** Slack on the key column relative to the longest key. */
 const KEY_EXTRA = 2;
-/** value 列宽（容纳典型 dataDir 路径）。超长值交给渲染器 box 裁切。 */
+/** Value column width (fits a typical dataDir path). Over-long values are clipped by the renderer box. */
 const VAL_W = 32;
-/** info 栏标签（与归档同序）。 */
+/** Info-column labels (same order as the archive). */
 const KV_KEYS: ReadonlyArray<readonly [string, keyof BannerInfo]> = [
   ["Version", "version"],
   ["Cwd", "cwd"],
@@ -62,20 +66,22 @@ const KV_KEYS: ReadonlyArray<readonly [string, keyof BannerInfo]> = [
 
 const KEY_W = Math.max(...KV_KEYS.map(([k]) => stringWidth(k))) + KEY_EXTRA;
 
-/** info 栏总宽 = key 列 + 1 列间隔 + value 列。 */
+/** Total info-column width = key column + 1 gap column + value column. */
 export const BANNER_INFO_WIDTH = KEY_W + 1 + VAL_W;
 
 /**
- * 完整并排布局（眼睛 + GAP + info + 外框）要 80 列。这不是「画不画眼睛」
- * 的门槛：32×13 点阵本身 32 列；79 列终端仍应画完整眼，info 可由渲染器裁切。
+ * The full side-by-side layout (eye + GAP + info + frame) wants 80 columns.
+ * This is NOT the threshold for "draw the eye or not": the 32×13 grid itself
+ * is 32 columns; a 79-column terminal should still draw the full eye, with
+ * the info column left to renderer clipping.
  */
 export const BANNER_MIN_COLS =
   stringWidth(EYE_LINES[0] ?? "") + GAP + BANNER_INFO_WIDTH + 2;
 
-/** 眼睛本身放不下才退单行。外框 2 列。 */
+/** Fall back to the single line only when the eye itself does not fit. The frame costs 2 columns. */
 export const BANNER_EYE_MIN_COLS = stringWidth(EYE_LINES[0] ?? "") + 2;
 
-// ── 生成函数（纯函数，无 ANSI / 无 React）─────────────────────────
+// ── Generators (pure functions, no ANSI / no React)───────────────────────────────
 
 export interface BannerInfo {
   readonly version: string;
@@ -83,7 +89,7 @@ export interface BannerInfo {
   readonly dataDir: string;
 }
 
-/** 窄终端降级单行：`◆ iknow <version>`。 */
+/** Narrow-terminal fallback single line: `◆ iknow <version>`. */
 export function bannerShortLine(version: string): string {
   return `${BANNER_TITLE} ${version}`;
 }
@@ -93,7 +99,7 @@ function basenameOf(p: string): string {
   return segs[segs.length - 1] ?? p;
 }
 
-/** info 栏三行（纯文本，key 列对齐；上色由组件层 fg 承担）。 */
+/** The three info-column lines (plain text, key-aligned; coloring is the component layer's fg job). */
 export function bannerInfoLines(info: BannerInfo): string[] {
   const values: Record<keyof BannerInfo, string> = {
     version: info.version,
@@ -104,14 +110,15 @@ export function bannerInfoLines(info: BannerInfo): string[] {
 }
 
 /**
- * 渲染 banner 为 scrollbox 文本行（spec #321 方案 B：与消息共享 scroll
- * space）。
+ * Render the banner as scrollbox text lines (shares the scroll space with
+ * messages).
  *
- *   - 眼睛本身放不下 → 单行 `bannerShortLine(version)`。
- *   - 否则 13 行完整眼：每行 = EYE_LINES[r] + GAP(3) + info 栏行
- *     （32 + 3 + 43 = 78）。cols 略小于 80 时仍画眼睛，info 可被裁切。
+ *   - Eye does not fit → single line `bannerShortLine(version)`.
+ *   - Otherwise the full 13-line eye: each line = EYE_LINES[r] + GAP(3) +
+ *     info-column line (32 + 3 + 43 = 78). Even slightly below 80 columns
+ *     the eye is still drawn; the info column may be clipped.
  *
- * 纯函数，无 React / 无 ANSI，可单测。
+ * Pure function, no React / no ANSI, unit-testable.
  */
 export function renderBannerLines(
   info: BannerInfo,
@@ -121,7 +128,7 @@ export function renderBannerLines(
     return [bannerShortLine(info.version)]; // EXIT: eye itself does not fit
   }
   const infoLines = bannerInfoLines(info);
-  // info 三行垂直居中：眼睛 13 行的中间 3 行（row 5,6,7，0-indexed）。
+  // Vertically center the 3 info lines on the middle rows of the 13-row eye (rows 5,6,7, 0-indexed).
   const infoRowStart = Math.floor((EYE_LINES.length - infoLines.length) / 2);
   const blank = " ".repeat(BANNER_INFO_WIDTH);
   return EYE_LINES.map((eyeLine, r) => {
@@ -137,12 +144,14 @@ export function renderBannerLines(
 }
 
 /**
- * e2 黄昏魔法石渐变（#321 logo 重设计定案）：13×32 逐 cell 上色，左→右 + 上→下
- * 合成（对角线），t = cWeight·(c/31) + rWeight·(r/12)，在 from/to 之间 RGB
- * 空间线性插值。与 scripts/banner-gradient-preview/exotic-e2.ts 完全一致
- * （端点 #1a1d6e 深蓝紫 → #ffafaf 粉金；c 权重 0.6 / r 权重 0.4）。
+ * e2 "twilight magic stone" gradient (finalized in the logo redesign): 13×32
+ * per-cell coloring, composed left→right + top→bottom (diagonal),
+ * t = cWeight·(c/31) + rWeight·(r/12), linear interpolation between from/to
+ * in RGB space. Mirrors scripts/banner-gradient-preview/exotic-e2.ts exactly
+ * (endpoints #1a1d6e deep blue-purple → #ffafaf pink-gold; c weight 0.6 /
+ * r weight 0.4).
  *
- * 纯函数，无 React / 无 ANSI，可单测。
+ * Pure function, no React / no ANSI, unit-testable.
  */
 export function eyeGradientCells(opts: {
   readonly from: string;
@@ -164,9 +173,10 @@ export function eyeGradientCells(opts: {
 }
 
 /**
- * #rrggbb 双端点 RGB 空间线性插值（t ∈ [0,1] 自动 clamp），返回 #rrggbb。
- * 复用现有 lerpColor 语义（RGB 空间插值），与预览脚本 _gradient.ts 对齐；
- * 不引入新插值函数。
+ * Linear RGB-space interpolation between two #rrggbb endpoints (t ∈ [0,1]
+ * auto-clamped), returns #rrggbb. Reuses the existing lerpColor semantics
+ * (RGB-space interpolation), aligned with the preview script _gradient.ts;
+ * no new interpolation function introduced.
  */
 function lerpColorHex(from: string, to: string, t: number): string {
   const tt = Math.max(0, Math.min(1, t));
@@ -179,7 +189,7 @@ function lerpColorHex(from: string, to: string, t: number): string {
   return `#${comp(ar, br)}${comp(ag, bg)}${comp(ab, bb)}`;
 }
 
-/** "#rrggbb" → [r, g, b] 三元组（0..255）。非法输入抛错。 */
+/** "#rrggbb" → [r, g, b] triple (0..255). Throws on invalid input. */
 function hexRgb(hex: string): readonly [number, number, number] {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
   if (!m) throw new Error(`bad hex color: ${hex}`);
@@ -187,7 +197,7 @@ function hexRgb(hex: string): readonly [number, number, number] {
   return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
 }
 
-/** t ∈ [0,1] clamp。 */
+/** Clamp t into [0,1]. */
 function clamp01(t: number): number {
   return Math.max(0, Math.min(1, t));
 }

@@ -2,16 +2,21 @@
 /**
  * src/tui/subagent-card-view.tsx
  *
- * specs/tui-subagent-transcript-live.md（锁句 1–2、5–6）：活子代理两行的
- * **唯一渲染面** —— live tail（`live-tool-preview.tsx`）与历史卡
- * （`message-blocks.tsx`）共用本组件。与 `CompletedToolPreviewView` 同款
- * 分工：投影在纯函数模块（`subagent-message-lines.ts`），渲染单源在此，
- * 两宿主不得各写一套 JSX —— 否则 dim / 绿色与空行占位会在两条路径上漂移。
+ * The single rendering surface for the subagent card's two live lines
+ * (specs/tui-subagent-transcript-live.md): shared by the live tail
+ * (`live-tool-preview.tsx`) and history cards (`message-blocks.tsx`). Same
+ * split as `CompletedToolPreviewView`: projection lives in the pure module
+ * (`subagent-message-lines.ts`), rendering lives only here — the two hosts
+ * must not each write their own JSX, or dim/green colours and empty-line
+ * placeholders would drift between the two paths.
  *
- * 颜色纪律：第 1 行恒默认正文色（live 为 `{role} running...`，completed 只作
- * 身份 —— 锁句 2 reopen）；概述行恒 dim（完成态不改它的着色，绿只属于完成
- * 标记）；`doneLine` 在场时以其下第 3 行绿 `tuiPalette.add` 画逐字 `✓ Done`。
- * 空预览渲染单空格占位：行账恒定，卡片不塌陷（锁句 1 的「占两行」）。
+ * Colour discipline: line 1 always uses the default text colour (live shows
+ * `{role} running...`; once completed it is identity only); the detail line
+ * is always dim (completion does not recolour it — green belongs solely to
+ * the done marker); when `doneLine` is present it renders as the 3rd line in
+ * green `tuiPalette.add` with the literal `✓ Done`. An empty preview renders
+ * a single-space placeholder so the row count stays constant and the card
+ * never collapses.
  */
 import type { ReactNode } from "react";
 import type { SubagentCardLines } from "./subagent-message-lines.js";

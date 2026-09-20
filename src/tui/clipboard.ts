@@ -1,24 +1,25 @@
 /**
  * src/tui/clipboard.ts
  *
- * #343 T5：迁移自 archive/tui-ink/src/clipboard.ts（#238 鼠标拖选复制
- * fallback 链）。T0 归档后从 src/tui/ 重建此文件——逻辑、平台探测、PATH
- * 隔离、超时都保持不动（语义对齐 ink 版 #238 copy-flow 契约）：
+ * Native clipboard fallback chain (rebuilt in src/tui/ after the tui-ink
+ * archive; logic, platform probing, PATH isolation and timeouts preserved
+ * per the original copy-flow contract):
  *  1. macOS pbcopy
- *  2. Linux wl-copy（Wayland）
- *  3. Linux xclip -selection clipboard（X11）
- *  4. Linux xsel --clipboard（X11 退化）
+ *  2. Linux wl-copy (Wayland)
+ *  3. Linux xclip -selection clipboard (X11)
+ *  4. Linux xsel --clipboard (X11 degradation)
  *  5. Windows clip.exe
- *  6. 退化：写 <dataDir>/last_copy.txt
+ *  6. last resort: write <dataDir>/last_copy.txt
  *
- * T5 调用入口：app.tsx 的 `doCopySelection`（OSC52 不可用 / 不可达时
- * 走此 fallback 链）。T5 优先路径是 `renderer.copyToClipboardOSC52`
- * （@opentui/core 内置 OSC52 写入），仅当终端不支持 OSC52 时退回
- * 本文件的 platform 探测链——D3 裁决保留两条路径，OSC52 失败不会
- * 静默。
+ * Entry point: `doCopySelection` in app.tsx, used when OSC52 is
+ * unavailable/unreachable. The preferred path is
+ * `renderer.copyToClipboardOSC52` (built into @opentui/core); this
+ * platform-probing chain only runs when the terminal does not support OSC52
+ * — both paths are deliberately kept and OSC52 failures never go silent.
  *
- * 不引外部依赖：复制实现 100 行出头可控，pyperclip 倒退在 ts-paths
- * 之外、对单仓库 lockfile 还要加一依赖，违反 #238 的最小改动目标。
+ * No external dependency: the implementation is ~100 lines; pulling in
+ * pyperclip would reach outside ts-paths and add a lockfile dependency for a
+ * single repo, against the minimal-change goal.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -41,12 +42,12 @@ interface CommandCandidate {
 }
 
 /**
- * 按平台挑出命令候选。Linux 同时备好 wl-copy / xclip / xsel；
- * 哪个在 PATH 真正命中由 copyToClipboard 试到。
+ * Pick command candidates per platform. Linux lists wl-copy / xclip / xsel
+ * together; copyToClipboard tries them until one is found on PATH.
  *
- * 为什么 Linux 同时列三个：headless 服务器（CI、纯 SSH）PATH 里
- * 通常一个都没有；普通桌面 X11 = xclip，Wayland = 后两者。三选
- * 一概率比单一 win/mac 都低。Mac/Win 不走 Linux 路径。
+ * Why three on Linux: headless servers (CI, plain SSH) usually have none of
+ * them; a desktop X11 setup has xclip, Wayland has the other two. Covering
+ * all three beats betting on one — Mac/Win never take the Linux path.
  */
 function candidatesForPlatform(): ReadonlyArray<CommandCandidate> {
   if (process.platform === "darwin") {
@@ -55,7 +56,7 @@ function candidatesForPlatform(): ReadonlyArray<CommandCandidate> {
   if (process.platform === "win32") {
     return [{ method: "clip.exe", cmd: "clip", args: [] }];
   }
-  // linux / freebsd / 其他 UN*X
+  // linux / freebsd / other UN*X
   return [
     { method: "wl-copy", cmd: "wl-copy", args: [] },
     { method: "xclip", cmd: "xclip", args: ["-selection", "clipboard"] },
@@ -72,13 +73,15 @@ function tryCommand(
     let settled = false;
     const child = spawn(candidate.cmd, [...candidate.args], {
       stdio: ["pipe", "pipe", "pipe"],
-      // detached: false → child 不脱离父进程
+      // detached stays false → the child does not leave the parent's process group
       windowsHide: true,
       env,
     });
-    // unref：挂起的剪贴板 daemon（wl-copy 等阻塞在 compositor）忽略 SIGTERM
-    // 时，不持有事件循环 — 否则 /quit 后 Node 永不退出（exit() 只 unmount 不
-    // process.exit）。写系统剪贴板是 fire-and-forget，不阻塞 TUI 关闭。
+    // unref: a wedged clipboard daemon (e.g. wl-copy blocked on the
+    // compositor) can ignore SIGTERM; without unref it would hold the event
+    // loop and Node never exits after /quit (exit() only unmounts, it does
+    // not process.exit). Writing the system clipboard is fire-and-forget and
+    // must not block TUI shutdown.
     child.unref();
     const timer = setTimeout(() => {
       if (settled) return;
@@ -86,7 +89,7 @@ function tryCommand(
       try {
         child.kill();
       } catch {
-        // 已被自然结束
+        // already exited on its own
       }
       resolve(false);
     }, 1500);
@@ -103,16 +106,15 @@ function tryCommand(
       resolve(code === 0);
     });
     child.stdin?.on("error", () => {
-      // EPIPE → 子进程提前退出。spawn 仍会触发 close，我们等 close 监听收尾。
+      // EPIPE → the child exited early; spawn still fires close, and the close listener finalizes.
     });
     child.stdin?.end(text, "utf8");
   });
 }
 
 /**
- * 必须先判二进制是否在 PATH——直接 spawn 失败有 stderr 噪音。node 20
- * 之前 hasbin 需要 child_process 用 && 命令探测；这里用一个 50ms 超
- * 时的 'which' 替代。Windows 不走此路径（用 'where' via cmd /c）。
+ * The binary must be checked on PATH before spawning — a failed spawn leaks
+ * stderr noise. This scans the PATH entries directly (no subprocess probe).
  */
 function which(binary: string, envPath: string): boolean {
   const sep = process.platform === "win32" ? ";" : ":";
@@ -123,15 +125,18 @@ function which(binary: string, envPath: string): boolean {
 }
 
 /**
- * 复制文本到系统剪贴板。允许空文本（视为成功，不复制）。
- * 三种结束：复制到剪贴板成功 / fallback 写文件 / 错（找不到任何后备）。
+ * Copy text to the system clipboard. Empty text is allowed (treated as
+ * success, nothing copied). Three outcomes: clipboard write ok / fallback
+ * file write / error (no fallback available).
  *
- * options.env：注入给候选命令的 env（缺省 = process.env）。测试断言
- * 必然 fallback 时传 { PATH: "/nonexistent" }，不动全局 PATH 避免
- * 并行 worker 串扰。
+ * options.env: the env injected into candidate commands (default =
+ * process.env). Tests that assert the fallback path pass
+ * { PATH: "/nonexistent" } instead of touching the global PATH, avoiding
+ * cross-talk between parallel workers.
  *
- * T5 备注：OSC52 路径走 CliRenderer.copyToClipboardOSC52，本函数仅作
- * 不可用 / 失败时的原生 fallback——不重复探测，保持单职责。
+ * Note: the OSC52 path goes through CliRenderer.copyToClipboardOSC52; this
+ * function is only the native fallback when that is unavailable or fails —
+ * no redundant probing, one responsibility.
  */
 export async function copyToClipboard(
   text: string,
@@ -149,7 +154,7 @@ export async function copyToClipboard(
       return { kind: "ok", method: candidate.method };
     }
   }
-  // 退化：写文件。dataDir 缺省 = cwd；多数 shell 可 cat 粘贴。
+  // Last resort: write a file. dataDir defaults to cwd; most shells can cat-paste it.
   const fallbackPath = options.dataDir
     ? join(options.dataDir, "last_copy.txt")
     : join(process.cwd(), "last_copy.txt");

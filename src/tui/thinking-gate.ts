@@ -1,13 +1,12 @@
 /**
- * src/tui/thinking-gate.ts
+ * Thinking override gate, pure functions (no React dependency, unit-testable
+ * standalone). Extracted from TuiApp.runTurnOnce, where the override pass-through
+ * decision (stateChanged / override computation) was inlined in a component
+ * closure and hard to test.
  *
- * thinking override gate 纯函数（无 React 依赖，可独立单测）。
- *
- * 背景：TuiApp.runTurnOnce 的 thinking override 透传决策（stateChanged /
- * override 计算）原本内联在组件闭包里，难以单测。reviewer Spec Low#3 要求抽出。
- *
- * 语义：仅当用户实际改了 thinking 状态（相对 env defaultThinking 基线）才透传
- * per-turn override；否则返回 undefined → 走 cached deps（行为不变）。
+ * Semantics: pass a per-turn override only when the user actually changed the
+ * thinking state relative to the env defaultThinking baseline; otherwise
+ * return undefined -> use cached deps (behavior unchanged).
  */
 
 import type {
@@ -15,15 +14,16 @@ import type {
   WireThinkingOverride,
 } from "../session-api/contract.js";
 
-/** env `thinking` + `thinkingEffort` 形状（TuiAppProps.defaultThinking 的最小投影）。 */
+/** Shape of env `thinking` + `thinkingEffort` (minimal projection of TuiAppProps.defaultThinking). */
 export interface DefaultThinkingShape {
   readonly mode: "off" | "adaptive";
   readonly effort: ThinkingEffortWire;
 }
 
-/** gate 纯函数：当前 thinking 状态 vs env 默认 → wire override（undefined = 走
- *  cached deps）。注意 enabled=false 时 effort 维度已由 enabled 覆盖，无需再比
- *  effort（defaultEffort 可能为 ""）。 */
+/** Gate pure function: current thinking state vs env default -> wire
+ *  override (undefined = use cached deps). When enabled=false the effort
+ *  dimension is already covered by enabled, so effort need not be compared
+ *  (defaultEffort may be ""). */
 export function computeThinkingOverride(
   defaultThinking: DefaultThinkingShape | undefined,
   enabled: boolean,
@@ -38,8 +38,9 @@ export function computeThinkingOverride(
   return enabled ? { mode: "adaptive", effort } : { mode: "off" };
 }
 
-/** thinking 档位展示标签：""（未显式指定）→ "auto"，其余原样。
- *  reviewer Medium#2：消除 `effort || "auto"` 重复（/effort 无效提示 + infoLines）。 */
+/** Thinking level display label: "" (not explicitly set) -> "auto", others
+ *  as-is. Single source for the former `effort || "auto"` duplication
+ *  (/effort invalid-level hint + infoLines). */
 export function formatEffortLabel(effort: ThinkingEffortWire): string {
   return effort === "" ? "auto" : effort;
 }

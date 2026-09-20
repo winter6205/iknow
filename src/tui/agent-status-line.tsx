@@ -1,14 +1,17 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/agent-status-line.tsx
+ * TUI projection of the ADR-0028 status bar: show only unchecked todos to
+ * the human (above the mode line, compressed to one row). `last_tool` still
+ * goes into the model's `<agent_status>` bar and the tool_call trace, but is
+ * not mapped to chrome.
  *
- * ADR-0028 状态栏的 TUI 投影：只把未勾待办给人看（mode 行上方、单行压缩）。
- * last_tool 仍进模型 `<agent_status>` 栏与 tool_call trace，不映射到 chrome。
+ * Data contract: the single source is the `agent_status` stream event from
+ * the same computation point that injects the harness bar; this module never
+ * reads the todo ledger file. replace-on-event: each event yields a complete
+ * independent snapshot.
  *
- * 数据契约：唯一来源是 harness 注入栏同一计算点的 `agent_status` 流事件；
- * 本模块不读待办账本文件。replace-on-event：每个事件产完整独立快照。
- *
- * 显示：有未勾项 → 一行 `□ a · b · c`（视觉宽度截断）；无未勾 / null → 0 行。
+ * Display: unchecked items → one row `□ a · b · c` (truncated by visual
+ * width); no unchecked items / null → 0 rows.
  */
 import type { ReactNode } from "react";
 import type { AgentStatusSnapshot } from "../harness/agent-status.js";
@@ -29,10 +32,11 @@ export function agentStatusFromEvent(
   event: HarnessStreamEvent
 ): AgentStatusSnapshot | null {
   if (event.type !== "agent_status") return null;
-  // spec agent-status-instruction-echo T4:instruction / reconcile 槽随事件
-  // 透传(与栏同源);投影规则 = pickPresentAgentStatusSlots SSOT(与快照装配、
-  // 事件发射同源;缺席 → key 不落,退回旧字段集形态(F1))。显示面不动 ——
-  // agentStatusLines 仍只投影 openTodoLines。
+  // instruction / reconcile slots pass through with the event (same source as
+  // the injected bar); projection rule = pickPresentAgentStatusSlots SSOT
+  // (same source as snapshot assembly and event emission; absent slot → key
+  // omitted, falling back to the old field-set shape). Display surface
+  // unchanged — agentStatusLines still projects openTodoLines only.
   return Object.freeze({
     lastTool: event.lastTool,
     openTodoLines: Object.freeze([...event.openTodoLines]),
@@ -40,7 +44,7 @@ export function agentStatusFromEvent(
   });
 }
 
-/** 行的显示文本 = 账本语法 SSOT 解析出的 subject;非语法行原样透传。 */
+/** Row display text = the subject parsed by the ledger-syntax SSOT; non-syntax lines pass through verbatim. */
 function todoBody(raw: string): string {
   return parseLedger(raw)[0]?.subject ?? raw;
 }

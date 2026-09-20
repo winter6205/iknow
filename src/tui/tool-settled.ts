@@ -1,36 +1,42 @@
 /**
  * src/tui/tool-settled.ts
  *
- * 落定态策略核（spec specs/tui-tool-settled-appearance.md D1/D4/D5/D6/D8）。
- * 纯 TS、无 React / Ink 依赖；渲染层只消费 `deriveSlot` 输出的 slot，不再
- * 自行组合标题隐藏开关与预览（D7）。
+ * Settled-appearance policy core. Pure TS, no React / Ink dependencies; the
+ * renderer only consumes slots from `deriveSlot` and never recombines title
+ * hiding and preview decisions itself.
  *
- * 派生顺序（D1）：running 全部逐条可见 → 成功按 class 分派 → 失败横切在核
- * 最后一步覆盖一切（error 色优先于 accent，D5）。
+ * Derivation order: running calls all stay visible individually → success
+ * dispatches by class → failure cuts across at the last step and overrides
+ * everything (error color beats accent).
  *
- * class 表（D8）在本文件内声明为单一来源：`tool-summary.ts` 的注册表按
- * 工具名逐条 `settledClass: TOOL_SETTLED_CLASS[name] ?? "retract"` 复用，
- * 避免两处硬编码漂移（Single Source of Truth）。未注册名缺省 retract ——
- * 策略核必须依赖无关（不 import 注册表），否则反向拉入 React 链。
+ * The class table is declared here as the single source: the registry in
+ * `tool-summary.ts` reuses it per tool name via
+ * `settledClass: TOOL_SETTLED_CLASS[name] ?? "retract"`, so the two places
+ * cannot drift. Unregistered names default to retract — the policy core must
+ * not import the registry, or it would pull in the React chain in reverse.
  */
 /**
- * 落定态分类（spec D8：keep / retract / accent 三类成功态分类表）。
- * "subagent" 不在 D8 三类内 —— 仅 spawn_subagent / subagent_result 使用，
- * 核在 class 分派之前特判为 keep-title-only（标题留、无预览、不进计数、
- * default 色），glyph 差异留给渲染层。设为显式字面量而非缺项 + `!` 断言：
- * 让「声明缺失 / 谎报」在编译期或跨核闸（tool-settled.test 子代理集合单源）
- * 处失败，而不是运行时静默解析成 retract。
+ * Success-state classification: keep / retract / accent.
+ * "subagent" is outside those three — used only by spawn_subagent /
+ * subagent_result; the core special-cases it before class dispatch into
+ * keep-title-only (title shown, no preview, not in the fold count, default
+ * color), leaving glyph differences to the renderer. Declared as an explicit
+ * literal rather than an omitted key + `!` assertion, so a missing or
+ * misreported entry fails at compile time or in the cross-core gate
+ * (tool-settled.test single-sources the subagent set) instead of silently
+ * resolving to retract at runtime.
  */
 export type SettledClass = "keep" | "retract" | "accent" | "subagent";
 
-/** slot 颜色 token（映射 tuiPalette；dim 不由核决定 —— dim 只属成功 bash 尾巴）。 */
+/** Slot color token (maps to tuiPalette; the core never decides dim — dim belongs only to the successful bash tail). */
 export type SettledColor = "default" | "accent" | "error";
 
-/** slot 颜色 token → 调色板前景色（D7 渲染映射单源）。
- *  default 落 dim（工具标题行的既有次级形态）；dim 本身不由核决定，映射
- *  归渲染层，但两处渲染（message-blocks / live-tool-preview）共用本函数，
- *  避免 color→palette 对照表漂移。theme.ts 纯 TS、无 React 依赖，核可安全
- *  引用类型。 */
+/** Slot color token → palette foreground color.
+ *  default falls to dim (the existing secondary form of tool title lines);
+ *  dim itself is not decided by the core and the mapping belongs to the
+ *  renderer, but both rendering sites (message-blocks / live-tool-preview)
+ *  share this function so the color→palette table cannot drift. theme.ts is
+ *  pure TS with no React dependency, so the core can reference its types. */
 export function settledColorToFg(
   color: SettledColor,
   palette: {
@@ -49,11 +55,11 @@ export function settledColorToFg(
   }
 }
 
-/** 渲染层唯一消费形态：标题 / 预览 / 折叠计数 / 颜色。 */
+/** The only form the renderer consumes: title / preview / fold count / color. */
 export interface SettledSlot {
   readonly showTitle: boolean;
   readonly showPreview: boolean;
-  /** 折叠计数行只聚合本字段为 true 的件（成功且 retract，spec D3）。 */
+  /** The fold-count line aggregates only items whose flag is true (success and retract). */
   readonly inFoldCount: boolean;
   readonly color: SettledColor;
 }
@@ -64,23 +70,25 @@ export interface SettledState {
 }
 
 /**
- * D8 分类表（成功态）。SSOT：tool-summary.ts 注册表逐名复用本表；
- * spawn_subagent / subagent_result 以 "subagent" class 显式在表（D8 三类
- * 之外，核按 keep-title-only 给 slot —— 标题留、无预览、不进计数、default
- * 色），glyph 差异留给渲染层。
+ * Success-state class table. SSOT: the tool-summary.ts registry reuses this
+ * table per name; spawn_subagent / subagent_result are listed explicitly with
+ * the "subagent" class (outside the three classes; the core gives them a
+ * keep-title-only slot — title shown, no preview, not in the fold count,
+ * default color), glyph differences left to the renderer.
  */
 export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
-  // keep（留的足迹，D4）
+  // keep: footprints that stay visible
   bash: "keep",
   write_file: "keep",
   edit_file: "keep",
   bash_stop: "keep",
   todo_write: "keep",
   memory_save: "keep",
-  // retract（收，标题与预览同假，只进折叠计数）
+  // retract: folded away, title and preview hidden together, counted only in the fold line
   read_file: "retract",
-  // read-image-vision 假设 11：与 read_file 同类。未注册名虽缺省 retract，
-  // 仍显式登记 —— summary 消费方按 TOOL_SETTLED_CLASS[name] 直取值，缺项即空洞。
+  // Per the read-image-vision spec, same class as read_file. Unregistered
+  // names already default to retract, but register it explicitly — summary
+  // consumers read TOOL_SETTLED_CLASS[name] directly, so a missing key is a hole.
   read_image: "retract",
   grep: "retract",
   glob: "retract",
@@ -88,9 +96,9 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   web_fetch: "retract",
   memory_recall: "retract",
   tool_search: "retract",
-  // disclosure-index-align T2: skill_search 已删（spec ADR-0046 / SC5）。
-  // 历史回放记录里仍有该名（tool_result 已写入 message），按缺省 retract
-  // 兜底（settledClassOf 未注册名缺省 retract）—— 无需显式声明。
+  // skill_search was removed (ADR-0046). Historical transcripts still carry
+  // the name (its tool_result is already in the message), so the unregistered
+  // default of retract covers it — no explicit entry needed.
   bash_output: "retract",
   list_mcp_resources: "retract",
   read_mcp_resource: "retract",
@@ -106,51 +114,55 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   lsp_diagnostics: "retract",
   lsp_document_symbol: "retract",
   lsp_workspace_symbol: "retract",
-  // accent（点名着色，D6）
+  // accent: named tools get the accent color
   skill: "accent",
   "create-worktree": "accent",
   "enter-worktree": "accent",
   "exit-worktree": "accent",
   "remove-worktree": "accent",
-  // 三类之外（D8「沿用独立 glyph」）：显式声明，核在 class 分派前特判
-  // keep-title-only —— 注册表与核共享同一子代理名单，跨核闸钉住一致性。
+  // Outside the three classes (standalone glyph is kept): declared explicitly,
+  // and the core special-cases keep-title-only before class dispatch — the
+  // registry and the core share one subagent list, pinned by the cross-core gate.
   spawn_subagent: "subagent",
   subagent_result: "subagent",
 };
 
-/** class 查询：未注册名缺省 retract（spec D1「未知工具缺省 retract、无预览」）。 */
+/** Class lookup: unregistered names default to retract (unknown tools: retract, no preview). */
 export function settledClassOf(name: string): SettledClass {
   return TOOL_SETTLED_CLASS[name] ?? "retract";
 }
 
-/** live noise 判定（specs/tui-activity-block.md live-signal revision #3/#4）。
- *  真 = 该工具运行阶段该进过程块 `calling`/`called` / 槽预览 —— 即 retract
- *  工具减掉 web_search / web_fetch（这两个属 live signal，走实卡）。
- *  settled 计数口径不变：TOOL_SETTLED_CLASS 仍把 web_* 记为 retract，本谓
- *  词只服务 live 块入场判据；任何消费方都不应把 web_* live 算入
- *  `calling`/`called` 计数或 unanchored 块。 */
+/** Live-noise test: true = the tool's running phase belongs in the process
+ *  block's `calling`/`called` lines / slot preview — i.e. the retract tools
+ *  minus web_search / web_fetch (those are live signals and render as real
+ *  cards). The settled counting rule is unchanged: TOOL_SETTLED_CLASS still
+ *  records web_* as retract; this predicate only gates live-block entry, and
+ *  no consumer should count live web_* into `calling`/`called` or unanchored
+ *  blocks. */
 export function isLiveNoise(name: string): boolean {
   if (isLiveSignal(name)) return false;
   return settledClassOf(name) === "retract";
 }
 
-/** live signal 的 web 子集（live-signal revision #4）：web_search /
- *  web_fetch live 与落定都留一行实卡（查询 / URL 已含在标题里）。
- *  carve-out 名单以本谓词为单一来源 —— isLiveNoise 的排除项与渲染面的
- *  「落定也留标题」兜底都引用这里，不再各自硬编码工具名。 */
+/** The web subset of live signals: web_search / web_fetch keep one real card
+ *  line both live and settled (the query / URL is already in the title).
+ *  This predicate is the single source of the carve-out list — both
+ *  isLiveNoise's exclusion and the renderer's "title stays when settled"
+ *  fallback reference it, so tool names are not hardcoded in each place. */
 export function isLiveSignal(name: string): boolean {
   return name === "web_search" || name === "web_fetch";
 }
 
-/** 成功态按 class 分派的 slot。 */
+/** Slot for the success state, dispatched by class. */
 function slotForClass(cls: SettledClass): SettledSlot {
   switch (cls) {
     case "keep":
-      // D4 keep：标题留；showPreview 由调用方预览通道再过滤。
-      // docs/CONTEXT.md keep class：bash 成功留命令 + 折叠 result preview；
-      // write / edit 留完成态预览；其余 keep（bash_stop / todo_write /
-      // memory_save）无预览内容自然为空。「谁真留预览」由 KEEP_WITH_PREVIEW
-      // 决定（bash / write_file / edit_file）。
+      // keep: title stays; showPreview is further filtered by the caller's
+      // preview channel. Per docs/CONTEXT.md, the keep class: successful bash
+      // keeps the command + a collapsed result preview; write / edit keep the
+      // completion preview; the other keeps (bash_stop / todo_write /
+      // memory_save) have no preview content anyway. Who really keeps a
+      // preview is decided by KEEP_WITH_PREVIEW (bash / write_file / edit_file).
       return {
         showTitle: true,
         showPreview: true,
@@ -158,7 +170,7 @@ function slotForClass(cls: SettledClass): SettledSlot {
         color: "default",
       };
     case "retract":
-      // D3：retract 必须标题与预览同假。
+      // retract: title and preview must be false together.
       return {
         showTitle: false,
         showPreview: false,
@@ -166,7 +178,7 @@ function slotForClass(cls: SettledClass): SettledSlot {
         color: "default",
       };
     case "accent":
-      // D6：accent 只点名着色，不摊正文预览。
+      // accent: color only, never a body preview.
       return {
         showTitle: true,
         showPreview: false,
@@ -174,15 +186,15 @@ function slotForClass(cls: SettledClass): SettledSlot {
         color: "accent",
       };
     case "subagent":
-      // D8 三类之外：keep-title-only（glyph 差异留给渲染层）。
+      // Outside the three classes: keep-title-only (glyph differences left to the renderer).
       return KEEP_TITLE_ONLY_SLOT;
   }
 }
 
 const RETRACT_SLOT = slotForClass("retract");
 const ACCENT_SLOT = slotForClass("accent");
-/** keep-with-title-only：会话动作类（bash_stop / todo_write / memory_save）
- *  与三类之外的子代理工具。 */
+/** keep-title-only: session-action tools (bash_stop / todo_write / memory_save)
+ *  and the subagent tools outside the three classes. */
 const KEEP_TITLE_ONLY_SLOT: SettledSlot = {
   showTitle: true,
   showPreview: false,
@@ -196,7 +208,7 @@ const FAILED_SLOT: SettledSlot = {
   inFoldCount: false,
   color: "error",
 };
-/** running 态（spec D1）：全部逐条可见，不提前进折叠计数。 */
+/** Running state: everything stays individually visible, nothing enters the fold count early. */
 const RUNNING_SLOT: SettledSlot = {
   showTitle: true,
   showPreview: false,
@@ -204,7 +216,7 @@ const RUNNING_SLOT: SettledSlot = {
   color: "default",
 };
 
-/** D4 中带预览足迹的 keep 工具：bash 折叠尾窗；write/edit 完成态预览。 */
+/** keep tools that carry a preview footprint: bash's collapsed tail window; write/edit completion preview. */
 const KEEP_WITH_PREVIEW: ReadonlySet<string> = new Set([
   "bash",
   "write_file",
@@ -212,21 +224,23 @@ const KEEP_WITH_PREVIEW: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 落定态单一派生（spec D1）。输入工具名与 { running, failed }，输出渲染 slot。
- * 失败横切在最后一步：任何 class 失败 → 标题留、error 色、不进计数、无预览。
- * 纯函数，无共享可变状态。
+ * The single settled-state derivation. Input: tool name and { running, failed };
+ * output: the render slot. Failure cuts across at the last step: any class
+ * failing → title stays, error color, no fold count, no preview.
+ * Pure function, no shared mutable state.
  */
 export function deriveSlot(name: string, state: SettledState): SettledSlot {
-  // 失败横切最后一步（D5）：error 优先于 accent / keep。
+  // Failure is the last crosscut: error beats accent / keep.
   if (state.failed) return FAILED_SLOT;
   if (state.running) return RUNNING_SLOT;
   const cls = settledClassOf(name);
-  // 子代理不进三类（spec D8「沿用独立 glyph」）—— class 表显式声明
-  // "subagent"，与未注册名缺省 retract 分流（不按 retract 兜底折叠）。
+  // Subagents never join the three classes (standalone glyph is kept): the
+  // class table declares "subagent" explicitly, separated from the unregistered
+  // retract default (they are not collapsed as a fallback).
   if (cls === "subagent") return KEEP_TITLE_ONLY_SLOT;
   if (cls === "retract") return RETRACT_SLOT;
   if (cls === "accent") return ACCENT_SLOT;
-  // keep 内部再分：bash / write / edit 带预览足迹，其余只留标题（D4）。
+  // Within keep: bash / write / edit carry a preview footprint, the rest are title-only.
   return KEEP_WITH_PREVIEW.has(name)
     ? KEEP_WITH_PREVIEW_SLOT
     : KEEP_TITLE_ONLY_SLOT;

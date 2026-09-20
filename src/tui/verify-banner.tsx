@@ -2,44 +2,53 @@
 /**
  * src/tui/verify-banner.tsx
  *
- * T3 (#458 包2): TUI verify 闭环终态人读 banner ——
- *   - HITL + auto 双模式都显示 passed / failed / unstable / escalated 4 终态;
- *   - 缺 verify → 静默(0 行,渲染壳 render null,无虚假提示);
- *   - wire 形状非法(runtime boundary)→ degraded「验证结果不可用」+ 渲染
- *     typed-error 详情(契约见 code-quality.md:`${kind}: ${conversation_id}`,
- *     禁用 `err instanceof Error ? err.message : String(err)` 回退);
- *   - 与 agent-status-line 同款两层结构:纯函数投影 + 渲染壳,纯函数可
- *     bun:test 单测直驱,不依赖 OpenTUI / React 渲染。
+ * Human-readable end-state banner for the TUI verify loop:
+ *   - shown in both HITL and auto modes for the 4 terminal states
+ *     passed / failed / unstable / escalated;
+ *   - missing verify → silent (0 rows, the render shell returns null, no
+ *     fake hint);
+ *   - malformed wire shape (runtime boundary) → degraded "verification result
+ *     unavailable" line plus the typed-error detail (contract in
+ *     code-quality.md: `${kind}: ${conversation_id}`; the
+ *     `err instanceof Error ? err.message : String(err)` fallback is banned);
+ *   - same two-layer shape as agent-status-line: pure projection functions +
+ *     a render shell; the pure functions are unit-testable under bun:test
+ *     directly, without OpenTUI / React rendering.
  *
- * 字形纪律:passed ✓ / failed ✗(subagent-panel 既用惯例 ✓ ✗ ▤);unstable ⚠ /
- * escalated ⤴(task 指定)。HITL 直显,auto 加 `[auto] ` 前缀(视觉标记)。
+ * Glyph discipline: passed ✓ / failed ✗ (established ✓ ✗ ▤ convention from
+ * subagent-panel); unstable ⚠ / escalated ⤴. HITL shows the label directly;
+ * auto prefixes `[auto] ` as a visual marker.
  *
- * 数据源唯一性:T3 不另建账本。banner 状态按会话 key 维护在 app.tsx
- * (`verifySlots`),数据来自 bridge.postMessage 返回的 `verify` DTO
- * (T2 已把 passed 加进 wire 联合);resume hydrate 时 transcript 无
- * VerifyAnswerView → 静默(empty slot),不试图从 <agent_status> / verify
- * 信封恢复,避免复刻第二份账本(与 agent-status 一致)。
+ * Single data source: no second ledger. Banner state lives in app.tsx keyed
+ * by conversation (`verifySlots`), fed by the `verify` DTO returned from
+ * bridge.postMessage (passed is already in the wire union). On resume hydrate,
+ * a transcript without a VerifyAnswerView stays silent (empty slot); we do not
+ * try to restore from <agent_status> / verify envelopes, to avoid cloning a
+ * second ledger (same stance as agent-status).
  */
 import type { ReactNode } from "react";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
-/** TUI 视角的 verify 模式:HITL = 默认交互式;auto = full_auto 模式
- *  (banner 额外加 `[auto] ` 视觉标记,见 src/tui/run.tsx --auto-mode flag)。 */
+/** Verify mode from the TUI perspective: hitl = the default interactive flow;
+ *  auto = full_auto mode (the banner adds the `[auto] ` visual marker; see the
+ *  src/tui/run.tsx --auto-mode flag). */
 export type VerifyBannerMode = "hitl" | "auto";
 
-/** 投影失败原因(code-quality.md typed-error 渲染契约):把判别联合的
- *  `kind` 提到主键,exhaustiveness 不强制(reason 后续可继续演化)。
- *  Render 侧按 `${kind}: ${conversation_id ?? — 缺则跳过 —}` 输出。 */
+/** Projection failure reason (code-quality.md typed-error rendering contract):
+ *  lifts `kind` out of the discriminated union as the primary key; no
+ *  exhaustiveness enforcement (reason may keep evolving). The render side
+ *  outputs `${kind}: ${conversation_id}`, skipping the id when absent. */
 export interface VerifyProjectionError {
   readonly kind: string;
   readonly conversation_id?: string;
 }
 
-/** app.tsx 状态槽的判别联合(数据 slot 与渲染投影在投影函数里收口)。
- *  none = 缺 verify(合法态,静默不渲染);ok = 正常 4 终态;
- *  unavailable = 投影失败(degraded 「验证结果不可用」)。 */
+/** Discriminated union for the app.tsx state slot (data slot and render
+ *  projection converge in the projection function). none = missing verify
+ *  (legal state, silent, no render); ok = one of the 4 terminal states;
+ *  unavailable = projection failed (degraded "result unavailable" line). */
 export type VerifySlot =
   | { readonly kind: "none" }
   | { readonly kind: "ok"; readonly verify: VerifyAnswerView }
@@ -53,14 +62,15 @@ export interface VerifyBannerLine {
   readonly text: string;
 }
 
-// ===== outcome → glyph + label + fg (4 状态映射) =============================
+// ===== outcome → glyph + label + fg (4-state mapping) =============================
 //
-// 色彩口径:passed 绿(palette.add,与 add diff 行同源);failed / escalated
-// 红(palette.error,与 del/error 同源);unstable 琥珀(palette.running,
-// 介于 [运行] 与 [错误] 之间的提示态)。
+// Color basis: passed green (palette.add, same source as add diff lines);
+// failed / escalated red (palette.error, same source as del/error); unstable
+// amber (palette.running, a hint state between running and error).
 //
-// 文案短形式 — 对应 cli/format.ts formatVerifyReport 的 label,但不带
-// 「[验证] ... —— 未判完成」警示后缀(banner 是终点状态反馈,不是报告)。
+// Short-form labels — matching the labels of cli/format.ts formatVerifyReport
+// but without its "not judged complete" warning suffix (the banner is
+// end-state feedback, not a report).
 const VERIFY_OUTCOME_PRESENTATION = {
   passed: { glyph: "✓", label: "验证通过", fg: tuiPalette.add },
   failed: { glyph: "✗", label: "验证未通过", fg: tuiPalette.error },
@@ -76,10 +86,12 @@ const VERIFY_OUTCOME_PRESENTATION = {
   },
 } as const;
 
-/** wire 形状校验(runtime boundary):postMessage 透传的 verify 字段跨进程/
- *  future wire 漂移时需 runtime 校验。返回值 = VerifySlot。
- *  显式判定 outcome ∈ 4 状态 + rounds 是有限非负整数;其它一律 unavailable
- *  而非抛错 —— 上层既可走 degraded 渲染,也不污染 React 渲染栈。 */
+/** Runtime wire-shape validation (runtime boundary): the verify field passed
+ *  through postMessage crosses process boundaries and future wire drift, so it
+ *  needs checking. Returns VerifySlot. Explicitly accepts outcome ∈ the 4 states
+ *  + rounds as a finite non-negative integer; anything else → unavailable rather
+ *  than throwing — the upper layer can render degraded without polluting the
+ *  React render stack. */
 export function verifyFromWire(raw: unknown): VerifySlot {
   if (raw === undefined || raw === null) {
     return { kind: "none" };
@@ -116,10 +128,11 @@ export function verifyFromWire(raw: unknown): VerifySlot {
   };
 }
 
-/** typed-error 渲染契约(code-quality.md):识别 kind 字段,渲染
- *  `${kind}: ${conversation_id}` 或仅有 `${kind}`;非合法 typed-error shape
- *  → null(上层不允许 `instanceof Error ? err.message : String(err)`
- *  回退 —— 必走「验证结果不可用」无详情的安全降级)。 */
+/** Typed-error rendering contract (code-quality.md): recognize the kind field,
+ *  render `${kind}: ${conversation_id}` or just `${kind}`; anything that is not
+ *  a legal typed-error shape → null (the upper layer must not fall back to
+ *  `instanceof Error ? err.message : String(err)` — it must take the safe
+ *  degraded line without details). */
 export function describeVerifyErrorDetail(err: unknown): string | null {
   if (typeof err !== "object" || err === null) return null;
   const obj = err as Record<string, unknown>;
@@ -128,10 +141,12 @@ export function describeVerifyErrorDetail(err: unknown): string | null {
   return typeof convId === "string" ? `${obj.kind}: ${convId}` : obj.kind;
 }
 
-/** 渲染投影:slot + 模式 → 显示行数组。none → [];ok → 1 行(终态文案);
- *  unavailable → 1 行(degraded)。auto 模式统一加 `[auto] ` 前缀(4 终态
- *  与 degraded 同款,视觉标记一眼可辨)。cols 截断走 clipOneLineVisual
- *  (CJK 2 列,与 agent-status-line / subagent-panel 同款)。 */
+/** Render projection: slot + mode → display-line array. none → []; ok → 1 line
+ *  (terminal-state text); unavailable → 1 line (degraded). auto mode prefixes
+ *  `[auto] ` uniformly (4 terminal states and the degraded line alike, so the
+ *  marker is recognizable at a glance). cols truncation goes through
+ *  clipOneLineVisual (CJK counts 2 columns; same as agent-status-line /
+ *  subagent-panel). */
 export function projectVerifyBanner(
   slot: VerifySlot,
   mode: VerifyBannerMode,
@@ -145,7 +160,7 @@ export function projectVerifyBanner(
     const text = `${autoPrefix}${pres.glyph} ${pres.label}（${view.rounds} 轮）`;
     return [{ fg: pres.fg, text: clipOneLineVisual(text, cols) }];
   }
-  // unavailable — auto 模式同样加 [auto] 前缀(标记与 4 终态一致)。
+  // unavailable — auto mode gets the same [auto] prefix (marker consistent with the 4 terminal states).
   const detail = describeVerifyErrorDetail(slot.reason);
   const suffix = detail === null ? "" : `（${detail}）`;
   const base = "⚠ 验证结果不可用";
@@ -157,19 +172,20 @@ export function projectVerifyBanner(
   ];
 }
 
-// ===== 渲染壳(单行 status row:与 components.tsx StatusLine 同纪律) =====
+// ===== Render shell (single-line status row: same discipline as StatusLine in components.tsx) =====
 
 export interface VerifyBannerStripProps {
-  /** 来自 app.tsx verifySlots 的当前 slot;无 verify → none → 静默。 */
+  /** Current slot from app.tsx verifySlots; no verify → none → silent. */
   readonly slot: VerifySlot;
   readonly mode: VerifyBannerMode;
   readonly cols: number;
 }
 
-/** 单行 banner 渲染壳。无 slot 行(slot.kind === "none") → 组件 return null
- *  (不渲染任何额外行,与 ChatView 自身的渲染约束统一)。
- *  注意:banner 自身没有 marginBottom / 边框 → chromeReserveRows 行账对应
- *  裸行(详见 chrome-budget.test.ts 的 verifyRows 联动用例)。 */
+/** Single-line banner render shell. An empty slot (slot.kind === "none") →
+ *  the component returns null (no extra row, unified with ChatView's own
+ *  rendering constraints). The banner itself has no marginBottom / border →
+ *  chromeReserveRows counts it as a bare row (see the verifyRows coupled
+ *  cases in chrome-budget.test.ts). */
 export function VerifyBannerStrip(props: VerifyBannerStripProps): ReactNode {
   const lines = projectVerifyBanner(props.slot, props.mode, props.cols);
   if (lines.length === 0) return null;

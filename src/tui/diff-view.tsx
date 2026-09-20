@@ -1,23 +1,24 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/diff-view.tsx
+ * Unified-diff renderer (ink → OpenTUI port): renders `DiffLine[]` from
+ * `computeDiff` (diff-unified.ts) into a red/green diff preview sized to the
+ * terminal width. Render only, no algorithms.
  *
- * #343 T4（自 archive/tui-ink/src/diff-view.tsx 迁移 ink → OpenTUI）：
- * 统一 diff 渲染器 —— 把 `computeDiff`（diff-unified.ts）产出的 `DiffLine[]`
- * 按终端宽度渲染成红绿 diff 预览。只做渲染、不做算法。
+ * Width tiers (line numbers + color):
+ *  - cols >= 80: two line-number columns (oldNo | newNo) + red/green;
+ *  - 40 <= cols < 80: single column (oldNo preferred, │ separated) + red/green;
+ *  - cols < 40: fold to `add` lines only (no line numbers, no del / hunk
+ *    headers) — narrow-terminal degradation, no throw, no overflow.
  *
- * 宽度分档（行号 + 颜色）：
- *  - cols >= 80：双列行号（oldNo | newNo）+ 红绿；
- *  - 40 <= cols < 80：单列行号（oldNo 优先 + │ 分隔）+ 红绿；
- *  - cols < 40：折叠为仅 `add` 行（无行号、无 del / hunk 头）——窄终端降级，
- *    不抛错、不溢出。
+ * Line text (DiffLine.text) already carries the unified-diff prefix
+ * (` ` / `-` / `+`); this layer only lays out number columns + color. Hunk
+ * headers (`@@ -A,B +C,D @@`, kind ctx) have no line numbers and render dim
+ * across the full row.
  *
- * 行文本（DiffLine.text）已带统一 diff 前缀（` ` / `-` / `+`），本层只排
- * 行号列 + 上色。hunk 头（`@@ -A,B +C,D @@`，kind ctx）无行号，整行 dim。
- *
- * 着色（OpenTUI 版）：add/del 行 fg 上语义色 + 外层 `<box width={cols}>`
- * 铺 backgroundColor 整行遮罩（bgAdd/bgDel）；tests/tui/diff-view.test.tsx
- * 用 captureSpans 实测 fg/bg RGBA（归档 ink 时代 skip 的上色契约落地）。
+ * Coloring (OpenTUI): add/del rows get semantic fg + the outer
+ * `<box width={cols}>` paints a full-row backgroundColor mask (bgAdd/bgDel);
+ * tests/tui/diff-view.test.tsx samples real fg/bg RGBA via captureSpans (the
+ * coloring contract that the archived ink-era tests skipped).
  */
 import type { ReactNode } from "react";
 import type { DiffLine } from "./diff-unified.js";
@@ -27,14 +28,14 @@ function pad3(n: number | undefined): string {
   return n === undefined ? "   " : String(n).padStart(3);
 }
 
-/** hunk 头判定（`@@` 起始的 ctx 行）。 */
+/** Hunk-header detection (ctx lines starting with `@@`). */
 function isHunkHeader(line: DiffLine): boolean {
   return line.kind === "ctx" && line.text.startsWith("@@");
 }
 
-/** 单行渲染字符串（纯函数，供测试直接断言文本形状）。 */
+/** Single-row render string (pure function; tests assert the text shape directly). */
 export function diffRowText(line: DiffLine, cols: number): string {
-  // 窄终端降级：仅 add 行，无行号。
+  // Narrow-terminal degradation: add lines only, no line numbers.
   if (cols < 40) return line.kind === "add" ? line.text : "";
   if (isHunkHeader(line)) return line.text;
   if (line.kind === "ctx") return line.text;
@@ -43,18 +44,19 @@ export function diffRowText(line: DiffLine, cols: number): string {
     const nw = pad3(line.newNo);
     return `${old} ${nw} │ ${line.text}`;
   }
-  // 单列：oldNo 优先，del/add 用 newNo 兜底。
+  // Single column: oldNo preferred, del/add fall back to newNo.
   const n = line.oldNo ?? line.newNo;
   const num = n === undefined ? "   " : String(n).padStart(3);
   return `${num} │ ${line.text}`;
 }
 
 /**
- * DiffLine[] → 可见平文本行（按 cols 折叠；空文本 drop）。
+ * DiffLine[] → visible flat text lines (folded by cols; empty texts dropped).
  *
- * 行账 SSOT：`liveToolPreviewRows`（live tail 行账预测）与 `<DiffView>`
- * 渲染都走 `diffRowText` 这同一套按 cols 折叠规则 —— 折叠规则只在此
- * 汇聚，杜绝多处内联分叉（行账 parity）。
+ * Row-accounting SSOT: both `liveToolPreviewRows` (live tail row-account
+ * prediction) and `<DiffView>` rendering go through `diffRowText`'s single
+ * set of col-folding rules — folding logic converges here only, no inline
+ * forks (row-account parity).
  */
 export function diffRowTexts(
   rows: readonly DiffLine[],
@@ -64,12 +66,13 @@ export function diffRowTexts(
 }
 
 /**
- * 单行整行背景遮罩色（按 kind + hunk 头）。
+ * Full-row background mask color for one line (by kind + hunk header).
  *
- * 只作用于 JSX 渲染层：add/del 返回淡色底，ctx/hunk 头返回 undefined
- * （透明）。**不**经 diffRowText / diffRowTexts 文本投影（那是行账 SSOT，
- * 绝不能改）。任何终端宽度都生效：窄终端折叠为 add-only 行时 add 行同样
- * 上绿底。
+ * Applies to the JSX render layer only: add/del return a light background,
+ * ctx / hunk headers return undefined (transparent). **Not** routed through
+ * the diffRowText / diffRowTexts text projection (that is the row-account
+ * SSOT, must never change). Effective at any terminal width: when narrow
+ * terminals fold to add-only rows, add rows still get the green background.
  */
 function rowBgColor(line: DiffLine): string | undefined {
   if (isHunkHeader(line)) return undefined;
@@ -83,7 +86,7 @@ function rowBgColor(line: DiffLine): string | undefined {
   }
 }
 
-/** 单行颜色（按 kind + hunk 头）。 */
+/** Single-line color (by kind + hunk header). */
 function rowColor(line: DiffLine): string {
   if (isHunkHeader(line)) return tuiPalette.dim;
   switch (line.kind) {
@@ -96,8 +99,9 @@ function rowColor(line: DiffLine): string {
   }
 }
 
-/** 单个 diff 行渲染：空文本 → 不占行；否则整行盒（遮罩铺满 cols）+ 文本
- *  （wrapMode none = 超宽截断不折行，行账 1 行）。 */
+/** One diff row: empty text → occupies no line; otherwise a full-width box
+ *  (mask spans cols) + text (wrapMode none = over-wide truncates without
+ *  folding, 1 row in the line accounting). */
 export function DiffRow(props: {
   readonly line: DiffLine;
   readonly cols: number;
@@ -118,12 +122,12 @@ export function DiffRow(props: {
   );
 }
 
-/** 折叠窄终端：仅保留 add 行（无行号无 hunk 头）。 */
+/** Narrow-terminal fold: keep add lines only (no line numbers, no hunk headers). */
 function foldNarrow(rows: readonly DiffLine[]): readonly DiffLine[] {
   return rows.filter((r) => r.kind === "add");
 }
 
-/** diff 预览容器：按 cols 分档渲染行列表。 */
+/** Diff preview container: renders the row list per cols tier. */
 export function DiffView(props: {
   readonly rows: readonly DiffLine[];
   readonly cols: number;

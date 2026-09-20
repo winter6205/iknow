@@ -2,29 +2,33 @@
 /**
  * src/tui/mcp-view.tsx
  *
- * #361 Phase D：MCP 服务看板（/mcp 入口）。参考 list-view.tsx 形态——纯函数 +
- * `useKeyboard`（↑↓ Enter Esc 导航）+ 视口切片（k9s 风格行级滚动）。
+ * MCP server board (the /mcp entry). Follows the list-view.tsx shape — pure
+ * functions + `useKeyboard` (↑↓ Enter Esc navigation) + viewport slicing
+ * (k9s-style row scrolling).
  *
- * 列表模式（mode="list"）：
- *  - 行 = `> server · state · 工具数 · source(user|project)`；
- *  - state 着色：connected 绿 / failed 红 / pending 暗黄 / disabled 灰；
- *  - ↑↓ 选行，Enter 进入 detail，`r` 触发 reload（带 reloading 提示），
- *    Esc 返回 chat；detail 模式同样响应 `r`（server 级操作）；
- *    reloading 提示两模式共用底部行。
- *  - 空状态：`无 MCP 服务。.iknow/mcp.json 配置后 /mcp 重载` + reload 提示。
+ * List mode (mode="list"):
+ *  - row = `> server · state · tool-count · source(user|project)`;
+ *  - state colors: connected green / failed red / pending amber / disabled gray;
+ *  - ↑↓ selects a row, Enter opens detail, `r` triggers reload (with a reloading
+ *    hint), Esc returns to chat; detail mode also answers `r` (reload is a
+ *    server-level operation); the reloading hint shares the bottom line in both modes;
+ *  - empty state: a hint telling the user to configure .iknow/mcp.json and
+ *    reload via /mcp, plus the reload hint.
  *
- * 详情模式（mode="detail"）：
- *  - header = `server · state` + 工具列表 `tool · description`（剥离
- *    `mcp__<server>__` 前缀，避免整行冗余全名）；
- *  - 首条 `← 返回`；Esc / Enter 返回列表（Esc 再按回 chat）；
- *  - `r` 重载（同列表模式，reload 是 server 级操作）；
- *  - cursor 恒 0（单 server 详情游标不活跃，留作未来多 server detail 切换）。
+ * Detail mode (mode="detail"):
+ *  - header = `server · state` + tool list `tool · description` (the
+ *    `mcp__<server>__` prefix is stripped to avoid redundant full names);
+ *  - the back entry leads the list; Esc / Enter return to the list (Esc again → chat);
+ *  - `r` reloads (same as list mode, a server-level operation);
+ *  - cursor is always 0 (a single-server detail cursor is inert, kept for
+ *    future multi-server detail switching).
  *
- * reload 语义：`r` → onReload + `reloading=true`；onReload 完成后延迟 ~200ms
- * 清位（给 UI 反馈窗口，避免 reload 极快时闪一下不可见）。
+ * reload semantics: `r` → onReload + `reloading=true`; cleared ~200ms after
+ * onReload settles (a UI feedback window so a very fast reload still shows).
  *
- * 视口行账（保守）：标题 1 + marginBottom 1 + 表头 1 + 行 N + 底部 reload
- * 状态 1 + 提示 1。固定 chrome 预留；超出滚动，本期简单截断 + ↑↓。
+ * Viewport row budget (conservative): title 1 + marginBottom 1 + header 1 +
+ * rows N + bottom reload status 1 + hint 1 — fixed chrome reservation; excess
+ * scrolls, currently simple truncation + ↑↓.
  */
 import { useCallback, useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -35,7 +39,7 @@ import type { AciToolDef } from "../harness/aci/types.js";
 import { tuiPalette } from "./theme.js";
 import { clipOneLine, visualWidth } from "./tool-summary.js";
 
-/** 平铺的 MCP 工具条目（server 反解自 `mcp__<server>__<tool>`）。 */
+/** Flattened MCP tool entries (server recovered from `mcp__<server>__<tool>`). */
 export interface McpToolEntry {
   readonly server: string;
   readonly tool: AciToolDef;
@@ -45,14 +49,14 @@ export interface McpViewProps {
   readonly statuses: readonly McpServerStatus[];
   readonly tools: ReadonlyArray<McpToolEntry>;
   readonly cols: number;
-  /** 视口可用行数（标题 + 表头 + 行数预算；缺省 12 供单测无 rows 环境）。 */
+  /** Usable viewport rows (title + header + row budget; default 12 so unit tests need no rows env). */
   readonly rows?: number;
   readonly onReload: () => void | Promise<void>;
   readonly onBack: () => void;
 }
 
-/** state → 语义色（connected 绿 / failed 红 / pending 暗黄 / disabled 灰）。
- *  exported 供单测直接断言。 */
+/** state → semantic color (connected green / failed red / pending amber /
+ *  disabled gray). Exported for direct unit-test assertions. */
 export function mcpStateColor(
   pal: typeof tuiPalette,
   state: McpServerStatus["state"]
@@ -71,17 +75,17 @@ export function mcpStateColor(
 
 export function McpView(props: McpViewProps): ReactNode {
   const pal = tuiPalette;
-  // 行账 SSOT（同 list-view 纪律，防整帧溢出）：
-  //  标题 1 + marginBottom 1 + 表头 1 + 底部 reload 状态 1 = 固定 chrome 4 行。
+  // Row-account SSOT (same list-view discipline, prevents whole-frame overflow):
+  //  title 1 + marginBottom 1 + header 1 + bottom reload status 1 = 4 fixed chrome rows.
   const rowsBudget = Math.max(6, props.rows ?? 12);
   const viewHeight = Math.max(1, rowsBudget - 4);
 
   const [mode, setMode] = useState<"list" | "detail">("list");
-  // 列表导航（原子 state：快速连键同一渲染批内不互读旧快照）。
+  // List navigation (atomic state: rapid keypresses within one render batch never read each other's stale snapshot).
   const [nav, setNav] = useState({ cursor: 0, scrollTop: 0 });
   const [reloading, setReloading] = useState(false);
 
-  // 每 server 工具数（列表行内展示；全量拉一次后按 server 过滤）。
+  // Per-server tool counts (shown inline in list rows; one full pass, then filtered by server).
   const toolCounts = useMemo(() => {
     const map = new Map<string, number>();
     for (const t of props.tools) {
@@ -94,7 +98,7 @@ export function McpView(props: McpViewProps): ReactNode {
     if (reloading) return;
     setReloading(true);
     const finish = (): void => {
-      // 短延迟给 UI 反馈（~200ms），reload 极快时也可见 loading 提示。
+      // Short delay gives UI feedback (~200ms), so the loading hint stays visible even for an instant reload.
       setTimeout(() => setReloading(false), 200);
     };
     try {
@@ -105,7 +109,7 @@ export function McpView(props: McpViewProps): ReactNode {
   }, [reloading, props.onReload]);
 
   useKeyboard((e: KeyEvent) => {
-    // 让出修饰键组合（Ctrl/Meta 由 app 层 / 系统接管）。
+    // Yield modified-key combos (Ctrl/Meta are taken by the app layer / system).
     if (e.ctrl || e.meta) return;
     if (e.name === "escape") {
       if (mode === "detail") {
@@ -116,8 +120,8 @@ export function McpView(props: McpViewProps): ReactNode {
       return;
     }
     if (mode === "detail") {
-      // 单 server 详情：Enter / ↑↓ 均不活跃，返回列表即可；`r` 是 server 级
-      // 操作，不依赖详情内容，两种模式都响应 reload。
+      // Single-server detail: Enter / ↑↓ are inert, returning to the list is
+      // enough; `r` is a server-level operation independent of detail content, so both modes reload.
       if (e.name === "return") {
         setMode("list");
         return;
@@ -127,7 +131,7 @@ export function McpView(props: McpViewProps): ReactNode {
       }
       return;
     }
-    // 列表模式
+    // List mode
     if (e.name === "return") {
       if (props.statuses.length > 0) {
         setMode("detail");
@@ -167,10 +171,10 @@ export function McpView(props: McpViewProps): ReactNode {
       ? "按 r 重载 · Esc 返回"
       : undefined;
 
-  // ── 列表模式渲染 ─────────────────────────────────────────────
+  // ── List mode render ─────────────────────────────────────────────
   if (mode === "list") {
     const total = props.statuses.length;
-    // 视口切片：只渲染 [scrollTop, scrollTop+viewHeight) 的 server 行。
+    // Viewport slicing: render only server rows in [scrollTop, scrollTop+viewHeight).
     const rows: ReactNode[] = [];
     for (
       let i = nav.scrollTop;
@@ -184,15 +188,16 @@ export function McpView(props: McpViewProps): ReactNode {
       const count = toolCounts.get(status.name) ?? 0;
       const stateColor = mcpStateColor(pal, status.state);
       const rowFg = selected ? pal.accent : pal.text;
-      // 行前缀 + server 名 + state 着色 + 工具数 + source 标记。
+      // Row prefix + server name + colored state + tool count + source marker.
       const prefix = clipOneLine(
         `${marker} ${status.name}`,
         Math.max(4, maxLineWidth - 8)
       );
-      // #378：failed 时 state 旁追渲染 error 首行（clipOneLine 截断；
-      // pal.dim + pal.error 色）。error 列宽预算让位于名称截断
-      // maxLineWidth - 8 既定逻辑——按「非 error 部分视觉宽」回找余量
-      // （含 ` · ` 分隔符），余量不足（名称占满整行）时不渲染，行不溢出于现状。
+      // On failed, the error first line renders next to the state (clipOneLine
+      // truncation, pal.dim + pal.error colors). The error-column budget yields to
+      // name truncation (the maxLineWidth - 8 logic): the remainder is found by
+      // "visual width of the non-error part" (including the ` · ` separator); no
+      // room left (name fill the row) → skip, so a row never overflows.
       const stateText = ` · ${status.state}`;
       const dimText = ` · ${count} 工具 · ${status.source}`;
       const errorBudget =
@@ -240,16 +245,16 @@ export function McpView(props: McpViewProps): ReactNode {
     );
   }
 
-  // ── 详情模式渲染 ─────────────────────────────────────────────
+  // ── Detail mode render ─────────────────────────────────────────────
   const selected = props.statuses[nav.cursor];
   const detailTools = selected
     ? props.tools.filter((t) => t.server === selected.name)
     : [];
-  // 首条 `← 返回` 恒在 index 0；工具行从 index 1 起，简单截断到视口。
-  // 工具名剥离 `mcp__<server>__` 前缀（server 已在 header 明示，避免冗余全名）；
-  // description 为空时与列表模式同口径回退 `(空)`。
+  // The back entry is always at index 0; tool rows start from index 1, truncated to the viewport.
+  // Tool names drop the `mcp__<server>__` prefix (the server is already explicit in the
+  // header, no redundant full name); an empty description falls back to the placeholder, same basis as list mode.
   const toolRows: ReactNode[] = [];
-  const maxToolRows = viewHeight - 1; // 预留 ← 返回 1 行
+  const maxToolRows = viewHeight - 1; // reserve 1 row for the back entry
   toolRows.push(
     <text key="back" fg={pal.dim}>
       ← 返回
@@ -265,7 +270,7 @@ export function McpView(props: McpViewProps): ReactNode {
       </text>
     );
   }
-  // 工具数超出视口 → 末尾提示余量（行账与截断同源，避免溢出）。
+  // Tool count exceeds the viewport → trailing hint for the hidden remainder (row account and truncation share one source, no overflow).
   const hiddenTools = detailTools.length - shownTools.length;
   if (hiddenTools > 0) {
     toolRows.push(
@@ -284,17 +289,15 @@ export function McpView(props: McpViewProps): ReactNode {
         {selected && <text fg={stateColor}> · {selected.state}</text>}
         <text fg={pal.dim}> Esc 返回列表 · 再按回 chat</text>
       </box>
-      {/* #378：failed + error → header 下 error 多行（按 \n 拆行、逐行
-          clipOneLine、pal.error 色），放于工具行之前；非 failed 不渲染。 */}
+      {/* failed + error → multi-line error under the header (split on \n, per-line
+          clipOneLine, pal.error color), placed before the tool rows; non-failed → no render. */}
       {selected?.state === "failed" &&
         selected.error &&
-        selected.error
-          .split("\n")
-          .map((line, i) => (
-            <text key={`mcp-err-${i}`} fg={pal.error}>
-              {clipOneLine(line, maxLineWidth)}
-            </text>
-          ))}
+        selected.error.split("\n").map((line, i) => (
+          <text key={`mcp-err-${i}`} fg={pal.error}>
+            {clipOneLine(line, maxLineWidth)}
+          </text>
+        ))}
       {toolRows}
       {footerLine !== undefined && (
         <box marginTop={1}>

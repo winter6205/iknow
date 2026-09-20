@@ -1,20 +1,18 @@
 /**
- * src/tui/turn-fold-lines.ts
+ * Turn / fold derivation extracted out of ChatView into a pure module;
+ * rendering remains ChatView's job.
  *
- * #986 + plans/issue-986-chatview-split.md：把 ChatView 内联的 turn /
- * fold 派生（行 307–504）抽成纯模块，渲染由 ChatView 仍负责。
+ * The old `buildFoldLinesBySegmentIndex` path (unit fold lines) is fully
+ * retired — the block list (`buildActivityBlockFoldLines`) is the single
+ * source of folding. This module keeps:
+ *  - `pickMessageSegments` / `renderInContentOrder` (MessageRow render splitting)
+ *  - `makeThinkingMsAtVisibleFromSource` (visibleIndex -> sourceIndex mapping)
+ *  - `segmentActivityBlocks` / `firstPartThinkingBlocks` (segment render slices)
+ *  - `shouldShowLiveThinkingPanel` (live-thinking yield check)
+ *  - `buildActivityBlockFoldLines` (activity block title / preview / hideThinking derivation)
  *
- * T7（specs/tui-activity-block.md / plans T7）：旧 `buildFoldLinesBySegmentIndex`
- * 路径（unit fold 行）整体退役 —— 块列表（`buildActivityBlockFoldLines`）
- * 是折叠的唯一来源；本模块只保留：
- *  - `pickMessageSegments` / `renderInContentOrder`（MessageRow 渲染切分用）
- *  - `makeThinkingMsAtVisibleFromSource`（visibleIndex → sourceIndex 映射）
- *  - `segmentActivityBlocks` / `firstPartThinkingBlocks`（段渲染切片）
- *  - `shouldShowLiveThinkingPanel`（live thinking 让位判定）
- *  - `buildActivityBlockFoldLines`（活动块标题 / 预览 / hideThinking 派生）
- *
- * 本模块纯函数、无 React / IO 依赖；调用方（ChatView）把结果 Map 喂回
- * 渲染层。
+ * Pure functions, no React / IO dependency; the caller (ChatView) feeds the
+ * result maps back into the render layer.
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import type { LiveToolRun } from "./live-tool-state.js";
@@ -25,32 +23,37 @@ import {
   type ActivityBlockInput,
 } from "./activity-block.js";
 
-/** anchor 消息下标 → 折叠行（unit fold，0 或 1 行）—— T7 后保留类型以
- *  兼容 MessageRow / ChatScrollbox 调用面，但本模块不再填充；传恒空 map。 */
+/** Anchor message index -> fold lines (unit fold, 0 or 1 line). The type is
+ *  kept for the MessageRow / ChatScrollbox call surface, but this module no
+ *  longer populates it; an always-empty map is passed. */
 export type FoldLinesBySegmentIndex = ReadonlyMap<
   number,
   ReadonlyArray<string>
 >;
 
-/** 已被折叠行覆盖的 ms 值集合（hideThinking 用，按派生值不反推显示文案）。 */
+/** Set of ms values already covered by fold lines (for hideThinking; keyed on derived values, never reverse-parsed from display text). */
 export type ShownThinkingMsValues = ReadonlySet<number>;
 
-/** `thinkingMsAtVisible(visibleIndex)` 的注入形态 —— 渲染层做 sourceIndex →
- *  visibleIndex 映射，本模块只看 visible 下标。 */
+/** Injectable form of `thinkingMsAtVisible(visibleIndex)` — the render layer
+ *  maps sourceIndex -> visibleIndex; this module only sees visible indices. */
 export type ThinkingMsAtVisible = (visibleIndex: number) => number;
 
 /**
- * live thinking 面板（open unit）让位判定 —— docs/CONTEXT.md `open unit`：
- * 已画活动块（`Thought for` / `calling / called`）**不是**关掉后续思考
- * panel 的信号；让位的唯一理由是**该 burst 已关闭**（draft 缓冲在每条
- * `text_delta` / `tool_call_start` 清空 — `closeThinkingPhase`）。任何 tool
- * running（包括同一 burst 内后续调起的工具）都不再关闭 panel —— 这正是
- * live-signal 锁句 7：不准用「任意 tool running」关下一块思考。
+ * Live thinking panel yield check — see docs/CONTEXT.md `open unit`:
+ * already-drawn activity blocks (`Thought for` / `calling / called`) are
+ * **not** a signal to close the following thinking panel; the only reason to
+ * yield is that **the burst has closed** (the draft buffer clears on every
+ * `text_delta` / `tool_call_start` — `closeThinkingPhase`). Any running tool
+ * (including tools started later within the same burst) no longer closes the
+ * panel — arbitrary "some tool is running" must never suppress the next
+ * thinking block.
  *
- * 注意：本函数在 T4 live-signal 之后仅保留**纯函数出口**（盖子 + 测
- * 试覆盖），不再被任何生产代码调用 —— ChatView 经 `liveThinking` 字段
- * 直接驱动 unanchored 活动块、ThinkingPanel 组件已退役。保留导出只
- * 为历史夹具与 `thinkingDraftMasked` 闸子的语义文档。
+ * Note: after the live-signal change this keeps only the **pure-function
+ * exit** (a cap + test coverage); no production code calls it anymore —
+ * ChatView drives unanchored activity blocks directly via the `liveThinking`
+ * field and the ThinkingPanel component is retired. The export remains purely
+ * as a historical fixture and semantic documentation of the
+ * `thinkingDraftMasked` gate.
  */
 export function shouldShowLiveThinkingPanel(opts: {
   readonly running: boolean;
@@ -60,9 +63,9 @@ export function shouldShowLiveThinkingPanel(opts: {
 }
 
 /**
- * `messageSegments` —— 给定 messageIndex 对应的所有 activitySegments
- * 子集（同一消息可能拆出多簇：tool → text → tool）。从全量 activity
- * 中筛出 `segment.messageIndex === visibleIndex` 的子集。
+ * `messageSegments` — the subset of activitySegments belonging to one
+ * messageIndex (a message may split into several clusters: tool -> text ->
+ * tool). Filters `segment.messageIndex === visibleIndex` out of the full list.
  */
 export function pickMessageSegments(
   activitySegments: ReadonlyArray<TurnActivitySegment>,
@@ -84,8 +87,8 @@ export function pickMessageSegments(
   return out;
 }
 
-/** 给定 messageSegments，是否存在多段且至少一段有折叠行 —— 控制是否走
- * 「in content order」渲染分支。 */
+/** Given messageSegments: more than one segment and at least one carries
+ *  fold lines — controls whether the "in content order" render branch runs. */
 export function renderInContentOrder(
   messageSegments: ReadonlyArray<{
     readonly segmentIndex: number;
@@ -101,8 +104,8 @@ export function renderInContentOrder(
 }
 
 /**
- * 把 `visibleMessages` / `thinkingMs` 拍平成 `thinkingMsAtVisible`：映射
- * `visibleIndex → sourceIndex` 后查表。sourceIndex 缺席时按 0 兜底。
+ * Flatten `visibleMessages` / `thinkingMs` into `thinkingMsAtVisible`: map
+ * `visibleIndex -> sourceIndex` then look up. Missing sourceIndex falls back to 0.
  */
 export function makeThinkingMsAtVisibleFromSource(
   thinkingMs: ReadonlyArray<number | null> | undefined,
@@ -119,9 +122,10 @@ export function makeThinkingMsAtVisibleFromSource(
 }
 
 /**
- * segment 到 message content 的活动块切片（`text` 取单段、`tools` 取
- * blockIndex..endIndex 的 tool_use）。原 ChatView 内层段渲染器从
- * message.content 抽「该 segment 的活动块」+（first part）thinkingBlocks。
+ * Activity-block slice from message content for one segment (`text` takes a
+ * single block; `tools` takes the tool_use items in blockIndex..endIndex).
+ * Previously the ChatView inner segment renderer extracted "this segment's
+ * activity blocks" + (first part) thinkingBlocks from message.content.
  */
 export function segmentActivityBlocks(
   message: AnthropicNativeMessage,
@@ -138,8 +142,7 @@ export function segmentActivityBlocks(
     .filter((b) => b.type === "tool_use");
 }
 
-/** first part 的 thinking blocks（thinking + redacted_thinking） —— 仅首
- * 段附加。 */
+/** Thinking blocks of the first part (thinking + redacted_thinking) — attached only to the first segment. */
 export function firstPartThinkingBlocks(
   message: AnthropicNativeMessage
 ): AnthropicNativeMessage["content"] {
@@ -149,52 +152,58 @@ export function firstPartThinkingBlocks(
 }
 
 /**
- * 活动块行派生（specs/tui-activity-block.md Thinking-at-bottom revision
- * 锁句 4）：把 `deriveActivityBlocks` 的块按 messageIndex 路由到 MessageRow，
- * 并**保留锚点**（contentBlockIndex）—— 落定标题由 MessageBlocks 按锚点
- * 插进消息内容顺序，不整包甩在消息尾巴。
+ * Activity block line derivation (Thinking-at-bottom): route blocks from
+ * `deriveActivityBlocks` to MessageRow by messageIndex while **keeping the
+ * anchor** (contentBlockIndex) — settled titles are inserted by MessageBlocks
+ * into the message content order, never dumped as a whole at the message tail.
  *
- * 关键映射（per-message，**不**跨消息合并 — spec S5）：
- *  - 块锚点 (messageIndex, contentBlockIndex) → messageIndex 直接匹配，
- *    不再走 `orderedTurnActivitySegments` 的跨消息合并（那是旧 unit fold 合同）。
- *  - 同 messageIndex 拆出多块时按 contentBlockIndex 升序消费。
- *  - 没有匹配 messageIndex 的块（live 思考块、live 工具簇块）落入
- *    `unanchoredBlocks`，由 ChatView 转给 TranscriptTail 渲染。
+ * Key mapping (per-message, **no** cross-message merge):
+ *  - block anchor (messageIndex, contentBlockIndex) matches messageIndex
+ *    directly; the old cross-message merge of `orderedTurnActivitySegments`
+ *    (unit-fold contract) is gone.
+ *  - multiple blocks under one messageIndex are consumed ascending by
+ *    contentBlockIndex.
+ *  - blocks with no matching messageIndex (live thinking blocks, live tool
+ *    clusters) fall into `unanchoredBlocks`, which ChatView hands to
+ *    TranscriptTail.
  *
- * 不变式：
- *  - 块标题文本 = `ActivityBlock.title`（`formatToolUseCounts` 单源，不另拼）；
- *  - 块覆盖的 thinkingMs 进 `shownThinkingMsValues`，hideThinking 双门用之；
- *  - `hideThinking` 只藏 MessageBlocks 内不当槽主的思考正文路径，不动这里
- *    的锚点标题（锁句 5 继承项）。
+ * Invariants:
+ *  - block title text = `ActivityBlock.title` (single source via
+ *    `formatToolUseCounts`, never re-composed);
+ *  - thinkingMs covered by blocks enters `shownThinkingMsValues`, used by the
+ *    hideThinking double gate;
+ *  - `hideThinking` hides only the non-slot-owner thinking body paths inside
+ *    MessageBlocks and never touches the anchor titles derived here.
  */
-/** 一条已锚定活动块的渲染行：锚点 + 标题 + 可选预览。 */
+/** One rendered line for an anchored activity block: anchor + title + optional preview. */
 export interface ActivityBlockLine {
   readonly contentBlockIndex: number;
   readonly title: string;
-  /** `null` = 该块无预览行（settled 块 slot.kind === "none"、或思考槽）；
-   *  非 null 才在块标题下画一行 dim 当前预览（spec S2–S4）。 */
+  /** `null` = the block has no preview line (settled block with slot.kind
+   *  === "none", or a thinking slot); non-null draws one dim current-preview
+   *  line under the block title. */
   readonly preview: string | null;
 }
 
 export interface ActivityBlockFoldDerivation {
-  /** messageIndex（visible）→ 该消息的活动块行（按 contentBlockIndex 升序，
-   *  保留锚点供 MessageBlocks 原位插入）。 */
+  /** messageIndex (visible) -> this message's activity block lines
+   *  (ascending by contentBlockIndex, anchors kept for MessageBlocks'
+   *  in-place insertion). */
   readonly blockLinesByMessage: ReadonlyMap<
     number,
     ReadonlyArray<ActivityBlockLine>
   >;
-  /** 块覆盖的 thinkingMs 值集合（hideThinking 用）。 */
+  /** thinkingMs values covered by blocks (for hideThinking). */
   readonly shownThinkingMsValues: ReadonlySet<number>;
-  /** 未匹配到任何 messageIndex 的块（live 块）—— tail 用。 */
+  /** Blocks matching no messageIndex (live blocks) — for the tail. */
   readonly unanchoredBlocks: ReadonlyArray<ActivityBlock>;
 }
 
 /**
- * 主函数：纯派生 —— 见模块头注释。
- *
- * 入参 = `deriveActivityBlocks` 同形态。返回的 `foldLineMapByMessage`
- * 按 messageIndex（visible 平铺下标）索引，每个 messageIndex 多块按
- * contentBlockIndex 升序消费，每块一行标题。
+ * Main function: pure derivation — see the module header. Inputs share the
+ * `deriveActivityBlocks` shape. The returned map is indexed by messageIndex
+ * (flattened visible index); multiple blocks per messageIndex are consumed
+ * ascending by contentBlockIndex, one title line per block.
  */
 export function buildActivityBlockFoldLines(args: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
@@ -214,15 +223,16 @@ export function buildActivityBlockFoldLines(args: {
     liveThinking: args.liveThinking,
     inFoldCountOf: args.inFoldCountOf,
   });
-  // 按 messageIndex 分组，保留锚点；同消息多块按 contentBlockIndex 升序排
-  // （活动块的 contentBlockIndex = cluster 首块的下标）。
+  // Group by messageIndex, keeping anchors; multiple blocks of one message
+  // sort ascending by contentBlockIndex (a block's contentBlockIndex is the
+  // index of its cluster's first block).
   const byMessage = new Map<number, Array<ActivityBlockLine>>();
   const shownThinkingMsValues = new Set<number>();
   const unanchoredBlocks: ActivityBlock[] = [];
 
   for (const block of blocks) {
     if (block.anchor.messageIndex >= args.visibleCount) {
-      // EXIT: 盘上下标 ≥ visibleCount → live 块（未提交相），落 tail。
+      // EXIT: on-disk index >= visibleCount -> live block (uncommitted phase), falls to the tail.
       unanchoredBlocks.push(block);
       continue;
     }
@@ -236,7 +246,7 @@ export function buildActivityBlockFoldLines(args: {
     const ms = args.thinkingMsAtVisible(block.anchor.messageIndex);
     if (ms > 0) shownThinkingMsValues.add(ms);
   }
-  // 排序 + 转只读。
+  // Sort + freeze to read-only.
   const blockLinesByMessage = new Map<
     number,
     ReadonlyArray<ActivityBlockLine>

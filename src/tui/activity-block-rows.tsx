@@ -2,20 +2,22 @@
 /**
  * src/tui/activity-block-rows.tsx
  *
- * 过程块行装配单源（specs/tui-activity-block.md T4–T7）：块标题一行 +
- * 可选 dim 预览一行（仅当该块槽是 `tool-preview`）。
+ * Single-source assembly of activity block rows (specs/tui-activity-block.md):
+ * a block title row + an optional dim preview row (only when the block slot is
+ * `tool-preview`).
  *
- * 消费方三处共用本模板：历史消息行（`MessageBlocks` 按 contentBlockIndex
- * 锚点插入）、tail 的未锚定块壳（`TranscriptTail`）。模板单列成本模块是
- * 因为 `message-blocks` 也要用它 —— 留在 `message-row` 会让二者形成
- * 循环 import（message-row 已 import MessageBlocks）。
+ * All consumers share this template: historical message rows (`MessageBlocks`,
+ * inserted at the contentBlockIndex anchor) and the tail's unanchored block
+ * shells (`TranscriptTail`). The template lives in its own module because
+ * `message-blocks` also needs it —— keeping it in `message-row` would form a
+ * circular import (message-row already imports MessageBlocks).
  */
 import type { ReactNode } from "react";
 import * as React from "react";
 import { tuiPalette } from "./theme.js";
 
-/** 块标题 / 预览行的共享装配。keys 由调用方给（各消费方的 React key
- *  前缀不同，模板本身一致）。 */
+/** Shared assembly for block title / preview rows. Keys come from the caller
+ *  (each consumer uses a different React key prefix; the template itself is identical). */
 export function renderActivityBlockRows(
   blockTitles: ReadonlyArray<string>,
   slotPreviews: ReadonlyArray<string | null>,

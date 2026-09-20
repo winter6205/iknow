@@ -1,24 +1,27 @@
 /**
- * src/tui/deps.ts
+ * buildTuiDeps delegates to buildHarnessEngine({ surface: "tui" }) — assembly
+ * is SSOT-ized: the TUI no longer builds its own adapter / executor /
+ * permission / registry / system and goes entirely through the single harness
+ * assembly point (same source as chat / ask / serve, so the tool surface can
+ * never drift). The TUI therefore inherits subagentManager (self-built for
+ * surface !== "ask") + the combined shutdown handle (MCP + subagent cleanup).
+ * The coordinator segment is absent by default — its guidance landing moved to
+ * the spawn_subagent tool description (SSOT); the assembly seam stays, and
+ * callers can still render that segment explicitly via
+ * createIknowSystemResolver opts.coordinatorText.
  *
- * #365 T2: buildTuiDeps 委托 buildHarnessEngine({ surface: "tui" }) —— 装配
- * SSOT 化。TUI 不再自建 adapter / executor / permission / registry / system,
- * 全量走 harness 单一装配点(与 chat / ask / serve 同源,工具面永不漂移)。
- * TUI 因此自动继承 subagentManager(surface !== "ask" 自建) + shutdown 组合
- * 句柄(MCP + subagent 两清理)。coordinator 段默认缺席(#558 T2)—— 引导
- * 落点已迁到 spawn_subagent 工具 description(#557 T1 SSOT);装配缝保留,
- * 调用方显式经 createIknowSystemResolver opts.coordinatorText 仍渲染该段。
+ * Observability seam: opts.onToolEvent + opts.soleInflightId are wrapped by
+ * wrapTuiHook in this module into BuildEngineOpts.hooks (PostToolUseHook),
+ * passed through build-engine into createAciExecutor — postToolUse fires →
+ * attribution via soleInflightId → onToolEvent (tool summary line events; the
+ * official observation hook in permission/types.ts, fires after each call).
  *
- * T1 观测缝(#365):opts.onToolEvent + opts.soleInflightId 由本模块 wrapTuiHook
- * 包装成 BuildEngineOpts.hooks(PostToolUseHook),经 build-engine 透传进
- * createAciExecutor —— postToolUse 触发 → soleInflightId 归因 → onToolEvent
- * (工具摘要行事件,Q5b=B;permission/types.ts:118-131 官方观测挂点,每 call 事后触发)。
- *
- * #337 Phase B / #361 Phase D / #378:装配完成后用 build-engine 透出的
- * skillCatalog + mcpManager + catalog 构建 TUI 扩展面(TuiExtensions),经
- * opts.onExtensions 同步回调消费(slash 候选 / MCP 看板 / 退出收口)。MCP 连接
- * 超时由 env.mcp.connectTimeoutMs 经 build-engine 透传(默认 60_000)。
- * 纯 TS 模块,无 ink / OpenTUI 依赖。
+ * After assembly, build-engine's skillCatalog + mcpManager + catalog are used
+ * to build the TUI extension surface (TuiExtensions), consumed through the
+ * synchronous opts.onExtensions callback (slash candidates / MCP board /
+ * shutdown closure). The MCP connect timeout passes through build-engine from
+ * env.mcp.connectTimeoutMs (default 60_000).
+ * Pure TS module, no ink / OpenTUI dependencies.
  */
 import type { LoopEngineDeps } from "../harness/index.js";
 import {
@@ -57,24 +60,26 @@ import { resolveServeDataDir } from "../session-api/serve.js";
 import { resolveTasksDir } from "../harness/background/paths.js";
 import { MEMORY_DIR_NAME } from "../shared/session-tree-names.js";
 
-/** 工具摘要行事件（postToolUse 投影，observability-only）。 */
+/** Tool summary line event (postToolUse projection, observability-only). */
 export interface TuiToolEvent {
   readonly conversationId: string;
   readonly toolName: string;
-  /** T4 (#175): tool_use_id — TUI 用此与流式 tool_call_start 配对转 ok/failed
-   * 摘要行;缺省时(host 未注入 / 旧版回放) 落回 legacy 字符串行追加。 */
+  /** tool_use_id — the TUI pairs it with streaming tool_call_start to flip
+   *  summary lines to ok/failed; when absent (host did not inject / old
+   *  replay) fall back to appending legacy string lines. */
   readonly toolUseId?: string;
   /** ok | validation_failed | tool_not_found | execution_failed */
   readonly kind: string;
   readonly input: unknown;
   readonly message?: string;
   /**
-   * T4 (#298):观测 side-channel 载体 — handler envelope 的 meta(old/new 全文)。
-   * 注意与模型面(MCP/Anthropic)的 `payload` 概念无关:此字段只承载 diff 的
-   * old/new 内容,绝不进模型 tool_result。仅在 ok 且有 meta 时存在。
-   *
-   * #693 T4 D4:扩 stdout / stderr —— bash 子进程输出,result preview 尾窗的
-   * 数据源;同样走观测旁路,模型视野不可见。
+   * Observation side-channel carrier — the handler envelope's meta (full
+   * old/new text). Unrelated to the model-facing (MCP/Anthropic) `payload`
+   * concept: this field only carries the diff's old/new content and never
+   * enters the model's tool_result. Present only when ok and meta exists.
+   * Extended later with stdout / stderr — bash subprocess output, the data
+   * source of the result-preview tail window; same observation bypass,
+   * invisible to the model.
    */
   readonly payload?: {
     readonly oldContent?: string;
@@ -86,170 +91,191 @@ export interface TuiToolEvent {
 
 export interface BuildTuiDepsOptions {
   readonly askUser: AskUser;
-  /** 工具完成事件；归因规则见 hub-bridge.ts（单会话 in-flight 才归因）。 */
+  /** Tool completion event; attribution rules live in hub-bridge.ts
+   *  (attribute only when a single session is in flight). */
   readonly onToolEvent?: (event: TuiToolEvent) => void;
   /**
-   * 归因查询：当前是否恰好一个会话 in-flight（是则返回其 id）。
-   * 多会话并发时事件抑制（宁缺勿错归，见 hub-bridge.ts 已知边界）。
+   * Attribution query: whether exactly one session is in flight now (returns
+   * its id if so). With concurrent sessions events are suppressed — better to
+   * miss than to mis-attribute (see hub-bridge.ts known boundary).
    */
   readonly soleInflightId?: () => string | undefined;
   /**
-   * 可变权限模式上下文（TUI 按 Shift+Tab 翻转它）。
-   * 缺省 = 静态 default 上下文（保留历史行为；hub 内 ToolExecutionContext
-   * 仍走 asModeContext 自适配）。
+   * Mutable permission-mode context (the TUI flips it with Shift+Tab).
+   * Absent = static default context (historical behavior preserved; the hub's
+   * ToolExecutionContext still adapts via asModeContext).
    */
   readonly permissionMode?: PermissionModeContext;
   /**
-   * #279 项3：会话级授权登记表 —— 权限 modal「总是允许」写入 session 层
-   * allow 规则（最高优先 normal 层），后续同工具调用 checkPermission 直接
-   * 放行不再 ask。缺省 = 无 session 层（历史行为）。
+   * Session-level grant registry — the permission modal's "always allow"
+   * writes an allow rule into the session layer (highest-priority normal
+   * layer), so later calls of the same tool pass checkPermission without
+   * asking. Absent = no session layer (historical behavior).
    */
   readonly sessionGrants?: SessionGrants;
   /**
-   * D-α T5 / ADR-0030：graph 编排 overlay holder（TUI 按 Shift+Tab 或敲
-   * `/graph` 翻它）。透传给 build-engine —— `run_graph` 与编排段按返回的
-   * `graphAssembly` 每 round 快照 gate。缺席 = 本入口未接 overlay。
+   * Graph-orchestration overlay holder (ADR-0030; the TUI flips it with
+   * Shift+Tab or `/graph`). Passed through to build-engine — `run_graph` and
+   * the orchestration segment gate on the returned `graphAssembly` snapshot
+   * each round. Absent = this entry point has no overlay wired.
    */
   readonly graphMode?: GraphModeContext;
   /**
-   * ADR-0092 / SC13：filesystem isolation 档 holder（TUI 按 `/config` 翻它）。
-   * 透传给 build-engine —— `BuildEngineOpts.fsMode` → bash 工厂 per-call 读
-   * （前台 fence 与后台 spawn 共用同一份冻结值；沙箱纪律 #653 G3）。缺席 =
-   * 本入口未接 fs 档（引擎按全局档缺省）。
+   * Filesystem isolation tier holder (ADR-0092; the TUI flips it via
+   * `/config`). Passed through to build-engine — `BuildEngineOpts.fsMode` →
+   * the bash factory reads it per call (foreground fence and background spawn
+   * share one frozen value; sandbox discipline). Absent = this entry point
+   * has no fs tier (the engine defaults to the global tier).
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0096 T2：运行期子代理并发上限 holder（与 fsMode 同形态）。透传给
-   * build-engine —— `BuildEngineOpts.subagentCapacityHolder` →
-   * `createSubAgentManager`（spawn 闸每次现读）+ registry → spawn_subagent
-   * 工具 description（getter 同源）。缺席 = 引擎与工具面走 env/subagent
-   * 静态值（与既有行为 byte-equal）。
+   * Runtime subagent concurrency cap holder (ADR-0096; same shape as fsMode).
+   * Passed through to build-engine — `BuildEngineOpts.subagentCapacityHolder`
+   * → `createSubAgentManager` (the spawn gate reads it fresh each time) +
+   * registry → the spawn_subagent tool description (getter, same source).
+   * Absent = engine and tool surface use the static env/subagent values
+   * (byte-equal to prior behavior).
    */
   readonly subagentCapHolder?: SubagentCapacityHolder;
   /**
-   * ADR-0096 T3：worktree 门禁运行期开关 holder（与 fsMode / cap 同形态）。
-   * 透传给 build-engine —— `BuildEngineOpts.worktreeOnMutateHolder` → mutate
-   * 门禁每波入口现读（D2 一波一读；面板翻转对下一波 tool call 生效）。
-   * 缺席 = 门禁退回启动期冻结读数（`resolveWorktreeOnMutate(settings)`），与
-   * 既有行为 byte-equal。
+   * Worktree-gate runtime toggle holder (ADR-0096; same shape as fsMode /
+   * cap). Passed through to build-engine —
+   * `BuildEngineOpts.worktreeOnMutateHolder` → the mutate gate reads it fresh
+   * at each wave entry (one read per wave; a panel flip takes effect on the
+   * next wave of tool calls). Absent = the gate falls back to the boot-time
+   * frozen reading (`resolveWorktreeOnMutate(settings)`), byte-equal to prior
+   * behavior.
    */
   readonly worktreeOnMutateHolder?: WorktreeOnMutateHolder;
   /**
-   * live-graph-phase1 T1 / ADR-0051:活图账本 host（run.tsx 自建单例）。
-   * 透传给 build-engine —— `run_graph` handler 按 ctx.conversationId 解析
-   * 会话账本。缺席 = 工具不建账（V1 零行为变化）。
+   * Live-graph ledger host (self-built singleton in run.tsx). Passed through
+   * to build-engine — the `run_graph` handler resolves the session ledger by
+   * ctx.conversationId. Absent = the tool keeps no ledger (no behavior
+   * change).
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
-  /** #337 Phase B 测试缝：userHome 覆盖（默认 homedir()）。 */
+  /** Test seam: userHome override (default homedir()). */
   readonly userHome?: string;
-  /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
+  /** Test seam: cwd override (default process.cwd()). */
   readonly cwd?: string;
   /**
-   * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
-   * 到 build-engine。TUI 入口(tui/run.tsx)从 `RunTuiOptions.workspaceRoot`
-   * 透传到 buildTuiDeps → buildHarnessEngine。TUI 不再持有 userHome/cwd
-   * 之外的全局 state,workspaceRoot 在 deps 层单向透明。
+   * ADR-0019: per-root state anchor — the CLI `--workspace-root` flag passes
+   * through to build-engine. The TUI entry (tui/run.tsx) forwards
+   * `RunTuiOptions.workspaceRoot` to buildTuiDeps → buildHarnessEngine. The
+   * TUI keeps no global state beyond userHome/cwd; workspaceRoot stays
+   * one-directional and transparent at the deps layer.
    */
   readonly workspaceRoot?: string;
   /**
-   * #950 T2 / session-folder-consolidation: session pool root（与
-   * `createTuiBridge.dataDir` / `RunTuiOptions.dataDir` 同形）—— todo
-   * 会话文件夹根由此 + `workspaceRoot` 派生
-   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir),
-   * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`)。缺席 →
-   * `resolveServeDataDir` 缺省 `~/.iknow`（ADR-0087）。run.tsx 传已 resolve
-   * 的 dataDir,保证 bridge 的 SessionStore 与 todo 落点是同一个
-   * projects/<slug>/。
+   * Session pool root (same shape as `createTuiBridge.dataDir` /
+   * `RunTuiOptions.dataDir`) — the todo session-folder root derives from this
+   * + `workspaceRoot` via
+   * `resolveProjectSessionDir(resolveServeDataDir(dataDir),
+   * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`. Absent →
+   * `resolveServeDataDir` defaults to `~/.iknow` (ADR-0087). run.tsx passes
+   * the already-resolved dataDir so the bridge's SessionStore and the todo
+   * landing share the same projects/<slug>/.
    */
   readonly dataDir?: string;
   /**
-   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
-   * 跨 rebind 原样透传；reload 的 mcpConfigRoot 只由此派生，禁止用 cwd 重算。
+   * Stable main checkout root. Captured at first assembly and passed through
+   * rebinds verbatim; reload's mcpConfigRoot derives only from this — never
+   * recomputed from cwd.
    */
   readonly productRoot?: string;
   /**
-   * 观测性地板:JSONL trace 写目录。在场时把 subagent 三事件交给 build-engine
-   * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
+   * Observability floor: JSONL trace write directory. When present, the three
+   * subagent events go to build-engine (same shape as the serve hub:
+   * `<traceOut>/subagent.jsonl`).
    */
   readonly traceOut?: string;
   /**
-   * T5 (ADR-0071 / SC8 + L2): 当前 TUI 会话
-   * conversationId —— 派生 `<父会话文件夹>/subagents/` 用。caller
-   * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。
+   * Current TUI session's conversationId (ADR-0071) — used to derive
+   * `<parent session folder>/subagents/`. The caller (tui/run.tsx) forwards
+   * it after getting soleInflightId from hub-bridge.
    *
-   * review-fix (M1) 事实说明:TUI 装配期(run.tsx buildTuiDeps 调用点)inflight
-   * 还没 mark —— 会话是 hub per-run 注入的,engine 早于首条消息建成。
-   * 所以 run.tsx 目前不传本字段,buildTuiDeps 走 randomUUID() 兜底(SC8
-   * acceptance 接受:per-build 唯一;rebuild / ensureSession 时重派生)。
-   * 子代理记录真实落点是 subagentManager 收到 spawn 时的 def.conversationId
-   * (hub-bridge postMessage → tool ctx → manager),file 锚点 =
-   * `<projectDir>/<装配期 id>/subagents/agent-<taskId>.jsonl`。
+   * Fact: at TUI assembly time (run.tsx's buildTuiDeps call site) nothing is
+   * marked inflight yet — the session is injected by the hub per run and the
+   * engine is built before the first message. So run.tsx currently does not
+   * pass this field and buildTuiDeps uses the randomUUID() fallback (accepted
+   * per SC8: unique per build; re-derived on rebuild / ensureSession). Where
+   * subagent records actually land is the def.conversationId that
+   * subagentManager receives at spawn (hub-bridge postMessage → tool ctx →
+   * manager); the file anchor is
+   * `<projectDir>/<assembly-time id>/subagents/agent-<taskId>.jsonl`.
    */
   readonly conversationId?: string;
-  /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
+  /** Test seam: MCP client factory override (inject a stub to avoid real stdio startup). */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
   ) => import("../harness/mcp/manager.js").McpClientHandle;
   /**
-   * #378 测试缝：createMcpManager 工厂覆盖。与 createMcpClient 对偶——
-   * 测试经此捕获 createMcpManager 入参（如 timeoutMsOverride 透传），
-   * 避免 mock.module 触发 bun require 死锁（bun 1.3.14 已知问题）。
+   * Test seam: createMcpManager factory override. The counterpart of
+   * createMcpClient — tests capture createMcpManager's arguments here (e.g.
+   * timeoutMs forwarding) to avoid mock.module triggering the bun require
+   * deadlock (known bun 1.3.14 issue).
    */
   readonly createMcpManager?: typeof import("../harness/mcp/manager.js").createMcpManager;
   /**
-   * #337 Phase B：装配完成同步回调，透出扩展面（skillCatalog / mcp / shutdown）。
-   * Phase C/D 消费（slash 候选派生、MCP 状态显示、退出路径收口）。
+   * Synchronous callback fired after assembly, exposing the extension surface
+   * (skillCatalog / mcp / shutdown) for consumption: slash candidate
+   * derivation, MCP status display, exit path closure.
    */
   readonly onExtensions?: (ext: TuiExtensions) => void;
   /**
-   * Review High-1 (2026-08-29 / ADR-0037)：worktree isolation host 缝 ——
-   * 透传给 buildHarnessEngine。开关本体由 build-engine 在启动加载点从
-   * `settings` 读取（硬要求 9）；ON 时 TUI 引擎的 mutate 被门禁拦截，provision
-   * 负责建 task worktree + 仅本会话根改绑（TUI hub 的 per-root 重建缝见
-   * run.tsx / hub-bridge）。缺席 → 不包装，行为与今日逐字节一致。
+   * Worktree isolation host seam (ADR-0037) — passed through to
+   * buildHarnessEngine. The switch itself is read from `settings` at the
+   * build-engine load point; when ON, the TUI engine's mutates are gated:
+   * provision creates the task worktree and rebinds only this session's root
+   * (the TUI hub's per-root rebuild seam lives in run.tsx / hub-bridge).
+   * Absent → no wrapping, byte-identical to prior behavior.
    */
   readonly worktreeIsolation?: WorktreeIsolationHostOpts;
   /**
-   * Review High-2 (2026-08-29 / 硬要求 9)：启动装配点读取的 settings 对象。
-   * 透传给 buildHarnessEngine 的 `settings` 缝 —— rebind 后 per-root 重建的
-   * 引擎复用 run.tsx 传入的同一对象，worktree 内 `.iknow/` 缺席（gitignore）
-   * 也绝不隐式重载 project settings。缺席 → build-engine 自行缺省加载
-   * （与今日等价）。
+   * The settings object read at the boot assembly point — the `settings` seam
+   * passed to buildHarnessEngine. Per-root rebuilds after a rebind reuse the
+   * same object run.tsx passed, so a worktree's missing `.iknow/`
+   * (gitignored) never silently reloads project settings. Absent →
+   * build-engine loads its own default (equivalent to prior behavior).
    */
   readonly settings?: IknowSettings;
 }
 
 /**
- * #337 Phase B：装配完成透出的 TUI 扩展面（Phase C/D 消费）。
- *  - skillCatalog：Phase C 读 available()/get() 派生 slash 候选 + 加载正文；
- *  - mcp.status / reload：MCP server 连接状态快照 + 重读两级 config 后重载；
- *  - listMcpTools（#361 Phase D）：一次拉全量 mcp__* 工具 → 平铺
- *    `{ server, tool }[]`，detail view 按 server 过滤（避免 N 次过滤）。
- *    只追加 readonly 字段，不改 Phase B 既有逻辑；
- *  - shutdown：TUI 退出路径调用，关闭所有 MCP client + 取消 in-flight + SIGTERM stdio。
+ * The TUI extension surface exposed after assembly.
+ *  - skillCatalog: read available()/get() to derive slash candidates + loaded
+ *    bodies;
+ *  - mcp.status / reload: MCP server connection snapshot + reload after
+ *    re-reading the two config levels;
+ *  - listMcpTools: pull all mcp__* tools once → flat `{ server, tool }[]`;
+ *    the detail view filters by server (avoids N filter passes);
+ *  - shutdown: called on the TUI exit path — close all MCP clients + cancel
+ *    in-flight + SIGTERM stdio.
  */
 export interface TuiExtensions {
   readonly skillCatalog: SkillCatalog;
   /**
-   * T6 (`specs/skill-index-increment.md` SC8)：现行可加载面重扫缝。TUI 斜杠
-   * 候选面打开时经它换血（会话中途落盘的 SKILL.md 立刻进候选，不等下一
-   * turn）。与 `BuiltEngine.skillRescanner` / `deps.skillIndexDelta` 是**同一
-   * 台**持有者。缺席（ask 表面 / 未注入 todoDir / fixture）→ 候选恒为
-   * `skillCatalog` 装配期快照。
+   * Live rescan seam for the loadable surface. The TUI slash candidate panel
+   * refreshes through it when opened (a SKILL.md written mid-session enters
+   * candidates immediately, without waiting for the next turn). This is the
+   * **same holder** as `BuiltEngine.skillRescanner` /
+   * `deps.skillIndexDelta`. Absent (ask surface / no todoDir injected /
+   * fixture) → candidates stay the `skillCatalog` assembly snapshot forever.
    */
   readonly skillRescanner?: SkillRescanner;
   /**
-   * 活 taskRoot cell（specs/skill-load-write-root.md）：TUI chrome 渲染面
-   * （worktreeIsolationLines / resolveWorktreeChromeRoot）消费。ADR-0079 后
-   * slash 装配 skill 正文不再读此 cell（正文不再挂写根 trailer）。缺席
-   * （fixture / 测试）→ chrome 渲染退化到 workspaceRoot。
+   * Live taskRoot cell, consumed by TUI chrome renderers
+   * (worktreeIsolationLines / resolveWorktreeChromeRoot). Since ADR-0079 the
+   * slash assembly of skill bodies no longer reads this cell (bodies carry no
+   * write-root trailer). Absent (fixture / tests) → chrome degrades to
+   * workspaceRoot.
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
-   * T6 (plans/write-situation-disclosure.md)：worktree 隔离档（来自 build-
-   * engine `isolationEnabled` 单一读取点的透出）。ADR-0079 后 slash 装配
-   * skill 正文不再消费此档（正文不再挂写根 trailer）；字段保留以维持装配
-   * 面兼容（与 app.tsx TuiAppProps.isolationOn 同步保留）。
+   * Worktree isolation tier (from build-engine's single `isolationEnabled`
+   * read point). Since ADR-0079 the slash assembly of skill bodies no longer
+   * consumes it; the field stays for assembly-surface compatibility (kept in
+   * sync with app.tsx TuiAppProps.isolationOn).
    */
   readonly isolationOn?: boolean;
   readonly mcp: {
@@ -260,7 +286,7 @@ export interface TuiExtensions {
   readonly shutdown: () => Promise<void>;
 }
 
-/** MCP 看板消费的最小扩展面（TuiAppProps.mcp 用；deps.ts SSOT）。 */
+/** Minimal extension surface consumed by the MCP board (TuiAppProps.mcp; deps.ts SSOT). */
 export interface TuiMcpViewExt {
   readonly status: () => readonly McpServerStatus[];
   readonly reload: () => Promise<void>;
@@ -273,10 +299,11 @@ export interface McpToolExtEntry {
 }
 
 /**
- * 从动态工具名反解 server 名：`mcp__<server>__<tool>`（server / tool 段都
- * 可能含 `__` —— manager 的 sanitizeSegment 只把非 `[A-Za-z0-9_]` 替换成 `_`，
- * 连字符 / 点保留）。返回中间段 `server`；段数不足（非标准形态）返回原名。
- * 纯函数 + exported 供单测直接断言。
+ * Recover the server name from a dynamic tool name: `mcp__<server>__<tool>`
+ * (either segment may itself contain `__` — the manager's sanitizeSegment only
+ * replaces non-`[A-Za-z0-9_]` with `_`, keeping hyphens / dots). Returns the
+ * middle `server` segment; on too few segments (non-standard shape) returns
+ * the original name. Pure function + exported for direct unit assertions.
  */
 export function mcpServerOfToolName(name: string): string {
   const body = name.startsWith("mcp__") ? name.slice("mcp__".length) : name;
@@ -286,9 +313,10 @@ export function mcpServerOfToolName(name: string): string {
 }
 
 /**
- * memory-toggle-live（S5 整改）: 可选字段落盘 helper —— 值在场时才产出
- * `{ [key]: value }`，缺席产出空对象。`buildTuiDeps` 返回块的一串条件
- * spread 统一走这里，宿主解构语义不变（缺席字段不出现）。
+ * Optional-field landing helper: emits `{ [key]: value }` only when the value
+ * is present, otherwise an empty object. The conditional-spread chain in
+ * `buildTuiDeps`' return block all goes through here, so host destructuring
+ * semantics are unchanged (absent fields simply do not appear).
  */
 function presentFields<V>(
   key: string,
@@ -298,27 +326,30 @@ function presentFields<V>(
 }
 
 /**
- * T1 观测缝(#365):把 TUI 的 onToolEvent + soleInflightId 归因包装成
- * build-engine 的 PostToolUseHook(透传进 createAciExecutor)。语义与委托前
- * 一致:postToolUse 触发 → soleInflightId 归因 → onToolEvent 投影为
- * TuiToolEvent。soleInflightId 缺省/undefined(多会话并发)→ 事件抑制。
+ * Observability seam: wraps the TUI's onToolEvent + soleInflightId attribution
+ * into build-engine's PostToolUseHook (passed through to
+ * createAciExecutor). Semantics match the pre-delegation form: postToolUse
+ * fires → soleInflightId attribution → onToolEvent projection into
+ * TuiToolEvent. soleInflightId absent/undefined (concurrent sessions) →
+ * events suppressed.
  */
 function wrapTuiHook(opts: BuildTuiDepsOptions): PostToolUseHook {
   return (result) => {
     if (!opts.onToolEvent) return;
     const conversationId = opts.soleInflightId?.();
-    // 多会话并发 → 无法归因 → 抑制（v1 已知边界，见 hub-bridge.ts）。
+    // Concurrent sessions → cannot attribute → suppress (known v1 boundary, see hub-bridge.ts).
     if (conversationId === undefined) return;
     opts.onToolEvent({
       conversationId,
       toolName: result.name,
-      // T4 (#175): 把 tool_use_id 透传,TUI 据此与流式 tool_call_start 配对
-      // (result.toolUseId 是必填字段,见 permission/types.ts PostToolUseHook)。
+      // Pass tool_use_id through so the TUI pairs it with streaming
+      // tool_call_start (result.toolUseId is required; see permission/types.ts
+      // PostToolUseHook).
       toolUseId: result.toolUseId,
       kind: result.kind,
       input: result.input,
       message: result.message,
-      // T4 (#298): meta 透传 → TuiToolEvent.payload(观测 side-channel)。
+      // meta passthrough → TuiToolEvent.payload (observation side channel).
       payload: result.meta,
     });
   };
@@ -329,10 +360,11 @@ export async function buildTuiDeps(
   opts: BuildTuiDepsOptions
 ): Promise<
   /**
-   * T11:deps 字段平铺与 `EngineBundle` 同源 —— 用 `Omit<EngineBundle,"deps">`
-   * 锁定 `EngineBundle` SSOT;`memoryFlags?` 是 TUI 独有扩展(Esc 翻 box)。
-   * 之所以不直接 `EngineBundle`:`buildTuiDeps` 返回 shape 把 `deps` 字段
-   * 平铺进 `LoopEngineDeps`,host 调用解构时不必再走 `result.deps.x`。
+   * deps fields are flattened in sync with `EngineBundle` —
+   * `Omit<EngineBundle,"deps">` locks the SSOT; `memoryFlags?` is a
+   * TUI-only extension (Esc flips the box). Not returning a plain
+   * `EngineBundle` because this shape flattens `deps` into
+   * `LoopEngineDeps`, so hosts destructure without `result.deps.x`.
    */
   LoopEngineDeps &
     Omit<EngineBundle, "deps"> & {
@@ -341,57 +373,64 @@ export async function buildTuiDeps(
     }
 > {
   if (!bundle.env.llm.apiKey) {
-    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    // key source = settings.llm.apiKey (literal or ${VAR}).
     throw new Error(LLM_API_KEY_MISSING_MESSAGE);
   }
-  // #337 Phase B：userHome / cwd 测试缝（默认 = 真实 homedir() / process.cwd()），
-  // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
+  // userHome / cwd test seams (default = real homedir() / process.cwd()),
+  // same shape as build-engine's. The assembly-time skill scanner and mcp
+  // config both read from here.
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
-  // 兼容 `opts.traceOut`(test seam / 旧 path) → 仍落 diagnosticsDir(stderr
-  // pointer);缺省时 manager 内 effectiveDiagnosticsDir 兜底跟随 subagentsDir。
+  // Compatibility with `opts.traceOut` (test seam / old path) → still lands in
+  // diagnosticsDir (stderr pointer); when absent, the manager's internal
+  // effectiveDiagnosticsDir follows subagentsDir as fallback.
   const traceOut = opts.traceOut;
-  // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:TUI 入口
-  // 注入「会话文件夹根」让 todo_write 在主 loop 在场 —— 与 chat / serve
-  // 三入口同源 SSOT:同一 `(baseDir, projectIdentityRoot)` 派生公式
-  // (resolveProjectSessionDir),同一会话解析到同一 projectDir。TUI 的
-  // conversationId 由 hub per-run 注入(hub-bridge → SessionHub),不在本层
-  // 拼 —— 本层只给根。
+  // ADR-0071: the TUI entry injects the "session folder root" so todo_write
+  // is present in the main loop — same-source SSOT with chat / serve: the
+  // same `(baseDir, projectIdentityRoot)` derivation formula
+  // (resolveProjectSessionDir) resolves one conversation to one projectDir.
+  // The TUI's conversationId is injected by the hub per run (hub-bridge →
+  // SessionHub), not assembled here — this layer only provides the root.
   const todoProjectDir = resolveProjectSessionDir(
     resolveServeDataDir(opts.dataDir),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
-  // ADR-0088:后台任务登记根 —— 与 todoProjectDir 同一对
-  // `(dataDir, projectIdentityRoot)`,同一 slug 的项目树兄弟 `tasks/`。
-  // 与 workspaceRoot 解耦(throwaway 不另开活账本)。
+  // ADR-0088: background task registry root — same `(dataDir,
+  // projectIdentityRoot)` pair as todoProjectDir, so tasks/ is a sibling in
+  // the same project slug tree. Decoupled from workspaceRoot (throwaway roots
+  // do not open a second live ledger).
   const tasksDir = resolveTasksDir({
     dataDir: resolveServeDataDir(opts.dataDir),
     projectIdentityRoot: deriveProjectIdentityRoot({ cwd: opts.workspaceRoot }),
   });
   const memoryDir = join(todoProjectDir, MEMORY_DIR_NAME);
-  // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle
-  // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
-  // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
+  // ADR-0071: subagent lifecycle / content trace goes per-agent via
+  // `<parent session folder>/subagents/agent-<taskId>.jsonl`.
+  // The TUI subagent root = `<projectDir>/<conversationId>/subagents/`.
   //
-  // review-fix (M1):TUI 装配期 deps 层拿不到真实 conversationId —— 会话
-  // 由 hub per-run 注入 (hub-bridge.ensureSession → mark → subagentManager
-  // 拿到 task def.conversationId),run.tsx 建成初始 engine 时 inflight 还是
-  // 空集。两种合理形态:
-  //   - (a) caller 已知(opts.conversationId 在场)→ 用 caller 给的值;
-  //   - (b) caller 未知 → 装配期 randomUUID() 兜底,T5 SC8 acceptance 接受
-  //     (per-build 唯一;rebuild/ensureSession 时 ctor 重新派生,以引擎重建缝
-  //     为转移点 —— hub 的 buildEngine 路径会拿到真实 conversationId)。
-  // 双段式缝设计:装配期根 + 调用期 id —— 仓库既有 todo-write.ts:
-  // resolveConversationTodoPath 与此处同构,不要发明新形状。
-  // TUI bridge 的 postMessage 钩子 (inflight.mark) 把会话 ID 透传到
-  // tool ctx.conversationId,manager 拿 def.conversationId 已经够用。
+  // At TUI assembly time the deps layer cannot know the real conversationId —
+  // the session is injected by the hub per run (hub-bridge.ensureSession →
+  // mark → subagentManager gets the task def.conversationId), and run.tsx
+  // builds the initial engine while inflight is still empty. Two valid
+  // shapes:
+  //   - (a) caller knows (opts.conversationId present) → use it;
+  //   - (b) caller does not know → assembly-time randomUUID() fallback,
+  //     accepted (unique per build; re-derived at rebuild/ensureSession, with
+  //     the engine-rebuild seam as the transfer point — the hub's buildEngine
+  //     path gets the real conversationId).
+  // Two-phase seam design: assembly-time root + call-time id — the existing
+  // resolveConversationTodoPath in todo-write.ts is isomorphic; do not invent
+  // a new shape.
+  // The TUI bridge's postMessage hook (inflight.mark) forwards the session id
+  // into the tool ctx.conversationId, which is enough for the manager to use
+  // def.conversationId.
   const subagentsConversationId = opts.conversationId ?? randomUUID();
   const subagentsDir = resolveSubagentTraceDir({
     projectDir: todoProjectDir,
     conversationId: subagentsConversationId,
   });
-  // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 装配点自建,与
-  // graphMode 平行挂在会话 runtime 上。
+  // Live-graph ledger host — self-built at the TUI assembly point, hanging on
+  // the session runtime parallel to graphMode.
   const liveGraphLedger = opts.liveGraphLedger;
   const built = await buildHarnessEngine({
     env: bundle.env,
@@ -399,74 +438,81 @@ export async function buildTuiDeps(
     surface: "tui",
     memory: { enabled: true },
     todoDir: todoProjectDir,
-    // ADR-0088:登记根随会话池,不随 workspaceRoot。
+    // ADR-0088: the registry root follows the session pool, not workspaceRoot.
     tasksDir,
-    // ADR-0099:项目记忆同棵,不随 workspaceRoot。
+    // ADR-0099: project memory follows the same tree, not workspaceRoot.
     memoryDir,
-    // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
-    // build-engine 缺省即 process.cwd(),故不显式传。
+    // The sandbox root keeps TUI's historical semantics (launch dir =
+    // process.cwd()); build-engine already defaults to process.cwd(), so it
+    // is not passed explicitly.
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
-    // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。
+    // Overlay holder passthrough — the conditional assembly seam for
+    // run_graph / the orchestration segment.
     ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
-    // ADR-0092 / SC13:fs isolation holder 透传 —— bash 工厂 per-call 读
-    // （build-engine 侧按 `!== undefined` 守卫，缺席与显式 undefined 同义）。
+    // ADR-0092: fs isolation holder passthrough — the bash factory reads per
+    // call (build-engine guards on `!== undefined`, so absent and explicit
+    // undefined are equivalent).
     fsMode: opts.fsMode,
-    // ADR-0096 T2：cap holder 透传 —— build-engine 用它取代
-    // env.subagent.maxConcurrentWorkers 的启动期一次性快照（spawn 闸每次
-    // 现读 holder.get()）；同源透传给 registry → spawn_subagent 工具
-    // description getter。两路合一：TUI /config 面板翻一次全局生效。
-    // 直接 passthrough —— BuildEngineOpts.subagentCapacityHolder 是可选,
-    // 缺席 = undefined,build-engine 侧 `!== undefined` 守卫无需 ternary 包装。
+    // ADR-0096: cap holder passthrough — build-engine uses it instead of a
+    // one-shot boot snapshot of env.subagent.maxConcurrentWorkers (the spawn
+    // gate reads holder.get() each time); forwarded in the same source to
+    // registry → the spawn_subagent tool description getter. Both paths in
+    // one: one flip of the TUI /config panel takes effect globally.
+    // Direct passthrough — BuildEngineOpts.subagentCapacityHolder is optional
+    // and absent = undefined, so the `!== undefined` guard needs no ternary.
     subagentCapacityHolder: opts.subagentCapHolder,
-    // ADR-0096 T3：worktree 门禁 holder 透传 —— build-engine 用它取代启动
-    // 期一次性读数（门禁每波入口现读 holder.get()）。同上，直接 passthrough
-    // （BuildEngineOpts 侧可选 + `!== undefined` 守卫）。
+    // ADR-0096: worktree gate holder passthrough — build-engine reads
+    // holder.get() at each mutate-wave entry instead of one boot reading.
+    // Same as above, direct passthrough (optional + `!== undefined` guard).
     worktreeOnMutateHolder: opts.worktreeOnMutateHolder,
-    // live-graph-phase1 T1:活图账本 host 透传（TUI 装配点自建）。
+    // Live-graph ledger host passthrough (self-built at the TUI assembly point).
     ...(liveGraphLedger ? { liveGraphLedger } : {}),
-    // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。
+    // Observability seam: tool summary lines — postToolUse projected into TuiToolEvent.
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
-    // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。
+    // Test seams: userHome / cwd overrides (same shape as build-engine's).
     ...(opts.userHome ? { userHome } : {}),
     ...(opts.cwd ? { cwd } : {}),
-    // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
+    // ADR-0019: per-root state anchor passthrough to build-engine.
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
-    // T6:稳定 productRoot 透传（缺席 → build-engine 桥接为 workspaceRoot）。
+    // Stable productRoot passthrough (absent → build-engine bridges to workspaceRoot).
     ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
-    // 观测性地板:subagent lifecycle / content 走 per-agent 形态
-    // (subagentsDir); `opts.traceOut` 仍透传给 subagentDiagnosticsDir
-    // (stderr pointer) —— 旧 path 兼容, traceOut 缺席则由 manager 内兜底
-    // 跟随 subagentsDir。
+    // Observability floor: subagent lifecycle / content go per-agent
+    // (subagentsDir); `opts.traceOut` is still passed as
+    // subagentDiagnosticsDir (stderr pointer) for old-path compatibility;
+    // when absent the manager internally follows subagentsDir.
     subagentsDir,
     ...(traceOut !== undefined ? { subagentDiagnosticsDir: traceOut } : {}),
-    // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
-    // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
+    // Test seam: createMcpManager factory override (passthrough; tests capture args).
+    // prettier-ignore kept on one line verbatim (88 chars > 80 cols; reformatting disabled here).
     // prettier-ignore
     ...(opts.createMcpManager ? { createMcpManager: opts.createMcpManager } : {}),
-    // #337 Phase B 测试缝:MCP client 工厂覆盖。
+    // Test seam: MCP client factory override.
     ...(opts.createMcpClient ? { createMcpClient: opts.createMcpClient } : {}),
-    // Review High-2 / High-1 (2026-08-29):启动装配 settings 对象 +
-    // worktree isolation host 缝透传（开关读取仍在 build-engine 启动加载点）。
+    // Boot-assembly settings object + worktree isolation host seam
+    // passthrough (the switch itself is still read at build-engine's load point).
     ...(opts.settings ? { settings: opts.settings } : {}),
     ...(opts.worktreeIsolation
       ? { worktreeIsolation: opts.worktreeIsolation }
       : {}),
   });
 
-  // #337 Phase B / #361 Phase D：用 build-engine 透出的装配件构建 TUI 扩展面。
-  // skillCatalog / mcpManager / catalog 均来自 buildHarnessEngine 单一装配点
-  // (surface="tui" 全装配;mcpManager 仅在 manager 缺席时缺省防御)。
+  // Build the TUI extension surface from build-engine's exposed assemblies.
+  // skillCatalog / mcpManager / catalog all come from the single
+  // buildHarnessEngine assembly point (surface="tui" is fully assembled;
+  // mcpManager only as a defensive default when the manager is absent).
   const mcpManager = built.mcpManager;
   const skillCatalog = built.skillCatalog;
   const skillRescanner = built.skillRescanner;
   const catalog = built.catalog;
 
-  // reload 实现：重读两级 config（可被用户改 ~/.iknow/mcp.json 或项目级
-  // mcp.json 后触发）,manager.reload 内部 shutdown + 重建 + 后台 start。
-  // 幂等：无 mcp.json → servers 空 → reload 空集。
-  // T6:mcpConfigRoot 锁定装配时的 productRoot / BuiltEngine.mcpRoots，
-  // 不随 task cwd 漂移，也不读 process.cwd()。
+  // reload: re-read the two config levels (users trigger it after editing
+  // ~/.iknow/mcp.json or a project mcp.json); manager.reload internally does
+  // shutdown + rebuild + background start.
+  // Idempotent: no mcp.json → empty servers → reload to empty set.
+  // mcpConfigRoot locks the assembly-time productRoot /
+  // BuiltEngine.mcpRoots — it never drifts with task cwd and never reads
+  // process.cwd().
   const mcpConfigRoot =
     built.mcpRoots?.mcpConfigRoot ??
     opts.productRoot ??
@@ -478,10 +524,11 @@ export async function buildTuiDeps(
     await mcpManager.reload(cfg.servers);
   };
 
-  // #361 Phase D：listMcpTools 实现 — 从 catalog.all() 取全部 mcp__* 动态
-  // 工具，按 server 名反解（mcp__<server>__<tool>），平铺成 {server, tool}[]。
-  // reload 后工具集变化（unregister + register），detail view 每次进入重拉最新
-  // 即可（TuiApp 侧缓存 policy：看板首次进入拉一次，reload 后刷新）。
+  // listMcpTools: take all mcp__* dynamic tools from catalog.all(), reverse-
+  // parse the server name (mcp__<server>__<tool>) and flatten to
+  // {server, tool}[]. The tool set changes after reload (unregister +
+  // register), so the detail view just refetches on each entry (TuiApp cache
+  // policy: fetch once when the board is first entered, refresh after reload).
   const listMcpTools = (): ReadonlyArray<McpToolExtEntry> => {
     if (!catalog) return [];
     const out: McpToolExtEntry[] = [];
@@ -493,28 +540,32 @@ export async function buildTuiDeps(
     return out;
   };
 
-  // 装配完成后同步回调透出扩展面（Phase C/D 消费）。shutdown 收口于
-  // build-engine 组合 shutdown（MCP 关闭 client + 取消 in-flight + SIGTERM
-  // stdio 子孙 + subagent drain）。surface="tui" 全装配:skillCatalog /
-  // mcpManager / shutdown 均在 ask 之外必建(T6 + T8 契约),此处以必达断言
-  // 收窄类型;极端防御缺省(空 catalog / no-op shutdown)保证回调不抛。
+  // After assembly, expose the extension surface through the synchronous
+  // callback. shutdown is consolidated in build-engine's combined handle
+  // (MCP client close + in-flight cancel + SIGTERM stdio descendants +
+  // subagent drain). With surface="tui", skillCatalog / mcpManager / shutdown
+  // are all built outside the ask surface; asserted here to narrow the types;
+  // extreme defensive defaults (empty catalog / no-op shutdown) keep the
+  // callback from throwing.
   opts.onExtensions?.({
     skillCatalog: skillCatalog!,
-    // T6 (`specs/skill-index-increment.md` SC8)：rescan 缝透出给 TUI 斜杠
-    // 候选面 —— 与引擎 `deps.skillIndexDelta` 同一台持有者（plugin 根换血
-    // 只在这一台上做）。缺席（ask 表面 / 未注入 todoDir）→ TuiApp 退化为
-    // 缓存快照，行为与旧形态逐字节一致。走 `presentFields` 而非内联三元：
-    // 同文件既有的可选字段纪律（且 S5 ratchet 不认新增分支）。
+    // Rescan seam exposed to the TUI slash candidate panel — same holder as
+    // the engine's `deps.skillIndexDelta` (plugin-root refresh happens only
+    // on that one holder). Absent (ask surface / no todoDir injected) →
+    // TuiApp degrades to the cached snapshot, byte-identical to the old form.
+    // Routed through `presentFields` rather than an inline ternary: the
+    // file's existing optional-field discipline (and the complexity ratchet
+    // does not accept new branches).
     ...presentFields("skillRescanner", skillRescanner),
-    // specs/skill-load-write-root.md：活 taskRoot cell 透出，TUI chrome 渲染
-    // 面消费。ADR-0079 后 slash 装配 skill 正文不再读此 cell（正文不再挂
-    // 写根 trailer）。
+    // Live taskRoot cell exposed for TUI chrome rendering. Since ADR-0079 the
+    // slash assembly of skill bodies no longer reads this cell (bodies carry
+    // no write-root trailer).
     ...(built.liveTaskRoot !== undefined
       ? { liveTaskRoot: built.liveTaskRoot }
       : {}),
-    // T6 (write-situation-disclosure)：worktree 隔离档透出。ADR-0079 后
-    // slash 装配不再消费此档；保留透出以维持 TuiExtensions 装配面兼容
-    // （与 TuiAppProps.isolationOn 同步保留）。
+    // Worktree isolation tier exposure. Since ADR-0079 the slash assembly no
+    // longer consumes it; kept so the TuiExtensions surface stays compatible
+    // (in sync with TuiAppProps.isolationOn).
     ...(built.isolationOn !== undefined
       ? { isolationOn: built.isolationOn }
       : {}),
@@ -524,7 +575,7 @@ export async function buildTuiDeps(
     },
     listMcpTools,
     shutdown: async () => {
-      // surface="tui" 必建 shutdown(T8 + T6 契约);极端防御缺省 no-op。
+      // Always built for surface="tui"; extreme defensive default is no-op.
       if (built.shutdown) await built.shutdown();
     },
   });
@@ -534,13 +585,15 @@ export async function buildTuiDeps(
     ...presentFields("subagentManager", built.subagentManager),
     ...presentFields("shutdown", built.shutdown),
     ...presentFields("graphAssembly", built.graphAssembly),
-    // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
-    // createTuiBridge → SessionHub。缺席（memory 层关）→ 字段不出现；双关仍透出（机械段）。
+    // Auto-memory hooks flattened out with deps; run.tsx destructures and
+    // hands them to createTuiBridge → SessionHub. Absent (memory layer off) →
+    // field does not appear; both-off still exposes (mechanical segment).
     ...presentFields("autoMemory", built.autoMemory),
     ...presentFields("overlayMemoryPrefetch", built.overlayMemoryPrefetch),
     ...presentFields("memoryFlags", built.memoryFlags),
-    // memory-toggle-live: system 快照失效句柄随 deps 平铺 —— /memory commit
-    // 时由 app 层调用，翻转在下一轮生效。缺席（非 TUI / 注入形态）→ 不调用。
+    // Memory-system snapshot invalidation handle, flattened with deps — the
+    // app layer calls it on /memory commit; the flip takes effect next round.
+    // Absent (non-TUI / injected shape) → do not call.
     ...presentFields("invalidateMemorySystem", built.invalidateMemorySystem),
   };
 }

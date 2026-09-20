@@ -1,13 +1,15 @@
 /**
  * src/tui/turn-activity.ts
  *
- * 当前 turn 的活动段派生（纯函数）。给 `deriveActivityBlocks` 与 MessageRow
- * 提供 segment / count 形态 —— T7 后 `unit fold`（`Thought for … · name × N`
- * 一行）的派生从本模块移除，由 `activity-block.ts` 单独承担（活动块列表
- * 是折叠 / 预览的唯一来源）。
+ * Derives the activity segments of the current turn (pure functions), feeding
+ * segment / count shapes to `deriveActivityBlocks` and MessageRow. The
+ * `unit fold` line (`Thought for … · name × N`) is no longer derived here —
+ * activity-block.ts owns it, and the activity-block list is the single source
+ * for folding / previewing.
  *
- * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
- * 起到会话末尾（含中间 tool_result user 消息）。
+ * The turn boundary shares its rule with `isTurnQuery`: from the last user
+ * query without a tool_result to the end of the session (tool_result user
+ * messages in between included).
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
@@ -32,10 +34,12 @@ export type TurnActivitySegment =
 
 export interface TurnActivityOptions {
   /**
-   * D3（spec specs/tui-tool-settled-appearance.md）：折叠计数行只聚合本判定
-   * 为 true 的 tool_use（成功且 retract）。resolver 缺省 = 全部计入（纯函数
-   * 兜底与计数助手一致）；生产调用方传 `deriveSlot(name, {running, failed})`
-   * 派生的判定，failed 数据源 = `toolResultStatusMap`。
+   * The fold-count line aggregates only tool_use calls for which this
+   * predicate returns true (success and retract). An absent resolver counts
+   * everything (the pure-function fallback matches the count helpers);
+   * production callers pass a decision derived from
+   * `deriveSlot(name, {running, failed})`, with failures sourced from
+   * `toolResultStatusMap`.
    */
   readonly inFoldCountOf?: (
     call: Readonly<{ readonly id: string; readonly name: string }>
@@ -43,13 +47,16 @@ export interface TurnActivityOptions {
 }
 
 /**
- * assistant 活动的消息级顺序：文本段与连续 tool_use 集群按原始消息顺序
- * 返回。thinking / tool_result / user query 不占活动段；tool_result 不打断
- * 连续工具集群，因而一轮工具调用仍只画一个原位折叠。
+ * Message-level order of assistant activity: text segments and runs of
+ * consecutive tool_use clusters are returned in original message order.
+ * thinking / tool_result / user query occupy no activity segment; tool_result
+ * does not break a run of tool clusters, so one round of tool calls still
+ * renders exactly one in-place fold.
  *
- * D3：entries 只聚合 `opts.inFoldCountOf` 判定为 true 的 tool_use（成功且
- * retract）；留 / 点名 / 失败件不进计数（它们由渲染层画独立标题行）。
- * resolver 缺省 = 全部计入。
+ * Entries aggregate only tool_use calls for which `opts.inFoldCountOf`
+ * returns true (success and retract); kept / accent / failed calls are not
+ * counted (the renderer draws their own title lines). An absent resolver
+ * counts everything.
  */
 export function orderedTurnActivitySegments(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -57,7 +64,7 @@ export function orderedTurnActivitySegments(
   opts?: TurnActivityOptions
 ): ReadonlyArray<TurnActivitySegment> {
   if (!Number.isFinite(start) || start < 0 || start >= messages.length) {
-    // EXIT: 无效或越界的 turn 起点不应把历史消息误当作当前活动。
+    // EXIT: An invalid or out-of-range turn start must not treat history as current activity.
     return [];
   }
   const inFoldCountOf = opts?.inFoldCountOf;
@@ -90,16 +97,17 @@ export function orderedTurnActivitySegments(
     for (let i = Math.trunc(start); i < messages.length; i++) {
       const message = messages[i];
       if (message === undefined) continue;
-      // D3 (tui-display-consistency):turn 边界 = user query (isTurnQuery);
-      // 切到下一条 user query 时立即 flush 当前 tool 簇 —— 跨轮 tool_use
-      // 不再合到同簇(每轮各自折叠),但同一 turn 内的多段 tool_use 仍合并。
+      // Turn boundary = user query (isTurnQuery): flush the current tool
+      // cluster as soon as the next user query appears — tool_use across
+      // turns never merges into one cluster (each turn folds separately),
+      // while multiple tool_use runs within the same turn still merge.
       if (message.role === "user" && isTurnQuery(message)) {
         flushTools();
         continue;
       }
       if (message.role !== "assistant") continue;
       if (!Array.isArray(message.content)) {
-        // EXIT: 非数组 content 无法安全参与有序活动投影。
+        // EXIT: Non-array content cannot safely participate in the ordered activity projection.
         continue;
       }
       for (const [contentBlockIndex, block] of message.content.entries()) {
@@ -129,12 +137,12 @@ export function orderedTurnActivitySegments(
     flushTools();
     return segments;
   } catch {
-    // EXIT: 异常消息形态没有可推导的稳定顺序，安全地不渲染折叠。
+    // EXIT: Malformed messages have no derivable stable order; render no fold, safely.
     return [];
   }
 }
 
-/** 最后一条 turn query 的下标；没有 query → -1。 */
+/** Index of the last turn query; no query → -1. */
 export function lastTurnQueryIndex(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): number {
@@ -146,7 +154,7 @@ export function lastTurnQueryIndex(
   return idx;
 }
 
-/** 从 `start`（含）切到末尾；start < 0 或越界 → 空数组（无 query 不当成全历史）。 */
+/** Slice from `start` (inclusive) to the end; start < 0 or out of range → empty array (a missing query must not mean the whole history). */
 export function sliceTurnFrom(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   start: number
@@ -156,10 +164,11 @@ export function sliceTurnFrom(
 }
 
 /**
- * assistant `tool_use` 按首次出现顺序计数。非 assistant / 非 tool_use 忽略。
- * count 钳到 ≥0（名字空串仍计一次，避免丢调用）。
- * D3：`opts.inFoldCountOf` 提供时只计数判定为 true 的件（成功且 retract），
- * 与 `orderedTurnActivitySegments` 同一 resolver 契约；缺省 = 全部计入。
+ * Count assistant `tool_use` by first-appearance order. Non-assistant /
+ * non-tool_use blocks are ignored. Counts clamp to ≥0 (an empty name still
+ * counts once so no call is lost). When `opts.inFoldCountOf` is provided only
+ * calls it accepts are counted (success and retract) — the same resolver
+ * contract as `orderedTurnActivitySegments`; absent = count everything.
  */
 export function countToolUsesByName(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -184,7 +193,7 @@ export function countToolUsesByName(
   }));
 }
 
-/** 本切片里 assistant `tool_use` id 集合（live 计数去重用）。 */
+/** Set of assistant `tool_use` ids in this slice (for deduping live counts). */
 export function toolUseIdsOf(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlySet<string> {
@@ -199,8 +208,8 @@ export function toolUseIdsOf(
 }
 
 /**
- * 按 name 计数；`excludeIds` 命中则跳过（历史已计入的 live 条目不双计）。
- * 空 name 仍计一次。
+ * Count by name; skip calls whose id is in `excludeIds` (live entries already
+ * counted in history must not double-count). An empty name still counts once.
  */
 export function countNamedCalls(
   calls: ReadonlyArray<{ readonly id: string; readonly name: string }>,
@@ -219,7 +228,7 @@ export function countNamedCalls(
   }));
 }
 
-/** `bash × 2 · write_file × 1`；空列表 → 空串（无前导分隔符）。 */
+/** Formats as `bash × 2 · write_file × 1`; empty list → empty string (no leading separator). */
 export function formatToolUseCounts(
   entries: ReadonlyArray<ToolUseCount>
 ): string {
@@ -230,7 +239,7 @@ export function formatToolUseCounts(
     .join(" · ");
 }
 
-/** ms → 秒（向上取整，确保 250ms 显示成 1 秒）。 */
+/** ms → seconds (rounded up so 250ms still shows as 1s). */
 export function thinkingMsToSeconds(ms: number): number {
   if (!Number.isFinite(ms) || ms <= 0) return 0;
   return Math.ceil(ms / 1000);

@@ -1,6 +1,6 @@
 /**
- * run_graph 语义分组：now / issues / done / waiting / selected。
- * 纯函数，不 import scheduler / topo，不进 run-graph-tool。
+ * run_graph semantic grouping: now / issues / done / waiting / selected.
+ * Pure functions; no scheduler / topo imports and not part of run-graph-tool.
  */
 import type {
   GraphNodeProgress,
@@ -65,8 +65,8 @@ function firstUnmetDep(
     const dep = byId.get(id);
     if (dep === undefined || dep.status !== "done") return id;
   }
-  // EXIT: pending 且没有未完成依赖（空 deps，或 deps 均已 done）——
-  // 仍归入 waiting 簇，避免节点从分组里消失。
+  // EXIT: pending with no unmet dep (empty deps, or all deps already done) —
+  // still folded into a waiting cluster so no node disappears from grouping.
   return node.deps[0] ?? "unknown";
 }
 

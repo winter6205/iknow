@@ -1,54 +1,66 @@
 /**
  * src/tui/transcript-viewport.ts
  *
- * 视口挂载（非行账、非条数尾窗）：根据 scrollTop + viewport + overscan
- * 决定 ChatView 把哪一段 messages 挂进 OpenTUI 树。高度由调用方传入
- * （布局实测或常量占位），本模块不估算 markdown 行数。
+ * Viewport mounting (not row accounting, not a count-based tail window):
+ * decides which slice of messages ChatView mounts into the OpenTUI tree from
+ * scrollTop + viewport + overscan. Heights are supplied by the caller (layout
+ * measurement or a constant placeholder); this module never estimates markdown
+ * row counts.
  *
- * spec `specs/tui-transcript-viewport.md` invariant 4：挂载范围只看
- * scrollTop + viewport.height + 小于一屏的 overscan，**不看内容总高** ——
- * 没有「内容低于 N 屏则全量挂载」的短路。内容全部落在视口 + overscan 内
- * 时，区间换算结果与全量 map 相同。
+ * specs/tui-transcript-viewport.md invariant 4: the mount range depends only
+ * on scrollTop + viewport.height + an overscan smaller than one screen, and
+ * never on total content height — there is no "mount everything when content
+ * is under N screens" short-circuit. When all content fits within the viewport
+ * + overscan, the range conversion yields the same result as a full map.
  */
 import { CHAT_WHEEL_SCROLL_MULTIPLIER } from "./wheel-scroll.js";
 
 export const VIEWPORT_PLACEHOLDER_HEIGHT = 4;
 
 /**
- * 默认 overscan = 视口的四分之一（量化到行，下限 1 行）。
+ * Default overscan = one quarter of the viewport (quantized to rows, floor 1).
  *
- * spec invariant 4 要求 overscan **小于一屏**：一屏 overscan 会让挂载区间
- * 达到 3 屏高（上 1 + 视口 1 + 下 1），既违背「子树规模跟视口走」，又让
- * 未测高条目在滚动时反复进出窗口。四分之一屏足够覆盖量化提交步长
- * （见 `resolveScrollCommitStep`：步长 ≤ overscan，亚阈值滚动期间视口内
- * 条目必然仍在窗口里），同时把窗口压到约 1.5 屏。
+ * spec invariant 4 requires the overscan to be **smaller than one screen**: a
+ * one-screen overscan would grow the mount range to 3 screens (1 above +
+ * viewport + 1 below), which both violates "subtree size follows the viewport"
+ * and makes unmeasured entries repeatedly enter and leave the window while
+ * scrolling. A quarter screen is enough to cover the quantized commit step
+ * (see `resolveScrollCommitStep`: step ≤ overscan, so during sub-threshold
+ * scrolling entries in the viewport are necessarily still inside the window),
+ * while keeping the window at about 1.5 screens.
  *
- * 退化情形：视口 ≤ 1 行时不存在「小于一屏」的正 overscan，下限 1 行是
- * 可达最小值（真实终端不会出现）。
+ * Degenerate case: with a viewport ≤ 1 row there is no positive overscan
+ * "smaller than one screen", so the floor of 1 is the reachable minimum (real
+ * terminals never hit this).
  */
 export function defaultViewportOverscan(viewportHeight: number): number {
   if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return 1;
-  // floor 而非 round：不足 1 行的份额向下取整（视口 4–7 行 → overscan 1），
-  // 保证 overscan 随视口只涨不跳（round 会让 4–5 行的份额变成 2，窗口翻倍）；
-  // floor 本身也吸收非整数视口。
+  // floor, not round: fractions below one row round down (viewport 4–7 rows → overscan 1),
+  // guaranteeing overscan only grows with the viewport without jumping (round would turn a
+  // 4–5-row fraction into 2 and double the window); floor also absorbs non-integer viewports.
   return Math.max(1, Math.floor(viewportHeight / 4));
 }
 
 /**
- * 命名再导出（无独立行为）：值 = `CHAT_WHEEL_SCROLL_MULTIPLIER`（单一真源），
- * 用作 React 提交量化步长的上限。
+ * Named re-export (no standalone behaviour): value =
+ * `CHAT_WHEEL_SCROLL_MULTIPLIER` (single source of truth), used as the upper
+ * bound of the React commit quantization step.
  *
- * 滚动位置来自 `verticalScrollBar` 的逐帧 `change`：不量化则每次 change
- * 都 `setScrollTop`，整棵 ChatView（含 markdown 渲染）跟着重算。步长上限
- * 取一次滚轮步长的理由：滚轮是长 transcript 的主要滚动入口，量化步长
- * 大于一次滚轮位移时，单次滚轮永远够不到下一次量化边界，窗口被永久落
- * 在后面。下限是 1 行（`resolveScrollCommitStep`）= 最小提交量子：亚行
- * 位移不触发整树重算，整行位移不被吞，与滚轮步长无关；再由默认 overscan
- * 收敛，保证视口内容不因跳过提交而卸载。
+ * Scroll position comes from `verticalScrollBar`'s per-frame `change`: without
+ * quantization every change calls `setScrollTop` and the whole ChatView tree
+ * (including markdown rendering) recomputes. The step cap is set to one wheel
+ * step because the wheel is the primary scrolling entry for long transcripts:
+ * if the quantization step were larger than one wheel displacement, a single
+ * wheel turn would never reach the next quantization boundary and the window
+ * would be permanently left behind. The floor is 1 row
+ * (`resolveScrollCommitStep`) = the smallest commit quantum: sub-row
+ * displacements don't trigger whole-tree recomputes, whole-row displacements
+ * aren't swallowed, independent of wheel step; further bounded by the default
+ * overscan so viewport content is never unmounted due to skipped commits.
  */
 export const SCROLL_COMMIT_STEP_ROWS = CHAT_WHEEL_SCROLL_MULTIPLIER;
 
-/** 量化步长：≥1、≤ 一滚轮步长、≤ 该视口的默认 overscan。 */
+/** Quantized step: ≥1, ≤ one wheel step, ≤ the default overscan for that viewport. */
 export function resolveScrollCommitStep(viewportHeight: number): number {
   const overscan = defaultViewportOverscan(viewportHeight);
   return Math.max(1, Math.min(SCROLL_COMMIT_STEP_ROWS, overscan));
@@ -203,26 +215,29 @@ export function selectViewportMountWindow<T>(
   };
 }
 
-/** 一次滚动 change 的提交裁决参数。 */
+/** Commit decision parameters for one scroll change. */
 export interface ScrollCommitOpts {
-  /** 量化步长（行）；非有限 / <1 按 1 处理（绝不因坏参数吞掉真实位移）。 */
+  /** Quantization step (rows); non-finite / <1 treated as 1 (never swallow a real displacement due to a bad param). */
   readonly step: number;
-  /** 底部位置 = max(0, scrollHeight - viewport.height)。 */
+  /** Bottom position = max(0, scrollHeight - viewport.height). */
   readonly maxScrollTop: number;
 }
 
 /**
- * 是否需要把本次 `change` 的位置提交给 React（spec invariant 8 的量化条款）。
+ * Whether this `change`'s position should be committed to React (the
+ * quantization clause of spec invariant 8).
  *
- * 规则（按优先级）：
- *  1. `prev` 非有限（首次提交，含 NaN 种子）→ 提交；
- *  2. `next` 非有限 → 丢弃（垃圾位置不该改窗口）；
- *  3. `next <= 0` → 提交（置顶：第一个气泡必须挂上）；
- *  4. `next >= maxScrollTop` → 提交（贴底：sticky 不滞后）；
- *  5. 其余：位移 ≥ 量化步长才提交，亚阈值连续 change 不触发 React 提交。
+ * Rules (in priority order):
+ *  1. `prev` non-finite (first commit, incl. NaN seed) → commit;
+ *  2. `next` non-finite → drop (garbage positions must not change the window);
+ *  3. `next <= 0` → commit (at top: the first bubble must be mounted);
+ *  4. `next >= maxScrollTop` → commit (at bottom: sticky must not lag);
+ *  5. otherwise: commit only when the displacement ≥ the quantization step; sub-threshold
+ *     consecutive changes do not trigger a React commit.
  *
- * 跳过提交期间窗口停在旧 scrollTop，但 overscan ≥ 量化步长
- * （`resolveScrollCommitStep` 保证），视口内条目仍在挂载区间内。
+ * While commits are skipped the window stays at the old scrollTop, but
+ * overscan ≥ quantization step (guaranteed by `resolveScrollCommitStep`), so
+ * entries in the viewport remain inside the mount range.
  */
 export function shouldCommitScrollTop(
   prev: number,
@@ -240,7 +255,7 @@ export function shouldCommitScrollTop(
   return Math.abs(next - prev) >= step;
 }
 
-/** OpenTUI ScrollBox 滚动位置；只需 on/off + 回读 scrollTop。 */
+/** OpenTUI ScrollBox scroll position; only on/off + reading scrollTop back are needed. */
 export interface ScrollTopSource {
   readonly scrollTop: number;
   readonly verticalScrollBar: {

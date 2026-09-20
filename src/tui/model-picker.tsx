@@ -2,30 +2,35 @@
 /**
  * src/tui/model-picker.tsx
  *
- * /model 模型选择面板（provider 注册表版）：每项一行 `${provider}/${model}`
- * （有 name 时附显示名），复用 design-25 视觉语言（圆角流光框 + ◆─ 标题 + ▸
- * 焦点游标 + 键位提示）。
+ * /model picker over the provider registry: one row per
+ * `${provider}/${model}` (plus display name when configured), sharing the
+ * rounded flowing-border frame + ◆─ title + ▸ cursor + key hints visual
+ * language with the other pickers.
  *
- * 交互语义（与 thinking-picker / memory-picker 同款 SSOT）：
- *  - ↑/↓ → 移焦点（clamp 在**可见窗口**内，面板保持打开）；
- *  - Enter → fix（选定当前焦点项，宿主据此持久化 + reloadFromEnv + 关闭）；
- *  - Esc → commit（**直接关闭，不持久化**）—— 见下方 cancel 语义说明；
- *  - Space/Tab 与 ←/→ → ignore（无 toggle / 无横移语义）；
- *  - ctrl/meta 组合键 → ignore（让给 app 层既有路由，Ctrl+C/O 不被吞）。
+ * Interaction semantics (same SSOT as thinking-picker / memory-picker):
+ *  - ↑/↓ → move focus (clamped to the **visible window**, panel stays open);
+ *  - Enter → fix (commit the focused entry; host persists + reloadFromEnv +
+ *    closes);
+ *  - Esc → commit (**close without persisting**) — see the cancel-semantics
+ *    note below;
+ *  - Space/Tab and ←/→ → ignore (no toggle / no horizontal movement);
+ *  - ctrl/meta combos → ignore (leave them to the app layer; Ctrl+C/O is not
+ *    swallowed).
  *
- * ## Esc 为什么不构成 cancel 路径
+ * ## Why Esc is not a cancel path
  *
- * thinking-picker 的 Esc = 「保存退出」：面板内持有**未提交的暂存态**
- * （switchPreview / effortFocusIndex），Esc 才写真实 state。本面板没有暂存态
- * —— 焦点移动（↑/↓）只改 focusedIndex，不写任何持久化字段；唯一的写操作是
- * Enter 提交。因此 Esc 关闭时**没有东西需要保存**，也**没有东西需要回滚**：
- * 它既不是「保存退出」也不是「放弃修改」（无 staged 状态可放弃）。用户再次
- * 打开面板时焦点回到当前 model 对应的 entry（app.tsx 的 seed 逻辑），观感与
- * 关闭前一致 —— 关闭动作本身对配置零副作用。
+ * thinking-picker's Esc = "save and exit" because the panel holds uncommitted
+ * staged state (switchPreview / effortFocusIndex) that Esc writes to real
+ * state. This panel has no staged state — ↑/↓ only move focusedIndex and
+ * write nothing; the only write happens on Enter. So on Esc there is nothing
+ * to save and nothing to roll back: it is neither "save" nor "discard".
+ * Reopening seeds focus back to the current model's entry (app.tsx seed
+ * logic), so closing has zero side effect on configuration.
  *
- * 行账：`modelPickerRows(entryCount)` = 边框 2 + 内容行（hard cap 12，超出显示
- * 「…N more」）+ 键位提示 1；**不含 marginBottom=1**（与 thinkingPickerRows 同
- * 约定，由 chromeReserveRows 的 +1 入账）。
+ * Row budget: `modelPickerRows(entryCount)` = border 2 + content rows (hard
+ * cap 12, overflow collapses into one "…N more" row) + key hints 1;
+ * **excludes marginBottom=1** (same convention as thinkingPickerRows,
+ * accounted by chromeReserveRows +1).
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
@@ -36,15 +41,17 @@ import { PICKER_WIDTH } from "./thinking-picker.js";
 import { tuiPalette } from "./theme.js";
 import { BORDER_CYCLE_MS, flowBorderColor } from "./designs/_color.js";
 
-/** 可见内容行上限：超出部分折叠为一行「…N more」，面板行数不随注册表增长
- *  （V1 不滚屏，与 thinking-picker 的恒定行数纪律一致）。 */
+/** Max visible content rows: the rest collapses into one "…N more" row so the
+ *  panel height never grows with the registry (V1 has no scrolling, same
+ *  constant-rows discipline as thinking-picker). */
 export const MODEL_PICKER_MAX_ROWS = 12;
 
-/** picker 内一项（provider 注册表扁平投影；调用方负责展开 provider × models）。 */
+/** One picker entry (flat projection of the provider registry; the caller
+ *  expands provider × models). */
 export interface ModelPickerEntry {
   readonly providerId: string;
   readonly modelId: string;
-  /** provider.models[i].name（显示名）。缺省 → 只渲染路由 ID。 */
+  /** provider.models[i].name (display name). Absent → route ID only. */
   readonly label?: string;
 }
 
@@ -53,19 +60,22 @@ export interface ModelPickerState {
   readonly focusedIndex: number;
 }
 
-/** 路由 ID 串（持久化值 + 列表主标签）：`${provider}/${model}`。 */
+/** Route-ID string (persisted value + primary row label): `${provider}/${model}`. */
 export function modelRouteId(entry: ModelPickerEntry): string {
   return `${entry.providerId}/${entry.modelId}`;
 }
 
 /**
- * provider 注册表 → 扁平 `provider × models` 条目（展开语义的唯一实现面）。
+ * Provider registry → flat `provider × models` entries (the single
+ * implementation of the expansion semantics).
  *
- * 宿主（app 的 /model 面板）与显示面（context-bar 的模型名前缀）都要这份
- * 投影，但两者互为上下游（app → context-bar），任一方持有都会让另一方反向
- * import 成环 —— 故下沉到本叶子模块（它已持有 `ModelPickerEntry` 与路由 ID
- * 谓词，展平与路由判定是同一份语义的两个部分）。注册表为空 / 缺席 → 空数组
- * （调用方据此走 notice / 回退路由串）。
+ * Both the host (app's /model panel) and the display surface (context-bar's
+ * model-name prefix) need this projection, but they are upstream/downstream
+ * of each other (app → context-bar); either one owning it would force a
+ * circular reverse import — hence it lives in this leaf module (which already
+ * holds `ModelPickerEntry` and the route-ID predicate; flattening and route
+ * matching are two halves of one semantic). Empty / absent registry → empty
+ * array (callers fall back to notice / raw route string accordingly).
  */
 export function modelPickerEntries(
   providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
@@ -84,8 +94,9 @@ export function modelPickerEntries(
 }
 
 /**
- * 路由 ID → 条目的查找（谓词只此一处：`modelRouteId`，不在各调用点内联
- * 模板串 —— 内联会让 `${provider}/${model}` 的分隔约定在多个文件漂移）。
+ * Route-ID → entry lookup (the predicate lives here only: `modelRouteId`,
+ * never inlined at call sites — inlining would let the `${provider}/${model}`
+ * separator convention drift across files).
  */
 export function findEntryByRouteId(
   entries: ReadonlyArray<ModelPickerEntry>,
@@ -95,15 +106,20 @@ export function findEntryByRouteId(
 }
 
 /**
- * 状态栏模型名投影（纯函数）：当前 model 路由 ID 在注册表里命中条目且该项配了
- * `name` → 显示 `name`（例如 `MiniMax M3`）；未命中 / 无 name / 注册表缺席 →
- * 原样回退路由串（`provider/model`），不伪造、不抛错。仅状态栏展示面走本投影；
- * `/info`（spec SC11）与 `/model` picker 的焦点 seed 仍用原始路由串。label 经
- * settings 解析层 drop-not-throw 保证非空；此处再挡空串（与 picker 的
- * `label.length > 0` 渲染守卫同口径），空 label 视同「无 name」回退路由串。
+ * Status-bar model-name projection (pure function): when the current model
+ * route ID hits a registry entry that has a `name`, show the `name` (e.g.
+ * `MiniMax M3`); on miss / no name / absent registry → fall back to the raw
+ * route string (`provider/model`), never fabricate or throw. Only the
+ * status-bar display surface uses this projection; `/info` and the /model
+ * picker's focus seed still use the raw route string. The settings layer's
+ * drop-not-throw parsing already guarantees a non-empty label; this guards
+ * empty strings again (same standard as the picker's `label.length > 0`
+ * render guard) — an empty label is treated as "no name" and falls back.
  *
- * 与展平 / 路由判定同宿主：三者是同一份「注册表 → 条目 → 显示名」投影语义
- * 的三段，拆开会让 `${provider}/${model}` 约定与回退口径在调用点间漂移。
+ * Hosted together with flattening / route matching: the three are segments
+ * of one "registry → entry → display name" projection semantic; splitting
+ * them would let the `${provider}/${model}` convention and fallback rules
+ * drift across call sites.
  */
 export function modelDisplayName(
   model: string | undefined,
@@ -121,26 +137,30 @@ export type ModelPickerAction =
   | { readonly kind: "ignore" };
 
 /**
- * 焦点 clamp 上界（与渲染行账同源）：焦点只能落在**可见窗口**内，即
- * `min(entryCount, MODEL_PICKER_MAX_ROWS) - 1`。
+ * Focus clamp upper bound (same source as the render row budget): focus may
+ * only land inside the **visible window**, i.e.
+ * `min(entryCount, MODEL_PICKER_MAX_ROWS) - 1`.
  *
- * V1「不滚屏」的既定取舍：面板恒渲染前 MODEL_PICKER_MAX_ROWS 项，超出的条目
- * 只在「…N more」里计数、永远不可见。若 clamp 到 `entryCount-1`，注册表 ≥13 条
- * 时按 ↓ 会让游标 `▸` 移出渲染区 —— 焦点看不见却能 Enter 提交隐藏条目。
- * 代价：隐藏条目要**精简注册表**（删掉前 12 条之外的多余 model）才能选到，
- * 本面板不提供滚动窗口（与 thinking-picker 的恒定行数纪律一致）。
+ * Deliberate V1 "no scrolling" trade-off: the panel always renders the first
+ * MODEL_PICKER_MAX_ROWS entries; extras are only counted in "…N more" and
+ * never visible. Clamping to `entryCount-1` instead would let ↓ move the ▸
+ * cursor out of the rendered area once the registry has ≥13 entries — an
+ * invisible focus could still Enter-commit a hidden entry. Consequence:
+ * reaching a hidden entry requires **trimming the registry** (removing models
+ * beyond the first 12); this panel offers no scrolling window (same
+ * constant-rows discipline as thinking-picker).
  */
 function maxFocusedIndex(entryCount: number): number {
   return Math.max(0, Math.min(entryCount, MODEL_PICKER_MAX_ROWS) - 1);
 }
 
 /**
- * 键路由纯函数（宿主 useKeyboard 消费）：
- *  - ctrl/meta → ignore（Ctrl+C/O 不被吞）；
- *  - Esc → commit（关闭，不持久化）；
- *  - ↑/↓ → move，clamp [0, maxFocusedIndex]（可见窗口内；空列表 → 恒 0）；
- *  - Enter → fix（选定焦点项）；
- *  - Space / Tab / ←/→ / 其余 → ignore（无 toggle，无横移）。
+ * Key-routing pure function (consumed by the host's useKeyboard):
+ *  - ctrl/meta → ignore (Ctrl+C/O not swallowed);
+ *  - Esc → commit (close without persisting);
+ *  - ↑/↓ → move, clamp [0, maxFocusedIndex] (visible window; empty list → 0);
+ *  - Enter → fix (commit the focused entry);
+ *  - Space / Tab / ←/→ / rest → ignore (no toggle, no horizontal move).
  */
 export function reduceModelPickerKey(
   event: ModalKeyEvent,
@@ -150,8 +170,9 @@ export function reduceModelPickerKey(
   const { key } = event;
   if (key.ctrl || key.meta) return { kind: "ignore" };
   if (key.escape) return { kind: "commit" };
-  // 两个方向都 clamp 到可见窗口：焦点 seed（app 层按当前 model 查下标）可能落在
-  // 窗口外，任一方向键都会把焦点拉回可见区。
+  // Both directions clamp to the visible window: the focus seed (app layer
+  // looks up the index of the current model) may land outside it, and either
+  // arrow key pulls focus back into view.
   const max = maxFocusedIndex(entryCount);
   if (key.upArrow) {
     return {
@@ -170,14 +191,17 @@ export function reduceModelPickerKey(
 }
 
 /**
- * 面板总终端行数（行账 SSOT，纯函数）：边框 2 + 标题 1 + 内容行 + 键位提示 1
- * （与 memoryPickerRows「边框 2 + 标题 + 两行开关 + 键位提示」同款逐项列账）。
- * 内容行 = min(entryCount, MODEL_PICKER_MAX_ROWS)，entryCount 超过上限时
- * 多出的部分由「…N more」一行代表（面板行数因此封顶，不随注册表增长）。
- * entryCount = 0 → 1 行占位（空注册表路径由 app 层 notice 拦下，不打开面板；
- * 此处仍给确定性行数，避免渲染盒高度为 0）。
- * **不含 marginBottom=1** —— 与 modalRows / thinkingPickerRows 同约定，由
- * chromeReserveRows 的 +1 入账。
+ * Total terminal rows (row-budget SSOT, pure): border 2 + title 1 + content
+ * rows + key hints 1 (itemized accounting, same style as memoryPickerRows'
+ * "border 2 + title + two toggle rows + key hints"). Content rows =
+ * min(entryCount, MODEL_PICKER_MAX_ROWS); when entryCount exceeds the cap the
+ * remainder is represented by one "…N more" row (so panel height is bounded
+ * and never grows with the registry). entryCount = 0 → 1 placeholder row
+ * (the empty-registry path is intercepted by an app-layer notice and the
+ * panel never opens; a deterministic row count is kept here anyway so the
+ * render box is never zero-height). **Excludes marginBottom=1** — same
+ * convention as modalRows / thinkingPickerRows, accounted by the +1 in
+ * chromeReserveRows.
  */
 export function modelPickerRows(entryCount: number): number {
   const overflow = entryCount > MODEL_PICKER_MAX_ROWS ? 1 : 0;
@@ -185,16 +209,18 @@ export function modelPickerRows(entryCount: number): number {
   return 2 + 1 + content + overflow + 1;
 }
 
-/** 可见条目窗口：[0, max) —— V1 不滚屏（面板恒显示前 MODEL_PICKER_MAX_ROWS
- *  项，与 reduceModelPickerKey 的焦点上界同源）。 */
+/** Visible entry window: [0, max) — V1 has no scrolling (the panel always
+ *  shows the first MODEL_PICKER_MAX_ROWS entries, same source as
+ *  reduceModelPickerKey's focus upper bound). */
 function visibleEntries(
   entries: ReadonlyArray<ModelPickerEntry>
 ): ReadonlyArray<ModelPickerEntry> {
   return entries.slice(0, MODEL_PICKER_MAX_ROWS);
 }
 
-/** 单行渲染文本：`▸ provider/model  ·  name`（焦点行带游标，非焦点两空格，
- *  与 memory-picker 的游标模式同宽——各 2 列，不破坏行账）。 */
+/** One rendered row: `▸ provider/model  ·  name` (focused rows carry the
+ *  cursor, unfocused use two spaces — same 2-column cursor width as
+ *  memory-picker so the row budget never breaks). */
 function entryRow(
   key: string,
   entry: ModelPickerEntry,
@@ -219,9 +245,10 @@ function entryRow(
 }
 
 /**
- * ModelPicker —— design-25 风格模型选择面板。常驻 overlay：无入场动画，
- * 宽度固定 PICKER_WIDTH、alignSelf flex-start 靠左（不占满屏宽）；行数由
- * modelPickerRows 预测（边框 2 + 内容 + 键位提示 1）。
+ * ModelPicker — rounded flowing-border model panel. Persistent overlay: no
+ * entry animation, fixed width PICKER_WIDTH with alignSelf flex-start (never
+ * full-screen width); rows predicted by modelPickerRows (border 2 + content +
+ * key hints 1).
  */
 export function ModelPicker(props: {
   readonly state: ModelPickerState;
@@ -253,8 +280,9 @@ export function ModelPicker(props: {
     entryRow(`${entry.providerId}/${entry.modelId}`, entry, i === focusedIndex)
   );
   if (rows.length === 0) {
-    // 防御分支：空注册表不打开面板（app 层 notice 拦下）；直接挂载到渲染器
-    // 时给一行确定性占位，避免零高盒。
+    // Defensive branch: an empty registry never opens the panel (app-layer
+    // notice intercepts); when mounted directly by the renderer, keep one
+    // deterministic placeholder row to avoid a zero-height box.
     rows.push(
       <text key="model-empty" fg={pal.dim}>
         （未配置 providers）
@@ -280,7 +308,7 @@ export function ModelPicker(props: {
       width={PICKER_WIDTH}
       alignSelf="flex-start"
     >
-      {/* 标题 ◆─ 模型（design-25 同款前缀，与同族面板视觉一致） */}
+      {/* Title: model (◆─ shared panel prefix, consistent with the picker family) */}
       <text>
         <span fg={pal.running}>{"◆─ "}</span>
         <span fg={pal.text} attributes={TextAttributes.BOLD}>
@@ -288,7 +316,7 @@ export function ModelPicker(props: {
         </span>
       </text>
       {rows}
-      {/* 键位提示（wrapMode none：窄终端 clip 不折行，保持行账恒定） */}
+      {/* Key hints (wrapMode none: narrow terminals clip instead of wrapping, keeping the row budget constant) */}
       <text fg={pal.dim} wrapMode="none">
         [↑↓] 选择 · [Enter] 切换 · [Esc] 关闭
       </text>

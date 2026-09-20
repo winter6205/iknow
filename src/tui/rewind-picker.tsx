@@ -2,8 +2,10 @@
 /**
  * src/tui/rewind-picker.tsx
  *
- * L3 锚点选择器。锚点 = 当前 head 链上的用户消息；确认后 head 指到该句
- * parent（回到发送这句之前）。旧链保留，picker 默认不列跳过分支。
+ * L3 anchor picker. An anchor = a user message on the current head chain;
+ * after confirming, head points to that message's parent (back to before it
+ * was sent). The old chain is kept; the picker does not list skipped
+ * branches by default.
  */
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import {
@@ -20,7 +22,8 @@ import {
 
 export type RewindTarget = LedgerRewindTarget;
 
-/** 线性 SessionFile 投影（无跳过分支）。TUI 打开 picker 时走 store 当前 head 链。 */
+/** Linear SessionFile projection (no skipped branches). When the TUI opens the
+ *  picker it follows the store's current head chain. */
 export function buildRewindTargets(
   file: SessionFileV1
 ): ReadonlyArray<RewindTarget> {

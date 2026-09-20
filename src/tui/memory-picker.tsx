@@ -2,9 +2,11 @@
 /**
  * src/tui/memory-picker.tsx
  *
- * /memory 双开关面板：自动记忆（autoExtract）+ Dream。
- * 交互对齐 thinking-picker：Space/Tab 翻转当前行、Enter 固定不关、Esc 保存退出。
- * Dream 仅在自动记忆开启时可改；关掉自动记忆时 Dream 强制关。
+ * /memory two-row toggle panel: auto memory (autoExtract) + Dream.
+ * Interaction mirrors thinking-picker: Space/Tab flips the focused row, Enter
+ * pins without closing, Esc saves and exits.
+ * Dream is editable only while auto memory is on; turning auto memory off
+ * forces Dream off.
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
@@ -80,7 +82,7 @@ export function reduceMemoryPickerKey(
   return { type: "ignore" };
 }
 
-/** 边框 2 + 标题 + 两行开关 + 键位提示。不含 marginBottom。 */
+/** Border 2 + title + two toggle rows + key hints. Excludes marginBottom. */
 export function memoryPickerRows(): number {
   return 6;
 }

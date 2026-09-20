@@ -1,19 +1,15 @@
 /**
- * src/tui/session-state.ts
+ * TUI session state machine. Pure TS: no ink / OpenTUI dependencies.
  *
- * #343 T6-A 迁移：从 archive/tui-ink/src/session-state.ts 迁回 src/tui/。
- * 逻辑与原版一致（#146 TUI 会话状态机，Q1/Q1a 裁决）；仅文件头注释更新
- * 为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ * Business constraints:
+ *  - run tri-state `idle` / `running-fg` / `running-bg` (time-sliced
+ *    active-one; switching away mid-turn keeps the turn running in background);
+ *  - view tri-state `chat` / `list` / `mcp`;
+ *  - message discipline: `ReadonlyArray` + `Object.freeze`, whole-array
+ *    replacement, never mutate.
  *
- * 业务约束（沿用 #146 + #120 纪律）：
- *  - 会话运行三态 `idle` / `running-fg` / `running-bg`（分时切换 active-one；
- *    turn 运行中切走 → 后台继续执行）；
- *  - 视图三态 `chat` / `list` / `mcp`；
- *  - 消息纪律与 #120 Q3 一致：`ReadonlyArray` + `Object.freeze`，整体替换、
- *    永不 mutate。
- *
- * 全部转换为纯函数（discriminated state in → new state out），UI 层
- * （app.tsx 的 hook）只做编排。
+ * All transitions are pure functions (discriminated state in -> new state
+ * out); the UI layer (app.tsx hook) only orchestrates.
  */
 
 import type {
@@ -36,40 +32,43 @@ import type { SessionFileV1 } from "../session-api/store/schema.js";
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
 export type TuiView = "chat" | "list" | "mcp";
 
-/** 未建档会话的内存占位键（lazy create：首条消息发出才进 SessionStore）。 */
+/** In-memory placeholder key for an unmaterialized session (lazy create: it enters SessionStore only when the first message is sent). */
 export const DRAFT_SESSION_ID = "__draft__";
 
 export interface TuiSessionState {
-  /** undefined = lazy draft（尚未 createSession 建档）。 */
+  /** undefined = lazy draft (createSession not yet called). */
   readonly conversationId: string | undefined;
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
-  /** 累计 turnCount（来自会话文件 / postMessage 回执，run() 内部计数从 0 起不同）。 */
+  /** Cumulative turnCount (from the session file / postMessage receipt; run()'s internal counter starts from 0 and differs). */
   readonly turnCount: number;
-  /** ISO 时间；draft 为 ""。 */
+  /** ISO timestamp; "" for a draft. */
   readonly updatedAt: string;
   readonly jsonMode: boolean;
   readonly runState: SessionRunState;
-  /** 最近一次 turn 的停止原因（展示用）。 */
+  /** Stop reason of the latest turn (display only). */
   readonly lastStopReason: StopReason | undefined;
-  /** T3: 最近一次 turn 的 token usage（上下文用量显示；只来自运行时回执）。 */
+  /** Token usage of the latest turn (context-usage display; runtime receipts only). */
   readonly lastUsage: TokenUsage | null;
   /**
-   * ADR-0037 T5:会话当前工作根（T3 改绑落盘的 task worktree 路径）。
-   * undefined = 未绑定（开关 OFF / 尚未 mutate）→ 展示层零多余状态。
-   * 只读投影:TUI 不做任何 git 操作,展示值唯一来源是会话文件。
+   * ADR-0037: the session's current working root (the task-worktree path
+   * persisted on rebind). undefined = unbound (feature OFF / no mutation
+   * yet) -> display layer adds no extra state. Read-only projection: the TUI
+   * performs no git operations; the session file is the sole display source.
    */
   readonly workspaceRoot: string | undefined;
   /**
-   * D3 (tui-display-consistency): 落盘思考时长并行数组（与 messages 一一对应）。
-   * 与 `SessionFileV1.thinkingMs` 同 spread-discipline：undefined 元素 = 该位置事件无
-   * thinkingMs（非流式回合 / legacy 文件 / 非 assistant），整个 key 缺席 = 整链均无
-   * thinkingMs（旧会话）。消费侧（turn-activity sumThinkingMsInRange）按 0 计入；
-   * 折叠行仅在总秒数 > 0 时显示「思考了 N 秒」，否则只显示工具计数。
+   * Persisted thinking-duration parallel array (one slot per message).
+   * Same spread discipline as `SessionFileV1.thinkingMs`: an undefined
+   * element = no thinkingMs at that position (non-streaming turn / legacy
+   * file / non-assistant); the whole key absent = no thinkingMs anywhere in
+   * the chain (legacy session). Consumers (turn-activity
+   * sumThinkingMsInRange) count those as 0; the fold line shows "thought for
+   * N seconds" only when the total > 0, otherwise tool counts alone.
    */
   readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
-/** 新建 draft 会话（启动直达新会话聊天界面，Q2=C；不触盘）。 */
+/** Create a draft session (startup lands directly in a new-session chat view; no disk touch). */
 export function createDraftSession(): TuiSessionState {
   return Object.freeze({
     conversationId: undefined,
@@ -81,12 +80,12 @@ export function createDraftSession(): TuiSessionState {
     lastStopReason: undefined,
     lastUsage: null,
     workspaceRoot: undefined,
-    // D3:draft 没有 thinkingMs；折叠簇求和按 0 计入。
+    // A draft has no thinkingMs; fold-cluster sums count 0.
     thinkingMs: undefined,
   });
 }
 
-/** 从已落盘会话文件恢复（`iknow tui <session-id>` / 列表 Enter 路径）。 */
+/** Restore from a persisted session file (`iknow tui <session-id>` / Enter from the list view). */
 export function attachSession(file: SessionFileV1): TuiSessionState {
   return Object.freeze({
     conversationId: file.conversation_id,
@@ -96,32 +95,33 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     jsonMode: file.jsonMode,
     runState: "idle",
     lastStopReason: undefined,
-    // lastUsage 只来自运行时回执，不从会话文件携带（初值 null）。
+    // lastUsage comes only from runtime receipts, never from the session file (initial null).
     lastUsage: null,
-    // ADR-0037 T5:改绑后的 task worktree 根随会话文件恢复（重启后现势仍在）。
+    // ADR-0037: the rebound task-worktree root is restored with the session file (still current after restart).
     workspaceRoot: file.workspaceRoot,
-    // D3:把落盘的并行数组带到会话状态 —— 折叠行从此读取（取代 in-memory
-    // 思考秒数副通道，已整条删除）。
+    // Carry the persisted parallel array into session state — fold lines
+    // read it from here (replacing the deleted in-memory thinking-seconds side channel).
     thinkingMs: file.thinkingMs,
   });
 }
 
-/** turn 起跑：仅 idle 可起跑（重复起跑视为调用方 bug，保持原状态不抛错）。 */
+/** Turn start: only idle can start (a double start is a caller bug — keep the state unchanged, never throw). */
 export function turnStarted(session: TuiSessionState): TuiSessionState {
   if (session.runState !== "idle") return session;
   return Object.freeze({ ...session, runState: "running-fg" });
 }
 
 /**
- * 从该会话切走（Q1a）：running-fg → running-bg（后台继续执行）；
- * idle 会话切走不变。running-bg 重入切走保持 running-bg。
+ * Switching away from this session: running-fg -> running-bg (execution
+ * continues in background); an idle session is unchanged; switching away
+ * again while running-bg stays running-bg.
  */
 export function switchedAwayFrom(session: TuiSessionState): TuiSessionState {
   if (session.runState !== "running-fg") return session;
   return Object.freeze({ ...session, runState: "running-bg" });
 }
 
-/** 切回该会话：running-bg → running-fg；idle 不变。 */
+/** Switching back to this session: running-bg -> running-fg; idle unchanged. */
 export function switchedTo(session: TuiSessionState): TuiSessionState {
   if (session.runState !== "running-bg") return session;
   return Object.freeze({ ...session, runState: "running-fg" });
@@ -134,23 +134,26 @@ export interface TurnFinishedInput {
   readonly updatedAt: string;
   readonly jsonMode: boolean;
   readonly stopReason: StopReason;
-  /** T3: 该回合的 token usage（bridge.postMessage 回执透传；缺省/无 → null）。
-   *  可选既是「省略即 null」的显式语义，也保留既有调用面（app.tsx 的 T4
-   *  接线前不传 lastUsage 也能编译）。 */
+  /** This turn's token usage (passed through from the bridge.postMessage
+   *  receipt; absent / none -> null). Optional encodes the explicit
+   *  "omitted means null" semantics and keeps the existing call surface
+   *  compiling without lastUsage. */
   readonly lastUsage?: TokenUsage | null;
   /**
-   * ADR-0037 T5:turn 结束时落盘文件里的 workspaceRoot（改绑回合起携带）。
-   * 缺省 = 本回合未发生改绑（或文件刷新失败）→ 保留既有值，不误清。
+   * ADR-0037: workspaceRoot from the persisted file at turn end (carried by
+   * rebind turns). Absent = no rebind this turn (or the file refresh
+   * failed) -> keep the existing value, never clear it by mistake.
    */
   readonly workspaceRoot?: string;
   /**
-   * D3:turn 结束时落盘文件里的 thinkingMs 并行数组。缺省 = 本回合未拿到
-   * 刷新视图（文件 IO 失败）→ 保留既有值，不误清。
+   * thinkingMs parallel array from the persisted file at turn end. Absent =
+   * no refreshed view this turn (file IO failure) -> keep the existing
+   * value, never clear it by mistake.
    */
   readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
-/** turn 结束（自然完成 / cancelled / timeout 均走此）：落回 idle + 整体冻结替换。 */
+/** Turn end (natural completion / cancelled / timeout all land here): back to idle + whole frozen replacement. */
 export function turnFinished(
   session: TuiSessionState,
   input: TurnFinishedInput
@@ -165,33 +168,38 @@ export function turnFinished(
     runState: "idle",
     lastStopReason: input.stopReason,
     lastUsage: input.lastUsage ?? null,
-    // ADR-0037 T5:改绑回合携带新根;普通回合缺省 → 保留既有绑定值。
+    // ADR-0037: rebind turns carry the new root; normal turns omit it -> keep the existing bound value.
     workspaceRoot: input.workspaceRoot ?? session.workspaceRoot,
-    // D3:从落盘文件刷新 thinkingMs;缺省 → 保留既有数组(部分恢复场景)。
+    // Refresh thinkingMs from the persisted file; absent -> keep the existing array (partial-recovery case).
     thinkingMs: input.thinkingMs ?? session.thinkingMs,
   });
 }
 
-/** 前台打断护栏（Q1a；Esc 消费，2026-09-18 自 Ctrl+C 迁入）：仅 running-fg 可被打断。 */
+/** Foreground interrupt guard (consumed by Esc): only running-fg can be interrupted. */
 export function canInterrupt(session: TuiSessionState): boolean {
   return session.runState === "running-fg";
 }
 
 /**
- * T2 (#175): 用户消息即时回显 — 提交后、任何 delta 到达前把用户文本追加进
- * messages,让对话立刻可见(不必等 turn 结束重读文件)。
+ * Instant user-message echo — right after submit, before any delta arrives,
+ * append the user text to messages so the conversation updates immediately
+ * (no waiting for turn end + file re-read).
  *
- * 为什么在 turnStarted 之后调用:runState 保持 running-fg(即时回显不改变
- * 会话运行态),且不改变 conversationId / turnCount 等其余字段。turn 结束 /
- * abort 后由落盘 messages 原子替换(中间态自动消失)。
+ * Why called after turnStarted: runState stays running-fg (the echo changes
+ * no run state) and conversationId / turnCount etc. are untouched. At turn
+ * end / abort the persisted messages atomically replace the intermediate
+ * state.
  *
- * 空文本(trim 后)不追加,返回原状态 — 防空白输入污染 messages。
+ * Empty text (after trim) is not appended and the original state is
+ * returned — blank input must never pollute messages.
  *
- * #377 项 D（#337 Phase C 决定撤销）：echo 与发送文本可分离 —— 本函数接收
- * **显示形态**（displayText），它是用户可见会话中的临时代理。skill-load
- * 场景发送文本含技能正文（进模型历史），显示形态用精简占位「[加载技能 X]」
- * 避免正文泄漏进会话。turn 结束 turnFinished 仍用落盘权威消息原子替换中间态
- * （含正文 —— 这是用户接受的 running→complete 形态切换）。
+ * Echo and sent text may differ: this function receives the *display form*
+ * (displayText), a temporary stand-in in the user-visible session. For
+ * skill-load, the sent text embeds the skill body (into model history) while
+ * the display form shows a compact placeholder ("[加载技能 X]") so the body
+ * never leaks into the session view. turnFinished still replaces everything
+ * with the authoritative persisted messages (body included — an accepted
+ * running->complete shape switch).
  */
 export function userMessageEchoed(
   session: TuiSessionState,
@@ -209,10 +217,12 @@ export function userMessageEchoed(
 }
 
 /**
- * 手动压缩（/compact）落盘后的会话刷新：以压缩后文件内容替换 messages /
- * turnCount / updatedAt，但**保留** lastStopReason / lastUsage（压缩不是 turn，
- * 不应清掉上下文用量读数），runState 归 idle。仅 idle 会话可压缩（running 时
- * 由命令侧护栏拒绝，这里同 turnStarted 语义：非 idle 保持原状态）。
+ * Session refresh after manual compaction (/compact): replace messages /
+ * turnCount / updatedAt with the compacted file content, but **keep**
+ * lastStopReason / lastUsage (compaction is not a turn; the context-usage
+ * reading must not be cleared), runState back to idle. Only idle sessions
+ * compact (the command-side guard rejects while running; here, same
+ * semantics as turnStarted: non-idle keeps the state unchanged).
  */
 export function sessionCompacted(
   session: TuiSessionState,
@@ -235,11 +245,13 @@ export function sessionCompacted(
 }
 
 /**
- * 回退（/rewind / 双 Esc）落盘后的会话刷新：镜像 sessionCompacted —— 以
- * rewindFile 截断后的文件内容整体替换 messages / turnCount / updatedAt /
- * jsonMode，但**保留** lastStopReason / lastUsage（回退不是 turn，不应清掉
- * 上下文用量读数），runState 归 idle。仅 idle 会话可回退（running 时由命令
- * 侧护栏拒绝，这里同 turnStarted 语义：非 idle 保持原状态，不抛错）。
+ * Session refresh after rewind (/rewind / double-Esc): mirrors
+ * sessionCompacted — wholesale replacement of messages / turnCount /
+ * updatedAt / jsonMode with the truncated file, but **keep**
+ * lastStopReason / lastUsage (rewind is not a turn; the usage reading must
+ * not be cleared), runState back to idle. Only idle sessions rewind (the
+ * command-side guard rejects while running; non-idle keeps the state
+ * unchanged here, never throws).
  */
 export function sessionRewound(
   session: TuiSessionState,
@@ -262,29 +274,30 @@ export function sessionRewound(
 }
 
 /**
- * 输入历史（↑ recall）种子：把已落盘会话的 query user 消息按 turn 顺序
- * 投影为输入历史。会话恢复（`iknow tui <session-id>` / /sessions Enter
- * openSessionAt）后 ↑ 立即可用，不必先提交一条新输入 —— 此前历史仅存
- * process 内存、只在提交时追加，恢复/切换会话后 ↑ 为空。
+ * Join all text blocks of a user message with "\n". Used by the input
+ * history seed below and by the hidden-message classifier.
  *
- * query 判别与 checkpoint.ts isQuery 同源（镜像 hub.ts
- * projectMessagesToTurns）：`role === "user"` 且 content 不含 tool_result
- * block；tool_result 回显是 turn 的延续，不是新提问。
+ * Input-history (up-arrow recall) seeding rules: persisted query user
+ * messages are projected to history in turn order, so after session restore
+ * (`iknow tui <session-id>` / /sessions Enter) up-arrow works immediately
+ * — previously history lived only in process memory and was empty after
+ * restore.
  *
- * 文本提取：全部 text block 的 `.text` 用 "\n" 连接后 trim（用户实际键入
- * 全文；与 rewind-picker firstUserFullText 只取首个 text block 不同 —— 输入
- * 历史要完整文本，而实际消息几乎都恰好一个 text block）。
+ * Query discrimination shares its source with checkpoint.ts isQuery
+ * (mirroring hub.ts projectMessagesToTurns): `role === "user"` and no
+ * tool_result block in content — a tool_result echo continues the turn, it
+ * is not a new question.
  *
- * 丢弃规则（与提交路径 app.tsx handleSubmit 一致）：
- *  - trim 后为空；
- *  - `[skill-load ` 开头：skill-load 代理正文会持久化进 transcript（见
- *    app.tsx sendTurn displayText 注释），但不得污染 ↑ 历史（显示占位
- *    约定「[加载技能 X]」）；
- *  - host-drain / verify / graph_mode 信封：给模型的注入，不是用户键入（与
- *    isTurnQuery 跳过 drain 同源，并覆盖 VALIDATION FAILED / VERIFY rerun /
- *    `<graph_mode>` 三条通知）。
- *  - 相邻重复抑制：与上一条保留项相同则跳过（同提交路径
- *    `h[h.length-1] === text` 语义）；非相邻重复保留（真实重提同一问题）。
+ * Drop rules (consistent with the submit path app.tsx handleSubmit):
+ *  - empty after trim;
+ *  - starts with `[skill-load `: the skill-load proxy body is persisted into
+ *    the transcript but must not pollute up-arrow history (display uses the
+ *    "[加载技能 X]" placeholder convention);
+ *  - host-drain / verify / graph_mode envelopes: model-directed injections,
+ *    not user keystrokes (same source as isTurnQuery skipping drain; covers
+ *    the VALIDATION FAILED / VERIFY rerun / `<graph_mode>` notices).
+ * Adjacent-duplicate suppression matches the submit path
+ * (`h[h.length-1] === text`); non-adjacent repeats are kept (genuine re-ask).
  */
 export function joinedUserText(message: AnthropicNativeMessage): string {
   return message.content
@@ -314,27 +327,29 @@ export function isTuiHiddenUserMessage(
 }
 
 /**
- * plans/tui-chrome-interaction.md Task 5：skill-load chip 投影（render-side SSOT）。
+ * Skill-load chip projection (render-side SSOT).
  *
- * 从 user message 文本里抽出 `{name, remainder}`，给 TUI user 分支渲染用；
- * SKILL body 永远不进 ❯ 气泡。模型历史仍收 `buildSkillLoadText` 信封（session-api
- * 侧不动），TUI 不画正文。
+ * Extracts `{name, remainder}` from user-message text for the TUI user
+ * branch; the SKILL body never enters the ❯ bubble. Model history still
+ * receives the `buildSkillLoadText` envelope (session-api side unchanged);
+ * the TUI simply does not draw the body.
  *
- * 命中形态（与 `buildSkillLoadText` 装配一致）：
+ * Accepted shape (matching `buildSkillLoadText` assembly):
  *   `[skill-load name="<name>"]\n<body>[ + \n\n<remainder>]`
  *
- * 拒绝形态（返回 null → 落回普通 user 文本渲染）：
- *   - 完全不以 `[skill-load ` 开头；
- *   - `[skill-load name="` 之后没有闭合的 `"`（前缀短命中但 name 没闭合）；
- *   - `]` 之后没有 `\n`（不是 buildSkillLoadText 形态）。
+ * Rejected shapes (return null -> plain user-text rendering):
+ *   - does not start with `[skill-load ` at all;
+ *   - no closing `"` after `[skill-load name="` (short prefix hit, name unclosed);
+ *   - no `\n` after `]` (not the buildSkillLoadText shape).
  *
- * 边界：
- *   - body 巨大：lastIndexOf `\n\n` 仍能定位 buildSkillLoadText 唯一添加的
- *     分隔符（约定 `createSkillBody` 末尾是 `</skill_files>` 不带末尾 `\n\n`，
- *     body 自身不会撞上分隔符）；
- *   - remainder 非空 → 抽出；
- *   - remainder 空 → 仍然命中（chip-only 路径）；
- *   - body 内 `\n\n` 段：最后一个才是 buildSkillLoadText 的 separator。
+ * Edges:
+ *   - huge body: lastIndexOf `\n\n` still locates the single separator that
+ *     buildSkillLoadText adds (by convention `createSkillBody` ends with
+ *     `</skill_files>` without a trailing `\n\n`, so the body itself never
+ *     collides with the separator);
+ *   - non-empty remainder -> extracted;
+ *   - empty remainder -> still a hit (chip-only path);
+ *   - `\n\n` inside the body: only the last one is buildSkillLoadText's separator.
  */
 export interface SkillLoadProjection {
   readonly name: string;
@@ -344,29 +359,33 @@ export interface SkillLoadProjection {
 export function projectSkillLoadUserText(
   text: string
 ): SkillLoadProjection | null {
-  // session-api 落盘的 user turn 可能带 memory prefetch overlay 前缀
-  // （attachPrefetchOverlay：overlay + MEMORY_PREFETCH_END + envelope）。
-  // 先剥离再匹配，否则 reload 后投影失败 → body 全文溢出渲染。
+  // A persisted user turn may carry the memory-prefetch overlay prefix
+  // (attachPrefetchOverlay: overlay + MEMORY_PREFETCH_END + envelope).
+  // Strip before matching, otherwise the projection fails after reload and
+  // the whole body overflows into the rendering.
   const stripped = stripPrefetchOverlay(text);
   if (!stripped.startsWith(SKILL_LOAD_PREFIX_SHORT)) return null;
-  // 闭合形态：`[skill-load name="..."]` 要求短前缀之后紧接 `name="`。
+  // Closed shape: `[skill-load name="..."]` requires `name="` right after the short prefix.
   if (!stripped.startsWith(SKILL_LOAD_PREFIX)) return null;
   const afterPrefix = stripped.slice(SKILL_LOAD_PREFIX.length);
   const closingQuote = afterPrefix.indexOf('"');
   if (closingQuote === -1) return null;
   const name = afterPrefix.slice(0, closingQuote);
-  // 闭合 ] 与正文之间必须是 `\n`（buildSkillLoadText 装配约定），
-  // 否则不是合法形态 → 落回普通文本。
+  // Between the closing ] and the body there must be a `\n`
+  // (buildSkillLoadText assembly convention); otherwise it is not a valid
+  // shape -> fall back to plain text.
   const afterName = afterPrefix.slice(closingQuote + 1);
   if (!afterName.startsWith("]\n")) return null;
   const tail = afterName.slice("]\n".length);
-  // buildSkillLoadText 仅在 remainder 非空时追加 `\n\n<remainder>`，且唯一
-  // 一次。但 body 自身（createSkillBody 产物）含多段 `\n\n` 分隔，末段以
-  // `</skill_files>` 结尾 —— 仅靠 lastIndexOf `\n\n` 会把 body 末段误判为
-  // remainder。借 body 末尾固定 `</skill_files>` 锚定位 separator：
-  //   `</skill_files>\n\n<remainder>` 命中 → split；否则 remainder 空。
-  // body 为空（罕见）时退化为 tail 开头 `\n\n<remainder>` 形态（empty body
-  // + 非空 remainder 仍带 `\n\n` 前缀）。
+  // buildSkillLoadText appends `\n\n<remainder>` only when the remainder is
+  // non-empty, exactly once. But the body itself (createSkillBody output)
+  // contains multiple `\n\n` separations and ends with `</skill_files>` —
+  // relying on lastIndexOf `\n\n` alone would misread the body tail as the
+  // remainder. Anchor on the fixed body-ending `</skill_files>` to locate
+  // the separator: `</skill_files>\n\n<remainder>` -> split; otherwise the
+  // remainder is empty. With an empty body (rare) the tail degrades to the
+  // `\n\n<remainder>`-prefixed shape (empty body + non-empty remainder still
+  // carries the `\n\n` prefix).
   const marker = "</skill_files>";
   const markerIdx = tail.lastIndexOf(marker);
   if (markerIdx !== -1) {
@@ -379,9 +398,10 @@ export function projectSkillLoadUserText(
   if (tail.startsWith("\n\n") && tail.length > "\n\n".length) {
     return { name, remainder: tail.slice("\n\n".length) };
   }
-  // 无 marker、无空 body 分隔 → 退化为 lastIndexOf `\n\n`（兼容合成测试文本
-  // 与历史 envelope 形态，body 自身不带 `</skill_files>`）。约定 body 不以
-  // `\n\n` 结尾；命中 `\n\n` 即 buildSkillLoadText 的 separator（罕见路径）。
+  // No marker and no empty-body separator -> degrade to lastIndexOf
+  // `\n\n` (compatibility with synthetic test text and historical envelope
+  // shapes whose body lacks `</skill_files>`). By convention the body never
+  // ends with `\n\n`, so a hit is buildSkillLoadText's separator (rare path).
   const fallbackSep = tail.lastIndexOf("\n\n");
   if (fallbackSep !== -1) {
     return { name, remainder: tail.slice(fallbackSep + "\n\n".length) };
@@ -411,14 +431,17 @@ export function seedInputHistory(
 }
 
 /**
- * 追加一条输入历史（提交路径；将替换 app.tsx handleSubmit 的内联
- * updater，语义必须逐点一致）：
- *  - 空白输入（trim 后空）不追加，返回原引用 —— app.tsx setState 依赖
- *    引用相等跳过重渲染；
- *  - text 不 trim（上游 handleSubmit 已 `raw.trim()`），按传入原样入列；
- *  - 相邻重复抑制：与末条相同返回原引用（同 seedInputHistory /
- *    `h[h.length-1] === text`）；非相邻重复不属于本函数职责；
- *  - 其余返回新冻结数组（ReadonlyArray 纪律：整体替换、永不 mutate）。
+ * Append one input-history entry (submit path; replaces the inline updater
+ * in app.tsx handleSubmit, so the semantics must match point by point):
+ *  - blank input (empty after trim) -> not appended, original reference
+ *    returned — app.tsx setState relies on reference equality to skip re-render;
+ *  - text is not re-trimmed (upstream handleSubmit already did `raw.trim()`),
+ *    stored exactly as given;
+ *  - adjacent-duplicate suppression: equal to the last entry -> original
+ *    reference (same `h[h.length-1] === text` rule as the seed path);
+ *    non-adjacent repeats are out of scope here;
+ *  - otherwise return a new frozen array (ReadonlyArray discipline: whole
+ *    replacement, never mutate).
  */
 export function appendInputHistory(
   history: ReadonlyArray<string>,

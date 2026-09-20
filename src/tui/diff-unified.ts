@@ -1,21 +1,22 @@
 /**
- * src/tui/diff-unified.ts
+ * Pure unified-diff functions (jsdiff): turn old/new text into per-line
+ * `DiffLine[]`. The TUI red/green diff preview (diff-view.tsx) only renders,
+ * never computes.
  *
- * #343 T4（自 archive/tui-ink/src/diff-unified.ts 迁移，语义不变）：
- * 统一 diff（jsdiff）纯函数 —— 把 old/new 文本算成逐行 `DiffLine[]`，
- * TUI 红绿 diff 预览（diff-view.tsx）只做渲染、不做算法。
+ * Contract (aligned with `git diff --unified=3`, verified isomorphic):
+ *  - line text carries the unified-diff prefix: `ctx` → leading space,
+ *    `del` → `-`, `add` → `+`;
+ *  - hunk header `@@ -A,B +C,D @@` (first line of each hunk, kind `ctx`,
+ *    no line numbers) — it anchors `oldNo`/`newNo` start (diff-view builds
+ *    the line-number columns from it);
+ *  - `oldNo` increments on `del`/`ctx` lines, `newNo` on `add`/`ctx` lines;
+ *    each hunk restarts independently from its oldStart/newStart;
+ *  - the missing-newline marker `\ No newline at end of file` is kept as a `ctx` line;
+ *  - both inputs empty → empty array; one side empty → a single pure-add / pure-del hunk.
  *
- * 契约（与 git diff --unified=3 对齐，实测同构）：
- *  - 行文本带统一 diff 前缀：`ctx` → 前导空格、`del` → `-`、`add` → `+`；
- *  - hunk 头 `@@ -A,B +C,D @@`（每 hunk 首行，kind `ctx`，无行号）——
- *    它是 `oldNo`/`newNo` 的起点锚（diff-view 靠它排行号列）；
- *  - `oldNo` 在 `del`/`ctx` 行递增，`newNo` 在 `add`/`ctx` 行递增，
- *    每个 hunk 独立从 oldStart/newStart 起算；
- *  - 无行尾换行标记 `\ No newline at end of file` 以 `ctx` 行保留；
- *  - 双双空输入 → 空数组；单边空 → 纯 add / 纯 del 一个 hunk。
- *
- * 错误契约：jsdiff 任何异常统一包装为 typed `DiffError`（带 `code`），
- * 不外泄 raw Error —— 渲染层按 instanceof 判级，不碰栈文本。
+ * Error contract: any jsdiff exception is wrapped into the typed `DiffError`
+ * (with `code`); raw Error never leaks — the render layer classifies via
+ * instanceof, never touches stack text.
  */
 import { structuredPatch } from "diff";
 
@@ -28,7 +29,7 @@ export interface DiffLine {
   readonly text: string;
 }
 
-/** jsdiff 失败时抛出的 typed 错误：`code` 给调用方程序化判级。 */
+/** Typed error thrown on jsdiff failure: `code` lets callers classify programmatically. */
 export class DiffError extends Error {
   constructor(
     message: string,
@@ -39,7 +40,7 @@ export class DiffError extends Error {
   }
 }
 
-/** hunk 头行（`@@ -A,B +C,D @@`）：有 kind/无行号，行号计数起点。 */
+/** Hunk header line (`@@ -A,B +C,D @@`): has kind / no line numbers; line-number counting starts here. */
 function hunkHeaderText(
   oldStart: number,
   oldLines: number,
@@ -50,12 +51,14 @@ function hunkHeaderText(
 }
 
 /**
- * old/new 文本 → 逐行统一 diff。`cols` 保留给渲染层（窄终端折叠），
- * 本层是纯函数，与终端宽度无关——忽略该参数。
+ * old/new text → per-line unified diff. `cols` is kept for the render layer
+ * (narrow-terminal folding); this layer is a pure function independent of
+ * terminal width — the parameter is ignored.
  *
- * 空输入契约：双双空 → `[]`；单边空 → 单 hunk 的纯 add / 纯 del。
+ * Empty-input contract: both empty → `[]`; one side empty → a single
+ * pure-add / pure-del hunk.
  *
- * @throws {DiffError} jsdiff 内部异常时（code `JS_DIFF_FAILED`）。
+ * @throws {DiffError} on jsdiff internal failure (code `JS_DIFF_FAILED`).
  */
 export function computeDiff(
   _filePath: string,
@@ -92,7 +95,7 @@ export function computeDiff(
         hunk.newLines
       ),
     });
-    // hunk 内行号从 hunk 起点起算，独立于上一 hunk（unified diff 语义）。
+    // Line numbers restart at the hunk start, independent of the previous hunk (unified-diff semantics).
     let oldNo = hunk.oldStart;
     let newNo = hunk.newStart;
     for (const line of hunk.lines) {
@@ -103,7 +106,7 @@ export function computeDiff(
         rows.push({ kind: "add", newNo, text: line });
         newNo += 1;
       } else {
-        // ctx（前导空格）与 `\ No newline at end of file` 标记都算 ctx。
+        // ctx (leading space) and the `\ No newline at end of file` marker both count as ctx.
         rows.push({ kind: "ctx", oldNo, newNo, text: line });
         if (line.startsWith(" ")) {
           oldNo += 1;

@@ -2,80 +2,88 @@
 /**
  * src/tui/subagent-panel.tsx
  *
- * 子代理状态面板 —— 渲染在 ContextBar（用量条）下方的几行子代理状态。
+ * Subagent status panel — a few lines of subagent state rendered below the
+ * ContextBar (usage bar).
  *
- * 数据契约（#358 T3）：本组件**只读**消费 `SubagentInfo` 投影
- * （src/harness/subagent/manager.ts 的 listSubagents 输出原样），不写任何
- * 状态、不订阅、不轮询 —— 纯展示组件，props（startedAt/endedAt ISO）驱动，
- * 零 effect / interval。接线（app.tsx 把 subagents 数组 + cols + 时间源传
- * 下来）由调用方负责，本模块只管「投影 → 行文本」与渲染分两层。
+ * Data contract: this component only reads the `SubagentInfo` projection (the
+ * raw `listSubagents` output of src/harness/subagent/manager.ts). No state
+ * writes, no subscriptions, no polling — a pure presentational component
+ * driven by props (startedAt/endedAt ISO), zero effects/intervals. Wiring
+ * (app.tsx passing the subagents array + cols + time source) is the caller's
+ * job; this module owns only "projection → line text" and rendering.
  *
- * 可见性语义（对齐 Claude Code 完成态行为）：
- *   1. 活跃行（starting/running）始终显示，每子代理一行；
- *   2. 失败行（failed）仅当 endedAt 距 now ≤ FAILED_VISIBLE_WINDOW_S 显示，
- *      过期即移出；
- *   3. 完成行（completed）不单独显示（立即移除）；
- *   4. 无任何活跃行且存在 DONE_FADE_WINDOW_S 内完成的 → 单行 `✓ N 完成`
- *      淡出提示；
- *   5. 全空 → return null；
- *   6. 活跃行全量列出，但受 SUBAGENT_PANEL_MAX_ROWS 上限约束 —— 超限时前
- *      maxRows-1 行原样、末行折叠为 `… +N`（#1044）。折叠后行数即 chrome 行账
- *      （app.tsx subagentPanelRowBudget → chromeReserveRows.panelRows），
- *      画在输入框下方且不再被 Yoga 比例压缩。
+ * Visibility semantics (aligned with Claude Code's done-state behaviour):
+ *   1. Active lines (starting/running): always shown, one line per subagent;
+ *   2. Failed lines: shown only while endedAt is within
+ *      FAILED_VISIBLE_WINDOW_S of now, then dropped;
+ *   3. Completed lines: never shown individually (removed immediately);
+ *   4. No active line but something completed within DONE_FADE_WINDOW_S →
+ *      a single fading `✓ N 完成` hint line;
+ *   5. Everything empty → return null;
+ *   6. Active lines are listed in full but capped at SUBAGENT_PANEL_MAX_ROWS —
+ *      on overflow the first maxRows-1 lines stay and the tail collapses to
+ *      `… +N`. After collapse the line count equals the chrome row accounting
+ *      (app.tsx subagentPanelRowBudget → chromeReserveRows.panelRows); the
+ *      panel draws below the input box and is no longer compressed by Yoga
+ *      ratios.
  *
- * 窄列分支（cols < 40）说明：产品路径 cols 下限 40（见 app.tsx cols =
- * Math.max(width ?? 80, 40)），本分支属防御 / 测试 fixture 路径；保留是为
- * 让 cols=30 fixture 的单测能直驱可见性（行账同源走 panelRows）。
+ * Narrow-column branch (cols < 40): the product path floors cols at 40 (see
+ * app.tsx `Math.max(width ?? 80, 40)`), so this branch is defensive / for
+ * test fixtures; kept so cols=30 unit tests can drive visibility directly
+ * (row accounting still goes through panelRows).
  *
- * 字形纪律（spec #146:86 无 emoji UI 字形）：只用几何字形 `● ○ ✓ ✗`
- * （项目既有惯例，见 context-bar 的 █░ / tool-summary 的 …），禁止 emoji。
+ * Glyph discipline (no emoji UI glyphs): only geometric glyphs `● ○ ✓ ✗`
+ * (project convention, cf. █░ in context-bar and … in tool-summary).
  */
 import type { ReactNode } from "react";
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
-// SC14/SC15 行序合同：live 判据是单一谓词（starting + running），与投影 /
-// 强杀分派 / app focus 计数同源 —— 面板行序漂移会让 Ctrl+X 杀错行。
+// Row-order contract shared with the kill dispatch and app focus counting:
+// "live" is the single predicate isLiveSubagent (starting + running) — panel
+// row-order drift would make Ctrl+X kill the wrong row.
 import { isLiveSubagent } from "./subagent-message-lines.js";
 
 export interface SubagentPanelProps {
-  /** 只读投影（#358 T7）：host 传 SubagentInfo 列表，本组件不改写。 */
+  /** Read-only projection: the host passes the SubagentInfo list; this component never rewrites it. */
   readonly subagents: ReadonlyArray<SubagentInfo>;
   readonly cols: number;
-  /** 测试注入用；缺省 Date.now()。 */
+  /** Test injection; defaults to Date.now(). */
   readonly nowMs?: number;
   /**
-   * T7：当前聚焦的 live 子代理行下标（chrome-focus reducer 的
-   * `{ kind: "subagent", row }` 派生）。仅作用于 live 行 —— 聚焦行
-   * taskPreview 不截断 + 加 `> ` 前缀；其余行保持原截断行为。
-   * 越界或 undefined → 无聚焦（等价原行为）。
+   * Index of the currently focused live subagent row (derived from the
+   * chrome-focus reducer's `{ kind: "subagent", row }`). Applies to live rows
+   * only — the focused row's taskPreview is not truncated and gains a `> `
+   * prefix; other rows keep the original truncation. Out of range or
+   * undefined → no focus (behaviour identical to unfocused).
    */
   readonly focusedRow?: number;
-  /** 面板行数上限（#1044，超出折叠为 `… +N`）。缺省 SUBAGENT_PANEL_MAX_ROWS ——
-   *  调用方（app.tsx）与本组件同源取值，行账与渲染高度恒等。 */
+  /** Panel row cap (overflow collapses to `… +N`). Defaults to
+   *  SUBAGENT_PANEL_MAX_ROWS — the caller (app.tsx) and this component read
+   *  the same source, so row accounting always equals rendered height. */
   readonly maxRows?: number;
 }
 
 export interface SubagentLine {
-  /** 行首几何字形（`● ○ ✗ ✓ …`）——单测匹配用；text 已含完整行文本。 */
+  /** Leading geometric glyph (`● ○ ✗ ✓ …`) for unit-test matching; text already holds the full line. */
   readonly icon: string;
   readonly fg: string;
-  /** 完整行文本（含 icon 字形与分隔符），组件直接 `<text>{text}</text>`。 */
+  /** Full line text (icon glyph and separators included); rendered directly as `<text>{text}</text>`. */
   readonly text: string;
 }
 
-/** 失败行可见窗口：endedAt 距 now ≤ 30s。导出供 app.tsx 的 watch 窗口
- *  同源消费（hasRecentEndedSubagent failed 分支用本值 ×1000）。 */
+/** Failed-line visibility window: endedAt within 30s of now. Exported so app.tsx's
+ *  watch window consumes the same value (hasRecentEndedSubagent failed branch uses this ×1000). */
 export const FAILED_VISIBLE_WINDOW_S = 30;
-/** 完成淡出窗口：endedAt 距 now ≤ 5s。导出供 app.tsx 的 watch 窗口
- *  同源消费（hasRecentEndedSubagent completed 分支用本值 ×1000）。 */
+/** Done-fade window: endedAt within 5s of now. Exported so app.tsx's watch window
+ *  consumes the same value (hasRecentEndedSubagent completed branch uses this ×1000). */
 export const DONE_FADE_WINDOW_S = 5;
-/** 宽列行装饰预留：icon(1) + 空格(1) + name 空格(1) + ` · `(3) + elapsed 最长 8 列。 */
+/** Wide-column line decoration reserve: icon(1) + space(1) + name space(1) + ` · `(3) + elapsed up to 8 columns. */
 const DECOR_RESERVE = 14;
 const NAME_BUDGET = 20;
 
-/** live 行首字形（starting ○ / running ●）—— 投影与 visibleLiveRowCount 同源。 */
+/** Live-row leading glyphs (starting ○ / running ●) — projection and visibleLiveRowCount share this source. */
 const ICON_STARTING = "○";
 const ICON_RUNNING = "●";
 const LIVE_LINE_ICONS: ReadonlySet<string> = new Set([
@@ -84,17 +92,20 @@ const LIVE_LINE_ICONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 面板行数上限（#1044 SSOT）：SubagentPanel 渲染与 chromeReserveRows 的
- * panelRows 行账共用同一值 —— 超限折叠为「… +N」一行后，行账与实际渲染
- * 高度恒等，Yoga 负空间不再按 flexShrink 比例摊到输入框（底部 chrome 无显式
- * 高度、默认 flexShrink=1，见 issue #1044 根因）。app.tsx 经 subagentPanelRowBudget
- * 与本常量接线，不得另立数字。
+ * Panel row cap (SSOT): shared by SubagentPanel rendering and the
+ * chromeReserveRows.panelRows row accounting in app.tsx — after overflow
+ * collapses into a single `… +N` line, the accounted rows and the rendered
+ * height are always equal, so Yoga's negative space no longer gets spread
+ * onto the input box by flexShrink ratio (bottom chrome has no explicit
+ * height and defaults to flexShrink=1). app.tsx wires through
+ * subagentPanelRowBudget; do not introduce a second number.
  */
 export const SUBAGENT_PANEL_MAX_ROWS = 5;
 
 /**
- * startedAt(ISO) → nowMs 的整秒 elapsed。非法 ISO / nowMs 早于 startedAt
- * （时钟漂移）→ 0（防 NaN 上行到渲染层）。
+ * Whole-second elapsed between startedAt(ISO) and nowMs. Invalid ISO or
+ * nowMs earlier than startedAt (clock drift) → 0, keeping NaN out of the
+ * render layer.
  */
 export function elapsedSec(startedAt: string, nowMs: number): number {
   const started = Date.parse(startedAt);
@@ -110,10 +121,11 @@ function subagentDisplayName(info: SubagentInfo): string {
 }
 
 /**
- * 行数上限折叠（#1044）—— lines 超过 maxRows 时截到 maxRows-1 行，末行换成
- * `… +N`（N = 被隐藏行数，dim 色）。maxRows 缺省 / ≤0 / 未超限 → 原样返回。
- * 模块级纯函数：projectSubagentLines 已顶 S5 ratchet 基线，分支外移不抬其
- * 复杂度。
+ * Row-cap collapsing: when lines exceed maxRows, keep maxRows-1 lines and
+ * replace the tail with `… +N` (N = hidden row count, dim colour). Undefined
+ * or ≤0 maxRows, or no overflow → returned as-is. Module-level pure
+ * function: projectSubagentLines is already at its S5 ratchet baseline, so
+ * moving this branch out keeps its complexity flat.
  */
 function collapseToMaxRows(
   lines: SubagentLine[],
@@ -134,17 +146,23 @@ function collapseToMaxRows(
 }
 
 /**
- * 折叠后仍可见的 live 行数（#1044 焦点环上界 SSOT）。复用与渲染完全同一份
- * projectSubagentLines 投影（含 failed 行穿插 + collapseToMaxRows 尾部裁剪 +
- * `… +N` 折叠行），再数其中的 live 字形（○/●）—— 可见行数与渲染行集恒等。
+ * Live rows still visible after collapsing (focus-ring upper bound, SSOT).
+ * Reuses the exact same projectSubagentLines projection as rendering
+ * (including failed-line interleaving, collapseToMaxRows tail cutting and
+ * the `… +N` fold line), then counts live glyphs (○/●) in it — the visible
+ * count and the rendered row set are always identical.
  *
- * 不能用 `min(live 行数, maxRows-1)` 公式：failed(✗) 行与 live 行穿插进同一
- * 序列参与折叠裁剪，failed 行占据可见槽位时实际可见 live 行数更少，公式会
- * 高估 → focusedRow 落到被隐藏的行上（`> ` 前缀画在不可见行）。
+ * A `min(live rows, maxRows-1)` formula will not do: failed (✗) lines
+ * interleave with live lines in the same sequence and take part in
+ * collapsing; when failed lines occupy visible slots, fewer live lines are
+ * actually visible and the formula overestimates → focusedRow could land on
+ * a hidden row (the `> ` prefix drawn on an invisible line).
  *
- * `cols` 只影响行文本截断、不影响行集组成；`nowMs` 决定 failed 30s 窗口，
- * 必须与渲染同源传入。reducer（reduceChromeFocus.subagentCount）与越界
- * clamp（app.tsx useEffect）用本函数而不是原始 live 数。纯函数可单测直驱。
+ * `cols` only affects line-text truncation, not row-set composition;
+ * `nowMs` decides the 30s failed window and must be passed from the same
+ * source as rendering. The reducer (reduceChromeFocus.subagentCount) and the
+ * out-of-range clamp (app.tsx useEffect) use this function instead of the
+ * raw live count. Pure function, directly unit-testable.
  */
 export function visibleLiveRowCount(
   subagents: ReadonlyArray<SubagentInfo>,
@@ -152,23 +170,30 @@ export function visibleLiveRowCount(
   cols: number,
   maxRows: number = SUBAGENT_PANEL_MAX_ROWS
 ): number {
-  return projectSubagentLines(subagents, nowMs, cols, undefined, maxRows)
-    .filter((line) => LIVE_LINE_ICONS.has(line.icon)).length;
+  return projectSubagentLines(
+    subagents,
+    nowMs,
+    cols,
+    undefined,
+    maxRows
+  ).filter((line) => LIVE_LINE_ICONS.has(line.icon)).length;
 }
 
 /**
- * 纯函数投影：可见性过滤 + 行文本生成（不 touch OpenTUI，可单测直驱）。
+ * Pure projection: visibility filtering + line-text generation (never
+ * touches OpenTUI, directly unit-testable).
  *
- *   - 活跃行：`{icon} {name} {taskPreview} · {elapsed}`；窄列无 preview；
- *   - 失败行：`✗ {name} {preview} · {reason}`；
- *   - 完成淡出行：`✓ {N} 完成`；
- *   - 受 maxRows 上限约束（超限末行折 `… +N`，#1044）。
+ *   - live line: `{icon} {name} {taskPreview} · {elapsed}`; no preview in narrow columns;
+ *   - failed line: `✗ {name} {preview} · {reason}`;
+ *   - done-fade line: `✓ {N} 完成`;
+ *   - capped at maxRows (overflow folds the tail into `… +N`).
  *
- * `focusedRow`（可选，T7 接线）：当 `live[i]` 的下标 `i === focusedRow` 时，
- * taskPreview 不再截断（仍按 cols 视觉宽度兜底），并加 `> ` 前缀标记聚焦；
- * 其余 `live` 行保持原截断。failed 行不参与 focus（focusedRow 仅作用于
- * live 行 —— 子代理 chrome 的 focus 仅在 live 环移动）。`undefined` 或
- * 越界 → 不聚焦（所有行按原行为渲染）。
+ * `focusedRow` (optional): when a `live[i]` has `i === focusedRow`, its
+ * taskPreview is not truncated (still bounded by cols visual width) and gains
+ * a `> ` prefix marking focus; other `live` rows keep truncation. Failed
+ * lines take no focus (focusedRow applies to live rows only — subagent chrome
+ * focus moves within the live ring). `undefined` or out of range → no focus
+ * (all rows render as before).
  */
 export function projectSubagentLines(
   subagents: ReadonlyArray<SubagentInfo>,
@@ -192,9 +217,10 @@ export function projectSubagentLines(
       const icon = s.state === "starting" ? ICON_STARTING : ICON_RUNNING;
       const fg = s.state === "starting" ? tuiPalette.dim : tuiPalette.running;
       const elapsed = formatRunDuration(elapsedSec(s.startedAt, nowMs));
-      // 聚焦判定：仅 live 行参与；聚焦行 → 不截断 preview（仍按 cols 兜底）+
-      // `> ` 前缀；其余行保持原截断行为。`focusedRow` 越界（≥ live.length）→
-      // 等价于未聚焦（不做前缀）。
+      // Focus applies to live rows only: the focused row keeps its preview
+      // untruncated (still bounded by cols) + `> ` prefix; other rows keep
+      // the original truncation. focusedRow out of range (≥ live.length) →
+      // equivalent to unfocused (no prefix).
       const isFocused = focusedRow !== undefined && focusedRow === liveIndex;
       const focusedPrefix = isFocused ? "> " : "";
       const previewRendered = isFocused

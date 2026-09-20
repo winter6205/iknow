@@ -1,15 +1,16 @@
 /**
  * src/tui/ask-user.ts
  *
- * #343 T4（自 archive/tui-ink/src/ask-user.ts 迁移，语义不变）：
- * TUI 专用 AskUser 桥接 —— 全屏 raw mode 下 readline 不可用，仿
- * createServeAskUser 的 queue-based + fail-closed 纪律（#115 H3），
- * resolve 入口在 TUI 状态机（用户在权限 modal 键入 y/n/a 或 ↑↓Enter）。
+ * TUI-only AskUser bridge: in full-screen raw mode readline is unavailable,
+ * so this follows createServeAskUser's queue-based, fail-closed discipline.
+ * The resolve entry point lives in the TUI state machine (the user types
+ * y/n/a or ↑↓+Enter in the permission modal).
  *
- * 语义：
- *  - ask(ctx) 分配 `ask-N`，挂 fail-closed 定时器（默认 60s，unref）；
- *  - 仅 resolveAsk(id, true) 可放行；超时 / caller abort / 未知 id → false；
- *  - pending() 供 UI 渲染提示（工具名 + summaryHint + id）。
+ * Semantics:
+ *  - ask(ctx) allocates an `ask-N` id and arms a fail-closed timer
+ *    (default 60s, unref);
+ *  - only resolveAsk(id, true) grants; timeout / caller abort / unknown id → false;
+ *  - pending() feeds the UI prompt (tool name + summaryHint + id).
  */
 import type { AskUser } from "../harness/permission/types.js";
 
@@ -24,8 +25,8 @@ export interface TuiAskUserBridge {
   readonly resolveAsk: (id: string, approved: boolean) => boolean;
   readonly pending: () => TuiPendingAsk | undefined;
   readonly pendingCount: () => number;
-  /** pending 变化通知（enqueue / settle 各触发一次）。TUI 据此即时
-   *  re-render 挂/摘 modal。返回退订函数。 */
+  /** Pending-change notification (fires once per enqueue / settle). The TUI
+   *  uses it to mount / unmount the modal immediately. Returns unsubscribe. */
   readonly subscribe: (cb: () => void) => () => void;
 }
 
@@ -67,7 +68,7 @@ export function createTuiAskUserBridge(opts?: {
     counter += 1;
     const id = `ask-${counter}`;
     return new Promise<boolean>((resolve) => {
-      // 先挂 fail-closed 定时器，同 tick resolveAsk 也能赢（settle 清 timer）。
+      // Arm the fail-closed timer first so a same-tick resolveAsk can still win (settle clears the timer).
       const timer = setTimeout(() => {
         settle(id, false);
       }, timeoutMs);

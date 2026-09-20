@@ -1,5 +1,5 @@
 /**
- * T4 (#690): TUI /continue EXIT copy + client busy-guard.
+ * TUI /continue EXIT copy + client busy-guard.
  *
  * Busy is client-only (EXIT busy_stop_first). Predicate SSOT is load+messages+goal
  * via pendingFromLoadedSession — never TuiSessionState.lastStopReason.

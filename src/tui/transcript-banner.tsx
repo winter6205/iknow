@@ -2,23 +2,26 @@
 /**
  * src/tui/transcript-banner.tsx
  *
- * #986：banner 段渲染抽到独立 sibling 组件。spec 方案 B：banner 是滚动区
- * 首段，与消息共享 scroll space；用户上滚能翻回 banner（不复位 collapse，
- * 2026-08-08 裁定）。眼睛段用 eyeGradientCells 逐 cell 上色（e2 黄昏魔法石
- * 渐变）；info 栏（Version/Cwd/Data dir）取 bannerLines 行尾段；窄终端
- * （renderBannerLines 返回单行 short）保持单行降级。
+ * Banner segment split out of ChatView as a sibling component. The banner is
+ * the first segment of the scroll area and shares the scroll space with
+ * messages, so scrolling up can reach it again (collapse is not reset). The
+ * eye art is coloured cell-by-cell via eyeGradientCells (dusk "magic stone"
+ * gradient); the info bar (Version/Cwd/Data dir) takes the tail of each
+ * bannerLines row; on narrow terminals (renderBannerLines returns a single
+ * short line) the one-line degradation is kept.
  *
- * 内容宽度 = `cols` 满宽（与 `<scrollbox>` width 同源）。眼形 + GAP + info
- * 栏布局常量（EYE_W / BANNER_GAP）由本文件独享；bannerLines 行尾段从
- * `EYE_W + BANNER_GAP` 起 slice（与 banner.ts renderBannerLines 布局对齐）。
+ * Content width = full `cols` (same source as the `<scrollbox>` width). The
+ * eye + gap + info-bar layout constants (EYE_W / BANNER_GAP) are exclusive to
+ * this file; the info part of a bannerLines row is sliced from
+ * `EYE_W + BANNER_GAP` (aligned with renderBannerLines' layout in banner.ts).
  */
 import type { ReactNode } from "react";
 import { EYE_LINES, eyeGradientCells } from "./banner.js";
 import { tuiPalette } from "./theme.js";
 
-/** 眼睛矩阵宽（首行宽度，banner.ts EYE_LINES 字形数据同源）。 */
+/** Eye matrix width (first row's width; same glyph data as EYE_LINES in banner.ts). */
 const EYE_W = [...(EYE_LINES[0] ?? "")].length;
-/** 眼睛与 info 栏之间间距（banner.ts GAP 同值）。 */
+/** Gap between the eye art and the info bar (same value as GAP in banner.ts). */
 const BANNER_GAP = 3;
 
 export function TranscriptBanner(props: {
@@ -27,7 +30,7 @@ export function TranscriptBanner(props: {
   const pal = tuiPalette;
   const lines = props.bannerLines;
   if (lines.length === 0) return null;
-  // 窄终端 → renderBannerLines 返回 1 行短形态；保留单行降级。
+  // Narrow terminal → renderBannerLines returns 1 short line; keep the single-line degradation.
   if (lines.length === 1) {
     return (
       <box
@@ -44,8 +47,8 @@ export function TranscriptBanner(props: {
       </box>
     );
   }
-  // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
-  // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
+  // Dusk "magic stone" gradient (matches scripts/banner-gradient-preview/exotic-e2.ts):
+  // 13×32 cells coloured individually, diagonal t = cWeight·(c/31) + rWeight·(r/12).
   const eyeGradient = eyeGradientCells({
     from: pal.logoInk,
     to: pal.logoGold,
@@ -62,7 +65,7 @@ export function TranscriptBanner(props: {
       paddingX={1}
     >
       {eyeGradient.map((row, r) => {
-        // 行尾段 = GAP 之后的 info 栏（banner.ts renderBannerLines 布局）。
+        // Line tail = the info bar after the GAP (banner.ts renderBannerLines layout).
         const infoPart = (lines[r] ?? "").slice(EYE_W + BANNER_GAP);
         return (
           <text key={`banner-${r}`} wrapMode="none">

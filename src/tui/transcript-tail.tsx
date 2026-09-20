@@ -2,27 +2,31 @@
 /**
  * src/tui/transcript-tail.tsx
  *
- * #986：把 ChatView 末尾段（spacerAfter、crunched、unanchoredBlocks、
- * tailSlots、legacy liveToolLines、askLine、Spinner）抽成 sibling 组件。
- * 逻辑由纯派生（`buildActivityBlockFoldLines` 提 `unanchoredBlocks`、
- * `liveTailSlots` 提 `tailSlots`）下放 ChatView，本组件只挂 JSX。
+ * ChatView's tail segment (spacerAfter, crunched, unanchoredBlocks,
+ * tailSlots, legacy liveToolLines, askLine, Spinner) split out as a sibling
+ * component. The logic is pushed down into ChatView's pure derivations
+ * (`buildActivityBlockFoldLines` yields `unanchoredBlocks`, `liveTailSlots`
+ * yields `tailSlots`); this component only mounts JSX.
  *
- * 渲染顺序（spec D7 + 过程块 spec）：
- *   crunched 行 → 未锚定非思考块（unanchoredBlocks 中非 thinking）→ tail slots
- *   → legacy liveToolLines → askLine → 未锚定思考块（unanchoredBlocks 中 thinking）
- *   → spinner。
+ * Render order: crunched line → unanchored non-thinking blocks
+ * (non-thinking among unanchoredBlocks) → tail slots → legacy liveToolLines →
+ * askLine → unanchored thinking blocks (thinking among unanchoredBlocks) →
+ * spinner.
  *
- * 过程块 spec：块列表（`buildActivityBlockFoldLines`）是折叠 / 预览的唯一
- * 来源；旧 `live activity group` 一行英文摘要（`Listing × N · Reading × M`）
- * 与 `unit fold`（`Thought for Ns · name × M`）互斥闸整体退役 —— 同批
- * retract 只在块 called 计数出现一次（spec S7）。
+ * The block list (`buildActivityBlockFoldLines`) is the sole source of
+ * folding / preview; the old one-line `live activity group` summary
+ * (`Listing × N · Reading × M`) and the `unit fold`
+ * (`Thought for Ns · name × M`) mutual-exclusion gate have retired wholesale —
+ * a same-batch retract now counts once in the block's called tally.
  *
- * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
- * 还在流的思考段是 transcript 最底 —— 思考块（`slot.kind === "thinking"`）
- * 从 unanchoredBlocks 拆分出来，单独挂在 askLine 之后、Spinner 之前；非
- * 思考块（live noise / signal 已落定计数行）走原路径（crunched 之后、
- * tail slots 之前）。`Thinking…` 标题 + 预览/展开 只画一次。ThinkingPanel
- * 已退役，`ThinkingBlockSlot` 仍承担思考块的视觉（peek / Markdown 展开）。
+ * Thinking-at-bottom: the still-streaming thinking segment sits at the
+ * transcript's bottom — thinking blocks (`slot.kind === "thinking"`) are
+ * split out of unanchoredBlocks and mounted separately after askLine and
+ * before the Spinner; non-thinking blocks (settled live noise / signal count
+ * lines) keep the old path (after crunched, before tail slots). The
+ * `Thinking…` title + preview/expand is drawn exactly once. ThinkingPanel has
+ * retired; `ThinkingBlockSlot` still carries the thinking block's visuals
+ * (peek / Markdown expand).
  */
 import type { ReactNode } from "react";
 import { Markdown } from "./markdown.js";
@@ -35,7 +39,7 @@ import type { LiveTailSlot, LiveToolRun } from "./live-tool-state.js";
 import { tuiPalette } from "./theme.js";
 import type { ActivityBlock } from "./activity-block.js";
 
-/** 复用 `live-tool-state` 的 `LiveTailSlot` 联合 —— 同源消费侧不重定义。 */
+/** Reuses `LiveTailSlot` from `live-tool-state` — the consuming side does not redefine it. */
 export type TailSlotDecision = LiveTailSlot;
 
 export interface TranscriptTailProps {
@@ -48,17 +52,19 @@ export interface TranscriptTailProps {
   readonly thinkingExpanded: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
-  /** T5（spec S2–S4 / plans T5）：未锚定到 messageIndex 的活动块 —— live
-   *  块（未提交的思考 / 安静工具）必须出现在 tail。每块按「标题 + 预览
-   *  一行」形态渲染，与 MessageRow 内块同形态。空 → 不画。 */
+  /** Activity blocks not anchored to a messageIndex — live blocks
+   *  (uncommitted thinking / quiet tools) must appear in the tail. Each block
+   *  renders as "title + one preview line", the same shape as blocks inside
+   *  MessageRow. Empty → nothing drawn. */
   readonly unanchoredBlocks: ReadonlyArray<ActivityBlock>;
 }
 
 export function TranscriptTail(props: TranscriptTailProps): ReactNode {
   const pal = tuiPalette;
-  // Thinking-at-bottom revision：unanchoredBlocks 拆成两组 —— 非思考块
-  // 走原路径（crunched → tail slots 之前），思考块挂到 askLine 之后、
-  // Spinner 之前；同一帧内 `Thinking…` 仅出现一次（位置合同）。
+  // Thinking-at-bottom: unanchoredBlocks is split into two groups — non-thinking
+  // blocks take the old path (crunched → before tail slots), thinking blocks
+  // mount after askLine and before the Spinner; `Thinking…` appears once per
+  // frame at most (position contract).
   const nonThinkingBlocks: ActivityBlock[] = [];
   const thinkingBlocks: ActivityBlock[] = [];
   for (const block of props.unanchoredBlocks) {
@@ -122,7 +128,7 @@ function slotKey(slot: TailSlotDecision, i: number): string {
   return slot.kind === "tools" ? `live-tools-${i}` : `live-draft-${i}`;
 }
 
-/** 单 tail slot：tools 组 → 列容器；draft 段 → 仅 running 渲染 + MessageShell。 */
+/** A single tail slot: tools group → column container; draft segment → renders only while running + MessageShell. */
 function TailSlotBox(props: {
   readonly slot: TailSlotDecision;
   readonly index: number;
@@ -158,7 +164,7 @@ function TailSlotBox(props: {
   );
 }
 
-/** spacer 撑住挂载高度（viewport 后的尾段）。 */
+/** Spacer holds the mounted height (the tail segment after the viewport). */
 export function TailSpacer(props: {
   readonly height: number;
   readonly contentWidth: number;
@@ -175,24 +181,27 @@ export function TailSpacer(props: {
 }
 
 /**
- * T5（spec S2–S4 / plans T5）：未锚定到 messageIndex 的活动块（live 块）
- * 在 tail 渲染 —— 块标题 + 预览行（settled → 仅标题，running → 标题 + 预览）。
- * 与 MessageRow 的 renderBlockTitles 形态对齐。
+ * Activity blocks not anchored to a messageIndex (live blocks) rendered in
+ * the tail — block title + preview line (settled → title only, running →
+ * title + preview). Aligned with MessageRow's renderBlockTitles shape.
  *
- * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
- * 思考块（`slot.kind === "thinking"`）从本壳里剥离，挂到 `UnanchoredThinkingBlocks`，
- * 独立绘制在 askLine 之后、Spinner 之前 —— 同一 burst 内思考是 transcript 最底。
- * 思考块的视觉（peek / Markdown 展开）由 `ThinkingBlockSlot` 单源承担，
- * `Thinking…` 标题在屏上**恰好一次**。
+ * Thinking-at-bottom: thinking blocks (`slot.kind === "thinking"`) are peeled
+ * off from this shell and mounted on `UnanchoredThinkingBlocks`, drawn
+ * separately after askLine and before the Spinner — within one burst, thinking
+ * is the transcript's bottom. The thinking block's visuals (peek / Markdown
+ * expand) are carried by the single source `ThinkingBlockSlot`, and the
+ * `Thinking…` title appears exactly once on screen.
  */
 function UnanchoredActivityBlocks(props: {
   readonly blocks: ReadonlyArray<ActivityBlock>;
   readonly contentWidth: number;
 }): ReactNode {
-  // 行装配单源：非思考块的「标题 + 可选预览」模板走
-  // `renderActivityBlockRows`（与 MessageRow 同源，不再各自漂移）。
-  // 块按数组序渲染 —— 连续段合成一次 rows 调用，保持文档顺序与「连续的非
-  // 思考段合成一行模板」的合并行为（spec / message-blocks 同款）。
+  // Single source for row assembly: the non-thinking block "title + optional
+  // preview" template goes through `renderActivityBlockRows` (same source as
+  // MessageRow, no more independent drift). Blocks render in array order —
+  // consecutive runs collapse into one rows call, preserving document order
+  // and the "merge consecutive non-thinking runs into one row template"
+  // behaviour (same as message-blocks).
   const titles: string[] = [];
   const previews: Array<string | null> = [];
   for (const block of props.blocks) {
@@ -212,11 +221,12 @@ function UnanchoredActivityBlocks(props: {
 }
 
 /**
- * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
- * 还在流的思考段作为 transcript 最底元素 —— 单独挂载在 askLine 之后、
- * Spinner 之前。视觉与原 ThinkingPanel 同形态（dim `Thinking…` 标题 + peek
- * 预览或 Markdown 展开）；思考标题在屏上仅出现一次（与 unanchored noise
- * 计数行物理隔离，避免「思考钉在工具卡上方」旧行为）。
+ * Thinking-at-bottom: the still-streaming thinking segment is the transcript's
+ * bottommost element — mounted separately after askLine and before the
+ * Spinner. Visually it matches the old ThinkingPanel (dim `Thinking…` title +
+ * peek preview or Markdown expand); the thinking title appears only once on
+ * screen (physically separated from the unanchored noise count rows, avoiding
+ * the old "thinking pinned above the tool card" behaviour).
  */
 function UnanchoredThinkingBlocks(props: {
   readonly blocks: ReadonlyArray<ActivityBlock>;
@@ -224,15 +234,17 @@ function UnanchoredThinkingBlocks(props: {
   readonly deferredThinkingDrafts: string;
   readonly thinkingExpanded: boolean;
 }): ReactNode {
-  // 单一思考块（thinking 是位置合同的「一个」主语 —— `appendLiveBlocks`
-  // 只产一个 thinking 块；多思考块场景由下一段思考另起一个 anchor 进入
-  // unanchoredBlocks）。`Thinking…` 仍由 activity-block 单源产出，本组件
-  // 不复制文案。
+  // Single thinking block (thinking is the "one" subject of the position
+  // contract — `appendLiveBlocks` yields only one thinking block; multi-block
+  // cases enter unanchoredBlocks as a fresh anchor from the next thinking
+  // segment). `Thinking…` is still produced by the activity-block single
+  // source; this component does not duplicate the text.
   return (
     <MessageShell key="unanchored-thinking-blocks" cols={props.contentWidth}>
       {props.blocks.map((block, idx) => {
-        // 非思考块不应出现在本壳里 —— 直接渲染会丢可视槽位、且破坏最底
-        // 位置合同；早退兜底（防御性，调用方已拆分）。
+        // Non-thinking blocks must not appear in this shell — rendering them
+        // would drop visible slots and break the bottommost position contract;
+        // early-return fallback (defensive, the caller already split them).
         if (block.slot.kind !== "thinking") return null;
         return (
           <ThinkingBlockSlot
@@ -247,10 +259,11 @@ function UnanchoredThinkingBlocks(props: {
   );
 }
 
-/** 单块：思考标题 + 思考预览（折叠 ≤3 行 / 展开 Markdown 全文）。
- *  与 `ThinkingPanel` 视觉同形态（dim 行、wrapMode="none"），唯一区别
- *  是挂载在 unanchored 块壳里而非独立 tail 单元。标题不透传 block.title ——
- *  live 块标题就是 `formatThinkingLive()`（activity-block 单源），这里不复制。 */
+/** One block: thinking title + thinking preview (folded ≤3 lines / expanded full Markdown).
+ *  Visually matches `ThinkingPanel` (dim rows, wrapMode="none"); the only
+ *  difference is mounting inside the unanchored block shell rather than a
+ *  standalone tail unit. The title does not pass through block.title — a live
+ *  block's title is `formatThinkingLive()` (activity-block single source), not copied here. */
 function ThinkingBlockSlot(props: {
   readonly contentWidth: number;
   readonly draft: string;

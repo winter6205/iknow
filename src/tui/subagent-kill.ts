@@ -1,45 +1,51 @@
 /**
  * src/tui/subagent-kill.ts
  *
- * spec Slice D / SC14–SC15（`specs/agent-control-surface.md`）/ plan task 8：
- * chrome-focus 聚焦子代理行时 **Ctrl+X** 强杀该子代理；无聚焦 → 空操作。
+ * Ctrl+X force-kills the subagent on the focused chrome-focus row; with no
+ * subagent focus it is a no-op (specs/agent-control-surface.md).
  *
- * 为什么单独成模块：app.tsx 3300+ 行且在 S5 复杂度压力下 —— 键位处理只留
- * 一个调用点，本模块是纯函数，单测不渲染 TUI。
+ * Why a separate module: app.tsx is huge and under complexity pressure — key
+ * handling keeps exactly one call site there, and this pure function is
+ * unit-tested without rendering a TUI.
  *
- * 行 → taskId 的唯一映射：复用面板的 live 行序 ——
- * `projectSubagentLines` 的 live 前缀（`src/tui/subagent-panel.tsx`）只对
- * starting/running 行递增下标，且 failed/completed 只会追加在 live 之后。
- * 因此 `liveSubagents(subagents)[row]` 与面板 `focusedRow` 指的是同一行，
- * 聚焦与强杀不会各算一套。
- * 判据本身是共享的单一谓词 `isLiveSubagent`
- * （`src/tui/subagent-message-lines.ts`）—— 面板、投影、强杀三处不再各写
- * 一份 `state === "starting" || state === "running"` 字面量。
+ * The only row → taskId mapping: reuse the panel's live row order —
+ * `projectSubagentLines`' live prefix (`src/tui/subagent-panel.tsx`) only
+ * increments its index for starting/running rows, and failed/completed lines
+ * can only append after the live ones. So `liveSubagents(subagents)[row]`
+ * and the panel's `focusedRow` address the same row; focus and kill never
+ * compute separate orders. The predicate itself is the shared single source
+ * `isLiveSubagent` (`src/tui/subagent-message-lines.ts`) — panel, projection
+ * and kill no longer each restate
+ * `state === "starting" || state === "running"` literals.
  *
- * 边界（SC15 empty + 陈旧行）：
- *   - focus 不是 subagent（input / graph）→ no-op；
- *   - row 不是非负整数（NaN / 负数 / 小数 / undefined）→ no-op；
- *   - row ≥ live 数（focus 陈旧：子代理刚终态、下一 tick 尚未 clamp）→ no-op；
- *   - 无 live 子代理 → no-op。
- *   以上全部返回 `{ kind: "none" }`，不抛错、不伪造 taskId。
+ * Boundaries (empty + stale rows):
+ *   - focus is not subagent (input / graph) → no-op;
+ *   - row is not a non-negative integer (NaN / negative / fraction / undefined) → no-op;
+ *   - row ≥ live count (stale focus: the subagent just reached a terminal
+ *     state before the next clamp tick) → no-op;
+ *   - no live subagents → no-op.
+ *   All of the above return `{ kind: "none" }` — never throw, never fabricate a taskId.
  *
- * 父 turn 的 cancelled 来自哪里（SC14 的完整归因链）：
- *   `abortTask` 先以 `SubAgentAbortError` settle 该任务在飞的 `waitFor`
- *   （manager 的单任务拒绝集），再 abort worker 子进程（SIGTERM + 5s
- *   SIGKILL 兜底）。父侧前景 `waitFor(taskId, …, ctx.signal)` 因此**无需**
- *   自己的 abort 信号就收敛：handler 把 typed abort 转成 `ToolExecutionError`
- *   （操作员强杀文本），executor 因调用方 signal 未 abort 而原样透出 ——
- *   模型可见归因是「被操作员杀掉」，与墙钟超时的 `wall-clock timeout`、
- *   Ctrl+C / `/quit` 的严格 `"cancelled"` 三者互不撞脸。
- *   顺序契约：拒绝先于 SIGTERM —— 否则 worker 对 SIGTERM 的收尾会写回
- *   `reason:"timeout"` 信封，把操作员强杀误标成墙钟到期。
- *   本模块只负责「聚焦行 → 杀对 taskId」，链路本身归 manager。
+ * Where the parent turn's cancellation comes from: `abortTask` first settles
+ * the task's in-flight `waitFor` with `SubAgentAbortError` (the manager's
+ * per-task rejection set), then aborts the worker subprocess (SIGTERM with a
+ * 5s SIGKILL backstop). The parent foreground
+ * `waitFor(taskId, …, ctx.signal)` converges without needing its own abort
+ * signal: the handler converts the typed abort into a `ToolExecutionError`
+ * (operator-kill text) and the executor passes it through because the
+ * caller's signal was not aborted — the model-visible attribution is "killed
+ * by the operator", clearly distinct from the wall-clock-timeout message and
+ * the strict `"cancelled"` of Ctrl+C / `/quit`. Ordering contract: rejection
+ * precedes SIGTERM — otherwise the worker's SIGTERM cleanup would write back
+ * a `reason:"timeout"` envelope and mislabel an operator kill as a wall-clock
+ * expiry. This module only maps "focused row → the right taskId"; the chain
+ * itself belongs to the manager.
  */
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import type { ChromeFocus } from "./chrome-focus.js";
 import { isLiveSubagent } from "./subagent-message-lines.js";
 
-/** 与 `projectSubagentLines` 的 live 前缀同源：只认 starting / running。 */
+/** Same source as projectSubagentLines' live prefix: starting / running only. */
 export function liveSubagents(
   subagents: ReadonlyArray<SubagentInfo>
 ): ReadonlyArray<SubagentInfo> {
@@ -51,8 +57,9 @@ export type KillSubagentDispatch =
   | { readonly kind: "kill"; readonly taskId: string; readonly role?: string };
 
 /**
- * Ctrl+X 的纯分派：聚焦行 → 该行 live 子代理的 taskId；否则 no-op。
- * 不调用 abort，只决定「杀谁」（调用方把 taskId 交给 bridge.abortSubagentTask）。
+ * Pure Ctrl+X dispatch: focused row → that live subagent's taskId; else no-op.
+ * Does not call abort — it only decides "who to kill" (the caller hands the
+ * taskId to bridge.abortSubagentTask).
  */
 export function dispatchKillFocusedSubagent(
   focus: ChromeFocus,

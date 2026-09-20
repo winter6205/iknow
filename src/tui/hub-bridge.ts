@@ -1,20 +1,22 @@
 /**
- * src/tui/hub-bridge.ts
+ * TUI <-> SessionHub bridge. Pure TS: no ink / OpenTUI dependencies.
  *
- * #343 T6-A 迁移：从 archive/tui-ink/src/hub-bridge.ts 迁回 src/tui/。逻辑与
- * 原版一致（#146 TUI ↔ SessionHub 桥接 α 直连）；仅文件头注释更新为本次迁移
- * 说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ * Responsibilities:
+ *  - assemble SessionStore (~/.iknow + sha1(cwd)[:12] namespace) + SessionHub;
+ *  - lazy create: a draft session is only materialized via createSession when
+ *    its first message is sent, so start-then-quit leaves no empty shell
+ *    (list() already filters sessions without assistant text — double safety);
+ *  - postMessage wrapper: passes AbortSignal through and projects the
+ *    response into TUI session-state inputs;
+ *  - tool-event attribution seam: the postToolUse hook fires at the deps
+ *    layer without knowing conversationId, so it attributes by "exactly one
+ *    in-flight session"; with concurrent sessions it suppresses rather than
+ *    misattributes.
  *
- * 职责：
- *  - 装配 SessionStore（~/.iknow + sha1(cwd)[:12] 命名空间，#120）+ SessionHub；
- *  - lazy create（Q4 裁决）：draft 会话首条消息发出才 createSession 建档，
- *    启动即退出不留空壳（list() 本就过滤无 assistant 文本会话，双保险）；
- *  - postMessage 封装：透传 AbortSignal，回执投影为 TUI 会话状态输入；
- *  - 工具事件归因接缝：postToolUse 钩子在 deps 层触发但不知 conversationId，
- *    以「单会话 in-flight」为准归因；多会话并发时抑制（宁缺勿错归）。
- *
- * #146 决策 4（=9a）：本期不做跨进程文件锁；TUI 分时切换 + 单活跃会话，
- * 进程内冲突面小，跨进程最坏后写覆盖先写丢一个 turn，tmp/rename 不写坏文件。
+ * No cross-process file lock by design: the TUI time-slices with a single
+ * active session, so in-process contention is small; the worst cross-process
+ * outcome is last-write-wins losing one turn, and tmp/rename never corrupts
+ * the file.
  */
 import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
@@ -51,29 +53,33 @@ import type { IknowEnv, LlmEnv } from "../config/env.js";
 import { DEFAULT_STRATEGY_CONTEXT_WINDOW } from "../config/env.js";
 
 /**
- * T3: TUI 用量显示的 **策略预算窗口**缺省（ADR-0100）。分母与 proactive 闸问
- * 同一数字，故引用 env 层的 `DEFAULT_STRATEGY_CONTEXT_WINDOW`（`IKNOW_MODEL_CONTEXT_WINDOW`
- * 覆盖），不在此另立一份常量。仅作显示，不启用压缩（本计划裁决 5）。
+ * Default *strategy budget window* for the TUI usage display (ADR-0100).
+ * The denominator and the proactive gate must consult the same number, so
+ * this references the env layer's `DEFAULT_STRATEGY_CONTEXT_WINDOW`
+ * (overridable via `IKNOW_MODEL_CONTEXT_WINDOW`) instead of forking a second
+ * constant. Display only — it never enables compaction here.
  */
 export const DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW;
 
 /**
- * T6 (checkpoint-rewind): 双 Esc 回退的 debounce 窗口（间隔 ≤ 此值视为双击，
- * 打开 L3 锚点选择器）。对齐 rewind baseline §1 实测 `foE = 1000ms`
- * （specs/checkpoint-rewind.md 双 Esc 行为）。idle 首次 Esc 只记时间戳不动作。
- * 纯函数 `isDoubleEsc(lastMs, nowMs)` 在该文件导出以便单测 1000ms 边界
- * （999ms 命中 / 1001ms 不命中）。调用点不得内联裸字面量 1000。
+ * Double-Esc rewind debounce window: gap <= this value counts as a double
+ * press and opens the anchor picker. 1000ms matches the measured rewind
+ * baseline. The first Esc while idle only
+ * records a timestamp. See `isDoubleEsc` for the boundary-testable pure
+ * function (999ms hit / 1001ms miss); call sites must not inline the
+ * bare literal 1000.
  */
 export const REWIND_DOUBLE_ESC_WINDOW_MS = 1000;
 
-/** 双 Esc debounce 判定：与上次 Esc 间隔 ≤ 窗口 → 命中（双击）。 */
+/** Double-Esc check: gap since the last Esc <= window counts as a double press. */
 export function isDoubleEsc(lastMs: number, nowMs: number): boolean {
   return nowMs - lastMs <= REWIND_DOUBLE_ESC_WINDOW_MS;
 }
 
 /**
- * in-flight 会话登记簿：postMessage 进出登记；deps.ts 的 postToolUse 钩子
- * 经 soleId() 归因工具事件（恰好一个 in-flight → 该会话；否则 undefined）。
+ * In-flight session registry: postMessage marks on entry / unmarks on exit;
+ * the postToolUse hook in deps.ts attributes tool events via soleId()
+ * (exactly one in-flight -> that session; otherwise undefined).
  */
 export interface InflightRegistry {
   readonly mark: (conversationId: string) => void;
@@ -103,33 +109,34 @@ export interface TuiPostResult {
   readonly stopReason: PostMessageResponse["turn"]["answer"]["stopReason"];
   readonly turnCount: number;
   readonly jsonMode: boolean;
-  /** T3: 最近一次成功模型调用的 token usage（wire 字段缺席 → null，与 RunResult 同语义）。 */
+  /** Token usage of the latest successful model call (absent wire field -> null, same semantics as RunResult). */
   readonly lastUsage: TokenUsage | null;
-  /** B1: 用户打断反馈（Esc）—— cancelled 时存在（true=checkpoint 已保存 /
-   *  false=无新内容未落盘）；非 cancelled 缺席（undefined）。 */
+  /** User-interrupt feedback (Esc): present only when cancelled (true =
+   *  checkpoint saved / false = nothing new to persist); absent otherwise. */
   readonly interrupted?: boolean;
-  /** T3 (#458 包2): 本回合 verify 闭环终态
-   *  (passed/failed/unstable/escalated)。verifyConfig 缺席 / abort /
-   *  disabled → 字段缺席（与 resp.turn.answer.verify byte-stable 同模式）。
-   *  TUI 据此判断是否渲染 VerifyBanner，缺席 → 静默不渲染。 */
+  /** Final verify-loop state for this turn (passed/failed/unstable/
+   *  escalated). verifyConfig absent / abort / disabled -> field absent
+   *  (same byte-stable pattern as resp.turn.answer.verify). The TUI renders
+   *  VerifyBanner only when present. */
   readonly verify?: VerifyAnswerView;
-  /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要 (status + 消息文本)。
-   *  wire 字段 apiError 缺席 → 字段缺席(byte-stable)。TUI notice 渲染
-   *  protocolError + apiError 时落"API error (status): message"提示,
-   *  不带 status 时落"API error: message"。 */
+  /** ADR-0094: gateway-side summary (status + message text) on transport
+   *  failure. Absent wire field apiError -> absent field (byte-stable). The
+   *  TUI notice renders "API error (status): message" when status is
+   *  present, else "API error: message". */
   readonly apiError?: { readonly status?: number; readonly message: string };
 }
 
 export interface TuiBridge {
   readonly hub: SessionHub;
   readonly store: SessionStore;
-  /** draft → 建档并返回新 conversation_id；已建档 → 原样返回。 */
+  /** draft -> create the session and return the new conversation_id; already materialized -> return as-is. */
   readonly ensureSession: (
     conversationId: string | undefined
   ) => Promise<string>;
-  /** 发一条消息跑一个 turn（透传 signal 支持 Esc 打断前台）。
-   *  thinking: T2 每回合覆盖 harness 的 thinking 控制臂（与 SessionHub.postMessage
-   *  的 wire 字段同形；缺省 → 沿用 ensureDeps 的缓存配置）。 */
+  /** Send one message, run one turn (signal passes through so Esc can
+   *  interrupt the foreground). thinking: per-turn override of the harness
+   *  thinking control arm (same shape as SessionHub.postMessage's wire
+   *  field; absent -> keep ensureDeps' cached configuration). */
   readonly postMessage: (opts: {
     readonly conversationId: string;
     readonly text: string;
@@ -137,72 +144,76 @@ export interface TuiBridge {
     readonly thinking?: WireThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }) => Promise<TuiPostResult>;
-  /** T4: host wake subscription; absent manager is a no-op (ask-safe). */
+  /** Host wake subscription; absent manager is a no-op (ask-safe). */
   readonly subscribeSubagentTerminal: (
     subscriber: (notice: SubAgentTerminalNotice) => void,
     conversationId?: string
   ) => () => void;
-  /** T4: run a silent turn with the pending terminal drain. */
+  /** Run a silent turn with the pending terminal drain. */
   readonly wakeFromSubagent: (
     conversationId: string
   ) => Promise<TuiPostResult | undefined>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
-  /** 手动压缩会话（/compact）。返回 `{ compacted, cancelled? }`,`compacted`
-   *  true = 实际发生裁剪;false = 无可压缩上下文(manual-compact-trigger T1:
-   *  空会话幂等 / 压缩整体失败,T1 后不再有 auto token 门 no-op)或 #548 中途取消 — 后者
-   *  `cancelled:true`,app 层据此区分。signal/onStream 透传到
-   *  SessionHub.compactSession → runFullCompact,让 /compact 支持 progress
-   *  事件 + 中途取消(Claude Code 体感)。observer 已带 compaction_cancelled
-   *  事件,但 pre-aborted signal 路径 observer 不触发(early-return at
-   *  full-compact.ts:262);`cancelled` 字段是兜底字段,覆盖所有取消路径。 */
+  /** Manual compaction (/compact). Returns `{ compacted, cancelled? }`:
+   *  `compacted` true = trimming actually happened; false = nothing
+   *  compactable (empty session is idempotent) or full failure — the auto
+   *  token-gate no-op case no longer exists. Mid-run cancellation reports
+   *  `cancelled:true`, which the app layer distinguishes. signal/onStream
+   *  pass through SessionHub.compactSession -> runFullCompact so /compact
+   *  supports progress events + mid-run cancel. The observer already emits
+   *  compaction_cancelled, but the pre-aborted-signal path early-returns
+   *  before the observer fires (full-compact.ts); the `cancelled` field is
+   *  the catch-all covering every cancellation path. */
   readonly compactSession: (
     conversationId: string,
     opts?: CompactCallerOpts
   ) => Promise<{
     readonly compacted: boolean;
     readonly cancelled?: boolean;
-    /** plan T2:触发判据分类标识(4 选 1);T4 文案分支依据。 */
+    /** Trigger-criterion classification (one of four); drives the copy branch in the TUI. */
     readonly reason: CompactReason;
   }>;
-  /** continue_pending T4: skip-append 续跑。reload/谓词在 hub；投影同 postMessage。 */
+  /** continue_pending: skip-append resume. Reload/predicates live in the hub; projection same as postMessage. */
   readonly continueSession: (
     conversationId: string,
     opts?: CompactCallerOpts
   ) => Promise<TuiPostResult>;
-  /** 回退：#624 把持久化 head 指到事件 id（null = 空 transcript）。 */
+  /** Rewind: point the persisted head at an event id (null = empty transcript). */
   readonly rewindSession: (
     conversationId: string,
     head: string | null
   ) => Promise<SessionFileV1>;
-  /** 当前 head 链上的用户锚点（跳过分支不列出）。 */
+  /** User anchors on the current head chain (skipped branches not listed). */
   readonly listRewindTargets: (
     conversationId: string
   ) => Promise<ReadonlyArray<LedgerRewindTarget>>;
   readonly inflight: InflightRegistry;
-  /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
+  /** Context window capacity (tokens). Display only; never triggers compaction. */
   readonly contextWindow: number;
-  /** 子代理状态只读投影（#358 T7 同真值）：无 manager → 空数组。 */
+  /** Read-only projection of subagent state: no manager -> empty array. */
   readonly listSubagents: (
     conversationId?: string
   ) => ReadonlyArray<SubagentInfo>;
   /**
-   * Slice D / SC14: 强杀单个子代理（TUI Ctrl+X，chrome-focus 聚焦行）。
-   * 返回 true = 任务当时仍在飞（先 settle 父侧 waitFor，再对 worker 发
-   * SIGTERM）；未知 / 已终态 id、无 manager（ask surface）→ false
-   * （空操作，不抛错）。
+   * Force-kill one subagent (TUI Ctrl+X on the chrome-focused row).
+   * Returns true = the task was still in flight (the parent-side waitFor is
+   * settled first, then SIGTERM goes to the worker); unknown / already
+   * terminal id, or no manager (ask surface) -> false (no-op, never throws).
    *
-   * **同步取消父 turn 的 wait**：`manager.abortTask` 先以
-   * `SubAgentAbortError` 拒绝该任务的在飞 `waitFor`（SC14「父 turn 收到
-   * cancelled」），再中止 worker 子进程。见 `src/tui/subagent-kill.ts` 头注。
+   * **Synchronous cancel of the parent turn's wait**: `manager.abortTask`
+   * first rejects the task's in-flight `waitFor` with `SubAgentAbortError`
+   * (the parent turn sees "cancelled"), then aborts the worker subprocess.
+   * See the header note in `src/tui/subagent-kill.ts`.
    */
   readonly abortSubagentTask: (taskId: string) => boolean;
   /**
-   * plans/session-fg-handoff-interrupt Locked sentence 3 / T5：Ctrl+C 扇出
-   * 本会话**全部前景子代理**（`foreground === true` ∧ live）。父 `running-fg`
-   * turn 的 aborter 仍归 app 层（同一 registry，不新开第二条通道）。
-   * `wait:false` 后景与其它会话不在集合内 —— 作用域由 conversationId 定。
-   * 返回真正被 abort 的 taskId；无 manager → 空数组（不抛错）。
+   * Ctrl+C fan-out to **all foreground subagents of this session**
+   * (`foreground === true` and live). The parent `running-fg` turn's
+   * aborter still belongs to the app layer (same registry, no second
+   * channel). Background (`wait:false`) work and other sessions are outside
+   * the set — scope is defined by conversationId. Returns the taskIds
+   * actually aborted; no manager -> empty array (never throws).
    */
   readonly abortSessionForegroundWork: (
     conversationId: string
@@ -210,96 +221,108 @@ export interface TuiBridge {
 }
 
 export interface CreateTuiBridgeOptions {
-  /** 会话池根目录；缺省 ~/.iknow（ADR-0087，与 serve 同款 resolveServeDataDir）。 */
+  /** Session-pool root; defaults to ~/.iknow (ADR-0087, same resolveServeDataDir as serve). */
   readonly dataDir?: string;
   /** T1: resolved workspace root used when lazily creating a session. */
   readonly workspaceRoot?: string;
   /**
-   * T6:稳定 productRoot（启动 workspace）。单向透传给 SessionHub，不在
-   * bridge 内重算 MCP 路径策略。
+   * Stable productRoot (the startup workspace). Passed through to SessionHub
+   * one-way; the bridge never recomputes MCP path policy.
    */
   readonly productRoot?: string;
-  /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
+  /** Harness deps (product path passes the buildTuiDeps result; tests inject stub deps). */
   readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
   readonly traceOut?: string;
-  /** in-flight 登记簿（deps.ts 的 soleInflightId 同源，归因一致）。 */
+  /** In-flight registry (same source as deps.ts's soleInflightId, so attribution stays consistent). */
   readonly inflight: InflightRegistry;
-  /** subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
-   *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
+  /** subagentManager is assembled by buildTuiDeps via the
+   *  buildHarnessEngine SSOT; hub-bridge passes it through to SessionHub.
+   *  Default undefined -> no-manager path (drain returns empty). */
   readonly subagentManager?: SubAgentManager;
   /**
-   * auto-memory T4 / ADR-0031 D1:自动记忆钩子。与 subagentManager 同路
-   * (buildTuiDeps → buildHarnessEngine SSOT 装配) 透传给 SessionHub。
-   * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
+   * ADR-0031: auto-memory hook. Rides the same route as subagentManager
+   * (buildTuiDeps -> buildHarnessEngine SSOT assembly) into SessionHub.
+   * Absent (default OFF) -> the hub never calls it, behavior byte-identical.
    */
   readonly autoMemory?: AutoMemoryHook;
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
-  /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
+  /** Verify-loop configuration. Absent = transparently off (postMessage runs the plain run). */
   readonly verifyConfig?: VerifyConfig;
   /**
-   * D-α T5:graph 装配快照句柄（buildTuiDeps 透出）。TUI 自己 build engine,
-   * hub 只拿成品 deps —— 句柄必须由这里交进去,否则 `/graph` 翻了 holder 也
-   * 进不了下一次装配。缺席 = 本入口未接 overlay。
+   * Graph-assembly snapshot handle (surfaced by buildTuiDeps). The TUI
+   * builds its own engine and the hub only receives finished deps — the
+   * handle must be handed in here, otherwise flipping `/graph` on the
+   * holder would never reach the next assembly. Absent = this entry has no
+   * graph overlay.
    */
   readonly graphAssembly?: GraphAssembly;
   /**
-   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host（TUI 装配点
-   * 自建后经这里交进 hub —— hub 按 conversationId 解析；resetSession /
-   * hub.shutdown 销毁）。缺席 = 本入口未接活图。
+   * ADR-0047: live-graph ledger host (built at the TUI assembly point and
+   * handed into the hub here — the hub resolves by conversationId; destroyed
+   * by resetSession / hub.shutdown). Absent = no live graph on this entry.
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
-  /** T3: 上下文用量显示分母（**策略预算窗口**，token）。缺省
-   *  `DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000`（ADR-0100）。 */
+  /** Denominator for context-usage display (the **strategy budget
+   *  window**, tokens). Defaults to `DEFAULT_CONTEXT_WINDOW =
+   *  DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000` (ADR-0100). */
   readonly contextWindow?: number;
-  /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
-   *  不回退 process.env）。与 SessionHub 构造 opts 的 overrideEnv 同形。 */
+  /** LLM env override source, passed through to SessionHub (used when the
+   *  override path rebuilds the adapter; never falls back to process.env).
+   *  Same shape as SessionHub's constructor overrideEnv option. */
   readonly overrideEnv?: { readonly llm: LlmEnv };
   /**
-   * settings-hot-reload（T3）:env 源，透传给 SessionHub.envProvider。
-   * T4 由 run.tsx 注入 EnvLoader.get（首次 lazy load + 缓存命中）。
-   * 缺省 → hub 内部 loadIknowEnv（行为零变化）。
+   * settings-hot-reload: env source, passed through to
+   * SessionHub.envProvider. run.tsx injects EnvLoader.get (first lazy load
+   * + cache hit). Default -> the hub's internal loadIknowEnv (zero behavior
+   * change).
    */
   readonly envProvider?: () => IknowEnv;
-  /** settings-hot-reload（T3）:env 变化回调，透传给 SessionHub.onEnvChange。
-   *  T4 由 run.tsx 注入 EnvLoader.subscribe 链路，驱动 TUI 显示层刷新。 */
+  /** settings-hot-reload: env-change callback, passed through to
+   *  SessionHub.onEnvChange. run.tsx injects the EnvLoader.subscribe chain
+   *  to refresh the TUI display layer. */
   readonly onEnvChange?: (env: IknowEnv) => void;
   /**
-   * Review High-1 (2026-08-29 / ADR-0037)：注入 deps 的启动引擎根（TUI 的
-   * buildTuiDeps 构建根）。声明后，hub 的 ensureDeps 在会话根离开该根
-   * （worktree rebind）时落到 per-root 引擎重建（经下方 buildEngine 缝），
-   * 与 serve hub 的两条装配路径行为一致。缺席 = 今日短路语义。
+   * ADR-0037: the startup engine root for the injected deps (the root
+   * buildTuiDeps was built on). Once declared, the hub's ensureDeps falls to
+   * per-root engine rebuild (through the buildEngine seam below) when the
+   * session root leaves this root (worktree rebind) — consistent with the
+   * serve hub's two assembly paths. Absent = short-circuit semantics.
    */
   readonly engineRoot?: string;
   /**
-   * Review High-1: per-root 引擎重建缝（TUI 由 run.tsx 提供 —— 用同一
-   * depsOpts + 新根重跑 buildTuiDeps，rebind 后的回合跑在 worktree 根引擎上，
-   * 且复用同一启动 settings 对象，硬要求 9）。缺席 = 无重建能力（行为不变）。
+   * Per-root engine rebuild seam (provided by run.tsx: rerun buildTuiDeps
+   * with the same depsOpts + the new root, so post-rebind turns run on the
+   * worktree-root engine and reuse the same startup settings object).
+   * Absent = no rebuild capability (behavior unchanged).
    *
-   * T11: 返回 bundle 形状对齐 `EngineBundle` —— 与 chat `rebuildDeps` / hub
-   * `getOrBuildEngine` 共享同一类型。
+   * The returned bundle shape is `EngineBundle`, the same type shared by
+   * chat's `rebuildDeps` and the hub's `getOrBuildEngine`.
    */
   readonly buildEngine?: (root: string) => Promise<EngineBundle>;
   /**
-   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — `isolation.worktreeExclusive`
-   * 装配期一次性解析结果（与 SessionHubOptions.worktreeExclusive 同形；缺席
-   * = OFF = 与今日逐字节一致 SC2）。由 TUI run.tsx 解析后透传，hub 构造时
-   * 再喂给 `createTaskWorktreeProvisioner` 闭包冻结（ADR-0037 §5 硬要求 9）。
+   * ADR-0070 — one-time assembly-resolution result of
+   * `isolation.worktreeExclusive` (same shape as
+   * SessionHubOptions.worktreeExclusive; absent = OFF = byte-identical
+   * behavior). Resolved by the TUI's run.tsx and passed through; the hub
+   * feeds it to the `createTaskWorktreeProvisioner` closure to freeze
+   * (ADR-0037 hard requirement: reuse the startup settings).
    */
   readonly worktreeExclusive?: boolean;
   /**
-   * ADR-0092 / SC13: fs isolation 档 holder（与 SessionHubOptions.fsMode 同形）。
-   * 透传给 `SessionHub` —— hub 的 verify 调用点 per-call 读它，TUI 的 `/config`
-   * 翻的是同一个 holder（与 bash 侧经 buildTuiDeps 接线的是同一实例）。
-   * 缺席 = 本入口未接 fs 档 → hub 的 verify 面按全局档（serve 已按同款接线，
-   * 见 session-api/serve.ts）。
+   * ADR-0092: fs isolation mode holder (same shape as
+   * SessionHubOptions.fsMode). Passed through to `SessionHub` — the hub's
+   * verify call sites read it per call, and the TUI's `/config` flips the
+   * same holder (the same instance the bash tool is wired to via
+   * buildTuiDeps). Absent = this entry has no fs-mode wiring -> the hub's
+   * verify surface uses the global mode (serve wires it the same way, see
+   * session-api/serve.ts).
    */
   readonly fsMode?: FsModeContext;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
-  // T1 (session-folder-consolidation): store namespace keys by
-  // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+  // Store namespace keys by projectIdentityRoot, not cwd — mirrors build-engine.
   const projectIdentityRoot = deriveProjectIdentityRoot({
     cwd: opts.workspaceRoot,
   });
@@ -312,57 +335,63 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     deps: opts.deps,
     defaultJsonMode: opts.defaultJsonMode ?? false,
     traceOut: opts.traceOut,
-    // ADR-0113 T4: lite 槽在场才注入标题生成器（envProvider 优先、
-    // overrideEnv 兜底的双源解析收敛在共享装配缝；缺席 → 键不出现不触发）。
+    // ADR-0113: inject the title generator only when the lite slot exists
+    // (the shared assembly seam converges the dual-source resolution:
+    // envProvider first, overrideEnv fallback; absent -> the key never
+    // appears and never fires).
     ...liteTitleGeneratorOptions({
       envProvider: opts.envProvider,
       env: opts.overrideEnv,
     }),
-    // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
-    // hub-bridge 透传给 SessionHub。
+    // subagentManager assembled by buildTuiDeps via the buildHarnessEngine
+    // SSOT; hub-bridge passes it through to SessionHub.
     subagentManager: opts.subagentManager,
-    // auto-memory T4:自动记忆钩子同路透传(缺席 = 关)。
+    // auto-memory hook: same pass-through route (absent = off).
     ...(opts.autoMemory ? { autoMemory: opts.autoMemory } : {}),
     ...(opts.overlayMemoryPrefetch
       ? { overlayMemoryPrefetch: opts.overlayMemoryPrefetch }
       : {}),
-    // #128 T8: verifyConfig 由 run.tsx 装配 (settings.verify 段) 透传。
-    // command 缺失时 (含 verify 段缺失) 由 runClassifier 接管 (subagentManager
-    // 在场);缺席 = 不包裹 run (仅未接线路径)。
+    // verifyConfig assembled by run.tsx (settings.verify section) and
+    // passed through. When command is missing (including the whole verify
+    // section), runClassifier takes over (subagentManager present); absent
+    // verifyConfig = the run is not wrapped (unwired path only).
     verifyConfig: opts.verifyConfig,
-    // D-α T5: 每条 postMessage 前拍一次 graph 装配快照（SC3 与 chat 同语义）。
+    // Take a graph-assembly snapshot before each postMessage (same semantics as chat).
     ...(opts.graphAssembly ? { graphAssembly: opts.graphAssembly } : {}),
-    // live-graph-phase1 T1:账本 host 注入 hub —— 按 conversationId 解析。
+    // Ledger host injected into the hub — resolved by conversationId.
     ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
-    // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
-    // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
+    // LLM env override source — the env validated at TUI startup goes to
+    // the override path, so rebuilding the adapter there never falls back to
+    // process.env.
     ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),
-    // settings-hot-reload（T3）:env 源 + 变化回调透传（缺省 → 行为零变化）。
+    // settings-hot-reload: env source + change callback pass-through (default -> zero behavior change).
     ...(opts.envProvider ? { envProvider: opts.envProvider } : {}),
     ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
-    // T1: the bridge's resolved root is also the hub's engine/state anchor.
+    // The bridge's resolved root is also the hub's engine/state anchor.
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
-    // T6:稳定 productRoot 单向透传（缺席 → hub 回退 workspaceRoot）。
+    // Stable productRoot one-way pass-through (absent -> the hub falls back to workspaceRoot).
     ...(opts.productRoot !== undefined
       ? { productRoot: opts.productRoot }
       : {}),
-    // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝透传。
+    // Startup root of the injected deps + per-root rebuild seam pass-through.
     ...(opts.engineRoot !== undefined
       ? { injectedEngineRoot: opts.engineRoot }
       : {}),
     ...(opts.buildEngine ? { buildEngine: opts.buildEngine } : {}),
-    // T3 / plans/worktree-exclusive-lock.md / ADR-0070: 占用锁档透传。
-    // OFF（缺席 / 非 true）→ hub 构造时 `worktreeExclusive` 字段缺席，
-    // provisioner 完全跳过占用检查，行为与今日逐字节一致（SC2）。
+    // ADR-0070: exclusive-lock mode pass-through. OFF (absent / not true)
+    // -> the `worktreeExclusive` field is absent at hub construction, the
+    // provisioner skips exclusivity checks entirely, byte-identical behavior.
     ...(opts.worktreeExclusive === true ? { worktreeExclusive: true } : {}),
-    // ADR-0092 / SC13: fs 隔离档 holder 透传 —— TUI 的 verify 命令面与 bash
-    // 工具面必须同档（holder 同一实例；hub 的 runVerifyLoop 调用点 per-call
-    // 现读，`/config` 翻档下一次调用生效）。与 serve 侧同款接线。
-    // 直接赋值（tsconfig 未开 exactOptionalPropertyTypes）：`undefined` 与
-    // 「key 缺席」在本仓 opts 解构语义下等价，省掉一个三元分支 —— S5 ratchet
-    // 对 touched function 的复杂度增长零容忍（见 .claude/rules）。
+    // ADR-0092: fs isolation mode holder pass-through — the TUI's verify
+    // command surface and the bash tool surface must share a mode (same
+    // holder instance; the hub's runVerifyLoop call sites read it per call,
+    // so `/config` takes effect on the next call). Same wiring as serve.
+    // Direct assignment (tsconfig lacks exactOptionalPropertyTypes):
+    // `undefined` equals "key absent" under this repo's opts destructuring,
+    // saving one ternary branch — the S5 lint ratchet tolerates zero
+    // complexity growth in touched functions.
     fsMode: opts.fsMode,
   });
 
@@ -377,9 +406,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     ...(resp.turn.answer.verify !== undefined
       ? { verify: resp.turn.answer.verify }
       : {}),
-    // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要透传;字段缺席 →
-    // 字段缺席 (byte-stable)。TUI notice 据此区分 API error 文案 vs
-    // 原通用 "连接或模型故障" 文案。
+    // ADR-0094: gateway-side summary pass-through on transport failure;
+    // absent field -> absent field (byte-stable). Lets the TUI notice
+    // distinguish the API-error copy from the generic connection/model
+    // failure copy.
     ...(resp.turn.answer.apiError !== undefined
       ? { apiError: resp.turn.answer.apiError }
       : {}),
@@ -444,9 +474,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
             }
           : undefined
       );
-      // cancelled 透传 — TUI app 据此区分"无可压缩上下文"与"用户中途取消" (Low #1 兜底)。
-      // reason 透传 — plan T2 触发判据分类标识,T4 据此分文案(详见 plans/
-      // compress-trigger-gate.md T4 acceptance 的「TUI 文案」分支)。
+      // cancelled pass-through — the TUI app distinguishes "nothing to
+      // compact" from "user cancelled mid-run". reason pass-through — the
+      // trigger-classification tag that drives the copy branch.
       return {
         compacted: res.compacted,
         reason: res.reason,
@@ -462,11 +492,13 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
         opts.inflight.unmark(conversationId);
       }
     },
-    // #622 T5: rewind 改走 hub.rewindSession —— 与 postMessage/compact 同
-    // 一条 per-conversation serialize 队列（此前绕开队列直调 store 裸 IO
-    // 的纪律随 rewindFile 截断语义一起退役）。hub 侧落点是
-    // #624: hub.rewindSession(id, head) → store.rewindToHead，不截断文件。
-    // store.load 取回投影（closeout 自愈后的权威视图）供 TUI 渲染。
+    // Rewind goes through hub.rewindSession — the same per-conversation
+    // serialize queue as postMessage/compact (the old discipline of calling
+    // bare store IO outside the queue retired together with rewindFile's
+    // truncation semantics). Hub side: hub.rewindSession(id, head) ->
+    // store.rewindToHead, no file truncation. store.load returns the
+    // projection (the authoritative view after closeout self-heal) for TUI
+    // rendering.
     rewindSession: async (conversationId, head) => {
       await hub.rewindSession(conversationId, head);
       return store.load(conversationId);
@@ -477,12 +509,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    // #358 T7: 子代理只读投影。无 manager（ask surface / 旧产品路径） → 空。
+    // Subagent read-only projection. No manager (ask surface / legacy product path) -> empty.
     listSubagents: (conversationId) => hub.listSubagents(conversationId),
-    // Slice D / SC14: 强杀出口（Ctrl+X）。hub 侧 no-op 语义 → false。
+    // Force-kill exit (Ctrl+X). Hub-side no-op semantics -> false.
     abortSubagentTask: (taskId) => hub.abortSubagentTask(taskId),
-    // Locked sentence 3 / T5: Ctrl+C 扇出（本会话前景子代理）。hub 侧无
-    // manager → 空数组。
+    // Ctrl+C fan-out (foreground subagents of this session). No manager on the hub side -> empty array.
     abortSessionForegroundWork: (conversationId) =>
       hub.abortSessionForegroundWork(conversationId),
   };

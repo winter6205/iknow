@@ -1,52 +1,48 @@
 /**
- * src/tui/slash.ts
+ * TUI slash-command vocabulary, parsing, Tab completion and hint lines.
+ * Pure TS: no ink / OpenTUI dependencies.
  *
- * #343 T6-A 迁移：从 archive/tui-ink/src/slash.ts 迁回 src/tui/。逻辑与原版
- * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
- * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ * Vocabulary: /sessions /new /quit /exit /help /info /thinking /effort /memory
+ * /compact /continue /rewind /mcp /graph /config /model — VOCABULARY below is
+ * the single source (don't duplicate the count here, it drifts). /reset is
+ * absent from the vocabulary and thus unreachable.
+ * - /config: ADR-0092 filesystem-isolation mode switch; value domain and copy
+ *   live in harness/sandbox/fs-mode.ts; chat / TUI / serve share semantics.
+ * - /graph: non-TTY peer of the graph-mode overlay; value domain and copy
+ *   live in harness/graph/mode.ts; same three-entry semantics.
+ * - /effort help text is derived from ADJUSTABLE_EFFORT_LEVELS (no second
+ *   hardcoded list).
+ * - Key binding: Esc = interrupt foreground turn (double-press = rewind),
+ *   Ctrl+C = copy selection; the help footer follows this semantics.
  *
- * 词表：/sessions /new /quit /exit /help /info /thinking /effort /memory
- * /compact /continue /rewind /mcp /graph /config /model（以 VOCABULARY 为准
- * —— 不在此重复条数，条数是漂移源）。/reset 不在词表内即天然不可达（Q5c
- * 废除）。
- * rev 2026-09-13:ADR-0092 / SC13 加 /config（文件系统隔离档切换;值域与
- * 文案单点在 harness/sandbox/fs-mode.ts;三入口 chat / TUI / serve 同语义）。
- * rev 2026-09-14:#1010 加 /model（provider/model picker）。
- * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
- * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
- * rev 2026-08-12:#377 系列加 /effort（思考强度调整）。
- * rev 2026-08-26:D-α V1 加 /graph（图模式 overlay 的非 TTY 对等物,值域与
- * 文案单点在 harness/graph/mode.ts;三入口 chat / TUI / serve 同语义）。
- * /effort help 文案由 ADJUSTABLE_EFFORT_LEVELS 派生（不硬编码第二份列表）。
- * rev 2026-09-18:键位迁移 —— Esc = 打断前台（双击回退），Ctrl+C = 复制选中；
- * help 尾注三行随语义改写（打断不再绑 Ctrl+C）。
+ * Parsing: trimmed input starting with "/" goes through the vocabulary;
+ * miss → unknown (UI hint); otherwise → a plain message.
  *
- * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
- * 不以 "/" 开头 → message（普通消息）。
+ * Tab completion + candidate hints (live filtering):
+ *  - slashSuggestions: prefix-filtered candidates in vocabulary order.
+ *  - slashComplete: three-state — unique match → `/{cmd} `; no match → null;
+ *    ≥2 matches → longest common prefix of candidate forms (returned only on
+ *    progress, bash-style partial completion; see the function doc comment).
+ *  - slashHintLines: one-line short descriptions for compact rendering below
+ *    the input box.
  *
- * Tab 补全 + 候选提示词（live filtering）：
- *  - slashSuggestions：按当前输入前缀过滤并保持词表原顺序。
- *  - slashComplete：三态 —— 唯一匹配 → `/{cmd} `；0 匹配 → null；≥2 匹配
- *    → 候选补全形的最长公共前缀（有进展才返回，bash 式部分补全，详见
- *    函数 doc comment）。
- *  - slashHintLines：渲染用一行短描述，便于在输入框下方紧凑展示。
- *
- * #337 Phase C（slash 扩展 + skill 加载发送）：
- *  - 判别联合 `SlashCandidate` = 静态命令 | skill（Phase D 复用）；
- *  - `slashSuggestions(input, skills?)` 混显静态命令（词表前缀过滤，保持在前）
- *    与 skill 名（大小写不敏感前缀过滤，在后）——确定性顺序；
- *  - `slashComplete(input, skills?)` 跨「静态命令 + skill」唯一匹配补全；
- *  - `parseSkillLoad(raw, skills)` 精确命中 skill 名 → {name, remainder}，
- *    命中静态命令 / 不匹配 → undefined（静态命令优先）。发送语义见 app.tsx。
- *    SkillEntryLike = {name, description?, aliases?} 最小投影，slash.ts 不依赖
- *    harness catalog 类型（解耦，便于单测注入扁平对象）。
- *
- * spec tui-skill-slash-catalog（skill bare alias）：
- *  - 匹配认**规范名或唯一裸名别名**（大小写不敏感），出条/展示/补全恒用规范名
- *    （invariant 2）；别名由调用方从 catalog 投影（app.tsx：`stripNamespace`
- *    + `get(bare) === entry` 唯一性判据），slash.ts 不自行拆 `:`（invariant 1）。
- *  - 静态词表在精确碰撞时优先（invariant 4）；remainder 按输入 token 长度切
- *    （invariant 5，复用 slashRemainder）。
+ * Skill entries (shared with the skill-catalog send path):
+ *  - discriminated union `SlashCandidate` = static command | skill;
+ *  - `slashSuggestions(input, skills?)` interleaves static commands (prefix
+ *    filtered, always first) with skill names (case-insensitive prefix
+ *    filter, after) — deterministic order;
+ *  - `slashComplete(input, skills?)` completes across "static command +
+ *    skill" on a unique match;
+ *  - `parseSkillLoad(raw, skills)` exact skill-name hit → {name, remainder};
+ *    hit on a static command / no match → undefined (static commands win).
+ *    Send semantics live in app.tsx. SkillEntryLike is a minimal
+ *    {name, description?, aliases?} projection so slash.ts does not depend
+ *    on harness catalog types (flat objects can be injected in unit tests).
+ *  - Bare-alias matching (spec tui-skill-slash-catalog): a skill matches by
+ *    canonical name or unique bare alias (case-insensitive), but listing /
+ *    display / completion always use the canonical name. The caller projects
+ *    aliases from the catalog (`stripNamespace` + uniqueness check);
+ *    slash.ts never splits `:` itself.
  */
 
 import { THINKING_EFFORT_VALUES } from "../session-api/contract.js";
@@ -79,23 +75,25 @@ export type SlashParseResult =
   | { kind: "unknown"; raw: string }
   | { kind: "message"; text: string };
 
-/** skill 最小投影（避免 slash.ts 强依赖 harness catalog 类型；调用方传入
- *  skillCatalog.available() 同形扁平对象即可）。
+/** Minimal skill projection (keeps slash.ts free of harness catalog types;
+ *  callers pass a flat object shaped like skillCatalog.available()).
  *
- *  `aliases`（spec tui-skill-slash-catalog）：插件技能的**唯一**裸名别名
- *  —— 调用方从 catalog 投影（`stripNamespace` + `get(bare) === entry` 唯一
- *  性判据）后塞入；slash.ts 只消费，不自行拆 `:`（spec invariant 1）。缺省 /
- *  空数组 = 无别名（catalog 未登记或冲突被丢）。 */
+ *  `aliases` (spec tui-skill-slash-catalog): the skill's *unique* bare-name
+ *  alias, projected by the caller from the catalog (`stripNamespace` +
+ *  `get(bare) === entry` uniqueness check). slash.ts only consumes it and
+ *  never splits `:` itself. Absent / empty = no alias (not registered or
+ *  dropped due to conflict). */
 export interface SkillEntryLike {
   readonly name: string;
   readonly description?: string;
   readonly aliases?: ReadonlyArray<string>;
 }
 
-/** slash 候选判别联合：静态命令 | skill（Phase C 引入，Phase D 复用）。
- *  顺序约定：静态命令在前、skill 在后（slashSuggestions 确定性输出）。
- *  skill 臂的 `name` 恒为**规范名**（invariant 2：展示与补全都用
- *  `plugin:skill`）；`aliases` 只参与匹配与 exactness 判定，不出条、不显示。 */
+/** Slash candidate union: static command | skill.
+ *  Order convention: static commands first, skills after (deterministic
+ *  slashSuggestions output). The skill arm's `name` is always the canonical
+ *  name (invariant 2: display and completion use `plugin:skill`);
+ *  `aliases` only take part in matching / exactness checks — never listed. */
 export type SlashCandidate =
   | { kind: "command"; command: TuiSlashCommand }
   | {
@@ -124,7 +122,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "model",
 ]);
 
-/** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
+/** Parse input-box content; empty / whitespace-only → message (callers ignore empty input). */
 export function parseTuiInput(raw: string): SlashParseResult {
   const text = raw.trim();
   if (!text.startsWith("/")) return { kind: "message", text };
@@ -136,10 +134,10 @@ export function parseTuiInput(raw: string): SlashParseResult {
   return { kind: "unknown", raw: text };
 }
 
-/** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。
- *  #337 Phase C：`/<skill-name>  加载技能`（skill 名由调用方动态拼入，不参与
- *  静态词表）。#361 Phase D：/mcp 真描述（词表含 rewind，/mcp 末位与
- *  slashSuggestions 的词表序一致）。#377 系列加 /effort（紧邻 /thinking 之后）。 */
+/** /help vocabulary text (no emoji; user-visible copy is Chinese, matching
+ *  the repo's usage style). Skill lines (`/<skill-name>  加载技能`) are
+ *  spliced in by the caller and never join the static vocabulary; ordering
+ *  here follows the same vocabulary order as slashSuggestions. */
 export function helpLines(
   skillNames?: ReadonlyArray<string>
 ): ReadonlyArray<string> {
@@ -171,7 +169,7 @@ export function helpLines(
   ];
 }
 
-/** 一行短描述（用于输入框下方紧凑提示）。 */
+/** One-line short descriptions (compact hint below the input box). */
 const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   sessions: "打开会话列表",
   new: "新建会话",
@@ -196,25 +194,28 @@ export interface SlashHintLine {
   readonly description: string;
 }
 
-/** 首 token 的小写前缀（`/xxx...` → `xxx`；空 / 非 "/" 开头 → ""）。
- *  算法 SSOT 在 harness（`slashHeadPrefix`，plan T3 slash 投影收敛）；本名
- *  是 TUI 宿主的既有出口（app.tsx onSelectHint / tests 消费）。 */
+/** Lowercased first-token prefix (`/xxx...` -> `xxx`; empty / non-"/" -> "").
+ *  Algorithm SSOT is the harness's `slashHeadPrefix`; this name is the
+ *  established TUI-host export (consumed by app.tsx / tests). */
 export function slashPrefix(text: string): string {
   return slashHeadPrefix(text);
 }
 
 /**
- * 给定当前输入，枚举所有前缀命中的候选（静态命令在前、skill 在后，确定性
- * 顺序）。skill 名匹配为大小写不敏感前缀过滤。空 / 非 "/" 开头 → 空数组。
- * 静态命令仍按词表原顺序（slashHintLines 等既有契约不变）。
+ * Enumerate all prefix-matched candidates for the current input (static
+ * commands first, skills after — deterministic order). Skill matching is a
+ * case-insensitive prefix filter. Empty / non-"/" input -> empty array.
+ * Static commands keep the original vocabulary order (existing contracts
+ * such as slashHintLines unchanged).
  *
- * #377 E（提示过载修复）：空前缀（输入恰为 "/"）只返回静态命令，skill 必须
- * 用户至少打 1 字符前缀（/c /ar …）才进列表 —— 防止 bare `/` 弹出 N 条 skill
- * 长描述撑爆屏外。
+ * Anti-overload: on an empty prefix (input is exactly "/") only static
+ * commands are returned — a skill needs at least 1 typed character, so a
+ * bare `/` never floods the screen with N long skill descriptions.
  *
- * Task 4 备注：此函数为底层「全量候选枚举」——既服务 slashSuggestions（消歧
- * 过滤），也服务 slashComplete（Tab 补全需要全量 LCP）。两个调用方各自承担
- * 各自的过滤职责（disambig 显示 vs. Tab 行为），不在此函数内分歧。
+ * This is the low-level "full candidate enumeration": it serves both
+ * slashSuggestions (disambiguation filtering) and slashComplete (Tab needs
+ * the LCP over the full set). Each caller owns its own filtering; no
+ * branching happens here.
  */
 function enumerateSlashCandidates(
   input: string,
@@ -224,17 +225,19 @@ function enumerateSlashCandidates(
   if (!text.startsWith("/")) return [];
   const prefix = slashPrefix(text);
   const out: SlashCandidate[] = [];
-  // 空前缀（输入恰为 "/"）→ 全部命令（cmd.startsWith("") 恒真）。
+  // Empty prefix (input is exactly "/") -> all commands (startsWith("") is always true).
   for (const cmd of VOCABULARY) {
     if (cmd.startsWith(prefix)) {
       out.push({ kind: "command", command: cmd as TuiSlashCommand });
     }
   }
-  // 空前缀 → skill 不入场；用户至少打 1 字符前缀才混入。
+  // Empty prefix -> no skills; they join only after >=1 typed character.
   if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
-      // 规范名或任一裸名别名命中前缀即入场，但**只发一条** canonical 候选
-      // —— 别名不是第二条候选（重复条会把唯一匹配退化成 ≥2 的 LCP 分支）。
+      // A prefix hit on the canonical name or any bare alias admits the
+      // skill, but emits exactly one canonical candidate — an alias is not a
+      // second entry (duplicates would degrade a unique match into the >=2
+      // LCP branch).
       if (skillHeadLowers(skill).some((head) => head.startsWith(prefix))) {
         out.push({
           kind: "skill",
@@ -248,42 +251,44 @@ function enumerateSlashCandidates(
   return out;
 }
 
-/** skill 的全部可匹配首 token 小写形：规范名 + 唯一裸名别名（spec
- *  invariant 3 —— 冲突别名已由 catalog 侧丢弃，这里只消费投影）。 */
+/** All matchable lowercased first-token forms: canonical name + unique bare
+ *  alias (spec invariant 3 — conflicting aliases are already dropped on the
+ *  catalog side; this only consumes the projection). */
 function skillHeadLowers(skill: SkillEntryLike): ReadonlyArray<string> {
   return [skill.name, ...(skill.aliases ?? [])].map((head) =>
     head.toLowerCase()
   );
 }
 
-/** Task 4：从 SlashCandidate 求其规范化的「首 token 小写名」集合（统一判定
- *  接口）。skill 臂含别名 —— typed 裸名 token 也必须被认成精确命中
- *  （invariant 2/3：exactness 认 bare，展示仍 canonical）。 */
+/** Normalized "lowercased first-token name" set of a SlashCandidate (uniform
+ *  check interface). The skill arm includes aliases — a typed bare name
+ *  must count as an exact hit (invariant 2/3: exactness accepts bare,
+ *  display stays canonical). */
 function candidateHeadLowers(c: SlashCandidate): ReadonlyArray<string> {
   return c.kind === "command" ? [c.command] : skillHeadLowers(c);
 }
 
 /**
- * 给定当前输入，返回**用于消歧显示**的候选（静态命令在前、skill 在后，
- * 确定性顺序）。
+ * Candidates for the disambiguation UI, given the current input (static
+ * commands first, skills after — deterministic order). The list serves
+ * disambiguation only:
+ *  - unique exact hit (typed first token === a candidate name) -> empty list
+ *    (even with no longer siblings).
+ *  - exact hit + remainder (name followed by space / extra text) -> empty
+ *    list (even with longer siblings).
+ *  - ambiguous prefix (no exact candidate; e.g. `/way` -> way-foo + way-bar)
+ *    -> keep everything, including when remainder is non-empty (`/way now`
+ *    still lists way-foo / way-bar — disambiguation isn't done).
+ *  - exact hit with longer siblings -> show only the longer siblings, not
+ *    the already-complete name.
+ *  - case-insensitive (mixed-case `/ECHO` still matches echo).
  *
- * Task 4（plans/tui-chrome-interaction.md）：候选列表仅作**消歧**用。
- *  - **唯一精确命中**（typed 首 token === 某候选名）→ 空列表（即便没有更长
- *    兄弟）。
- *  - **精确命中 + remainder**（typed 首 token === 某候选名 + 空格/剩余段）
- *    → 空列表（即便有更长兄弟）。
- *  - **前缀歧义**（typed 前缀没有精确候选；如 `/way` → way-foo + way-bar）
- *    → 列表保留全部，**含 remainder 非空时**（`/way now` 仍显示 way-foo /
- *    way-bar —— 消歧职责未完成）。
- *  - **精确命中无空格但有更长兄弟**（typed 首 token === 某候选名 + 存在其他
- *    匹配项）→ 只显示更长兄弟，**不**显示已完整的名字。
- *  - 大小写不敏感（mixed-case `/ECHO` 仍识别为 echo）。
+ * Tab completion (slashComplete) bypasses this filter — it is a separate
+ * path that computes LCP over the full candidate set via
+ * enumerateSlashCandidates directly.
  *
- * Tab 补全（slashComplete）不走此过滤 —— 那是独立路径，必须按全量候选计算
- * LCP。详见 slashComplete 内部对 enumerateSlashCandidates 的直接调用。
- *
- * #377 E 保留：空前缀（输入恰为 "/"）只返回静态命令，skill 不入场；slashComplete
- * 同契约（"/" 永远 null —— 多匹配）。
+ * Same empty-prefix contract as enumeration: "/" lists static commands only;
+ * slashComplete returns null for "/" (always multi-match).
  */
 export function slashSuggestions(
   input: string,
@@ -295,17 +300,17 @@ export function slashSuggestions(
   const matches = enumerateSlashCandidates(text, skills);
   if (matches.length === 0) return [];
   const prefixLower = slashPrefix(text);
-  // 候选首 token 小写集合逐条算一次（每候选两个消费点：exactness + 兄弟过滤）。
+  // Compute each candidate's lowercased head set once (two consumers per candidate: exactness + sibling filtering).
   const headLowers = matches.map((m) => candidateHeadLowers(m));
-  // 候选中是否包含 typed 前缀的精确命中（大小写不敏感，skill 臂含裸名别名）。
+  // Whether any candidate is an exact hit for the typed prefix (case-insensitive; skill arms include bare aliases).
   const hasExact = headLowers.some((heads) => heads.includes(prefixLower));
-  // 1) 精确命中 + remainder → 用户已「提交」（typed `/skillname` 后追加更多
-  //    内容）；候选不再有消歧意义，全部隐藏。非 exact 前缀 + remainder 不受
-  //    此条影响（前缀歧义仍是消歧场景，列表保留 —— plan T4 只授权 exact
-  //    命中清空）。
+  // 1) Exact hit + remainder -> the user has "moved on" (typed a full name
+  //    then appended more); candidates no longer disambiguate, hide them all.
+  //    Non-exact prefix + remainder is unaffected (prefix ambiguity is still
+  //    a disambiguation scenario — only exact hits clear the list).
   if (remainder !== "" && hasExact) return [];
   if (!hasExact) return matches;
-  // 3) 存在精确命中 → 过滤掉该精确候选，保留仅「更长兄弟」（仍可消歧）。
+  // 3) Exact hit present -> drop that candidate, keep only longer siblings (still disambiguating).
   const out: SlashCandidate[] = [];
   for (const [i, m] of matches.entries()) {
     if (headLowers[i]!.includes(prefixLower)) continue;
@@ -315,8 +320,9 @@ export function slashSuggestions(
 }
 
 /**
- * 求一组字符串的最长公共前缀（逐字符精确比较，大小写敏感；空数组 → ""）。
- * 仅供 slashComplete 的多匹配部分补全使用，模块私有。
+ * Longest common prefix of a string set (exact char comparison,
+ * case-sensitive; empty array -> ""). Private to slashComplete's
+ * multi-match partial completion.
  */
 function longestCommonPrefix(forms: ReadonlyArray<string>): string {
   if (forms.length === 0) return "";
@@ -332,24 +338,31 @@ function longestCommonPrefix(forms: ReadonlyArray<string>): string {
 }
 
 /**
- * 给定当前输入，给出一个 Tab 补全结果，三态语义（shell-like）：
- *  1) 唯一匹配 → `/{cmd} ` / `/{skillName} `（带尾随空格；skill 名可能有
- *     连字符/点，无需转义）；
- *  2) 0 匹配 → null；
- *  3) ≥2 匹配 → 取全部候选补全形（`/{command}` / `/{skill.name}`，命令与
- *     skill 统一，保留声明原始大小写）的最长公共前缀（LCP），按进展规则
- *     决定返回（bash 式部分补全，不带尾随空格，剩余歧义由候选 UI 展示）：
- *       - LCP 严格长于已输入前缀形 `/${slashPrefix(input.trim())}` → 返回 LCP；
- *       - 二者忽略大小写相等但大小写不同（typedForm 恒小写）→ 返回 LCP
- *         （把输入规范化为候选声明大小写，如 '/ECHO' → '/Echo'）；
- *       - 否则（无进展，如 '/e' 对 exit/effort、裸 '/' 对全词表）→ null。
- *     大小写规则确定性说明：skill 前缀匹配大小写不敏感，LCP 用候选原始
- *     大小写逐字符比较 —— 混合大小写候选的 LCP 可能比忽略大小写的理论
- *     公共前缀短，这是可接受的保守行为（宁可少补，不错补）。
+ * One Tab-completion result for the current input, shell-like three states:
+ *  1) unique match -> `/{cmd} ` / `/{skillName} ` (trailing space; skill
+ *     names may contain hyphens/dots, no escaping needed);
+ *  2) 0 matches -> null;
+ *  3) >=2 matches -> LCP over all candidate completion forms
+ *     (`/{command}` / `/{skill.name}`, declared casing preserved), returned
+ *     per progress rules (bash-style partial completion, no trailing space;
+ *     remaining ambiguity is shown by the candidate UI):
+ *       - LCP strictly longer than the typed form `/${slashPrefix(...)}` ->
+ *         return LCP;
+ *       - equal ignoring case but differing in case (typed form is always
+ *         lowercase) -> return LCP (normalizes input to the declared casing,
+ *         e.g. '/ECHO' -> '/Echo');
+ *       - otherwise (no progress, e.g. '/e' vs exit/effort, bare '/' vs the
+ *         whole vocabulary) -> null.
+ *     Casing determinism: skill prefix matching is case-insensitive but LCP
+ *     compares the declared casings char by char — the LCP of mixed-case
+ *     candidates can be shorter than the theoretical case-insensitive common
+ *     prefix; acceptable conservative behavior (under-complete rather than
+ *     mis-complete).
  *
- * Task 4 守卫：使用全量候选枚举（enumerateSlashCandidates），**不**走
- * slashSuggestions 的消歧过滤 —— 即使 typed 是精确命中（如 `/echo`），
- * Tab 仍需补全到 `/{name} `（带尾随空格）。remainder 已提交 → null。
+ * Guard: uses the full candidate enumeration (enumerateSlashCandidates),
+ * NOT slashSuggestions' disambiguation filter — even when the typed token is
+ * an exact hit (e.g. `/echo`), Tab still completes to `/{name} ` with a
+ * trailing space. Remainder already typed -> null.
  */
 export function slashComplete(
   input: string,
@@ -365,9 +378,10 @@ export function slashComplete(
     m.kind === "command" ? `/${m.command}` : `/${m.name}`
   );
   if (matches.length === 1) return `${forms[0]!} `;
-  // Task 4：typed 首 token 是某候选的**精确命中**（大小写不敏感，skill 臂
-  // 含裸名别名）+ 还存在更长兄弟（matches.length >= 2）→ Tab 补全该精确候选
-  // 的**规范名**（带尾随空格），而非 LCP（LCP === typedForm 无进展）。
+  // The typed first token is an exact hit of some candidate
+  // (case-insensitive, skill arms include bare aliases) and longer siblings
+  // exist (matches.length >= 2) -> Tab completes that candidate's canonical
+  // name (with trailing space), not the LCP (LCP === typedForm: no progress).
   const typedForm = `/${slashPrefix(text)}`;
   const typedLower = slashPrefix(text);
   const exactIndex = matches.findIndex((m) =>
@@ -379,21 +393,23 @@ export function slashComplete(
     lcp.length > typedForm.length ||
     (lcp.toLowerCase() === typedForm.toLowerCase() && lcp !== typedForm)
   ) {
-    // 部分补全：不带尾随空格（还有剩余歧义，等下一次 Tab 或 ↓ 选择）。
+    // Partial completion: no trailing space (ambiguity remains; wait for next Tab or pick via down-arrow).
     return lcp;
   }
   return null;
 }
 
 /**
- * #337 Phase C：`/skill-name [提示词]` 解析。
- * 输入 trim 后以 "/" 开头，首 token `/xxx` 中 `xxx` **精确命中** skill 的
- * 规范名或唯一裸名别名（spec tui-skill-slash-catalog invariant 3）→ 返回
- * `{ name, remainder }`（`name` 恒为**规范名**，invariant 2；remainder = 去掉
- * 首 token 后的剩余部分，可能为空）。命中静态 slash 命令 / 不匹配 →
- * undefined（静态命令优先，invariant 4 / C1 语义）。与 parseTuiInput 的
- * command/unknown/message 判别正交：skill 名不属于静态词表，parseTuiInput 只
- * 会把它判为 unknown——调用方在 parseTuiInput **之前**先调本函数分流。
+ * Parse `/skill-name [prompt]`. Trimmed input starting with "/": if the
+ * first token `xxx` exactly hits a skill's canonical name or unique bare
+ * alias (spec tui-skill-slash-catalog invariant 3) -> return
+ * `{ name, remainder }` (`name` is always the canonical name, invariant 2;
+ * remainder = what follows the first token, possibly empty). Hit on a static
+ * slash command / no match -> undefined (static commands win, invariant 4).
+ * Orthogonal to parseTuiInput's command/unknown/message discrimination: a
+ * skill name is not in the static vocabulary and parseTuiInput would only
+ * call it unknown — callers dispatch through this function *before*
+ * parseTuiInput.
  */
 export function parseSkillLoad(
   raw: string,
@@ -404,12 +420,14 @@ export function parseSkillLoad(
   if (prefix === "") return undefined;
   if (VOCABULARY.has(prefix)) return undefined;
   for (const skill of skills) {
-    // 精确命中规范名或裸名别名（大小写不敏感，与 slashSuggestions 前缀过滤
-    // 同语义；返回原始 skill.name 作为 name，保留声明大小写并确保后续
-    // catalog.get 拿到的是规范名而非用户 typed 的裸名）。
+    // Exact hit on canonical name or bare alias (case-insensitive, same
+    // semantics as slashSuggestions' prefix filter). Return the declared
+    // skill.name so display keeps the original casing and later catalog.get
+    // receives the canonical name, not the user-typed bare one.
     if (skillHeadLowers(skill).includes(prefix)) {
-      // invariant 5：remainder 按**输入 token 长度**切（slashRemainder 即该
-      // 单一实现）—— 用 skill.name.length 会在裸名输入里吃掉 remainder 前缀。
+      // invariant 5: slice remainder by the *input token* length
+      // (slashRemainder is that single implementation) — using
+      // skill.name.length would eat into the remainder on bare-alias input.
       return { name: skill.name, remainder: slashRemainder(text) };
     }
   }
@@ -417,10 +435,11 @@ export function parseSkillLoad(
 }
 
 /**
- * #377 系列 /effort：可调思考强度档位（SSOT 派生 —— 不硬编码第二份列表）。
- * 复用 contract.ts 的 THINKING_EFFORT_VALUES（含 ""=自适应），过滤掉自适应档：
- * 用户只通过 /effort 显式选 concrete 档（low/medium/high/xhigh/max），
- * 缺省 / 关闭时回归自适应，不把 ""/auto 暴露成可选项。
+ * /effort: adjustable thinking-effort levels (derived from SSOT — no second
+ * hardcoded list). Reuses contract.ts's THINKING_EFFORT_VALUES (which
+ * includes ""=adaptive) and filters the adaptive level out: /effort lets
+ * users pick only concrete levels (low/medium/high/xhigh/max); default /
+ * off falls back to adaptive, ""/auto is never offered.
  */
 export const ADJUSTABLE_EFFORT_LEVELS: ReadonlyArray<
   Exclude<ThinkingEffortWire, "">
@@ -429,10 +448,11 @@ export const ADJUSTABLE_EFFORT_LEVELS: ReadonlyArray<
 );
 
 /**
- * #377 系列 /effort：解析 `/effort <level>` 的 level 部分（不含首 token 的剩余段）。
- * 参考 parseSkillLoad 的 remainder 模式：取首 token 之后剩余 → trim →
- * toLowerCase → 须命中 ADJUSTABLE_EFFORT_LEVELS（5 档 concrete，不含 ""）。
- * 空 / 缺参 / 不在集合 → undefined。
+ * /effort: parse the level part of `/effort <level>` (the remainder after
+ * the first token). Same remainder pattern as parseSkillLoad: take what
+ * follows the first token -> trim -> toLowerCase -> must hit
+ * ADJUSTABLE_EFFORT_LEVELS (concrete levels only, no "").
+ * Empty / missing / out-of-set -> undefined.
  */
 export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
   const text = raw.trim();
@@ -446,16 +466,18 @@ export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
 }
 
 /**
- * 首 token 之后的剩余段（trim 后）。`/effort <level>` / `/continue` /
- * `/graph on` 共用同一个切法。算法 SSOT 在 harness（`slashTailRemainder`）。
+ * The (trimmed) segment after the first token. Shared slicing for
+ * `/effort <level>`, `/continue` and `/graph on`. Algorithm SSOT is the
+ * harness's `slashTailRemainder`.
  */
 export function slashRemainder(raw: string): string {
   return slashTailRemainder(raw);
 }
 
 /**
- * `/effort <level>` 与 `/continue` 共用：首 token 之后剩余段是否非空。
- * /effort 需区分无参（开面板）与非法档；/continue 任何 args → usage EXIT。
+ * Shared by `/effort` and `/continue`: whether anything follows the first
+ * token. /effort must tell "no arg" (open panel) from an invalid level;
+ * /continue exits with a usage error on any args.
  */
 export function slashHasArg(raw: string): boolean {
   return slashRemainder(raw) !== "";
@@ -466,9 +488,10 @@ export function effortHasArg(raw: string): boolean {
 }
 
 /**
- * 任务 B：按候选列表 + 选中索引补全（PromptInput 内部 hintCursor 用）。
- * cursor 越界 / suggestions 为空 → null。返回 `/{cmd} ` 形式与
- * slashComplete 一致，调用方可直接覆盖 inputValue。
+ * Complete by candidate list + selected index (used by PromptInput's
+ * internal hintCursor). Out-of-range cursor / empty list -> null. The
+ * `/{cmd} ` form matches slashComplete, so callers can overwrite inputValue
+ * directly.
  */
 export function slashCompleteFromList(
   suggestions: ReadonlyArray<TuiSlashCommand>,
@@ -480,8 +503,9 @@ export function slashCompleteFromList(
   return `/${cmd} `;
 }
 
-/** #337 Phase C：SlashCandidate 版按 cursor 补全（静态命令 | skill 通用）。
- *  语义与 slashCompleteFromList 一致；skill 名原样保留（含连字符/点）。 */
+/** SlashCandidate version of cursor-based completion (static command |
+ *  skill). Same semantics as slashCompleteFromList; skill names kept as
+ *  declared (hyphens/dots included). */
 export function slashCompleteFromCandidates(
   suggestions: ReadonlyArray<SlashCandidate>,
   cursor: number
@@ -494,7 +518,7 @@ export function slashCompleteFromCandidates(
     : `/${candidate.name} `;
 }
 
-/** 给候选生成一行短描述的「补全提示行」（调用方负责渲染）。 */
+/** Build one-line hint rows (command + short description) for candidates; rendering is the caller's job. */
 export function slashHintLines(
   suggestions: ReadonlyArray<TuiSlashCommand>
 ): ReadonlyArray<SlashHintLine> {
@@ -506,8 +530,8 @@ export function slashHintLines(
 }
 
 /**
- * 任务 B：暴露候选短描述（PromptInput 内部渲染 hint 时用；保持外部
- * 调用方仍可走 slashHintLines 自渲）。
+ * Expose the candidate short descriptions (for PromptInput's internal hint
+ * rendering; external callers may still go through slashHintLines).
  */
 export const SLASH_HINT_DESCRIPTIONS: Readonly<
   Record<TuiSlashCommand, string>

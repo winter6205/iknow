@@ -1,42 +1,45 @@
 /**
- * src/tui/scrollbar-style.ts
+ * Look-and-feel policy for OpenTUI `<scrollbox>` vertical scrollbars: barely
+ * visible at rest, only colored on pointer hover.
  *
- * OpenTUI `<scrollbox>` 竖向滚动条的观感策略：常态极淡、指针移入才显色。
+ * Background: the scrollbar is fully OpenTUI-built (the app layer only
+ * overrides colors via `verticalScrollbarOptions`). The default thumb
+ * `#9a9ea3` is always opaque and the track `#252527` nearly matches the chat
+ * background — visually an always-lit white bar. This module squeezes it to
+ * "almost invisible at rest, obvious on hover"; the track stays invisible so
+ * the color change concentrates on the thumb.
  *
- * 背景：滚动条完全由 OpenTUI 内建（应用层只经 `verticalScrollbarOptions`
- * 覆盖颜色）。默认 thumb `#9a9ea3` 全程不透明、track `#252527` 与聊天背景
- * 近乎同色 —— 视觉上是一根常亮的白条。本模块把它压到「平时几乎看不见、
- * hover 才明显」，track 始终保持隐形，让显色变化集中在 thumb 上。
+ * Colors use 8-digit hex (`#RRGGBBAA`): OpenTUI slider rendering goes through
+ * `setCellWithAlphaBlending`, so alpha truly participates in blending
+ * (verified by in-frame pixel sampling) — not darkened colors faking
+ * transparency.
  *
- * 颜色走 8 位 hex（`#RRGGBBAA`）：OpenTUI 的滑块渲染经
- * `setCellWithAlphaBlending`，alpha 真正参与混合（已实测帧内取色验证），
- * 不是靠调深色调冒充透明。
- *
- * hover 由 scrollbar renderable 基类的 `onMouseOver` / `onMouseOut` 驱动
- * （`Slider` 自己只接 down/drag/up，不含 hover；见 `attachScrollbarHover`）。
+ * Hover is driven by the scrollbar renderable base class's `onMouseOver` /
+ * `onMouseOut` (the `Slider` itself only handles down/drag/up, no hover; see
+ * `attachScrollbarHover`).
  */
 
-/** 常态 thumb：极淡，仅留一丝位置暗示。 */
+/** Idle thumb: extremely faint, just a hint of position. */
 export const SCROLLBAR_THUMB_IDLE_ALPHA = 60;
-/** hover 态 thumb：显色（不透明，对比度拉满）。 */
+/** Hover thumb: full color (opaque, max contrast). */
 export const SCROLLBAR_THUMB_HOVER_ALPHA = 255;
 
-/** thumb 基色（中性亮灰，暗色终端下作前景穿透出来）。 */
+/** Thumb base color (neutral bright gray, pops as foreground on dark terminals). */
 const THUMB_RGB = [154, 158, 163] as const;
-/** track 基色：与聊天背景同色调，alpha 归零 = 完全隐形。 */
+/** Track base color: matches the chat background; alpha 0 = fully invisible. */
 const TRACK_RGB = [37, 37, 39] as const;
 
 function clampAlpha(alpha: number): number {
-  if (!Number.isFinite(alpha)) return 0; // EXIT: NaN|Infinity → 全透明，不误吞可见度
+  if (!Number.isFinite(alpha)) return 0; // EXIT: NaN|Infinity → fully transparent, never falsely gain visibility
   return Math.max(0, Math.min(255, Math.trunc(alpha)));
 }
 
-/** 小写 hex（与 theme.ts 调色板同款；OpenTUI 两种大小写都收）。 */
+/** Lowercase hex (same style as theme.ts palette; OpenTUI accepts either case). */
 function toHex(alpha: number): string {
   return clampAlpha(alpha).toString(16).padStart(2, "0");
 }
 
-/** `#rrggbbaa` —— RGB 取自基色三元组，alpha 由入参决定。 */
+/** `#rrggbbaa` — RGB taken from the base triplet, alpha from the argument. */
 function rgbaHex(
   rgb: readonly [number, number, number],
   alpha: number
@@ -52,19 +55,21 @@ function rgbaHex(
 }
 
 /**
- * 竖向滚动条 track（轨道）颜色：恒定全透明。
+ * Vertical scrollbar track color: always fully transparent.
  *
- * track 与聊天背景同色调，显形只会加噪音；「显色」语义全部交给 thumb。
- * 返回全 0 alpha 而非省略 —— 省略会回落 OpenTUI 默认 `#252527`（可见）。
+ * The track matches the chat background; showing it would only add noise —
+ * the "colorize" semantics belong entirely to the thumb. Returns alpha 0
+ * rather than omitting the option — omission falls back to OpenTUI's visible
+ * default `#252527`.
  */
 export function scrollbarTrackColor(): string {
   return rgbaHex(TRACK_RGB, 0);
 }
 
 /**
- * 竖向滚动条 thumb（滑块）颜色：`idle` 极淡 / `hover` 显色。
+ * Vertical scrollbar thumb color: `idle` faint / `hover` colored.
  *
- * @param hovered 指针当前是否停在滚动条上
+ * @param hovered whether the pointer currently rests on the scrollbar
  */
 export function scrollbarThumbColor(hovered: boolean): string {
   return rgbaHex(
@@ -74,11 +79,14 @@ export function scrollbarThumbColor(hovered: boolean): string {
 }
 
 /**
- * hover 挂载面：只需 `onMouseOver` / `onMouseOut` 两个可写槽。
+ * Hover mounting surface: needs only the two writable slots
+ * `onMouseOver` / `onMouseOut`.
  *
- * 方法简写（而非属性式函数类型）是有意的：OpenTUI 把槽声明为
- * `(event: MouseEvent) => void`，属性式写法在逆变下拒收，方法简写按双变
- * 接受 —— 本模块只写零参 handler，不需要也不该 import OpenTUI 的事件类型。
+ * Method shorthand (rather than property-style function types) is deliberate:
+ * OpenTUI declares the slots as `(event: MouseEvent) => void`; property style
+ * is rejected under contravariance while method shorthand is accepted under
+ * bivariance — this module writes only zero-arg handlers and neither needs
+ * nor should import OpenTUI's event types.
  */
 export interface ScrollbarHoverTarget {
   onMouseOver?(event: never): void;
@@ -86,13 +94,15 @@ export interface ScrollbarHoverTarget {
 }
 
 /**
- * 把指针进出映射到 `setHovered`，返回卸载函数。
+ * Map pointer enter/leave onto `setHovered`, return an uninstall function.
  *
- * `setHovered` 只在状态真正翻转时被调用 —— 终端把 `over` 事件按移动逐帧
- * 派发，不去重会让每次都触发无谓的 resize/redraw。
+ * `setHovered` is called only on real state flips — terminals dispatch `over`
+ * events per movement frame; without dedupe every frame would trigger a
+ * pointless resize/redraw.
  *
- * EXIT：target 缺 `onMouseOver`/`onMouseOut` 槽（非 OpenTUI 对象 / 桩）
- * 时返回 no-op 卸载函数，不抛错 —— 观感降级不该拖垮会话视图。
+ * EXIT: when target lacks the `onMouseOver`/`onMouseOut` slots (non-OpenTUI
+ * object / stub), return a no-op uninstall function instead of throwing —
+ * a degraded look must not take down the session view.
  */
 export function attachScrollbarHover(
   target: ScrollbarHoverTarget | null | undefined,
@@ -101,7 +111,7 @@ export function attachScrollbarHover(
   if (target == null || typeof target !== "object") return () => {}; // EXIT
   let hovered = false;
   const update = (next: boolean): void => {
-    if (next === hovered) return; // dedupe: 逐帧 move 不重放同一状态
+    if (next === hovered) return; // dedupe: per-frame moves must not replay the same state
     hovered = next;
     setHovered(next);
   };

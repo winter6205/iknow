@@ -2,50 +2,58 @@
 /**
  * src/tui/chat-view.tsx
  *
- * #343 T6-B：会话视图（OpenTUI 全内容滚动版，替代 T3 简化壳 + 终结 T5 ink
- * 行级窗口路径）。#986：本文件归零到 S5 hard-gate error 0、嵌套 ≤4、
- * ChatView complexity ≤10 —— 把折叠派生抽到 `turn-fold-lines.ts`、banner
- * 抽到 `transcript-banner.tsx`、挂载消息行抽到 `message-row.tsx`、尾部抽
- * 到 `transcript-tail.tsx`；本文件保留 hooks + memo 派生 + scrollbox 装配。
+ * Session view (OpenTUI full-content scrolling, superseding the earlier
+ * simplified shell and the ink line-window path). To keep ChatView within
+ * the S5 complexity gate (errors 0, nesting <= 4, complexity <= 10), the
+ * fold-line derivation lives in `turn-fold-lines.ts`, the banner in
+ * `transcript-banner.tsx`, mounted message rows in `message-row.tsx`, and
+ * the tail in `transcript-tail.tsx`; this file keeps hooks + memo derivations
+ * + scrollbox assembly.
  *
- * 滚动纪律（spec SC3 + D3 裁决，沿用 T3）：
- *  - 整体交给内建 `<scrollbox stickyScroll stickyStart="bottom">`——
- *    布局位置由 scrollbox 实测（scrollTop / scrollHeight / viewport.height，
- *    经 ChatViewHandle.scrollbox ref 直查），本文件不产任何行账 / 行窗口
- *    数学，也不估算消息行数（禁行计数零复发，archive 行级窗口全删除）。
- *  - sticky 智能模式：追加内容默认贴底跟随；用户上滚后停止跟随，滚回底部
- *    ±1 行容差后自动恢复。
- *  - 强制滚底通道：ChatViewHandle.scrollToBottom()。
+ * Scrolling discipline:
+ *  - everything goes through the built-in
+ *    `<scrollbox stickyScroll stickyStart="bottom">` — layout positions come
+ *    from scrollbox measurements (scrollTop / scrollHeight /
+ *    viewport.height via the ChatViewHandle.scrollbox ref); this file does no
+ *    line accounting / line-window math and never estimates message line
+ *    counts (the archived row-window modules are fully deleted).
+ *  - sticky smart mode: appended content follows the bottom by default;
+ *    scrolling up stops following, and returning within +/-1 row of the
+ *    bottom resumes automatically.
+ *  - Forced bottom channel: ChatViewHandle.scrollToBottom().
  *
- * 渲染内容（scrollbox 内全部内容，水平整宽，垂直自滚）：
- *  - banner 段（若提供 props.bannerLines）：首段，与消息共享 scroll space。
- *    实现由 `<TranscriptBanner>` 承担。
- *  - **视口挂载**（`transcript-viewport.ts`）：session 全量仍在
- *    `session.messages`；OpenTUI 树只挂视口+overscan 内的消息，spacer 撑住
- *    `scrollHeight`。禁止固定条数尾窗 / 行账。Live tail 不进虚拟化集合。
- *    视口窗口的 scrollTop 来自 `verticalScrollBar` 的 `change` 事件
- *    （赋值 scrollTop 会间接 emit）；禁止 patch setter / rAF 轮询。
- *  - 每条 **已 mount** 消息 → `<MessageRow>`（透传 visibleIndex /
- *    foldLinesBySegmentIndex / 派生 messageSegments）。
- *  - tail（流式 thinking / draft 面板 + liveToolRuns + legacy liveToolLines
- *    + askLine + spinner）：由 `<TranscriptTail>` 承担。
+ * Rendered content (everything inside the scrollbox, full width, self-scrolling):
+ *  - banner section (when props.bannerLines provided): first segment, sharing
+ *    the scroll space with messages; implemented by `<TranscriptBanner>`.
+ *  - **Viewport mounting** (`transcript-viewport.ts`): the full session stays
+ *    in `session.messages`; the OpenTUI tree mounts only messages inside the
+ *    viewport + overscan, with spacers holding up `scrollHeight`. No fixed
+ *    tail-window counts / row math. The live tail is not part of the
+ *    virtualized collection. The viewport window's scrollTop comes from the
+ *    `verticalScrollBar` `change` event (assigning scrollTop emits it too);
+ *    patching the setter / rAF polling is forbidden.
+ *  - each **mounted** message → `<MessageRow>` (passing visibleIndex /
+ *    foldLinesBySegmentIndex / derived messageSegments).
+ *  - tail (streaming thinking / draft panels + liveToolRuns + legacy
+ *    liveToolLines + askLine + spinner): handled by `<TranscriptTail>`.
  *
- * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
- *  - **历史消息里的 preview**：在 `<MessageRow>` 内部走
- *    `MessageBlocks.ToolPreviewRows` → `CompletedToolPreviewView`；
- *  - **live tail**：`<TranscriptTail>` 走 `liveToolPreviewBox` 路径。
+ * Tool-output expansion location:
+ *  - **previews inside historical messages**: rendered inside
+ *    `<MessageRow>` via `MessageBlocks.ToolPreviewRows` →
+ *    `CompletedToolPreviewView`;
+ *  - **live tail**: `<TranscriptTail>` takes the `liveToolPreviewBox` path.
  *
- * 流式并发防御（spec SC8）：`draftSegments` 与 `thinkingDraftMasked` 经
- * useDeferredValue — 高频更新降级低优先级，与 app 层 startTransition 构成
- * 双向防御。T3 已实现，T6-B 沿用。
+ * Streaming concurrency defense: `draftSegments` and `thinkingDraftMasked`
+ * pass through useDeferredValue — high-frequency updates downgrade to low
+ * priority, forming two-way defense with the app-layer startTransition.
  *
- * 禁（与 archive 行级窗口正交）：
- *  - 行计数 / 行窗口数学；
- *  - markdown-lines / message-rows / row-window / chat-flow（已归档行账模块）；
- *  - 镜像渲染树（同一组件既走 MessageBlocks 又走 Clipped 路径）；
- *  - selection / onWindow / HighlightedLine（OpenTUI renderer 处理选区）。
+ * Forbidden (orthogonal to the archived row-window):
+ *  - line counting / line-window math;
+ *  - markdown-lines / message-rows / row-window / chat-flow (archived row-accounting modules);
+ *  - mirror render trees (one component taking both MessageBlocks and Clipped paths);
+ *  - selection / onWindow / HighlightedLine (the OpenTUI renderer handles selection).
  *
- * ChatViewHandle 保留：scrollToBottom + scrollbox ref 直查。
+ * ChatViewHandle stays: scrollToBottom + scrollbox ref direct query.
  */
 import {
   forwardRef,
@@ -106,58 +114,67 @@ import type { TurnActivitySegment } from "./turn-activity.js";
 
 export interface ChatViewHandle {
   /**
-   * 强制滚底（用户发新消息 / turn 完成时 app 层调用）：scrollTop 直达
-   * scrollHeight - viewport 底，sticky 状态随之复位，后续追加恢复跟随。
+   * Force scroll to bottom (called by the app layer when the user sends a new
+   * message / a turn completes): scrollTop goes straight to
+   * scrollHeight - viewport, sticky state resets accordingly, and subsequent
+   * appends resume following.
    */
   scrollToBottom(): void;
   /**
-   * scrollbox renderable 直查入口（布局实测 SSOT）：scrollTop /
-   * scrollHeight / viewport.height / scrollBy / scrollTo。未挂载时为 null。
+   * Direct query entry to the scrollbox renderable (layout-measurement SSOT):
+   * scrollTop / scrollHeight / viewport.height / scrollBy / scrollTo. Null before mount.
    */
   readonly scrollbox: ScrollBoxRenderable | null;
 }
 
 export interface ChatViewProps {
-  /** 会话状态机（T6-A 已迁入）。消息 + runState + 流式边界。 */
+  /** Session state machine. Messages + runState + streaming boundaries. */
   readonly session: TuiSessionState;
-  /** specs/tui-subagent-transcript-live.md：子代理只读投影（app 层 1Hz 轮询
-   *  的 `bridge.listSubagents()`）。本组件按 `toolUseId` join 到 spawn 卡；
-   *  缺省 / 空 → 卡片与改前逐字节一致（历史卡单行摘要、live 卡既有形态）。 */
+  /** Read-only subagent projection (the app layer's 1Hz polling of
+   *  `bridge.listSubagents()`). This component joins by `toolUseId` onto the
+   *  spawn card; absent / empty → cards stay byte-identical to before (single-
+   *  line summaries for history cards, existing shape for live cards). */
   readonly subagents?: ReadonlyArray<SubagentInfo>;
-  /** 滚动区宽度（终端列宽）。 */
+  /** Scroll area width (terminal columns). */
   readonly cols: number;
-  /** 滚动区高度预算（输入框 / 状态栏在 app 层另行固定挂载）。 */
+  /** Scroll area height budget (input box / status bar are mounted separately at the app layer). */
   readonly rows: number;
   /**
-   * turn 进行中逐条出现的工具事件文案（legacy formatLiveToolEvent 字符串行）。
-   * liveToolRuns 已结构化时退化为尾部补充（与结构化共存，向后兼容）。
+   * Per-event tool lines appearing during a turn (legacy formatLiveToolEvent
+   * string lines). When liveToolRuns is structured this degrades to a tail
+   * supplement (coexists with the structured form; kept for backward compat).
    */
   readonly liveToolLines: ReadonlyArray<string>;
   /**
-   * T4 (#175)：结构化工具调用实时状态。运行中条目按 `[运行中] name` 渲染，
-   * 已完成条目按统一 diff 预览。liveToolReduce 维护顺序；缺省 = 空数组。
+   * Structured real-time tool-call state. Running entries render as
+   * `[运行中] name`; completed entries use the unified diff preview.
+   * liveToolReduce maintains order; default = empty array.
    */
   readonly liveToolRuns?: ReadonlyArray<LiveToolRun>;
-  /** 流式累积的 masked 助手文本（草稿）。running-fg 渲染于 spinner 之前。
-   *  单段兼容：未传 draftSegments 时当作一段。 */
+  /** Streaming-accumulated masked assistant text (draft). Rendered before the
+   *  spinner while running-fg. Single-segment compat: draftsMasked alone is
+   *  treated as one segment. */
   readonly draftsMasked?: string;
-  /** 按 seal 切开的草稿段。有值时优先于 draftsMasked，与 liveToolRuns
-   *  的 draftEpoch 交错渲染。 */
+  /** Draft segments split by seal. When present it takes precedence over
+   *  draftsMasked and interleaves with liveToolRuns by draftEpoch. */
   readonly draftSegments?: ReadonlyArray<string>;
-  /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
+  /** Streaming thinking draft masked text. thinkingExpanded decides collapsed / expanded. */
   readonly thinkingDraftMasked?: string;
-  /** 最近一次完成 turn 的运行秒数快照（app 层 runTurnOnce finally 写入
-   *  crunchedOf === activeKey 时传）。在消息流末尾渲染 `Crunched for X`，
-   *  会话结束后显示，运行中清空（app 层管理 crunchedOf 归属，ChatView 仅做
-   *  条件渲染）。缺省 undefined → 不渲染。 */
+  /** Runtime-seconds snapshot of the most recent completed turn (written by
+   *  the app layer's runTurnOnce finally when crunchedOf === activeKey).
+   *  Renders `Crunched for X` at the end of the message stream: shown after
+   *  the session ends, cleared while running (the app layer owns crunchedOf
+   *  attribution; ChatView only conditionally renders). Undefined → not
+   *  rendered. */
   readonly crunchedSeconds?: number;
-  /** askUser 待决提示（undefined = 无 pending ask）。 */
+  /** askUser pending prompt (undefined = no pending ask). */
   readonly askLine?: string;
-  /** thinking 折叠面板展开态（false = 隐藏 thinking 明文）。 */
+  /** thinking collapse-panel expanded state (false = hide thinking plaintext). */
   readonly thinkingExpanded?: boolean;
   /**
-   * 方案 B：banner 作为滚动区首段内容（与消息共享 scroll space）。
-   * 眼睛放得下时由 banner.ts 画 13 行完整眼；只有点阵本身放不下才单行。
+   * Banner as the scroll area's first segment (sharing the scroll space with
+   * messages). When the eye fits, banner.ts draws the full 13-line eye; only
+   * when the dot matrix itself does not fit does it fall back to one line.
    */
   readonly bannerLines?: ReadonlyArray<string>;
 }
@@ -180,12 +197,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       setScrollbarHovered,
       setScrollTop,
       ref,
-      // 会话切换时 itemHeights / scrollTop 重置（见上）——提交量化游标
-      // 必须一起重置：旧会话的游标会让新会话首个亚阈值 change 被判为
-      // 「未跨步长」而丢弃，新窗口停在旧位置。
+      // On session switch itemHeights / scrollTop reset (see above) — the
+      // commit-quantization cursor must reset too: a cursor from the old
+      // session would classify the new session's first sub-threshold change as
+      // "step not crossed" and drop it, leaving the new window stuck at the
+      // old position.
       conversationId,
     });
-    // 并发防御：流式草稿高频更新走低优先级（SC8 — spec 同款）。
+    // Concurrency defense: high-frequency streaming drafts update at low priority.
     const draftSegments = useMemo((): ReadonlyArray<string> => {
       if (props.draftSegments !== undefined) {
         return props.draftSegments;
@@ -199,46 +218,55 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const deferredThinkingDrafts = useDeferredValue(
       props.thinkingDraftMasked ?? ""
     );
-    // statusMap = tool_result 精确配对（与 T6 ToolSummaryRow 状态染色同一 SSOT）。
-    // useMemo 稳定下游 props：messages 引用变化时才重算，避免每次 render 产新
-    // Map 导致 MessageBlocks 引用 props 变化触发下游重渲染（解决间距抖动）。
+    // statusMap = exact tool_result pairing (same SSOT as ToolSummaryRow status coloring).
+    // useMemo stabilizes downstream props: recompute only when the messages
+    // reference changes, so every render does not produce a new Map and churn
+    // MessageBlocks reference props into downstream re-renders (fixes spacing jitter).
     const statusMap = useMemo(
       () => toolResultStatusMap(props.session.messages),
       [props.session.messages]
     );
-    // #693 T4 D4:resultTextMap = tool_use_id → tool_result 文本（历史结果预览
-    // 数据源）。同源 useMemo 稳定（与 statusMap 同纪律）。
+    // resultTextMap = tool_use_id → tool_result text (data source for
+    // historical result previews). Same-source useMemo stabilization (same
+    // discipline as statusMap).
     const resultTextMap = useMemo(
       () => toolResultTextMap(props.session.messages),
       [props.session.messages]
     );
     const running = props.session.runState === "running-fg";
     const thinkingExpanded = props.thinkingExpanded === true;
-    // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
+    // Message content width leaves room for the scrollbar / safe margin
+    // (scrollbox-measured; no line-count estimation).
     const contentWidth = Math.max(1, props.cols - 2);
     const liveToolRuns = props.liveToolRuns ?? [];
-    // specs/tui-subagent-transcript-live.md：卡级两行投影（toolUseId → 两行）。
-    // 一次投影喂两个宿主（历史卡 MessageRow→MessageBlocks 与 live tail
-    // liveToolRunsBox），四条消费规则同源不漂移。
+    // Card-level two-line projection (toolUseId → two lines). One projection
+    // feeds both hosts (history cards via MessageRow→MessageBlocks, and the
+    // live tail via liveToolRunsBox); the four consumption rules stay single-
+    // source and cannot drift.
     //
-    // 依赖是**内容签名**（不是数组引用）：app 层 1Hz 轮询每次 setSubagents 都
-    // 产新数组，用引用做依赖会每秒产新 Map → 下游 memo 化的历史消息块
-    // （MessageBlocks 浅比较 subagentCards）每秒全量重建元素树。
+    // The dependency is a **content signature** (not the array reference):
+    // the app layer's 1Hz polling produces a new array on every setSubagents,
+    // and using the reference as dependency would create a new Map each
+    // second → the memoized downstream history blocks (MessageBlocks shallow-
+    // compares subagentCards) would rebuild their whole element tree every
+    // second.
     const subagentsKey = subagentCardsKey(props.subagents ?? []);
     const subagentCards = useMemo(
       () => subagentCardLinesMap(props.subagents ?? [], contentWidth),
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上：签名即内容
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- see above: the signature is the content
       [subagentsKey, contentWidth]
     );
-    // T3（plans/tui-tool-rhythm.md）：live 相邻 keep 卡之间空一行 ——
-    // 卡间距收敛在 liveToolRunsBox 内（历史侧 MessageBlocks 各块自带节奏）。
+    // Live-adjacent keep cards get one blank row between them — the spacing
+    // converges inside liveToolRunsBox (history-side MessageBlocks gives each
+    // block its own rhythm).
     const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
       liveToolRunsBox(runs, contentWidth, subagentCards);
     const bannerLines = props.bannerLines ?? [];
-    // visible 列表会丢掉 agent_status / drain 等隐藏 user 消息，下标比
-    // 盘上短。所有 thinkingMs 查找必须映射回 sourceIndex，否则
-    // `Thought for` 读到 null 槽，折叠行消失，hideThinking 又把消息框
-    // 里的摘要掐掉。
+    // The visible list drops hidden user messages (agent_status / drain), so
+    // it is shorter than the on-disk array. All thinkingMs lookups must map
+    // back to sourceIndex, otherwise `Thought for` reads a null slot, the
+    // fold line disappears, and hideThinking then clips the summary out of the
+    // message box too.
     const visibleEntries = useMemo(
       () =>
         props.session.messages
@@ -288,67 +316,76 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       visibleMessages,
       itemHeights,
     ]);
-    // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合成功且
-    // retract 的件 —— resolver 从 statusMap（tool_use_id → 是否失败）派生每件
-    // 的 slot；未配对（live running / cancelled）不进计数。
-    // `useMemo` 包裹：闭包每 render 都是新引用，下面 `activitySegments` 的
-    // useMemo 依赖它，没稳定就每次 render 都重算。
-    // 有意不复用 `deriveSlot(...).inFoldCount`（SSOT 分叉声明）：本 resolver
-    // 消费的是**块计数口径** —— live-signal revision #3/#8 把「未配对 =
-    // 仍 running 的 noise」也算入（history 里仍在跑的噪音要 calling），
-    // 而 `deriveSlot` 是**卡片 slot 口径**（未配对 = running 卡）。两口径
-    // 在未配对上不同是合同要求，不是漂移；`isLiveNoise` 是两边共享的
-    // 类判定单源。
+    // Fold counting aggregates only successful retract-class tools — the
+    // resolver derives each item's slot from statusMap (tool_use_id →
+    // failed?); unpaired ones (live running / cancelled) do not enter the
+    // count. Wrapped in `useMemo`: the closure would otherwise be a new
+    // reference every render, and the `activitySegments` useMemo below depends
+    // on it, so without stabilization everything recomputes per render.
+    // Deliberately not reusing `deriveSlot(...).inFoldCount` (declared SSOT
+    // fork): this resolver consumes the **block-counting caliber** — the
+    // live-signal revision also counts "unpaired = still-running noise" (noise
+    // still running in history must show as calling), while `deriveSlot` is
+    // the **card-slot caliber** (unpaired = running card). The two calibers
+    // differing on unpaired items is contractual, not drift; `isLiveNoise` is
+    // the shared single-source class decision for both.
     const inFoldCountOf = useMemo(
       () =>
         (
           call: Readonly<{ readonly id: string; readonly name: string }>
         ): boolean => {
-          // live-signal revision #3/#4：只数 live noise（spec Never「不另
-          // 造第二套分类表」）。web_search / web_fetch 永不进 `calling`/
-          // `called`：TOOL_SETTLED_CLASS 仍归 retract（计数口径不变），
-          // 但 live signal 实卡路径不走块计数。
+          // Only live-noise names count (never invent a second classification
+          // table). web_search / web_fetch never enter `calling`/`called`:
+          // TOOL_SETTLED_CLASS still classifies them retract (counting caliber
+          // unchanged), but the live-signal card path does not go through
+          // block counting.
           if (isLiveNoise(call.name)) {
-            if (!statusMap.has(call.id)) return true; // 未配对 = running
+            if (!statusMap.has(call.id)) return true; // unpaired = running
             return (
-              statusMap.get(call.id) !== true // 失败横切
+              statusMap.get(call.id) !== true // failures cut across
             );
           }
           return false;
         },
       [statusMap]
     );
-    // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
-    // lastTurnSlice;`activitySegments` 从 0 起构建(0 = 首条 user query 之前的
-    // assistant 起步;无 query → 全历史)。
+    // Folding applies to the whole turn history — no more slicing to
+    // lastTurnSlice; `activitySegments` builds from 0 (0 = starting at the
+    // assistant before the first user query; no query → full history).
     const activitySegments = useMemo(
       () => orderedTurnActivitySegments(visibleMessages, 0, { inFoldCountOf }),
       [visibleMessages, inFoldCountOf]
     );
-    // plans/tui-live-activity-fold.md T3：**已画 foldLinesBySegmentIndex 是
-    // 唯一折叠存在信号** —— 删除了整轮 `currentTurnHasFold` /
-    // `currentTurnHasThinkingFold` 面板闸与 `foldDisplayLines.length` 折叠闸
-    // （turn 级布尔会把当前 **open unit** 的思考面板与过程组一起吞掉）。
+    // The already-drawn foldLinesBySegmentIndex is the **only** signal that a
+    // fold exists — the whole-turn `currentTurnHasFold` /
+    // `currentTurnHasThinkingFold` panel gates and the `foldDisplayLines.length`
+    // fold gate were deleted (a turn-level boolean would swallow the current
+    // **open unit**'s thinking panel together with the progress group).
     //
-    // T3/T5：tail 只剔除**已在历史里**的 tool_use id（同一条只画一次）；不再
-    // 按「本轮已折叠」二次过滤 —— 那是与 reducer 直删叠加的双删。
+    // The tail removes only tool_use ids **already present in history** (draw
+    // each row once); it no longer second-filters by "already folded this
+    // turn" — that was a double delete stacked onto the reducer's direct deletion.
     const turnLiveRuns = useMemo(() => {
       const historyToolUseIds = toolUseIdsOf(visibleMessages);
       return liveToolRuns.filter((run) => !historyToolUseIds.has(run.id));
     }, [liveToolRuns, visibleMessages]);
-    // T7（specs/tui-activity-block.md / plans T7）：退役 `formatLiveActivitySummary`
-    // / `splitLiveActivityRuns` 的生产调用面 —— 过程块（unanchoredBlocks）
-    // 是进行中**收类**与 keep / 聚合 bash 的唯一时态（spec S4/S6）。idle
-    // 落定仍走块计数（活动块 settled 态），unit fold 旧路径不再叠画。
-    // T4–T7 (specs/tui-activity-block.md)：过程块 = 块标题 + 正文槽；块列表
-    // 走 `deriveActivityBlocks` 派生，结果按 messageIndex 分组直接喂 MessageRow。
-    // `visibleStart` 之前的历史 assistant 不参与活动投影；本切片以 visibleStart=0
-    // 起算（与 activitySegments 同源）。
+    // Retired `formatLiveActivitySummary` / `splitLiveActivityRuns` from the
+    // production call surface — activity blocks (unanchoredBlocks) are the
+    // sole live tense for in-progress **class collapse** and keep / aggregated
+    // bash. Idle settling still goes through block counting (settled state of
+    // activity blocks); the old unit-fold path never stacks on top.
+    // Activity blocks = block titles + body slots; the block list is derived
+    // via `deriveActivityBlocks`, and results are grouped by messageIndex to
+    // feed MessageRow directly. History assistant messages before
+    // `visibleStart` do not participate in the activity projection; this
+    // slice computes with visibleStart=0 (same source as activitySegments).
     //
-    // T4 live-signal revision：思考正文活在 unanchored 活动块的正文槽里 —
-    // — ThinkingPanel 组件已退役；liveThinking 闸恢复「draft 非空」语义。
-    // 任意 tool running（含同一 burst 内后续工具）不再关思考 —— 锁句 7。
-    // 抽到函数外：父组件 cc 由 11 → 9（避免触碰 s5 hard gate）。
+    // Thinking body text lives in the unanchored activity block's body slot —
+    // the ThinkingPanel component is retired; the liveThinking gate keeps the
+    // "draft non-empty" meaning. Any tool running (including later tools in
+    // the same burst) no longer closes thinking.
+    // Hoisted out of the parent component to keep its cyclomatic complexity
+    // under the S5 hard gate.
     const liveThinking = liveThinkingFromDraft(
       running,
       props.thinkingDraftMasked
@@ -360,9 +397,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           visibleStart: 0,
           visibleCount: visibleMessages.length,
           thinkingMsAtVisible,
-          // 已进 transcript 的 tool_use 仍可能 running：必须把完整 liveRuns
-          // 交给派生（resolveLiveRunning）。unanchored 追加在 derive 内排除
-          // 历史 id，避免 calling 双画。tail 卡仍用 turnLiveRuns。
+          // tool_use items already in the transcript may still be running:
+          // the full liveRuns must go to the derivation (resolveLiveRunning).
+          // unanchored appends exclude history ids inside derive to avoid
+          // double-drawing calling. Tail cards still use turnLiveRuns.
           liveRuns: liveToolRuns,
           liveThinking,
           inFoldCountOf,
@@ -375,27 +413,31 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         liveThinking,
       ]
     );
-    // 块覆盖的 ms 值集合（hideThinking 双门用）。T7：旧 `foldLinesBySegmentIndex`
-    // 路径整体退役 —— hideThinking 的 `shownThinkingMsValues` 双门只剩块列表
-    // 一路，不再需要并集。
+    // Set of ms values covered by blocks (for the hideThinking dual gate).
+    // The old `foldLinesBySegmentIndex` path is fully retired — hideThinking's
+    // `shownThinkingMsValues` gate has only the block list left, no union needed.
     const mergedShownThinkingMsValues =
       activityBlockFoldLines.shownThinkingMsValues;
-    // T4–T7：旧 `foldLinesBySegmentIndex`（unit fold 行）整体退役 —— 块列表
-    // （`buildActivityBlockFoldLines`）是折叠的唯一来源；这里传空 map 让
-    // ChatScrollbox 走「块列表 → MessageRow → renderBlockTitles」单一路径，
-    // 不再画双行（`Thought for Ns · read_file × 1` 旧行 + `Thought for Ns` 新行）。
+    // The old `foldLinesBySegmentIndex` (unit-fold lines) is retired entirely —
+    // the block list (`buildActivityBlockFoldLines`) is the single source of
+    // folding; passing an empty map here routes ChatScrollbox through the one
+    // path (block list → MessageRow → renderBlockTitles) and never draws
+    // double lines (old `Thought for Ns · read_file × 1` + new `Thought for Ns`).
     const foldLinesBySegmentIndex: FoldLinesBySegmentIndex = useMemo(
       () => new Map(),
       []
     );
-    // 细节槽 / 过程组：收类件进过程组计数，running 件占据唯一细节槽，其余逐条。
-    // T4 live-signal：ThinkingPanel 已退役（思考活在 unanchored 块正文槽）。
-    // 此处不再派生 `showThinkingPanel`，TranscriptTail 也不再接受该 prop。
-    // T7（specs/tui-activity-block.md / plans T7）：过程块（unanchoredBlocks）
-    // 取代旧 `live activity group` 双时态 —— `formatLiveActivitySummary` /
-    // `splitLiveActivityRuns` 不再被生产代码调用；同批 retract 只在块 called
-    // 计数出现一次。`liveTailSlots` 仍承担**逐条面**（draftEpoch 错开工具组
-    // 与草稿段，详情见 transcript-tail.tsx）。
+    // Detail slot / progress group: collapsed-class items enter the progress-
+    // group count, running items occupy the single detail slot, the rest go
+    // one-by-one. ThinkingPanel is retired (thinking lives in the unanchored
+    // block's body slot), so no `showThinkingPanel` is derived here and
+    // TranscriptTail no longer accepts that prop.
+    // Activity blocks replace the old live-activity-group double tense —
+    // `formatLiveActivitySummary` / `splitLiveActivityRuns` are no longer
+    // called by production code; same-batch retract appears exactly once in
+    // block called-counting. `liveTailSlots` still handles the **per-item
+    // surface** (draftEpoch interleaves tool groups with draft segments;
+    // details in transcript-tail.tsx).
     const tailSlots = useMemo(
       () => liveTailSlots(turnLiveRuns, deferredSegments),
       [turnLiveRuns, deferredSegments]
@@ -432,10 +474,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
 );
 
 /**
- * 视口挂载行高度量测（#986 — 从 ChatView 抽出）。每条挂载消息根节点的
- * DOM id 是 `tmsg-${i}`（`MessageRow` 内 id 契约）；本函数按可见下标
- * 通过 `scrollbox.getRenderable` 读真实高度，写回 itemHeights。变更才
- * 触发 setState，避免无谓重渲染。
+ * Height measurement for viewport-mounted rows (hoisted out of ChatView).
+ * Each mounted message's root node DOM id is `tmsg-${i}` (the id contract
+ * inside `MessageRow`); this function reads real heights via
+ * `scrollbox.getRenderable` by visible index and writes them back to
+ * itemHeights. setState fires only on change, avoiding pointless re-renders.
  */
 function measureMountedHeights(
   sb: ScrollBoxRenderable | null,
@@ -460,18 +503,19 @@ function measureMountedHeights(
 }
 
 /**
- * scrollbox 元素 + ref 绑定（#986 — 从 ChatView 抽出）。两个
- * `useLayoutEffect`（scrollTop 追踪 + scrollbar hover 绑定）与
- * `useImperativeHandle`（ChatViewHandle 暴露 scrollToBottom +
- * scrollbox 直查）。承载 invariant：scrollbox 元素与 ref 绑定由
- * ChatView 顶层无条件调用，不得挪到 render helper。
+ * Scrollbox element + ref bindings (hoisted out of ChatView). Two
+ * `useLayoutEffect`s (scrollTop tracking + scrollbar hover binding) and
+ * `useImperativeHandle` (ChatViewHandle exposes scrollToBottom + scrollbox
+ * direct query). Carried invariant: the scrollbox element and ref bindings
+ * are called unconditionally at ChatView's top level and must not move into
+ * a render helper.
  */
 function useScrollboxBindings(args: {
   readonly sbRef: { current: ScrollBoxRenderable | null };
   readonly setScrollbarHovered: (hovered: boolean) => void;
   readonly setScrollTop: (next: number | ((prev: number) => number)) => void;
   readonly ref: React.Ref<ChatViewHandle>;
-  /** 当前会话 id；变化 = 换会话 → 重订阅并复位量化游标（见调用处）。 */
+  /** Current session id; changing it = switching sessions → resubscribe and reset the quantization cursor (see call site). */
   readonly conversationId: string | undefined;
 }): void {
   const { sbRef, setScrollbarHovered, setScrollTop, ref, conversationId } =
@@ -512,7 +556,7 @@ function useScrollboxBindings(args: {
       committed = next;
       setScrollTop((prev) => (prev === next ? prev : next));
     });
-    // hover 槽挂在 scrollbar renderable 上（Slider 自身只接 down/drag/up）。
+    // The hover slot attaches to the scrollbar renderable (Slider itself only accepts down/drag/up).
     const stopHover = attachScrollbarHover(
       sb.verticalScrollBar,
       setScrollbarHovered
@@ -535,13 +579,15 @@ function useScrollboxBindings(args: {
 }
 
 /**
- * `<scrollbox>` 渲染（#986 — 从 ChatView 抽出）。所有分支（banner /
- * spacerBefore / mounted map / TranscriptTail）与 props 透传集中到本组件，
- * ChatView 顶层只剩 hook 装配 + memo 派生，complexity 落回 ≤10。
+ * The `<scrollbox>` render (hoisted out of ChatView). All branches (banner /
+ * spacerBefore / mounted map / TranscriptTail) and props pass-through
+ * concentrate in this component; ChatView's top level keeps only hook wiring
+ * + memo derivations, bringing complexity back to <= 10.
  *
- * props 全是 ChatView 已派生 / useMemo 稳定的引用（statusMap /
- * resultTextMap / visibleMessages / foldLinesBySegmentIndex 等），本组件
- * 只挂 JSX，不再派生。
+ * Every prop is an already-derived / useMemo-stabilized reference from
+ * ChatView (statusMap / resultTextMap / visibleMessages /
+ * foldLinesBySegmentIndex etc.); this component only mounts JSX and derives
+ * nothing.
  */
 function ChatScrollbox(props: {
   readonly sbRef: { current: ScrollBoxRenderable | null };
@@ -553,9 +599,9 @@ function ChatScrollbox(props: {
   readonly contentWidth: number;
   readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
   readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  /** T4–T7 + Thinking-at-bottom revision 锁句 4：活动块行按 messageIndex
-   *  分组（含锚点）。MessageBlocks 据此把标题按锚点插进内容顺序（跨消息
-   *  不合并合同）。 */
+  /** Activity-block lines grouped by messageIndex (anchors included; the
+   *  Thinking-at-bottom revision contract). MessageBlocks uses this to insert
+   *  titles into content order per anchor (no cross-message merging). */
   readonly blockLinesByMessage: ReadonlyMap<
     number,
     ReadonlyArray<ActivityBlockLine>
@@ -563,8 +609,8 @@ function ChatScrollbox(props: {
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
-  /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
-   *  （ChatView 单次 `subagentCardLinesMap` 产出，历史卡与 live 卡共用）。 */
+  /** toolUseId → subagent card two-line projection (produced once by
+   *  ChatView's `subagentCardLinesMap`, shared by history and live cards). */
   readonly subagentCards: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
   readonly thinkingMsAtVisible: ThinkingMsAtVisible;
@@ -649,8 +695,10 @@ function ChatScrollbox(props: {
   );
 }
 
-/** 思考在流判定：draft 非空 + turn 进行中 —— 锁句 7 之后该闸不再受
- *  tool running 影响，迁到纯函数避免父组件 cc 越过 s5 hard gate。 */
+/** Live-thinking gate: draft non-empty + turn in progress — after the
+ *  tool-running lock was lifted this gate no longer reacts to running tools;
+ *  hoisted to a pure function so the parent's cyclomatic complexity stays
+ *  under the S5 hard gate. */
 function liveThinkingFromDraft(
   running: boolean,
   thinkingDraftMasked: string | undefined

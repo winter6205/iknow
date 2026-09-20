@@ -2,15 +2,19 @@
 /**
  * src/tui/completed-tool-preview-view.tsx
  *
- * 完成态 write/edit 预览的共用渲染（代码行 / 截断 DiffView / 溢出文案）。
- * live box 与历史 `ToolPreviewRows` 都走这里，避免两处复制 JSX。
- * 数据 SSOT 仍是 `completedToolPreview`；本文件只渲染。
+ * Shared rendering for completed write/edit previews (code lines / truncated
+ * DiffView / overflow label). Both the live box and the historical
+ * `ToolPreviewRows` come through here instead of duplicating the JSX. The
+ * data SSOT stays `completedToolPreview`; this file only renders.
  *
- * #693 T4 D4:扩 resultPreview —— 标题行下方的 dim 尾部预览
- * （bash / skill 等子进程输出，行数由共享 result preview 合同定）。live + 历史共用同一渲染面。
- * 失败由 caller 在外层包 error 色 token 体现；preview 文本本身不变。
+ * Extended with resultPreview —— a dim tail preview below the title row
+ * (subprocess output for bash / skill etc.; line count is set by the shared
+ * result-preview contract). Live and history share the same render surface.
+ * Failure is applied by the caller wrapping an error-color token outside;
+ * the preview text itself never changes.
  *
- * 正文 gutter：单条 `│`（装饰 dim）；溢出 `… +N 行` 不加 gutter / 不加 `>`。
+ * Body gutter: a single `│` (decorative dim); the overflow label carries no
+ * gutter and no `>`.
  */
 import type { ReactNode } from "react";
 import {
@@ -23,10 +27,10 @@ import { DiffView, diffRowTexts } from "./diff-view.js";
 import { CodeBlock } from "./markdown.js";
 import { tuiPalette } from "./theme.js";
 
-/** 结果预览正文 gutter（spec D4 dim 装饰）。一条 `│`，不再每行 `>`。 */
+/** Result-preview body gutter (dim decoration). One `│`, no per-line `>` anymore. */
 const RESULT_PREVIEW_PREFIX = "│";
 
-/** 结果预览行（带 │ gutter），供行账（liveToolPreviewRows）与渲染同源。 */
+/** Result-preview lines (with │ gutter), same source for the row account (liveToolPreviewRows) and rendering. */
 export function resultPreviewTextLines(preview: ResultPreview): string[] {
   if (preview.kind === "empty") return [];
   const out: string[] = [];
@@ -39,8 +43,9 @@ export function resultPreviewTextLines(preview: ResultPreview): string[] {
   return out;
 }
 
-/** 完成态预览的纯文本行（行账 / live text lines 与 JSX 同源）。
- *  挤档（D5）无正文行 —— 标题行由调用方拼装（`squeezeWriteSummary`）。 */
+/** Plain text lines of the completed preview (row account / live text lines share
+ *  one source with the JSX). The squeeze mode has no body lines —— its title row
+ *  is assembled by the caller (`squeezeWriteSummary`). */
 export function completedToolPreviewTextLines(
   preview: CompletedToolPreview,
   cols: number
@@ -56,13 +61,13 @@ export function completedToolPreviewTextLines(
   return lines;
 }
 
-/** 完成态 write/edit 预览节点：代码行（新建 10 行 + `+N more lines`）或
- *  本次改动 DiffView（不截断）。挤档（D5）由调用方走 `squeezeWriteSummary`
- *  的标题行，本节点不渲染。 */
+/** Completed write/edit preview node: code lines (first lines on create +
+ *  overflow label) or this change's DiffView (untruncated). Squeeze mode goes
+ *  through the caller's `squeezeWriteSummary` title row; this node renders nothing. */
 export function CompletedToolPreviewView(props: {
   readonly preview: CompletedToolPreview;
   readonly cols: number;
-  /** #693 T4 D4:结果预览（bash / skill 输出,result preview 尾窗）。缺省 / empty 不渲染。 */
+  /** Result preview (bash / skill output, result-preview tail window). Absent / empty → no render. */
   readonly resultPreview?: ResultPreview;
 }): ReactNode {
   const { preview, cols, resultPreview } = props;
@@ -108,9 +113,9 @@ export function CompletedToolPreviewView(props: {
             </text>
           )}
           {resultPreview.lines.map((line, i) => (
-            // #tui-render-overhaul T1:dim 只属装饰（gutter / 溢出）—— 内容行
-            // 走正文色，避免「结果预览一坨灰」。gutter 与内容分段渲染，分属
-            // 不同 fg token 互不污染。
+            // Dim belongs only to decoration (gutter / overflow) —— content lines
+            // use the body color, so the result preview never reads as one gray lump.
+            // Gutter and content render as separate spans with distinct fg tokens.
             <text key={`rp-${i}`} wrapMode="none">
               <span fg={tuiPalette.dim}>{`${RESULT_PREVIEW_PREFIX} `}</span>
               <span fg={tuiPalette.text}>{line}</span>

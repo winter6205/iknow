@@ -1,77 +1,78 @@
 /**
- * src/tui/theme.ts
+ * TUI palette tokens (pure TS, no react dependency).
  *
- * TUI 调色板 token（纯 TS，不依赖 react）。
+ * Values ported verbatim from archive/tui-ink/src/theme.ts,
+ * field semantics unchanged; logoInk / logoGold are banner-only gradient
+ * endpoints (deep blue-violet #1a1d6e → pink-gold #ffafaf, diagonal
+ * interpolation weights c 0.6 / r 0.4 — algorithm in banner.ts
+ * eyeGradientCells).
  *
- * #343 T1：从 archive/tui-ink/src/theme.ts 原值搬入（V7 定案 V3_PAIR.dark），
- * 字段语义不变；新增 logoInk / logoGold 两个 banner 专属色 = banner 渐变端点
- * （e2 黄昏魔法石：logoInk #1a1d6e 深蓝紫 → logoGold #ffafaf 粉金，对角线
- * 插值 c 权重 0.6 / r 权重 0.4，算法见 banner.ts eyeGradientCells）。
+ * Fenced code block colors (dark-gray bg + syntax highlight) codeBlockBg /
+ * codeDefault / syntaxXxx are ported from the reference renderer in
+ * scripts/codeblock-preview/_render.tsx; hexes map 1:1 to VSCode dark+
+ * defaults. Inline codespan still uses `code` #66b8ae (unchanged).
  *
- * 围栏代码块 c4（深灰底 + 语法高亮）的 codeBlockBg / codeDefault / syntaxXxx
- * 颜色固化：搬自 scripts/codeblock-preview/_render.tsx（c4 参考实现），hex
- * 与 VSCode dark+ 默认配色一一对应。行内 codespan 仍走 `code` #66b8ae（不动）。
- *
- * 色彩纪律：NO_COLOR / 终端能力降级交给 OpenTUI 渲染器处理（hex ColorInput
- * 由渲染器按终端能力降级），应用层不手写 ANSI。
+ * Color discipline: NO_COLOR / terminal-capability degradation is handled by
+ * the OpenTUI renderer (hex ColorInput downgrades by terminal capability);
+ * the app layer never hand-writes ANSI.
  */
 
 export interface TuiPalette {
-  /** 主强调色（banner / 焦点 / 品牌呼应）。 */
+  /** Primary accent (banner / focus / brand echo). */
   readonly accent: string;
-  /** 正文（最高对比）。原型 fg。 */
+  /** Body text (highest contrast). Prototype fg. */
   readonly text: string;
-  /** 次级文字（dim 用）。原型 muted。 */
+  /** Secondary text (used for dim). Prototype muted. */
   readonly dim: string;
-  /** 边框。 */
+  /** Borders. */
   readonly border: string;
-  /** 选中行语义色（配 inverse 反白使用，k9s 模式）。 */
+  /** Selected-row semantic color (paired with inverse video, k9s style). */
   readonly selected: string;
-  /** 前台运行指示。 */
+  /** Foreground run indicator. */
   readonly running: string;
-  /** 后台运行标记。 */
+  /** Background run marker. */
   readonly bgRunning: string;
-  /** 错误。原型 danger。 */
+  /** Errors. Prototype danger. */
   readonly error: string;
-  /** markdown：H1 标题。 */
+  /** markdown: H1 heading. */
   readonly h1: string;
-  /** markdown：H2/H3 标题（原型 Heading 组件 h1→h1, else→h2）。 */
+  /** markdown: H2/H3 headings (prototype Heading component h1→h1, else→h2). */
   readonly h2: string;
-  /** markdown：行内 codespan（围栏代码块**不用**，块内走 codeDefault + 语法高亮四色）。 */
+  /** markdown: inline codespan (fenced blocks do **not** use it; they use codeDefault + 4-color syntax highlight). */
   readonly code: string;
-  /** markdown：围栏代码块整块底色（VSCode dark+ 编辑区 #1e1e1e）。 */
+  /** markdown: fenced code block background (VSCode dark+ editor #1e1e1e). */
   readonly codeBlockBg: string;
-  /** markdown：围栏代码块默认字色（未匹配语法 token 的 plain 文本）。 */
+  /** markdown: fenced code block default text color (plain text unmatched by syntax tokens). */
   readonly codeDefault: string;
-  /** markdown：围栏代码块语法高亮——注释（VSCode dark+ 绿，配合 DIM|ITALIC）。 */
+  /** markdown: fenced block syntax highlight — comments (VSCode dark+ green, paired with DIM|ITALIC). */
   readonly syntaxComment: string;
-  /** markdown：围栏代码块语法高亮——字符串（VSCode dark+ 橙）。 */
+  /** markdown: fenced block syntax highlight — strings (VSCode dark+ orange). */
   readonly syntaxString: string;
-  /** markdown：围栏代码块语法高亮——数字（VSCode dark+ 浅青）。 */
+  /** markdown: fenced block syntax highlight — numbers (VSCode dark+ light cyan). */
   readonly syntaxNumber: string;
-  /** markdown：围栏代码块语法高亮——关键字（VSCode dark+ 紫）。 */
+  /** markdown: fenced block syntax highlight — keywords (VSCode dark+ purple). */
   readonly syntaxKeyword: string;
-  /** markdown：引用块。 */
+  /** markdown: blockquotes. */
   readonly quote: string;
-  /** markdown：表格表头。 */
+  /** markdown: table header. */
   readonly table: string;
-  /** markdown：列表项符号。 */
+  /** markdown: list bullet marker. */
   readonly bullet: string;
-  /** unified diff：新增行（git 风格绿）。 */
+  /** unified diff: added line (git-style green). */
   readonly add: string;
-  /** unified diff：删除行（git 风格红）。 */
+  /** unified diff: deleted line (git-style red). */
   readonly del: string;
-  /** unified diff：新增行整行背景遮罩（GitHub dark add-bg 风格淡绿）。 */
+  /** unified diff: full-row background mask for added lines (GitHub dark add-bg light green). */
   readonly bgAdd: string;
-  /** unified diff：删除行整行背景遮罩（GitHub dark del-bg 风格淡红）。 */
+  /** unified diff: full-row background mask for deleted lines (GitHub dark del-bg light red). */
   readonly bgDel: string;
-  /** T7 消息底色：user 消息块背景（淡灰蓝，暗色下不刺眼，与 assistant 有区分度）。 */
+  /** Message bg: user message block (light gray-blue; not glaring in dark theme, distinct from assistant). */
   readonly userBg: string;
-  /** T7 消息底色：assistant 消息块背景（比 userBg 更深，形成角色对比）。 */
+  /** Message bg: assistant message block (darker than userBg, forming the role contrast). */
   readonly assistantBg: string;
-  /** banner 渐变起点（e2 黄昏魔法石深蓝紫 #1a1d6e，对角线插值 c 权重 0.6）。 */
+  /** banner gradient start (deep blue-violet #1a1d6e; diagonal interpolation c weight 0.6). */
   readonly logoInk: string;
-  /** banner 渐变终点（e2 黄昏魔法石粉金 #ffafaf，对角线插值 r 权重 0.4）。 */
+  /** banner gradient end (pink-gold #ffafaf; diagonal interpolation r weight 0.4). */
   readonly logoGold: string;
 }
 

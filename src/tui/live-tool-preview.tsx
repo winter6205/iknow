@@ -2,27 +2,31 @@
 /**
  * src/tui/live-tool-preview.tsx
  *
- * #343 T4（自 archive/tui-ink/src/live-tool-preview.tsx 迁移 ink → OpenTUI）：
- * live 工具 tail 的渲染 + 行账单一 SSOT —— `liveToolPreviewTextLines` 供
- * 渲染（liveToolPreviewBox）与行账（liveToolPreviewRows）共用，行账与渲染
- * 不漂移（parity）。
+ * Live tool tail rendering + single row-account SSOT (migrated from
+ * archive/tui-ink/src/live-tool-preview.tsx, ink → OpenTUI):
+ * `liveToolPreviewTextLines` is shared by the renderer (liveToolPreviewBox)
+ * and the row account (liveToolPreviewRows), so the two never drift (parity).
  *
- * 例外 = 子代理卡路径（specs/tui-subagent-transcript-live.md）：card 命中时
- * 渲染与文本行都改由 `SubagentCardView`/卡级投影承担，本模块两者都只做
- * 分流（`cardIfLive`）—— 该分支的行数恒 2，两处仍同源。
+ * Exception = the subagent-card path (specs/tui-subagent-transcript-live.md):
+ * on a card hit, rendering and text lines both move to `SubagentCardView` /
+ * card-level projection; this module only dispatches (`cardIfLive`) —— that
+ * branch is always 2 rows, both sides stay same-source.
  *
- * T5 (tui-render-optimization)：running 态若有 `partialInput`（tool_input_delta
- * 累积），渲染英文过程行 `name · <partial 摘要>`（bash 为
- * `Running 1 shell command… · <command>`；parse 成功走 summarizeToolCall，
- * 不完整 JSON 原样截断）；无增量 → 基础过程行（bash 只余 shell 前缀）。
- * 摘要统一由 `summarizePartialInput`（tool-summary.ts）产出，行账仍 1 行。
- * 无 `[运行中]`（spec D1）。
+ * Running state with `partialInput` (accumulated tool_input_delta) renders an
+ * English progress line `name · <partial summary>` (bash:
+ * `Running 1 shell command… · <command>`; on successful parse it goes through
+ * summarizeToolCall, incomplete JSON is truncated verbatim); no delta → the
+ * base progress line (bash keeps only the shell prefix). Summaries come from
+ * `summarizePartialInput` (tool-summary.ts); the row account stays 1 row.
+ * Running lines deliberately carry no localized status bracket.
  *
- * write_file / edit_file 运行中不渲染 `content` 正文（含不完整 JSON）；
- * 完成后用 `completedToolPreview` 截断代码或 diff。
+ * write_file / edit_file render no `content` body while running (including
+ * incomplete JSON); after completion `completedToolPreview` truncates the
+ * code or diff.
  *
- * 行账口径：box 渲染 = 状态行 1 行 + 预览行 N 行（diff 行按宽度折叠后
- * 可见的行）。`liveToolPreviewRows` 返回 box 实际占用的物理行数。
+ * Row-account basis: box render = 1 status row + N preview rows (diff lines
+ * folded by width, visible rows only). `liveToolPreviewRows` returns the
+ * box's actual physical row count.
  */
 import type { ReactNode } from "react";
 import type { SubagentCardLines } from "./subagent-message-lines.js";
@@ -67,9 +71,10 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
     const rec = parsed as Record<string, unknown>;
     const path =
       typeof rec.path === "string" && rec.path.length > 0 ? rec.path : "?";
-    // Running write/edit: `Wrote <path> (N lines)` / `Edited <path>` —— 行数
-    // 只在流式 content 已成非空 string 时出现（半成品里缺失 ≠ 0 行）。绝不
-    // 把 old/new/content 正文流进状态行。
+    // Running write/edit: `Wrote <path> (N lines)` / `Edited <path>` —— the
+    // line count appears only once the streamed content is a non-empty string
+    // (missing in a half-streamed object ≠ 0 lines). Never stream old/new/
+    // content bodies into the status line.
     const summary =
       run.name === "write_file"
         ? summarizeToolCall("write_file", parsed, cols, { running: true })
@@ -95,12 +100,14 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
 }
 
 /**
- * running 状态行：有 partialInput 增量 → 英文过程行 `name · <partial 摘要>`
- * （bash 前缀 `Running 1 shell command…`）；空 / 无增量 → 基础过程行
- * （formatRunningToolLine）。摘要单源 = summarizePartialInput，行账 1 行。
- * write/edit 不把 content 流进该行。
- * #693 T1 D7：含 partial 的形态拼装委托 formatToolStatusLine（tool-summary SSOT），
- * 与历史 ToolSummaryRow 同源 —— 字节一致，无重复模板。
+ * Running status line: with partialInput deltas → English progress line
+ * `name · <partial summary>` (bash prefix `Running 1 shell command…`);
+ * empty / no delta → base progress line (formatRunningToolLine). Summary
+ * single source = summarizePartialInput; the row account stays 1 row.
+ * write/edit never stream content into this line. Assembling the
+ * partial-bearing shape is delegated to formatToolStatusLine (tool-summary
+ * SSOT), same source as the historical ToolSummaryRow —— byte-identical,
+ * no duplicated template.
  */
 function runningLine(run: LiveToolRun, cols: number): string {
   if (isWriteEditTool(run.name)) return writeEditRunningLine(run, cols);
@@ -126,10 +133,11 @@ function completedPreviewOf(run: LiveToolRun) {
   });
 }
 
-/** live 路径：完成态工具结果预览（bash）。走 run.stdout / run.stderr
- *  旁路（不依赖历史 tool_result 反序列化）。preview 声明缺席 / 字段缺席
- *  → empty。D5：失败件核置 showPreview 假 —— 不用 dim ⎿ 堆 stderr 长文
- *  （失败只走一行短错误）。 */
+/** Live path: completed tool result preview (bash). Uses the run.stdout /
+ *  run.stderr bypass (no dependence on historical tool_result
+ *  deserialization). Missing preview declaration / field → empty. Failed
+ *  runs keep the preview off —— no long stderr piled under a dim ⎿
+ *  (failures render one short error line only). */
 function resultPreviewOf(run: LiveToolRun) {
   if (run.status === "running") {
     return { kind: "empty" as const };
@@ -143,14 +151,14 @@ function resultPreviewOf(run: LiveToolRun) {
   });
 }
 
-/**
- * 锁句 5 的失败横切：**失败的 run 不吃 card 投影**（走既有 failure
- * overlay），其余情形下非空 card 才是本 run 的卡级两行。
+/** Failure cross-cut: a failed run never takes the card projection (it goes
+ *  through the existing failure overlay); otherwise a non-empty card is this
+ *  run's card-level two rows.
  *
- * 单一函数而非两处 `&&` 链：渲染面（`liveToolPreviewBox`）与文本面
- * （`liveToolPreviewTextLines`）都要这条判据，两处各写一遍时任何一处漂移
- * 都会让「行账说 2 行、渲染画 3 行」这类不一致重新出现。
- */
+ *  One function instead of two `&&` chains: both the render side
+ *  (`liveToolPreviewBox`) and the text side (`liveToolPreviewTextLines`) need
+ *  this predicate; written twice, any drift would reintroduce inconsistencies
+ *  like "the row account says 2 rows, the render draws 3". */
 function cardIfLive(
   run: LiveToolRun,
   card: SubagentCardLines | null | undefined
@@ -160,10 +168,11 @@ function cardIfLive(
 }
 
 /**
- * 会话里已经有任一 spawn join 卡时，live tail 不再画未 join 的
- * `spawn_subagent` 运行行（CONTEXT **subagent card live**：不得并排
- * `running...` 与 fallback `general-purpose running`）。
- * 无 join 卡 → 原样保留，第一条运行行仍可见。
+ * Once the session has any spawn join card, the live tail stops drawing
+ * un-joined `spawn_subagent` running rows (CONTEXT **subagent card live**: a
+ * `running...` card and the fallback `general-purpose running` row must never
+ * sit side by side). No join card → keep as-is, the first running row stays
+ * visible.
  */
 export function filterLiveToolRunsAgainstSpawnCards(
   runs: ReadonlyArray<LiveToolRun>,
@@ -177,17 +186,20 @@ export function filterLiveToolRunsAgainstSpawnCards(
 }
 
 /**
- * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
- * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
- * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
+ * Plain text lines of the live tool box ([status row, ...preview rows]),
+ * shared by the row account + flat projection. The completed preview is
+ * same-source with `completedToolPreview` (code or truncated diff); the
+ * result preview goes through `resultToolPreview` (bash stdout/stderr tail).
  */
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
   cols: number,
-  /** specs/tui-subagent-transcript-live.md：本 run 是 spawn 卡且 join 上了子代理
-   *  时，卡的文本行改由卡级投影提供（第 1 行 `{role} running...`、第 2 行 dim
-   *  预览；completed 概述下再加绿 `✓ Done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
-   *  join 的 spawn 卡都走既有路径）。 */
+  /** specs/tui-subagent-transcript-live.md: when this run is a spawn card that
+   *  joined a subagent, the card's text lines come from the card-level
+   *  projection (row 1 `{role} running...`, row 2 the dim preview; a green
+   *  `✓ Done` is appended under the completed overview). Absent → byte-for-byte
+   *  as before (non-spawn tools, polled cards, un-joined spawn cards all take
+   *  the existing path). */
   card?: SubagentCardLines | null
 ): ReadonlyArray<string> {
   const live = cardIfLive(run, card);
@@ -201,11 +213,13 @@ export function liveToolPreviewTextLines(
   }
   const out: string[] = [formatCompletedToolLine(run, cols)];
   if (run.status === "failed") {
-    // D5：失败一行短错误（截断），不画 dim 预览。数据源 = run.message ??
-    // run.detail（live 旁路字段）—— 与历史路径 message-blocks.failureTextOf
-    // 的 JSON envelope 解析**有意分叉**：live 事件尚未经 tool_result 编码，
-    // 没有 envelope 可解析；历史只有落盘文本，无旁路字段。两侧错误文本不
-    // 承诺字节一致（同源截断纪律 = clipErrorLine）。
+    // Failed: one short truncated error line, no dim preview. Data source =
+    // run.message ?? run.detail (live bypass fields) —— intentionally forked
+    // from the historical message-blocks.failureTextOf JSON-envelope parsing:
+    // live events have not gone through tool_result encoding, there is no
+    // envelope to parse; the historical side only has persisted text, no bypass
+    // fields. Byte-equal error text is not promised across the two sides
+    // (shared truncation discipline = clipErrorLine).
     const err = clipErrorLine(run.message ?? run.detail ?? "", cols);
     if (err.length > 0) out.push(err);
     return out;
@@ -222,9 +236,10 @@ export function liveToolPreviewTextLines(
   return out;
 }
 
-/** live 工具 box 占用的物理行数（状态 1 行 + 可见预览行）。
- *  card 命中 → live 2 行（身份 + 概述）、completed 3 行（概述下加 `✓ Done`），行账与
- *  `liveToolPreviewTextLines` 同源（两行路径同样由它产出，parity 不破）。 */
+/** Physical row count of the live tool box (status 1 row + visible preview rows).
+ *  card hit → live 2 rows (identity + overview), completed 3 rows (`✓ Done`
+ *  appended under the overview); the row account is same-source with
+ *  `liveToolPreviewTextLines` (the 2-row path comes from it too, parity holds). */
 export function liveToolPreviewRows(
   run: LiveToolRun,
   cols: number,
@@ -233,19 +248,24 @@ export function liveToolPreviewRows(
   return liveToolPreviewTextLines(run, cols, card).length;
 }
 
-/** live 工具 runs 容器：相邻卡之间空一行（plans/tui-tool-rhythm.md T3）。
+/** Live tool runs container: one blank line between adjacent cards.
  *
- *  keep class 标题卡的卡间距与历史 MessageBlocks 的 `withBlockSpacing`
- *  （相邻块间 1 行）同一节奏 —— 历史侧由 message-blocks 的块包裹负责。
- *  间距只在卡与卡之间插入，首卡不带顶部空行（与历史首块不补顶 margin
- *  一致）。过程组摘要行不是 keep 卡，不套这条间距（本容器只收 runs，
- *  摘要行由调用方另画）。
+ *  The keep-class title cards share the historical MessageBlocks
+ *  `withBlockSpacing` rhythm (1 line between adjacent blocks) —— the
+ *  historical side handles spacing via message-blocks' block wrapper.
+ *  Spacing is inserted only between cards; the first card gets no top blank
+ *  line (matching the historical first block getting no top margin).
+ *  Process-group summary rows are not keep cards and do not take this
+ *  spacing (this container only receives runs; summary rows are drawn by
+ *  the caller).
  *
- *  `memo` 不适用：runs 为每帧新建数组的调用惯例，容器本身无状态。
+ *  `memo` does not apply: the call convention passes a fresh runs array each
+ *  frame, and the container itself is stateless.
  *
- *  `cards`（specs/tui-subagent-transcript-live.md）：toolUseId → 卡级两行投影
- *  （`subagentCardLinesMap` 产出）。按 `run.id` 精确查表 —— 缺表 / 缺项 →
- *  该卡走既有形态，不借用别的 worker 的预览（锁句 6）。 */
+ *  `cards` (specs/tui-subagent-transcript-live.md): toolUseId → card-level
+ *  two-row projection (produced by `subagentCardLinesMap`). Looked up exactly
+ *  by `run.id` —— missing map / missing entry → that card keeps its existing
+ *  shape, never borrowing another worker's preview. */
 export function liveToolRunsBox(
   runs: ReadonlyArray<LiveToolRun>,
   cols: number,
@@ -267,15 +287,17 @@ export function liveToolRunsBox(
   );
 }
 
-/** live 工具 tail box：状态行 + 完成态截断预览。
- *  运行态仅状态行（T5：有 partialInput 增量时含 `· <partial 摘要>`）；
- *  write/edit 运行中不画 content。D5/D6：颜色消费 deriveSlot 的 color
- *  token —— 失败 error、accent 类成功 accent，dim 不再染所有完成行。
+/** Live tool tail box: status line + truncated completed-state preview.
+ *  Running shows the status line only (with partialInput deltas it includes
+ *  `· <partial summary>`); write/edit draw no content while running. Colors
+ *  consume deriveSlot's color tokens —— failure is error, accent-class
+ *  successes are accent; dim no longer tints every completed row.
  *
- *  `card`（specs/tui-subagent-transcript-live.md）：命中时该 spawn 卡画
- *  `SubagentCardView` 两行（第 1 行 `{role} running...`、第 2 行 dim 预览 /
- *  绿 `✓ Done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
- *  的失败横切在 box 这一层同样成立）。 */
+ *  `card` (specs/tui-subagent-transcript-live.md): on a hit this spawn card
+ *  draws `SubagentCardView`'s two rows (row 1 `{role} running...`, row 2 the
+ *  dim preview / green `✓ Done`); the whole card no longer goes through the
+ *  existing title + preview combination; a failed card never takes the card
+ *  (the failure cross-cut holds at the box layer too). */
 export function liveToolPreviewBox(
   run: LiveToolRun,
   cols: number,
@@ -304,8 +326,8 @@ export function liveToolPreviewBox(
     accent: tuiPalette.accent,
     error: tuiPalette.error,
   });
-  // #tui-render-overhaul T2:accent 类（skill / worktree 生命周期）标题加
-  // bold —— 与 message-blocks.ToolSummaryRow 同源（live + 历史字节一致）。
+  // Accent-class titles (skill / worktree lifecycle) get bold —— same source
+  // as message-blocks.ToolSummaryRow (byte-identical across live + history).
   const isAccentTitle = slot.color === "accent";
   return (
     <box key={run.id} flexDirection="column">

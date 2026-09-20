@@ -2,27 +2,29 @@
 /**
  * src/tui/list-view.tsx
  *
- * #343 T4（自 archive/tui-ink/src/list-view.tsx 迁移 ink → OpenTUI，语义不变）：
- * 会话列表视图（Q4a/Q4b 裁决）：
- *  - 列内容 = title（首条 user 前 80 字符，#120 SSOT；#467 改名自 summary）
- *    + 相对时间 + 运行指示；数据源 = SessionStore.list() 的 title 字段，不做
- *    per-id 重读（SC 13）；
- *  - updatedAt 降序（store.list() 已排序）；
- *  - 首行 `+ 新建会话` 伪条目：Enter = /new 等价（Q4b）；
- *  - ↑↓ 选择，Enter 打开，Esc 返回聊天视图（Q3 列表纯导航；本视图内追加
- *    搜索输入，见下）；
- *  - 删除入口不暴露（D1 安全边界）。
- *  - running-bg 会话行内静态 `[运行中]` 暗色标记（与前台 spinner 区分）。
+ * Session list view:
+ *  - column content = title (first 80 chars of the first user message, the
+ *    SessionStore SSOT) + relative time + running indicator; data source =
+ *    the title field from SessionStore.list(), with no per-id re-read;
+ *  - updatedAt descending (store.list() is already sorted);
+ *  - the first row `+ 新建会话` is a pseudo-entry: Enter ≡ /new;
+ *  - ↑↓ select, Enter opens, Esc returns to the chat view (the list is pure
+ *    navigation; the in-view search input is described below);
+ *  - no delete entry is exposed (safety boundary).
+ *  - running-bg sessions get a static dim `[运行中]` inline marker
+ *    (distinct from the foreground spinner).
  *
- * —— 会话超限修复（2026-08-09，迁移后保留）——
- *   1. 顶部搜索框：直接键入即过滤（按 title / lastFinalText 子串匹配，
- *      不区分大小写；清空 = 全量）。
- *   2. 视口窗口：只渲染 `rows` 预算内的行（顶部搜索框 + 表头 + 行数预算），
- *      超出部分不渲染，杜绝整帧溢出。
- *   3. 行级滚动：↑↓ 移到视口边缘则翻页（k9s 风格）；PgUp/PgDn/Home/End
- *      直接翻页/跳顶/跳底。搜索词变化时 clamp 滚动到安全范围。
+ * Overflow fixes for large session counts:
+ *   1. Top search box: typing filters immediately (case-insensitive substring
+ *      on title / lastFinalText; clearing = full list).
+ *   2. Viewport window: only rows within the `rows` budget render (search box
+ *      + header + row budget); the rest is not rendered, so the frame can
+ *      never overflow wholesale.
+ *   3. Row-level scrolling: ↑↓ at a viewport edge pages (k9s style);
+ *      PgUp/PgDn/Home/End page or jump directly. Scroll is clamped to the
+ *      safe range when the query changes.
  *
- * 键输入：OpenTUI `useKeyboard`（KeyEvent.name 判别）替代 ink `useInput`。
+ * Key input: OpenTUI `useKeyboard` (discriminated on KeyEvent.name).
  */
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -33,11 +35,11 @@ import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./tool-summary.js";
 
 export interface TuiListEntry extends SessionListEntry {
-  /** 该会话当前在 TUI 内是否 running-bg（列表行静态标记用）。 */
+  /** Whether this session is currently running-bg inside the TUI (for the static list-row marker). */
   readonly runningBg: boolean;
 }
 
-/** 相对时间（updatedAt → 「3 分钟前」风格，无 emoji）。 */
+/** Relative time (updatedAt → "3 分钟前" style, no emoji). */
 export function relativeTime(iso: string, now: Date = new Date()): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "";
@@ -55,16 +57,17 @@ export function relativeTime(iso: string, now: Date = new Date()): string {
 export interface ListViewProps {
   readonly entries: ReadonlyArray<TuiListEntry>;
   readonly cols: number;
-  /** 列表视口可用行数（顶部搜索框 + 表头 + 行数预算；由 app 传入，避免
-   *   ListView 自己量终端）。缺省 16（单测无 rows 环境）。 */
+  /** Usable rows for the list viewport (top search box + header + row budget;
+   *  passed by the app so ListView never measures the terminal). Defaults to
+   *  16 (unit-test environments without rows). */
   readonly rows?: number;
-  /** 选中首行伪条目或某个会话 Enter → 传 index（0 = 新建）。 */
+  /** Enter on the pseudo-entry or a session row → index passed up (0 = new session). */
   readonly onOpen: (index: number) => void;
   readonly onBack: () => void;
 }
 
-/** 行内容匹配（搜索过滤谓词）：title / lastFinalText 子串，不区分大小写。
- *  exported 供单测直接断言。 */
+/** Row-content match (search filter predicate): case-insensitive substring on title / lastFinalText.
+ *  Exported so unit tests can assert it directly. */
 export function listEntryMatches(
   entry: SessionListEntry,
   query: string
@@ -77,8 +80,9 @@ export function listEntryMatches(
   );
 }
 
-/** 过滤控制字符（原 components.tsx stripNonPrintable 的私迁移：components.tsx
- *  属 T6 共享文件，T4 不动它 —— 仅本视图自用）。 */
+/** Strip control characters (a private copy of components.tsx's
+ *  stripNonPrintable: components.tsx is a shared file this task must not
+ *  touch — used only by this view). */
 function stripNonPrintable(input: string): string {
   return [...input]
     .filter((c) => c.charCodeAt(0) >= 32 || c === "\t")
@@ -88,33 +92,39 @@ function stripNonPrintable(input: string): string {
 
 export function ListView(props: ListViewProps): ReactNode {
   const pal = tuiPalette;
-  // 行账 SSOT（#268 同类帧高溢出防线）：整帧渲染行数必须 ≤ rowsBudget。
-  //  搜索框 1 行 + 表头 2 行（标题 + marginBottom 空行） + 滚动指示预留 2
-  // （↑/↓ 各 1） = 固定 chrome 5 行。视口行数 = 预算 - 5，最坏情况（双指示
-  // 全显）= 1+2+viewHeight+2 = rowsBudget 恰好贴边，永不溢出。指示行预留在
-  // 预算内而非动态收缩视口：滚动时视口高度恒定，不出现内容跳变。
+  // Row-accounting SSOT (defence against frame-height overflow): total
+  // rendered rows must be ≤ rowsBudget. Search box 1 row + header 2 rows
+  // (title + marginBottom blank) + 2 reserved for scroll indicators (↑/↓ one
+  // each) = 5 fixed chrome rows. Viewport rows = budget - 5, so the worst
+  // case (both indicators shown) = 1+2+viewHeight+2 = rowsBudget exactly at
+  // the edge, never overflowing. Indicator rows are reserved inside the
+  // budget instead of dynamically shrinking the viewport: viewport height
+  // stays constant while scrolling, so content never jumps.
   const rowsBudget = Math.max(6, props.rows ?? 16);
   const viewHeight = Math.max(1, rowsBudget - 5);
-  // 搜索输入（本视图内第二输入框；Esc 清空搜索而非直接返回，二次 Esc 返回
-  // 聊天视图——与「纯导航」的原意保持一致，搜索是列表的辅助能力）。
+  // Search input (this view's second input surface; Esc clears the search
+  // instead of returning directly, a second Esc returns to the chat view —
+  // keeping the "pure navigation" intent, search being an auxiliary list capability).
   const [query, setQuery] = useState("");
-  // 光标 + 视口顶合并为单一原子状态：OpenTUI 快速连键会在同一渲染批内派发
-  // 多个 KeyEvent，分离 state 的函数式更新会互读旧快照、丢失边缘滚动步长；
-  // 原子对象在批内逐步复合仍正确（序列键语义与归档版一致）。
-  // 首行伪条目占 index 0；光标初始在伪条目上（新建是高频动作）。
-  // scrollTop = 视口顶部行的全局 index（0 = 伪条目）。scroll 0 时伪条目固定可见。
+  // Cursor + viewport top merged into one atomic state: on rapid key repeats
+  // OpenTUI dispatches multiple KeyEvents within one render batch, and
+  // separate functional state updates would read each other's stale
+  // snapshots and lose edge-scroll steps; an atomic object composes correctly
+  // step by step within the batch.
+  // The first-row pseudo-entry takes index 0; the cursor starts on it (new session is the frequent action).
+  // scrollTop = global index of the viewport's top row (0 = pseudo-entry). At scroll 0 the pseudo-entry is always visible.
   const [nav, setNav] = useState({ cursor: 0, scrollTop: 0 });
   const cursor = nav.cursor;
   const scrollTop = nav.scrollTop;
 
-  // 过滤后的有效条目（伪条目恒在 index 0）。
+  // Filtered effective entries (pseudo-entry always at index 0).
   const filtered = useMemo(
     () => props.entries.filter((e) => listEntryMatches(e, query)),
     [props.entries, query]
   );
-  const total = filtered.length + 1; // index 0 = 伪条目
+  const total = filtered.length + 1; // index 0 = pseudo-entry
 
-  // 搜索结果变化 → 光标与滚动都 clamp 回安全范围（总行数变化时防越界）。
+  // Search results change → clamp both cursor and scroll back into the safe range (guards against total row-count changes).
   useEffect(() => {
     const maxScroll = Math.max(0, total - viewHeight);
     setNav((v) => ({
@@ -124,7 +134,7 @@ export function ListView(props: ListViewProps): ReactNode {
   }, [total, viewHeight]);
 
   useKeyboard((e: KeyEvent) => {
-    // 导航键优先匹配；可打印字符 / backspace 走搜索输入。
+    // Navigation keys match first; printable chars / backspace go to the search input.
     if (e.ctrl || e.meta) return;
     if (e.name === "return") {
       props.onOpen(cursor);
@@ -141,8 +151,8 @@ export function ListView(props: ListViewProps): ReactNode {
     if (e.name === "up") {
       setNav((v) => {
         const next = v.cursor - 1;
-        if (next < 0) return v; // 已在顶 → no-op
-        // 出了视口上缘 → 视口上移一行
+        if (next < 0) return v; // already at top → no-op
+        // Left the viewport's top edge → shift viewport up one row
         const scrollTopNext =
           next < v.scrollTop ? v.scrollTop - 1 : v.scrollTop;
         return { cursor: next, scrollTop: scrollTopNext };
@@ -152,8 +162,8 @@ export function ListView(props: ListViewProps): ReactNode {
     if (e.name === "down") {
       setNav((v) => {
         const next = v.cursor + 1;
-        if (next >= total) return v; // 已在底 → no-op
-        // 出了视口下缘 → 视口下移一行
+        if (next >= total) return v; // already at bottom → no-op
+        // Left the viewport's bottom edge → shift viewport down one row
         const scrollTopNext =
           next >= v.scrollTop + viewHeight ? v.scrollTop + 1 : v.scrollTop;
         return { cursor: next, scrollTop: scrollTopNext };
@@ -190,7 +200,7 @@ export function ListView(props: ListViewProps): ReactNode {
       setQuery((q) => q.slice(0, -1));
       return;
     }
-    // 可打印字符 → 追加到搜索词（箭头 / 功能键 name 长度 > 1，过滤后为空）。
+    // Printable char → append to the search query (arrow / function keys have name length > 1, filtering to empty).
     const printable = stripNonPrintable(
       typeof e.name === "string" ? e.name : e.sequence
     );
@@ -200,7 +210,7 @@ export function ListView(props: ListViewProps): ReactNode {
   const summaryWidth = Math.max(10, props.cols - 24);
   const renderSummary = (s: string): string => clipOneLine(s, summaryWidth);
 
-  // 视口切片：只渲染 [scrollTop, scrollTop+viewHeight) 的全局行。
+  // Viewport slice: render only the global rows in [scrollTop, scrollTop+viewHeight).
   const visible: number[] = [];
   for (let i = scrollTop; i < scrollTop + viewHeight && i < total; i++) {
     visible.push(i);
@@ -234,7 +244,7 @@ export function ListView(props: ListViewProps): ReactNode {
 
   return (
     <box flexDirection="column">
-      {/* 搜索框：占 1 行；键入即过滤，内容为空显示占位提示。 */}
+      {/* Search box: occupies 1 row; typing filters immediately, and a placeholder hint shows when empty. */}
       <text fg={pal.dim}>
         ❯ 搜索会话{" "}
         <span fg={query.length > 0 ? pal.text : pal.dim}>

@@ -2,22 +2,26 @@
 /**
  * src/tui/message-row.tsx
  *
- * #986：把 ChatView 内「挂载消息行」（原 650–768 行）抽成 sibling 组件。
+ * ChatView's "mounted message row" extracted as a sibling component.
  *
- * 承重契约（实测，详见 plans/issue-986-chatview-split.md）：
- *  - 根节点 `<box id={`tmsg-${visibleIndex}`} width={contentWidth} flexShrink={0}>`
- *    必须保留 —— `useLayoutEffect`（283–306）靠 DOM id 通过 `sb.getRenderable`
- *    量测每条消息行高度；
- *  - `visibleIndex` 由 ChatView 计算（= mountWindow.startIndex + i）后通过
- *    prop 传入；不得在组件内用 map index 重算（spacerBefore 偏移会污染）。
+ * Load-bearing contracts (measured):
+ *  - the root `<box id={`tmsg-${visibleIndex}`} width={contentWidth} flexShrink={0}>`
+ *    must be kept — ChatView's `useLayoutEffect` measures every message-row
+ *    height via `sb.getRenderable` keyed by that DOM id;
+ *  - `visibleIndex` is computed by ChatView (= mountWindow.startIndex + i) and
+ *    passed in via prop; it must not be recomputed inside the component from
+ *    the map index (the spacerBefore offset would corrupt it).
  *
- * 渲染双分支：
- *  (a) `renderInContentOrder === true`：消息被 activitySegments 拆成多簇
- *      （tool→text→tool），按段原位插入 fold 行；
- *  (b) 正常路径：单 MessageBlocks + 该消息所有 fold 行平铺到尾部。
+ * Two render branches:
+ *  (a) `renderInContentOrder === true`: the message is split by
+ *     activitySegments into multiple clusters (tool→text→tool); fold rows are
+ *     inserted per segment at their original positions;
+ *  (b) normal path: a single MessageBlocks + all of the message's fold rows
+ *     flattened at the tail.
  *
- * per-segment 渲染由 `<TurnFoldSegment>`（本文件内私有子组件）承担，
- * 把原内层 60 行 cc=12 闭包切成多个 ≤60 行组件。
+ * Per-segment rendering is handled by `<TurnFoldSegment>` (a private subcomponent
+ * in this file), splitting the former ~60-line cc=12 inner closure into
+ * multiple smaller components.
  */
 import type { ReactNode } from "react";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
@@ -51,15 +55,17 @@ export interface MessageRowProps {
   readonly messageThinkingMs: number;
   readonly messageSegments: ReadonlyArray<SegmentWithIndex>;
   readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  /** T4–T7 + Thinking-at-bottom revision 锁句 4（specs/tui-activity-block.md）：
-   *  本消息的活动块行（含锚点，按 contentBlockIndex 升序）。MessageBlocks
-   *  据此把标题按锚点插进内容顺序；跨消息不合并。 */
+  /** This message's activity-block lines (with anchors, ascending
+   *  contentBlockIndex; specs/tui-activity-block.md). MessageBlocks inserts
+   *  the titles into the content order at their anchors; no cross-message
+   *  merging. */
   readonly activityBlocks: ReadonlyArray<ActivityBlockLine>;
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
-  /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
-   *  （ChatView 单次投影，历史卡与 live 卡共用）。缺省 → 与改前逐字节一致。 */
+  /** specs/tui-subagent-transcript-live.md: toolUseId → two-line subagent card
+   *  projection (projected once by ChatView, shared by history and live
+   *  cards). Absent → byte-identical rendering to before the feature. */
   readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
 }
@@ -143,9 +149,10 @@ export function MessageRow(props: MessageRowProps): ReactNode {
 }
 
 /**
- * per-segment 容器：同一 messageIndex 拆出多簇时按 message.content 顺序
- * 逐段画 MessageBlocks + 段尾 fold 行。fold 行由 `<TurnFoldLines>` 包装
- * MessageShell（chat-view renderFoldLines 原契约）。
+ * Per-segment container: when the same messageIndex splits into multiple
+ * clusters, draw MessageBlocks + per-segment tail fold rows in
+ * message.content order. The fold rows are wrapped by `<TurnFoldLines>`
+ * around MessageShell (ChatView's original renderFoldLines contract).
  */
 function TurnFoldSegments(props: {
   readonly message: AnthropicNativeMessage;
@@ -203,10 +210,12 @@ function TurnFoldSegments(props: {
 }
 
 /**
- * 单段：MessageBlocks + 段尾 fold 行。
+ * One segment: MessageBlocks + tail fold rows.
  *
- * hideThinking 逻辑与原 chat-view 一致：段已画 fold 行 / ms 值已被 fold
- * 行覆盖 → hideSegmentThinking = true（但展开态 / hideThinking 强制 false）。
+ * hideThinking logic matches the original chat-view: the segment already drew
+ * a fold row / its ms value is already covered by a fold row →
+ * hideSegmentThinking = true (except in the expanded state / where
+ * hideThinking is forced false).
  */
 function TurnFoldSegment(props: {
   readonly segmentMessage: AnthropicNativeMessage;
@@ -224,8 +233,9 @@ function TurnFoldSegment(props: {
   readonly messageThinkingMs: number;
 }): ReactNode {
   const segmentHasFold = props.foldLinesBySegmentIndex.has(props.segmentIndex);
-  // hideThinking 双重门：段已画 fold 行 OR 段内 messageThinkingMs 值已被
-  // fold 行覆盖 → hide；展开态例外。
+  // hideThinking double gate: the segment already drew a fold row OR this
+  // segment's messageThinkingMs value is already covered by a fold row → hide;
+  // the expanded state is exempt.
   const hideSegmentThinking =
     (segmentHasFold ||
       (props.messageThinkingMs > 0 &&
@@ -261,9 +271,10 @@ function TurnFoldSegment(props: {
 }
 
 /**
- * 折叠行 JSX（#693 T1 D1）：与 assistant 外壳共用 MessageShell（无
- * backgroundColor、无 paddingX —— T2 透传化），壳内 `<text>` 强制单行
- * 不折（wrapMode="none"）。foldMap 不含该 segmentIndex → 返回 null。
+ * Fold-row JSX: shares MessageShell with the assistant shell (no
+ * backgroundColor, no paddingX — transparent), and the inner `<text>` forces
+ * single-line no-wrap (wrapMode="none"). foldMap missing this segmentIndex →
+ * return null.
  */
 export function renderFoldLines(
   foldLinesBySegmentIndex: FoldLinesBySegmentIndex,
@@ -292,7 +303,7 @@ export function renderFoldLines(
   );
 }
 
-/** pickMessageSegments wrapper —— 渲染层调用入口（与可见下标配对）。 */
+/** pickMessageSegments wrapper — the render-layer call entry (paired with the visible index). */
 export function messageSegmentsOfVisible(
   activitySegments: ReadonlyArray<TurnActivitySegment>,
   visibleIndex: number
@@ -300,7 +311,8 @@ export function messageSegmentsOfVisible(
   return pickMessageSegments(activitySegments, visibleIndex);
 }
 
-// 块标题渲染已迁至 MessageBlocks（Thinking-at-bottom revision 锁句 4：
-// 标题按锚点插进消息内容顺序）。本文件不再持有尾部整包渲染路径
-// （renderBlockTitles）与共享模板（renderActivityBlockRows →
-// activity-block-rows.tsx 单源）。
+// Block-title rendering has moved to MessageBlocks (Thinking-at-bottom: titles
+// are inserted into the message content order at their anchors). This file no
+// longer holds the trailing whole-package render path (renderBlockTitles) or
+// the shared template (renderActivityBlockRows → activity-block-rows.tsx
+// single source).

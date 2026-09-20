@@ -1,23 +1,27 @@
 /**
  * src/tui/chrome-focus.ts
  *
- * plans/tui-chrome-interaction.md T6 —— chrome-focus reducer（纯函数模块）。
+ * chrome-focus reducer (pure function module).
  *
- * 唯一职责：单一抽象拥有焦点状态 `input` | `subagent(row)` | `graph`，
- * 按 Down/Up 在三环之间移动。reducer 只认 down/up（其他键一律 no-op，
- * 不抢 Tab / Enter / Escape / 普通字符 —— 这些仍由 prompt-input /
- * slash / graph-chrome 等其他 reducer / 组件处理）。
+ * Sole responsibility: one abstraction owns the focus state
+ * `input` | `subagent(row)` | `graph`, moving between the three rings with
+ * Down/Up. The reducer only knows down/up (every other key is a no-op — it
+ * never grabs Tab / Enter / Escape / plain characters; those stay with the
+ * prompt-input / slash / graph-chrome reducers and components).
  *
- * wiring 不在本文件 —— T7 才把 useKeyboard 接到本 reducer 上；本轮
- * 只交付纯函数 + 单测覆盖 5 类（empty / negative / overflow /
- * concurrent / exception）。
+ * Wiring is not in this file — hooking useKeyboard up to this reducer happens
+ * in the app layer. What ships here is only the pure functions + unit tests
+ * covering 5 classes (empty / negative / overflow / concurrent / exception).
  *
- * 复杂度纪律：每个分支 ≤4 嵌套、函数 ≤60 行、cyclomatic ≤10。
+ * Complexity discipline: ≤4 nesting per branch, ≤60 lines per function,
+ * cyclomatic ≤10.
  *
- * 不变量：
- *  - subagent row clamp 到 [0, subagentCount-1]，越界回 input；
- *  - snapshot 缺失（hasSnapshot=false）→ graph 环不可达 / 已占焦点回 input；
- *  - subagentCount=0 → subagent 环不可达 / 已占焦点回 input。
+ * Invariants:
+ *  - subagent row clamps to [0, subagentCount-1]; out of range → back to input;
+ *  - missing snapshot (hasSnapshot=false) → the graph ring is unreachable / if
+ *    it holds focus, back to input;
+ *  - subagentCount=0 → the subagent ring is unreachable / if it holds focus,
+ *    back to input.
  */
 export type ChromeFocus =
   | { readonly kind: "input" }
@@ -27,9 +31,9 @@ export type ChromeFocus =
 export interface ReduceChromeFocusInput {
   readonly focus: ChromeFocus;
   readonly key: string;
-  /** 当前可见的子代理行数（来自 projectSubagentLines 投影）。 */
+  /** Currently visible subagent row count (from the projectSubagentLines projection). */
   readonly subagentCount: number;
-  /** run_graph 快照是否存在。 */
+  /** Whether a run_graph snapshot exists. */
   readonly hasSnapshot: boolean;
 }
 
@@ -37,7 +41,7 @@ export interface ReduceChromeFocusResult {
   readonly focus: ChromeFocus;
 }
 
-/** 防御：负数 / NaN → 0；保留语义清晰，单测钉死。 */
+/** Defense: negative / NaN → 0; semantics stay clear, pinned by unit tests. */
 function safeCount(n: number): number {
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.floor(n);
@@ -51,19 +55,23 @@ function clampRow(row: number, count: number): number {
 }
 
 /**
- * chrome-focus 状态机的纯函数 reducer。
+ * Pure-function reducer for the chrome-focus state machine.
  *
- * 设计要点：
- *  - only `down` / `up` move the cursor；其他键原样返回当前焦点（不抢键）。
- *  - **no-op 语义**：焦点不变的分支返回 `input.focus` 原引用（而非新建
- *    对象）—— 调用方用 `next.focus !== chromeFocus` 身份比较探测变化，
- *    引用相等 → 无 setState / 无多余 re-render；onLeaveToChrome 契约
- *    （无可达环 → 返回 false，PromptInput 保留状态）也依赖这一点。
- *  - subagent 环行数由 caller 投影（projectSubagentLines 同源）；reducer
- *    只看 count，不知道具体 row 是哪个 subagent —— T7 在 app.tsx 拼装。
- *  - graph 环单一节点（无 row 选择 —— graph chrome 一行）。
- *  - 异常 / 边界：snapshot 缺失 / 空 panel / 负 row → 跳过该环，焦点回
- *    上一个可达环（input 兜底）。
+ * Design points:
+ *  - only `down` / `up` move the cursor; other keys return the current focus
+ *    verbatim (no key grabbing).
+ *  - **no-op semantics**: branches that leave focus unchanged return the very
+ *    `input.focus` reference (not a fresh object) —— callers detect change via
+ *    the identity comparison `next.focus !== chromeFocus`; reference equality
+ *    → no setState / no extra re-render. The onLeaveToChrome contract (no
+ *    reachable ring → return false, PromptInput keeps its state) relies on this too.
+ *  - the subagent ring's row count is projected by the caller (same source as
+ *    projectSubagentLines); the reducer only sees the count, not which subagent
+ *    a row is — the app.tsx side assembles it during wiring.
+ *  - the graph ring is a single node (no row selection — one graph chrome row).
+ *  - exceptions / boundaries: missing snapshot / empty panel / negative row
+ *    → skip that ring; focus returns to the previous reachable ring
+ *    (input is the floor).
  */
 export function reduceChromeFocus(
   input: ReduceChromeFocusInput
@@ -81,7 +89,7 @@ export function reduceChromeFocus(
   }
 
   if (input.focus.kind === "subagent") {
-    // 异常 / 空 panel：当前 subagent 环不可达 → 回 input。
+    // Exception / empty panel: the current subagent ring is unreachable → back to input.
     if (count === 0) return { focus: { kind: "input" } };
     const row = clampRow(input.focus.row, count);
     if (key === "down") {

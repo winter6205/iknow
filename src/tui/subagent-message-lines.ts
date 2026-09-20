@@ -1,82 +1,97 @@
 /**
  * src/tui/subagent-message-lines.ts
  *
- * specs/tui-subagent-transcript-live.md（实施源；计划 = plans/tui-subagent-
- * transcript-live.md，完成态修订 = plans/strategy-window-and-subagent-card.md
- * T3）—— **卡级两行投影**：把一个子代理 join 回会话 transcript 里派它的那张
- * `spawn_subagent` 卡。live 第 1 行 `{role} running...`、第 2 行 dim
- * `taskPreview`；该 worker **completed** 后概述留下、第 1 行去 running 只作
- * 身份、其下加逐字绿 `✓ Done`（锁句 2 reopen）。join 键 =
- * `SubagentInfo.toolUseId`（= 那次 spawn 的 tool_use id，与卡侧同一 id 空间）。
+ * Card-level two-line projection (specs/tui-subagent-transcript-live.md):
+ * join one subagent back to the `spawn_subagent` card that spawned it in the
+ * session transcript. Live line 1 is `{role} running...`, line 2 the dim
+ * `taskPreview`; once that worker completes, the overview stays, line 1
+ * drops the running suffix and is identity only, and a literal green `✓ Done`
+ * is appended below it. The join key is `SubagentInfo.toolUseId` (the tool_use
+ * id of that spawn — the same id space as the card side).
  *
- * 取代 = Slice D / SC14 的「live 列表整体铺开」投影（`projectSubagentMessageLines`
- * / `subagentMessageRowCount`）与 prompt 上方身份条 —— 位置改判给会话卡后，
- * 「每个 live 子代理恒占两行」不再是投影的输出形状，卡只认自己的关联键。
+ * This replaces the older "spread the whole live list" projection
+ * (`projectSubagentMessageLines` / `subagentMessageRowCount`) and the identity
+ * bar above the prompt: placement is decided by the session card, so "every
+ * live subagent always occupies two rows" is no longer the projection's output
+ * shape — a card only knows its own correlator.
  *
- * 本文件是 **React-free 纯 TS**（不 touch React / OpenTUI）：投影可单测直驱，
- * 渲染由宿主的单一渲染面（`subagent-card-view.tsx`）承担 —— live tail 与
- * 历史卡两宿主不得各写一套模板。
+ * This file is React-free pure TS (no React / OpenTUI): the projection is
+ * unit-testable directly, and rendering belongs to the hosts' single surface
+ * (`subagent-card-view.tsx`) — live tail and history hosts must not each
+ * write their own template.
  *
- * 边界（spec「Input-contract classes」前两行）：
- *   - empty：空数组 / `toolUseId` 缺省或空串或纯空白 → `null`（无关联键，
- *     不借用别的 worker 的预览 —— 锁句 6 的 `// EXIT:` 面）；
- *   - negative：无匹配 / 匹配到 `failed` → `null`（锁句 5：failed 走该卡既有
- *     failure overlay，不走绿 `✓ Done`）；role 缺省 / 空串 / 纯空白 →
- *     catalog fallback（永不输出「子代理」字面值）；
- *   - overflow：live 两行各自按 cols 视觉宽度截断（CJK-safe），永不换行；
- *     `cols <= 0` → 1 列预算。completed 的概述行同样受列宽收口（概述回到
- *     页面上就必须和 live 一样不越列）；完成标记 `✓ Done` 是逐字固定面
- *     （锁句 2 reopen），不做宽度收口 —— 字面文本优先于列宽美学，宿主
- *     `wrapMode="none"` 裁边；
- *   - concurrent：纯函数，每次投影取调用时刻入参，无历史残留；两个 live
- *     worker 各取自己 join 的 `taskPreview`，互不串；重复 `toolUseId` 时
- *     列表序首个胜（确定性）；
- *   - exception：不读 `startedAt` / `endedAt` / `summary`（非法 ISO 不影响
- *     投影）；缺 / 空 `taskPreview` → 概述行以空串占位，行账不塌陷。
+ * Boundaries:
+ *   - empty: empty array / `toolUseId` absent, empty or whitespace-only →
+ *     `null` (no correlator — never borrow another worker's preview);
+ *   - negative: no match / match is `failed` → `null` (failed goes to that
+ *     card's existing failure overlay, not the green `✓ Done`); role absent /
+ *     empty / whitespace-only → catalog fallback (the literal 子代理 is never
+ *     emitted);
+ *   - overflow: the two live lines are each truncated to cols visual width
+ *     (CJK-safe) and never wrap; `cols <= 0` → a 1-column budget. The
+ *     completed card's overview is width-clamped the same way (once back on
+ *     the page it must not overflow columns any more than live does); the
+ *     done marker `✓ Done` is a fixed literal face with no width clamp —
+ *     literal text wins over column aesthetics, and the host's
+ *     `wrapMode="none"` clips edges;
+ *   - concurrent: pure function — each projection reads the arguments at call
+ *     time with no history residue; two live workers each take the
+ *     `taskPreview` of their own join without crossing; on duplicate
+ *     `toolUseId` the first entry in list order wins (deterministic);
+ *   - exception: `startedAt` / `endedAt` / `summary` are never read (invalid
+ *     ISO cannot affect the projection); missing / empty `taskPreview` → the
+ *     overview line holds an empty-string placeholder so the row count never
+ *     collapses.
  */
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { SUBAGENT_ROLE_FALLBACK } from "../shared/tool-line.js";
 
 /**
- * 缺 role 时的 catalog fallback。与 `resolveSubagentRoleFromInput`
- * （`src/shared/tool-line.ts:119`）的 `SUBAGENT_ROLE_FALLBACK` 同值同源 ——
- * 工具卡与两行投影对同一子代理不得各印一个角色名。
+ * Catalog fallback when role is missing. Same value and source as
+ * `SUBAGENT_ROLE_FALLBACK` in `resolveSubagentRoleFromInput`
+ * (src/shared/tool-line.ts) — the tool card and the two-line projection must
+ * not print two different role names for the same subagent.
  */
 export const IDENTITY_FALLBACK_ROLE = SUBAGENT_ROLE_FALLBACK;
 
-/** live 第 1 行固定后缀（spec 原文 `running...`，三个点）。completed 不带
- *  该后缀 —— 锁句 2 reopen 后第 1 行只作身份。join 不上的 spawn 卡不走本
- *  后缀 —— 它落 `formatToolStatusLine` 的无点形态（`explore running`）。 */
+/** Fixed suffix of live line 1 (three dots). Completed lines drop it — line 1
+ *  is identity only then. A spawn card that never joins skips this suffix —
+ *  it falls into formatToolStatusLine's dotless form (`explore running`). */
 const RUNNING_SUFFIX = " running...";
 
-/** completed 的完成标记（锁句 2 reopen：概述保留、其下逐字绿 `✓ Done`）。
- *  与面板 `●` / `✓` 同为几何字形（spec #146:86 纪律），不用 emoji。 */
+/** Completed card's done marker: the overview stays and this literal green
+ *  `✓ Done` renders below it. A geometric glyph like the panel's `●` / `✓`
+ *  (no emoji). */
 const DONE_MARKER = "✓ Done";
 
 /**
- * live 子代理的**唯一判据**：`starting` + `running`（SC14 / SC15 行序合同）。
+ * The single predicate for a live subagent: `starting` + `running` (the row
+ * order contract).
  *
- * 面板的 live 行序（`projectSubagentLines`）、Ctrl+X 强杀分派
- * （`subagent-kill.ts`）与 app 的 focus 计数共用本谓词 —— 判据在多处各写
- * 一遍字面量时，任何一处漂移都会让「聚焦行 ↔ 杀谁」错位。终态
- * （completed / failed）不算 live：终态窗口语义归面板。
+ * The panel's live row order (`projectSubagentLines`), the Ctrl+X kill
+ * dispatch (subagent-kill.ts) and the app's focus count all share this
+ * predicate — restating the literals in several places means any drift would
+ * misalign "focused row ↔ who gets killed". Terminal states (completed /
+ * failed) are not live: their window semantics belong to the panel.
  *
- * 放在本模块（React / OpenTUI 无关的纯函数层）而不是面板 .tsx：kill 分派与
- * 投影都能 import 它而不把 OpenTUI 拖进各自的依赖图。
+ * Lives in this module (the React / OpenTUI-free pure layer) rather than the
+ * panel .tsx so the kill dispatch and the projection can import it without
+ * dragging OpenTUI into their dependency graphs.
  *
- * 注：卡级投影不看本谓词 —— 它按 `state` 三分类（live / completed / failed），
- * 因为 completed 的卡仍要画概述 + 绿 `✓ Done`（锁句 2 reopen）。
+ * Note: the card-level projection ignores this predicate — it classifies by
+ * `state` three ways (live / completed / failed), because a completed card
+ * still draws its overview + green `✓ Done`.
  */
 export function isLiveSubagent(info: SubagentInfo): boolean {
   return info.state === "starting" || info.state === "running";
 }
 
 /**
- * 单活子代理的 role 投影（钉死 negative 决策）：
- *   - role 存在且非空（trim 后长度 > 0）→ role.trim()；
- *   - role 缺席 / 空串 / 纯空白 → `IDENTITY_FALLBACK_ROLE`；永不输出
- *     「子代理」字面值。
+ * Role projection for one live subagent:
+ *   - role present and non-blank (after trim) → role.trim();
+ *   - role absent / empty / whitespace-only → IDENTITY_FALLBACK_ROLE; the
+ *     literal 子代理 is never emitted.
  */
 export function resolveIdentityRole(info: SubagentInfo): string {
   const role = info.role;
@@ -85,23 +100,26 @@ export function resolveIdentityRole(info: SubagentInfo): string {
   return trimmed.length > 0 ? trimmed : IDENTITY_FALLBACK_ROLE;
 }
 
-/** 卡级投影（spec「Card contract」的单一形状）。 */
+/** Card-level projection (the single shape both hosts render). */
 export interface SubagentCardLines {
-  /** 第 1 行：live → `{role} running...`；completed → 仅身份，不含
-   *  `running...`（锁句 2 reopen）。 */
+  /** Line 1: live → `{role} running...`; completed → identity only, no
+   *  `running...`. */
   readonly roleLine: string;
-  /** 第 2 行：live 与 completed 均为按 cols 截断的 `taskPreview`
-   *  （空串 = 空行占位）。completed 不得用它顶替概述。 */
+  /** Line 2: `taskPreview` truncated to cols for both live and completed
+   *  (empty string = placeholder row). For a completed card this line is the
+   *  kept overview, not a stand-in. */
   readonly detailLine: string;
-  /** 第 3 行（仅 completed）：逐字 `✓ Done`；live 缺席（undefined）。 */
+  /** Line 3 (completed only): literal `✓ Done`; absent (undefined) while live. */
   readonly doneLine?: string;
-  /** 完成态标志：true → `doneLine` 在场，宿主以 `tuiPalette.add`（绿）画它。 */
+  /** Completion flag: true → doneLine present; the host draws it with
+   *  tuiPalette.add (green). */
   readonly done: boolean;
 }
 
 /**
- * join 键归一化：缺省 / 空串 / 纯空白都不是合法关联键 → `null`。
- * 两侧（入参 `toolUseId` 与条目字段）同口径 —— 空白差异不制造假 join。
+ * Join-key normalization: absent / empty / whitespace-only is not a valid
+ * correlator → `null`. The same rule applies on both sides (the argument and
+ * the entry field) — whitespace differences must not create fake joins.
  */
 function normalizeCorrelator(toolUseId: string | undefined): string | null {
   if (toolUseId === undefined) return null;
@@ -109,12 +127,13 @@ function normalizeCorrelator(toolUseId: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** 单卡拼装（live / completed）。调用方保证 `state !== "failed"`。 */
+/** Single-card assembly (live / completed). The caller guarantees state !== "failed". */
 function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
   const role = resolveIdentityRole(info);
   if (info.state === "completed") {
-    // 锁句 2 reopen：概述留下（与 live 同口径按 cols 截断），第 1 行去
-    // running 只作身份，其下追加逐字 `✓ Done`（不做宽度收口）。
+    // Completed: the overview stays (truncated to cols like live), line 1
+    // drops the running suffix to identity only, and the literal `✓ Done` is
+    // appended below with no width clamp.
     return {
       roleLine: clipOneLineVisual(role, budget),
       detailLine: clipOneLineVisual(info.taskPreview, budget),
@@ -130,18 +149,22 @@ function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
 }
 
 /**
- * 单卡投影：join 到 `toolUseId` 的那个子代理的卡级两行。
+ * Single-card projection: the card-level two lines of the subagent joined to
+ * `toolUseId`.
  *
- * 返回 `null` 的所有情形（宿主据此回落既有单行标题 / failure overlay）：
- *   - `toolUseId` 缺省 / 空串 / 纯空白 —— EXIT: 无关联键，不借用别的 worker
- *     的预览（锁句 6）；
- *   - 无条目对上该键；
- *   - 对上该键的条目全是 `failed` —— 锁句 5：failed 不进 join，归该卡
- *     failure overlay。
+ * All cases returning `null` (the host falls back to the existing single-line
+ * title / failure overlay):
+ *   - `toolUseId` absent / empty / whitespace-only — EXIT: no correlator,
+ *     never borrow another worker's preview;
+ *   - no entry matches the key;
+ *   - every entry under the key is `failed` — failed stays out of the join
+ *     and belongs to that card's failure overlay.
  *
- * 实现直接查 `subagentCardLinesMap`：两函数共用「缺键 / failed 整条跳过、
- * 重复键取列表序首个」这一条规则，不各写一遍 —— 两份实现一旦漂移，live 宿主
- * （逐卡投影）与历史宿主（map）会对同一 worker 画出不同行。
+ * The implementation queries subagentCardLinesMap directly: both functions
+ * share the single rule "skip absent-key / failed entries, first entry wins
+ * on duplicate keys" rather than each writing it — once the two
+ * implementations drift, the live host (per-card projection) and the history
+ * host (map) would render different lines for the same worker.
  */
 export function projectSubagentCardLines(
   subagents: ReadonlyArray<SubagentInfo>,
@@ -149,24 +172,29 @@ export function projectSubagentCardLines(
   cols: number
 ): SubagentCardLines | null {
   const key = normalizeCorrelator(toolUseId);
-  if (key === null) return null; // EXIT: 无关联键，不借流（锁句 6）
+  if (key === null) return null; // EXIT: no correlator — never borrow another worker's preview
   return subagentCardLinesMap(subagents, cols).get(key) ?? null;
 }
 
 /**
- * 投影输入的**内容签名**（`useMemo` 依赖用）。app 层 1Hz 轮询每次都
- * `setSubagents` 一个新数组 —— 以数组引用做依赖会让 `subagentCardLinesMap`
- * 每秒产新 Map，下游 memo 化的历史消息块（`MessageBlocks`）随之每秒全量
- * 重建元素树（history-rerender-cost 同类回归）。签名字段 = 投影实际读取的
- * 全部字段（`toolUseId` / `state` / `role` / `taskPreview`），漏一个就会
- * 让缓存返回过期卡片。
+ * Content signature of the projection input (for useMemo deps). The app
+ * layer polls at 1Hz and calls setSubagents with a fresh array each time —
+ * depending on the array reference would make subagentCardLinesMap build a
+ * new Map every second, and the memoized history message blocks
+ * (MessageBlocks) below would rebuild their whole element tree likewise
+ * (same class of regression as history-rerender-cost). The signature fields
+ * are exactly everything the projection reads (`toolUseId` / `state` /
+ * `role` / `taskPreview`); omitting one would let the cache serve stale
+ * cards.
  *
- * 编码走 `JSON.stringify` 的嵌套数组：字段内的任意字符（含引号 / 逗号 /
- * 控制符）都被转义，元组到签名是单射。手拼分隔符做不到这点 —— role
- * （`subagent_type` 入参）与 taskPreview（`def.task`）都是模型给的任意
- * 字符串，含分隔符时会撞成同一签名，memo 返回过期卡片。JSON 同时保证源码
- * 里不出现字面控制字节（字面 NUL 会让 git 把本文件当二进制，diff 与 rg
- * 双双失明）。
+ * Encoding is JSON.stringify over nested arrays: any character inside a
+ * field (quotes / commas / control chars) is escaped, and the tuple→signature
+ * map is injective. Hand-joined delimiters cannot achieve that — role (the
+ * `subagent_type` input) and taskPreview (`def.task`) are arbitrary
+ * model-supplied strings that could collide into the same signature across a
+ * delimiter and serve stale cards. JSON also keeps literal control bytes out
+ * of the source (a literal NUL would make git treat this file as binary and
+ * blind both diff and rg).
  */
 export function subagentCardsKey(
   subagents: ReadonlyArray<SubagentInfo>
@@ -182,13 +210,15 @@ export function subagentCardsKey(
 }
 
 /**
- * 逐卡 map（key = `toolUseId`）：历史卡宿主一次取全，按卡自己的 id 查表 ——
- * 避免每卡一次线性扫描。
+ * Per-card map (key = `toolUseId`): the history-card host reads it once and
+ * looks each card up by its own id — avoiding one linear scan per card.
  *
- * 跳过规则与单卡投影同源：缺 / 空 `toolUseId` 的条目整体跳过（不入 map，
- * 不占任何 key），`failed` 条目整体跳过（锁句 5），重复键列表序首个胜
- * （确定性 —— 后到者不覆盖）。live 与 completed 都入 map（completed 的卡
- * 仍要画概述 + 绿 `✓ Done`）。
+ * Skip rules share the source with the single-card projection: entries with
+ * absent / empty `toolUseId` are skipped entirely (never enter the map, never
+ * occupy a key), `failed` entries are skipped, duplicate keys keep the first
+ * entry in list order (deterministic — later entries never overwrite). Both
+ * live and completed enter the map (a completed card still draws its overview
+ * + green `✓ Done`).
  */
 export function subagentCardLinesMap(
   subagents: ReadonlyArray<SubagentInfo>,
@@ -198,9 +228,9 @@ export function subagentCardLinesMap(
   const out = new Map<string, SubagentCardLines>();
   for (const info of subagents) {
     const key = normalizeCorrelator(info.toolUseId);
-    if (key === null) continue; // EXIT: 无关联键的条目不入 map
-    if (info.state === "failed") continue; // 锁句 5
-    if (out.has(key)) continue; // 列表序首个胜
+    if (key === null) continue; // EXIT: entries without a correlator never enter the map
+    if (info.state === "failed") continue; // failed belongs to the card's failure overlay
+    if (out.has(key)) continue; // first entry in list order wins
     out.set(key, buildCard(info, budget));
   }
   return out;

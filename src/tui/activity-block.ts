@@ -1,29 +1,34 @@
 /**
- * src/tui/activity-block.ts
+ * Activity ("process") blocks, purely derived.
  *
- * specs/tui-activity-block.md S1/S2–S7/S9/S10 锁句：过程块纯派生。
+ * Input = messages (persisted history) + live runs (uncommitted live tool
+ * state) + a live-thinking flag + thinkingMsAtVisible (per-message thinking
+ * duration). Output = `ActivityBlock[]` anchored after assistant messages,
+ * each with a one-line title, one body slot and a `live` flag. ChatView /
+ * message-blocks.tsx only consume this list — they never re-derive process
+ * chrome.
  *
- * 输入 = messages（已落盘历史）+ live runs（未提交 live 工具状态）
- * + live thinking 在流标记 + thinkingMsAtVisible（每条消息思考时长）。
- * 输出 = 按 assistant 消息追加的 `ActivityBlock[]`，每块一行标题 + 一个
- * 正文槽 + `live` 标记。ChatView / message-blocks.tsx 只消费此列表，不
- * 二次推导过程 chrome。
- *
- * 不变式（spec 锁句）：
- *  - 一条 assistant 消息可拆多块（被正文 / keep / accent / 失败切开），
- *    但每块仍按时间顺序追加，绝不整轮收成一行 stub。
- *  - 思考 + 相邻安静工具 = 焊（中间无正文 / keep / accent / 失败）；
- *    相邻判据看**原始** tool_use 序列（与 `orderedTurnActivitySegments`
- *    共享同一种扫描），不依赖 entries 过滤后的成簇。
- *  - 失败件 = 横切：失败件自己不入块、不占 dim 预览槽；其**两侧**安静
- *    簇被它切开（与 keep / accent 同待遇）。
- *  - keep / accent = 块外实卡（不计数）；它们仍是「隔开」因素。
- *  - 槽同一时刻只归思考流或一行 dim 工具预览（`tool-preview` 的 text
- *    来自 `formatRunningToolLine`，不另造模板串）。
- *  - 思考在流（liveThinking）→ 块标题 = `Thinking…`（用 `formatThinkingLive`），
- *    槽归思考；与最后一段 history welding 时也保留「下一块新思考」不写回。
- *  - 纯函数、无 React / 无 IO / 无 Date.now()；纯模块（注释解释「为什么」，
- *    早退分支 `// EXIT:` 标注，沿仓库惯例）。
+ * Invariants:
+ *  - one assistant message may split into several blocks (cut by text /
+ *    keep / accent / failure), but blocks stay chronological; a turn is
+ *    never collapsed into a one-line stub.
+ *  - thinking + adjacent quiet tools = welded (nothing between them: no
+ *    text / keep / accent / failure). Adjacency is judged on the *raw*
+ *    tool_use sequence (same scan as `orderedTurnActivitySegments`), not on
+ *    filtered clusters.
+ *  - failures cut across: a failed item joins no block and takes no dim
+ *    preview slot, and it separates the quiet clusters on both sides (same
+ *    treatment as keep / accent).
+ *  - keep / accent = real cards outside blocks (uncounted), but they still
+ *    separate blocks.
+ *  - the slot belongs at any moment either to the thinking stream or to one
+ *    dim tool-preview line (`tool-preview` text comes from
+ *    `formatRunningToolLine`; no second template).
+ *  - liveThinking -> block title = `Thinking…` (`formatThinkingLive`), slot
+ *    owned by thinking; when welding with the last history segment, the
+ *    "next block is a new thinking" rule holds (no write-back).
+ *  - pure function: no React / IO / Date.now(). Early returns are marked
+ *    `// EXIT:` per repo convention.
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import {
@@ -37,19 +42,19 @@ import type { LiveToolRun } from "./live-tool-state.js";
 import { formatRunningToolLine } from "./live-tool-state.js";
 import { isLiveNoise } from "./tool-settled.js";
 
-/** 锚点：插入位的 messageIndex + contentBlockIndex。 */
+/** Anchor: insertion point as messageIndex + contentBlockIndex. */
 export interface ActivityBlockAnchor {
   readonly messageIndex: number;
   readonly contentBlockIndex: number;
 }
 
-/** 正文槽的归属；同一时刻至多一种 kind。 */
+/** Body-slot ownership; at most one kind at a time. */
 export type ActivityBlockSlot =
   | { readonly kind: "thinking" }
   | { readonly kind: "tool-preview"; readonly text: string }
   | { readonly kind: "none" };
 
-/** 过程块：标题 + 锚点 + 槽 + live 标记。 */
+/** Process block: title + anchor + slot + live flag. */
 export interface ActivityBlock {
   readonly anchor: ActivityBlockAnchor;
   readonly title: string;
@@ -57,29 +62,30 @@ export interface ActivityBlock {
   readonly live: boolean;
 }
 
-/** 输入：messages + live runs + 思考时长 + 思考在流标记 + 收类判定解析。 */
+/** Input: messages + live runs + thinking durations + live-thinking flag + fold-counting resolver. */
 export interface ActivityBlockInput {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
-  /** 起始下标（含）。NaN / <0 / >=length → 视作 0（与既有 `sliceTurnFrom`
-   *  负数一致）；超过末尾 → 历史全舍、live 块仍画在 messages.length。 */
+  /** Start index (inclusive). NaN / <0 / >=length -> treated as 0 (same
+   *  negative handling as `sliceTurnFrom`); past the end -> all history is
+   *  dropped while live blocks still render at messages.length. */
   readonly start?: number;
   readonly thinkingMsAtVisible: (visibleIndex: number) => number;
   readonly liveThinking?: boolean;
   readonly liveRuns?: ReadonlyArray<LiveToolRun>;
-  /** 与 ChatView 同款：仅数 `deriveSlot(...).inFoldCount` 为 true 的件；
-   *  缺省 = 全部计入（纯函数兜底，与 `orderedTurnActivitySegments`
-   *  的 `inFoldCountOf` 缺省同款）。 */
+  /** Same as ChatView: only items with `deriveSlot(...).inFoldCount` true
+   *  are counted; default = count everything (pure-function fallback, same
+   *  default as `orderedTurnActivitySegments`'s `inFoldCountOf`). */
   readonly inFoldCountOf?: (
     call: Readonly<{ id: string; name: string }>
   ) => boolean;
 }
 
-/** 默认 inFoldCountOf：未注册名也兜底 retract（与既有 `inFoldCountOf` 缺省一致）。 */
+/** Default inFoldCountOf: even unregistered names fall back to retract (matches the existing default). */
 function alwaysInFold(): boolean {
   return true;
 }
 
-/** 把 live 工具名转成「首现顺序 + 总数」的 `ToolUseCount[]`（同 `formatToolUseCounts` 口径）。 */
+/** Turn live tool names into `ToolUseCount[]` (first-seen order + totals), same accounting as `formatToolUseCounts`. */
 function liveToolCounts(
   liveRuns: ReadonlyArray<LiveToolRun>
 ): ReadonlyArray<ToolUseCount> {
@@ -93,12 +99,13 @@ function liveToolCounts(
   return order.map((name) => ({ name, count: counts.get(name) ?? 0 }));
 }
 
-/** 标题段构造：时长段 + 计数段，规则见 spec S2 / S3 锁句。
- *  - 无思考段、无计数 → 空串（不画标题）；
- *  - 仅思考段或仅计数段 → 直接接；
- *  - 双段 → 时长段 + `, ` + 计数段；同一批件多 tool 之间 ` · `。
- *  - 计数段必须先经 `formatToolUseCounts` —— 多名 `· ` 拼接、零数过滤都
- *    走那一个 SSOT，不另起一份硬编码。 */
+/** Title construction: duration segment + count segment.
+ *  - no thinking segment and no counts -> empty string (no title drawn);
+ *  - only one segment -> used directly;
+ *  - both -> duration + `, ` + counts; tools within one batch joined by ` · `.
+ *  - the count segment must go through `formatToolUseCounts` first — name
+ *    joining and zero filtering live in that single SSOT, never a second
+ *    hardcoded copy. */
 function buildTitle(
   thinkingSeconds: number,
   hasWeld: boolean,
@@ -109,25 +116,28 @@ function buildTitle(
   if (think.length === 0 && countsText.length === 0) return "";
   if (think.length === 0) return `${verb} ${countsText}`;
   if (countsText.length === 0) return think;
-  // 焊接 → 时长段后接 `, `；非焊接（独立块）→ 只画时长段（计数由分
-  // 离的那块承担）。S2 锁句：标题只写「调用方块关联」的工具。
+  // Welded -> duration + `, ` + counts; unwelded (standalone block) ->
+  // duration only (counts belong to the separate block). Titles only name
+  // tools associated with the calling block.
   return hasWeld ? `${think}, ${verb} ${countsText}` : think;
 }
 
-/** 安静簇 = retract 且非失败；焊接只判这层。
- *  与「不计数」同源 —— `deriveSlot` 的 `inFoldCount` 已在「失败 / 非收类」
- *  上假，过滤即成「焊入集合」。失败件是 `failed:true`，自然漏出。 */
+/** Quiet cluster membership = retract and not failed; welding checks only
+ *  this layer. Same source as "not counted" — `deriveSlot`'s `inFoldCount`
+ *  is already false for failed / non-retract items, so filtering yields the
+ *  weld-in set; failures (`failed:true`) fall out naturally. */
 function isWeldable(
   id: string,
   name: string,
   inFoldCountOf: (call: Readonly<{ id: string; name: string }>) => boolean
 ): boolean {
-  // 必须传真 `id`：ChatView 的 resolver 依赖 `toolResultStatusMap`
-  // 按 id 查失败位；空 id 会让真历史件被判成「未配对」而不入簇。
+  // Must pass the real `id`: ChatView's resolver looks failure up in
+  // `toolResultStatusMap` by id; an empty id would make genuine history
+  // items look unpaired and drop them from the cluster.
   return inFoldCountOf({ id, name });
 }
 
-/** 主函数：纯派生。详见模块头注释。 */
+/** Main function: pure derivation. See the module header. */
 export function deriveActivityBlocks(
   input: ActivityBlockInput
 ): ReadonlyArray<ActivityBlock> {
@@ -144,14 +154,17 @@ export function deriveActivityBlocks(
   const inFoldCountOf = input.inFoldCountOf ?? alwaysInFold;
   const blocks: ActivityBlock[] = [];
 
-  // 处理越界：start >= messages.length → 历史全舍，但 live 块（思考在流 /
-  // live 安静工具）仍画在 messages.length（未提交相的虚拟 messageIndex）。
+  // Out-of-range start: drop all history, but live blocks (thinking stream
+  // / live quiet tools) still render at messages.length (the virtual
+  // messageIndex of the uncommitted phase).
   const historyStart = Math.min(start, messages.length);
 
   try {
-    // 一遍扫描 + 累积计数 + 切开边界识别。每个 block 用「首个块的思考时长」
-    // 决定时长段；同消息多次出现 thinking 时只首块带时长（不跨消息求和，与
-    // `thinkingMsAtVisible` 的 per-message 含义对齐）。
+    // Single pass: accumulate counts and recognize cut boundaries. Each
+    // block's duration segment comes from the first block's thinking
+    // duration; when a message has several thinking segments only the first
+    // carries the duration (no cross-message summation — matches
+    // `thinkingMsAtVisible`'s per-message meaning).
     const scratch: ScratchState = {
       pending: null,
       blocks,
@@ -160,22 +173,24 @@ export function deriveActivityBlocks(
       liveRuns,
     };
 
-    // 工具 use：i 是 messages 内的下标（不是 visible）—— 同一消息可拆
-    // 多簇；切点 = 正文 / keep / accent / 失败。
+    // Tool uses: i indexes messages (not visible) — one message may split
+    // into several clusters; cut points = text / keep / accent / failure.
     const startIndex = Math.trunc(historyStart);
     for (let i = startIndex; i < messages.length; i++) {
       scanMessage(i, messages[i], inFoldCountOf, scratch);
     }
   } catch {
-    // EXIT: 异常消息形态不画块（与 `orderedTurnActivitySegments` 同款兜底）。
+    // EXIT: malformed messages draw no blocks (same fallback as `orderedTurnActivitySegments`).
     return [];
   }
 
-  // live 相：未提交的工具 + 思考在流 → 在 `messages.length` 处画独立块
-  // （不动历史块计数，spec S5「新消息开新块」+ S11「hideThinking 只跟槽位
-  // 主人走」的源头）。块**只**承接 retract 类（与 history `inFoldCountOf`
-  // 同源）—— keep / accent / 失败仍由 tail 工具卡（live-tool-preview）
-  // 与历史消息块承接，否则会与原 tail 路径双画。
+  // Live phase: uncommitted tools + thinking stream -> standalone blocks at
+  // `messages.length` (history block counts untouched; this is the source of
+  // "a new message opens a new block" and "hideThinking follows only the
+  // slot owner"). Blocks carry **only** retract-class runs (same source as
+  // history's `inFoldCountOf`) — keep / accent / failure stay on the tail
+  // tool cards (live-tool-preview) and history blocks, otherwise the
+  // original tail path would double-draw them.
   appendLiveBlocks(blocks, {
     messageIndex: messages.length,
     contentBlockIndex: 0,
@@ -186,7 +201,7 @@ export function deriveActivityBlocks(
   return blocks;
 }
 
-/** 把 live 工具簇与思考在流画在 messages.length 处；纯尾追加。 */
+/** Render the live tool cluster and thinking stream at messages.length; pure tail append. */
 function appendLiveBlocks(
   blocks: ReadonlyArray<ActivityBlock>,
   args: {
@@ -198,14 +213,16 @@ function appendLiveBlocks(
 ): void {
   const { messageIndex, contentBlockIndex, liveRuns, liveThinking } = args;
   const list = blocks as ActivityBlock[];
-  // Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
-  // 同一 burst 内思考块后置 —— 还在流的思考段是本批最底（文档顺序），
-  // 它驱动的动作若已出现则位于它上面。
+  // Thinking-at-bottom: within one burst the thinking block is appended
+  // last — a still-streaming thinking segment sits at the bottom of the
+  // batch in document order, and any action it already drove appears above
+  // it.
   //
-  // live 安静簇：仅 live noise 类进 unanchored 块（specs live-signal
-  // revision #3/#4）。web_search / web_fetch 走实卡（live signal），不进
-  // 块计数 / 槽预览。失败 / keep / accent 仍走原 tail / 历史路径，避免
-  // 双画。判据走 `isLiveNoise`（settled 计数口径不变；web_* 仍 retract）。
+  // Live quiet cluster: only live-noise names enter unanchored blocks.
+  // web_search / web_fetch go to real cards (live signal), never into block
+  // counts / slot previews. Failure / keep / accent keep the original tail /
+  // history path to avoid double drawing. The predicate is `isLiveNoise`
+  // (settled counting unchanged; web_* still retract).
   const retractRuns = liveRuns.filter(
     (run) => run.status !== "failed" && isLiveNoise(run.name)
   );
@@ -237,19 +254,20 @@ function appendLiveBlocks(
   }
 }
 
-/** 扫描 scratch：累积 pending + 产出 blocks + per-message thinking 去重集 +
- *  thinkingMs 闭包（让子函数不重复接参）。把扫描状态归一处，避免主函数
- *  cc 膨胀（S5 hard gate）。 */
+/** Scan scratch state: pending accumulator + produced blocks + per-message
+ *  thinking dedupe set + thinkingMs closure (so helpers don't re-thread
+ *  params). Keeping scan state in one place avoids cyclomatic-complexity
+ *  growth in the main function. */
 interface PendingAccumulator {
   readonly messageIndex: number;
   readonly contentBlockIndex: number;
   readonly counts: Map<string, number>;
   readonly order: string[];
-  /** 该块覆盖的 tool_use id 集合 —— 与 live run id 配对，用来决定
-   *  「焊入簇仍有 running 件 → calling + 预览槽」。 */
+  /** tool_use ids covered by this block — paired with live run ids to
+   *  decide "welded cluster still has running items -> calling + preview slot". */
   readonly toolUseIds: Set<string>;
-  readonly hasWeld: boolean; // 该块是否含可焊的安静件
-  readonly weldedThinkingSeconds: number; // 思考段是否进该块（焊成同一标题）
+  readonly hasWeld: boolean; // block contains weldable quiet items
+  readonly weldedThinkingSeconds: number; // thinking duration welded into this block's title
 }
 
 interface ScratchState {
@@ -260,9 +278,9 @@ interface ScratchState {
   liveRuns: ReadonlyArray<LiveToolRun>;
 }
 
-/** 单条 assistant 消息扫描（cc 切碎）：跳过非 assistant / 非数组 content；
- *  对每个 content block 调 classifyBlock，最后 flushPending 把累积的 pending
- *  落地。 */
+/** Scan one assistant message (complexity split): skip non-assistant /
+ *  non-array content; classifyBlock each content block; flushPending at the
+ *  end to materialize accumulated pending. */
 function scanMessage(
   messageIndex: number,
   message: AnthropicNativeMessage | undefined,
@@ -272,11 +290,12 @@ function scanMessage(
   if (message === undefined) return;
   if (message.role !== "assistant") return;
   if (!Array.isArray(message.content)) {
-    // EXIT: 非数组 content 无法安全参与有序活动投影。
+    // EXIT: non-array content cannot safely join the ordered activity projection.
     return;
   }
-  // 同消息去重：多次进入该消息前 flush 上一消息累积的 pending。
-  // 这条规则同时承担「正文切开」—— 文本块到达时同样 flush。
+  // Same-message dedupe: flush the previous message's pending before
+  // re-entering a message. This rule also serves as the "text cuts blocks"
+  // mechanism — arriving text blocks flush the same way.
   for (const [contentBlockIndex, block] of message.content.entries()) {
     classifyBlock(
       block,
@@ -286,12 +305,13 @@ function scanMessage(
       scratch
     );
   }
-  // 消息尾部 → flush。
+  // End of message -> flush.
   flushPending(scratch);
 }
 
-/** 单块分类 + 累积（cc 切碎：把分派从主函数里搬出）。正文 / keep / 失败
- *  三类切点在此原地 flush；thinking / tool_use 累积到 scratch.pending。 */
+/** Classify + accumulate one block (complexity split: dispatch moved out of
+ *  the main scan). Text / keep / failure cut points flush in place here;
+ *  thinking / tool_use accumulate into scratch.pending. */
 function classifyBlock(
   block: AnthropicNativeMessage["content"][number],
   contentBlockIndex: number,
@@ -300,11 +320,11 @@ function classifyBlock(
   scratch: ScratchState
 ): void {
   if (block === null || block === undefined) {
-    // EXIT: null/undefined 块跳过而非抛错（异常形态容错）。
+    // EXIT: skip null/undefined blocks instead of throwing (malformed-shape tolerance).
     return;
   }
   if (block.type === "text") {
-    // 正文切点：flush 当前 pending（同消息 / 跨消息均生效）。
+    // Text cut point: flush current pending (applies within and across messages).
     flushPending(scratch);
     return;
   }
@@ -314,24 +334,24 @@ function classifyBlock(
   }
   if (block.type !== "tool_use") return;
   if (!isWeldable(block.id, block.name, inFoldCountOf)) {
-    // keep / accent / 失败件 → flush 当前 pending 并跳过该件本身。
+    // keep / accent / failure item -> flush current pending and skip the item itself.
     flushPending(scratch);
     return;
   }
   absorbToolUse(block, contentBlockIndex, messageIndex, scratch);
 }
 
-/** thinking 段：thinkingMs 仍以 per-message 计量，首段贴时长。 */
+/** Thinking segment: thinkingMs stays per-message; the first segment carries the duration. */
 function absorbThinking(
   messageIndex: number,
   contentBlockIndex: number,
   scratch: ScratchState
 ): void {
   if (scratch.pending !== null) {
-    // 当前已有 pending（说明上一个块在同消息内）→ 不再累计时长。
+    // Pending already exists (previous block is in the same message) -> do not accumulate duration again.
     return;
   }
-  // 不立即 flush —— 等下一段再决定该块标题是否焊入。
+  // Do not flush immediately — the next segment decides whether the title welds in.
   const seconds = thinkingMsToSeconds(
     scratch.thinkingMsAtVisible(messageIndex)
   );
@@ -349,7 +369,7 @@ function absorbThinking(
   scratch.drawnThinkingMessageIndices.add(messageIndex);
 }
 
-/** tool_use 焊入件：累积计数并决定是否切新块（跨消息切 / 同消息 weld 升级）。 */
+/** Weldable tool_use: accumulate counts and decide block cuts (cross-message flush / same-message weld upgrade). */
 function absorbToolUse(
   block: { id: string; name: string },
   contentBlockIndex: number,
@@ -359,11 +379,11 @@ function absorbToolUse(
   if (scratch.pending === null) {
     scratch.pending = createWeldPending(messageIndex, contentBlockIndex);
   } else if (scratch.pending.messageIndex !== messageIndex) {
-    // 跨消息 → flush 上一条消息的 pending，新块起算。
+    // Cross-message -> flush the previous message's pending, start a fresh block.
     flushPending(scratch);
     scratch.pending = createWeldPending(messageIndex, contentBlockIndex);
   } else if (scratch.pending.weldedThinkingSeconds > 0) {
-    // 同消息内焊入 —— thinking 段 + tool_use 共存 = welded。
+    // Same-message weld — thinking segment + tool_use coexisting = welded.
     scratch.pending = { ...scratch.pending, hasWeld: true };
   }
   const pending = scratch.pending;
@@ -387,13 +407,13 @@ function createWeldPending(
   };
 }
 
-/** flush 累积 → 出块（无内容 → 不出块；标题空 → 不出块）。 */
+/** Flush accumulated pending -> emit a block (nothing accumulated or empty title -> no block). */
 function flushPending(scratch: ScratchState): void {
   const pending = scratch.pending;
   if (pending === null) return;
   const hasCounts = pending.counts.size > 0;
   if (!pending.hasWeld && !hasCounts && pending.weldedThinkingSeconds === 0) {
-    // EXIT: 无累积内容（既无焊入件也无 thinking 段计入）→ 不画块。
+    // EXIT: nothing accumulated (no weld items, no counted thinking segment) -> draw no block.
     scratch.pending = null;
     return;
   }
@@ -424,8 +444,9 @@ function flushPending(scratch: ScratchState): void {
   scratch.pending = null;
 }
 
-/** 解析 pending 对应的 live running 状态（spec S4）：同 id 的 live run
- *  若命中 → 该块仍在演变、预览槽显示最后一件。 */
+/** Resolve the live running state for a pending block: a live run with a
+ *  matching id means the block is still evolving; the preview slot shows the
+ *  last running one. */
 function resolveLiveRunning(
   toolUseIds: ReadonlySet<string>,
   liveRuns: ReadonlyArray<LiveToolRun>
@@ -443,7 +464,7 @@ function resolveLiveRunning(
   };
 }
 
-/** 块标题文本合成：thinking 时长段 + 焊入计数 + calling/called verb。 */
+/** Compose the block title: thinking duration segment + welded counts + calling/called verb. */
 function composePendingTitle(
   pending: PendingAccumulator,
   hasCounts: boolean,

@@ -1,7 +1,8 @@
 /** @jsxImportSource @opentui/react */
 /**
- * run_graph 主会话 chrome 一行：用量条下英文 `graph` + 计数 + now。
- * 数据只来自 `graph_progress` 快照 DTO，不 import scheduler / topo。
+ * One line of run_graph main-session chrome: English `graph` + counts + now,
+ * below the usage bar. Data comes only from `graph_progress` snapshot DTOs;
+ * no scheduler / topo imports.
  */
 import type { ReactNode } from "react";
 import type { GraphProgressSnapshot } from "../harness/graph/progress.js";
@@ -17,8 +18,8 @@ export interface GraphChromeLine {
 }
 
 /**
- * graph_progress → 快照。null snapshot = 清除槽；其它事件 = 保持旧槽
- * （返回 undefined）。
+ * graph_progress → snapshot. A null snapshot clears the slot; any other event
+ * keeps the old one (returns undefined).
  */
 export function graphProgressFromEvent(
   event: HarnessStreamEvent
@@ -50,10 +51,7 @@ export function graphChromeLine(
     now.length > 0
       ? `graph ${doneCount(snapshot)}/${snapshot.nodes.length} now ${now}`
       : `graph ${doneCount(snapshot)}/${snapshot.nodes.length}`;
-  const text = clipOneLineVisual(
-    `${prefix}${body}`,
-    Math.max(1, cols)
-  );
+  const text = clipOneLineVisual(`${prefix}${body}`, Math.max(1, cols));
   return { fg: tuiPalette.dim, text };
 }
 

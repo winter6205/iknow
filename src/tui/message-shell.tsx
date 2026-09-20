@@ -2,48 +2,52 @@
 /**
  * src/tui/message-shell.tsx
  *
- * #693 T1 D1/D7：共用 assistant 外壳组件 SSOT。
- * plans/tui-chrome-interaction.md T2：assistant 不再带 panel 填充 —— 外壳
- * 透传（无 backgroundColor、无 paddingX），仅 `marginTop` 节奏容器。assistant
- * 文本走终端默认底色、Markdown 格式化保留（子树自带 width / wrap）。用户消息
- * 仍走 userBg 填充（message-blocks.tsx 内部 box）；输入框 share user 填充
- * 家族（prompt-input.tsx 内部 box）。fold rows 跟 assistant ——
- * ChatView renderFoldLines 复用本壳,本壳无 panel 注入 → 折叠行也保持
- * 透明。
+ * Shared assistant shell SSOT. The assistant no longer carries a panel fill —
+ * the shell is transparent (no backgroundColor, no paddingX), a marginTop
+ * rhythm container only. Assistant text uses the terminal's default
+ * background with Markdown formatting kept (subtrees bring their own width /
+ * wrap). User messages still use the userBg fill (an internal box in
+ * message-blocks.tsx); the input box shares the user fill family (an internal
+ * box in prompt-input.tsx). Fold rows follow the assistant — ChatView's
+ * renderFoldLines reuses this shell, and with no panel injected the folded
+ * rows stay transparent too.
  *
- * 三个消费方共用同一壳（消除「外壳跳变」不一致）：
- *  (a) MessageBlocks assistant 分支（历史消息渲染）；
- *  (b) ChatView 流式草稿槽（运行中 assistant 草稿）；
- *  (c) ChatView renderFoldLines 折叠行容器（思考了 N 秒 / 工具计数）。
+ * Three consumers share the one shell (eliminating "shell jump" inconsistency):
+ *  (a) the MessageBlocks assistant branch (history message rendering);
+ *  (b) ChatView's streaming draft slot (in-flight assistant draft);
+ *  (c) ChatView's renderFoldLines fold-row container (thought for Ns / tool counts).
  *
- * `memo` 包裹：cols / marginTop 来自父 props（浅比较稳定）。children 若是
- * 每次新建的 JSX,外壳 memo 会失效——这是有意为之：memo 目标是外壳自身不因
- * 无关父状态重渲染（如 scrollbox scrollTop / streaming 草稿高频更新）；
- * children 仍由父组件按需重建，与现行 MessageBlocks memo 边界同源。
+ * `memo` wrapper: cols / marginTop come from parent props (stable shallow
+ * compare). If children is freshly created JSX each time, the shell's memo is
+ * defeated — deliberately: memo's goal is keeping the shell itself from
+ * re-rendering on unrelated parent state (e.g. scrollbox scrollTop / high-rate
+ * streaming draft updates); children are still rebuilt by the parent on
+ * demand, same boundary as the existing MessageBlocks memo.
  */
 import { memo, type ReactNode } from "react";
 
 /**
- * 共用 assistant 外壳组件（memo 包裹）。
+ * Shared assistant shell component (memo-wrapped).
  *
- * props：
- *  - `cols`：外壳可用列宽（透传惯例；当前外壳本身不渲染文字,子节点自带
- *    width,不需要再透传）。
- *  - `marginTop`：根节点顶部 margin（消息间 1 行节奏由父组件传
- *    `visibleIndex===0?0:1`）。
- *  - `children`：壳内内容（文本 / Markdown / 工具摘要行 / 折叠行）。
+ * props:
+ *  - `cols`: available shell width (pass-through convention; the shell itself
+ *    renders no text — children bring their own width, no need to forward again).
+ *  - `marginTop`: top margin of the root node (the 1-row rhythm between
+ *    messages is passed by the parent as `visibleIndex===0?0:1`).
+ *  - `children`: shell content (text / Markdown / tool summary rows / fold rows).
  */
 export const MessageShell = memo(function MessageShell(props: {
   readonly cols?: number;
   readonly marginTop?: number;
   readonly children: ReactNode;
 }): ReactNode {
-  // cols 仅用于父级契约透传（消费方按惯例传入,外壳本身不做宽度换算——
-  // 子节点自带 width={cols}）。缺省不报错。
+  // cols exists only for the parent pass-through contract (consumers pass it
+  // by convention; the shell does no width math — children bring width={cols}).
+  // A missing value is not an error.
   void props.cols;
-  // T2 透传化：不再注入 backgroundColor、不再 paddingX 水平缩进。
-  // 内部块（用户消息 / 围栏代码块 / 输入框）各自带 fill,message-shell
-  // 只负责消息间 marginTop 节奏。
+  // Transparent shell: no backgroundColor injected, no paddingX indentation.
+  // Inner blocks (user messages / fenced code / input box) each carry their
+  // own fill; message-shell only owns the inter-message marginTop rhythm.
   return (
     <box flexDirection="column" marginTop={props.marginTop ?? 0}>
       <box flexDirection="column">{props.children}</box>

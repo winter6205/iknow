@@ -1,31 +1,37 @@
 /**
  * src/tui/tool-summary.ts
  *
- * #343 T4（自 archive/tui-ink/src/tool-summary.ts 迁移，语义不变）：
- * 工具调用摘要行（纯格式化，可单测）：
- *  - 摘要行 = 工具名 + 参数摘要 + 状态；
- *  - 生成/编辑类增强：write_file/edit_file 显示「生成了什么」（路径 + 行数）。
+ * Tool-call summary lines (pure formatting, unit-testable); migrated from
+ * the archive Ink TUI with unchanged semantics:
+ *  - a summary line = tool name + argument digest + status;
+ *  - generate/edit tools are enriched: write_file/edit_file show *what was
+ *    generated* (path + line count).
  *
- * T5 (tui-render-optimization)：`summarizePartialInput` — 运行中 partial JSON
- * 文本摘要（parse 成功走 summarizeToolCall，不完整 JSON 原样截断）。
+ * `summarizePartialInput` (re-exported from shared) summarizes partial JSON
+ * while streaming (parses → summarizeToolCall; incomplete JSON → raw clip).
  *
- * D1（specs/tui-human-display.md）拆分：**文本层**（摘要 / 状态行拼装 /
- * 收口助手 / 子代理文案）已搬到中立模块 `src/shared/tool-line.ts` —— CLI
- * 与该模块共用同一实现（CLI import src/tui 是反向分层）。本文件对它们做
- * re-export，既有 TUI 调用方与 tests/tui/* 的 import 路径与字节不变；
- * 本文件保留 TUI 独有的部分：**结果预览**（completedToolPreview /
- * resultToolPreview / toolPreviewRows）与带 settledClass 的显示注册表。
+ * The **text layer** (summaries / status-line assembly / clip helpers /
+ * subagent wording) lives in the neutral module `src/shared/tool-line.ts`
+ * so the CLI shares one implementation (CLI importing src/tui would invert
+ * the layering). This file re-exports those symbols so existing TUI callers
+ * and tests/tui/* keep their import paths byte-for-byte; what stays here is
+ * TUI-only: **result previews** (completedToolPreview / resultToolPreview /
+ * toolPreviewRows) and the display registry carrying settledClass.
  *
- * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——running 过程行
- * （`Running 1 shell command… · <command>` / `name · detail`）、完成行
- * `name · detail`（failed 才有 `[失败]` 前缀）——行级窗口账目一律按
- * 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），保证各形态单行不折
- * （running bash 前缀较长，拼装后由 `formatToolStatusLine` 整行兜底收口）。
+ * Width discipline (narrow-terminal fix): a summary line renders in three
+ * shapes — running progress line (`Running 1 shell command… · <command>` /
+ * `name · detail`) and settled line `name · detail` (only failed rows get
+ * the `[失败]` prefix) — and line-level window accounting always counts 1
+ * line. When `cols` is passed, clip by visual width (reserving the widest
+ * decoration) so no shape wraps (the running bash prefix is long; the full
+ * line is backstopped by `formatToolStatusLine`).
  *
- * 内容可见性：write_file / edit_file 完成后 `completedToolPreview` 产出
- * 截断代码或 diff（UI SSOT）；live box 与历史 `ToolPreviewRows` 共用
- * `CompletedToolPreviewView` 渲染。`toolPreviewRows` 仍是无界 DiffLine
- * 助手（测试锁 create 整文件绿 diff），生产 UI 不直接调用。
+ * Content visibility: after write_file / edit_file completes,
+ * `completedToolPreview` produces a truncated body or diff (UI SSOT); the
+ * live box and history `ToolPreviewRows` share `CompletedToolPreviewView`
+ * rendering. `toolPreviewRows` remains an unbounded DiffLine helper (tests
+ * lock the whole-file green diff for create); production UI does not call
+ * it directly.
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import {
@@ -49,8 +55,9 @@ import { computeDiff, type DiffLine } from "./diff-unified.js";
 import { foldBashPreviewLines } from "./progress-tick.js";
 import { TOOL_SETTLED_CLASS, type SettledClass } from "./tool-settled.js";
 
-// D1 文本层单源 = src/shared/tool-line.ts（CLI 同源）。re-export 保持既有
-// TUI 调用方与 tests/tui/* 的 import 路径不变（字节零变化）。
+// Single source for the text layer = src/shared/tool-line.ts (shared with
+// the CLI). The re-export keeps existing TUI callers' and tests/tui/*'
+// import paths unchanged (zero byte drift).
 export {
   BASH_RUNNING_PREFIX,
   SUBAGENT_ROLE_FALLBACK,
@@ -68,13 +75,14 @@ export {
   visualWidth,
 };
 
-/** ANSI CSI / OSC escape 序列（多见 CSI SGR `\x1b[...m` / OSC `\x1b]...BEL/ST`）。
- *  strip 时一并吞掉终止符（m / K / H / J / BEL / ST = ESC \），保证不会把
- *  转义序列截到一半（spec D4 边界：截断不得切断转义序列中间）。 */
+/** ANSI CSI / OSC escape sequences (mostly CSI SGR `\x1b[...m` / OSC `\x1b]...BEL/ST`).
+ *  The strip also swallows the terminator (m / K / H / J / BEL / ST = ESC \) so an
+ *  escape sequence is never cut in half (boundary contract: truncation must not
+ *  split a sequence mid-way). */
 const ANSI_ESCAPE_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
-/** 剥 ANSI 转义序列（按字符数返回，保留原字符位置不可见）。 */
+/** Strip ANSI escape sequences (returns by character count; original invisible-char positions preserved). */
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_ESCAPE_RE, "");
 }
@@ -82,7 +90,7 @@ export function stripAnsi(s: string): string {
 export interface ToolSummaryLine {
   readonly toolName: string;
   readonly detail: string;
-  /** ok | failed | unknown（tool_result 未到达，如 cancelled 中断）。 */
+  /** ok | failed | unknown (tool_result never arrived, e.g. cancelled interrupt). */
   readonly status: "ok" | "failed" | "unknown";
 }
 
@@ -97,28 +105,35 @@ function countLines(s: unknown): number {
   return s.split("\n").length;
 }
 
-/** #693 T4 D4:工具显示注册表 — 「摘要 + 结果预览」一体声明。
+/** Tool display registry — declares "summary + result preview" in one place.
  *
- *  D7 把「工具状态行文案」与「结果预览函数」同置一处，让「新增一种工具
- *  的显示」只需在 TOOL_DISPLAYS 加一条声明，而不是散改三处（live +
- *  历史 + 结果预览）。每个 tool 一行：summary 函数 + preview 函数（无
- *  预览需求 → 字段缺席；read_file 等明确「不显示预览」的工具亦按字段
- *  缺席处理，见 spec D4 边界）。
+ *  Co-locating each tool's status-line wording with its preview function
+ *  means adding display for a new tool is one TOOL_DISPLAYS entry instead of
+ *  three scattered edits (live + history + result preview). One row per
+ *  tool: summary function + optional preview function (no preview need →
+ *  field absent; tools that deliberately show no preview, e.g. read_file,
+ *  are also field-absent).
  *
- *  preview 函数签名：`(rec, resultText?) => ResultPreview`。
- *  `rec` = tool_use input 投影；`resultText` = tool_result 文本（live 路径
- *  缺省，因 live 走 run.stdout / run.stderr 旁路；历史路径必传 —
- *  来源 = `toolResultTextMap(session.messages)`）。
+ *  Preview signature: `(rec, resultText?) => ResultPreview`.
+ *  `rec` = projection of the tool_use input; `resultText` = tool_result text
+ *  (absent on the live path, which reads the run.stdout / run.stderr
+ *  side-channels instead; always provided on the history path — source =
+ *  `toolResultTextMap(session.messages)`).
  */
 interface ToolDisplay {
-  /** 摘要声明：引用 shared TOOL_SUMMARIES 的同一函数对象（不是复制文本）——
-   *  CLI 与 TUI 的 detail 文本单源，注册表只把它纳入「一体声明」行。 */
+  /** Summary declaration: references the same function object as shared
+   *  TOOL_SUMMARIES (not a copy of text) — the CLI and TUI detail wording
+   *  stays single-source; the registry merely folds it into the one-row
+   *  declaration. */
   readonly summary: (rec: Record<string, unknown>) => string;
-  /** 运行中摘要（可选）。字段缺席 = 运行态与落定态同文案；声明它的工具，
-   *  其落定摘要含「只有 input 齐了才可信的量」（write_file 的行数）——
-   *  运行中 input 是流式半成品，该量必须省略而不是显示成 0。 */
+  /** Optional running-state summary. Field absent = running and settled
+   *  share one wording; a tool that declares it has a settled summary
+   *  containing a quantity only trustworthy once the input is complete
+   *  (write_file's line count) — while streaming the input is a half-
+   *  finished product, so that quantity must be omitted, never shown as 0. */
   readonly runningSummary?: (rec: Record<string, unknown>) => string;
-  /** 落定态三分类（spec D2：缺声明非法 —— 接口必填 + 测试拒绝）。 */
+  /** Settled-state tri-class (a missing declaration is illegal — the field
+   *  is required and tests reject gaps). */
   readonly settledClass: SettledClass;
   readonly preview?: (
     rec: Record<string, unknown>,
@@ -134,9 +149,10 @@ function bashPreview(
   stdout?: string,
   stderr?: string
 ): ResultPreview {
-  // live 路径：stdout/stderr 旁路优先（未走模型 tool_result 编码；
-  // 也不依赖历史 tool_result 文本反序列化 JSON）。缺省回退到 resultText
-  // 的 JSON envelope（历史路径）。
+  // Live path: the stdout/stderr side-channels take priority (they bypass
+  // the model's tool_result encoding and don't depend on deserializing
+  // historical tool_result JSON). Fallback = the resultText JSON envelope
+  // (history path).
   let bashStdout = stdout;
   let bashStderr = stderr;
   if (
@@ -149,9 +165,11 @@ function bashPreview(
       if (typeof parsed.stdout === "string") bashStdout = parsed.stdout;
       if (typeof parsed.stderr === "string") bashStderr = parsed.stderr;
     } catch {
-      // EXIT: 非 JSON 形态(理论上 bash 不会产出,保留防御)→ 整段 resultText
-      // 视为 stdout 显示的退路。不抛、不再尝试其它形态 —— 历史路径的
-      // tool_result 文本就是可展示的最真实料,展示层降级到全文而非空预览。
+      // EXIT: not a JSON shape (bash should never produce one; kept as
+      // defense) → treat the whole resultText as stdout so something still
+      // shows. No throw, no other-shape attempts — the historical
+      // tool_result text is the most faithful material the display layer
+      // has, so degrade to full text rather than an empty preview.
       bashStdout = resultText;
     }
   }
@@ -171,9 +189,10 @@ function bashPreview(
 }
 
 const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
-  // settledClass 值取自 tool-settled.ts 的 D8 分类表、summary 取自 shared
-  // TOOL_SUMMARIES（两处均为单一来源，注册表只复用不复制；summary +
-  // preview? + settledClass 同置一行，spec D7）。
+  // settledClass values come from tool-settled.ts's classification table and
+  // summary from shared TOOL_SUMMARIES (both single sources; the registry
+  // reuses, never copies — summary + preview? + settledClass co-located in
+  // one row).
   write_file: {
     summary: TOOL_SUMMARIES.write_file!.summary,
     runningSummary: TOOL_SUMMARIES.write_file!.runningSummary,
@@ -220,18 +239,20 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: TOOL_SUMMARIES.tool_search!.summary,
     settledClass: TOOL_SETTLED_CLASS.tool_search!,
   },
-  // D6（spec specs/tui-tool-settled-appearance.md）：skill 是 accent 类 ——
-  // 只点名着色（`skill <name>`），不把 skill 正文摊成结果预览浅色预览；
-  // 声明无 preview 字段（resultToolPreview 走 empty）。
+  // skill is an accent-class tool — only the name is colored
+  // (`skill <name>`); the skill body is not spread into a pale result
+  // preview. No preview field is declared (resultToolPreview returns empty).
   skill: {
     summary: TOOL_SUMMARIES.skill!.summary,
     settledClass: TOOL_SETTLED_CLASS.skill!,
   },
-  // disclosure-index-align T2: skill_search 已删（spec ADR-0046 / SC5）。
-  // 历史 tool_result 可能仍含该名 → 走默认 placeholder（已不在 TOOL_SUMMARIES），
-  // 行为与未注册工具一致（无显示声明即 retract 兜底）。
-  // 子代理两件（spec D8 三类之外）：settledClass 取核内显式声明的 "subagent"
-  // —— 不用 `!` 兜底，声明缺失/谎报在编译期或跨核闸失败。
+  // skill_search was removed (ADR-0046); historical tool_results may still
+  // carry the name → the default placeholder handles it (it is no longer in
+  // TOOL_SUMMARIES), same behavior as any unregistered tool (no display
+  // declaration = retract fallback).
+  // The two subagent tools: settledClass takes the core's explicitly
+  // declared "subagent" — no `!` fallback, so a missing/misreported
+  // declaration fails at compile time or at the cross-module gate.
   spawn_subagent: {
     summary: TOOL_SUMMARIES.spawn_subagent!.summary,
     runningSummary: TOOL_SUMMARIES.spawn_subagent!.runningSummary,
@@ -281,9 +302,8 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: TOOL_SUMMARIES.lsp_workspace_symbol!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_workspace_symbol!,
   },
-  // bash_output / bash_stop / todo_write / list_mcp_resources / read_mcp_resource /
-  // query_trace:host 工具 / 无内容可预览 —— 仅 summary 声明,无 preview
-  // (CLI 与 TUI 同字节,模型视野与现状一致)。
+  // Host tools / nothing previewable — summary declaration only, no preview
+  // (CLI and TUI render identically; model visibility matches current state).
   bash_output: {
     summary: TOOL_SUMMARIES.bash_output!.summary,
     settledClass: TOOL_SETTLED_CLASS.bash_output!,
@@ -308,12 +328,14 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: TOOL_SUMMARIES.query_trace!.summary,
     settledClass: TOOL_SETTLED_CLASS.query_trace!,
   },
-  // task worktree 生命周期五件（spec D8）：enter/exit/create/remove 点名
-  // 着色（accent），list 是查询类（retract）。人读表述随 D1 改英文并点名新
-  // 注册名（specs/create-worktree-tools.md D5）—— 文本在 shared
-  // TOOL_SUMMARIES 声明，CLI 侧无注册表可查，同源才不漂移。
-  // 这五件在 TUI surface 属 host 缝条件化装配（deps-tools 期望集剥除），
-  // 显示声明仍常驻 —— 渲染注册表完备性与装配条件化解耦。
+  // The five task-worktree lifecycle tools: enter/exit/create/remove are
+  // accent-class (name colored), list is query-class (retract). Their
+  // human-readable wording lives in shared TOOL_SUMMARIES — the CLI side
+  // has no registry lookup, so only a single source avoids drift.
+  // These five are conditionally assembled at the TUI surface (stripped
+  // from the deps-tools expectation set), but their display declarations
+  // stay resident — registry completeness is decoupled from assembly
+  // conditions.
   "create-worktree": {
     summary: TOOL_SUMMARIES["create-worktree"]!.summary,
     settledClass: TOOL_SETTLED_CLASS["create-worktree"]!,
@@ -336,8 +358,9 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
   },
 };
 
-/** 单源：根据工具名 + input + resultText 产结果预览（行级尾部 tail + ANSI 透传）。
- *  无 preview 声明 / 无 resultText / 空输出 → `{ kind: "empty" }`。 */
+/** Single source: build a result preview from tool name + input + resultText
+ *  (tail row window + ANSI passthrough). No preview declaration / no
+ *  resultText / empty output → `{ kind: "empty" }`. */
 export function resultToolPreview(
   name: string,
   input: unknown,
@@ -355,77 +378,88 @@ export function resultToolPreview(
   return display.preview(rec, opts?.resultText, opts?.stdout, opts?.stderr);
 }
 
-/** 注册表覆盖性：列出当前 TOOL_DISPLAYS 注册的所有工具名（供测试用）。 */
+/** Registry coverage: list all tool names currently registered in TOOL_DISPLAYS (for tests). */
 export function registeredToolDisplayNames(): ReadonlyArray<string> {
   return Object.keys(TOOL_DISPLAYS);
 }
 
-/** 显示注册表的 settledClass 查询（供测试闸用）：未注册名缺省 retract，
- *  与 TOOL_SETTLED_CLASS 兜底一致。 */
+/** settledClass lookup on the display registry (for the test gate): an
+ *  unregistered name defaults to retract, matching the TOOL_SETTLED_CLASS
+ *  fallback. */
 export function settledClassOfDisplay(name: string): SettledClass {
   return TOOL_DISPLAYS[name]?.settledClass ?? "retract";
 }
 
 /**
- * D5（spec specs/tui-tool-settled-appearance.md）：失败一行短错误。
- * 单源截断：折叠空白 → `clipOneLineVisual` 按视觉宽度收口（窄终端单行
- * 不折），带 `…` 省略号 —— 不把长回执（如 `[worktree_isolation]`）摊成
- * 多行。空文本 → 空串（渲染层不画空错误行）。
+ * One short error line for a failed tool.
+ * Single-source truncation: collapse whitespace → `clipOneLineVisual` clips
+ * to visual width (no wrap on narrow terminals) with an `…` ellipsis — long
+ * receipts (e.g. `[worktree_isolation]`) are never spread over multiple
+ * lines. Empty text → empty string (the renderer draws no error row).
  */
 export function clipErrorLine(text: string, cols: number): string {
   if (text.length === 0) return "";
   return clipOneLineVisual(text, Math.max(1, cols - 2));
 }
 
-/** 新建文件（write create preview）可见窗：正文前 10 行（spec D3）。
- *  **不是**编辑 diff 的帽 —— 编辑/覆盖已有文件的 diff 不截断。 */
+/** Visible window for a new file (write create preview): first 10 body
+ *  lines. **Not** a cap for edit diffs — diffs of edits/overwrites are never
+ *  truncated. */
 export const WRITE_CREATE_PREVIEW_WINDOW = 10;
 
-/** 兼容别名：既有调用方/测试引用的 `TOOL_PREVIEW_WINDOW` 现等于新建窗 10。
- *  编辑 diff 不再共用该帽（D4：diff 全量可见）。 */
+/** Compatibility alias: existing callers/tests referencing `TOOL_PREVIEW_WINDOW` now equal the create window 10.
+ *  Edit diffs no longer share this cap (diffs are fully visible). */
 export const TOOL_PREVIEW_WINDOW = WRITE_CREATE_PREVIEW_WINDOW;
 
-/** #693 T4 D4:结果预览（bash / skill）可见窗（尾部 tail，截断即折叠）。
- *  行数 SSOT = docs/CONTEXT.md **result preview**（"取 bash 尾部最多 3 行"）：
- *  操作员裁定 3 行，write/edit 窗不在本常量管辖（各自独立帽）。 */
+/** Result preview (bash / skill) visible window: tail rows, overflow is
+ *  folded away. Line-count SSOT = docs/CONTEXT.md **result preview** ("take
+ *  up to 3 tail lines of bash"): operator-ruled 3 lines; the write/edit
+ *  window is independent of this constant. */
 export const RESULT_PREVIEW_WINDOW = 3;
 
-/** 新建预览溢出文案：`+N more lines`（N = 被截去的行数）。人读合同
- *  （spec D3 / docs/CONTEXT.md write create preview / fence display cap）
- *  钉死英文形态；围栏 32 行帽与新建 10 行帽共用本标签，两条渲染路径
- *  （markdown fence / html）与完成态预览不再各写一份文案。 */
+/** Write-create preview overflow label: `+N more lines` (N = hidden line
+ *  count). The human-readable contract pins the English form (see
+ *  docs/CONTEXT.md write create preview / fence display cap); the fence
+ *  32-line cap and the create 10-line cap share this label so the two
+ *  render paths (markdown fence / html) and the completed-state preview no
+ *  longer each keep their own wording. */
 export function previewOverflowLabel(hiddenLineCount: number): string {
   return `+${hiddenLineCount} more lines`;
 }
 
-/** 语义别名：新建预览溢出（D3）。保留独立名让完成态预览的调用点读到意图，
- *  字节与 `previewOverflowLabel` 一致（同一 SSOT 函数）。 */
+/** Semantic alias for the write-create overflow label. Kept as a
+ *  distinct name so completed-preview call sites read the intent; bytes are
+ *  identical to `previewOverflowLabel` (same SSOT function). */
 export const writePreviewOverflowLabel = previewOverflowLabel;
 
-/** #693 T4 D4:结果预览溢出文案。`… +N 行`（N = 被截去的行数）—— 与
- *  write/edit 溢出对齐意图（藏尾部行数），但 spec D4 钉死为
- *  `… +N 行` 形态（首行前置），把测试摘要/git 结果通常在末尾这一信号
- *  显式给到读者。 */
+/** Result-preview overflow label: `… +N 行` (N = hidden line count) —
+ *  aligned in intent with the write/edit overflow (hides the tail line
+ *  count), but the pinned UI form is `… +N 行` with the marker on the first
+ *  line, surfacing to the reader that test summaries / git results usually
+ *  land at the end. */
 export function resultPreviewOverflowLabel(hiddenLineCount: number): string {
   return `… +${hiddenLineCount} 行`;
 }
 
-/** #693 T4 D4:工具结果预览（bash / skill 等子进程输出）。live 路径走
- *  `run.stdout / run.stderr` 旁路；历史路径走 `toolResultTextMap` 投影到
- *  bash JSON envelope 的 `output` 字段。ANSI 透传：保留转义序列，只在
- *  「可见性判定（是否空）」与「溢出行数计算」上按 ANSI 剥离后宽度计数，
- *  实际行内容原样透传。
+/** Tool-result preview (bash / skill, i.e. subprocess output). The live path
+ *  reads the `run.stdout / run.stderr` side-channels; the history path
+ *  projects through `toolResultTextMap` onto the bash JSON envelope's
+ *  `output` field. ANSI passthrough: escape sequences are kept; they are
+ *  stripped only for the emptiness check and the overflow line count, while
+ *  row content passes through unchanged.
  *
- *  边界（spec D4 钉死）：
- *   - 输出为空 / 全空白 / ANSI strip 后为空 → `{ kind: "empty" }`；
- *   - 截取文本「尾部」RESULT_PREVIEW_WINDOW 行（3 行封顶），首行 +N
- *     标记溢出；
- *   - 单行直接显示 1 行（不强制 3 行格式）；
- *   - ANSI 序列按剥离后宽度计数（`string-width` 内建 ANSI 处理），
- *     截断不得切断转义序列中间 —— 因行内不再二次裁剪（行级截断只按
- *     行数，不按视觉宽度），该约束天然成立；
- *   - 失败由渲染层在 ToolSummaryRow 外层包 error 色 token 体现；
- *     preview 文本本身不变（spec：「失败时内容照常显示但整体标红」）。 */
+ *  Boundaries (pinned contract):
+ *   - empty / all-whitespace / empty-after-ANSI-strip → `{ kind: "empty" }`;
+ *   - keep the last RESULT_PREVIEW_WINDOW lines (cap 3), with a leading
+ *     `+N` marker for overflow;
+ *   - a single line shows as one line (no forced 3-line format);
+ *   - ANSI sequences count by stripped width (`string-width` handles ANSI
+ *     natively), and truncation must never split a sequence mid-way — this
+ *     holds naturally because lines are never re-clipped in-row (row
+ *     truncation counts lines, not visual width);
+ *   - failure coloring is applied by the render layer wrapping ToolSummaryRow
+ *     in an error-color token; the preview text itself is unchanged ("on
+ *     failure the content still shows, tinted red as a whole"). */
 export type ResultPreview =
   | { readonly kind: "empty" }
   | {
@@ -436,7 +470,7 @@ export type ResultPreview =
 
 const EMPTY_RESULT_PREVIEW: ResultPreview = { kind: "empty" };
 
-/** 尾部取 N 行 + 溢出计数。lines.length <= N → 整段透传。 */
+/** Take the tail N rows + overflow count. lines.length <= N → pass through in full. */
 function takeTailWindow(lines: readonly string[]): {
   readonly visible: readonly string[];
   readonly hiddenLineCount: number;
@@ -451,14 +485,15 @@ function takeTailWindow(lines: readonly string[]): {
   };
 }
 
-/** 单源：从「可能含 ANSI 的输出」判定是否应渲染预览块。空 / 全空白 /
- *  ANSI strip 后为空 → 视为空（不渲染空块）。 */
+/** Single source: decide whether output that may contain ANSI deserves a
+ *  preview block. Empty / all-whitespace / empty-after-strip → treated as
+ *  empty (no blank block rendered). */
 function isRenderableOutput(s: string): boolean {
   if (s.length === 0) return false;
-  // 整段全空白：visible 仅空白 / 换行 / ANSI 序列。
+  // Whole input blank: visible chars are only whitespace / newlines / ANSI sequences.
   const stripped = stripAnsi(s);
   if (stripped.trim().length === 0) return false;
-  // ANSI strip 后空（理论上上述已覆盖；保留以防 ANSI 序列独占整段）。
+  // Empty after ANSI strip (theoretically covered above; kept in case ANSI sequences alone fill the input).
   if (stripped.length === 0) return false;
   return true;
 }
@@ -466,20 +501,22 @@ function isRenderableOutput(s: string): boolean {
 export type CompletedToolPreview =
   | { readonly kind: "empty" }
   | {
-      /** write create preview：新建文件正文前 10 行 + `+N more lines`。 */
+      /** write create preview: first 10 body lines + `+N more lines`. */
       readonly kind: "code";
       readonly lines: readonly string[];
       readonly hiddenLineCount: number;
     }
   | {
-      /** edit diff preview：本次改动 diff，**不截断**（D4）。 */
+      /** edit diff preview: this change's diff, **untruncated**. */
       readonly kind: "diff";
       readonly rows: readonly DiffLine[];
       readonly hiddenLineCount: number;
     }
   | {
-      /** 挤档（spec D5）：视图被多写/子代理挤住时，写/改只留标题行的
-       *  `Wrote N lines to <path>`，正文预览整段让位（不是被截断）。 */
+      /** Squeeze mode: when the view is crowded by multiple writes /
+       *  subagents, write/edit keep only the title line
+       *  `Wrote N lines to <path>` and the body preview yields entirely
+       *  (not truncated — removed). */
       readonly kind: "squeeze";
       readonly line: string;
     };
@@ -492,7 +529,7 @@ function splitContentLines(content: string): readonly string[] {
   return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
 }
 
-/** 可见窗截断（仅用于 **write create preview**；编辑 diff 不截断）。 */
+/** Visible-window truncation (used **only for write create preview**; edit diffs are never truncated). */
 function truncateWindow<T>(items: readonly T[]): {
   readonly visible: readonly T[];
   readonly hiddenLineCount: number;
@@ -526,9 +563,10 @@ function resolveWriteEditPair(
     } else if (name === "write_file") {
       const c = rec.content;
       if (typeof c !== "string") return null;
-      // 无 side-channel 旧内容 → 视为新建（纯 add）。历史路径没有读盘前的
-      // 旧内容（meta 在 model 边界被丢弃），该假设由调用方显式传
-      // oldContent 才被推翻。
+      // No side-channel old content → treat as new file (pure adds). The
+      // history path has no pre-write disk content (meta is dropped at the
+      // model boundary); this assumption is only overturned when the caller
+      // explicitly passes oldContent.
       if (oldContent === undefined) oldContent = "";
       newContent = c;
     } else {
@@ -543,28 +581,34 @@ function hasPreviewPath(rec: Record<string, unknown>): boolean {
 }
 
 /**
- * 完成态 write/edit 预览分类（specs/tui-human-display.md D3–D5）：
- *  - **新建**（write_file 且旧内容为空）→ `kind: "code"`，正文前 10 行 +
- *    `+N more lines`（`WRITE_CREATE_PREVIEW_WINDOW`）；
- *  - **覆盖已有文件 / edit_file** → `kind: "diff"`，本次改动 diff **不截断**
- *    （hiddenLineCount 恒 0；D4 明令不套新建那 10 行帽）；
- *  - **挤档**（调用方显式声明视图被挤，如子代理并排）→ `kind: "squeeze"`，
- *    正文预览让位，只留标题行 `Wrote N lines to <path>`（由调用方拼装）。
+ * Completed-state write/edit preview classification:
+ *  - **new file** (write_file with empty old content) → `kind: "code"`,
+ *    first 10 body lines + `+N more lines` (`WRITE_CREATE_PREVIEW_WINDOW`);
+ *  - **overwrite / edit_file** → `kind: "diff"`, this change's diff is
+ *    **untruncated** (hiddenLineCount always 0; the create 10-line cap never
+ *    applies to diffs);
+ *  - **squeeze** (caller explicitly declares the view is crowded, e.g. side-
+ *    by-side subagents) → `kind: "squeeze"`, the body preview yields and only
+ *    the title line `Wrote N lines to <path>` remains (assembled by the
+ *    caller).
  *
- *  非 write/edit、缺 path、空正文（无 diff 行且非新建正文）→ `{ kind: "empty" }`。
- *  不读工作区；权威数据 = input + 旁路 old/newContent。
+ *  Non write/edit, missing path, empty body (no diff rows and no new-file
+ *  content) → `{ kind: "empty" }`. Never reads the workspace; authoritative
+ *  data = input + side-channel old/newContent.
  */
 export function completedToolPreview(
   name: string,
   input: unknown,
   opts?: {
-    /** 写盘前旧内容（write_file 覆盖判定 → diff 基线）。 */
+    /** Old content before writing to disk (write_file overwrite detection → diff baseline). */
     readonly oldContent?: string;
     readonly newContent?: string;
-    /** 挤档：视图被多写/子代理挤住 → 正文预览整段让位（D5）。
-     *  **尚未接线**：D5 是「可」权限不是硬要求，主会话默认走 D3/D4；
-     *  当前无调用方传本值时该分支不可达，待拥挤信号（同轮多写 /
-     *  子代理挤视图）在渲染层可用后再接。 */
+    /** Squeeze: the view is crowded by multiple writes / subagents → the
+     *  body preview yields entirely. **Not wired yet**: squeeze is a
+     *  permission, not a hard requirement — the main session defaults to the
+     *  code/diff branches; with no caller passing this value the branch is
+     *  unreachable until crowding signals (multi-write in one turn /
+     *  subagents crowding the view) reach the render layer. */
     readonly squeezed?: boolean;
   }
 ): CompletedToolPreview {
@@ -588,7 +632,7 @@ export function completedToolPreview(
     if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
     return { kind: "code", lines: visible, hiddenLineCount };
   }
-  // D4：编辑/覆盖画本次改动 diff，不截断（hiddenLineCount 恒 0）。
+  // Edits/overwrites draw this change's diff, untruncated (hiddenLineCount always 0).
   const rows = toolPreviewRows(name, rec, 0, {
     oldContent: pair.oldContent,
     newContent: pair.newContent,
@@ -598,17 +642,20 @@ export function completedToolPreview(
 }
 
 /**
- * 无界 DiffLine 助手（非生产 UI SSOT）：edit_file / write_file 调用
- * `computeDiff` 产出完整 `DiffLine[]`。其余工具 / 无内容 → 空数组。
- * 生产完成态预览走 `completedToolPreview`（create 保持代码行，diff 再截断
- * 本函数的结果）；测试仍用本函数锁 write_file create 的整文件绿 diff。
+ * Unbounded DiffLine helper (not the production UI SSOT): edit_file /
+ * write_file call `computeDiff` to produce the full `DiffLine[]`. Other
+ * tools / no content → empty array. Production completed-state previews go
+ * through `completedToolPreview` (create keeps code lines; diff is truncated
+ * from this function's result); tests still use this to lock the whole-file
+ * green diff for write_file create.
  *
- * `opts.oldContent / opts.newContent`（side-channel）：live 运行完成事件
- * 携带读盘前后全文（与 model tool_result 严格分离）→ 精确 diff。缺省（历史
- * 持久化消息，meta 在 model 边界被丢弃）回退 intent-diff：
- *  - edit_file：input.old_str / input.new_str 片段 diff；
- *  - write_file：old 视为空串 → 纯 add；
- *  - 其余工具：空数组。
+ * `opts.oldContent / opts.newContent` (side-channel): live run-completion
+ * events carry full pre/post-write file content (strictly separated from the
+ * model's tool_result) → exact diff. Absent (persisted history, meta dropped
+ * at the model boundary) falls back to intent-diff:
+ *  - edit_file: fragment diff of input.old_str / input.new_str;
+ *  - write_file: old treated as empty string → pure adds;
+ *  - all other tools: empty array.
  */
 export function toolPreviewRows(
   name: string,
@@ -625,8 +672,9 @@ export function toolPreviewRows(
   return computeDiff(name, pair.oldContent, pair.newContent);
 }
 
-/** 挤档标题行（spec D5）：`Wrote N lines to <path>`。N = 本次写入正文的
- *  可见行数；`newContent` 缺席（历史无旁路）→ 省略 N，只留路径。 */
+/** Squeeze title line: `Wrote N lines to <path>`. N = visible line count of
+ *  this write's body; when `newContent` is absent (history without side-
+ *  channel) N is omitted and only the path remains. */
 export function squeezeWriteSummary(
   input: unknown,
   newContent?: string
@@ -640,7 +688,7 @@ export function squeezeWriteSummary(
   return `Wrote ${countLines(newContent)} lines to ${path}`;
 }
 
-/** tool_use_id → is_error 状态映射（tool_result 精确配对，SSOT）。 */
+/** tool_use_id → is_error status map (exact tool_result pairing, SSOT). */
 export function toolResultStatusMap(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): Map<string, boolean> {
@@ -655,13 +703,17 @@ export function toolResultStatusMap(
   return map;
 }
 
-/** #693 T4 D4:tool_use_id → tool_result 文本映射（历史结果预览数据源 SSOT）。
- *  - content 是 string → 原样透传（最常见形态：bash JSON envelope / skill 正文）；
- *  - content 是 AnthropicContentBlock[] → 拼所有 text block（按出现顺序,空块跳过）。
- *    block 形态出现于 ACI 链路：handler 复杂返回（如 structured object）的
- *    AnthropicContentBlock[] 编码走 blocks。bash / skill 走 string,故文本分支
- *    实际命中。
- *  - 未配对 tool_result / 既非 string 也非 array → 缺席（consumer 走 empty 预览）。
+/** tool_use_id → tool_result text map (data-source SSOT for historical
+ *  result previews).
+ *  - content is a string → passed through as-is (the common shape: bash
+ *    JSON envelope / skill body);
+ *  - content is AnthropicContentBlock[] → concatenate all text blocks in
+ *    appearance order, skipping empty ones. The block shape appears on the
+ *    ACI path: complex handler returns (e.g. structured objects) are encoded
+ *    as AnthropicContentBlock[] via blocks; bash / skill use strings, so the
+ *    string branch is what actually hits in practice.
+ *  - unpaired tool_result / neither string nor array → absent (consumers fall
+ *    back to the empty preview).
  */
 export function toolResultTextMap(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -699,8 +751,9 @@ export function toolResultTextMap(
 }
 
 /**
- * 从权威 messages 投影工具摘要行（resume 渲染 / 单测用）：
- * assistant.tool_use 产出行，tool_result 按 tool_use_id 回填状态。
+ * Project tool summary lines from the authoritative messages (resume
+ * rendering / unit tests): assistant.tool_use produces rows, tool_result
+ * backfills status by tool_use_id.
  */
 export function projectToolLines(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -724,6 +777,6 @@ export function projectToolLines(
   return lines;
 }
 
-// 运行中 bash 前缀（BASH_RUNNING_PREFIX）与工具状态行拼装
-// （formatToolStatusLine / formatLiveToolEvent）的实现均在
-// src/shared/tool-line.ts（CLI 同源），本文件顶部 re-export。
+// The running-bash prefix (BASH_RUNNING_PREFIX) and status-line assembly
+// (formatToolStatusLine / formatLiveToolEvent) are implemented in
+// src/shared/tool-line.ts (shared with the CLI), re-exported at the top.

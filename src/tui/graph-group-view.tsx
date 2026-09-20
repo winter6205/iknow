@@ -1,7 +1,8 @@
 /** @jsxImportSource @opentui/react */
 /**
- * run_graph 全屏语义分组视图。独立 view，不走 ChatView 行账。
- * 节点 last 输出用快照 summary 文本，不用原型假 transcript。
+ * run_graph full-screen semantic-group view. Standalone view, outside ChatView
+ * row accounting. A node's last output uses the snapshot summary text, not a
+ * prototype fake transcript.
  */
 import type { ReactNode } from "react";
 import type { GraphProgressSnapshot } from "../harness/graph/progress.js";

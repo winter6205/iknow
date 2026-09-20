@@ -2,32 +2,39 @@
 /**
  * src/tui/config-panel.tsx
  *
- * `/config` 设置面板（ADR-0096，T1+T2）：无参 `/config` 打开与 `/model` 同族的浮层
- * 面板，三行（FS 隔离档 / worktree 门禁 / 子代理并发上限）；有参 `/config …`
- * 仍走既有 `applyFsModeCommand` 路径不变。
+ * `/config` settings panel (ADR-0096): bare `/config` opens a floating panel
+ * of the same family as `/model` with three rows (FS isolation mode / worktree
+ * gate / subagent concurrency cap); `/config …` with arguments keeps the
+ * existing `applyFsModeCommand` path unchanged.
  *
- * 交互语义（与 model-picker / memory-picker 同款 SSOT —— picker family 三件套：
- *  State + reducer + rows 函数 + 组件）：
- *  - ↑/↓ → 移焦点（clamp [0, ROW_COUNT-1]，三行恒定）；
- *  - Enter → fix（FS 行：翻 holder 后落盘；cap 行：循环 cap holder 后落盘；
- *    worktree 行：翻 worktree holder 后落盘 —— 三行均已激活）；
- *  - Esc → commit（**直接关闭**，无 save-staged 语义）—— Enter 翻转即落盘，
- *    没有「未提交的暂存态」可保存，与 model-picker 的 cancel 语义同款；
- *  - ctrl/meta → ignore（让给 app 层既有路由）。
+ * Interaction semantics (same SSOT as model-picker / memory-picker — the
+ * picker-family triplet of State + reducer + rows function + component):
+ *  - ↑/↓ → move focus (clamp [0, ROW_COUNT-1], always three rows);
+ *  - Enter → fix (FS row: flip the holder then persist; cap row: cycle the cap
+ *    holder then persist; worktree row: flip the worktree holder then persist
+ *    — all three rows are live);
+ *  - Esc → commit (**close directly**, no save-staged semantics) — Enter
+ *    persists immediately on flip, so there is no uncommitted staged state to
+ *    save; same cancel semantics as model-picker;
+ *  - ctrl/meta → ignore (leave them to the app layer).
  *
- * 行账：`configPickerRows()` = 边框 2 + 标题 1 + 3 行内容 + 键位提示 1 = 7，
- * **不含 marginBottom=1**（与 modelPickerRows / thinkingPickerRows / memoryPickerRows
- * 同约定，由 chromeReserveRows 的 +1 入账）。
+ * Row budget: `configPickerRows()` = border 2 + title 1 + 3 content rows +
+ * key hints 1 = 7. **Excludes marginBottom=1** (same convention as
+ * modelPickerRows / thinkingPickerRows / memoryPickerRows, accounted by the
+ * +1 in chromeReserveRows).
  *
- * 三行（值域闭集，非法态不可达 —— 面板键入路径无自由输入）：
- *  - FS 隔离档 `global | workspace`（活动行，可改）；经 `props.fsMode?.set()`
- *    翻 holder 后 fire-and-forget `props.onPersistFsMode`，失败 → notice。
- *  - worktree 门禁 `ON | OFF`（T3 活动行）：经 `props.worktreeOnMutateHolder`
- *    `set(...)` 翻 holder 后 fire-and-forget `onPersistWorktreeOnMutate`，失败
- *    → notice（与 FS / cap 行同款：holder 已生效不撤回）。
- *  - 子代理并发上限 `3 | 5 | 9 | 15 | unlimited`（T2 活动行）：经
- *    `nextSubagentCap` 循环调 cap holder `set(...)` 后 fire-and-forget
- *    `onPersistSubagentCap`，失败 → notice（与 FS 行同形态）。
+ * The three rows (closed value sets, illegal states unreachable — the panel
+ * has no free-text input):
+ *  - FS isolation mode `global | workspace` (live row): flip via
+ *    `props.fsMode?.set()` then fire-and-forget `props.onPersistFsMode`;
+ *    failure → notice.
+ *  - worktree gate `ON | OFF` (live row): flip via
+ *    `props.worktreeOnMutateHolder.set(...)` then fire-and-forget
+ *    `onPersistWorktreeOnMutate`; failure → notice (holder stays applied,
+ *    same as the FS / cap rows — never rolled back).
+ *  - subagent concurrency cap `3 | 5 | 9 | 15 | unlimited` (live row): cycle
+ *    the cap holder via `nextSubagentCap` then fire-and-forget
+ *    `onPersistSubagentCap`; failure → notice (same shape as the FS row).
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
@@ -42,24 +49,28 @@ import { tuiPalette } from "./theme.js";
 import { BORDER_CYCLE_MS, flowBorderColor } from "./designs/_color.js";
 
 /**
- * config 面板宽度（与 picker family 同族但**独立取值**，不复用 PICKER_WIDTH）。
- * 三行带右侧「Enter 切换为 …」hint，最宽内容行 = 51 列（`▸ 文件系统隔离档
- * global  ·  Enter 切换为 workspace`，CJK=2；cap 行最宽 47）—— 50 宽的
- * PICKER_WIDTH 内宽只有 46 列，会把行 wrap 成两行、顶破 `configPickerRows()`
- * 的行账挤 transcript（code-review High 修复：宽度预算 = 内宽 ≥ 最宽行）。
- * 56 − 边框 2 − paddingX 2 = 52 ≥ 51。行账不受宽度影响（行数不变）。
+ * Config panel width (picker family but **independent value**, not reusing
+ * PICKER_WIDTH). The three rows carry a right-side switch hint (see
+ * fsNextHint below; CJK labels count as 2 cols each); the widest content row
+ * is 51 cols (the FS row with its CJK label + hint; the cap row peaks at 47)
+ * — PICKER_WIDTH=50 leaves only 46 inner cols, which would wrap rows into two
+ * lines and push `configPickerRows()` past its budget, squeezing the
+ * transcript (width budget rule: inner width ≥ widest row). 56 − border 2 −
+ * paddingX 2 = 52 ≥ 51. The row budget itself is width-independent (row
+ * count unchanged).
  */
 export const CONFIG_PICKER_WIDTH = 56;
 
-/** T1 三行：恒 3（FS / worktree / cap）。后续 T2/T3 只加行，不增列。 */
+/** The three rows: always 3 (FS / worktree / cap). Future rows add lines, not columns. */
 export const CONFIG_PICKER_ROW_COUNT = 3;
 
-/** 子代理并发上限 display-only 取值（值域闭集；undefined = 未接线显示「—」）。 */
+/** Subagent concurrency cap, display-only value (closed set; undefined = not wired, shows "—"). */
 export type SubagentCapDisplay = number | "unlimited" | undefined;
 
 /**
- * 子代理并发上限显示串（display-only；T2 由 holder.get() 替换）。undefined →
- * "—"（未接线 / 启动装配缺失的占位）。
+ * Concurrency-cap display string (display-only; replaced by holder.get()
+ * once wired). undefined → "—" (placeholder for not-wired / missing startup
+ * assembly).
  */
 export function formatSubagentCapDisplay(cap: SubagentCapDisplay): string {
   if (cap === undefined) return "—";
@@ -67,7 +78,7 @@ export function formatSubagentCapDisplay(cap: SubagentCapDisplay): string {
   return String(cap);
 }
 
-/** ADR-0096 T2 ── 子代理并发上限闭集（面板 Enter 循环唯一源）。3→5→9→15→unlimited→3。 */
+/** Subagent concurrency cap closed set (the single source the panel's Enter cycles through). 3→5→9→15→unlimited→3. */
 export const SUBAGENT_CAP_CYCLE: ReadonlyArray<number | "unlimited"> = [
   3,
   5,
@@ -77,10 +88,12 @@ export const SUBAGENT_CAP_CYCLE: ReadonlyArray<number | "unlimited"> = [
 ];
 
 /**
- * 闭集内下一个 cap（pure）。`3 → 5 → 9 → 15 → "unlimited" → 3` 循环。非法
- * 入参（含 undefined）→ 默认 3 起步（与 T1 显示「—」后首次 Enter 一致：
- * 不预设初值，先回退到闭集最小元素，避免把 holder 拍到意外大值）。调用方
- * 已经过面板 Enter 路径不会传非法值；本函数是 fail-closed 兜底。
+ * Next cap within the closed set (pure): `3 → 5 → 9 → 15 → "unlimited" → 3`.
+ * Illegal input (including undefined) → start at the default 3 (consistent
+ * with the first Enter after the "—" placeholder: don't preset an initial
+ * value, fall back to the set minimum so the holder is never slammed to an
+ * unexpectedly large value). Callers go through the panel's Enter path and
+ * never pass illegal values; this function is the fail-closed backstop.
  */
 export function nextSubagentCap(
   current: number | "unlimited" | undefined
@@ -92,27 +105,29 @@ export function nextSubagentCap(
 }
 
 /**
- * worktree 门禁显示串（T1 display-only；T3 起由 holder 现值驱动）。
- * `undefined`（未接线 / 启动装配缺失）→ "OFF"（与 `resolveWorktreeOnMutate`
- * 的 fail-closed 缺省同向）。
+ * Worktree gate display string. `undefined` (not wired / missing startup
+ * assembly) → "OFF" (same direction as the fail-closed default of
+ * `resolveWorktreeOnMutate`).
  */
 export function formatWorktreeOnMutateDisplay(on: boolean | undefined): string {
   return on === true ? "ON" : "OFF";
 }
 
 /**
- * ADR-0096 T3 ── worktree 门禁翻转（pure）：`ON ↔ OFF` 闭集切换。
- * 面板内只产这两个值；holder 内部 `set` 还会过 typeof boolean 兜底
- * （fail-closed，与 `createFsModeContext` 的 set 同形态）。
+ * Worktree gate flip (pure): `ON ↔ OFF` closed-set toggle. The panel only
+ * produces these two values; the holder's internal `set` additionally guards
+ * with a typeof-boolean check (fail-closed, same shape as
+ * `createFsModeContext`'s set).
  */
 export function toggleWorktreeOnMutate(on: boolean): boolean {
   return !on;
 }
 
 /**
- * 面板状态（reducer + 组件共用）。`focusedIndex` 是面板内唯一暂存态（clamp
- * 到 [0, CONFIG_PICKER_ROW_COUNT-1]）；其余字段都是渲染期 snapshot（来自
- * props / fsMode.get()，不存本组件内 —— 避免与 holder 不同步）。
+ * Panel state (shared by reducer + component). `focusedIndex` is the only
+ * in-panel staged state (clamped to [0, CONFIG_PICKER_ROW_COUNT-1]); every
+ * other field is a render-time snapshot (from props / fsMode.get(), not
+ * stored in this component — to stay in sync with the holders).
  */
 export interface ConfigPickerState {
   readonly focusedIndex: 0 | 1 | 2;
@@ -125,13 +140,15 @@ export type ConfigPickerAction =
   | { readonly kind: "ignore" };
 
 /**
- * 键路由纯函数（宿主 useKeyboard 消费）：
- *  - ctrl/meta → ignore（Ctrl+C/O 不被吞）；
- *  - Esc → commit（直接关闭，无 staged 状态可保存 —— Enter 即落盘）；
- *  - ↑/↓ → move，clamp [0, ROW_COUNT-1]；
- *  - Enter → fix（按 focusedIndex 决定改哪个值；非 FS 行 no-op，组件层判行
- *    后落到 onSelect 上，由宿主决定是否真改）；
- *  - 其余 → ignore。
+ * Key-routing pure function (consumed by the host's useKeyboard):
+ *  - ctrl/meta → ignore (Ctrl+C/O not swallowed);
+ *  - Esc → commit (close directly — Enter persists immediately, so there is
+ *    no staged state to save);
+ *  - ↑/↓ → move, clamp [0, ROW_COUNT-1];
+ *  - Enter → fix (which row to change is decided by focusedIndex; the
+ *    component layer dispatches to the corresponding handler and the host
+ *    decides whether to actually write);
+ *  - anything else → ignore.
  */
 export function reduceConfigPickerKey(
   event: ModalKeyEvent,
@@ -163,27 +180,31 @@ export function reduceConfigPickerKey(
 }
 
 /**
- * FS 档翻转（pure）：`global ↔ workspace` 闭集切换。面板内只产这两个值；
- * holder 内部 `set` 还会过 `parseFsModeFlag` 兜底（fail-closed）。
+ * FS mode flip (pure): `global ↔ workspace` closed-set toggle. The panel only
+ * produces these two values; the holder's internal `set` additionally guards
+ * through `parseFsModeFlag` (fail-closed).
  */
 export function toggleFsMode(mode: FsIsolationMode): FsIsolationMode {
   return mode === "global" ? "workspace" : "global";
 }
 
 /**
- * 面板总终端行数（行账 SSOT，纯函数）：边框 2 + 标题 1 + 内容 3 行 +
- * 键位提示 1 = 7。**不含 marginBottom=1** —— 由 chromeReserveRows 的 +1
- * 入账（与 modelPickerRows / thinkingPickerRows / memoryPickerRows 同约定）。
+ * Total terminal rows (row-budget SSOT, pure): border 2 + title 1 + 3 content
+ * rows + key hints 1 = 7. **Excludes marginBottom=1** — accounted by the +1
+ * in chromeReserveRows (same convention as modelPickerRows /
+ * thinkingPickerRows / memoryPickerRows).
  */
 export function configPickerRows(): number {
   return 7;
 }
 
 /**
- * 把面板的 fix action 翻译成「要写哪一行」。宿主据此派发到 FS holder / worktree
- * holder / cap holder。本函数只是 pure 路由：focusedIndex → row kind，
- * 不接触 holder 也不写文件 —— 真正的 set + persist 在 app.tsx 内联（S5：
- * 行为体留在宿主；本叶子只做判别，避免组件内联触发引擎写）。
+ * Translates the panel's fix action into "which row to write". The host uses
+ * this to dispatch to the FS holder / worktree holder / cap holder. Pure
+ * routing only: focusedIndex → row kind, touching no holder and writing no
+ * file — the real set + persist happens inline in app.tsx (behavior stays
+ * with the host; this leaf only discriminates, so the component never triggers
+ * engine writes inline).
  */
 export type ConfigRowKind = "fsMode" | "worktreeOnMutate" | "subagentCap";
 
@@ -194,14 +215,17 @@ export function configRowKindFor(focusedIndex: 0 | 1 | 2): ConfigRowKind {
 }
 
 /**
- * worktree 行的三件展示值（value / hint / readOnly），按「holder 是否在场」
- * 两分支收口。抽到模块级的理由：`ConfigPicker` 是既有超线组件（面板每加一个
- * 分支都会顶到 S5 ratchet），且本投影与 `capValue` / `fsValue` 同族 ——
- * 渲染期 snapshot，不写任何字段。
+ * The worktree row's three display values (value / hint / readOnly), collapsed
+ * into two branches by "is the holder present". Extracted to module level
+ * because `ConfigPicker` is an existing over-budget component (every new
+ * panel branch would hit the S5 ratchet), and this projection belongs to the
+ * same family as `capValue` / `fsValue` — render-time snapshots that write
+ * nothing.
  *
- * holder 在场 → 现值 `holder.get()` 现读 + hint 展示「按 Enter 会切到哪」
- * （与 FS / cap 行同口径）+ 可改；缺席 → 退回 `worktreeOn` 静态快照 +
- * 无 hint + read-only（T1 形态，`row()` 渲染「(仅显示)」）。
+ * Holder present → live `holder.get()` read + a hint showing what Enter would
+ * switch to (same standard as the FS / cap rows) + editable; absent → static
+ * `worktreeOn` snapshot + no hint + read-only (`row()` then renders the
+ * display-only marker instead of the hint).
  */
 function worktreeRowDisplay(props: {
   readonly worktreeOnMutateHolder?: WorktreeGateReader;
@@ -228,51 +252,57 @@ function worktreeRowDisplay(props: {
 }
 
 /**
- * ConfigPicker —— design-25 风格设置面板。常驻 overlay：无入场动画，宽度固定
- * CONFIG_PICKER_WIDTH（56，独立于 PICKER_WIDTH —— 行带右侧 hint 更宽）、
- * alignSelf flex-start 靠左（与 model-picker 同款）；行数由 configPickerRows
- * 预测（7 行）。
+ * ConfigPicker — settings panel with the rounded flowing-border style.
+ * Persistent overlay: fixed width CONFIG_PICKER_WIDTH (56, independent of
+ * PICKER_WIDTH — the rows carry wider right-side hints) and alignSelf
+ * flex-start (same as model-picker); rows predicted by configPickerRows
+ * (7).
  *
- * 三行 Enter 同款：翻各自 holder 后 fire-and-forget 落盘（失败由宿主经
- * notice 兜底，holder 不撤回）；对应 holder 缺席 → no-op + 仅显示。
+ * All three rows behave the same on Enter: flip the respective holder then
+ * fire-and-forget persist (failures surface via an app-layer notice; the
+ * holder is not rolled back); a missing holder → no-op + display-only.
  */
 export function ConfigPicker(props: {
   readonly state: ConfigPickerState;
   readonly fsMode: FsModeContext | undefined;
   /**
-   * ADR-0096 T3：worktree 门禁运行时 holder（与 `subagentCapHolder` 同形态）。
-   * 在场时该行读 `holder.get()` 现值（每次 render 现读）且 Enter 激活；缺席
-   * 时退回 `worktreeOn` 静态快照（T1 形态，仍为 read-only）。
+   * Worktree-gate runtime holder (same shape as `subagentCapHolder`). When
+   * present the row reads `holder.get()` live (every render) and Enter is
+   * active; when absent it falls back to the static `worktreeOn` snapshot
+   * (still read-only).
    */
   readonly worktreeOnMutateHolder?: WorktreeGateReader;
   /**
-   * worktree 门禁启动期快照（T1 display-only；T3 由 holder 在场时覆盖）。
-   * undefined → "OFF" 占位。
+   * Worktree-gate startup snapshot (display-only; superseded by the holder
+   * when present). undefined → "OFF" placeholder.
    */
   readonly worktreeOn?: boolean;
   /**
-   * ADR-0096 T2：子代理并发上限运行时 holder。在场时面板 cap 行读 `holder.get()`
-   * 现值（每次 render 现读，与 fsMode 同形态）；缺席时退回
-   * `subagentCapDisplay`（T1 启动期快照）。
+   * Subagent-cap runtime holder. When present the cap row reads
+   * `holder.get()` live (every render, same shape as fsMode); when absent it
+   * falls back to `subagentCapDisplay` (startup snapshot).
    */
   readonly subagentCapHolder?: {
     readonly get: () => number | "unlimited";
   };
   /**
-   * 子代理并发上限启动期快照（T1 display-only；T2 在场时被 subagentCapHolder
-   * 覆盖，保留作为测试 fixture / 旧宿主兼容）。undefined → "—" 占位。
+   * Subagent-cap startup snapshot (display-only; overridden by
+   * subagentCapHolder when wired; kept as a test fixture / legacy-host
+   * fallback). undefined → "—" placeholder.
    */
   readonly subagentCapDisplay?: SubagentCapDisplay;
   /**
-   * cap 行是否有 holder 接进（决定 cap 行 Enter 是否激活）；宿主（TuiApp）传
-   * undefined 时 cap 行回退为 read-only（与 T1 行为一致）。
+   * Whether a holder is wired for the cap row (decides if Enter is active on
+   * it); the host (TuiApp) passing undefined degrades the cap row to
+   * read-only.
    */
   readonly capRowInteractive?: boolean;
   /**
-   * 重渲染触发器（Enter 翻 holder 后由宿主递增）。holder 是普通对象，
-   * `get()` 不订阅 —— 不传这个 prop 的话父组件重渲染时本组件仍会重新执行，
-   * 但显式带上它能让「为什么这里会刷新」在类型上自解释，也防未来把组件
-   * memo 化时静默失效。
+   * Re-render trigger (incremented by the host after Enter flips a holder).
+   * Holders are plain objects and `get()` does not subscribe — without this
+   * prop the component would still re-run on parent renders, but passing it
+   * explicitly makes "why does this refresh" self-documenting in types, and
+   * guards against silent staleness if the component is ever memoized.
    */
   readonly renderTick?: number;
 }): ReactNode {
@@ -297,29 +327,33 @@ export function ConfigPicker(props: {
     });
   }, [tl]);
 
-  // FS 行现值：调用期读 holder（面板打开期间快照语义 —— 与 envDisplay.get()
-  // 同款；holder 缺席 → 默认 "global" 显示）。避免宿主经 props 传 snapshot
-  // 给 TuiApp 增分支（S5 硬门）。
+  // FS row live value: read the holder at call time (snapshot semantics while
+  // the panel is open — same as envDisplay.get(); holder absent → display
+  // "global" by default). Keeps host snapshots out of TuiApp's props (S5 hard
+  // gate on component branches).
   const fsValue = props.fsMode?.get() ?? "global";
   const fsOther = toggleFsMode(fsValue);
-  // FS 行的可改值预览（不是 staged 态 —— 只是给用户看「按 Enter 会翻到哪」），
-  // 与 memory-picker 的 `descOn` / `descOff` 投影同口径；不改任何持久化字段。
+  // FS row's pending-value preview (not staged state — just shows the user
+  // what Enter would flip to), same projection style as memory-picker's
+  // descOn/descOff; writes no persisted field.
   const fsNextHint = `Enter 切换为 ${fsOther}`;
-  // worktree 行现值 + 可改值预览：holder 在场按 holder.get() 现读（Enter 翻
-  // holder → 下次 render 即见新值，与 fsMode / cap 行一致）；缺席退回
-  // props.worktreeOn（T1 启动期快照）+ 无 hint（read-only）。两分支收口在
-  // 模块级 helper（S5：ConfigPicker 是既有 god component）。
+  // Worktree row live value + preview: holder present → live holder.get()
+  // (Enter flips the holder → next render shows the new value, consistent
+  // with the FS / cap rows); absent → fall back to props.worktreeOn (startup
+  // snapshot) + no hint (read-only). Both branches collapse in a module-level
+  // helper (ConfigPicker is an existing god component).
   const worktreeRow = worktreeRowDisplay(props);
-  // cap 行现值：holder 在场时按 holder.get() 现读（TUI /config 面板 Enter 翻
-  // holder → 下次 render 即看到新值，与 fsMode 形态一致）；holder 缺席退回
-  // props.subagentCapDisplay（T1 启动期快照）。
+  // Cap row live value: holder present → live holder.get() (Enter flips the
+  // holder → next render shows the new value, same shape as fsMode); holder
+  // absent → fall back to props.subagentCapDisplay (startup snapshot).
   const capValue = formatSubagentCapDisplay(
     props.subagentCapHolder !== undefined
       ? props.subagentCapHolder.get()
       : props.subagentCapDisplay
   );
-  // cap 行可改值预览：显示「按 Enter 切到哪」—— 与 FS 行 fsNextHint 同款
-  // 口径。capRowInteractive=false → 不显示 hint（降级到 read-only）。
+  // Cap row preview: shows what Enter would switch to — same standard as the
+  // FS row's fsNextHint. capRowInteractive=false → no hint (degrades to
+  // read-only).
   const capCurrentValue =
     props.subagentCapHolder !== undefined
       ? props.subagentCapHolder.get()
@@ -354,8 +388,9 @@ export function ConfigPicker(props: {
     );
   }
 
-  // 三行 panelSlot 是无自由文本渲染（label + value + hint 都闭合到 const），
-  // 因此按行号夹 const 到 inline 字面，避免 JSX 字符串拼接的隐式 escape。
+  // The three panelSlot rows render no free text (label + value + hint all
+  // close over constants), so const-literalize per row index to avoid the
+  // implicit escaping of JSX string concatenation.
   return (
     <box
       flexDirection="column"
@@ -367,7 +402,7 @@ export function ConfigPicker(props: {
       width={CONFIG_PICKER_WIDTH}
       alignSelf="flex-start"
     >
-      {/* 标题 ◆─ 设置（design-25 同款前缀） */}
+      {/* Title: settings (◆─ shared panel prefix) */}
       <text>
         <span fg={pal.running}>{"◆─ "}</span>
         <span fg={pal.text} attributes={TextAttributes.BOLD}>

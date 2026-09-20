@@ -2,34 +2,34 @@
 /**
  * src/tui/components.tsx
  *
- * #343 T1 基础原语最小集 + T6-B 增量（不提前抽象）：
- *  - Separator：全宽水平分隔线；
- *  - StatusLine：单行状态 / 提示文字（默认 dim 次级色）；
- *  - Spinner：T6-B 增量 — 80ms/帧 braille-dot 轮转，`useTick` 驱动。
- *    PromptInput 仍归 T6-C 写（本文件不引入输入框逻辑）。
+ * Minimal shared primitive set (no premature abstraction):
+ *  - Separator: full-width horizontal rule;
+ *  - StatusLine: single status / hint line (dim secondary colour by default);
+ *  - Spinner: 80ms/frame braille-dot rotation driven by `useTick`.
+ *    PromptInput lives elsewhere (no input-box logic in this file).
  */
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { tuiPalette } from "./theme.js";
 
-/** 全宽分隔线：1 行高 box 以 border 色背景充当横线。 */
+/** Full-width separator: a 1-row box painted with the border colour. */
 export function Separator(): ReactNode {
   return <box height={1} width="100%" backgroundColor={tuiPalette.border} />;
 }
 
 export interface StatusLineProps {
   readonly text: string;
-  /** 语义色覆盖（默认 dim；错误提示传 tuiPalette.error 等）。 */
+  /** Semantic colour override (default dim; error hints pass tuiPalette.error etc.). */
   readonly fg?: string;
 }
 
-/** 单行状态行：状态栏 / 错误提示 / slash 反馈共用。 */
+/** Single status line: shared by the status bar / error hints / slash feedback. */
 export function StatusLine(props: StatusLineProps): ReactNode {
   return <text fg={props.fg ?? tuiPalette.dim}>{props.text}</text>;
 }
 
-/** braille-dot 轮转（80ms/帧，Q4a：前台动态指示，无 emoji）。
- *  帧序来自 archive/tui-ink/src/components.tsx SPINNER_FRAMES —— 单一来源。 */
+/** Braille-dot rotation frames (80ms/frame; foreground dynamic indicator, no emoji).
+ *  Frame order is the single source from archive/tui-ink/src/components.tsx SPINNER_FRAMES. */
 export const SPINNER_FRAMES: ReadonlyArray<string> = [
   "⠋",
   "⠙",
@@ -43,9 +43,9 @@ export const SPINNER_FRAMES: ReadonlyArray<string> = [
   "⠏",
 ];
 
-/** 100ms 心跳：返回自增帧号，驱动 spinner / 动效重渲染。
- *  periodMs <= 0 = 禁用档（不挂定时器，避免 0ms 忙轮询；hooks 顺序不变）。
- *  T6-B 简易版（去 archive 冗余 useRef 路径），80ms 周期。 */
+/** 100ms heartbeat: returns an auto-incrementing frame number, driving spinner / animation
+ *  re-renders. periodMs <= 0 = disabled tier (no timer armed, avoiding 0ms busy polling;
+ *  hooks order unchanged). Simplified form (drops the redundant archive useRef path), 80ms period. */
 export function useTick(periodMs = 100): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -56,7 +56,7 @@ export function useTick(periodMs = 100): number {
   return tick;
 }
 
-/** 旋转指示器 — T6-B 简易版（运行态不传 label 默认「运行中…」）。 */
+/** Spinner — simplified form (running state with no label passed defaults to "运行中…"). */
 export function Spinner(props: { readonly label?: string }): ReactNode {
   const tick = useTick(80);
   const idx = tick % SPINNER_FRAMES.length;

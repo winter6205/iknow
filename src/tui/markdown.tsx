@@ -1,31 +1,37 @@
 /** @jsxImportSource @opentui/react */
 /**
- * src/tui/markdown.tsx
+ * Markdown → OpenTUI element tree.
  *
- * Markdown → OpenTUI 元素树（#343 T2，ink 版重写；issue #321 / 决策 #325）。
+ * Semantics follow archive/tui-ink/src/markdown.tsx (importing that archive is
+ * forbidden): marked.lexer parsing is kept, only the render mapping is
+ * rewritten —
+ *  - Inline styles go through <text>/<span> fg / attributes (TextAttributes
+ *    bitmask): strong→BOLD, em→ITALIC, del→STRIKETHROUGH,
+ *    codespan→fg=palette.code; link / image render anchor text only (the TUI
+ *    does not show URLs).
+ *  - Fenced code blocks: dark-gray fill + syntax highlighting (VSCode dark+
+ *    four colors), no border / no language label, 1-space padding left and
+ *    right, wrapMode="none" (over-wide lines are not folded), blank lines do
+ *    not collapse; colors come from tuiPalette.codeBlockBg / codeDefault /
+ *    syntaxXxx.
+ *  - Block spacing SSOT: top-level container `gap={1}` — exactly one blank
+ *    line between adjacent blocks. Block-level elements never carry vertical
+ *    margins themselves (per-token margins would stack with gap into 2 blanks).
+ *  - Tables: adaptive column-width compression + clipOneLineVisual semantic
+ *    truncation (CJK counted by display width); over-wide tables squeeze into
+ *    the container, and what still cannot fit is clipped whole-row — never
+ *    overflow.
+ *  - Empty boundary: empty-string / whitespace-only input renders an empty box
+ *    (no blank-line ghost).
  *
- * 语义沿用 archive/tui-ink/src/markdown.tsx（禁止 import 该归档）：
- * marked.lexer 解析保留，只重写渲染映射——
- *  - 行内样式走 `<text>`/`<span>` 的 fg / attributes（TextAttributes bitmask，
- *    #325 决策 2）：strong→BOLD、em→ITALIC、del→STRIKETHROUGH、
- *    codespan→fg=palette.code；link / image 只渲锚文本（TUI 不展示 URL）。
- *  - 围栏代码块 c4 定案：深灰底 + 语法高亮（VSCode dark+ 四色）、无边框 /
- *    无语言标签（语言标签是 c5 候选，c4 不画）、左右各 1 空格 padding、
- *    wrapMode="none" 超宽不折行、空行不塌缩；颜色由 tuiPalette.codeBlockBg
- *    / codeDefault / syntaxXxx 提供。
- *  - 块间距 SSOT：顶层容器 `gap={1}`——相邻块之间恰空一行。块级元素自身
- *    一律不带垂直 margin（per-token margin 与 gap 叠加会变 2 空行）。
- *  - 表格：自适应列宽压缩 + clipOneLineVisual 语义截断（CJK 按视觉宽度），
- *    超宽表格压到容器宽度内，压不下时整行兜底裁切——不溢出。
- *  - empty 边界：空字符串 / 纯空白输入渲染空 box（不留空行残影，
- *    spec Testing Strategy）。
- *
- * 与 ink 版的差异：本文件不再产出行账 API（行计数镜像、行账 SSOT
- * 整套随 #325 整条删除）——滚动交 `<scrollbox>`（T3），Markdown 渲染
- * 仅负责把 marked token 转 OpenTUI 元素树。
+ * Unlike the ink version, this file no longer produces a line-ledger API (the
+ * line-count mirror was dropped wholesale) — scrolling is delegated to
+ * <scrollbox>; Markdown only converts marked tokens into an OpenTUI element
+ * tree.
  */
-// OpenTUI JSX 命名空间下 JSX.Element = ReactNode——组件返回类型统一用
-// ReactNode（ReactElement 收窄会与命名空间 Element 类型冲突）。
+// Under the OpenTUI JSX namespace, JSX.Element = ReactNode — component return
+// types use ReactNode (narrowing to ReactElement would clash with the
+// namespace's Element type).
 import type { ReactNode } from "react";
 import { useMemo, useRef } from "react";
 import stringWidth from "string-width";
@@ -38,9 +44,10 @@ import { clipFenceDisplayLines } from "./fence-display-cap.js";
 import { previewOverflowLabel } from "./tool-summary.js";
 import { splitStreamingMarkdown } from "../shared/streaming-block-freeze.js";
 
-// -- 视觉宽度工具（表格压缩 / 截断专用；SSOT = string-width） ---------
+// -- Visual-width utilities (table compression / truncation; SSOT = string-width) ---
 
-/** 按视觉宽度截断单行，超长以 … 收尾（clipOneLineVisual 语义，CJK 占 2 列）。 */
+/** Clip one line to a visual width, ending with … when too long
+ *  (clipOneLineVisual semantics; CJK counts as 2 columns). */
 function clipVisual(s: string, maxWidth: number): string {
   if (maxWidth <= 0) return "";
   if (stringWidth(s) <= maxWidth) return s;
@@ -56,7 +63,7 @@ function clipVisual(s: string, maxWidth: number): string {
   return `${acc}…`;
 }
 
-// -- 行内 tokens（marked inline token 递归 → text/span 片段） ----------
+// -- Inline tokens (marked inline tokens recursed into text/span fragments) --
 
 function renderInline(
   tokens: ReadonlyArray<Token> | undefined,
@@ -68,12 +75,14 @@ function renderInline(
     const key = `${keyPrefix}-${k++}`;
     switch (t.type) {
       case "text":
-        // marked 在软换行 / 嵌套场景给 text token 挂子 tokens，优先递归。
+        // On soft breaks / nesting, marked attaches child tokens to text
+        // tokens — recurse first.
         if (t.tokens !== undefined) {
           nodes.push(...renderInline(t.tokens, key));
           break;
         }
-        // 盘古之白：仅渲染层变换，不回写会话数据。
+        // Pangu spacing: render-time transform only, never written back to
+        // session data.
         nodes.push(panguSpacing(t.text));
         break;
       case "strong":
@@ -83,7 +92,7 @@ function renderInline(
         nodes.push(<em key={key}>{renderInline(t.tokens, key)}</em>);
         break;
       case "del":
-        // OpenTUI 无 del 内置元素——走 span attributes bitmask。
+        // OpenTUI has no built-in del element — use the span attributes bitmask.
         nodes.push(
           <span key={key} attributes={TextAttributes.STRIKETHROUGH}>
             {renderInline(t.tokens, key)}
@@ -99,7 +108,7 @@ function renderInline(
         break;
       case "link":
       case "image":
-        // TUI 不展示 URL：只渲锚文本 / alt 文本。
+        // The TUI does not show URLs: render anchor text / alt text only.
         nodes.push(...renderInline(t.tokens, key));
         break;
       case "html":
@@ -110,14 +119,16 @@ function renderInline(
         );
         break;
       case "br":
-        // LineBreakProps 只含 id（无 key）——位置序已稳定，不需要 key。
+        // LineBreakProps carries only id (no key) — positional order is
+        // already stable, no key needed.
         nodes.push(<br />);
         break;
       case "escape":
         nodes.push(t.text);
         break;
       default: {
-        // Generic 兜底（marked 扩展 token）：有子 tokens 递归，否则取 text。
+        // Generic fallback (marked extension tokens): recurse if there are
+        // child tokens, otherwise take text.
         const g = t as Tokens.Generic;
         nodes.push(
           g.tokens !== undefined ? renderInline(g.tokens, key) : (g.text ?? "")
@@ -128,7 +139,7 @@ function renderInline(
   return nodes;
 }
 
-/** 行内 tokens → 纯文本（表格单元格压缩用；定界符不占列）。 */
+/** Inline tokens → plain text (for table cell compression; delimiters take no column). */
 function flattenInline(tokens: ReadonlyArray<Token> | undefined): string {
   let out = "";
   for (const t of tokens ?? []) {
@@ -161,10 +172,11 @@ function flattenInline(tokens: ReadonlyArray<Token> | undefined): string {
   return out;
 }
 
-// -- 围栏代码块 c4 渲染：深灰底 + 语法高亮（VSCode dark+ 四色） -------
+// -- Fenced code block rendering: dark-gray fill + syntax highlighting (VSCode dark+ four colors) --
 
-/** 纯 token 类型 + 文本。tokenizeCodeLine 产出 → CodeBlockLine 消费，
- *  拆分是为单测正则 / 捕获组逻辑时不必渲染 JSX（直接断言 CodeToken[]）。 */
+/** Pure token kind + text. Produced by tokenizeCodeLine and consumed by
+ *  CodeBlockLine; split out so unit tests can assert CodeToken[] against the
+ *  regex / capture-group logic without rendering JSX. */
 export type CodeTokenKind =
   "plain" | "comment" | "string" | "number" | "keyword";
 
@@ -173,10 +185,11 @@ export interface CodeToken {
   readonly text: string;
 }
 
-/** c4 围栏代码块语法粗 tokenizer（零 lexer 依赖；搬自
- *  scripts/codeblock-preview/_render.tsx 的 TOKEN_RE + 捕获组分色语义）。
- *  规则顺序：comment → string → number → keyword，确保 `//abc` 不会被
- *  `abc` 抢先匹配成 keyword。`g` flag + 局部 lastIndex 重置避免跨调用污染。 */
+/** Coarse syntax tokenizer for fenced code blocks (zero lexer dependency;
+ *  ported from scripts/codeblock-preview/_render.tsx with its TOKEN_RE +
+ *  capture-group coloring semantics). Rule order: comment → string → number →
+ *  keyword, so `//abc` is never grabbed by `abc` as a keyword first. The `g`
+ *  flag plus a local lastIndex reset avoids cross-call pollution. */
 export function tokenizeCodeLine(line: string): CodeToken[] {
   const out: CodeToken[] = [];
   let last = 0;
@@ -199,16 +212,18 @@ export function tokenizeCodeLine(line: string): CodeToken[] {
   return out;
 }
 
-/** 语法 token 正则：注释 / 字符串 / 数字 / 关键字（keyword 列表 = c4 定稿，
- *  跟 VSCode dark+ default 对齐）。 */
+/** Syntax token regex: comment / string / number / keyword (the keyword list
+ *  is a fixed set aligned with VSCode dark+ defaults). */
 const CODE_TOKEN_RE =
   /(\/\/.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\b)|(\b(?:export|function|const|return|if|else|let|var|new|import|from|class|interface|type|extends|async|await|true|false|null|undefined)\b)/g;
 
-/** 注释 token 的 TextAttributes：dim + italic（VSCode dark+ 注释视觉）。 */
+/** TextAttributes for comment tokens: dim + italic (VSCode dark+ comment look). */
 const COMMENT_ATTRS = TextAttributes.DIM | TextAttributes.ITALIC;
 
-/** 单行渲染（空行铺背景不塌缩 / diff +/- 复用 palette.add/del / 其它走
- *  tokenizeCodeLine + 调色）。`bg` 全行铺，`fg` 仅作用于 plain span。 */
+/** Single-line render (blank lines still get the fill without collapsing /
+ *  diff +/- reuses palette.add/del / everything else goes through
+ *  tokenizeCodeLine + palette). `bg` covers the whole line; `fg` applies only
+ *  to plain spans. */
 function CodeBlockLine(props: {
   readonly line: string;
   readonly lang: string;
@@ -216,8 +231,8 @@ function CodeBlockLine(props: {
   readonly fg: string;
 }): ReactNode {
   const { line, lang, bg, fg } = props;
-  // 空行：`{" "}` 占一格 + box 背景铺满整行；行高不塌缩（box padding
-  // + 1 行文本 = 1 物理行高）。
+  // Blank line: `{" "}` holds one cell + the box fill covers the row; line
+  // height does not collapse (box padding + 1 text line = 1 physical row).
   if (line === "") {
     return (
       <text bg={bg} wrapMode="none">
@@ -225,8 +240,9 @@ function CodeBlockLine(props: {
       </text>
     );
   }
-  // diff 代码块：行首 +/- 用 palette.add/del 上色，其余保持默认字色
-  // （参考预览 c4 不对 diff 行做语法高亮，只标 +/- 符号）。
+  // diff blocks: a leading +/- is colored with palette.add/del and the rest
+  // keeps the default text color (diff lines get no syntax highlighting, only
+  // the sign).
   if (lang === "diff" && (line[0] === "+" || line[0] === "-")) {
     const sign = line[0]!;
     return (
@@ -266,10 +282,11 @@ function CodeBlockLine(props: {
   );
 }
 
-/** c4 围栏代码块容器：无 border / 无 title；lang 保留接收但 c4 不画
- *  （c5 才在前置画 `ts │`，c4 定稿不画）。box backgroundColor + 左右 1
- *  padding 的视觉契约；块间空一行由 `Markdown` 容器 gap 提供，代码块自身
- *  不带垂直 margin（否则与 gap 叠加成 2 空行）。 */
+/** Fenced code block container: no border / no title; lang is still accepted
+ *  but never drawn (a `ts │`-style prefix was a rejected candidate). The
+ *  visual contract is box backgroundColor + 1 padding each side; the blank
+ *  line between blocks comes from the `Markdown` container gap, so the code
+ *  block carries no vertical margin (it would stack with gap into 2 blanks). */
 export function CodeBlock(props: {
   readonly lang: string;
   readonly lines: readonly string[];
@@ -302,12 +319,14 @@ export function CodeBlock(props: {
   );
 }
 
-// -- 块渲染（heading / table / list / quote / html / paragraph）--------
+// -- Block rendering (heading / table / list / quote / html / paragraph) --
 
 /**
- * 表格超宽压缩（#325 自适应列宽）：自然列宽 = 各列最宽单元格；行预算
- * `budget` 装不下时迭代削最宽列（下限 1 列），单元格按 clipVisual 截断；
- * 极端窄容器（列数 × 最小宽仍超预算）整行兜底裁切——帧内绝不溢出。
+ * Over-wide table compression with adaptive column widths: natural width =
+ * widest cell per column; when the row cannot fit `budget`, iteratively shave
+ * the widest column (floor 1) and clip cells with clipVisual; in extremely
+ * narrow containers (columns × minimum width still over budget) the whole row
+ * is clipped as a last resort — a frame never overflows.
  */
 function Table(props: {
   readonly rows: string[][];
@@ -320,7 +339,7 @@ function Table(props: {
       widths[i] = Math.max(widths[i], stringWidth(cell));
     });
   }
-  // 行宽 = Σ 列宽 + 每列左右各 1 空格 + (cols-1) 个 │ 分隔。
+  // Row width = Σ column widths + 1 space each side per column + (cols-1) │ separators.
   const overhead = cols * 2 + (cols - 1);
   while (widths.reduce((a, b) => a + b, 0) + overhead > props.budget) {
     let mi = 0;
@@ -355,9 +374,11 @@ function Table(props: {
 }
 
 /**
- * marked list → 扁平行序列递归渲染（嵌套子列表按深度缩进展开，顺序 =
- * 渲染顺序：父项后紧跟其子列表）。ordered 按 list.start 起编号；marker：
- * 无序 `•`、有序 `N.`——与归档 ink 版视觉一致。
+ * marked list → flat row sequence, recursed (nested sublists expand with
+ * depth indentation; order = render order: a parent item is immediately
+ * followed by its sublist). Ordered lists number from list.start; markers are
+ * `•` unordered and `N.` ordered — visually consistent with the archived ink
+ * version.
  */
 function renderList(list: Tokens.List, key: string, depth: number): ReactNode {
   let num = typeof list.start === "number" ? list.start : 1;
@@ -372,7 +393,8 @@ function renderList(list: Tokens.List, key: string, depth: number): ReactNode {
       } else if (tk.type === "space") {
         continue;
       } else {
-        // loose 项多段落之间插空格分隔（否则 "a"+"b" 粘成 "ab"）。
+        // Loose items hold multiple paragraphs; separate them with a space
+        // (otherwise "a"+"b" glue into "ab").
         if (inline.length > 0) {
           inline.push({ type: "text", raw: " ", text: " " });
         }
@@ -398,13 +420,14 @@ function renderList(list: Tokens.List, key: string, depth: number): ReactNode {
 }
 
 function renderToken(tok: Token, key: number, width: number): ReactNode {
-  // marked 18：Token = MarkedToken | Tokens.Generic（Generic.type: string 非
-  // 字面量 + 索引签名）——先剥 Generic 恢复 switch 收窄，default 防御兜底。
+  // marked 18: Token = MarkedToken | Tokens.Generic (Generic.type is
+  // non-literal string + index signature) — strip Generic first to restore
+  // switch narrowing; default branch is a defensive fallback.
   const t = tok as MarkedToken;
   switch (t.type) {
     case "space":
     case "hr":
-      // 不留空行残影：空 token 不产行。
+      // No blank-line ghosts: empty tokens produce no row.
       return null;
     case "heading":
       return (
@@ -418,7 +441,8 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
         </text>
       );
     case "code": {
-      // 未闭合 fence：marked 吞到文末（流式草稿半截 markdown 安全）。
+      // Unclosed fence: marked swallows to end of input (safe for half-cut
+      // streaming drafts).
       const lang = (t.lang ?? "").trim().split(/\s+/)[0] ?? "";
       const lines = t.text === "" ? [] : t.text.split("\n");
       return <CodeBlock key={key} lang={lang} lines={lines} />;
@@ -455,8 +479,9 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
     case "html": {
       const body = t.text.replace(/\n+$/, "");
       if (body === "") return null;
-      // html 块同样走 fence-display-cap 的 32 行帽 + `+N more lines` 溢出——
-      // <style> / <script> 这类无界正文不整块挂树（与围栏代码块同源）。
+      // html blocks go through the same fence-display-cap 32-line limit +
+      // overflow label as fenced code — unbounded bodies like <style> /
+      // <script> never mount whole.
       const lines = body.split("\n");
       const clip = clipFenceDisplayLines(lines);
       return (
@@ -493,18 +518,21 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
   }
 }
 
-// -- lexer 结果缓存（按 text；解析与宽度无关） -------------------------
+// -- lexer result cache (keyed by text; parsing is width-independent) -----
 
 /**
- * `marked.lexer` 结果缓存。key 只含 text —— 本文件是唯一调用点且不传 options，
- * 换行 / 压缩全在渲染层按 width 做，解析结果与宽度无关。
+ * Cache of `marked.lexer` results. The key holds only the text — this file is
+ * the sole call site and passes no options; wrapping / compression all happen
+ * at render time per width, so parse output is width-independent.
  *
- * 为什么需要：memo 只挡得住「props 未变」的重渲染。终端 resize（cols 变化）
- * 与视口挂载的卸载—重挂（滚出去再滚回来）都会让历史正文重新走一遍解析，
- * 长会话下依旧是 O(历史体量)。
+ * Why it is needed: memo only stops re-renders when props are unchanged.
+ * Terminal resize (cols change) and viewport unmount—remount (scroll out and
+ * back) all push historical text through a fresh parse; in long sessions that
+ * is still O(history size).
  *
- * 容量上限 256 条、命中即刷新到队尾（LRU）：会话可以无限长，缓存不能无界。
- * token 数组对外只读消费（renderToken 不改 token），可跨渲染共享。
+ * Cap of 256 entries, hits refresh to the tail (LRU): sessions grow without
+ * bound, the cache must not. Token arrays are consumed read-only
+ * (renderToken never mutates tokens), so they can be shared across renders.
  */
 const LEXER_CACHE_LIMIT = 256;
 const lexerCache = new Map<string, MarkedToken[]>();
@@ -578,8 +606,9 @@ function MarkdownStreaming(props: {
   );
 }
 
-/** 主渲染器：markdown 文本 → OpenTUI 元素树。
- *  `streaming`：会变长的草稿 / 展开 thinking 才钉前缀；历史正文走全文缓存。 */
+/** Main renderer: markdown text → OpenTUI element tree.
+ *  `streaming`: only growing drafts / expanded thinking pin the frozen prefix;
+ *  historical text uses the plain full-text cache. */
 export function Markdown(props: {
   readonly text: string;
   readonly width: number;

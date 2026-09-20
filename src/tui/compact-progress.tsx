@@ -2,31 +2,34 @@
 /**
  * src/tui/compact-progress.tsx
  *
- * compact 压缩进度面板（design-25 视觉语言，与 /effort 档位面板同款圆角流光
- * 框 + 渐变读条 + 边界水线）。
+ * Compaction progress panel: the rounded flowing-border frame with gradient
+ * bar and edge crest, matching the /effort picker's visual language.
  *
- * **读条是时间估计，不是真实进度** —— harness 只发 5 个离散事件
- * （`compaction_started {droppedCount}` / `compaction_text_delta` /
- * `compaction_completed` / `compaction_failed` / `compaction_cancelled`，
- * 见 src/harness/stream.ts:43-52），**没有** tick、百分比或 phase 信号。
- * 因此填充量只能按 elapsed 做渐近逼近（`compactBarFill`，上限 0.95），
- * 只有收到 completed 才走 1.0。面板不冒充真值：未完成的条永远留缺口。
+ * **The bar is a time estimate, not real progress** — the harness emits only
+ * 5 discrete events (`compaction_started {droppedCount}` /
+ * `compaction_text_delta` / `compaction_completed` / `compaction_failed` /
+ * `compaction_cancelled`, see src/harness/stream.ts); there is **no** tick,
+ * percentage or phase signal. So the fill can only asymptote over elapsed
+ * (`compactBarFill`, capped at 0.95) and hits 1.0 only on completed. The
+ * panel never fakes a finished bar: an incomplete bar always keeps a gap.
  *
- * T1 纯函数（无 React 依赖，可独立单测）：
- *  - `reduceCompactionEvent`：事件归约状态机（identity 契约见下）；
+ * Pure functions (no React dependency, independently unit-testable):
+ *  - `reduceCompactionEvent`: event-reduction state machine (identity contract below);
  *  - `compactBarFill` / `compactStatusText` / `compactHintText` /
- *    `compactProgressRows`：填充估计、状态行、键位提示、行账 SSOT；
- *  - `startCompactPanel` / `settleCompactPanel`：面板建/终态入口。
+ *    `compactProgressRows`: fill estimate, status text, key hints, row-account SSOT;
+ *  - `startCompactPanel` / `settleCompactPanel`: panel create/terminal entry points.
  *
- * T2 渲染组件 `CompactProgress`：圆角流光框（8s 边框相位）+ 标题 + 状态行 +
- * 45 格 `█` 读条 + 键位提示，共 6 行（边框 2 + 内容 4），不含 marginBottom
- * （与 thinkingPickerRows / memoryPickerRows 同约定，由 chromeReserveRows +1
- * 入账）。宽度固定 PICKER_WIDTH（50），alignSelf="flex-start" 靠左。
+ * The render component `CompactProgress`: rounded flow frame (8s border phase)
+ * + title + status line + 45-cell `█` bar + key hints, 6 rows total (2 border
+ * + 4 content), excluding marginBottom (same convention as thinkingPickerRows /
+ * memoryPickerRows, accounted via chromeReserveRows +1). Fixed PICKER_WIDTH
+ * (50), alignSelf="flex-start".
  *
- * 事件是**快路径**，promise 结果是**终态权威**（plan D3.5）：pre-abort 早返回
- * （full-compact.ts 的 `signal_aborted` 早返回分支）与 catch 都不经任何
- * `compaction_*` 事件，只靠事件会让面板停在 95% 伪在途态。故宿主必须用
- * `settleCompactPanel` 兜底终态，并在 turn 的 finally 强制清扫。
+ * Events are the **fast path**, the promise result is the **terminal authority**:
+ * the pre-abort early return (full-compact.ts `signal_aborted` branch) and the
+ * catch emit no `compaction_*` events at all, so relying on events alone would
+ * strand the panel in a 95% pseudo in-flight state. The host must fall back to
+ * `settleCompactPanel` for the terminal state and force-sweep in the turn's finally.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { TextAttributes, type Timeline } from "@opentui/core";
@@ -44,22 +47,23 @@ import {
   triangleWindow,
 } from "./designs/_color.js";
 
-// ── T1：状态模型 + 纯函数投影 ───────────────────────────────────────────
+// ── State model + pure projections ─────────────────────────────────────────
 
-/** 面板来源：手动 `/compact`（可 Esc 取消）/ turn 内 auto-compact（Esc 打断 turn）。 */
+/** Panel origin: manual `/compact` (Esc cancels it) / in-turn auto-compact (Esc interrupts the turn). */
 export type CompactProgressSource = "manual" | "turn";
 
-/** 终态分类。done = 压缩实际完成；failed = 摘要失败；cancelled = 用户取消。 */
+/** Terminal classification. done = compaction actually completed; failed = summary failed; cancelled = user cancelled. */
 export type CompactTerminalKind = "done" | "failed" | "cancelled";
 
 /**
- * 面板状态（宿主 app.tsx 持有，按 conversationId 分键）。
+ * Panel state (owned by the host app.tsx, keyed by conversationId).
  *
- *  - source：面板归属路径（决定键位提示文案，也决定面板由谁清扫）；
- *  - droppedCount：started 事件携带的待压缩消息条数（0 = 尚未收到 started，
- *    状态行显示 "preparing"）；
- *  - startedAt：面板建立时刻（elapsed 起算点，ms epoch）；
- *  - terminal：终态（null = 在途）。终态一旦确立，迟到事件一律忽略。
+ *  - source: which path owns the panel (decides the hint text, and who sweeps it);
+ *  - droppedCount: message count carried by the started event (0 = started not yet
+ *    received, the status line shows "preparing");
+ *  - startedAt: panel creation moment (elapsed origin, ms epoch);
+ *  - terminal: terminal state (null = in-flight). Once terminal, late events are
+ *    ignored.
  */
 export interface CompactProgressState {
   readonly source: CompactProgressSource;
@@ -71,23 +75,24 @@ export interface CompactProgressState {
   };
 }
 
-/** 读条上限（时间估计永不「跑满」——只有 completed 才 1.0）。 */
+/** Bar fill cap (the time estimate never "completes" — only done reaches 1.0). */
 export const COMPACT_BAR_MAX_FILL = 0.95;
-/** 时间常数：elapsed = tau 时约完成 63%（渐近逼近，见 compactBarFill）。 */
+/** Time constant: at elapsed = tau the estimate is about 63% complete (asymptote, see compactBarFill). */
 export const COMPACT_TAU_MS = 12_000;
-/** 终态停留时长：让 100% / 失败色可见，之后宿主卸载面板。 */
+/** Terminal dwell time: lets 100% / failure color be seen before the host unmounts the panel. */
 export const COMPACT_HOLD_MS = 1_200;
 
 /**
- * 读条填充量（时间估计，**不是**真实进度）。
+ * Bar fill (time estimate, **not** real progress).
  *
- * `min(0.95, 0.05 + 0.90 * (1 - exp(-max(0,elapsed)/12000)))`：
- *  - 起点 0.05（面板一出现就有可见填充，不是空条）；
- *  - 渐近上限 0.95（时间流逝永不冒充「完成」）；
- *  - 负 elapsed 钳制到 0（startedAt 落在未来 / 时钟回拨）。
+ * `min(0.95, 0.05 + 0.90 * (1 - exp(-max(0,elapsed)/12000)))`:
+ *  - starts at 0.05 (a visible fill the moment the panel appears, never empty);
+ *  - asymptotic cap 0.95 (passing time never impersonates "done");
+ *  - negative elapsed clamps to 0 (startedAt in the future / clock skew).
  *
- * completed 的 1.0 由组件按 `terminal.kind === "done"` 单独处理，不走本函数
- * （本函数只表达「在途」的估计）。
+ * The 1.0 on completed is handled by the component directly via
+ * `terminal.kind === "done"`, not through this function (which only expresses
+ * the in-flight estimate).
  */
 export function compactBarFill(elapsedMs: number): number {
   const t = Math.max(0, elapsedMs);
@@ -98,12 +103,12 @@ export function compactBarFill(elapsedMs: number): number {
 }
 
 /**
- * 状态行文案（SSOT 纯函数）。elapsed = floor(max(0, now-startedAt)/1000) 秒：
+ * Status line text (SSOT pure function). elapsed = floor(max(0, now-startedAt)/1000) seconds:
  *
- *  - 在途且 droppedCount === 0 → `◐  {n}s · preparing`（started 未到）；
- *  - 在途 → `◐  {n}s · {droppedCount} messages folded`；
- *  - done → `✓  {n}s · done`；failed → `✗  {n}s · summary failed`；
- *    cancelled → `—  {n}s · cancelled`。
+ *  - in-flight and droppedCount === 0 → `◐  {n}s · preparing` (started not yet seen);
+ *  - in-flight → `◐  {n}s · {droppedCount} messages folded`;
+ *  - done → `✓  {n}s · done`; failed → `✗  {n}s · summary failed`;
+ *    cancelled → `—  {n}s · cancelled`.
  */
 export function compactStatusText(
   state: CompactProgressState,
@@ -125,7 +130,7 @@ export function compactStatusText(
     case "cancelled":
       return `—  ${elapsed}s · cancelled`;
     default: {
-      // 判别联合收窄后不可达；仅未来新增 kind 时兜底（不静默吞掉新状态）。
+      // Unreachable after union narrowing; only a future new kind lands here (never silently swallowed).
       const _exhaustive: never = state.terminal.kind;
       throw new Error(`unknown compact terminal kind: ${String(_exhaustive)}`);
     }
@@ -133,22 +138,23 @@ export function compactStatusText(
 }
 
 /**
- * 键位提示：manual → `[Esc] cancel`；turn → `[Esc] interrupt`。
+ * Key hints: manual → `[Esc] cancel`; turn → `[Esc] interrupt`.
  *
- * turn 路径没有独立的压缩取消通道 —— Esc 打断的是 turn 本身，压缩随之
- * abort（loop-engine 把同一 signal 传进 applyCompactAttachment），故文案
- * 必须说 interrupt 而不是 cancel，避免许诺一个不存在的精确操作。
+ * The turn path has no dedicated compaction-cancel channel — Esc interrupts
+ * the turn itself and compaction aborts along with it (loop-engine passes the
+ * same signal into applyCompactAttachment), so the text must say interrupt,
+ * not cancel, to avoid promising an exact operation that does not exist.
  */
 export function compactHintText(source: CompactProgressSource): string {
   return source === "manual" ? "[Esc] cancel" : "[Esc] interrupt";
 }
 
-/** 面板总终端行数（行账 SSOT）：边框 2 + 内容 4。不含 marginBottom=1。 */
+/** Total terminal rows of the panel (row-account SSOT): border 2 + content 4. Excludes marginBottom=1. */
 export function compactProgressRows(): number {
   return 6;
 }
 
-/** 新建面板（startedAt=nowMs，droppedCount 0，在途）。 */
+/** Create a panel (startedAt=nowMs, droppedCount 0, in-flight). */
 export function startCompactPanel(
   source: CompactProgressSource,
   nowMs: number
@@ -157,10 +163,11 @@ export function startCompactPanel(
 }
 
 /**
- * 终态入口（promise 结果是终态权威，plan D3.5）。
+ * Terminal entry point (the promise result is the terminal authority).
  *
- * 已终态 → 原样返回（引用相等）：不许迟到路径改写已呈现的结局，也不重置
- * 停留计时（atMs 是首次 settle 的时刻）。
+ * Already terminal → returned as-is (reference equality): late paths must not
+ * rewrite a presented outcome, nor reset the hold timer (atMs is the first
+ * settle moment).
  */
 export function settleCompactPanel(
   state: CompactProgressState,
@@ -172,8 +179,9 @@ export function settleCompactPanel(
 }
 
 /**
- * 终态事件的「无面板」短路：无面板可更新 → undefined（不无中生有）。
- * 三个终态事件共用，把分支从 reduceCompactionEvent 里提出来（复杂度预算）。
+ * Short-circuit for terminal events with no panel: nothing to update →
+ * undefined (do not conjure a panel). Shared by the three terminal events,
+ * pulled out of reduceCompactionEvent to stay within the complexity budget.
  */
 function settleIfPresent(
   state: CompactProgressState | undefined,
@@ -186,18 +194,22 @@ function settleIfPresent(
 }
 
 /**
- * 事件归约（纯函数，identity 契约见下）。宿主按 conversationId 分键调用。
+ * Event reduction (pure function, identity contract below). The host calls it
+ * keyed by conversationId.
  *
- * **identity 契约**：非 compaction 事件原样返回**同一引用** —— app.tsx 的
- * onStream 逐事件链据此做引用相等守卫，非压缩事件不触发任何 setState
- * （否则每个 text_delta 都会 re-render 整个 chrome）。
+ * **Identity contract**: non-compaction events return **the same reference** —
+ * app.tsx's onStream event chain uses reference equality as a guard, so
+ * non-compaction events trigger no setState (otherwise every text_delta would
+ * re-render the whole chrome).
  *
- *  - `compaction_started`：在途 → 更新 droppedCount（保留 source/startedAt，
- *    不重置计时）；已终态 → 忽略（迟到）；无面板 → 按 opts 建立；
- *  - `compaction_completed` / `_failed` / `_cancelled`：无面板 → undefined
- *    （无面板可更新，不无中生有）；已终态 → 忽略（迟到）；在途 → settle；
- *  - `compaction_text_delta`：恒 identity（活动信号；填充是时间估计，文本
- *    增量不推进任何状态）。
+ *  - `compaction_started`: in-flight → update droppedCount (keep source/startedAt,
+ *    do not reset the timer); already terminal → ignore (late); no panel → create
+ *    per opts;
+ *  - `compaction_completed` / `_failed` / `_cancelled`: no panel → undefined
+ *    (nothing to update, do not conjure one); already terminal → ignore (late);
+ *    in-flight → settle;
+ *  - `compaction_text_delta`: always identity (liveness signal; the fill is a
+ *    time estimate, text deltas advance nothing).
  */
 export function reduceCompactionEvent(
   state: CompactProgressState | undefined,
@@ -214,7 +226,7 @@ export function reduceCompactionEvent(
           terminal: null,
         };
       }
-      if (state.terminal !== null) return state; // 迟到的 started
+      if (state.terminal !== null) return state; // late started, ignored
       return { ...state, droppedCount: event.droppedCount };
     case "compaction_completed":
       return settleIfPresent(state, "done", opts.nowMs);
@@ -223,30 +235,31 @@ export function reduceCompactionEvent(
     case "compaction_cancelled":
       return settleIfPresent(state, "cancelled", opts.nowMs);
     default:
-      // compaction_text_delta：恒 identity（摘要文本流只证明「还活着」，
-      // 不参与进度估计）。非 compaction 事件同理 —— identity 是 app 层
-      // 引用相等守卫的依据。
+      // compaction_text_delta: always identity (the summary text stream only
+      // proves liveness, it does not advance progress). Same for non-compaction
+      // events — identity is what the app-layer reference-equality guard relies on.
       return state;
   }
 }
 
-// ── 渲染常量（design-25 同款） ──────────────────────────────────────────
+// ── Render constants (same visual language as the pickers) ─────────────────
 
-/** 边界水线左右流动一趟的时长（alternate ping-pong 单程）。 */
+/** Duration of one full left-right crest traverse (alternate ping-pong single pass). */
 const EDGE_FLOW_MS = 2400;
-/** 水线晃动幅度（相对 segLen 的半幅，± 0.9 段）。 */
+/** Crest sway amplitude (half-range relative to segLen, ± 0.9 segments). */
 const EDGE_SWAY = 0.9;
-/** 水线最亮处向 logoGold 的混合上限。 */
+/** Brightest point of the crest blends fully to logoGold. */
 const EDGE_MIX = 1;
-/** 读条心跳周期（elapsed 秒级跳字 + 水线推进的驱动源）。 */
+/** Bar heartbeat period (drives the per-second elapsed ticks + crest advance). */
 const TICK_MS = 100;
 
 /**
- * CompactProgress —— design-25 风格压缩进度面板。
+ * CompactProgress — rounded-flow compaction progress panel.
  *
- * 常驻 overlay：无入场动画，宽度固定 PICKER_WIDTH、alignSelf flex-start 靠左；
- * 行数恒定 6（2 边框 + 4 内容：标题 / 状态行 / 读条 / 键位提示）。
- * 配色与动效逐字对齐 thinking-picker 的 effort 面板（同一视觉语言）。
+ * Persistent overlay: no entrance animation, fixed PICKER_WIDTH with
+ * alignSelf flex-start; constant 6 rows (2 border + 4 content: title /
+ * status line / bar / key hints). Colors and motion align verbatim with
+ * the effort panel of thinking-picker (same visual language).
  */
 export function CompactProgress(props: {
   readonly state: CompactProgressState;
@@ -254,7 +267,7 @@ export function CompactProgress(props: {
   const pal = tuiPalette;
   const { state } = props;
 
-  // ── Timeline 引用（useRef 锁首 render 实例，design-25 同款） ──
+  // ── Timeline refs (useRef pins the first render instance, same as the pickers) ──
   const initialTimeline = useTimeline({
     duration: BORDER_CYCLE_MS,
     loop: true,
@@ -271,15 +284,15 @@ export function CompactProgress(props: {
   if (edgeRef.current === null) edgeRef.current = edgeFirst;
   const tlEdge = edgeRef.current;
 
-  // ── 常驻动效 state（每帧 setState） ──
+  // ── Persistent animation state (setState every frame) ──
   const [borderPhase, setBorderPhase] = useState(0);
-  const [edgePhase, setEdgePhase] = useState(0.5); // 水线相位 0..1..0
-  // elapsed 时钟：100ms 心跳（不用 useTimeline —— 秒级跳字是离散读数，
-  // 不是连续插值动画）。返回值只作 re-render 触发源，elapsed 由 Date.now()
-  // 现算，故不消费 tick 值。
+  const [edgePhase, setEdgePhase] = useState(0.5); // crest phase 0..1..0
+  // Elapsed clock: 100ms heartbeat (not useTimeline — second ticks are discrete
+  // readings, not continuous interpolation). The return value only triggers
+  // re-render; elapsed is recomputed from Date.now(), the tick value is unused.
   useTick(TICK_MS);
 
-  // 边框流光相位：8s 线性循环（onComplete 归零避免 reset 陷阱）
+  // Border flow phase: 8s linear loop (onComplete resets to avoid the reset trap).
   useEffect(() => {
     const target = { phase: 0 };
     tl.add(target, {
@@ -296,8 +309,9 @@ export function CompactProgress(props: {
     });
   }, [tl]);
 
-  // 常驻：水线相位 0→1→0（alternate ping-pong），驱动边界左右小幅流动。
-  // 填充几乎不动时水线仍在跑 —— 这是「还活着」的存活信号。
+  // Persistent: crest phase 0→1→0 (alternate ping-pong), driving the edge a
+  // small left-right flow. Even when the fill barely moves the crest keeps
+  // running — a liveness signal.
   useEffect(() => {
     const target = { p: 0 };
     tlEdge.add(target, {
@@ -310,30 +324,33 @@ export function CompactProgress(props: {
     });
   }, [tlEdge]);
 
-  // ── 读条几何（共享 _geometry.ts）：宽度固定 PICKER_WIDTH，border 左右
-  //    2 列 + paddingX 各 1 列 = 4 列固定开销，内宽 = PICKER_WIDTH - 4。
+  // ── Bar geometry (shared _geometry.ts): width fixed at PICKER_WIDTH; border
+  //    2 cols + paddingX 2 cols = 4 cols fixed overhead, inner width =
+  //    PICKER_WIDTH - 4.
   const barLen = floorTo5BarLen(PICKER_WIDTH - 4);
   const segLen = barLen / 5;
 
-  // ── 填充量：done 才 1.0（真实完成），其余按时间渐近（见模块头注释）。
+  // ── Fill: 1.0 only on done (real completion), otherwise time-asymptotic
+  //    (see module header).
   const terminalKind = state.terminal?.kind ?? null;
   const nowMs = Date.now();
   const fill =
     terminalKind === "done" ? 1 : compactBarFill(nowMs - state.startedAt);
-  // 水线中心 = 填充前沿 ± 0.9*segLen 缓摆。
+  // Crest center = fill frontier ± 0.9*segLen slow sway.
   const edgeCenter = fill * barLen - 1 + (edgePhase - 0.5) * segLen * EDGE_SWAY;
 
-  /** 水线（半宽 segLen 的三角窗，越靠前沿越向 logoGold 过渡）。 */
+  /** Crest (triangular window of half-width segLen, blending toward logoGold at the frontier). */
   function crestColor(i: number): number {
     return triangleWindow(i, edgeCenter, segLen) * EDGE_MIX;
   }
 
   /**
-   * 字符 i 的颜色：
-   *  - 未填充 → 暗灰干轨（bg border / fg dim），水线不越界；
-   *  - 已填充 → 紫渐变基色（gradAt 按前沿归一）+ 前沿水线混向 logoGold；
-   *  - terminal failed → 已填充段整体混向 error（失败色铺满）；
-   *  - terminal cancelled → 全条退化暗灰（会话原样，无成果可展示）。
+   * Color of char i:
+   *  - unfilled → dark-gray dry track (bg border / fg dim), crest stays out;
+   *  - filled → purple-gradient base (gradAt normalized by the frontier) with the
+   *    edge crest mixing toward logoGold;
+   *  - terminal failed → the filled segment overall mixes toward error;
+   *  - terminal cancelled → whole bar degrades to dark gray (nothing to show).
    */
   function colorAt(i: number): { bg: string; fg: string } {
     if (terminalKind === "cancelled") {
@@ -348,14 +365,14 @@ export function CompactProgress(props: {
     const crest = mixHex(pal.logoInk, pal.logoGold, glowEdge);
     let bg = mixHex(base, crest, glowEdge);
     if (terminalKind === "failed") {
-      // 失败：填充段整体向 error 倾斜（保留一点渐变骨架）。
+      // Failed: the filled segment tilts toward error overall (a bit of gradient skeleton kept).
       bg = mixHex(bg, pal.error, 0.72);
     }
     const fg = mixHex(bg, pal.logoInk, 0.5);
     return { bg, fg };
   }
 
-  // ── 读条：铺满内宽，逐格 bg/fg 染色 ──
+  // ── Progress bar: fills the inner width, per-cell bg/fg tinting ──
   const barCells: ReactNode[] = [];
   for (let i = 0; i < barLen; i++) {
     const { bg, fg } = colorAt(i);
@@ -373,7 +390,7 @@ export function CompactProgress(props: {
         ? pal.running
         : pal.dim;
 
-  // ── 渲染 ──
+  // ── Render ──
   return (
     <box
       flexDirection="column"
@@ -385,7 +402,7 @@ export function CompactProgress(props: {
       width={PICKER_WIDTH}
       alignSelf="flex-start"
     >
-      {/* 标题 ◆─ Compacting（design-25 同款前缀，running 色 + BOLD 正文） */}
+      {/* Title ◆─ Compacting (picker-family prefix, running color + BOLD body) */}
       <text>
         <span fg={pal.running}>{"◆─ "}</span>
         <span fg={pal.text} attributes={TextAttributes.BOLD}>
@@ -393,15 +410,15 @@ export function CompactProgress(props: {
         </span>
       </text>
 
-      {/* 状态行：◐/✓/✗/— + elapsed + 结果（文案 SSOT = compactStatusText） */}
+      {/* Status line: ◐/✓/✗/— + elapsed + outcome (text SSOT = compactStatusText) */}
       <text fg={statusTone} wrapMode="none">
         {compactStatusText(state, nowMs)}
       </text>
 
-      {/* 读条：紫渐变填充 + 前沿流动水线（时间估计，非真实进度） */}
+      {/* Progress bar: purple-gradient fill + flowing edge crest (time estimate, not real progress) */}
       <text wrapMode="none">{barCells}</text>
 
-      {/* 键位提示（wrapMode none：窄终端 clip 不折行，保持固定 6 行行账） */}
+      {/* Key hints (wrapMode none: clipped on narrow terminals, keeping the fixed 6-row budget) */}
       <text fg={pal.dim} wrapMode="none">
         {compactHintText(state.source)}
       </text>

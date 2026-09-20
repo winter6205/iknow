@@ -2,33 +2,36 @@
 /**
  * src/tui/app.tsx
  *
- * #343 T6-C：TUI 根组件端到端接线（OpenTUI 版）。在 T5 selection/copy
- * 接线基础上叠加状态机 / slash 路由 / hub-bridge 流式 / 权限 modal /
- * 退出语义。语义与 archive/tui-ink/src/app.tsx 一致（#146 交互契约
- * 全保留），只换渲染后端 + 键事件模型（ink useInput → OpenTUI useKeyboard
- * KeyEvent.name 投影）。
+ * TUI root component (OpenTUI backend): state machine, slash routing,
+ * hub-bridge streaming, permission modal, quit semantics. Interaction
+ * semantics match archive/tui-ink/src/app.tsx; only the rendering backend
+ * and key-event model differ (ink useInput → OpenTUI useKeyboard
+ * KeyEvent.name projection).
  *
- * 状态机纪律（specs/146-tui.md Q1/Q1a）：
- *  - 会话三态 idle / running-fg / running-bg，由 session-state.ts 纯
- *    函数驱动；turn 切走 → running-bg，Esc 仅打断 running-fg
- *    （2026-09-18 键位迁移：打断由 Ctrl+C 改绑 Esc；Ctrl+C 只剩选区复制）。
- *  - 视图二态 chat / list。
- *  - 消息 ReadonlyArray + Object.freeze 整体替换。
+ * State-machine discipline (specs/146-tui.md):
+ *  - Session tri-state idle / running-fg / running-bg, driven by pure
+ *    functions in session-state.ts; switching away mid-turn → running-bg;
+ *    Esc interrupts running-fg only (key migration 2026-09-18: interrupt
+ *    moved from Ctrl+C to Esc; Ctrl+C is now selection copy only).
+ *  - View bi-state chat / list.
+ *  - Messages are ReadonlyArray + Object.freeze, replaced wholesale.
  *
- * 流式并发（spec SC8）：`useDeferredValue` 在 ChatView 内；app 层
- * `startTransition` 包裹 draft subscribe 回调 — 双向防御。
+ * Streaming concurrency: `useDeferredValue` lives in ChatView; the app
+ * layer wraps draft subscribe callbacks in `startTransition` — dual defense.
  *
- * 退出语义（spec OQ3）：存在 running-bg 会话时 /quit 需二次确认；
- * 确认后等全部 in-flight turn 落盘再 destroy 渲染器（不打断后台 turn）。
+ * Quit semantics: /quit with running-bg sessions requires second
+ * confirmation; after confirming, wait for all in-flight turns to persist
+ * before destroying the renderer (background turns are not interrupted).
  *
- * T8 多行输入：输入框行账从固定 3 → 动态（chromeReserveRows 新增
- * `inputRows`，按 inputValue 逻辑行数封顶 MAX_INPUT_LINES=8）；内容行数增
- * → viewportRows 减 → ChatView 高度预算联动，历史消息不丢仅可视区变矮。
+ * Multi-line input: input-row accounting is dynamic (chromeReserveRows
+ * `inputRows` capped at MAX_INPUT_LINES=8 logical lines of inputValue);
+ * more content rows → fewer viewportRows → ChatView height shrinks,
+ * history messages are never lost, only the viewport gets shorter.
  *
- * 不产（spec SC3 删除清单正交）：
- *  - 行级滚动 / 行窗口数学（OpenTUI `<scrollbox stickyScroll>` 接管）；
+ * Deliberately absent (OpenTUI built-ins take over):
+ *  - row-level scrolling / row-window math (`<scrollbox stickyScroll>`);
  *  - markdown-lines / message-rows / row-window / chat-flow / selection
- *    / mouse / text 模块（OpenTUI 内置 selection + 渲染器坐标）。
+ *    / mouse / text modules (built-in selection + renderer coordinates).
  */
 import {
   startTransition,
@@ -194,19 +197,20 @@ import {
   EMPTY_ENV_DISPLAY_STORE,
   type EnvDisplayStore,
 } from "./env-display-store.js";
-// plans/tui-chrome-interaction.md T7：chrome-focus reducer 接线 ——
-// `reduceChromeFocus` 拥有 input/subagent(row)/graph 三环焦点（src/tui/
-// chrome-focus.ts），reducer 是纯函数，本文件只做组合（T7 验收：wiring
-// 只做组合，不长成 god-handler）。`graphChromeFocus`（graph-chrome.ts 旧
-// 二态 reducer）只保留 openView 视图层（full-screen GraphGroupView 的
-// Open/Close 仍是它的职责；不与三环焦点切换混）。
+// Chrome-focus reducer wiring: `reduceChromeFocus` owns the input /
+// subagent(row) / graph focus rings (src/tui/chrome-focus.ts) as a pure
+// function; this file only composes it — the wiring must not grow into a
+// god-handler. `graphChromeFocus` (graph-chrome.ts legacy two-state
+// reducer) keeps only the openView layer (full-screen GraphGroupView
+// Open/Close is still its job; not mixed with the three-ring focus switch).
 import { type ChromeFocus, reduceChromeFocus } from "./chrome-focus.js";
-// Slice D / SC14: Ctrl+X 强杀聚焦子代理 —— 纯分派模块（行序与面板同源）。
+// Ctrl+X hard-kill of the focused subagent — pure dispatch module (row
+// order shares the same source as the panel).
 import { dispatchKillFocusedSubagent } from "./subagent-kill.js";
-// live 判据（Ctrl+X 分派 / 面板 / 焦点计数同源）。
+// Live subagent predicate (single source for Ctrl+X dispatch / panel / focus count).
 import { isLiveSubagent } from "./subagent-message-lines.js";
-// #647 T3 / ADR-0028:agent 现势显示(与 ContextBar 的 context usage 显示是
-// 两回事,命名刻意区分)—— 只读 agent_status 流事件的最新一份快照。
+// Agent current-status display (ADR-0028) — distinct from ContextBar's
+// context usage by design: read-only latest snapshot of the agent_status event stream.
 import {
   AgentStatusPanel,
   agentStatusFromEvent,
@@ -230,18 +234,20 @@ import {
   agentStatusFromMessages,
   type AgentStatusSnapshot,
 } from "../harness/agent-status.js";
-// #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
-// 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
-// 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
+// Environment current-status as an independent slot — same chrome area as
+// the ADR-0028 status bar but a parallel, separate stream. EnvironmentPane
+// must not read the ADR-0028 status bar's events / snapshots / ledger
+// readers (pinned by a grep guard in tests/tui/environment-pane.test.tsx).
 import {
   envSnapshotFromEvent,
   resolveWorktreeChromeRoot,
   sessionLocationLines,
 } from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
-// #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
-// failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
-// 投影 + 渲染壳见 verify-banner.tsx(纯函数可单测)。
+// TUI verify closed-loop terminal-state human banner (HITL + auto modes:
+// passed / failed / unstable / escalated). The wire already reaches
+// bridge.TuiPostResult.verify; projection + render shell live in
+// verify-banner.tsx (pure functions, unit-testable).
 import {
   projectVerifyBanner,
   VerifyBannerStrip,
@@ -255,10 +261,11 @@ import {
   PromptInput,
   type PromptInputHandle,
 } from "./prompt-input.js";
-// T8 — chromeReserveRows 行账封顶由 INPUT_MAX_LINES（prompt-input SSOT）
-// 统一收口，避免 app.tsx 与 prompt-input.tsx 各自持有 "8" 常量导致飘移。
-// app 侧本地别名为 MAX_INPUT_LINES（保留原引用语义）+ 重新导出，保证
-// 外部 import 表面（tests/tui/*）稳定。
+// chromeReserveRows line-account cap is unified through INPUT_MAX_LINES
+// (prompt-input SSOT) so app.tsx and prompt-input.tsx don't each hold an
+// "8" constant that can drift. Local alias MAX_INPUT_LINES keeps the
+// original reference semantics + re-export to stabilize the external
+// import surface (tests/tui/*).
 import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import {
@@ -320,29 +327,29 @@ import {
 } from "../harness/subagent/host-wake.js";
 import { extractTitle } from "../session-api/store/schema.js";
 
-/** T8/T9：chromeReserveRows 行账封顶常量与可见行数计算函数的本地重导出
- *  （SSOT 实际定义在 prompt-input.tsx，避免两模块各持 "8" 常量飘移）。
- *  T9 加 inputWrapLineCount（wrap-aware 视觉折行行数）—— 修长文本无 `\n`
- *  时输入框高度不增长的回归（2026-08-14 用户反馈「输入多少都是一行」）。 */
+/** Local re-export of the chromeReserveRows line-account cap and the
+ *  visible-line-count helpers (actual SSOT is prompt-input.tsx, so two
+ *  modules don't each hold an "8" constant). Also re-exports
+ *  inputWrapLineCount (wrap-aware visual line count) — fixes the regression
+ *  where long text without `\n` kept the input box at one line. */
 export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
 
 /**
- * notice 文本按视觉宽度折行后行数（行账 SSOT，纯函数可单测）。
+ * Row count after wrapping notice text by visual width (line-account SSOT,
+ * pure function, unit-testable).
  *
- * OpenTUI 版没有 archive 自带的 `wrapTextVisual` — 用 modal.tsx 已就位的
- * `wrapModalLines`（wrap-ansi + {trim:false, hard:true}）复用。空数组/不含
- * 元素 → 0 行。
+ * OpenTUI has no equivalent of the archive's `wrapTextVisual` — reuse
+ * `wrapModalLines` from modal.tsx (wrap-ansi + {trim:false, hard:true}).
+ * Empty array / no elements → 0 rows.
  */
 /**
- * /compact 入口护栏文案 SSOT（纯函数，可单测 —— Spec review Medium#3：
- * 五条 guard 原先内联在 switch 分支里，只有 draft 一条被 app 级测试间接覆盖）。
- *
- * 五条 guard 覆盖的手动路径前置条件：
- *  - busy：turn 在跑，压缩要排队（runState 门）；
- *  - in_flight：同一时刻只允许一条 /compact（compactingControllerRef 同步门）；
- *  - draft：会话尚未建档，没有可压缩的东西；
- *  - cancelled：promise 结果 cancelled（pre-abort 早返回 / 事件标记）；
- *  - failed：compactSession 抛出（describeError 注入）。
+ * SSOT for /compact entry-guard notice text (pure functions). The five
+ * guards cover manual-path preconditions:
+ *  - busy: a turn is running, compaction must queue (runState gate);
+ *  - in_flight: only one /compact at a time (compactingControllerRef sync gate);
+ *  - draft: session not yet persisted, nothing to compact;
+ *  - cancelled: promise resolved cancelled (pre-abort early return / event flag);
+ *  - failed: compactSession threw (rendered via describeError).
  */
 export type CompactGuard = "busy" | "in_flight" | "draft";
 
@@ -361,28 +368,28 @@ export function compactGuardNoticeFor(guard: CompactGuard): string {
   }
 }
 
-/** 压缩成功取消（promise 结果 cancelled）的 notice 文案。 */
+/** Notice text when compaction was cancelled (promise result cancelled). */
 export function compactCancelledNotice(): string {
   return "Compaction cancelled — session unchanged.";
 }
 
-/** 压缩抛错的 notice 前缀（错误体由 describeError 兜底，非纯函数部分）。 */
+/** Notice prefix when compaction throws (error body filled by describeError). */
 export function compactFailedNoticePrefix(): string {
   return "Compaction failed: ";
 }
 
 /**
- * plan compress-trigger-gate T4 + review-fix:把 /compact notice 文案决策抽成
- * module-level 纯函数,便于 bun:test 单测覆盖 4 reason 分支(避免 mount
- * 整 TUI 渲染链路 + frozen bridge mock)。函数式 + exhaustiveness 检查
- * (sealed CompactReason union):future 新增 reason 时 TS 编译失败。
+ * Decide /compact notice text as a module-level pure function so unit tests
+ * can cover all 4 reason branches without mounting the whole TUI render
+ * chain + frozen bridge mock. Functional style + exhaustiveness check over
+ * the sealed CompactReason union: adding a future reason fails TS compile.
  */
 export function compactNoticeFor(
   reason: CompactReason,
   compacted: boolean
 ): readonly string[] {
   if (compacted) {
-    // compacted=true 路径:windowed → 保留尾部 + 裁早期;full_summary → 摘要前缀 + 保留尾部。
+    // compacted=true path: windowed → keep tail + trim early; full_summary → summary prefix + kept tail.
     switch (reason) {
       case "windowed":
         return ["Context compacted (kept tail, trimmed early messages)."];
@@ -390,7 +397,7 @@ export function compactNoticeFor(
         return ["Context compacted (structured summary + kept tail)."];
       case "below_token_threshold":
       case "messages_too_few":
-        // 逻辑上 compacted=true 不该拿到这些 reason;列全满足 exhaustiveness。
+        // Logically compacted=true never sees these reasons; listed for exhaustiveness.
         throw new Error(
           `unexpected no-op reason in compacted branch: ${reason}`
         );
@@ -400,11 +407,12 @@ export function compactNoticeFor(
       }
     }
   }
-  // compacted=false 路径:plan manual-compact-trigger T1/T2 — 手动
-  // compactSession 不再返回 below_token_threshold(auto token 门仅属
-  // proactive 路径),空会话幂等与压缩整体失败共用 messages_too_few,
-  // 语义是「没有可压缩的上下文」而非「消息条数过少」。below_token_threshold
-  // / 压缩成功 reason 在此分支出现均属契约破坏,抛错而非呈现 auto 阈值文案。
+  // compacted=false path: manual compactSession never returns
+  // below_token_threshold (the auto token gate belongs to the proactive
+  // path only); empty-session idempotency and overall compaction failure
+  // share messages_too_few, meaning "no compactable context" rather than
+  // "too few messages". Any below_token_threshold or success reason showing
+  // up here is a contract violation → throw instead of rendering auto-gate text.
   switch (reason) {
     case "messages_too_few":
       return ["Nothing to compact — session unchanged."];
@@ -424,7 +432,7 @@ export function noticeRenderRows(
   cols: number
 ): number {
   if (lines === undefined || lines.length === 0) return 0;
-  // notice 渲染盒内文宽 = cols - 2（容器边距各 1），与 ListView 实测对齐。
+  // notice render box inner width = cols - 2 (1 per side), matched to ListView measurements.
   const inner = Math.max(0, cols - 2);
   let rows = 0;
   for (const line of lines) {
@@ -438,27 +446,30 @@ export function noticeRenderRows(
 }
 
 /**
- * 底部 chrome 行账（SSOT，可单测）。逐项入账，新增底部行必须同步本函数：
+ * Bottom chrome line account (SSOT, unit-testable). Itemized; any new bottom
+ * row must update this function:
  *
- *   - ChatView marginTop headroom（顶部留白 1 行）
- *   - 权限 mode 指示行 1 行
- *   - 输入框圆角线框（inputRows 内容行 + 2 边框行；T8 起动态，
- *     输入行数增 → 视图预算随之减，不挤掉历史消息）
- *   - ContextBar 用量条 1 行
- *   - agent 现势显示（未勾待办单行，agentStatusRows；mode 行上方）
- *   - ask 槽 1 行（ChatView tail 恒预留）
- *   - slash 候选行（inputValue.trim().startsWith("/") ? … : 0）
- *   - notice 本体 + 自身 marginBottom=1
- *   - modal 本体 + 自身 marginBottom=1
- *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
- *   - compact 进度面板 + 自身 marginBottom=1（compactRows 同上款约定）
- *   - 子代理状态面板（ContextBar 之下第二站，不计入 chrome 行账，避免把输入框往上顶）
- *   - 后台运行标记行（存在 running-bg 时）
+ *   - ChatView marginTop headroom (1 row)
+ *   - permission mode indicator row, 1 row
+ *   - input box rounded frame (inputRows content rows + 2 border rows;
+ *     dynamic — more input rows shrink the view budget instead of pushing
+ *     history messages out)
+ *   - ContextBar usage bar, 1 row
+ *   - agent current-status (single unfinished-todo line, agentStatusRows; above mode row)
+ *   - ask slot 1 row (ChatView tail always reserved)
+ *   - slash candidate rows (inputValue.trim().startsWith("/") ? … : 0)
+ *   - notice body + its own marginBottom=1
+ *   - modal body + its own marginBottom=1
+ *   - thinking-picker panel + its own marginBottom=1 (pickerRows follows the modalRows convention)
+ *   - compact progress panel + its own marginBottom=1 (compactRows same convention)
+ *   - subagent status panel (second slot below ContextBar, NOT counted in chrome rows to avoid pushing the input box up)
+ *   - background-run marker row (present when running-bg sessions exist)
  */
 /**
- * 面板型槽位的统一入账：缺省 0，行数 > 0 → rows + 1（自身 marginBottom=1），
- * 否则 0。notice / modal / picker / compact 四槽同款约定 —— 四处各写一遍
- * `?? 0` + 三元必然漂移，也把 chromeReserveRows 的复杂度顶到硬门之上。
+ * Uniform accounting for panel-type slots: default 0; rows > 0 → rows + 1
+ * (own marginBottom=1), else 0. notice / modal / picker / compact share this
+ * convention — writing `?? 0` + a ternary four times inevitably drifts and
+ * pushes chromeReserveRows' complexity past the hard gate.
  */
 function panelSlotRows(rows: number | undefined): number {
   const n = rows ?? 0;
@@ -466,9 +477,10 @@ function panelSlotRows(rows: number | undefined): number {
 }
 
 /**
- * 零默认槽位求和（缺省 / 显式 0 都按 0 计）。`chromeReserveRows` 的尾部槽
- * 位已有 6 个，逐项写 `(x ?? 0)` 会把这一个组合函数推过 S5 复杂度硬门；
- * 折叠进本 helper 让新增槽位只增一行调用，不再逐个加分支。
+ * Sum of zero-default slots (missing / explicit 0 both count as 0).
+ * `chromeReserveRows` already has 6 tail slots; writing `(x ?? 0)` per item
+ * would push this combinator past the S5 complexity hard gate. Folding them
+ * into this helper keeps each new slot at one added call line.
  */
 function zeroDefaultRows(rows: ReadonlyArray<number | undefined>): number {
   let total = 0;
@@ -477,15 +489,17 @@ function zeroDefaultRows(rows: ReadonlyArray<number | undefined>): number {
 }
 
 /**
- * /model 面板条目投影：实现下沉到 model-picker.tsx 并从本文件再导出。
- * app 与 context-bar 都消费这份「注册表 → 条目」投影，任一方持有实现都会
- * 逼另一方反向 import 成环 —— 投影族（展平 / 路由判定 / 显示名）因此全部
- * 落在两者的共同下游叶子模块。再导出保持既有调用点
- * （app 内部 + tests/tui/model-command.test.tsx）import 路径不变。
+ * /model picker entry projection: implementation lives in model-picker.tsx
+ * and is re-exported here. Both app and context-bar consume this
+ * "registry → entries" projection; whichever one owned it would force the
+ * other into a circular reverse import — so the whole projection family
+ * (flatten / route matching / display name) sits in their shared leaf
+ * module. Re-export keeps existing call sites (inside app +
+ * tests/tui/model-command.test.tsx) importing from the same path.
  */
 export { modelPickerEntries } from "./model-picker.js";
 
-/** 当前 model 串在条目列表中的下标（找不到 / 空列表 → 0）。 */
+/** Index of the current model string in the entry list (not found / empty list → 0). */
 export function modelFocusIndexFor(
   entries: ReadonlyArray<ModelPickerEntry>,
   model: string | undefined
@@ -496,10 +510,12 @@ export function modelFocusIndexFor(
 }
 
 /**
- * picker 行账（chrome 预算槽）：非 chat 视图 / 面板未开 → 0；打开 → 按当前
- * 注册表条目数取 `modelPickerRows`。三元从 TuiApp 内联折进 helper，新增面板
- * 只加一行调用、不给组件加分支（与 `modelPickerEntries` 同款动机）。
- * **不含 marginBottom=1**（由 chromeReserveRows 的 +1 入账，见 modelPickerRows）。
+ * Picker row account (chrome budget slot): non-chat view / panel closed →
+ * 0; open → `modelPickerRows` by current registry entry count. The ternary
+ * was folded from TuiApp inline code into a helper, so a new panel adds one
+ * call line instead of a component branch (same motivation as
+ * `modelPickerEntries`). **Excludes marginBottom=1** (accounted by the +1
+ * in chromeReserveRows, see modelPickerRows).
  */
 export function modelPickerRowsFor(
   open: boolean,
@@ -511,8 +527,9 @@ export function modelPickerRowsFor(
 }
 
 /**
- * 面板渲染态（`ModelPickerState | null`）：非 chat / 未打开 → null（组件不
- * 渲染）。构造与判别折进 helper，避免组件内联三元+对象字面量各占一个分支。
+ * Panel render state (`ModelPickerState | null`): non-chat / not open →
+ * null (component not rendered). Construction + discrimination folded into a
+ * helper so the JSX doesn't spend one branch each on an inline ternary and object literal.
  */
 export function modelPickerStateFor(
   open: boolean,
@@ -525,9 +542,8 @@ export function modelPickerStateFor(
 }
 
 /**
- * 面板渲染态（`ConfigPickerState | null`）：非 chat / 未打开 → null（组件不
- * 渲染）。构造与判别折进 helper，避免组件内联三元+对象字面量各占一个分支
- * （同 `modelPickerStateFor`）。
+ * Panel render state (`ConfigPickerState | null`): non-chat / not open →
+ * null (component not rendered). Same folding as `modelPickerStateFor`.
  */
 function configPickerStateFor(
   open: boolean,
@@ -539,11 +555,13 @@ function configPickerStateFor(
 }
 
 /**
- * picker 家族行账总入口（chrome 预算槽，ADR-0096 T1 起并入 config 面板）：
- * 依次判 config → thinking → memory → model，命中即返回对应行数（互斥由开
- * 面板路径保证，此处只按 open 标志取值）。三元从 TuiApp 内联折进 helper，
- * 新增面板只加一行判别、不给组件加分支（S5 硬门，与 `subagentRowBudget`
- * 同款动机）。**不含 marginBottom=1**（由 chromeReserveRows 的 +1 入账）。
+ * picker-family row budget entry point (chrome slot; the config panel
+ * (ADR-0096) joins it too): checks config → thinking → memory → model in
+ * order and returns the first hit's row count (mutual exclusion is
+ * guaranteed by the open-panel paths; here we only read the flags). Ternary
+ * folded from TuiApp inline code — a new panel adds one discriminator line,
+ * not a component branch (complexity hard gate, same motivation as
+ * `subagentRowBudget`). **Excludes marginBottom=1** (accounted by the +1 in chromeReserveRows).
  */
 function pickerRowsForBudget(opts: {
   readonly view: TuiView;
@@ -562,10 +580,12 @@ function pickerRowsForBudget(opts: {
 }
 
 /**
- * 输入框占位符的 picker 文案（判别顺序 = 面板互斥优先级：回退 > model >
- * memory > thinking）。任一 picker 打开 → 对应键位提示，否则 undefined（调用
- * 方落回默认文案 / ask 分支）。文案链折进本函数，组件只做取值（S5：分支体在
- * helper 内；文案 SSOT 在此，测试断言的中文串不散落在 JSX）。
+ * Input placeholder text while a picker is open (check order = panel
+ * priority: rewind > model > memory > thinking). Any picker open → its key
+ * hint, else undefined (caller falls back to the default text / ask branch).
+ * The chain lives in this helper so the component only reads a value
+ * (complexity gate: branch bodies in helpers; the text SSOT is here, so the
+ * Chinese strings asserted by tests don't scatter across JSX).
  */
 export function pickerPlaceholderFor(opts: {
   readonly rewindOpen: boolean;
@@ -596,9 +616,10 @@ export function pickerPlaceholderFor(opts: {
 }
 
 /**
- * /help 的 skill 名入参：有 skill → 名字列表，无 → undefined（`helpLines`
- * 据此整段退场，不渲染空 skills 段）。判空折进 helper，`case "help"` 只留
- * 一行（S5：分支体在 helper 内）。
+ * Skill-name argument for /help: with skills → name list, without →
+ * undefined (`helpLines` then drops the whole skills section instead of
+ * rendering an empty one). Emptiness check folded into a helper so
+ * `case "help"` stays one line.
  */
 export function skillNamesForHelp(
   skillList: ReadonlyArray<{ readonly name: string }>
@@ -607,15 +628,16 @@ export function skillNamesForHelp(
   return skillList.map((entry) => entry.name);
 }
 
-/** /model 注册表为空时的 typed notice（测试断言的中文串 SSOT）。 */
+/** Typed notice when the /model registry is empty (SSOT string asserted by tests). */
 export const MODEL_PICKER_EMPTY_NOTICE =
   "未配置 providers —— 在 ~/.iknow/settings.json 的 llm.providers 里登记（含 id / baseUrl / apiKeyEnv / models）。";
 
 /**
- * /model 命令的落地：注册表空 / 缺席 → 走 onEmpty（typed notice，**不打开
- * 面板**）；非空 → onOpen(焦点初值 = 当前 model 对应条目，找不到 → 0)，调用
- * 方在 onOpen 内完成面板互斥（收起 thinking / memory）。判定从 handleSubmit
- * 的 case 分支体折进本函数，case 只留一行派发（S5：分支体在 helper 内）。
+ * /model command landing: empty / absent registry → onEmpty (typed notice,
+ * **panel stays closed**); non-empty → onOpen(focus = entry for current
+ * model, not found → 0); the caller completes panel mutual exclusion (close
+ * thinking / memory) inside onOpen. Case body folded out of handleSubmit,
+ * leaving one dispatch line per case.
  */
 export function openModelPickerCommand(opts: {
   readonly providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined;
@@ -632,18 +654,20 @@ export function openModelPickerCommand(opts: {
 }
 
 /**
- * /config 面板的键位落地（宿主 useKeyboard 的 `if (configPickerOpen)` 分支体）。
- * 纯路由在 `reduceConfigPickerKey`，本函数只把 action 接到回调上，保留面板
- * 交互语义（ADR-0096 T1+T2）：
- *  - move → onMove（面板保持打开）；
- *  - fix（Enter）→ 按行分发：FS 行 onToggleFsMode（翻 fs holder + 落盘），
- *    cap 行 onToggleSubagentCap（循环 cap holder + 落盘；holder 缺席时宿主
- *    回调自身 no-op）；worktree 行 no-op（T3 才接 isolation holder）。面板
- *    保持打开（多档连续切换）。
- *  - commit（Esc）→ 仅 onClose（无 staged 状态可保存 —— Enter 即落盘）；
- *  - ignore → no-op。
- * 抽到模块级的理由同 `applyModelPickerKey`（宿主 useKeyboard 的分支体在
- * helper 内，S5 硬门：handler 只判键 + 派发）。
+ * /config panel key handling (body of the host useKeyboard's
+ * `if (configPickerOpen)` branch). Pure routing lives in
+ * `reduceConfigPickerKey`; this function only wires actions to callbacks,
+ * preserving panel interaction semantics (ADR-0096):
+ *  - move → onMove (panel stays open);
+ *  - fix (Enter) → dispatch by row: FS row → onToggleFsMode (flip fs holder + persist),
+ *    cap row → onToggleSubagentCap (cycle cap holder + persist), worktree
+ *    row → onToggleWorktreeOnMutate; when a holder is absent the host
+ *    callback itself no-ops. Panel stays open (continuous switching).
+ *  - commit (Esc) → onClose only (no staged state to save — Enter persists immediately);
+ *  - ignore → no-op.
+ * Module-level for the same reason as `applyModelPickerKey`: the host
+ * useKeyboard branch body lives in a helper (complexity gate: handler only
+ * checks the key + dispatches).
  */
 export function applyConfigPickerKey(
   event: ModalKeyEvent,
@@ -654,9 +678,10 @@ export function applyConfigPickerKey(
     readonly onToggleWorktreeOnMutate: () => void;
     readonly onToggleSubagentCap: () => void;
     /**
-     * fix 之后的强制重渲染（实测缺陷修复：holder 是普通对象，`get()` 不订阅
-     * —— 不显式触发的话屏上值会停在下一次焦点移动才更新，用户按 Enter 后
-     * 看不到任何反馈）。宿主接一个 state 计数器即可。
+     * Forced re-render after fix (observed defect: the holder is a plain
+     * object and `get()` doesn't subscribe — without an explicit trigger the
+     * on-screen value only updates on the next focus move, so Enter shows no
+     * feedback). The host just needs a state counter.
      */
     readonly onRerender: () => void;
     readonly onClose: () => void;
@@ -670,8 +695,8 @@ export function applyConfigPickerKey(
       opts.onMove(action.index);
       break;
     case "fix":
-      // 按 focusedIndex 判行：FS 行 → 翻 fsMode；worktree 行 → 翻门禁 holder；
-      // cap 行 → 循环 cap（三行均已激活；holder 缺席时对应回调自身 no-op）。
+      // Dispatch by focusedIndex: FS row → flip fsMode; worktree row → flip the gate holder;
+      // cap row → cycle cap (all three rows active; callbacks no-op when their holder is absent).
       {
         const row = configRowKindFor(opts.focusedIndex);
         if (row === "fsMode") opts.onToggleFsMode();
@@ -689,19 +714,20 @@ export function applyConfigPickerKey(
 }
 
 /**
- * Ctrl+O 判键（思考折叠切换）：从宿主 useKeyboard 内联折进 helper（S5 硬门
- * —— T1 给 config 面板加守卫时抵回分支预算）。
+ * Ctrl+O key check (toggle thinking fold): folded out of host useKeyboard
+ * inline to keep the branch budget intact for the config-panel guard.
  */
 function isThinkingFoldKey(e: KeyEvent): boolean {
   return e.ctrl && e.name === "o";
 }
 
 /**
- * FS 行 Enter 的行为体（fix action → 真正的 holder 翻转 + fire-and-forget
- * 落盘）。从 TuiApp 的 useKeyboard 内联折进模块级 helper（S5 硬门）：holder
- * 缺席 → no-op（面板仍开可关，与无参 /config 开面板不要求 holder 同源）。
- * 失败兜底契约与 `runConfigSlashCommand` 有参路径同款：UI 不抛、notice 呈现，
- * holder 值不回滚（运行期已生效，文件态以下次读盘为准）。
+ * Behavior body for Enter on the FS row (fix action → actual holder flip +
+ * fire-and-forget persist). Module-level helper: holder absent → no-op
+ * (panel still opens/closes; same source-of-truth as argless /config opening
+ * without a holder). Failure contract matches `runConfigSlashCommand`'s
+ * arg path: UI never throws, notice renders, holder value is not rolled back
+ * (it already took effect at runtime; the file state follows the next read).
  */
 function toggleFsModeAndPersist(
   props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
@@ -717,12 +743,12 @@ function toggleFsModeAndPersist(
 }
 
 /**
- * ADR-0096 T2 ── cap 行 Enter 的行为体（fix action → 循环 cap holder +
- * fire-and-forget 落盘）。从 TuiApp 的 useKeyboard 内联折进模块级 helper
- * （S5 硬门）：holder 缺席 → no-op（与 FS 行 `fsMode` 缺席同形态）。落盘
- * 失败兜底与 `toggleFsModeAndPersist` 同款（UI 不抛、notice 呈现，holder
- * 已生效不撤回）。`nextSubagentCap` 是闭集循环（3→5→9→15→unlimited→3）；
- * holder.set 内部 `isValidSubagentCapacityValue` 兜底拒非法字面。
+ * Behavior body for Enter on the cap row (fix action → cycle cap holder +
+ * fire-and-forget persist). Module-level helper: holder absent → no-op
+ * (same shape as the FS row's missing `fsMode`). Persist-failure fallback
+ * matches `toggleFsModeAndPersist` (UI never throws, notice renders, holder
+ * stays applied). `nextSubagentCap` is a closed cycle (3→5→9→15→unlimited→3);
+ * holder.set internally rejects invalid literals via `isValidSubagentCapacityValue`.
  */
 function toggleSubagentCapAndPersist(
   props: Pick<
@@ -733,19 +759,22 @@ function toggleSubagentCapAndPersist(
 ): void {
   const holder = props.subagentCapHolder;
   if (holder === undefined) return;
-  // 起点读 holder 现值（与显示同源：避免面板 subagentCapDisplay 滞后时的
-  // 视觉跳变）。subagentCapDisplay 与 holder.get() 偶尔分裂的场景（外部
-  // 写 settings.json 让另一进程 reload）下也以 holder 为准 —— display
-  // 只是面板快照，runtime 真相在 holder。
+  // Start from the holder's live value (same source as display: avoids a
+  // visual jump when the panel's subagentCapDisplay lags). Even when display
+  // and holder.get() diverge (e.g. another process rewrote settings.json and
+  // reloaded), the holder wins — display is just a panel snapshot; runtime
+  // truth lives in the holder.
   const current: SubagentCapacityValue = holder.get();
   const next = nextSubagentCap(current);
   holder.set(next);
-  // fire-and-forget：holder 已生效（manager 下一次 spawn 即按新闸）；落盘
-  // 失败由宿主 notice 兜底，**不**把 holder 回滚（与 FS 行同款）。失败双通道：
-  // ① persist 返回结构化 `{ok:false, reason}`（persistSubagentCapImpl 捕获
-  // 后返回、不 rethrow）→ 同步分支 notice；② promise reject → .catch。
-  // code-review High 修复：只接 .catch 会把 ① 静默吞掉（resolved 值被
-  // `void` 丢弃），用户看不出「已保存」与「保存失败」的差别。
+  // fire-and-forget: the holder already applies (manager honors the new gate
+  // on next spawn); persist failure falls back to a host notice and does
+  // **not** roll back the holder (same as the FS row). Failure has two
+  // channels: ① persist resolves with structured `{ok:false, reason}` (the
+  // persist impl catches and returns, no rethrow) → sync notice; ② promise
+  // rejection → .catch. Hooking only .catch silently swallows ① (the resolved
+  // value is dropped by `void`), leaving the user unable to tell "saved"
+  // from "save failed".
   void props
     .onPersistSubagentCap?.({ maxConcurrentWorkers: next })
     .then((res) => {
@@ -763,12 +792,13 @@ function toggleSubagentCapAndPersist(
 }
 
 /**
- * ADR-0096 T3 ── worktree 门禁行 Enter 的行为体（fix action → 翻
- * worktree holder + fire-and-forget 落盘）。从 TuiApp 的 useKeyboard 内联
- * 折进模块级 helper（S5 硬门）：holder 缺席 → no-op（与 FS / cap 行同形态）。
- * 落盘失败兜底同款：UI 不抛、notice 呈现，holder 已翻不撤回 —— 门禁拦截与否
- * 已在下一次 wave 生效，文件态以下次读盘为准。**从不 auto-provision**：
- * 翻 ON 只恢复「拦下未绑树 mutate」这一条反应（ADR-0037 §1 保留）。
+ * Behavior body for Enter on the worktree gate row (fix action → flip
+ * worktree holder + fire-and-forget persist). Module-level helper: holder
+ * absent → no-op (same shape as the FS / cap rows). Persist-failure fallback
+ * is the same: UI never throws, notice renders, the flipped holder is not
+ * reverted — whether the gate intercepts already takes effect on the next
+ * wave; file state follows the next read. **Never auto-provisions**: flipping
+ * ON only restores the "block unbound-tree mutations" behavior (ADR-0037).
  */
 function toggleWorktreeOnMutateAndPersist(
   props: Pick<
@@ -787,15 +817,18 @@ function toggleWorktreeOnMutateAndPersist(
 }
 
 /**
- * /model 面板的键位落地（宿主 useKeyboard 的 `if (modelPickerOpen)` 分支体）。
- * 纯路由在 `reduceModelPickerKey`，本函数只把 action 接到回调上，保留面板
- * 交互语义（spec SC8）：
- *  - move → onMove（面板保持打开）；
- *  - fix（Enter）→ onSelect(路由 ID) + onClose（选定 + 持久化 + 关闭）；
- *  - commit（Esc）→ 仅 onClose（**不持久化**）；焦点移动不产生 staged 状态，
- *    故无回滚 —— 详见 model-picker.tsx 的 cancel 语义说明；
- *  - ignore → no-op。
- * 焦点条目缺失（条目被重载清空）仍关闭，与内联版本同语义。
+ * /model panel key handling (body of the host useKeyboard's
+ * `if (modelPickerOpen)` branch). Pure routing lives in
+ * `reduceModelPickerKey`; this function only wires actions to callbacks,
+ * preserving panel interaction semantics:
+ *  - move → onMove (panel stays open);
+ *  - fix (Enter) → onSelect(route ID) + onClose (select + persist + close);
+ *  - commit (Esc) → onClose only (**no persistence**); focus moves stage no
+ *    state, so there is nothing to roll back — see the cancel-semantics note
+ *    in model-picker.tsx;
+ *  - ignore → no-op.
+ * Still closes when the focused entry is missing (registry reloaded to
+ * empty), same semantics as the inline version.
  */
 export function applyModelPickerKey(
   event: ModalKeyEvent,
@@ -830,14 +863,18 @@ export function applyModelPickerKey(
 }
 
 /**
- * specs/tui-subagent-transcript-live.md：子代理两行已改画在会话消息内的
- * spawn 卡上（transcript 滚动区），prompt 上方不再有身份条 —— chrome 行账
- * 归零（锁句 3）。保留函数名与签名，让「不再入账」成为显式声明而非删掉
- * 调用点后的隐式缺省（`chromeReserveRows.subagentRows` 缺省即 0）。
+ * specs/tui-subagent-transcript-live.md: the two subagent lines moved into
+ * the in-transcript spawn card (scroll area), so there is no identity strip
+ * above the prompt anymore — chrome row account goes to zero. The function
+ * name and signature stay so that "no longer accounted" is an explicit
+ * declaration rather than an implicit default after deleting the call site
+ * (`chromeReserveRows.subagentRows` defaults to 0).
  *
- * 两个入参**有意不使用**：签名的形状是「这条预算曾是 view/subagents 的
- * 函数」的存档，调用点传真实值也让将来若恢复入账时改动面留在本函数内。
- * 返回值恒 0 是合同本身（测试逐 view / 逐 live 数钉住），不是待填的桩。
+ * The two parameters are **deliberately unused**: the signature archives the
+ * shape "this budget used to be a function of view/subagents", and callers
+ * still pass real values so a future re-accounting change stays inside this
+ * function. The constant 0 return is the contract itself (pinned per view /
+ * per live count in tests), not a stub to be filled.
  */
 export function subagentRowBudget(
   _view: TuiView,
@@ -847,11 +884,12 @@ export function subagentRowBudget(
 }
 
 /**
- * SubagentPanel 的 chrome 行账（#1044，取代「恒 0」，见 subagentRowBudget）。
- * 投影带 maxRows 折叠后取行数 —— 面板占几行就入账几行，Yoga 负空间不再摊到
- * 输入框；上限（SUBAGENT_PANEL_MAX_ROWS，与组件同源）保证账目有界（与终端高、
- * live 数解耦）。
- * 非 chat 视图 → 0（面板渲染 null）。
+ * SubagentPanel's chrome row account (replaces the constant 0 in
+ * subagentRowBudget). Count the projected lines after maxRows folding — the
+ * panel books exactly the rows it occupies, so Yoga negative space no longer
+ * spills into the input box; the cap (SUBAGENT_PANEL_MAX_ROWS, same source
+ * as the component) keeps the account bounded (decoupled from terminal
+ * height / live count). Non-chat view → 0 (panel renders null).
  */
 function subagentPanelRowBudget(
   view: TuiView,
@@ -869,10 +907,10 @@ function subagentPanelRowBudget(
 }
 
 /**
- * `/graph` case 体：翻 graph holder（与 Shift+Tab 同源）并同步 chrome 状态。
- *
- * 抽到模块级：case 内的 `if (!holder)` 分支若留在 handleSubmit 内，会把后者
- * 顶过 S5 ratchet 的 HEAD 基线（既有超阈值函数只许不升）。
+ * `/graph` case body: flip the graph holder (same source as Shift+Tab) and
+ * sync chrome state. Module-level because an `if (!holder)` branch left
+ * inside handleSubmit would push it past the complexity ratchet's HEAD
+ * baseline (existing over-threshold functions may only stay flat).
  */
 function runGraphSlashCommand(
   props: Pick<TuiAppProps, "graphMode">,
@@ -880,8 +918,8 @@ function runGraphSlashCommand(
   setGraphOn: (enabled: boolean) => void,
   setNotice: (notice: Notice) => void
 ): void {
-  // D-α V1 / SC3：`/graph` 是 Shift+Tab 的非 TTY 对等物 —— 翻同一个
-  // holder，解析与文案单点在 harness/graph/mode.ts（三入口同源）。
+  // `/graph` is the non-TTY peer of Shift+Tab — flips the same holder;
+  // parsing and text have a single point in harness/graph/mode.ts (shared by all three entry points).
   const graphCtx = props.graphMode;
   if (!graphCtx) {
     setNotice({ lines: ["图模式未接线（本入口未注入 graph holder）。"] });
@@ -893,11 +931,11 @@ function runGraphSlashCommand(
 }
 
 /**
- * `/config` case 体：ADR-0096 T1 ——
- *  - 无参（args 为空）→ 打开面板（互斥关闭 thinking / memory / model picker）；
- *  - 有参 → 走既有 `applyFsModeCommand` 路径，status / set / usage 行为不变。
+ * `/config` case body (ADR-0096):
+ *  - argless (empty args) → open the panel (mutually exclusive with thinking / memory / model pickers);
+ *  - with args → existing `applyFsModeCommand` path; status / set / usage behavior unchanged.
  *
- * 抽到模块级的理由同 `runGraphSlashCommand`（case 体内分支在 helper 内，S5）。
+ * Module-level for the same reason as `runGraphSlashCommand` (case-body branches live in a helper).
  */
 function runConfigSlashCommand(
   props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
@@ -910,11 +948,11 @@ function runConfigSlashCommand(
   setModelPickerOpen: (open: boolean) => void
 ): void {
   const args = splitConfigArgs(slashRemainder(text));
-  // T1：空 args → 开面板（与 model-picker 的 openModelPickerCommand 同源
-  // 设计 —— 打开前不要求 holder 接入；holder 缺席时面板仍显示，但 FS 行 Enter
-  // 不会翻动）。
+  // Empty args → open the panel (same design as openModelPickerCommand in
+  // model-picker — no holder required to open; with the holder absent the
+  // panel still shows but Enter on the FS row flips nothing).
   if (args.length === 0) {
-    // 面板互斥：开 config 时收起其余 picker（与 model / memory picker 同款）。
+    // Panel mutual exclusion: opening config closes the other pickers (same pattern as model / memory pickers).
     setThinkingPickerOpen(null);
     setMemoryPickerOpen(false);
     setModelPickerOpen(false);
@@ -922,22 +960,21 @@ function runConfigSlashCommand(
     setConfigFocusIndex(0);
     return;
   }
-  // ADR-0092 / SC13：有参路径翻 fs isolation holder（与 PermissionMode
-  // 正交 —— Shift+Tab 不动它），切档成功才落盘。解析与文案单点在
-  // harness/sandbox/fs-mode.ts（三入口同源）。
+  // ADR-0092: the args path flips the fs isolation holder (orthogonal to
+  // PermissionMode — Shift+Tab never touches it); persist only on a
+  // successful switch. Parsing and text have a single point in
+  // harness/sandbox/fs-mode.ts (shared by all three entry points).
   const fsCtx = props.fsMode;
   if (!fsCtx) {
     setNotice({ lines: ["文件系统隔离档未接线（本入口未注入 fs holder）。"] });
     return;
   }
-  // app 侧只解析一次，同一份结果同时驱动 notice 与落盘判定。`applyFsModeCommand`
-  // 内部还会为「改 holder」再解析一次 —— 那是命令 SSOT 的一部分，要合并得让
-  // fs-mode.ts 把 kind 透出返回值（不在本入口的改动范围）。
+  // The app side parses once and the same result drives both the notice and the persist decision.
+  // `applyFsModeCommand` internally parses again for the "modify holder" path — that is part of the command SSOT; merging it would require fs-mode.ts to expose `kind` in its return value (out of scope for this entry point).
   const cmd = parseConfigCommand(args);
   const res = applyFsModeCommand(fsCtx, args);
   setNotice({ lines: [res.text] });
-  // 切档成功才落盘（usage / status 不该写文件）。fire-and-forget：
-  // 失败不抛（UI 兜底），成功不阻塞输入。
+  // Persist only on a successful switch (usage / status must not write the file). fire-and-forget: failure never throws (UI fallback), success never blocks input.
   if (res.ok && cmd.kind === "set") {
     void props.onPersistFsMode?.(fsCtx.get()).catch((err: unknown) => {
       setNotice({ lines: [`文件系统隔离档保存失败：${describeError(err)}`] });
@@ -949,49 +986,46 @@ export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
   readonly bgLine: boolean;
-  /** 输入框内容可见行数（textarea 逻辑行）。缺省 1 → 预算 3（等价旧固定值）；
-   *   内部封顶 MAX_INPUT_LINES（行账 SSOT，防误传超大值挤爆视图）。 */
+  /** Visible content lines of the input box (textarea logical rows). Default 1 → budget 3 (equals the old fixed value); internally capped at MAX_INPUT_LINES (line-account SSOT, guards against oversized values squeezing the view). */
   readonly inputRows?: number;
   readonly modalRows?: number;
   readonly pickerRows?: number;
-  /** 子代理状态面板行数（#1044：折叠后实际行数，上限 SUBAGENT_PANEL_MAX_ROWS；
-   *   与面板渲染高度恒等）。函数仍接受显式值（单测 / 旧调用兼容）。 */
+  /** Subagent status panel rows: folded actual row count (cap SUBAGENT_PANEL_MAX_ROWS; always equal to the panel's rendered height). The function still accepts explicit values (unit tests / legacy callers). */
   readonly panelRows?: number;
   /**
-   * specs/tui-subagent-transcript-live.md：prompt 上方身份条已拆除 —— 两行
-   * 改画在会话 transcript 的 spawn 卡上（滚动区内，不吃 chrome 预留）。
-   * 产品路径恒 0（`subagentRowBudget` 返回值）；显式值只留给单测 / 旧调用
-   * 兼容。缺省 0 → 不占行。（#1044 起 `panelRows` 走面板折叠后行数，两槽
-   * 不再同款。）
+   * specs/tui-subagent-transcript-live.md: the identity strip above the
+   * prompt is removed — the two lines now render on the spawn card inside
+   * the session transcript (scroll area, no chrome reservation). Product
+   * path is always 0 (return of `subagentRowBudget`); explicit values are
+   * only for unit tests / legacy callers. Default 0 → no rows. (The
+   * `panelRows` slot books the folded panel rows, so the two slots no
+   * longer share the convention.)
    */
   readonly subagentRows?: number;
-  /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
-   *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
+  /** Agent current-status rows (actual output of agentStatusLines, 0-1). Default 0 → no rows (no snapshot / component renders null / legacy behavior). */
   readonly agentStatusRows?: number;
-  /** #653 G1 T5:环境现势独立 slot 行数（envSnapshotLines 实际产出，0-2）。
-   *   缺省 0 → 不占行（无事件 / 组件渲染 null / 旧行为兼容）。 */
+  /** Environment pane independent slot rows (actual output of envSnapshotLines, 0-2). Default 0 → no rows (no events / component renders null / legacy behavior). */
   readonly envPaneRows?: number;
-  /** #458 包2 T3:verify 闭环终态 banner 行数（projectVerifyBanner 实际产出，
-   *   0 或 1）。缺省 0 → 不占行（无 verify / slot=none → 组件渲染 null）。 */
+  /** Verify closed-loop terminal banner rows (actual output of projectVerifyBanner, 0 or 1). Default 0 → no rows (no verify / slot=none → component renders null). */
   readonly verifyRows?: number;
-  /** run_graph chrome 一行（0 或 1）。缺省 0 → 无快照不占行。 */
+  /** run_graph chrome single row (0 or 1). Default 0 → no rows without a snapshot. */
   readonly graphRows?: number;
-  /** compact 进度面板行数（compactProgressRows()，6 行）。缺省 0 → 无面板
-   *   不占行（旧调用 / 无压缩路径零影响）。 */
+  /** Compact progress panel rows (compactProgressRows(), 6). Default 0 → no rows when the panel is closed (legacy callers / non-compaction paths unaffected). */
   readonly compactRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
     Math.min(opts.inputRows ?? 1, MAX_INPUT_LINES)
   );
-  // 尾部纯增槽位（含 marginBottom 已由各自 +1 表达的项）逐项求和。
+  // Pure additive tail slots (items whose marginBottom is already expressed by their own +1), summed per item.
   const tailRows =
     panelSlotRows(opts.noticeRows) + // notice + marginBottom
     panelSlotRows(opts.modalRows) +
     panelSlotRows(opts.pickerRows) +
-    panelSlotRows(opts.compactRows) + // compact 进度面板 + marginBottom
-    // 零默认槽位（缺省 0 = 不占行）求和：逐项 `?? 0` 会把本函数复杂度推过
-    // S5 硬门，故共用一个折叠 helper（与 panelSlotRows 同款动机）。
+    panelSlotRows(opts.compactRows) + // compact progress panel + marginBottom
+    // Sum of zero-default slots (missing 0 = no rows): per-item `?? 0` would
+    // push this function past the complexity hard gate, so they share one folding
+    // helper (same motivation as panelSlotRows).
     zeroDefaultRows([
       opts.panelRows,
       opts.subagentRows,
@@ -1000,20 +1034,20 @@ export function chromeReserveRows(opts: {
       opts.verifyRows,
       opts.graphRows,
     ]) +
-    (opts.bgLine ? 1 : 0); // 后台运行标记行
+    (opts.bgLine ? 1 : 0); // background-run marker row
   return (
     1 + // top headroom
-    1 + // mode指示行
-    inputContentRows + // 输入框内容行
-    2 + // 输入框圆角边框（顶/底框线）
+    1 + // mode indicator row
+    inputContentRows + // input box content rows
+    2 + // input box rounded border (top/bottom lines)
     opts.inputHintRows +
     1 + // ContextBar
-    1 + // ask 槽
+    1 + // ask slot
     tailRows
   );
 }
 
-/** #146 TUI 工具事件 sink（从 archive 迁入）：postToolUse 投影订阅。 */
+/** TUI tool-event sink (migrated from archive): postToolUse projection subscription. */
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
   readonly subscribe: (cb: (event: TuiToolEvent) => void) => () => void;
@@ -1035,13 +1069,14 @@ export function createToolEventSink(): TuiToolEventSink {
   return Object.freeze(sink);
 }
 
-/** W2 扩展：TuiAppProps.permissionMode 缺省 fallback（测试兼容；
- *  product 路径由 run.tsx 显式传）。模块私有，避免跨 mount 共享可变单例。 */
+/** Fallback when TuiAppProps.permissionMode is missing (test compat; the
+ *  product path passes it explicitly from run.tsx). Module-private, avoiding
+ *  a mutable singleton shared across mounts. */
 const defaultPermissionModeContext: PermissionModeContext =
   createPermissionModeContext("default");
 
-/** #337 Phase C：skillCatalog 缺省 fallback（空清单 — 兼容 fixture / 测试；
- *  product 路径由 run.tsx 经 TuiExtensions.skillCatalog 注入）。模块私有。 */
+/** skillCatalog default fallback (empty catalog — fixture / test compat; the
+ *  product path injects it from run.tsx via TuiExtensions.skillCatalog). Module-private. */
 const emptySkillCatalog: SkillCatalog = Object.freeze({
   search: () => [],
   get: () => undefined,
@@ -1054,139 +1089,154 @@ export interface TuiAppProps {
   readonly bridge: TuiBridge;
   readonly askBridge: TuiAskUserBridge;
   readonly toolEventSink: TuiToolEventSink;
-  /** `iknow tui <session-id>` resume 入口传入的已建档会话；缺省 = draft。 */
+  /** Session already persisted, passed in by the `iknow tui <session-id>` resume entry; absent = draft. */
   readonly initialSession?: TuiSessionState;
   readonly cwd: string;
   readonly dataDir: string;
   readonly permissionMode?: PermissionModeContext;
   /**
-   * D-α V1 / ADR-0030：graph 编排 overlay 的会话 holder。Shift+Tab 三态轮的
-   * 第三站与 `/graph on|off` 翻的是同一个它（SC3 三入口同 holder）。缺席 →
-   * Shift+Tab 退化成既有两态 permission 轮，`/graph` 提示未接线（测试 /
-   * fixture 兼容；产品路径由 run.tsx 注入）。
+   * ADR-0030: session holder for the graph orchestration overlay. The third
+   * stop of the Shift+Tab tri-state cycle and `/graph on|off` flip this same
+   * holder (all three entry points share it). Absent → Shift+Tab degrades to
+   * the existing two-state permission cycle and `/graph` reports unwired
+   * (test / fixture compat; the product path injects it via run.tsx).
    */
   readonly graphMode?: GraphModeContext;
   /**
-   * ADR-0092 / SC13：filesystem isolation 档的会话 holder。`/config` 就地翻
-   * 它；引擎（build-engine → bash 工厂）per-call 读同一 holder。缺席 →
-   * `/config` 提示未接线（测试 / fixture 兼容；产品路径由 run.tsx 注入）。
+   * ADR-0092: session holder for the filesystem isolation mode. `/config`
+   * flips it in place; the engine (build-engine → bash factory) reads the
+   * same holder per call. Absent → `/config` reports unwired (test / fixture
+   * compat; the product path injects it via run.tsx).
    *
-   * **与 PermissionMode 正交**：Shift+Tab 的三态轮不动本 holder（授权轴 ≠
-   * FS 档轴）。
+   * **Orthogonal to PermissionMode**: the Shift+Tab tri-state cycle never
+   * touches this holder (authorization axis ≠ FS-mode axis).
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0092 / SC13：`/config` 切换后的落盘回调（fire-and-forget）。
-   * 产品路径由 run.tsx 注入 `persistFsModeChanges(resolveThinkingSettingsPath(), …)`
-   * 的闭包；测试可注入 spy。失败不抛（UI 兜底 setNotice）；成功路径不
-   * 阻塞输入。
+   * ADR-0092: persist callback after a `/config` switch (fire-and-forget).
+   * Product path injects a closure over `persistFsModeChanges(resolveThinkingSettingsPath(), …)`
+   * from run.tsx; tests may inject a spy. Failure never throws (UI fallback
+   * via setNotice); success never blocks input.
    */
   readonly onPersistFsMode?: (mode: FsIsolationMode) => Promise<void>;
-  /** #279 项3：权限 modal「总是允许」落点 — session 层授权登记表。 */
+  /** Persistence target for the permission modal "always allow" — session-level grants registry. */
   readonly sessionGrants?: SessionGrants;
-  /** 测试注入口：可选初始视图（缺省 chat）。 */
+  /** Test injection: optional initial view (default chat). */
   readonly initialView?: TuiView;
-  /** 测试 / mock 注入口：触发 renderer.destroy 的回调；缺省 = no-op。
-   *  参数 = 退出时活跃会话的 conversationId（draft 未建档时 undefined），
-   *  供宿主在终端恢复后打印 resume 提示。 */
+  /** Test / mock injection: callback triggered on renderer.destroy; default = no-op.
+   *  Argument = conversationId of the sessions active at quit time (undefined for an
+   *  unpersisted draft), so the host can print a resume hint after terminal restore. */
   readonly onQuit?: (conversationId?: string) => void;
-  /** #337 Phase C：skill 清单（slash 候选混显 + /skill-name 加载发送）。
-   *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
-   *  TuiExtensions.skillCatalog 注入）。本值是**装配期缓存**，斜杠面板打开
-   *  时经 `skillRescanner` 重扫换新（spec skill-index-increment SC8）。 */
+  /** Skill catalog (mixed into slash candidates + /skill-name load-and-send).
+   *  Optional: default = empty catalog (fixture / test compat; the product path
+   *  injects via run.tsx through TuiExtensions.skillCatalog). This value is an
+   *  **assembly-time cache**, refreshed on slash-panel open via `skillRescanner`. */
   readonly skillCatalog?: SkillCatalog;
   /**
-   * T6 (`specs/skill-index-increment.md` SC8)：rescan 缝 —— 与引擎的
-   * `deps.skillIndexDelta` 同一个持有者（装配期一次，跨会话共用）。
-   * 打开斜杠面板时重扫现行可加载面，让会话中途落盘的 SKILL.md 立刻进候选。
-   * 缺席（fixture / 测试）→ 候选恒为 `skillCatalog` 快照（旧行为逐字节一致）。
+   * Rescan seam (`specs/skill-index-increment.md`) — the same holder as the
+   * engine's `deps.skillIndexDelta` (once at assembly, shared across
+   * sessions). Rescanning the loadable surface when the slash panel opens
+   * lets SKILL.md files written mid-session enter candidates immediately.
+   * Absent (fixture / test) → candidates stay the `skillCatalog` snapshot
+   * (byte-identical to the old behavior).
    */
   readonly skillRescanner?: SkillRescanner;
-  /** 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配 skill
-   *  正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一装配口。
-   *  缺省 = undefined → 无 trailer（兼容 fixture / 测试）。 */
+  /** Live taskRoot cell (specs/skill-load-write-root.md): read for a snapshot
+   *  when slash assembles a skill body — the same assembly point as ACI skill()
+   *  / hub loadSkillBody. Default = undefined → no trailer (fixture / test compat). */
   readonly liveTaskRoot?: LiveTaskRoot;
-  /** T6 (plans/write-situation-disclosure.md)：worktree 隔离档（来自 build-
-   *  engine `isolationEnabled` 单一读取点的透出）。ADR-0079 后 slash 装配
-   *  skill 正文不再消费 `isolationOn`（正文不再挂写根 trailer）；字段保留
-   *  以维持 TuiAppProps 装配面兼容 build-engine 透传，未来若有其它渲染面
-   *  需要隔离档可继续使用。
+  /** Worktree isolation flag (single read point in build-engine
+   *  `isolationEnabled`, surfaced here). Since ADR-0079 slash-assembled skill
+   *  bodies no longer consume `isolationOn` (no write-root trailer on bodies);
+   *  the field stays to keep the TuiAppProps assembly surface compatible with
+   *  build-engine passthrough, in case another render surface needs the isolation flag.
    *
-   *  config 面板（ADR-0096 T1）复用本字段显示 worktree 门禁行（仅展示，不可改；
-   *  T3 接 isolation holder 后由 props.fsMode 同族 holder 驱动翻转）。 */
+   *  The config panel (ADR-0096) reuses this field to show the worktree gate row
+   *  (display-only; the flip is driven by the isolation holder sibling of props.fsMode). */
   readonly isolationOn?: boolean;
   /**
-   * ADR-0096 T1：子代理并发上限现值的 display-only 投影（启动期一次性读
-   * 取）。undefined → 面板显示「—」占位。本票不接 holder，不持久化，不触发
-   * 任何 manager 行为；T2 接入 cap holder 后由 runtime cap snapshot 替换。
-   * 严禁本字段去主动调 `SubAgentCapacityError` / 修改 `SubagentManager` —
-   * T1 任务边界外（plans/tui-config-panel.md §3）。
+   * ADR-0096: display-only projection of the current subagent concurrency cap
+   *  (one-time read at startup). undefined → the panel shows a "—" placeholder.
+   *  This ticket wires no holder, persists nothing, and triggers no manager
+   *  behavior; after the cap holder landed, the runtime cap snapshot replaces it.
+   *  This field must never call `SubAgentCapacityError` or mutate
+   *  `SubagentManager` — out of the display-only boundary.
    */
   readonly subagentCapDisplay?: SubagentCapDisplay;
   /**
-   * ADR-0096 T2 ── 子代理并发上限运行时 holder（与 fsMode / graphMode 同形态）。
-   * 在场时面板 cap 行 Enter 即循环调 holder.set(...)（3→5→9→15→unlimited→3），
-   * 并 fire-and-forget `onPersistSubagentCap` 落盘（与 FS 行 onPersistFsMode
-   * 同款失败兜底契约）；缺席时面板 cap 行保持 display-only（T1 行为兼容）。
+   * ADR-0096: runtime holder for the subagent concurrency cap (same shape as
+   * fsMode / graphMode). When present, Enter on the panel cap row cycles
+   * holder.set(...) (3→5→9→15→unlimited→3) and persists fire-and-forget via
+   * `onPersistSubagentCap` (same failure-fallback contract as the FS row's
+   * onPersistFsMode); when absent the cap row stays display-only (legacy behavior).
    *
-   * 仅持有 holder 不会让面板可见 —— `subagentCapDisplay`（由调用方传 holder
-   * .get()）仍控制行显示串；本 prop 只决定 cap 行是否可改。
+   * Holding the holder does not make the panel visible — `subagentCapDisplay`
+   * (fed from holder.get() by the caller) still controls the row's display
+   * text; this prop only decides whether the cap row is editable.
    */
   readonly subagentCapHolder?: SubagentCapacityHolder;
   /**
-   * ADR-0096 T2 ── 子代理并发上限落盘通道。失败**双通道**：persist 实现可
-   * 返回结构化 `{ ok: false; reason }`（如 persistSubagentCapImpl 内部捕获
-   * 后不 rethrow），也可直接 reject —— 两种都由 app 侧 notice 呈现（High1
-   * 修复后两者等价兜底）。缺席 → 仅会话内翻转（holder 已生效），不写文件
-   * （测试 / 旧宿主兼容）。
+   * ADR-0096: persist channel for the subagent concurrency cap. Failure is
+   * **dual-channel**: the persist impl may resolve with a structured
+   * `{ ok: false; reason }` (persistSubagentCapImpl catches internally without
+   * rethrowing) or reject outright — both render as an app-side notice.
+   * Absent → in-session flip only (holder already applied), no file write
+   * (test / legacy host compat).
    */
   readonly onPersistSubagentCap?: (
     patch: SubagentCapPersistPatch
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
-   * ADR-0096 T3 ── worktree 门禁运行时 holder（与 fsMode / subagentCapHolder
-   * 同形态）。在场时面板 worktree 行 Enter 即翻 holder.set(...)，并
-   * fire-and-forget `onPersistWorktreeOnMutate` 落盘；缺席时退回
-   * `isolationOn` 静态快照 + 行保持 display-only（T1/T2 行为兼容）。
+   * ADR-0096: runtime holder for the worktree gate (same shape as fsMode /
+   * subagentCapHolder). When present, Enter on the panel worktree row flips
+   * holder.set(...) and persists fire-and-forget via
+   * `onPersistWorktreeOnMutate`; when absent the row falls back to the
+   * static `isolationOn` snapshot and stays display-only.
    *
-   * 门禁本身从不 auto-provision（ADR-0037 §1 保留）：翻 ON 只让未绑树的
-   * mutate 在下一次 wave 被拦并指向 create-worktree ACI 工具。
+   * The gate itself never auto-provisions (ADR-0037): flipping ON only makes
+   * unbound-tree mutations get intercepted on the next wave, pointing at the create-worktree ACI tool.
    */
   readonly worktreeOnMutateHolder?: WorktreeOnMutateHolder;
   /**
-   * ADR-0096 T3 ── worktree 门禁落盘通道（isolation.worktreeOnMutate，用户层）。
-   * 与 onPersistFsMode 同款：返回 promise，失败 catch 后以 notice 呈现，
-   * holder 已生效不撤回。缺席 → 仅会话内翻转，不写文件（测试 / 旧宿主兼容）。
+   * ADR-0096: persist channel for the worktree gate (isolation.worktreeOnMutate, user layer).
+   * Same as onPersistFsMode: returns a promise; failure is caught and shown as a
+   * notice, and the applied holder is not reverted. Absent → in-session flip
+   * only, no file write (test / legacy host compat).
    */
   readonly onPersistWorktreeOnMutate?: (on: boolean) => Promise<void>;
-  /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
-   *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
-   *  TuiExtensions 注入；fixture / 测试可选 stub。 */
+  /** MCP dashboard extension surface (TuiMcpViewExt minimal dependency). Default =
+   *  undefined → /mcp view switch shows "MCP not wired". Product path injects via
+   *  run.tsx through TuiExtensions; fixture / tests may stub. */
   readonly mcp?: TuiMcpViewExt;
   /**
-   * env 派生显示快照（当前模型路由串 + thinking 基线）的订阅口。product
-   * 路径由 run.tsx 装配并传入（`env.llm` 投影的单一发布口）。
+   * Subscription point for the env-derived display snapshot (current model
+   * route string + thinking baseline). The product path assembles and passes it
+   * from run.tsx (single publication point of the `env.llm` projection).
    *
-   * 未接线（fixture / 大批直挂 TuiApp 的测试）→ 用模块级惰性空 store：读值
-   * 恒 undefined（/info 不打 `Model:` 行、ContextBar 不渲染 model 段），
-   * 订阅永不触发 —— 与「env 从未变化」等价，行为与旧缺省 prop 一致。
+   * Unwired (fixture / the many TuiApp-mounting tests) → a module-level lazy
+   * empty store: reads are always undefined (/info omits the `Model:` line,
+   * ContextBar omits the model segment), and subscriptions never fire —
+   * equivalent to "env never changed", matching the old default prop.
    */
   readonly envDisplay?: EnvDisplayStore;
   /**
-   * 反向持久化（T4，settings 双向通道）：/thinking /effort 面板 Esc 保存退出
-   * 时把面板 commit 结果投影成可持久化 payload 交给宿主写回 settings.json
-   * （fire-and-forget，不阻塞面板 state 更新）。返回 `{ ok: false; reason }`
-   * 或抛错 → app 以 notice 呈现失败，in-memory override 已生效（本次会话）。
-   * 成功不发 notice（写回是后台行为，面板 Esc 本身即反馈）。
-   * 可选：缺省 undefined → 面板行为与 PR #413 完全一致（纯 in-memory override，
-   * 测试 / fixture 兼容）。
+   * Reverse persistence (bidirectional settings channel): when a /thinking or
+   * /effort panel exits via Esc-save, the commit result is projected into a
+   * persistable payload handed to the host to write back to settings.json
+   * (fire-and-forget, never blocking panel state updates). A
+   * `{ ok: false; reason }` return or a throw → the app renders a notice; the
+   * in-memory override has already applied (this session). No notice on
+   * success (writeback is a background act; panel Esc is itself the feedback).
+   * Optional: default undefined → panel behaves exactly like a pure in-memory
+   * override (test / fixture compat).
    */
   readonly onPersistThinking?: (
     patch: CommittedThinkingPatch
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
-   * /memory 面板 Esc 写回 settings.memory。可选：缺省 → 仅会话内预览
-   * （测试兼容）。live flags 由宿主注入，Esc 时同步改盒内字段。
+   * /memory panel Esc writeback to settings.memory. Optional: default →
+   * in-session preview only (test compat). Live flags are injected by the
+   * host and updated in sync on Esc.
    */
   readonly onPersistMemory?: (
     patch: CommittedMemoryPatch
@@ -1200,24 +1250,28 @@ export interface TuiAppProps {
     dream: boolean;
   };
   /**
-   * memory-toggle-live: memory_layer system 快照失效句柄（build-engine
-   * invalidateMemorySystem 经 deps 透传）。/memory commit 时调用，翻转在
-   * 下一轮生效。缺省（测试 / 旧宿主）→ 不调用。
+   * memory-toggle-live: invalidation handle for the memory_layer system
+   * snapshot (build-engine invalidateMemorySystem passed through deps).
+   * Called on /memory commit; the flip takes effect on the next turn.
+   * Default (tests / legacy hosts) → not called.
    */
   readonly invalidateMemorySystem?: () => void;
   /**
-   * ADR-0093 / specs/tui-model-command.md：provider 注册表（settings
-   * `llm.providers` 的启动快照）。`/model` 面板的数据源 —— 展开为
-   * provider × models 的扁平条目。缺省 / 空数组 → `/model` 走 notice
-   * 「未配置 providers」，不打开面板（测试 / fixture 兼容，行为与今日一致）。
+   * ADR-0093 / specs/tui-model-command.md: provider registry (startup snapshot
+   * of settings `llm.providers`). Data source of the `/model` panel — expanded
+   * into flat provider × models entries. Default / empty array → `/model`
+   * shows the MODEL_PICKER_EMPTY_NOTICE without opening the panel (test /
+   * fixture compat, unchanged behavior).
    */
   readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   /**
-   * ADR-0093 / spec SC5：`/model` 面板 Enter 选定后的持久化通道。宿主写回
-   * settings.json 后必须**显式刷新 env 并重建 adapter**（self-write 哨兵会吞掉
-   * 自身写回触发的 watcher 事件，故 reloadFromEnv 不会被自动触发）。返回
-   * `{ ok: false; reason }` 或抛错 → app 以 notice 呈现；成功不发 notice
-   * （写回是后台行为）。缺省 undefined → 选定后只关闭面板（纯 UI，测试兼容）。
+   * ADR-0093: persist channel after Enter-selection in the `/model` panel. The
+   * host must **explicitly refresh env and rebuild the adapter** after writing
+   * settings.json (the self-write sentinel swallows the watcher event caused by
+   * its own writeback, so reloadFromEnv is not triggered automatically). A
+   * `{ ok: false; reason }` return or a throw → the app renders a notice; no
+   * notice on success (writeback is a background act). Default undefined →
+   * selection only closes the panel (pure UI, test compat).
    */
   readonly onPersistModel?: (patch: { readonly model: string }) => Promise<
     | { ok: true }
@@ -1228,12 +1282,13 @@ export interface TuiAppProps {
       }
   >;
   /**
-   * T2 (#transport-continue-persist): 流式臂上「连续多久没 onStream 事件
-   * → 把 notice 改成「仍在等待」」的阈值（毫秒）。缺省 = 20_000（spec
-   * invariant 3：~20s 静默只更新 sticky notice copy，**不**自动消失）。
-   * 测试可注入小值避开真实 20s 睡眠。注：这是 UI 反馈节流，**不**等同于
-   * harness 侧 idle / hardCap（harness 仍按 settings.llm.idleTimeoutMs
-   * 默认 300_000 ~ 5 min 决策 fault class）。
+   * On the streaming arm: how long without an onStream event before the
+   * notice is rewritten to "still waiting" (ms). Default = 20_000: ~20s of
+   * silence only updates the sticky notice copy, it does **not** auto-dismiss.
+   * Tests may inject a small value to avoid a real 20s
+   * sleep. Note: this is UI-feedback throttling, **not** the harness-side
+   * idle / hardCap decision (the harness still decides fault class via
+   * settings.llm.idleTimeoutMs, default 300_000 ≈ 5 min).
    */
   readonly streamingSilenceNoticeMs?: number;
 }
@@ -1243,42 +1298,50 @@ interface Notice {
 }
 
 /**
- * T2 (#transport-continue-persist) UI 反馈节流:流式臂连续无 onStream 事件
- * 多久 → 改 notice 文案为「等待模型输出」(spec invariant 3)。~20s 只是 UI
- * 反馈阈值,**不**影响 harness 侧 idle / hardCap 决策 —— 后者走
- * settings.llm.idleTimeoutMs(env > settings > 默认 300_000,见 env.ts)。
- * 改文案而非新增 notice;notice box 仍是 sticky(无 TTL 自动消失,与
- * spec invariant 3 / SC5 同款)。
+ * UI-feedback throttle: how long the streaming arm may go without onStream
+ * events before the notice copy changes to "waiting for model output". The
+ * ~20s threshold is UI feedback only and **does not**
+ * affect harness-side idle / hardCap decisions — those follow
+ * settings.llm.idleTimeoutMs (env > settings > default 300_000, see env.ts).
+ * The copy is rewritten in place rather than adding a new notice; the notice
+ * box stays sticky (no TTL auto-dismiss).
  *
- * 相位门:工具执行期(含权限 / ask 等待)harness 设计上不发任何流事件,
- * 「无流字节」不代表模型卡死 —— 该相位由 `toolPhaseActive` 闸住
- * (见 nextToolPhaseActive / armSilenceTimer),不落 notice。
+ * Phase gate: by design the harness emits no stream events during tool
+ * execution (incl. permission / ask waits), so "no stream bytes" does not
+ * imply a stuck model — that phase is gated by `toolPhaseActive` (see
+ * nextToolPhaseActive / armSilenceTimer) and must not land in the notice.
  */
 const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 20_000;
 
 /**
- * 静默阈值解析（S5：`??` 若写在 `runTurnOnce` 内会计入它的圈复杂度，
- * 把已顶到 23 的函数再 +1 —— 解析下沉到本叶子函数）。
+ * Silence-threshold resolution, pushed down to this leaf function so the
+ * `??` doesn't add cyclomatic complexity to the already at-limit `runTurnOnce`.
  */
 function resolveStreamingSilenceNoticeMs(override: number | undefined): number {
   return override ?? DEFAULT_STREAMING_SILENCE_NOTICE_MS;
 }
 
 /**
- * 工具相位跟踪（S5：叶子函数，分支不记进 onStream 的圈复杂度）。
+ * Tool-phase tracking (leaf function so its branches don't add to onStream's cyclomatic complexity).
  *
- * 「无流字节」只在**模型相位**才是异常信号：工具执行期（含权限 / ask 等待）
- * harness 按设计不发任何流事件，把它算进静默窗就会在长工具上误报「等模型」。
+ * "No stream bytes" is an anomaly signal only in the **model phase**: during
+ * tool execution (incl. permission / ask waits) the harness emits no stream
+ * events by design, and counting that as silence would falsely report
+ * "waiting for model" on long tools.
  *
- * 相位判据取事件语义而非展示态 `liveToolRuns`：后者只由 postToolUse 收缩，
- * 而被权限拦下（denied / hook blocked）的调用**不**发 postToolUse
- * （permission-executor 的 blocked 分支直接返回），展示态会整轮卡在 running
- * → 相位门若读它会漏报到回合结束。事件面判据无此洞：
- *   - `tool_call_start` = 模型流已交出 tool_use，接下来是工具执行 → 进工具相位；
- *   - `agent_status` / `env_snapshot` = 每次模型调用前的边界事件（工具批已收
- *     口、下一轮模型调用将起）→ 出工具相位，此后静默就是模型静默。
- * 工具执行期唯一会来的事件是 graph_progress（run_graph 内部进度），不落在
- * 上述两侧，相位保持不变。
+ * The phase discriminator uses event semantics, not the display state
+ * `liveToolRuns`: the latter shrinks only on postToolUse, while calls blocked
+ * by permissions (denied / hook blocked) **don't** emit postToolUse (the
+ * permission-executor blocked branch returns directly), so the display state
+ * would stay "running" for the whole turn and a phase gate reading it would
+ * under-report until turn end. Event-based criteria have no such hole:
+ *   - `tool_call_start` = the model stream already handed over tool_use, tool
+ *     execution follows → enter tool phase;
+ *   - `agent_status` / `env_snapshot` = boundary events before each model call
+ *     (tool batch closed, next model call starting) → leave tool phase; silence
+ *     after them is model silence.
+ * The only event that arrives during tool execution is graph_progress
+ * (run_graph internal progress), which matches neither side, so the phase holds.
  */
 export function nextToolPhaseActive(
   active: boolean,
@@ -1292,10 +1355,11 @@ export function nextToolPhaseActive(
 }
 
 /**
- * 流式静默时把现有 notice 改写为「等待模型」文案(spec 不变式 3)。英文是
- * sticky notice 的既有约定(docs/CONTEXT.md「sticky notice」:异常停或传输
- * 过程的英文提示框),与 init / 中断 / API error 等既有英文面一致。两行
- * 各自短于 notice 盒内宽,不触发折行。
+ * On streaming silence, rewrite the current notice to the "waiting for
+ * model" copy. English is the existing convention for sticky notices
+ * (docs/CONTEXT.md "sticky notice": English boxes for abnormal stops /
+ * transport hangs), consistent with init / interrupt / API-error surfaces.
+ * Both lines stay shorter than the notice box inner width, so no wrapping.
  */
 const STREAMING_SILENCE_NOTICE_LINES: ReadonlyArray<string> = [
   "⠿ Waiting for model output — ~20s with no new stream bytes.",
@@ -1303,8 +1367,9 @@ const STREAMING_SILENCE_NOTICE_LINES: ReadonlyArray<string> = [
 ];
 
 /**
- * 当前 notice 是否就是流式静默文案。成功收尾只清这一条过程性提示，
- * stop_summary / 异常停等更明确的来源按 identity 原样保留。
+ * Whether the current notice is exactly the streaming-silence copy. A
+ * successful finish clears only this procedural hint; more definite sources
+ * (stop_summary / abnormal-stop notices) are preserved as-is by identity.
  */
 function isStreamingSilenceNotice(notice: Notice | undefined): boolean {
   const lines = notice?.lines;
@@ -1315,23 +1380,25 @@ function isStreamingSilenceNotice(notice: Notice | undefined): boolean {
   );
 }
 
-// spec tui-skill-slash-catalog（skill bare alias）：slash 匹配认 catalog 的
-// 唯一裸名别名，展示/加载仍用规范名。别名不新增 catalog 接口 —— 只用公开的
-// `available()` / `get()` 推导（invariant 1：不在此处重写 `:` 拆名规则）。
-// 取面 / 投影算法收敛在 harness（`loadableOf` / `projectSlashEntries`），
-// 本文件不再持本地副本。
+// specs/tui-skill-slash-catalog.md (skill bare alias): slash matching accepts
+// the catalog's unique bare-name aliases; display/loading still use canonical
+// names. Aliasing adds no catalog interface — it derives only from the public
+// `available()` / `get()` (never re-implement the `:` name-split rule here).
+// The surface / projection algorithms live in harness (`loadableOf` /
+// `projectSlashEntries`); this file keeps no local copy.
 
 /**
- * SC8（slash 侧）—— **提交期**的 skill-load 解析结果（判别联合）。
+ * **Submit-time** skill-load resolution for slash (discriminated union).
  *
- * `error` 与 `miss` 必须分开：扫描失败时「不是技能」是**不知道**，谎报成
- * miss 会让操作员看到「未知命令」（暗示技能不存在），而真实原因是根目录
- * 一时读不到（`SkillRescanError`）。
+ * `error` and `miss` must stay separate: when the scan fails, "not a skill"
+ * is **unknown**, and lying with miss would show the operator "unknown
+ * command" (implying the skill doesn't exist) when the real cause is a
+ * momentarily unreadable root (`SkillRescanError`).
  */
 export type SkillLoadResolution =
   | {
       readonly kind: "hit";
-      /** 命中用的那份 catalog —— 与下文 `get(name)` 同台，避免 split-brain。 */
+      /** The catalog this hit came from — same instance used for `get(name)`, avoiding split-brain. */
       readonly catalog: SkillCatalog;
       readonly name: string;
       readonly remainder: string;
@@ -1340,30 +1407,34 @@ export type SkillLoadResolution =
   | { readonly kind: "error"; readonly error: unknown };
 
 /**
- * SC8（slash 侧）—— 提交 `/name` 时的 skill-load 解析（miss → 当场重扫一次）。
+ * Submit-time skill-load resolution for `/name` (miss → rescan once inline).
  *
- * 打开斜杠面板的那次 rescan 是**异步**的：快速键入 / 粘贴 `/zz-live` 后立刻
- * Enter，提交会赶在它落地之前，只看缓存列表就把刚装的技能报成「未知命令」
- * （真实 TUI 实测坐实）。故提交路径自己兜一次 —— 命中就走，未命中才重扫
- * （常见情形零额外 IO）。
+ * The rescan triggered by opening the slash panel is **async**: typing /
+ * pasting `/zz-live` and hitting Enter quickly can submit before it lands,
+ * and consulting only the cached list would report a freshly installed skill
+ * as "unknown command" (confirmed in a real TUI run). So the submit path
+ * rescans as a fallback — hit uses it directly, only a miss triggers a
+ * rescan (zero extra IO in the common case).
  *
- * 静态词表行与普通消息在**扫描之前**短路：`/help` / `/quit` 不该为一次
- * skill-load 判定白扫全根。
+ * Static vocabulary lines and plain messages short-circuit **before** the
+ * scan: `/help` / `/quit` shouldn't pay a full-root scan for a skill-load decision.
  */
 export async function resolveSkillLoadAtSubmit(input: {
   readonly text: string;
-  /** 当前（可能已刷新过的）catalog。 */
+  /** The current catalog, possibly already refreshed. */
   readonly catalog: SkillCatalog;
   readonly rescanner: SkillRescanner | undefined;
 }): Promise<SkillLoadResolution> {
-  // 只有「/ 开头且未命中静态词表」的行才可能是 skill-load（parseSkillLoad
-  // 同纪律：静态命令优先）。message / command 直接 miss，不扫盘。
+  // Only lines that start with "/" and miss the static vocabulary can be a
+  // skill-load (same discipline as parseSkillLoad: static commands win).
+  // message / command are an immediate miss with no disk scan.
   if (parseTuiInput(input.text).kind !== "unknown") return { kind: "miss" };
   const attempt = (catalog: SkillCatalog): SkillLoadResolution | undefined => {
     const load = parseSkillLoad(input.text, toSlashEntries(catalog));
     if (load === undefined) return undefined;
-    // hit ⟹ `get` 必有值（toSlashEntries 派生自同一 catalog），但残缺实现
-    // 下退化为 miss 比让调用方拿到 undefined 再崩更诚实。
+    // hit ⟹ `get` must return a value (toSlashEntries derives from the same
+    // catalog), but under a partial catalog degrading to miss is more honest
+    // than handing the caller an undefined crash.
     if (catalog.get(load.name) === undefined) return undefined;
     return { kind: "hit", catalog, name: load.name, remainder: load.remainder };
   };
@@ -1381,15 +1452,17 @@ export async function resolveSkillLoadAtSubmit(input: {
 }
 
 /**
- * SC8（slash 侧）—— 提交期 skill-load 的**处置**（`resolveSkillLoadAtSubmit`
- * 的调用方契约）。
+ * Submit-time skill-load **disposition** (the caller contract of
+ * `resolveSkillLoadAtSubmit`).
  *
- *   - `not-skill`：不是 skill-load（普通消息 / 静态命令 / 未命中）→ 调用方
- *     落回既有分流；
- *   - `notice`：给操作员一条提示（不存在 / 扫描失败 / 正文装配失败），不发送；
- *   - `send`：命中且正文已装配 → 调用方 `sendTurn`。
+ *   - `not-skill`: not a skill-load (plain message / static command / miss) →
+ *     caller falls back to existing routing;
+ *   - `notice`: show the operator one notice (missing / scan failure / body
+ *     assembly failure), don't send;
+ *   - `send`: hit and body assembled → caller `sendTurn`s.
  *
- * 抽成模块级纯函数（S5 ratchet：把分支挪出 god component 的 `handleSubmit`）。
+ * Module-level pure function so these branches stay out of the god
+ * component's `handleSubmit` (complexity ratchet).
  */
 export type SkillLoadOutcome =
   | { readonly kind: "not-skill" }
@@ -1401,10 +1474,11 @@ export type SkillLoadOutcome =
     };
 
 /**
- * 判定并装配一次提交期 skill-load（见 `SkillLoadOutcome`）。
+ * Decide and assemble one submit-time skill-load (see `SkillLoadOutcome`).
  *
- * 三条「不是技能」的路径在这里合流，让 `handleSubmit` 只需两个分支：静态
- * 命令 / 普通消息短路、解析未命中、`get` 落空。
+ * The three "not a skill" paths converge here so `handleSubmit` needs only
+ * two branches: static-command / plain-message short-circuit, parse miss,
+ * and `get` coming up empty.
  */
 export async function resolveSkillLoadSubmit(input: {
   readonly text: string;
@@ -1420,9 +1494,10 @@ export async function resolveSkillLoadSubmit(input: {
   }
   if (resolved.kind === "miss") return { kind: "not-skill" };
   const entry = resolved.catalog.get(resolved.name);
-  // spec skill-index-increment SC6：`disable-model-invocation` 只罩模型索引
-  // 与 `skill()`，**不**罩人侧 slash —— 禁用条目仍可 `/` 加载（与无
-  // description 同档）。这里的 gate 只剩「catalog 里没有」。
+  // specs/skill-index-increment.md: `disable-model-invocation` gates only the
+  // model index and `skill()`, **not** the human-side slash — a disabled entry
+  // is still loadable via `/` (same tier as a missing description). The only
+  // gate left here is "not in the catalog".
   if (entry === undefined) {
     return {
       kind: "notice",
@@ -1430,17 +1505,19 @@ export async function resolveSkillLoadSubmit(input: {
     };
   }
   try {
-    // ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 形态逐字节一致）。
-    // 写处境披露由 worker prior + chat-session rebind 一次性通知承担。slash
-    // 装配只走 entry + dir 单形态；liveTaskRoot / isolationOn 在本组件仍由
-    // chrome 渲染（sessionLocationLines 经 resolveWorktreeChromeRoot）持有，
-    // 本路径不消费。
+    // ADR-0079 — skill bodies carry no write-root trailer anymore.
+    // Write-situation disclosure is handled by the worker prior + chat-session
+    // rebind one-time notice. Slash assembly uses the entry + dir single form;
+    // liveTaskRoot / isolationOn are still held by this component for chrome
+    // rendering (sessionLocationLines via resolveWorktreeChromeRoot) but not
+    // consumed on this path.
     const body = await createSkillBody({ entry, dir: entry.dir });
-    // plans/tui-chrome-interaction.md Task 5：displayText 也走闭合信封形态
-    // （empty body + 同样 remainder），让 render 层
-    // `projectSkillLoadUserText` 抽到同样的 `{name, remainder}` —— 运行中的
-    // echo 与落盘后的 transcript 显示一致（chip-only 或 chip+ remainder），
-    // 不再用中文「[加载技能 X]」占位。turn 完成后落盘权威消息原子替换。
+    // displayText uses the same closed-envelope form (empty body + same
+    // remainder) so the render layer's `projectSkillLoadUserText` extracts the
+    // same `{name, remainder}` — the in-flight echo and the persisted
+    // transcript render identically (chip-only or chip+remainder); the old
+    // Chinese "[load skill X]" placeholder is gone. After the turn finishes,
+    // the persisted authoritative message is atomically replaced.
     return {
       kind: "send",
       sendText: buildSkillLoadText(resolved.name, body, resolved.remainder),
@@ -1456,25 +1533,27 @@ export async function resolveSkillLoadSubmit(input: {
 }
 
 /**
- * 斜杠面板是否打开（`useLiveSkillCatalog` 的上升沿信号）。
+ * Whether the slash panel is open (the rising-edge signal for
+ * `useLiveSkillCatalog`).
  *
- * 抽成模块级纯函数（S5：god component 里多一个判据就让复杂度再涨一格），
- * 同时把「面板打开」的判据**单点化**：`inputHintSuggestions` 与 `hintRows`
- * 各自内联过同一判据，本 hook 是第三个消费点 —— 三处若各写各的，将来改
- * 「打开」语义（如支持 `/` 后带空格）必然漂移。
+ * Module-level pure function (one more inline criterion in the god component
+ * means one more complexity notch), and it **single-sources** the "panel
+ * open" predicate: `inputHintSuggestions` and `hintRows` each inlined it, and
+ * this hook is the third consumer — three hand-rolled copies would drift the
+ * moment "open" semantics change (e.g. allowing a space after `/`).
  */
 function slashPaletteOpen(inputValue: string): boolean {
   return inputValue.trim().startsWith("/");
 }
 
 /**
- * slash 候选投影（spec skill-index-increment SC5/SC6：人侧 slash 走
- * **可加载技能面** —— 含无 description、含 `disable-model-invocation`，
- * 不是模型索引面）。
+ * Slash candidate projection (specs/skill-index-increment.md: the human-side
+ * slash uses the **loadable-skills surface** — including description-less
+ * entries and `disable-model-invocation` ones — not the model index surface).
  *
- * 算法本体在 harness（`projectSlashEntries`，plan T3「harness 可复用的
- * slash 投影」）—— TUI / CLI / hub 同一实现，不再各持镜像。本函数只保留
- * TUI 宿主的名字与形状（既有测试 / slash.ts 消费面不变）。
+ * The algorithm itself lives in harness (`projectSlashEntries`) so TUI / CLI
+ * / hub share one implementation instead of mirrors. This function only keeps
+ * the TUI host's name and shape (existing tests / slash.ts consumers unchanged).
  */
 export function toSlashEntries(
   catalog: SkillCatalog
@@ -1490,7 +1569,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const cols = Math.max(width ?? 80, 40);
   const rows = Math.max(height ?? 24, 10);
 
-  // ── 状态机核心 ─────────────────────────────────────────────────
+  // ── State-machine core ─────────────────────────────────────────
   const initial = props.initialSession ?? createDraftSession();
   const initialKey = initial.conversationId ?? DRAFT_SESSION_ID;
   const [sessions, setSessions] = useState<Record<string, TuiSessionState>>(
@@ -1499,12 +1578,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [activeKey, setActiveKey] = useState(initialKey);
   const [view, setView] = useState<TuiView>(props.initialView ?? "chat");
   const [inputValue, setInputValue] = useState("");
-  // #279 项5 + 会话恢复种子：输入历史（内存态不落盘）按 session key 隔离
-  // （conversationId / DRAFT_SESSION_ID），initialSession 恢复时用
-  // seedInputHistory 把已落盘 transcript 的 query user 消息投影为种子
-  // （↑ 召回立即可用）；此后提交经 appendInputHistory 追加（空白跳过 +
-  // 相邻去重，同引用短路）。openSessionAt 首次 attach 同样播种；已加载过
-  // 的会话切回沿用既有历史（map 已有 key 不重播，保留本进程内追加项）。
+  // Input history (in-memory, never persisted) keyed per session
+  // (conversationId / DRAFT_SESSION_ID). On resume, seedInputHistory projects
+  // the persisted transcript's query-user messages as the seed (↑ recall works
+  // immediately); afterwards submits append via appendInputHistory (blank
+  // skipped + adjacent dedup, same-reference short-circuit). openSessionAt
+  // seeds on first attach the same way; switching back to an already-loaded
+  // session keeps its history (an existing map key is never reseeded, so
+  // in-process appends survive).
   const [inputHistories, setInputHistories] = useState<
     Record<string, ReadonlyArray<string>>
   >(() => ({ [initialKey]: seedInputHistory(initial.messages) }));
@@ -1513,17 +1594,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [liveToolLines, setLiveToolLines] = useState<
     Record<string, ReadonlyArray<string>>
   >({});
-  // T4 (#175): 结构化工具调用实时状态。
+  // Structured live tool-call state.
   const [liveToolRuns, setLiveToolRuns] = useState<
     Record<string, ReadonlyArray<LiveToolRun>>
   >({});
-  // #647 T3 / ADR-0028:TUI 只读最新现势 —— 按会话 key 的最新快照
-  // (conversationId → snapshot,liveToolRuns 同款 keyed 形态)。replace-on-event:
-  // 事件到达时按「事件所属回合的 conversationId」整体替换该会话槽位,无历史、
-  // 无第二份 todo 账本(数据唯一来源是 harness 注入 <agent_status> 栏同一
-  // 计算点发出的同一份快照)。渲染只取 active 会话的槽位 → 切走不残留 A 的
-  // 现势、切回仍在(end-of-round review Spec Medium 修复)。与 liveToolRuns
-  // (in-flight 展示)分开,不混、不回流模型向任何字段。
+  // ADR-0028: TUI reads only the latest status snapshot — per-session-key
+  // (conversationId → snapshot, same keyed shape as liveToolRuns).
+  // replace-on-event: each event wholesale replaces the slot of its turn's
+  // conversationId; no history and no second todo ledger (the single data
+  // source is the same snapshot emitted from the same computation point that
+  // feeds the harness `<agent_status>` block). Rendering takes only the
+  // active session's slot → switching away leaves no stale status behind and
+  // switching back still has it. Kept separate from liveToolRuns (in-flight
+  // display): never mixed, never fed back into any model-facing field.
   const [agentStatuses, setAgentStatuses] = useState<
     Record<string, AgentStatusSnapshot>
   >(() => {
@@ -1532,66 +1615,78 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const snapshot = agentStatusFromMessages(initial.messages);
     return snapshot === null ? {} : { [id]: snapshot };
   });
-  // #653 G1 T5:环境现势单 state 槽 —— 与 ADR-0028 状态栏平行的独立流。
-  // env 不属于会话(全局共享):不按 conversationId 分键,事件到达即整体
-  // 替换(replace-on-event,投影产完整独立快照);尚无事件 → null → 面板
-  // 不渲染。数据只进本 UI,绝不回流模型向任何字段。
+  // Environment-status single state slot — an independent stream parallel to
+  // the ADR-0028 status bar. env is not session-scoped (globally shared): no
+  // conversationId keying, replace-on-event with the full projected snapshot;
+  // no events yet → null → pane not rendered. Data flows into this UI only,
+  // never back into any model-facing field.
   const [envSnapshot, setEnvSnapshot] = useState<EnvSnapshot | null>(
     () => null
   );
   const [graphProgresses, setGraphProgresses] = useState<
     Record<string, GraphProgressSnapshot>
   >({});
-  // plans/tui-chrome-interaction.md T7：chrome-focus 三态焦点（input /
-  // subagent(row) / graph），reducer SSOT = reduceChromeFocus。`graphViewOpen`
-  // 仍是独立状态（full-screen GraphGroupView 的 open/close，由 graph-chrome
-  // 旧 reducer 的 openView 触发；与三环焦点切换正交）。
+  // chrome-focus three-state (input / subagent(row) / graph); reducer SSOT =
+  // reduceChromeFocus. `graphViewOpen` remains independent state (full-screen
+  // GraphGroupView open/close, triggered by graph-chrome's legacy reducer
+  // openView; orthogonal to the three-ring focus switching).
   const [chromeFocus, setChromeFocus] = useState<ChromeFocus>({
     kind: "input",
   });
-  // 旧二态 `graphChromeFocus` 保留：仅用于 graph 全屏视图的 openView 决策
-  // （graph chrome 自身的 onTabComplete 旧路径仍存在，详见下方 onLeaveToChrome
-  // 改为 reduceChromeFocus）；后续清理时移除。
+  // Legacy two-state `graphChromeFocus` kept only for the graph full-screen
+  // view's openView decision (graph chrome's own onTabComplete legacy path
+  // still exists, see onLeaveToChrome below now using reduceChromeFocus);
+  // remove during later cleanup.
   const [graphChromeFocus, setGraphChromeFocus] =
     useState<GraphChromeFocus>("input");
   const [graphViewOpen, setGraphViewOpen] = useState(false);
   const [graphSelectedId, setGraphSelectedId] = useState<string | null>(null);
   const [graphNodeDetail, setGraphNodeDetail] = useState(false);
-  // #458 包2 T3:verify 终态槽(conversationId → VerifySlot 判别联合)。
-  // none = 缺 verify(合法态 → banner 静默);ok = 4 终态;unavailable =
-  // wire 形状非法(degraded)。sendTurn 入口清槽(防上一回合判定残留到
-  // 下一回合 running 阶段),runTurnOnce 收到 resp 后经 verifyFromWire
-  // runtime 校验写入。resume 时 transcript 无 VerifyAnswerView → 槽空,
-  // 不从 transcript 复刻第二份账本(与 agent-status 同纪律)。
+  // verify terminal slot (conversationId → VerifySlot discriminated union).
+  // none = no verify (legal state → banner silent); ok = 4 terminal states;
+  // unavailable = illegal wire shape (degraded). sendTurn clears the slot on
+  // entry (so the previous turn's verdict can't leak into the next turn's
+  // running phase); runTurnOnce writes it after resp via verifyFromWire
+  // runtime validation. On resume the transcript has no VerifyAnswerView →
+  // slot stays empty; no second ledger is cloned from the transcript (same
+  // discipline as agent-status).
   const [verifySlots, setVerifySlots] = useState<Record<string, VerifySlot>>(
     {}
   );
-  // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
+  // Thinking fold-panel expanded state; Ctrl+O folds/unfolds, /thinking toggles (thinking enabled).
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  // env 派生显示快照的读取口：未接线 → 模块级惰性空 store（读值恒空）。
+  // Read surface for the env-derived display snapshot: unwired → module-level
+  // lazy empty store (reads always empty).
   const envDisplay = props.envDisplay ?? EMPTY_ENV_DISPLAY_STORE;
-  // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
-  // env defaultThinking.mode === "adaptive"；用户 /effort 也会 setEnabled(true)。
+  // Thinking control-arm toggle (switched by /thinking, decoupled from the
+  // fold state). Initial baseline = env defaultThinking.mode === "adaptive";
+  // user /effort also calls setEnabled(true).
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(
     () => envDisplay.get().defaultThinking?.mode === "adaptive"
   );
-  // thinking 档位（/effort 设置；"" 表示未指定 → 不附加 effort）。初始 =
-  // env defaultThinking.effort。
+  // Thinking effort level (set by /effort; "" = unspecified → no effort
+  // attached). Initial = env defaultThinking.effort.
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffortWire>(
     () => envDisplay.get().defaultThinking?.effort ?? ""
   );
-  // 用户是否**亲手**改过 thinking / effort（ref 而非 state：只影响「env 新
-  // 基线要不要覆盖」的判定，本身不驱动渲染）。一旦置位即本会话不再复位 ——
-  // /model 切换同样**不**复位它们，这正是 #1021 要修的行为（旧实现每次 env
-  // 变化都把这两个 state 拖回新基线，用户手改的覆盖被静默丢弃）。
+  // Whether the user **personally** changed thinking / effort (ref not state:
+  // it only feeds the "should a new env baseline override" decision and never
+  // drives rendering itself). Once set, it is never reset for the session —
+  // /model switches do **not** reset it either, which is exactly the fixed
+  // behavior (the old implementation dragged both states back to the new
+  // baseline on every env change, silently discarding the user's manual override).
   const thinkingTouchedRef = useRef(false);
   const effortTouchedRef = useRef(false);
-  // env 新基线到达 → 只回填用户**没碰过**的字段。未碰过的字段写入相同值会被
-  // React 判为无变化（bailout）不重渲染 —— 于是「只换模型」的 publish 是零
-  // 渲染事件，只有 /thinking /effort 留下的覆盖需要显式让位给新基线时才渲染。
-  // 语义取舍（有意为之）：用户一旦碰过某字段，本会话后续的 env 基线变化都不
-  // 再改写它 —— 显示层与 per-turn override 因此始终一致（override 相对基线
-  // 计算，而基线取自 store；若这里被拽回新基线，用户的手改会被静默吞掉）。
+  // New env baseline arrives → backfill only fields the user **never touched**.
+  // Writing an identical value to an untouched field is a React bailout (no
+  // re-render) — so a "model-only" publish is a zero-render event, and only an
+  // override left by /thinking /effort renders when it must explicitly yield
+  // to the new baseline. Deliberate trade-off: once the user has touched a
+  // field, later env baseline changes never rewrite it this session — the
+  // display layer and the per-turn override therefore stay consistent
+  // (override is computed relative to the baseline, which comes from the
+  // store; if this dragged back to a new baseline, the user's manual edit would
+  // be silently swallowed).
   useEffect(() => {
     const unsubscribe = envDisplay.subscribe(() => {
       const snap = envDisplay.get();
@@ -1604,44 +1699,48 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     return unsubscribe;
   }, [envDisplay]);
-  // ── thinking-picker 面板态（/thinking /effort 打开；null = 未打开）────
-  // design-25 picker（用户定案双面板版）：/thinking /effort 不再立即生效 +
-  // notice，改为弹出浮层面板。Enter 固定（面板保持打开）、Esc 保存退出（写入
-  // 真实 thinkingEnabled / thinkingEffort，无 cancel 路径）。面板内是未提交
-  // 的暂存态（switchPreview / effortFocusIndex / effortFixedIndex），Esc 才写
-  // 真实 state。
+  // ── thinking-picker panel state (opened by /thinking /effort; null = closed) ──
+  // Dual-panel picker (user-decided design): /thinking /effort no longer take
+  // effect immediately with a notice; they open an overlay panel. Enter fixes
+  // (panel stays open), Esc saves and exits (writes the real thinkingEnabled /
+  // thinkingEffort; there is no cancel path). Inside the panel everything is
+  // uncommitted staged state (switchPreview / effortFocusIndex /
+  // effortFixedIndex); only Esc writes real state.
   const [thinkingPickerOpen, setThinkingPickerOpen] = useState<
     null | "thinking" | "effort"
   >(null);
-  // 开关面板预览态（/thinking）：面板内未提交的开关值（Enter/Space/Tab 翻转，
-  // Esc 保存退出才写 thinkingEnabled）。
+  // Switch-panel preview state (/thinking): the uncommitted switch value in
+  // the panel (Enter/Space/Tab toggle; only Esc-save writes thinkingEnabled).
   const [switchPreview, setSwitchPreview] = useState<boolean>(
     () => thinkingEnabled
   );
-  // 档位面板聚焦档（/effort）：←/→ 移动的焦点游标（0..4，未提交）。
+  // Effort-panel focused level (/effort): cursor moved by ←/→ (0..4, uncommitted).
   const [effortFocusIndex, setEffortFocusIndex] = useState<number>(
     effortToDisplayIndex(thinkingEffort)
   );
-  // 档位面板已固定档（/effort）：Enter 固定的面板内已提交档（0..4，Esc 保存
-  // 退出才写 thinkingEffort）。
+  // Effort-panel fixed level (/effort): in-panel committed pick fixed by Enter
+  // (0..4; only Esc-save writes thinkingEffort).
   const [effortFixedIndex, setEffortFixedIndex] = useState<number>(
     effortToDisplayIndex(thinkingEffort)
   );
   const [memoryPickerOpen, setMemoryPickerOpen] = useState(false);
   const [memoryFocusIndex, setMemoryFocusIndex] = useState<0 | 1>(0);
-  // /model 面板（spec SC8）：open = 面板可见；focusIndex = 焦点条目下标（面板内
-  // 唯一的暂存态）。**焦点移动不产生 staged 状态** —— 没有「未提交的模型选择」
-  // 这种东西（唯一的写操作是 Enter），故 Esc 既非保存退出也非放弃修改，见
-  // model-picker.tsx 的 cancel 语义说明。
+  // /model panel: open = panel visible; focusIndex = focused entry index (the
+  // only staged state in the panel). **Focus moves stage no state** — there is
+  // no such thing as an "uncommitted model selection" (Enter is the only write),
+  // so Esc is neither save-exit nor discard; see the cancel-semantics note in model-picker.tsx.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelFocusIndex, setModelFocusIndex] = useState(0);
-  // /config 面板（ADR-0096，T1）：无参 `/config` 打开。FS 行 Enter 即落盘；
-  // worktree / cap 行本票 display-only（T2/T3 接 holder 后激活）。
+  // /config panel (ADR-0096): opened by argless `/config`. FS row Enter persists
+  // immediately; the worktree / cap rows were display-only at first and became
+  // editable once their holders were wired in.
   const [configPickerOpen, setConfigPickerOpen] = useState(false);
   const [configFocusIndex, setConfigFocusIndex] = useState<0 | 1 | 2>(0);
-  // 三行（FS / worktree / cap）的 holder 是普通对象 —— `get()` 不订阅，
-  // 翻完不会触发 re-render，屏上值会停到下一次焦点移动（实测缺陷）。
-  // 本计数器只作 fix 后的重渲染触发器，不参与任何判定（值本身仍读 holder）。
+  // The three rows' holders (FS / worktree / cap) are plain objects — `get()`
+  // doesn't subscribe, so a flip triggers no re-render and on-screen values
+  // stall until the next focus move (observed defect). This counter only
+  // re-renders after a fix; it feeds no decision (values are still read from
+  // the holders).
   const [configRenderTick, setConfigRenderTick] = useState(0);
   const [memoryCommitted, setMemoryCommitted] = useState(() =>
     seedMemoryPreview(props.defaultMemory)
@@ -1649,27 +1748,31 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [memoryPreview, setMemoryPreview] = useState(() =>
     seedMemoryPreview(props.defaultMemory)
   );
-  // 档位面板自适应态（/effort）：Space/Tab 切换；Esc 保存退出时 autoOn 优先写
-  // ""=自适应（保持 auto，不降级到 concrete）。seed = 当前 thinkingEffort===""
-  // → 自适应态（打开 /effort 无参时修复「当前 auto → Esc 静默降 medium」bug）。
+  // Effort-panel auto mode (/effort): toggled by Space/Tab; on Esc-save, autoOn
+  // takes priority and writes ""=adaptive (keeps auto, no downgrade to a
+  // concrete level). Seed = current thinkingEffort==="" → adaptive (fixes the
+  // bug where argless /effort on the current auto silently dropped to medium
+  // on Esc).
   const [effortAutoOn, setEffortAutoOn] = useState<boolean>(
     () => thinkingEffort === ""
   );
-  // W2 扩展：权限模式镜像（仅驱动模式指示行 re-render）。
+  // Permission-mode mirror (only drives mode-indicator-row re-render).
   const [permMode, setPermMode] = useState(() => permissionMode.get());
-  // D-α V1：graph overlay 镜像（同上，只驱动模式指示行；权威在 holder）。
+  // Graph overlay mirror (same: drives the mode indicator row only; the holder is authoritative).
   const [graphOn, setGraphOn] = useState(
     () => props.graphMode?.get().enabled ?? false
   );
-  // #279 项3：权限 modal 槽状态（dismissed = Esc 收起后退回输入框 y/n 兜底）。
+  // Permission modal slot state (dismissed = after Esc collapse, fall back to the input-box y/n prompt).
   const [askModalDismissed, setAskModalDismissed] = useState(false);
   const [permissionIndex, setPermissionIndex] = useState(0);
   const [pendingQuit, setPendingQuit] = useState(false);
-  // T6 (checkpoint-rewind)：L3 回退 picker 状态（/rewind 与双 Esc 共用）。
-  // 激活态直接持有会话文件投影后的锚点目标（选择时一次性 load，减少闭包
-  // 与异步竞态）；selectedIndex / confirming 由宿主持有（纯渲染无内部状态，
-  // 与权限 modal 同纪律）。active 会话切走即关闭（newSession / openSessionAt
-  // 清态），避免 picker 悬在错误会话上。
+  // L3 rewind picker state (checkpoint-rewind; shared by /rewind and double Esc).
+  // The active state directly holds the anchor targets projected from the
+  // session file (one-time load at selection, reducing closures and async
+  // races); selectedIndex / confirming are host-held (pure render, no internal
+  // state, same discipline as the permission modal). Switching away from the
+  // active session closes the picker (newSession / openSessionAt clear state)
+  // so it never hovers over the wrong session.
   const [rewindTargets, setRewindTargets] = useState<
     ReadonlyArray<RewindTarget> | undefined
   >(undefined);
@@ -1677,47 +1780,59 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [rewindConfirming, setRewindConfirming] = useState(false);
   const lastEscAtRef = useRef<number | undefined>(undefined);
 
-  // #343 v3 follow-up: 终端（iTerm2 / WezTerm / kitty 等）在 mouse right-up 时
-  // 会**自动**把"系统剪贴板当前内容"paste 到 stdin —— 这是 terminal-level
-  // feature，不是 OpenTUI 事件。我们 right-up 触发复制（OSC52 写剪贴板）几乎
-  // 与终端发起 paste 同时发生，时序上 paste 字节里的内容是 OSC52 **覆盖前**的
-  // 旧系统剪贴板内容（不是当前选区），最终通过 usePaste 写进输入框 —— 表现
-  // 为"右键复制 + 右键粘贴同时触发，粘贴的是上一次别处复制的内容"。应用层
-  // 无能力阻止终端发字节，但可以：在 right-up 触发复制后 arm paste-swallow
-  // 窗口（默认 250ms，覆盖 stdin→paste-event 的解析延迟）；usePaste 收到
-  // PasteEvent 时若在 arm 窗口内 → event.preventDefault() 吞掉，不进
-  // setInputValue。窗口外（用户主动 Cmd+V）保持原行为不变。
+  // Terminals (iTerm2 / WezTerm / kitty etc.) **automatically** paste "the
+  // current system clipboard content" into stdin on mouse right-up — a
+  // terminal-level feature, not an OpenTUI event. Our right-up copy (OSC52
+  // write to clipboard) fires almost simultaneously with the terminal-initiated
+  // paste, so chronologically the pasted bytes carry the **pre-OSC52** system
+  // clipboard content (not the current selection), which usePaste then writes
+  // into the input box — showing up as "right-click copy + right-click paste
+  // trigger together, pasting something copied elsewhere earlier". The app
+  // cannot stop the terminal from sending bytes, but it can arm a
+  // paste-swallow window after the right-up copy (default 250ms, covering the
+  // stdin→paste-event parse delay); when usePaste receives a PasteEvent inside
+  // the arm window → event.preventDefault() swallows it, never reaching
+  // setInputValue. Outside the window (user-initiated Cmd+V) behavior is unchanged.
   const pasteArmedUntilRef = useRef<number>(0);
-  // paste buffer-first 单真相源：app 层 usePaste 经此句柄直接写原生 textarea
-  // buffer（与 keypress 同源），不再走 React state 排队（竞态见
-  // tests/tui/input-interleave-race.test.tsx 头注）。
+  // Paste buffer-first single source of truth: app-level usePaste writes the
+  // native textarea buffer directly through this handle (same origin as
+  // keypress), bypassing React state queuing (for the race, see the header
+  // note in tests/tui/input-interleave-race.test.tsx).
   const promptInputRef = useRef<PromptInputHandle | null>(null);
 
-  // ── 流式草稿（单会话 in-flight 时挂，bg 由落盘刷新获得终稿）─────
+  // ── Streaming draft (mounted while the single session is in flight; bg sessions
+  //    get their final text through the persistence refresh) ───────────────────
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
   const [draftSegments, setDraftSegments] = useState<ReadonlyArray<string>>([]);
   const [thinkingDraftMasked, setThinkingDraftMasked] = useState<string>("");
-  // 最近一次 turn 的 thinking 最终秒数（turn 结束快照）。供历史消息末条
-  // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：仅显示末条
-  // assistant 的留存，且与 mode 行 Crunched 同 turn 写入（同 runTurnOnce
-  // finally），非本 turn 不会读到；切换会话后末条 assistant 仍会带旧 turn
-  // 的 thinking 秒数（已知限制，未做归属校验，与原实现一致）。
-  // D3 (tui-display-consistency):整条 TUI 内存思考秒数副通道已删除 ——
-  // 不再有 pin / freeze / ref / store-thunk 一组 in-memory 秒数变量。
-  // 折叠行思考秒数改读 `session.thinkingMs`（落盘数据，由 `attachSession`
-  // / `turnFinished` 携带；`streamDraft.thinkingSeconds()` 仍保留作流式
-  // 期间「思考中…」实时读数，但不再冻结与回传）。
-  // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
-  // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
-  // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
+  // Thinking final seconds of the latest turn (snapshot at turn end). Kept
+  // for the last history assistant's fold line to show "thought for N
+  // seconds". **Not keyed per session**: only the last assistant's retention
+  // is displayed, written in the same turn as the mode-row Crunched (same
+  // runTurnOnce finally), so a non-current turn never reads it; after
+  // switching sessions the last assistant still carries the old turn's
+  // thinking seconds (known limitation, no ownership check, same as the
+  // original implementation).
+  // D3 (tui-display-consistency): the whole in-memory thinking-seconds side
+  // channel was removed — no more pin / freeze / ref / store-thunk set of
+  // in-memory second variables. The fold line now reads `session.thinkingMs`
+  // (persisted data carried by `attachSession` / `turnFinished`;
+  // `streamDraft.thinkingSeconds()` remains only as the live "thinking…" read
+  // during streaming, no longer frozen or handed back).
+  // Run-duration stats (live seconds at the mode row's right edge): stamped
+  // at turn start, ticking at 1Hz while running, frozen at turn end.
+  // runStartedAt non-null = running (mode row shows `· Xs`); null = finished
+  // (mode row clears, stats move to the trailing Crunched line in the message flow).
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsed, setRunElapsed] = useState(0);
-  // #358 T7: 子代理只读投影 (host = bridge.listSubagents)。初始空数组 —
-  // 第一帧前不调用 bridge,watch 派生恒 false 不启表。
+  // Subagent read-only projection (host = bridge.listSubagents). Starts as an
+  // empty array — bridge is not called before the first frame, and watch
+  // derived false so no timer starts.
   const [subagents, setSubagents] = useState<ReadonlyArray<SubagentInfo>>([]);
-  // 最近一次完成 turn 的会话归属 + 快照秒数。runTurnOnce 入口清空（运行中
-  // 不显示上次总结），finally 写入；ChatView 仅在 `crunchedOf === activeKey`
-  // 时接收 crunchedSeconds，避免跨会话错配（跟旧 runStatsOf 同款所有权校验）。
+  // Session ownership + snapshot seconds of the last finished turn. Cleared
+  // at runTurnOnce entry (no stale summary while running), written in finally;
+  // ChatView only accepts crunchedSeconds when `crunchedOf === activeKey`,
+  // avoiding cross-session mismatch (same ownership check as the old runStatsOf).
   const [crunchedOf, setCrunchedOf] = useState<string | null>(null);
   const [crunchedSeconds, setCrunchedSeconds] = useState(0);
   useEffect(() => {
@@ -1727,7 +1842,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return undefined;
     }
     const unsubscribe = streamDraft.subscribe(() => {
-      // SC8 双向防御：流式 high-frequency 更新标记为低优先级 transition。
+      // Dual defense for streaming: mark high-frequency stream updates as low-priority transitions.
       startTransition(() => {
         setDraftSegments(streamDraft.maskedSegments());
         setThinkingDraftMasked(streamDraft.thinkingMasked());
@@ -1735,15 +1850,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     setDraftSegments(streamDraft.maskedSegments());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
-    // D3:删除了 `setInterval` 冻结 tick —— 不再向 app 层回传冻结秒数;
-    // 折叠行的「思考了 N 秒」由落盘 thinkingMs 接管（`MessageBlocks` 读
-    // `session.thinkingMs[messageIndex]`）。
+    // D3: removed the `setInterval` freeze tick — no more frozen seconds handed
+    // back to the app layer; the fold line's "thought for N seconds" is taken
+    // over by the persisted thinkingMs (`MessageBlocks` reads
+    // `session.thinkingMs[messageIndex]`).
     return () => {
       unsubscribe();
     };
   }, [streamDraft]);
 
-  // ── 退出 / 打断 / inflight 簿记 ────────────────────────────────
+  // ── Quit / interrupt / inflight bookkeeping ─────────────────────────────────
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
   const sessionsRef = useRef(sessions);
@@ -1751,27 +1867,31 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const activeKeyRef = useRef(activeKey);
   activeKeyRef.current = activeKey;
   const subagentWakeRef = useRef<SubagentWake | undefined>(undefined);
-  // #548:手动压缩专属 AbortController — 与 turn 的 `aborters` map 解耦
-  // (turn 中断 ↔ 压缩中断两条独立通道)。同一时刻仅一个 /compact 路径在
-  // 飞(活跃会话只有一个),所以 ref 单槽足够。Esc/Ctrl+C handler 在
-  // `canInterrupt(active)` 兜底之前先看此 ref 是否非空,是 → 走压缩取消;
-  // re-entry 护栏(防止 /compact 重复触发)同样看此 ref(同步源,无 React
-  // commit 竞态;Standards review Low#4 修复)。
+  // Dedicated AbortController for manual compaction — decoupled from the
+  // turn `aborters` map (turn-interrupt ↔ compaction-interrupt are two
+  // independent channels). Only one /compact path can be in flight at a time
+  // (a single active session), so one ref slot suffices. The Esc interrupt
+  // handler checks this ref before falling back to `canInterrupt(active)`:
+  // non-null → compaction cancel. The re-entry guard (prevents duplicate
+  // /compact triggers) reads the same ref (synchronous source, no React
+  // commit race).
   const compactingControllerRef = useRef<AbortController | null>(null);
-  // compact 进度面板(per-conversation keyed,与 liveToolRuns / agentStatuses
-  // 同款归属纪律:事件按到达时的会话分键,渲染只取 active 会话的条目)。
-  // 手动 /compact 与 turn 内 auto-compact 共用同一 reduce —— auto 路径此前
-  // 对用户完全静默,本面板是它的第一处可见化。
+  // Compact progress panel (per-conversation keyed, same ownership discipline
+  // as liveToolRuns / agentStatuses: events key by the session active at
+  // arrival, rendering takes only the active session's entry). Manual /compact
+  // and in-turn auto-compact share one reducer — the auto path was previously
+  // fully silent to the user, and this panel is its first visualization.
   const [compactPanels, setCompactPanels] = useState<
     Record<string, CompactProgressState>
   >({});
-  // 终态停留 timer(conversationId → handle):终态后 HOLD_MS 卸载面板,
-  // 让 100% / 失败色可见。新压缩开始 / 卸载时清 pending,防迟到 timer 打到
-  // 新面板。
+  // Terminal-state dwell timer (conversationId → handle): after a terminal
+  // state the panel unmounts HOLD_MS later so 100% / failure colors stay
+  // visible. A new compaction start or unmount clears pending timers so a
+  // late timer never hits a fresh panel.
   const compactTimersRef = useRef(
     new Map<string, ReturnType<typeof setTimeout>>()
   );
-  /** 清 pending timer(ref 簿记与 clearTimeout 成对,避免漏清)。 */
+  /** Clear a pending timer (ref bookkeeping and clearTimeout paired, avoiding leaks). */
   function clearCompactTimer(conversationId: string): void {
     const timer = compactTimersRef.current.get(conversationId);
     if (timer !== undefined) {
@@ -1779,7 +1899,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       compactTimersRef.current.delete(conversationId);
     }
   }
-  /** 立即移除面板 + 清 pending timer(no-op / turn finally 清扫用)。 */
+  /** Immediately remove the panel + clear pending timer (for no-op / turn-finally sweep). */
   function clearCompactPanel(conversationId: string): void {
     clearCompactTimer(conversationId);
     setCompactPanels((prev) => {
@@ -1789,12 +1909,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
   }
   /**
-   * 武装 HOLD_MS 卸载 timer(幂等:已武装则不重置 —— 首个终态信号开始计时,
-   * 后续重复 settle 不延长停留窗口)。
+   * Arm the HOLD_MS unmount timer (idempotent: already armed → don't reset —
+   * timing starts at the first terminal signal, repeated settles never extend
+   * the dwell window).
    *
-   * 两条路径都必须武装,且入口不同(turn 路径没有 promise 结果可依赖 ——
-   * 压缩发生在 run 内部,终态信号只能来自事件):漏了任何一条,面板就会带着
-   * `✓ done` 永久挂在屏上并持续顶着 chrome 行账(Spec review High)。
+   * Both paths must arm it, entering from different places (the turn path has
+   * no promise result to rely on — compaction happens inside the run, so its
+   * terminal signal can only come from events): missing either one leaves the
+   * panel pinned on screen with `✓ done` forever, still holding its chrome row account.
    */
   function armCompactHoldTimer(conversationId: string): void {
     if (compactTimersRef.current.has(conversationId)) return;
@@ -1809,9 +1931,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     compactTimersRef.current.set(conversationId, timer);
   }
   /**
-   * 统一终态入口(promise 结果是终态权威,plan D3.5):设终态 + 武装 HOLD_MS
-   * 卸载 timer。面板已不在(no-op 已清 / 未曾建立)→ setState no-op;timer 仍
-   * 武装但到点是 no-op,无副作用。
+   * Unified terminal-state entry (the promise result is the terminal-state
+   * authority): set terminal state + arm the HOLD_MS unmount timer. Panel
+   * already gone (cleared / never established) → setState no-op; the timer is
+   * still armed but its callback no-ops, no side effects.
    */
   function settleCompactPanelFor(
     conversationId: string,
@@ -1827,18 +1950,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     armCompactHoldTimer(conversationId);
   }
   /**
-   * 压缩事件统一投递入口（turn / manual 两条路径共用，plan D3）。
+   * Unified delivery entry for compaction events (shared by the turn and
+   * manual paths).
    *
-   * 职责三件（顺序敏感）：
-   *  1. `compaction_started` → 先清该会话 pending hold timer：新 run 开始，
-   *     上一次的卸载 timer 若还在飞，到点会删掉**本次**的新面板（纪律见
-   *     compactTimersRef 注释）；
-   *  2. reduce 落 state（identity 守卫：非压缩事件 / 未变 → 不触发 re-render）；
-   *  3. 终态事件 → 武装 HOLD_MS 卸载 timer。
+   * Three duties (order-sensitive):
+   *  1. `compaction_started` → first clear this conversation's pending hold
+   *     timer: a new run has begun, and an in-flight unmount timer from the
+   *     previous run would delete **this** run's fresh panel (discipline in
+   *     the compactTimersRef comment);
+   *  2. reduce into state (identity guard: non-compaction event / unchanged → no re-render);
+   *  3. terminal event → arm the HOLD_MS unmount timer.
    *
-   * 第 3 件是 Spec review High 的修复点：turn 路径的终态**只能**来自事件
-   * （压缩跑在 run 内部，没有 promise 结果可依赖），漏武装即 `✓ done` 面板
-   * 永久挂屏 + 持续顶着 chrome 行账。manual 路径重复武装是幂等 no-op。
+   * Item 3 is the critical fix: the turn path's terminal state can come
+   * **only** from events (compaction runs inside the run, no promise result to
+   * rely on); missing the arm leaves a `✓ done` panel on screen forever, still
+   * holding its chrome row account. Re-arming on the manual path is an idempotent no-op.
    */
   function applyCompactEvent(
     conversationId: string,
@@ -1869,14 +1995,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
   /**
-   * 非终态兜底清扫（plan D3.5 的「finally 强扫」语义，turn / manual 两条路径
-   * 共用）：面板仍非终态 → 立即移除，不留 95% 伪在途态。
+   * Non-terminal fallback sweep (the "finally hard-sweep" semantics, shared by
+   * the turn and manual paths): panel still non-terminal → remove immediately,
+   * never leave a fake 95% in-flight state.
    *
-   * 为什么必须两条路径都扫：promise 结果是终态权威，但前提是每条路径都
-   * settle 过。turn 路径的终止点（finally）与 manual 的终止点（catch/finally）
-   * 都可能出现「没走到任何 settle 分支」的未来改动 —— 而 hold timer 只在
-   * settle 时才起，漏 settle 即**永久残留**。故在两侧终止点各扫一次，把
-   * 「漏 settle」从「永久残留」降级为「面板立即消失」。
+   * Why both paths must sweep: the promise result is the terminal-state
+   * authority, but only if every path settled something. Both the turn path's
+   * terminus (finally) and manual's (catch/finally) could gain future changes
+   * that "reach no settle branch" — and the hold timer only starts on settle,
+   * so a missed settle means **permanent residue**. Sweeping at both termini
+   * downgrades "missed settle" from "permanent residue" to "panel disappears
+   * immediately".
    */
   function sweepCompactPanel(conversationId: string): void {
     setCompactPanels((prev) => {
@@ -1886,7 +2015,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return rest;
     });
   }
-  // 卸载清 pending timer(防 setState-after-unmount)。
+  // On unmount clear pending timers (guards setState-after-unmount).
   useEffect(() => {
     const timers = compactTimersRef.current;
     return () => {
@@ -1896,28 +2025,33 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }, []);
   const viewRef = useRef<TuiView>(view);
   viewRef.current = view;
-  // #343 间歇性回归根因（v2 修复）：OpenTUI 在 mouse down 上若 defaultPrevented
-  // 为 false 会自动 clearSelection()（chunk-bun-8fkgaxc6.js:9109）。当 right-down
-  // 落在 (a) hitTest miss 区域或 (b) 子节点 stopPropagation 链路时，preventDefault
-  // 错过回写——clearSelection 先把每个 touchedRenderable 的本地选区 reset，再把
-  // currentSelection 置 null。handleMouseUp 再读 getSelection() → null → 报「无
-  // 选区」。v1 (ref<Selection|null>) 抓 Selection 对象引用避开了 null 分支，但仍
-  // 走「选中区域为空。」——因为 Selection 内部的 _selectedRenderables 还指向那
-  // 些已被 reset 的 renderable，getSelectedText 返回 ""。
-  // v2 改成值类型缓存：监听 OpenTUI 的 "selection" 事件（left-drag-RELEASE 时
-  // emit，那时 finishSelection 刚走完 notifySelectablesOfSelectionChange、每条
-  // touchedRenderable 的本地选区都还活着），那一刻就把 text 字符串抽出来塞进
-  // ref。字符串是值类型，clearSelection 改不到。right-up 直接读字符串拷贝。
+  // Root cause of an intermittent regression (v2 fix): on mouse-down OpenTUI
+  // auto-calls clearSelection() when defaultPrevented is false. When
+  // right-down lands (a) in a hitTest-miss region or (b) inside a child's
+  // stopPropagation chain, preventDefault is missed — clearSelection first
+  // resets each touchedRenderable's local selection, then sets
+  // currentSelection to null. handleMouseUp then reads getSelection() → null →
+  // "no selection". v1 (ref<Selection|null>) held the Selection object
+  // reference to dodge the null branch, but still hit "empty selection": the
+  // Selection's internal _selectedRenderables pointed at already-reset
+  // renderables, so getSelectedText returned "".
+  // v2 switches to a value-type cache: listen to OpenTUI's "selection" event
+  // (emitted on left-drag-RELEASE, right after finishSelection ran
+  // notifySelectablesOfSelectionChange while every touchedRenderable's local
+  // selection is still alive) and extract the text string into a ref at that
+  // moment. Strings are value types — clearSelection can't touch them;
+  // right-up reads the string copy directly.
   const cachedSelectionTextRef = useRef<string>("");
   useSelectionHandler((selection: Selection) => {
-    // OpenTUI 在 left-drag-RELEASE 时 emit "selection"，那时 finishSelection
-    // 刚跑完 notifySelectablesOfSelectionChange，每条 touchedRenderable 的本
-    // 地选区都还活着。立刻把 text 字符串抽出来塞进 ref —— 字符串是值类型，
-    // 后续任何 clearSelection 都改不到。
+    // OpenTUI emits "selection" on left-drag-RELEASE, right after
+    // finishSelection has run notifySelectablesOfSelectionChange while every
+    // touchedRenderable's local selection is still alive. Extract the text
+    // string into the ref immediately — strings are value types, no later
+    // clearSelection can alter them.
     cachedSelectionTextRef.current = selection.getSelectedText();
   });
 
-  // ── askPending 订阅（权限 modal 挂/摘） ────────────────────────
+  // ── askPending subscription (mount/unmount of the permission modal) ─────
   const [askPending, setAskPending] = useState<TuiPendingAsk | undefined>(
     props.askBridge.pending()
   );
@@ -1928,15 +2062,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
   }, [props.askBridge]);
 
-  // ── session-state 镜像 ref（鼠标 / 流式 stale 闭包读取） ────────
+  // ── session-state mirror refs (read from mouse / streaming stale closures) ──
   const dataDirRef = useRef(props.dataDir);
   useEffect(() => {
     dataDirRef.current = props.dataDir;
   }, [props.dataDir]);
-  // 复制通道：T5 优先 OSC52，失败退回原生 fallback 链。
-  // #343 修复：调用 OSC52 前必须先问 renderer.isOsc52Supported()——部分
-  // 终端（出于安全策略）会忽略 OSC52 字节但 copyToClipboardOSC52 仍返回
-  // true，导致「已复制」notice + 空剪贴板。先 gate 掉，避免盲信原生返回值。
+  // Copy channel: prefer OSC52, fall back to the native fallback chain on failure.
+  // Must ask renderer.isOsc52Supported() before calling OSC52 — some terminals
+  // (security policy) silently ignore OSC52 bytes while
+  // copyToClipboardOSC52 still returns true, producing a "copied" notice with
+  // an empty clipboard. Gate first instead of blindly trusting the native return.
   const doCopy = useCallback(
     async (text: string): Promise<CopyResult> => {
       if (text.length === 0) return { kind: "empty" };
@@ -1954,7 +2089,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     [renderer]
   );
 
-  /** 根据复制结果设置 notice（右键复制复用）。 */
+  /** Set the notice from a copy result (shared by right-click copy). */
   function setNoticeFromCopyResult(text: string, result: CopyResult): void {
     if (result.kind === "ok") {
       setNotice({ lines: [`已复制（${result.method}，${text.length} 字）。`] });
@@ -1969,17 +2104,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** 右键 down：补一道缓存 + 阻止 OpenTUI 在 down 阶段自动 clearSelection()。 */
+  /** Right-button down: extra cache pass + block OpenTUI's auto clearSelection() on down. */
   const handleMouseDown = useCallback(
     (e: MouseEvent) => {
       if (e.button === MouseButton.RIGHT) {
-        // 双保险路径：
-        //   1. 缓存：useSelectionHandler 已在 left-drag-RELEASE 那一刻把 text
-        //      字符串塞进 cachedSelectionTextRef；这里再读一次 currentSelection
-        //      把 text 写一遍 —— 兜底"selection 事件没 emit"或"currentSelection
-        //      还没被清掉"的场景（比如现有测试直接给 currentSelection 赋值）。
-        //   2. preventDefault：阻止 OpenTUI 默认行为（chunk-bun-8fkgaxc6.js:9109：
-        //      !event?.defaultPrevented && down && currentSelection → clearSelection()）。
+        // Belt-and-braces path:
+        //   1. cache: useSelectionHandler already stored the text string in
+        //      cachedSelectionTextRef at left-drag-RELEASE; here we read
+        //      currentSelection once more and rewrite the text — covering "the
+        //      selection event never emitted" or "currentSelection not
+        //      cleared yet" (e.g. tests that assign currentSelection directly).
+        //   2. preventDefault: blocks OpenTUI's default
+        //      (!defaultPrevented && down && currentSelection → clearSelection()).
         const live = renderer.getSelection();
         if (live) {
           const text = live.getSelectedText();
@@ -1991,15 +2127,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     [renderer]
   );
 
-  /** 右键 up 时复制缓存的选区文本（useSelectionHandler 已提前抽取）。 */
+  /** Right-button up: copy the cached selection text (extracted earlier by useSelectionHandler). */
   const handleMouseUp = useCallback(
     (e: MouseEvent) => {
       if (e.button !== MouseButton.RIGHT) return;
       const text = cachedSelectionTextRef.current;
       cachedSelectionTextRef.current = "";
       if (text.length === 0) {
-        // 缓存为空：要么没拖选过、要么上一次 emit 时 Selection.getSelectedText
-        // 本身返回空（比如用户只点了一下没拖）。给具体提示区分两种情况。
+        // Empty cache: either nothing was ever drag-selected, or the last
+        // emit's Selection.getSelectedText() itself returned "" (e.g. the user
+        // clicked without dragging). Distinct notices tell the two apart.
         if (renderer.getSelection() === null) {
           setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
         } else {
@@ -2008,10 +2145,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
       void doCopy(text).then((result) => setNoticeFromCopyResult(text, result));
-      // arm paste-swallow 窗口：right-up 触发的"复制"几乎与终端的 paste-byte
-      // 同步到达 stdin，应用层不能阻止终端发字节，但能在 usePaste 收到事件时
-      // 吞掉。250ms 覆盖 stdin 解析→_internalKeyInput 派发→usePaste handler
-      // 触发的全程；超过 250ms 用户主动 Cmd+V 不受影响。
+      // Arm the paste-swallow window: the copy triggered by right-up reaches
+      // stdin almost together with the terminal's paste bytes; the app cannot
+      // stop the terminal from sending them but can swallow the event when
+      // usePaste receives it. 250ms covers stdin parse → _internalKeyInput
+      // dispatch → usePaste handler; user-initiated Cmd+V beyond 250ms is unaffected.
       pasteArmedUntilRef.current = Date.now() + 250;
       renderer.clearSelection();
     },
@@ -2019,33 +2157,37 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   );
 
   usePaste((event) => {
-    // v3 paste-swallow：right-up 触发的复制会在 250ms 内伴随终端发出的 paste
-    // 字节（paste 的是 OSC52 覆盖前的旧系统剪贴板内容，不是当前选区）。在
-    // arm 窗口内到达的 paste 一律吞掉，不进 setInputValue。窗口外（用户主动
-    // Cmd+V / Shift+Insert）保持原行为不变。
+    // paste-swallow: the copy triggered by right-up is followed within 250ms
+    // by the terminal's paste bytes (the pasted content is the pre-OSC52
+    // system clipboard, not the current selection). Any paste arriving inside
+    // the arm window is swallowed and never reaches setInputValue. Outside the
+    // window (user-initiated Cmd+V / Shift+Insert) behavior is unchanged.
     if (Date.now() < pasteArmedUntilRef.current) {
-      // 显式 preventDefault 也喂给下游（即便没有 renderable listener 也保持
-      // 语义清晰：这是我们主动拒绝的粘贴事件）。
+      // Explicit preventDefault also feeds downstream (even with no renderable
+      // listener, keeping semantics clear: this is a paste we actively rejected).
       event.preventDefault();
       pasteArmedUntilRef.current = 0;
       return;
     }
-    // B01 fix + buffer-first 单真相源。preventDefault 阻断 textarea native
-    // handlePaste（InternalKeyHandler.emitWithPriority 在 defaultPrevented
-    // 时跳过 renderable listener）。同一 paste 事件若 path A 与 path B
-    // 双驱动改 inputValue（外置语音输入一次吐多段时）：
-    //  - path A functional updater (prev+text) 与 path B direct setInputValue
-    //    (ta.plainText) 跨 React 18 commit 周期错位 → 中间段被吞；
-    //  - useEffect[props.value] 反复 setText 重置 buffer（prompt-input.tsx:151）
-    //    → 跨 commit 的 buffer 中途状态被 overwrite → 错位覆盖。
-    // B01 原修复走 path A 单源（setInputValue(prev+text) 排队 commit）；
-    // 但 keypress 路径是 buffer-first（原生 buffer 同步改 + 绝对值
-    // onChange(ta.plainText)），paste 的 functional update 未 commit 时紧接的
-    // keypress 绝对值 setState 仍会覆盖排队中的 paste 段 —— 语音输入
-    // paste 与手动 keypress 交错时中间段被吞（input-interleave-race 测试）。
-    // 现在改调 PromptInput.insertText：与 keypress 同为 buffer-first 单真相源
-    // （写原生 buffer → content-changed 同步 emit → handleContentChange 绝对值
-    // 回报），两条路径不再交错竞态。
+    // preventDefault + buffer-first single source of truth. preventDefault
+    // blocks the textarea's native handlePaste (InternalKeyHandler.emitWithPriority
+    // skips renderable listeners when defaultPrevented). If one paste event
+    // drove inputValue through both path A and path B (external dictation
+    // emitting multiple segments at once):
+    //  - path A functional updater (prev+text) and path B direct setInputValue
+    //    (ta.plainText) misalign across React 18 commit cycles → middle segments lost;
+    //  - useEffect[props.value] repeatedly resets the buffer via setText
+    //    (prompt-input.tsx) → mid-commit buffer state gets overwritten → misaligned overwrite.
+    // The original fix used path A alone (setInputValue(prev+text) queued into
+    // commit); but the keypress path is buffer-first (native buffer written
+    // synchronously + absolute-value onChange(ta.plainText)), so a keypress
+    // absolute setState landing before the paste's functional update commits
+    // still overwrote the queued paste segment — middle segments lost when
+    // dictation paste interleaves with manual keypress (input-interleave-race test).
+    // Now it calls PromptInput.insertText: buffer-first like keypress, same
+    // single source (write native buffer → synchronous content-changed emit →
+    // handleContentChange reports the absolute value), so the two paths no
+    // longer interleave into a race.
     event.preventDefault();
     const text = decodePasteBytes(event.bytes) ?? "";
     if (text.length > 0) {
@@ -2053,7 +2195,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   });
 
-  // ── 工具事件订阅（T4 结构化 + legacy 字符串行回退） ─────────────
+  // ── Tool-event subscription (structured state + legacy string-line fallback) ──
   useEffect(
     () =>
       props.toolEventSink.subscribe((event) => {
@@ -2085,11 +2227,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }));
           return;
         }
-        // #358 T7: legacy 路径（无 toolUseId 的字符串事件）统一走
-        // formatLiveToolEvent SSOT——spawn_subagent / subagent_result 借此命中
-        // 子代理专属 glyph 分支（▣/✓/✗ + 子代理标签）；detail 空时输出
-        // `${name} · ok`，替代旧实现 `name  [ok]` 的残缺模板（对齐
-        // tool-summary.ts:341 字节规则）。传 cols 让 detail 按视觉宽度收口。
+        // Legacy path (string events without toolUseId) uniformly goes through
+        // the formatLiveToolEvent SSOT — spawn_subagent / subagent_result hit
+        // the subagent-specific glyph branches (▣/✓/✗ + subagent label)
+        // through it; an empty detail renders `${name} · ok`, replacing the
+        // old truncated `name  [ok]` template (matches tool-summary.ts byte
+        // rules). Pass cols so detail caps by visual width.
         setLiveToolLines((prev) => ({
           ...prev,
           [event.conversationId]: [
@@ -2106,10 +2249,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     [props.toolEventSink, cols]
   );
 
-  // ── 派生：active 会话 + 输入候选 + permissionIndex/active ──────
+  // ── Derived: active session + input candidates + permissionIndex/active ──
   const active = sessions[activeKey] ?? initial;
-  // 1Hz 运行时 tick：running-fg 且已打点 → 递增 runElapsed（与 thinking 秒数
-  // tick 同纪律——只读 ref/state，不触发额外 setState 风暴）。
+  // 1Hz runtime tick: running-fg and stamped → increment runElapsed (same
+  // discipline as the thinking-seconds tick — read-only refs/state, no extra
+  // setState storms).
   useEffect(() => {
     if (active.runState !== "running-fg" || runStartedAt === null) return;
     const tick = setInterval(() => {
@@ -2117,12 +2261,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }, 1000);
     return () => clearInterval(tick);
   }, [active.runState, runStartedAt]);
-  // #358 T7: 子代理 watch 派生 — 轮询窗口 = running-fg OR 活跃子代理 OR
-  // 终态保留窗口内（failed 走 FAILED_VISIBLE_WINDOW_S×1000，completed 走
-  // DONE_FADE_WINDOW_S×1000 —— 均从 SubagentPanel 同源导入，避免双编码）。
-  // 终态窗口过后 subagents 数组仍可能保留该条但 Date.parse 距 now > 窗口 →
-  // hasRecentEndedSubagent=false → subagentWatch=false → effect cleanup 停表,
-  // 不浪费 1Hz 轮询。
+  // Subagent watch derivation — polling window = running-fg OR live subagent
+  // OR inside a terminal retention window (failed uses
+  // FAILED_VISIBLE_WINDOW_S×1000, completed uses DONE_FADE_WINDOW_S×1000 —
+  // both imported from SubagentPanel's source to avoid double encoding). After
+  // the window the subagents array may still hold the entry but
+  // Date.parse age > window → hasRecentEndedSubagent=false → subagentWatch=false →
+  // effect cleanup stops the timer instead of wasting 1Hz polling.
   const hasLiveSubagent = subagents.some(isLiveSubagent);
   const hasRecentEndedSubagent = subagents.some((s) => {
     if (s.endedAt === undefined) return false;
@@ -2132,14 +2277,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       : ageMs < DONE_FADE_WINDOW_S * 1000;
   });
   const subagentWatch = hasLiveSubagent || hasRecentEndedSubagent;
-  // 1Hz 子代理轮询:running-fg 或 watch=true → 拉 bridge.listSubagents()。
-  // 无 manager(ask surface)→ listSubagents 恒空数组,watch 恒 false,不启表;
-  // running-bg 时若仍有活跃 / 未过期终态子代理（watch=true）也启表——
-  // chat 视图下面板需要最新 subagents 投影（runElapsed/ageSec 每秒跳变），
-  // list/mcp 视图下面板不渲染但轮询开销 1Hz 且仅 watch=true 时承担。
-  // 挂载时先同步拉一次：idle 会话若已有 live 子代理（如上一 turn 遗留 /
-  // 外部 spawn），初始帧就能渲染 spawn 卡两行 / panel，而不是等下一个
-  // tick 且 watch=false 永不启动。
+  // 1Hz subagent polling: running-fg or watch=true → pull bridge.listSubagents().
+  // Without a manager (ask surface) listSubagents stays an empty array and
+  // watch stays false, so no timer starts; in running-bg, if there are still
+  // live / unexpired terminal subagents (watch=true) the timer also runs — the
+  // chat view needs the freshest subagents projection (runElapsed/ageSec tick
+  // per second), while in list/mcp views the panel doesn't render yet the
+  // polling cost is 1Hz and only borne when watch=true.
+  // Pull once synchronously at mount: an idle session that already has live
+  // subagents (leftover from the previous turn / external spawn) renders the
+  // spawn-card lines / panel in the first frame instead of waiting for a tick
+  // that watch=false would never start.
   useEffect(() => {
     setSubagents(props.bridge.listSubagents());
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2151,19 +2299,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }, 1000);
     return () => clearInterval(tick);
   }, [active.runState, subagentWatch, props.bridge]);
-  // plans T7：chrome-focus 焦点 clamp —— subagent 行数变化（live 子代理退出
-  // / 新增 / 完成窗口过期）时，chromeFocus.kind === "subagent" 的 row 可能
-  // 越界。Reducer 在 key press 时做 clamp，但本 effect 兜底无键位下的 stale
-  // 状态：focus 越界 → 回 input（reducer 同款语义：subagent 环不可达）。
-  // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
-  // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
-  // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
-  // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
+  // chrome-focus clamp: when subagent row counts change (live subagents exit /
+  // join / completion windows expire), the row under chromeFocus.kind ===
+  // "subagent" may go out of bounds. The reducer clamps on key press, but this
+  // effect covers stale focus with no key press: out-of-range → back to input
+  // (same semantics as the reducer: the subagent ring is unreachable). Graph
+  // focus is already handled above by the graphProgresses nextGraph === null
+  // branch's setGraphChromeFocus("input"), so no duplication here.
+  // skillCatalog is optional (default = empty catalog); available() = non-disabled
+  // entries with descriptions, name-sorted. Slash candidates mix static commands + skills.
   const cachedSkillCatalog = props.skillCatalog ?? emptySkillCatalog;
-  // spec skill-index-increment SC8（slash 侧）：候选面「当场热」—— 打开斜杠
-  // 面板时经 T6 rescan 缝重扫一次现行可加载面（会话中途落盘的 SKILL.md /
-  // 插件目录换血立刻可见，不必等下一 turn）。缝缺席（测试 / fixture）→ 恒等
-  // 透传缓存；rescan 失败 → 保留缓存 + notice 一条（不阻断输入）。
+  // specs/skill-index-increment.md (slash side): the candidate surface is
+  // "hot in place" — opening the slash panel rescans the current loadable
+  // surface once through the rescan seam (SKILL.md files written mid-session /
+  // plugin directory changes show immediately, no waiting for the next turn).
+  // Seam absent (test / fixture) → identity passthrough of the cache; rescan
+  // failure → keep the cache + one notice (never blocks input).
   const skillCatalog = useLiveSkillCatalog({
     catalog: cachedSkillCatalog,
     rescanner: props.skillRescanner,
@@ -2172,16 +2323,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: [formatSkillRescanFailure(err)] }),
   });
   const skillList = useMemo(() => toSlashEntries(skillCatalog), [skillCatalog]);
-  // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配以外的
-  // chrome 渲染面（sessionLocationLines 经 resolveWorktreeChromeRoot）也
-  // 消费。ADR-0079 后 slash 装配不再读此 cell（正文不再挂写根 trailer），
-  // 但 cell 仍由 props 透传至此供 chrome 渲染。
+  // Live taskRoot cell (specs/skill-load-write-root.md): beyond slash assembly,
+  // the chrome render surface (sessionLocationLines via
+  // resolveWorktreeChromeRoot) also consumes it. Since ADR-0079 slash assembly
+  // no longer reads this cell (bodies carry no write-root trailer), but the
+  // cell is still passed through props here for chrome rendering.
   const liveTaskRoot = props.liveTaskRoot;
   const inputHintSuggestions = useMemo<ReadonlyArray<SlashCandidate>>(() => {
     if (!inputValue.trim().startsWith("/")) return [];
     return slashSuggestions(inputValue, skillList);
   }, [inputValue, skillList]);
-  // 新 ask id 到来 → render-body 复位 modal 状态。
+  // New ask id arrives → reset modal state during render.
   const askId = askPending?.id;
   const lastAskIdRef = useRef<string | undefined>(undefined);
   if (askId !== lastAskIdRef.current) {
@@ -2196,39 +2348,39 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const activeToolName = active.conversationId
     ? activeToolNameOf(liveToolRuns[active.conversationId] ?? [])
     : undefined;
-  // #647 T3:active 会话的现势快照(keyed by conversationId,与
-  // activeToolName 同款派生口径)——draft 无 conversationId / 该会话尚无
-  // 事件 → null,面板不渲染 → 切走不残留、切回复现。
+  // Active session's status snapshot (keyed by conversationId, same derivation
+  // shape as activeToolName) — draft has no conversationId / the session has no
+  // events yet → null, panel not rendered → nothing stale on switch-away, restored on switch-back.
   const agentStatus = active.conversationId
     ? (agentStatuses[active.conversationId] ?? null)
     : null;
   const graphProgress = active.conversationId
     ? (graphProgresses[active.conversationId] ?? null)
     : null;
-  // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
-  // plans/tui-chrome-interaction.md T7：ContextBar 不得有 `▣ 子代理` 后缀
-  // （acceptance 钉死）。子代理工具（spawn_subagent / subagent_result）
-  // activeToolName → undefined；子代理状态由 spawn 卡上的两行（`{role}
-  // running...` + 预览 / done）+ SubagentPanel（输入框下方 task list）表达。
-  // 普通工具 activeToolName 不变；缺 activeToolName 仍为 undefined。
+  // Subagent-tool symmetry — ContextBar must not carry a subagent suffix (pinned
+  // by acceptance). For subagent tools (spawn_subagent /
+  // subagent_result) activeToolName → undefined; subagent status is expressed
+  // by the two lines on the spawn card (`{role} running...` + preview / done)
+  // + SubagentPanel (the task list below the input box). Regular tools keep
+  // their activeToolName; when absent it stays undefined.
   const activeToolLabel =
     activeToolName !== undefined && !isSubagentTool(activeToolName)
       ? activeToolName
       : undefined;
-  // T7 + #1044: chrome-focus reducer 输入 —— `visibleLiveRowCount` 是
-  // 「折叠后仍可见的 live 行数」（starting + running，且受
-  // SUBAGENT_PANEL_MAX_ROWS 上限约束；与 projectSubagentLines 投影同源）。
-  // 用于 reduceChromeFocus 的 subagentCount 与 SubagentPanel 的 focusedRow
-  // 越界 clamp —— 不能用原始 live 数：面板折叠（>maxRows）时后者会把焦点
-  // 移到被隐藏的行上。
+  // Chrome-focus reducer input — `visibleLiveRowCount` is the "live row count
+  // still visible after folding" (starting + running, capped by
+  // SUBAGENT_PANEL_MAX_ROWS; same source as the projectSubagentLines
+  // projection). Feeds reduceChromeFocus's subagentCount and the out-of-range
+  // clamp of SubagentPanel's focusedRow — the raw live count won't do: when
+  // the panel folds rows (>maxRows) it would move focus onto hidden rows.
   const liveSubagentCount = visibleLiveRowCount(subagents, Date.now(), cols);
-  // plans T7：chrome-focus 焦点 clamp —— 可见 subagent 行数变化（live 子代理
-  // 退出 / 新增 / 完成窗口过期 / 折叠边界跨越）时，chromeFocus.kind ===
-  // "subagent" 的 row 可能越界。Reducer 在 key press 时做 clamp，但本 effect
-  // 兜底无键位下的 stale 状态：focus 越界 → 回 input（reducer 同款语义：
-  // subagent 环不可达）。
-  // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
-  // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
+  // chrome-focus clamp: when the visible subagent row count changes (live
+  // subagents exit / join / completion windows expire / folding boundaries
+  // crossed), the row under chromeFocus.kind === "subagent" may go out of
+  // bounds. The reducer clamps on key press; this effect covers stale focus
+  // with no key press: out-of-range → back to input (reducer-consistent: the
+  // subagent ring is unreachable). Graph focus is already covered above by the
+  // graphProgresses nextGraph === null branch's setGraphChromeFocus("input").
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (chromeFocus.kind !== "subagent") return;
@@ -2236,7 +2388,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setChromeFocus({ kind: "input" });
   }, [liveSubagentCount]);
 
-  // ── 权限 modal 应答落点 ──────────────────────────────────────────
+  // ── Permission modal answer landing ──────────────────────────────
   function resolvePermissionAsk(
     pending: TuiPendingAsk,
     answer: PermissionAnswer
@@ -2265,10 +2417,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  // ── 视图 chrome（banner 随消息共享 scroll space） ──────────────
-  // spec #321 方案 B：banner 作为 scrollbox 第一段内容，与消息共享滚动
-  // 空间（用户上滚能翻回 banner）。眼字形两色分段信息在纯文本里丢失
-  // （统一单色 logoInk；可接受降级，见 banner.ts renderBannerLines 头注）。
+  // ── View chrome (banner shares scroll space with messages) ───────
+  // The banner is the scrollbox's first segment, scrolling with messages (so
+  // users can scroll up back to it). Two-color glyph-shaped segmentation is
+  // lost in plain text (unified single logoInk color; accepted degradation,
+  // see the header note in banner.ts renderBannerLines).
   const bannerLines = useMemo<ReadonlyArray<string>>(
     () =>
       renderBannerLines(
@@ -2278,12 +2431,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     [cols, props.cwd, props.dataDir]
   );
 
-  // ── /sessions 列表加载 ───────────────────────────────────────────
+  // ── /sessions list loading ───────────────────────────────────────────
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
 
-  // ── #361 Phase D：/mcp 看板数据（首次进入拉一次，reload 后刷新）──────
+  // ── /mcp dashboard data (pulled once on first entry, refreshed after reload) ────
   const [mcpStatuses, setMcpStatuses] = useState<readonly McpServerStatus[]>(
     () => props.mcp?.status() ?? []
   );
@@ -2295,7 +2448,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: ["MCP 未装配（buildTuiDeps 未注入 mcp 扩展）。"] });
       return;
     }
-    // 看板首次进入拉一次最新（status + 全量工具），保留缓存避免重拉。
+    // Pull the freshest status + full tool list once on first entry; keep the cache to avoid re-pulling.
     setMcpStatuses(props.mcp.status());
     setMcpTools(props.mcp.listMcpTools?.() ?? []);
     setView("mcp");
@@ -2308,7 +2461,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     } catch (err) {
       setNotice({ lines: [`MCP 重载失败：${describeError(err)}`] });
     }
-    // reload 后工具集变化（unregister + register）→ 刷新状态与工具列表。
+    // Reload re-registers tools (unregister + register); refresh status and tool list.
     setMcpStatuses(ext.status());
     setMcpTools(ext.listMcpTools?.() ?? []);
   }
@@ -2327,12 +2480,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  // ── 会话切换 / 新建 ────────────────────────────────────────────
+  // ── Session switch / new ────────────────────────────────────────────
   function newSession(): void {
     const draft = createDraftSession();
     setSessions((prev) => ({ ...prev, [DRAFT_SESSION_ID]: draft }));
-    // 新草稿从空输入历史起（不继承上一草稿的 ↑ 召回 —— 提交 remap 时 DRAFT
-    // 键已复位为 []，这里与之一致，防 /new 泄漏上一草稿历史）。
+    // A new draft starts with empty input history: submit remap resets the
+    // DRAFT key to [], so /new must not leak the previous draft's history.
     setInputHistories((prev) => ({ ...prev, [DRAFT_SESSION_ID]: [] }));
     setActiveKey(DRAFT_SESSION_ID);
     setView("chat");
@@ -2360,9 +2513,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         const file = await props.bridge.loadSessionFile(id);
         const attached = attachSession(file);
         setSessions((prev) => ({ ...prev, [id]: attached }));
-        // 首次 attach 顺带播种输入历史（transcript 投影，↑ 召回立即可用）；
-        // 已加载过的会话（existing 分支）map 已有 key 不重播——保留本进程内
-        // 的追加项（重播会把 seed 复位、吞掉切走前未落盘的提交）。
+        // First attach seeds input history from the transcript so ↑ recall
+        // works at once; already-loaded sessions keep their in-process
+        // appends (re-seeding would drop submissions not yet flushed).
         setInputHistories((prev) =>
           prev[id] === undefined
             ? { ...prev, [id]: seedInputHistory(attached.messages) }
@@ -2397,13 +2550,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setConfigPickerOpen(false);
   }
 
-  // ── turn 发送 ───────────────────────────────────────────────────
-  // #377 项 D（#337 Phase C 决定撤销）：echo 与发送文本可分离 —— displayText
-  // 控制用户可见会话中的临时代理，text 仍原样经 run() 进模型历史。skill-load
-  // 路径传 displayText 为「[加载技能 X] [remainder]」精简占位，避免技能正文
-  // 泄漏进会话显示。turn 结束 turnFinished 用落盘权威消息原子替换中间态——
-  // skill-load 会话仍会显示完整正文（落盘历史可见），这是用户接受的取舍：
-  // 运行中可见精简占位，完成后与会话文件一致。
+  // ── Turn send ───────────────────────────────────────────────────
+  // Echo and sent text can diverge: displayText is the transient stand-in
+  // shown in the live session, while text goes to the model history verbatim.
+  // skill-load passes a compact "[loading skill X] [remainder]" placeholder
+  // so the skill body doesn't leak into the running view; on turn end
+  // turnFinished atomically swaps in the persisted messages, so the finished
+  // session always matches the session file.
   async function sendTurn(text: string, displayText?: string): Promise<void> {
     if (active.runState !== "idle") {
       setNotice({
@@ -2430,9 +2583,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         delete next[DRAFT_SESSION_ID];
         return next;
       });
-      // 输入历史随会话 remap 迁到新 key：提交 append 发生在 remap 前的
-      // DRAFT_SESSION_ID 名下，不迁移则 ↑ 历史在首条消息建档瞬间清空。
-      // DRAFT 键复位为 []（后续 /new 新草稿从空历史起，不继承上一草稿）。
+      // Move input history to the real session key on remap: appends landed
+      // under DRAFT_SESSION_ID before the first message created the session.
+      // Reset DRAFT to [] so the next /new draft starts with empty history.
       setInputHistories((prev) => {
         const draftHistory = prev[DRAFT_SESSION_ID];
         if (draftHistory === undefined) return prev;
@@ -2460,8 +2613,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     const controller = new AbortController();
     aborters.current.set(targetId, controller);
-    // T3:清掉上一回合 verify 终态 —— 新 turn 进入 running 后 banner 不再
-    // 显示旧判定(与 crunchedOf 入口清空同款 turn-boundary 纪律)。
+    // Drop the previous turn's verify verdict at the turn boundary so the
+    // banner never shows a stale judgment (same discipline as crunchedOf).
     setVerifySlots((prev) => {
       if (!(targetId in prev)) return prev;
       const next = { ...prev };
@@ -2526,28 +2679,27 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
-    /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;undefined = 非 transport 失败。 */
+    /** ADR-0094: gateway-side summary on transport failure; undefined = not a transport failure. */
     let apiError:
       { readonly status?: number; readonly message: string } | undefined;
     let uncancellableOperationNotice: string | undefined;
-    // transport_retry 过程性 notice 追踪 —— completed/maxTurns 收尾时只清
-    // 本轮 retry 落下的 notice,不碰 stop_summary 等其他 notice 来源。
+    // Tracks transport_retry notices so completed/maxTurns teardown clears
+    // only this turn's retry notice, never stop_summary or other sources.
     let retryNoticeShown = false;
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
-    // restore idle, do not reload (reload overwrite → 刷新会话失败).
+    // restore idle, do not reload (a reload overwrite would fail the refresh).
     let skipTurnRefresh = false;
-    // T2 (#transport-continue-persist) UI 反馈节流:流式静默 ~20s 后把
-    // notice 文案改成「仍在等待」。注意:这是 UI 反馈,不影响 harness idle
-    // 决策(harness 仍按 settings.llm.idleTimeoutMs 走)。闭包变量,不进
-    // React state —— setTimeout handle 跨 render 无意义,且每次 onStream
-    // 触发都要重置,React 状态语义不对。
+    // UI-only feedback throttle: after ~20s of streaming silence, rewrite
+    // the notice to "still waiting". Harness idle decisions are unaffected
+    // (they follow settings.llm.idleTimeoutMs). Closure vars, not React
+    // state: the timer handle is re-armed on every onStream event.
     const silenceThresholdMs = resolveStreamingSilenceNoticeMs(
       props.streamingSilenceNoticeMs
     );
     let silenceTimerId: ReturnType<typeof setTimeout> | undefined;
     let silenceNoticeShown = false;
-    // 相位态见 nextToolPhaseActive 注释。回合以模型相位开局(尚未交出
-    // tool_use),事件到达时推进。
+    // Phase tracking (see nextToolPhaseActive): a turn starts in model
+    // phase and flips to tool phase when tool_use is emitted.
     let toolPhaseActive = false;
     const clearSilenceTimer = (): void => {
       if (silenceTimerId !== undefined) {
@@ -2561,14 +2713,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       if (silenceThresholdMs <= 0) return;
       silenceTimerId = setTimeout(() => {
         silenceTimerId = undefined;
-        // 每次静默 episode 仅触发一次更新(sticky notice 已设过同样文案
-        // → 同一回合内再 fire 只是覆盖同一字符串,避免 timer churn 与
-        // setState 噪音);流式字节恢复时 onStream 重置 silenceNoticeShown
-        // → 下一次 silence 可重新落 notice。
+        // Fire once per silence episode; onStream resets silenceNoticeShown
+        // when bytes resume, so the next episode can notify again.
         if (silenceNoticeShown) return;
-        // 相位门:工具执行期(含权限 / ask 等待)harness 不发流事件是设计
-        // 使然,不是模型卡死。重排一个满窗而不落 notice —— 回到模型相位
-        // 后若确实静默,下一个完整窗仍会给出提示。
+        // Phase gate: no stream events during tool execution (incl.
+        // permission/ask waits) is by design, not a stuck model. Re-arm a
+        // full window without notifying.
         if (toolPhaseActive) {
           armSilenceTimer();
           return;
@@ -2579,40 +2729,36 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     };
     const draft = createStreamDraft();
     setStreamDraft(draft);
-    // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
-    // 注意与思考秒数区分：运行时长 = turn 起点 → turn 结束（含等待 / 工具），
-    // 思考秒数由 stream-draft 首条 thinking_delta 惰性打点起算（纯思考时长，
-    // 不含 turn 启动等待 —— 2026-08-14 语义修正，见 stream-draft.ts 注释）。
+    // Wall-clock timer for the mode line's live "running" counter: turn
+    // start → end (waits + tools included). Thinking seconds are separate —
+    // see stream-draft.ts (measured from the first thinking_delta).
     const startedAt = Date.now();
     setRunStartedAt(startedAt);
     setRunElapsed(0);
-    // D3:`thinkingFrozenRef.current = 0` / `setThinkingFrozenSeconds(0)` 已
-    // 删除 —— 内存思考秒数副通道整条下线;折叠行从落盘 thinkingMs 读。
-    // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
-    // 通过 crunchedOf 归属校验）。
+    // The in-memory thinking-seconds channel is gone; folded rows read
+    // thinkingMs from the persisted file. Clear the previous "Crunched"
+    // summary so a new turn doesn't show the old one at the stream tail.
     setCrunchedOf(null);
-    // 草稿分段：tool_call_start 时 seal 当前文本段，把已 seal 段数打成
-    // draftEpoch。ChatView 按 epoch 交错渲染，与历史 content 块顺序一致。
-    // 判定只依赖本闭包事件顺序（#616），不经过 React state / ref 镜像。
+    // Draft segmentation: tool_call_start seals the current text segment and
+    // exposes the sealed count as draftEpoch, so ChatView interleaves in the
+    // same order as persisted content blocks. Closure event order only.
     const onStream = (event: HarnessStreamEvent): void => {
-      // 相位推进先于重置:agent_status / env_snapshot(每次模型调用前的
-      // 边界事件)把回合带回模型相位,tool_call_start 进入工具相位。见
-      // nextToolPhaseActive。
+      // Phase advance before timer reset: agent_status / env_snapshot return
+      // the turn to model phase, tool_call_start enters tool phase (see
+      // nextToolPhaseActive).
       toolPhaseActive = nextToolPhaseActive(toolPhaseActive, event);
-      // T2 (#transport-continue-persist): 任何 onStream 事件(增量 / 工具 /
-      // 状态快照,凡是流式臂产出的事件)都视作「流式字节到达」→ 重置静默
-      // 计时器与 silenceNoticeShown。下一次 silence episode 仍能重新触发
-      // 一次 notice 改写(不 spam,见 armSilenceTimer 注释)。
+      // Any onStream event counts as "bytes arrived" → re-arm the silence
+      // timer (one notice per episode, see armSilenceTimer).
       armSilenceTimer();
       draft.append(event);
       if (event.type === "tool_call_start") {
-        // 过程性「等待模型」只在模型相位有效：交出 tool_use 后立刻清掉
-        // 已上屏文案（相位门原先只禁止新写）。异常停 sticky 不匹配 identity。
+        // The transient "waiting for model" notice is model-phase only:
+        // clear it from screen as soon as tool_use is emitted.
         setNotice((prev) =>
           isStreamingSilenceNotice(prev) ? undefined : prev
         );
-        // 先 seal 再读 sealedCount：setState updater 延迟到 render 才执行，
-        // 禁止在 updater 内重读（#616 同类陷阱）。
+        // Seal before reading sealedCount: setState updaters run at render
+        // time, so re-reading state inside one is a stale-read trap.
         draft.sealText();
         const draftEpoch = draft.sealedCount();
         setLiveToolRuns((prev) => ({
@@ -2624,8 +2770,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             draftEpoch,
           }),
         }));
-        // D3:删除了 `pinAndStoreThinkingSeconds(draft)` —— 工具起点不再
-        // 钉住内存思考秒数;结束态思考秒数从落盘 thinkingMs 读取。
+        // No in-memory thinking-seconds pinning at tool start; final values
+        // come from the persisted thinkingMs.
       }
       if (event.type === "tool_input_delta") {
         setLiveToolRuns((prev) => ({
@@ -2647,8 +2793,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setNotice({ lines: [event.text] });
       }
       if (event.type === "transport_retry") {
-        // Bug（2026-09-07）:429/网络故障的重试进度可见化。落到 notice 同一
-        // 渲染面;turn 结束后被异常 stopReason notice / cancel notice 覆盖。
+        // Surface 429/network retry progress in the notice lane; a later
+        // stopReason/cancel notice overwrites it at turn end.
         retryNoticeShown = true;
         setNotice({
           lines: [
@@ -2657,10 +2803,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         });
       }
       if (event.type === "agent_status") {
-        // #647 T3 / ADR-0028:按本回合 conversationId(targetId —— 事件到达
-        // 时的会话归属,与上方 liveToolRuns 同款闭包捕获)整体替换该会话的
-        // 现势槽(agentStatusFromEvent 产完整独立快照,不依赖旧值 → 旧快照
-        // 不可能残留/混合)。只进本 UI,绝不回流任何模型向字段。
+        // ADR-0028: replace this conversation's status slot wholesale, keyed
+        // by the turn's own targetId (closure capture, like liveToolRuns).
+        // agentStatusFromEvent returns a self-contained snapshot, so stale
+        // state can't linger. UI-only; never feeds model-facing fields.
         const nextAgentStatus = agentStatusFromEvent(event);
         if (nextAgentStatus !== null) {
           setAgentStatuses((prev) => ({
@@ -2670,9 +2816,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }
       }
       if (event.type === "env_snapshot") {
-        // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 投影平行独立流。
-        // env 不属于会话,单 state 槽整体替换(envSnapshotFromEvent 产完整
-        // 独立快照,不依赖旧值);只进本 UI,绝不回流任何模型向字段。
+        // Env snapshot: session-independent single slot, replaced wholesale
+        // by envSnapshotFromEvent. UI-only; never feeds model-facing fields.
         const nextEnv = envSnapshotFromEvent(event);
         if (nextEnv !== null) {
           setEnvSnapshot(nextEnv);
@@ -2694,29 +2839,28 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setGraphSelectedId(null);
         }
       }
-      // #467 压缩事件:auto-compact(proactive/reactive)此前对用户完全静默,
-      // 本面板是它的第一处可见化。与手动路径共用 applyCompactEvent(同一
-      // reduce + 同一终态 timer 武装),identity 守卫(非压缩事件返回同一引用)
-      // → 不新建对象、不触发 re-render。
+      // Auto-compact (proactive/reactive) was once silent to the user; this
+      // panel is its first surfacing. It shares applyCompactEvent with the
+      // manual path (same reduce + terminal timer arming); the identity
+      // guard keeps non-compaction events on the same reference, no re-render.
       if (event.type.startsWith("compaction_")) {
         applyCompactEvent(targetId, event, "turn");
       }
     };
     try {
-      // T2 (#transport-continue-persist): 回合发起即启动静默计时器 —— 即使
-      // 第一个流式字节 20s+ 还没到,UI 也应进入「仍在等待」反馈路径(典型
-      // 场景:流建立中,首个 text_delta 卡在 backpressure / TLS handshake)。
-      // armSilenceTimer() 内部已重置 silenceNoticeShown → 下一次 onStream
-      // 不会被既有「仍在等待」streak 吞掉(同一回合内重置文案无害)。
+      // Arm the silence timer at turn start: even if the first stream byte
+      // takes 20s+ (stream setup stuck in backpressure / TLS handshake), the
+      // UI should reach the "still waiting" path. armSilenceTimer resets
+      // silenceNoticeShown, so later events aren't swallowed by the streak.
       armSilenceTimer();
-      // thinking override gate：仅当用户实际改了状态才透传（初始化即 env
-      // 默认 → 不透传，走 stub-model 测试的 cached deps 路径；用户 /thinking
-      // /effort 改了 → 透传 per-turn override）。决策逻辑见 thinking-gate.ts
-      // computeThinkingOverride（纯函数，已单测）。
+      // Thinking override gate: send a per-turn override only when the user
+      // actually changed thinking state (env default → no override). Logic:
+      // computeThinkingOverride in thinking-gate.ts (pure fn, unit-tested).
       //
-      // 基线在**回合发起时**从 store 现读，不用渲染期快照：hub 已按新 env 重建
-      // 了 adapter，若这里还按过期基线比对，会相对真实默认值发出错误的
-      // per-turn override（把 adapter 刚拿到的基线又覆盖回去）。
+      // Read the baseline from the store at turn start, not from a
+      // render-time snapshot: the hub may have rebuilt the adapter with a new
+      // env, and a stale baseline would emit an override clobbering the fresh
+      // default the adapter just received.
       const thinkingOverride: WireThinkingOverride | undefined =
         computeThinkingOverride(
           envDisplay.get().defaultThinking,
@@ -2744,15 +2888,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       stopReason = resp.stopReason;
       lastUsage = resp.lastUsage;
-      // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
-      // (completed 等) → undefined,notice 分支只对 cancelled 生效。
+      // Interrupt feedback: the bridge passes true/false when cancelled;
+      // other stop reasons → undefined (the notice branch acts on cancelled).
       interrupted = resp.interrupted;
-      // ADR-0094 SC4-SC5: 透传 transport 摘要给 notice 渲染分支;undefined →
-      // 走原通用文案。protocolError 命中时供「API error (status): message」用。
+      // ADR-0094: pass the transport summary to the notice renderer;
+      // undefined falls back to the generic text. Feeds "API error (status): message".
       apiError = resp.apiError;
-      // T3 (#458 包2):verify 终态入槽。verifyFromWire 做 runtime boundary
-      // 校验(4 outcome + rounds 形状),非法 wire → unavailable(degraded 渲染,
-      // 不抛错污染 React 栈);none → 从 map 摘除该会话键(banner 静默)。
+      // Verify verdict into its slot. verifyFromWire validates the wire
+      // shape at the runtime boundary; invalid wire → unavailable (degraded
+      // render, no throw into React); none → drop the key, banner silent.
       setVerifySlots((prev) => {
         const next = verifyFromWire(resp.verify);
         if (next.kind === "none") {
@@ -2764,11 +2908,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return { ...prev, [targetId]: next };
       });
     } catch (err) {
-      // ADR-0094 SC4-SC5: 4xx 等非瞬态供应商失败不走 TransportRetryExhausted
-      // 正常返回路径，而是从 run() reject 抛到这里。带 HTTP status 的提炼结果
-      // 才渲染「API error (status): 原文」，与正常返回路径同一文案面；无
-      // status（hub 本地校验 ValidationError / NotFoundError 等）不冒充
-      // API error → 沿用既有 describeError 文案。
+      // ADR-0094: non-transient provider failures (e.g. 4xx) reject from
+      // run() instead of taking the TransportRetryExhausted normal-return
+      // path. Only results carrying an HTTP status render "API error
+      // (status): ..."; status-less hub validation errors (ValidationError /
+      // NotFoundError) keep the describeError text instead of posing as API errors.
       const thrownApiError = transportApiErrorFromThrow(err);
       if (thrownApiError !== undefined) {
         apiError = thrownApiError;
@@ -2783,27 +2927,25 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: [...outcome.noticeLines] });
     } finally {
       aborters.current.delete(targetId);
-      // T2 (#transport-continue-persist): turn 结束(成功 / cancelled /
-      // throw)清掉静默计时器,避免 stuck 在「仍在等待」timer 后续误触 setNotice
-      // 与 React 重渲染。**不**清 notice 文案:sticky 纪律(spec SC5)由 turn
-      // 收尾的 setNotice(undefined / 异常 stopReason)分支决定,本 finally 不
-      // 接管。
+      // Turn over (success / cancelled / throw): clear the silence timer so a
+      // stuck "still waiting" timer can't fire setNotice later. Do NOT clear
+      // the notice text — sticky handling belongs to the teardown branches
+      // below, not this finally.
       clearSilenceTimer();
-      // compact 面板兜底清扫(plan D3.5):turn 结束仍非终态 = 缺终态事件
-      // (reactive compact 早返回 / 事件被吞咽)→ 立即清除,不留 95% 伪在途
-      // 面板。已终态 → 交给 HOLD_MS timer 自然卸载(不抢它的停留时间)。
-      // 与 manual 路径共用 sweepCompactPanel(同一契约,两处终止点各扫一次)。
+      // Failsafe compact-panel sweep: still non-terminal at turn end means
+      // terminal events were missed → clear it immediately rather than
+      // leaving a fake in-flight panel. Already terminal → the HOLD_MS timer
+      // unloads it. Shares sweepCompactPanel with the manual path.
       sweepCompactPanel(targetId);
-      // 快照本次 turn 的 thinking 最终秒数（reset 会置 0，必须先取）。
-      // D3:thinking 秒数整条内存副通道全部下线 ——
-      // 折叠行的「思考了 N 秒」改读落盘 thinkingMs（commitMessages → store.appendEvents 写入;
-      // turn 结束 → `loadSessionFile(targetId)` 重读 file → `turnFinished` 携 thinkingMs）;
-      // turn 结束 + 流式面板消失 → 末条 assistant 折叠行秒数自动由 session.thinkingMs 接管。
+      // Thinking seconds now run entirely through the persisted path:
+      // commitMessages writes thinkingMs, loadSessionFile → turnFinished
+      // carries it, and the folded "thought for N s" row reads it once the
+      // streaming panel disappears.
       draft.reset();
       setStreamDraft(null);
-      // 运行时长冻结：turn 结束精确值（含工具耗时尾段，tick 可能未覆盖）。
-      // crunchedOf = 归属会话 id —— 只有当前 active 会话等于它时 ChatView
-      // 才接收 crunchedSeconds（消息流末尾 Crunched 行），避免跨会话错配。
+      // Freeze the exact run duration at turn end (tick may miss the tool tail).
+      // crunchedOf is the owning session id: ChatView takes crunchedSeconds
+      // only for the active session, avoiding cross-session mismatches.
       const finalRunSeconds = Math.max(
         0,
         Math.floor((Date.now() - startedAt) / 1000)
@@ -2842,11 +2984,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
             lastUsage,
-            // ADR-0037 T5:改绑回合的落盘文件携带 task worktree 根 → 现势行
-            // 当回合即更新;普通回合字段缺席 → turnFinished 保留既有值。
+            // ADR-0037: a rebound turn's persisted file carries the task
+            // worktree root, updating the status row within the turn; the
+            // field is absent for normal turns → turnFinished keeps the old value.
             workspaceRoot: file.workspaceRoot,
-            // D3 (tui-display-consistency):从落盘文件携 thinkingMs 并行数组 → 折叠
-            // 行「思考了 N 秒」从此处读取;旧的 in-memory 思考秒数副通道已删除。
+            // The persisted file carries thinkingMs as a parallel array; the
+            // folded "thought for N s" row reads it (in-memory channel removed).
             thinkingMs: file.thinkingMs,
           }),
         };
@@ -2854,8 +2997,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
       setLiveToolRuns((prev) => ({ ...prev, [targetId]: [] }));
       if (stopReason === "cancelled") {
-        // B1: interrupted=true → checkpoint 已保存(delta>0);false → 无新内容
-        // 未落 checkpoint(delta=0);undefined → 旧链路 / 未知,保留兜底文案。
+        // interrupted=true → checkpoint saved (delta>0); false → nothing new,
+        // no checkpoint; undefined → legacy path/unknown, keep fallback text.
         setNotice({
           lines:
             uncancellableOperationNotice !== undefined
@@ -2873,30 +3016,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         stopReason === "emptyFinalResponse" ||
         stopReason === "fused"
       ) {
-        // Bug（2026-09-07）：429/网络类故障在 loop-engine 被压平成正常返回
-        // （TransportRetryExhaustedError → protocolError，finalText 为空），
-        // 此前只有 throw 路径与 cancelled 出 notice → 一轮静默结束。异常
-        // stopReason 落同一 notice 渲染面，用户至少能看到 turn 未成功。
-        // maxTurns 不并入：已有专属完成反馈（验证行）。
-        // ADR-0094 SC4-SC5: protocolError + apiError 走专用文案(API error
-        // (status): message),让网关侧信息透出;其它异常停沿用通用文案
-        // （单点 = abnormalStopNoticeLines）。
+        // 429/network failures are flattened by loop-engine into a normal
+        // return (protocolError, empty finalText); without this branch the
+        // turn would end silently. Abnormal stopReasons share the notice lane
+        // so the user sees the turn did not succeed. maxTurns is excluded —
+        // it has its own completion feedback. ADR-0094: protocolError +
+        // apiError render the dedicated "API error (status): message" text
+        // (single point = abnormalStopNoticeLines).
         setNotice({ lines: abnormalStopNoticeLines(stopReason, apiError) });
       } else if (retryNoticeShown) {
-        // completed / maxTurns 收尾:只清本轮 transport_retry 落下的过程性
-        // notice,避免成功回合残留「退避中…」;stop_summary 等 notice 不动
-        // (它们在 maxTurns 收尾后仍需呈现,见 max-turns/stream-draft 测试)。
+        // completed / maxTurns teardown: clear only this turn's transient
+        // transport_retry notice so "backing off…" doesn't linger on a
+        // successful turn; stop_summary and friends must survive maxTurns.
         setNotice(undefined);
       } else {
-        // 静默等待文案同属过程性提示:成功收尾若它仍在屏(未被 stop_summary
-        // 等更明确的来源覆盖)→ 清掉,不留过期「等待模型」;其它来源经
-        // identity 判定原样返回,零额外渲染。
+        // The silence-wait text is transient too: clear it on a successful
+        // finish unless a stronger source (stop_summary etc.) replaced it;
+        // the identity check returns other notices untouched, no re-render.
         setNotice((prev) =>
           isStreamingSilenceNotice(prev) ? undefined : prev
         );
       }
     } catch (err) {
-      // 刷新失败也要落回 idle，否则会话卡在 running-fg。
+      // Even on refresh failure fall back to idle; otherwise the session sticks in running-fg.
       setSessions((prev) => {
         const current = prev[targetId];
         if (!current) return prev;
@@ -2918,7 +3060,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  // T4: terminal worker notices wake only the active idle session. The
+  // Terminal worker notices wake only the active idle session. The
   // injected drain is sent through the bridge's silent path, so this effect
   // never appends a user bubble or input-history entry.
   useEffect(() => {
@@ -2984,35 +3126,38 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       return;
     }
-    // SC12 / plan task 7：先 abort 当前前台 turn 再收尾 —— 前景
-    // spawn_subagent(wait:true) 的 inflight promise 会一直等到子代理 per-task
-    // 墙钟（缺省 7200s），不 abort 就等于退出挂起。后台会话不动（同一次
-    // /quit 的二次确认分支仍负责等它们落盘）。链路见 quit-abort.ts 头注。
+    // Abort the current foreground turn before teardown: an inflight
+    // spawn_subagent(wait:true) promise would otherwise wait the subagent's
+    // per-task wall clock (default 7200s) and hang the exit. Background
+    // sessions are untouched (the /quit confirm branch waits for them).
+    // See the header note in quit-abort.ts.
     abortForegroundTurnOnQuit({ session: active, aborters: aborters.current });
     await Promise.allSettled([...inflightPromises.current]);
     props.onQuit?.(active.conversationId);
     if (!renderer.isDestroyed) renderer.destroy();
   }
 
-  /** Ctrl+O：折叠态翻转（thinkingExpanded），语义与 /thinking 开关无关。 */
+  /** Ctrl+O: toggle the fold state (thinkingExpanded); unrelated to the /thinking switch. */
   function toggleThinkingFold(): void {
     setThinkingExpanded((prev) => !prev);
   }
 
   /**
-   * 前台打断本体（Locked sentence 3 / T5；2026-09-18 起由 Esc 消费）：
-   * 「当前会话前台一切」——
-   *   - 子代理：`bridge.abortSessionForegroundWork(本会话)` 一趟枚举 + abort
-   *     本会话**新鲜**的前景账（父 idle 但在途的 `wait:true` 只有 hub 侧看
-   *     得到；TUI 的 1Hz 投影最多陈旧 1s，不拿它当判据）。无 manager
-   *     （ask 形态）→ 空数组；
-   *   - 父 turn：既有 `aborters`（canInterrupt 唯一判据，与 /quit / Esc 同
-   *     源，无第二条 abort 通道）。controller 竞态缺席（turn finally 收尾）
-   *     → 静默，不伪造打断。
+   * Foreground interrupt (driven by Esc): aborts "everything in this
+   * session's foreground" in one pass.
+   *   - Subagents: bridge.abortSessionForegroundWork(id) enumerates and
+   *     aborts fresh foreground work hub-side (an in-flight wait:true child
+   *     with an idle parent is only visible there; the TUI's 1Hz projection
+   *     can be up to 1s stale, so it is not the criterion). No manager
+   *     (ask form) → empty array.
+   *   - Parent turn: the existing `aborters` registry — the sole abort
+   *     channel, shared with /quit and canInterrupt. A missing controller
+   *     (turn finally already ran) stays silent; never fabricate an interrupt.
    *
-   * 返回「本会话前台真的有活」（判据是这趟动作本身，不另读会陈旧的 React
-   * 态）：调用方据此决定是否继续走双 Esc 回退判定。两臂无活时零副作用
-   * （扇出空转、无 aborter 可 abort）→ 返回 false。
+   * Returns whether the foreground really had live work, judged by the action
+   * itself rather than stale React state; callers use it to decide whether to
+   * fall through to the double-Esc rewind check. Both arms empty → zero side
+   * effects, returns false.
    */
   function interruptForegroundTurn(): boolean {
     const id = active.conversationId;
@@ -3026,11 +3171,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * 选区复制臂（Ctrl+C 唯一职责，2026-09-18 键位迁移；打断已整体移交给
-   * Esc 分支，经 interruptForegroundTurn 含前景子代理扇出）。
-   *
-   * 有选区 → 复制（清 ref 走 handleMouseUp 同款尾清理）；无选区 → 提示复制
-   * 用法（Ctrl+C 不再指向打断，文案随语义改）。
+   * Ctrl+C's sole duty: copy the selection. Interrupt moved wholesale to the
+   * Esc branch (interruptForegroundTurn, incl. foreground-subagent fan-out).
+   * Selection → copy with the same tail cleanup as handleMouseUp; no
+   * selection → show copy-usage text (Ctrl+C no longer means interrupt).
    */
   function handleCtrlCCopy(): void {
     const selectedText = cachedSelectionTextRef.current;
@@ -3047,10 +3191,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * Ctrl+X 分支体（spec Slice D / SC14–SC15）：强杀 chrome-focus 聚焦的
-   * live 子代理。无聚焦 / 陈旧行（子代理刚终态、clamp 尚未跑）→ 纯函数回
-   * `kind:"none"` → 空操作，不抛错、不伪造 taskId。行→taskId 映射与
-   * SubagentPanel 的 focusedRow 同为 live 行序（见 subagent-kill.ts 头注）。
+   * Ctrl+X: force-kill the live subagent focused by chrome-focus. No focus
+   * or a stale row (subagent just terminal, clamp not run yet) → the pure
+   * dispatch returns kind:"none" → no-op, no throw, no fabricated taskId.
+   * Row → taskId mapping follows live row order like SubagentPanel's
+   * focusedRow (see the header note in subagent-kill.ts).
    */
   function killFocusedSubagent(): void {
     const kill = dispatchKillFocusedSubagent(chromeFocus, subagents);
@@ -3065,9 +3210,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
   }
 
-  /** T6：打开 L3 回退锚点选择器（/rewind 与双 Esc 共用路径）。
-   *  一次 load 会话文件 → 投影锚点 → 激活 picker。失败经 describeError 只透
-   *  typed kind。调用方已保证 idle + 非 draft。 */
+  /** Open the L3 rewind-anchor picker (shared by /rewind and double-Esc):
+   *  load the session file once → project anchors → activate the picker.
+   *  Failures surface only the typed kind via describeError. The caller has
+   *  already guaranteed idle + non-draft. */
   async function openRewindPicker(targetId: string): Promise<void> {
     try {
       const targets = await props.bridge.listRewindTargets(targetId);
@@ -3085,7 +3231,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** 确认后移动 head；fillInput 时把锚点全文填回输入框。 */
+  /** Move head after confirmation; with fillInput, put the anchor text back into the input. */
   async function executeRewind(
     targetId: string,
     target: RewindTarget
@@ -3118,12 +3264,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  // ── submit 路由 ────────────────────────────────────────────────
+  // ── Submit routing ────────────────────────────────────────────────
   async function handleSubmit(raw: string): Promise<void> {
     setInputValue("");
     const text = raw.trim();
     if (text.length === 0) return;
-    // askPending 时 y/n/a 直达（modal 已让键位 → 输入框兜底）。
+    // With askPending, y/n/a answer directly (modal yielded keys → input fallback).
     if (askPending) {
       const lower = text.toLowerCase();
       if (lower === "y" || lower === "yes") {
@@ -3139,10 +3285,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
     }
-    // #337 Phase C：/skill-name [提示词] 精确命中 → 确定性 skill-load 发送
-    // （静态命令优先：parseSkillLoad 命中词表返回 undefined，落回原分流）。
-    // SC8：提交期自兜一次 —— 面板打开时那次异步 rescan 可能还没落地，快速
-    // 键入/粘贴后立刻 Enter 会赶在它之前（真实 TUI 实测坐实）。
+    // Exact /skill-name [prompt] match → deterministic skill-load send
+    // (static commands win first: parseSkillLoad returns undefined on a hit,
+    // falling through to normal routing). Re-scan once at submit time: the
+    // async rescan from panel opening may not land before a fast Enter.
     const skillOutcome = await resolveSkillLoadSubmit({
       text,
       catalog: skillCatalog,
@@ -3159,9 +3305,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {
-      // 真实消息进历史（避免 y/n / slash / busy-guard 消息污染）；按当前
-      // activeKey 落账（per-session 隔离，appendInputHistory 空白跳过 +
-      // 相邻去重、无变化返回原引用）。
+      // Only real messages enter history (no y/n / slash / busy-guard
+      // noise), keyed by activeKey for per-session isolation;
+      // appendInputHistory skips blanks, dedupes adjacent, same-ref on no-op.
       if (!askPending && active.runState === "idle" && parsed.text.length > 0) {
         setInputHistories((prev) => ({
           ...prev,
@@ -3218,8 +3364,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               enabled: thinkingEnabled,
               effort: thinkingEffort,
             },
-            // 调用时读当前快照（不是渲染期捕获）—— env 变化只经 store 发布，
-            // 本闭包不随 store 重渲染，读 props/state 会拿到过期值。
+            // Read the live snapshot at call time (not render-captured):
+            // env changes publish through the store only and this closure
+            // never re-renders with them.
             envDisplay.get().model
           ),
         });
@@ -3243,9 +3390,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
       case "thinking": {
-        // design-25 picker（双面板版）：/thinking 打开纯开关面板（ON/OFF），
-        // 不设 notice（面板本身即反馈）。seed 自当前 thinkingEnabled；Enter/
-        // Space/Tab 翻转预览、Esc 保存退出写 thinkingEnabled。不碰 effort。
+        // /thinking opens a pure ON/OFF toggle panel (the panel itself is
+        // the feedback, no notice). Seeded from current thinkingEnabled;
+        // Enter/Space/Tab flip the preview, Esc saves. Effort untouched.
         setThinkingPickerOpen("thinking");
         setSwitchPreview(thinkingEnabled);
         setMemoryPickerOpen(false);
@@ -3254,10 +3401,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       case "effort": {
         const level = parseEffortLevel(text);
-        // design-25 picker（双面板版）：/effort 打开纯档位面板。有合法档参 →
-        // 打开并直接固定该档（Enter 预览亦可移档、再固定）；无参 → 打开面板
-        // seed 当前已提交档（用户点名：/effort 无参也要打开面板）；仅当输入了
-        // 非法 concrete 档（如 /effort auto）才走 notice 提示可用档位。
+        // /effort opens the effort-level panel. Valid level arg → open with
+        // that level fixed; no arg → open seeded with the committed level;
+        // only an invalid concrete level (e.g. /effort auto) shows a notice.
         if (level === undefined && effortHasArg(text)) {
           setNotice({
             lines: [
@@ -3272,13 +3418,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           });
           return;
         }
-        const seed = level ?? thinkingEffort; // 无参 → seed 当前已提交档
+        const seed = level ?? thinkingEffort; // no arg → seed the committed level
         setThinkingPickerOpen("effort");
-        // auto 态 seed：无参且当前是自适应（thinkingEffort=""）→ autoOn=true
-        // （面板灰显自适应态，Esc 保持 auto 写 ""）；显式档位 → autoOn=false。
+        // auto seed: no arg while adaptive (thinkingEffort="") → autoOn=true
+        // (Esc keeps auto writing ""); an explicit level → autoOn=false.
         setEffortAutoOn(seed === "");
         setEffortFocusIndex(effortToDisplayIndex(seed));
-        setEffortFixedIndex(effortToDisplayIndex(seed)); // /effort <level> 直接固定该档
+        setEffortFixedIndex(effortToDisplayIndex(seed)); // /effort <level> fixes that level directly
         setMemoryPickerOpen(false);
         setConfigPickerOpen(false);
         return;
@@ -3292,17 +3438,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
       case "model":
-        // ADR-0093 / spec SC8：注册表空 / 缺席 → typed notice（不抛错、不打开
-        // picker）；非空 → 打开，焦点初值 = 当前 model 对应条目（找不到 → 0）。
-        // 判定在 openModelPickerCommand 内（S5：case 只做一行派发）。
+        // ADR-0093: empty/absent registry → typed notice (no throw, no
+        // picker); otherwise open with focus on the current model's entry
+        // (0 if not found). Decision lives inside openModelPickerCommand.
         openModelPickerCommand({
           providers: props.providers,
-          // 焦点 seed 取当前快照：picker 打开时用户看到的焦点行 = 此刻生效的
-          // 模型（闭包不订阅 store，必须调用时读）。
+          // Focus seeds from the live snapshot: the picker shows the
+          // currently effective model (the closure doesn't subscribe to the store).
           model: envDisplay.get().model,
           onEmpty: (lines) => setNotice({ lines }),
           onOpen: (focusIndex) => {
-            // 面板互斥：model picker 打开即收起同族面板（与 /memory 同款）。
+            // Panel exclusivity: opening the model picker closes sibling panels.
             setThinkingPickerOpen(null);
             setMemoryPickerOpen(false);
             setConfigPickerOpen(false);
@@ -3318,8 +3464,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           });
           return;
         }
-        // #548:防止压缩未结束前重复触发(压缩期间 runState 仍 idle,既有 gate
-        // 拦不住;用 ref 作同步守护,React state 会有一帧 commit 滞后)。
+        // Block re-triggering while compaction runs: runState stays idle
+        // during compaction so the usual gate misses it; a ref guards
+        // synchronously (React state lags one commit).
         if (compactingControllerRef.current !== null) {
           setNotice({
             lines: [compactGuardNoticeFor("in_flight")],
@@ -3331,28 +3478,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setNotice({ lines: [compactGuardNoticeFor("draft")] });
           return;
         }
-        // #548:创建专属 AbortController(Esc/Ctrl+C 通过 compactingControllerRef
-        // 触发 abort) + observer(透传 compaction_* 进度事件 + compaction_text_delta,
-        // 后者经 #550 wrapper 重映射后进入压缩预览)。进度呈现 = design-25 面板
-        // (compact-progress.tsx,行账入 chromeReserveRows.compactRows);事件的
-        // 归约走 reduceCompactionEvent 同一套纯函数(与 turn 内 auto-compact 共用)。
+        // Dedicated AbortController (Esc cancels via compactingControllerRef)
+        // + observer relaying compaction_* progress events (text deltas are
+        // remapped into the compaction preview). Progress renders through
+        // compact-progress.tsx (rows budgeted in
+        // chromeReserveRows.compactRows) and reduces via the same
+        // reduceCompactionEvent pure functions as in-turn auto-compact.
         const compactController = new AbortController();
         compactingControllerRef.current = compactController;
-        // 面板先于任何事件出现(观察者要立刻看到"在压缩",不等第一个事件)。
-        // 建面板前清该会话的 pending hold timer(Standards review Low):上一次
-        // 压缩的终态 timer 若还在飞,到点会把**本次**的新面板删掉(纪律见
-        // compactTimersRef 注释:新压缩开始清 pending)。
+        // Show the panel before any event arrives — the user should see
+        // "compacting" immediately. Clear this session's pending hold timer
+        // first: a previous compaction's terminal timer would otherwise fire
+        // and delete this new panel (see compactTimersRef).
         clearCompactTimer(targetId);
         setCompactPanels((prev) => ({
           ...prev,
           [targetId]: startCompactPanel("manual", Date.now()),
         }));
-        // #548:onStream 内的 compaction_cancelled 事件标记"中途取消"(bridge
-        // 返回 compacted=false,与"无可压缩上下文"同形),promise resolve 后据此
-        // 选择不同 notice 文案。闭包变量,无需 React state。
-        // 注:pre-aborted signal(early-return at full-compact.ts:262)observer
-        // 不触发 — response.cancelled 字段兜底(Low #1 修复),且 settle 由
-        // promise 结果驱动(事件只是快路径,终态权威在下面)。
+        // compaction_cancelled in onStream marks a mid-run cancel (the
+        // bridge returns compacted=false, same shape as "nothing to
+        // compact"); the closure flag picks the notice text after resolve.
+        // Note: with a pre-aborted signal the observer never fires —
+        // response.cancelled backstops that, and settling is driven by the
+        // promise result (events are only the fast path).
         let cancelledByUser = false;
         try {
           const compactResult = await props.bridge.compactSession(targetId, {
@@ -3361,23 +3509,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               if (event.type === "compaction_cancelled") {
                 cancelledByUser = true;
               }
-              // 与 turn 路径同一入口(reduce + identity 守卫 + 终态 timer 武装)。
+              // Same entry point as the turn path (reduce + identity guard + terminal timer).
               applyCompactEvent(targetId, event, "manual");
             },
           });
           const compacted = compactResult.compacted;
-          // Low #1 兜底:pre-aborted signal 路径 observer 不触发 → 用
-          // response.cancelled 兜底。
+          // Backstop: the pre-aborted signal path never fires the observer → use response.cancelled.
           if (compactResult.cancelled) cancelledByUser = true;
           if (cancelledByUser) {
-            // #548:Claude Code 取消语义 — 会话保持原样,不 sessionCompacted
-            // 投影(updatedAt / messages 均不变),仅提示用户。
+            // Cancel semantics (Claude Code style): the session is left
+            // untouched — no sessionCompacted projection (updatedAt /
+            // messages unchanged), only the user gets a notice.
             settleCompactPanelFor(targetId, "cancelled");
             setNotice({
               lines: [compactCancelledNotice()],
             });
           } else if (compacted) {
-            // 实际裁剪完成 → 重读落盘文件 + sessionCompacted 投影。
+            // Trimming actually done → reload the persisted file + sessionCompacted projection.
             const file = await props.bridge.loadSessionFile(targetId);
             setSessions((prev) => {
               const current = prev[targetId];
@@ -3393,15 +3541,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               };
             });
             settleCompactPanelFor(targetId, "done");
-            // 文案决策 SSOT:compactNoticeFor 纯函数(manual-compact-trigger
-            // T2:no-op 支语义为「没有可压缩的上下文」,below_token_threshold
-            // 在手动路径抛错)。
+            // Notice text decided by the compactNoticeFor pure function:
+            // the no-op branch means "no compactable context";
+            // below_token_threshold throws on the manual path.
             setNotice({
               lines: compactNoticeFor(compactResult.reason, true),
             });
           } else {
-            // no-op(compacted:false 且非 cancelled)= 压根没发生压缩 —— 立即
-            // 清除面板,不显示伪造的 done(plan D3.5)。
+            // no-op (compacted:false, not cancelled) = nothing happened —
+            // clear the panel immediately instead of a fake "done".
             clearCompactPanel(targetId);
             setNotice({
               lines: compactNoticeFor(compactResult.reason, false),
@@ -3413,10 +3561,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             lines: [`${compactFailedNoticePrefix()}${describeError(err)}`],
           });
         } finally {
-          // 与 turn 路径对称的兜底清扫(plan D3.5 / Standards review Medium):
-          // 上面四分支已覆盖 cancelled / compacted / no-op / catch,但若未来新增
-          // 分支漏 settle,pending 面板会永久残留(hold timer 只随 settle 起)。
-          // 已终态 → sweep 是 no-op,不抢 HOLD_MS 停留时间。
+          // Symmetric failsafe sweep: the four branches above cover
+          // cancelled / compacted / no-op / catch, but a future branch that
+          // misses settle would strand a pending panel forever (the hold
+          // timer only arms on settle). Already terminal → sweep is a no-op.
           sweepCompactPanel(targetId);
           compactingControllerRef.current = null;
         }
@@ -3457,13 +3605,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  // ── 反向持久化（T4，settings 双向通道） ────────────────────────────────
+  // ── Reverse persistence (two-way settings channel) ────────────────────
   /**
-   * 把面板 commit 的 payload 交给 props.onPersistThinking 写回 settings.json。
-   * fire-and-forget（不 await、不阻塞面板 state 更新 —— Esc 保存退出已生效）；
-   * 失败（reject 或返回 { ok:false }）→ notice 呈现，in-memory override 保留
-   * （本次会话仍有效）。成功静默（面板 Esc 本身即反馈，写回是后台行为）。
-   * payload null（committedThinkingPatch 防御分支，当前 union 无此路径）→ no-op。
+   * Hand the panel's committed payload to props.onPersistThinking for the
+   * settings.json write-back. Fire-and-forget: it never blocks the panel
+   * state update (Esc-save already took effect). Failure (reject or
+   * { ok:false }) → notice, keeping the in-memory override valid for this
+   * session; success is silent. Null payload (defensive branch of
+   * committedThinkingPatch, unreachable in the current union) → no-op.
    */
   function persistThinkingFromCommit(
     patch: CommittedThinkingPatch | null
@@ -3496,8 +3645,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       props.memoryFlags.autoExtract = patch.autoExtract;
       props.memoryFlags.dream = patch.dream;
     }
-    // memory-toggle-live: 同一次 commit 让 memory_layer system 快照作废，
-    // 翻转（含关闭）在下一轮生效 —— 快照不再困住旧开关态。
+    // The same commit invalidates the memory_layer system snapshot so the
+    // toggle (incl. off) takes effect next turn — no stale snapshot latch.
     props.invalidateMemorySystem?.();
     if (props.onPersistMemory === undefined) return;
     void props.onPersistMemory(patch).then(
@@ -3523,11 +3672,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * /model 面板 Enter 选定的持久化接线（spec SC5 + SC10）。与 thinking /
-   * memory 的 fire-and-forget 不同，这里**必须 await 宿主返回**：宿主要在写回
-   * 之后显式刷新 env 并重建 adapter（self-write 哨兵会吞掉自身写回触发的
-   * watcher 事件，reloadFromEnv 不会被自动触发），失败以 notice 呈现。
-   * 面板已先关闭（选定动作已完成，写回是后台行为）。
+   * Persistence wiring for the /model picker's Enter selection. Unlike the
+   * fire-and-forget thinking/memory paths, this must await the host: the
+   * host refreshes env and rebuilds the adapter after the write-back (the
+   * self-write sentinel swallows the watcher event its own write triggers,
+   * so reloadFromEnv won't fire automatically). Failures surface as a
+   * notice; the panel is already closed.
    */
   function persistModelFromCommit(model: string): Promise<void> {
     const cb = props.onPersistModel;
@@ -3548,7 +3698,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
   }
 
-  // ── 全局键位（Ctrl+C / Shift+Tab / Ctrl+O / modal） ────
+  // ── Global keys (Ctrl+C / Shift+Tab / Ctrl+O / modal) ────
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
     const isCtrlC = e.ctrl && e.name === "c";
@@ -3578,23 +3728,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       hasSnapshot: graphProgress !== null,
       key: e.name,
     });
-    // plans/tui-chrome-interaction.md T7：graph 全屏 open/close 仍由
-    // 旧 graphChromeFocus（input|graph 二态 reducer）的 openView 触发。
-    // 三态 chromeFocus 取代的是 chrome 环间的 Down/Up 切换（input ↔
-    // subagent(row) ↔ graph），由 reduceChromeFocus + PromptInput
-    // onLeaveToChrome 接管（见下方）。
-    // 双 reducer 同步：三环 chromeFocus 进 graph 时，二态
-    // graphChromeFocus 必须跟着置 "graph"，否则 Enter 的 openView 判定
-    // 读到旧值（Tab 进 graph 环 → Enter 全屏打不开）。
+    // Graph fullscreen open/close is still driven by the legacy two-state
+    // graphChromeFocus reducer's openView. The three-state chromeFocus only
+    // replaces Down/Up switching between chrome rings (input ↔
+    // subagent(row) ↔ graph) via reduceChromeFocus + PromptInput
+    // onLeaveToChrome. Dual-reducer sync: when chromeFocus enters graph,
+    // graphChromeFocus must follow, or Enter's openView check reads stale.
     if (chromeFocus.kind === "graph" && graphChromeFocus !== "graph") {
       setGraphChromeFocus("graph");
     }
     if (chromeFocus.kind === "graph") {
-      // 旧 reducer 在 graph 环内只剩两个职责：Enter → openView（全屏视图）、
-      // Escape → 退出环。Down/Up **不**在此处理（旧 reducer 会把
-      // graphChromeFocus 拉回 input 后 unconditional return，三环 reducer
-      // 的 graph→Up→subagent/input 转移变成死代码 + 焦点陷阱）——落到底部
-      // 三环分支消费，离开 graph 时同步 graphChromeFocus。
+      // Inside the graph ring the old reducer keeps only two jobs: Enter →
+      // openView, Escape → leave ring. Down/Up are deliberately not handled
+      // here (it would reset focus to input and return unconditionally,
+      // killing the three-ring reducer's graph→Up transitions); they fall
+      // through to the three-ring branch, which syncs graphChromeFocus on exit.
       if (graphKey.openView === true) {
         const ids =
           graphProgress === null
@@ -3613,19 +3761,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       if (e.name !== "down" && e.name !== "up" && !isCtrlC) return;
     }
 
-    // plans/tui-chrome-interaction.md T7：chrome-focus 三态 reducer 全局
-    // Down/Up 键位 —— 当焦点不在 input（subagent 或 graph 环）时，Down/Up
-    // 由 reducer 全局消费（PromptInput 此时 disabled，不接键）。输入框路径
-    // 由 PromptInput 内部 onLeaveToChrome 接管（multiline 视觉末行 / 单行无
-    // 历史时让出键位）—— 与本分支正交，不重复触发。
-    //   - chromeFocus = input → PromptInput 自己处理 Down/Up（含 hint /
-    //     multiline / history / onLeaveToChrome 路径）；本分支不进。
-    //   - chromeFocus = subagent(row) → Down/Up 在 subagent 行间移动；Down
-    //     越出 last 行 → graph（若有快照）；Up 在 row=0 → 回 input。
-    //   - chromeFocus = graph → Up → 最后一个 subagent（若有）/input；Down
-    //     在最末环 → 原地。
-    // reducer 是纯函数，相同 input → 同样 output；用 !== identity 比对探测
-    // 焦点变化。
+    // Global Down/Up for the three-state chrome-focus reducer: when focus is
+    // not in input (subagent or graph ring), the reducer consumes the keys
+    // (PromptInput is disabled then). The input path is handled inside
+    // PromptInput via onLeaveToChrome — orthogonal to this branch.
+    //   - input → PromptInput itself (hint / multiline / history / yield).
+    //   - subagent(row) → move across rows; Down past the last row → graph
+    //     (if a snapshot exists); Up at row 0 → input.
+    //   - graph → Up → last subagent (if any) / input; Down at the last
+    //     ring → stay.
+    // The reducer is pure: detect focus changes with !== identity.
     if (
       chromeFocus.kind !== "input" &&
       (e.name === "down" || e.name === "up") &&
@@ -3639,9 +3784,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       if (next.focus !== chromeFocus) {
         setChromeFocus(next.focus);
-        // 双 reducer 同步（离开方向）：三环焦点从 graph 退出时，旧二态
-        // reducer 的 focus 也要回 input，否则下一次 Enter 的 openView 判定
-        // 读到 stale "graph" 意外开全屏。
+        // Dual-reducer sync (leaving): when three-ring focus exits graph,
+        // the old reducer's focus must return to input too, or the next
+        // Enter reads a stale "graph" and opens fullscreen unexpectedly.
         if (
           chromeFocus.kind === "graph" &&
           next.focus.kind !== "graph" &&
@@ -3650,14 +3795,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setGraphChromeFocus("input");
         }
       }
-      // graph 全屏打开时不在此分支（已被上方 graphViewOpen 短路）；不打开
-      // 时全屏不会响应 Down/Up，本分支 preventDefault 等价 no-op（事件已被
-      // useKeyboard 消费，键不冒泡到其他 reducer）。
+      // Graph-fullscreen open never reaches this branch (short-circuited
+      // above); closed, fullscreen ignores Down/Up, so the preventDefault
+      // here is effectively a no-op.
       return;
     }
 
-    // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
-    // graph holder 缺席时自动退化成既有两态 permission 轮）。
+    // Shift+Tab cycles agent mode (permission cycle + optional graph
+    // overlay state; without a graph holder it degrades to the two-state cycle).
     if (
       applyShiftTabAgentModeFlip({
         key: {
@@ -3676,33 +3821,31 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     ) {
       return;
     }
-    // Ctrl+C：选区复制（唯一职责）。打断已整体移交给 Esc 分支
-    // （interruptForegroundTurn，含前景子代理扇出）—— 2026-09-18 键位迁移：
-    // Ctrl+C 不再打断，避免「想复制误触发打断」。
+    // Ctrl+C: copy selection only. Interrupt moved wholesale to the Esc
+    // branch (interruptForegroundTurn incl. foreground-subagent fan-out),
+    // so copying can never trigger an interrupt.
     if (isCtrlC) {
-      // Locked sentence 3 的复制臂在 helper —— handler 只做键位分派（S5）。
+      // The copy arm lives in the helper — the handler only dispatches keys.
       handleCtrlCCopy();
       return;
     }
-    // Ctrl+X：强杀 chrome-focus 聚焦的 live 子代理（spec Slice D / SC14）。
-    // 判键留在 handler（S5：handler 只做键位分派，分支体在 helper 内）。
+    // Ctrl+X: force-kill the chrome-focus selected live subagent.
+    // Key detection stays here; the branch body is in the helper.
     if (e.ctrl && e.name === "x") {
       killFocusedSubagent();
       return;
     }
     if (view !== "chat") return;
-    // Ctrl+O：切换思考面板折叠态（展开/折叠）。toggleThinkingFold 只翻折叠，
-    // 与 /thinking 的开关（thinkingEnabled）解耦。判键折进 isThinkingFoldKey
-    // （S5：T1 给 config 面板加守卫，判键 helper 抵回分支预算）。
+    // Ctrl+O: toggle the thinking fold. Purely presentational — decoupled
+    // from /thinking (thinkingEnabled). Key test in isThinkingFoldKey.
     if (isThinkingFoldKey(e)) {
       toggleThinkingFold();
       return;
     }
-    // /config 面板（ADR-0096 T1+T2）：活跃时独占键位。优先级置于 model /
-    // memory / thinking 之前 —— 同族面板最近打开的优先消费键位。键路由 +
-    // 行为体在 applyConfigPickerKey / toggleFsModeAndPersist /
-    // toggleWorktreeOnMutateAndPersist / toggleSubagentCapAndPersist
-    // （S5：handler 只判键派发）。
+    // /config panel (ADR-0096): exclusive keys while open, checked before
+    // model/memory/thinking — the most recently opened sibling panel wins.
+    // Key routing + behavior live in applyConfigPickerKey and the
+    // toggle*AndPersist helpers.
     if (configPickerOpen) {
       applyConfigPickerKey(modalKeyEventOf(e), {
         focusedIndex: configFocusIndex,
@@ -3717,10 +3860,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       return;
     }
-    // /model 面板：活跃时独占键位（与 memory / thinking 面板同款插入点 ——
-    // Ctrl 分支之后）。交互语义（spec SC8：↑/↓ 移焦点、Enter 选定 + 持久化 +
-    // 关闭、Esc 直接关闭**不持久化**）与键路由在 applyModelPickerKey 内
-    // （S5：handler 只做判键 + 派发，分支体在 helper 内）。
+    // /model panel: exclusive keys while open (inserted after the Ctrl
+    // branch). Semantics: ↑/↓ move focus, Enter selects + persists + closes,
+    // Esc closes without persisting. Routing in applyModelPickerKey.
     if (modelPickerOpen) {
       applyModelPickerKey(modalKeyEventOf(e), {
         entries: modelPickerEntries(props.providers),
@@ -3759,32 +3901,31 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // design-25 thinking-picker（双面板版）：picker 活跃时独占键位。优先级纪律
-    // （spec §0）：Ctrl 组合（含 Ctrl+O/Ctrl+C）> picker > rewind > 双 Esc >
-    // ask modal。本分支插在 Ctrl 分支之后、rewind 分支之前 —— ctrl/meta 组合由
-    // reducer 判 ignore 不吞（Ctrl+C/O 照常到 app 层）。交互语义（SSOT）：
-    // Enter 固定（面板保持打开，可继续调）、Esc 保存退出（写入真实 state，无
-    // cancel 路径）。
+    // thinking picker: exclusive keys while open. Priority: Ctrl combos >
+    // picker > rewind > double Esc > ask modal (this branch sits after the
+    // Ctrl branch; ctrl/meta combos are ignored by the reducer, not
+    // swallowed). Enter fixes the preview (panel stays open); Esc saves to
+    // real state — there is no cancel path.
     if (thinkingPickerOpen === "thinking") {
       const action = reduceThinkingSwitchKey(modalKeyEventOf(e));
       switch (action.type) {
         case "toggle":
-          // Space/Tab：翻转面板内开关预览，面板保持打开。
+          // Space/Tab: flip the switch preview; panel stays open.
           setSwitchPreview((prev) => !prev);
           break;
         case "fix":
-          // Enter：固定当前预览（无翻转、面板保持打开）——「回车选定后固定而不
-          // 是退出」。开关面板只有 ON/OFF 两态，fix 即确认当前预览值，无需改
-          // switchPreview；写不写都在 Esc 时落盘。
+          // Enter fixes the current preview without flipping it; the panel
+          // stays open. With only ON/OFF states, fix just confirms the
+          // preview — persistence happens on Esc either way.
           break;
         case "commit":
-          // Esc：把面板内已固定值写真实 thinkingEnabled，然后关闭。
+          // Esc: commit the fixed preview into thinkingEnabled, then close.
           setThinkingEnabled(switchPreview);
-          // 用户亲手改过 → 之后的 env 新基线不再改写本字段（见订阅 effect）。
+          // User-touched: later env baselines must not rewrite this field (see the subscription effect).
           thinkingTouchedRef.current = true;
           setThinkingPickerOpen(null);
-          // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
-          // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
+          // Reverse persistence: fire-and-forget — never blocks the panel
+          // update; failures show a notice (the in-memory override stands).
           void persistThinkingFromCommit(
             committedThinkingPatch({
               kind: "thinking",
@@ -3803,31 +3944,31 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       switch (action.type) {
         case "move":
-          // ←/→：移动焦点游标，面板保持打开。
+          // ←/→: move the focus cursor; panel stays open.
           setEffortFocusIndex(action.index);
           break;
         case "fix":
-          // Enter：把焦点档固定为面板内已提交档，面板保持打开。
+          // Enter: fix the focused level as the committed preview; panel stays open.
           setEffortFixedIndex(effortFocusIndex);
           break;
         case "toggleAuto":
-          // Space/Tab：切换自适应 auto 态，面板保持打开。
+          // Space/Tab: toggle adaptive auto; panel stays open.
           setEffortAutoOn((prev) => !prev);
           break;
         case "commit": {
-          // Esc：autoOn → 写 ""=自适应（保持 auto，不降级）；否则写已固定 concrete
-          // 档。均隐式开思考，然后关闭。
+          // Esc: autoOn → write "" (stay adaptive, no downgrade); otherwise
+          // the fixed concrete level. Both implicitly enable thinking; then close.
           setThinkingEffort(
             effortAutoOn ? "" : indexToEffort(effortFixedIndex)
           );
-          setThinkingEnabled(true); // 隐式开思考（选档即开，spec §0 语义）
-          // 一次 /effort 提交同时动了两个字段 → 两者都算「用户亲手改过」，
-          // 后续 env 基线变化都不得再把它们拽回去。
+          setThinkingEnabled(true); // Implicitly enable thinking: picking a level turns it on
+          // One /effort commit touches two fields — both are user-touched,
+          // so later env baseline changes must not pull them back.
           thinkingTouchedRef.current = true;
           effortTouchedRef.current = true;
           setThinkingPickerOpen(null);
-          // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
-          // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
+          // Reverse persistence: fire-and-forget — never blocks the panel
+          // update; failures show a notice (the in-memory override stands).
           void persistThinkingFromCommit(
             committedThinkingPatch({
               kind: "effort",
@@ -3843,8 +3984,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // T6 rewind picker 活跃时独占键位（Esc 走 cancel；↑/↓ 移动；Enter 在
-    // 选择态进入确认行 / 确认态执行）。reducer 路由见 rewind-picker 纯函数。
+    // Rewind picker: exclusive keys while open (Esc cancels; ↑/↓ move; Enter
+    // confirms in select state / executes in confirm state). Routing lives in
+    // the rewind-picker pure reducer.
     if (rewindTargets !== undefined) {
       const action = reduceRewindKey(modalKeyEventOf(e), {
         targets: rewindTargets,
@@ -3860,7 +4002,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           break;
         case "execute": {
           const targetId = active.conversationId;
-          // 确认态 Enter 时 reducer 只产 execute 不产 move，此处索引安全。
+          // In confirm state the reducer yields execute without move, so this index is safe.
           const t = rewindTargets[rewindIndex];
           if (targetId !== undefined && t !== undefined) {
             void executeRewind(targetId, t);
@@ -3878,26 +4020,26 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // T6 双 Esc（2026-09-18 键位迁移后 Esc 是打断唯一入口）：前台有活 →
-    // interruptForegroundTurn（父 running-fg turn + 本会话全部前景子代理，
-    // 「前台一切」，与 /quit 的 canInterrupt 同一判据）赢过双 Esc 回退判定，
-    // 只记时间戳；idle 首次 Esc 只记时间戳不动作；间隔 ≤
-    // REWIND_DOUBLE_ESC_WINDOW_MS → 打开 L3 picker。askModalActive 时下方
-    // 块处理 Esc dismiss，re-path 不拦截（避免吞掉 dismiss）。
+    // Double Esc (Esc is the sole interrupt entry): if the foreground has
+    // work, interruptForegroundTurn (parent turn + this session's foreground
+    // subagents, same criterion as /quit's canInterrupt) wins and only
+    // records the timestamp; an idle first Esc only records the timestamp; a
+    // second Esc within REWIND_DOUBLE_ESC_WINDOW_MS opens the L3 picker.
+    // With askModalActive the block below dismisses the modal — no interception.
     if (e.name === "escape" && !askModalActive) {
-      // #548:压缩进行中 → 走压缩取消通道(Esc 是压缩取消唯一键位);
-      // 此分支优先于前台打断,因为压缩期间 runState 仍 idle,
-      // interruptForegroundTurn 会落进 double-Esc rewind picker 路径,语义错误。
+      // Compaction in progress → Esc is its cancel key. Checked before
+      // foreground interrupt: runState is idle during compaction, so
+      // interruptForegroundTurn would wrongly reach double-Esc rewind.
       if (compactingControllerRef.current !== null) {
         compactingControllerRef.current.abort();
         return;
       }
       const nowMs = Date.now();
       const last = lastEscAtRef.current;
-      // 前台有活先打断（Locked sentence 3 的顺序条款，自 Ctrl+C 迁入）：
-      // 判据是 interruptForegroundTurn() 的返回值 —— 动作本身的结果（hub
-      // 现拉的新鲜前景账 + aborter 登记簿），不是 TUI 1Hz 投影：后者会漏
-      // 掉刚 spawn / 父已 idle 的 `wait:true` 子代理。
+      // Interrupt first when the foreground has work: the criterion is
+      // interruptForegroundTurn()'s own result (fresh hub-side foreground
+      // accounting + aborter registry), not the TUI 1Hz projection, which
+      // would miss wait:true children whose parent just went idle.
       if (interruptForegroundTurn()) {
         lastEscAtRef.current = nowMs;
         return;
@@ -3917,7 +4059,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // modal 活跃时独占键位。
+    // Ask modal: exclusive keys while active.
     if (askModalActive && askPending !== undefined) {
       const action = reduceModalKey(modalKeyEventOf(e), {
         options: PERMISSION_ANSWERS,
@@ -3939,12 +4081,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   });
 
-  // ── 渲染视图 ────────────────────────────────────────────────────
-  // 视口高度（行级滚动废除；scrollbox 内置 stickyScroll；ChatView 内部
-  // 自管布局高度）。banner 与消息同处 scrollbox — 不再单独扣减 banner。
-  // chrome 逐项入账（chromeReserveRows SSOT）：输入框 3 行 + mode 指示 1 行
-  // + ContextBar 1 行 + ask 槽 1 行 + headroom 1 行 + slash 候选行 + notice
-  // 折行 + modal 折行 + bgLine。
+  // ── Render views ────────────────────────────────────────────────────
+  // Viewport height: row-level scrolling is gone (scrollbox has stickyScroll;
+  // ChatView sizes itself). Banner and messages share the scrollbox, so the
+  // banner is no longer deducted separately.
+  // Chrome is budgeted item by item (chromeReserveRows SSOT): input 3 + mode
+  // 1 + ContextBar 1 + ask slot 1 + headroom 1 + slash suggestions + notice /
+  // modal wrapped rows + bgLine.
   const hintRows = inputValue.trim().startsWith("/")
     ? slashSuggestions(inputValue, skillList).length
     : 0;
@@ -3960,9 +4103,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       : rewindTargets !== undefined
         ? rewindModalRows(rewindTargets, cols, rewindIndex, rewindConfirming)
         : 0;
-  // design-25 thinking-picker 行账：picker 打开 → thinking 5 行 / effort 7 行
-  // + marginBottom 1 并入 chrome 预算（与 modalRows 同款），否则 viewport 高度被挤。
-  // config / thinking / memory / model 的判别折进模块级 helper（S5 硬门）。
+  // Picker row budget (thinking 5 / effort 7 + margins) joins the chrome
+  // budget like modalRows, or the viewport would shrink. The
+  // config/thinking/memory/model discrimination lives in a module-level helper.
   const pickerRows: number = pickerRowsForBudget({
     view,
     configPickerOpen,
@@ -3971,13 +4114,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     modelPickerOpen,
     providers: props.providers,
   });
-  // compact 进度面板:只取 active 会话的条目(与 crunchedOf / verifySlots 同款
-  // 归属校验,切走会话不残留别的会话的压缩面板)。
+  // Compact panel: only the active session's entry (same ownership check as
+  // crunchedOf / verifySlots — no other session's panel after switching away).
   const activeCompact: CompactProgressState | undefined =
     active.conversationId !== undefined
       ? compactPanels[active.conversationId]
       : undefined;
-  // 面板判别联合（渲染槽 + 类型标注共用，SSOT）。
+  // Panel discriminated union (shared by render slot + type annotation).
   const pickerState: ThinkingPickerState | null =
     view === "chat" && thinkingPickerOpen !== null
       ? thinkingPickerOpen === "thinking"
@@ -3989,38 +4132,38 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             autoOn: effortAutoOn,
           }
       : null;
-  // /model 面板渲染态（与 pickerState 同款判别：open 时构造，否则 null）。
+  // /model render state: built when open, else null (same shape as pickerState).
   const modelState: ModelPickerState | null = modelPickerStateFor(
     modelPickerOpen,
     view,
     props.providers,
     modelFocusIndex
   );
-  // /config 面板渲染态（同款判别折进 helper：open 时构造，否则 null）。
+  // /config render state: built when open, else null (helper-folded discrimination).
   const configState: ConfigPickerState | null = configPickerStateFor(
     configPickerOpen,
     view,
     configFocusIndex
   );
-  // T9：输入框行账动态化 —— wrap-aware 视觉折行行数（修 2026-08-14 用户反馈
-  // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
-  // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
+  // Wrap-aware input row count: long text without `\n` still folds at cols.
+  // The cap lives inside chromeReserveRows (SSOT); overflow scrolls within
+  // the textarea.
   const inputContentRows = inputWrapLineCount(inputValue, cols);
-  // 子代理面板在输入框下方渲染。#1044 前不入账（panelRows 恒 0）——「终端装
-  // 不下的行溢到屏幕下方」假设不成立：底部 chrome 无显式高度、默认
-  // flexShrink=1，总高超出时 Yoga 把负空间按比例摊给输入框等，内容行被压进
-  // 边框（live 子代理 ≥7 时必现，与终端高无关）。#1044 起面板行数（折叠上限
-  // SUBAGENT_PANEL_MAX_ROWS）入账 —— 输入框正常上移且始终完整显示。
-  // agent 现势：mode 行上方未勾待办单行（0-1）。
-  // 非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
+  // Subagent panel renders under the input. Its rows must be budgeted
+  // (capped at SUBAGENT_PANEL_MAX_ROWS): bottom chrome has no fixed height
+  // and flexShrink=1, so an unbudgeted panel makes Yoga squeeze input
+  // content into the borders once ≥7 live rows appear.
+  // Agent status: 0-1 unchecked-todo line above the mode row; non-chat view
+  // or no snapshot → 0 (component renders null).
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
   const subagentPanelRows = subagentPanelRowBudget(view, subagents, cols);
-  // 环境现势事件仍收（harness 给人不给模型）。D7 / SC6:envPaneRows 槽位现渲染
-  // **常驻**会话位置行（0/1 行）—— 主仓 / 非 task 路径照样画,绑任务树只把
-  // 同一行路径换成树上根(活 taskRoot 优先),显隐不再由绑定决定。分支取
-  // env_snapshot 的 gitBranch;快照尚未到（启动首拍）→ 只画路径段,不留 0 行。
-  // 只读投影（sessionLocationLines）,零 git 操作。
+  // Env snapshot events are still received (harness informs humans, not
+  // the model). envPaneRows renders a permanent session-location row (0/1):
+  // the main-repo / non-task path shows it too; binding a task tree only
+  // swaps the path for the live taskRoot. Branch comes from
+  // env_snapshot.gitBranch; before the first snapshot only the path shows.
+  // Read-only projection (sessionLocationLines), zero git operations.
   const envPaneRowBudget =
     view === "chat"
       ? sessionLocationLines({
@@ -4034,11 +4177,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols,
         }).length
       : 0;
-  // 位置行随快照重算（分支首拍由 env_snapshot 填上）。
+  // Location row recomputes with the snapshot (first frame fills the branch).
   void envSnapshot;
-  // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
-  // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
-  // 仅 chat 视图入账;切走会话不渲染(与 crunchedOf 同款归属校验)。
+  // Verify banner row budget: active session's slot + mode (hitl/auto);
+  // projectVerifyBanner (pure fn) yields 0/1 rows. Chat view only — no
+  // render for switched-away sessions (ownership check like crunchedOf).
   const verifyMode: "hitl" | "auto" =
     permMode === "full_auto" ? "auto" : "hitl";
   const verifySlot: VerifySlot | null =
@@ -4063,13 +4206,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           view === "chat" && activeCompact !== undefined
             ? compactProgressRows()
             : 0,
-        // #1044：SubagentPanel 行数入账（折叠上限内，与渲染高度恒等）——
-        // 取代「恒 0」；取代记录见 specs/tui-subagent-transcript-live.md。
+        // SubagentPanel rows are budgeted (collapsed height = render height);
+        // see specs/tui-subagent-transcript-live.md for the superseded record.
         panelRows: subagentPanelRows,
-        // specs/tui-subagent-transcript-live.md：两行已改画在会话 transcript
-        // 的 spawn 卡上（滚动区内）—— 不再吃 chrome 预留，`subagentRowBudget`
-        // 恒 0。调用点保留：入参形状是「这条预算曾是 view/subagents 的函数」
-        // 的存档，也避免将来恢复入账时要动本行。
+        // Per specs/tui-subagent-transcript-live.md those two lines moved
+        // onto the spawn card inside the transcript (scroll area), so this no
+        // longer reserves chrome and subagentRowBudget stays 0. The call site
+        // is kept so re-budgeting later needs no signature churn.
         subagentRows: subagentRowBudget(view, subagents),
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
@@ -4077,13 +4220,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         graphRows: graphChromeRows(graphProgress),
       })
   );
-  // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
+  // List view (ListView): only the notice occupies the bottom, plus 2 headroom rows.
   const listViewRows = Math.max(
     5,
     rows - 2 - noticeRenderRows(notice?.lines, cols)
   );
-  // #361 Phase D：MCP 看板视图 — 输入框 / mode 行 / ContextBar 均不渲染
-  // （view !== "chat"），底部仅 notice 占用 + 空行隔离，与列表同款预算。
+  // MCP dashboard view: input / mode row / ContextBar are not rendered
+  // (view !== "chat"); bottom is notice + blank line, same budget as the list.
   const mcpViewRows = Math.max(
     5,
     rows - 2 - noticeRenderRows(notice?.lines, cols)
@@ -4181,17 +4324,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         />
       )}
       {modelState !== null && <ModelPicker state={modelState} />}
-      {/* ADR-0096 T1+T2+T3 /config 面板：三行均可改（Enter 翻各自 holder +
-          落盘）。worktree 行 T3 接 worktreeOnMutateHolder 后激活；holder
-          缺席时退回 isolationOn 静态快照 + display-only。fsMode /
-          subagentCapHolder / worktreeOnMutateHolder 缺席时对应行 Enter
-          no-op，面板仍可开可关（与 model-picker 在 providers 缺失时不打开
-          是不同决策 —— config 面板开 open 不要求 holder 存在）。 */}
+      {/* ADR-0096 /config panel: all three rows are editable (Enter toggles
+          each holder and persists). A missing holder (fsMode / subagentCap /
+          worktreeOnMutate) makes its row display-only / no-op, but the panel
+          still opens — unlike the model picker, which refuses to open
+          without a providers registry. */}
       {configState !== null && (
         <ConfigPicker
-          // 重渲染计数器作 prop：Enter 翻 holder 后父组件重渲染，本组件随之
-          // 重新现读 holder.get()（holder 非订阅源，见 configRenderTick 注释）。
-          // 传 prop 而非 key —— key 会重挂载并重播边框动画，视觉上闪一下。
+          // Re-render counter as prop: after Enter toggles a holder, this
+          // component re-reads holder.get() (holders are not subscribable;
+          // see configRenderTick). Prop, not key — a key change would remount
+          // and visibly replay the border animation.
           renderTick={configRenderTick}
           state={configState}
           fsMode={props.fsMode}
@@ -4239,9 +4382,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               ? `[${graphOn ? "graph" : permMode === "full_auto" ? "auto" : "def"}]`
               : `mode: ${agentModeLabel({ permission: permMode, graph: graphOn })}`}
           </text>
-          {/* mode 右侧运行中实时显示秒数（`· Xs`，每秒跳）；结束后清空（mode
-              行不残留，统计移到流末尾 `Crunched for X` 行）。实时 token 计算
-              暂不做（#426 修订：先不上 token 数量计算）。 */}
+          {/* Live run seconds to the right of mode (`· Xs`, ticks per
+              second); cleared at turn end — stats move to the trailing
+              `Crunched for X` line. Real-time token counting is not done. */}
           {cols >= 40 &&
             active.runState === "running-fg" &&
             runStartedAt !== null && (
@@ -4249,16 +4392,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             )}
         </box>
       )}
-      {/* #458 包2 T3:verify 闭环终态 banner —— 滚动区外、mode 行与输入框
-          之间。slot=none → 组件渲染 null(静默,无虚假提示);HITL 直显,
-          full_auto 加 [auto] 前缀。行账经 chromeReserveRows.verifyRows 入账。 */}
+      {/* Verify terminal-state banner: outside the scroll area, between the
+          mode row and the input. slot=none renders null (silent, no fake
+          hint); HITL shows directly, full_auto prefixes [auto]. Rows
+          budgeted via chromeReserveRows.verifyRows. */}
       {view === "chat" && (
         <VerifyBannerStrip slot={verifySlot} mode={verifyMode} cols={cols} />
       )}
-      {/* specs/tui-subagent-transcript-live.md 锁句 3：prompt 上方的身份条已
-          拆除 —— 两行改画在会话 transcript 里那张 spawn 卡上（`subagents` 经
-          ChatView → 卡级投影 join）。此处不再有子代理 chrome 行，行账归零
-          （`subagentRowBudget` 恒 0）。 */}
+      {/* The subagent identity bar above the prompt was removed — those
+          two lines now render on the spawn card inside the session
+          transcript (see specs/tui-subagent-transcript-live.md), so no
+          subagent chrome rows remain here (subagentRowBudget stays 0). */}
       {view === "chat" && (
         <PromptInput
           ref={promptInputRef}
@@ -4266,8 +4410,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols={cols}
           maxLines={MAX_INPUT_LINES}
           placeholder={
-            // picker 文案（含 /model）折进 pickerPlaceholderFor；未开面板 →
-            // undefined，落回 ask / 默认文案（S5：分支体在 helper 内）。
+            // Picker placeholder text (incl. /model) lives in
+            // pickerPlaceholderFor; no picker open → ask / default text.
             pickerPlaceholderFor({
               rewindOpen: rewindTargets !== undefined,
               configPickerOpen,
@@ -4289,27 +4433,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             memoryPickerOpen ||
             modelPickerOpen ||
             configPickerOpen ||
-            // plans T7：input 失活条件由 chrome-focus 三态 reducer 接管
-            // —— focus 在 subagent 或 graph 时禁用输入框。
+            // Input deactivation follows the chrome-focus reducer: disabled
+            // while focus is on the subagent or graph ring.
             chromeFocus.kind !== "input" ||
             graphViewOpen
           }
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
           onSelectHint={(candidate) => {
-            // #337 Phase C：candidate 为 SlashCandidate 判别联合。
-            // 静态命令 → 走 handleSubmit(`/${cmd}`) 原路由（含 /new 等）；
-            // skill → 发送 skill-load。hint 可见时 Enter 走本回调而非 onSubmit
-            // （PromptInput 语义），故要保留用户已输入的 remainder：若当前
-            // inputValue 首 token 精确命中同 skill → 提整个 raw（含 remainder）；
-            // 否则（部分输入如 /ec，或 hint 选中非当前 token 的 skill）→
-            // 补全 `/name ` 形态发送。
+            // candidate is the SlashCandidate union: static command →
+            // handleSubmit(`/${cmd}`) routing; skill → skill-load send. With
+            // the hint bar visible Enter hits this callback instead of
+            // onSubmit (PromptInput semantics), so preserve the typed
+            // remainder: if inputValue's first token exactly matches the
+            // candidate, submit the raw line; otherwise send the completion.
             if (candidate.kind === "command") {
-              // 保留用户已输入的 remainder：input 首 token 精确命中同 command
-              // （如 /effort high → effort）→ 提整个 raw（含参数）；否则
-              // （部分输入如 /q，或 hint 选中非当前 token 的 command）→
-              // 补全 `/{cmd}` 形态发送。首 token 复用 slash.ts 的 slashPrefix
-              // （reviewer Medium#3：Feature Envy 收敛）。
+              // Keep typed args: if the first token exactly matches the
+              // selected command (e.g. /effort high) submit the raw line;
+              // otherwise send `/{cmd}`. First token via slash.ts slashPrefix.
               const firstTok = slashPrefix(inputValue);
               if (firstTok === candidate.command) {
                 void handleSubmit(inputValue);
@@ -4326,10 +4467,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
           }}
           onTabComplete={(value, cursor) => {
-            // 高亮非首候选（cursor > 0）→ 按 hint 选中项补全（原
-            // length===1 && cursor===0 条件使「选中补全」恒不可达——修复死
-            // 代码）；否则唯一匹配补全 / 多匹配最长公共前缀部分补全
-            // （slashComplete 三态语义）。
+            // A non-first highlighted candidate (cursor > 0) completes to
+            // the hint selection; otherwise slashComplete's three-way
+            // behavior: unique match, or longest-common-prefix partial.
             if (cursor > 0 && inputHintSuggestions.length > 0) {
               return slashCompleteFromCandidates(inputHintSuggestions, cursor);
             }
@@ -4338,34 +4478,32 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           hintSuggestions={inputHintSuggestions}
           history={inputHistory}
           onLeaveToChrome={() => {
-            // plans/tui-chrome-interaction.md T7：使用三态 chrome-focus
-            // reducer（input/subagent(row)/graph）替换旧二态 graphChromeFocus
-            // —— reducer 由 PromptInput Down/Up 触发（「视觉末/首行 + onLeaveToChrome
-            // 让出」），key 在 prompt-input 内部已被消费，因此 reducer 在此
-            // 只按"离开 input"语义走：input → 第一个可达环（subagent 或 graph）。
+            // The three-state chrome-focus reducer (input/subagent(row)/
+            // graph) replaces the old two-state graphChromeFocus.
+            // PromptInput has already consumed the key when this fires, so
+            // here the reducer only applies "leave input" semantics:
+            // input → first reachable ring (subagent or graph).
             const next = reduceChromeFocus({
               focus: chromeFocus,
               key: "down",
               subagentCount: liveSubagentCount,
               hasSnapshot: graphProgress !== null,
             });
-            // reducer 是纯函数，相同 input → 同样 output；用 !== 比较 identity
-            // 即可探测焦点变化。
+            // Pure reducer: detect the focus change with !== identity.
             if (next.focus !== chromeFocus) {
               setChromeFocus(next.focus);
             }
-            // onLeaveToChrome 返回 true 表示 PromptInput 已让出键位（消费
-            // 了 preventDefault），app 层不再二次处理。focus 不变（input 上
-            // 无可达环）→ 返回 false，让 PromptInput 保留状态（与 T6 reducer
-            // 同契约）。
+            // true = PromptInput yielded the key (preventDefault consumed),
+            // so the app layer must not re-process it. Focus unchanged (no
+            // reachable ring) → false, letting PromptInput keep its state.
             return next.focus !== chromeFocus;
           }}
         />
       )}
-      {/* chrome footer 顺序（prompt 之下，JSX 顺序 = 视觉顺序 —— 新增行必须
-          插在 ContextBar 之后，不得插到 ContextBar 与 PromptInput 之间）：
-            ContextBar（model + ctx，prompt 下第一行）→
-            session location（路径 · 分支）→ subagent task list → graph。 */}
+      {/* Chrome footer order below the prompt — JSX order = visual order.
+          New rows go after ContextBar, never between ContextBar and
+          PromptInput: ContextBar (model + ctx) → session location
+          (path · branch) → subagent task list → graph. */}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
@@ -4374,9 +4512,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             running={active.runState === "running-fg"}
             cols={cols}
             activeToolName={activeToolLabel}
-            // model 段由 ContextBar 直接订阅 envDisplay —— env 变化不进 React
-            // 树，本组件不重渲染、也不必经 props 把模型名传导下去。providers
-            // 是启动期常量注册表，仍走 props。
+            // ContextBar subscribes to envDisplay itself: env changes never
+            // re-render this tree, so the model name needn't be threaded via
+            // props. providers is a startup constant and still comes via props.
             envDisplay={envDisplay}
             providers={props.providers}
             effortLabel={
@@ -4385,9 +4523,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           />
         </box>
       )}
-      {/* D7 / SC6: 会话位置行（ContextBar 之下、子代理之上；envPaneRows 槽位
-          入账不变）—— 常驻 1 行 `路径 · 分支`，绑任务树时同一槽换成树上根。
-          不进焦点环、不带 dirty/diff。 */}
+      {/* Session location row (below ContextBar, above the subagent
+          panels; envPaneRows budget unchanged): a permanent
+          `path · branch` line whose slot shows the task-tree root when
+          bound. Not in the focus ring, no dirty/diff. */}
       {view === "chat" &&
         sessionLocationLines({
           projectRoot: props.cwd,
@@ -4403,11 +4542,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             {line.text}
           </text>
         ))}
-      {/* 子代理状态：路径行之下。#1044 起计入 chrome 行账（panelRows =
-          折叠后行数，上限 SUBAGENT_PANEL_MAX_ROWS）。
-          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
-          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
-          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
+      {/* Subagent panel under the location row; its rows count into the
+          chrome budget (collapsed at SUBAGENT_PANEL_MAX_ROWS). focusedRow
+          expands that live row's full taskPreview with a `> ` prefix while
+          others stay truncated — only reducer-addressable live rows
+          (SubagentPanel projects by liveIndex). */}
       {view === "chat" && (
         <SubagentPanel
           subagents={subagents}
@@ -4439,8 +4578,8 @@ export function infoLines(
   key: string,
   contextWindow: number,
   thinking: { readonly enabled: boolean; readonly effort: ThinkingEffortWire },
-  /** 当前模型串（spec SC11：`Model: <provider>/<model>`）。**原样**透出：
-   *  无 providers 段时也走同一行，不伪造 provider 前缀。 */
+  /** Current model string, shown verbatim as `Model: <provider>/<model>`;
+   *  without a providers section the same line still shows — no fake prefix. */
   model: string | undefined
 ): ReadonlyArray<string> {
   const lu = session.lastUsage;
@@ -4452,14 +4591,13 @@ export function infoLines(
           `cache read: ${lu.cacheReadInputTokens}`,
           `window: ${contextWindow}`,
         ];
-  // thinking 档位行：off / adaptive (auto) / adaptive (high) 等。effort 空串
-  // 且 enabled → "auto"（未显式指定档位）；展示标签复用 formatEffortLabel
-  // （reviewer Medium#2：消除 `|| "auto"` 重复）。
+  // Thinking row: off / adaptive (auto) / adaptive (high)...
+  // formatEffortLabel maps an empty enabled effort to "auto" (single label source).
   const thinkingLine = thinking.enabled
     ? `thinking: adaptive (${formatEffortLabel(thinking.effort)})`
     : "thinking: off";
-  // spec SC11：`Model: <provider>/<model>` 一行。model 未接线（envDisplay 快照
-  // 里没有模型路由串）→ 整行退场，不渲染 `Model: undefined`。
+  // `Model: <provider>/<model>` line: when the envDisplay snapshot has no
+  // model route, drop the whole line instead of rendering `Model: undefined`.
   const modelLine = model !== undefined ? [`Model: ${model}`] : [];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
@@ -4475,8 +4613,8 @@ export function infoLines(
   ];
 }
 
-/** 后台会话状态行（spec #146 SC5：`后台运行中 · <title>`）。
- *  纯函数可单测：title 为空时回退「后台运行中」（不加尾缀）。 */
+/** Background-session status line: "running in background · <title>".
+ *  Pure and unit-testable: an empty title falls back to the bare label. */
 export function bgStatusLine(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string {
@@ -4485,12 +4623,10 @@ export function bgStatusLine(
 }
 
 /**
- * ADR-0094 SC4-SC5：viewport API error 单点文案构造。
- *
- * 输入 = `summarizeTransportCause` 的产出（`{ status?, message }`）。status
- * 在场 → 「⚠ API error (status): 原文」；缺席 → 「⚠ API error: 原文」。
- * 三处调用点（continue catch / 默认 catch / 正常返回 notice 分支）共用本
- * helper，禁止再内联重复三元。
+ * ADR-0094: single-point builder for the viewport API-error notice line.
+ * Input is summarizeTransportCause output ({ status?, message }): with a
+ * status → "⚠ API error (status): ...", otherwise "⚠ API error: ...". All
+ * three call sites share this helper — no inlined ternary duplicates.
  */
 function apiErrorNoticeLine(summary: {
   readonly status?: number;
@@ -4502,10 +4638,10 @@ function apiErrorNoticeLine(summary: {
 }
 
 /**
- * throw 路径的供应商失败判别：只有带 HTTP status 的提炼结果才视为供应商
- * /传输层错误（SDK APIError 形状）。hub 侧本地校验错误（ValidationError /
- * NotFoundError 等无 status 的 Error）→ undefined，沿用既有 describeError
- * 文案，不冒充 API error。
+ * Throw-path provider-failure test: only summaries carrying an HTTP status
+ * (SDK APIError shape) count as provider/transport errors. Hub-side local
+ * validation errors (status-less ValidationError / NotFoundError) return
+ * undefined so describeError text stands — never posing as an API error.
  */
 function transportApiErrorFromThrow(
   err: unknown
@@ -4517,9 +4653,10 @@ function transportApiErrorFromThrow(
 }
 
 /**
- * throw 路径整块收口（runTurnOnce catch 的复杂度单点）：按 mode 决定 notice
- * 行 / 停止因 / 是否跳过刷新。continue 的 EXIT / 校验错误不落 stopReason
- * （后续按 completed 投影，保持既有语义）。
+ * Whole throw-path outcome for runTurnOnce's catch (single complexity
+ * point): picks notice lines / stop reason / refresh skip per mode. A
+ * continue EXIT / validation error sets no stopReason — it projects as
+ * completed to keep existing semantics.
  */
 function turnFailureOutcome(opts: {
   readonly mode: "append" | "continue" | "wake";
@@ -4568,8 +4705,9 @@ function turnFailureOutcome(opts: {
 }
 
 /**
- * 异常 stopReason 分支的 notice 行：protocolError + apiError → API error
- * 专用文案；其余异常停 → 通用「turn 未成功结束」。
+ * Notice lines for abnormal stopReasons: protocolError + apiError gets the
+ * dedicated API-error text; other abnormal stops get the generic
+ * "turn did not finish" line.
  */
 function abnormalStopNoticeLines(
   stopReason: string,
@@ -4581,10 +4719,10 @@ function abnormalStopNoticeLines(
 }
 
 function describeError(err: unknown): string {
-  // ADR-0093 / specs/tui-model-command.md SC4：provider 命中但 apiKeyEnv 未设
-  // 是 typed **plain object**（非 Error）。必须先按判别联合识别，否则
-  // `String(err)` 会打成 `[object Object]`，kind / providerId / apiKeyEnv 全
-  // 不可见（code-quality.md typed-error catch 契约）。
+  // ADR-0093: a provider hit with unset apiKeyEnv is a typed plain object,
+  // not an Error. Recognize the discriminated union `kind` first —
+  // String(err) would flatten it to [object Object], hiding kind /
+  // providerId / apiKeyEnv (typed-error catch contract, code-quality.md).
   if (isLlmProviderConfigError(err)) {
     return formatLlmProviderConfigError(err);
   }

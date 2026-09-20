@@ -2,40 +2,48 @@
 /**
  * src/tui/run.tsx
  *
- * #343 T6-C：OpenTUI 渲染入口扩展（端到端装配）。T1 阶段仅做 root.render
- * + E1/E2 单一 catch；本步完成 product 路径的全量接线：
- *  - prepareRuntime → buildTuiDeps（real adapter + ACI 10 工具 + askUser
- *    桥接 + postToolUse 事件）；
- *  - createInflightRegistry + createTuiBridge（SessionStore + SessionHub
- *    + 单会话归因 soleInflightId + contextWindow 透传）；
- *  - createToolEventSink + createTuiAskUserBridge；
- *  - resolvePermissionMode（`--auto-mode` / IKNOW_PERMISSION_MODE 初始值） +
- *    createSessionGrants（#279 项3 always 落点）+ 注入 deps 与 TuiApp；
- *  - sessionId resume：`iknow tui <id>` → loadSessionFile → attachSession
- *    → initialSession prop；
+ * OpenTUI render entry: full product-path assembly.
+ *  - prepareRuntime → buildTuiDeps (real adapter + ACI tool set + askUser
+ *    bridge + postToolUse events);
+ *  - createInflightRegistry + createTuiBridge (SessionStore + SessionHub
+ *    + soleInflightId attribution + contextWindow pass-through);
+ *  - createToolEventSink + createTuiAskUserBridge;
+ *  - resolvePermissionMode (`--auto-mode` / IKNOW_PERMISSION_MODE initial
+ *    value) + createSessionGrants (always-grant persistence) + injection
+ *    into deps and TuiApp;
+ *  - session resume: `iknow tui <id>` → loadSessionFile → attachSession
+ *    → initialSession prop;
  *  - `<TuiApp bridge askBridge toolEventSink cwd dataDir permissionMode
- *    sessionGrants info initialSession onQuit/>`，onQuit 触发 renderer.destroy。
+ *    sessionGrants info initialSession onQuit/>`, onQuit triggers
+ *    renderer.destroy.
  *
- * 错误路径（specs/321 Error Paths E1/E2）：渲染器构造 / 运行抛错 → 类型化
- * stderr 消息 + 退出码 1。runTui 有且仅有一个 catch 点，全部清理（终端
- * teardown + destroy 渲染器）收口于该点。createRenderer 注入口保留供测试诱导。
- * 另有第三条错误路径（catch 之外）：非 TTY fail-fast —— 生产路径（未注入
- * createRenderer）且 stdin/stdout 非交互终端时，装配前直接类型化 stderr +
- * 退出码 1（新版 OpenTUI 非 TTY 可建 renderer，无此守卫会挂死）。
+ * Error paths: renderer construction / runtime throw → typed stderr
+ * message + exit code 1. runTui has exactly one catch point; all cleanup
+ * (terminal teardown + renderer destroy) converges there. createRenderer
+ * stays injectable for tests to induce failures. A third error path lives
+ * outside the catch: non-TTY fail-fast — on the production path (no
+ * injected createRenderer) with non-interactive stdin/stdout, emit typed
+ * stderr + exit 1 before any assembly (newer OpenTUI builds a renderer on
+ * non-TTY successfully, which would hang without this guard).
  *
- * T2 顺序不变式（2026-09-14 事故）：渲染器工厂在**装配之后**才调用 —— 装配
- * 链（prepareRuntime / workspaceRoot / permissionMode / buildTuiDeps）会抛
- * typed plain object（provider_api_key_missing / WorkspaceRootError），此前
- * 建渲染器等于先探测终端（OSC 10/11 能力查询 + alternate screen），抛错后
- * 终端残留能力应答。非 TTY fail-fast 仍在任何装配与渲染器之前。
- * 错误体渲染走 cli.ts 同款判别联合（`isLlmProviderConfigError` /
- * `isWorkspaceRootError`），绝不 `String(plain object)` → `[object Object]`。
+ * Renderer-after-assembly ordering invariant (2026-09-14 incident): the
+ * assembly chain (prepareRuntime / workspaceRoot / permissionMode /
+ * buildTuiDeps) throws typed plain objects (provider_api_key_missing /
+ * WorkspaceRootError); creating the renderer first would probe the terminal
+ * (OSC 10/11 capability queries + alternate screen) and leave capability
+ * replies stranded after a throw. Non-TTY fail-fast still precedes all
+ * assembly and rendering. Error bodies render via the same
+ * discriminated-union dispatch as cli.ts (`isLlmProviderConfigError` /
+ * `isWorkspaceRootError`) — never `String(plain object)` →
+ * `[object Object]`.
  *
- * T6 终端收口：catch / /quit / 正常退出三路都经 `teardownTerminal` 闭包调
- * 同一个 `teardownTuiTerminal` —— 关鼠标追踪（raw mode 仍开，OpenTUI
- * #904 类：先恢复 cooked mode 会把在途鼠标报告回显到 shell prompt）→
- * destroy（内部恢复 cooked mode）→ 丢弃 stdin 缓冲的能力应答（OSC 10/11
- * `rgb:` / DECRQM `$y`）→ raw mode 兜底。顺序理由见该函数头注。
+ * Terminal teardown: all three exits (catch / /quit / normal) go through
+ * the `teardownTerminal` closure calling one `teardownTuiTerminal` —
+ * disable mouse tracking (raw mode still on; restoring cooked mode first
+ * would echo in-flight mouse reports to the shell prompt) → destroy
+ * (restores cooked mode internally) → discard buffered stdin capability
+ * replies (OSC 10/11 `rgb:` / DECRQM `$y`) → raw-mode fallback. See the
+ * function's header comment for the ordering rationale.
  */
 import {
   CliRenderEvents,
@@ -107,50 +115,59 @@ import {
 import { homedir } from "node:os";
 import { shutdownDefaultLspPool } from "../harness/lsp/client.js";
 
-/** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
+/** Typed error prefix for renderer startup failures (message constants, no magic strings). */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
 
 export interface RunTuiOptions {
-  /** `iknow tui <session-id>` resume；缺省 = 新会话（Q2=C）。 */
+  /** `iknow tui <session-id>` resume; default = new session. */
   readonly sessionId?: string;
-  /** 会话池根目录（--data-dir）；缺省 ~/.iknow（ADR-0087）。 */
+  /** Session pool root (--data-dir); default ~/.iknow (ADR-0087). */
   readonly dataDir?: string;
   /**
-   * ADR-0019: per-root state anchor — CLI `--workspace-root` flag 透传。
-   * 装配期 resolve 一次并透传到 build-engine。Persona seed 走
-   * userHome/.iknow,不跟 workspaceRoot。会话池不跟它分片（ADR-0087）。
+   * ADR-0019: per-root state anchor — passed through from the CLI
+   * `--workspace-root` flag. Resolved once at assembly and forwarded to
+   * the build engine. Persona seeds stay at userHome/.iknow, not
+   * workspaceRoot. The session pool is not sharded by it (ADR-0087).
    */
   readonly workspaceRoot?: string;
-  /** JSONL trace 输出路径。缺省(经 resolveTraceRoot)落本入口写侧 dataDir ——
-   *  与 hub 写 trace 的会话文件夹同池,读侧工具/面板扫描根不与写侧分叉。 */
+  /** JSONL trace output path. Default (via resolveTraceRoot) uses this
+   *  entry's resolved dataDir — the same pool the hub writes per-session
+   *  traces to, so reader-side tools/panels never scan a root that
+   *  diverges from the writer. */
   readonly traceOut?: string;
   /**
-   * `iknow tui --auto-mode`：显式初始权限模式。优先于 IKNOW_PERMISSION_MODE。
-   * 缺省 undefined → 走 env → default。
+   * `iknow tui --auto-mode`: explicit initial permission mode, taking
+   * precedence over IKNOW_PERMISSION_MODE. Undefined → env → default.
    */
   readonly permissionMode?: string;
-  /** 测试注入口：覆盖渲染器工厂（诱导 E1/E2）；生产缺省 createCliRenderer。 */
+  /** Test seam: override the renderer factory (to induce startup errors);
+   *  production uses createCliRenderer. */
   readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
 }
 
-/** Ctrl+C 语义自管：不退出进程，打断走 app 层 Esc 分支（#146 Q1a；
- *  2026-09-18 键位迁移后 Ctrl+C 只剩选区复制，进程级 SIGINT 仍兜底）。
- *  alternate-screen：scrollback 收口（#321 问题 1）。
- *  不 freeze：OpenTUI 0.5.1 的 CliRenderer 构造器在 Linux 下会写
- *  config.useThread 默认值，冻结对象抛 "not extensible"（实测）。 */
+/** Self-managed Ctrl+C: do not exit the process; interruption goes through
+ *  the app-layer Esc path (after the 2026-09-18 keybinding migration Ctrl+C
+ *  only does selection copy; the process-level SIGINT remains as a safety
+ *  net).
+ *  alternate-screen: keeps scrollback clean.
+ *  No freeze: OpenTUI 0.5.1's CliRenderer constructor writes the
+ *  config.useThread default on Linux, so a frozen object throws
+ *  "not extensible" (observed). */
 const RENDERER_CONFIG: CliRendererConfig = {
   exitOnCtrlC: false,
   screenMode: "alternate-screen",
 };
 
 /**
- * T2 / code-quality.md typed-error catch 契约：启动失败的错误体渲染。
+ * Typed-error catch contract: render startup-failure error bodies.
  *
- * LLM provider / workspace-root 是 typed **plain object**（`satisfies` 形态，
- * 非 Error 实例）—— 此前 catch 的 `String(err)` 把它打成 `[object Object]`，
- * kind / providerId / apiKeyEnv 全不可见（2026-09-14 事故的 TUI 侧症状）。
- * 分支顺序对齐 cli.ts `printCliError`：判别联合优先，Error 次之，其余对象
- * 走 JSON（非有损；循环引用退构造器名），**绝不**产出 `[object Object]`。
+ * LLM provider / workspace-root errors are typed **plain objects**
+ * (`satisfies` shape, not Error instances) — a bare `String(err)` renders
+ * them as `[object Object]`, hiding kind / providerId / apiKeyEnv (the
+ * TUI-side symptom of the 2026-09-14 incident). Branch order mirrors cli.ts
+ * `printCliError`: discriminated unions first, then Error, other objects
+ * via JSON (lossless; circular refs fall back to the constructor name).
+ * Never emit `[object Object]`.
  */
 export function describeTuiStartError(err: unknown): string {
   if (isLlmProviderConfigError(err)) return formatLlmProviderConfigError(err);
@@ -160,35 +177,44 @@ export function describeTuiStartError(err: unknown): string {
     try {
       return JSON.stringify(err);
     } catch {
-      // 循环引用 / BigInt 无法 JSON 化：退构造器名，仍不产生 [object Object]。
+      // Circular refs / BigInt cannot be JSON-ified: fall back to the
+      // constructor name, still never producing [object Object].
       return `[${err.constructor?.name ?? "object"}]`;
     }
   }
   return String(err);
 }
 
-/** 终端收口所需的最小 stdin 面（结构类型：测试注入 fake，生产 = process.stdin）。 */
+/** Minimal stdin surface needed for terminal teardown (structural type:
+ *  tests inject a fake; production = process.stdin). */
 export interface TuiTerminalStdin {
   readonly isRaw?: boolean;
   read: () => unknown;
   setRawMode?: (mode: boolean) => unknown;
 }
 
-/** 丢弃 stdin 里已到达但未消费的字节（能力查询应答）。
+/** Discard bytes that have already arrived in stdin but were never
+ *  consumed (capability-query replies).
  *
- *  `read()` 循环与 OpenTUI `resume()` 的清缓冲同款：渲染器写出的 OSC 10/11
- *  `rgb:` / DECRQM `$y` 应答在退出窗口内到达时，若留在缓冲里，进程退出后
- *  shell 会把它当键盘输入回显到下一个 prompt（2026-09-14 事故的残留形态，
- *  同族还有鼠标追踪的 `M` 报告）。这里主动消费掉；流已 close / 不可读时
- *  read 抛错按无可清理处理。
+ *  The `read()` loop mirrors OpenTUI's own buffer purge in `resume()`: OSC
+ *  10/11 `rgb:` / DECRQM `$y` replies (same family: mouse-tracking `M`
+ *  reports) arriving within the exit window would otherwise be echoed by
+ *  the shell as keyboard input into the next prompt after this process
+ *  exits. We consume them proactively; when the stream is closed /
+ *  unreadable, read throws and is treated as nothing to clean.
  *
- *  只消费**已进入用户态缓冲**的字节（同 OpenTUI resume() 的同步 drain），
- *  仍在内核 tty 队列里的字节本函数看不到 —— 见 teardownTuiTerminal 头注。 */
-/** ADR-0096 T2 ── 子代理并发上限落盘通道（fire-and-forget，失败由 app.tsx
- *  notice 兜底）。与 `persistFsMode` 同形态但返回 `{ok, reason}` 而非 throw：
- *  TuiAppProps.onPersistSubagentCap 契约如此 —— 模型描述 getter 反映的是
- *  holder 现值，文件层失败不撤回 holder。`activeEnvLoader.markSelfWrite`
- *  与 `persistThinking` / `persistFsMode` 同步防 self-write 回路。 */
+ *  Only bytes already in the **user-space buffer** are consumed (the same
+ *  synchronous drain as OpenTUI resume()); bytes still in the kernel tty
+ *  queue are invisible to this function — see the teardownTuiTerminal
+ *  header note. */
+/** ADR-0096 — subagent concurrency-cap persistence channel
+ *  (fire-and-forget; failures surface as app.tsx notices). Same shape as
+ *  `persistFsMode` but returns `{ok, reason}` instead of throwing: the
+ *  TuiAppProps.onPersistSubagentCap contract is like that — the tool
+ *  description getter reflects the holder's current value, so a file-layer
+ *  failure does not roll back the holder. `activeEnvLoader.markSelfWrite`
+ *  prevents the settings self-write loop, as in `persistThinking` /
+ *  `persistFsMode`. */
 async function persistSubagentCapImpl(
   patch: SubagentCapPersistPatch,
   activeEnvLoader: EnvLoader
@@ -208,12 +234,14 @@ async function persistSubagentCapImpl(
   }
 }
 
-/** ADR-0096 T3 ── worktree 门禁落盘通道（fire-and-forget，失败由 app.tsx
- *  notice 兜底）。与 `persistFsMode` 逐条同形：用户层键 `isolation.
- *  worktreeOnMutate`，`activeEnvLoader.markSelfWrite` 防 self-write 回路，
- *  错误重新抛出（TuiAppProps.onPersistWorktreeOnMutate 契约 = Promise<void>，
- *  由 app 的 catch 落 notice），holder 已翻不撤回 —— 门禁下一次 wave 即按
- *  新值裁决（ADR-0037 §1：翻 ON 只拦未绑树 mutate，从不 auto-provision）。 */
+/** ADR-0096 — worktree-gate persistence channel (fire-and-forget; failures
+ *  surface as app.tsx notices). Item-for-item same shape as `persistFsMode`:
+ *  user-layer key `isolation.worktreeOnMutate`, `markSelfWrite` to suppress
+ *  the self-write loop, errors rethrown (the
+ *  TuiAppProps.onPersistWorktreeOnMutate contract = Promise<void>, app's
+ *  catch renders the notice), and a flipped holder is not rolled back — the
+ *  gate adjudicates the next wave on the new value (ADR-0037: flipping ON
+ *  only blocks unbound-tree mutations and never auto-provisions). */
 async function persistWorktreeOnMutateImpl(
   on: boolean,
   activeEnvLoader: EnvLoader
@@ -237,54 +265,62 @@ function drainTuiStdin(stdin: TuiTerminalStdin): void {
     try {
       chunk = stdin.read();
     } catch {
-      // EXIT: 流已 close / 不可读 —— 没有可丢弃的缓冲，收口继续。
+      // EXIT: stream closed / unreadable — nothing buffered to discard; teardown continues.
       return;
     }
-    // EXIT: 缓冲已空（null = EOF，undefined = 无更多数据）。
+    // EXIT: buffer empty (null = EOF, undefined = no more data).
     if (chunk === null || chunk === undefined) return;
-    // discard：这些字节是本进程发出查询的应答，不属于任何调用方。
+    // Discard: these bytes are replies to this process's own queries and belong to no caller.
   }
 }
 
 /**
- * T6 终端收口唯一实现（catch / `/quit` / 正常退出三路共用）。
+ * Single terminal-teardown implementation (shared by catch / `/quit` /
+ * normal exit).
  *
- * 顺序即契约，四步各自补 OpenTUI 0.5.1 `renderer.destroy()` **不覆盖**的面：
- *  1. `useMouse = false`（raw mode 仍开时先发鼠标关闭序列）。destroy 内部先
- *     恢复 cooked mode、鼠标关闭序列由原生层在后面才发 —— 中间窗口里在途
- *     鼠标报告会被 shell 回显成 `35;83;40M` 类垃圾（OpenTUI #904 类）。
- *  2. `destroy()`：恢复 cooked mode / 退出 alternate screen / 移除 stdin
- *     监听 / 释放 native 指针。这些交给 OpenTUI，本函数不重复实现。
- *  3. `drainTuiStdin`：丢弃缓冲里的能力应答。放在 destroy **之后** ——
- *     收下 destroy 窗口期到达的字节；此刻 OpenTUI 的 stdin 监听已摘除、
- *     流已 pause，本函数读取不与解析器抢数据。仍在内核 tty 队列、尚未被
- *     用户态读到的字节省略（同步 API 不可见；那条腿靠 T2 顺序不变式
- *     —— 装配失败时根本不发查询，从源头不产生应答）。
- *  4. raw mode 兜底：destroy 抛错 / 未曾跑成（外部已 destroy 但 raw 仍开）时
- *     恢复 cooked。`isRaw === true` 才调，正常路径下是 no-op。
+ * The order is the contract; each of the four steps covers a gap that
+ * OpenTUI 0.5.1 `renderer.destroy()` does **not**:
+ *  1. `useMouse = false` (send the mouse-disable sequence while raw mode
+ *     is still on). destroy() restores cooked mode first and the native
+ *     layer disables mouse only afterwards — in-flight mouse reports
+ *     echoed within that window show up as `35;83;40M`-style garbage.
+ *  2. `destroy()`: restore cooked mode / leave alternate screen / remove
+ *     stdin listeners / release native pointers. Left to OpenTUI, not
+ *     reimplemented here.
+ *  3. `drainTuiStdin`: drop buffered capability replies — placed **after**
+ *     destroy so bytes that arrived during the destroy window are also
+ *     caught; at this point OpenTUI's stdin listener is detached and the
+ *     stream paused, so this read cannot race the parser. Bytes still in
+ *     the kernel tty queue are skipped (invisible to the synchronous API;
+ *     that leg is short-circuited by the assembly-before-renderer ordering
+ *     — a failed assembly never emits the queries in the first place).
+ *  4. Raw-mode fallback: restore cooked mode when destroy threw or never
+ *     ran (externally destroyed but raw still on). Only called when
+ *     `isRaw === true`; a no-op on the normal path.
  *
- * 幂等：已 destroy 的 renderer 跳过 1–2，3–4 仍执行 —— `/quit` 上 app.tsx
- * 的 `if (!renderer.isDestroyed)` 守卫与 whenDestroyed 收口路径都会二次进入。
- * 失败一律不上抛：收口异常不能覆盖调用方正在呈现的原始错误。
+ * Idempotent: an already-destroyed renderer skips steps 1–2 but still runs
+ * 3–4 — both the `if (!renderer.isDestroyed)` guard on app.tsx `/quit` and
+ * the whenDestroyed teardown path re-enter here. Failures never propagate
+ * upward: teardown errors must not mask the caller's original error.
  */
 export function teardownTuiTerminal(
   renderer?: CliRenderer,
   stdin: TuiTerminalStdin = process.stdin
 ): void {
-  // EXIT: 从未创建 renderer（T2 顺序不变式下的装配失败）= 从未探测终端，
-  // 无需收口。
+  // EXIT: renderer never created (assembly failure under the ordering
+  // invariant) = terminal never probed, nothing to tear down.
   if (renderer === undefined) return;
   if (!renderer.isDestroyed) {
     try {
       renderer.useMouse = false;
     } catch {
-      // EXIT: 渲染循环已坏（native 已释放等）—— 本步放弃，但 destroy / drain
-      // 仍然必须继续，收口不能半途而废。
+      // EXIT: render loop already broken (native released, etc.) — skip this
+      // step, but destroy / drain must still run; teardown cannot stop halfway.
     }
     try {
       renderer.destroy();
     } catch {
-      // EXIT: destroy 失败不得上抛（覆盖调用方原始错误）；raw mode 由下方兜底。
+      // EXIT: destroy failure must not propagate (would mask the caller's error); raw mode is handled by the fallback below.
     }
   }
   drainTuiStdin(stdin);
@@ -292,21 +328,23 @@ export function teardownTuiTerminal(
     try {
       stdin.setRawMode(false);
     } catch {
-      // EXIT: 流已 close —— 终端随进程退出复位，无进一步动作。
+      // EXIT: stream closed — the terminal resets on process exit; no further action.
     }
   }
 }
 
 /**
- * 启动 TUI 渲染循环，返回进程退出码（0 = 正常退出，1 = E1/E2 类型化失败）。
- * cli.ts 将返回值落为 process.exitCode。
+ * Start the TUI render loop; returns the process exit code (0 = normal
+ * exit, 1 = typed startup failure). cli.ts assigns it to process.exitCode.
  */
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
-  // 非 TTY fail-fast：OpenTUI 新版在非 TTY 下也能成功创建 renderer（不再
-  // 抛错），不拦截会一路装配到 whenDestroyed 永久挂死（管道 / 重定向场景
-  // 实测挂起）。此处在任何装配与渲染器创建前拦截，无资源需清理，故不进
-  // 下方单一 catch。注入 createRenderer 的测试路径（E1/E2）跳过本检查 —
-  // 它们诱导的是渲染器错误路径，与 TTY 探测无关。
+  // Non-TTY fail-fast: newer OpenTUI creates a renderer successfully on
+  // non-TTY, so without this guard assembly proceeds all the way to
+  // whenDestroyed and hangs forever (observed on pipes / redirection).
+  // Intercept before any assembly or renderer creation — no resources to
+  // clean, so this path intentionally stays outside the single catch below.
+  // Test paths that inject createRenderer skip the check — they induce
+  // renderer error paths, unrelated to TTY probing.
   if (
     options.createRenderer === undefined &&
     (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -319,36 +357,44 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const factory = options.createRenderer ?? createCliRenderer;
   let renderer: CliRenderer | undefined;
   let onQuitBridge: { destroy: (conversationId?: string) => void } | undefined;
-  // /quit 时活跃会话的 conversationId（app.tsx quit() 经 onQuit 传入）。
-  // whenDestroyed + shutdownExtensions 收口后（终端已恢复到主屏）打印
-  // resume 提示；draft 未建档（undefined）则不打印。
+  // conversationId of the active session at /quit time (passed by app.tsx
+  // quit() via onQuit). The resume hint prints after whenDestroyed +
+  // shutdownExtensions have restored the terminal to the main screen; an
+  // unfiled draft (undefined) prints nothing.
   let quitResumeConversationId: string | undefined;
-  // #337 Phase B:TUI 扩展面透出(skillCatalog / mcp.status / mcp.reload / shutdown),
-  // 由 buildTuiDeps 的 onExtensions 回调同步注入。退出路径调用 shutdownExtensions()
-  // 关闭 MCP manager(避免 stdio 子进程泄漏);幂等封装保证 onQuit 与 whenDestroyed
-  // 兜底路径共享同一 shutdown promise,不会重复关闭产生 spurious warn。
+  // Expose the TUI extension surface (skillCatalog / mcp.status / mcp.reload
+  // / shutdown), injected synchronously by buildTuiDeps' onExtensions
+  // callback. The exit path calls shutdownExtensions() to close the MCP
+  // manager (avoiding leaked stdio children); the idempotent wrapper lets
+  // onQuit and the whenDestroyed fallback share one shutdown promise, so a
+  // double close cannot produce a spurious warn.
   let tuiExtensions: TuiExtensions | undefined;
-  // settings-hot-reload（T4）:EnvLoader 提升到 try 外层 —— 三条退出路径
-  // （/quit onQuitBridge / 信号 registerShutdown / catch 错误路径）都必须释放
-  // fs watcher 句柄，否则事件循环不空 → 进程 /quit 后挂死（reviewer blocker）。
-  // 声明延后到装配成功后赋值；stop() 幂等，未初始化（装配前抛错）时 no-op。
+  // Settings hot-reload: EnvLoader is hoisted outside the try — all three
+  // exit paths (/quit onQuitBridge / signal registerShutdown / catch) must
+  // release the fs watcher handle, otherwise the event loop never drains
+  // and the process hangs after /quit. Assignment happens after assembly
+  // succeeds; stop() is idempotent, so an uninitialized (pre-assembly throw)
+  // case is a no-op.
   let envLoader: EnvLoader | undefined;
   let shutdownPromise: Promise<void> | undefined;
-  // 收敛修复 (2026-08-29 第二轮 review):late-bound hub 引用盒 —— 定义在
-  // shutdownExtensions 之前(该闭包在 try 外,拿不到 try 内的 bridgeRef)。
-  // /quit 路径经 shutdownExtensions 也必须收口 per-root 重建引擎;信号路径
-  // 由 combinedShutdown 兜底(hub.shutdown 幂等,双路径重复调用无害)。
+  // Late-bound hub reference box — declared before shutdownExtensions (that
+  // closure lives outside the try and cannot see try-local state). The /quit
+  // path must also close per-root rebuilt engines via shutdownExtensions;
+  // the signal path is covered by combinedShutdown (hub.shutdown is
+  // idempotent, so dual-path calls are harmless).
   const hubRef: { current?: { shutdown: () => Promise<void> } } = {};
   const shutdownExtensions = (): Promise<void> => {
     if (shutdownPromise === undefined) {
       shutdownPromise = (async () => {
-        // watcher 先释放（不再有 reload 事件），再关 MCP/subagent。
+        // Release the watcher first (no more reload events), then close MCP/subagent.
         envLoader?.stop();
-        // 进程级 LSP 池终止（/quit 挂死根因收口）：warmup / lsp_* spawn 的
-        // language server 子进程 stdio 管道不释放,事件循环排不空。放在任何
-        // early-return 之前 —— 装配早期失败（onExtensions 注入前）路径下
-        // warmup 子进程也必须收口;幂等 + latch,未 spawn 时为 no-op。引擎
-        // shutdown 不负责此项（rebind 中途会调用,不得 latch 共享池）。
+        // Kill the process-wide LSP pool (root cause of /quit hangs):
+        // language-server children from warmup / lsp_* spawn keep stdio
+        // pipes open, so the event loop never drains. Placed before any
+        // early return — even an early assembly failure (before onExtensions
+        // injection) must reap warmup children; idempotent + latched, no-op
+        // when nothing was spawned. Engine shutdown does not own this
+        // (rebind calls it mid-flight and must not latch the shared pool).
         await shutdownDefaultLspPool();
         const ext = tuiExtensions;
         if (!ext) return;
@@ -361,9 +407,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
             }\n`
           );
         }
-        // 收敛修复:ext.shutdown() 只关初始引擎;tuiExtensions 未注入
-        // (装配早期退出)时上一行已 return —— hub.shutdown 兜底收口
-        // per-root 重建引擎(hub 持 engineByRoot 全量句柄)。
+        // ext.shutdown() only closes the initial engine; when tuiExtensions
+        // was never injected (early exit during assembly) the line above has
+        // already returned — hub.shutdown is the backstop that closes
+        // per-root rebuilt engines (the hub holds all engineByRoot handles).
         try {
           await hubRef.current?.shutdown();
         } catch (err) {
@@ -377,13 +424,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }
     return shutdownPromise;
   };
-  // T6：三条退出路径（catch / /quit onQuitBridge / whenDestroyed 正常收口）
-  // 共用唯一终端收口闭包 —— 顺序契约见 teardownTuiTerminal。renderer 未创建
-  // （T2 顺序不变式下的装配期抛错）时为 no-op。
+  // All three exit paths (catch / /quit onQuitBridge / whenDestroyed normal
+  // close) share this single terminal-teardown closure — ordering contract
+  // in teardownTuiTerminal. No-op while the renderer was never created
+  // (assembly-time throw under the ordering invariant).
   const teardownTerminal = (): void => teardownTuiTerminal(renderer);
   try {
     const runtime = await prepareRuntime();
-    // T1: resolve the root before any lazy session create. The resolver's
+    // Resolve the root before any lazy session create. The resolver's
     // final cwd fallback is an entry-level binding, never a SessionHub
     // create-time cwd backfill.
     const envWsRoot = runtime.env.workspaceRoot;
@@ -393,24 +441,29 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       cwd,
       env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
     });
-    // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
-    // issue #584: persona seed 永远 `<homedir>/.iknow`,不跟 workspaceRoot。
+    // Assembly chain: runtime → deps → bridge/ask/tool bridges → TuiApp.
+    // The persona seed always lives at `<homedir>/.iknow`, never follows
+    // workspaceRoot.
     await initIknowWorkspaceSafe();
-    // settings-hot-reload（T4）:EnvLoader 作为 env 源。初次 get() = lazy load
-    // 拿初始 env，后续 watcher 触发自动 reload。初始 env 用它（而非 bundle.env）
-    // 保证「初始 adapter + envProvider 首次快照」同源一致（生产两值相同）。
-    // envLoader 在 try 外层声明（三条退出路径都要 stop）；装配成功后本函数内
-    // 一定非空，取局部 const 供后续闭包使用（TS 无法对 `let` 字段窄化）。
+    // EnvLoader as the env source: the first get() lazily loads the initial
+    // env; later watcher events reload automatically. Using it for the
+    // initial env (not bundle.env) keeps the initial adapter and the
+    // envProvider's first snapshot consistent (both equal in production).
+    // envLoader is declared outside the try (all exit paths must stop it);
+    // after a successful assembly it is certainly non-null, so we take a
+    // local const for closures (TS cannot narrow a `let` field).
     envLoader = createEnvLoader({
       cwd: process.cwd(),
       home: homedir(),
     });
     const activeEnvLoader = envLoader;
     let currentEnv: IknowEnv = activeEnvLoader.get();
-    // env 派生显示快照的唯一发布口：hub 的 reloadFromEnv 成功后经 onEnvChange
-    // 发布，订阅方（ContextBar 的 model 段 / TuiApp 的 thinking 基线）各自按需
-    // 刷新。**不**重渲染 TuiApp —— 整树重绘是用户可见的闪烁（#1021），且旧的
-    // props 基线会无条件覆盖用户手改的 thinking / effort。
+    // Single publication point for env-derived display snapshots: the hub
+    // publishes via onEnvChange after a successful reloadFromEnv, and each
+    // subscriber (ContextBar's model segment / TuiApp's thinking baseline)
+    // refreshes itself. Do **not** re-render TuiApp — a whole-tree repaint
+    // is user-visible flicker, and the old props baseline would
+    // unconditionally overwrite user-edited thinking / effort.
     const envDisplay = createEnvDisplayStore({
       model: currentEnv.llm.model,
       defaultThinking: {
@@ -419,27 +472,32 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       },
     });
     const bundle: RuntimeBundle = { env: currentEnv, session: runtime.session };
-    // ADR-0087: 会话池 = 显式 dataDir 否则 ~/.iknow，不跟 workspaceRoot 分片。
+    // ADR-0087: session pool = explicit dataDir else ~/.iknow; never sharded by workspaceRoot.
     const dataDir = resolveServeDataDir(options.dataDir);
-    // trace 读侧扫描根(ACI 三工具 + 面板)缺省 = 本入口写侧 dataDir —— 同一
-    // 解析结果,读侧不与写侧分叉(flag > IKNOW_TRACE_OUT env > dataDir)。
+    // Reader-side scan root for traces (ACI tools + panels) defaults to this
+    // entry's writer-side dataDir — one resolution, so readers never diverge
+    // from writers (flag > IKNOW_TRACE_OUT env > dataDir).
     const traceOut = resolveTraceRoot(options.traceOut, dataDir);
-    // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
-    // ADR-0084 写回落对层：thinking / memory 是**用户层键**（llm / memory 段），
-    // 项目文件不再采纳这两段（项目允许名单 = verify / secrets /
-    // permissions），故写回目标恒为 <home>/.iknow/settings.json，与「项目文件
-    // 是否存在」解耦（旧 ADR-0019 D1.3 的 project 优先档会把用户层键写进不再被
-    // 读取的项目文件）。写回后登记 self-write 哨兵
-    // （activeEnvLoader.markSelfWrite）→ 自身 fs.watch 不回环。失败 → 返回
-    // { ok:false, reason } 由 app 以 notice 呈现，不 crash TUI（in-memory
-    // override 保留）。persistThinkingChanges 内部原子写（tmp + rename），
-    // 写回不重建 adapter（哨兵吞 reload，当前 env / adapter 不动）。
+    // Settings bidirectional persistence: /thinking /effort panel Esc → write
+    // back to settings.json. ADR-0084 write-target layering: thinking /
+    // memory are **user-layer keys** (llm / memory sections) and project
+    // files no longer adopt them (the project allowlist = verify / secrets /
+    // permissions), so writes always target <home>/.iknow/settings.json
+    // regardless of whether a project file exists (the old project-preferred
+    // rule would have written user-layer keys into files nobody reads
+    // anymore). After each write, register the self-write sentinel
+    // (activeEnvLoader.markSelfWrite) so our own fs.watch does not loop
+    // back. Failure → return { ok:false, reason } for app to render as a
+    // notice, never crash the TUI (the in-memory override stays).
+    // persistThinkingChanges writes atomically (tmp + rename) and does not
+    // rebuild the adapter (the sentinel swallows the reload; current env /
+    // adapter untouched).
     const persistThinking: NonNullable<
       TuiAppProps["onPersistThinking"]
     > = async (patch) => {
       try {
-        // home 与 EnvLoader / loadIknowSettings 同源（本入口 line 216 同一
-        // homedir()），读侧写侧不落两层。
+        // home comes from the same homedir() call as EnvLoader /
+        // loadIknowSettings; reader and writer never land on two layers.
         const path = resolveThinkingSettingsPath({
           home: homedir(),
         });
@@ -458,7 +516,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       patch
     ) => {
       try {
-        // 同 persistThinking：memory 亦用户层键 → 恒写 <home>/.iknow/settings.json。
+        // Same as persistThinking: memory is also a user-layer key → always write <home>/.iknow/settings.json.
         const path = resolveThinkingSettingsPath({
           home: homedir(),
         });
@@ -477,38 +535,45 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       mode
     ) => {
       try {
-        // 同 persistThinking：fsMode 亦用户层键（isolation 段，ADR-0084
-        // 允许名单外） → 恒写 <home>/.iknow/settings.json。
+        // Same as persistThinking: fsMode is also a user-layer key (isolation
+        // section, outside the ADR-0084 allowlist) → always write
+        // <home>/.iknow/settings.json.
         const path = resolveThinkingSettingsPath({
           home: homedir(),
         });
         const { bytes } = await persistFsModeChanges(path, { fsMode: mode });
         activeEnvLoader.markSelfWrite(path, bytes);
       } catch (err) {
-        // app.tsx 的 onPersistFsMode 契约是 Promise<void>（失败由调用方
-        // 以 notice 呈现）；这里把错误重新抛出，让 app 的 catch 兜底。
+        // app.tsx's onPersistFsMode contract is Promise<void (failures
+        // render as notices by the caller); rethrow here so app's catch
+        // handles it.
         throw err instanceof Error ? err : new Error(String(err));
       }
     };
 
-    // /model 面板 Enter 的持久化（ADR-0093 / spec SC5 + SC10）。与 thinking /
-    // memory 的差异：**必须显式刷新 env 并重建 adapter** —— 模型是下一轮
-    // 装配参数，写文件本身不会让 adapter 换模型。链路：
-    //   1) persistModelChanges 原子写 <home>/.iknow/settings.json；
-    //   2) markSelfWrite 登记内容哈希 → 自身写回触发的 watcher 事件被吞
-    //      （否则会和下面的显式 reload 抢一次 reload）；
-    //   3) activeEnvLoader.reload()：EnvLoader.get() 有缓存，`get()` 拿到的
-    //      仍是旧 env —— 显式 reload 才把新 model 读进缓存；
-    //   4) bridge.hub.reloadFromEnv()：hub 经 envProvider = () => get() 取这份
-    //      新 env 重建 adapter（T4 既有通路），并在成功后触发 onEnvChange →
-    //      envDisplay.publish → 显示层就地同步（ContextBar / /info 的 Model 行）。
-    // 任一步失败 → { ok:false, reason }，由 app 以 notice 呈现，不 crash TUI。
+    // /model panel Enter persistence (ADR-0093). Unlike thinking / memory
+    // this **must explicitly refresh env and rebuild the adapter** — the
+    // model is a next-round assembly parameter and writing the file alone
+    // does not switch it. Chain:
+    //   1) persistModelChanges atomically writes <home>/.iknow/settings.json;
+    //   2) markSelfWrite registers the content hash so the watcher event
+    //      triggered by our own write is swallowed (otherwise it would race
+    //      the explicit reload below);
+    //   3) activeEnvLoader.reload(): EnvLoader.get() caches, so a bare get()
+    //      still returns the old env — the explicit reload reads the new
+    //      model into the cache;
+    //   4) bridge.hub.reloadFromEnv(): the hub rebuilds the adapter from
+    //      envProvider = () => get() and, on success, fires onEnvChange →
+    //      envDisplay.publish → display syncs in place (ContextBar / /info
+    //      Model rows).
+    // Any step failing → { ok:false, reason } rendered as a notice by app;
+    // no TUI crash.
     const persistModel: NonNullable<TuiAppProps["onPersistModel"]> = async (
       patch
     ) => {
       let wrote = false;
       try {
-        // 同 persistThinking：model 亦用户层键 → 恒写 <home>/.iknow/settings.json。
+        // Same as persistThinking: model is also a user-layer key → always write <home>/.iknow/settings.json.
         const path = resolveThinkingSettingsPath({
           home: homedir(),
         });
@@ -519,8 +584,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         await bridge.hub.reloadFromEnv();
         return { ok: true as const };
       } catch (err) {
-        // typed **plain object**（provider_api_key_missing）不是 Error：
-        // persistModelFailure 先按判别联合识别（code-quality.md typed-error）。
+        // Typed **plain objects** (provider_api_key_missing) are not Errors:
+        // persistModelFailure dispatches on the discriminated union first
+        // (typed-error catch contract).
         return persistModelFailure(wrote, err);
       }
     };
@@ -528,66 +594,72 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
     const askBridge = createTuiAskUserBridge();
-    // T5 (ADR-0090):启动 mode 种子优先级 `--auto-mode`(explicit) >
-    // IKNOW_PERMISSION_MODE > 项目 permissions.defaultMode > "default"。
-    // 项目 settings 读根 = projectIdentityRoot(不是 cwd):rebind 后 cwd 是
-    // 没有 `.iknow` 的裸 task worktree。fail-loud(legacy / full_auto)经
-    // resolvePermissionMode 原路上抛,由本函数的错误路径呈现。
+    // ADR-0090: startup permission-mode precedence: `--auto-mode` (explicit) >
+    // IKNOW_PERMISSION_MODE > project permissions.defaultMode > "default".
+    // The project settings root is projectIdentityRoot, not cwd: after a
+    // rebind the cwd is a bare task worktree without `.iknow`. Fail-loud
+    // values (legacy / full_auto) propagate up through
+    // resolvePermissionMode and are rendered by this function's error path.
     const permissionMode = resolvePermissionMode(options.permissionMode, {
       cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
     });
     const sessionGrants = createSessionGrants();
-    // D-α V1 / ADR-0030:graph overlay 的会话 holder —— 初值走 settings
-    // （默认关），运行中由 Shift+Tab 与 `/graph` 就地翻，引擎不重建。
-    // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
-    // 同一对象驱动 graph / verify / depsOpts.settings —— rebind 后 per-root
-    // 重建的引擎复用它，worktree 内 `.iknow/` 缺席也绝不隐式重载 settings。
+    // Graph-mode session holder (ADR-0030) — initial value from settings
+    // (off by default); Shift+Tab and `/graph` flip it in place without
+    // rebuilding the engine. Settings are read exactly once at startup and
+    // one object drives graph / verify / depsOpts.settings — per-root
+    // rebuilt engines reuse it, and a missing `.iknow/` inside a worktree
+    // must never trigger an implicit settings reload.
     const startupSettings = loadIknowSettings();
     const graphMode = createGraphModeContext(
       resolveGraphMode({ settings: startupSettings.graph })
     );
-    // ADR-0092 / SC13:filesystem isolation 档 holder —— 初值走 settings
-    // （缺省 global），运行中由 `/config` 就地翻；holder 同时给引擎
-    // （buildTuiDeps → BuildEngineOpts.fsMode → bash 工厂 per-call 读）与
-    // TuiApp（命令面）。与 permissionMode / graphMode 正交 —— Shift+Tab
-    // 不动它。settings 只在启动加载点读一次（review High-2 / 硬要求 9）。
+    // Filesystem-isolation holder (ADR-0092) — initial value from settings
+    // (default global); `/config` flips it in place. The holder feeds both
+    // the engine (buildTuiDeps → BuildEngineOpts.fsMode → bash factory
+    // per-call read) and TuiApp (command surface). Orthogonal to
+    // permissionMode / graphMode — Shift+Tab does not touch it. Settings are
+    // read once at startup (see the startupSettings note).
     const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
-    // ADR-0096 T2:子代理并发上限 holder（与 fsMode 同形态）—— 初值走
-    // env.subagent.maxConcurrentWorkers（env > settings > 默认 15 链已
-    // 在 env.ts 钉死）。运行期由 TUI /config 面板 Enter 循环翻
-    // (3→5→9→15→unlimited→3)；holder 同时给引擎（BuildEngineOpts.
-    // subagentCapacityHolder → createSubAgentManager → spawn 闸）与
-    // TuiApp（命令面）以及 registry → spawn_subagent 工具 description
-    // （getter 现读 holder）。三入口同源 → 闸值与 description N 与
-    // SubAgentCapacityError.maxConcurrentWorkers 永远一致。
-    // ADR-0096 T2:子代理并发上限 holder（与 fsMode 同形态），三入口同源：
-    // 引擎 spawn 闸 + 工具 description + TUI 命令面共享同一 holder 引用。
-    // cap 行 Enter 落盘通道（与 persistFsMode 同形态：闭包持有
-    // `activeEnvLoader` 防 settings.json self-write 回路；失败由 app.tsx
-    // 兜底 notice，holder 已生效不撤回）。`subagentCapBindings` IIFE
-    // 一次性返回元组，让 runTui 不背 +2 复杂度（S5 硬门）。
+    // ADR-0096: subagent concurrency-cap holder (same shape as fsMode).
+    // Initial value comes from env.subagent.maxConcurrentWorkers (the
+    // env > settings > default-15 chain is pinned in env.ts). At runtime the
+    // /config panel Enter cycles it (3→5→9→15→unlimited→3). One holder
+    // reference serves the engine (BuildEngineOpts.subagentCapacityHolder →
+    // createSubAgentManager → spawn gate), TuiApp (command surface), and the
+    // registry (spawn_subagent tool description via a getter that reads the
+    // holder live) — so the gate value, the description's N, and
+    // SubAgentCapacityError.maxConcurrentWorkers always agree. The cap row's
+    // persist channel mirrors persistFsMode (the closure holds
+    // `activeEnvLoader` to suppress the settings.json self-write loop;
+    // failure falls back to an app.tsx notice and the holder is not rolled
+    // back). The IIFE returns the tuple in one shot to keep runTui under the
+    // complexity gate.
     const [subagentCapHolder, persistSubagentCap] = (() => {
-      // M1（code-review 修复）：初值走 `currentEnv`（env > settings > 默认 15
-      // 链已在 env.ts 钉死）而非 `startupSettings.subagent?.…` —— 否则 env
-      // `IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS` 在场而 settings 未写该键时，
-      // manager 闸用 env 值、面板却显示 settings/默认值，同一时刻两个真相。
-      // 面板显示语义（plan §3 T2 open issue，票内决议）：**显示 effective
-      // 值（holder.get() = env 链解出值）**，与 manager 闸同源；不另发
-      // 「env 覆盖 settings」notice —— holder.get() 本身就是 effective 值，
-      // 会话内 Enter 翻转后写 user 层（env 优先级更高时下次 env reload 仍
-      // 由 env 胜，与 /model 显示语义同向）。注意：写 user 层不反向覆盖 env。
+      // Initial value must come from `currentEnv` (the env > settings > 15
+      // chain pinned in env.ts), not `startupSettings.subagent?.…`: with
+      // IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS set but the settings key
+      // absent, the manager gate would use the env value while the panel
+      // showed the settings/default value — two truths at once. Panel display
+      // shows the effective value (holder.get() = the value resolved through
+      // the env chain), same source as the gate; no separate "env overrides
+      // settings" notice — holder.get() is already the effective value, and
+      // an Enter flip in-session writes the user layer (when env has higher
+      // priority, env still wins on the next reload, matching /model display
+      // semantics). Note: writing the user layer does not override env.
       const initial = currentEnv.subagent.maxConcurrentWorkers;
       const holder = createSubagentCapacityHolder(initial);
       const persist = (p: SubagentCapPersistPatch) =>
         persistSubagentCapImpl(p, activeEnvLoader);
       return [holder, persist] as const;
     })();
-    // ADR-0096 T3:worktree 门禁 holder（与 fsMode / cap 同形态）—— 初值走
-    // 启动读数 `resolveWorktreeOnMutate(startupSettings)`（硬要求 9：settings
-    // 仍只读一次）。运行期由 /config 面板 worktree 行 Enter 翻；holder 同时
-    // 给引擎（buildTuiDeps → BuildEngineOpts.worktreeOnMutateHolder → mutate
-    // 门禁每波入口现读）与 TuiApp（命令面/显示）。同款 IIFE 收口，让 runTui
-    // 不背 +2 复杂度（S5 硬门）。
+    // ADR-0096: worktree-gate holder (same shape as fsMode / cap) — initial
+    // value from the startup read `resolveWorktreeOnMutate(startupSettings)`
+    // (settings still read exactly once). The /config panel worktree row
+    // Enter flips it; the holder feeds both the engine (buildTuiDeps →
+    // BuildEngineOpts.worktreeOnMutateHolder → the mutate gate reads it at
+    // each wave entry) and TuiApp (command/display surfaces). Same IIFE
+    // closure pattern to keep runTui simple.
     const [worktreeOnMutateHolder, persistWorktreeOnMutate] = (() => {
       const holder = createWorktreeOnMutateHolder(
         resolveWorktreeOnMutate(startupSettings)
@@ -596,20 +668,22 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         persistWorktreeOnMutateImpl(on, activeEnvLoader);
       return [holder, persist] as const;
     })();
-    // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 单例,跨多会话
-    // (web 多面板 / 切换会话)按 conversationId 解析;resetSession /
-    // hub.shutdown 销毁。
+    // Live-graph ledger host — a TUI singleton resolved by conversationId
+    // across sessions (web panels / session switching); destroyed by
+    // resetSession / hub.shutdown.
     const liveGraphLedger = createLiveGraphLedgerHost();
 
     // The initial TUI engine is built before createTuiBridge, so bind this
     // host seam late to the Hub that owns dirty-root persistence. Mutates
     // cannot reach the seam until the bridge has been created below.
     const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
-    // worktree-host.ts 工厂装配（PR #869 name 透传修复点的 TUI 缝版本；
-    // 可单测）。手工解构在 WorktreeProvisionContext 新增字段时会静默丢
-    // 字段且编译仍绿——TUI 缝 2026-09-05 trace 实测复现了 CLI 缝同款退化
-    // （name=ai-news-archive-2026-09-05 被丢，建出 UUID-only 叶子）。
-    // hub 缺席的 fail-closed 属于本文件桥接逻辑（bridgeRef 只有这里知道）。
+    // worktree-host.ts factory assembly (the TUI-seam version of the
+    // name pass-through fix; unit-testable). Manual destructuring silently
+    // drops new WorktreeProvisionContext fields while still compiling — a
+    // TUI-seam trace (2026-09-05) reproduced the same regression the CLI
+    // seam had had (a requested name was dropped and a UUID-only leaf was
+    // created). Fail-closed behavior when the hub is absent belongs to this
+    // file's bridging logic (only here is bridgeRef known).
     const worktreeIsolation = createTuiWorktreeIsolationHost({
       provisionWorktree: (ctx) =>
         bridgeRef.hub?.provisionWorktree(ctx) ??
@@ -624,42 +698,46 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       soleInflightId: () => inflight.soleId(),
       permissionMode,
       graphMode,
-      // ADR-0092 / SC13:fs isolation holder 给引擎(build-engine →
-      // BuildEngineOpts.fsMode → bash 工厂 per-call 读)。
+      // ADR-0092: pass the fs-isolation holder to the engine (build-engine →
+      // BuildEngineOpts.fsMode → bash factory per-call read).
       fsMode,
-      // ADR-0096 T2:子代理并发上限 holder —— buildTuiDeps → BuildEngineOpts.
-      // subagentCapacityHolder → createSubAgentManager(spawn 闸每次现读) +
-      // registry → spawn_subagent 工具 description（getter 同源）。
-      // 三入口同一冻结引用,TUI /config 面板翻一次全局生效。
+      // ADR-0096: subagent concurrency-cap holder — buildTuiDeps →
+      // BuildEngineOpts.subagentCapacityHolder → createSubAgentManager
+      // (spawn gate reads it live per call) + registry → spawn_subagent tool
+      // description (same-source getter). One frozen reference shared by all
+      // three surfaces, so a /config panel flip takes global effect.
       subagentCapHolder,
-      // ADR-0096 T3:worktree 门禁 holder —— buildTuiDeps → BuildEngineOpts.
-      // worktreeOnMutateHolder → mutate 门禁每波入口现读。面板翻一次即对下
-      // 一波 tool call 生效；**从不 auto-provision**（ADR-0037 §1 保留）。
+      // ADR-0096: worktree-gate holder — buildTuiDeps →
+      // BuildEngineOpts.worktreeOnMutateHolder → the mutate gate reads it at
+      // each wave entry. A panel flip affects the next tool-call wave; it
+      // never auto-provisions (ADR-0037).
       worktreeOnMutateHolder,
       liveGraphLedger,
       sessionGrants,
-      // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
-      // memory / skill seam。
-      // T6:启动 workspace 即稳定 productRoot —— rebuild 只换 workspaceRoot。
+      // ADR-0019: pass workspaceRoot to the build-engine identity / memory /
+      // skill seams. The startup workspace is also the stable productRoot —
+      // a rebuild only swaps workspaceRoot.
       ...(workspaceRoot ? { workspaceRoot, productRoot: workspaceRoot } : {}),
-      // #950 T2 / session-folder-consolidation:已 resolve 的 dataDir 透传给
-      // deps 层,让 todo 会话文件夹根与 bridge 的 SessionStore 落同一个
-      // projects/<slug>/(resolveServeDataDir 在上游只算一次)。
+      // Pass the already-resolved dataDir to the deps layer so the todo
+      // session-folder root and the bridge's SessionStore land in the same
+      // projects/<slug>/ (resolveServeDataDir computes once upstream).
       ...(dataDir !== undefined ? { dataDir } : {}),
-      // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
-      // host 缝透传（build-engine 据此装配 mutate 门禁）。
+      // The startup settings object + isolation host seam passed through
+      // (build-engine gates mutations accordingly).
       settings: startupSettings,
       worktreeIsolation,
-      // 观测性地板:与下方 createTuiBridge 的 traceOut 同一个值 —— hub 写会话
-      // 的 turn / tool 记录,deps 层的工厂让子代理三事件落同一个
-      // `<traceOut>/<conversationId>.jsonl`。
+      // Observability floor: the same value as createTuiBridge's traceOut
+      // below — the hub writes per-session turn/tool records and the deps
+      // factory lands subagent events in the same
+      // `<traceOut>/<conversationId>.jsonl`.
       traceOut,
       onExtensions: (ext) => {
         tuiExtensions = ext;
       },
     };
-    // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
-    // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
+    // buildTuiDeps returns flat LoopEngineDeps & { subagentManager?,
+    // shutdown? } (not a nested { deps, ... }); the rest destructuring strips
+    // the two handles, leaving LoopEngineDeps.
     const {
       subagentManager,
       shutdown,
@@ -670,51 +748,61 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       invalidateMemorySystem,
       ...deps
     } = await buildTuiDeps(bundle, depsOpts);
-    // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
-    // 与 chat/serve 一致)。T4 起 registerShutdown 参数放宽为结构
-    // `{ shutdown?: }`(DRIFT-1),TUI 只透 shutdown 句柄 — deps / engine /
-    // subagentManager 形态与钩子无关,不再用 undefined as never 占位。
-    // shutdown 缺席(防御,ask 形态不可能) → registerShutdown 内部 no-op。
-    // TUI exitOnCtrlC=false 是 renderer 不吃 Ctrl+C 退出（app 层 Ctrl+C 只做
-    // 选区复制），SIGINT 到 Node 进程层 handler 仍响应。
-    // settings-hot-reload（T4）:envLoader.stop() 也必须接到 shutdown —— 长程
-    // 进程退出前释放 fs watcher 句柄（计划风险清单：避免 serve 类进程泄漏）。
-    // 信号路径（registerShutdown）不经过 onQuitBridge，需在此释放 watcher；
-    // /quit 路径由 shutdownExtensions 兜底释放（幂等，重复 stop 无害）。
-    // Review High-1:late-bound hub 引用 —— combinedShutdown 在 bridge 创建前
-    // 注册，重建引擎的 shutdown 收口经 bridgeRef 转发。
+    // Attach the MCP + subagent combined shutdown to process signal handling
+    // (runtime.ts semantics, consistent with chat/serve). registerShutdown
+    // takes a structural `{ shutdown?: }`, so the TUI passes only the handle
+    // — deps / engine / subagentManager shapes are hook-agnostic. When
+    // shutdown is absent (defensive; impossible for this shape),
+    // registerShutdown is a no-op internally. The TUI's exitOnCtrlC=false
+    // means the renderer does not consume Ctrl+C (the app layer only uses it
+    // for selection copy), so SIGINT still reaches the Node process handler.
+    // Settings hot-reload: envLoader.stop() must also run on shutdown —
+    // long-lived processes must release the fs watcher handle before exit
+    // (avoid leaked watcher loops). The signal path (registerShutdown) does
+    // not pass through onQuitBridge, so release the watcher here; the /quit
+    // path releases via shutdownExtensions (idempotent, double stop is
+    // harmless). The late-bound hub reference lets combinedShutdown —
+    // registered before the bridge exists — close rebuilt engines via
+    // bridgeRef.
     const combinedShutdown = async (): Promise<void> => {
       envLoader?.stop();
       if (shutdown) await shutdown();
-      // Review High-1:per-root 重建引擎（rebind 后经 buildEngine 缝新建）
-      // 的组合 shutdown 由 hub 收口（初始引擎不在 engineByRoot，不重复关）。
+      // Per-root rebuilt engines (created via the buildEngine seam after a
+      // rebind) are closed by the hub here (the initial engine is not in
+      // engineByRoot, so no double close).
       if (bridgeRef.hub) await bridgeRef.hub.shutdown();
-      // 信号路径与 /quit 同根因：LSP 子进程 stdio 管道不释放事件循环排不空。
+      // Signal path shares the /quit root cause: LSP child stdio pipes keep
+      // the event loop non-empty.
       await shutdownDefaultLspPool();
     };
     registerShutdown({ shutdown: combinedShutdown });
     const bridge = createTuiBridge({
-      // review-fix (M4): 传已 resolve 的 dataDir —— 先前把 raw options.dataDir
-      // 交给 bridge,而 TuiApp 已用 resolveServeDataDir 的值,导致 bridge 内部
-      // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
+      // Pass the resolved dataDir: earlier code handed raw options.dataDir to
+      // the bridge while TuiApp already used the resolveServeDataDir value, so
+      // the bridge's internal SessionStore location drifted from the display
+      // layer (worst with an explicit workspaceRoot).
       dataDir,
       workspaceRoot,
-      // T6:稳定 productRoot = 启动 workspace；bridge 单向透传给 hub。
+      // Stable productRoot = startup workspace; the bridge forwards it to the
+      // hub one-way.
       ...(workspaceRoot ? { productRoot: workspaceRoot } : {}),
       deps,
       subagentManager,
-      // live-graph-phase1 T1:账本 host 注入 bridge —— hub 按 conversationId 解析。
+      // Ledger host injected into the bridge — the hub resolves it by conversationId.
       liveGraphLedger,
-      // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。
-      // rebind 后会话根离开启动根 → ensureDeps 经此缝以同一 depsOpts（同一
-      // 启动 settings + 稳定 productRoot,硬要求 9 / T6）在新根重跑
-      // buildTuiDeps,下一回合跑在 worktree 根引擎上。onExtensions 回调同步
-      // 覆盖 tuiExtensions —— 展示面跟随活跃引擎。
+      // Inject the startup deps root + the per-root engine-rebuild seam:
+      // after a rebind the session root leaves the startup root → ensureDeps
+      // reruns buildTuiDeps at the new root through this seam with the same
+      // depsOpts (same startup settings + stable productRoot), so the next
+      // turn runs on the worktree-root engine. The onExtensions callback
+      // synchronously overwrites tuiExtensions — display surfaces follow the
+      // active engine.
       engineRoot: workspaceRoot,
       buildEngine: async (root) => {
-        // buildTuiDeps 透出平铺 deps（与 initial 构建同型）；hub 的
-        // buildEngine 缝要求 { deps, ...句柄 } 形态 —— 在此重新收拢。
-        // T6:productRoot 经 depsOpts 保留；只覆盖 cwd / workspaceRoot。
+        // buildTuiDeps yields flat deps (same shape as the initial build);
+        // the hub's buildEngine seam wants { deps, ...handles } — re-cohere
+        // here. productRoot persists via depsOpts; only cwd / workspaceRoot
+        // are overridden.
         const {
           subagentManager: sm,
           shutdown: sd,
@@ -736,30 +824,34 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           ...(om ? { overlayMemoryPrefetch: om } : {}),
         };
       },
-      // auto-memory T4:钩子由 build-engine 按 settings.memory.autoExtract
-      // 装配；缺席（默认 OFF）→ hub 不调，行为逐字节不变。
+      // Auto-memory hooks are assembled by build-engine per
+      // settings.memory.autoExtract; absent (default OFF) → the hub never
+      // calls them, behavior byte-identical.
       autoMemory,
       overlayMemoryPrefetch,
       traceOut,
-      // #128 T8: settings.verify 段 → 闭环配置 (经 hub-bridge 透传 SessionHub)。
-      // command 缺失 (含 verify 段缺失) → { command: "" }, hub 装配
-      // subagentManager 时 runClassifier 接管 (spec #128 Objective)。与 serve
-      // 共用 resolveVerifyConfig 装配。
-      // Review High-2:同一启动装配 settings 对象（不重读 settings 文件）。
+      // settings.verify section → closed-loop config (forwarded through
+      // hub-bridge to SessionHub). Missing command (including a missing
+      // verify section) → { command: "" }, and runClassifier takes over when
+      // the hub assembles subagentManager. Shares the resolveVerifyConfig
+      // assembly with serve. The same startup settings object is used (no
+      // settings re-read).
       verifyConfig: resolveVerifyConfig(startupSettings.verify),
-      // D-α T5:graph 装配快照交给 hub —— 每条 postMessage 拍一次
-      // （`/graph on` 之后的**下一条**消息才装 run_graph）。
+      // Hand the graph assembly snapshot to the hub — each postMessage takes
+      // one snapshot (the message **after** `/graph on` is the first with
+      // run_graph assembled).
       ...(graphAssembly ? { graphAssembly } : {}),
       inflight,
       contextWindow: currentEnv.compress.contextWindow,
-      // T2: 把启动期校验过的 env 透到 hub 的 override 路径 —— override 重建
-      // adapter 时用这份 env，不回退 process.env（reviewer blocker fix）。
+      // Pass the validated startup env to the hub's override path — override-
+      // rebuilt adapters use this env instead of falling back to process.env.
       overrideEnv: { llm: currentEnv.llm },
-      // settings-hot-reload（T3/T4）:env 源透传给 hub —— ensureDeps /
-      // reloadFromEnv 用 activeEnvLoader.get() 拿最新 env（T2 EnvLoader.get 天然实现）。
+      // Pass the env source to the hub — ensureDeps / reloadFromEnv read the
+      // latest env via activeEnvLoader.get().
       envProvider: () => activeEnvLoader.get(),
-      // env 变化（reloadFromEnv 成功后）→ 只发布显示快照。订阅方就地刷新；
-      // TuiApp 整树**不**重渲染（本回调不再触发 root.render）。
+      // On env change (after a successful reloadFromEnv) publish only the
+      // display snapshot; subscribers refresh in place, and the TuiApp tree
+      // is **not** re-rendered (this callback never calls root.render).
       onEnvChange: (env) => {
         currentEnv = env;
         envDisplay.publish({
@@ -770,28 +862,32 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           },
         });
       },
-      // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter 占用锁档
-      // 一次性透传 —— 启动加载点解析后冻结（ADR-0037 §5 硬要求 9），
-      // bridge → hub → provisioner 闭包贯穿。OFF（缺席 / 非 true）→
-      // 完全跳过占用检查（SC2 零回归）。
+      // ADR-0070: enter-occupancy-lock tier, passed once — resolved at the
+      // startup load point then frozen (ADR-0037), threading bridge → hub →
+      // provisioner closures. OFF (absent / non-true) → occupancy checks are
+      // fully skipped (zero regression).
       worktreeExclusive: resolveWorktreeExclusive(startupSettings),
-      // ADR-0092 / SC13:同一 fs holder 透传给 bridge → hub —— TUI 的 verify
-      // 命令面与 bash 工具面同档（verify 调用点 per-call 现读 holder，`/config`
-      // 翻档下一次调用生效，与 bash 侧同一实例）。serve 已按同款接线。
+      // The same fs holder (ADR-0092) forwarded to bridge → hub — the TUI's
+      // verify command surface and bash tool surface share one tier (verify
+      // reads the holder per call; a `/config` flip affects the next call,
+      // same instance as bash). serve uses the same wiring.
       fsMode,
     });
-    // Review High-1:bridge 就绪后回填 late-bound hub 引用（见上方 bridgeRef）。
+    // Once the bridge is ready, backfill the late-bound hub reference (see bridgeRef above).
     bridgeRef.hub = bridge.hub;
-    // 收敛修复 (2026-08-29):同一回填点供 shutdownExtensions（/quit 路径）读。
+    // The same backfill point feeds shutdownExtensions (the /quit path).
     hubRef.current = bridge.hub;
-    // settings-hot-reload（T4）:订阅 EnvLoader —— settings 文件变化 → 自动
-    // reload env（成功）→ 走 hub 的 adapter 热重建通路（不直接碰 build-engine）。
-    // reload 失败（坏 JSON 等）→ EnvLoader 内部保留旧 env + onError 通知，
-    // 这里不上报（默认已写 stderr）；adapter 保持旧引用。
+    // Settings hot-reload: subscribe to EnvLoader — settings file changes →
+    // reload env (on success) → the hub's adapter hot-rebuild path (never
+    // touching build-engine directly). A failed reload (bad JSON, etc.) →
+    // EnvLoader keeps the old env internally and reports via onError; we do
+    // not surface it here (stderr already written); the adapter keeps the old
+    // reference.
     activeEnvLoader.subscribe(() => {
       void bridge.hub.reloadFromEnv().catch(() => {
-        // reloadFromEnv 抛错（envProvider 已成功 reload，此处几乎不会到；
-        // apiKey 缺失降级时 .catch 吞掉 → cachedDeps 不动，静默保留旧 adapter）。
+        // reloadFromEnv can only throw if envProvider reloaded successfully
+        // (almost unreachable here); on apiKey-missing degradation the .catch
+        // swallows it → cachedDeps stays and the old adapter is kept silently.
       });
     });
 
@@ -803,32 +899,39 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
 
     onQuitBridge = {
       destroy: (conversationId?: string): void => {
-        // #337 Phase B:/quit 二次确认 → 等 in-flight 落盘 → onQuit 触发。
-        // shutdown 收口 MCP(关闭 client + 取消 in-flight + SIGTERM stdio),
-        // 完成后 destroy 渲染器。fire-and-forget:app 接着自己 destroy(见
-        // app.tsx quit() 末尾),不会挂起;whenDestroyed 兜底 await 同一 shutdown。
+        // /quit double-confirm → wait for in-flight flush → trigger onQuit.
+        // shutdown closes the MCP layer (clients + in-flight cancellation +
+        // SIGTERM to stdio children), then destroys the renderer.
+        // Fire-and-forget: app proceeds to its own destroy (see the end of
+        // app.tsx quit()), so nothing hangs; whenDestroyed awaits the same
+        // shutdown as a fallback.
         quitResumeConversationId = conversationId;
-        // T6：唯一收口必须在 app.tsx quit() 同 tick 的 renderer.destroy()
-        // **之前**跑完「关鼠标 + drain」（顺序契约见 teardownTuiTerminal）；
-        // 本函数自己 destroy 后，app.tsx 的 `if (!renderer.isDestroyed)` 守卫
-        // 自然跳过（幂等，不重复释放 native）。
+        // The single teardown must complete "mouse disable + drain" within
+        // the same tick **before** app.tsx quit()'s renderer.destroy()
+        // (ordering contract in teardownTuiTerminal). Since this function
+        // destroys on its own, app.tsx's `if (!renderer.isDestroyed)` guard
+        // naturally skips (idempotent, no double native release).
         teardownTerminal();
         void shutdownExtensions();
       },
     };
 
-    // T2 顺序不变式：渲染器工厂在**装配链之后**才调用 —— 上面 prepareRuntime
-    // / resolveWorkspaceRoot / resolvePermissionMode / buildTuiDeps 会抛 typed
-    // plain object（provider_api_key_missing 等）；此前建渲染器等于先探测终端
-    // （OSC 10/11 能力查询 + alternate screen），抛错后终端残留能力应答。
+    // Ordering invariant: the renderer factory runs **after the assembly
+    // chain** — prepareRuntime / resolveWorkspaceRoot / resolvePermissionMode
+    // / buildTuiDeps above throw typed plain objects
+    // (provider_api_key_missing, etc.); creating the renderer first would
+    // probe the terminal (OSC 10/11 capability queries + alternate screen)
+    // and leave capability replies stranded after a throw.
     renderer = await factory(RENDERER_CONFIG);
 
     const root = createRoot(renderer);
-    // 本函数是 <TuiApp> 的**唯一** root.render 调用点（启动挂载一次）：env 的
-    // 后续变化一律经 envDisplay.publish 下发（见上面 onEnvChange），订阅方各自
-    // 就地刷新 —— root.render 再入会让整棵树重算（用户可见闪烁），且渲染期
-    // props 快照会覆盖用户手改的 thinking / effort。TuiApp 只收 envDisplay 订阅
-    // 口，不收 model / defaultThinking 值 prop。
+    // This function is the **only** root.render call site for <TuiApp>
+    // (mounted once at startup): later env changes flow exclusively through
+    // envDisplay.publish (see onEnvChange above) and each subscriber
+    // refreshes in place — re-entering root.render recomputes the whole tree
+    // (user-visible flicker), and the render-time props snapshot would
+    // overwrite user-edited thinking / effort. TuiApp receives only the
+    // envDisplay subscription, never model / defaultThinking value props.
     const mountApp = (): void => {
       root.render(
         <TuiApp
@@ -840,44 +943,50 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           dataDir={dataDir}
           permissionMode={permissionMode}
           graphMode={graphMode}
-          // ADR-0092 / SC13:fs isolation holder + 落盘回调给命令面
-          //（引擎那侧的 holder 经 depsOpts.fsMode 走）。
+          // ADR-0092: fs-isolation holder + persist callback for the command
+          // surface (the engine-side holder goes via depsOpts.fsMode).
           fsMode={fsMode}
           onPersistFsMode={persistFsMode}
-          // ADR-0096 T2:cap holder + 落盘回调给命令面（与 fsMode 同形态）;
-          // 引擎那侧 holder 经 depsOpts.subagentCapHolder 走。两者同引用,
-          // /config 面板翻一次全局生效。holder 在场时面板优先用 holder.get()，
-          // `subagentCapDisplay` 仅在 holder 缺席时作为 fallback snapshot 透
-          // 传（保持 T1 兼容）。
+          // ADR-0096: cap holder + persist callback for the command surface
+          // (same shape as fsMode); the engine-side holder goes via
+          // depsOpts.subagentCapHolder. Same reference, so one /config panel
+          // flip works globally. When the holder exists the panel prefers
+          // holder.get(); `subagentCapDisplay` is only passed as a fallback
+          // snapshot when the holder is absent.
           subagentCapHolder={subagentCapHolder}
           onPersistSubagentCap={persistSubagentCap}
-          // ADR-0096 T3:worktree 门禁 holder + 落盘回调给命令面（与 fsMode /
-          // cap 同形态）；引擎那侧同引用经 depsOpts.worktreeOnMutateHolder 走。
-          // `isolationOn` 仍透传作为 holder 缺席时的 fallback snapshot（T1 兼容）。
+          // ADR-0096: worktree-gate holder + persist callback for the command
+          // surface (same shape as fsMode / cap); the engine shares the same
+          // reference via depsOpts.worktreeOnMutateHolder. `isolationOn`
+          // remains as a fallback snapshot when the holder is absent.
           worktreeOnMutateHolder={worktreeOnMutateHolder}
           onPersistWorktreeOnMutate={persistWorktreeOnMutate}
           sessionGrants={sessionGrants}
-          // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
-          // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处
-          // 可选缺省 = 空清单（测试 / 装配异常路径安全降级）。
+          // TuiApp consumes skillCatalog (slash candidates + /skill
+          // load-and-send). onExtensions injects it synchronously during
+          // buildTuiDeps assembly; the optional default = empty catalog
+          // (safe degradation for tests / abnormal assembly paths).
           skillCatalog={tuiExtensions?.skillCatalog}
-          // T6 / SC8：斜杠候选面「当场热」的 rescan 缝（与引擎 `deps.
-          // skillIndexDelta` 同一台）。mountApp 是唯一 root.render 点（启动
-          // 挂载一次），故本 props 是**装配期快照** —— 与同处的 skillCatalog
-          // 同形。SC8 的主场景（user / project 根中途落盘 SKILL.md）由
-          // projectIdentityRoot 跨 rebind 稳定覆盖；rebind 换引擎后的 plugin
-          // 根换血面是已知限制（handoff「SC8 剩余面」）。
+          // The slash-candidate "hot in-session" rescan seam (same machine as
+          // the engine's `deps.skillIndexDelta`). mountApp is the only
+          // root.render point (mounted once at startup), so this prop is an
+          // **assembly-time snapshot**, like skillCatalog beside it. The main
+          // scenario (SKILL.md files landing mid-session in user / project
+          // roots) is covered across rebinds by the stable
+          // projectIdentityRoot; the plugin-root refresh after a rebind is a
+          // known limitation.
           skillRescanner={tuiExtensions?.skillRescanner}
-          // specs/skill-load-write-root.md：slash 装配 skill 正文时读活
-          // taskRoot 快照（TuiExtensions 透传；缺省 = undefined → 无 trailer）。
+          // When a slash command assembles skill bodies, read the live
+          // taskRoot snapshot (passed through TuiExtensions; default
+          // undefined → no trailer).
           liveTaskRoot={tuiExtensions?.liveTaskRoot}
-          // T6 (write-situation-disclosure)：slash 装配双参形态需要
-          // `isolationOn` 与 liveTaskRoot 配对算 writeSituation。缺省 →
-          // undefined → app.tsx 内 fail-closed 走等价于旧形态的
-          // writable_main，与改造前 byte-equal。
+          // The slash assembly's two-argument form needs `isolationOn` paired
+          // with liveTaskRoot to compute writeSituation. Absent → undefined →
+          // app.tsx fail-closes to writable_main, byte-equal to the pre-
+          // change form.
           isolationOn={tuiExtensions?.isolationOn}
-          // #361 Phase D：TuiApp 消费 MCP 看板扩展面（status / reload /
-          // listMcpTools），缺省 = undefined → /mcp 提示「MCP 未装配」。
+          // TuiApp consumes the MCP board surface (status / reload /
+          // listMcpTools); default undefined → /mcp reports "MCP 未装配".
           mcp={
             tuiExtensions
               ? {
@@ -887,16 +996,19 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
                 }
               : undefined
           }
-          // env 派生显示快照（模型路由串 + thinking 基线）—— app 与 ContextBar
-          // 都经它读当前值并订阅变化，取代逐层 props 透传。
+          // Env-derived display snapshot (model routing string + thinking
+          // baseline) — app and ContextBar read current values and subscribe
+          // through it, replacing per-layer props passing.
           envDisplay={envDisplay}
-          // settings 双向持久化（T4）：面板 Esc → persistThinking 闭包写回
-          // settings.json（失败以 notice 呈现，不 crash TUI）。
+          // Settings bidirectional persistence: panel Esc → persistThinking
+          // closure writes settings.json (failure shown as a notice, no TUI
+          // crash).
           onPersistThinking={persistThinking}
           onPersistMemory={persistMemory}
-          // /model 面板（ADR-0093 / spec SC8）：providers 取**同一启动 settings
-          // 对象**（不重读 settings 文件，与 graph / verify 同纪律）；注册表
-          // 为空 → app 层 /model 走 notice 不打开面板。
+          // /model panel (ADR-0093): providers come from the **same startup
+          // settings object** (no settings re-read, same discipline as graph
+          // / verify); an empty registry → app-layer /model shows a notice
+          // instead of opening the panel.
           providers={startupSettings.llm?.providers ?? []}
           onPersistModel={persistModel}
           defaultMemory={loadIknowSettings().memory}
@@ -908,15 +1020,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     };
     mountApp();
     await whenDestroyed(renderer);
-    // T6：正常退出（信号收口 / E4 直接 destroy 后本 await 返回）也在返回前
-    // 补收口 —— app.tsx /quit 已提前 destroy（renderer 不再重复 destroy），
-    // 此处只补 drain + raw mode 兜底。
+    // Normal exit (signal close / direct destroy returns this await) also
+    // tops up teardown before returning — app.tsx /quit already destroyed
+    // early (the renderer is not destroyed twice), so here we only add drain
+    // + raw-mode fallback.
     teardownTerminal();
-    // #337 Phase B:兜底 —— onQuit 未接管的退出路径(信号 / E4 直接 destroy),
-    // shutdownExtensions 已启动则 no-op,未启动则确保 MCP 关闭在 runTui 返回
-    // 前完成,避免 stdio 子孙泄漏。
+    // Backstop — exit paths not taken over by onQuit (signals / direct
+    // destroy): if shutdownExtensions has started it is a no-op; otherwise
+    // ensure MCP shutdown completes before runTui returns, avoiding leaked
+    // stdio descendants.
     await shutdownExtensions();
-    // /quit 建档会话 → 终端恢复后打印 resume 提示（draft 无 id 不打印）。
+    // /quit on a filed session → print the resume hint after terminal
+    // restore (drafts without an id print nothing).
     if (quitResumeConversationId) {
       process.stdout.write(
         `Resume this session with:\niknow --resume ${quitResumeConversationId}\n`
@@ -924,23 +1039,25 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }
     return 0;
   } catch (err) {
-    // 唯一 catch 点（E1/E2）：类型化消息写 stderr，终端收口于此。
-    // describeTuiStartError：判别联合优先（provider / workspace-root 是
-    // plain object，`String(err)` 会打成 [object Object]，见 code-quality.md）。
+    // The single catch point: write a typed message to stderr; terminal
+    // teardown converges here. describeTuiStartError dispatches
+    // discriminated unions first (provider / workspace-root errors are plain
+    // objects; `String(err)` would render them [object Object]).
     const cause = describeTuiStartError(err);
     process.stderr.write(
       `${TUI_RENDERER_ERROR_PREFIX}：${cause}。请重新安装依赖（npm ci）后重试\n`
     );
     teardownTerminal();
-    // #337 Phase B:错误路径也尽力收口 MCP(若 buildTuiDeps 完成后才抛错,
-    // tuiExtensions 已注入;若 buildTuiDeps 自身抛错则 no-op)。不阻塞退出码。
+    // Best-effort MCP close on the error path too (if the throw came after
+    // buildTuiDeps, tuiExtensions is already injected; if buildTuiDeps itself
+    // threw, no-op). Does not affect the exit code.
     await shutdownExtensions();
     void onQuitBridge;
     return 1;
   }
 }
 
-/** 渲染器 destroy 事件 = TUI 生命周期终点（/quit / 信号 / E4）。 */
+/** Renderer destroy event = end of the TUI lifecycle (/quit / signal / forced destroy). */
 function whenDestroyed(renderer: CliRenderer): Promise<void> {
   if (renderer.isDestroyed) return Promise.resolve();
   return new Promise<void>((resolve) => {
