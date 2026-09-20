@@ -192,3 +192,12 @@ docs/demos
 # ADR-0107：egress 中继是本仓自带件（纯 .mjs 资产，非下载产物），必须入仓。
 !/vendor/egress-relay/
 !/vendor/egress-relay/**
+
+# Phase 1: archived to winter6205/iknow-archive (batch1)
+# 以下路径内容已整体迁移至归档仓，工作区副本仅本地保留、永不回仓。
+# archive/ 规则置于末尾，覆盖上方旧的 archive/* + 白名单三段式规则。
+archive/
+plans/
+docs/audits/
+docs/wayfinder/
+docs/integration-materials.env.example
