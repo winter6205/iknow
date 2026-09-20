@@ -1,44 +1,53 @@
 /**
- * LSP 编辑失效通知层 — spec 251-lsp-tool（§ notifier.ts）+ lsp-optimization plan T2。
+ * LSP edit-invalidation notification layer.
  *
- * **职责**：edit_file 写盘成功后，由装配层（build-engine.ts）把
- * `invalidate(file)` 作为 registry 的 `onEdit` 回调注入；notifier 再把该文件
- * 的最新文本同步给对应语言服务器客户端，让 server 侧文本保持最新。
+ * **Responsibility**: after edit_file successfully writes to disk, the
+ * assembly layer (build-engine.ts) injects `invalidate(file)` as the
+ * registry's `onEdit` callback; the notifier then syncs the file's latest
+ * text to the matching language-server client so the server-side text stays
+ * current.
  *
- * **标准 didChange（plan T2，取代 Q2/A13 的 `workspace/xrefs` 字面值）**：
- * 旧实现发送非标准 `workspace/xrefs`，server 侧文本永远停留在 didOpen
- * version:1，后续 definition/references 基于陈旧内容。改经
- * `client.notifyChange(file)` 走标准 `textDocument/didChange`（full sync，
- * version++）：server 侧文本同步后，后续请求天然基于新内容，无需猜测
- * server 私有失效语义。「发送方式」仍框定在本文件内部，后续调整只需改此处。
+ * **Standard didChange** (replacing the earlier non-standard `workspace/xrefs`
+ * literal): the old implementation sent non-standard `workspace/xrefs`, so
+ * server-side text stayed forever at didOpen version:1 and later
+ * definition/references ran on stale content. Now it goes through
+ * `client.notifyChange(file)` as standard `textDocument/didChange` (full
+ * sync, version++): once server-side text is synced, later requests naturally
+ * see new content with no guessing at server-private invalidation semantics.
+ * The "how to send" decision stays encapsulated in this file, so future
+ * adjustments touch only here.
  *
- * **降级策略（spec Open Question 决议）**：notifier 是尽力而为（best-effort）。
- *   - `invalidate` 是 fire-and-forget：返回 void，内部异步发送；
- *   - 异步发送包裹 try/catch，任何失败（client 已 dispose / 读文件失败 /
- *     spawn 失败）都记录并忽略，**绝不把错误抛回 edit_file 主路径**，
- *     否则一次失效通知失败会把整次 edit 变成 execution_failed；
- *   - `getClient` 返回 undefined（该文件无可用 LSP server）→ 静默跳过。
- *     文件写盘本身已成功，未通知到 server 只是陈旧缓存，可自愈。
+ * **Degradation policy**: the notifier is best-effort.
+ *   - `invalidate` is fire-and-forget: returns void, sends asynchronously;
+ *   - the async send is wrapped in try/catch; any failure (client already
+ *     disposed / file read failure / spawn failure) is logged and swallowed,
+ *     **never propagated back to the edit_file main path** — one failed
+ *     invalidation would otherwise turn the whole edit into execution_failed;
+ *   - `getClient` returning undefined (no usable LSP server for the file) →
+ *     silently skip. The file write itself succeeded; a server that missed
+ *     the notification merely holds stale cache and self-heals.
  *
- * **取消语义（Q2/A9）**：本模块只发 JSON-RPC notification，不终止任何
- * 语言服务器子进程（与 client.ts 一致，见 spec S14）。
+ * **Cancellation semantics**: this module only sends JSON-RPC notifications
+ * and never terminates any language-server subprocess (consistent with
+ * client.ts).
  */
 import type { LspCtx } from "./types.js";
 import { getClient } from "./client.js";
 
 /**
- * 创建 LSP 编辑失效 notifier。
+ * Create the LSP edit-invalidation notifier.
  *
- * @param ctx  LSP 客户端上下文（build-engine 装配时传入 `{ directory }`）。
- * @returns   `{ invalidate(file) }` —— fire-and-forget 失效回调，供装配层
- *            作为 registry 的 `onEdit` 注入 edit_file。
+ * @param ctx  LSP client context (build-engine passes `{ directory }` at assembly).
+ * @returns   `{ invalidate(file) }` — a fire-and-forget invalidation callback
+ *            the assembly layer injects as the registry's `onEdit` into edit_file.
  */
 export function createLspNotifier(ctx: LspCtx): {
   readonly invalidate: (file: string) => void;
 } {
   const invalidate = (file: string): void => {
-    // 尽力而为：异步发送，失败不抛回 edit_file 主路径（spec Open Question
-    // 决议）。onEdit 回调是同步签名，这里立即返回，发送在后台完成。
+    // Best-effort: send asynchronously; failures never propagate back to the
+    // edit_file main path. The onEdit callback has a sync signature — return
+    // immediately here, the send completes in the background.
     void notifyInvalidation(ctx, file);
   };
 
@@ -46,24 +55,29 @@ export function createLspNotifier(ctx: LspCtx): {
 }
 
 /**
- * 异步发送单条失效通知。内部 catch 一切错误并吞掉（记录/忽略），
- * 保证不把错误传播给调用方（fire-and-forget）。
+ * Send one invalidation notification asynchronously. Catches and swallows all
+ * errors internally (log/ignore), guaranteeing none propagate to the caller
+ * (fire-and-forget).
  */
 async function notifyInvalidation(ctx: LspCtx, file: string): Promise<void> {
   try {
     const client = await getClient(ctx, file);
     if (!client) {
-      // 该文件无可用 LSP server → 静默跳过（降级，不阻碍写盘主路径）。
+      // No usable LSP server for this file → skip silently (degradation;
+      // never blocks the write path).
       return;
     }
-    // 标准 didChange 同步（见头注释）：未打开 → didOpen 等价路径；
-    // 已打开 → didChange full sync version++。读文件失败在此 reject 并被
-    // 下方 catch 吞掉（notifier best-effort，不回传 edit_file 主路径）。
+    // Standard didChange sync (see header): not open → didOpen-equivalent
+    // path; already open → full-sync didChange with version++. A file-read
+    // failure rejects here and is swallowed by the catch below (notifier is
+    // best-effort, nothing returns to the edit_file main path).
     await client.notifyChange(file);
   } catch (err) {
-    // 降级：notifier 失败不影响 edit_file 主路径（spec Open Question 决议）。
-    // 文件已写盘成功；失效通知失败只是 server 侧短暂陈旧，可自愈。
-    // stderr 留痕便于诊断,S3 禁空 catch → 必须有可观测面。
+    // Degradation: notifier failure never affects the edit_file main path.
+    // The file is already written; a failed invalidation only leaves the
+    // server briefly stale and self-heals.
+    // stderr trail aids diagnosis — an empty catch is banned, an observable
+    // surface is required.
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(
       `[lsp-notifier] invalidate failed for ${file}: ${msg}\n`

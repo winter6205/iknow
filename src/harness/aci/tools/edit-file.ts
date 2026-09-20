@@ -1,16 +1,16 @@
 /**
  * ACI Layer 1: edit_file (poka-yoke linter, split-join replacement).
  *
- * 工具层重写（#141）— 契约真值见
- * `docs/adr/0004-tool-layer-six-tool-set.md` L17 与 plans/141-tool-layer-rewrite.md
- * T1-4 / T9 裁定:
- *   - 保留 poka-yoke linter (`lintPatch` 来自 helpers);
- *   - 新增 `replace_all`(默认 false);
- *   - 替换一律 `split(old).join(new)` —— 严禁 `String.replace` 正则语义,
- *     防 `$&` / `$1` / `$$` 静默特殊化(Standards M1);
- *   - 写入前 lint(new_str) 失败 → 拒绝且不落盘;
- *   - 错误文案固定:`[edit_file] old_str not found: <path>` /
- *     `[edit_file] old_str matched N times, provide more context or set replace_all`。
+ * Contract: docs/adr/0004-tool-layer-six-tool-set.md. Rules:
+ *   - keep the poka-yoke linter (`lintPatch` comes from helpers);
+ *   - `replace_all` defaults to false;
+ *   - every replacement goes through `split(old).join(new)` — never
+ *     `String.replace`, because its regex semantics would silently
+ *     special-case `$&` / `$1` / `$$` in the replacement string;
+ *   - if lint(new_str) fails, refuse the edit before touching the file;
+ *   - fixed failure messages:
+ *     `[edit_file] old_str not found: <path>` /
+ *     `[edit_file] old_str matched N times, provide more context or set replace_all`.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -30,8 +30,9 @@ import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 const TOOL_NAME = "edit_file";
 
 /**
- * 可选接缝:写盘成功后回调,参数为被修改文件的绝对路径。
- * 供外层(如 LSP notifier)做失效通知;仅成功路径触发,失败不触发避免误通知。
+ * Optional seam: invoked after a successful write with the absolute path of
+ * the modified file, so outer layers (e.g. the LSP notifier) can invalidate.
+ * Fires only on the success path — failures must not trigger a bogus notice.
  */
 export interface EditFileOpts {
   readonly onEdit?: (file: string) => void;
@@ -94,7 +95,8 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
-  // 禁止 String.replace 正则语义(防 $& 特殊化):只切第一刀再拼回。
+  // Avoid String.replace's regex semantics ($& special-casing): slice at the
+  // first occurrence and stitch the pieces back around the new string.
   const firstSplit = haystack.indexOf(oldStr);
   if (firstSplit < 0) return haystack;
   return (
@@ -107,30 +109,30 @@ function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
 /**
  * Snapshot the live root at handler invocation time. Accepts either a literal
  * path (legacy / forward-compat shape — tests and other one-shot callers pass
- * `string`) or a `LiveTaskRoot` cell (T5: registry threads the cell so that
+ * `string`) or a `LiveTaskRoot` cell (the registry threads the cell so that a
  * `worktree rebind` in the same run reaches this handler). The returned
- * `string` is the snapshot value — D2 forbids reading the cell more than once
- * per handler call, so callers must reuse the snapshot for both resolve and
- * write.
+ * `string` is the snapshot value — the cell must be read at most once per
+ * handler call, so callers reuse the snapshot for both resolve and write.
  */
 function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
 }
 
 /**
- * 工厂:createEditFileTool(root) — 写入工具,带 poka-yoke linter。
- * 行为:
- *   1. resolveWithinRoot(root, path)(symlink 逃逸拒绝);
- *   2. 读文件(必须存在,否则报错);
- *   3. lintPatch(new_str) 失败 → 拒绝且不落盘;
- *   4. old_str 出现 0 次 → 失败文案`[edit_file] old_str not found: <path>`;
- *   5. replace_all=false 且 >1 次 → 失败文案`[edit_file] old_str matched N times, provide more context or set replace_all`;
- *   6. 替换(split-join / split+slice)→ 写回 → 返回确认纯字符串。
+ * Factory: createEditFileTool(root) — write tool with a poka-yoke linter.
+ * Behavior:
+ *   1. resolveWithinRoot(root, path) (symlink escapes rejected);
+ *   2. read the file (it must exist, else error);
+ *   3. lintPatch(new_str) failure → refuse without touching disk;
+ *   4. old_str occurs 0 times → `[edit_file] old_str not found: <path>`;
+ *   5. replace_all=false and >1 occurrence → `[edit_file] old_str matched N
+ *      times, provide more context or set replace_all`;
+ *   6. replace (split-join / split+slice) → write back → confirmation string.
  *
- * T5 (plans/worktree-live-task-root.md §6): `root` may be a `LiveTaskRoot`
- * cell; the handler reads the snapshot at call time, so `worktree rebind`
- * in the same run lands new edits in the rebound tree. `string` callers
- * (legacy tests, one-shot consumers) keep byte-identical behavior.
+ * `root` may also be a `LiveTaskRoot` cell: the handler reads the snapshot at
+ * call time, so a `worktree rebind` in the same run lands new edits in the
+ * rebound tree. `string` callers (legacy tests, one-shot consumers) keep
+ * byte-identical behavior.
  */
 export function createEditFileTool(
   root: string | LiveTaskRoot,
@@ -141,7 +143,7 @@ export function createEditFileTool(
     ctx?: ToolExecutionContext
   ): Promise<unknown> => {
     const validated = asEditFileInput(input);
-    // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
+    // Per-call snapshot: resolve and write must share the same root value.
     const rootAtCall = readRoot(root);
     const sessionTmpRoot = resolveSessionFenceTmp({
       tmpDir: opts?.tmpDir,
@@ -159,13 +161,13 @@ export function createEditFileTool(
       throw asToolExecutionError("[edit_file] cannot read file", err);
     }
 
-    // poka-yoke:写入前 lint(new_str) — 失败则拒绝且不落盘。
+    // poka-yoke: lint(new_str) before writing — refuse without touching disk.
     const lint = lintPatch(validated.new_str);
     if (!lint.ok) {
       throw new ToolExecutionError(`[edit_file] lint rejected: ${lint.reason}`);
     }
 
-    // 计数 old_str 出现次数 —— 必须先于写盘。
+    // Count old_str occurrences — must happen before any write.
     const occurrences = countOccurrences(content, validated.old_str);
     if (occurrences === 0) {
       throw new ToolExecutionError(`[edit_file] old_str not found: ${absPath}`);
@@ -176,18 +178,21 @@ export function createEditFileTool(
       );
     }
 
-    // split-join 等价精确替换(单处/多处均如此),无 String.replace 正则语义。
+    // split-join is exact replacement (single or multiple occurrences alike),
+    // with no String.replace regex semantics.
     const replaced = validated.replace_all
       ? content.split(validated.old_str).join(validated.new_str)
       : replaceOnce(content, validated.old_str, validated.new_str);
     await writeFile(absPath, replaced, "utf8");
 
-    // 成功路径接缝:仅在写盘成功后回调。失败路径不触发,避免误通知
-    // (例如 LSP notifier 已 dispose 但我们仍误告其刷新)。
+    // Success-path seam: callback fires only after the write succeeds. Failure
+    // paths stay silent, so a disposed LSP notifier is never falsely told to
+    // refresh.
     opts?.onEdit?.(absPath);
 
-    // T4 #298 side-channel:envelope 的 output 进 model tool_result,meta
-    // (old/new 全文)只走观测侧信道,不进模型可见 payload。
+    // Side-channel split: the envelope's output goes into the model's
+    // tool_result; meta (full old/new contents) travels only the observation
+    // side-channel and never enters the model-visible payload.
     return {
       output: `[edit_file] replaced ${occurrences} occurrence(s) in ${absPath}`,
       meta: { oldContent: content, newContent: replaced },

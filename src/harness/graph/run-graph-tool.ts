@@ -1,23 +1,30 @@
 /**
- * D-α T3/T4 —— `run_graph` ACI 工具（graph mode 打开时才露出的编排入口）。
+ * The `run_graph` ACI tool — the orchestration entry, exposed only when graph mode is on.
  *
- * 与 `spawn_subagent` 的分工：`spawn_subagent` 是「一件事交出去」，`run_graph`
- * 是「一张有依赖的图一次性交出去」。父代理声明 DAG，host 走
- * `validateGraph` → `topoWaves`（由 `runGraph` 内部完成）→
- * `createSubAgentNodeExecutor`；节点本身仍是前景 spawn（ADR-0014），所以
- * 并发上限沿用 manager 的全局可配硬顶（默认 15），不另起 per-graph budget。
+ * Division of labor with `spawn_subagent`: `spawn_subagent` hands off one
+ * task; `run_graph` hands off an entire dependency graph at once. The
+ * parent agent declares a DAG and the host runs `validateGraph` →
+ * `topoWaves` (inside `runGraph`) → `createSubAgentNodeExecutor`; nodes are
+ * still foreground spawns (ADR-0014), so concurrency uses the manager's
+ * global configurable hard cap (default 15) — no separate per-graph budget.
  *
- * 两道 EXIT：
- *   - graph mode 关着还被调到（同 round 翻键 / 模型幻觉）→ `ToolExecutionError`，
- *     零 spawn。装配层已按快照把工具从 promptTools 里滤掉，这里是第二道闸。
- *   - 拓扑非法（环 / 自依赖 / 未知依赖 / 重复 id）→ `ToolExecutionError`，
- *     同样零 spawn —— 校验在任何 `manager.spawn` 之前跑完。
- *   - live-graph-phase2 T3：带失败边的图里同一 id 第 9 次 executor 进入 →
- *     effort 熔断（`effort-fuse.ts`，spec SC7 / ADR-0057 / 0064），已 done
- *     先冻结，整次调用 typed 拒 —— 与 mid-run violation 同一通道。
+ * Exit gates:
+ *   - invoked while graph mode is off (same-round flag flip / model
+ *     hallucination) → `ToolExecutionError`, zero spawns. The assembly
+ *     layer already filters the tool out of promptTools by snapshot; this
+ *     is the second gate.
+ *   - invalid topology (cycle / self-dep / unknown dep / duplicate id) →
+ *     `ToolExecutionError`, likewise zero spawns — validation completes
+ *     before any `manager.spawn`.
+ *   - on a graph with failure edges, once the same id exceeds the executor
+ *     entry threshold the effort fuse trips (`effort-fuse.ts`): done results
+ *     freeze first, then the whole call is rejected with a typed error —
+ *     the same channel as a mid-run violation.
  *
- * 节点级失败不是异常而是数据：失败节点的下游被 `runGraph` 标 skipped，独立
- * 分支照跑，最终以浓缩结果整体返回，让父代理自己决定怎么收尾。
+ * Node-level failure is data, not an exception: `runGraph` marks the
+ * downstream of a failed node as skipped, independent branches keep running,
+ * and the call returns one condensed report so the parent agent decides how
+ * to wrap up.
  */
 
 import type { AciToolDef } from "../aci/types.js";
@@ -48,55 +55,65 @@ import type {
 export interface RunGraphToolDeps {
   readonly manager: SubAgentManager;
   /**
-   * 本 round 的 graph 装配快照（`GraphAssembly.enabled`）。
+   * This round's graph assembly snapshot (`GraphAssembly.enabled`).
    *
-   * ADR-0041 / plans/model-prefix-layering.md B3:工具面已常驻，调用侧是否
-   * 可用由本 gate 单点决定。**缺省 = 恒关**(handler typed 拒绝,零 spawn),
-   * 这是 fail-closed 安全姿态 —— 直接构造工具的测试必须显式传 isEnabled
-   * 才能跑通;生产装配由 build-engine 按 graphAssembly.enabled 注入。
+   * The tool surface is now always resident; whether a call is admitted is
+   * decided solely by this gate. **Absent = always off** (the handler
+   * rejects with a typed error, zero spawns) — the fail-closed stance.
+   * Tests constructing the tool directly must pass an explicit isEnabled to
+   * reach the handler; production assembly injects graphAssembly.enabled
+   * via build-engine.
    */
   readonly isEnabled?: () => boolean;
   /**
-   * 活图账本 host（live-graph-phase1 T1 / ADR-0047 / ADR-0051）。按
-   * `ctx.conversationId` 解析会话账本：第一次校验通过的调用 `ensure()`
-   * 建账；settle 后按终态冻结 done/failed（skipped 不冻）；已冻结 id
-   * 再交 → typed 拒绝、零 spawn。**缺省 = 无账本** —— 行为与 V1 字节
-   * 一致（ask / 直调测试 / 未接活图的调用方零变化）。
+   * Live-graph ledger host (ADR-0047). Resolves the per-conversation ledger
+   * by `ctx.conversationId`: the first call that passes validation creates
+   * it via `ensure()`; after settle, terminal nodes freeze as done/failed
+   * (skipped does not freeze); resubmitting a frozen id → typed rejection,
+   * zero spawns. **Absent = no ledger** — behavior is byte-identical to the
+   * ledger-free path (ask / direct-call tests / callers not wired to a live
+   * graph see no change).
    */
   readonly ledger?: LiveGraphLedgerHost;
 }
 
-/** 模型声明的单节点（schema 与本形状一一对应）。 */
+/** A single node as declared by the model (schema maps one-to-one to this shape). */
 interface RunGraphNodeInput {
   readonly id: string;
   readonly task: string;
   readonly deps?: ReadonlyArray<string>;
   /**
-   * live-graph-phase2 T1：标明的失败边（单终点）。目标必须是本次
-   * `nodes` 的某个 id；指向自己 = 标明的单格再进入，合法（spec Changes
-   * / ADR-0053）。目标语义（failed 才走、done 不走）由 T2 调度执行。
+   * Marked failure edge (single endpoint). The target must be some id in
+   * this `nodes` batch; targeting self = a marked single-cell re-entry,
+   * legal. Runtime semantics (traversed only from `failed`, never from
+   * `done`) belong to the scheduler.
    */
   readonly onFailure?: string;
 }
 
 /**
- * live-graph-phase2 T1（spec SC4–SC5 / ADR-0067 取代）：`onFailure`
- * 由"阶段 1 拒失败标记"升级为已声明属性 —— 合法形（目标在本批 ids）
- * 通过 readNodes + 校验层；非法形（值非 string、目标未知或已冻结）
- * typed 拒、零 spawn。T2 才把 `onFailure` 接到调度按 NodeOutcome 走边。
+ * `onFailure` is upgraded from "failure markers rejected" (an earlier
+ * now-superseded rule) to a declared attribute: legal forms (target within
+ * batch's ids) pass readNodes + the validation layer; illegal forms (value
+ * not a string, target unknown or frozen) get a typed rejection, zero
+ * spawns. The scheduler is what later walks the edge per NodeOutcome.
  *
- * 工具说明要让模型掌握活图账本的剩余子图语义（live-graph-phase1 T4 /
- * spec SC5–SC12 / ADR-0050 / 0065）：
- *   (a) 只交还要跑的节点（residual subgraph）—— 已终态 id 不要重交；
- *   (b) 已 done / failed 的 id 会冻结，再次提交会被 typed 拒绝；
- *   (c) deps 指向已 done 的上游可以省略该上游节点 —— host 合并账本、
- *       把上游产出写进下游 task；
- *   (d) 调用侧取消（abort）后，已 done 的 id 留在账本继续冻结，
- *       未完成的 id 可在下一段剩余子图里再交。
+ * The tool description must teach the model the live-graph ledger's
+ * residual-subgraph semantics:
+ *   (a) submit only the nodes that still need to run (residual subgraph) —
+ *       never resubmit terminal ids;
+ *   (b) ids already done / failed are frozen; resubmitting them gets a
+ *       typed rejection;
+ *   (c) deps pointing at already-done upstreams may omit that upstream node
+ *       — the host merges the ledger and threads the upstream output into
+ *       downstream tasks;
+ *   (d) after a caller-side cancel (abort), done ids stay frozen on the
+ *       ledger, unfinished ids can be resubmitted in the next residual
+ *       subgraph.
  *
- * 阶段 2 起，`onFailure` 由 schema 接受；`wait:false` 仍不识别，
- * 由 schema 与 handler 守门；说明文字正面引导（D9 paradigm），
- * 仅描述能力与边界。
+ * The schema accepts `onFailure`; `wait:false` is still unrecognized and
+ * gated by schema and handler; the description text guides positively and
+ * describes only capabilities and boundaries.
  */
 const DESCRIPTION =
   "Run several sub-agent tasks as one dependency graph in a single call. " +
@@ -141,17 +158,16 @@ function describeValidationError(err: GraphValidationError): string {
   }
 }
 
-/** 防御式读参：ajv strict 已守过形状，这里挡直调 handler 的路径。
+/** Defensive arg reading: ajv strict already checks the shape; this guards the direct-handler-call path.
  *
- * 两道闸门与 inputSchema 严格对齐（live-graph-phase1 T4 /
- * live-graph-phase2 T1 / spec SC10–SC11 / ADR-0065）：
- *   - 根：除了 `nodes` 之外的任何键（包括 `wait` 等未声明字段）→
- *     typed 拒、零 spawn。`onFailure` 只允许出现在节点层。
- *   - 节点：除了 `id` / `task` / `deps` / `onFailure` 之外的任何键
- *     → typed 拒、零 spawn。`onFailure` 是已声明字段（live-graph-
- *     phase2 T1；阶段 1 的 ADR-0067「拒失败标记」由此被取代）；目标
- *     校验（未知 / 已冻）由 handler 在 schema/readNodes 通过后单独
- *     做（不与形状闸混淆）。
+ * Both gates align strictly with inputSchema:
+ *   - root: any key other than `nodes` (including undeclared fields like
+ *     `wait`) → typed rejection, zero spawns. `onFailure` is allowed only
+ *     at the node level.
+ *   - node: any key other than `id` / `task` / `deps` / `onFailure` → typed
+ *     rejection, zero spawns. `onFailure` is a declared field; target
+ *     validation (unknown / frozen) is a separate pass the handler runs
+ *     after schema/readNodes succeed (kept distinct from the shape gate).
  */
 const ROOT_KEYS: ReadonlySet<string> = new Set(["nodes"]);
 const NODE_KEYS: ReadonlySet<string> = new Set([
@@ -163,7 +179,7 @@ const NODE_KEYS: ReadonlySet<string> = new Set([
 
 function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   const obj = (input ?? {}) as Record<string, unknown>;
-  // 根：拒未声明键（含 wait —— ADR-0065：图上无 wait:false）。
+  // Root: reject undeclared keys (including `wait` — there is no wait:false on the graph).
   for (const key of Object.keys(obj)) {
     if (!ROOT_KEYS.has(key)) {
       throw new ToolExecutionError(
@@ -177,12 +193,13 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
       "run_graph: `nodes` must be a non-empty array"
     );
   }
-  // S5 基线既有:复杂度 14 在本票之前的 master 上已超阈(本票只改
-  // description 字符串);拆函数属另一票,scope-disable 防它拦 commit。
+  // Complexity 14 was already over the threshold on master before this
+  // change (which only touches the description string); extracting a
+  // function is a separate task — scope-disable so lint does not block commits.
   // eslint-disable-next-line complexity -- baseline: pre-existing on master
   return raw.map((entry, i) => {
     const node = (entry ?? {}) as Record<string, unknown>;
-    // 节点：拒未声明键（`onFailure` 已是声明字段 —— phase2 T1）。
+    // Node: reject undeclared keys (`onFailure` is already a declared field).
     for (const key of Object.keys(node)) {
       if (!NODE_KEYS.has(key)) {
         throw new ToolExecutionError(
@@ -208,10 +225,10 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
     }
     const onFailure = node.onFailure;
     if (onFailure !== undefined && typeof onFailure !== "string") {
-      // spec SC5 / Changes：onFailure 必须是 string；数组 / 数字 / 其它
-      // 非 string 值 → 两条失败边 / 形状错误的兜底（JSON 对象上"两条
-      // 失败边"只能以非法值形态出现，schema 是主合同 type:"string"，
-      // 直调路径此处拒）。零 spawn。
+      // onFailure must be a string; arrays, numbers, and other non-string
+      // values are the only way a JSON object can smuggle in "two failure
+      // edges" or a malformed shape — the schema's primary contract is
+      // type:"string", and this rejects the direct-call path. Zero spawns.
       throw new ToolExecutionError(
         `run_graph: node "${id}" has a non-string \`onFailure\` (only a string target id is accepted)`
       );
@@ -225,7 +242,7 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   });
 }
 
-/** 浓缩回报：父代理要的是「谁成了、谁没成、产出是什么」，不是执行细节。 */
+/** Condensed report: the parent agent needs who succeeded, who failed, and what each produced — not execution detail. */
 function condense(
   nodes: ReadonlyArray<RunGraphNodeInput>,
   results: Readonly<Record<string, GraphNodeResult>>,
@@ -248,9 +265,11 @@ function condense(
 }
 
 /**
- * 依赖产出沿边流动：下游节点是独立进程里的新会话，看不见上游 messages，
- * 所以上游结果必须写进它的 task 文本才叫「有依赖」。无 deps 的节点原样
- * 透传（与单次 `spawn_subagent` 的 task 字节一致）。
+ * Dependency outputs flow along edges: a downstream node is a fresh session
+ * in its own process and cannot see upstream messages, so upstream results
+ * must be written into its task text for "depends on" to mean anything.
+ * Nodes without deps pass through unchanged (task bytes identical to a
+ * single `spawn_subagent`).
  */
 function renderTask(node: RunGraphNodeInput, ctx: NodeContext): string {
   const deps = node.deps ?? [];
@@ -273,11 +292,12 @@ function emitGraphProgress(
 }
 
 /**
- * 局部 AbortSignal 合并：任一被 abort → 返回的 signal 被 abort；两者
- * 都缺席 → undefined。手写 listener 组合而非 `AbortSignal.any` ——
- * 该静态方法需要 Node ≥ 20.3，而 package.json engines 只保证 `>=20`。
- * 组合出的 controller 无引用泄漏风险：调度器生命周期 = 本次 handler
- * 调用，listener 随 controller 被 GC。
+ * Merge two local AbortSignals: if either aborts → the returned signal
+ * aborts; both absent → undefined. Hand-rolled listener composition rather
+ * than `AbortSignal.any` — that static method needs Node ≥ 20.3 while
+ * package.json engines only guarantees `>=20`. No leak risk in the composed
+ * controller: the scheduler's lifetime = this handler invocation, so
+ * listeners are GC'd with the controller.
  */
 function combineAbortSignals(
   a: AbortSignal | undefined,
@@ -296,15 +316,17 @@ function combineAbortSignals(
 }
 
 /**
- * live-graph-phase1 T2:剩余子图合并(spec SC5–SC7 / ADR-0050)。
- * 在 validateGraph 之前先折叠账本:frozen-done dep → 满足,从 deps
- * 剔除(产出单独带回,并入 nodeCtx.outputs 供 renderTask 写入
- * 下游 task);frozen-failed dep → typed 拒(spec ASSUMPTIONS #3);
- * 重交已冻结 id → typed 拒(SC5 末句 / SC6 整段拒绝)。merge
- * 之外的所有拓扑 / 重复 / 环 / 自依赖仍由 validateGraph 单一
- * 权威(complexity-anti-drift 不让 freeze 进 Kahn)。
+ * Residual-subgraph merge: fold the ledger before validateGraph — a
+ * frozen-done dep counts as satisfied and is removed from deps (its output
+ * is brought back separately and merged into nodeCtx.outputs so renderTask
+ * writes it into downstream tasks); a frozen-failed dep → typed rejection;
+ * resubmitting a frozen id → typed rejection, whole submission refused.
+ * Everything beyond the merge — topology / duplicates / cycles / self-deps
+ * — stays validateGraph's single authority (freeze logic must not leak into
+ * Kahn).
  *
- * 账本缺席 → 零行为变化:原 nodes 透传、无账本产出。
+ * Ledger absent → zero behavior change: nodes pass through, no ledger
+ * outputs.
  */
 function mergeResidual(
   nodes: ReadonlyArray<RunGraphNodeInput>,
@@ -334,8 +356,9 @@ function mergeResidual(
   if (merged.rejections.length > 0) {
     throw new ToolExecutionError(`run_graph: ${merged.rejections.join("; ")}`);
   }
-  // T2:把 `onFailure` 重新挂到合并后的 specNodes 上 —— residual 层只
-  // 处理 dep / id(账本冻结语义),失败边由 handler 在此贴回去给调度器。
+  // Re-attach `onFailure` onto the merged specNodes — the residual layer
+  // only handles deps / ids (ledger freeze semantics); the handler pastes
+  // failure edges back on here for the scheduler.
   const onFailureById = new Map(nodes.map((n) => [n.id, n.onFailure] as const));
   const specNodes = merged.nodes.map((n) => {
     const of = onFailureById.get(n.id);
@@ -349,30 +372,38 @@ function mergeResidual(
 }
 
 /**
- * live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
- * (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
- * T2:done 节点的产出也写进账本(SC5「B 能读到 A 的产出」数据源)。
- * T3(spec SC8):调用侧取消时,只冻结「真 done」的节点。abort 路
- * 径上失败的节点(executor 的 signal.aborted 预检查返回
- * failed、waitFor 被 abort 拒绝回 failed)是取消的症状而非真
- * 终结,把它们冻成 failed 等于「取消失败 = 失败冻结」,会让
- * 剩余子图合并层把这些 id 拒为 frozen-failed,父代理就再也
- * 救不回未跑的子节点了(spec SC8 末段)。阶段 1 单跑一次
- * 没有「失败的子节点重跑」语义,放弃冻结就是放弃「失败」的
- * 终态 —— 而失败的真相要等下一段剩余子图提交再说。正常
- * settle(无 abort)路径下 failed 仍按 SC6 冻结,SC6 语义不变。
+ * Freeze settled ids into the ledger by terminal status. skipped does not
+ * freeze; the ledger enforces this at a single point and the handler passes
+ * GraphNodeResult.status straight through. Done nodes also write their
+ * output into the ledger — the data source for downstream reads.
  *
- * F2(review fix):熔断路径不复用 cancel 的「仅冻 done」规则 —— 熔断
- * 路径上 executor 闭包返回的 failed 是**真实失败**(子代理 envelope
- * failed / executor 入口熔断拒绝),与 abort 的「取消症状 failed」
- * 语义不同。熔断走正常 settle 的冻结语义(done / failed 都冻):否则
- * 下一段剩余子图可以重交这些 id 再跑一次,违反 ADR-0050「已完成不
- * 重演」,也绕开 mergeResidual 的 frozen-failed 拒绝。cancel 语义
- * (仅冻 done)不变 —— 本函数唯一需要区分的分支就是调用侧取消。
+ * On a caller-side cancel, freeze only the genuinely done nodes. Failures
+ * on the abort path (the executor's signal.aborted pre-check returning
+ * failed, waitFor rejecting as failed under abort) are symptoms of
+ * cancellation, not real terminations; freezing them as failed would mean
+ * "cancelled = failed-frozen", and the residual-subgraph merge layer would
+ * then refuse those ids as frozen-failed, leaving the parent agent unable
+ * to rescue unfinished nodes. Since a single run has no "rerun a failed
+ * node" semantics, declining to freeze is declining the failed terminal —
+ * whether the failure was real is settled by the next residual submission.
+ * On a normal settle (no abort), failed still freezes as before.
  *
- * 只有 string 产出进账本:非 string 的 `output` 在浓缩层有 `String(...)`
- * 兜底渲染,但账本是跨调用的持久权威 —— 把对象 `String()` 化的
- * "[object Object]" 冻进账本,会在后续剩余子图里被当真产出写进下游 task。
+ * The fuse path does not reuse cancel's "freeze done only" rule: a failed
+ * returned on the fuse path is a **real failure** (sub-agent envelope
+ * failed, or entry refused because the fuse tripped), which is semantically
+ * different from abort's "cancel-symptom failed". The fuse follows normal
+ * settle freeze semantics (both done and failed freeze) — otherwise the
+ * next residual subgraph could resubmit those ids and run them again,
+ * violating "completed is never replayed" and bypassing mergeResidual's
+ * frozen-failed rejection. Cancel semantics (freeze done only) are
+ * unchanged — caller-side cancellation is the only branch this function
+ * needs to distinguish.
+ *
+ * Only string outputs enter the ledger: the condense layer renders non-
+ * string `output` with a `String(...)` fallback, but the ledger is the
+ * cross-call durable authority — freezing a `String()`-ified
+ * "[object Object]" of an object would later be written into downstream
+ * tasks as a real output.
  */
 function freezeResults(
   ledger: LiveGraphLedger,
@@ -380,9 +411,10 @@ function freezeResults(
   cancelled: boolean
 ): void {
   for (const result of Object.values(results)) {
-    // 取消路径:仅 done 进账本;failed / skipped 留给后续剩余
-    // 子图。熔断路径与正常 settle 路径:done / 真 failed 都进,skipped
-    // 由账本单点静默忽略。
+    // Cancel path: only done enters the ledger; failed / skipped stay
+    // available for later residual subgraphs. Fuse path and normal settle
+    // path: done and real failed both enter; skipped is silently ignored by
+    // the ledger's single point.
     if (cancelled && result.status !== "done") continue;
     ledger.freeze(
       result.id,
@@ -395,8 +427,9 @@ function freezeResults(
 }
 
 export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
-  // ADR-0041:isEnabled 缺省 = 恒关 —— 工具面常驻后,handler 是唯一守门。
-  // 直接构造工具的测试必须显式传 isEnabled 才能调通 handler。
+  // isEnabled absent = always off — now that the tool surface is resident,
+  // the handler is the only gate. Tests constructing the tool directly must
+  // pass an explicit isEnabled to reach the handler.
   const isEnabled = deps.isEnabled ?? ((): boolean => false);
   return Object.freeze({
     name: "run_graph",
@@ -441,22 +474,26 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       additionalProperties: false,
     },
     aci: {
-      // 与 spawn_subagent 同归类：执行耗时但工具本身不改文件系统,
-      // 真正的写权限由每个子代理各自的 permission 层守。
+      // Same classification as spawn_subagent: execution is slow but the
+      // tool itself touches no filesystem; real write authority is guarded
+      // by each sub-agent's own permission layer.
       category: "read-only",
       lazy: false,
-      // 图寿命 = 各节点 manager per-task 钟之和；ACI 不另起 timer,
-      // 否则会在节点还活着时提前 abort（与 spawn_subagent 同理）。
+      // Graph lifetime = sum of each node's manager per-task clocks; ACI
+      // must not start its own timer, or it would abort early while nodes
+      // are still alive (same reasoning as spawn_subagent).
       timeoutTier: "unbounded",
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
     } as const,
-    // S5 基线既有:复杂度 18 同为 master 已有;本票只改 description 字符串,
-    // 不做 handler 拆分(minimal change),scope-disable 留待复杂度票。
+    // Complexity 18 likewise pre-existed on master; this change only
+    // touches the description string and does not split the handler
+    // (minimal change) — scope-disable is left for a complexity task.
     // eslint-disable-next-line complexity -- baseline: pre-existing on master
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
-      // EXIT:overlay 关着 —— 装配层已把工具滤出 promptTools,能走到这里
-      // 说明是同 round 翻键或模型幻觉。零 spawn,typed 拒绝。
+      // EXIT: overlay off — the assembly layer already filtered the tool
+      // out of promptTools, so reaching here means a same-round flag flip
+      // or model hallucination. Zero spawns, typed rejection.
       if (!isEnabled()) {
         throw new ToolExecutionError(
           "run_graph: graph mode is off for this run; use spawn_subagent, or turn graph mode on (Shift+Tab / `/graph on`) and try again on the next turn"
@@ -464,59 +501,63 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       }
       const nodes = readNodes(input);
       const ledger = deps.ledger?.ledgerFor(ctx?.conversationId);
-      // T2:剩余子图合并走 mergeResidual;账本缺席 → 零行为变化。
+      // Residual-subgraph merge goes through mergeResidual; ledger absent → zero behavior change.
       const { specNodes, ledgerOutputs } = mergeResidual(nodes, ledger);
       const spec: GraphSpec = { nodes: specNodes };
-      // T2:本段是否带失败边 —— 决定走哪条调度线(见下方 runGraph 分流)。
+      // Does this submission carry failure edges — decides which scheduler path runs (see the split below).
       const hasFailureEdges = specNodes.some((n) => n.onFailure !== undefined);
-      // EXIT:拓扑非法 —— 在任何 spawn 之前 fail-fast(spec SC4 零 spawn)。
+      // EXIT: invalid topology — fail-fast before any spawn (zero spawns).
       const errors = validateGraph(spec);
       if (errors.length > 0) {
         throw new ToolExecutionError(
           `run_graph: invalid graph — ${errors.map(describeValidationError).join("; ")}`
         );
       }
-      // live-graph-phase2 T1:失败边校验(SC5)——目标未知 / 已冻 → typed 拒、
-      // 零 spawn。放在 validateGraph 之后:仅因 deps 成环仍由 topo 单点拒
-      // (ADR-0059);onFailure 目标检查是独立一层(complexity-anti-drift
-      // 不把失败边塞进 Kahn)。self-onFailure 在 validateOnFailureEdges
-      // 里合法(spec Changes)。
+      // Failure-edge validation: unknown / frozen target → typed rejection,
+      // zero spawns. Placed after validateGraph: cycles formed by deps alone
+      // remain topo's single point to refuse, and the onFailure
+      // target check is its own layer (failure edges stay out of Kahn).
+      // self-onFailure is legal inside validateOnFailureEdges.
       const onFailureRejections = validateOnFailureEdges(nodes, ledger);
       if (onFailureRejections.length > 0) {
         throw new ToolExecutionError(
           `run_graph: invalid failure edge(s) — ${onFailureRejections.join("; ")}`
         );
       }
-      // live-graph-phase1 T1:活图账本生命周期 —— 拓扑 / 失败边非法路径
-      // 绝不建账本(SC1 + ASSUMPTIONS #4),所以本块紧跟两道校验之后。
+      // Live-graph ledger lifecycle: an invalid topology / failure-edge path
+      // must never create a ledger, so this block sits right after both
+      // validations.
       if (ledger !== undefined) {
         ledger.ensure();
       }
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
       const parentTurnId = ctx?.turnId;
-      // T3:effort 熔断只在失败边调度线装(spec SC7 / ADR-0057 / 0064)。
-      // plain Kahn 路径(阶段 1)每 id 至多进入一次,无需计数(SC9)。
+      // The effort fuse is installed only on the failure-edge scheduler
+      // path: the plain Kahn path enters each id at most once, no counting.
       const fuse = hasFailureEdges ? createEffortFuse() : undefined;
-      // 每节点现装一次 executor:task 文本要带上该节点 deps 的产出,而
-      // NodePlan 是静态的 —— 现装是让「数据沿边流动」落在既有 executor
-      // 上而不改它的最小做法。T2:ledgerOutputs(本段合并出来的 frozen-done
-      // 产出)合并进 nodeCtx.outputs,使 renderTask 字节不变地写进
-      // 下游 task(spec SC5「B 能读到 A 的产出」)。
+      // Build the executor fresh per node: the task text must carry the
+      // outputs of that node's deps while NodePlan is static — building
+      // fresh is the minimal way to make "data flow along edges" work on
+      // the existing executor without changing it. ledgerOutputs (frozen-
+      // done outputs merged for this submission) fold into nodeCtx.outputs
+      // so renderTask writes them into downstream tasks byte-for-byte.
       const exec: NodeExecutor = (id, nodeCtx) => {
-        // 调用侧已取消 → 本节点不再 spawn。scheduler 把它记成 failed,
-        // 下游随之 skipped;整张图收敛后由下面的 EXIT 统一归因。
+        // Caller already cancelled → this node spawns nothing. The
+        // scheduler records it as failed, downstream becomes skipped; once
+        // the whole graph converges, the EXIT below attributes it uniformly.
         if (signal?.aborted) {
           return Promise.resolve({
             status: "failed" as const,
             error: "run_graph: cancelled by caller abort",
           });
         }
-        // T3:executor 入口计数(spec SC7 / ADR-0057 / 0064 —— 计数点在
-        // 进入,不在校验/调度层)。第 9 次进入同一 id → 熔断:本进入零
-        // spawn,fuse.signal 让调度器停止一切新进入(in-flight 照实落定,
-        // 所以 fuse.signal 不喂给节点 executor),整次调用收敛后由下方
-        // EXIT typed 拒。
+        // Count at the executor entry (the count point is entry, not the
+        // validation or scheduler layer). Exceeding the threshold on one id
+        // trips the fuse: this entry spawns nothing, fuse.signal makes the
+        // scheduler stop all new entries (in-flight nodes still settle,
+        // which is why fuse.signal is not fed to the node executor), and
+        // after the call converges the EXIT below rejects with a typed error.
         if (fuse !== undefined && !fuse.enter(id)) {
           return Promise.resolve({
             status: "failed" as const,
@@ -536,9 +577,10 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       };
       const tracker = createGraphProgressTracker(spec.nodes);
       try {
-        // T2:分流 —— 无失败边的图仍走 plain `runGraph`(阶段 1 Kahn,
-        // 字节级一致,SC9);带失败边则走 outcome 调度器,按 NodeOutcome
-        // 启动唯一 onFailure 终点一次,允许同 id 再进入(SC1/SC2/SC6)。
+        // Scheduler split — graphs without failure edges still use plain
+        // `runGraph` (Kahn, byte-level identical); graphs with failure edges
+        // use the outcome scheduler, which starts the unique onFailure
+        // target once per NodeOutcome and allows re-entry of the same id.
         const progressHooks = {
           onWave: (wave: number, ids: ReadonlyArray<string>): void => {
             emitGraphProgress(ctx, tracker.onWave(wave, ids));
@@ -550,17 +592,21 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         let violation: FailureEdgeViolation | undefined;
         let execution: GraphExecution;
         if (hasFailureEdges) {
-          // 已知接受竞态（boundary review 记录在案）：并发第二次调用若同
-          // 时提交失败边，可能在第一次调用执行中读到未冻结的账本态并
-          // kick 同一 id。handler 层不装 per-conversation mutex（阶段 1
-          // M2 诚实钉，见 run-graph-concurrency.test.ts）—— 真正的串行
-          // 守卫在 ACI executor：run_graph 声明 isConcurrencySafe:false，
-          // 并发波次把 unsafe 调用与其它调用分波，同会话的两次 run_graph
-          // 在真实 executor 里不会并发，该竞态经生产路径不可达。
-          // T3:fuse.signal 只喂给调度器 —— 停的是「新进入的启动」,
-          // in-flight 节点照实落定(不喂节点 executor 的 signal,否则
-          // 会被误判成调用侧取消)。合并调用侧 signal 与 fuse.signal,
-          // 任一被 abort → 调度收敛。
+          // Known, accepted race (recorded in boundary review): a
+          // concurrent second call submitting failure edges at the same time
+          // could read an unfrozen ledger state mid-first-call and kick the
+          // same id. The handler layer deliberately has no per-conversation
+          // mutex (honestly pinned; see run-graph-concurrency.test.ts) —
+          // the real serialization guard is in the ACI executor: run_graph
+          // declares isConcurrencySafe:false, concurrent waves separate
+          // unsafe calls from the rest, so two run_graph calls in one
+          // conversation never overlap in the real executor and this race
+          // is unreachable through the production path.
+          // fuse.signal is fed only to the scheduler — it stops "starting
+          // new entries"; in-flight nodes settle as-is (it is not fed to
+          // node executors, or they would be misread as caller-side
+          // cancellation). Combine the caller signal with fuse.signal:
+          // either aborting → the scheduler converges.
           const r = await runGraphWithFailureEdges(spec, exec, {
             ...progressHooks,
             signal: combineAbortSignals(signal, fuse?.signal),
@@ -570,15 +616,17 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         } else {
           execution = await runGraph(spec, exec, progressHooks);
         }
-        // T1/T2/T3 冻结语义集中在 freezeResults;详情见该函数。violation
-        // 与 abort 走同一通道:done 部分保留进账本(SC8 + ADR-0060),不
-        // 当成功数据返回。
+        // Freeze semantics for all paths are centralized in freezeResults;
+        // see that function. violation and abort share one channel: the done
+        // portion is kept into the ledger, not returned as success data.
         const cancelled = signal?.aborted === true;
-        // T3:fuse tripped 走与 violation / abort 同一 partial-results 通
-        // 道 —— done 部分先冻结(ADR-0057「熔断后已完成留下」),再 typed
-        // 拒。F2:熔断 ≠ cancel,沿用正常 settle 路径冻结 done + 真 failed,
-        // 避免下一段剩余子图重交这些 id(违反 ADR-0050)。cancel 仍优先:
-        // 调用侧都取消本轮了,abort 症状 failed 不冻结(SC8)。
+        // A tripped fuse goes through the same partial-results channel as
+        // violation / abort — freeze the done portion first ("what completed
+        // before a trip stays"), then reject with a typed error. Fuse ≠
+        // cancel: follow the normal settle path freezing done + real
+        // failed, so the next residual subgraph cannot resubmit these ids.
+        // Cancel still takes precedence: the caller dropped this round, so
+        // cancel-symptom failed does not freeze.
         const fuseTripped = fuse?.signal.aborted === true;
         if (ledger !== undefined) {
           freezeResults(ledger, execution.results, cancelled);
@@ -593,9 +641,10 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
             `run_graph: failure edge from "${violation.from}" targets "${violation.target}" which is already done — frozen node cannot be re-run; submit a new node id instead`
           );
         }
-        // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
-        // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
-        // 不当成功数据返回:调用方已经不要这轮了。
+        // EXIT: attribute caller cancellation — consistent with
+        // spawn_subagent (the executor normalizes signal.aborted to
+        // execution_failed:cancelled). A half-graph's partial results are
+        // not returned as success data: the caller no longer wants this round.
         if (cancelled) {
           throw new ToolExecutionError(
             "run_graph: cancelled by caller abort while the graph was running"

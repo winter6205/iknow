@@ -1,28 +1,33 @@
 /**
- * T2 (#175): Harness 流式事件契约 SSOT (D1 最小集, 阶段二扩展)。
+ * Harness streaming-event contract SSOT (minimal set, extended in later phases).
  *
- * 事件集:
- *   - text_delta / thinking_delta:增量文本 (answer / thinking);
- *   - tool_call_start:工具调用开始, 携带 `id` (tool_use block id, 供
- *     host 与 postToolUse 完成事件配对, T4 实时状态依赖);
- *   - tool_input_delta:工具调用 input 增量 (partial_json 逐段), 携带
- *     `id` (tool_use block id, 与 tool_call_start 同一来源) — 增量只服务
- *     展示层 (T1 tui-render-optimization), 权威 input 仍由
- *     `finalMessage()` 一次性交付;
- *   - stop_summary:终态事件 (plan T4 / ADR-0011) — 异常停后 best-effort
- *     模型收尾摘要的纯文本载荷, 由 loop-engine run() 在返回前 emit;
- *     不携带结构 / 元数据 (摘要文本即载荷)。
+ * Event set:
+ *   - text_delta / thinking_delta: incremental text (answer / thinking);
+ *   - tool_call_start: tool call begins, carries `id` (the tool_use block id
+ *     used to pair with postToolUse completion events for live status);
+ *   - tool_input_delta: incremental tool input (partial_json pieces),
+ *     carrying the same `id` as tool_call_start — increments serve only the
+ *     display layer; the authoritative input still arrives in one shot from
+ *     `finalMessage()`;
+ *   - stop_summary: terminal event — after an abnormal stop, the
  *
- * 为什么用这些事件:
- *   - 原生 SSE 事件 (SDK 0.115 message_stream) 不出 adapter 边界
- *     (#147 D1 裁决), 经 wireStreamEvents 翻译;
- *   - v1+ 已实现:tool input 增量流通过 `tool_input_delta` 事件逐段 emit
- *     (增量只服务展示层, 权威 input 仍由 `finalMessage()` 一次性交付 —
- *     T3 末态经 `interpretMessage` 现有 SSOT 零改动路径, D8 整回合不提交
- *     不受影响)。
- *   - SDK 0.115 无 wire 级 ping/error 事件, 契约不承诺。
+ // (ADR-0011)
+ *     best-effort closing model summary as plain text, emitted by
+ *     loop-engine run() before returning; carries no structure / metadata
+ *     (the summary text is the payload).
  *
- * 扩展点: 加新成员只需扩本联合 (消费者按 `type` 窄化), 无需改 emit / 消费点。
+ * Why these events:
+ *   - native SSE events do not cross the adapter boundary (adjudicated
+ *     early), translated via wireStreamEvents;
+ *   - tool input incremental streaming emits pieces via `tool_input_delta`
+ *     (display only; the authoritative input comes from `finalMessage()` —
+ *     the end state goes through the existing `interpretMessage` SSOT path
+ *     with zero changes, and whole-turn commit semantics are unaffected).
+ *   - the SDK has no wire-level ping/error events, so the contract promises
+ *     none.
+ *
+ * Extension point: adding a member only extends this union (consumers
+ * narrow on `type`); no emit / consume sites to change.
  */
 import type { AgentStatusSnapshot } from "./agent-status.js";
 import type { EnvSnapshot } from "./env-snapshot.js";
@@ -34,66 +39,84 @@ export type HarnessStreamEvent =
   | { type: "tool_call_start"; name: string; id: string }
   | { type: "tool_input_delta"; id: string; partialJson: string }
   | { type: "stop_summary"; text: string }
-  // #467:LLM 结构化摘要压缩(full-compact)生命周期事件。宿主层据此渲染
-  // "Compacting…"指示 / 透出摘要 latency。compact 期间 turn 仍在继续(主 loop
-  // 等摘要完成才进入下一 step),故宿主收到 compaction_started 时可显示进度
-  // 指示器;收到 completed / failed / cancelled 中任一终态事件后清除指示器
-  // (cancelled = wait 中用户取消,非错误,语义对齐 Claude Code:压缩中 Esc =
-  // 会话原样 + 无失败呈现)。事件形状保持最小:仅携带宿主渲染 / 日志所需字段。
+  // LLM structured-summary compaction (full-compact) lifecycle events. The
+  // host renders a "Compacting…" indicator / surfaces summary latency from
+  // them. During compaction the turn is still running (the main loop waits
+  // for the summary before the next step), so on compaction_started the host
+  // may show a progress indicator, cleared by any terminal event
+  // (completed / failed / cancelled; cancelled = user cancelled during the
+  // wait, not an error — Esc mid-compaction keeps the conversation as-is
+  // with no failure presentation, aligned with Claude Code). Shapes stay
+  // minimal: only fields the host needs for rendering / logging.
   | { type: "compaction_started"; droppedCount: number }
   | { type: "compaction_completed"; summaryLen: number; durationMs: number }
   | { type: "compaction_failed"; reason: string; durationMs: number }
   | { type: "compaction_cancelled" }
-  // #550:压缩摘要的流式文本轨道。runFullCompact 不再把 adapter 的原始
-  // text_delta 直透宿主,而是重映射为本事件——宿主若把它当 text_delta 追加进
-  // 主回答草稿,摘要文本会污染 assistant 回复(渲染污染 latent bug)。宿主
-  // 按 `type` 窄化路由到独立压缩草稿;thinking_delta 在压缩上下文内被
-  // runFullCompact 吞咽(scratchpad,不暴露)。
+  // Streaming text track for the compaction summary. runFullCompact no
+  // longer passes the adapter's raw text_delta through to the host but
+  // remaps it to this event — a host that appended it to the main answer
+  // draft would let summary text pollute the assistant reply (a latent
+  // rendering-pollution bug). Hosts narrow on `type` into a separate
+  // compaction draft; thinking_delta inside the compaction context is
+  // swallowed by runFullCompact (scratchpad, not exposed).
   | { type: "compaction_text_delta"; text: string }
-  // #647 T3 / ADR-0028 / CONTEXT「状态栏」:现势快照事件 —— TUI 只读最新现势
-  // 的读口。loop-engine 在每次即将调用模型前、注入 `<agent_status>` 栏的同一
-  // 计算点发出,字段与栏同源(AgentStatusSnapshot 的数据字段,见
-  // agent-status.ts;不携带栏 text —— text 由同一快照派生,两处若可能分叉
-  // 即设计缺陷)。deps.agentStatus 缺席(ask / worker 路径)→ 栏不注入,本
-  // 事件也随之不发。事件只给宿主 UI,绝不进模型栏(in-flight 属
-  // tool_call_start 等既有事件,与本事件分开)。字段形状经 Pick 直接取自
-  // AgentStatusSnapshot(不内联重声明,单一真源;per-field 文档见
-  // agent-status.ts,本处不重复)。spec agent-status-instruction-echo T3:
-  // Pick 随快照加性扩 instruction / reconcile 两槽 —— 条件在场语义沿用快照
-  // 字段本身(缺席 → key 不出现,F1 形态退回旧三件);reconcile 结算已经
-  // loop-engine run 作用域装箱接线(子弹 4 完成):事件 reconcile 槽随结算
-  // 条件在场(本栏已结算 → key 在场,含 false;无判定对象 → 槽缺席)。
+  // Status-bar current-snapshot event — the read port for the TUI's
+  // (ADR-0028)
+  // "latest current state". loop-engine emits it at the same computation
+  // point where it injects the `<agent_status>` bar, just before each model
+  // call; fields share the bar's source (AgentStatusSnapshot data fields,
+  // see agent-status.ts; the bar `text` is not carried — it derives from the
+  // same snapshot, and any divergence between the two would be a design
+  // flaw). When deps.agentStatus is absent (ask / worker paths) the bar is
+  // not injected and this event is not emitted either. The event goes only
+  // to host UI, never into the model bar (in-flight state belongs to
+  // existing events like tool_call_start). The shape uses Pick directly from
+  // AgentStatusSnapshot (no inlined re-declaration, one source of truth;
+  // per-field docs live in agent-status.ts and are not repeated here). The
+  // Pick grows additively with the snapshot's instruction / reconcile slots —
+  // conditional presence follows the snapshot field itself (absent → key not
+  // emitted); reconcile settlement is wired through the loop-engine
+  // run-scoped box: the event's reconcile key appears once this bar has
+  // settled (including false); nothing to settle → slot absent.
   | ({
       type: "agent_status";
     } & Pick<
       AgentStatusSnapshot,
       "lastTool" | "openTodoLines" | "instruction" | "reconcile"
     >)
-  // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势快照事件 —— 与
-  // `agent_status` 平行的**独立**事件流(人读 chrome 的数据源,给 TUI
-  // EnvironmentPane;给人不给模型)。loop-engine 在每次即将调用模型前、
-  // `agent_status` 事件之后的同一回合边界计算点发出。**不**复用
-  // agent_status 事件 / 快照结构(字段零重叠),**不**进 messages、
-  // **不**进 verify 输入、**不**写 ADR-0028 状态栏。deps.envSnapshot 缺席
-  // (ask / worker 路径)→ 本事件不发。snapshot 即 readEnvSnapshot 产物:
-  // git 失败 → git 字段全 null + degradeReason 分型(degraded,cwd 保留),永不 throw。
+  // Environment-freshness snapshot event — an **independent** stream
+  // parallel to `agent_status` (data source for human-readable chrome, the
+  // TUI EnvironmentPane; for humans, not the model). loop-engine emits it at
+  // the same turn boundary, right after the `agent_status` event, before
+  // each model call. It deliberately does not reuse the agent_status event /
+  // snapshot shape (zero field overlap), does not enter messages, does not
+  // (ADR-0028)
+  // enter verify input, and does not write the status bar. When
+  // deps.envSnapshot is absent (ask / worker paths) the event is not sent.
+  // The snapshot is readEnvSnapshot's product: git failure → all git fields
+  // null + a degradeReason classification (degraded, cwd preserved), never
+  // throws.
   | { type: "env_snapshot"; snapshot: EnvSnapshot }
-  // TUI run_graph 执行视图：scheduler onWave/onNode 累加快照。snapshot
-  // null = 本次 run_graph 结束或取消，宿主应撤掉 graph chrome。
+  // TUI run_graph execution view: scheduler onWave/onNode accumulate a
+  // snapshot. snapshot null = this run_graph ended or was cancelled; the
+  // host should tear down the graph chrome.
   | { type: "graph_progress"; snapshot: GraphProgressSnapshot | null }
-  // ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换流事件
-  // —— 仅当 loop-engine 在两次相邻 step 边界检测到 graphAssembly
-  // 翻转(开→关 / 关→开)时发出,与消息尾部追加的 `<graph_mode>` 单行
-  // 文本同源(SSOT 在 graph/notification.ts)。宿主层据此更新人读
-  // chrome(标题栏 / status bar);模型面的切换提示只走 messages 尾部
-  // 追加(appendGraphModeChange 走 appendMessage),不走 stream event。
-  // 字段仅保留 `enabled` —— 翻转方向与文本方向 1:1 对应,文本本身由
-  // messages 序列承载。
+  // Graph-mode switch stream event — emitted only when loop-engine detects
+  // a graphAssembly flip (off→on / on→off) between two adjacent step
+  // boundaries, same source as the single `<graph_mode>` line appended to
+  // the message tail (SSOT in graph/notification.ts). The host updates
+  // human-readable chrome (title bar / status bar) from it; the
+  // model-facing switch notice goes only through the messages append
+  // (appendGraphModeChange → appendMessage), not a stream event. Only
+  // `enabled` is kept as a field — flip direction maps 1:1 to text
+  // direction, and the text itself is carried by the messages sequence.
   | { type: "graph_mode_changed"; enabled: boolean }
-  // Bug（2026-09-07）:传输重试进度 —— withTransportRetry 每次退避重试前
-  // 发出,宿主渲染「连接重试 attempt/max」类指示。此前重试完全静默,429/
-  // 网络故障期间用户看不到任何活动。`detail` 为 fault 的短描述(状态码/
-  // 错误类),仅给人看,不进模型面。
+  // Transport retry progress — emitted by withTransportRetry before each
+  // backoff retry so the host can render a "connection retry attempt/max"
+  // style indicator. Retries were previously silent: during 429 / network
+  // faults the user saw no activity at all. `detail` is a short description
+  // of the fault (status code / error class) for humans only, never into
+  // the model face.
   | {
       type: "transport_retry";
       attempt: number;
@@ -102,9 +125,11 @@ export type HarnessStreamEvent =
     };
 
 /**
- * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw
- * 与 wireStreamEvents D3 先例)。统一封装:anthropic-adapter stream 翻译 + full
- * compact 压缩生命周期事件均消费此函数,避免各处 try/catch 复制粘贴。
+ * Observer errors must not back-flow into the emit path (aligned with
+ * ADR-0003's `safeTrace` MUST NOT throw and the wireStreamEvents precedent).
+ * Single wrapper: both the anthropic-adapter stream translation and the
+ * full-compact lifecycle events consume it, avoiding copy-pasted try/catch
+ * at each site.
  */
 export function safeEmitStream(
   onStream: ((event: HarnessStreamEvent) => void) | undefined,
@@ -114,7 +139,7 @@ export function safeEmitStream(
   try {
     onStream(event);
   } catch {
-    // D3:swallow observer exceptions,host faults must not back-flow into
+    // Swallow observer exceptions: host faults must not back-flow into
     // the stream arm (aligned with ADR-0003 `safeTrace` MUST NOT throw).
   }
 }

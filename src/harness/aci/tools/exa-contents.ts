@@ -1,6 +1,7 @@
 /**
- * Exa contents 阅读适配：写死官方端点，不过 network-guard 出站。
- * 协议细节停在本文件，不进 web_fetch handler。
+ * Exa contents reader: hits the hard-coded official endpoint directly,
+ * bypassing the network-guard egress path. Protocol details stay in this
+ * file and do not leak into the web_fetch handler.
  */
 
 import { ToolExecutionError } from "../../errors.js";

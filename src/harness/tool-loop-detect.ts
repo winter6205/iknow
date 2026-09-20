@@ -1,6 +1,7 @@
 /**
- * #672 T3: 本 run 工具环检测（调用键 + 结果键，周期 k=1..5，重复 R=5，停滞才 trip）。
- * 无法正规化（含不规则 MCP 形状）→ fail-open。
+ * Per-run tool-loop detection (call key + result key, periods k=1..5,
+ * repetition R=5; trips only on a stall). Anything that cannot be
+ * normalized (including irregular MCP shapes) → fail-open.
  */
 
 import { createHash } from "node:crypto";
@@ -17,7 +18,7 @@ export type ToolLoopEvent = {
   readonly callKey: string;
   readonly resultKey: string;
   readonly normalizable: boolean;
-  /** 同一 tool phase（一次 runToolPhase）共享 id；单波并行不算跨周期重复。 */
+  /** Shared id for one tool phase (a single runToolPhase); parallel calls within one wave do not count as cross-period repeats. */
   readonly phaseId: number;
 };
 
@@ -36,17 +37,18 @@ function canonicalJson(value: unknown): string | null {
   try {
     return JSON.stringify(sortKeys(value));
   } catch {
-    // EXIT: 循环结构 / 不可序列化 → 调用键无法正规化，上层 fail-open。
+    // EXIT: cyclic / non-serializable → call key unnormalizable, upper layer fails open.
     return null;
   }
 }
 
 /**
- * 契约（path-image-vision 修复 R2）：resultKey 不收像素本体 —— read_image
- * 成功臂的 payload 携带 ≤1.4MB base64 image block（executor 下转型塞进
- * AnthropicContentBlock[]），整块序列化会随 events 全 run 累积。base64 image
- * block 按内容哈希指纹化（相同字节 → 相同 resultKey，loop 判等语义不变）；
- * 其余非 text block 维持既有 JSON.stringify 路径。
+ * Contract: resultKey never absorbs pixel bodies — a successful `read_image`
+ * payload carries a ≤1.4MB base64 image block (downcast by the executor into
+ * AnthropicContentBlock[]), and serializing whole blocks would accumulate
+ * across all events for the run. base64 image blocks are fingerprinted by
+ * content hash (same bytes → same resultKey, loop-equality semantics
+ * unchanged); other non-text blocks keep the existing JSON.stringify path.
  */
 function imageFingerprint(b: unknown): string | null {
   if (b === null || typeof b !== "object") return null;
@@ -91,7 +93,7 @@ function resultKeyFrom(result: ToolExecutionResult): string | null {
       if (typeof code === "number") extra = `:code=${code}`;
     }
   } catch {
-    // EXIT: payload 不是 JSON → 不加 exit code 后缀，仍用原文做结果键。
+    // EXIT: payload is not JSON → skip the exit-code suffix, still use the raw text as the result key.
     extra = "";
   }
   const body = canonicalJson(text);

@@ -1,7 +1,7 @@
 /**
  * `glob` — ACI tool: find files by glob pattern under a workspace root.
  *
- * Contract surface (T7 of #141, ADR-0004):
+ * Contract surface (ADR-0004):
  *   - input  : { pattern: string, path?: string, limit?: integer }
  *   - output : alphabetised, root-relative paths, one per line.
  *   - empty pattern is a hard error (NOT a "match all" fallback).
@@ -66,10 +66,10 @@ export interface GlobToolDeps {
 /**
  * Snapshot the live root at handler invocation time. Accepts either a
  * literal path (legacy / forward-compat shape — tests and other one-shot
- * callers pass `string`) or a `LiveTaskRoot` cell (T6: registry threads
+ * callers pass `string`) or a `LiveTaskRoot` cell (the registry threads
  * the cell so that `worktree rebind` in the same run reaches this
- * handler). The returned `string` is the snapshot value — D2 forbids
- * reading the cell more than once per handler call.
+ * handler). The returned `string` is the snapshot value — reading the cell
+ * more than once per handler call is forbidden.
  */
 function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
@@ -78,12 +78,11 @@ function readRoot(root: string | LiveTaskRoot): string {
 /**
  * Factory: create the `glob` tool bound to a workspace root.
  *
- * T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
- * `LiveTaskRoot` cell; the handler reads the snapshot at call time, so
- * `worktree rebind` in the same run lands the next call in the rebound
- * tree. `string` callers (legacy tests, one-shot consumers) keep
- * byte-identical behavior. `deps` is an optional test seam (production
- * callers omit it).
+ * `root` may be a `LiveTaskRoot` cell; the handler reads the snapshot at
+ * call time, so `worktree rebind` in the same run lands the next call in
+ * the rebound tree. `string` callers (legacy tests, one-shot consumers)
+ * keep byte-identical behavior. `deps` is an optional test seam
+ * (production callers omit it).
  */
 export function createGlobTool(
   root: string | LiveTaskRoot,
@@ -114,9 +113,10 @@ export function createGlobTool(
       const subPath = readSubPath(input);
       const limit = clampLimit(readLimit(input));
 
-      // T6 D2: per-handler batch snapshot. root 在入口读一次冻结,贯穿整条
-      // 路径(resolve → realpath → rg/fallback)。handler 内后续 cell 翻转
-      // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root(legacy parity)。
+      // Per-handler batch snapshot: the root is read once at entry and
+      // frozen for the whole path (resolve → realpath → rg/fallback). Later
+      // cell flips inside the handler do not leak into this call. With no
+      // cell, fall back to the root captured at factory time (legacy parity).
       const rootAtCall = readRoot(root);
       const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
 
@@ -136,7 +136,7 @@ export function createGlobTool(
       //    - Test seam path: deps.spawnRg (no signal — used only for parse
       //      logic + ENOENT-driven fallback coverage).
       //    - Production path: spawnWithStopSignal so ctx.signal can stop
-      //      the rg child + descendants (ADR-0005 L14 — signal must reach
+      //      the rg child + descendants (ADR-0005: the signal must reach
       //      any subprocess; rg spawns workers on some workloads).
       let rawPaths: string[];
       try {
@@ -175,9 +175,9 @@ export function createGlobTool(
  *   `undefined` so the live-root fence stays intact.
  * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
  *   shape-based fallback to a derived main checkout — OFF assembly must get
- *   no extra read root (spec SC4: byte-identical to the historical read
- *   boundary) and worker assembly must not widen its tool surface (spec
- *   clause 14) merely because the root path looks task-worktree-shaped.
+ *   no extra read root (byte-identical to the historical read boundary) and
+ *   worker assembly must not widen its tool surface merely because the root
+ *   path looks task-worktree-shaped.
  */
 function resolveProjectIdentityRoot(
   root: string,
@@ -235,7 +235,7 @@ function readPattern(input: unknown): string {
     throw new ToolExecutionError("glob: pattern must be a string");
   }
   if (pattern.length === 0) {
-    // ADR-0004 L30: empty pattern must NOT degenerate to "match all".
+    // ADR-0004: an empty pattern must NOT degenerate to "match all".
     throw new ToolExecutionError(
       "glob: pattern must be a non-empty glob (e.g. '*.ts' or 'src/**/*.md')"
     );
@@ -290,7 +290,7 @@ async function runRgViaSeam(
 
 /**
  * Production path: real `rg` via `spawnWithStopSignal` so ctx.signal can
- * cancel the rg child + its descendant processes (ADR-0005 L14).
+ * cancel the rg child + its descendant processes (ADR-0005).
  */
 async function runRgViaProduction(
   pattern: string,

@@ -1,12 +1,15 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：拓扑校验与分层。
+ * PROTOTYPE — self-written Graph multi-task orchestration: topology
+ * validation and layering.
  *
- * 验证问题：（同 types.ts 头注释）
- * 本文件是纯函数模块：validateGraph 检测 unknown-dep / self-dep / duplicate-id /
- * cycle（尽力而为）；topoWaves 做 Kahn 分层（wave 0 = 无依赖，wave N =
- * 依赖全在 < N 层；非法图抛 Error）。无 IO、无 console、不 import loop-engine。
+ * Validation question: (same as types.ts header)
+ * Pure-function module: validateGraph detects unknown-dep / self-dep /
+ * duplicate-id / cycle (best effort); topoWaves does Kahn layering (wave 0 =
+ * no deps, wave N = deps all in layers < N; throws Error on an invalid spec).
+ * No IO, no console, no loop-engine imports.
  *
- * 边界：本模块是 A/B/C 三个原型的共同编译依赖；纯逻辑层，不依赖 subagent/trace。
+ * Boundary: shared compile-time dependency of the prototypes in this
+ * directory; pure logic layer with no subagent/trace dependency.
  */
 
 import type { GraphSpec } from "./types.js";
@@ -22,8 +25,9 @@ export type GraphValidationError =
   | { readonly kind: "cycle"; readonly involved: ReadonlyArray<string> };
 
 /**
- * 校验：未知依赖 / 自依赖 / 重复 id / 环。返回 [] = 合法。
- * cycle 检测用 Kahn 残留：处理不到的节点集即环上节点（尽力而为）。
+ * Validate: unknown deps / self-deps / duplicate ids / cycles. [] = valid.
+ * Cycle detection uses the Kahn residue: nodes left unprocessed are on
+ * cycles (best effort).
  */
 export function validateGraph(
   spec: GraphSpec
@@ -50,7 +54,8 @@ export function validateGraph(
     }
   }
 
-  // cycle detection via Kahn 残留（仅在前面三项均通过时才有意义，但仍尽力而为）
+  // Cycle detection via Kahn residue (only meaningful when the three checks
+  // above all pass, but still best effort)
   const { inDegree, dependents } = buildAdjacency(spec, ids);
   const queue: string[] = [];
   for (const [id, deg] of inDegree) {
@@ -78,7 +83,7 @@ export function validateGraph(
   return errors;
 }
 
-/** Kahn 分层：wave 0 = 无依赖，wave N = 依赖全在 < N 的层。非法图抛 Error。 */
+/** Kahn layering: wave 0 = no deps, wave N = deps all in layers < N. Throws Error on an invalid graph. */
 export function topoWaves(
   spec: GraphSpec
 ): ReadonlyArray<ReadonlyArray<string>> {
@@ -87,7 +92,7 @@ export function topoWaves(
     throw new Error(`invalid graph: ${describeError(errors[0]!)}`);
   }
 
-  // 记录 spec.nodes 的原始顺序，每层内按此稳定排序
+  // Record spec.nodes' original order; each layer is stably sorted by it
   const nodeOrder = new Map<string, number>();
   for (let i = 0; i < spec.nodes.length; i++) {
     nodeOrder.set(spec.nodes[i]!.id, i);
@@ -118,8 +123,9 @@ export function topoWaves(
 }
 
 /**
- * Adjacency 抽取：被 validateGraph（cycle 残差检测）与 topoWaves（Kahn 分层）
- * 共同依赖。`validIds` 仅 validateGraph 用（用于跳过非法边的环检测）。
+ * Adjacency extraction, shared by validateGraph (cycle-residue detection)
+ * and topoWaves (Kahn layering). `validIds` is only for validateGraph (to
+ * skip illegal edges during cycle detection).
  */
 function buildAdjacency(
   spec: GraphSpec,

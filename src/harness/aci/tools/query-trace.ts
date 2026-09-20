@@ -9,8 +9,8 @@
  * its own tool name (TOOL_NAME) on the two domain errors it translates. Any
  * other error is re-raised untouched.
  *
- * plan `trace-mcp-read-side-split` T7: the drill-down axis (`record_id` /
- * `detail`) is gone — `get_record` owns it now. The face therefore drops those
+ * After the trace read-side split, the drill-down axis (`record_id` /
+ * `detail`) is gone — `get_record` owns it. The face therefore drops those
  * three schema keys, gains `offset`, makes `conversation_id` required, and
  * maps the read-side `session_not_found` to a typed tool error.
  */
@@ -40,9 +40,11 @@ export class QueryTraceValidationError extends ToolExecutionError {
 }
 
 /**
- * 行轴契约（spec SC20）：`session_not_found` 由 `get_record` 引入，T7 复用 ——
- * 行轴是第二个必填 `conversation_id` 的工具（Assumption 4 关掉了「缺省=最近活跃
- * 会话」）。消息按本面习惯把工具名前缀拼在最前，调用方沿用 SC16 的形状识别。
+ * Row-axis contract: `session_not_found` was introduced by `get_record` and
+ * is reused here — this is the second tool with a required
+ * `conversation_id` (the shared assumption rules out "default = most
+ * recently active session"). The message prefixes the tool name up front per
+ * this face's convention; callers keep recognizing the same shape.
  */
 export class QueryTraceSessionNotFoundError extends ToolExecutionError {
   readonly kind = "session_not_found" as const;
@@ -116,9 +118,10 @@ export function createQueryTraceTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
-      // B6 / ADR-0043 §3:trace 读侧 row-axis(schema 面积最大)→ 退场次序
-      // 首位;超阈值时首退。stamp 仅此一处;`tool-overflow.ts` 是判定层
-      // SSOT,本字段是数据来源。
+      // ADR-0043 puts this first in the deferral order (trace read side,
+      // row axis — the largest schema surface): deferred first when over
+      // threshold. The stamp lives only here; `tool-overflow.ts` is the
+      // decision-layer SSOT and this field is its data source.
       deferrable: true,
     },
   });

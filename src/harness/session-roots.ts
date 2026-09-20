@@ -1,34 +1,45 @@
 /**
- * T2 (plans/worktree-session-roots.md) — 会话三根 SSOT（ADR-0037 §4）。
+ * Session roots SSOT (ADR-0037): the single root-policy point.
  *
- * 唯一根策略点：一次输入按**角色**出三个根，调用方（memory / skills /
- * permission / background / config / mcp / subagent spawn）只消费返回值，不再
- * 自行拼 `join(cwd, '.iknow', …)`、读 `process.cwd()` 或判断 task worktree。
- * 唯一例外是装配层选 per-root 状态锚（build-engine 判 `workspaceRoot` 是否已是
- * task worktree，ADR-0037 §4 amended）—— 那是一次策略决策，不是路径拼装。
- * 身份根的**取值**（宿主钉的值，或缺席时 `mainCheckoutOf(cwd)`）同样由装配层
- * 决定，但**校验**在这里，与另外三根同一条规则。
+ * One input yields roots by **role**; consumers (memory / skills /
+ * permission / background / config / mcp / subagent spawn) only use the
+ * returned values and never join `join(cwd, '.iknow', …)` themselves, read
+ * `process.cwd()`, or judge task worktrees. The one exception is the
+ * assembly layer choosing the per-root state anchor (build-engine decides
+ * whether `workspaceRoot` is already a task worktree, ADR-0037) — that is
+ * one policy decision, not path joining. The identity root's **value** (the
+ * host-pinned one, or `mainCheckoutOf(cwd)` when absent) is likewise chosen
+ * by the assembly layer, but its **validation** happens here under the same
+ * rule as the other roots.
  *
- *  - `productRoot`：开会话时的主 checkout，首次装配钉死，跨 rebind 与重启不变。
- *    `mcp.json` 只问它（`mcpConfigRoot`，#828 已落地，行为不变）；per-root 状态
- *    （记忆库）的锚由装配层定：`workspaceRoot` 优先，仅当它自身已是
- *    task worktree 时退到 `productRoot`（ADR-0037 §4 amended）。
- *  - `projectIdentityRoot`：用户此刻在做的那个项目，宿主启动时钉一次，跨 rebind
- *    不变。**项目身份只问它**——rules / 项目 `AGENTS.md` / `permissions.toml` /
- *    项目 skills 发现、子代理继承的身份根、记忆库命名空间名。与 `productRoot`
- *    分开的原因：宿主按 ADR-0019 从 `workspaceRoot` 取 `productRoot`，而
- *    `--workspace-root <dir>` 重定向档下 `<dir>` 不是项目（`dir ≠ cwd`）。
- *  - `taskRoot`：本会话 task worktree（create / enter 切过去，exit 切回主仓）。
- *    **写与工具 cwd 只问它**——写工具 / 会改工作区的 bash / git / LSP 目录 /
- *    子代理工作目录。
- *  - `installRoot`：iknow 运行时自身的安装位置（worker bootstrap 解析 tsx 与
- *    自身依赖）。≠ 用户项目的 `node_modules`，故裸 task worktree 上 worker 仍起。
+ *  - `productRoot`: the main checkout at conversation start; pinned at first
+ *    assembly, unchanged across rebinds and restarts. Only `mcp.json` asks
+ *    it (`mcpConfigRoot`); the per-root state (memory library) anchor is
+ *    chosen by the assembly layer: `workspaceRoot` preferred, falling back
+ *    to `productRoot` only when it is itself a task worktree (ADR-0037).
+ *  - `projectIdentityRoot`: the project the user is actually working on,
+ *    pinned once at host startup, unchanged across rebinds. **Only it
+ *    answers project identity** — rules / project `AGENTS.md` /
+ *    `permissions.toml` / project skill discovery, the identity root
+ *    inherited by subagents, the memory-library namespace. It is separate
+ *    from `productRoot` because the host derives `productRoot` from
+ *    `workspaceRoot` per ADR-0019, and under `--workspace-root <dir>`
+ *    redirection `<dir>` is not the project (`dir ≠ cwd`).
+ *  - `taskRoot`: this conversation's task worktree (create / enter switch
+ *    to it, exit switches back to the main checkout). **Only it answers
+ *    writes and tool cwd** — write tools / workspace-mutating bash / git /
+ *    LSP dirs / subagent working dir.
+ *  - `installRoot`: where the iknow runtime itself is installed (worker
+ *    bootstrap resolves tsx and its own deps). ≠ the user project's
+ *    `node_modules`, so a worker still starts on a bare task worktree.
  *
- * `resolveSessionRoots` 是纯函数：不读 git、不碰文件系统、不持会话状态。缺根 /
- * 空白 / 相对 / 无法规范化一律 fail-closed 抛 `SessionRootError`（「与已固定的根
- * 不一致」归 `resolveMcpRoots({ expectedWorkspaceRoot })`，此处不平行开第二套），
- * **绝不**回退 `process.cwd()`。唯一有 IO 的导出是 `resolveInstallRoot`，它锚在
- * `import.meta.url` 而不是任何会话根。
+ * `resolveSessionRoots` is pure: no git reads, no filesystem, no session
+ * state. Missing / blank / relative / un-normalizable roots fail closed with
+ * `SessionRootError` (the "inconsistent with the pinned root" check belongs
+ * to `resolveMcpRoots({ expectedWorkspaceRoot })`, not a second parallel
+ * scheme here), and it **never** falls back to `process.cwd()`. The only
+ * exported function with IO is `resolveInstallRoot`, anchored on
+ * `import.meta.url` rather than any session root.
  */
 import path from "node:path";
 import { existsSync } from "node:fs";
@@ -41,27 +52,30 @@ import { mainCheckoutOf } from "./isolation/worktree-gate.js";
  *  error without a separate detour into harness/errors. */
 export { SessionRootError } from "./errors.js";
 
-/** 诊断里回显根值的上限：长路径也要保持有限诊断。 */
+/** Cap on root values echoed in diagnostics: long paths must stay bounded. */
 export const MAX_ROOT_DETAIL_CHARS = 120;
 
 /**
- * T1 (ADR-0071) — 路径敌意段净化器,会话文件夹
- * 与 todo ledger 共用。「`..` 风格不可能逃逸」的保证由本函数唯一承担,
- * 任何拼接 `conversationId` 进文件路径的代码必须先过 sanitize:
- *   - 严格 `[A-Za-z0-9_-]` → 全部其它字符(含 `.` / `/` / `\0`)归 `_`。
- *   - conversationId 在实践中是 UUID,所以丢弃 `.` 不丢语义。
+ * (ADR-0071) Path-hostile segment sanitizer shared by the session folder and
+ * the todo ledger. The guarantee that "`..`-style escape is impossible"
+ * rests solely on this function: any code joining a `conversationId` into a
+ * file path must pass it through sanitize first:
+ *   - strict `[A-Za-z0-9_-]` → every other character (including `.` / `/` /
+ *     `\0`) becomes `_`.
+ *   - conversationId is a UUID in practice, so dropping `.` loses no
+ *     semantics.
  *
- * 共享原因:同一净化规则被两套消费者同时需要 ——
- *   - todo ledger(`resolveConversationTodoPath`,todo-write.ts SSOT);
- *   - 会话文件夹叶子(`resolveConversationDir`,session-store.ts)。
- * 影子副本会让「`..` 不可逃逸」这一不变式被两份代码分别承担,日后修
- * 其一便破契约。本函数是 SSOT。
+ * Shared because one sanitization rule serves two consumers —
+ *   - the todo ledger (`resolveConversationTodoPath`, todo-write.ts SSOT);
+ *   - the session-folder leaf (`resolveConversationDir`, session-store.ts).
+ * A shadow copy would make the "`..` cannot escape" invariant the job of two
+ * code paths; fixing one would break the contract. This function is the SSOT.
  */
 export function sanitizeConversationSegment(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
-/** 三根，全部已规范化为绝对路径。 */
+/** The session roots, all normalized to absolute paths. */
 export interface SessionRoots {
   readonly productRoot: string;
   readonly taskRoot: string;
@@ -70,41 +84,51 @@ export interface SessionRoots {
 }
 
 /**
- * T3 (plans/write-situation-disclosure.md) — 写处境三态。
+ * Write-situation tri-state.
  *
- * 单一来源：判定住 `src/harness/isolation/write-situation.ts`，渲染（告知面 /
- * worker prior）住 `src/harness/skill/*`，枚举类型住本文件。SC4 钉死依赖方向：
- * `skill/body.ts` 不 import `isolation/`，故渲染面只消费本枚举 + 一个非隔离根串。
+ * Single source: the decision lives in
+ * `src/harness/isolation/write-situation.ts`, rendering (disclosure face /
+ * worker prior) lives in `src/harness/skill/*`, the enum type lives here.
+ * The dependency direction is pinned: `skill/body.ts` must not import
+ * `isolation/`, so the rendering side consumes only this enum + one
+ * non-isolation root string.
  *
- * 语义（spec SC1 / SC3 / ADR-0069 Decision 2）：
- *   - `writable_main`：隔离 OFF，主仓根 = 写根。**含「隔离 OFF + 树形路径」组合**——
- *     negative 臂钉死防形状判断被单独误用（对齐 ADR-0037 §4 教训）。
- *   - `writable_tree`：隔离 ON + 活根是本会话的 task worktree（路径形状合法）。
- *   - `no_writable_root`：隔离 ON + 活根非树形（主仓对文件改动只读，告知面**不**
- *     点名 `create-worktree`——spec SC3）。
+ * Semantics:
+ *   - `writable_main`: isolation OFF, main checkout root = write root.
+ *     **Includes the "isolation OFF + tree-shaped path" combination** — the
+ *     negative arm is pinned so shape checks cannot be misused on their own
+ *     (the lesson recorded in ADR-0037).
+ *   - `writable_tree`: isolation ON and the live root is this conversation's
+ *     task worktree (legal tree shape).
+ *   - `no_writable_root`: isolation ON and the live root is not tree-shaped
+ *     (the main checkout is read-only for file edits); the disclosure face
+ *     does **not** name `create-worktree`.
  */
 export type WriteSituation =
   "writable_main" | "writable_tree" | "no_writable_root";
 
 export interface ResolveSessionRootsInput {
-  /** 开会话时的主 checkout；项目身份与 per-root 状态的唯一来源。 */
+  /** Main checkout at conversation start; sole source of project identity and per-root state. */
   readonly productRoot: string | undefined;
-  /** 本会话生效的 task worktree（未改绑时等于 `productRoot`）。 */
+  /** This conversation's live task worktree (equals `productRoot` before any rebind). */
   readonly taskRoot: string | undefined;
-  /** iknow 自身安装位置；生产由 `resolveInstallRoot()` 提供。 */
+  /** iknow's own install location; production supplies it via `resolveInstallRoot()`. */
   readonly installRoot: string | undefined;
   /**
-   * 项目身份根。装配层给值：宿主钉下的值优先，缺席时 `mainCheckoutOf(cwd)`。
-   * 到这里一律当**必填**校验 —— 显式传空串 / 相对值不得静默按 `process.cwd()`
-   * 解释（改绑后那正是 task worktree）。
+   * Project identity root. The assembly layer supplies it: the host-pinned
+   * value first, else `mainCheckoutOf(cwd)`. Validation here always treats
+   * it as **required** — an explicit empty string / relative value must not
+   * be silently read as `process.cwd()` (after a rebind that is exactly the
+   * task worktree).
    */
   readonly projectIdentityRoot: string | undefined;
 }
 
 /**
- * 规范化一个根候选值的纯结果。不抛错——由各消费者把 rejection 映射成自己的
- * typed error（MCP 侧要保住既有 `McpLifecycleError` kind 分工，见
- * `mcp/roots.ts`），这样规范化规则只有一份实现。
+ * Pure result of normalizing one root candidate. Does not throw — each
+ * consumer maps a rejection to its own typed error (the MCP side must keep
+ * its existing `McpLifecycleError` kind split, see `mcp/roots.ts`), so the
+ * normalization rule has exactly one implementation.
  */
 export type RootRejection =
   | { readonly reason: "missing" }
@@ -115,7 +139,7 @@ export type RootNormalization =
   | { readonly ok: true; readonly root: string }
   | { readonly ok: false; readonly rejection: RootRejection };
 
-/** 缺席 / 空白 / 含 NUL / 非绝对 → rejection；否则返回规范化的绝对根。 */
+/** Absent / blank / contains NUL / not absolute → rejection; otherwise the normalized absolute root. */
 export function normalizeRootCandidate(
   value: string | undefined
 ): RootNormalization {
@@ -138,13 +162,13 @@ export function normalizeRootCandidate(
   return { ok: true, root: normalized };
 }
 
-/** 诊断回显：截断到有限长度，避免超长路径撑爆错误消息。 */
+/** Diagnostic echo: truncate to a bounded length so over-long paths cannot blow up error messages. */
 export function quoteRoot(value: string, limit: number): string {
   const shown = value.length > limit ? `${value.slice(0, limit)}…` : value;
   return `'${shown}'`;
 }
 
-/** 去掉结尾分隔符，但保留文件系统根本身（posix `/`、win32 `C:\`）。 */
+/** Strip trailing separators but keep the filesystem root itself (posix `/`, win32 `C:\`). */
 function stripTrailingSeparators(p: string): string {
   const { root } = path.parse(p);
   let out = p;
@@ -158,14 +182,17 @@ function stripTrailingSeparators(p: string): string {
 }
 
 /**
- * 解析三根。任何校验失败都在文件读取 / spawn / 工具执行之前抛出，`detail`
- * 点名出错的角色（`productRoot` / `taskRoot` / `installRoot` /
- * `projectIdentityRoot`），因为漏接的新
- * 消费者要在装配层就看得见是哪个根缺了。
+ * Resolve the session roots. Any validation failure throws before file
+ * reads / spawn / tool execution, and `detail` names the failing role
+ * (`productRoot` / `taskRoot` / `installRoot` /
+ * `projectIdentityRoot`) so a newly-wired consumer sees at assembly time
+ * which root is missing.
  *
- * 「与已固定的 task 根一致」这条校验**不**在这里：非 ask 面由
- * `resolveMcpRoots({ expectedWorkspaceRoot })` 承担（`McpLifecycleError`
- * kind 分工对既有调用方不变），此处不再平行开第二套同义校验。
+ * The "consistent with the pinned task root" check is deliberately **not**
+ * here: non-ask faces carry it via
+ * `resolveMcpRoots({ expectedWorkspaceRoot })` (the `McpLifecycleError`
+ * kind split is unchanged for existing callers); no second synonymous check
+ * is opened in parallel.
  */
 export function resolveSessionRoots(
   input: ResolveSessionRootsInput
@@ -181,7 +208,7 @@ export function resolveSessionRoots(
   return { productRoot, taskRoot, installRoot, projectIdentityRoot };
 }
 
-/** 缺席 → `missing_root`；在场但不可用 → `invalid_root`。 */
+/** Absent → `missing_root`; present but unusable → `invalid_root`. */
 function requireRoot(value: string | undefined, label: string): string {
   const result = normalizeRootCandidate(value);
   if (result.ok) return result.root;
@@ -204,18 +231,22 @@ function requireRoot(value: string | undefined, label: string): string {
 }
 
 /**
- * `resolveInstallRoot` 只需算一次：安装位置在进程生命周期内不变，因此刻意不给
- * reset 缝（测试要换安装根就走 `opts.installRoot` 注入，不改进程级缓存）。
+ * `resolveInstallRoot` only needs to compute once: the install location is
+ * fixed for the process lifetime, so there is deliberately no reset seam
+ * (tests needing a different install root inject `opts.installRoot` instead
+ * of poking the process-level cache).
  */
 let cachedInstallRoot: string | undefined;
 
 /**
- * iknow 自身的安装根：从**本模块文件**向上找最近的 `package.json` 所在目录。
+ * iknow's own install root: walk up from **this module's file** to the
+ * nearest directory containing `package.json`.
  *
- * 锚点刻意是 `import.meta.url` 而不是任何会话根或 `process.cwd()`——子代理
- * worker 的 cwd 可能是一棵没有 `node_modules` 的裸 task worktree，那时
- * cwd 相对解析会以 `Cannot find package` 崩掉（硬要求 6）。dev（`src/…`）与
- * 打包后（`dist/…`）都落在同一个包根上。
+ * The anchor is deliberately `import.meta.url`, not any session root or
+ * `process.cwd()` — a subagent worker's cwd may be a bare task worktree
+ * without `node_modules`, where cwd-relative resolution would crash with
+ * `Cannot find package`. Both dev (`src/…`) and packaged (`dist/…`) layouts
+ * land on the same package root.
  */
 export function resolveInstallRoot(): string {
   if (cachedInstallRoot !== undefined) return cachedInstallRoot;
@@ -239,10 +270,10 @@ export function resolveInstallRoot(): string {
 }
 
 /**
- * T1 (ADR-0071) — pre-assembly derivation of the
+ * (ADR-0071) Pre-assembly derivation of the
  * session folder grouping root for the three production call sites
  * (`cli.ts` / `serve.ts` / `hub-bridge.ts`). Mirrors the build-engine
- * formula at `build-engine.ts:523`:
+ * formula:
  *
  *   `mainCheckoutOf(opts.explicitProjectIdentityRoot ?? process.cwd())`
  *
@@ -269,19 +300,18 @@ export function deriveProjectIdentityRoot(opts: {
 }
 
 // --------------------------------------------------------------------------
-// T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — live `taskRoot`
-// holder + single writer.
+// Live `taskRoot` holder + single writer.
 //
 // `resolveSessionRoots` stays a pure function (above). The live holder
 // sits alongside it as a sibling export of the same module — the SSOT
-// for "会话当前生效根". Writes are gated through ONE entry point
-// (`writeLiveTaskRoot`), reached only via the build-engine wrapper around
-// host `provision` / `enter` / `exit` seams (`withLiveTaskRootWrite`).
+// for the conversation's current effective root. Writes are gated through
+// ONE entry point (`writeLiveTaskRoot`), reached only via the build-engine
+// wrapper around host `provision` / `enter` / `exit` seams
+// (`withLiveTaskRootWrite`).
 //
 // Stable roots (productRoot / projectIdentityRoot / installRoot /
 // mcpConfigRoot / stateAnchor / memoryDir / todoDir / traceDir) are NOT
-// carried here — the cell holds a single `taskRoot` string, nothing else
-// (D3).
+// carried here — the cell holds a single `taskRoot` string, nothing else.
 // --------------------------------------------------------------------------
 
 /**
@@ -326,7 +356,7 @@ export function createLiveTaskRoot(initial: string): LiveTaskRoot {
 }
 
 /**
- * T4 single writer — update the live `taskRoot` cell. Called only by the
+ * Single writer — update the live `taskRoot` cell. Called only by the
  * build-engine wrapper around host seams (via `withLiveTaskRootWrite`); the
  * public `LiveTaskRoot` interface does not expose a setter, so external
  * callers cannot bypass the wrapper.
@@ -343,8 +373,8 @@ export function writeLiveTaskRoot(cell: LiveTaskRoot, value: string): void {
 }
 
 /**
- * T4 (plans/worktree-live-task-root.md §5 D1) — wrap an async root-resolver
- * seam so successful resolutions also update the live `taskRoot` cell.
+ * Wrap an async root-resolver seam so successful resolutions also update the
+ * live `taskRoot` cell.
  *
  *   - seam resolves → write cell, return the resolved value unchanged;
  *   - seam throws (any typed error) → cell **unchanged** (no write, no
@@ -354,7 +384,7 @@ export function writeLiveTaskRoot(cell: LiveTaskRoot, value: string): void {
  * The wrap is the single writer entry point. build-engine applies this
  * helper to host `provision` / `enter` / `exit` seams uniformly — every
  * successful seam resolution reaches `writeLiveTaskRoot` through here.
- * Stable roots (D3) are not affected; only the seam-resolved value
+ * Stable roots are not affected; only the seam-resolved value
  * (== `taskRoot`) is written.
  */
 export function withLiveTaskRootWrite<
@@ -363,10 +393,10 @@ export function withLiveTaskRootWrite<
   seam: F,
   cell: LiveTaskRoot,
   /**
-   * write-situation-disclosure T9: how to extract the ROOT from the seam
-   * result. Omitted for plain string seams (`provision` / `exit`); the enter
-   * seam resolves to `{ path, receipt }` and passes `(r) => r.path` so the
-   * cell keeps receiving the root while the receipt flows to the tool layer.
+   * How to extract the ROOT from the seam result. Omitted for plain string
+   * seams (`provision` / `exit`); the enter seam resolves to
+   * `{ path, receipt }` and passes `(r) => r.path` so the cell keeps
+   * receiving the root while the receipt flows to the tool layer.
    */
   rootOf: (value: Awaited<ReturnType<F>>) => string = (value) => value as string
 ): F {

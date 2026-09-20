@@ -1,71 +1,68 @@
 /**
- * LSP 客户端层类型契约 — spec 251-lsp-tool。
+ * Type contracts for the LSP client layer (`src/harness/lsp/`).
  *
- * 本文件定义 LSP 客户端层（`src/harness/lsp/`）的对外类型边界：
- * `server.ts`（Info 声明 + NearestRoot）与 `client.ts`（getClient 三件套）
- * 都从本文件读类型；handler 层（`aci/tools/lsp.ts`）只通过 `client.ts` 的
- * `getClient(ctx, file)` 入口间接消费 `LspCtx`。
+ * `server.ts` (server info + NearestRoot) and `client.ts` (getClient) read
+ * their types from here; the handler layer (`aci/tools/lsp.ts`) consumes
+ * `LspCtx` only indirectly via `getClient(ctx, file)`.
  *
- * **不包含**:
- *   - vscode-jsonrpc 的具体 client 类型（client.ts 内部封装）；
- *   - 9 件 ACI 工具的 schema（aci/tools/lsp.ts 定义）；
- *   - tsserver 的请求/响应 payload（透传字符串/对象给 typescript-language-server）。
+ * **Not included**: vscode-jsonrpc client internals (hidden inside client.ts),
+ * ACI tool schemas (defined in aci/tools/lsp.ts), tsserver request/response
+ * payloads (passed through opaquely to typescript-language-server).
  *
- * 设计目的:让 `src/harness/lsp/` 是自完备的「自建 LSP 客户端」模块,
- * 装配层（build-engine.ts）只感知 `LspCtx` 一个数据结构。
+ * Goal: keep `src/harness/lsp/` a self-contained in-house LSP client module;
+ * the assembly layer (build-engine.ts) only needs the `LspCtx` shape.
  */
 
 /**
- * LSP 客户端上下文（不可变）。build-engine.ts 装配时一次性传入,
- * 持有 directory 作为 NearestRoot 的上界 stop（spec #247 Q6）。
+ * Immutable LSP client context, built once at assembly time.
+ * `directory` is the upper bound (stop) for NearestRoot search; for this
+ * single-user, single-project local product it equals process.cwd().
  *
- * 当前 iknow 是单用户单项目本机产品,directory ≡ process.cwd()。
- *
- * **T8（D5, plans/worktree-live-task-root.md §6 T8）**：`directory` 仍然
- * 必填（满足装配期冻结的旧 ctx 形态），但当 `directoryCell` 在场时 —
- * `getClient` 入口以 `directoryCell.read()` 为真值，`directory` 仅作缺省
- * 与未翻 cell 的旧路径回退。rebind 后 `NearestRoot` 上界 stop 与 pool key
- * 都跟活根走，旧根 client 由 `getClient` 入口前的 lazy sweep 显式
- * `dispose()`。
+ * When `directoryCell` is present, `getClient` treats `directoryCell.read()`
+ * as the effective root (the live task root after a worktree rebind) and
+ * `directory` is only the fallback for callers that never flip the cell.
+ * After a rebind, both the NearestRoot bound and the pool key follow the live
+ * root; clients bound to the old root are disposed by a lazy sweep at the
+ * `getClient` entry point.
  */
 export interface LspCtx {
-  /** LSP 服务根目录搜索的上界（NearestRoot 不允许跨出）。 */
+  /** Upper bound for NearestRoot search (never walks outside). */
   readonly directory: string;
   /**
-   * T8（D5）: live `taskRoot` cell — 在场时由 `getClient` 在入口读一次作
-   * 为 effective `directory`（覆盖本字段）。缺席 → 退回本字段的冻结值
-   * （un-rebind 路径行为逐字节不变）。
+   * Live task-root cell. When present, `getClient` reads it once at entry as
+   * the effective `directory` (overriding the field above). Absent → use the
+   * frozen value (un-rebind path stays byte-for-byte unchanged).
    */
   readonly directoryCell?: import("../session-roots.js").LiveTaskRoot;
   /**
-   * per-request LSP 超时上限（毫秒，lsp-optimization 二期 B7）。缺省由工具层
-   * DEFAULT_LSP_REQUEST_TIMEOUT_MS（20_000）兜底。来源：settings.lsp.requestTimeoutMs。
+   * Per-request LSP timeout cap (ms). Defaults to the tool layer's
+   * DEFAULT_LSP_REQUEST_TIMEOUT_MS (20_000). From settings.lsp.requestTimeoutMs.
    */
   readonly requestTimeoutMs?: number;
   /**
-   * lsp_diagnostics 读前等待 deadline（毫秒，二期 B7）。缺省由工具层
-   * DIAGNOSTICS_WAIT_MS（2_000）兜底。来源：settings.lsp.diagnosticsWaitMs。
+   * Deadline for lsp_diagnostics read wait (ms). Defaults to the tool layer's
+   * DIAGNOSTICS_WAIT_MS (2_000). From settings.lsp.diagnosticsWaitMs.
    */
   readonly diagnosticsWaitMs?: number;
   /**
-   * 空闲客户端回收阈值（毫秒，二期 B7/B5）。≤0 或 undefined → 不 sweep。
-   * 来源：settings.lsp.idleTimeoutMs；缺省语义（10min）由 client.ts sweep
-   * 消费方在装配层决定（build-engine 注入缺省 600_000）。
+   * Idle-client reclaim threshold (ms). ≤0 or undefined → no sweep.
+   * From settings.lsp.idleTimeoutMs; the default (10min) is injected by the
+   * assembly layer (build-engine passes 600_000) since client.ts sweep is the consumer.
    */
   readonly idleTimeoutMs?: number;
   /**
-   * 禁用的 server id 列表（二期 B7）。命中的 server 在 getClientDetailed
-   * 里按 no-server 处理（视为未配置）。来源：settings.lsp.disabledServers。
+   * Disabled server ids. A matched server is treated as unconfigured
+   * (no-server) in getClientDetailed. From settings.lsp.disabledServers.
    */
   readonly disabledServers?: ReadonlyArray<string>;
   /**
-   * 连接池实例（MCP / 多 workspace）。缺席走 client.ts 模块缺省池。
-   * 类型在 client.ts，这里用 import type 避免运行时环。
+   * Connection pool instance (MCP / multi-workspace). Absent → client.ts
+   * module default pool. Type lives in client.ts; use import type to avoid a runtime cycle.
    */
   readonly pool?: import("./client.js").LspClientPool;
   /**
-   * 覆盖 language-server / tsserver 可执行文件解析。返回绝对路径或 PATH 名；
-   * undefined 则回落默认 node_modules + which。
+   * Override language-server / tsserver executable resolution. Return an
+   * absolute path or PATH name; undefined falls back to node_modules + which.
    */
   readonly resolveBin?: (
     pkgName: string,
@@ -74,48 +71,49 @@ export interface LspCtx {
 }
 
 /**
- * LSP server 启动配置 — server.ts 内的单语言(`Typescript`)实例
- * 的「如何 spawn + 如何解析 root」声明。
+ * LSP server startup config — per-language (`Typescript`) declaration of
+ * "how to spawn + how to resolve root" inside server.ts.
  *
- * 与 lsp.ts:80-89 Info 同构;保留扁平声明(spec #247 Q2 决议
- * 不拆 registry/spawn/client 三文件)。
+ * Kept as a flat declaration isomorphic to the info struct in lsp.ts (the
+ * registry/spawn/client split was deliberately not adopted).
  *
- * `spawn` 返回 `undefined` 时表示该 server 在当前环境下不可用
- * (tsserver bin 缺失 / typescript-language-server 二进制缺失);
- * client.ts 据此走 broken 记忆,不抛错(handler 转纯字符串
- * `"(no LSP server available)"`)。
+ * When `spawn` returns `undefined`, the server is unavailable in the current
+ * environment (tsserver bin missing / typescript-language-server binary
+ * missing); client.ts records this as broken and does not throw (the handler
+ * renders the plain string `"(no LSP server available)"`).
  */
 export interface LspServerInfo {
   readonly id: string;
-  /** 从 file 路径向上找最近含 lockfile 的目录当 root;上界 stop=ctx.directory。 */
+  /** Walk up from file to the nearest lockfile dir as root; bounded by ctx.directory. */
   readonly root: (file: string, ctx: LspCtx) => Promise<string | undefined>;
-  /** 此 server 支持的文件扩展名列表(client.ts 早返优化:不在列表内的 file 拒)。 */
+  /** File extensions this server handles (client.ts early-return: reject files not listed). */
   readonly extensions: ReadonlyArray<string>;
   /**
-   * Spawn server 子进程。返回 `{ process, initialization }` 由 client.ts
-   * 包成 vscode-jsonrpc connection 并发送 initialize 请求。
+   * Spawn the server subprocess. Returns `{ process, initialization }`, which
+   * client.ts wraps into a vscode-jsonrpc connection and sends initialize.
    */
   readonly spawn: (
     root: string,
     ctx: LspCtx
   ) => Promise<LspServerHandle | undefined>;
   /**
-   * 可读的安装提示（lsp-optimization 二期 B3）：spawn-failed 哨兵渲染时
-   * 附带给模型的一句 `npm i -g <pkg>`。缺席 → 哨兵省略 hint 句。
+   * Human-readable install hint: a single `npm i -g <pkg>` sentence attached
+   * when rendering the spawn-failed sentinel. Absent → sentinel omits the hint.
    */
   readonly installHint?: string;
 }
 
-/** spawn 返回的 server 句柄:子进程 + initializationOptions(typescript-language-server 透传 tsserver.path)。 */
+/** Handle returned by spawn: subprocess + initializationOptions (passes tsserver.path to typescript-language-server). */
 export interface LspServerHandle {
   readonly process: import("node:child_process").ChildProcess;
   /**
-   * LSP initialize 握手透传的 initializationOptions（spec 302-lsp-multilang §
-   * types.ts 决策1）。
+   * initializationOptions passed through the LSP initialize handshake.
    *
-   * 原（spec 251）必填 `{ tsserver: { path } }` 仅适用 TS 单语言；多语言后按
-   * server 各自声明——pyright 透传 `{ pythonPath }`，yaml/json/dockerfile 无
-   * 必需初始化（省略合法）。泛化可选项后现有 TS fixture 零迁移。
+   * Originally required as `{ tsserver: { path } }` for the single TS
+   * language; with multi-language support each server declares its own —
+   * pyright passes `{ pythonPath }`, while yaml/json/dockerfile need no
+   * initialization (omitting is legal). Making it optional keeps existing TS
+   * fixtures unchanged.
    */
   readonly initialization?: Record<string, unknown>;
 }

@@ -1,19 +1,25 @@
 /**
- * #356 T6 — defaultSubAgentSpawn 生产 worker 进程 spawn 工厂（T2 报告要求的
- * 接线落点）。
+ * Production worker-process spawn factory for defaultSubAgentSpawn.
  *
- * DI 由 build-engine 注入 createSubAgentManager({ spawn: defaultSubAgentSpawn })。
- * 形态 = 同 iknow binary headless 重入：`node <iknow-bin> --subagent-worker`
- * （cli.ts main() 对 `__subagent_worker__` command 的 dispatch，spec 假设 5）。
- * worker 协议：`stdin` 一行 envelope → `stdout` 一行 result。
+ * build-engine wires it via createSubAgentManager({ spawn:
+ * defaultSubAgentSpawn }). Shape = headless re-entry of the same iknow
+ * binary: `node <iknow-bin> --subagent-worker` (cli.ts main() dispatching the
+ * `__subagent_worker__` command). Worker protocol: one envelope line on
+ * stdin → one result line on stdout.
  *
- * 职责边界：
- *   - `stdinPayload` 写不写由 manager 负责（manager.spawn 拿到 child 后自己
- *     `write + end`），spawn.ts 只负责 spawn + 返回 child；
- *   - env 继承父进程（ADR-0001，不发明第二条 env 协议）。
+ * Responsibility boundary:
+ *   - whether stdinPayload gets written is the manager's job (manager.spawn
+ *     does the `write + end` itself once it holds the child); spawn.ts only
+ *     spawns and returns the child;
  *
- * 形参为 `SubAgentSpawn` 签名契约：defaultSubAgentSpawn 不读 `def` / `taskId`
- * / `stdinPayload`（由 manager 端消费），下划线前缀避开 `noUnusedParameters`。
+ // (ADR-0001)
+ *   - env is inherited from the parent process (no second env protocol is
+ *     invented here).
+ *
+ * The parameters follow the `SubAgentSpawn` signature contract:
+ * defaultSubAgentSpawn does not read `def` / `taskId` / `stdinPayload`
+ * (consumed manager-side); the underscore prefix sidesteps
+ * `noUnusedParameters`.
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -35,11 +41,12 @@ export interface ResolveSubagentWorkerSpawnArgsOptions {
   readonly execPath: string;
   readonly argv1?: string;
   /**
-   * T5 (plans/worktree-session-roots.md / ADR-0037 §4): iknow 自身的安装根 —
-   * tsx loader 从**它**解析，不从子进程 cwd。子进程 cwd 可能是一棵没有
-   * `node_modules` 的裸 task worktree，cwd 相对解析在那里以
-   * `Cannot find package 'tsx'` 崩掉（硬要求 6）。缺席 → 锚回本模块
-   * (`import.meta.url`)，与生产同值，旧调用方字节不变。
+   * ADR-0037: iknow's own installation root — the tsx loader resolves from
+   * there, not from the child's cwd. The child cwd may be a bare task
+   * worktree without `node_modules`, where cwd-relative resolution crashes
+   * with `Cannot find package 'tsx'`. Absent → anchor back to this module
+   * (`import.meta.url`), same as production, so old callers are byte-
+   * unchanged.
    */
   readonly installRoot?: string;
   /**
@@ -77,9 +84,9 @@ function isTypeScriptEntry(argv1: string): boolean {
 
 function makeResolveTsxLoader(installRoot?: string): () => string {
   if (installRoot === undefined) return () => requireFromSpawn.resolve("tsx");
-  // `createRequire` 需要一个文件锚点；用 `<installRoot>/package.json`，它就是
-  // resolveInstallRoot() 找到的那个包根标记（文件不必已存在也能作锚，但生产
-  // 里它一定在）。
+  // `createRequire` needs a file anchor; use `<installRoot>/package.json` —
+  // it is the package-root marker resolveInstallRoot() finds (the anchor works
+  // even if the file does not exist, and in production it always does).
   const requireFromInstall = createRequire(
     resolve(installRoot, "package.json")
   );
@@ -129,54 +136,60 @@ export interface DefaultSubAgentSpawnOpts {
   /** ADR-0019 per-root state anchor → child's `IKNOW_WORKSPACE_ROOT`. */
   readonly workspaceRoot?: string;
   /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): the parent session's
-   * project identity root → child's `IKNOW_PRODUCT_ROOT` (env var name kept:
-   * it is the existing parent→child wire format). The child's cwd may be a
-   * gitignored task worktree with no `.iknow` and no `AGENTS.md`, so its rules
-   * / project AGENTS.md / project skills discovery must read the identity root.
-   * Undefined → var absent → the worker falls back to its cwd (unbound
-   * sessions, where both roots are the same value; byte-identical to today).
+   * ADR-0037: the parent session's project identity root → child's
+   * `IKNOW_PRODUCT_ROOT` (env var name kept: it is the existing parent→child
+   * wire format). The child's cwd may be a gitignored task worktree with no
+   * `.iknow` and no `AGENTS.md`, so its rules / project AGENTS.md / project
+   * skills discovery must read the identity root. Undefined → var absent →
+   * the worker falls back to its cwd (unbound sessions, where both roots are
+   * the same value; byte-identical to before).
    */
   readonly projectIdentityRoot?: string;
   /**
-   * T5 / T8 (plans/worktree-isolation-model-provision.md hard req 7 +
-   * plans/worktree-live-task-root.md §6 T8 D6): the worker child inherits
-   * the parent session's REBOUND root as its `cwd`, so writes and
-   * workspace-relative bash land in the same tree as the parent.
+   * ADR-0037: the worker child inherits the parent session's REBOUND root as
+   * its `cwd`, so writes and workspace-relative bash land in the same tree as
+   * the parent.
    *
-   * Shape can be either `string` (frozen value) or `() => string` (live
-   * cell getter):
-   *  - string: build-time decision (legacy / un-rebind), byte-stable to today;
-   *  - getter: each spawn closure reads the cell current value, so rebind
+   * Shape can be either `string` (frozen value) or `() => string` (live cell
+   * getter):
+   *  - string: build-time decision (legacy / un-rebind), byte-stable to
+   *    before;
+   *  - getter: each spawn closure reads the cell's current value, so a rebind
    *    before the next spawn automatically lands the worker in the new tree.
    *
    * Undefined (unbound session / worker defaults) = no cwd option = the child
-   * inherits the parent process cwd byte-identically to today.
+   * inherits the parent process cwd byte-identically to before.
    */
   readonly sessionRoot?: string | (() => string);
   /**
-   * T5 (plans/worktree-session-roots.md / ADR-0037 §4): iknow 自身的安装根 —
-   * 子进程的 tsx loader 从它解析。**不是**用户项目的 `node_modules`，所以裸
-   * task worktree（`sessionRoot` 上无 `node_modules`）也能起 worker，不要求
-   * 操作员先 symlink。缺席 → 锚回 spawn 模块自身，与生产同值。
+   * ADR-0037: iknow's own installation root — the child's tsx loader
+   * resolves from it. **Not** the user project's `node_modules`, so a bare
+   * task worktree (no `node_modules` under `sessionRoot`) can still start a
+   * worker without asking the operator to symlink anything. Absent → anchor
+   * back to this spawn module, same as production.
    */
   readonly installRoot?: string;
   /**
-   * ADR-0092 Amendment 2026-09-13 / SC11:父会话的 fs 隔离档 holder →
-   * 子进程 `IKNOW_FS_MODE`(与 `workspaceRoot` / `productIdentityRoot` 同一条
-   * 「父进程设、worker 读」env wire;信封是 untrusted 输入面,不承载本字段)。
-   * 值在**每次 spawn 时**读 holder(同 `sessionRoot` getter 的 spawn-time
-   * 纪律)——装配期把 holder 冻结成字符串,运行期 `/config fs workspace` 就再
-   * 也到不了子进程。holder 在场即写线(值是缺省档也写,父子对「缺省」只有
-   * 一种解释:键缺席 = 这条通道未接);holder 缺席(legacy / 测试路径)→ 不写
-   * 该键,子进程 env 与今日字节一致。
+   * Parent session's fs isolation-mode holder → child's `IKNOW_FS_MODE` (the
+   *
+   // (ADR-0092)
+   * same "parent writes, worker reads" env wire as `workspaceRoot` /
+   * `productIdentityRoot`; the envelope is an untrusted input surface and
+   * carries no such field). The value is read from the holder at **every
+   * spawn** (same spawn-time discipline as the `sessionRoot` getter) —
+   * freezing the holder into a string at assembly would put `/config fs
+   * workspace` permanently out of reach of children. Holder present → the
+   * env key is always written (even for the default mode; key absent = this
+   * channel is not wired, one interpretation only); holder absent (legacy /
+   * test paths) → key omitted, child env byte-identical to before.
    */
   readonly fsMode?: FsModeContext;
   /**
-   * issue 1059:父会话 worktree-on-mutate 活开关 holder → 子进程
-   * `IKNOW_WORKTREE_GATE_ON`(同 fsMode 的 spawn-time 读法:运行期面板翻转
-   * 对下一次 spawn 生效)。holder 在场即写线("1"/"0" 都写,键缺席 = 通道
-   * 未接 → worker 永不发 UNBOUND_FENCE 段,字节不变)。
+   * Parent session's worktree-on-mutate live switch holder → child's
+   * `IKNOW_WORKTREE_GATE_ON` (same spawn-time read as fsMode: a panel flip
+   * takes effect for the next spawn). Holder present → the key is always
+   * written ("1"/"0" both written; key absent = channel unwired → the worker
+   * never emits the UNBOUND_FENCE section, bytes unchanged).
    */
   readonly worktreeGate?: WorktreeGateReader;
 }
@@ -194,15 +207,17 @@ export function createDefaultSubAgentSpawn(
   } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
-    // T8 (D6): sessionRoot 在 closure 执行时读 --
-    // string 时返回值不变;getter 时返回 cell 当前值,
-    // 允许 build-engine 把 build-time 决定换成 spawn-time 闭包。
+    // sessionRoot is read when the closure executes — a string returns the
+    // same value every time; a getter returns the cell's current value, so
+    // build-engine can turn a build-time decision into a spawn-time closure.
     const cwd = typeof sessionRoot === "function" ? sessionRoot() : sessionRoot;
-    // ADR-0092 Amendment / SC11:fs 档同样在 spawn 期读 holder —— 运行期
-    // `/config` 翻档对下一次 spawn 生效(镜像 sessionRoot 的 spawn-time 读法);
-    // holder 缺席 → 不写该 env 键(legacy 子进程 env 字节不变)。
+    // fs mode likewise reads the holder at spawn time — a mid-session
+    // (ADR-0092)
+    // `/config` flip takes effect for the next spawn (mirroring sessionRoot's
+    // spawn-time read); holder absent → env key not written (legacy child env
+    // bytes unchanged).
     const fsModeToken = fsMode?.get();
-    // issue 1059:开关同 fsMode 在 spawn 期读,holder 缺席 → 不写该 env 键。
+    // Same spawn-time read as fsMode; holder absent → env key not written.
     const worktreeGateOn = worktreeGate?.get();
     const child = spawn(
       process.execPath,
@@ -232,7 +247,7 @@ export function createDefaultSubAgentSpawn(
         ...(cwd !== undefined ? { cwd } : {}),
       }
     );
-    // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。
+    // The manager owns the stdin write (worker protocol: one envelope line in → one result line out).
     return child as ChildProcess;
   };
 }

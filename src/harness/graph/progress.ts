@@ -1,7 +1,9 @@
 /**
- * run_graph 人眼进度快照：由 onWave / onNode 累加，不读 JSONL。
+ * Human-eye progress snapshot for run_graph: accumulated from onWave /
+ * onNode callbacks, never reads JSONL.
  *
- * TUI 只消费本 DTO（经 `graph_progress` 流事件），不反向 import scheduler / topo。
+ * The TUI consumes only this DTO (via the `graph_progress` stream event) and
+ * never imports scheduler / topo back.
  */
 import type { GraphNodeResult, NodeStatus } from "./types.js";
 
@@ -10,12 +12,12 @@ export interface GraphNodeProgress {
   readonly deps: ReadonlyArray<string>;
   readonly status: NodeStatus;
   readonly summary?: string;
-  /** onWave→onNode 墙钟毫秒；尚未终态则缺省。 */
+  /** Wall-clock ms from onWave to onNode; absent before the node settles. */
   readonly durationMs?: number;
 }
 
 export interface GraphProgressSnapshot {
-  /** 最近一次 onWave 的波次下标；尚未开波 = -1。 */
+  /** Wave index of the latest onWave; -1 before the first wave starts. */
   readonly waveIndex: number;
   readonly nodes: ReadonlyArray<GraphNodeProgress>;
 }
@@ -25,7 +27,7 @@ export interface GraphNodeSeed {
   readonly deps: ReadonlyArray<string>;
 }
 
-/** 粗摘要上限：TUI 一行/详情够扫读，不把 envelope.result 整包推进快照。 */
+/** Coarse-summary cap: enough for one TUI line / scannable detail; never pushes a whole envelope.result into the snapshot. */
 export const GRAPH_SUMMARY_MAX = 240;
 
 function clipSummary(text: string): string {
@@ -93,7 +95,8 @@ export function createGraphProgressTracker(
   }
 
   function onNode(result: GraphNodeResult): GraphProgressSnapshot {
-    // EXIT: 未知 id 不进快照 —— 投影只按 seed order；写进 statuses 也看不见。
+    // EXIT: unknown ids never enter the snapshot — projection follows seed
+    // order only; writing into statuses would not make them visible anyway.
     if (!depsOf.has(result.id)) return snapshot();
     statuses.set(result.id, result.status);
     const summary = summaryOf(result);

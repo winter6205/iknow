@@ -1,28 +1,33 @@
 /**
- * #356 subagent worker 进程主线 (spec 356-subagent-v1 § worker.ts)。
+ * Subagent worker process entry.
  *
- * 形态 = 同 iknow binary headless 重入: `node <iknow-bin> --subagent-worker`。
- * 父代理 spawn 后:
- *   - stdin  一行 JSON = WorkerEnvelope (parseWorkerEnvelope, 信封 schema 冻结);
- *   - worker 进程跑独立 run() (独立 registry, 不依赖父注册表);
- *   - stdout 一行 JSON = SubAgentEnvelope (浓缩结果, emit 前 truncateEnvelopeResult);
- *   - stderr 仅日志 (不污染 wire)。
+ * Shape = headless re-entry of the same iknow binary: `node <iknow-bin> --subagent-worker`.
+ * After the parent spawns us:
+ *   - stdin  one JSON line = WorkerEnvelope (parseWorkerEnvelope, schema frozen);
+ *   - the worker process runs its own run() (independent registry, no parent registry);
+ *   - stdout one JSON line = SubAgentEnvelope (condensed result, truncateEnvelopeResult before emit);
+ *   - stderr is logs only (never pollute the wire).
  *
- * 关键纪律 (spec SC11 / Boundaries Always):
- *   - stdout 严格单 wire: 所有非 envelope 输出走 process.stderr.write,
- *     禁止 console.log 到 stdout;
- *   - SIGTERM 友好收尾 (runSubagentWorker 由 cli.ts 调度, 当前实现
- *     显式 process.exit(WORKER_EXIT_OK) 保证 stdout flush);
- *   - exit-code 语义按 ADR-0111 不变式 (b) 成文化 (常量 WORKER_EXIT_*):
- *     exit 2 仅信封协议错误 (parse ProtocolError 上抛, cli.ts 捕获);
- *     run 阶段逃逸 → best-effort failed envelope + exit 1;
- *   - env 继承父进程 (ADR-0001, 不发明第二条 env 协议);
- *   - worker 子进程不含 spawn_subagent (SC9, v1 嵌套禁派发 ——
- *     createDefaultAciRegistry 不传 subagentManager, 该工具 T2 才落地)。
+ * Key disciplines:
+ *   - stdout is a single strict wire: everything non-envelope goes to
+ *     process.stderr.write; console.log to stdout is forbidden;
+ *   - SIGTERM-friendly shutdown (runSubagentWorker is dispatched by cli.ts; the
+ *     current implementation exits explicitly with process.exit(WORKER_EXIT_OK)
+ *     to guarantee stdout flush);
+ *   - exit-code semantics follow ADR-0111 invariant (b), codified in the
+ *     WORKER_EXIT_* constants:
+ *     exit 2 is envelope-protocol errors only (parse ProtocolError rethrown,
  *
- * 测试 seam: 生产 runSubagentWorker() 走真实装配; runWorkerOnce(opts) 把
- * envelope → run → truncateEnvelopeResult 拆出来, 导出仅供测试注入
- * stub deps (createStubModel), 不 spawn 真 worker 子进程。
+ // (ADR-0001)
+ *     caught by cli.ts);
+ *     an escape from the run phase → best-effort failed envelope + exit 1;
+ *   - env is inherited from the parent (no second env protocol invented);
+ *   - the worker child has no spawn_subagent (v1 forbids nested dispatch —
+ *     createDefaultAciRegistry gets no subagentManager).
+ *
+ * Test seam: production runSubagentWorker() uses real assembly; runWorkerOnce(opts)
+ * splits envelope → run → truncateEnvelopeResult so tests inject stub deps
+ * (createStubModel) without spawning a real worker child.
  */
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -108,7 +113,7 @@ import type { SkillSummary } from "../identity/assemble.js";
 import type { SkillCatalogFaces } from "../skill/catalog.js";
 import { writeRootSegment } from "../skill/body.js";
 
-/** stderr 日志前缀 (spec Code Style: warn 一行不泄露 env 值)。 */
+/** stderr log prefix (a warn line must never leak env values). */
 const LOG_PREFIX = "[subagent-worker]";
 
 function log(message: string): void {
@@ -119,14 +124,15 @@ function log(message: string): void {
 const DEFAULT_WORKER_TRACE_DIR = "trace";
 
 /**
- * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。
- * role 缺省 → general-purpose（与 spawn_subagent 缺省角色对齐）。
- * 未知 id 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
- * wire-mismatch 兜底, 单测 envelope-role.test.ts 显式锁定 fallback 内容
- * (不静默吞掉 — 装配层发一行 log, 输出仍无 persona)。
+ * Look up the catalog for the persona segment text (catalog body).
+ * Missing role → general-purpose (aligned with the spawn_subagent default role).
+ * Unknown ids take the catch path (defense-in-depth): the spawn side already
+ * validates once with ajv, so this is a wire-mismatch backstop; the
+ * envelope-role unit test explicitly locks the fallback content (never
+ * silently swallowed — the assembly layer logs one line, output still has no persona).
  *
- * catalog 由调用方传入（worker 装配期按 userHome 构建 merged resolver,
- * 含 ~/.iknow/agents/ 用户角色）。
+ * The catalog is passed in by the caller (the worker builds a merged resolver
+ * per userHome at assembly time, including ~/.iknow/agents/ user roles).
  */
 function resolvePersonaBody(
   role: string | undefined,
@@ -145,13 +151,14 @@ function resolvePersonaBody(
 }
 
 /**
- * #562 T7: 查 catalog 取 bashMode 派生 tool constraints 段文本。
- * bashMode="readonly" → 注入 "Tool constraints for this run" 段;
- * 其他 (role 缺省 / 未知 / bashMode 缺省 / bashMode="any") → 不注入,
- * 走 V1 baseline (byte-stable, 段缺席)。
+ * Look up the catalog for bashMode and derive the tool-constraints segment text.
+ * bashMode="readonly" → inject the "Tool constraints for this run" segment;
+ * anything else (role absent / unknown / bashMode absent / bashMode="any") →
+ * no injection, V1 baseline (byte-stable, segment absent).
  *
- * 防御契约与 resolvePersonaBody 同形态:role 缺省 / 未知 → 不抛, 装配
- * 期 catch 后走 fallback;catalog 是只读数据, 无副作用。
+ * Defense contract mirrors resolvePersonaBody: role absent / unknown → no
+ * throw; the assembly layer catches and falls back. The catalog is read-only
+ * data with no side effects.
  */
 function resolveConstraintsText(
   role: string | undefined,
@@ -174,24 +181,25 @@ function resolveConstraintsText(
 }
 
 /**
- * #556 T2 + #562 T7: 加性段注入 wrapper
- * (base < persona < constraints)。
+ * Additive-segment injection wrapper (base < persona < constraints).
  *
- * 顺序契约 (plan T7 实现选):
- *   - persona (#556):catalog body, 角色定位。
- *   - constraints (#562 T7):readonly mode 时追加, mode 延伸语义。
+ * Order contract:
+ *   - persona: catalog body, role identity.
+ *   - constraints: appended when readonly mode, an extension of the mode semantics.
  *
- * ADR-0112 T4: addendum (envelope.systemPrompt, 父模型可写) 从 system 降权
- * 出通道 —— 可写段不买 system 席位, 改走 user/untrusted (见
- * priorMessagesFromEnvelope)。persona / constraints 来自受信 role 配置
- * (catalog), 不降权。
+ * ADR-0112: the addendum (envelope.systemPrompt, parent-model-writable) is
+ * demoted out of the system channel — a writable segment buys no system seat,
+ * it goes through user/untrusted instead (see priorMessagesFromEnvelope).
+ * persona / constraints come from trusted role config (catalog) and are not demoted.
  *
- * 二者全缺省走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
- * base 缺席 → 输出只是 extras 两者按序 join;任一缺席 → 该 slot 在
- * extras 数组过滤掉, 顺序保持不变。
+ * When both default away, the outer short-circuit returns base: byte-stable,
+ * preserving the V1 baseline. base absent → output is just the two extras
+ * joined in order; either absent → that slot is filtered out of the extras
+ * array and the order is unchanged.
  *
- * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 6 段
- * LOCKED 顺序 (identity / soul / usage / user_profile / bootstrap / memory_layer)。
+ * Additive segments append after the base system and never reorder the 6
+ * LOCKED segments of IKNOW_ASSEMBLY_ORDER (identity / soul / usage /
+ * user_profile / bootstrap / memory_layer).
  */
 function withRoleExtras(
   base: () => Promise<string | undefined>,
@@ -210,154 +218,179 @@ function withRoleExtras(
 }
 
 /**
- * worker 装配入参 (createWorkerDeps seam)。
+ * Worker assembly inputs (the createWorkerDeps seam).
  *
- * 生产路径 runSubagentWorker() 只传 env + sandboxRoot; 测试可覆盖
- * model (stub) / trace (noop) / skillCatalog / system / userHome / cwd。
+ * Production path runSubagentWorker() passes only env + sandboxRoot; tests may
+ * override model (stub) / trace (noop) / skillCatalog / system / userHome / cwd.
  */
 export interface CreateWorkerDepsOptions {
-  /** 从 loadIknowEnv() 读到的完整 IknowEnv (生产路径)。 */
+  /** The full IknowEnv read from loadIknowEnv() (production path). */
   readonly env: IknowEnv;
-  /** 软沙箱根 (worker 的 fs 工具越界边界, 来自 WorkerEnvelope.sandboxRoot)。 */
+  /** Soft sandbox root (the worker fs tools' containment bound, from WorkerEnvelope.sandboxRoot). */
   readonly sandboxRoot: string;
-  /** 测试缝: 注入 stub-model (createStubModel) 替代真实 Anthropic adapter。 */
+  /** Test seam: inject a stub model (createStubModel) in place of the real Anthropic adapter. */
   readonly model?: LoopEngineDeps["adapter"];
-  /** 测试缝: 注入自定义 skill catalog (缺省 = worker 自身扫描, OQ3 独立扫描)。 */
+  /** Test seam: custom skill catalog (default = worker's own scan). */
   readonly skillCatalog?: ReturnType<typeof createSkillCatalog>;
-  /** 测试缝: trace service (缺省 = createJsonlTraceService, 单测覆盖 noop)。 */
+  /** Test seam: trace service (default = createJsonlTraceService; unit tests cover noop). */
   readonly trace?: TraceService;
-  /** 测试缝: 覆盖 userHome (默认 homedir(); 单测用 tmp fixture 隔离真实用户目录)。 */
+  /** Test seam: override userHome (default homedir(); unit tests use tmp fixtures to isolate the real user dir). */
   readonly userHome?: string;
-  /** 测试缝: 覆盖 cwd (默认 process.cwd())。 */
+  /** Test seam: override cwd (default process.cwd()). */
   readonly cwd?: string;
-  /** 测试缝: 覆盖 system resolver (缺省 createIknowSystemResolver)。 */
+  /** Test seam: override the system resolver (default createIknowSystemResolver). */
   readonly system?: LoopEngineDeps["system"];
-  /** 测试缝: 覆盖 maxTurns (envelope.maxTurns > env.llm.maxTurns 优先)。 */
+  /** Test seam: override maxTurns (envelope.maxTurns > env.llm.maxTurns takes priority). */
   readonly maxTurns?: number;
-  /** #468 deny-list: 来自 WorkerEnvelope.disallowedTools, 透传给
-   *  createDefaultAciRegistry 做 def-list 期裁剪 (声明面 = 实际面)。
-   *  缺席 / undefined 不裁剪, 向后兼容旧 wire。 */
+  /** Deny-list from WorkerEnvelope.disallowedTools, passed through to
+   *  createDefaultAciRegistry for def-list-time pruning (declared surface =
+   *  actual surface). Absent / undefined prunes nothing, backward compatible. */
   readonly disallowedTools?: ReadonlyArray<string>;
-  /** ADR-0019 (T4): per-root state anchor. Threaded to `createDefaultAciRegistry`
+  /** ADR-0019: per-root state anchor. Threaded to `createDefaultAciRegistry`
    *  → read_file's `extraReadRoots` so `<workspaceRoot>/.iknow` is reachable
    *  at parity with the home profile. ADR-0092 global mode: not a bind root;
    *  bash no longer threads it. Absent → registry falls back to sandboxRoot
    *  (legacy shape). */
   readonly workspaceRoot?: string;
   /**
-   * T3 (ADR-0037 §4) + T5b (ADR-0037 §9.2 #6): 项目身份根,双消费面。
-   *   - T3 身份发现（不变）：rules / 项目 `AGENTS.md` / 项目 skills 读它，
-   *     而不是 worker 自己的 cwd —— 改绑后 cwd 是一棵没有 `.iknow` 的裸树；
-   *     缺席回落 cwd（未改绑时两者同值，字节不变）。
-   *   - T5b bash 围栏读白名单：createWorkerRuntime 在围栏 taskRoot
-   *     （sandboxRoot）是 task-worktree 形状时把它（缺席回落
-   *     `mainCheckoutOf(sandboxRoot)`）透传给 registry → bash 工厂 →
-   *     per-call createFsPolicy 合同读根（提供即恒进，fail-loud 由
-   *     policy 层承担）。生产路径 build-engine spawn 处已无条件注入
-   *     `sessionRoots.projectIdentityRoot`（IKNOW_PRODUCT_ROOT，T3 wire），
-   *     值与主链 registry（build-engine isolationEnabled 档）同一份。
+   * ADR-0037: project identity root, two consumer surfaces.
+   *   - Identity discovery (unchanged): rules / project `AGENTS.md` / project
+   *     skills read it, not the worker's own cwd — after a rebind the cwd is a
+   *     bare tree without `.iknow`; absent → falls back to cwd (unbound case:
+   *     both equal, bytes unchanged).
+   *   - Bash fence read whitelist: createWorkerRuntime passes it (absent →
+   *     `mainCheckoutOf(sandboxRoot)`) to registry → bash factory → per-call
+   *     createFsPolicy contract-read roots whenever the fence taskRoot
+   *     (sandboxRoot) is a task-worktree shape (whenever provided it always
+   *     joins; fail-loud is the policy layer's job). The production build-engine
+   *     spawn site unconditionally injects `sessionRoots.projectIdentityRoot`
+   *     (IKNOW_PRODUCT_ROOT wire), the same value the main-chain registry gets
+   *     (build-engine isolationEnabled tier).
    */
   readonly projectIdentityRoot?: string;
   /**
-   * ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder(per-call snapshot),
-   * 透传给 worker 的 bash 工厂。holder 缺席 → 全局档(V1 baseline)。
-   * homeRoot 不是独立缝:装配层从本层已 resolve 的 `userHome`
-   * (opts.userHome ?? homedir())派生,与 settings / persona / state 同源。
+   * ADR-0092: fs-isolation-tier holder (per-call snapshot) threaded to the
+   * worker's bash factory. Holder absent → global tier (V1 baseline).
+   * homeRoot is not a separate seam: the assembly layer derives it from the
+   * already-resolved `userHome` here (opts.userHome ?? homedir()), same source
+   * as settings / persona / state.
    *
-   * 生产入口的 holder 由 `fsModeOptionFromEnv(process.env)` 从父进程写的
-   * `IKNOW_FS_MODE` 造(见 runSubagentWorker)—— worker 是独立进程,拿不到
-   * 父进程的 holder 对象,档位只能以值过界后在本进程重建 holder。
+   * At the production entry the holder is built by `fsModeOptionFromEnv(process.env)`
+   * from the parent-written `IKNOW_FS_MODE` (see runSubagentWorker) — the worker
+   * is a separate process and cannot see the parent's holder object, so the tier
+   * crosses the boundary as a value and the holder is rebuilt in-process.
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsModeContext;
   /**
-   * issue 1059:worktree-on-mutate 开关的进程内重建 holder —— 生产入口由
-   * `worktreeGateOptionFromEnv(process.env)` 从父进程写的
-   * `IKNOW_WORKTREE_GATE_ON`("1"/"0")造。worker 无门禁 executor,此 holder
-   * 只喂 bash 工厂的 UNBOUND_FENCE 判定;键缺席 / 非法 → 键缺席 = bash 工厂
-   * 无 holder → 永不发段(legacy 父进程字节不变)。
+   * In-process rebuilt holder for the worktree-on-mutate switch: the production
+   * entry builds it via `worktreeGateOptionFromEnv(process.env)` from the
+   * parent-written `IKNOW_WORKTREE_GATE_ON` ("1"/"0"). The worker has no gate
+   * executor; this holder only feeds the bash factory's UNBOUND_FENCE decision.
+   * Key absent / invalid → key absent → bash factory has no holder → never
+   * emits the segment (legacy parent process, bytes unchanged).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
-   * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
-   * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
-   * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
+   * Seam copy of envelope.role (passed through by runSubagentWorker).
+   * The worker queries the catalog at assembly time for the body and injects
+   * the persona segment; default / unknown → V1 baseline (no persona segment,
+   * no extra deny injection).
    */
   readonly role?: string;
   /**
-   * #562 T6: bash 模式显式覆盖 (= 优先于 role 派生)。缺省 → worker
-   * 装配期调 resolveBashMode(role) 派生:role "explore" → "readonly",
-   * 其他全部 → "any"。该 seam 为测试与未来跨阶段注入留口 (e.g.
-   * 直接派 readonly worker 不读 catalog)。Catalog 路由仍归 spawn
-   * tool 负责;registry 只透传,不读 catalog。
+   * Explicit bash-mode override (takes priority over role derivation).
+   * Default → the worker calls resolveBashMode(role) at assembly time:
+   * role "explore" → "readonly", everything else → "any". This seam stays for
+   * tests and future cross-stage injection (e.g. dispatching a readonly worker
+   * directly without reading the catalog). Catalog routing remains the spawn
+   * tool's job; the registry only passes through and never reads the catalog.
    */
   readonly bashMode?: "any" | "readonly";
   /**
-   * T5 (ADR-0071 / SC8 + L2): 由 envelope.traceFilePath
-   * 透传的 worker content trace 锚点(父会话已经替这个 taskId 建好
-   * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`)。在场时 worker file-mode
-   * 落该路径 + conversationId=taskId,替代 L2 假 scope `randomUUID()`(已退役)。
-   * 缺席 → 走 IKNOW_TRACE_OUT / defaultTraceDir 退路(byte-stable)。
+   * ADR-0071: worker content-trace anchor passed through by
+   * envelope.traceFilePath (the parent session has already created
+   * `<parent session folder>/subagents/agent-<taskId>.jsonl` for this taskId).
+   * When present, the worker's file-mode lands on that path with
+   * conversationId=taskId, replacing the retired fake `randomUUID()` scope.
+   * Absent → falls back to IKNOW_TRACE_OUT / defaultTraceDir (byte-stable).
    */
   readonly traceFilePath?: string;
   /**
-   * T5: 配套 traceFilePath —— 该 worker 的 taskId(parent spawn 时已锁)。
-   * 生产装配层 (runSubagentWorker 经 manager envelope 透传) 永远会同时传
-   * `traceFilePath + taskId` 配对;两键同时在场是 file-mode 装配的前提,
-   * traceFilePath 缺席时本字段被忽略(legacy IKNOW_TRACE_OUT 退路)。
+   * Companion to traceFilePath — this worker's taskId (locked at parent spawn).
+   * The production assembly (runSubagentWorker via the manager envelope) always
+   * passes the `traceFilePath + taskId` pair together; both keys present is the
+   * precondition for file-mode assembly. When traceFilePath is absent this field
+   * is ignored (legacy IKNOW_TRACE_OUT fallback).
    *
-   * ADR-0084 / D1 (second consumer): 同一 taskId 也喂
-   * `LoopEngineDeps.conversationId` —— 让 worker 的 last-read 账本按
-   * worker 身份分桶（子代理自己的空桶）。trace 无关的 caller（测试缝 /
-   * 只关心账本的装配）也可以只传本字段；缺席 → 无 id，非空覆写 fail-closed。
+   * The same taskId also feeds a second consumer:
+   *
+   // (ADR-0084)
+   * `LoopEngineDeps.conversationId` — bucketing the worker's last-read ledger
+   * by worker identity (the subagent's own empty bucket). Trace-unrelated
+   * callers (test seams / assembly that only cares about the ledger) may pass
+   * this field alone; absent → no id; a non-empty override fails closed.
    */
   readonly taskId?: string;
   /**
-   * T3: explicit worker fence `/tmp` pad. Absent + `traceFilePath` present →
+   * Explicit worker fence `/tmp` pad. Absent + `traceFilePath` present →
    * `<dirname(traceFilePath)>/fence-tmp` (nested `subagents/<taskId>/`).
    */
   readonly tmpDir?: string;
   /**
-   * ADR-0085 / SC9:父会话账本锚点(由 envelope.todoLedger 透传)。
-   * `projectDir` = 父会话项目目录(`TodoWriteToolDeps.todoDir` 同一值),
-   * `conversationId` = 父会话 id。在场 → worker registry 装配 todo_write:
-   * 与父共用同一本账(可 read / update),`add` 由工具自身 typed 拒绝
-   * (添加仅父会话;worker 权限层是 no-ask,不能靠它兜)。
-   * 缺席(旧 wire / 跨版本 resume)→ 不装配 todo_write,工具面 byte-stable。
+   * ADR-0085: parent-session ledger anchor (passed through by envelope.todoLedger).
+   * `projectDir` = the parent session's project dir (same value as
+   * `TodoWriteToolDeps.todoDir`); `conversationId` = the parent session id.
+   * Present → the worker registry assembles todo_write sharing the parent's
+   * single ledger (read / update allowed; `add` is typed-rejected by the tool
+   * itself — adding is parent-only and the worker's permission layer is
+   * no-ask, so it cannot backstop that). Absent (old wire / cross-version
+   * resume) → todo_write is not assembled; tool surface byte-stable.
    */
   readonly todoLedger?: {
     readonly projectDir: string;
     readonly conversationId: string;
   };
   /**
-   * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7):父会话 spawn
-   * **当时**的完整模型索引快照(由 envelope.skillIndexSnapshot 透传)。
+   * The parent session's full model-index snapshot as of spawn time (passed
+   * through by envelope.skillIndexSnapshot).
    *
-   * 在场(含空数组) → worker 的 `<available_skills>` 冻表以它为**唯一来源**
-   * —— 父已追加进场的名不在 worker 的扫描里,靠 rescan 拿不到;且父与 worker
-   * 的技能根可以不同(插件根随 reload / 工作目录差异),按名回查会丢条目,
-   * 故按名 + description 直出(渲染仍走 `skillsSegment`,SSOT 不变)。
-   * 缺席(旧 wire / 跨版本 resume / 直连装配) → 退回 worker 自己的独立 rescan
-   * (`createSkillScanner`,与今日逐字节一致)。
+   * Present (including empty array) → the worker's `<available_skills>` frozen
+   * table uses it as the **sole source** — names the parent has already loaded
+   * are not in the worker's scan, so a rescan cannot recover them; and parent
+   * and worker may have different skill roots (plugin roots vary with reload /
+   * working directory), so a by-name lookup would drop entries. Hence entries
+   * are projected by name + description directly (rendering still goes through
+   * `skillsSegment`, SSOT unchanged).
+   * Absent (old wire / cross-version resume / direct assembly) → falls back to
+   * the worker's own independent rescan (`createSkillScanner`, byte-identical
+   * to before).
    */
   readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
 }
 
 /**
- * T7:worker 索引面的**唯一裁决点** —— 父快照在场就用父快照,否则用 worker
- * 自己的 catalog(退回既有行为,逐字节不变)。
+ * The single decision point for the worker's index surface — if the parent
+ * snapshot is present use it, otherwise the worker's own catalog (legacy
+ * behavior, byte-for-byte unchanged).
  *
- * 两条路径都产 `SkillSummary[]`,渲染仍归 `skillsSegment`(identity 层
- * SSOT)—— worker 不留第二套渲染,也不预渲染段文本(段的位置 / 排序 /
- * 空清单句全由那一个函数决定)。
+ * Both paths produce `SkillSummary[]`; rendering stays with `skillsSegment`
+ * (identity-layer SSOT) — the worker keeps no second renderer and never
+ * pre-renders the segment (segment position / ordering / empty-list sentence
+ * are all decided by that one function).
  *
- * 冻表纪律:快照路径在**装配期**投影一次并冻结(快照是值,worker 进程内不
- * 再变;与 git 快照缝同款 —— 相邻两次求值 byte-stable 是 KV 缓存契约的
- * 前提)。catalog 路径保持既有形态(每次现读 —— 集合本身装配期已定)。
+ * Frozen-table discipline: the snapshot path projects once at assembly time
+ * and freezes (the snapshot is a value that cannot change inside the worker
+ * process; same idea as the git-snapshot seam — byte-stable between two
+ * evaluations is a precondition of the KV-cache contract). The catalog path
+ * keeps the existing shape (read on demand — the set itself was fixed at
+ * assembly time).
  *
- * 快照条目带的是**父的** name + description:父与 worker 的技能根可以不同
- * (插件根随 reload / 工作目录差异),按名在 worker catalog 里回查会丢条目
- * —— spec 的判据是「完整」,故直出(该名在 worker 里可能无正文可加载,
- * 见 CreateWorkerDepsOptions.skillIndexSnapshot 注释)。
+ * Snapshot entries carry the **parent's** name + description: parent and
+ * worker may have different skill roots (plugin roots vary with reload /
+ * working directory), and a by-name lookup in the worker catalog would drop
+ * entries — the requirement is "complete", so entries are projected directly
+ * (that name may have no loadable body in the worker; see the
+ * CreateWorkerDepsOptions.skillIndexSnapshot comment).
  */
 function systemSkillsGetter(opts: {
   readonly snapshot: readonly SkillIndexSnapshotEntry[] | undefined;
@@ -371,9 +404,9 @@ function systemSkillsGetter(opts: {
         ...(entry.disabled ? { disabled: true } : {}),
       }));
   }
-  // 投影只搬 name / description —— 不带 `disabled`:模型索引面本就不含
-  // disabled 条目,快照里不存在「disabled 为真」的合法输入(envelope schema
-  // 也不收该键)。
+  // Projection carries only name / description — no `disabled`: the model
+  // index surface never contains disabled entries, so "disabled true" is not
+  // a legal input in the snapshot (the envelope schema rejects the key too).
   const frozen: ReadonlyArray<SkillSummary> = Object.freeze(
     opts.snapshot.map((entry) =>
       Object.freeze({
@@ -388,20 +421,24 @@ function systemSkillsGetter(opts: {
 }
 
 /**
- * ADR-0092 Amendment 2026-09-13 / SC11:worker 侧 fs 档读点 —— 父进程经
- * `IKNOW_FS_MODE` 写来的档位字面 → `createWorkerDeps` 的 `fsMode` holder。
+ * ADR-0092: worker-side fs-tier read point — the tier literal written
+ * by the parent via `IKNOW_FS_MODE` → the `fsMode` holder for `createWorkerDeps`.
  *
- * worker 是独立进程:没有父进程的 holder 对象可共享,档位只能以**值**过
- * 进程边界,worker 侧新建一个 holder 并把该值当初始值。与「worker 进程内该
- * 档恒定」的语义一致 —— worker 不提供 `/config` 命令面,没有就地翻档的
- * 第二入口;holder 形态保留是给 bash 工厂的既有 opt 契约(handler per-call
- * `get()`),不是给运行期翻转的。
+ * The worker is a separate process: no parent holder object can be shared, so
+ * the tier crosses the process boundary as a value and the worker builds a new
+ * holder seeded with that value. This matches the semantics "the tier is
+ * constant within the worker process" — the worker exposes no `/config` face,
+ * so there is no second in-place flip entry; the holder shape is kept only for
+ * the bash factory's existing opt contract (handler per-call `get()`), not for
+ * runtime flipping.
  *
- * 归一走 `parseFsModeFlag`(值域 SSOT,与 settings 段 / `/config` 同一份)
- * 而不是在 worker 里再写一遍字面比较:大小写与首尾空白按同一条规则折叠。
- * 缺省 / 非法值 → **键缺席**(不显式写 `global`)—— 与 `workspaceRoot` /
- * `productRoot` 的 spread-guard 同款,让「缺席」在下游只有一种解释,且
- * legacy 路径(旧父进程不写该键)字节不变。
+ * Normalization goes through `parseFsModeFlag` (value-domain SSOT, same as the
+ * settings segment / `/config`) instead of re-writing literal comparison in
+ * the worker: case and surrounding whitespace fold by the same rule.
+ * Missing / invalid → **key absent** (no explicit `global`) — same
+ * spread-guard style as `workspaceRoot` / `productRoot`, so "absent" has only
+ * one downstream interpretation and the legacy path (old parent not writing
+ * the key) stays byte-identical.
  */
 export function fsModeOptionFromEnv(
   env: Readonly<Record<string, string | undefined>>
@@ -411,9 +448,10 @@ export function fsModeOptionFromEnv(
 }
 
 /**
- * issue 1059:与 `fsModeOptionFromEnv` 同纪律的开关过界重建 —— 值域是
- * "1"/"0" 两枚,非法值 → 键缺席(下游 spread-guard 丢弃,等同通道未接),
- * 不在 worker 里猜父进程意图。
+ * Same discipline as `fsModeOptionFromEnv` for rebuilding the switch across
+ * the process boundary — the value domain is just "1"/"0"; invalid → key
+ * absent (downstream spread-guard drops it, same as an unwired channel),
+ * never guessing the parent's intent inside the worker.
  */
 export function worktreeGateOptionFromEnv(
   env: Readonly<Record<string, string | undefined>>
@@ -442,13 +480,16 @@ function resolveWorkerFenceTmp(
 }
 
 /**
- * ADR-0085 / SC9:worker 侧账本注册缝 —— 父会话账本锚点(经 envelope
- * `todoLedger` 透传)在场 → `todo_write` 入 worker 工具面,挂到与父**同一本**
- * todos.md;`canAdd:false` 让工具自身 typed 拒绝 `add`(读 / 更新可用)。
- * 缺席 → 不装配(旧 wire byte-stable,worker 工具面不含 todo_write)。
+ * ADR-0085: worker-side ledger registration seam — when the parent
+ * ledger anchor (passed via envelope `todoLedger`) is present, `todo_write`
+ * joins the worker's tool surface attached to the **same** todos.md as the
+ * parent; `canAdd:false` makes the tool itself typed-reject `add` (read /
+ * update stay available). Absent → not assembled (old wire byte-stable; the
+ * worker tool surface contains no todo_write).
  *
- * 与主 loop registry 同源:`todoDir` 就是父 registry 拿到的那个值,worker 不
- * 另派生(路径分段清洗归 `resolveConversationTodoPath`)。
+ * Same source as the main loop registry: `todoDir` is exactly the value the
+ * parent registry got; the worker does not re-derive it (path-segment
+ * sanitizing belongs to `resolveConversationTodoPath`).
  */
 function todoLedgerRegistryOpts(
   ledger:
@@ -469,14 +510,16 @@ function todoLedgerRegistryOpts(
 }
 
 /**
- * SC9:worker 子进程的 Anthropic client。headers 透传与 build-engine
- * `createAdapterFromEnv` 同形 —— `env.llm.headers` 有值时作 SDK
- * `defaultHeaders`;缺席时**不传该键**(条件 spread),client options 与今日
- * 逐字节一致(不会多出显式 `undefined` / `{}`)。
+ * The worker child's Anthropic client. Header pass-through matches
+ * build-engine's `createAdapterFromEnv` — when `env.llm.headers` has values it
+ * becomes the SDK `defaultHeaders`; absent → **the key is not passed**
+ * (conditional spread), so client options stay byte-identical (no explicit
+ * `undefined` / `{}` leaking in).
  *
- * 独立成挂载点而非内联:装配函数已超 S5 复杂度阈值,新增分支必须落在
- * 新函数里(ratchet 只允许持平 / 下降),且这里本来就是「env → client」的
- * 单一职责边界。
+ * A named mount point rather than inline: the assembly function already exceeds
+ * the S5 complexity threshold, so new branches must land in a new function
+ * (the ratchet only allows flat/down), and this is the single-responsibility
+ * "env → client" boundary anyway.
  */
 function createWorkerAnthropicClient(env: IknowEnv): Anthropic {
   return new Anthropic({
@@ -489,17 +532,18 @@ function createWorkerAnthropicClient(env: IknowEnv): Anthropic {
 }
 
 /**
- * 装配 worker 进程的 LoopEngineDeps。真实路径 (spec T1):
- *   - adapter = createRealAnthropicAdapter (build-engine 同款参数);
- *   - registry = createDefaultAciRegistry (不传 subagentManager → 无 spawn_subagent);
+ * Assemble the worker process's LoopEngineDeps. Real path:
+ *   - adapter = createRealAnthropicAdapter (same params as build-engine);
+ *   - registry = createDefaultAciRegistry (no subagentManager → no spawn_subagent);
  *   - executor = createAciExecutor (permission middleware + fail-closed askUser);
- *   - system = createIknowSystemResolver (surface "ask" → 无 BOOTSTRAP);
- *   - trace = createJsonlTraceService (cli.ts 同形态; 测试覆盖 noop);
- *   - compress 透传 env.compress (与 build-engine 同形态)。
+ *   - system = createIknowSystemResolver (surface "ask" → no BOOTSTRAP);
+ *   - trace = createJsonlTraceService (same shape as cli.ts; tests cover noop);
+ *   - compress passes env.compress through (same shape as build-engine).
  *
- * worker 子进程是任务型 (有界 scope), 不装配 MCP manager / memory layer ——
- * 与 build-engine 的差异注释见各装配点。LSP notifier / warmup 二期 B6 起与
- * build-engine 同构装配（SSOT: LspCtx.directory ≡ sandboxRoot）。
+ * The worker child is task-shaped (bounded scope), so no MCP manager / memory
+ * layer is assembled — see each assembly point's diff-vs-build-engine comment.
+ * Since phase 2, LSP notifier / warmup are assembled in lockstep with
+ * build-engine (SSOT: LspCtx.directory ≡ sandboxRoot).
  */
 export async function createWorkerDeps(
   opts: CreateWorkerDepsOptions
@@ -508,13 +552,15 @@ export async function createWorkerDeps(
 }
 
 /**
- * D-α 观测地板: `createWorkerDeps` 的全量装配产物。
+ * Observability floor: the full assembly output of `createWorkerDeps`.
  *
- * `createWorkerDeps` 只透出 `deps`(既有 seam, 全部现存 caller 不变);
- * 生产入口 `runSubagentWorker` 走本函数, 额外拿到 ACI catalog —— fileRefs
- * 需要按 `aci.category === "write"` 派生工具名, 而 `LoopEngineDeps` 只带
- * 无 ACI 元数据的 `registry`。不把 catalog 塞进 deps: `LoopEngineDeps` 是
- * loop-engine 的契约面, 加一个只有 worker 消费的字段会污染它。
+ * `createWorkerDeps` exposes only `deps` (the existing seam — every current
+ * caller is unchanged); the production entry `runSubagentWorker` goes through
+ * this function and additionally gets the ACI catalog — fileRefs needs to
+ * derive tool names from `aci.category === "write"`, while `LoopEngineDeps`
+ * only carries the ACI-metadata-free `registry`. The catalog is not stuffed
+ * into deps: `LoopEngineDeps` is loop-engine's contract surface, and a
+ * worker-only field would pollute it.
  */
 export async function createWorkerRuntime(
   opts: CreateWorkerDepsOptions
@@ -524,27 +570,34 @@ export async function createWorkerRuntime(
 }> {
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
-  // user agents 目录按 worker 自身 userHome 扫描（测试缝 userHome 同时
-  // 隔离 ~/.iknow/agents）。记忆化在 user-catalog 内, 每进程最多扫一次。
+  // The user-agents dir is scanned with the worker's own userHome (the
+  // userHome test seam also isolates ~/.iknow/agents). Memoization lives
+  // inside user-catalog — at most one scan per process.
   const agentCatalog = createMergedCatalogResolver({ home: userHome });
   const cwd = opts.cwd ?? process.cwd();
-  // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
+  // Identity-discovery root. Parent session passed nothing (unbound / old
+  // wire) → fall back to cwd, same value as today.
   const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
-  // T5b (ADR-0037 §9.2 #6): worker bash 围栏的 identity 合同读根。worker
-  // 进程没有 isolationEnabled 信号(settings / isolationHost 都不在场),但其
-  // 围栏 taskRoot = sandboxRoot(spawn 期冻结,registry 无 liveTaskRoot),主链
-  // 「rebind 后 identity 根才装载」的谓词在 worker 侧的等价形式 = sandboxRoot
-  // 是 task-worktree 形状 —— 与 build-engine spawn 处给 sessionRoot 的判定
-  // (taskWorktreeOwnerOf,build-engine.ts 同一函数)同源:
-  //   - OFF / 未改绑(sandboxRoot = 主仓):不传 —— .git 就在 cwd 内,本不缺
-  //     读通道(ADR §9.2 #6 括号理由),字节同今日,不比主链更宽;
-  //   - ON + 已改绑(sandboxRoot = task worktree):传父会话 verbatim 的
-  //     sessionRoots.projectIdentityRoot(T3 IKNOW_PRODUCT_ROOT wire 已送达,
-  //     与主链 ON 档 registry 同一份值),修 worktree repo 发现断链(git
-  //     status exit 128,T1 盘点实测)。
-  // 值回落 mainCheckoutOf(sandboxRoot):与 build-engine sessionRoots 派生
-  // (mainCheckoutOf(opts.projectIdentityRoot ?? cwd))同一 SSOT 纯路径推导,
-  // 不新造状态源;回落值盘上缺席时由 policy 合同根 fail-loud(§9.4)。
+  // ADR-0037: identity contract read root for the worker bash fence.
+  // The worker process has no isolationEnabled signal (neither settings nor
+  // isolationHost is present), but its fence taskRoot = sandboxRoot (frozen at
+  // spawn; the registry has no liveTaskRoot). The main chain's "load the
+  // identity root only after rebind" predicate reduces here to: sandboxRoot is
+  // a task-worktree shape — same source as the build-engine spawn-site check
+  // feeding sessionRoot (taskWorktreeOwnerOf, the same function in
+  // build-engine.ts):
+  //   - OFF / unbound (sandboxRoot = main checkout): don't pass — .git sits
+  //     inside cwd, no read channel is missing (the rationale in
+  //     ADR-0037), bytes same as today, never wider than the main chain;
+  //   - ON + bound (sandboxRoot = task worktree): pass the parent session's
+  //     verbatim sessionRoots.projectIdentityRoot (delivered over the
+  //     IKNOW_PRODUCT_ROOT wire), the same value the main-chain ON-tier
+  //     registry gets — fixing the broken worktree repo discovery (git status
+  //     exit 128, measured in the inventory pass).
+  // Value fallback mainCheckoutOf(sandboxRoot): the same pure path derivation
+  // build-engine's sessionRoots use (mainCheckoutOf(opts.projectIdentityRoot ??
+  // cwd)) — no new state source; if the fallback path is absent on disk, the
+  // policy contract root fails loud (ADR-0037).
   const identityFenceRoot = isTaskWorktreePath(sandboxRoot)
     ? (opts.projectIdentityRoot ?? mainCheckoutOf(sandboxRoot))
     : undefined;
@@ -553,16 +606,18 @@ export async function createWorkerRuntime(
     DEFAULT_WORKER_TRACE_DIR
   );
 
-  // 任务型子代理: 用 fail-closed askUser (无交互, 权限不足即拒绝, #162 平权
-  // 装配)。subagent 聚焦执行, 不重复向 operator 弹 y/N 提示。
+  // Task-shaped subagent: fail-closed askUser (no interaction; insufficient
+  // permission = immediate denial, at parity with the main assembly). The
+  // subagent focuses on execution and never re-prompts the operator y/N.
   const askUser = createNoAskUser();
 
   const adapter =
     opts.model ??
     withTransportRetry(
       createRealAnthropicAdapter({
-        // ADR-0093 / SC9：env.llm.headers → client defaultHeaders，构造见
-        // `createWorkerAnthropicClient`（条件 spread，缺席不传键）。
+        // env.llm.headers → client defaultHeaders; see
+        // (ADR-0093)
+        // `createWorkerAnthropicClient` (conditional spread, key absent if unset).
         client: createWorkerAnthropicClient(env),
         model: wireModelFromRoute(env.llm.model),
         maxTokens: env.llm.maxOutputTokens,
@@ -573,18 +628,21 @@ export async function createWorkerRuntime(
       { translate: translateAnthropicTransportFault }
     );
 
-  // skill 索引: worker 自身独立扫描 (spec OQ3 默认 —— 简化通信, 复用父装配
-  // 形态); scanner 内部 try/catch + warn, 目录缺失降级, 装配不阻塞。
-  // #global-plugins T1: 插件 skill 同样由 worker 自解析（与父装配同源 = 同一
-  // 插件根解析 + 同一 disabled 过滤）。merged catalog 的 plugin agents 走
-  // createMergedCatalogResolver() 自解析（ACR #5）—— 不需要 worker 注入。
+  // Skill index: the worker scans independently (simpler communication, reuses
+  // the parent's assembly shape); the scanner has internal try/catch + warn,
+  // degrades on missing dirs, and never blocks assembly.
+  // Plugin skills are likewise resolved by the worker itself (same source as
+  // the parent assembly = same plugin-root resolution + same disabled filter).
+  // Merged-catalog plugin agents self-resolve via createMergedCatalogResolver()
+  // — no worker injection needed.
   const workerSettings = loadIknowSettings({
     cwd: projectIdentityRoot,
     home: userHome,
   });
-  // 「解析根 → 扫描 → disabled 过滤（→ plugin catalog）」一条链走
-  // roots.ts 的共用装配 helper（与 build-engine 同源），worker 不再各写
-  // 一遍 —— disabled 过滤条件化的 branch 数留在 helper 内。
+  // The "resolve roots → scan → disabled filter (→ plugin catalog)" chain goes
+  // through roots.ts's shared assembly helper (same source as build-engine);
+  // the worker no longer rewrites it — the disabled-filter branch count stays
+  // inside the helper.
   const { catalog: pluginCatalog, enabled: enabledInstallations } =
     await resolvePluginCatalog({
       roots: resolvePluginRoots({
@@ -593,8 +651,9 @@ export async function createWorkerRuntime(
       }),
       plugins: workerSettings.plugins,
     });
-  // #global-plugins T2: hooksEntries 是插件 hooks 文件源（见 build-engine
-  // 同款装配注释）；worker 与父引擎从同一份插件解析（同源、同 disabled）。
+  // hooksEntries is the plugin hooks file source (see the matching assembly
+  // comment in build-engine); worker and parent engine read the same plugin
+  // resolution (same source, same disabled set).
   const pluginSkillDirs: PluginSkillDir[] = enabledInstallations.map((p) => ({
     dir: join(p.root, "skills"),
     plugin: p.name,
@@ -606,35 +665,38 @@ export async function createWorkerRuntime(
         userHome,
         projectIdentityRoot,
         env: process.env,
-        // 空数组 = 无插件 skill（scanner 缺省即空数组），无须条件展开。
+        // Empty array = no plugin skills (the scanner defaults to empty), no conditional spread needed.
         pluginSkillDirs,
       }).scan()
     );
 
-  // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
-  // spawn_subagent (SC9) —— registry.ts 不传 subagentManager, 该工具不在
-  // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
-  // #562 T6: bashMode 与 catalog deny 均由同一能力解析源派生；显式
-  // opts.bashMode 只保留既有测试/未来注入 seam，不改变 catalog 的 deny。
+  // Independent registry: no dependency on the parent's registry. The worker
+  // child has no spawn_subagent — registry.ts is not given a
+  // subagentManager, so that tool is absent from factories.
+  // bashMode and the catalog deny both derive from the same capability
+  // resolver; explicit opts.bashMode only keeps the existing test/future
+  // injection seam and never changes the catalog deny.
   const isJudge = opts.role === "judge";
   const capabilities = isJudge
     ? { bashMode: "any" as const, disallowedTools: opts.disallowedTools }
     : resolveSubagentCapabilities({
         role: opts.role,
         parentDisallowedTools: opts.disallowedTools,
-        // 与 persona/constraints 同源: builtin + user agents merged catalog。
+        // Same source as persona/constraints: merged builtin + user agents catalog.
         catalog: agentCatalog,
       });
   if (capabilities.catalogError !== undefined) {
     log(`role '${opts.role}' not in catalog; bashMode fallback to 'any'`);
   }
   const bashMode: BashMode = opts.bashMode ?? capabilities.bashMode;
-  // lsp-optimization 二期 B6/B7 closeout: worker 同构装配 LSP notifier +
-  // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
-  // lsp idleTimeoutMs 走常量缺省（10min），不读 settings.lsp（worker 仅
-  // 在下方 user-hook 装配处读 settings.hooks 段）；超时/等待仍走工具层常量。
-  // Locked sentence 5:warmup 不在装配期起,改由 deps.registry 视图惰性 arm
-  // （第一次 language server 工具名解析），见下方 withLazyLspWarmup 调用。
+  // Worker assembles LSP notifier + warmup in lockstep with build-engine (same
+  // seam). SSOT: LspCtx.directory ≡ sandboxRoot.
+  // lsp idleTimeoutMs uses the constant default (10min), not settings.lsp (the
+  // worker only reads the settings.hooks segment at the user-hook assembly
+  // below); timeout/wait still use tool-layer constants.
+  // Warmup does not start at assembly time; it is lazily armed through the
+  // deps.registry view (first language-server tool-name resolution) — see the
+  // withLazyLspWarmup call below.
   const lspCtx = {
     directory: sandboxRoot,
     idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS,
@@ -650,29 +712,31 @@ export async function createWorkerRuntime(
     ...(capabilities.disallowedTools !== undefined
       ? { disallowedTools: capabilities.disallowedTools }
       : {}),
-    // ADR-0019 (T4): per-root state anchor spread-guard — absent →
+    // ADR-0019: per-root state anchor spread-guard — absent →
     // registry falls back to sandboxRoot (legacy shape byte-identical).
     // Threaded to read_file's extraReadRoots; bash no longer consumes it
     // (ADR-0092 global mode has no per-root mount and no policy predicate).
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
-    // T5b (ADR-0037 §9.2 #6): identity 合同读根条件化透传(谓词见
-    // identityFenceRoot)—— registry spread-guard 把它送进 bash 工厂 →
-    // per-call createFsPolicy 读白名单;read_file / grep / glob 同得只读
-    // 直通,与主链 isolationEnabled ON 档的 registry 面一致。缺席不传,
-    // 与主链 OFF 档字节一致。
+    // ADR-0037: conditional identity contract read root (predicate in
+    // identityFenceRoot) — the registry spread-guard routes it into the bash
+    // factory → per-call createFsPolicy read whitelist; read_file / grep / glob
+    // get the same read-only pass-through, matching the main chain's
+    // isolationEnabled ON-tier registry. Absent → not passed, byte-identical
+    // to the main chain OFF tier.
     ...(identityFenceRoot !== undefined
       ? { projectIdentityRoot: identityFenceRoot }
       : {}),
-    // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传
-    // 给 worker bash 工厂 —— 与 build-engine 主链同形态。holder 缺席 →
-    // V1 global baseline。homeRoot 取本层已 resolve 的 `userHome`
-    // (opts.userHome 测试缝 ?? homedir(),见上文),不留给 bash 工厂再
-    // `homedir()` 一次 —— 与主链同款:测试缝必须能改到围栏源端。
+    // ADR-0092: fs isolation-tier holder + homeRoot threaded to the worker bash
+    // factory — same shape as the build-engine main chain. Holder absent →
+    // V1 global baseline. homeRoot reuses the userHome resolved at this layer
+    // (opts.userHome test seam ?? homedir(), see above) — the bash factory does
+    // not call `homedir()` again — same as the main chain: the test seam must
+    // be able to steer the fence source.
     fsMode: opts.fsMode,
     homeRoot: userHome,
-    // issue 1059:开关 holder 透传给 worker bash 工厂(缺席 = 不发段)。
+    // Switch holder threaded to the worker bash factory (absent = no segment).
     ...(opts.worktreeOnMutate !== undefined
       ? { worktreeOnMutate: opts.worktreeOnMutate }
       : {}),
@@ -682,17 +746,22 @@ export async function createWorkerRuntime(
   });
 
   const baseExecutor = createExecutor(reg.inner);
-  // ADR-0084 / SC5 worker 平权:worker 是同一会话的子代理面,项目权限规则
-  // 必须与主链同源 —— 否则被主链 deny 的命令可从 worker 绕行。读根 =
-  // `projectIdentityRoot`(与上方 user-hook settings 读根同一份,worker 无
-  // sessionRoots,身份根经 IKNOW_PRODUCT_ROOT wire 送达 / 缺席回落 cwd);
-  // fail-loud 原路上抛(typed ProjectSettingsError),worker 进程顶层
-  // (cli.ts)转 stderr + exit 2,不静默降级成「无项目规则」。无项目规则 =
-  // undefined,由 `createPermissionPolicy` 的 spread-guard 丢弃(与 key 缺席
-  // 同形),此处不再叠一层条件分支。
-  // ADR-0090: 声明式规则编译锚 = sandboxRoot(与 build-engine 同款);
-  // knownToolNames 取 worker 内建 registry(无动态 MCP 件)——未知工具名
-  // 的 deny/ask 加载期告警,规则仍保留编译。
+  // Worker permission parity: the worker is the subagent face of the same
+  // (ADR-0084)
+  // session, so project permission rules must share the main chain's source —
+  // otherwise a command denied on the main chain could detour through the
+  // worker. Read root = `projectIdentityRoot` (same value as the user-hook
+  // settings read root above; the worker has no sessionRoots, and the identity
+  // root arrives over the IKNOW_PRODUCT_ROOT wire / falls back to cwd when
+  // absent); fail-loud rethrows as-is (typed ProjectSettingsError), which the
+  // worker process top level (cli.ts) turns into stderr + exit 2 — never
+  // silently downgrading to "no project rules". No project rules = undefined,
+  // dropped by `createPermissionPolicy`'s spread-guard (same shape as key
+  // absent), so no extra conditional branch here.
+  // ADR-0090: declarative-rule compile anchor = sandboxRoot (same as
+  // build-engine); knownToolNames comes from the worker's built-in registry
+  // (no dynamic MCP pieces) — load-time warnings for deny/ask on unknown tool
+  // names, but rules are still compiled.
   const policy = createPermissionPolicy({
     project: resolveProjectPermissionSource({
       projectIdentityRoot,
@@ -711,7 +780,7 @@ export async function createWorkerRuntime(
     env: process.env,
     onError: (e) => process.stderr.write(`[worker ${e.phase}] ${e.message}\n`),
   });
-  // 插件 hooks 文件源 —— 与父引擎同一份 catalog。链序 settings → plugin。
+  // Plugin hooks file source — same catalog as the parent engine. Chain order settings → plugin.
   const pluginHooksOpts: Parameters<typeof createPluginHooksFromCatalog>[0] = {
     entries: pluginCatalog.hooksEntries,
     installations: enabledInstallations,
@@ -722,9 +791,10 @@ export async function createWorkerRuntime(
     onError: (e) => process.stderr.write(`[worker ${e.phase}] ${e.message}\n`),
   };
   const pluginHooks = createPluginHooksFromCatalog(pluginHooksOpts);
-  // 组合器跳过 undefined 槽（未配的源）；worker 无 TUI post，插件 Post 若在
-  // 场则单独成链。全缺席 → undefined → postToolUse 字段整体缺席（executor
-  // 侧 `?? no-op` 同形，条件展开可省）。
+  // The combinator skips undefined slots (unconfigured sources); the worker has
+  // no TUI post, so a plugin Post, if present, forms its own chain. All absent →
+  // undefined → the postToolUse field is absent entirely (same shape as the
+  // executor's `?? no-op`, so the conditional spread can be omitted).
   const postToolUse = composePostHooks([settingsHooks.post, pluginHooks.post]);
   const executor = createAciExecutor({
     inner: baseExecutor,
@@ -737,18 +807,21 @@ export async function createWorkerRuntime(
     },
   });
 
-  // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); worker
-  // 只注入静态 AGENTS.md / rules,不启用 memory library。skills 段照常注入
-  // (SC12: skill 工具在场就该让模型知道 available skills)。
-  // Judge workers must not inherit the full iknow soul / assistant voice
-  // (verify-goal-gate T2). Catalog lookup is skipped so "unknown role"
+  // surface "ask" → shouldIncludeBootstrap false (no BOOTSTRAP segment); the
+  // worker injects only static AGENTS.md / rules and does not enable the memory
+  // library. The skills segment is injected as usual (when the skill tool is
+  // present, the model should know the available skills).
+  // Judge workers must not inherit the full iknow soul / assistant voice.
+  // Catalog lookup is skipped so "unknown role"
   // fallback does not re-attach the iknow base.
-  // plans/model-prefix-layering.md B5 / spec §9:worker 给父代理同款 git 快照。
-  // worker 装配期同步取一次 createGitSnapshotProvider(以稳定
-  // projectIdentityRoot 为 cwd),结果冻结在闭包 → worker 进程内字节级恒定,
-  // 注入 resolver 的 `git` 缝 → 与父代理 share the same git block text。
-  // 退化态(非 git 仓库 / git 不可用 / cwd 不可解析)→ undefined → 段缺席,
-  // 装配不报错。
+  // The worker gets the same git snapshot as the parent agent.
+  // At assembly time the worker synchronously takes one
+  // createGitSnapshotProvider (with the stable projectIdentityRoot as cwd);
+  // the result is frozen in the closure → byte-constant within the worker
+  // process, injected into the resolver's `git` seam → sharing the same git
+  // block text with the parent agent. Degenerate states (not a git repo / git
+  // unavailable / cwd unresolvable) → undefined → segment absent, no
+  // assembly error.
   const baseSystem = isJudge
     ? async () => undefined
     : (opts.system ??
@@ -759,8 +832,9 @@ export async function createWorkerRuntime(
         surface: "ask",
         memoryEnabled: false,
         staticInstructions: opts.role !== "explore",
-        // T7 (spec SC10):索引面 = 父会话当时快照(在场时)或 worker 自己的
-        // catalog rescan(缺席时,既有行为逐字节不变)。裁决点见 systemSkillsGetter。
+        // Index surface = the parent session's as-of snapshot (when present) or
+        // the worker's own catalog rescan (absent, existing behavior byte-for-byte
+        // unchanged). Decision point: systemSkillsGetter.
         skills: systemSkillsGetter({
           snapshot: opts.skillIndexSnapshot,
           catalog: skillCatalog,
@@ -768,15 +842,17 @@ export async function createWorkerRuntime(
         git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
       }));
 
-  // #556 T2 + #562 T7: persona + constraints 注入 (加性段, 不触碰
-  // IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints;二者全缺省 →
-  // base 透传, V1 baseline 严格 byte-stable。
-  // ADR-0112 T4: envelope.systemPrompt (addendum) 不再进 system —— 装配层
-  // 无消费口, worker 运行期在 priorMessagesFromEnvelope 走 user/untrusted。
+  // Persona + constraints injection (additive segments, never touching
+  // IKNOW_ASSEMBLY_ORDER). Order base < persona < constraints; both default
+  // away → base passthrough, V1 baseline strictly byte-stable.
+  // ADR-0112: envelope.systemPrompt (addendum) no longer enters system — the
+  // assembly layer has no consumer for it; at runtime the worker routes it
+  // through priorMessagesFromEnvelope into user/untrusted.
   //
-  // role 缺省 → general-purpose persona; 未知 id → 不注入 persona
-  // (defense-in-depth): worker 装配期 catch AgentCatalogLookupError 显式走
-  // fallback, 单测 envelope-role 与 tool-constraints 锁定该路径。
+  // role absent → general-purpose persona; unknown id → no persona injected
+  // (defense-in-depth): the worker catches AgentCatalogLookupError at assembly
+  // time and explicitly takes the fallback; the envelope-role and
+  // tool-constraints unit tests lock this path.
   const personaText = isJudge
     ? undefined
     : resolvePersonaBody(opts.role, agentCatalog);
@@ -791,11 +867,12 @@ export async function createWorkerRuntime(
   const deps: LoopEngineDeps = {
     adapter,
     executor,
-    // Locked sentence 5:worker 面同缝 —— 装配期不 warmup,第一次 language
-    // server 工具名解析才 arm(与 build-engine 共用 lsp/warmup.ts 的视图)。
+    // Worker uses the same seam — no warmup at assembly time; the first
+    // language-server tool-name resolution arms it (sharing lsp/warmup.ts's
+    // view with build-engine).
     registry: withLazyLspWarmup(reg.inner, lspCtx),
-    // #353 settings 回退已在 loadIknowEnv 内合并; envelope.maxTurns 由
-    // runWorkerOnce 优先覆写。
+    // settings fallback is already merged inside loadIknowEnv; envelope.maxTurns
+    // is overridden with priority by runWorkerOnce.
     maxTurns: env.llm.maxTurns,
     detectToolLoop: env.loop?.detectToolLoop !== false,
     timeoutMs: env.llm.timeoutMs,
@@ -807,45 +884,57 @@ export async function createWorkerRuntime(
       : {}),
     system,
     promptTools: reg.visibleSchemas,
-    // ADR-0084 / D1:子代理是**独立** conversation —— 这个值让它拿到**自己的**
-    // 一件空桶（账本按 conversationId 分桶），不是父会话的 id，也不与父会话
-    // 共享任何条目。spec「子代理新 conversation 空表」要的是**空桶**而不是
-    // **桶缺席**：`ledgerFor(undefined) === undefined` 会让 worker 内刚成功的
-    // `read_file` 无处入账，同回合 read-modify-write 的 `write_file` 因此
-    // **永久**被拒（不可恢复）—— 那是装配漏接线，不是契约。
+    // The subagent is an **independent** conversation — this value
+    // (ADR-0084)
+    // gives it **its own** empty bucket (the ledger buckets by conversationId),
+    // not the parent session's id, and sharing no entries with the parent.
+    // "Subagent gets a fresh empty conversation table" means an **empty bucket**,
+    // not **bucket absent**: `ledgerFor(undefined) === undefined` would leave a
+    // just-succeeded `read_file` in the worker with nowhere to book its read,
+    // and the same-turn read-modify-write `write_file` would then be **forever**
+    // denied (unrecoverable) — that is a wiring miss, not a contract.
     //
-    // 语义关系：下方 trace 分支的 conversationId 也是 `opts.taskId`（manager
-    // 在 spawn 期锁定的 task 身份），两个消费面指向同一身份，不会漂移。
+    // Semantic relation: the trace branch below also uses `opts.taskId` as its
+    // conversationId (the task identity the manager locks at spawn), so the two
+    // consumer faces point at the same identity and cannot drift.
     //
-    // 缺席（legacy envelope / 跨版本 resume / 测试未传）→ undefined，**不兜底
-    // 造 id**：造 per-process 假 id 等于给未读覆写开后门（比拒更危险）。
-    // read / 白名单 bash 无 id 仍可执行。
+    // Absent (legacy envelope / cross-version resume / test not passing it) →
+    // undefined, and **no fallback id is minted**: a per-process fake id is a
+    // backdoor for unread overwrites (more dangerous than denial).
+    // read / whitelisted bash still run without an id.
     //
-    // 最小性：其它 conversationId 消费者（backgroundManager / todoDir /
-    // graphAssembly / subagentManager）都不在 worker registry 里，且
-    // `resolveSessionFenceTmp` 的 `projectDir` 缺席 —— worker 的 `/tmp` pad
-    // 仍只由 `tmpDir`(workerFenceTmp) 或 mkdtemp 回落决定。
+    // Minimality: the other conversationId consumers (backgroundManager /
+    // todoDir / graphAssembly / subagentManager) are none of them in the worker
+    // registry, and `resolveSessionFenceTmp`'s `projectDir` is absent — the
+    // worker's `/tmp` pad is still decided only by `tmpDir` (workerFenceTmp) or
+    // the mkdtemp fallback.
     ...(opts.taskId !== undefined ? { conversationId: opts.taskId } : {}),
-    // T3 (ADR-0071) 已退役 `./trace/` cwd-relative
-    // 退路(SC6)—— 主会话 trace 锚走会话文件夹 (resolveServeDataDir() 同源)。
-    // worker 继承父进程 env (ADR-0001),这里再读一次 IKNOW_TRACE_OUT 保持解析
-    // 顺序一致 (cli.ts resolveTraceRoot 形态)。traceFilePath 在场时优先 (T5
-    // SC8 + L2,见下方 trace 装配分支)。
+    // ADR-0071 retired the `./trace/` cwd-relative
+    // fallback — the main-session trace anchor goes through the session folder
+    // (same source as resolveServeDataDir()). The worker inherits the parent's
+    // (ADR-0001)
+    // env, so IKNOW_TRACE_OUT is read once more here to keep the resolution
+    // order consistent (same shape as cli.ts resolveTraceRoot). When
+    // traceFilePath is present it takes priority (see the trace assembly branch
+    // below).
     //
-    // T5 (ADR-0071 / SC8 + L2): opts.traceFilePath
-    // 在场时(由 envelope.traceFilePath 透传,父 manager 已经替这个 taskId
-    // 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),worker 直接 file-mode
-    // 落该路径 + conversationId=taskId。
+    // ADR-0071: when opts.traceFilePath is
+    // present (passed through by envelope.traceFilePath; the parent manager has
+    // already created `<parent session folder>/subagents/agent-<taskId>.jsonl`
+    // for this taskId), the worker lands file-mode directly on that path with
+    // conversationId=taskId.
     //
-    // review-fix (H1): `filePath` 是 JsonlTraceOptions 的目录模式键(目录 +
-    // conversationId 派生出 <dir>/<convId>.jsonl),把文件路径当目录会让工
-    // 厂把目标文件当目录 → 子目录 <filePath>/<taskId>.jsonl 不存在 → 静默
-    // 零行落盘。修法:走 `traceFilePath` (file-mode 键) + `conversationId` 必
-    // 须 == opts.taskId。taskId 缺席 → 装配期 fail-loud,不再用 `randomUUID()`
-    // 假 scope(SC8 退役 L2,pack 配对契约写死)。
+    // `filePath` is JsonlTraceOptions' directory-mode key (directory +
+    // conversationId derive <dir>/<convId>.jsonl); feeding it a file path makes
+    // the factory treat the target file as a directory → the nested
+    // <filePath>/<taskId>.jsonl never exists → silently zero-line writes. The
+    // fix: use `traceFilePath` (the file-mode key), and `conversationId` must
+    // == opts.taskId. taskId absent → fail loud at assembly; no more fake
+    // `randomUUID()` scopes (the retired fake scope; the pack pairing
+    // contract is hard-coded).
     //
-    // 缺席 → 走 IKNOW_TRACE_OUT / defaultTraceDir 退路(legacy envelope / 跨
-    // 版本 resume / 测试未传, byte-stable)。
+    // Absent → IKNOW_TRACE_OUT / defaultTraceDir fallback (legacy envelope /
+    // cross-version resume / test not passing it, byte-stable).
     trace:
       opts.trace ??
       (opts.traceFilePath !== undefined
@@ -869,9 +958,9 @@ export async function createWorkerRuntime(
       thresholdTokens: env.compress.thresholdTokens,
     },
   };
-  // 测试缝: opts.maxTurns 覆盖 env 默认值。LoopEngineDeps.maxTurns 是
-  // readonly, 必须新建对象 (不变量: 不修改 deps 而是返回新 deps, 与
-  // runWorkerOnce 的 { ...deps, maxTurns } 形态一致)。
+  // Test seam: opts.maxTurns overrides the env default. LoopEngineDeps.maxTurns
+  // is readonly, so a new object is required (invariant: return new deps rather
+  // than mutate, matching runWorkerOnce's { ...deps, maxTurns } shape).
   return {
     deps:
       opts.maxTurns !== undefined ? { ...deps, maxTurns: opts.maxTurns } : deps,
@@ -880,22 +969,24 @@ export async function createWorkerRuntime(
 }
 
 /**
- * envelope 观测字段的派生源 (D-α 地板)。
+ * Derivation source for envelope observability fields (the observability floor).
  *
- * `writeToolNames` 缺席 → 不派生 fileRefs。刻意不在 worker 内兜底一份硬编码
- * 名单: 唯一真值是 ACI catalog 的 `category:"write"` (见 file-refs.ts),
- * 装配路径 (runSubagentWorker) 负责把它传进来。
+ * `writeToolNames` absent → no fileRefs derived. Deliberately no hardcoded
+ * fallback list inside the worker: the only true value is the ACI catalog's
+ * `category:"write"` (see file-refs.ts), and the assembly path
+ * (runSubagentWorker) is responsible for passing it in.
  */
 export interface EnvelopeObservabilityOpts {
   readonly writeToolNames?: ReadonlySet<string>;
 }
 
 /**
- * D-α 观测地板: 由 RunResult 派生 envelope 的两个观测字段。
+ * Observability floor: derive the envelope's two observability fields from RunResult.
  *
- * `stop_reason` 恒填 (run() 一定有 stopReason); `fileRefs` 仅在调用方给出
- * write 工具名集合 (从 ACI catalog 的 `category:"write"` 派生) 且确有写路径
- * 时落值 —— Postel: 无派生源 / 无写操作都不写 key, 与 V1 逐位兼容。
+ * `stop_reason` is always filled (run() always has a stopReason); `fileRefs`
+ * lands only when the caller supplies the write-tool name set (derived from the
+ * ACI catalog's `category:"write"`) and there really are write paths — Postel:
+ * no derivation source / no writes → no key, bit-compatible with V1.
  */
 function observabilityFields(
   result: import("../model-adapter/types.js").RunResult,
@@ -912,15 +1003,16 @@ function observabilityFields(
 }
 
 /**
- * 由 run() 结果派生 SubAgentEnvelope (status ok)。
+ * Derive SubAgentEnvelope (status ok) from a run() result.
  *
- * result 字段 = finalText ?? "" (浓缩结果); summary 同源 (V1 无独立
- * 摘要段, 与 finalText 同一真值, 保证父代理 drain 不会拿到空 summary)。
- * usage 透传 RunResult.lastUsage (字段缺席 = 无成功模型调用)。
- * D-α: 追加 stop_reason (恒填) 与 fileRefs (有写操作时填)。
+ * result field = finalText ?? "" (condensed result); summary shares the same
+ * source (V1 has no separate summary segment — same truth value as finalText,
+ * guaranteeing the parent's drain never gets an empty summary).
+ * usage passes through RunResult.lastUsage (field absent = no successful model call).
+ * Also appends stop_reason (always filled) and fileRefs (filled when there are writes).
  *
- * 导出: 测试 seam — 直接验证 envelope 派生逻辑, 不依赖 loop-engine
- * 完整装配 (后者单测用 createStubModel + 全 deps)。
+ * Exported as a test seam — verifies envelope derivation directly without the
+ * full loop-engine assembly (that unit test uses createStubModel + all deps).
  */
 export function toOkEnvelope(
   result: import("../model-adapter/types.js").RunResult,
@@ -936,17 +1028,20 @@ export function toOkEnvelope(
   };
 }
 
-/** 失败路径 envelope (SC6 reason enum 五值: crashed/maxTurnsExceeded/timeout/
- *  protocolError/modelTransient —— 第五值由 ADR-0111 Decision 2 显式修订 SC9
- *  冻结追加, 承载「带 cause 的瞬时模型流/传输失败」)。
- *  导出: 测试 seam — 直接验证 reason 五值各自的 envelope 形态。
- *  #358 T3 (additive): 第二参 summary 可选 — SIGTERM 优雅收尾时携带
- *  worker 自跑收尾摘要轮的 stop_summary 文本;不传时行为与旧签名逐位一致
- *  (空串), 不 breaking 既有 callers。
- *  D-α (additive): 第三参 extras 承载 stop_reason / fileRefs —— 只有从
- *  run() 返回值派生的失败路径 (protocolError / emptyFinalResponse / fused /
- *  SIGTERM 收尾) 有这两个真值; 抛错路径 (MaxTurnsExceeded / ProtocolError
- *  throw) 无 RunResult, 字段缺席。 */
+/** Failure-path envelope (reason enum of five values: crashed/maxTurnsExceeded/
+ *  timeout/protocolError/modelTransient — the fifth value was added by an
+ *  explicit revision to the frozen vocabulary via ADR-0111,
+ *  carrying "transient model-stream/transport failure with a cause").
+ *  Exported as a test seam — verifies each of the five reasons' envelope shape.
+ *  (additive): the second param summary is optional — on SIGTERM graceful
+ *  shutdown it carries the worker's self-run epilogue round's stop_summary
+ *  text; when omitted the behavior is bit-identical to the old signature
+ *  (empty string), not breaking existing callers.
+ *  (additive): the third param extras carries stop_reason / fileRefs — only the
+ *  failure paths derived from run()'s return value (protocolError /
+ *  emptyFinalResponse / fused / SIGTERM shutdown) have these two real values;
+ *  throw paths (MaxTurnsExceeded / ProtocolError throw) have no RunResult, so
+ *  the fields are absent. */
 export function toFailedEnvelope(
   reason: SubAgentEnvelope["reason"],
   summary = "",
@@ -962,13 +1057,15 @@ export function toFailedEnvelope(
 }
 
 /**
- * #358 T3:是否本 worker 的 SIGTERM 超时 abort。
+ * Is this the worker's own SIGTERM timeout abort?
  *
- * 判定线 = `signal.reason === "subagent-timeout"` (worker 注册的 SIGTERM
- * handler 用该 reason abort controller)。run() 的 stopReason 为 cancelled
- * 未必源自本 abort —— 工具侧 execution_failed:"cancelled" 也能产生
- * cancelled (computeToolStopFlags, 无 signal abort), 此时绝不能误走
- * 超时收尾信封。纯谓词, 导出供测试 seam 与 worker 判定共用。
+ * Decision line = `signal.reason === "subagent-timeout"` (the worker's SIGTERM
+ * handler aborts the controller with that reason). run()'s stopReason being
+ * cancelled is not necessarily from this abort — the tool-side
+ * execution_failed:"cancelled" can also produce cancelled
+ * (computeToolStopFlags, without a signal abort), and in that case we must
+ * never wrongly take the timeout-shutdown envelope. Pure predicate, exported
+ * for the test seam and the worker's decision to share.
  */
 export function isSubagentTimeoutAbort(
   signal: AbortSignal | undefined
@@ -977,14 +1074,16 @@ export function isSubagentTimeoutAbort(
 }
 
 /**
- * #358 T2 / D8 (spec SC5): 仅 envelope.maxTurns 覆盖 deps; envelope.timeoutMs
- * 绝不过渡到 deps。两者语义分离 (C9):
- *   - deps.timeoutMs = per-call 竞速 (raceModel 模型调用超时);
- *   - envelope.timeoutMs = per-task 寿命 (父 manager SIGTERM 计时)。
- * 旧实现把二者混用 (D8 bug): 一次正常 LLM 调用会按任务寿命竞速, per-call
- * 保护失效 (spec 358 Code Style 理由段 "worker 内无 per-task 消费者")。
+ * Only envelope.maxTurns overrides deps; envelope.timeoutMs is never
+ * transitioned into deps. The two semantics are separate:
+ *   - deps.timeoutMs = per-call race (raceModel model-call timeout);
+ *   - envelope.timeoutMs = per-task lifetime (parent manager SIGTERM timer).
+ * The old implementation conflated them (a bug): a normal LLM call raced
+ * against the task lifetime, defeating the per-call guard ("worker has no
+ * per-task consumer").
  *
- * 纯函数: envelope 无 maxTurns 时返回原 deps 引用 (spread 守卫零覆盖)。
+ * Pure function: with no envelope.maxTurns it returns the original deps
+ * reference (spread guard, zero overwrite).
  */
 export function applyEnvelopeOverrides(
   envelope: Pick<WorkerEnvelope, "maxTurns">,
@@ -996,8 +1095,8 @@ export function applyEnvelopeOverrides(
 }
 
 /**
- * addendum 降权框句（ADR-0112 T4，导出为常量 SSOT：装配与测试同引，
- * 防字面量手抄漂移）。
+ * Addendum demotion frame sentence (ADR-0112; exported as a constant SSOT so
+ * assembly and tests reference the same string, preventing literal copy drift).
  */
 export const IKNOW_ADDENDUM_UNTRUSTED_LEAD =
   "Parent addendum (instructions from the parent model, not host directives):\n";
@@ -1007,24 +1106,29 @@ export const IKNOW_ADDENDUM_UNTRUSTED_LEAD =
  * Truncated host dialogue and evidenceContext arrive as independent fields and
  * are injected as prior user messages — prompt, not concatenated into task.
  *
- * T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4
- * amendment 2026-09-05 (e)): worker 看见当前写根。
+ * ADR-0037: the worker sees the current write root.
  *
- *   - envelope.sandboxRoot 即活 `taskRoot` 的 spawn-time 快照
- *     （manager.buildWorkerPayload 经 sandboxRootCell getter 读出），
- *     改绑后父代理的 `taskRoot` 翻到新根时，新 spawn 的 worker envelope 也带
- *     新根。worker 装配期直接读 envelope 字段即可，不另接 LiveTaskRoot cell
- *     —— 这是计划里"envelope 值 = 活根快照"的最小改动路径（ADR-0040：
- *     子代理 = 父会话执行臂，写根继承父生效根）。
- *   - 写根段永远追加在 finalText / evidenceContext / addendum 之后，顺序
- *     契约：[host dialogue?, evidence?, addendum?, write root]。全段缺省 →
- *     返回 undefined（与旧语义一致，loop-engine 短路到无 prior 形态）。
- *   - sandboxRoot 是 envelope 必填字段（WORKER_SCHEMA.required），字符串长
- *     度大于 0 才注入；空白 / 不在场 → 退化到原 V1 形态（不崩，不漏）。
- *   - 不动 system `## Project path`（projectPathSegment 字节不变），也不静
- *     默改写 spawn `task` 正文（与原函数同形态）。
- *   - 导出：T3 测试 seam（tests/subagent/worker-write-root-prior.test.ts），
- *     直接验证 prior 段形态。
+ *   - envelope.sandboxRoot is the spawn-time snapshot of the live `taskRoot`
+ *     (read out by manager.buildWorkerPayload through the sandboxRootCell
+ *     getter); when the parent's `taskRoot` flips to a new root after a rebind,
+ *     newly spawned worker envelopes carry the new root too. The worker just
+ *     reads the envelope field at assembly time, without wiring a separate
+ *
+ // (ADR-0040)
+ *     LiveTaskRoot cell — the minimal-change path for "envelope value = live
+ *     root snapshot" (subagent = the parent session's execution arm; the write
+ *     root inherits the parent's effective root).
+ *   - The write-root segment is always appended after finalText /
+ *     evidenceContext / addendum; order contract: [host dialogue?, evidence?,
+ *     addendum?, write root]. All segments default away → return undefined
+ *     (matching the old semantics; loop-engine short-circuits to the no-prior form).
+ *   - sandboxRoot is a required envelope field (WORKER_SCHEMA.required);
+ *     injected only when the string length is > 0; blank / absent → degrade to
+ *     the original V1 form (no crash, no leak).
+ *   - Does not touch the system `## Project path` (projectPathSegment bytes
+ *     unchanged) and never silently rewrites the spawn `task` body (same shape
+ *     as the original function).
+ *   - Exported: test seam that verifies the prior-segment form directly.
  */
 export function priorMessagesFromEnvelope(
   env: WorkerEnvelope,
@@ -1042,32 +1146,35 @@ export function priorMessagesFromEnvelope(
       )
     );
   }
-  // ADR-0112 T4 — envelope.systemPrompt（父模型可写的 addendum）降权进
-  // user/untrusted 通道：无戳普通 user 消息，原文逐字保留 —— 官方帧语法的
-  // 转义由出站投影（T2 合同）承担，这里不重复转义、不发明戳。空串 =
-  // typed skip（与 finalText 的 empty 臂同形，不造空框句）。
-  // 位置：evidence 之后、写根段之前 —— 指令段紧邻 task，且守住
-  // 「写根段永远末段」的 SC2 字节合同。
+  // ADR-0112 — envelope.systemPrompt (the parent-model-writable addendum) is
+  // demoted into the user/untrusted channel: a plain untagged user message,
+  // verbatim — escaping for the official frame syntax is the outbound
+  // projection's job, so no re-escaping and no invented tags here. Empty string
+  // = typed skip (same shape as finalText's empty arm; no empty frame sentence).
+  // Position: after evidence, before the write-root segment — the instruction
+  // segment sits adjacent to task while upholding the "write-root segment is
+  // always last" byte contract.
   if (env.systemPrompt !== undefined && env.systemPrompt.length > 0) {
     prior.push(
       encodeUserText(IKNOW_ADDENDUM_UNTRUSTED_LEAD + env.systemPrompt)
     );
   }
-  // T6 (plans/write-situation-disclosure.md) — 当前写根段由 envelope
-  // 处境枚举驱动（ADR-0069 D2; spec SC4 / OQ1）。
-  //   - 旧 envelope（无 writeSituation 字段）→ typed skip，不注入写根段
-  //     不回落旧文案（OQ1 采纳 (b) — 宁可不告知,不可说错）;
-  //   - writeSituation = "no_writable_root" → ③ 态披露（不嵌入 sandboxRoot,
-  //     不点名建树工具; spec SC3）;
-  //   - writeSituation = "writable_main" / "writable_tree" → ①/② 文案
-  //     与改造前逐字节相等（SC2 硬约束,前缀缓存与 skill-load-write-root
-  //     SC2 守门）。
-  // 顺序契约：[host dialogue?, evidence?, addendum?, write root] —— 写根段
-  // 永远是末段（ADR-0112 T4 在 evidence 与写根段之间插入 addendum 段）;
-  // typed skip 时该 slot 在 extras 数组过滤掉,顺序保持不变。
-  // 渲染 SSOT = writeRootSegment(skill/body.ts),与 skill 正文 trailer
-  // (createSkillBody) 共用同一函数 —— worker 源内不留第二份长句
-  // (skill-load-write-root 合同 1)。
+  // The current write-root segment is driven by the envelope's
+  // situation enum.
+  //   - old envelope (no writeSituation field) → typed skip, no write-root
+  //     segment, no fallback to the old wording (better silent than wrong);
+  //   - writeSituation = "no_writable_root" → the ③-state disclosure (does not
+  //     embed sandboxRoot, does not name the tree-creation tool);
+  //   - writeSituation = "writable_main" / "writable_tree" → the ①/② wording is
+  //     byte-identical to before (hard constraint: prefix cache and the
+  //     skill-load-write-root guard).
+  // Order contract: [host dialogue?, evidence?, addendum?, write root] — the
+  // write-root segment is always last (ADR-0112 inserted the addendum segment
+  // between evidence and the write-root segment); on a typed skip that slot is
+  // filtered from the extras array and the order is preserved.
+  // Rendering SSOT = writeRootSegment (skill/body.ts), the same function shared
+  // with the skill body trailer (createSkillBody) — no second copy of the long
+  // sentence in the worker source (skill-load-write-root contract 1).
   if (env.writeSituation !== undefined) {
     const segment = writeRootSegment(env.writeSituation, env.sandboxRoot);
     if (segment !== null) {
@@ -1078,13 +1185,17 @@ export function priorMessagesFromEnvelope(
 }
 
 /**
- * ADR-0102 T3 — 工人 transcript IO 缝（harness 侧契约面）。
+ * Worker transcript IO seam (harness-side contract surface).
  *
- * Gate B（tests/harness/public-exports.test.ts）禁止 src/harness 可执行面
- * import session-api —— 工人账的 codec 住在 session-api/store/worker-transcript，
- * 生产实现在 cli 入口（`runSubagentWorker` 唯一调用方）注入；worker 内核
- * 只见这个窄接口。not_found 折叠成 `absent`（合法态：新工人没有账 ≠ 错误），
- * 真实故障（io / parse / schema）原样上抛 —— 调用方不得把损坏的账读成无账。
+ // (ADR-0102)
+ *
+ * Gate B (tests/harness/public-exports.test.ts) forbids src/harness executable
+ * faces from importing session-api — the worker ledger's codec lives in
+ * session-api/store/worker-transcript, and the production implementation is
+ * injected at the cli entry (the sole `runSubagentWorker` caller); the worker
+ * kernel sees only this narrow interface. not_found folds into `absent` (legal
+ * state: a new worker having no ledger ≠ error); real faults (io / parse /
+ * schema) rethrow as-is — callers must not read a corrupt ledger as "no ledger".
  */
 export interface WorkerTranscriptIO {
   readonly loadMessages: () => Promise<
@@ -1101,9 +1212,10 @@ export interface WorkerTranscriptIO {
 }
 
 /**
- * 按 envelope 落点构造一本账的 IO（cli 注入形态；测试直接传闭包）。
- * `cwd` = 建批 header 的工作根（envelope.sandboxRoot 快照），实现方只在
- * 首批建账时消费。
+ * Build one ledger's IO from the envelope landing point (cli-injected shape;
+ * tests pass a closure directly). `cwd` = the working root for the batch header
+ * (envelope.sandboxRoot snapshot); the implementation consumes it only when
+ * creating the ledger for the first batch.
  */
 export type WorkerTranscriptIOFactory = (loc: {
   readonly transcriptPath: string;
@@ -1112,19 +1224,27 @@ export type WorkerTranscriptIOFactory = (loc: {
 }) => WorkerTranscriptIO;
 
 /**
- * ADR-0102 T3 — transcript 接线判定点（一次 await 完成「读账 → 定 prefix →
- * 落 seed 批」）。返回 undefined = 不接线（旧 envelope 无 transcriptPath /
- * 生产入口未注入 IO），调用方走改造前的逐字节旧形态。
+ * Transcript wiring decision point (one await completes "read ledger → fix
  *
- * 两态 prefix：
- *   - absent（新工人）→ envelope prior 段作前缀，seed 批 = [prior 段?, task]
- *     一次落账（loop-engine 的 commit 点只覆盖 run 期新消息，初始 user/
- *     prior 不经 commit，seed 在此补上）；
- *   - present（续跑，ADR-0102 的 continue 臂）→ 盘上 head 链投影作前缀，
- *     seed 批 = 本轮新 user 一句（continue 不重放 prior 段，写处境披露等
- *     已在账上）。
- * IO 抛出的真实故障（io / parse / schema）**原样上抛** —— 损坏的账不能
- * 被读成无账；commit 失败按 loop-engine 契约包 MessageCommitError 中止 run。
+ // (ADR-0102)
+ * prefix → write seed batch"). Returns undefined = not wired (old envelope with
+ * no transcriptPath / production entry injected no IO); the caller takes the
+ * pre-change byte-exact old path.
+ *
+ * Two-state prefix:
+ *   - absent (new worker) → the envelope prior segment is the prefix, seed batch
+ *     = [prior segment?, task] written once (loop-engine's commit point covers
+ *     only run-phase new messages; the initial user/prior bypasses commit, so
+ *     the seed is added here);
+ *
+ // (ADR-0102)
+ *   - present (continue arm) → the on-disk head-chain projection is the
+ *     prefix, seed batch = this round's new user sentence only (continue does
+ *     not replay the prior segment; the write-situation disclosure etc. is
+ *     already on the ledger).
+ * Real faults thrown by IO (io / parse / schema) rethrow **as-is** — a corrupt
+ * ledger must not be read as "no ledger"; a commit failure follows the
+ * loop-engine contract, wrapped as MessageCommitError to abort the run.
  */
 async function wireWorkerTranscript(opts: {
   readonly env: WorkerEnvelope;
@@ -1143,8 +1263,9 @@ async function wireWorkerTranscript(opts: {
     return undefined;
   }
   if (opts.ioFactory === undefined) {
-    // 装配漏接线（测试直调 / 旧 cli）：账不写，任务照跑 —— 与旧形态一致，
-    // 但留一行 stderr 观测，不静默丢「该写没写」。
+    // Missing assembly wiring (direct test call / old cli): the ledger is not
+    // written, the task runs anyway — same as the old form, but leave one stderr
+    // line so "should have written but didn't" is not silently lost.
     log(
       "envelope carries transcriptPath but no transcript IO injected; worker transcript disabled"
     );
@@ -1180,11 +1301,12 @@ async function wireWorkerTranscript(opts: {
 }
 
 /**
- * ADR-0111 不变式 (b) — worker 逃逸 throw 类型 → failed envelope reason 映射
- * SSOT (runWorkerOnce 逃逸 catch 与 runSubagentWorker/cli 最后防线共用, 不分叉)。
- * 子类支 (ModelStreamIncompleteError) 排在 ProtocolError 通用支之前
- * (loop :1912 分支顺序惯例)。
- * undefined = 非结构化失败类 (调用面决定上抛或归 crashed)。
+ * ADR-0111 invariant (b) — worker escape-throw type → failed envelope reason
+ * mapping SSOT (runWorkerOnce's escape catch and the runSubagentWorker/cli last
+ * line of defense share it, no fork). The subclass arm
+ * (ModelStreamIncompleteError) precedes the generic ProtocolError arm
+ * (loop's branch-order convention).
+ * undefined = non-structured failure class (the call site decides rethrow or crashed).
  */
 function escapeFailureReason(
   err: unknown
@@ -1196,10 +1318,11 @@ function escapeFailureReason(
 }
 
 /**
- * protocolError/emptyFinalResponse 收口派生支 (ADR-0111 Decision 2(a)):
- * RunResult.apiError 在场 ⇔ 带 cause 的瞬时模型流/传输失败 (loop 收口唯一
- * 挂载点是 transportApiErrorOf) → modelTransient; 缺席 = 真协议损坏 →
- * 维持 protocolError。
+ * protocolError/emptyFinalResponse convergence derivation arm (ADR-0111):
+ * RunResult.apiError present ⇔ transient model-stream/transport
+ * failure with a cause (the loop's only convergence mount point is
+ * transportApiErrorOf) → modelTransient; absent = genuine protocol corruption →
+ * keep protocolError.
  */
 function stopFailureEnvelope(
   result: import("../model-adapter/types.js").RunResult,
@@ -1213,54 +1336,63 @@ function stopFailureEnvelope(
 }
 
 /**
- * 测试 seam (导出仅供测试): envelope → run → truncateEnvelopeResult。
+ * Test seam (exported for tests only): envelope → run → truncateEnvelopeResult.
  *
- * 把 readStdin → parseWorkerEnvelope → run → 派生 envelope → 截断这一段
- * 拆出来, 让单测直接调 runWorkerOnce({ workerEnvelope, deps }) 注入 stub
- * deps, 不 spawn 真 worker 子进程 (避免依赖真 LLM key)。
+ * Splits out readStdin → parseWorkerEnvelope → run → derive envelope → truncate,
+ * so unit tests can call runWorkerOnce({ workerEnvelope, deps }) directly with
+ * stub deps injected, without spawning a real worker child (avoids depending on
+ * a real LLM key).
  *
- * 失败路径 (spec SC6 / assumption 16, exit-code 语义成文化于 ADR-0111 不变式 (b)):
- *   - parseWorkerEnvelope 抛 ProtocolError → 不在这里处理 (调用方
- *     runSubagentWorker 让该错误原样上抛 —— exit 2 专码仅属这条信封协议崩溃路径);
- *   - run() 抛 MaxTurnsExceeded → status:failed, reason:maxTurnsExceeded
- *     (plan T3 / ADR-0011: maxTurns 超限 = throw, worker emit failed envelope);
- *   - run() 抛 ModelStreamIncompleteError → status:failed, reason:modelTransient
- *     (ADR-0111 Decision 2(b): 子类支排在 ProtocolError 通用支之前; loop
- *     收口面之外的逃逸防御支);
- *   - run() 抛 ProtocolError → status:failed, reason:protocolError
- *     (harness 模型协议错误, 不是 envelope 协议 —— 区别于 exit 2 路径);
- *   - run() 正常返回 stopReason=protocolError 且 RunResult.apiError 在场
- *     → reason:modelTransient, 缺席 → protocolError (ADR-0111 Decision 2(a),
- *     不变式: apiError 在场 ⇔ 带 cause 的瞬时模型流/传输失败);
- *   - 其他 run() 错误 → 抛出 (runSubagentWorker run 阶段收口 →
- *     best-effort failed envelope + exit 1, 不再冒用 exit 2)。
+ * Failure paths (exit-code semantics codified in ADR-0111 invariant (b)):
+ *   - parseWorkerEnvelope throws ProtocolError → not handled here (the caller
+ *     runSubagentWorker rethrows it as-is — exit 2 belongs solely to this
+ *     envelope-protocol crash path);
+ *   - run() throws MaxTurnsExceeded → status:failed, reason:maxTurnsExceeded
  *
- * #358 T3 SIGTERM 优雅收尾 (spec Code Style "catch 侧跑 epilogueSummary 一轮"):
- *   - 进程收 SIGTERM (父 manager 超时计时到) → 同步前奏注册的 handler 用
- *     reason "subagent-timeout" abort controller → raceModel callerAbort →
- *     run() 返回 stopReason="cancelled";
- *   - run() 内部的 epilogueSummary 会因 signal 已 abort 直接跳过 (L494
- *     "if (opts.signal?.aborted) return") —— 故 worker 在 run() 返回后
- *     用**未中止的新 signal** 自跑一轮收尾摘要 (reason:"timeout"), 捕获
- *     stop_summary 文本进 envelope.summary, 让父代理 drain 拿到真实进度
- *     (而非 generic "timeout after <n>ms");
- *   - 摘要轮 best-effort (D3 纪律): 失败 / 超时 / 抛错 → summary 回退空串,
- *     envelope 照常写, 绝不阻塞;
- *   - non-SIGTERM 路径 (普通 cancelled / protocolError / ok) 字节不变。
+ // (ADR-0011)
+ *     (maxTurns over limit = throw; worker emits a failed envelope);
+ *   - run() throws ModelStreamIncompleteError → status:failed, reason:modelTransient
+ *     (ADR-0111: the subclass arm precedes the generic
+ *     ProtocolError arm; the escape-defense arm outside the loop's convergence face);
+ *   - run() throws ProtocolError → status:failed, reason:protocolError
+ *     (harness model-protocol error, not envelope protocol — distinct from exit 2);
+ *   - run() returns normally with stopReason=protocolError and RunResult.apiError
+ *     present → reason:modelTransient, absent → protocolError (ADR-0111,
+ *     invariant: apiError present ⇔ transient model-stream/transport failure with a cause);
+ *   - other run() errors → throw (runSubagentWorker's run-phase convergence →
+ *     best-effort failed envelope + exit 1, no longer misusing exit 2).
+ *
+ * SIGTERM graceful shutdown ("run epilogueSummary one round on the catch side"):
+ *   - process receives SIGTERM (parent manager timeout fires) → the handler
+ *     registered in the synchronous prologue aborts the controller with reason
+ *     "subagent-timeout" → raceModel callerAbort → run() returns stopReason="cancelled";
+ *   - the epilogueSummary inside run() skips directly because the signal is
+ *     already aborted ("if (opts.signal?.aborted) return") — so after run()
+ *     returns the worker runs its own epilogue round with an **un-aborted new
+ *     signal** (reason:"timeout"), capturing the stop_summary text into
+ *     envelope.summary so the parent's drain gets real progress (rather than
+ *     the generic "timeout after <n>ms");
+ *   - the summary round is best-effort: failure / timeout / throw → summary
+ *     falls back to empty string, the envelope is written as usual, never blocks;
+ *   - non-SIGTERM paths (ordinary cancelled / protocolError / ok) bytes unchanged.
  */
 export async function runWorkerOnce(opts: {
   readonly workerEnvelope: WorkerEnvelope;
   readonly deps: LoopEngineDeps;
   /**
-   * D-α 观测地板: ACI catalog 派生的 write 类工具名 (fileRefs 的派生源)。
-   * 生产路径由 runSubagentWorker 从 createWorkerRuntime 的 catalog 算出;
-   * 缺席 → 不派生 fileRefs (stop_reason 不受影响, 恒填)。
+   * Write-class tool names derived from the ACI catalog (the fileRefs
+   * derivation source). On the production path runSubagentWorker computes it
+   * from createWorkerRuntime's catalog; absent → no fileRefs derived (stop_reason
+   * unaffected, always filled).
    */
   readonly writeToolNames?: ReadonlySet<string>;
   /**
-   * ADR-0102 T3: 工人 transcript IO 注入（生产由 runSubagentWorker 透传
-   * cli 传入的真实缝；测试直接注入闭包）。envelope.transcriptPath 缺席时
-   * 本参数不被消费 —— 行为与改造前逐字节一致。
+   * Worker transcript IO injection (production passes the real seam from cli
+   *
+   // (ADR-0102)
+   * through runSubagentWorker; tests inject a closure directly). When
+   * envelope.transcriptPath is absent this param is not consumed — behavior is
+   * byte-identical to before.
    */
   readonly transcriptIo?: WorkerTranscriptIOFactory;
 }): Promise<SubAgentEnvelope> {
@@ -1269,22 +1401,26 @@ export async function runWorkerOnce(opts: {
     opts.writeToolNames !== undefined
       ? { writeToolNames: opts.writeToolNames }
       : {};
-  // #358 T2 / D8: 只应用 maxTurns 覆盖, timeoutMs 不进 deps (per-call 语义)。
+  // Only apply the maxTurns override; timeoutMs does not enter deps (per-call semantics).
   const baseRunDeps = applyEnvelopeOverrides(env, deps);
-  // #358 T3: SIGTERM → abort("subagent-timeout")。worker 由父 manager per-task
-  // 超时计时驱动, 收到 SIGTERM = 任务寿命到点, 走优雅收尾而非立即退出。
+  // SIGTERM → abort("subagent-timeout"). The worker is driven by the parent
+  // manager's per-timeout timer; receiving SIGTERM = task lifetime elapsed, so
+  // take graceful shutdown rather than immediate exit.
   const controller = new AbortController();
   const onSigterm = (): void => controller.abort("subagent-timeout");
   process.once("SIGTERM", onSigterm);
   try {
-    // 运行期透传 signal。onStream 不传: (a) text_delta 等热路径事件 worker
-    // 无展示消费方; (b) signal 已 abort 时 run() 内部不跑收尾摘要, 不会 emit
-    // stop_summary —— 摘要捕获只在下方自跑收尾轮 (runTimeoutEpilogue) 完成。
+    // Pass the signal through at runtime. onStream is not passed: (a) the worker
+    // has no display consumer for hot-path events like text_delta; (b) when the
+    // signal is already aborted run() does not run its internal epilogue and
+    // won't emit stop_summary — summary capture happens only in the self-run
+    // epilogue round below (runTimeoutEpilogue).
     const envelopePrior = priorMessagesFromEnvelope(
       env,
       baseRunDeps.adapter.encodeUserText
     );
-    // ADR-0102 T3 — 工人账接线（缺席 = 零变化）。
+    // Worker ledger wiring (absent = zero change).
+    // (ADR-0102)
     const wired = await wireWorkerTranscript({
       env,
       deps: baseRunDeps,
@@ -1299,9 +1435,10 @@ export async function runWorkerOnce(opts: {
       controller.signal,
       priorMessages !== undefined ? { priorMessages } : undefined
     );
-    // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason
-    // 形态返回 (不 throw), 但 worker 必须标 failed —— 父代理 drain 收到 ok
-    // 却带 protocolError stopReason 会误判子代理成功 (SC6 / SC13)。
+    // run() returning normally ≠ success: harness protocol-layer errors / empty
+    // final response return via stopReason (no throw), but the worker must mark
+    // failed — the parent's drain receiving ok with a protocolError stopReason
+    // would misjudge the subagent as successful.
     if (result.stopReason === "fused") {
       log(`run() stopReason=fused`);
       return truncateEnvelopeResult(
@@ -1319,8 +1456,8 @@ export async function runWorkerOnce(opts: {
       log(`run() stopReason=${result.stopReason}`);
       return truncateEnvelopeResult(stopFailureEnvelope(result, observability));
     }
-    // #358 T3 超时收尾: stopReason=cancelled 且确系本 worker 的 SIGTERM
-    // abort (signal.reason === "subagent-timeout"; 工具侧 cancelled 不误标)。
+    // Timeout epilogue: stopReason=cancelled and genuinely this worker's SIGTERM
+    // abort (signal.reason === "subagent-timeout"; tool-side cancelled is not mislabeled).
     if (
       result.stopReason === "cancelled" &&
       isSubagentTimeoutAbort(controller.signal)
@@ -1363,34 +1500,39 @@ export async function runWorkerOnce(opts: {
     }
     return truncateEnvelopeResult(toOkEnvelope(result, observability));
   } catch (err) {
-    // 逃逸 throw 类型 → reason 映射走 SSOT (escapeFailureReason)。经 Decision 5
-    // 核实: 经 step 的正常路径被 loop 收口、不达此支; 本 catch 服务 loop 收口面
-    // 之外的逃逸 (如 epilogue / worker 收尾调用面抛出的本类错误)。
-    // unknown 逃逸上抛, 由 runSubagentWorker run 阶段收口
-    // (best-effort failed envelope + exit 1, ADR-0111 不变式 (b))。
+    // Escaped-throw type → reason mapping goes through SSOT (escapeFailureReason).
+    // Errors reaching the loop's normal step path are caught there and never hit
+    // this branch; this catch only serves escapes outside the loop's containment
+    // (e.g. this kind of error thrown from the epilogue / worker finalizer calls).
+    // Unknown escapes rethrow for runSubagentWorker's run-phase containment
+    // (best-effort failed envelope + exit 1, ADR-0111 invariant (b)).
     const reason = escapeFailureReason(err);
     if (reason === undefined) throw err;
     log(`run() escape ${reason}: ${errorMessage(err)}`);
     return truncateEnvelopeResult(toFailedEnvelope(reason));
   } finally {
-    // 任务结束（无论成败）即移除 SIGTERM 监听, 避免 worker 长驻阶段
-    // 残留 listener（runSubagentWorker 随后 process.exit(0)）。
+    // Remove the SIGTERM listener as soon as the task ends (success or not),
+    // so no stale listener survives the worker's finalization phase
+    // (runSubagentWorker then calls process.exit(0)).
     process.removeListener("SIGTERM", onSigterm);
   }
 }
 
 /**
- * #358 T3:worker 自跑一轮 SIGTERM 收尾摘要 (best-effort, D3)。
+ * Worker-side SIGTERM timeout epilogue: run one best-effort summary round.
  *
- * run() 返回 cancelled+(subagent-timeout abort) 时, run() 内部不会跑
- * 收尾摘要 (signal 已 abort, epilogueSummary 直接返回)。此处用全新
- * **未中止** controller 调 epilogueSummary 一轮 (reason:"timeout"):
- *   - 需要手传 result.messages (cancelled 时已含 appendSystemInterrupt 的
- *     权威历史, 见 run() stop 分支), 摘要轮只读它作为输入;
- *   - 捕获 stop_summary 事件文本 → 返回它; 摘要轮失败 / 超时 / signal
- *     再次中断 → 返回空串 (envelope 照常写, 绝不阻塞原始停因)。
- * 内部 15s 摘要超时归 loop-engine 的 runSummaryWithTimeout 管, 这里不再
- * 加第二层计时。
+ * When run() returns cancelled with this worker's own timeout abort, run()
+ * internally skips the summary (its signal is already aborted, epilogueSummary
+ * returns immediately). Here we call epilogueSummary once with a fresh
+ * **non-aborted** controller (reason:"timeout"):
+ *   - result.messages must be passed explicitly (on cancelled it already
+ *     contains the authoritative history with appendSystemInterrupt, see the
+ *     stop branch in run()); the summary round reads only that as input;
+ *   - capture the stop_summary event text and return it; summary failure /
+ *     timeout / signal interruption again → return empty string (the envelope
+ *     is still written; never mask the original stop reason).
+ * The 15s summary timeout is owned by loop-engine's runSummaryWithTimeout —
+ * no second layer of timing here.
  */
 async function runTimeoutEpilogue(
   deps: LoopEngineDeps,
@@ -1413,13 +1555,14 @@ async function runTimeoutEpilogue(
       },
     });
   } catch {
-    // D3: 摘要失败绝不阻塞 — 返回空串, writer 侧照常写 timeout 信封。
+    // Summary failure must never block: return empty string, the writer side
+    // still writes the timeout envelope.
     return "";
   }
   return summary;
 }
 
-/** 一次性读 stdin 全部字节 (worker 协议: 单 envelope, 读到 EOF)。 */
+/** Read all stdin bytes once (worker protocol: single envelope, read to EOF). */
 function readStdin(): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -1432,11 +1575,12 @@ function readStdin(): Promise<string> {
 }
 
 /**
- * ADR-0111 不变式 (b) — run 阶段逃逸 → failed envelope 派生 SSOT
- * (runSubagentWorker 收口与 cli.ts 最后防线共用同一判据, 不分叉)。
- * 结构化逃逸走 escapeFailureReason; 其余归 crashed (进程以错误结束 =
- * ADR-0111 收窄后的「进程级异常死亡」词汇; 父侧 SC16 对 exit≠0 本就标
- * crashed, 信封派生不与之矛盾)。
+ * ADR-0111 invariant (b) — SSOT for deriving a failed envelope from a run-phase
+ * escape (runSubagentWorker's containment and cli.ts's last-resort defense use
+ * the same criteria, no fork). Structured escapes go through
+ * escapeFailureReason; everything else is crashed (a process ending in error =
+ * ADR-0111's narrowed "process-level abnormal death" vocabulary; the parent
+ * already marks exit≠0 as crashed, so the envelope derivation does not conflict).
  */
 export function runEscapeEnvelope(err: unknown): SubAgentEnvelope {
   const reason = escapeFailureReason(err);
@@ -1448,9 +1592,9 @@ export function runEscapeEnvelope(err: unknown): SubAgentEnvelope {
 }
 
 /**
- * 逃逸错误渲染 (stderr 诊断面): Error 保 stack; plain-object typed error
- * 走 errorMessage SSOT, 不塌缩成 `[object Object]` (code-quality
- * typed-error catch 契约)。
+ * Escape-error rendering (stderr diagnostics surface): real Errors keep their
+ * stack; plain-object typed errors go through the errorMessage SSOT instead of
+ * collapsing into `[object Object]` (typed-error catch contract).
  */
 export function renderWorkerError(err: unknown): string {
   if (err instanceof Error) return err.stack ?? err.message;
@@ -1458,31 +1602,38 @@ export function renderWorkerError(err: unknown): string {
 }
 
 /**
- * ADR-0111 不变式 (b) — worker exit-code 语义常量 (命名单点, cli.ts 消费;
- * 语义正文见 runSubagentWorker doc, 不在此复述):
- *   - OK(0): 信封已写 stdout (status ok/failed 均是, 结构化失败按 reason 归因);
- *   - RUN_PHASE(1): run 阶段逃逸 → best-effort failed envelope + exit 1;
- *   - ENVELOPE_PROTOCOL(2): 仅信封协议错误 (parseWorkerEnvelope ProtocolError,
- *     无信封可写; assumption 16 / SC13 协议层崩溃专码)。
+ * ADR-0111 invariant (b) — worker exit-code semantics constants (single named
+ * source, consumed by cli.ts; full semantics live in the runSubagentWorker doc,
+ * not restated here):
+ *   - OK(0): an envelope was written to stdout (true for both ok and failed —
+ *     structured failures are attributed by reason);
+ *   - RUN_PHASE(1): run-phase escape → best-effort failed envelope + exit 1;
+ *   - ENVELOPE_PROTOCOL(2): envelope protocol errors only (parseWorkerEnvelope
+ *     ProtocolError, no envelope writable; dedicated code for protocol-level
+ *     crashes).
  */
 export const WORKER_EXIT_OK = 0;
 export const WORKER_EXIT_RUN_PHASE = 1;
 export const WORKER_EXIT_ENVELOPE_PROTOCOL = 2;
 
 /**
- * worker 进程主入口 (cli.ts dispatch):
- *   stdin 一次性读全部 → parseWorkerEnvelope → createWorkerDeps →
- *   runWorkerOnce → stdout newline-JSON → exit 0。
+ * Worker process main entry (cli.ts dispatch):
+ *   read all stdin once → parseWorkerEnvelope → createWorkerDeps →
+ *   runWorkerOnce → stdout newline-JSON → exit 0.
  *
- * exit-code 语义 (ADR-0111 不变式 (b), 成文化 assumption 16 / SC13):
- *   - **exit 2 = 仅信封协议错误** —— parseWorkerEnvelope 抛 ProtocolError
- *     (stdin JSON parse 失败 / WorkerEnvelope 字段缺失) 原样上抛, 无信封
- *     可写, 由调用方 cli.ts 捕获 → `[subagent-worker] fatal` + exit 2;
- *     本函数内 parse 之后不再有任何 ProtocolError 逃逸通道 (run 阶段收口)。
- *   - run 阶段逃逸 (装配 / 收尾 / loop 收口面之外的 typed 逃逸) →
- *     best-effort failed envelope 写 stdout + exit 1, 不再冒用 2。
- *   - exit 0 + failed envelope = run() 派生的结构化失败
- *     (reason ∈ 五值枚举, ADR-0111 Decision 2), 父侧按信封归因。
+ * Exit-code semantics (ADR-0111 invariant (b)):
+ *   - **exit 2 = envelope protocol errors only** — ProtocolError thrown by
+ *     parseWorkerEnvelope (stdin JSON parse failure / missing WorkerEnvelope
+ *     fields) propagates as-is with no envelope to write; the caller cli.ts
+ *     catches it → `[subagent-worker] fatal` + exit 2. After parse inside this
+ *     function there remains no ProtocolError escape path (the run phase is
+ *     contained).
+ *   - run-phase escapes (assembly / finalization / typed escapes outside the
+ *     loop's containment) → best-effort failed envelope on stdout + exit 1,
+ *     never reusing 2.
+ *   - exit 0 + failed envelope = structured failure derived by run()
+ *     (reason ∈ the five-value enum, ADR-0111); the parent attributes from the
+ *     envelope.
  */
 export async function runSubagentWorker(
   transcriptIo?: WorkerTranscriptIOFactory
@@ -1490,12 +1641,14 @@ export async function runSubagentWorker(
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
   const phase = await runWorkerPhase(workerEnvelope, transcriptIo);
-  // stdout 单 wire: 成功与 run 阶段逃逸共用同一落笔点, exit code 由阶段收口决定。
+  // Single stdout wire: success and run-phase escapes share one write point;
+  // the exit code is decided by the phase containment.
   process.stdout.write(JSON.stringify(phase.envelope) + "\n");
   process.exit(phase.exitCode);
 }
 
-/** parse 之后的完整 run 阶段: 错误一律收口为 (envelope, exitCode), 不上抛。 */
+/** The full run phase after parse: errors are always contained as
+ *  (envelope, exitCode), never rethrown. */
 async function runWorkerPhase(
   workerEnvelope: WorkerEnvelope,
   transcriptIo?: WorkerTranscriptIOFactory
@@ -1509,7 +1662,8 @@ async function runWorkerPhase(
       exitCode: WORKER_EXIT_OK,
     };
   } catch (err) {
-    // run 阶段逃逸: 诊断走 stderr (stdout 是信封协议单 wire), 信封照写, exit 1。
+    // Run-phase escape: diagnostics go to stderr (stdout is the single envelope
+    // protocol wire); still write the envelope, exit 1.
     process.stderr.write(
       `[subagent-worker] run-phase error: ${renderWorkerError(err)}\n`
     );
@@ -1520,7 +1674,7 @@ async function runWorkerPhase(
   }
 }
 
-/** 装配 → runWorkerOnce (信封 = 返回值的进程级形态)。 */
+/** Assembly → runWorkerOnce (the envelope is the process-level form of the return value). */
 async function assembleAndRunWorker(
   workerEnvelope: WorkerEnvelope,
   transcriptIo?: WorkerTranscriptIOFactory
@@ -1530,15 +1684,17 @@ async function assembleAndRunWorker(
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
-    // #556 T2: envelope.role 透传到 createWorkerDeps seam —— 缺失时不传
-    // (V1 baseline, byte-stable)。ADR-0112 T4: envelope.systemPrompt 不再
-    // 透传为 addendum —— worker 运行期从 envelope 直接读, 走
-    // priorMessagesFromEnvelope 的 user/untrusted 通道, 不进 system。
+    // envelope.role is threaded to the createWorkerDeps seam — when absent,
+    // the key is omitted (V1 baseline, byte-stable). ADR-0112: envelope.systemPrompt
+    // is no longer passed through as an addendum — the worker reads the envelope
+    // directly at runtime, going through priorMessagesFromEnvelope's
+    // user/untrusted channel, never into system.
     ...(workerEnvelope.role !== undefined ? { role: workerEnvelope.role } : {}),
-    // ADR-0019 (review-fix H3): worker 继承父 env SSOT —— 当 spawn 父进程
-    // 设置了 IKNOW_WORKSPACE_ROOT,worker 的 fs-policy fence 也按同一根
-    // 保护 `.iknow`(与 build-engine 同形态)。条件解析:无 flag 且无 env
-    // 时不 resolve,保持 sandboxRoot fallback(legacy 字节不变)。
+    // ADR-0019: the worker inherits the parent env SSOT — when the spawning
+    // parent set IKNOW_WORKSPACE_ROOT, the worker's fs-policy fence protects
+    // `.iknow` by the same root (same shape as build-engine). Conditional
+    // resolution: with neither flag nor env, don't resolve, keeping the
+    // sandboxRoot fallback (legacy bytes unchanged).
     ...(env.workspaceRoot !== undefined
       ? {
           workspaceRoot: resolveWorkspaceRoot({
@@ -1547,24 +1703,28 @@ async function assembleAndRunWorker(
           }),
         }
       : {}),
-    // T3 (ADR-0037 §4): 父会话经 IKNOW_PRODUCT_ROOT 传下来的项目身份根。
-    // `env.productRoot` 是 env var 那侧的名字（wire 不改），进程内的选项面
-    // 叫 `projectIdentityRoot`。缺席（未改绑 / 旧 wire）→ 不传 →
-    // createWorkerRuntime 回落 cwd。
+    // The project identity root the parent session passes down via
+    // IKNOW_PRODUCT_ROOT (ADR-0037). `env.productRoot` is the env-var-side
+    // name (the wire is unchanged); the in-process option surface is called
+    // `projectIdentityRoot`. Absent (un-rebound / old wire) → not passed →
+    // createWorkerRuntime falls back to cwd.
     ...(env.productRoot !== undefined
       ? { projectIdentityRoot: env.productRoot }
       : {}),
-    // ADR-0092 Amendment 2026-09-13 / SC11:父进程经 IKNOW_FS_MODE 写来的
-    // fs 隔离档 → worker 的 bash 工厂 holder。缺席 / 非法 → 键缺席 =
-    // 全局档(bash handler 入口缺省回落),legacy 父进程(不写该键)字节不变。
+    // ADR-0092: the fs isolation tier written over by the parent via
+    // IKNOW_FS_MODE → the worker's bash-factory holder. Absent / invalid →
+    // key absent = global tier (bash handler entry falls back by default),
+    // legacy parents (not writing the key) keep bytes unchanged.
     ...fsModeOptionFromEnv(process.env),
-    // issue 1059:父进程 IKNOW_WORKTREE_GATE_ON → 本进程 holder(缺席 = 不发段)。
+    // Parent process IKNOW_WORKTREE_GATE_ON → this process's holder (absent =
+    // no segment emitted) for the worktree-on-mutate switch.
     ...worktreeGateOptionFromEnv(process.env),
-    // T5 (ADR-0071 / SC8 + L2): 父 manager
-    // 已经在 spawn 期替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
-    // 把 traceFilePath + taskId 经 envelope 透传过来 ——
-    // worker 直接 file-mode 落该路径,替代 L2 假 scope `randomUUID()`(已退役)。
-    // 缺席(legacy envelope / 跨版本 resume)→ 走 IKNOW_TRACE_OUT 退路(byte-stable)。
+    // ADR-0071: the parent manager already created
+    // `<parent session folder>/subagents/agent-<taskId>.jsonl` for this taskId
+    // at spawn time and threads traceFilePath + taskId through the envelope —
+    // the worker writes that path directly in file-mode, replacing the retired
+    // fake-scope `randomUUID()`. Absent (legacy envelope / cross-version
+    // resume) → the IKNOW_TRACE_OUT fallback (byte-stable).
     ...(workerEnvelope.traceFilePath !== undefined &&
     workerEnvelope.taskId !== undefined
       ? {
@@ -1572,24 +1732,28 @@ async function assembleAndRunWorker(
           taskId: workerEnvelope.taskId,
         }
       : {}),
-    // ADR-0085 / SC9:父会话账本锚点 —— 父 manager spawn 期已把它算进
-    // envelope(projectDir 与主 loop registry 的 todoDir 同源,conversationId
-    // = 父会话 id)。worker 据此把 todo_write 挂到父账本上(读 / 更新;
-    // 添加由工具 typed 拒绝)。缺席(旧 wire / 跨版本 resume)→ 不传,
-    // worker 工具面维持旧形态。
+    // ADR-0085: parent-session ledger anchor — the parent manager computes it
+    // into the envelope at spawn (projectDir shares its source with the main
+    // loop registry's todoDir; conversationId = the parent session id). The
+    // worker hangs its todo_write off the parent ledger (read / update; adds
+    // are typed-rejected by the tool). Absent (old wire / cross-version
+    // resume) → not passed, the worker's tool surface keeps the legacy form.
     ...(workerEnvelope.todoLedger !== undefined
       ? { todoLedger: workerEnvelope.todoLedger }
       : {}),
-    // T7 (spec SC10):父会话当时完整模型索引快照 —— 在场(含空数组) → worker
-    // 的 `<available_skills>` 冻表以它为唯一来源;缺席(旧 wire / 跨版本
-    // resume)→ 退回 worker 自己的独立 rescan(byte-stable)。空数组刻意不做
-    // 缺席折叠:它是「父确实没有模型索引」的确定事实,见 envelope 字段注释。
+    // The parent session's full model-index snapshot — present (including an
+    // empty array) → the worker's `<available_skills>` frozen table takes it
+    // as its sole source; absent (old wire / cross-version resume) → fall back
+    // to the worker's own independent rescan (byte-stable). An empty array is
+    // deliberately not folded into absence: it is the definite fact that "the
+    // parent truly has no model index", see the envelope field comment.
     ...(workerEnvelope.skillIndexSnapshot !== undefined
       ? { skillIndexSnapshot: workerEnvelope.skillIndexSnapshot }
       : {}),
   });
-  // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog
-  // 里 category:"write" 的工具名 (def-list 期裁剪后的真实工具面)。
+  // Observation floor for fileRefs: derived from the ACI catalog actually
+  // assembled for this worker, taking the tools with category:"write" (the
+  // real tool surface after def-list trimming).
   return runWorkerOnce({
     workerEnvelope,
     deps,

@@ -5,10 +5,9 @@
  * index, the mtime-descending page order, paging, and response serialization are
  * shared with the MCP transport through src/traceserver.
  *
- * The shared core names no tool in its error messages, so this face prefixes its
- * own tool name (TOOL_NAME) on every error it translates (plan
- * `trace-mcp-read-side-split` T5a's contract). Any other error is re-raised
- * untouched.
+ * The shared core names no tool in its error messages, so this face prefixes
+ * its own tool name (TOOL_NAME) on every error it translates. Any other
+ * error is re-raised untouched.
  */
 import { ToolExecutionError } from "../../errors.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -54,8 +53,9 @@ export function createListSessionsTool(
         throw new ListSessionsValidationError(error.field, error.message);
       }
       if (error instanceof TraceReadError) {
-        // 目录读失败不是参数问题，所以不带 field；消息只含 errno code
-        // （wrapIoError 刻意不泄漏 fs 细节），前缀仍是本工具名。
+        // A directory read failure is not a parameter problem, so no field
+        // is attached; the message carries only the errno code (wrapIoError
+        // deliberately hides fs details); the prefix is still this tool's name.
         throw new ToolExecutionError(`${TOOL_NAME}: ${error.message}`);
       }
       throw error;
@@ -84,8 +84,8 @@ export function createListSessionsTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
-      // B6 / ADR-0043 §3:trace 读侧目录轴(行轴 query_trace 之后),退场
-      // 次序第二位。
+      // ADR-0043 puts it second in the deferral order (trace read side,
+      // directory axis, after the row-axis query_trace).
       deferrable: true,
     },
   });

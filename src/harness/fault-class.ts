@@ -1,27 +1,32 @@
 /**
- * #672 T1: FaultClass 策略表。
+ * FaultClass policy table.
  *
- * 闭集 `retry` | `fuse` | `none`，轴 API / 工具 / 上下文 / 控制流（G2）。
- * 只回答传输是否可重试、同参失败是否计入熔断策略；不写入 StopReason。
- * T1 不接 ModelAdapter 重试循环、不接工具环检测。
+ * Closed set `retry` | `fuse` | `none` over the API / tool / context /
+ * control-flow axes. Answers only whether a transport failure is retryable
+ * and whether same-argument failures count toward the fuse; never writes a
+ * StopReason. This layer does not touch the ModelAdapter retry loop or tool
+ * loop detection.
  */
 
 export type FaultClass = "retry" | "fuse" | "none";
 
-/** 到点的是哪根钟（与 race-timers 的 `RaceExpirySource` 同值域）。 */
+/** Which clock fired (same value domain as race-timers' `RaceExpirySource`). */
 export type ClockAbortSource = "idle" | "hardCap";
 
 /**
- * transport-continue-persist T1 / spec inv 2:时钟 abort 的 typed 标记。
+ * Typed marker for clock aborts.
  *
- * 两根钟与宿主 Ctrl+C 走同一条 `AbortSignal` 通道,而 SDK 的
- * `APIUserAbortError` **不携带** `signal.reason`（fetch 不转发）—— 单看
- * thrown error 分不出「钟到点」与「人按了 Ctrl+C」。因此来源必须刻在
- * `signal.reason` 上,翻译层（`translateAnthropicTransportFault`）先认
- * 这个标记再归类,时钟 abort 才不会误标成 `user_cancel`。
+ * Both clocks and the host Ctrl+C travel the same `AbortSignal` channel, and
+ * the SDK's `APIUserAbortError` **does not carry** `signal.reason` (fetch
+ * doesn't forward it) — the thrown error alone cannot distinguish "a clock
+ * fired" from "a human pressed Ctrl+C". So the source must be stamped on
+ * `signal.reason`, and the translation layer
+ * (`translateAnthropicTransportFault`) checks this marker before
+ * classifying, so a clock abort is never mislabeled as `user_cancel`.
  *
- * `visible` = 到点前本次 attempt 是否已有模型输出增量（race-timers 的
- * `hadVisibleDelta`）:不可见才允许整回合重试（spec inv 1）。
+ * `visible` = whether this attempt had any model output increment before
+ * the fire (race-timers' `hadVisibleDelta`): only invisible aborts may retry
+ * the whole attempt.
  */
 export interface ClockAbortReason {
   readonly kind: "clock_abort";
@@ -43,9 +48,10 @@ export function clockAbortReasonOf(
 }
 
 /**
- * `signal.reason` → ClockAbortReason;非钟 abort（无 reason / 宿主 reason）
- * → undefined。结构判别而非 `instanceof`:reason 是跨 `AbortSignal.any`
- * 传递的普通值,不走错误类层级。
+ * `signal.reason` → ClockAbortReason; non-clock aborts (no reason / host
+ * reason) → undefined. Structural discrimination rather than `instanceof`:
+ * reason is a plain value crossing `AbortSignal.any`, not an error-class
+ * hierarchy.
  */
 export function clockAbortOf(
   signal: AbortSignal | undefined
@@ -75,8 +81,9 @@ export type FaultEvent =
       readonly retryAfterMs?: number;
     }
   /**
-   * 时钟到点（idle / 硬顶）。可见 = 已出字,不得自动重试;不可见 = 本次
-   * attempt 无任何模型输出,属可重试的传输失败（spec inv 1–2）。
+   * Clock fired (idle / hard cap). visible = output already streamed → no
+   * auto-retry; invisible = this attempt produced no model output → a
+   * retryable transport failure.
    */
   | {
       readonly kind: "clock_timeout";
@@ -84,10 +91,11 @@ export type FaultEvent =
       readonly visible: boolean;
     }
   /**
-   * ADR-0111 不变式 (a)：上游流结束但未产出完整 assistant Message（空流 /
-   * 断流，`ModelStreamIncompleteError` 的 fault 格）。`visible` 判据同
-   * `clock_timeout`：不可见 = 本次 attempt 无任何模型输出增量，整 step 重试
-   * 安全；已出字 = 不自动重试，落 typed 失败。
+   * ADR-0111 invariant (a): the upstream stream ended without producing a
+   * complete assistant Message (empty / truncated stream, the fault slot of
+   * `ModelStreamIncompleteError`). Same `visible` rule as `clock_timeout`:
+   * invisible → whole-step retry is safe; output already visible → no
+   * auto-retry, a typed failure stands.
    */
   | { readonly kind: "stream_incomplete"; readonly visible: boolean }
   | { readonly kind: "llm_network" }
@@ -98,7 +106,7 @@ export type FaultEvent =
   | { readonly kind: "timeout" }
   | {
       readonly kind: "execution_failed";
-      /** 同一 tool+参数已出现的 execution_failed 次数（含本次）。 */
+      /** Number of execution_failed occurrences for the same tool+args (including this one). */
       readonly occurrenceCount: number;
     }
   | { readonly kind: "compact_failed" }
@@ -106,15 +114,20 @@ export type FaultEvent =
   | { readonly kind: "empty_final_response" };
 
 /**
- * `retry-after` 头 → 毫秒（spec inv 4 的 "honor retry-after"）。只认两种形态：
- *   - delta-seconds（`"3"`、`"3.5"`，RFC 9110 允许小数）；
- *   - HTTP-date（`"Wed, 21 Oct 2015 07:28:00 GMT"`）→ 与 `nowMs` 之差。
- * 其余（空串 / 非数 / 已过去的日期 / 负数）→ undefined = 视作缺席，回落本地
- * 退避表：宁可自己说了算，也不因为一个畸形 header 当场重发。
+ * `retry-after` header → milliseconds ("honor retry-after"). Only two forms
+ * are accepted:
+ *   - delta-seconds (`"3"`, `"3.5"` — RFC 9110 allows fractional);
+ *   - HTTP-date (`"Wed, 21 Oct 2015 07:28:00 GMT"`) → difference from
+ *     `nowMs`.
+ * Anything else (empty / non-numeric / past date / negative) → undefined =
+ * treated as absent, falling back to the local backoff table: better to
+ * decide for ourselves than to fire an immediate resend on a malformed
+ * header.
  *
- * 放在本模块（而非重试装饰器）是因为它只决定 FaultEvent 的**形状**，与
- * 「退避多久」的策略无关；translator（anthropic-adapter）与重试循环各自
- * 只依赖本模块。
+ * Lives here (not in the retry decorator) because it only determines the
+ * **shape** of the FaultEvent, independent of the "how long to back off"
+ * policy; the translator (anthropic-adapter) and the retry loop each depend
+ * only on this module.
  */
 export function parseRetryAfterMs(
   rawValue: string | null | undefined,
@@ -143,16 +156,21 @@ function isTransientHttpStatus(status: number): boolean {
 }
 
 /**
- * G2 策略：429/5xx/网络 → retry；反复同参 execution_failed → fuse；其余 none。
+ * Policy: 429 / 5xx / network → retry; repeated same-args execution_failed →
+ * fuse; everything else none.
  *
- * transport-continue-persist T1:时钟到点**不可见**（本次 attempt 无任何模型
- * 输出增量）→ retry —— 卡死的连接不是「回合已失败」,重发整次调用是安全的
- * （spec inv 1）;已出字则不得自动重试,落 none 由 loop-engine 走既有 timeout
- * 收场。可见与否是 race-timers 从流事件推出的 `hadVisibleDelta`,不在本层判断。
+ * A clock firing while **invisible** (this attempt produced no model output
+ * increment) → retry — a stalled connection is not "the turn failed", so
+ * resending the whole call is safe; once output is visible, no auto-retry:
+ * it lands none and loop-engine closes via the existing timeout path.
+ * Visibility is derived from stream events by race-timers
+ * (`hadVisibleDelta`), not decided here.
  *
- * ADR-0111 不变式 (a):上游流未完成（`stream_incomplete`）与 `clock_timeout`
- * 同判据 —— 不可见 → retry（整 step 重试安全,由 withTransportRetry 既有预算
- * 承载）;已出字 → none（不自动重试,typed 错误直抛落 loop 收口）。
+ * ADR-0111 invariant (a): an unfinished upstream stream
+ * (`stream_incomplete`) follows the same rule as `clock_timeout` — invisible
+ * → retry (whole-step retry safe, within withTransportRetry's existing
+ * budget); visible → none (no auto-retry; the typed error propagates to the
+ * loop's closing path).
  */
 export function classifyFault(
   event: FaultEvent | null | undefined
@@ -163,8 +181,8 @@ export function classifyFault(
       return isTransientHttpStatus(event.status) ? "retry" : "none";
     case "llm_network":
       return "retry";
-    // visible 纪律单实现（两格同判据，出处见上方 doc：clock_timeout =
-    // transport-continue-persist inv 1；stream_incomplete = ADR-0111 不变式 a）。
+    // Single implementation of the visible rule (both kinds share it:
+    // clock_timeout and stream_incomplete, see the doc above).
     case "clock_timeout":
     case "stream_incomplete":
       return event.visible ? "none" : "retry";

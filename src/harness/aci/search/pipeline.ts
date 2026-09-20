@@ -1,18 +1,24 @@
 /**
- * 两条引擎的汇流层（D2–D5 单点落地；SC4–SC9）。
+ * The confluence layer for both engines (single landing point of the display
+ * contract).
  *
- * 为什么需要这一层：rg 与 Node 扫的**产物形状不同**（rg 直出 `-l` 路径表 /
- * `--count` 计数表，Node 扫直出命中行），但契约要求二者对同一查询给出同一
- * 结果。若让 handler 分两条路各自投影，`also` 行窗、分页、`total:` 会各写
- * 一遍 —— SC9 的「Node 全语义」就成了一句口号。
+ * Why this layer exists: rg and the Node scan **produce different shapes** (rg
+ * emits `-l` path tables / `--count` tables directly, the Node scan emits hit
+ * lines directly), yet the contract requires both to answer the same query
+ * identically. If the handler projected along two paths, the `also` line
+ * window, pagination, and `total:` would each be written twice — "full Node
+ * semantics" would become a slogan.
  *
- * 做法：两条引擎都**先归一成命中行**，随后所有语义（also 过滤 → 排序 →
- * 分页 → 投影）只在这条流水线上发生一次。`paths` / `count` 只是投影的收窄
- * 视图，不再是引擎的另一条取样路径。
+ * Approach: both engines **normalize to hit lines first**, then all semantics
+ * (also filtering → sorting → pagination → projection) happen exactly once on
+ * this pipeline. `paths` / `count` are merely narrowed projection views, no
+ * longer a separate sampling path of the engine.
  *
- * 唯一例外是**没有 `also` 时的 `paths` / `count`**：那两种情形不需要行号，
- * 让 rg 走 `-l` / `--count` 可以少传一遍行内容（大仓下是数量级差异）。即便
- * 走这条快路，`total:` 仍按「切片前」算，与慢路一致。
+ * The only exception is **`paths` / `count` without `also`**: those two cases
+ * need no line numbers, so rg may take its `-l` / `--count` fast path and skip
+ * shipping line content (an order-of-magnitude difference on large repos).
+ * Even on this fast path, `total:` is computed "before slicing", consistent
+ * with the slow path.
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -35,23 +41,25 @@ import {
 export interface PipelineInput {
   readonly spec: QuerySpec;
   readonly result: EngineResult;
-  /** 命中行的取行回调（`context` 展示 + `also` 行窗共用）。 */
+  /** Line fetcher callback for hit lines (shared by `context` display and the `also` line window). */
   readonly readLines: (path: string) => Promise<ReadonlyArray<string> | null>;
 }
 
 /**
- * 引擎产物 → 模型可见字符串。
+ * Engine result → model-visible string.
  *
- * 顺序是契约的一部分：**先 also 过滤，再排序，再切片**。颠倒任何一步，
- * 分页都会漏条或重条（SC7）。
+ * Order is part of the contract: **also-filter first, then sort, then slice**.
+ * Reversing any step makes pagination drop or duplicate entries.
  */
 export async function renderResult(input: PipelineInput): Promise<string> {
   const { spec, result } = input;
   if (result.kind === "unavailable") {
-    // 本层不该见到 unavailable：分派逻辑（`grep.ts` resolveEngineResult）
-    // 已经在降级时改走 Node 扫。走到这里说明装配出了 bug，用本层统一的
-    // typed 错误抛出（`ToolExecutionError`，与工具层其余失败同形），别让
-    // 裸 Error 混进 ACI 的失败域。
+    // This layer should never see unavailable: the dispatch logic (`grep.ts`
+    // resolveEngineResult) already switches to the Node scan when
+    // downgrading. Reaching here means an assembly bug, so throw this layer's
+    // uniform typed error (`ToolExecutionError`, same shape as other tool-
+    // layer failures) rather than let a bare Error into the ACI failure
+    // domain.
     throw new ToolExecutionError(
       "grep: internal error: result projection received an unavailable engine result"
     );
@@ -78,17 +86,21 @@ export async function renderResult(input: PipelineInput): Promise<string> {
 }
 
 /**
- * 行协议可表示性收口（D2；两条引擎共用）。
+ * Line-protocol representability gate (shared by both engines).
  *
- * 含 `\n` / `\0` 的路径在任何出法里都不能出现：`\n` 会把自己的记录拆成两条
- * （`path:line:text` 的行协议下前半段长成一条假命中），`\0` 与 `--null` 的
- * 分隔符撞车。这里放在**两条引擎的汇流点**，而不是各引擎内部 —— 将来任何
- * 新引擎只要走这条流水线就自动继承，不会再分叉出第三种坏法。
+ * Paths containing `\n` / `\0` must not appear in any output mode: `\n` splits
+ * the record into two (under the `path:line:text` line protocol the first half
+ * becomes a fake hit), and `\0` collides with the `--null` delimiter. This
+ * sits at the **confluence of both engines**, not inside each engine — any
+ * future engine that goes through this pipeline inherits it automatically, so
+ * no third kind of breakage can fork off.
  *
- * 遍历期已由 argv 的排除 glob 挡掉绝大多数（含 `\n` 目录的整棵子树）；
- * rg 的显式点名目标由 `rg-engine.ts` 在 exec 前挡掉；本层兜住其余一切
- * （Node 扫、显式文件参数、以及「路径只在祖先段里带换行」这类漏网）。
- * 判定与理由见 `path-representable.ts`。
+ * During traversal the argv exclusion globs already block most cases (the
+ * whole subtree of a `\n`-containing directory); rg's explicit named targets
+ * are blocked pre-exec by `rg-engine.ts`; this layer catches everything else
+ * (the Node scan, explicit file arguments, and strays like "the newline only
+ * appears in an ancestor segment"). Decision and rationale in
+ * `path-representable.ts`.
  */
 function dropUnrepresentable(result: EngineResult): EngineResult {
   if (result.kind === "unavailable") return result;
@@ -124,15 +136,18 @@ function dropUnrepresentable(result: EngineResult): EngineResult {
 }
 
 /**
- * `context` 出法：得到组 → 排序 → 按组切片。分页单位是**组**（一段连续展示块）。
+ * `context` output: obtain groups → sort → slice by group. The pagination
+ * unit is the **group** (one contiguous display block).
  *
- * rg 路径已经把组算好了（它自己插的 `--` 就是组边界），直接用；Node 路径
- * 没有这层信息，由 `buildContextGroups` 按「命中行 ± context」重建同样的
- * 形状。两条引擎产出的组结构一致，投影因此只有一处。
+ * The rg path already computed the groups (the `--` separators it inserts are
+ * the group boundaries), used directly; the Node path lacks that info, so
+ * `buildContextGroups` rebuilds the same shape from "hit line ± context". Both
+ * engines produce identical group structures, hence one projection.
  *
- * 排序在切片之前（D3）**对两条引擎都必要**：rg 的组序跟着并行遍历走，Node
- * 的组序跟着 `readdir` 走，两者都不是 (path, line) 序。少了这一步，同一个
- * `offset` 在两次调用里会落到不同的组上 —— 分页名册必须是确定的。
+ * Sorting before slicing is required for **both engines**: rg's group order
+ * follows parallel traversal, Node's follows `readdir`, and neither is
+ * (path, line) order. Without this step, the same `offset` would land on
+ * different groups across calls — the pagination roster must be deterministic.
  */
 async function renderContext(
   input: PipelineInput,
@@ -154,10 +169,11 @@ async function renderContext(
 }
 
 /**
- * `also` 行窗过滤（D5）。
+ * `also` line-window filtering.
  *
- * 有 `also` → 必须先有行号，故取样出法此时是 `content`（见 `engineSpecFor`），
- * `lines` 即命中行；窗内没有第二段的命中被丢掉。
+ * With `also`, line numbers are required first, so the sampling mode at this
+ * point is `content` (see `engineSpecFor`), and `lines` are the hit lines;
+ * hits whose second segment is outside the window are dropped.
  */
 async function applyAlsoFilter(
   input: PipelineInput
@@ -166,9 +182,11 @@ async function applyAlsoFilter(
   const lines = result.kind === "lines" ? result.lines : [];
   if (!hasAlso(spec)) return lines;
   const also = expandAlsoNeedle(spec.also!, spec.ignoreCase);
-  // `filterHitsByAlsoWindow` 的取行是同步的（纯判定层），这里先把命中涉及的
-  // 文件**预读**成一张同步表再喂进去 —— 文件读取仍走 `input.readLines`
-  // （异步、带 1MB / 二进制准入），判定层不必知道 fs。
+  // `filterHitsByAlsoWindow` reads lines synchronously (pure decision layer),
+  // so here we **pre-read** the files involved in hits into a synchronous
+  // table before feeding it — file reading still goes through
+  // `input.readLines` (async, with the 1MB / binary admission), and the
+  // decision layer need not know about fs.
   const files = new Map<string, ReadonlyArray<string> | null>();
   for (const hit of lines) {
     if (files.has(hit.path)) continue;
@@ -182,7 +200,7 @@ async function applyAlsoFilter(
   });
 }
 
-/** 投影输入的最小形状（`project.ts` 只认命中行 + 切片参数）。 */
+/** Minimal shape for projection input (`project.ts` only needs hit lines + slice params). */
 function projection(
   lines: ReadonlyArray<LineHit>,
   spec: QuerySpec
@@ -199,11 +217,13 @@ function hasAlso(spec: QuerySpec): boolean {
 }
 
 /**
- * 引擎取样用的 spec。
+ * Spec used for engine sampling.
  *
- * `also` 在场时**必须**取内容行（要行号才能判窗），所以把出法临时改成
- * `content` 且关掉 context（行窗是过滤，不是展示）。没有 `also` 时按请求
- * 出法取样，让 rg 走 `-l` / `--count` 的快路。
+ * With `also` present, content lines **must** be sampled (line numbers are
+ * needed to judge the window), so the output mode is temporarily set to
+ * `content` and context is turned off (the line window is filtering, not
+ * display). Without `also`, sample per the requested mode so rg can take its
+ * `-l` / `--count` fast path.
  */
 export function engineSpecFor(spec: QuerySpec): QuerySpec {
   if (!hasAlso(spec)) return spec;

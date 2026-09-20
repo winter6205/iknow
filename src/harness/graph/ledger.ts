@@ -1,108 +1,109 @@
 /**
- * 活图账本（live-graph-phase1 T1）。
+ * Live-graph ledger: host-held record of which graph nodes have settled, so
+ * finished work is never re-run.
  *
- * 权威来自 `docs/adr/0047-live-graph-session-authority.md`：长程图的"已
- * 完成不重演"由 host 持有的活图状态保证，不靠模型对 transcript 的记忆。本
- * 模块是 harness/graph 的单点权威（bounded-context-guardian 边界：
- * session-api / cli 只持有/销毁，不实现账本逻辑）。
+ * Authority: `docs/adr/0047-live-graph-session-authority.md` — the "done stays
+ * done" guarantee for long-running graphs comes from this session state, not
+ * from the model's memory of the transcript. Single authority within
+ * harness/graph: session-api / cli only hold or destroy the ledger, they do
+ * not implement ledger logic.
  *
- * ## 生命周期（spec SC1–SC4 / ADR-0051）
+ * Lifecycle:
+ *   1. **Creation**: `ensure()` is called only after the first `run_graph`'s
+ *      `nodes` pass `validateGraph`; `exists()` is false before that. A failed
+ *      validation leaves no trace — `ledgerFor` lazily creates the object, but
+ *      `exists()` stays false and the frozen set stays empty.
+ *   2. **Survives the overlay**: closing and reopening graph mode keeps the
+ *      same ledger for the same conversation — `LiveGraphLedger` hangs beside
+ *      `GraphModeContext` on the session runtime, not inside a `GraphAssembly`
+ *      snapshot.
+ *   3. **reset / session end**: `destroy()` clears the frozen set and the
+ *      existence flag; called by `/reset` (CLI), `resetSession` (hub), process
+ *      exit, and `hub.shutdown`. Old ids may really spawn again afterwards.
+ *   4. **Compaction keeps it**: the ledger is an in-process object; compact
+ *      only rewrites the transcript, so the frozen set is untouched.
  *
- *   1. **创建**：第一次 `run_graph` 的 `nodes` 通过 `validateGraph` 之后
- *      调 `ensure()`；之前 `exists()` 为 false。验证失败不留任何冻结痕迹
- *      —— host 的 `ledgerFor` 会懒创建账本对象，但 `exists()` 仍为 false、
- *      冻结集合为空（spec SC1 + ASSUMPTIONS #4）。
- *   2. **overlay 关不毁**：关掉 graph mode 后再开，同一会话仍是同一张账本
- *      —— `LiveGraphLedger` 与 `GraphModeContext` 平行挂在 session runtime
- *      上，不是 `GraphAssembly` 的快照。
- *   3. **reset / 会话结束销毁**：`destroy()` 清空已冻结集合与会话存在标志。
- *      `/reset`（CLI） / `resetSession`（hub） / 进程退出 / `hub.shutdown`
- *      调它。销毁后旧 id 可重新提交并真 spawn。
- *   4. **compact 不扔**：账本是 in-process 对象，compact 只重写 transcript
- *      不动它；冻结集合原样保留。
+ * Freeze semantics: `freeze(id, status)` accepts only `done` and `failed` —
+ * `skipped` and never-run ids are not frozen (NodeOutcome freeze = last
+ * settled outcome is done or failed). `isFrozen(id)` is the typed-rejection
+ * basis for the `run_graph` handler before any spawn (zero spawn, same class
+ * as invalid-topology rejection).
  *
- * ## 冻结语义（T1 种子，T2 完整合并）
+ * Process death / cross-process resume: the ledger is not persisted to JSONL.
+ * Resuming from a transcript starts from an empty ledger; old freeze
+ * semantics die with the old process — intended product behaviour, not a bug.
  *
- * `freeze(id, status)` 只接受 `done` 与 `failed` —— `skipped` 与从未跑过的
- * id 不冻结（spec Glossary：NodeOutcome 冻结 = 最后一次结局为 done 或
- * failed）。`isFrozen(id)` 是 `run_graph` handler 在 spawn 前的 typed 拒绝
- * 依据（零 spawn，与拓扑非法同一类别）。
+ * `LiveGraphLedgerHost` is a thin per-conversationId resolver: one hub's many
+ * session ledgers are created and destroyed through it; single-session entry
+ * points (CLI / one-shot calls) use the same host with just one id.
  *
- * ## 进程死亡与跨进程 resume
- *
- * 账本不写 JSONL（spec ASSUMPTIONS #9）。进程死后从 transcript resume 不
- * 重建账本 —— 新的会话对象从空账本开始；旧会话的冻结语义随旧进程消亡
- * 释放，这是产品行为而非 bug。
- *
- * ## 多会话 hub
- *
- * `LiveGraphLedgerHost` 是按 conversationId 解析账本的薄包装 —— 一个
- * hub 持有的多会话账本由它统一创建/销毁；CLI / 一次性调用等单会话入口
- * 用同一个 host 但只对一个 id 写。
- *
- * 边界：本模块不 import loop-engine / build-engine / session-api。
+ * Boundary: this module does not import loop-engine / build-engine /
+ * session-api.
  */
 
-/** 终态 —— 冻结依据（spec Glossary）。 */
+/** Terminal statuses — the basis for freezing. */
 export type FrozenTerminal = "done" | "failed";
 
 /**
- * 结算可传的全部状态。生产者只有 `GraphNodeResult.status` 的落定值
- * （done / failed / skipped）—— "running" / "pending" 是调度中的中间态，
- * 没有任何生产者会把它们送进 freeze，故不进本联合。
+ * All statuses a settlement may carry. The only producer is the settled value
+ * of `GraphNodeResult.status` (done / failed / skipped) — "running" /
+ * "pending" are mid-scheduling states with no producer feeding freeze, so
+ * they stay out of this union.
  */
 export type SettleStatus = FrozenTerminal | "skipped";
 
-/** 账本单点强制：只有终态进冻结集合（spec Glossary，调用方不各自过滤）。 */
+/** Enforced centrally: only terminal statuses enter the frozen set. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["done", "failed"]);
 
 export interface LiveGraphLedger {
-  /** 账本是否已创建（第一次 `ensure()` 之后为 true，销毁后回 false）。 */
+  /** Whether the ledger has been created (true after first `ensure()`, false again after destroy). */
   readonly exists: () => boolean;
   /**
-   * 第一次调用创建账本（推迟到 `validateGraph` 通过之后）；之后调用是
-   * 幂等 no-op。验证失败路径绝不应调它 —— spec SC1 关键边界。
+   * First call creates the ledger (deferred until `validateGraph` passes);
+   * later calls are idempotent no-ops. Must never be called on the
+   * validation-failure path.
    */
   readonly ensure: () => void;
   /**
-   * 记录一次结算的终态。`done` / `failed` 冻结；`skipped` 静默忽略
-   * （spec Glossary：skipped 不冻）。同 id 多次 freeze 后写以末次状态为
-   * 准（fallback 收敛，便于后续 `back-edge` 等回写场景）。
+   * Record one settled terminal status. `done` / `failed` freeze; `skipped` is
+   * silently ignored. Repeated freezes of the same id: the last write wins
+   * (converges for future re-write scenarios such as back-edges).
    *
-   * `output` 是 T2 剩余子图合并的数据流：status 为 done 且传入 string 时
-   * 记进产出表（`outputOf` 可读）；failed / skipped / 未传 → 清掉旧产出，
-   * 保证产出与末次状态一致。
+   * `output` carries the data for residual-subgraph merging: when status is
+   * done and a string is passed, it is stored for `outputOf`; failed /
+   * skipped / absent → the old output is cleared so outputs always match the
+   * last status.
    *
-   * 接受 `SettleStatus`（done / failed / skipped）而非仅终态：handler 拿到
-   * `GraphNodeResult.status` 直传即可，"skipped 不冻" 由账本单点强制，
-   * 不靠调用方各自过滤。状态集与生产者对齐 —— 结算落定值只有这三态，
-   * 调度中间态（running / pending）没有生产者，不在签名里。
+   * Accepts `SettleStatus` (not just terminals) so the handler can pass
+   * `GraphNodeResult.status` through directly — "skipped does not freeze" is
+   * enforced here, not by each caller filtering.
    */
   readonly freeze: (id: string, status: SettleStatus, output?: string) => void;
-  /** 该 id 是否因 done/failed 终态被冻结 —— handler 用它做 typed 拒绝。 */
+  /** Whether the id is frozen by a done/failed terminal — handler's typed-rejection check. */
   readonly isFrozen: (id: string) => boolean;
-  /** 该 id 的冻结状态；未冻结返回 undefined。剩余子图合并用它区分 done / failed。 */
+  /** Frozen status of the id; undefined when not frozen. Residual merging uses it to tell done from failed. */
   readonly statusOf: (id: string) => FrozenTerminal | undefined;
   /**
-   * 该 id 冻结为 done 时记录的产出；未冻结或非 done 返回 undefined。
-   * T2 剩余子图合并的数据源：第二段提交省略已 done 的上游时，host 用它
-   * 把上游产出写进下游节点 task（spec SC5「B 能读到 A 的产出」）。
+   * Output recorded when the id froze as done; undefined when not frozen or
+   * not done. Data source for residual-subgraph merging: when a later segment
+   * omits already-done upstream nodes, the host writes their output into
+   * downstream node tasks.
    */
   readonly outputOf: (id: string) => string | undefined;
-  /** 快照：当前冻结的全部 id（顺序按首次 freeze 的顺序，稳定测试断言）。 */
+  /** Snapshot of all currently frozen ids, in first-freeze order (stable for test assertions). */
   readonly frozenIds: () => ReadonlyArray<string>;
-  /** 销毁：清空冻结集合与会话存在标志。会话结束 / reset 调它。 */
+  /** Destroy: clears the frozen set and existence flag. Called on session end / reset. */
   readonly destroy: () => void;
 }
 
 export function createLiveGraphLedger(): LiveGraphLedger {
   let created = false;
-  // 用 Map 而非 Record 既保插入顺序又让 isFrozen O(1)；不存 `frozen` 布尔
-  // —— 末次 status 由"是否在 map 里"即可推断，status 字段留给 T2 失败回写
-  // 等场景扩展。
+  // Map (not Record) keeps insertion order and makes isFrozen O(1); no
+  // `frozen` boolean is stored — membership alone implies a terminal status,
+  // and the status field stays for re-write scenarios such as back-edges.
   const frozen = new Map<string, FrozenTerminal>();
-  // T2:已冻结 done 节点的产出快照(spec SC5「B 能读到 A 的产出」)。
-  // 只在 freeze 调用方传入 output 且 status === "done" 时写。
+  // Outputs of done-frozen nodes, so later segments can read upstream
+  // results. Only written when the freeze caller passes output and status is done.
   const outputs = new Map<string, string>();
   const ledger: LiveGraphLedger = {
     exists: () => created,
@@ -134,27 +135,29 @@ export function createLiveGraphLedger(): LiveGraphLedger {
 }
 
 /**
- * 多会话账本解析器（hub 用）。`ledgerFor` 在第一次拿某 conversationId
- * 时懒创建一份；同一 id 多次取拿回同一对象。`destroy` 清掉一份会话
- * 账本（reset）；`destroyAll` 清掉全部（hub.shutdown / 进程退出）。
+ * Multi-session ledger resolver (for hubs). `ledgerFor` lazily creates one
+ * ledger per conversationId on first access; repeated lookups return the same
+ * object. `destroy` drops one session's ledger (reset); `destroyAll` drops
+ * every ledger (hub.shutdown / process exit).
  *
- * 单会话入口（CLI / 直调 handler 的测试）也用同一个 host，但通常
- * `destroyAll` 由进程退出兜底（无显式 shutdown 钩子仍能让对象 GC）。
+ * Single-session entry points (CLI / handler-direct tests) use the same host;
+ * `destroyAll` is usually backstopped by process exit (objects get GC'd even
+ * without an explicit shutdown hook).
  *
- * `undefined` conversationId（tool handler 在 `ctx.conversationId` 缺席
- * 的 stub / 直调路径）落到一份共享的"匿名"账本 —— 行为可观测、不
- * 静默丢冻结语义，与 spec SC1 "未交节点无账本" 兼容：host 默认未实例化
- * 时工具不调账本逻辑，匿名账本仅在 host 实例化且 handler 真跑过来时才
- * 触及。
+ * An `undefined` conversationId (stub / direct-call paths where
+ * `ctx.conversationId` is absent) falls back to a shared "anonymous" ledger —
+ * observable behaviour, freeze semantics never silently dropped. Compatible
+ * with "no ledger before the first accepted graph": tools skip ledger logic
+ * entirely until the host is instantiated and a handler really runs.
  */
 export interface LiveGraphLedgerHost {
-  /** 取一份账本；同 id 多次取拿回同一对象。`undefined` 落到共享匿名账本。 */
+  /** Get a ledger; same id always returns the same object. `undefined` uses the shared anonymous ledger. */
   readonly ledgerFor: (conversationId: string | undefined) => LiveGraphLedger;
-  /** 销毁单会话账本（reset / 会话结束）。id 不存在 → no-op。 */
+  /** Destroy one session's ledger (reset / session end). Missing id → no-op. */
   readonly destroy: (conversationId: string) => void;
-  /** 销毁全部账本（hub.shutdown / 进程退出）。 */
+  /** Destroy all ledgers (hub.shutdown / process exit). */
   readonly destroyAll: () => void;
-  /** 测试可观察：当前已创建的会话账本数量（不计匿名单例）。 */
+  /** Test-observable: number of created session ledgers (anonymous singleton excluded). */
   readonly size: () => number;
 }
 

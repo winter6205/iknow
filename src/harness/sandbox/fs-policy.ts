@@ -34,10 +34,11 @@ export interface FsPolicy {
    *  It is a host path only — never a bind target for guest Linux `/tmp`. */
   tmpRoot(): string;
   /**
-   * fs 隔离档(ADR-0092 Amendment 2026-09-13, SC11/SC12):仅 `bwrap` 消费
-   * 该字段决定是否在 mount 层叠 `--ro-bind <home>` + `--bind <workspaceRoot>` +
-   * `--bind <tmpRoot>` 三层(global 档 = 无条件不叠)。缺省 `"global"` —— 与 V1
-   * argv 形态逐字节一致。
+   * fs isolation tier (ADR-0092): only `bwrap` consumes this field to decide
+   * whether to stack the mount-level trio `--ro-bind <home>` +
+   * `--bind <workspaceRoot>` + `--bind <tmpRoot>` (global tier never stacks).
+   * Defaults to `"global"` — argv shape stays byte-identical to the original
+   * global form.
    */
   readonly mode: FsIsolationMode;
 }
@@ -47,9 +48,10 @@ export interface FsPolicyOptions {
    *  blank or missing on disk → typed fail-loud. */
   readonly tmpDir: string;
   /**
-   * fs 隔离档(ADR-0092 Amendment 2026-09-13):缺省 / 非法值一律回落
-   * `"global"`(fail-closed,与 settings 段非法值 drop-not-throw 纪律同款)。
-   * 仅 `"workspace"` 才让 bwrap 多叠 home ro-bind + 两处写白名单 bind。
+   * fs isolation tier (ADR-0092): missing or invalid values fall back to
+   * `"global"` (fail-closed, same drop-not-throw discipline as the settings
+   * section). Only `"workspace"` makes bwrap add the home ro-bind plus the
+   * two writable binds.
    */
   readonly mode?: FsIsolationMode;
 }
@@ -82,15 +84,17 @@ function contractRoot(role: string, value: string | undefined): string {
  * `--ro-bind` over `/etc /usr /bin /lib /lib64`) and the permission chain
  * + hard-walls; a `home` / `workspaceRoot` predicate would not shape argv.
  *
- * Round 2(ADR-0092 Amendment 2026-09-13):policy 增加 `mode` 字段,`bwrap` 据
- * 此在 mount 层叠工作区档三层(`--ro-bind <home>` + `--bind <workspaceRoot>`
- * + `--bind <tmpRoot>`)。`mode` 解析走 `parseFsModeFlag` —— 缺省 / 非法值
- * 回落 `"global"`(fail-closed),与 settings 段 drop-not-throw 纪律同款。
+ * The policy also carries a `mode` field (ADR-0092): bwrap uses it to stack
+ * the workspace-tier trio (`--ro-bind <home>` + `--bind <workspaceRoot>`
+ * + `--bind <tmpRoot>`). `mode` is parsed via `parseFsModeFlag` — missing or
+ * invalid literals fail closed to `"global"`, same drop-not-throw discipline
+ * as the settings section.
  */
 export function createFsPolicy(opts: FsPolicyOptions): FsPolicy {
   const tmpRoot = contractRoot("tmpDir", opts.tmpDir);
-  // fail-closed:缺省 / 非法字面 → global。`mode` 暴露给 bwrap(冻结对象
-  // 形,handler per-call 读取与 `tmpRoot()` 同形态)。
+  // fail-closed: missing / invalid literal → global. `mode` is exposed to
+  // bwrap (frozen object shape; the handler reads it per call, same form as
+  // `tmpRoot()`).
   const mode: FsIsolationMode = parseFsModeFlag(opts.mode) ?? "global";
   return Object.freeze({ tmpRoot: () => tmpRoot, mode });
 }

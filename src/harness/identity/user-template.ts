@@ -1,18 +1,20 @@
 /**
- * IKNOW-196 user.md seed 模板 (spec `specs/196-identity-assembly.md`
- * Project Structure 段,spec.md:84 + Boundaries 段)。
+ * Seed template for `~/.iknow/user.md`.
  *
- * 模块责任:首启时 seed `~/.iknow/user.md` 的占位模板。五段结构对位
- * ohmo USER_TEMPLATE:Profile / Defaults / Ongoing context / Preferences /
- * Notes。仅当 user.md 不存在时写入(eager + idempotent,
- * `initializeIknowWorkspace` 用 if-not-exists 守卫,不覆盖用户已改)。
+ * Responsibility: the placeholder template written on first start. Five
+ * sections mirror ohmo's USER_TEMPLATE: Profile / Defaults / Ongoing context /
+ * Preferences / Notes. Written only when user.md does not exist (eager +
+ * idempotent — `initializeIknowWorkspace` guards with if-not-exists and never
+ * overwrites user edits).
  *
- * user.md 是用户可改段,装配时纯净读;用户画像走 `user_profile` 段,
- * 被 PRIORITY 压过。每个字段是 placeholder,用户按需替换。
- * 本 const 是 SSOT,装配时只引用,绝不复制 / 切片(防 drift)。
+ * user.md is the user-editable segment, read verbatim at assembly time; the
+ * user persona goes through the `user_profile` segment and is overridden by
+ * PRIORITY. Every field is a placeholder for the user to replace on demand.
+ * This const is the SSOT — referenced at assembly time, never copied or
+ * sliced (drift prevention).
  */
 
-/** IKNOW-196 user.md seed 模板(Profile / Defaults / Ongoing / Preferences / Notes)。 */
+/** user.md seed template (Profile / Defaults / Ongoing / Preferences / Notes). */
 export const USER_TEMPLATE = `
 # User Profile
 

@@ -1,15 +1,17 @@
 /**
- * ip-classify：IP 字面量非公网分类（network-guard 的判定数据层）。
+ * ip-classify: non-public classification for IP literals (the decision-data
+ * layer under network-guard).
  *
- * code-review 整改抽出：network-guard.ts 超 300 行文件预算，把 IPv4/IPv6
- * 分类与解析（纯函数、无 I/O）独立成本模块，guard 只保留出站流程。
- * 非公网段清单对齐 Python ipaddress 的 is_global 语义（loopback / 私网 /
- * link-local / CGNAT / 多播 / 保留段等）。
+ * Split out because network-guard.ts exceeded its file-size budget: IPv4 /
+ * IPv6 classification and parsing are pure functions with no I/O, so they
+ * live here and the guard keeps only the egress flow. The blocked-range list
+ * mirrors Python ipaddress's is_global semantics (loopback / private /
+ * link-local / CGNAT / multicast / reserved ranges).
  */
 
 import { isIP } from "node:net";
 
-/** IPv4 非公网段（base / prefix / 类别标签）。 */
+/** IPv4 non-public ranges (base / prefix / category label). */
 const IPV4_BLOCKED_RANGES: ReadonlyArray<{
   base: string;
   prefix: number;
@@ -31,15 +33,15 @@ const IPV4_BLOCKED_RANGES: ReadonlyArray<{
   { base: "240.0.0.0", prefix: 4, label: "reserved" },
 ];
 
-/** 判定 IP 是否非公网：非公网返回类别标签，公网返回 null。 */
+/** Whether an IP is non-public: returns the category label for non-public, null for public. */
 export function classifyIp(ip: string): string | null {
   const version = isIP(ip);
   if (version === 4) return classifyIpv4(ip);
   if (version === 6) return classifyIpv6(ip);
-  return null; // 非 IP 字面量（主机名），交由主机名 + DNS 防线处理
+  return null; // not an IP literal (hostname) — the hostname + DNS defenses handle it
 }
 
-/** IPv4 非公网段匹配。 */
+/** Match against IPv4 non-public ranges. */
 function classifyIpv4(ip: string): string | null {
   const value = ipv4ToNumber(ip);
   if (value === null) return null;
@@ -49,7 +51,7 @@ function classifyIpv4(ip: string): string | null {
   return null;
 }
 
-/** IPv4 点分十进制 → 32 位无符号整数；非法返回 null。 */
+/** IPv4 dotted-quad → 32-bit unsigned int; null if malformed. */
 function ipv4ToNumber(ip: string): number | null {
   const parts = ip.split(".");
   if (parts.length !== 4) return null;
@@ -63,7 +65,7 @@ function ipv4ToNumber(ip: string): number | null {
   return acc >>> 0;
 }
 
-/** IPv4 是否在 base/prefix 段内。 */
+/** Whether an IPv4 value falls inside a base/prefix range. */
 function inIpv4Range(value: number, base: string, prefix: number): boolean {
   const baseValue = ipv4ToNumber(base);
   if (baseValue === null) return false;
@@ -71,14 +73,14 @@ function inIpv4Range(value: number, base: string, prefix: number): boolean {
   return value >>> shift === baseValue >>> shift;
 }
 
-/** IPv6 非公网类别：loopback / unspecified / link-local / unique-local / multicast / v4-mapped。 */
+/** IPv6 non-public categories: loopback / unspecified / link-local / unique-local / multicast / v4-mapped. */
 function classifyIpv6(ip: string): string | null {
   const groups = ipv6Groups(ip);
   if (groups === null) return null;
   const first = groups[0];
   if (groups.slice(0, 7).every((g) => g === 0)) {
-    if (groups[7] === 1) return "loopback"; // IPv6 回环地址
-    if (groups[7] === 0) return "unspecified"; // IPv6 未指定地址
+    if (groups[7] === 1) return "loopback"; // IPv6 loopback address
+    if (groups[7] === 0) return "unspecified"; // IPv6 unspecified address
   }
   if ((first & 0xffc0) === 0xfe80) return "link-local"; // fe80::/10
   if ((first & 0xfe00) === 0xfc00) return "unique-local"; // fc00::/7
@@ -86,7 +88,7 @@ function classifyIpv6(ip: string): string | null {
   return classifyIpv6MappedIpv4(groups);
 }
 
-/** IPv4-mapped IPv6（内嵌 IPv4 段）→ 判定内嵌 IPv4。 */
+/** IPv4-mapped IPv6 (embedded IPv4 tail) → classify the embedded IPv4. */
 function classifyIpv6MappedIpv4(groups: readonly number[]): string | null {
   const prefixAllZero = groups.slice(0, 5).every((g) => g === 0);
   if (!prefixAllZero || groups[5] !== 0xffff) return null;
@@ -94,7 +96,7 @@ function classifyIpv6MappedIpv4(groups: readonly number[]): string | null {
   return classifyIpv4(embedded);
 }
 
-/** IPv6 展开为 8 个 16 位组；非法返回 null（处理双冒号缩写与内嵌 IPv4）。 */
+/** Expand IPv6 into 8 16-bit groups; null if malformed (handles :: abbreviation and embedded IPv4). */
 function ipv6Groups(ip: string): readonly number[] | null {
   let s = ip.toLowerCase();
   const zone = s.indexOf("%");
@@ -111,7 +113,7 @@ function ipv6Groups(ip: string): readonly number[] | null {
   return expandDoubleColon(s);
 }
 
-/** 双冒号缩写展开 + 每组合法性校验。 */
+/** Expand the :: abbreviation and validate every group. */
 function expandDoubleColon(s: string): readonly number[] | null {
   const dcIdx = s.indexOf("::");
   let parts: string[];

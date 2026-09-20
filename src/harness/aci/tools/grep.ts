@@ -1,23 +1,30 @@
 /**
- * grep 工具 — 搜面契约（specs/aci-file-search-surface.md D2–D7 / SC4–SC10）。
+ * grep tool — search-surface contract.
  *
- * 行为概要：
- *   - 出法（D2）：`paths`（默认，唯一相对路径）/ `content`（`path:line:text`）/
- *     `count`（`path:条数` + 全库 `total:`）。入参别名 `files_with_matches`
- *     在进引擎前归一为 `paths`（搜法仍 paths，不是第四种出法）。
- *   - 分页（D3）：`offset` + `head_limit`（默认 50、硬顶 2000）切**已排序**
- *     名单；排序（path 再行号）发生在切片之前。偏移越过最后一条且本次有命中
- *     → 精确回执 `No entries at this offset`；无匹配 → 空串。
- *   - 收窄（D4）：`path`（目录）/ `glob`（文件名模式）/ `type`（语言，二者并列）。
- *     未知 `type` 与坏正则是**两种** typed 错误（SC10）。
- *   - 行窗（D5）：`also` + `within_lines`（默认 5）是**过滤**，只在窗内找第二段。
- *   - 引擎（D6 / ADR-0089）：有 rg 时匹配只出 rg（不再 JS 再滤）；起不来
- *     （不存在 / ENOENT / 不可执行）→ Node 遍历 + JS `RegExp` 编得过的
- *     pattern，调用仍成功。命中集不必与 rg 一致 —— Node 不模仿 rg 的
- *     默认引擎拒绝集。**不** 回落到 PATH 上的 `rg`。
+ * Behavior:
+ *   - Output modes: `paths` (default, workspace-relative only) / `content`
+ *     (`path:line:text`) / `count` (`path:count` + repo-wide `total:`). The
+ *     input alias `files_with_matches` normalizes to `paths` before the
+ *     engine — it is not a fourth mode.
+ *   - Pagination: `offset` + `head_limit` (default 50, hard cap 2000) slice
+ *     the **already sorted** list; sorting (path, then line number) happens
+ *     before slicing. An offset past the last entry with hits → exact
+ *     receipt `No entries at this offset`; no matches → empty string.
+ *   - Narrowing: `path` (directory) / `glob` (file-name pattern) / `type`
+ *     (language). Unknown `type` and a bad regex are **two distinct** typed
+ *     errors.
+ *   - Line window: `also` + `within_lines` (default 5) is a **filter** — the
+ *     second literal is only sought inside the window.
+ *   - Engine (ADR-0089): when rg is available, matches come only from rg
+ *     (no second JS filtering). When it cannot start (missing / ENOENT /
+ *     not executable) → Node walk + JS `RegExp` on compilable patterns; the
+ *     call still succeeds. The hit set need not match rg — Node does not
+ *     imitate rg's default-engine reject set. There is **no** fallback to a
+ *     PATH `rg`.
  *
- * 复杂度（SC12）：flag 解析 / argv / 行解析 / 行窗 / 组构造 / 排序 / 分页 /
- * 投影各自独立成模块，本文件只做装配与引擎分派。
+ * Complexity: flag parsing / argv / line parsing / window / group build /
+ * sort / pagination / projection each live in their own module; this file
+ * only assembles and dispatches engines.
  */
 
 import { realpath, stat } from "node:fs/promises";
@@ -51,9 +58,9 @@ import type { QuerySpec } from "../search/types.js";
 
 export type { SpawnFn } from "../search/rg-engine.js";
 
-/** 依赖注入：覆盖点（默认 = 生产值）。 */
+/** Dependency injection: override points (defaults = production values). */
 export interface GrepToolDeps {
-  /** 替换引擎 spawn（最常见用法：模拟安装根二进制缺失以驱动 Node 降级路径）。 */
+  /** Replace engine spawn (typically: simulate a missing install-root binary to drive the Node degrade path). */
   readonly spawn?: SpawnFn;
   /**
    * Stable project identity root. When present, absolute paths (and relative
@@ -67,14 +74,16 @@ export interface GrepToolDeps {
    */
   readonly allowProjectIdentityRoot?: boolean;
   /**
-   * 覆盖钉死二进制路径。缺席 → `<resolveInstallRoot()>/vendor/ripgrep/...`。
-   * 测试可指向不存在的路径来驱动「安装根二进制不存在」这一 D6 分支。
+   * Override the pinned binary path. Absent → `<resolveInstallRoot()>/vendor/ripgrep/...`.
+   * Tests may point at a nonexistent path to drive the "install-root binary
+   * missing" branch.
    */
   readonly engineBinaryPath?: string;
   /**
-   * 范围闸的文件数上限覆盖（SC5）。缺席 → `GREP_SCOPE_FILE_LIMIT`（生产值）。
-   * 测试注入小值以构造「过大树」而不必真造上万文件；两条引擎都读它，所以
-   * 同一个 `path` 在 rg / Node 路径上得到同一个判定。
+   * Scope-gate file-count override. Absent → `GREP_SCOPE_FILE_LIMIT`
+   * (production value). Tests inject a small value to simulate an
+   * oversize tree; both engines read it, so the same `path` gets the same
+   * verdict on the rg and Node paths.
    */
   readonly scopeFileLimit?: number;
 }
@@ -110,9 +119,10 @@ export function createGrepTool(
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
-    // T6 D2: per-handler batch snapshot —— root 在入口读一次冻结，贯穿整条
-    // 路径（compileInput → rg / Node 扫）。handler 内后续 cell 翻转不渗透
-    // 进本次调用。cell 缺席 → 退到工厂捕获 root（legacy parity）。
+    // Per-handler batch snapshot: root is read once at entry and frozen for
+    // the whole path (compileInput → rg / Node scan). Later cell flips inside
+    // the handler do not leak into this call. No cell → fall back to the
+    // factory-captured root (legacy parity).
     rejectRetiredLimitField(input);
     const rootAtCall = readRoot(root);
     const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
@@ -126,23 +136,28 @@ export function createGrepTool(
     const binaryPath =
       deps?.engineBinaryPath ??
       engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
-    // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
+    // Sampling spec: with `also` present, read content lines (the line
+    // window needs line numbers to judge).
     const sampleSpec = engineSpecFor(compiled.spec);
-    // 主 pattern 的编译**只在 Node 降级路径里**触发（ADR-0089）：有 rg 时
-    // 匹配只出 rg，rg 自身的 pattern 错误由 rg 子进程（rc=2）报；rg 起不来
-    // 时 Node 遍历 + `RegExp` 出结果，调用仍成功。共享入口不预判 rg 路径的
-    // pattern 合法性 —— rg 接受而 JS 拒绝的构造（PCRE2 命名组 `(?P<n>abc)`、
-    // inline flag `(?i)abc` 等）必须能走通 rg 路径。
+    // Compiling the main pattern happens **only on the Node degrade path**
+    // (ADR-0089): with rg, matches come only from rg and rg's own pattern
+    // errors are reported by the rg subprocess (rc=2); when rg cannot start,
+    // the Node walk + `RegExp` still succeed. The shared entry point does not
+    // pre-judge pattern legality for the rg path — constructs rg accepts but
+    // JS rejects (PCRE2 named groups `(?P<n>abc)`, inline flag `(?i)abc`)
+    // must be able to travel the rg path.
     const explicitFileRel = await explicitFileRelative(compiled);
     const readLines = (path: string) =>
       readWorkspaceLines(compiled.workspaceRoot, path, {
         allowOversize: path === explicitFileRel,
       });
 
-    // SC5 范围闸：两条引擎**共用**同一道前置判定，因此同一个 `path` 的
-    // 成败不随引擎变。显式单文件 `path` 与肯定 `glob` 豁免（见 scope-guard）。
-    // 抛出的 ToolExecutionError 由 executor 净化后作为该 call 的
-    // `execution_failed` tool_result 回到模型 —— 不是回合级 timeout。
+    // Scope gate: both engines **share** this pre-check, so success/failure
+    // for the same `path` does not vary by engine. Explicit single-file `path`
+    // and affirmative `glob` are exempt (see scope-guard). The thrown
+    // ToolExecutionError is sanitized by the executor and returned to the
+    // model as this call's `execution_failed` tool_result — not a turn-level
+    // timeout.
     await assertScopeWithinLimit({
       workspaceRoot: compiled.workspaceRoot,
       searchRoot: compiled.searchRoot,
@@ -178,19 +193,22 @@ export function createGrepTool(
   });
 }
 
-/** 模型可见文案（D7）：schema 与描述提为模块常量，工厂保持短小。 */
+/** Model-visible text: schema and description live as module constants, keeping the factory short. */
 export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan when that engine is unavailable — the Node fallback walks files and matches with JavaScript RegExp and may answer differently from ripgrep.`;
 
 /**
- * 输入 schema（与 `options.ts` 的解析层是同一契约的两道防线）。
+ * Input schema (two layers of the same contract as the parsing in
+ * `options.ts`).
  *
- * 不开 `additionalProperties: false` —— SC10 / D4 承诺「退役字段 `limit` /
- * `grep_limit`」要给到模型一条 typed 指引（指向 `head_limit`），但 ajv 的
- * `additionalProperties` 泛化消息（`must NOT have additional properties`）
- * 会抢先于 handler 里的 `rejectRetiredLimitField` 命中，模型只看到前者。
- * 改为放行 extra，由 handler 第 107 行的 `rejectRetiredLimitField` 接住退役
- * 名（拒）；其它真正未知的字段由 `compileInput → parseQuerySpec` 静默忽略
- * （与 `additionalProperties:true` 同形，不变 schema 已知的必填与类型闸门）。
+ * `additionalProperties: false` is deliberately not set — retired fields
+ * `limit` / `grep_limit` must give the model a typed pointer (to
+ * `head_limit`), but ajv's generic `additionalProperties` message
+ * (`must NOT have additional properties`) would preempt the handler's
+ * `rejectRetiredLimitField` and be all the model sees. Extra properties
+ * pass the schema; the handler's `rejectRetiredLimitField` (step 1) rejects
+ * retired names; genuinely unknown fields are silently ignored by
+ * `compileInput → parseQuerySpec` (same shape as
+ * `additionalProperties:true`, without weakening required/type gates).
  */
 export const GREP_INPUT_SCHEMA = {
   type: "object",
@@ -199,10 +217,11 @@ export const GREP_INPUT_SCHEMA = {
     path: { type: "string" },
     output: {
       type: "string",
-      // 出法枚举 + 入参别名（D2），从 options 的 SSOT 派生。ajv 在 handler
-      // 之前校验（registry 构造期编译），别名不进枚举就永远到不了
-      // `readOutput` 的归一逻辑；schema 里带上它，出法仍只有三种（别名归一
-      // 为 paths）。
+      // Output-mode enum + input alias, derived from the options SSOT. ajv
+      // validates before the handler (compiled at registry construction), so an
+      // alias outside the enum would never reach `readOutput`'s normalization;
+      // including it in the schema still leaves exactly three output modes
+      // (the alias normalizes to paths).
       enum: [...GREP_OUTPUT_VALUES],
       default: "paths",
     },
@@ -219,8 +238,9 @@ export const GREP_INPUT_SCHEMA = {
 } as const;
 
 /**
- * 搜索根是文件时的 workspace 相对路径（与 `node-scan` 吐出的 relPath 同形）；
- * 目录 / 不存在的路径 → `undefined`（体积闸照常生效）。
+ * Workspace-relative path when the search root is a file (same shape as
+ * `node-scan`'s relPath); directory / nonexistent path → `undefined` (the
+ * size gate still applies).
  */
 async function explicitFileRelative(
   compiled: CompiledInput
@@ -231,12 +251,14 @@ async function explicitFileRelative(
 }
 
 /**
- * 引擎分派（D6 / SC9 / ADR-0089）。
+ * Engine dispatch (ADR-0089).
  *
- * 生产路径只 exec 安装根钉死二进制；rg 在场 → 直接用 rg 的命中（不再 JS
- * 再滤）。起不来 → Node 遍历 + JS `RegExp`（`compilePattern` 已编过的），
- * 调用仍成功。命中集允许两条路径不同（Node 不模仿 rg 的默认引擎拒绝集）。
- * 这里**没有** PATH `rg` 的分支 —— 那是契约明令禁止的凑合路径。
+ * Production only execs the install-root pinned binary; rg present → use rg
+ * hits directly (no second JS filtering). Cannot start → Node walk + JS
+ * `RegExp` (already compiled by `compilePattern`), call still succeeds. Hit
+ * sets may differ between paths (Node does not imitate rg's default-engine
+ * reject set). There is **no** PATH `rg` branch — the contract forbids that
+ * stopgap path.
  */
 async function resolveEngineResult(input: {
   readonly binaryPath: string | undefined;
@@ -255,10 +277,11 @@ async function resolveEngineResult(input: {
   });
   if (fromRg.kind !== "unavailable") return fromRg;
 
-  // Node 降级路径（ADR-0089）：此处才编主 pattern —— rg 路径不预判合法性，
-  // rg 接受而 JS 拒绝的构造（PCRE2 命名组 / inline flag 等）必须能走通 rg
-  // 路径。Node 侧编不过 → typed 拒绝（文案点名 pattern，与未知 type 的失败
-  // 域互不混同，SC10）。
+  // Node degrade path (ADR-0089): the main pattern is compiled only here —
+  // the rg path does not pre-judge legality, and constructs rg accepts but JS
+  // rejects (PCRE2 named groups / inline flags) must travel the rg path. If
+  // the Node side cannot compile → typed rejection (naming the pattern, not
+  // conflated with the unknown-type failure domain).
   const regex = compilePattern(
     input.sampleSpec.pattern,
     input.sampleSpec.ignoreCase

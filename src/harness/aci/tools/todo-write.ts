@@ -1,7 +1,7 @@
 /**
- * #440 T2/T3 + #903 T2 + ADR-0085 / specs/agent-control-surface.md Slice C:
- * todo_write tool — session-scope ledger with mode routing, governance limits,
- * and atomic write.
+ * todo_write tool — session-scope ledger with mode routing, governance
+ * limits, and atomic write. See ADR-0085 / specs/agent-control-surface.md
+ * Slice C.
  *
  * Shape (ADR-0085): every item carries a stable **id**, and the main path is
  * three operations —
@@ -13,25 +13,29 @@
  * `check` is folded into `update` (status=completed). `replace` is demoted to
  * a whole-table escape hatch (ADR-0046 snapshot discipline unchanged).
  *
- * D1: single-tool + mode enum shape.
- * D2: file at `<会话文件夹根>/<conversationId>/todos.md` (T2)。
- *    工厂的 `todoDir` 字段语义升级:由「surface 目录」改为「会话项目目录」
- *    (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`),per-conv
- *    文件路径在调用期由 `resolveConversationTodoPath` 派生。
- * D4: file limit 64 KB; per-item limit 500 codepoints; tmp + rename
- *    atomic write (negative-phrasing rejection is NOT applied — todo items
- *    like "别忘了跑测试" are legitimate tasks; only memory_save rejects
- *    negative phrasing).
- * D5: short receipt; no pending count; no envelope meta.
- * D7: write / non-concurrency-safe / block / default timeout tier; the
- *    code-level permission rule in policy.ts:codeBuiltInRules allows the
- *    read-only sub-mode (`mode === "read"`) to bypass ask.
+ * Single-tool + mode enum shape.
+ * The file lives at `<session-project-root>/<conversationId>/todos.md`.
+ *   The factory's `todoDir` field was upgraded from "surface directory" to
+ *   "session project directory"
+ *   (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`); the
+ *   per-conv file path is derived at call time by
+ *   `resolveConversationTodoPath`.
+ * Governance: file limit 64 KB; per-item limit 500 codepoints; tmp + rename
+ *   atomic write (negative-phrasing rejection is NOT applied — todo items
+ *   like "remember not to forget the tests" are legitimate tasks; only
+ *   memory_save rejects negative phrasing).
+ * Short receipt; no pending count; no envelope meta.
+ * write / non-concurrency-safe / block / default timeout tier; the
+ *   code-level permission rule in policy.ts:codeBuiltInRules allows the
+ *   read-only sub-mode (`mode === "read"`) to bypass ask.
  *
- * #903: `mode = "replace"` 扩展 — 整张列表换成新现行,旧 `todos.md` 改名为
- * 同目录快照 `todos.<unixMs>.<hex>.md` 保留历史(ADR-0046:快照与现行同会话
- * 目录,T2 升级);空 / 缺席现行不建快照。replace 仍是 write(默认 ask)。
+ * `mode = "replace"` extension — swap the whole list for the new current
+ * table, renaming the old `todos.md` to a same-directory snapshot
+ * `todos.<unixMs>.<hex>.md` to keep history (ADR-0046: snapshot and current
+ * live in the same session directory). Empty / absent current file → no
+ * snapshot. replace remains write (default ask).
  *
- * Ownership boundary (D6): the worker assembly path does not inject todoDir
+ * Ownership boundary: the worker assembly path does not inject todoDir
  * → todo_write is excluded from the worker tool surface at registry
  * construction time. Concurrency among write calls inside the same main
  * loop is not blocked at the file level — but each call is
@@ -76,14 +80,14 @@ export const TODO_WRITE_MODES = ["read", "add", "update", "replace"] as const;
 export type TodoWriteMode = (typeof TODO_WRITE_MODES)[number];
 
 /**
- * #645 T1: ledger filename relative to `todoDir` (D2: `<todoDir>/todos.md`).
+ * Ledger filename relative to `todoDir` (`<todoDir>/todos.md`).
  * Exported (additive) so the agent-status bar reads the same file the writer
  * owns — no second copy of the filename knowledge.
  */
 export const TODOS_FILE = "todos.md";
 
 /**
- * #646 T2 / ADR-0028: skip clause — when the next step alone finishes the
+ * ADR-0028: skip clause — when the next step alone finishes the
  * user's request (no multi-round progress to watch), do the work directly
  * without a list; the positive trigger stays "multi-step across multiple
  * turns → build a list". The clause also names how an existing list stays
@@ -91,17 +95,16 @@ export const TODOS_FILE = "todos.md";
  * the ADR-0085 main path.
  *
  * Lives ONLY in the tool description (never in the status bar, never in the
- * system prompt). Positively phrased English — passes the D9 NEGATIVE_PHRASES
+ * system prompt). Positively phrased English — passes the negative-phrase
  * guards verbatim (no "simple task", no negative imperatives). Exported as
- * SSOT so the description assembly and the bar-purity test
- * (agent-status-read-rule.test.ts T2 ③) reference the same symbol instead
- * of copying the text.
+ * SSOT so the description assembly and the bar-purity test reference the
+ * same symbol instead of copying the text.
  */
 export const TODO_WRITE_SKIP_CLAUSE =
   "When the next step alone finishes the user's request, work directly without a list; build a list when the work extends across multiple turns and progress needs tracking across rounds, and keep it current by updating each item's status by id as work advances.";
 
 /**
- * Governance limits (D4): file size capped at 64 KB (much smaller than the
+ * Governance limits: file size capped at 64 KB (much smaller than the
  * memory_save 1 MB ceiling); per-item text capped at 500 codepoints
  * (matches the recent-user-tasks excerpt discipline; `[...item].length`
  * counts Unicode code points, not UTF-16 code units, so emoji and CJK are
@@ -112,41 +115,48 @@ export const MAX_ITEM_CODEPOINTS = 500;
 
 export interface TodoWriteToolDeps {
   /**
-   * 会话项目目录根(T2 / session-folder-consolidation):
-   *   `resolveProjectSessionDir(baseDir, projectIdentityRoot)` 的输出,
-   *   即 `<baseDir>/projects/<basename>-<sha1[:12]>`。
-   * Per-conversation 文件路径在调用期由 `resolveConversationTodoPath`
-   * 派生(`ctx.conversationId` 在场 → `<projectDir>/<sanitized id>/todos.md`,
-   * 缺席 → `<projectDir>/todos.md` 旧布局)。
+   * Session project directory root:
+   *   the output of `resolveProjectSessionDir(baseDir, projectIdentityRoot)`,
+   *   i.e. `<baseDir>/projects/<basename>-<sha1[:12]>`.
+   * The per-conversation file path is derived at call time by
+   * `resolveConversationTodoPath` (`ctx.conversationId` present →
+   * `<projectDir>/<sanitized id>/todos.md`; absent → legacy
+   * `<projectDir>/todos.md`).
    *
-   * T2 之前这里叫「surface 目录」(`~/.iknow/todos/<surface>/`),T2 起改成
-   * 「会话项目目录」 —— 同一会话从 chat / serve / TUI 三入口注入同一根,
-   * `<surface>` 分裂消除,关键判据(SC5/T2 关键判据)。
+   * This used to be called the "surface directory"
+   * (`~/.iknow/todos/<surface>/`); it is now the session project directory —
+   * the same session injected from chat / serve / TUI shares one root, so the
+   * `<surface>` split is eliminated.
    */
   readonly todoDir: string;
   /**
-   * ADR-0085 / SC9:调用方能力。worker 与父会话共用**同一本账**,但
-   * **添加仅父会话** —— worker 的 `add` 是工具自身的 typed 拒绝(见 handler),
-   * 工具本身仍在 worker 工具面上(模型读得到拒绝原因,不是「工具不在场」)。
+   * ADR-0085: caller capability. The worker and the parent session share
+   * **the same ledger**, but **adding is parent-only** — a worker's `add` is
+   * a typed rejection from the tool itself (see handler), and the tool stays
+   * on the worker surface (the model reads the rejection reason, rather than
+   * seeing "tool absent").
    *
-   * `conversationId` 是 ctx 的**回退源**:worker 进程的 executor 不合成
-   * `ctx.conversationId`(worker deps 无 conversationId),父会话经
-   * envelope 透传的会话 id 由装配层放进这里;显式 `ctx.conversationId`
-   * 在场时以 ctx 为准。`canAdd: false` 时 `add` typed 拒绝,`read` /
-   * `update` / `replace` 照常(共享账本 = worker 能读能更)。
+   * `conversationId` is the ctx **fallback source**: the worker process's
+   * executor does not synthesize `ctx.conversationId` (worker deps have no
+   * conversationId), so the parent session's id is passed through the
+   * envelope and placed here by the assembly layer; when
+   * `ctx.conversationId` is present it wins. With `canAdd: false`, `add` is
+   * a typed rejection, while `read` / `update` / `replace` proceed normally
+   * (shared ledger = the worker can read and update).
    *
-   * 缺省 → 旧行为逐字节不变(canAdd 视为 true、路径只看 ctx)。
+   * Omitted → old behavior, byte-identical (canAdd treated as true, path
+   * driven only by ctx).
    */
   readonly actor?: TodoWriteActor;
   /** Test seam: deterministic tmp suffix (defaults to random hex). */
   readonly randomBytes?: (n: number) => Buffer;
 }
 
-/** ADR-0085 / SC9:调用方能力(父 vs worker)与所属会话。 */
+/** ADR-0085: caller capability (parent vs worker) and owning session. */
 export interface TodoWriteActor {
-  /** 所属会话 id;`ctx.conversationId` 缺席时的回退源。 */
+  /** Owning session id; fallback source when `ctx.conversationId` is absent. */
   readonly conversationId?: string;
-  /** `add` 是否可用(父会话 true;worker false —— 共享账本只读+更新)。 */
+  /** Whether `add` is available (parent true; worker false — read+update only on the shared ledger). */
   readonly canAdd: boolean;
 }
 
@@ -174,23 +184,25 @@ export interface TodoWriteActor {
  */
 export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
   const random = deps.randomBytes ?? ((n: number) => randomBytes(n));
-  // ADR-0085 / SC9:父会话缺省 canAdd=true(旧行为);worker 装配显式 false。
+  // ADR-0085: parent sessions default to canAdd=true (old behavior); worker assembly sets it explicitly false.
   const canAdd = deps.actor?.canAdd !== false;
 
   return Object.freeze({
     name: "todo_write",
     description:
-      // ADR-0085:四 mode 各自一句分述 —— 删除是 update 族(update + delete:true +
-      // id),不立第五 mode;replace 只收 items(ADR-0046 / G2),无单数 item 别名。
-      // D9 正面引导:无 "do not" / "never" / "simple task" 等负面措辞。
+      // ADR-0085: one sentence per mode — deletion belongs to the update
+      // family (update + delete:true + id), not a fifth mode; replace takes
+      // only items (ADR-0046), no singular item alias.
+      // Positive guidance only: no "do not" / "never" / "simple task" wording.
       "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. The ledger supports four modes. mode=read lists every current item as `- [status] [id] subject`. mode=add appends one `item` or several `items` at once; the receipt names the new ids. mode=update changes an item's subject and/or status by id, and removes that item by passing id with delete:true. mode=replace swaps the whole table for a new `items` array; the previous ledger is renamed to a same-directory snapshot. Update by id keeps the table stable across rounds. Designed for tasks across multiple turns where progress needs to persist between rounds. " +
       TODO_WRITE_SKIP_CLAUSE,
     inputSchema: {
       type: "object",
       properties: {
         mode: { type: "string", enum: [...TODO_WRITE_MODES] },
-        // add: 单条 item 或一次多条 items(ADR-0085 / G2:多步计划一次写完)。
-        // 二者互斥,per-mode 字段互斥在 parseInput 阶段报错。
+        // add: one `item` or many `items` at once (ADR-0085: write a
+        // multi-step plan in one call). The two are mutually exclusive;
+        // per-mode field exclusion is reported at the parseInput stage.
         item: {
           type: "string",
           description:
@@ -202,7 +214,7 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
           description:
             "Array of subject texts; mode=add appends them, mode=replace swaps the whole table for them.",
         },
-        // update: 目标条目 id + 至少一个改动字段。
+        // update: target entry id + at least one changed field.
         id: {
           type: "string",
           description:
@@ -234,8 +246,9 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       timeoutTier: "default",
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
-      // T11 收敛:filePath 不再工厂期预拼死路径 —— todoDir 本身按 D3 仍冻结,
-      // 但 `join` 从装配期挪到调用期,语义逐字节一致(`join` 是纯函数)。
+      // filePath is no longer baked at factory time — todoDir itself stays
+      // frozen, but `join` moved from assembly time to call time, semantics
+      // byte-identical (`join` is a pure function).
       // Per-conversation isolation: ledger resolves at CALL time from
       // ctx.conversationId (plumbed by the executor since #017) — one
       // conversation, one ledger. Absent ctx → legacy shared-root layout.
@@ -248,8 +261,10 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
         case "read":
           return await readLedger(filePath);
         case "add":
-          // ADR-0085 / SC9:添加仅父会话。worker 与父共用同一本账但不得追加
-          // —— 拒绝在工具自身、在任何写盘之前,且先于文件的读取(不半写)。
+          // ADR-0085: adding is parent-only. The worker shares the parent's
+          // ledger but may not append — the rejection lives in the tool
+          // itself, before any write and even before reading the file (no
+          // half-write).
           if (!canAdd) throw addIsParentOnlyError();
           return await addItems(filePath, params.subjects, random);
         case "update":
@@ -266,8 +281,9 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
 // ---------------------------------------------------------------------------
 
 /**
- * ADR-0085 / SC9:worker `add` 的 typed 拒绝。措辞要让模型读出「为什么」+
- * 「还能做什么」—— 唯一写出这条禁令的地方是工具自身(权限层无 actor 维度)。
+ * ADR-0085: typed rejection for a worker's `add`. The wording must let the
+ * model read both "why" and "what it can still do" — the tool itself is the
+ * only place this rule is stated (the permission layer has no actor axis).
  */
 function addIsParentOnlyError(): ToolExecutionError {
   return new ToolExecutionError(
@@ -314,11 +330,14 @@ async function replaceLedger(
   subjects: ReadonlyArray<string>,
   random: (n: number) => Buffer
 ): Promise<string> {
-  // #903 SC2/SC3:把现行 todos.md 换成新列表,旧文件留同目录快照
-  // (`todos.<unixMs>.<hex>.md`)。空 / 缺席现行不建快照。失败纪律:
-  // limit 校验在前(rename 之前),rename 失败 typed-error 不毁现行,
-  // rename 成功但后续原子写失败 → 快照已写好,现行要么旧内容要么完整
-  // 新内容(原子写半截由 writeTodosAtomic 保证不存在)。
+  // Swap the current todos.md for the new list, keeping the old file as a
+  // same-directory snapshot (`todos.<unixMs>.<hex>.md`). Empty / absent
+  // current → no snapshot. Failure discipline: the limit check comes first
+  // (before rename); a failed rename throws typed-error without destroying
+  // the current file; a successful rename followed by a failed atomic write
+  // → the snapshot is already written and the current file is either the old
+  // content or the complete new content (a half-written atomic file cannot
+  // exist, guaranteed by writeTodosAtomic).
   const newContent = serializeLedger(pendingItemsFromSubjects(subjects));
   assertWithinFileLimit(newContent);
   const current = await readTodos(filePath);
@@ -366,8 +385,9 @@ interface ReplaceParams {
 type ParsedInput = ReadParams | AddParams | UpdateParams | ReplaceParams;
 
 /**
- * Per-mode 字段互斥:每个 mode 只认自己那一组字段(表驱动,新增 mode 只加
- * 一行)。`add` 的 item/items 二选一在 parseAddInput 内单独报错。
+ * Per-mode field exclusion: each mode recognizes only its own field set
+ * (table-driven, so a new mode adds just one row). The item/items
+ * either-or for `add` is reported separately inside parseAddInput.
  */
 const FORBIDDEN_KEYS: Readonly<Record<TodoWriteMode, ReadonlyArray<string>>> = {
   read: ["item", "items", "id", "subject", "status", "delete"],
@@ -423,7 +443,8 @@ function parseAddInput(raw: Record<string, unknown>): AddParams {
     );
   }
   if (!hasItems) {
-    // 缺省 item → "" 走 validateItemText 触发「非空」提示(错误文案统一)。
+    // Missing item → "" flows through validateItemText to trigger the
+    // "non-empty" message (uniform error wording).
     const subject = hasItem ? requireStringValue(raw.item, "item") : "";
     validateItemText(subject);
     return { mode: "add", subjects: [subject] };
@@ -519,7 +540,7 @@ function parseOptionalStatus(value: unknown): TodoItemStatus | undefined {
   return value as TodoItemStatus;
 }
 
-/** `delete` 只接受 boolean;false 视为「不删除」,仍需别的改动字段。 */
+/** `delete` accepts boolean only; false means "not deleting", so another change field is still required. */
 function parseDeleteFlag(value: unknown): true | undefined {
   if (value === undefined || value === false) return undefined;
   if (value === true) return true;
@@ -527,9 +548,9 @@ function parseDeleteFlag(value: unknown): true | undefined {
 }
 
 /**
- * 单一非空 + 500 codepoint 校验(dup-validate:add 单条 / add 数组 / update
- * subject / replace items 共用)。D4:emoji / CJK 按 Unicode code point 计数
- * (`[...s].length`)。
+ * Single non-empty + 500-codepoint validation (shared by add single / add
+ * array / update subject / replace items). Emoji / CJK are counted as
+ * Unicode code points (`[...s].length`).
  */
 function validateItemText(value: string): void {
   if (value.length === 0 || codepointLength(value) > MAX_ITEM_CODEPOINTS) {
@@ -593,9 +614,11 @@ async function writeTodosAtomic(
 }
 
 /**
- * #903 SC3:快照旧现行 `todos.md` → 同目录 `todos.<unixMs>.<hex>.md`。
- * 纯 rename(原子)—— 文件内容不变,只是改路径;rename 失败抛 typed-error
- * 且不修改现行(因为 rename 在跨设备 / 权限缺失时不会半改)。
+ * Snapshot the old current `todos.md` → same-directory
+ * `todos.<unixMs>.<hex>.md`. Pure rename (atomic) — file content unchanged,
+ * only the path moves; a failed rename throws typed-error and leaves the
+ * current file untouched (rename never half-applies across devices / on
+ * permission errors).
  */
 async function snapshotCurrentTodos(
   filePath: string,

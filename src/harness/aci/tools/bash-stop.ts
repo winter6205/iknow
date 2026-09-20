@@ -1,15 +1,17 @@
 /**
- * #502 T4 — bash_stop ACI 工具（Track A 模型操作面）。
+ * bash_stop ACI tool — the model-facing surface for background tasks.
  *
- * 用途：终止由 `bash` 工具以 `background: true` 启动的后台任务。manager.stop
- * 实现 host 侧 kill(-pgid)：SIGTERM → 2s 宽限 → SIGKILL（manager.ts:477-527）；
- * 对已终态任务幂等成功（合法态，不抛错、不二次发信号，kill_race 语义 T2 定稿）。
+ * Terminates a task spawned via `bash(background: true)`. manager.stop
+ * implements host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL; stopping
+ * an already-terminal task is an idempotent success (a legal state — no
+ * throw, no second signal; kill_race semantics settled with the tool).
  *
- * Permission（#502 票明示）：category "write" → 默认 ask。后台任务终止是
- * 有副作用的动作（杀掉正在跑的长驻服务 / 构建），模型调用需用户确认，
- * 与 todo_write 的 write→ask 同形态。
+ * Permission: category "write" → default ask. Terminating a background task
+ * has side effects (killing a live long-running service / build), so the
+ * model's call needs user confirmation — same write→ask shape as todo_write.
  *
- * 描述（D9 决议）：仅正面引导条件（何时用 / 与什么工具配对），不写负面禁令词。
+ * Description: positively-framed guidance only (when to use / which tools
+ * to pair with), no negative prohibitions.
  */
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -27,15 +29,16 @@ interface BashStopInput {
 }
 
 /**
- * 工厂：createBashStopTool(deps) — bash_stop 工具（第 30 件）。
+ * Factory: createBashStopTool(deps) — the bash_stop tool.
  *
- * 返回的 AciToolDef 满足：
+ * The returned AciToolDef satisfies:
  *   - name === "bash_stop"
- *   - inputSchema: { task_id 必填 }，additionalProperties:false
- *   - aci 元数据：write / NOT concurrency-safe / block / default tier
- *   - handler 输出 JSON `{task_id, status:"stopped"}`；task_id 空串透传给
- *     manager → empty_task_id typed-error（不拦截）。manager.stop 对未知
- *     task_id 抛 task_not_found → 渲染 `${kind}: ${context}`。
+ *   - inputSchema: { task_id required }, additionalProperties:false
+ *   - aci metadata: write / NOT concurrency-safe / block / default tier
+ *   - handler emits JSON `{task_id, status:"stopped"}`; an empty task_id
+ *     passes through to the manager → empty_task_id typed error (no
+ *     interception). manager.stop throws task_not_found for unknown ids →
+ *     rendered as `${kind}: ${context}`.
  */
 export function createBashStopTool(
   opts: CreateBashStopToolOptions
@@ -46,14 +49,17 @@ export function createBashStopTool(
   ): Promise<string> => {
     const parsed = compileStopInput(input);
     try {
-      // #502 T5 / ADR-0021 D1.4:ctx.conversationId 透传 manager 做 scope 过滤。
-      // 跨 conversation 停他人任务 → task_not_in_scope（manager 权威判别）。
+      // ADR-0021: pass ctx.conversationId to the manager for scope
+      // filtering. Stopping another conversation's task →
+      // task_not_in_scope (the manager is the authority).
       await opts.backgroundManager.stop(parsed.task_id, ctx?.conversationId);
     } catch (err) {
       if (err instanceof ToolExecutionError) throw err;
-      // typed-error catch 契约：kind 判别后用 renderTaskError 渲染 `${kind}:
-      // ${context}`，禁 [object Object]。manager 抛 plain object（判别联合
-      // BackgroundTaskError），不是 Error instance，按契约走 renderTaskError。
+      // Typed-error catch contract: discriminate `kind`, then render via
+      // renderTaskError as `${kind}: ${context}` — never [object Object].
+      // The manager throws plain objects (the BackgroundTaskError
+      // discriminated union), not Error instances, so renderTaskError is
+      // the contract path.
       throw new ToolExecutionError(
         `bash_stop: ${renderTaskError(err as BackgroundTaskError)}`
       );
@@ -88,9 +94,10 @@ export function createBashStopTool(
 }
 
 /**
- * 输入编译 + 严格校验：task_id 必填且为字符串（允许空串 → manager 走
- * empty_task_id typed-error 透传；非对象 / 缺 task_id / 类型错 →
- * ToolExecutionError 自身防御，schema 之外的兜底）。
+ * Input compile + strict validation: task_id is required and must be a
+ * string (empty string allowed → the manager's empty_task_id typed error
+ * passes through; non-object / missing task_id / wrong type →
+ * ToolExecutionError as this layer's own defense beyond the schema).
  */
 function compileStopInput(input: unknown): {
   readonly task_id: string;

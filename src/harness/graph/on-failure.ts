@@ -1,38 +1,40 @@
 /**
- * live-graph-phase2 T1 — `onFailure` 失败边校验（spec SC4–SC5 / Changes /
- * ADR-0053、0058–0060、0066）。
+ * `onFailure` failure-edge validation.
  *
- * 分层（complexity-anti-drift）：本模块只做"线性扫描 + 拒绝清单"，不改
- * `validateGraph` / `topoWaves` 的 Kahn；环检测只对 `deps`，仅因
- * `onFailure` 形成的圈合法（ADR-0058/0059）。
+ * Layering: this module is only a linear scan + rejection list; it does not
+ * touch the Kahn logic in `validateGraph` / `topoWaves`. Cycle detection
+ * covers `deps` only — cycles formed solely by `onFailure` edges are legal.
  *
- * 三类 typed 拒绝：
- *   - 目标不在本批 ids → `onFailure targeting unknown node "X"`；
- *   - 目标在账本上已冻结（done / failed） → `onFailure targeting frozen
- *     node "X" (done|failed)`，覆盖跨调用冻结语义（ADR-0060：done 永
- *     不因失败边再跑）；
- *   - `onFailure` 指向自己（self）合法 —— spec Changes「失败回走到未冻
- *     旧 id 时 spawn 次数增加」的单格再进入显式表达（ADR-0053）。
+ * Three typed rejection classes:
+ *   - target not in this batch's ids → `onFailure targeting unknown node "X"`;
+ *   - target already frozen on the ledger (done / failed) → `onFailure
+ *     targeting frozen node "X" (done|failed)`, covering cross-call freeze
+ *     semantics (a done node is never re-run because of a failure edge);
+ *   - self-targeting `onFailure` is legal — the explicit form of a
+ *     single-cell re-entry into an unfrozen id on failure.
  *
- * 边界：本模块是纯函数，只读账本 `isFrozen` / `statusOf`；不 import
- * scheduler / node-executor / loop-engine。
+ * Boundary: pure function reading only the ledger's `isFrozen` /
+ * `statusOf`; imports no scheduler / node-executor / loop-engine.
  */
 
 import type { LiveGraphLedger } from "./ledger.js";
 
-/** 单个节点的最小形态（readNodes 已识别完 id/task/deps 后交给校验层）。 */
+/** Minimal node shape (readNodes has already recognized id/task/deps before handing off to validation). */
 export interface OnFailureNode {
   readonly id: string;
   readonly onFailure?: string;
 }
 
 /**
- * 失败边校验：对每个声明 `onFailure` 的节点检查目标是否合法（在本批 ids
- * 中、不在账本已冻结）。返回拒绝原因字符串数组；空数组 = 通过。
+ * Failure-edge validation: for each node declaring `onFailure`, check the
+ * target is legal (present in this batch's ids, not frozen on the ledger).
+ * Returns rejection reason strings; an empty array = pass.
  *
- * `nodes` 应为本次 `run_graph` 提交的全部节点（已通过 schema/readNodes
- * 的 id/task/deps 形状校验）。`ledger` 缺席 = 无跨调用冻结可查，等价于
- * 全部未冻结（与 `mergeResidual` 缺席时一致：纯本批 id 检查）。
+ * `nodes` should be all nodes submitted by this `run_graph` call (already
+ * past the schema/readNodes shape checks for id/task/deps). An absent
+ * `ledger` = no cross-call freeze to consult, equivalent to everything
+ * unfrozen (same convention as `mergeResidual` without a ledger:
+ * this-batch ids only).
  */
 export function validateOnFailureEdges(
   nodes: ReadonlyArray<OnFailureNode>,
@@ -45,10 +47,12 @@ export function validateOnFailureEdges(
   for (const node of nodes) {
     const target = node.onFailure;
     if (target === undefined) continue;
-    // 跨调用冻结（ADR-0060）先于 unknown 检查：账本上已冻结的 id 即使
-    // 不在本批 ids 里，也要报出「指向冻结节点」这一更具体的拒绝原因，
-    // 让模型知道该换新 id，而不是误以为拼错了 id。self-onFailure 在此
-    // 自然合法 —— 本批 self id 未冻结，`isFrozen` 只查账本。
+    // Check cross-call freeze before unknown-target: an id already frozen
+    // on the ledger must report the more specific "targeting frozen node"
+    // rejection even if it is absent from this batch, so the model learns
+    // to submit a new id instead of assuming a typo. self-onFailure is
+    // naturally legal here — a this-batch self id is not yet frozen, and
+    // `isFrozen` only consults the ledger.
     if (ledger !== undefined && ledger.isFrozen(target)) {
       const status = ledger.statusOf(target);
       rejections.push(
@@ -56,7 +60,7 @@ export function validateOnFailureEdges(
       );
       continue;
     }
-    // spec Changes：目标必须是本批 ids 之一（指向本批即含 self）。
+    // The target must be one of this batch's ids (a this-batch target includes self).
     if (!ids.has(target)) {
       rejections.push(
         `onFailure targeting unknown node "${target}" — target must be the id of one of the nodes in this submission`

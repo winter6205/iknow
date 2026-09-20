@@ -5,14 +5,17 @@ import {
 } from "../../config/settings.js";
 
 /**
- * settings-model-extension：解析 settings.llm.apiKey 的原始形态，返回
- * 需要参与 process.env 清洗的**变量名**集合。
- *  - 占位符串（`${VAR}` / `$VAR` 形态，任意合法组合，含多段 `${A}${B}` 与
- *    字面 + 占位符混合如 `${A}literal`）→ 返 var 名去重数组（来自
- *    `extractPlaceholders`，M1 修复多段遮蔽漏洗）；
- *  - 字面（trim 后非空、不含 `$IDENT` / `${VAR}` 形态）→ 返 []（密钥已在
- *    settings 文件里不进 env 扫描；其 trimmed 值进 `currentSecretValues`
- *    的内存遮蔽集，M3 修复字面密钥回显遮蔽失效）。
+ * Parse the raw form of settings.llm.apiKey and return the set of **variable
+ * names** that must take part in process.env scrubbing.
+ *  - placeholder string (`${VAR}` / `$VAR` forms, any legal combination,
+ *    including multi-segment `${A}${B}` and literal+placeholder mixes like
+ *    `${A}literal`) → deduped var-name array (from `extractPlaceholders`;
+ *    multi-segment coverage matters — an earlier version only saw the first
+ *    segment and under-scrubbed);
+ *  - literal (non-empty after trim, no `$IDENT` / `${VAR}` form) → `[]` (the
+ *    key lives in the settings file, outside env scanning; its trimmed value
+ *    enters the in-memory mask set of `currentSecretValues` so literal-key
+ *    echo is masked too).
  */
 function placeholderVarNames(apiKeyRaw: string | undefined): string[] {
   if (!apiKeyRaw) return [];
@@ -22,12 +25,14 @@ function placeholderVarNames(apiKeyRaw: string | undefined): string[] {
 }
 
 /**
- * 安全地读 settings.llm.apiKey 原始字符串。
- *  - env-isolation 是输出清洗安全层，必须在任何环境可加载（含 model 未配的
- *    fail-fast 场景）。模块顶层 / 每次调用的 key 名解析对 model 无依赖——
- *    `loadIknowEnv` 在 model 未配时抛「no LLM model configured」，此处吞掉
- *    并退化（secret 名单仅剩 env 扫描），不让安全层因装配前置条件缺失而崩溃。
- *  - 成功时返回 settings.llm.apiKey trim 后的原始串（可能为 undefined）。
+ * Safely read the raw settings.llm.apiKey string.
+ *  - env-isolation is an output-scrubbing security layer and must work in any
+ *    loadable environment (including fail-fast scenarios where no model is
+ *    configured). Key-name resolution here has no model dependency —
+ *    `loadIknowEnv` throws when no model is configured; we swallow that and
+ *    degrade (the secret name list falls back to env scanning only), so the
+ *    security layer never crashes on a missing assembly precondition.
+ *  - On success returns settings.llm.apiKey trimmed (possibly undefined).
  */
 function safeLlmApiKeyRaw(): string | undefined {
   let loaded: IknowSettings;
@@ -41,14 +46,15 @@ function safeLlmApiKeyRaw(): string | undefined {
 }
 
 /**
- * 字面 apiKey（trim 后非空、不含占位符形态）→ 其值进入 SC20 遮蔽集，
- * 避免字面密钥回显到模型输出 / JSON trace 时被原样泄露（M3 修复）。变
- * 量名不进 env 扫描（无对应 env var）。
+ * A literal apiKey (non-empty after trim, no placeholder form) → its value
+ * enters the secret mask set, so a literal key echoed into model output /
+ * JSON trace is not leaked verbatim. No var name enters env scanning (there
+ * is no corresponding env var).
  */
 function literalApiKey(): string | undefined {
   const raw = safeLlmApiKeyRaw();
   if (!raw) return undefined;
-  // 字面 = 不含任何 `${VAR}` / `$VAR` 占位符形态（extractPlaceholders 返空）。
+  // literal = contains no `${VAR}` / `$VAR` placeholder form at all (extractPlaceholders returns empty).
   return extractPlaceholders(raw).length === 0 ? raw : undefined;
 }
 
@@ -68,10 +74,11 @@ const SECRET_PATTERN =
   /API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i;
 
 /**
- * settings-model-extension：secret 名单来源 =
- *  1. settings.llm.apiKey 占位符指向的变量名（任意合法组合，含多段；
- *     M1 修复多段 `${A}${B}` 漏洗）；
- *  2. process.env 中命中 SECRET_PATTERN 的变量名（兜底扫描，保持既有行为）。
+ * Secret name sources:
+ *  1. var names pointed to by settings.llm.apiKey placeholders (any legal
+ *     combination, multi-segment included);
+ *  2. process.env names matching SECRET_PATTERN (fallback scan, preserving
+ *     existing behavior).
  */
 function configuredSecretNames(): readonly string[] {
   const names = new Set<string>();
@@ -108,9 +115,10 @@ export function createEnvIsolation(opts: EnvIsolationOptions): EnvIsolation {
 }
 
 /**
- * #562 T5 / #653:cwdReadonly 后滤注入 GIT_OPTIONAL_LOCKS=0。
- * `filter()` 返回 freeze 对象,不能原地赋值;本函数拷贝后 additive,绕过
- * BASE_ENV_WHITELIST(只用于 bash fence,无 secret 风险)。false / 缺省不改 env。
+ * When cwdReadonly, additionally inject GIT_OPTIONAL_LOCKS=0. `filter()`
+ * returns a frozen object, so this copies then adds, bypassing
+ * BASE_ENV_WHITELIST (bash fence only, no secret risk). false / absent leaves
+ * env untouched.
  */
 export function applyCwdReadonlyFenceEnv(
   filtered: NodeJS.ProcessEnv,
@@ -124,11 +132,13 @@ export function currentSecretEnvNames(): readonly string[] {
   return configuredSecretNames();
 }
 
-/** #406 T3:active extras — per-engine secret registry 的值（build-engine 构造
- *   registry 后经 `setActiveExtraSecrets(registry.values())` 写入）。让输出
- *   mask 消费点（jsonl / format / stream-draft / hub 全走 `currentSecretValues()`
- *   无参调用）无需改调用点即可覆盖 registry 追踪的密钥。模块级可变槽位是本层
- *   唯一共享状态；显式 `extraSecrets` 入参优先于槽位（`??` 语义）。 */
+/** Active extras — values of the per-engine secret registry (build-engine
+ *   writes them via `setActiveExtraSecrets(registry.values())` after building
+ *   the registry). Output-mask consumers (jsonl / format / stream-draft / hub,
+ *   all calling `currentSecretValues()` with no args) then cover
+ *   registry-tracked keys without changing call sites. This module-level
+ *   mutable slot is the layer's only shared state; an explicit `extraSecrets`
+ *   argument takes precedence over the slot (`??` semantics). */
 let activeExtraSecrets: ReadonlyArray<string> = Object.freeze([]);
 
 export function setActiveExtraSecrets(values: Iterable<string>): void {
@@ -144,16 +154,17 @@ export function currentSecretValues(
   extraSecrets?: Iterable<string>
 ): readonly string[] {
   const values = new Set<string>();
-  // 1) 变量名 → 实际值（占位符指向的 var + SECRET_PATTERN 兜底命中的 var）。
+  // 1) var names → actual values (placeholder-pointed vars + SECRET_PATTERN fallback hits).
   for (const name of configuredSecretNames()) {
     const value = env[name];
     if (value) values.add(value);
   }
-  // 2) M3：字面 apiKey 的 trimmed 值也进遮蔽集（与变量名形态不同的字面值，
-  // 避免对字面密钥回显时 SC20 遮蔽失效）。
+  // 2) the literal apiKey's trimmed value also joins the mask set (a literal
+  // value distinct from any var-name form, so echo of a literal key stays masked).
   const literal = literalApiKey();
   if (literal) values.add(literal);
-  // 3) #406 T3:registry 追踪值并入（显式入参优先，缺省用模块槽位）；Set 去重。
+  // 3) registry-tracked values merge in (explicit arg wins; module slot is the
+  // default); Set dedups.
   const extras = extraSecrets ?? activeExtraSecrets;
   for (const v of extras) {
     if (v) values.add(v);

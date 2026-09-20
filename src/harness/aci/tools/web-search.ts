@@ -1,26 +1,33 @@
 /**
- * web_search 工具（ACI Web 类，#141 工具层扩展）：网页搜索并返回紧凑结果列表。
+ * web_search tool (ACI web category): search the web, return a compact list.
  *
- * 行为真值：web_search_tool.py（行为对齐，非移植）：
- *   - 默认端点：DuckDuckGo html（upstream 默认）在部分网络环境（本地 DNS
- *     污染 / egress 阻断，实测 WSL2 + Windows host 解析器把 duckduckgo.com
- *     解析到 Facebook IP 且直连超时）不可达。B1 决策：默认端点切到 Bing
- *     （cn.bing.com/search，实测本机 200 + 结果结构完整、中国区可达），
- *     DDG html 保留为 search_url 覆写 / IKNOW_WEB_SEARCH_URL 可选值。
- *   - 结果页解析：按端点 hostname 分派解析器 —— DDG html 走 result__a /
- *     result-link + result__snippet；Bing 走 li.b_algo → h2>a + div.b_caption。
- *   - DuckDuckGo /l/?uddg= 重定向链接归一为目标 URL。
- *   - 输出编号列表 `N. title / URL: / snippet`；零结果 → ToolExecutionError。
+ * Behavioral ground truth: web_search_tool.py (behavior-aligned, not a port):
+ *   - Default endpoint: the upstream-default DuckDuckGo html endpoint is
+ *     unreachable on some networks (local DNS pollution / egress blocking —
+ *     measured on WSL2 + Windows host resolver: duckduckgo.com resolves to a
+ *     Facebook IP and direct connections time out). So the default is Bing
+ *     (cn.bing.com/search — measured reachable from CN with complete result
+ *     structure); DDG html remains available via the search_url override /
+ *     IKNOW_WEB_SEARCH_URL.
+ *   - Result-page parsing dispatches on endpoint hostname — DDG html uses
+ *     result__a / result-link + result__snippet; Bing uses li.b_algo → h2>a +
+ *     div.b_caption.
+ *   - DuckDuckGo /l/?uddg= redirect links are normalized to the target URL.
+ *   - Output is a numbered list `N. title / URL: / snippet`; zero results →
+ *     ToolExecutionError.
  *
- * SSRF 防线复用 network-guard（端点与 search_url 覆写均逐跳校验）；
- * 非 2xx / 空结果抛 ToolExecutionError（executor 原样回灌模型）。
+ * The SSRF defense reuses network-guard (both the endpoint and search_url
+ * overrides are validated hop by hop); non-2xx / empty results throw
+ * ToolExecutionError (fed back to the model verbatim by the executor).
  *
- * ACI 元数据：category=read-only、isConcurrencySafe=true、interruptBehavior=cancel、
- * timeoutTier=default（30s）。
+ * ACI metadata: category=read-only, isConcurrencySafe=true,
+ * interruptBehavior=cancel, timeoutTier=default (30s).
  *
- * 依赖注入（对齐 grep.ts GrepToolDeps 先例）：deps.fetch / deps.lookup 覆盖
- * network-guard 出口层（生产默认 = network-guard createDefaultGuardDeps SSOT）；
- * deps.envSearchUrl 注入装配方解析好的 env 端点（测试隔离 / 生产经 loadIknowEnv）。
+ * Dependency injection (following the grep.ts GrepToolDeps precedent):
+ * deps.fetch / deps.lookup override the network-guard egress layer
+ * (production default = network-guard createDefaultGuardDeps SSOT);
+ * deps.envSearchUrl injects the env-resolved endpoint prepared by the
+ * assembly side (test isolation / production via loadIknowEnv).
  */
 
 import type { AciToolDef } from "../types.js";
@@ -55,17 +62,19 @@ const MAX_SNIPPET_CHARS = 500;
 const MAX_URL_CHARS = 2_000;
 const SEARCH_OUTPUT_BUDGET = 8_000;
 export const SEARCH_TIMEOUT_MS = 20_000;
-/** B1 默认端点:Bing(中国区可达,DDG 在此类网络不可达)。DDG html 仍可经覆写。 */
+/** Default endpoint is Bing (reachable in CN where DDG is not); DDG html stays available via override. */
 const DEFAULT_SEARCH_ENDPOINT = "https://cn.bing.com/search";
 
 /**
- * 依赖注入：覆盖点（默认 = 生产值）。
- * - `fetch` 覆盖点：替换出口 HTTP 层（测试注入 canned 结果页）。
- * - `lookup` 覆盖点：替换 DNS 解析（测试注入固定 IP）。
- * - `envSearchUrl` 覆盖点：装配方（buildHarnessEngine）经 loadIknowEnv 解析的
- *   `IKNOW_WEB_SEARCH_URL` 值；测试可直注。工具自身不读 process.env（env.ts SSOT）。
- * - `proxyUrl` 覆盖点：把出站代理 URL 透传到 network-guard（IKNOW_WEB_PROXY
- *   装配路径；非空时 fetch 挂 ProxyAgent dispatcher）。
+ * Dependency injection: override points (defaults = production values).
+ * - `fetch`: replaces the egress HTTP layer (tests inject canned result pages).
+ * - `lookup`: replaces DNS resolution (tests inject fixed IPs).
+ * - `envSearchUrl`: the `IKNOW_WEB_SEARCH_URL` value resolved by the assembly
+ *   side (buildHarnessEngine) via loadIknowEnv; tests may inject directly.
+ *   The tool never reads process.env (env.ts is the SSOT).
+ * - `proxyUrl`: passes the outbound proxy URL through to network-guard
+ *   (IKNOW_WEB_PROXY assembly path; when non-empty, fetch attaches a
+ *   ProxyAgent dispatcher).
  */
 export interface WebSearchToolDeps {
   readonly fetch?: GuardFetchFn;
@@ -73,23 +82,25 @@ export interface WebSearchToolDeps {
   readonly envSearchUrl?: string | undefined;
   readonly proxyUrl?: string;
   /**
-   * #826 T2: 选定的 web_search 后端 id。**未设 = 未设**，不等于显式
-   * `"bing"` —— T3 的 `backend_unset_with_key` 三态判定依赖这个区分
-   * （未设 + 某 keyed key 已设 = 配错，不静默回 Bing）。
+   * Selected web_search backend id. **Unset ≠ explicitly `"bing"`** — the
+   * tri-state `backend_unset_with_key` check relies on this distinction
+   * (unset + any keyed key set = misconfiguration, no silent Bing fallback).
    */
   readonly backend?: SearchBackendId;
   /**
-   * #826 T3: keyed 后端 API key（装配方经 T1 env loader 解析 `EXA_API_KEY` /
-   * `TAVILY_API_KEY` / `BRAVE_API_KEY` 后注入；工具自身不读 process.env，
-   * env.ts SSOT）。缺失 / 空白 → `missing_key` fail-closed。
+   * Keyed-backend API keys, resolved by the assembly side from
+   * `EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` and injected here;
+   * the tool never reads process.env (env.ts is the SSOT). Missing /
+   * blank → `missing_key` fail-closed.
    */
   readonly exaApiKey?: string;
   readonly tavilyApiKey?: string;
   readonly braveApiKey?: string;
   /**
-   * #826 T3: backend 工厂覆盖点（与 `fetch` / `lookup` 同族的注入缝）。
-   * 缺省 = `selectBackend(backendId)`（BACKENDS 表）。测试用它驱动
-   * `http_non_2xx` / `timeout` / `parse` 出口路径，而不改全局 BACKENDS 表。
+   * Backend-factory override (same injection seam family as `fetch` /
+   * `lookup`). Default = `selectBackend(backendId)` (the BACKENDS table).
+   * Tests drive the `http_non_2xx` / `timeout` / `parse` exit paths through
+   * it without mutating the global BACKENDS table.
    */
   readonly backendFactory?: SearchBackendFactory;
 }
@@ -101,27 +112,29 @@ interface SearchInput {
 }
 
 /**
- * #826 T2 (spec Assumption 7): web_search 后端 id 闭集。
- * 装配路径（registry → buildHarnessEngine）经 T1 env loader 解析
- * `IKNOW_WEB_SEARCH_BACKEND`（不合法 → typed `WebEnvConfigError`，
- * **不**回退默认）；T3 起 factory 边界加 schema reject + 默认到 bing。
+ * Closed set of web_search backend ids. The assembly path
+ * (registry → buildHarnessEngine) resolves `IKNOW_WEB_SEARCH_BACKEND` via
+ * the env loader (invalid → typed `WebEnvConfigError`, **no** fallback to a
+ * default); the factory boundary additionally schema-rejects and defaults to
+ * bing.
  */
 export type SearchBackendId = "bing" | "tavily" | "exa" | "brave";
 
 /**
- * #826 T2 (spec Assumption 7): SearchBackend 三方法同形接口。
- *   - `fetchResults` 发 HTTP 拿上游响应（raw shape：Bing 是 HTML 字符串，
- *     Tavily/Exa/Brave T4-T6 是 JSON）。
- *   - `project` 把上游 raw 投到 Bing-shape `SearchResult[]`（spec Assumption 8）。
- *   - `describe` 出 observability 侧通道 meta（`adapter` / `latencyMs` /
- *     `requestId?`），T12 envelope spec 未落地前不消费。
+ * Three-method uniform interface for a search backend.
+ *   - `fetchResults`: performs the HTTP call and returns the raw upstream
+ *     payload (an HTML string for Bing, JSON for Tavily / Exa / Brave).
+ *   - `project`: maps the raw upstream payload into Bing-shape
+ *     `SearchResult[]`.
+ *   - `describe`: observability side-channel meta (`adapter` / `latencyMs` /
+ *     `requestId?`), unconsumed until the envelope/meta spec lands.
  */
 export interface SearchBackend {
   readonly id: SearchBackendId;
   fetchResults(args: {
     query: string;
     maxResults: number;
-    /** executor 透传的取消信号；T2 阶段 ctx?.signal 可能未传，故 `signal?`。 */
+    /** Cancellation signal passed through by the executor; may be absent. */
     signal?: AbortSignal;
   }): Promise<unknown>;
   /** Project the raw upstream payload into Bing-shape `SearchResult[]`. */
@@ -133,30 +146,31 @@ export interface SearchBackend {
 }
 
 /**
- * #826 T2: backend 实例化需要的 per-call 上下文（guardDeps 装配期绑定；
- * endpoint 由 `compileSearchInput` 在 handler 内解析 — 含 SSRF 验证、
- * search_url 覆写、envSearchUrl fallback）。
+ * Per-call context needed to instantiate a backend (guardDeps bound at
+ * assembly time; endpoint resolved inside the handler by
+ * `compileSearchInput` — includes SSRF validation, search_url override,
+ * envSearchUrl fallback).
  *
- * #826 T4: 增 `apiKey` 字段（keyed backend 需要）。handler 在
- * `assertBackendConfig` 之后才调工厂，故 keyed backend 拿到的一定是
- * 已解析的真值（空白 / 占位符解析失败已在 entry fail-closed）。
+ * `apiKey` exists for keyed backends. The handler only calls the factory
+ * after `assertBackendConfig`, so a keyed backend always receives a resolved
+ * truthy value (blank / failed placeholder resolution already failed closed
+ * at entry).
  */
 export interface SearchBackendCtorOptions {
   readonly guardDeps: GuardDeps;
   readonly endpoint: string;
   /**
-   * #826 T4: keyed backend 的 API key。仅 keyed backend 关心（bing
-   * 不读）。`assertBackendConfig` 已在 entry 校验 non-empty，本字段
-   * 是「已验证非空」的真值透传 —— 不再二次判空。
+   * API key for keyed backends (bing never reads it). Already validated
+   * non-empty by `assertBackendConfig` — a truthy pass-through, no re-check.
    */
   readonly apiKey?: string;
 }
 
 /**
- * #826 T2: 后端工厂签名。`BACKENDS` 表按 `id` 持工厂函数，每调用拉一份
- * 实例 — BingBackend 需要 `endpoint`（per-call），Tavily/Exa/Brave 仍
- * 占位实现（不持 state）。T4-T6 起把 Tavily/Exa/Brave 替换为真 fetch，
- * 工厂签名不变。
+ * Backend factory signature. The `BACKENDS` table holds factories by `id`,
+ * pulling one instance per call — BingBackend needs `endpoint` (per-call),
+ * while the others hold no state. Real fetch implementations may replace
+ * stubs without changing this signature.
  */
 export type SearchBackendFactory = (
   opts: SearchBackendCtorOptions
@@ -169,21 +183,21 @@ interface SearchResult {
 }
 
 /**
- * 工厂：createWebSearchTool(deps?) — 网页搜索工具。
+ * Factory: createWebSearchTool(deps?) — the web search tool.
  *
- * 返回的 AciToolDef 满足：
+ * The returned AciToolDef satisfies:
  *   - name === "web_search"
- *   - inputSchema: { query 必填 + max_results?(默认 5, 1..10) + search_url? }
- *   - aci 元数据：read-only / concurrency-safe / cancel / default tier
+ *   - inputSchema: { query required + max_results?(default 5, 1..10) + search_url? }
+ *   - aci metadata: read-only / concurrency-safe / cancel / default tier
  */
 export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
-  // fail-fast:代理配置在装配时即过 SSRF 语法校验,坏的 IKNOW_WEB_PROXY
-  // 在 build 期报错,而非首次搜索时才暴露。
+  // Fail fast: the proxy config passes SSRF syntax validation at assembly
+  // time, so a broken IKNOW_WEB_PROXY errors at build, not on first search.
   const guardDeps = resolveGuardDeps(deps);
   const resultCache = new Map<string, Promise<ReadonlyArray<SearchResult>>>();
-  // #826 T2/T3: 选定后端工厂(per-call 由 handler 拉实例)。`backend` 未设
-  // 与显式 "bing" 在 `backendId` 上收敛,但三态 fail-closed 需要区分,
-  // 故单独记 `backendUnset`。
+  // Selected backend factory (the handler pulls an instance per call).
+  // Unset `backend` and explicit "bing" converge on `backendId`, but the
+  // tri-state fail-closed check must tell them apart, so track `backendUnset`.
   const backendUnset = deps?.backend === undefined;
   const capability = resolveWebCapability({
     backend: deps?.backend,
@@ -199,8 +213,9 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
-    // 配置态：未设 + 有 keyed key 仍 fail-closed。缺搜（stub / 无 key）
-    // 回落默认检索，不再 missing_key / not_shipped。
+    // Config stage: unset backend + any keyed key still fails closed.
+    // Missing key (stub / no key) falls back to default search instead of
+    // raising missing_key / not_shipped.
     assertBackendConfig(backendUnset, apiKeys, capability);
     assertSearchUrlAllowed(searchBackendId, input);
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
@@ -229,10 +244,11 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
     try {
       results = await resultsPromise;
     } catch (err) {
-      // EXIT: #826 T3 — 六 kind typed 失败 1:1 转译为 ToolExecutionError
-      // (executor 原样回灌模型)。非 typed 的一律原样上抛:既有 Bing 路径的
-      // ToolExecutionError (network-guard `web_search failed: ...`) 与任何
-      // 意外运行时错误都不得被本出口吞掉 / 改写 (SC #5 字节级一致)。
+      // EXIT: the six typed kinds translate 1:1 into ToolExecutionError
+      // (the executor feeds them back to the model verbatim). Everything
+      // untyped rethrows as-is: the existing Bing path's ToolExecutionError
+      // (network-guard `web_search failed: ...`) and any unexpected runtime
+      // error must not be swallowed or rewritten by this exit.
       if (isSearchBackendError(err)) throw toToolExecutionError(err);
       throw err;
     }
@@ -278,13 +294,14 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "default" as const,
-      // B6 / ADR-0043 §3:web 出口低频件,退场次序第四位(trace 三件之后)。
+      // Low-frequency web egress piece; ADR-0043 puts it fourth in the
+      // deferral order (after the three trace pieces).
       deferrable: true,
     },
   });
 }
 
-/** 组装 guard deps：注入 stub 优先，缺省用 network-guard 生产默认（SSOT）。 */
+/** Assemble guard deps: injected stubs win, defaulting to network-guard's production SSOT. */
 function resolveGuardDeps(deps?: WebSearchToolDeps): GuardDeps {
   if (deps?.fetch && deps?.lookup)
     return { fetch: deps.fetch, lookup: deps.lookup };
@@ -298,9 +315,9 @@ function resolveGuardDeps(deps?: WebSearchToolDeps): GuardDeps {
 }
 
 /**
- * #826 T3: keyed 后端 id → 注入的 API key / 对应 env var 名。
- * `bing` 不在表里（零 key 默认路径）；表的键集 = spec Assumption 6 里
- * "keyed backend" 的定义。
+ * Keyed backend id → its injected API key / matching env var name. `bing` is
+ * deliberately absent (the zero-key default path); the key set defines what
+ * counts as a "keyed backend".
  */
 const KEYED_BACKEND_ENV_KEYS = {
   exa: EXA_API_KEY_ENV_KEY,
@@ -313,9 +330,11 @@ type KeyedBackendId = keyof typeof KEYED_BACKEND_ENV_KEYS;
 type KeyedApiKeys = Readonly<Record<KeyedBackendId, string | undefined>>;
 
 /**
- * #826 T3: 把注入的三个 key 收成一张表。空白串按缺失处理 —— T1 env loader
- * 已把「空串 / 占位符解析失败」折成 undefined，这里再兜一次（直调 handler
- * 的测试 / 装配方绕过 loader 的路径同样 fail-closed，而非带着空 key 出网）。
+ * Collect the three injected keys into one table. Blank strings count as
+ * missing — the env loader already folds empty / failed placeholder
+ * resolution into undefined; this is a backstop so callers that bypass the
+ * loader (direct-handler tests / assembly scripts) also fail closed instead
+ * of leaving with an empty key.
  */
 function collectApiKeys(deps?: WebSearchToolDeps): KeyedApiKeys {
   const normalize = (raw: string | undefined): string | undefined => {
@@ -330,15 +349,17 @@ function collectApiKeys(deps?: WebSearchToolDeps): KeyedApiKeys {
 }
 
 /**
- * #826 T3 (spec Assumption 6): 三态 fail-closed 里的两个**配置态**，在
- * handler entry 判定 —— 不依赖 fetch 阶段，配错不消耗一次出网。
+ * Two of the three fail-closed states are **config-stage**, checked at
+ * handler entry so a misconfiguration never costs an outbound request:
  *
- *   ① backend = keyed 但对应 key 缺失 → `missing_key`
- *   ② backend 未设 但某个 keyed key 已设 → `backend_unset_with_key`
- *      （防配错静默回 Bing；显式 `backend="bing"` + key 已设**不是**配错）
+ *   ① backend = keyed but its key is missing → `missing_key`
+ *   ② backend unset but some keyed key is set → `backend_unset_with_key`
+ *      (refuses to silently serve Bing under misconfiguration; explicit
+ *      `backend="bing"` + a set key is **not** a misconfiguration)
  *
- * 第三态（backend = bing / 未设 + 零 key → 走 Bing HTML）无错误，直接放行。
- * message 只出 backend id 与 env var **名**，绝不出 key 值。
+ * The third state (backend = bing / unset + zero keys → Bing HTML) needs no
+ * error and passes through. Messages name only the backend id and the env
+ * var **name**, never a key value.
  */
 function assertBackendConfig(
   backendUnset: boolean,
@@ -369,9 +390,10 @@ function assertBackendConfig(
 }
 
 /**
- * #826 T3 (spec Assumption 9): `search_url` 覆写只对 `backend="bing"` 有意义
- * （它是 HTML 端点覆写 + SSRF 验证路径）。keyed backend 下传入 = schema
- * reject，**不**走 SSRF 验证路径，也不静默忽略。
+ * The `search_url` override only makes sense for `backend="bing"` (it is an
+ * HTML-endpoint override on the SSRF-validated path). Passing it under a
+ * keyed backend is a schema reject — the request neither goes through SSRF
+ * validation nor gets silently ignored.
  */
 function assertSearchUrlAllowed(
   backendId: SearchBackendId,
@@ -387,7 +409,7 @@ function assertSearchUrlAllowed(
   );
 }
 
-/** 入参校验：query 非空；max_results clamp [1,10]；端点优先级 search_url > env > 默认。 */
+/** Input validation: query non-empty; max_results clamped to [1,10]; endpoint priority search_url > env > default. */
 function compileSearchInput(
   input: unknown,
   envSearchUrl: string | undefined
@@ -414,7 +436,7 @@ function compileSearchInput(
   };
 }
 
-/** max_results clamp：非有限数 / ≤0 → 默认 5；>10 → 10。 */
+/** max_results clamp: non-finite / ≤0 → default 5; >10 → 10. */
 function clampMaxResults(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw))
     return DEFAULT_MAX_RESULTS;
@@ -425,10 +447,11 @@ function clampMaxResults(raw: unknown): number {
 }
 
 /**
- * #826 T2: 用选定的 `SearchBackend` 拉一次结果 — 把 v0 内联的 fetch +
- * parse 拆成 backend.fetchResults (raw) + backend.project (Bing-shape)。
- * Bing 路径下 backend === BingBackend，与 v0 字节级一致（同一
- * `fetchPublicResponse` + 同一 `parseSearchResults` hostname dispatch）。
+ * Pull one result set through the selected `SearchBackend` — the originally
+ * inlined fetch + parse split into backend.fetchResults (raw) +
+ * backend.project (Bing-shape). On the Bing path this is byte-identical to
+ * the previous inline code (same `fetchPublicResponse` + same
+ * `parseSearchResults` hostname dispatch).
  */
 async function loadSearchResults(
   parsed: SearchInput,
@@ -444,8 +467,9 @@ async function loadSearchResults(
 }
 
 /**
- * 解析搜索结果页：按端点 hostname 分派解析器（DDG html vs Bing），
- * 限 maxResults 条。未知端点回退 DDG 解析（向后兼容旧 fixture）。
+ * Parse a results page: dispatch the parser by endpoint hostname
+ * (DDG html vs Bing), capped at maxResults. Unknown endpoints fall back to
+ * the DDG parser (backward compatibility with older fixtures).
  */
 function parseSearchResults(
   body: string,
@@ -457,7 +481,7 @@ function parseSearchResults(
     : parseDuckDuckGoResults(body, maxResults);
 }
 
-/** 端点是否为 Bing（默认 cn.bing.com，或覆写的 bing.com / cn.bing.com）。 */
+/** Whether the endpoint is Bing (default cn.bing.com, or an overridden bing.com / cn.bing.com). */
 function isBingEndpoint(endpoint: string): boolean {
   try {
     const hostname = new URL(endpoint).hostname.toLowerCase();
@@ -467,7 +491,7 @@ function isBingEndpoint(endpoint: string): boolean {
   }
 }
 
-/** DDG html 解析：result__a / result-link 锚点 + 对齐位置的 snippet。 */
+/** DDG html parser: result__a / result-link anchors + positionally aligned snippets. */
 function parseDuckDuckGoResults(
   body: string,
   maxResults: number
@@ -490,7 +514,7 @@ function parseDuckDuckGoResults(
   return results;
 }
 
-/** Bing 解析：li.b_algo 结果块 → h2>a（title + href）+ div.b_caption（snippet）。 */
+/** Bing parser: li.b_algo result blocks → h2>a (title + href) + div.b_caption (snippet). */
 function parseBingResults(body: string, maxResults: number): SearchResult[] {
   const results: SearchResult[] = [];
   const pattern = /<li\b([^>]*)>([\s\S]*?)<\/li>/gi;
@@ -525,13 +549,10 @@ function parseBingResults(body: string, maxResults: number): SearchResult[] {
 }
 
 /**
- * #826 T4: shared 单条投影 —— `projectSearchResult` 升级为 export，让
- * ExaBackend（T4）/ TavilyBackend（T5）/ BraveBackend（T6）走同一份
- * T2 字段 cap + 全空丢弃，与 Bing HTML 解析路径字节级一致。
- *
- * spec SC #3 + Assumption 8 锚定："T2 字段 cap 一刀切，adapter 不写自家 cap"。
- * T2 把这条 cap 落到了 Bing path 内的私有函数；T4 起 export 出来供
- * keyed backend 共用，避免每家重写一份。
+ * Shared single-item projection — exported so every keyed backend
+ * (Exa / Tavily / Brave) reuses the same field caps + drop-when-all-empty
+ * rule, byte-identical with the Bing HTML parsing path. One rule for all
+ * adapters: field caps live here, and backends never write their own caps.
  */
 export function projectSearchResult(
   result: SearchResult
@@ -556,9 +577,10 @@ function truncateField(value: string, maxChars: number): string {
   return Array.from(value.trim()).slice(0, maxChars).join("");
 }
 
-/** 提取 class 含 result__snippet / result-snippet 的元素文本。
- * 用 `<(\w+)…<\/\1>` 回溯引用匹配任意同名开闭标签，避免在源码枚举
- * 具体标签名（Gate B 判据 12 禁词含 `span`，与 OTel span-metric 冲突）。 */
+/** Extract text of elements whose class contains result__snippet / result-snippet.
+ *  The `<(\w+)…<\/\1>` backreference matches any same-name open/close tag pair
+ *  instead of enumerating tag names in source (`span` is a banned literal here
+ *  because it collides with OTel span-metric vocabulary). */
 function parseDdgSnippets(body: string): string[] {
   const pattern =
     /<(\w+)[^>]+class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>([\s\S]*?)<\/\1>/gi;
@@ -569,7 +591,7 @@ function parseDdgSnippets(body: string): string[] {
   return out;
 }
 
-/** 提取 class 含 result__a / result-link 的锚点：title（去 HTML）+ 归一 URL。 */
+/** Extract anchors whose class contains result__a / result-link: title (HTML stripped) + normalized URL. */
 function parseDdgAnchors(
   body: string
 ): ReadonlyArray<{ title: string; url: string }> {
@@ -590,7 +612,7 @@ function parseDdgAnchors(
   return out;
 }
 
-/** DuckDuckGo /l/?uddg= 重定向链接 → uddg 参数解码后的目标 URL。 */
+/** DuckDuckGo /l/?uddg= redirect link → target URL decoded from the uddg param. */
 function normalizeResultUrl(rawUrl: string): string {
   let parsed: URL;
   try {
@@ -608,7 +630,7 @@ function normalizeResultUrl(rawUrl: string): string {
   return rawUrl;
 }
 
-/** 输出拼装：`Search results for: <query>` + 编号列表。 */
+/** Output assembly: `Search results for: <query>` + numbered list. */
 function formatSearchResults(
   query: string,
   results: ReadonlyArray<SearchResult>,
@@ -642,27 +664,30 @@ function formatSearchResults(
 }
 
 // =============================================================================
-// #826 T2: SearchBackend seam — BingBackend + selectBackend + BACKENDS 表。
-// 同文件 BACKENDS 表(spec 决议),handler 路径:selectBackend(id)(guardDeps, endpoint)
-// → backend.fetchResults → backend.project。T2 阶段仅 bing 真接;
-// tavily/exa/brave 占位 throws,T3 起替换为 typed SearchBackendError。
+// SearchBackend seam — BingBackend + selectBackend + the BACKENDS table.
+// Handler path: selectBackend(id)(guardDeps, endpoint) → backend.fetchResults
+// → backend.project. Only bing is genuinely wired; unshipped backends throw
+// typed SearchBackendError.
 // =============================================================================
 
 /**
- * #826 T2: BingBackend — 把既有 `cn.bing.com/search` HTML 解析路径包成同形
- * `SearchBackend` 三方法签名。
+ * BingBackend — wraps the existing `cn.bing.com/search` HTML parsing path
+ * behind the uniform three-method `SearchBackend` signature.
  *
- *   - `fetchResults`：走 `fetchPublicResponse`（含 SSRF 验证 + 既有重定向
- *     跳逐跳校验），返回原始 HTML 字符串。
- *   - `project`：调既有 `parseSearchResults(raw, maxResults, endpoint)`
- *     hostname 分派（Bing 走 `parseBingResults`，search_url 覆写到 DDG
- *     等非 Bing hostname 走 `parseDuckDuckGoResults`，保持 v0 行为）。
- *   - `describe`：返回 `{ adapter: "bing", latencyMs, requestId? }` —
- *     envelope spec 未落地前 `requestId` 留 undefined（spec Assumption 12）。
+ *   - `fetchResults`: goes through `fetchPublicResponse` (SSRF validation +
+ *     hop-by-hop redirect checks), returning the raw HTML string.
+ *   - `project`: calls the existing
+ *     `parseSearchResults(raw, maxResults, endpoint)` hostname dispatch
+ *     (Bing → `parseBingResults`; a search_url override to a non-Bing
+ *     hostname such as DDG → `parseDuckDuckGoResults`, preserving original
+ *     behavior).
+ *   - `describe`: returns `{ adapter: "bing", latencyMs, requestId? }` —
+ *     `requestId` stays undefined until the envelope/meta spec lands.
  *
- * `search_url` 覆写在 handler 里经 `compileSearchInput` 提前解析（已
- * SSRF 校验），endpoint 由 caller 经 `backendFactory({ endpoint, ... })`
- * 注入；本类不读 process.env（env.ts SSOT）。
+ * The `search_url` override is resolved earlier in the handler by
+ * `compileSearchInput` (already SSRF-validated); the endpoint is injected by
+ * the caller via `backendFactory({ endpoint, ... })`. This class never reads
+ * process.env (env.ts is the SSOT).
  */
 export class BingBackend implements SearchBackend {
   readonly id: SearchBackendId = "bing";
@@ -687,7 +712,8 @@ export class BingBackend implements SearchBackend {
   }
 
   project(raw: unknown, maxResults: number): SearchResult[] {
-    // raw 是 fetchPublicResponse 返回的 HTML body；既有解析器依赖字符串。
+    // raw is the HTML body returned by fetchPublicResponse; the existing
+    // parsers require a string.
     return parseSearchResults(raw as string, maxResults, this.endpoint);
   }
 
@@ -703,8 +729,9 @@ export class BingBackend implements SearchBackend {
 }
 
 /**
- * #826 T2: 后端分派。`BACKENDS` 表按 `id` 持工厂；运行时拿到的总是
- * `SearchBackendFactory`（types 保证），运行时再 guard 防意外未知键。
+ * Backend dispatch. The `BACKENDS` table holds factories by `id`; at runtime
+ * we always get a `SearchBackendFactory` (types guarantee it), and the
+ * runtime guard here defends against unexpected unknown keys.
  */
 export function selectBackend(id: SearchBackendId): SearchBackendFactory {
   const factory = BACKENDS[id];
@@ -717,25 +744,28 @@ export function selectBackend(id: SearchBackendId): SearchBackendFactory {
 }
 
 // =============================================================================
-// #826 T4: ExaBackend v1 真 fetch — Exa 真 HTTP + spec Assumption 8 投影。
+// ExaBackend — real Exa HTTP fetch + projection to Bing-shape results.
 // =============================================================================
 
 /**
- * #826 T4: Exa 真端点。`api.exa.ai` 不走 SSRF 防线（既非私网也不是用户
- * 覆写），handler 里 compileSearchInput 解析的 endpoint 对 keyed backend
- * 不生效 —— Exa 路径写死此常量。
+ * Exa's real endpoint. `api.exa.ai` does not go through the SSRF defense
+ * (neither private nor user-overridden), and the endpoint resolved by
+ * compileSearchInput has no effect for keyed backends — the Exa path
+ * hardcodes this constant.
  */
 const EXA_ENDPOINT = "https://api.exa.ai/search";
 
 /**
- * #826 T4: Exa 投影用的形态描述。Exa 真响应 `SearchResponse` (`results[]`)
- * 在 Exa docs 里字段非常宽（image / publishedDate / author / id 等），但
- * spec Assumption 8 只关心三字段 + highlights/text，故用窄类型描述 contract。
+ * Shape used for Exa projection. Exa's real `SearchResponse` (`results[]`)
+ * carries many more fields in its docs (image / publishedDate / author / id
+ * etc.), but we only care about the three output fields + highlights/text,
+ * so describe the contract with a narrow type.
  *
- * 注：spec Assumption 8 原本写 `highlights[0].text`（视 highlights 为
- * `Array<{text: string}>`），但 T8 真出网 probe 实测发现 Exa 真响应
- * `highlights: string[]` —— 每条 highlight 是字符串本身，不是包了 `text`
- * 字段的对象。本接口已对齐真 API 形态；spec 修正留后续 ticket。
+ * Note: the original spec described highlights as `Array<{text: string}>`,
+ * but a live probe found Exa actually returns `highlights: string[]` — each
+ * highlight is the string itself, not an object wrapping `text`. This
+ * interface matches the real API shape; the spec fix trails in a later
+ * ticket.
  */
 interface ExaResultRaw {
   readonly title?: unknown;
@@ -745,8 +775,9 @@ interface ExaResultRaw {
 }
 
 /**
- * #826 T4: Exa 真响应形态（最少需要 results[]）。`requestId` 由 envelope
- * meta spec 接管前不消费；T4 保留字段在 raw 上以备后续。
+ * Exa's real response shape (minimally needs results[]). `requestId` stays
+ * unconsumed until the envelope/meta spec takes it over; the field is kept
+ * on the raw payload for future use.
  */
 interface ExaResponseRaw {
   readonly results?: unknown;
@@ -754,50 +785,52 @@ interface ExaResponseRaw {
 }
 
 /**
- * #826 T4: ExaBackend 构造选项。
+ * ExaBackend construction options.
  *
- * - `apiKey` 必须非空（已由 `assertBackendConfig` 在 handler entry 校验）；
- *   工厂层兜底拒绝空串，防止绕过 entry 校验的直调路径（测试 / 装配脚本）、
- *   让 backend 实例持有无 key 状态而出网。
- * - `fetch` 注入点：测试用 stub fetch 替换 `globalThis.fetch`，生产
- *   默认走全局 fetch（undici 已内置）。`AbortSignal` 直接透传给 fetch，
- *   fetch 抛 `AbortError` 时由 `fetchResults` 翻译为 typed
- *   `SearchBackendError(kind="timeout")`。
+ * - `apiKey` must be non-empty (already validated at handler entry by
+ *   `assertBackendConfig`); the factory layer additionally rejects empty
+ *   strings so direct-call paths that bypass entry validation (tests /
+ *   assembly scripts) cannot leave with a keyless backend instance.
+ * - `fetch`: test seam — replaces `globalThis.fetch`; production uses the
+ *   global fetch (undici built in). The `AbortSignal` passes straight to
+ *   fetch; a thrown `AbortError` is translated by `fetchResults` into typed
+ *   `SearchBackendError(kind="timeout")`.
  */
 export interface ExaBackendCtorOptions {
   readonly apiKey: string;
-  /** #826 T4: 测试 seam —— 替换 fetch（生产默认 = `globalThis.fetch`）。 */
+  /** Test seam — replaces fetch (production default = `globalThis.fetch`). */
   readonly fetch?: typeof globalThis.fetch;
 }
 
 /**
- * #826 T4: Exa 真 fetch + spec Assumption 8 投影。
+ * ExaBackend: real Exa fetch + projection to Bing-shape results.
  *
- *   - `fetchResults`：
- *     - POST `https://api.exa.ai/search`，body `{ query, numResults, contents:{highlights:true} }`
+ *   - `fetchResults`:
+ *     - POST `https://api.exa.ai/search`, body `{ query, numResults, contents:{highlights:true} }`
  *     - `Authorization: Bearer ${apiKey}` header
- *     - 非 2xx → typed `SearchBackendError(kind="http_non_2xx", endpoint=api.exa.ai, ...)`；
- *       message **不**带 key 字面值 / Authorization header（`createSearchBackendError`
- *       的 redactAuthSecrets 兜底）
- *     - `AbortError`（signal aborted）→ typed
+ *     - non-2xx → typed `SearchBackendError(kind="http_non_2xx", endpoint=api.exa.ai, ...)`;
+ *       the message carries **no** key literal / Authorization header
+ *       (`createSearchBackendError`'s redactAuthSecrets is the backstop)
+ *     - `AbortError` (signal aborted) → typed
  *       `SearchBackendError(kind="timeout", endpoint=api.exa.ai, ...)`
- *     - 畸形 JSON（parse 失败）→ typed `SearchBackendError(kind="parse", ...)`，
- *       **不**降级为 silent empty
+ *     - malformed JSON (parse failure) → typed `SearchBackendError(kind="parse", ...)`,
+ *       **no** downgrade to silent empty
  *
- *   - `project`：把 Exa JSON 投到 Bing-shape `SearchResult[]`，
- *     `snippet = highlights?.[0] ?? text ?? ""`（高亮按 Exa 真 API
- *     `string[]` 形态取第一条；落空时按 spec 兜底走 `result.text`）。
- *     字段 cap 走
- *     `projectSearchResult`（T4 起 export 出来供各家 keyed backend 共用，
- *     与 Bing HTML 路径字节级一致 —— spec SC #3「T2 字段 cap 一刀切，
- *     adapter 不写自家 cap」）。`maxResults` cap 在 `project` 内部施加
- *     （Bing 路径同形态：`parseBingResults` 在循环里 `if (results.length >= maxResults) break`）。
+ *   - `project`: maps Exa JSON into Bing-shape `SearchResult[]` with
+ *     `snippet = highlights?.[0] ?? text ?? ""` (take the first highlight per
+ *     Exa's real `string[]` shape; on a miss, fall back to `result.text`).
+ *     Field caps go through the shared `projectSearchResult`, byte-identical
+ *     with the Bing HTML path — one cap rule for all adapters, and backends
+ *     never write their own. The `maxResults` cap is applied inside
+ *     `project` (same form as the Bing path: `parseBingResults` breaks in
+ *     its loop on `results.length >= maxResults`).
  *
- *   - `describe`：`adapter: "exa" + latencyMs` —— envelope meta spec
- *     未落地前 `requestId` 留 undefined。
+ *   - `describe`: `adapter: "exa" + latencyMs` — `requestId` stays undefined
+ *     until the envelope/meta spec lands.
  *
- * 不读 process.env、不调 `fetchPublicResponse`（Exa 是固定 vendor endpoint，
- * 不需要 SSRF 防线 / 重定向跳限制 / 字节上限；改走 native fetch 拿 200 即可）。
+ * Never reads process.env and never calls `fetchPublicResponse` (Exa is a
+ * fixed vendor endpoint, so the SSRF defense / redirect-hop limits / byte
+ * caps are unnecessary; native fetch up to a 200 is enough).
  */
 export class ExaBackend implements SearchBackend {
   readonly id: SearchBackendId = "exa";
@@ -806,7 +839,8 @@ export class ExaBackend implements SearchBackend {
   private readonly fetchFn: typeof globalThis.fetch;
 
   constructor(opts: ExaBackendCtorOptions) {
-    // EXIT: 拒绝空 key —— 防 backend 实例持有无 key 状态而出网。
+    // EXIT: reject an empty key — never let an instance hold keyless state
+    // and go outbound.
     if (!opts.apiKey) {
       throw new ToolExecutionError("ExaBackend: apiKey is required");
     }
@@ -830,20 +864,22 @@ export class ExaBackend implements SearchBackend {
         body: JSON.stringify({
           query: args.query,
           numResults: args.maxResults,
-          // highlights 必须显式开 —— 否则上游不返回 highlights 字段，
-          // project 会一律落 text（snippet 偏长），与 spec Assumption 8
-          // 的「highlights[0] 优先」承诺不一致。
+          // highlights must be enabled explicitly — otherwise the upstream
+          // omits the highlights field, project always falls back to text
+          // (longer snippets), contradicting the "highlights first" contract.
           contents: { highlights: true },
         }),
         signal: args.signal,
       });
     } catch (err) {
-      // EXIT: fetch 抛的 abort / 其它底层错都先翻译为 typed timeout
-      // （spec SC #3 「Timeout → typed SearchBackendError(kind=timeout)
-      // when signal.aborted」）。其它底层网络错也走同 typed 路径，避免
-      // 漏到 handler 出口的「untyped pass-through」分支给模型看到原始
-      // 错误栈。非 abort 错误仍归 timeout 是有意偏离 —— abort 是这类
-      // 失败在生产环境的唯一可观察态，区分信号本身已经在外层 signal 上。
+      // EXIT: translate fetch aborts and other low-level errors into typed
+      // timeout first (Timeout → typed SearchBackendError(kind=timeout)
+      // when signal.aborted). Other low-level network errors take the same
+      // typed path so they never leak into the handler exit's untyped
+      // pass-through branch and expose a raw error stack to the model.
+      // Classifying non-abort errors as timeout is deliberate: abort is the
+      // only observable form of this failure in production, and the
+      // distinction already lives on the outer signal.
       const aborted =
         args.signal?.aborted === true ||
         (err instanceof Error && err.name === "AbortError");
@@ -858,8 +894,8 @@ export class ExaBackend implements SearchBackend {
     }
 
     if (!response.ok) {
-      // EXIT: 上游非 2xx —— typed http_non_2xx；status + endpoint 进 message，
-      // key / Authorization 由 redactAuthSecrets 兜底脱敏。
+      // EXIT: upstream non-2xx — typed http_non_2xx; status + endpoint go
+      // into the message, keys / Authorization redacted by redactAuthSecrets.
       throw createSearchBackendError({
         kind: "http_non_2xx",
         message: `upstream returned status ${response.status}`,
@@ -912,8 +948,9 @@ export class ExaBackend implements SearchBackend {
     const out: SearchResult[] = [];
     for (const itemRaw of response.results) {
       if (typeof itemRaw !== "object" || itemRaw === null) {
-        // EXIT: 单条 result 形态畸形 —— 跳过（不抛错），保持与 Bing 路径
-        // 单条解析失败的容错形态一致（Bing 用 `continue` 跳过畸形 li 块）。
+        // EXIT: a malformed single result is skipped (no throw), matching
+        // the Bing path's tolerance (which `continue`s past malformed li
+        // blocks).
         continue;
       }
       const item = itemRaw as ExaResultRaw;
@@ -940,16 +977,16 @@ export class ExaBackend implements SearchBackend {
 }
 
 /**
- * #826 T4 / spec Assumption 8：`snippet = highlights?.[0] ?? text ?? ""`。
- * 抽出来便于单测 + 隔离 ExaResultRaw 的窄类型描述。
+ * `snippet = highlights?.[0] ?? text ?? ""`. Extracted for unit testing and
+ * to isolate the narrow ExaResultRaw shape.
  *
- * 注：spec Assumption 8 原本写 `highlights[0].text`（视每条 highlight 为
- * ` {text: string}` 对象），但 T8 真出网 probe 实测发现 Exa 真响应
- * `highlights: string[]` —— 每条 highlight 是字符串本身（按 Exa docs：
- * 「a relevant excerpt/sentence from the result text」）。本函数已对齐真
- * API 形态：`highlights?.[0]` 取第一条字符串 highlight；落空时按 spec
- * 兜底走 `item.text`（部分 Exa 响应只给 `text` 不给 highlights），再
- * 落空返 `""`。spec 修正留后续 ticket。
+ * Note: the original spec treated each highlight as a `{text: string}`
+ * object, but a live probe found Exa actually returns `highlights:
+ * string[]` — each highlight is the string itself (per Exa docs: "a
+ * relevant excerpt/sentence from the result text"). This function matches
+ * the real API: take the first string highlight; on a miss fall back to
+ * `item.text` (some Exa responses give only `text`), and on a second miss
+ * return `""`. The spec fix trails in a later ticket.
  */
 function pickExaSnippet(item: ExaResultRaw): string {
   const highlights = item.highlights;
@@ -962,62 +999,65 @@ function pickExaSnippet(item: ExaResultRaw): string {
 }
 
 /**
- * #826 T5: Tavily 真端点（v2 真 fetch 推进；v1 stub 抛 typed `not_shipped`）。
- * v1 不出网 —— `TavilyBackend.fetchResults` 立即抛 typed
- * `SearchBackendError(kind="not_shipped")`；`project` 按 spec Assumption 8
- * 把 Tavily JSON 投到 Bing-shape（**忽略** `result.answer`）。真 fetch 落地
- * 后保留 endpoint 常量，factory 替换 fetch 实现即可。
+ * Tavily's real endpoint (a later version will ship the real fetch; v1 stub
+ * throws typed `not_shipped`). v1 never goes outbound —
+ * `TavilyBackend.fetchResults` immediately throws typed
+ * `SearchBackendError(kind="not_shipped")`, while `project` already maps
+ * Tavily JSON into Bing-shape (deliberately **ignoring** `result.answer`).
+ * Once the real fetch lands, keep this endpoint constant and only swap the
+ * fetch implementation in the backend.
  */
 const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 
 /**
- * #826 T5: Tavily 单条 result 形态（spec Assumption 8）。
- * `answer` 是 Tavily 上游 LLM-synthesized answer field —— spec 明文**忽略**，
- * 不进 snippet（snippet 走 `content`）。
+ * Single Tavily result shape. `answer` is Tavily's upstream
+ * LLM-synthesized answer field — deliberately ignored (snippet comes from
+ * `content`).
  */
 interface TavilyResultRaw {
   readonly title?: unknown;
   readonly url?: unknown;
   readonly content?: unknown;
-  /** #826 T5: Tavily 上游特有字段；spec 强制忽略 —— 投影函数直接不看。 */
+  /** Tavily-specific field; intentionally ignored — the projector never reads it. */
   readonly answer?: unknown;
 }
 
 /**
- * #826 T5: Tavily 响应形态（最少需要 `results[]`）。
+ * Tavily response shape (minimally needs `results[]`).
  */
 interface TavilyResponseRaw {
   readonly results?: unknown;
 }
 
 /**
- * #826 T6: Brave 真端点（v2 真 fetch 推进；v1 stub 抛 typed `not_shipped`）。
- * v1 不出网 —— `BraveBackend.fetchResults` / `project` / `describe` 三方法
- * 均抛 typed `SearchBackendError(kind="not_shipped")`，统一语义；
- * 真 fetch 落地后保留 endpoint 常量，工厂替换 fetch 实现即可。
+ * Brave's real endpoint (a later version will ship the real fetch; v1 stub
+ * throws typed `not_shipped`). v1 never goes outbound — all three methods of
+ * `BraveBackend` throw typed `SearchBackendError(kind="not_shipped")` with
+ * uniform semantics; once the real fetch lands, keep this endpoint constant
+ * and only swap the fetch implementation.
  */
 const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
 
 /**
- * #826 T6: BraveBackend v1 stub。
+ * BraveBackend v1 stub.
  *
- *   - `fetchResults`：立即抛 typed
- *     `SearchBackendError(kind="not_shipped", endpoint=api.search.brave.com)`，
- *     message 含 backend id "brave" + v2 提示。**不**发真 HTTP；v2 真 fetch
- *     推进时实现 GET + X-Subscription-Token header。
- *   - `project`：抛 typed `not_shipped`（spec Assumption 8「Brave v1 不实现
- *     `project`」+ T6 acceptance #2 推荐「uniform semantics —— all three
- *     methods throw not_shipped for v1」）。v2 真 fetch 推进时按
- *     spec Assumption 8 投影（`result.title` / `result.description` /
- *     `result.url`，字段 cap 走共享 `projectSearchResult`）。
- *   - `describe`：抛 typed `not_shipped`（T6 acceptance #3 同语义）。
- *     v2 推进时落真形态 `{ adapter: "brave" + latencyMs }`，与 Tavily /
- *     Exa / Bing 同形态。
+ *   - `fetchResults`: immediately throws typed
+ *     `SearchBackendError(kind="not_shipped", endpoint=api.search.brave.com)`;
+ *     the message names backend id "brave" + a v2 hint. **No** real HTTP is
+ *     sent; when the real fetch ships, implement GET + X-Subscription-Token
+ *     header.
+ *   - `project`: throws typed `not_shipped` (uniform semantics for v1 — all
+ *     three methods throw). When the real fetch ships, project into
+ *     Bing-shape (`result.title` / `result.description` / `result.url`,
+ *     field caps via the shared `projectSearchResult`).
+ *   - `describe`: throws typed `not_shipped` (same semantics). When the real
+ *     form ships, return `{ adapter: "brave", latencyMs }`, same shape as
+ *     Tavily / Exa / Bing.
  *
- * v1 状态：无 constructor 参数（无 per-call state、无 apiKey 字段 —— 真 fetch
- * 推进时再加 apiKey，与 ExaBackend 一致）。所有三方法都直接 sync / async
- * 抛 typed not_shipped；handler 出口的 try/catch 据此 1:1 转译为
- * `ToolExecutionError`（spec SC #8）。
+ * v1 state: no constructor parameters (no per-call state, no apiKey field —
+ * apiKey will be added when the real fetch ships, mirroring ExaBackend). All
+ * three methods synchronously/asynchronously throw typed not_shipped; the
+ * handler exit's try/catch translates them 1:1 into `ToolExecutionError`.
  */
 export class BraveBackend implements SearchBackend {
   readonly id: SearchBackendId = "brave";
@@ -1027,10 +1067,11 @@ export class BraveBackend implements SearchBackend {
     maxResults: number;
     signal?: AbortSignal;
   }): Promise<unknown> {
-    // EXIT: v1 stub — 立即抛 typed not_shipped；handler 出口的 try/catch
-    // 据此 1:1 转译为 ToolExecutionError（spec SC #8）。不读 apiKey（v2
-    // 真 fetch 时再读），不带 key 字面值 / Authorization / endpoint query
-    // —— `createSearchBackendError` 兜底脱敏。
+    // EXIT: v1 stub — immediately throw typed not_shipped; the handler
+    // exit's try/catch translates it 1:1 into ToolExecutionError. No apiKey
+    // read (added with the real fetch), and no key literal / Authorization /
+    // endpoint query in the message — `createSearchBackendError` redacts as
+    // a backstop.
     throw createSearchBackendError({
       kind: "not_shipped",
       message:
@@ -1040,9 +1081,9 @@ export class BraveBackend implements SearchBackend {
   }
 
   project(_raw: unknown, _maxResults: number): SearchResult[] {
-    // EXIT: v1 stub — `project` 也抛 typed not_shipped（spec Assumption 8
-    // 钉"Brave v1 不实现 `project`"；T6 acceptance #2 推荐三方法统一语义）。
-    // v2 真 fetch 推进时按 spec Assumption 8 投影到 Bing-shape。
+    // EXIT: v1 stub — `project` also throws typed not_shipped (Brave v1 has
+    // no `project`; uniform semantics across all three methods). When the
+    // real fetch ships, project into Bing-shape.
     throw createSearchBackendError({
       kind: "not_shipped",
       message:
@@ -1055,8 +1096,8 @@ export class BraveBackend implements SearchBackend {
     _raw: unknown,
     _startedAt: number
   ): { adapter: SearchBackendId; latencyMs: number; requestId?: string } {
-    // EXIT: v1 stub — `describe` 也抛 typed not_shipped（T6 acceptance #3
-    // 同语义）；v2 推进时落真形态。
+    // EXIT: v1 stub — `describe` also throws typed not_shipped (uniform
+    // semantics); the real form ships later.
     throw createSearchBackendError({
       kind: "not_shipped",
       message:
@@ -1067,23 +1108,23 @@ export class BraveBackend implements SearchBackend {
 }
 
 /**
- * #826 T5: TavilyBackend v1 stub。
+ * TavilyBackend v1 stub.
  *
- *   - `fetchResults`：立即抛 typed
- *     `SearchBackendError(kind="not_shipped", endpoint=api.tavily.com)`，
- *     message 含 backend id "tavily" + v2 提示。**不**发真 HTTP；v2 真 fetch
- *     推进时实现 POST + Authorization。
- *   - `project`：把 Tavily JSON 投到 Bing-shape `SearchResult[]`
- *     （`title = result.title`、`snippet = result.content`、
- *     `url = result.url`，**`result.answer` 忽略**）。字段 cap 走
- *     `projectSearchResult`（与 Bing HTML 路径字节级一致 —— spec SC #3
- *     「T2 字段 cap 一刀切，adapter 不写自家 cap」）；`maxResults` cap 在
- *     `project` 内 `if (out.length >= maxResults) break` 施加，与
- *     `ExaBackend.project` / Bing 解析路径同形态。
- *   - `describe`：`adapter: "tavily" + latencyMs`。
+ *   - `fetchResults`: immediately throws typed
+ *     `SearchBackendError(kind="not_shipped", endpoint=api.tavily.com)`;
+ *     the message names backend id "tavily" + a v2 hint. **No** real HTTP is
+ *     sent; when the real fetch ships, implement POST + Authorization.
+ *   - `project`: maps Tavily JSON into Bing-shape `SearchResult[]`
+ *     (`title = result.title`, `snippet = result.content`,
+ *     `url = result.url`, **`result.answer` ignored**). Field caps go
+ *     through `projectSearchResult` (byte-identical with the Bing HTML path —
+ *     one cap rule for all adapters); the `maxResults` cap is applied inside
+ *     `project` via `if (out.length >= maxResults) break`, same form as
+ *     `ExaBackend.project` and the Bing parsing path.
+ *   - `describe`: `adapter: "tavily" + latencyMs`.
  *
- * v1 状态：无 constructor 参数（无 per-call state、无 apiKey 字段 ——
- * 真 fetch 推进时再加 apiKey，与 ExaBackend 一致）。
+ * v1 state: no constructor parameters (no per-call state, no apiKey field —
+ * apiKey will be added when the real fetch ships, mirroring ExaBackend).
  */
 export class TavilyBackend implements SearchBackend {
   readonly id: SearchBackendId = "tavily";
@@ -1093,10 +1134,11 @@ export class TavilyBackend implements SearchBackend {
     maxResults: number;
     signal?: AbortSignal;
   }): Promise<unknown> {
-    // EXIT: v1 stub — 立即抛 typed not_shipped；handler 出口的 try/catch
-    // 据此 1:1 转译为 ToolExecutionError（spec SC #8）。不读 apiKey（v2
-    // 真 fetch 时再读），不带 key 字面值 / Authorization / endpoint query
-    // —— `createSearchBackendError` 兜底脱敏。
+    // EXIT: v1 stub — immediately throw typed not_shipped; the handler
+    // exit's try/catch translates it 1:1 into ToolExecutionError. No apiKey
+    // read (added with the real fetch), and no key literal / Authorization /
+    // endpoint query in the message — `createSearchBackendError` redacts as
+    // a backstop.
     throw createSearchBackendError({
       kind: "not_shipped",
       message:
@@ -1124,16 +1166,18 @@ export class TavilyBackend implements SearchBackend {
     const out: SearchResult[] = [];
     for (const itemRaw of response.results) {
       if (typeof itemRaw !== "object" || itemRaw === null) {
-        // EXIT: 单条 result 形态畸形 —— 跳过（不抛错），保持与 Bing 路径 /
-        // Exa project 的容错形态一致（skip malformed 单条）。
+        // EXIT: a malformed single result is skipped (no throw), matching
+        // the tolerance of the Bing path / Exa project (skip malformed
+        // singles).
         continue;
       }
       const item = itemRaw as TavilyResultRaw;
       const title = typeof item.title === "string" ? item.title : "";
       const url = typeof item.url === "string" ? item.url : "";
-      // spec Assumption 8: snippet = result.content。**刻意不看 result.answer**
-      // —— Tavily 上游独有 LLM-synthesized 字段，spec 强制忽略；projected
-      // snippet 永不含 answer 字面值，handler formatter 也不会带回。
+      // snippet = result.content. result.answer is deliberately not read —
+      // it is Tavily's upstream-specific LLM-synthesized field and must stay
+      // out: the projected snippet never contains answer text, and the
+      // handler formatter cannot carry it back either.
       const snippet = typeof item.content === "string" ? item.content : "";
       const projected = projectSearchResult({ title, url, snippet });
       if (!projected) continue;
@@ -1155,22 +1199,22 @@ export class TavilyBackend implements SearchBackend {
 }
 
 /**
- * #826 T2: `BACKENDS` 表 — 按 `id` 持 backend 工厂。T2 仅 bing 真接；
- * tavily/exa/brave 占位 throws。`selectBackend(id)` 返回工厂；handler
- * 调工厂拉实例。
+ * The `BACKENDS` table — backend factories keyed by `id`. `selectBackend(id)`
+ * returns a factory; the handler calls it to pull an instance per use.
  *
- * T4 起：Exa 真 fetch 落地，`BACKENDS.exa` 工厂改为透传 apiKey 给
- * `ExaBackend` 构造函数。handler 在 `assertBackendConfig` 之后才调
- * 工厂，故 apiKey 一定 non-empty；构造函数的空串兜底是防绕过 entry
- * 校验的直调路径（测试 / 装配脚本）留下无 key 实例。
+ * Exa: the factory passes apiKey through to the `ExaBackend` constructor.
+ * The handler only calls factories after `assertBackendConfig`, so apiKey is
+ * always non-empty; the constructor's empty-string rejection is a backstop
+ * for direct-call paths that bypass entry validation (tests / assembly
+ * scripts), preventing keyless instances.
  *
- * T5 起：Tavily stub 落地（`project` 真实、`fetchResults` 抛 typed
- * `not_shipped`）。`TavilyBackend` 无 constructor 参数，工厂直接 `new`
- * 即可。
+ * Tavily: stub implementation (`project` real, `fetchResults` throws typed
+ * `not_shipped`). `TavilyBackend` takes no constructor parameters, so the
+ * factory is a bare `new`.
  *
- * T6 起：Brave stub 落地（三方法均抛 typed `not_shipped`，统一语义）。
- * `BraveBackend` 无 constructor 参数，工厂直接 `new` 即可。v2 真 fetch
- * 推进时按 ExaBackend 形态补 apiKey 注入即可。
+ * Brave: stub implementation (all three methods throw typed `not_shipped`,
+ * uniform semantics). `BraveBackend` takes no constructor parameters; when
+ * the real fetch ships, add apiKey injection mirroring ExaBackend.
  */
 export const BACKENDS: Record<SearchBackendId, SearchBackendFactory> = {
   bing: ({ guardDeps, endpoint }) => new BingBackend(guardDeps, endpoint),

@@ -1,13 +1,17 @@
 /**
- * rg stdout 解析（SC12「行解析」）。
+ * rg stdout parsing (line parsing).
  *
- * 输入形状由 `argv.ts` 固定：`--null` → `path\0line:text\n`。NUL 定界把
- * 「路径含冒号」从分列问题里彻底移除 —— D3 的 `:` / `-` / `--` 分列只在
- * **content + context** 的渲染侧才有意义（那条路径由 `rg-output-context.ts`
- * 解析，见该文件注释）。
+ * The input shape is fixed by `argv.ts`: `--null` → `path\0line:text\n`.
+ * NUL delimiting removes "path contains a colon" from the column-splitting
+ * problem entirely — the `:` / `-` / `--` splitting in the rendering layer
+ * only matters for **content + context** (parsed by
+ * `rg-output-context.ts`, see that file's comments).
  *
- * 旧契约保持：单行内容 > MAX_MATCH_LINE_COLUMNS 截断 + `...[truncated]`，
- * 按 **code point** 切（不拆 surrogate pair，ADR-0004 修订）。
+ * Old contract preserved: a single match line over MAX_MATCH_LINE_COLUMNS is
+ * truncated with `...[truncated]`, cut by **code point** (never splitting a
+ *
+ // (ADR-0004)
+ * surrogate pair).
  */
 
 import { truncateByCodePoint } from "../../sandbox/runner.js";
@@ -17,55 +21,73 @@ export const MAX_MATCH_LINE_COLUMNS = 2_000;
 export const RG_TRUNCATION_MARKER = "...[truncated]";
 
 /**
- * rg `--max-columns-preview` 追加的省略标记（实测 15.1.0 原文）。
+ * The elision marker rg `--max-columns-preview` appends (verbatim rg 15.1.0).
  *
- * 它**不是**本工具的省略标记：正文里出现这串字符时，模型看到的是 rg 传输层
- * 的收口痕迹，而不是 D2 的展示口径。解析层必须先把它剥掉，再按 code point
- * 走唯一一道闸 —— 否则 rg 路径的正文尾巴会多出这段文本，而 Node 路径没有。
+ * It is **not** this tool's elision marker: when this string appears in the
+ * body, the model is seeing rg's transport-layer truncation, not the display
+ * rule. The parser must strip it first, then apply the single code-point
+ * gate — otherwise the rg path keeps this text tail while the Node path does
+ * not.
  */
 export const RG_PREVIEW_MARKER = " [... omitted end of long line]";
 
 /**
- * 传输预算 / 权威口径之比：UTF-8 一个 code point 最多 4 字节。
+ * Transport budget / authoritative width ratio: one UTF-8 code point is at
+ * most 4 bytes.
  *
- * `--max-columns` 的**触发**按字节、**切片**按 code point（实测 15.1.0），而
- * `truncateMatchContent` 只认 code point，两者单位不同。预算取到 4 倍才让
- * 「rg 加过标记」不蕴含「内容被切掉」：
- *   - 超限行（> 2000 cp）必然 >= 2001 字节 ⟹ 必然触发；切到 8000 cp 时正文
- *     远在权威上限之上，剥标记后再由 code point 闸收口，形状一致。
- *   - 未超限行最多 2000 cp ⟹ 最多 8000 字节；触发线上的行 rg 至多切到
- *     8000 cp（切点落在字符中间时干脆不切，实测 15.1.0），所以正文一个字符
- *     都不会丢。预算小于 4 倍时，`漢`×1000（3003 字节 / 1003 cp）这类行会被
- *     真的切掉一截，而 Node 侧认为它没超列原样保留 —— 同一行的字节数、正文、
- *     可复制内容全不同（D6/SC9）。
+ * `--max-columns` **triggers** on bytes but **slices** on code points
+ * (verified 15.1.0), whereas `truncateMatchContent` only understands code
+ * points — different units. A 4x budget ensures "rg appended a marker" does
+ * not imply "content was cut":
+ *   - An over-long line (> 2000 cp) is necessarily >= 2001 bytes ⟹ always
+ *     triggers; when sliced to 8000 cp the body is far above the
+ *     authoritative cap, so after stripping the marker the code-point gate
+ *     finalizes the same shape.
+ *   - A non-over-long line is at most 2000 cp ⟹ at most 8000 bytes; a line at
+ *     the trigger rg slices to at most 8000 cp (and doesn't slice at all when
+ *     the cut would land mid-character, verified 15.1.0), so no character is
+ *     lost. With a budget below 4x, lines of 1000 three-byte CJK chars
+ *     (3003 bytes / 1003 cp) would actually lose a tail, while the Node side
+ *     keeps them intact as under-column — same line, different bytes / body /
+ *     copyable content.
  *
- * 所以本工具从不让 rg 的传输预算充当展示口径：它只用来限制传输量，最终形状
- * 由 `truncateMatchContent` 唯一决定。
+ * So this tool never lets rg's transport budget act as the display width: it
+ * only limits transport, and the final shape is decided solely by
+ * `truncateMatchContent`.
  */
 export const MAX_COLUMN_BYTES_PER_CODE_POINT = 4;
 
-/** 传给 rg `--max-columns` 的字节预算（`argv.ts` 与解析层共用同一算式）。 */
+/** Byte budget passed to rg `--max-columns` (`argv.ts` and the parser share one formula). */
 export function rgTransportBudgetBytes(maxColumns: number): number {
   return maxColumns * MAX_COLUMN_BYTES_PER_CODE_POINT;
 }
 
 /**
- * 剥掉 rg 传输层的省略标记（只在**确定是 rg 加的**时候剥）。
+ * Strip rg's transport-layer elision marker (only when it is **certain rg
+ * added it**).
  *
- * rg 15.1.0 的实测语义（两个单位不同，见 `MAX_COLUMN_BYTES_PER_CODE_POINT`）：
- *   - **触发**：行字节数 >= 预算就追加本标记；
- *   - **切片**：正文切成前 `预算` 个 **code point**，不足则原样。
- * 于是标记出现时正文未必被切过（恰好等于预算、或切割点落在多字节字符中间时
- * 都不切，实测 15.1.0），而「去标记后的字节数 >= 预算」与「rg 加过标记」等价：
- *   - 切过的行，去掉的前缀正好是 `预算` 个 code point，至少 `预算` 字节；
- *   - 没切的整行本来就有 >= 预算 字节。
- * 正文里恰好以这串文本结尾的真实行因此不会被误剥：它的字节数若 >= 预算，rg
- * 也会给它追加自己的标记，剥掉末尾那一个正好还原。
+ * Verified rg 15.1.0 semantics (the two units differ, see
+ * `MAX_COLUMN_BYTES_PER_CODE_POINT`):
+ *   - **Trigger**: append the marker when line bytes >= budget;
+ *   - **Slice**: cut the body to the first `budget` **code points**, or keep
+ *     it verbatim if shorter.
+ * So a marker does not prove the body was cut (no cut when the line is
+ * exactly the budget, or when the cut would land mid-character, verified
+ * 15.1.0), and "bytes after removing the marker >= budget" is equivalent to
+ * "rg appended the marker":
+ *   - a cut line loses a prefix of exactly `budget` code points, i.e. at
+ *     least `budget` bytes;
+ *   - an uncut whole line already had >= budget bytes.
+ * A real file line that happens to end with this text is therefore not
+ * stripped by mistake: if its byte count >= budget, rg would have appended
+ * its own marker too, and removing just the last one restores it.
  *
- * `strippedTailBytes` = 调用方在**原始记录尾部**剥掉的字节数（`--crlf` 下 rg
- * 回显的尾随 `\r` 即 1）：它计入 rg 的触发基数，少了它 7999 字节的 CRLF 行会
- * 漏剥（实测 15.1.0：7999 + `\r` 恰好达线）。调用方必须传「记录原样长度 -
- * 传入内容长度」，不能先扣再猜。
+ * `strippedTailBytes` = bytes the caller removed from the **raw record tail**
+ * (the trailing `\r` rg echoes under `--crlf`, i.e. 1): it counts toward rg's
+ * trigger base, and without it a 7999-byte CRLF line would escape stripping
+ * (verified 15.1.0: 7999 + `\r` lands exactly on the line). Callers must pass
+ * "verbatim record length - content length passed in", not pre-deduct and
+ * guess.
  */
 export function stripRgPreviewMarker(
   content: string,
@@ -80,16 +102,18 @@ export function stripRgPreviewMarker(
 }
 
 /**
- * 解析 `--null` content 输出的命中行。
+ * Parse hit lines from `--null` content output.
  *
- * 形状损坏的记录（无 NUL、行号非十进制）整条跳过 —— 不猜、不产生假命中。
+ * Malformed records (no NUL, non-decimal line number) are skipped entirely —
+ * no guessing, no fake hits.
  */
 export function parseRgNullLines(stdout: string): LineHit[] {
   const hits: LineHit[] = [];
   for (const record of stdout.split("\n")) {
     if (record.length === 0) continue;
-    // 二进制提示不是命中行（见 `isRgBinaryNotice`）：它的「路径:」段与
-    // `path:line:text` 同形，不显式排除就会被解析成一条假命中。
+    // The binary notice is not a hit line (see `isRgBinaryNotice`): its
+    // "path:" segment is shaped like `path:line:text`, so without an explicit
+    // exclusion it would parse as a fake hit.
     if (isRgBinaryNotice(record)) continue;
     const nulIdx = record.indexOf("\0");
     if (nulIdx === -1) continue;
@@ -109,65 +133,76 @@ export function parseRgNullLines(stdout: string): LineHit[] {
 }
 
 /**
- * rg 的二进制提示记录（**不是命中行**）。
+ * rg's binary notice records (**not hit lines**).
  *
- * 实测 15.1.0 的两种原文（`--null -H` 下路径段以 NUL 收尾，故 NUL 之后是
- * 提示正文）：
+ * Two verbatim forms verified in 15.1.0 (under `--null -H` the path segment
+ * ends with NUL, so the notice body follows the NUL):
  *   - `path\0 binary file matches (found "\0" byte around offset 8)`
  *   - `path\0 WARNING: stopped searching binary file after match (found "\0" byte around offset 70008)`
- *   - `path: binary file matches (...)` —— `--null` 下 rg 只在**真正输出内容
- *     记录**时用 NUL 定界，提示行走的是无 NUL 的 `path: ` 形态（实测 15.1.0）。
+ *   - `path: binary file matches (...)` — under `--null`, rg only NUL-delimits
+ *     **real content records**; the notice line uses the NUL-free `path: `
+ *     form (verified 15.1.0).
  *
- * 它们长得像记录（有路径、有冒号），若不识别就会被 `parseRgNullLines` 一类
- * 解析器当成命中或整条丢弃；`-l` / `--count` 出法下 rg 甚至**不吐**这些提示，
- * 于是同一个含 NUL 的文件 `-l` 列出、`content` 报提示（实测 15.1.0：远距离
- * NUL 的文件 `-l` rc=0 带路径、`--count` rc=0 不带、`content` 吐 WARNING）。
- * 这是 rg 自身检测窗口（64 KiB）的副作用，不是一条可复刻的口径，所以两条
- * 引擎统一按「二进制文件不搜」处理，这里只负责把提示识别出来。
+ * They look like records (path, colon); unrecognized, parsers like
+ * `parseRgNullLines` would treat them as hits or drop them wholesale. Under
+ * `-l` / `--count` rg does not even **emit** these notices, so the same
+ * NUL-containing file is listed by `-l` but reported as a notice by
+ * `content` (verified 15.1.0: a file with a far NUL gives `-l` rc=0 with the
+ * path, `--count` rc=0 without, `content` a WARNING). This is a side effect
+ * of rg's own detection window (64 KiB) and not a replicable rule, so both
+ * engines uniformly treat binary files as unsearchable; this code only
+ * recognizes the notice.
  *
- * 判据必须**锚在记录位置**：命中行的正文里完全可能出现同一串字（拿
- * `binary file matches` 当 pattern 自指查询时就会），按子串判会把真命中一起
- * 丢掉。两种原文的姿态固定 —— 提示正文紧跟路径段（`path\0 ` 或 `path: `），
- * 且**没有行号段**（命中记录必然是 `path\0<十进制>:正文`，分隔符是 `:`）。
+ * The test must be **anchored at the record position**: a hit line's body can
+ * contain the very same text (e.g. querying `binary file matches` as a
+ * pattern), so a substring test would drop real hits too. Both verbatim forms
+ * have a fixed posture — the notice body follows the path segment directly
+ * (`path\0 ` or `path: `) and there is **no line-number segment** (a hit
+ * record is always `path\0<decimal>:body`, delimited by `:`).
  */
 const RG_BINARY_NOTICE_BODY =
   /^(?:WARNING: )?(?:binary file matches|stopped searching binary file)/;
 
-/** 该记录是否是 rg 的二进制提示（而非命中）。 */
+/** Whether this record is rg's binary notice (rather than a hit). */
 export function isRgBinaryNotice(record: string): boolean {
   const nul = record.indexOf("\0");
   if (nul !== -1) {
     const rest = record.slice(nul + 1);
-    // `path\0<十进制>:` 是命中记录 —— 正文里出现同样的字也不得被当提示丢掉。
+    // `path\0<decimal>:` is a hit record — even the same text in its body
+    // must not be dropped as a notice.
     if (/^\d+:/.test(rest)) return false;
     return RG_BINARY_NOTICE_BODY.test(rest.replace(/^ /, ""));
   }
-  // 无 NUL 的只有两种可能：提示行（`path: 提示正文`）或形状损坏的记录。
+  // Without NUL there are only two cases: a notice line (`path: notice body`)
+  // or a malformed record.
   const colon = record.indexOf(": ");
   return colon !== -1 && RG_BINARY_NOTICE_BODY.test(record.slice(colon + 2));
 }
 
 /**
- * 剥尾随 `\r`（rg stdout 的每一条内容记录都要过这道）。
+ * Strip a trailing `\r` (every rg stdout content record passes this gate).
  *
- * `argv.ts` 带了 `--crlf`：rg 按 CRLF 判行边界（`foo$` 因此能命中 CRLF 行），
- * 但**回显的行内容仍带 `\r`**（实测 15.1.0，`--null` 与否都一样）。Node 侧按
- * `\n` 切行后已剥 `\r`（见 `file-lines.splitLines`），这里不剥就是同一查询两条
- * 引擎输出差一个不可见字符 —— 模型看不到它，但字节比较与后续 `edit_file` 的
- * `old_str` 都会撞上。
+ * `argv.ts` passes `--crlf`: rg decides line boundaries by CRLF (so `foo$`
+ * hits a CRLF line), but **the echoed line content still carries `\r`**
+ * (verified 15.1.0, same with or without `--null`). The Node side already
+ * strips `\r` after splitting on `\n` (see `file-lines.splitLines`); not
+ * stripping here means the same query differs by one invisible char between
+ * engines — invisible to the model, but byte comparisons and a later
+ * `edit_file` `old_str` would both trip on it.
  *
- * 剥除由 `truncateRgContent` 统一执行（本函数不对外）：`\r` 是 rg 判定「行
- * 超长」的字节基数的一部分（见 `stripRgPreviewMarker`），调用方若先剥再交进
- * 来，那一个字节就永久丢失、标记剥取随之判错。
+ * Stripping is unified in `truncateRgContent` (this helper is private): `\r`
+ * is part of the byte base rg uses to judge "line too long" (see
+ * `stripRgPreviewMarker`), so if a caller strips it before handing the body
+ * over, that byte is lost for good and marker-stripping then misjudges.
  */
 function stripCr(text: string): string {
   return text.endsWith("\r") ? text.slice(0, -1) : text;
 }
 
 /**
- * `--null` 下 `--count` 的输出形状：`path\0count\n`。
+ * Output shape of `--count` under `--null`: `path\0count\n`.
  *
- * count 出法不需要行号；路径用同款 NUL 定界。
+ * The count form needs no line numbers; paths use the same NUL delimiter.
  */
 export function parseRgNullCounts(
   stdout: string
@@ -175,8 +210,9 @@ export function parseRgNullCounts(
   const counts: Array<{ path: string; count: number }> = [];
   for (const record of stdout.split("\n")) {
     if (record.length === 0) continue;
-    // 二进制提示同 `parseRgNullLines`：它不是计数记录，形状判定必须一致 ——
-    // 少了这道，`--count` 下的提示会被当 `path:0` 之类的假计数收下。
+    // Binary notice, same as `parseRgNullLines`: it is not a count record, so
+    // the shape test must agree — without this a notice under `--count` would
+    // be accepted as a fake count like `path:0`.
     if (isRgBinaryNotice(record)) continue;
     const nulIdx = record.indexOf("\0");
     if (nulIdx === -1) continue;
@@ -188,13 +224,13 @@ export function parseRgNullCounts(
   return counts;
 }
 
-/** `--files-with-matches --null` → `path\0` 序列。 */
+/** `--files-with-matches --null` → a `path\0` sequence. */
 export function parseRgNullPaths(stdout: string): string[] {
   const paths: string[] = [];
   for (const record of stdout.split("\0")) {
     if (record.length === 0) continue;
-    // 最后一段可能带尾随 \n（rg 每条记录以 \0 收尾后仍会有换行以外的
-    // 空白），剥掉后再剥 `./`。
+    // The last segment may carry a trailing \n (after each record's \0, rg
+    // still emits whitespace); strip it, then strip `./`.
     const cleaned = stripDotSlash(record.replace(/\n+$/, ""));
     if (cleaned.length > 0) paths.push(cleaned);
   }
@@ -202,14 +238,17 @@ export function parseRgNullPaths(stdout: string): string[] {
 }
 
 /**
- * 单行内容收口：按 **code point** 收到 MAX_MATCH_LINE_COLUMNS，超出加标记。
+ * Finalize a single content line: cut to MAX_MATCH_LINE_COLUMNS by **code
+ * point**, appending the marker when over.
  *
- * 与 `sandbox/runner.ts` 的 `truncateByCodePoint` 是同一件事 —— 这里只是
- * 套上本层的省略标记与上限常量，切法不另写一份（旧实现的 `Array.from` +
- * `slice` 是第二份实现，漂移风险白担）。
+ * Same thing as `truncateByCodePoint` in `sandbox/runner.ts` — here we only
+ * wrap in this layer's elision marker and cap constant; the cut itself is not
+ * reimplemented (the old `Array.from` + `slice` was a second implementation,
+ * pure drift risk).
  *
- * 纯展示闸，**不含传输层痕迹的处理**（见 `truncateRgContent`）：两条引擎的
- * 最终形状因此只由这一处决定，任何一条引擎都不多截一刀。
+ * Pure display gate, **no handling of transport-layer artifacts** (see
+ * `truncateRgContent`): the final shape of both engines is thus decided only
+ * here, and neither engine cuts an extra time.
  */
 export function truncateMatchContent(content: string): string {
   if (Array.from(content).length <= MAX_MATCH_LINE_COLUMNS) return content;
@@ -217,15 +256,19 @@ export function truncateMatchContent(content: string): string {
 }
 
 /**
- * rg 解析路径的入口：先洗掉传输层痕迹，再过共用展示闸。
+ * Entry point for the rg parse path: first wash off transport-layer
+ * artifacts, then apply the shared display gate.
  *
- * 清洗必须**只在 rg 路径**做：`stripRgPreviewMarker` 的判据是「去标记后字节数
- * >= 预算」，一个真实文件里恰好那么长、又恰好以该文本结尾的行，在 Node 路径
- * 会被白白削掉一截（Node 没有传输层，那种结尾就是内容本身）—— 两条引擎对
- * 同一文件给出不同正文（D6/SC9）。所以 Node 路径只走 `truncateMatchContent`。
+ * The wash must happen **only on the rg path**: `stripRgPreviewMarker`'s test
+ * is "bytes after removing the marker >= budget", so a real file line that is
+ * exactly that long and happens to end with that text would lose a tail for
+ * nothing on the Node path (Node has no transport layer — such an ending is
+ * just content), giving the two engines different bodies for the same file.
+ * Hence the Node path runs `truncateMatchContent` only.
  *
- * 尾随 `\r` 在此剥掉（rg 回显它、Node 侧已由 `splitLines` 剥），但它的字节数
- * 要交给标记剥取当触发基数 —— 顺序不能反。
+ * The trailing `\r` is stripped here (rg echoes it, the Node side already
+ * stripped via `splitLines`), but its byte count must be handed to marker
+ * stripping as the trigger base — the order cannot be reversed.
  */
 export function truncateRgContent(raw: string): string {
   const hasCr = raw.endsWith("\r");

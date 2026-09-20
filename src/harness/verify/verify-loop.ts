@@ -1,26 +1,32 @@
 /**
- * verify-loop 主循环 — orchestrator 层 advisor (T7, GH #128 失败自动修正闭环)。
+ * verify-loop main loop — advisor-layer wrapper around run() implementing the
+ * failure auto-correction closed loop.
  *
- * 形态: 包裹 run() 的 advisor (D1), 引擎零改动, 停止语义保持冻结。
- *   - 仅 StopReason=completed 触发验证 (假设 B9);
- *   - 验证命令经 runVerify 在 bwrap 沙箱执行 (假设 B7, 缺省装配与 bash 工具同款);
- *   - 注入只追加: 失败信封作为一条 user 消息 append 到 messages, 作为下一轮
- *     priorMessages; 从不伪造 tool_use 配对;
- *   - 超时 (timeoutSec 默认 600) 判"不稳定"不判"真失败" (假设 B13);
- *   - 用户 abort 终止整个闭环, 消息历史符合 in-flight closeout (假设 B12);
- *   - exec 启动失败 (spawn error / 沙箱拒绝) → exit=127 → 真失败分支;
- *   - 未配 verify.command + 未装配分类器 seam → 透明关闭, 行为与裸 run 逐字节
- *     一致 (SC7 既有语义, 向后兼容);
- *   - 未配 verify.command + 装配分类器 seam (runClassifier) → 子代理 LLM 判官
- *     裁决任务完成度 (spec #128 SC1/A1 填空): pass → 完成; fail → 注入分类器
- *     信封继续; abort/transport/schema 错 → unstable (SC5 fail-open)。
+ * Shape: an advisor wrapping run(), zero engine changes, stop semantics frozen.
+ *   - Only StopReason=completed triggers verification;
+ *   - the verify command runs in the bwrap sandbox via runVerify (default
+ *     assembly identical to the bash tool);
+ *   - injection is append-only: the failure envelope is appended to messages as
+ *     one user message and replayed as next-round priorMessages; tool_use
+ *     pairing is never forged;
+ *   - timeout (default 600s) is judged "unstable", not "true failure";
+ *   - user abort ends the whole loop, message history follows in-flight closeout;
+ *   - exec spawn failure / sandbox rejection → exit=127 → true-failure branch;
+ *   - no verify.command and no classifier seam → transparently disabled,
+ *     byte-identical to a bare run (backward compatible);
+ *   - no verify.command but a classifier seam (runClassifier) is assembled →
+ *     the subagent LLM judge rules on task completion: pass → done; fail →
+ *     inject the classifier envelope and continue; abort / transport / schema
+ *     errors → unstable (fail-open).
  *
- * 依赖方向: 只消费 verdict / inject / types 纯函数层 + sandbox 基础层,
- * 不 import 任何 ACI 装饰层, 不 import settings (配置由调用方传入 VerifyConfig)。
+ * Dependency direction: consumes only the pure verdict / inject / types layers
+ * plus the sandbox base layer. No ACI decoration imports, no settings
+ * (configuration arrives via VerifyConfig from the caller).
  *
- * runFn / runVerify 双缝注入: runFn 是 run() 的委托 (测试传 stub, 装配层传
- * 真实 run 闭包), runVerify 是验证执行体 (测试传脚本化假命令, 生产缺省
- * runInSandbox 构造)。verify-loop 不 import loop-engine 的 deps, 保持可测性。
+ * runFn / runVerify dual-seam injection: runFn delegates to run() (tests pass
+ * a stub, assembly passes the real closure); runVerify is the verification
+ * executor (tests pass scripted fake commands, production defaults to
+ * runInSandbox). verify-loop never imports loop-engine deps, keeping testability.
  */
 import { randomUUID } from "node:crypto";
 import type { WorktreeGateReader } from "../isolation/worktree-gate.js";
@@ -67,61 +73,65 @@ import {
   type Verdict,
   type VerifyConfig,
 } from "./types.js";
-// 沙箱执行体 (M4 拆分): RunVerifyFn / makeDefaultRunVerify / runVerifyOnce 落
-// sandbox-run.ts, 本文件只做判定编排 (不 import sandbox 层)。
+// Sandbox executor split: RunVerifyFn / makeDefaultRunVerify / runVerifyOnce
+// live in sandbox-run.ts; this file only orchestrates decisions (no direct
+// sandbox-layer imports).
 import {
   makeDefaultRunVerify,
   runVerifyOnce,
   type RunVerifyFn,
 } from "./sandbox-run.js";
 
-/** 验证命令超时默认 (秒); 超时判"不稳定" (假设 B13, plan §Decisions 定稿)。 */
+/** Default verify-command timeout (seconds); a timeout is judged "unstable". */
 export const DEFAULT_TIMEOUT_SEC = 600;
-/** 兜底总轮数上限默认; 裁判是趋势不是计数器 (plan §Decisions 定稿)。 */
+/** Default hard round cap; the judge is the trend, not the counter. */
 export const DEFAULT_MAX_ROUNDS = 12;
 /**
- * #449b B5 补跑 (evidence-rerun) 单闭环上限 (plan B5 决议)。
- * `rerunAttempts >= RERUN_ATTEMPT_CAP` 后落原 produceObservation (判官 / 命令
- * 既有机制); 1 次 = 给模型一次补证据机会, 避免无限 loop (spec A10 决议细化)。
- * 不导出: 仅供 runVerifyLoopBody 内部使用。
+ * Evidence-rerun attempt cap per closed loop. At the cap the loop falls back
+ * to the original produceObservation (judge / command mechanisms); 1 gives the
+ * model one chance to supply evidence without risking an infinite loop.
+ * Not exported: used only inside runVerifyLoopBody.
  */
 const RERUN_ATTEMPT_CAP = 1;
 
-/** 单次 run() 的返回形状 (runFn 委托的返回)。 */
+/** Return shape of a single run() (what runFn delegates). */
 export type RunOutcome = {
   readonly result: RunResult;
   readonly trace: LoopTrace;
 };
 
-// RunVerifyFn 类型经 sandbox-run.ts re-export (M4 拆分), 保持 verify-loop 最小面。
+// RunVerifyFn is re-exported via sandbox-run.ts; keep verify-loop's surface minimal.
 export type { RunVerifyFn } from "./sandbox-run.js";
 
 /**
- * 分类器 worker 回包信封 (spec #128 SC5)。
- * 由装配层把 SubAgentManager 的 SubAgentEnvelope 适配到此形状:
- *   - status:"ok" → result 承载判官 JSON (verify-loop 侧 parseClassifierResult);
- *   - status:"failed" → transport 错 (reason ∈ crashed/timeout/protocolError),
- *     verify-loop 收敛为 unstable (SC5 fail-open), 不注入失败信封。
- * 进程隔离 (A2) 由 seam 实现承担, verify-loop 只做编排 + 解析 + 降级。
+ * Classifier worker reply envelope. The assembly layer adapts SubAgentManager's
+ * SubAgentEnvelope to this shape:
+ *   - status:"ok" → result carries the judge JSON (parsed by parseClassifierResult);
+ *   - status:"failed" → transport error (reason ∈ crashed/timeout/protocolError);
+ *     verify-loop converges it to unstable (fail-open) without injecting an envelope.
+ * Process isolation is the seam implementation's job; verify-loop only
+ * orchestrates, parses, and degrades.
  */
 export interface ClassifierEnvelope {
   readonly status: "ok" | "failed";
-  /** status:"ok" 时 = 判官 JSON; status:"failed" 时为空串。 */
+  /** Judge JSON when status:"ok"; empty string when status:"failed". */
   readonly result: string;
-  /** envelope reason 联合按名对齐 envelope SSOT (ADR-0111 第五值
-   *  modelTransient；failed 一律按 transport 错 fail-open 收敛为 unstable，
-   *  值域扩宽不改本文件消费语义)。 */
+  /** envelope reason union aligned by name with the envelope SSOT (ADR-0111
+   *  fifth value modelTransient; failed always fail-opens to unstable as a
+   *  transport error — widening the union does not change consumption here). */
   readonly reason?: SubagentFailureReason;
   readonly summary: string;
 }
 
 /**
- * 分类器执行体 (spec #128 A2 子代理 LLM 判官 seam)。
- * 由装配层把 SubAgentManager (process-isolated worker spawn) 适配到此签名:
- *   - 生产: 构造 SubAgentDefinition → manager.spawn → manager.waitFor → 返回
- *     SubAgentEnvelope 适配成的 ClassifierEnvelope;
- *   - 测试: 注入脚本化替身。
- * spawn / envelope 协议 / 进程隔离 (A2) 由 seam 实现承担, verify-loop 只做编排。
+ * Classifier executor — the subagent LLM judge seam used when command is absent.
+ * The assembly layer adapts SubAgentManager (process-isolated worker spawn) to
+ * this signature:
+ *   - production: build SubAgentDefinition → manager.spawn → manager.waitFor →
+ *     adapt SubAgentEnvelope to ClassifierEnvelope;
+ *   - tests: inject a scripted double.
+ * Spawn / envelope protocol / process isolation belong to the seam; verify-loop
+ * only orchestrates.
  */
 export interface RunClassifierFn {
   (args: {
@@ -130,19 +140,19 @@ export interface RunClassifierFn {
     readonly finalText: string | null;
     readonly signal?: AbortSignal;
     readonly cwd: string;
-    /** 分类器模型槽位 (A7: settings.verify.classifierModel ?? settings.llm.model)。 */
+    /** Classifier model slot (settings.verify.classifierModel ?? settings.llm.model). */
     readonly model?: string;
     /**
-     * #449b B6: 证据体检单 (G5-3 决议术语)。独立 RunClassifierFn 参数
-     * (prompt, not the exam question); 不得拼进 task。失败修正信封仍可
-     * 走 evidence_context 段。
+     * Evidence report card. A separate RunClassifierFn parameter
+     * (prompt, not the exam question); must not be concatenated into task.
+     * The failure-correction envelope still uses its evidence_context section.
      */
     readonly evidenceContext?: EvidenceContext;
   }): Promise<ClassifierEnvelope>;
 }
 
 export interface VerifyLoopOptions {
-  /** run() 委托 (可注入). runFn 决定 userText 与历史续传语义。 */
+  /** run() delegate (injectable). runFn decides userText and history-resume semantics. */
   readonly runFn: (
     userText: string,
     opts?: {
@@ -151,25 +161,28 @@ export interface VerifyLoopOptions {
       onStream?: (event: HarnessStreamEvent) => void;
     }
   ) => Promise<RunOutcome>;
-  /** 本轮任务原始 userText (闭环各轮复用同一任务文本)。 */
+  /** Original userText of the task (reused by every round of the loop). */
   readonly userText: string;
   readonly config: VerifyConfig;
   readonly sessionId: string;
-  /** 用户中断信号; abort → 整个闭环终止 (in-flight closeout)。 */
+  /** User abort signal; abort ends the whole loop (in-flight closeout). */
   readonly signal?: AbortSignal;
-  /** 观测落点 (trace 域 VerificationRecord, 每轮判定写盘, @throws never)。 */
+  /** Observation sink (trace-domain VerificationRecord; every round's verdict is persisted, never throws). */
   readonly trace?: TraceService;
-  /** 验证执行体测试缝; 缺省内部用 runInSandbox 构造 (bwrap 沙箱)。 */
+  /** Test seam for the verification executor; default built internally via runInSandbox (bwrap). */
   readonly runVerify?: RunVerifyFn;
   /**
-   * 分类器执行体 (command 缺失时的子代理 LLM 判官)。装配 → 启用分类器填空;
-   * 缺席 + command 缺失 → 透明关闭 (SC7 既有语义, 向后兼容)。
+   * Classifier executor (subagent LLM judge when command is absent). Assembled
+   * → classifier fills in; absent + no command → transparently disabled
+   * (backward compatible).
    */
   readonly runClassifier?: RunClassifierFn;
   /**
-   * Completion-facing judge dispatch (ADR-0024).
+   * Completion-facing judge dispatch.
+   *
+   // (ADR-0024)
    * `hitl` = skip LLM judge (named EXIT).
-   * `auto` = goal 功能 (`/goal`) judge module: spawn judge on completed unless hard-fail,
+   * `auto` = the `/goal` feature's judge module: spawn judge on completed unless hard-fail,
    * including checker SUFFICIENT.
    * Omitted keeps the legacy evidence-first short-circuit (SUFFICIENT skips
    * the judge) so existing classifier unit tests stay on the old path.
@@ -177,39 +190,47 @@ export interface VerifyLoopOptions {
   readonly completionMode?: "hitl" | "auto";
   readonly cwd: string;
   /**
-   * ADR-0092 Round 2 / SC11/SC12:验证命令围栏的 fs 隔离档 + home ro-bind
-   * 源端。透传给 `makeDefaultRunVerify`(与 bash 工具同款装配语义);缺席 →
-   * 全局档(V1 baseline)。值域类型用 type-only import 直连
-   * `sandbox/fs-mode.js`(仅类型,运行期无依赖 —— 见上「不 import sandbox 层」
-   * 依赖纪律)。
+   * ADR-0092: fs isolation tier + home ro-bind source for the verify-command
+   * fence. Passed through to `makeDefaultRunVerify` (same assembly semantics
+   * as the bash tool); absent → global tier (baseline). Type-only import from
+   * `sandbox/fs-mode.js` (types only, no runtime dependency — see the
+   * "no sandbox-layer imports" discipline above).
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
   readonly homeRoot?: string;
   /**
-   * issue 1059:worktree-on-mutate holder(只读视图)—— 透传给
-   * `makeDefaultRunVerify`,验证命令 fence 与 bash 工具面在 UNBOUND_FENCE
-   * 轴上判定同源(G3)。缺席 → 不发段(V1 baseline)。
+   * worktree-on-mutate holder (read-only view) — passed through to
+   * `makeDefaultRunVerify` so the verify fence and the bash tool surface rule
+   * identically on the UNBOUND_FENCE axis. Absent → segment not emitted
+   * (baseline).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
-   * ADR-0092 / SC12:验证命令的会话 tmp 宿主路径 —— 既是围栏内 `$TMPDIR` 的
-   * 值,也是工作区档 `--bind <tmpRoot>` 的源端(两者必须同一份)。调用方经
-   * `resolveSessionFenceTmp({ projectDir, conversationId })` 解析 —— 与 bash
-   * 工具面**同一个** helper,不在本面独立推导第三份。
+   * ADR-0092: session tmp host path for verify commands — both the in-fence
+   * `$TMPDIR` value and the workspace-tier `--bind <tmpRoot>` source (must be
+   * the same path). Callers resolve it via
+   * `resolveSessionFenceTmp({ projectDir, conversationId })` — the **same**
+   * helper as the bash tool surface; never derive a third source here.
    *
-   * 缺席 → 缺省执行体回退进程 `tmpdir()`(fallback 不是目标态:未接线 /
-   * 测试注入路径)。真拿不到会话 tmp 时**不抛错** —— 那会让 verify 在
-   * projectDir / conversationId 缺失的宿主上直接失败,超出本面职责。
+   * Absent → the default executor falls back to the process `tmpdir()` (a
+   * fallback, not the target state: unwired / test-injection paths). It does
+   * **not throw** when session tmp is unavailable — throwing would break
+   * verify on hosts lacking projectDir / conversationId, out of this module's
+   * scope.
    */
   readonly tmpDir?: string;
   /**
-   * ADR-0097 / T7:出口代理缝策略 —— 由 caller(verify-loop 调用方:
-   * hub / chat-session)注入(通常经 `createEgressPolicyFactory` 派生)。
-   * 透传给 `makeDefaultRunVerify`(模块级 session 单例,首次 verify
-   * 命令执行时 lazy start)。缺省 = 无 session = 无缝(V1 baseline)。
+   * Egress proxy seam policy — injected by the caller (hub / chat-session,
    *
-   * **生产装配 TODO**:hub / chat-session 装配点本票后接 —— 详见
-   * ADR-0097 / T7 装配接线表。本票只定义契约,不实现装配点。
+   // (ADR-0097)
+   * usually derived via `createEgressPolicyFactory`) and passed to
+   * `makeDefaultRunVerify` (module-level per-session singleton, lazy-started
+   * on the first verify command). Default = no session = no seam (baseline).
+   *
+   * **Production assembly TODO**: hub / chat-session wiring points still to
+   * be connected — this only defines the contract, not the assembly.
+   *
+   // (ADR-0097)
    */
   readonly egressPolicy?: import("../sandbox/index.js").EgressPolicyInput;
 }
@@ -218,51 +239,52 @@ export type VerifyLoopOutcome =
   "passed" | "failed" | "unstable" | "escalated" | "aborted" | "disabled";
 
 export interface VerifyLoopResult {
-  /** 最终 run 结果 (通过 / 或停止时的最后状态)。 */
+  /** Final run result (passed, or the last state when the loop stopped). */
   readonly result: RunResult;
   readonly trace: LoopTrace;
-  /** 验证轮数 (0 = 未配置不启用, 或非 completed 未触发)。 */
+  /** Verification rounds (0 = not configured / not triggered on non-completed). */
   readonly rounds: number;
-  /** config.command 缺失 → false (透明关闭, 行为与裸 run 一致)。 */
+  /** False when config.command is absent (transparently disabled, same as bare run). */
   readonly enabled: boolean;
   readonly outcome: VerifyLoopOutcome;
-  /** verify 域记录 (trace 已写盘同源)。 */
+  /** verify-domain records (same source as what trace persisted). */
   readonly records: ReadonlyArray<VerificationRecord>;
 }
 
-/** 趋势状态 (bestFailed / lastFailed / lastSignature), 由 verify-loop 持有。 */
+/** Trend state (bestFailed / lastFailed / lastSignature), owned by verify-loop. */
 interface TrendState {
   bestFailed?: number;
   lastFailed?: number;
   lastSignature?: string;
 }
 
-/** 每轮验证的原始观察 (roundOutcome), 供记录 / 信封消费。 */
+/** Raw per-round observation (roundOutcome), consumed by records / envelopes. */
 interface RoundObservation {
   readonly verdict: Verdict;
   readonly exitCode: number;
   readonly failedCount?: number;
   readonly signature?: string;
-  /** 初始验证 stdout (信封 output_excerpt 的原始输入, 截断由 inject 负责)。 */
+  /** Initial verification stdout (raw input for the envelope's output_excerpt; truncation is inject's job). */
   readonly outputText: string;
-  /** 分类器分支: 判官真失败的一句立论 (A8 信封 reason 字段; 命令路径缺席)。 */
+  /** Classifier branch: the judge's one-line rationale (envelope reason; absent on the command path). */
   readonly reason?: string;
-  /** 分类器分支: 判官列出的缺失项 (A8 信封 missing 字段; 命令路径缺席)。 */
+  /** Classifier branch: judge-listed missing items (envelope missing; absent on the command path). */
   readonly missing?: ReadonlyArray<string>;
-  /** 分类器分支: 判官跑的 evidence 列表 (SC10 落盘 + A8 信封 evidence 字段)。 */
+  /** Classifier branch: evidence the judge ran (persisted + envelope evidence field). */
   readonly evidence?: ReadonlyArray<ClassifierCheck>;
-  /** 证据优先前级 (#449b B4): 仅 EVIDENCE_INSUFFICIENT 轮由 body 合并进本轮
-   *  observation; Postel 落盘经 buildRecord (SUFFICIENT / CONTRADICTED 不携带)。 */
+  /** Evidence-first pre-stage: merged into the observation by the body only on
+   *  EVIDENCE_INSUFFICIENT rounds; Postel persistence via buildRecord
+   *  (SUFFICIENT / CONTRADICTED carry nothing). */
   readonly evidenceVerdict?: EvidenceVerdict;
   readonly gamingSignals?: ReadonlyArray<string>;
 }
 
-/** 一轮验证的终态; aborted = 用户中断打断验证执行。 */
+/** Terminal state of one verification round; aborted = user interrupt during execution. */
 type RoundResult =
   | { readonly aborted: true }
   | ({ readonly aborted?: false } & RoundObservation);
 
-/** 单轮验证后的闭环处置决策。 */
+/** Loop disposition decision after a single verification round. */
 type RoundDecision =
   | {
       readonly kind: "pass";
@@ -277,18 +299,18 @@ type RoundDecision =
   | { readonly kind: "continue"; readonly recordAction: "continue" }
   | { readonly kind: "escalate"; readonly recordAction: "escalate" };
 
-/** countRegex 编译; 非法正则降级 undefined (内置失败行识别兜底, 与 verdict.ts 同纪律)。 */
+/** Compile countRegex; invalid regex degrades to undefined (built-in failure-line fallback, same discipline as verdict.ts). */
 function compileCountRegex(pattern: string | undefined): RegExp | undefined {
   if (pattern === undefined) return undefined;
   try {
     return new RegExp(pattern);
   } catch {
-    // // EXIT: 非法正则 → undefined, 走内置失败行识别兜底 (S3 显式退出条件)。
+    // EXIT: invalid regex → undefined, built-in failure-line fallback.
     return undefined;
   }
 }
 
-/** {files} 提取: 取签名 `exit=N|内容` 中 `|` 后的失败首行; 纯 exit 签名 → undefined。 */
+/** {files} extraction: take the first failure line after `|` in the signature `exit=N|...`; bare-exit signature → undefined. */
 function extractFiles(signature: string): string | undefined {
   const sep = signature.indexOf("|");
   if (sep < 0) return undefined;
@@ -296,12 +318,13 @@ function extractFiles(signature: string): string | undefined {
   return files.length > 0 ? files : undefined;
 }
 
-/* ------------------------------ 一轮验证 (初始 + 确认阶梯) ------------------------------ */
+/* ------------------------------ one verification round (initial + confirmation ladder) ------------------------------ */
 
 /**
- * 一轮验证: 初始执行 → exit 0 即 pass; exit≠0 走两级确认阶梯
- * (全量复跑一次 → 失败用例单跑一次, 每级至多一次不递归, spec Glossary)。
- * 任一级超时 → unstable (不判真失败); 任一级被用户 abort → aborted。
+ * One verification round: initial run → exit 0 is pass; exit≠0 enters the
+ * two-level confirmation ladder (full rerun once → failed-case single rerun
+ * once; each level at most once, no recursion). A timeout at any level →
+ * unstable (never a true failure); a user abort at any level → aborted.
  */
 async function runVerificationRound(opts: {
   readonly command: string;
@@ -310,7 +333,7 @@ async function runVerificationRound(opts: {
   readonly signal?: AbortSignal;
   readonly rerunTemplate?: string;
   readonly countRegex?: string;
-  /** 观测落点 + parentTurnId, 透传 runVerifyOnce 落 SandboxCmdRecord (spec:67)。 */
+  /** Observation sink + parentTurnId, passed through runVerifyOnce to persist SandboxCmdRecord. */
   readonly trace?: TraceService;
   readonly parentTurnId: string;
 }): Promise<RoundResult> {
@@ -341,7 +364,7 @@ async function runVerificationRound(opts: {
     return { verdict: "pass", exitCode, failedCount, signature, outputText };
   }
 
-  // 确认阶梯第一级: 全量复跑 (同一命令再跑一次)。
+  // Confirmation ladder level 1: full rerun (same command, once more).
   const rerun = await runVerifyOnce(opts.runVerify, opts.command, opts);
   if (opts.signal?.aborted) return { aborted: true };
   if (rerun.timedOut) {
@@ -355,7 +378,7 @@ async function runVerificationRound(opts: {
   }
   const rerunPassed = rerun.result.exitCode === 0;
 
-  // 确认阶梯第二级: 失败用例单跑 (仅 rerunTemplate 配置且能提取出失败用例)。
+  // Confirmation ladder level 2: failed-case single rerun (only when rerunTemplate is set and cases are extractable).
   let singleRunPassed: boolean | undefined;
   const rerunTemplate = opts.rerunTemplate;
   const files =
@@ -386,13 +409,15 @@ async function runVerificationRound(opts: {
   return { verdict, exitCode, failedCount, signature, outputText };
 }
 
-/* ------------------------------ 处置决策 ------------------------------ */
+/* ------------------------------ disposition ------------------------------ */
 
 /**
- * 单轮验证后的处置 (pure): pass / unstable → 停; true-failure → 趋势裁判。
- * 趋势放行但轮数达上限 → 耗尽处置: report → 停 (如实报告); escalate 首次 →
- * 注入升级指令并延长预算至 maxRounds*2 (总预算不重置, round 计数不断),
- * 延长期内再次耗尽 → 停 (outcome escalated)。
+ * Post-round disposition (pure): pass / unstable → stop; true-failure → trend
+ * judgment. When the trend allows continuing but the round cap is hit →
+ * exhaustion handling: report → stop (honest report); first escalate →
+ * inject the escalation directive and extend the budget to maxRounds*2 (the
+ * total budget is not reset and the round counter keeps running); exhausting
+ * again during the extension → stop (outcome escalated).
  */
 function decideRoundAction(args: {
   readonly verdict: Verdict;
@@ -411,7 +436,7 @@ function decideRoundAction(args: {
   if (args.trend.action === "stop") {
     return { kind: "stop", recordAction: "stop", finalOutcome: "failed" };
   }
-  // true-failure + 趋势放行: 兜底轮数上限。
+  // true-failure + trend allows continuing: backstop round cap.
   const cap = args.maxRounds * (args.escalated ? 2 : 1);
   if (args.round >= cap) {
     if (args.onExhausted === "escalate" && !args.escalated) {
@@ -426,7 +451,7 @@ function decideRoundAction(args: {
   return { kind: "continue", recordAction: "continue" };
 }
 
-/** 趋势状态推进: 仅放行轮 (action continue) 更新, 且只更新首个 best。 */
+/** Trend-state advance: only rounds allowed to continue update it, and only the first best is kept. */
 function updateTrendState(
   trend: TrendState,
   observation: RoundObservation,
@@ -444,9 +469,9 @@ function updateTrendState(
   trend.lastSignature = observation.signature;
 }
 
-/* ------------------------------ 记录与信封构造 ------------------------------ */
+/* ------------------------------ record & envelope construction ------------------------------ */
 
-/** 构造一条 verify 域 VerificationRecord (trace 域字段同构, 直接可写盘)。 */
+/** Build one verify-domain VerificationRecord (field-isomorphic to the trace domain, directly persistable). */
 function buildRecord(opts: {
   readonly sessionId: string;
   readonly round: number;
@@ -467,7 +492,7 @@ function buildRecord(opts: {
     ...(observation.signature !== undefined
       ? { signature: observation.signature }
       : {}),
-    // SC10: 分类器分支字段 Postel 落盘 (命令路径缺席, 不产出这些键)。
+    // Classifier-branch fields persist Postel-style (absent on the command path).
     ...(observation.reason !== undefined ? { reason: observation.reason } : {}),
     ...(observation.evidence !== undefined
       ? { evidence: observation.evidence }
@@ -475,8 +500,9 @@ function buildRecord(opts: {
     ...(observation.missing !== undefined
       ? { missing: observation.missing }
       : {}),
-    // #449b B4: 证据优先前级字段 Postel 落盘 (仅 INSUFFICIENT 轮产这些键;
-    // SUFFICIENT / CONTRADICTED 短路 observation 不含这些字段, 自然不落)。
+    // Evidence-first pre-stage fields persist Postel-style (only INSUFFICIENT
+    // rounds carry them; short-circuited SUFFICIENT / CONTRADICTED observations
+    // lack the fields naturally).
     ...(observation.evidenceVerdict !== undefined
       ? { evidenceVerdict: observation.evidenceVerdict }
       : {}),
@@ -491,10 +517,11 @@ function buildRecord(opts: {
 }
 
 /**
- * 注入信封作为 user 消息 (append-only, 不伪造 tool 块)。
- * ADR-0112 Does #1:信封是宿主注入 commit,盖非模型可见出处戳 —— 三条
- * 注入缝(失败信封 / 补跑信封 / 升级指令)共用本缝,出站投影按带戳帧
- * 透传官方前缀锚。
+ * Inject the envelope as a user message (append-only, never fakes tool blocks).
+ * ADR-0112: the envelope is a host-injected commit — stamped with a
+ * non-model-visible provenance marker. All three injection seams (failure
+ * envelope / rerun envelope / escalation directive) share it; the outbound
+ * projection passes the official prefix anchor through on stamped frames.
  */
 function userTextMessage(text: string): AnthropicNativeMessage {
   const block: AnthropicContentBlock = { type: "text", text };
@@ -505,8 +532,9 @@ function userTextMessage(text: string): AnthropicNativeMessage {
 }
 
 /**
- * 是否为本循环注入的任一信封 (避免 stale 信封累积)。
- * 涵盖: `[VALIDATION FAILED]` 修正信封 + `[VERIFY: rerun needed]` 补跑信封 (B5)。
+ * Whether this is one of the envelopes injected by this loop (prevents stale
+ * envelope accumulation). Covers both the [VALIDATION FAILED] correction
+ * envelope and the [VERIFY: rerun needed] evidence-rerun envelope.
  */
 function isInjectedEnvelope(message: AnthropicNativeMessage): boolean {
   if (message.role !== "user") return false;
@@ -517,10 +545,11 @@ function isInjectedEnvelope(message: AnthropicNativeMessage): boolean {
 }
 
 /**
- * 重建下一轮 priorMessages: 从 current.result.messages 滤除已注入的验证信封
- * ([VALIDATION FAILED] / [VERIFY: rerun needed]), 再 append 新注入消息。
- * 避免每轮把上一轮失败 / 补跑信封留存在历史里 —— 模型不得重复读到已失效的
- * 旧上下文 (历史收敛 + closeout 不残留 stale 上下文)。
+ * Rebuild next-round priorMessages: filter previously injected verification
+ * envelopes ([VALIDATION FAILED] / [VERIFY: rerun needed]) out of
+ * current.result.messages, then append the new injection. Keeps the model
+ * from re-reading already-invalidated stale context (history convergence;
+ * closeout leaves no stale context behind).
  */
 function buildNextPriorMessages(
   current: RunOutcome,
@@ -532,7 +561,7 @@ function buildNextPriorMessages(
   return [...filtered, injected];
 }
 
-/** #449b B5 probeVerifyCommand 的 flag file 候选集 (D2 spec Code Style)。 */
+/** Flag-file candidates for probeVerifyCommand input. */
 const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
   "pyproject.toml",
   "pytest.ini",
@@ -540,14 +569,13 @@ const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
   "Cargo.toml",
 ]);
 
-/** #449b B5 补跑信封前缀 (rerunAttempted 消息扫描派生锚点, 与 inject SSOT 同源)。 */
-
 /**
- * #449b B6: 从消息历史派生 rerunAttempted (补跑是否已尝试)。
- * 闭包无法访问 runVerifyLoopBody 局部 rerunAttempts (produceObservation seam
- * 签名冻结, 沿用 B4 决策不扩缝) —— 用可观测痕迹: user 消息文本以
- * `[VERIFY: rerun needed]` 开头即代表 B5 补跑信封已注入过。
- * checkEvidence 同输入 messages 只读扫描, 幂等无副作用。
+ * Derive rerunAttempted (whether an evidence rerun was already tried) from the
+ * message history. The closure cannot reach runVerifyLoopBody's local
+ * rerunAttempts (the produceObservation seam signature is frozen), so use an
+ * observable trace instead: a user message starting with
+ * `[VERIFY: rerun needed]` means the rerun envelope was injected.
+ * checkEvidence stays a read-only idempotent scan over the same messages.
  */
 function hasRerunEnvelope(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -563,9 +591,9 @@ function hasRerunEnvelope(
 }
 
 /**
- * #449b B6: 证据摘要序列化 (evidenceSummary 数据源)。
- * 每 run 一行 `command exit=N green=<bool>` (沿用既有简洁风格);
- * 宿主侧截断由下游消费方负责 (buildClassifierEnvelope / 判官 task 拼接段)。
+ * Serialize the evidence summary (evidenceSummary data source): one line per
+ * run, `command exit=N green=<bool>`. Host-side truncation is the downstream
+ * consumer's job (classifier envelope / judge task assembly).
  */
 function buildEvidenceSummary(report: EvidenceReport): string {
   if (report.runs.length === 0) return "";
@@ -575,13 +603,13 @@ function buildEvidenceSummary(report: EvidenceReport): string {
 }
 
 /**
- * #449b B6: 组装 EvidenceContext (证据体检单, G5-3 决议)。
- * 纯函数幂等: 与 body 前级 checkEvidence 各自独立调用, 无副作用。
+ * Assemble the EvidenceContext report card. Pure and idempotent: called
+ * independently of the body's pre-stage checkEvidence, no side effects.
  *   - checkerVerdict = report.verdict;
  *   - reasons = report.reasons;
- *   - executedCommands = report.runs.map(r => r.command);
- *   - rerunAttempted = 消息扫描 [VERIFY: rerun needed] 前缀派生;
- *   - evidenceSummary = 每 run 一行序列化。
+ *   - executedCommands = report.runs commands;
+ *   - rerunAttempted = derived by scanning messages for the [VERIFY: rerun needed] prefix;
+ *   - evidenceSummary = one line per run.
  */
 function buildEvidenceContext(
   report: EvidenceReport,
@@ -597,12 +625,16 @@ function buildEvidenceContext(
 }
 
 /**
- * 从消息历史提取 probeVerifyCommand 输入候选 (B5 决议: 优先真实派生)。
- *   - write_file / edit_file tool_use 的 filePath: 标志文件名命中即贡献;
- *   - write_file filePath === "package.json" 且 content 字符串以 `{` 起头:
- *     视为 package.json 内容形态 (probe 解析 JSON 看 vitest / jest deps);
- *   - 其它非标志路径 / 缺 content 的 package.json: 不贡献 (probe fail-closed)。
- * 沿用 probeVerifyCommand 的两形态契约 (路径字符串 | JSON 内容字符串)。
+ * Extract probeVerifyCommand input candidates from message history (prefer
+ * real derivation):
+ *   - write_file / edit_file tool_use filePath: contributes when it names a
+ *     flag file;
+ *   - write_file with filePath === "package.json" whose content string starts
+ *     with `{`: treated as package.json content (probe parses JSON for
+ *     vitest / jest deps);
+ *   - other paths / package.json without content: no contribution (probe is
+ *     fail-closed).
+ * Follows probeVerifyCommand's two-shape contract (path string | JSON content string).
  */
 function collectProbeFiles(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -638,14 +670,16 @@ function collectProbeFiles(
 }
 
 /**
- * #449b B5 补跑命令派生 (Leader 裁决 v2: 判官路径专属机制)。
+ * Derive the evidence-rerun command (judge-path-only mechanism).
  *
- * 命令路径 (config.command 非空) 走沙箱重跑 (frozen legacy, SC10/Never-do):
- * 沙箱已执行该命令, 补跑信封冗余且会破坏命令路径基线 → 不补跑 → 落
- * produceCommandObservation。判官路径 (command 空) 才走 probeVerifyCommand
- * 探测 (write_file/edit_file 标志文件 + package.json JSON 内容)。
+ * The command path (non-empty config.command) already reruns inside the
+ * sandbox (frozen legacy): a rerun envelope would be redundant and would
+ * break the command-path baseline → no rerun → fall to produceObservation.
+ * Only the judge path (empty command) probes via probeVerifyCommand
+ * (write_file/edit_file flag files + package.json JSON content).
  *
- * 返回: 唯一补跑命令 | null (无命令/冲突/未探测到 → 跳过补跑)。
+ * Returns: the unique rerun command | null (no command / conflict / not
+ * detected → skip rerun).
  */
 function deriveRerunCommand(
   configCommand: string | undefined,
@@ -656,12 +690,12 @@ function deriveRerunCommand(
   return probeVerifyCommand(collectProbeFiles(current.result.messages));
 }
 
-/** 升级指令 (spec 假设 B10 固定模板): 禁止重复同一修复, 换思路或明确报告阻塞。 */
+/** Escalation directive (fixed template): forbid repeating the same fix, change approach or report the blocker. */
 function buildEscalateMessage(round: number): string {
   return `${round} attempts with the same approach failed. Do not repeat the same fix — re-read the task and take a different approach, or report the blocker explicitly.`;
 }
 
-/** 终局返回: 冻结的 VerifyLoopResult。 */
+/** Terminal return: the frozen VerifyLoopResult. */
 function buildResult(opts: {
   readonly current: RunOutcome;
   readonly records: ReadonlyArray<VerificationRecord>;
@@ -679,23 +713,25 @@ function buildResult(opts: {
   });
 }
 
-/* ------------------------------ 分类器分支 (command 缺失填空, spec #128) ------------------------------ */
+/* ------------------------------ classifier branch (fills in when command is absent) ------------------------------ */
 
 /**
- * 单次分类器判定 (SC1 command-absent 分支执行体)。
- * 归一化规则 (spec SC5/A5 + #449b B7 SC7/SC8):
- *   - 用户 abort → aborted;
- *   - transport 错 (status:"failed", reason ∈ crashed/timeout/protocolError)
- *     → verdict=unstable, reason=REASON_ABORT_TYPED (判官自身故障统一 abort),
- *     不注入信封 (fail-open, 不静默放行);
- *   - schema 错 (parseClassifierResult 收敛为 abort) → verdict=unstable,
- *     reason=REASON_ABORT_TYPED, 不注入信封;
- *   - {kind:"unverified"} (判官读完证据仍不足、拒绝猜 PASS/FAIL, B7 第 4 态)
- *     → verdict=unstable, signature="classifier-unverified",
- *     reason=REASON_UNVERIFIED, 不注入信封 —— 与 abort 严格区分 (SC7 typed
- *     reason 落盘), 二者都走 decideRoundAction stop → outcome=unstable;
+ * One classifier judgment (the command-absent branch executor).
+ * Normalization rules:
+ *   - user abort → aborted;
+ *   - transport error (status:"failed", reason ∈ crashed/timeout/protocolError)
+ *     → verdict=unstable, reason=REASON_ABORT_TYPED (the judge's own fault
+ *     unifies under abort); no envelope injection (fail-open, never a silent
+ *     pass);
+ *   - schema error (parseClassifierResult converges to abort) →
+ *     verdict=unstable, reason=REASON_ABORT_TYPED, no envelope injection;
+ *   - {kind:"unverified"} (judge read the evidence, still insufficient, refuses
+ *     to guess PASS/FAIL — the 4th state) → verdict=unstable,
+ *     signature="classifier-unverified", reason=REASON_UNVERIFIED, no envelope
+ *     injection — strictly distinguished from abort (typed reason persisted);
+ *     both take the stop path in decideRoundAction → outcome=unstable;
  *   - {kind:"pass"} → verdict=pass;
- *   - {kind:"fail"} → verdict=true-failure + reason/missing (信封消费)。
+ *   - {kind:"fail"} → verdict=true-failure + reason/missing (envelope consumes them).
  */
 async function runClassifierOnce(opts: {
   readonly task: string;
@@ -706,8 +742,9 @@ async function runClassifierOnce(opts: {
   readonly summary: string;
   readonly finalText: string | null;
   /**
-   * #449b B6: 证据体检单 (produceObservation 闭包内组装)。undefined → 判官
-   * 拿不到 evidenceContext, task = userText 逐字节 (B6 兼容既有 SC7 SC10)。
+   * Evidence report card (assembled inside the produceObservation closure).
+   * undefined → the judge gets no evidenceContext and task is byte-identical
+   * to userText (compatibility with the existing classifier path).
    */
   readonly evidenceContext?: EvidenceContext;
 }): Promise<RoundResult> {
@@ -725,13 +762,14 @@ async function runClassifierOnce(opts: {
         : {}),
     });
   } catch {
-    // 用户 abort 优先于 transport 归类: seam 在用户 Ctrl+C 时可能以
-    // AbortError/worker 死亡 reject —— 此时必须走 in-flight abort closeout
-    // (outcome=aborted), 不得按 transport 错降级为 unstable。
+    // User abort takes priority over transport classification: the seam may
+    // reject with AbortError / worker death on Ctrl+C — that must take the
+    // in-flight abort closeout (outcome=aborted), never degrade to unstable.
     if (opts.signal?.aborted) return { aborted: true };
-    // // EXIT: seam throw (非用户 abort) = transport 错 → fail-open unstable,
-    // 不注入失败信封 (不静默放过); reason=REASON_ABORT_TYPED (判官自身故障,
-    // 与 schema 降级统一, B7 SC7 typed reason 区分落盘)。
+    // EXIT: seam throw (not user abort) = transport error → fail-open
+    // unstable, no failure-envelope injection (never a silent pass);
+    // reason=REASON_ABORT_TYPED (judge's own fault, unified with the schema
+    // downgrade, distinguished in persisted typed reasons).
     return {
       verdict: "unstable",
       exitCode: 1,
@@ -742,8 +780,9 @@ async function runClassifierOnce(opts: {
   }
   if (opts.signal?.aborted) return { aborted: true };
   if (envelope.status === "failed") {
-    // // EXIT: worker 进程级失败 (crashed/timeout/protocolError) = transport 错
-    // → fail-open unstable, 不注入失败信封; reason=REASON_ABORT_TYPED (同上)。
+    // EXIT: worker process-level failure (crashed/timeout/protocolError) =
+    // transport error → fail-open unstable, no envelope injection;
+    // reason=REASON_ABORT_TYPED (as above).
     return {
       verdict: "unstable",
       exitCode: 1,
@@ -752,14 +791,15 @@ async function runClassifierOnce(opts: {
       reason: REASON_ABORT_TYPED,
     };
   }
-  // SC8 运行时保证: 判官输出宿主侧截断后解析 (prompt 不写长度, A8; 截断不
-  // 仅存在于 spec Check 的 grep, 而是真在 parse 前应用)。
+  // Runtime guarantee: judge output is host-side truncated before parsing (the
+  // prompt states no length limit; truncation is actually applied pre-parse,
+  // not just a spec grep).
   const parsed = parseClassifierResult(
     truncateClassifierOutput(envelope.result)
   );
   if (parsed.kind === "abort") {
-    // // EXIT: schema 错 / 判官判不了 → fail-open unstable, 不注入失败信封;
-    // reason=REASON_ABORT_TYPED (B7 SC7 typed reason 落盘)。
+    // EXIT: schema error / judge cannot decide → fail-open unstable, no
+    // envelope injection; reason=REASON_ABORT_TYPED (typed reason persisted).
     return {
       verdict: "unstable",
       exitCode: 1,
@@ -769,9 +809,10 @@ async function runClassifierOnce(opts: {
     };
   }
   if (parsed.kind === "unverified") {
-    // #449b B7: unverified 是判官诚实停法 (读完证据仍不足, 拒绝猜 PASS/FAIL),
-    // 不是判官故障 —— signature/reason 与 abort 严格区分 (SC7); 同样直接走
-    // decideRoundAction stop → outcome=unstable, 不注入信封 (SC8, 零第 2 轮)。
+    // unverified is the judge's honest stop (evidence read, still
+    // insufficient, refuses to guess PASS/FAIL), not a judge fault —
+    // signature/reason strictly distinguished from abort; likewise takes the
+    // decideRoundAction stop path → outcome=unstable, no envelope injection.
     return {
       verdict: "unstable",
       exitCode: 1,
@@ -788,7 +829,8 @@ async function runClassifierOnce(opts: {
       outputText: "",
     };
   }
-  // true classifier fail: 注入信封继续 (A5), 与命令路径同构的失败签名语义。
+  // true classifier fail: inject the envelope and continue; failure-signature
+  // semantics parallel to the command path.
   return {
     verdict: "true-failure",
     exitCode: 1,
@@ -801,16 +843,16 @@ async function runClassifierOnce(opts: {
   };
 }
 
-/* ------------------------------ 主循环 (command 与 classifier 共用) ------------------------------ */
+/* ------------------------------ main loop (shared by command & classifier) ------------------------------ */
 
 /**
- * 闭环主体 (command 与 classifier 两分支共用)。
- * 差异点经两枚 seam 参数化:
- *   - produceObservation: 单轮验证产出 (runVerificationRound vs runClassifierOnce);
- *   - buildFailureEnvelope: 失败信封文本 (buildValidationEnvelope vs
- *     buildClassifierEnvelope, T4 替换)。
- * 轮次模型 / 趋势判定 / maxRounds 兜底 / escalate / abort closeout 两分支同构
- * (spec #128: 分类器只是同一 advisor 的另一条验证体分支)。
+ * The loop body (shared by the command and classifier branches).
+ * Differences are parameterized by two seams:
+ *   - produceObservation: one-round verification output (runVerificationRound vs runClassifierOnce);
+ *   - buildFailureEnvelope: failure envelope text (buildValidationEnvelope vs buildClassifierEnvelope).
+ * Round model / trend judgment / maxRounds backstop / escalate / abort closeout
+ * are isomorphic across branches — the classifier is just another verification
+ * executor of the same advisor.
  */
 async function runVerifyLoopBody(opts: {
   readonly options: VerifyLoopOptions;
@@ -830,7 +872,7 @@ async function runVerifyLoopBody(opts: {
   const records: VerificationRecord[] = [];
   const trend: TrendState = {};
   let escalated = false;
-  /** #449b B5: 补跑轮数计数 (1-attempt cap, 与 trend/escalated 同层局部状态)。 */
+  /** Evidence-rerun attempt counter (cap-based; local state beside trend/escalated). */
   let rerunAttempts = 0;
   let current = await options.runFn(options.userText, {
     signal: options.signal,
@@ -847,7 +889,7 @@ async function runVerifyLoopBody(opts: {
         outcome: "aborted",
       });
     }
-    // 仅 StopReason=completed 触发验证 (假设 B9); 其余原样透传。
+    // Only StopReason=completed triggers verification; everything else passes through.
     if (current.result.stopReason !== "completed") {
       const outcome: VerifyLoopOutcome =
         current.result.stopReason === "cancelled" ? "aborted" : "failed";
@@ -861,18 +903,24 @@ async function runVerifyLoopBody(opts: {
     }
 
     round += 1;
-    // #449b B4 evidence-first 前级 (spec Code Style): 每轮 produceObservation 前
-    // 先 checkEvidence, 三态映射:
-    //   EVIDENCE_SUFFICIENT → 默认 PASS 短路 (零判官零重跑, 即便配了 command, G3);
-    //     例外: completionMode === "auto" 且 command 空 → 仍 spawn 完成向判官
-    //     (ADR-0024 成功也评; 不把 command 沙箱闭环混进来);
-    //   EVIDENCE_CONTRADICTED → goal 功能 (completionMode auto) / omitted:
-    //     true-failure (进修正轮);
-    //     HITL: 与 INSUFFICIENT 同 EXIT (跳过完成向判官, 不 true-failure,
-    //     不补跑/不打回干活模型; ADR-0073; HITL 落 evidenceVerdict 供人读投影);
-    //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
-    //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
-    //     落盘)。SUFFICIENT 与 goal 功能 CONTRADICTED 不落 evidenceVerdict (B3)。
+    // Evidence-first pre-stage: before each round's produceObservation run
+    // checkEvidence; three-state mapping:
+    //   EVIDENCE_SUFFICIENT → PASS short-circuit (zero judge, zero rerun, even
+    //     when a command is configured);
+    //     exception: completionMode === "auto" and command empty → still spawn
+    // (ADR-0024)
+    //     the completion-facing judge (judged even on success; the command
+    //     sandbox loop stays out of this);
+    //   EVIDENCE_CONTRADICTED → goal feature (completionMode auto) / omitted:
+    //     true-failure (enters correction round);
+    // (ADR-0073)
+    //     HITL: same EXIT as INSUFFICIENT (skip the completion-facing judge,
+    //     no true-failure, no rerun/rebuke of the working model; HITL persists
+    //     evidenceVerdict for the human-readable projection);
+    //   EVIDENCE_INSUFFICIENT → fall to the original produceObservation (judge /
+    //     command mechanisms), merging evidenceVerdict + gamingSignals into
+    //     this round's observation (Postel persistence via buildRecord).
+    //     SUFFICIENT and goal-mode CONTRADICTED do not persist evidenceVerdict.
     const evidenceReport = checkEvidence({
       messages: current.result.messages,
       claimIndex: deriveClaimIndex(current.result.messages),
@@ -902,8 +950,9 @@ async function runVerifyLoopBody(opts: {
       if (options.completionMode === "hitl") {
         // EXIT: HITL CONTRADICTED consumes like INSUFFICIENT — skip
         // completion judge, no true-failure, no extra worker/rerun round.
-        // Persist evidenceVerdict so human projection can hide 「验证通过」
-        // (B3 Postel still omits verdict on goal-功能 true-failure / SUFFICIENT).
+        // Persist evidenceVerdict so human projection can hide the
+        // "verification passed" banner (Postel still omits the verdict on
+        // goal-mode true-failure / SUFFICIENT).
         observation = await opts.produceObservation(round, current);
         pendingEvidence = {
           evidenceVerdict: "EVIDENCE_CONTRADICTED",
@@ -922,13 +971,15 @@ async function runVerifyLoopBody(opts: {
         };
       }
     } else {
-      // #449b B5 补跑信封 (Leader 裁决 v2: 判官路径专属机制): INSUFFICIENT +
-      // deriveRerunCommand 非 null (command 空时 probeVerifyCommand 探测命中) 且
-      // rerunAttempts < 1 → 注入补跑信封 → 走一次 run() 续轮 (rerunAttempts += 1)
-      // → 下一轮重新进 B4 证据核对。命令路径 (config.command 非空) 不补跑, 直接
-      // 落 produceObservation 走沙箱重跑 (frozen legacy, SC10/Never-do)。cap 用尽
-      // 后落原 produceObservation (判官 / 命令既有机制), 不无限补跑
-      // (A10 决议: 1 次上限, 不走 config 字段)。
+      // Evidence-rerun envelope (judge-path-only mechanism): INSUFFICIENT +
+      // deriveRerunCommand non-null (command empty and probeVerifyCommand hit)
+      // and rerunAttempts below cap → inject the rerun envelope → one run()
+      // continuation (rerunAttempts += 1) → next round re-enters the evidence
+      // check. The command path (non-empty config.command) never reruns here:
+      // it falls straight to produceObservation's sandbox rerun (frozen legacy,
+      // never overlap the command baseline). Once the cap is spent, fall to
+      // the original produceObservation — no unbounded reruns (single-attempt
+      // cap is hard-coded, not a config field).
       if (rerunAttempts < RERUN_ATTEMPT_CAP) {
         const rerunCommand = deriveRerunCommand(
           options.config.command,
@@ -959,8 +1010,9 @@ async function runVerifyLoopBody(opts: {
         gamingSignals: evidenceReport.gamingSignals,
       };
     }
-    // INSUFFICIENT + HITL CONTRADICTED skip 合并 evidenceVerdict (Postel:
-    // SUFFICIENT / goal 功能 CONTRADICTED 短路不携带, buildRecord 不落盘)。
+    // Merge evidenceVerdict for INSUFFICIENT + HITL CONTRADICTED skip rounds
+    // (Postel: short-circuited SUFFICIENT / goal-mode CONTRADICTED carry
+    // nothing, so buildRecord never persists it).
     if (pendingEvidence !== undefined) {
       observation = {
         ...observation,
@@ -977,7 +1029,8 @@ async function runVerifyLoopBody(opts: {
       });
     }
 
-    // 趋势判定 (裁判是趋势不是计数器); 放行时先更新状态再决定处置。
+    // Trend judgment (the trend is the judge, not the counter); when allowed
+    // to continue, update state first, then decide disposition.
     const trendResult = evaluateTrend({
       currentFailed: observation.failedCount,
       bestFailed: trend.bestFailed,
@@ -995,7 +1048,7 @@ async function runVerifyLoopBody(opts: {
       escalated,
       onExhausted: options.config.onExhausted,
     });
-    // 终态仅终局轮 (pass/stop) 有值; continue/escalate 轮无 finalOutcome。
+    // finalOutcome exists only on terminal rounds (pass/stop); continue/escalate rounds carry none.
     const finalOutcome =
       decision.kind === "pass" || decision.kind === "stop"
         ? decision.finalOutcome
@@ -1032,8 +1085,10 @@ async function runVerifyLoopBody(opts: {
       continue;
     }
 
-    // 普通继续: 注入验证失败信封 (append-only), 下一轮 run 携带它。
-    // priorMessages 经 buildNextPriorMessages 滤除旧信封 —— 历史收敛 (High 修复)。
+    // Normal continuation: inject the verification-failure envelope
+    // (append-only) so the next run() round carries it. priorMessages go
+    // through buildNextPriorMessages to filter stale envelopes — history
+    // convergence.
     const envelope = opts.buildFailureEnvelope(
       round,
       opts.maxRounds,
@@ -1046,7 +1101,7 @@ async function runVerifyLoopBody(opts: {
   }
 }
 
-/** command 路径的观察产出: 沙箱验证 + 确认阶梯 (M4 runVerificationRound)。 */
+/** Command-path observation producer: sandbox verification + confirmation ladder (runVerificationRound). */
 function produceCommandObservation(opts: {
   readonly options: VerifyLoopOptions;
   readonly command: string;
@@ -1055,10 +1110,10 @@ function produceCommandObservation(opts: {
 }): (round: number, current: RunOutcome) => Promise<RoundResult> {
   const { options, command, runVerify, timeoutSec } = opts;
   return async (round, current) => {
-    // parentTurnId: 触发本轮验证的 completed turn id —— 上一轮 run 的最后一条
-    // turn 的 turnIndex 字符串化 (trace 域 TurnRecord 无独立 id, turnIndex 为
-    // 唯一稳定锚点; plan §Decisions parentTurnId 语义)。仅 completed 才走到此,
-    // 故最后一条 turn 即触发验证的 completed 回合。
+    // parentTurnId: the completed turn that triggered this verification round —
+    // stringified turnIndex of the last turn in the previous run (trace-domain
+    // TurnRecord has no separate id; turnIndex is the only stable anchor).
+    // Only completed reaches here, so the last turn is the triggering one.
     const lastTurn = current.trace.turns[current.trace.turns.length - 1];
     const parentTurnId =
       lastTurn !== undefined ? String(lastTurn.turnIndex) : `round-${round}`;
@@ -1075,7 +1130,7 @@ function produceCommandObservation(opts: {
   };
 }
 
-/** command 路径的失败信封: 既有 buildValidationEnvelope (命令字段齐全)。 */
+/** Command-path failure envelope: buildValidationEnvelope with all command fields. */
 function buildCommandFailureEnvelope(opts: {
   readonly command: string;
 }): (
@@ -1102,10 +1157,11 @@ function buildCommandFailureEnvelope(opts: {
 }
 
 /**
- * command 缺失 + 装配分类器 seam → 子代理 LLM 判官填空 (spec #128 SC1/A1)。
- * 与 command 路径同构地走 runVerifyLoopBody; summary 取 completed run 的
- * finalText 内容摘要 (判官看到的是"模型最终声称的内容", 不是 trace 锚点)。
- * 调用方 (runVerifyLoop 入口) 已保证 runClassifier 存在。
+ * Command absent + classifier seam assembled → the subagent LLM judge fills
+ * in. Runs through runVerifyLoopBody isomorphically with the command path;
+ * summary is the completed run's finalText digest (the judge sees "what the
+ * model finally claimed", not trace anchors). The caller (runVerifyLoop entry)
+ * guarantees runClassifier exists.
  */
 function runClassifierLoop(
   options: VerifyLoopOptions & { readonly runClassifier: RunClassifierFn },
@@ -1114,10 +1170,11 @@ function runClassifierLoop(
 ): Promise<VerifyLoopResult> {
   const { runClassifier } = options;
   /**
-   * #449b B6: produceObservation 与 buildFailureEnvelope 共享 evidenceContext
-   * 派生结果。produceObservation 闭包内组装, buildFailureEnvelope 闭包读取。
-   * 两闭包在同一轮先后触发 (produceObservation → observation → decision →
-   * 若 continue 才调 buildFailureEnvelope), 共享变量顺序一致性保证。
+   * evidenceContext derived once and shared between the produceObservation and
+   * buildFailureEnvelope closures: produceObservation assembles it,
+   * buildFailureEnvelope reads it. Both fire in order within one round
+   * (produceObservation → observation → decision → buildFailureEnvelope only
+   * on continue), so the shared variable is order-consistent.
    */
   let lastEvidenceContext: EvidenceContext | undefined;
   return runVerifyLoopBody({
@@ -1135,8 +1192,9 @@ function runClassifierLoop(
         });
       }
       const summary = current.result.finalText ?? "";
-      // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
-      // 与 body 前级各自独立无副作用; claimIndex = 声称下标, 与前级对齐)。
+      // Reuse the evidence-first pre-stage's report (checkEvidence is pure and
+      // idempotent; the second call is independent and side-effect-free;
+      // claimIndex aligns with the pre-stage).
       const report = checkEvidence({
         messages: current.result.messages,
         claimIndex: deriveClaimIndex(current.result.messages),
@@ -1165,8 +1223,8 @@ function runClassifierLoop(
         task: options.userText,
         reason: observation.reason ?? "classifier reported failure",
         missing: observation.missing ?? [],
-        // B6: 失败修正信封附 evidence_context 段 (Postel: undefined → 既有
-        // 信封字节相等, 不传 evidence_context 段)。
+        // Failure-correction envelope carries the evidence_context section
+        // (Postel: undefined → envelope bytes unchanged, section omitted).
         ...(lastEvidenceContext !== undefined
           ? { evidenceContext: lastEvidenceContext }
           : {}),
@@ -1175,14 +1233,16 @@ function runClassifierLoop(
 }
 
 /**
- * makeDefaultRunVerify 的装配参数构造 —— fs 档三件 + egress 缝选项集中
- * 一处（S5 complexity 门：runVerifyLoop 只做编排）。
+ * Build makeDefaultRunVerify's assembly args — fs tier trio + egress seam in
+ * one place (runVerifyLoop stays pure orchestration).
  *
- * ADR-0092 Round 2 / SC11/SC12:fs 档 + homeRoot + 会话 tmp 透传（三者
- * 缺席 → 全局档 / 进程 tmpdir, V1 baseline 字节不变）。
- * ADR-0097 / T7:egress 缝（模块级 session 单例,首次 verify 调用 lazy
- * start）。**生产装配 TODO**:hub / chat-session 装配点后续接 —— 本票
- * 只定义契约,不实现装配点。
+ * ADR-0092: fs tier + homeRoot + session tmp pass-through (all absent →
+ * global tier / process tmpdir, baseline bytes unchanged).
+ * Egress seam: module-level per-session singleton, lazy-started on the first
+ *
+ // (ADR-0097)
+ * verify call. **Production assembly TODO**: hub / chat-session wiring still
+ * to be connected — this only defines the contract.
  */
 function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
   cwd: string;
@@ -1213,9 +1273,10 @@ export async function runVerifyLoop(
   const maxRounds = options.config.maxRounds ?? DEFAULT_MAX_ROUNDS;
   const sessionId = options.sessionId;
 
-  // 未配 verify.command → 二选一 (A1 路径 X 独占):
-  //   装配分类器 seam → 判官填空 (SC1);
-  //   未装配 → 透明关闭, 只跑一次, 行为与裸 run 逐字节一致 (SC7 既有语义)。
+  // No verify.command → one of two paths:
+  //   classifier seam assembled → judge fills in;
+  //   not assembled → transparently disabled, single run, byte-identical to a
+  //   bare run (backward compatible).
   if (command.length === 0) {
     if (options.runClassifier !== undefined) {
       return runClassifierLoop(

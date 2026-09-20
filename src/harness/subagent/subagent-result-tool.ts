@@ -1,23 +1,23 @@
 /**
- * #356 T5 — subagent_result ACI 工具（主代理第 25/25 件）。
+ * `subagent_result` ACI tool — after `spawn_subagent` hands back a
+ * `task_id`, poll the SubAgentManager's four-state buffer: not_found /
+ * running / completed / failed (parent-visible short handoff centered on
+ * summary / paths / status / stop_reason). Like spawn, synchronous and
+ * non-blocking (≤10ms): returns the serialized `manager.queryBuffer(taskId)`
+ * directly, no sleep / no await — polling cadence is the model's choice (a
+ * completed result is also host-drained into the next turn's user message;
+ * this tool is the active pull surface).
  *
- * 模型用 `spawn_subagent` 拿到 `task_id` 后，用本工具轮询 `SubAgentManager`
- * 四态 buffer：not_found / running / completed / failed（父可见短交差以
- * summary / paths / status / stop_reason 为中心）。与 spawn 一样同步非阻塞
- * （≤10ms），直返 `manager.queryBuffer(taskId)` 的序列化结果；不做 sleep /
- * 不 await——
- * 轮询节奏由模型侧自主决定（completed 结果 host drain 也会在下一轮 turn
- * 拼入 user message，本工具是主动拉取面）。
+ * **DI shape**: the factory takes `manager`; `createDefaultAciRegistry`
+ * instantiates it when the `subagentManager` opts is provided and omits it
+ * otherwise (same gating condition as spawn_subagent).
  *
- * **依赖注入形态**：工厂收 `manager`（T2 提供）。装配层
- * `createDefaultAciRegistry` 在 `subagentManager` opts 传入时实例化；
- * 缺席时不装配（与 spawn_subagent 同形态，registry.ts Gate 3 镜像过滤）。
+ * **append-only**: `name` maps one-to-one to the tail of
+ * `ACI_TOOLSET_NAMES`, right after spawn_subagent, never reordering
+ * existing entries.
  *
- * **append-only**：`name` 与 `ACI_TOOLSET_NAMES` 末位一一对应；spawn_subagent
- * 在前、本工具在最后，不重排既有 24 件。
- *
- * 错误形态：`ToolExecutionError` 同步抛（input 校验失败），由 aci-executor
- * 包成 `execution_failed` result 反馈给模型。
+ * Error shape: validation failures throw `ToolExecutionError` synchronously;
+ * aci-executor wraps it into an `execution_failed` result for the model.
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
@@ -27,9 +27,10 @@ import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError } from "../errors.js";
 
 /**
- * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
- * （T2 createSubAgentManager 的输出）。本工具仅消费 `queryBuffer(taskId)`
- * 同步四态查询；waitFor / drain 由 host 侧独占（spec Never 暴露给 agent）。
+ * Dependency injection: `manager` owns the parent-side sub-agent lifecycle
+ * / state machine / buffer / shutdown chain. This tool consumes only the
+ * synchronous four-state `queryBuffer(taskId)` query; waitFor / drain stay
+ * host-owned (never exposed to the agent).
  */
 export interface SubAgentResultToolDeps {
   readonly manager: SubAgentManager;
@@ -106,15 +107,16 @@ export function createSubAgentResultTool(
       additionalProperties: false,
     },
     aci: {
-      category: "read-only", // 查询面只读 buffer，不产生副作用
-      isConcurrencySafe: true, // 多个 task_id 并行轮询合法
-      interruptBehavior: "cancel", // 同步入口；signal 来时直接弃查询
-      timeoutTier: "fast", // 同步查询 buffer 极快（≤10ms）
-      lazy: false, // 常驻 prompt：poll 是核心能力，discover 没意义
+      category: "read-only", // pure buffer read, no side effects
+      isConcurrencySafe: true, // polling several task_ids in parallel is legal
+      interruptBehavior: "cancel", // sync entry; on abort just drop the query
+      timeoutTier: "fast", // synchronous buffer lookup is very fast (≤10ms)
+      lazy: false, // resident prompt: polling is a core capability, discovery makes no sense
     } as const,
     handler: (input: unknown, _ctx?: ToolExecutionContext) => {
-      // input 已由 ajv strict 校验过形状（createAciRegistry 装配时编译）。
-      // 此处再做运行时防御：schema 之外的 null / 数组 / 字符串都不应到此。
+      // shape is already ajv-strict-validated (compiled at registry
+      // assembly); this runtime guard catches null / array / bare-string
+      // input that should never reach the handler.
       const obj = (input ?? {}) as Record<string, unknown>;
       const taskId = obj.task_id;
       if (typeof taskId !== "string" || taskId.length === 0) {
@@ -123,7 +125,7 @@ export function createSubAgentResultTool(
         );
       }
       const tmpPath = parseTmpPath(obj.tmp_path);
-      // 同步非阻塞：queryBuffer + queryPad（无 waitFor / drain）。
+      // sync and non-blocking: queryBuffer + queryPad only (no waitFor / drain).
       const result = deps.manager.queryBuffer(taskId);
       if (result.status === "not_found") {
         return JSON.stringify({ status: "not_found" });

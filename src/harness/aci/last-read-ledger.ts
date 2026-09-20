@@ -1,33 +1,39 @@
 /**
- * last-read ledger（ADR-0084 / specs/aci-file-search-surface.md D1）。
+ * Last-read ledger (ADR-0084).
  *
- * 「本 conversation 看过的规范 path」登记表。`write_file` 只在目标**已存在
- * 且 size>0** 时查表：账上没有 → typed 失败、不写盘。新建与空文件免检。
+ * Registry of "canonical paths this conversation has seen". `write_file`
+ * consults the table only when the target **already exists and is
+ * non-empty**: not in the ledger → typed failure, nothing written. New files
+ * and empty files are exempt.
  *
- * 生命周期与 store 正交：
- *   - **进程内存**，键为 conversationId，**不落盘**（resume / 进程重启 → 空表，
- *     spec SC13）。当前生产装配（registry 自建）里表随 registry 同寿：没有任何
- *     生产 caller 调 `destroy` —— 该 API 是给宿主 / 测试的缝，会话 reset 或
- *     shutdown 要清表时由宿主自己接。
- *   - **无 conversationId → 不建桶**。`ledgerFor(undefined)` 返回 `undefined`，
- *     `record` 无处可落 —— 这是与 `graph/ledger.ts` 匿名共享桶模式的显式
- *     例外：spec 要求无 id 的非空 `write_file` fail-closed，且**禁止隐式
- *     进程级全局表**。read_file / 白名单 bash 无 id 仍可执行，只是不入账。
+ * Lifecycle is orthogonal to the session store:
+ *   - **process memory**, keyed by conversationId, **never persisted**
+ *     (resume / process restart → empty table). In the current production
+ *     wiring (registry self-builds) the table lives as long as its registry:
+ *     no production caller invokes `destroy` — that API is a seam for hosts
+ *     / tests to clear the table on session reset or shutdown.
+ *   - **no conversationId → no bucket**. `ledgerFor(undefined)` returns
+ *     `undefined` and `record` has nowhere to land — an explicit exception
+ *     to the anonymous shared-bucket pattern in `graph/ledger.ts`: the spec
+ *     requires a non-empty `write_file` without an id to fail closed, and
+ *     **forbids an implicit process-wide global table**. read_file and
+ *     whitelisted bash still run without an id; they just book nothing.
  *
- * 账本只存**规范 path**（调用方用与写入侧同一个 `resolveWithinRoot` 口径
- * 解析后的绝对路径）。本模块不做 path 解析、不 import loop-engine /
- * build-engine / 工具 handler —— 单点职责是分桶与集合判定。
+ * The ledger stores only **canonical paths** (absolute paths resolved by the
+ * caller through the same `resolveWithinRoot` used on the write side). This
+ * module does no path resolution and imports no loop-engine / build-engine /
+ * tool handlers — its single job is bucketing and set membership.
  */
 
-/** 单会话账本：规范 path 的集合。 */
+/** One conversation's ledger: a set of canonical paths. */
 export interface LastReadLedger {
-  /** 该规范 path 是否已入账。 */
+  /** Whether this canonical path has been booked. */
   readonly has: (canonicalPath: string) => boolean;
-  /** 入账一条规范 path（幂等）。 */
+  /** Book one canonical path (idempotent). */
   readonly record: (canonicalPath: string) => void;
-  /** 测试可观察：已入账条数。 */
+  /** Test-observable: number of booked entries. */
   readonly size: () => number;
-  /** 清空集合。宿主在会话 reset / 结束时的清表缝；当前生产装配不调用。 */
+  /** Clear the set. Host seam for clearing at session reset / end; current production assembly does not call it. */
   readonly destroy: () => void;
 }
 
@@ -47,23 +53,25 @@ export function createLastReadLedger(): LastReadLedger {
 }
 
 /**
- * 多会话账本解析器。`ledgerFor` 第一次拿某 conversationId 时懒创建一份；
- * 同一 id 多次取拿回同一对象。
+ * Multi-conversation ledger resolver. `ledgerFor` lazily creates a ledger
+ * the first time a conversationId is seen; repeated lookups of the same id
+ * return the same object.
  *
- * `undefined` conversationId → **`undefined`**（不建匿名桶）：调用方据此
- * 对非空 `write_file` fail-closed，同时让无 id 的 read / bash 保持可执行。
- * 这条与 `graph/ledger.ts` 的匿名共享桶相反，是 spec D1 的显式要求。
+ * An `undefined` conversationId maps to **`undefined`** (no anonymous
+ * bucket): callers use that to fail closed on non-empty `write_file` without
+ * an id, while id-less read / bash stay executable. This is the opposite of
+ * the anonymous shared bucket in `graph/ledger.ts`, per ADR-0084.
  */
 export interface LastReadLedgerHost {
-  /** 取一份账本；同 id 多次取拿回同一对象；`undefined` → `undefined`。 */
+  /** Get a ledger; same id always returns the same object; `undefined` → `undefined`. */
   readonly ledgerFor: (
     conversationId: string | undefined
   ) => LastReadLedger | undefined;
-  /** 清掉单会话账本。宿主 reset 缝；id 不存在 → no-op。 */
+  /** Drop one conversation's ledger. Host reset seam; unknown id → no-op. */
   readonly destroy: (conversationId: string) => void;
-  /** 清掉全部账本。宿主 shutdown 缝；进程退出时进程内存自然消失。 */
+  /** Drop all ledgers. Host shutdown seam; process memory dies with the process anyway. */
   readonly destroyAll: () => void;
-  /** 测试可观察：当前已创建的会话账本数量。 */
+  /** Test-observable: number of conversation ledgers currently created. */
   readonly size: () => number;
 }
 

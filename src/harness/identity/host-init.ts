@@ -1,29 +1,36 @@
 /**
- * Host-side init script hook (W1).
+ * Host-side init script hook.
  *
- * 为什么需要这个:用户的初始化脚本(读 ~/.iknow/、建目录、seed 配置)如果
- * 由 agent 用 bash 工具跑,会被 execute 分类 → ask → TTY y/N 拦截,体验
- * 上"启动脚本还要用户手动确认"违反直觉(用户的反馈)。这里提供宿主侧的
- * init 脚本执行钩子:由宿主进程 spawn 执行用户自写脚本,不经过 agent bash
- * 工具 → 无权限确认、无 allowlist 限制、无 fs 软沙箱限制(写 ~/.iknow 是
- * 宿主自己的事)。
+ * Why: if a user's initialization script (read ~/.iknow/, create dirs, seed
+ * config) were run by the agent through the bash tool, it would be
+ * classified as execute → ask → TTY y/N interception — "a startup script that
+ * still needs manual confirmation" is counterintuitive (user feedback). This
+ * is a host-side hook instead: the host process spawns the user's own script,
+ * bypassing the agent bash tool → no permission prompt, no allowlist, no fs
+ * soft-sandbox limits (writing ~/.iknow is the host's own business).
  *
- * 触发面:
- *   - `runHostInitScript()` 在 chat / ask / serve 进程启动时各调一次。
- *   - 脚本路径:`IKNOW_HOST_INIT_SCRIPT` env 指定,或默认 `~/.iknow/init.sh`。
- *   - 文件不存在 → skip(零行为变化);执行失败 → warn + 不阻塞装配
- *     (降级契约,同 `initIknowWorkspaceSafe`)。
+ * Trigger surface:
+ *   - `runHostInitScript()` is called once at chat / ask / serve process startup.
+ *   - Script path: `IKNOW_HOST_INIT_SCRIPT` env, or default `~/.iknow/init.sh`.
+ *   - File absent → skip (zero behavior change); execution failure → warn +
+ *     never block assembly (degradation contract, same as
+ *     `initIknowWorkspaceSafe`).
  *
- * 安全约束:
- *   - 超时(默认 15s):超时 → kill 进程组 → 不阻塞装配。
- *   - 输出落 stderr(可见但不带 `execution_failed` 前缀 — 不是 agent 工具结果)。
- *   - 危险命令拦截:脚本由用户自写,宿主不对其做 hard-wall / allowlist
- *     校验(那本就不是它的语义)。用户写啥跑啥,责任自负。
+ * Safety constraints:
+ *   - Timeout (default 15s): on timeout → kill the process group → assembly
+ *     is not blocked.
+ *   - Output lands on stderr (visible but without the `execution_failed`
+ *     prefix — it is not an agent tool result).
+ *   - No dangerous-command interception: the script is user-authored, and the
+ *     host applies no hard-wall / allowlist validation to it (that was never
+ *     its semantics). The user runs what they wrote, at their own risk.
  *
- * 与 `initIknowWorkspaceSafe()` 的关系:后者 seed iknow 自身的模板文件
- * (user.md / state.json),由代码常量驱动;前者是**用户自写**脚本,二者
- * 独立。先后顺序:先 initIknowWorkspaceSafe(代码常量),再 runHostInitScript
- * (用户脚本),这样用户脚本可以读到已 seed 的 user.md / state.json。
+ * Relation to `initIknowWorkspaceSafe()`: the latter seeds iknow's own
+ * template files (user.md / state.json) driven by code constants; the former
+ * runs a **user-authored** script — the two are independent. Ordering:
+ * initIknowWorkspaceSafe first (code constants), then runHostInitScript
+ * (user script), so the user script can read the already-seeded
+ * user.md / state.json.
  */
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
@@ -200,7 +207,7 @@ function collectOutput(
 }
 
 /** Lifecycle state passed through spawn event handlers — single object so each
- *  handler stays short (≤30 lines per ACR complexity anti-drift). */
+ *  handler stays short. */
 interface LifecycleCtx {
   readonly child: ReturnType<typeof spawn>;
   readonly scriptPath: string;
@@ -229,7 +236,7 @@ function armTimeout(ctx: LifecycleCtx, timeoutMs: number): void {
       try {
         process.kill(-pid, "SIGKILL");
       } catch {
-        /* ESRCH 等忽略 */
+        /* ESRCH etc. — ignore */
       }
     }
     const snap = ctx.buf.snapshot();

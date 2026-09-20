@@ -71,8 +71,9 @@ export function resolveSubagentCapabilities(
     };
   }
 
-  // 默认 = builtin + `~/.iknow/agents/` 用户角色合并 catalog（记忆化，
-  // 进程内只扫一次）。测试仍可注入显式 catalog 隔离。
+  // Default = builtin + `~/.iknow/agents/` user-role merged catalog
+  // (memoized, scanned once per process). Tests may still inject an explicit
+  // catalog for isolation.
   const catalog = opts.catalog ?? createMergedCatalogResolver();
   try {
     const entry = catalog.get(opts.role);

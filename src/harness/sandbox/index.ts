@@ -1,9 +1,9 @@
 export { READ_ONLY_SYSTEM_PATHS, createFsPolicy } from "./fs-policy.js";
 export type { FsPolicy, FsPolicyOptions } from "./fs-policy.js";
 
-// ADR-0092 Amendment 2026-09-13 / SC11/SC12:工作区档 fs-isolation overlay
-// —— 可变 holder + 值域守卫(详见 fs-mode.ts 文件头 SSOT)。`resolveFsIsolationMode`
-// 由 T8 在 `config/settings.ts` 落地,本文件只 re-export 类型与工厂。
+// Workspace-tier fs-isolation overlay per ADR-0092 — mutable holder + value
+// guard (SSOT: file header of fs-mode.ts). `resolveFsIsolationMode` lives in
+// `config/settings.ts`; this file only re-exports the types and factories.
 export {
   FS_ISOLATION_MODE_DEFAULT,
   createFsModeContext,

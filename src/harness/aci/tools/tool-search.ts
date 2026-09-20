@@ -1,38 +1,49 @@
 /**
- * tool_search 工具（ACI 第 9 件，#224 工具扩展之路）：按名/子串检索已注册
- * 工具并返回完整 ToolDef JSON。
+ * tool_search: searches the registered tool catalog by name/substring and
+ * returns full ToolDef JSON.
  *
- * 行为真值：spec 224-tool-extension-path.md § Code Style：
- *   - 输入 `query`（名字/描述大小写不敏感子串，**trim 后**判空）或 `names`
- *     （精确工具名列表），两字段均可选；"至少一个" 语义由 handler 入口判定
- *     —— 空参 / 空白-only `query` = `"(no matches) Rephrase ..."`（合法返回，
- *     非错误；带换词引导），不交给 ajv（D9）。
- *   - 匹配 = 遍历 catalog.all()：`names` 非空 → 精确名 includes；否则 →
- *     name/description 子串 contains（大小写不敏感）。
- *   - 命中后逐名调 `getRegistry().discover(name)` 副作用：标记被检索过的
- *     lazy 工具从下一轮起进入 promptTools()（引擎消费 discovered set）。
- *     discover 与输出同界 —— 被封顶丢弃的命中不进 discovered set。
- *   - wire 形态（D6）：每行一个 JSON，显式三字段投影
- *     `{ name, description, inputSchema }` —— 不把 `aci` 元数据或 handler
- *     泄漏进 wire JSON（契约 Y1 plain-string 守门）。
- *   - 有界输出：可选 `limit`（默认 20，上界 100，非法值由 ajv 拒收）+ 字符
- *     自限（`OUTPUT_SELF_CAP`）。超出部分**整行**丢弃（每行永远可 JSON.parse），
- *     并追加一条纯文本引导行。契约 X：executor 仍是截断唯一权威，本工具输出
- *     少于封顶是遵守而非绕开（spec 224:172），引导行是 plain data 而非
- *     truncated/total 元字段（spec 224:208）—— 复用 `NO_MATCHES` 非 JSON 行
- *     的 S5 carve-out 先例。
+ * Behavioral truth:
+ *   - Input `query` (case-insensitive substring over name/description,
+ *     emptiness checked **after trim**) or `names` (exact tool-name list);
+ *     both fields optional. The "at least one" semantics is decided at the
+ *     handler entry — empty / whitespace-only `query` returns
+ *     `"(no matches) Rephrase ..."` (a legal result, not an error, with
+ *     rephrase guidance); this is deliberately not pushed to ajv.
+ *   - Matching = scan catalog.all(): if `names` is non-empty → exact-name
+ *     includes; otherwise → case-insensitive substring over
+ *     name/description.
+ *   - Each hit then goes through `getRegistry().discover(name)` as a side
+ *     effect: lazy tools marked as searched enter promptTools() from the
+ *     next round onward (the engine consumes the discovered set).
+ *     discover shares the same boundary as the output — hits dropped by the
+ *     cap never enter the discovered set.
+ *   - Wire shape: one JSON per line, explicit three-field projection
+ *     `{ name, description, inputSchema }` — `aci` metadata and handlers
+ *     must not leak into the wire JSON (plain-string-only contract).
+ *   - Bounded output: optional `limit` (default 20, max 100; illegal values
+ *     rejected by ajv) plus a character self-cap (`OUTPUT_SELF_CAP`).
+ *     Overflow drops **whole lines** (every line is always JSON.parse-able)
+ *     and appends one plain-text guidance line. The executor remains the
+ *     sole truncation authority, so this tool emitting less than the cap is
+ *     compliance, not circumvention; the guidance line is plain data, not
+ *     truncated/total metafields — it reuses the precedent of the non-JSON
+ *     `NO_MATCHES` line's line-parseable carve-out.
  *
- * **依赖注入形态（lazy self-reference）**：tool_search 需要的是"已装配完成的
- * registry 的 catalog（检索对象）+ discover（标记副作用）"。由于 registry
- * 本身包含 tool_search，直接持有 registry 引用会造成自引用循环，故 deps 收
- * `getRegistry: () => AciRegistry` 惰性闭包 —— 装配期只存函数，调用期（模型
- * 实际 tool_search 时）才解引用，此时 createDefaultAciRegistry 已把
- * `assembled.reg` 赋值完毕。装配未完成即被调用 → 抛 ToolExecutionError
- * （fail-fast，不静默）。
+ * **Dependency-injection shape (lazy self-reference)**: what tool_search
+ * needs is the assembled registry's catalog (search target) + discover
+ * (marking side effect). Because the registry itself contains tool_search,
+ * holding a direct registry reference would form a self-reference cycle, so
+ * deps take a lazy closure `getRegistry: () => AciRegistry` — assembly
+ * stores only the function; dereferencing happens at call time (when the
+ * model actually invokes tool_search), by which point
+ * createDefaultAciRegistry has finished assigning `assembled.reg`. Called
+ * before assembly completes → throws ToolExecutionError (fail-fast, never
+ * silent).
  *
- * ACI 元数据（D8）：read-only / concurrency-safe / cancel / fast tier（5s，
- * 纯内存 catalog 扫描）。**不显式设 lazy**（默认 false；自举守卫是 fail-safe
- * —— 本期零工具 lazy，tool_search 常驻 prompt）。
+ * ACI metadata: read-only / concurrency-safe / cancel / fast tier (5s, pure
+ * in-memory catalog scan). **lazy is deliberately not set** (default false;
+ * the bootstrap guard is fail-safe — zero lazy tools in this layer, so
+ * tool_search is always resident in the prompt).
  */
 
 import type { AciToolDef } from "../types.js";
@@ -41,8 +52,9 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 
 /**
- * 依赖注入：`getRegistry` 惰性解引用已装配 registry。
- * 装配完成前调用 → 抛 ToolExecutionError（自引用循环的 fail-fast）。
+ * Dependency injection: `getRegistry` lazily dereferences the assembled
+ * registry. Calling before assembly completes → ToolExecutionError
+ * (fail-fast against the self-reference cycle).
  */
 export interface ToolSearchDeps {
   readonly getRegistry: () => AciRegistry;
@@ -55,33 +67,37 @@ interface ToolSearchInput {
 }
 
 /**
- * 无匹配 / 空参的合法返回：缺参 = 无结果。
- * T3：沿用 `skill.ts` 引导文本先例（disclosure-index-align T2 删 skill_search
- * 之后,`skill` 引导回 `<available_skills>` 清单或 `read_file`,此处 NO_MATCHES
- * 不依赖已删检索件）。返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
+ * Legal return for no-matches / empty input: missing arguments = no results.
+ * Follows the guidance-text precedent of `skill.ts` (after skill_search was
+ * removed, `skill` guides back to the `<available_skills>` listing or
+ * `read_file`; this NO_MATCHES does not depend on any removed search tool).
+ * The return is not a bare marker but carries rephrase guidance (search
+ * again with a different keyword, or fetch exact tools via `names`).
  */
 export const NO_MATCHES =
   "(no matches) Rephrase `query` with a different keyword, or pass exact tool names via `names`.";
 
-/** 缺省命中条数封顶；显式 `limit` 覆盖，上界 MAX_LIMIT。 */
+/** Default hit cap; an explicit `limit` overrides it, bounded by MAX_LIMIT. */
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 /**
- * 字符自限阈值，镜像 `tools/executor.ts` 的 OUTPUT_HARD_CAP（20000）。
- * 契约 X：executor 是截断唯一权威；本工具自限坐在其之下，让 executor 的
- * 兜底截断在本工具输出上恒为 no-op（`memory/tools/recall.ts` 同形先例）。
+ * Character self-cap threshold, mirroring OUTPUT_HARD_CAP (20000) in
+ * `tools/executor.ts`. The executor is the sole truncation authority; this
+ * tool's self-cap sits beneath it so the executor's fallback truncation is
+ * always a no-op on this output (`memory/tools/recall.ts` is the same-shape
+ * precedent).
  */
 const OUTPUT_SELF_CAP = 20_000;
 
 /**
- * 工厂：createToolSearchTool(deps) — 工具检索工具（第 9 件）。
+ * Factory: createToolSearchTool(deps) — the tool-search tool.
  *
- * 返回的 AciToolDef 满足：
+ * The returned AciToolDef satisfies:
  *   - name === "tool_search"
- *   - inputSchema: { query? 子串 + names? 精确名 + limit? 条数封顶 }，均可选，
- *     additionalProperties:false
- *   - aci 元数据：read-only / concurrency-safe / cancel / fast tier
+ *   - inputSchema: { query? substring + names? exact names + limit? hit cap },
+ *     all optional, additionalProperties:false
+ *   - aci metadata: read-only / concurrency-safe / cancel / fast tier
  */
 export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
   const handler = (input: unknown, _ctx?: ToolExecutionContext): string => {
@@ -89,7 +105,8 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
     const q = typeof query === "string" ? query.trim() : "";
     const nameList = Array.isArray(names) ? names : [];
 
-    // "至少一个" 语义：query 非空字符串 或 names 非空数组，否则无结果。
+    // "At least one" semantics: non-empty query string or non-empty names
+    // array; otherwise no results.
     if (q.length === 0 && nameList.length === 0) {
       return NO_MATCHES;
     }
@@ -115,8 +132,10 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
 
     const kept = takeWithinBudget(matches, resolveLimit(limit));
 
-    // 副作用：标记被检索工具为 discovered（lazy 工具从下一轮进 promptTools）。
-    // 只覆盖真正输出的命中 —— 模型没看到的工具不该占下一轮 prompt 预算。
+    // Side effect: mark the returned tools as discovered (lazy tools then
+    // enter promptTools from the next round on).
+    // Only cover hits actually emitted — a tool the model never saw should
+    // not take prompt budget in the next round.
     for (const m of kept) {
       registry.discover(m.name);
     }
@@ -161,12 +180,13 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
-      // lazy 不显式设（默认 false）—— tool_search 常驻 prompt，自举守卫兜底。
+      // lazy deliberately unset (default false) — tool_search is always
+      // resident in the prompt; the bootstrap guard covers it.
     },
   });
 }
 
-/** wire 形态（D6）：显式三字段投影，不泄漏 aci 元数据 / handler。 */
+/** Wire shape: explicit three-field projection; never leaks aci metadata / handler. */
 function projectLine(t: AciToolDef): string {
   return JSON.stringify({
     name: t.name,
@@ -176,16 +196,19 @@ function projectLine(t: AciToolDef): string {
 }
 
 /**
- * 封顶引导行（纯文本，非 JSON —— S5 line-parseable carve-out 先例同
- * `NO_MATCHES`）。只报 plain data，不带 truncated/total 元字段（契约 X）。
+ * Cap guidance line (plain text, not JSON — same line-parseable carve-out
+ * precedent as `NO_MATCHES`). Reports plain data only, no
+ * truncated/total metafields.
  */
 function guidanceLine(shown: number, matched: number): string {
   return `(showing ${shown} of ${matched} matches) Narrow \`query\`, pass exact tool names via \`names\`, or raise \`limit\` (max ${MAX_LIMIT}).`;
 }
 
 /**
- * ajv 是 `limit` 的拒收层（0 / 负数 / 非整数在 schema 层被拒）；handler 侧
- * 只做宽松兜底（直调 handler 的非法值退回缺省），不新增失败路径。
+ * ajv is the rejection layer for `limit` (0 / negative / non-integer are
+ * rejected at the schema level); the handler only does a lenient fallback
+ * (illegal values on direct handler calls revert to the default), adding no
+ * new failure path.
  */
 function resolveLimit(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
@@ -195,14 +218,17 @@ function resolveLimit(value: unknown): number {
 }
 
 /**
- * 有界投影：按条数封顶 + 字符预算取前缀，整行丢弃（永不吐半行 JSON）。
- * 预算里预留引导行长度，保证含引导行的总输出仍 ≤ OUTPUT_SELF_CAP。
+ * Bounded projection: take a prefix within the hit count and character
+ * budget, dropping whole lines (never emit half a JSON line). The budget
+ * reserves room for the guidance line so the total output including it
+ * stays ≤ OUTPUT_SELF_CAP.
  */
 function takeWithinBudget(
   matches: ReadonlyArray<AciToolDef>,
   limit: number
 ): ReadonlyArray<AciToolDef> {
-  // 预留按 shown = matched 估（shown ≤ matched，位数不会更多）。
+  // Reserve estimated at shown = matched (shown ≤ matched, so the digit
+  // count is never larger).
   const reserve = guidanceLine(matches.length, matches.length).length + 1;
   const kept: AciToolDef[] = [];
   let used = 0;
@@ -216,7 +242,7 @@ function takeWithinBudget(
   return kept;
 }
 
-/** 解引用已装配 registry；装配未完成 → 抛 ToolExecutionError（fail-fast）。 */
+/** Dereference the assembled registry; not yet assembled → ToolExecutionError (fail-fast). */
 function resolveRegistry(deps: ToolSearchDeps): AciRegistry {
   const reg = deps.getRegistry();
   if (!reg) {

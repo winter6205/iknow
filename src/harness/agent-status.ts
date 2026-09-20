@@ -1,97 +1,114 @@
 /**
- * #645 T1 / ADR-0028 / CONTEXT「状态栏」: 现势快照 —— 纯构造器 + IO 读取器。
+ * Status-bar current snapshot — pure constructor + IO reader.
  *
- * 边界:
- *   - `buildAgentStatusText` 纯函数(无 IO、无时间 / 随机依赖),T3(TUI
- *     只读最新现势)复用同一份快照计算发事件,不与消息编码内部耦合;
- *   - `readOpenTodoLines` 只投影 `<projectDir>/<conversationId>/todos.md`
- *     里未完成的条目(pending + in_progress,绝不含 completed),按账本语法
- *     SSOT 规范化成带 id 的行形态(`- [ ] [tN] subject` /
- *     `- [~] [tN] subject`);文件缺席 / 空文件 / 全完成 / 读取失败 →
- *     空列表,绝不把读失败抛进模型回合(当"无 todo 段"静默处理);
- *     `projectDir` 在 T2 / session-folder-consolidation 起是「会话文件夹根」
- *     (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`),由 chat /
- *     serve / TUI 三入口用同一对 `(baseDir, projectIdentityRoot)` 派生,保证
- *     同一会话解析到同一 projectDir(T2 关键判据);
- *   - 栏文本只承载代码算出的现势(last_tool + 未完成 todo 段),不含政策
- *     散言 / 读规则 / 跳过条件(那些归 T2 的 system 前缀与 tool
- *     description)。空槽不广告:无未勾项时整段缺席,不印空列表。
+ // (ADR-0028)
  *
- * 本模块不改 todo_write 的 read/add/update/replace 语义（ADR-0085 三件事 +
- * replace 整表逃生口；`check` 已并入 update）,只读文件。
+ * Boundaries:
+ *   - `buildAgentStatusText` is pure (no IO / time / randomness); the TUI
+ *     reads the latest snapshot and reuses the same computation to emit
+ *     events, without coupling to message-encoding internals;
+ *   - `readOpenTodoLines` only projects unfinished items (pending +
+ *     in_progress, never completed) from `<projectDir>/<conversationId>/todos.md`,
+ *     normalized through the ledger-syntax SSOT into id-bearing lines
+ *     (`- [ ] [tN] subject` / `- [~] [tN] subject`); missing file / empty
+ *     file / all completed / read failure → empty list, and a read failure
+ *     is never thrown into a model turn (silently treated as "no todo
+ *     section"); `projectDir` is the session-folder root
+ *     (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`), derived by
+ *     the chat / serve / TUI entries from the same `(baseDir,
+ *     projectIdentityRoot)` pair so one conversation always resolves to the
+ *     same projectDir;
+ *   - the bar text carries only computed current state (last_tool + open
+ *     todo section), no policy prose / read rules / skip conditions (those
+ *     belong to the system prefix and the tool description). Empty slots
+ *     are not advertised: with nothing open, the section is absent entirely.
+ *
+ * This module does not change todo_write's read/add/update/replace semantics
+ * (ADR-0085's three operations plus the whole-table replace escape hatch;
+ * `check` folded into update) — it only reads the files.
  */
 import { readFile } from "node:fs/promises";
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
 import { formatLedgerLine, parseLedger } from "./aci/tools/todo-ledger.js";
 import { resolveConversationTodoPath } from "./aci/tools/todo-write.js";
 
-// 投影锚点:账本语法 SSOT 是 todo-ledger.ts 的 parseLedger / formatLedgerLine
-// —— 投影不再按行前缀逐字透传,而是解析后重建规范行(带 id、状态标记正确),
-// 写入侧与投影侧共用同一份语法定义,畸形 / 遗留行也走同一条解析路径。
+// Projection anchor: the ledger-syntax SSOT is parseLedger / formatLedgerLine
+// in todo-ledger.ts — projection rebuilds canonical lines (correct id and
+// status marks) instead of passing raw line prefixes through, so the writer
+// side and the projection side share one grammar and malformed / legacy
+// lines take the same parse path.
 
-/**
- * 本回合尚未跑过工具时的 last_tool 值(ADR-0028 Consequences:
- * "本回合尚未跑过工具则为 idle")。
- */
+/** last_tool value when no tool has run yet in this turn. */
+// (ADR-0028)
 export const AGENT_STATUS_IDLE_TOOL = "idle";
 
 /**
- * reconcile 行的固定文本(spec invariant 4:它是栏内行不是 system,
- * 跨回合 / 跨会话字节恒定)。导出为常量件供测试与注入名册完备性锁引用。
+ * Fixed text of the reconcile line: it is a line inside the bar, not system
+ * text, byte-constant across turns and sessions. Exported as a constant for
+ * tests and the injection-roster completeness lock.
  */
 export const AGENT_STATUS_RECONCILE_LINE =
   "reconcile: A new user instruction has arrived; if it conflicts with the current todo ledger, reconcile the ledger via todo_write first, then continue.";
 
-/** 现势快照数据(栏文本的单一真源;T3 从同一份数据发 TUI 事件)。 */
+/** Snapshot data: single source of truth for the bar text; the TUI emits events from the same data. */
 export interface AgentStatusSnapshot {
-  /** 上一跳刚完成的工具名(run 作用域);本回合尚未跑过工具 = "idle"。 */
+  /** Tool that just completed on the previous hop (run-scoped); "idle" before the first tool this turn. */
   readonly lastTool: string;
-  /** 未完成条目的规范账本行(pending + in_progress,带 id);无 = 空列表。 */
+  /** Canonical ledger lines of open items (pending + in_progress, with ids); empty when none. */
   readonly openTodoLines: ReadonlyArray<string>;
   /**
-   * 最新真实用户指令首行逐字回显(spec ADR-0103);null / 缺席 → 整行缺席
-   * (空槽不广告)。可选是为了让 T3 接线前的旧装配点(compute / TUI 事件)
-   * 原样编译,parse 侧总是显式给出 null。
+   * Verbatim first line of the latest real user instruction; null / absent
+   *
+   // (ADR-0103)
+   * → the whole line is absent (empty slots are not advertised). Optional
+   * so assembly points predating the wiring compile unchanged; the parse
+   * side always gives null explicitly.
    */
   readonly instruction?: string | null;
   /**
-   * 本栏是否携带 pivot reconcile 标记(进场后首跳一次性);false / 缺席 →
-   * 整行缺席。结算算法归 T3,这里只承载字段。
+   * Whether this bar carries the one-shot pivot reconcile marker after a
+   * new instruction; false / absent → line absent. The settlement algorithm
+   * lives in the loop engine; this only carries the field.
    */
   readonly reconcile?: boolean;
 }
 
 /**
- * 纯构造器:快照数据 → 栏文本。
+ * Pure constructor: snapshot data → bar text.
  *
- * 形状(最小机器可读 `<agent_status>` 包装):
+ * Shape (minimal machine-readable `<agent_status>` wrapper):
  *
  * ```
  * <agent_status>
  * last_tool: <name>
- * instruction: <最新真实用户指令首行逐字>(null / 缺席 → 整行缺席)
- * reconcile: <固定标记句>(false / 缺席 → 整行缺席)
+ * instruction: <first line of the latest real user instruction, verbatim> (null / absent → line absent)
+ * reconcile: <fixed marker sentence> (false / absent → line absent)
  * todos:
  * - [ ] <item>
  * </agent_status>
  * ```
  *
- * instruction / reconcile / todo 段都是「空槽不广告」的可选段;标量段
- * (instruction / reconcile)与 last_tool 一律排在 `todos:` 头之前(次序纪律)。
+ * instruction / reconcile / todo sections all follow "empty slots are not
+ * advertised"; scalar sections always precede the `todos:` header (ordering
+ * discipline).
  */
-/** 官方帧开/闭标签字面（ADR-0112 T2：出站投影 TAG 转义名册由此常量拼装，
- *  产出方与转译方同源，防字面量手抄漂移）。 */
+/** Official frame open/close tag literals: the outbound projection's
+ * (ADR-0112)
+ *  TAG-escape roster is assembled from these constants, so producer and
+ *  escaper share one source and hand-copied literals cannot drift. */
 export const AGENT_STATUS_OPEN_TAG = "<agent_status>";
 export const AGENT_STATUS_CLOSE_TAG = "</agent_status>";
 
-/** 栏文本形态检测（TUI 隐藏注入气泡、turn 边界、测试夹具共用）。 */
+/** Bar-text shape detector (shared by TUI injected-bubble hiding, turn boundaries, test fixtures). */
 export function isAgentStatusText(text: string): boolean {
   return text.trimStart().startsWith(AGENT_STATUS_OPEN_TAG);
 }
 
 export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
-  // 次序纪律(spec invariant 5):标量字段行全部先于 `todos:` 头,todo 行
-  // 永远占栏末段 —— 这是旧解析器吃新栏仍得正确子集(回滚安全)的根。
+  // Ordering discipline: all scalar field lines come before the `todos:`
+  // header and todo lines always occupy the bar tail — this is what lets an
+  // older parser eat a newer bar and still get the correct subset (rollback
+  // safety).
   const lines: string[] = [
     AGENT_STATUS_OPEN_TAG,
     `last_tool: ${snapshot.lastTool}`,
@@ -115,9 +132,10 @@ const INSTRUCTION_PREFIX = "instruction: ";
 const RECONCILE_PREFIX = "reconcile: ";
 
 /**
- * 栏文本 → 现势快照(TUI resume hydrate / 测试直驱)。畸形输入 → null,不 throw。
- * 旧格式栏(无 instruction / reconcile 行)是合法输入 → 显式缺省
- * `instruction: null, reconcile: false`(spec F4,不判畸形)。
+ * Bar text → snapshot (TUI resume hydrate / direct tests). Malformed input →
+ * null, no throw. Older-format bars (no instruction / reconcile lines) are
+ * valid input → explicit defaults `instruction: null, reconcile: false`
+ * (not treated as malformed).
  */
 export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
   if (!isAgentStatusText(text)) return null;
@@ -131,7 +149,7 @@ export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
   const instructionLine = body.find((l) => l.startsWith(INSTRUCTION_PREFIX));
   const reconcile = body.some((l) => l.startsWith(RECONCILE_PREFIX));
   const todoHeaderIndex = body.findIndex((l) => l === "todos:");
-  // `todos:` 头之前的未知标量行(前向兼容)不进 todo 列表:头后才是 todo 段。
+  // Unknown scalar lines before the `todos:` header (forward compat) never enter the todo list: only after the header is the todo section.
   const openTodoLines =
     todoHeaderIndex >= 0 ? body.slice(todoHeaderIndex + 1) : [];
   return Object.freeze({
@@ -146,8 +164,8 @@ export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
 }
 
 /**
- * messages 里末条 agent_status user 消息 → 快照(冷启动 hydrate SSOT)。
- * 无栏 / 末栏畸形 → null;不读 todos.md。
+ * Last agent_status user message in `messages` → snapshot (cold-start hydrate
+ * SSOT). No bar / malformed last bar → null; does not read todos.md.
  */
 export function agentStatusFromMessages(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -164,9 +182,7 @@ export function agentStatusFromMessages(
   return null;
 }
 
-/**
- * 未完成条目 → 规范账本行(保序)。completed 不投影 —— 状态栏只报没做完的。
- */
+/** Open items → canonical ledger lines (order kept). Completed items are never projected — the bar only reports what is not done. */
 function projectUnfinishedItems(content: string): ReadonlyArray<string> {
   return parseLedger(content)
     .filter((i) => i.status !== "completed")
@@ -174,12 +190,14 @@ function projectUnfinishedItems(content: string): ReadonlyArray<string> {
 }
 
 /**
- * IO 读取器:读 `<todoDir>/[<conversationId>/]todos.md`,只投影未完成的
- * 条目(pending + in_progress,保序),按账本语法 SSOT 规范化成带 id 的行。
- * conversationId 在场 → 读该会话自己的账本(与 todo_write 写入侧同一 SSOT
- * 解析);缺席 → 根 todos.md(向后兼容)。文件缺席 / 空文件 / 全完成 /
- * 任何读取失败 → 空列表;绝不 throw(调用侧是即将进行的模型回合,读失败
- * 按"无 todo 段"处理,无 fallback 噪音)。
+ * IO reader: reads `<todoDir>/[<conversationId>/]todos.md` and projects only
+ * the open items (pending + in_progress, order kept), normalized through the
+ * ledger-syntax SSOT into id-bearing lines. With a conversationId → that
+ * conversation's own ledger (same SSOT as the todo_write writer); without →
+ * root todos.md (backward compat). Missing file / empty file / all completed
+ * / any read failure → empty list; never throws (the caller is about to make
+ * a model turn; read failures are treated as "no todo section", with no
+ * fallback noise).
  */
 export async function readOpenTodoLines(
   todoDir: string,
@@ -193,20 +211,24 @@ export async function readOpenTodoLines(
     const content = await readFile(filePath, "utf8");
     return projectUnfinishedItems(content);
   } catch {
-    // EXIT: 任何读失败(含 ENOENT / EACCES / ENOTDIR)→ 空列表
-    // (ADR-0028 静默收敛:读失败当"无 todo 段",绝不抛进模型回合)
+    // EXIT: any read failure (ENOENT / EACCES / ENOTDIR included) → empty
+    // list, silently converged as "no todo section"; never thrown into a
+    // (ADR-0028)
+    // model turn.
     return [];
   }
 }
 
 /**
- * instruction / reconcile 两槽「条件在场 → key 缺席」投影的 SSOT
- * (spec agent-status-instruction-echo;快照装配 compute、流事件发射
- * loop-engine、TUI 事件映射 agent-status-line 三个消费点共用,防 spread
- * 守卫手抄漂移)。统一语义一条规则:槽传 undefined = 未提供 → key 缺席;
- * 其余值(含 null / false)逐字在场 —— 缺席 ≠ null/false 的契约不变。
- * 「空槽不广告」的 instruction null 归一(→ 未提供)属调用侧字段语义,
- * 由 compute 入口完成;事件 / TUI 透传面保留事件实际值不在此列。
+ * SSOT for projecting the instruction / reconcile slots' "present only if
+ * provided → otherwise key absent": a slot of undefined = not provided →
+ * key absent; any other value (including null / false) stays verbatim —
+ * absent ≠ null/false is the contract. Shared by the three consumers
+ * (snapshot assembly in compute, stream-event emission in loop-engine, TUI
+ * event mapping) so the spread guards cannot drift by hand-copying. The
+ * instruction null-normalization enforcing "empty slots are not advertised"
+ * is caller-side field semantics done at the compute entry; event / TUI
+ * pass-through keeps the event's actual value.
  */
 export function pickPresentAgentStatusSlots(slots: {
   readonly instruction?: string | null;
@@ -219,32 +241,37 @@ export function pickPresentAgentStatusSlots(slots: {
 }
 
 /**
- * 组合计算:读 todos.md 投影未勾行 + last_tool (+ T3 instruction 透传 +
- * T4 reconcile 结算字段透传) → 快照数据与栏文本。T3(TUI 只读订阅)从同一份
- * 数据 / 文本派生 UI,不另建账本。instruction 由调用侧(loop-engine 经 T2
- * 提取器)传入;null / 缺席 → 字段不落 key(事件面保持 F1 的旧字段集形态)。
- * reconcile 由调用侧 run 作用域装箱结算后传入;缺席(无判定对象)→ 同样不落
- * key,false → 行缺席但事件 key 在场(结算已发生)。永不 throw(读取失败由
- * readOpenTodoLines 收敛为空列表)。
+ * Combined computation: read todos.md open lines + last_tool (+ instruction
+ * pass-through + reconcile settlement field) → snapshot data and bar text.
+ * The TUI derives its view from the same data / text without building a
+ * second ledger. `instruction` comes from the caller (loop-engine via the
+ * extractor); null / absent → the field key is dropped (the event surface
+ * keeps the old field-set shape). `reconcile` comes from the caller after
+ * run-scoped settlement; absent (nothing to settle) → key dropped too,
+ * false → line absent but event key present (settlement happened). Never
+ * throws (read failures are converged to empty lists by
+ * readOpenTodoLines).
  */
 export async function computeAgentStatusSnapshot(opts: {
   readonly lastTool: string;
   readonly todoDir: string;
-  /** 在场 → 投影该会话自己的账本(SSOT 与 todo_write 写入侧同源)。 */
+  /** When present, projects that conversation's own ledger (SSOT shared with the todo_write writer). */
   readonly conversationId?: string;
-  /** spec T3:最新真实用户指令首行(T2 提取器产物);null → 段缺席。 */
+  /** First line of the latest real user instruction (extractor product); null → section absent. */
   readonly instruction?: string | null;
   /**
-   * spec T4:本栏 reconcile 标记结算结果(loop-engine run 作用域装箱算出);
-   * 缺席 = 无判定对象(F1),字段不落 key(事件面退回旧字段集形态)。
+   * Reconcile-marker settlement for this bar (computed by the loop engine's
+   * run-scoped box); absent = nothing to settle, key dropped (the event
+   * surface falls back to the old field set).
    */
   readonly reconcile?: boolean;
 }): Promise<AgentStatusSnapshot & { readonly text: string }> {
   const snapshot: AgentStatusSnapshot = {
     lastTool: opts.lastTool,
     openTodoLines: await readOpenTodoLines(opts.todoDir, opts.conversationId),
-    // instruction null = 「空槽不广告」(F1) → 归一为未提供;key 投影规则
-    // 本身归 pickPresentAgentStatusSlots SSOT(review 修复弹收敛)。
+    // instruction null = "empty slots are not advertised" → normalized to
+    // not-provided; the key-projection rule itself lives in
+    // pickPresentAgentStatusSlots.
     ...pickPresentAgentStatusSlots({
       instruction: opts.instruction ?? undefined,
       reconcile: opts.reconcile,

@@ -1,18 +1,18 @@
 /**
- * ACI 工具集注册层 — 11 件 SSOT（8 基线 + memory_recall/memory_save + tool_search）。
+ * ACI toolset assembly layer — single source of truth for which tools exist
+ * and how env is injected, shared by every harness entry (CLI `ask` /
+ * `chat` / `serve`, TUI `iknow tui`). Without it toolsets drift apart
+ * (historical lesson: a hand-written file-tool list in `src/tui/deps.ts`
+ * forgot to register web_fetch / web_search).
  *
- * **目的**:让所有 harness 入口(CLI `ask` / `chat` / `serve`、TUI `iknow tui`)
- * 共享同一份"工具有哪些 + 怎么注入 env"的装配函数,避免工具集分裂
- * (历史教训:`src/tui/deps.ts` 手写 6 个文件工具漏注册 web_fetch/web_search)。
+ * This module only decides "which tools + env passthrough"; it does not
+ * replace `createAciRegistry` (which owns the protocol registry and the
+ * lazy-load catalog).
  *
- * 本模块仅做"哪些工具 + env 透传",
- * 不替代 `createAciRegistry`(后者还管协议 registry + 延迟加载 catalog)。
- *
- * **append-only**:不重排既有 8 工具顺序(policy byName 键空间与 ADR-0006 稳定);
- * Web 类工具(bash / read_file / grep / glob / edit_file / write_file 之后)
- * 沿用 build-engine.ts 历史顺序;memory_recall / memory_save(#228 layer 3,
- * 条件化:memoryDir 缺席时不入注册表)在 Web 类之后追加;`tool_search`(#224
- * 扩展路径)末尾追加。
+ * **Append-only**: never reorder (the policy byName keyspace and ADR-0006
+ * require stable ordering). Web-family tools follow the historical order
+ * from build-engine.ts; memory_recall / memory_save (conditional: omitted
+ * without memoryDir) come after them; `tool_search` is appended last.
  */
 import type { IknowEnv } from "../../../config/env.js";
 import { createAciRegistry, type AciRegistry } from "../aci-registry.js";
@@ -86,26 +86,26 @@ import {
 import { join } from "node:path";
 
 /**
- * 11 件生产工具的命名常量 — SSOT（8 基线 + memory_recall + memory_save + tool_search）。
+ * Naming constants for the production tools an LLM agent calls — naming
+ * SSOT, not a test fixture. Exporting it splits two layers:
+ *   - Assembly: `createDefaultAciRegistry()` wires the factories and returns
+ *     the AciRegistry; production entries (build-engine / TUI) only talk to
+ *     the factory.
+ *   - Naming: this list is the authoritative declaration of the iknow
+ *     toolset. Tests consume it to pin the set, and future diagnostics /
+ *     tool_search-style hooks look tools up by name.
  *
- * 这是给 LLM agent 调的 11 个生产工具(bash / read_file / grep / glob /
- * edit_file / write_file / web_fetch / web_search / memory_recall /
- * memory_save / tool_search)的命名真值,不是测试 fixture。导出它让两个层分工:
- *   - 装配层:`createDefaultAciRegistry()` 实际把 factories 拼起来,
- *     返回 AciRegistry;生产入口(build-engine / TUI)只跟工厂交互
- *   - 命名层:本常量承载「这 11 个名字是 iknow 工具集」的声明真值,
- *     被测试断言消费(`registry.test.ts` 用它锁工具集不变),也给未来
- *     诊断 / tool_search 类 hook 按名查工具用
+ * "Consumed by test assertions" ≠ "test tool" — this is the naming
+ * authority; tests are just one of its consumers.
  *
- * 即「测试断言消费」不等于「测试工具」— 它是工具集的命名权威,
- * 测试只是这条权威的消费者之一。
- *
- * **Gate 3（SSOT append-only 纪律）**:`createDefaultAciRegistry` 把 factories
- * 按此名单派生装配;若 factories 键与名单不一致(长度/顺序/成员任何一处
- * 分歧),装配期即抛 `RegistryConstructionError`。将来加件只改 factories 忘
- * append 名单(或反之,或重排既有项)装配期立刻失败,不给运行期留隐患。
- * memory_recall / memory_save 是条件化的(memoryDir 缺席时同时缺席,
- * Gate 3 在 `toolsetNames` 端做镜像过滤,见工厂尾部注释)。
+ * **Gate 3 (SSOT append-only discipline)**: `createDefaultAciRegistry`
+ * derives its assembly from this list; any divergence between the factory
+ * keys and the list (length / order / membership) throws
+ * `RegistryConstructionError` at assembly time. Adding a tool to the
+ * factories without appending it here (or vice versa, or reordering) fails
+ * immediately instead of lurking until runtime. memory_recall /
+ * memory_save are conditional (they vanish together with memoryDir); Gate 3
+ * mirror-filters `toolsetNames` accordingly (see the factory tail comment).
  */
 export const ACI_TOOLSET_NAMES = Object.freeze([
   "bash",
@@ -116,187 +116,197 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "write_file",
   "web_fetch",
   "web_search",
-  "memory_recall", // #228 layer 3（条件化:memoryDir 缺席时不装配）
-  "memory_save", // #228 layer 3（同上）
-  "tool_search", // #224 扩展路径
-  // #337 T5 skill 工具集 append-only：21→22。
-  // 一件工具,条件化装配（skillCatalog 缺席时不入注册表,与 memoryDir
-  // 同形态：Gate 3 在 toolsetNames 端镜像过滤,见工厂尾部注释）。
-  // disclosure-index-align T2:#337 T5 的 `skill_search` 已删（spec ADR-0046
-  // / SC5：未描述的 skill 靠 `skill({name})` 带回正文,索引文件
-  // `<available_skills>` 已给名+描述,直呼路径不依赖二次检索）。
-  "skill", // #337 T5 直呼取 skill 正文
-  // #356 T4 spawn_subagent append-only：22→23。条件化装配（subagentManager
-  // 缺席时不入注册表，与 skillCatalog / memoryDir 同形态：Gate 3 在
-  // toolsetNames 端镜像过滤，见工厂尾部注释）。
-  "spawn_subagent", // #356 T4 主代理派发子代理（异步返 task_id）
-  // #356 T5 subagent_result append-only：23→24。条件化装配（subagentManager
-  // 缺席时不入注册表，与 spawn_subagent / skillCatalog / memoryDir 同形态：
-  // Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
-  "subagent_result", // #356 T5 主代理轮询子代理四态（not_found/running/completed/failed）
-  // #440 双 Stream 工具集 append-only：24→27（并集，#480 Stream B 先合 +
-  // #481 Stream A 后合）。三件都条件化装配（Gate 3 在 toolsetNames 端
-  // 镜像过滤，见工厂尾部注释）：
-  //   - todo_write: todoDir 缺席时不入注册表 — ask 表面不传（SC8 oneshot
-  //     剥离）；worker 装配路径在父会话经 envelope 透传 `todoLedger` 时
-  //     传入 todoDir + todoActor{canAdd:false}（ADR-0085 / SC9：与父共用
-  //     同一本账，可读可更；`add` 拒绝在工具 handler 内，不是「工具不在场」）
-  //   - list_mcp_resources / read_mcp_resource: mcpManager 缺席时不入
-  //     注册表 — ask 入口零件 + 任务型 worker；与 subagentManager /
-  //     skillCatalog / memoryDir 同形态
-  // M2 决议：MCP resources read-only / 默认 ask 关闭；与 web_fetch /
-  // web_search 先例对齐（ask 是副作用守门，不是内容审查门）。list 由
-  // iknow 自写 meta 工具行为透明，诚实标 read-only（与 mcp__* 动态工具
-  // 的保守 write 默认不同）。
-  "todo_write", // #440 D1/D2 session 作用域 ledger（host 注入 todoDir）
-  "list_mcp_resources", // #440 T11 list MCP server 暴露的 resources（聚合 / 可选 server + cursor）
-  "read_mcp_resource", // #440 T11 读单个 resource 内容（必填 server + uri）
-  // #502 T4 bash_output / bash_stop append-only：27→29（Track A 模型操作面，
-  // 与 T3 bash background:true 成对）。两件都条件化装配（backgroundManager
-  // 缺席时不入注册表——ask 入口零件；bash 常驻不在此列，参数级能力由 handler
-  // 运行时决策——Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
-  "bash_output", // #502 T4 读后台任务日志尾部 + 状态/exit_code（read-only 默认 allow）
-  "bash_stop", // #502 T4 终止后台任务进程组（SIGTERM→2s→SIGKILL；write 默认 ask）
-  // D-α T3 run_graph append-only：29→30。条件化装配（graphAssembly +
-  // subagentManager 同时在场才入注册表——ask / worker / 未接 overlay 的入口
-  // 三者皆缺席；Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
-  // 注册 ≠ 可见：本 round 的 graph 快照关着时装配层把它滤出 promptTools,
-  // handler 亦二次 EXIT（ADR-0030 —— overlay 是运行期可翻的,registry 是
-  // 构造期冻结的,两者只能这样对齐）。
-  "run_graph", // D-α T3 父代理声明 DAG，host 走 waves + 前景 spawn 编排
+  "memory_recall", // conditional: omitted when memoryDir is absent
+  "memory_save", // conditional: same as memory_recall
+  "tool_search", // lazy-discovery entry point
+  // skill tool, append-only. One tool, conditional (absent without
+  // skillCatalog — same shape as memoryDir: Gate 3 mirror-filters
+  // toolsetNames, see the factory tail comment).
+  // `skill_search` was removed (ADR-0046): the `<available_skills>` index
+  // already lists name + description, and `skill({name})` brings back the
+  // body directly, so the direct-call path needs no second search step.
+  "skill", // direct skill body fetch by name
+  // spawn_subagent, append-only. Conditional (absent without
+  // subagentManager — same shape as skillCatalog / memoryDir: Gate 3
+  // mirror-filters toolsetNames, see the factory tail comment).
+  "spawn_subagent", // parent agent dispatches a subagent (returns task_id async)
+  // subagent_result, append-only. Conditional (absent without
+  // subagentManager — same gate shape as spawn_subagent).
+  "subagent_result", // parent polls subagent state (not_found/running/completed/failed)
+  // Session-ledger / MCP / background additions, append-only (all three
+  // conditional — Gate 3 mirror-filters toolsetNames, see factory tail):
+  //   - todo_write: absent without todoDir — the ask surface does not pass
+  //     it (oneshot surfaces strip it); worker assembly passes the parent's
+  //     todoDir with todoActor{canAdd:false} (ADR-0085: worker shares the
+  //     parent ledger — read/update allowed; `add` is rejected inside the
+  //     tool handler, not by hiding the tool).
+  //   - list_mcp_resources / read_mcp_resource: absent without mcpManager —
+  //     ask inlet parts + task workers.
+  // MCP resources are read-only and off on the default ask surface,
+  // aligned with the web_fetch / web_search precedent (ask gates side
+  // effects, not content review). The list tool is iknow-authored and
+  // transparent, honestly labelled read-only (unlike the conservative
+  // write default for dynamic mcp__* tools).
+  "todo_write", // session-scoped todo ledger (host injects todoDir)
+  "list_mcp_resources", // list resources exposed by MCP servers (aggregated; optional server + cursor)
+  "read_mcp_resource", // read one resource's content (server + uri required)
+  // bash_output / bash_stop, append-only — the model-facing pair for
+  // bash background:true. Both conditional (absent without
+  // backgroundManager — ask inlet parts; bash itself stays resident, its
+  // parameter-level capability is a runtime handler decision; Gate 3
+  // mirror-filters toolsetNames, see factory tail).
+  "bash_output", // tail of a background task's log + status/exit_code (read-only, allow by default)
+  "bash_stop", // kill a background task's process group (SIGTERM→2s→SIGKILL; write, ask by default)
+  // run_graph, append-only. Conditional (registered only when graphAssembly
+  // AND subagentManager are both present — ask / worker / entries without
+  // the overlay all lack them; Gate 3 mirror-filters toolsetNames, see
+  // factory tail).
+  // Registering ≠ visible: when this round's graph snapshot is off, the
+  // assembly layer filters it out of promptTools, and the handler also
+  // exits (ADR-0030 — the overlay is a runtime-flippable switch while the
+  // registry is frozen at construction, so only this pairing aligns them).
+  "run_graph", // parent declares a DAG; host orchestrates waves + foreground spawns
   "query_trace", // trace read-side projection and record drill-down
-  // T4 (plans/worktree-isolation-model-provision.md) 创建工作树 ACI 工具
-  // append-only：30→31。条件化装配（worktreeProvision host 缝缺席时不入
-  // 注册表 —— 无 hub 的入口 / worker 装配路径；ADR-0037 Amendment 2026-09-11
-  // 已撤销「工具在场 ⇔ 开关 ON」，开关 OFF 不再卸掉工具。Gate 3 在
-  // toolsetNames 端镜像过滤，见工厂尾部注释）。名字与 T3 门禁 hint 常量
-  // `CREATE_WORKTREE_TOOL_HINT`（"create-worktree ACI tool"）
-  // 逐字对齐 —— 被拦 mutate 的 block 文案指向的工具名必须真实存在。
-  // ADR-0082 改名：注册名去掉 `-task`（位置不动，仍 append-only）。
+  // create-worktree ACI tool, append-only. Conditional (absent without the
+  // worktreeProvision host seam — hub-less inlets / worker assembly).
+  // ADR-0037 (amended 2026-09-11) revoked "tool present ⇔ switch ON":
+  // switch OFF no longer unregisters the tool. Gate 3 mirror-filters
+  // toolsetNames, see factory tail. The name must match the gate hint
+  // constant `CREATE_WORKTREE_TOOL_HINT` ("create-worktree ACI tool")
+  // verbatim — a blocked mutate's message must point at a tool that
+  // really exists. ADR-0082 renamed it: the registered name drops `-task`
+  // (position kept, still append-only).
   "create-worktree",
-  // T7 (plans/worktree-isolation-model-provision.md) enter-worktree
-  // append-only：32→33。条件化装配（worktreeEnter host 缝缺席时不入注册表
-  // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
-  // toolsetNames 端镜像过滤，见工厂尾部注释）。工具只收 owner conversationId，
-  // 目标路径由 SSOT `taskWorktreePath` 派生，不收自由路径。
+  // enter-worktree, append-only. Conditional (absent without the
+  // worktreeEnter host seam — TUI wires provision only / worker assembly /
+  // hub-less inlets; Gate 3 mirror-filters toolsetNames). The tool takes
+  // only the owner conversationId; the target path is derived from the
+  // SSOT `taskWorktreePath`, never from a free-form path.
   "enter-worktree",
-  // T8 (plans/worktree-isolation-model-provision.md) exit-worktree
-  // append-only：33→34。条件化装配（worktreeExit host 缝缺席时不入注册表
-  // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
-  // toolsetNames 端镜像过滤，见工厂尾部注释）。工具无参数；主仓根由 host
-  // 从树本身派生（git common dir），树保留不删。
+  // exit-worktree, append-only. Conditional (absent without the
+  // worktreeExit host seam — same shape as worktreeEnter). The tool takes
+  // no parameters; the main-repo root is derived by the host from the
+  // tree itself (git common dir), and the tree is kept, not deleted.
   "exit-worktree",
-  // symbol-primary-aci T2 符号查询工具集 append-only：34→44。
-  // 与 #251 的 10 件 `lsp_*` **并存**（T5 才把坐标面从模型面移除）：本批以
-  // 符号身份（`{ file, symbol_path }`）提问，行列译码封在 symbol-resolver.ts。
-  // append 在末尾而非插在 lsp_* 之后 —— 本文件的 append-only 纪律（policy
-  // byName 键空间与 ADR-0006 稳定）要求不重排既有 34 件。
-  "find_symbol", // 工作区按名字/模式找符号（空 query 由 schema 拒绝）
-  "find_declaration", // 声明/定义
-  "find_referencing_symbols", // 引用（含声明）
-  "find_implementations", // 接口/抽象成员 → 具体实现
-  "get_symbols_overview", // 单文件大纲（拿 symbol_path 的入口）
-  "get_hover", // 类型/签名/文档
-  "get_diagnostics_for_file", // 文件诊断（file 与 files 互斥）
-  "prepare_call_hierarchy", // 调用图 item
-  "list_incoming_calls", // 调用者
-  "list_outgoing_calls", // 被调用者
-  // symbol-primary-aci T4 符号改工具集 append-only:32→36（去掉旧 lsp_* 后
-  // 的末位 5 件,常驻,category=write）。以符号身份（`{ file, symbol_path }`）
-  // 改代码，行列译码封在 symbol-resolver.ts。category="write"，写盘后经
-  // onEdit → lspNotifier 触发 textDocument/didChange 与 edit_file 同链路。
-  // edit_file 仍在 —— 留给不是单一符号的文本补丁（spec §使用规则段）。
-  // spec symbol-primary-aci.md T5 + ADR-0037 + #803 T9 的 tool surface 加法：
-  // 8 基线 + memory_* (2 件) + tool_search + skill 1（disclosure-index-align
-  // T2 删 skill_search，#337 原 2 件 → 1 件）+ subagent 2 + todo + mcp 2 +
-  // bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 =
-  // 39 件名，T5b 目录轴再 append 1 件 = 40 件名，T6 内容轴再 append 1 件
-  // = 41 件名，task-worktree-lifecycle 再 append list/remove = 43 件名。本表
-  // 长度以数组为 source of truth。
-  "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
-  "replace_symbol_body", // 替换定义体（range = node.range，签名 + body）
-  "insert_before_symbol", // 在符号定义前插入（range.start 位置）
-  "insert_after_symbol", // 在符号定义后插入（range.end 位置）
-  "safe_delete_symbol", // 无引用才删；仍有引用返 typed 失败 + 引用列表
-  // plan `trace-mcp-read-side-split` T5b append-only：39→40。trace 读侧的**目录轴**
-  // （有哪些会话），与 query_trace 的行轴正交；常驻装配（与 query_trace 同门，
-  // 无 host 缝可条件化）。
+  // Symbol-query toolset, append-only. Coexists with the 10 coordinate
+  // `lsp_*` tools from the older layer until the coordinate surface is
+  // removed from the model face; this batch asks by symbol identity
+  // (`{ file, symbol_path }`) — row/column decoding is sealed in
+  // symbol-resolver.ts. Appended at the tail rather than inserted after
+  // lsp_* — the append-only discipline of this file (policy byName
+  // keyspace and ADR-0006 stability) forbids reordering.
+  "find_symbol", // find symbols workspace-wide by name/pattern (empty query rejected by schema)
+  "find_declaration", // declaration/definition
+  "find_referencing_symbols", // references (including the declaration)
+  "find_implementations", // interface/abstract members → concrete implementations
+  "get_symbols_overview", // single-file outline (entry point for symbol_path)
+  "get_hover", // type/signature/docs
+  "get_diagnostics_for_file", // file diagnostics (`file` and `files` are mutually exclusive)
+  "prepare_call_hierarchy", // call-graph items
+  "list_incoming_calls", // callers
+  "list_outgoing_calls", // callees
+  // Symbol-mutation toolset, append-only (resident, category=write). Code
+  // changes by symbol identity (`{ file, symbol_path }`); row/column
+  // decoding is sealed in symbol-resolver.ts. category="write": after a
+  // write, onEdit → lspNotifier fires textDocument/didChange through the
+  // same chain as edit_file. edit_file stays — for text patches that are
+  // not a single symbol.
+  // The array itself is the source of truth for the tool count; no
+  // hardcoded totals live here.
+  "rename_symbol", // rename a symbol project-wide (textDocument/rename + applyEdit)
+  "replace_symbol_body", // replace a definition body (range = node.range: signature + body)
+  "insert_before_symbol", // insert before a symbol definition (at range.start)
+  "insert_after_symbol", // insert after a symbol definition (at range.end)
+  "safe_delete_symbol", // delete only when unreferenced; else typed failure + reference list
+  // Trace read-side catalog axis (which sessions exist), append-only,
+  // orthogonal to query_trace's row axis; resident (same door as
+  // query_trace — no host seam to condition on).
   //
-  // 位置是契约不是风格：Gate 3 按「长度 + 顺序 + 成员」比对 factories 键与本名单，
-  // 所以对应工厂必须是 `factories` 字面量的**最后一个键**（在 symbolMutateTools
-  // 展开之后）。另有一批下游测按下标锁中段（run-graph-assembly.test.ts 的
-  // idx 19-22），插在它们之前即红 —— 尾部追加才是安全改法。
+  // Position is a contract, not style: Gate 3 compares factory keys against
+  // this list by length + order + membership, so the matching factory must
+  // be the **last key** of the `factories` literal (after the
+  // symbolMutateTools spread). Several downstream tests pin mid-array
+  // indices, so inserting before them breaks red — tail-append is the only
+  // safe edit.
   "list_sessions",
-  // plan `trace-mcp-read-side-split` T6 append-only：40→41。trace 读侧的**内容轴**
-  // （一条记录里的一段字符窗），与目录轴、行轴正交；常驻装配（与 query_trace /
-  // list_sessions 同门，无 host 缝可条件化）。
+  // Trace read-side content axis (a character window inside one record),
+  // append-only, orthogonal to the catalog and row axes; resident (same
+  // door as query_trace / list_sessions — no host seam to condition on).
   //
-  // 仍然只能追加在尾部：中段插入会撞上下游按下标锁定的断言（
-  // run-graph-assembly.test.ts 的 idx 19-22 等），尾部才是 append-only 契约。
+  // Still tail-append only: mid-array insertion collides with the
+  // index-pinned downstream assertions above.
   "get_record",
   // task-worktree-lifecycle: discovery and explicit cleanup are appended after
   // the existing ACI surface. Both host seams are independently conditional.
   "list-worktrees",
   "remove-worktree",
-  // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
-  // 43→44。条件化装配（subagentManager 缺席时不入注册表 —— 与
-  // spawn_subagent / subagent_result 同门条件；Gate 3 在 toolsetNames 端
-  // 镜像过滤）。父模型停工人 = 操作员 Ctrl+X 的模型面对称臂。
+  // subagent_stop, append-only (ADR-0101). Conditional on the same seam as
+  // spawn_subagent / subagent_result (subagentManager; Gate 3
+  // mirror-filters toolsetNames). The parent model's stop lever is the
+  // symmetric arm of the operator's Ctrl+X.
   "subagent_stop",
-  // plan subagent-stop-and-continue T4 (ADR-0102) subagent_continue append-only:
-  // 44→45。同门条件（subagentManager）；死工人 + 有账才再拉起，闸在
-  // manager.resumeTask，等待契约与 spawn 相同。
+  // subagent_continue, append-only (ADR-0102). Same condition
+  // (subagentManager); revives a dead worker only when its ledger exists,
+  // the gate sits in manager.resumeTask, and the wait contract matches
+  // spawn's.
   "subagent_continue",
-  // read-image-vision T2 (spec SC6) read_image append-only:45→46。常驻装配
-  // （无 host 缝可条件化，与 read_file / grep / glob 同门）；围栏内图片按
-  // 魔数读为 SDK image block，不入 last-read ledger（ADR-0084 入账面不变）。
+  // read_image, append-only. Resident (no host seam to condition on —
+  // same door as read_file / grep / glob). Images inside the fence are
+  // read by magic number into SDK image blocks and are NOT booked into
+  // the last-read ledger (ADR-0084 keeps the write-gate admission surface
+  // unchanged).
   "read_image",
 ] as const);
 
 /**
- * 工厂入参:仅消费 env.web 字段(端点覆写 + 出站代理)与沙箱根。
- * 不接收完整 IknowEnv — 避免误传 LLM key 等敏感字段越界。
+ * Factory input: consumes only env.web fields (endpoint overrides + egress
+ * proxy) plus the sandbox root. Deliberately not the full IknowEnv, so LLM
+ * keys and other sensitive fields cannot leak into tool scope by mistake.
  */
 export interface CreateDefaultAciRegistryOptions {
   readonly env: Pick<IknowEnv, "web">;
-  /** 软沙箱根(传入 process.cwd() 或调用方显式路径;fs 工具据此越界拒绝)。 */
+  /** Soft sandbox root (process.cwd() or an explicit caller path; fs tools reject escapes against it). */
   readonly sandboxRoot: string;
-  /** 记忆库根目录(#228 layer 3)。缺席时 memory_recall / memory_save 不入注册表。 */
+  /** Memory base dir. When absent, memory_recall / memory_save are not registered. */
   readonly memoryDir?: string;
-  /** #337 T5 skill 索引层(catalog)。缺席时 skill 不入注册表
-   *  （disclosure-index-align T2 删 skill_search 后只剩 skill 一件）。 */
+  /** Skill index catalog. When absent, skill is not registered (after
+   *  skill_search was removed, only the one skill tool remains). */
   readonly skillCatalog?: SkillCatalog;
-  /** #356 T4 主代理本地子代理生命周期管理器。缺席时 spawn_subagent 不入注册表
-   * （ask 入口零件场景；chat/tui/serve 由 build-engine 按 surface 条件构造传入）。 */
+  /** Local subagent lifecycle manager for the parent agent. When absent,
+   *  spawn_subagent is not registered (ask-inlet parts scenario;
+   *  chat/tui/serve build it per-surface in build-engine). */
   readonly subagentManager?: SubAgentManager;
-  /** ADR-0096 T2：闸值 holder —— 与 subagentManager 配对传入工具工厂，
-   * description getter 现读 holder；缺席时退化到 manager.getCapacity()。 */
+  /** ADR-0096: capacity-value holder — passed to the tool factory paired
+   *  with subagentManager; the description getter reads the holder live,
+   *  falling back to manager.getCapacity() when absent. */
   readonly subagentCapacityHolder?: SubagentCapacityHolder;
   /**
-   * #global-plugins T1（review C1 装配接线）：spawn_subagent 工具
-   * 默认走 `createMergedCatalogResolver()`（与 capability 解析面同源），
-   * 该默认路径 ledger-aware —— 读本机 `<home>/.iknow/plugins` ledger
-   * 加载插件 agent。测试 / hub-less 入口若想与本机已装插件解耦，注
-   * 入显式 resolver（d9 描述守卫、ask 装配路径等都是该 seam 的消费
-   * 面）。生产 build-engine 路径**不**注入，走默认与 capability 同
-   * 源 resolver（ACR #5）。
+   * spawn_subagent defaults to `createMergedCatalogResolver()` (same source
+   * as capability resolution), and that default path is ledger-aware — it
+   * loads plugin agents from the local `<home>/.iknow/plugins` ledger.
+   * Tests / hub-less entries that want to decouple from installed plugins
+   * inject an explicit resolver (description guards and ask-assembly paths
+   * consume this seam). The production build-engine path deliberately does
+   * **not** inject one, sharing the resolver with capability resolution.
    */
   readonly agentCatalog?: AgentCatalogResolver;
-  /** #440 T11 MCP 资源通道管理器。缺席时 list_mcp_resources / read_mcp_resource
-   *  不入注册表（ask 入口零件场景 + 任务型 worker；chat/tui/serve 由 build-engine
-   *  按 surface 条件构造传入）。与 subagentManager / skillCatalog / memoryDir
-   *  同形态：Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释。 */
+  /** MCP resource channel manager. When absent, list_mcp_resources /
+   *  read_mcp_resource are not registered (ask-inlet parts + task workers;
+   *  chat/tui/serve build it per-surface in build-engine). Same shape as
+   *  subagentManager / skillCatalog / memoryDir: Gate 3 mirror-filters
+   *  toolsetNames, see the factory tail comment. */
   readonly mcpManager?: McpManager;
-  /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
+  /** onEdit seam: callback after edit_file writes successfully (assembly wires the LSP notifier). */
   readonly onEdit?: (file: string) => void;
   /**
-   * lsp-optimization 二期 B7 closeout：完整 LspCtx 透传给符号工具集
-   * （symbol.ts / symbol-resolver.ts / symbol-mutate.ts 内部消费 lsp.ts
-   * SSOT 时取用本 ctx —— T5 起旧的 10 件 `lsp_*` 已从模型面退役，本字段
-   * 仅服务符号工具）。缺席时回落 `{ directory: sandboxRoot }`（与一轮
-   * 行为一致）。build-engine / worker 必须传入与 notifier/warmup 同一份
-   * 对象，否则 settings.lsp（timeout / wait / idle / disabledServers）
-   * 对符号工具路径不生效。
+   * Full LspCtx passed through to the symbol toolset (symbol.ts /
+   * symbol-resolver.ts / symbol-mutate.ts take this ctx when consuming the
+   * lsp.ts SSOT internally — the old 10 `lsp_*` coordinate tools have
+   * retired from the model face, so this field serves only symbol tools).
+   * Falls back to `{ directory: sandboxRoot }` when absent. build-engine /
+   * worker must pass the same object as the notifier/warmup path, otherwise
+   * settings.lsp (timeout / wait / idle / disabledServers) never reaches
+   * the symbol-tool path.
    */
   readonly lspCtx?: LspCtx;
   /** ADR-0019 (T4): per-root state anchor. Threaded into read_file so its
@@ -305,74 +315,92 @@ export interface CreateDefaultAciRegistryOptions {
    *  bind root; bash no longer threads it (no predicate, no per-root mount).
    *  Defaults to `sandboxRoot` (legacy shape) when absent. */
   readonly workspaceRoot?: string;
-  /** T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根 —— 会话
-   *  隔离开关 ON 时交给 `read_file` / `grep` / `glob` 的稳定只读根。工具在
-   *  handler 调用时再要求 live `taskRoot` 是 task worktree，因此同一 run 的
-   *  rebind 可生效而 OFF 档仍不获得额外读根。**不**透给 bash / write / edit
-   *  —— 写不得出沙箱。缺席 / 等于 sandboxRoot → 无额外读根。 */
+  /** ADR-0037: project identity root — the stable read-only root handed to
+   *  `read_file` / `grep` / `glob` when the session isolation switch is ON.
+   *  Tools re-require at call time that the live `taskRoot` is a task
+   *  worktree, so a same-run rebind takes effect while the OFF tier still
+   *  gains no extra read root. **Not** threaded to bash / write / edit —
+   *  writes must not escape the sandbox. Absent / equal to sandboxRoot →
+   *  no extra read root. */
   readonly projectIdentityRoot?: string;
-  /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
-   *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
-   *  原样透传（行为 byte-identical，向后兼容）。 */
+  /** Per-engine secret registry. Threaded to the bash factory — the handler
+   *  restores placeholders to real values before execution (see the restore
+   *  section in bash.ts). Absent → bash commands pass through verbatim
+   *  (byte-identical behavior, backward compatible). */
   readonly secretRegistry?: SecretRegistry;
-  /** #468 deny-list：def-list 期宽容裁剪（buildWorkerToolSurface 语义）——
-   *  缺席 / undefined / 空数组不裁剪，向后兼容。与既有条件化装配
-   *  （memoryDir / skillCatalog / subagentManager）正交组合（Gate 3 镜像
-   *  过滤保证 toolsetNames 与 factories 键集一致）。 */
+  /** Deny-list: permissive def-list trimming at assembly
+   *  (buildWorkerToolSurface semantics) — absent / undefined / empty array
+   *  means no trimming, backward compatible. Composes orthogonally with the
+   *  existing conditional assembly (memoryDir / skillCatalog /
+   *  subagentManager); Gate 3 mirror-filtering keeps toolsetNames and the
+   *  factory key set consistent. */
   readonly disallowedTools?: ReadonlyArray<string>;
-  /** #440 D2/D6:session 作用域 todos.md 目录。host 注入：build-engine
-   *  从 session/conversationId 解析（每 conversationId 一份）。缺席时
-   *  todo_write 不入注册表（与 memoryDir 同形态：ask 入口零件场景）。
+  /** ADR-0085: session-scoped todos.md directory. Host injects: build-engine
+   *  resolves it from session/conversationId (one per conversation). Absent →
+   *  todo_write is not registered (same shape as memoryDir; ask-inlet parts).
    *
-   *  ADR-0085 / SC9:worker 装配路径也注入本项 —— worker 与父会话共用同一
-   *  本账（读 / 更新），与 `todoActor` 配对表达「添加仅父会话」。 */
+   *  Worker assembly also injects this — a worker shares the parent
+   *  session's ledger (read / update), paired with `todoActor` to express
+   *  "only the parent may add". */
   readonly todoDir?: string;
-  /** ADR-0085 / SC9:todo_write 调用方能力（actor）。conversationId 是
-   *  `ctx.conversationId` 的回退源（worker 进程的 executor 不合成该 ctx
-   *  字段）；`canAdd:false` 时工具的 `add` 在 handler 内 typed 拒绝。
-   *  缺席 → 旧行为逐字节不变（canAdd 视为 true、只看 ctx.conversationId）。 */
+  /** ADR-0085: todo_write caller capabilities (actor). conversationId is the
+   *  fallback source for `ctx.conversationId` (the worker-process executor
+   *  does not synthesize that ctx field); with `canAdd:false` the tool's
+   *  `add` rejects typed inside the handler.
+   *  Absent → behavior byte-identical to before (canAdd treated as true,
+   *  only ctx.conversationId consulted). */
   readonly todoActor?: TodoWriteActor;
   /**
-   * T3: current-identity fence `/tmp` pad. Worker assembly points this at
+   * Current-identity fence `/tmp` pad. Worker assembly points this at
    * `subagents/<taskId>/fence-tmp`. Absent → bash/write keep the existing
    * session/fallback resolve.
    */
   readonly tmpDir?: string;
-  /** #502 T3:background 任务管理器。在场时透传给 bash 工厂 —— `background: true`
-   *  分支可用（handler 经 manager.spawn 立即返 task_id）。缺席时 bash 的
-   *  background:true → ToolExecutionError（fail-fast）。与 subagentManager /
-   *  skillCatalog 同形态：只透传不条件化装配名称 —— bash 是常驻工具，参数级
-   *  能力由 handler 运行时决策。 */
+  /** Background task manager. When present it is threaded to the bash
+   *  factory — the `background: true` branch becomes usable (handler goes
+   *  through manager.spawn and returns task_id immediately). Absent →
+   *  bash's background:true throws ToolExecutionError (fail-fast). Same
+   *  shape as subagentManager / skillCatalog: pass-through only, no
+   *  conditional tool naming — bash is resident, and its parameter-level
+   *  capability is a runtime handler decision. */
   readonly backgroundManager?: BackgroundTaskManager;
-  /** #562 T6:bash 模式由 worker.ts 显式透传 —— "readonly" 时 bash handler
-   *  调 validateReadonlyCommand + fence 收 cwdReadonly:true (T4+T5 双闸)。
-   * registry 这里只透传, 不读 catalog (catalog 路由归 spawn-subagent-tool
-   * 工厂负责 — plan T3 决议)。缺省 → bash 字节与 V1 一致。 */
+  /** bash mode, explicitly passed through by worker.ts — with "readonly" the
+   *  bash handler runs validateReadonlyCommand and tightens the fence with
+   *  cwdReadonly:true (double gate). The registry only forwards it and does
+   *  not read the catalog (catalog routing belongs to the spawn-subagent-tool
+   *  factory). Default → bash is byte-identical to V1. */
   readonly bashMode?: "any" | "readonly";
-  /** D-α T3 / ADR-0030:本 round 的 graph 装配快照（`GraphAssembly` 的读侧）。
-   *  与 `subagentManager` 同时在场时 `run_graph` 入注册表；缺席时不装
-   *  （ask / worker / 未接 overlay 的入口）。工具**可见性**由快照决定,
-   *  装配层据此过滤 promptTools —— 见 build-engine。 */
+  /** ADR-0030: this round's graph assembly snapshot (read side of
+   *  `GraphAssembly`). `run_graph` enters the registry only when this and
+   *  `subagentManager` are both present; absent (ask / worker / entries
+   *  without the overlay) → not assembled. Tool **visibility** is decided
+   *  by the snapshot — the assembly layer filters promptTools accordingly,
+   *  see build-engine. */
   readonly graphAssembly?: { readonly enabled: () => boolean };
   /**
-   * live-graph-phase1 T1:活图账本 host（ADR-0047 / ADR-0051）。与会话
-   * runtime 同寿 —— host 持有 / 销毁，账本权威在 harness/graph。缺席时
-   * `run_graph` handler 不建账（V1 零行为变化）。
+   * ADR-0047: live-graph ledger host — lives as long as the session
+   * runtime (the host owns / destroys it); ledger authority sits in
+   * harness/graph. Absent → the `run_graph` handler keeps no ledger
+   * (zero behavior change from V1).
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
   /**
-   * ADR-0084 / D1: last-read 账本 host（`conversationId → 规范 path 集合`）的
-   * 可选缝。不传则 registry 自建一份（默认接线，写闸即生效）；注入同一实例
-   * 可让跨 registry（rebind 重建 / hub cachedDeps 复用）延续旧读 —— 但当前
-   * 生产装配不注入，per-root 重建的 registry 从空表开始（spec D1 的 lifetime
-   * 规则）。账本只影响「非空 write_file 是否需要先读」这一个闸，缺席时行为
-   * 与 ADR-0084 之前一致（不拒），故不作为 Gate 3 的条件化装配开关。
+   * ADR-0084: optional seam for the last-read ledger host
+   * (`conversationId → set of canonical paths`). If not passed, the
+   * registry builds its own (default wiring: the write gate is live).
+   * Injecting the same instance lets old reads survive across registries
+   * (rebind rebuilds / hub cachedDeps reuse) — current production does not
+   * inject, so a per-root rebuilt registry starts from an empty table (the
+   * lifetime rule). The ledger affects exactly one gate — whether a
+   * non-empty write_file needs a prior read — and absent behavior matches
+   * pre-ADR-0084 (no rejection), so it is not a Gate 3 conditional-assembly
+   * switch.
    */
   readonly lastReadLedger?: LastReadLedgerHost;
   /** Trace directory for the read-only query_trace tool. */
   readonly traceDir?: string;
   /**
-   * T4 / ADR-0037 (amended 2026-08-30): worktree isolation host provision
+   * ADR-0037 (amended 2026-08-30): worktree isolation host provision
    * seam (session-api hub, threaded by build-engine). Present → the
    * `create-worktree` ACI tool enters the registry; absent (switch
    * OFF, worker assembly, hub-less inlets) → excluded via the Gate 3 mirror
@@ -380,14 +408,14 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly worktreeProvision?: CreateWorktreeProvisionFn;
   /**
-   * T7 / ADR-0037 (amended 2026-08-30): explicit-enter host seam. Present →
+   * ADR-0037 (amended 2026-08-30): explicit-enter host seam. Present →
    * the `enter-worktree` ACI tool enters the registry; absent (TUI
    * provision-only wiring, worker assembly, hub-less inlets) → excluded via
    * the Gate 3 mirror filter.
    */
   readonly worktreeEnter?: WorktreeEnterToolDeps["worktreeEnter"];
   /**
-   * T8 / ADR-0037 (amended 2026-08-30): symmetric-exit host seam. Present →
+   * ADR-0037 (amended 2026-08-30): symmetric-exit host seam. Present →
    * the `exit-worktree` ACI tool enters the registry; absent (TUI
    * provision-only wiring, worker assembly, hub-less inlets) → excluded via
    * the Gate 3 mirror filter.
@@ -404,110 +432,124 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly worktreeRemove?: RemoveWorktreeToolDeps["worktreeRemove"];
   /**
-   * T5 (plans/worktree-live-task-root.md §6): live `taskRoot` cell. When
+   * Live `taskRoot` cell. When
    * provided, `write_file` / `edit_file` factories receive the cell and the
    * handler reads the snapshot at call time — `worktree rebind` in the same
    * run reaches them. When absent (legacy / one-shot callers), factories
    * receive `sandboxRoot` as a string — existing tests and behavior stay
-   * byte-identical. The cell only carries the live `taskRoot` (D3: stable
+   * byte-identical. The cell only carries the live `taskRoot` (stable
    * roots stay frozen), so this field is intentionally narrow.
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
-   * T4 (plans/write-situation-disclosure.md): worktree isolation 档判定
-   *（`buildHarnessEngine` 启动加载点一次性读取，与门禁武装同源）。ADR-0079
-   * 后 `skill()` 正文装配不再消费此档（skill 正文不再挂写根 trailer，
-   * createSkillTool 只吃 catalog）；字段保留给未来可能的隔离档消费面。
-   * 缺席 → 无消费面受影响。
+   * Worktree-isolation tier flag, read once at `buildHarnessEngine` startup
+   * (same source as arming the gate). Since ADR-0079, `skill()` body
+   * assembly no longer consumes it (skill bodies carry no write-root
+   * trailer; createSkillTool takes only the catalog). Kept for future
+   * isolation-tier consumers. Absent → no consumer affected.
    */
   readonly isolationOn?: boolean;
   /**
-   * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder —— bash
-   * 工厂透传,handler per-call `get()` 读取(同 `liveTaskRoot` D2 batch
-   * snapshot 纪律)。holder 在场 → bash fence 据此叠 `--ro-bind <home>` 等
-   * 三层；缺席 → 全局档(V1 baseline)。T8 在 build-engine 装配处把
-   * `resolveFsIsolationMode(settings)` 一次解析,装入 holder 透传。
+   * ADR-0092: fs isolation-mode holder — threaded to the bash factory and
+   * read per call via `get()` (same batch-snapshot discipline as
+   * `liveTaskRoot`). Present → the bash fence layers `--ro-bind <home>` and
+   * the other tiers on top; absent → global mode (V1 baseline). build-engine
+   * resolves `resolveFsIsolationMode(settings)` once at assembly and
+   * installs it into the holder.
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。
-   * 缺省 → build-engine 装配层从 `userHome` 派生(测试可注入)。
+   * ADR-0092: workspace-tier home ro-bind source, a host absolute path.
+   * Default: the build-engine assembly layer derives it from `userHome`
+   * (tests may inject).
    */
   readonly homeRoot?: string;
   /**
-   * issue 1059:worktree-on-mutate 活开关 holder(只读视图)—— bash 工厂
-   * 透传,handler 入口与 waveRoot 同 vintage 读一次。gate ON ∧ waveRoot 是
-   * 主 checkout → 前台 / 后台 fence 叠 UNBOUND_FENCE 物理 ro-bind 段;
-   * 缺席 → 永不发段(V1 baseline 逐字节不变)。
+   * worktree-on-mutate live-switch holder (read-only view) — threaded to
+   * the bash factory; the handler entry reads it once at the same vintage
+   * as waveRoot. Gate ON ∧ waveRoot is the main checkout → foreground /
+   * background fences add the UNBOUND_FENCE physical ro-bind segment;
+   * absent → the segment is never emitted (V1 baseline byte-identical).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
-   * ADR-0097 / T7:egress 允许集策略工厂 —— 透传给 bash 工厂
-   * (`createBashTool({ egressPolicyFactory })`)。生产由 build-engine 经
-   * `createEgressPolicyFactory({ settings })` 构造;缺席 = 本次装配无
-   * egress 数据面 → bash handler 内 `policyInput === undefined` → 不起
-   * session,fence 走纯断网(`--unshare-net` 恒在,fail-closed 合法态)。
-   * worker / hub-less 入口不传,与「非交互入口只能走预置配置」语义一致。
+   * ADR-0097: egress allow-list policy factory — threaded to the bash
+   * factory (`createBashTool({ egressPolicyFactory })`). Production:
+   * build-engine constructs it via `createEgressPolicyFactory({ settings })`.
+   * Absent → this assembly has no egress data plane → inside the bash
+   * handler `policyInput === undefined` → no session starts and the fence
+   * stays fully offline (`--unshare-net` always on, a legal fail-closed
+   * state). Worker / hub-less inlets do not pass it — consistent with
+   * "non-interactive entries only use preset configuration".
    */
   readonly egressPolicyFactory?: () =>
     import("../../sandbox/egress/session.js").EgressPolicyInput | undefined;
   /**
-   * ADR-0097 / T6:首次域名批准 ask inlet —— 透传给 bash 工厂,由工厂闭包
-   * 期包成 `EgressApprovalGate`(allowed/denied 会话级集 + in-flight 合并)。
-   * 缺省(无交互入口)→ gate 内部 fail-closed:首见新域名直接记
-   * `no-approval-inlet` 违例。生产由 build-engine 把既有 `AskUser` 转写
-   * 为 `(host) => Promise<boolean>`(见 bash.ts askApproval 装配纪律注释)。
+   * ADR-0097: first-domain approval ask inlet — threaded to the bash
+   * factory, where the factory closure wraps it into an
+   * `EgressApprovalGate` (per-session allowed/denied sets + in-flight
+   * coalescing). Default (no interactive inlet) → the gate fails closed:
+   * an unseen domain is recorded directly as a `no-approval-inlet`
+   * violation. Production: build-engine adapts the existing `AskUser` into
+   * `(host) => Promise<boolean>` (see the askApproval assembly note in
+   * bash.ts).
    */
   readonly askApproval?: import("../../sandbox/egress/approval.js").AskApproval;
 }
 
 /**
- * 默认工具注册工厂 — SSOT（memoryDir 缺席 → 9 件:8 + tool_search;
- * memoryDir 存在 → 11 件:8 + memory_recall + memory_save + tool_search）。
+ * Default tool-registry factory — SSOT. Absent memoryDir drops the memory
+ * pair from the set; present memoryDir adds memory_recall + memory_save.
  *
- * **装配期 fail-fast**:
- *   - proxyUrl 非法(非 http/https / 含凭据)→ `createWebFetchTool` /
- *     `createWebSearchTool` 工厂内 `createDefaultGuardDeps` 同步抛
- *     ToolExecutionError,与 build-engine.ts 既有行为一致
- *     (tests/build-engine.test.ts:94 已锁)。
- *   - **Gate 3（SSOT append-only 纪律）**:`ACI_TOOLSET_NAMES` 与下面
- *     `factories` 记录键不一致（长度/顺序/成员任何一处分歧）→ 同步抛
- *     `RegistryConstructionError`。derived-from-map 形态让闸门有真牙:
- *     将来加件只改 factories 忘 append names(或反之)装配期立刻失败,
- *     不给运行期留隐患（D4）。memory 条件化:memoryDir 缺席时 toolsetNames
- *     先剔除 memory_recall / memory_save 再做 Gate 3 对比,与 factories
- *     键集一致。
+ * **Assembly-time fail-fast**:
+ *   - invalid proxyUrl (non-http/https / contains credentials) →
+ *     `createDefaultGuardDeps` inside `createWebFetchTool` /
+ *     `createWebSearchTool` throws ToolExecutionError synchronously,
+ *     matching build-engine.ts's existing behavior.
+ *   - **Gate 3 (SSOT append-only discipline)**: divergence between
+ *     `ACI_TOOLSET_NAMES` and the `factories` record keys below (length /
+ *     order / membership) throws `RegistryConstructionError` synchronously.
+ *     The derived-from-map shape gives the gate teeth: adding a tool to one
+ *     side only fails at assembly time, never lurking until runtime. memory
+ *     conditioning: when memoryDir is absent, toolsetNames strips
+ *     memory_recall / memory_save before the Gate 3 comparison, matching
+ *     the factories key set.
  *
- * **返回值**:`AciRegistry`(含 `inner` 协议层 + `catalog` 权限/延迟加载层),
- * 调用方可直接交给 `createExecutor` 与 `createAciExecutor`。
+ * **Return value**: `AciRegistry` (protocol layer `inner` + permission /
+ * lazy-load catalog), directly consumable by `createExecutor` and
+ * `createAciExecutor`.
  *
- * **tool_search 自引用**:`tool_search` 需要的是"已装配完成的 registry",
- * 但 registry 自身包含 tool_search（直接持有即自引用循环）。故 deps 用
- * `getRegistry: () => AciRegistry` 惰性闭包,装配完成后由 `assembled.reg`
- * 解引用。装配未完成即被调用 → 抛 ToolExecutionError（fail-fast）。
+ * **tool_search self-reference**: `tool_search` needs the fully assembled
+ * registry, but holding it directly would be a self-reference cycle — so
+ * its deps take a lazy `getRegistry: () => AciRegistry` closure resolved
+ * from `assembled.reg` after assembly completes. Calling before assembly
+ * throws ToolExecutionError (fail-fast).
  */
 /**
- * `lsp.ts` 的 10 件坐标 `lsp_*` AciToolDef（`createLspToolSet`）已从模型面
- * 退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）—— `lsp.ts` 仍作
- * 内部 SSOT：`LSP_ACI_META` / `renderNoServer` / `extractCallHierarchyItems` /
+ * The 10 coordinate `lsp_*` AciToolDefs from `lsp.ts`
+ * (`createLspToolSet`) have retired from the model face. `lsp.ts` remains
+ * an internal SSOT: `LSP_ACI_META` / `renderNoServer` / `extractCallHierarchyItems` /
  * `getClientForWorkspaceDetailed` / `compileValidator` / `stringifyResult` /
  * `createRequestCancellation` / `timeoutError` / `isLspFailureSentinel` /
  * `makeOperationTool` / `makeDiagnosticsTool` / `makeCallHierarchyCallTool`
- * 诸导出由 symbol-resolver / symbol-mutate 直接 import 复用，
- * 不再走 factories map 的 `...lspTools(lspCtx)` 展开路径。
+ * are imported directly by symbol-resolver / symbol-mutate, no longer
+ * reaching the model face through a `...lspTools(lspCtx)` spread in the
+ * factories map.
  *
- * 内部 SSOT 覆盖测试（`tests/harness/aci/lsp.test.ts` 等）仍按 AciToolDef
- * 形态直接调 `createLspToolSet` —— 见 lsp.ts 顶部 SSOT 注释。T5 后本
- * `createDefaultAciRegistry` 不再 export 任何把 lsp_* 拉入模型面的接口。
+ * Internal-SSOT coverage tests (`tests/harness/aci/lsp.test.ts` etc.) still
+ * call `createLspToolSet` directly against the AciToolDef shape — see the
+ * SSOT note at the top of lsp.ts. `createDefaultAciRegistry` no longer
+ * exposes any path that pulls lsp_* into the model face.
  */
 
 /**
- * 把符号查询工具集展开成 factories 记录（symbol-primary-aci T2，10 件：
+ * Expand the symbol-query toolset into a factories record (10 tools:
  * find_symbol / find_declaration / find_referencing_symbols /
  * find_implementations / get_symbols_overview / get_hover /
  * get_diagnostics_for_file / prepare_call_hierarchy / list_incoming_calls /
- * list_outgoing_calls）。共享同一份 lspCtx（B7 语义）：旧 10 件 `lsp_*` 与
- * 本批共同消费 `lsp.ts` 内部 SSOT，模型面仅符号工具可见（spec §37-53 + SC2 + SC7）。
+ * list_outgoing_calls). They share one lspCtx: the retired `lsp_*` set and
+ * this batch consume the same lsp.ts internal SSOT, and only the symbol
+ * tools are visible on the model face.
  */
 function symbolQueryTools(ctx: LspCtx): Record<string, () => AciToolDef> {
   const tools = createSymbolQueryToolSet(ctx);
@@ -519,12 +561,13 @@ function symbolQueryTools(ctx: LspCtx): Record<string, () => AciToolDef> {
 }
 
 /**
- * 把符号改工具集展开成 factories 记录（symbol-primary-aci T4，5 件：
+ * Expand the symbol-mutation toolset into a factories record (5 tools:
  * rename_symbol / replace_symbol_body / insert_before_symbol /
- * insert_after_symbol / safe_delete_symbol）。与 symbolQueryTools
- * 同形态：工厂返回冻结 AciToolDef 列表，按 ACI_TOOLSET_NAMES 中的 key 索引；
- * 共享同一份 lspCtx（B7 语义）。`onEdit` 透传自 registry 的 opts，写盘后
- * 触发 lspNotifier.invalidate(file) 与 edit_file 同一接缝（plan T1）。
+ * insert_after_symbol / safe_delete_symbol). Same shape as
+ * symbolQueryTools: the factory returns the frozen AciToolDef list, keyed
+ * by the names in ACI_TOOLSET_NAMES, sharing one lspCtx. `onEdit` is
+ * threaded from the registry's opts — after a write it triggers
+ * lspNotifier.invalidate(file) through the same seam as edit_file.
  */
 function symbolMutateTools(
   ctx: LspCtx,
@@ -539,10 +582,12 @@ function symbolMutateTools(
 }
 
 /**
- * ADR-0084 / D1:last-read 账本 host 的解析口。注入者优先（跨 registry 共享
- * 的宿主缝），缺席则 registry 自建一份 —— 闸的默认接线在 registry 这一层，
- * 装配层不必知道它存在（也就没有第四个「必须记得传」的入口）。生产当前走
- * 自建臂：per-root 重建的 registry 各自从空表开始。
+ * ADR-0084: resolution point for the last-read ledger host. An injector
+ * wins (a host seam shared across registries); otherwise the registry
+ * builds its own — the gate's default wiring lives in this layer, so
+ * assembly callers never need to know it exists (and there is no fourth
+ * "must remember to pass" inlet). Current production takes the self-build
+ * branch: each per-root rebuilt registry starts from an empty table.
  */
 function resolveLastReadLedger(
   opts: CreateDefaultAciRegistryOptions
@@ -566,13 +611,15 @@ export function createDefaultAciRegistry(
   const backgroundManager = opts.backgroundManager;
   const graphAssembly = opts.graphAssembly;
   const liveGraphLedger = opts.liveGraphLedger;
-  // ADR-0084 / D1: last-read 账本。注入缺席 → registry 自建一份（默认接线:
-  // write_file 的闸自本切片起对每个 registry 装配入口生效）；跨 registry
-  // 延续旧读（rebind 重建 / hub cachedDeps 复用）需装配层注入同一实例，
-  // 当前生产不注入。
+  // ADR-0084: last-read ledger. Injection absent → the registry builds its
+  // own (default wiring: write_file's gate is live for every registry
+  // assembly entry). Carrying old reads across registries (rebind rebuilds /
+  // hub cachedDeps reuse) would need the assembly layer to inject the same
+  // instance; current production does not.
   const lastReadLedger = resolveLastReadLedger(opts);
-  // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
-  // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
+  // bashMode is explicitly threaded to createBashTool. The registry does not
+  // read the catalog — the spawn-subagent-tool factory is the true owner of
+  // catalog routing.
   const bashMode = opts.bashMode;
   // ADR-0019 (T4): per-root state anchor. Threaded to read_file so its
   // `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
@@ -580,88 +627,104 @@ export function createDefaultAciRegistry(
   // sandboxRoot when absent (legacy shape) so existing callers without
   // per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
-  // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
-  // surface !== "ask" 解析 session 级目录并透传；ask 不传 → tool 不入
-  // 注册表（SC8 oneshot 剥离）。worker 装配路径经 `todoLedger` 透传同一
-  // 父会话根（ADR-0085 / SC9：共享账本，`add` 由工具 handler typed 拒绝，
-  // 工具本身仍在 worker 面上）。Gate 3 镜像过滤见下。
+  // Switch for todo_write's conditional assembly. Host-injected; build-engine
+  // resolves a session-level directory when surface !== "ask" and threads it;
+  // ask does not pass it → the tool is not registered (oneshot surfaces
+  // strip it). Worker assembly threads the same parent-session root via
+  // `todoLedger` (ADR-0085: shared ledger; `add` is rejected typed by the
+  // tool handler, the tool itself stays on the worker surface). Gate 3
+  // mirror-filter below.
   const todoDir = opts.todoDir;
-  // ADR-0085 / SC9:todo_write 的 actor 能力位(父 vs worker)——只透传,
-  // Gate 3 开关仍以 todoDir 单键为准(工具名/件数不因 actor 漂移)。
+  // ADR-0085: todo_write actor capability bits (parent vs worker) —
+  // pass-through only; the Gate 3 switch still keys on todoDir alone
+  // (tool names / counts do not drift with the actor).
   const todoActor = opts.todoActor;
-  // T4:创建工作树 ACI 工具的条件化装配开关（host provision 缝）。build-engine
-  // 在 hub 注入 host 缝时透传，与 isolationEnabled 解耦（ADR-0037
-  // Amendment 2026-09-11 / SC1：开关 OFF 也注册）；worker / ask / hub-less
-  // 入口不传 → create-worktree 不入注册表。Gate 3 镜像过滤见下。
+  // create-worktree: conditional assembly switch (host provision seam).
+  // build-engine threads it when the hub injects the host seam, decoupled
+  // from isolationEnabled (ADR-0037 amended 2026-09-11: the tool registers
+  // even when the switch is OFF); worker / ask / hub-less inlets do not pass
+  // it → create-worktree stays out of the registry. Gate 3 mirror-filter
+  // below.
   const worktreeProvision = opts.worktreeProvision;
-  // T7:enter-worktree 的条件化装配开关（host enter 缝）。build-engine
-  // 在 host 注入 enter 缝时透传；TUI（只接 provision）/ worker / hub-less
-  // 入口不传 → 工具不入注册表。Gate 3 镜像过滤见下。
+  // enter-worktree: conditional assembly switch (host enter seam).
+  // build-engine threads it when the host injects the enter seam; TUI
+  // (provision only) / worker / hub-less inlets do not → the tool stays out
+  // of the registry. Gate 3 mirror-filter below.
   const worktreeEnter = opts.worktreeEnter;
-  // T8:exit-worktree 的条件化装配开关（host exit 缝）。同 worktreeEnter
-  // 形态：TUI（只接 provision）/ worker / hub-less 入口不传 → 不入注册表。
+  // exit-worktree: conditional assembly switch (host exit seam). Same shape
+  // as worktreeEnter: TUI (provision only) / worker / hub-less inlets do not
+  // pass it → not registered.
   const worktreeExit = opts.worktreeExit;
   const worktreeList = opts.worktreeList;
   const worktreeRemove = opts.worktreeRemove;
 
-  // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
-  // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
+  // holder: lazy dereference point for tool_search's self-reference (the
+  // closure returns undefined before assembly completes; tool-search.ts's
+  // resolveRegistry then throws ToolExecutionError as the fallback).
   const assembled: { reg?: AciRegistry } = {};
 
-  // #251 / symbol-primary-aci T2:坐标面与符号面共享同一份 LspCtx —— 两套
-  // 工具走同一条客户端/取消/超时链路,ctx 分叉即 settings.lsp 半生效。
-  // B7 closeout:优先用装配层同一份 lspCtx,缺席回落 sandboxRoot-only。
+  // The coordinate surface and the symbol surface share one LspCtx — two
+  // tool sets on one client/cancel/timeout chain; forking ctx would put
+  // settings.lsp into a half-effective state.
+  // Prefer the assembly layer's single lspCtx; fall back to sandboxRoot-only.
   const lspCtx: LspCtx = opts.lspCtx ?? { directory: sandboxRoot };
 
-  // 读侧工具（query_trace / list_sessions，T6 再加 get_record）必须解析到同一个
-  // 目录，否则列出来的会话查不到；三态回落因此只在这里出现一次。写成闭包是为了
-  // 不把它提前到模块加载期 —— 读取时机与合并前逐字一致（都在这两个 factory 各自
-  // 被调用的那一刻，也就是 registry 构造期）。
+  // The read-side tools (query_trace / list_sessions / get_record) must
+  // resolve to the same directory, or listed sessions would not be
+  // queryable; hence the three-state fallback appears exactly once here.
+  // Kept as a closure so read timing matches pre-merge behavior verbatim
+  // (each factory dereferences at its own call, i.e. registry construction).
   const traceReadDir = () =>
     opts.traceDir ??
     process.env.IKNOW_TRACE_OUT ??
     join(workspaceRoot, "trace");
 
-  // append-only:顺序与 build-engine.ts 既有策略(policy byName 键空间)一致。
-  // memoryDir 缺席 → memory_recall / memory_save 从 factories 剔除
-  // (memoryEnabled=false 的 ask 路径;见 build-engine.ts 条件构造)。
-  // skillCatalog 缺席 → skill 从 factories 剔除（disclosure-index-align T2
-  // 删 skill_search 后只剩一件;见 spec ADR-0046 / SC5）。
-  // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
-  // tool_search 之前,skill 在末尾。
+  // append-only: order matches build-engine.ts's existing policy (the
+  // policy byName keyspace). Absent memoryDir → memory_recall / memory_save
+  // are dropped from factories (the memoryEnabled=false ask path; see the
+  // conditional construction in build-engine.ts). Absent skillCatalog →
+  // skill is dropped from factories (only the one skill tool remains after
+  // skill_search was removed; see ADR-0046).
+  // Key order must match ACI_TOOLSET_NAMES item by item (Gate 3): memory_*
+  // before tool_search, skill at the tail.
   const factories: Record<string, () => AciToolDef> = {
     bash: () =>
       createBashTool(sandboxRoot, {
         secretRegistry,
         ...(backgroundManager ? { backgroundManager } : {}),
-        // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
+        // bashMode pass-through — readonly mode triggers the validator +
+        // the fence's cwdReadonly.
         ...(bashMode !== undefined ? { bashMode } : {}),
-        // T7: 透传 live taskRoot cell。门禁未翻 ⇒ cell 初值 = sandboxRoot,
-        // handler 内 cell.read() 一次取得 waveRoot,前台 fence + background
-        // spawn 共用该值（D2）。liveTaskRoot 缺席 → 退回 sandboxRoot
-        // （legacy parity,与 V1 字节一致）。
+        // Thread the live taskRoot cell. Gate unwipped ⇒ cell initial value
+        // = sandboxRoot; the handler reads the waveRoot once via
+        // cell.read() and the foreground fence + background spawn share that
+        // value. Absent liveTaskRoot → fall back to sandboxRoot (legacy
+        // parity, byte-identical to V1).
         ...(opts.liveTaskRoot !== undefined
           ? { liveTaskRoot: opts.liveTaskRoot }
           : {}),
-        // T1: todoDir is the session project dir; bash resolves
+        // todoDir is the session project dir; bash resolves
         // `<sessionFolder>/fence-tmp` per conversationId (ADR-0074).
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
-        // T3: worker identity pad (nested under subagents/<taskId>/).
+        // worker identity pad (nested under subagents/<taskId>/).
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
-        // ADR-0084 / D1: 成功白名单单文件读入账（bash 是入账两条源之一）。
+        // ADR-0084: successful whitelisted single-file reads are booked in
+        // (bash is one of the two admission sources).
         lastReadLedger,
-        // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传。
-        // holder 在场 → bash handler per-call `get()` 读一次;缺席 → 全局档
-        // (V1 baseline)。homeRoot 装配层从 userHome 派生。
+        // ADR-0092: fs isolation-mode holder + homeRoot pass-through.
+        // Holder present → bash handler reads `get()` once per call; absent →
+        // global mode (V1 baseline). homeRoot is derived from userHome by the
+        // assembly layer.
         ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
-        // issue 1059:UNBOUND_FENCE holder 透传(缺席 = 不发段)。
+        // UNBOUND_FENCE holder pass-through (absent = segment never emitted).
         ...(opts.worktreeOnMutate !== undefined
           ? { worktreeOnMutate: opts.worktreeOnMutate }
           : {}),
-        // ADR-0097 / T7:egress 数据面 + 批准 ask 面。二者都由装配层
-        // (build-engine)注入;缺席 = 无缝断网 / 无 ask 面 fail-closed,
-        // 与 worker / hub-less 入口的「非交互 = 拒绝」语义一致。
+        // ADR-0097: egress data plane + approval ask surface. Both are
+        // injected by the assembly layer (build-engine); absent = no seam →
+        // fully offline / no ask surface → fail-closed, consistent with the
+        // "non-interactive = deny" semantics of worker / hub-less inlets.
         ...(opts.egressPolicyFactory !== undefined
           ? { egressPolicyFactory: opts.egressPolicyFactory }
           : {}),
@@ -669,16 +732,16 @@ export function createDefaultAciRegistry(
           ? { askApproval: opts.askApproval }
           : {}),
       }),
-    // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
-    // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未
-    // rebind → 退回 sandboxRoot,byte-identical 于 T5 之前的形态)。factory
-    // handler 内 cell.read() 取一次 snapshot,与 read_file 的 extraReadRoots
-    // 同 vintage(D9)。glob / grep 同样的 per-call 读取。
+    // Read-path tool factories take `liveTaskRoot ?? sandboxRoot` instead of
+    // the frozen sandboxRoot (cell absent / never rebound → fall back to
+    // sandboxRoot, byte-identical to the pre-rebind shape). The factory
+    // handler reads the cell once per call to get a snapshot, same vintage
+    // as read_file's extraReadRoots. glob / grep read per call likewise.
     //
-    // D10 处置：**接通** registry.ts:471-473 死缝 → read-file.ts 现在真实
-    // 消费 `projectIdentityRoot`(ADR-0037 §1 身份根只读直通)。registry 这层
-    // 仍以 spread guard 透传,但 read-file.ts 把它纳入 extraReadRoots(D9
-    // 同 vintage,rebind 后身份根文件仍可达)。
+    // The formerly-dead projectIdentityRoot seam is now genuinely consumed:
+    // read-file.ts admits it into extraReadRoots (ADR-0037: identity-root
+    // read-through). This layer still passes it via a spread guard, and
+    // after rebind the identity-root files stay reachable (same vintage).
     read_file: () =>
       createReadFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         workspaceRoot,
@@ -688,11 +751,13 @@ export function createDefaultAciRegistry(
         ...(opts.projectIdentityRoot !== undefined
           ? { allowProjectIdentityRoot: true }
           : {}),
-        // ADR-0092: read 面与 write/edit 共用同一会话 tmp 身份（透传形态
-        // 与下方 write_file / edit_file 逐项一致）。
+        // ADR-0092: the read surface shares the same session tmp identity as
+        // write/edit (pass-through shape identical to write_file / edit_file
+        // below).
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
-        // ADR-0084 / D1: 成功读（含空文件与截断页）入账 —— 写闸的入账源。
+        // ADR-0084: successful reads (including empty files and truncated
+        // pages) are booked in — the admission source for the write gate.
         lastReadLedger,
       }),
     grep: () =>
@@ -709,9 +774,10 @@ export function createDefaultAciRegistry(
           : {}),
         allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
       }),
-    // T5:write_file / edit_file 读活 taskRoot。门禁未翻 ⇒ cell 初值 =
-    // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
-    // 同 handler 内 resolve 与写入共用该值（D2）。
+    // write_file / edit_file read the live taskRoot. Gate unwipped ⇒ cell
+    // initial value = sandboxRoot, byte-identical to today; the handler
+    // reads the cell once and resolve + write within the same handler share
+    // that snapshot.
     edit_file: () =>
       createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         onEdit,
@@ -722,7 +788,8 @@ export function createDefaultAciRegistry(
       createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
-        // ADR-0084 / D1: 非空覆写查 last-read 表（本切片新增的写闸）。
+        // ADR-0084: non-empty overwrite consults the last-read table (the
+        // write gate added by this slice).
         lastReadLedger,
       }),
     web_fetch: () =>
@@ -733,13 +800,15 @@ export function createDefaultAciRegistry(
         tavilyApiKey: env.web.tavilyApiKey,
         braveApiKey: env.web.braveApiKey,
       }),
-    // #826 T4: 把 searchBackend + 三个 vendor key 透传给 web_search。
-    // env loader 已把 EXA_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY 经
-    // expandPlaceholders 解析（空 / "yes" / 占位符解析失败 → undefined）；
-    // T3 handler 的 assertBackendConfig 据此三态 fail-closed（missing_key /
-    // backend_unset_with_key / 默认 bing）—— 本层只透传，不二次校验。
-    // searchBackend 在 schema reject 非法值后落到闭集（loader 抛 typed error
-    // 时 buildHarnessEngine 装配即失败，不会到这里），故透传即可。
+    // Thread searchBackend + the three vendor keys to web_search. The env
+    // loader has already resolved EXA_API_KEY / TAVILY_API_KEY /
+    // BRAVE_API_KEY through expandPlaceholders (empty / "yes" / failed
+    // placeholder → undefined); the handler's assertBackendConfig turns the
+    // three states into fail-closed outcomes (missing_key /
+    // backend_unset_with_key / default bing) — this layer only passes
+    // through, no second validation. searchBackend lands in the closed set
+    // after schema rejection (a loader typed-error fails buildHarnessEngine
+    // assembly before reaching here), so pass-through suffices.
     web_search: () =>
       createWebSearchTool({
         envSearchUrl: searchUrl,
@@ -765,37 +834,42 @@ export function createDefaultAciRegistry(
           return r;
         },
       }),
-    // #251 / symbol-primary-aci T5：坐标面 lsp_* 已从模型面移除（spec
-    // symbol-primary-aci.md §37-53 + SC2 / SC7 / ACR complexity-anti-drift）；
-    // lsp.ts 实现的 client / cancel / timeout / sentinel / diagnostics / call
-    // hierarchy 等 SSOT 复用层由 symbol.ts / symbol-resolver.ts / symbol-mutate.ts
-    // 消费，model surface 由符号工具（find_* / get_* / *_calls + 5 件改工具）
-    // 接班。nearestRoot 边界、settings.lsp / idle / disabledServers 等 B7 语义
-    // 落 lspCtx 一份 → 符号工具共享。
-    // #337 T5 skill 工具（条件化装配：skillCatalog 缺席时不入注册表）。
-    // disclosure-index-align T2:skill_search 已删（spec ADR-0046 / SC5：索引
-    // 段 `<available_skills>` 已给名+描述,直呼 `skill({name})` 不依赖二次
-    // 检索）。
+    // The coordinate-surface lsp_* tools are removed from the model face;
+    // the client / cancel / timeout / sentinel / diagnostics / call-hierarchy
+    // SSOT layer implemented in lsp.ts is consumed by symbol.ts /
+    // symbol-resolver.ts / symbol-mutate.ts instead, and the model surface
+    // is taken over by the symbol tools (find_* / get_* / *_calls + the 5
+    // mutation tools). nearestRoot boundaries and settings.lsp / idle /
+    // disabledServers semantics live in the single lspCtx shared by the
+    // symbol tools.
+    // skill tool (conditional assembly: absent without skillCatalog).
+    // skill_search was removed (ADR-0046): the `<available_skills>` index
+    // section already gives name + description, and the direct
+    // `skill({name})` call needs no second search step.
     ...(skillCatalog
       ? {
-          // ADR-0079 — skill 正文不再挂写根 trailer：createSkillTool 不再
-          // 消费 liveTaskRoot / isolationOn；写处境披露的权威路径迁到
-          // worker prior（subagent/worker.ts）与 chat-session rebind 通知
-          // （chat-session.ts），共用同一 helper writeRootSegment。
+          // ADR-0079 — skill bodies no longer carry the write-root trailer:
+          // createSkillTool does not consume liveTaskRoot / isolationOn;
+          // the authoritative path for write-situation disclosure moved to
+          // the worker prior (subagent/worker.ts) and the chat-session
+          // rebind notification (chat-session.ts), sharing one
+          // writeRootSegment helper.
           skill: () => createSkillTool({ catalog: skillCatalog }),
         }
       : {}),
-    // #356 T4 spawn_subagent 工具集（条件化装配：subagentManager 缺席时
-    // 不入注册表——ask 入口零件；与 skillCatalog / memoryDir 同形态）。
-    // review C1：opts.agentCatalog 透传给 spawn 工厂（缺省走
-    // createMergedCatalogResolver() 默认路径，与 capability 解析面同
-    // 源，ACR #5）。
-    // ADR-0096 T2：opts.subagentCapacityHolder 同步透传（最小注入 —
-    // 不参与 Gate 3 镜像过滤，与 subagentManager 同门条件）。缺席时的
-    // 语义：spawn 工厂内部退化到 `manager.getCapacity()`（manager 自己
-    // 持有同一闸值，spawn-subagent-tool.ts readCapacity）—— 闸值真相
-    // 单一在 manager/holder 链上，此处条件透传只是「有 holder 就优先
-    // 用 holder 现读」的运行期选择，两条路径产出等价 description N。
+    // spawn_subagent (conditional assembly: absent without subagentManager —
+    // ask inlet parts; same shape as skillCatalog / memoryDir).
+    // opts.agentCatalog is threaded to the spawn factory (default: the
+    // createMergedCatalogResolver() path, same source as capability
+    // resolution).
+    // ADR-0096: opts.subagentCapacityHolder is threaded in sync (minimal
+    // injection — not part of the Gate 3 mirror filter, same condition as
+    // subagentManager). Absent semantics: the spawn factory falls back to
+    // `manager.getCapacity()` (the manager itself holds the same gate value;
+    // see readCapacity in spawn-subagent-tool.ts) — the gate value's single
+    // truth sits on the manager/holder chain, and this conditional
+    // pass-through is just a runtime preference for "read the holder live
+    // when one exists"; both paths produce an equivalent description N.
     ...(subagentManager
       ? {
           spawn_subagent: () =>
@@ -810,20 +884,21 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // #356 T5 subagent_result 工具集（条件化装配：subagentManager 缺席时
-    // 不入注册表，与 spawn_subagent 同形态；Gate 3 镜像过滤，见下）。
+    // subagent_result (conditional assembly: absent without subagentManager,
+    // same shape as spawn_subagent; Gate 3 mirror filter below).
     ...(subagentManager
       ? {
           subagent_result: () =>
             createSubAgentResultTool({ manager: subagentManager }),
         }
       : {}),
-    // #440 T4 todo_write 工具集（条件化装配：todoDir 缺席时不入注册表 —
-    // ask 表面 build-engine 不传 todoDir（SC8 oneshot 剥离）；Gate 3 镜像
-    // 过滤，见下）。
-    // ADR-0085 / SC9:worker 装配路径也传 todoDir + todoActor{canAdd:false}
-    // —— 工具在场（模型能读到 `add` 的 typed 拒绝原因），actor 缝承载父会话
-    // id 与能力位。
+    // todo_write (conditional assembly: absent without todoDir — on the ask
+    // surface build-engine does not pass todoDir (oneshot stripping); Gate 3
+    // mirror filter below).
+    // ADR-0085: worker assembly also passes todoDir + todoActor{canAdd:false}
+    // — the tool stays present (the model can read `add`'s typed rejection
+    // reason), and the actor seam carries the parent session id + capability
+    // bits.
     ...(todoDir
       ? {
           todo_write: () =>
@@ -833,11 +908,12 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // #440 T11 MCP resources 工具集（条件化装配：mcpManager 缺席时
-    // 不入注册表——ask 入口零件 + 任务型 worker；与 subagentManager /
-    // skillCatalog / memoryDir 同形态；Gate 3 镜像过滤，见下）。
-    // list / read 都通过 getManager 惰性闭包解引用 manager；装配期
-    // mcpManager 缺席则工具不入注册表（handler 永不被路由）。
+    // MCP resources tools (conditional assembly: absent without mcpManager —
+    // ask inlet parts + task workers; same shape as subagentManager /
+    // skillCatalog / memoryDir; Gate 3 mirror filter below).
+    // list / read both dereference the manager lazily via getManager; if
+    // mcpManager is absent at assembly time the tools never enter the
+    // registry (the handler is never routed to).
     ...(mcpManager
       ? {
           list_mcp_resources: () =>
@@ -850,22 +926,24 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // #502 T4 bash_output / bash_stop 工具集（条件化装配：backgroundManager
-    // 缺席时不入注册表——ask 入口零件；bash 常驻工具不在此列，T3 参数级
-    // 能力由 handler 运行时决策。Gate 3 镜像过滤，见下）。
+    // bash_output / bash_stop (conditional assembly: absent without
+    // backgroundManager — ask inlet parts; the resident bash tool is not in
+    // this class, its background:true parameter capability is a runtime
+    // handler decision. Gate 3 mirror filter below).
     ...(backgroundManager
       ? {
           bash_output: () => createBashOutputTool({ backgroundManager }),
           bash_stop: () => createBashStopTool({ backgroundManager }),
         }
       : {}),
-    // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻注册
-    // —— graph 模式开/关只由 handler 层 isEnabled gate 决定（拒绝时
-    // ToolExecutionError,SC5 实测）。`subagentManager` 缺席时同条件
-    // 化装配跳过（编排底座缺一不可,与 spawn_subagent 同形态）。
+    // `run_graph` registers permanently — graph mode on/off is decided only
+    // by the handler-level isEnabled gate (rejection surfaces as
+    // ToolExecutionError at runtime). When `subagentManager` is absent the
+    // same conditional skips assembly (the orchestration substrate is
+    // indispensable; same shape as spawn_subagent).
     //
-    // live-graph-phase1 T1:活图账本（ADR-0047 / ADR-0051）随 host 缝透传;
-    // 缺席 → 工具 handler 不建账（V1 零行为变化）。
+    // ADR-0047: the live-graph ledger threads through as a host seam;
+    // absent → the tool handler keeps no ledger (zero behavior change from V1).
     ...(subagentManager
       ? {
           run_graph: () =>
@@ -879,9 +957,10 @@ export function createDefaultAciRegistry(
         }
       : {}),
     query_trace: () => createQueryTraceTool(traceReadDir()),
-    // T4 创建工作树 ACI 工具（条件化装配：worktreeProvision host 缝缺席时
-    // 不入注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前根；
-    // 建树 + 改绑副作用全部委托 host provision 缝（session-api hub）。
+    // create-worktree (conditional assembly: absent without the
+    // worktreeProvision host seam). The handler closure binds this engine's
+    // sandboxRoot = the session's current root; tree creation + rebind side
+    // effects are all delegated to the host provision seam (session-api hub).
     ...(worktreeProvision
       ? {
           "create-worktree": () =>
@@ -891,9 +970,10 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // T7 enter-worktree（条件化装配：worktreeEnter host 缝缺席时不入
-    // 注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前根（主仓）；
-    // 树校验 + 改绑副作用全部委托 host enter 缝。
+    // enter-worktree (conditional assembly: absent without the worktreeEnter
+    // host seam). The handler closure binds this engine's sandboxRoot = the
+    // session's current root (main repo); tree validation + rebind side
+    // effects are all delegated to the host enter seam.
     ...(worktreeEnter
       ? {
           "enter-worktree": () =>
@@ -903,9 +983,10 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // T8 exit-worktree（条件化装配：worktreeExit host 缝缺席时不入
-    // 注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前 task 树；
-    // 回绑主仓根 + 树保留的副作用全部委托 host exit 缝。
+    // exit-worktree (conditional assembly: absent without the worktreeExit
+    // host seam). The handler closure binds this engine's sandboxRoot = the
+    // session's current task tree; rebinding to the main-repo root while
+    // keeping the tree is delegated entirely to the host exit seam.
     ...(worktreeExit
       ? {
           "exit-worktree": () =>
@@ -915,22 +996,26 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // symbol-primary-aci T2 符号查询工具集（常驻，符号主路径是默认）。
-    // 与符号改工具共享同一份 lspCtx；键顺序必须与 ACI_TOOLSET_NAMES 末尾
-    // 10 项逐项一致（Gate 3）。
+    // Symbol-query toolset (resident — the symbol primary path is the
+    // default). Shares one lspCtx with the symbol-mutation tools; key order
+    // must match the last 10 entries of ACI_TOOLSET_NAMES item by item
+    // (Gate 3).
     ...symbolQueryTools(lspCtx),
-    // symbol-primary-aci T4 符号改工具集（常驻，category=write）。
-    // 与符号查询共享同一份 lspCtx；onEdit 来自 registry 的 opts.onEdit
-    // （build-engine 装配时注入 lspNotifier.invalidate）—— 写盘后触发
-    // textDocument/didChange 与 edit_file 同链路。键顺序必须与
-    // ACI_TOOLSET_NAMES 末尾 5 项逐项一致（Gate 3）。
+    // Symbol-mutation toolset (resident, category=write). Shares one lspCtx
+    // with the symbol-query tools; onEdit comes from the registry's
+    // opts.onEdit (build-engine injects lspNotifier.invalidate at assembly)
+    // — after a write, textDocument/didChange fires through the same chain
+    // as edit_file. Key order must match the last 5 entries of
+    // ACI_TOOLSET_NAMES item by item (Gate 3).
     ...symbolMutateTools(lspCtx, onEdit),
-    // plan T5b：本键曾是字面量最后一个键 —— Gate 3 比对 factories 键顺序与
-    // ACI_TOOLSET_NAMES 顺序（名单尾部同项）。目录经 traceReadDir() 与
-    // query_trace 同源，列出来的会话才查得到。
+    // This key used to be the literal's last key — Gate 3 compares factory
+    // key order against ACI_TOOLSET_NAMES (same tail item in the list). The
+    // directory comes from traceReadDir(), same source as query_trace, so
+    // listed sessions are actually queryable.
     list_sessions: () => createListSessionsTool(traceReadDir()),
-    // plan T6：现在本键是字面量最后一个键（同上 Gate 3）。三轴共用 traceReadDir()
-    // 解析出的目录，get_record 点名的 conversation_id 才是 list_sessions 给过的那个。
+    // Now this is the literal's last key (same Gate 3 contract). All three
+    // axes share the directory resolved by traceReadDir(), so the
+    // conversation_id that get_record names is one list_sessions produced.
     get_record: () => createGetRecordTool(traceReadDir()),
     // task-worktree-lifecycle: host-only discovery/cleanup tools remain at the
     // append-only tail so existing tool positions stay stable.
@@ -952,53 +1037,62 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    // plan subagent-stop-and-continue T2 (ADR-0101)：本键曾是 factories 字面量
-    // 的最后一个键（Gate 3 顺序契约，见 ACI_TOOLSET_NAMES 尾部注释）。
-    // 条件化装配与 spawn_subagent / subagent_result 同门（subagentManager
-    // 缺席 → 工具不入注册表）。
+    // subagent_stop (ADR-0101): this key used to be the factories literal's
+    // last key (Gate 3 ordering contract; see the tail comment on
+    // ACI_TOOLSET_NAMES). Conditional on the same seam as spawn_subagent /
+    // subagent_result (absent subagentManager → the tool stays out).
     ...(subagentManager
       ? {
           subagent_stop: () =>
             createSubAgentStopTool({ manager: subagentManager }),
-          // plan subagent-stop-and-continue T4 (ADR-0102)：本键曾是字面量
-          // 最后一个键。同门条件、尾部追加。
+          // subagent_continue (ADR-0102): used to be the literal's last key.
+          // Same condition, tail-appended.
           subagent_continue: () =>
             createSubAgentContinueTool({ manager: subagentManager }),
         }
       : {}),
-    // read-image-vision T2 (spec SC6)：现在是字面量最后一个键（Gate 3 顺序
-    // 契约，见 ACI_TOOLSET_NAMES 尾部注释）。常驻、无缺席条件；root 与
-    // read_file 同一挂法 —— `liveTaskRoot ?? sandboxRoot`，handler 内
-    // cell.read() 取一次 snapshot（D2/D9 同 vintage）。不接 lastReadLedger
-    // （spec 假设 10：读图不入账）。
+    // read_image: now the literal's last key (Gate 3 ordering contract; see
+    // the tail comment on ACI_TOOLSET_NAMES). Resident, no absence
+    // condition; root attaches the same way as read_file —
+    // `liveTaskRoot ?? sandboxRoot`, handler reads the cell once for a
+    // snapshot (same vintage). Does not wire lastReadLedger — reading images
+    // is not booked into the ledger.
     read_image: () => createReadImageTool(opts.liveTaskRoot ?? sandboxRoot),
   };
 
-  // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
-  // memoryDir 缺席时 memory_recall/memory_save 不装配,skillCatalog 缺席时
-  // skill 不装配,故对照名单需先剔除这些条件键。任何不一致
-  // 均装配期失败,不留到运行期。
-  // #468 deny-list：deny 名并入 excluded（toolsetNames 端剔除），factories 键
-  // 端同源过滤 → Gate 3 双侧镜像一致（与 memoryDir 条件化同款机制）。
+  // Gate 3 check: factory keys must strictly match ACI_TOOLSET_NAMES
+  // (length + order + membership). Absent memoryDir means
+  // memory_recall/memory_save are not assembled, absent skillCatalog means
+  // skill is not assembled, etc., so the comparison list must first strip
+  // those conditional keys. Any divergence fails at assembly time, never
+  // surviving to runtime.
+  // Deny-list: denied names merge into `excluded` (stripped on the
+  // toolsetNames side) and the factory keys are filtered from the same
+  // source → Gate 3 mirrors both sides consistently (same mechanism as the
+  // memoryDir conditioning).
   const denySet = new Set(disallowedTools ?? []);
   const factoryNames = Object.keys(factories).filter((n) => !denySet.has(n));
   const excluded: ReadonlyArray<string> = [
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
-    // plan subagent-stop-and-continue T2/T4：subagent_stop / subagent_continue
-    // 与 spawn / result 同门条件（尾部追加名单顺序 = ACI_TOOLSET_NAMES 末位）。
+    // subagent_stop / subagent_continue share the spawn / result condition
+    // (tail-append order = the tail of ACI_TOOLSET_NAMES).
     ...(subagentManager ? [] : ["subagent_stop", "subagent_continue"]),
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
-    // ADR-0041:run_graph 常驻后只剩 subagentManager 同门条件(graphAssembly
-    // 缺席不再触发缺席 —— handler isEnabled 缺省恒关,run_graph 仍在注册表)。
+    // run_graph is permanently registered now, so only the subagentManager
+    // condition remains (absent graphAssembly no longer excludes it — the
+    // handler's isEnabled defaults to off, but run_graph stays in the
+    // registry).
     ...(subagentManager ? [] : ["run_graph"]),
-    // T4：host 缝缺席（worker / hub-less 入口）→ 建树工具不入注册表。开关
-    // OFF 不在此列（ADR-0037 Amendment 2026-09-11：工具面常在，只有门禁跟开关）。
-    // T7：enter 缝缺席（TUI provision-only / worker / hub-less 入口）→
-    // enter 工具不入注册表。
+    // Absent host seam (worker / hub-less inlet) → the tree-creation tool
+    // stays out of the registry. Switch OFF is not in this class (ADR-0037
+    // amended 2026-09-11: the tool surface is constant; only the gate
+    // follows the switch).
+    // Absent enter seam (TUI provision-only / worker / hub-less inlet) →
+    // the enter tool stays out.
     ...(worktreeProvision ? [] : ["create-worktree"]),
     ...(worktreeEnter ? [] : ["enter-worktree"]),
     ...(worktreeExit ? [] : ["exit-worktree"]),
@@ -1019,15 +1113,18 @@ export function createDefaultAciRegistry(
   }
 
   const tools = toolsetNames.map((n) => factories[n]!());
-  // #468 def-list 期裁剪（构造期保证 inner/visibleSchemas 双面只剩保留项）。
-  // buildWorkerToolSurface 宽容模式合并默认 deny [spawn_subagent] + 用户 deny；
-  // 默认 deny 在 worker 装配路径上属合法冗余（subagentManager 缺席 →
-  // spawn_subagent 不在 tools）。仅当 disallowedTools 非空才调用 —
-  // build-engine.ts:294 既有调用（subagentManager 在场、未传
-  // disallowedTools）若无条件调用 buildWorkerToolSurface，宽容模式默认
-  // deny 会误剥离 spawn_subagent，破坏向后兼容。Gate 3 excluded 已先把
-  // deny 名从 toolsetNames 剔除，此处 buildWorkerToolSurface 是双机制的
-  // 幂等兜底（actual surface 二次断言）。
+  // Def-list trimming at construction (guarantees both the inner and
+  // visibleSchemas surfaces retain only the allowed items).
+  // buildWorkerToolSurface's permissive mode merges the default deny [spawn_subagent]
+  // + the user deny; the default deny is legal redundancy on the worker
+  // assembly path (absent subagentManager → spawn_subagent is not in tools).
+  // Call it only when disallowedTools is non-empty — the existing
+  // build-engine.ts call site (subagentManager present, no disallowedTools)
+  // would have its spawn_subagent wrongly stripped in permissive mode if
+  // buildWorkerToolSurface were called unconditionally, breaking backward
+  // compatibility. Gate 3's `excluded` has already removed denied names from
+  // toolsetNames, so buildWorkerToolSurface here is an idempotent backstop
+  // of the dual mechanism (a second assertion on the actual surface).
   const finalTools =
     disallowedTools !== undefined && disallowedTools.length > 0
       ? buildWorkerToolSurface(tools, disallowedTools)

@@ -1,9 +1,10 @@
 /**
- * ACI 能力层：公共出口。
+ * ACI capability layer: public entry.
  *
- * 重新出口 Layer 0 全部类型与工厂。新模块（permission/）作为决策 / 规则 /
- * 策略的权威源；本入口继续提供 prototype 兼容 API（createPermissionPolicy /
- * isAllowedCommand / isDangerousCommand / checkPermission / createAciExecutor）。
+ * Re-exports all Layer 0 types and factories. The permission/ module is the
+ * authoritative source for decisions / rules / policy; this entry keeps the
+ * legacy-compatible API (createPermissionPolicy / isAllowedCommand /
+ * isDangerousCommand / checkPermission / createAciExecutor).
  */
 
 export type { AciCategory, AciMeta, AciToolDef, AciCatalog } from "./types.js";

@@ -1,61 +1,67 @@
 /**
- * ADR-0045 — sandbox 执行面 server 化的消息合同 SSOT。
+ * Message-contract SSOT for the server-ised sandbox execution plane.
  *
- * 两型协议：
- *   1. 短生命周期 request/response（前台 + verify）: `exec(req): Promise<ExecResponse>`
- *      等子进程退出、取一次性结果。
- *   2. 长生命周期 task-handle（后台）: `spawn(req): Promise<SpawnResponse>`
- *      同步 resolve task_id;返回的 handle 暴露 stdout/stderr/exit/stopped
- *      事件(AsyncIterable) + stop control message。
+ // (ADR-0045)
  *
- * 4 类故障路径(ADR-0045 §4,overflow 已合并进 truncateByCodePoint 契约)
- * 的 typed-error 判别联合定义在此;server 内部一致抛 typed error,client
- * 按 kind 分支。本文件只锁形状,handler 实现见 ./index.ts。
+ * Two protocol shapes:
+ *   1. Short-lived request/response (foreground + verify): `exec(req): Promise<ExecResponse>`
+ *      waits for the child to exit and returns a one-shot result.
+ *   2. Long-lived task handle (background): `spawn(req): Promise<SpawnResponse>`
+ *      resolves the task_id synchronously; the returned handle exposes
+ *      stdout/stderr/exit/stopped events (AsyncIterable) + a stop control message.
+ *
+ * The typed-error discriminated union for the fault paths (overflow merged into
+ *
+ // (ADR-0045)
+ * the truncateByCodePoint contract) is defined here; the server throws typed
+ * errors internally and clients branch on kind. This file only pins the shapes,
+ * handler implementations live in ./index.ts.
  */
 import type { BwrapFence } from "../bwrap.js";
 
-/** 短生命周期 exec request — 等子进程退出后一次性返回结果。 */
+/** Short-lived exec request — returns a one-shot result after the child exits. */
 export interface ExecRequest {
   readonly kind: "exec";
   readonly fence: BwrapFence;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
-  /** 缺省 DEFAULT_MAX_OUTPUT_CODE_POINTS (12_000)。≤0 / 非整数 → RangeError。 */
+  /** Defaults to DEFAULT_MAX_OUTPUT_CODE_POINTS (12_000). ≤0 / non-integer → RangeError. */
   readonly maxOutputCodePoints?: number;
-  /** 缺省 2_000 ms。负数 → RangeError;0 = 立刻 SIGKILL 不发 SIGTERM。 */
+  /** Defaults to 2_000 ms. Negative → RangeError; 0 = SIGKILL immediately, no SIGTERM first. */
   readonly killGraceMs?: number;
 }
 
 export interface ExecResponse {
-  /** 信号终止时由 SIGNAL_EXIT_CODES 映射(128 + signal number);exit 缺失落 1。 */
+  /** On signal termination mapped by SIGNAL_EXIT_CODES (128 + signal number); missing exit falls back to 1. */
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
 }
 
-/** 长生命周期 spawn request — 同步 resolve task_id;handle 持续 emit 事件。 */
+/** Long-lived spawn request — resolves task_id synchronously; the handle keeps emitting events. */
 export interface SpawnRequest {
   readonly kind: "spawn";
   readonly fence: BwrapFence;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
-  /** 缺省 2_000 ms(SIGTERM→SIGKILL 升级宽限);负数 → RangeError。 */
+  /** Defaults to 2_000 ms (SIGTERM→SIGKILL escalation grace); negative → RangeError. */
   readonly killGraceMs?: number;
-  /** 占位符形态( #406 roundtrip)—— 落盘用,真值由 caller 还原后传 fence。 */
+  /** Placeholder form (conversation roundtrip) — persisted to disk; the caller restores the real value before passing the fence. */
   readonly recordCommand?: string;
-  /** session 标识(透传到 manager.state 内存 Map;同 ADR-0021 D1.4 语义)。 */
+  /** Session identity (passed through to the manager.state in-memory Map). */
+  // (ADR-0021)
   readonly conversationId?: string;
 }
 
-/** spawn 一次性响应 —— 同步 resolve,客户端拿到 task_id 后立即返回。 */
+/** One-shot spawn response — resolves synchronously so the client returns immediately with the task_id. */
 export interface SpawnResponse {
   readonly task_id: string;
   readonly log_path: string;
 }
 
-/** 长生命周期 task event stream(AsyncIterable)。kind 决定形态。 */
+/** Long-lived task event stream (AsyncIterable); kind decides the shape. */
 export type SandboxTaskEvent =
   | {
       readonly kind: "stdout";
@@ -76,64 +82,72 @@ export type SandboxTaskEvent =
     };
 
 /**
- * 长生命周期 handle —— 协议层抽象把 kill 升级的中间状态封装,client 只
- * 经 stop() 触发,SIGTERM→SIGKILL 升级由 handle 内部实现。pid 物理
- * 所有权仍在 host(server 同进程,故 host = server)。
+ * Long-lived handle — the protocol layer encapsulates the intermediate states of
+ * the kill escalation: clients only go through stop(), and the SIGTERM→SIGKILL
+ * escalation is an internal detail. Physical pid ownership stays with the host
+ * (server runs in-process, so host = server).
  */
 export interface SandboxTaskHandle {
   readonly task_id: string;
   readonly log_path: string;
   /**
-   * AsyncIterable:event stream (stdout/stderr/exit/stopped)。
+   * AsyncIterable: the event stream (stdout/stderr/exit/stopped).
    *
-   * Single-consumer 契约:每次调用返回一个新的 AsyncIterable;同一 handle
-   * 上多次调用 `events()` 会**抢事件** —— 后到的 consumer 会跳过早于它
-   * 入队的 stdout/stderr,且 close sentinel 只能被一个 consumer 看到。
-   * 设计取舍:同进程 router 形态下 consumer 一一对应(bash tool 后台
-   * 单例),无 share 需求;若未来需要 broadcast,加显式 broadcast operator
-   * 而非悄悄放宽本契约。
+   * Single-consumer contract: each call returns a new AsyncIterable; calling
+   * `events()` twice on the same handle makes consumers compete for events —
+   * the later one misses stdout/stderr queued before it, and the close sentinel
+   * is visible to exactly one consumer. Design trade-off: with a same-process
+   * router, consumers pair one-to-one (the bash tool's background is a
+   * singleton), so there is no sharing need; if broadcasting is ever required,
+   * add an explicit broadcast operator instead of silently loosening this
+   * contract.
    */
   events(): AsyncIterable<SandboxTaskEvent>;
-  /** control message:SIGTERM → graceMs → SIGKILL(缺省 2_000 ms)。幂等。 */
+  /** Control message: SIGTERM → graceMs → SIGKILL (default 2_000 ms). Idempotent. */
   stop(graceMs?: number): Promise<void>;
 }
 
-/** 内部:队列元素判别联合 —— SandboxTaskEvent 或 close sentinel。 */
+/** Internal: queue-element discriminated union — SandboxTaskEvent or the close sentinel. */
 export type QueuedTaskEvent = SandboxTaskEvent | { readonly kind: "close" };
 
 /**
- * 4 类故障路径的 typed error(ADR-0045 §4 / §5,移除 kind 后剩余)。
+ * Typed errors for the fault paths: what remains once the merged-away kinds
  *
- * catch 契约:client 必先识别 kind 分支;`${kind}: ${context}` 渲染;
- * 禁止 `err instanceof Error ? err.message : String(err)` 落 `[object
- * Object]`(code-quality.md typed-error catch 契约)。
+ // (ADR-0045)
+ * (overflow via truncate, empty task_id) are excluded.
  *
- * 设计取舍:
- *   - `empty_task_id` 删除 —— task_id 由 server 端 randomBytes 生成,
- *     caller 无法传入,union 列出即死代码面。
- *   - `overflow` 删除 —— output 截断由 truncateByCodePoint 承载(沿用
- *     runner.ts:84-89 契约),不抛 typed error(ADR-0045 §2.1 语义已
- *     如此,§4 表格对齐)。
+ * Catch contract: clients must branch on kind first; render as
+ * `${kind}: ${context}`; never funnel through
+ * `err instanceof Error ? err.message : String(err)` into `[object Object]`.
+ *
+ * Design trade-offs:
+ *   - `empty_task_id` removed — task_id is generated server-side via
+ *     randomBytes, callers cannot supply it, so listing it in the union would
+ *     be dead API surface.
+ *   - `overflow` removed — output truncation is carried by truncateByCodePoint
+ *
+ // (ADR-0045)
+ *     (the contract already used in runner.ts), no typed error is thrown.
  */
 export type SandboxServerError =
-  /** empty:request 帧缺 fence / cwd 空 → 不 spawn 直接抛。 */
+  /** empty: request frame lacks fence / cwd is blank → throw without spawning. */
   | { kind: "empty_request"; context: string }
-  /** negative:maxOutputCodePoints / killGraceMs 越界。RangeError 透传 truncateByCodePoint 契约。 */
+  /** negative: maxOutputCodePoints / killGraceMs out of range. RangeError passes through the truncateByCodePoint contract. */
   | { kind: "negative_argument"; context: string; cause: unknown }
-  /** exception:子进程退出未回执 / server 不可达(跨进程化未来场景) —— typed fail-loud,不降级。 */
+  /** exception: child exited without acknowledgement / server unreachable (future cross-process scenario) — typed fail-loud, no degradation. */
   | {
       kind: "server_unreachable";
       context: string;
       cause?: unknown;
     }
-  /** exception:accept 后子进程异常退出未回执 —— typed fail-loud + orphan 进程组 reap(stale-reap.ts:184 纪律)。 */
+  /** exception: after accept, the child died abnormally without acknowledgement — typed fail-loud + orphan process-group reap (stale-reap.ts discipline). */
   | {
       kind: "orphan_process_group";
       context: string;
       pgid?: number;
     };
 
-/** 工具:渲染 typed-error 字面量 `${kind}: ${context}`(code-quality.md catch 契约)。 */
+/** Utility: render a typed-error literal as `${kind}: ${context}`. */
 export function renderSandboxServerError(err: SandboxServerError): string {
   return `${err.kind}: ${err.context}`;
 }

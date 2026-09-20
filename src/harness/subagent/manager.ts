@@ -1,11 +1,13 @@
 /**
- * #356 T2 — SubAgentManager:父代理侧子代理生命周期 / 状态机 / 浓缩 buffer /
- * shutdown 链。
+ * SubAgentManager: parent-side subagent lifecycle / state machine / condensed
+ * buffer / shutdown chain.
  *
- * 与 mcp/manager.ts:266-306 蓝本同构(abort in-flight + SIGTERM + SIGKILL 兜底)。
- * DI 边界:manager 自身不 import child_process(运行时),spawn 工厂由调用方注入,
- * 避免与 worker.ts 共享子进程类型的运行时耦合;生产 spawn 实现 defaultSubAgentSpawn
- * 在 ./spawn.ts,T6 接线时由 build-engine 注入。
+ * Structurally mirrors the mcp/manager.ts blueprint (abort in-flight + SIGTERM
+ * + SIGKILL backstop). DI boundary: the manager itself does not import
+ * child_process at runtime; the spawn factory is injected by the caller,
+ * avoiding a runtime coupling of child-process types with worker.ts. The
+ * production spawn implementation defaultSubAgentSpawn lives in ./spawn.ts and
+ * is injected by build-engine at wiring time.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -55,8 +57,8 @@ import type { PadQueryResult } from "./pad-inspect.js";
 
 export type { PadQueryResult } from "./pad-inspect.js";
 
-// re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
-// SubAgentDefinition,不必各自 import role.js。
+// re-export: manager callers (tools, host-drain) uniformly take
+// SubAgentDefinition from the manager side instead of importing role.js themselves.
 export type { SubAgentDefinition } from "./role.js";
 
 export type QueryBufferResult =
@@ -65,16 +67,17 @@ export type QueryBufferResult =
   | SubAgentEnvelope // completed
   | {
       status: "failed";
-      // ADR-0111 Decision 2: reason 词汇表按名复用 envelope SSOT。
+      // ADR-0111: the reason vocabulary reuses the envelope SSOT by name.
       reason: SubagentFailureReason;
       summary: string;
     };
 
 /**
- * #358 T7: Session API 只读投影的最小状态面 (spec Code Style 137)。
- * 字段集与 trace SubagentSpawnRecord 对齐,但截断语义不同:
- * taskPreview 截断 ≤120 (权限行,不落 task 全文 —— spec 358 权限 row)。
- * Postel: endedAt/summary/reason 仅终态且有值时在场, running 态缺席。
+ * Minimal state surface for the Session API read-only projection.
+ * Field set aligns with trace SubagentSpawnRecord, but truncation differs:
+ * taskPreview is cut at ≤120 (a permission line — full task text never
+ * leaves here). Postel: endedAt/summary/reason are present only in terminal
+ * states with values; absent while running.
  */
 export interface SubagentInfo {
   readonly taskId: string;
@@ -84,83 +87,96 @@ export interface SubagentInfo {
   readonly endedAt?: string;
   readonly summary?: string;
   readonly reason?: string;
-  /** catalog persona id（`explore` / `general-purpose`）；缺省不在场。 */
+  /** catalog persona id (`explore` / `general-purpose`); absent when unset. */
   readonly role?: string;
   /**
-   * 派出该子代理的那次 `spawn_subagent` 调用的 tool_use id —— 会话卡按它
-   * 把 live 行 join 回派发卡。
-   * 可选：ask / direct-handler / 测试注入的 spawn 不带此键，缺席即整个
-   * 字段不在场(Postel)，不在场 ≠ 值为 undefined。
+   * The tool_use id of the `spawn_subagent` call that dispatched this
+   * subagent — the session card joins live rows back to the dispatch card
+   * through it.
+   * Optional: ask / direct-handler / test-injected spawns carry no such key,
+   * and absence means the whole field is absent (Postel) — absent ≠ undefined.
    */
   readonly toolUseId?: string;
-  /** 归属会话（`def.conversationId`）；直调 manager / judge 等无会话场景缺席。 */
+  /** Owning session (`def.conversationId`); absent for direct manager calls / judge and other session-less contexts. */
   readonly conversationId?: string;
   /**
-   * 前景标志 —— **等价于** `def.excludeFromHostDrain === true`，即父侧
-   * in-band 等待（`wait:true` 的 spawn_subagent）与 judge / graph-node 同一
-   * population：信封已由调用方当跳取走。前台打断（Ctrl+C 扇出本会话全部
-   * 前景子代理）按此字段选目标，故它**不能**在此重算「态是否 running」——
-   * 语义是交付通道，不是寿命。
-   * Postel:仅 true 在场；后景 / 未知缺席（消费方必须按 `=== true` 判断）。
+   * Foreground flag — **equivalent to** `def.excludeFromHostDrain === true`,
+   * i.e. parent-side in-band waiting (`wait:true` spawn_subagent) shares the
+   * same population as judge / graph-node: the envelope was already taken by
+   * the caller as a hop. Foreground interrupt (Ctrl+C fanning out all
+   * foreground subagents of this session) selects targets by this field, so
+   * it **must not** recompute "is running" here — the semantics are the
+   * delivery channel, not the lifetime.
+   * Postel: only true is present; background / unknown absent (consumers must check `=== true`).
    */
   readonly foreground?: boolean;
 }
 
 export interface SubAgentManager {
   /**
-   * 同步入 map 立即返回 taskId(manager 内部 randomUUID() 唯一真值,SC3)。
-   * #361 C1:running+starting 数 ≥ MAX_CONCURRENT_WORKERS 时立即抛
-   * SubAgentCapacityError(handler 接住后抛 ToolExecutionError)。
+   * Synchronously enters the map and returns a taskId immediately (the
+   * manager's internal randomUUID() is the single source of truth). When
+   * running+starting count ≥ MAX_CONCURRENT_WORKERS, throws
+   * SubAgentCapacityError immediately (the handler catches it and throws ToolExecutionError).
    */
   readonly spawn: (def: SubAgentDefinition) => { readonly taskId: string };
-  /** 同步非阻塞四态查询(SC5)。 */
+  /** Synchronous non-blocking four-state query. */
   readonly queryBuffer: (taskId: string) => QueryBufferResult;
   /**
-   * T5: sync list/read of this worker's fence-tmp pad. Unknown id →
+   * Sync list/read of this worker's fence-tmp pad. Unknown id →
    * `not_found` (same discriminant as queryBuffer). Optional on the
    * interface so poll-only fakes stay structural.
    */
   readonly queryPad?: (taskId: string, tmpPath?: string) => PadQueryResult;
   /**
-   * #361 C3: 第三参 `signal?: AbortSignal` —— caller abort → reject
-   * SubAgentAbortError(与 SubAgentWaitTimeoutError 类型区分)。首查终态路径
-   * 保留(立即 resolve,不经 interval)。timeoutMs 缺省走 #358 T2 三层链
-   * (def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS)。
+   * The third param `signal?: AbortSignal` — caller abort → rejects
+   * SubAgentAbortError (typed apart from SubAgentWaitTimeoutError). The
+   * first-query terminal path is preserved (immediate resolve, no interval).
+   * timeoutMs defaults through the three-tier chain
+   * (def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS).
    */
   readonly waitFor: (
     taskId: string,
     timeoutMs?: number,
     signal?: AbortSignal
   ) => Promise<SubAgentEnvelope>;
-  /** abort in-flight + SIGTERM 子孙 + ≥5s 兜底 SIGKILL(SC12)。 */
+  /** abort in-flight + SIGTERM descendants + ≥5s backstop SIGKILL. */
   readonly shutdown: () => Promise<void>;
-  /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内终态任务列表。 */
+  /** Minimal read-only enumeration needed by host-drain: terminal tasks currently in the buffer. */
   readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }>;
   /**
-   * #361 C2: host-drain 阻塞轮询所需的非终态任务 ID 列表(starting + running)。
-   * completed / failed 不出现;host drain 据此判断"无任务→"" vs "仅 running→轮询"。
+   * Non-terminal task IDs (starting + running) for host-drain's blocking
+   * polling. completed / failed never appear; host drain uses this to
+   * distinguish "no tasks → empty" from "only running → poll".
    */
   readonly listActive: () => ReadonlyArray<string>;
   /**
-   * #361 T5 / SC14: 主动 abort 单任务 → 先以 SubAgentAbortError settle 本任务
-   * 在飞的 `waitFor`(操作员强杀归因),再传播 task.abortCtrl.abort +
-   * child.SIGTERM + 5s SIGKILL 兜底(以本次 SIGTERM 为基准重排,review-fix S1)。
-   * 对未找到 / 已终态任务 no-op。
+   * Actively abort a single task → first settle this task's in-flight
+   * `waitFor` with SubAgentAbortError (operator force-kill attribution),
+   * then propagate task.abortCtrl.abort + child.SIGTERM + 5s SIGKILL backstop
+   * (re-armed from this SIGTERM as the baseline). No-op for unknown or
+   * already-terminal tasks.
    */
   readonly abortTask: (taskId: string) => boolean;
   /**
-   * ADR-0102 T4: 续跑已死工人 —— 新进程、同 `task_id` 对外句柄。闸全部
-   * 在 manager 内判（工具只做 typed kind → ToolExecutionError 映射，不在
-   * 工具侧重算寿命）：未知 id → `not_found`；starting/running → `running`
-   * （不往 in-flight loop 塞话）；缺工人 transcript（含无装配目录的 legacy
-   * 落点）→ `no_transcript`，**不从 per-agent trace 倒灌**。并发顶与 spawn
-   * 同源（超限仍 SubAgentCapacityError，锁句 5）。
-   * `def` 只带本次调用的回合字段（task 下一句 / parentTurnId / toolUseId /
-   * 前景排除位）；身份与能力字段（role / model / maxTurns / sandboxRoot /
-   * disallowedTools …）沿用原 def —— 原 catalog 角色再 run()。
+   * Resume a dead worker — new process, same external `task_id` handle. All
+   *
+   // (ADR-0102)
+   * gates are decided inside the manager (the tool only maps typed kind →
+   * ToolExecutionError, never recomputing lifetime at the tool side):
+   * unknown id → `not_found`; starting/running → `running` (never feed words
+   * into an in-flight loop); missing worker transcript (including legacy
+   * locations without an assembly dir) → `no_transcript`, **never backfilled
+   * from the per-agent trace**. Concurrency cap shares its source with spawn
+   * (over the limit still throws SubAgentCapacityError).
+   * `def` carries only this call's turn fields (next task sentence /
+   * parentTurnId / toolUseId / foreground-exclusion bit); identity and
+   * capability fields (role / model / maxTurns / sandboxRoot /
+   * disallowedTools …) are taken from the original def — rerun() the original
+   * catalog role.
    * Optional on the interface so poll-only fakes stay structural.
    */
   readonly resumeTask?: (
@@ -168,10 +184,11 @@ export interface SubAgentManager {
     def: SubAgentDefinition
   ) => { readonly taskId: string };
   /**
-   * #358 T7: 只读全量枚举(starting/running/completed/failed 合一) — Session
-   * API GET /sessions/:id/subagents 端点消费。数据源 = 内存 map + 终态
-   * envelope(与 queryBuffer/drainCompleted 同真值),不在端点侧做任务寿命
-   * 语义决策。taskPreview 截断 ≤120 见 SubagentInfo 注释。
+   * Read-only full enumeration (starting/running/completed/failed together) —
+   * consumed by Session API GET /sessions/:id/subagents. Data source =
+   * in-memory map + terminal envelopes (the same truth as
+   * queryBuffer/drainCompleted); no task-lifetime decisions at the endpoint
+   * side. taskPreview truncation ≤120: see the SubagentInfo comment.
    */
   readonly listSubagents: (
     conversationId?: string
@@ -185,21 +202,25 @@ export interface SubAgentManager {
     conversationId?: string
   ) => () => void;
   /**
-   * ADR-0096 T2：当前并发上限（`number` 或 `"unlimited"`）—— spawn 闸单点
-   * SSOT。spawn_subagent 工具 description 派生同此，确保 N 与回执同数字。
-   * TUI /config 面板 Enter 调 holder.set 改值后立即在 get 反射。
+   * Current concurrency cap (`number` or `"unlimited"`) — the single SSOT
+   *
+   // (ADR-0096)
+   * point for the spawn gate. The spawn_subagent tool description derives
+   * from the same place, guaranteeing N and the error receipt carry the same
+   * number. After TUI /config panel Enter calls holder.set, get reflects the
+   * new value immediately.
    */
   readonly getCapacity: () => SubagentCapacityValue;
 }
 
-/** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
+/** Spawn DI factory signature: injected by the caller (test fakes / production defaultSubAgentSpawn). */
 export type SubAgentSpawn = (
   def: SubAgentDefinition,
   taskId: string,
   stdinPayload: WorkerEnvelope
 ) => ChildProcess;
 
-/** waitFor 超时 / shutdown 收口的 typed 拒绝原因(status/reason 常量透传给调用方)。 */
+/** Typed rejection reasons for waitFor timeout / shutdown collection (status/reason constants passed through to the caller). */
 export class SubAgentWaitTimeoutError extends Error {
   override readonly name = "SubAgentWaitTimeoutError";
   readonly status = "failed" as const;
@@ -207,9 +228,11 @@ export class SubAgentWaitTimeoutError extends Error {
 }
 
 /**
- * ADR-0102 T4 — resumeTask 的 typed 拒绝。`kind` 是判别联合，消费方
- * （subagent_continue handler）按 kind 映射模型可见文案，禁止
- * `err instanceof Error ? err.message : …` 式的语义丢失。
+ * Typed rejection for resumeTask. `kind` is a discriminated union; the
+ *
+ // (ADR-0102)
+ * consumer (subagent_continue handler) maps kind to model-visible text, and
+ * `err instanceof Error ? err.message : …` semantic loss is forbidden.
  */
 export class SubAgentResumeError extends Error {
   override readonly name = "SubAgentResumeError";
@@ -223,30 +246,42 @@ export class SubAgentResumeError extends Error {
 }
 
 /**
- * #361 C1 / T4: 父代理侧并发 worker 默认上限。spawn 入口 running+starting 数 ≥ 此值
- * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
+ * Default concurrent-worker cap on the parent side. At the spawn entry, when
+ * running+starting count ≥ this value, throw SubAgentCapacityError
+ * immediately (explicit failure so the model can lower concurrency and retry;
+ * no queueing, no silence).
  */
 export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
 
 /**
- * ADR-0096 T2：子代理并发上限值域。`number` = 闸值（active+starting ≥ 此值抛
- * `SubAgentCapacityError`）；`"unlimited"` = 不做并发拒绝（OS / 内存仍是事实顶）。
+ * Value range of the subagent concurrency cap. `number` = gate value
  *
- * holder `get()` 在 `createSubAgentManager` 的 spawn 闸内每次都现读，描述
- * 子代理工具 description 与回执 `SubAgentCapacityError.maxConcurrentWorkers`
- * 都从同一处派生，ADR-0096 「description N 与错误回执同一数字」直接落地。
+ // (ADR-0096)
+ * (active+starting ≥ it throws `SubAgentCapacityError`); `"unlimited"` = no
+ * concurrency rejection (OS / memory remain the factual caps).
+ *
+ * The holder's `get()` is re-read on every spawn-gate pass inside
+ * `createSubAgentManager`; both the subagent tool description and the
+ * `SubAgentCapacityError.maxConcurrentWorkers` receipt derive from that same
+ *
+ // (ADR-0096)
+ * place, so "description N and error receipt the same number" holds directly.
  */
 export type SubagentCapacityValue = number | "unlimited";
 
 /**
- * ADR-0096 T2：运行期并发上限 holder（镜像 `FsModeContext` /
- * `PermissionModeContext` / `GraphModeContext` —— 三入口同源）。`set` 兜底过
- * `coerceSubagentCapacityValue`：正整数 / `"unlimited"` 才生效，其它一律忽略，
- * 维持 holder 当前态（fail-closed，与 fs-mode.ts 同款纪律）。
+ * Runtime concurrency-cap holder (mirrors `FsModeContext` /
  *
- * 装配期初值 = `env.subagent.maxConcurrentWorkers`（env > settings > 15 链已
- * 在 env.ts:1067 钉死），TUI /config 面板 Enter 在 `3|5|9|15|unlimited` 闭集内
- * 循环调 `set(...)`，manager 立即按新闸生效。
+ // (ADR-0096)
+ * `PermissionModeContext` / `GraphModeContext` — three entries, one source).
+ * `set` falls back through `coerceSubagentCapacityValue`: only positive
+ * integers / `"unlimited"` take effect, anything else is ignored, keeping the
+ * holder's current state (fail-closed, same discipline as fs-mode.ts).
+ *
+ * Assembly-time initial value = `env.subagent.maxConcurrentWorkers` (the
+ * env > settings > 15 chain is already pinned in env.ts); the TUI /config
+ * panel Enter loops `set(...)` within the closed set `3|5|9|15|unlimited`,
+ * and the manager applies the new gate immediately.
  */
 export interface SubagentCapacityHolder {
   readonly get: () => SubagentCapacityValue;
@@ -254,12 +289,14 @@ export interface SubagentCapacityHolder {
 }
 
 /**
- * 装配期兜底（mirror `parseFsModeFlag` 的「合法字面优先 / 非法回默认」）：
- * 正整数或字面 `"unlimited"` 才接受，其它一律回落
- * `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`。调用方（env.ts:1067 链）几乎
- * 不会传非法值；本函数在装配期作为最后一道 fail-back（注意：与 holder 的
- * set 不同——set 用 `isValidSubagentCapacityValue` 严格校验，非法就 skip，
- * 不会把 holder 拍回默认 15）。
+ * Assembly-time fallback (mirrors `parseFsModeFlag`'s "valid literal first /
+ * invalid falls back to default"): only positive integers or the literal
+ * `"unlimited"` are accepted, everything else falls back to
+ * `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`. Callers (the env chain) almost
+ * never pass invalid values; this function is the last fail-back at assembly
+ * time (note: unlike the holder's set — set validates strictly with
+ * `isValidSubagentCapacityValue` and skips invalid values, never snapping the
+ * holder back to the default).
  */
 export function coerceSubagentCapacityValue(
   value: unknown
@@ -281,7 +318,7 @@ export function createSubagentCapacityHolder(
 ): SubagentCapacityHolder {
   const starting = coerceSubagentCapacityValue(initial);
   let current: SubagentCapacityValue = starting;
-  /** 严格合法闸值：正整数或字面 `"unlimited"`。不合法返 false（与 `coerceSubagentCapacityValue` 区别：后者兜底回默认）。 */
+  /** Strict valid gate value: positive integer or the literal `"unlimited"`. Invalid returns false (differs from `coerceSubagentCapacityValue`: the latter falls back to the default). */
   function isValidSubagentCapacityValue(
     v: unknown
   ): v is SubagentCapacityValue {
@@ -294,17 +331,19 @@ export function createSubagentCapacityHolder(
   return Object.freeze({
     get: () => current,
     set: (value: SubagentCapacityValue) => {
-      // fail-closed：与 fs-mode.ts:67-73 同款纪律。`coerceSubagentCapacityValue`
-      // 把非法字面拍回默认 15，会让 set(0) 这类调用把 holder 静默改回默认；
-      // 这里用严格合法校验，非法 → 跳过，holder 维持当前态。这样 spawn 闸始终
-      // 不会从非法 set 收到无效值（typed-error 契约的硬门）。
+      // fail-closed: same discipline as fs-mode.ts. Running
+      // `coerceSubagentCapacityValue` here would snap invalid literals back to
+      // the default, letting set(0)-style calls silently reset the holder; so
+      // this uses strict validation instead — invalid → skip, holder keeps its
+      // current state. The spawn gate thus never receives an invalid value
+      // from a bad set (the hard gate of the typed-error contract).
       if (isValidSubagentCapacityValue(value)) current = value;
     },
   });
 }
 
-/** 内部 helper：闸值以 `number` 入参时校验 running+starting 数，否则抛 typed 拒绝。
- *  从 `spawn()` 抽出来保 S5 复杂度（嵌套 for/if 不再计入 spawn 的分支）。 */
+/** Internal helper: when the gate value is a `number`, validate the running+starting count, else throw a typed rejection.
+ *  Extracted from `spawn()` to keep complexity in check (nested for/if no longer count toward spawn's branches). */
 function assertCapacityAvailable(
   cap: number,
   tasks: ReadonlyMap<string, Task>
@@ -319,8 +358,9 @@ function assertCapacityAvailable(
 }
 
 /**
- * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",
- * active }` 透传。message 含 capacity + active/limit(handler 用作 ToolExecutionError 文案)。
+ * Typed rejection for spawn over the concurrency cap. Fields
+ * `{ status:"failed", reason:"capacity", active }` pass through. The message
+ * carries capacity + active/limit (the handler uses it as ToolExecutionError text).
  */
 export class SubAgentCapacityError extends Error {
   override readonly name = "SubAgentCapacityError";
@@ -338,10 +378,11 @@ export class SubAgentCapacityError extends Error {
 }
 
 /**
- * #361 C3: waitFor 收到 AbortSignal abort → typed 拒绝(与 SubAgentWaitTimeoutError
- * 类型区分)。字段 `{ status:"failed", reason:"aborted", taskId }`。
- * handler 捕获后抛 ToolExecutionError,executor 因 `signal.aborted === true`
- * 归一 `execution_failed:cancelled`(归因 = 调用侧取消)。
+ * waitFor receives an AbortSignal abort → typed rejection (typed apart from
+ * SubAgentWaitTimeoutError). Fields `{ status:"failed", reason:"aborted", taskId }`.
+ * The handler catches it and throws ToolExecutionError; the executor, seeing
+ * `signal.aborted === true`, normalizes to `execution_failed:cancelled`
+ * (attribution = caller-side cancellation).
  */
 export class SubAgentAbortError extends Error {
   override readonly name = "SubAgentAbortError";
@@ -355,20 +396,23 @@ export class SubAgentAbortError extends Error {
 }
 
 /**
- * #361 T13 / #358 T2: per-task 缺省 wallclock 7200s(2h)——spec Assumptions 1:
- * operator 真实使用数据表明子代理任务常态超过 1 小时,对齐 deer-flow 1800s
- * 实测再留余量;300s 原值无实测依据。
- * wait:true handler 显式传给 waitFor;manager 内部 spawn 的 per-task
- * SIGTERM 计时器也用此链末端常量作缺省,worker 侧 wallclock 与前景 wait 对齐。
- * 唯一声明点 (spec "per-task 缺省值归 T2 manager 消费点, 避免两处声明")。
+ * Per-task default wallclock 7200s (2h): real operator usage data shows
+ * subagent tasks routinely exceed 1 hour, so align with deer-flow's 1800s and
+ * leave headroom; the original 300s had no measurement backing.
+ * The wait:true handler passes this explicitly to waitFor; the per-task
+ * SIGTERM timer inside manager spawn also uses this chain's end constant as
+ * its default, aligning the worker-side wallclock with foreground wait.
+ * Single declaration point (the per-task default belongs to the manager
+ * consumer, avoiding two-place drift).
  */
 export const PER_TASK_TIMEOUT_MS = 7_200_000;
 
 /**
- * #358 T2: per-task wallclock 三层缺省链 (spec SC4 / Assumptions 1):
- * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
- * 语义分离 (C9): 这是任务寿命 (父 manager SIGTERM), 与 worker 内 per-call
- * 竞速 (deps.timeoutMs) 无关; 单一常量声明点保证缺省值不漂移。
+ * Three-tier per-task wallclock default chain:
+ * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`.
+ * Semantic separation: this is the task lifetime (parent manager SIGTERM),
+ * unrelated to the in-worker per-call race (deps.timeoutMs); the single
+ * constant declaration point keeps the default from drifting.
  */
 export function effectiveTaskTimeoutMs(
   def: SubAgentDefinition,
@@ -378,14 +422,16 @@ export function effectiveTaskTimeoutMs(
 }
 
 /**
- * #358 review-fix (Fix 3): taskPreview SSOT —— 长度 + 来源统一。
- * 只取 `def.task`（不回落 def.systemPrompt），截断 ≤120 字符（默认）。
- * 两个消费面共用同一真值:
- *   - `recordSubagentSpawn` 的 subagent_spawn 落盘 taskPreview
- *   - `listSubagents` 的 HTTP/API 投影 taskPreview
- * 120 是 spec 权限行定案的 "least-privilege" 边界（task 全文不落盘 / 不
- * 上行）；trace 侧没有理由写更多，且 systemPrompt 纳入会扩大脱敏面。max
- * 参数供显式覆盖（当前无调用方传 <120 以下的更小值，保留参数防未来漂移）。
+ * taskPreview SSOT — unified length + source.
+ * Takes only `def.task` (never falls back to def.systemPrompt), truncated ≤120
+ * chars (default). Two consumer surfaces share one truth:
+ *   - `recordSubagentSpawn`'s subagent_spawn persisted taskPreview
+ *   - `listSubagents`' HTTP/API projection taskPreview
+ * 120 is the least-privilege boundary decided for the permission line (full
+ * task text never persists / goes upstream); the trace side has no reason to
+ * write more, and including systemPrompt would widen the masking surface.
+ * The max param allows explicit override (no caller currently passes a
+ * smaller value <120; the param is kept against future drift).
  */
 export function truncateTaskPreview(
   def: SubAgentDefinition,
@@ -395,11 +441,13 @@ export function truncateTaskPreview(
 }
 
 /**
- * F-4: `def.parentTurnId` → 三类生命周期 record 的 `parentTurnId`。
+ * `def.parentTurnId` → `parentTurnId` on the three lifecycle record kinds.
  *
- * 单点展开而不是在四个埋点各写一遍三元式:四处漂移一处就够把某回合的
- * 反向追溯打出一个洞(spawn 有、stop 没有 = `?parent_turn_id=` 只捞到半条命)。
- * Postel(ADR-0003 D9):派发方没给归属回合就整个键缺席,不落 null / 空串。
+ * Expanded at one point instead of repeating the ternary at four trace sites:
+ * drift in any one punctures that turn's reverse trace (present on spawn but
+ * not stop = `?parent_turn_id=` retrieves only half the story).
+ * Postel (ADR-0003): when the dispatcher gives no attribution turn the whole
+ * key is absent — never null / empty string.
  */
 function parentTurnFields(def: SubAgentDefinition): {
   readonly parentTurnId?: string;
@@ -410,9 +458,11 @@ function parentTurnFields(def: SubAgentDefinition): {
 }
 
 /**
- * T7 投影的 Postel 增量：归属会话 + 前景标志（见 SubagentInfo 两字段注释）。
- * 单点展开而不是塞进 listSubagents 的字段字面量 —— 每加一个可选字段就给
- * 投影函数加一段分支，复杂度阈值会先于语义漂移报警。
+ * Postel increments for the projection: owning session + foreground flag (see
+ * the two SubagentInfo field comments). Expanded at one point instead of
+ * inlining into listSubagents' field literals — every optional field added
+ * would grow a branch in the projection function, and the complexity
+ * threshold would alarm before any semantic drift does.
  */
 function ownershipInfoFields(def: SubAgentDefinition): {
   readonly conversationId?: string;
@@ -422,9 +472,9 @@ function ownershipInfoFields(def: SubAgentDefinition): {
     ...(def.conversationId !== undefined
       ? { conversationId: def.conversationId }
       : {}),
-    // Foreground == parent awaits in-band == excludeFromHostDrain（同一
-    // population：wait:true 的 spawn_subagent / judge / graph-node）。
-    // 下游 Ctrl+C 扇出按此字段选本会话前景子代理。
+    // Foreground == parent awaits in-band == excludeFromHostDrain (same
+    // population: wait:true spawn_subagent / judge / graph-node).
+    // Downstream Ctrl+C fan-out selects this session's foreground subagents by it.
     ...(def.excludeFromHostDrain === true ? { foreground: true } : {}),
   };
 }
@@ -439,24 +489,25 @@ interface Task {
   envelope?: SubAgentEnvelope;
   abortCtrl?: AbortController;
   /**
-   * #356 High #2 fix: per-task timeout handle (def.timeoutMs expiry -> SIGTERM
+   * Per-task timeout handle (def.timeoutMs expiry -> SIGTERM
    * + 5s fallback SIGKILL -> reason:"timeout"). shutdown / child exit /
    * terminal state must clear it to avoid leaks or stray SIGKILL.
    */
   timeoutTimer?: NodeJS.Timeout;
-  /** #356 High #2 fix: SIGKILL 兜底 timer(exit / shutdown 需与 timeoutTimer 一并清)。 */
+  /** SIGKILL backstop timer (exit / shutdown must clear it together with timeoutTimer). */
   timeoutKillFallback?: NodeJS.Timeout;
-  /** #358 T4: startedAt ISO 戳 (subagent_spawn 落盘的 source)。
-   *  Task 构造时即生成;后续 spawn/stop 都引用此 ISO。 */
+  /** startedAt ISO stamp (the source for persisted subagent_spawn).
+   *  Created at Task construction; later spawn/stop records all reference this ISO. */
   readonly startedAt: string;
-  /** #358 T4: stoppedEmitted guard — subagent_stop 单点 single-emit
-   * (exit handler 与 child.on("error")/timeout-fired 等多路径都可能触发终态);
-   * flag 一旦置位不再覆写, 避免重复落盘。 */
+  /** stoppedEmitted guard — subagent_stop single-emit at one point
+   * (exit handler and child.on("error")/timeout-fired and other paths can all trigger the terminal state);
+   * once set, never overwritten, avoiding duplicate persistence. */
   stoppedEmitted: boolean;
   /**
-   * #358 T7: 终态 ISO 戳(仅簿记,不改状态机语义)。emitStop 内随
-   * stoppedEmitted 锁存一次;listSubagents 读它当 endedAt。running/
-   * starting 态缺席 → Postel 不上行。
+   * Terminal-state ISO stamp (bookkeeping only, does not change state-machine
+   * semantics). Latched once inside emitStop alongside stoppedEmitted;
+   * listSubagents reads it as endedAt. Absent while running/starting →
+   * Postel: not surfaced upward.
    */
   endedAt?: string;
   /** exit/error share one bounded stderr-drain continuation. */
@@ -464,11 +515,14 @@ interface Task {
   /** Host path of this worker's fence `/tmp` pad when session layout exists. */
   padRoot?: string;
   /**
-   * #358 T5 / SC14: 本任务未决 waitFor 的 settleReject 引用。
-   * `abortTask`(操作员强杀)据此**同步**拒绝该任务的 wait 者 —— 只杀 worker
-   * 子进程不够:父侧前景 wait 不带 manager 侧 abort 信号,否则只能等 SIGTERM
-   * 让 worker 写回失败信封(归因还会被误标成 timeout)。
-   * 与全局 `waitRejecters`(shutdown 全量拒绝)分开:这里是单任务作用域。
+   * SettleReject references for this task's pending waitFor.
+   * `abortTask` (operator force-kill) uses them to reject the task's waiters
+   * **synchronously** — killing only the worker child is not enough: the
+   * parent-side foreground wait carries no manager-side abort signal, so it
+   * would otherwise have to wait for SIGTERM to let the worker write back a
+   * failed envelope (and attribution would be mislabeled as timeout).
+   * Kept separate from the global `waitRejecters` (shutdown's blanket
+   * rejection): these are single-task scoped.
    */
   readonly waitRejects: Set<(reason: unknown) => void>;
 }
@@ -479,10 +533,11 @@ const MAX_STDERR_TAIL_CHARS = SUMMARY_LIMIT;
 const STDERR_DRAIN_GRACE_MS = 500;
 const MAX_STDERR_DIAGNOSTICS_BYTES = 1024 * 1024;
 
-/** Postel 在场判据：非空串才在场，缺席 ≠ 值为 undefined。
- *  `writeMetaOnce`（落盘 meta）与 `listSubagents`（对外投影）对同一字段
- *  必须同判据 —— 两处各写一遍时，任一处漂移都会让「meta 里有、投影里没有」
- *  （或反之）的字段成为静默不一致。 */
+/** Postel presence criterion: only a non-empty string is present; absent ≠ undefined.
+ *  `writeMetaOnce` (persisted meta) and `listSubagents` (external projection)
+ *  must use the same criterion for the same field — writing it twice and
+ *  drifting in either place makes "present in meta but not in the projection"
+ *  (or the reverse) a silently inconsistent field. */
 function presentString(v: string | undefined): boolean {
   return typeof v === "string" && v.length > 0;
 }
@@ -545,11 +600,12 @@ function crashedSummary(
 }
 
 /**
- * #361 T5: SIGKILL 兜底计时器(per-task timeout 与 abortTask 共用)。
- * `reset=true` 时先清已有兜底再以新基准重排(abortTask 场景:兜底基准从
- * 早前的 arm 点移到本次 SIGTERM 点 —— 避免旧兜底在 timeout SIGTERM 同点
- * 双发;review-fix S1)。child exit / shutdown / terminal state 清理见
- * exit handler / shutdown 循环。
+ * SIGKILL backstop timer (shared by per-task timeout and abortTask).
+ * With `reset=true`, first clear any existing backstop and re-arm from the
+ * new baseline (abortTask scenario: the backstop baseline moves from an
+ * earlier arm point to this SIGTERM point — avoiding a double-fire at the
+ * timeout SIGTERM's same instant). Cleanup on child exit / shutdown /
+ * terminal state lives in the exit handler / shutdown loop.
  */
 function armKillFallback(task: Task, reset = false): void {
   if (task.timeoutKillFallback !== undefined) {
@@ -571,13 +627,16 @@ function armKillFallback(task: Task, reset = false): void {
 }
 
 /**
- * ADR-0085 / SC9:父会话账本锚点 —— worker 与父共用同一本 todos.md。
+ * ADR-0085: parent-session ledger anchor — worker and parent share the same
+ * todos.md.
  *
- * 数据源 = host 注入的 `todoDir`(与主 loop registry 同一值;不解析 trace
- * 文件布局来反推,避免 fragile coupling)+ `conversationId`(父会话 id,
- * spawn_subagent 从 ctx 透传)。缺任一、或 id 为空串(空 id 会被
- * `resolveConversationTodoPath` 解释成 legacy 根账本) → 不发该字段,worker
- * 退回无 todoDir 的旧工具面(byte-stable)。
+ * Data source = host-injected `todoDir` (the same value as the main loop
+ * registry; we do not reverse-derive from the trace file layout, avoiding
+ * fragile coupling) + `conversationId` (parent session id, threaded through
+ * by spawn_subagent from ctx). Missing either, or an empty-string id (an
+ * empty id would be interpreted by `resolveConversationTodoPath` as the
+ * legacy root ledger) → the field is not emitted, and the worker falls back
+ * to the todoDir-less legacy tool surface (byte-stable).
  */
 function todoLedgerAnchor(
   todoDir: string | undefined,
@@ -594,14 +653,18 @@ function todoLedgerAnchor(
 }
 
 /**
- * T7 (spec SC10):父会话模型索引快照 → envelope 字段（三态折叠）。
+ * Parent-session model-index snapshot → envelope field (three-state folding).
  *
- *   - getter 缺席 / 返回 undefined → `{}`（键省略 = worker 走自有退路）;
- *   - 返回 `[]` → 键在场 + 空数组（「父无模型索引」是确定事实，不是缺席）;
- *   - 返回条目 → 逐条浅拷贝（交付点拷贝：父侧数组后续 push / 改写不回流
- *     已落线的信封，worker 侧拿到的也是当时那一段）。
+ *   - getter absent / returns undefined → `{}` (key omitted = worker takes
+ *     its own fallback path);
+ *   - returns `[]` → key present with an empty array ("the parent has no
+ *     model index" is a definite fact, not absence);
+ *   - returns entries → shallow copy per entry (copy at the delivery point:
+ *     later parent-side pushes / rewrites never flow back into the already
+ *     dispatched envelope, and the worker receives that frozen segment too).
  *
- * getter 抛错原样上抛（不吞成空快照）—— 装配期故障显形优于静默错冻表。
+ * A throwing getter propagates as-is (never swallowed into an empty snapshot)
+ * — surfacing assembly-time faults beats silently freezing a wrong table.
  */
 function skillIndexSnapshotField(
   read:
@@ -620,15 +683,19 @@ function skillIndexSnapshotField(
 }
 
 /**
- * ADR-0102 T3 / T5 (ADR-0071):per-worker 磁盘账三键折叠 —— taskId /
- * traceFilePath / transcriptPath 同门派生自同一 `subagentsDir`（键
- * `(父 conversationId, task_id)` 的目录段已由 `resolveSubagentsDirForDef`
- * 解出）。目录缺席 → 三键整个省略（legacy envelope byte-stable）；在场则
- * 懒建 `subagents/<taskId>/` 布局（trace record + fence-tmp pad + 工人
- * transcript 路径）。
+ * ADR-0071: per-worker disk-ledger three-key folding — taskId /
  *
- * 独立成模块级函数而非内联条件：`buildWorkerPayload` 的圈复杂度是逐函数
- * 棘轮（同 spawn-subagent-tool 的 foregroundDrainExclusion 先例）。
+ // (ADR-0102)
+ * traceFilePath / transcriptPath are derived from the same `subagentsDir` in
+ * one place (the directory segment for key `(parent conversationId, task_id)`
+ * is already resolved by `resolveSubagentsDirForDef`). Directory absent → all
+ * three keys omitted (legacy envelope byte-stable); present → lazily create
+ * the `subagents/<taskId>/` layout (trace record + fence-tmp pad + worker
+ * transcript path).
+ *
+ * A standalone module-level function rather than an inline conditional:
+ * `buildWorkerPayload`'s cyclomatic complexity is a per-function ratchet (same
+ * precedent as spawn-subagent-tool's foregroundDrainExclusion).
  */
 function workerLedgerFields(
   subagentsDir: string | undefined,
@@ -648,14 +715,20 @@ function workerLedgerFields(
 }
 
 /**
- * ADR-0102 T4 — 续跑 def 合并：**身份与能力字段沿用原 def**（原 catalog
- * 角色再 run()、同 model / maxTurns / timeoutMs / sandboxRoot /
- * disallowedTools / systemPrompt / conversationId 归属），**回合与交付通道
- * 字段按本次调用重算**（task 下一句 / parentTurnId / toolUseId / 前景排除
- * 位）。排除与回合字段必须先摘再挂：留着 base 的值会把上一轮的归属错接到
- * 这一跳，`excludeFromHostDrain` 留着会让后景续跑的终态丢掉 mailbox 叫醒。
- * `task` 是这一跳的输入本体：缺失 / 空串 → typed 拒绝（`missing_task`），
- * 不静默空串起工 —— 空 task 的工人会立刻交出无意义结果，比拒绝更难归因。
+ * Resume-def merge: **identity and capability fields come from the original
+ *
+ // (ADR-0102)
+ * def** (rerun() the original catalog role, same model / maxTurns / timeoutMs
+ * / sandboxRoot / disallowedTools / systemPrompt / conversationId
+ * attribution); **turn and delivery-channel fields are recomputed per call**
+ * (task next sentence / parentTurnId / toolUseId / foreground-exclusion bit).
+ * The turn fields must be detached before re-attaching: leaving base's values
+ * would mis-wire the previous turn's attribution onto this hop, and leaving
+ * `excludeFromHostDrain` would lose the mailbox wake-up for a background
+ * resume's terminal state. `task` is this hop's input proper: missing / empty
+ * string → typed rejection (`missing_task`), never silently start on an empty
+ * task — a worker with an empty task immediately returns a meaningless
+ * result, which is harder to attribute than a rejection.
  */
 function resumeDefinition(
   base: SubAgentDefinition,
@@ -666,7 +739,8 @@ function resumeDefinition(
   if (task === undefined || task.length === 0) {
     throw new SubAgentResumeError(taskId, "missing_task");
   }
-  // rest 解构 = 强类型 omit：摘掉上一跳的回合归属字段，再按本次调用重挂。
+  // rest destructuring = strongly-typed omit: detach the previous hop's turn
+  // attribution fields, then re-attach per this call.
   const {
     parentTurnId: _baseTurnId,
     toolUseId: _baseToolUseId,
@@ -689,27 +763,33 @@ function resumeDefinition(
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
-   * #357 T1: 父 sandboxRoot —— 父代理的"工作域"。`buildWorkerPayload` 单点校验
-   * `def.sandboxRoot` 必须 prefix-of-parent(防任意路径提权)。缺省 = process.cwd()
-   * (manager 直造场景,如既有的 manager.test.ts makeHarness);生产装配由 build-engine
-   * 注入主代理的 sandboxRoot(SC8)。manager 自身不解析 opts.sandboxRoot —— 在
-   * buildWorkerPayload 内 realpath 一次后冻结,worker fs 工具沿用同一 resolved 值。
+   * Parent sandboxRoot — the parent agent's "work domain". `buildWorkerPayload`
+   * validates in one place that `def.sandboxRoot` must be prefix-of-parent
+   * (preventing arbitrary-path escalation). Default = process.cwd()
+   * (manager-direct construction scenarios, e.g. the existing manager.test.ts
+   * makeHarness); production assembly injects the main agent's sandboxRoot via
+   * build-engine. The manager itself does not resolve opts.sandboxRoot — it is
+   * realpath'd once inside buildWorkerPayload and then frozen, and the
+   * worker's fs tools reuse the same resolved value.
    */
   readonly sandboxRoot?: string;
   /**
-   * T8（D6, plans/worktree-live-task-root.md §6 T8）: 可选 live cell getter
-   * —— `buildWorkerPayload` 入口读一次活根作为父 sandbox 上界。当 parent
-   * rebinds 时,manager 对 def.sandboxRoot 的 prefix-of-parent 校验随之迁移:
-   * 旧根里的 def 现在是新根之外,被 typed 拒绝,不会被误判为新根的合法子。
+   * Optional live cell getter — `buildWorkerPayload` reads the live root once
+   * at entry as the parent sandbox bound. When the parent rebinds, manager's
+   * prefix-of-parent validation of def.sandboxRoot migrates with it: a def
+   * inside the old root is now outside the new one and gets typed-rejected,
+   * never misjudged as a legitimate child of the new root.
    *
-   * 与 `sandboxRoot` 互斥:在场时优先于 `sandboxRoot`(getter read 在每次
-   * spawn 时都重算)。缺席 → 用 `sandboxRoot` 的冻结值(既有行为,逐字节不变)。
+   * Mutually exclusive with `sandboxRoot`: when present it takes priority
+   * (the getter is re-read on every spawn). Absent → use `sandboxRoot`'s
+   * frozen value (existing behavior, byte-for-byte unchanged).
    */
   readonly sandboxRootCell?: () => string;
   /**
-   * #358 T4: 可选 TraceService — 子代理生命周期三类事件 (subagent_spawn /
-   * subagent_state_change / subagent_stop) 落盘。注入则通过 safeTrace 包裹
-   * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
+   * Optional TraceService — the three subagent lifecycle event kinds
+   * (subagent_spawn / subagent_state_change / subagent_stop) persist to disk.
+   * When injected, emit through safeTrace wrapping; when not injected, zero
+   * side effects (byte-stable with existing behavior).
    */
   readonly trace?: TraceService;
   /**
@@ -719,108 +799,140 @@ export function createSubAgentManager(opts: {
    */
   readonly diagnosticsDir?: string;
   /**
-   * #358 T2: per-task 缺省 wallclock (毫秒) — 消费链中段:
-   * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
-   * 装配由 build-engine 从 env.subagent.taskTimeoutMs (settings/env 合并)
-   * 透传;env 层无第三层默认 (常量唯一声明点在本文件)。
+   * Per-task default wallclock (ms) — middle of the consumption chain:
+   * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`.
+   * Assembly threads it from build-engine's env.subagent.taskTimeoutMs
+   * (settings/env merged); the env layer carries no third-tier default (the
+   * constant's single declaration point is in this file).
    */
   readonly taskTimeoutMs?: number;
   /**
-   * #361 C1 / T4 + ADR-0096 T2: 并发上限。`number` 仅正整数生效（缺席或非法
-   * 值回退 `MAX_CONCURRENT_WORKERS`，即 15）；`"unlimited"` = 不做并发拒绝
-   * （OS / 内存仍是事实顶）；`SubagentCapacityHolder` = 运行期就地翻转（装配
-   * 期 / TUI /config 面板同款）。超限立即抛错，不排队。
+   * Concurrency cap. `number` only takes effect as a positive integer
    *
-   * 与 `subagentCapacityHolder` 互斥优先：holder 在场时 **完全** 用 holder 当前值
-   * （spawn 入口每次现读），`maxConcurrentWorkers` 仅作 holder 缺席时的初值兜底；
-   * 都缺 → 默认 15（与既有行为逐字节相等）。
+   // (ADR-0096)
+   * (absent or invalid falls back to `MAX_CONCURRENT_WORKERS`, i.e. 15);
+   * `"unlimited"` = no concurrency rejection (OS / memory remain the factual
+   * caps); a `SubagentCapacityHolder` = runtime in-place flipping (assembly
+   * time / TUI /config panel alike). Over the limit throws immediately, no
+   * queueing.
+   *
+   * Priority against `subagentCapacityHolder`: when the holder is present,
+   * **fully** use the holder's current value (read fresh at every spawn
+   * entry); `maxConcurrentWorkers` only serves as the initial fallback when
+   * the holder is absent; both absent → default 15 (byte-for-byte equal to
+   * existing behavior).
    */
   readonly maxConcurrentWorkers?: SubagentCapacityValue;
   /**
-   * ADR-0096 T2：运行期并发上限 holder —— 镜像 `FsModeContext` /
-   * `PermissionModeContext` 同形态。在场时 spawn 闸每次 `holder.get()` 现读；
-   * TUI /config 面板 Enter 循环 `holder.set(...)`，manager 立即按新闸生效
-   * （与图节点同顶：run-graph-executor 既有断言不回归）。
+   * Runtime concurrency-cap holder — same shape as `FsModeContext` /
+   *
+   // (ADR-0096)
+   * `PermissionModeContext`. When present, the spawn gate reads
+   * `holder.get()` fresh every time; TUI /config panel Enter loops
+   * `holder.set(...)`, and the manager applies the new gate immediately
+   * (sharing the ceiling with graph nodes: run-graph-executor's existing
+   * assertions do not regress).
    */
   readonly subagentCapacityHolder?: SubagentCapacityHolder;
   /**
-   * T6 (plans/write-situation-disclosure.md): 可选 worktree 隔离档
-   * (build-engine `isolationEnabled` 单一读取点的透出)。`buildWorkerPayload`
-   * 在 spawn 期用它与 resolved sandboxRoot 一起算 `writeSituation`，再透传
-   * 进 envelope —— worker prior 据此渲染写根段。缺省 → `false`(隔离 OFF,
-   * 等价 `writable_main`),与改造前 byte-equal（build-engine 装配层总会传
-   * 此值;该 seam 仅供 manager 直造场景如既有 manager.test.ts makeHarness
-   * 走默认行为）。
+   * Optional worktree isolation tier (the transparency of build-engine's
+   * single `isolationEnabled` read point). `buildWorkerPayload` uses it with
+   * the resolved sandboxRoot at spawn time to compute `writeSituation`, then
+   * threads it into the envelope — the worker prior renders its write-root
+   * segment from it. Default → `false` (isolation OFF, equivalent to
+   * `writable_main`), byte-equal with the pre-change state (build-engine's
+   * assembly layer always passes this value; the seam exists only for
+   * manager-direct scenarios like the existing manager.test.ts makeHarness
+   * falling back to default behavior).
    */
   readonly isolationOn?: boolean;
   /**
-   * T5 (ADR-0071 / SC8 + Decision 1):
-   * 子代理 per-agent trace + meta 归属目录 = `<父会话文件夹>/subagents/`。
-   * 在场时:每次 spawn 懒建一个 file-mode JsonlTraceService 实例
-   * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId 钉 taskId);
-   * 同一 taskId 的三类 lifecycle 记录(subagent_spawn / _state_change / _stop)
-   * 全落该文件(父进程写, ADR-0035「无条件落盘」生命周期面保证不降级)。
-   * 首次 spawn 还写一次 `.meta.json`(SC8 acceptance: 至少
-   * `{agentType, toolUseId, spawnDepth}`,Postel 缺席则省略)。
-   * 缺席 → 走 NoopTraceService(同既有 build-engine 缺省形态, byte-stable)。
+   * ADR-0071: subagent per-agent trace + meta home directory =
+   * `<parent session folder>/subagents/`. When present: each spawn lazily
+   * creates a file-mode JsonlTraceService instance
+   * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId pinned to taskId);
+   * all three lifecycle record kinds for the same taskId (subagent_spawn /
+   * _state_change / _stop) land in that file (written by the parent process;
+   *
+   // (ADR-0035)
+   * the "unconditional persistence" lifecycle guarantee ensures no
+   * degradation). The first spawn also writes `.meta.json` once: at least
+   * `{agentType, toolUseId, spawnDepth}`, Postel — absent fields omitted.
+   * Absent → NoopTraceService (same as the existing build-engine default,
+   * byte-stable).
    */
   readonly subagentsDir?: string;
   /**
-   * review-fix (M5):装配期根 —— `<baseDir>/projects/<slug>` 形式(serve hub
-   * 不在装配期持有 conversationId 时用此字段而非 `subagentsDir`)。
-   * spawn 期若 `def.conversationId` 在场 → 派生 per-conversation 子目录
-   * `<projectDir>/<sanitize(convId)>/subagents/`;若 convId 缺席 → 退回
-   * `<projectDir>/subagents/`(项目层平铺,兼容 legacy manager 直造场景)。
+   * Assembly-time root — shaped `<baseDir>/projects/<slug>` (used by the
+   * serve hub when it does not hold a conversationId at assembly time,
+   * instead of `subagentsDir`). At spawn, if `def.conversationId` is present
+   * → derive the per-conversation subdirectory
+   * `<projectDir>/<sanitize(convId)>/subagents/`; if convId is absent → fall
+   * back to `<projectDir>/subagents/` (project-level flat, compatible with
+   * legacy manager-direct scenarios).
    *
-   * 与 `subagentsDir` 互斥优先:`subagentsDir` 在场时按既有形态直接用;
-   * `subagentsDir` 缺席但 `projectDir` 在场 → 走本两段式缝派生。
-   * 与 `resolveConversationTodoPath` 同构(todo-write.ts SSOT),不要发明
-   * 新的形状。
+   * Mutually exclusive priority with `subagentsDir`: when `subagentsDir` is
+   * present it is used directly in the existing form; when `subagentsDir` is
+   * absent but `projectDir` present → derive through this two-segment seam.
+   * Same shape as `resolveConversationTodoPath` (the todo-write.ts SSOT) —
+   * do not invent a new form.
    */
   readonly projectDir?: string;
   /**
-   * ADR-0085 / SC9:父会话项目目录(`TodoWriteToolDeps.todoDir` 的同一值,
-   * host 注入)。在场且 `def.conversationId` 在场 → `buildWorkerPayload` 把
-   * `{projectDir, conversationId}` 作为 `todoLedger` 落进 envelope,worker
-   * 装配期据此把 **同一本** todos.md 挂给 worker 的 todo_write(读 / 更新;
-   * 添加由工具对 worker typed 拒绝)。缺席 → 不发该字段(旧 wire 形态,
-   * worker 工具面不含 todo_write,byte-stable)。
+   * ADR-0085: parent-session project directory (the same value as
+   * `TodoWriteToolDeps.todoDir`, host-injected). Present and `def.conversationId`
+   * present → `buildWorkerPayload` writes `{projectDir, conversationId}` as
+   * `todoLedger` into the envelope, and the worker's assembly mounts **the
+   * same** todos.md to the worker's todo_write (read / update; adds are
+   * typed-rejected by the tool for the worker). Absent → field not emitted
+   * (old wire form, worker tool surface without todo_write, byte-stable).
    *
-   * 不从 trace 文件布局反推 —— 落值与 `resolveConversationTodoPath`
-   * (todo-write.ts SSOT)同一对 (projectDir, conversationId)。
+   * Never reverse-derived from the trace file layout — the stored value and
+   * `resolveConversationTodoPath` (todo-write.ts SSOT) use the same
+   * (projectDir, conversationId) pair.
    */
   readonly todoDir?: string;
   /**
-   * T7 (`specs/skill-index-increment.md` / SC10)—— 父会话**当时**的完整模型
-   * 索引条目 getter（= 父冻表模型索引 ∪ 父索引进场史，见 ADR-0098）。
+   * The parent session's complete model-index entries **as of now** (getter) =
+   * the parent's frozen-table model index ∪ the parent index's arrival
+   * history — see ADR-0098.
    *
-   * **每次 spawn 现读**（与 `sandboxRootCell` 同形态，构造期取值不叫「当时」）：
-   * 父会话中途有新技能名进场后，下一次 spawn 的 worker 快照才含它们。
-   * 返回值落进 `WorkerEnvelope.skillIndexSnapshot`，worker 侧据它渲染自己的
-   * `<available_skills>` 冻表，不再自做 diff / 不再依赖 worker 自己的扫描根。
+   * **Re-read at every spawn** (same shape as `sandboxRootCell`; taking the
+   * value at construction time is not "as of now"): once new skill names
+   * arrive mid-session in the parent, the next spawn's worker snapshot
+   * contains them. The return value lands in `WorkerEnvelope.skillIndexSnapshot`;
+   * the worker renders its own `<available_skills>` frozen table from it, no
+   * longer diffing on its own / no longer relying on the worker's own scan roots.
    *
-   * **入参是该 spawn 的父会话锚**（`def.conversationId`）：进场史是 per-session
-   * 叶子（`<projectDir>/<sanitize(convId)>/skill-index.json`），而一台
-   * subagent manager 随 build-engine 跨会话共享（serve 尤其）—— 把
-   * conversationId 钉进装配期会让所有会话拿到同一份史。冻表名那一半与会话
-   * 无关，由 getter 的实现方在缝里以 `initialNames` 承载。
+   * **The argument is this spawn's parent-session anchor** (`def.conversationId`):
+   * arrival history is a per-session leaf
+   * (`<projectDir>/<sanitize(convId)>/skill-index.json`), while one subagent
+   * manager is shared across sessions by build-engine (serve especially) —
+   * pinning conversationId at assembly time would hand every session the same
+   * history. The frozen-table-names half is session-independent and is
+   * carried by the getter's implementor through `initialNames` in the seam.
    *
-   * 三态语义（父侧的「不知道」与「确实是空」不同义）：
-   *   - getter 缺席 / 返回 `undefined` → envelope **省略该键**，worker 退回
-   *     自己的独立 rescan（旧 wire / manager 直造路径逐字节不变）;
-   *   - 返回 `[]` → 键在场且为空数组，worker 渲染空清单句（父确实没有模型
-   *     索引，不拿 worker 自扫结果顶替）。
+   * Three-state semantics (the parent's "don't know" and "definitely empty"
+   * are not the same thing):
+   *   - getter absent / returns `undefined` → envelope **omits the key**,
+   *     worker falls back to its own independent rescan (old wire /
+   *     manager-direct paths byte-for-byte unchanged);
+   *   - returns `[]` → key present as an empty array, worker renders the empty
+   *     manifest sentence (the parent genuinely has no model index; the
+   *     worker's self-scan result must not stand in for it).
    *
-   * getter 抛错 → 原样上抛（不吞成空快照）：装配期故障显形，好过静默给
-   * worker 一张错的冻表。
+   * A throwing getter propagates as-is (never swallowed into an empty
+   * snapshot): surfacing assembly-time faults beats silently handing the
+   * worker a wrong frozen table.
    */
   readonly skillIndexSnapshot?: (
     conversationId: string | undefined
   ) => readonly SkillIndexSnapshotEntry[] | undefined;
   /**
-   * T5:可选 override — 用外部注入的 TraceService 工厂(每个 taskId 一份)
-   * 取代默认 `createJsonlTraceService` 文件实例。仅供测试/特殊注入;
-   * 生产路径走 file mode 默认。
+   * Optional override — replaces the default `createJsonlTraceService` file
+   * instances with an externally injected TraceService factory (one per
+   * taskId). Test / special injection only; the production path uses the file
+   * mode default.
    */
   readonly traceFactory?: (
     filePath: string,
@@ -828,31 +940,32 @@ export function createSubAgentManager(opts: {
   ) => TraceService;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
-  /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
+  /** Polling handles of all pending waitFor (non-terminal; shutdown must clear them to prevent a hanging process). */
   const waitPollers = new Set<ReturnType<typeof setInterval>>();
-  /** 未决 waitFor 的 settleReject 引用:shutdown 时主动拒绝,SC16 不悬挂。 */
+  /** settleReject references of pending waitFor: actively rejected at shutdown, never hanging. */
   const waitRejecters = new Set<(reason: unknown) => void>();
   const terminalMailbox = createSubAgentMailbox();
   /**
-   * T5: 每个 task 独立持有的 per-agent trace 实例 + meta 写盘闭包。
-   * `opts.subagentsDir` 缺席时退化为 NoopTraceService(同 build-engine
-   * 缺省形态, byte-stable);在 spawn 入口懒建,任务结束后 GC 实例即可
-   * (写盘 trace 由操作系统 page cache / fsync 兜底,manager 不持有
-   * 长生命周期文件句柄)。
+   * Per-task independently held per-agent trace instance + meta write closure.
+   * When `opts.subagentsDir` is absent, degrades to NoopTraceService (same as
+   * the build-engine default, byte-stable); lazily built at the spawn entry,
+   * and the instance can simply be GC'd after the task ends (trace writes are
+   * backed by the OS page cache / fsync, the manager holds no long-lived file
+   * handles).
    */
   type PerAgentTrace = {
     readonly trace: TraceService;
     readonly filePath: string;
   };
   const perAgentTraces = new Map<string, PerAgentTrace>();
-  /** review-fix (M5):subagentsDir / projectDir 任一在场 → 走 per-agent 形态
-   *  (null 触发 NoopTraceService);都缺 → 退回到 opts.trace 单实例兼容。 */
+  /** subagentsDir / projectDir any present → per-agent form
+   *  (null triggers NoopTraceService); both absent → fall back to the opts.trace single-instance compatibility. */
   const noopTrace: TraceService | null =
     opts.subagentsDir || opts.projectDir ? null : (opts.trace ?? null);
   /**
-   * 工厂默认实现:file mode JsonlTraceService,锚
-   * `<subagentsDir>/agent-<taskId>.jsonl`,conversationId 钉 taskId。
-   * 测试可注入 `opts.traceFactory` 覆盖。
+   * Factory default implementation: file mode JsonlTraceService, anchored at
+   * `<subagentsDir>/agent-<taskId>.jsonl`, conversationId pinned to taskId.
+   * Tests may inject `opts.traceFactory` to override.
    */
   const defaultTraceFactory = (
     filePath: string,
@@ -860,10 +973,10 @@ export function createSubAgentManager(opts: {
   ): TraceService =>
     createJsonlTraceService({ traceFilePath: filePath, conversationId });
   const traceFactory = opts.traceFactory ?? defaultTraceFactory;
-  /** 解析 task → per-agent trace(懒建 + 复用, 同一 task 不开第二份)。
-   * review-fix (M5):接受可选 `def` —— `def.conversationId` 在场时派生
-   * `<projectDir>/<sanitize(convId)>/subagents/`;否则退回装配期根
-   * (`opts.subagentsDir` 优先,否则 `<opts.projectDir>/subagents/`)。 */
+  /** Resolve task → per-agent trace (lazy build + reuse, never a second instance per task).
+   * Accepts an optional `def` — when `def.conversationId` is present, derive
+   * `<projectDir>/<sanitize(convId)>/subagents/`; otherwise fall back to the
+   * assembly-time root (`opts.subagentsDir` first, else `<opts.projectDir>/subagents/`). */
   function resolvePerAgentTrace(
     taskId: string,
     def?: SubAgentDefinition
@@ -880,18 +993,21 @@ export function createSubAgentManager(opts: {
     return traceInstance;
   }
   /**
-   * review-fix (M5):两段式缝派生 —— 给定 def 派生「实际写入目录」。
-   *   1. `opts.subagentsDir` 在场 → 直接用(装配件已含 convId 段,cli/TUI
-   *      形态,byte-stable);
-   *   2. 否则 `opts.projectDir` + `def.conversationId` → 派生
-   *      `<projectDir>/<sanitize(convId)>/subagents/`(与 todo-write 的
-   *      `resolveConversationTodoPath` 同构);
-   *   3. `projectDir` 在场但 `def.conversationId` 缺席 → `<projectDir>/subagents/`
-   *      (项目层平铺,legacy manager 直造场景兜底)。
+   * Two-segment seam derivation — given a def, derive the "actual write
+   * directory".
+   *   1. `opts.subagentsDir` present → use it directly (the assembly part
+   *      already includes the convId segment, cli/TUI form, byte-stable);
+   *   2. else `opts.projectDir` + `def.conversationId` → derive
+   *      `<projectDir>/<sanitize(convId)>/subagents/` (same shape as
+   *      todo-write's `resolveConversationTodoPath`);
+   *   3. `projectDir` present but `def.conversationId` absent →
+   *      `<projectDir>/subagents/` (project-level flat, fallback for legacy
+   *      manager-direct scenarios).
    *
-   * 两种装配件 `subagentsDir` / `projectDir` 互斥共用 —— 同一 manager 不
-   * 同时收到两种装配件:build-engine 在装配件存在时优先透传 `subagentsDir`
-   * (cli/TUI);hub 全链路改走 `projectDir`。
+   * The two assembly parts `subagentsDir` / `projectDir` are mutually
+   * exclusive — one manager never receives both: build-engine prefers
+   * threading `subagentsDir` when the assembly part exists (cli/TUI); the
+   * hub's whole chain goes through `projectDir`.
    */
   function resolveSubagentsDirForDef(
     def?: SubAgentDefinition
@@ -976,23 +1092,26 @@ export function createSubAgentManager(opts: {
     };
   }
   /**
-   * SC8: per-task `.meta.json` 一次性写盘 —— 至少含
-   * `{agentType, toolUseId, spawnDepth}`,Postel 缺席字段省略。
-   * `agentType` 取 `def.role`(spawn_subagent → catalog id; judge → "judge";
-   * 缺省 / 未知 / 旧 wire → 字段省略)。
+   * Per-task `.meta.json` written once — contains at least
+   * `{agentType, toolUseId, spawnDepth}`, Postel: absent fields omitted.
+   * `agentType` comes from `def.role` (spawn_subagent → catalog id; judge →
+   * "judge"; default / unknown / old wire → field omitted).
    *
-   * review-fix (M5):落点与 `resolvePerAgentTrace` 同源 —— 同一 def 派生
-   * 同一目录。装配件 subagentsDir / projectDir 互斥共用同一函数。
+   * The landing site shares its source with `resolvePerAgentTrace` — the same
+   * def derives the same directory. The assembly parts subagentsDir /
+   * projectDir are mutually exclusive and share the same function.
    *
-   * review-fix (M6):`spawnDepth` 默认 1 —— 顶层 spawn 恒为 1(v1 禁嵌套);
-   * `def.spawnDepth` 显式值优先(seam 留给将来嵌套派发场景)。
-   * 失败时 console.warn,不阻塞 spawn。
+   * `spawnDepth` defaults to 1 — top-level spawn is always 1 (v1 forbids
+   * nesting); an explicit `def.spawnDepth` wins (the seam is reserved for
+   * future nested-dispatch scenarios). On failure, console.warn; never blocks
+   * spawn.
    *
-   * 「一次」是**结构性**的,不靠 latch:`writeMetaOnce` 只有一个调用点,且
-   * 开头 `existsSync(metaPath)` 早返回 —— 同一任务第二次进来不会走到 warn。
-   * 与之对照,`writeFinalTextToPad` 会随同一任务的多次信封落地重入(见其头注),
-   * 故那里必须用 `finalTextWriteWarned` 锁存。两者形态不同是各自的调用基数
-   * 决定的,不是遗漏。
+   * "Once" is **structural**, not latch-based: `writeMetaOnce` has a single
+   * call site plus an `existsSync(metaPath)` early return — a task's second
+   * pass never reaches the warn. By contrast, `writeFinalTextToPad` re-enters
+   * with multiple envelope landings on the same task (see its header), so
+   * there `finalTextWriteWarned` must latch. The differing shapes follow each
+   * one's call cardinality, not an oversight.
    */
   function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
     const subagentsDir = resolveSubagentsDirForDef(def);
@@ -1007,12 +1126,13 @@ export function createSubAgentManager(opts: {
     if (presentString(def.toolUseId)) {
       meta.toolUseId = def.toolUseId;
     }
-    // M6: v1 禁嵌套 → 普通 spawn 恒为 1;def.spawnDepth 显式值优先。
+    // v1 forbids nesting → plain spawn is always 1; an explicit def.spawnDepth wins.
     meta.spawnDepth = def.spawnDepth ?? 1;
     try {
-      // SC8: 子目录可能在 lazy resolvePerAgentTrace 之前就写 meta(此处没
-      // 经过 trace 路径);显式 mkdirSync 兜底 — resolvePerAgentTrace 内
-      // 的 mkdirSync 是 trace 写盘的 idempotent 保护,不替 meta 兜底。
+      // The meta may be written before the lazy resolvePerAgentTrace creates
+      // the subdirectory (this path skips the trace side); explicit mkdirSync
+      // backstop — the mkdirSync inside resolvePerAgentTrace is idempotent
+      // protection for trace writes, not a substitute for the meta backstop.
       mkdirSync(dirname(metaPath), { recursive: true });
       writeFileSync(metaPath, JSON.stringify(meta) + "\n");
     } catch (err) {
@@ -1021,15 +1141,20 @@ export function createSubAgentManager(opts: {
     }
   }
   /**
-   * 兼容既有 `opts.trace` 注入(测试 seam):manager 直造场景若传 trace 但
-   * 没传 subagentsDir,沿用 #358 T4 形态——所有 task 共用单实例 trace
-   * (走 `subagent.jsonl` 目录模式聚合落盘),行为同改造前。
-   * 显式传了 subagentsDir 后,opts.trace 失效(per-agent 形态优先)。
+   * Compatibility with the existing `opts.trace` injection (test seam): if a
+   * manager-direct scenario passes trace but no subagentsDir, the previous
+   * shape is kept — all tasks share one trace instance (aggregated writes via
+   * the `subagent.jsonl` directory mode), behavior unchanged from before.
+   * Once subagentsDir is explicitly passed, opts.trace stops taking effect
+   * (the per-agent form wins).
    *
-   * ADR-0096 T2：闸值持有 = holder 优先；holder 缺席 → 一次性
-   * `maxConcurrentWorkers`（与既有行为逐字节相等，仍由 `opts.maxConcurrentWorkers`
-   * 经 fail-closed 校验）。spawn 闸读 `currentCapacity()`：holder 形态每次现读，
-   * 静态形态直接返 opts 初值。
+   * Gate-value holding = holder first; holder absent → one-shot
+   *
+   // (ADR-0096)
+   * `maxConcurrentWorkers` (byte-for-byte equal to existing behavior, still
+   * running `opts.maxConcurrentWorkers` through fail-closed validation). The
+   * spawn gate reads `currentCapacity()`: the holder form re-reads every
+   * time, the static form returns the opts initial value directly.
    */
   const capacityHolder: SubagentCapacityHolder =
     opts.subagentCapacityHolder ??
@@ -1037,19 +1162,21 @@ export function createSubAgentManager(opts: {
       opts.maxConcurrentWorkers ?? DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS
     );
 
-  /** spawn 闸读 holder 当前值（`number` 或 `"unlimited"`）。 */
+  /** The spawn gate reads the holder's current value (`number` or `"unlimited"`). */
   function currentCapacity(): SubagentCapacityValue {
     return capacityHolder.get();
   }
 
   /**
-   * #358 T4: emitStateChange — 任何 task.state 迁移点必经此处。
-   * Postel: reason 仅 toState === "failed" 时填 (spec Code Style 121)。
-   * 该函数: (1) 写入 task.state (2) 同步发 subagent_state_change 埋点 (3) 不 throw。
-   * safeTrace 包裹: trace 写盘失败不阻塞 manager 业务。
-   * T5: trace per task —— per-agent 形态下按 taskId 取独立 trace 实例
-   * (`<subagentsDir>/agent-<taskId>.jsonl`);opts.subagentsDir 缺席时
-   * 退回到 `opts.trace` 兼容形态(#358 T4 既有聚合单实例)。
+   * emitStateChange — every task.state transition point must pass through
+   * here. Postel: reason is filled only when toState === "failed". This
+   * function: (1) writes task.state (2) synchronously emits the
+   * subagent_state_change trace record (3) never throws. safeTrace wrapping:
+   * trace write failure does not block manager business. Trace is per task —
+   * in the per-agent form the trace instance is taken by taskId
+   * (`<subagentsDir>/agent-<taskId>.jsonl`); when opts.subagentsDir is absent
+   * it falls back to the `opts.trace` compatibility form (the existing
+   * aggregated single instance).
    */
   function emitStateChange(
     task: Task,
@@ -1060,13 +1187,16 @@ export function createSubAgentManager(opts: {
     }
   ): void {
     const fromState = task.state;
-    // review-fix (Fix 2): 同态迁移 self-loop guard —— 状态机 "same state"
-    // 迁移是 no-op。典型场景: SC6 优雅收尾时 timer fire 先 emitStateChange
-    // (running → failed), 随后 worker 的 timeout envelope 在 stdout handler
-    // 再次 emitStateChange (failed → failed) —— 前者已落盘, 后者若再写会
-    // 产生 from_state === to_state === "failed" 的 spurious 记录。跳过 state
-    // 赋值与 trace 两者 (既有 emitStop 的 stoppedEmitted 单点守门不覆盖这里:
-    // state_change 没有等价 flag, 靠 prev === toState 判定)。
+    // Same-state transition self-loop guard — a "same state" transition in the
+    // state machine is a no-op. Typical scenario: during graceful timeout
+    // collection the timer fires first and calls emitStateChange
+    // (running → failed), then the worker's timeout envelope makes the stdout
+    // handler call emitStateChange again (failed → failed) — the former has
+    // already persisted, and writing again would produce a spurious record
+    // with from_state === to_state === "failed". Skip both the state
+    // assignment and the trace (emitStop's stoppedEmitted single-emit guard
+    // does not cover this: state_change has no equivalent flag, it relies on
+    // the prev === toState check).
     if (fromState === toState) return;
     task.state = toState;
     const taskTrace = resolvePerAgentTrace(task.id, task.def);
@@ -1089,10 +1219,12 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * 终态信封 → mailbox notice 的 Postel 投影：可选字段逐项条件展开。
-   * 单点收拢而不是让 emitStop 自己长出一串 `...(x !== undefined ? …)`——
-   * 每加一个 locator 字段就给 emitStop 加一段分支，复杂度阈值会先于语义
-   * 漂移报警（同 ownershipInfoFields 的收拢理由）。
+   * Postel projection terminal envelope → mailbox notice: optional fields
+   * expanded conditionally, item by item. Collapsed at one point instead of
+   * letting emitStop grow a chain of `...(x !== undefined ? …)` — every
+   * locator field added would grow a branch in emitStop, and the complexity
+   * threshold would alarm before any semantic drift (same collapse rationale
+   * as ownershipInfoFields).
    */
   function terminalNoticeOf(task: Task, envelope: SubAgentEnvelope) {
     return {
@@ -1126,10 +1258,10 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * #358 T4: emitStop — 任务终态时落 subagent_stop; stoppedEmitted flag 守门
-   * 保证 single-emit (exit handler + timeout-fire + child.on("error") 多路径
-   * 都可能触发终态); 已发则 no-op。
-   * Postel: 缺省 reason = envelope.reason; summary = envelope.summary (failed 态必有)。
+   * emitStop — persists subagent_stop at task terminal state; the
+   * stoppedEmitted flag guards single-emit (exit handler + timeout-fire +
+   * child.on("error") are multiple terminal-state paths); no-op if already sent.
+   * Postel: default reason = envelope.reason; summary = envelope.summary (always present in failed state).
    */
   function emitStop(
     task: Task,
@@ -1147,12 +1279,12 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
     if (task.envelope !== undefined && task.def.excludeFromHostDrain !== true) {
-      // Locked sentence 2: 发布在 locateEnvelope 之后，故 drain/wake 收到的
-      // 信封同样带 output_path（写盘先于 publish）。
+      // Locked sentence 2: published after locateEnvelope, so the envelopes
+      // drain/wake receives also carry output_path (the write precedes publish).
       terminalMailbox.publish(terminalNoticeOf(task, task.envelope));
     }
     const endedAt = new Date().toISOString();
-    // #358 T7: 终态 ISO 随 single-emit 锁存一次 (listSubagents 读它当 endedAt)。
+    // The terminal ISO is latched once alongside single-emit (listSubagents reads it as endedAt).
     task.endedAt = endedAt;
     const durationMs = Math.max(
       0,
@@ -1214,12 +1346,14 @@ export function createSubAgentManager(opts: {
       reason: "crashed",
       error,
     });
-    // T5 (ADR-0071 / ADR-0035 同日 Amendment):
-    // stderr / subagentDiagnosticsDir 跟随 `<父会话文件夹>/subagents/` —
-    // 显式 diagnosticsDir 缺省 → 退化到 subagentsDir。
-    // review-fix (M5):退化链加 projectDir 两段式缝派生(同 def 落点) —
-    // hub 路径(def.conversationId 在场)下 stderr pointer 也落 per-conversation
-    // 叶子。三者都缺 → 不写 stderr pointer (与既有行为 byte-stable)。
+    // ADR-0071: stderr / subagentDiagnosticsDir follow
+    // (ADR-0035)
+    // `<parent session folder>/subagents/` — an explicit diagnosticsDir is
+    // absent → degrade to subagentsDir. The degradation chain also derives
+    // through the projectDir two-segment seam (same-def landing site): under
+    // the hub path (def.conversationId present) the stderr pointer lands in
+    // the per-conversation leaf too. All three absent → no stderr pointer
+    // (byte-stable with existing behavior).
     const effectiveDiagnosticsDir =
       opts.diagnosticsDir ?? resolveSubagentsDirForDef(task.def);
     const stderrDiagnostics =
@@ -1251,36 +1385,46 @@ export function createSubAgentManager(opts: {
   }
 
   function spawn(def: SubAgentDefinition): { readonly taskId: string } {
-    // #361 C1 / T4 + ADR-0096 T2: running+starting ≥ configured cap 立即抛
-    // SubAgentCapacityError。显式失败 > 静默排队(handler 接住后抛
-    // ToolExecutionError,模型降并发重试)。
+    // running+starting ≥ configured cap throws SubAgentCapacityError
+    // (ADR-0096)
+    // immediately. Explicit failure > silent queueing (the handler catches it
+    // and throws ToolExecutionError, the model lowers concurrency and retries).
     //
-    // T2 / holder：闸值每次现读 holder.get()，让 TUI /config 面板 Enter 翻转
-    // 立即对下一次 spawn 生效。`"unlimited"` → 不做并发拒绝（OS / 内存仍是
-    // 事实顶，ADR-0096 主条款），分支跳过整段计数 + 抛错路径。
+    // The cap value is re-read from holder.get() every time, so a TUI /config
+    // panel Enter flip takes effect on the very next spawn. `"unlimited"` →
+    // no concurrency rejection (OS / memory remain the factual caps) (ADR-0096), the
+    // branch skips the whole counting + throw path.
     const cap = currentCapacity();
     if (cap !== "unlimited") {
       assertCapacityAvailable(cap, tasks);
     }
 
-    // #357 T1: 校验必须在 opts.spawn 之前(否则 line 205 既有 try/catch 会把
-    // 拒绝吞成 task failed)。也不在 tasks.set 之后 —— 提前抛出保证 map 无残留。
-    // buildWorkerPayload 单点校验所有 spawn 路径(模型工具 + 判官 + 将来角色),
-    // 校验失败同步抛 SubAgentSandboxRootError(handler 转 ToolExecutionError)。
+    // Validation must precede opts.spawn (otherwise the existing try/catch in
+    // the launch path would swallow the rejection as task failed). Also not
+    // after tasks.set — throwing early guarantees no map residue.
+    // buildWorkerPayload validates every spawn path in one place (model tool
+    // + judge + future roles); validation failure throws
+    // SubAgentSandboxRootError synchronously (the handler converts it to ToolExecutionError).
     //
-    // T5 (ADR-0071 / SC8 + L2): buildWorkerPayload
-    // 现在接收 taskId —— 父侧 manager 已经锁定 taskId 才能算出对应的 traceFilePath
-    // (per-agent 形态: `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),写到
-    // envelope 让 worker file-mode 落该路径,代替 L2 假 scope `randomUUID()`(已退役)。
+    // ADR-0071: buildWorkerPayload now receives taskId — only with the taskId
+    // already locked by the parent-side manager can the corresponding
+    // traceFilePath be computed (per-agent form:
+    // `<parent session folder>/subagents/agent-<taskId>.jsonl`), written into
+    // the envelope so the worker persists that path in file-mode, replacing
+    // the retired fake-scope `randomUUID()`.
     return launchWorker(def, randomUUID());
   }
 
   /**
-   * ADR-0102 T4 — spawn 的机械臂：以给定 task_id 起一个新 worker 进程并
-   * 入账（capacity / 入参校验在调用点完成后进入本函数）。fresh spawn 传
-   * randomUUID()；resumeTask 传**同一个** task_id（对外句柄不变、进程是
-   * 新的）。meta 已存在则 writeMetaOnce 天然跳过；per-agent trace 按
-   * taskId 缓存复用，续跑的 lifecycle 记录接在同一份 trace 之后。
+   * The mechanical arm of spawn: start a new worker process under a given
+   *
+   // (ADR-0102)
+   * task_id and book it (capacity / argument validation already completed at
+   * the call site before entering this function). Fresh spawn passes
+   * randomUUID(); resumeTask passes **the same** task_id (external handle
+   * unchanged, process is new). If meta already exists, writeMetaOnce skips
+   * naturally; the per-agent trace is cached and reused by taskId, so the
+   * resume's lifecycle records append to the same trace file.
    */
   function launchWorker(
     def: SubAgentDefinition,
@@ -1304,9 +1448,10 @@ export function createSubAgentManager(opts: {
     tasks.set(id, task);
 
     let child: ChildProcess;
-    // T5: meta.json 写盘一次(成功 / 失败两条路径都尝试)—— 在 spawn 工厂
-    // 调用之前写,这样失败路径也有 meta;生产路径 spawn 工厂 spawn
-    // child 也耗时,meta 在那之前落盘对观测侧更友好。
+    // Write meta.json once (attempted on both success and failure paths) —
+    // before the spawn factory call, so the failure path has meta too; the
+    // production spawn factory also takes time launching the child, and meta
+    // landing before that is friendlier to the observability side.
     writeMetaOnce(id, def);
     try {
       child = opts.spawn(def, id, payload);
@@ -1318,10 +1463,10 @@ export function createSubAgentManager(opts: {
         summary: `subagent spawn failed: ${errMsg}`,
         result: "",
       });
-      // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
-      // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
-      // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走
-      // opts.trace 兼容形态。
+      // spawn still records subagent_spawn (the failure path records the
+      // attempt too); immediately followed by emitStateChange(failed) +
+      // emitStop (single-emit lifecycle). Trace per taskId (per-agent form);
+      // when subagentsDir is absent the opts.trace compatibility form applies.
       const taskTrace = resolvePerAgentTrace(task.id, task.def);
       if (taskTrace) {
         void safeTrace(() =>
@@ -1360,9 +1505,10 @@ export function createSubAgentManager(opts: {
       }
     });
 
-    // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
-    // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
-    // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走 opts.trace 兼容。
+    // subagent_spawn is emitted after the child launches successfully (task.state is
+    // still "starting" at this point; the emitStateChange("running") below drives the
+    // starting→running transition). Trace per taskId (per-agent form); if subagentsDir
+    // is absent, use opts.trace compatibility.
     const taskTrace = resolvePerAgentTrace(task.id, task.def);
     if (taskTrace) {
       const taskPreviewSource = truncateTaskPreview(def, 120);
@@ -1384,30 +1530,33 @@ export function createSubAgentManager(opts: {
         })
       );
     }
-    // 状态迁移: starting → running (emitStateChange 内置 task.state 写入 + 埋点)
+    // State transition: starting → running (emitStateChange internally writes task.state + emits the record)
     emitStateChange(task, "running");
 
-    // #356 High #2 fix: per-task timeout (SC6 / assumption 14).
-    // #358 T2: def.timeoutMs 缺省走三层链 (def ?? taskTimeoutMs ?? 7200s),
-    // 与前景 wait 对齐 — 避免"spawn wallclock vs waitFor wait"语义错位。
-    // expiry -> mark failed reason:"timeout" + SIGTERM;5s fallback SIGKILL
-    // against workers that ignore SIGTERM(review-fix S1:兜底改在 timeout
-    // SIGTERM 之后 arm,基准对齐 SIGTERM 点;不再 spawn 时 arm —— 否则默认
-    // 7200s timeout 下 5s 就把 worker 强杀)。timer.unref so it does not
-    // block process exit。
+    // Per-task timeout. def.timeoutMs defaults through the three-tier chain
+    // (def ?? taskTimeoutMs ?? 7200s), aligned with the foreground wait —
+    // avoiding the "spawn wallclock vs waitFor wait" semantic mismatch.
+    // expiry -> mark failed reason:"timeout" + SIGTERM; 5s fallback SIGKILL
+    // against workers that ignore SIGTERM (the fallback is armed after the
+    // timeout SIGTERM, baseline aligned to the SIGTERM point; arming at spawn
+    // time was wrong — with the default 7200s timeout a worker would be
+    // force-killed after 5s). timer.unref so it does not block process exit.
     const effectiveTimeoutMs = effectiveTaskTimeoutMs(def, opts);
     if (effectiveTimeoutMs > 0) {
       task.timeoutTimer = setTimeout(() => {
         // Already terminated (child exit / stdout envelope) -> do not overwrite.
         if (task.state === "completed" || task.state === "failed") return;
-        // #358 T3 优雅窗口:此处先写 generic fallback 信封并立即 SIGTERM,
-        // 但 SIGKILL 兜底(5s 后)到达之前,stdout handler 的
-        // `task.envelope = env` 会用**子进程写回的更丰富信封**无条件替换
-        // fallback —— worker 在 SIGTERM 上自跑收尾摘要轮后 emits 的
-        // {reason:"timeout", summary:<真实进度>} 因此成为父侧最终真值,
-        // 不被 generic "timeout after <n>ms" 覆盖 (emitStateChange/emitStop
-        // 已先发不可逆;timedOut 由 exit handler 的 guard 保 reason=timeout)。
-        // SIGKILL 兜底只对忽略 SIGTERM 的 worker 生效 (armKillFallback)。
+        // Graceful window: here we first write a generic fallback envelope and
+        // SIGTERM immediately, but before the SIGKILL backstop (5s later)
+        // arrives, the stdout handler's `task.envelope = env` unconditionally
+        // replaces the fallback with the **richer envelope written back by the
+        // child** — the {reason:"timeout", summary:<real progress>} the worker
+        // emits after running its own SIGTERM epilogue summary round thus
+        // becomes the parent-side final truth, not overwritten by the generic
+        // "timeout after <n>ms" (emitStateChange/emitStop have already fired
+        // irrevocably; timedOut is kept as reason=timeout by the exit handler's
+        // guard). The SIGKILL backstop only reaches workers that ignore
+        // SIGTERM (armKillFallback).
         task.envelope = locateEnvelope(task, {
           status: "failed",
           reason: "timeout",
@@ -1426,24 +1575,27 @@ export function createSubAgentManager(opts: {
             /* ESRCH et al. ignore */
           }
         }
-        // #361 T5 (S1):SIGKILL 兜底以 SIGTERM 为基准 arm 5s,worker 忽略
-        // SIGTERM 时 5s 后强杀;abortTask 已先到时此处 reset=false 直接
-        // 复用(避免 SIGKILL 时刻双发)。exit handler 清。
+        // SIGKILL backstop arms 5s from the SIGTERM baseline; when the worker
+        // ignores SIGTERM it is force-killed after 5s. If abortTask arrived
+        // first, reset=false here reuses directly (avoiding a double SIGKILL
+        // firing). Cleaned up by the exit handler.
         armKillFallback(task);
       }, effectiveTimeoutMs);
       task.timeoutTimer.unref?.();
     }
 
-    // 写 payload(stdin JSON-line)。worker 侧 for-await stdin 读到 EOF 才开始跑;
-    // 写完即 end(),否则 worker 永远等 stdin。#357 T1:复用单点校验过的 payload,
-    // 避免二次 buildWorkerPayload 调用带来的再次校验副作用风险(虽然当前为纯函数,
-    // 但显式复用更清晰,且与 opts.spawn 第三参对齐)。
+    // Write payload (stdin JSON-line). The worker's for-await stdin only
+    // starts running after EOF; end() immediately after writing, otherwise the
+    // worker waits for stdin forever. Reuse the already-validated payload from
+    // the single validation point to avoid side-effect risks of a second
+    // buildWorkerPayload call (it is currently a pure function, but explicit
+    // reuse is clearer and aligns with opts.spawn's third param).
     if (child.stdin) {
       child.stdin.write(JSON.stringify(payload) + "\n");
       child.stdin.end();
     }
 
-    // stdout newline-JSON → parse → truncate → completed。多条 envelope 取最后一条。
+    // stdout newline-JSON → parse → truncate → completed. With multiple envelopes the last one wins.
     let stdoutBuf = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBuf += chunk.toString("utf8");
@@ -1458,8 +1610,9 @@ export function createSubAgentManager(opts: {
             truncateEnvelopeResult(parseParentEnvelope(line))
           );
           task.envelope = env;
-          // #358 T4: state migration + stop event (single-emit 在 emitStop 内由
-          // stoppedEmitted flag 守门,后续 exit/error 路径重复触发 no-op)。
+          // State migration + stop event (single-emit is guarded by the
+          // stoppedEmitted flag inside emitStop; repeated triggers from later
+          // exit/error paths are no-ops).
           if (env.status === "ok") {
             emitStateChange(task, "completed");
             emitStop(task, "completed", { summary: env.summary });
@@ -1473,7 +1626,7 @@ export function createSubAgentManager(opts: {
             });
           }
         } catch (err) {
-          // SC13:信封校验失败 = 协议错误。
+          // Envelope validation failure = protocol error.
           const errMsg = err instanceof Error ? err.message : String(err);
           task.envelope = locateEnvelope(task, {
             status: "failed",
@@ -1491,7 +1644,7 @@ export function createSubAgentManager(opts: {
     });
 
     child.on("exit", (code, signal) => {
-      // #356 High #2 fix: child exited -> clear timeoutTimer + killFallback to
+      // child exited -> clear timeoutTimer + killFallback to
       // avoid stray SIGKILL on already-dead children.
       if (task.timeoutTimer) {
         clearTimeout(task.timeoutTimer);
@@ -1501,10 +1654,11 @@ export function createSubAgentManager(opts: {
         clearTimeout(task.timeoutKillFallback);
         task.timeoutKillFallback = undefined;
       }
-      // SC16:非 0 退出码 / 被信号杀死 → crashed,覆盖先前 envelope(即使已 completed)。
-      // #356 High #2 fix: 主动 timeout 后我们 SIGTERM child,child 以信号退出
-      // 会走到这里 —— 保留 reason:"timeout",不被 crashed 覆盖(否则 waitFor /
-      // queryBuffer 的 timeout 语义丢失)。
+      // Non-zero exit code / killed by signal -> crashed, overwriting the prior envelope (even if already completed).
+      // After a deliberate timeout we SIGTERM the child, and the child
+      // exiting on a signal lands here — keep reason:"timeout", not
+      // overwritten by crashed (otherwise the timeout semantics of
+      // waitFor / queryBuffer would be lost).
       const timedOut =
         task.state === "failed" && task.envelope?.reason === "timeout";
       if (!timedOut && (code !== 0 || signal !== null)) {
@@ -1512,8 +1666,9 @@ export function createSubAgentManager(opts: {
           task.state === "failed" && task.envelope?.reason === "timeout"
             ? "timeout"
             : "crashed";
-        // 在 timeout-fire 之后 child 走 SIGTERM 退出:task.state 已经 failed,
-        // 直接 emitStop(reason=timeout, signal=SIGTERM 等) — 不再次 emitStateChange。
+        // Child exits via SIGTERM after the timeout-fire: task.state is
+        // already failed, emitStop directly (reason=timeout, signal=SIGTERM
+        // etc.) — no second emitStateChange.
         if (reason === "crashed") {
           void settleCrash({
             task,
@@ -1524,7 +1679,7 @@ export function createSubAgentManager(opts: {
             signal,
           });
         } else {
-          // timeout envelope 已经写入 → 仅补 emitStop (terminal 信号)
+          // timeout envelope already written -> only supplement emitStop (terminal signal)
           emitStop(task, "failed", {
             reason: "timeout",
             summary: task.envelope?.summary ?? `timeout after effective`,
@@ -1533,8 +1688,9 @@ export function createSubAgentManager(opts: {
           });
         }
       }
-      // SC16: 干净退出 (0, null) 且无 envelope → protocolError 并立即放槽。
-      // 已有终态不覆盖:合法 envelope / timeout / 其他失败路径的结果保持不变。
+      // Clean exit (0, null) with no envelope -> protocolError, slot released immediately.
+      // Existing terminal states are not overwritten: legitimate envelope /
+      // timeout / other failure-path results stay as they are.
       if (
         code === 0 &&
         signal === null &&
@@ -1555,7 +1711,7 @@ export function createSubAgentManager(opts: {
           summary,
         });
       }
-      // 干净退出(0, null)且有 envelope → 保持 completed (已在 stdout 段 emitStop)。
+      // Clean exit (0, null) with an envelope -> stays completed (emitStop already fired in the stdout stage).
     });
 
     child.on("error", (err) => {
@@ -1574,11 +1730,13 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * Sync 版 realpathWithMissingSuffix(src/harness/aci/tools/helpers.ts 同形):
-   * 沿现存祖先 realpath 后追加未解析后缀段。用于 sandboxRoot 校验的 ENOENT
-   * fallback —— child 与 parent 臂都落 realpath 形态,symlinked 父根
-   * (macOS /var → /private/var 等)下词法 child 才不会对 realpath parent 假越界。
-   * 非 ENOENT 错误原样抛出(调用方区分 I/O 故障与 outside)。
+   * Sync version of realpathWithMissingSuffix (same shape as
+   * src/harness/aci/tools/helpers.ts): realpath the nearest existing ancestor
+   * then append the unresolved suffix segments. Used by the ENOENT fallback
+   * of sandboxRoot validation — both child and parent arms land in realpath
+   * form, so under a symlinked parent root (macOS /var → /private/var etc.) a
+   * lexical child never falsely appears outside the realpath'd parent.
+   * Non-ENOENT errors rethrow as-is (the caller distinguishes I/O faults from outside).
    */
   function resolveWithinParentForm(target: string): string {
     const missingSegments: string[] = [];
@@ -1601,24 +1759,32 @@ export function createSubAgentManager(opts: {
     def: SubAgentDefinition,
     taskId: string
   ): WorkerEnvelope {
-    // #357 T1: 所有 spawn 路径必经此单点校验。语义:
-    //   1. parentSandboxRoot 入口读一次:
-    //      - sandboxRootCell 在场 (T8 D6) → cell.read() (活根)
-    //      - 否则 realpathSync(opts.sandboxRoot ?? process.cwd()) (冻结值,旧路径)
-    //      父代理的工作域真值(resolve 父目录层可能含 symlink,例如 /var → /private/var
-    //      on macOS),worker fs 工具沿用同一 resolved 值。
-    //   2. def.sandboxRoot 缺席 → 写入 parentSandboxRoot(SC8:继承父根,不是 process.cwd())。
-    //      父根 ≠ process.cwd() 的场景(主代理的 sandboxRoot ≠ 启动 cwd)下,这一变更
-    //      防止子代理工作域意外扩大到主进程 cwd 之外。
-    //   3. def.sandboxRoot 在场 → resolved = realpathSync(resolve(def.sandboxRoot)),
-    //      rel = relative(parentSandboxRoot, resolved)。rel === "" 合法(相等);
-    //      rel.startsWith("..") || isAbsolute(rel) → typed 拒绝。realpath 抛 ENOENT
-    //      → 词法 fallback:用 resolve(def.sandboxRoot) 的词法路径重做 prefix 判定
-    //      (spec SC6:父根下尚未存在的子路径不是 outside,词法在父根内即放行);
-    //      词法越界仍 typed 拒绝(spec SC7 + 防"声明未创建路径 = 隐式扩大父根")。
-    //      其他 errno(EACCES / ELOOP 等)原样 rethrow,不得包装成 outside。
-    //   4. `rel.startsWith("..")` 对合法目录名 `..foo` 也拒绝(spec Code Style 是
-    //      合同,fail-closed 优先,不试图区分 `..foo` vs `..` / `../`)。
+    // Every spawn path passes this single-point validation. Semantics:
+    //   1. parentSandboxRoot is read once at entry:
+    //      - sandboxRootCell present → cell() (live root)
+    //      - otherwise realpathSync(opts.sandboxRoot ?? process.cwd()) (frozen value, legacy path)
+    //      The parent agent's true work domain (the resolved parent directory
+    //      layer may contain symlinks, e.g. /var → /private/var on macOS);
+    //      the worker's fs tools reuse the same resolved value.
+    //   2. def.sandboxRoot absent → write parentSandboxRoot (inherit the
+    //      parent root, not process.cwd()). Where parent root ≠ process.cwd()
+    //      (the main agent's sandboxRoot differs from the startup cwd), this
+    //      prevents the subagent's work domain from accidentally widening
+    //      beyond the main process cwd.
+    //   3. def.sandboxRoot present → resolved =
+    //      realpathSync(resolve(def.sandboxRoot)), rel =
+    //      relative(parentSandboxRoot, resolved). rel === "" is legal
+    //      (equality); rel.startsWith("..") || isAbsolute(rel) → typed
+    //      rejection. realpath throwing ENOENT → lexical fallback: redo the
+    //      prefix verdict with the lexical path of resolve(def.sandboxRoot)
+    //      (a not-yet-created child path under the parent root is not
+    //      outside; lexical containment in the parent root passes); a lexical
+    //      escape is still typed-rejected (guards against "declaring an
+    //      uncreated path = implicitly widening the parent root"). Other
+    //      errnos (EACCES / ELOOP etc.) rethrow as-is, never wrapped as outside.
+    //   4. `rel.startsWith("..")` also rejects the legal directory name
+    //      `..foo` (fail-closed first per contract; no attempt to distinguish
+    //      `..foo` from `..` / `../`).
     let parentSandboxRoot: string;
     try {
       const candidate =
@@ -1627,8 +1793,9 @@ export function createSubAgentManager(opts: {
           : (opts.sandboxRoot ?? process.cwd());
       parentSandboxRoot = realpathSync(candidate);
     } catch (err) {
-      // opts.sandboxRoot 本身存在但不可 realpath(罕见;主代理装配通常与 cwd 同) →
-      // 不可推断父根,直接 typed 拒绝。
+      // opts.sandboxRoot itself exists but cannot be realpath'd (rare; the
+      // main agent assembly usually shares cwd) → the parent root cannot be
+      // inferred, typed-reject directly.
       const candidate =
         opts.sandboxRootCell !== undefined
           ? opts.sandboxRootCell()
@@ -1653,22 +1820,26 @@ export function createSubAgentManager(opts: {
         resolved = realpathSync(resolve(def.sandboxRoot));
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          // spec SC6:父根下尚未存在的子路径不是 outside —— 放行,但不用
-          // 纯词法 resolve:child 取「最近存在祖先的 realpath + 未解析
-          // 后缀」,与 parent 臂 realpath 形态对齐(见下方 relative 裁决
-          // 处注释;symlinked 父根下纯词法 child 会假越界)。
+          // A not-yet-existing child path under the parent root is not
+          // outside — pass, but not with a pure lexical resolve: the child
+          // takes "realpath of the nearest existing ancestor + unresolved
+          // suffix", aligning with the parent arm's realpath form (see the
+          // comment at the relative() verdict below; a pure lexical child
+          // falsely escapes under a symlinked parent root).
           resolved = resolveWithinParentForm(def.sandboxRoot);
         } else {
-          // 非 ENOENT 的 I/O(EACCES / ELOOP / ENOTDIR 等)原样 rethrow,
-          // 不得包装成 outside。
+          // Non-ENOENT I/O (EACCES / ELOOP / ENOTDIR etc.) rethrows as-is,
+          // never wrapped as outside.
           throw err;
         }
       }
-      // 两臂同形态裁决:ENOENT fallback 的 child 不用纯词法 resolve ——
-      // symlinked 父根(macOS /var → /private/var 等)下,realpath(parent)
-      // 与词法 child 直接 relative() 会假越界。child 改取「最近存在祖先的
-      // realpath + 未解析后缀」,与 parent 臂的 realpath 形态对齐
-      // (helpers.ts realpathWithMissingSuffix 同形的 sync 版)。
+      // Both arms adjudicated in the same form: the ENOENT-fallback child
+      // does not use a pure lexical resolve — under a symlinked parent root
+      // (macOS /var → /private/var etc.), relative()ing a lexical child
+      // directly against realpath(parent) would falsely report an escape.
+      // The child instead takes "realpath of the nearest existing ancestor +
+      // unresolved suffix", matching the parent arm's realpath form (the
+      // sync twin of helpers.ts realpathWithMissingSuffix).
       const rel = relative(parentSandboxRoot, resolved);
       if (rel.startsWith("..") || isAbsolute(rel)) {
         throw new SubAgentSandboxRootError({
@@ -1693,42 +1864,51 @@ export function createSubAgentManager(opts: {
       ...(def.evidenceContext !== undefined && {
         evidenceContext: def.evidenceContext,
       }),
-      // T6 (plans/write-situation-disclosure.md): 处境枚举由 spawn 期
-      // 算好后透传进 envelope。worker prior 据此渲染写根段:
-      //   - writable_main / writable_tree → ①/② 文案(与改造前逐字节相等);
-      //   - no_writable_root → ③ 态披露(隔离 ON + resolved 非树形 = 未绑树)。
-      // ADR-0069 D2: 单一来源 = spawn 时 `writeSituation(isolationOn,
-      // resolved)`,consumers(render / worker prior)不再各自判定形状;
-      // shape 判断仍归 `writeSituation`(`isolation/write-situation.ts`),
-      // 本处只算一次并透传。
-      // opts.isolationOn 缺省 → false(隔离 OFF);与既有 manager 直造场景
-      // (manager.test.ts makeHarness) 字节不变。
+      // The situation enum is computed at spawn time and threaded through the
+      // envelope. The worker prior renders the write-root segment from it:
+      //   - writable_main / writable_tree → ①/② wording (byte-equal to before the change);
+      //   - no_writable_root → ③ disclosure (isolation ON + resolved non-tree
+      //     shape = unbound tree).
+      // Single source = `writeSituation(isolationOn, resolved)` at spawn time;
+      // consumers (render / worker prior) no longer judge the shape each on
+      // their own. The shape decision still lives in `writeSituation`
+      // (`isolation/write-situation.ts`); this site only computes it once and threads it through.
+      // opts.isolationOn absent → false (isolation OFF); byte-unchanged for
+      // existing manager-direct scenarios (manager.test.ts makeHarness).
       ...(opts.isolationOn !== undefined
         ? {
             writeSituation: writeSituation(opts.isolationOn, resolved),
           }
         : { writeSituation: writeSituation(false, resolved) }),
-      // T5 (ADR-0071 / SC8 + L2): 父 manager
-      // 已经替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
-      // 把 traceFilePath + taskId 经 envelope 透传给 worker —— worker 直接
-      // file-mode 落该路径 + conversationId=taskId, 代替 L2 假 scope `randomUUID()`
-      // (已退役,per-agent 形态优先)。
+      // ADR-0071: the parent manager already created
+      // `<parent session folder>/subagents/agent-<taskId>.jsonl` for this
+      // taskId, and threads traceFilePath + taskId through the envelope to the
+      // worker — the worker persists that path directly in file-mode with
+      // conversationId=taskId, replacing the retired fake-scope `randomUUID()`
+      // (per-agent form wins).
       //
-      // review-fix (M5):落点与 `resolvePerAgentTrace` / `writeMetaOnce` 同源
-      // —— 同一 def 派生同一目录(cli/TUI 走 subagentsDir 既有形态;hub 走
-      // projectDir + def.conversationId 两段式缝)。任一在场即按派生结果发;
-      // 双缺 → 不写这两个加性字段 → worker 退化到既有 IKNOW_TRACE_OUT /
-      // defaultTraceDir 形态 (legacy envelope byte-stable)。
+      // The landing site shares its source with `resolvePerAgentTrace` /
+      // `writeMetaOnce` — the same def derives the same directory (cli/TUI via
+      // the existing subagentsDir form; hub via the two-segment seam of
+      // projectDir + def.conversationId). If either is present, emit per the
+      // derived result; both absent → do not write these two additive fields →
+      // the worker degrades to the existing IKNOW_TRACE_OUT / defaultTraceDir
+      // form (legacy envelope byte-stable).
       //
-      // ADR-0102 T3:同一目录派生下再发 `transcriptPath` —— 工人 transcript
-      // (SessionFileV1 形态的对话账,`<subagents>/<taskId>/<taskId>.jsonl`,
-      // 与 per-agent trace `agent-<taskId>.jsonl` 分家)。落点与 trace 同门:
-      // 目录派生缺席 → 三个键整个省略,worker 不写账(旧形态逐字节不变)。
+      // Under the same directory derivation we also emit `transcriptPath` —
+      // (ADR-0102)
+      // the worker transcript (the SessionFileV1-shaped conversation ledger,
+      // `<subagents>/<taskId>/<taskId>.jsonl`, kept apart from the per-agent
+      // trace `agent-<taskId>.jsonl`). Same landing discipline as trace: if the
+      // directory derivation is absent, all three keys are omitted and the
+      // worker keeps no ledger (old form byte-for-byte unchanged).
       ...workerLedgerFields(resolveSubagentsDirForDef(def), taskId),
       ...todoLedgerAnchor(opts.todoDir, def.conversationId),
-      // T7 (spec SC10):父会话「当时」的完整模型索引快照 —— 每次 spawn 现读
-      // getter（`sandboxRootCell` 同形态），值落线后才增长父侧不会回流。
-      // 三态折叠进 helper（getter 缺席 / undefined → 键省略;`[]` → 键在场）。
+      // The parent session's complete model-index snapshot "as of now" — the
+      // getter is re-read at every spawn (same shape as `sandboxRootCell`);
+      // once the value is on the wire, later parent-side growth never flows back.
+      // Three-state folding lives in the helper (getter absent / undefined →
+      // key omitted; `[]` → key present).
       ...skillIndexSnapshotField(opts.skillIndexSnapshot, def.conversationId),
     };
   }
@@ -1739,7 +1919,8 @@ export function createSubAgentManager(opts: {
     if (task.state === "starting" || task.state === "running")
       return { status: "running" };
     if (task.state === "completed" && task.envelope) return task.envelope;
-    // failed 态必有 envelope(handlers 一律带 result);防御兜底。
+    // A failed task always carries an envelope (handlers uniformly pass
+    // result); this is the defensive fallback.
     if (task.envelope) {
       return {
         status: "failed",
@@ -1771,11 +1952,12 @@ export function createSubAgentManager(opts: {
         reject(new SubAgentWaitTimeoutError());
         return;
       }
-      // #358 T2: 缺省 timeoutMs 走三层链 (def ?? taskTimeoutMs ?? 7200s),
-      // 与 spawn 的 SIGTERM 计时同源 — 防止缺省值两处声明漂移。
+      // Default timeoutMs goes through the three-tier chain
+      // (def ?? taskTimeoutMs ?? 7200s), the same source as spawn's SIGTERM
+      // timer — preventing default-value drift across two declaration points.
       const effectiveTimeout =
         timeoutMs ?? effectiveTaskTimeoutMs(task.def, opts);
-      // #361 C3: 预 abort → 立即 SubAgentAbortError,不建轮询状态。
+      // Pre-aborted signal → immediate SubAgentAbortError, no polling state built.
       if (signal?.aborted) {
         reject(new SubAgentAbortError(taskId));
         return;
@@ -1783,7 +1965,7 @@ export function createSubAgentManager(opts: {
 
       let settled = false;
       let interval: ReturnType<typeof setInterval> | undefined;
-      // #361 C3: abort listener 在 resolve/reject 后 cleanup,防泄漏。
+      // The abort listener is cleaned up after resolve/reject, preventing leaks.
       const onAbort = (): void => {
         if (!signal?.aborted) return;
         cleanup();
@@ -1793,8 +1975,9 @@ export function createSubAgentManager(opts: {
         if (interval) clearInterval(interval);
         waitPollers.delete(interval as ReturnType<typeof setInterval>);
         waitRejecters.delete(settleReject);
-        // SC14: 本任务的 wait 已 settle(任一臂) → 从 abortTask 的单任务
-        // 拒绝集摘除,避免陈旧 setter 在后续 abortTask 时二次 settle。
+        // This task's wait has settled (any arm) → remove from abortTask's
+        // single-task rejection set, so a stale setter isn't double-settled by
+        // a later abortTask.
         task.waitRejects.delete(settleReject);
         if (signal) signal.removeEventListener("abort", onAbort);
       };
@@ -1812,8 +1995,8 @@ export function createSubAgentManager(opts: {
 
       const started = Date.now();
       const check = () => {
-        // completed / failed 都 resolve envelope(调用方按 status 区分);
-        // 仅 timeout / abort / shutdown reject。
+        // completed / failed both resolve the envelope (the caller branches on
+        // status); only timeout / abort / shutdown reject.
         if (task.state === "completed" || task.state === "failed") {
           if (task.envelope) resolveEnvelope(task.envelope);
           else settleReject(new SubAgentWaitTimeoutError());
@@ -1832,39 +2015,44 @@ export function createSubAgentManager(opts: {
       interval = setInterval(check, WAIT_POLL_MS);
       waitPollers.add(interval);
       waitRejecters.add(settleReject);
-      // SC14: 同源注册进本任务的拒绝集 —— abortTask 据此 settle 本任务在飞
-      // wait(操作员强杀 → 父 turn 收 cancelled)。
+      // Registered from the same source into this task's rejection set —
+      // abortTask settles this task's in-flight wait through it (operator
+      // force-kill → the parent turn collects cancelled).
       task.waitRejects.add(settleReject);
       signal?.addEventListener("abort", onAbort);
-      check(); // 立即首查:已终态任务直接收敛,不等首个 tick
+      check(); // Immediate first check: an already-terminal task converges directly, no first tick
     });
   }
 
   /**
-   * #361 T5 / SC14: 主动 abort 单任务。先 settle 本任务在飞的 `waitFor`
-   * (以 `SubAgentAbortError` 拒绝 —— 与 shutdown 同形,但只作用于这一个
-   * task),再传播 abortCtrl.abort() → child SIGTERM → SIGKILL 兜底 5s。
+   * Actively abort a single task. First settle this task's in-flight
+   * `waitFor` (reject with `SubAgentAbortError` — same shape as shutdown but
+   * scoped to this one task), then propagate abortCtrl.abort() → child
+   * SIGTERM → SIGKILL backstop 5s.
    *
-   * 顺序是契约:拒绝必须发生在 SIGTERM 之前 —— worker 对 SIGTERM 的收尾会
-   * 写回 `reason:"timeout"` 的失败信封,若先杀后拒,父侧看到的就是墙钟超时
-   * 归因(SC13 文案),而操作员强杀与墙钟到期必须可区分(SC14)。
+   * The order is contractual: the rejection must precede the SIGTERM — the
+   * worker's SIGTERM epilogue writes back a `reason:"timeout"` failed
+   * envelope, and if we killed first / rejected after, the parent would see
+   * wallclock-timeout attribution, whereas operator force-kill and wallclock
+   * expiry must stay distinguishable.
    *
-   * review-fix S1:先进去清旧兜底计时器,再以本次 SIGTERM 为基准重排 5s ——
-   * 否则 spawn 早期(per-task timeout 前)arm 的旧兜底仍在旧基准 fire,与
-   * timeout SIGTERM 同点双发。未找到 / 已终态任务 no-op 返回 false;实际对
-   * in-flight child 发起中止返回 true。
+   * Clear the old backstop timer first, then re-arm 5s from this SIGTERM —
+   * otherwise a backstop armed early (before the per-task timeout) still
+   * fires on the old baseline, double-firing at the timeout SIGTERM's
+   * instant. Unknown / already-terminal tasks are a no-op returning false;
+   * returns true when an in-flight child was actually signaled.
    */
   function abortTask(taskId: string): boolean {
     const task = tasks.get(taskId);
     if (!task) return false;
     if (task.state !== "starting" && task.state !== "running") return false;
-    // 1. 先 settle wait 者(snapshot:settleReject 在自身 cleanup 中 mutate
-    //    本 set 跳过迭代)。
+    // 1. First settle the waiters (snapshot: settleReject mutates this set
+    //    inside its own cleanup, skipping iteration).
     for (const reject of [...task.waitRejects]) {
       reject(new SubAgentAbortError(taskId));
     }
     task.waitRejects.clear();
-    // 2. 再中止 worker 子进程 + 兜底。
+    // 2. Then abort the worker child process + backstop.
     task.abortCtrl?.abort();
     if (task.child) {
       try {
@@ -1872,19 +2060,24 @@ export function createSubAgentManager(opts: {
       } catch {
         /* ESRCH et al. ignore */
       }
-      // 清 + 重排:兜底基准 = 本次 SIGTERM 时刻(reset=true)。
+      // Clear + re-arm: backstop baseline = this SIGTERM moment (reset=true).
       armKillFallback(task, true);
     }
     return true;
   }
 
   /**
-   * ADR-0102 T4 — 续跑闸（进程已死 + 本切片起写下的工人 transcript）。
-   * `completed` / `failed` / `aborted` 一视同仁（机械同一条路径）；闸序：
-   * 存在 → 寿命 → transcript → 并发顶，前序不满足即 typed 拒绝、不占额度。
-   * 成功 = `launchWorker(merged, 同 taskId)` —— 新进程、同对外句柄；旧 Task
-   * 记录整体被新记录替换（终态信封 / endedAt 是上一轮的真值，随替换出账，
-   * 交差本身已在当跳 tool_result / mailbox 交付过）。
+   * Resume gate (process already dead + the worker transcript written since
+   *
+   // (ADR-0102)
+   * this slice onward). `completed` / `failed` / `aborted` are treated alike
+   * (one mechanical path); gate order: existence → lifetime → transcript →
+   * concurrency cap; an unsatisfied earlier gate typed-rejects and occupies
+   * no quota. Success = `launchWorker(merged, same taskId)` — new process,
+   * same external handle; the old Task record is wholesale replaced by the new
+   * one (the terminal envelope / endedAt were the previous round's truth and
+   * leave the books with the replacement; the handoff itself was already
+   * delivered in that hop's tool_result / mailbox).
    */
   function resumeTask(
     taskId: string,
@@ -1900,12 +2093,13 @@ export function createSubAgentManager(opts: {
     const dir = resolveSubagentsDirForDef(old.def);
     const transcriptPath =
       dir === undefined ? undefined : workerTranscriptPath(dir, taskId);
-    // 锁句 6：只认 T3 工人账；per-agent trace（agent-<taskId>.jsonl）在场
-    // 但账缺席 = 切片前的旧工人，不从 trace 倒灌造账。
+    // Only accept the worker ledger written by this slice's layout; a present
+    // per-agent trace (agent-<taskId>.jsonl) with an absent ledger = a
+    // pre-slice worker — never fabricate a ledger backfilled from the trace.
     if (transcriptPath === undefined || !existsSync(transcriptPath)) {
       throw new SubAgentResumeError(taskId, "no_transcript");
     }
-    // 锁句 5：续跑占用同一子代理并发顶（超限 → SubAgentCapacityError）。
+    // The resume occupies the same subagent concurrency cap (over the limit → SubAgentCapacityError).
     const cap = currentCapacity();
     if (cap !== "unlimited") {
       assertCapacityAvailable(cap, tasks);
@@ -1913,7 +2107,7 @@ export function createSubAgentManager(opts: {
     return launchWorker(resumeDefinition(old.def, def, taskId), taskId);
   }
 
-  /** #361 C2: host-drain 阻塞轮询所需的非终态任务 ID 列表(starting + running)。 */
+  /** Non-terminal task IDs (starting + running) needed by host-drain's blocking poll. */
   function listActive(): ReadonlyArray<string> {
     const out: string[] = [];
     for (const [id, task] of tasks) {
@@ -1923,9 +2117,11 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * #358 T7: 全量只读投影。summary/reason 取终态 envelope(与 queryBuffer
-   * 同真值);taskPreview 截断 ≤120,不落 task 全文(spec 权限 row)。
-   * Postel: endedAt 仅在终态存续;summary/reason 仅 envelope 有值时上行。
+   * Full read-only projection. summary/reason come from the terminal
+   * envelope (the same truth as queryBuffer); taskPreview truncates ≤120,
+   * never carrying full task text (the permission row).
+   * Postel: endedAt persists only in terminal states; summary/reason surface
+   * upward only when the envelope has values.
    */
   function listSubagents(conversationId?: string): ReadonlyArray<SubagentInfo> {
     const out: SubagentInfo[] = [];
@@ -1940,7 +2136,7 @@ export function createSubAgentManager(opts: {
       const item: SubagentInfo = {
         taskId: task.id,
         state: task.state,
-        // Fix 3: 与 recordSubagentSpawn 同源 (truncateTaskPreview 默认 120)。
+        // Same source as recordSubagentSpawn (truncateTaskPreview default 120).
         taskPreview: truncateTaskPreview(task.def),
         startedAt: task.startedAt,
         ...(task.endedAt !== undefined ? { endedAt: task.endedAt } : {}),
@@ -1955,7 +2151,7 @@ export function createSubAgentManager(opts: {
         ...(task.def.role !== undefined && task.def.role.trim() !== ""
           ? { role: task.def.role.trim() }
           : {}),
-        // presentString = 与 writeMetaOnce 同判据（同一 helper，见模块顶）。
+        // presentString = same criterion as writeMetaOnce (one helper, see module top).
         ...(presentString(task.def.toolUseId)
           ? { toolUseId: task.def.toolUseId }
           : {}),
@@ -1986,7 +2182,7 @@ export function createSubAgentManager(opts: {
       .map((t) => t.child)
       .filter((c): c is ChildProcess => c !== undefined);
 
-    // #356 High #2 fix: shutdown clears all timeoutTimers so the manager
+    // shutdown clears all timeoutTimers so the manager
     // process does not hold dangling timers nor fire SIGKILL on already-
     // SIGTERM'd children.
     for (const t of runningTasks) {
@@ -2000,19 +2196,19 @@ export function createSubAgentManager(opts: {
       }
     }
 
-    // 1. abort in-flight(预留:当前 spec 未把 abortCtrl 接到具体调用)。
+    // 1. abort in-flight (reserved: the current spec does not wire abortCtrl to concrete calls).
     for (const t of tasks.values()) t.abortCtrl?.abort();
 
-    // 2. SIGTERM 所有运行中子进程。
+    // 2. SIGTERM all running children.
     for (const child of runningChildren) {
       try {
         child.kill("SIGTERM");
       } catch {
-        /* ESRCH 等忽略 */
+        /* ESRCH et al. ignore */
       }
     }
 
-    // 3. 等退出 ≤5s,未退出 → SIGKILL 兜底。
+    // 3. Wait for exit ≤5s; survivors → SIGKILL backstop.
     await new Promise<void>((resolvePromise) => {
       let settled = false;
       const closed = new Set<ChildProcess>();
@@ -2028,7 +2224,7 @@ export function createSubAgentManager(opts: {
             try {
               child.kill("SIGKILL");
             } catch {
-              /* ESRCH 等忽略 */
+              /* ESRCH et al. ignore */
             }
           }
         }
@@ -2039,7 +2235,7 @@ export function createSubAgentManager(opts: {
         return;
       }
       for (const child of runningChildren) {
-        // 已在 spawn 后退出(exitCode 为 number)的视为已关闭;否则监听 exit。
+        // Children that already exited after spawn (exitCode is a number) count as closed; otherwise listen for exit.
         if (typeof child.exitCode === "number") {
           closed.add(child);
           if (closed.size === runningChildren.length) finish();
@@ -2052,15 +2248,16 @@ export function createSubAgentManager(opts: {
       }
     });
 
-    // 未决 waitFor 主动拒绝 + 清轮询句柄(SC16 不悬挂)。snapshot 防止
-    // settleReject 在自身 cleanup 中 mutate waitRejecters 跳过迭代。
+    // Actively reject pending waitFor + clear poll handles (never hanging).
+    // The snapshot prevents settleReject mutating waitRejecters inside its own
+    // cleanup and skipping iteration.
     for (const reject of [...waitRejecters])
       reject(new SubAgentWaitTimeoutError());
     waitRejecters.clear();
     for (const poller of waitPollers) clearInterval(poller);
     waitPollers.clear();
 
-    // 4. 清空 tasks map。
+    // 4. Clear the tasks map.
     tasks.clear();
     terminalMailbox.clear();
   }
@@ -2093,12 +2290,15 @@ export function createSubAgentManager(opts: {
     drainCompleted,
     listActive,
     abortTask,
-    // ADR-0102 T4: 死工人续跑入口（闸在 resumeTask 内判，subagent_continue 只做映射）。
+    // Entry point for resuming dead workers (gates decided inside resumeTask;
+    // (ADR-0102)
+    // subagent_continue only maps them).
     resumeTask,
     listSubagents,
     subscribe,
-    // ADR-0096 T2: 并发上限只读 getter — description N 与 SubAgentCapacityError
-    // 同源,持有方 = spawn 闸同 holder。
+    // Read-only getter for the concurrency cap — description and
+    // SubAgentCapacityError share one source (ADR-0096); the holder is the same one the
+    // spawn gate holds.
     getCapacity: currentCapacity,
   });
 }

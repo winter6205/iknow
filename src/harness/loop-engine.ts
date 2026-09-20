@@ -1,35 +1,38 @@
 /**
- * Loop Engine (013 / 014 / 015 拥有;spec Code Style 区钉死接口形状)。
+ * Loop Engine: stepwise state machine driving model turns and tool
+ * execution; interface shapes are pinned by spec.
  *
- * 边界:
- *   - 无可变实例字段;state 线程化、immutable 追加(S10 / S11 守门);
- *   - 014 原子校验:Adapter 交付的 AssistantTurnResult 通过后,整回合
- *     追加到 messages;tool calls 交给 Executor 串行执行;
- *   - ToolExecutionResult 经 Model Adapter.encodeToolResults 编码为
- *     原生 tool_result 块,再原子追加为一条 user message;
- *   - 016 Q3 五类停止原因:completed / maxTurns / nonSuccessStop /
- *     protocolError / emptyFinalResponse;
- *   - 017 新增两类:cancelled (signal abort) / timeout (超时强制);
- *   - 017 新增第二返回面:独立 LoopTrace,run 一次性返回
- *     `{ result: RunResult; trace: LoopTrace }`(A1 冻结形状)。
- *   - plan T3 / ADR-0011:maxTurns 超限从 silent-stop 升级为
- *     `throw MaxTurnsExceeded`;任一异常停后跑一轮 best-effort 模型
- *     收尾摘要(T4 / ADR-0011),经 `{ type: "stop_summary", text }` 事件
- *     投递,不污染权威历史。
- *   - plan T3 / ADR-0013:SDK prompt-too-long (400) → `PromptTooLongError`
- *     → reactive compact(每 run 限 1 次)压缩后重试一次模型调用。
+ * Boundaries:
+ *   - No mutable instance fields; state is threaded through, messages are
+ *     appended immutably;
+ *   - Atomic turn commit: an AssistantTurnResult delivered by the Adapter
+ *     is appended to messages only as a whole turn; tool calls go to the
+ *     Executor for serial execution;
+ *   - ToolExecutionResult is encoded into native tool_result blocks via
+ *     Model Adapter.encodeToolResults and appended as one user message;
+ *   - Stop reasons: completed / maxTurns / nonSuccessStop / protocolError /
+ *     emptyFinalResponse, plus cancelled (signal abort) and timeout
+ *     (forced by clock);
+ *   - run() returns a second surface besides the result:
+ *     `{ result: RunResult; trace: LoopTrace }`.
+ *   - Exceeding maxTurns throws `MaxTurnsExceeded` instead of stopping
+ *     silently; after any exceptional stop one best-effort closing summary
+ *     runs (ADR-0011), delivered as a `{ type: "stop_summary", text }`
+ *     event without polluting the authoritative history.
+ *   - SDK prompt-too-long (400) → `PromptTooLongError` → reactive compact
+ *     (at most once per run), then the model call is retried once
+ *     (ADR-0013).
  *
- * Loop Engine 不读取、不判断、不构造供应商原生字段;Model Adapter 是
- * 唯一允许处理原生历史的模块。
+ * Loop Engine never reads, judges, or constructs vendor-native fields;
+ * the Model Adapter is the only module allowed to handle native history.
  *
- * 016 H1 修复:`step(state, deps)` 真实实现为单步状态机推进;虽然 spec
- * 原文是 sync 签名,因 `adapter.step` 本身是异步,本 step 实际返回
- * `Promise<Transition>` 以保证协议契约诚实。`run` 直接复用本 step,避免
- * 双轨实现漂移。
- *
- * 017 T5:step 内部通过 stepWithTrace 同时产出 Transition 与 TurnTrace;
- * public step() 只返 Transition(冻结 016 契约);run() 累 trace + 一次
- * computeTotals 后返回 {result, trace}。
+ * `step(state, deps)` is a real single-step transition. The spec signature
+ * is sync, but `adapter.step` is async, so step returns
+ * `Promise<Transition>` to keep the protocol contract honest; `run` reuses
+ * the same step to avoid dual-track drift. Internally stepWithTrace yields
+ * both a Transition and a TurnTrace; the public step() returns only the
+ * Transition (frozen contract); run() accumulates traces and computes
+ * totals once.
  */
 
 import { randomUUID } from "node:crypto";
@@ -131,8 +134,9 @@ import {
 } from "./graph/notification.js";
 
 /**
- * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
- * 已知值直接透传; 未知值 (含 nonSuccessStop / maxTurns / completed) 兜底 "unknown"。
+ * Map an arbitrary reason string to TraceErrorType without `as` casts.
+ * Known values pass through; anything else (including nonSuccessStop /
+ * maxTurns / completed) falls back to "unknown".
  */
 function toTraceErrorType(reason: string): TraceErrorType {
   switch (reason) {
@@ -150,8 +154,9 @@ function toTraceErrorType(reason: string): TraceErrorType {
 }
 
 /**
- * 把 StopReason 安全映射为 TurnRecord.decision (消除 as 强转)。
- * maxTurns 早停不记录 turn, 该分支不可达; 兜底 "nonSuccessStop" 保持 total。
+ * Map StopReason to TurnRecord.decision without `as` casts. maxTurns early
+ * stops never record a turn, so that branch is unreachable; the
+ * "nonSuccessStop" fallback keeps the mapping total.
  */
 function toDecision(
   reason: string
@@ -171,41 +176,46 @@ function toDecision(
 }
 
 /**
- * Loop Engine 需要的完整 Adapter 接口:除 step 外还要能编码用户文本
- * 与工具结果(交给历史追加)。Anthropic Adapter / Stub Model 都按
- * 此接口实现。
+ * The full Adapter interface Loop Engine needs: besides step, the adapter
+ * must encode user text and tool results for the history append. Both the
+ * Anthropic Adapter and the stub model implement this interface.
  */
 export interface LoopAdapter {
   readonly step: (
     state: LoopState,
     request: {
       tools?: unknown;
-      /** #196 IKNOW T1:每 turn 由 deps.system?.() 解析,undefined 时不发送 system 字段。 */
+      /** Resolved per turn from deps.system?.(); when undefined the system field is not sent. */
       system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
     },
-    signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
+    signal?: AbortSignal // LoopAdapter is consumed directly by Loop Engine, so it must accept signal
   ) => Promise<AssistantTurnResult>;
   /**
-   * B6 / ADR-0043 §3:可选 countTokens 钩子(溢出治理专用)。
+   * ADR-0043: optional countTokens hook (overflow governance only).
    *
-   * 真实 Anthropic adapter(`createRealAnthropicAdapter`)实现本方法 ——
-   * 透传 SDK `client.messages.countTokens` 实测 token 数;Stub / 离线
-   * adapter **不实现**(字段缺席 → 装配层跳过本会话,`console.warn` 一行
-   * 记录,首轮不抛错、不重试,见 `aci/tool-overflow.ts` skip 语义)。
+   * The real Anthropic adapter (`createRealAnthropicAdapter`) implements
+   * this by proxying the SDK `client.messages.countTokens` measured token
+   * count; stub / offline adapters do not (field absent → the assembly
+   * layer skips the overflow session for this conversation and logs one
+   * `console.warn` line; no throw and no retry on the first round — see
+   * the skip semantics in `aci/tool-overflow.ts`).
    *
-   * **不入 loop-engine 消费面**:countTokens 仅装配期调用一次,会话内
-   * 恒定,后续每轮 `step` 不调用本方法(避免与目标端点被动缓存兼容的
-   * 抖动风险)。loop-engine 不读取本字段,接口就位仅为类型安全。
+   * Not part of the loop-engine consumption surface: countTokens is called
+   * once at assembly time and is constant per session; later `step` calls
+   * never use it (avoiding churn against passive caching at the target
+   * endpoint). loop-engine does not read this field; its presence here is
+   * purely for type safety.
    */
   readonly countTokens?: (
     input: CountTokensInput
   ) => Promise<CountTokensResult>;
   /**
-   * #178 T5 (#147 D6):实际调用模式申报 —— true = 该 adapter 走流式臂
-   * (SDK `.stream()`),false/undefined = 非流式臂 / 离线替身。loop-engine
-   * 只在 trace `recordLlmCall` 处读取(不读、不判断、不构造其它供应商字段);
-   * 缺省语义让 stub-model / 离线 adapter 零改动保持 `stream: false`。
+   * Actual call-mode declaration: true = this adapter uses the streaming
+   * arm (SDK `.stream()`); false/undefined = non-streaming arm / offline
+   * stand-in. loop-engine reads it only at trace `recordLlmCall` (it never
+   * reads, judges, or constructs other vendor fields); the default keeps
+   * stub-model / offline adapters at `stream: false` with zero changes.
    */
   readonly streamMode?: boolean;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
@@ -219,273 +229,336 @@ export interface LoopEngineDeps {
   readonly executor: Executor;
   readonly registry: Registry;
   /**
-   * plan T5-engine / ADR-0012:单次会话最大循环轮数上限(可选)。
-   * `undefined`(默认)= 无限(loop 永不因 turn 计数而停);
-   * 显式配置时达上限 → throw MaxTurnsExceeded(ADR-0011,见 stepWithTrace)。
+   * ADR-0012: max loop turns per session (optional). `undefined`
+   * (default) = unlimited (the loop never stops on turn count); when
+   * configured and the cap is reached → throw MaxTurnsExceeded
+   * (ADR-0011, see stepWithTrace).
    */
   readonly maxTurns: number | undefined;
   /**
-   * #196 IKNOW T1:每 turn 系统提示装配器。返回 string → 透传
-   * adapter.step request.system;返回 undefined / 字段缺席 → 跳过注入
-   * (行为零变化,守 #121 装配契约)。
+   * Per-turn system-prompt assembler. string → passed through as
+   * adapter.step request.system; undefined / field absent → injection is
+   * skipped (zero behavior change, honoring the assembly contract).
    */
   readonly system?: () => Promise<string | undefined>;
-  /** 017: 主超时,运行时兜底 DEFAULT_TIMEOUT_MS(不在类型层写死) */
+  /** Primary timeout; runtime falls back to DEFAULT_TIMEOUT_MS (not hardcoded in the type layer) */
   readonly timeoutMs?: number;
-  /** 017: 模型侧覆盖;生效 = modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
+  /** Model-side override; effective = modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly modelTimeoutMs?: number;
   /**
-   * #742 T1 / CONTEXT「model-call idle」:单次模型调用的静默上限(ms)。
-   * **仅流式臂**(`adapter.streamMode === true`)生效 —— 非流式臂没有增量
-   * 可以重置它,配了也按缺席处理(改前单钟逐字节不变)。缺席 / <= 0 → 关闭。
+   * Silence cap (ms) for a single model call, per the CONTEXT glossary
+   * entry "model-call idle". Only effective on the streaming arm
+   * (`adapter.streamMode === true`) — the non-streaming arm has no
+   * increments to reset it, so a configured value is treated as absent
+   * (pre-change single-clock behavior stays byte-identical). Absent /
+   * <= 0 → disabled.
    */
   readonly modelIdleTimeoutMs?: number;
   /**
-   * #742 T1 / CONTEXT「模型调用硬顶」:流式臂上从本次 step 起算的有限上限
-   * (ms),到点即使仍有增量也落 `timeout`。**仅流式臂**生效;缺席 → 回落
-   * `modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS`。
+   * Hard wall cap (ms) for one model call on the streaming arm, measured
+   * from the start of this step; when it fires, stop as `timeout` even if
+   * increments are still arriving. Streaming arm only; absent → falls
+   * back to `modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS`.
    *
-   * 流式臂上它取代 `timeoutMs` 当墙钟:`timeoutMs` 是"从开打起算"的单钟,
-   * 正是 T1 要修的误杀源;想在流式臂上收紧墙钟请调本字段而非 `timeoutMs`。
+   * On the streaming arm it replaces `timeoutMs` as the wall clock:
+   * `timeoutMs` counts "from process start", which was the source of
+   * false kills this cap fixes; to tighten the wall clock on the streaming
+   * arm, tune this field instead of `timeoutMs`.
    */
   readonly modelHardCapMs?: number;
   /**
-   * transport-continue-persist T1 / spec inv 4 测试缝:不可见时钟到点后重发
-   * 整次调用前的退避时长(ms)。缺席 → 走生产秒级指数表(1s / 2s / 4s / 8s,
-   * 上限 16s)。只在测试里压小,生产装配不传。
+   * Backoff (ms) before re-issuing the whole call after an invisible clock
+   * fires (transport-continue-persist invariant 4 test seam). Absent → the
+   * production exponential table (1s / 2s / 4s / 8s, capped at 16s). Only
+   * tests shrink it; production assembly never passes it.
    *
-   * 与 `withTransportRetry` 的 `sleep` 注入同型的「时间缝」纪律:退避表本身
-   * 由 transport-retry.test.ts 直接钉死,这里只让 loop 级集成用例不必真等秒。
+   * Same "time seam" discipline as `withTransportRetry`'s `sleep`
+   * injection: the backoff table itself is pinned directly by
+   * transport-retry.test.ts; this seam only spares loop-level integration
+   * cases from real second-long waits.
    */
   readonly transportRetryDelayMs?: (attempt: number) => number;
-  /** 017: 工具侧覆盖;生效 = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
+  /** Tool-side override; effective = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly toolTimeoutMs?: number;
   /**
-   * plan T4 / ADR-0011:收尾摘要独立短超时(ms)。缺省 15000。
-   * 摘要失败 / 超时 → 跳过,绝不阻塞原始停因;测试可用小值提速。
+   * Independent short timeout (ms) for the closing summary. Default
+   * 15000. Summary failure / timeout → skipped; it must never block the
+   * original stop reason. Tests may use small values for speed.
    */
   readonly summaryTimeoutMs?: number;
   /** 064 T4: optional TraceService injection; byte-identical when absent (criterion 5/17) */
   readonly trace?: TraceService;
   /**
-   * T3 / v2 (spec Open Q4):可选 agent 版本(由 caller/CLI 侧注入 getVersion() 值)。
-   * 仅当 `trace` 与 `agentVersion` 同时存在时,run 末尾才落一条 session L1 根记录
-   * (Loop Engine 不 import cli/usage.ts,避免写侧←cli 反向依赖)。
-   * 字段缺席 → 不埋 session 记录,行为 byte-identical(既有测试零改动)。
+   * Optional agent version (injected by the caller / CLI side via the
+   * getVersion() value). A session L1 root record is written at the end of
+   * run only when both `trace` and `agentVersion` are present (Loop Engine
+   * does not import cli/usage.ts, avoiding a write-side ← cli reverse
+   * dependency). Field absent → no session record, byte-identical
+   * behavior (existing tests untouched).
    */
   readonly agentVersion?: string;
   /**
-   * #224 注入缝 — 装配层注入"当前 turn 应进 prompt 的工具集"。
-   * 每轮模型调用前由 loop-engine 通过 deps.promptTools?.() 取值；
-   * 返回 ReadonlyArray<ToolDef>(Foundation 工具描述符形态)。
-   * 缺省回退 deps.registry.list()(行为中性,守 S2 byte-identical)。
+   * Injection seam: the assembly layer provides "the tool set that should
+   * enter the prompt for the current turn". Read via
+   * deps.promptTools?.() before every model call; returns
+   * ReadonlyArray<ToolDef> (Foundation tool descriptors).
+   * Defaults to deps.registry.list() (behavior-neutral).
    */
   readonly promptTools?: () => ReadonlyArray<ToolDef>;
   /**
-   * #119 T7:压缩配置缝。字段缺席 = 压缩关闭(行为零变化,守 byte-identical 纪律)。
-   * contextWindow 是 **策略预算窗口**(默认 256000),thresholdTokens 缺省推导
-   * `floor(0.95 × window)` (见 harness/compress/threshold.ts, ADR-0100)。
+   * Compaction config seam. Field absent = compaction disabled (zero
+   * behavior change). contextWindow is the strategy budget window
+   * (default 256000); thresholdTokens defaults to
+   * `floor(0.95 × window)` (see harness/compress/threshold.ts, ADR-0100).
    */
   readonly compress?: {
     readonly contextWindow: number;
     readonly thresholdTokens: number | undefined;
   };
   /**
-   * #406 T2:per-engine secret registry。当存在时 run() 把用户文本中的
-   * 密钥值替换为 `<<<SECRET_N>>>` 占位符后再编码为第一条 user message。
-   * 缺席 → 行为与 legacy byte-identical(明文进 messages)。
+   * Per-engine secret registry. When present, run() replaces secret values
+   * in user text with `<<<SECRET_N>>>` placeholders before encoding the
+   * first user message. Absent → legacy byte-identical behavior (plaintext
+   * into messages).
    */
   readonly secretRegistry?: SecretRegistry;
   /**
-   * #406 T4:secret 处理模式。"block" 关闭识别(legacy deny-only
-   * preToolUse guard 处理密钥);缺省(undefined)= "roundtrip" →
-   * secretRegistry 存在时识别生效。
+   * Secret handling mode. "block" disables recognition (the legacy
+   * deny-only preToolUse guard handles secrets); default (undefined) =
+   * "roundtrip" → recognition active when secretRegistry exists.
    */
   readonly secretsMode?: "roundtrip" | "block";
   /**
-   * #458 T7 (SC11): compact 边界渲染缝。可选闭包 — 当 compact 触发时,
-   * 若返回非空字符串,`applyCompactAttachment` 会在 boundary placeholder
-   * user 消息之后追加一条 user 消息承载渲染文本(如近期用户任务摘录)。
-   * 字段缺席 → helper 早退,行为与现 master byte-identical(不改停止语义,
-   * ADR-0011)。harness 不 import session-api;渲染文本由 caller(如 hub 的
-   * `renderRecentUserTasksBoundary` 私有 closure)经闭包注入,零反向依赖。
+   * Compact boundary rendering seam. Optional closure — when compaction
+   * triggers and it returns a non-empty string, `applyCompactAttachment`
+   * appends one more user message after the boundary placeholder user
+   * message carrying the rendered text (e.g. a recent-user-task digest).
+   * Field absent → the helper early-returns, behavior identical to before
+   * (stop semantics unchanged, ADR-0011). harness does not import
+   * session-api; the rendered text comes from the caller (e.g. the hub's
+   * `renderRecentUserTasksBoundary` private closure) via closure
+   * injection, zero reverse dependency.
    *
-   * 历史: #458 早期版本由 taskFocus 字段驱动 (`renderTaskFocusBoundary`);
-   * #605 T2 退休 taskFocus 字段后, 渲染源改为 `session.messages` 内的
-   * `extractRecentUserTasks` 摘录。
+   * History: the earlier version was driven by a taskFocus field
+   * (`renderTaskFocusBoundary`); after taskFocus was retired, the render
+   * source became the `extractRecentUserTasks` digest over
+   * `session.messages`.
    */
   readonly boundaryAttachment?: () => string | undefined;
   /**
-   * #502 T5 / ADR-0021 D1.4:当前 session 的 conversationId（纯记账 + 入参
-   * filter）。由 surface 层（chat-session / hub）注入 per-session 值；loop-engine
-   * 经 executor.executeAll 第 4 参透传给 tool ctx（bash-output / bash-stop 读
-   * ctx.conversationId 与 task 的 conversation_id 比对）。字段缺省 = 不过滤
-   * （ask / worker / oneshot 等无会话装配零行为变化）。
+   * conversationId of the current session (pure bookkeeping + input
+   *
+   // (ADR-0021)
+   * filter). Injected per-session by the surface layer (chat-session /
+   * hub); loop-engine passes it through executor.executeAll's 4th
+   * argument into tool ctx (bash-output / bash-stop compare
+   * ctx.conversationId against the task's conversation_id). Field absent
+   * = no filtering (ask / worker / oneshot assemblies see zero behavior
+   * change).
    */
   readonly conversationId?: string;
   /**
-   * T5 (spec `skill-index-increment` / ADR-0098 / SC1–SC4、SC7):技能模型
-   * 索引进场缝。字段在场 = stepWithTrace 每次即将调用模型前(首次调用 +
-   * reactive-compact 压缩后的重试两处)拿一次 `computeSkillIndexDelta` ——
-   * rescan 现行技能根 → `模型索引 − 索引进场史` → **只含新建行**的
-   * `<available_skills>` 文本,经 `pendingInjected.record` 同形(appendMcp
-   * Reconnect / appendAgentStatusBar)接到当时 `messages` 尾;无新建 → 零
-   * 追加(SC1)。进场史落盘在 delta 内部先于返回,落盘失败 → 不追加
-   * (spec Input-contract exception 列)。字段缺席 = 零行为变化(ask /
-   * worker / 既有测试 byte-identical;AB1 同款可选缝纪律)。
+   * Skill model-index entry seam (ADR-0098). When present, stepWithTrace
+   * calls `computeSkillIndexDelta` once right before every model call
+   * (first call + the retry after reactive-compact compaction): rescan
+   * the live skill roots → `model index − index-entry ledger` → an
+   * `<available_skills>` text containing only newly created rows, appended
+   * to the tail of the current `messages` through the same
+   * `pendingInjected.record` path as appendMcpReconnect /
+   * appendAgentStatusBar; nothing new → zero append. The entry ledger is
+   * persisted inside the delta producer before it returns; a persist
+   * failure → no append (listed in the spec's input-contract exceptions).
+   * Field absent = zero behavior change (ask / worker and existing tests
+   * byte-identical; same optional-seam discipline as sibling seams).
    *
-   * 判定次序:在 agentStatusBar / envSnapshot 之后 —— 增量是本轮**最后**
-   * 一条模型可见消息(spec Assumption 8「delta 接在 messages 最末」)。
+   * Ordering: after agentStatusBar / envSnapshot — the delta must be the
+   * last model-visible message of the round.
    */
   readonly skillIndexDelta?: SkillIndexDeltaSeam;
   /**
-   * #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子(可选)。
-   * host(hub / chat-session)注入纯 async 闭包,把已进权威历史的消息立即
-   * 上盘;loop-engine 自身零 IO —— 不感知 store / 文件 / 会话格式,钩子
-   * 只收 AnthropicNativeMessage(Gate B:无 session-api 类型入内核)。
+   * In-turn commit hook (optional). The host (hub / chat-session) injects
+   * a plain async closure that flushes messages already in the
+   * authoritative history to disk immediately; loop-engine itself does
+   * zero IO — it knows no store / file / session format, and the hook
+   * only accepts AnthropicNativeMessage (no session-api types enter the
+   * kernel).
    *
-   * 调用点(同一 run 内严格按序):
-   *   (a) assistant 消息 append 进权威历史后立刻 —— 纯文本收尾与工具
-   *       回合都 commit;
-   *   (b) 每个工具结果一拿到手立刻 —— 单条 user message 承载该结果的
-   *       encoded tool_result block(与批量进权威历史的块逐块一致,
-   *       encodeToolResults 是逐元素 map)。
+   * Call sites (strictly ordered within one run):
+   *   (a) right after an assistant message is appended to the
+   *       authoritative history — both pure-text endings and tool turns
+   *       commit;
+   *   (b) right after each tool result arrives — one user message
+   *       carrying that result's encoded tool_result block (block-for-
+   *       block identical to the batched authoritative append, since
+   *       encodeToolResults maps element-wise).
    *
-   * 字段缺席 → 零 commit,行为与此前完全一致(byte-identical)。
-   * 失败语义:钩子抛错 → 包 MessageCommitError 重抛,run 中止;不重试、
-   * 不吞咽、不改 stop 语义(见 errors.ts MessageCommitError)。
+   * Field absent → zero commits, behavior exactly as before
+   * (byte-identical). Failure semantics: a throwing hook is wrapped in
+   * MessageCommitError and rethrown, aborting the run; no retry, no
+   * swallowing, no change to stop semantics (see MessageCommitError in
+   * errors.ts).
    *
-   * D2 (tui-display-consistency):第二参 `thinkingMs?: number` 是 assistant
-   * 回合的落盘思考时长(ms)。仅 assistant commit 调用点传入
-   * `turnResult.thinkingMs`(adapter 流式臂首条 thinking_delta → 首个非思考
-   * 增量的时长);tool_result commit 调用点传入 undefined。`thinkingMs <= 0`
-   * 或非有限数 → 字段缺席,store 落盘不挂 key(spec 钉死边界形态)。
-   * number 非 session-api 类型,不破 Gate B。
+   * The 2nd parameter `thinkingMs?: number` is the assistant turn's
+   * persisted thinking duration (ms). Only the assistant commit site
+   * passes `turnResult.thinkingMs` (adapter streaming arm: first
+   * thinking_delta → first non-thinking increment); tool_result commit
+   * sites pass undefined. `thinkingMs <= 0` or non-finite → field absent,
+   * the store does not attach the key. number is not a session-api type,
+   * so the kernel-dependency gate holds.
    */
   readonly commitMessages?: (
     messages: ReadonlyArray<AnthropicNativeMessage>,
     thinkingMs?: number
   ) => Promise<void>;
   /**
-   * #645 T1 / ADR-0028:状态栏注入缝。字段在场 = stepWithTrace 每次即将
-   * 调用模型前(首次调用 + reactive-compact 压缩后的重试)把代码现算的
-   * 现势(last_tool + 未勾 todo 段)以 user 消息 immutable 追加到当时
-   * `messages` 尾;旧栏保留、不 splice、不写 deps.system。字段缺席 =
-   * 零注入(ask / worker 路径与既有测试 byte-identical)。todoDir 与
-   * todo_write 工具同一 session 目录;栏只读文件,快照计算见
-   * agent-status.ts(读失败当无 todo 段,不抛进模型回合)。
+   * Status-bar injection seam (ADR-0028). When present, stepWithTrace
+   * appends the freshly computed current state (last_tool + unchecked
+   * todo section) immutably as a user message to the tail of the current
+   * `messages` right before every model call (first call +
+   * reactive-compact retry); the old bar is kept — no splice, no write to
+   * deps.system. Field absent = zero injection (ask / worker paths and
+   * existing tests byte-identical). todoDir is the same session directory
+   * used by the todo_write tool; the bar only reads files — snapshot
+   * computation is in agent-status.ts (a read failure is treated as "no
+   * todo section" and never throws into the model turn).
    */
   readonly agentStatus?: { readonly todoDir: string };
   /**
-   * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝(可选)。字段
-   * 在场 = stepWithTrace 每次即将调用模型前,在 appendAgentStatusBar 之后的
-   * 同一回合边界计算点,调用 `readCwd()` 现读活 taskRoot 并把
-   * readEnvSnapshot 的产物经 safeEmitStream 发 `env_snapshot` 流事件
-   * (与 agent_status 平行的独立流;只给宿主 UI,绝不进 messages / verify /
-   * ADR-0028 栏)。字段缺席 → 零 IO、零事件 (ask / worker / 既有 stub 装配
-   * byte-identical)。readEnvSnapshot 永不 throw(T4 契约),观察者异常由
-   * safeEmitStream 吞咽,模型回合不受影响。
+   * Environment-present state event seam (optional). When present, at the
+   * same turn-boundary computation point right after
+   * appendAgentStatusBar, stepWithTrace calls `readCwd()` to read the
+   * live taskRoot and emits readEnvSnapshot's product as an
+   * `env_snapshot` stream event via safeEmitStream (a stream parallel to
+   * agent_status; host UI only, never into messages / verify / the
+   * ADR-0028 bar). Field absent → zero IO, zero events (ask / worker /
+   * existing stub assemblies byte-identical). readEnvSnapshot never
+   * throws, and observer exceptions are swallowed by safeEmitStream,
+   * leaving the model turn unaffected.
    *
-   * T9 (ADR-0037 §4):env_snapshot 必须读到活 taskRoot 才能让 rebind 后的人
-   * 读面 (TUI cwd / git 摘要) 跟随新的 worktree。`readCwd` 是装配层注入的
-   * 活 reader (LiveTaskRoot.read),每次 env_snapshot 计算时现读 —— 而不是
-   * 在装配期把 cwd 钉死,否则 KV cache 之外的展示面会停在 rebind 前的根。
+   * env_snapshot must read the live taskRoot (ADR-0037) so that
+   * post-rebind human-facing surfaces (TUI cwd / git summary) follow the
+   * new worktree. `readCwd` is a live reader (LiveTaskRoot.read) injected
+   * by the assembly layer, re-read on every env_snapshot computation —
+   * not pinned at assembly time, otherwise display surfaces outside the
+   * KV cache would stay on the pre-rebind root.
    *
-   * 命名说明:字段叫 `readCwd` 而非 `readTaskRoot` 是为沿用 env_snapshot 数
-   * 据流约定的 cwd 语义(readEnvSnapshot 收 cwd),但其值在 T9 起实际上来自
-   * 活 LiveTaskRoot —— 阅读 readEnvSnapshot 内部读法时不要误以为是装配期
-   * 钉死的 cwd。
+   * Naming: the field is `readCwd` rather than `readTaskRoot` to keep the
+   * env_snapshot data-stream cwd semantics (readEnvSnapshot takes cwd),
+   * but its value actually comes from the live LiveTaskRoot — when
+   * reading readEnvSnapshot internals, do not assume the cwd was pinned
+   * at assembly time.
    */
   readonly envSnapshot?: EnvSnapshotSeam;
   /**
-   * ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换注入缝。
-   * 字段在场 = stepWithTrace 每次即将调用模型前在 appendAgentStatusBar
-   * 之前调用,比较本次 graphAssembly.enabled() 与 `lastSeenEnabled`
-   * 持有的「上一次的值」:翻转时以 user 消息 immutable 追加一条单行
-   * 静态文本(开图含编排指引、关图关闭提示),同值零追加。字段缺席 =
-   * 零追加(ask / worker / 未接 overlay 的入口零行为变化,byte-identical)。
-   * `lastSeenEnabled` 是 deps 寿命内的可变引用;宿主在 rebuild 引擎时
-   * 自然新建一份,跨会话零泄漏。
+   * Graph-mode toggle injection seam. When present, stepWithTrace calls
+   * it before every model call, just ahead of appendAgentStatusBar,
+   * comparing this round's graphAssembly.enabled() against the previous
+   * value held in `lastSeenEnabled`: on a flip, one single-line static
+   * text (graph-on includes orchestration guidance, graph-off a shutdown
+   * note) is appended immutably as a user message; same value → zero
+   * append. Field absent = zero append (ask / worker / entries without
+   * the overlay see zero behavior change, byte-identical).
+   * `lastSeenEnabled` is a mutable reference living as long as deps; the
+   * host naturally creates a fresh one when rebuilding the engine, so
+   * nothing leaks across sessions.
    */
   readonly graphModeChange?: {
     readonly assembly: GraphAssembly;
-    /** 上一次本 deps 看到的 graph 状态(宿主/loop-engine 写入,自身仅读 + 写入)。 */
+    /** Graph state last seen by this deps (written by host/loop-engine; this seam only reads + writes it). */
     readonly lastSeenEnabled: { value: boolean | undefined };
   };
   /**
-   * ADR-0081 — graph mode 每个 `run()` 开头一句短现势注入缝。
-   * 字段在场 = 本 run 第一次即将调模型前(含该次 reactive-compact 重试前
-   * 的首次判定),在 appendGraphModeChange 之后、appendMcpReconnect 之前按
-   * `assembly.enabled()` 决定是否追加一句短 `<graph_mode>`
-   * (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,SSOT in graph/notification.ts):
-   *   - seam 缺席 → 零追加(ask / worker / 未接 overlay 入口零行为变化);
-   *   - `enabled() === false` → 零追加(holder off / 从未开过);
-   *   - 当拍 appendGraphModeChange 刚贴过长 ON → 零追加且本 run 不再贴短
-   *     (SC5:同一 run 已贴长 ON 不叠短句);
-   *   - `appendedThisRun` 已置位 → 零追加(同 run 后续 hop / compact 重试);
-   *   - 其余 → 短现势以 user 消息 immutable 追加,record 进 pendingInjected
-   *     (#888 契约,与 appendGraphModeChange 同形)。
-   * `run()` 开头把 `appendedThisRun` 重置;exported `step()` 不重置,同 deps
-   * 连续 step = 同一 run 的 hop。判定读 `assembly.enabled()`(round 快照),
-   * 不读 holder、不写 lastSeenEnabled。
-   * 不进 system / 不进 run_graph 回执 / 不进 <agent_status> 栏。
+   * ADR-0081 — one short graph-mode presence line per `run()` seam.
+   * When present, before the first model call of the run (including the
+   * first check ahead of that run's reactive-compact retry), after
+   * appendGraphModeChange and before appendMcpReconnect,
+   * `assembly.enabled()` decides whether to append one short
+   * `<graph_mode>` line (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION, SSOT in
+   * graph/notification.ts):
+   *   - seam absent → zero append (ask / worker / entries without the
+   *     overlay see zero behavior change);
+   *   - `enabled() === false` → zero append (holder off / never opened);
+   *   - appendGraphModeChange just pasted the long ON in this tick → zero
+   *     append and no short line for the rest of the run (long ON and the
+   *     short line never coexist in one tick);
+   *   - `appendedThisRun` already set → zero append (later hops / compact
+   *     retries in the same run);
+   *   - otherwise → the presence line is appended immutably as a user
+   *     message and recorded in pendingInjected (same shape as
+   *     appendGraphModeChange).
+   * `run()` resets `appendedThisRun`; the exported `step()` does not, so
+   * consecutive steps over the same deps are hops of one run. The check
+   * reads `assembly.enabled()` (round snapshot), never the holder, and
+   * never writes lastSeenEnabled. Not into system / run_graph receipts /
+   * the <agent_status> bar.
    */
   readonly graphModePresence?: {
     readonly assembly: GraphAssembly;
-    /** 本 run 是否已结算短现势(已贴或因长 ON 抑制)。装配期装箱,run() 重置。 */
+    /** Whether this run has settled the presence line (pasted, or suppressed by the long ON). Boxed at assembly time; reset by run(). */
     readonly appendedThisRun: { value: boolean };
   };
   /**
-   * B4 / ADR-0043 §4:MCP 手动重连追加缝。字段在场 = stepWithTrace 每次
-   * 即将调用模型前消费 `takePending()` 拿到「回调已记录但尚未进 transcript」
-   * 的重连事件,每个事件以 user 消息 immutable 追加一条单行静态文本
-   * (模板钉死 MCP_RECONNECT_NOTIFICATION_TEMPLATE);无 pending → 零追加。
-   * 字段缺席 = 零追加(ask / worker / 未接 manager 的入口零行为变化,
-   * byte-identical)。
+   * ADR-0043: MCP manual-reconnect append seam. When present,
+   * stepWithTrace consumes `takePending()` right before every model call
+   * to get reconnect events "recorded by the callback but not yet in the
+   * transcript", and appends each event immutably as a user message with
+   * a single-line static text (template pinned by
+   * MCP_RECONNECT_NOTIFICATION_TEMPLATE); no pending → zero append.
+   * Field absent = zero append (ask / worker / entries without the
+   * manager see zero behavior change, byte-identical).
    *
-   * 数据流:build-engine 装配期 `manager.onManualReconnect(cb)` 把事件
-   * push 进 `pending`(回调在 TUI / CLI 重连动作的成功路径上触发);
-   * loop-engine 在下一 step 边界 take 走并追加,追加后事件不再重复出现
-   * (take = 取走 + 清空,一次性消费)。schema 变更本身由 manager 经
-   * registerExternal 进 tools(下一轮 promptTools 自然含),本缝只负责
-   * 告知模型「新 server 工具已可用」。
+   * Data flow: during build-engine assembly, `manager.onManualReconnect(cb)`
+   * pushes events into `pending` (the callback fires on the success path
+   * of TUI / CLI reconnect actions); loop-engine takes them at the next
+   * step boundary and appends, after which events never repeat (take =
+   * drain + clear, one-shot consumption). Schema changes themselves enter
+   * tools via manager's registerExternal (the next promptTools naturally
+   * includes them); this seam only informs the model that the new
+   * server's tools are available.
    */
   readonly mcpReconnect?: {
-    /** 取走全部 pending 事件(一次性消费;返回后内部清空)。 */
+    /** Drain all pending events (one-shot consumption; internal state cleared after return). */
     readonly takePending: () => ReadonlyArray<{
       readonly server: string;
       readonly tools: ReadonlyArray<string>;
     }>;
   };
   /**
-   * #672 T3:工具环检测。缺省 / true = 开；false = 关。
+   * Tool-loop detection. Default / true = enabled; false = disabled.
    */
   readonly detectToolLoop?: boolean;
 }
 
 /**
- * 把消息及其 content blocks 冻结(S10 守门).blocks 是平铺对象({type,
- * text}/{type,id,name,input}/...);`Object.freeze({ ...b })` 浅冻结块自身
- * 的可枚举属性已足够(input 由模型给出的不可变快照,不允许回路修改)。
+ * Freeze a message and its content blocks. Blocks are flat objects
+ * ({type, text}/{type,id,name,input}/...); a shallow
+ * `Object.freeze({ ...b })` of each block's own enumerable properties
+ * suffices (input is an immutable snapshot given by the model and must
+ * not be mutated by the loop).
  */
 function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
   return Object.freeze({
     role: msg.role,
     content: Object.freeze(msg.content.map((b) => Object.freeze({ ...b }))),
-    // ADR-0112 T2:宿主出处戳随冻结存活(compact re-freeze 克隆、priorMessages
-    // 续传都过本缝;丢戳会让已盖戳宿主帧在下次出站被误转译,KV 前缀漂移)。
+    // ADR-0112: the host-provenance stamp survives freezing (compact
+    // re-freeze clones and priorMessages continuation all pass through
+    // this seam; losing the stamp would make an already-stamped host
+    // frame get re-translated on the next outbound call, drifting the KV
+    // prefix).
     ...(msg.hostInjected === true ? { hostInjected: true } : {}),
   });
 }
 
 /**
- * #620 T3:调 host 注入的 commit 钩子;钩子缺席 = 零 IO 早退(行为不变)。
- * 钩子失败统一包 MessageCommitError 上抛(命名失败,不静默吞咽)。
+ * Invoke the host-injected commit hook; hook absent = zero-IO early return
+ * (behavior unchanged). Hook failures are uniformly wrapped in
+ * MessageCommitError and rethrown (named failure, never silent).
  *
- * D2 (tui-display-consistency):第二参 `thinkingMs` 透传到 host 钩子;
- * 缺席 (undefined) → host 钩子不挂 key,与既有 byte-identical 行为一致。
- * tool_result commit 点传 undefined;assistant commit 点传
- * `turnResult.thinkingMs`(可能是 undefined:non-stream / 无思考 / 边界非法)。
+ * The 2nd parameter `thinkingMs` is passed through to the host hook;
+ * absent (undefined) → the host hook attaches no key, keeping the
+ * existing byte-identical behavior. tool_result commit sites pass
+ * undefined; assistant commit sites pass `turnResult.thinkingMs` (possibly
+ * undefined: non-stream / no thinking / invalid boundary).
  */
 async function commitMessagesOrThrow(
   deps: LoopEngineDeps,
@@ -501,40 +574,48 @@ async function commitMessagesOrThrow(
 }
 
 /**
- * #888 save-fork 修复:run 作用域的注入消息 pending 缓冲。
+ * Run-scoped pending buffer for injected messages (save-fork fix).
  *
- * appendGraphModeChange / appendMcpReconnect / appendAgentStatusBar 把 user
- * 注入消息 immutable 追加进内存权威历史,但从不经过 commitMessagesOrThrow
- * 落 JSONL 链。run 结束后宿主收尾 save(hub / chat)把含注入消息的内存
- * 投影与纯 commit 链做 LCP
- * 对齐,在第一条注入消息处 jsonDeepEqual 失配 → planSessionSave 判 fork,
- * parent 回落、真实前缀孤儿化,下一个 run 从 query 重放整轮(#888 现象)。
+ * appendGraphModeChange / appendMcpReconnect / appendAgentStatusBar append
+ * user injection messages immutably into the in-memory authoritative
+ * history, but never pass through commitMessagesOrThrow to the JSONL
+ * chain. After run ends, the host's closing save (hub / chat) aligns the
+ * in-memory projection (which contains injected messages) with the pure
+ * commit chain via LCP; the first injected message breaks jsonDeepEqual →
+ * planSessionSave reports a fork, parent falls back and the real prefix is
+ * orphaned, so the next run replays the whole round from the query.
  *
- * 本缓冲让注入消息在下一次 assistant / tool_result commit 时随批 flush
- * (loop-detected envelope 的既有先例同形态),恢复不变式:
- *   「内存权威历史 − seed query」==「盘上 commit 链 − 宿主懒提交的 query 前缀」。
- * 停止路径处置:
- *   - cancelled:run() 收尾在 appendSystemInterrupt 后把 pending + system
- *     interrupt 一起 flush(收尾 save 的投影与链对齐,不 fork);
- *   - protocolError / emptyFinalResponse:pending 丢弃(#120 裁决:turn 不进
- *     历史,save 判 prefix/extension,零新增 fork 面);
- *   - timeout / fused / nonSuccessStop:pending 已随最后一个 tool_result /
- *     assistant commit flush,无残留。
- *   - compact(reactive / proactive)重建历史后 pending 清空:压缩产物与
- *     旧链本就不可 LCP 对齐(既有 fork-copy 语义),flush 旧 pending 只会
- *     把可能已不在内存的消息写上盘。
- * 钩子缺席(commitMessages undefined)时缓冲仍照常累积/清空——flush 是
- * no-op,零 IO 语义不变。
+ * This buffer makes injected messages flush with the next assistant /
+ * tool_result commit batch (same shape as the existing loop-detected
+ * envelope), restoring the invariant:
+ *   "in-memory authoritative history − seed query" == "on-disk commit
+ *    chain − the host's lazily-committed query prefix".
+ * Stop-path handling:
+ *   - cancelled: run()'s closing flushes pending + system interrupt
+ *     together after appendSystemInterrupt (the closing save's projection
+ *     aligns with the chain, no fork);
+ *   - protocolError / emptyFinalResponse: pending is discarded (the turn
+ *     never enters history; save reports prefix/extension, adding no new
+ *     fork surface);
+ *   - timeout / fused / nonSuccessStop: pending has already flushed with
+ *     the last tool_result / assistant commit; nothing remains.
+ *   - compact (reactive / proactive): after rebuilding history, pending
+ *     is cleared — the compaction product and the old chain are not
+ *     LCP-alignable anyway (existing fork-copy semantics), and flushing
+ *     old pending would write messages that may no longer be in memory.
+ * When the hook is absent (commitMessages undefined) the buffer still
+ * accumulates/clears normally — flush is a no-op, zero-IO semantics
+ * unchanged.
  */
 function createPendingInjected() {
   let pending: AnthropicNativeMessage[] = [];
   return {
-    /** 注入点调用:入缓冲,返回该消息供 appendMessage 追加进权威历史。 */
+    /** Called at injection points: buffer the message and return it for appendMessage to add to the authoritative history. */
     record(msg: AnthropicNativeMessage): AnthropicNativeMessage {
       pending.push(msg);
       return msg;
     },
-    /** commit 点调用:返回全部 pending 并清空(flush 即清,顺序保持)。 */
+    /** Called at commit points: return all pending and clear (flush-on-take, order preserved). */
     take(): AnthropicNativeMessage[] {
       if (pending.length === 0) return [];
       const flushed = pending;
@@ -547,32 +628,42 @@ function createPendingInjected() {
 type PendingInjected = ReturnType<typeof createPendingInjected>;
 
 /**
- * T5 / ADR-0098:技能索引进场缝的**传输形态**。loop-engine 只认识「拿一次
- * 增量,拿到非空就贴」这一件事,并不知道 rescan / ledger / 渲染 —— 那些全
- * 在 `harness/skill/index-delta.ts`(缝的**生产者**)。
+ * Transport shape of the skill model-index entry seam (ADR-0098).
+ * loop-engine only knows "get a delta once, paste it if non-empty" and
+ * knows nothing of rescan / ledger / rendering — all of that lives in
+ * `harness/skill/index-delta.ts` (the seam's producer).
  *
- * 为什么是**闭包**而不是 `(rescanner, ledger)` 两个对象:宿主(三入口 +
- * 测试)在装配期已经能建出 rescanner / ledger,包成闭包后 loop-engine 对
- * `harness/skill/*` 零 import —— 与 `boundaryAttachment` / `agentStatus`
- * 同款「宿主注入纯闭包,引擎不反向依赖」纪律(Gate B:无 session-api /
- * skill 子系统类型入内核)。
+ * Why a closure instead of a `(rescanner, ledger)` pair: the host (three
+ * entry points + tests) already builds rescanner / ledger at assembly
+ * time; wrapping them in a closure keeps loop-engine free of any
+ * `harness/skill/*` import — same "host injects a pure closure, engine
+ * has no reverse dependency" discipline as `boundaryAttachment` /
+ * `agentStatus` (no session-api / skill-subsystem types enter the
+ * kernel).
  *
- * 失败语义:`delta()` 抛 typed 错(`SkillRescanError` / `SkillIndexLedger
- * Error` / 未来任何)时 loop-engine **吞咽 + console.warn 一行**,不注入、
- * 不中断回合 —— spec Input-contract exception 列要的是「不贴残缺 delta、
- * 不改冻表、保留进场史」,而回合本身不该因一次索引扫描失败而中止(与既有
- * 降级契约同形:栏读失败 → 无 todo 段,模型回合不受影响)。落盘失败时
- * `computeSkillIndexDelta` 已保证不返回文本,故这里「吞咽」等价于「不把
- * messages 追加当成已进场」。
+ * Failure semantics: when `delta()` throws a typed error
+ * (`SkillRescanError` / `SkillIndexLedgerError` / anything future),
+ * loop-engine swallows it and logs one `console.warn` line — no
+ * injection, no aborted turn. The spec's input-contract exception wants
+ * "never paste a partial delta, never touch the frozen table, keep the
+ * entry ledger", and a single index-scan failure must not abort the turn
+ * (same degradation shape as existing contracts: bar read failure → no
+ * todo section, model turn unaffected). On persist failure
+ * `computeSkillIndexDelta` already guarantees it returns no text, so
+ * "swallow" here equals "do not treat the messages append as entered".
  *
- * 会话锚(**调用参数**,不是装配参数):形态照抄 `agentStatus` —— 装配期
- * (尤其 serve)拿不到 conversationId,per-session 叶子在调用期才定。宿主
- * 把它收到的 `deps.conversationId` 原样转给缝;`undefined`(ask / worker /
- * 未锚装配)→ 缝返回空增量(无会话锚 = 无可持久化进场史)。
+ * Session anchor (a call parameter, not an assembly parameter): the
+ * shape copies `agentStatus` — the host (especially serve) cannot know
+ * conversationId at assembly time, so the per-session leaf is decided at
+ * call time. The host forwards the `deps.conversationId` it received to
+ * the seam; `undefined` (ask / worker / unanchored assembly) → the seam
+ * returns an empty delta (no session anchor = no persistable entry
+ * ledger).
  */
 export interface SkillIndexDeltaSeam {
   /**
-   * 拿本轮增量。返回空文本 = 无新建 = 零追加。抛错 = 本轮不贴(吞咽)。
+   * Fetch this round's delta. Empty text = nothing new = zero append.
+   * Throw = skip this round (swallowed).
    */
   delta(conversationId: string | undefined): Promise<{
     readonly added: readonly string[];
@@ -591,13 +682,17 @@ function appendMessage(opts: {
 }
 
 /**
- * 子弹 4 / invariant 3:reconcile 相关号判定 —— 同一「真实用户消息」= 对象
- * 同一性,或 reactive/proactive compact 的 re-freeze 克隆(`freezeMessage`
- * 逐条 clone,compact 后 kept 尾引用变而内容不变;纯引用比较会把克隆误判成
- * 新消息进场,同一指令被重复标记,违反「标记只在该跳出现一次」)。单 run 内
- * 真实用户消息只在 run() 入口追加一条,其后 user 消息全是宿主注入(被 T2
- * 名册滤掉),故「同 role + 逐块同内容」在结算面等价于同一性,无第二条款式
- * 相同的真实消息可混淆。
+ * Same-real-user-message test for reconcile: object identity, OR a
+ * re-freeze clone from reactive/proactive compact. `freezeMessage` clones
+ * per message, so after compaction the kept tail's references change
+ * while content does not; a pure reference compare would misread the
+ * clone as a new message and re-mark the same instruction, violating
+ * "marking appears only once for that jump". Within a single run the real
+ * user message is appended exactly once at run() entry, and all later
+ * user messages are host-injected (dropped by the extractor's roster),
+ * so "same role + block-for-block same content" is equivalent to identity
+ * on the settling surface — no second look-alike real message can
+ * confuse it.
  */
 function isSameRealUserMessage(
   a: AnthropicNativeMessage,
@@ -618,33 +713,43 @@ function isSameRealUserMessage(
 }
 
 /**
- * #645 T1 / ADR-0028:把现势栏以 user 消息 immutable 追加到 `messages` 尾
- * (经 adapter.encodeUserText 编码,与首条用户文本同一缝)。
- * `deps.agentStatus` 缺席 → 原样返回 state(零注入);在场 → 现算快照
- * (todos.md 读失败当无 todo 段,见 agent-status.ts),追加后返回新 state。
- * 永不 throw:读失败已收敛为"无 todo 段",模型回合不受影响。
+ * ADR-0028: append the current status bar immutably as a user message at
+ * the tail of `messages` (encoded via adapter.encodeUserText, the same
+ * seam as the first user text). `deps.agentStatus` absent → return state
+ * unchanged (zero injection); present → compute the snapshot fresh (todos
+ * read failure is treated as "no todo section", see agent-status.ts) and
+ * return the new state after appending. Never throws: read failure has
+ * already converged to "no todo section", the model turn is unaffected.
  *
- * #647 T3 / ADR-0028:同一计算点(同一份 snapshot 对象)经 safeEmitStream 发
- * `agent_status` 流事件 —— TUI 只读最新现势的读口;事件字段即栏的数据字段,
- * 两处不可能分叉(单一真源)。观察者异常被 safeEmitStream 吞咽,不反流进
- * 模型回合。deps.agentStatus 缺席 → 无栏也无事件(ask / worker 路径)。
+ * At the same computation point (one and the same snapshot object), an
+ * `agent_status` stream event is emitted via safeEmitStream — the TUI's
+ * read-only latest-state surface; the event fields are the bar's data
+ * fields, so the two cannot diverge (single source of truth). Observer
+ * exceptions are swallowed by safeEmitStream and never flow back into the
+ * model turn. deps.agentStatus absent → no bar and no event (ask /
+ * worker).
  *
- * #888:注入消息同时 record 进 pending 缓冲 —— 下一次 assistant / tool_result
- * commit 时随批 flush 上盘,消除 save-fork。
+ * Injection messages are also recorded into the pending buffer — they
+ * flush to disk with the next assistant / tool_result commit batch,
+ * eliminating the save-fork.
  *
- * spec agent-status-instruction-echo T3:同一计算点经 T2 提取器
- * (`extractLatestRealUserInstruction`)从 `state.messages` 现读最新真实用户
- * 指令首行,随同一份 snapshot 进栏 `instruction:` 行与 `agent_status` 事件
- * (SC1 / SC6 同源;逐字回显非摘要,invariant 1)。无真实用户消息 → 段整
- * 段缺席(F1)。提取纯读取零抛错;append-only / pendingInjected 纪律不变
- * (invariant 6)。
+ * Instruction echo: at the same computation point, the extractor
+ * (`extractLatestRealUserInstruction`) reads the latest real user
+ * instruction's first line from `state.messages`, which enters the bar's
+ * `instruction:` line and the `agent_status` event with the same snapshot
+ * (same source; verbatim echo, not a summary). No real user message → the
+ * section is absent entirely. Extraction is pure reads and never throws;
+ * append-only / pendingInjected discipline is unchanged.
  *
- * 子弹 4 / invariant 3:reconcile 经 run 作用域装箱 `reconcileRef` 一次性
- * 结算 —— 提取命中的真实用户消息与已结算引用不同 → 本栏标记并写盒;相同
- * (含 compact re-freeze 克隆,见 `isSameRealUserMessage`)→ 本栏
- * `reconcile: false`(行缺席、事件 key 在场)。无判定对象(F1)→ 字段整
- * 槽缺席、装箱不清(冷启动 `stamped = undefined` 合法)。两处调用点(正常
- * step 与 reactive-compact 重试)共享同一装箱,结算同形。
+ * Reconcile settles once per run through the run-scoped box
+ * `reconcileRef` — the extracted real user message differs from the
+ * settled reference → this bar is marked and the box is updated; same
+ * (including compact re-freeze clones, see `isSameRealUserMessage`) →
+ * this bar carries `reconcile: false` (line absent, event key present).
+ * Nothing to judge → the field slot is absent entirely and the box is not
+ * cleared (cold start `stamped = undefined` is legitimate). Both call
+ * sites (normal step and reactive-compact retry) share the same box and
+ * settle identically.
  */
 async function appendAgentStatusBar(
   state: LoopState,
@@ -680,27 +785,35 @@ async function appendAgentStatusBar(
     type: "agent_status",
     lastTool: snapshot.lastTool,
     openTodoLines: snapshot.openTodoLines,
-    // 条件在场:投影规则 = pickPresentAgentStatusSlots SSOT(与快照装配、
-    // TUI 事件映射同源;缺席 → key 不出现,与栏文本"空槽不广告"同一形态)。
+    // Conditional presence: projection rule = pickPresentAgentStatusSlots
+    // SSOT (same source as snapshot assembly and TUI event mapping; absent
+    // → key does not appear, matching the bar text's "don't advertise
+    // empty slots" shape).
     ...pickPresentAgentStatusSlots(snapshot),
   });
-  // ADR-0112 T2:宿主注入 commit 时盖非模型可见出处戳;带戳帧在出站投影透传。
+  // ADR-0112: stamp the non-model-visible provenance when the host-
+  // injected message commits; stamped frames pass through the outbound
+  // projection.
   const msg = stampHostInjected(deps.adapter.encodeUserText(snapshot.text));
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
 }
 
 /**
- * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:在 appendAgentStatusBar 之后的
- * 同一回合边界计算点,把环境现势快照经 safeEmitStream 发 `env_snapshot`
- * 流事件 —— 与 `agent_status` 平行的**独立**事件流(人读 chrome 数据源,
- * 给 TUI EnvironmentPane;给人不给模型)。**不**复用 agent_status 事件 /
- * 快照结构,**不**追加任何消息(state 原样返回),**不**进 messages /
- * verify / ADR-0028 栏。
+ * Emitted at the same turn-boundary computation point after
+ * appendAgentStatusBar: the environment snapshot goes out as an
+ * `env_snapshot` stream event via safeEmitStream — a stream independent
+ * of and parallel to `agent_status` (human-facing chrome data for the
+ * TUI EnvironmentPane; for humans, not the model). It does not reuse the
+ * agent_status event or snapshot structure, does not append any message
+ * (state returned unchanged), and never enters messages / verify / the
+ * ADR-0028 bar.
  *
- * deps.envSnapshot 缺席 → 零 IO 早退(ask / worker / 既有装配零行为变化)。
- * readEnvSnapshot 永不 throw(T4:git 失败 → git 字段全 null、cwd 保留,
- * EXIT degraded);观察者异常由 safeEmitStream 吞咽,模型回合不受影响。
+ * deps.envSnapshot absent → zero-IO early return (ask / worker / existing
+ * assemblies see zero behavior change). readEnvSnapshot never throws (git
+ * failure → all git fields null, cwd retained, degraded exit); observer
+ * exceptions are swallowed by safeEmitStream, the model turn is
+ * unaffected.
  */
 async function appendEnvSnapshot(
   state: LoopState,
@@ -708,40 +821,50 @@ async function appendEnvSnapshot(
   onStream?: (event: HarnessStreamEvent) => void
 ): Promise<LoopState> {
   if (deps.envSnapshot === undefined) return state;
-  // T9:每次即将调模型前现读活 taskRoot,而不是用装配期快照 —— 这样 rebind
-  // 后下一波 tool calls 的人读面 (TUI cwd / git 摘要) 跟随活根,而 system
-  // prompt 仍钉在稳定根,KV 缓存前缀字节不变。
+  // Re-read the live taskRoot before every model call instead of using an
+  // assembly-time snapshot — so post-rebind the human-facing surfaces of
+  // the next tool-call wave (TUI cwd / git summary) follow the live root,
+  // while the system prompt stays pinned on the stable root and the KV
+  // cache prefix bytes are unchanged.
   const snapshot = await readEnvSnapshot({ cwd: deps.envSnapshot.readCwd() });
   safeEmitStream(onStream, { type: "env_snapshot", snapshot });
   return state;
 }
 
 /**
- * ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换追加缝。
- * 比较本次 graphAssembly.enabled() 与 `lastSeenEnabled.value` 持有的
- * 「上一次值」:翻转 → encodeUserText + appendMessage + safeEmitStream
- * 发 `graph_mode_changed` 流事件;同值 → 零追加,state 原样返回。
+ * Graph-mode toggle append seam. Compare this round's
+ * graphAssembly.enabled() with the previous value in
+ * `lastSeenEnabled.value`: flip → encodeUserText + appendMessage +
+ * safeEmitStream emitting a `graph_mode_changed` stream event; same value
+ * → zero append, state returned unchanged.
  *
- * 形态镜像 appendAgentStatusBar(seam 缺席 → 零注入,行为 byte-identical):
- *   - deps.graphModeChange 缺席 → return state(ask / worker / 未接
- *     overlay 的入口零行为变化);
- *   - seam 在场 → 每步调用,同 round 内连续多步翻转检测无误;
- *   - 写入更新由本函数完成,`lastSeenEnabled` 与 deps 同步生命周期
- *     (rebuild 引擎时宿主自然新建一份,跨会话零泄漏);
- *   - 切换文本 = SSOT(renderGraphModeChangeNotification),开图含
- *     编排指引,关图含关闭提示 —— 内容并入 IKNOW_GRAPH_ORCHESTRATION_TEXT。
+ * Shape mirrors appendAgentStatusBar (seam absent → zero injection,
+ * byte-identical behavior):
+ *   - deps.graphModeChange absent → return state (ask / worker / entries
+ *     without the overlay see zero behavior change);
+ *   - seam present → called each step; multiple flips within one round
+ *     are detected correctly;
+ *   - the update write is done by this function; `lastSeenEnabled` shares
+ *     deps' lifetime (the host naturally creates a fresh one on engine
+ *     rebuild, so nothing leaks across sessions);
+ *   - toggle text = SSOT (renderGraphModeChangeNotification): graph-on
+ *     includes orchestration guidance, graph-off a shutdown hint —
+ *     content consolidated into IKNOW_GRAPH_ORCHESTRATION_TEXT.
  *
- * 判定次序:appendAgentStatusBar 之前调用,确保 status bar 在
- * graph 切换提示之后(后注入的 message 排在末尾,模型面看到的次序
- * 与写入次序一致)。
+ * Ordering: called before appendAgentStatusBar so the status bar comes
+ * after the graph toggle notice (the later-injected message sits at the
+ * tail; the model sees write order = read order).
  *
- * 返回值 `{ state, appendedLongOn }`:`appendedLongOn === true` 当且仅当
- * 本拍因翻入 on 实际贴了长 ON 通知(IKNOW_GRAPH_MODE_ON_NOTIFICATION),
- * 给同段后续的 appendGraphModePresence 用作 SC5 去重信号 —— 同一拍长
- * ON 与短现势不并存。其他路径(off 翻转 / 同值 / seam 缺席 / 初值观察)
- * 均为 false。
+ * Return `{ state, appendedLongOn }`: `appendedLongOn === true` iff this
+ * tick actually pasted the long ON notice while flipping into on
+ * (IKNOW_GRAPH_MODE_ON_NOTIFICATION), used by the subsequent
+ * appendGraphModePresence in the same segment as a dedupe signal — long
+ * ON and the short presence line never coexist in one tick. All other
+ * paths (off flip / same value / seam absent / initial observation) yield
+ * false.
  *
- * #888:切换提示同样 record 进 pending 缓冲,随下一批 commit flush。
+ * Toggle notices are also recorded into the pending buffer and flush with
+ * the next commit batch.
  */
 async function appendGraphModeChange(
   state: LoopState,
@@ -753,8 +876,9 @@ async function appendGraphModeChange(
   if (seam === undefined) return { state, appendedLongOn: false };
   const next = seam.assembly.enabled();
   const last = seam.lastSeenEnabled.value;
-  // 初次观察(last = undefined):只记初值,不追加 —— 新会话/新 deps
-  // 的第一轮没有「翻转」可言,关图开局更不能灌一条 off 提示。
+  // First observation (last = undefined): only record the initial value,
+  // no append — the first round of a new session / new deps has no flip to
+  // speak of, and a graph-off start must not inject an off notice.
   if (last === undefined) {
     seam.lastSeenEnabled.value = next;
     return { state, appendedLongOn: false };
@@ -776,18 +900,22 @@ async function appendGraphModeChange(
 }
 
 /**
- * ADR-0081 — graph mode 每个 `run()` 一句短现势追加缝。
+ * ADR-0081 — one short graph-mode presence line per `run()` seam.
  *
- * 判定次序:在 appendGraphModeChange 之后、appendMcpReconnect 之前调用。
+ * Ordering: called after appendGraphModeChange and before
+ * appendMcpReconnect.
  *
- * 判定:
- *   1. deps.graphModePresence 缺席 → 零追加;
- *   2. graphModeChange 缺席(装配错配)→ 零追加;
- *   3. `appendedThisRun` 已结算 → 零追加(同 run 后续 hop / compact 重试);
- *   4. `appendedLongOn === true` → 结算 latch、零追加(SC5);
- *   5. `assembly.enabled() === false` → 零追加且不结算(关着时下一 hop
- *      仍可在 beginRound 后按新快照判定);
- *   6. 其余 → 贴短句并结算 latch。
+ * Decision:
+ *   1. deps.graphModePresence absent → zero append;
+ *   2. graphModeChange absent (assembly mismatch) → zero append;
+ *   3. `appendedThisRun` already settled → zero append (later hops /
+ *      compact retries in the same run);
+ *   4. `appendedLongOn === true` → settle the latch, zero append (long ON
+ *      and short line never coexist);
+ *   5. `assembly.enabled() === false` → zero append and no settle (while
+ *      off, the next hop may still decide on the fresh snapshot after
+ *      beginRound);
+ *   6. otherwise → paste the short line and settle the latch.
  */
 function resetGraphPresenceLatch(deps: LoopEngineDeps): void {
   const seam = deps.graphModePresence;
@@ -803,9 +931,11 @@ async function appendGraphModePresence(
 ): Promise<LoopState> {
   const seam = deps.graphModePresence;
   if (seam === undefined) return state;
-  // 保守 guard:presence 在场而 change 缺席 = 装配错配(build-engine 永远
-  // 同 gate 同源接线两缝),此时零注入而非让 presence 脱离 change 的翻转
-  // 语义独立生效(与「overlay 缺席 = 零注入」同一保守姿态)。
+  // Conservative guard: presence present while change absent = assembly
+  // mismatch (build-engine always wires both seams through the same gate
+  // from the same source); then zero injection rather than letting
+  // presence act independently of change's flip semantics (same
+  // conservative stance as "overlay absent = zero injection").
   if (deps.graphModeChange === undefined) return state;
   const latch = seam.appendedThisRun;
   if (latch.value) return state;
@@ -823,10 +953,12 @@ async function appendGraphModePresence(
 }
 
 /**
- * 两条 graph 缝的编排收敛:appendGraphModeChange → appendGraphModePresence
- * 按固定次序配对(change 先行,presence 拿 appendedLongOn 当 SC5 去重
- * 信号)。首调与 reactive-compact 重试两处同形,提取本 helper 消除逐字
- * 重复;次序语义(在 mcpReconnect / agentStatusBar 之前)由调用方保持。
+ * Orchestration convergence for the two graph seams:
+ * appendGraphModeChange → appendGraphModePresence are paired in a fixed
+ * order (change first; presence takes appendedLongOn as the dedupe
+ * signal). The first call and the reactive-compact retry share this
+ * helper to remove verbatim duplication; the ordering semantics (before
+ * mcpReconnect / agentStatusBar) stay with the callers.
  */
 async function appendGraphSeams(
   state: LoopState,
@@ -850,32 +982,41 @@ async function appendGraphSeams(
 }
 
 /**
- * B4 / ADR-0043 §4:MCP 手动重连通知模板(SSOT)。
+ * ADR-0043: MCP manual-reconnect notification template (SSOT).
  *
- * 单行静态文本:`<server>` + 工具名清单由 appendMcpReconnect 现拼;
- * 本常量钉住文案骨架,测试引用常量不走字面。与 graph_mode_change 同形:
- * user 消息 immutable 追加,transcript 一等公民,KV 缓存只受 messages
- * 尾部追加影响(前缀 tools/system 不动)。
+ * Single-line static text: `<server>` + the tool-name list are filled in
+ * by appendMcpReconnect at call time; this constant pins the wording
+ * skeleton, and tests reference the constant rather than the literal.
+ * Same shape as graph_mode_change: immutable user-message append,
+ * first-class in the transcript, and the KV cache is only affected by
+ * tail appends to messages (the tools/system prefix stays put).
  */
 export const MCP_RECONNECT_NOTIFICATION_TEMPLATE =
   "MCP server '<server>' reconnected manually — its tools are now available: <tools>. Schemas were not loaded; call tool_search before invoking any of them.";
 
 /**
- * B4 / ADR-0043 §4:MCP 手动重连追加缝。消费 `deps.mcpReconnect.takePending()`
- * 的 pending 事件,每个事件以 user 消息 immutable 追加一条单行文本
- * (MCP_RECONNECT_NOTIFICATION_TEMPLATE,`<server>` / `<tools>` 现拼)。
+ * ADR-0043: MCP manual-reconnect append seam. Consumes the pending events
+ * from `deps.mcpReconnect.takePending()`, appending each as a single-line
+ * text (MCP_RECONNECT_NOTIFICATION_TEMPLATE with `<server>` / `<tools>`
+ * filled in) immutably as a user message.
  *
- * 形态镜像 appendGraphModeChange(seam 缺席 → 零注入,行为 byte-identical):
- *   - deps.mcpReconnect 缺席 → return state(ask / worker / 未接 manager);
- *   - takePending() 返回空 → 零追加,state 原样返回;
- *   - 多个 pending 事件按记录顺序逐条追加(一次重连一个事件);
- *   - 消息次序:在 graph 切换提示之后、status bar 之前 —— 与 graphModeChange
- *     同一判定段(环境级事件先于回合现势栏)。
+ * Shape mirrors appendGraphModeChange (seam absent → zero injection,
+ * byte-identical):
+ *   - deps.mcpReconnect absent → return state (ask / worker / no
+ *     manager);
+ *   - takePending() empty → zero append, state unchanged;
+ *   - multiple pending events are appended one by one in record order
+ *     (one event per reconnect);
+ *   - message ordering: after the graph toggle notice, before the status
+ *     bar — same decision segment as graphModeChange (environment-level
+ *     events precede the per-turn status bar).
  *
- * 判定次序:与 appendGraphModeChange 并列,appendAgentStatusBar 之前调用,
- * 保证 status bar 在重连提示之后(模型读到时序 = 重连告知 → 现势栏)。
+ * Ordering: parallel to appendGraphModeChange, called before
+ * appendAgentStatusBar so the status bar lands after the reconnect notice
+ * (model read order = reconnect notice → status bar).
  *
- * #888:重连提示同样 record 进 pending 缓冲,随下一批 commit flush。
+ * Reconnect notices are also recorded into the pending buffer and flush
+ * with the next commit batch.
  */
 function appendMcpReconnect(
   state: LoopState,
@@ -900,23 +1041,30 @@ function appendMcpReconnect(
 }
 
 /**
- * T5 (spec `skill-index-increment` / ADR-0098 / SC1–SC4、SC7):技能模型索引
- * 增量追加缝。每次即将调用模型前取一次 `deps.skillIndexDelta` 的增量,非空
- * 则以 user 消息 immutable 追加到当时 `messages` 尾(spec Assumption 8:
- * delta 是本轮最后一条消息 —— 本轮 user 原文 / skill-load 信封 / graph 提示
- * / 重连通知 / 现势栏都在它前面)。
+ * Skill model-index delta append seam (ADR-0098). Right before every
+ * model call, take one delta from `deps.skillIndexDelta`; if non-empty,
+ * append it immutably as a user message at the tail of the current
+ * `messages` (the delta must be the round's last message — this round's
+ * user text / skill-load envelopes / graph notices / reconnect notices /
+ * status bar all precede it).
  *
- * 形态镜像 appendMcpReconnect(seam 缺席 → 零注入,行为 byte-identical):
- *   - `deps.skillIndexDelta` 缺席 → return state(ask / worker / 既有装配);
- *   - `delta()` 返回空文本 → 零追加(SC1「无新建则不贴」);
- *   - `delta()` 抛错 → 吞咽 + console.warn(不中断回合,spec exception 列
- *     「不贴残缺 delta、保留进场史」由生产者保证 —— 落盘失败时它不返回文本)。
+ * Shape mirrors appendMcpReconnect (seam absent → zero injection,
+ * byte-identical):
+ *   - `deps.skillIndexDelta` absent → return state (ask / worker /
+ *     existing assemblies);
+ *   - `delta()` returns empty text → zero append ("nothing new, no
+ *     paste");
+ *   - `delta()` throws → swallow + console.warn (the turn is not aborted;
+ *     "never paste a partial delta, keep the entry ledger" is guaranteed
+ *     by the producer — on persist failure it returns no text).
  *
- * 进场史**不从这里**写:落盘在 `computeSkillIndexDelta` 内部先于返回
- * (Input-contract「落盘失败 → 不把 messages 追加当成已进场」)。
+ * The entry ledger is not written from here: persistence happens inside
+ * `computeSkillIndexDelta` before it returns (persist failure → the
+ * messages append must not be treated as an entry).
  *
- * #888:注入消息同样 record 进 pending 缓冲,随下一批 commit flush ——
- * 落盘史与 messages 双写,若只落盘不 commit 会让 save 判 fork。
+ * The injected message is also recorded into the pending buffer and flush
+ * with the next commit batch — with a dual write to the ledger and
+ * messages, persisting without committing would make save report a fork.
  */
 async function appendSkillIndexDelta(
   state: LoopState,
@@ -927,18 +1075,17 @@ async function appendSkillIndexDelta(
   if (seam === undefined) return state;
   let text: string;
   try {
-    // 会话锚从 deps 现读（与 appendAgentStatusBar 的 `deps.conversationId`
-    // 同一拍）—— serve 的 per-run runDeps 在调用前注入它。
+    // Session anchor read fresh from deps (same tick as
+    // appendAgentStatusBar); serve's per-run runDeps inject it before the call.
     const delta = await seam.delta(deps.conversationId);
     if (delta.added.length === 0 || delta.text.length === 0) return state;
     text = delta.text;
   } catch (err) {
-    // EXIT: typed 错(rescan_failed / write_failed / ...)→ 本轮不贴。
-    // 冻表字节不在本函数手上(装配期 holder),故「不改冻表」结构性成立;
-    // 「保留进场史」由生产者的先落盘后返回顺序保证。
-    // 渲染归 `errorMessage`（errors.ts 单点）：`instanceof Error ? … : String(…)`
-    // 是 code-quality.md typed-error catch 契约明文禁止的形态（plain object 会
-    // 打成 `[object Object]`，kind/context 全丢）。
+    // EXIT: typed error (rescan_failed / write_failed) → skip this round;
+    // frozen table untouched; entry history persists.
+    // Render with `errorMessage` (errors.ts single point) — the code-quality
+    // typed-error catch contract forbids `instanceof Error ? … : String(…)`:
+    // plain objects stringify to `[object Object]`, losing kind/context.
     console.warn(
       `[loop-engine] skill index delta skipped: ${errorMessage(err)}`
     );
@@ -949,15 +1096,18 @@ async function appendSkillIndexDelta(
   return appendMessage({ state, msg });
 }
 
-/** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
- *  Transcript 一等公民：append 到 LoopState.messages 末尾，随持久化/渲染/
- * rewind 一起出现；provider 边界（buildMessageParams filter，T2）剥离它，
- * 绝不进 SDK wire body。system 不构成 turn：splitTurns 按
- * `role === "user"` 且非 tool_result 切片，system 项自然落在相邻 turn 间隙。 */
+/** Ctrl+C / signal abort trigger this fixed system interrupt text.
+ *  First-class in the Transcript: appended to the tail of
+ *  LoopState.messages, surfacing with persistence / rendering / rewind;
+ *  stripped at the provider boundary (buildMessageParams filter) and
+ *  never entering the SDK wire body. A system entry is not a turn:
+ *  splitTurns slices by `role === "user"` and non-tool_result, so system
+ *  items naturally fall between adjacent turns. */
 const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
 
-/** 把 system 中断消息 append 到权威历史末尾（immutable）；与 appendMessage
- *  同样的冻结纪律，append-only 不变式不破。 */
+/** Append the system interrupt message immutably to the tail of the
+ *  authoritative history; same freezing discipline as appendMessage, so
+ *  the append-only invariant holds. */
 function appendSystemInterrupt(state: LoopState): LoopState {
   return {
     messages: Object.freeze([
@@ -972,11 +1122,13 @@ function appendSystemInterrupt(state: LoopState): LoopState {
 }
 
 /**
- * ADR-0112 T2:runFullCompact 的 adapter 视图。compress 有界上下文不认识
- * 出处戳,盖戳责任在宿主 commit 方(loop-engine):compact 请求 prompt 是
- * 宿主注入,须带戳,否则出站投影会把它当 untrusted 转译。本视图是 compact
- * 请求盖戳的**唯一缝**(trace 用 inputMessages 也经本视图 encodeUserText
- * 构造,不再各自手盖)。
+ * ADR-0112: adapter view for runFullCompact. The compress bounded context
+ * knows nothing of provenance stamps; stamping is the host committer's
+ * duty (loop-engine): the compact request prompt is host-injected and
+ * must carry the stamp, otherwise the outbound projection would translate
+ * it as untrusted. This view is the only stamping seam for compact
+ * requests (trace's inputMessages is also built through this view's
+ * encodeUserText, so callers no longer stamp by hand).
  */
 function makeCompactAdapterView(deps: LoopEngineDeps): CompactAdapter {
   const view: CompactAdapter = {
@@ -988,22 +1140,29 @@ function makeCompactAdapterView(deps: LoopEngineDeps): CompactAdapter {
 }
 
 /**
- * ADR-0108:模型在途观察窗缓冲 —— `text` 累积与墙上 draft 同源字节的
- * text_delta;`modelInFlight` 标记本步输出是否尚未定稿(已交付回合的文本
- * 留在缓冲里但不在途,closeout 不得二次 keep,SC7 守卫)。单点声明,
- * closeout / 开窗 / 关窗 / stepWithTrace 装配面共用。
+ * ADR-0108: model in-flight observation window buffer. `text` accumulates
+ * the same bytes as the wall-side draft's text_delta; `modelInFlight`
+ * marks whether this step's output is still undelivered (text of already-
+ * delivered turns stays in the buffer but is not in flight, so closeout
+ * must not keep it twice). Single declaration point shared by closeout /
+ * window open / window close / stepWithTrace assembly surfaces.
  */
 type ModelStreamWindow = { text: string; modelInFlight: boolean };
 
 /**
- * ADR-0108 in-flight closeout keep(与墙上同一把 freeze 刀):模型在途取消 /
- * 超时时,已钉住的流式前缀 prefixRaw 作为本轮 assistant 进权威历史,tailRaw
- * (还在长的块)丢弃;无 prefix → 不落 assistant,仍写 user + interrupt(SC2)。
- * 顺序 invariant 7:split →(有 prefix)assistant 随批 commit(顺带 flush
- * pending 注入)→(cancelled)interrupt append 并单独 commit。assistant commit
- * 失败即抛 MessageCommitError,绝不带着「前缀未进史」的假史继续写 interrupt。
- * 工具在途停因 modelInFlight=false —— assistant 已随正常路径 append,本函数
- * 直通(SC7 四条消息形状不回退)。
+ * ADR-0108 in-flight closeout keep (the same freeze knife as the wall):
+ * when the model is cancelled / timed out mid-flight, the already-pinned
+ * streaming prefix prefixRaw enters the authoritative history as this
+ * turn's assistant message; tailRaw (still-growing block) is discarded;
+ * without a prefix no assistant is written, but user + interrupt are still
+ * written. Ordering invariant: split → (with prefix) assistant commits
+ * with the batch (flushing pending injections along the way) →
+ * (cancelled) interrupt appends and commits separately. A failed assistant
+ * commit throws MessageCommitError immediately — never continue writing
+ * the interrupt over a false history whose "prefix never entered".
+ * Tool-side stops have modelInFlight=false — the assistant already
+ * appended through the normal path, so this function passes straight
+ * through.
  */
 async function closeoutInFlightStop(opts: {
   readonly deps: LoopEngineDeps;
@@ -1013,8 +1172,9 @@ async function closeoutInFlightStop(opts: {
   readonly pendingInjected: PendingInjected;
 }): Promise<LoopState> {
   const { deps, reason, finalState, modelStreamRef, pendingInjected } = opts;
-  // ADR-0108 invariant 5:timeout 与 cancelled 用同一把 keep 刀(ADR-0091 的
-  // 钟 abort 只改停因归属,不改 keep 语义);interrupt 文案仍只属于 cancelled。
+  // ADR-0108: timeout and cancelled use the same keep knife (ADR-0091's
+  // clock abort only reassigns the stop reason, it does not change keep
+  // semantics); the interrupt wording still belongs to cancelled only.
   const keptPrefix =
     (reason === "cancelled" || reason === "timeout") &&
     modelStreamRef.modelInFlight
@@ -1030,17 +1190,20 @@ async function closeoutInFlightStop(opts: {
     await commitMessagesOrThrow(deps, [...pendingInjected.take(), keptMsg]);
   }
   if (reason !== "cancelled") return keptState;
-  // #392 T4 / G3 #388:cancelled 把 system 中断消息 append 到权威历史末尾
-  // (transcript 一等公民)。timeout 不在此面:钟 abort ≠ 用户中断,固定文案
-  // "Interrupted by user." 不适用(ADR-0091)。
+  // cancelled appends the system interrupt message to the tail of the
+  // authoritative history (transcript first-class citizen). timeout is not
+  // on this surface: clock abort ≠ user interrupt, so the fixed text
+  // "Interrupted by user." does not apply (ADR-0091).
   const interrupted = appendSystemInterrupt(keptState);
   const interruptMsg: AnthropicNativeMessage = {
     role: "system",
     content: [{ type: "text", text: SYSTEM_INTERRUPT_TEXT }],
   };
-  // #888:cancelled 收尾把残留 pending 注入与 interrupt 一起 flush(keep prefix
-  // 在场时 pending 已随 assistant 批 flush,interrupt 单独成批)——不 flush 则
-  // 宿主收尾 save 在此处 LCP 失配 fork。无 commitMessages 钩子时 no-op。
+  // cancelled's closing flushes leftover pending injections together with
+  // the interrupt (when a keep prefix exists, pending has already flushed
+  // with the assistant batch, so the interrupt forms its own batch) —
+  // without the flush, the host's closing save would fork on an LCP
+  // mismatch here. A no-op when there is no commitMessages hook.
   await commitMessagesOrThrow(
     deps,
     keptPrefix === ""
@@ -1051,31 +1214,38 @@ async function closeoutInFlightStop(opts: {
 }
 
 /**
- * #458 T7 (SC11):统一两处 compact 调用点(reactive / proactive)的压缩 +
- * 边界渲染缝。原 placeholder 路径保持不变,现叠加 #467 step 2 的 LLM
- * 结构化摘要优先路径:
+ * Unifies compaction + boundary-rendering across the two compact call
+ * sites (reactive / proactive). The original placeholder path is kept and
+ * now layered with the LLM structured-summary fast path:
  *
- *   1. `splitForCompaction(state.messages, DEFAULT_KEEP_RECENT)` 复用
- *      window.ts tool-pair 守门拆 dropped / kept;无可丢前缀 →
- *      return state(行为与旧 `compacted === state.messages` 早退一致);
- *   2. best-effort `runFullCompact` 对 dropped 跑一轮 LLM 摘要
- *      (no tools → 纯文本;adapter 拒绝 / 超时 / 空响应 → 各种 outcome);
+ *   1. `splitForCompaction(state.messages, DEFAULT_KEEP_RECENT)` reuses
+ *      window.ts's tool-pair guard to split dropped / kept; nothing
+ *      droppable → return state (same early return as the old
+ *      `compacted === state.messages`);
+ *   2. best-effort `runFullCompact` runs one LLM summary round over
+ *      dropped (no tools → pure text; adapter refusal / timeout / empty
+ *      response → various outcomes);
  *   3. `summarized` → `buildCompactedMessages`:
- *      [summary user 消息, (可选 boundaryAttr), ...kept];
- *   4. `signal_aborted`(wait 逻辑参考 Claude Code:压缩中取消 = 保持会话原样,
- *      不做 fallback 截断,与 timeout / adapter_failed 不同)→ 返回 state 不变;
- *   5. 其余 outcome → 回退现有 `compactMessages` + boundary placeholder
- *      路径(#467 决议:摘要失败绝不阻塞主 loop)。
+ *      [summary user message, (optional boundaryAttr), ...kept];
+ *   4. `signal_aborted` (Claude Code-like semantics: cancelling during
+ *      compaction keeps the session as-is, no fallback truncation —
+ *      different from timeout / adapter_failed) → return state unchanged;
+ *   5. all other outcomes → fall back to the existing `compactMessages` +
+ *      boundary placeholder path (a summary failure must never block the
+ *      main loop).
  *
- * 停止语义守门不变:boundaryAttachment 字段缺席 → 摘要路径不插入 attachment,
- * 回退路径与现 master byte-identical;普通 turn(非 compact)→ helper 不被调用。
+ * Stop-semantics guard unchanged: boundaryAttachment absent → the summary
+ * path inserts no attachment; the fallback path is byte-identical to
+ * before; normal (non-compact) turns never invoke this helper.
  *
- * `opts.signal` / `opts.onStream`:run 级取消信号与流式事件观察者透传到
- * `runFullCompact`——reactive 调用点传 `opts.signal`(PromptTooLongError 重试
- * 前压缩期间用户取消 → 保持原样 → protocolError 收场);proactive 调用点传
- * `opts?.onStream`(宿主收到 compaction_started / completed / failed +
- * compaction_text_delta,后由 full-compact innerOnStream 重映射而来,#550
- * 渲染污染守门)。缺席 → 行为零变化(旧 `signal: undefined` 语义)。
+ * `opts.signal` / `opts.onStream` pass the run-level cancel signal and
+ * stream observer through to `runFullCompact` — the reactive site passes
+ * `opts.signal` (user cancels during the pre-retry compaction after
+ * PromptTooLongError → keep as-is → end as protocolError); the proactive
+ * site passes `opts?.onStream` (the host receives compaction_started /
+ * completed / failed plus compaction_text_delta, remapped by full-compact
+ * innerOnStream to guard against render pollution). Absent → zero
+ * behavior change (old `signal: undefined` semantics).
  */
 async function applyCompactAttachment(
   state: LoopState,
@@ -1104,10 +1274,12 @@ async function applyCompactAttachment(
   const endedAt = new Date().toISOString();
   const durationMs = performance.now() - startMono;
 
-  // wait 逻辑参考 Claude Code:压缩中取消(Esc/Ctrl+C)→ 会话保持原样,
-  // 不做 fallback 截断(截断会让摘要失败路径的 messages 丢失,与"取消即无变化"
-  // 的取消语义冲突)。调用方据此决定后续收场(reactive → protocolError;
-  // proactive → 下一轮 stepWithTrace 看到 callerAbort 取消)。
+  // Claude Code-like wait semantics: cancel mid-compaction (Esc/Ctrl+C) →
+  // keep the session as-is, no fallback truncation (truncation would lose
+  // messages on the summary-failure path, conflicting with the
+  // "cancel = no change" semantics). The caller decides the follow-up
+  // ending (reactive → protocolError; proactive → the next
+  // stepWithTrace sees callerAbort and cancels).
   if (outcome.kind === "signal_aborted") {
     return state;
   }
@@ -1130,8 +1302,9 @@ async function applyCompactAttachment(
     });
     return {
       ...state,
-      // 续传摘要 = 宿主注入 commit(spec Does #1):首条必须盖戳,否则
-      // 出站投影把 COMPACT_SUMMARY 官方前缀按 untrusted 转义剥掉。
+      // Continuing summary = host-injected commit: the first message
+      // must carry the stamp, otherwise the outbound projection would
+      // strip the COMPACT_SUMMARY official prefix as untrusted escaping.
       messages: Object.freeze(
         composed.map((m, i) =>
           freezeMessage(i === 0 ? stampHostInjected(m) : m)
@@ -1140,7 +1313,8 @@ async function applyCompactAttachment(
     };
   }
 
-  // 摘要失败 / 超时 / 空响应 / adapter 拒绝 → 回退旧纯截断 placeholder 路径。
+  // Summary failure / timeout / empty response / adapter refusal → fall
+  // back to the old pure-truncation placeholder path.
   const compacted = compactMessages(state.messages);
   if (compacted === state.messages) return state;
   await recordCompactLlmCall({
@@ -1168,28 +1342,36 @@ async function applyCompactAttachment(
 }
 
 /**
- * plan compress-trigger-gate T3:proactive auto-compact 在 token 已超但
- * `splitForCompaction` 无窗口(`messages.length <= DEFAULT_KEEP_RECENT`)时的
- * full summary 降级路径。整段 messages 都视为 dropped(无 kept tail)调
- * `runFullCompact` 跑一次 LLM 摘要;成功后用 `buildCompactedMessages`
- * 重建,命中与窗口压缩同一 `boundaryAttachment` 注入点。
+ * Full-summary degradation path for proactive auto-compact when tokens
+ * already exceed the threshold but `splitForCompaction` has no window
+ * (`messages.length <= DEFAULT_KEEP_RECENT`). The whole messages array is
+ * treated as dropped (no kept tail) and `runFullCompact` runs one LLM
+ * summary; on success, rebuild via `buildCompactedMessages`, hitting the
+ * same `boundaryAttachment` injection point as windowed compaction.
  *
- * 与 `applyCompactAttachment` 的语义差:
- *   - 入参:整段 `state.messages` 都视为 dropped(没有 `keepRecent` 切割);
- *     `applyCompactAttachment` 走 `splitForCompaction` 留 6 条 kept tail。
- *   - 失败回退:本路径**不回退**到 `compactMessages` 纯截断 placeholder——
- *     整段消息视为 dropped 再走 `compactMessages` 等于清空,过于激进
- *     (#467 决议:摘要失败绝不阻塞主 loop,但 full summary 路径宁可保留
- *     原状让 reactive 兜底处理 PromptTooLongError,每 run 限 1 次契约保留)。
- *     失败 / 超时 / 空响应 / adapter 拒绝 → 返回 state 不变;
- *     `lastCompactTurn` 因外层 `compactedState.messages !== state.messages`
- *     检查不更新,下一轮 step 重新进 gate 再尝试(无死循环)。
- *   - signal_aborted → state 不变(Claude Code 取消语义)。
+ * Semantic differences from `applyCompactAttachment`:
+ *   - Input: the whole `state.messages` is treated as dropped (no
+ *     `keepRecent` cut); `applyCompactAttachment` goes through
+ *     `splitForCompaction` and keeps a 6-message kept tail.
+ *   - Failure fallback: this path does NOT fall back to the
+ *     `compactMessages` pure-truncation placeholder — treating all
+ *     messages as dropped and then compacting equals wiping them, too
+ *     aggressive (a summary failure must never block the main loop, but
+ *     on the full-summary path we prefer to leave state untouched and let
+ *     reactive handle PromptTooLongError, preserving the once-per-run
+ *     contract). Failure / timeout / empty response / adapter refusal →
+ *     return state unchanged; because the outer
+ *     `compactedState.messages !== state.messages` check keeps
+ *     `lastCompactTurn` from updating, the next step re-enters the gate
+ *     and retries (no dead loop).
+ *   - signal_aborted → state unchanged (Claude Code cancel semantics).
  *
- * `opts.signal` / `opts.onStream`:语义与 `applyCompactAttachment` 完全一致,
- * reactive 调用点传 `opts.signal`(PromptTooLongError 重试前压缩期间用户取消 →
- * 保持原样 → protocolError 收场);proactive 调用点传 `opts?.onStream`
- * (宿主收到 compaction_started / completed / failed + compaction_text_delta)。
+ * `opts.signal` / `opts.onStream`: semantics identical to
+ * `applyCompactAttachment` — the reactive site passes `opts.signal`
+ * (user cancels during the pre-retry compaction after
+ * PromptTooLongError → keep as-is → end as protocolError); the proactive
+ * site passes `opts?.onStream` (host receives compaction_started /
+ * completed / failed plus compaction_text_delta).
  */
 async function applyFullCompactSummary(
   state: LoopState,
@@ -1217,8 +1399,8 @@ async function applyFullCompactSummary(
   const endedAt = new Date().toISOString();
   const durationMs = performance.now() - startMono;
 
-  // Claude Code 取消语义:中途 signal abort → state 不变
-  // (与 applyCompactAttachment 同一守门,详见该 helper 注释)。
+  // Claude Code cancel semantics: mid-way signal abort → state unchanged
+  // (same guard as applyCompactAttachment; see that helper's comment).
   if (outcome.kind === "signal_aborted") return state;
 
   if (outcome.kind === "summarized") {
@@ -1239,8 +1421,9 @@ async function applyFullCompactSummary(
     });
     return {
       ...state,
-      // full-summary 降级路径与 windowed 分支同一契约:续传摘要首条 =
-      // 宿主注入 commit,盖戳后才进权威历史(spec Does #1 / invariant 2)。
+      // The full-summary degradation path shares the windowed branch's
+      // contract: the continuing summary's first message = host-injected
+      // commit, stamped before entering the authoritative history.
       messages: Object.freeze(
         composed.map((m, i) =>
           freezeMessage(i === 0 ? stampHostInjected(m) : m)
@@ -1249,10 +1432,12 @@ async function applyFullCompactSummary(
     };
   }
 
-  // 摘要失败 / 超时 / 空响应 / adapter 拒绝 → state 不变;让 reactive 兜底处理
-  // PromptTooLongError(每 run 限 1 次契约保留)。lastCompactTurn 在外层因
-  // `compactedState.messages === state.messages` 不更新 → 下一轮 re-enter gate,
-  // 死循环防御由 evaluateCompactTrigger 自己(noop 早退)兜住。
+  // Summary failure / timeout / empty response / adapter refusal → state
+  // unchanged; let reactive handle PromptTooLongError (the once-per-run
+  // contract is preserved). lastCompactTurn stays un-updated at the outer
+  // level because `compactedState.messages === state.messages` → the next
+  // round re-enters the gate; dead-loop defense is caught by
+  // evaluateCompactTrigger itself (noop early return).
   await recordCompactLlmCall({
     deps,
     startedAt,
@@ -1266,12 +1451,14 @@ async function applyFullCompactSummary(
 }
 
 /**
- * #467 step 2:compact 摘要轮的 trace 落盘(best-effort,失败不阻塞)。
- * 模式对齐 epilogueSummary(loop-engine.ts:517)的 recordLlmCall:成功路径
- * usage 展开填四 token 字段,失败路径 status "error" + error.message 携带
- * outcome.kind(kind 不在 TraceErrorType 联合内,走 "unknown" 兜底,具体
- * kind 保留在 message 供观测方区分)。POSTEL(ADR-0008 D3):usage 缺席时
- * *_tokens 键缺席(not zero)。
+ * Trace persistence for the compact summary round (best-effort; failure
+ * must not block). Mirrors epilogueSummary's recordLlmCall pattern: the
+ * success path expands usage into the four token fields; the failure path
+ * uses status "error" and error.message carrying outcome.kind (kind is
+ * not in the TraceErrorType union, so it falls back to "unknown" with the
+ * concrete kind kept in message for observers to distinguish). POSTEL
+ * (ADR-0008): when usage is absent, the *_tokens keys are absent (not
+ * zero).
  */
 async function recordCompactLlmCall(opts: {
   readonly deps: LoopEngineDeps;
@@ -1314,19 +1501,24 @@ async function recordCompactLlmCall(opts: {
 }
 
 /**
- * 从权威历史派生 `result.finalText`(仅 `reason === "completed"` 时调用)。
+ * Derive `result.finalText` from the authoritative history (called only
+ * when `reason === "completed"`).
  *
- * 算法:倒序扫 messages,找到**第一条带非空 text 的 assistant** 回合,
- * 返回其 text 块拼接;越过空 text 的 assistant(如纯 tool_use 回合)继续
- * 回扫;无则返回 null。
+ * Algorithm: scan messages backwards to the first assistant turn with
+ * non-empty text and return its concatenated text blocks; skip empty-text
+ * assistant turns (e.g. pure tool_use) and keep scanning; return null if
+ * none.
  *
- * 与 `src/cli/format.ts` 的 `renderAssistantAnswer({showThinking:false})`
- * 在边界上存在细微差异:后者停在最后一条 assistant(不回扫空 text)。
- * 生产路径 `formatRunHuman` 走 `result.finalText`(本函数),分歧仅在
- * `renderAssistantAnswer(false)` 的直接测试调用暴露;由
- * `tests/cli/format.test.ts` 的不变量回归测试钉住一致性。
+ * A subtle boundary difference exists vs `renderAssistantAnswer(
+ * {showThinking:false})` in `src/cli/format.ts`: the latter stops at the
+ * last assistant (no back-scan past empty text). The production path
+ * `formatRunHuman` uses `result.finalText` (this function); the
+ * divergence is only exposed by direct test calls of
+ * `renderAssistantAnswer(false)` and is pinned for consistency by
+ * invariant regression tests in `tests/cli/format.test.ts`.
  *
- * 导出供测试引用同一真源(`result.finalText` 契约),非通用工具。
+ * Exported so tests reference the same source of truth (the
+ * `result.finalText` contract); not a general utility.
  */
 export function deriveFinalText(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -1334,47 +1526,56 @@ export function deriveFinalText(
   return lastNonEmptyAssistant(messages)?.text ?? null;
 }
 
-/** 017 A3:超时运行时兜底。仅当 side-specific 与主超时字段都缺省时生效;按阶段解析,不存储。 */
+/** Runtime fallback for timeouts. Only effective when both side-specific and primary timeout fields are absent; resolved per phase, never stored. */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
- * plan T4 / ADR-0011:收尾摘要 (epilogue) 常量。
+ * Epilogue (closing summary) constants, ADR-0011.
  *
- * 摘要轮是**纯文本**单轮模型调用(不携带工具),best-effort:
- *   - 独立短超时,避免摘要拖垮原始停因的返回;
- *   - 输入 = transcript 尾部 ~8K token 估算窗口 + 停因 reason;
- *   - 失败 / 超时 / signal 已 abort → 静默跳过,原始停因不受阻塞。
- * 摘要结果不 append 进 `_messages`(append-only 权威历史不变)。
+ * The summary round is a pure-text single model call (no tools), best-
+ * effort:
+ *   - an independent short timeout so the summary never drags the
+ *     original stop reason's return;
+ *   - input = transcript tail within an ~8K token estimated window + the
+ *     stop reason;
+ *   - failure / timeout / signal already aborted → silently skipped; the
+ *     original stop reason is never blocked.
+ * The summary result is never appended into `_messages` (the append-only
+ * authoritative history is unchanged).
  */
 const SUMMARY_TIMEOUT_MS = 15_000;
 const SUMMARY_TAIL_TOKEN_BUDGET = 8_000;
-/** 摘要尾部窗口的条数兜底(估算超窗时按此截取尾部;S5 命名常量)。 */
+/** Message-count floor for the summary tail window (when the estimate exceeds the window, cut the tail by this many; named constant). */
 const SUMMARY_TAIL_FALLBACK_MESSAGES = 20;
 const SUMMARY_PROMPT = (reason: string): string =>
   `Briefly summarize in a few sentences what was done in this conversation and why it ended (stop reason: ${reason}). Keep it concise.`;
 
 /**
- * plan T4 / ADR-0011:best-effort 收尾摘要模型调用的纯文本产物。
+ * ADR-0011: pure-text product of the best-effort closing summary model
+ * call.
  *
- * 收尾摘要的成功路径只关心两件事:`text`(投递给 host 的 stop_summary
- * 事件载荷)和 `usage`(摘要轮的 token 计量,走 trace `recordLlmCall`
- * `LlmCallRecord`,status ok,Postel 字段出席 — ADR-0008 Decision 3
- * 不在这里脱钩)。failure / 超时 / signal-abort → 返回 null,调用方
- * 静默跳过,绝不阻塞原始停因。
+ * The success path cares about exactly two things: `text` (the payload
+ * delivered to the host's stop_summary event) and `usage` (the summary
+ * round's token accounting, via trace `recordLlmCall` / `LlmCallRecord`,
+ * status ok, Postel field presence — ADR-0008 does not diverge here).
+ * failure / timeout / signal-abort → return null and the caller silently
+ * skips, never blocking the original stop reason.
  */
 interface SummaryOutcome {
   readonly text: string;
   readonly usage: TokenUsage | undefined;
-  /** 摘要轮模型实际看到的输入消息(truncateTailForSummary 截尾 + 收尾 user prompt) */
+  /** The input messages the model actually saw in the summary round (tail-truncated by truncateTailForSummary + the closing user prompt) */
   readonly inputMessages: ReadonlyArray<AnthropicNativeMessage>;
 }
 
 /**
- * plan T4 / ADR-0011:截取摘要输入的历史尾部窗口。
+ * ADR-0011: cut the history tail window used as summary input.
  *
- * 估算尾部 ~8K token 窗口作摘要输入(天然在窗内,避免超窗 reactive-compact
- * 兜底)。估算超窗 → 先按尾部条数截取;极端长历史一次截取仍超窗 → 再用
- * compactMessages 收口(它保 tool 配对)。
+ * Estimate an ~8K token tail window as the summary input (naturally
+ * inside the window, avoiding the over-window reactive-compact fallback).
+ * When the estimate exceeds the window → first cut by tail message count;
+ * if an extreme history still exceeds after one cut → close in with
+ * compactMessages (which preserves tool pairing).
  */
 function truncateTailForSummary(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -1391,17 +1592,22 @@ function truncateTailForSummary(
 }
 
 /**
- * plan T4 / ADR-0011:带独立超时的摘要模型调用。
+ * ADR-0011: summary model call with its own timeout.
  *
- * 构造独立 `{ messages, turnCount: 0 }` 状态(与主 loop turnCount 解耦 ——
- * 摘要轮不计 maxTurns,不消费工具预算);调 `adapter.step` 一次(不传 tools
- * → 纯文本,无工具触发);`Promise.race` 包独立 ~15s 超时 + catch-all。
+ * Builds an independent `{ messages, turnCount: 0 }` state (decoupled from
+ * the main loop's turnCount — the summary round is not counted in
+ * maxTurns and consumes no tool budget); calls `adapter.step` once (no
+ * tools → pure text, no tool firing); `Promise.race` wraps an independent
+ * ~15s timeout plus a catch-all.
  *
- * 内部 AbortController:超时触发时中止真实 HTTP 请求(对齐 raceModel 的
- * timer → childAbort 纪律);与 run 级 signal 合并为 composite 传给
- * adapter.step —— concurrent 场景 run signal abort 会同步取消摘要调用。
- * adapterP 永不 reject:catch-all 把失败收敛为 null,避免 race 后到 rejection
- * 触发 unhandledRejection(测试替身 / 真 SDK 都可能)。失败 / 超时 → null。
+ * Internal AbortController: when the timeout fires it aborts the real
+ * HTTP request (aligning with raceModel's timer → childAbort discipline),
+ * merged with the run-level signal into a composite passed to
+ * adapter.step — under concurrency, a run signal abort also cancels the
+ * summary call synchronously. adapterP never rejects: the catch-all
+ * converges failures to null, avoiding an unhandledRejection when the
+ * race settles late (test doubles and the real SDK can both hit
+ * this). Failure / timeout → null.
  */
 async function runSummaryWithTimeout(opts: {
   readonly deps: LoopEngineDeps;
@@ -1452,7 +1658,8 @@ async function runSummaryWithTimeout(opts: {
   try {
     return await Promise.race([adapterP, timeoutP]);
   } catch {
-    // catch-all:摘要失败绝不阻塞原始停因(ADR-0011 Decision 4)。
+    // Catch-all: a summary failure must never block the original stop
+    // reason (ADR-0011).
     return null;
   } finally {
     if (!adapterResolved && timer !== undefined) clearTimeout(timer);
@@ -1460,10 +1667,11 @@ async function runSummaryWithTimeout(opts: {
 }
 
 /**
- * plan T4 / ADR-0011:best-effort 收尾摘要模型调用(编排)。
+ * ADR-0011: orchestration of the best-effort closing summary call.
  *
- * signal 已 abort(concurrent 场景)→ 直接取消,不发起模型调用。
- * 返回 `SummaryOutcome` 或 `null`(失败/超时/signal-abort)。
+ * Signal already aborted (concurrency) → cancel immediately without
+ * issuing a model call. Returns `SummaryOutcome` or `null`
+ * (failure / timeout / signal-abort).
  */
 async function tryRunSummary(opts: {
   readonly deps: LoopEngineDeps;
@@ -1482,25 +1690,32 @@ async function tryRunSummary(opts: {
 }
 
 /**
- * plan T4 / ADR-0011:run() 收尾 —— 异常停后跑一轮收尾摘要并落 trace。
+ * ADR-0011: run() closing — after an exceptional stop, run one closing
+ * summary round and record trace.
  *
- * 只处理 `reason !== "completed"` 的异常停(maxTurns / protocolError /
- * cancelled / timeout 等)。摘要轮:
- *   - 不 append 进权威历史(append-only 不变式);
- *   - 不计 maxTurns / 工具预算;
- *   - usage 照落 trace `LlmCallRecord`(status ok);
- *   - 结果经 `{ type: "stop_summary", text }` 事件投递给 host。
+ * Handles only exceptional stops (`reason !== "completed"`: maxTurns /
+ * protocolError / cancelled / timeout, etc.). The summary round:
+ *   - is never appended to the authoritative history (append-only
+ *     invariant);
+ *   - counts neither maxTurns nor tool budget;
+ *   - records usage into trace `LlmCallRecord` (status ok);
+ *   - delivers the result to the host via a
+ *     `{ type: "stop_summary", text }` event.
  *
- * **trace 兼容纪律**:run 的既有 recordLlmCall 契约是"每次成功的模型
- * 调用落一条 llm_call,每次模型阶段落一条 turn"。摘要轮在此之外额外
- * 落一条独立的 `recordLlmCall`(status ok),**不**额外落 turn ——
- * 避免破坏既有 turn 序列的 `lines.length` 精确断言(挂 maxTurns 的
- * 断言由本分支 throw 前内部先行记录 turn)。
+ * Trace compatibility: run's existing recordLlmCall contract is "one
+ * llm_call per successful model call, one turn per model phase". The
+ * summary round adds exactly one independent `recordLlmCall` (status ok)
+ * beyond that and no extra turn — to avoid breaking existing exact
+ * `lines.length` assertions over the turn sequence (the maxTurns
+ * assertion is served by the turn already recorded before this branch
+ * throws).
  *
- * **#358 T3 导出**:worker.ts 在 run() 返回 cancelled + subagent-timeout
- * abort 后以**未中止**的新 signal 自跑本收尾摘要轮 (spec Code Style
- * "catch 侧跑 epilogueSummary 一轮" 的进程内落实; signal 已 abort 时
- * run() 内部不会跑, 故由 worker 补上)。导出为 additive, 逻辑零改动。
+ * Exported for worker.ts: after run() returns cancelled with a
+ * subagent-timeout abort, the worker runs this closing summary round
+ * itself under a fresh, un-aborted signal (the in-process implementation
+ * of the spec's "run one epilogueSummary round on the catch side"; when
+ * the signal is already aborted run() skips it internally, so the worker
+ * supplies it). The export is additive; logic unchanged.
  */
 export async function epilogueSummary(opts: {
   readonly deps: LoopEngineDeps;
@@ -1525,17 +1740,22 @@ export async function epilogueSummary(opts: {
         durationMs,
         supplierStop: "success",
         stream: streamMode,
-        // ADR-0014 决策 6 / #361 T12:摘要轮捕获模型实际看到的 messages。
-        // review-fix S5:改用 outcome.inputMessages = tryRunSummary 经
-        // truncateTailForSummary 截尾后的输入 + 收尾 user prompt(即模型
-        // 本轮真实看到的 messages),不再用 opts.messages(完整 pre-summary
-        // 历史,与模型所见不符)。
-        // 取舍:全量消息进 trace 会膨胀 jsonl;LlmCallRecord.messages 字段
-        // 语义即"模型实际看到的 messages"(ADR-0003 既有字段),摘要轮同样
-        // 满足该语义,保持一致填充。token 计数照旧经 *_tokens 字段表达。
+        // ADR-0014: the summary round captures the messages the model
+        // actually saw. Uses outcome.inputMessages = the input after
+        // tryRunSummary's truncateTailForSummary tail-cut plus the
+        // closing user prompt (i.e., the messages the model really saw
+        // this round), not opts.messages (the full pre-summary history,
+        // which would misrepresent what the model saw). Trade-off:
+        // putting all messages into trace would bloat jsonl; the
+        // semantics of LlmCallRecord.messages is "the messages the model
+        // actually saw" (an existing ADR-0003 field), and the summary
+        // round satisfies the same semantics, so it is filled
+        // consistently. Token accounting is still expressed through the
+        // *_tokens fields.
         messagesCaptured: true,
         messages: outcome.inputMessages,
-        // SC-W 5:摘要轮同样无可填 model 字段(adapter 不暴露,见 ok 分支注释)。
+        // Like other rounds, no model field can be filled here (the
+        // adapter does not expose it; see the ok-branch comment).
         status: "ok",
         ...(outcome.usage !== undefined ? outcome.usage : {}),
       })
@@ -1544,24 +1764,29 @@ export async function epilogueSummary(opts: {
   try {
     opts.onStream?.({ type: "stop_summary", text: outcome.text });
   } catch {
-    // 观察者异常不得反向破坏原始停因返回(D3 纪律)。
+    // Observer exceptions must never break the original stop reason's
+    // return.
   }
 }
 
-/** 023: raceModel 的结构化胜出来源，避免 SDK abort 错误覆盖原始意图。 */
+/** Structured winner source for raceModel, so SDK abort errors cannot override the original intent. */
 export type RaceOutcomeSource =
   "adapter" | "timerTimeout" | "hostCancel" | "callerAbort";
 
 /**
- * transport-continue-persist T1:`timerTimeout` 支**必带** `clockAbort` ——
- * 就是 `onExpire` 里刻进 abort reason 的那一枚 `clock_abort` 标记本身
- * (`ClockAbortReason`)。不另读 `childSignal`、不做字段解包:重发判定
- * (`classifyClockRetry`)直接消费它,与翻译层(SC2)读的是同一个值。
+ * Transport-continue-persist: the `timerTimeout` arm must carry
+ * `clockAbort` — the very `clock_abort` marker engraved into the abort
+ * reason inside `onExpire` (`ClockAbortReason`). No re-reading of
+ * `childSignal`, no field unpacking: the resend decision
+ * (`classifyClockRetry`) consumes it directly, reading the same value the
+ * translation layer reads.
  *
- * 判别联合而非可选字段:`onExpire` 先 abort 再 settle,标记在 timerTimeout
- * 上不可能缺席,类型就不该给「缺席」留位置(也就没有 `?? "idle"` 一类
- * 看似合理的兜底值)。`visible === false` = 整次调用可以安全重发
- * (spec inv 1);`true` = 已出字,不重发,按既有 timeout 收场。
+ * A discriminated union rather than an optional field: `onExpire` aborts
+ * before settling, so the marker can never be absent on timerTimeout, and
+ * the type should not leave room for "absent" (nor a seemingly reasonable
+ * `?? "idle"` fallback). `visible === false` = the whole call may be
+ * safely re-issued (invariant 1); `true` = output already appeared, no
+ * re-issue, end via the existing timeout path.
  */
 type RaceOutcomeOf<S extends RaceOutcomeSource> = {
   readonly result: AssistantTurnResult | undefined;
@@ -1569,13 +1794,16 @@ type RaceOutcomeOf<S extends RaceOutcomeSource> = {
 };
 
 /**
- * 每个 source 各自一个成员(而非把三个非钟 source 并成一个)—— 消费侧才能
- * 靠**逐个排除**收窄:`runModelAttempt` 先排掉 adapter / callerAbort /
- * hostCancel,末尾剩下的必是 timerTimeout,`clockAbort` 直接可读。并成一个
- * 成员会挡住这个收窄(排除 "adapter" 不会消掉成员本身)。
+ * One member per source (rather than merging the three non-clock sources)
+ * so the consumer can narrow by eliminating one at a time:
+ * `runModelAttempt` first rules out adapter / callerAbort / hostCancel,
+ * leaving necessarily timerTimeout at the end, whose `clockAbort` is
+ * directly readable. Merging them into one member would block this
+ * narrowing (eliminating "adapter" does not eliminate the member itself).
  *
- * 收窄同时是穷尽性检查:未来新增 source 时,末尾那一支会因读不到
- * `clockAbort` 而编译失败,不会静默落进某个既有臂。
+ * The narrowing doubles as an exhaustiveness check: when a future source
+ * is added, the last arm fails to compile because `clockAbort` is not
+ * readable — it will never silently fall into an existing arm.
  */
 export type RaceModelOutcome =
   | RaceOutcomeOf<"adapter">
@@ -1598,20 +1826,21 @@ export interface RaceModelOpts {
   readonly signal: AbortSignal | undefined;
   readonly timeoutMs: number;
   readonly onStream?: (event: HarnessStreamEvent) => void;
-  /** #196 IKNOW T1:runModelPhase 每 turn 解析 deps.system?.() 后透传;undefined 时不发送 system。 */
+  /** runModelPhase resolves deps.system?.() per turn and passes it through; system is not sent when undefined. */
   readonly systemText?: string;
   /**
-   * #742 T1:模型输出增量的静默上限(ms)。缺席 / <= 0 → 只有 `timeoutMs`
-   * 一根钟(改前行为)。到点与 `timeoutMs` 同样落 `timerTimeout`。
-   * 流式臂门禁由 `resolveModelClocks` 在 stepWithTrace 处判定,本层只收数值。
+   * Silence cap (ms) on model output deltas. Absent / <= 0 → `timeoutMs`
+   * remains the only clock (prior behavior). Expiry lands on `timerTimeout`,
+   * same as `timeoutMs`. The streaming-arm gate is decided by
+   * `resolveModelClocks` at stepWithTrace; this layer only takes a number.
    */
   readonly idleTimeoutMs?: number;
 }
 
 /**
- * settle 的入参:两条臂 —— 钟到点必须自带标记(timerTimeout 上「标记缺席」
- * 不可表达,consumer 无需兜底值);其余 source 沿用 result / err 两个位置参数
- * 的原语义。
+ * Input to settle: two arms — a clock expiry must carry its own marker
+ * (marker-absence is inexpressible on timerTimeout, so consumers need no
+ * fallback); other sources keep the original result / err positional semantics.
  */
 type RaceSettleSpec =
   | {
@@ -1621,7 +1850,7 @@ type RaceSettleSpec =
     }
   | { readonly source: "timerTimeout"; readonly clock: ClockAbortReason };
 
-/** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
+/** Settle is co-located in this helper: one first-wins decision point plus cleanup. */
 function createRaceOutcome(opts: {
   readonly raceOpts: RaceModelOpts;
   readonly child: AbortController;
@@ -1633,7 +1862,7 @@ function createRaceOutcome(opts: {
     let timers: RaceTimers | undefined;
     let abortListener: (() => void) | undefined;
     const settle = (spec: RaceSettleSpec): void => {
-      if (settled) return; // post-settle SDK error / abort 均丢弃。
+      if (settled) return; // drop any post-settle SDK error / abort
       settled = true;
       timers?.cancel();
       if (opts.raceOpts.signal && abortListener)
@@ -1651,13 +1880,13 @@ function createRaceOutcome(opts: {
       else resolve(Object.freeze({ result: spec.result, source: spec.source }));
     };
     opts.setChildAbort(() => settle({ source: "hostCancel" }));
-    // #742 T1:idle 与硬顶两根钟由 race-timers 起,胜出仲裁仍只在 settle 一处;
-    // 两根钟到点都落同一个 timerTimeout(不新增 StopReason)。
-    // transport-continue-persist T1 / spec inv 1–2:到点前的可见性同一枚标记
-    // 走两条路 —— ① abort 的 reason(`clock_abort`,translate 层据此不误标
-    // user_cancel,SC2);② outcome 的 `clockAbort`,runModelPhase 据此决定
-    // 能否重发整次调用(spec inv 1)。两路是**同一个值**(先 abort 再 settle),
-    // 胜出仲裁仍只在本 settle 一处。
+    // Idle and hard-cap clocks are started by race-timers and both land on the
+    // same timerTimeout on expiry (no new StopReason); arbitration happens only
+    // at settle. Pre-expiry visibility travels as one marker via two paths —
+    // the abort reason (`clock_abort`, so the translate layer does not mislabel
+    // it user_cancel) and the outcome's `clockAbort` (so runModelPhase can
+    // decide whether the whole call may be resent). Both paths carry the same
+    // value (abort first, then settle).
     timers = startRaceTimers({
       hardCapMs: opts.raceOpts.timeoutMs,
       idleTimeoutMs: opts.raceOpts.idleTimeoutMs,
@@ -1666,12 +1895,13 @@ function createRaceOutcome(opts: {
           source,
           timers?.hadVisibleDelta === true
         );
-        opts.child.abort(reason); // L1': 必须先取消 HTTP，再记录 timer 胜出。
+        opts.child.abort(reason); // cancel the HTTP request first, then record the timer win
         settle({ source: "timerTimeout", clock: reason });
       },
     });
-    // #742 T1:idle 在场时观察者被包一层(先记增量再原样转发);不在场则原样
-    // 透传宿主回调。转发 / 吞咽纪律见 observeModelIdle。
+    // With idle present the observer is wrapped (record the delta, then forward
+    // verbatim); otherwise the host callback passes through unchanged.
+    // Forwarding / swallowing discipline: see observeModelIdle.
     const onStream = observeModelIdle(timers, opts.raceOpts.onStream);
     abortListener = (): void => settle({ source: "callerAbort" });
     if (opts.raceOpts.signal?.aborted) abortListener();
@@ -1686,8 +1916,8 @@ function createRaceOutcome(opts: {
           tools:
             opts.raceOpts.deps.promptTools?.() ??
             opts.raceOpts.deps.registry.list(),
-          // #196 IKNOW T1:system 字段条件附加 — undefined 时不发
-          // (byte-identical 既有 behavior,守 014 附加原则)。
+          // system is attached only when defined; undefined → field omitted,
+          // byte-identical to prior behavior.
           ...(opts.raceOpts.systemText !== undefined
             ? { system: opts.raceOpts.systemText }
             : {}),
@@ -1702,7 +1932,7 @@ function createRaceOutcome(opts: {
   });
 }
 
-/** 023: child 与 caller signal 合并，timer/host 都可取消真实 HTTP。 */
+/** Merge child with the caller signal so timer/host can both cancel the real HTTP. */
 export function raceModel(opts: RaceModelOpts): RaceModelHandle {
   const child = new AbortController();
   const childSignal = AbortSignal.any(
@@ -1723,10 +1953,10 @@ export function raceModel(opts: RaceModelOpts): RaceModelHandle {
 }
 
 /**
- * 017 T5:构造一条 TurnTrace(A7 字段集,严格不含 payload)。
+ * Build one TurnTrace (strictly payload-free field set).
  *
- * freezeMessage 等同 messages 守门:S10 守门延伸到 trace,运行时不可
- * 原地修改任何字段。toolCalls 数组与条目各自 freeze。
+ * The freezeMessage gate applied to messages extends to the trace: no field
+ * may be mutated in place at runtime. The toolCalls array and each entry are frozen.
  */
 function mkTurn(input: {
   readonly turnIndex: number;
@@ -1747,16 +1977,16 @@ function mkTurn(input: {
 }
 
 /**
- * 025 #98:reason 驱动 transition(冻结 StopReason 不变),cancelKind 独立
- * 驱动 trace 元数据;两者解耦,hostCancel 得以保留 stopReason "timeout"
- * 的控制流,同时在 trace 记录真实来源。
+ * reason drives the transition (frozen StopReason unchanged); cancelKind
+ * independently drives trace metadata. Decoupling them lets hostCancel keep
+ * the stopReason "timeout" control flow while the trace records the true source.
  */
 function modelStop(opts: {
   readonly state: LoopState;
   readonly started: number;
   readonly reason: "cancelled" | "timeout" | "protocolError";
   readonly cancelKind: CancelKind;
-  /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;非 transport 失败 → 不挂。 */
+  /** ADR-0094: gateway-side summary on transport failure; not attached otherwise. */
   readonly apiError?: ApiErrorSummary;
 }): {
   kind: "stop";
@@ -1781,21 +2011,24 @@ function modelStop(opts: {
 }
 
 /**
- * timerTimeout 的唯一消费面:判断「能不能把整次调用重发」。
+ * Sole consumer of timerTimeout: decides whether the whole call may be resent.
  *
- * 两道门,都在这里而非重试循环体内(后者会把分支记进 `runModelPhase` 的
- * 圈复杂度,S5 叶子函数纪律 —— 同 `resolveStreamingSilenceNoticeMs`):
- *   1. **只在流式臂重发**(idle 在场)。非流式臂今日的单钟是「请求墙钟」,
- *      其超时语义(spec inv 4 的 request timeout)不在本 ticket 的验收面
- *      (ticket 只点名 idle);保持改前逐字节行为,也不把非流式臂的失败收场
- *      一并改掉(blast radius 越界)。
- *   2. **走与传输重试同一张 FaultClass 表**:钟到点且本次 attempt 一个增量
- *      都没有 = `retry`(spec inv 1);已出字 → `none`,落既有 timeout 收场,
- *      不作废模型已写出的内容。
+ * Both gates live here rather than in the retry loop body (the latter would
+ * charge the branches to `runModelPhase`'s cyclomatic complexity — leaf-function
+ * discipline, same as `resolveStreamingSilenceNoticeMs`):
+ *   1. Resend only on the streaming arm (idle present). The non-streaming
+ *      arm's single clock is a request wall-clock; its timeout semantics are
+ *      out of scope here — byte-identical prior behavior is kept, so the
+ *      blast radius does not swallow the non-streaming failure conclusion.
+ *   2. Same FaultClass table as transport retries: clock expiry with zero
+ *      deltas this attempt → `retry`; anything already streamed → `none`,
+ *      falling back to the existing timeout stop (never invalidate content
+ *      the model has already produced).
  *
- * `clock` = 本次到点的 `clock_abort` 标记(`onExpire` 一次调用产出、先 abort
- * 再 settle,故 timerTimeout 路径上必然在场)。`attempt` = 本次已是第几次
- * 尝试(1-based),预算与传输重试共用 `TRANSPORT_MAX_ATTEMPTS`。
+ * `clock` = this expiry's `clock_abort` marker (produced by one `onExpire`
+ * call, abort-then-settle, so always present on the timerTimeout path).
+ * `attempt` is 1-based; the budget is shared with transport retries via
+ * `TRANSPORT_MAX_ATTEMPTS`.
  */
 function classifyClockRetry(
   clock: ClockAbortReason,
@@ -1812,18 +2045,20 @@ function classifyClockRetry(
   return attempt >= TRANSPORT_MAX_ATTEMPTS ? "none" : "retry";
 }
 
-/** `modelStop` 的产物(既有 stop 返回形状)。 */
+/** The product of `modelStop` (the existing stop return shape). */
 type StopResult = ReturnType<typeof modelStop>;
 
 /**
- * 一次 attempt 的收场。三态 discriminated union,`stop` 里再分两支:
+ * Conclusion of one attempt. Three-way discriminated union; the `stop` field
+ * inside splits further:
  *
- * - `ok`:adapter 胜出,带回回合结果。
- * - `clock_timeout`:timerTimeout —— `clock` 是**必填**,即 `onExpire` 里
- *   刻进 abort reason 的那一枚 `clock_abort` 标记本身。它是「这次收场还
- *   有机会被重发丢弃」的唯一信号(见 `attemptVerdict`),也是 `?.` + `??`
- *   默认值的替代:标记缺席在类型上不可表达,不必再读 `childSignal` 回捞。
- * - `stop`:callerAbort / hostCancel 的既有收场,终局,无可丢弃。
+ * - `ok`: adapter won, carrying the turn result.
+ * - `clock_timeout`: timerTimeout — `clock` is required, i.e. exactly the
+ *   `clock_abort` marker etched into the abort reason by `onExpire`. It is
+ *   the sole signal that "this conclusion may still be discarded by a resend"
+ *   (see `attemptVerdict`), replacing `?.` + `??` defaults: marker-absence is
+ *   inexpressible in the type, so there is no need to re-read `childSignal`.
+ * - `stop`: the existing callerAbort / hostCancel conclusion — terminal, nothing to discard.
  */
 type ModelAttemptConclusion =
   | { readonly kind: "ok"; readonly result: AssistantTurnResult }
@@ -1874,13 +2109,15 @@ async function runModelAttempt(opts: {
     return { kind: "stop", stop: stopAt("cancelled", "callerAbort") };
   }
   if (outcome.source === "hostCancel") {
-    // hostCancel 保留 stopReason "timeout" 以维持控制流;trace 由 cancelKind
-    // 独立记录真实来源。覆盖说明见本文件 `hostCancel` 注释。
+    // hostCancel keeps stopReason "timeout" to preserve control flow; the trace
+    // records the true source independently via cancelKind.
     return { kind: "stop", stop: stopAt("timeout", "hostCancel") };
   }
-  // 三个非钟 source 已排除,只剩 timerTimeout —— 到点标记是它的必填字段,
-  // 这里直读,不设兜底值(见 `RaceModelOutcome`)。先落既有 timeout 收场,
-  // 是否真重发由调用方按 `attemptVerdict` 决定:重发就丢弃这次 stop。
+  // Only timerTimeout remains once the three non-clock sources are excluded —
+  // its expiry marker is a required field, read directly with no fallback
+  // (see `RaceModelOutcome`). Land the existing timeout conclusion first;
+  // whether it is truly resent is up to the caller via `attemptVerdict`
+  // (a resend discards this stop).
   return {
     kind: "clock_timeout",
     stop: stopAt("timeout", "timerTimeout"),
@@ -1889,14 +2126,16 @@ async function runModelAttempt(opts: {
 }
 
 /**
- * 重发收场判定:把一次 attempt 的收场与本轮 attempt 序号 + idle 开关合到
- * 一处,`runModelPhase` 的循环体只问一件事 —— 「这次要不要重发」。
+ * Resend verdict: folds one attempt's conclusion together with the attempt
+ * ordinal and the idle switch, so the `runModelPhase` loop asks one question —
+ * "should this be resent?".
  *
- * `"retry"` = 本次收场是 timerTimeout 且 `classifyClockRetry` 放行,即它是
- * 可丢弃的临时失败;其余任何情况都返回既有 `stop`,终局不变。
+ * `"retry"` = the conclusion is timerTimeout and `classifyClockRetry` allows
+ * it, i.e. a discardable transient failure; every other case returns the
+ * existing `stop`, terminal as before.
  *
- * `ok` 不接受:成功臂由调用方在 `attempt.kind` 上先分派(它带的是回合结果,
- * 与 stop 不同形),这里只处理两条 stop 臂。
+ * `ok` is not accepted: the caller dispatches on `attempt.kind` first (it
+ * carries a turn result, a different shape); only the two stop arms live here.
  */
 function attemptVerdict(
   attempt: Exclude<ModelAttemptConclusion, { kind: "ok" }>,
@@ -1913,11 +2152,11 @@ function attemptVerdict(
 }
 
 /**
- * 重发前的退避等待;本函数只在 `runModelPhase` 的重试臂里被调用。
+ * Backoff wait before a resend; only called from the retry arm of `runModelPhase`.
  *
- * abort during backoff → `"cancelled"`(spec 输入契约:不再发起下一次
- * attempt);其余 sleep 异常原样上抛,不吞。返回 `"retrying"` = 等待走完,
- * 调用方继续下一次 attempt。
+ * abort during backoff → `"cancelled"` (no further attempt is started); other
+ * sleep errors propagate as-is, never swallowed. `"retrying"` = the wait
+ * finished and the caller proceeds with the next attempt.
  */
 async function awaitRetryBackoff(
   attempt: number,
@@ -1935,19 +2174,19 @@ async function awaitRetryBackoff(
   return "retrying";
 }
 
-/** 023: await 结构化 race outcome，并保持 SDK-first 错误 catch 契约。 */
+/** Await the structured race outcome, keeping the SDK-first error catch contract. */
 async function runModelPhase(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly started: number;
-  /** #742 T1:本次 step 的硬顶(ms)。非流式臂 = 今日单钟解析结果。 */
+  /** Hard cap for this step (ms); non-streaming arm = the single-clock resolution. */
   readonly modelHardCapMs: number;
-  /** #742 T1:本次 step 的 idle 上限(ms);undefined = 只有硬顶一根钟。 */
+  /** Idle cap for this step (ms); undefined = hard-cap clock only. */
   readonly modelIdleTimeoutMs: number | undefined;
   readonly onStream?: (event: HarnessStreamEvent) => void;
-  /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记。
-   *   true = 本次 run 已压缩重试过一次,不再第二次。 */
+  /** ADR-0013: run-scoped reactive-compact attempted flag;
+   *  true = already compacted and retried once this run, no second time. */
   readonly reactiveAttemptedRef: { attempted: boolean };
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
@@ -1960,15 +2199,17 @@ async function runModelPhase(opts: {
   | { kind: "reactive_compact_pending"; state: LoopState }
 > {
   try {
-    // #196 IKNOW T1:每 turn 解析 deps.system?.();undefined → 字段缺席,
-    // adapter 端条件 spread 不发 system 字段 → KV cache prefix 字节级零变化。
+    // Resolve deps.system?.() once per turn; undefined → field omitted, the
+    // adapter's conditional spread sends no system field → byte-zero change
+    // to the KV cache prefix.
     const systemText = await opts.deps.system?.();
-    // transport-continue-persist T1 / spec inv 1–2:时钟到点且**本次 attempt
-    // 无任何模型输出增量**时,整次调用重发(秒级指数退避、有界尝试),而不是
-    // 把回合判成 timeout —— 卡死的连接不是「回合已失败」。可见性与钟的来源
-    // 由 race 从同一次 `onExpire` 带出(`RaceModelOutcome.clock`,即刻进
-    // abort reason 的那枚标记);本循环只留「发一次 / 收场 / 退避后重发」三步,
-    // 重发判定见 `classifyClockRetry`,退避见 `awaitRetryBackoff`。
+    // When a clock expires with zero model-output deltas this attempt, resend
+    // the whole call (bounded attempts, second-scale exponential backoff)
+    // instead of judging the turn timed out — a stalled connection is not a
+    // failed turn. Visibility and clock origin are carried out of the race by
+    // the same `onExpire` (`RaceModelOutcome.clock`, the marker just etched
+    // into the abort reason). This loop keeps only send / conclude /
+    // backoff-resend; see `classifyClockRetry` and `awaitRetryBackoff`.
     let clockAttempt = 1;
     for (;;) {
       const attempt = await runModelAttempt({
@@ -2008,9 +2249,10 @@ async function runModelPhase(opts: {
       clockAttempt += 1;
     }
   } catch (err) {
-    // plan T3 / ADR-0013:reactive compact 兜底 — 每 run 限 1 次。
-    // PromptTooLongError extends ProtocolError,必须先于 ProtocolError 分支判定;
-    // 压缩成功 → 返回 reactive_compact_pending 让 stepWithTrace 用压缩后状态重跑一次。
+    // ADR-0013: reactive compact fallback — at most once per run.
+    // PromptTooLongError extends ProtocolError, so it must be checked before
+    // the ProtocolError branch; on success return reactive_compact_pending so
+    // stepWithTrace reruns once with the compacted state.
     if (err instanceof PromptTooLongError) {
       if (
         opts.deps.compress !== undefined &&
@@ -2022,8 +2264,9 @@ async function runModelPhase(opts: {
           opts.deps,
           { signal: opts.signal, onStream: opts.onStream }
         );
-        // wait 逻辑参考 Claude Code:reactive compact 期间被用户取消 →
-        // 不论压缩结果如何都按取消收场(避免落 protocolError 让用户困惑)。
+        // If the user cancels during reactive compaction, conclude as
+        // cancelled regardless of the compaction outcome (a protocolError stop
+        // here would only confuse the user).
         if (opts.signal?.aborted) {
           return modelStop({
             state: opts.state,
@@ -2039,8 +2282,9 @@ async function runModelPhase(opts: {
           };
         }
       }
-      // 压缩关闭 / 已尝试过 / 压缩后窗口仍超 → 交回 ProtocolError 语义
-      // (ADR-0013:"压缩后仍超 → throw,交回 ADR-0012 超限语义收场")。
+      // compaction disabled / already attempted / still over window after
+      // compaction → fall back to ProtocolError semantics (ADR-0013 defers
+      // the over-limit conclusion to ADR-0012).
       return modelStop({
         state: opts.state,
         started: opts.started,
@@ -2052,9 +2296,10 @@ async function runModelPhase(opts: {
       err instanceof ProtocolError ||
       err instanceof TransportRetryExhaustedError
     ) {
-      // ADR-0094 SC4-SC5: 仅 TransportRetryExhaustedError 携带 cause,挂到
-      // RunResult.apiError,供 chat-flow viewport 渲染「API error (status):
-      // message」类提示; ProtocolError 直抛无 cause → 不挂,保留通用 notice。
+      // ADR-0094: only TransportRetryExhaustedError carries a cause; attach it
+      // to RunResult.apiError so the chat-flow viewport can render hints like
+      // "API error (status): message"; a bare ProtocolError has no cause → not
+      // attached, the generic notice is kept.
       return modelStop({
         state: opts.state,
         started: opts.started,
@@ -2068,9 +2313,9 @@ async function runModelPhase(opts: {
 }
 
 /**
- * 017 T5 / #645 T1:toolCallViews 的 id→name 视图名表(单次构造,多处消费:
- * runToolPhase 的 trace 落盘、stepWithTrace 的 trace 落盘与状态栏 last_tool
- * 更新 —— 三处共用同一构造,消除重复)。
+ * id→name view map over toolCallViews (built once, consumed in three places:
+ * runToolPhase's trace writes, stepWithTrace's trace writes and status-bar
+ * last_tool updates — sharing one construction removes duplication).
  */
 function toolNameById(
   views: ReadonlyArray<{ readonly id: string; readonly name: string }>
@@ -2079,10 +2324,10 @@ function toolNameById(
 }
 
 /**
- * 017 T5:纯函数 — 把 Executor 的 ToolExecutionResult 序列映射为 trace
- * 用的 toolCalls 数组。nameById 是按 toolUseId 索引的视图名表(由上层
- * 一次构造);tool_not_found 允许自报 toolName,其他 kind 兜底空串:
- * 该空串分支对良构结果不可达,但保留 total 以满足类型严格性。
+ * Pure map from the Executor's ToolExecutionResult sequence to the trace
+ * toolCalls array. nameById is the toolUseId-indexed view map (built once
+ * upstream); tool_not_found may self-report toolName, other kinds fall back
+ * to "": unreachable for well-formed results, but kept for type totality.
  */
 function toTraceToolCalls(opts: {
   readonly results: ReadonlyArray<ToolExecutionResult>;
@@ -2106,37 +2351,41 @@ function toTraceToolCalls(opts: {
 }
 
 /**
- * 回合/宿主钟 abort 在 signal.reason 上的标记(ADR-0091)。严格 equal 比较,
- * 严禁任何 substring / prefix 优化 —— "timeout" 是单 call 失败标签同时也是
- * StopReason 值 ,"timeout:…" 是单 call 的失败前缀 ,"subagent-timeout"
- * 是子代理 per-task 寿命。值与三者皆不同 ("turn-timeout"), 唯一表达
- * 回合钟的 abort 原因;复用字符串会让 computeToolStopFlags 的严格 equal
- * 与单 call result 标签 / StopReason union 失联,与 worker.ts 的
- * "subagent-timeout" 同构。
+ * Marker on signal.reason for turn/host clock aborts (ADR-0091). Strict
+ * equality comparison only — no substring / prefix shortcuts: "timeout" is
+ * both a per-call failure tag and a StopReason value, "timeout:…" is a
+ * per-call failure prefix, "subagent-timeout" is a subagent per-task
+ * lifetime. This value ("turn-timeout") differs from all three and uniquely
+ * expresses the turn clock's abort reason; reusing a string would detach
+ * computeToolStopFlags' strict equality from the per-call result tags /
+ * StopReason union. Same shape as "subagent-timeout" in worker.ts.
  */
 export const TURN_CLOCK_ABORT_REASON = "turn-timeout";
 
 /**
- * 017 T5:扫描 Executor 结果 + signal,判定本次 tool 阶段是否触发
- * cancelled / timeout。
+ * Scan Executor results + signal to decide whether this tool phase triggers
+ * cancelled / timeout.
  *
- * ADR-0091:单 call 工具超时只失败该条 tool_result(该条仍是
- * execution_failed + "timeout",ADR-0005 不变),不升格为回合 timeout ——
- * 所以 results 里的 "timeout" 标签对 timedOut 完全无影响。回合 timeout
- * 只认外层 signal 以 TURN_CLOCK_ABORT_REASON 为 reason 的 abort。
+ * ADR-0091: a per-call tool timeout only fails that one tool_result (it stays
+ * execution_failed + "timeout", ADR-0005 unchanged) and never escalates to a
+ * turn timeout — so "timeout" tags inside results have no bearing on timedOut.
+ * Turn timeout is recognized only from an outer-signal abort whose reason is
+ * TURN_CLOCK_ABORT_REASON.
  *
- * 时钟 abort 权威:cancelled 不再无条件吸收每一次 abort。理由 —— 现形状
- * `signal.aborted || tag==="cancelled"` 会把时钟 abort 也读成 cancelled,
- * 使「timeout 只在 signal 已 abort 且 cancelled 未抢先时成立」永假
- * (ADR-0091 的 "cancelled 未抢先" 预设一个非 cancelled 的 abort)。
- * 因此 clockAbort 成立时 cancelled 收敛为 false,即使 executor 对同一次
- * caller 信号归一出了 "cancelled" result 标签 —— 那只是同一次 abort 的
- * 派生,不得反向改写回合归因。无 clockAbort 时 cancelled 保持原形状
- * (plain abort 或 "cancelled" 标签)。
+ * Clock-abort authority: cancelled no longer absorbs every abort
+ * unconditionally. The old shape `signal.aborted || tag==="cancelled"` would
+ * read a clock abort as cancelled, making "timeout holds only when the signal
+ * has aborted and cancelled did not preempt" permanently false (ADR-0091's
+ * "cancelled did not preempt" presupposes a non-cancelled abort). So when
+ * clockAbort holds, cancelled converges to false even if the executor
+ * normalized a "cancelled" result tag from the same caller signal — that tag
+ * is merely derived from the same abort and must not rewrite the turn's
+ * attribution. Without clockAbort, cancelled keeps the old shape (plain abort
+ * or "cancelled" tag).
  *
- * 无 producer 说明:今日 tool 阶段没有回合钟 — 真正的回合/宿主钟必须以
- * reason 恰为 TURN_CLOCK_ABORT_REASON 的 abort 才能落到 timedOut(与
- * modelStop 的 hostCancel 同型:该分支生产不可达,由测试 seam 钉住)。
+ * No producer today: the tool phase has no turn clock — only an abort with
+ * reason exactly TURN_CLOCK_ABORT_REASON can land timedOut (same shape as
+ * modelStop's hostCancel: production-unreachable, pinned by a test seam).
  */
 export function computeToolStopFlags(opts: {
   readonly results: ReadonlyArray<ToolExecutionResult>;
@@ -2157,9 +2406,9 @@ export function computeToolStopFlags(opts: {
 type ToolCallView = { id: string; name: string; input: unknown };
 
 /**
- * #620:commit in tool_use order as soon as the prefix has settled.
+ * Commit in tool_use order as soon as the prefix has settled.
  * Later results may finish first but stay buffered until earlier slots fill.
- * executeAll still receives the whole wave (AC51/52); onSettled is the
+ * executeAll still receives the whole wave; onSettled is the
  * commit seam so the loop does not wait for the slowest call before the
  * first result can hit disk.
  */
@@ -2170,16 +2419,18 @@ async function executeWaveAndCommit(opts: {
   readonly toolTimeout: number;
   readonly results: ToolExecutionResult[];
   readonly blocks: AnthropicContentBlock[];
-  /** F-4:本回合 trace turn id,透传到 ctx.turnId(spawn_subagent 的归属回合)。 */
+  /** This turn's trace turn id, passed through to ctx.turnId (spawn_subagent attribution). */
   readonly turnId: string;
-  /** #888:注入消息随第一个 tool_result commit 随批 flush。 */
+  /** Injected messages flush in the batch of the first tool_result commit. */
   readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
   /**
-   * 本回合模型可见历史快照（skill() 二次短路）。append-only messages 的引用
-   * 在 wave 入口透传 —— 同波内 assistant 消息已在史（runToolPhase 的
-   * afterAssistantState），tool_result 尚未入史（见 executeWaveAndCommit），
-   * 所以同波二次同名短路由 handler 侧 wave map 兜住，不依赖本快照。
+   * Model-visible history snapshot for this turn (skill() second-call short
+   * circuit). The append-only messages reference is passed at wave entry —
+   * within a wave the assistant message is already in history
+   * (runToolPhase's afterAssistantState) while tool_results are not yet
+   * (see executeWaveAndCommit), so a same-wave repeat short circuit is
+   * covered by the handler-side wave map, not by this snapshot.
    */
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
 }): Promise<void> {
@@ -2188,10 +2439,12 @@ async function executeWaveAndCommit(opts: {
     () => undefined
   );
   let next = 0;
-  // WHY: onSettled 回调会并发重入 flushPrefix,而 worker transcript 路径没有
-  // hub serialize queue 兜底 → 重叠 commit 产生重复 event id。门闩让重入方
-  // 直接返回;持有方 while 每轮重查 slots[next] 会顺带冲掉新到的 slot,
-  // 已退出循环的残量由 executeAll 返回后的最终 flush 兜底。
+  // WHY: onSettled callbacks may re-enter flushPrefix concurrently, and the
+  // worker transcript path has no hub serialize queue fallback → overlapping
+  // commits would produce duplicate event ids. The latch makes re-entrant
+  // calls return immediately; the holder's while loop rechecks slots[next]
+  // each round and sweeps newly arrived slots, and any residue after the loop
+  // exits is covered by the final flush once executeAll returns.
   let flushing = false;
   const flushPrefix = async (): Promise<void> => {
     if (flushing) return;
@@ -2231,7 +2484,7 @@ async function executeWaveAndCommit(opts: {
   await flushPrefix();
 }
 
-/** 017 T5:工具阶段独立收敛,保持整回合追加与停止优先级不变。 */
+/** Tool phase converges independently, keeping whole-turn append and stop precedence unchanged. */
 async function runToolPhase(opts: {
   readonly afterAssistantState: LoopState;
   readonly entryTurnCount: number;
@@ -2239,9 +2492,9 @@ async function runToolPhase(opts: {
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly started: number;
-  /** F-4:本回合 trace turn id(见 executeWaveAndCommit)。 */
+  /** This turn's trace turn id (see executeWaveAndCommit). */
   readonly turnId: string;
-  /** #888:注入消息随第一个 tool_result commit 随批 flush。 */
+  /** Injected messages flush in the batch of the first tool_result commit. */
   readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<{
@@ -2266,8 +2519,10 @@ async function runToolPhase(opts: {
   });
   const results: ToolExecutionResult[] = [];
   const blocks: AnthropicContentBlock[] = [];
-  // skill() 二次短路:快照取 afterAssistantState.messages(含本波 assistant
-  // tool_use 消息,不含本波 tool_result —— 后者在整波完成后才 append)。
+  // skill() second-call short circuit: the snapshot is
+  // afterAssistantState.messages (includes this wave's assistant tool_use
+  // message, excludes its tool_results — those append only after the whole
+  // wave completes).
   for (const wave of waves) {
     await executeWaveAndCommit({
       wave,
@@ -2302,7 +2557,7 @@ async function runToolPhase(opts: {
     supplierStop: opts.turnResult.supplierStop,
     toolCalls,
     durationMs,
-    // 025 #98:cancelled 优先级高于 timeout(与 computeToolStopFlags 注释一致)。
+    // cancelled outranks timeout (consistent with the computeToolStopFlags doc).
     cancelKind: cancelled ? "callerAbort" : timedOut ? "timerTimeout" : "none",
   });
   if (cancelled) {
@@ -2330,10 +2585,12 @@ async function runToolPhase(opts: {
 }
 
 /**
- * ADR-0108:开一段模型在途观察窗 —— 返回包一层的 onStream(只累积 text_delta
- * 原文进 ref,与墙上 draft 同源字节;其余事件原样转发)并重置缓冲、置
- * modelInFlight=true。reactive-compact 重试用同一 helper 重开窗口(半截输出
- * 不属于重试轮的 keep 面)。ref 缺席(public step)→ 零包装,原样转发。
+ * ADR-0108: open a model-in-flight observation window — returns a wrapped
+ * onStream (accumulates raw text_delta into ref, the same bytes as the
+ * on-screen draft; other events forwarded verbatim), resets the buffer and
+ * sets modelInFlight=true. The reactive-compact retry reopens the window with
+ * the same helper (a half-finished output is not part of the retry round's
+ * keep face). ref absent (public step) → no wrapping, forward as-is.
  */
 function openModelInFlightWindow(
   ref: ModelStreamWindow | undefined,
@@ -2349,79 +2606,88 @@ function openModelInFlightWindow(
 }
 
 /**
- * ADR-0108:模型已交付整回合 —— 离开在途窗口。此后 assistant 走正常 append
- * 路径入史,工具在途 / 后续停因不再进 keep 面(SC7 四条消息形状不回退)。
+ * ADR-0108: the model delivered a full turn — leave the in-flight window.
+ * Thereafter the assistant enters history through the normal append path;
+ * tool in-flight and later stop reasons no longer enter the keep face (the
+ * four-message-shape contract does not regress).
  */
 function closeModelInFlightWindow(ref: ModelStreamWindow | undefined): void {
   if (ref !== undefined) ref.modelInFlight = false;
 }
 
 /**
- * 017 T5:stepWithTrace 在原 step 逻辑上叠加:
- *   - step 入口记 started = performance.now(),出口算 durationMs;
- *   - 调用 runModelPhase 包 adapter.step + 超时 + abort + 协议错误;
- *   - 整回合取消/超时/协议错误时仍跑出 stop(reason),但 turn 也用占位
- *     TurnTrace 记入 trace(S12/S14 路径不进入历史,trace 仍记一次失败
- *     尝试,S13/S15 路径 tool_call 失败已填入 toolCalls 数组);
- *   - turn 仅在 maxTurns 早停分支返回 null(no adapter call → no trace entry)。
+ * stepWithTrace layers tracing on top of the original step logic:
+ *   - records started = performance.now() at entry, computes durationMs at exit;
+ *   - delegates adapter.step + timeout + abort + protocol errors to runModelPhase;
+ *   - whole-turn cancel/timeout/protocol errors still yield stop(reason), and a
+ *     placeholder TurnTrace is still recorded into the trace (paths that never
+ *     enter history still log one failed attempt; tool-failure paths have
+ *     already filled the toolCalls array);
+ *   - turn returns null only in the maxTurns early-stop branch (no adapter call → no trace entry).
  *
- * 内部 Transition 形状与 016 冻结契约一致(judgement union,reason 字段
- * 类型随 StopReason 自动扩展)。
+ * The internal Transition shape matches the frozen contract (judgement union,
+ * reason type auto-widens with StopReason).
  *
- * plan T3 / ADR-0011:maxTurns 超限从 silent-stop 升级为
- * `throw MaxTurnsExceeded`(surface 必须感知;turnsRan = 已跑轮数)。
- * `maxTurns` 现在类型 `number | undefined`(plan T5-engine / ADR-0012):
- * undefined = 永不触发(exploration 不被 turn 计数误杀)。
+ * ADR-0011: maxTurns overflow is upgraded from silent-stop to
+ * `throw MaxTurnsExceeded` (the surface must notice; turnsRan = turns already run).
+ * `maxTurns` is `number | undefined` (ADR-0012): undefined = never triggers
+ * (exploration is not killed by turn counting).
  */
 async function stepWithTrace(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
   readonly onStream?: (event: HarnessStreamEvent) => void;
-  /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记(跨 step 传递)。 */
+  /** ADR-0013: run-scoped reactive-compact attempted flag (carried across steps). */
   readonly reactiveAttemptedRef: { attempted: boolean };
   /**
-   * #645 T1 / ADR-0028:状态栏 last_tool 的 run 作用域可变引用。run() 创建
-   * 并跨 step 共享(一个 run = 一个用户回合);public step() 每次新建(单步
-   * 语义)。初值 AGENT_STATUS_IDLE_TOOL;每个工具批后更新为批内最后一个
-   * 成功工具名(无成功 → 保持原值)。仅 deps.agentStatus 在场时被消费
-   * (appendAgentStatusBar 读 lastTool);refs 无既有观察者 → 字段缺席时
-   * 更新零可观察行为。
+   * ADR-0028: run-scoped mutable ref for the status bar's last_tool. run()
+   * creates it and shares it across steps (one run = one user turn); public
+   * step() creates a fresh one each call (single-step semantics). Initial
+   * value AGENT_STATUS_IDLE_TOOL; after each tool batch it updates to the
+   * last successful tool name in the batch (no success → keep old value).
+   * Consumed only when deps.agentStatus is present (appendAgentStatusBar
+   * reads lastTool); with the field absent, updates have zero observable effect.
    */
   readonly lastToolRef: { lastTool: string };
   /**
-   * spec agent-status-instruction-echo 子弹 4:reconcile 结算的 run 作用域
-   * 可变引用 —— 照 `lastToolRef` 形态,run() 创建跨 step 共享,public step()
-   * 每次新建(单步语义,冷启动 stamped=undefined 合法)。装箱内容 = 最近一次
-   * 已随栏结算的真实用户消息对象引用(消息 frozen + immutable append;
-   * compact re-freeze 克隆由 `isSameRealUserMessage` 判同)。不落盘、不进
-   * deps 装配面;仅 deps.agentStatus 在场时被消费。
+   * Run-scoped mutable ref for reconcile settlement — same shape as
+   * `lastToolRef`: run() creates it and shares across steps, public step()
+   * creates a fresh one (single-step semantics; cold start with
+   * stamped=undefined is legal). Boxed content = the latest real user message
+   * already settled with the status bar (messages frozen + appended
+   * immutably; compact re-freeze clones are matched by
+   * `isSameRealUserMessage`). Not persisted, not part of the deps assembly
+   * surface; consumed only when deps.agentStatus is present.
    */
   readonly reconcileRef: { stamped: AnthropicNativeMessage | undefined };
-  /** #672 T3:本 run 工具环事件（跨 step 累积；public step 每次新建）。 */
+  /** This run's tool-loop events (accumulated across steps; public step creates a fresh one). */
   readonly toolLoopRef: { events: ToolLoopEvent[]; nextPhase: number };
-  /** #888:run 作用域注入消息 pending 缓冲(public step 每次新建)。 */
+  /** Run-scoped pending buffer for injected messages (public step creates a fresh one). */
   readonly pendingInjected: PendingInjected;
   /**
-   * ADR-0108:模型在途流式正文缓冲 —— 与墙上 draft 同源字节(text_delta 逐段
-   * 累积),供 run() closeout 在 cancelled / timeout 时用同一把 freeze 刀 keep
-   * 前缀。仅 run() 传入;public step() 不传 = 不累积、零包装(单步无 closeout)。
+   * ADR-0108: model in-flight streaming text buffer — the same bytes as the
+   * on-screen draft (accumulated per text_delta), so run()'s closeout can
+   * keep the prefix with the same freeze knife on cancelled / timeout. Passed
+   * only by run(); public step() omits it = no accumulation, no wrapping
+   * (single step has no closeout).
    */
   readonly modelStreamRef?: ModelStreamWindow;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
   /**
-   * #160 / ADR-0008 Decision 5: 本步成功模型调用的 usage(undefined = 无成功模型调用
-   * 或成功调用 usage 缺席)。run 累 lastUsage 仅在 !== undefined 时更新。
+   * ADR-0008: usage of this step's successful model call (undefined = no
+   * successful call, or that call's usage absent). run's lastUsage updates
+   * only when !== undefined.
    */
   modelUsage: TokenUsage | undefined;
-  /** ADR-0094 SC4-SC5: modelStop 路径挂在 RunResult.apiError 上的网关侧摘要。
-   *  undefined = 非 transport 失败路径,RunResult 不挂 apiError。 */
+  /** ADR-0094: gateway-side summary attached to RunResult.apiError on modelStop paths.
+   *  undefined = non-transport failure path, RunResult carries no apiError. */
   apiError?: ApiErrorSummary;
 }> {
-  // plan T3 / ADR-0011 + plan T5-engine / ADR-0012:maxTurns 超限 → throw。
-  // undefined = 无限,永不触发(长程探索不被 turn 计数误杀)。
+  // ADR-0011 + ADR-0012: maxTurns overflow → throw.
+  // undefined = unlimited, never triggers (long exploration is not killed by turn counting).
   if (
     opts.deps.maxTurns !== undefined &&
     opts.state.turnCount >= opts.deps.maxTurns
@@ -2431,15 +2697,16 @@ async function stepWithTrace(opts: {
 
   const started = performance.now();
   const turnStartedAt = new Date().toISOString();
-  // F-4:本回合 trace turn id 在回合入口生成而非 recordTurn 内部生成 —— 工具
-  // 阶段要拿它当 ctx.turnId(spawn_subagent 据此填 parentTurnId),而 recordTurn
-  // 在回合末尾才发。四条 recordTurn 出口全部复用这一个 id,一回合一行不变。
+  // The turn's trace id is generated at turn entry, not inside recordTurn —
+  // the tool phase needs it as ctx.turnId (spawn_subagent fills parentTurnId
+  // from it), while recordTurn fires only at turn end. All four recordTurn
+  // exits reuse this single id, keeping one row per turn.
   const turnId = randomUUID();
   const modelTimeout =
     opts.deps.modelTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // #742 T1:流式臂拿 idle + 硬顶两根钟,非流式臂原样只用上面那一根。
-  // 流式臂门禁读 adapter 自报的 `streamMode`(#178 T5 已有的模式申报 SSOT),
-  // 不另造第二个开关。
+  // Streaming arm gets idle + hard-cap clocks; the non-streaming arm keeps
+  // only the single clock above. The gate reads the adapter's self-reported
+  // `streamMode` (the existing mode-declaration SSOT), no second switch.
   const modelClocks = resolveModelClocks({
     modelTimeoutMs: modelTimeout,
     streamingArm: opts.deps.adapter.streamMode === true,
@@ -2450,19 +2717,22 @@ async function stepWithTrace(opts: {
   const llmStartedAt = new Date().toISOString();
   const llmStartMono = performance.now();
 
-  // plan T3 / ADR-0013:runModelPhase 失败侧会返回 reactive_compact_pending,这里
-  // 用压缩后的 state 重试一次模型调用(每 run 限 1 次,reactiveAttemptedRef 守门)。
-  // reactiveAttemptedRef 在第一次返回 reactive_compact_pending 前已被翻转 attempted=true,
-  // 第二次 runModelPhase 调用因 attempted=true 不再产出 reactive_compact_pending
-  // (落 modelStop(protocolError)),所以下方 narrow 只需穷举 ok/stop。
-  // `effectiveState` 记录本步模型实际看到的 messages:reactive 压缩后用它替代
-  // opts.state,以便 appendMessage / finalState 反映压缩后的权威历史(append-only
-  // 不变式 + 不把模型已不见的消息重新带回历史)。
+  // ADR-0013: runModelPhase's failure side can return reactive_compact_pending;
+  // here the model call is retried once with the compacted state (at most once
+  // per run, gated by reactiveAttemptedRef). The ref is already flipped to
+  // attempted=true before the first reactive_compact_pending returns, so the
+  // second runModelPhase call can no longer produce it (it lands in
+  // modelStop(protocolError)) — the narrowing below only enumerates ok/stop.
+  // `effectiveState` records what the model actually saw this step: after
+  // reactive compaction it replaces opts.state so appendMessage / finalState
+  // reflect the compacted authoritative history (append-only invariant + never
+  // dragging messages the model no longer sees back into history).
   //
-  // #645 T1 / ADR-0028:每次即将调用模型前把现势栏以 user 消息追加在当时的
-  // `messages` 尾 —— 首次调用与 reactive-compact 重试两处各追加一条(栏在
-  // compact 之后落位);proactive compact 在 run() 迭代顶部、stepWithTrace
-  // 之前发生,栏天然落在其后。旧栏永不删除 / 改写。
+  // ADR-0028: before every model call, append the current status bar as a user
+  // message at the tail of the then-current `messages` — once at the first
+  // call and once at the reactive-compact retry (the bar lands after compact);
+  // proactive compact happens at the top of the run() loop before
+  // stepWithTrace, so the bar naturally follows it. Old bars are never deleted or rewritten.
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
     | {
@@ -2471,17 +2741,19 @@ async function stepWithTrace(opts: {
         turn: TurnTrace;
         apiError?: ApiErrorSummary;
       };
-  // ADR-0041 / ADR-0081:graph 两条缝(change → presence)先于 mcpReconnect
-  // / agentStatusBar 调用,保证「graph 翻转提示 → 短现势 → 重连告知 →
-  // status bar」的模型可读时序;presence 每 run 至多一句;seam 缺席 → 零追加。
+  // ADR-0081: the two graph seams (change → presence) run before mcpReconnect
+  // / agentStatusBar, guaranteeing the model-readable order "graph-shift
+  // notice → brief presence → reconnect report → status bar"; presence emits at
+  // most one sentence per run; seam absent → zero appends.
   const graphSeamState = await appendGraphSeams(
     opts.state,
     opts.deps,
     opts.pendingInjected,
     opts.onStream
   );
-  // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— 与 graphModeChange 同段
-  // (环境级事件),在 status bar 之前消费 pending。seam 缺席 → 零追加。
+  // ADR-0043: MCP manual-reconnect append seam — same segment as
+  // graphModeChange (environment-level events), consuming pending before the
+  // status bar. Seam absent → zero appends.
   const mcpReconnectState = appendMcpReconnect(
     graphSeamState.state,
     opts.deps,
@@ -2495,22 +2767,26 @@ async function stepWithTrace(opts: {
     opts.pendingInjected,
     opts.onStream
   );
-  // #653 G1 T5:环境现势快照 —— 与 agent_status 同一回合边界(栏先、
-  // 环境后)的平行独立流;只给宿主 UI,不影响 messages。
+  // Environment live-status snapshot — a parallel independent stream at the
+  // same turn boundary as agent_status (bar first, environment second);
+  // host UI only, never touches messages.
   const barStateWithEnv = await appendEnvSnapshot(
     barState,
     opts.deps,
     opts.onStream
   );
-  // T5 / ADR-0098:技能索引进场增量 —— 本回合**最后**一次 messages 尾追加
-  // (spec Assumption 8)。seam 缺席 / 无新建 / 取增量失败 → 零追加。
+  // ADR-0098: skill-index entry delta — the **last** append to the tail of
+  // messages this turn. Seam absent / nothing new / delta fetch failure →
+  // zero appends.
   const deltaState = await appendSkillIndexDelta(
     barStateWithEnv,
     opts.deps,
     opts.pendingInjected
   );
-  // ADR-0108:模型在途观察窗 —— 每 step 入口重置缓冲,keep 只针对本步未定稿
-  // 输出;已完成回合已随正常路径 append 的 assistant 不会被二次写入。
+  // ADR-0108: model in-flight observation window — reset the buffer at each
+  // step entry; keep only targets this step's undelivered output, so
+  // assistants already appended via the normal path in finished turns are
+  // never written twice.
   const modelStreamRef = opts.modelStreamRef;
   const modelOnStream = openModelInFlightWindow(modelStreamRef, opts.onStream);
   const firstPhase = await runModelPhase({
@@ -2523,29 +2799,32 @@ async function stepWithTrace(opts: {
     onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
-  // 非 reactive 路径:模型看到的最后一条即 deltaState(含增量注入)。
+  // Non-reactive path: the last message the model saw is deltaState (with the injected delta).
   let effectiveState: LoopState = deltaState;
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
-          // ADR-0041 / ADR-0081:reactive compact 重试前同样过 graph 两条缝
-          // (同 run 内 change 仍可翻键;presence latch 已结算则不再贴短句)。
+          // ADR-0081: the reactive-compact retry passes the two graph seams too
+          // (change may still flip within the same run; presence emits nothing
+          // once its latch has settled).
           const compactedWithGraphSeams = await appendGraphSeams(
             firstPhase.state,
             opts.deps,
             opts.pendingInjected,
             opts.onStream
           );
-          // B4 / ADR-0043 §4:reactive compact 重试前同样消费重连 pending
-          // (同 round 两次模型调用之间手动重连可能完成)。
+          // ADR-0043: the retry also consumes reconnect pending (a manual
+          // reconnect may complete between the two model calls of this round).
           const compactedWithReconnect = appendMcpReconnect(
             compactedWithGraphSeams.state,
             opts.deps,
             opts.pendingInjected
           );
-          // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
-          // 子弹 4:与正常 step 调用点共享同一 reconcileRef 装箱 —— compact
-          // 的 kept 尾 re-freeze 克隆不伪造进场,结算行为同形。
+          // The bar appends after compact (at the tail of the compaction
+          // product), so the retry request ends with the newest bar. Shares
+          // the same reconcileRef box as the normal step call site — a
+          // compact kept-tail re-freeze clone does not fake an entry, and
+          // settlement behavior stays the same shape.
           const compactedWithBar = await appendAgentStatusBar(
             compactedWithReconnect,
             opts.deps,
@@ -2554,26 +2833,31 @@ async function stepWithTrace(opts: {
             opts.pendingInjected,
             opts.onStream
           );
-          // #653 G1 T5:reactive compact 重试的同一回合边界同样发环境现势。
+          // The reactive-compact retry emits the environment snapshot at the same turn boundary.
           const compactedWithEnv = await appendEnvSnapshot(
             compactedWithBar,
             opts.deps,
             opts.onStream
           );
-          // T5 / ADR-0098 / SC4:compact 后的重试同样过增量缝 —— 但判定只读
-          // 落盘史,「messages 里的增量被 compact 吃掉」不会让它再贴一遍
-          // (生产者 `computeSkillIndexDelta` 不读 messages)。
+          // ADR-0098: the post-compact retry also passes the delta seam — but
+          // its judgment reads only the on-disk history, so "the delta inside
+          // messages got eaten by compact" does not make it re-attach
+          // (producer `computeSkillIndexDelta` does not read messages).
           const compactedWithDelta = await appendSkillIndexDelta(
             compactedWithEnv,
             opts.deps,
             opts.pendingInjected
           );
           effectiveState = compactedWithDelta;
-          // ADR-0108:reactive 重试是一次全新的模型生成 —— 重开观察窗(重置
-          // 缓冲),前一次抛 PromptTooLongError 前的半截输出不属于重试轮 keep 面。
-          // 重试的 runModelPhase 消费本次开窗的返回值,不复用首次包装闭包:
-          // 两者今天写到同一个 ref、当前等价,但依赖「返回值恰好相同」是隐性
-          // stale-closure 契约,窗口一旦改为每次新建装箱就会静默错位。
+          // ADR-0108: the reactive retry is a brand-new model generation —
+          // reopen the observation window (reset the buffer); the half-finished
+          // output before the earlier PromptTooLongError is not part of the
+          // retry round's keep face. The retried runModelPhase consumes this
+          // call's return value instead of reusing the first wrapping closure:
+          // both write to the same ref today, but relying on "the return
+          // values happen to be identical" is an implicit stale-closure
+          // contract that would silently misalign if the window ever became a
+          // fresh box per open.
           const retryOnStream = openModelInFlightWindow(
             modelStreamRef,
             opts.onStream
@@ -2589,8 +2873,8 @@ async function stepWithTrace(opts: {
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
           });
           if (compressedAttempt.kind === "reactive_compact_pending") {
-            // 不变式违反 — reactive_compact 已被关闭或已尝试过,
-            // runModelPhase 不应再返回 reactive_compact_pending。
+            // Invariant violated — reactive_compact is disabled or already
+            // attempted; runModelPhase should not return reactive_compact_pending again.
             return {
               kind: "stop",
               transition: {
@@ -2613,9 +2897,10 @@ async function stepWithTrace(opts: {
 
   const llmEndedAt = new Date().toISOString();
   const llmDurationMs = performance.now() - llmStartMono;
-  // #178 T5 (D6):trace `stream` 布尔按实际模式翻转。模式由 adapter 经只读
-  // `streamMode` 申报(见 LoopAdapter 注释);两处 recordLlmCall site(ok /
-  // error)共用同一真值,在埋点前取一次。
+  // The trace `stream` boolean flips with the actual mode. The mode is
+  // declared by the adapter via read-only `streamMode` (see the LoopAdapter
+  // comment); both recordLlmCall sites (ok / error) share this single truth
+  // value, read once before instrumentation.
   const streamMode = opts.deps.adapter.streamMode === true;
   let llmCallId: string | undefined;
   if (opts.deps.trace) {
@@ -2629,26 +2914,30 @@ async function stepWithTrace(opts: {
           durationMs: llmDurationMs,
           stream: streamMode,
           messagesCaptured: true,
-          // ADR-0014 决策 6 / #361 T12:错误分支同样捕获模型实际看到的
-          // messages(取 effectiveState.messages,与 ok 分支同源 —— 包含
-          // reactive 压缩后形态)。error/status 字段语义不变(Postel);
-          // messages 字段是独立的"模型实际看到了什么"通道,error 不影响
-          // 该字段填充,与 ok 分支语义对齐。
+          // ADR-0014: the error branch also captures what the model actually
+          // saw (effectiveState.messages, same source as the ok branch —
+          // including the post-reactive-compaction shape). error/status field
+          // semantics unchanged (Postel); messages is the independent "what
+          // did the model actually see" channel, filled regardless of error, aligned with the ok branch.
           messages: effectiveState.messages,
-          // SC-W 5:错误分支 model 三字段整体缺席(Postel,ADR-0008 D3 同构)——
-          // 且 adapter 本就不暴露 model,无论成功失败都无可填。
+          // Error branch: the three model fields are wholly absent (Postel,
+          // same shape as ADR-0008) — the adapter never exposes a model, so
+          // there is nothing to fill on success or failure alike.
           status: "error",
           error: { type: toTraceErrorType(reason), message: reason },
         })
       );
     } else {
-      // usage 缺席(error/stub 路径)整条不落盘——Postel(ADR-0008 Decision 3)
+      // usage absent (error/stub paths): the whole record is not written — Postel
+      // (ADR-0008)
       const usage = modelPhase.result.usage;
-      // SC-W 5 (v2 spec):modelRequested/modelActual/provider 缺席(Postel)。
-      // LoopAdapter/AssistantTurnResult 不暴露 model 字段(见 model-adapter/types.ts
-      // AssistantTurnResult:仅 nativeMessage/projection/supplierStop/usage)——
-      // model 是 adapter 内部 opts.model 的私有细节,bounded context 边界禁止
-      // loop-engine import adapter 的构造选项。能力不存在就不声明字段(ADR-0003 D9)。
+      // modelRequested/modelActual/provider are absent (Postel).
+      // LoopAdapter/AssistantTurnResult do not expose model fields (see
+      // AssistantTurnResult in model-adapter/types.ts: only
+      // nativeMessage/projection/supplierStop/usage) — model is a private
+      // detail of the adapter's internal opts.model, and the bounded-context
+      // boundary forbids loop-engine from importing adapter construction
+      // options. If the capability does not exist, do not declare the field (ADR-0003).
       llmCallId = await safeTrace(() =>
         opts.deps.trace!.recordLlmCall({
           startedAt: llmStartedAt,
@@ -2657,14 +2946,15 @@ async function stepWithTrace(opts: {
           supplierStop: modelPhase.result.supplierStop,
           stream: streamMode,
           messagesCaptured: true,
-          // ADR-0014 决策 6 / #361 T12:成功分支捕获模型实际看到的
-          // messages(取 effectiveState.messages,reactive 压缩后的权威
-          // 历史 —— loop-engine.ts:879 注释明确 effectiveState 记录
-          // 模型本步实际看到的 messages)。该字段是 ADR-0003 既有字段,
-          // 仅从此处起首次填充;取舍:全量 messages 进 trace 会膨胀
-          // jsonl,但 LlmCallRecord.messages 字段语义即"模型实际看到的
-          // messages",符合 ADR 决策 6 验收纪律(messages_captured:true +
-          // messages 数组含 coordinator 段 proactive 关键词)。
+          // ADR-0014: the ok branch captures what the model actually saw
+          // (effectiveState.messages — the authoritative post-reactive-compaction
+          // history; effectiveState records exactly the messages the model saw
+          // this step). This is an existing ADR-0003 field, filled here from
+          // now on. Trade-off: full messages in the trace inflate the jsonl,
+          // but LlmCallRecord.messages means precisely "messages the model
+          // actually saw", satisfying the ADR's acceptance discipline
+          // (messages_captured:true + the messages array including the
+          // coordinator-section proactive keywords).
           messages: effectiveState.messages,
           status: "ok",
           ...(usage !== undefined ? usage : {}),
@@ -2702,7 +2992,7 @@ async function stepWithTrace(opts: {
     );
   }
   const turnResult = modelPhase.result;
-  // ADR-0108:整回合已交付 —— 关闭在途窗口,后续停因不再进 keep 面。
+  // ADR-0108: the full turn has been delivered — close the in-flight window; later stop reasons no longer enter the keep face.
   closeModelInFlightWindow(modelStreamRef);
 
   if (
@@ -2754,12 +3044,14 @@ async function stepWithTrace(opts: {
     messages: nextState.messages,
     turnCount: effectiveState.turnCount + 1,
   };
-  // #620 T3 (spec D4):assistant 一进权威历史立刻经 host 钩子上盘(边跑边写);
-  // 纯文本收尾与工具回合共用此 commit 点。
-  // D2 (tui-display-consistency):assistant commit 顺带传 turnResult.thinkingMs
-  // (流式臂 stepStreamArm 测得;非流式 / 边界形态 → undefined)。
-  // #888:批头拼上 pending 注入消息(bar / graph / mcp),flush 即清空 ——
-  // 盘上 commit 链与内存权威历史恢复逐条 LCP 对齐,save 不再 fork。
+  // As soon as the assistant message enters the authoritative history it is
+  // committed to disk through the host hook (write-as-you-run); the plain-text
+  // finish and tool turns share this commit point. The assistant commit also
+  // carries turnResult.thinkingMs (measured by the streaming arm stepStreamArm;
+  // non-streaming / boundary shapes → undefined).
+  // The pending injected messages (bar / graph / mcp) are concatenated at the
+  // batch head and the buffer clears on flush — the on-disk commit chain and
+  // the in-memory authoritative history stay per-entry LCP aligned, save no longer forks.
   await commitMessagesOrThrow(
     opts.deps,
     [...opts.pendingInjected.take(), turnResult.nativeMessage],
@@ -2817,10 +3109,11 @@ async function stepWithTrace(opts: {
     onStream: opts.onStream,
   });
 
-  // #645 T1 / ADR-0028:last_tool = 批内最后一个成功工具名(kind === "ok")。
-  // 按执行序扫(串行批即调用序),成功者覆盖、失败者永不更新;批内无成功
-  // → 保持原值。工具名经 toolCallViews 的 id→name 视图解析(与 trace 落盘
-  // 同源)。下一次 appendAgentStatusBar 消费该值。
+  // ADR-0028: last_tool = the last successful tool name in the batch (kind === "ok").
+  // Scanned in execution order (serial batches = call order); successes
+  // overwrite, failures never update; no success in batch → keep old value.
+  // Tool names resolve via toolCallViews' id→name map (same source as trace
+  // writes). The next appendAgentStatusBar consumes this value.
   const nameById = toolNameById(toolPhase.toolCallViews);
   for (const result of toolPhase.toolResults) {
     if (result.kind !== "ok") continue;
@@ -2832,12 +3125,15 @@ async function stepWithTrace(opts: {
   const toolDurationMs = performance.now() - toolStartMono;
   const toolCallIds: string[] = [];
   if (opts.deps.trace) {
-    // tool_call 落盘需要 arguments(trace 观测痛点: 39MB trace 中查"哪个 tool_call
-    // 写了某文件"只能 grep 原始 jsonl 的 llm_call messages)。与 #645 loop-detector
-    // 同源 toolCallViews 解析 input, 保证 trace 落盘的 input 与运行时使用的 input
-    // 是同一份;result 不落盘避免 trace 体积翻倍(已在 llm_call tool_result 全量
-    // 落盘)。mask 管线由 jsonl.ts 的 writeLine 对整行 JSON 统一处理(同 messages),
-    // 写入侧无需裁剪或开关,符合 types.ts:55-62 「不在写入侧裁剪」决策。
+    // tool_call persistence needs arguments (a trace-observability pain point:
+    // asking "which tool_call wrote a file" in a 39MB trace otherwise means
+    // grepping raw jsonl llm_call messages). input is resolved from the same
+    // toolCallViews the loop-detector uses, guaranteeing the persisted input
+    // is identical to the runtime input; results are not persisted to avoid
+    // doubling trace size (they are already fully persisted inside llm_call
+    // tool_result). The mask pipeline runs uniformly over the whole JSON line
+    // in jsonl.ts writeLine (same as messages) — no write-side trimming or
+    // switch, per the "don't trim at the write side" decision in types.ts.
     const inputById = new Map(
       toolPhase.toolCallViews.map((v) => [v.id, v.input] as const)
     );
@@ -2924,8 +3220,9 @@ async function stepWithTrace(opts: {
       const envelope = freezeMessage(
         stampHostInjected(opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT))
       );
-      // #888:envelope 自身入盘的批同样先 flush pending 注入(bar 等),
-      // 顺序与内存权威历史一致。
+      // The batch that persists the envelope itself also flushes pending
+      // injections (bar etc.) first, keeping the order consistent with the
+      // in-memory authoritative history.
       await commitMessagesOrThrow(opts.deps, [
         ...opts.pendingInjected.take(),
         envelope,
@@ -2950,33 +3247,36 @@ async function stepWithTrace(opts: {
 }
 
 /**
- * 单步状态机推进。基于当前 state + deps 调用一次 Adapter:
- *   1. turnCount 已达 maxTurns -> throw MaxTurnsExceeded(plan T3 / ADR-0011,
- *      替代旧 silent-stop),不调 Adapter;
- *   2. 调 Adapter;若抛 PromptTooLongError -> reactive compact 重试一次
- *      (plan T3 / ADR-0013),仍超 / 已试过 -> stop protocolError;
- *      若抛 ProtocolError -> stop protocolError(整回合不进历史);
- *   3. emptyFinalResponse -> stop emptyFinalResponse(整回合不进历史);
- *   4. 纯文本完成 -> stop completed(进历史)或 nonSuccessStop;
- *   5. 有 tool call -> 执行工具,把 tool_result 编码后追加为一条 user
- *      message,产出 continue nextState(turnCount + 1)。
+ * Single state-machine step. Calls the Adapter once from state + deps:
+ *   1. turnCount already at maxTurns -> throw MaxTurnsExceeded (ADR-0011,
+ *      replacing the old silent-stop), no Adapter call;
+ *   2. call the Adapter; PromptTooLongError -> retry once with reactive
+ *      compact (ADR-0013), still over / already tried -> stop protocolError;
+ *      ProtocolError -> stop protocolError (the whole turn stays out of history);
+ *   3. emptyFinalResponse -> stop emptyFinalResponse (turn not in history);
+ *   4. plain-text finish -> stop completed (in history) or nonSuccessStop;
+ *   5. tool calls -> execute tools, append encoded tool_results as one user
+ *      message, produce continue nextState (turnCount + 1).
  *
- * 017:signal 透传给 adapter.step;Adapter 抛 DOMException AbortError
- * 与 Promise.race 超时都被收敛为 cancelled / timeout。stepWithTrace 是
- * 唯一持有 trace 的内部入口,public step() 只返 Transition(016 契约冻结)。
+ * signal is passed through to adapter.step; Adapter-thrown DOMException
+ * AbortError and Promise.race timeouts are both converged into cancelled /
+ * timeout. stepWithTrace is the only internal entry holding the trace;
+ * public step() returns only Transition (frozen contract).
  *
- * 因 adapter.step 本身异步,本 step 返回 `Promise<Transition>`;spec 原文
- * 的 sync 签名在本版本诚实化为 async,以避免"双轨实现"漂移。
+ * adapter.step is itself async, so this step returns `Promise<Transition>`;
+ * the sync signature in the original spec is honestly corrected to async to
+ * avoid dual-implementation drift.
  */
 export async function step(
   state: LoopState,
   deps: LoopEngineDeps,
   signal?: AbortSignal
 ): Promise<Transition> {
-  // #645 T1:单步语义 —— 每次调用新建 lastToolRef(初值 idle,单步内工具批
-  // 后更新,与 run 的回合作用域状态互不共享)。#888:pendingInjected 同理
-  // 每次新建(单步的注入随本步 commit flush,跨 step 不残留)。子弹 4:
-  // reconcileRef 同理每次新建(单步各自冷启动 stamped=undefined)。
+  // Single-step semantics: lastToolRef is created fresh per call (initial
+  // idle, updated after the step's tool batch, never shared with run-scoped
+  // state). pendingInjected likewise fresh per call (injections flush with this
+  // step's commit, no cross-step residue). reconcileRef likewise fresh per
+  // call (each single step cold-starts with stamped=undefined).
   const { transition } = await stepWithTrace({
     state,
     deps,
@@ -2991,18 +3291,19 @@ export async function step(
 }
 
 /**
- * 整轮运行:init -> 反复 step -> stop 收尾。S6 / S9 / 全部错误路径
- * 由 step 一并负责,避免双轨实现漂移。
+ * Full-round run: init -> repeated step -> stop closeout. All error paths are
+ * owned by step to avoid dual-implementation drift.
  *
- * 017 A1 返回形状变更:`Promise<{ result: RunResult; trace: LoopTrace }>`。
- * RunResult 形状零变更;trace 仅在 run 内部 immutable 累积([...prev, t]),
- * run 收尾一次性 computeTotals(A7)。
+ * Return shape: `Promise<{ result: RunResult; trace: LoopTrace }>`.
+ * RunResult shape unchanged; trace is accumulated immutably inside run
+ * ([...prev, t]) and totals are computed once at the end.
  *
- * plan T3 / ADR-0011 + plan T4:maxTurns 超限时 run 直接 throw
- * MaxTurnsExceeded(在 stepWithTrace 入口触发,先于 turnStartedAt / recordTurn;
- * surface 不依赖 trace.turns,靠 throws.turnsRan 推断 turnCount),surface
- * (T6 范畴)必须 catch;异常停(protocolError / cancelled / timeout /
- * nonSuccessStop)仍走 return stop + 收尾摘要事件。
+ * ADR-0011: on maxTurns overflow run throws MaxTurnsExceeded directly
+ * (triggered at the stepWithTrace entry, before turnStartedAt / recordTurn;
+ * surfaces do not rely on trace.turns, they infer turnCount from
+ * throws.turnsRan), and the surface must catch it; exceptional stops
+ * (protocolError / cancelled / timeout / nonSuccessStop) still return a stop
+ * plus the epilogue summary event.
  */
 export async function run(
   userText: string,
@@ -3014,12 +3315,13 @@ export async function run(
     appendUserText?: boolean;
   }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
-  // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
-  // #406 T2:识别层入口 —— secretsMode 非 "block" 且 secretRegistry 在场时,
-  // 先对用户文本做占位符替换再编码。占位符形态不进 registry(recognize 只扫
-  // 密钥形态),跨 turn 续传时 previous 占位符原样保留。
-  // #687 T1: appendUserText 缺省 true = 今日行为; false = skip-append,
-  // 不 encodeUserText、不 recognize(userText)。
+  // priorMessages continuation seam: history prefix frozen entry by entry, turnCount still starts at 0.
+  // Recognition-layer entry — when secretsMode is not "block" and secretRegistry
+  // is present, replace user text with placeholders before encoding. The
+  // placeholder form never enters the registry (recognize only scans secret
+  // shapes); placeholders from previous turns stay as-is across continuation.
+  // appendUserText defaults to true = today's behavior; false = skip-append,
+  // no encodeUserText and no recognize(userText).
   let state: LoopState;
   if (opts?.appendUserText !== false) {
     let effectiveUserText = userText;
@@ -3047,58 +3349,66 @@ export async function run(
       turnCount: 0,
     };
   }
-  // #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 usage 可变引用。
-  // 初值 null = run 无成功模型调用;仅当 step 成功且 usage 存在时更新。
+  // ADR-0008: mutable ref for the usage of the last successful model call.
+  // Initial null = no successful model call this run; updated only when a step
+  // succeeds and usage is present.
   let lastUsage: TokenUsage | null = null;
   let turns: ReadonlyArray<TurnTrace> = [];
-  // plan T3 / v2:run 级 L1 根记录的起止锚点(诚实值:不前置估算)。
-  // endedAt / durationMs / status 只有在 run 收尾后才能确定,故 session 记录
-  // 必须写在整个 run 末尾(Never-do:"用估算值顶替 trace 真值"红线)。
+  // Start/end anchors for the run-level L1 root record (honest values: no
+  // upfront estimation). endedAt / durationMs / status are only known when the
+  // run closes, so the session record must be written at the very end — never
+  // substitute estimates for real trace values.
   const sessionStartedAt = new Date().toISOString();
   const sessionStartMono = performance.now();
-  // plans/proactive-compact-run-entry.md 锁句2:proactive auto-compact check 的
-  // turnCount 锚点。初值 -1 = 「本 run 尚未成功压过任何一轮」——run() 起始
-  // turnCount=0 也要进 gate(prior 续传超闸不把超闸上下文先送给模型,锁句1)。
-  // 锚点只禁止「本 turnCount 上已成功压过」的重复扫描,不禁止首步。
-  // 闭包变量不入 LoopState(#119 Q4 决议)。
+  // turnCount anchor for the proactive auto-compact check. Initial -1 =
+  // "nothing compacted successfully yet this run" — the run() start
+  // (turnCount=0) also enters the gate (a prior-continuation session over the
+  // gate must not send over-gate context to the model first). The anchor only
+  // forbids repeat scans that already succeeded on this turnCount, never the first step.
+  // Closure variable, not part of LoopState.
   let lastCompactTurn: number = -1;
-  // plan T3 / ADR-0013:reactive-compact 已尝试标记(每 run 限 1 次,闭包变量)。
+  // ADR-0013: reactive-compact attempted flag (at most once per run, closure variable).
   const reactiveAttemptedRef = { attempted: false };
-  // #645 T1 / ADR-0028:状态栏 last_tool 回合作用域状态 —— 一个 run = 一个
-  // 用户回合,初值 idle(本回合尚未跑过工具),每个工具批后更新为批内最后
-  // 一个成功工具名;跨 step 共享,run 结束即弃。
+  // ADR-0028: status-bar last_tool run-scoped state — one run = one user
+  // turn; initial idle (no tools run yet this turn), updated after each tool
+  // batch to the last successful tool name; shared across steps, discarded at run end.
   const lastToolRef = { lastTool: AGENT_STATUS_IDLE_TOOL };
-  // spec agent-status-instruction-echo 子弹 4:reconcile 结算装箱 —— 同
-  // lastToolRef 形态,一个 run = 一次「新消息进场」观察窗:首跳栏标记、其后
-  // 各跳/各 step 不再标记;run 结束即弃(下一 run 新建 → 第二波再标记)。
+  // Reconcile settlement box — same shape as lastToolRef: one run = one
+  // "new message entered" observation window; the first bar marks it, later
+  // hops/steps no longer re-mark; discarded at run end (the next run boxes
+  // fresh → a second wave marks again).
   const reconcileRef: { stamped: AnthropicNativeMessage | undefined } = {
     stamped: undefined,
   };
   const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
-  // #888:run 作用域注入消息 pending 缓冲(见 createPendingInjected)。
+  // Run-scoped pending buffer for injected messages (see createPendingInjected).
   const pendingInjected = createPendingInjected();
-  // ADR-0108:模型在途流式正文缓冲 —— stepWithTrace 在模型在途窗口内累积
-  // text_delta(与墙上 draft 同源字节),cancelled closeout 用同一把 freeze
-  // 刀把已钉住前缀 keep 进权威历史。
+  // ADR-0108: model in-flight streaming text buffer — stepWithTrace accumulates
+  // text_delta inside the in-flight window (the same bytes as the on-screen
+  // draft); the cancelled closeout keeps the pinned prefix in the authoritative
+  // history with the same freeze knife.
   const modelStreamRef = { text: "", modelInFlight: false };
-  // ADR-0081:每个 run() 重新结算短现势(同 deps 跨 run 不沿用旧 latch)。
+  // ADR-0081: each run() re-settles the brief presence (same deps do not carry an old latch across runs).
   resetGraphPresenceLatch(deps);
   while (true) {
-    // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
-    // plans/proactive-compact-run-entry.md 锁句1-2:每次进入 step 前都检,
-    // 含本 run 首步(turnCount=0,prior 续传超闸不豁免);锚点仅防「同一
-    // turnCount 已成功压过」的重复 estimate。
+    // compress seam absent (field omitted) → skip the check, zero behavior change (byte-identical).
+    // Check before every step entry, including this run's first step
+    // (turnCount=0; a prior-continuation session over the gate is not exempt);
+    // the anchor only prevents repeat estimates that already succeeded on the
+    // same turnCount.
     //
-    // plan compress-trigger-gate T3:proactive gate 改为统一判据
-    // `evaluateCompactTrigger`(token 阈值 + 窗口守门 + full summary 降级三段)。
-    // 旧 `shouldAutoCompact` 仅判 token 阈值,导致 token 已超但 messages ≤
-    // DEFAULT_KEEP_RECENT 时 `splitForCompaction` 返 undefined → applyCompactAttachment
-    // 返回 state 不变 → lastCompactTurn 不更新 → 死循环(每次都重新触发又无效)。
-    // 新判据:
-    //   - compact_via_window → applyCompactAttachment 既有窗口路径(行为不变);
-    //   - compact_via_full_summary → applyFullCompactSummary 整段视为 dropped 走
-    //     LLM 摘要,无 kept tail;成功时 messages 引用变化 → lastCompactTurn 更新;
-    //   - noop → token 未达阈值,跳过(行为零变化)。
+    // The proactive gate uses the unified criterion `evaluateCompactTrigger`
+    // (token threshold + window gating + full-summary degradation, three
+    // stages). The old `shouldAutoCompact` judged only the token threshold:
+    // when tokens were over but messages ≤ DEFAULT_KEEP_RECENT,
+    // `splitForCompaction` returned undefined → applyCompactAttachment left
+    // state unchanged → lastCompactTurn never updated → infinite re-trigger.
+    // New criterion:
+    //   - compact_via_window → applyCompactAttachment's existing window path (behavior unchanged);
+    //   - compact_via_full_summary → applyFullCompactSummary treats the whole
+    //     span as dropped and runs an LLM summary, no kept tail; on success the
+    //     messages reference changes → lastCompactTurn updates;
+    //   - noop → tokens below threshold, skip (zero behavior change).
     if (deps.compress !== undefined && state.turnCount > lastCompactTurn) {
       const threshold = getAutoCompactThreshold(
         deps.compress.contextWindow,
@@ -3111,29 +3421,32 @@ export async function run(
       if (decision.action !== "noop") {
         let compactedState: LoopState;
         if (decision.action === "compact_via_window") {
-          // 既有窗口路径:splitForCompaction → runFullCompact → buildCompactedMessages。
-          // 行为不变(#458 T7 SC11)。
+          // Existing window path: splitForCompaction → runFullCompact → buildCompactedMessages.
+          // Behavior unchanged.
           compactedState = await applyCompactAttachment(state, deps, {
             signal,
             onStream: opts?.onStream,
           });
         } else {
-          // compact_via_full_summary:token 已超但 messages ≤ keepRecent,
-          // 整段视为 dropped 走 LLM 摘要,无 kept tail。
+          // compact_via_full_summary: tokens over but messages ≤ keepRecent;
+          // the whole span is treated as dropped and sent through an LLM
+          // summary, no kept tail.
           compactedState = await applyFullCompactSummary(state, deps, {
             signal,
             onStream: opts?.onStream,
           });
         }
         if (compactedState.messages !== state.messages) {
-          // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
-          // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,
-          // 否则可变普通对象进入权威历史,违反 append-only immutable 不变式。
+          // Immutable rebuild; no mutation, the original messages reference stays.
+          // Freeze gate: like appendMessage, the compaction result must freeze
+          // every message, otherwise mutable plain objects would enter the
+          // authoritative history and violate the append-only invariant.
           state = compactedState;
           lastCompactTurn = state.turnCount;
-          // #888:压缩产物与旧链本就不可 LCP 对齐(既有 fork-copy 语义),
-          // 旧 pending 注入只可能指向已不存在的消息位置 —— 丢弃缓冲,
-          // 让压缩后的新注入随新 commit flush。
+          // The compaction product can never LCP-align with the old chain
+          // (existing fork-copy semantics), and old pending injections can only
+          // point at message positions that no longer exist — drop the buffer
+          // so post-compaction injections flush with the new commit.
           pendingInjected.take();
         }
       }
@@ -3142,7 +3455,7 @@ export async function run(
       transition: Transition;
       turn: TurnTrace | null;
       modelUsage: TokenUsage | undefined;
-      /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;非 transport 失败 → undefined。 */
+      /** ADR-0094: gateway-side summary on transport failure; undefined otherwise. */
       apiError?: ApiErrorSummary;
     };
     try {
@@ -3160,9 +3473,10 @@ export async function run(
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {
-        // plan T4 / ADR-0011:maxTurns 超限走 throw 路径(不进 stop 分支),
-        // 这里在重抛前先跑一轮 best-effort 收尾摘要,再原样重抛 ——
-        // "原始停因仍抛出",摘要失败/超时绝不阻塞 throw。
+        // ADR-0011: maxTurns overflow takes the throw path (not the stop
+        // branch); run one best-effort epilogue summary before rethrowing, then
+        // rethrow as-is — the original stop cause still throws, and a summary
+        // failure/timeout must never block the throw.
         await epilogueSummary({
           deps,
           messages: state.messages,
@@ -3175,18 +3489,19 @@ export async function run(
     }
     const { transition, turn, modelUsage, apiError } = stepResult;
     if (turn !== null) {
-      // immutable append;禁止 push / 原地修改。
+      // immutable append; no push / in-place mutation.
       turns = [...turns, turn];
     }
-    // 仅成功模型调用(usage 存在)更新 lastUsage;失败/取消/超时路径不覆盖。
+    // lastUsage updates only on a successful model call (usage present); failure / cancel / timeout paths never overwrite it.
     if (modelUsage !== undefined) {
       lastUsage = modelUsage;
     }
     if (transition.kind === "stop") {
       const { reason, finalState } = transition;
-      // ADR-0108 / #392 T4 / #888:模型在途 cancelled 的 freeze 前缀 keep、
-      // interrupt append 与 commit flush 顺序收敛在 closeoutInFlightStop
-      // (见该函数文档);在 epilogueSummary 之前完成,收尾摘要看到完整历史。
+      // ADR-0108: the freeze-prefix keep for model in-flight cancelled, the
+      // interrupt append, and the commit flush order all converge in
+      // closeoutInFlightStop (see its docs); it completes before
+      // epilogueSummary so the summary sees the full history.
       const keptState = await closeoutInFlightStop({
         deps,
         reason,
@@ -3197,9 +3512,9 @@ export async function run(
       const finalMessages = keptState.messages;
       const finalText =
         reason === "completed" ? deriveFinalText(finalMessages) : null;
-      // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要(thread from
-      // stepWithTrace / modelStop catch 分支);非 transport 失败 (apiError
-      // undefined) → 字段缺席(byte-stable,wire 表面与 lastUsage 同模式)。
+      // ADR-0094: gateway-side summary on transport failure (threaded from the
+      // stepWithTrace / modelStop catch branch); non-transport failure
+      // (apiError undefined) → field absent (byte-stable, same wire-surface pattern as lastUsage).
       const result: RunResult = withApiError(
         {
           finalText,
@@ -3210,8 +3525,9 @@ export async function run(
         },
         apiError
       );
-      // plan T4 / ADR-0011:异常停(completed 除外)后跑一轮 best-effort
-      // 收尾摘要。不计 maxTurns / 工具预算;失败即跳过,不阻塞原始停因。
+      // ADR-0011: after an exceptional stop (anything but completed), run one
+      // best-effort epilogue summary. It counts toward neither maxTurns nor the
+      // tool budget; on failure just skip, never block the original stop cause.
       if (reason !== "completed") {
         await epilogueSummary({
           deps,
@@ -3221,10 +3537,11 @@ export async function run(
           signal,
         });
       }
-      // plan T3 / v2:run 末尾落一条 session L1 根记录(仅当 caller 注入
-      // agentVersion 且启用了 trace)。status 由 result.stopReason 派生:
-      // completed → ok,其余(nonSuccessStop/protocolError/cancelled/...)
-      // → error。埋点走 safeTrace,失败绝不中断业务(@throws never)。
+      // At run end, write one session L1 root record (only when the caller
+      // injected agentVersion and trace is enabled). status derives from
+      // result.stopReason: completed → ok, everything else
+      // (nonSuccessStop/protocolError/cancelled/...) → error. Instrumentation
+      // goes through safeTrace; failure never interrupts business (@throws never).
       if (deps.trace && deps.agentVersion !== undefined) {
         const sessionEndedAt = new Date().toISOString();
         const sessionDurationMs = performance.now() - sessionStartMono;
@@ -3258,16 +3575,18 @@ export async function run(
 export type { Executor, Registry } from "./tools/types.js";
 export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
 
-/** T9 / #653:envSnapshot 缝形态别名 —— 让测试 / 外部装配代码可以引用同一类型,
- *  而不是穿透 `unknown` 强转 `LoopEngineDeps.envSnapshot`。 */
+/** envSnapshot seam shape alias — lets tests / external assembly code
+ *  reference the same type instead of casting `unknown` to
+ *  `LoopEngineDeps.envSnapshot`. */
 export type EnvSnapshotSeam = { readonly readCwd: () => string };
 
 /**
- * 工厂:把 dep 闭包成 runner / stepper 对象(016 T12 spec 出口)。
- * 返回的 `step` 是闭包版(只需传 state),`run` 接收 userText。
+ * Factory: closes the dep bag into a runner / stepper object.
+ * The returned `step` is the closure version (only state needed); `run` takes userText.
  *
- * 017:闭包层 run / step 透传可选的 signal 第三参;返回形状随 run /
- * step 扩展,闭包类型签名同步更新。
+ * The closure layer's run / step pass through the optional third signal
+ * parameter; return shapes follow run / step extensions, and the closure type
+ * signatures update in sync.
  */
 export function createLoopEngine(deps: LoopEngineDeps): {
   readonly run: (

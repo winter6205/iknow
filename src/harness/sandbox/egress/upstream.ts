@@ -1,20 +1,23 @@
 /**
  * src/harness/sandbox/egress/upstream.ts
  *
- * T4 上游适配层（specs/network-egress-allowlist.md §Dependency fork「文件承载
- * 纪律」：版本升级只改这一文件，不外溢）。
+ * Upstream adapter layer — file-carrier discipline: version upgrades touch
+ * only this file, never spread outward.
  *
- * 单一职责：把 `@anthropic-ai/sandbox-runtime` 的网络半场件集中在该层 re-export
- * —— 本仓其它模块（包括 domain-matcher / session / bwrap）均不得直接
- * import 包内路径。
+ * Single responsibility: centralize the network half of
+ * `@anthropic-ai/sandbox-runtime` behind re-exports — no other module in
+ * this repo (including domain-matcher / session / bwrap) may import package
+ * paths directly.
  *
- * 复用面（spike 结论，0.0.76）：
- *   - http-proxy / socks-proxy：代理 server，filter 回调语义对称；
- *   - domain-pattern（已被 domain-matcher.ts 消费）、address、parent-proxy
- *     已在对应适配层 re-export；本文件只补「session 装配期需要」的件。
+ * Reused surface (verified on 0.0.76):
+ *   - http-proxy / socks-proxy: proxy servers with symmetric filter-callback
+ *     semantics;
+ *   - domain-pattern (consumed by domain-matcher.ts), address, parent-proxy
+ *     are already re-exported by their own adapter layers; this file adds
+ *     only what session assembly needs.
  *
- * 包无 `exports` 字段（实测），深路径导入可用但无契约稳定性 —— 升级时
- * 全部 import 收口到此文件。
+ * The package has no `exports` field (verified): deep imports work but carry
+ * no contract stability — keep every package-path import funneled here.
  */
 
 export {
@@ -22,11 +25,11 @@ export {
   type HttpProxyServerOptions,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/http-proxy.js";
 
-// SOCKS5 / git-over-SOCKS 面（1080 段）已被操作员裁定摘出当前分支
-// ADR-0107 §Decision 5（ssh 传输面）
-// 「实现里钉死一种」钉死为 HTTP CONNECT（session.ts `GIT_SSH_COMMAND`
-// 冻结形态）。仍在此文件 re-export 一份以备未来 mux 形态补时消费，避免
-// 新增 import 直接打到包内路径；届时在此追加第二枚 socket。
+// The SOCKS5 / git-over-SOCKS surface is ruled out of the current branch:
+// the ssh transport (ADR-0107) is pinned to exactly one form — HTTP CONNECT
+// (the frozen `GIT_SSH_COMMAND` shape in session.ts). Keep this re-export so
+// a future multiplexed socket consumes it here instead of new deep imports
+// into the package.
 export {
   createSocksProxyServer,
   type SocksProxyServerOptions,
@@ -41,12 +44,12 @@ export {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/resolved-address-guard.js";
 
 /**
- * egress-credential-sentinel T2 / SC10：domain-pattern 匹配器收口。
- * `domain-matcher.ts` 是既有深路径 import 点，按 0097「文件承载纪律」并入
- * 本适配层，使 `src/` 的包深路径 import 只剩 upstream.ts 一处。
- * `matchesDomainPattern`（无端口档）= sentinel registry 的 HostMatcher
- * （T3 代换门接线用，包 manager 同件，`sandbox-manager.js:282`）；
- * `matchesDomainPatternWithPort` = 允许集判定用（T2 收口）。
+ * Domain-pattern matcher funnel. `domain-matcher.ts` was the existing deep
+ * import site; merged into this adapter layer under the same file-carrier
+ * discipline so that upstream.ts is the only package deep-path import left in
+ * `src/`. `matchesDomainPattern` (no-port form) = the HostMatcher used by the
+ * sentinel registry and by the sandbox-manager internally;
+ * `matchesDomainPatternWithPort` = allowlist decisions.
  */
 export {
   matchesDomainPattern,
@@ -54,14 +57,14 @@ export {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
 
 /**
- * egress-credential-sentinel T4（Assumption 3 收口纪律）：MITM CA 件 ——
- * `createMitmCA({caCertPath, caKeyPath})` 装载持久 CA 并**顺带现写 trust
- * bundle**（`trustBundlePath` = 包内 writeTrustBundle 的产物，每次调用新
- * temp 文件；只含 CERTIFICATE 块的 PEM 过滤在包内，mitm-ca.js:166-175，
- * 本仓不复刻）。`generateCa` 是纯生成原语（无 FS 副作用），持久层落盘
- * 归本仓 `ca-store.ts`。`disposeMitmCA` = T3 dispose 接线的 trust bundle
- * 临时件清理通道（bundle 目录恒删；持久 CA 非 ephemeral 不受影响，
- * mitm-ca.js:111-125）。
+ * MITM CA pieces: `createMitmCA({caCertPath, caKeyPath})` loads the durable
+ * CA and **also writes a fresh trust bundle** (`trustBundlePath` = the
+ * package's writeTrustBundle output, a new temp file per call; the
+ * CERTIFICATE-block-only PEM filter lives in the package, not replicated
+ * here). `generateCa` is a pure generation primitive (no FS side effects);
+ * persisting it to disk is this repo's `ca-store.ts`. `disposeMitmCA` = the
+ * trust-bundle temp cleanup channel (the bundle dir is always deleted; the
+ * durable CA is not ephemeral and stays untouched).
  */
 export {
   createMitmCA,
@@ -74,10 +77,12 @@ export {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/mitm-ca.js";
 
 /**
- * 信任注入名册全集（Assumption 11：env 注入面 = 该 roster 全量，值指向
- * trust bundle）。逐客户端三臂常量在 `ca-store.ts` 另行钉死。
- * `normalizePathForSandbox` = 凭据条目 path 的 tilde 展开 + realpath 归一，
- * T2 文件预检（F2/F3）与包内 masking 用同一归一形态，deny/binding 落点对齐。
+ * Full roster of trust-injection vars (the env injection surface = every
+ * entry, all pointing at the trust bundle). Per-client three-arm constants
+ * are pinned separately in `ca-store.ts`.
+ * `normalizePathForSandbox` = tilde expansion + realpath normalization for
+ * credential entry paths, so the pre-check here and the package's masking
+ * agree on the same normalized form and deny/binding land in one place.
  */
 export {
   CA_TRUST_VARS,
@@ -85,14 +90,14 @@ export {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
 
 /**
- * egress-credential-sentinel T2（Assumption 3 收口纪律）：sentinel 铸造与
- * 掩码流程件 —— `SentinelRegistry`（假值空间，per-session）、
- * `buildMaskedEnvVars` / `buildMaskedFileBinds`（env / 文件掩码流程）。
- * 本仓偏离点集中在装配层入参：`onExtractNoMatch` 显式传 `"deny"`
- * （Assumption 8，不吃包默认 `"warn"` fail-open）；`allowedDomains` 入参
- * 恒传 `[]`（Assumption 6，条目 injectHosts 必为显式值，不吃缺省扩张）。
- * 非 UTF-8 / 二进制的包内行为是静默 skip（fail-open），本仓在调用前
- * 预检并降级 deny —— 见 `credential-assembly.ts`。
+ * Sentinel minting and masking flow pieces — `SentinelRegistry` (fake-value
+ * space, per-session), `buildMaskedEnvVars` / `buildMaskedFileBinds` (env /
+ * file masking flows). This repo's deviations are all at assembly inputs:
+ * `onExtractNoMatch` is explicitly `"deny"` (do not eat the package default
+ * `"warn"` fail-open); `allowedDomains` is always `[]` (entry injectHosts
+ * must be explicit, no default expansion). The package silently skips
+ * non-UTF-8 / binary files (fail-open); this repo pre-checks and degrades to
+ * deny before calling — see `credential-assembly.ts`.
  */
 export {
   SentinelRegistry,

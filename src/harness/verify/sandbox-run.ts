@@ -1,9 +1,10 @@
 /**
- * verify 沙箱执行体 (#128 T7/M4 拆分)。
+ * verify sandbox executor, split out from the decision orchestration
+ * (verify-loop.ts).
  *
- * 与判定编排 (verify-loop.ts) 隔离: 本文件只负责"验证命令 → bwrap 沙箱执行 →
- * 超时包裹 → SandboxCmdRecord 落盘"。M6 抽共享工厂 (bash 工具同款装配语义),
- * 消除 makeDefaultRunVerify 在 verify-loop 内部重造 bash 装配。
+ * This file only does "verify command → bwrap sandbox exec → timeout wrap →
+ * SandboxCmdRecord persistence". A shared factory with the bash tool's
+ * assembly semantics removes duplicated fence wiring from verify-loop.
  */
 import { tmpdir } from "node:os";
 import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
@@ -27,8 +28,8 @@ import {
 } from "../isolation/worktree-gate.js";
 
 /**
- * 验证执行体: command → 沙箱执行 → { exitCode, stdout, stderr }。
- * 生产缺省装配用 runInSandbox + bwrap; 测试注入脚本化替身。
+ * Verification executor: command → sandbox exec → { exitCode, stdout, stderr }.
+ * Production default uses runInSandbox + bwrap; tests inject scripted doubles.
  */
 export type RunVerifyFn = (
   command: string,
@@ -36,74 +37,87 @@ export type RunVerifyFn = (
 ) => Promise<SandboxRunResult>;
 
 /**
- * 生产缺省 runVerify: 与 bash 工具同款沙箱装配 (spec:64 声明验证命令沿用
- * bash 工具的围栏 / 资源限额, 不单独放宽)。命令拼 `bash -c <command>`,
- * 与 bash.ts 一致。
+ * Production default runVerify: same sandbox assembly as the bash tool (verify
+ * commands inherit the bash tool's fence / resource limits, never relaxed
+ * separately). Command is wrapped as `bash -c <command>`, matching bash.ts.
  *
- * ADR-0092 / Round 2:工作区档 fs 档 + homeRoot 透传,bwrap 据此在工作区档
- * 叠 `--ro-bind <home>` + `--bind <cwd>` + `--bind <tmpDir>` 三层(global 档
- * 下 bwrap 不发射,V1 baseline 不破)。fsMode 缺省回退与 bash 工具同形态
- * (`"global"`)。
+ * ADR-0092: workspace fs tier + homeRoot pass-through — bwrap then layers
+ * `--ro-bind <home>` + `--bind <cwd>` + `--bind <tmpDir>` in workspace tier
+ * (global tier emits none, baseline preserved). fsMode default fallback has
+ * the same shape as the bash tool (`"global"`).
  *
- * homeRoot 缺省**不**再回落成「不发射 home 层」:verify 面若在 workspace 档
- * 漏传 homeRoot,bwrap 抛 typed error(fail-loud)—— 静默跳过 home ro-bind 会
- * 让验证命令的围栏悄悄退回全局档,而 bash 工具仍在工作区档,同一会话两条
- * 执行面档位不一致且无信号。
+ * homeRoot absent does **not** silently skip the home layer: if verify runs
+ * in workspace tier without homeRoot, bwrap throws a typed error (fail-loud).
+ * A silent skip would quietly regress the verify fence to global tier while
+ * the bash tool stays in workspace tier — two inconsistent execution surfaces
+ * in one session with no signal.
  */
 export function makeDefaultRunVerify(opts: {
   readonly cwd: string;
   /**
-   * ADR-0092 / SC12: 验证命令的会话 tmp 宿主路径 —— `$TMPDIR` 的来源,
-   * 同时是工作区档 `--bind <tmpRoot>` 的源端(两者必须同一份)。
+   * ADR-0092: session tmp host path for verify commands — the `$TMPDIR`
+   * source and the workspace-tier `--bind <tmpRoot>` source (must be the same
+   * path).
    *
-   * 缺省回退进程 `tmpdir()`:**这是 fallback 不是目标态** —— 会话 tmp 的
-   * 权威解析归调用方(`resolveSessionFenceTmp({ projectDir, conversationId })`,
-   * 与 bash 工具面同一 helper)。回退只服务「未接线 / 测试注入」路径:
-   * 在那里报错会让 verify 在拿不到 projectDir / conversationId 时直接失败,
-   * 超出本面职责。生产两个 caller(session-api/hub、cli/chat-session)都显式传。
+   * Default falls back to the process `tmpdir()`: **a fallback, not the
+   * target state** — authoritative session-tmp resolution belongs to the
+   * caller (`resolveSessionFenceTmp({ projectDir, conversationId })`, the same
+   * helper as the bash tool surface). The fallback only serves unwired /
+   * test-injection paths: throwing there would fail verify whenever
+   * projectDir / conversationId are missing, beyond this module's duty.
+   * Both production callers (session-api/hub, cli/chat-session) pass it
+   * explicitly.
    */
   readonly tmpDir?: string;
-  /** ADR-0092 Round 2 / SC11/SC12:工作区档 fs 档。缺省 → global(V1 baseline)。 */
+  /** ADR-0092: workspace fs isolation tier. Default → global (baseline). */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
-  /** ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。 */
+  /** ADR-0092: host absolute path for the workspace-tier home ro-bind source. */
   readonly homeRoot?: string;
   /**
-   * ADR-0097 / T7:出口代理缝策略 —— 由 caller(verify-loop 装配期)透传
-   * (通常经 `createEgressPolicyFactory` 派生)。verify 模块级形态:per-
-   * session 单例 session(所有 verify 命令共享同一份 session),首次
-   * `runVerify` 调用时 lazy start;后续调用复用(spec §Module-level form
-   * 「module-level singleton」);start 失败 → 无缝(fail-closed,与后台
-   * 同语义);调用方负责 dispose(由 verify-loop / hub 在会话退出时调
-   * `disposeEgressSessionForVerify` 释放)。
+   * Egress proxy seam policy — passed through by the caller (verify-loop
    *
-   * 缺省 = caller 未注入 = 无缝(V1 baseline 等价;沙箱内 `--unshare-net`
-   * 恒在)。**生产装配 TODO**:hub / chat-session 装配点本票后接。
+   // (ADR-0097)
+   * assembly, usually derived via `createEgressPolicyFactory`). Verify's
+   * module-level form: one per-session singleton shared by all verify
+   * commands, lazy-started on the first `runVerify` call and reused after
+   * (module-level singleton); start failure → no seam (fail-closed, same
+   * semantics as background); the caller disposes it (hub / verify-loop at
+   * session exit via `disposeEgressSessionForVerify`).
+   *
+   * Default = caller injected nothing = no seam (baseline equivalent; the
+   * sandbox still has `--unshare-net`). **Production assembly TODO**: hub /
+   * chat-session wiring points still to be connected.
    */
   readonly egressPolicy?: EgressPolicyInput;
   /**
-   * issue 1059:worktree-on-mutate holder(只读视图)。本闭包由 verify-loop
-   * 每轮现造 → 工厂期 `get()` 即该轮快照(与上方 fsMode 快照同 vintage)。
-   * gate ON ∧ cwd 是主 checkout → 验证命令 fence 叠 UNBOUND_FENCE ro-bind
-   * 段,与 bash 工具面判定同源(G3)。缺席 → 不发段(V1 baseline 字节不变)。
+   * worktree-on-mutate holder (read-only view). This closure is rebuilt per
+   * round by verify-loop, so the factory-time `get()` equals that round's
+   * snapshot (same vintage as the fsMode snapshot above). gate ON ∧ cwd is
+   * the main checkout → the verify fence layers the UNBOUND_FENCE ro-bind
+   * segment, judged identically to the bash tool surface. Absent → segment
+   * not emitted (baseline bytes unchanged).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
 }): RunVerifyFn {
-  // 注意:调用方(verify-loop.ts)每轮现造本闭包,故此处工厂期快照 == 该轮
-  // 的 per-call 快照 —— 与 bash handler 入口 D2 snapshot 同 vintage。
+  // Note: the caller (verify-loop.ts) rebuilds this closure per round, so the
+  // factory-time snapshot here == that round's per-call snapshot — same
+  // vintage as the bash handler's entry snapshot.
   const tmpDir = opts.tmpDir ?? tmpdir();
   const fsMode = opts.fsMode ?? "global";
   const homeRoot = opts.homeRoot;
-  // issue 1059:工厂期读 holder 一次 —— 与 fsMode 快照同 vintage。
+  // Read the holder once at factory time — same vintage as the fsMode snapshot.
   const unboundMainCheckout = unboundFenceMainCheckout({
     gateOn: opts.worktreeOnMutate?.get() === true,
     root: opts.cwd,
   });
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  // ADR-0097 / T7:模块级 session 单例 —— 首次调用时 lazy start。
-  // start 失败(典型:中继产品依赖缺席 / unix socket 占用)→ session 保持 undefined,
-  // 后续调用 fence 走纯断网(fail-closed)。调用方经
-  // `disposeEgressSessionForVerify` 释放(verify-loop / hub 会话退出时)。
+  // Module-level per-session egress singleton — lazy-started on first call.
+  // (ADR-0097)
+  // Start failure (typically a missing relay dependency / unix socket in use)
+  // leaves session undefined and every later fence runs with plain network
+  // isolation (fail-closed). Callers release it via
+  // `disposeEgressSessionForVerify` (verify-loop / hub at session exit).
   let egressSession: EgressSession | undefined;
   let egressStartAttempted = false;
   async function ensureEgressSession(): Promise<EgressSession | undefined> {
@@ -120,19 +134,22 @@ export function makeDefaultRunVerify(opts: {
     return egressSession;
   }
   return async (command, ctx) => {
-    // ADR-0092 / SC12:`$TMPDIR` 与交给 createBwrapFence 的 `tmpRoot` 必须
-    // 是**同一份**宿主真路径(与 bash.ts 的 fenceEnv 同形同时机)。
-    // `envIsolation.filter` 只按 BASE_ENV_WHITELIST 放行宿主已有的
-    // `TMPDIR` —— 宿主未导出时它根本不在场,围栏内写 `"$TMPDIR/x"` 会落到
-    // `/x`(guest 根)被拒。显式注入才是本面的目标态;filter 结果里的宿主
-    // 值被有意覆盖(生产装配的会话 tmp 由调用方给,不由宿主 env 决定)。
-    // ADR-0097 / T7:egress session lazy start —— 首次调用起,后续复用。
+    // ADR-0092: `$TMPDIR` and the `tmpRoot` handed to createBwrapFence must be
+    // the **same** real host path (same shape and timing as bash.ts's fenceEnv).
+    // `envIsolation.filter` only passes a host TMPDIR through
+    // BASE_ENV_WHITELIST — if the host never exported it, in-fence writes to
+    // "$TMPDIR/x" land on /x (guest root) and get denied. Explicit injection
+    // is this surface's target state; the host value in the filter result is
+    // intentionally overridden (the session tmp comes from the caller, not
+    // (ADR-0097)
+    // from host env).
+    // Egress session lazy start — begins on first call, reused after.
     const session = await ensureEgressSession();
-    // egress-ssh-bridge T5：内层监听前导与 bash.ts 前台 / background
-    // spawn factory 同形，拼接单点 = egress 模块
-    // `wrapCommandWithInnerBridge`（review Medium 收敛）—— session 在场时
-    // payload = `<innerBridgeScript>\n<command>`；缺席 = byte-identical
-    // （invariant 3）。
+    // Inner-bridge command prefix, identical in shape to the bash tool's
+    // foreground / background spawn; the single concat point is the egress
+    // module's `wrapCommandWithInnerBridge` — with a session the payload is
+    // `<innerBridgeScript>\n<command>`, without one it is byte-identical to
+    // the raw command (invariant: no session ⇒ no bytes changed).
     const commandPayload = wrapCommandWithInnerBridge(session?.spec, command);
     const fenceEnv = {
       ...envIsolation.filter(process.env),
@@ -145,16 +162,19 @@ export function makeDefaultRunVerify(opts: {
       fsPolicy,
       env: fenceEnv,
       cwd: opts.cwd,
-      // ADR-0092 Round 2 / SC11:workspace 档三层。**不**按 `homeRoot !==
-      // undefined` 预过滤 —— home 层缺席时 bwrap 抛 typed error(工作区档
-      // 缺 home = 静默退化成全局档,是安全洞不是容错)。此处只表达「哪些层
-      // 的源端是哪些路径」,「缺了该不该发射」由 fence 装配层唯一裁决。
+      // ADR-0092: workspace-tier three layers. Deliberately **not**
+      // pre-filtered on `homeRoot !== undefined` — when the home source is
+      // missing, bwrap throws a typed error (workspace tier without home
+      // silently degrading to global tier is a security hole, not tolerance).
+      // This call site only says which paths feed which layers; whether a
+      // layer may be omitted is the fence assembly layer's sole decision.
       ...(fsMode === "workspace"
         ? { homeRoot, workspaceRoot: opts.cwd, tmpRoot: tmpDir }
         : {}),
-      // ADR-0097 / T7:egress 缝(per-call fence argv,module-level session)。
+      // Egress seam (per-call fence argv, module-level session).
+      // (ADR-0097)
       ...(session !== undefined ? { egress: session.spec } : {}),
-      // issue 1059:UNBOUND_FENCE 段 —— 与 bash 工具面同段同序(G3)。
+      // UNBOUND_FENCE segment — same segment, same order as the bash tool surface.
       ...(unboundMainCheckout !== undefined
         ? {
             unboundFence: {
@@ -174,29 +194,32 @@ export function makeDefaultRunVerify(opts: {
 }
 
 /**
- * ADR-0097 / T7:释放 `makeDefaultRunVerify` 模块级 egress session
- * (verify-loop / hub 在会话退出时调用)。session 未起 / 已 dispose 时
- * 静默成功(幂等)。
+ * Release the module-level egress session of `makeDefaultRunVerify` (hub /
+ *
+ // (ADR-0097)
+ * verify-loop call this at session exit). Silent success when the session was
+ * never started or already disposed (idempotent).
  */
 export async function disposeEgressSessionForVerify(
   verifyFn: RunVerifyFn
 ): Promise<void> {
-  // verifyFn 是闭包,无引用桥 —— 调用方负责持有 `(verifyFn as any)._egressSession`
-  // 或本工厂返回值。本票最小实现:由 makeDefaultRunVerify 返回值 close
-  // 关联字段(已隐式 —— factory 闭包内部 `egressSession` 变量,本函数无
-  // 桥接)。**生产装配 TODO**:verify-loop / hub 装配点本票后接 ——
-  // 本票只定义契约,不实现 dispose 桥(避免在工厂返回值上挂占位字段污染
-  // RunVerifyFn 签名)。
+  // verifyFn is a closure with no reference bridge — holding the session for
+  // disposal is the caller's responsibility. Minimal contract for now: the
+  // factory keeps `egressSession` inside its closure and this function has no
+  // bridge. **Production assembly TODO**: dispose bridging comes with the
+  // hub / verify-loop assembly — this ticket only defines the contract and
+  // avoids polluting the RunVerifyFn signature with a placeholder field.
   void verifyFn;
 }
 
 /**
- * 单次命令执行 + 超时包裹 (verify-loop 层, 不动 runner 签名)。
- * 每执行一个独立 AbortController: timeoutSec 到时 abort (timedOut=true);
- * 用户 signal abort 同样转发给 controller (用户优先, 由调用方判 aborted)。
- * exec 启动失败 (spawn error / 沙箱拒绝) → 收敛为 exit=127 (真失败分支语义)。
- * spec:67 / plan §Decisions: 每次执行落一条 SandboxCmdRecord (parentTurnId 挂
- * 触发本轮验证的 completed turn id, 单值 parent, #286)。
+ * One command execution + timeout wrapper (loop layer; runner signature untouched).
+ * Each execution gets its own AbortController: timeoutSec fires → abort
+ * (timedOut=true); a user signal abort forwards into the controller too (user
+ * takes priority; the caller decides aborted). Spawn error / sandbox rejection
+ * converges to exit=127 (true-failure branch semantics). Every execution
+ * persists one SandboxCmdRecord whose parentTurnId is the completed turn that
+ * triggered the round (single-valued parent).
  */
 export async function runVerifyOnce(
   runVerify: RunVerifyFn,
@@ -204,9 +227,9 @@ export async function runVerifyOnce(
   opts: {
     readonly timeoutSec: number;
     readonly signal?: AbortSignal;
-    /** 观测落点 (spec:67: 验证命令经 SandboxCmdRecord 落盘)。 */
+    /** Observation sink (verify commands persist via SandboxCmdRecord). */
     readonly trace?: TraceService;
-    /** 触发本轮验证的 completed turn id (plan §Decisions parentTurnId 语义)。 */
+    /** The completed turn id that triggered this verification round. */
     readonly parentTurnId: string;
   }
 ): Promise<{ readonly result: SandboxRunResult; readonly timedOut: boolean }> {
@@ -214,7 +237,7 @@ export async function runVerifyOnce(
   const startedAt = new Date().toISOString();
   const startMono = performance.now();
   let timedOut = false;
-  /** spawn/沙箱启动失败记录 (S3: 收敛 127 时保留根因, 不进 stderr 伪造)。 */
+  /** Spawn/sandbox startup failure (exit=127 convergence keeps the root cause; never forged into stderr). */
   let sandboxError: string | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -229,9 +252,11 @@ export async function runVerifyOnce(
     try {
       result = await runVerify(command, { signal: controller.signal });
     } catch (err) {
-      // 启动失败不抛错打断闭环, 归入 exit=127 真失败 (spec:94 ENOENT 边界)。
-      // // EXIT: spawn/沙箱启动失败 → 收敛为 exit=127, 走真失败分支。
-      // (S3 判据: fallback 分支必含显式退出条件; err 记录于 SandboxCmdRecord error)
+      // Startup failure must not throw and break the loop; fold into
+      // exit=127 true-failure (ENOENT boundary).
+      // EXIT: spawn/sandbox startup failure → exit=127, true-failure branch
+      // (fallback carries an explicit exit condition; err recorded on
+      // SandboxCmdRecord error).
       result = { exitCode: 127, stdout: "", stderr: "" };
       sandboxError = err instanceof Error ? err.message : String(err);
     }
@@ -246,7 +271,8 @@ export async function runVerifyOnce(
       endedAt,
       durationMs: Math.round(performance.now() - startMono),
       status: timedOut ? "error" : "ok",
-      // 失败根因显式记录 (S3: 超时 / 启动失败不静默): Postel, 成功无 error。
+      // Failure root cause persisted explicitly (timeouts / startup failures never silent);
+      // Postel: successful runs carry no error key.
       ...(timedOut
         ? {
             error: {

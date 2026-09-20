@@ -1,23 +1,24 @@
 /**
- * IKNOW-symbol-primary T1: 使用规则层 (spec `specs/symbol-primary-aci.md` 装配
- * 顺序约束 + 使用规则段内容契约)。
+ * Usage-rules layer: priority of the primary code path.
  *
- * 模块责任:回答 "我按什么规矩动手" —— 代码主路径优先级。不放 soul Vibe 的
- * Markdown / 分段排版纪律(那条归 soul.ts),不放 identity 卡的本体事实(归
- * identity.ts),不放人格 core truths / boundaries(归 soul.ts)。本段只讲
- * 工具优先级与三类回退场景,对应 spec Assumptions 2 / 使用规则段 / SC8。
+ * Responsibility: answer "by what rules do I act". Does not carry soul's
+ * Vibe markdown/paragraph formatting discipline (that stays in soul.ts), nor
+ * identity's ontological facts (identity.ts), nor core truths / boundaries
+ * (soul.ts). This segment covers only tool priority and the three grep/read_file
+ * fallback situations.
  *
- * 锁定约束:删掉这段 = agent 在代码上仍会用 grep 开场,违反 spec 假设
- * 1 (代码发现默认走符号工具,不是 grep)。判断标准 "删掉后 agent 是不是
- * 还能按符号身份办事":否 → 归 usage。装配层把本段插在 soul 之后、
- * user_profile 之前,chat / tui / serve / ask 全部注入(SC1 + spec 假设 5)。
+ * Locked constraint: deleting this segment = the agent still opens with grep
+ * on code. Test: "after deleting it, can the agent still act by symbol
+ * identity?" no → usage. The assembly layer inserts this segment after soul
+ * and before user_profile; it is injected on chat / tui / serve / ask alike.
  *
- * 后续调整使用规则,改本文件(代码),不进用户工作区。本 const 是 SSOT,
- * 装配时只引用,绝不复制 / 切片(防 drift)。
+ * Future usage-rule tweaks go in this file (code), never in the user
+ * workspace. This const is the SSOT — referenced at assembly time, never
+ * copied or sliced (drift prevention).
  */
 
-/** IKNOW-symbol-primary T1 使用规则:代码主路径优先级 (回答 "我按什么规矩动手")。
- *  删掉这段 = agent 在代码上仍会用 grep 开场。 */
+/** Usage rules: priority of the primary code path (answers "by what rules do I act").
+ *  Deleting this segment = the agent still opens with grep on code. */
 export const IKNOW_USAGE_DEFAULT = `
 # Usage rules
 

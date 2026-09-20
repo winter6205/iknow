@@ -1,98 +1,111 @@
 /**
- * spec §9 / plan B5 — git 块（"## Git"）的唯一 git 读取出口。
+ * Sole git-read exit for the git block ("## Git").
  *
- * 设计原则：
- *   - 装配层（`assemble.ts`）经注入缝消费，**绝不** 直接 shell 出 git ——
- *     守住 assemble.ts 的 fs / path-only 纯度。
- *   - `createGitSnapshotProvider({ cwd })` 返回一个闭包，闭包在工厂调用
- *     时取一次快照、会话内冻结（build-engine / worker 装配期同步执行）。
- *     装配层每 turn 调同一闭包 → 相邻两轮文本 byte-identical
- *     （D9 / spec §2 断言 ② / KV 缓存契约）。
- *   - 退化态（cwd 不可用 / 非 git 仓库 / git 不可用）→ 快照 = undefined →
- *     装配段整体缺席（spec §9：「接受缺席即字节变化」）。分型词汇表在
- *     `env-snapshot.ts`,本模块只做「退化即 undefined」收敛。
- *   - status 输出经 `truncateByCodepoints` 截断（`GIT_STATUS_MAX_CHARS`
- *     上限，2000 codepoints，与 `MAX_ENV_DIFF_CHARS` 同档）；四要素 + D1
- *     免责句全部走 SSOT 常量。
+ * Design principles:
+ *   - The assembly layer (`assemble.ts`) consumes it through an injected
+ *     seam and never shells out to git directly — preserving assemble.ts's
+ *     fs / path-only purity.
+ *   - `createGitSnapshotProvider({ cwd })` returns a closure that takes one
+ *     snapshot at factory time and freezes it for the session (executed
+ *     synchronously during build-engine / worker assembly). The assembly
+ *     layer calls the same closure every turn → adjacent turns are
+ *     byte-identical (KV cache contract).
+ *   - Degraded states (cwd unavailable / not a git repo / git unavailable) →
+ *     snapshot = undefined → the whole assembly segment is absent ("absence =
+ *     byte change is accepted"). The taxonomy lives in `env-snapshot.ts`;
+ *     this module only collapses degradation into undefined.
+ *   - status output is truncated via `truncateByCodepoints` (capped at
+ *     `GIT_STATUS_MAX_CHARS`, 2000 codepoints, same tier as
+ *     `MAX_ENV_DIFF_CHARS`); the four fields + disclaimer all come from SSOT
+ *     constants.
  *
- * 数据源：
- *   - branch         ← `git --no-pager status --porcelain=v1 -b` 的 `## ...` 行
- *                        （与 env-snapshot.ts parseBranchLine 同形态）。
+ * Data sources:
+ *   - branch         ← the `## ...` line of `git --no-pager status --porcelain=v1 -b`
+ *                        (same shape as parseBranchLine in env-snapshot.ts).
  *   - mainBranch     ← `git --no-pager symbolic-ref --short refs/remotes/origin/HEAD`
- *                        缺席（无 origin / 离线）→ null（提示行标 "—"）。
- *   - status         ← 同上的 porcelain v1 全文（剥离 `## ...` 行），按
- *                        codepoint 上限截断。
- *   - recentCommits  ← `git --no-pager log --oneline -5` 拆行。
+ *                        absent (no origin / offline) → null (rendered as "—").
+ *   - status         ← the full porcelain v1 text from the same call (with the
+ *                        `## ...` line stripped), truncated at the codepoint cap.
+ *   - recentCommits  ← `git --no-pager log --oneline -5` split by line.
  *
- * 取值用 `spawnSync`：会话级一次性快照，开销可控；闭包返回冻结值不再 IO。
- * 本模块是 `git` 命令在本仓的唯一 spawn 出口（assemble.ts 测试套验证）。
+ * `spawnSync` is used for reads: a one-shot session-level snapshot keeps cost
+ * controlled; the closure returns the frozen value with no further IO.
+ * This module is the only place in the repo that spawns `git` (verified by
+ * the assemble.ts test suite).
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { truncateByCodepoints } from "../env-snapshot.js";
 
 // ---------------------------------------------------------------------------
-// SSOT 常量（装配层 / 测试只引用，不复制不切片）
+// SSOT constants (assembly layer / tests reference only; no copying or slicing)
 // ---------------------------------------------------------------------------
 
-/** `## Git` 段小标题（与 `projectPathSegment` / `coordinatorSegment` 同形态）。 */
+/** `## Git` segment heading (same shape as `projectPathSegment` / `coordinatorSegment`). */
 export const GIT_SEGMENT_TITLE = "## Git";
 
-/** D1 免责句（spec §9）：明示快照语义，模型不应把它当成实时状态。 */
+/** Disclaimer: states snapshot semantics explicitly — the model must not
+ *  treat it as live state. */
 export const GIT_SEGMENT_DISCLAIMER =
   "snapshot taken at session start; not refreshed during the session";
 
 /**
- * status 截断 codepoint 上限（spec §9 用 `truncateByCodepoints`，未锁数字）。
- * 2000 与 `MAX_ENV_DIFF_CHARS` 同档：典型 git status（含 porcelain v1 + dirty
- * 列表）远低于此值；超限只见于有大量 untracked / modified 的工作树，marker
- * 仍计入预算。装配总预算不受影响（status 是 git 块唯一可截断的字段）。
+ * Codepoint cap for status truncation (`truncateByCodepoints`; the number
+ * itself is not locked). 2000 sits at the same tier as `MAX_ENV_DIFF_CHARS`:
+ * a typical git status (porcelain v1 + dirty list) is far below it; only
+ * worktrees with many untracked/modified files exceed it, and the marker still
+ * counts against the budget. The overall assembly budget is unaffected
+ * (status is the only truncatable field in the git block).
  */
 export const GIT_STATUS_MAX_CHARS = 2000;
 
-/** status 之外其它字段的 codepoint 上限（兜底分支名 / commit 行过长场景）。 */
+/** Codepoint caps for fields other than status (fallback for over-long branch
+ *  names / commit lines). */
 export const GIT_FIELD_MAX_CHARS = 200;
 
-/** git 命令执行超时（秒）。快照取一次，开销可控；超过此值 → git_unavailable。 */
+/** git command execution timeout (seconds). The snapshot is taken once, so
+ *  cost is controlled; exceeding this → git_unavailable. */
 const DEFAULT_GIT_TIMEOUT_SECONDS = 5;
 
 // ---------------------------------------------------------------------------
-// 公共类型
+// Public types
 // ---------------------------------------------------------------------------
 
-/** 一次冻结的 git 快照。退化态不产出本对象（provider 返回 undefined →
- *  装配段整体缺席），因此没有 degradeReason 字段。 */
+/** One frozen git snapshot. Degraded states produce no object (the provider
+ *  returns undefined → the whole assembly segment is absent), hence there is
+ *  no degradeReason field. */
 export interface GitSnapshot {
-  /** 当前分支名；detached HEAD 时为 "HEAD"；退化态 → null。 */
+  /** Current branch name; "HEAD" when detached; degraded → null. */
   readonly branch: string | null;
-  /** PR 基线分支（origin/HEAD 派生的上游分支）；无 origin / 离线 → null。 */
+  /** PR base branch (upstream derived from origin/HEAD); no origin / offline → null. */
   readonly mainBranch: string | null;
-  /** `git status --porcelain=v1 -b` 文本（剥离 `## ...` 行），已按 codepoint
-   *  截断；clean 工作区 → ""；退化态 → null。 */
+  /** `git status --porcelain=v1 -b` text (with the `## ...` line stripped),
+   *  truncated by codepoints; clean worktree → ""; degraded → null. */
   readonly status: string | null;
-  /** 最近 5 条 commit（`git log --oneline -5` 拆行）；退化 → []。 */
+  /** Last 5 commits (`git log --oneline -5` split by line); degraded → []. */
   readonly recentCommits: ReadonlyArray<string>;
 }
 
-/** spawn 注入缝（测试可替换；默认走 node:child_process.spawnSync）。 */
+/** Spawn seam (replaceable in tests; default uses node:child_process.spawnSync). */
 export type GitExec = (
   args: readonly string[],
   cwd: string,
   timeoutSeconds?: number
 ) => SpawnSyncReturns<string>;
 
-/** `createGitSnapshotProvider` 的入参。 */
+/** Options for `createGitSnapshotProvider`. */
 export interface CreateGitSnapshotProviderOpts {
-  /** cwd 来源：build-engine 传 `projectIdentityRoot`（稳定根），worker
-   *  传父会话同值；未传 → 退化 cwd_unavailable。 */
+  /** cwd source: build-engine passes `projectIdentityRoot` (the stable
+   *  root); the worker passes the same value as the parent session;
+   *  missing → degraded cwd_unavailable. */
   readonly cwd: string;
-  /** 测试可注入 exec；缺省走 spawnSync。 */
+  /** Tests may inject exec; defaults to spawnSync. */
   readonly exec?: GitExec;
-  /** 单次 git 命令超时（秒）；缺省 = 5。 */
+  /** Per-git-command timeout (seconds); default = 5. */
   readonly timeoutSeconds?: number;
 }
 
 // ---------------------------------------------------------------------------
-// 默认 exec（spawnSync git）
+// Default exec (spawnSync git)
 // ---------------------------------------------------------------------------
 
 function defaultExec(
@@ -109,15 +122,16 @@ function defaultExec(
 }
 
 // ---------------------------------------------------------------------------
-// 退化判定（与 env-snapshot.ts 同词汇表,退化即 undefined —— 本模块不再
-// 透出 EnvDegradeReason 分型,分型细节由 env-snapshot.ts 自身负责）
+// Degradation handling (same vocabulary as env-snapshot.ts: degradation
+// collapses to undefined — this module no longer exposes the
+// EnvDegradeReason taxonomy; env-snapshot.ts owns those details)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 纯计算（无 IO）
+// Pure computation (no IO)
 // ---------------------------------------------------------------------------
 
-/** 取 `git status --porcelain=v1 -b` 第一行分支名（detached → "HEAD"）。 */
+/** Branch name from the first line of `git status --porcelain=v1 -b` (detached → "HEAD"). */
 function parseBranchFromStatus(porcelain: string): string | null {
   for (const line of porcelain.split("\n")) {
     if (!line.startsWith("## ")) continue;
@@ -130,7 +144,7 @@ function parseBranchFromStatus(porcelain: string): string | null {
   return null;
 }
 
-/** 剥离 porcelain v1 文本的 `## ...` 注解行，得到干净的 dirty 列表。 */
+/** Strip the `## ...` annotation lines from porcelain v1 text to get a clean dirty list. */
 function cleanStatusBlock(porcelain: string): string {
   return porcelain
     .split("\n")
@@ -140,20 +154,22 @@ function cleanStatusBlock(porcelain: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Provider 工厂
+// Provider factory
 // ---------------------------------------------------------------------------
 
 /**
- * 工厂：返回闭包。闭包在工厂调用时**同步取一次** git 快照、冻结在闭包里；
- * 装配层每 turn 调同一闭包 → 相邻两轮 byte-identical
- * （D9 / spec §2 断言 ②）。
+ * Factory returning a closure. The closure takes the git snapshot once,
+ * synchronously, at factory time and freezes it; the assembly layer calls the
+ * same closure every turn → adjacent turns are byte-identical.
  *
- * 退化路径：
- *   - cwd 空串 → 立即退化，**不 spawn** git。
- *   - spawn 同步失败（ENOENT / EACCES）/ 超时 / 退码非 0 → 闭包返回
- *     undefined（退化即 undefined，分型不透出）。
+ * Degraded paths:
+ *   - empty cwd → immediate degradation, git is **not** spawned.
+ *   - synchronous spawn failure (ENOENT / EACCES) / timeout / non-zero exit →
+ *     the closure returns undefined (degradation collapses to undefined; no
+ *     taxonomy is exposed).
  *
- * 一旦冻结（无论成功 / 退化），闭包永远返回同一值；不重试、不 IO。
+ * Once frozen (success or degraded), the closure always returns the same
+ * value; no retries, no IO.
  */
 export function createGitSnapshotProvider(
   opts: CreateGitSnapshotProviderOpts
@@ -168,7 +184,7 @@ export function createGitSnapshotProvider(
   return (): GitSnapshot | undefined => snapshot;
 }
 
-/** 一次 IO 快照采集（同步）。失败 / 退化返回 undefined。 */
+/** One synchronous IO snapshot capture. Failure / degradation → undefined. */
 function captureSnapshot(args: {
   readonly cwd: string;
   readonly exec: GitExec;
@@ -177,8 +193,8 @@ function captureSnapshot(args: {
   const { cwd, exec, timeoutSeconds } = args;
   if (cwd.trim() === "") return undefined;
 
-  // 1) status（含 branch 注解行）—— 任一 spawn 失败 → 整体退化
-  // （退化即 undefined,分型不透出）。
+  // 1) status (includes the branch annotation line) — any spawn failure
+  // degrades the whole snapshot (degradation = undefined, no taxonomy).
   const statusResult = exec(
     ["--no-pager", "status", "--porcelain=v1", "-b"],
     cwd,
@@ -191,7 +207,8 @@ function captureSnapshot(args: {
   const branch = parseBranchFromStatus(porcelain);
   const statusBody = cleanStatusBlock(porcelain);
 
-  // 2) mainBranch（origin/HEAD）—— 软失败，无 origin / 离线 → null，不整体退化。
+  // 2) mainBranch (origin/HEAD) — soft failure: no origin / offline → null,
+  // no whole-snapshot degradation.
   let mainBranch: string | null = null;
   const mainResult = exec(
     ["--no-pager", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -203,7 +220,7 @@ function captureSnapshot(args: {
     mainBranch = trimmed === "" ? null : trimmed;
   }
 
-  // 3) recent commits —— 软失败 → 空数组。
+  // 3) recent commits — soft failure → empty array.
   let recentCommits: ReadonlyArray<string> = [];
   const logResult = exec(
     ["--no-pager", "log", "--oneline", "-5"],
@@ -230,19 +247,21 @@ function captureSnapshot(args: {
 }
 
 // ---------------------------------------------------------------------------
-// 段渲染（纯函数，assemble.ts 调用；与 projectPathSegment 同形态）
+// Segment rendering (pure function, called by assemble.ts; same shape as
+// projectPathSegment)
 // ---------------------------------------------------------------------------
 
 /**
- * 渲染 `## Git` 段：四要素 + D1 免责句。
+ * Render the `## Git` segment: four fields + disclaimer.
  *
- * - snapshot === undefined → undefined（装配层不追加段，字节级零变化；
- *   退化态在 provider 侧已收敛为 undefined,本函数不再二次判退化）。
- * - 否则：标题 + 四要素 + 免责句。
+ * - snapshot === undefined → undefined (the assembly layer appends nothing,
+ *   byte-identical; degradation is already collapsed to undefined on the
+ *   provider side, so this function does not re-check).
+ * - otherwise: title + four fields + disclaimer.
  *
- * 字段缺席（branch / mainBranch === null）渲染占位 "—"；clean status
- * 渲染占位 "(clean)"；recentCommits 空渲染占位 "(none)"。test 断言引用
- * SSOT 常量。
+ * Absent fields (branch / mainBranch === null) render the placeholder "—";
+ * clean status renders "(clean)"; empty recentCommits renders "(none)".
+ * Tests assert against the SSOT constants.
  */
 export function gitSnapshotSegment(
   snapshot: GitSnapshot | undefined

@@ -1,9 +1,10 @@
 /**
- * flag 解析 / 校验（SC12 第一职责；契约 D2–D5）。
+ * Flag parsing / validation.
  *
- * 与 handler 分开：本模块只做「unknown → 规范化 QuerySpec」+ typed 拒绝，
- * 不碰 fs、不碰进程、不拼 argv。schema 之外的第二道防线（schema 缺席 /
- * 直呼工具时仍 fail-closed）。
+ * Separate from the handler: this module only does "unknown → normalized
+ * QuerySpec" plus typed rejection — no fs, no processes, no argv building. It
+ * is the second line of defense beyond the schema (fail-closed even when the
+ * schema is absent or the tool is called directly).
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -11,31 +12,34 @@ import { assertValidGlob } from "./glob-match.js";
 import { resolveTypeName } from "./type-table.js";
 import type { GrepOutput, QuerySpec } from "./types.js";
 
-/** D3：默认 50、硬顶 2000（ADR-0006 Amendment）。 */
+/** Default 50, hard cap 2000 (ADR-0006). */
 export const DEFAULT_HEAD_LIMIT = 50;
 export const MAX_HEAD_LIMIT = 2000;
 
-/** D5：`also` 在场时行窗默认半径。 */
+/** Default line-window radius when `also` is present. */
 export const DEFAULT_WITHIN_LINES = 5;
 
-/** `context` 硬顶：与单行截断同量级，防止一次请求把上下文撑爆。 */
+/** Hard cap for `context`: same order as the single-line truncation, so one request cannot blow up the context. */
 export const MAX_CONTEXT = 50;
 
 const OUTPUTS: ReadonlyArray<GrepOutput> = ["paths", "content", "count"];
 
 /**
- * 入参别名（D2）：只换标签，搜法仍是目标出法。schema 枚举接受别名，
- * `readOutput` 在进引擎前归一 —— `QuerySpec.output` 因此永远只有三种取值，
- * 别名不会成为第四种出法（SC1）。
+ * Input aliases: the label changes, the search behavior stays the target
+ * mode. The schema enum accepts aliases, and `readOutput` normalizes before
+ * entering the engine — so `QuerySpec.output` always has exactly three values
+ * and an alias never becomes a fourth mode.
  */
 const OUTPUT_ALIASES: ReadonlyMap<string, GrepOutput> = new Map([
   ["files_with_matches", "paths"],
 ]);
 
 /**
- * 模型可传的 `output` 值全集（真实出法 + 别名）。SSOT：失败文案与 schema 的
- * `enum` 都从这里派生（`grep.ts` 引用它）—— 两处各自手写会让「别名只加进
- * 归一表、schema 忘加」在 ajv 处静默复现（别名到不了 `readOutput`）。
+ * Full set of `output` values a model may pass (real modes + aliases). SSOT:
+ * the failure text and the schema's `enum` both derive from here (`grep.ts`
+ * references it) — handwriting the two places would silently reintroduce
+ * "alias added to the normalization table but forgotten in the schema" (the
+ * alias would never reach `readOutput`).
  */
 export const GREP_OUTPUT_VALUES: ReadonlyArray<string> = [
   ...OUTPUTS,
@@ -43,10 +47,11 @@ export const GREP_OUTPUT_VALUES: ReadonlyArray<string> = [
 ];
 
 /**
- * 把 handler input 解析为 QuerySpec。
+ * Parse handler input into a QuerySpec.
  *
- * 非法输入一律 typed 拒绝（SC10 的两种 typed 错误之一：**输入**类）。
- * 坏正则与未知 `type` 在各自的编译器里另报（不可混为一种）。
+ * Illegal input is uniformly typed-rejected (the **input** class of the two
+ * typed error kinds). Bad regex and unknown `type` report separately in their
+ * own compilers (do not merge them into one kind).
  */
 export function parseQuerySpec(input: unknown): QuerySpec {
   if (input === null || typeof input !== "object") {
@@ -56,15 +61,20 @@ export function parseQuerySpec(input: unknown): QuerySpec {
   const pattern = readNonEmptyString(raw.pattern, "pattern");
   const also = readOptionalNonEmptyString(raw.also, "also");
   const glob = readOptionalNonEmptyString(raw.glob, "glob");
-  // 坏 glob 必须在入口就挡下（不是只在 Node 引擎里当字面量）：rg 对它是
-  // rc=2 整次失败，两条引擎的成败不能取决于谁在跑（SC9）。
+  // A bad glob must be blocked at the entry (not treated as a literal only
+  // inside the Node engine): rg fails the whole run with rc=2 on it, and
+  // success/failure must not depend on which engine is running.
   if (glob !== undefined) assertValidGlob(glob);
-  // 未知 `type` 同样必须在入口挡下 —— 但理由与坏 glob 不同：rg 自己的
-  // `--type` 校验只在 argv 构造里跑，而 argv 只在**自带引擎在场**时才被走到。
-  // 若把校验留在那一层，`{pattern,type:"nosuchtype"}` 在安装根缺二进制
-  // （D6 降级）或该平台无资产时会静默回空串，而不是 SC10 要求的 typed 错误
-  // —— 同一个输入的错误与否取决于哪条引擎在跑。校验提到解析层后，两条引擎
-  // 共用同一个失败域（`resolveTypeName` 是唯一文案源）。
+  // Unknown `type` must likewise be blocked at the entry — but for a different
+  // reason than bad globs: rg's own `--type` validation only runs inside argv
+  // construction, and argv is only reached **when the bundled engine is
+  // present**. Leaving validation in that layer would make
+  // `{pattern,type:"nosuchtype"}` silently return an empty string when the
+  // install root lacks the binary (the downgrade path) or the platform has no
+  // asset, instead of the required typed error — whether the same input errors
+  // would depend on which engine runs. Hoisting validation to the parsing
+  // layer gives both engines one failure domain (`resolveTypeName` is the
+  // single text source).
   const type = readOptionalNonEmptyString(raw.type, "type");
   if (type !== undefined) resolveTypeName(type);
   const output = readOutput(raw.output);
@@ -110,12 +120,15 @@ export function parseQuerySpec(input: unknown): QuerySpec {
 }
 
 /**
- * 退役名 `limit` / `grep_limit`：出现即 typed 拒绝，把旧名误导挡在入口（D3）。
+ * Retired names `limit` / `grep_limit`: their presence is typed-rejected,
+ * blocking old-name confusion at the entry.
  *
- * 两个名字都要拦：契约写的是「不叫 `limit`，**不叫 `grep_limit`**」，
- * schema 的 `additionalProperties: false` 只保证新装配不认它，直呼工具 / 旧
- * 装配仍可能带进来 —— 只拦 `limit` 会让 `grep_limit` 静默失效（模型以为
- * 自己限了条数，实际拿到默认 50 条）。
+ * Both names must be blocked: the contract says "not `limit`, **not
+ * `grep_limit`**", and the schema's `additionalProperties: false` only
+ * guarantees new assemblies reject them — direct tool calls / old assemblies
+ * may still pass them. Blocking only `limit` would let `grep_limit` fail
+ * silently (the model believes it capped the count but actually gets the
+ * default 50).
  */
 export function rejectRetiredLimitField(input: unknown): void {
   if (input === null || typeof input !== "object") return;
@@ -127,7 +140,7 @@ export function rejectRetiredLimitField(input: unknown): void {
   );
 }
 
-/** 退役的条数字段名（D3；文案里点名 head_limit，见上）。 */
+/** Retired count-field names (the error text names head_limit, see above). */
 const RETIRED_LIMIT_FIELDS: ReadonlyArray<string> = ["limit", "grep_limit"];
 
 function readNonEmptyString(value: unknown, name: string): string {
@@ -157,7 +170,7 @@ function readOutput(value: unknown): GrepOutput {
   );
 }
 
-/** 整数 flag 的界（一个 flag 一份；比 5 个位置参数更难写反）。 */
+/** Bounds for an integer flag (one spec per flag; harder to transpose than 5 positional params). */
 interface BoundedIntegerSpec {
   readonly name: string;
   readonly min: number;
@@ -165,7 +178,7 @@ interface BoundedIntegerSpec {
   readonly fallback: number;
 }
 
-/** 读一个非负整数 flag：缺席取 fallback，非整数 / 越下界 typed 拒绝，上界夹住。 */
+/** Read a non-negative integer flag: absent → fallback; non-integer / below min → typed rejection; above max → clamp. */
 function readBoundedInteger(value: unknown, spec: BoundedIntegerSpec): number {
   if (value === undefined) return spec.fallback;
   if (

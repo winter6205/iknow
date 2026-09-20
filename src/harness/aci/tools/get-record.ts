@@ -5,17 +5,18 @@
  * addressing, part inventory, window slicing, and response serialization are
  * shared with the MCP transport through src/traceserver.
  *
- * spec SC20 counts the kinds this face can raise: `validation`, `record_scan`,
- * `record_not_found`, `window_overflow`, `session_not_found`, plus the reader's
- * `io_error`. Each one is translated on its own arm — a fall-through would turn
- * a typed refusal into the executor's generic "tool execution failed". Kinds
- * that carry facts the caller needs to re-aim its next call (an out-of-range
- * coordinate's real size, a `part_chars` budget) keep them as fields; the two
- * kinds whose facts are already in the message reuse `ToolExecutionError`, the
- * same ruling `query_trace` and `list_sessions` made for them.
+ * The spec enumerates the kinds this face can raise: `validation`,
+ * `record_scan`, `record_not_found`, `window_overflow`, `session_not_found`,
+ * plus the reader's `io_error`. Each one is translated on its own arm — a
+ * fall-through would turn a typed refusal into the executor's generic "tool
+ * execution failed". Kinds that carry facts the caller needs to re-aim its
+ * next call (an out-of-range coordinate's real size, a `part_chars` budget)
+ * keep them as fields; the two kinds whose facts are already in the message
+ * reuse `ToolExecutionError`, the same ruling `query_trace` and
+ * `list_sessions` made for them.
  *
- * The shared core names no tool in its messages, so this face prefixes its own
- * name on every error it translates (spec SC16).
+ * The shared core names no tool in its messages, so this face prefixes its
+ * own name on every error it translates.
  */
 import { ToolExecutionError } from "../../errors.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -45,7 +46,7 @@ export class GetRecordValidationError extends ToolExecutionError {
   }
 }
 
-/** 扫到上限仍未命中：与「扫完了，没有」是两种主张，调用方下一步不同。 */
+/** Scan limit hit without a match: a different claim from "scanned everything, none found" — the caller's next step differs. */
 export class GetRecordScanError extends ToolExecutionError {
   readonly kind = "record_scan" as const;
   readonly recordId: string;
@@ -79,8 +80,10 @@ export class GetRecordSessionNotFoundError extends ToolExecutionError {
 }
 
 /**
- * 窗越出 part 末尾。带上 `part_chars` 与 `remaining`：本 kind 的全部用处就是让
- * 调用方一次算出末页坐标，缺了这两个字段它就退化成一条需要重读文档的错误。
+ * Window runs past the part end. Carries `part_chars` and `remaining`: the
+ * whole point of this kind is letting the caller compute the last-page
+ * coordinates in one shot; without these two fields it degenerates into an
+ * error that requires re-reading the docs.
  */
 export class GetRecordWindowOverflowError extends ToolExecutionError {
   readonly kind = "window_overflow" as const;
@@ -137,8 +140,9 @@ export function createGetRecordTool(
         );
       }
       if (error instanceof TraceReadError) {
-        // 读文件失败不是参数问题，所以不带 field；消息只含 errno code
-        // （wrapIoError 刻意不泄漏 fs 细节），前缀仍是本工具名。
+        // A read failure is not a parameter problem, so no field is
+        // attached; the message carries only the errno code (wrapIoError
+        // deliberately hides fs details); the prefix is still this tool's name.
         throw new ToolExecutionError(`${TOOL_NAME}: ${error.message}`);
       }
       throw error;
@@ -151,7 +155,8 @@ export function createGetRecordTool(
     inputSchema: {
       type: "object",
       properties: {
-        // 必填：本面没有「缺省=最近活跃会话」，见 Assumption 4。
+        // Required: this face has no "default = most recently active
+        // session" behavior (see the trace-tools assumption).
         conversation_id: { type: "string" },
         record_id: { type: "string" },
         detail: {
@@ -178,8 +183,8 @@ export function createGetRecordTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
-      // B6 / ADR-0043 §3:trace 读侧内容轴(schema 面积通常最小),退场
-      // 次序第三位。
+      // ADR-0043 puts it third in the deferral order (trace read side,
+      // content axis; usually the smallest schema surface).
       deferrable: true,
     },
   });

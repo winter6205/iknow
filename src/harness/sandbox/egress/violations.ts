@@ -1,66 +1,79 @@
 /**
  * src/harness/sandbox/egress/violations.ts
  *
- * T4 egress 违例记录器（specs/network-egress-allowlist.md §Violation feedback
- * channel 的第 1 跳「记录」）。
+ * Egress violation recorder — the "record" hop of the violation feedback
+ * channel.
  *
- * 单一职责：在 egress proxy 的 filter 回调返回 false 时记录结构化违例；
- * 提供 session 收尾 drain 接口。T5 / T6 接 bash handler 做「回灌」——
- * 把违例文案追加到 tool_result 的 stderr 或 typed failure。
+ * Single responsibility: record structured violations when the egress proxy
+ * filter callback returns false, and provide the session-end drain interface.
+ * The bash handler consumes this for feed-back — appending violation text to
+ * the tool_result stderr or a typed failure.
  *
- * 选型说明：typed record（`kind` 判别联合）+ plain class 持有 + readonly 字段。
- * 与既有 ToolExecutionError / McpLifecycleError 的「kind + message + context」
- * 同形态：调用方 catch 后必须先判 kind 再渲染（code-quality.md typed-error
- * catch 契约），禁止 `err instanceof Error ? err.message : String(err)`。
+ * Shape choice: typed records (`kind`-discriminated union) held by a plain
+ * class with readonly fields — same shape as ToolExecutionError /
+ * McpLifecycleError: catchers must branch on `kind` before rendering
+ * (typed-error catch contract); `err instanceof Error ? err.message :
+ * String(err)` is forbidden.
  *
- * 理由（why 这里单立件，不与 policy.ts / bash.ts 混）：
- *   - 域判定拒绝是**边界表态**，与命令执行结果正交，独立承载更清爽；
- *   - spec「失败留痕」要求每条违例带 `command` 字段，bash 装配期注入；
- *   - session 与 drain 的对应：单个 session 一次性 drain，结束后清空。
+ * Why a standalone piece (not folded into policy.ts / bash.ts):
+ *   - domain-decision denial is a **boundary statement**, orthogonal to the
+ *     command execution result; standalone containment is cleaner;
+ *   - every violation must carry a `command` field, injected at bash assembly
+ *     time (failure-trace requirement);
+ *   - session/drain pairing: one drain per session, buffer cleared after.
  */
 
 import { VIOLATION_PREFIXES } from "../../permission/prefixes.js";
 
 /**
- * 允许集来源 —— 装配面注入的封闭三档（spec egress-preset-allowlist T2 /
- * invariant 4，全链一次改齐、不留旧值别名）：
- *   - "builtin"   = ADR-0104 代码承载预放行档（assembly 段缺席路径）；
- *   - "persisted" = 用户持久化 settings 增量并入档（assembly 段在场路径）；
- *   - "session"   = 会话级批准放行（bash 工厂包装层 fallback）。
- * 缺省 = 不注明来源（不伪造三档之一）。仅作观测面，不参与判定。
+ * Allowlist provenance — the closed three-tier value injected by the
+ * assembly surface (the whole chain migrated at once, no legacy aliases):
+ *   - "builtin"   = code-borne pre-allow tier (assembly path with the
+ *
+ // (ADR-0104)
+ *     settings section absent);
+ *   - "persisted" = user-persisted settings merged as an increment
+ *     (assembly path with the section present);
+ *   - "session"   = session-level approval (bash factory wrapper fallback).
+ * Default = provenance unstated (do not fabricate one of the three tiers).
+ * Observation surface only; never part of the decision.
  */
 export type EgressAllowlistSource = "builtin" | "session" | "persisted";
 
 export type EgressViolationReason =
-  /** CONNECT host 未命中允许集（denied 集或 pattern 也算这里 → 重定向）。 */
+  /** CONNECT host missed the allowlist (a denied-set/pattern hit is handled separately). */
   | "not-in-allowlist"
-  /** CONNECT host 命中 denied 集 / denied pattern（deny 优先）。 */
+  /** CONNECT host hit the denied set / denied pattern (deny wins). */
   | "denied"
-  /** 允许集为空（fail-closed 起步）。 */
+  /** Empty allowlist (fail-closed start). */
   | "allowlist-empty"
-  /** 允许集条目形态非法（`:65536` 等）。 */
+  /** Malformed allowlist entries (`:65536` etc.). */
   | "allowlist-malformed"
-  /** 地址守卫拒绝（解析后落在 loopback / 私网 / metadata 等）。 */
+  /** Address guard denial (resolved into loopback / private / metadata etc.). */
   | "address-denied"
-  /** 非交互入口首见新域名，且未提供 askApproval inlet。 */
+  /** First-seen domain at a non-interactive entry with no askApproval inlet. */
   | "no-approval-inlet"
-  /** 用户在交互入口明确拒绝批准该域名 —— 与 no-approval-inlet 区分(spec
-   *  §三类信号可区分纪律:infra / 用户拒 / 未配置三类信号修复动作不同)。 */
+  /** User explicitly denied approval at the interactive entry — kept distinct
+   *  from no-approval-inlet: the three signal classes (infra / user-denied /
+   *  unconfigured) require different fixes. */
   | "denied-by-user"
-  /** 基础设施故障（代理 / 中继依赖缺席）—— 非域判定拒绝 */
+  /** Infrastructure fault (proxy / relay dependency missing) — not a domain decision */
   | "infra-unavailable"
   /**
-   * egress-credential-sentinel T3 / F5（旁路诊断档）：请求体带
-   * `Content-Encoding`，包内字节扫描看不穿压缩体 → 体代换跳过，假值原样
-   * 到上游（fail-safe 方向 = 401 可诊断，非泄露）。**不是**域判定拒绝，
-   * 不给 allowlist 修复指引。
+   * Bypass diagnostic tier: request body carries `Content-Encoding`, the
+   * package's byte scan cannot see through compressed bodies → body
+   * substitution is skipped and the fake value reaches upstream unchanged
+   * (fail-safe direction = auth fails with 401, diagnosable, not a leak).
+   * **Not** a domain decision; no allowlist fix guidance.
    */
   | "substitution-skipped"
   /**
-   * egress-credential-sentinel T3 / F6（旁路诊断档）：域名被
-   * `shouldTerminateTLS` 豁免（不终止 TLS → 代换必然无法运行）且该域上
-   * 存在配置了注入的凭据条目（`namesInjectableAt` 非空）。豁免本身不是
-   * 违例；「豁免 ∧ 有可注入凭据 = 该域凭据不可用」才是本痕要说的。
+   * Bypass diagnostic tier: the domain is exempted by `shouldTerminateTLS`
+   * (no TLS termination → substitution necessarily cannot run) AND a
+   * credential entry with injection configured exists for that host
+   * (`namesInjectableAt` non-empty). The exemption itself is not a
+   * violation; what this trace says is "exemption ∧ injectable credentials =
+   * those credentials are unusable at this host".
    */
   | "tls-exempt-injectable";
 
@@ -70,40 +83,47 @@ export interface EgressViolation {
   readonly port: number;
   readonly reason: EgressViolationReason;
   /**
-   * 命令上下文（spawn 的原始命令文本或具名入口）。**仅作观测** —— 不参与
-   * 判定，不入 host 字段（避免命令字符串污染域名日志）。
+   * Command context (the spawned raw command text or named entry). **For
+   * observation only** — never part of the decision and never folded into the
+   * host field (so command strings cannot pollute domain logs).
    */
   readonly command: string;
 }
 
 export interface EgressViolationSink {
-  /** filter 回调里调用一次；纯 append，零异步。 */
+  /** Called once per filter callback; pure append, zero async. */
   record(v: EgressViolation): void;
   /**
-   * session 收尾 drain —— 调用方（bash handler）拿走后清空容器。
-   * 返回的快照只读；二次 drain 返回空数组。
+   * Session-end drain — the caller (bash handler) takes the snapshot and the
+   * container is cleared. The returned snapshot is readonly; a second drain
+   * returns an empty array.
    */
   drain(): readonly EgressViolation[];
   /**
-   * 当前已记录条数（测试 / 诊断用）。
+   * Current recorded count (tests / diagnostics).
    */
   size(): number;
 }
 
 /**
- * 工厂 —— 单 session 持有违例数组；`drain()` 出快照后清空（slice 不共享
- * 引用，避免后续 record 干扰已 drain 的副本）。
+ * Factory — one session holds the violation array; `drain()` snapshots then
+ * clears (slice shares no reference, so later records cannot disturb an
+ * already-drained copy).
  *
- * 非并发件：本仓 egress 域内不假设多线程访问 filter；node 单线程事件循环
- * 下 append / drain 顺序即可。生产场景下「同一 session 并发多个请求」由
- * 上游代理进程串行化（HTTP server 端）。
+ * Not a concurrency primitive: within this repo's egress domain the filter is
+ * not assumed to be hit from multiple threads; under Node's single-threaded
+ * event loop, append/drain ordering suffices. In production, "concurrent
+ * requests in one session" are serialized by the upstream proxy process (the
+ * HTTP server side).
  */
 export function createEgressViolationSink(): EgressViolationSink {
   let buffer: EgressViolation[] = [];
   return Object.freeze({
     record(v: EgressViolation) {
-      // 防御性：host 空串 / port 非数字 → 不入缓冲（防 log 注入与下游
-      // 假设破灭）。调用方应已在判定层把空 host 拦掉，此处兜底。
+      // Defensive: empty host / non-numeric port → not buffered (guards
+      // against log injection and broken downstream assumptions). Callers
+      // should already reject empty hosts at the decision layer; this is the
+      // backstop.
       if (typeof v.host !== "string" || v.host.length === 0) return;
       if (!Number.isInteger(v.port) || v.port < 0) return;
       buffer.push(Object.freeze({ ...v }));
@@ -120,20 +140,26 @@ export function createEgressViolationSink(): EgressViolationSink {
 }
 
 /**
- * 把违例快照翻译成人类可读的多行文本（每条一行；尾部换行可选）。
+ * Render a violation snapshot as human-readable multiline text (one line per
+ * violation; trailing newline optional).
  *
- * - not-in-allowlist：含被拒域名 + 建议配置键。
- * - denied：含被拒域名 + 命中 denied 规则字面量。
- * - allowlist-empty：含当前 allowedDomains 来源缺失事实。
- * - allowlist-malformed：含非法形态条目（命令级表述）。
- * - address-denied：含被拒域名 + 解析到的地址 + 命中档（loopback / 私网 等）。
- * - no-approval-inlet：含被拒域名 + 非交互入口事实。
- * - denied-by-user：含被拒域名 + 用户明确拒绝事实 + 配置键指引。
- * - infra-unavailable：基础设施故障 —— **不得**与域判定拒绝混排同一段
- *   （修复动作完全不同：infra = 修产品依赖 / 换装自带中继；域 = 改配置）。
- *   本函数只负责逐行渲染；infra/域混排拒绝逻辑在 `renderEgressFailureMessage`。
+ * - not-in-allowlist: denied domain + suggested config key.
+ * - denied: denied domain + matched deny rule literal.
+ * - allowlist-empty: the fact that no allowedDomains source is present.
+ * - allowlist-malformed: malformed entries (command-level phrasing).
+ * - address-denied: denied domain + resolved address + matched tier (loopback
+ *   / private etc.).
+ * - no-approval-inlet: denied domain + non-interactive-entry fact.
+ * - denied-by-user: denied domain + explicit user denial fact + config key
+ *   guidance.
+ * - infra-unavailable: infrastructure fault — must **never** be merged into
+ *   the same segment as domain denials (fixes differ completely: infra =
+ *   repair the product dependency / bundled relay; domain = change config).
+ *   This function only renders line by line; the infra/domain segregation
+ *   logic lives in `renderEgressFailureMessage`.
  *
- * 故意不渲染 secret / token / 命令全文 —— 命令截断到 80 字符。
+ * Deliberately never renders secrets / tokens / full command text — commands
+ * truncate to 80 chars.
  */
 export function renderEgressViolations(
   violations: readonly EgressViolation[]
@@ -147,13 +173,14 @@ export function renderEgressViolations(
 }
 
 /**
- * T3 旁路诊断档（credential-sentinel F5/F6）：与域判定拒绝 / infra 故障
- * 分前缀（`[egress_diagnostic]`），四类信号互不混淆 —— 修复动作是
- * 「让体可扫描 / 复核豁免名单」，与 allowlist 无关。
+ * Bypass diagnostic tier: separated from domain denials and infra faults by
+ * prefix (`[egress_diagnostic]`) so the four signal classes never mix — the
+ * fix here is "make the body scannable / review the exemption list", nothing
+ * to do with the allowlist.
  */
 type EgressDiagnosticReason = "substitution-skipped" | "tls-exempt-injectable";
 
-/** 判定 / infra 档 reason（诊断档之外全集，穷尽性由编译器保证）。 */
+/** Domain-decision / infra reasons (everything but diagnostics; exhaustiveness is compiler-enforced). */
 type EgressDomainReason = Exclude<
   EgressViolationReason,
   EgressDiagnosticReason
@@ -173,7 +200,8 @@ function renderSingleViolation(v: EgressViolation): string {
   const cmd =
     v.command.length > 80 ? `${v.command.slice(0, 77)}...` : v.command;
   const target = `${v.host}:${v.port}`;
-  // default 分支里 TS 把 reason 收窄为诊断档之外的全集（穷尽性编译器钉）。
+  // In the default branch TS narrows reason to the full set minus the
+  // diagnostic tiers (exhaustiveness pinned by the compiler).
   switch (v.reason) {
     case "substitution-skipped":
     case "tls-exempt-injectable":
@@ -209,19 +237,21 @@ function renderDomainViolation(
 }
 
 /**
- * 是否归类为「基础设施故障」—— 与域判定拒绝区分（spec §三类信号 + §Failure
- * paths）：infra = 修运行时 / 换装自带中继，**不得**给配置键指引；域判定
- * 拒绝 = 改配置 / 走交互批准入口。
+ * Whether a violation is classified as an "infrastructure fault" — kept
+ * distinct from domain denials: infra = repair the runtime / the bundled
+ * relay, and it must **never** receive config-key guidance; domain denial =
+ * change config / use the interactive approval entry.
  */
 function isInfraViolation(v: EgressViolation): boolean {
   return v.reason === "infra-unavailable";
 }
 
 /**
- * shared remediation 尾注 —— 多违例合并时复用（不逐行重复）。两种语义分
- * 两份：域判定拒绝给配置键 + 批准入口；infra 给基础设施修复提示。
- *
- * 中文说明留给 caller 自己渲染：注释只解释「为什么分两段」—— 修动作不同。
+ * Shared remediation footers — reused when multiple violations merge (no
+ * per-line repetition). Two semantics, two texts: domain denials get the
+ * config key + approval entry; infra gets the infrastructure repair note.
+ * The comment only explains why there are two segments — the fix actions
+ * differ.
  */
 const REMEDIATION_DOMAIN = `Remediation: add the host to isolation.network.allowedDomains in user settings, or approve it interactively through the permission prompt; the command itself ran to completion inside the sandbox — exit code still reflects the command, not this denial.`;
 const REMEDIATION_INFRA = `Remediation: this is an infrastructure fault, not a domain decision — check the iknow-bundled egress relay (vendor/egress-relay assets + a Node >=20 runtime in the install root), not the allowlist; the command itself ran to completion inside the sandbox — exit code still reflects the command, not this denial.`;
@@ -232,23 +262,26 @@ const SOURCE_LABEL: Record<EgressAllowlistSource, string> = {
 };
 
 /**
- * T5 typed failure message —— 拼成一条同时含：
- *   - `[network_denied]` 前缀（让既有 `categorizeResult` 落到 mid tier，
- *     走通 violation-handling.ts:139 的 networkDenied → mid 分支，不改
- *     该文件）；
- *   - 每条违例一行（被拒域名 + 命中 reason 的可读短文案）；
- *   - 共享补配指引尾注（不逐行重复）；
- *   - 允许集来源（缺省 = 不标注，**不伪造**）；
- *   - 「命令已跑完但出网被拒」语义（避免模型误判为进程崩溃）。
+ * Typed failure message — assembled as one block containing:
+ *   - the `[network_denied]` prefix (so the existing `categorizeResult` lands
+ *     it in the mid tier, keeping the networkDenied → mid branch in
+ *     violation-handling.ts working without touching that file);
+ *   - one line per violation (denied domain + readable text for the matched reason);
+ *   - the shared remediation footer (not repeated per line);
+ *   - allowlist provenance (default = unannotated, **never fabricated**);
+ *   - the "command ran to completion but egress was denied" semantics (so the
+ *     model does not misread it as a process crash).
  *
- * infra / 域判定拒绝**绝不混排**同一段：两类信号修复动作完全不同（spec
- * §Failure paths + §三类信号），混排会让模型误读。纯 infra → 不列域名；
- * 纯域判定 → 不说「infra」。
+ * Infra / domain denials are **never merged** into one segment: the two
+ * signal classes need completely different fixes, and mixing would mislead
+ * the model. Pure infra → no domains listed; pure domain → never says "infra".
  *
- * `infraHint`：基础设施故障的可选修复片段（bash 装配层在自带中继依赖
- * 缺失等 typed-error 上注入，typed-error catch 契约 code-quality.md）。仅在
- * infra-only 路径插入一行（位于 REMEDIATION_INFRA 之前），让模型/TUI
- * 看见「是哪个二进制 + 怎么装」；缺省不插入（避免无信息时的重复说明）。
+ * `infraHint`: an optional repair snippet for infra faults (injected by the
+ * bash assembly layer onto typed errors such as the bundled relay's missing
+ * dependencies; per the typed-error catch contract). Inserted as one line
+ * only on the infra-only path (before REMEDIATION_INFRA) so the model/TUI can
+ * see "which binary + how to install"; not inserted by default (avoids
+ * boilerplate when there is no information).
  */
 export function renderEgressFailureMessage(args: {
   readonly violations: readonly EgressViolation[];
@@ -260,9 +293,10 @@ export function renderEgressFailureMessage(args: {
 
   const infraOnly = violations.every(isInfraViolation);
   const domainOnly = violations.every((v) => !isInfraViolation(v));
-  // 防御性：infra + 域判定混合（理论上 T4 filter 不可能产生；保留该
-  // 路径以应对未来 reason 集合扩展）。此时**只渲染域判定**部分，infra
-  // 文案单立一段 —— 避免「infra 是 domain allowlist 决定」误导。
+  // Defensive: infra + domain mix (theoretically impossible from the filter;
+  // kept for future reason-set expansion). Render only the domain portion in
+  // that case, with infra as its own segment — avoid implying "infra is a
+  // domain allowlist decision".
   const domainViolations = violations.filter((v) => !isInfraViolation(v));
   const infraViolations = violations.filter(isInfraViolation);
 
@@ -275,7 +309,8 @@ export function renderEgressFailureMessage(args: {
   } else if (infraOnly) {
     appendInfraPortion(lines, infraViolations, infraHint);
   } else {
-    // 混合：分两段（spec §三类信号可区分 + §Failure paths「infra ≠ 域判定拒绝」）。
+    // Mixed: two segments (the three signal classes must stay distinguishable;
+    // infra ≠ domain denial).
     lines.push("Domain-deny portion:");
     appendDomainPortion(lines, domainViolations, allowlistSource);
     lines.push("Infrastructure-fault portion:");
@@ -285,9 +320,10 @@ export function renderEgressFailureMessage(args: {
 }
 
 /**
- * 「域判定拒绝」段落拼接 —— 公用从 violations 列表渲染每条 + 共享
- * REMEDIATION_DOMAIN 尾注（不逐行重复）。抽出以控制
- * `renderEgressFailureMessage` 复杂度（S5 门）。
+ * Assemble the domain-denial segment — renders each violation from the list
+ * plus the shared REMEDIATION_DOMAIN footer (no per-line repetition).
+ * Extracted to keep `renderEgressFailureMessage` within the complexity lint
+ * gate.
  */
 function appendDomainPortion(
   lines: string[],
@@ -304,12 +340,14 @@ function appendDomainPortion(
 }
 
 /**
- * 「基础设施故障」段落拼接 —— 公用从 violations 列表渲染每条 + 可选
- * infraHint（typed-error catch 契约落地：EgressRelayUnavailableError
- * 携带的 detail + remediationHint 拼成;让模型/TUI 直接看到「缺哪个产品
- * 依赖 + 怎么修」(ADR-0107：非系统装包文案),
- * 不再让 typed-error 信息被 [object Object] 吞掉）+ REMEDIATION_INFRA
- * 尾注。抽出以控制 `renderEgressFailureMessage` 复杂度（S5 门）。
+ * Assemble the infrastructure-fault segment — renders each violation plus the
+ * optional infraHint (typed-error catch contract landing: the detail +
+ * remediationHint carried by EgressRelayUnavailableError, so the model/TUI
+ * directly sees "which product dependency is missing + how to fix it" — per
+ * ADR-0107 this names the bundled relay, not a system package — and typed-error
+ * information is no longer swallowed as [object Object]) + the
+ * REMEDIATION_INFRA footer. Extracted to keep `renderEgressFailureMessage`
+ * within the complexity lint gate.
  */
 function appendInfraPortion(
   lines: string[],
@@ -326,22 +364,27 @@ function appendInfraPortion(
 }
 
 /**
- * egress-ssh-bridge F4（specs/egress-ssh-bridge.md §Failure paths F4）——
- * ssh 类失败回灌文案面的「首次未见主机 key」指引行。
+ * The "first unknown host key" guidance line for ssh-class failure feed-back
+ * text.
  *
- * 背景：known_hosts 无条目时 ssh 要求确认指纹，fence 无 tty → 认证前失败
- * （`Host key verification failed.` / `The authenticity of host ... can't
- * be established.`）。指引 = spec 钉死两选一：宿主侧先 `ssh-keyscan` /
- * 交互登录确认一次，或围栏内显式 `-o UserKnownHostsFile=` 组合写法
- * （`GIT_SSH_COMMAND="$GIT_SSH_COMMAND ..."` 引用注入值，spec §T3 合并策
- * 略同款）。**不**默认注入 / 建议 `StrictHostKeyChecking=no` —— 削弱信任
- * 面非本 spec 授权（反向钉子钉死字样不回潮）。
+ * Background: with no known_hosts entry ssh asks to confirm the fingerprint,
+ * the fence has no tty → failure before authentication (`Host key verification
+ * failed.` / `The authenticity of host ... can't be established.`). Guidance =
+ * the pinned two options: pre-populate known_hosts on the host via
+ * `ssh-keyscan` / confirm once interactively, or pass an explicit
+ * `-o UserKnownHostsFile=` inside the sandbox using the combined form
+ * (`GIT_SSH_COMMAND="$GIT_SSH_COMMAND ..."` referencing the injected value,
+ * same merge strategy as the rest of the ssh wiring). We do **not** inject or
+ * suggest `StrictHostKeyChecking=no` by default — weakening the trust plane is
+ * out of scope, and a reverse assertion pins that wording away.
  *
- * 判定是**文案面观测**而非框架归因：F4 发生在命令层（隧道已通、ssh 自己
- * 拒），不产 egress 违例、不改 typed-failure 通道；仅当 egress 缝在场且
- * 命令非零退出且 stderr 命中已知 ssh host-key 形态时由 bash 装配层追加
- * 一行。纯函数（无 I/O），pattern 集可扩展，miss 形态 = undefined
- * （宁缺勿误报）。
+ * The detection is **text-surface observation**, not framework attribution: it
+ * happens at the command layer (tunnel already up, ssh itself refuses),
+ * produces no egress violation and does not touch the typed-failure channel;
+ * the bash assembly layer appends one line only when the egress seam is in
+ * play, the command exits non-zero, and stderr matches a known ssh host-key
+ * shape. Pure function (no I/O); the pattern set is extensible; a miss =
+ * undefined (better to say nothing than to misreport).
  */
 const SSH_HOST_KEY_PATTERNS: readonly RegExp[] = [
   /Host key verification failed/,

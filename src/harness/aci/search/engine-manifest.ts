@@ -1,34 +1,38 @@
 /**
- * 自带搜引擎清单（D6 / SC9）。
+ * Manifest for the bundled search engine.
  *
- * 契约：安装/发版按平台下载钉死版本 + 校验和，落到安装根；运行只 exec
- * 该路径，PATH 上的 `rg` 不当主路径。
+ * Contract: install/release downloads the pinned version + checksum per
+ * platform into the install root; at runtime only that path is exec'd, and an
+ * `rg` on PATH is never the main path.
  *
- * 本模块是**纯数据 + 纯查询**：不碰网络、不碰 fs，因此离线可测。下载/解包
- * 由 `scripts/install-search-engine.ts` 消费同一份清单 —— URL、校验和、
- * 归档内二进制位置只有这一处真值，安装脚本与运行期解析不会走偏。
+ * This module is **pure data + pure queries**: no network, no fs, so it is
+ * testable offline. `scripts/install-search-engine.ts` consumes the same
+ * manifest for download/unpack — URLs, checksums, and in-archive binary paths
+ * have exactly one source of truth, so the installer and runtime resolution
+ * cannot drift apart.
  */
 
-/** 钉死的引擎版本。升级时同步重生 `type-table.ts`（`rg --type-list`）。 */
+/** Pinned engine version. On upgrade, regenerate `type-table.ts` (`rg --type-list`). */
 export const RIPGREP_VERSION = "15.1.0";
 
 export interface EngineAsset {
-  /** release 资产文件名。 */
+  /** Release asset filename. */
   readonly asset: string;
-  /** 该资产的 SHA-256（取自 release 自带的 `.sha256`）。 */
+  /** SHA-256 of this asset (taken from the release's own `.sha256`). */
   readonly sha256: string;
-  /** 归档格式，决定解包命令。 */
+  /** Archive format; decides the unpack command. */
   readonly archive: "tar.gz" | "zip";
-  /** 归档内二进制相对路径。 */
+  /** Binary path relative to the archive root. */
   readonly binaryInArchive: string;
 }
 
 /**
- * `${process.platform}-${process.arch}` → 资产。
+ * `${process.platform}-${process.arch}` → asset.
  *
- * 只登记 release 实际存在的资产（`aarch64-unknown-linux-musl` 与
- * `i686-unknown-linux-musl` 上游没有发布，故不登记；缺席平台走 Node 引擎，
- * 这是 D6 的合法降级而不是错误）。
+ * Only assets that actually exist in the release are registered
+ * (`aarch64-unknown-linux-musl` and `i686-unknown-linux-musl` are not
+ * published upstream, so they are absent; missing platforms use the Node
+ * engine — a legal downgrade, not an error).
  */
 const ASSETS: Readonly<Record<string, EngineAsset>> = Object.freeze({
   "linux-x64": {
@@ -69,12 +73,12 @@ const ASSETS: Readonly<Record<string, EngineAsset>> = Object.freeze({
   },
 });
 
-/** 平台键（`${platform}-${arch}`）；清单的键空间单一来源。 */
+/** Platform key (`${platform}-${arch}`); single source of the manifest's key space. */
 export function platformKey(platform: string, arch: string): string {
   return `${platform}-${arch}`;
 }
 
-/** 该平台是否有钉死资产；没有 → 无自带引擎，直接走 Node 引擎。 */
+/** Does this platform have a pinned asset; no → no bundled engine, go straight to the Node engine. */
 export function engineAsset(
   platform: string,
   arch: string
@@ -82,20 +86,22 @@ export function engineAsset(
   return ASSETS[platformKey(platform, arch)];
 }
 
-/** 全部已登记平台键（安装脚本与测试消费）。 */
+/** All registered platform keys (consumed by the installer and tests). */
 export function enginePlatformKeys(): ReadonlyArray<string> {
   return Object.keys(ASSETS);
 }
 
-/** 下载 URL。 */
+/** Download URL. */
 export function engineDownloadUrl(asset: EngineAsset): string {
   return `https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${asset.asset}`;
 }
 
 /**
- * 运行期执行路径：`<installRoot>/vendor/ripgrep/<version>/<platform>-<arch>/rg`。
+ * Runtime execution path:
+ * `<installRoot>/vendor/ripgrep/<version>/<platform>-<arch>/rg`.
  *
- * 平台无资产 → `undefined`（调用方据此走 Node 引擎，而不是去找 PATH）。
+ * No asset for the platform → `undefined` (the caller then uses the Node
+ * engine instead of searching PATH).
  */
 export function engineBinaryPath(
   installRoot: string,
@@ -108,7 +114,7 @@ export function engineBinaryPath(
   return `${installRoot}/vendor/ripgrep/${RIPGREP_VERSION}/${platformKey(platform, arch)}/${binaryName}`;
 }
 
-/** 落地目录（安装脚本的解包目标）。 */
+/** Landing directory (the installer's unpack target). */
 export function engineInstallDir(
   installRoot: string,
   platform: string,

@@ -1,28 +1,35 @@
 /**
- * ADR-0045 — sandbox 执行面同进程 router。
+ * Same-process router for the sandbox execution plane.
  *
- * 形态:可挂载工厂(createTraceRouter 同款,traceserver/serve.ts:61)。
- * 无 socket / 无 fork / 无 daemon —— 三个消费方(bash 前台 / verify /
- * 后台)全在同一 Node 进程内,harness 装配期持一份 router 引用。
+ // (ADR-0045)
  *
- * 两型协议(消息合同见 ./types.ts):
- *   - exec(req): 短生命周期 request/response,等子进程退出取一次性结果。
- *   - spawn(req): 长生命周期 task-handle,同步 resolve task_id,返回
- *     handle 暴露 stdout/stderr/exit/stopped AsyncIterable + stop
- *     control message(SIGTERM → graceMs → SIGKILL 升级)。
+ * Shape: mountable factory (same pattern as createTraceRouter in the trace
+ * server). No socket / no fork / no daemon — all three consumers (bash
+ * foreground / verify / background) live in one Node process, and harness
+ * assembly holds a single router reference.
  *
- * 4 类故障路径(ADR-0045 §4):empty / negative / concurrent / exception
- * —— typed error 抛在 ./types.ts SandboxServerError 判别联合上,client
- * 按 kind 分支。overflow 已合并进 truncateByCodePoint 契约(§2.1 语义
- * 已如此),不抛 typed error。fail-loud 纪律(§5):server 不可达 typed
- * fail-loud 不静默降级;ctx.signal abort 不只丢 promise —— spawn 协议
- * 经 stop control message 取消,exec 协议经 AbortSignal 透传到
- * spawnWithStopSignal(runner.ts:131-132)。
+ * Two protocol shapes (message contracts in ./types.ts):
+ *   - exec(req): short-lived request/response, waits for the child to exit for
+ *     a one-shot result.
+ *   - spawn(req): long-lived task handle, resolves task_id synchronously; the
+ *     handle exposes a stdout/stderr/exit/stopped AsyncIterable + a stop
+ *     control message (SIGTERM → graceMs → SIGKILL escalation).
  *
- * 降级:runInSandbox(runner.ts:184)与 defaultBackgroundSpawn
- * (manager.ts:239)在迁移期内降级为 router handler 的薄包装,不删
- * (兼容既有 30+ fixture)。本文件不重新实现 spawn 逻辑 —— 仍走
- * runner.ts spawnWithStopSignal 与 manager.ts nodeSpawn 既有路径。
+ * Fault paths are thrown as the SandboxServerError discriminated union in
+ *
+ // (ADR-0045)
+ * ./types.ts and clients branch on kind. Overflow is folded into the
+ * truncateByCodePoint contract, so it throws no typed error. Fail-loud
+ * discipline: an unreachable server fails loud as a typed error, never
+ * silently degrades; a ctx.signal abort must not merely drop the promise —
+ * the spawn protocol cancels via the stop control message and the exec
+ * protocol forwards the AbortSignal down to spawnWithStopSignal (runner.ts).
+ *
+ * During migration, runInSandbox (runner.ts) and defaultBackgroundSpawn
+ * (manager.ts) degrade to thin wrappers around router handlers rather than
+ * being deleted (30+ existing fixtures depend on them). This file does not
+ * re-implement spawn logic — it still goes through spawnWithStopSignal in
+ * runner.ts and the nodeSpawn path in manager.ts.
  */
 
 import {
@@ -54,23 +61,25 @@ import {
   wireChildStreamHandlers,
 } from "./spawn.js";
 
-/** 同进程 router 形态:无可观察状态、无 server、无 socket、无 fork。 */
+/** Same-process router shape: no observable state, no server, no socket, no fork. */
 export interface SandboxServer {
   readonly exec: (req: ExecRequest) => Promise<ExecResponse>;
   readonly spawn: (req: SpawnRequest) => Promise<SandboxTaskHandle>;
 }
 
-/** router 工厂选项 —— 当前为占位(ADR-0045 §3 留 client 侧的
- *  violation-handling 不进 server;后续若有 process-level 治理需要
- *  在此添加,工厂仍无 server 形态)。 */
+/** Factory options — currently a placeholder (ADR-0045): violation-handling stays on the
+ *  client side and out of the server; if process-level governance is ever
+ *  needed it is added here, and the factory still has no server shape. */
 export interface CreateSandboxServerOptions {
-  /** server 内 spawn 失败时日志;缺省静默。 */
+  /** Log for spawn failures inside the router; silent by default. */
   readonly log?: (msg: string) => void;
 }
 
 /**
- * fence + cwd 校验 —— exec 与 spawn 共享。空帧 typed fail-loud,
- * 不 spawn(ADR-0045 §4 empty 路径)。
+ * fence + cwd validation — shared by exec and spawn. An empty frame fails loud
+ * as a typed error without spawning (the empty fault path).
+ *
+ // (ADR-0045)
  */
 function validateFenceAndCwd(
   req: ExecRequest | SpawnRequest,
@@ -94,7 +103,7 @@ function validateFenceAndCwd(
   }
 }
 
-/** 负数 / 非整数参数校验 —— 透传 RangeError 给 client catch。 */
+/** Negative / non-integer argument validation — passes the RangeError through for the client to catch. */
 function validateNumericArgs(
   req: ExecRequest | SpawnRequest,
   op: "exec" | "spawn"
@@ -125,9 +134,9 @@ function validateNumericArgs(
 }
 
 /**
- * factory —— 无 server、无共享 mutable state;调用方在装配期持一份
- * router 引用;三处消费方(bash 前台 / verify / background)共用。
- * (mirror `createTraceRouter` 形态,traceserver/serve.ts:61。)
+ * factory — no server, no shared mutable state; the caller holds one router
+ * reference from assembly time and the three consumers (bash foreground /
+ * verify / background) share it. Mirrors the createTraceRouter shape.
  */
 export function createSandboxServer(
   opts: CreateSandboxServerOptions = {}
@@ -138,8 +147,9 @@ export function createSandboxServer(
   async function exec(req: ExecRequest): Promise<ExecResponse> {
     validateFenceAndCwd(req, "exec");
     validateNumericArgs(req, "exec");
-    // signal.aborted 初始态也走 exec:handler 立即把 signal 透传到 spawnWithStopSignal
-    // (runner.ts:131-132)。此处只验 frame 完整,fence 自身已封冻 argv。
+    // Even a pre-aborted signal goes through exec: the handler forwards the
+    // signal straight to spawnWithStopSignal (runner.ts). Here we only validate
+    // frame integrity; the fence's argv is already frozen.
     const maxOutputCodePoints =
       req.maxOutputCodePoints ?? DEFAULT_MAX_OUTPUT_CODE_POINTS;
     const { done } = spawnWithStopSignal(
@@ -160,9 +170,10 @@ export function createSandboxServer(
         stderr: truncateByCodePoint(result.stderr, maxOutputCodePoints),
       };
     } catch (cause) {
-      // exception:子进程退出未回执 / spawn 失败 —— typed fail-loud,
-      // 不静默降级。orphan 进程组 reap 纪律交给 spawnWithStopSignal(其
-      // 已对 abort / kill 升级托管);此处只把 spawn failure 转 typed error。
+      // exception: child exited without acknowledgement / spawn failed — typed
+      // fail-loud, no silent degradation. Orphan process-group reaping stays
+      // with spawnWithStopSignal (which already manages abort / kill
+      // escalation); here we only turn a spawn failure into a typed error.
       throw {
         kind: "server_unreachable",
         context: `exec: spawn failed for fence argv[0]=${String(req.fence.argv[0])}`,
@@ -184,7 +195,7 @@ export function createSandboxServer(
   return { exec, spawn };
 }
 
-/** spawn 节点 —— 持有进程 + 事件通道 + stop 升级。失败统一 typed error。 */
+/** The spawn node — owns the process + event channel + stop escalation. All failures surface as typed errors. */
 function runSpawnNode(
   req: SpawnRequest,
   task_id: string,
@@ -211,16 +222,17 @@ function runSpawnNode(
     onChildClose(child, channel, orphan, stopHandle);
     wireAbortSignal(req.signal, stopHandle, killGraceMs);
     const handle = assembleHandle(task_id, log_path, channel, stopHandle);
-    // Defer resolveHandle 一拍(setImmediate),让 spawn 失败的 child.once("error")
-    // 事件先到达 orphan.settle → rejectHandle;否则 resolve 先发,reject
-    // 被吞,typed orphan_process_group 不可观察(fail-loud 破裂)。
+    // Defer resolveHandle by one tick (setImmediate) so a spawn failure's
+    // child.once("error") reaches orphan.settled → rejectHandle first;
+    // otherwise resolve would win, the reject would be swallowed, and the typed
+    // orphan_process_group would be unobservable (fail-loud broken).
     setImmediate(() => {
       if (!orphan.settled) resolveHandle(handle);
     });
   });
 }
 
-/** 不暴露内部;消费方拿到 handle 后 stop() / events()。 */
+/** Internals not exposed; consumers get the handle and call stop() / events(). */
 export type {
   ExecRequest,
   ExecResponse,

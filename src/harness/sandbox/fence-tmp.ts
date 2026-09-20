@@ -78,16 +78,19 @@ export function workerFenceTmpPath(
   );
 }
 
-/** `<subagents>/<taskId>/stderr.log` — new-worker crash diagnostics (SC7). */
+/** `<subagents>/<taskId>/stderr.log` — crash diagnostics for a new-layout worker. */
 export function workerStderrPath(subagentsDir: string, taskId: string): string {
   return join(workerTaskDir(subagentsDir, taskId), "stderr.log");
 }
 
 /**
- * ADR-0102 T3 — 工人 transcript 落点：`<subagents>/<taskId>/<taskId>.jsonl`。
- * 与 per-agent trace (`agent-<taskId>.jsonl`) 同目录不同文件 —— 命名刻意不带
- * `agent-` 前缀：`listSubagentRecordPaths` 的 trace 枚举（`agent-*.jsonl`）
- * 因此不会把 transcript 收进 trace 名单（trace 与账分家，锁句 6）。
+ * Worker transcript location: `<subagents>/<taskId>/<taskId>.jsonl`. Same
+ *
+ // (ADR-0102)
+ * directory as the per-agent trace (`agent-<taskId>.jsonl`) but a different
+ * file. The name deliberately omits the `agent-` prefix so that
+ * `listSubagentRecordPaths`' trace glob (`agent-*.jsonl`) never pulls the
+ * transcript into the trace listing — transcript and trace stay separate.
  */
 export function workerTranscriptPath(
   subagentsDir: string,
@@ -122,9 +125,7 @@ export function ensureWorkerSessionLayout(
   };
 }
 
-/**
- * SC8: new layout first, then leftover flat `subagents/agent-<taskId>.jsonl`.
- */
+/** Prefer the new layout, then fall back to a leftover flat `subagents/agent-<taskId>.jsonl`. */
 export function resolveExistingSubagentRecordPath(
   subagentsDir: string,
   taskId: string
@@ -149,7 +150,7 @@ export class SubagentRecordListError extends Error {
 }
 
 /**
- * SC8 list: leftover flat `agent-*.jsonl` plus nested
+ * Lists leftover flat `agent-*.jsonl` plus nested
  * `subagents/<taskId>/agent-<taskId>.jsonl`. Does not migrate files.
  */
 export function listSubagentRecordPaths(subagentsDir: string): string[] {

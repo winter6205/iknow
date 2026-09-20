@@ -1,38 +1,42 @@
 /**
- * read_mcp_resource 工具 — wayfinder #440 Stream B T10（M1 / M2 / M3 决议）。
+ * read_mcp_resource tool — the read side of two explicit tools (list side in
+ * list-mcp-resources.ts). The model accesses resources exposed by an MCP
+ * server in a list → read two-step flow.
  *
- * 形态：两个显式工具的 read 侧（list 侧见 list-mcp-resources.ts）。
- * 模型按 list → read 两步式访问 MCP server 暴露的 resources。
+ * Dependency-injection shape (lazy self-reference): same as the list tool —
+ * deps take `getManager: () => McpManager`, dereferenced only at call time.
+ * Assembly incomplete → throw ToolExecutionError (fail-fast; conditional
+ * assembly guarantees the handler is only routed to once a manager is
+ * present).
  *
- * 依赖注入形态（lazy self-reference）：与 list 工具同形态——deps 收
- * `getManager: () => McpManager`，调用期才解引用。装配未完成 → 抛
- * ToolExecutionError（fail-fast；T11 条件化装配保证 manager 在场时
- * 才被路由到 handler）。
+ * Input: server and uri are both required non-empty strings (the model knows
+ * the pair explicitly after listing).
  *
- * 输入：server + uri 均为必填非空字符串（模型显式 list 后已知配对）。
+ * Output wire: a single JSON envelope `{ server, uri, contents: [...] }`.
+ * Per-contents field projection (text / blob mutually exclusive):
+ *   - always: uri
+ *   - optional: mimeType (externally declared content type)
+ *   - mutually exclusive: text (utf-8) or blob (base64) — whichever appears,
+ *     the other is absent
+ * The mutual-exclusion guarantee comes from the SDK protocol (the
+ * TextResourceContents | BlobResourceContents union); this tool only projects
+ * fields, it does not re-discriminate.
  *
- * 输出 wire：单个 JSON envelope `{ server, uri, contents: [...] }`。
- * 每个 contents 项字段投影（text / blob 互斥）：
- *   - 必有：uri
- *   - 可选：mimeType（外部声明的内容类型）
- *   - 互斥：text（utf-8）或 blob（base64）——任一出现即另一缺席
- * 互斥保证源自 SDK 协议（TextResourceContents | BlobResourceContents
- * 联合）；本工具只做字段投影，不重复判别。
+ * Security:
+ *   - resource-content injection: no sanitization layer (external content is
+ *     treated as untrusted data); the executor's 20000 truncation plus the
+ *     self-cap discipline bound output size;
+ *   - minimal schema validation of server / uri inputs + typed-error wrapping.
  *
- * 安全（M3 决议）：
- *   - 资源内容注入：不设 sanitization 层（外部内容当 untrusted 数据），
- *     executor 截断 20000 + 契约 X 兜底输出大小；
- *   - server / uri 入参 schema 最小校验 + typed-error 包装。
+ * ACI metadata:
+ *   category: "read-only"        (same shape as list)
+ *   isConcurrencySafe: false     (conservative default, same shape as mcp__* tools)
+ *   interruptBehavior: cancel    (same shape as list)
+ *   timeoutTier: "default"       (30s — server subprocesses cannot be fast)
  *
- * ACI 元数据（M2 决议）：
- *   category: "read-only"        （与 list 同形态）
- *   isConcurrencySafe: false     （M2 决议保守默认，与 mcp__* 工具同形态）
- *   interruptBehavior: cancel    （与 list 同形态）
- *   timeoutTier: "default"       （30s —— server 子进程不可 fast）
- *
- * description（D9 / M2 决议）：仅写正面引导条件，不写负面禁令词。
- * 触发条件：已经从 list_mcp_resource 拿到 server + uri 配对后，调本工具
- * 取内容。
+ * description: states only positive trigger conditions, no negative
+ * prohibition words. Trigger: after list_mcp_resources has surfaced a server
+ * + uri pair, call this tool to fetch the content.
  */
 
 import type { AciToolDef } from "../types.js";
@@ -45,8 +49,9 @@ import type {
 } from "../../mcp/manager.js";
 
 /**
- * 依赖注入：`getManager` 惰性解引用已装配 McpManager。
- * 装配未完成 → 抛 ToolExecutionError（与 list-mcp-resources.ts 同形态）。
+ * Dependency injection: `getManager` lazily dereferences the assembled
+ * McpManager. Assembly incomplete → ToolExecutionError (same shape as
+ * list-mcp-resources.ts).
  */
 export interface ReadMcpResourceToolDeps {
   readonly getManager: () => McpManager;
@@ -58,12 +63,12 @@ interface ReadMcpResourceInput {
 }
 
 /**
- * 工厂：createReadMcpResourceTool(deps) — read MCP resource 工具（第 27 件）。
+ * Factory: createReadMcpResourceTool(deps) — the read-MCP-resource tool.
  *
- * 返回的 AciToolDef 满足：
+ * The returned AciToolDef satisfies:
  *   - name === "read_mcp_resource"
- *   - inputSchema: { server 必填 + uri 必填 }，additionalProperties:false
- *   - aci 元数据：read-only / NOT concurrency-safe / cancel / default tier
+ *   - inputSchema: { server required + uri required }, additionalProperties:false
+ *   - aci metadata: read-only / NOT concurrency-safe / cancel / default tier
  */
 export function createReadMcpResourceTool(
   deps: ReadMcpResourceToolDeps
@@ -77,8 +82,9 @@ export function createReadMcpResourceTool(
 
     let result: ReadResourceResult;
     try {
-      // ADR-0039 重开并推翻 M3 的旧决议：manager 已支持 signal，
-      // read_mcp_resource 必须透传 ctx.signal 以兑现 cancel metadata。
+      // The manager supports signal; read_mcp_resource must pass through
+      // (ADR-0039)
+      // ctx.signal to honor its cancel metadata.
       result = await manager.readResource(parsed.server, parsed.uri, {
         signal: ctx?.signal,
       });
@@ -126,9 +132,10 @@ export function createReadMcpResourceTool(
 }
 
 /**
- * 输入编译 + 严格校验：server / uri 必填且非空字符串。
- * 缺席 / 类型错 / 空串 → 全部 typed-error（read 必须精确指定 server + uri，
- * 缺席无默认值，与 list 的可选语义区分）。
+ * Input compilation + strict validation: server / uri required, non-empty
+ * strings. Absent / wrong type / empty string → all typed errors (a read must
+ * name server + uri exactly; no default when absent, unlike list's optional
+ * semantics).
  */
 function compileReadInput(input: unknown): {
   readonly server: string;
@@ -152,9 +159,9 @@ function compileReadInput(input: unknown): {
 }
 
 /**
- * 装配未完成 / 缺席 → 抛 typed-error（fail-fast；与 list-mcp-resources.ts
- * resolveManager 同形态）。T11 条件化装配保证 manager 在场时此调用才被
- * 路由到 handler。
+ * Assembly incomplete / absent → typed error (fail-fast; same shape as
+ * list-mcp-resources.ts resolveManager). Conditional assembly guarantees the
+ * handler is only routed to once a manager is present.
  */
 function resolveManager(getManager: () => McpManager): McpManager {
   const m = getManager();
@@ -167,9 +174,10 @@ function resolveManager(getManager: () => McpManager): McpManager {
 }
 
 /**
- * 字段投影：readResult → wire envelope。
- * text / blob 互斥（SDK 协议保证）；本投影只保留有值字段，避免 null 泄漏
- * （与 tool-search.ts D6 同纪律）。
+ * Field projection: readResult → wire envelope.
+ * text / blob are mutually exclusive (guaranteed by the SDK protocol); this
+ * projection keeps only the field with a value, so no null leaks through
+ * (same discipline as tool-search.ts).
  */
 function projectReadResult(r: ReadResourceResult): {
   readonly server: string;
@@ -186,7 +194,7 @@ function projectReadResult(r: ReadResourceResult): {
 function projectContent(c: McpResourceContent): Record<string, unknown> {
   const out: Record<string, unknown> = { uri: c.uri };
   if (c.mimeType !== undefined) out.mimeType = c.mimeType;
-  // text / blob 互斥：只设有的那一项。
+  // text / blob mutually exclusive: set whichever is present.
   if (c.text !== undefined) {
     out.text = c.text;
   } else if (c.blob !== undefined) {

@@ -1,13 +1,15 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：公共出口。
+ * PROTOTYPE — self-written Graph multi-task orchestration: public surface.
  *
- * 本模块作为 graph 编排原型的统一入口，向上层（chat host / future CLI / future
- * TUI）暴露：拓扑（validateGraph / topoWaves）、调度（runGraph）、耦合拆分
- * （partitionByCoupling）、skill 门禁（skillCheckGate）、子代理绑定 executor
- * （createSubAgentNodeExecutor）。原型验证通过后，这些接口会折入真代码；
- * 留档即删。
+ * Unified entry for the graph orchestration prototypes, exposing upward
+ * (chat host / future CLI / future TUI): topology (validateGraph /
+ * topoWaves), scheduling (runGraph), coupling partition
+ * (partitionByCoupling), skill gate (skillCheckGate), and the subagent-bound
+ * executor (createSubAgentNodeExecutor). Once the prototypes validate, these
+ * interfaces fold into real code.
  *
- * 边界：仅 re-export 内部模块符号；不引入 loop-engine / build-engine。
+ * Boundary: re-exports internal module symbols only; introduces no
+ * loop-engine / build-engine dependency.
  */
 
 export type {

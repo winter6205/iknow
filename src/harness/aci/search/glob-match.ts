@@ -1,58 +1,74 @@
 /**
- * `--glob` 的 Node 引擎实现（D4；SC9 要求 Node 全语义）。
+ * Node-engine implementation of `--glob`.
  *
- * 语义按 ripgrep 实测钉死（不是自创）：
- *   - **含 `/` 的模式锚定搜索根**：`src/*.ts` 只匹配根下 `src/` 里的一层。
- *   - **不含 `/` 的模式按基名匹配任意深度**：`*.ts` 匹配 `a.ts` 与 `x/y/a.ts`。
- *   - **`!` 前缀是否定**，与正模式并列时先收后剔。
- *   - `**` 跨段；`*` / `?` 段内通配。
+ * Semantics pinned against real ripgrep behaviour (not invented):
+ *   - **A pattern containing `/` anchors to the search root**: `src/*.ts`
+ *     matches only one level inside `src/`.
+ *   - **A pattern without `/` matches the basename at any depth**: `*.ts`
+ *     matches `a.ts` and `x/y/a.ts`.
+ *   - **A `!` prefix negates**; when mixed with positives, collect then remove.
+ *   - `**` crosses segments; `*` / `?` are within-segment wildcards.
  *
- * 这一层与 `argv.ts` 的 `--glob` 是同一契约的两条实现：rg 引擎交给 rg 自己
- * 判，Node 引擎走这里。两边判定不等价即 SC9 失败。
+ * This layer and the `--glob` handling in `argv.ts` are two implementations of
+ * one contract: the rg engine defers to rg itself, the Node engine goes here.
+ * If the two diverge, cross-engine equivalence fails.
  */
 
 import { ToolExecutionError } from "../../errors.js";
 
 /**
- * glob 语法校验（**两条引擎共用**，故在解析层调用，见 `options.ts`）。
+ * Glob syntax validation (**shared by both engines**, hence called at the
+ * parsing layer, see `options.ts`).
  *
- * 存在的理由与 SC9 同源：rg 对语法坏的 glob 是 rc=2 整次失败，不是「无匹配」。
- * 若只在 Node 引擎里把坏 glob 当字面量处理，同一个 `glob` 参数的成败就取决于
- * 哪条引擎在跑 —— 自带引擎在场时报错、起不来时静默回空。
+ * Rationale: rg fails the whole run with rc=2 on a malformed glob, it does not
+ * degrade to "no match". If only the Node engine treated a bad glob as a
+ * literal, the outcome of the same `glob` argument would depend on which
+ * engine is running — error with the shipped engine, silently empty when it
+ * cannot start.
  *
- * 实测钉死的规则（rg 15.1.0）：`[` 必须闭合；且**紧跟 `[`（或 `[!` / `[^`）
- * 的那个 `]` 是字面成员**，不算闭合 —— 所以 `[]]` 合法、`[]` 与 `[!]` 报
- * `unclosed character class`。`{` 同理必须闭合（`{a,b` 报 unclosed alternate
- * group），独立的 `}` 报 unopened alternate group；`\{` / `\}` 是字面。
+ * Rules verified against rg 15.1.0: `[` must close; and the `]` immediately
+ * after `[` (or `[!` / `[^`) **is a literal member**, not the closing
+ * bracket — hence `[]]` is legal while `[]` and `[!]` report `unclosed
+ * character class`.
+ * `{` must close too (`{a,b` reports unclosed alternate group); a stray `}`
+ * reports unopened alternate group; `\{` / `\}` are literals.
  *
- * 校验与展开共用同一个扫描器（`expandGlob`）—— 否则「校验放行的语法」与
- * 「匹配认得的语法」会各长一套，SC9 的等价性就没人守了。
+ * Validation and expansion share one scanner (`expandGlob`) — otherwise "what
+ * validation admits" and "what matching understands" would drift apart and
+ * nothing would guard cross-engine equivalence.
  */
 export function assertValidGlob(glob: string): void {
   expandGlob(glob);
 }
 
 /**
- * 判定一条相对路径是否被 glob 集合收下。
+ * Decide whether a relative path is accepted by a glob set.
  *
- * 裸 `!`（剥掉否定记号后什么都不剩）是**不选中任何文件**，不是「全收」：
- * 实测 rg 15.1.0 单条 `--glob '!'` rc=1，与 `--glob '!*'`（否定一切）同结果。
- * 空模式只能匹配空路径，而候选路径都非空 —— 所以它作为否定不剔任何文件、
- * 作为肯定不选任何文件。旧实现把 `!` 剥成空串当肯定模式，`matchOne` 拿空
- * 段的模式去比真实路径恰好全不中，却在**集合语义**上退化成「没有肯定模式
- * → 全收」，于是 `glob: "!"` 在 Node 路径列出全仓、rg 路径回空（Finding 3）。
+ * A bare `!` (nothing left after stripping the negation marker) **selects no
+ * files**, it does not mean "accept everything": verified against rg 15.1.0,
+ * a lone `--glob '!'` gives rc=1, same as `--glob '!*'` (negate all). An
+ * empty pattern can only match an empty path, and candidate paths are never
+ * empty — so as a negation it removes nothing and as a positive it selects
+ * nothing. The old implementation stripped `!` to an empty positive pattern;
+ * `matchOne` never hit with an empty-segment pattern against real paths, yet
+ * at the **set level** it degenerated into "no positive pattern → accept
+ * all", so `glob: "!"` listed the whole repo via Node while rg returned
+ * empty.
  */
 export function matchesGlobSet(
   relPath: string,
   globs: ReadonlyArray<string>
 ): boolean {
-  // 裸 `!` 让整组不再收下任何路径：它是**空模式**，rg 实测单条 `--glob '!'`
-  // rc=1（同树的 `--glob '!*'` 也是 rc=1）。不能靠「空模式匹配空串」在
-  // `matchOne` 里自然落到 false —— 集合语义下没有肯定模式会默认全收，裸 `!`
-  // 因此反转成「列全仓」（Finding 3）。
-  // 可达性：工具面只暴露单个 `glob` 参数，喂进来的就是这**一条**模式，
-  // 「裸 `!` 与其它 glob 并列」的形状从工具表面走不到；留在这里是因为
-  // `matchesGlobSet` 是集合语义的通用实现（`node-scan` 也按集合喂）。
+  // A bare `!` makes the whole set accept nothing: it is an **empty pattern**,
+  // verified against rg 15.1.0 where a lone `--glob '!'` gives rc=1 (same as
+  // `--glob '!*'` on the same tree). We cannot rely on "empty pattern matches
+  // empty string" to fall through to false inside `matchOne` — at the set
+  // level, no positive pattern defaults to accept-all, so a bare `!` would
+  // invert into "list the whole repo".
+  // Reachability: the tool surface exposes a single `glob` argument, so
+  // "bare `!` alongside other globs" is not reachable from the tool face; it
+  // stays here because `matchesGlobSet` is the general set implementation
+  // (`node-scan` also feeds it sets).
   if (globs.some((g) => g === "!")) return false;
   const positives = globs.filter((g) => !isNegation(g));
   const negatives = globs.filter((g) => isNegation(g)).map((g) => g.slice(1));
@@ -63,23 +79,29 @@ export function matchesGlobSet(
 }
 
 /**
- * 否定模式的匹配（**与正模式不同**，别复用 `matchOne`）。
+ * Negation-pattern matching (**differs from positive patterns**, do not reuse
+ * `matchOne`).
  *
- * 差别只在尾随 `/`：正模式 `sub/` 一个文件都不选（空段只能匹配空名字），
- * 而否定模式 `!sub/` 会把 `sub` 这个**目录整棵子树**剔掉（实测 15.1.0：
- * `--glob '!sub/'` 剔掉 `sub/c.ts` 与 `sub/deep/d.ts`）。这与 gitignore 的
- * 「目录限定」同源 —— rg 对否定 glob 走的是目录剪枝，不是逐文件匹配。
+ * The only difference is the trailing `/`: positive `sub/` selects no file
+ * (an empty segment only matches an empty name), while `!sub/` removes the
+ * **entire subtree** of directory `sub` (verified against rg 15.1.0:
+ * `--glob '!sub/'` drops `sub/c.ts` and `sub/deep/d.ts`). Same lineage as
+ * gitignore's "directory qualification" — rg prunes directories for negative
+ * globs rather than matching file by file.
  *
- * 祖先前缀（不含最后一段 = 文件本身）逐个过匹配器，因此
- *   - 单星尾斜杠只剔「有一层以上目录」的路径（根级文件留下），
- *   - 双星尾斜杠剔掉所有非根级路径，
- *   - `!a.ts/` 不剔任何东西（没有叫 `a.ts/` 的祖先目录）。
- * 三条都与 rg 实测一致。
+ * Ancestor prefixes (all but the last segment = the file itself) are each run
+ * through the matcher, therefore
+ *   - a single-star trailing slash removes only paths with at least one
+ *     directory level (root-level files survive),
+ *   - a double-star trailing slash removes every non-root path,
+ *   - `!a.ts/` removes nothing (no ancestor directory named `a.ts/`).
+ * All three match verified rg behaviour.
  */
 function matchesNegation(relPath: string, glob: string): boolean {
   if (!glob.endsWith("/")) return matchOne(relPath, glob);
   const dirGlob = glob.slice(0, -1);
-  // `!/` → 目录模式为空，剔不掉任何东西（rg 实测：结果与无 glob 相同）。
+  // `!/` → empty directory pattern, removes nothing (verified with rg: result
+  // identical to no glob at all).
   if (dirGlob.length === 0) return false;
   const segments = relPath.split("/").filter((s) => s.length > 0);
   for (let depth = 1; depth < segments.length; depth += 1) {
@@ -89,37 +111,45 @@ function matchesNegation(relPath: string, glob: string): boolean {
 }
 
 /**
- * `!` 开头的否定形态；`\!` 是转义后的字面 `!`，仍是肯定模式。
+ * Negation form starting with `!`; `\!` is an escaped literal `!` and stays a
+ * positive pattern.
  *
- * 实测 rg 15.1.0：`--glob '!bang.ts'` 不剔 `!bang.ts`（回全仓），
- * `--glob '\!bang.ts'` 只回 `!bang.ts` —— 转义的 `!` 是字面字符。
+ * Verified against rg 15.1.0: `--glob '!bang.ts'` does not remove `!bang.ts`
+ * (returns the whole repo), while `--glob '\!bang.ts'` returns only
+ * `!bang.ts` — the escaped `!` is a literal character.
  */
 export function isNegation(glob: string): boolean {
   return glob.startsWith("!") && !glob.startsWith("\\!");
 }
 
-/** 单条 glob 匹配（`!` 由 `matchesGlobSet` 剥掉，这里只收正模式）。 */
+/** Match one glob (`!` already stripped by `matchesGlobSet`; positives only). */
 export function matchOne(relPath: string, glob: string): boolean {
   const segments = relPath.split("/").filter((s) => s.length > 0);
   const base = segments[segments.length - 1];
   if (base === undefined) return false;
-  // 锚定是**整条模式**的性质：只要原文里有 `/`（哪怕它在某个 brace 备选里、
-  // 或是单个前导 `/`）就锚定搜索根，否则按基名匹配任意深度。实测：
-  //   `zz.ts` 命中 sub/zz.ts；`{sub/nope,zz}.ts` 不命中（整体锚定）；
-  //   `{a,sub/only}.ts` 同时命中根下 a.ts 与 sub/only.ts（「/」在备选里，
-  //   备选本身按「整条锚定」的段序列解释）。
+  // Anchoring is a property of the **whole pattern**: any `/` in the raw text
+  // (even inside a brace alternative, or a single leading `/`) anchors to the
+  // search root; otherwise match by basename at any depth. Verified:
+  //   `zz.ts` hits sub/zz.ts; `{sub/nope,zz}.ts` does not (pattern anchored);
+  //   `{a,sub/only}.ts` hits both root a.ts and sub/only.ts (the `/` sits in
+  //   an alternative, which is still interpreted under whole-pattern
+  //   anchoring).
   const anchored = glob.includes("/");
-  // 单个前导 `/` 是「从搜索根起」的记法，且**只认整条模式的第一个字符**：
-  // `/*.ts` 命中根下 .ts，`//a.ts` 不命中（第二个 `/` 是空段，不匹配任何
-  // 真实名字）；`{sub,/}z.ts` 里的 `/` 不是首字符，只是字面分隔符，所以
-  // `/z.ts` 那条备选要求路径里真的有个空段 —— 实测 rc=1。
+  // A single leading `/` means "from the search root" and is **only honored
+  // as the first character of the whole pattern**: `/*.ts` hits root .ts
+  // files, `//a.ts` hits nothing (the second `/` is an empty segment matching
+  // no real name); the `/` inside `{sub,/}z.ts` is not first, just a literal
+  // separator, so the `/z.ts` alternative demands a real empty segment in the
+  // path — verified rc=1.
   const normalized = glob.startsWith("/") ? glob.slice(1) : glob;
   for (const expanded of expandGlob(normalized)) {
-    // 空段一律保留为「不可匹配」：尾随 `/`（`sub/`、`*/`、`a.ts/`）在 rg 里
-    // **一个文件都不选**（实测 15.1.0，单条 glob 与否定形态都一样），与中间
-    // 空段（`a//b`）同因 —— 空段只能匹配空名字。旧实现把尾随空段 pop 掉，
-    // 于是 `sub/` 退化成 `sub`、`*/` 退化成 `*`，在 Node 路径收下一整个仓库，
-    // 而 rg 路径回空（Finding 3）。
+    // Empty segments are kept and are always "unmatchable": a trailing `/`
+    // (`sub/`, `*/`, `a.ts/`) selects **no file at all** in rg (verified
+    // 15.1.0, same for lone and negated forms), for the same reason as a
+    // middle empty segment (`a//b`) — an empty segment only matches an empty
+    // name. The old implementation popped the trailing empty segment, so
+    // `sub/` degenerated to `sub` and `*/` to `*`, and the Node path took the
+    // whole repo while rg returned empty.
     const pattern = expanded.split("/");
     const matched = anchored
       ? matchSegments(pattern, 0)(segments, 0)
@@ -130,21 +160,26 @@ export function matchOne(relPath: string, glob: string): boolean {
 }
 
 /**
- * brace 展开：`{a,b}` 产出一条备选，可嵌套、可多组（笛卡尔积）。
+ * Brace expansion: `{a,b}` yields one alternative; nesting and multiple
+ * groups produce a cartesian product.
  *
- * 语义按 rg 15.1.0 实测钉死，扫描与校验共用本函数（`assertValidGlob` 调它，
- * 形态坏即 typed 拒绝）：
- *   - `{a,b}` 交替；`{ts}` 单元素也展开（等价于 `ts`）；`{}` 展开为空串，
- *     即匹配空模式、不产文件（实测 `{}` rc=1、`a{}b` 命中 `ab`）。
- *   - 空备选被丢弃：`{a,}` ≡ `{a}`，`{,}` ≡ 无备选（整条不匹配）。
- *   - **不是** shell 的区间展开：`{1..3}` / `{a..c}` 当字面量（实测不命中
- *     任何文件、rc=1）。
- *   - 嵌套：`{a,{b,c}}` → a / b / c。
- *   - `\` 转义：`\{` / `\}` / `\,` 是字面字符（`a\{b` 命中 `a{b`）。
- *   - 字符类里的花括号是**字面成员**：`[{]` 不是交替组。
- *   - `{` 缺 `}` → unclosed alternate group；`}` 无 `{` → unopened。
+ * Semantics verified against rg 15.1.0; scanning and validation share this
+ * function (`assertValidGlob` calls it, malformed input → typed rejection):
+ *   - `{a,b}` alternation; `{ts}` with one element also expands (≡ `ts`);
+ *     `{}` expands to the empty string, i.e. matches the empty pattern and
+ *     produces no file (verified: `{}` rc=1, `a{}b` hits `ab`).
+ *   - Empty alternatives are dropped: `{a,}` ≡ `{a}`, `{,}` ≡ no alternative
+ *     (the whole pattern matches nothing).
+ *   - **Not** shell range expansion: `{1..3}` / `{a..c}` are literals
+ *     (verified: hit no file, rc=1).
+ *   - Nesting: `{a,{b,c}}` → a / b / c.
+ *   - `\` escaping: `\{` / `\}` / `\,` are literal chars (`a\{b` hits `a{b`).
+ *   - Braces inside a character class are **literal members**: `[{]` is not
+ *     an alternation group.
+ *   - `{` without `}` → unclosed alternate group; `}` without `{` → unopened.
  *
- * 返回**未做段切分**的候选原文（可能仍含 `/`）；空数组 = 该模式匹配空集。
+ * Returns candidates **before segment splitting** (may still contain `/`);
+ * an empty array = the pattern matches nothing.
  */
 export function expandGlob(glob: string): string[] {
   const out: string[] = [];
@@ -152,7 +187,7 @@ export function expandGlob(glob: string): string[] {
   return out;
 }
 
-/** 扫描一步的产物：要么吃进一段字面量，要么撞上一个交替组。 */
+/** Result of one scan step: either a literal chunk or an alternation group. */
 type ScanStep =
   | { readonly kind: "literal"; readonly text: string; readonly next: number }
   | {
@@ -162,10 +197,11 @@ type ScanStep =
     };
 
 /**
- * 单层扫描：把 `glob[from..]` 的展开结果接到 `prefix` 上。
+ * One-level scan: append the expansion of `glob[from..]` to `prefix`.
  *
- * 每个字符只做一次判定（判定本身在 `scanStep`），本函数只负责把「字面量」
- * 累积、把「交替组」展开成笛卡尔积。语法错误在 `scanStep` 抛出。
+ * Each character is classified once (classification lives in `scanStep`); this
+ * function only accumulates literals and expands alternation groups into the
+ * cartesian product. Syntax errors are thrown by `scanStep`.
  */
 function expandInto(
   glob: string,
@@ -183,7 +219,8 @@ function expandInto(
       continue;
     }
     for (const alt of step.alternatives) {
-      // 备选内部**递归**展开（嵌套 brace），尾串在同一层继续（多组笛卡尔积）。
+      // Alternatives expand **recursively** (nested braces); the tail
+      // continues at this level (cartesian product across groups).
       const heads: string[] = [];
       expandInto(literal + alt, 0, "", heads);
       for (const head of heads) expandInto(glob, step.tailFrom, head, out);
@@ -193,7 +230,7 @@ function expandInto(
   out.push(literal);
 }
 
-/** 扫描一步：转义 / 字符类 / 交替组 / 单字符字面量（`{` 未闭合与裸 `}` 在此拒绝）。 */
+/** One scan step: escape / character class / alternation group / single literal char (`{` unclosed and stray `}` are rejected here). */
 function scanStep(glob: string, i: number): ScanStep {
   const ch = glob[i]!;
   if (ch === "\\") return escapeStep(glob, i);
@@ -208,9 +245,10 @@ function scanStep(glob: string, i: number): ScanStep {
 }
 
 /**
- * 转义**原样保留**（`\{` 留作 `\{`）：段内匹配器要能区分「字面 `*`」与
- * 「通配 `*`」——`star\*` 命中名为 `star*` 的文件，`star*` 不是。展开层只
- * 负责不把被转义的字符误判为分组 / 类边界。
+ * Escapes are **kept verbatim** (`\{` stays `\{`): the within-segment matcher
+ * must distinguish a literal `*` from a wildcard `*` — `star\*` hits a file
+ * named `star*`, `star*` does not. The expansion layer only ensures escaped
+ * chars are not mistaken for group / class boundaries.
  */
 function escapeStep(glob: string, i: number): ScanStep {
   const next = glob[i + 1];
@@ -236,8 +274,9 @@ function groupStep(glob: string, i: number): ScanStep {
       `grep: invalid glob: ${glob} (unclosed alternate group; missing '}')`
     );
   }
-  // 空备选**保留**（代表空串，不是「丢弃」）：`a{}b` 命中 `ab`、
-  // `a{,}b` 也命中 `ab`；`{}` 展开成空模式，因此不命中任何真实文件名。
+  // Empty alternatives are **kept** (they stand for the empty string, not
+  // "dropped"): `a{}b` hits `ab` and `a{,}b` also hits `ab`; `{}` expands to
+  // the empty pattern, hence it matches no real filename.
   return {
     kind: "group",
     alternatives: splitAlternatives(glob.slice(i + 1, close)),
@@ -246,8 +285,9 @@ function groupStep(glob: string, i: number): ScanStep {
 }
 
 /**
- * `{` 的配对 `}` 下标（跳过 `\` 转义与字符类）；无配对 → -1。
- * 嵌套按深度计数，所以 `{a,{b,c}}` 的外层拿到最后一个 `}`。
+ * Index of the `}` matching a `{` (skipping `\` escapes and character
+ * classes); -1 if unpaired. Nesting is tracked by depth, so the outer group
+ * of `{a,{b,c}}` takes the last `}`.
  */
 function matchingBrace(glob: string, open: number): number {
   let depth = 0;
@@ -273,7 +313,7 @@ function matchingBrace(glob: string, open: number): number {
   return -1;
 }
 
-/** 顶层 `,` 切分（跳过转义 / 字符类 / 嵌套 brace）。 */
+/** Split on top-level `,` (skipping escapes / character classes / nested braces). */
 function splitAlternatives(body: string): string[] {
   const parts: string[] = [];
   let start = 0;
@@ -302,7 +342,7 @@ function splitAlternatives(body: string): string[] {
   return parts;
 }
 
-/** `**` 跨段、其余段内匹配。返回「从 pattern[p] 起能否吃掉 segs[s..]」。 */
+/** `**` crosses segments; others match within a segment. Returns "can pattern[p..] consume segs[s..]". */
 function matchSegments(
   pattern: ReadonlyArray<string>,
   p: number
@@ -330,7 +370,7 @@ function matchSegments(
   };
 }
 
-/** 段内 `*` / `?` / `[...]`。字符类区分大小写（与 rg 同口径）。 */
+/** Within-segment `*` / `?` / `[...]`. Character classes are case-sensitive (same as rg). */
 function matchToken(token: string, segment: string): boolean {
   let ti = 0;
   let si = 0;
@@ -344,7 +384,7 @@ function matchToken(token: string, segment: string): boolean {
   return si === segment.length;
 }
 
-/** 消费一个非 `*` 的 token 单位；返回新下标，`null` = 该处不匹配。 */
+/** Consume one non-`*` token unit; returns new indices, `null` = no match here. */
 function stepToken(
   token: string,
   ti: number,
@@ -356,7 +396,8 @@ function stepToken(
   if (ch === "?") return consumeOne(ti + 1, si, segment);
   if (ch === "[") {
     const cls = classAt(token, ti);
-    // 缺 `]` 的 `[` 不是字符类，落到下面的字面比较。
+    // A `[` without `]` is not a character class; fall through to the literal
+    // comparison below.
     if (cls !== undefined) {
       const hit = si < segment.length && inClass(segment[si]!, cls.body);
       return hit ? { ti: cls.next, si: si + 1 } : null;
@@ -366,7 +407,7 @@ function stepToken(
   return hit ? { ti: ti + 1, si: si + 1 } : null;
 }
 
-/** 转义：下一字符按字面比（`\*` 只吃字面 `*`，`\[` 只吃字面 `[`）。 */
+/** Escape: compare the next char literally (`\*` eats only a literal `*`, `\[` only a literal `[`). */
 function escapeTokenStep(
   token: string,
   ti: number,
@@ -382,7 +423,7 @@ function escapeTokenStep(
   return hit ? { ti: ti + 2, si: si + 1 } : null;
 }
 
-/** 前进一格；越界（segment 已耗尽）→ `null`。 */
+/** Advance one position; out of bounds (segment exhausted) → `null`. */
 function consumeOne(
   ti: number,
   si: number,
@@ -391,7 +432,7 @@ function consumeOne(
   return si < segment.length ? { ti, si: si + 1 } : null;
 }
 
-/** `*`：折叠连续 `*`，再用后缀去啃剩余 segment。 */
+/** `*`: collapse consecutive `*`, then match the suffix against the remaining segment. */
 function matchStar(
   token: string,
   ti: number,
@@ -408,10 +449,11 @@ function matchStar(
 }
 
 /**
- * `[` 处读一段字符类；缺终止 `]` → `undefined`。
+ * Read a character class at `[`; missing closing `]` → `undefined`.
  *
- * 紧跟 `[`（或 `[!` / `[^`）的那个 `]` 是**字面成员**而不是终止符 ——
- * rg 的语法如此：`[]]` 合法（类里只有 `]`），`[]` 与 `[!]` 报 unclosed。
+ * The `]` immediately after `[` (or `[!` / `[^`) **is a literal member**, not
+ * the terminator — that is rg's syntax: `[]]` is legal (class of just `]`),
+ * while `[]` and `[!]` report unclosed.
  */
 function classAt(
   token: string,
@@ -422,11 +464,11 @@ function classAt(
   if (token[i] === "]") i += 1;
   while (i < token.length && token[i] !== "]") i += 1;
   if (i === token.length) return undefined;
-  // body 含 `!` / `^` 前缀：否定由 `inClass` 解读。
+  // body includes the `!` / `^` prefix: negation is interpreted by `inClass`.
   return { body: token.slice(ti + 1, i), next: i + 1 };
 }
 
-/** 字符类：`[abc]` / `[a-z]` / `[!a-z]`。 */
+/** Character class: `[abc]` / `[a-z]` / `[!a-z]`. */
 function inClass(ch: string, cls: string): boolean {
   const negated = cls.startsWith("!") || cls.startsWith("^");
   const body = negated ? cls.slice(1) : cls;

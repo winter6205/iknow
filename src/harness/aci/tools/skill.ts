@@ -1,41 +1,46 @@
-// `skill` 工具（第 22 件 ACI，#337 T5/T6 + #disclosure-index-align T2）—
-// 按名取已安装 skill 的正文。
+// `skill` tool — fetch the body of an installed skill by exact name.
 //
-// 行为真值（spec 337-skill-mcp-extension.md § Code Style + T6 acceptance +
-// spec disclosure-index-align.md SC5/SC6）：
-//   - input `{ name: string required }` —— 直呼命中已索引 skill 名；
-//     叫错名返回引导文本，引导回 `<available_skills>` 清单
-//     （system 段）或（操作员指路径时）`read_file`；**禁止**再提到
-//     已删除的 `skill_search`（spec ADR-0046 / disclosure-index-align T2）。
-//   - **模型索引资格闸**（spec skill-index-increment.md SC5/SC6）：有
-//     description 且未 `disable-model-invocation` 的名字才装配正文；不合格
-//     名抛 `SkillNotModelIndexedError`（typed，理由到达模型），读盘失败抛
-//     `SkillBodyReadError`（与资格拒分型）。闸只罩本工具 —— 读同一份
-//     SKILL.md 的文件工具不因本闸失败（SC5 末句）。
-//   - output：装配正文（T6 起，frontmatter 剥离 + `Base directory` 行 +
-//     `<skill_files>` 段（采样 ≤10 / 绝对路径 / sampled 提示；references/ 不递归））。
-//     T5 阶段返回 SKILL.md 原文；T6 改走 `src/harness/skill/body.ts` 的
-//     `createSkillBody({ entry, dir })`（SC6）。
-//   - aci 元数据（G1 Q1 决策）：read-only / lazy:false / timeoutTier:fast。
+// Behavior ground truth:
+//   - input `{ name: string required }` — a hit against an indexed skill
+//     name loads it; a wrong name returns guidance text pointing back to the
+//     `<available_skills>` list (system section) or, when the operator named
+//     a path, to `read_file`. It must never mention the removed
+//     `skill_search` tool (ADR-0046).
+//   - Model-index eligibility gate: only names with a description and
+//     without `disable-model-invocation` get a body assembled. Ineligible
+//     names throw `SkillNotModelIndexedError` (typed, so the reason reaches
+//     the model); disk-read failures throw `SkillBodyReadError` (a distinct
+//     type from eligibility rejection). The gate covers this tool only — file
+//     tools reading the same SKILL.md do not fail because of it.
+//   - output: the assembled body (frontmatter stripped + `Base directory`
+//     line + `<skill_files>` section: ≤10 sampled absolute paths with a
+//     sampled hint; references/ not recursed), built via
+//     `src/harness/skill/body.ts` `createSkillBody({ entry, dir })`.
+//   - aci metadata: read-only / lazy:false / timeoutTier:fast.
 //
-// **依赖注入形态**：`createSkillTool(deps)` 收 catalog（装配层
-// `createDefaultAciRegistry` 经由 `skillCatalog` opts 传入）。catalog 由
-// T2 `createSkillCatalog(entries)` 创建；T5 阶段 catalog 缺席时（未到 T8
-// 装配），本工厂仍可被测试与未来迁移路径调用。T8 装配时缺席即不注册。
+// Dependency injection: `createSkillTool(deps)` takes the catalog (passed by
+// the assembly layer `createDefaultAciRegistry` via the `skillCatalog` opt).
+// The catalog is created by `createSkillCatalog(entries)`; the factory stays
+// callable for tests and migration paths when no catalog is assembled, and
+// assembly simply does not register the tool in that case.
 //
-// ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 形态逐字节一致）：
-// write root 的披露走 worker prior + chat-session rebind 一次性通知，
-// 共用 `writeRootSegment` helper；本工具的 `SkillToolDeps` 不再需要
-// `liveTaskRoot` / `isolationOn`。
+// ADR-0079 — skill bodies no longer append a write-root trailer (byte-identical
+// to the assembly form): write-root disclosure goes through the worker prior +
+// chat-session rebind one-time notification via the shared `writeRootSegment`
+// helper, so `SkillToolDeps` needs no `liveTaskRoot` / `isolationOn`.
 //
-// **二次短路**（spec skill-body-short-circuit.md SC2/SC3/SC5/SC7）：
-// 模型再调同名 `skill()` 且可见 messages 仍有该名成功全文（337 装配形态
-// 双标记齐全的非 error tool_result）→ 只回短回执，不重装正文；compact 丢掉
-// 该条后自然再灌全文（判据是快照，不是只增不减的会话 Set）。快照缺席
-// fail-closed 灌全文。同波内两次同名：tool_result 尚未入史，wave map
-// （turnId → 已装配名集合）兜住 —— 同波首次装配即预记，Promise.all 并发
-// 下两个 handler 同步批启动，后启动者读到预记即短路。闸只罩 ACI `skill()`
-// handler（slash / Web 不经此路径）。
+// Same-name short-circuit: when the model calls `skill()` again for a name
+// whose successful full body is still visible in messages (a non-error
+// tool_result with both assembly markers), return only a short receipt
+// instead of re-assembling; if compaction drops that entry the full body is
+// naturally re-fed (the criterion is a messages snapshot, not an
+// only-growing session Set). With no snapshot available, fail closed and
+// feed the full body. Two same-name calls in one wave: the tool_result is not
+// yet in history, so a wave map (turnId → assembled-name set) covers the gap —
+// the first assembly in the wave pre-records, and since Promise.all starts
+// both handlers synchronously, the later one reads the pre-record and
+// short-circuits. The gate covers the ACI `skill()` handler only (slash / Web
+// do not go through this path).
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { AnthropicNativeMessage } from "../../model-adapter/types.js";
@@ -45,31 +50,34 @@ import { createSkillBody, SKILL_BODY_MARKERS } from "../../skill/body.js";
 import { ToolExecutionError } from "../../errors.js";
 
 /**
- * 依赖注入：`catalog` 索引层（T2 提供），本工具经其
- * `get(name)` 拿 SkillEntry（body 装配模块吃 entry + dir）。
+ * Dependency injection: the `catalog` index layer; this tool uses its
+ * `get(name)` to obtain a SkillEntry (the body-assembly module takes
+ * entry + dir).
  */
 export interface SkillToolDeps {
   readonly catalog: SkillCatalog;
 }
 
 /**
- * spec skill-index-increment.md SC5/SC6 + Input-contract 表 `skill()` 行：
- * 「非模型索引 → 拒、不灌正文」，「读盘失败 typed，与『资格拒』分型」。
+ * Eligibility rejection: "not in the model index → refuse, feed no body".
  *
- * 模型索引资格（docs/CONTEXT.md「技能模型索引」）= 有 description 且未
- * `disable-model-invocation`。`skill()` 只服务这份资格；人侧 slash 走
- * **可加载技能面**（含无 description、含 disable），不经本 handler。
+ * Model-index eligibility (docs/CONTEXT.md "skill model index") = has a
+ * description and does not set `disable-model-invocation`. `skill()` serves
+ * only this eligibility; the human slash surface covers **loadable skills**
+ * (including those without description or with disable) and never enters
+ * this handler.
  *
- * 继承 `ToolExecutionError` 的理由：executor 的 `sanitizeFailure` 只放行
- * 该类型（或自报 `modelFacing`）的 message，其余塌成常量
- * `"tool execution failed"`。拒绝理由必须到达模型 —— 模型据此改用
- * `<available_skills>` 里的合格名，而不是盲目重试。
+ * Why it extends `ToolExecutionError`: the executor's `sanitizeFailure` only
+ * lets through that type's (or self-declared `modelFacing`) messages;
+ * anything else collapses to the constant `"tool execution failed"`. The
+ * rejection reason must reach the model — so it switches to an eligible name
+ * from `<available_skills>` instead of blindly retrying.
  */
 export class SkillNotModelIndexedError extends ToolExecutionError {
   override readonly name: string = "SkillNotModelIndexedError";
   readonly kind = "not_model_indexed" as const;
   readonly skillName: string;
-  /** 与 `disabled` 正交地说明是哪一侧不合格（两类出路不同）。 */
+  /** Which side fails, orthogonal to `disabled` (the two have different exits). */
   readonly reason: "disabled" | "no_description";
 
   constructor(skillName: string, reason: "disabled" | "no_description") {
@@ -84,16 +92,19 @@ export class SkillNotModelIndexedError extends ToolExecutionError {
 }
 
 /**
- * 装配期读盘失败（SKILL.md 不可读 / skill 目录不可达）。与
- * `SkillNotModelIndexedError` **分型**（spec Input-contract `skill()` 行
- * exception 列）：资格拒是「这条路对你不开放」，读盘失败是「本该开放、
- * 此刻读不到」—— 调用方下一步不同。
+ * Assembly-time disk-read failure (SKILL.md unreadable / skill directory
+ * unreachable). A **distinct type** from `SkillNotModelIndexedError`:
+ * eligibility rejection means "this route is not open to you", a disk-read
+ * failure means "it should be open but is unreadable right now" — the
+ * caller's next step differs.
  *
- * 读盘故障要点：`createSkillBody` 抛的 ENOENT / EACCES 原文里带绝对路径，
- * 直接透出会把 skill 安装根的路径布局写进模型可见文本（且 executor 只认
- * `ToolExecutionError` 的 message）。故本类**不搬运** cause 的 message ——
- * `message` 只说「哪个 skill 读不到 + 让模型改走 read_file」，原始故障留在
- * `cause` 上给测试与 host 分支用。
+ * Disk-fault handling: the raw ENOENT / EACCES thrown by `createSkillBody`
+ * embeds absolute paths, so passing it through verbatim would write the
+ * skill install root's layout into model-visible text (and the executor only
+ * honors `ToolExecutionError` messages). This class therefore **does not
+ * carry over** the cause's message — `message` says only "which skill could
+ * not be read + fall back to read_file", and the raw fault stays on `cause`
+ * for tests and host-side branching.
  */
 export class SkillBodyReadError extends ToolExecutionError {
   override readonly name: string = "SkillBodyReadError";
@@ -111,9 +122,10 @@ export class SkillBodyReadError extends ToolExecutionError {
 }
 
 /**
- * 读盘故障 → 安全短摘要（errno code 一类；不打路径）。cause 形态不定
- * （Error / plain object），故与 `errorMessage` 同一纪律：不写
- * `err.message` 的裸取值，也不 `String(err)` 打 `[object Object]`。
+ * Disk fault → safe short summary (errno code style; never a path). The
+ * cause's shape is not fixed (Error / plain object), so follow the same
+ * discipline as `errorMessage`: no bare `err.message` access and no
+ * `String(err)` that prints `[object Object]`.
  */
 function errorSummary(cause: unknown): string {
   if (cause !== null && typeof cause === "object" && "code" in cause) {
@@ -124,8 +136,10 @@ function errorSummary(cause: unknown): string {
 }
 
 /**
- * 短回执字面量（SC2）：非空、语义含「已在可见上下文 / 勿再调 / 按先前正文
- * 执行」。刻意**不含** 337 双标记任一 —— 回执绝不能被 recognizer 误认成全文。
+ * Short-receipt literal: non-empty, meaning "already in visible context /
+ * do not call again / act on the body fed earlier". Deliberately contains
+ * **neither** assembly marker — a receipt must never be mistaken by the
+ * recognizer for a full body.
  */
 const SHORT_CIRCUIT_RECEIPT =
   "Skill body already in context. Do not call `skill` again — use the body fed earlier.";
@@ -134,7 +148,7 @@ type ContentBlock = AnthropicNativeMessage["content"][number];
 type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
 type ToolResultBlock = Extract<ContentBlock, { type: "tool_result" }>;
 
-/** 该 block 是不是「本次要判定的 skill 名」的 tool_use（名字不同不算）。 */
+/** Is this block a tool_use for the skill name under evaluation (other names don't count)? */
 function isSkillUseOf(
   block: ContentBlock,
   name: string
@@ -147,8 +161,9 @@ function isSkillUseOf(
 }
 
 /**
- * 该 tool_result 是不是「已被认领的 id + 非 error」的成功结果。is_error
- * 的失败结果不算 —— 失败文本可能带标记，但正文并未真的入史。
+ * Is this tool_result a successful result for a claimed id and non-error?
+ * An is_error failure does not count — failure text may carry the markers
+ * while the body never actually entered history.
  */
 function isSuccessResultOf(
   block: ContentBlock,
@@ -161,7 +176,7 @@ function isSuccessResultOf(
   );
 }
 
-/** 337 装配形态判据：结果文本同时含双标记（缺一 = 截断形，不作数）。 */
+/** Assembly-form criterion: the result text contains both markers (one missing = truncated form, doesn't count). */
 function hasAssemblyMarkers(text: string): boolean {
   return (
     text.includes(SKILL_BODY_MARKERS.baseDirectory) &&
@@ -170,17 +185,18 @@ function hasAssemblyMarkers(text: string): boolean {
 }
 
 /**
- * 判定可见历史里是否已有 skill 名 `name` 的成功全文 tool_result
- * （skill-body-short-circuit spec「成功全文」判据）：
- * assistant `tool_use(name === "skill", input.name === name)` 的 id 存在
- * 后续 `tool_result(tool_use_id 匹配, is_error !== true)`，且结果文本同时含
- * 337 装配形态双标记。引导句 / 短回执不含双标记，天然不匹配。
+ * Does the visible history already contain a successful full-body
+ * tool_result for skill `name`? The "successful full body" criterion: an
+ * assistant `tool_use(name === "skill", input.name === name)` whose id is
+ * answered by a later `tool_result(tool_use_id match, is_error !== true)`,
+ * and the result text contains both assembly markers. Guidance text and
+ * short receipts lack the markers, so they never match.
  */
 export function hasVisibleFullSkillBody(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   name: string
 ): boolean {
-  // 先收集所有（tool_use_id, 名）→ 需要全文的 skill 调用 id。
+  // First collect all tool_use ids that are skill calls needing the full body.
   const wantedIds = new Set<string>();
   for (const message of messages) {
     for (const block of message.content) {
@@ -197,7 +213,7 @@ export function hasVisibleFullSkillBody(
   return false;
 }
 
-/** tool_result content 投影成纯文本（string 直取；blocks 拼 text 段）。 */
+/** Project tool_result content to plain text (string as-is; blocks joined by their text parts). */
 function resultBlockText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -216,10 +232,13 @@ function resultBlockText(content: unknown): string {
 }
 
 /**
- * 同波短路查询 + 预记，一步完成（SC7）：命中「该 turn 已装配过该名」返回
- * `undefined`（调用方回短回执）；否则同步预记并返回回滚凭据。预记必须先于
- * 装配 —— 同波 Promise.all 并发启动的第二个 handler 在本 handler 尚未返回
- * 时就能读到（tool_result 入史前 wave map 是唯一可见判据）。
+ * Same-wave short-circuit lookup + pre-record in one step: returns
+ * `undefined` when this turn has already assembled the name (caller sends
+ * the short receipt); otherwise synchronously pre-records and returns the
+ * rollback handle. The pre-record must happen before assembly — the second
+ * handler started concurrently by Promise.all in the same wave can read it
+ * before this handler returns (until the tool_result enters history, the
+ * wave map is the only visible criterion).
  */
 function claimSameWave(
   assembledByTurn: Map<string, Set<string>>,
@@ -235,11 +254,12 @@ function claimSameWave(
 }
 
 /**
- * 装配正文（T6：frontmatter 剥离 + Base directory 行 + skill_files 段；
- * ADR-0079 起不再追加写根 trailer）。entry.dir 即 SKILL.md 所在目录
- * （catalog.getBodyPath 内部 join(dir, "SKILL.md")）。装配抛错 → 回滚预记
- * （fail-closed）：正文从未入史就不得谎称已加载，第二次同名调用应重装配
- * 或让错误显形。
+ * Assemble the body (frontmatter strip + Base directory line + skill_files
+ * section; no write-root trailer since ADR-0079). entry.dir is the directory
+ * containing SKILL.md (catalog.getBodyPath internally joins dir/SKILL.md).
+ * If assembly throws, roll back the pre-record (fail closed): a body that
+ * never entered history must never be claimed as loaded — the next same-name
+ * call should re-assemble or let the error surface.
  */
 async function assembleWithRollback(
   entry: SkillEntry,
@@ -250,34 +270,41 @@ async function assembleWithRollback(
     return await createSkillBody({ entry, dir: entry.dir });
   } catch (err) {
     waveSet?.delete(name);
-    // 读盘失败与资格拒分型（spec Input-contract `skill()` 行 exception 列）。
-    // 预记回滚在此完成：正文从未入史就不得谎称已加载。
+    // Disk-read failure keeps a type distinct from eligibility rejection.
+    // The pre-record rollback completes here: never claim an unloaded body.
     throw new SkillBodyReadError(name, err);
   }
 }
 
 /**
- * 工厂：createSkillTool(deps) — 直呼取 skill 正文（第 22 件）。
+ * Factory: createSkillTool(deps) — fetch a skill body by exact name.
  *
- * 命中且可见历史已有成功全文 → 短回执；否则装配正文（frontmatter 剥离 +
- * Base directory 行 + `<skill_files>` 采样，与 #337 SC6 逐字节一致）。
- * 未命中：返回引导文本（不抛，向模型传达"看 `<available_skills>` 清单
- * 或（操作员指路径时）用 `read_file`"）—— spec ADR-0046 删 `skill_search`
- * 后唯一的回退入口。
+ * On a hit whose successful full body is still visible → short receipt;
+ * otherwise assemble the body (frontmatter strip + Base directory line +
+ * `<skill_files>` sampling, byte-identical with the assembly form).
+ * On a miss: return guidance text (no throw, conveying "check the
+ * `<available_skills>` list, or use `read_file` when the operator named a
+ * path") — the only fallback entry after `skill_search` was removed
+ * (ADR-0046).
  *
- * 命中后先过模型索引资格闸（SC5/SC6）：不合格 → `SkillNotModelIndexedError`，
- * 不装配正文、不进 wave map。顺序是**闸先于短路**：不合格名本就不该出现在
- * 模型的调用面上，历史里恰好有同名旧全文也不能把它「洗白」成已加载。
+ * On a hit, the model-index eligibility gate runs first: ineligible →
+ * `SkillNotModelIndexedError`, no body assembled, no wave-map entry. The
+ * order is **gate before short-circuit**: an ineligible name should not be
+ * on the model's call surface at all, and a stale same-name body in history
+ * must not "launder" it into loaded.
  *
- * Wave map 权衡：keyed by turnId，跨 turn 残留无害（判据仍以 messages
- * 快照为准，map 只覆盖「同波 tool_result 未入史」窗口）；factory 闭包
- * 持有、不清理 —— 键空间 = 会话内真实使用过的 turnId 数，量级小。
- * 预记先于装配（同波 Promise.all 并发下第二个 handler 读不到未完成的
- * 第一个），装配抛错时回滚预记 —— 正文从未入史就不得谎称已加载
- * （S2 exception 类 fail-closed）。
+ * Wave-map trade-off: keyed by turnId; cross-turn residue is harmless (the
+ * criterion stays the messages snapshot; the map only covers the "same wave,
+ * tool_result not yet in history" window). Held by the factory closure and
+ * never cleaned — the key space is the number of turnIds actually used in a
+ * session, which is small. Pre-record before assembly (under Promise.all in
+ * the same wave, the second handler must see the first's intent even though
+ * it has not returned), and roll back the pre-record when assembly throws:
+ * a body that never entered history must never be claimed as loaded
+ * (fail-closed on the exception path).
  */
 export function createSkillTool(deps: SkillToolDeps): AciToolDef {
-  // SC7:本 factory（每会话装配一个）内的同波已装配名集合。
+  // Same-wave assembled-name sets within this factory (one per session).
   const assembledByTurn = new Map<string, Set<string>>();
   return Object.freeze({
     name: "skill",
@@ -289,12 +316,14 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       required: ["name"],
       additionalProperties: false,
     },
-    // ADR-0083 — 装配期静态声明:本工具的输出（一次装配产物、整份语义，
-    // 不是可再生查询）不进 executor 的 `OUTPUT_HARD_CAP` 兜底截断。落值
-    // 点在此，读点只在 `src/harness/tools/executor.ts`（safeContent）；
-    // 其余内建工厂不落此声明，MCP 转换路径不落（`toAciToolDef` 只映射
-    // name / description / inputSchema），`registerExternal` 另做剥离防
-    // 手工构造的 mcp__ def 混入。
+    // ADR-0083 — statically declared at assembly time: this tool's output is
+    // a one-shot assembly product with whole-document semantics (not a
+    // re-derivable query), so it is exempt from the executor's
+    // `OUTPUT_HARD_CAP` fallback truncation. Declared here, read only in
+    // `src/harness/tools/executor.ts` (safeContent); other built-in factories
+    // do not declare it, and the MCP conversion path does not either
+    // (`toAciToolDef` maps only name / description / inputSchema);
+    // `registerExternal` strips it so hand-built mcp__ defs can't smuggle it.
     exemptFromOutputCap: true,
     handler: async (
       input: unknown,
@@ -303,14 +332,16 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       const name = parseName(input);
       const entry = deps.catalog.get(name);
       if (!entry) {
-        // 引导句不算已加载：不进 wave map，再调仍引导（SC5）。
+        // Guidance doesn't count as loaded: no wave-map entry, retries still get guidance.
         return `skill '${name}' not found. Pick the name from the \`<available_skills>\` list in the system prompt, or — if the operator pointed at a file path outside the scan root — use \`read_file\`.`;
       }
-      // 模型索引资格闸（SC5/SC6）——**先于**任何短路 / wave 预记 / 装配。
-      // 不合格名不该进任何路径：既不装配正文，也不该被标成「已加载」而
-      // 让第二次同名调用拿到短回执（拒必须压过短路，否则不合格名会被
-      // 历史里的旧全文「洗白」）。catalog.get 仍按名返回含 disabled 的
-      // 条目（可加载技能面），闸只落在本 handler。
+      // Model-index eligibility gate — runs **before** any short-circuit /
+      // wave pre-record / assembly. An ineligible name must enter no path:
+      // neither body assembly nor a "loaded" marking that would hand a short
+      // receipt to the next same-name call (rejection must outrank
+      // short-circuit, or stale history would launder it). catalog.get still
+      // returns disabled entries by name (the loadable-skills surface); the
+      // gate lives only in this handler.
       const ineligibility = modelIndexIneligibility(entry);
       if (ineligibility !== undefined) {
         throw new SkillNotModelIndexedError(name, ineligibility);
@@ -319,19 +350,20 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       if (messages !== undefined && hasVisibleFullSkillBody(messages, name)) {
         return SHORT_CIRCUIT_RECEIPT;
       }
-      // turnId 缺席（slash / 直调 handler）→ 无同波登记可查，fail-closed 灌全文。
+      // No turnId (slash / direct handler call) → no same-wave record to
+      // consult; fail closed and feed the full body.
       const turnId = ctx?.turnId;
       let waveSet: Set<string> | undefined;
       if (turnId !== undefined) {
         waveSet = claimSameWave(assembledByTurn, turnId, name);
-        // undefined = 该 turn 已装配过该名 → 正文已在场，短路。
+        // undefined = this turn already assembled the name → body is present, short-circuit.
         if (waveSet === undefined) return SHORT_CIRCUIT_RECEIPT;
       }
       return await assembleWithRollback(entry, name, waveSet);
     },
     aci: {
       category: "read-only",
-      // T6 装配前无需 lazy;skill 工具常驻 prompt（T6 不改此项）。
+      // No lazy needed before assembly; the skill tool is resident in the prompt.
       lazy: false,
       timeoutTier: "fast",
       isConcurrencySafe: true,
@@ -340,7 +372,7 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
   });
 }
 
-/** 解析 name 字段；非 string / 缺字段 → 视为未命中(返回引导文本)。 */
+/** Parse the name field; non-string / missing → treated as a miss (returns guidance text). */
 function parseName(input: unknown): string {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return "";

@@ -1,45 +1,57 @@
 /**
- * B6 / ADR-0043 §3 — 溢出治理判定层(纯逻辑)。
+ * ADR-0043 — overflow-governance decision layer (pure logic).
  *
- * 装配期(`buildHarnessEngine` 在 `await mcpManager.start()` 之后)一次性判定:
- * 可延迟工具池(MCP 工具天然 deferrable + 标记 deferrable 的内建低频件)
- * schema 总量超过端点模型 context window 的 10% 时,按退场次序逐件退到索引
- * 档(名+描述),直至总量 ≤ 阈值或池空。**只首轮一次**,会话内不重算。
+ * Decided once at assembly time (`buildHarnessEngine`, after
+ * `await mcpManager.start()`): when the deferrable tool pool (MCP tools are
+ * naturally deferrable, plus builtins explicitly marked deferrable) exceeds
+ * 10% of the endpoint model's context window in total schema size, retire
+ * tools one by one down to the index tier (name + description only),
+ * following the fixed retirement order, until the total is back under the
+ * threshold or the pool is empty. **First turn only** — never recomputed
+ * within a session.
  *
- * 退场机制 = stamp `aci.lazy: true`(B4 §2 已立:lazy 工具 schema 不进
- * visibleSchemas;T4:退场件进 `<deferred_internal_tools>` 段为**名+描述**,
- * 模型直呼即 hydrate —— 不必先 `tool_search`,见 permission-executor gateOne)。
+ * Retirement mechanism = stamp `aci.lazy: true` (a lazy tool's schema stays
+ * out of visibleSchemas; retired tools appear in the
+ * `<deferred_internal_tools>` section as **name + description**, and the
+ * model hydrates by calling the tool directly — no prior `tool_search`
+ * needed; see permission-executor gateOne).
  *
- * 退场次序(SSOT,ADR-0043 §3 钉死):trace 读侧三件
- * (query_trace / list_sessions / get_record) → web_search / web_fetch → 其
- * 余低频件按实测面积排。**核心七件永不退场**(bash / read_file / edit_file
- * / write_file / grep / glob / spawn_subagent),即使被标 deferrable 也不参
- * 与判定。
+ * Retirement order (SSOT, pinned by ADR-0043): the three trace read-side
+ * tools (query_trace / list_sessions / get_record) → web_search / web_fetch
+ * → other low-frequency tools ordered by measured footprint. **The core
+ * seven never retire** (bash / read_file / edit_file / write_file / grep /
+ * glob / spawn_subagent) — they do not participate in the decision even if
+ * marked deferrable.
  *
- * countTokens 调用失败 / 缺席 → 跳过本会话(全部 deferrable 内建件保持常
- * 驻),首轮不抛错、不重试,由调用方 `console.warn` 记录。
+ * countTokens call failure / absent → skip the judgment for this session
+ * (all deferrable builtins stay resident); no first-turn throw, no retry;
+ * the caller records it via `console.warn`.
  *
- * 本模块**纯逻辑**:不绑 build-engine / 不绑 ACI executor;输入 tools +
- * countTokens 闭包 + 阈值,输出 retire 名单 + reason。装配层拿到 retire
- * 名单后遍历 stamp `aci.lazy: true`(MutationField:此字段仅此一处允许
- * 写,符合 #224 B4 发现的"装配期 const 不可变"契约 —— registry 装配时
- * AciToolDef 是冻结的,但**本模块在 registry 构造前**对工厂内 def 写入
- * lazy:true 是构造期一次性副作用,等同于在 factories 工厂内手工 stamp)。
+ * This module is **pure logic**: no build-engine / ACI executor coupling;
+ * inputs are tools + a countTokens closure + a threshold, outputs are the
+ * retire list + a reason. The assembly layer walks the returned list and
+ * stamps `aci.lazy: true` (this field is written nowhere else, honoring the
+ * "assembly-time consts are immutable" contract — AciToolDefs are frozen
+ * once the registry is built, but **this module runs before registry
+ * construction**, so writing lazy:true into the factory-produced defs is a
+ * one-time construction-phase side effect equivalent to stamping inside the
+ * factories themselves).
  */
 
 import type { AciToolDef } from "./types.js";
 
 /**
- * 内建件退场次序(SSOT,ADR-0043 §3 预置)。
+ * Retirement order for builtins (SSOT, preset per ADR-0043).
  *
- *   - trace 读侧三件:query_trace / list_sessions / get_record
- *     (面积 × 低频从大到小;query_trace 行轴面积最大,get_record 内容轴面积
- *     通常最小)
- *   - web_search / web_fetch:网络出口 + 低频
+ *   - trace read-side three: query_trace / list_sessions / get_record
+ *     (largest footprint × lowest frequency first; query_trace's row axis is
+ *     the biggest, get_record's content axis is usually the smallest)
+ *   - web_search / web_fetch: network egress + low frequency
  *
- * 「其余低频查询件按实测面积排」超出预置次序的扩名 = Confirms with human
- * 项,本常量不动 —— 实施时若发现明显该进的候选项,在报告中列证据,不改
- * 数组(plan B6 §3)。
+ * Extending this order with "other low-frequency tools by measured
+ * footprint" requires human confirmation, so this constant stays put — if
+ * implementation finds an obvious candidate, list the evidence in the
+ * report instead of editing the array.
  */
 export const DEFERRABLE_BUILTIN_RETIRE_ORDER: ReadonlyArray<string> =
   Object.freeze([
@@ -50,7 +62,7 @@ export const DEFERRABLE_BUILTIN_RETIRE_ORDER: ReadonlyArray<string> =
     "web_fetch",
   ] as const);
 
-/** 核心七件 SSOT —— 永不退场,即使被标 deferrable。 */
+/** Core seven SSOT — never retired, even if marked deferrable. */
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "bash",
   "read_file",
@@ -61,17 +73,19 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "spawn_subagent",
 ]);
 
-/** countTokens 闭包契约 —— SDK 0.115 `client.messages.countTokens`
- *  调用面的最小投影:实测量(>= 0)或抛错。 */
+/** countTokens closure contract — minimal projection of the SDK's
+ *  `client.messages.countTokens` call site: a measured value (>= 0) or a
+ *  throw. */
 export type CountTokensFn = () => Promise<number>;
 
-/** 装配层传过来的可延迟池 = 标记 deferrable 的内建件 + MCP 工具(在调用
- *  方按 register 名单的 mcp__ 前缀过滤)。**核心件已被调用方剔除**(SSOT
- *  守门),本函数信任入参不含核心件。 */
+/** The deferrable pool handed over by the assembly layer = builtins marked
+ *  deferrable + MCP tools (the caller filters by the mcp__ prefix per its
+ *  register list). **Core tools are already removed by the caller** (SSOT
+ *  guard), so this function trusts the input holds none. */
 export interface OverflowJudgeOpts {
   readonly tools: ReadonlyArray<AciToolDef>;
-  /** 阈值 = contextWindow * 0.1(由调用方在装配层算好传入,本函数不读
-   *  env —— 纯逻辑)。 */
+  /** Threshold = contextWindow * 0.1 (computed by the caller at assembly;
+   *  this function never reads env — pure logic). */
   readonly threshold: number;
   readonly countTokens: CountTokensFn;
 }
@@ -86,39 +100,48 @@ export type OverflowJudgeResult =
     };
 
 /**
- * 首轮溢出治理判定 —— 一次到位,内部循环退场。
+ * First-turn overflow judgment — one pass, with an internal retirement
+ * loop.
  *
- * 步骤:
- *   1. 收集「候选退场名单」 = 标记 deferrable 且不在核心件名单里的工具
- *      名(按 `DEFERRABLE_BUILTIN_RETIRE_ORDER` 次序,其他 deferrable
- *      候选排在预置次序之后,见 `extraOrder`)。
- *   2. 第一次 `countTokens` 实测:成功 → 与阈值比较;失败 → 跳过
- *      本会话(返回 `countTokens_failed`,调用方 warn + 不动工具集)。
- *   3. 总量 ≤ 阈值 → `no_overflow`(调用方零动作)。
- *   4. 总量 > 阈值 → 按候选次序逐件退,每退 1 件重测 1 次 countTokens;
- *      退出循环当 ≤ 阈值或池空。
- *   5. 全退完仍超阈值 → `retired` 仍带上全部候选(已尽力,核心件永不退
- *      场,这是 hard ceiling);调用方零 warn(不是错误,只是面积不够)。
+ * Steps:
+ *   1. Collect the candidate retirement list = tool names marked deferrable
+ *      and not in the core set (ordered by
+ *      `DEFERRABLE_BUILTIN_RETIRE_ORDER`; remaining deferrable candidates
+ *      follow after the preset order, see `extraOrder`).
+ *   2. First `countTokens` measurement: success → compare with threshold;
+ *      failure → skip this session (return `countTokens_failed`, caller
+ *      warns + leaves the tool set untouched).
+ *   3. Total ≤ threshold → `no_overflow` (caller does nothing).
+ *   4. Total > threshold → retire candidates one by one in order,
+ *      re-measuring countTokens after each; exit the loop when the total is
+ *      back ≤ threshold or the pool is empty.
+ *   5. Still over threshold after retiring everything → `retired` still
+ *      carries all candidates (best effort; the core seven never retire —
+ *      this is the hard ceiling); the caller does not warn (not an error,
+ *      just insufficient savings).
  *
- * 候选名单 derivation:
- *   - 内建低频件 = 出现在 `DEFERRABLE_BUILTIN_RETIRE_ORDER` 且标 deferrable
- *     的工具,按预置次序
- *   - 其余 deferrable(MCP 工具天然 + 未来追加的内建件)= 按 catalog.all()
- *     注册次序(原序),列在预置次序之后
+ * Candidate list derivation:
+ *   - low-frequency builtins = tools present in
+ *     `DEFERRABLE_BUILTIN_RETIRE_ORDER` and marked deferrable, in preset
+ *     order
+ *   - other deferrable (MCP tools naturally + future builtins) = in
+ *     catalog.all() registration order (original order), listed after the
+ *     preset order
  *
- * 注:`runOverflowJudge` 接收的 `tools` 已是**装配期冻结的 def 列表**,
- * 不区分内建 / MCP —— registry.all() / reg.catalog.all() 都不动次序(本
- * 函数内部只按 `name` 排)。
+ * Note: the `tools` received by `runOverflowJudge` are the
+ * **assembly-time frozen def list**, with no builtin/MCP distinction —
+ * registry.all() / reg.catalog.all() never reorder (this function sorts
+ * only by `name` internally).
  */
 export async function runOverflowJudge(
   opts: OverflowJudgeOpts
 ): Promise<OverflowJudgeResult> {
   const candidateOrder = deriveCandidateOrder(opts.tools);
   if (candidateOrder.length === 0) {
-    // 池空 → 跳过判定,直接 no_overflow(无错)
+    // Empty pool → skip the judgment, straight no_overflow (no error)
     return { reason: "no_overflow", retire: [] };
   }
-  // 第一次实测
+  // First measurement
   let total: number;
   try {
     total = await opts.countTokens();
@@ -126,7 +149,7 @@ export async function runOverflowJudge(
     return { reason: "countTokens_failed", retire: [], cause };
   }
   if (!Number.isFinite(total) || total < 0) {
-    // 非法值 → 同失败语义(失败 = 跳过,retire 空)
+    // Invalid value → same semantics as failure (failure = skip, empty retire list)
     return {
       reason: "countTokens_failed",
       retire: [],
@@ -136,7 +159,7 @@ export async function runOverflowJudge(
   if (total <= opts.threshold) {
     return { reason: "no_overflow", retire: [] };
   }
-  // 退场循环:每退 1 件重测 1 次
+  // Retirement loop: re-measure after each retirement
   const retired: string[] = [];
   for (const name of candidateOrder) {
     retired.push(name);
@@ -144,40 +167,45 @@ export async function runOverflowJudge(
     try {
       next = await opts.countTokens();
     } catch (cause) {
-      // 中途 countTokens 失败 = retire 名单仅供参考 —— 调用方 skip 语义下
-      // 不应用(全量 deferrable 保持常驻);之前已退的件保留(已 latch),
-      // 不再追加。返回 countTokens_failed + 当前 retire,调用方 warn。
+      // A mid-loop countTokens failure makes the retire list advisory only —
+      // under the caller's skip semantics it must not be applied (all
+      // deferrable tools stay resident); tools retired before the failure
+      // stay retired (already latched) and nothing more is appended. Return
+      // countTokens_failed + the current retire; caller warns.
       return { reason: "countTokens_failed", retire: retired, cause };
     }
     if (next <= opts.threshold) {
       return { reason: "retired", retire: retired };
     }
   }
-  // 池空仍超阈值(罕见:核心件全在 + 大量 deferrable)→ 尽力退,retire
-  // 含全部候选;reason = "retired"(已尽力,不是错误)
+  // Pool exhausted but still over threshold (rare: all core tools present +
+  // a large deferrable pool) → best-effort retirement; retire carries every
+  // candidate; reason = "retired" (best effort done, not an error)
   return { reason: "retired", retire: retired };
 }
 
 /**
- * 候选退场名单 derivation:
- *   - 出现在 `DEFERRABLE_BUILTIN_RETIRE_ORDER` 的 deferrable 内建件 → 按
- *     预置次序
- *   - 其他 deferrable(MCP 工具天然 + 未来追加的内建件)= 按 registry 原
- *     序,列在预置次序之后
+ * Candidate retirement list derivation:
+ *   - deferrable builtins present in `DEFERRABLE_BUILTIN_RETIRE_ORDER` →
+ *     preset order
+ *   - other deferrable (MCP tools naturally + future builtins) → the
+ *     registry's original order, listed after the preset order
  *
- * 核心件已被 callers 剔除(本函数不二次过滤 —— 调用方负责把 bash 等剔
- * 除后再传入,以便调用方同时算核心件 schema 总量纳入 countTokens 实测
- * 面,即"模拟首轮请求完整面")。
+ * Core tools are already removed by callers (no second filtering here —
+ * the caller strips bash & co. before passing in, so the same call can
+ * also measure the core tools' schema footprint inside countTokens, i.e.
+ * "simulating the full first-turn request surface").
  */
 function deriveCandidateOrder(
   tools: ReadonlyArray<AciToolDef>
 ): ReadonlyArray<string> {
   const defSet = new Set<string>();
   for (const t of tools) {
-    // 核心七件(即使标 deferrable)永不参与 —— hard ceiling(ADR-0043 §3
-    // 钉死 + B6 plan §3 确认)。本过滤在候选 derivation 层一次性完成;
-    // 后续 retire 写入由 retireBuiltin 同步守门(核心件不在预置次序 +
-    // deriveCandidateOrder 已剔除)。
+    // The core seven never participate (even if marked deferrable) — hard
+    // ceiling pinned by ADR-0043. This filter runs once at the candidate
+    // derivation layer; retire writes stay guarded downstream by
+    // retireBuiltin (core tools are absent from the preset order and
+    // already stripped by deriveCandidateOrder).
     if (CORE_TOOL_NAMES.has(t.name)) continue;
     if (t.aci.deferrable === true) defSet.add(t.name);
   }
@@ -185,8 +213,8 @@ function deriveCandidateOrder(
   for (const name of DEFERRABLE_BUILTIN_RETIRE_ORDER) {
     if (defSet.has(name)) ordered.push(name);
   }
-  // 其他 deferrable 按 registry 原序(本函数信任入参 tools 的次序 =
-  // registry 注册序)
+  // Other deferrable tools keep the registry's original order (this function
+  // trusts the input tools order = registry registration order)
   for (const t of tools) {
     if (
       t.aci.deferrable === true &&

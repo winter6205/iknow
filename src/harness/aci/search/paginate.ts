@@ -1,33 +1,37 @@
 /**
- * 结果名单分页（SC12「分页」；契约 D3 / SC7）。
+ * Pagination of the result roster.
  *
- * 三种出法共用同一套 offset / head_limit —— 出法只决定「名单里放什么」，
- * 不决定「怎么切」。切的是**已排序**名单（见 `sort.ts`）。
+ * All three output modes share one offset / head_limit scheme — the output
+ * mode only decides "what goes into the roster", never "how it is sliced".
+ * What gets sliced is the **already sorted** roster (see `sort.ts`).
  *
- * 回执语义（SC7）：
- *   - 名单为空（本次查询确实无命中）→ 空串。
- *   - 名单非空但 offset 越过最后一条 → 精确 `No entries at this offset`。
- *   两条回执互斥，且都不是「无匹配」文案 —— 模型据此区分「换个词」与
- *   「翻页翻过头」。
+ * Receipt semantics:
+ *   - Empty roster (the query truly has no hits) → empty string.
+ *   - Non-empty roster but offset past the last entry → exactly
+ *     `No entries at this offset`.
+ *   The two receipts are mutually exclusive and neither is a "no matches"
+ *   message — the model uses them to tell "try another word" apart from
+ *   "paged past the end".
  */
 
-/** SC7 精确回执；不是空串、不是「无匹配」。 */
+/** The exact past-the-end receipt; not an empty string, not a "no matches" message. */
 export const NO_ENTRIES_AT_OFFSET = "No entries at this offset";
 
 export interface Page<T> {
   readonly items: ReadonlyArray<T>;
   /**
-   * offset 越过最后一条且名单非空 → true。调用方据此回
-   * `NO_ENTRIES_AT_OFFSET`。
+   * True when the roster is non-empty but the offset is past the last entry;
+   * the caller answers `NO_ENTRIES_AT_OFFSET` accordingly.
    */
   readonly beyondEnd: boolean;
 }
 
 /**
- * 切页。
+ * Slice a page.
  *
- * `items` 必须是已排序名单。空名单 → `{ items: [], beyondEnd: false }`
- * （无匹配是空串，不是本回执）。
+ * `items` must be the sorted roster. An empty roster yields
+ * `{ items: [], beyondEnd: false }` (no matches renders as an empty string,
+ * not as the past-the-end receipt).
  */
 export function paginate<T>(
   items: ReadonlyArray<T>,

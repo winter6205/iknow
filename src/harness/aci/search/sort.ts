@@ -1,17 +1,20 @@
 /**
- * 稳定排序（SC12「排序」；契约 D3「稳定排序（path 再行号）发生在切片之前」）。
+ * Stable sorting: (path, then line) ordering happens **before** slicing.
  *
- * 两种引擎的原始顺序都不可依赖：rg 的并行遍历顺序随线程调度变，Node 扫的
- * `readdir` 顺序随文件系统变。分页要求「同一查询两次调用看到同一页」，所以
- * 排序必须是切片的前置步骤，而不是展示层的修饰。
+ * Neither engine's raw order can be relied on: rg's parallel walk order varies
+ * with thread scheduling, and the Node scan's `readdir` order varies with the
+ * filesystem. Pagination requires "the same query called twice sees the same
+ * page", so sorting must be a prerequisite of slicing, not a display-layer
+ * garnish.
  */
 
 import type { ContextGroup, LineHit } from "./types.js";
 
 /**
- * 按 (path, line) 升序排；同键保持输入相对顺序（Array#sort 自 ES2019 起
- * 稳定）。path 比较用 code unit 序 —— 与 rg `--sort path` 的字典序同口径，
- * 且不随 locale 变。
+ * Sort ascending by (path, line); equal keys keep input relative order
+ * (Array#sort has been stable since ES2019). Path comparison uses code-unit
+ * order — same convention as rg's `--sort path` lexicographic order, and it
+ * does not vary with locale.
  */
 export function sortLineHits(hits: ReadonlyArray<LineHit>): LineHit[] {
   return [...hits].sort((a, b) => {
@@ -20,21 +23,24 @@ export function sortLineHits(hits: ReadonlyArray<LineHit>): LineHit[] {
   });
 }
 
-/** 文件名单排序（paths / count 出法共用；count 的 `path:条数` 行序）。 */
+/** Path-list sorting (shared by the paths / count outputs; counts render as `path:count` in this order). */
 export function sortPaths(paths: ReadonlyArray<string>): string[] {
   return [...paths].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**
- * 上下文组排序（`content + context` 的分页名册）。
+ * Context-group sorting (the pagination roster for `content + context`).
  *
- * 分页单位是**组**，所以切之前必须先给组排序 —— 两种引擎的组序都不可依赖：
- * rg 按并行遍历顺序吐组，Node 按 `readdir` 顺序建组。不排序就切片，同一个
- * `offset` 在两次调用里会落在不同的组上（SC7 要求 `offset=0,head_limit=50`
- * 与 `offset=50` 的集合不重叠）。
+ * The pagination unit is the **group**, so groups must be sorted before
+ * slicing — neither engine's group order can be relied on: rg emits groups in
+ * parallel-walk order, Node builds them in `readdir` order. Slicing without
+ * sorting would land the same `offset` on different groups across two calls,
+ * breaking the guarantee that `offset=0,head_limit=50` and `offset=50` never
+ * overlap.
  *
- * 组间比较用组内**首条**的 (path, line)：组内条目必然同文件且行号递增，
- * 首条即该组在全局名册里的位置。
+ * Groups are compared by the (path, line) of their **first** entry: entries
+ * inside a group necessarily share a file with increasing line numbers, so the
+ * first entry is the group's position in the global roster.
  */
 export function sortContextGroups(
   groups: ReadonlyArray<ContextGroup>
@@ -48,7 +54,7 @@ export function sortContextGroups(
   });
 }
 
-/** 文件计数排序（rg `--count` 直出路径；条数不进比较，只按 path）。 */
+/** Per-file count sorting (the rg `--count` direct-output path; counts never enter the comparison, only paths). */
 export function sortCounts(
   counts: ReadonlyArray<{ readonly path: string; readonly count: number }>
 ): Array<{ readonly path: string; readonly count: number }> {

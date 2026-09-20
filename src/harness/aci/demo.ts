@@ -1,13 +1,16 @@
 /**
- * PROTOTYPE（throwaway）— ACI 原型 Layer 2：一条命令跑通全生命周期演示。
+ * PROTOTYPE (throwaway) — ACI prototype Layer 2: one command runs a full
+ * lifecycle demo.
  *
- * 验证问题：Layer 0（契约/权限/装饰执行器）+ Layer 1（6 工具集，
- * ADR-0004）能否组装成一条命令跑通、每步打印完整状态的端到端演示，
- * 证明 ACI 装饰层可在不改 4-tool 协议前提下注入权限检查、安全标记
- * （Linter poka-yoke）。
+ * Question under test: can Layer 0 (contract / permission / decorating
+ * executor) + Layer 1 (the 6-tool set, ADR-0004) assemble into an end-to-end
+ * demo that runs in one command and prints the full state at every step —
+ * proving the ACI decorator layer can inject permission checks and safety
+ * marking (Linter poka-yoke) without changing the 4-tool protocol.
  *
- * 运行：npm run aci:demo（= tsx src/harness/aci/demo.ts）
- * 无持久化：scratch 目录在 os.tmpdir() 下创建，结束 rmSync 清理。
+ * Run: npm run aci:demo (= tsx src/harness/aci/demo.ts)
+ * No persistence: the scratch dir lives under os.tmpdir() and is rmSync'd
+ * at the end.
  */
 
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
@@ -35,7 +38,7 @@ import { createGrepTool } from "./tools/grep.js";
 import { createEditFileTool } from "./tools/edit-file.js";
 import { createWriteFileTool } from "./tools/write-file.js";
 
-/* ── helper: 构造 AssistantTurnResult（仿 loop-engine.test.ts，demo 自带一份）── */
+/* ── helper: build an AssistantTurnResult (mirrors loop-engine.test.ts; the demo keeps its own copy) ── */
 
 interface AssistantResultOpts {
   readonly texts: string[];
@@ -65,7 +68,7 @@ function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
   };
 }
 
-/* ── helper: 打印 messages 中全部 tool_result（is_error / payload 摘要）── */
+/* ── helper: print every tool_result in messages (is_error / payload summary) ── */
 
 function printToolResults(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -89,7 +92,7 @@ function printToolResults(
   }
 }
 
-/* ── helper: 打印 run() 返回摘要 + trace.totals ── */
+/* ── helper: print the run() result summary + trace.totals ── */
 
 function printRunSummary(opts: { result: RunResult; trace: LoopTrace }): void {
   const { result, trace } = opts;
@@ -99,7 +102,7 @@ function printRunSummary(opts: { result: RunResult; trace: LoopTrace }): void {
   console.log(`  trace.totals → ${JSON.stringify(trace.totals)}`);
 }
 
-/* ── helper: 场景分隔线 ── */
+/* ── helper: scenario separator banner ── */
 
 function banner(title: string): void {
   console.log("");
@@ -111,11 +114,11 @@ function banner(title: string): void {
 /* ── main ── */
 
 async function main(): Promise<void> {
-  // 1. scratch 目录 + 样例文件（无持久化，结束即清理）
+  // 1. scratch dir + sample files (no persistence; cleaned up at the end)
   const scratch = mkdtempSync(join(tmpdir(), "iknow-aci-prototype-"));
   console.log(`scratch: ${scratch}`);
 
-  // 60 个 .txt（验证 glob 真匹配 + 字母序）
+  // 60 .txt files (exercises real glob matching + alphabetical order)
   for (let i = 0; i < 60; i++) {
     writeFileSync(
       join(scratch, `note-${String(i).padStart(3, "0")}.txt`),
@@ -124,19 +127,19 @@ async function main(): Promise<void> {
   }
   writeFileSync(join(scratch, "alpha.ts"), "export const alpha = 1;\n");
   writeFileSync(join(scratch, "beta.ts"), "export const beta = 2;\n");
-  // 250 行大文件（验证 read_file 显式 offset 分页 — 无状态）
+  // 250-line big file (exercises explicit offset paging in read_file — stateless)
   const bigLines = Array.from(
     { length: 250 },
     (_, i) => `line ${String(i + 1)}: placeholder content for paging`
   );
   writeFileSync(join(scratch, "big-file.txt"), bigLines.join("\n"));
-  // 待编辑文件（验证 edit_file poka-yoke）
+  // file to be edited (exercises edit_file poka-yoke)
   writeFileSync(join(scratch, "edit-me.ts"), "const x = 1;\nconsole.log(x);\n");
 
   let allGreen = true;
 
   try {
-    // 2. 装配：registry + 装饰执行器（#141-T11 6 工具集，ADR-0004）
+    // 2. assembly: registry + decorating executor (the 6-tool set, ADR-0004)
     const bash = createBashTool(scratch);
     const readFile = createReadFileTool(scratch);
     const glob = createGlobTool(scratch);
@@ -172,7 +175,7 @@ async function main(): Promise<void> {
       maxTurns: 10,
     });
 
-    /* ── 场景 1：read-only 并发免确认 ── */
+    /* ── scenario 1: read-only concurrency without confirmation ── */
     banner(
       "场景 1：read-only 并发免确认（glob 真匹配 + read_file 无状态分页）"
     );
@@ -203,7 +206,7 @@ async function main(): Promise<void> {
               {
                 id: "s1-read-2",
                 name: "read_file",
-                // 续读必须显式 offset=50（契约 Y1 read_file 无状态）
+                // continuation must pass an explicit offset=50 (read_file is stateless)
                 input: { path: "big-file.txt", offset: 50, limit: 50 },
               },
             ],
@@ -221,7 +224,7 @@ async function main(): Promise<void> {
       if (result.stopReason !== "completed") allGreen = false;
     }
 
-    /* ── 场景 2：write 需确认 + Linter poka-yoke ── */
+    /* ── scenario 2: write confirmation + Linter poka-yoke ── */
     banner("场景 2：write + Linter poka-yoke（先坏补丁被拒，再正确补丁成功）");
     {
       const before = readFileSync(join(scratch, "edit-me.ts"), "utf8");
@@ -274,7 +277,7 @@ async function main(): Promise<void> {
       if (result.stopReason !== "completed") allGreen = false;
     }
 
-    /* ── 场景 3：execute 危险命令 deny ── */
+    /* ── scenario 3: execute denies dangerous commands ── */
     banner(
       "场景 3：execute 危险命令 deny（hard-wall: rm -rf / -> dangerous pattern）+ 安全命令放行"
     );
@@ -317,7 +320,7 @@ async function main(): Promise<void> {
       if (result.stopReason !== "completed") allGreen = false;
     }
 
-    /* ── 总结 ── */
+    /* ── summary ── */
     banner("被验证的决策");
     console.log("ACI 装饰层可在不改 4-tool 协议前提下注入：");
     console.log(

@@ -1,19 +1,23 @@
 /**
- * 符号查询 ACI 工具集 —— spec `symbol-primary-aci`（模型面查询 10 件）。
+ * Symbol-query ACI tool set — ten model-facing query tools addressed by
+ * symbol identity.
  *
- * **与 `lsp.ts` 的关系**：`lsp.ts` 的 10 件 `lsp_*` 以「文件 + 行 + 列」提问，
- * 模型必须先 grep 到某一行才能用；本模块以**符号身份**提问
- * （`{ file, symbol_path }`），行列译码封在 `symbol-resolver.ts` 内部。
- * T2 阶段两套并存（旧面 T5 才从模型面移除），故 LSP 客户端解析、取消/超时、
- * 无服务器哨兵、输出封顶全部复用 `lsp.ts` 的既有实现 —— 同一条链路只能有
- * 一份语义（SSOT），复制一份必然漂移。
+ * **Relation to `lsp.ts`**: the ten `lsp_*` tools there are addressed by
+ * "file + line + column", so the model must first grep down to a line; this
+ * module asks by **symbol identity** (`{ file, symbol_path }`) and keeps the
+ * line/column decoding inside `symbol-resolver.ts`. While both tool families
+ * coexist on the model surface, LSP client resolution, cancellation/timeout,
+ * the no-server sentinel and output capping are all reused from `lsp.ts` —
+ * one pipeline can only carry one semantics (SSOT); a copy would drift.
  *
- * 边界（继承 `lsp.ts`）：
- *   - **永不** `process.kill`；中断走 `$/cancelRequest`。
- *   - **永不** 返回结构化 payload（契约 Y1，handler 恒返字符串）。
- *   - **永不** 翻译 LSP payload 字段（语义归语言服务器）。
- *   - 符号解析失败（找不到 / 歧义 / 畸形节点）是**查询结果**，渲染成可读
- *     字符串；协议/超时故障才抛 `ToolExecutionError`。
+ * Boundaries (inherited from `lsp.ts`):
+ *   - **never** `process.kill`; interruption goes via `$/cancelRequest`.
+ *   - **never** return a structured payload — handlers always return strings.
+ *   - **never** translate LSP payload fields (that semantics belongs to the
+ *     language server).
+ *   - A failed symbol resolution (missing / ambiguous / malformed node) is a
+ *     **query result**, rendered as a readable string; only protocol or
+ *     timeout faults throw `ToolExecutionError`.
  */
 import { pathToFileURL } from "node:url";
 
@@ -49,9 +53,10 @@ import {
 } from "./symbol-resolver.js";
 
 /**
- * 符号身份入参（spec §符号身份）：相对/绝对文件路径 + 文件内符号树路径。
- * 无 `line` / `character` —— 这是本工具集与 `lsp_*` 的根本差别，schema 的
- * `additionalProperties: false` 让「顺手补个行列」在校验期就失败。
+ * Symbol-identity input: a relative/absolute file path plus the symbol's path
+ * inside that file's symbol tree. No `line` / `character` — that is the
+ * fundamental difference from the `lsp_*` family, and the schema's
+ * `additionalProperties: false` makes "just add a line/column" fail validation.
  */
 const SYMBOL_SCHEMA = {
   type: "object",
@@ -63,7 +68,8 @@ const SYMBOL_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** 单文件大纲：只要文件路径（大纲本身就是「还不知道符号名」的入口）。 */
+/** Single-file outline: only the file path (the outline itself is the entry
+ * point for "we don't know the symbol name yet"). */
 const FILE_SCHEMA = {
   type: "object",
   properties: {
@@ -74,9 +80,10 @@ const FILE_SCHEMA = {
 } as const;
 
 /**
- * `find_symbol` 入参：`query` **必填且非空**（spec §Model-facing tool set：
- * `workspace/symbol` 的空 query 快照不再是工作区查找的产品语义）。
- * `file` 可选，仅用于把语言服务器选择锚定到该文件所属工程。
+ * `find_symbol` input: `query` is **required and non-empty** — a blank-query
+ * `workspace/symbol` snapshot is no longer the product semantics for a
+ * workspace lookup. `file` is optional and only anchors language-server
+ * selection to that file's project.
  */
 const FIND_SYMBOL_SCHEMA = {
   type: "object",
@@ -102,7 +109,7 @@ interface FindSymbolInput {
   readonly file?: string;
 }
 
-/** 符号身份 → `textDocument/*` params（position 已是 0-based，无需换算）。 */
+/** Symbol identity → `textDocument/*` params (position is already 0-based). */
 function symbolPositionParams(
   file: string,
   position: LspPosition
@@ -114,11 +121,14 @@ function symbolPositionParams(
 }
 
 /**
- * 符号解析失败 → 模型可读字符串（契约 Y1）。
- * 每条都带可行动的下一步：候选路径 / 消歧提示 / 大纲工具名。
+ * A failed symbol resolution → a model-readable string (handlers never
+ * return structured payloads). Every rendering carries an actionable next
+ * step: candidate paths / disambiguation hint / outline tool name.
  *
- * `method_not_found` 复用 `lsp.ts` 的哨兵渲染（SSOT，不复制文案字面量）——
- * 符号族的缺方法语义与坐标族逐字一致，probe 的 skip 判定才认得出。
+ * `method_not_found` reuses `lsp.ts`'s sentinel rendering (SSOT — no copied
+ * message literals): the missing-method semantics of the symbol family is
+ * word-for-word identical to the coordinate family, so the probe's skip
+ * detection recognizes it.
  */
 function renderResolution(
   file: string,
@@ -137,20 +147,25 @@ function renderResolution(
     case "method_not_found":
       return renderMethodNotFound(res.method);
     case "found":
-      // 调用方在 kind === "found" 时不会走到这里；保留穷尽分支让编译期兜底。
+      // Callers never reach here with kind === "found"; the exhaustive branch
+      // stays as a compile-time backstop.
       return `(symbol "${res.path}" resolved in ${file})`;
   }
 }
 
 /**
- * 符号身份 → 已解析的 position，并在**请求级打开窗口**内执行 `run`。
+ * Symbol identity → resolved position, with `run` executed inside a
+ * **request-scoped open window**.
  *
- * 窗口必须罩住解析与随后的业务请求：解析要 didOpen 才建得起来 project，
- * 业务请求要同一份 server 侧文本；退出窗口即 didClose（spec 251「打开文档
- * 生命周期」—— 两次调用之间文件不对 server 保持打开）。
+ * The window must span both the resolution and the subsequent business
+ * request: resolution needs didOpen for the server to build a project, and
+ * the business request needs the same server-side text; leaving the window
+ * didCloses the document — between two tool calls the file is not kept open
+ * on the server.
  *
- * 三段：解析语言服务器 → `withDocumentOpen` + documentSymbol 树定位 → `run`。
- * 失败路径归一成模型可读字符串（契约 Y1），与成功路径的 stringify 同形。
+ * Three stages: resolve the language server → `withDocumentOpen` + locating
+ * via the documentSymbol tree → `run`. Failure paths normalize to
+ * model-readable strings, the same shape as the success path's stringify.
  */
 async function withResolvedSymbol<T>(
   ctx: LspCtx,
@@ -181,14 +196,15 @@ interface SymbolOperationSpec {
   readonly name: string;
   readonly method: string;
   readonly description: string;
-  /** 已解析的 position → LSP request params（references 需再挂 context）。 */
+  /** Resolved position → LSP request params (references attaches context too). */
   readonly buildParams: (file: string, position: LspPosition) => unknown;
 }
 
 /**
- * 单步符号 operation 工厂：符号身份 → position → 一次 LSP request。
- * 超时/abort 统一经 `createRequestCancellation`（与 `lsp.ts` 同一条取消链路，
- * 覆盖 documentSymbol 定位与业务请求两段）。
+ * Single-step symbol operation factory: symbol identity → position → one LSP
+ * request. Timeout/abort go uniformly through `createRequestCancellation`
+ * (the same cancellation chain as `lsp.ts`, covering both the documentSymbol
+ * locating stage and the business-request stage).
  */
 function makeSymbolOperationTool(
   ctx: LspCtx,
@@ -237,9 +253,10 @@ function makeSymbolOperationTool(
 }
 
 /**
- * 调用图两件（incoming / outgoing）：符号身份 → position →
- * `prepareCallHierarchy` 取首个 item → forward 给 incoming/outgoing。
- * 与 `lsp.ts` 的多步形态同构，只换了入参从行列到符号身份。
+ * The two call-hierarchy tools (incoming / outgoing): symbol identity →
+ * position → `prepareCallHierarchy`, take the first item → forward to
+ * incoming/outgoing. Structurally the same as `lsp.ts`'s multi-step form,
+ * with the input switched from line/column to symbol identity.
  */
 function makeSymbolCallHierarchyTool(
   ctx: LspCtx,
@@ -276,7 +293,8 @@ function makeSymbolCallHierarchyTool(
             );
             if (cancel.timedOut())
               throw timeoutError(name, timedOutMethod, timeoutMs);
-            // 缺方法哨兵：server 没有 call hierarchy —— 透传（不再 forward）。
+            // Missing-method sentinel: the server has no call hierarchy —
+            // pass it through (no forward).
             if (isMethodNotFoundSentinel(prepared)) return prepared;
             const items = extractCallHierarchyItems(prepared);
             const item = items[0];
@@ -305,18 +323,23 @@ function makeSymbolCallHierarchyTool(
 }
 
 /**
- * 无 `file` 分岔的「无 project 锚点」判别（plan T3）：命中 → 分层哨兵字符串。
+ * The "no project anchor" check for the branch without `file`: hit → a
+ * layered sentinel string.
  *
- * 两种可观测形态收敛到同一条哨兵（根因见 lsp.ts `renderNoProjectAnchor`）：
- *   - tsserver 抛 `No Project.`（锚点文件不属于任何 project）；
- *   - 无 project 上下文下 RPC 正常返回 `[]`。
+ * Two observable shapes converge on the same sentinel (root cause in lsp.ts
+ * `renderNoProjectAnchor`):
+ *   - tsserver throws `No Project.` (the anchor file belongs to no project);
+ *   - an RPC returns `[]` normally, with no project context.
  *
- * **`[]` 的新契约**：只有「查到了、真没这个符号」才返 `[]`；无锚点的空结果
- * 不再冒充查询结果。返回 `undefined` = 不是无锚点形态（正常数据 / 缺方法哨兵 /
- * 其它错误），由调用方按既有语义处理。
+ * **Contract for `[]`**: only "the query ran and the symbol genuinely does
+ * not exist" may return `[]`; an empty result without an anchor no longer
+ * impersonates a query result. Returning `undefined` = not the no-anchor
+ * shape (regular data / missing-method sentinel / other errors), left to the
+ * caller's existing handling.
  *
- * 非空结果原样透传（§8.4：正确锚点下覆盖也可能不完整，但那属于 description
- * 的常驻警示面，不是本判别的事）。
+ * Non-empty results pass through unchanged: even with a correct anchor the
+ * coverage can be incomplete, but that belongs to the standing warning in
+ * the tool description, not to this check.
  */
 function noAnchorSentinelOrUndefined(
   ctx: LspCtx,
@@ -328,9 +351,11 @@ function noAnchorSentinelOrUndefined(
 }
 
 /**
- * `find_symbol`：按名字/模式在工作区里找符号（`workspace/symbol`）。
- * `file` 缺省时按 `SERVERS` 声明序试探可用语言服务器（继承 `lsp.ts` 的
- * 工作区级 dispatch）；空 query 由 schema `minLength: 1` 在校验期拒绝。
+ * `find_symbol`: search the workspace for symbols by name/pattern
+ * (`workspace/symbol`). Without `file`, probe available language servers in
+ * `SERVERS` declaration order (inheriting `lsp.ts`'s workspace-level
+ * dispatch); an empty query is rejected at validation time by the schema's
+ * `minLength: 1`.
  */
 function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
   const name = "find_symbol";
@@ -369,9 +394,10 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
           );
           if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
           if (params.file === undefined) {
-            // EXIT: 无 `file` = 无 project 锚点，空结果不可信 → 分层哨兵
-            // （`[]` 从今只表示「查到了、真没这个符号」）。带 `file` 的路径
-            // 不走这里，行为逐字节不变。
+            // EXIT: no `file` = no project anchor, so an empty result is not
+            // trustworthy → layered sentinel (`[]` from now on only means
+            // "queried, symbol genuinely absent"). Paths that carry `file`
+            // skip this and behave byte-for-byte as before.
             const sentinel = noAnchorSentinelOrUndefined(ctx, result);
             if (sentinel !== undefined) return sentinel;
           }
@@ -379,9 +405,11 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
         } catch (err) {
           if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
           if (params.file === undefined) {
-            // EXIT: tsserver 的 `No Project.`（锚点不属于任何 project）同样
-            // 是无锚点形态 —— 收敛到同一哨兵，不让它冒充 RPC 故障。判定窄：
-            // 只认这一条 message，其余错误照旧上抛。
+            // EXIT: tsserver's `No Project.` (anchor belongs to no project)
+            // is the same no-anchor shape — converge on the same sentinel
+            // instead of letting it masquerade as an RPC fault. The check is
+            // deliberately narrow: only this message matches, other errors
+            // rethrow as before.
             if (isNoProjectAnchorError(err)) return renderNoProjectAnchor(ctx);
           }
           throw err;
@@ -397,10 +425,11 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
 }
 
 /**
- * `get_symbols_overview`：单文件符号大纲 —— 「还不知道符号名」时的入口
- * （spec §符号身份：用大纲或 find_symbol，而不是先 grep 源码）。
- * 输出是 server 原始 documentSymbol 树（契约 Y1 stringify），模型从中读出
- * `name` 与嵌套关系即可拼出别的工具要的 `symbol_path`。
+ * `get_symbols_overview`: the symbol outline of a single file — the entry
+ * point when the symbol name is not yet known (use the outline or
+ * find_symbol instead of grepping the source first). The output is the
+ * server's raw documentSymbol tree (stringified), from which the model reads
+ * `name`s and nesting to compose the `symbol_path` the other tools expect.
  */
 function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
   const name = "get_symbols_overview";
@@ -449,7 +478,8 @@ function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
   });
 }
 
-/** 10 件符号查询工具的名字真值（registry Gate 3 与测试共源）。 */
+/** Ground truth for the ten symbol-query tool names (shared by the registry's
+ * Gate 3 and the tests). */
 export const SYMBOL_QUERY_TOOL_NAMES = Object.freeze([
   "find_symbol",
   "find_declaration",
@@ -464,16 +494,19 @@ export const SYMBOL_QUERY_TOOL_NAMES = Object.freeze([
 ] as const);
 
 /**
- * MCP transport 用的 Zod schema（SDK 2.0 `registerTool` 的 `inputSchema` 接受
- * Standard Schema；Zod 4 即合规）。与 ACI 进程内的 JSON Schema（`SYMBOL_SCHEMA` /
- * `FILE_SCHEMA` / `FIND_SYMBOL_SCHEMA`）**不重复**：JSON Schema 给 ajv 校验
- * handler 入参，Zod 给 MCP transport —— 同一组字段各写一份是必要的（不同验证器
- * 不同语言），但同一验证器类型内 SSOT 不能再分裂。
+ * Zod schemas for the MCP transport (SDK 2.0 `registerTool` accepts a
+ * Standard Schema for `inputSchema`; Zod 4 qualifies). These do **not**
+ * duplicate the in-process ACI JSON Schemas (`SYMBOL_SCHEMA` / `FILE_SCHEMA`
+ * / `FIND_SYMBOL_SCHEMA`): JSON Schema feeds ajv for handler inputs, Zod
+ * feeds the MCP transport — writing the same fields once per validator is
+ * necessary (different validators, different consumers), but SSOT must not
+ * split further within one validator type.
  *
- * **`SYMBOL_QUERY_ZOD_SCHEMAS` 即 MCP Zod schema 的 SSOT**：键集合与
- * `SYMBOL_QUERY_TOOL_NAMES` 一一对应，缺一即构造期 fail-fast（与
- * `createSymbolQueryToolSet` 同纪律）。MCP 装配（`src/lsp-mcp/server.ts`）
- * 只 import，不内联。
+ * **`SYMBOL_QUERY_ZOD_SCHEMAS` is the SSOT for the MCP Zod schemas**: the
+ * key set corresponds one-to-one with `SYMBOL_QUERY_TOOL_NAMES`, and any
+ * missing key fails fast at construction (same discipline as
+ * `createSymbolQueryToolSet`). The MCP assembly (`src/lsp-mcp/server.ts`)
+ * only imports this — no inlining.
  */
 const symbolIdentityZod = z
   .object({
@@ -517,11 +550,12 @@ export const SYMBOL_QUERY_ZOD_SCHEMAS: Readonly<Record<string, z.ZodType>> =
   });
 
 /**
- * 构造符号查询工具集（`registry.ts` 装配入口）。
+ * Build the symbol-query tool set (`registry.ts` assembly entry point).
  *
- * 返回顺序与 `SYMBOL_QUERY_TOOL_NAMES` 一致（Gate 3 按名索引，顺序即契约）。
- * description 全部按**符号身份**行文 —— 不出现「先给行列」，与 spec
- * 「禁止把第几行第几列当作这些工具的主入参」对齐（D9 正面触发措辞）。
+ * Return order matches `SYMBOL_QUERY_TOOL_NAMES` (Gate 3 indexes by name;
+ * order is contract). Descriptions are all written in terms of **symbol
+ * identity** — never "give me a line/column first" — aligning with the rule
+ * that coordinates must not be presented as these tools' primary input.
  */
 export function createSymbolQueryToolSet(
   ctx: LspCtx
@@ -615,7 +649,9 @@ export function createSymbolQueryToolSet(
   return Object.freeze(
     SYMBOL_QUERY_TOOL_NAMES.map((name) => {
       const tool = byName.get(name);
-      // 构造期 fail-fast：名单与工厂分歧不留到运行期（与 registry Gate 3 同纪律）。
+      // Fail fast at construction when the name list and the factories
+      // diverge, rather than leaving it to runtime (same discipline as
+      // registry Gate 3).
       if (!tool) throw new Error(`symbol query tool missing: ${name}`);
       return tool;
     })

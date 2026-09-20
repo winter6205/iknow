@@ -1,21 +1,23 @@
 /**
  * src/harness/sandbox/egress/credential-mint.ts
  *
- * specs/egress-credential-sentinel.md T2 —— 启动期铸造（假值进围栏）。
+ * Startup-time minting (fake values into the fence).
  *
- * 单一职责：名册条目（`credential-assembly.ts` SSOT 产出的
- * `EgressCredentialRoster` 纯数据形状）→ registry 假值 + masked store +
- * bind 表 + fence env 增量；装配期防线（invariant 1/6 + F4）双 assert。
- * 名册装配 / 收窄合并归 `credential-assembly.ts`（T1），代换接线 /
- * dispose 归 T3（`session.ts`），CA 持久层归 T4（`ca-store.ts`）。
+ * Single responsibility: roster entries (the pure-data
+ * `EgressCredentialRoster` produced by `credential-assembly.ts`) → registry
+ * fake values + masked store + bind table + fence env increments;
+ * assembly-time defense lines double-asserted. Roster assembly / narrow merge
+ * belongs to `credential-assembly.ts`, substitution wiring / dispose to
+ * `session.ts`, the persistent CA layer to `ca-store.ts`.
  *
- * invariant 3（洗出防护）在签名面的体现：铸造只吃「名册 + CA + env 源」
- * ，**没有** allowedDomains / 批准集入参 —— 批准门新批域在类型上就
- * 进不了任何条目的 injectHosts。
+ * Leak-through protection in the signature: minting eats only "roster + CA +
+ * env source" — **no** allowedDomains / approval-set parameter — so freshly
+ * approved hosts cannot reach any entry's injectHosts even at the type level.
  *
- * Assumption 6（injectHosts 静态钉）：条目未声明 / 空 injectHosts →
- * settings 层已丢此类条目，本层防御直连调用方（`isMintable` 判据在
- * 名册装配侧），禁静默。
+ * injectHosts static-pinning: entries with undeclared / empty injectHosts are
+ * already dropped by the settings layer; this layer defends against direct
+ * callers (the `isMintable` test sits on the roster-assembly side), silence
+ * forbidden.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -41,11 +43,11 @@ import {
 } from "./upstream.js";
 
 /**
- * bwrap fence bind 表条目（`EgressFenceSpec.binds` 扩段形状，invariant 9）：
- * masked-file 盖 bind（src=fake 文件, dest=真路径）、store 目录 / trust
- * bundle 自 bind（src=dest）、F3 deny 的 `/dev/null` 盖 bind。发射落
- * egressBind 段（workspaceMounts 之后、cwdReadonly 之前），last-mount-wins
- * 盖过根 bind 下的真路径。
+ * bwrap fence bind table entry (an extension segment of `EgressFenceSpec.binds`):
+ * masked-file cover bind (src=fake file, dest=real path), store dir / trust
+ * bundle self-bind (src=dest), and the `/dev/null` cover bind for denied
+ * paths. Emitted into the egressBind segment (after workspaceMounts, before
+ * cwdReadonly), where last-mount-wins covers the real path under the root bind.
  */
 export interface EgressFenceBind {
   readonly src: string;
@@ -54,8 +56,9 @@ export interface EgressFenceBind {
 }
 
 /**
- * F3 deny 降级的 typed 违例痕（kind 判别联合，code-quality typed-error
- * 契约）。只含路径与人读文案，绝无凭据材料。
+ * Typed violation trace for deny downgrades (kind-discriminated union per the
+ * typed-error contract). Contains only paths and human-readable text, never
+ * credential material.
  */
 export interface CredentialDenyTrace {
   readonly kind: "credential_mask_denied";
@@ -63,17 +66,18 @@ export interface CredentialDenyTrace {
   readonly reason: string;
 }
 
-/** 铸造装配的 typed 失败档（F4 / invariant 1）：两类信号修复动作不同。 */
+/** Typed failure tiers of assembly-time defense lines: the two signals require different fixes. */
 export type EgressCredentialMintErrorKind =
-  /** invariant 6 + F4：注册 sentinel 互为子串 → 部分代换 session 不起。 */
+  /** Registered sentinels are substrings of each other → do not start a partially-substituting session. */
   | "sentinel_substring_contract"
-  /** invariant 1：注入的凭据 env 值 ∉ registry 假值空间 → session 不起。 */
+  /** An injected credential env value ∉ registry fake-value space → session does not start. */
   | "env_fake_space_contract";
 
 /**
- * 装配期防线违例 —— throw 于 session 启动之前（Step 1.5，起代理前），
- * 走 createEgressSession 同一失败通道（不跑「带部分代换 / 半真值」的
- * session）。message 只含条目名 / 档位，绝不回显真值。
+ * Assembly-time defense-line violation — thrown before session startup (prior
+ * to proxy start), on the same failure channel as createEgressSession (never
+ * run a session "with partial substitution / half real values"). The message
+ * contains only entry names / tiers, never echoes real values.
  */
 export class EgressCredentialMintError extends ToolExecutionError {
   override readonly name: string = "EgressCredentialMintError";
@@ -84,11 +88,11 @@ export class EgressCredentialMintError extends ToolExecutionError {
   }
 }
 
-/** 铸造产物：fence env 增量 + bind 表 + registry/store（消费与释放归 T3）。 */
+/** Minting output: fence env increments + bind table + registry/store (consumption and release belong to session wiring). */
 export interface EgressCredentialMint {
   readonly registry: SentinelRegistry;
   readonly store: MaskedFileStore;
-  /** fence env 增量：凭据假值 + `CA_TRUST_VARS` 全量指向 trust bundle。 */
+  /** Fence env increments: credential fake values + all `CA_TRUST_VARS` pointing at the trust bundle. */
   readonly envVars: Readonly<Record<string, string>>;
   readonly binds: readonly EgressFenceBind[];
   readonly denyTraces: readonly CredentialDenyTrace[];
@@ -96,17 +100,17 @@ export interface EgressCredentialMint {
 
 export interface MintEgressCredentialsArgs {
   readonly roster: EgressCredentialRoster;
-  /** T4 持久层装载产物（trust bundle 已随 createMitmCA 现写）。 */
+  /** Output of the persistent CA layer (trust bundle written fresh by createMitmCA). */
   readonly ca: MitmCA;
-  /** 宿主 env 源（默认 process.env）—— 真值只在本进程内存读，不进围栏。 */
+  /** Host env source (default process.env) — real values are read in this process's memory only, never into the fence. */
   readonly env?: Record<string, string | undefined>;
-  /** F1/F2 跳过痕（debug 档：无可保护条目不是故障）。 */
+  /** Skip traces (debug tier: "nothing protectable" is not a failure). */
   readonly onDebug?: (message: string) => void;
-  /** F3 违例痕旁路（invariant 7 禁静默）；缺省 console.warn。 */
+  /** Violation-trace bypass for denials (silence forbidden); default console.warn. */
   readonly onWarn?: (message: string) => void;
 }
 
-/** invariant 6 + F4：任一 sentinel 不得是另一 sentinel 的子串。 */
+/** No registered sentinel may be a substring of another. */
 export function assertSentinelSubstringContract(
   registry: SentinelRegistry
 ): void {
@@ -125,9 +129,11 @@ export function assertSentinelSubstringContract(
 }
 
 /**
- * invariant 1：凡注入围栏的凭据条目 env 值必须落在 registry 假值空间 ——
- * 整值 = 某 sentinel，structured 档 = 含某 sentinel 的合成交替值。违例
- * = 装配缺陷（真值可能直达围栏）→ typed 失败，不起 session。
+ * Every credential entry env value injected into the fence must land in the
+ * registry fake-value space — whole-value form = exactly some sentinel,
+ * structured form = a synthesized alternating value containing some sentinel.
+ * A violation = assembly defect (real values could reach the fence directly)
+ * → typed failure, session does not start.
  */
 export function assertInjectedEnvInFakeSpace(
   setEnvVars: Readonly<Record<string, string>>,
@@ -144,14 +150,14 @@ export function assertInjectedEnvInFakeSpace(
   }
 }
 
-/** F2 跳过痕文案（宿主读不到 = 围栏同样读不到，不可达不是泄露，不硬错）。 */
+/** Skip trace for unreadable files: host cannot read it = the fence cannot either; unreachability is not leakage, so no hard error. */
 function f2SkipReason(path: string, cause: string): string {
   return `[egress-credential] file entry "${path}" skipped (${cause}) — nothing protectable on this host; entry passes through as absent`;
 }
 
 /**
- * env 条目铸造（whole-value 形态）：F1 presence 预检后交包件铸造。
- * 独立成函数（S5 门）。
+ * Env entry minting (whole-value form): presence pre-check, then hand to the
+ * package flow. Separate function for the lint complexity gate.
  */
 function mintEnvEntries(
   entries: readonly EgressCredentialEnvVarEntry[],
@@ -175,8 +181,9 @@ function mintEnvEntries(
     });
   }
   const result = buildMaskedEnvVars(envConfigs, [], registry, env);
-  // 本仓 env 条目形状（T1）无 extract/decode → 该档结构上不可达；
-  // 保留防御分支：出现即留痕且不注入（fail-closed 方向）。
+  // This repo's env entry shape has no extract/decode → that tier is
+  // structurally unreachable; keep the defensive branch: if it ever appears,
+  // trace it and withhold from injection (fail-closed direction).
   for (const name of result.degradeToUnsetNames) {
     onDebug(
       `[egress-credential] env entry "${name}" degraded to unset (extract no match under deny policy) — withheld from fence env`
@@ -186,9 +193,11 @@ function mintEnvEntries(
 }
 
 /**
- * 文件条目 F2/F3 预检（Assumption 8 判责在本仓：包对非 UTF-8 只静默
- * skip = fail-open，deny 降级必须在调用包件之前拦截）。
- * 返回可掩码 config 集 + deny 路径集 + F3 typed 痕。独立成函数（S5 门）。
+ * File entry pre-check: accountability for the deny downgrade lives in this
+ * repo — the package silently skips non-UTF-8 input (fail-open), so the deny
+ * downgrade must intercept before the package flow runs.
+ * Returns the maskable config set + the denied-path set + typed deny traces.
+ * Separate function for the lint complexity gate.
  */
 function preflightFileEntries(
   entries: readonly EgressCredentialFileEntry[],
@@ -209,7 +218,7 @@ function preflightFileEntries(
       directory = statSync(resolved).isDirectory();
       if (!directory) raw = readFileSync(resolved);
     } catch {
-      // F2：absent / unreadable —— 下方统一跳过留痕。
+      // absent / unreadable — a unified skip trace follows.
     }
     if (directory || raw === null) {
       onDebug(
@@ -220,7 +229,7 @@ function preflightFileEntries(
       );
       continue;
     }
-    // 非 UTF-8 判据与包内 masking 同一算法（utf8 往返字节数不等 = 二进制）。
+    // Non-UTF-8 test uses the same algorithm as the package's masking (utf8 round-trip byte length mismatch = binary).
     const text = raw.toString("utf8");
     if (Buffer.byteLength(text, "utf8") !== raw.length) {
       denyPaths.add(resolved);
@@ -246,9 +255,10 @@ function preflightFileEntries(
 }
 
 /**
- * bind 表装配（invariant 9 落位归 bwrap 消费方）：masked 盖 bind → store
- * 目录 → trust bundle（经 T4 SSOT `egressCaBindSources`，CA key 路径永不
- * 出表）→ deny 盖 /dev/null。独立成函数（S5 门）。
+ * Bind-table assembly (placement is for the bwrap consumer): masked cover
+ * binds → store dir → trust bundle (via the SSOT `egressCaBindSources`; the
+ * CA key path never leaves the table) → /dev/null covers for denied paths.
+ * Separate function for the lint complexity gate.
  */
 function assembleFenceBinds(
   maskedBinds: readonly MaskedFileBind[],
@@ -274,18 +284,22 @@ function assembleFenceBinds(
 }
 
 /**
- * 启动期铸造：名册条目 → registry 假值 + masked store + bind 表 + fence
- * env 增量。失败路径按 spec 表逐条 typed 化：
- *   - F1：真值 env 缺席 / 空串 → 跳过条目 + debug 痕，不注入空假值
- *     （presence 检查不翻转）；
- *   - F2：文件不存在 / 不可读 / 是目录 → 跳过 + debug 痕，不硬错；
- *   - F3（Assumption 8）：非 UTF-8 / 二进制、extract 未命中 → **降级
- *     deny**：`/dev/null` 盖 bind 使路径进围栏不可读 + typed 违例痕含
- *     修复指引。本仓不吃包默认 warn-and-include fail-open；
- *   - F4 / invariant 1：注册后双 assert，违例 = throw（session 不起）。
+ * Startup-time minting: roster entries → registry fake values + masked store
+ * + bind table + fence env increments. Each failure path is typed:
+ *   - real-value env absent / empty string → skip the entry + debug trace,
+ *     never inject an empty fake (the presence check does not invert);
+ *   - file missing / unreadable / is-a-directory → skip + debug trace, no
+ *     hard error;
+ *   - non-UTF-8 / binary, or extract unmatched → **downgrade to deny**: a
+ *     `/dev/null` cover bind makes the path unreadable inside the fence + a
+ *     typed violation trace with fix guidance. We do not accept the package
+ *     default of warn-and-include (fail-open);
+ *   - post-registration double asserts; a violation = throw (session does
+ *     not start).
  *
- * `allowedDomains` 入参恒 `[]`（Assumption 6：条目 injectHosts 显式值，
- * 不吃包缺省扩张）；`onExtractNoMatch` 逐文件条目钉 `"deny"`。
+ * The `allowedDomains` argument is always `[]` (entry injectHosts must be
+ * explicit values, no package default expansion); `onExtractNoMatch` is
+ * pinned to `"deny"` per file entry.
  */
 export function mintEgressCredentials(
   args: MintEgressCredentialsArgs
@@ -318,17 +332,18 @@ export function mintEgressCredentials(
   }
   for (const t of denyTraces) onWarn(`[egress-credential] ${t.reason}`);
 
-  // bind 表 + fence env 增量（假值 + CA_TRUST_VARS 全量指向 trust bundle，
-  // Assumption 11）。
+  // bind table + fence env increments (fake values + all CA_TRUST_VARS
+  // pointing at the trust bundle).
   const binds = assembleFenceBinds(fileResult.binds, store, args.ca, denyPaths);
   const credEnv: Record<string, string> = { ...envResult.setEnvVars };
   for (const name of CA_TRUST_VARS) {
     credEnv[name] = args.ca.trustBundlePath;
   }
 
-  // 装配期防线（throw 后调用方拿不到 registry/store，无半注入态外泄）。
-  // assert 只钉凭据条目 env 值（invariant 1 的语义域）；CA_TRUST_VARS 是
-  // 信任链路径注入，不属假值空间。
+  // Assembly-time defense lines (after a throw the caller never receives
+  // registry/store, so no half-injected state leaks). The asserts pin only
+  // credential entry env values; CA_TRUST_VARS is trust-chain path injection,
+  // not part of the fake-value space.
   assertSentinelSubstringContract(registry);
   assertInjectedEnvInFakeSpace(envResult.setEnvVars, registry);
 

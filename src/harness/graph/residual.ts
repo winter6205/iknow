@@ -1,27 +1,33 @@
 /**
- * 活图剩余子图合并（live-graph-phase1 T2 / spec SC5–SC7 / ADR-0050）。
+ * Live-graph residual-subgraph merge: folds ledger-frozen terminal states
+ * into a new submission.
  *
- * 外环只交剩余子图：已 done 的上游不再出现在提交里，但下游 deps 仍指向它。
- * 本模块把「账本里冻结的终态」折叠进本次提交：
+ * The outer loop submits only the residual subgraph: already-done upstream
+ * nodes no longer appear in the submission, but downstream deps still point
+ * at them. This module merges that reality:
  *
- *   - 提交里出现已冻结 id（done 或 failed）→ 拒（SC5 末句 / SC6）；
- *   - dep 指向 frozen-done → 满足：从 dep 列表剔除，产出由账本补进下游
- *     task（SC5 数据流）；
- *   - dep 指向 frozen-failed → 拒：阶段 1 失败再试 = 新 id，不是图上绕回
- *     （spec ASSUMPTIONS #3）；
- *   - dep 指向 skipped 或未知 id → 原样留给 validateGraph（skipped 未冻可
- *     再交，SC7；未知 id 仍 typed 拒，ADR-0066 / SC12）。
+ *   - a frozen id (done or failed) appearing in the submission → reject
+ *     (re-running frozen work is never allowed);
+ *   - dep pointing at frozen-done → satisfied: strip it from the dep list,
+ *     and the ledger supplies its output into downstream tasks (the data
+ *     flow for reading upstream results);
+ *   - dep pointing at frozen-failed → reject: retrying a failure means a new
+ *     id, not routing around it on the graph;
+ *   - dep pointing at skipped or an unknown id → left untouched for
+ *     validateGraph (skipped was never frozen and may be resubmitted;
+ *     unknown ids stay typed-rejected there).
  *
- * 分层边界（complexity-anti-drift）：本模块只做「合并前的一次线性扫描 +
- * 拒绝清单」，不改 validateGraph / topoWaves 的 Kahn 逻辑；环 / 自依赖 /
- * 重复 id 仍由 topo 单点裁决。
+ * Layering: one linear scan plus a rejection list — this module never touches
+ * validateGraph / topoWaves' Kahn logic; cycles, self-deps and duplicate ids
+ * remain topo's single-point rulings.
  *
- * 边界：纯函数模块，不 import scheduler / node-executor / loop-engine。
+ * Boundary: pure function module; no imports of scheduler / node-executor /
+ * loop-engine.
  */
 
 import type { LiveGraphLedger } from "./ledger.js";
 
-/** 账本缺席时（deps.ledger undefined）的零行为变化：返回原 nodes、无拒绝。 */
+/** One submitted node's minimal shape: id + task + deps. */
 export interface ResidualNodeInput {
   readonly id: string;
   readonly task: string;
@@ -30,21 +36,24 @@ export interface ResidualNodeInput {
 
 export interface ResidualMergeResult {
   /**
-   * 合并后的 nodes：frozen-done 的 dep 已从 deps 剔除（satisfied），
-   * 其余 deps / 顺序原样 —— 直接交给 validateGraph，语义与其单跑一致。
+   * Merged nodes: frozen-done deps stripped (satisfied), everything else in
+   * original order — feed straight into validateGraph with the same
+   * semantics as running it alone.
    */
   readonly nodes: ReadonlyArray<ResidualNodeInput>;
   /**
-   * frozen-done dep 的产出，按 dep id 索引 —— handler 把它并进 NodeContext
-   * 的 outputs，让 renderTask 无改动地把上游产出写进下游 task（SC5）。
+   * Outputs of frozen-done deps, indexed by dep id — the handler folds them
+   * into NodeContext outputs so renderTask writes upstream results into
+   * downstream tasks unchanged.
    */
   readonly ledgerOutputs: Readonly<Record<string, string>>;
-  /** 全部拒绝原因（冻结冲突 / frozen-failed dep）；空数组 = 可继续校验。 */
+  /** All rejection reasons (frozen conflict / frozen-failed dep); empty = validation may proceed. */
   readonly rejections: ReadonlyArray<string>;
 }
 
 /**
- * 把账本终态折叠进本次提交（见模块头注释）。纯函数：不 ensure / 不 freeze。
+ * Fold ledger terminal states into this submission (see module header).
+ * Pure: never calls ensure / freeze.
  */
 export function resolveResidualSubgraph(
   nodes: ReadonlyArray<ResidualNodeInput>,
@@ -52,7 +61,7 @@ export function resolveResidualSubgraph(
 ): ResidualMergeResult {
   const rejections: string[] = [];
 
-  // SC5 末句 / SC6：已冻结 id 再交 = 重演，整段拒绝（零 spawn）。
+  // A frozen id resubmitted = re-run → reject the whole segment (zero spawn).
   const frozenSubmitted = nodes
     .map((n) => n.id)
     .filter((id) => ledger.isFrozen(id));
@@ -62,10 +71,10 @@ export function resolveResidualSubgraph(
     );
   }
 
-  // SC6（ASSUMPTIONS #3）：dep 指向 frozen-failed —— 不当 satisfied，也不当
-  // unknown-dep（错误信息要对模型有用：指向失败 id 必须换新 id 重试）。
-  // skipped / 从未跑过的 id 不在这里处理：前者 SC7 可再交，后者留给
-  // validateGraph 的 unknown-dep（ADR-0066）。
+  // Dep pointing at frozen-failed — neither satisfied nor unknown-dep (the
+  // error text must be useful to the model: pointing at a failed id requires
+  // a new node id). skipped / never-run ids are not handled here: the former
+  // may be resubmitted, the latter stay validateGraph's unknown-dep case.
   for (const node of nodes) {
     for (const dep of node.deps) {
       if (ledger.statusOf(dep) === "failed") {
@@ -76,7 +85,7 @@ export function resolveResidualSubgraph(
     }
   }
 
-  // SC5：frozen-done 的 dep = satisfied，从 spec 剔除；产出单独带回。
+  // frozen-done deps = satisfied; strip from the spec, carry outputs back separately.
   const ledgerOutputs: Record<string, string> = {};
   const merged = nodes.map((node) => {
     const kept = node.deps.filter((dep) => {

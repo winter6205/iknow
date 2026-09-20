@@ -1,22 +1,24 @@
 /**
- * IKNOW-196 人格层 (spec `specs/196-identity-assembly.md` Identity vs Soul 边界,
- * spec.md:158-188 + A13)。
+ * Persona layer.
  *
- * 模块责任:回答 "我如何活" —— 行为风格,代码 LOCKED,相对可调。
- * 放 core truths / boundaries / vibe / continuity 四段(Vibe 归人格,
- * 按 A13)。不含 Name / Kind / Signature(本体性事实归 `identity.ts`)。
+ * Responsibility: answer "how do I live" — behavioral style, LOCKED in code,
+ * relatively tunable. Holds core truths / boundaries / vibe / continuity
+ * (Vibe belongs to the persona layer). Excludes Name / Kind / Signature
+ * (ontological facts live in `identity.ts`).
  *
- * 锁定约束:删掉这段 = 还是 iknow 但行为不可预测。
- * 判断标准 "删掉后 agent 是不是 iknow":是 → 归 soul。
- * Vibe 内输出风格两条 (markdown 渲染告知 + 结构化为强制) 取自 Claude Code
- * 官方系统提示词 (逆向提取原文改写),解决模型无指令时输出挤成一坨。
- * 后续调整人格 / 边界,改本文件(代码),不进用户工作区。
- * 本 const 是 SSOT,装配时只引用,绝不复制 / 切片(防 drift)。
+ * Locked constraint: deleting this segment = still iknow but unpredictable
+ * behavior. Test: "after deleting it, is the agent still iknow?" yes → soul.
+ * The two output-style rules inside Vibe (markdown rendering notice +
+ * forced structuring) are adapted from Claude Code's official system prompt
+ * (reverse-extracted, rewritten) to fix crammed no-instruction output.
+ * Future persona/boundary tweaks go in this file (code), never in the user
+ * workspace. This const is the SSOT — referenced at assembly time, never
+ * copied or sliced (drift prevention).
  */
 
-/** IKNOW-196 人格层:行为风格(回答 "我如何活")。
- *  删掉这段 = 还是 iknow 但行为不可预测。
- *  判断标准 "删掉后 agent 是不是 iknow":是 → 归 soul。 */
+/** Persona layer: behavioral style (answers "how do I live").
+ *  Deleting this segment = still iknow but unpredictable behavior.
+ *  Test: "after deleting it, is the agent still iknow?" yes → soul. */
 export const IKNOW_SOUL_DEFAULT = `
 # iknow Soul
 

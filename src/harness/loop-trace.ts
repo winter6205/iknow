@@ -1,32 +1,35 @@
 /**
- * 017 LoopTrace A 层:只记结构元数据,严格不含 payload(input/output 在
- * messages 权威保存)。run 结束时一次性从 turns reduce,纯函数。
+ * LoopTrace layer A: records structural metadata only, strictly no payloads
+ * (input/output live in the authoritative messages store). Reduced once from
+ * turns at run end — a pure function.
  *
- * 字段集锁死(spec A7 SSOT):不在此加新字段;扩展走新 spec 增补。
+ * The field set is locked (SSOT): no new fields here; extensions go through
+ * a new spec amendment.
  *
- * Gate B 守门说明:本文件是 017 type-only 形状层,所有 timeout/trace/
- * signal/cancel 相关标识符都是 SSOT 字段名占位,不在此实现任何 Gate B
- * 能力行为;行为实现由 017 后置 spec 在其它模块承担并显式 deferred。
- * (本文件为 017 deferred 模块,Gate B capability gate 构造性满足,
- * 无 exemption 必要;见 public-exports.test.ts。)
+ * Gate note: this file is the type-only shape layer; every
+ * timeout/trace/signal/cancel identifier here is an SSOT field-name
+ * placeholder and implements no gated capability behavior (the capability
+ * gate is satisfied constructively, no exemption needed — see
+ * public-exports.test.ts); behavior lives in other modules per their own
+ * specs, explicitly deferred.
  */
 
-/** 025 #98:取消来源四值枚举(原 timeoutHit/signalAborted 双布尔)。值域与 023 RaceModelOutcome.source 对齐(adapter→none)。 */
+/** Cancellation source, four values (replacing the old timeoutHit / signalAborted boolean pair). Value domain aligned with the race outcome's `source` (adapter → none). */
 export type CancelKind = "none" | "callerAbort" | "timerTimeout" | "hostCancel";
 
 export interface TurnTrace {
   readonly turnIndex: number;
-  /** 引用 014 AssistantTurnResult.supplierStop 值域,不新定义。 */
+  /** References AssistantTurnResult.supplierStop's value domain, not redefined here. */
   readonly supplierStop: "success" | "truncation" | "refusal" | "other";
   readonly toolCalls: ReadonlyArray<{
     readonly toolUseId: string;
     readonly toolName: string;
-    /** 引用 015 ToolExecutionResult.kind 值域,不新定义。 */
+    /** References ToolExecutionResult.kind's value domain, not redefined here. */
     readonly kind:
       "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
     readonly message?: string;
   }>;
-  /** step 入口 → 出口 wall-clock。 */
+  /** Wall-clock from step entry to exit. */
   readonly durationMs: number;
   readonly cancelKind: CancelKind;
 }
@@ -53,8 +56,8 @@ export interface LoopTrace {
 }
 
 /**
- * run 结束时一次性从 turns reduce(纯函数,非增量累加)。
- * nesting ≤ 2:单次 reduce + 计数累加。
+ * Reduce once from turns at run end (pure function, not incremental
+ * accumulation). nesting ≤ 2: a single reduce + counter adds.
  */
 export function computeTotals(turns: ReadonlyArray<TurnTrace>): Totals {
   let totalDurationMs = 0;

@@ -1,13 +1,15 @@
 /**
- * evidence-checker — 证据优先判定的纯函数规则引擎 (spec 449-evidence-checker)。
+ * evidence-checker — pure-function rule engine for evidence-first judgment.
  *
- * 纯函数层 (G2-1): 零 IO、零 LLM、零 loop 接线。输入 = 主会话 messages 只读
- * 快照 + claimIndex 标量, 输出 = EvidenceReport。6 条检查全部封装在内部,
- * 调用方只消费 verdict 不数条件。
+ * Pure layer: zero IO, zero LLM, zero loop wiring. Input = read-only snapshot
+ * of the main session messages + a claimIndex scalar; output = EvidenceReport.
+ * All six checks live inside; callers consume the verdict only, never count
+ * conditions.
  *
- * 冻结契约 (ADR-0003/0006): 不 import loop-engine/session-api/subagent/fs;
- * 只消费已被 sandbox/executor 截断过的 stdout (截断是上游权威)。唯一跨
- * context import 是 AnthropicNativeMessage (与 verify-loop.ts:28 同款)。
+ * Frozen contract (ADR-0003/0006): no imports from loop-engine / session-api /
+ * subagent / fs; consumes only stdout already truncated upstream by
+ * sandbox/executor (truncation authority stays upstream). The only
+ * cross-context import is AnthropicNativeMessage (same as verify-loop.ts).
  */
 import type {
   AnthropicContentBlock,
@@ -19,12 +21,12 @@ import type {
   TestRunEvidence,
 } from "./types.js";
 
-/** is_error 失败标签统一前缀 (tool-result.ts:44)。 */
+/** Unified is_error failure label prefix (see tool-result.ts). */
 const EXECUTION_FAILED_PREFIX = "[execution_failed]";
 
 /**
- * tool_result content 首个 text 文本 (Anthropic content 双形状: string | block[])。
- * 畸形 content 返回 null (fail-closed, 不 crash)。
+ * First text of a tool_result content (Anthropic content has two shapes:
+ * string | block[]). Malformed content returns null (fail-closed, no crash).
  */
 function toolResultText(content: unknown): string | null {
   if (typeof content === "string") return content;
@@ -43,9 +45,10 @@ function toolResultText(content: unknown): string | null {
 }
 
 /**
- * 解析 bash tool_result 结构化 JSON (bash.ts:79-83 → executor.ts:46 文本契约)。
- * 解析失败返回 null (fail-closed)。解析成功返回 {code, stdout}:
- *  - code 供 exit code 判定; stdout 供 marker 判定 (真实 stdout, 非整段 JSON)。
+ * Parse the structured JSON of a bash tool_result (bash.ts/executor.ts text
+ * contract). Parse failure returns null (fail-closed). On success returns
+ * {code, stdout}: code for the exit-code decision; stdout for marker decisions
+ * (the real stdout, not the whole JSON blob).
  */
 function parseToolResult(text: string | null): {
   readonly code: number | null;
@@ -64,16 +67,17 @@ function parseToolResult(text: string | null): {
     }
     return { code: null, stdout: "" };
   } catch {
-    // 非 JSON: ^Exit code (\d+) 正则回退 (防御性兜底, 当前模型面 bash 恒为 JSON shape)。
+    // Non-JSON: ^Exit code (\d+) regex fallback (defensive; the current model
+    // surface always emits the JSON shape).
     const m = /^Exit code (\d+)/m.exec(text);
     return { code: m ? Number(m[1]) : null, stdout: text };
   }
 }
 
 /**
- * exit code 双路解析 (A9, R3 #457): 结构化 JSON {code} 优先; 解析失败回退
- * ^Exit code (\d+); is_error / [execution_failed] 前缀 → null。JSON 成功但
- * 形状不符 → null (fail-closed, 不静默放行)。
+ * Two-path exit-code parse: structured JSON {code} first; on parse failure
+ * fall back to ^Exit code (\d+); is_error / [execution_failed] prefix → null.
+ * JSON parses but shape mismatches → null (fail-closed, never a silent pass).
  */
 function parseExitCode(text: string | null, isError: boolean): number | null {
   if (isError || text === null) return null;
@@ -81,7 +85,7 @@ function parseExitCode(text: string | null, isError: boolean): number | null {
   return parseToolResult(text).code;
 }
 
-/** bash tool_use input.command 提取; 畸形 input 返回 "" (不 crash)。 */
+/** Extract bash tool_use input.command; malformed input returns "" (no crash). */
 function extractCommand(input: unknown): string {
   if (input && typeof input === "object") {
     const command = (input as { command?: unknown }).command;
@@ -91,21 +95,23 @@ function extractCommand(input: unknown): string {
 }
 
 /**
- * 五框架 runner 识别 + green 摘要行合取 (G4-1 白名单)。
- * runner 由命令侧锚定 (env 前缀/引用剥离识别), green 只从框架摘要行读数字,
- * 绝不扫描任意输出。两条件都中 → framework 判定; 否则 null (fail-closed)。
+ * Five-framework runner recognition + green-summary-line conjunction
+ * (whitelist). Runner is anchored on the command side (env-prefix / quote
+ * stripping); green reads numbers only from framework summary lines, never
+ * from arbitrary output. Both conditions must hit → framework; otherwise null
+ * (fail-closed).
  */
 const FRAMEWORK_RULES: ReadonlyArray<{
   readonly framework: Exclude<TestRunEvidence["framework"], null>;
-  /** 命令侧 runner 锚定 (word boundary, 防 go 子串误中)。 */
+  /** Command-side runner anchor (word boundary; prevents substring hits like "go"). */
   readonly runner: RegExp;
-  /** stdout green 摘要行 (只读通过数字)。 */
+  /** stdout green summary line (pass counts only). */
   readonly green: RegExp;
 }> = [
   {
     framework: "pytest",
     runner: /\bpytest\b/,
-    // count+duration 双子句摘要行 ("N passed in X.XXs", = 装饰可任意位置)。
+    // count+duration summary clause ("N passed in X.XXs"; decorators may appear anywhere).
     green: /\d+\s+passed\s+in\s+[\d.]+\s*s/,
   },
   {
@@ -130,15 +136,15 @@ const FRAMEWORK_RULES: ReadonlyArray<{
   },
 ];
 
-/** 弱绿四形态 (R2/truth; 窄跑用 -k/-t 过滤或 :: 精确路径定位)。 */
+/** Four weak-green shapes (narrow runs use -k/-t filters or :: exact-path selection). */
 const WEAK_GREEN_PATTERNS: ReadonlyArray<RegExp> = [
   /0 tests run/,
   /collected 0 items/,
   /no tests found/i,
-  /no test files found/i, // vitest 输出 "No test files found" (单数 test + files)
+  /no test files found/i, // vitest prints "No test files found" (singular test + files)
 ];
 
-/** 吞失败四 pattern (G4-3 硬信号; 命令文本命中即该证据作废)。 */
+/** Four failure-swallowing patterns (hard signal; a command-side hit voids that evidence). */
 const SWALLOWED_PATTERNS: ReadonlyArray<RegExp> = [
   /\|\|\s*true\b/,
   /\|\|\s*exit\s+0\b/,
@@ -146,12 +152,12 @@ const SWALLOWED_PATTERNS: ReadonlyArray<RegExp> = [
   /--passWithNoTests/,
 ];
 
-/** 命令侧窄跑过滤 (-k / -t / :: 精确路径) → 弱绿。 */
+/** Command-side narrow selection (-k / -t / :: exact path) → weak green. */
 function hasNarrowSelection(command: string): boolean {
   return /(^|\s)-[kt]\b/.test(command) || command.includes("::");
 }
 
-/** 五框架 marker 判定; 不匹配 → null (fail-closed, 不猜框架)。 */
+/** Five-framework marker check; no match → null (fail-closed, never guess a framework). */
 function detectFramework(
   command: string,
   stdout: string
@@ -162,20 +168,20 @@ function detectFramework(
   return null;
 }
 
-/** 弱绿判定: 摘要文本命中四形态任一, 或命令侧窄跑过滤。 */
+/** Weak green: any of the four summary shapes in stdout, or command-side narrow selection. */
 function isWeakGreen(command: string, stdout: string): boolean {
   if (WEAK_GREEN_PATTERNS.some((p) => p.test(stdout))) return true;
   return hasNarrowSelection(command);
 }
 
-/** 吞失败判定: 命令文本命中四 pattern 任一 → 该证据作废。 */
+/** Failure swallowed: any of the four patterns in the command text → evidence voided. */
 function isSwallowed(command: string): boolean {
   return SWALLOWED_PATTERNS.some((p) => p.test(command));
 }
 
 /**
- * 该 turn 的 bash 是否执行了测试 (命令侧测试意图启发式)。
- * 非测试 bash (ls / mkdir / git add 等) 不作为验证证据。
+ * Whether this turn's bash actually ran tests (command-side intent heuristic).
+ * Non-test bash (ls / mkdir / git add etc.) never counts as verification evidence.
  */
 function isTestCommand(command: string): boolean {
   const t =
@@ -183,16 +189,17 @@ function isTestCommand(command: string): boolean {
   return t.test(command);
 }
 
-/** doc-only 豁免: .md / .txt / docs/ 路径编辑不算代码编辑 (A6)。 */
+/** Doc-only exemption: .md / .txt / docs/ path edits do not count as code edits. */
 function isDocOnlyPath(filePath: unknown): boolean {
   if (typeof filePath !== "string") return false;
   return /\.(md|txt)$/i.test(filePath) || filePath.includes("docs/");
 }
 
 /**
- * 时效判定 (A6, R2 STALE 语义): 绿测试 turn 之后、claimIndex 之前存在
- * edit_file / write_file 且目标路径非 doc-only → stale。时序用 messages index
- * (不用 mtime/diff/git)。bash 内联改文件 (sed -i / echo >) v1 不追 (G4-2 已知局限)。
+ * Staleness check: an edit_file / write_file after the green test turn and
+ * before claimIndex, targeting a non-doc-only path → stale. Ordering uses the
+ * messages index (never mtime/diff/git). In-bash file mutation (sed -i /
+ * echo >) is not tracked in v1 (known limitation).
  */
 function hasStaleEdit(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -218,7 +225,7 @@ function hasStaleEdit(
   return false;
 }
 
-/** 向后扫描找 tool_use_id 配对的 tool_result (preserveToolPairs 保证成对)。 */
+/** Scan forward for the tool_result paired with a tool_use_id (preserveToolPairs guarantees pairing). */
 function findToolResult(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   toolUseId: string
@@ -238,9 +245,10 @@ function findToolResult(
 }
 
 /**
- * 提取 messages 里所有 bash 测试执行证据 (T3: 填充 marker/三防字段)。
- * 畸形 shape (缺 content / 非对象) 一律跳过, 不 crash (fail-closed)。
- * 非测试 bash (ls / mkdir / git add 等) 不作为验证证据。
+ * Extract all bash test-execution evidence from messages (fills the
+ * marker/anti-forgery fields). Malformed shapes (missing content / non-object)
+ * are skipped, never crash (fail-closed). Non-test bash (ls / mkdir / git add)
+ * does not count as verification evidence.
  */
 function extractTestRuns(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -256,16 +264,17 @@ function extractTestRuns(
       const b = block as AnthropicContentBlock;
       if (b.type !== "tool_use" || b.name !== "bash") continue;
       const command = extractCommand(b.input);
-      if (!isTestCommand(command)) continue; // 只收集测试执行
+      if (!isTestCommand(command)) continue; // test executions only
       const result = findToolResult(messages, b.id);
       const text = result ? toolResultText(result.content) : null;
       const isError = result ? Boolean(result.is_error) : false;
-      // marker 判定只读真实 stdout (结构化 JSON 的 stdout 字段);
-      // 非 JSON 回退形态 stdout = 全文 (防御性兜底)。
+      // Marker checks read only the real stdout (stdout field of the
+      // structured JSON); the non-JSON fallback shape treats the whole text
+      // as stdout (defensive).
       const { stdout } = parseToolResult(
         isError || text?.startsWith(EXECUTION_FAILED_PREFIX) ? null : text
       );
-      // runner + green 摘要行双锚定命中 → framework; greenSummary 与之等价。
+      // Runner + green-summary-line both anchored → framework; greenSummary is equivalent to it.
       const framework = detectFramework(command, stdout);
       runs.push({
         messageIndex: i,
@@ -282,11 +291,12 @@ function extractTestRuns(
 }
 
 /**
- * CONTRADICTED 硬否决判定 (A7 二进制事实, spec: truth count-based 永不指控)。
- * 只认两个可观测的"测试文件被破坏"事实:
- *  - write_file 把测试文件清空 (内容 ≈ 空);
- *  - bash `rm` 测试文件。
- * 数字类信号 (断言减少) 永不 CONTRADICTED (落 gamingSignals 软信号)。
+ * CONTRADICTED hard-veto check (binary facts; count-based signals never accuse).
+ * Only two observable "test file destroyed" facts count:
+ *  - write_file blanks a test file (content ≈ empty);
+ *  - bash `rm` on a test file.
+ * Numeric signals (fewer assertions) never reach CONTRADICTED — they fall to
+ * gamingSignals as soft signals.
  */
 function hasContradiction(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -309,8 +319,9 @@ function hasContradiction(
         if (isTestFilePath(fp) && isEmpty) return true;
       } else if (b.name === "bash") {
         const command = extractCommand(b.input);
-        // bash `rm` 测试文件: 提取 rm 目标 token 逐个喂 isTestFilePath,
-        // 收敛到「真测试文件」路径判定 (不子串误中 node_modules/vitest 等)。
+        // bash `rm` on a test file: feed each rm target token to
+        // isTestFilePath, converging on real test-file path decisions
+        // (avoids substring false hits like node_modules / vitest).
         if (/\brm\b/.test(command)) {
           const target = command
             .split(/\s+/)
@@ -323,7 +334,7 @@ function hasContradiction(
   return false;
 }
 
-/** 测试文件路径启发式 (src/foo.test.ts / tests/* / test_*.py 等)。 */
+/** Test-file path heuristic (src/foo.test.ts / tests/* / test_*.py etc.). */
 function isTestFilePath(filePath: string): boolean {
   return (
     /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(filePath) ||
@@ -339,9 +350,9 @@ function isTestFilePath(filePath: string): boolean {
 }
 
 /**
- * gamingSignals 软信号收集 (A7: 仅记录, 不参与判定)。
- * count-based 永不指控: 断言数减少 / 新增 skip/xfail / --no-verify 只落
- * gamingSignals, 不改 verdict。
+ * Collect gamingSignals soft signals (recorded only, never judged).
+ * Count-based signals never accuse: fewer assertions / new skip/xfail /
+ * --no-verify land only in gamingSignals, never changing the verdict.
  */
 function collectGamingSignals(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -363,8 +374,9 @@ function collectGamingSignals(
         ) {
           signals.push("git commit --no-verify/-n (skipped pre-commit checks)");
         }
-        // 变更测试文件自身的 bash 操作 → 软信号 (与 CONTRADICTED 对齐:
-        // 只有目标是 isTestFilePath 才记, 避免 rm dist/bundle.js 等误报)。
+        // bash operations mutating a test file itself → soft signal (aligned
+        // with CONTRADICTED: recorded only when the target passes
+        // isTestFilePath, avoiding false hits like rm dist/bundle.js).
         if (/\b(rm|sed|mv)\b/.test(command)) {
           const target = command
             .split(/\s+/)
@@ -374,8 +386,8 @@ function collectGamingSignals(
           }
         }
       } else if (b.name === "edit_file" || b.name === "write_file") {
-        // 新增 skip/xfail 装饰器到测试文件 → 软信号 (spec Glossary 三类别)。
-        // 只扫可见的 input.content 文本, 不读 fs (纯函数纪律 A11)。
+        // New skip/xfail decorator landing in a test file → soft signal.
+        // Scans only the visible input.content text, never reads fs (pure-function discipline).
         const input = b.input as { filePath?: unknown; content?: unknown };
         const fp = typeof input.filePath === "string" ? input.filePath : "";
         if (isTestFilePath(fp) && typeof input.content === "string") {
@@ -394,8 +406,9 @@ function collectGamingSignals(
 }
 
 /**
- * fail-closed 的 INSUFFICIENT 报告构造 (A8: 拿不准不 PASS)。
- * stale 由时效路径传入 (stale INSUFFICIENT 时报告需保留 STALE 语义)。
+ * Build the fail-closed INSUFFICIENT report (when unsure, never PASS).
+ * stale is passed in by the staleness path (a stale INSUFFICIENT report keeps
+ * STALE semantics).
  */
 function insufficient(
   reasons: ReadonlyArray<string>,
@@ -412,9 +425,10 @@ function insufficient(
 }
 
 /**
- * 证据充分性判定 (A3 五条件合取): exit 0 ∧ green 摘要 ∧ 非弱绿 ∧ 无吞失败
- * ∧ 时效窗口无代码编辑。T2 骨架阶段 greenSummary 恒 false → 永不 SUFFICIENT
- * (fail-closed); T3 填充 marker 判定后放行。时效判定 T3 落 stale 字段。
+ * Evidence-sufficiency verdict (five-condition conjunction): exit 0 ∧ green
+ * summary ∧ not weak green ∧ no swallowed failure ∧ no code edit inside the
+ * staleness window. Fail-closed throughout: anything unparseable never
+ * reaches SUFFICIENT.
  */
 function computeVerdict(runs: ReadonlyArray<TestRunEvidence>): EvidenceVerdict {
   for (const run of runs) {
@@ -431,9 +445,10 @@ function computeVerdict(runs: ReadonlyArray<TestRunEvidence>): EvidenceVerdict {
 }
 
 /**
- * checkEvidence — 主入口 (spec Code Style)。
- * 输入 = 主会话 append-only messages 只读快照 (截至最后一次 compact) +
- * claimIndex 标量 (completed 声称位置, 时效窗口右端)。
+ * checkEvidence — main entry.
+ * Input = read-only snapshot of the main session's append-only messages (up
+ * to the last compact) + claimIndex scalar (position of the completion claim,
+ * right edge of the staleness window).
  */
 export function checkEvidence(args: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
@@ -441,7 +456,7 @@ export function checkEvidence(args: {
 }): EvidenceReport {
   const { messages, claimIndex } = args;
 
-  // fail-closed 前置 (A8): claimIndex=0 / 空输入 → INSUFFICIENT。
+  // Fail-closed precondition: claimIndex=0 / empty input → INSUFFICIENT.
   if (claimIndex <= 0 || !Array.isArray(messages) || messages.length === 0) {
     return insufficient(
       ["no messages or claimIndex at session start (fail-closed)"],
@@ -449,8 +464,9 @@ export function checkEvidence(args: {
     );
   }
 
-  // claimIndex 窗口化: claim 之后产生的 run 不作证据 (时序窗口右端 = claimIndex,
-  // fail-closed 偏保守; claim 后产生的 run 即使绿也不 SUFFICIENT)。
+  // claimIndex windowing: runs produced after the claim are not evidence
+  // (right edge of the ordering window = claimIndex; conservative — even a
+  // green post-claim run never yields SUFFICIENT).
   const runs = extractTestRuns(messages).filter(
     (r) => r.messageIndex < claimIndex
   );
@@ -458,7 +474,7 @@ export function checkEvidence(args: {
     return insufficient(["no bash test execution before claim found"], []);
   }
 
-  // CONTRADICTED (A7): 清空/删除测试文件是唯一硬否决, 优先于其它判定。
+  // CONTRADICTED: clearing/removing test files is the only hard veto, checked before all else.
   if (hasContradiction(messages)) {
     return {
       verdict: "EVIDENCE_CONTRADICTED",
@@ -473,7 +489,7 @@ export function checkEvidence(args: {
 
   const verdict = computeVerdict(runs);
   if (verdict === "EVIDENCE_SUFFICIENT") {
-    // 时效 (A6): 绿测试 turn 之后、claimIndex 之前有代码编辑 → stale → 不 SUFFICIENT。
+    // Staleness: code edited after the green test turn but before claimIndex → stale → not SUFFICIENT.
     const stale = runs.some((r) =>
       hasStaleEdit(messages, r.messageIndex, claimIndex)
     );

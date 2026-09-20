@@ -1,10 +1,12 @@
 /**
- * 输出投影（SC12「输出投影」；契约 D2/D3；SC4/SC5/SC6/SC7）。
+ * Output projection.
  *
- * 三种出法共用同一条流水线：**sort → paginate → project**。出法只决定
- * 「名单里放什么」，不决定「怎么切」—— 切的是已排序名单（见 `sort.ts`）。
+ * All three output modes share one pipeline: **sort → paginate → project**.
+ * The mode decides only "what goes into the roster", never "how to slice" —
+ * slicing always applies to the sorted roster (see `sort.ts`).
  *
- * 投影层不碰 fs / 进程：输入是两条引擎归一后的原始产物。
+ * The projection layer touches no fs / processes: its inputs are the raw
+ * artifacts normalized from both engines.
  */
 
 import {
@@ -22,7 +24,7 @@ export interface ProjectionInput {
   readonly headLimit: number;
 }
 
-/** 唯一文件相对路径，每文件一条；条数按文件计（SC4）。 */
+/** Unique file-relative paths, one per file; counts are per file. */
 export function projectPaths(input: ProjectionInput): string {
   const unique = sortPaths([...new Set(input.hits.lines.map((h) => h.path))]);
   const page = paginate(unique, input.offset, input.headLimit);
@@ -30,7 +32,7 @@ export function projectPaths(input: ProjectionInput): string {
   return page.items.join("\n");
 }
 
-/** `path:line:text`（SC5）。 */
+/** `path:line:text`. */
 export function projectContent(input: ProjectionInput): string {
   const sorted = sortLineHits(input.hits.lines);
   const page = paginate(sorted, input.offset, input.headLimit);
@@ -41,10 +43,11 @@ export function projectContent(input: ProjectionInput): string {
 }
 
 /**
- * `path:条数` + 全库 `total:`（SC5）。
+ * `path:count` lines plus the corpus-wide `total:` line.
  *
- * `total` 取**切片前**的命中总数 —— 它是「这个查询一共多少命中」的答案，
- * 不是「这一页多少条」。分页与总数因此互不干扰。
+ * `total` counts the hits **before** slicing — it answers "how many hits does
+ * this query have in total", not "how many are on this page". Pagination and
+ * the total therefore never interfere with each other.
  */
 export function projectCount(input: ProjectionInput): string {
   const lines = input.hits.lines;
@@ -63,7 +66,7 @@ export function projectCount(input: ProjectionInput): string {
   ].join("\n");
 }
 
-/** 引擎已给出每文件计数时直接投影（rg `--count` 路径；total 仍然切片前算）。 */
+/** Project engine-per-file counts directly (the rg `--count` path; total is still computed pre-slice). */
 export function projectCounts(
   counts: ReadonlyArray<FileCount>,
   offset: number,
@@ -80,7 +83,7 @@ export function projectCounts(
   ].join("\n");
 }
 
-/** 引擎已给出路径名单时直接投影（rg `-l` 路径）。 */
+/** Project the engine's path list directly (the rg `-l` path). */
 export function projectPathList(
   paths: ReadonlyArray<string>,
   offset: number,
@@ -94,19 +97,24 @@ export function projectPathList(
 }
 
 /**
- * 渲染 `content + context` 的组序列（SC6）。
+ * Render the group sequence for `content + context` output.
  *
- * 匹配行 `path:line:text`；上下文行 `path:line-text`；组间插 `--`。
+ * Match lines are `path:line:text`; context lines are `path:line-text`; groups
+ * are separated by `--`.
  *
- * 为什么上下文行是 `path:line-text` 而**不是** `path-line-text`：后者的
- * 行号前那一段里允许出现任意字符，于是「内容里带冒号」的上下文行会长成
- * `a.ts-1-see x:9:fake` —— 任何按 `^[^:]*:\d+:` 判匹配行的消费者（人也
- * 好、下游 parser 也好）都会把它读成一条真命中，SC6 的「不脏行」就破了。
- * 把路径与行号用同一种分隔符框住（`path:line` 前缀），真假只由行号之后
- * 那**一个字符**承担（`:` = 匹配、`-` = 上下文），与 rg 原生 `--null
- * -C N` 输出的判别位置完全一致（那里是 `\0` 之后的 `path\0line:text` /
- * `path\0line-text`）。这样无论内容含什么，上下文行都无法被拆成
- * `path:整数:text` 三元组。
+ * Why context lines use `path:line-text` and **not** `path-line-text`: with
+ * the latter, anything is allowed between the path and the line number, so a
+ * context line whose content contains a colon would look like
+ * `a.ts-1-see x:9:fake` — any consumer that decides "match line" by
+ * `^[^:]*:\d+:` (a human or a downstream parser) would read that as a real
+ * hit, and the "no fake lines" guarantee of context output would break.
+ * Framing path and line number with the same separator (the `path:line`
+ * prefix) leaves exactly **one** character after the line number to tell
+ * truth from fiction (`:` = match, `-` = context), which is the same
+ * disambiguation position rg itself uses in `--null -C N` output (there it is
+ * `path\0line:text` / `path\0line-text` after the `\0`). No matter what the
+ * content contains, a context line can never be split into a
+ * `path:integer:text` triple.
  */
 export function projectContext(groups: ReadonlyArray<ContextGroup>): string {
   if (groups.length === 0) return "";

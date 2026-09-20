@@ -1,27 +1,38 @@
 /**
- * network-guard（SSRF 安全出口层）：web_fetch / web_search 共用的出站 HTTP 防线。
+ * network-guard (SSRF egress layer): the shared outbound-HTTP defense for
+ * web_fetch / web_search.
  *
- * 行为真值：utils/network_guard.py 的 DIRECT 解析模式裁剪版
- * （ACR corrective #2：不移植 PROXY / SYNTHETIC_DNS 配置管线——iknow 无此需求）。
+ * Behavioral ground truth: a trimmed version of utils/network_guard.py's
+ * DIRECT resolution mode (the PROXY / SYNTHETIC_DNS config pipelines are
+ * deliberately not ported — iknow has no use for them).
  *
- * 防线（逐跳生效，含重定向）：
- *   1. URL 语法：仅 http/https、必须有 host、拒绝嵌入凭据。
- *   2. IP 字面量：非公网段（loopback / 私网 / link-local / CGNAT / 多播 / 保留）拒绝。
- *   3. 主机名：localhost / 本地后缀 / 单标签主机名拒绝。
- *   4. DNS 解析：解析结果含任一非公网 IP → 拒绝；解析失败 → could not resolve。
- *   5. 重定向：≤5 跳，每一跳重新走 1-4；落到非公网目标即拒绝。
- *   6. 非 2xx → 拒绝（带状态码）。
+ * Defenses (applied per hop, redirects included):
+ *   1. URL syntax: http/https only, host required, embedded credentials
+ *      rejected.
+ *   2. IP literals: anything non-public (loopback / private / link-local /
+ *      CGNAT / multicast / reserved) is rejected.
+ *   3. Hostnames: localhost / local suffixes / single-label names rejected.
+ *   4. DNS resolution: any non-public IP in the result → reject; resolution
+ *      failure → could not resolve.
+ *   5. Redirects: ≤5 hops, each hop re-runs checks 1-4; landing on a
+ *      non-public target rejects.
+ *   6. Non-2xx → reject (with status code).
  *
- * 已知边界（与 upstream DIRECT 模式同构，非本实现偏离）：校验用 lookup 与
- * 生产 fetch（undici 自行解析）之间无 IP 钉扎，理论上存在 DNS rebinding
- * TOCTOU 窗口；缓解需自定义 undici dispatcher 钉扎已验证 IP（后续工单）。
+ * Known boundary (same shape as upstream DIRECT mode, not a deviation of
+ * this implementation): there is no IP pinning between the validation
+ * lookup and the production fetch (undici resolves on its own), leaving a
+ * theoretical DNS-rebinding TOCTOU window; mitigation needs a custom undici
+ * dispatcher that pins the validated IP (future work).
  *
- * 依赖注入（对齐 grep.ts 的 GrepToolDeps 先例）：fetch / lookup 均可被测试 stub
- * 覆盖，全部测试离线跑。生产默认用 createDefaultGuardDeps(userAgent) 组装
- * （fetch = globalThis.fetch redirect:manual；lookup = node:dns/promises.lookup all）。
+ * Dependency injection (following the grep.ts GrepToolDeps precedent):
+ * fetch / lookup are both overridable by test stubs, so all tests run
+ * offline. Production default is assembled by createDefaultGuardDeps
+ * (fetch = globalThis.fetch redirect:manual; lookup =
+ * node:dns/promises.lookup all).
  *
- * 所有失败抛 ToolExecutionError，消息以 `${tool} failed:` 开头（对齐 upstream
- * "web_fetch failed: ..." 约定），由 executor sanitizeFailure 原样回灌模型。
+ * All failures throw ToolExecutionError with messages prefixed
+ * `${tool} failed:` (matching upstream's "web_fetch failed: ..."
+ * convention), fed back to the model verbatim by the executor.
  */
 
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -32,23 +43,26 @@ import { ToolExecutionError } from "../../errors.js";
 import { classifyIp } from "./ip-classify.js";
 
 /**
- * 全局 fetch 的 RequestInit.dispatcher 类型来自 @types/node 捆绑的
- * undici-types@6(结构旧),而 undici@7 的 ProxyAgent 实现的是 undici@7
- * Dispatcher(FormData 等类型签名不同)。两套类型签名结构不兼容,但
- * 运行值是同一代理语义。此处用窄类型断言桥接 —— 只声明"满足全局 fetch
- * 需要的 dispatcher 形状",不引入 any。
+ * The RequestInit.dispatcher type on global fetch comes from the
+ * undici-types@6 bundled with @types/node (an older structural shape), while
+ * undici@7's ProxyAgent implements the undici@7 Dispatcher (different type
+ * signatures, e.g. FormData). The two type sets are structurally
+ * incompatible, but the runtime value is the same proxy semantics. This
+ * narrow type bridges them with an assertion — it only declares "whatever
+ * shape global fetch needs from dispatcher", without reaching for any.
  */
 type FetchDispatcher = NonNullable<Parameters<typeof fetch>[1]>["dispatcher"];
 
-/** 重定向上限（与 upstream MAX_REDIRECTS 对齐）。 */
+/** Redirect cap (aligned with upstream MAX_REDIRECTS). */
 export const MAX_REDIRECTS = 5;
 
-/** 解码后响应体上限（1 MiB）。生产流式读与 stub 二次校验共用。 */
+/** Decoded response-body cap (1 MiB); shared by the production streaming read and the stub double-check. */
 export const MAX_DECODED_BODY_BYTES = 1_048_576;
 
 /**
- * Content-Length 预检：仅当头是非负整数且大于上限时为 true。
- * 缺省 / 空 / 非数字 / 负数一律 false——非法 CL 不是拒绝依据。
+ * Content-Length pre-check: true only when the header is a non-negative
+ * integer larger than the cap. Absent / empty / non-numeric / negative all
+ * return false — an illegal Content-Length is never a rejection basis.
  */
 export function contentLengthExceedsCap(
   header: string | null | undefined,
@@ -63,7 +77,7 @@ export function contentLengthExceedsCap(
   return Number(trimmed) > maxBytes;
 }
 
-/** 已解码字符串的 UTF-8 字节数超限 → 抛无前缀 ToolExecutionError。 */
+/** UTF-8 byte size of the decoded string exceeds the cap → throw a prefix-free ToolExecutionError. */
 export function assertDecodedBodyLimit(
   body: string,
   maxBytes: number = MAX_DECODED_BODY_BYTES
@@ -75,8 +89,9 @@ export function assertDecodedBodyLimit(
 }
 
 /**
- * 从 ReadableStream 累计 UTF-8 字节，第一块越限即 abort。
- * 无流（null）返回空串，不假装成功读到了正文。
+ * Accumulate UTF-8 bytes from a ReadableStream, aborting as soon as a chunk
+ * crosses the cap. A null stream returns an empty string — never a pretend
+ * successful body read.
  */
 export async function readUtf8WithByteLimit(
   stream: ReadableStream<Uint8Array> | null,
@@ -111,31 +126,34 @@ export async function readUtf8WithByteLimit(
 }
 
 /**
- * 浏览器伪装 UA（web_fetch / web_search 工具生产默认出口共享）。
+ * Browser-spoofing UA (shared production egress default for web_fetch /
+ * web_search).
  *
- * 选用 Chrome 130 桌面 UA + iknow 产品后缀，对齐
- * `Mozilla/... iknow/<version>` 风格——伪装为真实浏览器以通过 Cloudflare
- * 等反爬 UA 过滤（实测：纯产品 UA "iknow-web-fetch/0.1" 被 Ars Technica
- * Cloudflare 拦截为 202 challenge；浏览器 UA 通过）。UA 中显式带 `iknow/`
- * 标识，避免完全伪装为不知名流量。
+ * A Chrome 130 desktop UA plus the iknow product suffix, in the
+ * `Mozilla/... iknow/<version>` style — spoofing a real browser to pass
+ * anti-bot UA filters such as Cloudflare (measured: a pure product UA
+ * "iknow-web-fetch/0.1" gets challenged with 202 by Ars Technica's
+ * Cloudflare; the browser UA passes). The UA still carries an explicit
+ * `iknow/` marker so traffic is not fully disguised as anonymous.
  *
- * 版本号写死是已知偏离（不随 Chrome 版本自动更新），与 upstream 同。
- * 测试覆盖：此常量导出供工具层引用；测试本身不检查 UA（注入 fetch stub
- * 不消费 headers）。
+ * The hardcoded version is a known deviation (no auto-update with Chrome),
+ * same as upstream. Test coverage: the constant is exported for the tool
+ * layer; tests do not check the UA (injected fetch stubs never read
+ * headers).
  */
 export const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) " +
   "AppleWebKit/537.36 (KHTML, like Gecko) " +
   "Chrome/130.0.0.0 Safari/537.36 iknow/0.1";
 
-/** 本地主机名黑名单（对齐 upstream _LOCAL_HOSTNAMES）。 */
+/** Local hostname denylist (aligned with upstream _LOCAL_HOSTNAMES). */
 const LOCAL_HOSTNAMES: ReadonlySet<string> = new Set([
   "localhost",
   "localhost.localdomain",
   "metadata.google.internal",
 ]);
 
-/** 本地主机名后缀黑名单（对齐 upstream _LOCAL_HOST_SUFFIXES）。 */
+/** Local hostname suffix denylist (aligned with upstream _LOCAL_HOST_SUFFIXES). */
 const LOCAL_HOST_SUFFIXES: readonly string[] = [
   ".localhost",
   ".local",
@@ -144,12 +162,12 @@ const LOCAL_HOST_SUFFIXES: readonly string[] = [
   ".cluster.local",
 ];
 
-/** 注入的 fetch 收到的每请求选项（signal 已合并 caller + 超时）。 */
+/** Per-request options received by the injected fetch (signal already merges caller + timeout). */
 export interface GuardFetchOptions {
   readonly signal?: AbortSignal;
 }
 
-/** 注入 fetch 的单次响应（redirect: manual 语义：3xx 带 location）。 */
+/** One response from the injected fetch (redirect: manual semantics: 3xx carries location). */
 export interface GuardHttpResponse {
   readonly status: number;
   readonly contentType: string;
@@ -157,72 +175,79 @@ export interface GuardHttpResponse {
   readonly location?: string;
 }
 
-/** fetchPublicResponse 的返回：原始响应 + 最终 URL（重定向后）。 */
+/** Return of fetchPublicResponse: the raw response + final URL (after redirects). */
 export interface GuardPublicResponse extends GuardHttpResponse {
   readonly finalUrl: string;
 }
 
-/** 测试 seam / 生产默认：发一次 GET（不自动跟随重定向）。 */
+/** Test seam / production default: issue one GET (redirects not auto-followed). */
 export type GuardFetchFn = (
   url: string,
   options: GuardFetchOptions
 ) => Promise<GuardHttpResponse>;
 
-/** 测试 seam / 生产默认：把主机名解析为 IP 地址列表。 */
+/** Test seam / production default: resolve a hostname to a list of IP addresses. */
 export type GuardLookupFn = (hostname: string) => Promise<readonly string[]>;
 
-/** 依赖注入对（fetch + lookup 均必传，由工具工厂填生产默认或测试 stub）。 */
+/** Dependency pair (fetch + lookup both required; tool factories fill production defaults or test stubs). */
 export interface GuardDeps {
   readonly fetch: GuardFetchFn;
   readonly lookup: GuardLookupFn;
 }
 
-/** fetchPublicResponse 的调用选项。 */
+/** Call options for fetchPublicResponse. */
 export interface FetchPublicOptions {
-  /** 工具名（用于错误前缀，如 "web_fetch"）。 */
+  /** Tool name (used for the error prefix, e.g. "web_fetch"). */
   readonly tool: string;
-  /** 整个出站调用（含全部重定向）的超时毫秒。 */
+  /** Timeout in ms for the whole outbound call (all redirects included). */
   readonly timeoutMs: number;
-  /** caller 取消信号（executor 透传）。 */
+  /** Caller cancellation signal (passed through by the executor). */
   readonly signal?: AbortSignal;
 }
 
-/** createDefaultGuardDeps 的配置选项。 */
+/** Configuration for createDefaultGuardDeps. */
 export interface DefaultGuardDepsOptions {
-  /** 显式出站代理 URL（http/https）。缺省 = 直连（不挂 dispatcher）。 */
+  /** Explicit outbound proxy URL (http/https). Default = direct (no dispatcher). */
   readonly proxyUrl?: string;
-  /** 可选 UA 覆写；缺省用 {@link DEFAULT_USER_AGENT}。 */
+  /** Optional UA override; defaults to {@link DEFAULT_USER_AGENT}. */
   readonly userAgent?: string;
 }
 
 /**
- * 生产默认出口 deps（SSOT）：fetch = globalThis.fetch（redirect: manual，
- * UA 默认浏览器伪装串）+ lookup = node:dns/promises.lookup(all)。
- * web_fetch / web_search 工厂不再各自复制默认实现（code-review 整改）。
+ * Production default egress deps (SSOT): fetch = globalThis.fetch (redirect:
+ * manual, UA defaults to the browser-spoofing string) + lookup =
+ * node:dns/promises.lookup(all). web_fetch / web_search factories no longer
+ * duplicate the default implementations.
  *
- * 代理臂（对齐 upstream `fetch_public_http_response` 的 `proxy` 配置，
- * trust_env=False 语义 —— 显式配置才生效，不读系统 HTTP(S)_PROXY）：
- *   - `opts.proxyUrl` 提供时，fetch 挂 `undici.ProxyAgent` dispatcher，
- *     出站流量经代理转发（远端解析 + 出网，绕开本地 DNS 污染 / egress 阻断）。
- *   - 代理 URL 走与目标 URL 同套 httpUrlViolation 校验（协议 / host / 凭据），
- *     对齐 upstream `validate_http_url(resolved_proxy)`。
- *   - 代理主机名不做公网 IP 防线 —— 本地代理（127.0.0.1 / 内网）必须允许，
- *     否则本地代理装配即失败。
- *   - 走代理时不改目标 URL 的 SSRF 校验：target 仍逐跳走语法 + IP + DNS 防线
- *     （代理在远端解析，本地 DNS 结果对 target 校验的语义与直连一致）。
+ * Proxy arm (aligned with upstream `fetch_public_http_response`'s `proxy`
+ * config and trust_env=False semantics — only explicit configuration takes
+ * effect, system HTTP(S)_PROXY is never read):
+ *   - When `opts.proxyUrl` is given, fetch attaches an `undici.ProxyAgent`
+ *     dispatcher and outbound traffic is relayed by the proxy (remote
+ *     resolution + egress, bypassing local DNS pollution / blocking).
+ *   - The proxy URL goes through the same httpUrlViolation checks as target
+ *     URLs (scheme / host / credentials), matching upstream's
+ *     `validate_http_url(resolved_proxy)`.
+ *   - The proxy hostname is exempt from the public-IP defense — local
+ *     proxies (127.0.0.1 / intranet) must be allowed or local proxy
+ *     assembly could never work.
+ *   - Going through a proxy does not relax target-URL SSRF validation: the
+ *     target still passes syntax + IP + DNS checks hop by hop (the proxy
+ *     resolves remotely; local DNS results for target validation carry the
+ *     same meaning as in direct mode).
  *
- * @param opts 配置：proxyUrl / userAgent；二者均可缺省。
+ * @param opts Configuration: proxyUrl / userAgent; both optional.
  */
 export function createDefaultGuardDeps(
   opts?: DefaultGuardDepsOptions | string
 ): GuardDeps {
-  // 向后兼容旧签名 createDefaultGuardDeps(userAgent?: string)。
+  // Backward compatibility with the old signature createDefaultGuardDeps(userAgent?: string).
   const userAgent =
     typeof opts === "string" ? opts : (opts?.userAgent ?? DEFAULT_USER_AGENT);
   const proxyUrl = typeof opts === "string" ? undefined : opts?.proxyUrl;
   let dispatcher: ProxyAgent | undefined;
   if (proxyUrl) {
-    // 代理 URL 复用目标 URL 的 SSRF 语法防线（协议 / host / 凭据）。
+    // The proxy URL reuses the target URL's SSRF syntax defense (scheme / host / credentials).
     const violation = httpUrlViolation(proxyUrl);
     if (violation !== null) {
       throw new ToolExecutionError(violation);
@@ -235,8 +260,9 @@ export function createDefaultGuardDeps(
       signal: options.signal,
       headers: { "User-Agent": userAgent },
       ...(dispatcher
-        ? // 类型桥接见 FetchDispatcher 注释(undici@7 与全局 fetch 的
-          // undici-types 版本不同,结构不兼容但运行值等价)。
+        ? // Type bridge explained on FetchDispatcher (undici@7 vs the
+          // undici-types bundled with global fetch differ structurally,
+          // but the runtime values are equivalent).
           { dispatcher: dispatcher as unknown as FetchDispatcher }
         : {}),
     });
@@ -266,8 +292,9 @@ export function createDefaultGuardDeps(
 }
 
 /**
- * 同步校验 URL 语法：仅 http/https、必须有 host、拒绝嵌入凭据。
- * 违规抛 ToolExecutionError（无工具前缀——供独立使用与 guard 内部复用）。
+ * Synchronous URL syntax validation: http/https only, host required,
+ * embedded credentials rejected. Violations throw ToolExecutionError
+ * (prefix-free — usable standalone and reused inside the guard).
  */
 export function validateHttpUrl(url: string): void {
   const violation = httpUrlViolation(url);
@@ -275,8 +302,9 @@ export function validateHttpUrl(url: string): void {
 }
 
 /**
- * 出站抓取：逐跳校验 + 跟随重定向（≤ MAX_REDIRECTS），返回最终响应。
- * 任何防线失败抛 ToolExecutionError，消息以 `${opts.tool} failed:` 开头。
+ * Outbound fetch: hop-by-hop validation + redirect following (≤
+ * MAX_REDIRECTS), returning the final response. Any defense failure throws
+ * ToolExecutionError prefixed with `${opts.tool} failed:`.
  */
 export async function fetchPublicResponse(
   url: string,
@@ -300,7 +328,7 @@ export async function fetchPublicResponse(
   }
 }
 
-/** 重定向主循环：每跳先 ensurePublicTarget 再 fetch，≤ MAX_REDIRECTS 跳。 */
+/** Redirect loop: every hop runs ensurePublicTarget first, then fetch; ≤ MAX_REDIRECTS hops. */
 async function followGuardedRedirects(
   url: string,
   deps: GuardDeps,
@@ -325,14 +353,14 @@ async function followGuardedRedirects(
   return fail(`too many redirects (>${MAX_REDIRECTS})`);
 }
 
-/** 构造带 `${tool} failed:` 前缀的 fail（返回 never，供 TS 收窄）。 */
+/** Builds a fail that prefixes `${tool} failed:` (returns never so TS narrows). */
 function failWithPrefix(tool: string): (reason: string) => never {
   return (reason: string): never => {
     throw new ToolExecutionError(`${tool} failed: ${reason}`);
   };
 }
 
-/** stub / 生产共用：解码体超限走 fail 前缀，不返回半页。 */
+/** Shared by stubs and production: an over-cap decoded body goes through the prefixed fail; never a half page. */
 function enforceDecodedBodyLimit(
   body: string,
   fail: (reason: string) => never
@@ -346,14 +374,14 @@ function enforceDecodedBodyLimit(
   }
 }
 
-/** 无 ReadableStream 时退回 text()，仍过字节上限。 */
+/** When there is no ReadableStream, fall back to text(), still enforcing the byte cap. */
 async function readTextThenLimit(response: Response): Promise<string> {
   const body = await response.text();
   assertDecodedBodyLimit(body);
   return body;
 }
 
-/** 执行一次注入 fetch，把中止 / 底层错误归一为带前缀的 ToolExecutionError。 */
+/** Run one injected fetch, normalizing aborts / low-level errors into a prefixed ToolExecutionError. */
 async function runFetch(
   fetch: GuardFetchFn,
   url: string,
@@ -361,7 +389,8 @@ async function runFetch(
   fail: (reason: string) => never
 ): Promise<GuardHttpResponse> {
   try {
-    // 中止先于 fetch 开始时，注入 stub 的 abort 监听器可能永不触发——先检一次。
+    // If the signal was already aborted before fetch started, an injected
+    // stub's abort listener may never fire — check once up front.
     if (signal.aborted) fail("request aborted");
     return await fetch(url, { signal });
   } catch (error) {
@@ -372,7 +401,8 @@ async function runFetch(
 }
 
 /**
- * 选厂商引擎之前复用今日私网 / 语法 / 主机名防线（不发出站）。
+ * Reuses the private-network / syntax / hostname defenses before a vendor
+ * engine is chosen (issues no outbound request).
  */
 export async function assertPublicHttpTarget(
   url: string,
@@ -382,7 +412,7 @@ export async function assertPublicHttpTarget(
   await ensurePublicTarget(url, lookup, failWithPrefix(tool));
 }
 
-/** 对单个目标 URL 跑 URL 语法 + IP/主机名 + DNS 四道防线。 */
+/** Runs URL syntax + IP/hostname + DNS (four defenses) against one target URL. */
 async function ensurePublicTarget(
   url: string,
   lookup: GuardLookupFn,
@@ -391,7 +421,7 @@ async function ensurePublicTarget(
   const violation = httpUrlViolation(url);
   if (violation !== null) fail(violation);
   const rawHostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-  // WHATWG URL 对 IPv6 字面量保留方括号；分类前剥掉。
+  // WHATWG URLs keep the brackets around IPv6 literals; strip before classification.
   const hostname =
     rawHostname.startsWith("[") && rawHostname.endsWith("]")
       ? rawHostname.slice(1, -1)
@@ -401,7 +431,7 @@ async function ensurePublicTarget(
     if (label !== null) {
       fail(`target resolves to non-public address(es): ${hostname} (${label})`);
     }
-    return; // 公网 IP 字面量：无需主机名 / DNS 防线
+    return; // public IP literal: hostname / DNS defenses not applicable
   }
   ensureHostnameAllowed(hostname, fail);
   const addresses = await resolveHost(hostname, lookup, fail);
@@ -414,7 +444,7 @@ async function ensurePublicTarget(
   }
 }
 
-/** 主机名黑名单 + 单标签拒绝。 */
+/** Hostname denylist + single-label rejection. */
 function ensureHostnameAllowed(
   hostname: string,
   fail: (reason: string) => never
@@ -430,7 +460,7 @@ function ensureHostnameAllowed(
   }
 }
 
-/** DNS 解析：失败 / 空结果都拒绝。 */
+/** DNS resolution: failures / empty results both reject. */
 async function resolveHost(
   hostname: string,
   lookup: GuardLookupFn,
@@ -442,13 +472,13 @@ async function resolveHost(
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     fail(`could not resolve target host ${hostname}: ${detail}`);
-    addresses = []; // 不可达 — fail 必抛；仅为 TS definite-assignment 收窄
+    addresses = []; // unreachable — fail always throws; here only for TS definite-assignment
   }
   if (addresses.length === 0) fail(`target host did not resolve: ${hostname}`);
   return addresses;
 }
 
-/** URL 语法违规检查：返回违规原因，合法返回 null。 */
+/** URL syntax violation check: returns the violation reason, or null when valid. */
 function httpUrlViolation(url: string): string | null {
   if (typeof url !== "string" || url.trim().length === 0) {
     return "URL must be a non-empty string";

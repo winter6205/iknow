@@ -1,9 +1,9 @@
 /**
- * src/harness/ 公共出口 (spec Project Structure 冻)。
+ * Public surface of src/harness/ (frozen by the project structure spec).
  *
- * T12 阶段补全:`run` / `createLoopEngine` / `createAnthropicAdapter` /
- * `createRegistry` / `createExecutor` / `createStubModel` / `createStubTool`
- * 等 Foundation 自治运行时入口。spec Success Criteria 16 条全部 yes。
+ * Foundation autonomous-runtime entries: `run` / `createLoopEngine` /
+ * `createAnthropicAdapter` / `createRegistry` / `createExecutor` /
+ * `createStubModel` / `createStubTool` and friends.
  */
 
 export {
@@ -72,14 +72,14 @@ export { createStubTool } from "./stubs/stub-tool.js";
 export { createEchoTool } from "./stubs/demo-tools.js";
 export { createGetTimeTool } from "./stubs/demo-tools.js";
 
-// 017 A7 LoopTrace:纯类型 + 一次性 reduce 函数,字段名 SSOT。
+// LoopTrace: pure types + one-shot reduce; field names are the SSOT.
 export { computeTotals } from "./loop-trace.js";
 export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
 
-// T2 (#175): Harness 流式事件契约 SSOT (D1 最小集)。
+// Harness streaming-event contract SSOT (minimal set).
 export type { HarnessStreamEvent } from "./stream.js";
 
-// 064 T4: TraceService bounded context public exports.
+// TraceService bounded context public exports.
 export type {
   TraceService,
   LlmCallRecord,
@@ -96,11 +96,14 @@ export {
   translateToObservability,
 } from "./trace/index.js";
 
-// 压缩：proactive/reactive 双保险共用 + 手动压缩入口（TUI /compact、web 按钮）
-// 共用的纯函数收口。loop-engine 自动触发；host 侧（session-api/hub）经
-// compactSession 手动触发，二者共用同一 `compactMessages`，阈值/压缩逻辑不分叉。
-// #467 step 2:LLM 结构化摘要(full compact)路径与纯截断 placeholder 路径并列
-// 暴露 —— loop-engine 自动路径与 hub 手动路径共用同一 best-effort 契约。
+// Compaction: the shared pure-function seam for the proactive / reactive
+// double-safety net plus the manual entry (TUI /compact, web button).
+// loop-engine triggers automatically; hosts (session-api/hub) trigger
+// manually via compactSession, and both share the same `compactMessages`,
+// so thresholds / compaction logic never fork.
+// The LLM structured-summary (full compact) path is exposed alongside the
+// plain truncation placeholder path — the loop-engine automatic path and the
+// hub manual path share the same best-effort contract.
 export {
   compactMessages,
   buildCompactPrompt,

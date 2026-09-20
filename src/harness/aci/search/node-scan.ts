@@ -1,19 +1,27 @@
 /**
- * Node 扫引擎（D6 / SC9 / ADR-0089）。
+ * The Node scan engine.
  *
- * 自带引擎起不来（安装根二进制不存在，或 spawn 得 ENOENT / 无法执行）时
- * 启用：Node 遍历文件 + 用 `RegExp` 跑 `compilePattern` 编得过的 pattern，
- * 调用仍成功。**不**少功能成功（直接拒绝），**不**许 exec PATH 上的 `rg`。
- * 命中集允许与 rg 不同 —— Node 不模仿 rg 的默认引擎拒绝集（lookaround /
- * `\d` 类等在无 rg 机器上可能更宽，文档与测试视为特性，不是漏测）。
+ // (ADR-0089)
  *
- * 单点职责：**产出与 rg 引擎同形的原始命中**（`LineHit[]` 已按 (path,line)
- * 稳定排序）。分页 / 投影 / 行窗过滤是共用层的事，本模块不重复实现 ——
- * 两条引擎的下游共用因此来自「喂进同一条流水线」而不是两套镜像逻辑。
+ * Enabled when the bundled engine cannot start (install-root binary missing,
+ * or spawn yields ENOENT / not executable): Node walks files and runs the
+ * pattern compiled by `compilePattern` through `RegExp`, and the call still
+ * succeeds. It does **not** fail by refusing features, and does **not** exec
+ * an `rg` off PATH. The hit set may differ from rg's — Node does not imitate
+ * rg's default-engine rejection set (lookaround / `\d` classes etc. may be
+ * wider on machines without rg; docs and tests treat this as a feature, not a
+ * missing test).
  *
- * 收窄（D4）走共享层：`type` 用 `type-table.ts` 的 rg 原词表（按文件名判），
- * `glob` 用 `glob-match.ts` 的 rg 同口径匹配。二者与 rg 引擎的 `--type` /
- * `--glob` 是同一语义的两条实现。
+ * Single responsibility: **produce raw hits shaped exactly like the rg
+ * engine's** (`LineHit[]`, stably sorted by (path,line)). Pagination /
+ * projection / line-window filtering belong to the shared layer, not here —
+ * the two engines' downstream sharing comes from "feeding the same pipeline",
+ * not from mirrored logic.
+ *
+ * Narrowing goes through shared layers: `type` uses rg's original table in
+ * `type-table.ts` (judged by filename), `glob` uses rg-equivalent matching in
+ * `glob-match.ts`. Both are the second implementation of rg engine's
+ * `--type` / `--glob` under one semantics.
  */
 
 import { readdir, stat } from "node:fs/promises";
@@ -30,31 +38,39 @@ export interface NodeScanInput {
   readonly spec: QuerySpec;
   readonly workspaceRoot: string;
   readonly searchRoot: string;
-  /** 已编译的主 pattern（坏正则在 `pattern.ts` 已 typed 拒绝）。 */
+  /** Compiled main pattern (bad regex was already typed-rejected in `pattern.ts`). */
   readonly regex: RegExp;
 }
 
-/** 全量命中（未排序；调用方走 sort → paginate → project）。 */
+/** All hits (unsorted; callers go sort → paginate → project). */
 export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
   const hits: LineHit[] = [];
-  // 搜索根是**显式点名的单个文件**时，体积闸与 `glob` / `type` 都让路 ——
-  // rg 的 `--max-filesize` 只在递归遍历期生效、用户 glob/type 也不作用于
-  // 显式文件参数（均实测）。Node 侧若照旧拦，同一个 `path` 的答案就随引擎变。
+  // When the search root is an **explicitly named single file**, the size gate
+  // and `glob` / `type` step aside — rg's `--max-filesize` only applies during
+  // recursive traversal, and user glob/type do not act on explicit file
+  // arguments either (both verified). If Node kept blocking, the same `path`
+  // would get engine-dependent answers.
   const explicitFile = await isFile(input.searchRoot);
   for await (const absPath of walkCandidates(input, explicitFile)) {
-    // 路径必须是 **workspace 相对**：SC4 要求模型可见行皆相对路径，且 D4 的
-    // `glob` 锚定匹配（`src/*.ts`）按相对路径判段。
+    // The path must be **workspace-relative**: model-visible lines are all
+    // required to be relative paths, and `glob` anchoring (`src/*.ts`) judges
+    // segments on relative paths.
     //
-    // `..` 前缀**不剔除**：identity root 是 workspace 之外那条经
-    // `resolveWithinRoot` 放行的只读根，它的命中天然长成 `../<identity>/x`。
-    // 在这里按前缀剔除会让改绑后的 grep 读面静默回空（而 rg 路径照常返回）
-    // —— 同一个 path 参数的答案取决于哪条引擎在跑。越界已由 resolveSearchRoot
-    // 的 containment 校验挡在入口，遍历本身只走 searchRoot 之下。
+    // `..` prefixes are **not removed**: the identity root is the read-only
+    // root outside workspace, admitted via `resolveWithinRoot`, and its hits
+    // naturally take the shape `../<identity>/x`. Filtering by prefix here
+    // would make post-rebinding grep reads silently empty (while the rg path
+    // still returns) — the same path argument answered differently depending on
+    // which engine runs. Escapes are already blocked at the entry by
+    // resolveSearchRoot's containment check, and traversal itself only walks
+    // under searchRoot.
     const relPath = toWorkspaceRelative(input.workspaceRoot, absPath);
-    // 行协议不可表示的路径直接跳过：含 `\n` 的路径会把自己的记录拆成两条
-    // （见 `path-representable.ts`）。跳过而不是报错 —— rg 侧遍历期用排除
-    // glob 静默跳过，两边必须同样「看不见」，否则同一个目录的条数、`total:`
-    // 与命中集又会随引擎变（D6/SC9）。
+    // Paths unrepresentable in the line protocol are skipped outright: a path
+    // with `\n` splits its own record into two (see
+    // `path-representable.ts`). Skip rather than error — on the rg side,
+    // traversal excludes them silently via glob, so both sides must be equally
+    // "blind"; otherwise counts, `total:`, and hit sets for the same directory
+    // would vary by engine.
     if (!isPathRepresentable(relPath)) continue;
     if (!explicitFile && !passesFilters(relPath, input.spec)) continue;
     const lines = await readWorkspaceLines(input.workspaceRoot, relPath, {
@@ -66,17 +82,19 @@ export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
   return hits;
 }
 
-/** 搜索根是否指向一个存在的文件（决定「显式文件」豁免是否适用）。 */
+/** Whether the search root points at an existing file (decides if the "explicit file" exemption applies). */
 async function isFile(path: string): Promise<boolean> {
   const info = await stat(path).catch(() => null);
   return info !== null && info.isFile();
 }
 
 /**
- * 候选文件：`path` 指向文件时就是它本身，指向目录时递归展开。
+ * Candidate files: `path` itself when it is a file, recursive expansion when
+ * it is a directory.
  *
- * 只递归目录会让 `path: "a.ts"` 静默回空 —— rg 那边是命中的，两条引擎对同
- * 一个参数给出不同答案（SC9）。所以先 stat 判型，是文件就直接作为唯一候选。
+ * Recursing only into directories would make `path: "a.ts"` silently return
+ * empty — rg hits there, so the two engines would answer the same argument
+ * differently. Hence stat first: a file becomes the sole candidate.
  */
 async function* walkCandidates(
   input: NodeScanInput,
@@ -90,29 +108,35 @@ async function* walkCandidates(
 }
 
 /**
- * 收窄：`glob` 与 `type` 并列（D4、D3）。
+ * Narrowing: `glob` and `type` side by side.
  *
- * rg 的真实规则（逐条实测，不是文档推断）：**只要给了一个肯定 glob，`--type`
- * 就完全不参与判定** —— glob 决定纳入集，type 被静默忽略。原 Node 侧实现是
- * AND（两者都要满足），同一查询 `{type:"ts", glob:"sub/*"}` 在 rg 侧回
- * `sub/a.ts` + `sub/b.js`（`sub/b.js` 不是 `.ts` 也进来，因为 glob 说了算），
- * Node 侧只回 `sub/a.ts`（D3）。
+ * rg's real rule (verified item by item, not inferred from docs): **as soon as
+ * one positive glob is given, `--type` drops out of judging entirely** — the
+ * glob decides the included set, type is silently ignored. The original Node-
+ * side implementation was AND (both must hold), so the same query
+ * `{type:"ts", glob:"sub/*"}` returns `sub/a.ts` + `sub/b.js` via rg (`sub/b.js`
+ * gets in despite not being `.ts`, because the glob decides) but only
+ * `sub/a.ts` via Node.
  *
- * 只有**否定** glob 时 type 仍然生效：`--type ts --glob` 加一条排除
- * node_modules 的否定 glob，实测 = `sub/a.ts,top.ts`（type 先筛，否定 glob
- * 再排除），与「只给那条否定 glob」的 4 条不同。
+ * Only **negated** globs keep type in effect: `--type ts` plus one negated
+ * glob excluding node_modules verified as `sub/a.ts,top.ts` (type filters
+ * first, the negated glob then removes), which differs from the 4 results of
+ * that negated glob alone.
  *
- * 本函数按 rg 的实测规则实现，两条引擎因此同判。语义上这意味着「`type` 与
- * `glob` 不是可以叠加的收窄维度」：要表达交集请写成一条 `sub/*.ts`。
- * 注意这与 D2 的顺序契约是同一套机制的两面 —— D2 让工具的排除 glob 成为
- * 最终胜负，D3 让用户 glob 对 type 的覆盖与 rg 一致。
+ * This function implements rg's verified rule, so both engines judge alike.
+ * Semantically this means "`type` and `glob` are not stackable narrowing
+ * dimensions": write a single `sub/*.ts` to express the intersection. Note
+ * this and the tool's glob-ordering contract are two faces of one mechanism —
+ * the ordering makes the tool's exclusion globs the final verdict, while here
+ * the user glob's override of type matches rg.
  */
 function passesFilters(relPath: string, spec: QuerySpec): boolean {
   const { type, glob } = spec;
   if (type === undefined && glob === undefined) return true;
   if (glob === undefined) return fileNameMatchesType(baseName(relPath), type!);
   if (type === undefined) return matchesGlobSet(relPath, [glob]);
-  // 并列：肯定 glob 在场 → type 让位（rg 实测）；只有否定 glob → type 仍生效。
+  // Side by side: a positive glob present → type steps aside (verified rg
+  // behavior); only a negated glob → type still in effect.
   if (!isNegation(glob)) return matchesGlobSet(relPath, [glob]);
   return (
     fileNameMatchesType(baseName(relPath), type) &&
@@ -138,11 +162,12 @@ function collectHits(
 }
 
 /**
- * 递归产出文件的绝对路径，跳过 node_modules / .git。
+ * Recursively yield absolute file paths, skipping node_modules / .git.
  *
- * 导出为**范围闸共用**（`scope-guard.ts` 计数用的是同一套遍历纪律）——
- * 正是为了让「过大的 `path`」在两条引擎上得到同一个判定（D6/SC9 引擎同判），
- * 而不是闸与扫各写一份、慢慢漂移。
+ * Exported for **shared use by the scope gate** (`scope-guard.ts` counts with
+ * the same traversal discipline) — precisely so an oversized `path` gets the
+ * same verdict on both engines, rather than gate and scan each writing a copy
+ * that slowly drifts.
  */
 export async function* walkFiles(dir: string): AsyncGenerator<string> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
@@ -158,13 +183,13 @@ export async function* walkFiles(dir: string): AsyncGenerator<string> {
   }
 }
 
-/** `searchRoot` 之外 → 保持 `../` 前缀（与 `relative()` 语义一致）。 */
+/** Basename of a posix-style relative path (text after the last `/`). */
 export function baseName(relPath: string): string {
   const idx = relPath.lastIndexOf("/");
   return idx === -1 ? relPath : relPath.slice(idx + 1);
 }
 
-/** 供调用方把绝对路径折成 workspace 相对（posix 形态）。 */
+/** Folds an absolute path to workspace-relative (posix form) for callers. */
 export function toWorkspaceRelative(
   workspaceRoot: string,
   absPath: string

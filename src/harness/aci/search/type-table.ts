@@ -1,12 +1,16 @@
 /**
- * ripgrep 15.1.0 的 `--type` 词表（由 `rg --type-list` 生成，按名排序）。
+ * The ripgrep 15.1.0 `--type` table (generated from `rg --type-list`, sorted by name).
  *
- * 为什么把词表搬进仓：D6 要求「自带引擎起不来 → Node 扫必须实现 D2–D5 全语义」。
- * Node 引擎没有 rg 的类型表可问，若只认一小撮类型，同一查询在两种引擎下
- * 会给出不同结果 —— 那不是「语义等价降级」而是静默改语义（SC9 禁止）。
+ * Why the table lives in-repo: the Node fallback engine must implement the
+ * full semantics when the bundled engine cannot start. The Node engine has no
+ * rg type table to consult; recognising only a handful of types would make the
+ * same query yield different results across engines — that would be a silent
+ * semantics change, not an equivalent fallback.
  *
- * 同步方式：升级 D6 钉死版本时重跑 `rg --type-list` 重生成本表；
- * `tests/harness/aci/search/argv.test.ts` 锁表形状（非空 / 已知名在场）。
+ * Refresh: when the pinned ripgrep version is upgraded, re-run
+ * `rg --type-list` to regenerate this table;
+ * `tests/harness/aci/search/argv.test.ts` locks the table shape (non-empty /
+ * known names present).
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -456,22 +460,26 @@ export const TYPE_GLOBS: Readonly<Record<string, readonly string[]>> =
     zstd: ["*.zst", "*.zstd"],
   });
 
-/** 已知类型名集合（Node 引擎的 type 校验 + 文件名匹配共用）。 */
+/** Set of known type names (shared by the Node engine's type validation and filename matching). */
 export const KNOWN_TYPES: ReadonlySet<string> = new Set(
   Object.keys(TYPE_GLOBS)
 );
 
 /**
- * 校验 `type` 是否在 rg 词表内；返回原值便于链式使用。
+ * Validate that `type` exists in the rg table; returns the value for chaining.
  *
- * 未知类型是**输入**类 typed 错误（与坏正则同属 ToolExecutionError，但文案
- * 点名 `type` 与类型名、不含 `pattern` —— SC10 要求两类不可混为「illegal
- * regex」一种）。rg 自己也会以 rc=2 报同类错误，这道前置校验让两条引擎路径
- * （rg / Node）给出同一文案，也避免「先花一次进程启动才发现名字错」。
+ * An unknown type is an **input**-class typed error (same ToolExecutionError
+ * family as a bad regex, but the message names `type` and the type name and
+ * never mentions `pattern` — the two error kinds must not collapse into one
+ * "illegal regex" message). rg itself reports the same error with rc=2; this
+ * up-front check gives both engine paths (rg / Node) the identical message and
+ * avoids "spawn a process only to discover the name was wrong".
  *
- * **调用点在 `options.ts` 的 `parseQuerySpec`，不在 argv 构造里**：argv 只在
- * 自带引擎在场时才会被走到，校验挂在那里会让 `type: "nosuchtype"` 在 Node
- * 全会话上静默回空 —— SC10 的「两种 typed 错误」就只在一条引擎上成立。
+ * **The call site is `parseQuerySpec` in options.ts, not the argv builder**:
+ * argv is only reached when the bundled engine is present, so validating there
+ * would let `type: "nosuchtype"` silently return empty on every Node-engine
+ * session — the "two typed errors" guarantee would then hold on only one
+ * engine.
  */
 export function resolveTypeName(type: string): string {
   if (!KNOWN_TYPES.has(type)) {

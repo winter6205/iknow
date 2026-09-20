@@ -1,31 +1,36 @@
 /**
- * LSP ACI 工具集 —— spec 251-lsp-tool（§ aci/tools/lsp.ts：9 件 handler 极薄）。
+ * LSP ACI tool set — handlers kept deliberately thin.
  *
- * 暴露 9 件 + lsp_diagnostics = 10 件 LSP 工具（spec 计数存在 9-vs-8 不一致，
- * 详见 T6 报告：导出 9 件 operation + lsp_diagnostics；T7 append 10 → 20 件需
- * 调整为 21，见 `ADR-0006` 收口）。
+ * Exports 9 operation tools + lsp_diagnostics = 10 tools (the spec count
+ * drifted between 9 and 8 across sections; the factory exports the full
+ * name list, and the registry's total-count assertion follows, per
+ * ADR-0006).
  *
- * 设计（spec #247 Q3 MCP 无状态思路）：
- *   - handler 极薄：参数校验（ajv 严格编译同源）→  await getClientDetailed(ctx, file)
- *     → 无 client 返分层哨兵字符串（renderNoServer，二期 B3）→ sendRequest →
- *     JSON.stringify（封顶 MAX_RESULT_BYTES + truncated footer，plan T3）。
- *     契约 Y1：handler 永远返纯字符串。
- *   - 三件套缓存（root+id / broken / inflight）由 client.ts 拥有，工具层零知识。
- *   - cancel / 超时都走 CancellationTokenSource → JSON-RPC `$/cancelRequest`
- *     （Q2/A9 + plan T1：per-request 20s 超时先于 executor 30s race 干净让路），
- *     本模块不持有任何进程信号。
- *   - 8 件共享 POSITION_SCHEMA（{file, line, character} 1-based line / 0-based
- *     character）；lsp_document_symbol, lsp_diagnostics 仅需 file；
- *     lsp_workspace_symbol 的 file / query 均可选（plan T3）。
+ * Design (stateless-MCP line of thinking):
+ *   - Thin handler: input validation (same-source strict ajv compile) →
+ *     await getClientDetailed(ctx, file) → when no client, return a layered
+ *     sentinel string (renderNoServer) → sendRequest → JSON.stringify (capped
+ *     at MAX_RESULT_BYTES with a truncated footer). The handler always
+ *     returns a plain string, never structured payloads.
+ *   - The three-way caches (root+id / broken / inflight) are owned by
+ *     client.ts; the tool layer knows nothing about them.
+ *   - Cancel / timeout both go through CancellationTokenSource → JSON-RPC
+ *     `$/cancelRequest`: a per-request 20s timeout yields cleanly ahead of
+ *     the executor's 30s race. This module never holds process signals.
+ *   - 8 tools share POSITION_SCHEMA ({file, line, character} with 1-based
+ *     line / 0-based character); lsp_document_symbol and lsp_diagnostics
+ *     need only file; lsp_workspace_symbol has optional file / query.
  *
- * 工厂签名：`createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef>`。
- *   - registry.ts (T7) 调用工厂拿 10 件冻结 tool defs，append 到默认注册表。
- *   - 传入 ctx 由 build-engine 装配（spec `LspCtx.directory` = process.cwd()）。
+ * Factory signature: `createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef>`.
+ *   - registry.ts calls the factory for 10 frozen tool defs and appends them
+ *     to the default registry.
+ *   - ctx is assembled by build-engine (`LspCtx.directory` = process.cwd()).
  *
- * 边界：
- *   - **永不** `process.kill`（Q2/A9）。
- *   - **永不** 返回结构化 payload（契约 Y1）。
- *   - **永不** 读取/翻译 LSP payload 字段（语义归 tsserver / typescript-language-server）。
+ * Boundaries:
+ *   - **Never** `process.kill`.
+ *   - **Never** return structured payloads (plain strings only).
+ *   - **Never** read/translate LSP payload fields (semantics belong to
+ *     tsserver / typescript-language-server).
  */
 import { pathToFileURL } from "node:url";
 import path from "node:path";
@@ -48,9 +53,10 @@ import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
 
 /**
- * 严格模式 ajv 单例：handler 编译 inputSchema 用，与 tools/registry.ts 装配期
- * 编译同源（015 强制同源 schema）。`coerceTypes: false`（不隐式转换） +
- * `strict: true`（不猜测缺失值，对齐 tools/registry.ts）。
+ * Strict-mode ajv singleton: compiles handler inputSchema, same-source as
+ * the tools/registry.ts assembly-time compile (forced schema homogeneity).
+ * `coerceTypes: false` (no implicit conversion) + `strict: true` (no
+ * guessing missing values, matching tools/registry.ts).
  */
 const lspAjv = new Ajv.default({
   strict: true,
@@ -58,7 +64,7 @@ const lspAjv = new Ajv.default({
   coerceTypes: false,
 });
 
-/** 8 件 position 操作共享的 JSON Schema（spec §aci/tools/lsp.ts POSITION_SCHEMA）。 */
+/** JSON Schema shared by the 8 position operations. */
 const POSITION_SCHEMA = {
   type: "object",
   properties: {
@@ -70,7 +76,7 @@ const POSITION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** 仅 file 必填的 JSON Schema（document_symbol）。 */
+/** JSON Schema requiring only file (document_symbol). */
 const FILE_ONLY_SCHEMA = {
   type: "object",
   properties: {
@@ -81,9 +87,10 @@ const FILE_ONLY_SCHEMA = {
 } as const;
 
 /**
- * lsp_diagnostics 专用 schema（二期 B2 批量）：`file`（单文件）与 `files`
- * （批量，1-10 个）二选一——互斥校验在 handler 内手工做（ajv 无法表达
- * exactly-one-of 且需逐案报错文案），schema 层只约束类型。
+ * lsp_diagnostics schema (batch form): `file` (single) or `files` (batch,
+ * 1-10) — exactly one. The mutual-exclusion check is done manually in the
+ * handler (ajv cannot express exactly-one-of and per-case error text), so the
+ * schema only constrains types.
  */
 const DIAGNOSTICS_SCHEMA = {
   type: "object",
@@ -99,13 +106,14 @@ const DIAGNOSTICS_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** lsp_diagnostics 批量单次封顶（二期 B2）：超出报 ToolExecutionError。 */
+/** Per-call cap for lsp_diagnostics batches: over the cap → ToolExecutionError. */
 const DIAGNOSTICS_MAX_FILES = 10;
 
 /**
- * lsp_workspace_symbol 专用 schema（lsp-optimization plan T3）：`file` 改可选
- * （工作区级查询本就无需文件锚点，旧 schema 必填 file 但 buildParams 忽略之），
- * 新增可选 `query`（旧实现 query 恒为 ""）。无 required。
+ * lsp_workspace_symbol schema: `file` is optional (workspace-level queries
+ * never needed a file anchor; the old schema required it but buildParams
+ * ignored it), plus an optional `query` (the old implementation always sent
+ * ""). No required fields.
  */
 const WORKSPACE_SYMBOL_SCHEMA = {
   type: "object",
@@ -117,30 +125,35 @@ const WORKSPACE_SYMBOL_SCHEMA = {
 } as const;
 
 /**
- * per-request 超时上限（lsp-optimization plan T1）：executor 30s race 超时后
- * 请求仍继续占用 server；连接内 20s 先触发，经 CancellationTokenSource
- * `cancel()` 自动向 server 发 `$/cancelRequest`（Q2/A9，不杀进程），干净让路。
+ * Per-request timeout cap: after the executor's 30s race the request would
+ * still occupy the server, so a 20s in-connection timer fires first and
+ * CancellationTokenSource `cancel()` automatically sends `$/cancelRequest`
+ * to the server (no process kill), yielding cleanly.
  */
 export const DEFAULT_LSP_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
- * lsp_diagnostics 读前等待 deadline（lsp-optimization plan T3）：ensureOpen 后
- * push diagnostics 尚未到达时立即读 diagStore 会得到空。每 100ms 轮询一次，
- * 首个该 uri 诊断到达即继续；deadline 到用现有内容（可能 undefined → 空渲染）。
+ * lsp_diagnostics read-before-wait deadline: right after ensureOpen, pushed
+ * diagnostics may not have arrived, so reading diagStore immediately yields
+ * empty. Poll every 100ms and continue as soon as the first diagnostics for
+ * the uri arrive; on deadline use whatever exists (possibly undefined →
+ * empty render).
  */
 export const DIAGNOSTICS_WAIT_MS = 2_000;
 
 /**
- * 工具输出封顶（lsp-optimization plan T3）：references 等大响应原样
- * stringify 进上下文可撑爆预算。超出截断 + footer（N 为完整字节数）。
+ * Tool output cap: large responses such as references stringified verbatim
+ * can blow the context budget. Over the cap: truncate + footer (N is the
+ * full byte count).
  */
 export const MAX_RESULT_BYTES = 48 * 1024;
 
 /**
- * 工具共用的 ajv 元数据（spec aci 元：read-only / 非并发安全 / cancel / 30s）。
+ * Shared aci metadata (read-only / not concurrency-safe / cancel / 30s).
  *
- * symbol-primary-aci T2：符号查询工具集（`symbol.ts`）复用同一份元数据 —
- * 两套工具走同一条 LSP 客户端/取消/超时链路，元数据分叉即语义分叉。
+ * The symbol query tool set (`symbol.ts`) reuses this exact object — both
+ * tool families run through the same LSP client/cancel/timeout chain, so a
+ * fork in metadata would be a fork in semantics.
  */
 export const LSP_ACI_META = {
   category: "read-only" as const,
@@ -159,24 +172,26 @@ interface FileOnlyInput {
   readonly file: string;
 }
 
-/** lsp_workspace_symbol 输入：file / query 均可选（plan T3）。 */
+/** lsp_workspace_symbol input: file / query both optional. */
 interface WorkspaceSymbolInput {
   readonly file?: string;
   readonly query?: string;
 }
 
-/** lsp_diagnostics 输入（二期 B2）：file / files 二选一（互斥 handler 内校验）。 */
+/** lsp_diagnostics input: exactly one of file / files (mutual exclusion checked in the handler). */
 interface DiagnosticsInput {
   readonly file?: string;
   readonly files?: readonly string[];
 }
 
 /**
- * 无可用 LSP client 的哨兵渲染（lsp-optimization 二期 B3 信息分层）。
- * 契约 Y1：纯字符串；按 failure.reason 分层给出可行动信息：
- *   - no-server：列出当前支持的全部扩展名（SERVERS 声明序）；
- *   - no-root：说明在 file 之上、ctx.directory 之内找不到 serverId 的根标记；
- *   - spawn-failed：serverId 不可用 + installHint（server 声明缺席则省略 hint 句）。
+ * Sentinel rendering when no usable LSP client exists, layered by
+ * failure.reason. Always a plain string:
+ *   - no-server: list every supported extension (in SERVERS declaration order);
+ *   - no-root: explain that no root marker for the serverId was found above
+ *     the file but within ctx.directory;
+ *   - spawn-failed: serverId unavailable + installHint (hint sentence omitted
+ *     when the server declaration is absent).
  */
 export function renderNoServer(
   ctx: LspCtx,
@@ -201,12 +216,15 @@ export function renderNoServer(
 }
 
 /**
- * server 未实现该 method 的哨兵（spec 251「缺方法哨兵」）。**不是**失败哨兵：
- * 能力缺口是 server 的固有特性（yaml/json 缺 references、callHierarchy 等），
- * 模型据此改用别的工具即可。契约 Y1：纯字符串。
+ * Sentinel for "the server does not implement this method". **Not** a
+ * failure sentinel: a capability gap is an intrinsic property of the server
+ * (yaml/json lack references, callHierarchy, etc.) and the model should just
+ * use another tool. Always a plain string.
  *
- * 且**不算 spawn 失败** —— 与 renderNoServer 的 spawn-failed 分层不同：
- * 连接与子进程都活着，同类其它 method 照常可用，故不写 broken、不逐出 client。
+ * And it is **not** a spawn failure — unlike renderNoServer's spawn-failed
+ * layer, the connection and child process are alive and other methods of the
+ * same kind still work, so nothing is marked broken and the client is not
+ * evicted.
  */
 export function renderMethodNotFound(
   method: string,
@@ -217,38 +235,46 @@ export function renderMethodNotFound(
 }
 
 /**
- * 无 project 锚点的分层哨兵（plan `lsp-silent-degradation` T3，措辞见
- * `docs/guides/lsp-client-analysis.md` §8.7）。
+ * Layered sentinel for queries with no project anchor (wording basis:
+ * `docs/guides/lsp-client-analysis.md`).
  *
- * `workspace/symbol` 的搜索集合由 server 当前已加载的 project graph 决定，
- * graph 又由它最后触碰的那个文件决定（tsserver 侧实测：锚点落在 tsconfig
- * `include` 外 → 只建 inferred project，该文件 + import closure）。无 `file`
- * 的调用方拿不到锚点，于是结果既能是「真没这个符号」，也能是「查询链路没有
- * project 上下文」——后者在生产形状实测 40s 全程 `[]`。
+ * The search set of `workspace/symbol` is determined by the project graph
+ * the server last loaded, and that graph is determined by the last file it
+ * touched (measured on tsserver: an anchor outside the tsconfig `include`
+ * builds only an inferred project containing that file + its import
+ * closure). A caller without `file` gets no anchor, so an empty result can
+ * mean either "the symbol really doesn't exist" or "the query path has no
+ * project context" — the latter measured 40s of all-`[]` in production
+ * shape.
  *
- * **刻意不进 `isLspFailureSentinel` 家族**（§8.7）：三条失败前缀的语义是
- * 「这次调用没打成」，本条调用打成了（RPC 有响应）。记 FAIL 是错误分类，
- * 且 probe 从不进这条分岔（§7.1 已写死）。消费者是模型 —— 它需要的是
- * 「结论不可信，换条路」，不是「LSP 坏了」。
+ * Deliberately **not** in the `isLspFailureSentinel` family: the three
+ * failure prefixes mean "this call did not go through", while this call did
+ * (the RPC answered). Recording FAIL would be a misclassification, and the
+ * probe never enters this branch. The consumer is the model — it needs
+ * "conclusion untrustworthy, take another route", not "LSP is broken".
  */
 /**
- * 按家族惯例接 `ctx: LspCtx`（与 `renderNoServer` 同形），实际只读 `ctx.directory`
- * —— 哨兵文案只需 directory 插值，统一签名让调用方（`symbol.ts` `find_symbol`
- * handler）无需为单字段拆包 ctx。
+ * Takes `ctx: LspCtx` by family convention (same form as `renderNoServer`)
+ * although it only reads `ctx.directory` — the sentinel text needs just the
+ * directory interpolation, and a uniform signature spares callers
+ * (`symbol.ts` `find_symbol` handler) from unpacking ctx for one field.
  */
 export function renderNoProjectAnchor(ctx: LspCtx): string {
   return `(LSP workspace/symbol has no project anchor under ${ctx.directory}; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)`;
 }
 
 /**
- * 判定 RPC 错误是否为 tsserver 的 `No Project.`（`ThrowNoProject`，
- * typescript.js）—— 锚点文件不属于任何 project 时 `workspace/symbol` 的
- * navto 抛出。实测形态是 vscode-jsonrpc 的 ResponseError，message 为
- * `<syntax> TypeScript Server Error (5.9.3)\nNo Project.\n<tsserver 栈>`。
+ * Whether an RPC error is tsserver's `No Project.` (`ThrowNoProject` in
+ * typescript.js) — thrown by `workspace/symbol` navto when the anchor file
+ * belongs to no project. Measured shape is a vscode-jsonrpc ResponseError
+ * whose message is `<syntax> TypeScript Server Error (<version>)\nNo
+ * Project.\n<tsserver stack>`.
  *
- * 只认 message 子串：实测 `name` 是通用 `"Error"`、`code` 是 `1`，两者都
- * 会与业务错误撞，不可作判据。判定窄是有意的 —— 只有这条形态被救成
- * `renderNoProjectAnchor`，其余 RPC 错误照旧上抛。
+ * Match on the message substring only: measured `name` is the generic
+ * `"Error"` and `code` is `1`, both of which collide with business errors
+ * and cannot serve as criteria. The narrowness is deliberate — only this
+ * exact shape is rescued into `renderNoProjectAnchor`; all other RPC errors
+ * rethrow as before.
  */
 export function isNoProjectAnchorError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
@@ -256,7 +282,7 @@ export function isNoProjectAnchorError(err: unknown): boolean {
   return typeof message === "string" && message.includes("No Project.");
 }
 
-/** 缺方法哨兵的判定（probe 视为 skip，不计 FAIL）。 */
+/** Method-not-found sentinel check (probes treat it as skip, not FAIL). */
 export function isMethodNotFoundSentinel(result: unknown): boolean {
   return (
     typeof result === "string" &&
@@ -266,9 +292,10 @@ export function isMethodNotFoundSentinel(result: unknown): boolean {
 }
 
 /**
- * probe / 工具层共用：分层哨兵是否表示「本次 LSP 调用失败」。
- * no-server / no-root / spawn-failed 三条文案前缀都算 FAIL（B3 closeout）。
- * 成功 hover JSON、diagnostics XML、空串不算；缺方法哨兵**不算**（见上）。
+ * Shared by probes and the tool layer: does this layered sentinel mean the
+ * LSP call failed? The no-server / no-root / spawn-failed message prefixes
+ * all count as FAIL. Successful hover JSON, diagnostics XML, empty strings
+ * do not; the method-not-found sentinel deliberately does NOT (see above).
  */
 export function isLspFailureSentinel(result: unknown): result is string {
   if (typeof result !== "string" || result.length === 0) return false;
@@ -279,8 +306,9 @@ export function isLspFailureSentinel(result: unknown): result is string {
 }
 
 /**
- * 把任意 LSP 响应规范成纯字符串（契约 Y1：永不返回结构化 payload），
- * 并封顶到 MAX_RESULT_BYTES（截 stringify 后的结果；N = 完整字节数）。
+ * Normalize any LSP response into a plain string (the contract: never hand
+ * structured payloads to the model), capped at MAX_RESULT_BYTES by truncating
+ * the stringified result; N in the footer is the full byte count.
  */
 export function stringifyResult(result: unknown): string {
   let text: string;
@@ -297,12 +325,14 @@ export function stringifyResult(result: unknown): string {
   return capResult(text);
 }
 
-/** 输出封顶：按字符回退截断（不在多字节字符中间切断）+ truncated footer。 */
+/** Output cap: rewind char-by-char so the cut never lands inside a multi-byte character, plus a truncated footer. */
 function capResult(text: string): string {
   const total = Buffer.byteLength(text, "utf8");
   if (total <= MAX_RESULT_BYTES) return text;
-  // 近似起点：UTF-8 字节数 ≥ 字符数，cap 字符的字节数只可能因多字节字符
-  // 超出，逐字符回退到字节边界内（>48KB 才进入，回退步数有限）。
+  // Start guess: UTF-8 byte length >= char length, so cutting at
+  // MAX_RESULT_BYTES chars can only overshoot because of multi-byte chars;
+  // rewind one char at a time until within budget (only entered above 48KB,
+  // so the rewind steps are bounded).
   let cut = MAX_RESULT_BYTES;
   while (
     cut > 0 &&
@@ -315,7 +345,7 @@ function capResult(text: string): string {
   return `${shown}\n...[truncated, ${shownBytes} of ${total} bytes shown]`;
 }
 
-/** 编译 schema 为 ajv validator + 构造抛错版 parse。 */
+/** Compile a schema into an ajv validator and build the throwing parse around it. */
 export function compileValidator(
   schema: Record<string, unknown>,
   toolName: string
@@ -342,7 +372,7 @@ export function compileValidator(
   };
 }
 
-/** Position 操作 → textDocument/position params（1-based line 转 0-based）。 */
+/** Position operations → textDocument/position params (convert 1-based line to 0-based). */
 function positionParams(
   file: string,
   line: number,
@@ -357,17 +387,17 @@ function positionParams(
   };
 }
 
-/** document_symbol params：textDocument only，不带 position。 */
+/** document_symbol params: textDocument only, no position. */
 function documentSymbolParams(file: string): unknown {
   return { textDocument: { uri: pathToFileURL(file).href } };
 }
 
-/** workspace/symbol params：接可选 query（空字符串 = 全部符号快照）。 */
+/** workspace/symbol params: optional query (empty string = full symbol snapshot). */
 function workspaceSymbolParams(query?: string): unknown {
   return { query: query ?? "" };
 }
 
-/** references params：position + includeDeclaration 上下文。 */
+/** references params: position plus includeDeclaration context. */
 function referencesParams(
   file: string,
   line: number,
@@ -383,21 +413,22 @@ interface OperationSpec {
   readonly name: string;
   readonly method: string;
   readonly schema: Record<string, unknown>;
-  /** #483 D9: per-operation description — each of the 7 positionOps gets its
+  /** Per-operation description — each of the 7 positionOps gets its
    *  own sentence instead of sharing a generic template, so the model prompt
    *  sees positive-trigger phrasing tuned to the operation. */
   readonly description: string;
-  /** 把 ajv-validated input 映射到 LSP request params。 */
+  /** Map the ajv-validated input onto LSP request params. */
   readonly buildParams: (
     input: PositionInput | FileOnlyInput | WorkspaceSymbolInput
   ) => unknown;
 }
 
 /**
- * 发一次 LSP request，把「server 未实现该方法」（`-32601`）转成缺方法哨兵
- * （spec 251「缺方法哨兵」）：不算 spawn 失败、不抛错 —— 能力缺口是 server
- * 的固有特性，模型据此改用别的工具即可。其余错误原样上抛（含超时，由调用
- * 方的 `cancel.timedOut()` 分流）。
+ * Send one LSP request, translating "server does not implement this method"
+ * (`-32601`) into the method-not-found sentinel: not a spawn failure and no
+ * throw — a capability gap is intrinsic to the server, and the model should
+ * simply pick another tool. All other errors propagate unchanged (including
+ * timeouts, which callers route via `cancel.timedOut()`).
  */
 export async function requestOrMethodNotFoundSentinel(
   client: LspClient,
@@ -406,8 +437,9 @@ export async function requestOrMethodNotFoundSentinel(
   token: CancellationToken,
   serverId?: string
 ): Promise<unknown> {
-  // server 在 initialize 里显式声明 `provider: false` → 确定没有，不必发。
-  // 声明**缺席**不在此列（缺席 ≠ 不支持，见 client.ts serverDeclaresUnsupported）。
+  // If initialize explicitly declared `provider: false`, the method is
+  // definitely absent — don't send. A missing declaration does NOT count
+  // (absent != unsupported; see client.ts serverDeclaresUnsupported).
   if (serverDeclaresUnsupported(client.getServerCapabilities(), method)) {
     return renderMethodNotFound(method, serverId);
   }
@@ -421,17 +453,20 @@ export async function requestOrMethodNotFoundSentinel(
 }
 
 /**
- * per-request 取消/超时控制（lsp-optimization plan T1 + 二期 B7）：
- *   - **超时**：timer 到 `timeoutMs`（ctx.requestTimeoutMs，缺省
- *     DEFAULT_LSP_REQUEST_TIMEOUT_MS）后 `source.cancel()`。
- *     token 被 cancel 时 vscode-jsonrpc 自动向 server 发 `$/cancelRequest`
- *     （Q2/A9 取消语义），pending request 随之 reject —— 不 kill 进程，
- *     server 有机会中断计算继续服务后续请求。
- *   - **abort 桥接**：executor 透传的 AbortSignal abort 时同样 `source.cancel()`。
+ * Per-request cancellation/timeout control:
+ *   - **Timeout**: a timer calls `source.cancel()` after `timeoutMs`
+ *     (ctx.requestTimeoutMs, default DEFAULT_LSP_REQUEST_TIMEOUT_MS).
+ *     When the token is cancelled, vscode-jsonrpc automatically sends
+ *     `$/cancelRequest` to the server, and the pending request rejects —
+ *     the process is never killed, so the server can abort its computation
+ *     and keep serving later requests.
+ *   - **Abort bridge**: an AbortSignal passed through from the executor
+ *     also calls `source.cancel()`.
  *
- * `timedOut()` 供调用方区分「超时」与「abort / 业务错误」：超时需转译成
- * ToolExecutionError（模型可读），其余错误原样上抛。dispose 清 timer + 移除
- * abort listener（照旧语义）。
+ * `timedOut()` lets callers tell "timeout" apart from "abort / business
+ * error": a timeout must be translated into a ToolExecutionError (readable
+ * by the model), other errors propagate unchanged. dispose clears the timer
+ * and removes the abort listener.
  */
 export function createRequestCancellation(
   execCtx: ToolExecutionContext | undefined,
@@ -466,7 +501,7 @@ export function createRequestCancellation(
   };
 }
 
-/** 超时错误的统一文案（模型可读；含触发超时的 method 与实际超时秒数）。 */
+/** Uniform timeout error message (model-readable; names the method and the effective seconds). */
 export function timeoutError(
   toolName: string,
   method: string,
@@ -478,11 +513,13 @@ export function timeoutError(
 }
 
 /**
- * workspace 级查询（file 省略）的 client 解析（plan T3 + 二期 B3）：无文件
- * 锚点可走 resolveServer dispatch，按 `SERVERS` 声明序逐个试探——取各 server
- * 首个扩展名拼 `ctx.directory` 下的伪路径，走 getClientDetailed 的
- * NearestRoot/spawn 全链路，首个可用即返回；全部不可用 → 返回最后一次失败
- * 原因（handler 转分层哨兵字符串）。
+ * Client resolution for workspace-level queries (file omitted): with no file
+ * anchor to drive resolveServer dispatch, probe servers in SERVERS
+ * declaration order — take each server's first extension to build a fake
+ * path under `ctx.directory`, run the full NearestRoot/spawn chain via
+ * getClientDetailed, and return the first usable client. If all fail,
+ * return the last failure reason (the handler renders it as a layered
+ * sentinel string).
  */
 export async function getClientForWorkspaceDetailed(
   ctx: LspCtx
@@ -499,12 +536,13 @@ export async function getClientForWorkspaceDetailed(
 }
 
 /**
- * 8 件标准 operation 工厂：单次 LSP request，输入 → sendRequest → stringify。
+ * Factory for the standard operations: a single LSP request, input →
+ * sendRequest → stringify.
  *
- * lsp_incoming_calls / lsp_outgoing_calls 走 `makeCallHierarchyCallTool`（多步：
- * 先 prepareCallHierarchy 拿 item，再 forward）；lsp_diagnostics 走独立工厂
- * （过滤 + 封顶 + Markdown 渲染）；本工厂处理 7 件标准单步 op + document_symbol
- * + workspace_symbol。
+ * lsp_incoming_calls / lsp_outgoing_calls use `makeCallHierarchyCallTool`
+ * (multi-step: prepareCallHierarchy first, then forward); lsp_diagnostics
+ * has its own factory (filter + cap + Markdown render). This factory covers
+ * the 7 single-step position ops plus document_symbol and workspace_symbol.
  */
 function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
   const validate = compileValidator(spec.schema, spec.name);
@@ -519,8 +557,8 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
     ): Promise<unknown> => {
       const params = validate(input) as
         PositionInput | FileOnlyInput | WorkspaceSymbolInput;
-      // file 缺省（仅 lsp_workspace_symbol）→ 工作区级查询，按 SERVERS 序
-      // 试探可用 server；file 在场 → 保持原 dispatch 语义不变。
+      // No file (lsp_workspace_symbol only) → workspace-level query, probing
+      // servers in SERVERS order; with a file, original dispatch semantics.
       const { client, failure } =
         params.file !== undefined
           ? await getClientDetailed(ctx, params.file)
@@ -532,17 +570,20 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
           params.file
         );
       }
-      // tsserver 对未打开文件不建 project → 符号类操作返空。请求级作用域把
-      // didOpen 窗口罩住整次请求（进入开、退出关，含抛错路径）。file 缺省的
-      // 工作区级查询无文件可打开，跳过。
-      // interruptBehavior="cancel" + per-request 超时（plan T1 + 二期 B7）：
-      // 统一经 CancellationTokenSource 桥接，abort / 超时都走 $/cancelRequest，
-      // 不杀 tsserver（Q2/A9）。超时上限来自 ctx.requestTimeoutMs（缺省 20s）。
+      // tsserver builds no project for files it hasn't opened → symbol ops
+      // return empty. A request-scoped window wraps didOpen around the whole
+      // request (open on entry, close on exit, including throw paths).
+      // Workspace-level queries with no file have nothing to open; skip.
+      // interruptBehavior="cancel" + per-request timeout: everything goes
+      // through the CancellationTokenSource bridge, so abort and timeout both
+      // issue `$/cancelRequest` and never kill tsserver. The limit comes from
+      // ctx.requestTimeoutMs (default 20s).
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       const run = async (): Promise<unknown> => {
         try {
-          // 缺方法（-32601）→ 哨兵字符串（能力缺口，非失败）；超时 → 下方转译。
+          // Method not found (-32601) → sentinel string (capability gap, not
+          // a failure); timeout → translated below.
           return await requestOrMethodNotFoundSentinel(
             client,
             spec.method,
@@ -550,8 +591,9 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
             cancel.token
           );
         } catch (err) {
-          // 超时路径：token cancel 已让 sendRequest reject（RequestCancelled），
-          // 转译成模型可读的 ToolExecutionError；abort / 业务错误原样上抛。
+          // Timeout path: the token cancel already made sendRequest reject
+          // (RequestCancelled); translate into a model-readable
+          // ToolExecutionError. Abort / business errors propagate unchanged.
           if (cancel.timedOut())
             throw timeoutError(spec.name, spec.method, timeoutMs);
           throw err;
@@ -569,12 +611,13 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
 }
 
 /**
- * callHierarchy/incomingCalls 与 outgoingCalls 多步处理：先准备 hierarchy item
- * （sendRequest textDocument/prepareCallHierarchy），取首项 item 后再 forward
- * 给 incomingCalls / outgoingCalls。
+ * Multi-step handling for callHierarchy/incomingCalls and outgoingCalls:
+ * first prepare the hierarchy item (textDocument/prepareCallHierarchy), take
+ * the first item, then forward it to incomingCalls / outgoingCalls.
  *
- * 输入仍走 POSITION_SCHEMA（1-based line / 0-based character），handler 内部
- * 负责两次 RPC，无 client 同样返分层哨兵字符串（renderNoServer，二期 B3）。
+ * Input still uses POSITION_SCHEMA (1-based line / 0-based character); the
+ * handler performs two RPCs internally, and with no client it likewise
+ * returns a layered sentinel string (renderNoServer).
  */
 function makeCallHierarchyCallTool(
   ctx: LspCtx,
@@ -601,9 +644,9 @@ function makeCallHierarchyCallTool(
           params.file
         );
       }
-      // 同 makeOperationTool：请求级作用域罩住 prepare + forward 两步（didOpen
-      // 窗口覆盖整次请求，退出即关）。
-      // per-request 超时 + abort 桥接（plan T1 + 二期 B7，同 makeOperationTool）。
+      // Same as makeOperationTool: the request-scoped window covers both
+      // prepare + forward (didOpen spans the whole request, closed on exit).
+      // Per-request timeout + abort bridge, same as makeOperationTool.
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       let timedOutMethod = "textDocument/prepareCallHierarchy";
@@ -618,7 +661,8 @@ function makeCallHierarchyCallTool(
           if (cancel.timedOut()) {
             throw timeoutError(name, timedOutMethod, timeoutMs);
           }
-          // 缺方法哨兵：server 没有 call hierarchy —— 直接透传（不再 forward）。
+          // Method-not-found sentinel: the server has no call hierarchy —
+          // pass it through directly (no forward).
           if (isMethodNotFoundSentinel(prepared)) return prepared;
           const items = extractCallHierarchyItems(prepared);
           const item = items[0];
@@ -632,7 +676,8 @@ function makeCallHierarchyCallTool(
           );
           if (cancel.timedOut())
             throw timeoutError(name, timedOutMethod, timeoutMs);
-          // stringifyResult 对字符串原样透传（哨兵与正常字符串响应同路）。
+          // stringifyResult passes strings through unchanged (sentinels and
+          // normal string responses take the same path).
           return stringifyResult(result);
         });
       } catch (err) {
@@ -648,9 +693,10 @@ function makeCallHierarchyCallTool(
 }
 
 /**
- * LSP 响应的「数组」或「包了 `{items}` 的对象」两种形态归一化(tsserver
- * prepareCallHierarchy 返回前者或后者均存在;diagnostics 推送是数组)。
- * 失败/非对象返回空数组。共享 normalizer 避免重复(DRY)。
+ * Normalize the two LSP response shapes — a plain array, or an object
+ * wrapping `{items}` (tsserver's prepareCallHierarchy returns either;
+ * diagnostics pushes are arrays). Failure / non-object yields an empty
+ * array. Shared normalizer to avoid duplication.
  */
 function unwrapItems(raw: unknown): ReadonlyArray<unknown> {
   if (Array.isArray(raw)) return raw;
@@ -661,7 +707,7 @@ function unwrapItems(raw: unknown): ReadonlyArray<unknown> {
   return [];
 }
 
-/** tsserver 返回的 prepareCallHierarchy 形态归一化：取 items 数组。 */
+/** Normalize tsserver's prepareCallHierarchy response shape: extract the items array. */
 export function extractCallHierarchyItems(
   prepared: unknown
 ): ReadonlyArray<unknown> {
@@ -669,29 +715,37 @@ export function extractCallHierarchyItems(
 }
 
 /**
- * lsp_diagnostics 工具：读文件级 push diagnostics（tsserver 走
- * `textDocument/publishDiagnostics` 通知，client.ts 已订阅 latest-wins 累积）。
- * severity 过滤（忽略 severity=0 hint；保留 1=error / 2=warning / 3=information /
- * 4=deprecated）+ 每文件封顶 20（spec S6 摘要形式）。
+ * lsp_diagnostics tool: reads file-level push diagnostics (tsserver sends
+ * `textDocument/publishDiagnostics` notifications; client.ts subscribes and
+ * accumulates latest-wins). Severity filter (ignore severity=0 hint; keep
+ * 1=error / 2=warning / 3=information / 4=deprecated) plus a 20-per-file cap
+ * in summary form.
  *
- * **批量（二期 B2）**：`file`（单文件）与 `files`（1-10 个）二选一，互斥在
- * handler 内手工校验（ajv 不表达 exactly-one-of）；files 超出
- * DIAGNOSTICS_MAX_FILES 报 ToolExecutionError。批量输出每文件一段
- * `<diagnostics file=...>`，段落间空行；单文件路径行为不变。
+ * **Batch**: `file` (single) and `files` (1-10) are mutually exclusive,
+ * checked manually in the handler (ajv cannot express exactly-one-of); more
+ * than DIAGNOSTICS_MAX_FILES entries raise ToolExecutionError. Batch output
+ * is one `<diagnostics file=...>` section per file, separated by blank
+ * lines; the single-file path behaves exactly as before.
  *
- * **读前等待（plan T3 + 二期 B1 收敛升级）**：ensureOpen 后 push 诊断尚未
- * 到达时立即读 diagStore 得到 undefined → 误报空。每 100ms 轮询诊断 entry：
- *   - 编辑过（openVersion ≥ 2）→ 等 entry.pushVersion ≥ openVersion
- *     （必须等到**编辑后**的新诊断），deadline 到用现有内容；
- *   - 未编辑过 → 沿一轮语义，等首推（entry 在场即继续）或 deadline；
- *   - execCtx?.signal aborted 立即结束等待。
- * deadline 来自 ctx.diagnosticsWaitMs（缺省 DIAGNOSTICS_WAIT_MS = 2s）。
+ * **Wait-before-read (convergence upgrade)**: right after ensureOpen the
+ * pushed diagnostics may not have arrived yet, and reading diagStore
+ * immediately yields undefined → false "clean". Poll the diagnostic entry
+ * every 100ms:
+ *   - edited file (openVersion >= 2) → wait for entry.pushVersion >=
+ *     openVersion (must see the post-edit diagnostics); on deadline use what
+ *     is there;
+ *   - never edited → wait for the first push (entry present → proceed) or
+ *     the deadline;
+ *   - execCtx?.signal aborted → stop waiting immediately.
+ * The deadline comes from ctx.diagnosticsWaitMs (default DIAGNOSTICS_WAIT_MS
+ * = 2s).
  *
- * 输出：纯字符串（契约 Y1）。
+ * Output: plain string only (never structured payloads).
  *
- * **name 参数（symbol-primary-aci T2）**：符号查询面复用同一 handler 语义
- * 暴露成 `get_diagnostics_for_file`（诊断本就按文件提问，无符号身份可谈）。
- * 缺省 `"lsp_diagnostics"` → 旧工具行为 byte-identical。
+ * **name parameter**: the symbol-query surface reuses the same handler
+ * semantics exposed as `get_diagnostics_for_file` (diagnostics are already
+ * asked per file; there is no symbol identity to speak of). Default
+ * `"lsp_diagnostics"` → the old tool behaves byte-identically.
  */
 export function makeDiagnosticsTool(
   ctx: LspCtx,
@@ -709,13 +763,15 @@ export function makeDiagnosticsTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as DiagnosticsInput;
-      // 互斥（二期 B2）：file 与 files 恰好一个（xor）。都缺省或都在场 → 报错。
+      // Mutual exclusion: exactly one of file / files (xor). Neither or both
+      // → error.
       if ((params.file !== undefined) === (params.files !== undefined)) {
         throw new ToolExecutionError(
           `[${name}] provide exactly one of \`file\` or \`files\``
         );
       }
-      // 批量封顶：> DIAGNOSTICS_MAX_FILES 个 → 报错（minItems=1 由 schema 管）。
+      // Batch cap: more than DIAGNOSTICS_MAX_FILES → error (minItems=1 is
+      // handled by the schema).
       if (
         params.files !== undefined &&
         params.files.length > DIAGNOSTICS_MAX_FILES
@@ -735,9 +791,11 @@ export function makeDiagnosticsTool(
           );
           continue;
         }
-        // push diagnostics 只在文件打开后才到达 → 整个「打开 + 等待 + 读取」
-        // 必须在同一个请求级作用域内，否则 didClose 会先丢掉诊断缓存、
-        // getDiagnosticsEntry 永远取到 undefined、render 出空标签。
+        // Push diagnostics only arrive while the file is open, so the whole
+        // "open + wait + read" must live inside one request-scoped window —
+        // otherwise didClose drops the diagnostic cache first, and
+        // getDiagnosticsEntry forever returns undefined, rendering an empty
+        // tag.
         const uri = pathToFileURL(file).href;
         const items = await client.withDocumentOpen(file, () =>
           waitForDiagnostics(
@@ -749,21 +807,24 @@ export function makeDiagnosticsTool(
         );
         segments.push(renderDiagnostics(file, items ?? []));
       }
-      // 单文件路径与一轮完全同形（单段无分隔符）；批量段间空行（二期 B2）。
+      // The single-file path is shaped exactly like the old round (one
+      // segment, no separator); batch segments join with a blank line.
       return segments.join("\n\n");
     },
   });
 }
 
 /**
- * ensureOpen 后等待该 uri 的诊断到达（plan T3 + 二期 B1 编辑后收敛）：
- *   - 首查即命中等待条件 → 立即返回（不进 timer）；
- *   - 每 100ms 轮询 `client.getDiagnosticsEntry(uri)`；
- *   - 编辑过 → 等到 entry.pushVersion ≥ openVersion；
- *   - 未编辑过 → 等到首个 entry；
- *   - waitMs deadline / signal abort → 返回现有内容。
+ * After ensureOpen, wait for diagnostics for this uri to arrive:
+ *   - first check already satisfies the wait condition → return immediately
+ *     (never enter the timer);
+ *   - poll `client.getDiagnosticsEntry(uri)` every 100ms;
+ *   - edited → wait until entry.pushVersion >= openVersion;
+ *   - not edited → wait for the first entry;
+ *   - waitMs deadline / signal abort → return whatever is there.
  *
- * 返回 undefined 表示 deadline 内未等到满足条件的诊断 entry。
+ * Returning undefined means no qualifying diagnostic entry arrived before the
+ * deadline.
  */
 function diagnosticsWereEdited(
   openVersion: number | undefined,
@@ -819,13 +880,13 @@ async function waitForDiagnostics(
   }
 }
 
-/** 诊断归一化 + 过滤 + 封顶 + 纯字符串摘要（spec S6）。 */
+/** Normalize + filter + cap diagnostics into a plain-string summary. */
 function renderDiagnostics(file: string, raw: unknown): string {
   const items = unwrapItems(raw);
   const filtered = items.filter((d) => {
     if (!d || typeof d !== "object") return false;
     const severity = (d as { severity?: unknown }).severity;
-    // severity 缺省按 1=error 处理；severity=0 (Hint) 过滤。
+    // Missing severity is treated as 1=error; severity=0 (Hint) is filtered.
     return typeof severity === "number" ? severity >= 1 : true;
   });
   const cap = 20;
@@ -873,9 +934,9 @@ function severityLabel(severity: number | undefined): string {
 }
 
 /**
- * 构造 LSP 工具集（registry.ts T7 调用入口）。
+ * Build the LSP tool set (the entry point registry.ts calls).
  *
- * 返回值顺序与 spec「9 件 operation + lsp_diagnostics」对应：
+ * Return order matches "9 operations + lsp_diagnostics":
  *   1. lsp_definition
  *   2. lsp_references
  *   3. lsp_hover
@@ -887,12 +948,11 @@ function severityLabel(severity: number | undefined): string {
  *   9. lsp_outgoing_calls
  *  10. lsp_diagnostics
  *
- * **T6 计数说明**：spec §Objective 写「9 件 ACI 工具 append（11 → 20）」但
- * `specs/251-lsp-tool.md` Objective 第 17-19 行实际列出 9 件 operation 名为
- * 「8 件 operation」；spec §aci/tools/lsp.ts 第 184 行注释也写「9 件 = 8 operation
- * + lsp_diagnostics」。本工厂按 plan T6 列出名称**全量导出 10 件**（9 operation
- * + lsp_diagnostics），T7 append 后总数 21（11 + 10）而非 20，registry.ts
- * 装配时 `ACI_TOOLSET_NAMES.length === 21` 需相应调整。
+ * **Count note**: some spec text says "9 ACI tools appended (11 → 20)" while
+ * the enumerated operation names list 9 operations + lsp_diagnostics. This
+ * factory exports the full set of 10 (9 operations + lsp_diagnostics), so
+ * after appending the total is 21 (11 + 10), not 20; registry.ts assembly
+ * expects `ACI_TOOLSET_NAMES.length === 21`.
  */
 export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
   const positionOps: ReadonlyArray<OperationSpec> = [

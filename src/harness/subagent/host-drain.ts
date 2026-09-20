@@ -1,24 +1,28 @@
 /**
- * #356 T7 / #361 C2·C4 — host drain: 在 chat / tui / serve 三入口的 run() 边界之间,
- * 把 SubAgentManager buffer 内终态任务浓缩成 user message 字符串,拼入
- * 下一次 run() 的 priorMessages。
+ * Host drain: between the run() boundaries of the chat / tui / serve
+ * entrypoints, condense terminal-state tasks buffered in SubAgentManager
+ * into user-message strings, appended to the next run()'s priorMessages.
  *
- * 关键纪律 (spec SC7 / OQ5 / 契约 C2·C4):
- *   - 空 manager (undefined) / 无任务 → 立即返回 "";
- *   - 任一终态任务 → 立即返回拼接结果,不等其它 running;
- *   - 仅 running → 立即返回 "",不在 run() 边界轮询等待;
- *   - **drain 永不抛**:manager buffer 或浓缩失败时静默返回 "";
- *   - 不修改 manager buffer 状态 (OQ5 buffer 永久缓存直到 shutdown);
- *   - 单 task 浓缩格式:
+ * Key discipline:
+ *   - empty manager (undefined) / no tasks → return "" immediately;
+ *   - any terminal task → return the concatenated result immediately, never
+ *     waiting for other running ones;
+ *   - only running → return "" immediately, no polling at the run() boundary;
+ *   - **drain never throws**: manager buffer or condensation failures
+ *     silently return "";
+ *   - does not modify manager buffer state (buffer is cached permanently
+ *     until shutdown);
+ *   - per-task condensation format:
  *       ## Sub-agent <taskId> result: <summary>
  *
  *       [result]
- *     多 task 用空行分隔。
+ *     multiple tasks separated by blank lines.
  *
- * 实现约束 (契约 C4):仅用 drainCompleted() 取结果;不调用 listActive() /
- * waitFor(),不改变 manager buffer。
+ * Implementation constraint: consume results only via drainCompleted();
+ * never call listActive() / waitFor(); never mutate the manager buffer.
  *
- * ask 入口无 manager → 不调本函数 → 不行为变化。
+ * The ask entrypoint has no manager → this function is not called → no
+ * behavior change.
  */
 import type { SubagentManagerDrainView } from "./manager-registry.js";
 import {
@@ -27,14 +31,15 @@ import {
 } from "./envelope.js";
 
 /**
- * Drain 消息文本前缀（SSOT）。单 task 浓缩格式为
- * `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${summary}\n\n${result}`；
- * 显示投影层（session-api turn 投影 / rewind 边界投影）用
- * `isSubagentDrainText` 识别并跳过 drain 消息，格式与谓词同源。
+ * Drain message text prefix (SSOT). The per-task condensation format is
+ * `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${summary}\n\n${result}`;
+ * display projection layers (session-api turn projection / rewind boundary
+ * projection) use `isSubagentDrainText` to recognize and skip drain
+ * messages, so format and predicate stay same-sourced.
  */
 export const SUBAGENT_DRAIN_PREFIX = "## Sub-agent ";
 
-/** trim 后以 drain 前缀开头即判定 —— drain 消息不构成 turn / 不作 slice 边界。 */
+/** Trimmed text starting with the drain prefix is a drain message — drain messages do not form a turn and are not slice boundaries. */
 export function isSubagentDrainText(text: string): boolean {
   return text.trim().startsWith(SUBAGENT_DRAIN_PREFIX);
 }
@@ -42,9 +47,9 @@ export function isSubagentDrainText(text: string): boolean {
 export interface DrainPendingSubagentsOpts {
   /** Restrict the drain to workers owned by one interactive session. */
   readonly conversationId?: string;
-  /** 已废弃,为保持调用方兼容而保留;host drain 不轮询。 */
+  /** Deprecated, kept for caller compatibility; host drain does not poll. */
   readonly pollMs?: number;
-  /** 已废弃,为保持调用方兼容而保留;host drain 不等待。 */
+  /** Deprecated, kept for caller compatibility; host drain does not wait. */
   readonly timeoutMs?: number;
 }
 
@@ -70,9 +75,11 @@ export interface DrainPendingSubagentsBeforeShutdownOpts {
 }
 
 /**
- * 终态条目 → 父可见浓缩文本。导出只为让「终态通道互斥」的测试能构造
- * **落盘态**（订阅者在发布前注册会被 mailbox 立即重放历史，见
- * tests/subagent/foreground-drain-exclusion.test.ts 的 late-subscriber 用法）。
+ * Terminal entries → parent-visible condensed text. Exported only so the
+ * terminal-channel mutual-exclusion test can construct the **persisted
+ * state** (a subscriber registering before publish gets mailbox history
+ * replayed immediately; see the late-subscriber usage in
+ * tests/subagent/foreground-drain-exclusion.test.ts).
  */
 export function formatDrainedResults(
   entries: ReadonlyArray<{
@@ -98,14 +105,16 @@ export function formatDrainedResults(
 }
 
 /**
- * 浓缩终态子代理结果为一条 user message 字符串。
+ * Condense terminal subagent results into a single user-message string.
  *
- * #361 C2: 后景 host drain 只消费已经完成的 buffer。返回 "" 当:
- *   - manager 为 undefined (ask 入口形态);
- *   - manager 内无任务或没有终态任务;
- *   - manager 的只读 drain / 浓缩操作失败(永不抛)。
+ * Background host drain only consumes already-completed buffer entries.
+ * Returns "" when:
+ *   - manager is undefined (ask-entry shape);
+ *   - manager has no tasks or no terminal tasks;
+ *   - the manager's read-only drain / condensation fails (never throws).
  *
- * `_opts` 仅为兼容既有调用方保留;running worker 不会触发等待。
+ * `_opts` is kept only for existing-caller compatibility; running workers
+ * never trigger a wait.
  */
 export async function drainPendingSubagents(
   manager: SubagentManagerDrainView | undefined,

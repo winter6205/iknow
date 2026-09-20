@@ -1,7 +1,7 @@
 /**
  * src/harness/sandbox/violation-executor.ts
  *
- * T6 wiring glue: wraps an Executor with the violation kill-session hook so
+ * Wiring glue: wraps an Executor with the violation kill-session hook so
  * every tool result is observed by the violation counter. When the counter
  * escalates to `shouldKill = true`, the configured `onKill` callback fires
  * (typically `wireKillSessionNotification` which writes a stderr line and
@@ -57,10 +57,11 @@ export function wrapWithViolationHook(
       messages?: ToolExecutionContext["messages"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
-      // #global-plugins T2:observe 变 async —— PostToolUseHook 放宽后可返回
-      // Promise，拒绝无人接会成 unhandledRejection。捕获后忽略（本包装是
-      // observer，不改变结果；诊断已有宿主侧 onHookError 通道），保持
-      // 「wrapper 不影响 inner 行为」的既有契约。
+      // observe is async: PostToolUseHook may now return a Promise, and an
+      // unhandled rejection would surface as unhandledRejection. Catch and
+      // ignore — this wrapper is an observer and must not alter results
+      // (diagnostics already have the host-side onHookError channel), keeping
+      // the contract that the wrapper never affects the inner executor.
       const observe = async (
         r: ToolExecutionResult,
         i: number
@@ -84,8 +85,9 @@ export function wrapWithViolationHook(
             payload,
           });
         } catch {
-          // EXIT: post hook 异常只影响观测，绝不改变工具结果（与
-          // permission-executor runAllowed 的 fire-and-forget 同判据）。
+          // EXIT: post-hook failures only affect observation, never the tool
+          // result (same fire-and-forget rationale as permission-executor
+          // runAllowed).
         }
       };
       const out = await opts.inner.executeAll(

@@ -25,19 +25,24 @@ import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
 
 /**
- * ADR-0084 / D1 — last-read 闸的 typed 拒绝（模型可读判据，不只是文案）。
+ * ADR-0084 — typed rejection from the last-read gate (a criterion the model
+ * can read, not just wording).
  *
- * 与 `ReadonlyViolationError`（bash-readonly.ts）同形：extends
- * `ToolExecutionError`，executor 的 `sanitizeFailure` 只读 `.message`，
- * 模型面回执逐字节不变。
+ * Same shape as `ReadonlyViolationError` (bash-readonly.ts): extends
+ * `ToolExecutionError`; the executor's `sanitizeFailure` reads only
+ * `.message`, so the model-facing receipt is byte-unchanged.
  *
- * `kind` / `path` 是**测试 / host 接缝**，不在执行器的读取面上：判别「这是
- * 写闸拒绝」而不是别的写失败，靠的是 `instanceof LastReadRequiredError`
- * （测试）或 message 文本。加字段不会改变模型所见。
+ * `kind` / `path` are a **test / host seam**, not in the executor's read
+ * surface: discriminating "this is a write-gate refusal" from other write
+ * failures relies on `instanceof LastReadRequiredError` (tests) or the
+ * message text. Extra fields never change what the model sees.
  *
- * 文案内嵌**规范绝对 path**，与成功回执的 `displayPath`（相对 root）口径不同 ——
- * 这是有意的例外：拒绝后模型要拿这个 path 去 `read_file` 解闸，worktree rebind /
- * 子代理多 root 场景下相对路径会指错树；成功回执只是给人看的短形式，无此风险。
+ * The message embeds the **canonical absolute path**, unlike the success
+ * receipt's `displayPath` (root-relative) — a deliberate exception: after a
+ * refusal the model feeds this path back into `read_file` to unlock, and
+ * under worktree rebind / multi-root subagents a relative path could point
+ * at the wrong tree; the success receipt is just a short human-facing form
+ * without that risk.
  */
 export class LastReadRequiredError extends ToolExecutionError {
   readonly kind = "last_read_required" as const;
@@ -51,7 +56,7 @@ export class LastReadRequiredError extends ToolExecutionError {
 }
 
 export interface WriteFileOpts {
-  /** Explicit host pad (tests / T3 worker pad). */
+  /** Explicit host pad (tests / supervised worker pad). */
   readonly tmpDir?: string;
   /** Session project dir; with `ctx.conversationId` → main-session pad. */
   readonly projectDir?: string;
@@ -116,15 +121,18 @@ function displayPath(root: string, target: string): string {
 }
 
 /**
- * Task 4 (plans/session-scratch-path-space.md) — 成功回执的路径口径。
+ * Path convention of the success receipt (session scratch path space).
  *
- * 交付写（target 在 taskRoot 下）保持既有的相对 taskRoot 短形式，逐字节
- * 不回退。写在会话 tmp 垫底（taskRoot 之外）时，displayPath 会得到 `../`
- * 链、模型抄回 read_file/edit_file 时指错路径 → 改用 canonical 绝对宿主
- * 路径（= resolveWithinRoot 的返回值本身，与 last-read 拒绝内嵌的绝对
- * path 同口径）。垫底比较用 realpath，与 resolveWithinRoot 内部把
- * sessionTmpRoot realpath 后再做 containment 的口径一致；realpath 失败
- * （垫底异常态）→ 退回既有相对形态，不在回执面制造新故障。
+ * Delivery writes (target under taskRoot) keep the existing taskRoot-relative
+ * short form, byte-for-byte. When writing into the session tmp pad (outside
+ * taskRoot), displayPath would produce a `../` chain that the model copies
+ * back into read_file/edit_file pointing at the wrong path → use the
+ * canonical absolute host path (= the `resolveWithinRoot` return value
+ * itself, same convention as the absolute path embedded in last-read
+ * refusals). Pad comparison uses realpath, matching resolveWithinRoot's
+ * internal containment which realpaths sessionTmpRoot first; if realpath
+ * fails (abnormal pad state) → fall back to the existing relative form
+ * rather than create a new failure surface in the receipt path.
  */
 async function receiptDisplayPath(
   root: string,
@@ -135,7 +143,7 @@ async function receiptDisplayPath(
     try {
       if (isWithinRoot(await realpath(resolve(pad)), target)) return target;
     } catch {
-      // EXIT: 垫底不可 realpath（未知态）→ 不改回执形态。
+      // EXIT: pad not realpath-able (unknown state) → keep the receipt shape.
     }
   }
   return displayPath(root, target);
@@ -144,11 +152,11 @@ async function receiptDisplayPath(
 /**
  * Snapshot the live root at handler invocation time. Accepts either a literal
  * path (legacy / forward-compat shape — tests and other one-shot callers pass
- * `string`) or a `LiveTaskRoot` cell (T5: registry threads the cell so that
+ * `string`) or a `LiveTaskRoot` cell (the registry threads the cell so that
  * `worktree rebind` in the same run reaches this handler). The returned
- * `string` is the snapshot value — D2 forbids reading the cell more than once
- * per handler call, so callers must reuse the snapshot for both resolve and
- * write.
+ * `string` is the snapshot value — reading the cell more than once per
+ * handler call is forbidden, so callers must reuse the snapshot for both
+ * resolve and write.
  */
 function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
@@ -160,10 +168,10 @@ function readRoot(root: string | LiveTaskRoot): string {
  * `create_directories` defaults to true and only controls parent-directory
  * creation; it never changes the whole-file replacement semantics.
  *
- * T5 (plans/worktree-live-task-root.md §6): `root` may be a `LiveTaskRoot`
- * cell; the handler reads the snapshot at call time, so `worktree rebind`
- * in the same run lands new writes in the rebound tree. `string` callers
- * (legacy tests, one-shot consumers) keep byte-identical behavior.
+ * `root` may be a `LiveTaskRoot` cell; the handler reads the snapshot at
+ * call time, so a `worktree rebind` in the same run lands new writes in the
+ * rebound tree. `string` callers (legacy tests, one-shot consumers) keep
+ * byte-identical behavior.
  */
 export function createWriteFileTool(
   root: string | LiveTaskRoot,
@@ -174,7 +182,7 @@ export function createWriteFileTool(
     ctx?: ToolExecutionContext
   ): Promise<unknown> => {
     const params = parseInput(input);
-    // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
+    // Per-call snapshot: resolve and the write must share one root value.
     const rootAtCall = readRoot(root);
     const sessionTmpRoot = resolveSessionFenceTmp({
       tmpDir: opts?.tmpDir,
@@ -224,9 +232,11 @@ export function createWriteFileTool(
       }
     }
 
-    // T4 #298 side-channel:写盘前读旧内容(oldContent);文件不存在 → 空串。
-    // 读失败不阻断写入(写盘才是主路径),仅降级 oldContent 为空,保证既有
-    // 拒绝语义(父目录缺失 / symlink 逃逸)不受影响 — 此刻 containment 已通过。
+    // Side channel for diffs: read the old content before writing; missing
+    // file → empty string. A read failure never blocks the write (the write
+    // is the main path); it only degrades oldContent to empty, keeping the
+    // existing rejection semantics (missing parent / symlink escape)
+    // untouched — containment has already passed at this point.
     let oldContent = "";
     try {
       oldContent = await readFile(target, "utf8");
@@ -234,10 +244,12 @@ export function createWriteFileTool(
       oldContent = "";
     }
 
-    // ADR-0084 last-read 闸:目标已存在且 size>0、本 conversation 账上没有
-    // → typed 拒绝、不写盘。新建与空文件免检(D1「非空 write 才查表」)。
-    // 判据用 stat 的字节数,不用 oldContent —— oldContent 的读取失败会被
-    // best-effort 降级成空串,拿它判「空」会把不可读的非空文件误放行。
+    // ADR-0084 last-read gate: target exists with size>0 and is absent from
+    // this conversation's ledger → typed refusal, nothing written. New files
+    // and empty files are exempt (only non-empty writes consult the table).
+    // The criterion uses stat's byte size, not oldContent — a failed
+    // oldContent read degrades best-effort to empty, and judging "empty" by
+    // it would wrongly pass an unreadable non-empty file.
     await assertLastRead(opts, ctx, target);
 
     return commitWrite(target, params, {
@@ -273,9 +285,10 @@ export function createWriteFileTool(
 }
 
 /**
- * ADR-0084 / D1 — 写盘落尾段：写文件、拼回执。抽出来只为让 handler 的
- * 判定链长度回到闸引入之前的形态（S5 ratchet）；顺序与文案形态不变
- * （Task 4 起垫底写的路径口径见 receiptDisplayPath）。
+ * ADR-0084 — the write tail: write the file, assemble the receipt. Extracted
+ * only to keep the handler's decision chain as short as it was before the
+ * gate was introduced (S5 ratchet); order and receipt wording are unchanged
+ * (for the pad-write path convention see receiptDisplayPath).
  */
 async function commitWrite(
   target: string,
@@ -303,44 +316,50 @@ async function commitWrite(
 }
 
 /**
- * ADR-0084 / D1 — last-read 闸。`target` 已是 containment 通过后的规范绝对
- * path,直接当账本键(与 read_file / 白名单 bash 的入账口径同源:同一个
- * `resolveWithinRoot` 解析结果)。
+ * ADR-0084 — the last-read gate. `target` is already the canonical absolute
+ * path past containment, used directly as the ledger key (same source as
+ * read_file / whitelisted bash reads: one `resolveWithinRoot` output).
  *
- * 四条 EXIT:
- *   - **host 缺席**(工厂未接账本:demo / 直接调工厂的测试)→ 不查表,行为与
- *     ADR-0084 之前逐字节一致。闸是否生效是装配层决策,不是工厂的。
- *   - host 在场但 conversationId 缺席 → 已存在且 size>0 一律拒(fail-closed,
- *     spec:无 id 的非空覆写拒绝;禁止隐式进程级全局表)。
- *   - target 不存在 / size==0 → 免检放行。
- *   - 账上有该 path → 放行。
+ * Four EXITs:
+ *   - **host absent** (factory without a ledger: demo / direct-factory
+ *     tests) → no table lookup, behavior byte-identical to pre-ADR-0084.
+ *     Whether the gate is on is a registry-assembly decision, not the
+ *     factory's.
+ *   - host present but conversationId absent → any existing size>0 target
+ *     is refused (fail-closed: non-empty overwrite without an id is
+ *     rejected; no implicit process-wide global table).
+ *   - target missing / size==0 → exempt, allowed.
+ *   - ledger has the path → allowed.
  *
- * stat 失败(EACCES / ELOOP 等)→ 不阻断:只在确知「已存在且非空」时才拒,
- * 未知态交回既有的写路径报错,不在这里制造新的拒绝面。
+ * stat failures (EACCES / ELOOP etc.) → non-blocking: refuse only when the
+ * target is known to exist and be non-empty; unknown states fall back to
+ * the existing write-path errors instead of gaining a new refusal surface
+ * here.
  */
 async function assertLastRead(
   opts: WriteFileOpts | undefined,
   ctx: ToolExecutionContext | undefined,
   target: string
 ): Promise<void> {
-  // EXIT: host 缺席（工厂未接账本，demo / 直接调工厂的测试）→ 闸整体不生效。
-  // 与「host 在场但 conversationId 缺席」是两回事 —— 后者 fail-closed。
+  // EXIT: host absent (factory without a ledger: demo / direct-factory
+  // tests) → the gate is entirely off. This is different from "host present
+  // but conversationId absent", which fails closed.
   const host = opts?.lastReadLedger;
   if (host === undefined) return;
   let info: Awaited<ReturnType<typeof stat>>;
   try {
     info = await stat(target);
   } catch {
-    // EXIT: stat 失败（EACCES / ELOOP 等）→ 未知态不在这里制造新拒绝面，
-    // 交回既有写路径报错。
+    // EXIT: stat failure (EACCES / ELOOP etc.) → unknown states create no
+    // new refusal surface here; fall back to existing write-path errors.
     return;
   }
-  // EXIT: 新建 / 非普通文件 / 空文件（size==0）→ 免检放行（D1「非空 write 才查表」）。
+  // EXIT: new / non-regular / empty file (size==0) → exempt (only non-empty writes consult the table).
   if (!info.isFile() || info.size === 0) return;
-  // EXIT: 账上有该 path（本 conversation 已读过）→ 放行。
+  // EXIT: ledger has the path (already read in this conversation) → allow.
   if (host.ledgerFor(ctx?.conversationId)?.has(target)) return;
-  // EXIT: 已存在且非空、账上无读 → typed last_read_required。模型只看到
-  // `.message`（executor 只回传 message）；`kind` 供测试 / host 按 `instanceof`
-  // 判别，不构成模型面判据。
+  // EXIT: exists, non-empty, absent from the ledger → typed last_read_required.
+  // The model only sees `.message` (the executor returns just the message);
+  // `kind` serves tests / host via `instanceof`, never a model-side criterion.
   throw new LastReadRequiredError(target);
 }

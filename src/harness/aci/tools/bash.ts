@@ -54,34 +54,40 @@ import type { LastReadLedgerHost } from "../last-read-ledger.js";
 
 interface BashInput {
   readonly command?: unknown;
-  /** #502 T3:background?: boolean — 缺省 false = 前台（既有路径）。 */
+  /** background?: boolean — defaults to false (foreground, existing path). */
   readonly background?: unknown;
 }
 
 export interface CreateBashToolOptions {
-  /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
-   *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
+  /** Per-engine secret registry. When present, the handler restores
+   *  placeholders (`<<<SECRET_N>>>` → real values) before building the
+   *  bwrap fence; absent → the command passes through unchanged. */
   readonly secretRegistry?: SecretRegistry;
-  /** #502 T3:后台任务管理器。在场时 `background: true` 分支可用 —— handler
-   *  经 manager.spawn 起 detached 子进程后立即返回 {task_id, log_path}，不
-   *  阻塞、不占 tier timer（handler 毫秒级返回 ⇒ executor tier 天然不治理
-   *  后台 daemon）。缺省时 `background: true` → ToolExecutionError（fail-fast，
-   *  不静默退化成前台 —— 长驻进程退化成前台会被 build tier 杀），前台路径
-   *  完全不受影响。生产装配 build-engine 注入 createBackgroundTaskManager +
-   *  defaultBackgroundSpawn。 */
+  /** Background task manager. When present, the `background: true` branch
+   *  works — the handler calls manager.spawn, returns {task_id, log_path}
+   *  immediately without blocking or occupying the tier timer (millisecond
+   *  return ⇒ the executor tier never governs background daemons). Absent →
+   *  `background: true` throws ToolExecutionError (fail-fast, no silent
+   *  degradation to foreground — a long-lived process demoted to foreground
+   *  would be killed by the build tier); the foreground path is unaffected.
+   *  Production assembly (build-engine) injects createBackgroundTaskManager
+   *  + defaultBackgroundSpawn. */
   readonly backgroundManager?: BackgroundTaskManager;
-  /** #562 T4:bash 模式 —— "readonly" 时 handler 在 isDangerousCommand 之后、
-   * commandContainsSensitivePath 之前调 validateReadonlyCommand，越界命令
-   * 抛 ReadonlyViolationError（extends ToolExecutionError）。缺省 "any" =
-   * V1 路径逐字节不变（回归基线）。 */
+  /** Bash mode — "readonly" makes the handler call
+   *  validateReadonlyCommand after isDangerousCommand and before
+   *  commandContainsSensitivePath; out-of-policy commands throw
+   *  ReadonlyViolationError (extends ToolExecutionError). Default "any" =
+   *  the original path byte-for-byte unchanged (regression baseline). */
   readonly bashMode?: "any" | "readonly";
-  /** #562 T5:fence cwd 级只读控制 —— true 时 fence 把 cwd bind 为 --ro-bind,
-   * 同时把 GIT_OPTIONAL_LOCKS=0 注入 fence env（git ≥2.14 防 `git status` 刷
-   * index）。缺省 / false = 既有可写 cwd。 */
+  /** Fence-level cwd read-only control — when true the fence binds cwd as
+   *  --ro-bind and injects GIT_OPTIONAL_LOCKS=0 into the fence env (git
+   *  ≥2.14, prevents `git status` from rewriting the index).
+   *  Default / false = the existing writable cwd. */
   readonly cwdReadonly?: boolean;
-  /** T7 (plans/worktree-live-task-root.md §6): per-call live root cell. 在场
-   * 时 handler 入口读一次冻结为 waveRoot（D2 batch snapshot），前台 /
-   * background 共用同一份。缺省时退回工厂捕获 cwd。 */
+  /** Per-call live root cell. When present, the handler reads it once at
+   *  entry and freezes it as waveRoot (batch snapshot), shared by the
+   *  foreground and background paths. Absent → fall back to the
+   *  factory-captured cwd. */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
    * ADR-0092: this identity's session tmp host path. Tests inject
@@ -107,7 +113,7 @@ export interface CreateBashToolOptions {
    */
   readonly projectDir?: string;
   /**
-   * ADR-0084 / D1: last-read ledger host. Present → a foreground command that
+   * ADR-0084: last-read ledger host. Present → a foreground command that
    * is exactly one whitelisted single-file read (exit 0) records the resolved
    * canonical path, so a later non-empty `write_file` on it passes the
    * freshness gate. Absent → nothing is recorded (legacy callers); reads stay
@@ -115,77 +121,90 @@ export interface CreateBashToolOptions {
    */
   readonly lastReadLedger?: LastReadLedgerHost;
   /**
-   * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder(详见
-   * `sandbox/fs-mode.ts`)。handler 入口 per-call `fsMode?.get() ?? "global"`
-   * 读一次,与 `liveTaskRoot` 的 D2 batch snapshot 纪律同款;前台 fence 与后台
-   * spawn 共用同一份冻结值。缺省 → 全局档(V1 baseline 不变)。
+   * ADR-0092: fs isolation-mode holder (see `sandbox/fs-mode.ts`). The
+   * handler reads `fsMode?.get() ?? "global"` once per call — same batch
+   * snapshot discipline as `liveTaskRoot`; the foreground fence and the
+   * background spawn share the same frozen value. Absent → global mode
+   * (V1 baseline unchanged).
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0092 Amendment 2026-09-13 / SC11:工作区档 home ro-bind 源端宿主绝对
-   * 路径。缺省 `homedir()` —— 与 `tmpDir` 注入同形态(测试可注入)。生产装配
-   * build-engine 透传 userHome / worker 透传 sessionRoots 的对应字段。
+   * ADR-0092: workspace-mode home ro-bind source host absolute path.
+   * Default `homedir()` — same injection shape as `tmpDir` (testable).
+   * Production assembly passes it through (build-engine: userHome;
+   * worker: the matching sessionRoots field).
    */
   readonly homeRoot?: string;
   /**
-   * issue 1059:worktree-on-mutate 活开关 holder(只读视图,与 gate 的
-   * `enabled` 同纪律)。handler 入口与 waveRoot 同时读一次冻结为
-   * UNBOUND_FENCE 判定 —— gate ON ∧ waveRoot 是主 checkout → 前台 fence /
-   * 后台 spawn 叠 `--ro-bind <main>` 物理段并在 EROFS 回灌时给可行动文案。
-   * 缺席 = 永不发段(bound / gate-OFF argv 逐字节不变)。
+   * Worktree-on-mutate live toggle holder (read-only view, same discipline
+   * as the gate's `enabled`). The handler reads it once at entry alongside
+   * waveRoot and freezes it for the UNBOUND_FENCE decision — gate ON ∧
+   * waveRoot is the main checkout → the foreground fence / background spawn
+   * adds the `--ro-bind <main>` physical segment and, on EROFS feedback,
+   * renders actionable guidance. Absent = never emits the segment (bound /
+   * gate-OFF argv byte-identical).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
-   * ADR-0097 / T4:出口代理缝装配 —— 由调用面注入判定器输入(从 settings
-   * `isolation.network` 读),handler 在 fence 装配期起 per-call egress
-   * session,然后在 finally 释放。**缺省** = 不起 egress session(fence
-   * 仍走 `--unshare-net`,等同纯断网)。生产装配在 build-engine 层注入,
-   * 测试可注入 fake 工厂。
+   * ADR-0097: egress proxy seam assembly — the caller injects the policy
+   * input factory (read from settings `isolation.network`); the handler
+   * starts a per-call egress session during fence assembly and releases it
+   * in `finally`. **Absent** = no egress session (fence still runs with
+   * `--unshare-net`, i.e. plain network isolation). Production assembly
+   * injects it at the build-engine layer; tests may inject fake factories.
    *
-   * 工厂形态而非 session 实例:per-call 装配,handler 内建 session,
-   * 然后 `finally { await session.dispose() }`。start 失败(EgressRelayUnavailableError
-   * 等)→ 按 spec「fail-closed 不静默降级」,本仓 expand 阶段接线为:本
-   * 次调用无 egress 缝(沙箱内无代理 env、`--unshare-net` 照旧在,等同
-   * 纯断网)+ typed failure 让模型 / TUI 可见 —— 不静默降级。
+   * Factory shape rather than a session instance: per-call assembly, the
+   * handler builds the session itself, then `finally { await
+   * session.dispose() }`. A start failure (EgressRelayUnavailableError
+   * etc.) is handled fail-closed without silent degradation: this call
+   * runs with no egress seam (no proxy env inside the sandbox,
+   * `--unshare-net` still in place, i.e. plain isolation) plus a typed
+   * failure visible to the model / TUI.
    */
   readonly egressPolicyFactory?: () => EgressPolicyInput | undefined;
   /**
-   * T5 测试 seam:注入 `createEgressSession` 工厂，让 tier 1→mid 端到端
-   * 测试可在不真起中继 / proxy 的前提下模拟「违例被记录 → drain → typed
-   * failure」路径。生产装配**不传**(走默认 createEgressSession)。
+   * Test seam: inject the `createEgressSession` factory so end-to-end tests
+   * can simulate "violation recorded → drain → typed failure" without
+   * actually starting a relay / proxy. Production assembly does **not**
+   * pass it (uses the default createEgressSession).
    *
-   * why 需要:bash handler 直接 import 真实 `createEgressSession`,而真
-   * 真 http-proxy 需要 unix socket 资源与监听权限,CI 上未必具备。让测试
-   * 在 stub session 里 record 一条违例 →
-   * 直接走 drain → typed failure 全管线,验证「message 从 handler 流到
-   * categorizeResult」不假绿。
+   * Why it's needed: the bash handler imports the real
+   * `createEgressSession` directly, and the real http-proxy needs unix
+   * socket resources and listen permissions that CI may not have. With a
+   * stub session the test records one violation and exercises the whole
+   * drain → typed failure pipeline, verifying that the message flows from
+   * handler to categorizeResult without false greens.
    */
   readonly createEgressSessionFactory?: typeof createEgressSession;
   /**
-   * T6:首次域名批准流的 ask inlet —— 把既有 `AskUser` 转写为
-   * `(host) => Promise<boolean>`,在 bash tool 工厂闭包期构造一个
-   * `EgressApprovalGate`,跨调用共享同一会话级 allowed/denied 集 +
-   * in-flight 合并表。
+   * First-seen domain approval flow: ask inlet — wraps the existing
+   * `AskUser` into `(host) => Promise<boolean>`; during the bash tool
+   * factory closure it builds one `EgressApprovalGate` shared across
+   * calls (session-level allowed/denied sets + in-flight merge table).
    *
-   * 缺省 = 无 ask 面,首次见到新域名直接记 `no-approval-inlet` 违例
-   * (spec §Failure paths「非交互入口首见新域名」fail-closed)。
+   * Absent = no ask surface; a first-seen domain is recorded as a
+   * `no-approval-inlet` violation (fail-closed for non-interactive
+   * entries).
    *
-   * 装配链:build-engine 层持有既有 `AskUser`,在 createBashTool 处
-   * 包成 `askApproval`,再透传给本 opts(参考 plans/ bash 装配纪律)。
-   * 测试可注入 fake `(host) => Boolean`。
+   * Assembly chain: build-engine holds the existing `AskUser`, wraps it
+   * into `askApproval` at createBashTool, and passes it through here.
+   * Tests may inject a fake `(host) => Boolean`.
    */
   readonly askApproval?: AskApproval;
 }
 
 /**
- * ADR-0092 Round 2(与 `liveTaskRoot` 的 D2 batch snapshot 同款纪律):fs 隔离档
- * holder 与 homeRoot 在 handler 入口读一次冻结 —— 前台 fence / background
- * spawn 共用同一份,handler 内 holder 后续翻转不渗透进本次调用。
+ * ADR-0092: read the fs isolation-mode holder and homeRoot once at handler
+ * entry and freeze them — foreground fence and background spawn share the
+ * same snapshot, so a later holder flip inside the handler cannot leak into
+ * the current call (same discipline as `liveTaskRoot`'s batch snapshot).
  *
- * holder 缺席 → 全局档(V1 baseline 不变);homeRoot 缺席 → `homedir()`
- * (与 opts 注入同形态,测试可注入)。落到非空值是有意的:工作区档下空
- * homeRoot 在 bwrap 层是 typed fail-loud(不得静默退化成全局档),这里
- * 给出与生产装配同值的缺省,使该守卫只在装配真漏传时触发。
+ * Holder absent → global mode (V1 baseline unchanged); homeRoot absent →
+ * `homedir()` (same injectable shape as opts). Landing on a non-empty
+ * default is deliberate: under workspace mode an empty homeRoot is a typed
+ * fail-loud at the bwrap layer (it must not silently degrade to global
+ * mode), so this default matches the production value and the guard only
+ * fires when assembly genuinely drops the input.
  */
 function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
   readonly mode: FsIsolationMode;
@@ -198,22 +217,24 @@ function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
 }
 
 /**
- * D2 batch snapshot 的 fence 输入(handler 入口冻结):fs 档 holder / homeRoot /
- * tmpDir 同 vintage —— 前台 fence 与后台 spawn 共用同一份,handler 内 holder
- * 或 cell 后续翻转不渗透进本次调用。
+ * Batch-snapshotted fence inputs (frozen at handler entry): fs mode holder
+ * / homeRoot / tmpDir share one vintage — foreground fence and background
+ * spawn use the same snapshot; later holder or cell flips cannot leak into
+ * the current call.
  */
 interface FenceSnapshot {
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
   readonly tmpDir: string;
-  /** issue 1059:handler 入口冻结的 UNBOUND_FENCE 主 checkout(缺席 = 不发段)。 */
+  /** UNBOUND_FENCE main checkout frozen at entry (absent = no segment). */
   readonly unboundMainCheckout: string | undefined;
 }
 
 /**
- * ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(home ro-bind + 两处写
- * 白名单)的源端绝对路径。global 档返回空展开 —— bwrap 侧不发射任何一层,
- * argv 与 V1 baseline 逐字节一致。
+ * ADR-0092: source absolute paths for the workspace-mode fence's three
+ * layers (home ro-bind + two write whitelists). Global mode returns an
+ * empty spread — bwrap emits none of the layers, argv byte-identical to
+ * the V1 baseline.
  */
 function fenceWorkspaceMounts(
   mode: FsIsolationMode,
@@ -225,18 +246,20 @@ function fenceWorkspaceMounts(
 }
 
 /**
- * ADR-0097 / T5:前台 bash 调用的 egress 装配 + 执行 + 回灌整段——独立于
- * handler（S5 complexity 门）。顺序即 T1 契约「起桥 → 绑 → 注入 → 收尾」：
- * fence 装配前起 per-call session；dispose 在 finally（异常路径与正常路径
- * 同一释放通道）；违例 drain 走 typed failure 路径（第 3 跳「前缀与 tier
- * 入口」，spec §Violation feedback channel）。
+ * The whole foreground bash flow — egress assembly + fence build + sandbox
+ * run + feedback (extracted to keep the handler under the S5 complexity
+ * gate). Order is the contract "start bridge → bind → inject → finalize":
+ * start the per-call session before fence assembly; dispose in `finally`
+ * (exception paths and normal paths share one release channel); the
+ * violation drain goes through the typed-failure path.
  *
- * T5 升级：drain 非空或 egressStartError 在场 → 不再 ok + stderr 旁路，
- * 改抛 `ToolExecutionError(message)`（typed）；executor 经
- * `buildFailureResult` 包成 `kind: "execution_failed"`、`message` 经
- * `categorizeResult` 命中 `[network_denied]` 前缀 → mid tier（不修改
- * violation-handling.ts，挂点 `:139` 自动接通）。drain 空且无 startError
- * → 维持 V1 ok 形状（byte-identical 于 T4 前）。
+ * When the drain is non-empty or egressStartError is present → throw
+ * `ToolExecutionError(message)` (typed) instead of ok + stderr bypass;
+ * the executor wraps it via `buildFailureResult` into
+ * `kind: "execution_failed"`, and `message` hits the `[network_denied]`
+ * prefix in `categorizeResult` → mid tier (violation-handling.ts needs no
+ * change; its hook wires up automatically). Empty drain and no startError
+ * → the original ok shape (byte-identical to before this upgrade).
  */
 async function runForegroundBash(
   args: RunForegroundBashArgs
@@ -256,8 +279,9 @@ async function runForegroundBash(
     toolOpts: opts,
     ctx,
   } = args;
-  // 起 session → 起 fence → 跑 sandbox → 装 mask → 入账 → finalize
-  // 6 步，每步都是 S5 抽离后的子函数；本函数只承担「按顺序编排」。
+  // start session → build fence → run sandbox → install mask → record
+  // ledger → finalize: 6 steps, each an extracted sub-function; this
+  // function only orchestrates them in order.
   const egress = await startEgressSessionForCall(
     effectiveEgressPolicyFactory,
     opts?.createEgressSessionFactory
@@ -305,7 +329,8 @@ async function runForegroundBash(
 }
 
 /**
- * `runForegroundBash` 的入参类型（拆出以控制该函数行数 ≤ 60 —— S5 软门）。
+ * Parameter type for `runForegroundBash` (split out to keep that function
+ * under 60 lines — S5 soft gate).
  */
 interface RunForegroundBashArgs {
   finalCommand: string;
@@ -314,37 +339,41 @@ interface RunForegroundBashArgs {
   fsMode: FsIsolationMode;
   homeRoot: string;
   tmpDir: string;
-  /** issue 1059:入口冻结的 UNBOUND_FENCE 主 checkout(undefined = 不发段)。 */
+  /** UNBOUND_FENCE main checkout frozen at entry (undefined = no segment). */
   unboundMainCheckout: string | undefined;
   fsPolicy: ReturnType<typeof createFsPolicy>;
   fenceEnv: Record<string, string>;
   fenceIsReadonly: boolean;
   /**
-   * T6:工厂闭包期包装出的 `egressPolicyFactory`(自动注入 `approvalGate` +
-   * allowlistSource fallback 为 "session")。缺席 → handler 不起 session,
-   * V1 baseline 不变。
+   * Factory-closure-wrapped `egressPolicyFactory` (auto-injects
+   * `approvalGate` and falls back allowlistSource to "session").
+   * Absent → the handler starts no session; V1 baseline unchanged.
    */
   effectiveEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined;
-  // 完整 opts 透传（lastReadLedger 等记录面在 runForegroundBash 内消费），
-  // 不拆散 —— 新增记录面时这里不再逐字段搬运。
+  // Pass opts through whole (recording surfaces like lastReadLedger are
+  // consumed inside runForegroundBash) — kept together so new recording
+  // surfaces don't require field-by-field plumbing here.
   toolOpts: CreateBashToolOptions | undefined;
   ctx?: ToolExecutionContext;
 }
 
 /**
- * 前台 bwrap fence 构造 —— 把 `bash -c finalCommand` + fs policy + env +
- * cwd + workspace mounts + 可选 egress spec 拼成一个 fence。
+ * Build the foreground bwrap fence — assembles `bash -c finalCommand` +
+ * fs policy + env + cwd + workspace mounts + optional egress spec into one
+ * fence.
  *
- * 抽离以控制 `runForegroundBash` 复杂度（S5 门）。workspaceMounts 与
- * egress 字段的填充规则见其注释；本函数仅做组装，不引入逻辑。
+ * Extracted to keep `runForegroundBash` complexity under the S5 gate.
+ * WorkspaceMounts and egress field population rules are documented at
+ * their sources; this function only composes, no logic.
  *
- * egress-ssh-bridge T1（ADR-0107 换装）：egress 在场时命令链前导
- * `spec.innerBridgeScript`（沙箱内自带 node 中继监听 127.0.0.1:3128 →
- * unix socket + trap 收尾，形态见
- * session.ts `buildInnerBridgeScript`）——代理 env 指到的是沙箱内这个监听，
- * 没有前导则整条缝只有宿主半场（O3）。无 egress = payload 逐字节不变
- * （byte-identical 回归基线，invariant 3「无缝 = 无桥」）。
+ * ADR-0107 relayout: when egress is present the command chain is prefixed
+ * with `spec.innerBridgeScript` (an in-sandbox node relay listening on
+ * 127.0.0.1:3128 → unix socket + trap cleanup; shape in session.ts
+ * `buildInnerBridgeScript`) — the proxy env points at this in-sandbox
+ * listener; without the prefix the seam would only have its host half.
+ * No egress = payload byte-identical (regression baseline: no seam = no
+ * bridge).
  */
 function buildForegroundFence(args: {
   readonly finalCommand: string;
@@ -369,10 +398,10 @@ function buildForegroundFence(args: {
     env: args.fenceEnv,
     cwd: args.waveRoot,
     ...(args.fenceIsReadonly ? { cwdReadonly: true } : {}),
-    // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(host root + 系统
-    // 前缀 + home ro-bind + 两处写白名单)的源端绝对路径。global 档下
-    // `fsPolicy.mode === "global"`,bwrap 内部自动不发射,与 V1 baseline
-    // 逐字节一致。
+    // ADR-0092: source paths for the workspace-mode fence layers (host
+    // root + system prefixes + home ro-bind + two write whitelists).
+    // Under global mode `fsPolicy.mode === "global"` and bwrap emits
+    // nothing, byte-identical to the V1 baseline.
     ...fenceWorkspaceMounts(
       args.fsMode,
       args.homeRoot,
@@ -382,8 +411,9 @@ function buildForegroundFence(args: {
     ...(args.egressSession !== undefined
       ? { egress: args.egressSession.spec }
       : {}),
-    // issue 1059:UNBOUND_FENCE 物理段 —— 入口冻结值直用,不重读 holder;
-    // pad=tmpDir 让 scratch 写继续可落(ADR 裁定点)。
+    // UNBOUND_FENCE physical segment — use the entry-frozen value, never
+    // re-read the holder; pad=tmpDir keeps scratch writes landing (the
+    // ADR's ruling point).
     ...(args.unboundMainCheckout !== undefined
       ? {
           unboundFence: {
@@ -396,14 +426,17 @@ function buildForegroundFence(args: {
 }
 
 /**
- * #406 T3:输出遮罩构造 —— handler return 前对 stdout / stderr 洗一遍。
+ * Output mask construction — scrub stdout / stderr once before
+ * the handler returns.
  *
- * mask 构造在每次调用内现取（registry 值可跨 turn 变化；不模块级
- * 缓存）。缺席 secretRegistry → 不构造 mask（plan 验收 #2；不扩展
- * 「缺席仍用 env 三源 mask」）。截断权威在 executor，mask 在 truncation
- * 之后跑 —— 遮的是已截断的真值，最大遮蔽窗口。
+ * The mask is built fresh inside each call (registry values can change
+ * across turns; no module-level caching). Absent secretRegistry → no mask
+ * is built (no "mask from the three env sources even when absent"
+ * extension). Truncation authority lies with the executor and the mask
+ * runs after truncation — it masks already-truncated real values, giving
+ * the maximum masking window.
  *
- * 独立成函数（S5 complexity 门）。
+ * Extracted (S5 complexity gate).
  */
 function buildOutputMask(
   opts: CreateBashToolOptions | undefined
@@ -415,11 +448,13 @@ function buildOutputMask(
 }
 
 /**
- * ADR-0084 / D1:前台 fence 完成后入账「恰好读了单文件」的成功命令。
+ * ADR-0084: after a foreground fence completes, record successful commands
+ * that "read exactly one file".
  *
- * 抽离以控制 `runForegroundBash` 复杂度（S5 门）。wrap 关系是「前台专用
- * 入口 → recordCompletedRead」：前台调用方只读一次 exit code 与 waveRoot
- * + tmpDir,薄层把它们传给既有 recordCompletedRead;不做额外逻辑。
+ * Extracted to control `runForegroundBash` complexity (S5 gate). This is
+ * just a foreground-only wrapper around recordCompletedRead: it reads the
+ * exit code, waveRoot and tmpDir once and passes them through — no extra
+ * logic.
  */
 async function recordForegroundRead(
   opts: CreateBashToolOptions | undefined,
@@ -440,13 +475,15 @@ async function recordForegroundRead(
 }
 
 /**
- * T5:违例 drain + egressStartError 检查 → typed failure / V1 ok 决策点。
- * 抽离以控制 `runForegroundBash` 复杂度(S5 门)。逻辑：
- *   - drain 非空或 startError 在场 → 拼 typed failure message 并抛
- *     `ToolExecutionError`;
- *   - 否则走 V1 ok 形状(assembleBashToolResult,byte-identical 于 T4 前)。
+ * Violation drain + egressStartError check → typed-failure / ok decision
+ * point. Extracted to control `runForegroundBash` complexity (S5 gate).
+ * Logic:
+ *   - non-empty drain or startError present → compose the typed failure
+ *     message and throw `ToolExecutionError`;
+ *   - otherwise keep the original ok shape (assembleBashToolResult,
+ *     byte-identical to before the typed-failure upgrade).
  *
- * 独立成函数(S5 complexity 门)。
+ * Standalone function (S5 complexity gate).
  */
 async function finalizeEgressPath(args: {
   readonly egressSession: EgressSession | undefined;
@@ -488,17 +525,19 @@ async function finalizeEgressPath(args: {
     });
     return { kind: "throw", throwError };
   }
-  // F4（egress-ssh-bridge §Failure paths）：egress 缝在场 + 命令非零退出 +
-  // stderr 命中 ssh 首次未见主机 key 形态 → 回灌 stderr 末行补一条宿主侧
-  // 指引（ssh-keyscan / UserKnownHostsFile 组合写法）。判定是文案面观测，
-  // 不改 exit 语义、不产 egress 违例；不命中 = byte-identical。
+  // When the egress seam is present + the command exits non-zero + stderr
+  // matches the ssh first-unseen-host-key shape → append one host-side
+  // guidance line to the stderr tail (ssh-keyscan / UserKnownHostsFile
+  // combo). This is a message-plane observation: it does not change exit
+  // semantics and produces no egress violation; no match = byte-identical.
   const f4Guidance =
     egressSession !== undefined && result.exitCode !== 0
       ? sshHostKeyFailureGuidance(result.stderr)
       : undefined;
-  // issue 1059:UNBOUND_FENCE 下 stderr 出现 EROFS → 回灌可行动文案(同 F4
-  // 走 ok-envelope stderr 旁路,不改 exit 语义、不进违例计数 ——
-  // categorizeResult 只认 execution_failed)。非 unbound 态 = 不发段。
+  // Under UNBOUND_FENCE, EROFS in stderr → feed back actionable guidance
+  // (same ok-envelope stderr bypass as the ssh-key hint above: no exit
+  // semantics change, no violation count — categorizeResult only knows
+  // execution_failed). Non-unbound state = no segment emitted.
   const erofsGuidance =
     unboundMainCheckout !== undefined && result.exitCode !== 0
       ? unboundFenceErofsGuidance(result.stderr)
@@ -517,24 +556,28 @@ async function finalizeEgressPath(args: {
 }
 
 /**
- * egress session per-call 装配 —— fence 装配前起 session；失败路径
- * （EgressRelayUnavailableError 等）→ 本次调用无 egress 缝（沙箱内无代理 env、
- * `--unshare-net` 照旧在，等同纯断网）+ 失败文案由调用方进 typed
- * failure 让模型/TUI 可见（T5 起不再走 stderr 旁路）。
+ * Per-call egress session assembly — start the session before fence
+ * assembly; on failure (EgressRelayUnavailableError etc.) this call runs
+ * with no egress seam (no proxy env inside the sandbox, `--unshare-net`
+ * still in place, i.e. plain isolation) + the failure text goes to the
+ * caller's typed failure so the model / TUI sees it (no stderr bypass).
  *
- * 透传 policyInput：调用方在 typed failure 阶段读
- * `policyInput.allowlistSource` 拼「当前允许集来源」标注。session 内部
- * 不持有 policy 的额外引用（已在 filter 闭包里），故由 caller 端缓存。
+ * policyInput is passed through: the caller reads
+ * `policyInput.allowlistSource` when composing the typed failure to label
+ * "current allowlist source". The session holds no extra policy reference
+ * (captured in its filter closure), hence the caller-side cache.
  *
- * typed-error catch 契约（code-quality.md）：先识别判别联合的具体类型，
- * 对 EgressRelayUnavailableError 这种携带 detail + remediationHint 的
- * typed 错误直接构造结构化 `startError`；未知错误走兜底形态但保留「unknown
- * cause」标注，避免 plain object 在 `String(err)` 下打成 `[object Object]`
- * 让 `kind` / `installHint` 全部不可见。`infraHint` 由 typed-error
- * 派生并透传给 composeEgressFailure，让 typed failure message 渲染出
- * 「装哪个 + 怎么装」（spec §三类信号 + SC13 验收）。
+ * Typed-error catch contract (code-quality.md): discriminate the concrete
+ * type first. EgressRelayUnavailableError carries detail +
+ * remediationHint (this product's dependency guidance, ADR-0107), so build
+ * a structured `startError` directly; unknown errors take the fallback
+ * shape but keep the "unknown cause" marker, so a plain object never
+ * renders as `[object Object]` under `String(err)` and hides `kind` /
+ * `installHint`. `infraHint` is derived from the typed error and passed to
+ * composeEgressFailure so the typed failure message spells out "which
+ * dependency is missing + how to install it".
  *
- * 独立成函数（S5 complexity 门）。
+ * Standalone function (S5 complexity gate).
  */
 async function startEgressSessionForCall(
   egressPolicyFactory: (() => EgressPolicyInput | undefined) | undefined,
@@ -548,26 +591,29 @@ async function startEgressSessionForCall(
   const policyInput = egressPolicyFactory?.();
   if (policyInput === undefined) return {};
   try {
-    // fail-closed 语义由 session 内部保证；这里只捕获启动失败 → 无缝 + 留痕。
+    // fail-closed semantics live inside the session; here we only catch
+    // startup failure → no seam + leave a trace.
     const session = await createEgressSessionFn({ policy: policyInput });
     return { session, policyInput };
   } catch (err) {
     if (err instanceof EgressRelayUnavailableError) {
-      // typed-error 分支：EgressRelayUnavailableError 携带 detail +
-      // remediationHint（本产品依赖指引，ADR-0107），用 err.message 作
-      // 结构化 startError；透传给 composeEgressFailure →
-      // renderEgressFailureMessage，让 typed failure message 里出现
-      // 「缺哪个产品依赖 + 怎么修」(SC13 验收 + typed-error catch 契约)。
+      // Typed branch: EgressRelayUnavailableError carries detail +
+      // remediationHint (product dependency guidance, ADR-0107); use
+      // err.message as the structured startError and pass it through
+      // composeEgressFailure → renderEgressFailureMessage, so the typed
+      // failure message shows "which product dependency is missing + how
+      // to fix it" (typed-error catch contract).
       return {
         startError: err.message,
         infraHint: err.message,
         policyInput,
       };
     }
-    // 兜底：未知错误保留 unknown cause 标注,不让 caller 把 plain object
-    // 当 [object Object] 渲染(code-quality.md typed-error catch 契约)。
-    // 把 err.message / String(err) 兜底放进 startError 时**显式标注**
-    // unknown cause 防止与 typed 路径混淆。
+    // Fallback: for unknown errors keep the "unknown cause" marker so the
+    // caller never renders a plain object as [object Object] (code-quality
+    // typed-error catch contract). Putting err.message / String(err) into
+    // startError is **explicitly labeled** unknown-cause to avoid confusion
+    // with the typed path.
     const fallback = err instanceof Error ? err.message : String(err);
     return {
       startError: `egress seam unavailable (unknown cause): ${fallback}`,
@@ -578,20 +624,25 @@ async function startEgressSessionForCall(
 }
 
 /**
- * 拼 typed failure message —— drain 非空或 egressStartError 在场时调用。
+ * Compose the typed failure message — called when the drain is non-empty
+ * or egressStartError is present.
  *
- * - drain 非空：走 `renderEgressFailureMessage`（typed failure 文案，含
- *   `[network_denied]` 前缀 + 每条一行 + 共享补配指引 + 「命令已跑完」
- *   语义；infra / 域判定绝不混排同一段）。
- * - egressStartError 在场且 drain 空：把中继依赖缺失/装配失败文案拼成
- *   typed failure（带 `[network_denied]` 前缀 + 「egress seam unavailable」
- *   语义），同时合成一条 `infra-unavailable` violation 走同一渲染管线，
- *   文案一致性归一。**不**给配置键指引（infra ≠ 域判定拒绝）。
+ * - Non-empty drain: render via `renderEgressFailureMessage` (typed
+ *   failure text with the `[network_denied]` prefix + one line per
+ *   violation + shared remediation guidance + the "command already ran"
+ *   semantics; infra vs domain-denial messages are never mixed in one
+ *   section).
+ * - egressStartError present with an empty drain: fold the
+ *   relay-dependency-missing / assembly-failure text into a typed failure
+ *   (`[network_denied]` prefix + "egress seam unavailable" semantics) and
+ *   synthesize an `infra-unavailable` violation through the same render
+ *   pipeline for message consistency. **No** config-key guidance
+ *   (infra ≠ domain-denial refusal).
  *
- * 返回 `ToolExecutionError`（typed），抛给 executor 走
- * `buildFailureResult` → `execution_failed`。
+ * Returns a typed `ToolExecutionError`, thrown to the executor's
+ * `buildFailureResult` → `execution_failed` path.
  *
- * 独立成函数（S5 complexity 门）。
+ * Standalone function (S5 complexity gate).
  */
 function composeEgressFailure(args: {
   readonly violations: readonly EgressViolation[];
@@ -600,8 +651,9 @@ function composeEgressFailure(args: {
   readonly allowlistSource?: EgressPolicyInput["allowlistSource"];
 }): ToolExecutionError {
   const { violations, startError, infraHint, allowlistSource } = args;
-  // startError 在场但 drain 空 → 合成 infra-unavailable violation，让
-  // 渲染管线统一处理（文案一致 + infra/域判定分离逻辑自动套用）。
+  // startError present but drain empty → synthesize an infra-unavailable
+  // violation so the render pipeline handles it uniformly (consistent text
+  // + the infra/domain separation logic applies automatically).
   const effectiveViolations: EgressViolation[] =
     violations.length > 0
       ? [...violations]
@@ -625,9 +677,10 @@ function composeEgressFailure(args: {
 }
 
 /**
- * runInSandbox + per-call egress session finally 释放——与正常路径同一
- * 通道（spec §Ownership / dispose contract 钉死的「异常路径与正常路径
- * 同一释放通道」）。dispose 幂等，重复调用安全。独立成函数（S5 门）。
+ * runInSandbox + per-call egress session release in `finally` — exception
+ * and normal paths share one release channel (the pinned ownership /
+ * dispose contract). dispose is idempotent, repeat calls are safe.
+ * Standalone function (S5 gate).
  */
 async function runSandboxDisposingEgress(
   runArgs: Parameters<typeof runInSandbox>[0],
@@ -640,18 +693,21 @@ async function runSandboxDisposingEgress(
       try {
         await egressSession.dispose();
       } catch {
-        // best-effort:dispose 异常不污染主调用方控制流。
+        // best-effort: a dispose error must not pollute the caller's
+        // control flow.
       }
     }
   }
 }
 
 /**
- * 组装 bash tool 返回形状 —— {code, stdout, stderr} JSON + meta 旁路。
+ * Assemble the bash tool return shape — {code, stdout, stderr} JSON + a
+ * meta side channel.
  *
- * T5 收紧：违例 / egressStartError 不再进 stderr 旁路（已转 typed failure
- * 在更上游抛走）。本函数现在只承载 V1 ok 形状 —— 与 T4 前的 byte-identical
- * 路径在同一分支。独立成函数（S5 门）。
+ * Since violations / egressStartError moved upstream into typed failure
+ * (no more stderr bypass), this function now carries only the ok shape —
+ * the byte-identical pre-upgrade path lives in this same branch.
+ * Standalone function (S5 gate).
  */
 function assembleBashToolResult(
   result: Awaited<ReturnType<typeof runInSandbox>>,
@@ -665,9 +721,10 @@ function assembleBashToolResult(
       stdout,
       stderr,
     }),
-    // #693 T4 D4:bash stdout/stderr 走观测旁路(meta),TUI 从旁路取数显示
-    // 5 行尾部预览（不经 encodeToolResults 进模型 tool_result，模型视野
-    // 仅见 output 字段里 JSON 化的 code/stdout/stderr —— 形状不变）。
+    // bash stdout/stderr take the observation side channel (meta); the TUI
+    // reads it for the 5-line tail preview (bypassing encodeToolResults
+    // into the model tool_result — the model only sees the JSON-ized
+    // code/stdout/stderr in the output field — shape unchanged).
     meta: {
       stdout,
       stderr,
@@ -680,29 +737,34 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   requireBwrap();
-  // ADR-0092 (D3): 工厂期只捕获 `tmpDir`（process-stable）。fsPolicy 由
-  // handler per-call 重建,不闭包到工厂捕获的 cwd。
+  // ADR-0092: the factory captures only `tmpDir` (process-stable). fsPolicy
+  // is rebuilt per call by the handler, never closed over the factory cwd.
   let fallbackFenceTmp: string | undefined;
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  // T6:首次域名批准流的会话级门件 —— 工厂闭包期构造一次,跨调用共享同一
-  // allowed/denied 集 + in-flight 合并表。askApproval 缺席 → 门件内部
-  // 走 fail-closed(spec §Failure paths「非交互入口首见新域名」),任何
-  // 首次见到的新 host 直接 deny,违例 reason `no-approval-inlet`。
-  // 注意:即便 gate 在场,「批准后是否落到持久层 settings」留 TODO(ADR-
-  // 0097 §批准持久化粒度 写回 API 若有则调用,本任务未做)。
+  // First-seen domain approval: session-level gate built once in the
+  // factory closure, shared across calls (allowed/denied sets + in-flight
+  // merge table). askApproval absent → the gate internally fails closed:
+  // any first-seen host is denied outright with violation reason
+  // `no-approval-inlet`. Note: even with the gate present, whether an
+  // approval persists back to settings is left TODO (call the write-back
+  // API when ADR-0097's approval-persistence-granularity offers one; not
+  // done here).
   const approvalGate: EgressApprovalGate | undefined =
     opts?.askApproval !== undefined
       ? createEgressApprovalGate({ askApproval: opts.askApproval })
       : undefined;
-  // 包装 egressPolicyFactory —— 每调用返回的 policy 都会注入
-  // `approvalGate`(若 gate 在场)。把 gate 注入放在 bash 工厂侧而不是
-  // 调用面,保证「egressPolicyFactory 提供数据、bash 工厂注入门件」的关
-  // 注点分离,egress 域不反向依赖 permission AskUser 装配。
-  // 「session 档生产者」（spec egress-preset-allowlist T2 钉死表）：装配面
-  // 只产 builtin / persisted 两档；caller 未显式设 allowlistSource 且交互
-  // 批准面（approvalGate）在场时，包装层补 "session" 档 —— 批准流颁发的
-  // 会话级放行，渲染「Current allowlist source: session-level allowlist」。
-  // caller 已设档时不覆盖。
+  // Wrap egressPolicyFactory — every policy returned per call gets
+  // `approvalGate` injected. Keeping gate injection on the bash factory
+  // side (not the caller's) preserves separation of concerns: the factory
+  // provides data, the bash factory attaches the gate; the egress domain
+  // never back-depends on permission's AskUser assembly.
+  // "session-tier producer" (pinned by the egress-preset-allowlist spec):
+  // the assembly side only produces builtin / persisted tiers; when the
+  // caller left allowlistSource unset and the interactive approval surface
+  // (approvalGate) is present, the wrapper fills in "session" — the
+  // session-level allow granted by the approval flow, rendered as
+  // "Current allowlist source: session-level allowlist". A caller-set
+  // tier is never overwritten.
   const wrappedEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined =
     opts?.egressPolicyFactory !== undefined
@@ -714,8 +776,9 @@ export function createBashTool(
           return { ...pi, allowlistSource: "session" as const };
         }
       : undefined;
-  // 同一份 gate 也注入到 policy(由 session 装配期 filter 消费)。再次折
-  // 射:在 policy 上 attach gate,egress 域按 host 决策。
+  // The same gate is also attached to the policy (consumed by the session
+  // assembly's filter): re-project — attach the gate onto the policy so the
+  // egress domain decides per host.
   const effectiveEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined =
     wrappedEgressPolicyFactory !== undefined && approvalGate !== undefined
@@ -736,10 +799,11 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: dangerous command rejected: ${command}`
       );
-    // #562 T4:bashMode="readonly" → enforce read-only command policy.
-    // 缺省 ("any") → 此分支不进入，handler 逐字节不变（V1 回归基线）。
-    // validateReadonlyCommand 抛 ReadonlyViolationError（extends
-    // ToolExecutionError），executor 经既有 ToolExecutionError 路径捕获。
+    // bashMode="readonly" → enforce the read-only command policy.
+    // Default ("any") → this branch never runs, handler byte-unchanged
+    // (regression baseline). validateReadonlyCommand throws
+    // ReadonlyViolationError (extends ToolExecutionError), caught by the
+    // executor's existing ToolExecutionError path.
     if (opts?.bashMode === "readonly") {
       validateReadonlyCommand(command);
     }
@@ -747,16 +811,20 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
       );
-    // T7 (D2): per-handler batch snapshot. cell 在入口读一次冻结为 waveRoot,
-    // 贯穿整条路径（前台 fence / background spawn 拿同一份）—— handler 内
-    // 后续 cell 翻转不渗透进本次调用。liveTaskRoot 缺席 → 退到工厂捕获 cwd
-    // （legacy parity:无 cell 时 byte-identical 于 V1）。
+    // Batch snapshot per handler call: read the cell once at entry and
+    // freeze it as waveRoot, threading through the whole path (foreground
+    // fence / background spawn get the same value) — later cell flips
+    // inside the handler cannot leak into this call. liveTaskRoot absent →
+    // fall back to the factory-captured cwd (legacy parity: without a cell
+    // the path is byte-identical to V1).
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
-    // issue 1059:UNBOUND_FENCE 判定与 waveRoot 同 vintage,在 handler 入口
-    // 读活 holder 一次冻结 —— 前台 fence / 后台 spawn / EROFS 回灌共用同一
-    // 份,handler 内 holder 翻转不渗透进本次调用(D2 纪律,同 fsMode 快照)。
+    // The UNBOUND_FENCE decision shares waveRoot's vintage: read the live
+    // holder once at entry and freeze — foreground fence / background
+    // spawn / EROFS feedback all use this single snapshot; a mid-handler
+    // holder flip cannot leak into this call (same snapshot discipline as
+    // fsMode).
     const unboundMainCheckout = unboundFenceMainCheckout({
       gateOn: opts?.worktreeOnMutate?.get() === true,
       root: waveRoot,
@@ -768,21 +836,25 @@ export function createBashTool(
       }
       return fallbackFenceTmp;
     });
-    // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
-    // 都先执行同一闸门（background 不豁免安全检查）。
+    // Only after the validation chain passes do we choose foreground /
+    // background — dangerous-command and sensitive-path gates run on both
+    // sides first (background does not bypass security checks).
     if ((input as BashInput | null)?.background === true) {
-      // ADR-0097:background spawn 与前台共用同一 fence 构造缝(沙箱纪律 G3):
-      // `--unshare-net` 恒在,出网能力同样只经 egress 缝。
-      // #502 review-repair（#406 roundtrip）:recordCommand 传原始占位符形态
-      // input.command（占位符落盘）,command 传还原后真值（spawn 执行用,不上盘）。
+      // ADR-0097: the background spawn shares the foreground fence
+      // construction seam (sandbox discipline G3): `--unshare-net` is
+      // always present; egress likewise only via the egress seam.
+      // Secret roundtrip: recordCommand keeps the original placeholder-form
+      // input.command (placeholders land on disk); command carries the
+      // restored real value (used for spawn, never persisted).
       const bgCommand = opts?.secretRegistry
         ? restore(command, opts.secretRegistry)
         : command;
-      // T7 (D2): background path 与 foreground path 共用同一份 waveRoot。
-      // handleBackground 把 waveRoot 转给 manager.spawn → defaultBackgroundSpawn
-      // 内的 createFsPolicy / createBwrapFence 也围绕 waveRoot 构造 fence。
-      // ADR-0092 Round 2:fence snapshot (已冻结) 透传 BackgroundSpawnRequest
-      // —— 前台 / 后台 fence 在 fs 档轴上集合相等（沙箱纪律 G3）。
+      // The background path shares the same waveRoot as the foreground
+      // path: handleBackground passes waveRoot to manager.spawn →
+      // defaultBackgroundSpawn builds its createFsPolicy / createBwrapFence
+      // around the same root. ADR-0092: the already-frozen fence snapshot
+      // is forwarded via BackgroundSpawnRequest — foreground and background
+      // fence sets are equal on the fs-mode axis (sandbox discipline G3).
       return await handleBackground(
         {
           finalCommand: bgCommand,
@@ -795,10 +867,12 @@ export function createBashTool(
         effectiveEgressPolicyFactory
       );
     }
-    // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
-    // bashMode→cwdReadonly 映射由 T6 在此装配完成 (registry 只透传 bashMode,
-    // 不读 catalog)。cwdReadonly 显式 true / bashMode==="readonly" 任一即触发。
-    // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
+    // bashMode="readonly" derives cwdReadonly:true for the fence + env.
+    // The bashMode→cwdReadonly mapping is assembled here (the registry
+    // only passes bashMode through and does not read the catalog). Either
+    // an explicit cwdReadonly true or bashMode==="readonly" triggers it.
+    // Default "any" / undefined → no cwdReadonly passed, argv baseline
+    // unbroken.
     const fenceIsReadonly =
       opts?.cwdReadonly === true || opts?.bashMode === "readonly";
     const fenceEnv = {
@@ -810,16 +884,19 @@ export function createBashTool(
       // `/tmp` is never bound to it, so `$TMPDIR` names the real path.
       TMPDIR: tmpDir,
     };
-    // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
-    // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
-    // 见还原后的命令，只看到 bash 输出的 stdout。
+    // Restore placeholders before building the fence — the restored command
+    // is the text actually spawned into bwrap. The original command (with
+    // placeholders) is the only form seen in tool-call records / model
+    // context; the model never sees the restored command, only the bash
+    // stdout output.
     const finalCommand = opts?.secretRegistry
       ? restore(command, opts.secretRegistry)
       : command;
-    // T7 (D4): fsPolicy per-call rebuild —— `tmpDir` 工厂期冻结,只有 cwd
-    // 维度跟 waveRoot 联动。Round 2:policy 携带 fs 档(mode 字段),bwrap 据
-    // 此在工作区档 argv 叠三层(ADR-0092 Amendment)。handler 入口 fsMode
-    // 已 D2 snapshot,此处直接消费。
+    // fsPolicy per-call rebuild — `tmpDir` is frozen at factory time, only
+    // the cwd axis follows waveRoot. The policy carries the fs mode (mode
+    // field) so bwrap can stack the three workspace-mode layers (ADR-0092).
+    // fsMode was already snapshotted at handler entry; consumed directly
+    // here.
     const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
     return runForegroundBash({
       finalCommand,
@@ -866,13 +943,16 @@ export function createBashTool(
 }
 
 /**
- * background 分支的逐调用输入(#406 roundtrip secret 还原契约):
- * `recordCommand` 是原始占位符形态(registry json 落盘用);`finalCommand`
- * 是还原后真值(只活在 spawn 调用栈,沙箱执行拿真值,不上盘);`cwd` 是
- * handler 入口冻结的 waveRoot(与前台 fence 同源)。
+ * Per-call inputs of the background branch (secret-roundtrip contract):
+ * `recordCommand` is the original placeholder form (for registry JSON on
+ * disk); `finalCommand` is the restored real value (lives only in the
+ * spawn call stack — the sandbox executes it, never persisted); `cwd` is
+ * the waveRoot frozen at handler entry (same source as the foreground
+ * fence).
  *
- * ADR-0097:网络轴在前后台都是常量 —— fence 恒含 `--unshare-net`,出网
- * 只经 egress 缝,`BackgroundSpawnRequest` 无网络字段。
+ * ADR-0097: the network axis is constant across foreground and background
+ * — the fence always contains `--unshare-net`, egress only via the seam,
+ * and `BackgroundSpawnRequest` has no network field.
  */
 interface BackgroundSpawnInput {
   readonly finalCommand: string;
@@ -881,32 +961,35 @@ interface BackgroundSpawnInput {
 }
 
 /**
- * #502 T3:background 分支 —— 经 backgroundManager.spawn 起 detached 子进程后
- * 立即返回 {task_id, log_path}。不 await 子进程退出、不经 runInSandbox（无 fence
- * 二次构造）。
+ * Background branch — manager.spawn starts a detached child and returns
+ * {task_id, log_path} immediately. No await on child exit, no runInSandbox
+ * (no second fence construction).
  *
- * #502 T5:ctx.conversationId 透传 spawn request —— 进程由哪个 session 启的就
- * 标哪个 conversationId，bash_output / bash_stop 后续按同字段做 scope 过滤。
- * ctx 缺省 → 记录里 conversation_id 落空串 → 不过滤（向后兼容，与 ADR-0021 D1.4
- * 对齐）。
+ * ctx.conversationId is forwarded in the spawn request — the session that
+ * started the process owns the label, and bash_output / bash_stop later
+ * scope-filter on the same field. Missing ctx → conversation_id lands as
+ * empty string in the record → no filtering (backward compatible, aligned
+ * with ADR-0021).
  *
- * fence 输入(holder 档位 / homeRoot / tmpDir)取自 handler 入口的
- * `FenceSnapshot`,不在本函数内重读 cell 或 holder。
+ * Fence inputs (holder mode / homeRoot / tmpDir) come from the handler
+ * entry's `FenceSnapshot`; this function never re-reads the cell or holder.
  */
 async function handleBackground(
   input: BackgroundSpawnInput,
   opts: CreateBashToolOptions,
   ctx: ToolExecutionContext | undefined,
   { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout }: FenceSnapshot,
-  /** ADR-0097 / T7:per-call egress policy —— closure-derived,已注入
-   *  approvalGate。manager.spawn 在装配期起 session,缺省 = 无缝。 */
+  /** ADR-0097: per-call egress policy — closure-derived, approvalGate
+   *  already injected. manager.spawn starts the session during assembly;
+   *  absent = no seam. */
   effectiveEgressPolicyFactory?:
     (() => EgressPolicyInput | undefined) | undefined
 ): Promise<{
   task_id: string;
   log_path: string;
-  /** issue 1059 (M1):仅 UNBOUND_FENCE 态在场——后台 stderr 不上回执,
-   *  物理只读态在 spawn 时预披露;bound / gate OFF 形状 byte-identical。 */
+  /** Present only in the UNBOUND_FENCE state — background stderr has no
+   *  receipt channel, so the read-only physical state is pre-disclosed at
+   *  spawn; bound / gate-OFF shapes are byte-identical. */
   notice?: string;
 }> {
   const manager = opts.backgroundManager;
@@ -923,32 +1006,36 @@ async function handleBackground(
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),
-    // #653 T1:background path 的 cwdReadonly 派生 —— 镜像前台
-    // bashMode→cwdReadonly 映射(bash.ts fenceIsReadonly),foreground 与
-    // background bwrap argv / fence env 在 cwdReadonly 轴上集合相等。
-    // GIT_OPTIONAL_LOCKS 在 defaultBackgroundSpawn 于 filter 之后注入
-    // (freeze-safe);此处只透传旗标,不改 env(whitelist 会剥掉该键)。
+    // Background path derives cwdReadonly — mirroring the foreground
+    // bashMode→cwdReadonly mapping (bash.ts fenceIsReadonly) so foreground
+    // and background bwrap argv / fence env are set-equal on the
+    // cwdReadonly axis. GIT_OPTIONAL_LOCKS is injected in
+    // defaultBackgroundSpawn after the filter (freeze-safe); here we only
+    // pass the flag, not the env (the whitelist would strip that key).
     ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
       ? { cwdReadonly: true }
       : {}),
     tmpDir,
-    // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(前台与后台集合
-    // 相等,沙箱纪律 G3)。fsMode 是已 snapshot 字符串;homeRoot / tmpDir
-    // 由前台 handler 同款闭合传递(同源值,不重读 cell)。
+    // ADR-0092: workspace-mode fence three layers (foreground and
+    // background set-equal, sandbox discipline G3). fsMode is the already
+    // snapshotted string; homeRoot / tmpDir are passed by the same closure
+    // as the foreground handler (same-source values, no re-reading).
     fsMode,
     homeRoot,
-    // ADR-0097 / T7:egress 缝 —— policy 由 caller(registry 装配期)
-    // 注入(经 `effectiveEgressPolicyFactory` 派生,已注入 approvalGate)。
-    // manager.spawn 在 spawn 装配期起 session,缺省 = caller 未透传
-    // policy = 无缝(V1 baseline 等价)。后台路径无 ask 面 —— 即便
-    // policy 在场,filter 见未在 `allowedDomains` 的 host 仍记
-    // `no-approval-inlet` 违例(spec §Failure paths「非交互入口首见
-    // 新域名」)。
+    // ADR-0097: egress seam — policy injected by the caller (registry
+    // assembly, derived via `effectiveEgressPolicyFactory`, approvalGate
+    // already attached). manager.spawn starts the session during spawn
+    // assembly; absent = caller passed no policy = no seam (V1 baseline
+    // equivalent). The background path has no ask surface — even with a
+    // policy present, the filter records a `no-approval-inlet` violation
+    // for hosts not in `allowedDomains` (fail-closed for non-interactive
+    // entries).
     ...(effectiveEgressPolicyFactory !== undefined
       ? { egressPolicy: effectiveEgressPolicyFactory() }
       : {}),
-    // issue 1059:UNBOUND_FENCE 入口冻结值透传给后台 fence(前台/后台在
-    // 此轴上集合相等,G3 纪律),tmpPad 与前台同源 = tmpDir。
+    // UNBOUND_FENCE entry-frozen value forwarded to the background fence
+    // (foreground/background set-equal on this axis, G3 discipline);
+    // tmpPad shares the foreground source = tmpDir.
     ...(unboundMainCheckout !== undefined
       ? {
           unboundFence: {
@@ -959,11 +1046,13 @@ async function handleBackground(
       : {}),
   });
   if (result.status === "spawn_error") {
-    // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
-    // ToolExecutionError。caller catch 契约不会被 [object Object] 污染。
-    // concurrency_limit_reached 携带正面措辞 message（ADR-0021 D1.6:说明
-    // 现状+可用动作+零负面词），用 message 替代 context 让模型看到可执行
-    // 的后续动作；其它 kind 仍走 context 字节一致。
+    // Consistent with bash's existing error shape: render the typed error
+    // (${kind}: ${context}) into a ToolExecutionError so the caller's
+    // catch contract is never polluted by [object Object].
+    // concurrency_limit_reached carries a positively-worded message
+    // (ADR-0021: current state + available actions + zero negative
+    // wording); use message instead of context so the model sees an
+    // actionable next step; other kinds keep the byte-identical context.
     const detail =
       "message" in result.error && result.error.message
         ? result.error.message
@@ -982,11 +1071,15 @@ async function handleBackground(
 }
 
 /**
- * ADR-0084 / D1 的入账调用口（判定链在这里，handler 只转交）。
+ * ADR-0084: the recording entry point (decision chain lives here; the
+ * handler only forwards).
  *
- * `exitCode !== 0` → 什么都没读到，不入账。提取器只认「恰好一个顶层段 +
- * 无重定向/替换 + 白名单命令 + 恰好一个文件操作数」，抽不出 path 一律不入账
- * （fail-closed）：漏记只让模型多读一次，错记会让未读的非空文件被放行。
+ * `exitCode !== 0` → nothing was read, no recording. The extractor only
+ * accepts "exactly one top-level segment + no redirection/substitution +
+ * whitelisted command + exactly one file operand"; anything without an
+ * extractable path is not recorded (fail-closed): a missed entry merely
+ * costs the model one extra read, a wrong one would let an unread non-empty
+ * file be overwritten.
  */
 async function recordCompletedRead(
   opts: CreateBashToolOptions | undefined,
@@ -998,7 +1091,7 @@ async function recordCompletedRead(
     readonly sessionTmpRoot: string;
   }
 ): Promise<void> {
-  // EXIT: 命令失败（exit != 0）→ 什么都没读到，不入账。
+  // EXIT: command failed (exit != 0) → nothing was read, no recording.
   if (call.exitCode !== 0) return;
   await recordSingleReadCommand(opts?.lastReadLedger, ctx, call.command, {
     root: call.root,
@@ -1007,12 +1100,16 @@ async function recordCompletedRead(
 }
 
 /**
- * ADR-0084 / D1:把「恰好读了一个文件」的成功命令登记进 last-read 账本。
+ * ADR-0084: register a successful "read exactly one file" command into the
+ * last-read ledger.
  *
- * 提取器（`extractSingleReadPath`）只做字面量判定，path 解析在本函数完成 ——
- * 与 write_file 侧的 `resolveWithinRoot(rootAtCall, …)` 同一口径，这样账本键
- * 与写入侧 target 才可能相等。解析失败（越界 / 不存在的 path 形态）→ 静默
- * 跳过：账本只影响「能不能覆盖非空文件」这一个闸，不该让读命令多出一个失败面。
+ * The extractor (`extractSingleReadPath`) does literal-shape matching only;
+ * path resolution happens here — same convention as write_file's
+ * `resolveWithinRoot(rootAtCall, …)`, so that the ledger key and the
+ * write-side target can actually be equal. Resolution failure (out-of-root
+ * / nonexistent path shape) → silently skipped: the ledger gates only
+ * "can a non-empty file be overwritten"; a read command must not gain a
+ * new failure surface from it.
  */
 async function recordSingleReadCommand(
   host: LastReadLedgerHost | undefined,
@@ -1020,11 +1117,13 @@ async function recordSingleReadCommand(
   command: string,
   resolveCtx: { readonly root: string; readonly sessionTmpRoot: string }
 ): Promise<void> {
-  // EXIT: host 缺席（legacy 调用方）或无 conversationId（不建匿名桶）→ 不入账。
+  // EXIT: host absent (legacy caller) or no conversationId (no anonymous
+  // bucket) → no recording.
   const ledger = host?.ledgerFor(ctx?.conversationId);
   if (ledger === undefined) return;
-  // EXIT: 非「唯一单文件读」形态（管道 / 重定向 / 抑制输出旗标 / 原地改 /
-  // 递归 / 多文件 / 非白名单）→ 不入账（fail-closed）。
+  // EXIT: not the "unique single-file read" shape (pipe / redirect /
+  // output-suppressing flag / in-place edit / recursive / multi-file /
+  // non-whitelisted) → no recording (fail-closed).
   const candidate = extractSingleReadPath(command);
   if (candidate === undefined) return;
   let resolved: string;
@@ -1033,8 +1132,9 @@ async function recordSingleReadCommand(
       sessionTmpRoot: resolveCtx.sessionTmpRoot,
     });
   } catch {
-    // EXIT: path 解析失败（越界 / 不存在形态）→ 静默跳过；账本只影响非空
-    // 覆写这一个闸，不该让读命令多出一个失败面。
+    // EXIT: path resolution failed (out-of-root / nonexistent shape) →
+    // silently skip; the ledger gates only the non-empty-overwrite check,
+    // a read command must not gain a new failure surface from it.
     return;
   }
   ledger.record(resolved);

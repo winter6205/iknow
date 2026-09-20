@@ -1,6 +1,6 @@
-// 依赖单向 (sandbox 基础层 ← verify 消费层): truncateByCodePoint 经
-// sandbox 出口 re-export (T2 runner 迁移), 不从 ACI 装饰层拉取 ——
-// 避免 verify → ACI 反向依赖 (spec Project Structure / ACR 裁决)。
+// One-way dependency (sandbox base layer ← verify consumer layer):
+// truncateByCodePoint is consumed via the sandbox re-export, never pulled from
+// the ACI decoration layer — avoids a reverse verify → ACI dependency.
 import { truncateByCodePoint } from "../sandbox/index.js";
 import type { EvidenceContext } from "./types.js";
 
@@ -65,39 +65,45 @@ export function buildValidationEnvelope(
 }
 
 /**
- * #128 verify 分类器失败信封构造器 (spec A8)。
+ * Envelope builder for classifier-reported failures (distinct from the
+ * command-path envelope).
  *
- * 与命令路径信封区别: 不携带 command / exit_code / failed_count / signature
- * (那些是命令路径字段, 分类器不掌握); 改带 task + reason + missing[]。
+ * Unlike the command envelope it carries no command / exit_code / failed_count /
+ * signature (command-path fields the judge does not know); instead: task +
+ * reason + missing[].
  *
- * 形态契约:
+ * Shape contract:
  *   [VALIDATION FAILED] attempt=N/M verdict=true-failure source=classifier
  *   task: <goal.text>
  *   missing: ["...", "..."]
  *   reason: <judge one-line>
  *   Fix the failures above. Do not claim completion until validation passes.
  *
- * task 内部换行折叠为单空格 —— 保持信封 fixed-shape (A8: 每个字段恰一行,
- * 多行 task 不得破坏字段解析)。reason 在 reason 字段位置走 truncateExcerpt
- * (DRY, 对齐 ADR-0006 精神)。
+ * Newlines inside task collapse to a single space — the envelope stays
+ * fixed-shape (one line per field; a multi-line task must not break field
+ * parsing). The reason value goes through truncateExcerpt at its field
+ *
+ // (ADR-0006)
+ * position (DRY).
  */
 export interface BuildClassifierEnvelopeArgs {
   readonly round: number;
   readonly maxRounds: number;
-  /** The session.goal.text (or query fallback per #408) — what the judge evaluated. */
+  /** The session.goal.text (or query fallback) — what the judge evaluated. */
   readonly task: string;
   /** Judge-listed missing items (fail variant). Rendered as JSON-ish array. */
   readonly missing: readonly string[];
-  /** Judge's one-line 立论. Truncated via truncateExcerpt. */
+  /** Judge's one-line rationale. Truncated via truncateExcerpt. */
   readonly reason: string;
   /** Code-point cap for the reason value. Defaults to DEFAULT_MAX_CHARS. */
   readonly maxChars?: number;
   /**
-   * #449b B6: 证据体检单 (G5-3 决议术语)。缺席 → 信封逐字节不变 (Postel 既有
-   * 契约冻结, SC10 回归锚)。在场 → 在 missing/reason 段后、固定指令前插入
-   * `evidence_context:` 段 (checker_verdict / reasons / executed_commands /
-   * rerun_attempted / evidence_summary 五行 + evidenceSummary 多行块),
-   * evidenceSummary 走 truncateExcerpt(DEFAULT_MAX_CHARS)。
+   * Evidence report card. Absent → envelope bytes unchanged (frozen Postel
+   * contract, regression anchor). Present → an `evidence_context:` block is
+   * inserted after the missing/reason fields and before the fixed instruction
+   * (five lines: checker_verdict / reasons / executed_commands /
+   * rerun_attempted / evidence_summary, plus the multi-line summary block);
+   * evidenceSummary goes through truncateExcerpt(DEFAULT_MAX_CHARS).
    */
   readonly evidenceContext?: EvidenceContext;
 }
@@ -110,12 +116,13 @@ export function buildClassifierEnvelope(
     args.maxChars ?? DEFAULT_MAX_CHARS
   );
 
-  // spec Code Style: missing 渲染为 JSON-ish 字符串数组; 空数组渲染 "[]"。
-  // 顺序按上游给定顺序保留 (verifier test pins order).
+  // missing renders as a JSON-ish string array; empty renders as "[]".
+  // Upstream order is preserved (tests pin it).
   const missingJson = `[${args.missing.map((m) => JSON.stringify(m)).join(", ")}]`;
 
-  // task 内部行终止符 (CR/LF/U+2028/U+2029) 折叠为单空格: 保持信封 fixed-shape,
-  // 多行 goal.text 不产生额外字段行。
+  // Collapse task line terminators (CR/LF/U+2028/U+2029) to single spaces:
+  // the envelope keeps its fixed shape — a multi-line goal.text must not
+  // produce extra field lines.
   const taskLine = args.task.replace(/\r\n|[\r\n\u2028\u2029]/g, " ");
 
   const fields: string[] = [
@@ -127,13 +134,14 @@ export function buildClassifierEnvelope(
 
   const head = fields.join("\n");
 
-  // B6: evidenceContext 缺席 → 既有信封字节相等 (Postel 冻结既有契约, SC10)。
+  // No evidenceContext → envelope bytes identical to the frozen legacy shape.
   if (args.evidenceContext === undefined) {
     return `${head}\n${VALIDATION_FIXED_INSTRUCTION}\n`;
   }
 
-  // B6: evidenceContext 在场 → 在 missing/reason 之后、固定指令之前插入
-  // evidence_context 段。evidenceSummary 走 truncateExcerpt(B1 OQ2 = 20000)。
+  // evidenceContext present → insert the evidence_context block after
+  // missing/reason and before the fixed instruction. evidenceSummary goes
+  // through truncateExcerpt(DEFAULT_MAX_CHARS).
   const ctx = args.evidenceContext;
   const summaryCap = args.maxChars ?? DEFAULT_MAX_CHARS;
   const truncatedSummary = truncateExcerpt(ctx.evidenceSummary, summaryCap);
@@ -151,16 +159,19 @@ export function buildClassifierEnvelope(
     truncatedSummary,
   ].join("\n");
 
-  // evidence_summary 是多行块 (每 run 一行); summary 自身若以 \n 结尾则无需补
-  // 分隔, 否则在 evidence_summary 与 FIXED_INSTRUCTION 之间补 \n。
+  // evidence_summary is a multi-line block (one line per run); no extra
+  // separator when it already ends with \n, otherwise one \n before the fixed
+  // instruction.
   const separator = contextBlock.endsWith("\n") ? "" : "\n";
   return `${head}\n${contextBlock}${separator}${VALIDATION_FIXED_INSTRUCTION}\n`;
 }
 
 /**
- * #449b B5 补跑信封专属收尾指令 (B1 OQ1 终稿)。
- * 刻意不用 VALIDATION_FIXED_INSTRUCTION: 补跑信封语义 = "你声称完成但缺真实
- * 测试证据, 请跑命令并展示框架通过摘要", 与验证失败信封 (修正失败) 不同类。
+ * Rerun-envelope closing instruction, deliberately different from
+ * VALIDATION_FIXED_INSTRUCTION: the rerun envelope says "you claimed
+ * completion but real test evidence is missing — run the command and show the
+ * framework's green summary", a different kind from the validation-failure
+ * (fix-the-failure) envelope.
  */
 export const EVIDENCE_RERUN_FIXED_INSTRUCTION =
   "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
@@ -168,16 +179,16 @@ export const EVIDENCE_RERUN_FIXED_INSTRUCTION =
 export interface BuildEvidenceRerunEnvelopeArgs {
   readonly round: number;
   readonly maxRounds: number;
-  /** EvidenceReport.reasons (最多展示 5 条, 超出截 …N more 避免 envelope 膨胀)。 */
+  /** EvidenceReport.reasons (show at most 5; the rest collapses to "…N more" to keep the envelope small). */
   readonly reasons: ReadonlyArray<string>;
-  /** 可跑命令: config.command ?? probeVerifyCommand(...)。 */
+  /** Runnable command: config.command ?? probeVerifyCommand(...). */
   readonly command: string;
 }
 
 /**
- * #449b B5 补跑信封构造器 (spec Code Style / B1 OQ1 终稿逐字)。
+ * Evidence-rerun envelope builder (verbatim shape below).
  *
- * 形态契约:
+ * Shape contract:
  *   [VERIFY: rerun needed] attempt=N/M
  *   You claimed completion, but the automated evidence check did not find
  *   real test execution in the transcript.
@@ -190,8 +201,9 @@ export interface BuildEvidenceRerunEnvelopeArgs {
  *   Run the command and show the test framework's green-summary line; do not
  *   claim completion until verification passes.
  *
- * 与 [VALIDATION FAILED] 信封区分语义 (B1 决议): 补跑是证据体检后给模型一次
- * 补证据的机会, 前缀用 [VERIFY: rerun needed]; reasons 空 → 省略 Missing 段。
+ * Semantically distinct from the [VALIDATION FAILED] envelope: a rerun gives
+ * the model one chance to supply evidence after the evidence check; the prefix
+ * is [VERIFY: rerun needed]; empty reasons → the Missing section is omitted.
  */
 export function buildEvidenceRerunEnvelope(
   args: BuildEvidenceRerunEnvelopeArgs

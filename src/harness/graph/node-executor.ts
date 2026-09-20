@@ -1,24 +1,30 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：NodeExecutor ↔ SubAgentManager 适配。
+ * PROTOTYPE — self-written Graph multi-task orchestration: the
+ * NodeExecutor ↔ SubAgentManager adapter.
  *
- * 设计：本模块把 Graph 节点的执行收敛为「一次 foreground spawn + waitFor」
- * （ADR-0014 V1.5 前台默认值）：每节点 = 一次 SubAgentManager.spawn(def)
- * + manager.waitFor(taskId)，等待子代理终态后把 envelope.result 作为 NodeOutcome。
+ * Design: executing a Graph node is reduced to one foreground spawn +
+ * waitFor (ADR-0014 foreground default): each node = SubAgentManager.spawn(def)
+ * + manager.waitFor(taskId); once the subagent reaches a terminal state,
+ * envelope.result becomes the NodeOutcome.
  *
- * 关键决策：
- * - 不引入第二份并发上限。`DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`（默认 15，
- *   可配）是项目唯一权威并发容量，溢出 typed 拒绝 (SubAgentCapacityError)；scheduler 通过
- *   try/catch 转成 NodeOutcome { status:"failed", error }，让 findFailedUpstream
- *   把分支后续节点标 skipped（fail-fast 沿 deps 链向上传播）。
- * - 复用 SubAgentManager 内置的 TraceService seam；manager 在 spawn/stop/
- *   state_change 三处已经埋点 (subagent_spawn / subagent_state_change /
- *   subagent_stop)，graph 层不重复定义 recordGraphNodeStart/End，避免新事件
- *   类型爆炸（test 规约 jsonl.ts:268-326）。
- * - 不创建第二份 SessionStore 持久化权威：节点结果通过 spawn_subagent
- *   工具的 tool_result 路径写回 append-only messages（manager 装配契约）。
+ * Key decisions:
+ * - No second concurrency cap. `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`
+ *   (default 15, configurable) is the project's single authoritative
+ *   concurrency capacity; overflow is a typed rejection (SubAgentCapacityError).
+ *   The scheduler's try/catch converts it into NodeOutcome
+ *   { status:"failed", error }, so findFailedUpstream marks the branch's
+ *   successors skipped (fail-fast propagates up the deps chain).
+ * - Reuse SubAgentManager's built-in TraceService seam: the manager already
+ *   records at spawn/stop/state_change (subagent_spawn /
+ *   subagent_state_change / subagent_stop), so the graph layer defines no
+ *   recordGraphNodeStart/End of its own — avoids new event-type explosion
+ *   (test contract in jsonl.ts:268-326).
+ * - No second SessionStore persistence authority: node results flow back
+ *   into append-only messages via the spawn_subagent tool_result path
+ *   (manager assembly contract).
  *
- * 边界：仅依赖 subagent/（manager / envelope）与 trace/types；不 import
- * loop-engine / build-engine / index.ts。
+ * Boundary: depends only on subagent/ (manager / envelope) and
+ * trace/types; does not import loop-engine / build-engine / index.ts.
  */
 
 import { randomUUID } from "node:crypto";
@@ -37,34 +43,36 @@ import type {
 } from "../trace/types.js";
 import type { NodeContext, NodeExecutor, NodeOutcome } from "./types.js";
 
-/** 单节点到 SubAgentDefinition 的映射。 */
+/** Per-node mapping to a SubAgentDefinition. */
 export interface NodePlan {
-  /** 传给子代理的 task 文本（worker envelope.task 必填）。 */
+  /** Task text handed to the subagent (worker envelope.task is required). */
   readonly task: string;
-  /** 可选 systemPrompt / disallowedTools / model / maxTurns / timeoutMs / role。 */
+  /** Optional systemPrompt / disallowedTools / model / maxTurns / timeoutMs / role. */
   readonly def?: Omit<SubAgentDefinition, "task">;
 }
 
-/** NodeExecutor 工厂依赖：manager + per-node plan。 */
+/** NodeExecutor factory dependencies: manager + per-node plan. */
 export interface SubAgentNodeExecutorOptions {
   readonly manager: SubAgentManager;
   readonly plans: Readonly<Record<string, NodePlan>>;
   /**
-   * D-α T4:调用侧取消信号（ACI `ctx.signal`）。透传给 `manager.waitFor`，
-   * 让父回合被打断时前景等待立刻 reject 而不是空等到 per-task 墙钟。
-   * 缺席 → 与 V1 逐字节一致（waitFor 不带 signal）。
+   * Caller-side cancellation signal (ACI `ctx.signal`). Passed through to
+   * `manager.waitFor` so an interrupted parent turn rejects the foreground
+   * wait immediately instead of idling until the per-task wall clock.
+   * Absent → unchanged behaviour (waitFor without signal).
    */
   readonly signal?: AbortSignal;
-  /** 可选 SUBAGENT_STEP 写侧（graph 编排 dispatch/settle）。 */
+  /** Optional SUBAGENT_STEP write side (graph orchestration dispatch/settle). */
   readonly trace?: TraceService;
   /**
-   * 派出这张图的那一回合的 trace turn id（F-4）。给了就同时进节点 def
-   * （→ manager 三类 record）与本执行器发的 `subagent_step`。
+   * Trace turn id of the turn that launched this graph; when given it goes
+   * into both the node def (→ the manager's three record kinds) and this
+   * executor's `subagent_step`.
    */
   readonly parentTurnId?: string;
 }
 
-/** envelope.reason → TraceErrorType（无对应成员时归 unknown）。 */
+/** envelope.reason → TraceErrorType (falls back to unknown when unmapped). */
 function stepErrorType(reason: SubAgentEnvelope["reason"]): TraceErrorType {
   return reason === "timeout" || reason === "protocolError"
     ? reason
@@ -72,18 +80,22 @@ function stepErrorType(reason: SubAgentEnvelope["reason"]): TraceErrorType {
 }
 
 /**
- * 把 {id -> NodePlan} + manager 装成 NodeExecutor。
+ * Assemble {id -> NodePlan} + manager into a NodeExecutor.
  *
- * 节点执行 = manager.spawn(def) + manager.waitFor(taskId)：
- *   - spawn 抛 SubAgentCapacityError → 立即上抛，scheduler 的 try/catch
- *     把本节点定为 failed，后续依赖者因 findFailedUpstream 被 skipped
- *     （沿 deps 链 fail-fast），独立分支不受影响。
- *   - waitFor 返回 envelope：status === "ok" → { done, output = envelope.result }；
- *     status === "failed" → { failed, error = envelope.summary || reason }。
- *   - waitFor 抛错（超时 / abort / shutdown）→ 上抛，scheduler 同样归 failed。
+ * Node execution = manager.spawn(def) + manager.waitFor(taskId):
+ *   - spawn throws SubAgentCapacityError → rethrown immediately; the
+ *     scheduler's try/catch fails this node, and its dependents are skipped
+ *     via findFailedUpstream (fail-fast along deps); independent branches
+ *     are unaffected.
+ *   - waitFor returns an envelope: status === "ok" → { done, output =
+ *     envelope.result }; status === "failed" → { failed, error =
+ *     envelope.summary || reason }.
+ *   - waitFor throws (timeout / abort / shutdown) → rethrown; the scheduler
+ *     likewise records failed.
  *
- * 注：plan 必须覆盖 spec 中所有节点 id；缺 plan → 节点 failed (error 含
- * "no plan registered for id")。这是开发期配置错漏的快速反馈面。
+ * Note: plans must cover every node id in the spec; a missing plan → node
+ * failed (error contains "no plan registered for id") — the fast feedback
+ * surface for developer-time configuration gaps.
  */
 export function createSubAgentNodeExecutor(
   opts: SubAgentNodeExecutorOptions

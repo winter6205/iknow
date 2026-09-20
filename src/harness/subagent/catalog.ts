@@ -1,32 +1,38 @@
 /**
- * #556 T1 — builtin subagent catalog (resolver + entries)。
+ * Builtin subagent catalog (resolver + entries).
  *
- * 单一权威:builtin subagent 角色定义 = 冻结数组 `BUILTIN_CATALOG`,
- * 通过 `resolveAgentCatalog()` / `getAgentEntry(id)` 两条 resolver 暴露。
+ * Single source of truth: builtin subagent role definitions = frozen array
+ * `BUILTIN_CATALOG`, exposed through the `resolveAgentCatalog()` /
+ * `getAgentEntry(id)` resolver pair.
  *
- * 设计要点 (plan T1 Inherits):
+ * Design notes:
  *   - `AgentCatalogEntry { id, description, body, bashMode?, disallowedTools? }`
- *     是 worker 装配期的 additive 字段载体 (envelope.role additive 通道在 T2
- *     接入;bashMode 通道在 T6 接入;disallowedTools 经既有 buildWorkerToolSurface
- *     合并,不新造抽象)。
- *   - explore = 只读探索 agent:disallowedTools 禁 FILE_WRITE_TOOL_NAMES
- *     （edit_file / write_file + symbol mutate），bashMode="readonly"
- *     body 是 persona 文本 (T2 注入 worker system prompt)。
- *   - general-purpose = 全工具面,不额外 deny (默认 deny spawn_subagent 由
- *     buildWorkerToolSurface 自动叠加,worker toolset 本来就不含,静默)。
- *   - 数组 + 每条 entry + disallowedTools 全 Object.freeze,防下游意外修改。
+ *     is the additive field carrier for worker assembly (persona injects via
+ *     envelope.role; bashMode has its own channel; disallowedTools merges
+ *     through the existing buildWorkerToolSurface — no new abstraction).
+ *   - explore = read-only exploration agent: disallowedTools denies
+ *     FILE_WRITE_TOOL_NAMES (edit_file / write_file + symbol mutate),
+ *     bashMode="readonly", body is persona text injected into the worker
+ *     system prompt.
+ *   - general-purpose = full tool surface, no extra deny (the default deny of
+ *     spawn_subagent is auto-added by buildWorkerToolSurface and stays
+ *     silent since the worker toolset never contains it).
+ *   - Array + each entry + disallowedTools all Object.freeze, guarding
+ *     against accidental downstream mutation.
  *
- * 错误:未知 id → AgentCatalogLookupError (typed, local — 仿 manager.ts
- * SubAgentCapacityError precedent, 不进 errors.ts 单点)。worker 装配
- * 期 (T2) catch 此 error 走 fallback 路径 (无 persona / 无额外 deny /
- * bashMode="any" = V1 逐字节)。
+ * Errors: unknown id → AgentCatalogLookupError (typed, local — mirrors the
+ * manager.ts SubAgentCapacityError precedent, not moved into errors.ts).
+ * Worker assembly catches this error and falls back to V1 behavior (no
+ * persona / no extra deny / bashMode="any", byte-for-byte V1).
  */
 /**
- * 探索 agent 禁用的写类工具集合（SSOT 内联于本文件，与 aci/tools/symbol-mutate.js
- * 的 FILE_WRITE_TOOL_NAMES 同源；内联是为了让 retire 删除 symbol-mutate.js 后
- * catalog deny 仍然独立工作）。
+ * Write-class tools disabled for the explore agent (SSOT inlined in this
+ * file, same set as FILE_WRITE_TOOL_NAMES in aci/tools/symbol-mutate.js —
+ * inlined so catalog deny keeps working standalone after symbol-mutate.js
+ * is retired).
  *
- * 导出是为了让 capability.ts 复用同一真值，无需回引被废弃的 symbol-mutate.js。
+ * Exported so capability.ts reuses the same truth without back-referencing
+ * the deprecated symbol-mutate.js.
  */
 export const FILE_WRITE_TOOL_NAMES = Object.freeze([
   "edit_file",
@@ -45,22 +51,25 @@ export interface AgentCatalogEntry {
   readonly bashMode?: "any" | "readonly";
   readonly disallowedTools?: ReadonlyArray<string>;
   /**
-   * #global-plugins T1（review C4）：插件 agent 的**裸名别名**
-   * （即去掉 `<plugin>:` 前缀后的 basename）。仅当该裸名未被
-   * builtin / user / 其它插件占时由 catalog 索引 → `resolver.get(bare)`
-   * 命中该 entry。冲突时整字段被 strip（不留字段、不影响 canonical）。
-   * 该字段不参与 spawn enum / prose list 渲染（spawn-subagent-tool
-   * 只用 id + description），因此「type 上多一字段」对外不可见。
+   * Bare-name alias of a plugin agent (the basename with the `<plugin>:`
+   * prefix stripped). Indexed by the catalog only when no builtin / user /
+   * other plugin claims the bare name, so `resolver.get(bare)` hits this
+   * entry; on collision the whole field is stripped (no field left, canonical
+   * lookup unaffected). Not rendered into the spawn enum / prose list
+   * (spawn-subagent-tool uses id + description only), so the extra field is
+   * externally invisible.
    */
   readonly bareAlias?: string;
 }
 
 /**
- * 未知 catalog id fail-fast typed 错误 (T2 fallback 守门)。
+ * Typed fail-fast error for unknown catalog ids (guards the worker-assembly
+ * fallback path).
  *
- * Local error class — 仿 manager.ts SubAgentCapacityError / SubAgentAbortError
- * precedent (manager-local, 不入 errors.ts)。message 包含 id 便于 fallback
- * 路径打 log;无 context 字段 (lookup error 不承载额外诊断信息)。
+ * Local error class — mirrors the manager.ts SubAgentCapacityError /
+ * SubAgentAbortError precedent (manager-local, not in errors.ts). The message
+ * includes the id so the fallback path can log it; no context field, since a
+ * lookup error carries no extra diagnostics.
  */
 export class AgentCatalogLookupError extends Error {
   override readonly name = "AgentCatalogLookupError";
@@ -71,7 +80,7 @@ export class AgentCatalogLookupError extends Error {
   }
 }
 
-/** explore — 只读探索 agent。persona body 注入 worker system prompt (T2)。 */
+/** explore — read-only exploration agent; persona body injected into the worker system prompt. */
 const EXPLORE_ENTRY: AgentCatalogEntry = Object.freeze({
   id: "explore",
   description:
@@ -81,7 +90,7 @@ const EXPLORE_ENTRY: AgentCatalogEntry = Object.freeze({
   disallowedTools: Object.freeze([...FILE_WRITE_TOOL_NAMES]),
 });
 
-/** general-purpose — 全工具面 agent。persona body 注入 worker system prompt (T2)。 */
+/** general-purpose — full-tool-surface agent; persona body injected into the worker system prompt. */
 const GENERAL_PURPOSE_ENTRY: AgentCatalogEntry = Object.freeze({
   id: "general-purpose",
   description:
@@ -89,27 +98,29 @@ const GENERAL_PURPOSE_ENTRY: AgentCatalogEntry = Object.freeze({
   body: "You are a general-purpose agent. Use any available tool to accomplish the task delegated by the parent. Keep handoffs short, list relevant file paths, and do not paste entire files into the final draft. Prefer concise, evidence-backed results and return a structured summary.",
 });
 
-/** builtin catalog 单一权威源 (frozen array singleton)。 */
+/** Single authoritative builtin catalog source (frozen array singleton). */
 const BUILTIN_CATALOG: ReadonlyArray<AgentCatalogEntry> = Object.freeze([
   EXPLORE_ENTRY,
   GENERAL_PURPOSE_ENTRY,
 ]);
 
 /**
- * 返回 builtin catalog 全部 entry (frozen array singleton)。
+ * Return all builtin catalog entries (frozen array singleton).
  *
- * 调用方可安全持有返回引用 (frozen → 不可写, 同一引用 → 多次调用相等);
- * entry 自身 + disallowedTools 也全部 frozen。
+ * Callers may safely hold the returned reference (frozen → unwritable, same
+ * reference → equal across calls); each entry and its disallowedTools are
+ * also fully frozen.
  */
 export function resolveAgentCatalog(): ReadonlyArray<AgentCatalogEntry> {
   return BUILTIN_CATALOG;
 }
 
 /**
- * 按 id 查 entry。未知 id 抛 AgentCatalogLookupError (typed, fail-fast)。
+ * Look up an entry by id. Unknown id throws AgentCatalogLookupError (typed,
+ * fail-fast).
  *
- * T2 fallback:worker 装配期 catch 此 error 后走 V1 baseline 路径 (无 persona
- * 段 / 无额外 deny / bashMode 缺省 "any")。
+ * Fallback path: worker assembly catches this error and uses the V1 baseline
+ * (no persona section / no extra deny / bashMode defaults to "any").
  */
 export function getAgentEntry(id: string): AgentCatalogEntry {
   const entry = BUILTIN_CATALOG.find((e) => e.id === id);
@@ -120,23 +131,24 @@ export function getAgentEntry(id: string): AgentCatalogEntry {
 }
 
 /**
- * #556 T3: catalog resolver 双面 (list + get) 形态 — 给 spawn_subagent 工厂
- * 提供 enum + prose list (list) + 单 id 校验 (get) 两个消费面。
+ * Catalog resolver with two surfaces (list + get): the spawn_subagent factory
+ * consumes list for the enum + prose list and get for single-id validation.
  *
- * builtin = frozen singleton, 闭包 list/get 指向 BUILTIN_CATALOG / getAgentEntry。
- * production 装配层 (registry.ts) 不显式注入 — spawn-subagent-tool 工厂内部
- * 默认走 builtin resolver (plan T3 决议: registry 职责是工具面, 不是 agent
- * 路由 — 不动 registry.ts)。
+ * builtin = frozen singleton; the closure's list/get point at BUILTIN_CATALOG
+ * / getAgentEntry. Production assembly (registry.ts) does not inject
+ * explicitly — the spawn-subagent-tool factory defaults to the builtin
+ * resolver (registry's job is the tool surface, not agent routing —
+ * registry.ts untouched).
  *
- * 测试可注入 fake resolver (list 返回固定数组 + get 按需返 entry) 验证工厂
- * 双消费面契约。
+ * Tests can inject a fake resolver (list returns a fixed array + get yields
+ * entries on demand) to verify both consumption surfaces.
  */
 export interface AgentCatalogResolver {
   readonly list: () => ReadonlyArray<AgentCatalogEntry>;
   readonly get: (id: string) => AgentCatalogEntry;
 }
 
-/** builtin catalog resolver (frozen singleton, list + get 双面)。 */
+/** Builtin catalog resolver (frozen singleton, list + get surfaces). */
 export const builtinCatalogResolver: AgentCatalogResolver = Object.freeze({
   list: () => BUILTIN_CATALOG,
   get: (id: string) => getAgentEntry(id),

@@ -1,23 +1,29 @@
 /**
- * ACI 能力层：装饰执行器（毕业过渡）。
+ * ACI capability layer: decorating executor (graduation transition).
  *
- * 5-step middleware (preToolUse → checkPermission → askUser → inner → postToolUse)
- * 现已在 `src/harness/permission/permission-executor.ts` 实现；本文件保留
- * 原型 API（createAciExecutor / AciExecutorOptions / onDecision 观测钩子），
- * 内部转调到新的 PermissionExecutor。
+ * The 5-step middleware (preToolUse → checkPermission → askUser → inner →
+ * postToolUse) now lives in `src/harness/permission/permission-executor.ts`;
+ * this file keeps the prototype API (createAciExecutor /
+ * AciExecutorOptions / onDecision observation hook) and forwards to the new
+ * PermissionExecutor internally.
  *
- * 124/T5 增量：包一层 per-tool tier + interruptBehavior 路由:
- *   - 工具 catalog 中声明的 `timeoutTier` 覆盖 Loop Engine 传入的 timeoutMs(#124 决策 3-4)。
- *   - interruptBehavior="cancel" 透传 caller 的 AbortSignal 到 inner;caller abort
- *     立即抢占等待并返 "cancelled";若 handler 未收尾则标记后台运行并通知
- *     host,timeout 命中返 "timeout"。
- *   - interruptBehavior="block" 不透传 caller signal(只透传由 tier timeout 控制的
- *     新 AbortController),handler 跑完自然完成;若 caller signal 在等待期内 abort,
- *     收尾时把 ok 结果转换成 execution_failed { message: "cancelled" }(无 partial,
- *     因 handler 是干净的),并通过 host 状态通道说明该等待不可中止。
- *   - bash handler 在被中断/超时前可能已 flush 部分 stdout/stderr;把这些 partial
- *     内容塞到 execution_failed.partial,以便 Anthropic Adapter 编码为额外的
- *     [partial stdout] / [partial stderr] 文本块(SC13)。
+ * Per-tool tier + interruptBehavior routing layered on top:
+ *   - the `timeoutTier` declared in the tool catalog overrides the timeoutMs
+ *     passed in by the Loop Engine.
+ *   - interruptBehavior="cancel" passes the caller's AbortSignal through to
+ *     inner; a caller abort preempts the wait immediately and returns
+ *     "cancelled"; if the handler has not finished, the operation is marked
+ *     background and the host is notified; a timeout hit returns "timeout".
+ *   - interruptBehavior="block" does not pass the caller signal (only a new
+ *     AbortController governed by the tier timeout); the handler runs to
+ *     natural completion; if the caller signal aborts during the wait, the
+ *     settled ok result is converted to execution_failed { message:
+ *     "cancelled" } (no partial, since the handler stays clean), and the
+ *     host status channel explains that the wait cannot be aborted.
+ *   - the bash handler may already have flushed partial stdout/stderr before
+ *     being interrupted / timed out; that partial content is attached to
+ *     execution_failed.partial so the Anthropic Adapter encodes it as extra
+ *     [partial stdout] / [partial stderr] text blocks.
  */
 
 import type {
@@ -75,7 +81,7 @@ export interface AciExecutorOptions {
     readonly preToolUse?: PermissionExecutorOptions["preToolUse"];
     readonly postToolUse?: PermissionExecutorOptions["postToolUse"];
   };
-  /** 观测钩子：每次权限决策回调（demo/测试用，不参与决策）。 */
+  /** Observation hook: called on every permission decision (demo/tests; does not participate in the decision). */
   readonly onDecision?: (call: ToolCall, outcome: PermissionOutcome) => void;
   /**
    * Diagnostic sink for a handler rejection observed after the caller has
@@ -84,24 +90,28 @@ export interface AciExecutorOptions {
    */
   readonly onDiagnostic?: AciDiagnosticSink;
   /**
-   * Test seam:per-tool tier 覆盖为该固定毫秒值(测试 tier timeout 不必等真值)。
-   * 默认 undefined = 走真实 TIMEOUT_TIER_MS。生产调用方不传。
+   * Test seam: per-tool tier overrides use this fixed millisecond value
+   * (so tier-timeout tests need not wait for real durations).
+   * Default undefined = use the real TIMEOUT_TIER_MS. Production callers
+   * do not pass it.
    */
   readonly timeoutMsOverride?: number;
 }
 
 /**
- * Decorate inner Executor with the 5-step permission middleware + T5 per-tool
+ * Decorate inner Executor with the 5-step permission middleware + per-tool
  * tier + interruptBehavior routing. Back-compat shim: built on top of
  * permission/permission-executor so the prototype tests (which import from
  * aci/) keep passing without changing their call sites.
  *
- * #653 T2 (P 包):安全批可重叠 — executeAll 在 catalog 标注的 `isConcurrencySafe`
- * 维度上做 wave 调度:同一 wave 内连续 `isConcurrencySafe: true` 的 call 通过
- * Promise.all 并发启动;`isConcurrencySafe: false`(以及 catalog miss 的保守默认)
- * 的 call 必须独占一个 singleton wave,与任何其它 call 不重叠。结果顺序按输入
- * calls 顺序保持,per-call pre/permission/post 步骤仍在各自 routeOneCall 内逐
- * 调用走(5-step 中间件不变)。
+ * Safe batches may overlap — executeAll schedules waves along the
+ * `isConcurrencySafe` dimension annotated in the catalog: consecutive calls
+ * marked `isConcurrencySafe: true` start concurrently via Promise.all
+ * within one wave; calls marked `isConcurrencySafe: false` (and the
+ * conservative default for catalog misses) must occupy a singleton wave
+ * that overlaps nothing else. Result order follows the input calls order,
+ * and per-call pre/permission/post steps still run inside each call's own
+ * routeOneCall (the 5-step middleware is unchanged).
  */
 export function createAciExecutor(opts: AciExecutorOptions): Executor {
   const policy = opts.policy ?? createPermissionPolicy();
@@ -121,10 +131,11 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     );
   }
   const askUser = opts.askUser ?? (async () => true); // prototype default: no-ask approve
-  // B4 / ADR-0043 §2 + T3 / ADR-0046 §3:把 catalog 上的 isDiscovered /
-  // discover 注入 permission-runtime,让 gateOne 走 hydrate-then-execute
-  // 路径(opts.catalog 在场时直接读;缺席则从 registry 构一次,后者保留
-  // byte-stable 行为 —— 不传 isDiscovered/discover,gate 不会触发 hydrate)。
+  // ADR-0043 + ADR-0046: inject isDiscovered / discover from the catalog into
+  // the permission runtime so gateOne takes the hydrate-then-execute path
+  // (read opts.catalog directly when present; otherwise build once from the
+  // registry — the latter keeps byte-stable behavior: without
+  // isDiscovered/discover the gate never triggers hydrate).
   const catalogForT5: AciCatalog = opts.catalog ?? createAciCatalog(registry);
   const perm = createPermissionRuntime({
     inner: opts.inner,
@@ -308,15 +319,18 @@ async function runWave(opts: {
 }
 
 /**
- * tier timeout 命中后,给 inner 的"收尾窗口"(SC13 partial salvage)。
+ * The "salvage window" granted to inner after a tier timeout hit (partial
+ * recovery).
  *
- * tier abort 已经把 abort 透传给 handler(bash/grep/glob 经
- * spawnWithStopSignal 收到 SIGTERM→2s→SIGKILL;block 工具经 tierAbort signal
- * 自行收尾)。良性 handler 会在这个窗口内 settle 并交出已 flush 的
- * stdout/stderr,我们据此把 partial 塞进 execution_failed。窗口到点仍未
- * settle 则放弃 partial,直接返回裸 timeout(handler 拒绝收尾,不可等)。
+ * The tier abort has already propagated to the handler (bash/grep/glob get
+ * SIGTERM→2s→SIGKILL via spawnWithStopSignal; block tools wind down on the
+ * tierAbort signal). A benign handler settles inside this window and hands
+ * over its already-flushed stdout/stderr, so we can attach the partial to
+ * execution_failed. If it still has not settled when the window ends, the
+ * partial is abandoned and a bare timeout is returned (the handler refused
+ * to wind down; waiting is not an option).
  *
- * 取 3 s:bash 的 kill grace 是 2 s(SIGTERM→SIGKILL),加 1 s 收尾余量。
+ * 3 s: bash's kill grace is 2 s (SIGTERM→SIGKILL), plus 1 s of wind-down margin.
  */
 const SALVAGE_GRACE_MS = 3_000;
 /**
@@ -326,15 +340,18 @@ const SALVAGE_GRACE_MS = 3_000;
 const CALLER_SETTLE_GRACE_MS = 10;
 
 /**
- * T5:单次调用的 tier + interruptBehavior 路由。返回一个与 call 身份匹配的
- * ToolExecutionResult;失败标签仍是严格 equal 的 `"timeout"` / `"cancelled"`
- * (ADR-0005)。ADR-0091 起这些 result 标签不再驱动回合 timeout
- * (loop-engine.computeToolStopFlags 只认 signal.reason 时钟标记),本层语义
- * 因此不变:单 call tier 到点只失败该条结果。
+ * Per-call tier + interruptBehavior routing. Returns a ToolExecutionResult
+ * matching the call's identity; failure labels stay strictly equal
+ * `"timeout"` / `"cancelled"` (ADR-0005). Since ADR-0091 these result labels
+ * no longer drive the turn-level timeout
+ * (loop-engine.computeToolStopFlags only trusts the signal.reason clock
+ * marker), so this layer's semantics are unchanged: a single call's tier
+ * expiry only fails that one result.
  *
- * race 设计:inner.executeAll 与 tierAbort 触发 Promise.race。tier 先命中
- * 时不无限等 handler(防 handler 拒收尾),但给一个有界的 salvage 窗口
- * 取回已 flush 的 partial(SC13)。
+ * Race design: inner.executeAll races against the tierAbort trigger. When
+ * the tier wins we do not wait indefinitely for the handler (it may refuse
+ * to wind down), but a bounded salvage window gets a chance to recover the
+ * already-flushed partial.
  */
 async function routeOneCall(opts: {
   readonly runInner: (
@@ -411,12 +428,13 @@ async function routeOneCall(opts: {
       call,
       onDiagnostic,
       onBackground: notifyBackground,
-      // partial salvage 只对会产出 partial 的工具(bash)开放;其余工具 tier
-      // 命中即返回 timeout,不等 handler 收尾(防 stub/良性 handler 拖慢路径)。
+      // partial salvage is only opened for tools that produce partials
+      // (bash); other tools return timeout immediately on a tier hit
+      // without waiting for wind-down (keeps stub/benign handlers fast).
       salvageMs: def?.name === "bash" ? SALVAGE_GRACE_MS : 0,
     });
   } catch (err) {
-    // inner 抛错(非 tier 触发):rethrow。
+    // inner threw (not tier-triggered): rethrow.
     if (tierAbort.signal.aborted) {
       result = {
         kind: "execution_failed",
@@ -440,13 +458,13 @@ async function routeOneCall(opts: {
     }
   }
 
-  // 归一化(顺序即优先级):
-  //   1. tier timeout 命中 → timeout(权威,覆盖 block/cancel 一切)。partial 若
-  //      有(salvage 取回)保留。
+  // Normalization (order = precedence):
+  //   1. tier timeout hit → timeout (authoritative; overrides block/cancel
+  //      alike). A salvaged partial is kept if recovered.
   //   2. caller signal abort:
-  //        block → cancelled(无 partial,handler 干净完成);
-  //        cancel → cancelled(保留 bash partial)。
-  //   3. 其余原样返回。
+  //        block → cancelled (no partial; the handler completed cleanly);
+  //        cancel → cancelled (bash partial kept).
+  //   3. everything else passes through unchanged.
 
   if (tierAbort.signal.aborted) {
     const partial =
@@ -459,8 +477,9 @@ async function routeOneCall(opts: {
 
   if (callerSignal?.aborted === true) {
     if (isBlock) {
-      // block 工具:caller abort 不打断 handler;收尾后归一 cancelled(无 partial),
-      // 同时经 host 状态通道说明不可中止等待。
+      // block tool: a caller abort does not interrupt the handler; after
+      // wind-down normalize to cancelled (no partial), and explain via the
+      // host status channel that the wait could not be aborted.
       notifyBlock();
       return {
         kind: "execution_failed",
@@ -479,35 +498,40 @@ async function routeOneCall(opts: {
     );
   }
 
-  // 未 abort / 未超时:若 inner 已回 cancelled/timeout(executor.runOne 在
-  // signal.aborted 时的归一),补上 bash partial(若有)后原样返回。
+  // No abort / no timeout: if inner already returned cancelled/timeout
+  // (executor.runOne normalizes when signal.aborted), top up the bash
+  // partial (if any) and pass through.
   if (
     result.kind === "execution_failed" &&
     (result.message === "cancelled" || result.message === "timeout")
   ) {
-    return result; // partial 只能从 ok payload 提取;这里 result 已是 failed
+    return result; // partial can only come from an ok payload; this is already failed
   }
 
   return result;
 }
 
 /**
- * await inner; tier/caller abort 先到时按需进入有界 salvage 窗口(取回
- * handler 已 flush 的 partial)。返回最终的 ToolExecutionResult:
- *   - inner 先 settle → 其结果;
- *   - caller 先到 + settle 内 inner settle → 其结果(由调用方归一 cancelled + partial);
- *   - tier 先到 + salvage 内 inner settle → 其结果(由调用方归一 timeout + partial);
- *   - abort 先到 + salvage 超时 inner 未 settle → 对应 execution_failed(无 partial)。
+ * Await inner; when a tier/caller abort wins first, optionally enter a
+ * bounded salvage window (recovering the partial the handler already
+ * flushed). Returns the final ToolExecutionResult:
+ *   - inner settles first → its result;
+ *   - caller wins first + inner settles within the grace → its result (the
+ *     caller normalizes to cancelled + partial);
+ *   - tier wins first + inner settles within salvage → its result (the
+ *     caller normalizes to timeout + partial);
+ *   - abort wins first + inner unsettled when salvage ends → the matching
+ *     execution_failed (no partial).
  */
 async function awaitInnerOrTier(opts: {
   readonly innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>;
   readonly tierSignal: AbortSignal;
-  /** cancel tier 的 caller signal;block tier 刻意不传。 */
+  /** caller signal for the cancel tier; the block tier deliberately omits it. */
   readonly callerSignal: AbortSignal | undefined;
   readonly call: ToolCall;
   readonly onDiagnostic: AciExecutorOptions["onDiagnostic"];
   readonly onBackground: (() => void) | undefined;
-  /** salvage 窗口(ms);caller 的 0 使用短 settle grace, tier 的 0 立即返回。 */
+  /** salvage window (ms); a caller-side 0 uses the short settle grace, a tier-side 0 returns immediately. */
   readonly salvageMs: number;
 }): Promise<ToolExecutionResult> {
   const {
@@ -540,8 +564,10 @@ async function awaitInnerOrTier(opts: {
   }
 
   if (winner.kind === "caller") {
-    // caller 抢占只结束界面等待。bash 仍给既有 salvage 窗口取回 partial;
-    // 其它工具给一个极短收尾窗口，仍未 settle 才视为后台运行。
+    // A caller preempt only ends the UI-side wait. bash still gets its
+    // existing salvage window to recover the partial; other tools get a
+    // very short wind-down grace and are treated as background-running
+    // only if still unsettled.
     const settleGraceMs = salvageMs > 0 ? salvageMs : CALLER_SETTLE_GRACE_MS;
     const salvaged = await awaitDuringSalvage(innerPromise, settleGraceMs);
     if (salvaged.kind === "inner") return salvaged.result;
@@ -563,12 +589,14 @@ async function awaitInnerOrTier(opts: {
     };
   }
 
-  // tier 先到:abort 已透传给 handler。salvageMs>0 时给有界窗口取回 partial。
+  // Tier won first: the abort has already propagated to the handler. When
+  // salvageMs>0, give a bounded window to recover the partial.
   if (salvageMs > 0) {
     const salvaged = await awaitDuringSalvage(innerPromise, salvageMs);
     if (salvaged.kind === "inner") {
-      // handler 在 salvage 窗口内收尾了 — 交出它已 flush 的结果,调用方按
-      // tierAbort.aborted 归一 timeout 并注入 partial。
+      // The handler wound down inside the salvage window — hand over its
+      // flushed result; the caller normalizes to timeout via
+      // tierAbort.aborted and injects the partial.
       return salvaged.result;
     }
     if (salvaged.kind === "rejected") {
@@ -581,7 +609,8 @@ async function awaitInnerOrTier(opts: {
     }
   }
 
-  // salvage 超时(或未开启 salvage):handler 拒绝收尾。不再等,返回裸 timeout。
+  // Salvage expired (or was not opened): the handler refused to wind down.
+  // Stop waiting and return a bare timeout.
   observeDetachedRejection(innerPromise, call, onDiagnostic);
   return {
     kind: "execution_failed",
@@ -623,7 +652,7 @@ async function awaitDuringSalvage(
   return salvaged;
 }
 
-/** signal abort 时 resolve 的 promise(已 abort 立即 resolve)。 */
+/** Promise that resolves when the signal aborts (resolves immediately if already aborted). */
 function abortPromise(
   signal: AbortSignal,
   kind: "timer" | "caller" = "timer"
@@ -640,8 +669,8 @@ function abortPromise(
 }
 
 /**
- * Bash ok payload 的形状:`[{ type: "text", text: JSON.stringify({ code, stdout, stderr }) }]`。
- * 把 JSON 解析出来,stdout / stderr 放回 partial(SC13)。
+ * Shape of a bash ok payload:`[{ type: "text", text: JSON.stringify({ code, stdout, stderr }) }]`.
+ * Parse the JSON and put stdout / stderr back into the partial.
  */
 function extractBashPartial(
   result: ToolExecutionResult,

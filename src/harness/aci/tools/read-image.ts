@@ -1,19 +1,28 @@
 /**
- * read_image 工具（path-image-vision T1）— 围栏内图片按魔数读为 SDK image block。
+ * read_image tool — read a file inside the fence as an SDK image block,
+ * classified by magic bytes.
  *
- * 契约（specs/read-image-vision.md 假设 1–5 / 10，SC1–SC4）：
- *   - 输入: path (必填非空 string)；围栏解析与 read_file 同一入口
- *     （`resolveWithinRoot`，symlink 越界拒绝）
- *   - 判型只看魔数不看扩展名：PNG / JPEG / GIF87a / GIF89a / RIFF….WEBP；
- *     其余（含 NUL 二进制、空文件）typed 拒绝，与 read_file 的
- *     「当文本读」失败可区分
- *   - 体积顶 = read_file 同档 1MB，stat 后编码前判定
- *   - 成功返回 `ImageBlockParam`（base64）；executor 的成功臂据此直通进
- *     `tool_result.content`（image 只活在 tool_result 内，不上消息顶层）
- *   - 错误一律 throw ToolExecutionError（executor 转 execution_failed，失败臂仍 text）
- *   - 不入 last-read ledger：本工厂不接 ledger 参数（ADR-0084 入账面仅 read_file / 白名单 bash）
- *   - 不接 `projectIdentityRoot` 只读直通（有意窄于 read_file 的 resolveReadTarget）：
- *     只走 `resolveWithinRoot` 工作区围栏 fail-closed，spec read-image-vision 目标仅覆盖工作区根
+ * Contract:
+ *   - input: path (required, non-empty string); fence resolution uses the
+ *     same entry point as read_file (`resolveWithinRoot`, symlink escapes
+ *     rejected);
+ *   - classification looks only at magic bytes, never the extension:
+ *     PNG / JPEG / GIF87a / GIF89a / RIFF….WEBP; everything else (including
+ *     NUL-bearing binaries and empty files) is a typed refusal, distinguishable
+ *     from read_file's "read it as text" failure;
+ *   - size cap = same 1 MiB as read_file, checked after stat and before
+ *     encoding;
+ *   - success returns an `ImageBlockParam` (base64); the executor's success
+ *     arm passes it straight into `tool_result.content` (images live only
+ *     inside tool_result, never at message top level);
+ *   - every error throws ToolExecutionError (executor turns it into
+ *     execution_failed; the failure arm stays text);
+ *   - never recorded in the last-read ledger: this factory takes no ledger
+ *     parameter (only read_file and whitelisted bash are ledger subjects,
+ *     ADR-0084);
+ *   - deliberately narrower than read_file's resolveReadTarget: no
+ *     `projectIdentityRoot` read-only passthrough — only the
+ *     `resolveWithinRoot` workspace fence, fail-closed.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -24,10 +33,11 @@ import type { AciToolDef } from "../types.js";
 import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
 import { resolveWithinRoot } from "./helpers.js";
 
-/** 与 read_file 的 `MAX_FILE_BYTES` 同档（1 MiB），spec 假设 5：编码前判定。 */
+/** Same 1 MiB tier as read_file's `MAX_FILE_BYTES`; checked before encoding. */
 const MAX_IMAGE_BYTES = 1_048_576;
 
-/** media_type 名单 SSOT：executor 的形状闸与魔数判型共用同一来源。 */
+/** SSOT for the media_type list: the executor's shape gate and the magic-byte
+ * classifier draw from this single source. */
 export const IMAGE_MEDIA_TYPES = [
   "image/jpeg",
   "image/png",
@@ -41,7 +51,8 @@ function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
 }
 
-/** 只看文件头魔数；不匹配四类图像返回 undefined（调用方 typed 拒绝）。 */
+/** Looks only at the file-header magic bytes; returns undefined when the
+ * bytes match none of the four image types (caller then refuses by type). */
 function detectMediaType(buffer: Buffer): ImageMediaType | undefined {
   if (hasPngMagic(buffer)) return "image/png";
   if (hasJpegMagic(buffer)) return "image/jpeg";
@@ -51,8 +62,8 @@ function detectMediaType(buffer: Buffer): ImageMediaType | undefined {
 }
 
 function hasPngMagic(b: Buffer): boolean {
-  // 完整 8 字节签名（89 50 4E 47 0D 0A 1A 0A）：只查前 4 字节会把
-  // \x89PNG 开头的任意字节流误判为 PNG。
+  // Full 8-byte signature (89 50 4E 47 0D 0A 1A 0A): checking only the first
+  // 4 bytes would misclassify any byte stream starting with \x89PNG as PNG.
   return (
     b.length >= 8 &&
     b[0] === 0x89 &&
@@ -90,12 +101,15 @@ function parseInput(input: unknown): string {
   }
   const raw = input as Record<string, unknown>;
   if (typeof raw.path !== "string" || raw.path.length === 0) {
-    throw new ToolExecutionError("[read_image] path must be a non-empty string");
+    throw new ToolExecutionError(
+      "[read_image] path must be a non-empty string"
+    );
   }
   return raw.path;
 }
 
-/** stat → 1MB 闸（编码前）→ 魔数判定 → base64 编码；任一失败皆 typed throw。 */
+/** stat → 1 MiB gate (before encoding) → magic-byte classification → base64;
+ * every failure is a typed throw. */
 async function encodeImageBlock(
   root: string,
   target: string

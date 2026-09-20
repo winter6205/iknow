@@ -1,27 +1,28 @@
 /**
- * #502 T4 — bash_output ACI 工具（Track A 模型操作面）。
+ * bash_output ACI tool — the model-facing surface for background tasks.
  *
- * 用途：读取由 `bash` 工具以 `background: true` 启动的后台任务的日志尾部，
- * 附带当前任务状态与 exit code，模型据此决定后续动作（继续等 / 调用
- * bash_stop 终止 / 调整参数后重启）。
+ * Reads the log tail of a task spawned via `bash(background: true)` along
+ * with current status and exit code, so the model can decide its next move
+ * (keep waiting / bash_stop / relaunch with adjusted parameters).
  *
- * 数据通路：`manager.output(task_id, max_bytes)` — manager 内部已完成
- * writeChain drain + readFile + tail 截断（manager.ts:443-475）。本工具层
- * 做参数归一化 + typed-error catch 渲染（code-quality.md typed-error catch
- * 契约，禁 [object Object]）+ JSON envelope 装配。
+ * Data path: `manager.output(task_id, max_bytes)` — the manager already
+ * drains the writeChain, reads the file and tail-truncates. This tool layer
+ * only does input normalization + typed-error catch rendering
+ * (code-quality.md typed-error catch contract, no [object Object]) + JSON
+ * envelope assembly.
  *
- * 参数归一化（clamp-path-with-annotation，T4 定稿）：
- *   - max_bytes 缺席 / 非 number / <=0 → DEFAULT_LOG_MAX_BYTES（12KB）
- *   - max_bytes > MAX_LOG_READ_BYTES（100KB）→ clamp 到上限，不抛错
- *   - 临界值（恰好等于上限）原样透传
- * 入参断言在 fake manager 上锁定收敛值（tests/harness/aci/bash-output-stop.test.ts
- * 「max_bytes clamp」段）；manager 内部对 effectiveMax 还会二次 clamp
- * （idempotent），工具层先钳到位避免无意义的越界调用。
+ * max_bytes normalization (clamp path with annotation):
+ *   - absent / non-number / <=0 → DEFAULT_LOG_MAX_BYTES (12KB)
+ *   - > MAX_LOG_READ_BYTES (100KB) → clamped to the cap, no throw
+ *   - boundary value (exactly the cap) passes through unchanged
+ * The manager clamps effectiveMax a second time internally (idempotent);
+ * clamping here first avoids pointless over-cap calls.
  *
- * Permission（M2 决议）：read-only + 默认 allow（与 read_mcp_resource /
- * list_mcp_resources 同形态）。
+ * Permission: read-only + default allow (same shape as read_mcp_resource /
+ * list_mcp_resources).
  *
- * 描述（D9 决议）：仅正面引导条件（何时用 / 与什么工具配对），不写负面禁令词。
+ * Description: positively-framed guidance only (when to use / which tools
+ * to pair with), no negative prohibitions.
  */
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -47,14 +48,16 @@ interface BashOutputInput {
 }
 
 /**
- * 工厂：createBashOutputTool(deps) — bash_output 工具（第 29 件）。
+ * Factory: createBashOutputTool(deps) — the bash_output tool.
  *
- * 返回的 AciToolDef 满足：
+ * The returned AciToolDef satisfies:
  *   - name === "bash_output"
- *   - inputSchema: { task_id 必填, max_bytes? number }，additionalProperties:false
- *   - aci 元数据：read-only / concurrency-safe / cancel / fast tier
- *   - handler 输出 JSON envelope `{text, status, exit_code, task_id}`（与
- *     manager.output 返回形态一一对应，模型侧无需额外解码）。
+ *   - inputSchema: { task_id required, max_bytes? number },
+ *     additionalProperties:false
+ *   - aci metadata: read-only / concurrency-safe / cancel / fast tier
+ *   - handler emits the JSON envelope `{text, status, exit_code, task_id}`
+ *     (one-to-one with manager.output's return shape, no extra decoding on
+ *     the model side).
  */
 export function createBashOutputTool(
   opts: CreateBashOutputToolOptions
@@ -67,8 +70,9 @@ export function createBashOutputTool(
     const maxBytes = normalizeMaxBytes(parsed.max_bytes);
     let result: BackgroundOutputResult;
     try {
-      // #502 T5 / ADR-0021 D1.4:ctx.conversationId 透传 manager 做 scope 过滤。
-      // ctx 缺省 → requesterConversationId undefined → manager 不过滤（向后兼容）。
+      // ADR-0021: pass ctx.conversationId to the manager for scope
+      // filtering. Missing ctx → requesterConversationId undefined → no
+      // filtering (backward compatible).
       result = await opts.backgroundManager.output(
         parsed.task_id,
         maxBytes,
@@ -76,10 +80,11 @@ export function createBashOutputTool(
       );
     } catch (err) {
       if (err instanceof ToolExecutionError) throw err;
-      // typed-error catch 契约：kind 判别后用 renderTaskError 渲染 `${kind}:
-      // ${context}`，禁 [object Object]。manager 抛 plain object（判别联合
-      // BackgroundTaskError），不是 Error instance，需 JSON-or-errorMessage
-      // 兜底前先用 renderTaskError 走契约路径。
+      // Typed-error catch contract: discriminate `kind`, then render via
+      // renderTaskError as `${kind}: ${context}` — never [object Object].
+      // The manager throws plain objects (the BackgroundTaskError discriminated
+      // union), not Error instances, so the contract path must run before
+      // any JSON-or-errorMessage fallback.
       throw new ToolExecutionError(
         `bash_output: ${renderTaskError(err as BackgroundTaskError)}`
       );
@@ -120,9 +125,10 @@ export function createBashOutputTool(
 }
 
 /**
- * 输入编译 + 严格校验：task_id 必填且为字符串（允许空串 → manager 走
- * empty_task_id typed-error 透传；非对象 / 缺 task_id / 类型错 → ToolExecutionError
- * 自身防御，schema 之外的兜底）。
+ * Input compile + strict validation: task_id is required and must be a
+ * string (empty string allowed → the manager's empty_task_id typed error
+ * passes through; non-object / missing task_id / wrong type →
+ * ToolExecutionError as this layer's own defense beyond the schema).
  */
 function compileOutputInput(input: unknown): {
   readonly task_id: string;
@@ -141,10 +147,11 @@ function compileOutputInput(input: unknown): {
 }
 
 /**
- * max_bytes 归一化：缺席 / 非 number / <=0 → DEFAULT_LOG_MAX_BYTES；
- * > MAX_LOG_READ_BYTES → clamp 到上限；临界值（恰好等于上限）原样透传。
- * manager.output 还会对 effectiveMax 二次 clamp（idempotent），本工具层
- * 先钳到位避免无意义越界调用，并满足「工具层 clamp 入参」的契约注释。
+ * max_bytes normalization: absent / non-number / <=0 → DEFAULT_LOG_MAX_BYTES;
+ * > MAX_LOG_READ_BYTES → clamp to the cap; boundary value (exactly the cap)
+ * passes through unchanged. manager.output clamps effectiveMax again
+ * (idempotent); clamping here first avoids pointless over-cap calls and
+ * fulfills the "tool layer clamps its inputs" contract comment.
  */
 function normalizeMaxBytes(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {

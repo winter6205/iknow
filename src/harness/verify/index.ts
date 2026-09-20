@@ -1,12 +1,14 @@
 /**
- * verify bounded context 公共出口 (GH #128 失败自动修正闭环, T8)。
+ * verify bounded context — public exit.
  *
- * 最小面: 只 re-export 装配层 (cli / session-api) 需要的类型与函数 ——
- *   - VerifyConfig: settings.verify 段 → 装配层构造闭环配置;
+ * Minimal surface: re-exports only what assembly layers (cli / session-api)
+ * need —
+ *   - VerifyConfig: settings.verify section → loop config construction;
  *   - runVerifyLoop / VerifyLoopOptions / VerifyLoopResult / VerifyLoopOutcome:
- *     chat / serve 的 run() 包裹点;
- *   - 纯函数层 (verdict / inject) 是 verify-loop 内部契约, 装配层不消费,
- *     不在此暴露 (避免面膨胀, bounded-context-guardian)。
+ *     the run() wrapper points for chat / serve;
+ *   - the pure layers (verdict / inject) are verify-loop internals, not
+ *     consumed by assembly, so they stay unexported here (avoids surface
+ *     bloat and context leakage).
  */
 export type { VerifyConfig } from "./types.js";
 export type { VerificationRecord } from "./types.js";

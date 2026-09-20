@@ -1,36 +1,44 @@
 /**
- * ADR-0101 / plan subagent-stop-and-continue T2 — `subagent_stop` ACI 工具。
+ * `subagent_stop` ACI tool — the parent model's control plane for stopping a
  *
- * 父模型停工人的控制面，与操作员 Ctrl+X 对称：入参是本会话可见的 `task_id`
- * （spawn 回执 / 交差信封 / mailbox notice 上给过的那个），内部走既有
- * `manager.abortTask` —— 同一条先 settle 在飞 waitFor、再 SIGTERM + 5s
- * SIGKILL 兜底的杀进程路径（SC14 归因不变）。范围对齐 `bash_stop`：只停
- * 本会话派出的工人，跨会话 typed 拒收（所有权判定先于任何信号）。
+ // (ADR-0101)
+ * worker, symmetric with the operator's Ctrl+X. Input is a `task_id` visible
+ * to this session (from the spawn receipt / handoff envelope / mailbox
+ * notice); internally it uses the existing `manager.abortTask` — the same
+ * path that first settles in-flight waitFor, then SIGTERM with a 5s SIGKILL
+ * fallback (attribution unchanged). Scope matches `bash_stop`: only workers
+ * spawned by this session; cross-conversation tasks are rejected with a typed
+ * error (ownership check precedes any signal).
  *
- * 幂等语义（ADR-0101 Decision 3）：已终态 / 找不到 → **结构化说明**（ok
- * tool_result 里的 `status` 判别），不抛成「任务失败幻觉」—— 停一个已经交差
- * 的工人不是错误。running / starting → abortTask 发起中止，终态由
- * `subagent_result` 查询（failed 承载归因）。
+ * Idempotent semantics: already terminal / not found → a **structured
+ * explanation** (a `status` discriminator inside an ok tool_result), never a
+ * thrown "task failed" illusion — stopping an already-delivered worker is not
+ * an error. running / starting → abortTask initiates the abort; the terminal
+ * state is queried via `subagent_result` (failed carries the attribution).
  *
- * **依赖注入形态**：工厂收 `manager`；装配层 `createDefaultAciRegistry`
- * 在 `subagentManager` opts 传入时实例化，缺席时不装配（与 spawn_subagent /
- * subagent_result 同门条件，registry.ts Gate 3 镜像过滤）。
+ * **DI shape**: the factory takes `manager`; `createDefaultAciRegistry`
  *
- * **append-only**：`name` 与 `ACI_TOOLSET_NAMES` 末位一一对应，不重排既有件。
+ // (ADR-0101)
+ * instantiates it when `subagentManager` opts is provided and omits it
+ * otherwise (same gating condition as spawn_subagent / subagent_result).
+ *
+ * **append-only**: `name` maps one-to-one to the tail of
+ * `ACI_TOOLSET_NAMES`, never reordering existing entries.
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "./manager.js";
 import { ToolExecutionError } from "../errors.js";
-import { assertSubagentOwnership, findSubagentTask } from "./subagent-tool-shared.js";
+import {
+  assertSubagentOwnership,
+  findSubagentTask,
+} from "./subagent-tool-shared.js";
 
 export interface SubAgentStopToolDeps {
   readonly manager: SubAgentManager;
 }
 
-export function createSubAgentStopTool(
-  deps: SubAgentStopToolDeps
-): AciToolDef {
+export function createSubAgentStopTool(deps: SubAgentStopToolDeps): AciToolDef {
   return Object.freeze({
     name: "subagent_stop",
     description:
@@ -48,15 +56,15 @@ export function createSubAgentStopTool(
       additionalProperties: false,
     },
     aci: {
-      category: "write", // 终止正在跑的进程是有副作用的动作（bash_stop 同款默认 ask）
-      lazy: false, // 常驻 prompt：停工人是派发面的对称能力
-      timeoutTier: "default", // 同步入口：abortTask 不 await 终态
-      isConcurrencySafe: false, // 中止面不与其他调用重叠调度
-      interruptBehavior: "block", // 同步 handler（bash_stop 同款）
+      category: "write", // killing a running process has side effects (same default-ask as bash_stop)
+      lazy: false, // resident prompt: stopping a worker is the symmetric counterpart of dispatch
+      timeoutTier: "default", // sync entry: abortTask does not await the terminal state
+      isConcurrencySafe: false, // aborts are not interleaved with other calls
+      interruptBehavior: "block", // synchronous handler (same as bash_stop)
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
-      // input 已由 ajv strict 校验形状；此处保留 handler 直调兜底（同
-      // spawn_subagent / bash_stop 的 compile-input 形态）。
+      // shape is already ajv-strict-validated; the guard here covers direct
+      // handler calls (same compile-input shape as spawn_subagent / bash_stop).
       const obj = (input ?? {}) as Record<string, unknown>;
       const taskId = obj.task_id;
       if (typeof taskId !== "string" || taskId.length === 0) {
@@ -66,7 +74,8 @@ export function createSubAgentStopTool(
       }
       const info = findSubagentTask(deps.manager, taskId);
       if (info === undefined) {
-        // 结构化说明：未知 id 不是「停失败」，是没有这个任务（ADR-0101 幂等）。
+        // structured note: an unknown id is not a stop failure, just no such task (idempotent semantics).
+        // (ADR-0101)
         return JSON.stringify({
           task_id: taskId,
           status: "not_found",
@@ -83,12 +92,14 @@ export function createSubAgentStopTool(
       }
       const dispatched = deps.manager.abortTask(taskId);
       if (!dispatched) {
-        // starting/running → 终态的竞态：abortTask 对已终态任务返回 false，
-        // 重查一次按幂等语义回报，不伪造「stopped」。
+        // race between starting/running and the terminal state: abortTask
+        // returns false for an already-terminal task; re-query once and
+        // report per idempotent semantics, never fake "stopped".
         const latest = findSubagentTask(deps.manager, taskId);
         if (latest === undefined) {
-          // 两次查询之间任务整个出账（TTL 清出）：终态真值已不可知，
-          // 回报 not_found 结构化说明，不兜底伪造 state。
+          // the task left the ledger entirely between the two lookups (TTL
+          // eviction): the true terminal state is unknowable, so return the
+          // structured not_found instead of fabricating a state.
           return JSON.stringify({
             task_id: taskId,
             status: "not_found",

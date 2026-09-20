@@ -1,24 +1,27 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：Proto B — skill-check / 路由门禁。
+ * PROTOTYPE — self-written Graph multi-task orchestration: skill-check /
+ * routing gate.
  *
- * 设计问题：每个节点执行前能否跑一个 skill-check / 路由门禁，决定套用哪个
- * skill 契约（可拦截 / 改路由）？
+ * Design question: can a skill-check / routing gate run before each node to
+ * decide which skill contract applies (with the power to block or reroute)?
  *
- * 建模：skill 目录（skill 名 → 一句话契约描述）+ skillCheckGate 纯函数
- * （nodeId → 三态决策 route / block）。executor 在外层包一层 gate：
- * block → skipped；route → 调底层 executor 并记录套用的 skill。
- * 纯逻辑，无 IO、无 console。
+ * Model: a skill catalog (skill name → one-line contract description) plus
+ * the pure function skillCheckGate (nodeId → route / block decision). The
+ * executor wraps a gate layer outside: block → skipped; route → call the
+ * underlying executor and record the applied skill. Pure logic, no IO, no
+ * console.
  *
- * 边界：纯逻辑层，仅依赖 ./types；与 ./partition-by-coupling 并列互不依赖。
+ * Boundary: pure logic layer, depends only on ./types; parallel to
+ * ./partition-by-coupling with no mutual dependency.
  */
 
-/** Skill 目录条目：skill 名 + 一句话契约描述。 */
+/** Skill catalog entry: name + one-line contract description. */
 export interface SkillContract {
   readonly name: string;
   readonly description: string;
 }
 
-/** 本原型使用的 skill 目录：skill 名 → 一句话契约描述。 */
+/** Skill catalog used by this prototype: skill name → one-line contract description. */
 export const skillCatalog: Readonly<Record<string, SkillContract>> = {
   "code-review": {
     name: "code-review",
@@ -30,34 +33,35 @@ export const skillCatalog: Readonly<Record<string, SkillContract>> = {
   },
 };
 
-/** Gate 三态决策：route 套用 skill，block 拦截。 */
+/** Gate tri-state decision: route applies a skill, block intercepts. */
 export type GateDecision =
   | { readonly decision: "route"; readonly skill: string }
   | { readonly decision: "block"; readonly reason: string };
 
-/** 默认路由表（零参 gate 用）：nodeId → skill 名。 */
+/** Default routing table (for the zero-arg gate): nodeId → skill name. */
 const DEFAULT_NODE_SKILL_MAP: Readonly<Record<string, string>> = {
   "review-code": "code-review",
   "write-test": "tdd",
 };
 
-/** 默认高危节点表（零参 gate 用）：nodeId → 拦截 reason。 */
+/** Default high-risk node table (for the zero-arg gate): nodeId → block reason. */
 const DEFAULT_BLOCKED_NODES: Readonly<Record<string, string>> = {
   "deploy-prod": "prototype 禁止生产部署类操作",
 };
 
 /**
- * skillCheckGate：节点执行前的路由门禁（纯函数）。
+ * skillCheckGate: the routing gate before node execution (pure function).
  *
- * 形态 = pre-spawn hook（per graph-insertion-research §6 Q6：「不要模块级 map，
- * 判官 JUDGE_ALLOWED_TOOLS 同构」）。opts.?? 缺省走模块级常量，让无状态
- * 调用者也能用；有 opts 的调用者（如 createSubAgentNodeExecutor）注入每图
- * 配置，避免全局 map 污染 / 可测试。
+ * Shape = pre-spawn hook — deliberately not a module-level map; same
+ * structure as the judge's allowed-tools table. opts.?? defaults to the
+ * module-level constants so stateless callers work too; callers with opts
+ * (e.g. createSubAgentNodeExecutor) inject per-graph config, avoiding
+ * global-map pollution and staying testable.
  *
- * 决策：
- * - block 表命中 → block + reason；
- * - skill 路由表命中 → route + skill 名；
- * - 其它 → route（放行，skill = ""）。
+ * Decisions:
+ * - hit in the block table → block + reason;
+ * - hit in the skill routing table → route + skill name;
+ * - otherwise → route (pass through, skill = "").
  */
 export interface SkillCheckOptions {
   readonly nodeSkillMap?: Readonly<Record<string, string>>;
@@ -79,6 +83,6 @@ export function skillCheckGate(
   if (skill !== undefined) {
     return { decision: "route", skill };
   }
-  // 无匹配 skill 的普通节点：放行但不套契约。
+  // Plain node with no matching skill: pass through without applying a contract.
   return { decision: "route", skill: "" };
 }

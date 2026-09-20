@@ -1,37 +1,42 @@
 /**
- * ACI 能力层：类型契约。
+ * ACI capability layer: type contracts.
  *
- * 权限三层毕业（#122 Q5）后：删 pass_through（决策改 allow/deny/ask），
- * 删 AciMeta.isReadOnly / isDestructive（category 已是真值单一权威）；
- * 保留 category / isConcurrencySafe / interruptBehavior（#124 中断/超时）；
- * 新增 timeoutTier（T5 接入）：按工具静态分级超时。
+ * After the three permission layers graduated: pass_through was deleted
+ * (decisions are now allow/deny/ask), and AciMeta.isReadOnly /
+ * isDestructive were deleted (category is already the single authority).
+ * Retained: category / isConcurrencySafe / interruptBehavior
+ * (interruption & timeout semantics) plus timeoutTier — static per-tool
+ * timeout tiers.
  *
- * 决策 / 规则 / 策略对象均移至 `src/harness/permission/` 模块，
- * 见 permission/index.ts 公共出口。
+ * Decision / rule / policy objects now live in `src/harness/permission/`;
+ * see permission/index.ts for the public surface.
  */
 
 import type { ToolDef } from "../tools/types.js";
 
-/** ch04 四类安全级别（category 是 read-only / write / execute / collaborate 真值）。 */
+/** The four safety categories (category is the source of truth for read-only / write / execute / collaborate). */
 export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
 
 /**
- * 超时分级（T5 / #124）：工具的静态超时档位。
+ * Timeout tiers: static per-tool timeout levels.
  *
- *   fast       = 5 s       单次文件读 / glob 列表（轻量原子操作）
- *   default    = 30 s      写入 / grep 大仓库（常规 IO + 子进程）
- *   build      = 5 min     bash 长命令（构建 / 测试 / 部署）
- *   long       = 30 min    罕见大作业（MCP 等）
- *   unbounded  = 0         不设 ACI 层 timer（createAciExecutor `tierTimeoutMs > 0`
- *                          门）；寿命由工具自己的钟决定。spawn_subagent wait:true
- *                          必须用此档：`long`(30min) < PER_TASK(2h) 会提前 abort。
+ *   fast       = 5 s       single file read / glob listing (light atomic ops)
+ *   default    = 30 s      writes / grep over a large repo (regular IO + subprocess)
+ *   build      = 5 min     long bash commands (build / test / deploy)
+ *   long       = 30 min    rare large jobs (MCP etc.)
+ *   unbounded  = 0         no ACI-layer timer (createAciExecutor's
+ *                          `tierTimeoutMs > 0` guard); lifetime is governed
+ *                          by the tool's own clock. spawn_subagent wait:true
+ *                          must use this tier: `long` (30min) < PER_TASK (2h)
+ *                          would abort too early.
  *
- * 由 `TIMEOUT_TIER_MS` 提供毫秒值；`createAciExecutor` 在 #124 决策
- * 3-4 之下，把工具的 tier 视为权威覆盖 Loop Engine 传入的 timeoutMs。
+ * Millisecond values come from `TIMEOUT_TIER_MS`; `createAciExecutor` treats
+ * the tool's tier as authoritative, overriding the timeoutMs passed in by
+ * the Loop Engine.
  */
 export type TimeoutTier = "fast" | "default" | "build" | "long" | "unbounded";
 
-/** 各 tier 的毫秒值（frozen — 实现层 + 测试层共源）。 */
+/** Milliseconds per tier (frozen — shared by implementation and tests). */
 export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
   Object.freeze({
     fast: 5_000,
@@ -41,51 +46,59 @@ export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
     unbounded: 0,
   });
 
-/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级 / 溢出候选）。 */
+/** ACI safety/scheduling metadata (lazy loading / concurrency safety / interrupt behavior / timeout tier / overflow candidacy). */
 export interface AciMeta {
   readonly category: AciCategory;
   readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
-  /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入
-   *  (T4:直呼未 discover 的 lazy 件也触发 hydrate —— gateOne 读本字段,
-   *  故 permission-executor 的 catalog 投影必须保留它)。默认 false（核心常驻）。 */
+  /** true = lazy: stays out of the prompt schema by default and needs a
+   *  discover() lookup to be injected (calling an undiscovered lazy tool
+   *  directly also hydrates it — gateOne reads this field, so the
+   *  permission-executor's catalog projection must keep it). Default false
+   *  (core, resident). */
   readonly lazy?: boolean;
   /**
-   * B6 / ADR-0043 §3:溢出候选标记 —— true = 进入可延迟池(首轮装配
-   * countTokens 实测超过 context window 的 10% 时可退到索引档:名+描述)。与
-   * `lazy` 区分:`lazy` = 已加载即常驻(schema 仍可能在可见前缀),`deferrable`
-   * = 溢出时可退到索引档。**核心七件永不退场**(bash / read_file /
-   * edit_file / write_file / grep / glob / spawn_subagent),即使标
-   * deferrable 也被判定层忽略 —— 见 `tool-overflow.ts` `CORE_TOOL_NAMES`。
-   * 默认 false(常驻)。MCP 工具天然 deferrable(B4 §2);内建低频件按调用
-   * 频次数据定(本 plan B6 §3 预置:trace 读侧三件 + web_search / web_fetch)。
+   * ADR-0043: overflow candidacy marker — true = joins the deferrable pool
+   * (when the first-turn assembly-time countTokens measurement exceeds 10%
+   * of the context window, it may be retired to the index tier: name +
+   * description). Distinct from `lazy`: `lazy` = stays out until loaded
+   * (schema may still sit in the visible prefix), `deferrable` = may be
+   * retired to the index tier under overflow. **The core seven never
+   * retire** (bash / read_file / edit_file / write_file / grep / glob /
+   * spawn_subagent) — the decision layer ignores deferrable on them; see
+   * `CORE_TOOL_NAMES` in `tool-overflow.ts`.
+   * Default false (resident). MCP tools are naturally deferrable; builtin
+   * low-frequency candidates are preset as the trace read-side three +
+   * web_search / web_fetch.
    */
   readonly deferrable?: boolean;
-  /** 静态超时分级；createAciExecutor 据此生成 per-call 超时（覆盖 engine 传入 timeoutMs）。 */
+  /** Static timeout tier; createAciExecutor derives a per-call timeout from it (overriding the engine-passed timeoutMs). */
   readonly timeoutTier: TimeoutTier;
 }
 
-/** ACI 工具定义 = 冻结 ToolDef + aci 元数据（扩展，不改协议）。 */
+/** ACI tool definition = frozen ToolDef + aci metadata (an extension; the protocol is unchanged). */
 export interface AciToolDef extends ToolDef {
   readonly aci: AciMeta;
 }
 
-/** ACI 目录：按名定位 AciToolDef（权限层与延迟加载共用）。 */
+/** ACI catalog: lookup AciToolDef by name (shared by the permission layer and lazy loading). */
 export interface AciCatalog {
   readonly get: (name: string) => AciToolDef | undefined;
   readonly all: () => ReadonlyArray<AciToolDef>;
   /**
-   * B4 / ADR-0043 §2:检某名字是否已被 `discover()` 标记为「模型已检索」。
-   * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 hub runDeps
-   * 用 build-engine 之外的 registry,行为与 B4 之前一致)。
+   * ADR-0043: check whether a name has been marked "retrieved by the model"
+   * via `discover()`. Absent (`undefined`) → the gate lets the call through
+   * (paths not assembled via an ACI registry, e.g. a hub runDeps using a
+   * registry outside build-engine, behave as before this gate existed).
    */
   readonly isDiscovered?: (name: string) => boolean;
   /**
-   * T3 / T4 / ADR-0046 §3:hydrate 副作用入口 —— gateOne 对未 discover 的
-   * lazy 工具(`mcp__` 前缀件与 schema 退场的内建件)调此函数把名字纳入
-   * discovered set(下一轮 visibleSchemas 尾部追加 schema)。缺席
-   * (`undefined`)→ 闸门视作「非 ACI registry 装配的路径」,行为与 T3 之前
-   * 一致(直接交给 inner)。
+   * ADR-0046: hydrate side-effect entry — gateOne calls this for undiscovered
+   * lazy tools (`mcp__`-prefixed defs and schema-retired builtins) to add the
+   * name to the discovered set (next round's visibleSchemas appends the
+   * schema at the tail). Absent (`undefined`) → the gate treats it as a "not
+   * an ACI-registry path" and behaves as before (hands the call directly to
+   * inner).
    */
   readonly discover?: (name: string) => void;
 }
@@ -93,7 +106,7 @@ export interface AciCatalog {
 /**
  * ⚠️ Compatibility re-exports — the prototype layer used PermissionDecision,
  * PermissionOutcome, PermissionRule, AciPermissionPolicy. Those shapes live in
- * `src/harness/permission/` now (graduated as part of #122). Re-exporting them
+ * `src/harness/permission/` now (graduated there). Re-exporting them
  * here avoids breaking any prototype-importing tests while the new module
  * (the new home of these symbols) is the canonical source.
  */

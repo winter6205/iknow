@@ -14,8 +14,9 @@ import {
 
 import { ToolExecutionError } from "../../errors.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
-// spawnWithStopSignal / truncateByCodePoint 迁至 sandbox/runner（#128 T2）：
-// sandbox 是基础层，这里 re-export 保持 grep / glob / 既有测试的 import 路径不变。
+// spawnWithStopSignal / truncateByCodePoint moved to sandbox/runner:
+// sandbox is the base layer; the re-export here keeps the import paths used
+// by grep / glob / existing tests unchanged.
 export {
   SIGNAL_EXIT_CODES,
   spawnWithStopSignal,
@@ -48,21 +49,21 @@ function expandHome(p: string): string {
 }
 
 /**
- * T4 (plans/session-fg-handoff-interrupt.md Locked sentence 4): the model
- * sometimes echoes the live tree's own leaf prefix onto a workspace-relative
- * path — `ai-news-digest/index.html` while the tree root already IS
- * `<…>/.iknow/worktrees/ai-news-digest` — which resolves to a matryoshka
- * `ai-news-digest/` directory (the exact _Avoid_ in CONTEXT's taskRoot entry).
- * Strip that echo before resolution so both arms land on the tree root.
+ * The model sometimes echoes the live tree's own leaf prefix onto a
+ * workspace-relative path — `ai-news-digest/index.html` while the tree root
+ * already IS `<…>/.iknow/worktrees/ai-news-digest` — which resolves to a
+ * matryoshka `ai-news-digest/` directory (the exact _Avoid_ in CONTEXT's
+ * taskRoot entry). Strip that echo before resolution so both arms land on
+ * the tree root.
  *
  * Only for task-worktree-shaped roots (`isTaskWorktreePath`, shape SSOT):
  * a main checkout — or any non-worktree root — keeps today's byte-identical
  * resolution. The strip is unconditional for a leaf-prefixed path; a real
  * same-named nested directory gets no escape hatch. Only the prefix form
- * (`<leaf><sep>…`, or an absolute `<realRoot><sep><leaf><sep>…`) is stripped;
- * the bare leaf stays untouched. The relative arm normalizes first so a
- * `./<leaf>/…` echo cannot reach the nested decoy either; every non-matching
- * target is returned byte-identical.
+ * (`<leaf><sep>…`, or an absolute `<realRoot><sep><leaf><sep>…`) is
+ * stripped; the bare leaf stays untouched. The relative arm normalizes
+ * first so a `./<leaf>/…` echo cannot reach the nested decoy either; every
+ * non-matching target is returned byte-identical.
  */
 function stripTaskWorktreeLeafEcho(
   realRoot: string,
@@ -71,8 +72,9 @@ function stripTaskWorktreeLeafEcho(
   if (!isTaskWorktreePath(realRoot)) return expandedTarget;
   const leaf = basename(realRoot);
   if (leaf.length === 0) return expandedTarget;
-  // 归一化后再判前缀：`./<leaf>/…` 与 `<root>/./<leaf>/…` 都是同一句回显，
-  // 归一化不许成为绕过剥叶的旁门。不匹配的目标原样返回（逐字节不变）。
+  // Normalize before the prefix check: `./<leaf>/…` and `<root>/./<leaf>/…`
+  // are the same echo, and normalization must not become a back door around
+  // the leaf strip. Non-matching targets are returned byte-identical.
   const normalized = normalize(expandedTarget);
   const echo = `${leaf}${sep}`;
   if (isAbsolute(expandedTarget)) {
@@ -98,7 +100,7 @@ function stripTaskWorktreeLeafEcho(
  * already injects every turn but which the agent may also want to re-read
  * directly. A target is allowed if it falls under `root` OR any extra root.
  *
- * `extraWriteRoots` (optional, rev 2026-08-11): same semantics for write tools.
+ * `extraWriteRoots` (optional): same semantics for write tools.
  * Write tools (`edit_file` / `write_file`) traditionally do NOT pass extra
  * roots, but the user-profile directory at `~/.iknow/` needs write access so
  * the agent can update `user.md` and `rm BOOTSTRAP.md` directly (replaces the
@@ -163,8 +165,10 @@ function assertContained(
   roots: {
     readonly extraReadRoots?: readonly string[];
     readonly extraWriteRoots?: readonly string[];
-    /** ADR-0092 会话 tmp 垫底（realpath 后）：既作放行写根，也作 /tmp 拒绝
-     * 文案的数据源——单一通道，避免同一值经 extras 与独立参数双份传递。 */
+    /** ADR-0092 session tmp pad (after realpath): serves both as an allowed
+     *  write root and as the data source for the /tmp rejection message —
+     *  one channel, so the same value is not passed twice via extras and a
+     *  separate parameter. */
     readonly realTmpRoot?: string;
   }
 ): void {
@@ -179,19 +183,21 @@ function assertContained(
   if (withinPrimary || withinReadExtras || withinWriteExtras) return;
   const prefix = `path outside workspace: ${resolvedTarget} not under ${realRoot}`;
   const scratchRel = relativeToOsTmpIfUnder(resolvedTarget);
-  // SC4 (specs/mutate-write-contract.md / ADR-0092): guest Linux `/tmp` 不
-  // alias 到会话 tmp，`/tmp/...` 目标必须在这里可观察地失败——但草稿越界
-  // 不是交付越界，重试引导指向本身份展开 `$TMPDIR` 垫底绝对路径，而非
-  // 「relative to the taskRoot」(plans/session-scratch-path-space.md T2)。
-  // EXIT: 无垫底解析结果（read 面未接 sessionTmpRoot / legacy 调用）→ 落到
-  // 下方交付越界文案，与劈分前的可观察行为逐字一致。
+  // ADR-0092: a guest Linux `/tmp` is NOT aliased onto the session tmp, so a
+  // `/tmp/...` target must fail observably here. But a scratch-path escape is
+  // not a delivery escape: the retry guidance points at this identity's
+  // expanded `$TMPDIR` absolute pad, not "relative to the taskRoot".
+  // EXIT: no pad resolution result (read surface didn't get sessionTmpRoot /
+  // legacy call) → fall through to the delivery-escape message below,
+  // byte-identical to the pre-split observable behavior.
   if (scratchRel !== undefined && roots.realTmpRoot !== undefined) {
     throw new ToolExecutionError(
       scratchRejectionMessage(prefix, scratchRel, roots.realTmpRoot)
     );
   }
-  // EXIT: 非 OS /tmp 的越界 = 交付越界 → 保持 ADR-0037 §4 (e) 的 taskRoot
-  // 重试引导；写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
+  // EXIT: an escape outside OS /tmp = a delivery escape → keep ADR-0037's
+  // taskRoot retry guidance; write root absent → fall back to the base
+  // message (no crash, degrades to the base form).
   const deliveryHint =
     realRoot.length > 0
       ? ` (current write root is the live taskRoot: ${realRoot}; scratch files belong in the session tmp dir, $TMPDIR — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
@@ -200,9 +206,10 @@ function assertContained(
 }
 
 /**
- * 草稿（OS `/tmp`）越界的拒绝文案。T3 (plans/session-scratch-path-space.md):
- * 仅当 `<sessionScratch>/X` 已存在时补那条 canonical 宿主路径——仍不
- * alias：不读、不写、不重定向，只是文案提示，垫底内容不变。
+ * Rejection message for a scratch (OS `/tmp`) escape. Only when
+ * `<sessionScratch>/X` already exists do we name that canonical host path —
+ * still no aliasing: nothing is read, written, or redirected, it is only a
+ * wording hint, and the containment decision is unchanged.
  */
 function scratchRejectionMessage(
   prefix: string,
@@ -210,21 +217,23 @@ function scratchRejectionMessage(
   pad: string
 ): string {
   const nearMiss = scratchRel.length > 0 ? join(pad, scratchRel) : undefined;
-  // EXIT: 近邻存在性检查失败（existsSync 吞 EACCES/ENOENT 等）按不存在处理
-  // ——绝不把不存在的路径写成「去读这个」式指引。
+  // EXIT: a failed near-miss existence check (existsSync swallows EACCES /
+  // ENOENT etc.) is treated as "does not exist" — never turn a nonexistent
+  // path into a "go read this" pointer.
   if (nearMiss !== undefined && existsSync(nearMiss)) {
     return `${prefix} (guest /tmp is not aliased onto this identity's scratch area; ${nearMiss} already exists under the session tmp dir: expanded $TMPDIR is ${pad} — retry with that absolute path there.)`;
   }
-  // EXIT: 有垫底但无近邻文件 → 只给展开的 $TMPDIR 绝对路径，不暗示任何
-  // 具体文件存在。
+  // EXIT: pad present but no near-miss file → give only the expanded $TMPDIR
+  // absolute path, implying no specific file exists.
   return `${prefix} (guest /tmp is not aliased onto this identity's scratch area; scratch files belong in the session tmp dir: expanded $TMPDIR is ${pad} — same lifetime as this identity and not a delivery destination.)`;
 }
 
 /**
- * T2 (plans/session-scratch-path-space.md): 判定被拒目标是否落在真实 OS tmp
- * 之下（`/tmp` 或 `tmpdir()` 展开位）。只用于拒绝文案劈分支——绝不用于放行，
- * 否则会把不 alias 的 guest `/tmp` 重新变成访问面。返回相对该 tmp 根的路径
- * （可能为空串，表示目标就是 tmp 根本身）。
+ * Decide whether a rejected target falls under the real OS tmp
+ * (`/tmp` or the `tmpdir()` expansion). Used only to branch the rejection
+ * wording — never to grant access, or the non-aliased guest `/tmp` would
+ * become an attack surface again. Returns the path relative to that tmp
+ * root (possibly the empty string when the target is the tmp root itself).
  */
 function relativeToOsTmpIfUnder(resolvedTarget: string): string | undefined {
   for (const osTmp of ["/tmp", resolve(tmpdir())]) {

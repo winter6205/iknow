@@ -1,18 +1,23 @@
 /**
- * ACI 能力层：权限检查兼容入口（毕业过渡）。
+ * ACI capability layer: permission-check compatibility entry (graduation
+ * transition).
  *
- * 决策与决策对象已迁至 `src/harness/permission/`（#122）；
- * 本文件保留 allowlist / 危险命令识别工具（`isAllowedCommand` /
- * `isDangerousCommand` / `firstToken` / `SHELL_METACHARS`）作为纵深双保险
- * （硬墙只引用危险模式 + 敏感路径；非白名单命令落入 ask，执行期边界由 bwrap 承担）。
+ * Decisions and decision objects moved to `src/harness/permission/`; this
+ * file keeps the allowlist / dangerous-command detectors (`isAllowedCommand`
+ * / `isDangerousCommand` / `firstToken` / `SHELL_METACHARS`) as defense in
+ * depth (the hard walls reference only dangerous patterns + sensitive paths;
+ * non-whitelisted commands fall into ask, with runtime boundaries owned by
+ * bwrap).
  *
- * `checkPermission` 现已迁出至 `permission/checkPermission`（5 步中间件链在
- * `permission/permission-executor.ts`）。为避免破坏既有测试 / 工具代码，
- * 这里 re-export `createPermissionPolicy` / `checkPermission` 的纯函数形态，
- * 与 020 之前的 prototype API 形态保持兼容。
+ * `checkPermission` now lives in `permission/checkPermission` (the 5-step
+ * middleware chain is in `permission/permission-executor.ts`). To avoid
+ * breaking existing tests / tool code, this file re-exports the pure
+ * `createPermissionPolicy` / `checkPermission` shapes, staying compatible
+ * with the earlier prototype API.
  *
- * 也保留原有 prototype 的 `createPermissionPolicy({defaultRule, byName})`
- * 入参形态作为薄包装（内部映射至新 `createPermissionPolicy`）。
+ * Also keeps the prototype's `createPermissionPolicy({defaultRule, byName})`
+ * input shape as a thin wrapper (mapped internally to the new
+ * `createPermissionPolicy`).
  */
 
 import type {

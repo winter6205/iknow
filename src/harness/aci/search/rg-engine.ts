@@ -1,16 +1,20 @@
 /**
- * 自带引擎执行层（D6 / SC9；SC12「argv 构造」「行解析」）。
+ * Bundled-engine execution layer: argv construction and line parsing.
  *
- * 契约：生产 handler **只 exec 安装根钉死的那条路径**（`engine-manifest.ts`
- * 给出），不 `which rg`、不回落 PATH 上的 `rg`。PATH 里的 rg 是不是存在、
- * 是不是别的版本，都与此无关。
+ * Contract: the production handler **execs only the path pinned under the
+ * install root** (provided by `engine-manifest.ts`); it never runs `which rg`
+ * and never falls back to an `rg` on PATH. Whether some other rg or version
+ * exists on PATH is irrelevant here.
  *
- * 「自带起不来」的判定收在这里：spawn 抛 ENOENT / EACCES（或安装根没有该
- * 平台资产）→ 返回 `{ kind: "unavailable" }`，由 handler 转 Node 全语义扫。
- * 这是**唯一**的降级出口 —— 起不来不等于该调用失败。
+ * The "bundled engine cannot start" decision lives here: spawn throws
+ * ENOENT / EACCES (or the install root has no asset for this platform) →
+ * return `{ kind: "unavailable" }`, and the handler switches to the full-
+ * semantics Node scan. This is the **only** downgrade exit — cannot-start does
+ * not mean the call fails.
  *
- * 本模块不排序、不分页、不投影：它只把 rg 的 stdout 变成与 Node 引擎同形的
- * 原始产物，两条引擎因此共用同一条流水线。
+ * This module does not sort, paginate, or project: it only turns rg stdout
+ * into raw artifacts shaped exactly like the Node engine's, so both engines
+ * share one pipeline.
  */
 
 import type { ChildProcess } from "node:child_process";
@@ -32,14 +36,14 @@ import {
 } from "./rg-output.js";
 import type { ContextGroup, FileCount, LineHit, QuerySpec } from "./types.js";
 
-/** 测试接缝：生产 = node:child_process.spawn；可注入以模拟缺失 / 固定 stdout。 */
+/** Test seam: production = node:child_process.spawn; injectable to simulate a missing binary / fixed stdout. */
 export type SpawnFn = (
   command: string,
   args: readonly string[],
   options: Parameters<typeof nodeSpawn>[2]
 ) => ChildProcess;
 
-/** 引擎产物：三种出法各自的原始形态（尚未排序 / 分页）。 */
+/** Engine artifacts: the raw shape of each of the three output modes (not yet sorted / paginated). */
 export type EngineResult =
   | { readonly kind: "unavailable" }
   | { readonly kind: "lines"; readonly lines: ReadonlyArray<LineHit> }
@@ -49,7 +53,7 @@ export type EngineResult =
 
 export interface RgEngineInput {
   readonly spec: QuerySpec;
-  /** 钉死二进制的绝对路径；`undefined` = 该平台无资产 → 直接降级。 */
+  /** Absolute path of the pinned binary; `undefined` = no asset for this platform → downgrade directly. */
   readonly binaryPath: string | undefined;
   readonly searchRoot: string;
   readonly workspaceRoot: string;
@@ -58,23 +62,30 @@ export interface RgEngineInput {
 }
 
 /**
- * 跑 rg。任何「起不来」都返回 `unavailable`（含平台无资产），
- * 其余失败照常 typed 抛出。
+ * Run rg. Any "cannot start" returns `unavailable` (including no asset for the
+ * platform); all other failures throw typed as usual.
  */
 export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
   if (input.binaryPath === undefined) return { kind: "unavailable" };
 
-  // cwd = **workspace 根**（不是 searchRoot）：rg 回显喂进去的路径、且
-  // `--glob` 的锚定相对 cwd 判段 —— 两者都要求搜索路径相对 workspace 表达，
-  // 才能与 Node 引擎（按 workspace 相对 path 判段、吐相对 path）同口径。
+  // cwd = **workspace root** (not searchRoot): rg echoes the paths fed into
+  // it, and `--glob` anchoring decides segments relative to cwd — both
+  // require the search path to be expressed relative to workspace so that it
+  // matches the Node engine (which also judges segments on workspace-relative
+  // paths and emits relative paths).
   const searchPath = toSearchPath(input.workspaceRoot, input.searchRoot);
-  // 搜索目标本身含 `\n` / `\0` 时直接给空结果，**不** exec rg：rg 的 `--glob`
-  // 排除只作用于遍历期，显式点名的文件 / 目录照搜（实测 15.1.0），而它的
-  // 记录用 `\n` 收尾 —— 带 `\n` 的路径会把一条记录拆成两段，后半段长成一条
-  // **假命中**（`nl\nname.txt` → `name.txt:1:<正文>`），且该假路径若真存在就
-  // 能通过文本准入活到模型面前。搜索目标不可表示时它**整棵子树**也不可表示
-  // （任何子孙路径都带这段祖先名），空结果与「全部跳过」同义。规则与理由见
-  // `path-representable.ts`；Node 引擎侧由 `pipeline.ts` 的同一判据兜住。
+  // When the search target itself contains `\n` / `\0`, return an empty
+  // result directly and do **not** exec rg: rg's `--glob` exclusion only
+  // applies during traversal, while an explicitly named file / dir is still
+  // searched (verified 15.1.0), and its records end with `\n` — a path with
+  // `\n` splits one record into two, and the second half looks like a **fake
+  // hit** (`nl\nname.txt` → `name.txt:1:<body>`), and that fake path, if it
+  // really exists, could pass text admission and reach the model. When the
+  // search target is unrepresentable, its **entire subtree** is also
+  // unrepresentable (every descendant path carries this ancestor name), so an
+  // empty result is synonymous with "skip all". Rules and rationale in
+  // `path-representable.ts`; the Node engine side is covered by the same test
+  // in `pipeline.ts`.
   if (!isPathRepresentable(searchPath)) return parseByMode("", input);
   const args = buildRgArgs(input.spec, searchPath, MAX_MATCH_LINE_COLUMNS);
   const collected = await collect(input, args);
@@ -83,26 +94,34 @@ export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
 }
 
 /**
- * 二进制 / 超大的**准入复核**（D6/SC9：两条引擎同一条准入线）。
+ * Binary / oversize **admission re-check** (both engines share one admission
+ * line).
  *
- * 为什么 rg 报出来的路径还要复核：rg 自己的二进制检测是按 64 KiB 窗口做的，
- * 且**同一文件在不同出法下结论不同**（实测 15.1.0：NUL 在 70 KB 处的文件
- * `-l` 列出、`--count` 略过、`content` 吐 WARNING）。那种口径没有可复刻的
- * 一致含义，所以本工具的口径是「二进制（整文件含 NUL）不搜」—— 与
- * `read_file` 的 `buffer.includes(0x00)` 同源（ADR-0004），单一权威落在
- * `file-lines.ts` 的 `readTextBuffer`。rg 自带的检测因此只当省 I/O 的粗筛：
- * 它再准，最终接受集也由这里决定，两条引擎对同一个文件要么都收、要么都拒。
+ * Why re-check paths rg already reported: rg's own binary detection uses a
+ * 64 KiB window and **reaches different conclusions for the same file
+ * depending on output mode** (verified 15.1.0: a file with NUL at 70 KB is
+ * listed by `-l`, skipped by `--count`, WARNING for `content`). That behavior
+ * has no replicable consistent meaning, so this tool's rule is "binary
  *
- * `allowOversize` 的判据与 Node 扫同形（搜索根是显式点名的文件）—— 少了它，
- * `path: "big.ts"` 在 Node 路径能搜、rg 路径被这里拒掉，等于把豁免修复的
- * 分歧又倒回来。
+ // (ADR-0004)
+ * (whole file contains NUL) is not searched" — same source as `read_file`'s
+ * `buffer.includes(0x00)`, with single authority in
+ * `file-lines.ts`'s `readTextBuffer`. rg's built-in detection is thus only a
+ * best-effort I/O saver: however accurate it is, the final accepted set is
+ * decided here, so both engines admit or reject the same file together.
+ *
+ * The `allowOversize` test mirrors the Node scan shape (search root is an
+ * explicitly named file) — without it, `path: "big.ts"` would be searchable
+ * via Node but rejected here via rg, reintroducing exactly the divergence the
+ * exemption fix removed.
  */
 async function applyAdmission(
   result: EngineResult,
   input: RgEngineInput
 ): Promise<EngineResult> {
-  // `unavailable` 不是本层产物（调用方已分派掉），但它属于同一联合类型；
-  // 显式挡掉后其余三种形状各处都需要具体成员访问。
+  // `unavailable` is not a product of this layer (the caller already dispatched
+  // it), but it belongs to the same union type; after explicitly blocking it,
+  // the remaining three shapes each need concrete member access.
   if (result.kind === "unavailable") return result;
   const paths = resultPaths(result);
   if (paths.length === 0) return result;
@@ -110,13 +129,15 @@ async function applyAdmission(
   const admitted = await admittedPaths(input.workspaceRoot, paths, {
     allowOversize: await isExplicitFile(input),
   });
-  // 全员通过时原样返回（省掉一次逐条重造）：比较基数是**去重后**的数量，
-  // 命中行形状下同一文件会出现多次，拿 `paths.length` 比会永远走不到快路。
+  // When all paths pass, return as-is (saving one per-entry rebuild): the
+  // comparison base is the **deduplicated** count — in the hit-line shape the
+  // same file appears many times, so comparing `paths.length` would never take
+  // the fast path.
   if (admitted.size === unique.size) return result;
   return keepAdmitted(result, admitted);
 }
 
-/** 结果涉及的路径（三种形状各自的投影面）。 */
+/** Paths involved in the result (projection of each shape). */
 function resultPaths(
   result: Exclude<EngineResult, { kind: "unavailable" }>
 ): string[] {
@@ -131,7 +152,7 @@ function resultPaths(
   return [];
 }
 
-/** 按准入集合过滤结果（保持各形状的原有顺序）。 */
+/** Filter the result by the admitted set (preserving each shape's original order). */
 function keepAdmitted(
   result: Exclude<EngineResult, { kind: "unavailable" }>,
   admitted: ReadonlySet<string>
@@ -164,7 +185,7 @@ function keepAdmitted(
   };
 }
 
-/** 搜索根是否指向一个存在的文件（与 `node-scan` / `grep.ts` 同判据）。 */
+/** Whether the search root points at an existing file (same test as `node-scan` / `grep.ts`). */
 async function isExplicitFile(input: RgEngineInput): Promise<boolean> {
   const info = await stat(input.searchRoot).catch(() => null);
   return info !== null && info.isFile();
@@ -178,7 +199,7 @@ type Collected =
       readonly stderr: string;
     };
 
-/** spawn 并把 stdout/stderr 收全；ENOENT / EACCES → `unavailable`。 */
+/** Spawn and collect stdout/stderr fully; ENOENT / EACCES → `unavailable`. */
 async function collect(
   input: RgEngineInput,
   args: ReadonlyArray<string>
@@ -205,8 +226,10 @@ async function collect(
 }
 
 /**
- * 测试接缝分支：与生产路径的 kill 语义刻意不同（只够 ENOENT 模拟与
- * 固定 stdout 的解析覆盖）。需要完整 abort/kill 覆盖的用例走生产路径。
+ * Test-seam branch: deliberately different kill semantics from the
+ * production path (enough only for ENOENT simulation and fixed-stdout parse
+ * coverage). Cases needing full abort/kill coverage go through the production
+ * path.
  */
 function collectViaSeam(
   spawn: SpawnFn,
@@ -236,31 +259,37 @@ function collectViaSeam(
 }
 
 /**
- * 搜索根 → rg 的路径参数（相对 workspace 根，posix 分隔符）。
+ * Search root → rg's path argument (relative to workspace root, posix
+ * separators).
  *
- * identity root 在 workspace 之外（ADR-0037 改绑后的只读面）→ 这里会停下
- * `..` 形态的路径，rg 把它当「workspace 相对且带 `..`」搜。Node 扫同口径：
- * 它**不**按 `..` 前缀剔除（见 `node-scan.ts`），两条引擎的读面因此一致。
- * 越界已由 `resolveSearchRoot` 的 containment 校验挡在入口。
+ * An identity root outside workspace (the read-only surface after ADR-0037
+ * rebinding) → this yields a `..`-shaped path, and rg searches it as
+ * "workspace-relative with `..`". The Node scan matches: it does **not**
+ * remove `..`-prefixed entries (see `node-scan.ts`), so both engines' read
+ * surfaces agree. Escapes are blocked at the entry by `resolveSearchRoot`'s
+ * containment check.
  */
 function toSearchPath(workspaceRoot: string, searchRoot: string): string {
   const rel = relative(workspaceRoot, searchRoot).split("\\").join("/");
   return rel.length === 0 ? "." : rel;
 }
 
-/** 安装根二进制不存在 / 不可执行 —— D6 的唯一起不来判据。 */
+/** Install-root binary missing / not executable — the only cannot-start test. */
 function isUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   return code === "ENOENT" || code === "EACCES" || code === "EPERM";
 }
 
 /**
- * rc 解释：0/1 正常（1 = 无匹配）；2 = 用法 / 正则错误，**或**只是有文件读
- * 不到（`--no-messages` 已把后者压成空 stderr）；其余 = 引擎故障。
+ * rc interpretation: 0/1 normal (1 = no match); 2 = usage / regex error,
+ * **or** simply some file was unreadable (`--no-messages` has already squashed
+ * the latter into an empty stderr); anything else = engine failure.
  *
- * rc=2 且 stderr 空时 stdout 仍是合法命中 —— 若在这里抛，一个不可读的邻居
- * 文件就会让整次查询失败，而 Node 引擎只是跳过该文件，两条引擎对同一目录
- * 给出不同答案（SC9）。所以这种 2 当「部分成功」处理：解析拿到的行。
+ * When rc=2 and stderr is empty, stdout is still legitimate hits — throwing
+ * here would let one unreadable neighbor file fail the whole query, while the
+ * Node engine just skips that file, so the two engines would answer
+ * differently for the same directory. Hence this kind of 2 is treated as
+ * "partial success": parse whatever lines arrived.
  */
 function interpret(
   collected: Exclude<Collected, "unavailable">,
@@ -283,7 +312,7 @@ function interpret(
   );
 }
 
-/** 按出法解析 stdout；content + context 走组解析（SC6）。 */
+/** Parse stdout by output mode; content + context goes through group parsing. */
 function parseByMode(stdout: string, input: RgEngineInput): EngineResult {
   const spec = input.spec;
   if (spec.output === "paths") {
@@ -295,8 +324,9 @@ function parseByMode(stdout: string, input: RgEngineInput): EngineResult {
   if (spec.context > 0) {
     return { kind: "context", groups: parseRgContextStdout(stdout) };
   }
-  // `parseRgNullLines` 内部已按 MAX_MATCH_LINE_COLUMNS 走唯一一道闸，这里
-  // 不再收第二遍 —— 重复收口只会让「到底谁是权威」变得含糊。
+  // `parseRgNullLines` already applies the single code-point gate at
+  // MAX_MATCH_LINE_COLUMNS internally; no second pass here — repeated
+  // finalization only blurs "who is the authority".
   return { kind: "lines", lines: parseRgNullLines(stdout) };
 }
 

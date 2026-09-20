@@ -1,10 +1,14 @@
 /**
- * PROTOTYPE（throwaway）— ACI 原型工具层：延迟加载 registry。
+ * PROTOTYPE (throwaway) — ACI prototype tool layer: lazily-loaded registry.
  *
- * 验证问题：延迟加载（lazy 工具默认不进 prompt schema，需 discover() 注入）
- * 能否以加法式装饰层实现，不修改冻结 Registry 接口。
- * inner = createRegistry(tools)：AciToolDef 结构上是 ToolDef，spread 多带
- * aci 字段对 ajv 编译无害（additionalProperties 约束在 inputSchema 内，不在顶层）。
+ * Question under validation: can lazy loading (lazy tools stay out of the
+ * prompt schema until discover() injects them) be implemented as an
+ * additive decorating layer without modifying the frozen Registry
+ * interface.
+ * inner = createRegistry(tools): AciToolDef is structurally a ToolDef, and
+ * the extra `aci` field carried by spread is harmless to ajv compilation
+ * (the additionalProperties constraint lives inside inputSchema, not at the
+ * top level).
  */
 
 import Ajv from "ajv";
@@ -16,59 +20,75 @@ import type { AciCatalog, AciToolDef } from "./types.js";
 import { RegistryConstructionError } from "../errors.js";
 
 export interface AciRegistry {
-  /** 冻结协议 registry（交给 createExecutor）。 */
+  /** Frozen protocol registry (handed to createExecutor). */
   readonly inner: RegistryImpl;
   readonly catalog: AciCatalog;
-  /** 动态追加 MCP 扩展源工具，不改变 inner 的构造期快照。 */
+  /** Append MCP-extension tools dynamically without changing inner's construction-time snapshot. */
   readonly registerExternal: (defs: ReadonlyArray<AciToolDef>) => void;
   /**
-   * 按名移除动态扩展源工具（reload 时先 unregister 再 register）。
-   * 仅操作 externalByExt Map；不动 inner 冻结快照、不动 Gate2 防撞
-   * （同名 register 仍报错）。未注册的名字静默忽略（幂等 — reload
-   * 路径对陈旧 config 名不抛）。
+   * Remove dynamically-registered extension tools by name (reload unregisters
+   * before re-registering).
+   * Touches only the externalByExt Map; inner's frozen snapshot and the
+   * Gate-2 collision check stay untouched (a same-name register still
+   * throws). Unknown names are silently ignored (idempotent — the reload
+   * path must not throw on stale config names).
    */
   readonly unregisterExternal: (names: ReadonlyArray<string>) => void;
   /**
-   * B6 / ADR-0043 §3:溢出治理退场 seam —— 把内建 deferrable 件 stamp
-   * `aci.lazy: true`(进 lazy 尾部纪律:`visibleSchemas` 过滤 / 索引段带
-   * 名+描述常驻 / 直呼即 hydrate 把 schema 追回尾部)。**仅操作构造期
-   * `tools` 数组 + 对应 `byName` 槽**;`inner` 冻结快照不动(executor 仍能
-   * 解析,name 解析走 byName fallback)。仅限 `byName` 内的名字(内建 + 已
-   * register 的都不影响 —— 后者已被 B4 的 `lazy: true` 标记)。未注册的名字
-   * 静默忽略(幂等,与 `unregisterExternal` 同形态)。
+   * ADR-0043: overflow-governance retirement seam — stamps `aci.lazy: true`
+   * onto builtin deferrable tools (entering the lazy-tail discipline:
+   * `visibleSchemas` filters them, the index section keeps name +
+   * description resident, and a direct call hydrates the schema back onto
+   * the tail). **Operates only on the construction-time `tools` array + the
+   * matching `byName` slot**; inner's frozen snapshot stays untouched (the
+   * executor can still resolve the name via the byName fallback). Applies
+   * only to names present in `byName` (builtins + already-registered ones
+   * are unaffected — the latter are already marked `lazy: true`). Unknown
+   * names are silently ignored (idempotent, same shape as
+   * `unregisterExternal`).
    *
-   * 这是 B6 溢出治理的**唯一**写 seam:`build-engine` 装配期
-   * `await mcpManager.start()` 之后调一次(首轮判定,会话内恒定);不退
-   * 的内建件 = 不调。核心七件永不退场(由 `tool-overflow.ts` 的
-   * `deriveCandidateOrder` 上游保证,候选 derivation 层已剔除)。
+   * This is the **only** write seam for builtin retirement: build-engine
+   * calls it once at assembly, after `await mcpManager.start()` (first-turn
+   * decision, constant for the session); a builtin that should stay is
+   * simply not passed. The core seven never retire (guaranteed upstream by
+   * `deriveCandidateOrder` in `tool-overflow.ts`, which filters them out at
+   * the candidate-derivation layer).
    */
   readonly retireBuiltin: (names: ReadonlyArray<string>) => void;
   /**
-   * 进 prompt 的集合：非 lazy 全量（注册序）+ 已发现 lazy（discovery 序
-   * 尾部追加，保前缀稳定）。
+   * The set entering the prompt: all non-lazy tools (registration order) +
+   * discovered lazy tools (appended in discovery order, keeping the prefix
+   * stable).
    */
   readonly visibleSchemas: () => ReadonlyArray<ToolDef>;
-  /** 延迟加载：按需检索某工具 schema（含 lazy 的），未注册返回 undefined。 */
+  /** Lazy loading: fetch one tool's schema on demand (lazy ones included); undefined for unregistered names. */
   readonly discover: (name: string) => ToolDef | undefined;
   /**
-   * B4 / ADR-0043 §2:检某名字是否已被 `discover()` 标记为「模型已检索」。
-   * 装配层 / 闸门用:未 discover 的 `mcp__` 工具调用 = 未加载,应抛
-   * ToolExecutionError(模板钉死)而非真跑 handler。def 可能不在注册表
-   * (返回 false),已注册但未检索的也返回 false。
+   * ADR-0043: check whether a name has been marked "retrieved by the model"
+   * via `discover()`. Assembly layer / gate use: calling an `mcp__` tool that
+   * was never discovered = not loaded, and should throw ToolExecutionError
+   * (pinned by template) instead of really running the handler. A def
+   * missing from the registry returns false; registered-but-undiscovered
+   * also returns false.
    */
   readonly isDiscovered: (name: string) => boolean;
 }
 
 /**
- * ADR-0083 结构闸：MCP 工具**不可自称**取得 `exemptFromOutputCap` 豁免。
+ * ADR-0083 structural gate: MCP tools **may not self-declare** the
+ * `exemptFromOutputCap` exemption.
  *
- * 生产路径本就不落该声明（`src/harness/mcp/adapter.ts` 的 `toAciToolDef`
- * 只映射 name / description / inputSchema / aci / handler），本函数防的是
- * in-process 手工构造的 def 混入 —— 外部源天然是第三方数据，豁免只对内建
- * `createSkillTool` 这一处装配期落值。
+ * The production path never lands the declaration anyway
+ * (`toAciToolDef` in `src/harness/mcp/adapter.ts` maps only name /
+ * description / inputSchema / aci / handler); this function guards against
+ * hand-built in-process defs sneaking it in — external sources are by
+ * nature third-party data, and the exemption is reserved for the single
+ * builtin `createSkillTool` set at assembly time.
  *
- * 未携带声明的 def 原样返回（零拷贝，保持此前 `Map.set(def)` 的对象身份
- * 契约：`catalog.get(name)` 与注册入参是同一引用）；携带时才重建冻结副本。
+ * A def without the declaration is returned as-is (zero-copy, preserving
+ * the object-identity contract of the earlier `Map.set(def)`:
+ * `catalog.get(name)` yields the same reference that was registered); only
+ * a def carrying it is rebuilt as a frozen copy.
  */
 function stripOutputCapExemption(def: AciToolDef): AciToolDef {
   if (def.exemptFromOutputCap !== true) return def;
@@ -77,40 +97,47 @@ function stripOutputCapExemption(def: AciToolDef): AciToolDef {
 }
 
 /**
- * 构造 ACI registry：
- *   - inner = createRegistry(tools)（协议 registry，交给 createExecutor）；
- *   - catalog 持有 AciToolDef 全量（权限层与延迟加载共用）；
- *   - visibleSchemas = 非 lazy 全量（注册序，逐位稳定）+ 已发现 lazy 按
- *     discovery 顺序尾部追加（尾部追加保 KV cache 前缀，#631）；discover()
- *     调用即标记，下一轮起进入 promptTools()
- *     （#224 discovered set 状态 — 闭包于 createAciRegistry，不跨 session
- *     持久化，与 spec Boundaries Never 守门）；
- *   - discover 按名返回（含 lazy 工具），命中时记 discovered 标记；
- *     未注册返回 undefined。
+ * Build the ACI registry:
+ *   - inner = createRegistry(tools) (protocol registry, handed to
+ *     createExecutor);
+ *   - catalog holds every AciToolDef (shared by the permission layer and
+ *     lazy loading);
+ *   - visibleSchemas = all non-lazy tools (registration order, bit-stable)
+ *     + discovered lazy tools appended in discovery order (tail-append
+ *     preserves the KV-cache prefix); discover() marks on call, so the next
+ *     round's promptTools() includes it — the discovered set is closure
+ *     state inside createAciRegistry, never persisted across sessions (a
+ *     spec "Boundaries Never" guard);
+ *   - discover returns by name (lazy tools included), recording the
+ *     discovered mark on a hit;
+ *     undefined for unregistered names.
  *
- * **装配期 fail-fast 三闸门（spec § Boundaries Always）**：
- *   - Gate 1 自举守卫：tool_search 是发现工具自身,不允许标 lazy
- *     （否则它把自身标记为待发现,自举死锁）。
- *   - Gate 2 命名空间防撞:mcp__ 前缀预留给未来 MCP 工具(spec 决策
- *     点 2 ⑤);ACI 工具不能占用,装配期即抛。
- *   两闸门共用同一 for 循环前置校验(createRegistry 未调用,失败时无
- *     部分状态)。
+ * **Assembly-time fail-fast gates (spec Boundaries Always)**:
+ *   - Gate 1 bootstrap guard: tool_search is the discovery tool itself and
+ *     may not be marked lazy (it would mark itself pending discovery — a
+ *     bootstrap deadlock).
+ *   - Gate 2 namespace collision: the mcp__ prefix is reserved for MCP
+ *     tools; an ACI tool may not use it, throwing at assembly time.
+ *   Both gates share the same front-loaded for-loop check (createRegistry
+ *   has not run yet, so a failure leaves no partial state).
  */
 export function createAciRegistry(
   tools: ReadonlyArray<AciToolDef>
 ): AciRegistry {
-  // #224 闸门 1 + 2：装配期 fail-fast，在 createRegistry 调用前完成，
-  // 失败不留部分状态。复用 tools 单次遍历，避免双重扫描。
+  // Gates 1 + 2: assembly-time fail-fast, completed before createRegistry is
+  // called so a failure leaves no partial state. Single pass over tools to
+  // avoid double scanning.
   for (const t of tools) {
-    // 自举守卫 — tool_search 是发现工具自身,不允许标 lazy（否则它把
-    // 自身标记为待发现,自举死锁）。
+    // Bootstrap guard — tool_search is the discovery tool itself and may
+    // not be marked lazy (it would mark itself pending discovery, a
+    // bootstrap deadlock).
     if (t.name === "tool_search" && t.aci.lazy === true) {
       throw new RegistryConstructionError(
         "tool_search is the bootstrap discovery tool — lazy=true is forbidden"
       );
     }
-    // 命名空间防撞 — mcp__ 前缀预留给未来 MCP 工具（spec 决策点 2 ⑤）；
-    // ACI 工具不能占用。
+    // Namespace collision — the mcp__ prefix is reserved for MCP tools;
+    // ACI tools may not use it.
     if (t.name.startsWith("mcp__")) {
       throw new RegistryConstructionError(
         `tool name '${t.name}' uses reserved mcp__ namespace`
@@ -128,28 +155,33 @@ export function createAciRegistry(
   }
   const externalByExt = new Map<string, AciToolDef>();
 
-  // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
-  // 持久化）。discover() 命中时 add；visibleSchemas() = 非 lazy 全量（注册
-  // 序，逐位稳定）+ 已发现的 lazy 按 discovery 顺序尾部追加。尾部追加而非
-  // 插回注册序：相邻轮无新 discovery 时可见前缀逐位不变，保 KV cache 前缀
-  // 命中（#631）。B4 / ADR-0043 §2:`isDiscovered` 是 catalog / 闸门侧的
-  // 「已加载」检查入口（permission-executor 据此拒绝未 discover 即调的
-  // mcp__ 工具调用）。
+  // Discovered set: tool names retrieved during this run (closure state,
+  // never persisted across sessions). discover() adds on a hit;
+  // visibleSchemas() = all non-lazy tools (registration order, bit-stable) +
+  // discovered lazy tools appended in discovery order. Tail-append rather
+  // than reinserting into registration order: with no new discovery between
+  // adjacent rounds the visible prefix stays bit-identical, preserving the
+  // KV-cache prefix hit. ADR-0043: `isDiscovered` is the catalog / gate-side
+  // entry point for the "already loaded" check (permission-executor uses it
+  // to reject mcp__ tool calls made without prior discover()).
   const discovered = new Set<string>();
   const isDiscovered = (name: string): boolean => discovered.has(name);
 
   const catalog: AciCatalog = Object.freeze({
     get: (name: string) => byName.get(name) ?? externalByExt.get(name),
-    // 从 byName live 读(注册序 = 构造期 tools 顺序,byName 与 tools 同源
-    // 填充):retireBuiltin 只更新 byName 槽位,live 读让 catalog.all() 与
-    // catalog.get() 永不分叉(构造期冻结快照曾在 retire 后残留 stale def)。
+    // Live read from byName (registration order = the construction-time
+    // tools order; byName and tools are filled from the same source):
+    // retireBuiltin only updates the byName slot, and the live read keeps
+    // catalog.all() and catalog.get() from ever diverging (a frozen
+    // construction-time snapshot once left a stale def after retire).
     all: () =>
       Object.freeze([
         ...byName.values(),
         ...externalByExt.values(),
       ]) as ReadonlyArray<AciToolDef>,
-    // B4 / ADR-0043 §2:暴露 discovered 检查给闸门侧 —— permission-executor
-    // 据此拒绝「未 discover 即调」的 mcp__ 工具调用。
+    // ADR-0043: expose the discovered check to the gate side —
+    // permission-executor uses it to reject "call without discover" on
+    // mcp__ tools.
     isDiscovered,
   });
 
@@ -176,11 +208,15 @@ export function createAciRegistry(
           `validator compile failed for ${def.name}: ${msg}`
         );
       }
-      // 剥离豁免声明，不拒绝整次注册：丢弃声明后工具功能不变（只是回到
-      // 兜底闸），而拒绝会让一个外部源的坏 def 连累同批其它工具、并把装配
-      // 期错误留给 MCP 连接路径处置。剥离是结构闸 —— 存储侧不再携带该
-      // 字段，下游（executor 的 safeContent）结构上读不到，即便调用方先
-      // `catalog.get()` 再手工交 executor 也是 false。
+      // Strip the exemption declaration instead of rejecting the whole
+      // registration: after dropping the declaration the tool works
+      // unchanged (it just falls back to the default cap), while rejecting
+      // would let one bad external def punish its whole batch and leave an
+      // assembly-time error for the MCP connection path to handle. Stripping
+      // is a structural gate — the stored def no longer carries the field,
+      // so downstream consumers (executor's safeContent) cannot read it
+      // structurally, even if a caller hand-forwards `catalog.get()` output
+      // to an executor.
       pending.set(def.name, stripOutputCapExemption(def));
     }
     for (const [name, def] of pending) {
@@ -188,21 +224,24 @@ export function createAciRegistry(
     }
   };
 
-  // reload 缝：把外部工具按名撤回；不在此处跑 ajv 编译（已被
-  // registerExternal 编译过）。catalog / visibleSchemas / discover
-  // 都从 externalByExt live 读，因此删除后下游视图自动收敛。
+  // Reload seam: withdraw external tools by name; no ajv compilation here
+  // (registerExternal already compiled them). catalog / visibleSchemas /
+  // discover all read externalByExt live, so downstream views converge
+  // automatically after deletion.
   const unregisterExternal = (names: ReadonlyArray<string>): void => {
     for (const name of names) {
       externalByExt.delete(name);
     }
   };
 
-  // B6 / ADR-0043 §3:退场 seam —— 把构造期 `tools` 数组中指定名的元素
-  // 替换为带 `aci.lazy: true` 的新 def;同时 byName 也指向新 def(catalog
-  // 与 visibleSchemas 都从 byName / tools 读,实现一次替换两处一致)。
-  // 已 lazy 的不动(幂等);未在 byName 的名字静默忽略(与 unregisterExternal
-  // 同形态 —— 溢出治理调用方本就该保证 retire 名单 = 内建 deferrable
-  // 池,无未知名)。
+  // Retirement seam (ADR-0043) — replace named elements of the
+  // construction-time `tools` array with new defs stamped `aci.lazy: true`;
+  // byName points at the new def too (catalog and visibleSchemas read from
+  // byName / tools, so one replacement keeps both views consistent).
+  // Already-lazy defs are untouched (idempotent); names absent from byName
+  // are silently ignored (same shape as unregisterExternal — retirement
+  // callers are expected to pass exactly the builtin deferrable pool, with
+  // no unknown names).
   const retireBuiltin = (names: ReadonlyArray<string>): void => {
     for (const name of names) {
       const existing = byName.get(name);
@@ -213,8 +252,9 @@ export function createAciRegistry(
         aci: Object.freeze({ ...existing.aci, lazy: true }),
       }) as AciToolDef;
       byName.set(name, retired);
-      // 同步替换 `tools` 数组槽位(visibleSchemas 用 `[...tools, ...]`,
-      // 闭包读 this 数组 = 当前内容)
+      // Replace the `tools` array slot in sync (visibleSchemas uses
+      // `[...tools, ...]`, and the closure reads this array's current
+      // content)
       for (let i = 0; i < tools.length; i += 1) {
         if (tools[i]?.name === name) {
           (tools as AciToolDef[])[i] = retired;
@@ -226,9 +266,11 @@ export function createAciRegistry(
 
   const visibleSchemas = (): ReadonlyArray<ToolDef> => {
     const all = [...tools, ...externalByExt.values()];
-    // #224 不变式：非 lazy 注册序前缀逐位稳定——即使某非 lazy 工具被
-    // discover()（tool_search 对全量工具生效），也不挪位。尾部只追加
-    // 已发现的 **lazy** 工具（发现顺序）；lazy 工具不在前缀里，无需去重。
+    // Invariant: the non-lazy registration-order prefix stays bit-stable —
+    // even if a non-lazy tool gets discover()ed (tool_search covers the full
+    // set), it does not move. The tail only appends discovered **lazy**
+    // tools (in discovery order); lazy tools are not in the prefix, so no
+    // dedup is needed.
     const prefix = all.filter((t) => !t.aci.lazy);
     const discoveredTail = [...discovered].flatMap((name) => {
       const def = byName.get(name) ?? externalByExt.get(name);

@@ -1,15 +1,16 @@
 /**
- * IKNOW-196 首启引导模板 (spec `specs/196-identity-assembly.md` §"Bootstrap
- * 机制（rev 2026-08-11 隐式完成）").
+ * First-run guidance seed template.
  *
- * rev 2026-08-11:BOOTSTRAP 从"对话脚本 + /profile done 宿主
- * 钩子"改为**种子文件** `~/.iknow/BOOTSTRAP.md`。agent 首启时装配层把文件内容
- * 注入 system prompt;引导对话完成后 agent 用 write_file / edit_file / bash
- * 直接写 `~/.iknow/user.md`,然后 `rm BOOTSTRAP.md` —— 文件不在 → 下次装配不
- * 注入 → **隐式完成**,无需宿主斜杠命令。
+ * BOOTSTRAP is a seed file `~/.iknow/BOOTSTRAP.md`, not a scripted
+ * conversation with a host hook: on first run the assembly layer injects the
+ * file content into the system prompt; after the guided conversation the
+ * agent writes `~/.iknow/user.md` directly (write_file / edit_file / bash)
+ * and then `rm BOOTSTRAP.md` — file gone → next assembly skips injection →
+ * implicit completion, no host slash command needed.
  *
- * 完成语义对齐 ohmo BOOTSTRAP_TEMPLATE 结尾:"This file can be deleted when
- * done. If it is gone later, do not assume it should come back."
+ * Completion semantics mirror ohmo's BOOTSTRAP_TEMPLATE closing line:
+ * "This file can be deleted when done. If it is gone later, do not assume it
+ * should come back."
  */
 export const BOOTSTRAP_TEMPLATE = `# BOOTSTRAP.md - First Contact
 

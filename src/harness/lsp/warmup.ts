@@ -1,37 +1,44 @@
 /**
- * LSP warmup 预热层 — lsp-optimization plan T4。
+ * LSP warmup layer.
  *
- * **职责**：**首次** language server 工具调用时 fire-and-forget 预热——按
- * `ctx.directory`（≡ sandboxRoot，SSOT 见 build-engine.ts 装配注释）内的文件
- * 扩展名探测首个命中的 LSP server 并预 spawn，消掉后续 `lsp_*` 同族调用的
- * spawn + initialize 冷启动（tsserver 可达数秒）。
+ * **Responsibility**: on the **first** language-server tool call, fire-and-forget
+ * prewarming — probe file extensions under `ctx.directory` (≡ sandboxRoot,
+ * SSOT in build-engine.ts's assembly comment), pre-spawn every LSP server any
+ * extension hits, removing the spawn + initialize cold start (seconds for
+ * tsserver) from later `lsp_*` calls of the same family.
  *
- * **触发时机（Locked sentence 5）**：装配期不 warmup / 不 spawn；触发缝是
- * `withLazyLspWarmup` 包的 `LoopEngineDeps.registry` 视图 —— 装配期只消费
- * `list()`，而每个模型工具调用必按名走一次 `registry.get(name)`（engine 侧
- * `loop-engine.ts` 的 wave 分类 + executor 侧 `validateCall`）。取「第一次
- * 命中 language server 工具名」为准，命中即 arm（一次性 latch，同一装配
- * 只触发一次），fire-and-forget 不阻塞该次调用。
+ * **Trigger seam**: no warmup / no spawn during assembly; the seam is the
+ * `LoopEngineDeps.registry` view wrapped by `withLazyLspWarmup` — assembly
+ * only consumes `list()`, while every model tool call must resolve by name
+ * through `registry.get(name)` once (wave classification in `loop-engine.ts`
+ * + `validateCall` on the executor side). The first hit of a language-server
+ * tool name arms it (one-shot latch, once per assembly), fire-and-forget
+ * without blocking that call.
  *
- * **设计约束**：
- *   - **fire-and-forget**：`startLspWarmup` 同步返回，预热在后台串行进行；
- *     全量 try/catch 吞错（stderr 留痕），绝不阻塞 / 破坏 build 主路径。
- *   - **串行逐个、不早退**：按 `SERVERS` 声明序（TS 保底在前）遍历**所有**
- *     扩展名命中样本的 server 逐个预热——混合语言项目（ts+py 等）里每个
- *     server 都可能承担首次冷启动；单个 server 失败（undefined / throw）
- *     只留痕并继续下一个。
- *   - **ensureOpen 样本（二期 B4）**：getClient 成功后对样本文件 ensureOpen
- *     ——预热 server 侧 project 加载（tsserver 对未打开文件不建 project），
- *     首次 lsp_* 调用连 project 加载也免了。ensureOpen 读的是 warmup 扫描
- *     出的样本文件（磁盘现状即最新），单文件失败 try/catch 留痕继续。
- *   - 找不到任何候选文件（空目录 / 全是跳过目录）→ 不报错，但结局记为
- *     `skipped`（T1；人读的 stderr 一行不写，机器可读快照必可查）。
- *   - **结局可观测（T1）**：settle 后 `getWarmupOutcome()` 给出只读快照 ——
- *     人读的 stderr trace 原地保留，快照是给调用方（根因调查 / 诊断）的
- *     机器可读增量，「失败看起来像成功」在此终结。
+ * **Design constraints**:
+ *   - **fire-and-forget**: `startLspWarmup` returns synchronously, prewarming
+ *     runs serially in the background; a blanket try/catch swallows errors
+ *     (stderr trail) and never blocks or breaks the main path.
+ *   - **serial, no early exit**: traverse **all** servers with an extension
+ *     sample in `SERVERS` declaration order (TS floor first) — in mixed-language
+ *     projects (ts+py etc.) each server may carry the first cold start; a
+ *     single server failure (undefined / throw) only leaves a trail and
+ *     continues to the next.
+ *   - **ensureOpen sample**: after getClient succeeds, ensureOpen the sample
+ *     file — prewarming server-side project loading (tsserver builds no
+ *     project for unopened files), so the first lsp_* call skips project load
+ *     too. The sample is what warmup itself scanned (disk state is current);
+ *     a single-file failure is try/caught, trailed, and continues.
+ *   - No candidate files at all (empty dir / all skipped) → no error, but the
+ *     outcome records `skipped` (no human-readable stderr line; the
+ *     machine-readable snapshot must be queryable).
+ *   - **Observable outcome**: after settle, `getWarmupOutcome()` gives a
+ *     read-only snapshot — the human-readable stderr trace stays in place;
+ *     the snapshot is the machine-readable increment for callers (root-cause
+ *     investigation / diagnostics), ending "failure that looks like success".
  *
- * **取消语义（Q2/A9）**：本模块只经 `getClient` 建连接，不终止任何
- * server 子进程。
+ * **Cancellation semantics**: this module only builds connections via
+ * `getClient` and never terminates any server subprocess.
  */
 import { readdir } from "node:fs/promises";
 import type { Dirent } from "node:fs";
@@ -44,7 +51,7 @@ import { getClient } from "./client.js";
 import { SYMBOL_QUERY_TOOL_NAMES } from "../aci/tools/symbol.js";
 import { SYMBOL_MUTATE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 
-/** 预热扫描跳过的目录名（依赖 / 构建产物 / 元数据，不可能承载项目源码样本）。 */
+/** Directory names skipped by the warmup scan (deps / build output / metadata — never project source samples). */
 const WARMUP_SKIP_DIRS = new Set([
   "node_modules",
   ".git",
@@ -55,63 +62,72 @@ const WARMUP_SKIP_DIRS = new Set([
   ".iknow",
 ]);
 
-/** 递归深度上限：2 层足够命中典型项目顶层源码（src/<file>），控制扫描成本。 */
+/** Recursion depth cap: 2 levels reach typical top-level sources (src/<file>) while bounding scan cost. */
 const WARMUP_MAX_DEPTH = 2;
 
 /**
- * 最近一次 warmup 的结局（T1，plans/lsp-silent-degradation.md）。
+ * Outcome of the latest warmup.
  *
- * 语义：
- *   - `ok`：有扩展名样本的 server 全部 `getClient` 成功且样本 `ensureOpen`
- *     完成——`pinnedSamples` 非空，`failures` 恒为空。
- *   - `partial`：至少一个 server 预热失败（spawn 失败归一 undefined / 抛错），
- *     但整体流程走完——`failures` 非空，`pinnedSamples` 列出成功的那些。
- *   - `skipped`：没有可预热的对象或预热整体没走完——无样本目录、readdir
- *     失败降级成空扫描、整轮抛错。`pinnedSamples` 恒为空，`failures` 非空。
+ * Semantics:
+ *   - `ok`: every server with an extension sample had `getClient` succeed and
+ *     its sample `ensureOpen` complete — `pinnedSamples` non-empty, `failures`
+ *     always empty.
+ *   - `partial`: at least one server prewarm failed (spawn failure normalized
+ *     to undefined / throw), yet the overall flow finished — `failures`
+ *     non-empty, `pinnedSamples` lists the ones that worked.
+ *   - `skipped`: nothing to prewarm or the prewarm never finished — no sample
+ *     directories, readdir degraded to an empty scan, whole run threw.
+ *     `pinnedSamples` always empty, `failures` non-empty.
  */
 export type WarmupOutcome = {
   readonly status: "ok" | "partial" | "skipped";
-  /** 真的拿到活 client 并 ensureOpen 成功的 (server, 样本文件) 对。 */
+  /** (server, sample file) pairs that truly got a live client and a successful ensureOpen. */
   readonly pinnedSamples: ReadonlyArray<{
     readonly serverId: string;
     readonly file: string;
   }>;
-  /** 失败原因（server id / 扫描 + 整体失败的原文）。非 `ok` 时必非空。 */
+  /** Failure reasons (server id / scan + whole-run failure verbatim). Non-empty whenever not `ok`. */
   readonly failures: ReadonlyArray<string>;
 };
 
 /**
- * 最近一次 warmup 的结局快照；`undefined` = 尚未 settle 或本进程从未跑过
- * warmup。只读、永不抛——settle 的判定就是本字段首次非 `undefined`。
+ * Snapshot of the latest warmup outcome; `undefined` = not yet settled or
+ * warmup never ran in this process. Read-only, never throws — settled is
+ * defined as this field first becoming non-`undefined`.
  */
 let warmupOutcome: WarmupOutcome | undefined;
 
-/** 读最近一次 warmup 结局（T1）。永不抛；未 settle → `undefined`。 */
+/** Read the latest warmup outcome. Never throws; unsettled → `undefined`. */
 export function getWarmupOutcome(): WarmupOutcome | undefined {
   return warmupOutcome;
 }
 
 /**
- * 启动 LSP warmup（fire-and-forget）。由 `withLazyLspWarmup` 在第一次
- * language server 工具名解析时 arm，不在装配期调用；同步返回，内部异步
- * 执行且全量 catch。
+ * Start LSP warmup (fire-and-forget). Armed by `withLazyLspWarmup` at the
+ * first language-server tool-name resolution, never called during assembly;
+ * returns synchronously, running internally async with a blanket catch.
  */
 export function startLspWarmup(ctx: LspCtx): void {
   void warmup(ctx);
 }
 
 /**
- * language server 工具名族：直接取工具层 SSOT（10 件符号查询 + 5 件符号改），
- * 不再本地重列 —— 名字清单多一处副本就是一处漂移点（新增第 16 件符号工具
- * 时，本地副本会静默漏掉，arm 永不触发而调用照常走冷启动）。
+ * The language-server tool-name family: taken directly from the tool-layer
+ * SSOT (10 symbol-query + 5 symbol-mutation tools), no local re-listing —
+ * every extra copy of a name list is a drift point (a 16th symbol tool would
+ * be silently missing from a local copy, so the arm never fires and calls
+ * still pay the cold start).
  *
- * 无循环依赖（实测，非推断）：本模块的运行时出边只有 `./server.js` 与
- * `./client.js`（`./types.js` / `../tools/registry.js` 都是 `import type`，
- * 不进运行时图）；`symbol.ts` / `symbol-mutate.ts` 的运行时闭包只到
- * `aci/tools/lsp.js` / `symbol-resolver.js` / `lsp/client.js` / `lsp/server.js`
- * / `errors.js` / `lsp/language.js`，**不含本模块**。两个方向都无环，故本
- * import 不引入循环。`lsp_` 前缀族（坐标面 `lsp.ts`，`probe:lsp` 的仪器）
- * 由 `isLanguageServerToolName` 另行前缀命中，不在这两份数组里。
+ * No cycle at runtime (verified, not inferred): this module's runtime edges
+ * are only `./server.js` and `./client.js` (`./types.js` /
+ * `../tools/registry.js` are `import type`, not in the runtime graph);
+ * `symbol.ts` / `symbol-mutate.ts`'s runtime closures reach only
+ * `aci/tools/lsp.js` / `symbol-resolver.js` / `lsp/client.js` /
+ * `lsp/server.js` / `errors.js` / `lsp/language.js`, **not this module**.
+ * Neither direction cycles, so this import introduces none. The `lsp_` prefix
+ * family (the coordinate surface in `lsp.ts`, instrumented by `probe:lsp`) is
+ * matched separately by prefix in `isLanguageServerToolName`, not in these
+ * two arrays.
  */
 const LANGUAGE_SERVER_TOOL_NAMES: ReadonlySet<string> = new Set([
   ...SYMBOL_QUERY_TOOL_NAMES,
@@ -119,31 +135,36 @@ const LANGUAGE_SERVER_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 名字是否属于 language server 工具族：15 件模型面符号工具（精确名）+
- * `lsp_*` 前缀（坐标面已从模型面退役，`lsp.ts` 仍是 `probe:lsp` 的真实栈
- * 仪器 —— 前缀命中即 arm，多覆盖零风险）。
+ * Whether a name belongs to the language-server tool family: the 15
+ * model-facing symbol tools (exact names) + the `lsp_` prefix (the coordinate
+ * surface has retired from the model face, but `lsp.ts` remains the real-stack
+ * instrument for `probe:lsp` — prefix hit arms it, extra coverage is free).
  */
 function isLanguageServerToolName(name: string): boolean {
   return LANGUAGE_SERVER_TOOL_NAMES.has(name) || name.startsWith("lsp_");
 }
 
 /**
- * 惰性 warmup 触发缝（Locked sentence 5）：包一层 Registry 视图交给
- * `LoopEngineDeps.registry`，**第一次** `get(name)` 命中 language server
- * 工具族时 arm 一次 warmup。
+ * Lazy warmup trigger seam: wraps a Registry view handed to
+ * `LoopEngineDeps.registry` and arms warmup once when the **first** `get(name)`
+ * hits the language-server tool family.
  *
- * 为什么是这里（最小缝）：
- *   - 装配期只消费 `list()`（prompt 工具表 / knownToolNames），不经过本
- *     函数的 `get` —— 装配完成不 arm；
- *   - 每个模型工具调用必按名解析一次（`loop-engine.ts` wave 分类 +
- *     `executor.ts` `validateCall`），`get` 是「这类工具调用真的发生了」的
- *     唯一必经点，且天然带工具名，无需从 handler / 注册表反推可达集；
- *   - 不放在 `client.ts` 的 `getClientDetailed`：warmup 自身就经 `getClient`
- *     走该入口（递归），且 notifier 的 `invalidate` 也走 `getClient` ——
- *     普通 `edit_file` 写盘会误 arm，那不是 language server 工具调用。
+ * Why this seam (the minimal one):
+ *   - assembly only consumes `list()` (prompt tool table / knownToolNames) and
+ *     never passes through this function's `get` — no arm at assembly end;
+ *   - every model tool call must resolve by name once (`loop-engine.ts` wave
+ *     classification + `executor.ts` `validateCall`), so `get` is the sole
+ *     mandatory point proving "this kind of call actually happened", and it
+ *     naturally carries the tool name — no reachability set reverse-engineered
+ *     from handlers / the registry;
+ *   - not placed in `client.ts`'s `getClientDetailed`: warmup itself enters
+ *     through `getClient` (recursion), and notifier's `invalidate` also uses
+ *     `getClient` — a plain `edit_file` write would mis-arm, and that is not a
+ *     language-server tool call.
  *
- * `get` 每个调用会被解析多次（分类 + 校验），故 latch 一次性：同一装配
- * 只 arm 一次。`getValidator` 照原样透传（`RegistryImpl` 结构兼容）。
+ * `get` is resolved multiple times per call (classification + validation), so
+ * the latch is one-shot: each assembly arms at most once. `getValidator`
+ * passes through unchanged (`RegistryImpl` structurally compatible).
  */
 export function withLazyLspWarmup(
   inner: RegistryImpl,
@@ -159,38 +180,45 @@ export function withLazyLspWarmup(
       }
       return inner.get(name);
     },
-    // 结构兼容：`RegistryImpl` 的第三方法照原样透传（本缝只关心 `get`）。
+    // Structurally compatible: pass through RegistryImpl's third method
+    // unchanged (this seam only cares about `get`).
     getValidator: (name: string) => inner.getValidator(name),
   });
 }
 
 async function warmup(ctx: LspCtx): Promise<void> {
-  // 两类失败分开持有而非合流后按位置相减：server 级失败要进 [lsp-warmup]
-  // partial trace，扫描降级自己已经在 collectSampleFiles 里写过 readdir 行，
-  // 合流会让同一句文本在 stderr 出现两次（扫描失败被 partial 行再 join 一遍）。
+  // Keep the two failure classes separate rather than merged then
+  // positionally subtracted: server-level failures feed the [lsp-warmup]
+  // partial trace, while scan degradation already wrote its own readdir line
+  // inside collectSampleFiles — merging would print the same text twice on
+  // stderr (the scan failure re-joined by the partial line).
   const serverFailures: string[] = [];
-  // 扫描降级在 collectSampleFiles 内已写过 stderr；声明在 try 外，好让外层
-  // catch 的整体失败快照也能带上它（否则两类失败的合流只在成功路径成立）。
+  // Scan degradation already wrote stderr inside collectSampleFiles; declared
+  // outside the try so the outer catch's whole-run snapshot can carry it too
+  // (otherwise the merged view only exists on the success path).
   let scanFailures: string[] = [];
   const pinnedSamples: Array<{ serverId: string; file: string }> = [];
   try {
-    // 扫描失败经 collectSampleFiles 归一成空样本 + 一条 failure（stderr 同源
-    // 留痕）——readdir 降级不再只活在人读 trace 里，非 ok 快照必有 failures。
+    // Scan failure is normalized via collectSampleFiles into empty samples +
+    // one failure (same-source stderr trail) — readdir degradation no longer
+    // lives only in the human trace; every non-ok snapshot carries failures.
     const scan = await collectSampleFiles(ctx.directory, WARMUP_MAX_DEPTH);
     scanFailures = scan.failures;
     const samples = scan.samples;
     for (const server of SERVERS) {
       const sample = samples.find((file) => matchesServer(server, file));
-      if (!sample) continue; // 该 server 的扩展名在本项目无样本 → 跳过
+      if (!sample) continue; // no extension sample for this server in this project → skip
       try {
-        // 逐个预热所有命中 server（不早退）：混合语言项目（ts+py 等）里
-        // 每个 server 都可能承担首次 lsp_* 调用的冷启动。getClient 成功后
-        // 对样本 ensureOpen（二期 B4）——预热 server 侧 project 加载；样本
-        // 是 warmup 自己扫描出的磁盘文件，didOpen 读到的即磁盘现状。
+        // Prewarm every hit server serially (no early exit): in mixed-language
+        // projects (ts+py etc.) each server may carry the first lsp_* call's
+        // cold start. After getClient succeeds, ensureOpen the sample —
+        // prewarming server-side project loading; the sample is a disk file
+        // warmup itself scanned, so didOpen reads current disk state.
         const client = await getClient(ctx, sample, { server });
-        // EXIT: getClient 把 spawn 失败归一成 undefined（不抛）。此前该分支
-        // 静默 continue，正是「warmup 看起来成功、实际没 pin 住」的根因候选；
-        // 现记一条 failure 后才继续。
+        // EXIT: getClient normalizes spawn failure to undefined (no throw).
+        // This branch used to continue silently — a prime candidate for
+        // "warmup looked successful but pinned nothing"; now record a failure
+        // before continuing.
         if (!client) {
           serverFailures.push(`${server.id}: no client available`);
           continue;
@@ -198,8 +226,9 @@ async function warmup(ctx: LspCtx): Promise<void> {
         await client.ensureOpen(sample);
         pinnedSamples.push({ serverId: server.id, file: sample });
       } catch (err) {
-        // EXIT: 单个 server spawn/ensureOpen 抛错 → 记入 failures 后继续下一
-        // server；getClient 已把 spawn 失败归一为 undefined，此处兜底预料外 throw。
+        // EXIT: a single server's spawn/ensureOpen throw → record in failures
+        // and continue to the next; getClient already normalized spawn failure
+        // to undefined, so this guards unexpected throws.
         serverFailures.push(
           `${server.id}: ${err instanceof Error ? err.message : String(err)}`
         );
@@ -207,8 +236,8 @@ async function warmup(ctx: LspCtx): Promise<void> {
     }
     settleOutcome(serverFailures, scanFailures, pinnedSamples, ctx.directory);
   } catch (err) {
-    // EXIT: 预热整体失败（目录不可读等）→ stderr 一行 + 快照，不抛；首次 lsp_*
-    // 走正常 getClient 自愈。
+    // EXIT: whole prewarm failed (unreadable dir etc.) → one stderr line +
+    // snapshot, no throw; the first lsp_* call self-heals via normal getClient.
     const msg = err instanceof Error ? err.message : String(err);
     settle({
       status: "skipped",
@@ -219,19 +248,22 @@ async function warmup(ctx: LspCtx): Promise<void> {
   }
 }
 
-/** 写入结局快照：settle 点唯一（settle 判定 = 首次非 undefined）。 */
+/** Write the outcome snapshot: the sole settle point (settled = first non-undefined). */
 function settle(outcome: WarmupOutcome): void {
   warmupOutcome = outcome;
 }
 
 /**
- * 结算结局：派生 status、补「目录里没有任何样本」这一条 failure（快照契约：
- * 非 ok 必有 failures），并写人读的 partial trace 行。从 warmup 主体抽出是
- * 为了压住分支密度（S5 硬门）。
+ * Settle the outcome: derive status, add the "no samples in the directory at
+ * all" failure (snapshot contract: non-ok always has failures), and write the
+ * human-readable partial trace line. Extracted from warmup's body to keep
+ * branch density down.
  *
- * 两类失败分参传入（而非合流后相减）：快照要全量，partial trace 只该含
- * server 级失败 —— 扫描降级已在 collectSampleFiles 写过自己的 stderr 行，
- * 再被 partial 行 join 一遍就是同一句文本重复出现。
+ * The two failure classes arrive as separate params (not merged then
+ * subtracted): the snapshot wants everything, but the partial trace should
+ * only carry server-level failures — scan degradation already wrote its own
+ * stderr line in collectSampleFiles, and joining it again in the partial line
+ * would duplicate the same text.
  */
 function settleOutcome(
   serverFailures: string[],
@@ -246,8 +278,9 @@ function settleOutcome(
     );
   }
   settle({
-    // ok = 无失败且有 pin 住的样本；有失败但仍有样本 pin 住 = partial（部分
-    // server 没起来）；其余（无样本 / 全失败）= skipped。
+    // ok = no failures and at least one pinned sample; failures but some
+    // samples still pinned = partial (some servers didn't come up);
+    // everything else (no samples / all failed) = skipped.
     status:
       failures.length === 0 && pinnedSamples.length > 0
         ? "ok"
@@ -257,8 +290,9 @@ function settleOutcome(
     pinnedSamples,
     failures,
   });
-  // 人读 trace：有 server 尝试失败就写（改动前的语义，含全失败那一支）；
-  // 扫描降级 / 无样本的 failure 只进快照，不重复写 stderr。
+  // Human trace: written whenever a server attempt failed (the pre-change
+  // semantics, including the all-failed branch); scan-degradation / no-sample
+  // failures only enter the snapshot, not a duplicated stderr write.
   if (serverFailures.length > 0) {
     process.stderr.write(
       `[lsp-warmup] partial: ${serverFailures.join("; ")}\n`
@@ -267,23 +301,28 @@ function settleOutcome(
 }
 
 /**
- * 收集候选样本文件：readdir withFileTypes，递归至多 `depth` 层，跳过
- * WARMUP_SKIP_DIRS 与隐藏目录。readdir 失败按空目录处理（降级，不抛）——
- * 降级原因随样本一起返回，供 outcome 快照点名（stderr 仍然照写）。
+ * Collect candidate sample files: readdir withFileTypes, recurse at most
+ * `depth` levels, skip WARMUP_SKIP_DIRS and hidden directories. A readdir
+ * failure is treated as an empty directory (degradation, no throw) — the
+ * degradation reason returns alongside the samples for the outcome snapshot
+ * to name it (stderr still written).
  */
 async function collectSampleFiles(
   dir: string,
   depth: number
 ): Promise<{ samples: string[]; failures: string[] }> {
-  // 显式 Dirent（默认文件名泛型 string）：ReturnType<typeof readdir> 会取到
-  // readdir 的 Buffer 重载，与这里 `{ withFileTypes: true }` 的实参类型不符。
+  // Explicit Dirent (default name generic string): ReturnType<typeof readdir>
+  // would pick readdir's Buffer overload, mismatching the
+  // `{ withFileTypes: true }` argument used here.
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {
-    // EXIT: readdir 失败（目录不可读/已删除）→ 按"无候选样本"降级（不抛），
-    // 但降级原因作为 failure 上报，快照据此给出非 ok 结局；[lsp-warmup]
-    // readdir failed 行同时写给读日志的人。首次 lsp_* 调用走 getClient 正常自愈。
+    // EXIT: readdir failed (unreadable / deleted dir) → degrade to "no
+    // candidate samples" (no throw), but report the reason as a failure so
+    // the snapshot yields a non-ok outcome; the [lsp-warmup] readdir failed
+    // line is also written for humans reading logs. The first lsp_* call
+    // self-heals through the normal getClient path.
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[lsp-warmup] readdir failed for ${dir}: ${msg}\n`);
     return { samples: [], failures: [`readdir failed for ${dir}: ${msg}`] };
@@ -308,7 +347,7 @@ async function collectSampleFiles(
   return { samples, failures };
 }
 
-/** file 的扩展名（无扩展名回退全文件名，与 server.ts resolveServer 同语义）。 */
+/** File extension (extension-less falls back to full filename, same semantics as server.ts resolveServer). */
 function matchesServer(server: LspServerInfo, file: string): boolean {
   const ext = path.extname(file) || path.basename(file);
   return server.extensions.includes(ext);

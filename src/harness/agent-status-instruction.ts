@@ -1,24 +1,32 @@
 /**
- * spec agent-status-instruction-echo T2：真实用户消息甄别谓词（harness 层 SSOT）。
+ * Real-user-message discrimination predicate (harness-layer SSOT) for the
+ * agent-status instruction echo.
  *
- * 边界:
- *   - `extractLatestRealUserInstruction` 从 messages 尾向前扫第一条**真实**
- *     用户消息（invariant 2）：排除 `isHostInjectedUserText` 名册全部宿主注入，
- *     剥 memory prefetch overlay（marker 在场取**最后一个** marker 之后段，
- *     F6 宁欠勿过）；skill-load 信封计入真实用户消息但取 `\n\n` 后
- *     remainder 首行（首行是装配信封不是用户原话，remainder 空 → 前扫）；
- *   - 提取 = 首行（`\n` 前）、trim 行尾空白、100 **码点**截断（Array.from
- *     计数，非 UTF-16 单元），超限不加省略号（逐字纪律）；首行为空 → 该条
- *     无有效指令源，继续前扫（F2）；
- *   - 纯读取，零抛错（Input-contract 表）；无任何 LLM / adapter 参与（SC2，
- *     由 tests/harness/agent-status-instruction-seam.test.ts grep 锁钉住）；
- *   - 行首前缀形态名册（MCP 重连 / LOOP_DETECTED / compact 三缝 / drain /
- *     verify 两信封）在本模块落为**导出 SSOT** `HOST_INJECTION_LINE_ANCHORS`：
- *     前缀常量取自各产出方，漂移由 import 结构性排除；SEAM 完备性锁测试用
- *     产出方真常量（loop-engine / tool-loop-detect / full-compact）逐条校验
- *     不漂移，且新注入缝不挂名册即红；出站投影直接消费同名册（不再手抄副本）；
- *   - 不 import loop-engine（T3 将由 loop-engine 消费本模块，防成环）、
- *     不 import TUI（harness 不反向依赖）。
+ * Boundaries:
+ *   - `extractLatestRealUserInstruction` scans `messages` backwards for the
+ *     first **real** user message: it excludes every host injection in the
+ *     `isHostInjectedUserText` roster and strips the memory prefetch overlay
+ *     (when a marker is present, take the segment after the **last** marker
+ *     — prefer under-extraction to over-extraction); a skill-load envelope
+ *     counts as a real user message but the instruction is taken from the
+ *     remainder after `\n\n` (the first line is the assembled envelope, not
+ *     the user's words; empty remainder → keep scanning);
+ *   - extraction = first line (before `\n`), trim trailing whitespace,
+ *     truncate to 100 **codepoints** (Array.from count, not UTF-16 units),
+ *     no ellipsis when over the cap (verbatim discipline); an empty first
+ *     line → this message offers no valid instruction source, keep scanning;
+ *   - pure reading, zero throws; no LLM / adapter involvement (pinned by a
+ *     grep-lock seam test in tests/harness/);
+ *   - the line-prefix roster (MCP reconnect / LOOP_DETECTED / the three
+ *     compact seams / drain / the two verify envelopes) lands here as the
+ *     exported SSOT `HOST_INJECTION_LINE_ANCHORS`: prefix constants are
+ *     taken from their producers so drift is excluded structurally; the
+ *     seam-completeness lock verifies each entry against the real producer
+ *     constants (loop-engine / tool-loop-detect / full-compact), and a new
+ *     injection seam missing from the roster turns the test red; the
+ *     outbound projection consumes this same roster (no hand-copied twin);
+ *   - does not import loop-engine (it will consume this module; avoids a
+ *     cycle) and does not import the TUI (harness must not depend upward).
  */
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
 import { isAgentStatusText } from "./agent-status.js";
@@ -32,22 +40,22 @@ import { isSkillIndexDeltaText } from "./skill/index-delta.js";
 import { isSkillLoadText } from "./skill/body.js";
 import { MEMORY_PREFETCH_END } from "./memory/prefetch.js";
 
-/** instruction 回显上限（码点数，spec T2 提取规则）。 */
+/** Instruction echo cap (codepoints). */
 export const INSTRUCTION_MAX_CODEPOINTS = 100;
 
-// 名册前缀锚（各自产出方见注释；漂移由 SEAM 锁测试拦截）。
+// Roster prefix anchors (each producer noted below; the seam-lock test catches drift).
 
-/** = loop-engine `MCP_RECONNECT_NOTIFICATION_TEMPLATE` 的固定开头。 */
+/** = fixed start of loop-engine's `MCP_RECONNECT_NOTIFICATION_TEMPLATE`. */
 export const MCP_RECONNECT_INJECTION_PREFIX = "MCP server '";
-/** = tool-loop-detect `LOOP_DETECTED_TEXT` 的固定开头。 */
+/** = fixed start of tool-loop-detect's `LOOP_DETECTED_TEXT`. */
 export const LOOP_DETECTED_INJECTION_PREFIX = "LOOP_DETECTED:";
-/** = compress/full-compact `buildCompactPrompt()` 的固定开头（NO_TOOLS_PREAMBLE）。 */
+/** = fixed start of compress/full-compact `buildCompactPrompt()` (NO_TOOLS_PREAMBLE). */
 export const COMPACT_REQUEST_INJECTION_PREFIX =
   "CRITICAL: Respond with TEXT ONLY.";
-/** = loop-engine 私有 `SUMMARY_PROMPT` 的固定开头（OQ1：即使未持久也先进名册，保守多滤）。 */
+/** = fixed start of loop-engine's private `SUMMARY_PROMPT` (kept in the roster conservatively even if unpersisted — filter one too many rather than one too few). */
 export const STOP_SUMMARY_INJECTION_PREFIX =
   "Briefly summarize in a few sentences";
-/** = full-compact `SUMMARY_PREAMBLE`（compact 产物摘要，持久进 prior 的 user 消息）。 */
+/** = full-compact `SUMMARY_PREAMBLE` (the compact summary artifact, persisted into prior history as a user message). */
 export const COMPACT_SUMMARY_INJECTION_PREFIX =
   "This session is being continued from a previous conversation";
 
@@ -60,23 +68,31 @@ const PREFIX_ANCHORS: ReadonlyArray<string> = [
 ];
 
 /**
- * 行首前缀形态宿主注入锚的**单一权威名册**（SSOT，ADR-0112 T2 review 修复）：
- * 甄别谓词与出站投影（outbound-projection 的 `HOST_LINE_ANCHORS`）共同消费
- * 本数组，杜绝手工并行副本漂移；名册↔谓词一致性由投影漂移锁测试逐条遍历
- * 校验。标签形态帧（`<agent_status>` / `<graph_mode>` / `<available_skills>`）
- * 不在此列 —— 它们的转译走投影 TAG 规则（常量同样取自产出方）。
+ * The single authoritative roster of line-prefix host-injection anchors:
+ *
+ // (ADR-0112)
+ * both the discrimination predicate and the outbound projection
+ * (`HOST_LINE_ANCHORS` in outbound-projection) consume this array,
+ * eliminating hand-maintained parallel copies; roster-to-predicate
+ * consistency is walked entry-by-entry by the projection drift-lock test.
+ * Tag-framed forms (`<agent_status>` / `<graph_mode>` /
+ * `<available_skills>`) are not listed here — they are escaped by the
+ * projection's TAG rules (constants likewise sourced from the producers).
  */
-export const HOST_INJECTION_LINE_ANCHORS: ReadonlyArray<string> =
-  Object.freeze([
+export const HOST_INJECTION_LINE_ANCHORS: ReadonlyArray<string> = Object.freeze(
+  [
     ...PREFIX_ANCHORS,
     SUBAGENT_DRAIN_PREFIX,
     VALIDATION_FAILED_PREFIX,
     EVIDENCE_RERUN_PREFIX,
-  ]);
+  ]
+);
 
 /**
- * 甄别名册（现行全集，spec T2）：命中任一即宿主注入，不是操作员键入。
- * skill-load 信封**不在**名册内（计入真实用户消息，提取规则另行处理）。
+ * Discrimination roster (current full set): matching any entry means host
+ * injection, not operator keystrokes. The skill-load envelope is **not** in
+ * the roster — it counts as a real user message and the extraction rules
+ * handle it separately.
  */
 export function isHostInjectedUserText(text: string): boolean {
   if (
@@ -91,24 +107,26 @@ export function isHostInjectedUserText(text: string): boolean {
 }
 
 /**
- * 剥 memory prefetch overlay（invariant 2 + F6）：marker 在场取**最后一个**
- * marker 之后段为原文（用户可能把 marker 粘进原文，宁欠勿过）；无 marker →
- * 全文即原文。有意不复用 memory/prefetch.ts 的 `stripPrefetchOverlay`
- * （那个取第一个 marker 且带 legacy advisory 剥除，语义与本面 F6 不同）。
+ * Strip the memory prefetch overlay: when a marker is present, take the
+ * segment after the **last** marker as the original text (the user may have
+ * pasted the marker into their own message; prefer under-extraction). No
+ * marker → the whole text. Deliberately does not reuse `stripPrefetchOverlay`
+ * from memory/prefetch.ts (that one takes the first marker and also strips
+ * the legacy advisory — different semantics from this face).
  */
 export function stripMemoryPrefetchOverlay(text: string): string {
   const idx = text.lastIndexOf(MEMORY_PREFETCH_END);
   return idx >= 0 ? text.slice(idx + MEMORY_PREFETCH_END.length) : text;
 }
 
-/** user 消息 text 块拼接（同 TUI joinedUserText 形态，不 import TUI 侧件）。 */
+/** Concatenate a user message's text blocks (same joinedUserText shape as the TUI side, without importing it). */
 function joinedUserText(message: AnthropicNativeMessage): string {
   return message.content
     .flatMap((b) => (b.type === "text" ? [b.text] : []))
     .join("\n");
 }
 
-/** 100 码点截断，不劈半字符、不加省略号（逐字纪律）。 */
+/** Truncate to 100 codepoints: never split a character, never add an ellipsis (verbatim discipline). */
 function truncateCodePoints(line: string): string {
   const cps = Array.from(line);
   return cps.length <= INSTRUCTION_MAX_CODEPOINTS
@@ -117,8 +135,9 @@ function truncateCodePoints(line: string): string {
 }
 
 /**
- * skill-load 信封 → `\n\n` 后 remainder（spec T2 规则）；无 `\n\n` 或
- * remainder 纯空白 → null（该条视为无指令源，前扫）。
+ * skill-load envelope → the remainder after `\n\n`; no `\n\n` or a
+ * whitespace-only remainder → null (this message offers no instruction
+ * source; keep scanning).
  */
 function skillLoadRemainder(source: string): string | null {
   const idx = source.indexOf("\n\n");
@@ -127,25 +146,24 @@ function skillLoadRemainder(source: string): string | null {
   return remainder.trim().length === 0 ? null : remainder;
 }
 
-/** 一条已剥 overlay、已过名册的原文 → 有效指令行（首行）或 null。 */
+/** One overlay-stripped, roster-checked source → the effective instruction line (first line) or null. */
 function instructionLine(source: string): string | null {
-  const text = isSkillLoadText(source)
-    ? skillLoadRemainder(source)
-    : source;
+  const text = isSkillLoadText(source) ? skillLoadRemainder(source) : source;
   if (text === null) return null;
   const firstLine = text.split("\n", 1)[0]!.trimEnd();
   return firstLine.length === 0 ? null : truncateCodePoints(firstLine);
 }
 
-/** T2 提取结果：命中消息的对象引用（T3 reconcile 相关号）+ 逐字指令行。 */
+/** Extraction result: the matched message's object reference (for reconcile correlation) + the verbatim instruction line. */
 export interface RealUserInstruction {
   readonly message: AnthropicNativeMessage;
   readonly instruction: string;
 }
 
 /**
- * SSOT 谓词：messages 尾向前扫第一条真实用户消息并提取 instruction。
- * 无真实用户消息 / 全部首行空（F1 / F2）→ null。纯函数，永不抛错。
+ * SSOT predicate: scan `messages` backwards for the first real user message
+ * and extract its instruction. No real user message / all first lines empty
+ * → null. Pure function, never throws.
  */
 export function extractLatestRealUserInstruction(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -154,7 +172,7 @@ export function extractLatestRealUserInstruction(
     const m = messages[i]!;
     if (m.role !== "user") continue;
     const joined = joinedUserText(m);
-    if (joined.length === 0) continue; // 纯 tool_result 等无文本块
+    if (joined.length === 0) continue; // tool_result-only message, no text blocks
     const source = stripMemoryPrefetchOverlay(joined);
     if (isHostInjectedUserText(source)) continue;
     const line = instructionLine(source);

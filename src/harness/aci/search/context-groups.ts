@@ -1,15 +1,19 @@
 /**
- * `content + context` 的**组构造**（SC6 / D3；SC12「附近几行」职责）。
+ * **Group construction** for `content + context` (the "nearby lines"
+ * responsibility).
  *
- * 为什么需要这一层（而不是直接把 rg 的 stdout 透出去）：
- *   rg 开 `-C N` 后，同一条记录里 `:` 与 `-` 混排、组间还夹裸 `--`。那份
- *   文本在模型眼里就是一堆行 —— 上下文行 `a.ts-4-line4` 与匹配行
- *   `a.ts:4:hit` 只差一个字符，模型很容易把上下文行读成命中。SC6 要求
- *   「上下文行与 `--` 不被切成假 `path:line:text`」，所以本层的产物是
- *   **显式分组 + 每条的 isMatch 标记**，渲染交给 `project.ts`。
+ * Why this layer (instead of passing rg stdout through):
+ *   with rg `-C N`, `:` and `-` mix within one record and bare `--` sits
+ *   between groups. To the model that text is just a pile of lines — context
+ *   line `a.ts-4-line4` differs from match line `a.ts:4:hit` by one character,
+ *   so context lines are easily misread as hits. Context lines and `--` must
+ *   not be cut into fake `path:line:text`, hence this layer produces
+ *   **explicit groups + an isMatch flag per entry**, leaving rendering to
+ *   `project.ts`.
  *
- * 单引擎化：rg 路径把解析出的组喂进来，Node 路径自己按「命中行 ± context」
- * 构造同样的组 —— 两种引擎产出的形状完全一致，投影层不需要知道谁算的。
+ * Single-shape design: the rg path feeds parsed groups in, the Node path
+ * builds the same groups from "hit line ± context" — both engines yield
+ * identical shapes, so the projection layer need not know who computed them.
  */
 
 import {
@@ -25,20 +29,21 @@ import {
 } from "./types.js";
 
 export interface ContextBuildInput {
-  /** 命中行（已按 (path, line) 排序）。 */
+  /** Hit lines (already sorted by (path, line)). */
   readonly matches: ReadonlyArray<LineHit>;
-  /** 对称上下文半径（content 出法；>0 才调用本层）。 */
+  /** Symmetric context radius (content mode; this layer is called only when >0). */
   readonly context: number;
-  /** Workspace 相对路径 → 全文行；不可读 → null。 */
+  /** Workspace-relative path → full-text lines; unreadable → null. */
   readonly readLines: (path: string) => Promise<ReadonlyArray<string> | null>;
 }
 
 /**
- * 由命中行构造上下文组。
+ * Build context groups from hit lines.
  *
- * 分组规则与 rg 的 `--` 语义同口径：**相邻或重叠的上下文窗合并成一组**。
- * 窗 `[line-N, line+N]` 与下一命中窗相接（或重叠）即同组，否则另起一组。
- * 文件边界处窗被夹到 `[1, 行数]`。
+ * Grouping rule follows rg's `--` semantics: **adjacent or overlapping
+ * context windows merge into one group**. Windows `[line-N, line+N]` touch
+ * (or overlap) → same group, otherwise a new group starts. At file edges the
+ * window is clamped to `[1, lineCount]`.
  */
 export async function buildContextGroups(
   input: ContextBuildInput
@@ -53,7 +58,7 @@ export async function buildContextGroups(
   return groups;
 }
 
-/** 同文件命中聚成一批（排序保证同 path 连续，但按 path 分组更稳）。 */
+/** Collect same-file hits into one batch (sorting keeps same paths contiguous, but grouping by path is more robust). */
 function groupByPath(matches: ReadonlyArray<LineHit>): Map<string, LineHit[]> {
   const byPath = new Map<string, LineHit[]>();
   for (const hit of matches) {
@@ -65,10 +70,11 @@ function groupByPath(matches: ReadonlyArray<LineHit>): Map<string, LineHit[]> {
 }
 
 /**
- * 单文件的组序列。
+ * The group sequence for a single file.
  *
- * 窗相接判定用「本命中窗下界 ≤ 上一窗上界 + 1」：相接即合并（中间没有
- * 被跳过的行），否则另起一组并渲染 `--`。
+ * Window-touching test: "this hit window's lower bound <= previous window's
+ * upper bound + 1": touching merges (no skipped lines in between), otherwise a
+ * new group starts (rendered with `--`).
  */
 function groupsForFile(
   path: string,
@@ -76,8 +82,9 @@ function groupsForFile(
   lines: ReadonlyArray<string>,
   context: number
 ): ContextGroup[] {
-  // 命中行集合（不是「当前这一条」）：后一条命中落进前一条的窗时，它仍要
-  // 以 `:` 出（rg 口径 —— 窗合并后组内所有命中行都是匹配行）。
+  // The set of hit lines (not "the current one"): when a later hit falls into
+  // an earlier hit's window, it must still be emitted with `:` (rg behavior —
+  // after windows merge, every hit line inside the group is a match line).
   const matchLines = new Set(hits.map((hit) => hit.line));
   const groups: ContextGroup[] = [];
   let current: ContextEntry[] = [];
@@ -103,11 +110,12 @@ function groupsForFile(
 }
 
 /**
- * 组内每条都过同一道行宽闸（匹配行与上下文行**一视同仁**）。
+ * Every entry in a group passes the same line-width gate (match lines and
+ * context lines are **treated alike**).
  *
- * rg 的 `--max-columns-preview` 对两类行都生效（实测：5000 字符的上下文行
- * 同样被收到 2000 + 它自己的省略标记），Node 侧若只收匹配行，同一查询在
- * 两条引擎下的字节数就不同 —— SC9。
+ * rg's `--max-columns-preview` applies to both kinds (verified: a 5000-char
+ * context line is also cut to 2000 plus its own elision marker); if Node only
+ * cut match lines, the same query would differ in bytes between engines.
  */
 function entryFor(
   path: string,
@@ -119,11 +127,13 @@ function entryFor(
 }
 
 /**
- * 把 rg `--null -C N` 的 stdout 解析成组（rg 引擎路径）。
+ * Parse rg `--null -C N` stdout into groups (the rg engine path).
  *
- * rg 自己插的分组行是组边界；这里信任它，不重新按行号推导 —— rg 的合并
- * 阈值与上面 Node 路径的实现若有细微出入，直接采用 rg 的边界比「猜它怎么
- * 分的」更稳。损坏记录整条跳过（不猜、不产生假命中）。
+ * The separator lines rg inserts are the group boundaries; we trust them and
+ * do not re-derive from line numbers — if rg's merge threshold differs subtly
+ * from the Node path's implementation above, adopting rg's boundaries directly
+ * is steadier than "guessing how it grouped". Malformed records are skipped
+ * entirely (no guessing, no fake hits).
  */
 export function parseRgContextStdout(stdout: string): ContextGroup[] {
   const groups: ContextGroup[] = [];
@@ -140,10 +150,12 @@ export function parseRgContextStdout(stdout: string): ContextGroup[] {
       flush();
       continue;
     }
-    // 二进制提示行与 `path:line:text` 同形（`path: binary file matches (...)`），
-    // 形状判定要先于分列 —— 否则它会被解析成一条 `isMatch` 的假命中（见
-    // `rg-output.isRgBinaryNotice`）。判定收在循环里（不是 `parseContextRecord`
-    // 内），分列函数的分支数因此不因这条防线增长。
+    // The binary notice line is shaped like `path:line:text` (`path: binary
+    // file matches (...)`), so the shape test must run before column
+    // splitting — otherwise it parses as a fake `isMatch` hit (see
+    // `rg-output.isRgBinaryNotice`). The check lives in the loop (not inside
+    // `parseContextRecord`), so the splitting function's branch count does not
+    // grow because of this defense.
     if (isRgBinaryNotice(record)) continue;
     const entry = parseContextRecord(record);
     if (entry === undefined) continue;
@@ -154,10 +166,11 @@ export function parseRgContextStdout(stdout: string): ContextGroup[] {
 }
 
 /**
- * 分组行判定。
+ * Group-separator test.
  *
- * `--null` 下 rg 用 NUL 包夹分隔符（路径段为空），不带 `--null` 时是裸
- * `--` —— 两种形态都收，判定只此一处。
+ * Under `--null`, rg wraps the separator with NUL (empty path segment);
+ * without `--null` it is a bare `--` — both shapes are accepted, and the test
+ * lives in exactly one place.
  */
 function isGroupSeparator(record: string): boolean {
   return record.split("\0").join("").trim() === CONTEXT_GROUP_SEPARATOR;
@@ -168,8 +181,10 @@ function parseContextRecord(record: string): ContextEntry | undefined {
   if (nulIdx === -1) return undefined;
   const path = stripDotSlash(record.slice(0, nulIdx));
   const rest = record.slice(nulIdx + 1);
-  // 行号是前导十进制段；其后紧跟单字符分隔符（`:` 匹配 / `-` 上下文）。
-  // 先扫数字再判分隔符 —— 内容里的 `:` / `-` 因此不参与分列（SC6 的关键）。
+  // The line number is the leading decimal segment, followed by a one-char
+  // separator (`:` match / `-` context). Scan digits first, then test the
+  // separator — so `:` / `-` inside content never participate in splitting
+  // (the key point).
   let i = 0;
   while (i < rest.length && rest[i]! >= "0" && rest[i]! <= "9") i += 1;
   if (i === 0) return undefined;
@@ -177,9 +192,10 @@ function parseContextRecord(record: string): ContextEntry | undefined {
   if (sep !== ":" && sep !== "-") return undefined;
   const line = Number(rest.slice(0, i));
   if (!Number.isInteger(line) || line < 1) return undefined;
-  // rg 路径专用入口：先洗传输层痕迹（尾随 `\r` + 它自己的省略标记）再过共用
-  // 展示闸。**交原样内容**、不在调用点先剥 `\r`：那个字节计入 rg 的超长判定
-  // 基数（见 `rg-output.truncateRgContent`）。
+  // rg-path-only entry: first wash transport-layer artifacts (trailing `\r` +
+  // rg's own elision marker), then the shared display gate. **Pass the content
+  // verbatim**; do not strip `\r` at the call site — that byte counts toward
+  // rg's oversize trigger base (see `rg-output.truncateRgContent`).
   return {
     path,
     line,

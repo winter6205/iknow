@@ -1,33 +1,37 @@
 /**
- * #128 verify 分类器 (子代理 LLM 判官) 纯函数模块。
+ * Verify classifier (subagent LLM judge) pure-function module.
  *
- * Spec: specs/128-verify-classifier.md + specs/449-verify-evidence-first-loop.md。
- * 职责单一: 判官 JSON 解析 + 降级规则 + 宿主侧截断 (spawn/装配在 verify-loop 侧)。
+ * Single responsibility: judge-JSON parsing + downgrade rules + host-side
+ * truncation (spawn/assembly live in verify-loop).
  *
- * 关键契约 (spec A4 / SC4 / SC5 / A8 / SC8 + #449b B7 SC7):
- *  - 四态: pass / fail / abort / unverified (B7 判官扩第 4 态);
- *  - pass + 空 evidence → 静默降级 abort (reason 补"证据缺失");
- *  - schema 残缺 / kind 非法 / 非对象 → abort (transport/schema 错, fail-open 语义);
- *  - unverified: 判官读完证据认为不足、拒绝猜 PASS/FAIL —— reason 必填非空,
- *    evidence 可选缺省 (可能没跑命令所以无 evidence; 与 abort 同款可选纪律);
- *    unverified 缺/空 reason → abort 降级 (对齐 pass/fail 的 reason 必填纪律);
- *  - 判官输出宿主侧 truncateByCodePoint 至 2000 chars (prompt 不写长度, A8)。
+ * Key contracts:
+ *  - four states: pass / fail / abort / unverified;
+ *  - pass + empty evidence → silent downgrade to abort (missing-evidence reason);
+ *  - malformed schema / illegal kind / non-object → abort (transport/schema
+ *    error, fail-open semantics);
+ *  - unverified: judge read the evidence and refuses to guess PASS/FAIL —
+ *    reason required non-empty, evidence optional (commands may not have run;
+ *    same optional discipline as abort); unverified with missing/empty reason
+ *    downgrades to abort (aligned with the pass/fail reason discipline);
+ *  - judge output is truncated host-side to 2000 code points (the prompt
+ *    states no length limit).
  */
 import { truncateByCodePoint } from "../sandbox/index.js";
 import type { ClassifierCheck, ClassifierResult } from "./types.ts";
 
-/** 宿主侧判官输出截断上限 (A8, 对齐 ADR-0006 精神)。 */
+/** Host-side cap for judge output. */
+// (ADR-0006)
 export const CLASSIFIER_OUTPUT_LIMIT = 2000;
 
-/** 宿主侧截断: 按代码点截到 CLASSIFIER_OUTPUT_LIMIT, 不切 surrogate pair。 */
+/** Host-side truncation by code point; never splits a surrogate pair. */
 export function truncateClassifierOutput(text: string): string {
   return truncateByCodePoint(text, CLASSIFIER_OUTPUT_LIMIT);
 }
 
-/** 降级说明: pass 空 evidence 或 fail 空 evidence 时补的理由前缀。 */
+/** Downgrade note prefix added when pass/fail carries empty evidence. */
 const DEGRADE_REASON = "证据缺失（pass/fail 必须带非空 evidence）";
 
-/** 判定单个 evidence 项是否 shape 合法。 */
+/** Shape check for one evidence item. */
 function isClassifierCheck(v: unknown): v is ClassifierCheck {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
@@ -43,11 +47,12 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 /**
- * 解析判官 JSON → 四态 ClassifierResult (#449b B7 SC7: 扩 unverified 第 4 态)。
+ * Parse judge JSON → four-state ClassifierResult (including the unverified 4th state).
  *
- * 非法输入 (JSON 解析失败 / 非对象 / kind 非法 / shape 残缺 / pass|fail 空
- * evidence / unverified 缺 reason) 一律收敛为 `{kind:"abort", reason}`
- * (SC5: schema 错 → fail-open 到 unstable 的上游消费方)。
+ * All invalid inputs (JSON parse failure / non-object / illegal kind /
+ * malformed shape / pass|fail with empty evidence / unverified without
+ * reason) converge to `{kind:"abort", reason}` — schema errors fail-open
+ * toward unstable at the upstream consumer.
  */
 export function parseClassifierResult(raw: string): ClassifierResult {
   const aborted = (reason: string): ClassifierResult => ({
@@ -83,24 +88,26 @@ export function parseClassifierResult(raw: string): ClassifierResult {
     return { kind: "abort", reason: o.reason };
   }
 
-  // B7: unverified = 判官读完证据仍不足、拒绝猜 PASS/FAIL (SC7 第 4 态)。
-  // evidence 允许缺省 (可能没跑命令所以无 evidence, 与 abort 同款可选纪律);
-  // 若判官额外附了 evidence 也原样接受。reason 必填纪律已由上方统一检查保证。
+  // unverified = judge read the evidence, found it insufficient, refuses to
+  // guess PASS/FAIL (the 4th state). evidence may be absent (no commands run →
+  // no evidence; same optional discipline as abort); extra evidence attached
+  // anyway is accepted verbatim. The required-reason check above already holds.
   if (o.kind === "unverified") {
     return { kind: "unverified", reason: o.reason };
   }
 
-  // pass / fail 共同契约: evidence 必为数组且全项 shape 合法, 非空。
+  // pass / fail shared contract: evidence must be an array, every item
+  // shape-valid, non-empty.
   if (!Array.isArray(o.evidence) || !o.evidence.every(isClassifierCheck)) {
     return aborted("分类器输出 evidence 缺失或非法 (schema 错)");
   }
   if (o.evidence.length === 0) {
-    // 降级规则 (A4 末尾): pass/fail 空 evidence → abort。
+    // Downgrade rule: pass/fail with empty evidence → abort.
     return aborted(`${DEGRADE_REASON}: ${o.reason}`);
   }
 
   if (o.kind === "pass") {
-    // pass 不允许 missing 字段 (missing 仅 fail 承载)。
+    // pass must not carry missing (only fail does).
     if (o.missing !== undefined) {
       return aborted("分类器输出 pass 携带 missing 字段 (schema 错)");
     }
@@ -111,7 +118,7 @@ export function parseClassifierResult(raw: string): ClassifierResult {
     };
   }
 
-  // fail: missing 允许缺省(视为空数组)。
+  // fail: missing may be absent (treated as empty array).
   if (o.missing !== undefined && !isStringArray(o.missing)) {
     return aborted("分类器输出 fail missing 非字符串数组 (schema 错)");
   }

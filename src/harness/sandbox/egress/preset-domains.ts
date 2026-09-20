@@ -1,24 +1,35 @@
 /**
  * src/harness/sandbox/egress/preset-domains.ts
  *
- * ADR-0104 §Decision 1 起源、ADR-0107 §Decision 2 扩表 —— 代码承载的默认预放行档（builtin preset）。
+ * Code-borne default pre-allowlist (builtin preset) for high-frequency build
  *
- * **清单 SSOT 仅此一处**（spec `specs/egress-preset-allowlist.md` invariant 1/2）：
- * 合并只发生在 assembly.ts，任何消费面不得再自行拼 preset。
+ // (ADR-0104)
+ * traffic, extended for self-hosted relay egress per ADR-0107.
  *
- * 语义要点：
- *   - apex 与 `*.x` 并列写 —— `*.x` 严格子域不含 apex 是 ADR-0097 实测语义，
- *     缺一漏面；
- *   - 模型供应商 API / 容器镜像仓库 / GitLab·Bitbucket **显式不入档**
- *     （ADR-0104 §Decision 3：围栏内有 key，预放行 = secret 直传通道；
- *     ADR-0107 §Decision 2 重申不进档）——由 egress-assembly 测试反向钉住；
- *   - 收口原则（ADR-0104 §Decision 4 / ADR-0107 §Decision 2）：只收
- *     「git 主路径 + 主流包管理 + 本仓 Playwright 下载」高频可重复构建域，
- *     后续新增须对照该原则论证并走代码 review，不是配置开关
- *     （逃生通道 = 用户 `deniedDomains` 逐个砍，deny 优先）。
+ * **This list is the single source of truth**: merging happens only in
+ * assembly.ts; no consumer may re-append the preset itself.
+ *
+ * Semantics:
+ *   - apex and `*.x` are listed side by side — the matcher treats `*.x` as
+ *
+ // (ADR-0097)
+ *     strict subdomains excluding the apex (verified behavior), so dropping
+ *     either loses coverage;
+ *   - model-provider APIs / container registries / GitLab·Bitbucket are
+ *
+ // (ADR-0104)
+ *     deliberately excluded: keys live inside the fence, so pre-allowing them
+ *     would open a direct secret-exfiltration channel (reaffirmed by
+ *
+ // (ADR-0104)
+ *     ADR-0107). The egress-assembly tests pin this exclusion;
+ *   - inclusion principle: only git main paths, mainstream package managers,
+ *     and this repo's Playwright browser downloads. New entries must be
+ *     argued against that principle via code review — not a config toggle
+ *     (escape hatch = user `deniedDomains` per entry, deny wins).
  */
 
-/** 出厂预放行档：HTTPS git / PR API / 主流包管理主路径 / webui 测试浏览器二进制（ADR-0107 §Decision 2）。 */
+/** Builtin pre-allowlist: HTTPS git / PR APIs / mainstream package-manager main paths / webui test browser binaries. */
 export const BUILTIN_PRESET_ALLOWED_DOMAINS: readonly string[] = Object.freeze([
   "github.com",
   "*.github.com",

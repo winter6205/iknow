@@ -1,26 +1,36 @@
 /**
  * src/harness/sandbox/egress/domain-matcher.ts
  *
- * T3 域匹配与地址守卫适配层（egress 判定核心的纯逻辑件）。
+ * Domain matching + address-guard adapter layer (the pure-logic core of the
+ * egress decision).
  *
- * 单一职责：把上游 `@anthropic-ai/sandbox-runtime` 的匹配器与地址守卫收口，
- * 在本仓判定语义下吐出 allow / deny / reason。版本升级只改这一个文件。
+ * Single responsibility: funnel the upstream `@anthropic-ai/sandbox-runtime`
+ * matcher and address guard into allow / deny / reason under this repo's
+ * decision semantics. Version upgrades touch only this file.
  *
- * 判定语义（specs/network-egress-allowlist.md + ADR-0097 钉死）：
- *   - deny 优先：host 在 denied 集或命中 denied pattern → 拒，即使 allowed 也命中。
- *   - `*.x` 严格子域：匹配子域、**不**匹配 apex、不匹配前缀相似、不匹配后缀相似；
- *     大小写不敏感；可选 `:port`。
- *   - 允许集为空 → 全拒（fail-closed），不查地址守卫。
- *   - 地址守卫正交：域名命中不豁免；解析后地址落 loopback / RFC 1918 / ULA / CGNAT /
- *     metadata / link-local 一律拒。
- *   - 私网拒绝**必须显式 opt-in**（spec §Dependency fork：复用件 DENIED_CLASSES
- *     故意不含 RFC 1918 / ULA / CGNAT，本判定把 DEFAULT_PRIVATE_DENIED_RANGES 注入
- *     `deniedResolvedAddresses`，否则 SC4 落空）。
- *   - 配置层的非法形态（`:65536` / `:0` / `:abc` / `:` 等）本层会再次拒绝
- *     并以 `allowlist-malformed` 留痕（防御性深度，避免静默永不匹配）。
+ * Decision semantics (settled design invariants):
  *
- * 纯逻辑件：不碰进程/socket/spawn。T4 通过 `decideEgress` / `isAddressGuardDenied`
- * 消费本层；输入是纯数据。
+ // (ADR-0097)
+ *   - deny wins: host in the denied set or matching a denied pattern → deny,
+ *     even when allowed also matches.
+ *   - `*.x` is strict-subdomain: matches subdomains, **not** the apex, not
+ *     prefix-similar, not suffix-similar; case-insensitive; optional `:port`.
+ *   - empty allowlist → deny everything (fail-closed), address guard not
+ *     consulted.
+ *   - the address guard is orthogonal: a domain hit grants no exemption; any
+ *     resolved address in loopback / RFC 1918 / ULA / CGNAT / metadata /
+ *     link-local is denied.
+ *   - private-network denial **must be explicitly opted in**: the reused
+ *     upstream DENIED_CLASSES deliberately omits RFC 1918 / ULA / CGNAT, so
+ *     this decision injects DEFAULT_PRIVATE_DENIED_RANGES into
+ *     `deniedResolvedAddresses`, otherwise the private-range rule silently
+ *     never fires.
+ *   - malformed config forms (`:65536` / `:0` / `:abc` / `:` etc.) are
+ *     re-rejected by this layer with an `allowlist-malformed` trace
+ *     (defense-in-depth, avoiding silent never-match).
+ *
+ * Pure logic: no process / socket / spawn. The proxy layer consumes this via
+ * `decideEgress` / `isAddressGuardDenied`; inputs are plain data.
  */
 
 import {
@@ -29,17 +39,18 @@ import {
 } from "./upstream.js";
 
 /**
- * 私网拒绝档（RFC 1918 + ULA + CGNAT）。
+ * Private-network deny tier (RFC 1918 + ULA + CGNAT).
  *
- * 上游 `DENIED_CLASSES` 注释明写「allow-listing an intranet hostname is legitimate,
- * so those are opt-in via `network.deniedResolvedAddresses`」（resolved-address-guard.js:131）。
- * 不传这一档 = SC4 落空。
+ * The upstream `DENIED_CLASSES` comment states outright that allow-listing an
+ * intranet hostname is legitimate, so those classes are opt-in via
+ * `network.deniedResolvedAddresses` (see resolved-address-guard.js). Not
+ * passing this tier = the private-range rule never fires.
  *
- * 命名以 v4/v6 涵盖为准：
+ * Ranges chosen for v4/v6 coverage:
  *   - 10.0.0.0/8（RFC 1918）
  *   - 172.16.0.0/12（RFC 1918）
  *   - 192.168.0.0/16（RFC 1918）
- *   - fc00::/7（ULA，覆盖 fc00::/8 与 fd00::/8）
+ *   - fc00::/7 (ULA, covers fc00::/8 and fd00::/8)
  *   - 100.64.0.0/10（CGNAT，RFC 6598）
  */
 export const DEFAULT_PRIVATE_DENIED_RANGES: readonly string[] = Object.freeze([
@@ -51,12 +62,15 @@ export const DEFAULT_PRIVATE_DENIED_RANGES: readonly string[] = Object.freeze([
 ]);
 
 /**
- * 判定结果。`reason` 在 outcome === "deny" 时非空：
- *   - `not-in-allowlist`：host 未命中允许集，且未命中拒绝集（先匹配 allow，未命中再走 denied 检查）。
- *   - `denied`：host 命中 denied 集或 denied pattern（deny 优先）。
- *   - `allowlist-empty`：allowedDomains 空，fail-closed。
- *   - `allowlist-malformed`：所有 allowed 条目形态非法（`:65536` 等），不允许静默永不匹配。
- *   - `address-denied`：地址守卫拒绝（loopback / 私网 / metadata / link-local 等）。
+ * Decision result. `reason` is non-empty when outcome === "deny":
+ *   - `not-in-allowlist`: host matched no allow entry and no denied entry
+ *     (allow is checked first; a miss then goes through the denied check).
+ *   - `denied`: host hit the denied set or a denied pattern (deny wins).
+ *   - `allowlist-empty`: allowedDomains empty, fail-closed.
+ *   - `allowlist-malformed`: every allowed entry is malformed (e.g.
+ *     `:65536`) — silent never-match is not allowed.
+ *   - `address-denied`: address guard denial (loopback / private / metadata /
+ *     link-local etc.).
  */
 export type DecideEgressOutcome = "allow" | "deny";
 
@@ -73,40 +87,43 @@ export interface DecideEgressResult {
 }
 
 export interface DecideEgressInput {
-  /** CONNECT host / absolute-URI host；不可为空串。 */
+  /** CONNECT host / absolute-URI host; must not be an empty string. */
   readonly host: string;
-  /** 目标端口。 */
+  /** Target port. */
   readonly port: number;
-  /** 域名允许集。 */
+  /** Domain allowlist. */
   readonly allowedDomains: readonly string[];
-  /** 域名拒绝集（deny 优先）。 */
+  /** Domain denylist (deny wins). */
   readonly deniedDomains: readonly string[];
   /**
-   * 已解析的地址列表（DNS 解析后）。undefined = 尚未解析，本层仅做域名判定；
-   * T4 在解析前后可分别调用本函数。
+   * Resolved addresses (post-DNS). undefined = not resolved yet, this layer
+   * only does domain matching; the proxy layer may call this function both
+   * before and after resolution.
    *
-   * 语义对齐上游 `lookupFor`：任一地址落在 deniedResolvedAddresses（含
-   * DEFAULT_PRIVATE_DENIED_RANGES）即拒。
+   * Semantics aligned with upstream `lookupFor`: any address falling in
+   * deniedResolvedAddresses (incl. DEFAULT_PRIVATE_DENIED_RANGES) → deny.
    */
   readonly resolvedAddresses?: readonly string[];
   /**
-   * 地址守卫额外 denied 档（按 CIDR）。默认注入 DEFAULT_PRIVATE_DENIED_RANGES。
-   * T4 通常无需覆盖；测试时若需要可显式传入窄集合以避免触发宿主本地接口拒绝。
+   * Extra address-guard deny CIDRs. Defaults to injecting
+   * DEFAULT_PRIVATE_DENIED_RANGES. Usually no override needed; tests may
+   * pass a narrow set explicitly to avoid denials from host-local interfaces.
    */
   readonly deniedResolvedAddresses?: readonly string[];
 }
 
 /**
- * 主判定函数。输入纯数据，输出 allow / deny + reason。
+ * Main decision function. Plain data in, allow / deny + reason out.
  *
- * 顺序（spec §Settled invariants #6 + ADR §Decision）：
- *   1. 允许集空 → fail-closed (allowlist-empty)
- *   2. host 在 denied 集或命中 denied pattern → deny (denied)，deny 优先
- *   3. allowedDomains 形态非法（任一条目既不命中 host 也不命中合法 pattern） →
- *      整体记 allowlist-malformed 拒绝；不静默永不匹配
- *   4. host 未命中允许集 → deny (not-in-allowlist)
- *   5. host 命中允许集 + resolvedAddresses 含拒绝档地址 → deny (address-denied)
- *   6. 否则 → allow
+ * Order (settled invariants):
+ *   1. empty allowlist → fail-closed (allowlist-empty)
+ *   2. host in denied set / hits a denied pattern → deny (denied), deny wins
+ *   3. allowedDomains all malformed (no entry hits the host nor a legal
+ *      pattern) → deny as allowlist-malformed overall; no silent never-match
+ *   4. host misses the allowlist → deny (not-in-allowlist)
+ *   5. host hits + resolvedAddresses contain a denied-range address → deny
+ *      (address-denied)
+ *   6. otherwise → allow
  */
 export function decideEgress(input: DecideEgressInput): DecideEgressResult {
   const host = input.host.trim().toLowerCase();
@@ -114,19 +131,19 @@ export function decideEgress(input: DecideEgressInput): DecideEgressResult {
   const allowed = input.allowedDomains;
   const denied = input.deniedDomains;
 
-  // 1. 允许集为空 → fail-closed
+  // 1. empty allowlist → fail-closed
   if (allowed.length === 0) {
     return { outcome: "deny", reason: "allowlist-empty" };
   }
 
-  // 2. deny 优先：先扫 denied 集
+  // 2. deny wins: scan the denied set first
   if (matchesAny(host, port, denied)) {
     return { outcome: "deny", reason: "denied" };
   }
 
-  // 3+4. 扫允许集。任一条目形态非法（既不命中 host 也不命中合法 pattern）→ 整体记 malformed
-  // 这里的关键：如果所有 allowed 条目形态非法（典型的「表非空但全是非法 :port」场景），
-  // 不能让 host 「未命中」而被静默吞掉——这是 spec Evidence pointers 点名要的。
+  // 3+4. scan the allowlist. The key point: when every allowed entry is
+  // malformed (the classic "non-empty table but all :port illegal"), the
+  // host must not "miss" and be silently swallowed — deny explicitly.
   if (
     allowed.length > 0 &&
     allowed.every((entry) => !isWellFormedPattern(entry))
@@ -138,7 +155,7 @@ export function decideEgress(input: DecideEgressInput): DecideEgressResult {
     return { outcome: "deny", reason: "not-in-allowlist" };
   }
 
-  // 5. 域名命中 → 走地址守卫（仅当解析结果已就绪）
+  // 5. domain hit → consult the address guard (only once resolution is ready)
   if (input.resolvedAddresses !== undefined) {
     const deniedRanges =
       input.deniedResolvedAddresses ?? DEFAULT_PRIVATE_DENIED_RANGES;
@@ -146,9 +163,10 @@ export function decideEgress(input: DecideEgressInput): DecideEgressResult {
       allowedDomains: allowed,
       deniedDomains: denied,
       deniedResolvedAddresses: deniedRanges,
-      // 用一个确定性 stub 接口地址,避免在不同测试机上因本地 NIC 不同而漂移。
-      // Spec §Settled invariants 不要求「本机接口」拒绝档作为 SC4 命中依据;
-      // 我们只钉住 DEFAULT_PRIVATE_DENIED_RANGES + 上游默认 DENIED_CLASSES。
+      // Deterministic empty local-interface list avoids drift across test
+      // machines with different NICs; host-interface denial is not one of
+      // the pinned tiers here. We pin only
+      // DEFAULT_PRIVATE_DENIED_RANGES + the upstream default DENIED_CLASSES.
       localAddresses: () => [],
     });
     for (const addr of input.resolvedAddresses) {
@@ -162,10 +180,10 @@ export function decideEgress(input: DecideEgressInput): DecideEgressResult {
 }
 
 /**
- * 判定单个 (hostname, address, port) 是否被地址守卫拒。
- *
- * T4 在 DNS 解析循环中可能以更细粒度调用——例如每个地址先单独判定一次。
- * 暴露为顶层导出避免内部走 require 链。
+ * Decide whether a single (hostname, address, port) is denied by the address
+ * guard. The proxy layer may call at finer granularity inside the DNS
+ * resolution loop — e.g. one check per address. Exported at top level so
+ * consumers never route through an internal require chain.
  */
 export interface AddressGuardInput {
   readonly hostname: string;
@@ -189,16 +207,18 @@ export function isAddressGuardDenied(input: AddressGuardInput): boolean {
 }
 
 /* ---------------------------------------------------------------------------
- * 内部辅助
+ * Internal helpers
  * ------------------------------------------------------------------------- */
 
 /**
- * 给定一组 pattern（含 `:port`），判断其中任一是否命中 (host, port)。
+ * Given a set of patterns (possibly carrying `:port`), whether any hits
+ * (host, port).
  *
- * 注意：上游 `matchesDomainPatternWithPort` 在 pattern 形态非法时**不抛错**，
- * 直接返回 false（见 `domain-pattern.js:67-72` parsePortSuffix 与 Evidence pointers）。
- * 因此本函数无法凭「throws」区分「合法但不匹配」与「形态非法」——需要配套
- * `isWellFormedPattern` 来识别 allowlist-malformed 档。
+ * Note: upstream `matchesDomainPatternWithPort` **does not throw** on a
+ * malformed pattern — it just returns false (see parsePortSuffix in
+ * domain-pattern.js). So this function cannot tell "legal but unmatched" from
+ * "malformed" via a throw — hence the companion `isWellFormedPattern` to
+ * recognize the allowlist-malformed tier.
  */
 function matchesAny(
   host: string,
@@ -212,37 +232,48 @@ function matchesAny(
 }
 
 /**
- * 判断一条 pattern 在**形态层**是否合法：
- *   - `hostPattern`（剥掉 `:port` 后）非空
- *   - `:port` 数值在 1..65535（不含 0，含 65535）
+ * Whether a pattern is valid at the **form** level:
+ *   - `hostPattern` (after stripping `:port`) non-empty
+ *   - `:port` value in 1..65535 (0 excluded, 65535 included)
  *
- * 不命中 host 的合法 pattern 也算「形态合法」——它仍可命中其它 host；
- * 只有「形态非法」的条目会被上游静默永不匹配，本函数专门识别它。
+ * A legal pattern that does not match the host still counts as "well
+ * formed" — it may match other hosts; only malformed entries get silently
+ * swallowed upstream by never matching, and this function identifies exactly
+ * those.
  */
 function isWellFormedPattern(pattern: string): boolean {
   const trimmed = pattern.trim();
   if (trimmed === "") return false;
-  // 复刻上游对 pattern 形态的边界:
-  //   - 裸 IPv6（无方括号 + 多个 `:`）上游视为合法 hostPattern、port=undefined;
-  //   - `:port` 解析失败上游把整个 pattern 原样返回为 hostPattern,port=undefined。
-  // 二者都让 hostPattern 含 `:`，但语义不同。我们用 upstream 的边界对齐:
-  //   - `hostPattern` 非空
-  //   - `hostPattern` 不为空时,若同时**没有合法 port 后缀**且 hostPattern 含裸 `:`,
-  //     视为形态非法（裸 IPv6 上游允许,但我们这里保守——且测试集不涉及裸 IPv6 pattern）。
-  //   - 含 `:port` 且解析失败 → hostPattern 形如 `foo:abc` 等,判定为形态非法。
+  // Replicating upstream's pattern-form boundaries:
+  //   - bare IPv6 (no brackets + multiple `:`) is a legal hostPattern with
+  //     port=undefined upstream;
+  //   - when `:port` parsing fails, upstream returns the whole pattern as
+  //     hostPattern with port=undefined.
+  // Both leave hostPattern containing `:`, but mean different things. We
+  // align with upstream's boundaries:
+  //   - `hostPattern` non-empty
+  //   - when non-empty, if there is **no legal port suffix** and hostPattern
+  //     contains a bare `:`, treat as malformed (upstream allows bare IPv6,
+  //     but we stay conservative here — and the test set never uses bare IPv6
+  //     patterns).
+  //   - `:port` present but unparseable → hostPattern looks like `foo:abc`,
+  //     judged malformed.
   const { hostPattern, port } = splitDomainPatternPortLocal(trimmed);
   if (hostPattern === "") return false;
-  // 上游 splitDomainPatternPort 在「:port 非法」时返回 hostPattern === 原 pattern,
-  // 此时 hostPattern 形如 "github.com:65536"; 这种形态非法。
-  // 而对无后缀 / 合法 IPv6 的 pattern,hostPattern 是干净的。
-  // 判定法:若有 `:` 在 hostPattern 内,且没有合法 port 解析,则非法。
+  // Upstream splitDomainPatternPort returns hostPattern === the original
+  // pattern when ":port" is illegal, so hostPattern looks like
+  // "github.com:65536" — malformed. For no-suffix / legal-IPv6 patterns the
+  // hostPattern stays clean. Test: a `:` inside hostPattern with no legal
+  // port parse → malformed.
   if (hostPattern.includes(":") && port === undefined) return false;
   return true;
 }
 
 /**
- * 复刻 upstream `splitDomainPatternPort` 的最小子集，用于识别 `:port` 形态。
- * 直接 import 也会拉一份判定开销，且我们要的只是「port 数值」是否在合法范围。
+ * Minimal replication of upstream `splitDomainPatternPort`, used only to
+ * recognize the `:port` form. Importing upstream's version would drag in
+ * extra decision overhead, and all we need is whether the port value is in
+ * the legal range.
  */
 function splitDomainPatternPortLocal(pattern: string): {
   hostPattern: string;

@@ -1,60 +1,77 @@
 /**
- * 「按 path 取全文行」的 fs 边界（D5 行窗 + D3 context 共用）。
+ * The fs boundary for "get full-text lines by path" (shared by the line
+ * window and context rendering).
  *
- * 单点职责：把「一个 workspace 相对路径」变成行数组，或 null（不可读 /
- * 二进制 / 超大）。`also-window.ts` 与 `context-groups.ts` 都消费它，因此
- * 两条展示路径的文件准入完全一致 —— 不会出现「also 能看但 context 看不了」
- * 这类分叉。
+ * Single responsibility: turn "one workspace-relative path" into a line array,
+ * or null (unreadable / binary / oversize). Both `also-window.ts` and
+ * `context-groups.ts` consume it, so the file admission of the two display
+ * paths is identical — no forks like "visible via also but not via context".
  *
- * 跳过策略沿用旧 Node 回退（ADR-0004 修订）：>1MB 或**整文件**含 NUL 的文件
- * 不当文本读（显式点名的文件另有一个宽裕上界，见 `MAX_EXPLICIT_FILE_BYTES`）。
- * 行号 1 基 = 下标 + 1，所以 `readLines()[n-1]` 是第 n 行。
+ * Skip policy inherited from the old Node fallback: files >1MB or containing
+ *
+ // (ADR-0004)
+ * NUL **anywhere in the file** are not read as text (an explicitly named file
+ * gets a separate generous cap, see `MAX_EXPLICIT_FILE_BYTES`). Line numbers
+ * are 1-based = index + 1, so `readLines()[n-1]` is line n.
  */
 
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 /**
- * 文本文件的体积闸（**唯一权威**）：1 MiB 以上不当文本读。
+ * Size gate for text files (**single authority**): above 1 MiB is not read as
+ * text.
  *
- * 与 `read_file` 的拒读线同值但**不是同一份常量** —— `read-file.ts` 另有私有
- * `MAX_FILE_BYTES`（Task A 面，本切片不动）。搜索侧三处消费者（遍历期的
- * `--max-filesize`、`readWorkspaceLines`、`node-scan` 的准入）都从这里取，
- * 避免再长出一份漂移的复制。
+ * Same value as `read_file`'s refusal line but **not the same constant** —
+ * `read-file.ts` keeps its own private `MAX_FILE_BYTES` (out of scope for this
+ * slice). All three search-side consumers (the traversal `--max-filesize`,
+ * `readWorkspaceLines`, and `node-scan`'s admission) take it from here, to
+ * avoid growing another drifting copy.
  */
 export const MAX_TEXT_FILE_BYTES = 1_048_576;
 
 /**
- * 显式点名文件的体积上界（**16 倍** `MAX_TEXT_FILE_BYTES`）。
+ * Size cap for explicitly named files (**16x** `MAX_TEXT_FILE_BYTES`).
  *
- * 「显式文件豁免」是为对齐 rg 的 `--max-filesize` 只管遍历期而设的（见
- * 下）。但豁免若无上界，`{path: "<超大文件>"}` 会把任意大的文件整个读进
- * 内存；rg 那边是流式扫，Node 这边就成了 OOM 面。给一个宽裕但有限的上界，
- * 且**两条引擎共用这一条**：超过它的显式文件在 rg 与 Node 上都不被搜索
- * （rg 侧由 `grep.ts` 的准入过滤裁掉，不是各写一份阈值）。
+ * The "explicit file exemption" exists to align with rg's `--max-filesize`
+ * applying only during traversal (see below). But an unbounded exemption would
+ * let `{path: "<huge file>"}` read an arbitrarily large file wholly into
+ * memory; rg streams instead, so Node would become the OOM surface. Hence a
+ * generous but finite cap, **shared by both engines**: an explicit file above
+ * it is not searched by rg or Node either (on the rg side, `grep.ts`'s
+ * admission filter trims it — not a separately written threshold).
  */
 export const MAX_EXPLICIT_FILE_BYTES = MAX_TEXT_FILE_BYTES * 16;
 
 /**
- * Workspace 相对路径 → 文本 buffer；不可读 / 二进制 / 超大 → null。
+ * Workspace-relative path → text buffer; unreadable / binary / oversize →
+ * null.
  *
- * 这是「文件能不能当文本读」的**唯一准入判定**：`readWorkspaceLines` 与
- * `isTextFile` 都走它，两条引擎的接受集因此同源。分开两种消费形状（要行 /
- * 只要一个布尔）是为了让 `paths` / `count` 出法不必付切行的代价。
+ * This is the **single admission decision** for "can this file be read as
+ * text": both `readWorkspaceLines` and `isTextFile` go through it, so both
+ * engines' accepted sets share one source. Keeping two consumer shapes (lines
+ * vs just a boolean) lets the `paths` / `count` modes skip the line-splitting
+ * cost.
  *
- * `allowOversize` 只给「搜索根是**显式点名的单个文件**」这一条路用：rg 的
- * `--max-filesize` 只在**递归遍历**时生效，显式喂进来的文件即使超限也照搜
- * （实测 rg 15.1.0）。Node 侧若一律按体积拒读，同一个 `path: "big.ts"`
- * 就会在两条引擎上给出不同答案；反过来若完全不加界，超大文件就是无界读。
- * 于是取 `MAX_EXPLICIT_FILE_BYTES` 这个共同上界。
+ * `allowOversize` is used only on the path where "the search root is an
+ * **explicitly named single file**": rg's `--max-filesize` applies only during
+ * **recursive traversal**; an explicitly fed file is searched even above the
+ * limit (verified rg 15.1.0). If Node refused by size unconditionally, the
+ * same `path: "big.ts"` would get different answers from the two engines; and
+ * with no bound at all, an oversize file becomes an unbounded read. Hence the
+ * shared cap `MAX_EXPLICIT_FILE_BYTES`.
  *
- * 二进制判据是**整文件**扫描 NUL（`containsNul`），与 `read_file` 的
- * `buffer.includes(0x00)` 同口径（ADR-0004 的读侧先例）。为什么不能沿用
- * rg 自己的二进制检测当权威：它按 64 KiB 窗口判，且**同一文件在不同出法下
- * 结论不同** —— 远距离 NUL 的文件 `-l` 会列出、`--count` 会略过（实测
- * 15.1.0，因为 `-l` 命中即返回、`--count` 要读到文件尾）。那种「口径」没有
- * 可复刻的一致含义，所以两条引擎统一采用本函数的整文件判定，rg 自带的检测
- * 只当省 I/O 的粗筛（见 `rg-engine.ts` 的准入过滤）。
+ * The binary test scans the **whole file** for NUL (`containsNul`), same rule
+ * as `read_file`'s `buffer.includes(0x00)` (the read-side precedent). Why rg's
+ *
+ // (ADR-0004)
+ * own binary detection cannot be the authority: it judges within a 64 KiB
+ * window and **reaches different conclusions per output mode** — a file with a
+ * far-away NUL is listed by `-l` but skipped by `--count` (verified 15.1.0:
+ * `-l` returns on first hit while `--count` reads to EOF). That has no
+ * replicable consistent meaning, so both engines uniformly use this function's
+ * whole-file verdict, and rg's built-in detection is only an I/O-saving
+ * prefilter (see the admission filter in `rg-engine.ts`).
  */
 async function readTextBuffer(
   workspaceRoot: string,
@@ -75,9 +92,9 @@ async function readTextBuffer(
 }
 
 /**
- * Workspace 相对路径 → 行数组；不可读 / 二进制 / 超大 → null。
+ * Workspace-relative path → line array; unreadable / binary / oversize → null.
  *
- * 行号 1 基 = 下标 + 1，所以 `readLines()[n-1]` 是第 n 行。
+ * Line numbers are 1-based = index + 1, so `readLines()[n-1]` is line n.
  */
 export async function readWorkspaceLines(
   workspaceRoot: string,
@@ -93,9 +110,10 @@ export async function readWorkspaceLines(
 }
 
 /**
- * 准入布尔：该路径此刻能不能被当作文本搜索（`readWorkspaceLines` 的非 null
- * 判据，只是不切行）。rg 引擎用它把「rg 报了但按本工具口径是二进制 / 超大」
- * 的文件剔掉 —— 两条引擎因此共用同一条准入（见 `rg-engine.ts`）。
+ * Admission boolean: can this path be searched as text right now (the non-null
+ * test of `readWorkspaceLines`, without splitting lines). The rg engine uses
+ * it to drop files that "rg reported but are binary / oversize by this tool's
+ * rule" — both engines thus share one admission line (see `rg-engine.ts`).
  */
 export async function isTextFile(
   workspaceRoot: string,
@@ -112,13 +130,17 @@ export async function isTextFile(
 }
 
 /**
- * 一批 workspace 相对路径 → 通过准入的那些（**顺序保持**，同一路径只查一次）。
+ * A batch of workspace-relative paths → those passing admission (**order
+ * kept**, each path checked once).
  *
- * 为什么需要「批」这个形状：rg 引擎只能在拿到它的候选之后才复核（见
- * `rg-engine.ts` 的准入过滤），而 rg 一次可以报出上万个文件。逐个 `await`
- * 会让墙钟跟文件数线性相乘；实测 34k 文件（本仓 `pattern=import` 的真实规模）
- * 串行 18.2s、8 路 3.2s、**64 路 1.3s**。整文件 NUL 扫描是纯 I/O，并发是安全
- * 的 —— 上限取 64 是为了不给文件描述符 / 页缓存添压，不是语义的一部分。
+ * Why a batch shape: the rg engine can only re-check after receiving its
+ * candidates (see the admission filter in `rg-engine.ts`), and rg may report
+ * tens of thousands of files at once. `await`ing one by one multiplies
+ * wall-clock linearly with file count; measured on 34k files (this repo's real
+ * scale for `pattern=import`): serial 18.2s, 8-way 3.2s, **64-way 1.3s**.
+ * Whole-file NUL scanning is pure I/O, so concurrency is safe — the 64 cap
+ * exists to avoid pressuring file descriptors / page cache, it is not part of
+ * the semantics.
  */
 export async function admittedPaths(
   workspaceRoot: string,
@@ -145,10 +167,10 @@ export async function admittedPaths(
   return admitted;
 }
 
-/** 准入复核的并发路数（纯 I/O；见 `admittedPaths` 的实测依据）。 */
+/** Concurrency of the admission re-check (pure I/O; see the measurements in `admittedPaths`). */
 const ADMISSION_CONCURRENCY = 64;
 
-/** 按行切；CRLF 的 `\r` 剥掉；末行无换行也算一行。 */
+/** Split on lines; strip the `\r` of CRLF; a final line without newline still counts. */
 export function splitLines(buffer: Buffer): string[] {
   const text = buffer.toString("utf8");
   const out: string[] = [];
@@ -168,13 +190,14 @@ function stripCr(line: string): string {
 }
 
 /**
- * 二进制判据：**整个** buffer 里有 NUL 即判二进制。
+ * Binary test: NUL anywhere in the **whole** buffer → binary.
  *
- * 不做窗口截断（旧实现只看前 8 KiB）：窗口是 rg 二进制检测的近似，而 rg 的
- * 窗口（64 KiB）与 NUL 位置的关系会产生「同一文件在具名搜索里被当二进制、
- * 在递归遍历里被当文本」这类自相矛盾的结果。NUL 只可能来自非文本内容，
- * 整文件扫描是唯一稳定的口径，也与 `read_file` 的 `buffer.includes(0x00)`
- * 完全一致。
+ * No window truncation (the old implementation only looked at the first
+ * 8 KiB): a window is an approximation of rg's binary detection, and rg's
+ * window (64 KiB) versus NUL position produces self-contradictions like "the
+ * same file is binary in a named search but text in recursive traversal". NUL
+ * can only come from non-text content, so the whole-file scan is the only
+ * stable rule — and it matches `read_file`'s `buffer.includes(0x00)` exactly.
  */
 export function containsNul(buffer: Buffer): boolean {
   return buffer.includes(0x00);

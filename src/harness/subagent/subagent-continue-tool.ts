@@ -1,22 +1,32 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T4 — `subagent_continue` ACI 工具。
+ * `subagent_continue` ACI tool — hand one more message to a dead worker and
  *
- * 父模型对**已死工人**再给一句：入参本会话 `task_id` + 下一句 `message`。
- * 闸全部在 manager.resumeTask 内判（寿命 / 账存在性 / 并发顶，锁句 4–5），
- * 本工具只做三件事：入参校验、所有权过滤（跨会话拒，与 subagent_stop 同门）、
- * typed 拒绝（SubAgentResumeError 判别 kind → 模型可见 ToolExecutionError）。
- * 不在工具侧重算寿命 —— 两处判会漂移。
+ // (ADR-0102)
+ * continue its dialogue: input is this session's `task_id` plus the next
+ * `message`. All gates live inside `manager.resumeTask` (process lifetime /
+ * transcript accounting / concurrency cap); this tool only validates inputs,
+ * filters ownership (cross-conversation refusals, same gate as
+ * subagent_stop), and maps typed rejections (SubAgentResumeError kind →
+ * model-visible ToolExecutionError). The tool never re-derives lifetime —
+ * two checks would drift.
  *
- * 再拉起 = 新 worker 进程 + 同对外句柄（ADR-0102 Decision 2/4）：工人 transcript
- * 的 rewind head 由 worker 侧 T3 的 present 臂消费（盘上有账 → 账作 prior、
- * 本轮新句进 seed），本工具不搬对话历史。身份与能力字段沿用原 def —— 没有
- * subagent_type / model 等入参，原 catalog 角色再 run()。
+ * Resume = a new worker process behind the same external handle: the worker
+ * transcript's rewind head is consumed by the present arm on the worker side
+ * (transcript on disk → it becomes prior context, the new message seeds this
+ * turn); this tool does not move dialogue history. Identity and capability
+ * fields carry over from the original def — no subagent_type / model inputs;
+ * the original catalog role simply runs again.
  *
- * **等待契约与 spawn 相同**（锁句 5）：省略 `wait` = 前景，当跳返回投影信封；
- * `wait:false` = 后景 {task_id} + mailbox 叫醒。前景臂复用 spawn 的归因 helpers
- * （label 参数化），墙钟 / abort / buffer 分流的语义两条臂一致。
+ * **The wait contract matches spawn**: omitted `wait` = foreground, the call
  *
- * **依赖注入形态**与 append-only 位置契约同 subagent_stop（registry.ts 尾部注释）。
+ // (ADR-0102)
+ * returns the projected envelope; `wait:false` = background {task_id} plus a
+ * mailbox wake. The foreground arm reuses spawn's attribution helpers
+ * (parameterized label), so wall-clock / abort / buffer-routing semantics
+ * stay identical across both arms.
+ *
+ * **DI shape** and the append-only position contract are the same as
+ * subagent_stop (see the tail comment in registry.ts).
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
@@ -30,7 +40,10 @@ import {
   SubAgentWaitTimeoutError,
 } from "./manager.js";
 import { ToolExecutionError } from "../errors.js";
-import { assertSubagentOwnership, findSubagentTask } from "./subagent-tool-shared.js";
+import {
+  assertSubagentOwnership,
+  findSubagentTask,
+} from "./subagent-tool-shared.js";
 import {
   envelopeFromWaitTimeout,
   foregroundDrainExclusion,
@@ -45,12 +58,16 @@ export interface SubAgentContinueToolDeps {
 const LABEL = "subagent_continue";
 
 /**
- * SubAgentResumeError 的 kind → 模型可见文案。渲染形态 `${kind} — ${出路}`：
- * kind 词面上可见（typed-error catch 契约），每条都给出路 —— running 指回
- * stop-then-continue 的纠偏路径（中途注入不授权）；no_transcript 说明旧工人
- * 没有账、改走新 spawn；not_found 是调用面错误；missing_task 是 manager 直连
- * 面的空 task 兜底（本工具入参校验已挡空 message，触发即调用面缺陷）。
- * 放模块级：handler 圈复杂度棘轮（spawn 工具 foregroundDrainExclusion 同款先例）。
+ * SubAgentResumeError kind → model-visible message, rendered as
+ * `${kind} — ${remedy}`: the kind stays visible on the surface (typed-error
+ * catch contract) and every refusal names a way out — running points back to
+ * stop-then-continue (mid-turn injection is not authorized); no_transcript
+ * means the old worker has no accounting on disk, so a fresh spawn is the
+ * path; not_found is a call-site error; missing_task is the manager's
+ * direct-API empty-task fallback (input validation here already blocks
+ * empty messages, so hitting it signals a call-site defect).
+ * Module-level: handler cyclomatic-complexity ratchet (same precedent as
+ * spawn's foregroundDrainExclusion).
  */
 function resumeRefusalMessage(err: SubAgentResumeError): string {
   switch (err.kind) {
@@ -66,10 +83,12 @@ function resumeRefusalMessage(err: SubAgentResumeError): string {
 }
 
 /**
- * 所有权闸（与 subagent_stop 同一道，共享判定见 subagent-tool-shared.ts）：
- * 跨会话拒，且判定先于再拉起。未知 id 不在这里挡 —— 让它流到
- * manager.resumeTask 拿 not_found，寿命/账/额度的真值只在 manager 一处判
- * （工具侧重算会漂移）。
+ * Ownership gate (same one subagent_stop passes; shared logic in
+ * subagent-tool-shared.ts): cross-conversation refusals, checked before any
+ * resume. Unknown ids are deliberately not blocked here — they flow to
+ * manager.resumeTask and come back as not_found, because lifetime /
+ * transcript / quota truth is judged in exactly one place (re-checking in
+ * the tool would drift).
  */
 function assertOwnership(
   manager: SubAgentManager,
@@ -83,8 +102,9 @@ function assertOwnership(
 }
 
 /**
- * 再拉起臂：manager 闸（寿命 / 账 / 并发顶）+ typed 拒绝映射。
- * 放模块级：handler 圈复杂度棘轮（spawn 工具 foregroundDrainExclusion 先例）。
+ * Resume arm: manager gates (lifetime / transcript / concurrency cap) plus
+ * typed-rejection mapping. Module-level for the handler complexity ratchet
+ * (spawn's foregroundDrainExclusion precedent).
  */
 function resumeDeadWorker(
   manager: SubAgentManager,
@@ -93,7 +113,8 @@ function resumeDeadWorker(
 ): { readonly taskId: string } {
   const resume = manager.resumeTask;
   if (resume === undefined) {
-    // 装配漏接（poll-only fake manager）：显式失败，不静默退化成 spawn。
+    // wiring gap (poll-only fake manager): fail explicitly rather than
+    // silently degrading into a spawn.
     throw new ToolExecutionError(
       `${LABEL}: this session's sub-agent manager does not support resume`
     );
@@ -104,7 +125,8 @@ function resumeDeadWorker(
     if (err instanceof SubAgentResumeError) {
       throw new ToolExecutionError(resumeRefusalMessage(err));
     }
-    // 并发顶与 spawn 同源（锁句 5）：capacity 归因透传给模型，促其降并发。
+    // concurrency cap shares its source with spawn: pass the capacity
+    // attribution through to the model so it lowers parallelism.
     if (err instanceof SubAgentCapacityError) {
       throw new ToolExecutionError(err.message);
     }
@@ -113,9 +135,11 @@ function resumeDeadWorker(
 }
 
 /**
- * 前景臂 —— spawn 前景臂同款：waitFor 缺省走 manager 三层链（def.timeoutMs
- * 是原工人的寿命，不在此重释）；abort / 墙钟 / buffer 分流复用 spawn 的
- * 归因 helpers（label 参数化），两条臂的终态语义一致。
+ * Foreground arm — same shape as spawn's: waitFor defaults to the manager's
+ * three-layer chain (def.timeoutMs is the original worker's lifetime, not
+ * re-interpreted here); abort / wall-clock / buffer routing reuse spawn's
+ * attribution helpers (parameterized label) so both arms keep identical
+ * terminal semantics.
  */
 async function awaitForegroundHandoff(
   manager: SubAgentManager,
@@ -133,16 +157,21 @@ async function awaitForegroundHandoff(
       throw new ToolExecutionError(`${LABEL}: cancelled by caller abort`);
     }
     if (err instanceof SubAgentWaitTimeoutError) {
-      return envelopeFromWaitTimeout(manager.queryBuffer(taskId), taskId, LABEL);
+      return envelopeFromWaitTimeout(
+        manager.queryBuffer(taskId),
+        taskId,
+        LABEL
+      );
     }
     throw err;
   }
 }
 
 /**
- * 入参校验 + `wait` 默认值解析（缺省 = 前景，锁句 5「wait 与 spawn 相同」）。
- * input 已由 ajv strict 校验形状；此处保留 handler 直调兜底（同
- * spawn_subagent / subagent_stop 的 compile-input 形态）。
+ * Input validation + `wait` default resolution (omitted = foreground, same
+ * contract as spawn). Shape is already ajv-strict-validated; the guard here
+ * covers direct handler calls (same compile-input shape as spawn_subagent /
+ * subagent_stop).
  */
 function readContinueInputs(obj: Record<string, unknown>): {
   readonly taskId: string;
@@ -161,8 +190,9 @@ function readContinueInputs(obj: Record<string, unknown>): {
 }
 
 /**
- * 本跳 def：只带回合与交付通道字段；身份/能力字段由 manager 从原 def 沿用
- * （见 resumeDefinition）。不带 conversationId —— 归属是身份的一部分。
+ * This hop's def: only turn and delivery-channel fields; identity /
+ * capability fields carry over from the original def in the manager (see
+ * resumeDefinition). No conversationId — ownership is part of identity.
  */
 function continueTurnFields(
   message: string,
@@ -207,11 +237,11 @@ export function createSubAgentContinueTool(
       additionalProperties: false,
     },
     aci: {
-      category: "read-only", // 与 spawn_subagent 同归类（执行耗时但不改文件系统 —— ACR verdict 1 同门）
-      lazy: false, // 常驻 prompt：续跑是派发面的对称能力（stop 同款理由）
-      timeoutTier: "unbounded", // 前景臂寿命 = manager per-task 钟，ACI 不 timer（spawn 同款）
-      isConcurrencySafe: true, // 不同 task_id 的续跑可同轮并行（spawn 同契约）
-      interruptBehavior: "cancel", // 前景入口；ctx.signal abort → waitFor reject → 归因 cancelled
+      category: "read-only", // same category as spawn_subagent: long-running but never touches the filesystem
+      lazy: false, // resident prompt: continue is the symmetric counterpart of dispatch (same rationale as stop)
+      timeoutTier: "unbounded", // foreground lifetime = manager per-task clock; ACI runs no timer (same as spawn)
+      isConcurrencySafe: true, // continues of different task_ids may run in parallel in one turn (same contract as spawn)
+      interruptBehavior: "cancel", // foreground entry; ctx.signal abort → waitFor rejects → attributed as cancelled
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const obj = (input ?? {}) as Record<string, unknown>;
@@ -219,7 +249,7 @@ export function createSubAgentContinueTool(
       assertOwnership(deps.manager, taskId, ctx);
       const next = continueTurnFields(message, ctx, wait);
       const resumed = resumeDeadWorker(deps.manager, taskId, next);
-      // 后景臂与 spawn 的 wait:false 同形态：即返 {task_id}，终态走 mailbox。
+      // background arm mirrors spawn's wait:false: return {task_id} at once; the terminal state arrives via mailbox.
       if (!wait) {
         return JSON.stringify({ task_id: resumed.taskId });
       }

@@ -1,41 +1,54 @@
 /**
- * 符号改写 ACI 工具集 —— spec `symbol-primary-aci`（模型面改工具 5 件）。
+ * Symbol-mutation ACI tool set — five model-facing mutation tools.
  *
- * **为什么独立成文件（不复用 `symbol.ts` 既有模板）**：
- *   - 改工具走「读文件 → 文本替换 → 写文件」三步，与查询工具的「单次
- *     sendRequest → stringify」形态分歧；混进 `makeSymbolOperationTool`
- *     会让那一份工厂为「写」额外长 4 个 if 分支（`buildParams` 也得分流）。
- *   - 改工具要触发装配层的 `onEdit` 回调让 LSP 视图同步；查询工具不写盘，
- *     不必碰 notifier 接缝；两套职责拼到同一处会带歧义字段（写盘后才
- *     触发 onEdit / 查询永远不触发，类型无差异）。
- *   - **fail-fast 与契约层级分得更清楚**：查询失败 = 字符串哨兵返回；
- *     改失败 = typed 失败串（`{ deleted: false, references: [...] }` 之类）
- *     + `ToolExecutionError`（rename 冲突 / 无 server / 写盘拒绝）。拼在一起
- *     两套 typed 错误处理 + 一套纯字符串返回会让契约层次混淆。
+ * **Why a separate file (rather than reusing `symbol.ts` templates)**:
+ *   - Mutations go "read file → text replace → write file", which diverges
+ *     from query tools' "single sendRequest → stringify" shape; folding them
+ *     into `makeSymbolOperationTool` would grow four extra if-branches in
+ *     that factory just to support writing (`buildParams` would need
+ *     splitting too).
+ *   - Mutations must fire the assembly layer's `onEdit` callback so LSP
+ *     views stay in sync; query tools never touch disk and need no notifier
+ *     seam. Bolting both responsibilities together would leave ambiguous
+ *     fields (fire onEdit only after a successful write / never for queries
+ *     — with no type-level difference).
+ *   - **The fail-fast and contract levels stay clearer**: query failure =
+ *     string sentinel return; mutation failure = typed failure strings
+ *     (like `{ deleted: false, references: [...] }`) + `ToolExecutionError`
+ *     (rename conflict / no server / refused write). Merging them would mix
+ *     two typed-error regimes with a pure-string contract in one place.
  *
- * **写盘路径**：所有改工具走同一份「解析符号 → LSP 计算 edit → 落盘」
- * 链路；写盘不调 `edit_file`（不走 `old_str/new_str` 路径 —— rename 的编辑
- * 范围由语言服务器算，模型不参与）。写盘后用装配层 `onEdit` 触发
- * `lspNotifier.invalidate(file)`，与 `edit_file` 一致（plan T1 决定的
- * LSP didChange 同步语义）。
+ * **Write path**: every mutation tool uses the same
+ * "resolve symbol → compute edits via LSP → apply to disk" pipeline. The
+ * disk write does not call `edit_file` (no `old_str/new_str` path — the
+ * rename's edit ranges come from the language server, not the model). After
+ * writing, the assembly layer's `onEdit` triggers
+ * `lspNotifier.invalidate(file)`, matching `edit_file` so the LSP didChange
+ * sync semantics stay single-sourced.
  *
- * **不重复 `edit_file`**：本批工具以**符号身份**改代码；`edit_file` 留给
- * 不是单一符号的文本补丁（spec §使用规则段）。两者并存。
+ * **No overlap with `edit_file`**: these tools mutate by **symbol
+ * identity**; `edit_file` remains for text patches that are not one symbol.
+ * The two coexist.
  *
- * **aci 元数据**：5 件 `category: "write"`，复用 `LSP_ACI_META` 另三字段
- * （`isConcurrencySafe: false` / `interruptBehavior: "cancel"` /
- * `timeoutTier: "default"`）；symbol 查询面在 `symbol.ts` 用同一份元数据，
- * 改工具走 LSP 同一套 client / 取消 / 超时链路 —— 元数据分叉即语义分叉。
+ * **aci metadata**: all five use `category: "write"` and reuse the other
+ * three `LSP_ACI_META` fields (`isConcurrencySafe: false` /
+ * `interruptBehavior: "cancel"` / `timeoutTier: "default"`); the symbol
+ * query surface in `symbol.ts` uses the same metadata, and mutations ride
+ * the same LSP client / cancellation / timeout chain — diverging metadata
+ * means diverging semantics.
  *
- * 边界：
- *   - **永不** `process.kill`；中断走 `$/cancelRequest`。
- *   - **永不** 把 `{ file, symbol_path }` 之外的位置字段暴露给模型
- *     （schema `additionalProperties: false` 守住）。
- *   - **永不** 在无效化前静默吞失败 —— invalidate 失败 stderr 留痕
- *     （fire-and-forget 但 best-effort 必须有可观测面）。
- *   - 解析与写盘都必须在请求级打开窗口（`withDocumentOpen`）内完成 ——
- *     tsserver 对未打开文件不建 project，rename/documentSymbol 全返空 / 错；
- *     窗口退出即 didClose（spec 251 生命周期）。
+ * Boundaries:
+ *   - **never** `process.kill`; interruption goes via `$/cancelRequest`.
+ *   - **never** expose position fields beyond `{ file, symbol_path }` to
+ *     the model (the schema's `additionalProperties: false` guards this).
+ *   - **never** silently swallow a failure before invalidation — invalidation
+ *     failures leave a stderr trace (fire-and-forget, but best-effort must
+ *     stay observable).
+ *   - Resolution and writes must both happen inside the request-scoped open
+ *     window (`withDocumentOpen`) — tsserver builds no project for a closed
+ *     file, so rename/documentSymbol would return empty/wrong; leaving the
+ *     window didCloses the document, so files are not kept open on the
+ *     server between calls.
  */
 import { fileURLToPath } from "node:url";
 import { readFile, writeFile } from "node:fs/promises";
@@ -66,7 +79,8 @@ import {
 import { getClientDetailed } from "../../lsp/client.js";
 
 // ---------------------------------------------------------------------------
-// Schema — 5 件改工具共用 `{ file, symbol_path }` 主身 + 各自特化字段
+// Schema — the five mutation tools share the `{ file, symbol_path }` base
+// plus their own specialized fields
 // ---------------------------------------------------------------------------
 
 const SYMBOL_MUTATE_BASE_PROPS = {
@@ -107,7 +121,7 @@ const INSERT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** safe_delete_symbol: { file, symbol_path } — 与查询共用 schema */
+/** safe_delete_symbol: { file, symbol_path } — same schema as the queries */
 const DELETE_SCHEMA = {
   type: "object",
   properties: { ...SYMBOL_MUTATE_BASE_PROPS },
@@ -119,11 +133,13 @@ const MAX_NEW_BODY_BYTES = 48 * 1024;
 const MAX_INSERT_BYTES = 48 * 1024;
 
 /**
- * 符号改工具的 aci 元数据（symbol-primary-aci T4）：
- *   - `category: "write"` —— 改工具写盘；与查询面 read-only 区分
- *     （ACR permission 装饰按 category 走默认决策：write 默 ask）；
- *   - 其余三字段复用 LSP_ACI_META（同 LSP client / 取消 / 超时链路
- *     —— 元数据分叉即语义分叉）。
+ * aci metadata for the symbol-mutation tools:
+ *   - `category: "write"` — these tools write to disk; distinct from the
+ *     read-only query surface (permission decoration derives its default
+ *     decision from category: write defaults to ask);
+ *   - the other three fields reuse LSP_ACI_META (same LSP client /
+ *     cancellation / timeout chain — diverging metadata means diverging
+ *     semantics).
  */
 const SYMBOL_MUTATE_ACI_META = {
   category: "write" as const,
@@ -147,7 +163,8 @@ interface InsertInput extends SymbolMutateInput {
 }
 
 // ---------------------------------------------------------------------------
-// LSP payload 归一（不翻译字段，契约 Y2 — 语义归语言服务器）
+// LSP payload normalization (no field translation — that semantics belongs
+// to the language server)
 // ---------------------------------------------------------------------------
 
 interface LspRange {
@@ -161,12 +178,15 @@ interface TextEdit {
 }
 
 /**
- * tsserver / typescript-language-server 的 `WorkspaceEdit` 形态归一：
- *   - `changes`: 旧 LSP 形态 `{ uri: TextEdit[] }`；
- *   - `documentChanges`: LSP 3.13+ 形态 `(TextDocumentEdit | ResourceOp)[]`。
- * 我们只消费 `TextDocumentEdit[]`（含 `textDocument.uri` 与 `edits` 数组）。
- * `ResourceOp`（Create/Rename/Delete file）本批工具不发起 —— 改只动目标
- * 符号所在的文件，跨文件 rename 也只动 server 算出的 TextEdit 集合。
+ * Normalizing the `WorkspaceEdit` shape returned by tsserver /
+ * typescript-language-server:
+ *   - `changes`: the legacy LSP shape `{ uri: TextEdit[] }`;
+ *   - `documentChanges`: the LSP 3.13+ shape `(TextDocumentEdit | ResourceOp)[]`.
+ * We only consume `TextDocumentEdit[]` (with `textDocument.uri` and an
+ * `edits` array). `ResourceOp` (create/rename/delete file) is never initiated
+ * by this tool set — mutations touch only the files the target symbol lives
+ * in; even cross-file renames apply only the TextEdit sets the server
+ * computes.
  */
 interface TextDocumentEdit {
   readonly textDocument: { readonly uri: string };
@@ -174,18 +194,22 @@ interface TextDocumentEdit {
 }
 
 /**
- * WorkspaceEdit 归一化不可用片段（plan `lsp-silent-degradation` T4）：
- * server 送回了本工具集应用不了的东西 → typed 拒绝，**不部分应用**。
+ * Normalization of unusable WorkspaceEdit fragments: the server returned
+ * something this tool set cannot apply → typed refusal, **never partial
+ * application**.
  *
- * 为什么必须拒绝而不是跳过：applier 是「读文件 → 文本替换 → 写文件」，跳过
- * 一条 file operation 仍然会把其它 TextEdit 落盘 —— 半套 rename 比整体失败
- * 更坏，workspace 停在「改了一半」。旧实现用 `continue` / `flatMap` 把三种
- * 损坏都吞成「这条不存在」，最坏的表现是 server 只回 file operation 时返回
- * `renamed: true, editCount: 0`：失败看起来像成功。
+ * Why refuse instead of skip: the applier is "read file → text replace →
+ * write file", so skipping one file operation would still push the remaining
+ * TextEdits to disk — a half-applied rename is worse than a full failure,
+ * leaving the workspace "half changed". The old implementation swallowed all
+ * three corruptions via `continue` / `flatMap` as "this entry doesn't exist";
+ * worst case the server returned only file operations and the tool reported
+ * `renamed: true, editCount: 0` — a failure that looked like success.
  *
- * `kind` 是**测试 / host 接缝**（与 write-file.ts `LastReadRequiredError.kind`
- * 同形），不在执行器的读取面上；模型面只读 `.message`，而 message 已含 kind
- * 与具体是哪一种 op。
+ * `kind` is a **test / host seam** (same shape as write-file.ts's
+ * `LastReadRequiredError.kind`), not on the executor's read surface; the
+ * model side only reads `.message`, and the message already contains the
+ * kind and which specific op caused it.
  */
 export type WorkspaceEditUnsupportedKind =
   "file-operation" | "malformed-entry" | "malformed-edit" | "unresolvable-uri";
@@ -193,7 +217,8 @@ export type WorkspaceEditUnsupportedKind =
 export class WorkspaceEditUnsupportedError extends ToolExecutionError {
   override readonly name: string = "WorkspaceEditUnsupportedError";
   readonly kind: WorkspaceEditUnsupportedKind;
-  /** 具体是哪一种：`create` / `rename` / `delete`，或形状问题的一句话描述。 */
+  /** Which specific op: `create` / `rename` / `delete`, or a one-line
+   * description of the shape problem. */
   readonly detail: string;
 
   constructor(kind: WorkspaceEditUnsupportedKind, detail: string) {
@@ -207,8 +232,9 @@ export class WorkspaceEditUnsupportedError extends ToolExecutionError {
 }
 
 /**
- * server 侧 `documentChanges` 里的 file operation（LSP 3.16 `ResourceOp`）。
- * 含未知 `kind` 字面量 —— 同样应用不了，不能当「不认识就跳过」。
+ * File operations (LSP 3.16 `ResourceOp`) inside the server's
+ * `documentChanges`. Unknown `kind` literals are included too — equally
+ * inapplicable, so "not recognized" must not become "skip".
  */
 const RESOURCE_OP_KINDS: ReadonlySet<string> = new Set([
   "create",
@@ -219,13 +245,16 @@ const RESOURCE_OP_KINDS: ReadonlySet<string> = new Set([
 export function normalizeWorkspaceEdit(
   raw: unknown
 ): ReadonlyArray<TextDocumentEdit> {
-  // `null` / `undefined` 是「server 拒绝了这次 rename」的合法语义（handler 层
-  // 已在前置检查里译成同作用域冲突的 typed 失败，见 makeRenameSymbolTool），
-  // 不是损坏 —— 故这两态仍归一为空，交由调用方按既有语义处置。
+  // `null` / `undefined` is legal "the server rejected this rename" semantics
+  // (the handler already translated it into a typed same-scope-conflict
+  // failure, see makeRenameSymbolTool), not corruption — so these two states
+  // still normalize to empty and the caller handles them per existing
+  // semantics.
   if (raw === null || raw === undefined) return [];
-  // 其余非对象（字符串 / 数字 / 数组）读不出任何条目：不能当作「零条目」静默
-  // 放过 —— 那是「失败看起来像成功」在信封层的同一形态（handler 会把
-  // `renamed: true, editCount: 0` 报成成功）。
+  // Any other non-object (string / number / array) yields zero readable
+  // entries: it must not pass silently as "no entries" — that is the same
+  // "failure looks like success" shape at the envelope layer (the handler
+  // would report `renamed: true, editCount: 0` as success).
   if (typeof raw !== "object" || Array.isArray(raw)) {
     throw new WorkspaceEditUnsupportedError(
       "malformed-entry",
@@ -242,8 +271,9 @@ export function normalizeWorkspaceEdit(
   ];
 }
 
-/** 旧 `changes` 形态：`{ uri: TextEdit[] }`。在场的非法形状同样 typed 失败 */
-/**（`changes: []` / `changes: "..."` 都读不出 uri 映射，不是「没有 changes」）。 */
+/** The legacy `changes` form: `{ uri: TextEdit[] }`. A present-but-invalid
+ * shape is likewise a typed failure (`changes: []` / `changes: "..."` yield
+ * no uri mapping — that is not "no changes"). */
 function normalizeChangesForm(changes: unknown): TextDocumentEdit[] {
   if (changes === undefined) return [];
   if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
@@ -262,8 +292,9 @@ function normalizeChangesForm(changes: unknown): TextDocumentEdit[] {
 }
 
 /**
- * LSP 3.13+ `documentChanges` 形态。同样：在场就必须是数组，单个
- * `TextDocumentEdit` 对象也是非法（协议要求数组），不能降级成「零条目」。
+ * The LSP 3.13+ `documentChanges` form. Same rule: when present it must be
+ * an array — a lone `TextDocumentEdit` object is also illegal (the protocol
+ * requires an array) and must not degrade into "zero entries".
  */
 function normalizeDocumentChangesForm(
   documentChanges: unknown
@@ -283,10 +314,11 @@ function normalizeDocumentChangesForm(
 }
 
 /**
- * 单条 `documentChanges` 条目 → `TextDocumentEdit[]`（0 或 1 条）。
+ * One `documentChanges` entry → `TextDocumentEdit[]` (0 or 1 items).
  *
- * 与本文件其它归一化函数一样：**能应用就返回，应用不了就抛**
- * （`WorkspaceEditUnsupportedError`），没有第三种「静默跳过」的出口。
+ * Like the other normalizers in this file: **return what is applicable,
+ * throw on what is not** (`WorkspaceEditUnsupportedError`) — there is no
+ * third exit of "silently skip".
  */
 function normalizeDocumentChange(change: unknown): TextDocumentEdit[] {
   if (!change || typeof change !== "object") {
@@ -295,9 +327,10 @@ function normalizeDocumentChange(change: unknown): TextDocumentEdit[] {
       "documentChanges entry is not an object"
     );
   }
-  // file operation 先判：`CreateFile` / `RenameFile` / `DeleteFile` 都带
-  // `kind`，而 `TextDocumentEdit` 协议上不带 `kind`。未知 `kind` 字面量同样
-  // 过滤不掉，一并拒绝（不认识 ≠ 可以跳过）。
+  // Check for file operations first: `CreateFile` / `RenameFile` /
+  // `DeleteFile` all carry `kind`, while `TextDocumentEdit` protocol-wise
+  // does not. An unknown `kind` literal cannot be filtered out either, so it
+  // is refused as well (not recognized ≠ skippable).
   const maybeOp = change as { kind?: unknown };
   if (typeof maybeOp.kind === "string") {
     if (!RESOURCE_OP_KINDS.has(maybeOp.kind)) {
@@ -326,10 +359,11 @@ function normalizeDocumentChange(change: unknown): TextDocumentEdit[] {
 }
 
 /**
- * 单 uri 的 edits 数组 → `TextDocumentEdit[]`（0 或 1 条）。`edits` 不是数组
- * 或某条 `TextEdit` 形状非法 → typed 失败；**长度为 0 除外** —— 那是 server
- * 的合法「没有可改的地方」，返回空列表（与「N 条全被丢弃」分道扬镳，后者
- * 在丢弃点就抛了）。
+ * A single uri's edits array → `TextDocumentEdit[]` (0 or 1 items). `edits`
+ * not an array, or some `TextEdit` shape illegal → typed failure; **length 0
+ * is the exception** — that is the server's legal "nothing to change",
+ * returning an empty list (deliberately separate from "N entries all
+ * dropped", which throws at the drop point instead).
  */
 function docEditsFor(uri: string, edits: unknown): TextDocumentEdit[] {
   if (!Array.isArray(edits)) {
@@ -345,9 +379,11 @@ function docEditsFor(uri: string, edits: unknown): TextDocumentEdit[] {
 }
 
 /**
- * 单文件 edits 归一。空数组是合法响应（server 可以说「没有可改的地方」），
- * 返回空列表；任一条归一不了则整批 typed 失败 —— 抛在**吞点原地**，不让
- * 坏 payload 继续旅行后被含糊报错。
+ * Normalize one file's edits. An empty array is a legal response (the server
+ * may say "nothing to change") and yields an empty list; any single entry
+ * that cannot be normalized fails the whole batch — thrown **at the swallow
+ * point itself**, so a corrupt payload never keeps traveling only to be
+ * reported vaguely later.
  */
 function normalizeTextEdits(
   raw: ReadonlyArray<unknown>,
@@ -367,7 +403,8 @@ function normalizeTextEdits(
   return out;
 }
 
-/** 单条 TextEdit 归一；形状非法 → `undefined`（由调用方转 typed 失败）。 */
+/** Normalize one TextEdit; illegal shape → `undefined` (caller turns it into
+ * a typed failure). */
 function normalizeTextEdit(raw: unknown): TextEdit | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const e = raw as {
@@ -383,8 +420,9 @@ function normalizeTextEdit(raw: unknown): TextEdit | undefined {
     return undefined;
   }
   const { start, end } = e.range;
-  // range 坐标形状也要守住：`{ line: "3" }` 之类会让 offsetFor 静默错位
-  //（NaN 下标 → 空串拼接），改名结果静默丢字符。
+  // Guard the range coordinate shapes too: values like `{ line: "3" }` make
+  // offsetFor silently misplace (NaN indices → empty-string concatenation),
+  // so a rename would silently drop characters.
   if (!isLspPosition(start) || !isLspPosition(end)) {
     return undefined;
   }
@@ -397,17 +435,20 @@ function isLspPosition(v: unknown): v is LspPosition {
   return typeof p.line === "number" && typeof p.character === "number";
 }
 
-/** `DocumentSymbolNode.range` 的源类型只承诺 `start`；改工具需要 `end`
- *  构造完整 range。`SymbolInformation.location.range` 与 `DocumentSymbol.range`
- *  协议上都有 `start` + `end`，但 symbol-resolver.ts 用窄类型避免泄露给
- *  查询层（查询只要 selectionRange）。本工厂按协议信任 server payload，
- *  失败时由 normalizeTextEdit 那层兜底（缺 end → 该条形状非法，整批 typed
- *  失败，见 WorkspaceEditUnsupportedError）。 */
+/** The source type of `DocumentSymbolNode.range` only promises `start`;
+ *  mutation tools need `end` to build a full range. Protocol-wise both
+ *  `SymbolInformation.location.range` and `DocumentSymbol.range` carry
+ *  `start` + `end`, but symbol-resolver.ts uses a narrow type so it does not
+ *  leak to the query layer (queries only need selectionRange). This factory
+ *  trusts the server payload per protocol; failures fall back to the
+ *  normalizeTextEdit layer (missing end → that entry's shape is illegal,
+ *  whole batch typed failure — see WorkspaceEditUnsupportedError). */
 type NodeRange = { start?: LspPosition; end?: LspPosition };
 
-/** 把节点的全范围按协议组装。LSP DocumentSymbol.range 与
- *  SymbolInformation.location.range 都至少含 start + end；缺 end →
- *  退化为单点 range（与 node 起点同），写盘时按空替换处理。 */
+/** Assemble the node's full range per protocol. Both LSP
+ *  DocumentSymbol.range and SymbolInformation.location.range carry at least
+ *  start + end; when end is missing it degrades to a single-point range (at
+ *  the node's start), which the write treats as an empty replacement. */
 function assembleFullRange(
   start: LspPosition,
   end: LspPosition | undefined
@@ -415,9 +456,10 @@ function assembleFullRange(
   return { start, end: end ?? start };
 }
 
-/** 按 uri 分组（同一文件多 edits 合并）。`fileURLToPath` 解不出 → typed
- *  失败：那条 uri 的 edits 应用不了，跳过会让 workspace 停在「改了一半」，
- *  与 T4 拒 file operation 同一条纪律（不部分应用）。 */
+/** Group by uri (multiple edits for one file merge). `fileURLToPath` failing
+ *  to decode → typed failure: that uri's edits cannot be applied, and
+ *  skipping would leave the workspace "half changed" — same no-partial-
+ *  application discipline as refusing file operations above. */
 function groupEditsByPath(
   edits: ReadonlyArray<TextDocumentEdit>
 ): Map<string, TextEdit[]> {
@@ -427,9 +469,10 @@ function groupEditsByPath(
     try {
       path = fileURLToPath(doc.textDocument.uri);
     } catch (err) {
-      // uri 形状合法、只是落不成文件路径（非 `file:` scheme 等）——归因与
-      // payload 损坏不同，单独一类：模型据此知道 server 给了它不认的 uri，
-      // 而不是这次响应坏了。
+      // The uri is shape-valid but simply doesn't resolve to a file path
+      // (non-`file:` scheme etc.) — a different attribution from payload
+      // corruption, so it gets its own kind: the model learns the server
+      // handed back an uri it doesn't accept, rather than a broken response.
       const msg = err instanceof Error ? err.message : String(err);
       throw new WorkspaceEditUnsupportedError(
         "unresolvable-uri",
@@ -443,8 +486,9 @@ function groupEditsByPath(
   return grouped;
 }
 
-/** 单文件内多个 TextEdit 按 range.start 降序排序后依次 splice ——
- *  从尾向头替换保证前面的位置不被后续替换偏移。 */
+/** Sort a file's TextEdits by descending range.start and splice them in that
+ * order — replacing from the tail backwards keeps earlier offsets valid
+ * through subsequent replacements. */
 function applyEditsToText(text: string, edits: TextEdit[]): string {
   const sorted = [...edits].sort((a, b) => {
     if (a.range.start.line !== b.range.start.line) {
@@ -458,15 +502,15 @@ function applyEditsToText(text: string, edits: TextEdit[]): string {
     const end = offsetFor(lines, edit.range.end);
     const next = text.slice(0, start) + edit.newText + text.slice(end);
     text = next;
-    // 重新切分（newText 可能含多行）。
+    // Re-split (newText may contain multiple lines).
     lines.length = 0;
     lines.push(...next.split("\n"));
   }
   return text;
 }
 
-/** (line, character) → 文本内的字节偏移。line/character 0-based；line
- *  间用单 `\n` 分隔（与 LSP 协议一致）。 */
+/** (line, character) → byte offset within the text. line/character are
+ * 0-based; lines are joined by a single `\n` (per LSP protocol). */
 function offsetFor(lines: string[], pos: LspPosition): number {
   let offset = 0;
   for (let i = 0; i < pos.line; i++) {
@@ -477,14 +521,16 @@ function offsetFor(lines: string[], pos: LspPosition): number {
 }
 
 // ---------------------------------------------------------------------------
-// WorkspaceEdit 落盘 + onEdit 回调
+// WorkspaceEdit application to disk + onEdit callback
 // ---------------------------------------------------------------------------
 
-/** 落盘一组 TextDocumentEdit，调用 onEdit 让 LSP 视图同步。
+/** Apply a batch of TextDocumentEdit to disk, calling onEdit so LSP views
+ * stay in sync.
  *
- * **不平凡路径**：所有写盘走异步 `writeFile`，任一失败立刻抛
- * `ToolExecutionError`（拒绝静默当成功改名）；成功的文件全部记到
- * `writtenFiles` 用于返回与 invalidate 触发。 */
+ * **Non-trivial path**: every write is an async `writeFile`; any failure
+ * throws `ToolExecutionError` immediately (refusing to pass a silent failure
+ * off as a successful rename); every file that succeeded is recorded in
+ * `writtenFiles` for the return value and the invalidate trigger. */
 async function applyWorkspaceEdit(
   edits: ReadonlyArray<TextDocumentEdit>,
   onEdit: ((file: string) => void) | undefined
@@ -517,20 +563,24 @@ async function applyWorkspaceEdit(
       );
     }
     written.push(filePath);
-    // onEdit 是装配层接 lspNotifier.invalidate 的缝；写盘成功才触发，
-    // 失败路径不触发（避免误通知）。
+    // onEdit is the assembly-layer seam wiring lspNotifier.invalidate; it
+    // fires only after a successful write, never on failure (no bogus
+    // notices).
     onEdit?.(filePath);
   }
   return { writtenFiles: written, editCount };
 }
 
 // ---------------------------------------------------------------------------
-// 解析符号失败 → 模型可读字符串（与 symbol.ts 同一套语义）
+// Failed symbol resolution → model-readable string (same semantics as
+// symbol.ts)
 // ---------------------------------------------------------------------------
 
-/** 把 documentSymbol 节点 → 全范围（LSP range，**含整个定义体**）。
- *  优先级：node.range > node.location.range（DocumentSymbol vs SymbolInformation）。
- *  selectionRange 只覆盖符号名本身，**不能**用于 replace_body / safe_delete。 */
+/** Map a documentSymbol node → its full range (LSP range, **covering the
+ *  entire definition**). Precedence: node.range > node.location.range
+ *  (DocumentSymbol vs SymbolInformation). selectionRange covers only the
+ *  symbol name itself and must **not** be used for replace_body /
+ *  safe_delete. */
 function fullRangeOf(node: DocumentSymbolNode): LspRange | undefined {
   const r = (node.range ?? node.location?.range) as NodeRange | undefined;
   if (!r || !r.start) return undefined;
@@ -544,14 +594,17 @@ interface ResolvedSymbol {
 }
 
 /**
- * 解析符号身份并在**请求级打开窗口**内执行 `run`；任一失败 → 纯字符串
- * 失败串（与查询工具同语义）。
+ * Resolve a symbol identity and execute `run` inside a **request-scoped open
+ * window**; any failure → a plain-string failure (same semantics as the
+ * query tools).
  *
- * 窗口必须罩住解析与随后的改动/查询请求：解析要 didOpen 才建得起来
- * project，`textDocument/rename` / `references` 要同一份 server 侧文本；
- * 退出窗口即 didClose（spec 251「打开文档生命周期」—— 两次调用之间文件
- * 不对 server 保持打开）。落盘（applyWorkspaceEdit）仍在窗口内完成，
- * 随后 notifier 的 didChange 才会命中「已打开」分支。
+ * The window must span the resolution and the subsequent mutation/query
+ * request: resolution needs didOpen for the server to build a project, and
+ * `textDocument/rename` / `references` need the same server-side text;
+ * leaving the window didCloses the document — files are not kept open on the
+ * server between calls. The disk write (applyWorkspaceEdit) still happens
+ * inside the window, so the notifier's didChange hits the "already open"
+ * branch.
  */
 async function withResolvedSymbolForMutate<T>(
   ctx: LspCtx,
@@ -572,8 +625,9 @@ async function withResolvedSymbolForMutate<T>(
       token
     );
     if (resolved.kind !== "found") {
-      // 复用 symbol.ts 的渲染语义（一致失败串形态）：not_found / ambiguous /
-      // no_position；method_not_found 同样复用 lsp.ts 的哨兵渲染（SSOT）。
+      // Reuse symbol.ts's rendering semantics (consistent failure-string
+      // shape): not_found / ambiguous / no_position; method_not_found also
+      // reuses lsp.ts's sentinel rendering (SSOT).
       const candidates = (list: ReadonlyArray<string>): string =>
         list.length > 0 ? list.join(", ") : "(none)";
       switch (resolved.kind) {
@@ -596,22 +650,25 @@ async function withResolvedSymbolForMutate<T>(
 }
 
 // ---------------------------------------------------------------------------
-// 5 件改工具
+// The five mutation tools
 // ---------------------------------------------------------------------------
 
-/** rename_symbol — 全项目按符号改名。
+/** rename_symbol — project-wide rename by symbol identity.
  *
- * 走 `textDocument/rename` 让 tsserver 计算跨文件 WorkspaceEdit（包含声明点
- * + 所有引用点），应用前必须把 documentSymbol 缓存里旧版的查找目标同步
- * 失效 → 通过 `onEdit` 触发 notifier。
+ * Uses `textDocument/rename` so tsserver computes the cross-file
+ * WorkspaceEdit (declaration + all reference sites); before applying, stale
+ * lookup targets in the documentSymbol cache must be invalidated in sync →
+ * done via `onEdit` triggering the notifier.
  *
- * **rename 冲突**：tsserver 返 `null` 表示存在冲突（如与同作用域已有
- * 标识符同名）；typed 失败串明确给模型可行动提示。
+ * **Rename conflicts**: tsserver returns `null` when a conflict exists (e.g.
+ * a same-scope identifier already has the name); the typed failure string
+ * gives the model an explicit actionable hint.
  *
- * **不可应用的 WorkspaceEdit 片段**（plan `lsp-silent-degradation` T4）：
- * file operation / 归一不了 `documentChanges` 条目 / 形状非法 `TextEdit` →
- * `WorkspaceEditUnsupportedError` 上抛，**整体不应用**（旧实现静默 `continue`
- * 加 `flatMap` 丢条目，能落成半套 rename 或空 `editCount` 的「成功」）。 */
+ * **Unappliable WorkspaceEdit fragments**: file operations / entries that
+ * cannot normalize / illegal `TextEdit` shapes → `WorkspaceEditUnsupportedError`
+ * is thrown and **nothing is applied** (the old implementation silently
+ * `continue`d and dropped entries via flatMap, which could land a half
+ * rename or report an empty-`editCount` "success"). */
 function makeRenameSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
@@ -654,26 +711,32 @@ function makeRenameSymbolTool(
             );
             if (cancel.timedOut())
               throw timeoutError(name, "textDocument/rename", timeoutMs);
-            // 缺方法哨兵：server 没有 rename —— 透传（不再当 WorkspaceEdit 解析）。
+            // Missing-method sentinel: the server has no rename — pass it
+            // through (do not parse it as a WorkspaceEdit).
             if (isMethodNotFoundSentinel(result)) return result;
-            // tsserver 返回 null → 改名冲突（与同作用域现有标识符同名 / 跨
-            // 文件类型不允许等）。typed 失败串：明确告诉模型 rename 失败，
-            // 不留空 catch。
+            // tsserver returns null → rename conflict (same name as an
+            // existing same-scope identifier / cross-file type rules etc.).
+            // Typed failure string: tell the model plainly that the rename
+            // failed — no empty catch.
             if (result === null || result === undefined) {
               throw new ToolExecutionError(
                 `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${params.file}: existing declarations would conflict (the language server rejected the rename)`
               );
             }
-            // 归一化在**吞点原地**抛 WorkspaceEditUnsupportedError（typed，
-            // 指出 file-operation / malformed-entry / malformed-edit）——
-            // 不部分应用，盘上零写入。**不上抛前转成成功回执**：executor 的
-            // 冒泡面才是「这次调用失败」的信号，转成字符串会让损坏响应读成
-            // 改名成功（本票要消灭的正是这种「失败看起来像成功」）。
+            // Normalization throws WorkspaceEditUnsupportedError at the
+            // swallow point itself (typed, naming file-operation /
+            // malformed-entry / malformed-edit) — no partial application,
+            // zero disk writes. It must not be turned into a success receipt
+            // before rethrowing: the executor's throwing surface is the only
+            // "this call failed" signal, and a string would make a corrupt
+            // response read as a successful rename (exactly the
+            // "failure-looks-like-success" this layer exists to kill).
             const docEdits = normalizeWorkspaceEdit(result);
             if (docEdits.length === 0) {
-              // 空 edits 是 LSP 合法响应（server 说「没有可改的地方」）：
-              // 成功 no-op，不是错误。损坏条目不会走到这里 —— 它们在归一化
-              // 里 typed 失败，不会与「server 说零条」合流。
+              // Empty edits is a legal LSP response (the server says
+              // "nothing to change"): a successful no-op, not an error.
+              // Corrupt entries never get here — they fail as typed errors in
+              // normalization, so they can't merge with "server said zero".
               return stringifyResult({
                 renamed: true,
                 files: [],
@@ -702,11 +765,13 @@ function makeRenameSymbolTool(
   });
 }
 
-/** replace_symbol_body — 替换该符号定义体（含签名行，范围 = node.range）。
+/** replace_symbol_body — replace the symbol's definition body (signature line
+ * included, range = node.range).
  *
- * 不走 LSP `textDocument/*` 协议（无「替换 body」原语），直接构造
- * 单文件 TextEdit：range = node.range（全范围，含签名与 body），
- * newText = params.new_body。应用后 invalidate 单文件。 */
+ * Does not go through a LSP `textDocument/*` protocol call (there is no
+ * "replace body" primitive); it builds a single-file TextEdit directly:
+ * range = node.range (full range, signature + body), newText =
+ * params.new_body. After applying, invalidate the single file. */
 function makeReplaceSymbolBodyTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
@@ -773,12 +838,13 @@ function makeReplaceSymbolBodyTool(
   });
 }
 
-/** insert_before_symbol — 在 range.start 位置插入 code + "\n"（自动换行）。
- *  insert_after_symbol — 在 range.end 位置插入 "\n" + code（自动换行）。
+/** insert_before_symbol — inserts code + "\n" at range.start (auto newline).
+ *  insert_after_symbol — inserts "\n" + code at range.end (auto newline).
  *
- * 两个共用同一工厂：方向 = "before" → 插在 range.start；
- * 方向 = "after" → 插在 range.end。LSP TextEdit 同 insert 模式 —— server
- * 协议本就支持位置插入（newText 落在 range 上即 splice 入）。 */
+ *  Both share one factory: direction "before" → insert at range.start;
+ *  direction "after" → insert at range.end. Same LSP TextEdit insert pattern
+ *  — the protocol already supports positional insertion (newText spliced in
+ *  at the range). */
 function makeInsertSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
@@ -820,8 +886,9 @@ function makeInsertSymbolTool(
                 `[${spec.name}] symbol "${target.path}" in ${params.file} has no source range (cannot determine insertion anchor)`
               );
             }
-            // 在 range.start/end 位置上 splice：before → 在 start 之前插入 `code + "\n"`；
-            // after → 在 end 之后插入 `"\n" + code`（自动补换行保插入块独立成段）。
+            // Splice at range.start/end: before → insert `code + "\n"` ahead
+            // of start; after → insert `"\n" + code` past end (auto newlines
+            // keep the inserted block on its own lines).
             const anchor =
               spec.direction === "before" ? range.start : range.end;
             const newText =
@@ -857,11 +924,14 @@ function makeInsertSymbolTool(
   });
 }
 
-/** safe_delete_symbol — 无引用才删，否则返回引用列表且不删。
+/** safe_delete_symbol — delete only when there are no references; otherwise
+ * return the reference list and delete nothing.
  *
- * 先发 `textDocument/references`（includeDeclaration:true）收集所有引用。
- * 任一引用（含声明点）→ typed 失败串 `{ deleted: false, references: [...] }`，
- * 不删。否则构造 single-file delete edit（range = fullRange），落盘 + invalidate。 */
+ * First sends `textDocument/references` (includeDeclaration:true) to collect
+ * every reference. If any reference (including the declaration) exists → a
+ * typed failure `{ deleted: false, references: [...] }`, nothing deleted.
+ * Otherwise builds a single-file delete edit (range = fullRange), writes it,
+ * and invalidates. */
 function makeSafeDeleteSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
@@ -898,7 +968,7 @@ function makeSafeDeleteSymbolTool(
               );
             }
             const uri = fileURLFromPath(params.file);
-            // 第一步：references（includeDeclaration:true）→ 判空。
+            // Stage 1: references (includeDeclaration:true) → check empty.
             const refsRaw = await requestOrMethodNotFoundSentinel(
               target.client,
               "textDocument/references",
@@ -911,14 +981,17 @@ function makeSafeDeleteSymbolTool(
             );
             if (cancel.timedOut())
               throw timeoutError(name, "textDocument/references", timeoutMs);
-            // 缺方法哨兵：server 没有 references —— 无法证明「无引用」，
-            // fail-closed：透传哨兵、不进入删除路径（与 extractReferences
-            // 拒删同源纪律）。
+            // Missing-method sentinel: the server has no references — we
+            // cannot prove "no references", so fail closed: pass the
+            // sentinel through and never enter the delete path (same
+            // discipline as extractReferences refusing the delete).
             if (isMethodNotFoundSentinel(refsRaw)) return refsRaw;
             const references = extractReferences(refsRaw);
             if (references.length > 0) {
-              // typed 失败路径：返回引用列表 + 明确「不删」。模型见此结果
-              // 应决定是否改方案（先迁移引用），绝不静默当删除成功。
+              // Typed failure path: return the reference list + an explicit
+              // "not deleted". On seeing this the model should decide whether
+              // to re-plan (migrate references first); a delete is never
+              // silently reported as successful.
               return stringifyResult({
                 deleted: false,
                 symbol_path: target.path,
@@ -928,7 +1001,8 @@ function makeSafeDeleteSymbolTool(
                   `Resolve them first (find_referencing_symbols) before deleting.`,
               });
             }
-            // 第二步：无引用 → 删。range = 全范围（删除符号体，连签名带 body）。
+            // Stage 2: no references → delete. range = full range (the whole
+            // definition: signature and body alike).
             const range = fullRangeOf(target.symbol);
             if (!range) {
               throw new ToolExecutionError(
@@ -959,13 +1033,15 @@ function makeSafeDeleteSymbolTool(
   });
 }
 
-/** `textDocument/references` 响应归一为 `{ file, line, character }` 列表。
- *  tsserver 返 `Location[]`（`{ uri, range }`）；老 server 也可能返
- *  扁平数组。**malformed response（非数组）→ 抛 `ToolExecutionError`**：
- *  spec §53 与 ACR error-handling-enforcer 禁止空 catch 与 silent fallback；
- *  我们不能"证明无引用"，因此 `safe_delete_symbol` 必须拒绝删除而非进入
- *  "无引用"路径。单条 URI 解析失败 → 静默 `continue`（单条 entry 的局部失败
- *  不等价于"全部无可枚举引用"，政策允许）。 */
+/** Normalize a `textDocument/references` response into a
+ *  `{ file, line, character }` list. tsserver returns `Location[]`
+ *  (`{ uri, range }`); older servers may return a flat array. **A malformed
+ *  response (not an array) throws `ToolExecutionError`**: empty catches and
+ *  silent fallbacks are forbidden here — we cannot "prove no references", so
+ *  `safe_delete_symbol` must refuse the delete rather than take the "no
+ *  references" path. A single unresolvable URI is skipped with `continue`
+ *  (one entry's local failure does not mean "nothing is referenced", which
+ *  the policy permits). */
 function extractReferences(raw: unknown): ReadonlyArray<{
   readonly file: string;
   readonly line: number;
@@ -1001,17 +1077,19 @@ function extractReferences(raw: unknown): ReadonlyArray<{
   return out;
 }
 
-/** `pathToFileURL` 内联，避免与 lsp.ts 重复 import。 */
+/** `pathToFileURL` inlined to avoid a duplicate import alongside lsp.ts. */
 function fileURLFromPath(file: string): string {
-  // pathToFileURL 是 node:url 内置；不再开一层 import 直接复用即可。
+  // pathToFileURL is built into node:url; reuse it directly rather than
+  // opening another import layer.
   return new URL(`file://${file}`).href;
 }
 
 // ---------------------------------------------------------------------------
-// 工厂入口
+// Factory entry point
 // ---------------------------------------------------------------------------
 
-/** 5 件符号改工具的名字真值（registry Gate 3 与测试共源）。 */
+/** Ground truth for the five symbol-mutation tool names (shared by the
+ * registry's Gate 3 and the tests). */
 export const SYMBOL_MUTATE_TOOL_NAMES = Object.freeze([
   "rename_symbol",
   "replace_symbol_body",
@@ -1021,10 +1099,11 @@ export const SYMBOL_MUTATE_TOOL_NAMES = Object.freeze([
 ] as const);
 
 /**
- * Worker 可直接写 workspace 文件的能力 SSOT。
+ * SSOT for the capability "a worker may directly write workspace files".
  *
- * `category: "write"` 还包含工作树生命周期与进程控制工具；它们不属于
- * worker 的文件写能力面，不能直接拿 category 推导隔离结论。
+ * `category: "write"` also covers worktree lifecycle and process-control
+ * tools; those are not part of a worker's file-write capability surface, so
+ * isolation conclusions must not be derived from category alone.
  */
 export const FILE_WRITE_TOOL_NAMES = Object.freeze([
   "edit_file",
@@ -1032,12 +1111,13 @@ export const FILE_WRITE_TOOL_NAMES = Object.freeze([
   ...SYMBOL_MUTATE_TOOL_NAMES,
 ] as const);
 
-/** 装配入口（`registry.ts` 调用点）。
+/** Assembly entry (called from `registry.ts`).
  *
- * 与 `createSymbolQueryToolSet(ctx)` 同形态：ctx 由 build-engine 装配期
- * 透传同一份 `lspCtx`（settings.lsp / disabledServers / idle / requestTimeoutMs）。
- * `onEdit` 由 registry 装配层从 `opts.onEdit` 透传（同一来源 = edit_file 的
- * lspNotifier.invalidate 回调），保证写盘后 LSP 视图同步语义一致。 */
+ * Same shape as `createSymbolQueryToolSet(ctx)`: build-engine passes the same
+ * `lspCtx` at assembly time (settings.lsp / disabledServers / idle /
+ * requestTimeoutMs). `onEdit` comes through from the registry's `opts.onEdit`
+ * (the same source as edit_file's lspNotifier.invalidate callback), keeping
+ * the post-write LSP view-sync semantics identical. */
 export interface CreateSymbolMutateToolSetOptions {
   readonly ctx: LspCtx;
   readonly onEdit?: (file: string) => void;
@@ -1047,7 +1127,8 @@ export function createSymbolMutateToolSet(
   opts: CreateSymbolMutateToolSetOptions
 ): ReadonlyArray<AciToolDef> {
   const { ctx, onEdit } = opts;
-  // 顺序与 SYMBOL_MUTATE_TOOL_NAMES 一致（Gate 3 按名索引，顺序即契约）。
+  // Order matches SYMBOL_MUTATE_TOOL_NAMES (Gate 3 indexes by name; the
+  // order is the contract).
   const tools: AciToolDef[] = [
     makeRenameSymbolTool(
       ctx,
@@ -1090,7 +1171,8 @@ export function createSymbolMutateToolSet(
         "Use it as the safety wrapper around delete; resolve the references first, then retry."
     ),
   ];
-  // 构造期 fail-fast：名单与工厂分歧不留到运行期（与 registry Gate 3 同纪律）。
+  // Fail fast at construction when the name list and the factories diverge,
+  // rather than leaving it to runtime (same discipline as registry Gate 3).
   if (tools.length !== SYMBOL_MUTATE_TOOL_NAMES.length) {
     throw new Error(
       `symbol mutate tool count mismatch: have=${tools.length} want=${SYMBOL_MUTATE_TOOL_NAMES.length}`

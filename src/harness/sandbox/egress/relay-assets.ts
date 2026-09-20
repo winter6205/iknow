@@ -1,19 +1,22 @@
 /**
  * src/harness/sandbox/egress/relay-assets.ts
  *
- * ADR-0107 换装：出口中继 = 本仓自带件（`<installRoot>/vendor/egress-relay/`
- * 两枚纯 node .mjs 资产），**socat 不是产品依赖**（ADR-0107 §Decision 5）。
+ * Egress relay = assets shipped by this repo (`<installRoot>/vendor/egress-relay/`,
+ * two pure-node .mjs files); socat is **not a product dependency** (ADR-0107).
  *
- * 单一职责：解析「中继依赖三件套」= node 绝对路径 + 两枚资产绝对路径（+资产
- * 目录供 fence `--ro-bind`）。路径解析照 vendor/ripgrep 先例锚
- * `resolveInstallRoot()`（`import.meta.url` 上溯 package.json，dev `src/…`
- * 与打包 `dist/…` 同落包根；绝不回退 `process.cwd()`）。
+ * Single responsibility: resolve the relay dependency trio = node absolute
+ * path + two asset absolute paths (plus the asset dir for the fence
+ * `--ro-bind`). Path resolution follows the vendor/ripgrep precedent anchored
+ * on `resolveInstallRoot()` (walks up from `import.meta.url` to package.json,
+ * so dev `src/…` and packaged `dist/…` land at the same package root; never
+ * falls back to `process.cwd()`).
  *
- * node 解析：产品可能跑在 bun 下，`process.execPath` 不保证是 node ——
- * execPath basename 为 `node` 且存在才用，否则 `which node`。两档围栏内
- * 均可执行（global 档 `--bind / /`；workspace 档 home 子树 `--ro-bind`
- * 保留执行位）。解析不到 / 资产缺失 → `undefined`，由 session 层
- * fail-closed（`EgressRelayUnavailableError`）。
+ * node resolution: the product may run under bun, so `process.execPath` is
+ * not guaranteed to be node — use it only when its basename is `node` and it
+ * exists, else `which node`. Executable inside either fence tier (global tier
+ * `--bind / /`; workspace tier keeps the exec bit via the home-subtree
+ * `--ro-bind`). Unresolvable node / missing assets → `undefined`; the session
+ * layer fail-closes (`EgressRelayUnavailableError`).
  */
 
 import { spawnSync } from "node:child_process";
@@ -21,26 +24,26 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { resolveInstallRoot } from "../../session-roots.js";
 
-/** 资产目录（相对安装根）。fence 把该目录整段 `--ro-bind` 进围栏。 */
+/** Asset dir (relative to install root); the fence `--ro-bind`s it wholesale. */
 export const EGRESS_RELAY_DIR_REL = "vendor/egress-relay";
-/** 围栏内 TCP→unix 中继（半桥换装件）。 */
+/** In-fence TCP→unix relay (half-bridge). */
 export const EGRESS_TCP_RELAY_FILE = "egress-tcp-relay.mjs";
-/** ProxyCommand 用 HTTP CONNECT 隧道件。 */
+/** HTTP CONNECT tunnel used by ProxyCommand. */
 export const EGRESS_HTTP_CONNECT_FILE = "egress-http-connect.mjs";
 
-/** session / fence 装配消费的中继路径三件套（全部宿主绝对路径）。 */
+/** Relay path trio consumed by session / fence assembly (all host-absolute). */
 export interface EgressRelayPaths {
-  /** 宿主解析到的 node 绝对路径（命令链前导与 ProxyCommand 共用）。 */
+  /** Host-resolved node absolute path (shared by command-chain prefix and ProxyCommand). */
   readonly nodePath: string;
-  /** 资产目录（`--ro-bind` 目标，src=dest 同值）。 */
+  /** Asset dir (`--ro-bind` target, src=dest identical). */
   readonly relayDir: string;
-  /** 半桥中继脚本绝对路径。 */
+  /** Half-bridge relay script absolute path. */
   readonly bridgeScriptPath: string;
-  /** CONNECT 隧道脚本绝对路径（进 GIT_SSH_COMMAND argv，token 不进串）。 */
+  /** CONNECT tunnel script absolute path (goes into GIT_SSH_COMMAND argv; token never inlined). */
   readonly connectScriptPath: string;
 }
 
-/** 给定安装根算资产路径（不查存在性；测试 / 装配层复用形态）。 */
+/** Compute asset paths from an install root (no existence checks; reusable by tests / assembly). */
 export function egressRelayPathsFor(installRoot: string): {
   relayDir: string;
   bridgeScriptPath: string;
@@ -62,8 +65,9 @@ export function egressRelayPathsFor(installRoot: string): {
 }
 
 /**
- * node 可执行解析：execPath 是 node（basename 精确匹配，bun 下不成立）且
- * 存在 → 直接用；否则 `which node`。失败 → `undefined`。
+ * node executable resolution: execPath is node (exact basename match, fails
+ * under bun) and exists → use it directly; else `which node`. Failure →
+ * `undefined`.
  */
 export function resolveNodeExecutable(): string | undefined {
   const execPath = process.execPath;
@@ -88,10 +92,11 @@ export function resolveNodeExecutable(): string | undefined {
 }
 
 /**
- * 生产解析入口。deps 全为测试/探针注入面（存在性、node 解析、安装根），
- * 省略即走宿主真值。任一环节不成立 → `undefined`（调用方 fail-closed）。
- * `resolveInstallRoot()` 抛错（裸环境）同样收敛为 `undefined` —— 本产品
- * 依赖缺失语义。
+ * Production resolution entry. All deps are test/probe injection points
+ * (existence, node resolution, install root); omit them to use real host
+ * values. Any failed step → `undefined` (caller fail-closes). A throw from
+ * `resolveInstallRoot()` (bare environment) likewise collapses to
+ * `undefined` — missing-product-dependency semantics.
  */
 export function resolveEgressRelay(
   deps: {

@@ -1,11 +1,10 @@
 /**
- * verify 纯函数判定层 (GH #128 失败自动修正闭环, T3)。
+ * verify pure-function decision layer for the failure auto-correction loop.
  *
- * 三态判定 / 确认阶梯 / 失败签名 / 趋势判定 —— 全部纯函数, 零 IO 零副作用
- * (spec ACR complexity-anti-drift yes; spec:92 unit 层落点)。
- * 语义按 specs/128-auto-correction-loop.md Glossary 与 plans/128-auto-correction-loop.md
- * §Decisions; 任何状态 (bestFailed / 上轮签名 / 连续退化计数) 由调用方
- * (verify-loop) 持有并传入, 本模块不隐式记忆。
+ * Three-state verdict / confirmation ladder / failure signature / trend
+ * evaluation — all pure, zero IO, zero side effects. All state (bestFailed /
+ * previous signature / consecutive-regression counts) is owned and passed in
+ * by the caller (verify-loop); this module never remembers implicitly.
  */
 import type {
   ConfirmationVerdict,
@@ -14,33 +13,35 @@ import type {
   Verdict,
 } from "./types.js";
 
-/** 内置失败行识别 (plan §Decisions): exit≠0 时计这些行数为 failedCount。 */
+/** Built-in failure-line detection: when exit!=0, count these lines as failedCount. */
 export const FAILURE_LINE_PATTERN = /^\s*(FAIL(ED)?|✗|×)\b|\berror:/i;
 
-/* ------------------------------ 三态判定 ------------------------------ */
+/* ------------------------------ three-state verdict ------------------------------ */
 
 export interface AssessVerdictArgs {
   readonly exitCode: number;
-  /** 本轮失败用例数; 无法解析时缺省。 */
+  /** Failed cases this round; omitted when unparseable. */
   readonly failedCount?: number;
   /**
-   * 确认阶梯第一级 (全量复跑) 是否通过。
-   * 首次验证 (尚未复跑) 传 undefined → 视为未通过, 不凭空放行。
+   * Whether ladder level 1 (full rerun) passed.
+   * First verification (no rerun yet) passes undefined → treated as failed,
+   * never a free pass.
    */
   readonly rerunPassed?: boolean;
   /**
-   * 确认阶梯第二级 (失败用例单跑) 是否通过。
-   * 未配置 rerunTemplate 时缺省 → 不参与 unstable 判定。
+   * Whether ladder level 2 (failed-case rerun) passed.
+   * Omitted when rerunTemplate is unset → excluded from the unstable decision.
    */
   readonly singlePassed?: boolean;
 }
 
 /**
- * 三态判定: pass / true-failure / unstable。
- * - exit 0 或失败数为 0 → pass;
- * - exit≠0 且确认阶梯全不过 → true-failure;
- * - exit≠0 且全量复跑过 → pass (flaky 放行, 不修正);
- * - exit≠0 且全量复跑仍挂但单跑过 → unstable (套件干扰, 不修正)。
+ * Three states: pass / true-failure / unstable.
+ * - exit 0 or zero failures → pass;
+ * - exit≠0 and every ladder level fails → true-failure;
+ * - exit≠0 but full rerun passes → pass (flaky, no correction);
+ * - exit≠0, full rerun still fails, single-case rerun passes → unstable
+ *   (suite interference, no correction).
  */
 export function assessVerdict(args: AssessVerdictArgs): Verdict {
   const { exitCode, failedCount } = args;
@@ -50,29 +51,31 @@ export function assessVerdict(args: AssessVerdictArgs): Verdict {
   return "true-failure";
 }
 
-/* ------------------------------ 确认阶梯 ------------------------------ */
+/* ------------------------------ confirmation ladder ------------------------------ */
 
 export interface ConfirmFailureArgs {
-  /** 第一级: 全量复跑是否通过。 */
+  /** Level 1: did the full rerun pass? */
   readonly rerunPassed: boolean;
   /**
-   * 第二级: 失败用例单跑是否通过。
-   * 未配置 rerunTemplate 时调用方传 undefined (跳过单跑)。
+   * Level 2: did the failed-case rerun pass?
+   * Caller passes undefined when rerunTemplate is unset (single rerun skipped).
    */
   readonly singleRunPassed?: boolean;
 }
 
 export interface ConfirmationLadderResult {
   readonly verdict: ConfirmationVerdict;
-  /** 第一级是否失败 (全量复跑挂)。 */
+  /** Whether level 1 failed (full rerun failed). */
   readonly rerunFailed: boolean;
-  /** 第二级是否执行且通过; undefined = 未配置单跑模板。 */
+  /** Whether level 2 ran and passed; undefined = single-rerun template unset. */
   readonly singleRunPassed?: boolean;
 }
 
 /**
- * 两级确认阶梯 (Glossary: 每级至多一次不递归, 全过才判 flaky, 全不过才判真失败)。
- * 阶梯是短路链: 全量复跑过 → flaky, 不触发第二级; 全量复跑挂时再视单跑结果。
+ * Two-level confirmation ladder: each level runs at most once, no recursion;
+ * only flaky when everything passes, only true-failure when everything fails.
+ * The ladder short-circuits: full rerun passes → flaky, level 2 never runs;
+ * level 2 is consulted only when the full rerun fails.
  */
 export function confirmFailure(
   args: ConfirmFailureArgs
@@ -90,19 +93,20 @@ export function confirmFailure(
   };
 }
 
-/* ------------------------------ 失败计数 ------------------------------ */
+/* ------------------------------ failure counting ------------------------------ */
 
 export function countFailures(
   outputText: string,
   countRegex?: RegExp,
   exitCode?: number
 ): number | undefined {
-  // pass 分支 (exit 0) 不数失败行 —— 失败计数只服务于失败语义。
+  // exit-0 (pass) branch never counts failure lines — counting only serves failure semantics.
   if (exitCode !== undefined && exitCode === 0) return 0;
 
   if (countRegex !== undefined) {
     const match = countRegex.exec(outputText);
-    // 只认能提取出整数个数的正则; 无捕获组 / 不匹配 → 不猜测, 走纯签名路径。
+    // Only trust regexes that yield an integer count; no capture group / no
+    // match → don't guess, fall back to the pure-signature path.
     if (match !== null && match[1] !== undefined) {
       const n = Number(match[1]);
       if (Number.isInteger(n) && n >= 0) return n;
@@ -117,20 +121,21 @@ export function countFailures(
   return count;
 }
 
-/* ------------------------------ 失败签名 ------------------------------ */
+/* ------------------------------ failure signature ------------------------------ */
 
 export interface BuildFailureSignatureArgs {
   readonly exitCode: number;
-  /** 原始验证输出; 签名提取只读其文本, 不修改调用方数据。 */
+  /** Raw verification output; signature extraction is read-only on this text. */
   readonly outputText: string;
-  /** settings.verify.countRegex; 优先于内置失败行识别。 */
+  /** settings.verify.countRegex; takes priority over built-in line detection. */
   readonly countRegex?: string;
 }
 
 /**
- * 失败签名归一 (Glossary): 退出码 + 失败用例名/首行错误。
- * 格式 `exit=1|tests/auth.test.ts:login rejects bad token`。
- * countRegex 优先 (plan §Decisions); 两者均无 → 纯 `exit=N` 签名 (仅停滞检测)。
+ * Normalized failure signature: exit code + failing case name / first error line.
+ * Format: `exit=1|tests/auth.test.ts:login rejects bad token`.
+ * countRegex wins when configured; neither available → bare `exit=N`
+ * signature (stall detection only).
  */
 export function buildFailureSignature(args: BuildFailureSignatureArgs): string {
   const { exitCode, outputText } = args;
@@ -141,8 +146,9 @@ export function buildFailureSignature(args: BuildFailureSignatureArgs): string {
 }
 
 /**
- * 取首个失败行行首作为签名内容。
- * 无配置 countRegex 时走内置失败行识别; 有配置时优先用其匹配行。
+ * Use the start of the first failure line as signature content.
+ * With countRegex configured its match wins; otherwise fall back to built-in
+ * failure-line detection.
  */
 function firstFailureLine(
   outputText: string,
@@ -153,8 +159,9 @@ function firstFailureLine(
     try {
       re = new RegExp(countRegex);
     } catch {
-      // settings 层已兜底非法正则; 纯函数层无法解析时降级内置识别。
-      // // EXIT: 非法正则 → 降级内置失败行识别 (S3 显式退出条件)。
+      // Settings layer already guards invalid regexes; if unparseable here,
+      // degrade to built-in detection.
+      // EXIT: invalid regex → built-in failure-line fallback.
       re = FAILURE_LINE_PATTERN;
     }
     const match = re.exec(outputText);
@@ -170,23 +177,24 @@ function firstFailureLine(
 }
 
 /**
- * 剥 FAIL / FAILED / ✗ / × 前缀标记, 保留失败用例名或错误内容。
- * spec 签名示例 "exit=1|tests/auth.test.ts:login rejects bad token"
- * 不含 "FAIL  " 前缀 —— 签名内容是失败用例名, 不是行首标记。
- * error: 行保留 "error:" 前缀 (其内容本身就是首行错误文本)。
+ * Strip FAIL / FAILED / ✗ / × line markers, keeping the failing case name or
+ * error content. The signature example
+ * "exit=1|tests/auth.test.ts:login rejects bad token" has no "FAIL  " prefix —
+ * signature content is the case name, not the line marker.
+ * error: lines keep their "error:" prefix (the content itself is the error text).
  */
 function stripFailureMarker(line: string): string {
   return line.replace(/^\s*(FAIL(ED)?|✗|×)\b\s*/, "").trim();
 }
 
-/* ------------------------------ 趋势判定 ------------------------------ */
+/* ------------------------------ trend evaluation ------------------------------ */
 
 export interface EvaluateTrendArgs {
-  /** 本轮失败用例数; undefined = 解析不出 (走纯签名比对)。 */
+  /** Failed cases this round; undefined = unparseable (pure signature comparison). */
   readonly currentFailed?: number;
-  /** 历史最好 (最小) 失败数。 */
+  /** Historical best (minimum) failure count. */
   readonly bestFailed?: number;
-  /** 上轮失败用例数。 */
+  /** Failed cases in the previous round. */
   readonly lastFailed?: number;
   readonly currentSignature: string;
   readonly lastSignature?: string;
@@ -198,13 +206,15 @@ export interface TrendResult {
 }
 
 /**
- * 趋势判定 (Glossary): 裁判是趋势不是计数器, maxRounds 仅兜底。
- * 判定顺序 = 优先级, 各规则互斥:
- * 1. 进展: current < best → continue (优于历史最好, 无条件放行);
- * 2. 停滞: 同签名连续两轮 (current == last, 签名不变) → stop;
- * 3. 回归: last > best 且 current > best (连续两轮差于最好成绩) → stop;
- * 4. 震荡宽容: current > best 但 last == best (单轮退化, 未到两轮) → continue;
- * 5. 兜底 (含失败数解析不出的轮次): 不猜停, 放行。
+ * Trend evaluation: the trend is the judge, maxRounds is only a backstop.
+ * Rule order = priority; rules are mutually exclusive:
+ * 1. progress: current < best → continue (better than historical best, always let through);
+ * 2. stuck: identical signature for two consecutive rounds (current == last) → stop;
+ * 3. regression: last > best and current > best (two rounds worse than best) → stop;
+ * 4. oscillation-tolerant: current > best but last == best (single-round
+ *    regression) → continue;
+ * 5. fallback (rounds whose failure count is unparseable): never guess a stop;
+ *    let it through.
  */
 export function evaluateTrend(args: EvaluateTrendArgs): TrendResult {
   const { currentFailed, bestFailed, lastFailed, currentSignature } = args;

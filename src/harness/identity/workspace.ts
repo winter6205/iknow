@@ -1,17 +1,16 @@
 /**
- * IKNOW-196 Workspace 初始化 + state.json 状态机
- * (spec `specs/196-identity-assembly.md` spec.md:197-236 + spec.md:300-326)。
+ * Workspace initialization + state.json state machine.
  *
- * 模块责任:eager + idempotent 初始化 `~/.iknow/` 目录;seed user.md
- * (USER_TEMPLATE,来自 `./user-template.ts`);seed state.json
- * (bootstrap_seeded:false);**rev 2026-08-11 seed BOOTSTRAP.md**
- * (BOOTSTRAP_TEMPLATE,bs=false 时;对齐 ohmo initialize_workspace);
- * 读 / 写 state.json (PATCH 单字段 + atomic write)。读路径 JSON 损坏 /
- * schema 不匹配 → skip + warn,不阻塞装配。
+ * Responsibility: eager + idempotent init of the `~/.iknow/` directory; seed
+ * user.md (USER_TEMPLATE, from `./user-template.ts`); seed state.json
+ * (bootstrap_seeded:false); seed BOOTSTRAP.md (BOOTSTRAP_TEMPLATE, when
+ * bs=false, aligned with ohmo initialize_workspace); read / write state.json
+ * (single-field PATCH + atomic write). On the read path, JSON corruption /
+ * schema mismatch → skip + warn, never blocking assembly.
  *
- * 锁定约束:不创建 identity.md / soul.md 文件
- * (认知/人格是代码常量,见 `identity.ts` / `soul.ts`);
- * user.md 是用户可改文件,seed 后不再覆盖。
+ * Locked constraint: never create identity.md / soul.md files (the cognitive
+ * and persona layers are code constants, see `identity.ts` / `soul.ts`);
+ * user.md is user-editable and never overwritten after seeding.
  */
 
 import path from "node:path";
@@ -30,26 +29,26 @@ import { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
  * Per-root `.iknow` under `resolveWorkspaceRoot()` (`[explicit, env, cwd]`,
  * default `process.cwd()`). Kept for memory / sessions / settings callers.
  * Persona seed (user.md / BOOTSTRAP.md / identity state.json) does **not**
- * use this helper — those files live at `userHome/.iknow` (issue #584).
+ * use this helper — those files live at `userHome/.iknow`.
  */
 export function iknowWorkspaceRoot(opts?: ResolveWorkspaceRootOpts): string {
   return path.join(resolveWorkspaceRoot(opts), ".iknow");
 }
 
-/** Schema-versioned state.json(预留 schema 迁移)。 */
+/** Schema-versioned state.json (schema migrations reserved). */
 export interface IknowStateV1 {
   readonly schema_version: 1;
   readonly bootstrap_seeded: boolean;
 }
 
-/** IKNOW-196 装配错误分类(降级契约 spec.md:300-326)。 */
+/** Assembly error taxonomy (degradation contract). */
 export type IknowIdentityError =
   | { kind: "state_parse_failed"; path: string; reason: string }
   | { kind: "state_schema_invalid"; path: string; field: string }
   | { kind: "write_failed"; path: string; cause: string }
   | { kind: "io_error"; path: string; cause: string };
 
-/** 读路径降级返回的默认 state(无任何字段已确认)。 */
+/** Default state returned on read-path degradation (no field confirmed). */
 function defaultState(): IknowStateV1 {
   return {
     schema_version: 1,
@@ -65,8 +64,8 @@ function userFilePath(workspace: string): string {
   return path.join(workspace, "user.md");
 }
 
-/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径（对齐 ohmo `get_bootstrap_path`）。
- *  seed 后只读、不写；完成 = 文件被删，无需宿主钩子。 */
+/** BOOTSTRAP.md path (aligned with ohmo `get_bootstrap_path`).
+ *  Read-only after seeding; completion = the file is deleted, no host hook. */
 export function bootstrapFilePath(workspace: string): string {
   return path.join(workspace, "BOOTSTRAP.md");
 }
@@ -85,7 +84,7 @@ async function readIfExists(p: string): Promise<string | undefined> {
   }
 }
 
-/** schema 字段校验:任一非法 → warn + 返回 undefined。 */
+/** Schema field validation: any violation → warn + return undefined. */
 function validateStateFields(
   obj: Record<string, unknown>,
   p: string
@@ -108,12 +107,12 @@ function validateStateFields(
   };
 }
 
-/** 把磁盘内容解析成 state;JSON 损坏 / schema 不匹配 → warn + 默认 state。 */
+/** Parse disk content into state; JSON corruption / schema mismatch → warn + default state. */
 function parseStateOrDefault(content: string, p: string): IknowStateV1 {
   return tryParseState(content, p) ?? defaultState();
 }
 
-/** 解析失败 / schema 不匹配 → undefined(便于写路径判断是否需要 self-heal)。 */
+/** Parse failure / schema mismatch → undefined (lets the write path decide on self-heal). */
 function tryParseState(content: string, p: string): IknowStateV1 | undefined {
   let raw: unknown;
   try {
@@ -132,7 +131,7 @@ function tryParseState(content: string, p: string): IknowStateV1 | undefined {
   return validateStateFields(raw as Record<string, unknown>, p);
 }
 
-/** 读取 state.json;不存在 / JSON 损坏 / schema 不匹配 → 默认 state。 */
+/** Read state.json; missing / JSON corruption / schema mismatch → default state. */
 export async function readIknowState(
   workspace?: string
 ): Promise<IknowStateV1> {
@@ -143,7 +142,7 @@ export async function readIknowState(
   return parseStateOrDefault(content, p);
 }
 
-/** Atomic write:temp + rename,防半写 JSON 损坏(spec Boundaries Always)。 */
+/** Atomic write: temp + rename, preventing half-written JSON corruption. */
 async function atomicWriteJson(p: string, data: string): Promise<void> {
   const tmp = `${p}.${randomBytes(6).toString("hex")}.tmp`;
   try {
@@ -154,7 +153,7 @@ async function atomicWriteJson(p: string, data: string): Promise<void> {
     try {
       await fs.unlink(tmp);
     } catch {
-      /* tmp 可能已不存在,忽略 */
+      /* tmp may already be gone; ignore */
     }
     throw {
       kind: "write_failed",
@@ -164,7 +163,7 @@ async function atomicWriteJson(p: string, data: string): Promise<void> {
   }
 }
 
-/** 写 state.json:PATCH 单字段 + atomic write。 */
+/** Write state.json: single-field PATCH + atomic write. */
 export async function writeIknowState(
   patch: Partial<Omit<IknowStateV1, "schema_version">>,
   workspace?: string
@@ -180,16 +179,18 @@ export async function writeIknowState(
   return next;
 }
 
-/** IKNOW-196 初始化:eager + idempotent。
- *  - mkdir -p `~/.iknow/`(幂等)
- *  - 写 user.md(仅当不存在;不覆盖用户已改)
- *  - 写 state.json(仅当不存在;bs=false)
- *  - 不创建 / 不写 identity.ts / soul.ts / bootstrap.ts / BOOTSTRAP.md(这些是代码常量)
- *  - 不创建 identity.md 文件(已合并到 soul,不单独存在)
+/** Workspace init: eager + idempotent.
+ *  - mkdir -p `~/.iknow/` (idempotent)
+ *  - write user.md (only when absent; never overwrite user edits)
+ *  - write state.json (only when absent; bs=false)
+ *  - never create / write identity.ts / soul.ts / bootstrap.ts / BOOTSTRAP.md
+ *    (these are code constants)
+ *  - never create an identity.md file (merged into soul, no standalone file)
  *
- * 失败降级面:`initIknowWorkspaceSafe()` 封装 try/catch+warn,
- * 4 入口 (chat / serve / tui / ask) 直接调,失败 log + 不阻塞装配
- * (spec Boundaries Always — 用户级文件 IO 失败不应让 agent 永远跑不起来)。
+ * Degradation surface: `initIknowWorkspaceSafe()` wraps try/catch + warn; the
+ * 4 entry points (chat / serve / tui / ask) call it directly — failure logs
+ * and never blocks assembly (user-level file IO failure must not stop the
+ * agent from ever running).
  */
 export async function initIknowWorkspaceSafe(opts?: {
   workspace?: string;
@@ -197,14 +198,14 @@ export async function initIknowWorkspaceSafe(opts?: {
   try {
     await initializeIknowWorkspace(opts);
   } catch (err) {
-    // IknowIdentityError 是 discriminated union,统一 console.warn + 继续。
+    // IknowIdentityError is a discriminated union: console.warn uniformly and continue.
     console.warn(
       `[iknow-identity] workspace init failed: ${JSON.stringify(err)}`
     );
   }
 }
 
-/** IKNOW-196 初始化:eager + idempotent。 */
+/** Workspace init: eager + idempotent. */
 export async function initializeIknowWorkspace(opts?: {
   workspace?: string;
 }): Promise<{ root: string; state: IknowStateV1 }> {
@@ -231,9 +232,10 @@ export async function initializeIknowWorkspace(opts?: {
   const sp = stateFilePath(root);
   const stateExisting = await readIfExists(sp);
   if (stateExisting === undefined) {
-    // 首次初始化:seed state(bs=false)+ seed BOOTSTRAP.md,然后翻 flag=true
-    // (对齐 ohmo initialize_workspace:写 BOOTSTRAP.md 的同一决策点翻 flag,
-    // 避免后续每次 build 重新 seed 已删文件)。
+    // First init: seed state (bs=false) + seed BOOTSTRAP.md, then flip the
+    // flag to true (aligned with ohmo initialize_workspace: flip the flag at
+    // the same decision point that writes BOOTSTRAP.md, so later builds never
+    // re-seed an already-deleted file).
     const seed: IknowStateV1 = {
       schema_version: 1,
       bootstrap_seeded: false,
@@ -245,9 +247,10 @@ export async function initializeIknowWorkspace(opts?: {
     return { root, state: complete };
   }
 
-  // 文件存在但 JSON 损坏 / schema 不匹配 → self-heal:
-  // 备份原文件到 .corrupt.<random>,写入新的合法 seed,返回 seed。
-  // 合法文件保留不动(idempotent;不抹掉已 seeded 的状态)。
+  // File exists but JSON is corrupt / schema mismatch → self-heal:
+  // back the original up to .corrupt.<random>, write a fresh valid seed,
+  // return the seed. A valid file stays untouched (idempotent; never wipe
+  // already-seeded state).
   const parsed = tryParseState(stateExisting, sp);
   if (parsed === undefined) {
     console.warn(
@@ -275,15 +278,17 @@ export async function initializeIknowWorkspace(opts?: {
     return { root, state: complete };
   }
 
-  // 合法 state 保留不动(idempotent)。rev 2026-08-11:bs=true 是 seed 完成的
-  // 存档标记(对齐 ohmo),seed 后不再补文件——完成由 BOOTSTRAP.md 文件缺失
-  // 驱动(装配层读文件),不重新 seed。
+  // Valid state stays untouched (idempotent). bs=true is the archive marker
+  // that seeding completed (aligned with ohmo); after seeding we never
+  // re-create files — completion is driven by BOOTSTRAP.md's absence (the
+  // assembly layer reads the file), not by re-seeding.
   return { root, state: parsed };
 }
 
-/** rev 2026-08-11:seed BOOTSTRAP.md(文件不存在才写,幂等;不覆盖用户已改)。
- *  对齐 ohmo initialize_workspace:首次启动写引导文件,引导完成后 agent 自己
- *  rm 它。调用方在同一决策点把 bs 翻 true。 */
+/** Seed BOOTSTRAP.md (write only when the file is absent; idempotent, never
+ *  overwrite user edits). Aligned with ohmo initialize_workspace: write the
+ *  guidance file on first start; after the guidance conversation the agent
+ *  rm's it itself. The caller flips bs to true at the same decision point. */
 async function seedBootstrapFile(root: string): Promise<void> {
   const bp = bootstrapFilePath(root);
   const existing = await readIfExists(bp);

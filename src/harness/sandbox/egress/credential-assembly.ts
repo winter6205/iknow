@@ -1,26 +1,30 @@
 /**
  * src/harness/sandbox/egress/credential-assembly.ts
  *
- * specs/egress-credential-sentinel.md T1 + T6 —— 凭据名册 SSOT + 装配 +
- * 入口姿态分支。
+ * Credential roster SSOT + assembly + entry posture branch.
  *
- * 单一职责：内置 github 名册（代码常量，spec 凭据名册表逐字）+ 用户层
- * `isolation.credentials` 段的收窄/追加合并，产出 `EgressCredentialRoster`
- * 纯数据形状；T6 入口以姿态分支委托铸造（`credential-mint.ts`，T2）或
- * 登记 skipped 痕。铸造实现（registry 假值 / masked store / bind 表 /
- * fence env 增量 + invariant 1/6 装配期 assert）在 `credential-mint.ts`；
- * 代换接线 / dispose 归 T3（`session.ts`），CA 持久层归 T4（`ca-store.ts`）。
+ * Single responsibility: the builtin github roster (code constant) merged
+ * with the user-layer `isolation.credentials` section (narrow/append),
+ * producing the pure-data `EgressCredentialRoster`; the entry point
+ * delegates by posture to minting (`credential-mint.ts`) or registers a
+ * skipped trace. The minting implementation (registry fake values / masked
+ * store / bind table / fence env increments + assembly-time asserts) lives in
+ * `credential-mint.ts`; substitution wiring / dispose live in `session.ts`,
+ * and the persistent CA layer in `ca-store.ts`.
  *
- * 依赖纪律：本域不反向 import config —— 用户段以结构化入参
- * （`UserCredentialSection`）注入，settings 侧条目类型与之结构兼容。
+ * Dependency discipline: this domain never imports config back — the user
+ * section arrives as a structured input (`UserCredentialSection`), and the
+ * settings-side entry types are structurally compatible with it.
  *
- * invariant 3（洗出防护）在签名面的体现：装配函数只吃「内置常量 + 用户段」
- * 两源，**没有** allowedDomains / 批准集入参 —— 批准门新批域在类型上就
- * 进不了任何条目的 injectHosts。
+ * Leak-through protection in the signature: the assembly function eats only
+ * the two sources "builtin constants + user section" — **no** allowedDomains /
+ * approval-set parameter — so freshly approved hosts cannot reach any entry's
+ * injectHosts even at the type level.
  *
- * Assumption 6（injectHosts 静态钉）：条目未声明 / 空 injectHosts →
- * 不铸造该条目 + warn 痕（不吃包「缺省 = 全部 allowedDomains」的
- * trade-off；settings 层已把此类条目丢弃，本层防御直连调用方，禁静默）。
+ * injectHosts static-pinning: an entry with undeclared / empty injectHosts →
+ * not minted + warn trace (we do not take the package's "default = all
+ * allowedDomains" trade-off; the settings layer already drops such entries,
+ * this layer defends against direct callers — no silence allowed).
  */
 
 import {
@@ -29,37 +33,38 @@ import {
   type MintEgressCredentialsArgs,
 } from "./credential-mint.js";
 
-/** 单条凭据文件条目（egress 侧数据形状）。 */
+/** One credential file entry (egress-side data shape). */
 export interface EgressCredentialFileEntry {
   readonly path: string;
-  /** 提取正则源串，含捕获组 1（组 1 = 被掩码的凭据值）。 */
+  /** Extraction regex source, must contain capture group 1 (group 1 = the credential value to mask). */
   readonly extract?: string;
   readonly decode?: "jwt";
   readonly injectHosts: readonly string[];
 }
 
-/** 单条凭据 env 变量条目（whole-value 掩码形态）。 */
+/** One credential env-var entry (whole-value masking form). */
 export interface EgressCredentialEnvVarEntry {
   readonly name: string;
   readonly injectHosts: readonly string[];
 }
 
-/** 装配产物：铸造消费的条目全集（内置 + 用户收窄/追加后）。 */
+/** Assembly output: the full entry set consumed by minting (builtin + user narrow/append). */
 export interface EgressCredentialRoster {
   readonly files: readonly EgressCredentialFileEntry[];
   readonly envVars: readonly EgressCredentialEnvVarEntry[];
 }
 
 /**
- * 用户段入参形态 —— 与 `IknowSettingsIsolationCredentials` 结构兼容
- * （mutable string[] 可赋 readonly string[]），避免 egress 域 import config。
+ * User-section input shape — structurally compatible with
+ * `IknowSettingsIsolationCredentials` (mutable string[] assignable to
+ * readonly string[]), avoiding a config import in the egress domain.
  */
 export interface UserCredentialSection {
   readonly files?: readonly EgressCredentialFileEntry[];
   readonly envVars?: readonly EgressCredentialEnvVarEntry[];
 }
 
-/** github 条目静态注入域（spec 凭据名册表逐字；Assumption 6 钉死不扩张）。 */
+/** GitHub entries' static injection hosts (pinned; never expands). */
 const GITHUB_INJECT_HOSTS: readonly string[] = Object.freeze([
   "github.com",
   "*.github.com",
@@ -77,9 +82,10 @@ function deepFreezeRoster<T>(value: T): T {
 }
 
 /**
- * 内置 github 名册（SSOT 单文件；宿主 env `GH_TOKEN` + `gh` hosts.yml）。
- * hosts.yml 条目 = structured extract 掩码：YAML `oauth_token:` 捕获组 1，
- * 文件其余字节逐字保留（gh 解析不炸）。
+ * Builtin github roster (single-file SSOT; host env `GH_TOKEN` + `gh`
+ * hosts.yml). The hosts.yml entry uses structured-extract masking: YAML
+ * `oauth_token:` capture group 1, every other byte of the file preserved
+ * verbatim (gh parsing must not break).
  */
 export const BUILTIN_GITHUB_CREDENTIAL_ROSTER: EgressCredentialRoster =
   deepFreezeRoster({
@@ -98,7 +104,7 @@ export const BUILTIN_GITHUB_CREDENTIAL_ROSTER: EgressCredentialRoster =
     ],
   });
 
-/** injectHosts 可铸造判据：非空数组且每项非空串（Assumption 6 显式值）。 */
+/** Mintability test for injectHosts: non-empty array with non-empty strings (explicit values required). */
 function isMintable(entry: unknown): boolean {
   const hosts = (entry as { readonly injectHosts?: unknown }).injectHosts;
   return (
@@ -115,7 +121,7 @@ function identity(entry: {
   return entry.path ?? entry.name ?? "(unidentified)";
 }
 
-/** 收窄/追加合并：同身份（path / name）条目就地替换，其余追加。 */
+/** Narrow/append merge: an entry with the same identity (path / name) replaces in place, others append. */
 function mergeEntries<
   T extends { readonly path?: string; readonly name?: string },
 >(
@@ -141,9 +147,11 @@ function mergeEntries<
 }
 
 /**
- * 装配铸造消费的凭据名册：内置 github 两条目为基线，用户段只做
- * 收窄（同身份条目替换）/ 追加（新条目）。用户段缺席 → 直接返回内置
- * 常量（引用稳定，跨 session 只读共享）。产物深 frozen。
+ * Assemble the credential roster consumed by minting: the two builtin github
+ * entries as baseline; the user section only narrows (same-identity entry
+ * replacement) or appends (new entries). Absent user section → return the
+ * builtin constant directly (reference-stable, read-only across sessions).
+ * Output is deep-frozen.
  */
 export function assembleEgressCredentials(
   userSection: UserCredentialSection | undefined,
@@ -168,38 +176,40 @@ export function assembleEgressCredentials(
     files.every((f, i) => f === BUILTIN_GITHUB_CREDENTIAL_ROSTER.files[i]) &&
     envVars.every((e, i) => e === BUILTIN_GITHUB_CREDENTIAL_ROSTER.envVars[i])
   ) {
-    // 用户段未产生任何有效变化（全被拒铸）→ 回到内置常量。
+    // The user section produced no effective change (all refused minting) → back to the builtin constant.
     return BUILTIN_GITHUB_CREDENTIAL_ROSTER;
   }
   return deepFreezeRoster({ files, envVars });
 }
 
-// ── T6：装配入口姿态分支（yolo / isolation OFF → 不铸造、不注入）──────────
+// ── Assembly entry posture branch (yolo / isolation OFF → no minting, no injection)
 
 /**
- * 围栏姿态（spec F9 / Assumption 9）：`fenced` = 正常铸造档；
- * `no-fence` = yolo / isolation OFF（围栏整体退场）—— 入口显式分支
- * 「不铸造、不注入」，返回 `skipped` 痕进诊断/日志，离线可查证
- * 「此时宿主真值直达、无存在面保护」。姿态差异显式登记，不静默。
+ * Fence posture: `fenced` = normal minting tier; `no-fence` = yolo /
+ * isolation OFF (the fence exits entirely) — the entry branches explicitly to
+ * "do not mint, do not inject" and returns a `skipped` trace into
+ * diagnostics/logs, so it is verifiable offline that "host real values reach
+ * children directly with no existence-plane protection". The posture
+ * difference is registered explicitly, never silent.
  */
 export type EgressFencePosture = "fenced" | "no-fence";
 
-/** `no-fence` 档产物：skipped 标记即离线判据（无 registry/store/envVars）。 */
+/** `no-fence` output: the skipped marker is itself the offline evidence (no registry/store/envVars). */
 export interface EgressCredentialSkipped {
   readonly skipped: "no-fence";
 }
 
-/** 入口返回联合：消费方必须显式处理 skipped 档（禁静默降级）。 */
+/** Entry return union: consumers must handle the skipped tier explicitly (no silent degradation). */
 export type EgressCredentialLayer =
   EgressCredentialMint | EgressCredentialSkipped;
 
-/** `fenced` 档入参 = T2 铸造入参 + 姿态声明。 */
+/** `fenced` inputs = minting args + posture declaration. */
 export interface MintEgressCredentialLayerFencedArgs extends MintEgressCredentialsArgs {
   readonly posture: "fenced";
   readonly onDiagnostic?: (message: string) => void;
 }
 
-/** `no-fence` 档入参：结构上不吃 roster / CA —— 不铸造无从消费真值。 */
+/** `no-fence` inputs: structurally cannot take roster / CA — nothing to mint against real values. */
 export interface MintEgressCredentialLayerNoFenceArgs {
   readonly posture: "no-fence";
   readonly onDiagnostic?: (message: string) => void;
@@ -209,10 +219,12 @@ export type MintEgressCredentialLayerArgs =
   MintEgressCredentialLayerFencedArgs | MintEgressCredentialLayerNoFenceArgs;
 
 /**
- * no-fence 痕文案 SSOT —— yolo / isolation OFF 接线方（`mintEgressCredentialLayer`
- * no-fence 姿态档）专用；生产装配的 network 段缺席已改走 builtin preset
- * policy（fence 在场，preset spec invariant 3），不再登记本痕。离线 grep
- * `skipped: no-fence` 即可查证姿态。文案不含任何凭据材料。
+ * no-fence trace text SSOT — used only by the yolo / isolation-OFF wiring
+ * (`mintEgressCredentialLayer` no-fence posture tier). Production assembly
+ * with the network section absent now goes through the builtin preset policy
+ * (fence in play), so this trace is no longer registered there. Offline grep
+ * of `skipped: no-fence` verifies the posture. The text contains no credential
+ * material.
  */
 export function noFenceCredentialTrace(): string {
   return (
@@ -224,11 +236,13 @@ export function noFenceCredentialTrace(): string {
 }
 
 /**
- * 凭据装配入口（T6）：三装配点经 `createEgressSession` 走到铸造时以
- * `fenced` 档委托 `mintEgressCredentials`（T2 形状逐字）；yolo /
- * isolation OFF 的接线方以 `no-fence` 档调用 —— 不构造 registry /
- * store、不装载 CA、不产出 env 增量，返回 `skipped` 痕并落诊断通道
- * （invariant 7 禁静默）。加性形状：ssh-bridge plan 可沿同一入口接线。
+ * Credential assembly entry: the three assembly points reach minting via
+ * `createEgressSession` and delegate with the `fenced` posture to
+ * `mintEgressCredentials`; yolo / isolation-OFF wiring calls with
+ * `no-fence` — no registry / store constructed, no CA loaded, no env
+ * increments produced; it returns the `skipped` trace on the diagnostic
+ * channel (silence forbidden). Additive shape: future ssh-bridge wiring can
+ * hook into the same entry.
  */
 export function mintEgressCredentialLayer(
   args: MintEgressCredentialLayerFencedArgs

@@ -1,16 +1,19 @@
 /**
- * rg argv 构造 + 语言类型校验（SC12「argv 构造」；契约 D4；SC10）。
+ * rg argv construction + language-type table validation.
  *
- * 出法与 flag 的对应是契约的一部分，不是实现细节：
- *   - `paths`  → `-l`          （rg 每个唯一文件一条）
- *   - `count`  → `--count`     （`path:条数`）
- *   - `content`→ `--line-number --no-heading`（`path:line:text`）
- *   - `--null` 常开：路径以 NUL 收尾，把「路径含冒号」从分列问题里移除。
- *   - `-C N` 只在 content 出法带上（其它出法没有「附近几行」的概念）。
+ * The output-mode / flag mapping is part of the contract, not an
+ * implementation detail:
+ *   - `paths`   → `-l`          (rg: one line per unique file)
+ *   - `count`   → `--count`     (`path:count`)
+ *   - `content` → `--line-number --no-heading` (`path:line:text`)
+ *   - `--null` always on: paths end with NUL, removing "path contains a
+ *     colon" from the column-splitting problem.
+ *   - `-C N` is added only for the content mode (other modes have no notion
+ *     of "a few lines nearby").
  *
- * 未知 `type` 的 typed 拒绝**不在这里**：它在 `options.ts` 的 `parseQuerySpec`
- * 就挡下（见该处注释）—— 校验若只挂在本函数上，就只在「自带引擎在场」时才
- * 生效。
+ * Typed rejection of unknown `type` is **not here**: `parseQuerySpec` in
+ * `options.ts` blocks it (see the comment there) — validation attached only to
+ * this function would take effect only "when the bundled engine is present".
  */
 
 import type { QuerySpec } from "./types.js";
@@ -19,7 +22,7 @@ import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
 import { NEWLINE_PATH_EXCLUDES } from "./path-representable.js";
 import { rgTransportBudgetBytes } from "./rg-output.js";
 
-/** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
+/** Frequently used samples from the type table (tests lock the shape; truth stays in TYPE_GLOBS). */
 export const KNOWN_TYPE_SAMPLE: ReadonlyArray<string> = [
   "ts",
   "js",
@@ -37,31 +40,43 @@ export function buildRgArgs(
 ): string[] {
   const args: string[] = [];
   pushOutputMode(args, spec);
-  // 不给 rg 加任何 Unicode 模式开关（`--no-unicode` / `--engine`）：这两个都是
-  // 「把 rg 的语义掰向 JS」的杠杆，ADR-0089 禁止用它们凑两引擎对齐。rg 按自己
-  // 的默认 Unicode 语义跑，`\w` / `\d` / `\b` 因此认非 ASCII 词字符；Node
-  // 路径按 JS 的语义跑，命中集与 rg 不同是**已接受的合同**（见 `pattern.ts`
-  // 文件头；回归钉子见 `tests/harness/aci/search/argv.test.ts`）。
-  // `--no-messages` 收掉**文件级**告警（不可读文件的 Permission denied、坏
-  // 符号链接），但**不收**正则 / 用法错误。于是 rc=2 且 stderr 空 = 只是某个
-  // 文件没读到（stdout 里的命中照常有效）；rc=2 且 stderr 非空 = 查询本身被
-  // 拒。少了这道开关，一个不可读的邻居文件会让整次查询失败，而 Node 引擎
-  // 只是跳过该文件 —— 两边对同一目录给出不同答案（SC9）。
-  // `-H` 常开：`path` 指向单个文件时 rg 默认省掉文件名（只剩 `行号:内容`），
-  // 与 paths / count 出法及 Node 引擎的 `path:line:text` 形状都不兼容。
+  // No Unicode mode switches for rg (`--no-unicode` / `--engine`) (ADR-0089):
+  // both are levers that "bend rg's semantics toward JS", and using them to
+  // force two-engine alignment is prohibited. rg runs its own default Unicode
+  // semantics, so `\w` / `\d` / `\b` recognize non-ASCII word chars; the Node
+  // path runs JS semantics, and a different hit set is an **accepted
+  // contract** (see the `pattern.ts` header; the regression pin lives in
+  // `tests/harness/aci/search/argv.test.ts`).
+  // `--no-messages` silences **file-level** warnings (Permission denied on
+  // unreadable files, broken symlinks) but does **not** silence regex / usage
+  // errors. Hence rc=2 with empty stderr = some file just wasn't read (hits in
+  // stdout remain valid); rc=2 with non-empty stderr = the query itself was
+  // rejected. Without this switch, one unreadable neighbor file would fail the
+  // whole query while the Node engine merely skips it — both engines answering
+  // differently for the same directory.
+  // `-H` always on: when `path` points at a single file, rg omits the filename
+  // by default (only `line:content`), incompatible with the paths / count
+  // modes and the Node engine's `path:line:text` shape.
   args.push("--null", "--color", "never", "--no-messages", "-H");
-  // 遍历纪律：Node 扫（`walkFiles`）只看这两个目录名，不认 `.gitignore` /
-  // `.ignore` / 隐藏文件。rg 默认相反（尊重 ignore、跳过隐藏）。两边不等价
-  // 就是 SC9 失败 —— 且同一次查询「换台引擎就少半仓」是最坏的一种静默改
-  // 语义。取「跟 Node 已有行为对齐」而不是「教 Node 读 ignore 规则」：
-  // 后者要复刻 rg 的 gitignore 语法（取反 / 目录限定 / 层级作用域），是另
-  // 一件工具的体量；`--no-ignore --hidden` 是一行且与既有语义一致。旧
-  // Node 回退（ADR-0004 修订）本来就不跳过隐藏文件，因此这不是新放宽。
+  // Traversal discipline: the Node scan (`walkFiles`) recognizes only these
+  // two directory names, not `.gitignore` / `.ignore` / hidden files. rg's
+  // default is the opposite (honors ignore files, skips hidden). Any
+  // divergence fails cross-engine equivalence — and "swap engines, silently
+  // lose half the repo" for one query is the worst kind of it. We choose "align
+  // with Node's existing behavior" over "teach Node ignore rules": the latter
+  // means reimplementing rg's gitignore syntax (negation / directory
+  // (ADR-0004)
+  // qualification / hierarchical scoping), a whole tool's worth of work;
+  // `--no-ignore --hidden` is one line and matches existing semantics. The old
+  // Node fallback never skipped hidden files either, so this is not a new
+  // loosening.
   //
-  // **顺序是契约**：用户 `spec.glob` 先于工具自带排除投递，rg 的
-  // `last-glob-wins` 因此让「跳过 node_modules / .git」成为最终胜负 —— 用户
-  // glob 是收窄（`*.ts`）时这条仍生效（命中限制在 `.ts`），用户 glob 是宽放
-  // （`**` / `*`）时也不会把仓库内部的依赖目录、git 配置吐回给模型（D2）。
+  // **Order is contract**: the user's `spec.glob` is delivered before the
+  // tool's built-in exclusions, so rg's `last-glob-wins` makes "skip
+  // node_modules / .git" the final verdict — it still holds when the user glob
+  // narrows (`*.ts`: hits stay within `.ts`), and when the user glob widens
+  // (`**` / `*`) the repo's dependency dirs and git config are never spat
+  // back to the model.
   args.push("--no-ignore", "--hidden");
   if (spec.glob !== undefined) args.push("--glob", spec.glob);
   args.push(
@@ -71,25 +86,33 @@ export function buildRgArgs(
     "!**/.git",
     ...NEWLINE_PATH_EXCLUDES.flatMap((glob) => ["--glob", glob])
   );
-  // 遍历期的体积闸；显式点名的文件不受它约束（rg 语义），Node 侧同口径。
+  // Size gate during traversal; explicitly named files are exempt (rg
+  // semantics), and the Node side uses the same rule.
   args.push(`--max-filesize=${String(MAX_TEXT_FILE_BYTES)}`);
-  // CRLF 对齐：Node 扫按 `\n` 切行后剥掉尾随 `\r`（`file-lines.splitLines`，
-  // 旧 Node 回退亦然），于是 `foo$` 能命中 CRLF 行。rg 默认把 `\r` 当行内容，
-  // 同一个 `foo$` 在 CRLF 文件上**一个都不中** —— 验收口径随引擎变。`--crlf`
-  // 让 rg 把 CRLF 当行终止符，`$` / `.` 的边界与 Node 一致。行内容里的 `\r`
-  // 由解析层剥掉（rg 仍原样回显），见 `rg-output.ts`。
+  // CRLF alignment: the Node scan splits on `\n` then strips the trailing
+  // `\r` (`file-lines.splitLines`; the old Node fallback did the same), so
+  // `foo$` hits CRLF lines. rg by default treats `\r` as line content, and the
+  // same `foo$` hits **nothing** in a CRLF file — acceptance would depend on
+  // the engine. `--crlf` makes rg treat CRLF as the line terminator, so `$` /
+  // `.` boundaries agree with Node. The `\r` in line content is stripped by
+  // the parse layer (rg still echoes it verbatim), see `rg-output.ts`.
   args.push("--crlf");
   if (spec.output === "content") {
-    // 超长匹配行的两道闸：先让 rg 自己收口，再由投影层按 code point 收到
-    // MAX_MATCH_LINE_COLUMNS（唯一权威）。第一道只为**传输量**存在 —— 少了
-    // 它，rg 会把整行原样吐回来，缓冲一整行 1MB 文本才发现要截断。因此它的
-    // 字节预算取 `rgTransportBudgetBytes`（= 4 倍 code point 上限，即 UTF-8
-    // 单字符最大宽度）：rg 的触发按**字节**、切片按 **code point**，预算取满
-    // 4 倍才让「rg 加了标记」不会伴随内容被切（见 `rg-output` 的实测说明）。
-    // 预算若更小，`hit + 漢×1000`（3003 字节 / 1003 个 code point）会在 2000
-    // 字节的线上触发，标记落进正文而 Node 侧原样保留 —— 同一行的字节数、
-    // 正文、可复制内容全不同（D6/SC9）。投影层再把 rg 的标记剥掉后统一收口，
-    // 两条引擎的最终形状因此只由权威口径决定。
+    // Two gates for over-long match lines: let rg finalize first, then the
+    // projection layer cuts to MAX_MATCH_LINE_COLUMNS by code point (the
+    // single authority). The first gate exists **only for transport volume** —
+    // without it rg would echo the whole line back and a 1MB line would be
+    // buffered before anyone noticed it must be truncated. Its byte budget is
+    // `rgTransportBudgetBytes` (= 4x the code-point cap, i.e. the max width of
+    // one UTF-8 char): rg **triggers** on bytes but **slices** by code point,
+    // and only a full 4x budget keeps "rg added a marker" from coinciding with
+    // content being cut (see the verified notes in `rg-output`). With a
+    // smaller budget, `hit + 1000 three-byte CJK chars` (3003 bytes / 1003
+    // code points) triggers on the 2000-byte line, the marker lands inside the
+    // body while the Node side keeps it verbatim — same line, different bytes
+    // / body / copyable content. The projection layer strips rg's marker and
+    // then finalizes uniformly, so the two engines' final shape is decided
+    // only by the authoritative width.
     args.push(
       `--max-columns=${String(rgTransportBudgetBytes(maxColumns))}`,
       "--max-columns-preview"
@@ -98,10 +121,13 @@ export function buildRgArgs(
   }
   if (spec.ignoreCase) args.push("--ignore-case");
   if (spec.type !== undefined) args.push("--type", spec.type);
-  // 搜索路径**相对 cwd**（cwd = workspace 根，见 rg-engine）：rg 把路径原样
-  // 回显，喂绝对路径就会把绝对路径吐给模型（SC4 要求相对）；且 `--glob` 的
-  // 锚定是相对 cwd 判的，喂绝对路径会让 `sub/*.ts` 这类模式在 cwd 不是
-  // workspace 根时判错（Node 引擎按 workspace 相对判段，两边必须同口径）。
+  // The search path is **relative to cwd** (cwd = workspace root, see
+  // rg-engine): rg echoes paths verbatim, so feeding an absolute path would
+  // hand an absolute path to the model (relative paths are required); and
+  // `--glob` anchoring is judged relative to cwd, so an absolute path would
+  // make patterns like `sub/*.ts` misjudge whenever cwd is not the workspace
+  // root (the Node engine judges segments workspace-relative — both sides
+  // must use one rule).
   args.push("--", spec.pattern, searchPath);
   return args;
 }
@@ -119,11 +145,13 @@ function pushOutputMode(args: string[], spec: QuerySpec): void {
 }
 
 /**
- * 某文件名是否命中 `type` 词表（Node 引擎的收窄实现）。
+ * Whether a filename hits the `type` table (the Node engine's narrowing
+ * implementation).
  *
- * 支持 rg 词表里出现的两种形状：`*.ext` 与 `Name.*` / `[Mm]akefile` 一类
- * 带字符类的字面名。大小写按 rg 语义：`*.[chH]` 这类字符类区分大小写，
- * 因此用不敏感的字符类展开而非全局 `i` flag。
+ * Supports both shapes found in rg's type table: `*.ext` and char-class
+ * literal names like `Name.*` / `[Mm]akefile`. Case follows rg semantics:
+ * classes like `*.[chH]` are case-sensitive, so case is expressed via the
+ * character classes themselves rather than a global `i` flag.
  */
 export function fileNameMatchesType(fileName: string, type: string): boolean {
   const globs = TYPE_GLOBS[type];
@@ -131,7 +159,7 @@ export function fileNameMatchesType(fileName: string, type: string): boolean {
   return globs.some((glob) => globToRegExp(glob).test(fileName));
 }
 
-/** 把 rg 类型词表里的单段 glob 编译为正则（`*` / `?` / `[...]`）。 */
+/** Compile one single-segment glob from rg's type table into a regex (`*` / `?` / `[...]`). */
 function globToRegExp(glob: string): RegExp {
   let source = "";
   let i = 0;

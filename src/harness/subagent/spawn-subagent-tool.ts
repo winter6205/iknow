@@ -1,37 +1,43 @@
 /**
- * #356 T4 / #361 V1.5 / #556 T3 — spawn_subagent ACI 工具（主代理第 24/25 件之一）。
+ * spawn_subagent ACI tool.
  *
- * **#361 前景 spawn 反转（ADR-0014 V1.5）**：默认 `wait:true` — 模型调一次 →
- * handler `await manager.waitFor(taskId, undefined, ctx.signal)`（缺省超时
- * 由 manager 三层链 `def.timeoutMs ?? taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`
- * 决定，spawn timer 同源），阻塞至子代理终态，把父可见短交差（summary /
- * changed paths / status / stop_reason）作 tool_result 返回。多个独立任务
- * 可在同一 turn 并行发多条 spawn_subagent（wait:true 各自阻塞，executor
- * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），chat / tui / serve
- * 由 host mailbox/subscribe 终态唤醒 silent run；subagent_result 仍可主动查询。
+ * Foreground spawn is the default (ADR-0014): `wait:true` blocks the handler
+ * on `manager.waitFor(taskId, undefined, ctx.signal)` until the sub-agent
+ * reaches a terminal state, then returns the parent-visible short handoff
+ * (summary / changed paths / status / stop_reason) as the tool result. The
+ * default timeout comes from the manager's three-layer chain
+ * (`def.timeoutMs ?? taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`), the same source
+ * the spawn timer uses, so the two stay aligned. Independent tasks may be
+ * dispatched as several spawn_subagent calls in one turn (each call blocks
+ * its own wait; the executor is concurrency-safe). `wait:false` returns
+ * `{task_id}` immediately — the async arm, where the host mailbox/subscribe
+ * path wakes a silent run on terminal completion and `subagent_result` stays
+ * available for explicit queries.
  *
- * **#556 T3 subagent_type routing**：可选参数 `subagent_type`（CC Agent
- * tool 字面名）→ 解析为 catalog id → 写入 `def.role`（T2 装配链路已透传到
- * envelope.role → worker 注入 persona 段）。缺省 = `general-purpose`；
- * ajv enum = catalog id 列表（运行时从 resolveAgentCatalog 派生，不写死字面）；
- * 未知值 ajv fail-fast。
+ * `subagent_type` routes the sub-agent through the agent catalog: the value
+ * resolves to a catalog id stored in `def.role` and later injected as the
+ * worker's persona. Default is `general-purpose`; the schema enum is derived
+ * from the catalog at assembly time (never a hardcoded literal), so unknown
+ * values fail fast in ajv.
  *
- * **依赖注入形态**：工厂收 `manager`（T2 提供）+ `catalog?`（T3 新增，
- * 可选 — 缺省走内部默认 `resolveAgentCatalog`）。装配层
- * `createDefaultAciRegistry` 在 `subagentManager` opts 传入时实例化；
- * 缺席时不装配（`ask` 入口零件场景；与 `memoryDir` / `skillCatalog` 条件化
- * 同形态，registry.ts Gate 3 toolsetNames 镜像过滤）。
+ * Dependency injection: the factory takes `manager` plus an optional
+ * `catalog` (defaults to the internal merged resolver). The assembly layer
+ * (`createDefaultAciRegistry`) instantiates the tool only when a
+ * sub-agent manager is configured — same conditional shape as `memoryDir` /
+ * `skillCatalog`.
  *
- * **append-only**：`name` 与 `ACI_TOOLSET_NAMES` 末位一一对应；不重排既有 23 件。
+ * Append-only: `name` pairs one-to-one with the tail of
+ * `ACI_TOOLSET_NAMES`; existing tools are never reordered.
  *
- * 错误形态（C5 归因表）：
- *   - input 校验失败 → `ToolExecutionError` 同步抛（executor → execution_failed）；
- *   - `background:true` v1 拒收 → `ToolExecutionError`；
- *   - C1 并发超限（manager.spawn 抛 SubAgentCapacityError）→ handler catch →
- *     `ToolExecutionError`（消息含 capacity + active/limit）；
- *   - `ctx.signal` abort → waitFor reject SubAgentAbortError → handler catch →
- *     `ToolExecutionError` → executor 因 `signal.aborted === true` 归一
- *     `execution_failed: "cancelled"`（归因 = 调用侧取消）。
+ * Error shapes:
+ *   - input validation failure → synchronous `ToolExecutionError`
+ *     (executor → execution_failed);
+ *   - `background:true` rejected in v1 → `ToolExecutionError`;
+ *   - concurrency over capacity (`SubAgentCapacityError` from
+ *     manager.spawn) → `ToolExecutionError` carrying capacity + active/limit;
+ *   - `ctx.signal` abort → waitFor rejects with SubAgentAbortError →
+ *     `ToolExecutionError` → the executor, seeing `signal.aborted === true`,
+ *     normalizes it to `execution_failed: "cancelled"` (caller-side cancel).
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
@@ -54,10 +60,10 @@ import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities } from "./capability.js";
 
 /**
- * Spec Layer 1 item 1 / SC4 — the dispatch lesson is one SSOT string: the
- * description embeds it verbatim and the guards read this same constant, so a
- * guard reds when a discipline clause (or the whole lesson) is dropped without
- * pinning the wording of any single clause.
+ * The dispatch lesson is one SSOT string: the tool description embeds it
+ * verbatim and the guards read this same constant, so a guard reds when a
+ * discipline clause (or the whole lesson) is dropped without pinning the
+ * wording of any single clause.
  *
  * Clauses: start with an `explore` sub-agent before dispatching any work that
  * writes; keep the operator concurrency discipline — an explicit numeric
@@ -83,53 +89,68 @@ export const SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN =
   /\b(?:at most|up to|no more than|max(?:imum)?(?: of)?)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b[^.;]{0,60}\b(?:concurrent(?:ly)?|in flight|workers?|sub-?agents?)\b/i;
 
 /**
- * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
- * （T2 createSubAgentManager 的输出）。本工具消费 `spawn(def)` 同步入口 +
- * `waitFor(taskId, timeoutMs, signal)` 前景阻塞入口；drain 由 host 侧独占
- * （spec Never 暴露给 agent）。
+ * Dependency injection: `manager` owns the sub-agent lifecycle / state
+ * machine / buffer / shutdown chain on the parent side. This tool consumes
+ * the synchronous `spawn(def)` entry and the foreground-blocking
+ * `waitFor(taskId, timeoutMs, signal)` entry; draining belongs to the host
+ * and is never exposed to the agent.
  *
- * `catalog?` 是 #556 T3 新增 seam：可选 — 缺省走内部默认 merged catalog
- * （`createMergedCatalogResolver`：builtin + `~/.iknow/agents/` 用户角色，
- * 双面 list + get），production 装配 `registry.ts` 不显式注入
- * （plan T3 决议：registry 职责是工具面，不是 agent 路由 — 不动 registry.ts）。
- * 测试可显式注入 fake resolver 验证 factory 真的在用 deps.catalog。
+ * `catalog` is an optional seam: when absent the tool uses the internal
+ * merged resolver (builtin + `~/.iknow/agents/` user roles, with both list
+ * and get views). Production assembly in `registry.ts` deliberately does not
+ * inject one — routing stays inside this factory so registry.ts remains the
+ * tool surface only. Tests can inject a fake resolver to verify the factory
+ * really uses `deps.catalog`.
  */
 export interface SpawnSubAgentToolDeps {
   readonly manager: SubAgentManager;
   /**
-   * #556 T3: agent catalog resolver (双面 list + get)。
-   * 可选 — 缺省 = merged catalog (`createMergedCatalogResolver`)。
-   * list() 供 enum + prose list 派生；get(id) 供 handler 单 id 校验。
+   * Agent catalog resolver (list + get views). Optional — defaults to the
+   * merged catalog (`createMergedCatalogResolver`). list() feeds the schema
+   * enum and the prose list; get(id) feeds per-id validation in the handler.
    */
   readonly catalog?: AgentCatalogResolver;
   /**
-   * ADR-0096 T2：并发上限 holder —— description N 与 SubAgentCapacityError
-   * 同源（同一 holder.get() 现读，闸值变化即时反映给模型）。manager 自身已
-   * 持有一份 holder（spawn 闸读同一处），本字段是描述层镜像，避免 description
-   * 与回执数字漂移。缺席 → 退回 `manager.getCapacity()`（manager 内部
-   * 暴露的等价 getter；fallback 路径与既有静态描述 N=15 字节级一致）。
+   * Concurrency-cap holder keeping the "N workers" clause in the description
+   *
+   // (ADR-0096)
+   * and SubAgentCapacityError on one source (both read `holder.get()` live,
+   * so a gate change reaches the model immediately). The manager already
+   * holds this holder for the spawn gate; this field is the description-layer
+   * mirror preventing drift between description and receipt numbers. When
+   * absent the tool falls back to `manager.getCapacity()` (the equivalent
+   * getter), byte-identical to the older static description.
    */
   readonly capacityHolder?: SubagentCapacityHolder;
 }
 
 /**
- * SC13 / plan task 7：子代理墙钟到期，父可见 tool result kind **不得**为 ok。
+ * When the sub-agent's wall clock expires, the parent-visible tool result
+ * kind must not be ok.
  *
- * 超时是唯一破例：crashed / maxTurnsExceeded / protocolError 仍是「任务结局是
- * 数据」，走 ok envelope（C5）；墙钟到期没有可读的终态交差，只有把它抛成
- * `execution_failed` 才能让模型把「子代理卡死在墙钟」和「子代理跑完但失败」
- * 区分开。envelope.status 本就是 "failed"，规格说的是 result kind。
+ * Timeout is the only exception: crashed / maxTurnsExceeded / protocolError
+ * are still "the task outcome is data" and travel as an ok envelope; an
+ * expired wall clock has no readable terminal handoff, so only throwing
+ * `execution_failed` lets the model tell "stuck at the wall clock" apart
+ * from "finished but failed". envelope.status is already "failed" — what the
+ * rule constrains is the result kind.
  *
- * message **不得**恰好等于 `"cancelled"` —— `computeToolStopFlags`
- * (loop-engine.ts) 仍用 `execution_failed && message === "cancelled"` 判
- * 整回合取消，撞字面量会把单个子任务的墙钟误升级成整回合停因。`"timeout"`
- * 标签在 ADR-0091 后对回合停因 inert（只作该条 result 归因），但仍避开，
- * 免得同波下游按标签做归因时把它读成时钟信号。
+ * The message must never be exactly `"cancelled"` —
+ * `computeToolStopFlags` (loop-engine.ts) still treats
+ * `execution_failed && message === "cancelled"` as whole-turn cancellation,
+ * so colliding with that literal would escalate one sub-task's wall clock
+ *
+ // (ADR-0091)
+ * into a turn-level stop cause. The `"timeout"` label is no longer live for
+ * turn-stop attribution (it only attributes this one result), but we still
+ * avoid it so downstream attribution keyed on labels cannot misread it as a
+ * clock signal.
  */
 /**
- * ADR-0102 T4 — label 参数化：前景 continue 的超时归因若仍署
- * "spawn_subagent:"，模型会把一次续跑读成一次新派发。缺省标签保持
- * spawn 臂既有文案逐字节不变；continue 工具传自己的标签。
+ * ADR-0102 — label parameterization: if a foreground continue's timeout were
+ * still attributed to "spawn_subagent:", the model would read one resumed run
+ * as one new dispatch. The default label keeps the spawn arm's wording
+ * byte-identical; the continue tool passes its own label.
  */
 export function throwWallClockTimeout(
   taskId: string,
@@ -144,22 +165,29 @@ export function throwWallClockTimeout(
 }
 
 /**
- * SC14 / plan task 8：`SubAgentAbortError` → 父可见 `ToolExecutionError`。
+ * `SubAgentAbortError` → parent-visible `ToolExecutionError`.
  *
- * 两种 abort 来源必须能分开：
- *   - **调用侧 abort**（Ctrl+C / `/quit`）：ctx.signal 已 abort，executor 的
- *     `buildFailureResult` 随后把 message 归一成严格 `"cancelled"`（整回合
- *     取消，loop-engine 消费）—— 这里保留 caller 文本只为不丢归因来源；
- *   - **操作员强杀**（TUI Ctrl+X → `manager.abortTask`，SC14）：ctx.signal
- *     **没有** abort，executor 不归一，message 原样透出 —— 所以这条文本就是
- *     模型能看见的全部归因。若沿用调用侧那句「caller aborted」，强杀会被读成
- *     调用方取消；若沿用墙钟那句，则与 SC13 的超时归因撞脸。
+ * The two abort sources must stay distinguishable:
+ *   - **caller-side abort** (Ctrl+C / `/quit`): ctx.signal is already
+ *     aborted, so the executor's `buildFailureResult` subsequently normalizes
+ *     the message to strict `"cancelled"` (whole-turn cancellation consumed
+ *     by loop-engine) — the caller text is kept here only so the attribution
+ *     source is not lost;
+ *   - **operator kill** (TUI Ctrl+X → `manager.abortTask`): ctx.signal was
+ *     **not** aborted, the executor does not normalize, and the message
+ *     surfaces verbatim — so this text is all the attribution the model can
+ *     see. Reusing the caller-side "caller aborted" wording would make a kill
+ *     read as a caller cancel; reusing the wall-clock wording would collide
+ *     with the timeout attribution.
  *
- * 两者的共同点是**绝不**恰好等于 `"cancelled"`：撞字面量会把单个子任务的
- * 结局误升级成整回合取消（`computeToolStopFlags` 的 result 标签分支）。
+ * What both share: never exactly `"cancelled"` — colliding with that literal
+ * would escalate one sub-task's outcome into whole-turn cancellation (the
+ * result-label branch in `computeToolStopFlags`).
  *
- * 放在 handler 外：整个归因判定（含 `ctx?.signal` 读）不占 handler 的圈复杂度
- * （S5 硬门：handler 已在基线上，任何新分支都会判回归）。
+ * Lives outside the handler: the whole attribution decision (including the
+ * `ctx?.signal` read) must not add to the handler's cyclomatic complexity
+ * (hard lint ratchet: the handler sits at its baseline and any new branch
+ * reads as regression).
  */
 export function throwAbortAttribution(
   err: SubAgentAbortError,
@@ -177,7 +205,7 @@ export function throwAbortAttribution(
   );
 }
 
-/** 已带 timeout 终态的信封 → 非 ok（详见 throwWallClockTimeout）。 */
+/** Envelope already carrying a timeout terminal state → must not be ok (see throwWallClockTimeout). */
 export function assertNotWallClockTimeout(
   env: SubAgentEnvelope,
   taskId: string,
@@ -188,7 +216,7 @@ export function assertNotWallClockTimeout(
   }
 }
 
-/** 父可见投影 + SC13 超时闸（终态信封交回模型的唯一出口）。 */
+/** Parent-visible projection + wall-clock timeout gate (the single exit for handing a terminal envelope to the model). */
 export function projectEnvelopeOrThrow(
   env: SubAgentEnvelope,
   taskId: string,
@@ -200,21 +228,23 @@ export function projectEnvelopeOrThrow(
 }
 
 /**
- * waitFor 墙钟拒绝后按 queryBuffer 分流。SubAgentWaitTimeoutError 复用于
- * unknown task / shutdown 清 map / failed-without-envelope / 真墙钟，不能一律合成 timeout。
+ * After waitFor rejects with a wall-clock error, dispatch by queryBuffer.
+ * SubAgentWaitTimeoutError is reused for unknown task / shutdown-cleared map
+ * / failed-without-envelope / a real wall clock, so it cannot be uniformly
+ * synthesized into a timeout.
  */
 export function envelopeFromWaitTimeout(
   buffer: QueryBufferResult,
   taskId: string,
   label = "spawn_subagent"
 ): SubAgentEnvelope {
-  // EXIT: not_found — 任务从未存在或 shutdown 已清 map；对模型是调用错误，不是 timeout 数据。
+  // EXIT: not_found — the task never existed or shutdown cleared the map; to the model this is a call error, not timeout data.
   if (buffer.status === "not_found") {
     throw new ToolExecutionError(
       `${label}: task ${taskId} not found after wait timeout`
     );
   }
-  // EXIT: running — 墙钟到但 worker 未终态（真墙钟；SC13 非 ok）。
+  // EXIT: running — wall clock expired but the worker has no terminal state (real wall clock; must not be ok).
   if (buffer.status === "running") {
     throwWallClockTimeout(
       taskId,
@@ -223,7 +253,7 @@ export function envelopeFromWaitTimeout(
     );
   }
   if (buffer.status === "failed") {
-    // EXIT: buffer 已是失败投影（含 protocolError / crashed / timeout envelope）。
+    // EXIT: buffer is already a failure projection (includes protocolError / crashed / timeout envelope).
     if ("result" in buffer && typeof buffer.result === "string") {
       return projectEnvelopeOrThrow(buffer, taskId, label);
     }
@@ -237,26 +267,30 @@ export function envelopeFromWaitTimeout(
       result: buffer.summary,
     };
   }
-  // EXIT: completed ok envelope 已在 buffer（status=failed 的终态信封也走这里，
-  // 由 SC13 闸按 reason 分流）。
+  // EXIT: completed ok envelope already in buffer (terminal envelopes with status=failed also land here,
+  // dispatched by reason through the timeout gate).
   return projectEnvelopeOrThrow(buffer, taskId, label);
 }
 
 /**
- * 前景臂的终态通道互斥（plans/session-fg-handoff-interrupt.md Locked
- * sentence 1）：`wait:true` 时 handler 正阻塞在 waitFor 上，同一份信封**由
- * 这一次 tool_result 当跳交付**；若再让 host drain 收走或 mailbox silent
- * wake 叫醒父回合，同一交差会二次进父 messages（被画成一条 user message /
- * 重复一份）。故 fg 任务一律排除出 host drain；`wait:false` 的异步臂才需要
- * 那两条通道，不设此位（Postel：非 true 时字段整个省略）。
+ * Terminal-channel mutual exclusion for the foreground arm: while `wait:true`
+ * blocks the handler in waitFor, this very tool_result owns the envelope's
+ * delivery — if the host drain or a mailbox silent-wake also fired, the same
+ * handoff would enter the parent messages twice (rendered as a duplicate user
+ * message). So foreground tasks are always excluded from host drain; only the
+ * `wait:false` async arm needs those two channels, and the field is omitted
+ * entirely otherwise (Postel).
  *
- * 两条理由放在模块级而不是 handler 的 def 字面量里：
- *   - **给这个位一个名字**：`excludeFromHostDrain` 是「交付通道」语义（见
- *     `SubagentInfo.foreground` 头注），不是「还在跑」；spread 进 def 字面
- *     量后它只剩一个无名布尔，接线点读不出这一位为什么在这；
- *   - **handler 的圈复杂度是逐函数棘轮**（`lint:s5` 对 HEAD 比同函数基线）：
- *     handler 是 `spawn-subagent-tool.ts` 里的 ArrowFunctionExpression，
- *     基线 41，内联这个三元会把它推到 42 判回归（实测）。
+ * The rationale lives at module level rather than in the handler's def
+ * literal:
+ *   - the bit deserves a named meaning — `excludeFromHostDrain` is
+ *     "delivery channel" semantics (see the `SubagentInfo.foreground` header
+ *     note), not "still running"; spread inline into the def literal it would
+ *     degrade to an anonymous boolean whose wiring point cannot explain it;
+ *   - the handler's cyclomatic complexity is a per-function ratchet
+ *     (`lint:s5` compares against HEAD for the same function): the handler is
+ *     this file's ArrowFunctionExpression and inlining this ternary would
+ *     push it from its baseline of 41 to 42, reading as a regression.
  */
 export function foregroundDrainExclusion(wait: boolean): {
   readonly excludeFromHostDrain?: boolean;
@@ -267,11 +301,12 @@ export function foregroundDrainExclusion(wait: boolean): {
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
-  // #556 T3: catalog resolver 闭包 — factory 内部 default = merged catalog
-  // (builtin + ~/.iknow/agents/ 用户角色, 记忆化; 双面 list + get)。
-  // registry.ts 不传 catalog, factory 兜底 (plan T3 决议: registry 职责是
-  // 工具面, 不是 agent 路由)。enum + prose list 在装配期从 merged list
-  // 派生, 用户角色文件在进程启动后即出现在工具面上。
+  // Catalog resolver closure: factory default = merged catalog (builtin +
+  // ~/.iknow/agents/ user roles, memoized; list + get views). registry.ts
+  // passes no catalog and the factory backstops — routing stays out of the
+  // tool-surface layer. enum + prose list derive from the merged list at
+  // assembly time, so user-role files show up in the tool surface right
+  // after process start.
   const catalog: AgentCatalogResolver =
     deps.catalog ?? createMergedCatalogResolver();
   const catalogIds = catalog.list().map((e) => e.id);
@@ -279,19 +314,22 @@ export function createSpawnSubAgentTool(
     .list()
     .map((e) => `- ${e.id}: ${e.description}`)
     .join("\n");
-  // ADR-0096 T2：description N 与 SubAgentCapacityError 同源（同一
-  // holder.get() 现读；回执数字与 description 永同步）。闸值变化 →
-  // 下一次模型拉取工具描述即看到新 N，无需重启。holder 缺席时退化到
-  // `manager.getCapacity()` —— manager 自身持有同一 holder 副本，
-  // 闸值形态等价；唯一缺 holder 的场景 = 装配期 manager 直造（如
-  // 既有 manager.test.ts makeHarness 路径），fallback 与既有静态 N=15
-  // 字节级一致。
+  // The description's N and SubAgentCapacityError share one source: read
+  // (ADR-0096)
+  // holder.get() live so the receipt number and the description never drift.
+  // A gate change reaches the model on its next tool-description fetch, no
+  // restart. When the holder is absent, fall back to `manager.getCapacity()`
+  // — the manager holds the same holder copy, so gate values are equivalent;
+  // the only holder-less case is a directly constructed manager (test
+  // harnesses), and the fallback matches the older static description
+  // byte-for-byte.
   const readCapacity = (): SubagentCapacityValue => {
     if (deps.capacityHolder !== undefined) return deps.capacityHolder.get();
     return deps.manager.getCapacity();
   };
-  // description 拆成两段拼接模板：固定前缀 + 闸值描述 + 闸值文案 + 固定后缀。
-  // 拼接闭包每次重读 holder；模型读 description 时即看到当前 N。
+  // Description assembled from two spliced templates: fixed prefix + cap
+  // clause. The splice closure re-reads the holder each time, so the model
+  // sees the current N when it reads the description.
   const descriptionPrefix = `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. `;
   const descriptionSuffix =
     `\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
@@ -305,9 +343,11 @@ export function createSpawnSubAgentTool(
   };
   return Object.freeze({
     name: "spawn_subagent",
-    // ADR-0096 T2：description = getter — Object.freeze 锁住 accessor，调用方
-    // 每次 `.description` 现读 `readCapacity()`，闸值变化立即反映（不动
-    // handler / schema / aci 元数据）。
+    // Live description: getter — Object.freeze locks the accessor, callers
+    // (ADR-0096)
+    // re-read `readCapacity()` on every `.description` access so a gate
+    // change reflects immediately (handler / schema / aci metadata
+    // untouched).
     get description(): string {
       const cap = readCapacity();
       return descriptionPrefix + capClause(cap) + descriptionSuffix;
@@ -321,17 +361,20 @@ export function createSpawnSubAgentTool(
         },
         subagent_type: {
           type: "string",
-          // #556 T3: enum = catalog ids (运行时 resolveAgentCatalog 派生,
-          // 不写死字面)。ajv fail-fast 拒未知 id (typed error 走 ToolExecutionError
-          // handler 路径, 见 plan T3 防御契约)。
+          // enum = catalog ids (derived from the live resolver at assembly
+          // time, never a hardcoded literal). ajv fail-fast rejects unknown
+          // ids; a typed error reaching the handler path is converted to
+          // ToolExecutionError by the defensive contract.
           enum: catalogIds,
           description:
             "Optional (#556 T3): route the sub-agent through one of the available subagent types listed above. Omit it and the sub-agent runs as `general-purpose` — the writable, full-tool-surface default. `explore` is the read-only type: ask for it explicitly when the task only reads.",
         },
         systemPrompt: {
           type: "string",
-          // ADR-0112 T4: addendum 降权出 system —— 该字段作为 untrusted user
-          // 通道消息传给子代理,不再是 system 段覆盖,描述必须如实。
+          // ADR-0112: the addendum is downgraded out of system — this
+          // field now travels to the sub-agent as an untrusted user-channel
+          // message, no longer a system-section override, so the description
+          // must say so plainly.
           description:
             "Optional guidance from the parent, delivered to the sub-agent as a user-channel message alongside the task. The sub-agent's `system` is host-assembled and stays in force; this adds framing, not a replacement constitution.",
         },
@@ -378,15 +421,16 @@ export function createSpawnSubAgentTool(
       additionalProperties: false,
     },
     aci: {
-      category: "read-only", // 工具面归类为 read-only（执行耗时但不改文件系统）—— see ACR verdict 1
-      lazy: false, // 常驻 prompt：spawn 是核心能力，discover 没意义
-      timeoutTier: "unbounded", // wait:true 寿命 = manager per-task 钟；ACI 不 timer。long(30min) < PER_TASK(2h) 会提前 abort
-      isConcurrencySafe: true, // 多个 spawn_subagent 并行调用合法（不同 task_id）
-      interruptBehavior: "cancel", // 前景入口；ctx.signal abort → waitFor reject → ToolExecutionError → execution_failed:cancelled
+      category: "read-only", // classified read-only: long-running but never mutates the filesystem
+      lazy: false, // resident in the prompt: spawning is a core capability, discovery makes no sense
+      timeoutTier: "unbounded", // wait:true lifetime = manager per-task clock; ACI adds no timer (a 30min tier would abort before the 2h PER_TASK clock)
+      isConcurrencySafe: true, // parallel spawn_subagent calls are legal (distinct task_ids)
+      interruptBehavior: "cancel", // foreground entry; ctx.signal abort → waitFor rejects → ToolExecutionError → execution_failed:cancelled
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
-      // input 已由 ajv strict 校验过形状（createAciRegistry 装配时编译）。
-      // 此处再做运行时防御：schema 之外的 null / 数组 / 字符串都不应到此。
+      // ajv strict has already validated the shape (compiled at
+      // createAciRegistry assembly). Runtime defense on top: null / array /
+      // string outside the schema should never reach here.
       const obj = (input ?? {}) as Record<string, unknown>;
       const task = obj.task;
       if (typeof task !== "string" || task.length === 0) {
@@ -394,34 +438,40 @@ export function createSpawnSubAgentTool(
           "spawn_subagent: missing or invalid `task`"
         );
       }
-      // v1 拒绝 background:true（spec Code Style 原文 + SC4 acceptance）。
+      // v1 rejects background:true.
       if (obj.background === true) {
         throw new ToolExecutionError("background:true not implemented in v1");
       }
-      // #361：默认值在 handler 内解析（ACI schema 不表达默认值）。缺省 = 前景。
+      // Defaults resolve inside the handler (the ACI schema expresses no
+      // defaults). Absent = foreground.
       const wait = obj.wait !== false;
-      // #556 T3 / T7: subagent_type → role 解析 (additive)。
-      //   - 缺省 (undefined) → catalog.get("general-purpose") (T7 默认角色)
-      //   - 已知 id → 写入 def.role (= catalog id, 透传到 envelope.role → worker
-      //     装配期查 catalog 取 body 注入 persona 段, T2 链路)
-      //   - 未知 id → ajv enum 已在 executor 入口拒;此处 catch 防御 (ajv 漏
-      //     网 / 直接调 handler) → 转 ToolExecutionError (不静默吞掉)
-      // #556 T3 + Spec review 收口: 捕获 catalog entry 用于 merge disallowedTools
-      // —— 否则 explore 角色的 [edit_file, write_file] 不进入 wire,worker 工具
-      // 面仍含这两个工具 (T8 acceptance "tool surface 无 edit_file/write_file" 失守)。
+      // subagent_type → role resolution (additive):
+      //   - absent (undefined) → catalog.get("general-purpose") (default role)
+      //   - known id → written into def.role (catalog id, forwarded to
+      //     envelope.role → the worker assembly queries the catalog for the
+      //     body and injects the persona section)
+      //   - unknown id → already rejected by the ajv enum at the executor
+      //     entry; the catch here is defense (ajv gap / direct handler call)
+      //     → converted to ToolExecutionError (never silently swallowed)
+      // Capture the catalog entry to merge disallowedTools — otherwise the
+      // `explore` role's [edit_file, write_file] never reaches the wire and
+      // the worker tool surface still carries those two tools.
       const subagentType = obj.subagent_type;
       if (subagentType !== undefined && typeof subagentType !== "string") {
-        // ajv strict 已拒, 此处防御
+        // ajv strict already rejects; this is defense
         throw new ToolExecutionError(
           "spawn_subagent: subagent_type must be a string"
         );
       }
       const requestedRole = subagentType ?? "general-purpose";
-      // catalog entry.disallowedTools 与 obj.disallowedTools union (Set 去重)。
-      // 两者均缺省 → undefined (V1 baseline,不动 def.disallowedTools 字段)。
-      // 仅有 catalog → 应用 catalog deny (e.g. explore → [edit_file, write_file])。
-      // 仅有 parent → 应用 parent deny (V1 行为)。
-      // 双有 → union,parent 可 ADD 更多 deny,不可 subtract catalog 默认。
+      // Union (Set-dedup) of catalog entry.disallowedTools and the parent's
+      // obj.disallowedTools:
+      //   - both absent → undefined (baseline, def.disallowedTools omitted);
+      //   - catalog only → apply the catalog deny (e.g. explore →
+      //     [edit_file, write_file]);
+      //   - parent only → apply the parent deny (original behavior);
+      //   - both → union: the parent can ADD denies but cannot subtract the
+      //     catalog default.
       const parentDisallowed = Array.isArray(obj.disallowedTools)
         ? (obj.disallowedTools as ReadonlyArray<string>)
         : undefined;
@@ -452,38 +502,44 @@ export function createSpawnSubAgentTool(
           ? (capabilities.catalogRole ?? requestedRole)
           : requestedRole;
       const mergedDisallowed = capabilities.disallowedTools;
-      // 装配 SubAgentDefinition：可选字段透传，缺失字段从 def 上省略（manager
-      // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
-      // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload
-      // 读到 def.task ?? "" 永远空串 → 子代理跑空任务）。
-      // #358 T2: timeoutMs 缺席时整个字段省略 —— 不在此把 percall/常量塞进
-      // def.timeoutMs。理由:manager 三层链 `def.timeoutMs ?? env.subagent.
-      // taskTimeoutMs ?? PER_TASK_TIMEOUT_MS` 必须让中段（settings 可配的
-      // taskTimeoutMs）在模型未显式给 timeout 时生效;若这里永远补死常量,
-      // 中段变成死代码(SC4 消费点证明)。
+      // Assemble the SubAgentDefinition: optional fields pass through,
+      // missing fields are omitted from def entirely (the manager applies its
+      // own default-deny / default maxTurns etc. per SubAgentDefinition).
+      // `task` must be forwarded into def — omitting it made
+      // buildWorkerPayload read `def.task ?? ""` and every sub-agent ran an
+      // empty task.
+      // timeoutMs is omitted field-and-all when absent — never fill in a
+      // per-call constant here. The manager's three-layer chain
+      // `def.timeoutMs ?? env.subagent.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`
+      // must let the middle layer (the settings-configurable taskTimeoutMs)
+      // take effect when the model gives no explicit timeout; hardcoding a
+      // constant here would turn that layer into dead code at the
+      // consumption point.
       const def: SubAgentDefinition = {
         task,
-        // T4: terminal notices must be attributable to the session that
+        // terminal notices must be attributable to the session that
         // spawned the worker so a TUI session cannot wake another one.
         ...(ctx?.conversationId !== undefined
           ? { conversationId: ctx.conversationId }
           : {}),
-        // F-4: 归属回合 —— manager 把它抄进 subagent_spawn / _state_change /
-        // _stop 三类 record。ctx 缺 turnId(worker / ask / 直接调 handler)时
-        // 字段整个省略,Postel 不落空值。
+        // Owning turn — the manager copies it into the subagent_spawn /
+        // _state_change / _stop records. When ctx lacks turnId (worker / ask /
+        // direct handler call) the field is omitted entirely; Postel, no
+        // empty values.
         ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
-        // T5 (ADR-0071 / SC8): 反查父 loop 那次
-        // 工具调用 —— executor 已把 call.id (Anthropic tool_use_id) 装进
-        // ctx.toolUseId,manager 把它抄进 .meta.json 的 toolUseId 字段。
-        // 缺省(ask / 直调 handler / 测试注入)整字段省略。
+        // ADR-0071: reverse lookup to the parent loop's originating tool call
+        // — the executor has put call.id (Anthropic tool_use_id) into
+        // ctx.toolUseId and the manager copies it into the .meta.json
+        // toolUseId field. Absent (ask / direct handler call / test
+        // injection) → field omitted.
         ...(ctx?.toolUseId !== undefined ? { toolUseId: ctx.toolUseId } : {}),
-        // #556 T3 / T7: subagent_type 解析结果 (缺省也解析为 general-purpose)
+        // resolved catalog role (the default also resolves to general-purpose)
         ...(resolvedRole !== undefined ? { role: resolvedRole } : {}),
         ...(typeof obj.systemPrompt === "string"
           ? { systemPrompt: obj.systemPrompt }
           : {}),
-        // #556 T3 + Spec review 收口: catalog entry.disallowedTools 与 parent
-        // disallowedTools union 后写入;两者均缺省 → 字段省略 (V1 byte-stable)。
+        // union of catalog entry.disallowedTools and the parent's, written
+        // after merge; both absent → field omitted (byte-stable baseline).
         ...(mergedDisallowed !== undefined
           ? { disallowedTools: mergedDisallowed }
           : {}),
@@ -492,61 +548,65 @@ export function createSpawnSubAgentTool(
         ...(typeof obj.timeoutMs === "number"
           ? { timeoutMs: obj.timeoutMs }
           : {}),
-        // #357 T1: 透传 sandboxRoot;manager.buildWorkerPayload 单点校验 prefix-of-parent。
+        // pass sandboxRoot through; manager.buildWorkerPayload validates
+        // prefix-of-parent at a single point.
         ...(typeof obj.sandboxRoot === "string"
           ? { sandboxRoot: obj.sandboxRoot }
           : {}),
-        // 前景臂的终态通道互斥 —— 见 foregroundDrainExclusion 头注。
+        // Foreground-arm terminal-channel exclusion — see the
+        // foregroundDrainExclusion header note.
         ...foregroundDrainExclusion(wait),
       };
       let taskId: string;
       try {
         taskId = deps.manager.spawn(def).taskId;
       } catch (err) {
-        // #357 T1: sandboxRoot 越界 / 不存在 → ToolExecutionError(message 面向模型)。
+        // sandboxRoot out of range / nonexistent → ToolExecutionError (message is model-facing).
         if (err instanceof SubAgentSandboxRootError) {
           throw new ToolExecutionError(err.message);
         }
-        // #361 C1: capacity → ToolExecutionError（消息含 capacity + active/limit）。
+        // capacity → ToolExecutionError (message carries capacity + active/limit).
         if (err instanceof SubAgentCapacityError) {
           throw new ToolExecutionError(err.message);
         }
-        // Fallback: fake / 外部代码抛带 capacity 文案的 Error —— 仍归因。
+        // Fallback: fakes / external code throwing an Error with capacity wording — still attributed.
         if (err instanceof Error && /capacity/i.test(err.message)) {
           throw new ToolExecutionError(err.message);
         }
         throw err;
       }
-      // #361 wait:false 异步臂：立即返 {task_id}，不等待。
+      // wait:false async arm: return {task_id} immediately, no waiting.
       if (!wait) {
         return JSON.stringify({ task_id: taskId });
       }
       try {
-        // 前景臂： waitFor 缺省走 manager 三层链 (def.timeoutMs ??
-        // env.subagent.taskTimeoutMs ?? 7200s)。def 在 handler 内只在模型
-        // 显式给 timeoutMs 时携带该字段（缺省省略），故此处传 undefined
-        // 让 spawn timer 与 waitFor 的缺省值由同一 effectiveTaskTimeoutMs
-        // 链决定 —— 中段 taskTimeoutMs 生效时两者天然对齐。
+        // Foreground arm: waitFor defaults through the manager's three-layer
+        // chain (def.timeoutMs ?? env.subagent.taskTimeoutMs ?? 7200s). def
+        // carries timeoutMs only when the model set it explicitly (absent is
+        // omitted), so passing undefined here lets the spawn timer and
+        // waitFor share one effectiveTaskTimeoutMs chain — when the middle
+        // taskTimeoutMs takes effect, the two align by construction.
         const envelope = await deps.manager.waitFor(
           taskId,
           undefined,
           ctx?.signal
         );
-        // C5：成功 tool_result = envelope（executor 20000 截断,天然复用）。
-        // 非超时的失败 envelope 仍作 ok 数据返回（crashed / maxTurnsExceeded /
-        // protocolError 是任务结局,模型读 summary/reason）。
-        // SC13：reason=timeout 的终态信封（manager per-task timer / worker
-        // SIGTERM 收尾）改抛 ToolExecutionError → 非 ok（projectEnvelopeOrThrow）。
+        // Success tool_result = envelope (reuses the executor's 20000-char
+        // truncation). Failure envelopes that are not timeouts still return
+        // as ok data (crashed / maxTurnsExceeded / protocolError are task
+        // outcomes; the model reads summary/reason). Terminal envelopes with
+        // reason=timeout (manager per-task timer / worker SIGTERM wrap-up)
+        // instead throw ToolExecutionError → non-ok (projectEnvelopeOrThrow).
         return projectEnvelopeOrThrow(envelope, taskId);
       } catch (err) {
-        // #361 C5 / SC14 abort 归因：调用侧 abort（executor 再归一成严格
-        // "cancelled"）与操作员强杀（原样透出）用不同文本，见
-        // throwAbortAttribution 头注。
+        // Abort attribution: caller-side abort (executor then normalizes to
+        // strict "cancelled") vs operator kill (verbatim pass-through) get
+        // different texts — see the throwAbortAttribution header note.
         if (err instanceof SubAgentAbortError) {
           throwAbortAttribution(err, ctx);
         }
-        // concurrent: ACI/caller abort 与 wait poll 竞态时 abort 优先，
-        // 不把 WaitTimeoutError 合成 timeout envelope。
+        // concurrent: when a caller/ACI abort races the wait poll, the abort
+        // wins — never synthesize a timeout envelope from WaitTimeoutError.
         if (ctx?.signal?.aborted) {
           throw new ToolExecutionError(
             "spawn_subagent: cancelled by caller abort"

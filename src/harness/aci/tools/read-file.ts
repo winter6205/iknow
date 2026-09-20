@@ -1,19 +1,25 @@
 /**
- * read_file 工具（T5）— 纯无状态文件精读（#141 工具层重写）。
+ * read_file tool — stateless precise file reading.
  *
- * 契约（ADR-0084 / D1c，**Amends** ADR-0004 L14 的「默认 200 行」）：
- *   - 输入: path (必填), offset? (默认 0, 0 基), limit? (**可选**)
- *   - **不写 `limit` = 从 offset 尽量读到 EOF**：正文整读页硬停 16000 code
- *     point，未到 EOF 时正文尾部附续读提示（含下次 offset）。不再有
- *     「默认 200 行」这回事（spec SC13）。
- *   - 写 `limit` = 仍切行窗，硬顶 2000 行（沿用既有 clamp）；同一对页预算
- *     也约束行窗，预算先触时正文尾部附续读提示（行窗语义不变）。
- *   - resolve+realpath 限定于 root 之内（symlink 越界拒绝）
- *   - 必须为文件（目录报错）；>1MB 拒绝并引导 grep+offset/limit 精读
- *   - NUL 字节 (0x00) 检测：拒绝二进制文件
- *   - 输出: 纯字符串 `${lineNo.padStart(6)}\t${line}`，行号 1 起（offset 后第一行 = offset+1）
- *   - 错误一律 throw ToolExecutionError（executor 转 execution_failed）
- *   - 工厂闭包仅持有 root，handler 无跨调用状态
+ * Contract (ADR-0084, **amends** ADR-0004's "default 200 lines"):
+ *   - input: path (required), offset? (default 0, 0-based), limit? (**optional**)
+ *   - **omitting `limit` = read from offset toward EOF**: the whole-file page
+ *     hard-stops at 16000 code points; when EOF is not reached the tail
+ *     carries a continuation hint (with the next offset). The "default 200
+ *     lines" behavior no longer exists.
+ *   - giving `limit` = still a line window, hard-capped at 2000 lines
+ *     (existing clamp); the same page budgets also constrain the line
+ *     window, and when a budget hits first the tail carries a continuation
+ *     hint (line-window semantics unchanged).
+ *   - resolve+realpath restricted inside root (symlink escape rejected)
+ *   - must be a file (directory errors); >1MB rejected with guidance to
+ *     grep + offset/limit precise reads
+ *   - NUL byte (0x00) detection: binary files rejected
+ *   - output: plain string `${lineNo.padStart(6)}\t${line}`, 1-based line
+ *     numbers (first line after offset = offset+1)
+ *   - errors always throw ToolExecutionError (executor converts to
+ *     execution_failed)
+ *   - the factory closure holds only root; the handler has no cross-call state
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -29,49 +35,51 @@ import type { LastReadLedgerHost } from "../last-read-ledger.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 import { resolveWithinRoot } from "./helpers.js";
 
-/** 显式 `limit` 的硬顶（行窗）；不写 `limit` 时改走 `MAX_READ_CODE_POINTS`。 */
+/** Hard cap for an explicit `limit` (line window); without `limit` the read goes through `MAX_READ_CODE_POINTS`. */
 const MAX_LIMIT = 2000;
 const MAX_FILE_BYTES = 1_048_576; // 1 MiB
 /**
- * 页正文硬停（code point，不含续读提示行）。两条正文路径（不写 `limit` 的
- * 整读、显式 `limit` 的行窗）共用。executor 的 20000 字符总闸（ADR-0006）
- * 不动 —— 本常量是工具层的精度闸，让「换更小 offset 续读」这条恢复路径在
- * 截断前就成立。
+ * Page body hard stop (code points, excluding the continuation-hint line).
+ * Shared by both body paths (whole-file read without `limit`, explicit
+ * `limit` line window). The executor's 20000-char total gate (ADR-0006) is
+ * untouched — this constant is the tool layer's precision gate so that the
+ * "retry with a smaller offset" recovery path exists before truncation.
  */
 const MAX_READ_CODE_POINTS = 16_000;
 /**
- * 页的 UTF-16 单元硬停。executor 的 20000 闸按 `String.length`（UTF-16
- * 单元）计量，而 astral 字符一个 code point 占两个单元 —— 只按 code point
- * 计量会产出 ~32000 单元的页，被 executor 二次截断（ADR-0006 Decision 4 禁止
- * 的双重截断）。19000 给续读提示 / 截断标记留 headroom，两个预算同时约束、
- * 先触者停。
+ * Page hard stop in UTF-16 units. The executor's 20000 gate counts
+ * `String.length` (UTF-16 units), while an astral code point takes two
+ * units — budgeting only in code points would produce ~32000-unit pages
+ * that get double-truncated by the executor (forbidden by ADR-0006).
+ * 19000 leaves headroom for the continuation hint / truncation marker;
+ * both budgets constrain together, first hit wins.
  */
 const MAX_READ_UTF16_UNITS = 19_000;
 
 /**
  * Snapshot the live root at handler invocation time. Accepts either a
  * literal path (legacy / forward-compat shape — tests and other one-shot
- * callers pass `string`) or a `LiveTaskRoot` cell (T6: registry threads
- * the cell so that `worktree rebind` in the same run reaches this
- * handler). The returned `string` is the snapshot value — D2 forbids
- * reading the cell more than once per handler call, so callers must
- * reuse the snapshot for both resolve and any other root-relative work.
+ * callers pass `string`) or a `LiveTaskRoot` cell (the registry threads
+ * the cell so that a `worktree rebind` in the same run reaches this
+ * handler). The returned `string` is the snapshot value — reading the cell
+ * more than once per handler call is forbidden, so callers must reuse the
+ * snapshot for both resolve and any other root-relative work.
  */
 function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
 }
 
 export interface CreateReadFileToolOptions {
-  /** ADR-0019 (T4): per-root state anchor. When provided, `<workspaceRoot>/.iknow`
+  /** ADR-0019: per-root state anchor. When provided, `<workspaceRoot>/.iknow`
    *  is added to the read-allowed roots so the agent can read its own per-root
    *  state at parity with the home profile. The protected-path check in
    *  fs-policy (still gating `<workspaceRoot>/.iknow/...` writes from the
    *  bash fence) keeps the write side locked down; read_file's seam only
    *  widens the read scope. Defaults to `root` (cwd) — the
-   *  legacy shape — to preserve the existing read-file-profile.test.ts
-   *  contract when workspaceRoot is not threaded. */
+   *  legacy shape — to preserve the existing read-file-profile contract
+   *  when workspaceRoot is not threaded. */
   readonly workspaceRoot?: string;
-  /** ADR-0037 §1 (T6 D10 wired): identity-root read passthrough. After a
+  /** ADR-0037: identity-root read passthrough. After a
    *  worktree rebind the live `taskRoot` is the new task worktree (which
    *  does NOT contain the project's `AGENTS.md` / `permissions.toml` /
    *  project rules). The stable `projectIdentityRoot` is threaded here so
@@ -98,12 +106,13 @@ export interface CreateReadFileToolOptions {
    */
   readonly lastReadLedger?: LastReadLedgerHost;
   /**
-   * ADR-0092 会话 tmp 身份（与 WriteFileOpts.tmpDir 同语义）：显式宿主垫底
-   * （测试 / T3 worker pad）。在场 → 该垫底成为 read_file 的独立 containment
-   * 读根，不再依赖 `~/.iknow` extraReadRoots 碰巧放行；缺席 → 无额外读根。
+   * ADR-0092 session tmp identity (same semantics as WriteFileOpts.tmpDir):
+   * an explicit host pad (tests / worker pad). Present → the pad becomes
+   * read_file's own containment read root instead of relying on `~/.iknow`
+   * extraReadRoots happening to admit it; absent → no extra read root.
    */
   readonly tmpDir?: string;
-  /** 会话 project dir；与 `ctx.conversationId` 同现 → `<sessionFolder>/fence-tmp` 垫底。 */
+  /** Session project dir; with `ctx.conversationId` → `<sessionFolder>/fence-tmp` pad. */
   readonly projectDir?: string;
 }
 
@@ -116,13 +125,13 @@ function iknowProfileRoot(): string {
 /**
  * Compute the per-call extraReadRoots anchored to the same wave snapshot as
  * `rootAtCall`. Both inputs are passed by the caller so the conditional
- * check uses the LIVE root (D9) — not a factory-time closure.
+ * check uses the LIVE root — not a factory-time closure.
  *
  * Read-only reachability surface:
  *   - `~/.iknow/` (home profile — always)
  *   - `<workspaceRoot>/.iknow` (per-root persona state) when threaded and
  *     distinct from the live root
- *   - `<projectIdentityRoot>` (ADR-0037 §1 identity-root passthrough) when
+ *   - `<projectIdentityRoot>` (ADR-0037 identity-root passthrough) when
  *     threaded and distinct from the live root
  *
  * Containment remains the read_file contract: escape is rejected by
@@ -151,14 +160,13 @@ export function createReadFileTool(
   // may also read the agent's own profile at `~/.iknow/` — the user asked for
   // this to be allowed by default. Write tools stay cwd-scoped.
   //
-  // T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
-  // `LiveTaskRoot` cell. The handler snapshots the cell at call time and
-  // rebuilds `extraReadRoots` against that snapshot, so root + extras share
-  // a single wave vintage (D9) — no "root is new, extras are old"
+  // `root` may be a `LiveTaskRoot` cell. The handler snapshots the cell at
+  // call time and rebuilds `extraReadRoots` against that snapshot, so root
+  // + extras share a single wave vintage — no "root is new, extras are old"
   // mid-stream mix. Legacy `string` callers keep byte-identical behavior.
   //
-  // ADR-0019 (T4): when workspaceRoot is threaded, `<workspaceRoot>/.iknow`
-  // is added as a second read root so the agent's per-root persona state
+  // ADR-0019: when workspaceRoot is threaded, `<workspaceRoot>/.iknow` is
+  // added as a second read root so the agent's per-root persona state
   // reaches the same surface as the global home profile. The contract is
   // reachability-only: extraReadRoots grants traversal through
   // `resolveWithinRoot`. Write enforcement (the bash channel's `.iknow`
@@ -166,11 +174,11 @@ export function createReadFileTool(
   // bwrap hard-wall (ADR-0092 global mode binds the host root, system
   // prefixes read-only; cwd writes are gated by the validator +
   // `--ro-bind cwd` EROFS). Read and protection are independent and
-  // intentionally so — see plan T4.
+  // intentionally so.
   //
-  // ADR-0037 §1 (T6 D10 wired): projectIdentityRoot threads the read-only
-  // identity-root passthrough so rebind doesn't strand AGENTS.md /
-  // permissions.toml / project rules.
+  // ADR-0037: projectIdentityRoot threads the read-only identity-root
+  // passthrough so rebind doesn't strand AGENTS.md / permissions.toml /
+  // project rules.
   return Object.freeze({
     name: "read_file",
     description:
@@ -199,7 +207,7 @@ export function createReadFileTool(
     },
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const params = parseInput(input);
-      // T6 D9: same wave snapshot — root and extras share the snapshot.
+      // Same wave snapshot — root and extras share the snapshot.
       const rootAtCall = readRoot(root);
       const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, opts);
       const extraReadRoots = computeExtraReadRoots(
@@ -253,14 +261,17 @@ export function createReadFileTool(
 }
 
 /**
- * ADR-0084 / D1c 的读尾段：选正文口径（整读到 EOF vs 显式行窗）、入账。
+ * ADR-0084 read tail: choose the body mode (read-to-EOF vs explicit line
+ * window), then record in the ledger.
  *
- * 顺序是契约的一部分 —— **先**构造正文（offset 越界等失败路径在这里
- * throw），**后**入账。反过来会把「没读到」记成「读过了」，随后 write_file
- * 的非空覆写闸就被这次失败读放行。
+ * Order is part of the contract — build the body **first** (failure paths
+ * like offset-out-of-range throw here), record **after**. Reversed, a
+ * failed read would be recorded as "read", and write_file's non-empty
+ * overwrite gate would then be opened by that failed read.
  *
- * 入账口径 = `resolved`（`resolveWithinRoot` 的解析结果），与 write_file 侧的
- * `target` 同源（同一个 resolve 输出），两边才可能命中同一条。
+ * Recording key = `resolved` (output of `resolveWithinRoot`), the same
+ * source as write_file's `target` (same resolve output), so both sides can
+ * hit the same entry.
  */
 function completeRead(
   text: string,
@@ -345,8 +356,9 @@ interface ParsedInput {
   readonly path: string;
   readonly offset: number;
   /**
-   * 显式行窗；**不写 `limit` → `undefined`**（区别于旧契约的默认 200）。
-   * handler 据此分派「行窗」与「整读到 EOF / 16000 cp」两条路径（D1c）。
+   * Explicit line window; **omitting `limit` → `undefined`** (unlike the
+   * old contract's default of 200). The handler dispatches between "line
+   * window" and "read-to-EOF / 16000 cp" based on this.
    */
   readonly limit: number | undefined;
 }
@@ -363,7 +375,7 @@ function parseInput(input: unknown): ParsedInput {
     raw.offset === undefined
       ? 0
       : requireNonNegativeInteger(raw.offset, "offset");
-  // 不写 limit → undefined（整读路径）；写了才 clamp 到 2000 行。
+  // No limit → undefined (whole-read path); only an explicit limit clamps to 2000 lines.
   const limit =
     raw.limit === undefined
       ? undefined
@@ -412,14 +424,18 @@ function renderLine(lineNumber: number, line: string): string {
 }
 
 /**
- * 显式 `limit` 路径 —— 行窗，语义与 ADR-0004 时期一致：窗口 = 从 `offset`
- * 起至多 `limit` 行（硬顶 2000，由 parseInput clamp）。
+ * Explicit `limit` path — a line window, semantics unchanged since ADR-0004:
+ * window = at most `limit` lines from `offset` (hard cap 2000, clamped by
+ * parseInput).
  *
- * 窗口之上叠**与整读路径同一对页预算**（16000 code point / 19000 UTF-16
- * 单元）：`limit: 2000` 在宽行文件上可产出 ~816000 单元的页，正好落进
- * ADR-0006 Decision 4 禁止的双重截断 —— 工具层先给足、executor 再砍尾，
- * 模型拿到无解释的半页。预算先触时窗口提前收尾并发**显式**续读标记；
- * 窗口自己先到顶（行数约束）则正文与旧契约逐字节一致，无标记。
+ * The window carries **the same page budgets as the whole-read path**
+ * (16000 code points / 19000 UTF-16 units): `limit: 2000` on wide-line
+ * files could produce ~816000-unit pages, exactly the double truncation
+ * ADR-0006 forbids — the tool layer over-delivers and the executor amputates
+ * the tail, leaving the model an unexplained half page. When a budget hits
+ * first, the window ends early with an **explicit** continuation marker;
+ * when the window's own line count tops out first, the body is
+ * byte-identical to the old contract, no marker.
  */
 function sliceLines(text: string, offset: number, limit: number): string {
   if (text.length === 0) return EMPTY_FILE_MARKER;
@@ -432,12 +448,15 @@ function sliceLines(text: string, offset: number, limit: number): string {
 }
 
 /**
- * 预算（非 `limit` 行数）切短行窗时的续读标记。与整读路径的
- * `continuationHint` 分开：这里必须说清「窗口没读完是页预算造成的」，
- * 否则模型会把短页误当 `limit` 已满足，不再续读。
+ * Continuation marker for when a page budget (not the `limit` line count)
+ * cuts a line window short. Separate from the whole-read path's
+ * `continuationHint`: it must state clearly that the unfinished window is
+ * caused by the page budget, otherwise the model mistakes the short page
+ * for "limit satisfied" and stops paging.
  *
- * 恢复路径是**下一次调用加大 `offset`**（行窗语义不变，`limit` 可原样带
- * 上）——提示里的 offset 必须是下一次调用接受的合法值。
+ * The recovery path is **a larger `offset` on the next call** (line-window
+ * semantics unchanged, `limit` may be carried as-is) — the offset in the
+ * hint must be a value the next call accepts.
  */
 function windowCutHint(
   nextOffset: number,
@@ -448,13 +467,15 @@ function windowCutHint(
 }
 
 /**
- * 不写 `limit` 路径（D1c）—— 从 `offset` 尽量读到 EOF，正文硬停
- * `MAX_READ_CODE_POINTS` code point / `MAX_READ_UTF16_UNITS` UTF-16 单元
- * （先触者停）。未到 EOF 时正文尾部附续读提示（含下次 offset）。**不**回落
- * 到任何默认行数（spec SC13 明确否决默认 200/2000）。
+ * The no-`limit` path — read from `offset` toward EOF, body hard-stopping
+ * at `MAX_READ_CODE_POINTS` code points / `MAX_READ_UTF16_UNITS` UTF-16
+ * units (first hit wins). If EOF is not reached the body tail carries a
+ * continuation hint (with the next offset). **No** fallback to any default
+ * line count (the old default 200/2000 is explicitly rejected).
  *
- * 单行自身超预算时正文里附带截断标记：offset 按行翻页，行内余下部分没有
- * 可达路径 —— 不说清就是静默数据丢失（ADR-0006 Decision 4）。
+ * When a single line exceeds the budget itself, the body carries an inline
+ * truncation marker: offset pages by line, so the rest of that line has no
+ * reachable path — not saying so would be silent data loss (ADR-0006).
  */
 function readToEnd(text: string, offset: number): string {
   if (text.length === 0) return EMPTY_FILE_MARKER;
@@ -471,13 +492,15 @@ interface Page {
 }
 
 /**
- * 逐行累加到页预算为止（或到 `endIndex` 行窗上界为止，先触者停）。返回
- * **整行**正文与下一条待读行下标 —— 非末行只截整行，模型不会拿到半行
- * 内容后误以为完整。
+ * Accumulate line by line until the page budget (or the `endIndex` window
+ * bound — first hit wins). Returns **whole-line** body and the index of the
+ * next unread line — non-final cuts drop whole lines only, so the model
+ * never receives half a line and assumes it's complete.
  *
- * 单行自身超预算（1MB 单行文件 / astral 长行）时至少发一条截断行 + 显式
- * 标记，并前进一行，保证续读提示里的 offset 严格增长（否则模型会在同一
- * offset 上打转）。
+ * When a single line exceeds the budget itself (1MB one-line file / long
+ * astral lines), at least one truncated line + explicit marker is emitted
+ * and the index advances by one, guaranteeing the continuation hint's
+ * offset strictly grows (otherwise the model would spin on the same offset).
  */
 function collectPage(
   lines: ReadonlyArray<string>,
@@ -510,7 +533,7 @@ function collectPage(
   };
 }
 
-/** 一行的页预算开销（含与前一行之间的换行符）。 */
+/** A line's page-budget cost (including the newline separator before it). */
 function pageCost(
   line: string,
   hasPrecedingLine: boolean
@@ -523,10 +546,12 @@ function pageCost(
 }
 
 /**
- * 单行超预算时的兜底渲染：行号 + 截到剩余预算的行文 + **显式截断标记**。
- * 标记说明两件事：这一行被截断了；余下部分不在 offset 翻页的可达面上
- * （offset 按行计，行内偏移没有入参）—— 模型据此改用更小的读法（如 bash
- * 的 `cut`/`sed -n` 行内切片）而不是徒劳地续读。
+ * Fallback rendering when one line exceeds the budget: line number + line
+ * text cut to the remaining budget + **explicit truncation marker**. The
+ * marker says two things: this line was truncated; the remainder is outside
+ * offset-paging's reachable surface (offset counts lines, there is no
+ * intra-line parameter) — so the model switches to a narrower read (e.g.
+ * bash `cut` / `sed -n` intra-line slicing) instead of uselessly continuing.
  */
 function truncateLine(line: string, offset: number): string {
   const prefix = `${String(offset + 1).padStart(6)}\t`;
@@ -534,16 +559,18 @@ function truncateLine(line: string, offset: number): string {
   return prefix + sliceWithinBudget(line, prefix + marker) + marker;
 }
 
-/** 截断标记文案（正文的一部分，计入页预算）。 */
+/** Truncation marker text (part of the body, counted in the page budget). */
 function truncationMarker(prefix: string): string {
   const lineNumber = Number.parseInt(prefix, 10);
   return ` …[read_file] line ${lineNumber} truncated at the page budget; the rest of this line is not reachable via offset paging (offset counts lines).`;
 }
 
 /**
- * 在 prefix+marker 已占用的预算之上，取行文的最长前缀，**同时**满足
- * code point 与 UTF-16 单元两个上限 —— 逐 code point 累加，先触者停
- * （astral 字符一个 code point 占两个单元，两个度量不能互相换算）。
+ * On top of the budget already taken by prefix+marker, take the longest
+ * prefix of the line text that satisfies **both** the code-point and
+ * UTF-16-unit caps — accumulate per code point, first hit wins (an astral
+ * code point takes two units, so the two measures cannot convert into
+ * each other).
  */
 function sliceWithinBudget(line: string, reserved: string): string {
   const maxCodePoints = MAX_READ_CODE_POINTS - countCodePoints(reserved);
@@ -563,12 +590,12 @@ function sliceWithinBudget(line: string, reserved: string): string {
   return kept.join("");
 }
 
-/** 续读提示行（正文之外；其长度已由页预算的 headroom 覆盖）。 */
+/** Continuation hint line (outside the body; its length is covered by the page budget's headroom). */
 function continuationHint(nextOffset: number, totalLines: number): string {
   return `[read_file] continued at line ${nextOffset + 1} of ${totalLines}; call read_file again with offset=${nextOffset} for the rest.`;
 }
 
-/** code point 计数（surrogate pair 算一个）—— 与 executor 截断口径一致。 */
+/** Code-point count (a surrogate pair counts as one) — same measure as the executor's truncation gate. */
 function countCodePoints(text: string): number {
   return Array.from(text).length;
 }

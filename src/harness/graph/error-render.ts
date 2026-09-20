@@ -1,21 +1,23 @@
 /**
- * 节点执行异常 → `error` 字符串的渲染契约（per code-quality.md typed-error
- * catch）：优先识别判别联合 `{kind, context}`；未知形态退回到 `err.message`；
- * 最末对非数组对象用 safe JSON 渲染（不可序列化时给构造器名描述），其余走
- * `String(err)`。
+ * Rendering contract: node-execution throwables → `error` strings. Prefer
+ * the typed discriminated union `{kind, context}`; unknown shapes fall back
+ * to `err.message`; plain non-array objects get a safe JSON rendering
+ * (constructor-name description when unserializable); everything else uses
+ * `String(err)`.
  *
- * 禁止 `err instanceof Error ? err.message : String(err)`（plain typed object
- * 会被打成 `[object Object]`，让 kind/context 完全不可见）。
+ * Forbidden: `err instanceof Error ? err.message : String(err)` — plain
+ * typed objects would render as `[object Object]`, hiding kind/context
+ * entirely.
  *
- * 边界：纯函数，不 import 调度器 / 账本 / node-executor；既被阶段 1 的
- * `scheduler.ts` 也被阶段 2 的 `outcome-scheduler.ts` 调用，避免重复实现
- * 漂移（review F5）。
+ * Boundary: pure function, no imports of scheduler / ledger / node-executor;
+ * shared by both scheduler lines so the two implementations cannot drift.
  */
 
 /**
- * 非 kind plain object 的最后兜底：JSON 序列化，失败（循环引用 /
- * BigInt 等不可序列化值）时退回到构造器名描述 —— 保证永不输出
- * `[object Object]`，也永不抛异常。
+ * Last fallback for kind-less plain objects: JSON-serialize; on failure
+ * (circular refs / BigInt and other unserializable values) fall back to a
+ * constructor-name description — guarantees never emitting
+ * `[object Object]`, never throwing.
  */
 function safeObjectString(value: object): string {
   try {
@@ -38,8 +40,9 @@ export function formatNodeError(err: unknown): string {
     return `${kind}: ${ctxStr}`;
   }
   if (err instanceof Error) return err.message;
-  // 非数组的对象（无 kind）走 safe JSON；数组与 primitive 沿用 String()
-  // （array 已有可读形式 "1,2,3"，primitive 的 String 形式即可读）。
+  // Non-array objects without a kind go through safe JSON; arrays and
+  // primitives keep String() (arrays already read as "1,2,3", a primitive's
+  // String form is itself readable).
   if (typeof err === "object" && err !== null && !Array.isArray(err)) {
     return safeObjectString(err);
   }

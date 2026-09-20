@@ -1,9 +1,12 @@
 /**
- * ADR-0045 — sandbox server 内部 helper:spawn 子流程抽取。
+ * Internal spawn sub-process helpers for the sandbox server.
  *
- * `server/index.ts` 的 spawn orchestrator 仅持有"协议形状";具体
- * 节点创建、SIGTERM→SIGKILL 升级、queue/sentinel 都落在此文件。本文件
- * 不对外导出,仅供 `server/index.ts` 内部使用。
+ // (ADR-0045)
+ *
+ * The spawn orchestrator in `server/index.ts` keeps only the "protocol shape";
+ * concrete node creation, SIGTERM→SIGKILL escalation and queue/sentinel
+ * machinery live in this file. Nothing here is exported beyond the package —
+ * it exists solely for `server/index.ts`.
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
@@ -19,15 +22,17 @@ import type {
   SandboxTaskHandle,
 } from "./types.js";
 
-/** 节点常量 —— 默认 killGraceMs(沿 ADR-0021 D1.7 形态)。 */
+/** Node constant — default killGraceMs (same shape as the manager's background tasks). */
+// (ADR-0021)
 export const DEFAULT_KILL_GRACE_MS = 2_000;
 
-/** 生成 `bg-` + 12 hex task_id(沿 ADR-0021 D1.7)。 */
+/** Generates a `bg-` + 12-hex task_id (same shape as the manager's background tasks). */
+// (ADR-0021)
 export function newTaskId(): string {
   return `bg-${randomBytes(6).toString("hex")}`;
 }
 
-/** nodeSpawn detached child —— 唯一 spawn 形态,集中 fenced cwd/env/detached。 */
+/** nodeSpawn detached child — the single spawn shape, centralising fenced cwd/env/detached. */
 export function spawnDetached(
   argv: readonly string[],
   cwd: string,
@@ -41,12 +46,12 @@ export function spawnDetached(
   });
 }
 
-/** 拼 log 路径 —— `cwd` 落地,与 manager.ts:466 同形。 */
+/** Build the log path — lands in `cwd`, same form as manager.ts. */
 export function logPathFor(cwd: string, taskId: string): string {
   return join(cwd, `.iknow-bg-${taskId}.log`);
 }
 
-/** 触发 SIGKILL 升级 —— killTimer 回调与 graceMs=0 即时分支共用。 */
+/** Trigger the SIGKILL escalation — shared by the killTimer callback and the immediate graceMs=0 branch. */
 export function escalateToSigkill(
   child: ChildProcess,
   pid: number | undefined,
@@ -56,12 +61,12 @@ export function escalateToSigkill(
   try {
     child.kill("SIGKILL");
   } catch {
-    /* ESRCH / EPIPE 吞 */
+    /* swallow ESRCH / EPIPE */
   }
   killProcessGroup(pid, "SIGKILL", log);
 }
 
-/** 触发 SIGTERM 升级 —— stop 入口共用。 */
+/** Trigger the SIGTERM escalation — shared by all stop entry points. */
 export function escalateToSigterm(
   child: ChildProcess,
   pid: number | undefined,
@@ -71,12 +76,12 @@ export function escalateToSigterm(
   try {
     child.kill("SIGTERM");
   } catch {
-    /* ESRCH / EPIPE 吞 */
+    /* swallow ESRCH / EPIPE */
   }
   killProcessGroup(pid, "SIGTERM", log);
 }
 
-/** 把 stdout/stderr chunk append 到 log 文件 —— 串行 writeChain 避免竞态。 */
+/** Append stdout/stderr chunks to the log file — a serial writeChain avoids races. */
 export function makeLogWriter(
   logPath: string,
   taskId: string,
@@ -96,13 +101,13 @@ export function makeLogWriter(
 }
 
 /**
- * queue + pending consumers 容器 —— 单 producer(spawn 节点)+ 多
- * consumer(`events()` 多次调用 = 抢事件,见 SandboxTaskHandle.events
- * JSDoc 的 single-consumer 契约)。
+ * queue + pending-consumer container — one producer (the spawn node) + many
+ * consumers (each `events()` call competes for events; see the
+ * single-consumer contract in SandboxTaskHandle.events' JSDoc).
  *
- * Why a class-like factory:`push` / `next` / `close` 三操作原内嵌在
- * spawn 闭包里 30+ 行,抽离后 spawn orchestrator 瘦身到只持有协议线
- * (abort / handle 构造)。
+ * Why a factory: `push` / `next` / `close` used to be inlined in the spawn
+ * closure for 30+ lines; extracting them slims the spawn orchestrator down to
+ * just the protocol lines (abort / handle construction).
  */
 export interface EventChannel {
   push(ev: SandboxTaskEvent): void;
@@ -157,7 +162,7 @@ export function createEventChannel(): EventChannel {
   };
 }
 
-/** 把 close sentinel 转成 AsyncIterable 包装(SandboxTaskEvent 流)。 */
+/** Turn the close sentinel into an AsyncIterable wrapper (the SandboxTaskEvent stream). */
 export async function* toTaskEventStream(
   channel: EventChannel
 ): AsyncGenerator<SandboxTaskEvent, void, void> {
@@ -169,7 +174,7 @@ export async function* toTaskEventStream(
   }
 }
 
-/** 把 stdout/stderr data 接到 channel + log writer。 */
+/** Wire stdout/stderr data into the channel + log writer. */
 export function wireChildStreamHandlers(
   child: ChildProcess,
   channel: EventChannel,
@@ -188,8 +193,8 @@ export function wireChildStreamHandlers(
 }
 
 /**
- * close handler —— settled 短路 + cancelKillTimer + exit/stopped 事件 +
- * close channel。
+ * close handler — settled short-circuit + cancelKillTimer + exit/stopped
+ * events + channel close.
  */
 export function onChildClose(
   child: ChildProcess,
@@ -208,7 +213,7 @@ export function onChildClose(
   });
 }
 
-/** error handler —— log + typed orphan fail-loud。 */
+/** error handler — log + typed orphan fail-loud. */
 export function onChildError(
   child: ChildProcess,
   orphan: OrphanSettler,
@@ -222,7 +227,8 @@ export function onChildError(
 }
 
 /**
- * external AbortSignal 接线 —— 短生命周期透传到 spawn,长生命周期经 stop() 升级。
+ * External AbortSignal wiring — for short-lived tasks it passes straight to
+ * the spawn; for long-lived ones it goes through stop() escalation.
  */
 export function wireAbortSignal(
   signal: AbortSignal | undefined,
@@ -243,7 +249,7 @@ export function wireAbortSignal(
 }
 
 /**
- * 拼 handle —— task_id + log_path + events stream + stop 控制面。
+ * Assemble the handle — task_id + log_path + events stream + stop control plane.
  */
 export function assembleHandle(
   task_id: string,
@@ -261,7 +267,7 @@ export function assembleHandle(
   };
 }
 
-/** 内部 typed error helper —— factory 内统一构造 typed-error。 */
+/** Internal typed-error helper — typed errors are built uniformly in one factory. */
 export function orphanGroupError(
   context: string,
   pgid: number | undefined
@@ -271,7 +277,7 @@ export function orphanGroupError(
     : { kind: "orphan_process_group", context, pgid };
 }
 
-/** stop 控制面 —— 闭包持有 child/pgid/log/stopped/killFallback。 */
+/** Stop control plane — the closure owns child/pgid/log/stopped/killFallback. */
 export interface StopHandle {
   stop(graceMs?: number): Promise<void>;
   cancelKillTimer(): void;
@@ -315,7 +321,7 @@ export function createStopHandle(
       }, g);
       killFallback.unref?.();
     } else {
-      // graceMs=0 → 立刻 SIGKILL,不进 setTimeout 排队。
+      // graceMs=0 → SIGKILL immediately, skipping the setTimeout queue.
       escalateToSigkill(child, pgid, log);
     }
     return Promise.resolve();
@@ -338,9 +344,10 @@ export function createStopHandle(
 }
 
 /**
- * settleWithOrphan 工厂 —— 闭包持有 child/pgid/log/channel/rejectHandle/settled。
- * Why a factory:runSpawnNode 内联版本把 4 个可变状态 + 副作用都揉在
- * orchestrator 函数里,135 行超硬门 60 行(S5 complexity-anti-drift)。
+ * OrphanSettler factory — the closure owns child/pgid/log/channel/rejectHandle/settled.
+ * Why a factory: the inlined version inside runSpawnNode mixed 4 mutable
+ * states + side effects in one orchestrator function, blowing past the 60-line
+ * hard cap of the complexity gate.
  */
 export interface OrphanSettler {
   settle(cause: unknown): void;

@@ -1,13 +1,16 @@
 /**
- * PROTOTYPE — Self-written Graph 多任务编排：调度器。
+ * PROTOTYPE — self-written Graph multi-task orchestration: scheduler.
  *
- * 验证问题：（同 types.ts 头注释）
- * 本文件是纯编排逻辑：按 wave 并发执行节点（Promise.all），跨 wave 串行；
- * 节点失败 → 其（传递）依赖者标 skipped（分支 fail-fast），独立分支继续；
- * 不可变累积状态，一次性返回 GraphExecution。不 import loop-engine、
- * 不 console.log（回调用参数传入，逻辑不直接打印）。
+ * Validation question: (same as types.ts header)
+ * Pure orchestration: run nodes concurrently per wave (Promise.all), waves
+ * serial; a node failure marks its (transitive) dependents skipped
+ * (branch fail-fast) while independent branches continue; state accumulates
+ * immutably and one GraphExecution is returned at the end. No loop-engine
+ * imports, no console.log (callbacks receive parameters; the logic never
+ * prints directly).
  *
- * 边界：纯编排逻辑，不直接 spawn；executor 闭包由调用方注入。
+ * Boundary: pure orchestration, never spawns directly; the executor closure
+ * is injected by the caller.
  */
 
 import { validateGraph, topoWaves } from "./topo.js";
@@ -22,16 +25,17 @@ import type {
 } from "./types.js";
 
 export interface RunGraphOptions {
-  /** 每个含可跑节点的 wave 开跑前回调（整波全 skipped 时不触发；外壳用来打印，逻辑不用它做控制流）。 */
+  /** Callback before each wave containing runnable nodes starts (skipped for an all-skipped wave; the shell prints progress, the logic never uses it for control flow). */
   readonly onWave?: (wave: number, ids: ReadonlyArray<string>) => void;
-  /** 每个节点落定后回调（含 skipped 节点）。 */
+  /** Callback after each node settles (skipped nodes included). */
   readonly onNode?: (result: GraphNodeResult) => void;
 }
 
 /**
- * 按 wave 执行：同 wave 内并发（Promise.all），跨 wave 串行。
- * 节点失败 → 其（传递）依赖者标 skipped（分支 fail-fast），独立分支继续。
- * 不可变累积状态，一次性返回 GraphExecution。
+ * Run by waves: concurrent within a wave (Promise.all), serial across waves.
+ * A failed node marks its (transitive) dependents skipped (branch fail-fast)
+ * while independent branches continue. State accumulates immutably; one
+ * GraphExecution is returned.
  */
 export async function runGraph(
   spec: GraphSpec,
@@ -45,19 +49,20 @@ export async function runGraph(
 
   const waves = topoWaves(spec);
 
-  // depsOf: 直接依赖表（用于追溯失败上游）
+  // depsOf: direct-dependency table (for tracing failed upstreams)
   const depsOf = new Map<string, ReadonlyArray<string>>();
   for (const node of spec.nodes) {
     depsOf.set(node.id, node.deps);
   }
 
-  // 不可变累积：每次 wave 结束 spread 出新对象替换，确保 GraphExecution 整体可冻结，
-  // 且 exec 的 ctx.outputs 读到的也是 Object.freeze 快照（下面 wave 起点会重新 freeze）。
+  // Immutable accumulation: each wave end spreads a new object, so the whole
+  // GraphExecution can be frozen and the ctx.outputs that exec reads is also
+  // an Object.freeze snapshot (refrozen at every wave start below).
   let statuses: Record<string, NodeStatus> = {};
   let results: Record<string, GraphNodeResult> = {};
   let outputs: Readonly<Record<string, unknown>> = {};
 
-  // 初始：所有节点 pending
+  // Initial state: all nodes pending
   for (const node of spec.nodes) {
     statuses[node.id] = "pending";
   }
@@ -67,7 +72,7 @@ export async function runGraph(
     const wave = waves[w]!;
     waveCount = w + 1;
 
-    // 决定本 wave 内哪些节点跑、哪些标 skipped
+    // Decide which nodes in this wave run and which are marked skipped
     const toRun: string[] = [];
     for (const id of wave) {
       const failedUpstream = findFailedUpstream(id, depsOf, results);
@@ -90,7 +95,7 @@ export async function runGraph(
       statuses = { ...statuses, [id]: "running" };
     }
 
-    // 同 wave 节点共享同一 ctx（已 done 节点的 outputs 快照）
+    // Nodes in the same wave share one ctx (snapshot of done nodes' outputs)
     const ctx: NodeContext = Object.freeze({
       outputs: Object.freeze({ ...outputs }),
     });
@@ -124,8 +129,8 @@ export async function runGraph(
 }
 
 /**
- * 沿 deps 链向上追溯，找到第一个失败/被跳过的上游节点。
- * 用于决定本节点是否因分支 fail-fast 而被标 skipped。
+ * Walk up the deps chain to find the first failed/skipped upstream node;
+ * decides whether this node is marked skipped by branch fail-fast.
  */
 function findFailedUpstream(
   nodeId: string,
