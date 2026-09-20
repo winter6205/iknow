@@ -1,30 +1,27 @@
 /**
- * serve-workspace T7a — SessionSidebar 工作空间分组子树 (T7b review fix 落地)。
+ * SessionSidebar workspace-group subtree.
  *
- * 把原本 prop-drilling 6 层的 GroupedSessionListView → WorkspaceGroupBlock →
- * WorkspaceGroupHeader → GroupCreateButton 折叠为单文件 + Context：所有叶子
- * 通过 `useWorkspaceGroupsCtx()` 取 `groups / onSelect / onToggleCollapsed /
- * onCreateInWorkspace`，prop 链路从 App 到叶子 ≤ 1 层（Context 透传）。
+ * Collapses the former 6-level prop-drilling chain
+ * GroupedSessionListView → WorkspaceGroupBlock → WorkspaceGroupHeader →
+ * GroupCreateButton into one file + Context: every leaf reads
+ * `groups / onSelect / onToggleCollapsed / onCreateInWorkspace` via
+ * `useWorkspaceGroupsCtx()`, so the prop chain from App to leaf is ≤ 1 level
+ * (Context carries the rest).
  *
- * 拆分边界（review fix H1 + H2 + M5）：
- *  - `WorkspaceGroupsContext` + `useWorkspaceGroupsCtx`: Context 通道；
- *    叶子只读 useContext，不再接 props。
- *  - `useWorkspaceGroups`: 折叠态自管 hook（T7b review fix M3 重写为懒加载 —
- *    通过 `CollapsedStateStore` 在 useRef 里持有缓存，避免 useEffect([groups])
- *    在 groups 数组引用变化时重置状态），由 GroupedView 在 Provider 内一次性
- *    调用并下发到 Context。
- *  - `GroupedView`: 顶层 composition。调 useWorkspaceGroups 拿
- *    isCollapsed / toggleCollapsed，下发给 Context；渲染 `<ul>`。
+ * Split boundaries:
+ *  - `WorkspaceGroupsContext` + `useWorkspaceGroupsCtx`: the Context channel;
+ *    leaves only read useContext, no props.
+ *  - `useWorkspaceGroups`: self-managed collapse-state hook (rewritten as lazy
+ *    per-key init — `CollapsedStateStore` caches in a
+ *    useRef so a changing `groups` array reference no longer resets state via
+ *    useEffect([groups])), called once inside the Provider by GroupedView and
+ *    pushed into Context.
+ *  - `GroupedView`: top-level composition. Calls useWorkspaceGroups for
+ *    isCollapsed / toggleCollapsed, pushes into Context; renders `<ul>`.
  *  - `WorkspaceGroupBlock` + `WorkspaceGroupHeader` + `GroupCreateButton`:
- *    叶子组件，全部 useContext，不再接 4 个相关 props（currentId 仍走 props
- *    — 它不是工作空间组上下文，且只在叶子用一次）。
- *
- * 行为契约：T4-T6 视觉 / a11y / 折叠逻辑全部不变，spec #90 / #95 不动。
- *
- * T7b review fix:
- *  - M3: useWorkspaceGroups 改为 lazy per-key init（见下方 hook 注释）。
- *  - M2: 移除 `currentBoundRoot` 入参 / Context 字段 / 叶子不再依赖。
- *  - L3: ChevronDownIcon → ChevronIcon({ direction }).
+ *    leaf components, all useContext, no longer accepting the 4 related props
+ *    (currentId still arrives via props — it is not group context and each
+ *    leaf uses it once).
  */
 import {
   createContext,
@@ -48,22 +45,22 @@ import { FOCUS_RING } from "../../lib/ui";
 import { plusButtonLabel, shouldShowPlusButton } from "../../lib/sidebar-plus";
 import { ChevronIcon, PlusIcon } from "./icons";
 
-/** CSS 拼接 helper — 跨组件共用，集中放这里避免重复。 */
+/** CSS join helper — shared across components here to avoid duplication. */
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
 /**
- * Context 通道承载的"组上下文"。叶子 (WorkspaceGroupBlock / Header /
- * GroupCreateButton) 只读 useContext，不再走 props。
+ * The "group context" carried by the Context channel. Leaves
+ * (WorkspaceGroupBlock / Header / GroupCreateButton) only read useContext, no props.
  *
- * `groups` / `currentConversationId` 由 Provider 在 GroupedView 一次性算出，
- * 下发到所有叶子；handler 同样集中下发，避免每个叶子重接 closure。Provider
- * 之外的子组件读 Context 会抛 `WorkspaceGroupsContext missing`，让错位用法
- * 早崩。
+ * `groups` / `currentConversationId` are computed once by the Provider in
+ * GroupedView and pushed to all leaves; handlers are centrally provided too,
+ * so leaves do not rewire closures. Reading the Context outside the Provider
+ * throws `WorkspaceGroupsContext missing` so misplacement crashes early.
  *
- * T7b review fix M2: 移除 `currentBoundRoot` 字段 — groupSessionsByWorkspace
- * 不再接收该参数，Context 也无需透传。
+ * `currentBoundRoot` field removed — groupSessionsByWorkspace
+ * no longer takes that param, so the Context need not carry it.
  */
 type WorkspaceGroupsContextValue = {
   readonly groups: readonly WorkspaceGroup[];
@@ -87,20 +84,22 @@ export function useWorkspaceGroupsCtx(): WorkspaceGroupsContextValue {
 }
 
 /**
- * 折叠态自管 hook（T4 + T7b lazy init 重写）。
+ * Self-managed collapse-state hook (lazy-init rewrite).
  *
- * 旧实现 `useEffect([groups])` 在 groups 数组引用变化（sessions 更新 /
- * currentConversationId 变化触发 useMemo 重算）时整张 map 重读 localStorage，
- * 抹掉用户刚 toggle 的状态。
+ * The old `useEffect([groups])` re-read the whole map from localStorage
+ * whenever the groups array reference changed (sessions update /
+ * currentConversationId change retriggering useMemo), wiping the user's fresh
+ * toggles.
  *
- * 新实现：
- *  - `CollapsedStateStore` 持有 `Map<key, boolean>`，通过 useRef 在 mount
- *    期间持久；首次 `lookup` 走 localStorage，之后保留内存值。
- *  - 用户的 toggle 写入 React `overrides` 状态（仅触发 setState 一次），与
- *    store 的内存值保持一致 — `isCollapsed` 优先读 overrides，缺失则降级
- *    到 store。
- *  - groups 数组引用变化不再触发任何状态重置：store 内部 Map 持久，render
- *    不再读 localStorage。
+ * New design:
+ *  - `CollapsedStateStore` holds a `Map<key, boolean>` persisted across mount
+ *    via useRef: the first `lookup` reads localStorage, afterwards the in-memory
+ *    value wins.
+ *  - User toggles write React `overrides` state (one setState), kept in sync
+ *    with the store's memory value — `isCollapsed` reads overrides first,
+ *    falling back to the store.
+ *  - A changing groups reference no longer resets any state: the store Map is
+ *    persistent and render never touches localStorage.
  */
 function useWorkspaceGroups(groups: readonly WorkspaceGroup[]): {
   isCollapsed: (groupKey: string) => boolean;
@@ -113,9 +112,9 @@ function useWorkspaceGroups(groups: readonly WorkspaceGroup[]): {
   const store = storeRef.current;
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
 
-  // 派生 key → isActive 查找表（每 render 重算 — O(n)，groups 通常很小）。
-  // 通过 useMemo 锁住引用，避免 isCollapsed/toggleCollapsed 的 useCallback
-  // 在无关 render 中重建。
+  // Derived key → isActive lookup (recomputed each render — O(n), groups is usually small).
+  // useMemo pins the reference so isCollapsed/toggleCollapsed callbacks are not
+  // rebuilt on unrelated renders.
   const isActiveMap = useMemo(() => {
     const m: Record<string, boolean> = {};
     for (const g of groups) m[g.key] = g.isActive;
@@ -144,14 +143,16 @@ function useWorkspaceGroups(groups: readonly WorkspaceGroup[]): {
 }
 
 /**
- * GroupCreateButton（T6）— 仅 bound 组渲染；(未绑定) 组由
- * shouldShowPlusButton 过滤。16x16 PlusIcon, text-ink-3 → hover:text-accent。
- * 不再接 onCreate prop — 直接从 Context 拿 `onCreateInWorkspace`。
+ * GroupCreateButton — rendered for bound groups only; the (未绑定)
+ * ("unbound") group is filtered by shouldShowPlusButton. 16x16 PlusIcon,
+ * text-ink-3 → hover:text-accent. No longer takes an onCreate prop —
+ * reads `onCreateInWorkspace` straight from Context.
  */
 function GroupCreateButton({ group }: { group: WorkspaceGroup }) {
   const { onCreateInWorkspace } = useWorkspaceGroupsCtx();
-  // group.isUnbound 时 group.key 是 sentinel "(未绑定)", 不能 bind —
-  // 上层 shouldShowPlusButton 已过滤; 这里再防御一道。
+  // When group.isUnbound, group.key is the sentinel "(未绑定)" ("unbound")
+  // and must not be bound — the upper shouldShowPlusButton already filters;
+  // this is a second line of defense.
   if (!shouldShowPlusButton(group) || !group.key) return null;
   const title = plusButtonLabel(group.label);
   return (
@@ -173,20 +174,20 @@ function GroupCreateButton({ group }: { group: WorkspaceGroup }) {
 }
 
 /**
- * WorkspaceGroupHeader（T4 + T6）— 组头。
- *  - 活跃组(isActive)展开且不响应折叠点击 — 渲染静态 div。
- *  - 其它组点击切换折叠态; aria-expanded 同步; chevron 跟随展开方向。
- *  - "📁 basename · 计数" 形态; 活跃组追加 "(当前)" 微标记。
- *  - T6: 右侧追加 + 按钮(bound 组才渲染)。
+ * WorkspaceGroupHeader — group header row.
+ *  - Active group (isActive) stays expanded and ignores collapse clicks — renders a static div.
+ *  - Other groups toggle collapse on click; aria-expanded stays in sync; chevron follows the expand direction.
+ *  - Shape: "📁 basename · count"; active group appends a "(当前)" ("current") micro-marker.
+ *  - Plus button on the right (bound groups only).
  *
- * 不再接 collapsed / onToggle / onCreate props — 全部从 Context 拿。
+ * No longer takes collapsed / onToggle / onCreate props — all from Context.
  *
- * T7b review fix L3: ChevronDownIcon → ChevronIcon({ direction }), 折叠态
- * 用 `direction="down"` + 父容器 `rotate-0` / `-rotate-90` 切换。
+ * ChevronDownIcon → ChevronIcon({ direction }); the collapsed
+ * state uses `direction="down"` + parent `rotate-0` / `-rotate-90` to switch.
  */
 function WorkspaceGroupHeader({ group }: { group: WorkspaceGroup }) {
   const { isCollapsed, toggleCollapsed } = useWorkspaceGroupsCtx();
-  // 活跃组永远展开 — 不提供折叠交互。
+  // Active group is always expanded — no collapse affordance.
   if (group.isActive) {
     return (
       <div
@@ -221,8 +222,9 @@ function WorkspaceGroupHeader({ group }: { group: WorkspaceGroup }) {
             : `${group.label} (${group.sessions.length})`
         }
         className={cx(
-          // T6: list-style 收紧 — 非活跃组折叠按钮加 rounded-md, 与
-          // T5 picker 列表节奏一致; count / chevron / icon 保持原样式。
+          // List-style tightening — inactive-group collapse button gets
+          // rounded-md to match the picker list rhythm; count / chevron /
+          // icon keep their original styling.
           "flex flex-1 items-center gap-1.5 rounded-md text-left",
           "transition-colors duration-[160ms] ease-soft hover:bg-bg",
           FOCUS_RING
@@ -253,9 +255,10 @@ function WorkspaceGroupHeader({ group }: { group: WorkspaceGroup }) {
 }
 
 /**
- * SessionItem — 单条会话 li。仅接 session / currentId / onSelect 三个 prop：
- *  currentId / onSelect 来自 GroupedView（≤ 1 层 prop, 不走 Context — 它们
- *  与"工作空间组"语义无关, 跟会话列表强绑定）。
+ * SessionItem — one session li. Takes only session / currentId / onSelect:
+ *  currentId / onSelect come from GroupedView (≤ 1 prop level, not via
+ *  Context — they have nothing to do with "workspace group" semantics and
+ *  bind tightly to the session list).
  */
 function SessionItem({
   session,
@@ -267,8 +270,8 @@ function SessionItem({
   onSelect: (id: string) => void;
 }) {
   const active = isCurrentSession(session.conversation_id, currentId);
-  // 主行 = header title（空/缺席时 sidebarLineText 走 id 前缀空态，
-  // 不回落 lastFinalText — spec session-list-title）。
+  // Main line = header title (when empty/absent, sidebarLineText falls back to the
+  // id-prefix empty state — never to lastFinalText; spec session-list-title).
   const excerpt = sidebarLineText(session);
   return (
     <li className="group relative">
@@ -278,10 +281,10 @@ function SessionItem({
         title={session.conversation_id}
         onClick={() => onSelect(session.conversation_id)}
         className={cx(
-          // serve-workspace T6: list 项 rounded-panel → rounded-md, 与 T5
-          // picker 列表收紧节奏一致 (recents / subdirs 都是 rounded-md)。
-          // 计数 badge / chevron / active 高亮不在此列 — 用户原话只针对
-          // **列表项**, 其它视觉锚点保留现状。
+          // List items rounded-panel → rounded-md to match the picker
+          // tightening (recents / subdirs are all rounded-md).
+          // Count badge / chevron / active highlight are out of scope — the
+          // user's ask targeted **list items** only; other visual anchors stay.
           "flex w-full items-baseline gap-2 truncate rounded-md px-3 py-1.5 pr-8 text-left text-[13px]",
           "transition-colors duration-[160ms] ease-soft",
           active
@@ -292,8 +295,9 @@ function SessionItem({
       >
         <span className="truncate">{excerpt}</span>
       </button>
-      {/* ADR-0020 contextual deep-link: hover 浮出，直达该会话的 trace 面板。
-          <a> 与 button 同级（a 嵌 button 是非法嵌套）；group-hover/focus 显隐。 */}
+      {/* ADR-0020 contextual deep-link: revealed on hover, goes straight to this
+          session's trace panel. <a> is a sibling of the button (a-in-button is
+          invalid nesting); shown via group-hover/focus. */}
       <a
         href={traceDeepLink(session.conversation_id)}
         title={`在 trace 面板查看 ${session.conversation_id}`}
@@ -313,18 +317,18 @@ function SessionItem({
 }
 
 /**
- * WorkspaceGroupBlock（T4）— 组头 + session 列表。
- *  collapsed=true 时只渲染组头 (CSS overflow-hidden, 不在 DOM 中移除 li,
- *  让展开是即时的、无 layout flash)。
- *  同一组内 session 仍按 sortSessionsByUpdatedDesc(由 groupSessionsByWorkspace
- *  预先排序)。
+ * WorkspaceGroupBlock — group header + session list.
+ *  collapsed=true renders only the header (CSS hides the list; li stays in the
+ *  DOM so expanding is instant with no layout flash).
+ *  Sessions within a group keep sortSessionsByUpdatedDesc order (pre-sorted by
+ *  groupSessionsByWorkspace).
  *
- * 仅接 group prop；collapsed / currentId / handlers 全部从 Context 拿。
+ * Takes only the group prop; collapsed / currentId / handlers all come from Context.
  */
 function WorkspaceGroupBlock({ group }: { group: WorkspaceGroup }) {
   const { currentConversationId, onSelect, isCollapsed } =
     useWorkspaceGroupsCtx();
-  // 活跃组永远展开; 其它组按折叠态。
+  // Active group is always expanded; others follow collapse state.
   const collapsed = group.isActive ? false : isCollapsed(group.key);
   return (
     <li className="list-none">
@@ -350,16 +354,16 @@ function WorkspaceGroupBlock({ group }: { group: WorkspaceGroup }) {
 }
 
 /**
- * GroupedView（T7a）— 工作空间分组子树顶层 composition。
+ * GroupedView — top-level composition of the workspace-group subtree.
  *
- * 入参：原始 sessions + currentConversationId + 两个 handler。
- * 内部：useMemo 算 groups；useWorkspaceGroups 拿折叠态；下发到 Context；
- * 渲染 <ul> + 子树。
+ * Inputs: raw sessions + currentConversationId + two handlers.
+ * Internally: useMemo computes groups; useWorkspaceGroups supplies collapse
+ * state; both are pushed into Context; renders <ul> + subtree.
  *
- * T7b review fix M2: 不再接 `currentBoundRoot`（已 dead）。
+ * No longer takes `currentBoundRoot` (dead).
  *
- * 调用方（SessionSidebar / ExpandedSidebar）只需 4 个 prop（之前 5 个），
- * 内部叶子零 prop drilling。
+ * Callers (SessionSidebar / ExpandedSidebar) pass only 4 props (was 5);
+ * inner leaves have zero prop drilling.
  */
 export function GroupedView({
   sessions,
@@ -397,10 +401,10 @@ export function GroupedView({
 }
 
 /**
- * 仅供单测使用的 Provider 注入 helper：让测试可以避开 GroupedView 的
- * `useMemo` + `useWorkspaceGroups` 计算, 直接注入任意 WorkspaceGroups
- * Context 值, 验证叶子组件（Header / Block / GroupCreateButton）能从
- * Context 拿到正确 props。
+ * Provider-injection helper for unit tests only: lets tests bypass GroupedView's
+ * `useMemo` + `useWorkspaceGroups` computation and inject an arbitrary
+ * WorkspaceGroups Context value directly, verifying that leaf components
+ * (Header / Block / GroupCreateButton) read the right props from Context.
  */
 export function WorkspaceGroupsProvider({
   value,

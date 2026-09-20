@@ -1,6 +1,7 @@
-/* FlowTree — 树状拓扑：7 站点横排顶部，事件按归属垂直落入各自子树
-   移植自 prototype web/trace-prototype/src/variants/FlowTree.tsx（#291）。
-   数据源改为真实 API 投影后的 TraceEvent[]（见 lib/flowTree.ts）。 */
+/* FlowTree — tree topology: the 7 stations sit in a horizontal row on top,
+   events drop vertically into their station's subtree.
+   Ported from prototype web/trace-prototype/src/variants/FlowTree.tsx (#291).
+   Data source is now TraceEvent[] projected from the real API (see lib/flowTree.ts). */
 import type { ReactNode } from "react";
 import type { TraceEvent, StationId } from "../lib/flowTree";
 import { STATIONS, fmtDur, statusTone, isErr } from "../lib/flowTree";
@@ -26,7 +27,7 @@ const ICONS: Record<string, string> = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M12 7.5v3M12 10.5l-4.5 6M12 10.5l4.5 6"/></svg>',
 };
 
-/* 布局常量（px，逻辑画布） */
+/* Layout constants (px, logical canvas) */
 const WIDTH = 1100;
 const NODE_W = 152;
 const NODE_H = 64;
@@ -35,13 +36,13 @@ const BADGE_D = 36;
 const TURN0_TOP = 110;
 const TURN1_TOP = 360;
 const TOTAL_H = 720;
-/* 站点 trunk：挂在列左侧（列间距 183.3，节点宽 152，间隙 31.3），trunk 距节点左缘 8px */
+/* Station trunk: hung on the column's left side (column pitch 183.3, node width 152, gap 31.3); TRUNK_OFF offsets it from the column centre */
 const TRUNK_OFF = 84;
 const RAIL_Y = BADGE_D / 2;
-/* 行间/走廊路由常量 */
-const ROW_GAP_Y = TURN0_TOP + NODE_H + ROW_GAP / 2; // 185（回合 0 上排↔下排之间）
-const CORRIDOR_A_LO = TURN0_TOP + 2 * NODE_H + ROW_GAP + 15; // 275（回合间走廊下沿）
-const CORRIDOR_B = TURN1_TOP + 2 * NODE_H + ROW_GAP + 20; // 530（回合 1 下方走廊）
+/* Row-gap / corridor routing constants */
+const ROW_GAP_Y = TURN0_TOP + NODE_H + ROW_GAP / 2; // 185 (between turn-0 upper and lower rows)
+const CORRIDOR_A_LO = TURN0_TOP + 2 * NODE_H + ROW_GAP + 15; // 275 (lower edge of the inter-turn corridor)
+const CORRIDOR_B = TURN1_TOP + 2 * NODE_H + ROW_GAP + 20; // 530 (corridor below turn 1)
 
 const stationIdx = (s: StationId) => STATIONS.findIndex((x) => x.id === s);
 const colCenter = (i: number) => (WIDTH * (i + 0.5)) / STATIONS.length;
@@ -55,14 +56,14 @@ interface Pos {
 }
 
 export function FlowTree({ events, selectedIdx, onSelect }: Props) {
-  /* 每事件绝对定位：turn 0 上半部、turn 1 下半部，列内按 idx 堆叠留 gap */
+  /* Absolute position per event: turn 0 in the upper band, turn 1 in the lower band; stacked by idx within each column with a gap */
   const pos = new Map<number, Pos>();
   for (const s of STATIONS) {
     const col = events
       .filter((e) => e.station === s.id)
       .sort((a, b) => a.idx - b.idx);
     const cx = colCenter(stationIdx(s.id));
-    /* 全列统一左侧 trunk（WIDTH 下最左列 trunk 仍在画布内） */
+    /* Trunk on the left for every column (at WIDTH the leftmost trunk still fits inside the canvas) */
     const trunkX = cx - TRUNK_OFF < 0 ? cx + TRUNK_OFF : cx - TRUNK_OFF;
     const place = (list: TraceEvent[], topOffset: number) =>
       list.forEach((e, i) => {
@@ -79,15 +80,16 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
       col.filter((e) => e.turn === 0),
       TURN0_TOP
     );
-    // 真实 trace 通常有多个回合；原型只画 2 回合。把 turn >= 1 全部堆到
-    // 下半带（TURN1_TOP），避免 turn >= 2 的事件无位置（pos.get 返回 undefined）。
+    // Real traces usually span more turns than the prototype's 2; stack every
+    // turn >= 1 into the lower band (TURN1_TOP) so turn >= 2 events still get a
+    // position (otherwise pos.get would return undefined).
     place(
       col.filter((e) => e.turn >= 1),
       TURN1_TOP
     );
   }
 
-  /* 站点 → 事件：节点顶部拐角 → 本列 trunk → 徽章中心 */
+  /* Station → event arcs: node top corner → column trunk → badge centre */
   const stationArcs = events.map((e) => {
     const p = pos.get(e.idx)!;
     const color = isErr(e.status) ? "var(--color-danger)" : "var(--color-line)";
@@ -105,7 +107,7 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
     );
   });
 
-  /* 顺序弧：相邻事件沿时间序列；错误路径整链变红 + 加粗 */
+  /* Sequence arcs: adjacent events in time order; error chains turn fully red + bolder */
   const seqArcs: ReactNode[] = [];
   for (let k = 0; k < events.length - 1; k++) {
     const a = events[k];
@@ -117,30 +119,30 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
     const strokeW = isErrLine ? 2.5 : 1.4;
     let d: string;
     if (a.station === b.station) {
-      /* 同列：节点底 → 下一节点顶（垂直小 S，当前数据不命中） */
+      /* Same column: node bottom → next node top (small vertical S; not hit by current data) */
       const y1 = pa.top + NODE_H;
       const y2 = pb.top;
       d = `M ${pa.cx} ${y1} C ${pa.cx} ${y1 + 16}, ${pa.cx} ${y2 - 16}, ${pa.cx} ${y2}`;
     } else if (pb.cx > pa.cx) {
-      /* 跨列左→右：右缘 → 下一节点左缘（水平小 S，同一行高） */
+      /* Cross-column left→right: right edge → next node's left edge (small horizontal S, same row height) */
       const x1 = pa.left + NODE_W;
       const x2 = pb.left;
       const dx = Math.max(8, (x2 - x1) / 2);
       d = `M ${x1} ${pa.cy} C ${x1 + dx} ${pa.cy}, ${x2 - dx} ${pb.cy}, ${x2} ${pb.cy}`;
     } else if (a.turn !== b.turn) {
-      /* 跨列右→左 + 跨回合：经回合间走廊（y 260..360） */
+      /* Cross-column right→left across turns: routed through the inter-turn corridor (y 260..360) */
       const y1 = pa.top + NODE_H;
       const y2 = pb.top;
       const c = (y1 + y2) / 2;
       d = `M ${pa.cx} ${y1} C ${pa.cx} ${c}, ${pb.cx} ${c}, ${pb.cx} ${y2}`;
     } else if (a.turn === 0 && pa.top < pb.top) {
-      /* 回合 0 上排 → 下排：经排间小走廊（不扫过同列下排节点） */
+      /* Turn-0 upper → lower row: through the small inter-row corridor (avoids sweeping over same-column lower nodes) */
       d = `M ${pa.cx} ${pa.top + NODE_H} C ${pa.cx} ${ROW_GAP_Y}, ${pb.cx} ${ROW_GAP_Y}, ${pb.cx} ${pb.top}`;
     } else if (a.turn === 0) {
-      /* 回合 0 下排 → 下排：经回合间走廊下沿 */
+      /* Turn-0 lower → lower row: along the inter-turn corridor's lower edge */
       d = `M ${pa.cx} ${pa.top + NODE_H} C ${pa.cx} ${CORRIDOR_A_LO}, ${pb.cx} ${CORRIDOR_A_LO}, ${pb.cx} ${pb.top + NODE_H}`;
     } else {
-      /* 回合 1：绕底部走廊（画布下沿之上） */
+      /* Turn 1: detour via the bottom corridor (above the canvas edge) */
       d = `M ${pa.cx} ${pa.top + NODE_H} C ${pa.cx} ${CORRIDOR_B}, ${pb.cx} ${CORRIDOR_B}, ${pb.cx} ${pb.top + NODE_H}`;
     }
     seqArcs.push(
@@ -155,7 +157,7 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
     );
   }
 
-  /* 错误链路背景带：覆盖错误链经过的整片区域（单块淡红遮罩） */
+  /* Error-chain background band: one pale-red mask covering the region the error chain traverses */
   const errIdxs = events.filter((e) => isErr(e.status));
   let band: ReactNode = null;
   if (errIdxs.length > 0) {
@@ -181,7 +183,7 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
 
   return (
     <div style={{ position: "relative", width: WIDTH, height: TOTAL_H }}>
-      {/* SVG 连线层 */}
+      {/* SVG connector layer */}
       <svg
         style={{
           position: "absolute",
@@ -196,7 +198,7 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
         {seqArcs}
       </svg>
 
-      {/* 顶部 6 站点徽章 */}
+      {/* Top station badges (one per column) */}
       {STATIONS.map((s) => {
         const cx = colCenter(stationIdx(s.id));
         const hasErr = events.some(
@@ -229,7 +231,7 @@ export function FlowTree({ events, selectedIdx, onSelect }: Props) {
         );
       })}
 
-      {/* 事件节点 */}
+      {/* Event nodes */}
       {events.map((e) => {
         const p = pos.get(e.idx)!;
         const tone = statusTone(e.status);

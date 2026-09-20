@@ -12,7 +12,7 @@ const OPTIONS: { id: TraceView; label: string }[] = [
   { id: "table", label: "表格" },
 ];
 
-/** 视图切换：FlowTree 为主视图，TraceTable 保留为表格变体（spec Open Q5）。 */
+/** View switch: FlowTree is the primary view; TraceTable stays as the table variant (spec Open Q5). */
 export function TraceViewToggle({ value, onChange }: TraceViewToggleProps) {
   return (
     <div className="flex items-center gap-1 rounded-pill border border-line bg-bg p-0.5">

@@ -1,8 +1,8 @@
 /**
- * serve-workspace T7a — ChatApp `cyclePermMode` hook (review fix M6)。
+ * ChatApp `cyclePermMode` hook.
  *
- * 把 ChatApp 内 ~12 行的 `cyclePermMode` 函数 + perm 调用模式抽到本 hook。
- * 行为契约：与原 inline handler 100% 等价。
+ * Extracts the ~12-line `cyclePermMode` + perm call pattern from ChatApp.
+ * Behavioral contract: 100% equivalent to the original inline handler.
  */
 import { useCallback } from "react";
 import { permissionModeLabel } from "../lib/permission-mode";

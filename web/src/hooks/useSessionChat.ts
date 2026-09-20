@@ -23,8 +23,9 @@ export type ChatUiMessage =
       answer: TurnAnswerDto;
     }
   | {
-      // 纯本地提示（slash 命令反馈等）：不进 wire，turnsToMessages 不产生，
-      // applySession（会话切换/压缩刷新）时被替换清除。
+      // Local-only notice (slash-command feedback etc.): never on the wire,
+      // never produced by turnsToMessages, and cleared (replaced) by
+      // applySession on session switch / compact refresh.
       id: string;
       role: "notice";
       text: string;
@@ -39,12 +40,12 @@ export type SessionChatState = {
   lastAnswer: TurnAnswerDto | null;
   healthLabel: string | null;
   contextWindow: number | null;
-  /** 模型路由 ID（health 下发）；未配置 → null。输入框下方状态条显示。 */
+  /** Model routing id (delivered by health); null when unconfigured. Shown in the status bar under the input. */
   model: string | null;
 };
 
 export type SessionChatApi = SessionChatState & {
-  /** `thinking` (T5) 为该回合的可选覆盖；未提供时后端走缓存配置。 */
+  /** `thinking` is an optional per-turn override; when omitted the backend uses cached config. */
   sendMessage: (
     text: string,
     thinking?: ThinkingOverride,
@@ -61,7 +62,7 @@ export type SessionChatApi = SessionChatState & {
   retryBootstrap: () => void;
   /** Clear mid-session error without resetting conversation. */
   clearError: () => void;
-  /** 追加一条纯本地 notice 消息（slash 命令反馈；不进 wire）。 */
+  /** Append a local-only notice message (slash-command feedback; not on the wire). */
   pushNotice: (text: string) => void;
 };
 
@@ -73,9 +74,10 @@ type ApplySessionExtras = {
 };
 
 /**
- * T9b: 进站总是从 0 创建新会话, 不再读 localStorage 恢复旧的 conversation_id。
- * serve 入口 T9a 已确保 `createSession` 在 default workspace 下永远成功,
- * 因此 fresh-on-mount 不再需要任何回退路径 — UI 与 session 文件一一对应。
+ * Every visit starts from a freshly created session — no more restoring
+ * a stale conversation_id from localStorage. Entry auto-bind guarantees
+ * `createSession` always succeeds under the default workspace, so
+ * fresh-on-mount needs no fallback path: UI and session files map 1:1.
  */
 function errMessage(e: unknown): string {
   if (e instanceof SessionApiError) return e.message;
@@ -99,7 +101,7 @@ function queryIdSlice(query: string): string {
  * Agent-message keep predicate: emit when finalText is non-empty OR when the
  * turn carries thinking OR tool calls. A maxTurns/timeout turn that ran tools
  * (or thought) but never produced text is NOT a blank reply — dropping it
- * loses the tool/thinking trail entirely (H2 regression). AgentCard renders
+ * loses the tool/thinking trail entirely. AgentCard renders
  * the empty-text body region as an empty block alongside its thinking /
  * tool sections, so `text: ""` is safe for the display path.
  */
@@ -229,9 +231,10 @@ export function useSessionChat(): SessionChatApi {
         contextWindow: health.contextWindow,
         model: health.model ?? null,
       };
-      // T9b: 进站总是 fresh-on-mount — health 通就立刻 createSession, 不读
-      // localStorage, 不尝试恢复旧会话。serve T9a auto-bind 后
-      // `createSession` 在 default workspace 下永远成功, 无需 fallback。
+      // Fresh-on-mount always — once health passes, createSession
+      // immediately; no localStorage read, no restoring old sessions. After
+      // entry auto-bind, `createSession` always succeeds under the default
+      // workspace, so no fallback is needed.
       await createAndAdopt(gen, healthExtras);
     } catch (e) {
       if (gen !== bootGen.current) return;
@@ -334,9 +337,11 @@ export function useSessionChat(): SessionChatApi {
     const gen = bootGen.current;
     const id = sessionIdRef.current;
     if (!id) return false;
-    // 保持 phase=ready（不置 loading），避免压缩这种轻操作引起全屏闪烁。
-    // 失败不落全局 error StateBlock（那会盖住整个消息区）——rethrow 交由调用方
-    // （App handleCompact）做局部提示，避免与 sendMessage 的大幅错误 UI 混淆。
+    // Keep phase=ready (no loading) so a light op like compaction doesn't
+    // flash the whole screen. Failure does not set the global error
+    // StateBlock (it would cover the message area) — rethrow and let the
+    // caller (App handleCompact) show a local notice instead, avoiding
+    // confusion with sendMessage's big error UI.
     try {
       const res = await api.compactSession(id);
       if (gen !== bootGen.current) return false;

@@ -1,19 +1,21 @@
 /**
  * web/src/components/UsageChip.tsx
  *
- * 上下文用量块（输入框下方状态条的右半部）：`X.Xk / Y.Yk` token 明细 +
- * 64px 进度条 + 百分比，三档色语义沿用原口径（<50% #7ab8ff / ≥50%
- * #d9a343 / >80% #c95d47，与 TUI context-bar.tsx 同值）；悬停 title 给出
- * 精确 token 值。
+ * Context-usage block (right half of the status bar under the input): `X.Xk /
+ * Y.Yk` token breakdown + 64px progress bar + percentage. Three-tier color
+ * semantics unchanged (<50% #7ab8ff / ≥50% #d9a343 / >80% #c95d47, same values
+ * as TUI context-bar.tsx); hover title shows exact token counts.
  *
- * 跨 package 镜像约束：三档色阈值与数值语义和 TUI src/tui/context-bar.tsx
- * 镜像同值 —— 修改任一侧必须同步另一侧（公式 / 三档色阈值双改）。
+ * Cross-package mirror constraint: the three color thresholds and numeric
+ * semantics mirror TUI src/tui/context-bar.tsx — changing either side must
+ * sync the other (formula / thresholds change together).
  *
- * 数值语义（迁移自 ContextUsageStrip，见 CONTEXT.md `context usage
- * (display)` 词条）：used = inputTokens + cacheReadInputTokens +
- * cacheCreationInputTokens（cache null → 0）；pct = round(used /
- * contextWindow × 100)。contextWindow 缺失 → null；usage 为 null（首回合
- * 前尚无读数）→ 按 0 渲染（状态条常驻，不等计算完成才出现）。
+ * Numeric semantics (migrated from ContextUsageStrip, see CONTEXT.md
+ * `context usage (display)`): used = inputTokens + cacheReadInputTokens +
+ * cacheCreationInputTokens (null cache → 0); pct = round(used /
+ * contextWindow × 100). Missing contextWindow → null; null usage (no reading
+ * before the first turn) → render as 0 (the strip is always present; it does
+ * not wait for a computed value to appear).
  */
 import { useMemo } from "react";
 import type { TokenUsage } from "../api/types";
@@ -24,8 +26,8 @@ export type UsageChipProps = {
   readonly sending?: boolean;
 };
 
-// 三档色阈值与 TUI src/tui/context-bar.tsx（contextColor / CTX_BLUE）跨
-// package 镜像同值 —— 修改任一侧必须同步另一侧。
+// Three-tier colors mirror TUI src/tui/context-bar.tsx (contextColor / CTX_BLUE)
+// cross-package — changing either side must sync the other.
 const COLOR_SAFE = "#7ab8ff";
 const COLOR_WARN = "#d9a343";
 const COLOR_ALERT = "#c95d47";
@@ -51,7 +53,7 @@ export function UsageChip({
     if (contextWindow === null || contextWindow <= 0) {
       return null;
     }
-    // usage 缺席（首回合前）→ used=0：状态条常驻，不隐藏等读数。
+    // usage absent (before first turn) → used=0: the strip persists, never hidden awaiting a reading.
     const used = usage === null ? 0 : ctxUsed(usage);
     return {
       used,
@@ -67,7 +69,7 @@ export function UsageChip({
 
   const color =
     detail.pct > 80 ? COLOR_ALERT : detail.pct >= 50 ? COLOR_WARN : COLOR_SAFE;
-  // sending 时轻微透明，与 ContextUsageStrip 现有口径一致（读数滞后一帧）。
+  // Slight transparency while sending, matching ContextUsageStrip's existing behavior (reading lags one frame).
   const style = sending ? { color, opacity: 0.85 } : { color };
 
   return (

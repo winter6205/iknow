@@ -1,22 +1,21 @@
 /**
- * serve-workspace T7a — SessionSidebar orchestrator (review fix slimming)。
+ * SessionSidebar orchestrator.
  *
- * 历史：该文件原 777 行，prop drilling 6 层（H1）、超长（H2）、ExpandedSidebar
- * 长方法（M5）。T7a 把：
+ * History: this file was 777 lines with 6-level prop drilling, excessive
+ * length, and a long ExpandedSidebar method. Extracted:
  *  - useWorkspaceGroups + WorkspaceGroupHeader / WorkspaceGroupBlock /
- *    GroupCreateButton / GroupedSessionListView 抽到 `grouped-view.tsx` + Context。
- *  - 图标 (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronIcon)
- *    抽到 `icons.tsx`。
- *  - 三态展示 (LoadingState / ErrorState / EmptyState) 抽到 `sidebar-states.tsx`。
- *  - SidebarHeader / NewSessionCTA / ExpandedSidebar / CollapsedRail 抽到
- *    `sidebar-shell.tsx`。
+ *    GroupCreateButton / GroupedSessionListView → `grouped-view.tsx` + Context.
+ *  - Icons (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronIcon) → `icons.tsx`.
+ *  - Tri-state display (LoadingState / ErrorState / EmptyState) → `sidebar-states.tsx`.
+ *  - SidebarHeader / NewSessionCTA / ExpandedSidebar / CollapsedRail →
+ *    `sidebar-shell.tsx`.
  *
- * T8: `useSessionList` 从本文件提到 `web/src/hooks/use-session-list.ts`,
- * 让 App 也能用同一份 session list (lookup active session 的 workspaceRoot
- * 喂给 WorkspaceChip)。
+ * `useSessionList` lifted from this file to
+ * `web/src/hooks/use-session-list.ts` so App can share the same session list
+ * (looking up the active session's workspaceRoot for WorkspaceChip).
  *
- * 本文件只保留 orchestration（collapsed 切换、focus 管理、useSessionList、
- * 子组件 prop 装配）。T4-T6 行为契约不变。
+ * What remains here is orchestration only (collapse toggle, focus management,
+ * useSessionList, subcomponent prop wiring).
  */
 import { useEffect, useRef } from "react";
 import { useSessionList } from "../hooks/use-session-list";
@@ -29,9 +28,10 @@ export type SessionSidebarProps = {
   onToggleCollapsed: () => void;
   onNewSession: () => void;
   /**
-   * serve-workspace T6: 工作空间组头部"+"按钮的回调 — 在指定 workspace
-   * 内新建会话。App 层负责把 root 绑到 picker (若需要), 再调 chat.newSession。
-   * (未绑定) 组不渲染 + 按钮, 此回调不会被调用。
+   * Callback for the workspace-group header "+" button —
+   * create a new session inside the given workspace. The App layer binds the
+   * root to the picker (if needed), then calls chat.newSession. The (未绑定)
+   * ("unbound") group renders no "+" button, so this callback never fires for it.
    */
   onCreateInWorkspace: (root: string) => void;
   /**

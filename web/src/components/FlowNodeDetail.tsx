@@ -1,5 +1,5 @@
-/* 右侧详情面板：选中事件的 keyvals 字段 + 原始 payload
-   移植自 prototype web/trace-prototype/src/components/SideRight.tsx。 */
+/* Right-hand detail panel: selected event's key/value fields + raw payload.
+   Ported from prototype web/trace-prototype/src/components/SideRight.tsx. */
 import type { TraceEvent } from "../lib/flowTree";
 import { STATIONS, fmtDur, statusTone } from "../lib/flowTree";
 

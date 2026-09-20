@@ -1,20 +1,20 @@
 /**
- * serve-workspace T7a — App 层 workspace 相关 handler 抽离 (review fix M6)。
+ * Hoist App-layer workspace handlers into one hook
+ * so ChatApp's main file converges to ≤ 200 lines:
+ *  - `handleNewSession`: unbound → open the picker; bound → newSession + bumpSidebar.
+ *  - `handleCreateInWorkspace`: rebind root + newSession; failures go to chat.pushNotice.
+ *  - `handleSelect`: switch to the target session + bumpSidebar.
  *
- * 把 ChatApp 内零散分布在 60+ 行内的三组 workspace handler 集中到一处 hook，
- * 让 ChatApp 主文件收敛到 ≤ 200 行：
- *  - `handleNewSession`：unbound 引导 picker / bound 直接 newSession + bumpSidebar。
- *  - `handleCreateInWorkspace`：换根 + newSession，失败走 chat.pushNotice。
- *  - `handleSelect`：切到目标会话 + bumpSidebar。
+ * With auto-binding of the default workspace on entry, `ws.bound`
+ * is always truthy, so the earlier `autoOpenedRef` + one-shot effect became dead code
+ * and was removed. The unbound branch in `handleNewSession` stays — it still
+ * guides the picker after a rare manual unbind.
  *
- * T9b: 进站 default workspace 由 serve T9a auto-bind, `ws.bound` 永远是 truthy,
- * 因此 T5 的 `autoOpenedRef` + 一次性 effect 已是 dead code, 删除。
- * `handleNewSession` 内 unbound 分支保留 — 用户主动解绑 (极少数) 后仍引导 picker。
+ * Popover dismissal (Esc / outside-click) + focus-return to the chip live
+ * in the separate `usePopoverDismiss` hook so this file's body only concerns
+ * the handler trio.
  *
- * T8: popover 关闭 (Esc / outside-click) + 焦点回 chip — `usePopoverDismiss`
- * effect 抽到独立 hook, 让本文件主体只关心 handler 三件套。
- *
- * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
+ * Behavioral contract: 100% equivalent to the original inline handlers; only the carrier changed.
  */
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,49 +25,51 @@ type ChatApi = ReturnType<typeof useSessionChat>;
 type WsApi = ReturnType<typeof useWorkspace>;
 
 export type UseWorkspaceActionsResult = {
-  /** Picker 显示态 — CTA / chip / /workspace 三入口共用。 */
+  /** Picker visibility — shared by the CTA / chip / /workspace entry points. */
   readonly workspaceOpen: boolean;
   /**
-   * 切换 picker 开 / 关。形参兼容 React `SetStateAction<boolean>` — 调用方
-   * 既可传 `true` / `false`, 也可传 `(prev) => !prev` 形式做 toggle
-   * (T8 chip 二次点击切换需要)。
+   * Open / close the picker. The parameter is React's
+   * `SetStateAction<boolean>`, accepting both `true` / `false` and the
+   * `(prev) => !prev` toggle form (needed by the second-click-on-chip behavior).
    */
   readonly setWorkspaceOpen: Dispatch<SetStateAction<boolean>>;
-  /** Sidebar 列表刷新信号 — lifecycle 事件后 bump。 */
+  /** Sidebar list refresh signal — bumped after lifecycle events. */
   readonly sidebarSignal: number;
   readonly bumpSidebar: () => void;
-  /** 创建新会话：unbound 引导 picker；bound 直接 newSession + bumpSidebar。 */
+  /** Create a new session: unbound guides the picker; bound goes straight to newSession + bumpSidebar. */
   readonly handleNewSession: () => Promise<void>;
-  /** Sidebar 组头部 + 按钮：在指定 workspace 内新建会话。 */
+  /** Sidebar group-header "+" button: create a session inside the given workspace. */
   readonly handleCreateInWorkspace: (root: string) => Promise<void>;
-  /** Sidebar 切换会话。 */
+  /** Sidebar session switch. */
   readonly handleSelect: (id: string) => Promise<void>;
 };
 
 /**
- * serve-workspace T8 + review fix M1/L1: popover 关闭三件套 effect。
+ * The popover-dismiss effect trio.
  *
- *  - `open === false` → effect 直接 return, 不挂监听, 不抢焦点。
+ *  - `open === false` → the effect returns early: no listeners, no focus grabs.
  *  - `open === true`:
- *      a. document `mousedown` 监听 — 命中 popover 之外 → close + focus trigger。
- *      b. document `keydown` 监听 — Esc → close + focus trigger。
+ *      a. document `mousedown` — a hit outside the popover → close + focus trigger.
+ *      b. document `keydown` — Esc → close + focus trigger.
  *
- * 与 picker 子组件内 onClick / onKeyDown 无关 — popover 自身不内嵌焦点陷阱
- * (低耦合), 仅做 dismiss 触发。focus-return 由 effect 完成 (避免 React render
- * 期间触发 focus 的 React 18 警告)。
+ * Independent of the picker child's own onClick / onKeyDown — the popover
+ * embeds no focus trap (low coupling) and only triggers dismissal. focus-return
+ * happens in the effect (avoiding React 18 warnings from focusing during render).
  *
- * a11y 红线: Esc 关后焦点必须回到 trigger (chip button), 让键盘用户能继续
- * 操作页面其他部分 (spec §a11y 红线)。
+ * a11y red line: after Esc closes, focus must return to the trigger (chip
+ * button) so keyboard users can keep operating the page (spec a11y red line).
  *
- * 反馈 M1 修复: 父层 inline `onClose` 是新 closure each render, 直接放 deps
- * 会让 effect 每次 render re-attach (mousedown + keydown × 2 listeners)。
- * 把 onClose 放进 ref, effect 闭包读 ref.current() — deps 收敛到
- * `[open, triggerRef, popoverRef]`, stable identity consumers 可放心 memo。
+ * A parent-inline `onClose` is a new closure each render;
+ * placing it in deps would re-attach the effect every render (mousedown +
+ * keydown × 2 listeners). Wrap it in a ref and call ref.current() in the
+ * handlers — deps converge to `[open, triggerRef, popoverRef]`, safe for
+ * stable-identity memo consumers.
  *
- * 反馈 L1 修复: 触发器 (chip) 已被外层 wrapper (popoverRef) 包裹
- * (ChatHeader 的 `<div ref={workspacePopoverRef}>` 包整个 chip + popover 容器),
- * trigger.contains 检查完全被 popover.contains 覆盖 — 删除以减表面。
- * 前提: 调用方必须保持这个包含关系 (本 App 调用即如此)。
+ * The trigger (chip) is already wrapped by the outer popover
+ * container (ChatHeader's `<div ref={workspacePopoverRef}>` wraps chip +
+ * popover together), so the trigger.contains check is fully subsumed by
+ * popover.contains — removed to shrink the surface. Callers must preserve
+ * that containment (as this App does).
  */
 export function usePopoverDismiss(
   open: boolean,
@@ -75,8 +77,8 @@ export function usePopoverDismiss(
   popoverRef: RefObject<HTMLElement | null>,
   onClose: () => void
 ): void {
-  // M1: ref 包装 onClose — 永远读到最新 closure, 但 effect 自身不依赖其
-  // identity,只在 handler 内调用,避免 re-attach。
+  // Wrap onClose in a ref — handlers always read the latest closure while
+  // the effect itself never depends on its identity, avoiding re-attach.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -85,11 +87,13 @@ export function usePopoverDismiss(
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target;
       if (!(target instanceof Node)) return;
-      // L1: trigger 已被 popoverRef 包含 (见 App.tsx 的 ref 拓扑), 去掉
-      // triggerRef.contains 检查以减表面, 行为等价。
+      // The trigger is contained by popoverRef (see the App.tsx ref
+      // topology); the triggerRef.contains check was removed to shrink the
+      // surface, behavior equivalent.
       if (popoverRef.current?.contains(target)) return;
       onCloseRef.current();
-      // 下一帧把焦点送回 trigger, 避免与 mouseup 顺序冲突。
+      // Return focus to the trigger on the next tick, avoiding an ordering
+      // conflict with mouseup.
       queueMicrotask(() => triggerRef.current?.focus());
     };
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -116,11 +120,13 @@ export function useWorkspaceActions(
   const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
 
   /**
-   * T5/T9b: unbound 状态下点「新会话」→ 打开 picker 引导选根（spec §Commands 1:
-   * unbound 不可发 turn）。T9a 后, serve auto-bind 让 ws.bound 默认 truthy,
-   * 这条分支只在用户主动解绑后才会触发, 是少数派路径但仍有意义 — 保留。
-   * ws.bound: 后端 hub.createSession 取 this.boundRoot (= ws.root) 写入
-   * 新会话, 不需要额外传 workspaceRoot 参数(T7+ 后端扩展点)。
+   * Clicking "new session" while unbound opens the picker to guide
+   * root selection (spec: unbound cannot send a turn). With entry auto-bind,
+   * ws.bound defaults to truthy, so this fires only after a manual
+   * unbind — a minority path but still meaningful, so kept.
+   * ws.bound: the backend hub.createSession takes this.boundRoot (= ws.root)
+   * for the new session, so no extra workspaceRoot parameter is needed
+   * (backend extension point).
    */
   const handleNewSession = useCallback(async () => {
     if (!ws.bound) {
@@ -132,17 +138,18 @@ export function useWorkspaceActions(
   }, [chat, bumpSidebar, ws.bound]);
 
   /**
-   * T6: Sidebar 组头部"+"按钮回调 — 在指定 workspace 内新建会话。
-   * 流程: 把 picker 绑到目标 root → 再建新会话。后端 createSession 取
-   * this.boundRoot 写入新会话。失败兜底走 chat.pushNotice。
+   * Sidebar group-header "+" callback — create a session inside the given
+   * workspace. Flow: bind to the target root first, then newSession; the
+   * backend createSession writes this.boundRoot into the new session.
+   * Failures fall back to chat.pushNotice.
    */
   const handleCreateInWorkspace = useCallback(
     async (root: string) => {
       try {
         if (!ws.bound || ws.root !== root) {
-          // sidebar 组根是从已存在的 session 文件读的, 必是已信任 — 无需
-          // confirmTrust。bindWorkspace 在 recentsHome 未装配(legacy)时
-          // 也总是成功。
+          // Group roots are read from existing session files, so they are
+          // always trusted — no confirmTrust needed. bindWorkspace also always
+          // succeeds when recentsHome is absent (legacy).
           await ws.bind(root);
         }
         await chat.newSession();
@@ -159,7 +166,7 @@ export function useWorkspaceActions(
   );
 
   /**
-   * Sidebar 切换会话。setConversation may switch to a session not yet in
+   * Sidebar session switch. setConversation may switch to a session not yet in
    * the cached list (e.g. just-created entries still propagating); refresh
    * sidebar to be safe.
    */

@@ -1,16 +1,17 @@
 /**
- * serve-workspace T7a — ChatApp 主区域 inline 对话框 / 错误块。
+ * Inline dialogs / error blocks for the ChatApp main area.
  *
- * review fix M6: 把 ChatApp 主区域 inline 的 ErrorBlock / McpPanel /
- * RewindPicker / MessageList 集合 (~75 行 JSX) 抽到本
- * 组件，让 ChatApp 主文件收敛到 ≤ 200 行。
+ * Extracts the inline ErrorBlock / McpPanel / RewindPicker /
+ * MessageList set (~75 lines of JSX) into this component so ChatApp's main
+ * file stays ≤200 lines.
  *
- * T8: WorkspacePicker 不再渲染在本主区 — 改成 popover 锚定在 ChatHeader
- * 的 WorkspaceChip 右上 (ChatHeader 接 `workspacePopover` 插槽, App 注入)。
- * 主区只留 MessageList + inline 错误 / 对话框 (McpPanel / RewindPicker /
- * PermissionDialog / StateBlock), 不再有「挤掉会话框位置」的布局占位。
+ * WorkspacePicker no longer renders in the main area — it is a popover
+ * anchored at the ChatHeader WorkspaceChip's top-right (ChatHeader takes a
+ * `workspacePopover` slot injected by App). The main area keeps only
+ * MessageList + inline error / dialog blocks (McpPanel / RewindPicker /
+ * PermissionDialog / StateBlock) — no more layout that squeezes the chat box.
  *
- * 行为契约: 与原 ChatApp 内 inline JSX 100% 等价。
+ * Behaviour contract: 100% equivalent to the original inline JSX in ChatApp.
  */
 import type { ReactNode } from "react";
 import { McpPanel } from "./McpPanel";
@@ -93,9 +94,9 @@ export function ChatMainDialogs({
 }
 
 /**
- * MCP 重载 + reload 副作用 helper（注入 reloadMcp 闭包）。
- * 由 ChatApp 提供 chat / setMcpServers / setMcpTools / setMcpReloading，
- * 返回一个可作 onReload 用的稳定 callback。
+ * MCP reload side-effect helper (supplies the reloadMcp closure).
+ * ChatApp provides chat / setMcpServers / setMcpTools / setMcpReloading;
+ * returns a stable callback usable as onReload.
  */
 export function useMcpReload({
   chat,

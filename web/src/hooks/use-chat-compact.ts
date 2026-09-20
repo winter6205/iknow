@@ -1,8 +1,8 @@
 /**
- * serve-workspace T7a — ChatApp `/compact` 命令 hook (review fix M6)。
+ * ChatApp `/compact` command hook.
  *
- * 把 ChatApp 内 ~20 行的 `handleCompact` 函数抽到本 hook，避免 ChatApp 主
- * 文件承载业务错误处理。T5-T6 行为契约不变。
+ * Extracts the ~20-line `handleCompact` so ChatApp's main file does not carry
+ * business error handling. Behavioral contract unchanged.
  */
 import { useCallback, useState } from "react";
 import type { useSessionChat } from "./useSessionChat";
@@ -19,15 +19,16 @@ export function useChatCompact(chat: ChatApi): {
     setCompacting(true);
     try {
       const didCompact = await chat.compact();
-      // plan manual-compact-trigger T2:web 端 useSessionChat.compact() 仍只
-      // 返 boolean(避免扩 SessionChatApi 公开 surface),hook 走简化二分支
-      // 文案。TUI reason 精度由 src/tui/app.tsx compactNoticeFor 承担。
-      // didCompact=true 涵盖 windowed / full_summary 两条压缩成功路径;false
-      // 文案语义是「没有可压缩的上下文」,禁止引用 auto 阈值。web 端
-      // api.compactSession 不传 signal(无取消入口);hub 对 abort 返
-      // 200 + {compacted:false, cancelled:true}、不抛错,该响应同样以
-      // compacted:false 落到本分支与 messages_too_few 合并(web 接受两态
-      // 合并的现状决策),catch 只接网络/服务端真实故障。
+      // web's useSessionChat.compact() still
+      // returns a plain boolean (keeping the SessionChatApi surface narrow), so
+      // this hook uses simplified two-branch wording; TUI reason precision
+      // lives in src/tui/app.tsx compactNoticeFor. didCompact=true covers both
+      // success paths (windowed / full_summary); the false branch means "no
+      // compactable context" — never cite the auto threshold. The web
+      // api.compactSession sends no signal (no cancel entry); on abort the hub
+      // returns 200 + {compacted:false, cancelled:true} without throwing, so
+      // that response also lands here merged with messages_too_few (an
+      // accepted web-side decision); catch only sees real network/server failures.
       chat.pushNotice(
         didCompact
           ? "已压缩上下文"

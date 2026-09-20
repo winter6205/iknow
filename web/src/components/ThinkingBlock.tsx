@@ -4,14 +4,16 @@ import { FOCUS_RING } from "../lib/ui";
 
 export type ThinkingBlockProps = {
   thinking: ThinkingView;
-  /** D2 (tui-display-consistency): 本回合 assistant 思考时长 (ms)。
-   *  缺席 = 旧会话无落盘 thinkingMs,只显示条目 / 加密计数 (与 TUI
-   *  折叠行「无秒数 → 只显示工具计数」同形态, spec SC8 / D6)。 */
+  /** This turn's assistant thinking duration (ms).
+   *  Absent = legacy session with no persisted thinkingMs; show only entry /
+   *  redacted counts (same shape as the TUI folded line's "无秒数 → 只显示工具计数"
+   *  — "no seconds → show only tool count"). */
   thinkingMs?: number;
 };
 
-/** D2: ms → 秒。Math.ceil 与 src/tui/turn-activity.ts thinkingMsToSeconds
- *  同姿态 (250ms 显成 1 秒)。非有限 / 负数 → 0 (与 TUI 同 posture)。 */
+/** ms → seconds. Math.ceil matches the posture of
+ *  src/tui/turn-activity.ts thinkingMsToSeconds (250ms displays as 1s).
+ *  Non-finite / negative → 0 (same posture as TUI). */
 function thinkingMsToSeconds(ms: number): number {
   if (!Number.isFinite(ms) || ms <= 0) return 0;
   return Math.ceil(ms / 1000);
@@ -29,10 +31,11 @@ export function ThinkingBlock({ thinking, thinkingMs }: ThinkingBlockProps) {
   const hasContent = entries.length > 0 || redacted > 0 || seconds > 0;
   if (!hasContent) return null;
 
-  // 文案与 TUI 折叠行同形 (src/tui/think-fold.ts formatThinkingFold):
-  //  `思考了 N 秒` 仅在 seconds > 0 时挂上;旧会话无 thinkingMs → 只显示
-  //  条目计数 + 已加密计数,贴合 spec SC8 「旧数据只显示工具计数」语义
-  //  (web 侧 thinking 块挂条目计数,工具计数在 toolCalls 区,互不重复)。
+  // Wording mirrors the TUI folded line (src/tui/think-fold.ts formatThinkingFold):
+  //  `思考了 N 秒` ("thought for N seconds") is appended only when seconds > 0;
+  //  legacy sessions without thinkingMs show entry count + redacted count,
+  //  matching "old data shows only the tool count" (the web thinking
+  //  block carries entry counts; tool counts live in the toolCalls section — no duplication).
   const secondsLabel = seconds > 0 ? ` · 思考了 ${seconds} 秒` : "";
   const meta = `${entries.length}${
     redacted > 0 ? ` · 已加密 ×${redacted}` : ""

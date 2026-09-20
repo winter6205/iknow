@@ -1,10 +1,12 @@
 /**
- * stopReason 显示文案（T6）— 纯函数层，全值域映射。
- * 仅非 completed 停止原因有展示文案；completed 与未知值一律返回 null（不显示）。
- * 参数放宽为 string：wire 值域可能随后端演进漂移，展示层须容忍未知值（fail quiet）。
+ * stopReason display text — pure function layer, full value-domain mapping.
+ * Only non-completed stop reasons have display text; completed and unknown
+ * values return null (not shown). The param is widened to string: the wire
+ * domain may drift as the backend evolves, so the display layer must
+ * tolerate unknown values (fail quiet).
  */
 
-/** 非 completed 停止原因 → 中文提示文案（quiet mono / warn 色展示）。 */
+/** Non-completed stop reason → display label (rendered in quiet mono / warn tone). */
 export const STOP_REASON_LABELS: Record<string, string> = {
   maxTurns: "已达轮次上限，回答可能不完整",
   nonSuccessStop: "模型未正常完成回答",
@@ -15,7 +17,7 @@ export const STOP_REASON_LABELS: Record<string, string> = {
   fused: "工具环停滞，本轮已熔断",
 };
 
-/** completed / 缺失 / 未知值 → null（调用方不渲染）。 */
+/** completed / missing / unknown → null (caller renders nothing). */
 export function stopReasonLabel(
   reason: string | null | undefined
 ): string | null {

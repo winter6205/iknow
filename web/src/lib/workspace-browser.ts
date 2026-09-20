@@ -1,28 +1,32 @@
 /**
- * serve-workspace T3 — picker 子目录浏览器的纯逻辑层。
+ * Pure logic layer for the picker's subdirectory browser.
  *
- * 把 React 组件里"决定 base 默认值"与"路径切面包屑"两条决策抽出来, 让
- * 单测在 node 环境直接覆盖, 不依赖 jsdom / fetch。组件只负责渲染与副作用,
- * 行为契约都在这里。
+ * Extracts the two decisions from the React component — "pick the base
+ * default" and "split a path into breadcrumbs" — so node-env unit tests
+ * cover them without jsdom / fetch. The component only renders and handles
+ * side effects; the behavior contracts live here.
  *
- * 命名: "Browser" 而非 "Browse" — `browse` 是动词(`listWorkspaceSubdirs`),
- * `browser` 是组件/纯函数层。
+ * Naming: "Browser" not "Browse" — `browse` is the verb
+ * (`listWorkspaceSubdirs`); `browser` is the component / pure-function layer.
  */
 
 /**
- * 探测 WSL 的最小可用方案 — 简单 hardcode `/home/winner`。WSL 互转
- * (\\wsl$\Ubuntu\... ↔ /home/winner/...) 显式 out of scope (plan §Out of
- * scope)。后续 v2 想要动态探测 (`navigator.userAgent` 含 "Linux" 或经后端
- * 读 /proc/version) 时只需替换该常量, 调用点不动。
+ * Minimal WSL probe — simply hardcoded to `/home/winner`. WSL path
+ * translation (\\wsl$\Ubuntu\... ↔ /home/winner/...) is explicitly out of
+ * scope. A later v2 with dynamic probing
+ * (`navigator.userAgent` containing "Linux", or reading /proc/version via
+ * backend) only needs to replace this constant; call sites stay put.
  */
 export const WSL_DEFAULT_BASE = "/home/winner";
 
 /**
- * Picker mount 时 base 默认值决议:
- *  - currentRoot 优先 (已绑定则用户想换才改, 不要每次开 picker 都跳回 default)。
- *  - 缺 currentRoot → WSL_DEFAULT_BASE。
+ * Base default resolution when the picker mounts:
+ *  - currentRoot wins (if already bound, the user changes it on purpose;
+ *    don't jump back to the default every time the picker opens).
+ *  - no currentRoot → WSL_DEFAULT_BASE.
  *
- * 传入空串 / 纯空白视为缺席 (currentRoot 经 `?? ""` 规范化, "" / "   " 走 fallback)。
+ * Empty / whitespace-only input counts as absent (currentRoot is normalized
+ * via `?? ""`; "" / "   " take the fallback).
  */
 export function resolveBrowserRoot(
   currentRoot: string | null,
@@ -32,21 +36,25 @@ export function resolveBrowserRoot(
   return defaultBase;
 }
 
-/** breadcrumb 单段: name (展示) + path (点击后调 browse 的绝对路径)。 */
+/** One breadcrumb segment: name (displayed) + path (absolute path passed to browse on click). */
 export interface BreadcrumbSegment {
   readonly name: string;
   readonly path: string;
 }
 
 /**
- * 把绝对路径切成 breadcrumb 段 ([/, home, winner, projects, iknow])。
- *  - POSIX `/a/b/c` → 5 段含根 `/`。
- *  - 根 `/` → 单段 `{"name":"/", "path":"/"}` (picker 永远至少展示一段)。
- *  - 空串 → 同上 (兜底, 与 WorkspaceChip.basename 行为对齐)。
- *  - Windows 反斜杠按 `\\` 切 (WSL 路径不通, 但 Picker basename 兼容, 这里也兼容, 避免 Picker 内出现双形态不一致)。
+ * Split an absolute path into breadcrumb segments
+ * ([/, home, winner, projects, iknow]).
+ *  - POSIX `/a/b/c` → 5 segments including the root `/`.
+ *  - Root `/` → single `{"name":"/", "path":"/"}` (the picker always shows ≥1 segment).
+ *  - Empty string → same fallback, aligned with WorkspaceChip.basename.
+ *  - Windows backslash paths split on `\\` (useless over WSL, but the picker
+ *    basename accepts them; accepting here too avoids two inconsistent
+ *    forms inside the picker).
  *
- * 失败段 (`/foo/..` / 含双斜杠) 保留原始片段, 不做 normalize — browse 失败时
- * 由后端 422 走 onNotice 通道, 不在前端悄悄修。
+ * Odd segments (`/foo/..`, double slashes) are kept verbatim, no normalize —
+ * a failing browse surfaces as a backend 422 through the onNotice channel
+ * instead of being silently fixed in the frontend.
  */
 export function breadcrumbs(path: string): ReadonlyArray<BreadcrumbSegment> {
   const trimmed = path.trim();
@@ -54,10 +62,10 @@ export function breadcrumbs(path: string): ReadonlyArray<BreadcrumbSegment> {
     return [{ name: "/", path: "/" }];
   }
   const isWindows = path.includes("\\") && !path.startsWith("/");
-  // 统一用 "/" 做切分, 反斜杠先替换为正斜杠
+  // Split on "/" uniformly; backslashes are converted to forward slashes first
   const normalized = isWindows ? trimmed.replace(/\\/g, "/") : trimmed;
   const parts = normalized.split("/").filter((p) => p.length > 0);
-  // 根: "/"
+  // root: "/"
   const segs: BreadcrumbSegment[] = [{ name: "/", path: "/" }];
   let acc = "";
   for (const p of parts) {
@@ -68,8 +76,9 @@ export function breadcrumbs(path: string): ReadonlyArray<BreadcrumbSegment> {
 }
 
 /**
- * 给定子目录 entry (`{name, path}`), 用户点击后应该替换到 input 的值。
- * 直接取 `path` (后端给的绝对路径) — 这是 SSOT, 不重新 `join` 防 split 误差。
+ * Value to put in the input when a subdir entry (`{name, path}`) is clicked.
+ * Take `path` (the backend-given absolute path) as-is — it is the SSOT; no
+ * re-`join`, which would risk path-splitting errors.
  */
 export function entryToInputPath(entry: {
   readonly name: string;

@@ -1,6 +1,7 @@
 /**
- * 用户思考模式设置（T5）— 纯函数层，localStorage key "iknow:thinking"。
- * UI 组件只消费本模块；wire override 映射经 toWireOverride。
+ * User thinking-mode settings — pure function layer, localStorage key
+ * "iknow:thinking". UI components consume only this module; the wire
+ * override mapping goes through toWireOverride.
  */
 import type { ThinkingOverride } from "../api/types";
 
@@ -9,9 +10,9 @@ export const THINKING_STORAGE_KEY = "iknow:thinking";
 export type ThinkingEffort = "" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ThinkingSettings = {
-  /** false → 关闭 thinking（wire mode="off"）；true → adaptive。 */
+  /** false → thinking off (wire mode="off"); true → adaptive. */
   enabled: boolean;
-  /** adaptive 强度档位；"" = 自动（后端缺省）。 */
+  /** adaptive effort level; "" = auto (backend default). */
   effort: ThinkingEffort;
 };
 
@@ -20,7 +21,7 @@ export const DEFAULT_THINKING_SETTINGS: ThinkingSettings = {
   effort: "",
 };
 
-/** 档位 → 标签（英文；"" = auto）。 */
+/** Effort level → label (English; "" = auto). */
 export const EFFORT_LABELS: Record<ThinkingEffort, string> = {
   "": "auto",
   low: "low",
@@ -30,7 +31,7 @@ export const EFFORT_LABELS: Record<ThinkingEffort, string> = {
   max: "max",
 };
 
-/** 分段选择器的档位顺序（自动在前）。 */
+/** Effort order for the segmented picker (auto first). */
 export const EFFORT_OPTIONS: readonly ThinkingEffort[] = [
   "",
   "low",

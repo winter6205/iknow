@@ -1,8 +1,8 @@
 /**
- * serve-workspace T7a — ChatApp 底部 footer (review fix M6)。
+ * ChatApp footer assembly.
  *
- * 把 ChatApp 内 `<SubagentStatusBar>` + `<Composer>` 的装配从 ChatApp 抽到
- * 本组件，避免 ChatApp 主文件承载 ~25 行 JSX。T5-T6 行为契约不变。
+ * Extracts the <SubagentStatusBar> + <Composer> wiring out of ChatApp so its
+ * main file sheds ~25 lines of JSX.
  */
 import type { ReactNode } from "react";
 import { Composer } from "./Composer";
@@ -44,7 +44,7 @@ export function ChatFooter({
 }): ReactNode {
   return (
     <>
-      {/* 子代理状态栏（spec #358 SC8）：零子代理 → 组件返回 null，不打扰 idle 会话。 */}
+      {/* Subagent status bar: returns null with zero subagents, so idle sessions stay undisturbed. */}
       <SubagentStatusBar subagents={subagents} />
       <Composer
         disabled={!chat.session || chat.phase === "loading" || !ws.bound}

@@ -8,13 +8,14 @@ import { UserMessage } from "./UserMessage";
 export type MessageListProps = {
   messages: ChatUiMessage[];
   emptyHint?: string;
-  /** True while a request is in flight — renders the in-progress bubble at the bottom (T4). */
+  /** True while a request is in flight — renders the in-progress bubble at the bottom. */
   sending?: boolean;
 };
 
 // Flat per-message render under Turn semantics: user (idx*2) + agent (idx*2+1),
-// single 26px conversation gap (Stage 2 brief). Evidence is reserved — wire 不携带,
-// MessageList passes no evidence prop, so evidence UI 当前不触发（见 AgentCard 顶注）。
+// single 26px conversation gap (Stage 2 brief). Evidence is reserved — the wire
+// carries none and MessageList passes no evidence prop, so evidence UI never
+// triggers today (see AgentCard file header).
 export function MessageList({
   messages,
   emptyHint = "发送问题开始对话。",

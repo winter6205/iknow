@@ -1,14 +1,16 @@
 /**
- * serve-workspace T7a — SessionSidebar 的 ChatApp 侧 props 装配容器 (T7b 精简)。
+ * ChatApp-side props assembly container for SessionSidebar.
  *
- * review fix M6: 从 ChatApp 抽出 SessionSidebar 的 props 装配，把 ~12 行
- * inline JSX + 各 handler 引用从 ChatApp 主文件挪到本容器，ChatApp 只接
- * 装配后的 side。
+ * Moves the ~12 lines of SessionSidebar props wiring (inline
+ * JSX + handler references) out of ChatApp's main file; ChatApp receives only
+ * the assembled side.
  *
- * T7b review fix M2: `currentBoundRoot` 不再透传 — groupSessionsByWorkspace
- * 不再需要 picker 当前根。同步移除 `ws` 入参（原唯一用途就是读 ws.root）。
+ * `currentBoundRoot` is no longer passed through —
+ * groupSessionsByWorkspace no longer needs the picker's current root; the
+ * `ws` param was removed with it (its only use was reading ws.root).
  *
- * 行为契约: 与原 ChatApp 内 `<SessionSidebar ... />` 100% 等价；只换载体。
+ * Behaviour contract: 100% equivalent to the original `<SessionSidebar ... />`
+ * in ChatApp; only the carrier changed.
  */
 import { SessionSidebar } from "./SessionSidebar";
 import type { useSessionChat } from "../hooks/useSessionChat";

@@ -121,7 +121,7 @@ function EffortOption({
   );
 }
 
-// SWR rationale: trigger 不抢焦（保持 textarea 焦点），Escape 时归还焦点给 trigger。
+// SWR rationale: the trigger never steals focus (textarea keeps it); on Escape focus returns to the trigger.
 export function ThinkingToggle({
   settings,
   onChange,

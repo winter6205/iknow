@@ -1,15 +1,15 @@
 /**
- * 停止原因 + 轮次元信息（T6）。
- * 仅当 stopReason 非 completed 或 turnCount > 1 时渲染一行 quiet mono 元信息。
- * 文案映射见 lib/stop-reason；本组件只负责布局（warn 文案在前 + 轮次计数在后）。
+ * Stop-reason + turn-count meta line.
+ * Renders one quiet mono meta line only when stopReason is not completed or turnCount > 1.
+ * Label mapping lives in lib/stop-reason; this component only handles layout (warn text first, turn count after).
  */
 import type { StopReason } from "../api/types";
 import { stopReasonLabel } from "../lib/stop-reason";
 
 export type StopNoticeProps = {
-  /** 缺失时按 null 处理 → 不显示。 */
+  /** Missing → treated as null → not shown. */
   stopReason?: StopReason;
-  /** 缺失 / ≤ 1 时不显示（"N 轮"）。 */
+  /** Missing / ≤ 1 → the "N 轮" ("N turns") count is not shown. */
   turnCount?: number;
 };
 

@@ -1,14 +1,14 @@
 /**
- * serve-workspace T7a — WorkspacePicker 「选择路径新建工作空间」子 panel。
+ * WorkspacePicker's 「选择路径新建工作空间」
+ * ("choose a path to create a new workspace") sub-panel.
  *
- * review fix H3 / M4：把"路径输入 + 信任 toggle + bind 按钮 + 内嵌子目录
- * 浏览器"这一段独立面板从 WorkspacePicker 主文件抽出。父组件只负责
- * 折叠态 (showPathPicker) 与 placement；面板自身持有 input / confirming /
- * binding 状态。
+ * Extracts this standalone panel — path input + trust
+ * toggle + bind button + embedded subdir browser — out of the WorkspacePicker
+ * main file. The parent owns only the collapsed state (showPathPicker) and
+ * placement; the panel itself holds input / confirming / binding state.
  *
- * 行为契约：与原 picker 内联 panel 100% 等价 — 同样的 input / trust /
- * bind 控件，同样的 submit() 路径 (buildBindPayload → onBind → onClose /
- * onNotice)。
+ * Same input / trust / bind controls, same submit() path (buildBindPayload →
+ * onBind → onClose / onNotice).
  */
 import { useState } from "react";
 import { resolveBrowserRoot } from "../../lib/workspace-browser";
@@ -55,7 +55,8 @@ export function PathPickerPanel({
     }
   };
 
-  // resolveBrowserRoot 在父组件已用过, 这里再次保险, 保持 panel 自洽。
+  // resolveBrowserRoot was already applied by the parent; re-apply as a safety
+  // net to keep the panel self-contained.
   const base = resolveBrowserRoot(initialBase);
 
   return (
@@ -67,10 +68,11 @@ export function PathPickerPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder="/abs/path/to/project"
           aria-label="工作空间绝对路径"
-          // T8 a11y: popover 挂载后, 父组件 useEffect 找 [data-ws-picker-autofocus="true"]
-          // 锚点 focus — recents 空 → 这里就是第一焦点收纳; recents 非空但用户
-          // 手动展开 path picker → 焦点亦可在此 (PathPickerPanel 是用户主动操作
-          // 的目标, auto-focus 不会让人意外)。
+          // After the popover mounts, the parent's useEffect focuses the
+          // [data-ws-picker-autofocus="true"] anchor — when recents is empty this is
+          // the first focus sink; when recents is non-empty but the user manually
+          // expanded the path picker, focus may also land here (PathPickerPanel is
+          // the target of a deliberate user action, so auto-focus is unsurprising).
           data-ws-picker-autofocus="true"
           className="min-w-0 flex-1 rounded-pill border border-ink-3/30 bg-surface px-2 py-1 font-mono text-[11px] outline-none focus:border-accent"
         />

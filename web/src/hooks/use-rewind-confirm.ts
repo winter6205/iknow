@@ -1,10 +1,10 @@
 /**
- * serve-workspace T7a — ChatApp rewind confirm 异步副作用 hook (review fix M6)。
+ * ChatApp rewind-confirm async side-effect hook.
  *
- * 把 ChatApp 内 ~15 行的 `confirmRewind` 函数（点确认 → chat.rewind + 关闭 picker）
- * 抽到本 hook，避免 ChatApp 主文件承载 IIFE + notice 字符串。
+ * Extracts the ~15-line `confirmRewind` (confirm click → chat.rewind + close
+ * picker) so ChatApp's main file does not carry the IIFE + notice strings.
  *
- * 行为契约：与原 inline handler 100% 等价。
+ * Behavioral contract: 100% equivalent to the original inline handler.
  */
 import { useCallback } from "react";
 import type { useSessionChat } from "./useSessionChat";

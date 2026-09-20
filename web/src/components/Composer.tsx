@@ -31,23 +31,23 @@ export type ComposerProps = {
   disabled?: boolean;
   sending?: boolean;
   onSend: (text: string) => void | Promise<void>;
-  /** slash 命令执行入口；"/" 开头的输入永不走 onSend。 */
+  /** Slash-command entry point; input starting with "/" never reaches onSend. */
   onCommand?: (name: SlashCommandName, arg?: string) => void;
   onSkillLoad?: (name: string, remainder: string) => void;
   skills?: ReadonlyArray<SkillEntryLike>;
-  /** 非法 slash 输入提示通道（App 接 chat.pushNotice）；缺席 → 静默兜底。 */
+  /** Notice channel for invalid slash input (App wires chat.pushNotice); absent → silent fallback. */
   onNotice?: (text: string) => void;
   placeholder?: string;
   thinkingSettings?: ThinkingSettings;
   onThinkingChange?: (next: ThinkingSettings) => void;
-  /** 上下文用量（透传输入框下方状态条的 UsageChip）。 */
+  /** Context usage (passed through to the UsageChip in the status bar below the input). */
   usage?: TokenUsage | null;
   contextWindow?: number | null;
-  /** 模型名（health 下发）；状态条左半部显示。缺席 → 不显示。 */
+  /** Model name (delivered by health); shown on the status bar's left half. Absent → hidden. */
   model?: string | null;
-  /** 当前 permission mode 显示标签（如 "Default"）；缺席 → 徽标不渲染。 */
+  /** Current permission-mode label (e.g. "Default"); absent → badge not rendered. */
   permissionModeLabel?: string | null;
-  /** Shift+Tab（或点击徽标）触发的模式循环切换（App 调后端端点）。 */
+  /** Mode-cycle trigger from Shift+Tab (or badge click); App calls the backend endpoint. */
   onPermissionModeToggle?: () => void;
 };
 
@@ -77,8 +77,8 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const locked = disabled || sending;
 
-  // Slash 补全菜单状态：selectedIndex 为键盘高亮项；Esc 关闭后 dismissed
-  // 置位，直到输入再次变化才重新打开。
+  // Slash-completion menu state: selectedIndex is the keyboard highlight; Esc
+  // sets dismissed, and the menu reopens only once the input changes again.
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const candidates = useMemo(
@@ -104,7 +104,7 @@ export function Composer({
     setMenuDismissed(false);
   };
 
-  /** 采纳候选：带参命令补全形带尾随空格，等待参数输入。 */
+  /** Accept a candidate: arg-taking commands complete with a trailing space, awaiting the argument. */
   const acceptCandidate = useCallback((name: string) => {
     const takesArg = commandTakesArg(name);
     setValue(takesArg ? `/${name} ` : `/${name}`);
@@ -143,7 +143,7 @@ export function Composer({
       return;
     }
     if (decision.kind === "notice") {
-      // 非法 slash 输入不静默：提示并保留输入框文本让用户修改。
+      // Invalid slash input is not silent: notify and keep the draft so the user can fix it.
       onNotice(decision.text);
       return;
     }
@@ -160,7 +160,7 @@ export function Composer({
     void submit();
   };
 
-  /** 菜单键盘事件的纯状态写回（裁决在 lib/slash menuKeyEvent）。 */
+  /** Pure state write-back for menu key events (decisions live in lib/slash menuKeyEvent). */
   const applyMenuEvent = (ev: MenuKeyEvent) => {
     if (ev.kind === "move") {
       setSelectedIndex(ev.index);
@@ -177,15 +177,16 @@ export function Composer({
         setValue(ev.action.text);
         setSelectedIndex(0);
       } else {
-        void submit(); // 菜单在场但无有效裁决 → 走提交裁决（含非法提示）
+        void submit(); // menu present but no valid decision → fall through to submit decision (incl. invalid-input notice)
       }
     }
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Shift+Tab 切 permission mode（镜像 TUI 快捷键）：优先于 slash 菜单的
-    // Tab 补全采纳，preventDefault 阻止浏览器反向移焦。徽标缺席（端点未
-    // 装配）→ 不拦截，保留浏览器原生反向移焦。
+    // Shift+Tab cycles permission mode (mirrors the TUI shortcut) and wins over
+    // the slash menu's Tab-accept; preventDefault blocks the browser's reverse
+    // focus move. No badge (endpoint not assembled) → no interception, native
+    // reverse focus move is kept.
     if (
       e.key === "Tab" &&
       e.shiftKey &&
@@ -287,10 +288,11 @@ export function Composer({
           )}
         </button>
       </div>
-      {/* 状态条：输入框下方。左 = 模型名 + permission mode 徽标（Shift+Tab
-          切换）；右 = 用量块（token 明细 + 进度条 + 百分比）。右缘对齐 pill
-          右缘（发送按钮 40px + gap 8px 在 pill 之外 → pr-12）。两者皆无 →
-          整行不渲染。 */}
+      {/* Status bar below the input. Left = model name + permission-mode badge
+          (Shift+Tab to cycle); right = usage block (token breakdown + progress
+          bar + percent). Right edge aligns with the pill's right edge (send
+          button 40px + 8px gap sit outside the pill → pr-12). Neither present
+          → row not rendered. */}
       {model || permissionModeLabel ? (
         <div className="mt-1.5 flex items-center justify-between gap-3 pl-2 pr-12 font-mono text-[10px] leading-none text-ink-3">
           <span className="flex min-w-0 items-center gap-2">

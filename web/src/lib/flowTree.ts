@@ -90,7 +90,7 @@ function timeOf(record: TraceRecord): string {
 
 /**
  * Map a JSONL record to its FlowTree station. `permission` reuses the
- * `violation` record_type (spec #286: reason=permission_denied lands on
+ * `violation` record_type (spec: reason=permission_denied lands on
  * permission); everything else is a direct record_type → station mapping.
  */
 function stationOf(
@@ -107,7 +107,7 @@ function stationOf(
     case "sandbox_cmd":
       return "sandbox";
     case "turn":
-      // 回合标记落在会话站（原型：回合分组挂在 session 站下）。
+      // Turn markers land on the session station (prototype groups turns under it).
       return "session";
     case "subagent_spawn":
     case "subagent_stop":
@@ -143,9 +143,9 @@ function statusOf(
     const kind = str(record, "tool_kind");
     if (kind !== undefined && kind !== "ok") return "error";
   }
-  // Subagent 终态 / 状态迁移失败即使 wire status 缺省也标红：stop 落 failed
-  // 或 state_change 迁到 failed 都是失败终局（T4 写侧 status 可被 safeTrace
-  // 包裹后在终态路由保留 reason，这里以状态域为准不依赖 status 填写）。
+  // Subagent failure end-states stay red even when wire status is absent: a
+  // stop at failed or a transition to failed is terminal. The write side
+  // may wrap status via safeTrace, so trust the state fields, not status.
   if (station === "subagent") {
     if (str(record, "final_state") === "failed") return "error";
     if (
@@ -172,7 +172,7 @@ function labelOf(recordType: TraceRecordType, record: TraceRecord): string {
     case "sandbox_cmd":
       return str(record, "command") ?? "沙箱命令";
     case "subagent_spawn":
-      // task_preview 截断后的任务摘要在服务端已截断, 直接展示 (权限行)。
+      // task_preview is already truncated server-side; display it as-is.
       return str(record, "task_preview") ?? "子代理 spawn";
     case "subagent_stop": {
       const finalState = str(record, "final_state");
@@ -184,7 +184,7 @@ function labelOf(recordType: TraceRecordType, record: TraceRecord): string {
       return `子代理状态 ${fromState}→${toState}`;
     }
     case "subagent_step": {
-      // step_index 是 0-based, 展示 1-based 与「回合 N」标签保持一致。
+      // step_index is 0-based; show 1-based to match the 「回合 N」 (turn N) labels.
       const head = `子代理步骤 ${num(record, "step_index") + 1} · ${
         str(record, "phase") ?? "?"
       }`;
@@ -216,9 +216,10 @@ const STRUCTURAL_KEYS = new Set([
   "duration_ms",
   "status",
   "turn_index",
-  // Subagent 生命周期列 (T4/T5): 承载 id / 关联 / 状态机迁移的键剥离出详情区 —
-  // 这些键在列定义 (TRACE_FIELD_DEFS) 里各有独立列, 重复展示无信息增益。
-  // 保留 reason / summary / task_preview 等 payload 细节。
+  // Subagent lifecycle columns: id / lineage / state-machine keys are
+  // stripped here because TRACE_FIELD_DEFS already gives each its own column —
+  // duplicating them in the detail panel adds no information.
+  // Payload details (reason / summary / task_preview) stay.
   "subagent_id",
   "task_id",
   "parent_turn_id",
@@ -229,7 +230,7 @@ const STRUCTURAL_KEYS = new Set([
   "exit_code",
   "signal",
   "ts",
-  // subagent_step 列: id 载体 + 步序 / 阶段 / 步骤名都已进标签与列定义。
+  // subagent_step keys: id carrier + step index / phase / label are already in the event label and column defs.
   "subagent_step_id",
   "step_index",
   "phase",

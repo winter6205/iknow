@@ -1,14 +1,15 @@
 /**
- * serve-workspace T7a — SessionSidebar 内部图标集合 (T7b: Chevron 合并)。
+ * SessionSidebar internal icon set.
  *
- * 16×16 / 12×12 描边 SVG，沿用项目既有的 stroke=currentColor / strokeWidth
- * 体系：父级 text-* 决定着色。无状态、无依赖，可被 SessionSidebar /
- * grouped-view / hooks 任意处 import。
+ * 16×16 / 12×12 stroked SVGs following the project's stroke=currentColor /
+ * strokeWidth convention: the parent's text-* class sets the color. Stateless
+ * and dependency-free; importable anywhere in SessionSidebar / grouped-view / hooks.
  *
- * T7b review fix L3: `ChevronRightIcon` + `ChevronDownIcon` 结构仅 points 旋
- * 转方向不同，合并为 `ChevronIcon({ direction })`；方向切换靠 SVG `<polyline>`
- * points 不同（保持原 polyline 形态，不引入 CSS rotate，避免 strokeWidth /
- * 尺寸在不同方向时形变）。`ChevronLeftIcon` 单独保留 — 形态不重合。
+ * `ChevronRightIcon` + `ChevronDownIcon` differed only in
+ * polyline rotation direction, merged into `ChevronIcon({ direction })`;
+ * direction switches via distinct `<polyline>` points (keeps the original
+ * polyline shape without CSS rotate, avoiding strokeWidth / size distortion
+ * across directions). `ChevronLeftIcon` stays separate — shape does not coincide.
  */
 import type { JSX } from "react";
 
@@ -68,14 +69,15 @@ export function ChevronLeftIcon(): JSX.Element {
 }
 
 /**
- * 通用 chevron 箭头（T7b 合并 Right/Down）。`direction` 决定 polyline 三点
- * 走向：
- *  - "right" → 9,6 → 15,12 → 9,18（左上 → 中右 → 左下，" > " 形）
- *  - "down"  → 6,9 → 12,15 → 18,9（左上 → 中下 → 右上，" v " 形）
+ * Generic chevron (merged Right/Down). `direction` picks the three-point
+ * polyline path:
+ *  - "right" → 9,6 → 15,12 → 9,18 (top-left → mid-right → bottom-left, " > " shape)
+ *  - "down"  → 6,9 → 12,15 → 18,9 (top-left → bottom-mid → top-right, " v " shape)
  *
- * 默认 12×12 / strokeWidth=2，与原 `ChevronDownIcon` 一致；"right" 沿用相同
- * 尺寸，由调用方决定是否在父容器加 `transition-transform` 做旋转动画
- * （grouped-view 用 `-rotate-90` / `rotate-0` 切换）。
+ * Defaults 12×12 / strokeWidth=2, matching the original `ChevronDownIcon`;
+ * "right" reuses the same size, and callers decide whether to add
+ * `transition-transform` on the parent for rotation animation (grouped-view
+ * switches via `-rotate-90` / `rotate-0`).
  */
 export function ChevronIcon({
   direction,

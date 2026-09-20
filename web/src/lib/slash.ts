@@ -1,9 +1,10 @@
 /**
  * web/src/lib/slash.ts
  *
- * Web Composer 的 slash 命令面。词表对齐 TUI `src/tui/slash.ts`（13 条 +
- * skill 混显，含 serve-workspace 的 /workspace 与 continue_pending 的
- * /continue）；浏览器无进程退出时 /quit /exit 仍进词表，由 App 做能力映射。
+ * Slash-command surface for the web composer. The vocabulary mirrors the TUI
+ * `src/tui/slash.ts` (13 commands + mixed-in skills, incl. serve-workspace's
+ * /workspace and continue_pending's /continue); browsers have no process to
+ * exit, so /quit /exit stay in the vocabulary and App maps the capability.
  */
 
 export type SlashCommandName =
@@ -31,13 +32,15 @@ export type SlashCommand = {
 export interface SkillEntryLike {
   readonly name: string;
   /**
-   * 人侧技能可以没有 description（spec skill-index-increment SC5/SC9）。
-   * 缺席 ≠ 空串：候选渲染据此走「无描述」形态。
+   * Human-side skills may have no description (spec
+   * skill-index-increment). Absent ≠ empty string: candidate rendering shows the
+   * "no description" form accordingly.
    */
   readonly description?: string;
   /**
-   * 裸名别名（catalog 只保留唯一别名，冲突者已被 catalog 丢弃）。
-   * `parseSkillLoad` 用它解析 typed 裸名，并据此取 **typed token 长度**。
+   * Bare-name aliases (catalog keeps only unique aliases; colliding ones are
+   * already dropped by the catalog). `parseSkillLoad` uses them to resolve
+   * typed bare names and to take the **typed token length**.
    */
   readonly aliases?: ReadonlyArray<string>;
 }
@@ -81,8 +84,9 @@ const BY_NAME = new Map<SlashCommandName, SlashCommand>(
 );
 
 /**
- * 接受参数的命令。`graph` 在表内但**不**进 `ARG_COMMAND_SPECS` —— 值域
- * 与拒绝理由都由服务端 `applyGraphCommand` 裁决（前端复制一份就会漂移）。
+ * Commands that accept an argument. `graph` is listed here but deliberately
+ * NOT in `ARG_COMMAND_SPECS` — its value domain and rejection reasons are
+ * decided server-side by `applyGraphCommand` (a frontend copy would drift).
  */
 const ARG_COMMANDS = new Set<SlashCommandName>(["thinking", "effort", "graph"]);
 
@@ -99,7 +103,7 @@ export function matchSlash(input: string): SlashMatch | null {
   const cmd = BY_NAME.get(name as SlashCommandName);
   if (cmd === undefined) return null;
   const rest = text.slice(head.length).trim();
-  // continue 不进 ARG_COMMANDS（无值域）；带参仍 match，handler 发 usage EXIT。
+  // continue is not in ARG_COMMANDS (no value domain); args still match and the handler emits the usage EXIT.
   if (rest !== "" && !ARG_COMMANDS.has(cmd.name) && cmd.name !== "continue") {
     return null;
   }
@@ -131,14 +135,16 @@ export function slashCandidates(
   }
   if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
-      // 规范名或任一裸名别名命中前缀即入场，但只发一条 canonical 候选
-      // （别名不是第二条候选）。
+      // Canonical name or any bare alias hitting the prefix admits the
+      // skill, but only one canonical candidate is emitted (aliases are not
+      // second candidates).
       if (skillHeadLowers(skill).some((head) => head.startsWith(prefix))) {
         out.push({
           kind: "skill",
           name: skill.name,
-          // 无 description 的条目**仍进候选**（SC9）：缺席保留 undefined，
-          // 不补占位文案 —— 占位文案会把「无描述」伪装成有描述。
+          // Entries without a description still enter the candidates:
+          // absence keeps undefined, no placeholder text — a placeholder
+          // would disguise "no description" as one.
           ...(skill.description !== undefined
             ? { description: skill.description }
             : {}),
@@ -150,10 +156,10 @@ export function slashCandidates(
   return out;
 }
 
-/** skill 的全部可匹配首 token 小写形：规范名 + 唯一裸名别名。
- *  SSOT 语义对齐 TUI `skillHeadLowers`（src/tui/slash.ts）—— web 与
- *  `../src/` 之间有 tsconfig 边界（include 仅 `src`，无 path map），
- *  故本地镜像；改 TUI 侧时同步此处。 */
+/** All lowercase first-token forms a skill can match: canonical name + unique bare aliases.
+ *  SSOT semantics mirror the TUI `skillHeadLowers` (src/tui/slash.ts) — a
+ *  tsconfig boundary separates web from `../src/` (include is `src` only, no
+ *  path map), so this is a local mirror; sync it when the TUI side changes. */
 function skillHeadLowers(skill: SkillEntryLike): ReadonlyArray<string> {
   return [skill.name, ...(skill.aliases ?? [])].map((head) =>
     head.toLowerCase()
@@ -161,10 +167,11 @@ function skillHeadLowers(skill: SkillEntryLike): ReadonlyArray<string> {
 }
 
 /**
- * remainder 按 **typed 首 token 长度** 切，SSOT 对齐 TUI `slashRemainder`
- * （src/tui/slash.ts:445）。**禁止**用 `skill.name.length` /
- * `text.indexOf("/")` 组合：裸名输入（typed `/echo` 命中 canonical
- * `plugin:echo`）会按 canonical 长度多吃/少吃字符（SC9 明确禁止）。
+ * Cut the remainder by the **typed first-token length**, mirroring the TUI
+ * SSOT `slashRemainder` (src/tui/slash.ts:445). Do NOT combine
+ * `skill.name.length` / `text.indexOf("/")`: a bare-name input (typed
+ * `/echo` hitting canonical `plugin:echo`) would then over- or under-eat
+ * characters by the canonical length (explicitly forbidden by the spec).
  */
 function slashRemainder(text: string): string {
   const firstTok = text.split(/\s+/, 1)[0] ?? text;
@@ -180,8 +187,8 @@ export function parseSkillLoad(
   if (prefix === "") return undefined;
   if (BY_NAME.has(prefix as SlashCommandName)) return undefined;
   for (const skill of skills) {
-    // 精确命中规范名或裸名别名（大小写不敏感）；返回 canonical
-    // `skill.name`，保证落盘信封恒 canonical。
+    // Exact hit on canonical name or a bare alias (case-insensitive);
+    // return canonical `skill.name` so the persisted envelope is always canonical.
     if (skillHeadLowers(skill).includes(prefix)) {
       return { name: skill.name, remainder: slashRemainder(text) };
     }

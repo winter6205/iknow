@@ -1,17 +1,22 @@
 /**
- * serve-workspace T4 — Sidebar 工作空间组折叠态 localStorage 持久化 + T7b 懒加载。
+ * localStorage persistence for sidebar workspace-group
+ * collapsed state + lazy loading.
  *
- * 设计要点:
- *  - key 形如 `sidebar.workspaceGroups.<encoded>`，其中 `<encoded>` 是
- *    base64(workspaceRoot) 或 base64("(未绑定)") —— 路径内的 "/" 不会破坏
- *    localStorage 形态。
- *  - 仅持久化非活跃组的折叠态；活跃组永远展开，UI 层也不应写入（直接不调
- *    saveCollapsed）。这样刷新页面后用户不会把"我现在在哪儿"折叠掉。
- *  - 浏览器专用：btoa + TextEncoder 路径，Node 兜底 / Buffer 已删（T7b review
- *    fix M1）。Node 20+ 全局 btoa 存在，vitest 在 node env 下也走 btoa。
- *  - T7b: `CollapsedStateStore` 把"懒初始化 / 内存缓存 / 落盘"封进一个
- *    `useRef` 实例，让 `useWorkspaceGroups` 不再依赖 useEffect([groups])
- *    来 re-init，避免用户 toggle 状态被 groups 数组引用变化抹掉。
+ * Design points:
+ *  - Key shape `sidebar.workspaceGroups.<encoded>`, where `<encoded>` is
+ *    base64(workspaceRoot) or base64("(未绑定)") — the "/" inside paths can
+ *    no longer break the localStorage key shape.
+ *  - Only non-active groups' collapsed state is persisted; the active group
+ *    stays expanded and the UI must not write it (just don't call
+ *    saveCollapsed). After a page refresh the user can never collapse "where
+ *    I am right now".
+ *  - Browser-only: btoa + TextEncoder path; the Node/Buffer fallback was
+ *    removed. Node 20+ has a global btoa, so vitest in
+ *    node env still goes through btoa.
+ *  - `CollapsedStateStore` wraps lazy init / in-memory cache / persist
+ *    in one `useRef` instance, so `useWorkspaceGroups` no longer re-inits
+ *    via useEffect([groups]) — a groups-array identity change can no longer
+ *    wipe the user's toggles.
  */
 
 const STORAGE_PREFIX = "sidebar.workspaceGroups.";
@@ -59,29 +64,33 @@ export function saveCollapsed(root: string, collapsed: boolean): void {
 }
 
 /**
- * 折叠态懒初始化存储（T7b review fix M3）。
+ * Lazy-initialized collapsed-state store.
  *
- * 关键契约：
- *  - 首次观察到 key 时，从 localStorage 读默认值（活跃组强制 false）；之后
- *    保留内存值，不再 re-read。
- *  - `toggle(key, isActive)` 翻转并落盘（活跃组也写盘 — UI 不暴露给活跃组的
- *    toggle 入口，但保险起见保持原行为）。
+ * Key contracts:
+ *  - First sight of a key reads the default from localStorage (active group
+ *    forced to false); afterwards the in-memory value wins, no re-read.
+ *  - `toggle(key, isActive)` flips and persists (active group writes too —
+ *    the UI exposes no toggle for the active group, but the original
+ *    behavior is kept as a safety net).
  *
- * 设计动机：原先 `useWorkspaceGroups` 依赖 `useEffect([groups])` 在 groups
- * 数组引用变化时重置整个折叠态 map；这导致用户刚刚 toggle 的非活跃组在
- * refresh（groups 重新计算）后丢失状态。改为在 `useRef` 里持有本 store 实例，
- * 配合 render-time 的 lazy 初始化（O(1) per key after first sight），groups
- * 引用变化不再触发状态重置。
+ * Motivation: `useWorkspaceGroups` used to reset the whole collapsed map via
+ * `useEffect([groups])` whenever the groups array identity changed, so
+ * freshly toggled non-active groups lost their state after a refresh
+ * (groups recomputed). Holding this store in a `useRef` with render-time
+ * lazy init (O(1) per key after first sight) means groups-identity changes
+ * no longer reset state.
  *
- * 纯 JS class，React-free，可在 node vitest 直接单测（参考
- * `tests/web/workspace-groups-storage.test.ts` 中的 CollapsedStateStore 段）。
+ * Pure JS class, React-free, unit-testable directly under node vitest (see
+ * the CollapsedStateStore section in
+ * `tests/web/workspace-groups-storage.test.ts`).
  */
 export class CollapsedStateStore {
   private readonly seen = new Map<string, boolean>();
 
   /**
-   * 首次访问某 key 时从 localStorage 读取默认值（活跃组固定 false）；
-   * 后续访问直接返回内存值。SSR / privacy-mode 下首次返回 false。
+   * First access to a key reads the localStorage default (active group is
+   * fixed false); later accesses return the in-memory value. Under SSR /
+   * privacy-mode the first read is false.
    */
   lookup(key: string, isActive: boolean): boolean {
     const cached = this.seen.get(key);
@@ -92,8 +101,9 @@ export class CollapsedStateStore {
   }
 
   /**
-   * 翻转并落盘（仅写一次 localStorage；活跃组也写 — 防御性，UI 不暴露给
-   * 活跃组的 toggle）。返回新状态供 React 更新 override map。
+   * Flip and persist (a single localStorage write; the active group writes
+   * too — defensive, since the UI exposes no toggle for it). Returns the
+   * new state so React can update the override map.
    */
   toggle(key: string, isActive: boolean): boolean {
     const cur = this.lookup(key, isActive);

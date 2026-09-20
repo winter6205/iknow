@@ -1,29 +1,29 @@
 /**
- * serve-workspace T7a — ChatApp orchestration (review fix M6 slimming)。
+ * ChatApp orchestration.
  *
- * 历史: 该文件原 549 行, ChatApp 长方法 + 60+ 行 workspace handler 散布。
- * T7a 把：
- *  - useWorkspaceActions hook（handleNewSession / handleCreateInWorkspace /
- *    handleSelect / autoOpenedRef effect）→ `hooks/use-workspace-actions.ts`。
- *  - useSlashCommands hook（handleCommand + applyArgSetting + handleSkillLoad）
- *    → `hooks/use-slash-commands.ts`。
- *  - useChatCompact（/compact handler）→ `hooks/use-chat-compact.ts`。
- *  - usePermissionModeToggle（perm cycle）→ `hooks/use-permission-mode-toggle.ts`。
- *  - useRewindConfirm（rewind picker confirm 副作用）→ `hooks/use-rewind-confirm.ts`。
- *  - <ChatSidebarContainer> → `components/ChatSidebarContainer.tsx`。
- *  - <ChatMainDialogs> + useMcpReload → `components/ChatMainDialogs.tsx`。
- *  - <ChatFooter> → `components/ChatFooter.tsx`。
+ * Everything but orchestration lives outside ChatApp:
+ *  - workspace handlers (handleNewSession / handleCreateInWorkspace /
+ *    handleSelect) → `hooks/use-workspace-actions.ts`.
+ *  - slash routing (handleCommand + applyArgSetting + handleSkillLoad)
+ *    → `hooks/use-slash-commands.ts`.
+ *  - /compact → `hooks/use-chat-compact.ts`; perm cycle →
+ *    `hooks/use-permission-mode-toggle.ts`; rewind confirm →
+ *    `hooks/use-rewind-confirm.ts`.
+ *  - layout pieces → `components/ChatSidebarContainer.tsx`,
+ *    `components/ChatMainDialogs.tsx` (+ useMcpReload),
+ *    `components/ChatFooter.tsx`.
  *
- * T8: chip 上下文感知 + picker 改 popover — App 加三件事：
- *  - 顶层 `useSessionList` 复用同一份 session list, lookup active session
- *    的 workspaceRoot 喂给 WorkspaceChip。
- *  - chip button ref + popover wrapper ref 传给 ChatHeader (popover anchor)。
- *  - `usePopoverDismiss` 监听 Esc / outside-click, 关闭时焦点回 chip。
- *  - 渲染 <WorkspacePicker> 节点作为 ChatHeader 的 `workspacePopover` 插槽
- *    (slot anchor: `absolute top-full right-0 mt-1 z-50`, 由 ChatHeader 包)。
+ * Context-aware chip + picker-as-popover:
+ *  - top-level `useSessionList` sharing the session list, so the active
+ *    session's workspaceRoot can feed WorkspaceChip;
+ *  - chip button ref + popover wrapper ref passed to ChatHeader (popover
+ *    anchor); `usePopoverDismiss` watches Esc / outside-click and returns
+ *    focus to the chip on close;
+ *  - <WorkspacePicker> rendered through ChatHeader's `workspacePopover` slot
+ *    (positioning owned by ChatHeader's wrapper div).
  *
- * 本文件保留 ChatApp 的核心 orchestration（state / hooks 装配 / 三个状态
- * 分支的路由）。T4-T6 行为契约不变。
+ * What remains here is ChatApp's core orchestration (state / hook wiring /
+ * routing across the three status branches).
  */
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
@@ -56,7 +56,7 @@ import {
   type ThinkingSettings,
 } from "./lib/thinking-settings";
 
-/** Viewport width below which the sidebar starts collapsed (decision #7). */
+/** Viewport width below which the sidebar starts collapsed. */
 const NARROW_QUERY = "(max-width: 768px)";
 
 function ChatApp() {
@@ -71,8 +71,9 @@ function ChatApp() {
     handleCreateInWorkspace,
     handleSelect,
   } = useWorkspaceActions(chat, ws);
-  // SC8：可加载技能面「当场热」—— 挂载拉一次 + 窗口重新获得焦点时重取
-  // （切走期间装的技能回来即进 `/` 候选）。见 hooks/use-skills.ts 的取舍说明。
+  // Keep the loadable-skill surface "hot at hand" — fetch on mount and
+  // refetch when the window regains focus, so skills installed while away
+  // appear in `/` candidates on return. See hooks/use-skills.ts for the trade-off.
   const skills = useSkills();
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
@@ -93,9 +94,9 @@ function ChatApp() {
   >(undefined);
   const [rewindIndex, setRewindIndex] = useState(0);
 
-  // T8 + review fix M5: popover 一族 (refs / dismiss 监听 / active session
-  // lookup / 插槽 JSX) 全部下沉到 `useWorkspacePopover`。ChatApp 只消费
-  // 返回字段,自身保持 orchestration 角色。
+  // The whole popover concern (refs / dismiss listeners /
+  // active-session lookup / slot JSX) lives in `useWorkspacePopover`; ChatApp
+  // only consumes the returned fields and stays pure orchestration.
   const popover = useWorkspacePopover(
     {
       workspaceOpen,
@@ -134,9 +135,9 @@ function ChatApp() {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
-  // T8: popover 插槽 — 已经 useWorkspacePopover 内部构造好,ChatHeader
-  // 透传即可。视觉定位 (absolute top-full right-0 z-50) 由 ChatHeader 内的
-  // wrapper div 负责。
+  // Popover slot — already built inside useWorkspacePopover, passed
+  // straight through to ChatHeader. Visual positioning (absolute top-full
+  // right-0 z-50) is owned by the wrapper div inside ChatHeader.
   const header = (
     <ChatHeader
       phase={chat.phase}

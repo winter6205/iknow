@@ -1,20 +1,21 @@
 /**
- * serve-workspace T7a — WorkspacePicker 内嵌子目录浏览器（含 Breadcrumbs /
- * SubdirList 子组件）。
+ * WorkspacePicker's embedded subdir browser (with
+ * Breadcrumbs / SubdirList subcomponents).
  *
- * review fix H3 / M4：把 `WorkspaceBrowser()` 长方法拆为：
- *  - `WorkspaceBrowser`: 顶层 composition（展开/折叠 + browse 副作用）。
- *  - `Breadcrumbs`: 面包屑路径渲染（点击切换 browseRoot）。
- *  - `SubdirList`: 子目录列表渲染（点击切换 browseRoot + 替换 input）。
+ * Splits the long `WorkspaceBrowser()` method into:
+ *  - `WorkspaceBrowser`: top-level composition (expand/collapse + browse side effect).
+ *  - `Breadcrumbs`: breadcrumb path rendering (click switches browseRoot).
+ *  - `SubdirList`: subdir list rendering (click switches browseRoot + replaces input).
  *
- * T7b review fix L1: `input` 字段从 props 中删除 — 该字段从未被任何消费者
- * 读取（dead prop）。父端 `path-picker-panel.tsx` 同步停止传入。
+ * The `input` field was deleted from props — a dead prop no
+ * consumer read. Parent `path-picker-panel.tsx` stopped passing it in sync.
  *
- * T7b review fix #4: BrowserBody 外壳 `rounded-pill` → `rounded-md`，与
- * recents / subdir 列表项视觉对齐。
+ * BrowserBody shell `rounded-pill` → `rounded-md`, aligning
+ * with recents / subdir list-item visuals.
  *
- * 行为契约：与原 WorkspaceBrowser 100% 等价 — 同样的 useState 管 entries /
- * loading，同样的 AbortController 取消在途请求，同样的 deps 锁闭包。
+ * Behavior contract: 100% equivalent to the original WorkspaceBrowser — same
+ * useState managing entries / loading, same AbortController cancelling
+ * in-flight requests, same deps pinning closures.
  */
 import { useEffect, useState } from "react";
 import type { WorkspaceSubdirEntry } from "../../api/client";
@@ -25,9 +26,9 @@ import {
 } from "../../lib/workspace-browser";
 
 export type WorkspaceBrowserProps = {
-  /** mount 时的 base (currentRoot 或 WSL_DEFAULT_BASE) — 决定首次展开位置。 */
+  /** base at mount (currentRoot or WSL_DEFAULT_BASE) — sets the initial expand position. */
   readonly initialBase: string;
-  /** 用户点选子目录 → 替换 input。 */
+  /** User picks a subdir → replace input. */
   readonly onPickSubdir: (path: string) => void;
   readonly onNotice: (text: string) => void;
   readonly onBrowseSubdirs: (
@@ -36,7 +37,7 @@ export type WorkspaceBrowserProps = {
   ) => Promise<ReadonlyArray<WorkspaceSubdirEntry>>;
 };
 
-/** 面包屑路径：每段是一个 button，点击仅切 browseRoot（不动 input）。 */
+/** Breadcrumb path: each segment is a button; clicking only switches browseRoot (never touches input). */
 function Breadcrumbs({
   segs,
   onPickCrumb,
@@ -65,7 +66,7 @@ function Breadcrumbs({
   );
 }
 
-/** 子目录列表：每条是一个 button，点击替换 browseRoot + 替换 input。 */
+/** Subdir list: each entry is a button; clicking replaces browseRoot and the input. */
 function SubdirList({
   entries,
   onPickSubdir,
@@ -101,7 +102,7 @@ function SubdirList({
 }
 
 /**
- * 浏览器展开态下的内容区: breadcrumbs + 列表 (loading / empty / entries)。
+ * Content area while the browser is expanded: breadcrumbs + list (loading / empty / entries).
  */
 function BrowserBody({
   browseRoot,
@@ -135,7 +136,7 @@ function BrowserBody({
 }
 
 /**
- * 「浏览子目录」折叠 CTA — 触发 BrowserBody 显隐。
+ * 「浏览子目录」("browse subdirectories") collapsed CTA — toggles BrowserBody visibility.
  */
 function BrowserToggle({
   expanded,
@@ -159,11 +160,11 @@ function BrowserToggle({
 }
 
 /**
- * WorkspaceBrowser — picker 内嵌的子目录探测器 (T3)。
+ * WorkspaceBrowser — the subdir prober embedded in the picker.
  *
- * 单一 useState 管 entries + loading, 不缓存 — 用户点选立即触发
- * re-browse。AbortController 随每次 browse 重建, 避免上一次慢响应被
- * stale-entry 覆盖当前视图。
+ * A single useState manages entries + loading, no caching — a user click
+ * immediately triggers re-browse. The AbortController is rebuilt per browse so
+ * a previous slow response cannot overwrite the current view with stale entries.
  */
 export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
   const [expanded, setExpanded] = useState(false);
@@ -195,9 +196,9 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
 }
 
 /**
- * 浏览器展开态下的 browse 副作用 hook（T7a 抽出）。
- * expanded / browseRoot 变化时触发 browse；expanded=false 直接跳过不发请求，
- * AbortController 每次重建防止 stale 覆盖。
+ * Browse side-effect hook for the expanded browser state.
+ * Browse fires when expanded / browseRoot change; expanded=false skips the
+ * request entirely; the AbortController is rebuilt each time to prevent stale overwrites.
  */
 function useBrowseEntries({
   expanded,

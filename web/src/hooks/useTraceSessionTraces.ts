@@ -1,5 +1,5 @@
 /**
- * FlowTree 数据 hook — owns the per-session trace fetch + polling for the
+ * FlowTree data hook — owns the per-session trace fetch + polling for the
  * FlowTree view. Fetches the full session file (limit 200) and projects the
  * records into `TraceEvent[]` for the tree layout (see lib/flowTree.ts).
  *

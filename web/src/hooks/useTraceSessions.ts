@@ -1,5 +1,5 @@
 /**
- * Trace 会话列表 hook — fetches `GET /api/v1/sessions` once on mount with a
+ * Trace session list hook — fetches `GET /api/v1/sessions` once on mount with a
  * retry key. The list is refreshed on demand via `refresh()` (the sidebar
  * refresh button) or whenever the mount key changes.
  */

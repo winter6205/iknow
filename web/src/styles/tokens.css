@@ -1,5 +1,5 @@
 /**
- * iknow product shell design tokens — Variant A「软光 · 圆滑」(issue #92).
+ * iknow product shell design tokens — Variant A「软光 · 圆滑」(soft glow, smooth).
  * Tailwind v4 CSS-first config: the @theme block generates utility classes
  * (bg-bg, text-ink, rounded-card, shadow-chip, ease-soft, etc.) and outputs
  * all --color-* / --radius-* / --shadow-* / --font-* / --ease-* vars to :root.
@@ -11,9 +11,11 @@
   --chat-max: 46rem;
 }
 
-/* ink-2/3 alpha 较 Variant A 原型(0.62/0.52)微调至 0.66/0.62 以满足 WCAG AA 小字对比度。
-   accent / ok 调色（issue #92 #2 取向翻转）：松绿 → 雾灰 #7d8a82。
-   #7d8a82 vs bg #f6f3ec 对比度 3.25，最低饱和度雾灰，最克制。按钮文字深字（#2c2820）。*/
+/* ink-2/3 alphas nudged from the Variant A prototype (0.62/0.52) to
+   0.66/0.62 to meet WCAG AA small-text contrast.
+   accent / ok palette (direction flip): pine green → misty grey
+   #7d8a82 — 3.25 contrast against bg #f6f3ec, the least saturated and most
+   restrained misty grey. Button text uses the dark ink (#2c2820). */
 @theme {
   --color-bg: #f6f3ec;
   --color-surface: #fffdf8;
@@ -42,14 +44,14 @@
     "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
   --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
 
-  /* 动画 token（issue #92 #20）。stagger 延迟由组件内联 --i 变量驱动。 */
+  /* Animation tokens. Stagger delay is driven by the component's inline --i var. */
   --animate-message-in: messageIn 460ms var(--ease-soft) both;
   --animate-fade-in: fadeIn 180ms ease both;
-  /* T4: "思考中…" 三点呼吸动画（1.4s 一次循环，组件用 animationDelay 错峰）。 */
+  /* Breathing dots for "思考中…" (thinking…) — 1.4s cycle, components stagger via animationDelay. */
   --animate-think-pulse: thinkPulse 1.4s var(--ease-soft) infinite;
 }
 
-/* 消息入场 stagger：user --i=idx*2, agent --i=idx*2+1，延迟 = calc(var(--i)*70ms)（组件内联）。 */
+/* Message-entry stagger: user --i=idx*2, agent --i=idx*2+1; delay = calc(var(--i)*70ms) (inlined by the component). */
 @keyframes messageIn {
   from {
     opacity: 0;

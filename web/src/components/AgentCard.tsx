@@ -1,7 +1,7 @@
-// evidence?: reserved — Session API wire 当前不携带这些字段，组件结构预留。
+// evidence?: reserved — the Session API wire does not carry these fields yet; the component structure is kept for them.
 //
-// thinking/toolCalls（T4）：wire 已携带，组件按视觉层级渲染——
-// thinking 在上（折叠展开），body 居中（GFM markdown），toolCalls 在下（单展开）。
+// thinking/toolCalls: carried by the wire, rendered by visual hierarchy —
+// thinking on top (collapsible), body in the middle (GFM markdown), toolCalls below (single-expand).
 
 import { useState, type ReactNode } from "react";
 import type { TurnAnswerDto } from "../api/types";
@@ -16,16 +16,16 @@ import { ToolCallList } from "./ToolCallList";
 
 export type AgentCardProps = {
   text: string;
-  /** Optional TurnAnswerDto — T4 renders `thinking` + `toolCalls` projections. */
+  /** Optional TurnAnswerDto — renders `thinking` + `toolCalls` projections. */
   answer?: TurnAnswerDto;
-  /** Evidence projection reserved (see file header). 当前不渲染。 */
+  /** Evidence projection reserved (see file header); not rendered yet. */
   evidence?: EvidenceProjection;
-  /** Optional override for body rendering; default = GFM markdown with code highlighting (decision #19/T3). */
+  /** Optional override for body rendering; default = GFM markdown with code highlighting. */
   renderBody?: (text: string) => ReactNode;
   staggerIndex?: number;
 };
 
-// Three-state governance palette (issue #92 #13-16).
+// Three-state governance palette.
 const GOV_CLASS: Record<GovernanceStatus, string> = {
   ok: "bg-accent-soft text-ok",
   stale: "bg-warn-soft text-warn",
@@ -95,7 +95,7 @@ export function AgentCard({
       className="w-full self-stretch rounded-card border border-line bg-surface px-5 py-4 shadow-bubble animate-message-in"
       style={staggerStyle(staggerIndex)}
     >
-      {/* thinking 折叠展开（默认收起，aria-expanded + 键盘可达）。 */}
+      {/* Collapsible thinking block (collapsed by default; aria-expanded + keyboard accessible). */}
       {thinking ? (
         <ThinkingBlock
           thinking={thinking}
@@ -130,14 +130,14 @@ export function AgentCard({
         </div>
       ) : (
         <>
-          {/* Claims / body (T3: default = GFM markdown with code highlighting; renderBody overrides for tests). */}
+          {/* Claims / body (default = GFM markdown with code highlighting; renderBody overrides for tests). */}
           <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
             {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
           </div>
         </>
       )}
 
-      {/* Stop-reason notice (non-completed) + turnCount meta info (T6) — quiet mono row below the body. */}
+      {/* Stop-reason notice (non-completed) + turnCount meta info — quiet mono row below the body. */}
       <StopNotice
         stopReason={answer?.stopReason}
         turnCount={answer?.turnCount}
@@ -159,12 +159,12 @@ export function AgentCard({
         </div>
       ) : null}
 
-      {/* Source spans → chips + expand panels (#13-16). */}
+      {/* Source spans → chips + expand panels. */}
       {spans && spans.length > 0 ? (
         <EvidenceBlock spans={spans} isConflict={isConflict} />
       ) : null}
 
-      {/* Footer: governance badge + snapshot/hops (#15). */}
+      {/* Footer: governance badge + snapshot/hops. */}
       {hasFooter ? (
         <footer className="mt-[18px] flex flex-wrap items-center gap-[9px] border-t border-line pt-[13px]">
           {governance !== undefined ? (

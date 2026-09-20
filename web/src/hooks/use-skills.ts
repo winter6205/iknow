@@ -1,22 +1,27 @@
 /**
- * spec skill-index-increment SC8（Web 半边）—— slash 候选「当场热」。
+ * Keep slash candidates "hot at hand" (web half).
  *
- * 装配时拉一次 `GET /api/v1/skills` 就够不到 SC8：服务端已按**现行**技能根
- * 作答（hub 侧 rescan），但客户端只在挂载时拉一次 —— 之后装的技能永远不进
- * `/` 候选，要刷新整页才看得见。
+ * Fetching `GET /api/v1/skills` once at mount does not meet the spec: the server
+ * already answers from the current skill roots (hub-side rescan), but a
+ * mount-only client never sees skills installed later — they would only show
+ * up in `/` candidates after a full page reload.
  *
- * ## 为什么选「窗口重新获得焦点」而不是轮询 / 每次发送前拉
+ * ## Why window focus, not polling or fetch-before-send
  *
- * - **轮询**：`/skills` 是纯读盘 + 全根扫描，为一个「装了技能」这种低频事件
- *   常年打服务端，代价与收益不成比例；`useSubagentsPolling` / `useAsksPolling`
- *   那两条轮询服务的是**会话内高频变化**的状态，技能面不是。
- * - **每次发送前拉**：会把一次网络往返塞进发送关键路径；用户在别处
- *   （终端 / 编辑器）装完技能回到页面，正是「focus」这个信号，且它发生在
- *   任何发送**之前** —— 打开窗口时就已刷新，比发送前拉早且不挡发送。
- * - **focus** 也覆盖「reload 后切回来」：切走期间装的技能回来即见。
+ * - Polling: `/skills` is a pure disk read + full root scan; hammering the
+ *   server continuously for a low-frequency event like "a skill was
+ *   installed" is disproportionate. `useSubagentsPolling` / `useAsksPolling`
+ *   poll session-scoped high-frequency state; the skill surface is not that.
+ * - Fetch-before-send: would put a network round-trip on the critical send
+ *   path. Returning to the page after installing a skill elsewhere (terminal /
+ *   editor) *is* the focus signal, and it fires before any send — fresher and
+ *   never blocking a send.
+ * - focus also covers "came back after reload": skills installed while away
+ *   appear on return.
  *
- * 失败**不清空**已知候选（命中失败 → 保留最近一次成功结果）：一次网络抖动
- * 不该让 `/` 面变空；首次拉取失败仍是空清单（与改造前 `setSkills([])` 等价）。
+ * Failure does not clear known candidates (keep the last successful result):
+ * one network blip should not empty the `/` surface; a first-fetch failure is
+ * still an empty list (equivalent to the pre-change `setSkills([])`).
  */
 import { useEffect, useState } from "react";
 import * as api from "../api/client";
@@ -26,8 +31,9 @@ export function useSkills(): readonly SkillSummary[] {
   const [skills, setSkills] = useState<readonly SkillSummary[]>([]);
 
   useEffect(() => {
-    // 卸载 / 重挂后到达的响应丢弃：stale 响应不得写进新一次的 state
-    // （与 useSubagentsPolling 的 alive-ref 同款纪律）。
+    // Discard responses that arrive after unmount / remount: a stale response
+    // must never write into the new run's state (same alive-ref discipline as
+    // useSubagentsPolling).
     let alive = true;
     const refresh = (): void => {
       void api
@@ -36,8 +42,9 @@ export function useSkills(): readonly SkillSummary[] {
           if (alive) setSkills(res.skills);
         })
         .catch(() => {
-          // EXIT: 重取失败 → 保留已知候选（首次失败时就是空清单）。可见性
-          // 由既有 composer 行为承担：候选照旧，不弹错误横幅。
+          // EXIT: refetch failed → keep known candidates (first failure = empty
+          // list). Visibility is handled by existing composer behavior: candidates
+          // stay as-is, no error banner.
         });
     };
     refresh();

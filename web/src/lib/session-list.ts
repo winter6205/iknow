@@ -34,14 +34,15 @@ export function truncateExcerpt(text: string, max: number): string {
   return `${collapsed.slice(0, max).trimEnd()}…`;
 }
 
-/** Sidebar 主行截断宽度（视觉契约：单行不换行，32 字符 + 省略号）。 */
+/** Sidebar main-line truncation width (visual contract: one line, 32 chars + ellipsis). */
 const SIDEBAR_LINE_MAX = 32;
 
 /**
- * 侧栏单条会话的主行文案（spec session-list-title Does #1/#6）：
- * 主文案 = header `title`（截断折叠）；title 空 / 纯空白时
- * 走既有空态（conversation id 前缀），**绝不**回退到 lastFinalText —
- * lastFinalText 只作搜索/过滤命中面，不显示为主行。
+ * Main line for one sidebar session (spec session-list-title):
+ * the header `title`, collapsed and truncated. When the title is empty or
+ * whitespace-only, fall back to the existing empty state (conversation-id
+ * prefix). Never fall back to lastFinalText — it is a search/filter surface
+ * only, never the displayed line.
  */
 export function sidebarLineText(session: SessionListItem): string {
   return (
@@ -63,8 +64,9 @@ export function isCurrentSession(
 }
 
 /**
- * T7b review fix L5: sentinel key + label 合并为单一常量。两个值一直字面相同
- * ("(未绑定)")，data clumps；现在 key === label，调用点用一份常量。
+ * Merge the sentinel key and label into one constant.
+ * Both were always the same literal, "(未绑定)" (unbound) — a data clump;
+ * now key === label and call sites use the single constant.
  */
 export const UNBOUND = "(未绑定)";
 
@@ -77,10 +79,10 @@ export const UNBOUND = "(未绑定)";
  * key shape, so we keep `workspaceRoot` verbatim and encode the whole key at
  * the storage layer (see workspace-groups.ts).
  *
- * T7b review fix M2: 移除 `isCurrentRoot` 字段 — 该字段从未被任何消费者读取
- * （Speculative Generality）；同时移除 `groupSessionsByWorkspace` 的
- * `currentBoundRoot` 参数，让排序 / 标志计算只剩 currentConversationId 一个
- * 决定因素。
+ * Removed `isCurrentRoot` — no consumer ever read it
+ * (Speculative Generality); also removed `groupSessionsByWorkspace`'s
+ * `currentBoundRoot` param, leaving currentConversationId as the single
+ * driver of ordering and flags.
  */
 export type WorkspaceGroup = {
   readonly key: string;
@@ -106,9 +108,10 @@ export type WorkspaceGroup = {
  * Empty input → empty output (no synthetic "(未绑定)" group; that's a UI-only
  * concern).
  *
- * T7b review fix M2: 移除 `currentBoundRoot` 参数 — `isActive` 标志已由
- * `currentConversationId` 单独决定；picker 当前根对 sort 没影响（spec 保留
- * "找得到当前会话" 作为排序优先级）。
+ * The `currentBoundRoot` param is gone — `isActive` is
+ * decided by `currentConversationId` alone, and the picker's current root
+ * has no effect on sorting (the spec keeps "find the active session" as the
+ * ordering priority).
  */
 export function groupSessionsByWorkspace(
   sessions: readonly SessionListItem[],

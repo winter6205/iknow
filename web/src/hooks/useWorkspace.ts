@@ -3,13 +3,15 @@ import * as api from "../api/client";
 import type { WorkspaceSubdirEntry } from "../api/client";
 
 /**
- * serve-workspace T5: 顶栏 chip + picker 的状态锚。
+ * State anchor for the top-bar chip + picker.
  *
- * 挂载即拉 GET /api/v1/workspace + GET /api/v1/workspaces（并行）。前者失败
- * 视为 unbound + recents 空（serve 未启动或 trust 名单未装配），后者 404
- * 静默降级为空列表——recentsHome 缺席是合法的（plan §4.1 允许），不阻塞
- * 绑定主流程。`bind` 写成功后立即重读 recents，使新绑定的根出现在信任
- * 列表（plan §5 acceptance 5）。
+ * On mount, fetch GET /api/v1/workspace and GET /api/v1/workspaces in
+ * parallel. The former failing means unbound + empty recents (serve not
+ * running, or the trust list not assembled); the latter's 404 degrades
+ * silently to an empty list — an absent recentsHome is legal
+ * and never blocks the bind flow. After a successful `bind`,
+ * refetch recents immediately so the newly bound root appears in the trust
+ * list.
  */
 export type WorkspacePhase = "loading" | "ready" | "error";
 
@@ -24,10 +26,11 @@ export type WorkspaceApi = {
     opts?: { confirmTrust?: boolean }
   ) => Promise<void>;
   /**
-   * serve-workspace T3: 单层子目录探测, 透传 `listWorkspaceSubdirs`。
-   * 不做缓存 — Picker 一开即 browse, 用户点选立刻 re-browse 新位置,
-   * 不必叠一层 useState stale 复杂度。失败按既有 `request<T>` 通道抛
-   * `SessionApiError`, 调用方走 onNotice 兜底。
+   * Probe one directory level, passing through
+   * `listWorkspaceSubdirs`. No caching — the picker browses on open and
+   * re-browses on each user click; an extra useState layer would only add
+   * staleness complexity. Failures throw `SessionApiError` through the
+   * existing `request<T>` channel; callers fall back to onNotice.
    */
   readonly browseSubdirs: (
     root: string,
@@ -47,7 +50,7 @@ export function useWorkspace(): WorkspaceApi {
     setPhase("loading");
     Promise.all([
       api.getWorkspace(ctrl.signal),
-      // recentsHome 缺席 → 后端 404；UI 层静默降级（chip 不阻塞主流程）。
+      // absent recentsHome → backend 404; UI degrades silently (chip never blocks the main flow).
       api
         .listTrustedWorkspaces(ctrl.signal)
         .catch(() => ({ workspaces: [] as ReadonlyArray<{ root: string }> })),
@@ -61,8 +64,9 @@ export function useWorkspace(): WorkspaceApi {
       },
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
-        // GET workspace 也失败 → serve 未启动？仍以 unbound 视之，避免 chip
-        // 永远 loading；err 打到 console 由运维侧收集。
+        // GET workspace also failed — maybe serve isn't running? Still treat
+        // as unbound so the chip never hangs in loading; the error goes to
+        // console for ops-side collection.
         console.error("[workspace] load failed:", e);
         setBound(false);
         setRoot(null);
@@ -82,12 +86,12 @@ export function useWorkspace(): WorkspaceApi {
       });
       setBound(res.bound);
       setRoot(res.root ?? null);
-      // recents 重读：trust-gated bind 不应炸 recents 读（仍可能 404）。
+      // Refetch recents: a trust-gated bind must not break the recents read (it can still 404).
       try {
         const ws = await api.listTrustedWorkspaces();
         setRecents(ws.workspaces.map((w) => w.root));
       } catch {
-        /* recents 缺席不影响主绑定结果 */
+        /* absent recents do not affect the bind result */
       }
     },
     []

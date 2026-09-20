@@ -50,18 +50,19 @@ export type TurnAnswerDto = {
   readonly finalText: string;
   readonly stopReason: StopReason;
   readonly turnCount: number;
-  /** 可选：单回合 thinking 文本（后端 T1 投影；无 thinking 时省略）。 */
+  /** Optional: per-turn thinking text (backend projection; omitted when absent). */
   readonly thinking?: ThinkingView;
-  /** 可选：单回合工具调用视图（后端 T1 投影；无 tool_use 时省略）。 */
+  /** Optional: per-turn tool-call views (backend projection; omitted when no tool_use). */
   readonly toolCalls?: readonly ToolCallView[];
-  /** 可选：按 assistant 原生 content block 顺序排列的文本/工具活动。 */
+  /** Optional: text/tool activity ordered by the assistant's native content blocks. */
   readonly activity?: readonly ActivityItem[];
-  /** 可选：camelCase token usage；仅在后端值非 null 时存在。 */
+  /** Optional: camelCase token usage; present only when the backend value is non-null. */
   readonly lastUsage?: TokenUsage;
-  /** D2 (tui-display-consistency) wire surface: 单回合 assistant 思考时长
-   * (ms)。仅在 hub 算得 sum > 0 时存在;旧会话 / 非 assistant turn / sum = 0
-   * → 字段缺席 (byte-stable, 与 thinking/toolCalls/lastUsage 同模式)。
-   * UI 消费: AgentCard → ThinkingBlock 折叠块显示「思考了 N 秒」 (SC8)。 */
+  /** Wire surface: per-turn assistant thinking
+   * duration (ms). Present only when the hub computes sum > 0; legacy sessions /
+   * non-assistant turns / sum = 0 → field absent (byte-stable, same pattern as
+   * thinking/toolCalls/lastUsage). UI consumes it in AgentCard → ThinkingBlock's
+   * collapsed 「思考了 N 秒」("thought for N seconds") label. */
   readonly thinkingMs?: number;
 };
 
@@ -84,8 +85,9 @@ export type SessionListItem = {
   readonly conversation_id: string;
   readonly updatedAt: string;
   readonly lastFinalText: string;
-  /** UI title excerpt — sidebar 主行字段（spec session-list-title）。
-   *  服务端 SessionListEntry 一直返回；空串 = 尚无标题，渲染走空态。 */
+  /** UI title excerpt — the sidebar's primary row field (spec session-list-title).
+   *  The server-side SessionListEntry always returns it; empty string = no title
+   *  yet, rendered via the empty-state form. */
   readonly title: string;
   readonly workspaceRoot?: string;
   /** Additive binding health from the session store. */
@@ -125,13 +127,13 @@ export type ResetSessionResponse = {
   turns: TurnDto[];
 };
 
-/** 手动压缩会话响应（镜像 src/session-api/contract.ts CompactSessionResponse）。 */
+/** Manual session-compact response (mirrors CompactSessionResponse in src/session-api/contract.ts). */
 export type CompactSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
-  /** true 表示实际发生了裁剪；false 表示无可压缩上下文（幂等 no-op）。 */
+  /** true = truncation actually happened; false = nothing to compact (idempotent no-op). */
   compacted: boolean;
-  /** #548:signal abort → true,会话保持原样;其余时刻缺席 = false。 */
+  /** True when the signal aborted (session left untouched); absent otherwise = false. */
   cancelled?: boolean;
   beforeCount: number;
   afterCount: number;
@@ -157,9 +159,10 @@ export type RewindTargetsResponse = {
 };
 
 /**
- * 可加载技能面条目（对齐服务端 `SkillSummaryDto`）。`description` 允许
- * 缺席：人侧技能可以没有 description（spec skill-index-increment SC5/SC9），
- * 缺席 ≠ 空串 —— 渲染走「无描述」形态而不是空串。
+ * A loadable-skill row (aligned with the server-side `SkillSummaryDto`).
+ * `description` may be absent: hand-authored skills need none (spec
+ * skill-index-increment). Absent ≠ empty string — the UI renders a
+ * dedicated "no description" form rather than an empty string.
  */
 export type SkillSummary = {
   readonly name: string;
@@ -201,7 +204,7 @@ export type HealthResponse = {
   service: string;
   version: string;
   readonly contextWindow: number;
-  /** 模型路由 ID（settings.llm.model）；未配置时字段缺席。 */
+  /** Model routing id (settings.llm.model); absent when unconfigured. */
   readonly model?: string;
 };
 
@@ -255,13 +258,14 @@ export class SessionApiError extends Error {
   }
 }
 
-// -- Subagent runtime status (#358 T8) ---------------------------------------
+// -- Subagent runtime status --------------------------------------------------
 
 /**
- * 子代理在场状态投影（镜像 `src/harness/subagent/manager.ts` SubagentInfo，
- * T7 端点响应 item）。字段语义与后端 SSOT 同源：
- * `state` ∈ "starting"|"running"|"completed"|"failed"；
- * Postel：endedAt/summary/reason 仅终态且有值时在场。
+ * Subagent presence projection (mirrors SubagentInfo in
+ * `src/harness/subagent/manager.ts`, the endpoint response item).
+ * Field semantics share the backend SSOT:
+ * `state` ∈ "starting"|"running"|"completed"|"failed";
+ * Postel: endedAt/summary/reason present only in a terminal state with a value.
  */
 export interface SubagentStatus {
   readonly taskId: string;
@@ -273,10 +277,10 @@ export interface SubagentStatus {
   readonly reason?: string;
 }
 
-/** 四态联合，对齐 SubagentState（manager TaskState 同构）。 */
+/** Four-state union, aligned with SubagentState (isomorphic to the manager's TaskState). */
 export type SubagentState = "starting" | "running" | "completed" | "failed";
 
-/** 镜像 T7 端点返回包 `{ subagents: [...] }`（镜像 `{ asks: [...] }` 先例）。 */
+/** Mirrors the endpoint envelope `{ subagents: [...] }` (following the `{ asks: [...] }` precedent). */
 export interface SubagentsResponse {
   readonly subagents: ReadonlyArray<SubagentStatus>;
 }
@@ -293,7 +297,7 @@ export interface TracesResponse {
 }
 
 /**
- * Trace 会话列表条目（读侧 `GET /api/v1/sessions`，spec v2 SC-R 10）。
+ * Trace session list row (read side `GET /api/v1/sessions`).
  * Mirrors `SessionSummary` in src/traceserver/sessions.ts.
  */
 export interface TraceSessionSummary {
@@ -309,7 +313,7 @@ export interface SessionsResponse {
 
 /**
  * Mirrors TraceRecordType in src/traceserver/types.ts (whitelist-derrived union).
- * 新 record 类型只在此追加, 对齐读侧白名单 (T5)。
+ * New record types are appended here only, matching the read-side whitelist.
  */
 export type TraceRecordType =
   | "llm_call"
@@ -343,34 +347,34 @@ export interface TraceQueryParams {
   readonly status?: "ok" | "error";
   readonly limit?: number;
   readonly offset?: number;
-  /** 前端轮询间隔（缺省 1000ms，0 关闭）。spec v2 SC-R 14 / SC-V 26. */
+  /** Front-end poll interval (default 1000ms; 0 disables polling). Spec v2. */
   readonly poll?: number;
   /**
-   * T5/T6 (#358): 精确匹配 subagent task_id (snake_case wire, 镜像读侧
-   * TraceQuery.taskId)。undefined = 不参与过滤。
+   * Exact-match subagent task_id (snake_case wire, mirrors the
+   * read-side TraceQuery.taskId). undefined = no filtering.
    */
   readonly task_id?: string;
   /**
-   * T5/T6 (#358): 精确匹配 parent_turn_id (snake_case wire)。undefined = 不参与过滤。
+   * Exact-match parent_turn_id (snake_case wire). undefined = no filtering.
    */
   readonly parent_turn_id?: string;
 }
 
-// -- serve-workspace (#531, T5) -------------------------------------------------
+// -- Workspace picker ---------------------------------------------------------
 
-/** serve-workspace T3: GET /api/v1/workspace 响应（picker 绑定状态）。 */
+/** GET /api/v1/workspace response (picker binding state). */
 export interface WorkspaceState {
   readonly bound: boolean;
   readonly root?: string;
 }
 
-/** serve-workspace T3: PUT /api/v1/workspace 请求体。 */
+/** PUT /api/v1/workspace request body. */
 export interface PutWorkspaceRequest {
   readonly path: string;
   readonly confirmTrust?: boolean;
 }
 
-/** serve-workspace T3: GET /api/v1/workspaces 响应（recents / trusted）。 */
+/** GET /api/v1/workspaces response (recents / trusted). */
 export interface WorkspacesResponse {
   readonly workspaces: ReadonlyArray<{ readonly root: string }>;
 }

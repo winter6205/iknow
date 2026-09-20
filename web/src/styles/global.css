@@ -66,9 +66,10 @@ button:disabled {
   border: 0;
 }
 
-/* hljs 主题（github.css）自带白色底与 1em 内边距；底色置为透明让 CodeBlock
-   的暖色容器透出，内边距清零由 pre 统一控制（避免双重 padding）。
-   token 前景色保留 github 值，贴合浅色暖调 Variant A。 */
+/* The hljs theme (github.css) ships a white background and 1em padding;
+   background goes transparent so CodeBlock's warm container shows through,
+   padding is zeroed here and controlled by pre (avoids double padding).
+   Token foreground colors keep github values — they fit light warm Variant A. */
 .hljs {
   background: transparent;
 }
@@ -85,11 +86,11 @@ pre code.hljs {
   }
 }
 
-/* ===== FlowTree 可视化面板样式（移植自 trace-prototype/src/styles） =======
-   节点卡 / 画布 / 右侧详情面板。token 复用 tokens.css 的 --color-* / --radius-*
-   / --shadow-* / --ease-soft（主 web 工程已含，无需新增）。 */
+/* ===== FlowTree visual panel styles (ported from trace-prototype/src/styles) ======
+   Node cards / canvas / right detail panel. Tokens reuse tokens.css
+   --color-* / --radius-* / --shadow-* / --ease-soft (already in the main web build). */
 
-/* 中流程图主区 */
+/* Main flow-diagram canvas area */
 .tp-canvas {
   position: relative;
   padding: 24px;
@@ -102,7 +103,7 @@ pre code.hljs {
   min-height: 720px;
 }
 
-/* 右侧详情面板 */
+/* Right detail panel */
 .tp-side-r {
   border-left: 1px solid var(--color-line);
   background: var(--color-surface);
@@ -214,7 +215,7 @@ pre code.hljs {
   overflow: auto;
 }
 
-/* 节点卡（FlowTree） */
+/* Node card (FlowTree) */
 .tp-node {
   position: absolute;
   width: 152px;

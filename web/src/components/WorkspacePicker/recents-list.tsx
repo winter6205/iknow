@@ -1,22 +1,24 @@
 /**
- * serve-workspace T7a — WorkspacePicker 「已存在工作空间」recents 列表 (T7b 修)。
+ * WorkspacePicker's 「已存在工作空间」 ("existing
+ * workspaces") recents list.
  *
- * review fix H3 / M4 抽出来的子组件：把 recents 列表的渲染逻辑从
- * WorkspacePicker 主文件里挪出，让父组件 composition 收敛到 ≤ 30 行。
+ * Moves recents rendering out of the
+ * WorkspacePicker main file so the parent composition converges to ≤ 30 lines.
  *
- * 行为契约：recents 来自 `GET /api/v1/workspaces`，全部为已信任根；
- * 点击触发 onBind(path, { confirmTrust: false })。
+ * Recents come from `GET /api/v1/workspaces`, all trusted
+ * roots; click triggers onBind(path, { confirmTrust: false }).
  *
- * T7b review fix:
- *  - #2: recents onClick 末尾追加 `onClose()`，与 T3 submit 路径行为一致
- *    （点完 recents 自动关 picker，无需手动关）。
- *  - #3: basename span 显式色：active 继承 button 的 `text-accent`；非 active
- *    加 `text-ink-2` 让标签清晰（之前依赖 body 默认色，hover 时层级混乱）。
- *    AC 字面要求 "顶层 label = basename(root)(accent)" — 选择 active-only
- *    accent 方案（更清晰的 active / 非 active 区分），注释里说明权衡。
+ *  - recents onClick appends `onClose()`, matching the submit path
+ *    (clicking a recent auto-closes the picker, no manual dismissal).
+ *  - basename span gets an explicit color: active inherits the button's
+ *    `text-accent`; non-active adds `text-ink-2` for label clarity (previously
+ *    relied on body default color, which layered badly on hover). The spec literally
+ *    asks "顶层 label = basename(root)(accent)" — chose active-only accent
+ *    (clearer active/inactive distinction); this note records the tradeoff.
  *
- * T8: 第一个 recents 项打 `data-ws-picker-autofocus="true"` — popover 挂载后
- * 父组件 useEffect 找该锚点 focus (a11y: auto-open 后焦点进 popover)。
+ * The first recents item carries `data-ws-picker-autofocus="true"` — after
+ * the popover mounts the parent's useEffect focuses that anchor (a11y: after
+ * auto-open, focus enters the popover).
  */
 import { basename } from "../WorkspaceChip";
 import { pickRecentForBind } from "../WorkspacePicker";
@@ -63,10 +65,10 @@ export function RecentsList({
                   void onBind(payload.path, {
                     confirmTrust: payload.confirmTrust,
                   }).then(() => {
-                    // T7b #2: 与 T3 submit 路径一致 — bind 成功后自动关
-                    // picker。失败时 onBind reject, .then 不触发, picker
-                    // 保留供用户调整（与 submit 的 onNotice 错误路径行为
-                    // 对称）。
+                    // Same as the submit path — auto-close the picker
+                    // after a successful bind. On failure onBind rejects, .then
+                    // never runs, and the picker stays open for the user to adjust
+                    // (symmetric with submit's onNotice error path).
                     onClose();
                   });
                 }}

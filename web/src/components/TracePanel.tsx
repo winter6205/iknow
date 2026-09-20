@@ -16,8 +16,9 @@ import { TraceViewToggle, type TraceView } from "./TraceViewToggle";
 import { pickInitialTraceSession } from "../lib/trace-entry";
 
 /**
- * 读取 `?poll=<ms>` 参数（缺省 1000，0 关闭轮询）。spec v2 SC-V 26。
- * 非正整数 → 回退默认 1000（后端 400 由 hook 错误态呈现，这里保持前端稳健）。
+ * Read the `?poll=<ms>` param (default 1000; 0 disables polling).
+ * Non-positive-integer → fall back to default 1000 (a backend 400 is surfaced by
+ * the hook's error state; here we just keep the frontend robust).
  */
 function readPollMs(): number {
   const raw = new URL(window.location.href).searchParams.get("poll");
@@ -27,9 +28,10 @@ function readPollMs(): number {
 }
 
 /**
- * Container: 会话列表（左）→ 下钻到 FlowTree（主视图）/ TraceTable（表格
- * 变体，spec Open Q5）+ 右侧详情面板。字段表加载一次（失败可重试）；
- * FlowTree 数据按当前会话轮询（useTraceSessionTraces）。
+ * Container: session list (left) → drill down into FlowTree (primary view) /
+ * TraceTable (table variant, spec Open Q5) + right-side detail panel. The field
+ * table loads once (retryable on failure); FlowTree data polls per current
+ * session (useTraceSessionTraces).
  */
 export function TracePanel() {
   const [fields, setFields] = useState<ReadonlyArray<TraceFieldDef>>([]);
@@ -45,9 +47,9 @@ export function TracePanel() {
     refresh: refreshSessions,
   } = useTraceSessions();
   const [sessionId, setSessionId] = useState<string | null>(null);
-  // ADR-0020 deep-link: `/trace?session=<conversationId>`（chat 侧栏 ⇱trace
-  // 入口）优先选中该会话；读一次即可（后续用户点选覆盖）。SSR-free SPA，
-  // window 恒在。
+  // ADR-0020 deep-link: `/trace?session=<conversationId>` (the ⇱trace entry in
+  // the chat sidebar) preselects that session; read once (later user clicks win).
+  // SSR-free SPA, window always present.
   const [initialSessionParam] = useState<string | null>(() => {
     const param = new URLSearchParams(window.location.search).get("session");
     return param !== null && param.trim().length > 0 ? param : null;
@@ -58,7 +60,7 @@ export function TracePanel() {
     pollMs
   );
 
-  // 字段表 + 现有 TraceTable 过滤状态（表格变体复用）
+  // Field table + existing TraceTable filter state (reused by the table variant)
   const [filters, setFilters] = useState<TraceFilterValues>({
     conversationId: "",
     recordType: undefined,
@@ -83,8 +85,9 @@ export function TracePanel() {
     };
   }, [fieldsReloadKey]);
 
-  // 会话列表就绪后默认选中（SC-V 23 + deep-link 优先）；选中算法是纯函数
-  // pickInitialTraceSession（web/src/lib/trace-entry.ts，root vitest 覆盖）。
+  // Default selection once the session list is ready (SC-V 23 + deep-link wins);
+  // the pick algorithm is the pure function pickInitialTraceSession
+  // (web/src/lib/trace-entry.ts, covered by root vitest).
   useEffect(() => {
     if (sessionId !== null) return;
     const picked = pickInitialTraceSession(sessions, initialSessionParam);
@@ -152,7 +155,7 @@ export function TracePanel() {
       main = null;
     }
   } else {
-    // 表格变体（原 TracePanel 行为）
+    // Table variant (original TracePanel behavior)
     if (loading && tableData === null) {
       main = (
         <StateBlock
@@ -195,8 +198,8 @@ export function TracePanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b border-line px-4 py-2">
-        {/* ADR-0020: 与 chat 页（/）同进程互链 —— trace 面板是独立 SPA
-            页面（/trace），返回是一次普通页面导航。 */}
+        {/* ADR-0020: cross-linked with the chat page (/) in the same process — the
+            trace panel is a standalone SPA page (/trace); "back" is a plain navigation. */}
         <a
           href="/"
           title="返回对话页面"

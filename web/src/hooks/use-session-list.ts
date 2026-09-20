@@ -1,10 +1,11 @@
 /**
- * serve-workspace T8 — `useSessionList` 从 SessionSidebar 内部 hook 提到
- * 共享 hook, 让 App 层也能用同一份 session list (lookup active session 的
- * workspaceRoot, 喂给 WorkspaceChip 实现上下文感知)。
+ * Hoist `useSessionList` out of SessionSidebar into a
+ * shared hook so the App layer can use the same session list (looking up the
+ * active session's workspaceRoot for a context-aware WorkspaceChip).
  *
- * 行为契约: 与原 SessionSidebar 内 inline `useSessionList` 100% 等价 — 同样
- * 的 listSessions + AbortController + 外部 refreshSignal bump + 错误降级。
+ * Behavioral contract: 100% equivalent to the original inline hook in
+ * SessionSidebar — same listSessions + AbortController + external
+ * refreshSignal bump + error degradation.
  */
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api/client";
@@ -31,7 +32,7 @@ function toMessage(e: unknown): string {
  * user clicking. The AbortController cancels any in-flight request on unmount
  * or re-run so a stale response can never overwrite newer state.
  *
- * #90 contract preserved: listSessions + sortSessionsByUpdatedDesc +
+ * Contract preserved: listSessions + sortSessionsByUpdatedDesc +
  * error surfacing + refresh bump — only the visual layer changed.
  */
 export function useSessionList(externalSignal?: number): SessionListState {
@@ -47,8 +48,8 @@ export function useSessionList(externalSignal?: number): SessionListState {
     api.listSessions(ctrl.signal).then(
       (res) => {
         if (ctrl.signal.aborted) return;
-        // 排序由 GroupedView 内的 groupSessionsByWorkspace 接管；
-        // 这里只负责把 raw sessions 暴露给上层。
+        // Ordering is owned by groupSessionsByWorkspace inside GroupedView;
+        // this layer only exposes the raw sessions upward.
         setSessions(res.sessions);
         setPhase("ready");
       },

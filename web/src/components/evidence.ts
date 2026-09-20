@@ -1,7 +1,7 @@
 /**
- * Evidence 投影类型（保留，供未来 wire 字段扩展时使用）。
- * 当前 Session API wire（TurnAnswerDto = { finalText, stopReason, turnCount }）
- * 不携带这些字段；组件经可选 props 预留结构。
+ * Evidence projection types (kept for future wire-field expansion).
+ * The current Session API wire (TurnAnswerDto = { finalText, stopReason, turnCount })
+ * carries none of these fields; components reserve the shape via optional props.
  */
 export type GovernanceStatus = "ok" | "stale" | "conflict";
 
@@ -26,7 +26,7 @@ export const GOV_LABEL: Record<GovernanceStatus, string> = {
   conflict: "存在冲突",
 };
 
-/** 去 "snap_" 前缀，取前 n 字符短显。 */
+/** Strip the "snap_" prefix, show the first n chars. */
 export function shortSnap(id: string, n = 8): string {
   const bare = id.startsWith("snap_") ? id.slice(5) : id;
   return bare.slice(0, n);

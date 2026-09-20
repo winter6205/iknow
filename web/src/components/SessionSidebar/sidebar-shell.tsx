@@ -1,15 +1,15 @@
 /**
- * serve-workspace T7a — SessionSidebar 的 UI chrome 子组件 (T7b review fix 落地)。
+ * SessionSidebar UI-chrome subcomponents.
  *
- * 抽出 `SidebarHeader` / `NewSessionCTA` / `ExpandedSidebar` / `CollapsedRail`
- * 四个 layout 子组件。它们与 useSessionList 解耦（只接 phase / refresh /
- * handlers 等 props），合起来撑起"展开/折叠"两态外壳，让 SessionSidebar.tsx
- * 收敛到 orchestration（≤ 300 行）。
+ * Extracts four layout subcomponents: `SidebarHeader` / `NewSessionCTA` /
+ * `ExpandedSidebar` / `CollapsedRail`. They are decoupled from useSessionList
+ * (taking only phase / refresh / handlers as props) and together form the
+ * expanded/collapsed shell, letting SessionSidebar.tsx converge to
+ * orchestration (≤ 300 lines).
  *
- * T7b review fix:
- *  - M2: `ExpandedSidebarData.currentBoundRoot` 字段移除 — 该字段从未被任
- *    何消费者读取（Speculative Generality）。GroupedView 不再接收该 prop。
- *  - L3: ChevronRightIcon → ChevronIcon({ direction: "right" }).
+ *  - `ExpandedSidebarData.currentBoundRoot` removed — no consumer ever
+ *    read it (Speculative Generality). GroupedView no longer receives the prop.
+ *  - ChevronRightIcon → ChevronIcon({ direction: "right" }).
  */
 import type { RefObject } from "react";
 import { FOCUS_RING } from "../../lib/ui";
@@ -23,7 +23,7 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-/** Sidebar 顶部 header：标题 + refresh + collapse toggle。 */
+/** Sidebar top header: title + refresh + collapse toggle. */
 function SidebarHeader({
   refresh,
   collapseBtnRef,
@@ -70,7 +70,7 @@ function SidebarHeader({
   );
 }
 
-/** 「新会话」CTA pill：accent 主按钮。 */
+/** 「新会话」("new session") CTA pill: accent primary button. */
 function NewSessionCTA({ onNewSession }: { onNewSession: () => void }) {
   return (
     <div className="shrink-0 px-3 pt-2">
@@ -108,14 +108,15 @@ type ExpandedSidebarHandlers = {
 };
 
 /**
- * ExpandedSidebar composition（M5 fix）：
+ * ExpandedSidebar composition:
  *  - SidebarHeader (refresh + collapse toggle)
  *  - NewSessionCTA
  *  - content routing (loading / error / empty / grouped)
  *
- * Phase / error / empty 三态留本组件（与 useSessionList 紧密耦合，不到 30 行）。
+ * The phase / error / empty tri-state stays in this component (tightly coupled
+ * to useSessionList, under 30 lines).
  *
- * T7b review fix M2: `data.currentBoundRoot` 移除（GroupedView 不再需要）。
+ * `data.currentBoundRoot` removed (GroupedView no longer needs it).
  */
 export function ExpandedSidebar({
   data,

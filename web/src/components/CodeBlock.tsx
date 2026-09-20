@@ -10,7 +10,7 @@ export type CodeBlockProps = {
   className?: string;
 };
 
-/** navigator.clipboard first; execCommand 降级（非安全上下文 / 旧浏览器）。 */
+/** navigator.clipboard first; execCommand fallback (non-secure context / old browsers). */
 async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -37,7 +37,7 @@ async function copyText(text: string): Promise<boolean> {
 
 const COPY_RESET_MS = 2000;
 
-/** 从 markdown code 元素的 className（language-*）推导语言标签。 */
+/** Derive the language label from the markdown code element's className (language-*). */
 export function codeLanguageLabel(className: string | undefined): string {
   const match = className?.match(/language-([\w+#-]+)/);
   return match?.[1] ?? "";

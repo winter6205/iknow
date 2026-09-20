@@ -1,24 +1,24 @@
 /**
- * serve-workspace T8 — WorkspacePicker 改成 popover shell。
+ * WorkspacePicker popover shell.
  *
- * 历史: 该文件原 319 行, WorkspacePicker 122 行 / WorkspaceBrowser 103 行,
- * 两个长方法 (H3 / M4)。T7a 把:
- *  - recents 列表抽到 `WorkspacePicker/recents-list.tsx`。
- *  - path picker 子面板抽到 `WorkspacePicker/path-picker-panel.tsx`。
- *  - 子目录浏览器 (含 Breadcrumbs / SubdirList 子组件) 抽到
- *    `WorkspacePicker/workspace-browser.tsx`。
+ * History: the file was 319 lines with two long methods (WorkspacePicker 122 /
+ * WorkspaceBrowser 103). Extracted:
+ *  - the recents list → `WorkspacePicker/recents-list.tsx`.
+ *  - the path-picker sub-panel → `WorkspacePicker/path-picker-panel.tsx`.
+ *  - the subdir browser (with Breadcrumbs / SubdirList) →
+ *    `WorkspacePicker/workspace-browser.tsx`.
  *
- * T8 review: picker 改 popover — 父层 (ChatHeader / App) 把 popover shell
- * 锚定在 WorkspaceChip 右侧 (`absolute top-full right-0 mt-1 z-50`)。
- * shell 只负责 (a) `role="dialog"` / `aria-modal` / `aria-labelledby`
- * 三件套 (a11y 红线) 与 (b) 内嵌 PickerHeader + RecentsList + PathPickerPanel
- * composition。RecentsList / PathPickerPanel / WorkspaceBrowser 完全不重写
- * (T7a 子组件契约不变: recents onClick 末尾 `onClose()`, bind 成功也
- * `onClose()`)。
+ * The picker is a popover — the parent layer (ChatHeader / App)
+ * anchors the popover shell at the WorkspaceChip's right (`absolute top-full
+ * right-0 mt-1 z-50`). The shell owns only (a) the `role="dialog"` /
+ * `aria-modal` / `aria-labelledby` trio (a11y red line) and (b) the embedded
+ * PickerHeader + RecentsList + PathPickerPanel composition. RecentsList /
+ * PathPickerPanel / WorkspaceBrowser are untouched (subcomponent contract
+ * unchanged: recents onClick ends with `onClose()`; bind success also `onClose()`).
  *
- * pickRecent / submit / trust toggle 三条契约不变: spec §Commands 5 "换根 =
- * 新会话" 由 App 层 handleCreateInWorkspace 负责 (本 shell 只 bind 不 newSession,
- * 与默认决议 B 对齐)。
+ * pickRecent / submit / trust toggle contracts unchanged: the spec rule
+ * "switch root = new session" is handled by App-layer handleCreateInWorkspace
+ * (this shell only binds, never newSession — aligned with default resolution B).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveBrowserRoot } from "../lib/workspace-browser";
@@ -38,9 +38,10 @@ export type WorkspacePickerProps = {
   readonly onClose: () => void;
   readonly onNotice: (text: string) => void;
   /**
-   * serve-workspace T3: 子目录探测器。注入而非 import api, 让 Picker
-   * 在测试里能用 vi.stubGlobal("fetch") 顶替。browse 失败 (422 / network)
-   * 按 `SessionApiError` 通道抛出, 此处 catch → onNotice, 不阻塞 bind。
+   * Subdir prober. Injected rather than importing api so
+   * tests can stub it via vi.stubGlobal("fetch"). Browse failures (422 /
+   * network) throw through the `SessionApiError` channel; caught here →
+   * onNotice, never blocking bind.
    */
   readonly onBrowseSubdirs: (
     root: string,
@@ -49,7 +50,8 @@ export type WorkspacePickerProps = {
 };
 
 /**
- * 绑定请求载荷构造（空/纯空白输入 → null；供单测与组件共享）。
+ * Build the bind request payload (empty / whitespace-only input → null;
+ * shared by unit tests and the component).
  */
 export function buildBindPayload(
   input: string,
@@ -61,8 +63,8 @@ export function buildBindPayload(
 }
 
 /**
- * serve-workspace T5: recents 列表项点击的 bind 载荷。recents 来自
- * `GET /api/v1/workspaces`, 全部为已信任根, 无需再走 trust 二次确认。
+ * Bind payload for a recents list-item click. Recents come
+ * from `GET /api/v1/workspaces`, all trusted roots — no second trust confirmation needed.
  */
 export function pickRecentForBind(root: string): {
   path: string;
@@ -72,21 +74,23 @@ export function pickRecentForBind(root: string): {
 }
 
 /**
- * WorkspacePicker popover 标题 — a11y labelledby 锚点。`sr-only` 让
- * 标题对屏幕阅读器可达，对 sighted 用户不占视觉空间。
+ * WorkspacePicker popover title — the aria-labelledby anchor. `sr-only` keeps
+ * the title reachable to screen readers without taking visual space for sighted users.
  */
 const POPOVER_TITLE_ID = "workspace-picker-title";
 
 /**
- * WorkspacePicker popover shell — 三件套 (role / aria-modal / aria-labelledby) +
- * PickerHeader + RecentsList + PathPickerPanel 二级折叠。
+ * WorkspacePicker popover shell — the trio (role / aria-modal / aria-labelledby) +
+ * PickerHeader + RecentsList + PathPickerPanel two-level collapse.
  *
- * T5 既有行为: recents.length === 0 时 path picker 默认展开 (用户首次引导)；
- * recents 非空时 path picker 折叠, 由用户点 CTA 展开。
+ * With recents.length === 0 the path picker starts expanded
+ * (first-run guidance); with recents non-empty it stays collapsed until the user
+ * clicks the CTA.
  *
- * T8 mount 行为: auto-open (T5) 在 App 层 useWorkspaceActions 里, setWorkspaceOpen(true)
- * 触发本 shell 挂载。本 shell 的 `useEffect` 把焦点送到第一个可聚焦元素
- * (recents 首项 / path input 二选一), 满足 a11y "auto-open 后焦点进 popover"。
+ * Mount behavior: auto-open lives in App-layer useWorkspaceActions;
+ * setWorkspaceOpen(true) mounts this shell. The shell's `useEffect` moves focus
+ * to the first focusable element (first recents item / path input, one of the
+ * two), satisfying the a11y rule "after auto-open, focus enters the popover".
  */
 export function WorkspacePicker(props: WorkspacePickerProps) {
   const initialBase = resolveBrowserRoot(props.currentRoot);
@@ -95,9 +99,10 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
     props.recents.length === 0
   );
 
-  // T8 a11y: 挂载后第一项自动 focus (auto-open 路径)。recents 非空 → 首项
-  // recent button; recents 空 → path picker input。Effect 同步触发
-  // (queueMicrotask 替代 setTimeout 0, 避免测试时间敏感)。
+  // Auto-focus the first item on mount (auto-open path). Non-empty
+  // recents → first recent button; empty recents → path picker input. Effect
+  // fires synchronously (queueMicrotask instead of setTimeout 0 to avoid
+  // timing sensitivity in tests).
   useEffect(() => {
     const root = dialogRef.current;
     if (!root) return;
@@ -109,15 +114,15 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
     });
   }, []);
 
-  // M2 (review fix): focus trap — Tab 在 popover 内循环。
-  // - 焦点所有权: WorkspacePicker 拥有 trap (里头有可见的 focusable 元素);
-  //   usePopoverDismiss 拥有 Esc / outside-click / focus-return (见
-  //   use-workspace-actions.ts 注释)。两者职责分明。
-  // - aria-modal="true" 保留: 文件声明模态,trap 是真实行为。
-  // - 实现: 在 dialog 上挂 keydown,仅 key === "Tab" 时拦截;读 row.querySelectorAll
-  //   找 tabbable 元素,焦点在边缘时回卷。
-  // - `tabbable` 选择器: 匹配 native focusable + 通过 [tabindex] 显式打开的子节点。
-  //   `<button>` / `<input>` 默认 tabbable,disabled 不算。
+  // Focus trap — Tab cycles inside the popover.
+  // - Focus ownership: WorkspacePicker owns the trap (it contains the visible
+  //   focusable elements); usePopoverDismiss owns Esc / outside-click /
+  //   focus-return (see use-workspace-actions.ts comments). Clear split of duties.
+  // - aria-modal="true" stays: the file declares modality, the trap is real behavior.
+  // - Implementation: keydown on the dialog, intercepted only for key === "Tab";
+  //   querySelectorAll finds tabbable elements, wrapping focus at the edges.
+  // - `tabbable` selector: native focusables + children explicitly opened via
+  //   [tabindex]. `<button>` / `<input>` are tabbable by default; disabled ones are not.
   const handleDialogKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== "Tab") return;
     const root = dialogRef.current;
@@ -151,8 +156,8 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
       aria-modal="true"
       aria-labelledby={POPOVER_TITLE_ID}
       onKeyDown={handleDialogKeyDown}
-      // Popover shell — 父层 (App/ChatHeader) 用 `absolute top-full right-0 mt-1 z-50`
-      // 包本组件, shell 自身只管内容 + 边框 + shadow。
+      // Popover shell — the parent layer (App/ChatHeader) wraps this component
+      // with `absolute top-full right-0 mt-1 z-50`; the shell itself handles only content + border + shadow.
       className="w-[22rem] max-w-[calc(100vw-2rem)] border border-line bg-surface text-[12px] text-ink-2 shadow-bubble"
     >
       <h2 id={POPOVER_TITLE_ID} className="sr-only">
@@ -188,7 +193,7 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
 }
 
 /**
- * WorkspacePicker 顶部行：标题 + 关闭按钮。无状态纯展示。
+ * WorkspacePicker top row: title + close button. Stateless pure display.
  */
 function PickerHeader({ onClose }: { onClose: () => void }) {
   return (
@@ -201,7 +206,7 @@ function PickerHeader({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** 「选择路径新建工作空间」折叠 CTA — 控制 path picker 展开态。 */
+/** 「选择路径新建工作空间」("choose a path to create a new workspace") collapsed CTA — controls the path picker's expanded state. */
 function PathPickerToggle({
   expanded,
   onToggle,

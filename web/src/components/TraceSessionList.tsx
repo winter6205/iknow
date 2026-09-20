@@ -23,8 +23,8 @@ function fmtMtime(ms: number): string {
 }
 
 /**
- * 会话列表 → 下钻切换。点击某历史会话后，面板明细（FlowTree / TraceTable）
- * 下钻到该会话。列表与明细分离（SC-V 25）。
+ * Session list → drill-down switch. Clicking a historical session drills the
+ * detail panel (FlowTree / TraceTable) into it. List and detail are separate (SC-V 25).
  */
 export function TraceSessionList({
   sessions,

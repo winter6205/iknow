@@ -2,32 +2,35 @@ import type { Ref } from "react";
 import { FOCUS_RING } from "../lib/ui";
 
 export type WorkspaceChipProps = {
-  /** ws.bound (per-root pick) — 兜底态：未绑定 / 刚换根但 session 还没 refresh。 */
+  /** ws.bound (per-root pick) — fallback state: unbound / root just switched but the session list hasn't refreshed. */
   readonly bound: boolean;
-  /** ws.bound 当前根；与 bound 联动。 */
+  /** ws.bound current root; coupled with bound. */
   readonly root: string | null;
   /**
-   * serve-workspace T8: 当前 active session 的 workspaceRoot（来自
-   * session-list look-up by currentConversationId）。优先级最高 — 一旦
-   * 用户切到了一个工作空间, chip 就显示该会话所在的根名, 不再退到
-   * unbound 警告色。
+   * workspaceRoot of the current active session (from
+   * the session-list look-up by currentConversationId). Highest priority —
+   * once the user switches into a workspace, the chip shows that session's
+   * root name and never degrades to the unbound warning color.
    *
-   * 显式接受 string | null | undefined: 后端 schema 里 workspaceRoot
-   * 是 Postel 加性字段（legacy 文件可缺席 → undefined），UI 层空串 / undefined
-   * 同视为「未知」走兜底。
+   * Explicitly accepts string | null | undefined: workspaceRoot is a Postel
+   * additive field in the backend schema (may be absent in legacy files →
+   * undefined); the UI layer treats empty string / undefined alike as
+   * "unknown" and falls back.
    */
   readonly activeWorkspaceRoot?: string | null;
   readonly onOpen: () => void;
   /**
-   * serve-workspace T8: 父层传 chip button ref — popover 关闭时焦点回
-   * trigger (a11y 红线: Esc / outside-click 关后焦点必须回到 chip)。
+   * Parent passes the chip button ref — when the popover
+   * closes, focus returns to the trigger (a11y red line: after Esc /
+   * outside-click close, focus must land back on the chip).
    */
   readonly buttonRef?: Ref<HTMLButtonElement>;
 };
 
 /**
- * POSIX + Windows 兼容的 basename 提取。根目录（trim 后空串）原样返回：
- * "/" 这种"无 basename"输入在 chip 上展示成 "/"比空字符串更可读。
+ * POSIX + Windows compatible basename extraction. A root path (empty after
+ * trim) returns as-is: showing "/" for a "no basename" input reads better on
+ * the chip than an empty string.
  */
 export function basename(p: string): string {
   const trimmed = p.replace(/[/\\]+$/, "");
@@ -37,19 +40,20 @@ export function basename(p: string): string {
 }
 
 /**
- * 顶栏右侧元数据簇（serve-workspace T8 chip awareness）：
+ * Top-bar right metadata cluster (chip awareness):
  *
- * 显示优先级（高 → 低）：
- *  1. `activeWorkspaceRoot` 非空 → 该 basename + folder icon（folder
- *     color, ink-2, hover 高亮 ink-3），整体保持 current bound 形态。
- *     用户切到了一个工作空间内的会话，chip 即反映会话所在根 — 不再
- *     退到 unbound 警告色（用户反馈 "应该是在那个位置, 显示当前工作
- *     空间的名字"）。
- *  2. 否则 `bound && root` → `basename(root)`（同上视觉），picker 还没
- *     拿到 active session 数据时的兜底态（例如刚绑定还没刷新 list）。
- *  3. 否则 → 警告色 CTA "选择工作空间"（unbound）。
+ * Display priority (high → low):
+ *  1. `activeWorkspaceRoot` non-empty → that basename + folder icon (folder
+ *     color, ink-2, hover highlights ink-3), overall keeping the current-bound shape.
+ *     The user has switched into a session inside a workspace, so the chip
+ *     reflects that session's root instead of degrading to the unbound warning
+ *     color (user feedback: the chip should show the current workspace name
+ *     where the session lives).
+ *  2. Else `bound && root` → `basename(root)` (same visuals) — fallback while
+ *     the picker has not yet got active-session data (e.g. just bound, list not refreshed).
+ *  3. Else → warning-colored CTA "选择工作空间" ("choose workspace", unbound).
  *
- * 三态都用 `<button>`：chip 既是状态指示，也是 picker 触发入口。
+ * All three states use `<button>`: the chip is both status indicator and picker trigger.
  */
 export function WorkspaceChip({
   bound,

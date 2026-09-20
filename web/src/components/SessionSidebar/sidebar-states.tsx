@@ -1,9 +1,9 @@
 /**
- * serve-workspace T7a — SessionSidebar 的三态展示组件。
+ * SessionSidebar tri-state display components.
  *
- * loading / error / empty 三个无状态展示组件。它们与 useSessionList 紧耦合
- * （errorMsg / retry 由 SessionSidebar 注入），但本身零 prop drilling —
- * 抽出来便于 SessionSidebar.tsx 收敛到 ≤300 行。
+ * Stateless loading / error / empty displays. Tightly coupled to useSessionList
+ * (errorMsg / retry injected by SessionSidebar) but with zero prop drilling —
+ * extracted so SessionSidebar.tsx converges to ≤ 300 lines.
  */
 import { FOCUS_RING } from "../../lib/ui";
 

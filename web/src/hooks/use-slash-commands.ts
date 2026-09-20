@@ -1,11 +1,11 @@
 /**
- * serve-workspace T7a — ChatApp slash 命令路由 hook (review fix M6)。
+ * ChatApp slash-command routing hook.
  *
- * 把 ChatApp 内 ~140 行的 `handleCommand` + `applyArgSetting` + `handleSkillLoad`
- * 集中到一处。ChatApp 主文件不再承载每个 case 分支的 inline IIFE/notice
- * 字符串，让 ChatApp ≤ 200 行。
+ * Consolidates the ~140-line `handleCommand` + `applyArgSetting` +
+ * `handleSkillLoad` from ChatApp, so the main file no longer carries per-case
+ * inline IIFEs / notice strings and stays ≤ 200 lines.
  *
- * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
+ * Behavioral contract: 100% equivalent to the original inline handlers; only the carrier changed.
  */
 import { useCallback, useRef } from "react";
 import * as api from "../api/client";
@@ -15,11 +15,12 @@ import {
   type SlashCommandName,
 } from "../lib/slash";
 
-// SSOT 镜像（web ↔ src 跨 workspace 边界）。`web/` 是独立 Vite workspace
-// （见 `web/tsconfig.json` 仅 include `web/src`，无路径映射到 `../src/`），
-// 无法 import `src/harness/skill/body.ts` 的 `SKILL_LOAD_PREFIX` /
-// `buildSkillLoadText`。保持 byte 级形态与 `src/tui/app.tsx` /
-// `src/session-api/hub.ts` 一致；任何字面量变更必须三处同步。
+// SSOT mirror across the web ↔ src workspace boundary. `web/` is a separate
+// Vite workspace (`web/tsconfig.json` includes only `web/src`, no path map to
+// `../src/`), so it cannot import `SKILL_LOAD_PREFIX` / `buildSkillLoadText`
+// from `src/harness/skill/body.ts`. Keep the byte-level shape identical to
+// `src/tui/app.tsx` and `src/session-api/hub.ts`: any literal change must be
+// synchronized in all three places.
 const SKILL_LOAD_PREFIX_WEB = '[skill-load name="';
 import { formatSessionInfo } from "../lib/session-info";
 import type { WebRewindTarget } from "../lib/rewind-targets";
@@ -65,8 +66,8 @@ export type UseSlashCommandsResult = {
 };
 
 /**
- * /thinking / /effort 子命令处理（applyArgSetting）：两条命令都改
- * thinkingSettings（effort 自动开 enabled），并 push notice。
+ * /thinking and /effort subcommand handling (applyArgSetting): both mutate
+ * thinkingSettings (effort also turns enabled on) and push a notice.
  */
 function applyArgSetting(
   args: UseSlashCommandsArgs,
@@ -81,8 +82,9 @@ function applyArgSetting(
     args.chat.pushNotice(value === "on" ? "已开启思考" : "已关闭思考");
     return;
   }
-  // effort 仅在 thinking 开启时生效（toWireOverride：!enabled → mode
-  // off），故一并置 enabled=true。值已过词表值域校验（ThinkingEffort 子集）。
+  // effort only takes effect while thinking is on (toWireOverride: !enabled →
+  // mode off), so set enabled=true too. The value passed lexicon-range
+  // validation (a ThinkingEffort subset).
   args.handleThinkingChange({
     enabled: true,
     effort: value as ThinkingEffort,
@@ -216,7 +218,7 @@ export function useSlashCommands(
           })();
           break;
         case "graph": {
-          // args 原样上送：值域与文案在服务端 applyGraphCommand。
+          // Send args verbatim: value domain and wording are decided server-side in applyGraphCommand.
           const raw = (arg ?? "").trim();
           const parts = raw === "" ? [] : raw.split(/\s+/);
           void api
@@ -225,7 +227,7 @@ export function useSlashCommands(
               chat.pushNotice(res.message);
             })
             .catch((e: unknown) => {
-              // EXIT: 400/404 只 notice，不 fallback 成普通消息。
+              // EXIT: on 400/404 notice only; never fall back to sending a normal message.
               chat.pushNotice(e instanceof Error ? e.message : String(e));
             });
           break;

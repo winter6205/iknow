@@ -34,7 +34,7 @@ import { SessionApiError } from "./types";
 const API = "/api/v1";
 
 /**
- * Trace inspection API base path (spec #183).
+ * Trace inspection API base path.
  *
  * Defaults to `/api/v1/traces` so the existing `iknow serve` reverse-proxy
  * path works without env wiring. Override with VITE_TRACE_API_BASE when the
@@ -105,9 +105,11 @@ export function health(signal?: AbortSignal): Promise<HealthResponse> {
 }
 
 /**
- * permission mode 端点（TUI Shift+Tab 的 web 镜像）。GET 读当前值；POST
- * 走后端 SSOT 循环（nextShiftTabMode）切换并返回新值 —— 前端不复制
- * 循环语义。holder 缺席的装配返回 404（调用方静默降级：徽标不渲染）。
+ * Permission-mode endpoints (web mirror of the TUI's Shift+Tab). GET reads the
+ * current value; POST cycles via the backend SSOT (nextShiftTabMode) and
+ * returns the new value — the front-end never duplicates the cycle logic.
+ * Assemblies without a permission holder return 404 (callers degrade silently:
+ * no badge rendered).
  */
 export function getPermissionMode(
   signal?: AbortSignal
@@ -129,7 +131,7 @@ export function cyclePermissionMode(
   ).then((res) => res.mode);
 }
 
-/** POST /api/v1/graph-mode：slash `/graph` 的 args 原样上送；文案由服务端渲染。 */
+/** POST /api/v1/graph-mode: sends slash `/graph` args verbatim; the response text is rendered server-side. */
 export function applyGraphMode(
   args: ReadonlyArray<string>,
   signal?: AbortSignal
@@ -183,7 +185,7 @@ export function getSessionHistory(
 }
 
 export type PostMessageOptions = {
-  /** 每请求 thinking 覆盖（T5）；未提供则 body 不带 thinking 字段（后端走缓存配置）。 */
+  /** Per-request thinking override; omitted means no `thinking` field in the body (backend uses cached config). */
   thinking?: PostMessageRequest["thinking"];
 };
 
@@ -195,7 +197,7 @@ export function postMessage(
 ): Promise<PostMessageResponse> {
   const body: PostMessageRequest = {
     text,
-    // Explicit undefined 省略：JSON.stringify 会丢掉 undefined 字段。
+    // Omit explicit undefined: JSON.stringify would drop undefined fields anyway.
     ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
   };
   return request(
@@ -340,22 +342,23 @@ export function resolveAsk(
   );
 }
 
-// -- Subagent runtime status (#358 T8) ---------------------------------------
+// -- Subagent runtime status --------------------------------------------------
 
 /**
- * #358 T8: subagent 状态端点路径（纯函数，单独导出供单测——镜像
- * `resolveTraceSessionsBase` 形态；与 `listPendingAsks` 同样的
- * `{API}/sessions/{id}/...` URI 形态）。`encodeURIComponent` 处理
- * sessionId 中的特殊字符（避免裸 `?` `/` 触发路由解析）。
+ * Subagent-status endpoint path. Exported as a pure function for
+ * unit tests — mirrors `resolveTraceSessionsBase` and shares the
+ * `{API}/sessions/{id}/...` URI shape used by `listPendingAsks`.
+ * `encodeURIComponent` keeps special characters in sessionId (a bare `?` or
+ * `/`) from breaking route resolution.
  */
 export function resolveSubagentsPath(sessionId: string): string {
   return `${API}/sessions/${encodeURIComponent(sessionId)}/subagents`;
 }
 
 /**
- * GET /sessions/:id/subagents — 只读子代理状态投影（spec #358 T8）。
- * 与 `listPendingAsks` 同形：轮询端点，解析 `{ subagents: SubagentStatus[] }`。
- * 不建 SSE/websocket（spec Boundaries Never）。
+ * GET /sessions/:id/subagents — read-only subagent state projection.
+ * Same shape as `listPendingAsks`: a polling endpoint returning
+ * `{ subagents: SubagentStatus[] }`. No SSE/websocket (spec Boundaries Never).
  */
 export function getSubagents(
   id: string,
@@ -364,19 +367,20 @@ export function getSubagents(
   return request(resolveSubagentsPath(id), { method: "GET" }, signal);
 }
 
-// -- Workspace picker (serve-workspace #531, T5) --------------------------------
+// -- Workspace picker ---------------------------------------------------------
 
 /**
- * GET /api/v1/workspace — 当前 picker 绑定状态（bound + root）。
- * 未绑定 → `{ bound: false }`，root 缺席。
+ * GET /api/v1/workspace — current picker binding state (bound + root).
+ * Unbound → `{ bound: false }`, `root` absent.
  */
 export function getWorkspace(signal?: AbortSignal): Promise<WorkspaceState> {
   return request(`${API}/workspace`, {}, signal);
 }
 
 /**
- * GET /api/v1/workspaces — recents/trust 名单（picker 候选）。recentsHome
- * 缺席 → 后端 404 not_found（调用方自行静默降级为空列表）。
+ * GET /api/v1/workspaces — recents/trust list (picker candidates). When
+ * recentsHome is absent the backend returns 404 not_found; callers degrade
+ * silently to an empty list.
  */
 export function listTrustedWorkspaces(
   signal?: AbortSignal
@@ -385,10 +389,11 @@ export function listTrustedWorkspaces(
 }
 
 /**
- * serve-workspace T3: GET /api/v1/workspaces/browse?root=<abs> 单层子目录
- * 探测。返回 `{ entries: ReadonlyArray<{ name, path }> }`, path = join(root, name)。
- * 不存在 / 非绝对 / 无权限 / 空串 → 后端 422 typed validation, 此处按
- * 既有 `request<T>` 通道抛 `SessionApiError`, 调用方走 `onNotice` 兜底。
+ * GET /api/v1/workspaces/browse?root=<abs> probes one
+ * directory level. Returns `{ entries: ReadonlyArray<{ name, path }> }` with
+ * path = join(root, name). Missing / non-absolute / unreadable / empty root →
+ * backend 422 typed validation, surfaced here as `SessionApiError` through the
+ * existing `request<T>` channel; callers fall back to `onNotice`.
  */
 export interface WorkspaceSubdirEntry {
   readonly name: string;
@@ -411,8 +416,8 @@ export function listWorkspaceSubdirs(
 }
 
 /**
- * PUT /api/v1/workspace — 切换绑定根。`confirmTrust=true` 用于未信任路径
- * （首次绑定新绝对路径需显式确认信任）。
+ * PUT /api/v1/workspace — switch the bound root. `confirmTrust=true` is
+ * required when first binding a not-yet-trusted absolute path.
  */
 export function putWorkspace(
   body: PutWorkspaceRequest,
@@ -461,19 +466,20 @@ export function getTraceFields(
   return request(`${TRACE_API}/fields`, {}, signal);
 }
 
-// -- Trace session list (spec v2: 会话列表 → 下钻) ----------------------------
+// -- Trace session list (session list → drill-down) --------------------------
 
 /**
- * Trace 会话列表（读侧 `GET /api/v1/traces/sessions`，ADR-0020 D1.6）。
- * 与 session-api 的 `listSessions`（chat 会话 `GET /api/v1/sessions`）不同——
- * 这是 trace 面板自己的会话目录列表（conversation_id / mtime / size /
- * agent_version）。
+ * Trace session list (read side `GET /api/v1/traces/sessions`, ADR-0020 D1.6).
+ * Distinct from session-api's `listSessions` (chat sessions at
+ * `GET /api/v1/sessions`): this is the trace panel's own session directory
+ * (conversation_id / mtime / size / agent_version).
  *
- * ADR-0020 D1.1: 端点从 standalone 的 `/api/v1/sessions` 迁入 traces 前缀
- * 下（`/api/v1/traces/sessions`），避免与 chat sessions 撞名。mounted mode
- * 与 `--separate` mode 都在该前缀下提供（standalone 另保留旧别名一个版本）。
- * TRACE_API 默认 `/api/v1/traces`，故 sessions = `${TRACE_API}/sessions`；
- * VITE_TRACE_API_BASE 覆盖时同样从覆盖值推导（exported 供单测）。
+ * ADR-0020 D1.1: the endpoint moved from the standalone `/api/v1/sessions`
+ * under the traces prefix to avoid colliding with chat sessions. Both mounted
+ * and `--separate` modes serve it there (standalone keeps the old alias for
+ * one version). TRACE_API defaults to `/api/v1/traces`, so sessions =
+ * `${TRACE_API}/sessions`; a VITE_TRACE_API_BASE override derives from the
+ * overridden value the same way (exported pure for unit tests).
  */
 export function resolveTraceSessionsBase(traceApi: string): string {
   return `${traceApi}/sessions`;

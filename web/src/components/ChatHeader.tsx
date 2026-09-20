@@ -5,34 +5,34 @@ import { WorkspaceChip } from "./WorkspaceChip";
 export type ChatHeaderProps = {
   phase: ChatPhase;
   healthLabel: string | null;
-  /** serve-workspace T5: picker 绑定态（chip 展示）。 */
+  /** Picker binding state (shown by the chip). */
   workspaceBound: boolean;
   workspaceRoot: string | null;
   onOpenWorkspacePicker: () => void;
   /**
-   * serve-workspace T8: 当前 active session 的 workspaceRoot（来自
-   * session-list look-up by currentConversationId）。Chip 显示优先级
-   * 高于 workspaceRoot — 一旦用户在工作空间内, chip 就显示该会话所在
-   * 根名, 不再退到 unbound 警告色。
+   * workspaceRoot of the current active session (from
+   * session-list look-up by currentConversationId). Takes display priority
+   * over workspaceRoot — once the user is inside a workspace, the chip shows
+   * that session's root name instead of falling back to the unbound warning style.
    */
   activeWorkspaceRoot?: string | null;
   /**
-   * serve-workspace T8: chip button ref — 父层 App 把此 ref 传给 popover
-   * dismiss hook, Esc / outside-click 后焦点回 chip (a11y 红线)。
+   * Chip button ref — the parent App passes it to the
+   * popover dismiss hook so Esc / outside-click returns focus to the chip (a11y requirement).
    */
   chipButtonRef?: Ref<HTMLButtonElement>;
   /**
-   * serve-workspace T8: chip + popover 容器 ref — popover 内部 hit-testing
-   * 用 (outside-click 时跳过该 ref 内元素)。
+   * Chip + popover container ref — used for hit-testing
+   * inside the popover (outside-click skips elements within this ref).
    */
   workspacePopoverRef?: Ref<HTMLDivElement>;
   /**
-   * serve-workspace T8: popover 内容插槽 — 父层 App 渲染 <WorkspacePicker>
-   * 并通过该 prop 注入。popover 仅在 `workspaceOpen` 时显示, App 用 CSS
-   * 锚定 (absolute top-full right-0 mt-1 z-50)。
+   * Popover content slot — the parent App renders
+   * <WorkspacePicker> and injects it via this prop. The popover shows only
+   * when `workspaceOpen`; App anchors it with CSS (absolute top-full right-0 mt-1 z-50).
    */
   workspacePopover?: ReactNode;
-  /** serve-workspace T8: popover 显示态 — 控制插槽渲染。 */
+  /** Popover visibility — controls slot rendering. */
   workspaceOpen?: boolean;
 };
 
@@ -90,8 +90,8 @@ export function ChatHeader({
           <span aria-hidden="true">▗</span>
           Trace
         </a>
-        {/* T8: chip wrapper `relative` 让 popover 用 absolute 锚定 chip 右上。
-            workspacePopoverRef 透传给外层 div, 供 outside-click hit-testing。 */}
+        {/* The `relative` chip wrapper lets the popover anchor absolutely at the chip's top-right.
+            workspacePopoverRef passes through to the outer div for outside-click hit-testing. */}
         <div ref={workspacePopoverRef} className="relative">
           <WorkspaceChip
             bound={workspaceBound}

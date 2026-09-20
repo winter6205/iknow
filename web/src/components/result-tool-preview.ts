@@ -1,66 +1,69 @@
 /**
  * web/src/components/result-tool-preview.ts
  *
- * web 端的 result preview 投影，对应 TUI 的 `resultToolPreview`
- * (src/tui/tool-summary.ts)。两端各自实现（web 不能 import src/），
- * 边界行为（溢出 `… +N 行` + ANSI 透传 + 空 / 全空白 / ANSI-only 不渲染）
- * 仍对齐；**可见窗行数是两端的分歧点**：TUI 端已由
- * `specs/tui-tool-settled-appearance.md` D4（2026-09-14）改为 3 行，web 端
- * 本文件仍保 `RESULT_PREVIEW_WINDOW`，两端同步另立票
- * （见 `specs/tui-display-consistency.md` D6 注）。
+ * Web-side result preview projection, mirroring the TUI's `resultToolPreview`
+ * (src/tui/tool-summary.ts). The two ends implement it separately (web cannot
+ * import src/); boundary behavior (overflow `… +N 行` ("… +N lines"), ANSI
+ * passthrough, empty / all-whitespace / ANSI-only → no render) stays aligned.
+ * **The visible window line count is a known divergence**: the TUI moved to
+ * 3 lines; this file still keeps `RESULT_PREVIEW_WINDOW`, and syncing the two
+ * ends is tracked as a separate consistency item.
  *
- * Web 数据来源: wire `ToolCallView.outputPreview`(已 mask + 截断到
- * `MAX_TOOL_OUTPUT_PREVIEW_CHARS` = 1500 chars)。bash 走 JSON envelope →
- * 与 TUI 同语义的 parse-then-extract 逻辑 (`stdout` / `stderr` 字段拼接)。
+ * Web data source: wire `ToolCallView.outputPreview` (already masked and
+ * truncated to `MAX_TOOL_OUTPUT_PREVIEW_CHARS` = 1500 chars). bash goes
+ * through a JSON envelope → same parse-then-extract semantics as the TUI
+ * (concatenating the `stdout` / `stderr` fields).
  *
- * 边界：
- *   - 输出为空 / 全空白 / ANSI strip 后为空 → `{ kind: "empty" }`；
- *   - 截取尾部 `RESULT_PREVIEW_WINDOW` 行 + 溢出行数；
- *   - 单行直接显示 1 行（不强制撑满窗口）；
- *   - ANSI 序列按剥离后宽度计数，截断不得切断转义序列中间（行级截断天然不切
- *     字符）；
- *   - read_file / write_file / edit_file 等无 preview 需求的工具 → `empty`。
+ * Boundaries:
+ *   - empty / all-whitespace / empty-after-ANSI-strip output → `{ kind: "empty" }`;
+ *   - take the tail `RESULT_PREVIEW_WINDOW` lines + overflow count;
+ *   - a single line renders as one line (no padding to fill the window);
+ *   - ANSI sequences are counted by stripped width; truncation must not cut
+ *     through the middle of an escape sequence (line-level cuts never split chars);
+ *   - tools with no preview need (read_file / write_file / edit_file, etc.) → `empty`.
  *
- * 失败由渲染层在 ToolCallItem 外层 / OutputBlock 内层包 error 色 token 体现；
- * preview 文本本身不变（spec：「失败时内容照常显示但整体标红」）。
+ * Failure styling is applied by the render layer via error-color tokens
+ * (ToolCallItem outer / OutputBlock inner); the preview text itself is unchanged
+ * (spec: on failure show the content as-is but tint the whole block red).
  */
 import type { ToolCallView } from "../api/types.ts";
 
-/** #693 T4 D4:web 端结果预览可见窗（TUI 端已改 3 行,两端同步另立票,见文件头注）。 */
+/** Web-side visible preview window (TUI already moved to 3 lines; end sync is a separate ticket, see file header). */
 export const RESULT_PREVIEW_WINDOW = 5;
 
-/** 命名风格上沿用"result-tool-preview",与 TUI 端 `resultToolPreview` 同义。 */
+/** Name mirrors the TUI's `resultToolPreview` — same semantics. */
 export type ResultPreview =
   | { readonly kind: "empty" }
   | {
       readonly kind: "result";
       readonly lines: readonly string[];
-      /** 被截掉的行数 = totalLines - visibleLines（visibleLines 始终 = min(RESULT_PREVIEW_WINDOW, totalLines)）。 */
+      /** Truncated line count = totalLines - visibleLines (visibleLines always = min(RESULT_PREVIEW_WINDOW, totalLines)). */
       readonly hiddenLineCount: number;
     };
 
 const ANSI_ESCAPE_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
-/** 剥 ANSI 转义序列（仅用于「可见性判定」；不修改原字符串）。 */
+/** Strip ANSI escapes (visibility checks only; never mutates the original string). */
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_ESCAPE_RE, "");
 }
 
-/** 溢出文案:`… +N 行`（spec D4 钉死）。 */
+/** Overflow label: `… +N 行` ("… +N lines") — wording pinned by the spec. */
 export function resultPreviewOverflowLabel(hiddenLineCount: number): string {
   return `… +${hiddenLineCount} 行`;
 }
 
-/** 可消费预览的工具集合。skill 类一行结果;bash JSON envelope 内嵌 stdout/stderr。
- *  read_file / write_file / edit_file / grep / glob / web_* / lsp_* 等无预览需求
- *  工具一律走 empty 输出（spec D4 边界）。 */
+/** Tools with a consumable preview. skill: one-line result; bash: JSON envelope embedding stdout/stderr.
+ *  read_file / write_file / edit_file / grep / glob / web_* / lsp_* and other no-preview
+ *  tools always yield empty output (spec boundary). */
 const PREVIEWABLE_TOOLS: ReadonlySet<string> = new Set(["bash", "skill"]);
 
-/** bash tool_result 文本 → 拼接后的输出（与 TUI `bashPreview` 同语义）。
- *  若 JSON.parse 成功且含 `stdout` / `stderr` 字段 → 按 stdout + "\n" + stderr 拼；
- *  JSON 解析成功但缺字段 → 返回空串（让外层 isRenderableOutput 直接判 empty，
- *  与 TUI 行为一致 —— TUI 中 streams.length === 0 时整 preview 返回 empty）。 */
+/** bash tool_result text → joined output (same semantics as TUI `bashPreview`).
+ *  JSON.parse succeeds with `stdout` / `stderr` fields → join stdout + "\n" + stderr;
+ *  parse succeeds but fields missing → return "" so the outer isRenderableOutput
+ *  yields empty — matching TUI behavior (TUI returns empty preview when
+ *  streams.length === 0). */
 function extractBashOutput(resultText: string): string {
   try {
     const parsed = JSON.parse(resultText) as Record<string, unknown>;
@@ -73,15 +76,16 @@ function extractBashOutput(resultText: string): string {
     }
     return streams.join("\n");
   } catch {
-    // EXIT: parse 失败（非 JSON 形态,与 TUI bashPreview 退路同语义）→ 整段
-    // resultText 视为 stdout 显示。fallback 收拢在 catch 体内 —— 不与
-    // happy-path return 混在同一层,展示层降级到全文而非空预览。
+    // EXIT: parse failure (non-JSON shape, same fallback semantics as TUI
+    // bashPreview) → treat the whole resultText as stdout. The fallback lives
+    // inside the catch body, not mixed with the happy-path return: the display
+    // layer degrades to full text rather than an empty preview.
     return resultText;
   }
 }
 
-/** 单源:从「可能含 ANSI 的输出」判定是否应渲染预览块。
- *  空 / 全空白 / ANSI strip 后为空 → 视为空(不渲染空块)。 */
+/** Single source: decide whether to render a preview block from output that may contain ANSI.
+ *  Empty / all-whitespace / empty-after-strip → treated as empty (never render an empty block). */
 function isRenderableOutput(s: string): boolean {
   if (s.length === 0) return false;
   const stripped = stripAnsi(s);
@@ -90,14 +94,14 @@ function isRenderableOutput(s: string): boolean {
   return true;
 }
 
-/** 按行切分(保留 ANSI);尾部空行去掉(bash 输出常见 trailing \n)。 */
+/** Split by lines (ANSI preserved); drop a trailing empty line (bash output commonly ends with \n). */
 function splitOutputLines(s: string): string[] {
   if (s.length === 0) return [];
   const lines = s.split("\n");
   return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
 }
 
-/** 尾部取 N 行 + 溢出计数。lines.length <= N → 整段透传。 */
+/** Take the tail N lines + overflow count. lines.length <= N → pass through in full. */
 function takeTailWindow(lines: readonly string[]): {
   readonly visible: string[];
   readonly hiddenLineCount: number;
@@ -113,8 +117,8 @@ function takeTailWindow(lines: readonly string[]): {
 }
 
 /**
- * 单源:根据工具名 + wire 上的 `outputPreview` 产结果预览。
- *  无 preview 声明 / 无 outputPreview / 空输出 → `{ kind: "empty" }`。
+ * Single source: build the result preview from tool name + wire `outputPreview`.
+ *  No preview declaration / no outputPreview / empty output → `{ kind: "empty" }`.
  */
 export function resultToolPreview(
   toolName: string,

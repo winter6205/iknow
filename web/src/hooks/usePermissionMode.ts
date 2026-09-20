@@ -3,16 +3,16 @@ import { cyclePermissionMode, getPermissionMode } from "../api/client";
 import { SessionApiError, type PermissionMode } from "../api/types";
 
 export interface PermissionModeApi {
-  /** 当前 permission mode；null = 端点缺席（404）或未加载 → 徽标不渲染。 */
+  /** Current permission mode; null = endpoint absent (404) or not loaded → no badge rendered. */
   readonly mode: PermissionMode | null;
-  /** POST 循环切换（后端 SSOT nextShiftTabMode），返回切换后的 mode。 */
+  /** POST to cycle (backend SSOT nextShiftTabMode); resolves with the new mode. */
   readonly cycle: () => Promise<PermissionMode>;
 }
 
 /**
- * permission mode（TUI Shift+Tab 的 web 镜像）：挂载时读一次当前值；
- * 端点缺席（404，holder 未装配）→ null → 徽标不渲染。切换走后端 SSOT
- * cycle，前端不复制循环语义。
+ * Permission mode (web mirror of the TUI's Shift+Tab): read once on mount;
+ * endpoint absent (404, holder not assembled) → null → no badge. Cycling goes
+ * through the backend SSOT cycle — the front-end never duplicates the loop semantics.
  */
 export function usePermissionMode(): PermissionModeApi {
   const [mode, setMode] = useState<PermissionMode | null>(null);
@@ -24,7 +24,7 @@ export function usePermissionMode(): PermissionModeApi {
       })
       .catch((err: unknown) => {
         if (err instanceof SessionApiError && err.status === 404) {
-          // EXIT: 端点未装配（非 serve 入口）—— 预期降级，徽标保持缺席。
+          // EXIT: endpoint not assembled (non-serve entry) — expected degradation, badge stays absent.
           return;
         }
         console.warn("[permission-mode] initial read failed:", err);
