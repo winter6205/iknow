@@ -205,3 +205,8 @@ docs/integration-materials.env.example
 # Phase 1 batch2: archived to winter6205/iknow-archive
 .kiro/
 .evals/
+
+# Phase 1 batch3: archived to winter6205/iknow-archive
+# docs/archive/ 已被上方 archive/ 规则覆盖，无需重复。
+docs/handoff/
+docs/security-boundaries.md
