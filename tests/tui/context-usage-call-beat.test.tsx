@@ -27,7 +27,8 @@ import {
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { attachSession } from "../../src/tui/session-state.js";
-import { ContextBar, ctxUsed } from "../../src/tui/context-bar.js";
+import { ContextBar } from "../../src/tui/context-bar.js";
+import { occupancyFromUsage } from "../../src/harness/compress/occupancy.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import { assistantResult } from "../cli/_fixtures.ts";
@@ -326,7 +327,7 @@ describe("long turn ≥3 llm_calls + reopen（#1079 T6）", () => {
     const file = await bridge.loadSessionFile(conversationId!);
     const attached = attachSession(file);
     expect(attached.lastUsage).not.toBeNull();
-    expect(ctxUsed(attached.lastUsage as TokenUsage)).toBe(25600);
+    expect(occupancyFromUsage(attached.lastUsage as TokenUsage)).toBe(25600);
     const bar = await testRender(
       <ContextBar
         lastUsage={attached.lastUsage}

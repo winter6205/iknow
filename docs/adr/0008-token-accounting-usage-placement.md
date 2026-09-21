@@ -4,6 +4,8 @@ Date: 2026-08-05
 Status: accepted
 
 > **Amendment 2026-09-21** (Track A, call-beat display granularity): revises the display-granularity narrative of D5/D6 — the Running usage bar no longer refreshes only at the end of the whole `run()` (a one-beat lag was acceptable); it becomes **call-beat**: the host receives a `context_usage` stream event before each model call is issued (measured pre-call input occupancy via `ModelAdapter.countTokens`), and immediately after that call succeeds receives a correction event carrying its API `usage`; after the Nth successful call the bar already shows that call's reading, without waiting for the tool loop to finish. D6's "no estimation without successful usage; absent fields render as 0%" remains valid and is strengthened (beats lacking measured data simply emit no event). `RunResult.lastUsage` is still the run-level final value; per-beat exposure travels only the existing stream channel — no second token ledger is introduced. The session file persists this ground truth (`SessionFileV1.lastUsage`), and `attachSession` / Web load replay it (a session that once had successful usage no longer shows 0% on reopen).
+>
+> **Amendment 2026-09-21** (ADR-0118): D6's compression half is **superseded** — chars/N is no longer the primary criterion for proactive auto-compact; the gate numerator is now **context occupancy** (this beat's `countTokens` → previous-beat occupancy(usage) → chars estimate). The display half is unchanged: estimation never enters the trace / `lastUsage` / the bar.
 
 ## Context
 

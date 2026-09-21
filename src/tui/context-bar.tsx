@@ -11,9 +11,13 @@
  * no write-back; the migration changed only the render component, the data
  * path is unchanged.
  *
- * Numeric semantics (mirrored with web/src/components/UsageChip.tsx):
- * used = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
- * (null cache counts as 0); pct = round(used / contextWindow * 100).
+ * Numeric semantics = context occupancy (ADR-0118), computed by
+ * `compress/occupancy.ts` — the same function the proactive gate uses;
+ * web/src/components/UsageChip.tsx keeps a cross-package mirror of it:
+ * pre_call shape (cache fields null) →
+ * used = inputTokens; post_call → inputTokens + cacheReadInputTokens +
+ * cacheCreationInputTokens (null cache counts as 0); pct = round(used /
+ * contextWindow * 100).
  *
  * Three-tier thresholds: <50% CTX_BLUE; 50-80% running (amber); >80% error.
  * While running with usage already reported, the left border pulses at 600ms.
@@ -34,6 +38,7 @@
 import { useSyncExternalStore, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
+import { occupancyFromUsage } from "../harness/compress/occupancy.js";
 import type { IknowSettingsLlmProvider } from "../config/settings.js";
 import { modelDisplayName } from "./model-picker.js";
 import {
@@ -94,15 +99,6 @@ export function contextColor(pct: number): string {
   if (pct > 80) return tuiPalette.error;
   if (pct >= 50) return tuiPalette.running;
   return CTX_BLUE;
-}
-
-/** Total context token usage: null cache fields count as 0. */
-export function ctxUsed(lastUsage: TokenUsage): number {
-  return (
-    lastUsage.inputTokens +
-    (lastUsage.cacheReadInputTokens ?? 0) +
-    (lastUsage.cacheCreationInputTokens ?? 0)
-  );
 }
 
 /** 600ms boolean pulse (no timer started while frozen). */
@@ -169,7 +165,8 @@ export function ContextBar(props: ContextBarProps): ReactNode {
   );
   // Denominator ≤ 0 (envInt gave 0 / negative) → treat as invalid; used/pct fall back to 0 to avoid NaN.
   const denomOk = contextWindow > 0;
-  const used = lastUsage === null || !denomOk ? 0 : ctxUsed(lastUsage);
+  const used =
+    lastUsage === null || !denomOk ? 0 : occupancyFromUsage(lastUsage);
   const pct =
     lastUsage === null || !denomOk
       ? 0

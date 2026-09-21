@@ -5,9 +5,11 @@
  * ContextBar (OpenTUI version) — read-only display of RunResult.lastUsage
  * (ADR-0008 D5: the data path is unchanged, only the rendering component is
  * swapped; this component never writes the token ledger).
- *  - Number semantics: used = input + cacheRead + cacheCreation (cache
- *    null → 0); pct = round(used / contextWindow * 100); token figures
- *    render as `X.Xk/Y.Yk`;
+ *  - Numeric semantics = context occupancy (ADR-0118): pre_call shape (both
+ *    cache null) → used = inputTokens (cache never added onto a total that
+ *    already includes it); post_call → input + cacheRead + cacheCreation
+ *    (null cache → 0); pct = round(used / contextWindow * 100); token
+ *    figures render as `X.Xk/Y.Yk`;
  *  - three color thresholds: <50% CTX_BLUE / 50-80% running / >80% error
  *    (captureSpans);
  *  - lastUsage null (before the first turn) → full 0% frame; narrow cols
@@ -23,14 +25,14 @@ import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
 import type { CapturedFrame } from "@opentui/core";
 import {
+  contextColor,
   CTX_BLUE,
   ContextBar,
-  ctxUsed,
-  contextColor,
   modelPrefix,
   toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
+import { occupancyFromUsage } from "../../src/harness/compress/occupancy.js";
 import { modelDisplayName } from "../../src/tui/model-picker.js";
 import {
   activeToolNameOf,
@@ -54,6 +56,65 @@ function makeUsage(input: number): TokenUsage {
     cacheReadInputTokens: null,
   };
 }
+
+/**
+ * Context occupancy numerator contract (ADR-0118) — SHARED TABLE with
+ * tests/web/usage-chip.test.tsx: the same TokenUsage input pairs must yield
+ * the same occupancy on the harness SSOT (occupancyFromUsage, used by TUI
+ * and the gate) and the web contextOccupancy mirror. Changing a row here
+ * must change the mirrored row there.
+ */
+const OCCUPANCY_CASES: ReadonlyArray<{
+  readonly name: string;
+  readonly usage: TokenUsage;
+  readonly used: number;
+}> = [
+  {
+    name: "pre_call 形态（cache 全 null）→ inputTokens",
+    usage: makeUsage(12800),
+    used: 12800,
+  },
+  {
+    name: "pre_call 形态非零 input 同样不加 cache",
+    usage: makeUsage(1),
+    used: 1,
+  },
+  {
+    name: "post_call 三类相加（一 cache null 当 0）",
+    usage: {
+      inputTokens: 20,
+      outputTokens: 5,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: 30,
+    },
+    used: 50,
+  },
+  {
+    name: "post_call 三 cache 齐全",
+    usage: {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationInputTokens: 200,
+      cacheReadInputTokens: 300,
+    },
+    used: 600,
+  },
+  {
+    name: "post_call cache 全 0 → inputTokens",
+    usage: {
+      inputTokens: 42,
+      outputTokens: 1,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    },
+    used: 42,
+  },
+  {
+    name: "超预算占用原样返回（clamp 属渲染侧）",
+    usage: makeUsage(15000),
+    used: 15000,
+  },
+];
 
 function hex01(hex: string): [number, number, number] {
   return [
@@ -128,16 +189,15 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(valueBand(150, 10)).toBe("██████████");
   });
 
-  test("ctxUsed：cache null 按 0；非 null 合计", () => {
-    expect(ctxUsed(makeUsage(100))).toBe(100);
-    expect(
-      ctxUsed({
-        inputTokens: 100,
-        outputTokens: 50,
-        cacheCreationInputTokens: 200,
-        cacheReadInputTokens: 300,
-      })
-    ).toBe(600);
+  test("occupancyFromUsage：ADR-0118 共享分子表（pre_call 不加 cache；post_call 三类相加）", () => {
+    for (const c of OCCUPANCY_CASES) {
+      expect(occupancyFromUsage(c.usage), c.name).toBe(c.used);
+    }
+    // 结构不可能「总量再加 cacheRead 2×」：pre_call 形态（两 cache 字段均
+    // null）走 inputTokens-only 分支，cache 字段不参与任何加法。
+    for (const input of [0, 1, 12800, 15000]) {
+      expect(occupancyFromUsage(makeUsage(input))).toBe(input);
+    }
   });
 
   test("contextColor：阈值边界 <50/=50/>80", () => {
@@ -261,6 +321,31 @@ describe("渲染（只读 lastUsage）", () => {
     // Read-only contract: the component never mutates the passed usage object.
     expect(usage.inputTokens).toBe(1000);
     expect(usage.cacheReadInputTokens).toBe(2000);
+    await setup.renderer.destroy();
+  });
+
+  test("pre_call 形态读数（cache 全 null）→ 分子 = inputTokens 原样上条", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(12800),
+      contextWindow: 256000,
+      running: false,
+      cols: 80,
+    });
+    expect(setup.captureCharFrame()).toContain("5% ok 12.8k/256.0k");
+    await setup.renderer.destroy();
+  });
+
+  test("超预算（used > window）：band 封顶全填、数字不 clamp（现行兜底钉住）", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(15000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    const frame = setup.captureCharFrame();
+    // pct 数字与 k/k 原样显示 150% / 15.0k/10.0k（不截断读数）；
+    // 仅容量 band 通过 valueBand 的 0..100 clamp 封顶为全填。
+    expect(frame).toContain("ctx ██████████ 150% alert 15.0k/10.0k");
     await setup.renderer.destroy();
   });
 

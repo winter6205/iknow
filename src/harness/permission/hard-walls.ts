@@ -22,7 +22,10 @@ export type HardWallId =
  *     Process substitution / expansion that the substring scan cannot
  *     statically bound.
  *   - bare-metachar: command body consisting only of separators /
- *     redirects / pipes with no allowlisted token (e.g. `;`, `|`, `&&`).
+ *     redirects / pipes with no command word anywhere (e.g. `;`, `|`,
+ *     `&&`, `>/tmp/x`). It is NOT an allowlist gate: a segment that names
+ *     any command (allowlisted or not) has a body and is judged by the
+ *     other ids only.
  *   - root-find-walk: `find` whose search root is the filesystem root
  *     (`/`, `//`, `"/"`), or a bare / `.`-rooted `find` reached after a
  *     `cd /` in the same command. The fence cannot see a whole-machine read
@@ -675,8 +678,10 @@ function scanSegment(segment: string): DangerousPatternHit | null {
  *   - Command-substitution metachars (`$(`, `${`, backtick, `<(`) still
  *     trigger per-segment: a single segment containing them is enough.
  *   - The bare-metachar branch (segment = nothing but separators / pipes /
- *     redirects) only fires when NO segment has an allowlisted first token,
- *     matching the original "no command body" intent.
+ *     redirects) only fires when NO segment has a command word — the
+ *     "no command body" intent. Allowlist membership is irrelevant here:
+ *     the raw-string scan must not judge a payload that belongs to some
+ *     command word (`python3 -c "…;…"`), only a body that is pure noise.
  *   - `format` is matched lexically (segment-leading token), never as a
  *     substring.
  *   - The root-find walk is decided on the ORDERED segment fold (a `cd /`
@@ -699,29 +704,73 @@ export function findDangerousPattern(
   const walkHit = matchRootFindWalk(segments);
   if (walkHit !== null) return walkHit;
 
-  let anySegmentAllowlisted = false;
+  let anySegmentHasCommandWord = false;
   for (const segment of segments) {
     const hit = scanSegment(segment);
     if (hit !== null) return hit;
-    if (ALLOWED_COMMAND_TOKENS.has(firstToken(segment))) {
-      anySegmentAllowlisted = true;
-    }
+    if (segmentHasCommandWord(segment)) anySegmentHasCommandWord = true;
   }
 
-  if (!anySegmentAllowlisted) {
+  // No segment ever started a command — the body is nothing but
+  // separators / redirects / pipes. The raw-string metachar scan is only
+  // sound for THAT shape; run against a real command word it would score
+  // heredoc `<<` or interpreter source punctuation as danger (ADR-0068:
+  // the wall is not a syntax blacklist simulating the fence).
+  if (!anySegmentHasCommandWord) {
     return matchBareMetachar(command);
   }
   return null;
 }
 
 /**
+ * Single-character bare operators the wall treats as separator noise. SSOT
+ * for both the raw-string scan below and the operator-lead check in
+ * `segmentHasCommandWord`, so the two views cannot drift. (`&&` / `||` need
+ * no entry: the scan is substring-based, so `&` / `|` already cover them.)
+ */
+const BARE_METACHAR_CHARS: readonly string[] = Object.freeze([
+  "|",
+  ";",
+  ">",
+  "<",
+  "&",
+]);
+
+/** A token that begins (after optional fd digits) with a bare operator. */
+const OPERATOR_LEAD_PATTERN = new RegExp(
+  `^[0-9]*[${BARE_METACHAR_CHARS.join("")}]`
+);
+
+/**
+ * True when a segment's first command-bearing token names a command —
+ * anything that is not operator / redirect punctuation. Group punctuation
+ * glued to a word (`(echo`, `{echo`) or standing alone (`(`, `{`) is
+ * transparent: the scan moves to the next token. A leading fd digit (`2>`)
+ * or a glued redirect target (`>/tmp/x`) is still an operator spelling: no
+ * command has started. A token with no alphanumerics at all (`:(){`) cannot
+ * name a command either, which keeps the fork-bomb body in front of the
+ * bare-metachar branch.
+ */
+function segmentHasCommandWord(segment: string): boolean {
+  for (const raw of segmentTokens(segment)) {
+    const token = raw.replace(/\\/g, "");
+    if (/^[(){}\[\]]+$/.test(token)) continue;
+    if (!/[A-Za-z0-9]/.test(token)) return false;
+    return !OPERATOR_LEAD_PATTERN.test(token);
+  }
+  return false;
+}
+
+/**
  * Bare-metachar detector. Returns the first bare separator / redirect /
- * pipe / background operator that appears in `command`, or null. Used both
- * when the entire command consists of metachars (`;`, `&&`, `|`, ...) and
- * when all segments lack an allowlisted first token.
+ * pipe / background operator that appears in `command`, or null. Used only
+ * when the command is purely metachar(s) — `;`, `&&`, `|`, ... on their own
+ * or every produced segment lacking a command word (see
+ * `segmentHasCommandWord`): there is no executable body, so the only
+ * intent on screen is separator noise.
  */
 function matchBareMetachar(command: string): DangerousPatternHit | null {
-  for (const bare of ["|", ";", ">", "<", "&", "&&", "||"]) {
+  for (const bare of BARE_METACHAR_CHARS) {
     if (command.includes(bare)) {
       return { id: "bare-metachar", pattern: bare };
     }

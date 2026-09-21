@@ -149,10 +149,10 @@ const ALLOWED: ReadonlyArray<string> = [
 ];
 
 /**
- * Commands that must not be denied *by this wall* — the pre-existing
- * `bare-metachar` rule (no allowlisted first token + a `&&`) already denies
- * them, unchanged by this slice. Asserting `!== "root-find-walk"` pins the
- * boundary this wall owns without claiming the command is executable.
+ * Commands that must not be denied *by this wall* — a non-root `cd` (or an
+ * unreadable one) leaves the walk out of this wall's scope, whatever the
+ * other layers decide. Asserting `!== "root-find-walk"` pins the boundary
+ * this wall owns without claiming the command is executable.
  */
 const NOT_THE_WALK_WALL: ReadonlyArray<string> = [
   // `cd` to a non-root prefix must not arm the walk wall

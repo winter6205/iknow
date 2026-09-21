@@ -2277,6 +2277,47 @@ function emitPostCallContextUsage(
   });
 }
 
+/** ADR-0118: separate one-time-warn slot for the gate probe; sharing the
+ *  display path's `noCountTokensWarned` would let whichever seam warns first
+ *  silence the other's contract. */
+const noCountTokensWarnedAtGate = new WeakSet<LoopAdapter>();
+
+/**
+ * ADR-0118 proactive-gate measurement: this-beat `countTokens` over exactly
+ * the message array the gate is about to evaluate. Deliberately *not* the
+ * display triple (system/tools are assembled later inside `runModelPhase`),
+ * so no sharing with `measurePreCallInputTokens`. null = no real measurement
+ * this beat (hook absent / throw / non-finite / ≤0) — the gate then falls
+ * through previous usage → estimate; absence never means
+ * `below_token_threshold`.
+ */
+async function measureGateThisBeatOccupancy(
+  deps: LoopEngineDeps,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): Promise<number | null> {
+  const countTokens = deps.adapter.countTokens;
+  if (countTokens === undefined) {
+    if (!noCountTokensWarnedAtGate.has(deps.adapter)) {
+      noCountTokensWarnedAtGate.add(deps.adapter);
+      console.warn(
+        "context-usage proactive gate skipped measurement: adapter has no countTokens (gate falls back to previous usage → estimate)"
+      );
+    }
+    return null;
+  }
+  try {
+    const measured = await countTokens({ messages });
+    // Same validity gate as the display path: non-finite / non-positive =
+    // no measurement this beat, never a fake below-threshold verdict.
+    return Number.isFinite(measured.inputTokens) && measured.inputTokens > 0
+      ? measured.inputTokens
+      : null;
+  } catch {
+    // countTokens failure (API error / abort) must never break the loop turn.
+    return null;
+  }
+}
+
 /** Await the structured race outcome, keeping the SDK-first error catch contract. */
 async function runModelPhase(opts: {
   readonly state: LoopState;
@@ -3546,9 +3587,14 @@ export async function run(
         deps.compress.contextWindow,
         deps.compress.thresholdTokens
       );
+      // ADR-0118: occupancy chain = this-beat measurement → previous usage →
+      // estimate. The probe failing must never skip the gate evaluation.
+      const thisBeat = await measureGateThisBeatOccupancy(deps, state.messages);
       const decision = evaluateCompactTrigger(state.messages, {
         contextWindow: deps.compress.contextWindow,
         threshold,
+        thisBeatOccupancy: thisBeat,
+        previousUsage: lastUsage,
       });
       if (decision.action !== "noop") {
         let compactedState: LoopState;

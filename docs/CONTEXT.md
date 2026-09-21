@@ -71,11 +71,11 @@ _Avoid_: 把 provider id 自动拼进请求；把路由 ID 整段当网关模型
 **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）—— A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 append-only messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`.
 _Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁令仅对 LoopTrace 本体，不外延到 TraceService（`LlmCallRecord` 承载 token usage 是 ADR-0008 裁决的合规落点）
 
-**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算只供压缩决策，永不进核算 / 显示（ADR-0008）。
+**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算永不进核算 / 显示；闸侧只在无实测 occupancy 时作后备（ADR-0008 / ADR-0118）。
 _Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace
 
-**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类 token 互不相交）；分母 = **策略预算窗口**（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 256000）；Running 时按 **call-beat** 显示：读数 = 最近一次模型调用发出前的实测输入占用（`context_usage` 流事件 pre_call），或该次调用成功结束后的 API usage 校正（post_call）——随每次调用更新，不等整轮 `run()` 结束；同一次调用期间条可保持调用前值（检测在调用前，不在生成中途刷输出 token）。会话曾有成功 usage 时，`attachSession` / Web load 从会话文件回放的 lastUsage 或最后一条 agent answer 的 `lastUsage` 带回读数，重开不显示 0%。
-_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值（无成功 usage 字段缺席或 null，条画 0%）；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）；用供应商 1M 卡当分母；在生成中途按已输出 token 刷条
+**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = **context occupancy**；分母 = **策略预算窗口**（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 256000）；Running 时按 **call-beat** 显示：读数 = 最近一次模型调用发出前的实测输入占用（`context_usage` 流事件 pre_call），或该次调用成功结束后的 API usage 校正（post_call）——随每次调用更新，不等整轮 `run()` 结束；同一次调用期间条可保持调用前值（检测在调用前，不在生成中途刷输出 token）。会话曾有成功 usage 时，`attachSession` / Web load 从会话文件回放的 lastUsage 或最后一条 agent answer 的 `lastUsage` 带回读数，重开不显示 0%。
+_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值（无成功 usage 字段缺席或 null，条画 0%）；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）；用供应商 1M 卡当分母；在生成中途按已输出 token 刷条；把 countTokens 总量再加 cache
 
 **viewport mount**: ChatView 只把 scrollbox 当前视口加 overscan 内的 transcript 条目挂进 OpenTUI 树；滚动文档仍覆盖全量 `session.messages` 与方案 B banner，高度来自布局实测。
 _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树裁剪
@@ -397,7 +397,10 @@ _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字�
 **策略预算窗口**: `env.compress.contextWindow`——用量显示分母与 auto-compact 闸的同一数字；默认 256000。不是供应商模型上下文上限。ADR-0100。
 _Avoid_: 显示一套窗口、压缩一套；把 `providers[].contextWindow` 或 1M 卡当默认分母
 
-**auto-compact token gate**: loop-engine 在每次 `stepWithTrace` 前是否 **proactive** 压缩的阈值，含每个 `run()` 的第一次（prior 续传、`turnCount === 0` 不是豁免）；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6 / ADR-0100）。
+**context occupancy**: 用量条分子与 proactive auto-compact 闸的同一占用。pre_call（cache 字段缺席）= `inputTokens`（`countTokens` 总量）；post_call = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类不相交，null 当 0）。闸优先本拍有限且 >0 的 `countTokens`，否则上一拍 occupancy，否则 `estimateMessagesTokens`。ADR-0118。
+_Avoid_: 显示一套分子、压缩一套 chars/4；把 countTokens 总量再加 cache；把缺测直接收成低于阈值
+
+**auto-compact token gate**: loop-engine 在每次 `stepWithTrace` 前是否 **proactive** 压缩的阈值，含每个 `run()` 的第一次（prior 续传、`turnCount === 0` 不是豁免）；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。比较的是 **context occupancy**，不是 chars 估算（无实测时才回退估算）。估算不进 trace / `RunResult.lastUsage`（ADR-0008 D6 显示半边 / ADR-0118）。
 _Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`；用 `window − 33k` 当策略预算缺省闸；用 `turnCount === 0` 跳过 proactive
 
 **manual compact**: TUI `/compact` 与 web 压缩按钮触发的一次压缩；执行体与 proactive auto-compact **已开火之后**相同（窗口或 full_summary）。空会话幂等 no-op。

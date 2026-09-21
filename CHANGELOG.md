@@ -398,6 +398,7 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Changed
 
+- **Proactive auto-compact gate reads context occupancy (spec `context-occupancy-autocompact`, ADR-0118, 2026-09-21)**: the bar and the gate now share one numerator — `evaluateCompactTrigger` compares in the priority chain this-beat `countTokens` (finite and > 0) → previous-beat occupancy (usage) → chars estimate; a missing / throwing / non-positive reading always falls through and never collapses into `below_token_threshold`. loop-engine probes the gate-visible messages before the gate and always passes `lastUsage`; hosts without `onStream` still measure and gate. Display readings are unchanged (the TUI numerator now uses the harness SSOT `occupancyFromUsage` directly; the Web keeps a cross-package mirror pinned to the same formula by a shared table). The denominator, the 95% formula, the window/full_summary compactors, and manual `/compact` bypassing the gate all keep their semantics.
 - **TUI `/model` switching no longer re-renders the whole tree and no longer resets manual thinking/effort overrides (2026-09-15)**:
   env-derived display snapshots (model routing string + thinking baseline) flow
   through a framework-agnostic store consumed with `useSyncExternalStore`; a

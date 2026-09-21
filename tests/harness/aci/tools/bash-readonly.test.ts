@@ -320,18 +320,20 @@ describe("bash handler — readonly mode wiring", () => {
     );
   });
 
-  it("bashMode='readonly' rejects find -exec (reaches validator via + form)", async () => {
+  it("bashMode='readonly' rejects find -exec both terminators (reaches validator)", async () => {
     // `find . -delete` is caught upstream by isDangerousCommand (` -delete`
-    // substring); `-exec ... \;` contains `;` (findDangerousPattern bare
-    // metachar). The POSIX `+` terminator form reaches the -exec deny.
+    // substring); the `\;` and `+` terminators are both answered by the
+    // readonly find-flag table.
     const cwd = await makeScratch("bash-ro-find-");
     const tool = createBashTool(cwd, { bashMode: "readonly" });
-    await assert.rejects(
-      tool.handler({ command: "find . -exec rm {} +" }),
-      (error: unknown) =>
-        error instanceof ReadonlyViolationError &&
-        error.message.includes("find flag")
-    );
+    for (const terminator of ["+", "\\;"]) {
+      await assert.rejects(
+        tool.handler({ command: `find . -exec rm {} ${terminator}` }),
+        (error: unknown) =>
+          error instanceof ReadonlyViolationError &&
+          error.message.includes("find flag")
+      );
+    }
   });
 
   it("bashMode='readonly' rejects output redirect", async () => {
