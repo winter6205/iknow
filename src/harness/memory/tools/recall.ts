@@ -1,10 +1,10 @@
 /**
- * #121 T5: memory_recall tool (read-side, no side effects).
+ * memory_recall tool (read-side, no side effects).
  *
  * Spec: specs/121-memory-injection.md (Project Structure tools/recall.ts,
- * Testing Strategy tools-recall half, SC 8). Registered by build-engine T6;
+ * Testing Strategy tools-recall half). Registered by build-engine;
  * here only the bounded-context-local definition + AciMeta (recall =
- * read-only / cancel / fast per T1 decision).
+ * read-only / cancel / fast by design).
  *
  * Contract:
  *   - inputSchema `{ query: string (required), limit?: integer (1..50) }`
@@ -13,8 +13,8 @@
  *     is the truncation authority (contract X) — the tool never carries a
  *     truncated/total metadata field (contract Y1)
  *   - no writes, no side effects, no FS mutation
- *   - `disabled: true` entries are dropped before scoring (#730)
- *   - scoring delegates to scoreMemoryEntries (T3 bm25 heuristic)
+ *   - `disabled: true` entries are dropped before scoring
+ *   - scoring delegates to scoreMemoryEntries (bm25 heuristic)
  *
  * Injection seam (web tool precedent): `entries` overrides disk reads so unit
  * tests do not need a tmpdir populated with fixture files.
@@ -73,7 +73,7 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
       // must not reach the model — drop them before scoring so they cannot
       // occupy a limit slot either. The capability gate follows: a runtime
       // snapshot must not be handed back as durable fact (spec
-      // runtime-capability-memory-gate 读侧过滤 / SC7).
+      // runtime-capability-memory-gate read-side filtering).
       const entries = resolved.filter(
         (entry) => !entry.disabled && !isCapabilityObservationEntry(entry)
       );

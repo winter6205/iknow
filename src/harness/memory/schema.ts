@@ -1,9 +1,9 @@
 /**
- * #121 T2: MemoryFileV1 + MemoryEntryV1 types + sanitizeMemoryFile.
+ * MemoryFileV1 + MemoryEntryV1 types + sanitizeMemoryFile.
  *
  * Spec: specs/121-memory-injection.md (Project Structure schema.ts, Testing
- * Strategy schema half, SC 7, Boundaries Always — sanitize 是纯函数、无写盘
- * 副作用、拒绝 schemaVersion > CURRENT、未知字段保留).
+ * Strategy schema half — sanitize is a pure function with no disk-write side
+ * effects; it rejects schemaVersion > CURRENT and preserves unknown fields.
  *
  * Shape mirrors src/session-api/store/schema.ts (SessionFileV1 sanitize
  * precedent): reject-first for schemaVersion, unknown-field preservation on

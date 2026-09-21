@@ -1,4 +1,4 @@
-// Q1/Q2/Q5 决议:纯丢弃 + 边界占位符,immutable 重建,tool 配对完整
+// Pure drop + boundary placeholder, immutable rebuild, tool pairing kept intact.
 import {
   COMPACTION_BOUNDARY_PLACEHOLDER,
   DEFAULT_KEEP_RECENT,
@@ -9,11 +9,13 @@ import type {
 } from "../model-adapter/types.js";
 
 /**
- * 从末尾保留 keepRecent 条并向前修补边界,确保 tool_use↔tool_result 配对完整。
+ * Keep the last keepRecent messages, repairing the boundary forward so every
+ * tool_use↔tool_result pair stays complete.
  *
- * #467 step 2:导出供 `full-compact.splitForCompaction` 复用同一 tool-pair
- * 守门(proactive / reactive / 手动 compress 共用同一份"丢弃前缀 + 配对补全"
- * 不变式)。新导出是 additive,既有 `compactMessages` 行为字节级稳定。
+ * Exported so `full-compact.splitForCompaction` can reuse the same tool-pair
+ * guard (proactive / reactive / manual compaction share one "drop prefix +
+ * complete pairs" invariant). The new export is additive; existing
+ * `compactMessages` behavior is byte-stable.
  */
 export function preserveToolPairs(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -66,8 +68,9 @@ export function preserveToolPairs(
 }
 
 /**
- * 滑动窗口压缩 messages:保留尾部 keepRecent 条 + 配对补全,
- * 前面丢弃,以边界占位符单消息替代。
+ * Sliding-window compaction of messages: keep the tail of keepRecent
+ * messages + pair repair, drop the head, replaced by a single boundary
+ * placeholder message.
  */
 export function compactMessages(
   messages: ReadonlyArray<AnthropicNativeMessage>,

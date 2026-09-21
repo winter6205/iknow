@@ -1,5 +1,5 @@
 /**
- * LLM-driven structured summary compression (issue #467 step 2).
+ * LLM-driven structured summary compression.
  *
  * Replaces the pure-truncation compact path with a one-shot model call that
  * emits an `<analysis>` scratchpad + a structured `<summary>` over the
@@ -7,7 +7,7 @@
  * carrying the standard "This session is being continued..." preamble,
  * followed by the kept tail and (optionally) a boundaryAttachment user
  * message — mirroring the existing placeholder-based layout so the rest of
- * the loop (SC11 / SC12) sees the same message geometry.
+ * the loop sees the same message geometry.
  *
  * Best-effort contract: `runFullCompact` never rejects (any failure collapses
  * into a `FullCompactOutcome` variant). Callers (loop-engine `applyCompactAttachment`,
@@ -99,10 +99,12 @@ export function extractCompactSummary(raw: string): string | undefined {
   const withoutAnalysis = raw.replace(/<analysis>[\s\S]*?<\/analysis>/g, "");
   const summaryMatch = withoutAnalysis.match(/<summary>([\s\S]*?)<\/summary>/);
   let base = summaryMatch ? (summaryMatch[1] ?? "") : withoutAnalysis;
-  // #467 follow-up:i467 real-LLM smoke 抓到真实模型(MiniMax-M3)把
-  // `<analysis>` 写进 summary 块内(或未闭合)→ 上面的 pre-strip 漏过,
-  // scratchpad 文本泄漏进权威摘要。对提取出的 base 再全局 strip 一次
-  // (含 unclosed tail);summary 块本身不承载 analysis 语义,strip 无信息损失。
+  // Follow-up: a real-LLM smoke test caught the model writing
+  // `<analysis>` inside the summary block (or leaving it unclosed), slipping
+  // past the pre-strip above and leaking scratchpad text into the canonical
+  // summary. Strip the extracted base globally once more (including an
+  // unclosed tail); the summary block carries no analysis semantics, so the
+  // strip loses no information.
   base = base
     .replace(/<analysis>[\s\S]*?<\/analysis>/g, "")
     .replace(/<analysis>[\s\S]*$/g, "");
@@ -157,7 +159,7 @@ const SUMMARY_PREAMBLE =
  * `summaryUserMessage.content[0].text` is `SUMMARY_PREAMBLE + summaryText`,
  * matching the upstream user-message shape. Boundary attachment (if provided)
  * is a separate user message placed between summary and kept tail, mirroring
- * the placeholder+boundary layout used by the fallback path so SC11 geometry
+ * the placeholder+boundary layout used by the fallback path so the geometry
  * stays consistent.
  */
 export function buildCompactedMessages(opts: {
@@ -227,14 +229,17 @@ export interface CompactAdapter {
  *   - adapter resolves with non-empty extracted text → `{ kind: "summarized" }`;
  *   - adapter resolves with empty/whitespace-only text → `{ kind: "empty_response" }`;
  *   - adapter throws / rejects → `{ kind: "adapter_failed", message: String(err) }`;
- *   - `opts.timeoutMs` 注入的 timer 触发 → `{ kind: "timeout" }`,the in-flight
- *     adapter call is aborted via internal controller;**无默认 client-side
- *     超时**(wait 逻辑参考 Claude Code:压缩不设紧凑 timeout,上限 = SDK 默认
- *     HTTP timeout + 用户 signal 取消;默认短 timeout 模型在长上下文下不够——i467 smoke 实测 27KB dropped 已 ~17s)。
- *     `timeoutMs` 保留为测试 / 未来 caller 显式注入缝;
- *   - `opts.signal` aborts **mid-flight** (wait 逻辑参考 Claude Code:压缩中
- *     用户取消 = 保持会话原样)→ `{ kind: "signal_aborted" }`,in-flight adapter
- *     调用经 composite signal 一并取消(与 timeout abort 同一通道)。
+ *   - `opts.timeoutMs` timer fires -> `{ kind: "timeout" }`; the in-flight
+ *     adapter call is aborted via an internal controller; **no default
+ *     client-side timeout** — compaction waits for the model to finish
+ *     naturally, bounded by the SDK default HTTP timeout plus user-signal
+ *     cancellation (a short default timeout proved insufficient on long
+ *     contexts). `timeoutMs` stays as an explicit injection seam for tests /
+ *     future callers;
+ *   - `opts.signal` aborts **mid-flight** (user cancellation during
+ *     compaction = keep the session untouched) -> `{ kind: "signal_aborted" }`;
+ *     the in-flight adapter call is cancelled through a composite signal
+ *     (same channel as the timeout abort).
  *
  * Timeout / signal-merge pattern mirrors `runSummaryWithTimeout` (loop-engine.ts
  * epilogue summary) — internal `AbortController` merged with `opts.signal`,
@@ -242,13 +247,16 @@ export interface CompactAdapter {
  * is wrapped in an async IIFE so synchronous throws are caught uniformly
  * with async rejections.
  *
- * `opts.onStream` 透传:Claude Code 的压缩体感 = 模型生成可见 + 可取消,
- * 不是黑屏等待。压缩调用开始 / 结束各 emit 一条 `compaction_started` /
- * `compaction_completed`(携带 outcome.kind + latencyMs)。adapter 在压缩
- * 上下文内的 text_delta 经 innerOnStream 重映射为 `compaction_text_delta`
- * (#550:摘要文本与 assistant 回复文本分轨,宿主路由到独立压缩草稿);
- * thinking_delta 吞咽;其余事件原样透传。emit 一律 try/catch 吞咽
- * (观察者错误不得反流回压缩逻辑,对齐 wireStreamEvents D3)。
+ * `opts.onStream` pass-through: compaction should be observable and
+ * cancellable while the model generates, not a black-box wait. Emit one
+ * `compaction_started` / `compaction_completed` event around the compaction
+ * call (`compaction_completed` carries outcome.kind + latencyMs). adapter
+ * text_deltas inside the compaction context are remapped by innerOnStream to
+ * `compaction_text_delta` (summary text is tracked separately from assistant
+ * reply text so the host can route it to a dedicated compaction draft);
+ * thinking_deltas are swallowed; all other events pass through unchanged.
+ * Every emit is wrapped in try/catch (observer errors must never flow back
+ * into the compaction logic, per the wireStreamEvents contract).
  */
 export async function runFullCompact(opts: {
   readonly adapter: CompactAdapter;
@@ -258,8 +266,9 @@ export async function runFullCompact(opts: {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<FullCompactOutcome> {
   if (opts.signal?.aborted) return { kind: "signal_aborted" };
-  // 无默认超时(Claude Code 语义):timeoutMs 缺席 → 不装 timer,adapter 自然
-  // settle;上限由 SDK 默认 HTTP timeout(10 min)+ 用户 signal 兜底。
+  // No default timeout: when timeoutMs is absent, install no timer and let
+  // the adapter settle naturally; the ceiling is the SDK default HTTP timeout
+  // (10 min) plus user-signal cancellation.
   const timeoutMs = opts.timeoutMs;
   const promptText = buildCompactPrompt();
   const compactMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
@@ -270,14 +279,16 @@ export async function runFullCompact(opts: {
     messages: compactMessages,
     turnCount: 0,
   });
-  // #548/#550:把 opts.onStream 包裹成 innerOnStream,使 adapter 在压缩上下文
-  // 内产生的 text_delta 重映射为 compaction_text_delta(避免摘要文本泄漏进
-  // 宿主主回答草稿,Claude Code 体感),thinking_delta 吞咽(scratchpad 不应
-  // 出现在宿主 thinking 区)。compaction_* 生命周期事件由 runFullCompact 自
-  // 身经 safeEmitStream 直发 opts.onStream,本 wrapper 仅透传 + 走
-  // safeEmitStream(观察者异常不得反流,stream.ts:46-62 契约)。opts.onStream
-  // 缺席 → innerOnStream 缺席,adapter.request.onStream = undefined,与 #467
-  // 之前零变化。
+  // Wrap opts.onStream into innerOnStream so text_deltas the adapter emits
+  // inside the compaction context are remapped to compaction_text_delta
+  // (keeping summary text out of the host's main answer draft);
+  // thinking_deltas are swallowed (the scratchpad should never appear in the
+  // host's thinking panel). compaction_* lifecycle events are sent directly
+  // to opts.onStream by runFullCompact itself via safeEmitStream; this
+  // wrapper only passes through via safeEmitStream (observer exceptions must
+  // not flow back; see the stream.ts contract). opts.onStream absent ->
+  // innerOnStream absent, adapter.request.onStream = undefined, unchanged
+  // from prior behavior.
   const innerOnStream: ((event: HarnessStreamEvent) => void) | undefined =
     opts.onStream !== undefined
       ? (event) => {
@@ -289,8 +300,9 @@ export async function runFullCompact(opts: {
             return;
           }
           if (event.type === "thinking_delta") {
-            // 压缩 scratchpad(模型思考过程)不暴露给宿主;若直透则混入宿主
-            // thinking 区,语义错误。
+            // The compaction scratchpad (model thinking) is not exposed to
+            // the host; passing it through would mix it into the host's
+            // thinking panel, which is semantically wrong.
             return;
           }
           safeEmitStream(opts.onStream, event);
@@ -330,10 +342,12 @@ export async function runFullCompact(opts: {
     } catch (err) {
       return { kind: "adapter_failed", message: String(err) };
     } finally {
-      // timer / settled 信号必须在 IIFE 内清除,不能依赖外部 finally:
-      // 外部 finally 只在 !adapterSettled 时清 timer,失败分支(adapterSettled=true
-      // 但走 catch)会泄漏注入的 timeoutMs timer(无默认超时后仅测试 / 显式注入
-      // 路径存在,但泄漏语义同样必须守住)。
+      // The timer / settled signal must be cleared inside the IIFE, not via
+      // the outer finally: the outer finally only clears the timer when
+      // !adapterSettled, so the failure branch (adapterSettled=true but via
+      // catch) would leak the injected timeoutMs timer (only present on test
+      // / explicit-injection paths now that there is no default timeout, but
+      // the leak must still be prevented).
       adapterSettled = true;
       if (timer !== undefined) clearTimeout(timer);
     }
@@ -353,11 +367,12 @@ export async function runFullCompact(opts: {
     const winner = await Promise.race(
       timeoutP !== undefined ? [adapterP, timeoutP] : [adapterP]
     );
-    // 中途被 run / 宿主 signal 取消 → 返回 signal_aborted(Claude Code 体感:
-    // 压缩中 Esc = 立刻退出 + 会话原样,不像 timeout / adapter_failed 那样
-    // 走 fallback placeholder)。同步 emit `compaction_cancelled` 终态事件
-    // 让宿主渲染层清除 "Compacting…" 指示器(stream.ts 注释契约:started 必有
-    // 对端 completed / failed / cancelled 之一收尾)。
+    // Cancelled mid-flight by the run / host signal -> return signal_aborted
+    // (cancelling during compaction exits immediately and leaves the session
+    // untouched, unlike timeout / adapter_failed which fall back to a
+    // placeholder). Also emit the `compaction_cancelled` terminal event so
+    // the host UI can clear its "Compacting…" indicator (contract from
+    // stream.ts: every started has one of completed / failed / cancelled).
     if (opts.signal?.aborted) {
       safeEmitStream(opts.onStream, { type: "compaction_cancelled" });
       return { kind: "signal_aborted" };

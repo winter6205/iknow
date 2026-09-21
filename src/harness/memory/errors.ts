@@ -1,8 +1,8 @@
 /**
- * #121 T2: typed memory errors (Errors bounded context).
+ * Typed memory errors (Errors bounded context).
  *
  * Spec: specs/121-memory-injection.md (Boundaries Always — typed MemoryError,
- * 不空 catch; never string error codes). Shape mirrors src/harness/errors.ts
+ * no empty catch; never string error codes). Shape mirrors src/harness/errors.ts
  * (lightweight class extends Error + name override); index.ts re-exports.
  */
 
@@ -28,8 +28,8 @@ export class MemorySchemaInvalid extends MemoryError {
 }
 
 /**
- * Auto-memory ingest could not produce usable candidates (auto-memory T3 /
- * ADR-0031 D5): the extraction call failed, its output was not a JSON array,
+ * Auto-memory ingest could not produce usable candidates (ADR-0031 D5):
+ * the extraction call failed, its output was not a JSON array,
  * or a candidate reached the write path still carrying negative-form
  * phrasing. One error type so the host wire has exactly one thing to swallow.
  */
@@ -41,7 +41,7 @@ export class MemoryExtractError extends MemoryError {
 }
 
 /**
- * A GC option is outside its declared domain (auto-memory T2 / ADR-0031 D4).
+ * A GC option is outside its declared domain (ADR-0031).
  * Thrown before any scan or write so a bad cap cannot half-apply a plan.
  */
 export class MemoryGcOptionInvalid extends MemoryError {
@@ -57,9 +57,9 @@ export class MemoryIOError extends MemoryError {
 }
 
 /**
- * runtime-capability-memory-gate T2 (ADR-0086): the draft is a runtime
+ * ADR-0086: the draft is a runtime
  * capability / environment-availability observation ("web_search is
- * unavailable in this sandbox"). Subclass of `MemoryError` so #121's
+ * unavailable in this sandbox"). Subclass of `MemoryError` so the
  * typed-error contract still holds; a named subclass lets the host and the
  * tests tell "this fact may not be stored" apart from a malformed input or an
  * IO fault. `reason` is the wire-stable token

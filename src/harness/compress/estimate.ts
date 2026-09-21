@@ -1,7 +1,7 @@
-// Q6b-D3 决议:全量字符重估 × 4/3 padding,纯函数,不用 lastUsage
-// Deviation from spec Code Style:import 用 .js 扩展名(对齐 src/ 既有 convention
-// 如 model-adapter/types.ts → ../stream.js;NodeNext + verbatimModuleSyntax 下
-// \\allowImportingTsExtensions\\ 未开启,spec 模板的 .ts 写法会让 tsc exit 2)。
+// Full re-estimate from characters x 4/3 padding; pure function, no lastUsage.
+// Imports use .js extensions to match the existing src/ convention (e.g.
+// model-adapter/types.ts -> ../stream.js); under NodeNext +
+// verbatimModuleSyntax without allowImportingTsExtensions this is required.
 import { TOKEN_ESTIMATION_PADDING } from "./constant.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 
@@ -64,7 +64,7 @@ export function estimateMessagesTokens(
           break;
         case "thinking":
         case "redacted_thinking":
-          break; // 不计入输入 token(thinking 非发送历史)
+          break; // not counted toward input tokens (thinking is not sent history)
       }
     }
   }

@@ -1,13 +1,13 @@
 /**
  * src/harness/isolation/worktree-gate.ts
  *
- * ADR-0037 (amended 2026-08-30) / plans/worktree-isolation-model-provision.md
- * T3 — mutate gate at the harness executor seam. Model-provision contract:
+ * ADR-0037 (amended 2026-08-30).
+ * Mutate gate at the harness executor seam. Model-provision contract:
  * when the isolation switch is ON and the session is still on the main
  * checkout, the first workspace-mutating tool call is BLOCKED — the gate
  * NEVER provisions. Creating the per-conversation task worktree and rebinding
- * the session root is the model's job via the create-worktree ACI tool
- * (T4); the block message says exactly that. Once the session root moved to
+ * the session root is the model's job via the create-worktree ACI tool — the
+ * block message says exactly that. Once the session root moved to
  * its task worktree (host rebuilds the engine at that root), mutates are
  * adjudicated per conversation by the host `provision` seam: the session's
  * own tree is a same-root no-op passthrough, a foreign root fails closed.
@@ -32,7 +32,7 @@
  * Switch OFF → `createWorktreeIsolationExecutor` is not wired by the
  * assembly (build-engine), i.e. byte-identical to today's behavior.
  *
- * ADR-0096 T3 (amends ADR-0037): the switch is a live holder. The TUI /config
+ * ADR-0096 (amends ADR-0037): the switch is a live holder. The TUI /config
  * panel flips it in-session and persists it to the user layer; the gate reads
  * it once per wave. Flipping ON does NOT auto-provision — the unbound-mutate
  * block (and its create-worktree hint) is still the only reaction. Flipping
@@ -56,18 +56,18 @@ import { gateBlockNotice } from "./recoverability.js";
 export const WORKTREE_ISOLATION_PREFIX = "[worktree_isolation]";
 
 /**
- * Hint the gate emits on unbound mutates (T3 model-provision contract): the
- * model must call the create-worktree ACI tool (T4) — the gate never
- * auto-creates. T4's tool name/registration must align with this wording
+ * Hint the gate emits on unbound mutates (model-provision contract): the
+ * model must call the create-worktree ACI tool — the gate never
+ * auto-creates. The tool name/registration must align with this wording
  * (ADR-0082: the registered name is `create-worktree`).
  */
 export const CREATE_WORKTREE_TOOL_HINT = "create-worktree ACI tool";
 
 /**
- * Root-flip lifecycle block notice (D11 / review fix): a mutate arriving
+ * Root-flip lifecycle block notice: a mutate arriving
  * after an enter/exit-worktree call in the SAME wave would be adjudicated
  * on the wave-entry snapshot while its handler would consume the flipped
- * cell — the admit-but-write-other-root window D11 forbids. Fail-closed: the
+ * cell — the admit-but-write-other-root window this rule forbids. Fail-closed: the
  * call is not executed; the model re-issues it in the next wave.
  */
 export function rootFlipMutateNotice(toolName: string): string {
@@ -82,7 +82,7 @@ export function rootFlipMutateNotice(toolName: string): string {
 
 /**
  * Unbound-mutate block notice. Three semantic pieces (spec
- * casual-ask-context-hygiene.md:21 锁定语义, 2026-09-08 amendment):
+ * locked spec semantics, amended):
  *
  *   (a) conditional — "To write, ..." names the condition under which the
  *       named tool applies (this is the piece that the 2026-09-08 amendment
@@ -97,11 +97,11 @@ export function rootFlipMutateNotice(toolName: string): string {
  *       after the rebind, never "next turn" — turnCount is per assistant
  *       round, not per run).
  *
- * Plus the three SC7 substring bans that survive verbatim: literal
+ * Plus the three substring bans that survive verbatim: literal
  * `create-worktree`, no `this conversation's task worktree`, and the
  * factual `This call would write` opener. The notice is intentionally one
- * text — it never splits by user question type (casual-ask SC7 「不按用户
- * 问句分两套文案」).
+ * text — it never splits by user question type (one wording for every kind
+ * of user question).
  */
 export function unboundMutateNotice(): string {
   return (
@@ -124,7 +124,7 @@ export function unboundMutateNotice(): string {
  * and the attempted-path clues — the raw stderr lines that carried the
  * EROFS error (capped, so the model sees WHICH paths were hit). When a clue
  * targets git metadata (a `.git` path), the action sentence is the distinct
- * gitdir wording from ADR-0109 子决策 4 (build the tree first, run the git
+ * gitdir wording from ADR-0109 (build the tree first, run the git
  * command from the task tree) instead of the plain-file re-issue text — one
  * contract, never a shared vague notice. Returns undefined when stderr shows
  * no EROFS line: the caller then leaves the result byte-identical (never
@@ -204,13 +204,13 @@ export type WorktreeIsolationErrorKind =
   /**
    * Session root is a git worktree that is NOT this conversation's own task
    * worktree (another session's task tree, or an unrelated manual worktree).
-   * T4 fail-closed choice: the isolation contract (ADR-0037) only defines the
+   * Fail-closed choice: the isolation contract (ADR-0037) only defines the
    * main repo and the session's own task tree, so a foreign root never gets a
    * nested tree and never sees a write.
    */
   | "foreign_worktree"
   /**
-   * T7 enter-worktree: the requested target task worktree does not
+   * Enter-worktree: the requested target task worktree does not
    * exist (no directory at `<repoRoot>/.iknow/worktrees/<conversationId>`).
    * Distinct from `foreign_worktree` so the model can tell "wrong id / tree
    * never created" apart from "tree exists but belongs elsewhere".
@@ -225,12 +225,15 @@ export type WorktreeIsolationErrorKind =
   | "worktree_remove_failed"
   | "branch_delete_failed"
   /**
-   * plans/worktree-exclusive-lock.md T3 / ADR-0070 — `enter-worktree`
-   * 前置占用检查：目标树已被**别的现存会话记录**的 `workspaceRoot` 指向。
-   * 占用判据 = 现存会话记录的 `workspaceRoot`（零新持久状态，SC7）；
-   * 释放 = 恢复该会话让它自己 `exit-worktree`，或删除该会话记录
-   * （spec SC3 / SC9 显式给出的两条出路）。归 `operator_required`——
-   * 模型解不了别人的占用（recoverability.ts 的穷尽表保证停止指令自动接入）。
+   * ADR-0070 — `enter-worktree`
+   * Pre-occupancy check: the target tree is already pointed at by
+   * **another live session record's** `workspaceRoot`. Claim criterion = the
+   * `workspaceRoot` of existing session records (zero new persisted state);
+   * release = resume that session and let it `exit-worktree`, or delete that
+   * session record (the two explicit ways out). Classified
+   * `operator_required` — the model cannot release someone else's claim (the
+   * exhaustive table in recoverability.ts guarantees the stop instruction is
+   * wired in automatically).
    */
   | "worktree_claimed";
 
@@ -274,9 +277,11 @@ export type GitRunner = (
 /**
  * Production runner: `git <args>` in `cwd`. Spawn errors propagate as throws.
  *
- * cwd 语义的 runner 必须剥离父 git 进程注入的 GIT_DIR / GIT_WORK_TREE 等 env
- * （如 hook 子进程里启动 iknow 时）：这些变量会把 `rev-parse` 等按 cwd 探测
- * 的调用钉到父仓库上，探测的不再是 opts.cwd 指向的 repo。
+ * A runner with its own cwd semantics must strip the GIT_DIR /
+ * GIT_WORK_TREE-style env a parent git process injects (e.g. when iknow is
+ * started inside a hook subprocess): those variables pin `rev-parse` and
+ * friends onto the parent repo regardless of cwd, so the probe would no
+ * longer report the repo opts.cwd points at.
  */
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
@@ -399,9 +404,9 @@ export async function createTaskWorktree(
     );
   }
   if (branchProbe.code === 0) {
-    // T8 (plans/write-situation-disclosure.md) — `branch_exists` detail must be
-    // unique (one actionable next step per receipt, ADR-0069 「回执说下一步做什
-    // 么」). Two sub-cases by whether the target directory is on disk:
+    // `branch_exists` detail must be
+    // unique (one actionable next step per receipt). Two sub-cases by
+    // whether the target directory is on disk:
     //   - directory EXISTS (e.g. previous worktree remove left a branch behind
     //     — `remove-worktree` defaults to NOT deleting the branch) → defer
     //     to the same three-arm logic as `worktree_exists`; the branch is
@@ -460,12 +465,12 @@ export async function createTaskWorktree(
 export type MutateClass = "mutate" | "read" | "root_flip";
 
 /**
- * Root-flip lifecycle tools (T7 enter / T8 exit). They do not write workspace
+ * Root-flip lifecycle tools (enter / exit). They do not write workspace
  * files, but their handlers resolve the withLiveTaskRootWrite-wrapped host
  * enter/exit seams, which FLIP the live `taskRoot` cell mid-wave. A mutate
  * later in the same wave would otherwise be adjudicated on the wave-entry
- * snapshot (D2) while its handler consumes the flipped cell — the
- * admit-but-write-other-root window D11 forbids. The gate therefore tracks
+ * snapshot while its handler consumes the flipped cell — the
+ * admit-but-write-other-root window this rule forbids. The gate therefore tracks
  * these calls and fail-closes every subsequent mutate in the wave.
  */
 const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
@@ -474,8 +479,8 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * T1 (plans/worktree-live-task-root.md §6 T1) — workspace-mutation classifier
- * SSOT. Single source of truth for "does this tool write to the workspace":
+ * Workspace-mutation classifier SSOT.
+ * Single source of truth for "does this tool write to the workspace":
  *
  *   - the canonical list of workspace-writing tool names comes from
  *     `FILE_WRITE_TOOL_NAMES` (symbol-mutate.ts), which is the SAME frozen
@@ -497,14 +502,14 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
  *     are classified `root_flip`: they do not write workspace files, but their
  *     handlers flip the live `taskRoot` cell mid-wave (via the wrapped host
  *     seams), so the gate latches the flip and fail-closes later mutates in
- *     the same wave (D11). create-worktree is NOT in that set: its
+ *     the same wave. create-worktree is NOT in that set: its
  *     wrapped-provision flip only happens on a wave that started at the main
  *     repo, where every mutate is already blocked by the unbound branch.
  *
- * Before T1 the gate used a hardcoded 2-name set (`ALWAYS_MUTATE_TOOLS`),
+ * Before this classifier the gate used a hardcoded 2-name set (`ALWAYS_MUTATE_TOOLS`),
  * which left the 5 symbol-mutate tools (`rename_symbol` etc.) unclassified
  * → they passed the gate and edited the main repo directly (fail-open).
- * T1 closes that hole by routing on `FILE_WRITE_TOOL_NAMES`, the same SSOT
+ * The classifier closes that hole by routing on `FILE_WRITE_TOOL_NAMES`, the same SSOT
  * already used by the worker deny-list (catalog.ts) — one name → one
  * classification, no shadow copies.
  *
@@ -723,12 +728,11 @@ export function taskWorktreeOwnerOf(root: string): string | undefined {
 }
 
 /**
- * T8 (plans/write-situation-disclosure.md SC8 / SC9) — single actionable
- * guidance tail for the `worktree_exists` kind (and the directory-present
+ * Single actionable guidance tail for the `worktree_exists` kind (and the directory-present
  * sub-case of `branch_exists`). Returns ONLY the next-step phrase so each
  * caller can compose its own opener (`worktree_path_already_exists` /
  * `branch_already_exists_and_is_bound_to_<path>`). The kind stays
- * machine-readable through `gateBlockNotice` (T7), so this helper is the
+ * machine-readable through `gateBlockNotice`, so this helper is the
  * human-facing half — one phrase, one move.
  *
  * Three arms by `taskWorktreeOwnerOf(worktreePath)`:
@@ -793,7 +797,7 @@ export function worktreeGuidance(
 }
 
 /**
- * T6 (plans/worktree-session-roots.md / ADR-0037 §4): the stable main checkout
+ * ADR-0037 §4: the stable main checkout
  * that owns `root` — `root` itself when it is not task-worktree-shaped,
  * otherwise the repo three levels up (`<main>/.iknow/worktrees/<leaf>`).
  *
@@ -834,7 +838,7 @@ export function unboundFenceMainCheckout(args: {
  * branch name (SSOT; session-api worktree-rebind re-exports it). Contract:
  * first char alphanumeric; remainder alphanumeric / `_` / `-` — rejects path
  * traversal (`..`, `a/b`), leading dashes/dots, whitespace / shell
- * metacharacters, and empty strings. The T7 enter-worktree tool runs
+ * metacharacters, and empty strings. The enter-worktree tool runs
  * this against its model-supplied `conversationId` BEFORE any host call.
  */
 export const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -879,7 +883,7 @@ export type WorktreeProvisionFn = (
 ) => Promise<string>;
 
 /**
- * T7 explicit-enter seam context: a session (conversationId) anchored at the
+ * Explicit-enter seam context: a session (conversationId) anchored at the
  * main repo (root) adopts the EXISTING task worktree owned by
  * `targetConversationId`. The target path is resolved from the repository's
  * task-worktree listing, using either the owner's id or a unique label; the
@@ -895,7 +899,7 @@ export interface WorktreeEnterContext {
 }
 
 /**
- * T7 host enter seam shape (SSOT): resolves with the entered task worktree
+ * Host enter seam shape (SSOT): resolves with the entered task worktree
  * path; rejects with typed `WorktreeIsolationError`
  * (worktree_not_found / foreign_worktree / rebind_failed / git_unavailable).
  * Shared by the host opts, the `enter-worktree` ACI tool deps, and the
@@ -906,13 +910,13 @@ export type WorktreeEnterFn = (
 ) => Promise<WorktreeEnterResult>;
 
 /**
- * write-situation-disclosure T9 (SC10): the enter seam returns the rebound
+ * The enter seam returns the rebound
  * root AND the composed success receipt. `path` is what the live taskRoot
  * cell and the durable rebind record consume; `receipt` is the model-facing
  * success text, composed by the host seam (session-api) — it appends the
  * creator disclosure only when the tree's owner sidecar yields an owner, and
  * omits the sentence otherwise. Disclosure is constant-on and reads no
- * setting (specs/worktree-exclusive-lock.md SC10).
+ * setting (specs/worktree-exclusive-lock.md).
  */
 export interface WorktreeEnterResult {
   /** The entered (rebound) task worktree root. */
@@ -922,7 +926,7 @@ export interface WorktreeEnterResult {
 }
 
 /**
- * T8 symmetric-exit seam context: the session (conversationId) currently
+ * Symmetric-exit seam context: the session (conversationId) currently
  * executing on `root` returns to the main repo root. No target input — the
  * tree is identified by the engine root / the session's durable rebind
  * record; the main repo root is derived from the tree itself.
@@ -935,7 +939,7 @@ export interface WorktreeExitContext {
 }
 
 /**
- * T8 host exit seam shape (SSOT): resolves with the session's main repo
+ * Host exit seam shape (SSOT): resolves with the session's main repo
  * root; rejects with typed `WorktreeIsolationError` (rebind_failed /
  * git_unavailable). The tree is preserved (orphan cleanup is a plan
  * non-goal). Shared by the host opts, the `exit-worktree` ACI tool
@@ -1001,13 +1005,13 @@ export type WorktreeRemoveFn = (
  * switch itself is read once at the startup load point
  * (`resolveWorktreeOnMutate(settings)`), the host supplies only the provision
  * seam. Passthrough for a session already on its task worktree is anchored
- * PER CONVERSATION inside `provision` (T4) — the host must not blanket-mark
+ * PER CONVERSATION inside `provision` — the host must not blanket-mark
  * an engine "bound" when several conversations can share a root.
  */
 export interface WorktreeIsolationHostOpts {
   readonly provision: WorktreeProvisionFn;
   /**
-   * T7 explicit-enter seam (session-api hub / CLI provisioner). Present → the
+   * Explicit-enter seam (session-api hub / CLI provisioner). Present → the
    * `enter-worktree` ACI tool enters the registry (alongside
    * `create-worktree`); absent (worker assembly, hub-less inlets) →
    * excluded via the Gate 3 mirror filter. The gate itself never calls it —
@@ -1016,7 +1020,7 @@ export interface WorktreeIsolationHostOpts {
    */
   readonly worktreeEnter?: WorktreeEnterFn;
   /**
-   * T8 symmetric-exit seam (session-api hub / CLI provisioner). Present →
+   * Symmetric-exit seam (session-api hub / CLI provisioner). Present →
    * the `exit-worktree` ACI tool enters the registry; absent (worker
    * assembly, hub-less inlets) → excluded via the Gate 3 mirror filter. The
    * gate itself never calls it — exit is a model-invoked tool whose durable
@@ -1037,7 +1041,7 @@ export interface WorktreeIsolationHostOpts {
 }
 
 /**
- * ADR-0096 T3 — the `isolation.worktreeOnMutate` switch as a live cell.
+ * ADR-0096 — the `isolation.worktreeOnMutate` switch as a live cell.
  *
  * Mirrors `FsModeContext` / `SubagentCapacityHolder`: the assembly seeds it
  * once from `resolveWorktreeOnMutate(settings)` (hard req 9 — settings are
@@ -1048,7 +1052,7 @@ export interface WorktreeIsolationHostOpts {
  * Flipping this holder does NOT change any assembly-time derivation that
  * other consumers snapshot from the same setting (worker write-situation,
  * git-work-discipline prompt segment, project-identity read fence): those
- * stay frozen at the startup value. Only the mutate gate is live (T3 scope).
+ * stay frozen at the startup value. Only the mutate gate is live.
  */
 export interface WorktreeOnMutateHolder {
   readonly get: () => boolean;
@@ -1088,9 +1092,9 @@ export interface WorktreeIsolationGateOpts {
   /**
    * Startup read (hard req 9): assembly passes `resolveWorktreeOnMutate(settings)`.
    *
-   * ADR-0096 T3 — this is now a HOLDER (`get()`), not a frozen boolean. The
+   * ADR-0096 — this is now a HOLDER (`get()`), not a frozen boolean. The
    * assembly injects the session's live switch cell (the same instance the
-   * TUI /config panel flips); the gate reads it ONCE per wave (D2 snapshot
+   * TUI /config panel flips); the gate reads it ONCE per wave (snapshot
    * discipline — one wave, one switch value), so a panel flip takes effect on
    * the NEXT wave of tool calls, never mid-wave. The gate still NEVER
    * auto-provisions: flipping ON only re-arms the block on unbound mutates
@@ -1101,34 +1105,38 @@ export interface WorktreeIsolationGateOpts {
    */
   readonly enabled: WorktreeGateReader;
   /**
-   * T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2) — live `taskRoot`
-   * cell (T4 SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`
+   * Live `taskRoot` cell (SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`
    * entry; the whole wave shares that snapshot. Why snapshot, not per-call:
    *
-   *   - D2 (batch 快照): 一波 tool calls 只能有一个根 — 否则 create-worktree
-   *     在同波翻转时把一次逻辑改动劈进两棵树,违 least astonishment。rebind
-   *     因此对**下一波** tool calls 生效,不是同波。
-   *   - D11 (排序不变量): 门禁裁决用的根必须等于消费者用的根。单波内 cell
-   *     会被生命周期工具翻转 — create-worktree 在 gate 之前的 unbound
-   *     分支就被拦（main-repo 波内后续 mutate 本来就 block），而 enter/exit
-   *     以 `root_flip` 分类直达 inner 并经 `withLiveTaskRootWrite` 缝翻
-   *     cell；对这两者之后的 mutate，gate 以 `rootFlipped` latch fail-closed
-   *     拦下（`rootFlipMutateNotice`），保证被放行的每条 mutate 的
-   *     handler 读到的 cell 值就是门禁裁决用的快照值 — 不出现
-   *     admit-but-write-other-root 窗口。
+   *   - Batch snapshot: one wave of tool calls may have only one root —
+   *     otherwise a create-worktree flipping mid-wave would split a single
+   *     logical change across two trees, violating least astonishment. The
+   *     rebind therefore takes effect for the **next wave** of tool calls,
+   *     not the same wave.
+   *   - Ordering invariant: the root used for gate adjudication must equal
+   *     the root the consumer uses. Within one wave the cell can be flipped
+   *     by lifecycle tools — create-worktree is already blocked by the
+   *     pre-gate unbound branch (later mutates in a main-repo wave are
+   *     blocked anyway), while enter/exit go straight to inner under the
+   *     `root_flip` class and flip the cell through the
+   *     `withLiveTaskRootWrite` seam; for mutates after either, the gate
+   *     fail-closes on the `rootFlipped` latch (`rootFlipMutateNotice`), so
+   *     every admitted mutate's handler reads exactly the snapshot value the
+   *     gate adjudicated with — no admit-but-write-other-root window.
    *
-   * 写仍然由 `withLiveTaskRootWrite` 缝包裹 host `provision` / `enter` /
-   * `exit` 单点写入(T4 SSOT) — 本字段是**读取面**入口。
+   * Writes still go through the single-point host `provision` / `enter` /
+   * `exit` wrapped by the `withLiveTaskRootWrite` seam (SSOT) — this field
+   * is the **read-side** entry.
    */
   readonly liveTaskRoot: LiveTaskRoot;
   /**
-   * Host seam (session-api). T3 model-provision contract: the gate calls this
+   * Host seam (session-api). Model-provision contract: the gate calls this
    * ONLY for engines rooted at a task-worktree-shaped path (post-rebind), as
    * the per-conversation passthrough adjudicator — the session's own tree
    * resolves to the same root (zero-side-effect no-op), a foreign root
    * rejects with typed `foreign_worktree`. The creation path of the
    * underlying host provisioner is reserved for the create-worktree ACI
-   * tool (T4): the gate NEVER routes main-repo traffic here, so no
+   * tool: the gate NEVER routes main-repo traffic here, so no
    * `git worktree add` is ever triggered by a blocked mutate. MUST be
    * idempotent per conversation — the gate coalesces concurrent callers onto
    * one invocation.
@@ -1139,7 +1147,7 @@ export interface WorktreeIsolationGateOpts {
    * Harness-level prior for embeddings that serve EXACTLY the conversation
    * owning this root (e.g. a single-session CLI engine). Multi-conversation
    * hosts (session-api hub) must NOT set it — per-conversation passthrough is
-   * adjudicated by `provision` (T4: own task tree → same-root no-op; foreign
+   * adjudicated by `provision` (own task tree → same-root no-op; foreign
    * root → typed `foreign_worktree`).
    *
    * The bound-root is initialised to the wave-entry snapshot of
@@ -1167,7 +1175,7 @@ interface GateSessionState {
  *     the create-worktree ACI-tool notice; `provision` is never called,
  *     so no `git worktree add` runs and the main repo sees zero writes. The
  *     block is side-effect free and idempotent — every mutate re-blocks until
- *     the model provisions (T4 tool) and the host rebinds the session root;
+ *     the model provisions via create-worktree and the host rebinds the session root;
  *   - engine rooted at a task-worktree-shaped path → per-conversation
  *     adjudication via `provision`, coalesced onto a single invocation per
  *     conversation (boundary c idempotency):
@@ -1183,7 +1191,7 @@ export function createWorktreeIsolationExecutor(
   opts: WorktreeIsolationGateOpts & { readonly inner: Executor }
 ): Executor {
   const { enabled, liveTaskRoot, provision, initiallyBound, inner } = opts;
-  // ADR-0096 T3: `enabled` is a holder — every read goes through `.get()` at
+  // ADR-0096: `enabled` is a holder — every read goes through `.get()` at
   // the wave boundary (below); the gate never mutates it (the config panel /
   // assembly own the setter).
   const classify = opts.classify ?? classifyCall;
@@ -1230,13 +1238,13 @@ export function createWorktreeIsolationExecutor(
     if (state.status === "bound" && state.boundRoot === snapshotRoot) {
       return undefined; // passthrough
     }
-    // T3 model-provision contract: a session on a non-task-worktree root
+    // Model-provision contract: a session on a non-task-worktree root
     // (main repo) can never be bound — block with the ACI-tool notice and
     // NEVER provision (no `git worktree add` on the execution path). The
     // block is side-effect free; state stays open so later mutates re-block.
     //
-    // T10: `root` here is the **wave snapshot** of `liveTaskRoot` taken at
-    // executeAll entry (D2). mid-wave flips (create-worktree) do not
+    // `root` here is the **wave snapshot** of `liveTaskRoot` taken at
+    // executeAll entry. mid-wave flips (create-worktree) do not
     // change this snapshot — rebind takes effect on the NEXT wave.
     if (state.status === "open" && !isTaskWorktreePath(snapshotRoot)) {
       return block(call.id, unboundMutateNotice());
@@ -1257,7 +1265,7 @@ export function createWorktreeIsolationExecutor(
             : new WorktreeIsolationError("rebind_failed", errorMessage(err));
         opts.onError?.(typed);
         setState(conversationId, { status: "open" }); // retry allowed, still fail-closed
-        // T7: route through the single seam that carries the Recoverability
+        // Route through the single seam that carries the Recoverability
         // policy (`operator_required` stop-directive vs not). See
         // isolation/recoverability.ts.
         return block(call.id, gateBlockNotice(typed.kind, typed.detail));
@@ -1283,7 +1291,7 @@ export function createWorktreeIsolationExecutor(
     onStream?: (event: import("../stream.js").HarnessStreamEvent) => void,
     messages?: import("../tools/types.js").ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-    // ADR-0096 T3 — D2 wave snapshot for the SWITCH as well: read the holder
+    // ADR-0096 — wave snapshot for the SWITCH as well: read the holder
     // ONCE at wave entry. A panel flip (ON→OFF / OFF→ON) therefore applies to
     // the next wave, never mid-wave — same one-wave-one-value rule the live
     // taskRoot snapshot below follows.
@@ -1299,11 +1307,11 @@ export function createWorktreeIsolationExecutor(
         messages
       );
     }
-    // T10 D2: snapshot live taskRoot ONCE at executeAll entry. The whole wave
+    // Snapshot live taskRoot ONCE at executeAll entry. The whole wave
     // shares this value so:
     //   (a) mid-wave flips (create-worktree) cannot split the wave
     //     between two roots — one wave = one root (least astonishment);
-    //   (b) gate adjudication root == consumer handler root (D11 invariant:
+    //   (b) gate adjudication root == consumer handler root (invariant:
     //     gate admits → consumer writes to the same root). Within a single
     //     wave the cell can be flipped by the lifecycle tools (create- /
     //     enter- / exit-worktree) whose handlers resolve the wrapped
@@ -1335,7 +1343,7 @@ export function createWorktreeIsolationExecutor(
     // mixed / mutating batch: per-call gating (read calls still batched one
     // by one so onSettled keeps the input index alignment)
     const out: ToolExecutionResult[] = [];
-    // D11 (review fix): enter/exit-worktree are classified `root_flip`
+    // Enter/exit-worktree are classified `root_flip`
     // — they pass through to inner but their handlers flip the live cell
     // mid-wave via the withLiveTaskRootWrite-wrapped host seams. A mutate
     // AFTER such a call would be adjudicated on the wave-entry snapshot

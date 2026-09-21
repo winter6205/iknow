@@ -1,14 +1,14 @@
 /**
  * src/harness/hooks/user-hooks.ts
  *
- * Pre/Post multiplexer。用户 command 钩子编译在 plugin-hooks.ts
- * （createSettingsHookContribution）；本文件只组合各源。
+ * Pre/Post multiplexer. User command hooks are compiled in plugin-hooks.ts
+ * (createSettingsHookContribution); this file only composes sources.
  */
 import type { PostToolUseHook, PreToolUseHook } from "../permission/types.js";
 
 /**
- * 顺序执行各 Pre hook，第一个非 undefined 即短路（先拦先赢）。
- * undefined 槽跳过。返回 async hook。
+ * Run Pre hooks in order; the first non-undefined result short-circuits
+ * (first block wins). Undefined slots are skipped. Returns an async hook.
  */
 export function composePreHooks(
   hooks: ReadonlyArray<PreToolUseHook | undefined>
@@ -24,7 +24,7 @@ export function composePreHooks(
 }
 
 /**
- * 顺序 await 各 Post hook。全槽缺席 → undefined。
+ * Await Post hooks in order. All slots absent -> undefined.
  */
 export function composePostHooks(
   hooks: ReadonlyArray<PostToolUseHook | undefined>

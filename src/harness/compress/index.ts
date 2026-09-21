@@ -1,48 +1,50 @@
-// Q3 决议(proactive 估算触发)+ ADR-0013(reactive PromptTooLongError 触发,
-// plan T3):proactive(shouldAutoCompact)+ reactive(loop-engine 兜底,
-// 每 run 限 1 次)双保险共存,共用 `compactMessages`,无阈值/优先级冲突。
+// Proactive estimation trigger + reactive PromptTooLongError trigger
+// (ADR-0013): the proactive path (shouldAutoCompact) and the reactive
+// fallback in loop-engine (at most once per run) coexist as double
+// insurance, sharing `compactMessages` with no threshold/priority conflict.
 //
-// plan compress-trigger-gate T1:新增 `evaluateCompactTrigger` 统一触发判据,
-// 手动 /compact + loop-engine proactive 共用同一函数,token 阈值 + 窗口守门
-// + full summary 降级三段分类返回;`shouldAutoCompact` 保留为兼容 wrapper
-// (外部调用方未迁移前不破)。
+// `evaluateCompactTrigger` is the unified trigger decision: manual /compact
+// and loop-engine proactive share one function, classifying the result into
+// token threshold + window gating + full-summary fallback;
+// `shouldAutoCompact` is kept as a compatibility wrapper.
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { DEFAULT_KEEP_RECENT } from "./constant.js";
 import { estimateMessagesTokens } from "./estimate.js";
 import { preserveToolPairs } from "./window.js";
 
-/** CompactReason — 触发判据分类标识,SSOT 见 plans/compress-trigger-gate.md */
+/** CompactReason — trigger-decision classification tag. */
 type CompactReason =
-  | "below_token_threshold" // token 未达阈值,不压缩
-  | "messages_too_few" // token 已超但 splitForCompaction 无窗口
-  | "windowed" // token 已超 + 有可丢前缀,走窗口压缩
-  | "full_summary"; // token 已超 + 无窗口,走 full summary 路径
+  | "below_token_threshold" // token estimate below threshold; no compaction
+  | "messages_too_few" // threshold exceeded but splitForCompaction finds no window
+  | "windowed" // threshold exceeded + droppable prefix; windowed compaction
+  | "full_summary"; // threshold exceeded + no window; full-summary path
 
-/** CompactTriggerDecision — 判据返回 discriminated union */
+/** CompactTriggerDecision — trigger-decision result (discriminated union). */
 type CompactTriggerDecision =
   | { action: "noop"; reason: "below_token_threshold" }
   | { action: "compact_via_full_summary"; reason: "messages_too_few" }
   | { action: "compact_via_window"; reason: "windowed" };
 
 /**
- * 统一触发判据。手动 /compact + loop-engine proactive 共用本函数。
- *
- * ADR-0013 D3:proactive/reactive 共用 compactMessages,本函数只决定"走哪条
- * 压缩路径",不引入新压缩实现。token 估算仅供判据决策(ADR-0008 D6)。
+ * Unified trigger decision, shared by manual /compact and loop-engine
+ * proactive. Proactive and reactive share `compactMessages` (ADR-0013);
+ * this function only decides which compaction path to take and introduces
+ * no new compaction implementation. The token estimate is used only for
+ * the decision (ADR-0008).
  */
 export function evaluateCompactTrigger(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   ctx: {
     contextWindow: number;
     threshold: number;
-    keepRecent?: number; // 默认 DEFAULT_KEEP_RECENT
+    keepRecent?: number; // defaults to DEFAULT_KEEP_RECENT
   }
 ): CompactTriggerDecision {
   const estimated = estimateMessagesTokens(messages);
   if (estimated < ctx.threshold) {
     return { action: "noop", reason: "below_token_threshold" };
   }
-  // token 已超阈值 — 看窗口是否可丢
+  // Token threshold exceeded — check whether the window can be dropped
   const { slicedFrom } = preserveToolPairs(
     messages,
     ctx.keepRecent ?? DEFAULT_KEEP_RECENT
@@ -54,16 +56,18 @@ export function evaluateCompactTrigger(
 }
 
 /**
- * 判断 messages 当前累计 token 是否到达 proactive auto-compact 阈值。
- * 纯函数。reactive 触发由 loop-engine 的 `PromptTooLongError` 分支持有
- * (ADR-0013,plan T3),同一模块的 `compactMessages` 是双保险共用的压缩函数
- * —— proactive 与 reactive 不分叉阈值与压缩逻辑,各自独立触发,共用输出。
- * 共存语义断言见 `tests/harness/compress/dual-insurance.test.ts`。
+ * Whether the current accumulated token estimate of messages reaches the
+ * proactive auto-compact threshold. Pure function. The reactive trigger is
+ * owned by loop-engine's `PromptTooLongError` branch (ADR-0013);
+ * `compactMessages` in this module is the compaction function shared by
+ * both insurance paths — proactive and reactive do not fork the threshold
+ * or the compaction logic; they trigger independently and share the
+ * output.
  *
- * @deprecated — 新 caller 请使用 `evaluateCompactTrigger`(plan
- * compress-trigger-gate T1)。本函数保留为兼容 wrapper,函数体不变以免破坏
- * 既有外部调用方;委托关系 = 仅 token 阈值判据,不含窗口守门 / full summary
- * 降级语义。
+ * @deprecated — new callers should use `evaluateCompactTrigger`. This
+ * function is kept as a compatibility wrapper with an unchanged body to
+ * avoid breaking existing external callers; the delegation covers only the
+ * token-threshold decision, without window gating / full-summary fallback.
  */
 export function shouldAutoCompact(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -72,16 +76,17 @@ export function shouldAutoCompact(
   return estimateMessagesTokens(messages) >= ctx.threshold;
 }
 
-// Re-export 公共 API:让 `import { ... } from "src/harness/compress/"` 一站式可用
-// 注:strict noUnusedLocals 下,仅 re-export 的符号不能先 import 再 re-export,
-// 直接 `export ... from` 保持单一 write(T6 deviation)。
+// Re-export the public API so `import { ... } from "src/harness/compress/"`
+// works as a single entry. Note: under strict noUnusedLocals, re-export-only
+// symbols must not be imported first; use direct `export ... from`.
 //
-// #467 step 2:full-compact 五个函数(LLM 结构化摘要压缩)与旧纯截断路径
-// `compactMessages` 并列暴露 —— loop-engine 与 hub 可自由选择摘要成功路径或
-// placeholder 回退路径。注:不再导出 `COMPACT_TIMEOUT_SECONDS`(2026-08-19,
-// 实测 27KB dropped ~17s + Claude Code 无 client-side 超时语义对齐)——
-// runFullCompact 不设默认 client-side 超时,上限 = SDK 默认 HTTP timeout
-// + 用户 signal 取消;`timeoutMs` 保留为注入缝供测试 / 显式 caller 使用。
+// The five full-compact functions (LLM structured-summary compaction) are
+// exposed alongside the legacy pure-truncation path `compactMessages` —
+// loop-engine and hub can freely choose the summary-success path or the
+// placeholder fallback. Note: `COMPACT_TIMEOUT_SECONDS` is no longer
+// exported: runFullCompact installs no default client-side timeout (ceiling
+// = SDK default HTTP timeout + user-signal cancellation); `timeoutMs` stays
+// as an injection seam for tests / explicit callers.
 export {
   COMPACTION_BOUNDARY_PLACEHOLDER,
   DEFAULT_KEEP_RECENT,

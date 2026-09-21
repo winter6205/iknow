@@ -1,33 +1,40 @@
 /**
  * src/harness/isolation/recoverability.ts
  *
- * T7 (plans/write-situation-disclosure.md) — `WorktreeIsolationErrorKind` 的可
- * 恢复性穷尽表 + 门禁回执渲染缝（specs/write-situation-disclosure.md SC6 /
- * SC7）。
+ * Exhaustive recoverability table for `WorktreeIsolationErrorKind` and the
+ * gate-receipt rendering seam.
  *
- * 落点与边界（与 worktree-gate.ts 分离——后者已 1167 行 / 远超 500 行 soft
- * REVIEW 阈值，ACR note a；本文件承载纯数据 + 纯渲染函数）：
+ * Placement and boundary (kept separate from worktree-gate.ts, which already
+ * exceeds the soft review size threshold; this file carries pure data + pure
+ * rendering functions):
  *
- *   1. `Recoverability` ——最少两类的分类轴；`operator_required` 表示重试无
- *      用（结构性 / 环境性死路），`model_self_recoverable` 表示模型可凭另一
- *      工具或参数化解，`rerun_after_change` 表示「先做一件事再原样重试」。
+ *   1. `Recoverability` — the classification axis with at least two members;
+ *      `operator_required` means retrying is useless (a structural /
+ *      environmental dead end), `model_self_recoverable` means the model can
+ *      resolve it with another tool or by parameterizing, and
+ *      `rerun_after_change` means "do one thing first, then retry as-is".
  *   2. `RECOVERABILITY` ——`Record<WorktreeIsolationErrorKind, Recoverability>`
- *      **编译期穷尽** 16 个 kind。漏一个 / 多一个均使 `npm run typecheck` 失
- *      败——SC6 不靠断言兜底。已冻结分类：
+ *      **compile-time exhaustive** coverage of the 16 kinds. Missing or
+ *      adding one fails `npm run typecheck` — no runtime assertion needed.
  *
  *      - `not_a_git_repo` / `git_unavailable` —— `operator_required`
- *        （结构死路；本会话拿不到 gitdir / git 二进制；继续重试只会烧回合）
- *      - 其它 14 种 —— `model_self_recoverable`（模型可换工具 / 换 label /
- *        退出 / 清理后重试；详见各自 detail 措辞）
+ *        (structural dead end; this session cannot reach gitdir / the git
+ *        binary; further retries only burn turns)
+ *      - the other 14 kinds — `model_self_recoverable` (the model can switch
+ *        tools / labels / exit, or clean up and then retry; see each detail
+ *        wording)
  *
- *   3. `gateBlockNotice(kind, detail)` ——门禁渲染缝。`operator_required` 类
- *      附加停止指令（"Retry will not help; report to the operator"），保持
- *      机读 `kind=` 前缀（沿用 PR #947 `HardRuleSpec.reasonFor` 建立的「机读
- *      id 进 reason」惯例）；`model_self_recoverable` 不附加，让 detail 自身
- *      携带的下一步指令（如「换 label」/「commit 后再试」）独占回执。
+ *   3. `gateBlockNotice(kind, detail)` — the gate rendering seam.
+ *      `operator_required` kinds append a stop instruction ("Retry will not
+ *      help; report to the operator") and keep the machine-readable `kind=`
+ *      prefix (the "machine-readable id in the reason" convention);
+ *      `model_self_recoverable` appends nothing, letting the next-step
+ *      instruction carried by detail itself (e.g. "switch label" / "retry
+ *      after committing") own the receipt.
  *
- *   不改 `classifyCall` / `gateMutate` 状态机（spec Changes 已冻结）；不在
- *   此处抛 / 接 `WorktreeIsolationError`——只吃 (kind, detail) 字符串。
+ *   Does not change the `classifyCall` / `gateMutate` state machine; never
+ *   throws / catches `WorktreeIsolationError` here — it only takes
+ *   (kind, detail) strings.
  */
 import {
   WORKTREE_ISOLATION_PREFIX,
@@ -35,10 +42,11 @@ import {
 } from "./worktree-gate.js";
 
 /**
- * Recoverability category — at minimum `operator_required` 与 `model_self_recoverable`
- * 两类（spec 决议）；`rerun_after_change` 用于「先做一次状态变更再原样重试」的
- * 真态（如 `rebind_failed` 通常需要先 host 重置）。新增 kind 落到此联合即可，
- * `RECOVERABILITY` 穷尽性由 TypeScript 保证。
+ * Recoverability category — at minimum `operator_required` and
+ * `model_self_recoverable`; `rerun_after_change` covers the real states of
+ * "change one piece of state first, then retry as-is" (e.g. `rebind_failed`
+ * usually needs a host reset first). New kinds just land in this union; the
+ * exhaustiveness of `RECOVERABILITY` is guaranteed by TypeScript.
  */
 export type RecoverabilityCategory =
   "operator_required" | "model_self_recoverable" | "rerun_after_change";
@@ -46,8 +54,8 @@ export type RecoverabilityCategory =
 export interface Recoverability {
   readonly category: RecoverabilityCategory;
   /**
-   * 分类备注；用于穷尽断言失败时的诊断与文档生成。
-   * **不进**回执。
+   * Classification note; used for diagnostics / doc generation when the
+   * exhaustive assertion fails. **Never** enters the receipt.
    */
   readonly note: string;
 }
@@ -123,10 +131,11 @@ export const RECOVERABILITY = {
     category: "model_self_recoverable",
     note: "git branch -d failed; the branch is not merged or has untracked refs",
   },
-  // plans/worktree-exclusive-lock.md T3 / ADR-0070: enter 前置占用检查
-  // (worktree_claimed)——目标树被别人的现存会话记录占用。模型无法解掉别人的
-  // 占用（释放路径 = 恢复该会话让它自己 exit-worktree / 删除该会话
-  // 记录），所以归 operator_required，回执自带停止指令（spec SC3 / SC6）。
+  // Enter-time pre-occupancy check (worktree_claimed) — the target tree is
+  // claimed by another live session record (ADR-0070). The model cannot
+  // release someone else's claim (release = resume that session and let it
+  // exit-worktree / delete that session record), hence operator_required,
+  // and the receipt carries the stop instruction automatically.
   worktree_claimed: {
     category: "operator_required",
     note: "task worktree is already claimed by another existing session record; release it via the other session's exit-worktree or by deleting the session record",
@@ -147,16 +156,16 @@ const OPERATOR_REQUIRED_SUFFIX =
  * so the `operator_required` stop-directive policy lives next to the
  * classification table, not scattered across the gate.
  *
- * Composition rule (spec SC6 / SC7):
+ * Composition rule:
  *   - prefix: `[worktree_isolation]` (SSOT constant `WORKTREE_ISOLATION_PREFIX`).
- *   - body: `kind=<kind> <detail>` (machine-readable id first, mirroring PR #947
+ *   - body: `kind=<kind> <detail>` (machine-readable id first, mirroring the
  *     `HardRuleSpec.reasonFor` convention).
  *   - operator_required tail: append a stop-directive sentence so the receipt
  *     tells the model "do not retry, surface to the operator" instead of just
  *     diagnosing the dead end.
  *   - model_self_recoverable / rerun_after_change: NO tail — the detail itself
  *     carries the actionable next step; appending a stop-directive would
- *     conflict with SC7 "the notice must not steer the model's next move into
+ *     conflict with the rule "the notice must not steer the model's next move into
  *     building a tree" applied broadly.
  */
 export function gateBlockNotice(

@@ -1,15 +1,15 @@
 /**
- * #121 T3: discovery.ts (read-side metadata scanner for the static layer).
+ * discovery.ts (read-side metadata scanner for the static layer).
  *
  * Spec: specs/121-memory-injection.md (Project Structure discovery.ts, Testing
  * Strategy discovery half). Returns mtime + size metadata only — NEVER reads
- * file content (content loading is assembly.ts's job in T4).
+ * file content (content loading is assembly.ts's job).
  *
  * v0 design choices:
  *   - symlinks: rejected (v0 find filters them out — spec OQ5 explicitly leaves
  *     symlink resolution to a future ticket; same choice).
- *   - non-UTF-8: skipped + stderr warning (spec Boundaries Always — 坏文件跳过
- *     不中断会话; assembly still needs valid UTF-8 for body).
+ *   - non-UTF-8: skipped + stderr warning (a bad file never interrupts the
+ *     session; assembly still needs valid UTF-8 for the body).
  *   - rules: filename asc sort (deterministic order → stable assembly output).
  */
 import { lstat, opendir } from "node:fs/promises";

@@ -1,9 +1,9 @@
 /**
- * #121 T3: promote.ts (usage.json sidecar + promote eligibility gate).
+ * promote.ts (usage.json sidecar + promote eligibility gate).
  *
  * Spec: specs/121-memory-injection.md (Project Structure promote.ts, Testing
- * Strategy promote half, SC 10). usage.json 累积 recall 计数 + distinct
- * session_id 追踪；recall_count ≥ 2 distinct session_id → eligibleForPromote.
+ * Strategy promote half. usage.json accumulates recall counts + distinct
+ * session_id tracking; recall_count ≥ 2 distinct session_id → eligibleForPromote.
  *
  * Sidecar JSON shape (v0 — implementation choice, recorded for downstream):
  *   {
@@ -200,7 +200,7 @@ async function loadEntries(
       out.push({ slug: e.name.slice(0, -3), entry: parseMemoryEntry(buf) });
     } catch {
       // skip malformed files; assembly surfaces errors only for top-level
-      // read, not per-slug scans (Boundaries Always: 坏 frontmatter 跳过).
+      // read, not per-slug scans (bad frontmatter is skipped).
       continue;
     }
   }

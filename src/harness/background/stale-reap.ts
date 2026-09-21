@@ -1,24 +1,30 @@
 /**
- * #502 T6 — 启动 stale 清扫:回收 owner_pid 已死的后台任务进程组。
+ * Startup stale sweep: reclaim background-task process groups whose
+ * owner_pid is dead.
  *
- * ADR-0021 D1.5 语义:iknow 进程是物理锚 —— 进程异常退出(SIGKILL / crash)
- * 后遗留的后台任务进程组没有 owner 治理,下次启动在这里统一回收。
+ * Per ADR-0021 the iknow process is the physical anchor — after an abnormal
+ * exit (SIGKILL / crash) the leftover background-task process groups have no
+ * owner governance, and this sweep reclaims them on the next startup.
  *
- * 只处理 owner-dead 记录(APROC owner 判定:`/proc/<pid>` 存在 + stat 可读 =
- * alive;否则 dead)。owner-alive 记录跳过 —— 另一个存活的 iknow 进程的 live
- * task,绝不跨进程误 kill。
+ * Only owner-dead records are processed (owner check: `/proc/<pid>` exists +
+ * stat readable = alive; otherwise dead). owner-alive records are skipped —
+ * they are live tasks of another running iknow process; never kill across
+ * processes.
  *
- * pgid-reuse 加固(ADR-0021 D1.5):kill 前把 `/proc/<pgid-leader>/stat` 的
- * starttime 与 registry record 存的 starttime 比较:
- *   - record 有 starttime 且 mismatch → pgid 已被内核回收后复用给新组,
- *     只标 dead、绝不 kill(复用组的进程是无关进程,误杀不可接受)。
- *   - record 无 starttime(旧版本 record)→ 保守政策:跳过记录、保留 json、
- *     记日志 —— 宁漏不误杀。
- *   - record 有 starttime 且 current 一致 / 读不到(current 组已消失)→
- *     SIGKILL 进程组(ESRCH 吞掉)+ 标 dead。
+ * pgid-reuse hardening (ADR-0021): before killing, compare the starttime
+ * from `/proc/<pgid-leader>/stat` with the starttime stored in the registry
+ * record:
+ *   - record has starttime and it mismatches -> the pgid was recycled by the
+ *     kernel for a new group; mark dead only, never kill (the recycled group
+ *     holds unrelated processes; a mistaken kill is unacceptable).
+ *   - record has no starttime (older record) -> conservative policy: skip the
+ *     record, keep the json, log it — better to miss than to mis-kill.
+ *   - record starttime matches current / current unreadable (group already
+ *     gone) -> SIGKILL the process group (ESRCH swallowed) + mark dead.
  *
- * 决不 throw:missing tasksDir / broken json / 落盘失败 → 跳过该条(skipped)
- * 或 best-effort 继续,log 呈现。返回 summary 供调用方展示 / 断言。
+ * Never throws: missing tasksDir / broken json / persistence failure ->
+ * skip that entry (skipped) or continue best-effort, surfaced via log.
+ * Returns a summary for the caller to display / assert.
  */
 import { existsSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
@@ -30,19 +36,20 @@ import { readProcStartTime } from "./proc.js";
 
 export interface ReapStaleTasksOptions {
   readonly tasksDir: string;
-  /** 风险事件日志(缺省静默)。 */
+  /** Risk-event log (silent by default). */
   readonly log?: BackgroundTaskLog;
 }
 
 export interface ReapSummary {
-  /** 已回收(进程组已 kill + json 标 dead)的 task_id 列表。 */
+  /** task_ids reclaimed (process group killed + json marked dead). */
   readonly reaped: readonly string[];
-  /** 本趟跳过(owner alive / 无 starttime / broken json 等)的 task_id 列表。 */
+  /** task_ids skipped this pass (owner alive / no starttime / broken json, etc.). */
   readonly skipped: readonly string[];
 }
 
-/** /proc/<pid> 存在 + stat 可读 = 存活(doesn't distinguish zombie/defunct,
- *  zombie 也仍有 stat —— 保守判 alive,等 OS 回收)。 */
+/** /proc/<pid> exists + stat readable = alive (does not distinguish
+ *  zombie/defunct — zombies still have stat; conservatively judged alive,
+ *  waiting for the OS to reap them). */
 function isPidAlive(pid: number): boolean {
   try {
     return existsSync(`/proc/${pid}`);
@@ -51,7 +58,7 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-/** 一条记录本趟分类 → 计入 reaped / skipped / 不计入(已收敛)。 */
+/** Per-record classification this pass -> counted as reaped / skipped / neither (already converged). */
 type ReapAction = "reaped" | "skipped" | "none";
 
 async function markDead(
@@ -75,7 +82,7 @@ async function markDead(
   }
 }
 
-/** 日志卫生:向既有 log 文件追加 reap marker 行。文件不存在 → 吞错误(不创建)。 */
+/** Log hygiene: append a reap marker line to the existing log file. Missing file -> swallow the error (never create). */
 async function appendReapMarker(rec: BackgroundTaskRecord): Promise<void> {
   if (!existsSync(rec.log_path)) return;
   try {
@@ -85,7 +92,7 @@ async function appendReapMarker(rec: BackgroundTaskRecord): Promise<void> {
       "utf8"
     );
   } catch {
-    /* 追加失败不阻断回收流程 */
+    /* append failure must not block the reclamation flow */
   }
 }
 
@@ -104,8 +111,9 @@ export async function reapStaleTasks(
   try {
     taskIds = await registry.list();
   } catch (err) {
-    // missing 目录 list 返回 [] 不 throw;readdir 其它失败(路径是文件等)
-    // → 记日志 + 空 summary,启动清扫永不 crash。
+    // a missing directory lists as [] without throwing; other readdir
+    // failures (path is a file, etc.) -> log + empty summary; the startup
+    // sweep never crashes.
     log(
       `background reap: list failed: ${(err as BackgroundTaskError).context}`
     );
@@ -116,19 +124,21 @@ export async function reapStaleTasks(
     const action = await handleRecord(registry, taskId, log);
     if (action === "reaped") reaped.push(taskId);
     else if (action === "skipped") skipped.push(taskId);
-    // "none" → 已收敛(already_dead),既不计入 reaped 也不计入 skipped,
-    // 保持 mtime 不变,zero json changes。
+    // "none" -> already converged (already_dead), counted as neither reaped
+    // nor skipped; mtime unchanged, zero json changes.
   }
 
   return { reaped, skipped };
 }
 
 /**
- * 处理一条记录。返回本趟分类:
- *   - "reaped":owner_dead + starttime 一致 → 杀组 + 标 dead;
- *             owner_dead + starttime_mismatch → 标 dead,不 kill。
- *   - "skipped":owner_alive / 无 starttime / 落盘失败可恢复 / broken json。
- *   - "none":已 dead 的记录(json 收敛完毕,不再改写 —— 幂等门)。
+ * Process one record. Returns this pass's classification:
+ *   - "reaped": owner_dead + starttime matches -> kill group + mark dead;
+ *               owner_dead + starttime mismatch -> mark dead, no kill.
+ *   - "skipped": owner_alive / no starttime / recoverable persistence failure
+ *     / broken json.
+ *   - "none": already-dead record (json converged, never rewritten —
+ *     idempotence gate).
  */
 async function handleRecord(
   registry: ReturnType<typeof createBackgroundRegistry>,
@@ -147,8 +157,9 @@ async function handleRecord(
     return "skipped";
   }
 
-  // 幂等门:已 dead 记录是上一趟(或本趟)的成果,json 已收敛 —— 不再改写
-  // (保持 mtime 不变,zero json changes)。
+  // Idempotence gate: an already-dead record is the result of a previous
+  // (or this) pass; the json has converged — do not rewrite (mtime unchanged,
+  // zero json changes).
   if (rec.status === "dead") {
     log(`background reap: already dead, skip ${taskId}`);
     return "none";
@@ -159,7 +170,7 @@ async function handleRecord(
     return "skipped";
   }
 
-  // 无 starttime(旧版本 record)→ 保守政策:跳过、保留 json、记日志。
+  // No starttime (older record) -> conservative policy: skip, keep the json, log.
   if (rec.starttime === undefined) {
     log(
       `background reap: no starttime, conservative skip ${taskId} (pgid ${rec.pgid})`
@@ -169,7 +180,7 @@ async function handleRecord(
 
   const currentStart = readProcStartTime(rec.pgid);
   if (currentStart !== undefined && currentStart !== rec.starttime) {
-    // pgid 已被内核回收复用给新组 —— 只标 dead,绝不 kill 无关进程。
+    // The pgid was recycled by the kernel for a new group — mark dead only, never kill unrelated processes.
     log(
       `background reap: starttime mismatch pgid ${rec.pgid} (${rec.starttime} != ${currentStart}) — mark dead only, no kill`
     );
@@ -178,8 +189,9 @@ async function handleRecord(
     return "reaped";
   }
 
-  // owner dead + starttime 一致(或 current 读不到=组已消失,ESRCH 无害)。
-  // SIGKILL 整组(物理回收,不确定性最低)。ESRCH 吞掉。
+  // owner dead + starttime matches (or current unreadable = group already
+  // gone, ESRCH harmless). SIGKILL the whole group (physical reclamation,
+  // least ambiguity). ESRCH swallowed.
   try {
     process.kill(-rec.pgid, "SIGKILL");
   } catch (err) {

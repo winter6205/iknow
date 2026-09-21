@@ -34,7 +34,7 @@ export const MEMORY_PREFETCH_MAX_HITS = 5;
 export const MEMORY_PREFETCH_CHAR_CAP = 8000;
 
 export interface SelectPrefetchOpts {
-  /** T1 session-level dedup: ids already injected in this conversation. */
+  /** Session-level dedup: ids already injected in this conversation. */
   readonly excludeIds?: ReadonlySet<string>;
   readonly charCap?: number;
   readonly nowMs?: number;
@@ -65,11 +65,11 @@ export function selectPrefetchHits(
   opts?: SelectPrefetchOpts
 ): ReadonlyArray<ScoredEntry> {
   const excludeIds = opts?.excludeIds;
-  // T1 contract: already-injected ids are removed BEFORE scoring, so dedup
+  // Dedup contract: already-injected ids are removed BEFORE scoring, so dedup
   // never consumes one of the top-5 slots (next-best entry backfills).
   // `disabled` stays the first gate, so a soft-disabled row is never
   // classified; the capability filter then drops runtime snapshots (spec
-  // runtime-capability-memory-gate 读侧过滤) before they can consume a slot.
+  // runtime-capability-memory-gate read-side filtering) before they can consume a slot.
   const live = entries.filter(
     (entry) =>
       !entry.disabled &&
@@ -190,7 +190,7 @@ export interface BuildPrefetchOverlayOpts {
   readonly memoryDir: string;
   readonly query: string;
   readonly entries?: ReadonlyArray<MemoryEntryV1>;
-  /** T1 session-level dedup: ids already injected in this conversation. */
+  /** Session-level dedup: ids already injected in this conversation. */
   readonly excludeIds?: ReadonlySet<string>;
   readonly nowMs?: number;
 }
@@ -246,7 +246,7 @@ function parseAdvisoryBodyIds(body: string, ids: Set<string>): void {
 }
 
 /**
- * T1 session-level dedup: collect memory ids from advisory blocks previously
+ * Session-level dedup: collect memory ids from advisory blocks previously
  * injected into a user-turn text. A block starts at MEMORY_ADVISORY_PREFIX and
  * runs to MEMORY_PREFETCH_END or — when the marker is missing (legacy /
  * truncated history) — to the next PREFIX or end of text, collecting its
@@ -280,7 +280,7 @@ function isTextBlock(block: unknown): boolean {
 }
 
 /**
- * T1 resume recovery: scan loaded conversation history (cold start from
+ * Resume recovery: scan loaded conversation history (cold start from
  * checkpoint / session JSONL) for advisory blocks inside user text blocks.
  * History comes from disk, so every shape is guarded; unexpected failure →
  * empty set + log-and-continue (worst case one duplicate, never a failed turn).
@@ -308,7 +308,7 @@ export function recoverInjectedMemoryIds(messages: unknown): Set<string> {
 }
 
 /**
- * T1 post-attach bookkeeping: merge the ids actually carried by an attach
+ * Post-attach bookkeeping: merge the ids actually carried by an attach
  * result into the conversation's injected-id set. Only overlay-bearing texts
  * introduce ids — identity fallback (empty overlay / failed overlay fn)
  * returns the raw user text and adds nothing. When the end marker is present,

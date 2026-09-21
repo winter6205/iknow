@@ -1,8 +1,8 @@
 /**
- * runtime-capability-memory-gate T2: the runtime capability persist gate.
+ * The runtime capability persist gate.
  *
- * Spec: specs/runtime-capability-memory-gate.md (Boundaries Does — persist 前
- * 闸; Classifier fixtures). ADR-0086.
+ * Spec: specs/runtime-capability-memory-gate.md (the gate before persist;
+ * classifier fixtures (ADR-0086).
  *
  * A runtime capability observation ("web_search is down in this sandbox",
  * "there is no real outbound network here") describes the environment of one

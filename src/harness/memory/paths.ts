@@ -1,16 +1,18 @@
 /**
- * 项目记忆库路径派生（纯函数，无 IO）。
+ * Project memory-store path derivation (pure functions, no IO).
  *
- * ADR-0099 / ADR-0088:项目记忆落在 **home 项目树** 兄弟目录 ——
- * `<poolRoot>/projects/<slug>/memory/`，与会话文件夹、`tasks/` 同 slug。
- * `poolRoot` = 显式 `--data-dir` 否则 `~/.iknow`；slug =
- * `<basename(projectIdentityRoot)>-<sha1(projectIdentityRoot)[:12]>`。
+ * Project memory lives in the **home project tree** as a sibling directory
+ * (ADR-0099 / ADR-0088): `<poolRoot>/projects/<slug>/memory/`, same slug as the session
+ * folder and `tasks/`. `poolRoot` = explicit `--data-dir`, else `~/.iknow`;
+ * slug = `<basename(projectIdentityRoot)>-<sha1(projectIdentityRoot)[:12]>`.
  *
- * 与 ADR-0019 T2 的旧形态（`<workspaceRoot>/.iknow/memory/<slug>`）差别 =
- * 分组键:同一 `projectIdentityRoot` 的多份 checkout 共用一份记忆库，
- * throwaway `--workspace-root` 不再隔离项目记忆。
+ * Difference vs. the older workspace-root-anchored shape (ADR-0019)
+ * (`<workspaceRoot>/.iknow/memory/<slug>`) = grouping key: multiple checkouts
+ * of the same `projectIdentityRoot` share one memory store, and a throwaway
+ * `--workspace-root` no longer isolates project memory.
  *
- * `resolveUserMemoryDir` 仍是 per-root 用户层父目录（说明书装配不走本路径）。
+ * `resolveUserMemoryDir` remains the per-root user-layer parent (manual-style
+ * assembly does not go through this path).
  */
 import { isAbsolute, join } from "node:path";
 
@@ -27,10 +29,10 @@ import {
 import { resolveWorkspaceRoot } from "../../config/workspace-root.js";
 
 /**
- * 项目记忆库根:`<dataDir>/projects/<basename>-<sha1[:12]>/memory`。
+ * Project memory-store root: `<dataDir>/projects/<basename>-<sha1[:12]>/memory`.
  *
- * fail-closed 语义同 `resolveTasksDir`:缺根 / 空白 / 相对 / 超长
- * `projectIdentityRoot` 一律抛 typed `SessionRootError`。
+ * fail-closed semantics match `resolveTasksDir`: missing / blank / relative /
+ * over-long `projectIdentityRoot` all throw a typed `SessionRootError`.
  */
 export function resolveProjectMemoryDir(opts: {
   readonly dataDir: string;

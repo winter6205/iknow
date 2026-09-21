@@ -1,46 +1,54 @@
 /**
- * T3 (plans/write-situation-disclosure.md) — 写处境三态判定（expand，无消费方）。
+ * Write-situation tri-state decision (expanded early; no consumers yet).
  *
- * spec SC1 / ADR-0069 Decision 2：「此刻能不能写」由一个纯函数裁决，三态枚举
- * （`writable_main` / `writable_tree` / `no_writable_root`）落 `session-roots.ts`，
- * 渲染面与 worker prior 全部消费这个枚举，不再各自判断。本阶段**无消费方**——T4/T6
- * 才接入 `skill/body.ts` / `subagent/worker.ts`。
+ * "Can we write right now?" is decided by one pure function; the tri-state
+ * enum (`writable_main` / `writable_tree` / `no_writable_root`) lives in
+ * `session-roots.ts`, and the rendering surface plus the worker prior all
+ * consume this enum instead of judging on their own. This stage has **no
+ * consumers** — `skill/body.ts` / `subagent/worker.ts` wire in later.
  *
- * 边界契约：
- *   - 纯同步函数；不碰磁盘、不跑 git、不读 settings（隔离档由调用方传入）。
- *   - 形状判定**复用** `isTaskWorktreePath`（`worktree-gate.ts:575`），不平行开
- *     第二份形状逻辑——ACR bounded-context-guardian 已钉死。
- *   - empty / 空白根 → typed 结果（`no_writable_root`），不 throw 不静默放行。
- *     「主仓对文件改动只读」语义上等价于「无可写根」——告诉模型「别写」比「空串等
- *     于主仓」更安全。
- *   - overflow：极长 / 深嵌套 / 尾随分隔符——仍按 `isTaskWorktreePath` 裁决。
+ * Boundary contract:
+ *   - Pure synchronous function; touches no disk, runs no git, reads no
+ *     settings (the isolation tier is passed in by the caller).
+ *   - Shape detection **reuses** `isTaskWorktreePath`; no second parallel
+ *     shape logic.
+ *   - empty / blank root -> typed result (`no_writable_root`), never throws,
+ *     never silently allows. "The main repo is read-only for file edits" is
+ *     semantically equivalent to "no writable root" — telling the model "do
+ *     not write" is safer than treating an empty string as the main repo.
+ *   - overflow: extremely long / deeply nested / trailing separators — still
+ *     adjudicated by `isTaskWorktreePath`.
  */
 import type { WriteSituation } from "../session-roots.js";
 import { isTaskWorktreePath } from "./worktree-gate.js";
 
 /**
- * 判定「此刻能否写、写哪」——三态。
+ * Decide "can we write now, and where" — tri-state.
  *
- * @param isolationOn  隔离档（由调用方从 settings 注入；本函数**不读** settings）
- * @param root         当前活根（taskRoot 快照，非主仓字符串）
- * @returns            写处境枚举（typed，never throw）
+ * @param isolationOn  isolation tier (injected by the caller from settings;
+ *                     this function does **not** read settings)
+ * @param root         current live root (taskRoot snapshot, not the main-repo string)
+ * @returns            write-situation enum (typed, never throws)
  */
 export function writeSituation(
   isolationOn: boolean,
   root: string
 ): WriteSituation {
-  // empty 臂：根缺席 / 仅空白 → fail-closed 落 `no_writable_root`。
-  // 隔离 OFF 时也走这条——空白根不是「写主仓」，是「无根可写」。
+  // Empty arm: root absent / blank-only -> fail-closed to `no_writable_root`.
+  // This path is taken even with isolation OFF — a blank root is not "write
+  // the main repo", it is "no root to write".
   if (root.trim().length === 0) {
     return "no_writable_root";
   }
 
-  // 隔离 OFF：写根 = 主仓（活根字符串此时无意义）。**形状判断不参与**——
-  // 即使传入的是树形路径，也得说「写主仓」（negative 臂钉死）。
+  // Isolation OFF: write root = main repo (the live-root string is
+  // meaningless here). Shape detection **does not participate** — even if a
+  // tree-shaped path is passed in, the answer stays "write the main repo"
+  // (pinned by the negative arm).
   if (!isolationOn) {
     return "writable_main";
   }
 
-  // 隔离 ON：树形 → 写本会话的 task worktree；非树形 → 拒写。
+  // Isolation ON: tree-shaped -> write this session's task worktree; non-tree -> refuse the write.
   return isTaskWorktreePath(root) ? "writable_tree" : "no_writable_root";
 }

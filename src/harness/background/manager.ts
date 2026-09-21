@@ -1,23 +1,28 @@
 /**
- * #502 T2 — BackgroundTaskManager:后台任务生命周期 / 内存 Map 状态机 /
- * registry 落盘同步 / 日志流式追加。
+ * BackgroundTaskManager: background-task lifecycle / in-memory Map state
+ * machine / registry persistence sync / streaming log append.
  *
- * 本票范围(精确):spawn(立即返回,不 await 退出)、registry json 写入/状态
- * 迁移同步、log 尾部读取原语、stop(SIGTERM → 2s → SIGKILL,host 侧
- * kill(-pgid))。shutdown/reap = T6 范围,本票不实现。
+ * Scope: spawn (returns immediately, does not await exit), registry json
+ * write / status-transition sync, log-tail read primitives, and stop
+ * (SIGTERM → 2s → SIGKILL, host-side kill(-pgid)).
  *
- * DI 边界 mirror subagent/manager.ts:manager 不直接 import child_process
- * 运行时(spawn 工厂经 opts 注入);生产实现 defaultBackgroundSpawn 同文件
- * 导出(bwrap fence + detached spawn),T4 装配时由 build-engine 注入。
- * bwrap fence 复用 createBwrapFence;ADR-0097 后网络轴在前后台都是常量
- * (`--unshare-net` 恒在,出网只经 egress 缝)。
+ * DI boundary mirrors subagent/manager.ts: the manager does not import
+ * child_process at runtime (the spawn factory is injected via opts); the
+ * production defaultBackgroundSpawn lives in this same file (bwrap fence +
+ * detached spawn) and is injected by build-engine at assembly time. The
+ * fence reuses createBwrapFence; since ADR-0097 the network axis is constant
+ * in foreground and background (`--unshare-net` always present; egress only
+ * via the egress seam).
  *
- * 治理值自 ADR-0021 D1.6/D1.7(DEFAULT_LOG_MAX_* / task_id 格式在此即 SSOT)。
- * typed-error BackgroundTaskError 判定联合(code-quality.md catch 契约):
- *   empty_task_id / task_not_found / schema_invalid / io_failure / kill_race。
- * kill_race 语义定稿(测试锁住):对已终态任务的 stop = 幂等成功(合法态,
- * 不抛错、不二次发信号);仅 kill 升级期间进程组已消失(ESRCH)而未达 exit
- * 事件 → 命中 kill_race 归类,调用面仍按幂等成功收敛,不把竞态暴露为错误。
+ * Governance values (DEFAULT_LOG_MAX_* / task_id format) are pinned here as
+ * the SSOT (ADR-0021).
+ * Typed-error BackgroundTaskError discriminated union (catch contract):
+ *   empty_task_id / task_not_found / schema_invalid / io_failure / kill_race.
+ * kill_race semantics (locked by tests): stop on an already-terminal task =
+ * idempotent success (a legal state — no throw, no second signal); only when
+ * the process group vanished (ESRCH) during kill escalation before the exit
+ * event arrived is it classified as kill_race, and the caller still converges
+ * on idempotent success rather than exposing the race as an error.
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
@@ -45,7 +50,7 @@ import type { BackgroundRegistry } from "./registry.js";
 import type { BackgroundTaskError } from "./registry.js";
 import { readProcStartTime } from "./proc.js";
 
-/** spawn 请求校验失败的补充 kind(manager 专属;registry 不感知请求)。 */
+/** Extra kinds for spawn-request validation failures (manager-specific; the registry is unaware of requests). */
 export type BackgroundSpawnValidationError =
   | BackgroundTaskError
   | {
@@ -55,49 +60,53 @@ export type BackgroundSpawnValidationError =
   | {
       kind: "concurrency_limit_reached";
       context: string;
-      /** 正面措辞的可用动作提示（ADR-0021 D1.6 纪律：说明现状 + 可用动作，零负面词）。 */
+      /** Constructive action hint (ADR-0021 discipline: state the situation
+       *  + available actions, zero negative wording). */
       message: string;
     };
 
-/** ADR-0021 D1.6:日志读取默认窗口 12KB(治理值 SSOT 落在 manager 常量)。 */
+/** Default log-read window 12KB (governance-value SSOT lives in the
+ *  manager constant, ADR-0021). */
 export const DEFAULT_LOG_MAX_BYTES = 12 * 1024;
-/** ADR-0021 D1.6:日志读取窗口上限 100KB。 */
+/** Log-read window cap 100KB (ADR-0021). */
 export const MAX_LOG_READ_BYTES = 100 * 1024;
-/** ADR-0021 D1.6 / #491 D6:并发上限 8 —— 达到上限时 manager.spawn 以正面措辞
- *  拒绝（concurrency_limit_reached spawn_error,见 manager.ts spawn 段）。导出
- *  用于测试与装配断言。 */
+/** ADR-0021: concurrency cap 8 — at the cap manager.spawn rejects with a
+ *  constructive message (concurrency_limit_reached spawn_error, see the
+ *  spawn section). Exported for tests and assembly-time assertions. */
 export const MAX_CONCURRENT_BACKGROUND_TASKS = 8;
-/** stop 升级:SIGTERM → 宽限 2s → SIGKILL(复用 runner.ts stopTree 模式)。 */
+/** stop escalation: SIGTERM → 2s grace → SIGKILL (reuses the runner.ts stopTree pattern). */
 const STOP_KILL_GRACE_MS = 2_000;
-/** #502 T6 shutdown 镜像 SC12(subagent/manager.ts:479-563)常量:SIGTERM →
- *  宽限 5s → SIGKILL。镜像同名同值,便于 review。 */
+/** shutdown constants mirroring subagent/manager.ts (same names, same
+ *  values, for reviewability): SIGTERM → 5s grace → SIGKILL. */
 const SHUTDOWN_SIGKILL_GRACE_MS = 5_000;
 
-/** 内存态:进程内活句柄,不入 registry json(child + 可迁移状态)。 */
+/** In-memory state: live in-process handle, not persisted to the registry json (child + mutable status). */
 interface BackgroundTask {
   readonly task_id: string;
   readonly client: MutableClientState;
-  /** #502 review-repair:spawn 时的原 created_at(registry 真值);shutdown 收敛
-   *  步骤 5 沿用,不覆盖为当前时间(与 settle 闭包同语义)。 */
+  /** The original created_at from spawn time (registry truth); shutdown
+   *  convergence step 5 keeps it instead of stamping the current time (same
+   *  semantics as the settle closure). */
   readonly createdAt: string;
   child?: ChildProcess;
-  /** 日志 appendFile 串行链:每 chunk 都续在上一链尾,保证顺序。 */
+  /** Serialized log appendFile chain: each chunk continues off the previous chain tail, preserving order. */
   writeChain: Promise<void>;
-  /** #502 T6:stop() arm 的 SIGKILL 兜底 timer;shutdown() 需 clearTimeout 避免
-   *  与自身 5s 宽限升级重复触发。 */
+  /** SIGKILL fallback timer armed by stop(); shutdown() must clearTimeout it
+   *  to avoid double-firing with its own 5s grace escalation. */
   killFallback?: NodeJS.Timeout;
   /**
-   * ADR-0097 / T7:egress session 句柄 —— manager.spawn 起的 per-task
-   * session;settle(child exit 触发)在已 settle 守卫内 dispose,异常路径
-   * (registry.save 失败 / spawn factory 抛)同样兜底 dispose(spec §Ownership
-   * / dispose contract:「异常路径与正常路径同一释放通道」)。
+   * ADR-0097: egress session handle — the per-task session started by
+   * manager.spawn; settle (triggered by child exit) disposes inside the
+   * already-settled guard, and abnormal paths (registry.save failure / spawn
+   * factory throw) dispose through the same fallback (ownership contract:
+   * "abnormal and normal paths release through the same channel").
    *
-   * 缺省 = caller 未透传 egressPolicy = 本任务无 egress session。
+   * Absent = the caller passed no egressPolicy = this task has no egress session.
    */
   egressSession?: EgressSession;
 }
 
-/** 对外只读展示;内部可迁移字段由 manager 独占变更。 */
+/** Externally read-only view; mutable fields are changed exclusively by the manager. */
 export interface BackgroundTaskClientState {
   readonly status: BackgroundTaskStatus;
   readonly exit_code: number | null;
@@ -115,91 +124,103 @@ interface MutableClientState {
 }
 
 export interface CreateBackgroundTaskManagerOptions {
-  /** 落盘根:`<poolRoot>/projects/<slug>/tasks/`(ADR-0088 home 项目树)——
-   *  与会话文件夹叶子同层同 slug,经 host 注入的已解析绝对路径(不再自派生
-   *  workspaceRoot,见 `buildHarnessEngine` opts.tasksDir 注释)。 */
+  /** Persistence root: `<poolRoot>/projects/<slug>/tasks/` (ADR-0088 home
+   *  project tree) — same level and same slug as the session-folder leaf,
+   *  injected by the host as an already-resolved absolute path (workspaceRoot
+   *  is no longer self-derived; see the tasksDir note on
+   *  `buildHarnessEngine`). */
   readonly tasksDir: string;
-  /** DI spawn 工厂:由调用方注入(fake 测试 / 生产 defaultBackgroundSpawn)。 */
+  /** DI spawn factory, injected by the caller (fake tests / production defaultBackgroundSpawn). */
   readonly spawn: BackgroundSpawn;
-  /** 落盘 / 风险事件日志(缺省静默)。 */
+  /** Persistence / risk-event log (silent by default). */
   readonly log?: (msg: string) => void;
 }
 
-/** spawn 工厂签名:传入已解析的请求,返回 ChildProcess。 */
+/** Spawn-factory signature: takes the resolved request, returns a ChildProcess. */
 export type BackgroundSpawn = (
   request: BackgroundSpawnRequest
 ) => Promise<ChildProcess>;
 
-/** spawn 入参:命令 / cwd / 记账 conversationId。 */
+/** Spawn inputs: command / cwd / bookkeeping conversationId. */
 export interface BackgroundSpawnRequest {
-  /** 还原后真值命令 —— spawn 工厂（defaultBackgroundSpawn 进 bwrap）消费的
-   *  语义不变;真值只活在内存与 spawn 调用栈,绝不落盘。 */
+  /** The restored real command — consumed by the spawn factory
+   *  (defaultBackgroundSpawn into bwrap) with unchanged semantics; the real
+   *  value lives only in memory and the spawn call stack, never persisted. */
   readonly command: string;
   readonly cwd: string;
   readonly conversationId?: string;
-  /** #502 review-repair（#406 roundtrip）:持久化形态 —— 落盘 registry json 的
-   *  command 用此字段（占位符形态,`<<<SECRET_N>>>`),spawn 真值不上盘。
-   *  缺省（无 secret registry 场景 / 手写调用方）→ 回退 request.command。 */
+  /** Persisted form — the command written into the registry json uses this
+   *  field (placeholder form, `<<<SECRET_N>>>`); the spawn real value never
+   *  hits disk. Absent (no secret registry / hand-written callers) -> falls
+   *  back to request.command. */
   readonly recordCommand?: string;
   readonly env?: NodeJS.ProcessEnv;
-  /** #653 T1:cwdReadonly?: boolean — 透传 defaultBackgroundSpawn 构造 readonly
-   *  fence（cwd 绑定由 `--bind` 改为 `--ro-bind`,与前台 bashMode→cwdReadonly
-   *  派生路径对齐）。缺省 / false = 既有可写 cwd（V1 baseline 不变）。
-   *  由 bash.ts handleBackground 派生 opts.bashMode==="readonly" ||
-   *  opts.cwdReadonly===true 后传入。 */
+  /** cwdReadonly?: boolean — passed through to defaultBackgroundSpawn to
+   *  build a readonly fence (the cwd bind changes from `--bind` to
+   *  `--ro-bind`, aligning with the foreground bashMode → cwdReadonly
+   *  derivation). Absent / false = the existing writable cwd (V1 baseline
+   *  unchanged). Derived by bash.ts handleBackground from
+   *  opts.bashMode === "readonly" || opts.cwdReadonly === true. */
   readonly cwdReadonly?: boolean;
   /** ADR-0092 (amending ADR-0074): this identity's session tmp host path —
    *  the same path the foreground bash uses as `$TMPDIR`. Never a guest `/tmp`
    *  bind target. */
   readonly tmpDir?: string;
   /**
-   * ADR-0092 Round 2 / SC11/SC12:工作区档 fs 档 snapshot —— 前台 bash handler
-   * per-call D2 batch snapshot 后透传(镜像 waveRoot 的同款纪律);后台 spawn
-   * 共用同一份,确保前台 / 后台 fence 在 fs 档轴上集合相等(沙箱纪律 G3)。
-   * 缺省 / undefined → "global"(V1 baseline)。值已过 `parseFsModeFlag`
-   * 守卫(bash.ts handler 入口读一次)。
+   * Workspace-tier fs-mode snapshot (ADR-0092) — the foreground bash handler passes it
+   * through after its per-call batch snapshot (same discipline mirrored by
+   * waveRoot); background spawn reuses the identical one, keeping foreground
+   * / background fences set-equal on the fs-tier axis (sandbox discipline
+   * G3). Absent / undefined → "global" (V1 baseline). The value has passed
+   * the `parseFsModeFlag` guard (read once at the bash.ts handler entry).
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
   /**
-   * ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。镜像
-   * `opts.homeRoot`(bash.ts 装配期缺省取 `homedir()`,后台透传同值)。
-   * workspace 档下缺席 → bwrap 抛 typed error(fail-loud,不静默退化成全局
-   * 档);global 档下不消费。
+   * Workspace-tier home ro-bind source host absolute path (ADR-0092). Mirrors
+   * `opts.homeRoot` (bash.ts defaults to `homedir()` at assembly; background
+   * passes the same value through). Missing under the workspace tier ->
+   * bwrap throws a typed error (fail-loud, never silently degrading to the
+   * global tier); not consumed under the global tier.
    */
   readonly homeRoot?: string;
   /**
-   * ADR-0097 / T7:出口代理缝策略 —— 由 caller 透传(通常经
-   * `createEgressPolicyFactory` 派生)。后台任务形态:per-task 装配期
-   * 起 egress session,随任务存活(`settle()` 触发释放;spec
-   * §Ownership / dispose contract 钉死「异常路径与正常路径同一释放
-   * 通道」)。
+   * ADR-0097: egress proxy seam policy — passed in by the caller (typically
+   * derived via `createEgressPolicyFactory`). Background-task form: the egress
+   * session starts per-task at assembly time and lives with the task
+   * (released when `settle()` fires; the ownership contract pins "abnormal
+   * and normal paths release through the same channel").
    *
-   * 缺省 = caller 未注入 = 本任务不起 egress session,fence 走纯断网
-   * (与 V1 baseline 等价;沙箱内 `--unshare-net` 恒在)。这是「仅当本
-   * 次任务具备出网资格才起」契约的最小实现:T1 禁止在无 policy 时
-   * 强起 session(浪费 + 违反「仅当本次调用具备出网资格才起」)。
+   * Absent = the caller did not inject = this task starts no egress session
+   * and the fence stays fully offline (equivalent to the V1 baseline;
+   * `--unshare-net` always present in the sandbox). Minimal implementation of
+   * the "only start a session when this task is egress-eligible" contract:
+   * force-starting a session without a policy is forbidden (wasteful +
+   * contract-violating).
    *
-   * 后台路径无 ask 面:即使 policy 在场,filter 见 `not-in-allowlist`
-   * 仍记 `no-approval-inlet` 违例 + 不放行(spec §Failure paths「非交
-   * 互入口首见新域名」)。后台任务若需该 host,应在 user settings 预配
-   * (CI / 预置场景)。
+   * Background paths have no ask surface: even with a policy present, when
+   * the filter sees `not-in-allowlist` it still records a
+   * `no-approval-inlet` violation and does not release (failure path: "new
+   * domain first seen at a non-interactive inlet"). If a background task
+   * needs that host, provision it in user settings (CI / preset scenarios).
    */
   readonly egressPolicy?: EgressPolicyInput;
   /**
-   * ADR-0097 / T7:egress session 启动产物 —— 由 manager.spawn 在调
-   * defaultBackgroundSpawn 前置入(createEgressSession(policy).spec)。
-   * spawn 工厂读此字段构造 fence argv;manager.spawn 持 session handle
-   * 在 child exit 监听里 dispose。
+   * ADR-0097: egress session startup product — set by manager.spawn before
+   * calling defaultBackgroundSpawn (createEgressSession(policy).spec). The
+   * spawn factory reads this field to build fence argv; manager.spawn holds
+   * the session handle and disposes it in the child-exit listener.
    *
-   * 缺省 = caller 未透传 egressPolicy = 无 session = 无缝。**外部 caller
-   * 不填此字段**;只有 manager.spawn 与 spawn 工厂之间的内部约定。
+   * Absent = the caller passed no egressPolicy = no session = no seam.
+   * **External callers do not set this field**; it is an internal convention
+   * between manager.spawn and the spawn factory only.
    */
   readonly egressSpec?: EgressFenceSpec;
   /**
-   * issue 1059:UNBOUND_FENCE 段 —— bash handler 入口冻结的主 checkout +
-   * 会话 tmp pad 透传,defaultBackgroundSpawn 装配 fence 时消费(与前台
-   * fence 同段同序,G3 集合相等)。缺席 = 不发段,bound / gate-OFF 的
-   * 后台 argv 逐字节不变。
+   * UNBOUND_FENCE segment — the main checkout + session tmp pad frozen at
+   * the bash handler entry, passed through and consumed when
+   * defaultBackgroundSpawn assembles the fence (same segment, same order as
+   * the foreground fence, set-equal per G3). Absent = segment not emitted;
+   * bound / gate-OFF background argv stays byte-identical.
    */
   readonly unboundFence?: {
     readonly mainCheckout: string;
@@ -227,7 +248,7 @@ export interface BackgroundStatusResult {
 }
 
 export interface BackgroundOutputResult {
-  /** 仅返回尾部文本(默认 12KB,上限 100KB),超上限时截断。 */
+  /** Return only the tail text (default 12KB, cap 100KB), truncated beyond the cap. */
   readonly text: string;
   readonly status: BackgroundTaskStatus;
   readonly exit_code: number | null;
@@ -236,20 +257,22 @@ export interface BackgroundOutputResult {
 
 export interface BackgroundTaskManager {
   /**
-   * 经注入的 spawn 工厂起 detached 进程组,立即返回 {task_id, log_path}。
-   * 落盘 json 写入失败 → spawn_error(io_failure)。resolved 即 registry
-   * 已在盘上(同步契约,测试可立即读回)。
+   * Starts a detached process group via the injected spawn factory and
+   * returns {task_id, log_path} immediately. Registry json write failure ->
+   * spawn_error(io_failure). Once resolved, the registry is already on disk
+   * (synchronous contract; tests can read it back immediately).
    */
   readonly spawn: (
     request: BackgroundSpawnRequest
   ) => Promise<BackgroundSpawnResult>;
-  /** 查询当前状态(running / exited / killed)。内存态,不读盘。 */
+  /** Query current status (running / exited / killed). In-memory; does not read disk. */
   readonly status: (taskId: string) => Promise<BackgroundStatusResult>;
   /**
-   * 读日志尾部(默认 12KB,上限 100KB),附带当前状态与 exitCode。
-   * requesterConversationId 可选（T5 / ADR-0021 D1.4）:非空且与任务记录的
-   * conversation_id 不等 → 抛 task_not_in_scope（携带 owner_conversation_id）。
-   * 缺省 / 记录无 conversationId → 不过滤（向后兼容）。
+   * Reads the log tail (default 12KB, cap 100KB) with current status and
+   * exitCode. requesterConversationId is optional (ADR-0021): non-empty and
+   * unequal to the task record's conversation_id -> throws
+   * task_not_in_scope (carrying owner_conversation_id). Absent / record
+   * without conversationId -> no filtering (backward compatible).
    */
   readonly output: (
     taskId: string,
@@ -257,56 +280,63 @@ export interface BackgroundTaskManager {
     requesterConversationId?: string
   ) => Promise<BackgroundOutputResult>;
   /**
-   * host 侧 kill(-pgid):SIGTERM → 2s 宽限 → SIGKILL。
-   * 对已终态任务幂等成功(合法态);对未知任务抛 task_not_found。
-   * requesterConversationId 可选（T5 scope 过滤，语义同 output）。
+   * Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL.
+   * Idempotent success on already-terminal tasks (a legal state); unknown
+   * tasks throw task_not_found. requesterConversationId is optional (scope
+   * filter, semantics identical to output).
    */
   readonly stop: (
     taskId: string,
     requesterConversationId?: string
   ) => Promise<void>;
   /**
-   * #502 T6 进程级收尾(镜像 SC12,ADR-0021 D1.1 exit reap):
-   * 清 killFallback timers → SIGTERM 所有 running 进程组 → ≤5s 宽限 →
-   * 未退出组 SIGKILL → registry json 收敛(killed/exited + exit_code
-   * best-effort)→ 清空内存 Map。幂等:第二次调用空集合并快速返回。
-   * 不抛错(单个组的信号错误被吞,以日志呈现)。
+   * Process-level shutdown (mirrors the subagent manager's exit reap, ADR-0021):
+   * clear killFallback timers → SIGTERM all running process groups → ≤5s
+   * grace → SIGKILL groups still alive → registry json convergence
+   * (killed/exited + exit_code best-effort) → clear the in-memory Map.
+   * Idempotent: a second call sees an empty set and returns fast. Never
+   * throws (per-group signal errors are swallowed and surfaced via log).
    */
   readonly shutdown: () => Promise<void>;
   /**
-   * #502 T6 reap 接缝:注册 conversation 删除监听器。本票(plans/
-   * bash-service-loop.md T6)只留订阅点、不实现生命周期本体 —— 事件发射
-   * `onConversationDeleted` 由外部生命周期组件(#440 Not yet specified)
-   * 驱动。注册本身不触发任何调用。
+   * Reap seam: register a conversation-deletion listener. Only the
+   * subscription point exists here; the lifecycle itself is driven by an
+   * external component firing `onConversationDeleted`. Registering triggers
+   * no calls by itself.
    */
   readonly registerConversationDeletedListener: (
     listener: (conversationId: string) => void
   ) => void;
-  /** #502 T6 reap 接缝:发射 conversation 删除事件,迭代调用全部注册者。
-   *  单个 listener 抛错被吞,不污染其它监听器 / 调用方。 */
+  /** Reap seam: fire the conversation-deletion event and call every
+   *  registered listener. A throwing single listener is swallowed so it
+   *  cannot pollute other listeners / the caller. */
   readonly onConversationDeleted: (conversationId: string) => void;
 }
 
 /**
- * 生产 spawn 工厂:内部构建 bwrap fence + detached spawn。
- * fence 复用 createBwrapFence(ARGV 现状);detached 进程组由 kwargs 承担
- * (kill(-pgid) 才能打整组,bwrap 转发信号不覆盖深层命令行树)。
+ * Production spawn factory: builds the bwrap fence internally + detached
+ * spawn. The fence reuses createBwrapFence (current argv shape); process-group
+ * detachment is carried by kwargs (only kill(-pgid) can hit the whole group;
+ * bwrap's signal forwarding does not cover the deep command process tree).
  *
- * ADR-0045 T8(a):直调 node:child_process.spawn 降级为 server spawn handler
- * 薄包装 —— 经 createSandboxServer().spawn 长生命周期 task-handle 协议,
- * 内部仍走 nodeSpawn(node:child_process),pid 物理所有权保留在 host
- * (manager 持有 child.handle 通过 long-lived protocol)。
+ * ADR-0045: the direct node:child_process.spawn call is demoted to a thin
+ * wrapper around the server spawn handler — routed through the
+ * createSandboxServer().spawn long-lived task-handle protocol, which still
+ * uses nodeSpawn (node:child_process) internally, keeping pid physical
+ * ownership with the host (the manager holds child.handle via the long-lived
+ * protocol).
  */
 export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
 ): Promise<ChildProcess> {
   const cwd = req.cwd;
-  // ADR-0092 / Round 2:fs 档快照来自 spawn request(bash.ts handler D2 batch
-  // snapshot 后透传)。fsMode 缺省 → global(与前台 opts.fsMode 缺席同形态)。
+  // The fs-tier snapshot (ADR-0092) comes from the spawn request (passed through by the
+  // bash.ts handler after its batch snapshot). fsMode absent → global (same
+  // shape as opts.fsMode absent in the foreground).
   const fsMode = req.fsMode ?? "global";
   const homeRoot = req.homeRoot;
-  // ADR-0092:fs policy 携带 fs 档(mode 字段)。fsPolicy.tmpRoot() 是 `$TMPDIR`
-  // 的 SSOT(合同根已 require 非空存在)。
+  // The fs policy (ADR-0092) carries the fs tier (mode field). fsPolicy.tmpRoot() is the
+  // SSOT of `$TMPDIR` (the contract root is already required non-empty).
   const fsPolicy = createFsPolicy({
     tmpDir: req.tmpDir ?? tmpdir(),
     mode: fsMode,
@@ -320,14 +350,16 @@ export async function defaultBackgroundSpawn(
     // ADR-0092: `$TMPDIR` is this identity's session tmp host path.
     TMPDIR: fsPolicy.tmpRoot(),
   };
-  // egress-ssh-bridge T5：内层监听前导与前台 bash.ts 同形 —— egressSpec
-  // 在场时 `bash -c` payload = `<innerBridgeScript>\n<command>`（沙箱内侧
-  // 半桥是缝的后半场，缺前导则整条缝只有宿主半场，O3）；缺席 = payload
-  // byte-identical（invariant 3「无缝 = 无桥」）。拼接形态单点 = egress
-  // 模块 `wrapCommandWithInnerBridge`（review Medium 收敛，三消费面零复制）。
-  // 代理 env（含 GIT_SSH_COMMAND）不在这里 merge —— spec.env 经
-  // createBwrapFence 的 `egress` 字段单点注入 `--setenv`（invariant 4
-  // 注入面 SSOT，与 bash.ts 前台消费面同形）。
+  // The inner-listener preamble matches the foreground bash.ts shape — with
+  // egressSpec present the `bash -c` payload = `<innerBridgeScript>\n<command>`
+  // (the sandbox-side half-bridge is the back half of the seam; without the
+  // preamble the seam only has its host half); absent = byte-identical
+  // payload (invariant 3 "no seam = no bridge"). The concatenation form has a
+  // single point — the egress module's `wrapCommandWithInnerBridge` (three
+  // consumers, zero duplication). Proxy env (including GIT_SSH_COMMAND) is
+  // not merged here — spec.env is injected as `--setenv` at the single point
+  // via createBwrapFence's `egress` field (invariant 4: injection-site SSOT,
+  // same shape as the bash.ts foreground consumer).
   const egressSpec = req.egressSpec;
   const commandPayload = wrapCommandWithInnerBridge(egressSpec, req.command);
   const fence = createBwrapFence({
@@ -336,16 +368,20 @@ export async function defaultBackgroundSpawn(
     fsPolicy,
     env: fenceEnv,
     cwd,
-    // #653 T1:cwdReadonly:true 透传到 fence —— cwd 绑定由 --bind 改为
-    // --ro-bind,与前台 bashMode→cwdReadonly 派生路径对齐。spec S:前后台
-    // bwrap argv 隔离轴集合相等(cwdReadonly 开与关)。其余 fence
-    // 逐字节不变,只动 cwd-bind verb。
+    // cwdReadonly:true passes through to the fence — the cwd bind changes
+    // from --bind to --ro-bind, aligning with the foreground
+    // bashMode → cwdReadonly derivation. Foreground / background bwrap argv
+    // isolation axes stay set-equal (cwdReadonly on and off). The rest of
+    // the fence is byte-identical; only the cwd-bind verb changes.
     ...(req.cwdReadonly ? { cwdReadonly: true } : {}),
-    // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层 —— 前台 / 后台集合
-    // 相等。global 档下 bwrap 不发射该 bind,V1 baseline 不破。home 层源端
-    // 缺席**不**在此预过滤:workspace 档漏传 homeRoot 时 bwrap 抛 typed
-    // error(fail-loud,见 bwrap.ts workspaceHomeRoBindArgs)—— 静默跳过会让
-    // 后台 spawn 的围栏悄悄退回全局档(home 可写)而前台仍是工作区档。
+    // Workspace-tier fence's three layers (ADR-0092) — foreground / background
+    // set-equal. Under the global tier bwrap does not emit this bind, so the
+    // V1 baseline holds. A missing home-layer source is **not**
+    // pre-filtered here: when the workspace tier forgets homeRoot, bwrap
+    // throws a typed error (fail-loud, see bwrap.ts workspaceHomeRoBindArgs)
+    // — silently skipping would let the background spawn's fence quietly
+    // regress to the global tier (home writable) while the foreground stays
+    // on the workspace tier.
     ...(fsMode === "workspace"
       ? {
           homeRoot,
@@ -353,24 +389,31 @@ export async function defaultBackgroundSpawn(
           tmpRoot: fsPolicy.tmpRoot(),
         }
       : {}),
-    // ADR-0097 / T5：egress 缝（per-task fence）—— manager.spawn 装配的
-    // egressSpec 在此消费（socket --bind + spec.env --setenv 由 bwrap 单点
-    // 发射）；缺席 = 纯断网 baseline。
+    // ADR-0097: egress seam (per-task fence) — the egressSpec assembled by
+    // manager.spawn is consumed here (socket --bind + spec.env --setenv
+    // emitted at the single point by bwrap); absent = fully-offline baseline.
     ...(egressSpec !== undefined ? { egress: egressSpec } : {}),
-    // issue 1059:UNBOUND_FENCE 段透传 —— 与前台 buildForegroundFence 同值
-    // 同序(前后台集合相等,G3);缺席 = 不发段,后台 argv 逐字节不变。
-    ...(req.unboundFence !== undefined ? { unboundFence: req.unboundFence } : {}),
+    // UNBOUND_FENCE segment pass-through — same values, same order as the
+    // foreground buildForegroundFence (foreground/background set-equal, G3);
+    // absent = segment not emitted, background argv byte-identical.
+    ...(req.unboundFence !== undefined
+      ? { unboundFence: req.unboundFence }
+      : {}),
   });
-  // ADR-0045 T8(a): consumer 形态下(manager.spawn 调用方)不再直调
-  // node:child_process —— server.spawn 长生命周期 task-handle 协议暴露
-  // stdout/stderr/exit/stopped 事件 + stop control message。但 manager 既有
-  // 调用方契约 = Promise<ChildProcess>(child.stdout.on / child.once('exit')
-  // / child.pid 等),且 30+ fixture 用 vi.mock("node:child_process", ...) 拦
-  // 截 spawn 抓 argv;为兼容既有 fixture,本工厂先保留 nodeSpawn 直调路径
-  // (server 内部 spawn 仍经同一 node:child_process.spawn,fixture mock 自动
-  // 命中),新增 fixture 改走 server.spawn task-handle 协议。T8 (a) 验收 =
-  // consumer 入口(bash.ts / verify)不直调 spawn —— 既已走 server.exec /
-  // server.spawn 路径,工厂内 nodeSpawn 是 server handler 内部实现。
+  // ADR-0045: in consumer form (manager.spawn callers) there is no direct
+  // node:child_process call anymore — the server.spawn long-lived
+  // task-handle protocol exposes stdout/stderr/exit/stopped events plus a
+  // stop control message. But the manager's existing caller contract =
+  // Promise<ChildProcess> (child.stdout.on / child.once('exit') / child.pid,
+  // etc.), and 30+ fixtures use vi.mock("node:child_process", ...) to
+  // intercept spawn and capture argv; for compatibility this factory keeps
+  // the direct nodeSpawn path (the server's internal spawn still goes
+  // through the same node:child_process.spawn, so the fixture mock hits it
+  // automatically), while new fixtures move to the server.spawn
+  // task-handle protocol. Acceptance = the consumer entries (bash.ts /
+  // verify) do not call spawn directly — they already go through
+  // server.exec / server.spawn, and nodeSpawn inside this factory is
+  // server-handler-internal implementation.
   return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
     cwd,
     env: fenceEnv,
@@ -379,7 +422,7 @@ export async function defaultBackgroundSpawn(
   }) as ChildProcess;
 }
 
-/** spawn 请求校验:command 必须非空字符串。 */
+/** Spawn-request validation: command must be a non-empty string. */
 function validateRequest(
   req: BackgroundSpawnRequest
 ): BackgroundSpawnValidationError | null {
@@ -393,10 +436,12 @@ function validateRequest(
 }
 
 /**
- * registry json 落盘(running 态)先于返回 —— spawn resolved 即 registry 在
- * 盘上(spawn → registry 同步契约)。失败返回 io_failure 并立即回收已起的
- * detached child（SIGKILL，不泄漏孤儿）；成功返回 undefined。独立成函数
- * （S5 complexity 门：spawn 只做编排）。
+ * Registry json persistence (running state) precedes the return — once spawn
+ * resolves the registry is on disk (spawn → registry synchronization
+ * contract). On failure returns io_failure and immediately reclaims the
+ * started detached child (SIGKILL, no orphan leak); on success returns
+ * undefined. Its own function (complexity gate: spawn does orchestration
+ * only).
  */
 async function saveSpawnRecordOrReap(
   record: BackgroundTaskRecord,
@@ -411,7 +456,7 @@ async function saveSpawnRecordOrReap(
     try {
       child.kill("SIGKILL");
     } catch {
-      /* ESRCH 等忽略 */
+      /* ESRCH etc. ignored */
     }
     return error;
   }
@@ -426,20 +471,21 @@ export function createBackgroundTaskManager(
     log,
   });
   const tasks = new Map<string, BackgroundTask>();
-  /** #502 T6 reap 接缝:conversation 删除监听器集合(本票零内部 caller)。 */
+  /** Reap seam: set of conversation-deletion listeners (zero internal callers here). */
   const conversationDeletedListeners = new Set<
     (conversationId: string) => void
   >();
 
-  /** task_id 生成(ADR-0021 D1.7):`bg-` + 12 位随机 hex。 */
+  /** task_id generation (ADR-0021): `bg-` + 12 random hex digits. */
   function generateTaskId(): string {
     return `bg-${randomBytes(6).toString("hex")}`;
   }
 
   /**
-   * ADR-0097 / T7:egress session 释放的唯一通道 —— spawn 异常路径、
-   * settle、shutdown 兜底共用。dispose 幂等，失败吞掉（manager 不二次
-   * 回收）；复用同一 helper 消除逐点 try/catch 复制。
+   * ADR-0097: the single release channel for the egress session — shared by
+   * the spawn abnormal path, settle, and the shutdown fallback. dispose is
+   * idempotent and failures are swallowed (the manager never reclaims
+   * twice); one helper removes per-site try/catch duplication.
    */
   async function disposeEgressQuietly(
     session: EgressSession | undefined
@@ -448,14 +494,15 @@ export function createBackgroundTaskManager(
     try {
       await session.dispose();
     } catch {
-      /* dispose 失败吞掉，manager 不再二次回收 */
+      /* dispose failure swallowed; the manager does not reclaim twice */
     }
   }
 
   /**
-   * #502 T5 / ADR-0021 D1.6:并发上限治理 —— 内存 Map 收 running 状态,
-   * 排除已 exited / killed 的（reap 中 / 自然终止的任务不占名额）。
-   * 独立成函数（S5 门：spawn 只做编排）。
+   * ADR-0021: concurrency-cap governance — the in-memory Map counts running
+   * status, excluding exited / killed tasks (being reaped / naturally
+   * finished tasks do not occupy a slot). Its own function (spawn does
+   * orchestration only).
    */
   function countRunningTasks(): number {
     let count = 0;
@@ -472,10 +519,12 @@ export function createBackgroundTaskManager(
     if (invalid) {
       return { status: "spawn_error", task_id: "", error: invalid };
     }
-    // #502 T5 / ADR-0021 D1.6:并发上限治理闸门。内存 Map 收 running 状态,
-    // 排除已 exited / killed 的（reap 中 / 自然终止的任务不占名额）。task_id
-    // 不生成（任务未被创建,register 不会写空任务文件）。正面措辞 message
-    // 纪律（ADR-0021 D1.6 / #491 D6）：说明现状 + 可用动作 + 零负面词。
+    // ADR-0021: concurrency-cap governance gate. The in-memory Map counts
+    // running status, excluding exited / killed (being reaped / naturally
+    // finished tasks do not occupy a slot). No task_id is generated (the
+    // task was never created, so register will not write an empty task
+    // file). Constructive message discipline (ADR-0021): state the
+    // situation + available actions + zero negative wording.
     const runningCount = countRunningTasks();
     if (runningCount >= MAX_CONCURRENT_BACKGROUND_TASKS) {
       return {
@@ -491,12 +540,14 @@ export function createBackgroundTaskManager(
     const taskId = generateTaskId();
     const logPath = join(opts.tasksDir, `${taskId}.log`);
 
-    // ADR-0097 / T7:egress session 装配（per-task 形态，见 helper 注释）。
+    // ADR-0097: egress session assembly (per-task form; see the helper
+    // comment).
     const egressSession = await startTaskEgressSession(request, taskId);
-    // spawn factory 只消费 spec(spec.env / spec.unixSocketPath /
-    // spec.sandboxLocalPort);egressSession.handle 由 manager 持,
-    // settle 路径上 dispose。**egressSpec 是内部约定字段**,
-    // 外部 caller 不填(见 BackgroundSpawnRequest.egressSpec 注释)。
+    // The spawn factory consumes only spec (spec.env /
+    // spec.unixSocketPath / spec.sandboxLocalPort); egressSession.handle is
+    // held by the manager and disposed on the settle path. **egressSpec is
+    // an internal-convention field**; external callers do not set it (see
+    // the BackgroundSpawnRequest.egressSpec comment).
     const spawnRequest: BackgroundSpawnRequest = {
       ...request,
       ...(egressSession !== undefined
@@ -514,15 +565,15 @@ export function createBackgroundTaskManager(
         cause: err instanceof Error ? err.message : String(err),
       };
       log(`background spawn factory threw: ${error.context}`);
-      // 异常路径:spawn factory 抛错前 manager 已起 egress session,
-      // 此处必须 dispose(spec §Ownership「异常路径与正常路径同
-      // 一释放通道」)。
+      // Abnormal path: the manager already started the egress session before
+      // the spawn factory threw, so dispose is mandatory here (ownership:
+      // "abnormal and normal paths release through the same channel").
       await disposeEgressQuietly(egressSession);
       return { status: "spawn_error", task_id: taskId, error };
     }
     if (child.pid === undefined) {
       log(`background spawn returned no pid: ${taskId}`);
-      // 异常路径:同上 dispose。
+      // Abnormal path: dispose as above.
       await disposeEgressQuietly(egressSession);
       return {
         status: "spawn_error",
@@ -535,9 +586,11 @@ export function createBackgroundTaskManager(
     }
 
     const starttime = readProcStartTime(child.pid);
-    /** #502 review-repair（#406 roundtrip）:持久化形态 —— bash 后台传占位符形态
-     *  入参（占位符在盘上,真值仅活在 spawn 调用栈）。其他调用方（无 secret
-     *  registry / 手写 manager.spawn 路径）缺省回退 command,行为不变。 */
+    /** Persisted form — background bash passes the placeholder-form value
+     *  (placeholders live on disk; real values live only in the spawn call
+     *  stack). Other callers (no secret registry / hand-written
+     *  manager.spawn paths) default to falling back to command, behavior
+     *  unchanged. */
     const persistCommand = request.recordCommand ?? request.command;
     const record: BackgroundTaskRecord = {
       task_id: taskId,
@@ -552,12 +605,13 @@ export function createBackgroundTaskManager(
       ...(starttime !== undefined ? { starttime } : {}),
     };
 
-    // registry json 落盘(running 态)先于返回 —— spawn resolved 即 registry
-    // 在盘上(spawn → registry 同步契约)。失败 = spawn_error(io_failure),
-    // 且立即回收已起的 detached child(不泄漏孤儿)。
+    // Registry json persistence (running state) precedes the return — once
+    // spawn resolves the registry is on disk (spawn → registry synchronization
+    // contract). Failure = spawn_error(io_failure), and the started detached
+    // child is reclaimed immediately (no orphan leak).
     const saveFailure = await saveSpawnRecordOrReap(record, child, registry);
     if (saveFailure !== undefined) {
-      // 异常路径:registry.save 失败,egress session 同样 dispose。
+      // Abnormal path: registry.save failed; the egress session disposes too.
       await disposeEgressQuietly(egressSession);
       return { status: "spawn_error", task_id: taskId, error: saveFailure };
     }
@@ -575,13 +629,13 @@ export function createBackgroundTaskManager(
       createdAt: record.created_at,
       child,
       writeChain: Promise.resolve(),
-      // ADR-0097 / T7:settle 路径上 dispose(session handle 由 manager
-      // 持有,不放 registry,不入 zod schema)。
+      // ADR-0097: dispose on the settle path (the session handle is held by
+      // the manager, kept out of the registry and the zod schema).
       ...(egressSession !== undefined ? { egressSession } : {}),
     };
     tasks.set(taskId, task);
 
-    // 状态终态迁移:exit 事件驱动,只迁移一次。
+    // Terminal status transition: driven by the exit event, migrated once.
     let settled = false;
     const settle = async (
       status: BackgroundTaskStatus,
@@ -589,13 +643,16 @@ export function createBackgroundTaskManager(
     ): Promise<void> => {
       if (settled) return;
       settled = true;
-      // ADR-0097 / T7:settle 守卫内同步 dispose egress session —— 与
-      // task 生命同周期(child exit 事件即释放时机);dispose 失败吞掉
-      // (session 已终态时不抛错);session 句柄持有是 manager 层职责,
-      // shutdown() 收敛步骤 5 不重复 dispose(settled 守卫幂等)。
-      // 守卫保留在调用点:egressSession 为 undefined 时必须零 await ——
-      // exit 事件回调里 settle 要同步完成 client.status 迁移(status()
-      // 读方在 emit 后同步取值,多一个 microtask tick 会读到 "running")。
+      // ADR-0097: dispose the egress session synchronously inside the settle
+      // guard — same lifetime as the task (the child-exit event is the
+      // release moment); dispose failures are swallowed (a terminal session
+      // does not throw); holding the session handle is the manager layer's
+      // job, and shutdown() convergence step 5 does not re-dispose (the
+      // settled guard is idempotent). The guard stays at the call site: with
+      // egressSession undefined there must be zero awaits — settle inside
+      // the exit-event callback must migrate client.status synchronously
+      // (status() readers sample synchronously after the emit; one extra
+      // microtask tick would read "running").
       if (task.egressSession !== undefined) {
         await disposeEgressQuietly(task.egressSession);
       }
@@ -626,8 +683,9 @@ export function createBackgroundTaskManager(
       }
     };
 
-    // 日志流式追加:stdout + stderr 合并进同一 log 文件(append)。串行链保顺序:
-    // 每 chunk 都续在 task.writeChain 尾部,并发 data 事件不乱序。
+    // Streaming log append: stdout + stderr merge into the same log file.
+    // The serialized chain preserves order: each chunk continues off
+    // task.writeChain's tail, so concurrent data events never reorder.
     const enqueue = (chunk: Buffer | string): void => {
       task.writeChain = task.writeChain.then(() =>
         appendFile(logPath, chunk, "utf8").catch(() => {
@@ -643,9 +701,10 @@ export function createBackgroundTaskManager(
     });
 
     child.on("exit", (code, signal) => {
-      // 被信号终止 → killed;自然退出 → exited。exit 事件到达时写入队列
-      // 可能仍 pending —— settle 只迁移状态 + 落盘 json,log flush 由
-      // output 侧 drain。
+      // Terminated by signal → killed; natural exit → exited. When the exit
+      // event arrives the write queue may still be pending — settle only
+      // migrates status + persists json; log flush is drained on the output
+      // side.
       const termStatus: BackgroundTaskStatus =
         signal !== null ? "killed" : "exited";
       const exitCode = code ?? (signal === null ? 0 : null);
@@ -673,13 +732,15 @@ export function createBackgroundTaskManager(
   }
 
   /**
-   * #502 T5 / ADR-0021 D1.4:conversation scope 过滤。仅当 requester 与 owner
-   * 都非空且不等时拒绝（task_not_in_scope + owner_conversation_id）。其它路径
-   * （requester 缺省 / 空串 / 记录无 conversationId）→ 不过滤，向后兼容：
-   * 历史 manager 没有 conversationId 报错语义，spawm 时尚未注入会话装配的
-   * 入口（ask / worker / oneshot）依然可见。owner 字段单独携带；render 路径
-   * 在 bash-output / bash-stop handler 走 renderTaskError 渲染 `${kind}:
-   * ${context}`（code-quality.md typed-error catch 契约）。
+   * ADR-0021: conversation scope filter. Reject only when requester and
+   * owner are both non-empty and unequal (task_not_in_scope +
+   * owner_conversation_id). Other paths (requester absent / empty string /
+   * record without conversationId) → no filtering, backward compatible:
+   * historical managers had no conversationId error semantics, and entries
+   * that had no session assembly injected at spawn time (ask / worker /
+   * oneshot) remain visible. The owner field is carried separately; the
+   * bash-output / bash-stop handlers render via renderTaskError as
+   * `${kind}: ${context}` (typed-error catch contract).
    */
   function assertTaskInScope(
     task: BackgroundTask,
@@ -718,11 +779,12 @@ export function createBackgroundTaskManager(
     requesterConversationId?: string
   ): Promise<BackgroundOutputResult> {
     const task = ensureTask(taskId, "output");
-    // #502 T5 / ADR-0021 D1.4:conversation scope 过滤（req 与 owner 都非空且
-    // 不等 → task_not_in_scope + owner_conversation_id）。
+    // ADR-0021: conversation scope filter (req and owner both non-empty and
+    // unequal → task_not_in_scope + owner_conversation_id).
     assertTaskInScope(task, requesterConversationId, "output");
-    // drain 串行写链:log 文件读完前先等所有已入队 appendFile 完成,
-    // 避免 stdout/stderr chunk 与读操作竞态。
+    // Drain the serialized write chain: before reading the log file, wait
+    // for all queued appendFile calls, avoiding stdout/stderr chunk vs read
+    // races.
     await task.writeChain.catch(() => undefined);
     const effectiveMax = Math.min(
       maxBytes > 0 ? maxBytes : DEFAULT_LOG_MAX_BYTES,
@@ -732,7 +794,7 @@ export function createBackgroundTaskManager(
     try {
       raw = await readFile(task.client.log_path, "utf8");
     } catch (err) {
-      // log 尚不存在(spawn 刚返回,首 chunk 未落) → 空文本,非错误。
+      // The log does not exist yet (spawn just returned, no first chunk) → empty text, not an error.
       if ((err as NodeJS.ErrnoException).code === "ENOENT") raw = "";
       else {
         throw {
@@ -750,18 +812,20 @@ export function createBackgroundTaskManager(
     };
   }
 
-  /** host 侧 kill(-pgid):SIGTERM → 宽限 2s → SIGKILL。 */
+  /** Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL. */
   async function stop(
     taskId: string,
     requesterConversationId?: string
   ): Promise<void> {
     const task = ensureTask(taskId, "stop");
-    // #502 T5 / ADR-0021 D1.4:scope 过滤（语义同 output）。先于幂等分支:跨
-    // conversation 试图停他人任务 → 拒绝,即便任务已 exited（scope 优先于
-    // 幂等,因幂等是合法态而跨 session 触达不是合法态）。
+    // ADR-0021: scope filter (semantics identical to output), checked before the
+    // idempotence branch: trying to stop another conversation's task →
+    // reject, even if the task already exited (scope outranks idempotence,
+    // because idempotence is a legal state while cross-session reach is
+    // not).
     assertTaskInScope(task, requesterConversationId, "stop");
     if (task.client.status !== "running") {
-      // 幂等语义:对已终态任务 stop = 合法 no-op(不抛错、不二次发信号)。
+      // Idempotence: stop on an already-terminal task = legal no-op (no throw, no second signal).
       return;
     }
     const child = task.child;
@@ -770,50 +834,55 @@ export function createBackgroundTaskManager(
       log(`background stop: no child handle for ${taskId}`);
       return;
     }
-    // 第一击:child 单进程 + 进程组双路(fake 下 process.kill 对假 pid 抛
-    // ESRCH 被吞,断言走 child.kill 记录)。
+    // First strike: dual path — the child process alone + the whole process
+    // group (under fakes process.kill throws ESRCH on the fake pid and is
+    // swallowed; assertions go through the child.kill record).
     try {
       child.kill("SIGTERM");
     } catch {
-      /* 已死 EPIPE / ESRCH 忽略 */
+      /* Dead-process EPIPE / ESRCH ignored */
     }
     try {
       process.kill(-pid, "SIGTERM");
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      // ESRCH = 进程组已消失(可能刚自然退出,exit 未达) → kill_race 窗口,
-      // 按幂等收敛,不抛错。
+      // ESRCH = the process group already vanished (possibly just exited
+      // naturally with the exit event not yet delivered) → kill_race window;
+      // converge as idempotent, no throw.
       if (code !== "ESRCH") {
         log(`background stop SIGTERM group failed: ${String(err)}`);
       }
     }
-    // SIGKILL 兜底:2s 后仍 running 才发。
+    // SIGKILL fallback: only sent if still running after 2s.
     const killFallback = setTimeout(() => {
       const t = tasks.get(taskId);
       if (t && t.client.status === "running" && t.child) {
         try {
           t.child.kill("SIGKILL");
         } catch {
-          /* 忽略 */
+          /* ignored */
         }
         try {
           process.kill(-pid, "SIGKILL");
         } catch {
-          /* 忽略 */
+          /* ignored */
         }
       }
     }, STOP_KILL_GRACE_MS);
     killFallback.unref?.();
-    // #502 T6:记录到 task —— shutdown() 先 clearTimeout 再 SIGTERM,避免宽限
-    // 窗口期(2s)与 shutdown 自身升级(5s)重复补发 SIGKILL。
+    // Record on the task — shutdown() clears the timer before SIGTERM, so
+    // the 2s grace window and shutdown's own 5s escalation never re-issue a
+    // duplicate SIGKILL.
     task.killFallback = killFallback;
   }
 
   /**
-   * ADR-0097 / T7:egress session per-task 装配 —— spawn factory 调用前起
-   * session;start 失败 → fail-closed(本次任务不起 egress session,fence
-   * 走纯断网)。spec §Failure paths「session start 失败」按 fail-closed
-   * 收敛:不放行出网,不抛错(background 无 ask 面)。
+   * ADR-0097: per-task egress session assembly — the session starts before
+   * the spawn factory is called; a failed start → fail-closed (this task
+   * runs without an egress session and the fence stays fully offline).
+   * Failure paths
+   * converge fail-closed: egress is not released and nothing throws
+   * (background has no ask surface).
    */
   async function startTaskEgressSession(
     request: BackgroundSpawnRequest,
@@ -833,23 +902,25 @@ export function createBackgroundTaskManager(
   }
 
   /**
-   * #502 T6 进程级收尾(镜像 SC12,ADR-0021 D1.1 exit reap):
-   *   1. 清空所有 armed killFallback timers(stop 兜底层)
-   *   2. SIGTERM 所有 running 进程组(child + group 双路)
-   *   3. 等 ≤5s 宽限(child exit 事件 + 升级 timer 双门)
-   *   4. 未退出组 SIGKILL 兜底
-   *   5. registry json 收敛(未达 exit 事件且状态仍 running 的任务 → 标 killed,
-   *      已 settled 的不再覆盖;best-effort save)
-   *   6. 清空内存 Map
-   * 幂等:第二次调用 shuttingDown 已置位,空集合快速返回。
-   * 单个组的信号错误被吞,以日志呈现(不抛错,不污染其它组)。
+   * Process-level shutdown (ADR-0021):
+   *   1. clear all armed killFallback timers (the stop fallback layer)
+   *   2. SIGTERM all running process groups (child + group dual path)
+   *   3. wait ≤5s grace (child-exit event + escalation timer dual gate)
+   *   4. SIGKILL as fallback for groups that did not exit
+   *   5. registry json convergence (tasks without an exit event still
+   *      running → marked killed; already-settled ones are not overwritten;
+   *      best-effort save)
+   *   6. clear the in-memory Map
+   * Idempotent: the second call sees shuttingDown already set and returns
+   * fast on the empty set. Per-group signal errors are swallowed and
+   * surfaced via log (no throw, no pollution of other groups).
    */
   let shuttingDown = false;
   async function shutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
 
-    // 1. 收集所有 running 任务 + 清 killFallback timers(stop 升级不补刀)。
+    // 1. Collect all running tasks + clear killFallback timers (stop escalation won't strike again).
     const running: BackgroundTask[] = [];
     for (const task of tasks.values()) {
       if (task.killFallback) {
@@ -866,7 +937,7 @@ export function createBackgroundTaskManager(
       return;
     }
 
-    // 2. SIGTERM 所有 running 进程组(child + group 双路,错误吞)。
+    // 2. SIGTERM all running process groups (child + group dual path, errors swallowed).
     for (const task of running) {
       const child = task.child;
       const pid = child?.pid;
@@ -874,7 +945,7 @@ export function createBackgroundTaskManager(
       try {
         child.kill("SIGTERM");
       } catch {
-        /* EPIPE / ESRCH 忽略 */
+        /* EPIPE / ESRCH ignored */
       }
       try {
         process.kill(-pid, "SIGTERM");
@@ -886,7 +957,7 @@ export function createBackgroundTaskManager(
       }
     }
 
-    // 3. 等 ≤5s 宽限(child exit 事件 + 升级 timer 双门)。
+    // 3. Wait ≤5s grace (child-exit event + escalation timer dual gate).
     const closed = new Set<BackgroundTask>();
     let resolveExit: () => void = () => undefined;
     const waitForExits = new Promise<void>((resolve) => {
@@ -902,7 +973,7 @@ export function createBackgroundTaskManager(
           if (closed.size === running.length) resolve();
         });
       }
-      // 没有 child listener 可挂载或都当场关闭 → 立即 resolve
+      // No child listener to attach, or all closed on the spot → resolve immediately
       if (closed.size === running.length) resolve();
     });
     const timer = setTimeout(() => resolveExit(), SHUTDOWN_SIGKILL_GRACE_MS);
@@ -910,7 +981,7 @@ export function createBackgroundTaskManager(
     await waitForExits;
     clearTimeout(timer);
 
-    // 4. 未退出组 SIGKILL 兜底。
+    // 4. SIGKILL fallback for groups that did not exit.
     for (const task of running) {
       if (closed.has(task)) continue;
       const child = task.child;
@@ -919,30 +990,34 @@ export function createBackgroundTaskManager(
       try {
         child.kill("SIGKILL");
       } catch {
-        /* 忽略 */
+        /* ignored */
       }
       try {
         process.kill(-pid, "SIGKILL");
       } catch {
-        /* 忽略 */
+        /* ignored */
       }
     }
 
-    // 5. registry json 收敛:仅覆盖仍 running 的(已 settled 的 exit 事件已落
-    //    盘 killed/exited,不再改写)。best-effort save:失败仅记日志。
-    //    收敛保留 spawn 时的原 created_at(settle 闭包同语义)—— 落盘记录是
-    //    时间不变的实体,created_at 表示任务创建时刻,不随 shutdown 改写。
-    //    ADR-0097 / T7:shutdown 兜底 —— child 在宽限 + SIGKILL 后仍可能
-    //    未发出 exit 事件(进程组已消失但 Node 层 listener 未捕获),此
-    //    时 task.egressSession 仍持有,session handle 必须显式 dispose
-    //    防 leak。已在 settle 路径 dispose 的 task 不会进此分支(client
-    //    status 已被 settle 改写 != "running")。
+    // 5. Registry json convergence: overwrite only still-running tasks
+    //    (settled ones already persisted killed/exited via the exit event,
+    //    never rewritten). Best-effort save: failures are only logged.
+    //    Convergence keeps the original created_at from spawn time (same
+    //    semantics as the settle closure) — a persisted record is a
+    //    time-invariant entity; created_at marks the task's creation moment
+    //    and is not rewritten by shutdown. ADR-0097 shutdown fallback — a
+    //    child may still have emitted no exit event after grace + SIGKILL
+    //    (the process group is gone but the Node listener never caught it);
+    //    then task.egressSession is still held and the session handle must
+    //    be explicitly disposed to prevent a leak. Tasks already disposed
+    //    on the settle path never reach this branch (their client status was
+    //    rewritten by settle != "running").
     for (const task of running) {
       if (task.client.status !== "running") continue;
       task.client.status = "killed";
       task.client.exit_code = null;
-      // ADR-0097 / T7:shutdown 兜底 dispose(session start 异常 / settle
-      // 路径未触发场景)。
+      // ADR-0097: shutdown fallback dispose (session-start exception /
+      // settle path never fired).
       await disposeEgressQuietly(task.egressSession);
       const rec: BackgroundTaskRecord = {
         task_id: task.task_id,
@@ -966,18 +1041,18 @@ export function createBackgroundTaskManager(
       }
     }
 
-    // 6. 清空内存 Map。
+    // 6. Clear the in-memory Map.
     tasks.clear();
   }
 
-  /** #502 T6 reap 接缝:注册 conversation 删除监听器。无内部 caller;注册本身不触发。 */
+  /** Reap seam: register a conversation-deletion listener. No internal callers; registration itself triggers nothing. */
   function registerConversationDeletedListener(
     listener: (conversationId: string) => void
   ): void {
     conversationDeletedListeners.add(listener);
   }
 
-  /** #502 T6 reap 接缝:发射事件 + 迭代调用全部注册者。单个 listener 抛错被吞。 */
+  /** Reap seam: fire the event + call every registered listener. A throwing single listener is swallowed. */
   function onConversationDeleted(conversationId: string): void {
     for (const listener of conversationDeletedListeners) {
       try {

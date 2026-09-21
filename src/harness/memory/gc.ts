@@ -1,5 +1,5 @@
 /**
- * auto-memory T2: mechanical memory GC (TTL / supersede / cap eviction).
+ * Mechanical memory GC (TTL / supersede / cap eviction).
  *
  * Spec: specs/auto-memory.md D3; ADR-0031 Decision 4; ADR-0086
  * (capability memory sweep). Mechanical rules, no LLM, soft-disable only:
@@ -16,7 +16,7 @@
  * frontmatter line back. Repeat calls are idempotent — already-disabled
  * entries are neither re-disabled nor counted against the cap.
  *
- * auto-memory-layering T7: disabled entries eventually leave the hot dir —
+ * Disabled entries eventually leave the hot dir —
  * `disabled: true` + (`updated_at` ≥ 30 days old OR disabled count > cap)
  * moves `<slug>.md` to `memoryDir/archive/<slug>.md` (a rename, not a delete;
  * no hot scan — recall / prefetch / dream / cap / `listStoreEntries` — ever
@@ -48,7 +48,7 @@ export const DEFAULT_MEMORY_STORE_CAP = 200;
 
 /**
  * A disabled entry at least this many days past `updated_at` moves to
- * `memoryDir/archive/` (specs/auto-memory-layering.md — `≥ 30 天`, pinned
+ * `memoryDir/archive/` (specs/auto-memory-layering.md — `≥ 30 days`, pinned
  * boundary: exactly 30 days archives).
  */
 const ARCHIVE_MIN_AGE_DAYS = 30;
@@ -236,7 +236,7 @@ export function planMemoryGc(
  * (mirrors the per-slug skip in promote.ts / tools/recall.ts). Archive moves
  * (rename into `archive/`) and the MEMORY.md index rewrite throw the typed
  * `MemoryIOError` on failure — the host's EXIT log-and-continue catches it
- * (specs/auto-memory-layering.md SC15); gc.ts never swallows them.
+ * (specs/auto-memory-layering.md); gc.ts never swallows them.
  */
 export async function runMemoryGc(
   memoryDir: string,
@@ -313,7 +313,7 @@ function planMemoryArchive(
   }
   const archived = [...ageEligible.sort()];
   // Overflow is measured against the whole disabled set in the hot dir
-  // (specs/auto-memory-layering.md SC13: "热目录 disabled 条数 > store cap");
+  // (specs/auto-memory-layering.md: "hot-directory disabled count > store cap");
   // age-eligible entries already archive by rule A, the excess comes from the
   // not-yet-30d ones, oldest first.
   if (disabled.length > opts.cap && recent.length > 0) {
@@ -342,9 +342,9 @@ function tsOrZero(entry: MemoryEntryV1): number {
 /**
  * Move one hot `<slug>.md` into `memoryDir/archive/` via rename. Idempotent:
  * a slug already gone from the hot dir is an archived no-op, and rename
- * either lands the complete file or nothing (SC14 — no half-files). Missing
+ * either lands the complete file or nothing (no half-files). Missing
  * `archive/` is created; a non-directory `archive/` path surfaces as the
- * typed `MemoryIOError` (SC15).
+ * typed `MemoryIOError`.
  */
 async function archiveEntryFile(
   memoryDir: string,
@@ -374,8 +374,9 @@ async function archiveEntryFile(
 
 /**
  * Remove each archived slug's link line from MEMORY.md so the human index
- * never points into `archive/` (specs/auto-memory-layering.md: "对应行删除
- * 或忽略失效链" — this implementation deletes the line; pinned by
+ * never points into `archive/` (specs/auto-memory-layering.md: "delete the
+ * corresponding line or ignore the broken chain" — this implementation
+ * deletes the line; pinned by
  * gc.test.ts). Missing MEMORY.md is a no-op; unchanged content is not
  * rewritten. Same tmp+rename atomic replace as `upsertMemoryIndex`.
  */

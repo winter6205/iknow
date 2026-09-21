@@ -46,11 +46,13 @@ export function createSystemResolver(
   ctx: AssemblyContext,
   opts?: { readonly flags?: SystemResolverFlags }
 ): SystemResolver {
-  // ADR-0099:项目记忆库落 home 项目树 `projects/<slug>/memory`
-  // （装配期 eager mkdir；失败静默,不阻塞装配）。
+  // Project memory lives in the home project tree at
+  // `projects/<slug>/memory` (ADR-0099) (eager mkdir at assembly; failures
+  // stay silent and never block assembly).
   void mkdir(ctx.memoryDir, { recursive: true }).catch(() => {});
-  // per-flag-value 快照：flags 在场时最多两个槽位（true/false）各冻结一份，
-  // 无 flags 时就是原有单快照。装配失败不毒化对应槽位。
+  // Per-flag-value snapshots: with flags present, up to two slots (true/false)
+  // each freeze one snapshot; without flags it is the original single
+  // snapshot. Assembly failure does not poison the corresponding slot.
   const snapshots = new Map<boolean, Promise<string | undefined>>();
 
   const assembleFor = (flag: boolean): Promise<string | undefined> =>
@@ -63,9 +65,11 @@ export function createSystemResolver(
       ? opts.flags.autoExtract === true
       : ctx.autoExtract === true;
     if (!snapshots.has(flag)) {
-      // 快照只在成功取值后建立：装配抛错 → 清空缓存位，下次调用重试
-      // （原「装配失败不毒化缓存」契约，ADR-0009 T7）。并发调用共享同一次
-      // 装配（in-flight dedupe），全体收到同一 rejection。
+      // The snapshot is only established after a successful read: an assembly
+      // throw clears the cache slot so the next call retries (the "assembly
+      // failure does not poison the cache" contract, ADR-0009). Concurrent
+      // calls share one assembly (in-flight dedupe) and all receive the same
+      // rejection.
       const snap = assembleFor(flag).catch((err: unknown) => {
         if (snapshots.get(flag) === snap) snapshots.delete(flag);
         throw err;

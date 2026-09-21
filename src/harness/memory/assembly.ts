@@ -1,12 +1,12 @@
 /**
- * #121 T4: assembly.ts (assembleSystemPrompt — thin layer composer).
+ * assembly.ts (assembleSystemPrompt — thin layer composer).
  *
  * Spec: specs/121-memory-injection.md (Project Structure assembly.ts, Testing
- * Strategy assembly half, SC 1/3/4/5, Boundaries Always — append-only 纪律,
- * 文件截断不丢字符).
+ * Strategy assembly half) — append-only discipline (truncating a file must
+ * never lose characters).
  *
  * ## Assembly order (locked)
- *   ADR-0009 Decision 1+3+4; D2 amended 2026-08-30 (#841 T6).
+ *   ADR-0009 Decision 1+3+4; amended 2026-08-30.
  *     user AGENTS (+ user rules bodies in "bodies" mode)
  *     ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
  *     project AGENTS (+ project rules bodies in "bodies" mode)
@@ -50,14 +50,14 @@ export const PRIORITY_DECLARATION =
 
 /**
  * Locked by spec SC 5 (only when the memory library holds ≥1 entry) and
- * specs/casual-ask-context-hygiene.md SC1 (states existence only — never
+ * specs/casual-ask-context-hygiene.md (states existence only — never
  * commands the model to call memory_recall).
  */
 export const EXISTENCE_POINTER = "A memory library is available.";
 
 /**
  * How `.iknow/rules/*.md` files enter the static layer
- * (ADR-0009 D2 amended 2026-08-30 — plans/worktree-isolation-model-provision.md T6).
+ * (ADR-0009, amended 2026-08-30).
  *
  * - "bodies" (default): read each rules file and inject its (truncated) body.
  *   Used by the general-purpose worker path (identity staticInstructions) and
@@ -85,13 +85,14 @@ const FILE_CAP = 12000;
  * Inputs needed to compose the layered system prompt.
  *   projectIdentityRoot + userHome: discovery roots for the static layer
  *     (AGENTS.md + rules). user scope reads `<userHome>/.iknow/`; project
- *     scope reads `<projectIdentityRoot>/` — T3 (plans/worktree-session-roots.md
- *     / ADR-0037 §4): the project identity root the host pinned at startup,
+ *     scope reads `<projectIdentityRoot>/` (ADR-0037 §4): the project
+ *     identity root the host pinned at startup,
  *     NOT the cwd. A worktree rebind moves the cwd onto a gitignored task
  *     worktree; the project's instructions must not move with it (and must not
  *     be seeded onto the tree either).
- *   workspaceRoot: ADR-0019 (T2) per-root state anchor — settings 写回 /
- *     worktrees 仍跟它;项目记忆库不跟它（ADR-0099，home 项目树）。
+ *   workspaceRoot: the per-root state anchor (ADR-0019) — settings
+ *     write-back and worktrees still follow it; the project memory store
+ *     does not (ADR-0099, it lives in the home project tree).
  *   memoryDir: project-namespaced memory root
  *     (`<pool>/projects/<slug>/memory/`, ADR-0099)。
  *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER.
@@ -136,7 +137,7 @@ export async function assembleStaticSystemPrompt(
     parts.push(project);
   }
   if (rulesMode === "manifest") {
-    // #841 T6: parent opener carries a rules index (paths + read-path
+    // Parent opener carries a rules index (paths + read-path
     // guidance), never the bodies. Missing / empty rules dirs → no segment.
     const [userRules, projectRules] = await Promise.all([
       listRulesFiles(ctx.userHome, "user"),
@@ -150,7 +151,7 @@ export async function assembleStaticSystemPrompt(
 
 /** Compose the layered system prompt per the locked order (see file header).
  *  Parent session opener (chat / tui / serve via refresh.createSystemResolver).
- *  Note: rules enter as a manifest here, not bodies (#841 T6 / ADR-0009 D2
+ *  Note: rules enter as a manifest here, not bodies (ADR-0009
  *  amended); the ADR-0044 invariant itself lives in the file header. */
 export async function assembleSystemPrompt(
   ctx: AssemblyContext
@@ -210,8 +211,8 @@ function rulesManifestSegment(
  * skips the segment so a missing catalog cannot fail the user turn.
  * `disabled` stays the first gate; the capability filter then keeps runtime
  * snapshots out of the session snapshot (spec runtime-capability-memory-gate
- * 读侧过滤 / SC7, ADR-0042 snapshot eats the filtered list). Filtering lives
- * here, not in formatMemoryCatalog, which stays a dumb formatter.
+ * read-side filtering). The snapshot eats the filtered list (ADR-0042).
+ * Filtering lives here, not in formatMemoryCatalog, which stays a dumb formatter.
  */
 async function loadCatalogSegment(
   memoryDir: string
@@ -246,7 +247,7 @@ async function memoryLibraryNonEmpty(memoryDir: string): Promise<boolean> {
   return false;
 }
 
-/** Read a UTF-8 file; return "" on ENOENT/read failure (Boundaries Always 跳过). */
+/** Read a UTF-8 file; return "" on ENOENT/read failure (bad files are skipped). */
 async function readOrEmpty(path: string): Promise<string> {
   try {
     return await readFile(path, "utf8");

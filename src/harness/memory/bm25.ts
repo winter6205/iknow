@@ -1,9 +1,9 @@
 /**
- * #121 T3: bm25.ts (keyword heuristic scoring — pure function, no IO).
+ * bm25.ts (keyword heuristic scoring — pure function, no IO).
  *
  * Spec: specs/121-memory-injection.md (Project Structure bm25.ts, Testing
- * Strategy bm25 half). memory/search.py:15-50 同款启发式
- * (metadata 命中 2x + body 1x + importance 加权 + recency_boost + 排序稳定).
+ * Strategy bm25 half. Same heuristic family:
+ * (metadata hit 2x + body 1x + importance weighting + recency_boost + stable ordering).
  *
  * Score formula (v0):
  *   hits_title × TITLE_WEIGHT (2.0)
