@@ -192,7 +192,4 @@ log "web SPA build"
 HUSKY=0 npm run web:build
 test -f "$REPO_ROOT/web/dist/index.html"
 
-log "git attribution (overwrite platform identity/hooks)"
-bash "$REPO_ROOT/scripts/cursor-git-attribution.sh"
-
 log "done"

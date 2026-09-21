@@ -2,8 +2,8 @@
 # Per-boot runtime init for the Cursor Cloud Agent VM (`start` phase).
 #
 # iknow has no compose/dockerd daemons. Dependencies live in the snapshot
-# from cursor-install.sh. This script re-pins PATH + git identity (install
-# does not run on every boot), then setdefaults the MiniMax Anthropic node
+# from cursor-install.sh. This script re-pins PATH (git identity pin moved to
+# the archive repo), then setdefaults the MiniMax Anthropic node
 # so a Cloud Agent with only ANTHROPIC_AUTH_TOKEN injected can talk to
 # official MiniMax without a gitignored .env.local.
 set -euo pipefail
@@ -17,9 +17,6 @@ log() { printf '\n=== cursor-start: %s ===\n' "$*"; }
 # Same operator key as fin; fin uses the Chat Completions node instead.
 IKNOW_MINIMAX_ANTHROPIC_URL="https://api.minimaxi.com/anthropic"
 BASHRC_LLM_MARKER="# cursor-start: iknow MiniMax Anthropic node"
-
-log "git attribution (overwrite platform identity/hooks)"
-bash "$REPO_ROOT/scripts/cursor-git-attribution.sh"
 
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "$NVM_DIR/nvm.sh" ]; then
