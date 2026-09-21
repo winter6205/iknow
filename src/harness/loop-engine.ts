@@ -84,7 +84,10 @@ import type {
 } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
-import { safeEmitStream } from "./stream.js";
+import {
+  safeEmitStream,
+  TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT,
+} from "./stream.js";
 import { splitStreamingMarkdown } from "../shared/streaming-block-freeze.js";
 import type { RaceTimers } from "./race-timers.js";
 import { lastNonEmptyAssistant } from "./last-nonempty-assistant.js";
@@ -2348,7 +2351,7 @@ async function runModelPhase(opts: {
         type: "transport_retry",
         attempt: clockAttempt,
         maxAttempts: TRANSPORT_MAX_ATTEMPTS,
-        detail: "invisible_timeout",
+        detail: TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT,
       });
       if (
         (await awaitRetryBackoff(clockAttempt, opts.deps, opts.signal)) ===
