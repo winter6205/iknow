@@ -552,3 +552,58 @@ describe("T3 gate-blocked spawn forensic record", () => {
     );
   });
 });
+
+describe("T4 前景打断 cancelled 终态落 agent-<taskId>.jsonl", () => {
+  function readRows(filePath: string): Record<string, unknown>[] {
+    return readFileSync(filePath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it("abortTask 同步 append state_change+stop(reason=cancelled)，shutdown 后重读不重复", async () => {
+    const { manager, spawned } = makeManager({ subagentsDir });
+    const { taskId } = manager.spawn({
+      task: "fg interrupt on disk",
+      excludeFromHostDrain: true,
+    });
+    assert.equal(manager.abortTask(taskId), true);
+    await flushTwoTicks();
+
+    const filePath = workerRecordPath(subagentsDir, taskId);
+    let rows = readRows(filePath);
+    const stopRows = rows.filter((r) => r.record_type === "subagent_stop");
+    assert.equal(stopRows.length, 1);
+    assert.equal(stopRows[0]!.reason, "cancelled");
+    assert.equal(stopRows[0]!.final_state, "failed");
+    const failedChanges = rows.filter(
+      (r) =>
+        r.record_type === "subagent_state_change" && r.to_state === "failed"
+    );
+    assert.equal(failedChanges.length, 1);
+    assert.equal(failedChanges[0]!.reason, "cancelled");
+
+    // fake child appears reaped so shutdown's grace loop settles; the task is
+    // already terminal → shutdown's guarded cancelled emit must not re-append
+    Object.defineProperty(spawned[0], "exitCode", {
+      value: 1,
+      configurable: true,
+    });
+    await manager.shutdown();
+
+    // fresh reader ("restart" surface): the same lines, still exactly one stop
+    rows = readRows(filePath);
+    assert.equal(
+      rows.filter((r) => r.record_type === "subagent_stop").length,
+      1
+    );
+    assert.equal(
+      rows.filter(
+        (r) =>
+          r.record_type === "subagent_state_change" && r.to_state === "failed"
+      ).length,
+      1
+    );
+  });
+});

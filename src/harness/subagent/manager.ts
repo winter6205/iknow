@@ -1434,6 +1434,32 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * T4: synchronous cancelled terminal for interrupts whose worker leaves no
+   * attributable envelope (Esc / Ctrl+X / subagent_stop / shutdown). The state
+   * transition and the stop record append to the same per-agent subagent log
+   * before the call returns — the terminal leaves the memory Map even when the
+   * parent dies first. Foreground-only by design (`abortTask` gate): a
+   * background task must keep its async crashed envelope so the mailbox
+   * wake / drainCompleted surface still fires (CONTEXT 后景残留提示).
+   * `stoppedEmitted` + the state-change self-loop guard make every later path
+   * (SIGTERM epilogue envelope, exit handler, settleCrash) a no-op.
+   */
+  function emitCancelledTerminal(
+    task: Task,
+    attribution: {
+      readonly summary: string;
+      readonly signalSent: boolean;
+    }
+  ): void {
+    emitStateChange(task, "failed", { reason: "cancelled" });
+    emitStop(task, "failed", {
+      reason: "cancelled",
+      summary: attribution.summary,
+      ...(attribution.signalSent ? { signal: "SIGTERM" } : {}),
+    });
+  }
+
+  /**
    * emitStop — persists subagent_stop at task terminal state; the
    * stoppedEmitted flag guards single-emit (exit handler + timeout-fire +
    * child.on("error") are multiple terminal-state paths); no-op if already sent.
@@ -2236,14 +2262,26 @@ export function createSubAgentManager(opts: {
     task.waitRejects.clear();
     // 2. Then abort the worker child process + backstop.
     task.abortCtrl?.abort();
+    let signaled = false;
     if (task.child) {
       try {
-        task.child.kill("SIGTERM");
+        signaled = task.child.kill("SIGTERM");
       } catch {
         /* ESRCH et al. ignore */
       }
       // Clear + re-arm: backstop baseline = this SIGTERM moment (reset=true).
       armKillFallback(task, true);
+    }
+    // 3. Foreground waits carry no envelope-side attribution, so the terminal
+    //    record must be written here, synchronously (T4). Background tasks keep
+    //    the existing async crashed-envelope path — mailbox wake intact.
+    if (task.def.excludeFromHostDrain === true) {
+      emitCancelledTerminal(task, {
+        summary: signaled
+          ? "cancelled by interrupt; SIGTERM sent to worker"
+          : "cancelled by interrupt before worker signal",
+        signalSent: signaled,
+      });
     }
     return true;
   }
@@ -2453,6 +2491,27 @@ export function createSubAgentManager(opts: {
     });
   }
 
+  /**
+   * T4 shutdown arm of `emitCancelledTerminal`: every task still live when
+   * shutdown reaches its clear point gets the guarded cancelled terminal —
+   * waiters are already rejected and the mailbox is about to be cleared, so
+   * both foreground and background land here. never throw out of shutdown:
+   * each append is isolated.
+   */
+  function cancelLiveTasksForShutdown(): void {
+    for (const t of [...tasks.values()]) {
+      if (t.state !== "starting" && t.state !== "running") continue;
+      try {
+        emitCancelledTerminal(t, {
+          summary: "cancelled by manager shutdown",
+          signalSent: false,
+        });
+      } catch {
+        /* forensics must not break shutdown */
+      }
+    }
+  }
+
   async function shutdown(): Promise<void> {
     const runningTasks = [...tasks.values()].filter(
       (t) => t.state === "starting" || t.state === "running"
@@ -2535,6 +2594,10 @@ export function createSubAgentManager(opts: {
     waitRejecters.clear();
     for (const poller of waitPollers) clearInterval(poller);
     waitPollers.clear();
+
+    // 3.5 T4: still-live tasks land the cancelled terminal before the map goes
+    //     away (helper holds the branching so shutdown keeps its shape).
+    cancelLiveTasksForShutdown();
 
     // 4. Clear the tasks map.
     tasks.clear();

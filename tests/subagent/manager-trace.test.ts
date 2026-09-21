@@ -429,3 +429,128 @@ describe("SubAgentManager crash stderr drain race (T1)", () => {
     assert.equal(h.recorded.stops[0]?.error?.type, "unknown");
   });
 });
+
+// ─── T4: cancelled terminal — abortTask / shutdown synchronous append ───────
+
+describe("SubAgentManager T4 cancelled 终态 (abortTask / shutdown)", () => {
+  const tick = (): Promise<void> =>
+    new Promise((resolve) => setImmediate(resolve));
+
+  it("前景任务 abortTask → 同步 append state_change(failed/cancelled) + stop(cancelled)，恰一次", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({
+      task: "fg interrupt",
+      excludeFromHostDrain: true,
+    });
+    assert.equal(h.manager.abortTask(taskId), true);
+    await tick();
+
+    const cancelled = h.recorded.stateChanges.filter(
+      (r) => r.reason === "cancelled"
+    );
+    assert.equal(cancelled.length, 1, "exactly one cancelled state_change");
+    assert.equal(cancelled[0]!.fromState, "running");
+    assert.equal(cancelled[0]!.toState, "failed");
+    assert.equal(h.recorded.stops.length, 1);
+    assert.equal(h.recorded.stops[0]!.reason, "cancelled");
+    assert.equal(h.recorded.stops[0]!.finalState, "failed");
+    assert.equal(h.recorded.stops[0]!.id, taskId);
+  });
+
+  it("abortTask 后 worker 回写 SIGTERM 信封 + exit：不重复 append（stoppedEmitted/自环 guard）", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({
+      task: "fg interrupt epilogue",
+      excludeFromHostDrain: true,
+    });
+    assert.equal(h.manager.abortTask(taskId), true);
+    assert.equal(manager_abort_again_false(h, taskId), true);
+    h.spawned[0]!.stdout.write(
+      JSON.stringify({
+        status: "failed",
+        reason: "timeout",
+        summary: "worker SIGTERM epilogue",
+        result: "",
+      }) + "\n"
+    );
+    h.spawned[0]!.stderr.end();
+    h.spawned[0]!.emit("exit", null, "SIGTERM");
+    await tick();
+    await tick();
+
+    assert.equal(h.recorded.stops.length, 1, "single stop record");
+    assert.equal(h.recorded.stops[0]!.reason, "cancelled");
+    assert.equal(
+      h.recorded.stateChanges.filter((r) => r.toState === "failed").length,
+      1,
+      "no failed→failed self-loop record"
+    );
+  });
+
+  function manager_abort_again_false(
+    harness: TracingHarness,
+    taskId: string
+  ): boolean {
+    return harness.manager.abortTask(taskId) === false;
+  }
+
+  it("前景 abortTask 不发 mailbox 通知（wait:true 无 drain 消息）", async () => {
+    const h = makeTracingHarness();
+    const notices: unknown[] = [];
+    h.manager.subscribe((notice) => notices.push(notice));
+    const { taskId } = h.manager.spawn({
+      task: "fg silent cancel",
+      excludeFromHostDrain: true,
+    });
+    h.manager.abortTask(taskId);
+    await tick();
+    assert.equal(notices.length, 0, "cancelled foreground stays mailbox-silent");
+  });
+
+  it("后景 abortTask：不立即落 cancelled，保持既有异步 crashed + mailbox 语义", async () => {
+    const h = makeTracingHarness();
+    const notices: unknown[] = [];
+    h.manager.subscribe((notice) => notices.push(notice));
+    const { taskId } = h.manager.spawn({ task: "bg kill" });
+    assert.equal(h.manager.abortTask(taskId), true);
+    await tick();
+    assert.equal(h.recorded.stops.length, 0, "no synchronous cancelled record for bg");
+
+    h.spawned[0]!.stderr.end();
+    h.spawned[0]!.emit("exit", null, "SIGTERM");
+    for (let i = 0; i < 10 && h.recorded.stops.length === 0; i++) await tick();
+    assert.equal(h.recorded.stops.length, 1);
+    assert.equal(h.recorded.stops[0]!.reason, "crashed");
+    assert.equal(notices.length, 1, "bg terminal still wakes the mailbox");
+  });
+
+  it("shutdown：仍 live 的任务在 tasks.clear() 前落 cancelled 终态，恰一次", async () => {
+    const h = makeTracingHarness();
+    const fg = h.manager.spawn({
+      task: "fg survivor",
+      excludeFromHostDrain: true,
+    });
+    const bg = h.manager.spawn({ task: "bg survivor" });
+    // fake children appear already reaped: shutdown's grace loop finishes at once
+    for (const child of h.spawned) {
+      Object.defineProperty(child, "exitCode", { value: 1, configurable: true });
+    }
+    await h.manager.shutdown();
+    await tick();
+
+    const stops = h.recorded.stops.filter((r) => r.reason === "cancelled");
+    assert.equal(stops.length, 2, `fg+bg cancelled stops, got ${stops.length}`);
+    assert.deepEqual(
+      new Set(stops.map((r) => r.id)),
+      new Set([fg.taskId, bg.taskId])
+    );
+    for (const id of [fg.taskId, bg.taskId]) {
+      assert.equal(
+        h.recorded.stateChanges.filter(
+          (r) => r.reason === "cancelled" && r.id === id
+        ).length,
+        1
+      );
+    }
+  });
+});
