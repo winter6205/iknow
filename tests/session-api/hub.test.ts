@@ -1696,6 +1696,75 @@ describe("postMessage answer wire fields — lastUsage (context-usage-display)",
   });
 });
 
+// -- #1079 T5: lastUsage persistence + reopen replay -------------------------
+
+describe("session file persist — lastUsage replay on reopen (#1079 T5)", () => {
+  it("successful usage turn → persisted file carries lastUsage; getSession replays it on the last turn", async () => {
+    const usage = {
+      inputTokens: 12800,
+      outputTokens: 7,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: 2048,
+    };
+    const deps = makeDeps([assistantResult({ texts: ["done"], usage })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "x",
+    });
+    const file = await store.load(session.conversation_id);
+    assert.deepEqual(file.lastUsage, usage);
+    const { turns } = await hub.getSession(session.conversation_id);
+    assert.ok(turns.length > 0);
+    const lastAnswer = turns[turns.length - 1]!.answer as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(lastAnswer.lastUsage, usage);
+  });
+
+  it("turn without usage → file has no lastUsage key; getSession turns omit it (0% posture)", async () => {
+    const deps = makeDeps([assistantResult({ texts: ["plain"] })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "x",
+    });
+    const file = await store.load(session.conversation_id);
+    assert.equal("lastUsage" in file, false);
+    const { turns } = await hub.getSession(session.conversation_id);
+    const lastAnswer = turns[turns.length - 1]!.answer as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal("lastUsage" in lastAnswer, false);
+  });
+
+  it("a later usage-less turn keeps the earlier persisted reading (never regresses to absent)", async () => {
+    const usage = {
+      inputTokens: 999,
+      outputTokens: 1,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["a"], usage })]));
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "first",
+    });
+    const hub2 = makeHub(makeDeps([assistantResult({ texts: ["b", "c"] })]));
+    await hub2.postMessage({
+      conversationId: session.conversation_id,
+      text: "second",
+    });
+    const file = await store.load(session.conversation_id);
+    assert.deepEqual(file.lastUsage, usage);
+  });
+});
+
 // -- T2: per-turn thinking override -------------------------------------------
 
 describe("postMessage thinking override (T2)", () => {

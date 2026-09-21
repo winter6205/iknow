@@ -69,9 +69,24 @@ export interface ActivityBlockInput {
    *  negative handling as `sliceTurnFrom`); past the end -> all history is
    *  dropped while live blocks still render at messages.length. */
   readonly start?: number;
+  /** Scan bound (exclusive) — same contract as `TurnActivityOptions.end`
+   *  (see turn-activity.ts): absent / non-finite / negative → the end of the
+   *  list; above the length clamps to it; below `start` yields no history
+   *  blocks. Windowed callers pass the mount window end so history outside
+   *  the viewport is never scanned; live blocks keep anchoring at
+   *  messages.length regardless. */
+  readonly end?: number;
   readonly thinkingMsAtVisible: (visibleIndex: number) => number;
   readonly liveThinking?: boolean;
   readonly liveRuns?: ReadonlyArray<LiveToolRun>;
+  /** Pre-computed set of tool_use ids present in the *authoritative*
+   *  transcript (the unfiltered session.messages the caller indexed with
+   *  `syncToolIndex`), not necessarily in the `messages` list scanned here.
+   *  The superset is intended: hidden rows never carry tool_use blocks, so
+   *  dedup semantics are unchanged and supplying it keeps the windowed
+   *  derivation free of any O(history) pass. Absent -> derived by a full
+   *  scan here. */
+  readonly historyToolUseIds?: ReadonlySet<string>;
   /** Same as ChatView: only items with `deriveSlot(...).inFoldCount` true
    *  are counted; default = count everything (pure-function fallback, same
    *  default as `orderedTurnActivitySegments`'s `inFoldCountOf`). */
@@ -84,6 +99,9 @@ export interface ActivityBlockInput {
 function alwaysInFold(): boolean {
   return true;
 }
+
+/** Shared empty id set for the no-live-runs path (nothing to dedup). */
+const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
 
 /** Turn live tool names into `ToolUseCount[]` (first-seen order + totals), same accounting as `formatToolUseCounts`. */
 function liveToolCounts(
@@ -137,6 +155,39 @@ function isWeldable(
   return inFoldCountOf({ id, name });
 }
 
+/** Scan-bound resolution (complexity split; contract documented on
+ *  `ActivityBlockInput.start` / `.end`). Out-of-range start: drop all
+ *  history, but live blocks (thinking stream / live quiet tools) still
+ *  render at messages.length (the virtual messageIndex of the uncommitted
+ *  phase). */
+function resolveScanBound(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  start: number | undefined,
+  end: number | undefined
+): { readonly startIndex: number; readonly endBound: number } {
+  let s = start ?? 0;
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  let e = end ?? messages.length;
+  if (!Number.isFinite(e) || e < 0) e = messages.length; // EXIT: non-finite / negative end → to-the-end
+  if (e > messages.length) e = messages.length;
+  const historyStart = Math.min(s, messages.length);
+  return { startIndex: Math.trunc(historyStart), endBound: e };
+}
+
+/** Dedup source for the live phase (complexity split). Lazy default scan:
+ *  with no live runs there is nothing to dedup, and malformed-history
+ *  callers (derivation returns [] in the main function) must not throw here
+ *  — the scan only ever ran per-run inside the old filter callback. */
+function dedupIdsFor(
+  input: ActivityBlockInput,
+  liveRuns: ReadonlyArray<LiveToolRun>
+): ReadonlySet<string> {
+  return (
+    input.historyToolUseIds ??
+    (liveRuns.length > 0 ? toolUseIdsOf(input.messages) : EMPTY_IDS)
+  );
+}
+
 /** Main function: pure derivation. See the module header. */
 export function deriveActivityBlocks(
   input: ActivityBlockInput
@@ -148,16 +199,13 @@ export function deriveActivityBlocks(
     liveRuns = [],
   } = input;
 
-  let start = input.start ?? 0;
-  if (!Number.isFinite(start) || start < 0) start = 0;
-
+  const { startIndex, endBound } = resolveScanBound(
+    messages,
+    input.start,
+    input.end
+  );
   const inFoldCountOf = input.inFoldCountOf ?? alwaysInFold;
   const blocks: ActivityBlock[] = [];
-
-  // Out-of-range start: drop all history, but live blocks (thinking stream
-  // / live quiet tools) still render at messages.length (the virtual
-  // messageIndex of the uncommitted phase).
-  const historyStart = Math.min(start, messages.length);
 
   try {
     // Single pass: accumulate counts and recognize cut boundaries. Each
@@ -175,8 +223,7 @@ export function deriveActivityBlocks(
 
     // Tool uses: i indexes messages (not visible) — one message may split
     // into several clusters; cut points = text / keep / accent / failure.
-    const startIndex = Math.trunc(historyStart);
-    for (let i = startIndex; i < messages.length; i++) {
+    for (let i = startIndex; i < endBound; i++) {
       scanMessage(i, messages[i], inFoldCountOf, scratch);
     }
   } catch {
@@ -191,10 +238,11 @@ export function deriveActivityBlocks(
   // history's `inFoldCountOf`) — keep / accent / failure stay on the tail
   // tool cards (live-tool-preview) and history blocks, otherwise the
   // original tail path would double-draw them.
+  const historyToolUseIds = dedupIdsFor(input, liveRuns);
   appendLiveBlocks(blocks, {
     messageIndex: messages.length,
     contentBlockIndex: 0,
-    liveRuns: liveRuns.filter((run) => !toolUseIdsOf(messages).has(run.id)),
+    liveRuns: liveRuns.filter((run) => !historyToolUseIds.has(run.id)),
     liveThinking,
   });
 

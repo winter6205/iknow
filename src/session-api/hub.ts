@@ -20,6 +20,7 @@ import {
   type HarnessStreamEvent,
   type LoopEngineDeps,
   type RunResult,
+  type TokenUsage,
 } from "../harness/index.js";
 import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
 import { type CompactReason } from "../harness/compress/index.js";
@@ -154,6 +155,8 @@ import {
   toInterruptReason,
   validateGoalText,
 } from "./store/index.js";
+// Deep import: internal persist-rule helper, deliberately not on the store barrel.
+import { persistedLastUsage } from "./store/schema.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
@@ -560,7 +563,13 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
 
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>,
-  thinkingMs?: ReadonlyArray<number | null>
+  thinkingMs?: ReadonlyArray<number | null>,
+  /** #1079 reopen replay: the session file's persisted usage snapshot.
+   *  Attached to the LAST projected turn's answer only (the snapshot is by
+   *  definition that turn's reading; earlier turns' usage is unknowable from
+   *  a single ledger). Absent/null → no key anywhere (byte-stable pattern as
+   *  thinking/toolCalls/lastUsage). */
+  lastUsage?: TokenUsage | null
 ): TurnDto[] {
   const mask = createOutputMask(currentSecretValues()).mask;
   const turns: TurnDto[] = [];
@@ -594,6 +603,14 @@ export function projectMessagesToTurns(
         ...(turnThinkingMs > 0 ? { thinkingMs: turnThinkingMs } : {}),
       },
     });
+  }
+  if (lastUsage != null && turns.length > 0) {
+    const lastIndex = turns.length - 1;
+    const last = turns[lastIndex]!;
+    turns[lastIndex] = {
+      query: last.query,
+      answer: { ...last.answer, lastUsage },
+    };
   }
   return turns;
 }
@@ -1718,7 +1735,13 @@ export class SessionHub {
       session: this.summarize({ file }),
       // D2 (tui-display-consistency): pass file.thinkingMs parallel array so
       // projectMessagesToTurns can sum per-turn assistant thinkingMs.
-      turns: projectMessagesToTurns(file.messages, file.thinkingMs),
+      // #1079: pass file.lastUsage so the replay's last turn carries the
+      // persisted usage reading (web UsageChip reopens non-0%).
+      turns: projectMessagesToTurns(
+        file.messages,
+        file.thinkingMs,
+        file.lastUsage
+      ),
     };
   }
 
@@ -2040,6 +2063,7 @@ export class SessionHub {
                           return run(effective, runDeps, o?.signal, {
                             priorMessages: o?.priorMessages ?? priorMessages,
                             onStream: o?.onStream ?? wrappedOnStream,
+                            hostStreamPresent: opts.onStream !== undefined,
                           });
                         }),
                       // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
@@ -2161,6 +2185,7 @@ export class SessionHub {
                       return run(effective, runDeps, opts.signal, {
                         priorMessages,
                         onStream: wrappedOnStream,
+                        hostStreamPresent: opts.onStream !== undefined,
                       });
                     })();
               const result = runOutcome.result;
@@ -2704,6 +2729,7 @@ export class SessionHub {
         priorMessages: modelPrior,
         appendUserText: false,
         onStream: wrappedOnStream,
+        hostStreamPresent: opts?.onStream !== undefined,
       });
       await this.conditionalSave({
         conversationId,
@@ -3368,9 +3394,7 @@ export class SessionHub {
                     messagesCount: persistedMessages.length,
                     interruptedAt: now,
                     interruptReason,
-                    ...(result.lastUsage !== null
-                      ? { lastUsage: result.lastUsage }
-                      : {}),
+                    ...persistedLastUsage(result.lastUsage),
                   });
             return {
               ...withCheckpoint,
@@ -3379,6 +3403,10 @@ export class SessionHub {
               updatedAt: now,
               schemaVersion: CURRENT_SCHEMA_VERSION,
               title: extractTitle(persistedMessages),
+              // #1079: file-level usage snapshot for reopen replay (TUI attach
+              // / web load must not fall back to 0%); covers every persisted
+              // decision, interrupt stops included.
+              ...persistedLastUsage(result.lastUsage),
             };
           })();
     await this.consumeDirtyRootOnSave(conversationId, async (root) => {

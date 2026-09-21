@@ -34,9 +34,25 @@ npx tsx src/cli.ts -h
 npx tsx src/cli.ts              # TTY → chat
 npx tsx src/cli.ts chat
 npx tsx src/cli.ts ask "…"      # one-shot JSON
-npx tsx src/cli.ts tui          # needs Bun: npm run dev:tui
+npx tsx src/cli.ts tui          # needs Bun on PATH (auto re-execs; see below)
 npx tsx src/cli.ts serve        # http://127.0.0.1:8787  (API + SPA + /trace)
 ```
+
+### Using iknow from any other project
+
+`chat` / `ask` / `serve` run on Node. The TUI needs [Bun](https://bun.sh) on your PATH — then
+`iknow tui` works from any project directory: if the launch process is Node, it re-execs the same
+CLI file under Bun with the cwd untouched, so the workspace root defaults to that cwd (ADR-0019;
+override with `--workspace-root <dir>`). Project settings (`.iknow/settings.json`, `.env.local`)
+are read from the launch cwd as well.
+
+```bash
+cd /path/to/my-project && iknow tui
+# fallback when the `iknow` bin is unavailable:
+bun /path/to/iknow/dist/cli.js tui
+```
+
+`npm run dev:tui` is a convenience script that exists only at the iknow repo root.
 
 On a TTY, bare `iknow` opens chat. Piped / non-TTY with no args prints usage.
 

@@ -17,6 +17,7 @@
 import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -1241,6 +1242,147 @@ describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", (
       assert.equal(existsSync(join(dir, "trace.2.jsonl")), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createJsonlTraceService — ADR-0116 llm_call system + tool_names", () => {
+  interface SystemRef {
+    sha: string;
+    bytes: number;
+  }
+
+  function parseLine(line: string): Record<string, unknown> {
+    return JSON.parse(line) as Record<string, unknown>;
+  }
+
+  it("system: 行内为 {sha, bytes} 引用, blob 正文 {kind:'str', v} 与消息同池", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-system-ref",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      system: "You are iknow. Use the symbol tools — do not start with grep.",
+    });
+
+    const parsed = parseLine(lines[0]!);
+    const ref = parsed.system as SystemRef;
+    assert.deepEqual(Object.keys(ref).sort(), ["bytes", "sha"]);
+    const blob = readFileSync(join(scratch, "blobs", ref.sha), "utf8");
+    const payload = JSON.parse(blob) as { kind: string; v: string };
+    assert.equal(payload.kind, "str");
+    assert.equal(
+      payload.v,
+      "You are iknow. Use the symbol tools — do not start with grep."
+    );
+    assert.equal(ref.bytes, Buffer.byteLength(blob, "utf8"));
+    // The raw sentence never stays inline on the row.
+    assert.equal(lines[0]!.includes("symbol tools"), false);
+  });
+
+  it("system: 同一正文两次 llm_call → 两行 sha 相同且 blobs/ 只落一份 system blob (T2 同池去重)", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-system-dedup",
+      writer,
+    });
+    await svc.recordLlmCall({ ...SAMPLE_LLM, system: "same prefix" });
+    await svc.recordLlmCall({ ...SAMPLE_LLM, system: "same prefix" });
+
+    assert.equal(lines.length, 2);
+    const first = parseLine(lines[0]!).system as SystemRef;
+    const second = parseLine(lines[1]!).system as SystemRef;
+    assert.equal(first.sha, second.sha);
+    // One message-content blob ("hi", deduped) + one system blob.
+    const msgSha = (
+      (parseLine(lines[0]!).messages as Array<{ content: SystemRef }>)
+    )[0]!.content.sha;
+    assert.deepEqual(
+      readdirSync(join(scratch, "blobs")).sort(),
+      [first.sha, msgSha].sort()
+    );
+  });
+
+  it("system: 与消息正文共享同一 pool — system 与某条 message content 同文时同 sha", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-system-shared-pool",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "shared body" }],
+      system: "shared body",
+    });
+    // 字符串 content 的 payload 同为 {kind:"str", v}, 与 system 编码一致 → 同一 sha。
+    const parsed = parseLine(lines[0]!);
+    const systemRef = parsed.system as SystemRef;
+    const messageRef = (
+      parsed.messages as Array<{ content: SystemRef }>
+    )[0]!.content;
+    assert.equal(systemRef.sha, messageRef.sha);
+    assert.deepEqual(readdirSync(join(scratch, "blobs")), [systemRef.sha]);
+  });
+
+  it("tool_names: 名字数组内联写入 (snake_case), 不含 schema", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-tool-names",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      toolNames: ["read_file", "get_record"],
+    });
+    const parsed = parseLine(lines[0]!);
+    assert.deepEqual(parsed.tool_names, ["read_file", "get_record"]);
+  });
+
+  it("Postel: 未发送 → 行内无 system / tool_names 键; 空数组亦不落键", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-absent",
+      writer,
+    });
+    await svc.recordLlmCall(SAMPLE_LLM);
+    await svc.recordLlmCall({ ...SAMPLE_LLM, toolNames: [] });
+
+    for (const line of lines) {
+      const parsed = parseLine(line);
+      assert.equal("system" in parsed, false);
+      assert.equal("tool_names" in parsed, false);
+    }
+  });
+
+  it("blob IO 失败 (blobs 目录被文件占据) → 整行不落, warn-once, 返回 undefined", async () => {
+    mkdirSync(join(scratch, "sub"), { recursive: true });
+    writeFileSync(join(scratch, "sub", "blobs"), "occupied", "utf8");
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: join(scratch, "sub"),
+      conversationId: "conv-fail",
+      writer,
+    });
+    // targetDir = scratch/sub; its sibling blobs path is occupied by a file,
+    // so the mkdir in writeContentBlob fails and the whole row is dropped.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const id = await svc.recordLlmCall({
+        ...SAMPLE_LLM,
+        system: "prefix that cannot be stored",
+      });
+      assert.equal(id, undefined);
+      assert.equal(lines.length, 0);
+      assert.equal(warn.mock.calls.length, 1);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

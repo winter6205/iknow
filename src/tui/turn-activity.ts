@@ -44,6 +44,15 @@ export interface TurnActivityOptions {
   readonly inFoldCountOf?: (
     call: Readonly<{ readonly id: string; readonly name: string }>
   ) => boolean;
+  /**
+   * Scan bound (exclusive) — canonical statement of the contract also used
+   * by `ActivityBlockInput.end` and `buildActivityBlockFoldLines`'s
+   * `visibleEnd`: absent / non-finite / negative → the end of the list;
+   * above the length clamps to it; below `start` scans no history at all
+   * (empty result). Windowed callers pass the mount-window end so history
+   * outside the viewport is never scanned; segment indices stay absolute.
+   */
+  readonly end?: number;
 }
 
 /**
@@ -68,6 +77,9 @@ export function orderedTurnActivitySegments(
     return [];
   }
   const inFoldCountOf = opts?.inFoldCountOf;
+  let end = opts?.end ?? messages.length;
+  if (!Number.isFinite(end) || end < 0) end = messages.length; // EXIT: non-finite / negative end → to-the-end
+  if (end > messages.length) end = messages.length;
 
   try {
     const segments: TurnActivitySegment[] = [];
@@ -94,7 +106,7 @@ export function orderedTurnActivitySegments(
       toolContentBlockIndex = undefined;
     };
 
-    for (let i = Math.trunc(start); i < messages.length; i++) {
+    for (let i = Math.trunc(start); i < end; i++) {
       const message = messages[i];
       if (message === undefined) continue;
       // Turn boundary = user query (isTurnQuery): flush the current tool

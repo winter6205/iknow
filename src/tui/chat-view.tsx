@@ -85,7 +85,10 @@ import {
   subagentCardsKey,
   type SubagentCardLines,
 } from "./subagent-message-lines.js";
-import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
+import {
+  syncToolIndex,
+  type TranscriptToolIndex,
+} from "./tool-result-index.js";
 import {
   listenScrollBoxTop,
   resolveScrollCommitStep,
@@ -93,7 +96,7 @@ import {
   shouldCommitScrollTop,
   type ViewportMountWindow,
 } from "./transcript-viewport.js";
-import { orderedTurnActivitySegments, toolUseIdsOf } from "./turn-activity.js";
+import { orderedTurnActivitySegments } from "./turn-activity.js";
 import { isLiveNoise } from "./tool-settled.js";
 import { TranscriptBanner } from "./transcript-banner.js";
 import { MessageRow, messageSegmentsOfVisible } from "./message-row.js";
@@ -105,12 +108,54 @@ import {
 import {
   buildActivityBlockFoldLines,
   makeThinkingMsAtVisibleFromSource,
+  stabilizeActivityBlockLines,
   type ActivityBlockLine,
   type FoldLinesBySegmentIndex,
+  type FoldLinesCache,
   type ShownThinkingMsValues,
   type ThinkingMsAtVisible,
 } from "./turn-fold-lines.js";
 import type { TurnActivitySegment } from "./turn-activity.js";
+
+/** Stable empty array for rows without activity-block lines (the render-side
+ *  `?? EMPTY` fallback must not mint a new array per render — MessageBlocks'
+ *  memo shallow-compare depends on the reference). */
+const EMPTY_ACTIVITY_BLOCKS: ReadonlyArray<ActivityBlockLine> = [];
+
+interface ProjectionState {
+  readonly conversationId: string | undefined;
+  readonly head: AnthropicNativeMessage | undefined;
+  readonly length: number;
+  readonly epoch: number;
+}
+
+/**
+ * Projection-identity transition: the reset unit is the transcript
+ * projection, not just the session id. The explicit reset signals are
+ * (a) conversationId change, (b) head identity change, (c) the array
+ * shrinking (`length < prev.length`) — appends never shrink, so a shrink
+ * (rewind-to-prefix / truncation) resets even when the head object survives.
+ * Reference-reuse on rehydration keeps the head object across turn-end
+ * appends, so (b) alone only fires on a real head replacement (compact);
+ * (c) covers the prefix-returning shapes. On reset, itemHeights / scrollTop
+ * / the quantization cursor are all stale and the TUI follows the new
+ * projection bottom. Null = same projection.
+ */
+function projectionTransition(
+  prev: ProjectionState,
+  conversationId: string | undefined,
+  head: AnthropicNativeMessage | undefined,
+  length: number
+): ProjectionState | null {
+  if (
+    prev.conversationId === conversationId &&
+    prev.head === head &&
+    length >= prev.length
+  ) {
+    return null; // EXIT: pure append / unchanged — keep the user position
+  }
+  return { conversationId, head, length, epoch: prev.epoch + 1 };
+}
 
 export interface ChatViewHandle {
   /**
@@ -185,24 +230,40 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const [scrollTop, setScrollTop] = useState(Number.MAX_SAFE_INTEGER);
     const [itemHeights, setItemHeights] = useState<ReadonlyArray<number>>([]);
     const conversationId = props.session.conversationId;
-    const [heightSessionId, setHeightSessionId] = useState(conversationId);
-    if (heightSessionId !== conversationId) {
-      setHeightSessionId(conversationId);
+    // Projection tracking: itemHeights / scrollTop reset when the
+    // transcript projection is replaced (see projectionTransition).
+    const messagesHead = props.session.messages[0];
+    const messagesLength = props.session.messages.length;
+    const [projection, setProjection] = useState<ProjectionState>({
+      conversationId,
+      head: messagesHead,
+      length: messagesLength,
+      epoch: 0,
+    });
+    const nextProjection = projectionTransition(
+      projection,
+      conversationId,
+      messagesHead,
+      messagesLength
+    );
+    if (nextProjection !== null) {
+      setProjection(nextProjection);
       setItemHeights([]);
       setScrollTop(Number.MAX_SAFE_INTEGER);
     }
+    const projectionEpoch = projection.epoch;
     const [scrollbarHovered, setScrollbarHovered] = useState(false);
     useScrollboxBindings({
       sbRef,
       setScrollbarHovered,
       setScrollTop,
       ref,
-      // On session switch itemHeights / scrollTop reset (see above) — the
-      // commit-quantization cursor must reset too: a cursor from the old
-      // session would classify the new session's first sub-threshold change as
-      // "step not crossed" and drop it, leaving the new window stuck at the
-      // old position.
-      conversationId,
+      // On projection reset (session switch or head replacement) itemHeights /
+      // scrollTop go stale (see above) — the commit-quantization cursor must
+      // reset too: a cursor from the old projection would classify the new
+      // one's first sub-threshold change as "step not crossed" and drop it,
+      // leaving the new window stuck at the old position.
+      projectionEpoch,
     });
     // Concurrency defense: high-frequency streaming drafts update at low priority.
     const draftSegments = useMemo((): ReadonlyArray<string> => {
@@ -218,21 +279,20 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const deferredThinkingDrafts = useDeferredValue(
       props.thinkingDraftMasked ?? ""
     );
-    // statusMap = exact tool_result pairing (same SSOT as ToolSummaryRow status coloring).
-    // useMemo stabilizes downstream props: recompute only when the messages
-    // reference changes, so every render does not produce a new Map and churn
-    // MessageBlocks reference props into downstream re-renders (fixes spacing jitter).
-    const statusMap = useMemo(
-      () => toolResultStatusMap(props.session.messages),
-      [props.session.messages]
-    );
-    // resultTextMap = tool_use_id → tool_result text (data source for
-    // historical result previews). Same-source useMemo stabilization (same
-    // discipline as statusMap).
-    const resultTextMap = useMemo(
-      () => toolResultTextMap(props.session.messages),
-      [props.session.messages]
-    );
+    // Incremental tool_use_id index: statusMap / resultTextMap are
+    // byte-equivalent to the tool-summary.ts full-build SSOT but maintained
+    // across message-array changes — the append-mostly transcript plus the
+    // reference-reuse rehydration makes turn-end updates a pure append, and
+    // a tool-free append keeps the previous map references outright. The
+    // refs stay stable across renders (MessageBlocks memo contract).
+    const toolIndexRef = useRef<TranscriptToolIndex | null>(null);
+    const toolIndex = useMemo(() => {
+      const next = syncToolIndex(toolIndexRef.current, props.session.messages);
+      toolIndexRef.current = next;
+      return next;
+    }, [props.session.messages]);
+    const statusMap = toolIndex.statusMap;
+    const resultTextMap = toolIndex.resultTextMap;
     const running = props.session.runState === "running-fg";
     const thinkingExpanded = props.thinkingExpanded === true;
     // Message content width leaves room for the scrollbar / safe margin
@@ -350,11 +410,23 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       [statusMap]
     );
     // Folding applies to the whole turn history — no more slicing to
-    // lastTurnSlice; `activitySegments` builds from 0 (0 = starting at the
-    // assistant before the first user query; no query → full history).
+    // lastTurnSlice. The scan is bounded to the current mount
+    // window (segments only feed mounted rows, and the unit-fold path that
+    // once needed whole-turn aggregation is retired); scrolling still walks
+    // the full history because every window shift re-derives over the new
+    // range.
     const activitySegments = useMemo(
-      () => orderedTurnActivitySegments(visibleMessages, 0, { inFoldCountOf }),
-      [visibleMessages, inFoldCountOf]
+      () =>
+        orderedTurnActivitySegments(visibleMessages, mountWindow.startIndex, {
+          inFoldCountOf,
+          end: mountWindow.endIndex,
+        }),
+      [
+        visibleMessages,
+        inFoldCountOf,
+        mountWindow.startIndex,
+        mountWindow.endIndex,
+      ]
     );
     // The already-drawn foldLinesBySegmentIndex is the **only** signal that a
     // fold exists — the whole-turn `currentTurnHasFold` /
@@ -365,10 +437,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // The tail removes only tool_use ids **already present in history** (draw
     // each row once); it no longer second-filters by "already folded this
     // turn" — that was a double delete stacked onto the reducer's direct deletion.
-    const turnLiveRuns = useMemo(() => {
-      const historyToolUseIds = toolUseIdsOf(visibleMessages);
-      return liveToolRuns.filter((run) => !historyToolUseIds.has(run.id));
-    }, [liveToolRuns, visibleMessages]);
+    const turnLiveRuns = useMemo(
+      () => liveToolRuns.filter((run) => !toolIndex.toolUseIds.has(run.id)),
+      [liveToolRuns, toolIndex]
+    );
     // Retired `formatLiveActivitySummary` / `splitLiveActivityRuns` from the
     // production call surface — activity blocks (unanchoredBlocks) are the
     // sole live tense for in-progress **class collapse** and keep / aggregated
@@ -376,9 +448,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // activity blocks); the old unit-fold path never stacks on top.
     // Activity blocks = block titles + body slots; the block list is derived
     // via `deriveActivityBlocks`, and results are grouped by messageIndex to
-    // feed MessageRow directly. History assistant messages before
-    // `visibleStart` do not participate in the activity projection; this
-    // slice computes with visibleStart=0 (same source as activitySegments).
+    // feed MessageRow directly. The scan is bounded to the mount
+    // window — blocks are per-message derivations (flushed at message end),
+    // so in-window rows derive exactly what the full-table pass produced;
+    // scrolling up still reaches the same content because each window shift
+    // re-derives its own range. `historyToolUseIds` feeds the incremental
+    // index so no O(history) dedup scan runs per commit.
     //
     // Thinking body text lives in the unanchored activity block's body slot —
     // the ThinkingPanel component is retired; the liveThinking gate keeps the
@@ -390,12 +465,13 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       running,
       props.thinkingDraftMasked
     );
-    const activityBlockFoldLines = useMemo(
+    const foldDerived = useMemo(
       () =>
         buildActivityBlockFoldLines({
           messages: visibleMessages,
-          visibleStart: 0,
+          visibleStart: mountWindow.startIndex,
           visibleCount: visibleMessages.length,
+          visibleEnd: mountWindow.endIndex,
           thinkingMsAtVisible,
           // tool_use items already in the transcript may still be running:
           // the full liveRuns must go to the derivation (resolveLiveRunning).
@@ -404,15 +480,36 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           liveRuns: liveToolRuns,
           liveThinking,
           inFoldCountOf,
+          historyToolUseIds: toolIndex.toolUseIds,
         }),
       [
         visibleMessages,
+        mountWindow.startIndex,
+        mountWindow.endIndex,
         thinkingMsAtVisible,
         liveToolRuns,
         inFoldCountOf,
         liveThinking,
+        toolIndex,
       ]
     );
+    // Window shifts re-derive the range; rows whose message object and lines
+    // are unchanged keep their previous array reference so still-visible
+    // MessageBlocks memo-hit instead of re-rendering the whole viewport.
+    const foldCacheRef = useRef<FoldLinesCache | null>(null);
+    const activityBlockFoldLines = useMemo(() => {
+      const stable = stabilizeActivityBlockLines(
+        foldCacheRef.current,
+        foldDerived.blockLinesByMessage,
+        visibleMessages
+      );
+      foldCacheRef.current = stable.cache;
+      return {
+        blockLinesByMessage: stable.byMessage,
+        shownThinkingMsValues: foldDerived.shownThinkingMsValues,
+        unanchoredBlocks: foldDerived.unanchoredBlocks,
+      };
+    }, [foldDerived, visibleMessages]);
     // Set of ms values covered by blocks (for the hideThinking dual gate).
     // The old `foldLinesBySegmentIndex` path is fully retired — hideThinking's
     // `shownThinkingMsValues` gate has only the block list left, no union needed.
@@ -489,17 +586,26 @@ function measureMountedHeights(
   setHeights: (next: ReadonlyArray<number>) => void
 ): void {
   if (sb === null) return; // EXIT: unmounted during measure
-  let changed = false;
-  const next = visibleMessages.map((_, i) => prevHeights[i] ?? 0);
+  // The next array is copied lazily: a scroll commit that finds no mounted
+  // height change must not allocate an O(history) array nor churn the
+  // itemHeights reference the viewport memo depends on.
+  let next: number[] | null = null;
   for (let i = startIndex; i < endIndex; i++) {
     const node = sb.getRenderable(`tmsg-${i}`);
     const h = node?.height;
-    if (Number.isFinite(h) && (h as number) > 0 && next[i] !== (h as number)) {
+    if (
+      Number.isFinite(h) &&
+      (h as number) > 0 &&
+      (prevHeights[i] ?? 0) !== (h as number)
+    ) {
+      next ??= Array.from(
+        { length: visibleMessages.length },
+        (_, j) => prevHeights[j] ?? 0
+      );
       next[i] = h as number;
-      changed = true;
     }
   }
-  if (changed) setHeights(next);
+  if (next !== null) setHeights(next); // EXIT: nothing changed → no setState
 }
 
 /**
@@ -515,10 +621,12 @@ function useScrollboxBindings(args: {
   readonly setScrollbarHovered: (hovered: boolean) => void;
   readonly setScrollTop: (next: number | ((prev: number) => number)) => void;
   readonly ref: React.Ref<ChatViewHandle>;
-  /** Current session id; changing it = switching sessions → resubscribe and reset the quantization cursor (see call site). */
-  readonly conversationId: string | undefined;
+  /** Projection epoch: bumped whenever the transcript projection is replaced
+   *  (session switch / compact / rewind head change) → resubscribe and reset
+   *  the quantization cursor (see call site). */
+  readonly projectionEpoch: number;
 }): void {
-  const { sbRef, setScrollbarHovered, setScrollTop, ref, conversationId } =
+  const { sbRef, setScrollbarHovered, setScrollTop, ref, projectionEpoch } =
     args;
   useLayoutEffect(() => {
     const sb = sbRef.current;
@@ -540,7 +648,7 @@ function useScrollboxBindings(args: {
     // can never unmount what the viewport shows.
     //
     // `committed` lives for one subscription. The effect re-runs on
-    // `conversationId` change, so the cursor starts fresh (null → always
+    // `projectionEpoch` change, so the cursor starts fresh (null → always
     // commit) for the first change after a session switch — the same reset the
     // render body applies to itemHeights / scrollTop.
     let committed: number | null = null; // null = nothing committed yet → always commit
@@ -565,7 +673,7 @@ function useScrollboxBindings(args: {
       stopTracking();
       stopHover();
     };
-  }, [sbRef, setScrollTop, setScrollbarHovered, conversationId]);
+  }, [sbRef, setScrollTop, setScrollbarHovered, projectionEpoch]);
   useImperativeHandle(ref, () => ({
     scrollToBottom() {
       const sb = sbRef.current;
@@ -666,7 +774,10 @@ function ChatScrollbox(props: {
               visibleIndex
             )}
             foldLinesBySegmentIndex={props.foldLinesBySegmentIndex}
-            activityBlocks={props.blockLinesByMessage.get(visibleIndex) ?? []}
+            activityBlocks={
+              props.blockLinesByMessage.get(visibleIndex) ??
+              EMPTY_ACTIVITY_BLOCKS
+            }
             shownThinkingMsValues={props.shownThinkingMsValues}
             statusMap={props.statusMap}
             resultTextMap={props.resultTextMap}

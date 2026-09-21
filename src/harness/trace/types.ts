@@ -59,6 +59,25 @@ export interface LlmCallRecord {
    */
   messagesCaptured: boolean;
   messages?: ReadonlyArray<unknown>;
+  /**
+   * ADR-0116: the full `deps.system()` text this step actually sent — the
+   * identity prefix the model saw. Separate channel from `messages` (which
+   * stays the accumulated conversation, ADR-0036): the read side never finds
+   * the identity prefix masquerading as a `role=system` entry in `messages`.
+   * The implementation stores the body in the same content-addressed blob
+   * pool as messages (write-if-missing) and emits the `{sha, bytes}`
+   * reference on the JSONL row. Postel: when this step did not resolve / send
+   * a system prompt the key is wholly absent — never an empty string.
+   */
+  system?: string;
+  /**
+   * ADR-0116: names of the tools handed to the model this step — the name
+   * list only, never JSON schemas. The list is a step-start snapshot:
+   * promptTools is static within a step in current assembly (same stability
+   * assumption as `system`). Postel: absent when the step sent no
+   * tools (loop-engine omits an empty list rather than writing `[]`).
+   */
+  toolNames?: ReadonlyArray<string>;
   status: TraceStatus;
   error?: TraceError;
   /**

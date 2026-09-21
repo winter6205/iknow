@@ -22,7 +22,6 @@ import {
   type ActivityBlock,
   type ActivityBlockInput,
 } from "./activity-block.js";
-
 /** Anchor message index -> fold lines (unit fold, 0 or 1 line). The type is
  *  kept for the MessageRow / ChatScrollbox call surface, but this module no
  *  longer populates it; an always-empty map is passed. */
@@ -204,24 +203,41 @@ export interface ActivityBlockFoldDerivation {
  * `deriveActivityBlocks` shape. The returned map is indexed by messageIndex
  * (flattened visible index); multiple blocks per messageIndex are consumed
  * ascending by contentBlockIndex, one title line per block.
+ *
+ * Windowed callers pass `visibleStart` / `visibleEnd` = the current mount
+ * window: only that range of messages is scanned; blocks for
+ * rows outside the window simply do not exist in the result, and live
+ * (unanchored) blocks always fall to the tail as before.
  */
 export function buildActivityBlockFoldLines(args: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly visibleStart?: number;
   readonly visibleCount: number;
+  /** Scan / anchoring bound (exclusive) — follows the canonical contract in
+   *  `TurnActivityOptions.end` (turn-activity.ts), with absent defaulting to
+   *  `visibleCount` (the historical full-table behaviour). */
+  readonly visibleEnd?: number;
   readonly thinkingMsAtVisible: (visibleIndex: number) => number;
   readonly liveRuns?: ReadonlyArray<LiveToolRun>;
   readonly liveThinking?: boolean;
   readonly inFoldCountOf?: ActivityBlockInput["inFoldCountOf"];
+  /** Incremental tool_use id set (avoids the O(history) dedup scan). */
+  readonly historyToolUseIds?: ReadonlySet<string>;
 }): ActivityBlockFoldDerivation {
   const { messages } = args;
+  const endBound = Math.min(
+    args.visibleEnd ?? args.visibleCount,
+    messages.length
+  );
   const blocks = deriveActivityBlocks({
     messages,
     start: args.visibleStart,
+    end: endBound,
     thinkingMsAtVisible: args.thinkingMsAtVisible,
     liveRuns: args.liveRuns,
     liveThinking: args.liveThinking,
     inFoldCountOf: args.inFoldCountOf,
+    historyToolUseIds: args.historyToolUseIds,
   });
   // Group by messageIndex, keeping anchors; multiple blocks of one message
   // sort ascending by contentBlockIndex (a block's contentBlockIndex is the
@@ -231,8 +247,9 @@ export function buildActivityBlockFoldLines(args: {
   const unanchoredBlocks: ActivityBlock[] = [];
 
   for (const block of blocks) {
-    if (block.anchor.messageIndex >= args.visibleCount) {
-      // EXIT: on-disk index >= visibleCount -> live block (uncommitted phase), falls to the tail.
+    if (block.anchor.messageIndex >= endBound) {
+      // EXIT: on-disk index >= window bound (incl. the live phase at
+      // messages.length) -> live block (uncommitted phase), falls to the tail.
       unanchoredBlocks.push(block);
       continue;
     }
@@ -261,4 +278,75 @@ export function buildActivityBlockFoldLines(args: {
     shownThinkingMsValues,
     unanchoredBlocks,
   };
+}
+
+/**
+ * Reference-stable fold lines across windowed recomputes.
+ *
+ * ChatView re-runs `buildActivityBlockFoldLines` every time the mount window
+ * shifts (scroll commit). Without stabilization every still-visible row gets
+ * a brand-new lines array and MessageBlocks' memo shallow-compare misses —
+ * scrolling would re-render the whole visible window. This cache reuses the
+ * previous array reference when (a) the message object at that visibleIndex
+ * is still the same reference and (b) the derived lines are content-equal.
+ */
+export interface FoldLinesCache {
+  readonly entries: ReadonlyMap<
+    number,
+    {
+      readonly message: AnthropicNativeMessage;
+      readonly lines: ReadonlyArray<ActivityBlockLine>;
+    }
+  >;
+}
+
+function activityBlockLinesEqual(
+  a: ReadonlyArray<ActivityBlockLine>,
+  b: ReadonlyArray<ActivityBlockLine>
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (
+      x.contentBlockIndex !== y.contentBlockIndex ||
+      x.title !== y.title ||
+      x.preview !== y.preview
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function stabilizeActivityBlockLines(
+  prev: FoldLinesCache | null,
+  derived: ReadonlyMap<number, ReadonlyArray<ActivityBlockLine>>,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): {
+  readonly cache: FoldLinesCache;
+  readonly byMessage: ReadonlyMap<number, ReadonlyArray<ActivityBlockLine>>;
+} {
+  const entries = new Map<
+    number,
+    { message: AnthropicNativeMessage; lines: ReadonlyArray<ActivityBlockLine> }
+  >();
+  const byMessage = new Map<number, ReadonlyArray<ActivityBlockLine>>();
+  for (const [messageIndex, lines] of derived) {
+    const message = messages[messageIndex];
+    const cached = prev?.entries.get(messageIndex);
+    let stable = lines;
+    if (
+      message !== undefined &&
+      cached !== undefined &&
+      cached.message === message &&
+      activityBlockLinesEqual(cached.lines, lines)
+    ) {
+      stable = cached.lines; // EXIT: unchanged row keeps its previous array reference
+    }
+    if (message !== undefined)
+      entries.set(messageIndex, { message, lines: stable });
+    byMessage.set(messageIndex, stable);
+  }
+  return { cache: { entries }, byMessage };
 }

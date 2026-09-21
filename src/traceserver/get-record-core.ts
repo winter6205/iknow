@@ -22,6 +22,7 @@
  */
 import {
   collectToolResults,
+  dereferenceSystemBody,
   dereferenceTraceMessages,
   messageContentBlocks,
   messageRole,
@@ -86,13 +87,28 @@ export const GET_RECORD_DESCRIPTION =
   "from_char + count would pass part_chars; a window past the part end answers " +
   "with that size and the remaining characters. Use detail=messages to address " +
   "an LLM call's message content blocks (each inventory part carries the role " +
-  "of its message), which also requires message_index; leave detail at its " +
-  "default tool_results to address that call's projected tool results by " +
+  "of its message), which also requires message_index; use detail=system to " +
+  "address an LLM call's identity-prefix body as one part, or detail=tools to " +
+  "address its tool name list one part per name; leave detail at its default " +
+  "tool_results to address that call's projected tool results by " +
   "part_index, in projection order and in full. Positions count UTF-16 code " +
   "units, so a boundary may fall between the halves of a surrogate pair. " +
   "Discover conversation_id with list_sessions and record_id with query_trace.";
 
-type Detail = "messages" | "tool_results";
+type Detail = "messages" | "tool_results" | "system" | "tools";
+
+/**
+ * The full detail enum, declared once for the core's validation message and
+ * both faces' schemas (ACI + MCP) — the enum surface cannot drift between
+ * the three. Order is the validation message's order; `tool_results` stays
+ * the default.
+ */
+export const GET_RECORD_DETAIL_VALUES = [
+  "tool_results",
+  "messages",
+  "system",
+  "tools",
+] as const;
 
 interface GetRecordInput {
   readonly conversation_id?: unknown;
@@ -229,13 +245,16 @@ function requireNonEmptyString(value: unknown, field: string): string {
 
 function parseDetail(value: unknown): Detail {
   if (value === undefined) return "tool_results";
-  if (value !== "messages" && value !== "tool_results") {
+  if (
+    typeof value !== "string" ||
+    !(GET_RECORD_DETAIL_VALUES as ReadonlyArray<string>).includes(value)
+  ) {
     throw new TraceQueryValidationError(
       "detail",
-      "detail must be one of: messages, tool_results"
+      `detail must be one of: ${GET_RECORD_DETAIL_VALUES.join(", ")}`
     );
   }
-  return value;
+  return value as Detail;
 }
 
 /** One addressable part: coordinates + full text. Both the window arm and the manifest arm answer from this single list, so they cannot disagree. */
@@ -272,6 +291,18 @@ async function addressParts(
   readonly parts: ReadonlyArray<AddressablePart>;
   readonly messageCount: number;
 }> {
+  // ADR-0116 arms: `system` addresses the one dereferenced identity-prefix
+  // body; `tools` addresses the step's tool-name list (one part per name,
+  // the name echoed in the inventory identity). Neither is message-indexed,
+  // so messageCount is unused there (selectParts rejects message_index) —
+  // kept at 0 rather than paying for a messages deref these arms never read.
+  if (detail === "system" || detail === "tools") {
+    const parts =
+      detail === "system"
+        ? await systemParts(row, traceFilePath)
+        : toolNameParts(row);
+    return { parts, messageCount: 0 };
+  }
   const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
   // Pass traceFilePath, not traceDir — blob directory = dirname(filePath)/blobs.
   const dereferenced = await dereferenceTraceMessages(messages, {
@@ -311,6 +342,32 @@ async function addressParts(
     });
   });
   return { parts, messageCount: dereferenced.length };
+}
+
+/** detail=system (ADR-0116): the single dereferenced identity-prefix body, or no parts when the step sent none / the blob is unreadable. */
+async function systemParts(
+  row: TraceRecordRow,
+  traceFilePath: string
+): Promise<ReadonlyArray<AddressablePart>> {
+  const text = await dereferenceSystemBody(row["system"], { traceFilePath });
+  return text === undefined ? [] : [{ partIndex: 0, text }];
+}
+
+/** detail=tools (ADR-0116): one part per tool name; the name rides in the inventory identity like tool_results carries its tool name. */
+function toolNameParts(
+  row: TraceRecordRow
+): ReadonlyArray<AddressablePart> {
+  const names = Array.isArray(row["tool_names"]) ? row["tool_names"] : [];
+  const parts: AddressablePart[] = [];
+  for (const entry of names) {
+    if (typeof entry !== "string") continue;
+    parts.push({
+      partIndex: parts.length,
+      text: entry,
+      identity: { name: entry },
+    });
+  }
+  return parts;
 }
 
 /**
@@ -394,15 +451,37 @@ function windowOf(
 }
 
 /**
+ * Per-part-arm addressing vocabulary for the three non-message-indexed
+ * details: `phrase` names the arm in the message_index rejection, `unit`
+ * names the pagination unit in out-of-range errors (kept verbatim for
+ * tool_results, whose wording predates ADR-0116).
+ */
+const PART_ARM: Record<
+  "tool_results" | "system" | "tools",
+  { readonly phrase: string; readonly unit: string }
+> = {
+  tool_results: { phrase: "projected tool results", unit: "tool results" },
+  system: { phrase: "the record's system body", unit: "system body parts" },
+  tools: { phrase: "the record's tool name list", unit: "tool names" },
+};
+
+function partArmOf(detail: Detail): "tool_results" | "system" | "tools" {
+  if (detail === "system") return "system";
+  if (detail === "tools") return "tools";
+  return "tool_results";
+}
+
+/**
  * Narrow coordinates to one part — both arms share one criterion, so
  * "coordinates that took part in addressing must be answered; unused
  * coordinates must be rejected" is implemented once.
  *
  * Out-of-range `message_index` / `part_index` report `validation` with the
  * **real addressable count** (the error kind set stays at five, no sixth);
- * `detail=tool_results` does not address by message at all, so passing one
- * is rejected; a `detail=messages` window requires `message_index` —
- * defaulting it to 0 would answer "the message nobody named" as "message 0".
+ * the non-message arms (`tool_results`, ADR-0116's `system` / `tools`) do
+ * not address by message at all, so passing one is rejected; a
+ * `detail=messages` window requires `message_index` — defaulting it to 0
+ * would answer "the message nobody named" as "message 0".
  */
 function selectParts(
   parts: ReadonlyArray<AddressablePart>,
@@ -410,16 +489,19 @@ function selectParts(
   addressable: { readonly messageCount: number }
 ): ReadonlyArray<AddressablePart> {
   const { detail, messageIndex, partIndex } = parsed;
-  if (detail === "tool_results") {
+  if (detail !== "messages") {
+    const arm = partArmOf(detail);
     if (messageIndex !== undefined) {
       throw new TraceQueryValidationError(
         "message_index",
-        "message_index addresses one message; detail=tool_results addresses projected tool results, which are not message-indexed"
+        `message_index addresses one message; detail=${arm} addresses ${PART_ARM[arm].phrase}, which ${
+          arm === "tool_results" ? "are" : "is"
+        } not message-indexed`
       );
     }
     if (partIndex === undefined) return parts;
     if (partIndex >= parts.length) {
-      throw outOfRange("part_index", partIndex, parts.length, "tool results");
+      throw outOfRange("part_index", partIndex, parts.length, PART_ARM[arm].unit);
     }
     return parts.slice(partIndex, partIndex + 1);
   }

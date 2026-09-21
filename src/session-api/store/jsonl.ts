@@ -42,7 +42,10 @@
  * boundary. Existing event records are never dropped, so a rewound-away
  * branch survives every save in the same file.
  */
-import type { AnthropicNativeMessage } from "../../harness/index.js";
+import type {
+  AnthropicNativeMessage,
+  TokenUsage,
+} from "../../harness/index.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
 import { sanitizeSessionFile } from "./schema.js";
 
@@ -79,6 +82,10 @@ export interface SessionHeaderRecord {
   /** Parallel array of assistant-turn thinking duration (ms). Same
    *  spread-discipline as SessionFileV1.thinkingMs: absent is legal. */
   readonly thinkingMs?: ReadonlyArray<number | null>;
+  /** Context-usage display snapshot (#1079): rides the header via the
+   *  file-minus-messages spread, same add-on posture as goal/workspaceRoot.
+   *  Shape is validated on load by sanitizeSessionFile, not here. */
+  readonly lastUsage?: TokenUsage;
 }
 
 /** One message event: unique id + parent chain + verbatim native message.

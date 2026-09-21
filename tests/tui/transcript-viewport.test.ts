@@ -168,7 +168,9 @@ describe("selectViewportMountWindow", () => {
     // window behind the viewport); and ≤ one wheel step (a single wheel tick
     // must be able to move the window; whether one wheel event commits is
     // certified by the behavior test in chat-view-scroll.test.tsx).
-    expect(resolveScrollCommitStep(viewportHeight)).toBeLessThanOrEqual(overscan);
+    expect(resolveScrollCommitStep(viewportHeight)).toBeLessThanOrEqual(
+      overscan
+    );
 
     // An explicit smaller overscan is raised to the default (overscan < default
     // → default); an explicit larger one is respected verbatim. Window length is
@@ -180,7 +182,9 @@ describe("selectViewportMountWindow", () => {
       overscan: 2,
     });
     expect(explicitSmall.mounted.length).toBeLessThan(50);
-    expect(explicitSmall.spacerAfter).toBe((50 - explicitSmall.mounted.length) * 4);
+    expect(explicitSmall.spacerAfter).toBe(
+      (50 - explicitSmall.mounted.length) * 4
+    );
     // Default overscan = viewport/4 = 10 rows → window covers viewport +
     // overscan = 50 rows; 4 rows per item → mount ceil(50/4) = 13 items (the
     // right edge takes the first item covering up to row 50).
@@ -315,9 +319,7 @@ describe("shouldCommitScrollTop / resolveScrollCommitStep", () => {
       const step = resolveScrollCommitStep(viewportHeight);
       expect(step).toBeGreaterThanOrEqual(1);
       expect(step).toBeLessThanOrEqual(CHAT_WHEEL_SCROLL_MULTIPLIER);
-      expect(step).toBeLessThanOrEqual(
-        defaultViewportOverscan(viewportHeight)
-      );
+      expect(step).toBeLessThanOrEqual(defaultViewportOverscan(viewportHeight));
     }
   });
 });
@@ -387,5 +389,107 @@ describe("listenScrollBoxTop", () => {
     expect(() => listenScrollBoxTop({} as never, () => undefined)).toThrow(
       TypeError
     );
+  });
+});
+
+describe("selectViewportMountWindow: prefix-sum cache", () => {
+  // Seeded LCG so failures reproduce.
+  function lcg(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 0x100000000;
+    };
+  }
+
+  test("warm (repeated same-array) selects equal cold selects across a random sweep", () => {
+    const rnd = lcg(1079);
+    for (let trial = 0; trial < 300; trial++) {
+      const n = 1 + Math.floor(rnd() * 40);
+      const messages = ids(n);
+      const heights = Array.from({ length: n }, () => {
+        const roll = rnd();
+        if (roll < 0.1) return 0; // invalid → placeholder
+        if (roll < 0.15) return Number.NaN; // invalid → placeholder
+        return 1 + Math.floor(rnd() * 9);
+      });
+      const opts = {
+        scrollTop: Math.floor(rnd() * n * 10),
+        viewportHeight: 1 + Math.floor(rnd() * 12),
+        heights,
+        overscan: Math.floor(rnd() * 5),
+        placeholderHeight: 1 + Math.floor(rnd() * 6),
+      };
+      const cold = selectViewportMountWindow(messages, {
+        ...opts,
+        heights: [...heights],
+      });
+      const warm1 = selectViewportMountWindow(messages, opts);
+      const warm2 = selectViewportMountWindow(messages, opts);
+      expect(warm1).toEqual(cold);
+      expect(warm2).toEqual(cold);
+    }
+  });
+
+  test("cache entry is keyed on shape: grown list / changed placeholder rebuild", () => {
+    const base = [3, 5, 2];
+    const opts = { scrollTop: 6, viewportHeight: 4, heights: base };
+    const same = selectViewportMountWindow(ids(3), opts);
+    // Heights array stays short while the message list grows: missing tail
+    // rows resolve to the placeholder, not to stale sums.
+    const grownCold = selectViewportMountWindow(ids(5), {
+      ...opts,
+      heights: [...base],
+    });
+    const grownWarm = selectViewportMountWindow(ids(5), opts);
+    expect(grownWarm).toEqual(grownCold);
+    // A different placeholder for the same array must not reuse old sums.
+    const phCold = selectViewportMountWindow(ids(3), {
+      ...opts,
+      placeholderHeight: 7,
+      heights: [...base],
+    });
+    const phWarm = selectViewportMountWindow(ids(3), {
+      ...opts,
+      placeholderHeight: 7,
+    });
+    expect(phWarm).toEqual(phCold);
+    expect(same.mounted.length).toBeGreaterThan(0);
+  });
+
+  test("placeholder validation branch alone: same array + same n, two placeholderHeight values", () => {
+    // heights shorter than the message list: the missing tail rows resolve
+    // through `placeholder`, so the sums genuinely differ per placeholder
+    // value and a stale cache hit cannot hide behind `n` divergence.
+    // scrollTop 0 + viewport 5 cuts inside the placeholder rows, making
+    // spacerAfter depend on the placeholder value.
+    const heights = [3];
+    const opts = { scrollTop: 0, viewportHeight: 5, heights };
+    const coldFor = (placeholderHeight: number) =>
+      selectViewportMountWindow(ids(3), {
+        ...opts,
+        placeholderHeight,
+        heights: [...heights],
+      });
+    // Warm the cache entry (n = 3, placeholder = 4) …
+    const warm4 = selectViewportMountWindow(ids(3), {
+      ...opts,
+      placeholderHeight: 4,
+    });
+    expect(warm4).toEqual(coldFor(4));
+    // … then hit the SAME array identity with the SAME n but a different
+    // placeholder: only the `placeholder` check can reject the cached sums.
+    const warm7 = selectViewportMountWindow(ids(3), {
+      ...opts,
+      placeholderHeight: 7,
+    });
+    expect(warm7).toEqual(coldFor(7));
+    expect(warm7).not.toEqual(warm4);
+    // And back to 4 against the entry last cached at 7: still validated.
+    const warm4again = selectViewportMountWindow(ids(3), {
+      ...opts,
+      placeholderHeight: 4,
+    });
+    expect(warm4again).toEqual(coldFor(4));
   });
 });

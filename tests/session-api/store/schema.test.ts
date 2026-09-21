@@ -904,3 +904,63 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
     );
   });
 });
+
+// -- #1079 T5: file-level lastUsage (context-usage display replay) -----------
+
+describe("validateSessionFile — lastUsage field (usage replay snapshot)", () => {
+  const usage = {
+    inputTokens: 12800,
+    outputTokens: 7,
+    cacheCreationInputTokens: null,
+    cacheReadInputTokens: 2048,
+  };
+
+  it("accepts a file with lastUsage absent (legacy round-trip)", () => {
+    assert.equal(validateSessionFile(valid), null);
+    assert.equal("lastUsage" in valid, false);
+  });
+
+  it("accepts a well-formed lastUsage object and sanitize round-trips it verbatim", () => {
+    const withUsage = { ...valid, lastUsage: usage };
+    assert.equal(validateSessionFile(withUsage), null);
+    const out = sanitizeSessionFile(withUsage);
+    assert.deepEqual(out.lastUsage, usage);
+  });
+
+  it("returns 'lastUsage' for illegal present values", () => {
+    const illegal: unknown[] = [
+      null, // the absent spelling is key omission; null is not a usage reading
+      42,
+      "12800",
+      {}, // no fields
+      { inputTokens: 1 }, // missing required members
+      {
+        inputTokens: 1,
+        outputTokens: 2,
+        cacheCreationInputTokens: 3,
+        cacheReadInputTokens: "x", // wrong type in a member
+      },
+      {
+        inputTokens: Number.NaN, // non-finite
+        outputTokens: 2,
+        cacheCreationInputTokens: null,
+        cacheReadInputTokens: null,
+      },
+    ];
+    for (const lastUsage of illegal) {
+      assert.equal(
+        validateSessionFile({ ...valid, lastUsage }),
+        "lastUsage",
+        `expected 'lastUsage' for ${JSON.stringify(lastUsage) ?? "null"}`
+      );
+    }
+  });
+
+  it("legacy files without lastUsage sanitize with the key still absent (byte-stable)", () => {
+    const out = sanitizeSessionFile(valid) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal("lastUsage" in out, false);
+  });
+});

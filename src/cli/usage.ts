@@ -23,7 +23,7 @@ export function usageText(): string {
   iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
   iknow serve [options]         HTTP 会话 API + Web UI + trace 面板(/trace) / session API + web UI + trace panel
   iknow trace [options]         打开 trace 面板（探测 serve）/ open trace panel (probes serve)
-  iknow tui [session-id] [--auto-mode] 终端多会话交互界面 / multi-session TUI (banners/lists/slash)
+  iknow tui [session-id] [--auto-mode] 终端多会话交互界面（需 Bun）/ multi-session TUI (needs Bun on PATH)
   iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
   iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
   iknow -h | --help             显示本帮助 / show this help
@@ -43,8 +43,8 @@ export function usageText(): string {
   --separate                    trace 保留独立检测进程（#183 旧行为，端口 24881）
                                 / trace: keep standalone inspection process (#183 behavior, port 24881)
   --auto-mode                   tui 启动即 full_auto（跳过工具 ask）/ tui starts in full_auto (skip tool asks)
-                                （npm: npm run dev:tui -- --auto-mode 或 npm run dev:tui:auto-mode）
-                                / npm: npm run dev:tui -- --auto-mode or npm run dev:tui:auto-mode
+                                \`iknow tui --auto-mode\`（iknow 仓库根也可 npm run dev:tui -- --auto-mode）
+                                / \`iknow tui --auto-mode\` (or npm run dev:tui -- --auto-mode at the iknow repo root)
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset
@@ -62,6 +62,9 @@ export function usageText(): string {
     写侧由 serve/chat/ask 的 --trace-out 负责；检测到旧 ./trace.jsonl 需先跑迁移脚本
     / trace --separate keeps the standalone reader on ./trace/;
     if an old ./trace.jsonl exists, run npx tsx scripts/trace-migrate.ts first
+  • tui 需要 PATH 上有 Bun（OpenTUI 原生 FFI 仅 Bun 支持）。任意项目直接 \`iknow tui\`：Node 启动会自动改用 Bun 重跑同一 CLI，cwd 不变（workspace 默认 cwd，ADR-0019）。
+    / tui needs Bun on PATH: run \`iknow tui\` from any project — a Node launch re-execs the same CLI under Bun with the cwd preserved (workspace = cwd, ADR-0019).
+    \`npm run dev:tui\` 只在 iknow 仓库根有效 / only valid at the iknow repo root.
   • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool
   • 管道可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记 / pipe: IKNOW_CHAT_QUIET=1 quiet markers`;
 }
@@ -69,4 +72,18 @@ export function usageText(): string {
 /** Print usage to stdout. */
 export function printUsage(): void {
   process.stdout.write(`${usageText()}\n`);
+}
+
+/** Node 跑 `tui` 但 PATH 上无 Bun 时的拦截兜底文案。cliFile = 本进程这条 CLI 的绝对路径。 */
+export function tuiNodeInterceptMessage(cliFile: string): string {
+  return (
+    `未找到 Bun，TUI 未启动（OpenTUI 原生 FFI 仅 Bun 支持；当前进程是 Node）。\n` +
+    `安装 Bun（https://bun.sh）后，任意项目直接 \`iknow tui\` 即可（Node 会自动用 Bun 重跑）。\n` +
+    `chat / ask / serve 仍可用 Node。\n` +
+    `\n` +
+    `或现在手动执行（在目标项目目录，workspace 默认 cwd）：\n` +
+    `  bun ${JSON.stringify(cliFile)} tui\n` +
+    `\n` +
+    `仅 iknow 仓库根才有 npm run dev:tui。\n`
+  );
 }

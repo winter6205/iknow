@@ -134,6 +134,22 @@ import {
 } from "./graph/notification.js";
 
 /**
+ * ADR-0116 Postel pair for one step's recordLlmCall payload: the identity
+ * channels are present only when actually sent (undefined system text and
+ * an empty tool-name list both stay omitted keys, never empty values).
+ * Computed once so the ok / error trace branches cannot drift apart.
+ */
+function sentIdentityFields(
+  systemText: string | undefined,
+  stepToolNames: ReadonlyArray<string>
+): { system?: string; toolNames?: ReadonlyArray<string> } {
+  return {
+    ...(systemText !== undefined ? { system: systemText } : {}),
+    ...(stepToolNames.length > 0 ? { toolNames: stepToolNames } : {}),
+  };
+}
+
+/**
  * Map an arbitrary reason string to TraceErrorType without `as` casts.
  * Known values pass through; anything else (including nonSuccessStop /
  * maxTurns / completed) falls back to "unknown".
@@ -201,11 +217,11 @@ export interface LoopAdapter {
    * `console.warn` line; no throw and no retry on the first round — see
    * the skip semantics in `aci/tool-overflow.ts`).
    *
-   * Not part of the loop-engine consumption surface: countTokens is called
-   * once at assembly time and is constant per session; later `step` calls
-   * never use it (avoiding churn against passive caching at the target
-   * endpoint). loop-engine does not read this field; its presence here is
-   * purely for type safety.
+   * Two consumers read this hook: the assembly layer once at assembly time
+   * (overflow governance), and loop-engine's #1079 call-beat probe before
+   * every model call (only when the host carries onStream — see
+   * `emitPreCallContextUsage`). Adapters without it are skipped on the beat
+   * (one warn per adapter instance); the bar is never filled by estimation.
    */
   readonly countTokens?: (
     input: CountTokensInput
@@ -2174,6 +2190,109 @@ async function awaitRetryBackoff(
   return "retrying";
 }
 
+/**
+ * #1079 Track A call-beat measurement: before each model call, measure the
+ * exact outgoing input occupancy (`system` + `tools` + `messages`, the same
+ * values the request will carry) through the adapter's `countTokens` hook
+ * and emit it as a `context_usage` / `pre_call` stream event. Discipline:
+ *   - only a *measured* number is emitted; a missing / failing / invalid
+ *     countTokens skips this beat silently — chars/N estimation is
+ *     forbidden for the display path (ADR-0008 D6);
+ *   - with no onStream consumer the measurement is not made at all (no
+ *     per-call API cost for hosts that cannot see the reading);
+ *   - an adapter without countTokens logs once per adapter instance (the
+ *     fallback for such vendors is a provider-side message_start reading,
+ *     which no in-repo adapter needs today).
+ */
+const noCountTokensWarned = new WeakSet<LoopAdapter>();
+
+/** Run the adapter's countTokens against the exact outgoing request triple
+ *  and gate the reading by the declared validity contract; null = no real
+ *  measurement this beat (missing hook, failure, non-finite / non-positive). */
+async function measurePreCallInputTokens(
+  deps: LoopEngineDeps,
+  state: LoopState,
+  systemText: string | undefined
+): Promise<number | null> {
+  const countTokens = deps.adapter.countTokens;
+  if (countTokens === undefined) return null;
+  try {
+    const tools = deps.promptTools?.() ?? deps.registry.list();
+    const measured = await countTokens({
+      ...(tools.length > 0 ? { tools } : {}),
+      ...(systemText !== undefined ? { system: systemText } : {}),
+      messages: state.messages,
+    });
+    // Same validity gate the countTokens contract declares: non-finite /
+    // non-positive = failure, treated exactly like a throw (skip the beat).
+    return Number.isFinite(measured.inputTokens) && measured.inputTokens > 0
+      ? measured.inputTokens
+      : null;
+  } catch {
+    // EXIT: countTokens threw (API failure / abort) → skip this beat; the
+    // post_call correction or the next beat carries the next real reading.
+    return null;
+  }
+}
+
+async function emitPreCallContextUsage(opts: {
+  readonly state: LoopState;
+  readonly deps: LoopEngineDeps;
+  readonly systemText: string | undefined;
+  readonly hostStreamPresent: boolean;
+  readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
+}): Promise<void> {
+  const onStream = opts.onStream;
+  // runModelPhase's onStream is the in-flight-window wrapper (always a
+  // function inside run()); the host-presence flag is the real gate.
+  if (!opts.hostStreamPresent || onStream === undefined) return;
+  if (opts.deps.adapter.countTokens === undefined) {
+    if (!noCountTokensWarned.has(opts.deps.adapter)) {
+      noCountTokensWarned.add(opts.deps.adapter);
+      console.warn(
+        "context-usage pre-call measurement skipped: adapter has no countTokens (beats without a real reading emit nothing)"
+      );
+    }
+    return;
+  }
+  const inputTokens = await measurePreCallInputTokens(
+    opts.deps,
+    opts.state,
+    opts.systemText
+  );
+  if (inputTokens === null) return;
+  safeEmitStream(onStream, {
+    type: "context_usage",
+    phase: "pre_call",
+    usage: {
+      inputTokens,
+      // A countTokens reading knows nothing about output / cache split;
+      // 0 / null are "not generated yet / not measured", never estimates
+      // (the display numerator adds these as 0).
+      outputTokens: 0,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    },
+  });
+}
+
+/** #1079 call-beat correction: the successful call's real API usage (sealed
+ *  `AssistantTurnResult.usage` passthrough, no second ledger) goes out
+ *  immediately — the host sees beat N's truth before beat N's tool loop ends.
+ *  usage absent (stub / vendor withheld) → nothing emitted, the pre_call
+ *  reading stands until the next real one. */
+function emitPostCallContextUsage(
+  onStream: ((event: HarnessStreamEvent) => void) | undefined,
+  turnResult: AssistantTurnResult
+): void {
+  if (turnResult.usage === undefined) return;
+  safeEmitStream(onStream, {
+    type: "context_usage",
+    phase: "post_call",
+    usage: turnResult.usage,
+  });
+}
+
 /** Await the structured race outcome, keeping the SDK-first error catch contract. */
 async function runModelPhase(opts: {
   readonly state: LoopState;
@@ -2185,9 +2304,17 @@ async function runModelPhase(opts: {
   /** Idle cap for this step (ms); undefined = hard-cap clock only. */
   readonly modelIdleTimeoutMs: number | undefined;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** True only when the host passed its own onStream into stepWithTrace
+   *  (runModelPhase's own onStream is the in-flight-window wrapper, which
+   *  exists even for consumer-less hosts). Gates the pre-call usage probe:
+   *  no consumer → no per-call countTokens cost. */
+  readonly hostStreamPresent: boolean;
   /** ADR-0013: run-scoped reactive-compact attempted flag;
    *  true = already compacted and retried once this run, no second time. */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /** ADR-0011: resolved once per step by stepWithTrace so the trace record
+   *  can name exactly what was sent (undefined = system not sent → absent). */
+  readonly systemText: string | undefined;
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | {
@@ -2199,10 +2326,16 @@ async function runModelPhase(opts: {
   | { kind: "reactive_compact_pending"; state: LoopState }
 > {
   try {
-    // Resolve deps.system?.() once per turn; undefined → field omitted, the
-    // adapter's conditional spread sends no system field → byte-zero change
-    // to the KV cache prefix.
-    const systemText = await opts.deps.system?.();
+    // #1079 call-beat: measure the outgoing input on the same beat as the
+    // agent_status / env_snapshot injections, immediately before adapter.step.
+    // systemText is resolved once per step by stepWithTrace (ADR-0011 / 0116).
+    await emitPreCallContextUsage({
+      state: opts.state,
+      deps: opts.deps,
+      systemText: opts.systemText,
+      hostStreamPresent: opts.hostStreamPresent,
+      onStream: opts.onStream,
+    });
     // When a clock expires with zero model-output deltas this attempt, resend
     // the whole call (bounded attempts, second-scale exponential backoff)
     // instead of judging the turn timed out — a stalled connection is not a
@@ -2220,7 +2353,7 @@ async function runModelPhase(opts: {
         modelHardCapMs: opts.modelHardCapMs,
         modelIdleTimeoutMs: opts.modelIdleTimeoutMs,
         onStream: opts.onStream,
-        systemText,
+        systemText: opts.systemText,
       });
       if (attempt.kind === "ok") return attempt;
       const verdict = attemptVerdict(
@@ -2638,6 +2771,12 @@ async function stepWithTrace(opts: {
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** Whether the host itself consumes stream events. runModelPhase's own
+   *  onStream is an in-flight-window wrapper that exists even for hosts that
+   *  passed no callback, so `onStream !== undefined` cannot answer this;
+   *  run() threads the caller's honest flag through. Gates per-call
+   *  countTokens cost (#1079 pre_call probe): no host consumer → no probe. */
+  readonly hostStreamPresent: boolean;
   /** ADR-0013: run-scoped reactive-compact attempted flag (carried across steps). */
   readonly reactiveAttemptedRef: { attempted: boolean };
   /**
@@ -2789,6 +2928,24 @@ async function stepWithTrace(opts: {
   // never written twice.
   const modelStreamRef = opts.modelStreamRef;
   const modelOnStream = openModelInFlightWindow(modelStreamRef, opts.onStream);
+  // Resolve deps.system?.() once per step; undefined → the field is omitted
+  // both on the wire (the adapter's conditional spread sends no system field
+  // → byte-zero change to the KV cache prefix) and on the trace row
+  // (ADR-0116 Postel). The resolver is session-stable, so the reactive-
+  // compact retry phase and the recorded `system` all carry the same bytes.
+  const systemText = await opts.deps.system?.();
+  // ADR-0116: the tool names handed to the model this step — the same seam
+  // raceModel passes to adapter.step; names only, never schemas. Snapshot
+  // semantics: raceModel re-resolves promptTools per retry attempt, but
+  // promptTools is static within a step in current assembly, so these names
+  // are a valid step-start snapshot (same stability assumption as systemText).
+  const stepToolNames = (
+    opts.deps.promptTools?.() ?? opts.deps.registry.list()
+  ).map((tool) => tool.name);
+  // The Postel identity pair shared by both recordLlmCall branches (ok /
+  // stop): a channel that was not sent stays an omitted key, never an empty
+  // value — computed once so the two branches cannot drift apart.
+  const sentIdentity = sentIdentityFields(systemText, stepToolNames);
   const firstPhase = await runModelPhase({
     state: deltaState,
     deps: opts.deps,
@@ -2796,8 +2953,10 @@ async function stepWithTrace(opts: {
     started,
     modelHardCapMs: modelClocks.hardCapMs,
     modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
+    hostStreamPresent: opts.hostStreamPresent,
     onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
+    systemText,
   });
   // Non-reactive path: the last message the model saw is deltaState (with the injected delta).
   let effectiveState: LoopState = deltaState;
@@ -2869,8 +3028,10 @@ async function stepWithTrace(opts: {
             started,
             modelHardCapMs: modelClocks.hardCapMs,
             modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
+            hostStreamPresent: opts.hostStreamPresent,
             onStream: retryOnStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
+            systemText,
           });
           if (compressedAttempt.kind === "reactive_compact_pending") {
             // Invariant violated — reactive_compact is disabled or already
@@ -2920,6 +3081,10 @@ async function stepWithTrace(opts: {
           // semantics unchanged (Postel); messages is the independent "what
           // did the model actually see" channel, filled regardless of error, aligned with the ok branch.
           messages: effectiveState.messages,
+          // ADR-0116: the identity prefix and tool names this step sent are
+          // recorded on their own channels (Postel: absent when not sent —
+          // never an empty string, never an entry faked into `messages`).
+          ...sentIdentity,
           // Error branch: the three model fields are wholly absent (Postel,
           // same shape as ADR-0008) — the adapter never exposes a model, so
           // there is nothing to fill on success or failure alike.
@@ -2953,9 +3118,13 @@ async function stepWithTrace(opts: {
           // now on. Trade-off: full messages in the trace inflate the jsonl,
           // but LlmCallRecord.messages means precisely "messages the model
           // actually saw", satisfying the ADR's acceptance discipline
-          // (messages_captured:true + the messages array including the
-          // coordinator-section proactive keywords).
+          // (messages_captured:true + the messages array). ADR-0116: the
+          // coordinator-section proactive keywords hang on the captured
+          // `system` field below, never inside `messages`.
           messages: effectiveState.messages,
+          // ADR-0116: identity prefix + tool names actually sent this step
+          // (Postel: absent when not sent).
+          ...sentIdentity,
           status: "ok",
           ...(usage !== undefined ? usage : {}),
         })
@@ -2994,6 +3163,7 @@ async function stepWithTrace(opts: {
   const turnResult = modelPhase.result;
   // ADR-0108: the full turn has been delivered — close the in-flight window; later stop reasons no longer enter the keep face.
   closeModelInFlightWindow(modelStreamRef);
+  emitPostCallContextUsage(opts.onStream, turnResult);
 
   if (
     turnResult.projection.toolCalls.length === 0 &&
@@ -3281,6 +3451,7 @@ export async function step(
     state,
     deps,
     signal,
+    hostStreamPresent: false,
     reactiveAttemptedRef: { attempted: false },
     lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
     reconcileRef: { stamped: undefined },
@@ -3313,6 +3484,11 @@ export async function run(
     priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
     onStream?: (event: HarnessStreamEvent) => void;
     appendUserText?: boolean;
+    /** False when the caller only wraps onStream for its own bookkeeping and
+     *  the actual host has no stream consumer. Defaults to
+     *  `onStream !== undefined`. Gates the #1079 pre-call countTokens probe
+     *  so wrapper-only hosts pay no per-call measurement cost. */
+    hostStreamPresent?: boolean;
   }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // priorMessages continuation seam: history prefix frozen entry by entry, turnCount still starts at 0.
@@ -3322,6 +3498,8 @@ export async function run(
   // shapes); placeholders from previous turns stay as-is across continuation.
   // appendUserText defaults to true = today's behavior; false = skip-append,
   // no encodeUserText and no recognize(userText).
+  const hostStreamPresent =
+    opts?.hostStreamPresent ?? opts?.onStream !== undefined;
   let state: LoopState;
   if (opts?.appendUserText !== false) {
     let effectiveUserText = userText;
@@ -3464,6 +3642,7 @@ export async function run(
         deps,
         signal,
         onStream: opts?.onStream,
+        hostStreamPresent,
         reactiveAttemptedRef,
         lastToolRef,
         reconcileRef,

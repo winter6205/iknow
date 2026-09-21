@@ -112,6 +112,8 @@ import {
   validateGoalText,
   type GoalState,
 } from "../session-api/store/index.js";
+// Deep import: internal persist-rule helper, deliberately not on the store barrel.
+import { persistedLastUsage } from "../session-api/store/schema.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
@@ -2375,9 +2377,7 @@ export async function persistChatSessionCheckpoint(opts: {
             messagesCount: persistedMessages.length,
             interruptedAt: now,
             interruptReason,
-            ...(result.lastUsage !== null
-              ? { lastUsage: result.lastUsage }
-              : {}),
+            ...persistedLastUsage(result.lastUsage),
           });
     const updated: SessionFileV1 = {
       ...withCheckpoint,
@@ -2386,6 +2386,9 @@ export async function persistChatSessionCheckpoint(opts: {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       title: extractTitle(persistedMessages),
+      // #1079: same file-level usage snapshot discipline as
+      // hub.conditionalSave (reopen must not regress to 0%).
+      ...persistedLastUsage(result.lastUsage),
     };
     await store.save({ id: conversationId, file: updated });
   } catch (err) {

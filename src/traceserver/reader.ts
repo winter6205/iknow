@@ -53,6 +53,20 @@ export interface JsonlTraceReaderOptions {
 
 export interface JsonlTraceReader {
   query(q?: TraceQuery): TraceQueryResult;
+  /**
+   * Async contains query with a dereference arm (ADR-0116): the raw-line
+   * substring stays the fast path, but a line that misses it is still kept
+   * for parsing when `lineScope` claims it (e.g. llm_call rows), and each
+   * parsed row is finally matched as `rawHit || rowMatches(row)`. The
+   * `rowMatches` arm is where blob-stored bodies (system text, tool names)
+   * become searchable. Same caps and pagination as the contains branch of
+   * `query`.
+   */
+  queryContains(
+    q: TraceQuery & { readonly contains: string },
+    lineScope: (line: string) => boolean,
+    rowMatches: (row: TraceRecordRow) => Promise<boolean>
+  ): Promise<TraceQueryResult>;
 }
 
 // -- readLinesFrom ------------------------------------------------------------
@@ -82,15 +96,18 @@ interface RawLines {
  * re-reads it, guaranteeing each JSONL line is consumed exactly once.
  *
  * contains: when given, a case-sensitive substring prefilter runs on the
- * **raw line text** — lines that miss are dropped before parseLines (saves
+ * **raw line text** — lines that miss are dropped before parsing (saves
  * JSON.parse CPU). The filter sits after line splitting and before parsing,
  * so byte-level semantics (nextOffset / truncated) are unaffected.
+ * `keepLine` (ADR-0116) widens the prefilter for the dereference arm: a
+ * missing-line-scope predicate keeps the historical drop-everything behavior.
  */
 function readLinesFrom(
   filePath: string,
   maxBytes: number,
   startOffset: number,
-  contains?: string
+  contains?: string,
+  keepLine?: (line: string) => boolean
 ): RawLines {
   // ENOENT handling converges in statSize: a missing file -> size=0, falling
   // into the empty-segment branch below (silent polling, consistent with this
@@ -100,7 +117,8 @@ function readLinesFrom(
     // File replaced (resumeOffset beyond the new file) -> refetch from head.
     // Only startOffset > 0 and > size proves replacement; startOffset === 0
     // is already at the head, no replacement semantics.
-    if (startOffset > 0) return readLinesFrom(filePath, maxBytes, 0, contains);
+    if (startOffset > 0)
+      return readLinesFrom(filePath, maxBytes, 0, contains, keepLine);
     return { lines: [], nextOffset: 0, truncated: false };
   }
 
@@ -125,7 +143,12 @@ function readLinesFrom(
   // "empty string = absent" means the same here and in query-trace-core's
   // validation layer.
   if (!contains) return raw;
-  return { ...raw, lines: raw.lines.filter((line) => line.includes(contains)) };
+  return {
+    ...raw,
+    lines: raw.lines.filter(
+      (line) => line.includes(contains) || keepLine?.(line) === true
+    ),
+  };
 }
 
 function splitLines(
@@ -168,26 +191,6 @@ function splitLines(
 
 // -- parseLines ----------------------------------------------------------------
 
-interface ParsedLines {
-  readonly rows: TraceRecordRow[];
-  readonly skippedLines: number;
-}
-
-/**
- * Parse each line as JSON. Failed parses and non-plain-object results
- * (numbers, strings, arrays, null) count as skipped lines.
- */
-function parseLines(lines: ReadonlyArray<string>): ParsedLines {
-  const rows: TraceRecordRow[] = [];
-  let skippedLines = 0;
-  for (const line of lines) {
-    const row = parseOneLine(line);
-    if (row === undefined) skippedLines += 1;
-    else rows.push(row);
-  }
-  return { rows, skippedLines };
-}
-
 /**
  * Parse a single line into a TraceRecordRow.
  *
@@ -216,6 +219,57 @@ function parseOneLine(line: string): TraceRecordRow | undefined {
   }
   if (unmapped.length === 0) return row as TraceRecordRow;
   return { ...row, raw: { unmapped } } as TraceRecordRow;
+}
+
+/** Line + parsed row kept paired for the dereference arm of contains (ADR-0116): the final match test needs the raw text for the fast path and the row for the deref arm. */
+interface LinePair {
+  readonly line: string;
+  readonly row: TraceRecordRow;
+}
+
+function parseLinePairs(
+  lines: ReadonlyArray<string>
+): { pairs: LinePair[]; skippedLines: number } {
+  const pairs: LinePair[] = [];
+  let skippedLines = 0;
+  for (const line of lines) {
+    const row = parseOneLine(line);
+    if (row === undefined) skippedLines += 1;
+    else pairs.push({ line, row });
+  }
+  return { pairs, skippedLines };
+}
+
+/**
+ * The shared sort + filter stage of the query pipeline: both arms (plain
+ * `query` and the deref-arm `queryContains`) run the identical
+ * sort-by-time-desc then field-filter sequence over parsed pairs, so their
+ * ordering / scoping semantics cannot drift apart.
+ */
+function sortedScopedPairs(
+  pairs: ReadonlyArray<LinePair>,
+  query: TraceQuery
+): LinePair[] {
+  const sorted = [...pairs].sort((a, b) =>
+    compareTimeDesc(sortTimeOf(a.row), sortTimeOf(b.row))
+  );
+  return sorted.filter((pair) => applyFilter([pair.row], query)[0] !== undefined);
+}
+
+/** The shared pagination / result-assembly stage for both query arms. */
+function assemblePage(
+  matched: ReadonlyArray<TraceRecordRow>,
+  skippedLines: number,
+  raw: RawLines,
+  query: TraceQuery
+): TraceQueryResult {
+  return {
+    records: applyPagination(matched, query),
+    total: matched.length,
+    skippedLines,
+    truncated: raw.truncated,
+    offset: raw.nextOffset,
+  };
 }
 
 // -- applyFilter ---------------------------------------------------------------
@@ -281,18 +335,12 @@ function sortTimeOf(row: TraceRecordRow): string {
   return "";
 }
 
-/** Descending ISO8601 string compare; rows without a time keep stable order. */
-function sortByTimeDesc(rows: ReadonlyArray<TraceRecordRow>): TraceRecordRow[] {
-  return [...rows].sort((a, b) => {
-    const ta = sortTimeOf(a);
-    const tb = sortTimeOf(b);
-    // "" sorts last: rows with a timestamp come first; among timestamped rows
-    // ISO lexicographic order == chronological order.
-    if (ta === tb) return 0;
-    if (ta === "") return 1;
-    if (tb === "") return -1;
-    return ta < tb ? 1 : -1;
-  });
+/** Descending ISO8601 string compare; "" (no timestamp) sorts last, equal times keep stable order. */
+function compareTimeDesc(ta: string, tb: string): number {
+  if (ta === tb) return 0;
+  if (ta === "") return 1;
+  if (tb === "") return -1;
+  return ta < tb ? 1 : -1;
 }
 
 // -- factory -------------------------------------------------------------------
@@ -308,52 +356,75 @@ export function createJsonlTraceReader(
   return {
     query(query: TraceQuery = {}): TraceQueryResult {
       const startOffset = Math.max(0, query.resumeOffset ?? 0);
-      // With contains, the 8 MiB status-quo cap is bypassed for
-      // containsMaxBytes (default 256 MiB) — that is why finding "which
-      // records mention X" on a 39 MB trace needs this tier: an 8 MiB cap
-      // would shut out the whole second half of the trace. File above the
-      // cap -> throw TraceReadError instead of silent truncation, because a
-      // truncated contains is a dishonest search result (the same failure
-      // this knob exists to fix). Without contains, behavior is completely
-      // unchanged (uses `maxBytes`, the 8 MiB default).
       if (query.contains !== undefined) {
-        // The precheck and the read window use the same cap
-        // (containsMaxBytes): letting the read window take
-        // max(contains, max) would create two contradictory caps — with
-        // containsMaxBytes < maxBytes the window would be larger yet the
-        // query still refused at containsMaxBytes.
-        const size = statSize(filePath);
-        if (size > containsMaxBytes) {
-          throw new TraceReadError(
-            `contains query refused: trace file exceeds the ${containsMaxBytes}-byte ` +
-              `scan cap (size=${size}); narrow the query or raise containsMaxBytes`
-          );
-        }
-        const raw = readLinesFrom(
-          filePath,
-          containsMaxBytes,
-          startOffset,
-          query.contains
+        const raw = readContainsWindow(
+          { ...query, contains: query.contains },
+          startOffset
         );
         return finishQuery(raw, query);
       }
       const raw = readLinesFrom(filePath, maxBytes, startOffset);
       return finishQuery(raw, query);
     },
+
+    async queryContains(
+      query: TraceQuery & { readonly contains: string },
+      lineScope: (line: string) => boolean,
+      rowMatches: (row: TraceRecordRow) => Promise<boolean>
+    ): Promise<TraceQueryResult> {
+      const startOffset = Math.max(0, query.resumeOffset ?? 0);
+      const raw = readContainsWindow(query, startOffset, lineScope);
+      const { pairs, skippedLines } = parseLinePairs(raw.lines);
+      const matched: TraceRecordRow[] = [];
+      for (const pair of sortedScopedPairs(pairs, query)) {
+        // Fast path first: an inline raw hit never pays for a deref.
+        if (pair.line.includes(query.contains) || (await rowMatches(pair.row))) {
+          matched.push(pair.row);
+        }
+      }
+      return assemblePage(matched, skippedLines, raw, query);
+    },
   };
 
+  /**
+   * The one contains-window opener for both arms: with contains, the 8 MiB
+   * status-quo cap is bypassed for containsMaxBytes (default 256 MiB) —
+   * finding "which records mention X" on a 39 MB trace needs this tier: an
+   * 8 MiB cap would shut out the whole second half of the trace. Over-cap
+   * files throw TraceReadError instead of silent truncation, because a
+   * truncated contains is a dishonest search result (the same failure this
+   * knob exists to fix). The precheck and the read window use the same cap:
+   * letting the window take max(contains, max) would create two
+   * contradictory caps — with containsMaxBytes < maxBytes the window would
+   * be larger yet the query still refused at containsMaxBytes. `keepLine`
+   * widens the raw-line prefilter for the deref arm (ADR-0116); the plain
+   * contains branch keeps the historical drop-everything-on-miss behavior.
+   */
+  function readContainsWindow(
+    query: TraceQuery & { readonly contains: string },
+    startOffset: number,
+    keepLine?: (line: string) => boolean
+  ): RawLines {
+    const size = statSize(filePath);
+    if (size > containsMaxBytes) {
+      throw new TraceReadError(
+        `contains query refused: trace file exceeds the ${containsMaxBytes}-byte ` +
+          `scan cap (size=${size}); narrow the query or raise containsMaxBytes`
+      );
+    }
+    return readLinesFrom(
+      filePath,
+      containsMaxBytes,
+      startOffset,
+      query.contains,
+      keepLine
+    );
+  }
+
   function finishQuery(raw: RawLines, query: TraceQuery): TraceQueryResult {
-    const { rows, skippedLines } = parseLines(raw.lines);
-    const sorted = sortByTimeDesc(rows);
-    const filtered = applyFilter(sorted, query);
-    const records = applyPagination(filtered, query);
-    return {
-      records,
-      total: filtered.length,
-      skippedLines,
-      truncated: raw.truncated,
-      offset: raw.nextOffset,
-    };
+    const { pairs, skippedLines } = parseLinePairs(raw.lines);
+    const rows = sortedScopedPairs(pairs, query).map((pair) => pair.row);
+    return assemblePage(rows, skippedLines, raw, query);
   }
 }
 

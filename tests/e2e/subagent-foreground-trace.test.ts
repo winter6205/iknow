@@ -21,6 +21,7 @@ import { readFileSync, mkdtempSync } from "node:fs";
 
 import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { IKNOW_COORDINATOR_TEXT } from "../../src/harness/identity/assemble.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { awaitAllTasksTerminal } from "../_helpers/await-terminal.ts";
 import { run } from "../../src/harness/loop-engine.ts";
@@ -147,7 +148,16 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       step: async (state, request, signal) =>
         innerStub.step(state, request, signal),
     };
-    const runDeps: LoopEngineDeps = { ...deps, adapter };
+    const runDeps: LoopEngineDeps = {
+      ...deps,
+      adapter,
+      // ADR-0014 D6 (amended 2026-09-21, ADR-0116): the default chat system
+      // no longer carries the coordinator segment (#558 moved it behind the
+      // opt-in seam), so this acceptance seam passes the D6 text explicitly —
+      // the proactive keywords are then asserted on the captured `system`,
+      // never on `messages`.
+      system: async () => IKNOW_COORDINATOR_TEXT,
+    };
 
     const { result: t1 } = await run("please spawn a subagent", runDeps);
     assert.equal(t1.stopReason, "completed");
@@ -171,13 +181,30 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     assert.equal(toolCalls.length, 1);
     assert.equal(toolCalls[0]!["tool_name"], "spawn_subagent");
 
-    // 2. llm_call(messages_captured=true, non-empty messages)
+    // 2. llm_call(messages_captured=true, non-empty messages); proactive
+    //    keywords pin on deref'd system body (ADR-0116), not messages.
     const llmCalls = lines.filter((l) => l["record_type"] === "llm_call");
     assert.ok(llmCalls.length >= 2);
     for (const llm of llmCalls) {
       assert.equal(llm["messages_captured"], true);
       assert.ok(Array.isArray(llm["messages"]));
       assert.ok((llm["messages"] as unknown[]).length >= 1);
+      const systemRef = llm["system"] as { sha: string; bytes: number };
+      assert.ok(
+        systemRef && typeof systemRef.sha === "string",
+        "llm_call 行必须携带 system blob 引用 (D6 文本经 system seam 发送)"
+      );
+      const systemBody = JSON.parse(
+        readFileSync(join(traceDir, "blobs", systemRef.sha), "utf8")
+      ) as { kind: string; v: string };
+      assert.equal(systemBody.kind, "str");
+      assert.match(systemBody.v, /proactively/);
+      assert.match(systemBody.v, /blocks until finished/);
+      const messages = llm["messages"] as Array<{ role: string }>;
+      assert.equal(
+        messages.some((m) => m.role === "system"),
+        false
+      );
     }
   }, 30_000);
 

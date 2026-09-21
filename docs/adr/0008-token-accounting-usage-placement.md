@@ -3,6 +3,8 @@
 Date: 2026-08-05
 Status: accepted
 
+> **Amendment 2026-09-21**（#1079 Track A，call-beat 显示粒度）：D5/D6 的显示粒度叙述修订——Running 用量条不再是「整轮 `run()` 结束才刷新（one-beat lag 可接受）」，改为 **call-beat**：宿主在每次模型调用发出前收到 `context_usage` 流事件（pre-call 实测输入占用，经 `ModelAdapter.countTokens`），该次调用成功后立即收到携带其 API `usage` 的校正事件；第 N 次成功调用后条已是该次读数，不必等工具循环收尾。D6 的「无成功 usage 不估算、字段缺席画 0%」仍然有效且加强（缺实拍的拍直接不发事件）。`RunResult.lastUsage` 仍是 run 级终值；每拍暴露只走既有 stream 通道，不引入第二份 token 账本。会话文件持久化该真值（`SessionFileV1.lastUsage`），`attachSession` / Web load 回放之（曾有成功 usage 的会话重开不显示 0%）。
+
 ## Context
 
 GH issue #160 (winter6205/iknow) — the design grilling graduated from #136 (adapter usage consumption + token accounting foundation, closed 2026-08-04 for deferral discipline). iknow's harness currently has **zero** token / usage / context-window code (`src/harness/` grep-empty; `anthropic-adapter.ts` `interpretMessage` silently drops `sdkResp.usage`; `AssistantTurnResult` has no usage field; `LlmCallRecord` has zero token fields). Meanwhile 9router / MiniMax-M3 provably returns Anthropic-compatible `usage` (`input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens`; #132 probe D measured `cache_read_input_tokens: 128`). The TraceService module (`src/harness/trace/`, ADR-0003) is already landed and `specs/trace-service.md:120` pre-drafts nullable token fields.

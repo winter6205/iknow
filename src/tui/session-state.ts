@@ -27,6 +27,7 @@ import {
   SKILL_LOAD_PREFIX_SHORT,
 } from "../harness/skill/body.js";
 import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
+import { jsonDeepEqual } from "../session-api/store/index.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
@@ -95,8 +96,10 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     jsonMode: file.jsonMode,
     runState: "idle",
     lastStopReason: undefined,
-    // lastUsage comes only from runtime receipts, never from the session file (initial null).
-    lastUsage: null,
+    // #1079: reopen replays the file's persisted usage snapshot so a session
+    // that ever had a successful usage never reopens at 0%. Missing field
+    // (legacy file / never-successful session) → null → 0% (never chars/N).
+    lastUsage: file.lastUsage ?? null,
     // ADR-0037: the rebound task-worktree root is restored with the session file (still current after restart).
     workspaceRoot: file.workspaceRoot,
     // Carry the persisted parallel array into session state — fold lines
@@ -153,6 +156,29 @@ export interface TurnFinishedInput {
   readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
+/**
+ * Reference-preserving projection swap: whole-array replacement is kept as
+ * the discipline, but the longest content-equal **prefix** adopts the
+ * previous object references (and a fully equal projection reuses the
+ * previous frozen array itself). Downstream memo caches (tool-result index,
+ * ChatView derivations, MessageBlocks) are reference-keyed, so a
+ * re-hydration that changes no content stops invalidating them. Content is
+ * never edited here — only identities are carried over. Equality is the
+ * session-store SSOT `jsonDeepEqual`: a key present with value `undefined`
+ * is treated as absent (plain-JSON semantics), matching how a rehydrated
+ * transcript looks after a JSON round-trip.
+ */
+function reuseMessageReferences(
+  prev: ReadonlyArray<AnthropicNativeMessage>,
+  next: ReadonlyArray<AnthropicNativeMessage>
+): ReadonlyArray<AnthropicNativeMessage> {
+  let i = 0;
+  const limit = Math.min(prev.length, next.length);
+  while (i < limit && jsonDeepEqual(prev[i], next[i])) i++;
+  if (i === prev.length && i === next.length) return prev; // EXIT: fully content-equal projection
+  return Object.freeze(prev.slice(0, i).concat(next.slice(i)));
+}
+
 /** Turn end (natural completion / cancelled / timeout all land here): back to idle + whole frozen replacement. */
 export function turnFinished(
   session: TuiSessionState,
@@ -161,7 +187,7 @@ export function turnFinished(
   return Object.freeze({
     ...session,
     conversationId: input.conversationId,
-    messages: Object.freeze([...input.messages]),
+    messages: reuseMessageReferences(session.messages, input.messages),
     turnCount: input.turnCount,
     updatedAt: input.updatedAt,
     jsonMode: input.jsonMode,
@@ -173,6 +199,19 @@ export function turnFinished(
     // Refresh thinkingMs from the persisted file; absent -> keep the existing array (partial-recovery case).
     thinkingMs: input.thinkingMs ?? session.thinkingMs,
   });
+}
+
+/**
+ * #1079 call-beat: replace the usage reading mid-run when a context_usage
+ * stream event arrives (pre-call measurement or post-call correction),
+ * without touching run state or messages. Whole-replacement freeze discipline
+ * as in every other reducer here.
+ */
+export function withLastUsage(
+  session: TuiSessionState,
+  usage: TokenUsage
+): TuiSessionState {
+  return Object.freeze({ ...session, lastUsage: usage });
 }
 
 /** Foreground interrupt guard (consumed by Esc): only running-fg can be interrupted. */
@@ -236,7 +275,7 @@ export function sessionCompacted(
   if (session.runState !== "idle") return session;
   return Object.freeze({
     ...session,
-    messages: Object.freeze([...input.messages]),
+    messages: reuseMessageReferences(session.messages, input.messages),
     turnCount: input.turnCount,
     updatedAt: input.updatedAt,
     jsonMode: input.jsonMode,
@@ -265,7 +304,7 @@ export function sessionRewound(
   if (session.runState !== "idle") return session;
   return Object.freeze({
     ...session,
-    messages: Object.freeze([...input.messages]),
+    messages: reuseMessageReferences(session.messages, input.messages),
     turnCount: input.turnCount,
     updatedAt: input.updatedAt,
     jsonMode: input.jsonMode,

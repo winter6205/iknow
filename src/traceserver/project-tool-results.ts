@@ -215,6 +215,35 @@ function isRecordContentRef(value: unknown): value is {
   );
 }
 
+/**
+ * ADR-0116: resolve one llm_call row's `system` field — a `{sha, bytes}` ref
+ * (kind="str") into the same content-addressed pool messages use — to the
+ * full text this step sent. Absent / missing / corrupt / wrong-shape all
+ * resolve to `undefined` (Postel on the read side: "no system body here",
+ * never a throw and never an empty-string fake).
+ */
+export async function dereferenceSystemBody(
+  system: unknown,
+  options: TraceMessageDereferenceOptions = {}
+): Promise<string | undefined> {
+  if (!isRecord(system) || !isRecordContentRef(system)) return undefined;
+  try {
+    const payload = await readBlobPayload(system.sha, options);
+    if (
+      isRecord(payload) &&
+      payload.kind === "str" &&
+      typeof payload.v === "string"
+    ) {
+      return payload.v;
+    }
+    return undefined;
+  } catch {
+    // EXIT: a missing/corrupt blob means the body is unreadable here — the
+    // caller treats it exactly like an absent system field.
+    return undefined;
+  }
+}
+
 async function readBlobContent(
   ref: { sha: string; bytes: number },
   options: TraceMessageDereferenceOptions
