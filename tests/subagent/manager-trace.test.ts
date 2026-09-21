@@ -105,6 +105,10 @@ function makeTracingHarness(
       taskId: string,
       payload: WorkerEnvelope
     ) => ChildProcess;
+    /** Test hook: swap the state-change recorder (e.g. sync-throw to hit shutdown's warn path). */
+    readonly stateChangeRecorder?: (
+      rec: SubagentStateChangeRecord
+    ) => Promise<string | undefined>;
   } = {}
 ): TracingHarness {
   const spawned: FakeChild[] = [];
@@ -143,12 +147,12 @@ function makeTracingHarness(
       spawns.push(rec);
       return Promise.resolve(rec.id);
     },
-    recordSubagentStateChange: (
-      rec: SubagentStateChangeRecord
-    ): Promise<string | undefined> => {
-      stateChanges.push(rec);
-      return Promise.resolve(rec.id);
-    },
+    recordSubagentStateChange:
+      opts.stateChangeRecorder ??
+      ((rec: SubagentStateChangeRecord): Promise<string | undefined> => {
+        stateChanges.push(rec);
+        return Promise.resolve(rec.id);
+      }),
     recordSubagentStop: (
       rec: SubagentStopRecord
     ): Promise<string | undefined> => {
@@ -524,7 +528,7 @@ describe("SubAgentManager T4 cancelled 终态 (abortTask / shutdown)", () => {
     assert.equal(notices.length, 1, "bg terminal still wakes the mailbox");
   });
 
-  it("shutdown：仍 live 的任务在 tasks.clear() 前落 cancelled 终态，恰一次", async () => {
+  it("shutdown：前景 live 任务在 tasks.clear() 前落 cancelled 终态恰一次；后景 live 任务不落 cancelled", async () => {
     const h = makeTracingHarness();
     const fg = h.manager.spawn({
       task: "fg survivor",
@@ -538,19 +542,67 @@ describe("SubAgentManager T4 cancelled 终态 (abortTask / shutdown)", () => {
     await h.manager.shutdown();
     await tick();
 
+    // T4 contract is foreground-only: a live bg task keeps its async settle
+    // path (settleCrash → crashed + stderr pointer) and must not have its
+    // forensics replaced by a cancelled record at shutdown.
     const stops = h.recorded.stops.filter((r) => r.reason === "cancelled");
-    assert.equal(stops.length, 2, `fg+bg cancelled stops, got ${stops.length}`);
-    assert.deepEqual(
-      new Set(stops.map((r) => r.id)),
-      new Set([fg.taskId, bg.taskId])
+    assert.equal(stops.length, 1, `fg-only cancelled stop, got ${stops.length}`);
+    assert.equal(stops[0]!.id, fg.taskId);
+    assert.equal(
+      h.recorded.stateChanges.filter(
+        (r) => r.reason === "cancelled" && r.id === fg.taskId
+      ).length,
+      1
     );
-    for (const id of [fg.taskId, bg.taskId]) {
-      assert.equal(
-        h.recorded.stateChanges.filter(
-          (r) => r.reason === "cancelled" && r.id === id
-        ).length,
-        1
+    assert.equal(
+      h.recorded.stops.filter((r) => r.id === bg.taskId).length,
+      0,
+      "no stop record of any kind for the live bg task at shutdown"
+    );
+    assert.equal(
+      h.recorded.stateChanges.filter(
+        (r) => r.reason === "cancelled" && r.id === bg.taskId
+      ).length,
+      0,
+      "no cancelled state_change for the live bg task"
+    );
+  });
+
+  it("shutdown：foreground cancelled append 抛错 → warn 指名任务且不阻断，shutdown 正常完成", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = makeTracingHarness({
+        stateChangeRecorder: (
+          rec
+        ): Promise<string | undefined> => {
+          // Only the shutdown cancelled append fails; the spawn-time
+          // starting→running record stays healthy so the task is live.
+          if (rec.reason === "cancelled") throw new Error("disk on fire");
+          return Promise.resolve(rec.id);
+        },
+      });
+      const fg = h.manager.spawn({
+        task: "fg warn path",
+        excludeFromHostDrain: true,
+      });
+      for (const child of h.spawned) {
+        Object.defineProperty(child, "exitCode", {
+          value: 1,
+          configurable: true,
+        });
+      }
+      await h.manager.shutdown();
+      const calls = warn.mock.calls.map((args) => args.join(" "));
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.includes("shutdown cancelled terminal skipped") &&
+            c.includes(fg.taskId)
+        ),
+        `expected one warn naming the skipped terminal for ${fg.taskId}`
       );
+    } finally {
+      warn.mockRestore();
     }
   });
 });

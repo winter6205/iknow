@@ -1436,11 +1436,12 @@ export function createSubAgentManager(opts: {
   /**
    * T4: synchronous cancelled terminal for interrupts whose worker leaves no
    * attributable envelope (Esc / Ctrl+X / subagent_stop / shutdown). The state
-   * transition and the stop record append to the same per-agent subagent log
-   * before the call returns — the terminal leaves the memory Map even when the
-   * parent dies first. Foreground-only by design (`abortTask` gate): a
-   * background task must keep its async crashed envelope so the mailbox
-   * wake / drainCompleted surface still fires (CONTEXT 后景残留提示).
+   * transition and the stop record leave the memory Map and are enqueued on
+   * the per-agent subagent trace before the call returns — the shipped jsonl
+   * writer flushes inside that call (appendFileSync, no fsync). Foreground-
+   * only by design (`abortTask` gate): a background task must keep its async
+   * crashed envelope so the mailbox wake / drainCompleted surface still fires
+   * (CONTEXT 后景残留提示).
    * `stoppedEmitted` + the state-change self-loop guard make every later path
    * (SIGTERM epilogue envelope, exit handler, settleCrash) a no-op.
    */
@@ -2492,22 +2493,30 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * T4 shutdown arm of `emitCancelledTerminal`: every task still live when
-   * shutdown reaches its clear point gets the guarded cancelled terminal —
-   * waiters are already rejected and the mailbox is about to be cleared, so
-   * both foreground and background land here. never throw out of shutdown:
+   * T4 shutdown arm of `emitCancelledTerminal`: only still-live foreground
+   * tasks (`def.excludeFromHostDrain === true`, same population as the
+   * `abortTask` gate) get the guarded cancelled terminal — their waiters are
+   * already rejected and no async envelope path remains. Live background tasks
+   * keep their existing async settle path (settleCrash → crashed + stderr
+   * pointer, or timeout): a shutdown must not replace their forensics with a
+   * cancelled record (CONTEXT 后景残留提示). never throw out of shutdown:
    * each append is isolated.
    */
   function cancelLiveTasksForShutdown(): void {
     for (const t of [...tasks.values()]) {
       if (t.state !== "starting" && t.state !== "running") continue;
+      if (t.def.excludeFromHostDrain !== true) continue;
       try {
         emitCancelledTerminal(t, {
           summary: "cancelled by manager shutdown",
           signalSent: false,
         });
-      } catch {
-        /* forensics must not break shutdown */
+      } catch (err) {
+        // EXIT: forensics must not break shutdown — warn and continue.
+        const detail = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[subagent] shutdown cancelled terminal skipped for ${t.id}: ${detail}`
+        );
       }
     }
   }
