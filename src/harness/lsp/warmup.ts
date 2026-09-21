@@ -125,7 +125,7 @@ export function startLspWarmup(ctx: LspCtx): void {
  * `aci/tools/lsp.js` / `symbol-resolver.js` / `lsp/client.js` /
  * `lsp/server.js` / `errors.js` / `lsp/language.js`, **not this module**.
  * Neither direction cycles, so this import introduces none. The `lsp_` prefix
- * family (the coordinate surface in `lsp.ts`, instrumented by `probe:lsp`) is
+ * family (the coordinate surface in `lsp.ts`, instrumented by `scripts/lsp-probe.ts`) is
  * matched separately by prefix in `isLanguageServerToolName`, not in these
  * two arrays.
  */
@@ -138,7 +138,7 @@ const LANGUAGE_SERVER_TOOL_NAMES: ReadonlySet<string> = new Set([
  * Whether a name belongs to the language-server tool family: the 15
  * model-facing symbol tools (exact names) + the `lsp_` prefix (the coordinate
  * surface has retired from the model face, but `lsp.ts` remains the real-stack
- * instrument for `probe:lsp` — prefix hit arms it, extra coverage is free).
+ * instrument for `scripts/lsp-probe.ts` — prefix hit arms it, extra coverage is free).
  */
 function isLanguageServerToolName(name: string): boolean {
   return LANGUAGE_SERVER_TOOL_NAMES.has(name) || name.startsWith("lsp_");

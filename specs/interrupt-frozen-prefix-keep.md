@@ -1,52 +1,52 @@
 # Spec: interrupt frozen prefix keep
 
 **Status:** ready for plan  
-**Surface:** `src/shared` (freeze 切刀), `src/harness` (in-flight closeout), `src/session-api` (persist 对齐), `src/tui` (Markdown 改为调用方；settle 仍画 store)
+**Surface:** `src/shared` (freeze splitter), `src/harness` (in-flight closeout), `src/session-api` (persist alignment), `src/tui` (Markdown becomes caller-side; settle still paints the store)
 
 ## Goal
 
-Esc **前台打断** 时，实时生成里已经钉住的完整块留在权威历史与墙上；只丢掉还在长的那一块。三面（打断当下 / 重开 / 下一句 prior）同一形状。
+On Esc **foreground interrupt**, the already-frozen complete blocks of live generation stay in the authoritative history and on screen; only the block still growing is discarded. All three surfaces (at interrupt / reopen / next-turn prior) show the same shape.
 
 ## Settled invariants
 
-1. **粒度 = streaming block freeze**（ADR-0108）：`prefixRaw` 进本轮 assistant；`tailRaw` 丢弃。无 prefix → 不落 assistant，cancelled 仍写 **interrupt system message**。
-2. **SSOT 在 closeout，不在 TUI overlay。** 累积流式正文必须是 harness/host 在 abort 时能读到的缓冲（与墙上 draft 同源字节）。settle 卸 overlay 之后只画这份历史。
-3. **切刀模块**落在 harness 已能 import 的层（`src/shared` 缝）。TUI 只调用。禁止 `src/harness` import `src/tui`。
-4. **工具在途**不改：已 append 的 assistant 留下；在途 tool → `execution_failed` `"cancelled"`。已闭合 `tool_use`、尚未执行 → 既有 cancelled 回填。
-5. **timeout** 同一把 keep 刀；不加 `Interrupted by user.`。
-6. **`/continue`** 仍只从本次 prior 去掉末尾 interrupt；freeze 前缀留在盘上与 prior。
-7. **顺序：** split →（有 prefix 则 append assistant 并 commit）→ cancelled 则 append interrupt 并 commit。assistant commit 失败则走既有 **MessageCommitError**，不得只留下 interrupt、假装前缀已进史。
-8. 非字符串累积 → 切刀既有 typed 失败（与现行 freeze 入参契约一致），不得空 catch。
+1. **Granularity = streaming block freeze** (ADR-0108): `prefixRaw` enters this turn's assistant; `tailRaw` is discarded. No prefix → no assistant is recorded, and cancelled still writes the **interrupt system message**.
+2. **The SSOT is in closeout, not the TUI overlay.** The accumulated streaming text must be a buffer the harness/host can read at abort time (same-source bytes as the on-screen draft). After settle removes the overlay, only this history is painted.
+3. **The splitter module** lands in a layer the harness can already import (the `src/shared` seam). The TUI only calls it. `src/harness` importing `src/tui` is forbidden.
+4. **Tools in flight unchanged**: already-appended assistant content stays; an in-flight tool → `execution_failed` `"cancelled"`. A closed `tool_use` not yet executed → the existing cancelled backfill.
+5. **Timeout** uses the same keep splitter; no `Interrupted by user.` is appended.
+6. **`/continue`** still only strips the trailing interrupt from this run's prior; the frozen prefix stays on disk and in the prior.
+7. **Order:** split → (if there is a prefix, append the assistant and commit) → if cancelled, append the interrupt and commit. If the assistant commit fails, take the existing **MessageCommitError** path — never leave only the interrupt behind and pretend the prefix entered history.
+8. Non-string accumulation → the splitter's existing typed failure (consistent with the current freeze input contract); no empty catch.
 
 ## Out of scope
 
-- 改 Esc / Ctrl+C 键位
-- 流过的 token 全留（未选的粒度）
-- timeout 专用产品文案
-- 落定态留/收/点名着色
+- Changing Esc / Ctrl+C key bindings
+- Keeping every streamed token (the granularity not chosen)
+- Timeout-specific product copy
+- Coloring of settle states kept/collapsed/named
 - iknow-memory / dream / GC
-- 改 `transport-continue-persist.md` 的 continue / retry 合同（仅 interrupt keep 与之叠加）
+- Changing `transport-continue-persist.md`'s continue / retry contract (only the interrupt keep composes with it)
 
 ## Input-contract classes (public surfaces)
 
 | Surface                     | empty                                                         | invalid/negative                               | overflow                                                     | concurrent                                                | exception                                                              |
 | --------------------------- | ------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------- | ---------------------------------------------------------------------- |
-| freeze split                | `""` → prefix 空、tail 空、boundary 0                         | 非 string → typed throw，不 keep               | 超长 markdown 仍按同一刀切；不另发明截断上限                 | 与现行 freeze 单测「重入 / 边界只前进」同纪律             | lexer 失败不得空 catch                                                 |
-| `run()` cancelled，模型在途 | 无累积或无 prefix → messages = user + interrupt，无 assistant | 切刀 typed throw → 不得写成成功 cancelled 假史 | 有 prefix 则整段 prefix 进 assistant（体积跟既有消息上限走） | abort 已发生时不再等完整 model step；不双写两份 assistant | `commitMessages` 抛 → **MessageCommitError**；不 append 孤儿 interrupt |
-| `run()` timeout，模型在途   | 同 keep 刀；无 interrupt 句                                   | 同左                                           | 同左                                                         | 钟 abort 不得标成 user cancel（既有 ADR-0091）            | 同 commit 失败                                                         |
-| persist / load              | 无 prefix 的 cancelled 盘面 = user + interrupt                | 不把失败半截 assistant 当 protocolError keep   | N/A                                                          | N/A                                                       | save 失败按既有 commit 失败冒泡                                        |
-| TUI settle                  | overlay 空、store 有 prefix → 墙画 store                      | 不得用 overlay 残稿覆盖 store                  | N/A                                                          | `finally` 卸 draft 早于 `turnFinished` 换快照：以快照为准 | N/A                                                                    |
+| freeze split                | `""` → prefix empty, tail empty, boundary 0                    | non-string → typed throw, no keep              | over-long markdown is still split by the same rule; no new truncation cap invented | same discipline as the current freeze unit tests ("reentry / boundary only advances") | lexer failure must not be swallowed by an empty catch                   |
+| `run()` cancelled, model in flight | nothing accumulated or no prefix → messages = user + interrupt, no assistant | splitter typed throw → must not be written as a fake successful-cancelled history | with a prefix, the whole prefix goes into the assistant (size governed by the existing message caps) | once abort has happened, stop waiting for a full model step; never double-write two assistants | `commitMessages` throws → **MessageCommitError**; never append an orphan interrupt |
+| `run()` timeout, model in flight | same keep splitter; no interrupt line                          | same as left                                     | same as left                                                 | the clock abort must not be labeled a user cancel (existing ADR-0091) | same commit failure                                                    |
+| persist / load              | a cancelled disk state without prefix = user + interrupt       | never keep a failed half assistant as protocolError | N/A                                                          | N/A                                                       | save failure bubbles via the existing commit-failure path              |
+| TUI settle                  | overlay empty, store has prefix → paint from the store         | never let overlay leftovers overwrite the store | N/A                                                          | if `finally` drops the draft before `turnFinished` swaps the snapshot: the snapshot is authoritative | N/A                                                                    |
 
 ## Success criteria
 
-- SC1: 模型在途、累积正文能切出非空 `prefixRaw` 时，cancelled 后 `result.messages` 含该 prefix 的 assistant，随后 `Interrupted by user.`。
-- SC2: 仅 `tailRaw`（无 prefix）时 cancelled 后无本轮 assistant，仍有 user + interrupt。
-- SC3: 重开/load 与 SC1/SC2 同形状。
-- SC4: 普通下一句 prior 含 freeze 前缀与 interrupt；`/continue` 本次 prior 可去掉末尾 interrupt、前缀仍在。
-- SC5: timeout 模型在途 keep 同 SC1/SC2 的 prefix 规则，无 interrupt 句。
-- SC6: harness 源码无 `from "../tui/`（或等价 tui import）。
-- SC7: 工具在途 cancelled 既有四条消息形状（user / assistant / tool_result / interrupt）不回退。
+- SC1: with the model in flight and a non-empty `prefixRaw` splittable from the accumulated text, after cancellation `result.messages` contains the assistant carrying that prefix, followed by `Interrupted by user.`.
+- SC2: with only `tailRaw` (no prefix), after cancellation there is no assistant for this turn, and still user + interrupt.
+- SC3: reopen/load has the same shape as SC1/SC2.
+- SC4: an ordinary next-turn prior contains the frozen prefix and the interrupt; `/continue` may drop the trailing interrupt from this run's prior while the prefix remains.
+- SC5: timeout with the model in flight keeps the same prefix rules as SC1/SC2, without the interrupt line.
+- SC6: harness source contains no `from "../tui/` (or equivalent tui import).
+- SC7: tools-in-flight cancelled keeps the existing four-message shape (user / assistant / tool_result / interrupt) without regression.
 
 ## Measured / out-of-band
 
-操作员 TUI 真按 Esc 的观感不作为本 spec 落地 CI 闸；SC1–SC7 由单测锁。
+The operator's on-screen feel of really pressing Esc in the TUI is not the CI gate for this spec's landing; SC1–SC7 are locked by unit tests.

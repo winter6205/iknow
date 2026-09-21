@@ -25,11 +25,11 @@ agent 符号工具（15 件）
   The original 10 coordinate-face `lsp_*` tools were retired from the *model
   face*, but not from the codebase — `createLspToolSet`
   (`aci/tools/lsp.ts:857`) is the real-stack smoke-test instrument used by
-  `scripts/lsp-probe.ts:266` (wired through `probe:lsp` in `package.json`).
+  `scripts/lsp-probe.ts:266` (run via `npx tsx scripts/lsp-probe.ts`).
   Shared helpers (`getClientForWorkspaceDetailed` / `renderNoServer` /
   `stringifyResult` / `isLspFailureSentinel`, ...) are still imported by the
   live `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts`. The file is
-  misnamed, not dead; deleting it would break `probe:lsp`.
+  misnamed, not dead; deleting it would break the LSP probe.
   Caveat: the probe only calls `lsp_workspace_symbol({ file })` — always with
   `file` — so it never exercises the `find_symbol` branch without `file`; the
   probe matrix is not coverage for that path.
@@ -100,8 +100,8 @@ Plus the three text-sync notifications `didOpen` / `didChange` / `didClose`.
 ### 1.5 Verification
 
 ```bash
-npm run probe:lsp                  # 真实 server 烟测（5 server × 夹具）
-npm run probe:lsp -- --lang python
+npx tsx scripts/lsp-probe.ts                  # real-server smoke test (5 servers × fixtures)
+npx tsx scripts/lsp-probe.ts --lang python
 npm test                           # tests/harness/lsp/ + tests/harness/aci/lsp.test.ts
 ```
 
@@ -265,7 +265,7 @@ are discovered at runtime via `-32601` → method-not-found sentinel
 stands only on probe runs, never on capability declarations (the deliberate
 rejection in §4 applies).
 
-`npm run probe:lsp [-- --lang <lang>]` (`package.json:51`) is the only LSP
+`npx tsx scripts/lsp-probe.ts [--lang <lang>]` is the only LSP
 measurement surface that walks the **real stack**: production
 `createLspToolSet` (`aci/tools/lsp.ts:857`, see §1.1) → `lsp/client.ts` → a
 spawned real language-server child process. `--lang` accepts the keys of
@@ -398,11 +398,11 @@ git rev-parse --short HEAD   # 21bd5805 (feat/lsp-silent-degradation)
 node -v                      # v22.23.2
 npx tsx --version            # tsx v4.23.0
 
-npm run probe:lsp                          # typescript 保底
-npm run probe:lsp -- --lang python
-npm run probe:lsp -- --lang yaml
-npm run probe:lsp -- --lang json
-npm run probe:lsp -- --lang dockerfile
+npx tsx scripts/lsp-probe.ts                          # typescript baseline
+npx tsx scripts/lsp-probe.ts --lang python
+npx tsx scripts/lsp-probe.ts --lang yaml
+npx tsx scripts/lsp-probe.ts --lang json
+npx tsx scripts/lsp-probe.ts --lang dockerfile
 ```
 
 All 5 server packages were present in `node_modules` and resolved at step 1 of

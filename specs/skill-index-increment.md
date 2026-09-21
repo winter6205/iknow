@@ -1,74 +1,74 @@
-# Spec: skill-index-increment — 技能模型索引增量与人侧 slash 收口
+# Spec: skill-index-increment — incremental skill model index and human-side slash unification
 
 **Status:** ready for plan  
-**Surface:** harness skill catalog / identity `<available_skills>` / loop 注入缝 / session 落盘 / TUI·Web·CLI slash / worker 装配  
-**访谈:** 2026-09-17 LogicSync（假设门已确认，见 Inherits）
+**Surface:** harness skill catalog / identity `<available_skills>` / loop injection seam / session persistence / TUI·Web·CLI slash / worker assembly  
+**Interview:** 2026-09-17 LogicSync (assumption gates confirmed, see Inherits)
 
 ## Objective
 
-会话开场后新出现的 **技能模型索引** 条目必须进入模型眼前，且不得改写 system 前缀。人用 slash 加载技能走 **可加载技能面**（可含无 description 的人侧技能），TUI / Web / CLI **同一个入口**。`skill()` 只服务模型索引资格；读磁盘 SKILL.md 不拦。
+After a session opens, **skill model index** entries that newly appear must reach the model, and the system prefix must never be rewritten. Human slash skill loading goes through the **loadable-skill surface** (which may include human-side skills without a description), and TUI / Web / CLI share **one entry**. `skill()` governs model-index eligibility only; reading a SKILL.md from disk is not blocked.
 
-**用户：** 本机操作员（装技能、slash、会话中途出现新 SKILL.md）与模型（靠索引 `skill({name})`）。
+**Users:** the local operator (installing skills, slash, new SKILL.md appearing mid-session) and the model (relying on the index via `skill({name})`).
 
-**成功形态：** 开场冻表仍在 system 且相邻轮 deep-equal；新的模型索引名在下一轮调用前以隐藏 user 消息贴在 messages 最末；slash 立刻能 `/` 可加载条目；子代理出生时拍父会话当时完整模型索引进自己的冻表。
+**Success shape:** the opening frozen table stays in system and is deep-equal across adjacent turns; a new model-index name is appended at the very end of messages as a hidden user message before the next model call; slash can immediately `/`-complete the new loadable entry; a spawned sub-agent snapshots the parent session's complete model index at birth into its own frozen table.
 
-## Assumptions（访谈已确认）
+## Assumptions (confirmed in interview)
 
-1. 开场 `<available_skills>` 继续冻在 system，满足 **前缀资格线**。
-2. 中途只 **追加新建** 的模型索引行，不整表刷新，不改已进场条目的 description。
-3. 已进场条目的修改 / 下架 / disable 变更：本会话不对齐，**新开会话** 重冻。
-4. slash 信封灌正文 ≠ 索引进场；下一轮仍可为该 name 补索引增量。
-5. 已进场 name 跟 **session** 落盘（**索引进场史**）；**compact 不**据此再贴 listing。
-6. 新建 delta **带完整 description**，不再跑开场 10% **索引降档**。
-7. 子代理不跟增量消息、不第二套 diff；spawn 继承父会话 **此刻完整模型索引快照**。
-8. delta 接在 messages **最末**（本轮用户消息 / skill-load 信封已在上）。
-9. Plugin 包与 MCP：**显式 reload 或新会话** 才让 scanner 看见；不自动 turn 前 diff。reload 后多出来的 **skill 模型索引** 名仍走同一条 delta（不改 system）。MCP 工具面不套本 listing。
-10. 自动 name-diff 覆盖现行 `scan()` **全部技能根**（plugin 根须先 reload 才进入 scan 可见集）。
-11. 人侧技能（无 description，或 `disable-model-invocation`）：进 slash、不进模型索引、`skill()` 拒、**读文件不拦**。
-12. 本切片不把 MCP 名字目录做成 skill 同构增量。
+1. The opening `<available_skills>` stays frozen in system, satisfying the **prefix eligibility line**.
+2. Mid-session only **appends newly created** model-index rows; no full-table refresh, no description changes to already-admitted entries.
+3. Edits / removals / disable changes to admitted entries: not reconciled in this session — **start a new session** to refreeze.
+4. The slash envelope injecting the body ≠ index admission; the next turn may still add the index increment for that name.
+5. Admitted names persist with the **session** (the **index entry history**); **compact does not** re-attach a listing based on it.
+6. New deltas **carry the full description**; the opening 10% **index downshift** is not re-run.
+7. Sub-agents do not follow increment messages and keep no second diff; spawn inherits the parent session's **complete model-index snapshot at that moment**.
+8. The delta attaches at the **end** of messages (this turn's user message / skill-load envelope is already above it).
+9. Plugin packages and MCP: only an **explicit reload or a new session** makes the scanner see them; no automatic pre-turn diff. After reload, extra **skill model index** names still go through the same delta path (system unchanged). The MCP tool surface is not covered by this listing.
+10. Automatic name-diff covers every skill root of the current `scan()` (plugin roots must be reloaded first to enter the scan-visible set).
+11. Human-side skills (no description, or `disable-model-invocation`): enter slash, not the model index; `skill()` rejects them; **reading the file is not blocked**.
+12. This slice does not turn the MCP name catalog into a skill-like increment.
 
 ## Boundaries
 
 - **Does:**
-  - catalog 拆清 **技能模型索引** vs **可加载技能面**（`get` 仍按名取条目，含 disabled）。
-  - 开场冻表 = 模型索引在装配期的投影 + 既有降档；会话内 system 该段不变。
-  - 送模型前：rescan 现行技能根 → 模型索引 − 索引进场史 → 仅新建行渲染为 `<available_skills>` 增量，pendingInjected 同形接到 messages 尾；进场史落盘。
-  - 人侧 catalog 在安装 / 丢目录 / reload **当时** rescan，slash 立刻可见。
-  - TUI / Web / CLI slash **一个入口**：可加载全集、`SkillCatalog.get` 语义、remainder 按输入 token、别名；HTTP DTO 允许 description 缺席。
-  - `skill()`：非模型索引资格 → 拒、不灌正文；不禁止 `read_file`。
-  - 隐藏谓词：该增量 user 消息不进 ❯ 气泡 / Web 用户气泡 / CLI ↑ 历史（与 `isTuiHiddenUserMessage` 同纪律）。
-  - worker spawn：父会话模型索引全集写入 worker 自己的 system 冻表。
-- **Confirms with human:** （none — 访谈已收口）
+  - Split the catalog cleanly into **skill model index** vs **loadable-skill surface** (`get` still fetches entries by name, including disabled).
+  - Opening frozen table = the model index's assembly-time projection + the existing downshift; this system segment is unchanged within the session.
+  - Before sending to the model: rescan current skill roots → model index − entry history → render only new rows as an `<available_skills>` delta, hooked to the messages tail via pendingInjected in the same shape; persist the entry history.
+  - The human-side catalog rescans **at the moment** of install / folder drop / reload, so slash sees new entries immediately.
+  - TUI / Web / CLI slash is **one entry**: the full loadable set, `SkillCatalog.get` semantics, remainder by input token, aliases; the HTTP DTO allows a missing description.
+  - `skill()`: non-model-index eligibility → reject, do not inject the body; `read_file` is not prohibited.
+  - Hidden predicate: the delta user message does not enter the ❯ bubble / Web user bubble / CLI ↑ history (same discipline as `isTuiHiddenUserMessage`).
+  - worker spawn: write the parent session's full model-index set into the worker's own system frozen table.
+- **Confirms with human:** (none — interview closed)
 - **Out of this spec:**
-  - MCP 工具目录增量、MCP 自动 name-diff。
-  - Plugin 包未 reload 时的自动进场。
-  - compact 后重挂 listing 或重挂已调用 skill 正文（正文仍 ADR-0079）。
-  - 已进场 description 热更新、按调用次数降档、诊断 slash（`/context` 类）、`paths` / `when_to_use` / 子代理启动预载 SKILL 正文。
-  - 改 `IKNOW_ASSEMBLY_ORDER` 六段；把开场 listing 迁出 system。
+  - MCP tool-catalog increments, MCP automatic name-diff.
+  - Automatic admission of plugin packages before reload.
+  - Re-attaching the listing after compact or re-attaching invoked skill bodies (bodies still per ADR-0079).
+  - Hot-updating descriptions of admitted entries, invocation-count-based downshift, diagnostic slash (`/context`-style), `paths` / `when_to_use` / sub-agent startup preloading of SKILL bodies.
+  - Changing the six segments of `IKNOW_ASSEMBLY_ORDER`; moving the opening listing out of system.
 
 ## Success Criteria
 
-- **SC1** 相邻两轮（无新模型索引名）`tools` + `system` deep-equal，且 `<available_skills>` 冻表字节不变。
-- **SC2** 现行 scan 根下新增一条 **有 description 且未 disable** 的 skill 后，下一轮送模型的 messages **最末** 一条 user 文本为 `<available_skills>` 且 **只含** 该新 name（及当时完整 description）；冻表不含该行。
-- **SC3** 同一新 name 第二轮不再追加；session 恢复后根据索引进场史仍不重复追加。
-- **SC4** compact 之后不因「messages 里增量不见了」再追加同一批 name。
-- **SC5** 无 description 的 skill：slash（TUI/Web/CLI 同一入口）能信封加载；不出现在冻表或 delta；`skill({name})` 拒；`read_file` 其 SKILL.md 不因本闸失败。
-- **SC6** `disable-model-invocation` 且有 description：同 SC5 的人侧能 `/`、模型索引与 `skill()` 拒。
-- **SC7** slash 加载新技能正文后，该 name 若尚非模型索引进场，下一轮仍补 delta（信封 ≠ 进场史）。
-- **SC8** 安装 / reload 当下 slash 候选已含可加载新条目，不必等下一 turn。
-- **SC9** Web `listSkills`（或后继 DTO）含无 description 条目；remainder 不按 canonical 名长度误切。
-- **SC10** spawn 的 worker system 含父会话当时模型索引全集（含已追加进场的 name），worker 不自己往 prior 抄父增量消息。
-- **SC11** 未 reload 时，仅 plugin 包 / MCP 配置变化 **不** 产生 skill 索引 delta。
-- **SC12** 本切片相关 `npm test` 路径（catalog 两面、skill 工具门、slash 统一入口、注入隐藏、进场史、worker 快照）退出码 0。
+- **SC1** Adjacent turns (no new model-index names) keep `tools` + `system` deep-equal, and the `<available_skills>` frozen table byte-unchanged.
+- **SC2** After adding a skill **with a description and not disabled** under current scan roots, the **last** user text in the messages sent to the model on the next turn is `<available_skills>` containing **only** that new name (with its then-full description); the frozen table does not contain that row.
+- **SC3** The same new name is not appended a second time; after session restore the entry history still prevents duplicate appends.
+- **SC4** After compact, do not re-append the same batch of names because "the increment disappeared from messages".
+- **SC5** A skill without a description: slash (TUI/Web/CLI, same entry) can load it via the envelope; it appears in neither the frozen table nor a delta; `skill({name})` rejects it; `read_file` of its SKILL.md does not fail because of this gate.
+- **SC6** `disable-model-invocation` with a description: same as SC5 — human side can `/` it, model index and `skill()` reject it.
+- **SC7** After slash loads a new skill body, if the name has not yet entered the model index, the next turn still appends the delta (envelope ≠ entry history).
+- **SC8** At install / reload time, slash candidates already include the new loadable entry, without waiting for the next turn.
+- **SC9** Web `listSkills` (or its successor DTO) includes entries without descriptions; remainder is not mis-cut by canonical name length.
+- **SC10** The spawned worker's system contains the parent session's full model-index set at that moment (including names already admitted via increments); the worker does not copy the parent's increment messages into its own prior.
+- **SC11** Without a reload, plugin-package / MCP-config changes alone do **not** produce a skill-index delta.
+- **SC12** This slice's relevant `npm test` paths (catalog two surfaces, skill tool gate, unified slash entry, injection hiding, entry history, worker snapshot) exit 0.
 
 ## Input-contract classes
 
-| Surface          | empty                         | invalid/negative                     | overflow               | concurrent                       | exception                                                            |
-| ---------------- | ----------------------------- | ------------------------------------ | ---------------------- | -------------------------------- | -------------------------------------------------------------------- |
-| 模型索引查询     | 无合格条目 → 冻表空清单既有句 | disable / 无 description → 不进索引  | 降档仍只作用于开场冻表 | 同 turn 多次 diff 只贴一次新建集 | rescan 失败 → typed 错，不改冻表、不贴残缺 delta（EXIT：保留进场史） |
-| 可加载面 / slash | `/` 非技能                    | 未知名 → 非 skill-load；静态词表优先 | N/A                    | N/A                              | 正文读失败 → 既有 skill-load 错，不假装进场                          |
-| `skill()`        | 空 name → 既有校验            | 非模型索引 → 拒、不灌正文            | 二次短路仍 ADR-0079    | N/A                              | 读盘失败 typed，与「资格拒」分型                                     |
-| 索引进场史       | 新 session = 冻表 name 集     | 未知 name 写入忽略                   | N/A                    | 追加与落盘同一拍                 | 落盘失败 → typed，不把 messages 追加当成已进场                       |
+| Surface              | empty                                        | invalid/negative                          | overflow                              | concurrent                                     | exception                                                            |
+| -------------------- | -------------------------------------------- | ----------------------------------------- | ------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------- |
+| model-index query    | no eligible entries → frozen table keeps its existing empty-list line | disable / no description → not in the index | downshift still only applies to the opening frozen table | multiple diffs in one turn append the new set once | rescan failure → typed error; frozen table unchanged, no partial delta appended (EXIT: entry history preserved) |
+| loadable surface / slash | `/` non-skill                            | unknown name → not skill-load; static vocabulary wins first | N/A | N/A | body read failure → existing skill-load error, no fake admission |
+| `skill()`            | empty name → existing validation             | non-model-index → reject, no body injection | second short-circuit still ADR-0079   | N/A                                            | disk read failure typed, distinct from "eligibility rejection"       |
+| index entry history  | new session = frozen-table name set          | writes of unknown names ignored           | N/A                                   | append and persist in the same beat            | persist failure → typed; do not treat a messages append as already admitted |
 
 ## Open Questions
 
@@ -76,30 +76,30 @@
 
 ## Inherits / Changes
 
-**Inherits（CONTEXT 原句，实施时不得改义）：**
+**Inherits (CONTEXT original wording, meaning must not change in implementation):**
 
-- **前缀资格线：** 会话内可变的闸门只许落位 messages 尾部或 handler 层。
-- **append-only messages：** 消息只能以不可变追加更新。
-- **渐进式披露 / 直呼加载 / 索引降档 / 溢出治理：** 开场索引与 10% 闸、有描述则 `skill({name})`。
-- **skill() 二次短路 / skill-load display projection / skill bare alias：** 闸只罩 `skill()`；slash 信封仍灌全文；解析问 catalog。
-- **session transcript / 会话文件夹：** 进场史跟 session 走，不另造权威 messages。
+- **Prefix eligibility line:** in-session mutable gates may only land at the messages tail or the handler layer.
+- **append-only messages:** messages are only ever updated by immutable append.
+- **progressive disclosure / direct-call loading / index downshift / overflow governance:** the opening index and the 10% gate; with a description, `skill({name})`.
+- **skill() second short-circuit / skill-load display projection / skill bare alias:** the gate only covers `skill()`; the slash envelope still injects the full text; resolution asks the catalog.
+- **session transcript / conversation folder:** entry history follows the session; no second authoritative messages source.
 
-**Inherits（ADR）：** ADR-0043 前缀冻结与 messages 侧闸；ADR-0046 开场降档与直呼；ADR-0079 `skill()` 短路与 slash 不短路；ADR-0095 插件技能发现（本切片：包启用靠 reload）。
+**Inherits (ADR):** ADR-0043 prefix freeze and the messages-side gate; ADR-0046 opening downshift and direct call; ADR-0079 `skill()` short-circuit and the non-short-circuiting slash; ADR-0095 plugin skill discovery (this slice: package activation relies on reload).
 
-**Amends：** `specs/tui-skill-slash-catalog.md` 将 CLI 划出范围——本 spec **收回** CLI，与 TUI/Web 同一 slash 入口。`specs/tui-skill-slash-catalog.md` 的 catalog.get / remainder / 静态优先 / agents 不进 slash **仍然有效**。
+**Amends:** `specs/tui-skill-slash-catalog.md` scoped CLI out — this spec **reclaims** CLI, sharing one slash entry with TUI/Web. The catalog.get / remainder / static-priority / agents-not-in-slash locks of `specs/tui-skill-slash-catalog.md` **remain valid**.
 
-**Changes：** 新增 ADR-0098（开场冻表 + messages 增量 + 索引进场史）。catalog 一名两义的 `available()` 拆成模型索引与可加载面。
+**Changes:** add ADR-0098 (opening frozen table + messages delta + index entry history). Split the catalog's ambiguous `available()` into a model index and a loadable surface.
 
 ## ACR
 
 ```
-bounded-context-guardian: yes — catalog/进场史/注入在 harness；宿主只消费统一 slash 投影；session-api DTO 是同一可加载面的 HTTP 形，不在 web 另造资格门
-input-contract-tests: yes — 上表五类覆盖两查询、skill()、slash、进场史、注入空集
-error-handling-enforcer: yes — rescan/落盘/资格拒分型；失败不改冻表、不把失败追加标成已进场（EXIT 写在进场史行）
-complexity-anti-drift: yes — 复用 pendingInjected / 隐藏谓词；两查询而非第三套 listing 子系统；不把 MCP 并进本通道
-minimal-change-verifier: yes — 只做技能模型索引增量 + 人侧同一 slash 入口 + skill() 资格拒；诊断面、paths、MCP 目录增量、正文采样策略均划出
+bounded-context-guardian: yes — catalog/entry-history/injection live in harness; hosts only consume the unified slash projection; the session-api DTO is the HTTP shape of the same loadable surface, no second eligibility gate in web
+input-contract-tests: yes — the five classes above cover the two queries, skill(), slash, entry history, empty injection set
+error-handling-enforcer: yes — rescan/persist/eligibility-rejection typed separately; failure keeps the frozen table and never marks a failed append as admitted (EXIT written on the entry-history row)
+complexity-anti-drift: yes — reuse pendingInjected / hidden predicate; two queries instead of a third listing subsystem; MCP not merged into this channel
+minimal-change-verifier: yes — only the skill model-index increment + one human-side slash entry + skill() eligibility rejection; diagnostics surface, paths, MCP catalog increments, body sampling strategy all scoped out
 ```
 
 ## Persist
 
-已 flush：ADR-0098、CONTEXT 四词条 + vs、`specs/tui-skill-slash-catalog.md` CLI 指向、`docs/STATUS.md` 现状句、`plans/skill-index-increment.md`。
+Already flushed: ADR-0098, four CONTEXT.md entries plus vs sections, the CLI pointer in `specs/tui-skill-slash-catalog.md`, the current-status line in `docs/STATUS.md`, `plans/skill-index-increment.md`.

@@ -1,38 +1,38 @@
-# specs/ — 活跃 module spec 活索引（SSOT）
+# specs/ — live module-spec index (SSOT)
 
-> **索引维护规则**（重写自 `5ae9889a` 前旧版，AGENTS.md 指针「活跃 spec：`specs/README.md`」指向本文件）：
+> **Index maintenance rules** (rewritten from the pre-`5ae9889a` version; the AGENTS.md pointer "active specs: `specs/README.md`" points at this file):
 >
-> - **新增 spec** → 在对应主题组加一行（一句话职责 + 依据 ADR）。
-> - **spec 落地完成或 superseded** → 从本表删除条目（归档去向按当时约定，本表只列活文件）。
-> - 入口文件（AGENTS.md / docs/STATUS.md）只引用本文件，不逐字枚举 spec。
+> - **New spec** → add a row under the matching topic group (one-line responsibility + basis ADR).
+> - **Spec landed or superseded** → delete the row from this table (archive destination per the convention at the time; this table lists live files only).
+> - Entry files (AGENTS.md / docs/STATUS.md) reference only this file; they never enumerate specs verbatim.
 
-## 活跃 spec
+## Active specs
 
-### 运行时核心 / 沙箱
+### Runtime core / sandbox
 
-- `network-egress-allowlist.md` — 出口代理缝 + 域名允许集（ADR-0097，桥接改 ADR-0107：无宿主 socat）
-- `egress-preset-allowlist.md` — 出厂 defaults 清单（ADR-0104，扩表见 ADR-0107）
-- `egress-ssh-bridge.md` — SSH 走同一允许集；实现改为自带中继，禁止 socat 依赖（ADR-0107）
-- `egress-credential-sentinel.md` — sentinel 可选，0107 不自动启用（ADR-0105）
-- `worktree-unbound-ro-bind.md` — worktree 门禁 unbound bash 物理 ro-bind + EROFS 回灌，替代预测拦截（ADR-0109，supersedes ADR-0037 bash 预测条款）
-- `subagent-layers-worktree-deps.md` — subagent 三层 + worktree 项目依赖
+- `network-egress-allowlist.md` — egress proxy seam + domain allowlist (ADR-0097; bridging moved to ADR-0107: no host-side socat)
+- `egress-preset-allowlist.md` — factory defaults list (ADR-0104; table extensions per ADR-0107)
+- `egress-ssh-bridge.md` — SSH goes through the same allowlist; implementation switched to a self-contained relay, socat dependency forbidden (ADR-0107)
+- `egress-credential-sentinel.md` — sentinel optional, not auto-enabled by 0107 (ADR-0105)
+- `worktree-unbound-ro-bind.md` — worktree gate: physical ro-bind for unbound bash + EROFS feedback, replacing predictive interception (ADR-0109, supersedes ADR-0037 bash prediction clauses)
+- `subagent-layers-worktree-deps.md` — subagent three layers + worktree project deps
 
-### harness / 状态与传输
+### Harness / state and transport
 
-- `session-list-title.md` — 列表标题：独立 transcript 事件 + lite model 生成（ADR-0113）
-- `agent-status-instruction-echo.md` — 状态栏复诵升级：`instruction:` 逐字回显段 + pivot reconcile 一次性标记（ADR-0103 修订 ADR-0028；ACR PASS）
-- `instruction-authority-projection.md` — 指令权威出站投影：宿主帧盖戳 + untrusted 转译（#1066；ADR-0112）
+- `session-list-title.md` — list title: standalone transcript event + lite-model generation (ADR-0113)
+- `agent-status-instruction-echo.md` — status-bar echo upgrade: verbatim `instruction:` replay segment + one-shot pivot reconcile marker (ADR-0103 amends ADR-0028; ACR PASS)
+- `instruction-authority-projection.md` — instruction-authority outbound projection: host-frame stamping + untrusted translation (#1066; ADR-0112)
 - `transport-continue-persist.md` — transport retry / continue / failure persist
-- `interrupt-frozen-prefix-keep.md` — 模型在途打断留下 freeze 前缀（ADR-0108）
+- `interrupt-frozen-prefix-keep.md` — interrupting a model in flight keeps the frozen prefix (ADR-0108)
 
 ### TUI
 
-- `tui-activity-block.md` — 过程块（思考与安静工具共用正文槽，按消息切块追加）
+- `tui-activity-block.md` — activity blocks (thinking and quiet tools share one body slot; blocks cut per message and appended)
 - `tui-skill-slash-catalog.md` — TUI skill slash → harness SkillCatalog
-- `tui-subagent-transcript-live.md` — 活子代理两行落在会话 spawn 卡上
+- `tui-subagent-transcript-live.md` — live sub-agent's two lines land on the session spawn card
 
-### 工具与扩展源
+### Tools and extension sources
 
-- `251-lsp-tool.md` — LSP 工具（连接卫生增量）
-- `skill-index-increment.md` — 技能模型索引增量 + 人侧 slash 收口（ADR-0098）
-- `read-image-vision.md` — 围栏内指定路径读图，经 `tool_result` 送达 Anthropic vision（ACR PASS）
+- `251-lsp-tool.md` — LSP tool (connection-hygiene increment)
+- `skill-index-increment.md` — incremental skill model index + human-side slash unification (ADR-0098)
+- `read-image-vision.md` — read images at paths inside the fence, delivered to Anthropic vision via `tool_result` (ACR PASS)

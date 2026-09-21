@@ -1,210 +1,210 @@
-# Spec: 出口 ssh 桥（传输面）—— 沙箱内 git-over-SSH 可达（补完 ADR-0097 T7/T8 形态扩展）
+# Spec: egress ssh bridge (transport plane) — git-over-SSH reachable inside the sandbox (completing the ADR-0097 T7/T8 shape extension)
 
-**Status:** rev 2（实现改为自带中继，禁止 socat；ADR-0107）
-**Basis:** ADR-0097（代理缝结构、生命周期表三形态、「HTTP CONNECT + SOCKS5」原设计、T7/T8 欠账）；ADR-0104（preset 六域；`github.com` apex 与 `*.github.com` 并列）；ADR-0105 §Decision 5（SSH 凭据归本 spec；key 进围栏姿态 = 出口域限制兜底）；承接 `specs/network-egress-allowlist.md`（rev 2）与 `specs/egress-preset-allowlist.md`（rev 1）
-**Surface:** `src/harness/sandbox/egress/session.ts`、`upstream.ts`、`src/harness/sandbox/bwrap.ts`（egress bind 段扩多 socket）、`src/harness/aci/tools/bash.ts`（fence 内命令链接线）、`src/harness/background/manager.ts` / `src/harness/verify/sandbox-run.ts`（同规则接线确认）、`scripts/sandbox-probe.ts`（egress 分支重写 + ssh 探针类别）；**不改** `specs/egress-preset-allowlist.md` / preset 清单 / `domain-matcher.ts` 判定语义
+**Status:** rev 2 (implementation uses a self-shipped relay, socat forbidden; ADR-0107)
+**Basis:** ADR-0097 (proxy seam structure, lifecycle table for the three shapes, the original "HTTP CONNECT + SOCKS5" design, the T7/T8 debt); ADR-0104 (six preset domains; `github.com` apex alongside `*.github.com`); ADR-0105 §Decision 5 (SSH credentials belong to this spec; posture of keys entering the fence = egress domain restrictions as the backstop); continues `specs/network-egress-allowlist.md` (rev 2) and `specs/egress-preset-allowlist.md` (rev 1)
+**Surface:** `src/harness/sandbox/egress/session.ts`, `upstream.ts`, `src/harness/sandbox/bwrap.ts` (egress bind section extended to multiple sockets), `src/harness/aci/tools/bash.ts` (in-fence command-chain wiring), `src/harness/background/manager.ts` / `src/harness/verify/sandbox-run.ts` (same-rule wiring confirmation), `scripts/sandbox-probe.ts` (egress branch rewrite + ssh probe categories); **does not change** `specs/egress-preset-allowlist.md` / the preset list / `domain-matcher.ts` decision semantics
 
 ## Objective
 
-让沙箱内 `git push`（SSH remote）经**出口代理缝**可达：补完 ADR-0097 挂账的 T7/T8「SOCKS/git 形态扩展」——宿主侧 SOCKS5 代理面、沙箱内 socat 监听、`GIT_SSH_COMMAND` 注入、SSH 目标 `host:port` 的域判定语义，三形态（前台 per-call / background per-task / verify 单例）随 0097 生命周期表同规则起落。成功 = 实测地面：真实 `git push` 经放行域走通、未放行域 :22 被拒且违例回灌可区分。
+Make `git push` (SSH remote) inside the sandbox reachable through the **egress proxy seam**: complete the T7/T8 "SOCKS/git shape extension" ADR-0097 left on the books — host-side SOCKS5 proxy surface, in-sandbox socat listener, `GIT_SSH_COMMAND` injection, domain-decision semantics for SSH target `host:port`; all three shapes (foreground per-call / background per-task / verify singleton) start and stop under the same rules as the 0097 lifecycle table. Success = measured ground truth: a real `git push` succeeds through an admitted domain, un-admitted domains get :22 refused with distinguishable violation feedback.
 
-用户故事：操作员希望 agent 在围栏内对 SSH remote 的仓库完成 push / PR 流。现状 `session.ts:25` 明写「SOCKS5 / git-over-SOCKS 不在 T4 范围（T7/T8 形态扩展时按 mux 形态补）」；ADR-0104 §Consequences 遗留同款；实测事故（conversation `ee13c787`）里 `git push` 走 HTTPS 也因缝未闭合全灭——本 spec 与并行 spec 共同把「能推到 git 主机」变成现实。
+User story: the operator wants the agent to complete push / PR flows for SSH-remote repositories inside the fence. Currently `session.ts:25` explicitly states "SOCKS5 / git-over-SOCKS out of T4 scope (to be completed under the T7/T8 shape extension per the mux shape)"; ADR-0104 §Consequences carries the same leftover; in the measured incident (conversation `ee13c787`) even `git push` over HTTPS died entirely because the seam was never closed — this spec together with the parallel spec turns "able to push to git hosts" into reality.
 
-**用户已定方向（非假设）**：交付面 = 出口 ssh 桥（传输面）；SSH 凭据（私钥 / agent）归本 spec 设计；TLS 终止与 HTTP(S) 凭据 sentinel 代换归并行 spec `specs/egress-credential-sentinel.md`，本 spec 只声明共享装配缝、不设计对方范围。
+**User-settled direction (not an assumption)**: the deliverable = egress ssh bridge (transport plane); SSH credentials (private key / agent) are designed in this spec; TLS termination and HTTP(S) credential sentinel substitution belong to the parallel spec `specs/egress-credential-sentinel.md` — this spec only declares the shared assembly seam and does not design the other's scope.
 
-### ASSUMPTIONS I'M MAKING（全部「待确认」，人类 gate 由主会话走）
+### ASSUMPTIONS I'M MAKING (all "to be confirmed", the human gate runs in the main session)
 
-1. 待确认 —— SSH 隧道走**既有 HTTP 半桥的 CONNECT 通道**为 git 主形态（依赖包在 Linux 上同此选择：`sandbox-utils.js:540` 用 `socat - PROXY:`；SOCKS5+`nc` 形态仅作 macOS 系参考，`sandbox-utils.js:531`，且 `nc` 无 SOCKS5 auth、沙箱内可用性未证）。
-2. 待确认 —— SOCKS5 面仍按 0097 原设计建齐（宿主 `createSocksProxyServer` + 独立 unix socket + 沙箱内 1080 监听），供 socks5h 感知的通用工具（curl `--proxy socks5h://`、SSH 之外的隧道类）使用，但 **git 路径不依赖它**；若 ACR complexity-anti-drift 判定「git 不用的面先不建」，可整体裁剪 T2 而不影响其余任务。
-3. 待确认 —— 沙箱内代理监听端口采**固定值** 3128(HTTP)/1080(SOCKS)（依赖包同款：`linux-sandbox-utils.js:630-631`），宿主侧代理 TCP 端口维持 OS 分配；理由：沙箱 netns 号段私有、固定端口使 `GIT_SSH_COMMAND` 与 env 可预先拼装，去掉现行「宿主/沙箱同号」的巧合式耦合（`session.ts:435-437`）。
-4. 待确认 —— 实测教训「沙箱内 `/etc/ssh/ssh_config.d/*` 报 `Bad owner or permissions`」成立（任务前提，本 spec 起草时未在围栏内复验），故注入形态**必含 `-F /dev/null`**；T3 验收含围栏内复验探针。
-5. 待确认 —— 现状确认：`~/.ssh` 私钥在 global 与 workspace 两 fs 档**都可读**（global 档 `--bind / /` 可写可见；workspace 档 home `--ro-bind` 可见只读，见 `bwrap.ts:109-141`；全仓 src 无任何 `~/.ssh` deny 规则——grep 实证）。因此「workspace 档 key 不可读」在**当前 fs-policy 下不存在**；`SSH_AUTH_SOCK` bind 仅作为条件分支（未来 read-deny / key 不在 home 时）钉形状，不入必做面。
-6. 待确认 —— 允许集**无需**新增 `github.com:22` / `ssh.github.com:443` 形态条目：`domain-pattern.js:106-114` 明义「A pattern without a port matches every port」，preset 的 `github.com` 裸条目已覆盖 :22；`ssh.github.com` 命中 `*.github.com`（严格子域）。preset 清单零改动 ⇒ 无 cross-spec dependency（若实现期发现判定面与此结论不符，**回来改本 spec，不改 preset spec**）。
-7. 待确认 —— 批准流对 SSH 不加新语义：filter 回调同闸同 sink，session-grants 按 host 记账（交互批准过 `github.com` 的 HTTPS 会话，同会话 :22 也放行）——视为「域粒度批准」既有语义的自然延伸，不另立端口轴。
-8. 待确认 —— passphrase 保护私钥 + 无 agent = 围栏内 fail（ssh 提示口令、fence 无 tty → 失败），本 spec 只钉 Failure path 与指引文案（宿主侧 `ssh-add` / 改用无口令 key / 条件分支 `SSH_AUTH_SOCK` bind），不做口令回传面。
-9. 待确认 —— 真实 `git push` e2e 仅对**操作员自有远端 + 非破坏性 ref**（如 `refs/heads/iknow-egress-probe-*` 或 `--dry-run`）执行，默认 skip、显式环境变量开启（对齐 `archive/tests-real-llm/` 的「缺条件 → 显式 skip + Not run」纪律，不落 CI）。
-10. 待确认 —— 依赖包 `@anthropic-ai/sandbox-runtime` 升版时，本 spec 引用的包内路径/行号漂移只允许落在适配层 `upstream.ts` 与注释，判定/桥语义不因此改生产码。
+1. To be confirmed — the SSH tunnel rides the **CONNECT channel of the existing HTTP half-bridge** as the git primary shape (the dependency package makes the same choice on Linux: `sandbox-utils.js:540` uses `socat - PROXY:`; the SOCKS5+`nc` shape is a macOS-family reference only, `sandbox-utils.js:531`, and `nc` lacks SOCKS5 auth, availability inside the sandbox unproven).
+2. To be confirmed — the SOCKS5 surface is still built per the 0097 original design (host `createSocksProxyServer` + separate unix socket + in-sandbox 1080 listener) for socks5h-aware general tools (curl `--proxy socks5h://`, tunneling beyond SSH), but **the git path does not depend on it**; if the ACR complexity-anti-drift verdict says "don't build surfaces git doesn't use", T2 can be cut wholesale without affecting the other tasks.
+3. To be confirmed — in-sandbox proxy listen ports take **fixed values** 3128(HTTP)/1080(SOCKS) (same as the dependency package: `linux-sandbox-utils.js:630-631`); host-side proxy TCP ports remain OS-assigned; rationale: the sandbox netns number space is private, fixed ports let `GIT_SSH_COMMAND` and env be pre-assembled, removing the current coincidental "host/sandbox same port number" coupling (`session.ts:435-437`).
+4. To be confirmed — the measured lesson "`/etc/ssh/ssh_config.d/*` reports `Bad owner or permissions` inside the sandbox" holds (task premise; not re-verified inside the fence at drafting time), so the injection shape **must include `-F /dev/null`**; T3 acceptance includes an in-fence re-verification probe.
+5. To be confirmed — current-state confirmation: `~/.ssh` private keys are **readable under both** the global and workspace FS tiers (global tier `--bind / /` writable and visible; workspace tier home `--ro-bind` visible read-only, see `bwrap.ts:109-141`; no `~/.ssh` deny rule anywhere in repo `src` — grep-proven). Hence "keys unreadable under the workspace tier" **does not exist under the current fs-policy**; the `SSH_AUTH_SOCK` bind stays a conditional branch (pinned as a shape for future read-deny / keys outside home), not part of the must-do surface.
+6. To be confirmed — the allowlist **needs no** new `github.com:22` / `ssh.github.com:443`-style entries: `domain-pattern.js:106-114` states "A pattern without a port matches every port", and the preset's bare `github.com` entry already covers :22; `ssh.github.com` matches `*.github.com` (strict subdomain). Zero preset changes ⇒ no cross-spec dependency (if during implementation the decision layer contradicts this conclusion, **come back and amend this spec, not the preset spec**).
+7. To be confirmed — the approval flow adds no new semantics for SSH: the filter callback shares the same gate, same sink; session-grants account by host (a session that interactively approved `github.com` for HTTPS also admits :22 in the same session) — treated as the natural extension of the existing "domain-granular approval" semantics, with no separate port axis.
+8. To be confirmed — passphrase-protected keys + no agent = fail inside the fence (ssh prompts for the passphrase, the fence has no tty → failure); this spec only pins the Failure path and guidance text (host-side `ssh-add` / switch to an unencrypted key / the conditional `SSH_AUTH_SOCK` bind), and builds no passphrase-relay surface.
+9. To be confirmed — the real `git push` e2e runs only against **the operator's own remote + a non-destructive ref** (e.g. `refs/heads/iknow-egress-probe-*` or `--dry-run`), skipped by default and enabled by an explicit env var (aligned with the `archive/tests-real-llm/` discipline of "missing condition → explicit skip + Not run", kept out of CI).
+10. To be confirmed — when the dependency package `@anthropic-ai/sandbox-runtime` is upgraded, drift of package paths/line numbers cited by this spec may land only in the adapter layer `upstream.ts` and comments; decision/bridge semantics do not change production code because of it.
 
-## 领域词（逐字引 `docs/CONTEXT.md`，不重新定义）
+## Domain terms (quoted verbatim from `docs/CONTEXT.md`, not redefined)
 
-- 「**出口代理缝**（egress proxy seam）: bash 围栏恒 `--unshare-net` 之下唯一的出网通路——宿主出口代理的 unix socket bind 进沙箱、沙箱内 socat 转成本地端口，`HTTP_PROXY` 系环境变量指过去；域判定在宿主代理做（HTTPS 只看 CONNECT host，不解密）。ADR-0097。」
-- 「**域名允许集**（domain allowlist）: …`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；全集 = **预放行档**（代码承载）∪ 用户层 `allowedDomains` 增量…地址守卫…与域名集正交。ADR-0097 / ADR-0104。」
-- 「**预放行档**（builtin preset）: …`github.com` 与 `*.github.com` / `*.githubusercontent.com`、`registry.npmjs.org`、playwright 下载面…」
-- 「**凭据 sentinel** …ADR-0105」+ ADR-0105 §Decision 5：「**SSH 凭据不在本决策内**：私钥可读性与 `SSH_AUTH_SOCK` 形态归出口 ssh 桥（ADR-0097 T7/T8 形态扩展）；key 进围栏的姿态沿用『出口域限制兜底』（key 只能用于向放行域认证）。」
-- 「**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / 网络 / env 隔离 / rlimit / cwdReadonly）…#653 G3。」
-- secret-roundtrip mask（#406，`docs/CONTEXT.md` 详条）：可见面掩码，与 sentinel/本 spec 的 key 面正交（ADR-0105 §Decision 6 两层并存纪律照旧）。
-- 「yolo 模式」在 `docs/CONTEXT.md` **无词条**（grep 实证），仅以 `settings.isolation.defaultMode: "yolo"`（`src/harness/permission/project-settings.ts:361` 注释面）与 preset spec F6 的口径存在——登记进待写入清单（见 Inherits/Changes），本 spec 正文按「无 fence 即无 egress 缝」引用该口径。
+- "**egress proxy seam**: the sole outbound path under the bash fence's constant `--unshare-net` — the host egress proxy's unix socket is bound into the sandbox, in-sandbox socat turns it into local ports, and the `HTTP_PROXY`-family env vars point there; domain decisions run in the host proxy (HTTPS looks only at the CONNECT host, no decryption). ADR-0097."
+- "**domain allowlist**: … `*.x` strict subdomains (apex excluded), optional `:port` suffix, deny first; the full set = **builtin preset** (code-carried) ∪ user-layer `allowedDomains` increment … address guard … orthogonal to the domain set. ADR-0097 / ADR-0104."
+- "**builtin preset**: … `github.com` alongside `*.github.com` / `*.githubusercontent.com`, `registry.npmjs.org`, the playwright download surface …"
+- "**credential sentinel** … ADR-0105" + ADR-0105 §Decision 5: "**SSH credentials are outside this decision**: private-key readability and the `SSH_AUTH_SOCK` shape belong to the egress ssh bridge (ADR-0097 T7/T8 shape extension); the posture of keys entering the fence follows 'egress domain restrictions as the backstop' (a key can only be used to authenticate toward admitted domains)."
+- "**sandbox discipline**: for the same `bash` call inputs, foreground execution and `background:true` spawn share one set of bwrap fence parameters (FS / network / env isolation / rlimit / cwdReadonly) … #653 G3."
+- secret-roundtrip mask (#406, detailed in `docs/CONTEXT.md`): the visibility-surface mask, orthogonal to the sentinel / this spec's key surface (the two-layer coexistence discipline of ADR-0105 §Decision 6 stands).
+- "yolo mode" has **no entry** in `docs/CONTEXT.md` (grep-proven); it exists only via `settings.isolation.defaultMode: "yolo"` (comment surface at `src/harness/permission/project-settings.ts:361`) and the preset spec's F6 framing — registered in the persist list (see Inherits/Changes); this spec's body references that framing as "no fence ⇒ no egress seam".
 
 ## Boundaries
 
 - **Does:**
-  - **沙箱内侧半桥补齐（本 spec 的前提性欠账）**：fence 内命令链起 `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:<httpSocket>`（+ T2 在场时的 1080 段），形态抄依赖包 `linux-sandbox-utils.js:623-645`（`buildSandboxCommand`：后台监听 + `trap kill EXIT`）；代理 env 三键从「宿主 OS 端口」改指沙箱固定端口；`HTTP_PROXY` URL 嵌入 auth userinfo（修 §Open issues O1 的 407 死路）。
-  - **SOCKS/mux 半桥接线**（T2，受 assumption 2 门控）：宿主 `createSocksProxyServer`（`upstream.ts:27-30` 已 re-export 备用）挂**同一 filter 工厂**（同 `decideEgress` + 同一 violation sink + 同 token）+ 第二条宿主 socat（`UNIX-LISTEN:<socksSocket> → TCP:127.0.0.1:<socksPort>`）+ 沙箱内 1080 监听；mux 语义按依赖包规则（`linux-sandbox-utils.js:511-521`：两协议同宿主端口时**复用**桥进程与 socket）——iknow 两 server 端口天然不同，默认两桥两 socket。
-  - **`GIT_SSH_COMMAND` 注入**：形态钉死 = `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128,proxyauth=<user>:<token>'`（依据 `sandbox-utils.js:536-540` Linux 形态 + :524 mux 中和注释 + assumption 4 的 `-F /dev/null`）；经 `EgressFenceSpec.env` 走既有 `--setenv` 通道；`GIT_SSH_COMMAND` 不在 `BASE_ENV_WHITELIST`（`env-isolation.ts:55-65`），宿主值恒不进围栏，无缝时也不注入（纯断网一致性）。
-  - **SSH 域判定语义**：CONNECT/ SOCKS 目标的 `(host, port)` 直接喂既有 `decideEgress`——裸 host 条目匹配任意端口（`domain-pattern.js:106-114`，assumption 6 实证引文）；preset 零改动结论 + 该结论的判定层测试钉子。
-  - **凭据可用性分支**：私钥可读性两档现状确认钉成测试（assumption 5）；`SSH_AUTH_SOCK` bind 条件形态（同缝 `--bind` + env 注入 + 与 egress 桥同 dispose 通道）；passphrase/无 agent 的 Failure path 文案。
-  - **三形态生命周期**：SOCKS 桥与 GIT_SSH_COMMAND 注入随 session 同起同落（前台 per-call / background per-task `settle()` / verify 单例），stale socket 随机 id + 启动前清理纪律同通道（0097 §dispose 契约逐字沿用）。
-  - **yolo no-op**：egress 缝整体缺席（isolation OFF / 工厂返 `undefined` / `SocatUnavailableError` fail-closed）时本桥与注入同跳——无缝 = 无 `GIT_SSH_COMMAND` = git-over-SSH 与其余程序一样纯断网。
-  - **bwrap argv 新增项落位**（对照 `.qoder/rules/security-boundaries.md` 固定顺序）：第二条（及条件 SSH_AUTH_SOCK）unix socket `--bind` 并入既有 egress bind 段——**workspaceMounts 之后、cwdReadonly 之前**（`bwrap.ts:191-195` 注释即此规则）；`GIT_SSH_COMMAND` 等新 env 走 `createBwrapFence` 的 `--clearenv` 后 `--setenv` 段（`bwrap.ts:258-262`）；内层命令链在 `--` 之后的 command 位，不改 argv 序。
-  - **probe:sandbox 扩展**：egress「socat present」分支重写为真端到端（修 O1–O3，见 Open issues），新增 2 类——ssh 连通正探针（放行域 :22 握手到 banner 即算通）+ 未放行域 :22 违例探针（框架违例 reason 可区分）；全 11 类维持全绿。
-  - **测试矩阵**：单测（注入 seam）+ probe + TUI pty 实测 + 真实 `git push` e2e（assumption 9 门控），验收判据见 Success Criteria。
-- **Confirms with human（assumptions 未确认前不推进 PLAN）:**
-  - 上述 10 条 numbered assumptions 逐条确认 / 纠正 / 删除。
-  - T2 SOCKS 面去留（assumption 2 的裁剪选项）与沙箱固定端口 3128/1080 是否可被占用位（assumption 3）。
-  - `SSH_AUTH_SOCK` bind 从「条件分支」升「必做面」与否（assumption 5 现状成立时默认不做）。
+  - **In-sandbox half-bridge completion (this spec's precondition debt)**: the in-fence command chain starts `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:<httpSocket>` (+ the 1080 segment when T2 is present), shape copied from the dependency package `linux-sandbox-utils.js:623-645` (`buildSandboxCommand`: background listener + `trap kill EXIT`); the three proxy env keys switch from "host OS ports" to the sandbox's fixed ports; the `HTTP_PROXY` URL embeds auth userinfo (fixing the 407 dead end of §Open issues O1).
+  - **SOCKS/mux half-bridge wiring** (T2, gated by assumption 2): host `createSocksProxyServer` (already re-exported in reserve at `upstream.ts:27-30`) hung with the **same filter factory** (same `decideEgress` + same violation sink + same token) + a second host socat (`UNIX-LISTEN:<socksSocket> → TCP:127.0.0.1:<socksPort>`) + in-sandbox 1080 listener; mux semantics per the dependency package rules (`linux-sandbox-utils.js:511-521`: when both protocols share one host port the bridge process and socket are **reused**) — iknow's two server ports are naturally distinct, so the default is two bridges and two sockets.
+  - **`GIT_SSH_COMMAND` injection**: pinned shape = `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128,proxyauth=<user>:<token>'` (per `sandbox-utils.js:536-540` Linux shape + the :524 mux-neutralizing comment + assumption 4's `-F /dev/null`); routed through `EgressFenceSpec.env` into the existing `--setenv` channel; `GIT_SSH_COMMAND` is not in `BASE_ENV_WHITELIST` (`env-isolation.ts:55-65`), so host values never enter the fence, and with no seam nothing is injected either (pure-disconnect consistency).
+  - **SSH domain-decision semantics**: feed the CONNECT/SOCKS target's `(host, port)` straight into the existing `decideEgress` — a bare host entry matches any port (`domain-pattern.js:106-114`, assumption 6's cited proof); the zero-preset-change conclusion + a decision-layer test pin for that conclusion.
+  - **Credential-availability branch**: pin the current-state confirmation of private-key readability across the two tiers as tests (assumption 5); the conditional `SSH_AUTH_SOCK` bind shape (same-section `--bind` + env injection + the same dispose channel as the egress bridge); the passphrase/no-agent Failure-path text.
+  - **Three-shape lifecycle**: the SOCKS bridge and GIT_SSH_COMMAND injection rise and fall with the session (foreground per-call / background per-task `settle()` / verify singleton), with the same stale-socket random-id + startup-cleanup discipline on the same channel (the 0097 §dispose contract carries over verbatim).
+  - **yolo no-op**: when the egress seam is absent wholesale (isolation OFF / factory returns `undefined` / `SocatUnavailableError` fail-closed), this bridge and the injection skip in step — no seam = no `GIT_SSH_COMMAND` = git-over-SSH purely disconnected like every other program.
+  - **Placement of new bwrap argv items** (against the fixed order in `.qoder/rules/security-boundaries.md`): the second (and conditional SSH_AUTH_SOCK) unix socket `--bind` joins the existing egress bind section — **after workspaceMounts, before cwdReadonly** (the comment at `bwrap.ts:191-195` is exactly this rule); new env like `GIT_SSH_COMMAND` goes through the `--setenv` section after `--clearenv` in `createBwrapFence` (`bwrap.ts:258-262`); the inner command chain sits in the command position after `--`, changing no argv order.
+  - **probe:sandbox extension**: rewrite the egress "socat present" branch into true end-to-end (fixing O1–O3, see Open issues), add 2 categories — a positive ssh-connectivity probe (admitted domain :22 handshake to banner counts as through) + an un-admitted-domain :22 violation probe (framework violation reason distinguishable); all 11 categories stay green.
+  - **Test matrix**: unit (injection seam) + probe + TUI pty field test + real `git push` e2e (gated by assumption 9); acceptance criteria in Success Criteria.
+- **Confirms with human (no PLAN progress before assumptions are confirmed):**
+  - Each of the 10 numbered assumptions above confirmed / corrected / deleted.
+  - T2 SOCKS surface keep-or-cut (the trimming option of assumption 2) and whether the sandbox fixed ports 3128/1080 can collide with occupied ports (assumption 3).
+  - Whether the `SSH_AUTH_SOCK` bind is promoted from "conditional branch" to "must-do surface" (default: not done while assumption 5's status quo holds).
 - **Out of this spec:**
-  - **HTTP(S) 凭据 sentinel 代换 / TLS 终止（mitmCA / body-substitution / 真值不进围栏）**——并行 spec `specs/egress-credential-sentinel.md` 负责；共享装配缝 = `EgressSessionOptions` / `createEgressSession` 构造面（其需在同一 session 上挂 `mitmCA` 等 opts），本 spec 只保证 session 形状可叠加、**不设计对方范围**；两 spec 若同改 `session.ts`，合并次序由主会话裁。
-  - E 逃逸缝（沙箱内 unix socket / 反向通路面收口，backlog 已挂账）。
-  - gh 登录态 / GIT_CONFIG 代做 / 非 push 的 git 子命令便利面（HTTP 系凭据随 sentinel spec 走）。
-  - 「沙箱内起服务 → 宿主可达」反向通路（前 spec 已裁定消亡，netns 恒断无反向通路）。
-  - preset 清单变更（`specs/egress-preset-allowlist.md` 已提交，不许动；assumption 6 结论 = 本 spec 无需它变）。
-  - socat 分发（宿主前置依赖纪律不变，0097）。
+  - **HTTP(S) credential sentinel substitution / TLS termination (mitmCA / body-substitution / real values not entering the fence)** — owned by the parallel spec `specs/egress-credential-sentinel.md`; the shared assembly seam = the `EgressSessionOptions` / `createEgressSession` construction surface (that spec needs to hang `mitmCA`-family opts on the same session); this spec only guarantees the session shape is additively extensible and **does not design the other's scope**; if both specs edit `session.ts`, merge order is adjudicated by the main session.
+  - The E escape seam (consolidating in-sandbox unix sockets / reverse channels; already on the backlog books).
+  - gh login state / GIT_CONFIG convenience shims / non-push git subcommand conveniences (HTTP-family credentials travel with the sentinel spec).
+  - "run a service in the sandbox → host reachable" reverse channel (already ruled dead by the previous spec; the netns is permanently disconnected, there is no reverse path).
+  - Preset list changes (`specs/egress-preset-allowlist.md` is submitted, hands off; the assumption 6 conclusion = this spec needs no change from it).
+  - socat distribution (the host precondition-dependency discipline unchanged, 0097).
 
 ## Settled invariants
 
-1. **缝唯一性延续**：SSH 流量与 HTTP/HTTPS 走同一条代理缝（同一 filter、同一 sink、同一 token、同一 dispose 通道），不开第二条出网通路；`--unshare-net` 恒在纪律（0097 invariant 1）不因桥扩展而有例外。
-2. **判定不看内容**：SSH 流是 CONNECT 的 opaque 隧道（依赖包 `http-proxy.js:269-274` 注释实证：CONNECT 亦携带非 TLS 流，sniff 非 ClientHello 即原样隧道）——放行 = 能握手，域判定与端口来自客户端自报 authority，内容零检查；不得表述为「SSH 受内容管控」。
-3. **无缝 = 无 git ssh 特例**：egress session 缺席（任何原因）时 `GIT_SSH_COMMAND` 不注入——git-over-SSH 与全部非代理感知程序同态 fail-closed（纯断网），杜绝「有注入无桥」的半开形态。
-4. **注入面 SSOT 单点**：代理 env（三键 + `GIT_SSH_COMMAND` + NO_PROXY 族）只在 `buildProxyEnv`/`assembleFenceSpec` 一处构造（现 `session.ts:243-259, 439-448`），bash / background / verify 三消费面零复制——沙箱纪律（CONTEXT 词条）在 env 轴的定义即「三形态共用同一套围栏参数」。
-5. **host 粒度批准不扩端口轴**：批准 / 违例 / 地址守卫的判定输入恒为 `(host, port)` 纯数据；`:22` 不引入新配置形态（preset 无 :port 条目，assumption 6 若被推翻则回改本 spec 而非 preset spec）。
-6. **凭据姿态 = 出口域限制兜底**（ADR-0105 §Decision 5 逐字继承）：私钥进围栏可读是本档既定姿态；其风险收敛于 invariant 1——key 的唯一出网路径被域判定卡住。`SSH_AUTH_SOCK` 条件形态落地时同姿态（agent 只对经缝连接可用）。
-7. **argv 顺序不破 fence**：所有新增 bind 落 egress bind 段、新增 env 落 `--clearenv` 后 `--setenv` 段；改 `bwrap.ts` 前后必跑 `npm run probe:sandbox` 全类别全绿（security-boundaries 纪律）。
+1. **Seam uniqueness continues**: SSH traffic and HTTP/HTTPS go through the same proxy seam (same filter, same sink, same token, same dispose channel); no second outbound path is opened; the `--unshare-net` always-present discipline (0097 invariant 1) gains no exception from the bridge extension.
+2. **Decisions never inspect content**: the SSH stream is an opaque CONNECT tunnel (proven by the dependency package's comment at `http-proxy.js:269-274`: CONNECT also carries non-TLS streams; a sniff that is not a ClientHello tunnels it verbatim) — admission = handshake succeeds; the domain decision and port come from the client's self-reported authority, content gets zero inspection; never phrase it as "SSH is content-controlled".
+3. **No seam = no git-ssh special case**: when the egress session is absent (for any reason), `GIT_SSH_COMMAND` is not injected — git-over-SSH fails closed identically to every non-proxy-aware program (pure disconnect), eliminating the half-open "injection without bridge" shape.
+4. **Injection surface single SSOT**: the proxy env (three keys + `GIT_SSH_COMMAND` + the NO_PROXY family) is constructed only in `buildProxyEnv`/`assembleFenceSpec` (currently `session.ts:243-259, 439-448`); the bash / background / verify consumer surfaces copy nothing — that is the env-axis definition of the sandbox discipline (CONTEXT entry): "the three shapes share one set of fence parameters".
+5. **Host-granular approval does not extend a port axis**: the decision input for approvals / violations / address guards remains the pure data `(host, port)`; `:22` introduces no new configuration shape (the preset has no :port entries; if assumption 6 is overturned, amend this spec rather than the preset spec).
+6. **Credential posture = egress domain restrictions as the backstop** (verbatim inheritance of ADR-0105 §Decision 5): private keys readable inside the fence is this tier's settled posture; its risk converges into invariant 1 — the key's only outbound path is gated by the domain decision. When the conditional `SSH_AUTH_SOCK` bind lands, same posture (the agent is only usable for connections through the seam).
+7. **argv order never breaks the fence**: every new bind goes to the egress bind section, every new env to the `--setenv` section after `--clearenv`; before and after any `bwrap.ts` change, `npm run probe:sandbox` must be green across all categories (security-boundaries discipline).
 
-## 任务拆分
+## Task breakdown
 
-### T1 — 沙箱内侧半桥 + auth 闭环（HTTP 面前提修复）
+### T1 — in-sandbox half-bridge + auth closure (HTTP-surface prerequisite fixes)
 
-- `EgressFenceSpec` 扩字段（形状示意，非实现）：`sandboxProxyPorts: { http: 3128, socks?: 1080 }`、`innerBridgeScript: string`（宿主 session 装配期算好的监听前导命令）；`buildProxyEnv` 的 URL host 改 `127.0.0.1:3128` 并嵌 `http://<user>:<token>@` userinfo（token = session 现成 `randomBytes` 值，user 取 `sandbox-utils.js:712-722` 的固定名形态，本仓自定名不带 encodedCommand——归因已有 `commandLabel` sink 通道）。
-- fence 命令链接线：`bash.ts` `buildForegroundFence` 的 `args: ["-c", finalCommand]` 在 egress 在场时改为 `-c "<bridge 前导>\n<finalCommand>"`（前导 = `linux-sandbox-utils.js:626-632` 形态：`socat … & trap …`）；无 egress = 零改动（byte-identical 回归基线）。
-  就绪轮询修订注记（T5 实测）：前导脚本冻结形态追加第三行 `for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/<port>) 2>/dev/null && break; sleep 0.1; done`——why = T5 首跑发现裸 curl 与内层中继冷启动竞态（ECONNREFUSED exit 7；probe 以 `--retry-connrefused` 消化、产品路径无消化件）；`/dev/tcp` 轮询先例同款见 `sandbox-probe.ts`（socket 就绪轮询）。`bash-egress-inner-bridge.test.ts` / `egress-session.test.ts` verbatim 钉子已同步。
-- bwrap 层端口耦合解除：`sandboxLocalPort` 语义从「与宿主同号」改「沙箱内固定监听号」。
+- `EgressFenceSpec` extended fields (shape sketch, not implementation): `sandboxProxyPorts: { http: 3128, socks?: 1080 }`, `innerBridgeScript: string` (the listen-preamble command computed by the host at session assembly); `buildProxyEnv`'s URL host becomes `127.0.0.1:3128` with embedded `http://<user>:<token>@` userinfo (token = the session's existing `randomBytes` value; user follows the fixed-name shape at `sandbox-utils.js:712-722`, this repo picks its own name without encodedCommand — attribution already has the `commandLabel` sink channel).
+- Fence command-chain wiring: in `bash.ts` `buildForegroundFence`, `args: ["-c", finalCommand]` becomes `-c "<bridge preamble>\n<finalCommand>"` when egress is present (preamble = the `linux-sandbox-utils.js:626-632` shape: `socat … & trap …`); no egress = zero change (byte-identical regression baseline).
+  Readiness-polling revision note (T5 field test): a third line is appended to the frozen preamble script: `for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/<port>) 2>/dev/null && break; sleep 0.1; done` — why = T5's first run found a race between bare curl and the inner relay's cold start (ECONNREFUSED exit 7; the probe absorbs it with `--retry-connrefused`, the product path has no absorber); the `/dev/tcp` polling precedent is the same as `sandbox-probe.ts` (socket readiness polling). The verbatim pins in `bash-egress-inner-bridge.test.ts` / `egress-session.test.ts` are already synced.
+- bwrap-layer port decoupling: the `sandboxLocalPort` semantic changes from "same number as the host" to "fixed in-sandbox listen number".
 
-**验收**：单测（注入 `spawn` / `socketPathFactory` seam，不断言真监听）钉 spec 形状 + 前导脚本字符串；`egress-proxy-behavior.test.ts` 的「不起真桥」注释改写为覆盖内层脚本装配；probe「socat present」分支重写为经真链路的端到端（放行 loopback NIC IP → 拿到响应；注意 O2：目标 IP 若落 NO_PROXY 需选 NIC 地址而非 `127.0.0.1` 字面，且地址守卫档对 loopback 的拒绝意味着该正探针须以**非 loopback** 的可寻址 fixture 落地，或把正探针挪到 T5 真域层——实现期以实测为准并在测试注释钉结论）。
+**Acceptance**: unit tests (injecting the `spawn` / `socketPathFactory` seam, not asserting real listeners) pin the spec shape + the preamble script string; the "don't start a real bridge" comment in `egress-proxy-behavior.test.ts` is rewritten to cover inner-script assembly; the probe's "socat present" branch is rewritten end-to-end through the real chain (admit a loopback NIC IP → get a response; note O2: if the target IP would fall in NO_PROXY, pick a NIC address rather than the `127.0.0.1` literal, and since the address-guard tier rejects loopback, this positive probe must land on a **non-loopback** addressable fixture or move to T5's real-domain layer — decide by measurement during implementation and pin the conclusion in a test comment).
 
-### T2 — 宿主 SOCKS 面 + 第二桥（assumption 2 门控）
+### T2 — host SOCKS surface + second bridge (gated by assumption 2)
 
-- `createEgressSession` 内加起 `createSocksProxyServer`（经 `upstream.ts`，import 收口纪律）：`filter` 复用 `createFilterCallback` 同一实例工厂（同 policy、同 sink、token 同值）；`lookupFor` 同款地址守卫（`socks-proxy.js:74-78` 的 dial 路径带 `lookupFor`）。
-- 第二宿主 socat 桥 + `iknow-egress-socks-<id>.sock`；mux 规则：仅当宿主两端口相同（外部代理 override 形态，本仓暂不产生）才复用桥（`linux-sandbox-utils.js:511` 语义）。
-- `EgressFenceSpec.unixSocketPath` → `unixSocketPaths: readonly string[]`；`egressBindArgs`（`bwrap.ts:216-222`）逐条发射 `--bind`，段内位置不变。
+- Inside `createEgressSession`, also start `createSocksProxyServer` (via `upstream.ts`, import-consolidation discipline): `filter` reuses the same `createFilterCallback` instance factory (same policy, same sink, same token value); `lookupFor` gets the same address guard (`socks-proxy.js:74-78`: the dial path carries `lookupFor`).
+- The second host socat bridge + `iknow-egress-socks-<id>.sock`; mux rule: the bridge is reused only when the two host ports are equal (an external-proxy override shape this repo does not currently produce) (`linux-sandbox-utils.js:511` semantics).
+- `EgressFenceSpec.unixSocketPath` → `unixSocketPaths: readonly string[]`; `egressBindArgs` (`bwrap.ts:216-222`) emits `--bind` per entry, section position unchanged.
 
-**验收**：单测断言两桥 spawn 参数与 socket 命名；`git push` 不依赖 SOCKS（T3 走 HTTP CONNECT），SOCKS 面的可达性以沙箱内 `curl --proxy socks5h://<user>:<token>@127.0.0.1:1080 https://<放行域>` 探针断言（T5/T6 层）；dispose 单通道同时收两桥 + 两 server（幂等回归）。
+**Acceptance**: unit tests assert both bridges' spawn parameters and socket naming; `git push` does not depend on SOCKS (T3 goes HTTP CONNECT); SOCKS-surface reachability is asserted from inside the sandbox with a `curl --proxy socks5h://<user>:<token>@127.0.0.1:1080 https://<admitted domain>` probe (T5/T6 layer); the single dispose channel retires both bridges + both servers (idempotence regression).
 
-### T3 — `GIT_SSH_COMMAND` 注入与 env 策略
+### T3 — `GIT_SSH_COMMAND` injection and env policy
 
-- 注入串（钉死形态，rev 2 = ADR-0107 中继换装）：
-  `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand="'<node绝对路径>' '<本仓自带 vendor/egress-relay/egress-http-connect.mjs绝对路径>' %h %p"`
-  ADR-0107 中继换装一行注记：socat 被禁止作为产品依赖，ProxyCommand 由随仓最小 CONNECT 隧道件承担；认证材料不进 argv（旧 `proxyauth=` 内联退役），隧道件从继承的 `HTTP_PROXY` env 读 userinfo，与代理三键同源。
-  review 修复注记：路径引号统一为 `shellSingleQuote`（node / 脚本路径各自单引号 + 外层双引号，与 `buildInnerBridgeScript` 同策略；外层双引号由 git `split_cmdline` 剥除、内层单引号交 ssh ProxyCommand 的 `/bin/sh` 处理），与 `tests/harness/sandbox/egress-session.test.ts` 逐字断言一致。
-  依据：mux 中和理由 `sandbox-utils.js:516-524`（用户 config 的 ControlPath 在沙箱内不可 bind、auth 后即退）；`-F /dev/null` 依 assumption 4。旧「Linux 形态选型 `sandbox-utils.js:536-540`（`PROXY:` 跨 socat 版本可移植）」依据随换装失效。
-- 覆盖/合并策略：注入值只在 session 在场时存在；围栏内用户命令**显式内联** `GIT_SSH_COMMAND=...` 时后者胜（shell 语义，不加防御）；推荐组合写法 `GIT_SSH_COMMAND="$GIT_SSH_COMMAND -i <key>"` 写进指引文案（既有 `$GIT_SSH_COMMAND` 逐字引用）。known_hosts 不受 `-F` 影响（ssh 独立路径），首次未见主机 key 的失败面归 Failure paths F4。
-- env 白名单关系：`GIT_SSH_COMMAND` **不入** `BASE_ENV_WHITELIST`（宿主值不进围栏，invariant 3）；注入经 `spec.env` → `mergedEnv`（`bwrap.ts:224-239`），与 `--clearenv` 序不变。
+- The injected string (pinned shape, rev 2 = ADR-0107 relay re-fit):
+  `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand="'<node absolute path>' '<repo-shipped vendor/egress-relay/egress-http-connect.mjs absolute path>' %h %p"`
+  ADR-0107 relay re-fit one-line note: socat is forbidden as a product dependency; the ProxyCommand is carried by a minimal CONNECT tunnel piece shipped with the repo; auth material never enters argv (the old inline `proxyauth=` retires), and the tunnel piece reads userinfo from the inherited `HTTP_PROXY` env, same source as the three proxy keys.
+  review-fix note: path quoting unified to `shellSingleQuote` (node / script paths each single-quoted inside outer double quotes, same strategy as `buildInnerBridgeScript`; git's `split_cmdline` strips the outer double quotes and ssh's ProxyCommand `/bin/sh` handles the inner single quotes), consistent with the verbatim assertions in `tests/harness/sandbox/egress-session.test.ts`.
+  Rationale: mux-neutralizing reason at `sandbox-utils.js:516-524` (a ControlPath from user config is unbindable inside the sandbox and exits after auth); `-F /dev/null` per assumption 4. The old "Linux shape selection `sandbox-utils.js:536-540` (`PROXY:` portable across socat versions)" rationale is voided by the re-fit.
+- Override/merge policy: the injected value exists only when the session is present; if a command inside the fence **explicitly inlines** `GIT_SSH_COMMAND=...`, the latter wins (shell semantics, no defenses added); the recommended composition `GIT_SSH_COMMAND="$GIT_SSH_COMMAND -i <key>"` goes into guidance text (the existing `$GIT_SSH_COMMAND` verbatim reference). known_hosts is unaffected by `-F` (ssh keeps its own path); the first-unknown-host-key failure surface belongs to Failure paths F4.
+- env-whitelist relationship: `GIT_SSH_COMMAND` does **not enter** `BASE_ENV_WHITELIST` (host values never enter the fence, invariant 3); injection goes `spec.env` → `mergedEnv` (`bwrap.ts:224-239`), the ordering after `--clearenv` unchanged.
 
-**验收**：单测逐字符断言注入串（token 位以注入 seam 的固定 token 断言）；围栏内复验 `ssh -G github.com`（经 `bash` 工具）不报 `Bad owner or permissions`（assumption 4 的地面）；TUI 实测 `GIT_SSH_COMMAND` 值屏上可见。
+**Acceptance**: a unit test asserts the injected string character-by-character (the token position asserted with the injection seam's fixed token); re-verify in-fence that `ssh -G github.com` (via the `bash` tool) does not report `Bad owner or permissions` (assumption 4's ground truth); TUI field test shows the `GIT_SSH_COMMAND` value on screen.
 
-### T4 — SSH 域判定语义钉子（判定层，零生产码改动）
+### T4 — SSH domain-decision pins (decision layer, zero production-code change)
 
-- `decideEgress({host:"github.com",port:22,allowed:[...preset]})` → allow（裸条目匹任意端口）；`ssh.github.com:443` → allow（`*.github.com`）；`example.com:22` 未放行 → deny `not-in-allowlist`；`github.com` 进 `deniedDomains` → :22 同拒（deny 优先无端口例外）。
-- 「preset 不需要 `:22` / `:443` 形态条目」结论以测试钉死（assumption 6）；若上游 `matchesDomainPatternWithPort` 升版改语义，`upstream.ts` 适配层唯一改动点（0097 Dependency fork 纪律）。
+- `decideEgress({host:"github.com",port:22,allowed:[...preset]})` → allow (bare entries match any port); `ssh.github.com:443` → allow (`*.github.com`); unadmitted `example.com:22` → deny `not-in-allowlist`; putting `github.com` into `deniedDomains` → :22 also denied (deny-first, no port exception).
+- The conclusion "the preset needs no `:22` / `:443`-style entries" is pinned by tests (assumption 6); if an upstream `matchesDomainPatternWithPort` version bump changes semantics, `upstream.ts` is the sole adapter-layer change point (0097 Dependency fork discipline).
 
-**验收**：判定层表驱动单测全绿 + 一条显式命名的「ssh-port-inherits-bare-host-entry」回归钉子；grep 断言本 spec 未产生任何 preset 清单 diff。
+**Acceptance**: a decision-layer table-driven test suite fully green + one explicitly named "ssh-port-inherits-bare-host-entry" regression pin; grep asserting this spec produces zero preset-list diff.
 
-### T5 — 三形态生命周期 + yolo no-op 接线
+### T5 — three-shape lifecycle + yolo no-op wiring
 
-- background（`manager.ts:466-497`）与 verify（`sandbox-run.ts:67+` 单例）经同一 `EgressFenceSpec` 消费面自动获得 SOCKS 桥与注入；per-task `settle()` / 单例随宿主的释放通道零新代码，只加断言。
-- 内层监听前导脚本在三形态的命令装配点各自接线（background spawn factory 与 verify 的命令包装与 bash.ts 同形——若装配面已收敛在公共 helper 则一处改）。
-- yolo / 工厂 `undefined` / `SocatUnavailableError`：断言零注入（invariant 3）。
+- background (`manager.ts:466-497`) and verify (`sandbox-run.ts:67+` singleton) automatically gain the SOCKS bridge and injection through the same `EgressFenceSpec` consumer surface; the per-task `settle()` / host-bound singleton release channels need zero new code, assertions only.
+- The inner listen-preamble script is wired at each of the three shapes' command-assembly points (the background spawn factory and the verify command wrapper take the same shape as bash.ts — one change if assembly has already converged into a shared helper).
+- yolo / factory `undefined` / `SocatUnavailableError`: assert zero injection (invariant 3).
 
-**验收**：wiring 测试（`build-engine-egress-wiring.test.ts` 形制）断言三形态 spec 字段集相等；stale socket 清理与 dispose 幂等测试覆盖**当前在场的全部桥**——HTTP 桥（`iknow-egress-*`）恒在，SOCKS 桥（`iknow-egress-socks-*`）在 T2 在场时才进「双文件启动前清理 + 亡桥归类 infra」断言集；T2 被裁剪（assumption 2）时本断言退化为单桥，不得因缺 SOCKS socket 而红。
+**Acceptance**: wiring tests (in the `build-engine-egress-wiring.test.ts` mold) assert the three shapes' spec field sets are equal; stale-socket cleanup and dispose-idempotence tests cover **every bridge currently present** — the HTTP bridge (`iknow-egress-*`) is always present, the SOCKS bridge (`iknow-egress-socks-*`) joins the "dual-file startup cleanup + dead-bridge classified as infra" assertion set only when T2 is present; when T2 is cut (assumption 2) this assertion degrades to a single bridge and must not run red for a missing SOCKS socket.
 
-### T6 — 凭据可用性分支
+### T6 — credential-availability branch
 
-- 私钥可读性现状钉子：global / workspace 两档围栏内 `test -r ~/.ssh/id_ed25519`（fixture key）可读（assumption 5 的地面化）；workspace 档对 key 的**写**必败（ro-bind）。
-- `SSH_AUTH_SOCK` 条件形态（默认**关**，assumption 5）：开启时 = 宿主 agent socket 路径经同段 `--bind` + `SSH_AUTH_SOCK` 入 `spec.env`；agent socket 的 stale/缺失 fail-closed（连不上 = ssh 报 agent refused，归类 infra 非域拒绝）。
-- 指引文案面：passphrase/无 agent → 违例/失败信息含「宿主侧 `ssh-add` 或无口令 key」一行。
+- Current-state pins for private-key readability: in both the global / workspace tiers, `test -r ~/.ssh/id_ed25519` (fixture key) is readable inside the fence (grounding assumption 5); **writes** to the key under the workspace tier must fail (ro-bind).
+- The conditional `SSH_AUTH_SOCK` bind shape (default **off**, assumption 5): when on = the host agent socket path via the same `--bind` section + `SSH_AUTH_SOCK` into `spec.env`; a stale/missing agent socket fails closed (cannot connect = ssh reports agent refused, classified as infra, not domain denial).
+- Guidance-text surface: passphrase/no-agent → the violation/failure message carries one line pointing at host-side `ssh-add` or an unencrypted key.
 
-**验收**：两档可读性测试 + 条件形态的开/关行为各有单测（关态断言 `SSH_AUTH_SOCK` 在围栏 env 中不存在）。
+**Acceptance**: two-tier readability tests + the conditional shape's on/off behavior each with unit tests (off-state asserts `SSH_AUTH_SOCK` absent from the fence env).
 
-### T7 — 探针扩展 + TUI/真 push 实测
+### T7 — probe extension + TUI/real-push field tests
 
-- `scripts/sandbox-probe.ts`：T1 的重写 + 新增两类——
-  - 正探针：放行 fixture 域 :22（宿主侧可起假 ssh banner listener 于非 loopback NIC 或经域名 fixture）沙箱内 `nc`/`ssh -o ProxyCommand` 握手见 banner = 通；
-  - 违例探针：未放行域 :22 → 沙箱内失败 + 框架侧 sink 记 `not-in-allowlist`（port=22），两信号可区分（前 spec「三类信号」表延续）。
-  - 类别计数从 11 → 13 时同步 `security-boundaries.md` 的「11 类」表述？——**规范文件不改**（Out of scope：本 spec 不碰 `.qoder/rules/`；数字表述漂移登记进 Open questions OQ3 由主会话裁）。
-- TUI pty 实测（AGENTS 实测地面）：干净装配下 ①`git push --dry-run`（SSH remote，github.com）握手通到认证层；②未放行域 push → 屏上 `[network_denied]` typed failure 含被拒 `host:22`；③`echo $GIT_SSH_COMMAND` 屏上值 = T3 钉死形态。
-- 真实 e2e（assumption 9）：`archive/` 同纪律落一条显式开启的真 `git push`（操作员自有远端、探测 ref、push 后即删 ref）；缺开关/缺 key → 显式 skip + Not run。
+- `scripts/sandbox-probe.ts`: the T1 rewrite + two new categories —
+  - positive probe: admitted fixture domain :22 (host side starts a fake ssh banner listener on a non-loopback NIC or via a domain fixture); inside the sandbox, `nc`/`ssh -o ProxyCommand` handshake seeing the banner = through;
+  - violation probe: un-admitted domain :22 → failure inside the sandbox + the framework-side sink records `not-in-allowlist` (port=22), the two signals distinguishable (continuation of the previous spec's "three signals" table).
+  - Should bumping the category count from 11 → 13 sync the "11 categories" wording in `security-boundaries.md`? — **the rules file is not changed** (Out of scope: this spec does not touch `.qoder/rules/`; the numeric drift is registered in Open questions OQ3 for the main session to adjudicate).
+- TUI pty field test (AGENTS measured ground truth): under clean assembly ①`git push --dry-run` (SSH remote, github.com) handshakes through to the authentication layer; ②push to an un-admitted domain → an on-screen `[network_denied]` typed failure containing the rejected `host:22`; ③`echo $GIT_SSH_COMMAND` on-screen value = the T3 pinned shape.
+- Real e2e (assumption 9): under the same `archive/` discipline, one explicitly-enabled real `git push` (operator's own remote, a probe ref, ref deleted right after push); missing switch / missing key → explicit skip + Not run.
 
-**验收**：`npm run probe:sandbox` 全类别全绿（含新 2 类）；TUI 三条操作的屏上证据入报告；真 push e2e 在开启环境下 exit 0。
+**Acceptance**: `npm run probe:sandbox` green across all categories (including the 2 new ones); on-screen evidence for the three TUI operations in the report; the real-push e2e exits 0 in an enabled environment.
 
 ## Failure paths
 
-| #   | 路径                                                               | 行为                                                                                                                                                                                                                     |
-| --- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| F1  | 无 egress session（yolo / 工厂 undefined / SocatUnavailableError） | 不注入 `GIT_SSH_COMMAND`、不起内层监听——git ssh 纯断网（invariant 3），与前 spec「三类信号」的「无出网资格」归类一致                                                                                                     |
-| F2  | 未放行域 :22（含 SOCKS 面被拒）                                    | filter 记 `not-in-allowlist`（port=22）→ 隧道建立失败 → 收尾 drain → `execution_failed` typed failure（三跳通道原样复用，SSH 不开第二文案面）；ssh 自身的 `Connection closed`/`kex` 报错是命令层观测，与框架归因并行不混 |
-| F3  | 桥/代理进程死（CONNECT 成功前）                                    | ECONNREFUSED/桥亡 → infra 故障归类，不误报域拒绝（前 spec SC5 语义延伸到 :22）                                                                                                                                           |
-| F4  | 首次未见主机（known_hosts 无条目）                                 | ssh 要求确认指纹、fence 无 tty → 认证前失败；失败信息含指引（宿主侧先 `ssh-keyscan`/登录确认，或显式 `-o UserKnownHostsFile=` 组合写法）；**不**默认注入 `StrictHostKeyChecking=no`（削弱信任面非本 spec 授权）          |
-| F5  | passphrase 私钥 + 无 agent                                         | ssh 提示口令 → 无 tty 失败；指引 = 宿主 `ssh-add` / 无口令 key / `SSH_AUTH_SOCK` 条件形态（T6）；不自动回传口令                                                                                                          |
-| F6  | 内层 3128/1080 端口被沙箱内先占                                    | 内层脚本 `socat` 先于用户命令启动（前导序保证），理论竞争仅存在于用户嵌套 bwrap 场景 → 监听失败 fail-closed（连不上），违例不冒充域拒绝；探针含 socat 启动失败即脚本报错可见                                             |
-| F7  | `proxyauth` 凭据不符（token 漂移/复用旧串）                        | 代理 407（CONNECT）/SOCKS auth deny（`socks-proxy.js:10-20`）→ 归类 infra；token per-session 随机（`session.ts:489`）保证跨会话不通用                                                                                    |
-| F8  | SSH_AUTH_SOCK bind 指向 stale socket（条件形态）                   | 启动前同法清理（随机 id + unlink）；连接失败归类 infra 非域拒绝                                                                                                                                                          |
+| #   | Path                                                               | Behavior                                                                                                                                                                                                                     |
+| --- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1  | no egress session (yolo / factory undefined / SocatUnavailableError) | no `GIT_SSH_COMMAND` injection, no inner listener — git ssh purely disconnected (invariant 3), classified consistently with the previous spec's "three signals" "not qualified for egress" category                                          |
+| F2  | un-admitted domain :22 (including SOCKS-surface rejection)           | filter records `not-in-allowlist` (port=22) → tunnel establishment fails → final drain → `execution_failed` typed failure (the three-hop channel is reused as-is; SSH opens no second text surface); ssh's own `Connection closed`/`kex` errors are command-layer observations, parallel to framework attribution without mixing |
+| F3  | bridge/proxy process dead (before CONNECT succeeds)                  | ECONNREFUSED / bridge dead → classified as infra failure, never misreported as domain rejection (the previous spec's SC5 semantics extended to :22)                                                                            |
+| F4  | first-unknown host (no known_hosts entry)                            | ssh asks to confirm the fingerprint, the fence has no tty → failure before authentication; the message includes guidance (run `ssh-keyscan`/login confirmation on the host first, or an explicit `-o UserKnownHostsFile=` composition); `StrictHostKeyChecking=no` is **not** injected by default (weakening the trust surface is not this spec's mandate) |
+| F5  | passphrase key + no agent                                          | ssh prompts for the passphrase → fails without a tty; guidance = host `ssh-add` / unencrypted key / the conditional `SSH_AUTH_SOCK` shape (T6); no passphrase relay                                                            |
+| F6  | inner 3128/1080 ports taken first inside the sandbox                 | the inner script's `socat` starts before the user command (preamble ordering guarantees it), so the race theoretically exists only in user-nested-bwrap scenarios → listen failure fail-closed (unconnectable), violations never masquerade as domain rejection; the probe surfaces socat startup failure visibly                                            |
+| F7  | `proxyauth` mismatch (token drift / stale string reused)           | proxy 407 (CONNECT) / SOCKS auth deny (`socks-proxy.js:10-20`) → classified as infra; the per-session random token (`session.ts:489`) guarantees no cross-session portability                                                     |
+| F8  | SSH_AUTH_SOCK bind pointing at a stale socket (conditional shape)  | cleaned up before startup by the same method (random id + unlink); connection failure classified as infra, not domain rejection                                                                                               |
 
-## Success Criteria（binary）
+## Success Criteria (binary)
 
-- **SC1**：干净装配（preset 在场、无用户 settings 段）下，围栏内 `ssh -T git@github.com -o ProxyCommand='<注入值逐字>'` 完成 TCP+CONNECT 并收到对端 banner（probe 正探针 exit 0）。
-- **SC2**：未放行域 :22 被拒：沙箱内命令失败 **且** 框架 drain 到 `{host, port:22, reason:"not-in-allowlist"}`，tool_result 呈 `execution_failed` 含 `[network_denied]` 前缀（测试走 bash 真实返回形状，禁直接构造 typed failure——前 spec 假绿纪律）。
-- **SC3**：`GIT_SSH_COMMAND` 注入串逐字 = T3 钉死形态（单测）；session 缺席时该 env 在围栏 env 中不存在（三形态各 1 条 wiring 断言）。
-- **SC4**：判定层表驱动测试钉住 assumption 6：`github.com:22` allow / `ssh.github.com:443` allow / `example.com:22` deny / deny 优先含 :22；preset spec 文件与 `preset-domains` 清单 git diff 为空。
-- **SC5**：dispose 单通道收**全部已起的桥**（HTTP 桥/server/socket 恒在；SOCKS 桥/server/socket 仅 T2 在场时加入，T2 裁剪后本项退化为单桥不判红），幂等回归绿；stale socket 场景归类 infra（F3/F8 测试）。
-- **SC6**：`npm run probe:sandbox` 既有全类别 + 新 2 类全绿；`npm test` 全绿（含反转的 `egress-proxy-behavior` / `egress-assembly` / wiring 系列迁移）。
-- **SC7**：TUI pty 三条操作（T7）屏上证据齐；真 `git push` e2e 在开启环境 exit 0、默认环境显式 skip。
-- **SC8**：LSP/编译零新增错误（Serena `get_diagnostics_for_file` 于改动文件）；`bwrap.ts` argv 顺序纪律回归（egress bind 段位置 + `--clearenv` 前置于全部 `--setenv` 的既有测试不破）。
-- **SC9**：私钥两档可读性断言（T6）绿；关态 `SSH_AUTH_SOCK` 不存在断言绿。
+- **SC1**: under clean assembly (preset present, no user settings section), inside the fence `ssh -T git@github.com -o ProxyCommand='<the injected value verbatim>'` completes TCP+CONNECT and receives the peer banner (probe positive exit 0).
+- **SC2**: un-admitted domain :22 refused: the in-sandbox command fails **and** the framework drains `{host, port:22, reason:"not-in-allowlist"}`, the tool_result presents `execution_failed` with the `[network_denied]` prefix (tests go through the bash real return shape; constructing a typed failure directly is forbidden — the previous spec's false-green discipline).
+- **SC3**: the `GIT_SSH_COMMAND` injected string verbatim = the T3 pinned shape (unit test); when the session is absent that env does not exist in the fence env (one wiring assertion per each of the three shapes).
+- **SC4**: the decision-layer table-driven tests pin assumption 6: `github.com:22` allow / `ssh.github.com:443` allow / `example.com:22` deny / deny-first covers :22; the git diff of the preset spec file and the `preset-domains` list is empty.
+- **SC5**: the single dispose channel retires **all started bridges** (HTTP bridge/server/socket always present; the SOCKS bridge/server/socket joins only when T2 is present, and after a T2 cut this criterion degrades to a single bridge without a red verdict), idempotence regression green; stale-socket scenarios classified as infra (F3/F8 tests).
+- **SC6**: `npm run probe:sandbox` existing categories + the 2 new ones all green; `npm test` all green (including the flipped `egress-proxy-behavior` / `egress-assembly` / wiring-series migrations).
+- **SC7**: on-screen evidence for the three TUI pty operations (T7) complete; the real `git push` e2e exits 0 in an enabled environment and skips explicitly in the default environment.
+- **SC8**: LSP/compile zero new errors (Serena `get_diagnostics_for_file` on changed files); `bwrap.ts` argv-ordering regression (egress bind section placement + the existing tests that `--clearenv` precedes all `--setenv` not broken).
+- **SC9**: two-tier private-key readability assertions (T6) green; off-state `SSH_AUTH_SOCK`-absent assertion green.
 
 ## Open questions
 
-- OQ1：mux 单端口形态（HTTP+SOCKS 同居一端口、单 socket 复用）是否在 iknow 引入——当前两 server 天然分端口，mux 分支唯一受益者是外部代理 override 场景（本仓无该配置面）；默认不实现复用分支，仅保留规则引用（`linux-sandbox-utils.js:511-521`）。若 assumption 2 裁剪 T2 则本条自动消失。
-- OQ2：`GIT_SSH_COMMAND` 是否需要 `GIT_SSH` 姊妹变量（低版本 git 支持面）——依赖包只注 `GIT_SSH_COMMAND`（:531/:540 均然）；按只注入 `GIT_SSH_COMMAND` 收口，出现真实受害面再议。
-- OQ3：probe 类别数 11→13 后 `.qoder/rules/security-boundaries.md` 的「11 类」措辞更新属规范文件变更（本 spec 不碰），留主会话随登记一并处理。
-- OQ4：verify 单例的 egress session 跨调用复用与 per-call 内层监听的相互作用——单例 session 起一次、每次 verify 命令各自跑内层前导，端口重绑由 `reuseaddr` + netns 独立解决；实测若撞 `EADDRINUSE`（同 netns 复用异常路径）回到本节补形。
+- OQ1: whether the mux single-port shape (HTTP+SOCKS co-resident on one port, one socket reused) should be introduced into iknow — currently the two servers are naturally on separate ports and the mux branch's only beneficiary is an external-proxy override scenario (this repo has no such configuration surface); by default the reuse branch is not implemented, only the rule reference is kept (`linux-sandbox-utils.js:511-521`). If assumption 2 cuts T2, this item disappears automatically.
+- OQ2: whether `GIT_SSH_COMMAND` needs the `GIT_SSH` sibling variable (older-git support surface) — the dependency package injects only `GIT_SSH_COMMAND` (:531/:540 both); close with `GIT_SSH_COMMAND` only, revisit if a real victim surface appears.
+- OQ3: updating the "11 categories" wording of `.qoder/rules/security-boundaries.md` after the probe count goes 11→13 is a rules-file change (out of this spec), left for the main session to handle together with registration.
+- OQ4: the interaction between the verify singleton's cross-call egress session reuse and the per-call inner listener — the singleton session starts once, each verify run executes its own inner preamble; port re-binding is resolved by `reuseaddr` + independent netns; if measurement hits `EADDRINUSE` (an abnormal same-netns reuse path), return to this section and reshape.
 
 ## Inherits / Changes
 
-- **继承（逐字引用面）**：
-  - `docs/adr/0097` §Decision「HTTP CONNECT + SOCKS5」代理形态 + §生命周期表三形态 + stale socket 防线 + 批准持久化粒度；§Consequences「domain fronting 不可防」（SSH 隧道同性质）。
-  - `docs/adr/0104` §Decision 1 六域清单（本 spec 判定层消费，不改动）；`docs/adr/0105` §Decision 5/6（SSH 凭据归属 + 两层掩码/sentinel 并存）。
-  - `specs/network-egress-allowlist.md` 的 Violation feedback channel 三跳 / `execution_failed` 选型 / 三类信号可区分表 / Ownership-dispose 契约 / Dependency fork（适配层收口、私网档显式 opt-in、包深路径无契约稳定）。
-  - `specs/egress-preset-allowlist.md` 的合并语义与 `allowlistSource` 三档（SSH 违例文案同源复用，`port` 字段如实渲染）。
-  - `.qoder/rules/security-boundaries.md` §Sandbox argv 顺序与 probe 全绿纪律；AGENTS.md 测试规范（TUI 实测面、typed-error catch 契约、矩阵选择、`archive/` 显式 skip 纪律）。
-  - 代码既有缝：`session.ts` filter 工厂/sink/token/幂等 dispose、`domain-matcher.ts` 判定序、`bwrap.ts` egress bind 段与 env 段、`bash.ts` 前台编排 6 步、`manager.ts` settle 释放、`upstream.ts` import 收口。
-- **变更**：
-  - `EgressFenceSpec` 形状（多 socket / 固定内端口 / 注入 env 扩集 / 内层前导脚本）——三消费面随之适配。
-  - `session.ts` 头注「SOCKS5 / git 不在本层」欠账清偿；`upstream.ts:25` 同款注释更新。
-  - 无新 ADR 级决策（形态全在 0097 已裁框架内）；**待写入清单（persist 由主会话跑）**：`docs/CONTEXT.md`「yolo 模式」词条缺口（见领域词节末条）。
-- **依赖面声明（并行 spec 交界，不设计对方）**：`createEgressSession` 的 opts 是两 spec 共享装配缝——sentinel spec 需挂 `mitmCA`/代换注册表进同一 HTTP 代理实例；本 spec 保证 session 构造参数可加性扩展、代理 server 实例句柄不外泄给第二持有者。两 spec 对 `session.ts` 的改动合并冲突由主会话裁。
+- **Inherits (verbatim-quotation surfaces)**:
+  - `docs/adr/0097` §Decision "HTTP CONNECT + SOCKS5" proxy shape + §lifecycle table three shapes + the stale-socket defense line + approval-persistence granularity; §Consequences "domain fronting cannot be prevented" (SSH tunnels are the same in nature).
+  - `docs/adr/0104` §Decision 1 six-domain list (consumed by this spec's decision layer, unmodified); `docs/adr/0105` §Decision 5/6 (SSH credential ownership + the mask/sentinel two-layer coexistence).
+  - `specs/network-egress-allowlist.md`'s Violation feedback channel three hops / `execution_failed` selection / three-signals-distinguishable table / Ownership-dispose contract / Dependency fork (adapter-layer consolidation, the private-network tier explicitly opt-in, package deep paths contractually unstable).
+  - `specs/egress-preset-allowlist.md`'s merge semantics and the three `allowlistSource` tiers (SSH violation text reuses the same source; the `port` field renders as-is).
+  - `.qoder/rules/security-boundaries.md` §Sandbox argv ordering and probe-green discipline; AGENTS.md testing rules (TUI field-test surface, typed-error catch contract, matrix selection, `archive/` explicit-skip discipline).
+  - Existing code seams: the `session.ts` filter factory/sink/token/idempotent dispose, `domain-matcher.ts` decision order, the `bwrap.ts` egress bind and env sections, `bash.ts` six-step foreground orchestration, `manager.ts` settle release, `upstream.ts` import consolidation.
+- **Changes**:
+  - The `EgressFenceSpec` shape (multi-socket / fixed inner ports / extended injected env set / inner preamble script) — the three consumer surfaces adapt accordingly.
+  - The `session.ts` header note's "SOCKS5 / git out of this layer" debt is paid off; the same comment at `upstream.ts:25` updated.
+  - No new ADR-level decision (all shapes stay within the framework already adjudicated by 0097); **persist list (run by the main session)**: the `docs/CONTEXT.md` "yolo mode" entry gap (see the last bullet of the domain-terms section).
+- **Dependency declaration (parallel-spec boundary, other side not designed)**: `createEgressSession`'s opts is the assembly seam shared by the two specs — the sentinel spec needs to hang `mitmCA`/substitution registries onto the same HTTP proxy instance; this spec guarantees the session constructor parameters extend additively and the proxy server instance handle never leaks to a second holder. Merge conflicts in `session.ts` between the two specs are adjudicated by the main session.
 
-## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
+## ACR Verdict (architecture-change-reviewer · 5-verdict gate)
 
 ```text
-bounded-context-guardian: yes — SSH 桥全部收在 egress 缝（session/upstream/bwrap + EgressFenceSpec.env 单点，invariant 4）；bash/manager/sandbox-run 仅消费接线（T1/T5）；与 sentinel spec 交界显式声明「只保证 session 可加性、不设计对方、句柄不外泄」
-defensive-contract-validator: yes — 域判定四态表驱动（T4/SC4）、缺 socat（F1）、桥死归类 infra（F3）、端口先占（F6）、token 漂移（F7）、stale socket + dispose 幂等（SC5/F8）各有验收钉子；SC2 禁直构 typed failure 堵假绿
-error-handling-enforcer: yes — F1–F8 全部 infra/域拒绝/合法态分型且经三跳通道 drain 归因；O3「absent 分支报绿掩盖缺口」被点破并由 T1 重写 present 分支为真端到端 + SC6 强制 present 分支实测全绿清偿
-complexity-anti-drift: unclear → 已返工（rev 2）— 原判：assumption 2「T2 可整体裁剪」与 T5 验收/SC5 把双 socket/双桥写死进全局判据矛盾。返工：两处断言改为条件于 T2 在场，裁剪后退化为单桥不判红（审查方明示「一处文字性返工后即可交 writing-plans」）
-minimal-change-verifier: yes — 范围严格传输面；T6 凭据分支系 ADR-0105 §Decision 5 归属本 spec 的欠账且 SSH_AUTH_SOCK 默认关；preset 零改动双锁；O1–O3 是端到端前提修复非夹带
-OVERALL: PASS（rev 2，返工点已按审查方清单落实）
+bounded-context-guardian: yes — the SSH bridge stays entirely inside the egress seam (session/upstream/bwrap + the EgressFenceSpec.env single point, invariant 4); bash/manager/sandbox-run only consume wiring (T1/T5); the sentinel-spec boundary explicitly declares "guarantee only session additivity, do not design the other side, handles never leak"
+defensive-contract-validator: yes — the domain-decision four-state table-driven test (T4/SC4), missing socat (F1), bridge death classified as infra (F3), port pre-emption (F6), token drift (F7), stale socket + dispose idempotence (SC5/F8) each with acceptance pins; SC2's ban on directly constructing typed failures blocks false green
+error-handling-enforcer: yes — F1–F8 all typed into infra / domain-rejection / legal states with three-hop drain attribution; O3's "absent branch reporting green masks the gap" is called out and discharged by T1 rewriting the present branch into true end-to-end + SC6 forcing the present branch to be measured green
+complexity-anti-drift: unclear → reworked (rev 2) — original verdict: assumption 2's "T2 can be cut wholesale" contradicted T5 acceptance/SC5 hard-wiring dual sockets/dual bridges into the global criteria. Rework: both assertions made conditional on T2's presence, degrading to a single bridge without a red verdict after a cut (the reviewer stated one textual rework then hand to writing-plans)
+minimal-change-verifier: yes — scope strictly the transport plane; the T6 credential branch is the ADR-0105 §Decision 5 debt owed to this spec and SSH_AUTH_SOCK defaults off; preset zero-change double-locked; O1–O3 are end-to-end prerequisite fixes, not smuggling
+OVERALL: PASS (rev 2, rework items landed per the review checklist)
 ```
 
 ## Evidence pointers
 
-- 依赖包现成件（pin 版，包名 = 事实引用）：
-  - `linux-sandbox-utils.js:472-560` `initializeLinuxNetworkBridge`（宿主双桥 + mux 复用分支 :511-521 + socket 就绪轮询）；`:623-645` `buildSandboxCommand`（沙箱内 `TCP-LISTEN:3128/1080 → UNIX-CONNECT` 前导 + trap 收尾）；`:1540`（第二 socket `--bind`）、`:1543-1551`（proxy env 经 `--setenv` 指沙箱内端口）。
-  - `sandbox-utils.js:531`（SOCKS5+nc 形态，macOS 向）、`:536-540`（Linux `socat - PROXY:…proxyport=…[,proxyauth=…]` 形态 + mux 中和注释 :516-524 + 「DNS 解析发生在沙箱外」注记）、`:421-470`（`generateProxyEnvVars`：auth userinfo 嵌法 :433、NO_PROXY 档 :456-470）、`:712-722`（auth username 形态）。
-  - `http-proxy.js:52-67`（`checkAuth`：CONNECT 强制 Proxy-Authorization，无 header → 407 :221/:435）；`:269-276`（CONNECT 携带非 TLS 流 = SSH 隧道的既有实证注释）；`socks-proxy.js:5-49`（同形 `filter(port, host)` + `isValidHost` 畸形拒 + auth handler :10-20）、`:74-78`（dial 带 `lookupFor` 地址守卫）。
-  - `domain-pattern.js:106-120`（「无 `:port` 条目匹任意端口」语义原文）。
-- 本仓缝：`session.ts:25`（T7/T8 欠账原文）、`:243-259`（buildProxyEnv 无 auth → O1）、`:412-429`（宿主 HTTP 桥）、`:435-448`（同号耦合）；`bwrap.ts:191-195, 216-222`（egress bind 段）；`bash.ts:319-351`（`args:["-c", finalCommand]` 无前导）、`:470-508`（start-fail = 无缝）；`env-isolation.ts:55-65`（白名单无 GIT_SSH/SSH 族）；`assembly.ts:84-95`（段缺席 → undefined = 无缝路径）；`tests/harness/sandbox/egress-proxy-behavior.test.ts:15`（「不起真 socat 桥，沙箱内侧装配 T7/T8 范围」）；`scripts/sandbox-probe.ts:340-400`（present 分支现形，见 O2/O3）。
-- 实测事故与语义前提：conversation `ee13c787`（push 死路）；`*.x` 不含 apex / 后缀锚定 / 大小写（0097 §Evidence）；bwrap 0.11.1 对 `--unshare-net` 下 loopback 置起的行为**以 T1/T7 探针实测为证**（spec 不引外部文档当凭据）。
+- Package ready-mades (pinned version; package name = factual citation):
+  - `linux-sandbox-utils.js:472-560` `initializeLinuxNetworkBridge` (host dual bridges + mux reuse branch :511-521 + socket readiness polling); `:623-645` `buildSandboxCommand` (in-sandbox `TCP-LISTEN:3128/1080 → UNIX-CONNECT` preamble + trap teardown); `:1540` (second socket `--bind`), `:1543-1551` (proxy env via `--setenv` pointing at in-sandbox ports).
+  - `sandbox-utils.js:531` (SOCKS5+nc shape, macOS-facing), `:536-540` (Linux `socat - PROXY:…proxyport=…[,proxyauth=…]` shape + mux-neutralizing comment :516-524 + the "DNS resolution happens outside the sandbox" note), `:421-470` (`generateProxyEnvVars`: auth userinfo embedding :433, NO_PROXY tier :456-470), `:712-722` (auth username shape).
+  - `http-proxy.js:52-67` (`checkAuth`: CONNECT mandates Proxy-Authorization, missing header → 407 :221/:435); `:269-276` (CONNECT carrying non-TLS streams = the existing annotated proof for SSH tunnels); `socks-proxy.js:5-49` (same-shape `filter(port, host)` + `isValidHost` malformed rejection + auth handler :10-20), `:74-78` (dial carrying the `lookupFor` address guard).
+  - `domain-pattern.js:106-120` (original wording of the "an entry without `:port` matches every port" semantics).
+- This repo's seams: `session.ts:25` (the T7/T8 debt verbatim), `:243-259` (buildProxyEnv without auth → O1), `:412-429` (host HTTP bridge), `:435-448` (same-port-number coupling); `bwrap.ts:191-195, 216-222` (egress bind section); `bash.ts:319-351` (`args:["-c", finalCommand]` with no preamble), `:470-508` (start-failure = no seam); `env-isolation.ts:55-65` (whitelist has no GIT_SSH/SSH family); `assembly.ts:84-95` (section absent → undefined = the no-seam path); `tests/harness/sandbox/egress-proxy-behavior.test.ts:15` ("don't start a real socat bridge; in-sandbox assembly is T7/T8 scope"); `scripts/sandbox-probe.ts:340-400` (the present branch's current form, see O2/O3).
+- Measured incident and semantic premises: conversation `ee13c787` (push dead end); `*.x` excludes the apex / suffix anchoring / case (0097 §Evidence); bwrap 0.11.1's behavior of bringing up loopback under `--unshare-net` is **evidenced by the T1/T7 probes** (the spec cites no external documents as proof).
 
-### Open issues（起草期发现，与现有代码冲突，归 T1/T5 修复面）
+### Open issues (found during drafting, conflict with existing code, belong to the T1/T5 fix surface)
 
-- **O1（407 死路）**：session 给 HTTP 代理配了 `proxyAuthToken`（`session.ts:401, 489`）而注入的代理 URL 不含 userinfo（`session.ts:243-249`）——沙箱内 CONNECT 必 407（`http-proxy.js:52-59` 无条件校验在场 token）。T1 一并闭环。
-- **O2（NO_PROXY 自噬）**：`buildProxyEnv` 的 `NO_PROXY=127.0.0.1,localhost` 使「目标为 loopback 字面」的请求绕过代理直连（沙箱 netns 内必败）——probe present 分支（`sandbox-probe.ts:340+`，allowedDomains = `127.0.0.1:<port>`）在该形态下不可能 exit 0；本 spec 的正探针目标形态须避开 loopback 字面目标（T1/T7 注记）。
-- **O3（内层监听缺失 + 同号巧合）**：全仓 src 无 `TCP-LISTEN`/`UNIX-CONNECT` 装配（grep 实证），`session.ts:436` 注释引用的 `buildSandboxInnerCommand` 不存在——现「HTTP 半桥」实为宿主半场，端到端从未在 socat 在场机器上走通（本机 `which socat` = 无 → probe 走 absent 分支报绿掩盖此缺口）。本 spec 的 T1 即清偿。
+- **O1 (407 dead end)**: the session configures `proxyAuthToken` for the HTTP proxy (`session.ts:401, 489`) while the injected proxy URL carries no userinfo (`session.ts:243-249`) — an in-sandbox CONNECT must 407 (`http-proxy.js:52-59` unconditionally checks a present token). Closed together in T1.
+- **O2 (NO_PROXY self-cannibalization)**: `buildProxyEnv`'s `NO_PROXY=127.0.0.1,localhost` makes "target is a loopback literal" requests bypass the proxy and connect directly (must fail inside the sandbox netns) — the probe's present branch (`sandbox-probe.ts:340+`, allowedDomains = `127.0.0.1:<port>`) can never exit 0 under that shape; this spec's positive-probe target shape must avoid loopback literal targets (T1/T7 note).
+- **O3 (inner listener missing + same-port coincidence)**: no `TCP-LISTEN`/`UNIX-CONNECT` assembly anywhere in repo src (grep-proven); the `buildSandboxInnerCommand` referenced by the comment at `session.ts:436` does not exist — today's "HTTP half-bridge" is in fact only the host's half, and the end-to-end path has never run through on a machine with socat present (this machine's `which socat` = none → the probe takes the absent branch and reports green, masking the gap). T1 of this spec pays it off.

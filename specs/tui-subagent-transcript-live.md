@@ -1,121 +1,121 @@
-# Spec: tui-subagent-transcript-live — 活子代理两行落在会话 spawn 卡上
+# Spec: tui-subagent-transcript-live — live sub-agent's two lines land on the session spawn card
 
 **Status:** ready for plan
-**Surface:** `src/tui/subagent-message-lines.ts`、`src/tui/live-tool-preview.tsx`、`src/tui/message-blocks.tsx`、`src/tui/app.tsx`、`src/harness/subagent/manager.ts`（只读投影）
+**Surface:** `src/tui/subagent-message-lines.ts`, `src/tui/live-tool-preview.tsx`, `src/tui/message-blocks.tsx`, `src/tui/app.tsx`, `src/harness/subagent/manager.ts` (read-only projection)
 
-> 输入 = `plans/tui-subagent-transcript-live.md`（ACR 5/5 yes；九句锁句；`docs/CONTEXT.md` 词条 `subagent card live` 已 flush）。
-> 取代 = Slice D / SC14 把两行做成 prompt 上方 chrome（`SubagentIdentityStrip`）——本 spec 把位置改判给**会话 transcript 里那张 `spawn_subagent` 卡**。
-> **Reopen（`plans/strategy-window-and-subagent-card.md` T1）**：锁句 2 / 完成态表 / SC2 —— completed 后概述留下并加 `✓ Done`，不再把第 2 行换成字面 `done`，也不再保留 `running...`。
-> 范围 = 位置搬家 + 完成态 + `toolUseId` 只读 join；不改 SubagentPanel、harness spawn/abort、web、Ctrl+X、activity-block live-signal。
-> 落地 = T1 本 spec → T2 投影（含 `listSubagents` 只读 `toolUseId`）→ T3 卡承载两行、拆条 → code-review → verification-before-completion。
+> Input = `plans/tui-subagent-transcript-live.md` (ACR 5/5 yes; nine locked sentences; the `docs/CONTEXT.md` entry `subagent card live` already flushed).
+> Supersedes = Slice D / SC14, which made the two lines chrome above the prompt (`SubagentIdentityStrip`) — this spec re-awards the position to **the `spawn_subagent` card inside the session transcript**.
+> **Reopen (`plans/strategy-window-and-subagent-card.md` T1)**: locked sentence 2 / the completed-state table / SC2 — after completion the summary stays and gains `✓ Done`; line 2 is no longer replaced by a literal `done`, and `running...` is no longer kept either.
+> Scope = position move + completed state + read-only `toolUseId` join; SubagentPanel, harness spawn/abort, web, Ctrl+X, and activity-block live-signal are untouched.
+> Landing = T1 this spec → T2 projection (incl. `listSubagents` read-only `toolUseId`) → T3 card carries the two lines, strip removal → code-review → verification-before-completion.
 
 ## Goal
 
-活着的子代理不再画在输入框正上方，而是画在**会话里派它的那张 `spawn_subagent` 卡**下面：live 第 1 行 `{role} running...`，第 2 行 dim 为该 worker 任务概述（`taskPreview`）；完成后概述留下，其下绿 `✓ Done`，不再写 `running...`。输入框上方的身份条拆除，其 chrome 行账归零。
+A live sub-agent is no longer drawn directly above the input box; it is drawn under **the `spawn_subagent` card in the session that dispatched it**: live line 1 `{role} running...`, line 2 dim = that worker's task summary (`taskPreview`); after completion the summary stays, with a green `✓ Done` beneath it, and `running...` is never written again. The identity strip above the input box is removed, and its chrome row budget drops to zero.
 
-**用户**：iknow 单用户单项目本机产品；TUI 是主验收面（`npm run dev:tui`）。
+**User**: iknow is a single-user, single-project local product; the TUI is the main acceptance surface (`npm run dev:tui`).
 
-**要建什么**：
+**What to build**:
 
-1. **卡级两行投影**（纯函数）：`subagents × toolUseId → {roleLine, detailLine, done}`；join 不上 → 不画第 2 行。
-2. **join 键**：`SubagentInfo.toolUseId`（= 派发那次 `spawn_subagent` 的 tool_use id）经 `listSubagents` 只读透出；与卡侧 `tool_use.id` / `LiveToolRun.id` 同一 id 空间。
-3. **两个宿主**：live tail（`liveToolPreviewBox`，spawn 前台阻塞期间）与历史卡（`MessageBlocks`，turn 结束后）共用同一投影。
-4. **拆除**：`SubagentIdentityStrip` 及其 prompt 侧行账（`subagentRowBudget` → `chromeReserveRows.subagentRows` 产品路径不再喂值）。
+1. **Card-level two-line projection** (pure function): `subagents × toolUseId → {roleLine, detailLine, done}`; join misses → do not draw line 2.
+2. **Join key**: `SubagentInfo.toolUseId` (= the tool_use id of the dispatching `spawn_subagent` call) exposed read-only via `listSubagents`; same id space as the card-side `tool_use.id` / `LiveToolRun.id`.
+3. **Two hosts**: the live tail (`liveToolPreviewBox`, while spawn blocks the foreground) and historical cards (`MessageBlocks`, after the turn ends) share the same projection.
+4. **Removal**: `SubagentIdentityStrip` and its prompt-side row budget (`subagentRowBudget` → the `chromeReserveRows.subagentRows` product path is no longer fed).
 
 ## Locked sentences
 
-九句锁句（继承 `plans/tui-subagent-transcript-live.md`；实施与 review 均以此为准）：
+Nine locked sentences (inherited from `plans/tui-subagent-transcript-live.md`; implementation and review both defer to them):
 
-1. 每个活着的 `spawn_subagent` 在**会话 transcript 那张卡**占两行：第 1 行 `{role} running...`（三点），第 2 行 dim 为该 worker 任务概述（`taskPreview`）。
-2. 该 worker **completed** 后，任务概述留下，其下绿 `✓ Done`；不得把概述换成字面 `done`；不得再写 `running...`。不挪到输入框边上，不随底栏面板淡出而消失。
-3. 输入框**正上方**的身份条（`SubagentIdentityStrip`）拆除；其 chrome 行账归零。
-4. 输入框**下方** `SubagentPanel`（`●` / 时长 / 完成淡出 / Ctrl+X 行序）本票不改。
-5. **failed** 不走绿 `✓ Done`：沿用该工具卡既有 **failure overlay**。
-6. 实时流只挂在对得上 `toolUseId` 的那张 spawn 卡上；投影缺 `toolUseId` 则只画第 1 行、不借用别的 worker 的预览（`// EXIT:`）。
-7. `subagent_result` 仍是轮询卡，不套这两行。
-8. 不再为「避免 dual render」把 spawn 标题剥成不含 `running...` 的残句；身份以会话卡为准，底栏面板仍是任务列表。
-9. Web 状态条、harness spawn/abort、activity-block live-signal，本切片不做。
+1. Each live `spawn_subagent` occupies two lines on **that card in the session transcript**: line 1 `{role} running...` (three dots), line 2 dim = that worker's task summary (`taskPreview`).
+2. Once the worker is **completed**, the task summary stays, with a green `✓ Done` beneath it; the summary must not be replaced by a literal `done`; `running...` must not appear again. Nothing moves next to the input box, and nothing disappears with the bottom panel's fade-out.
+3. The identity strip directly **above** the input box (`SubagentIdentityStrip`) is removed; its chrome row budget goes to zero.
+4. `SubagentPanel` **below** the input box (`●` / durations / completion fade / Ctrl+X row order) is unchanged by this ticket.
+5. **failed** never takes the green `✓ Done`: keep that tool card's existing **failure overlay**.
+6. The live stream only attaches to the spawn card whose `toolUseId` matches; if the projection lacks `toolUseId`, draw line 1 only and never borrow another worker's preview (`// EXIT:`).
+7. `subagent_result` stays a polling card; the two lines do not apply.
+8. No longer strip the spawn title into a fragment without `running...` just to "avoid dual render"; identity defers to the session card, and the bottom panel remains the task list.
+9. Web status bar, harness spawn/abort, activity-block live-signal: not in this slice.
 
-### 锁句的落地解释（防 review 漂移）
+### Implementation reading of the locked sentences (anti review-drift)
 
-- 锁句 1 的「任务概述」**就是** `SubagentInfo.taskPreview`（manager 已截断 ≤120）以 1Hz 只读轮询刷新，**不是**逐 token 流；本切片不新增流式通道。
-- 锁句 2：completed 后概述仍在；其下绿 `✓ Done`（含 ✓）。第 1 行不得再带 `running...`。角色标题若仍在，只作身份、不含 running。
-- 锁句 6 的「缺 `toolUseId`」= **子代理侧投影缺关联键**（无关联键的 def / 非 spawn 来源）。此时卡照画第 1 行（角色从该卡自身 input 的 `subagent_type` → `role` → catalog fallback 派生），**不**拿任何别的 worker 的 `taskPreview` 顶替。
-- 锁句 5 与 6 的关系：failed 的 worker 不进 join map，卡回到既有 failure overlay（标题 + 单行短错误），不画完成态绿勾。
-- **完成态依赖进程内投影**：`✓ Done` 需要 `subagents` 列表里仍有该 worker（进程内）。应用重启后没有 join 源 → 该历史卡回既有单行落定摘要；本切片不引入落盘关联（不写第二套持久化）。
-- **`wait:false` 的卡**：spawn 立即返回 `{task_id}`（工具卡已落定），worker 仍在跑 —— 两行照画在卡上（join 只问 worker 状态，不问工具卡是否落定）。这不是漏洞，是本切片的正确形态。
-- **未 join 的 live spawn 卡**（无 `toolUseId`：ask / 直调 handler / 测试注入）：第 1 行仍画 `{role} running...`（角色由该卡自身 input 的 `subagent_type` → `role` → catalog fallback 派生），无第 2 行 —— 不借用任何别的 worker 预览。该形态与「join 上但仍是 live」在屏上都以 `{role} running...` 开头，区别只在有没有 dim 流那行。
+- Locked sentence 1's "task summary" **is exactly** `SubagentInfo.taskPreview` (already truncated ≤120 by the manager), refreshed by 1Hz read-only polling — **not** a per-token stream; this slice adds no streaming channel.
+- Locked sentence 2: after completion the summary stays; beneath it a green `✓ Done` (including ✓). Line 1 must not carry `running...` anymore. If a role title remains, it is identity only, never running.
+- Locked sentence 6's "missing `toolUseId`" = **the sub-agent-side projection lacks the association key** (defs without one / non-spawn sources). The card still draws line 1 (role derived from the card's own input's `subagent_type` → `role` → catalog fallback); it does **not** substitute any other worker's `taskPreview`.
+- Relation of locked sentences 5 and 6: failed workers do not enter the join map; the card falls back to the existing failure overlay (title + one short error line), with no completion check.
+- **The completed state depends on the in-process projection**: `✓ Done` requires the worker to still be in the `subagents` list (in process). After an app restart there is no join source → that historical card falls back to the existing single-line settled summary; this slice introduces no on-disk association (no second persistence scheme).
+- **`wait:false` cards**: spawn returns `{task_id}` immediately (the tool card has settled) while the worker is still running — the two lines still draw on the card (the join only asks the worker's state, not whether the tool card has settled). This is not a hole but the correct shape of this slice.
+- **Un-joined live spawn cards** (no `toolUseId`: ask / direct handler call / test injection): line 1 still draws `{role} running...` (role derived from the card's own input's `subagent_type` → `role` → catalog fallback), no line 2 — never borrowing any other worker's preview. This shape and "joined but still live" both start on screen with `{role} running...`; the only difference is the dim stream line.
 
-## Card contract（实施面单一形状）
+## Card contract (single shape for the implementation surface)
 
 ```ts
 export interface SubagentCardLines {
-  readonly roleLine: string; // live：`{role} running...`；completed：身份行，不含 `running...`
-  readonly detailLine: string; // live 与 completed 均为 taskPreview（按 cols 截断）
-  readonly doneLine?: string; // completed → `✓ Done`；live 缺席
-  readonly done: boolean; // 完成态着色：true → tuiPalette.add（绿）
+  readonly roleLine: string; // live: `{role} running...`; completed: identity line, without `running...`
+  readonly detailLine: string; // live and completed both: taskPreview (truncated by cols)
+  readonly doneLine?: string; // completed → `✓ Done`; absent while live
+  readonly done: boolean; // completed-state color: true → tuiPalette.add (green)
 }
 ```
 
-| 卡状态                                  | 画面                                                                                            |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| live（`starting` / `running`，join 上） | 第 1 行 `{role} running...`；第 2 行 dim 概述                                                   |
-| completed（join 上）                    | 概述留下；其下绿 `✓ Done`；不得 `running...`                                                    |
-| failed（join 上）                       | 不套完成态绿勾 —— 走该卡 failure overlay（锁句 5）                                              |
-| spawn 卡（running，join 不上）          | 只画第 1 行；文案 = 既有 `formatToolStatusLine` 的 dotless `{role} running`（不改模板，锁句 6） |
-| spawn 卡（ok，join 不上）               | 既有单行标题（`{role}` 落定摘要），本切片不改                                                   |
-| 非 spawn（含 `subagent_result`）        | 本切片完全不改（锁句 7）                                                                        |
+| Card state                                | Screen                                                                                              |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| live (`starting` / `running`, joined)     | line 1 `{role} running...`; line 2 dim summary                                                      |
+| completed (joined)                        | summary stays; green `✓ Done` beneath; no `running...`                                              |
+| failed (joined)                           | no completion check — the card's failure overlay takes over (locked sentence 5)                     |
+| spawn card (running, not joined)          | line 1 only; wording = the existing dotless `{role} running` from `formatToolStatusLine` (template unchanged, locked sentence 6) |
+| spawn card (ok, not joined)               | existing single-line title (the `{role}` settled summary), unchanged by this slice                  |
+| non-spawn (incl. `subagent_result`)       | entirely unchanged by this slice (locked sentence 7)                                                |
 
-两宿主共用的「第 1 行」文案来源分两路，**不得各写模板**：
+The "line 1" wording source shared by the two hosts splits into two paths, and **neither may write its own template**:
 
-- spawn 卡（`spawn_subagent`）且能投影 → 走 `SubagentCardView`（live：`{role} running...` + 概述；completed：概述 + 绿 `✓ Done`）；
-- 其余任何工具卡（含 `subagent_result`）→ 完全走既有 `formatToolStatusLine` 路径，字节与改前一致。
+- spawn cards (`spawn_subagent`) with a projection → go through `SubagentCardView` (live: `{role} running...` + summary; completed: summary + green `✓ Done`);
+- any other tool card (incl. `subagent_result`) → fully the existing `formatToolStatusLine` path, bytes identical to before the change.
 
-即：两行形态只挂在 `spawn_subagent` 上，`isSubagentTool` 的另一半（轮询卡）保持既有 detail-only 形态。
+That is: the two-line shape hangs only on `spawn_subagent`; the other half of `isSubagentTool` (the polling card) keeps its existing detail-only shape.
 
-两个宿主共用上表：live tail（`liveToolPreviewBox` / `liveToolPreviewTextLines`）与历史卡（`MessageBlocks`）都必须走同一投影函数，不得各写一套模板。
+Both hosts share the table above: the live tail (`liveToolPreviewBox` / `liveToolPreviewTextLines`) and historical cards (`MessageBlocks`) must go through the same projection function; no second template set.
 
 ## Superseded
 
-| 被取代行为                                                                       | 现行落点                                                               | 取代后                                                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 两行画在输入框正上方（`SubagentIdentityStrip`）                                  | `src/tui/subagent-identity-strip.tsx`、`app.tsx` 挂载                  | 两行画在会话 spawn 卡上；组件删除                                                                                                                                                                                                                                                                                                       |
-| strip 行数进 chrome 行账（每 live × 2）                                          | `app.tsx subagentRowBudget` → `chromeReserveRows.subagentRows`         | 产品路径不再喂值（缺省 0）；`chromeReserveRows` 的显式入参保留（单测 / 旧调用兼容），与 `panelRows` 同款约定                                                                                                                                                                                                                            |
-| 消息两行投影按 live 列表整体铺开                                                 | `subagent-message-lines.ts projectSubagentMessageLines`                | 改卡级投影（按 `toolUseId` join，逐卡）                                                                                                                                                                                                                                                                                                 |
-| 两行预算回归钉「strip 占 input 上方 2 行」                                       | `tests/tui/subagent-two-line-budget.test.tsx`                          | 改钉「子代理不占 prompt 行账；两行长在卡上」                                                                                                                                                                                                                                                                                            |
-| SubagentPanel 不计入 chrome 行账（`panelRows` 恒 0，「装不下的行溢到屏幕下方」） | #1044 `app.tsx subagentPanelRowBudget` → `chromeReserveRows.panelRows` | 该假设不成立：底部 chrome 无显式高度、默认 `flexShrink=1`，总高超出时 Yoga 把负空间按比例摊给输入框（live ≥7 必现，与终端高无关）。现行：面板行数（折叠上限 `SUBAGENT_PANEL_MAX_ROWS=5`，超限末行折 `… +N`）入账 —— 输入框正常上移且始终完整显示；焦点环 / clamp 同步改用 `visibleLiveRowCount`（可见 live 行数），折叠后焦点不落隐藏行 |
+| Superseded behavior                                                                        | Current location                                                     | After supersession |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- | ------------------ |
+| two lines drawn directly above the input box (`SubagentIdentityStrip`)                     | `src/tui/subagent-identity-strip.tsx`, mounted in `app.tsx`          | the two lines draw on the session spawn card; the component is deleted |
+| strip line count charged into the chrome budget (per live × 2)                             | `app.tsx subagentRowBudget` → `chromeReserveRows.subagentRows`       | the product path no longer feeds it (default 0); the explicit `chromeReserveRows` argument is kept (unit tests / legacy call compatibility), same convention as `panelRows` |
+| the two-line message projection spreads the whole live list                                | `subagent-message-lines.ts projectSubagentMessageLines`              | becomes a card-level projection (join by `toolUseId`, per card)   |
+| the two-line budget regression pinning "the strip occupies 2 rows above the input"         | `tests/tui/subagent-two-line-budget.test.tsx`                        | re-pinned to "sub-agents take no prompt row budget; the two lines grow on the card" |
+| SubagentPanel excluded from the chrome budget (`panelRows` always 0; "rows that don't fit overflow below the screen") | #1044 `app.tsx subagentPanelRowBudget` → `chromeReserveRows.panelRows` | the assumption fails: bottom chrome has no explicit height and defaults to `flexShrink=1`, so when total height overflows Yoga distributes the negative space to the input box proportionally (reproduces whenever live ≥7, independent of terminal height). Current: panel rows (collapse cap `SUBAGENT_PANEL_MAX_ROWS=5`, overflow folds the last row into `… +N`) are budgeted — the input box shifts up normally and is always fully displayed; focus ring / clamp switch to `visibleLiveRowCount` (visible live row count), so focus never lands on a hidden row after folding |
 
-**不授权**（本切片明确排除）：改 `SubagentPanel` 与 Ctrl+X 行序、改 harness spawn/abort/超时、改 web `SubagentStatusBar`、改 activity-block live-signal、给 `subagent_result` 套两行、恢复 prompt 侧身份条、改 `formatToolStatusLine` 的既有文字模板。
+**Not authorized** (explicitly excluded from this slice): changing `SubagentPanel` and the Ctrl+X row order, harness spawn/abort/timeouts, web `SubagentStatusBar`, activity-block live-signal, applying the two lines to `subagent_result`, restoring the prompt-side identity strip, changing `formatToolStatusLine`'s existing text templates.
 
 ## Input-contract classes
 
-| Surface                                                | empty                                                 | invalid / negative                                                     | overflow                                                                  | concurrent                                                   | exception                                                                                            |
-| ------------------------------------------------------ | ----------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `projectSubagentCardLines(subagents, toolUseId, cols)` | 空数组 / `toolUseId` 缺省或空串 → `null`（不借流）    | 无匹配 / 匹配到 failed → `null`；role 空串 / 纯空白 → catalog fallback | 两行各自按 cols 视觉宽度截断（CJK-safe），永不换行；`cols ≤ 0` → 1 列预算 | 两个 live worker：各卡只取自己 join 的 `taskPreview`，互不串 | 不读 `startedAt` / `endedAt`（非法 ISO 不影响投影）；缺 `taskPreview` → 第 2 行空串占位，行账仍 2 行 |
-| `subagentCardLinesMap(subagents, cols)`                | 空数组 → 空 map                                       | 缺 `toolUseId` / failed 的条目整体跳过（不入 map）                     | 同左（逐条按 cols 截断）                                                  | 重复 `toolUseId`：列表序首个胜（确定性）                     | 同上                                                                                                 |
-| `listSubagents` 的 `toolUseId` 字段                    | def 无 `toolUseId` → 字段整个省略（Postel，字节稳定） | 空串 → 省略                                                            | N/A                                                                       | N/A                                                          | N/A                                                                                                  |
-| `liveToolPreviewTextLines(run, cols, card?)`           | 无 card 且 running → 只 1 行                          | failed run → 不消费 card（走既有失败行）                               | 行内容按 cols 截断                                                        | N/A                                                          | N/A                                                                                                  |
-| `MessageBlocks` 历史卡                                 | 无 map → 与改前逐字节一致                             | map 命中 failed → 不套两行                                             | 两行按 innerCols 截断                                                     | N/A                                                          | 缺 `subagentCards` prop（旧调用）→ 与改前一致                                                        |
+| Surface                                                | empty                                                   | invalid / negative                                                  | overflow                                                                    | concurrent                                                    | exception |
+| ------------------------------------------------------ | ------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------- | --------- |
+| `projectSubagentCardLines(subagents, toolUseId, cols)` | empty array / `toolUseId` absent or empty string → `null` (never borrow a stream) | no match / matched to failed → `null`; empty or whitespace-only role → catalog fallback | each of the two lines truncated to cols by visual width (CJK-safe), never wrapping; `cols ≤ 0` → 1-column budget | two live workers: each card takes only its own joined `taskPreview`, never crossed | never reads `startedAt` / `endedAt` (invalid ISO cannot affect the projection); missing `taskPreview` → line 2 is an empty placeholder, budget still 2 rows |
+| `subagentCardLinesMap(subagents, cols)`                | empty array → empty map                                 | entries missing `toolUseId` or failed are skipped wholesale (not in the map) | same as left (per-entry truncation by cols)                                 | duplicate `toolUseId`: first in list order wins (deterministic) | same as above |
+| `listSubagents`'s `toolUseId` field                    | def without `toolUseId` → the field is omitted entirely (Postel, byte-stable) | empty string → omitted                                              | N/A                                                                         | N/A                                                           | N/A |
+| `liveToolPreviewTextLines(run, cols, card?)`           | no card and running → 1 line only                       | failed run → does not consume card (existing failure line path)     | line content truncated by cols                                              | N/A                                                           | N/A |
+| `MessageBlocks` historical cards                       | no map → byte-identical to before the change            | map hit on failed → no two lines                                    | two lines truncated by innerCols                                            | N/A                                                           | missing `subagentCards` prop (legacy call) → same as before the change |
 
 ## Success criteria
 
-- **SC1**: 真实会话里，前台 `spawn_subagent` 执行期间，该卡在 transcript 显示 `{role} running...` + 一行 dim `taskPreview`；输入框上方不再出现任何 `{role} running...` 行。
-- **SC2**: 该 worker 完成后，同一张卡仍能看见任务概述，其下绿 `✓ Done`（`fg = tuiPalette.add`），不得再写 `running...`，不得只剩字面 `done`。
-- **SC3**: 两个并发 live worker 各占自己的卡，预览不串（A 卡不出现 B 的 `taskPreview`）。
-- **SC4**: 缺 `toolUseId` 的子代理条目：卡只画第 1 行，不借用他人预览（`// EXIT:` 在拒绝分支上）。
-- **SC5**: `chromeReserveRows` 的产品调用不再为子代理预留 prompt 上方行数；live 子代理存在与否不改变 chrome 预算。
-- **SC6**: `SubagentPanel`（底栏 `●` 行 / 时长 / 完成淡出 / Ctrl+X 行序）行为与改前一致，既有面板测试全绿。
-- **SC7**: `subagent_result` 卡与 failed spawn 卡不套两行（既有 failure overlay / 轮询卡测试全绿）。
+- **SC1**: In a real session, while a foreground `spawn_subagent` runs, its card shows `{role} running...` + a one-line dim `taskPreview` in the transcript; no `{role} running...` line appears above the input box anymore.
+- **SC2**: After that worker completes, the same card still shows the task summary with a green `✓ Done` beneath (`fg = tuiPalette.add`); `running...` must never reappear, and it must not degrade to a literal `done` alone.
+- **SC3**: Two concurrent live workers each occupy their own card without preview crossing (card A never shows B's `taskPreview`).
+- **SC4**: Sub-agent entries lacking `toolUseId`: the card draws line 1 only and never borrows another's preview (`// EXIT:` on the rejection branch).
+- **SC5**: Product calls of `chromeReserveRows` no longer reserve rows above the prompt for sub-agents; whether live sub-agents exist does not change the chrome budget.
+- **SC6**: `SubagentPanel` (bottom `●` rows / durations / completion fade / Ctrl+X row order) behaves exactly as before, with all existing panel tests green.
+- **SC7**: `subagent_result` cards and failed spawn cards never take the two lines (existing failure overlay / polling-card tests stay green).
 
 ## Inherits / Changes
 
-- **继承**：`isLiveSubagent` 判据（`starting` + `running`，与面板 / Ctrl+X 分派同源）、`resolveIdentityRole` 的 catalog fallback（`SUBAGENT_ROLE_FALLBACK`，永不输出「子代理」字面值）、`clipOneLineVisual` 截断纪律、`tuiPalette` 的 `dim` / `add` token、`SubagentInfo` Postel 纪律（可选字段缺席即省略）。
-- **变更**：`SubagentInfo` 增可选只读 `toolUseId`；`subagent-message-lines.ts` 的投影从「live 列表整体铺开」改为「按 `toolUseId` 卡级 join」；`SubagentIdentityStrip` 删除；`subagentRowBudget` 保留签名、恒返回 0（见 Superseded 表：让「不再入账」是显式声明，`chromeReserveRows` 的显式入参保留给单测 / 旧调用）。
-- **不改**：`src/shared/tool-line.ts` 的文案模板逻辑（子代理分支的 detail-only 形态仍是「join 不上」时的兜底）、`SubagentPanel` 投影、harness spawn/abort 生命周期。
+- **Inherits**: the `isLiveSubagent` predicate (`starting` + `running`, same source as panel / Ctrl+X dispatching), `resolveIdentityRole`'s catalog fallback (`SUBAGENT_ROLE_FALLBACK`, never emitting the legacy Chinese "sub-agent" literal as a role), the `clipOneLineVisual` truncation discipline, `tuiPalette`'s `dim` / `add` tokens, `SubagentInfo`'s Postel discipline (optional fields omitted when absent).
+- **Changes**: `SubagentInfo` gains an optional read-only `toolUseId`; `subagent-message-lines.ts`'s projection moves from "spread the whole live list" to "card-level join by `toolUseId`"; `SubagentIdentityStrip` is deleted; `subagentRowBudget` keeps its signature and always returns 0 (see the Superseded table: making "no longer budgeted" an explicit declaration, while the explicit `chromeReserveRows` argument is kept for unit tests / legacy calls).
+- **Unchanged**: the wording-template logic in `src/shared/tool-line.ts` (the sub-agent branch's detail-only shape remains the fallback when the join misses), `SubagentPanel`'s projection, the harness spawn/abort lifecycle.
 
 ## Evidence pointers
 
-- 计划：`plans/tui-subagent-transcript-live.md`（位置搬家）；完成态修订：`plans/strategy-window-and-subagent-card.md`。
-- 前身：Slice D / SC14（`specs/agent-control-surface.md` 已归档）把两行落成 prompt 上方 chrome。
-- 领域词：`docs/CONTEXT.md` 词条 **subagent card live（子代理会话卡实时行）**（已 flush，本切片落地）。
-- join 键上游：`SubAgentDefinition.toolUseId`（`src/harness/subagent/role.ts`）← `ToolExecutionContext.toolUseId`（executor `call.id`）← `spawn-subagent-tool` 写入 def。
+- Plan: `plans/tui-subagent-transcript-live.md` (position move); completed-state revision: `plans/strategy-window-and-subagent-card.md`.
+- Predecessor: Slice D / SC14 (`specs/agent-control-surface.md`, archived) landed the two lines as chrome above the prompt.
+- Domain term: the `docs/CONTEXT.md` entry **subagent card live** (flushed; this slice lands it).
+- Join-key upstream: `SubAgentDefinition.toolUseId` (`src/harness/subagent/role.ts`) ← `ToolExecutionContext.toolUseId` (executor `call.id`) ← written into the def by `spawn-subagent-tool`.

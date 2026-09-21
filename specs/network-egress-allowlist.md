@@ -1,221 +1,221 @@
-# Spec: 出口代理缝 —— 域白名单网络边界
+# Spec: egress proxy seam — domain-allowlist network boundary
 
-**Status:** ready for review (rev 2；桥接实现以 ADR-0107 为准：无宿主 socat)
-**Surface:** `src/harness/sandbox/`（bwrap argv、egress 新目录）、`src/harness/aci/tools/bash.ts`、`src/harness/permission/`（删 ask 轴）、`src/harness/background/`、`src/harness/verify/`、`src/config/settings.ts`、`scripts/sandbox-probe.ts`
+**Status:** ready for review (rev 2; the bridging implementation follows ADR-0107: no host socat)
+**Surface:** `src/harness/sandbox/` (bwrap argv, new egress directory), `src/harness/aci/tools/bash.ts`, `src/harness/permission/` (delete the ask axis), `src/harness/background/`, `src/harness/verify/`, `src/config/settings.ts`, `scripts/sandbox-probe.ts`
 
 ## Goal
 
-bash 围栏的出口从「二值开关」（默认断网 / `network:true` 全开）改为**唯一通路**：netns 恒定断网 + **出口代理缝** + **域名允许集**判定。模型不再需要 per-call 网络参数；出网资格只由「域名是否在名单」回答，且失败带可行动的违例反馈。
+Change the bash fence's egress from a "binary switch" (network off by default / `network:true` fully open) to a **single channel**: the netns is permanently disconnected + the **egress proxy seam** + a **domain allowlist** decision. The model no longer needs per-call network parameters; egress qualification is answered only by "is the domain on the list", and failures carry actionable violation feedback.
 
-用户故事：操作员希望 agent 能跑 `npm install` / `git clone` 这类构建命令，但**不能**把任意数据发到任意站点。现状是「要么全断要么全开」，没有中间档；且 `STATIC_NETWORK_WHITELIST` 是声明未实施的死码。本 spec 落地中间档并清算死码。
+User story: the operator wants the agent to run build commands like `npm install` / `git clone`, but **must not** be able to send arbitrary data to arbitrary sites. The status quo is "all off or all on" with no middle tier, and `STATIC_NETWORK_WHITELIST` is declared-but-unimplemented dead code. This spec lands the middle tier and settles the dead code.
 
 ## Boundaries
 
 - **Does:**
-  - `--unshare-net` 改**恒定项**（任何路径不摘除），覆盖**全部 3 处 fence 装配点**：前台 `bash.ts:271` / background `manager.ts:275` / verify `sandbox-run.ts:78`（实测：subagent worker 不单独造 fence，走的就是这三条）。
-  - 新增 `src/harness/sandbox/egress/`：宿主出口代理（HTTP CONNECT + SOCKS5）+ **桥**（unix socket → 沙箱内本地端口）+ 域匹配器接线 + 地址守卫接线 + **违例记录与回灌**。
-  - 新增**域名允许集**判定：CONNECT host 匹配（`*.x` 严格子域不含 apex、可选 `:port`、deny 优先）+ 地址守卫（拒 loopback / 私网 / link-local / metadata）。
-  - **首次域名批准流**：交互入口首见新域名 → 走既有 ask 面问一次 → 批准 = 会话级放行 + 可选持久化到用户层 settings；非交互入口（background / verify / 无 ask 面）**无法问 = fail-closed 拒绝**，违例含缺失域名与补配指引。
-  - 配置面：用户层 settings 新键（`isolation.network.allowedDomains` / `deniedDomains`），用于**预置**与 CI 场景；项目文件不采纳。
-  - **删除面**（完整清单见「Deletion surface」）：bash input 的 `network?: boolean` 字段与其 description；`code-ask-bash-network` 权限规则；`isBashNetworkTrue` SSOT；`wantsHostNetwork` 全部分支；`BackgroundSpawnRequest.network`；`AskUser` ctx 的 `network` 字段；`NETWORK_HINT_MARKER` / `summarizeNetworkBash` / `NETWORK_HINT_TAIL` / `SECRET_WARNING`；probe 的 opt-in 类别。
-  - 依赖引入：`@anthropic-ai/sandbox-runtime`（Apache-2.0，pin 精确版）**只取网络半场**；bwrap argv 仍自装配（fsMode / workspace mount / argv 顺序纪律不动）。
+  - `--unshare-net` becomes a **constant item** (never removed on any path), covering **all 3 fence assembly points**: foreground `bash.ts:271` / background `manager.ts:275` / verify `sandbox-run.ts:78` (measured: the subagent worker does not build its own fence; it goes through exactly these three).
+  - New `src/harness/sandbox/egress/`: host egress proxy (HTTP CONNECT + SOCKS5) + **bridge** (unix socket → in-sandbox local port) + domain-matcher wiring + address-guard wiring + **violation recording and feedback**.
+  - New **domain allowlist** decision: CONNECT host matching (`*.x` strict subdomains excluding the apex, optional `:port`, deny first) + address guard (rejects loopback / private / link-local / metadata).
+  - **First-seen domain approval flow**: interactive entry, first-seen new domain → ask once via the existing ask surface; approval = session-level admission + optional persistence to user-layer settings; non-interactive entries (background / verify / no ask surface) **cannot ask = fail-closed rejection**, with the violation carrying the missing domain and remediation guidance.
+  - Configuration surface: new user-layer settings keys (`isolation.network.allowedDomains` / `deniedDomains`), for **presets** and CI scenarios; project files not adopted.
+  - **Deletion surface** (full list under "Deletion surface"): the bash input's `network?: boolean` field and its description; the `code-ask-bash-network` permission rule; the `isBashNetworkTrue` SSOT; all `wantsHostNetwork` branches; `BackgroundSpawnRequest.network`; the `network` field on the `AskUser` ctx; `NETWORK_HINT_MARKER` / `summarizeNetworkBash` / `NETWORK_HINT_TAIL` / `SECRET_WARNING`; the probe's opt-in categories.
+  - Dependency introduction: `@anthropic-ai/sandbox-runtime` (Apache-2.0, exact version pinned) for the **network half only**; bwrap argv remains self-assembled (fsMode / workspace mount / argv ordering discipline unchanged).
 - **Confirms with human:**
-  - ~~首次批准的持久化粒度（仅会话 vs 可写回用户层）落地形态。~~ **已裁定（2026-09-17）**：批准 = 会话级放行必成；写回用户层 settings 是可选附属动作，写回失败降级为仅会话放行 + 一次性警告，已批准调用照常执行。见 ADR-0097「批准持久化粒度」。
-  - ~~代理进程生命周期细节（前台随调用生灭 / background 桥活到任务结束的具体实现缝）。~~ **已裁定（2026-09-17）**：三形态共用「起桥 → 绑 socket → 注入 env → 收尾清理」接口，异常路径与正常路径同一释放通道；background 挂 `settle()`，verify 为模块级单例。见 ADR-0097「代理生命周期 / dispose 契约」。
+  - ~~The landing shape of first-approval persistence granularity (session-only vs writable back to the user layer).~~ **Adjudicated (2026-09-17)**: approval = session-level admission is mandatory; write-back to user-layer settings is an optional side action — a failed write-back degrades to session-only admission + a one-time warning, and the already-approved call executes normally. See ADR-0097 "approval persistence granularity".
+  - ~~Proxy-process lifecycle details (foreground born/dies per call / the concrete implementation seam of the background bridge living to task end).~~ **Adjudicated (2026-09-17)**: the three shapes share the "start bridge → bind socket → inject env → cleanup" interface, with exception paths using the same release channel as normal paths; background hangs on `settle()`, verify is a module-level singleton. See ADR-0097 "proxy lifecycle / dispose contract".
 - **Out of this spec:**
-  - `--yolo` 无沙箱模式（另票 #1035；两轴正交，yolo 的豁免面在该票裁定）。
-  - 「沙箱内起服务 → 宿主可达」反向通路（旧 `network:true` 的核心用例，netns 恒断下不成立；如需另开独立轴）。
-  - 内容级管控 / TLS 终止 / 凭据注入（ADR-0072 的 TUN 路线范围）。
-  - `web_fetch` / `web_search` 的 `network-guard` 栈（另一条防线，不受本 spec 影响）。
-  - worktree 门禁（`worktreeOnMutate`）——另一根轴，本 spec 不改。
+  - `--yolo` unsandboxed mode (separate ticket #1035; the two axes are orthogonal, yolo's exemption surface is adjudicated in that ticket).
+  - The "run a service in the sandbox → host reachable" reverse channel (the core use case of the old `network:true`; untenable under the permanent netns disconnect — if needed, open an independent axis).
+  - Content-level controls / TLS termination / credential injection (the ADR-0072 TUN-route scope).
+  - The `web_fetch` / `web_search` `network-guard` stack (a different defense line, unaffected by this spec).
+  - The worktree gate (`worktreeOnMutate`) — a different axis, unchanged here.
 
 ## Settled invariants
 
-1. **唯一通路**：`--unshare-net` 恒在；出网只能经代理缝。不存在第二出口、不存在逃生开关。
-2. **判定不看内容**：代理只看 CONNECT host / absolute-URI host，不解密。不得表述为内容级管控。
-3. **fail-closed 全覆盖**：未命中允许集、代理/桥进程死、非代理感知程序（raw socket）= 拒绝或断网；绝不静默放行。
-4. **删除而非并存**：旧 per-call `network:true` 语义整体移除，不留双轨。
-5. **只认用户层配置**：允许集 / 拒绝集只从用户层 settings 读（ADR-0084 纪律），项目文件出现该段即丢弃。
-6. **地址守卫正交**：域名命中不豁免地址守卫——解析后落在 loopback / 私网 / link-local / metadata 一律拒。
-7. **配置层永不抛**：允许集条目的非法形态不抛异常（对齐 `settings.ts:34-43` 的「非法值丢弃不抛错」纪律），但**必须留痕**——静默丢弃等同于让用户以为边界已生效。丢弃方向恒为**收紧**（不可达），不是放宽。
+1. **Single channel**: `--unshare-net` always present; egress only via the proxy seam. No second exit, no escape switch.
+2. **Decisions never inspect content**: the proxy looks only at the CONNECT host / absolute-URI host, no decryption. Never phrase it as content-level control.
+3. **fail-closed across the board**: allowlist miss, proxy/bridge process dead, non-proxy-aware programs (raw sockets) = rejection or disconnection; never silent admission.
+4. **Delete, not coexist**: the old per-call `network:true` semantics are removed wholesale, no dual track left.
+5. **User-layer configuration only**: the allow/deny sets are read only from user-layer settings (ADR-0084 discipline); if the section appears in a project file, it is dropped.
+6. **Address guard orthogonal**: a domain hit does not exempt the address guard — anything resolving into loopback / private / link-local / metadata is rejected.
+7. **The configuration layer never throws**: illegal allowlist entries raise no exception (aligned with the "illegal values dropped without throwing" discipline at `settings.ts:34-43`) but **must leave a trace** — silent dropping equals letting the user believe the boundary took effect. The drop direction is always **tightening** (unreachable), never loosening.
 
-## Violation feedback channel（ACR error-handling 项收敛）
+## Violation feedback channel (converging the ACR error-handling item)
 
-**实测事实**：`@anthropic-ai/sandbox-runtime` 的代理拒绝文案是**硬编码常量**（`http-proxy.js:10-13` 的 `ALLOWLIST_DENY`，无 options 注入点），403 body 恒为 `Connection blocked by network allowlist` + `X-Proxy-Error: blocked-by-allowlist`。因此「补配指引」**不可能**由代理自带文案承担，必须由本仓发射。
+**Measured fact**: the proxy rejection text of `@anthropic-ai/sandbox-runtime` is a **hard-coded constant** (`ALLOWLIST_DENY` at `http-proxy.js:10-13`, no options injection point); the 403 body is always `Connection blocked by network allowlist` + `X-Proxy-Error: blocked-by-allowlist`. Therefore the "remediation guidance" **cannot** be carried by the package's own text and must be emitted by this repo.
 
-（沙箱内的 `curl` 仍会把该 403 写进自己的 stderr——这是**命令层**的观测，与下述**框架层**的违例回灌是两条独立信息，后者才是模型据以补配的依据。）
+(Inside the sandbox, `curl` still writes that 403 into its own stderr — that is a **command-layer** observation, independent from the **framework-layer** violation feedback below; the latter is what the model relies on to reconfigure.)
 
-**通道（具名，三跳）**：
+**Channel (named, three hops)**:
 
-1. **记录**：本仓传给代理的 `filter(port, host, ...)` 回调是**我们的**代码。它返回 false 时，就地记录结构化违例 `{host, port, reason: "not-in-allowlist" | "address-denied" | "no-approval-inlet", command}`。这是唯一权威的拒绝观测点。
-2. **回灌**：bash handler 在调用收尾时 drain 本调用的违例记录，把可行动文本**追加到返回的 `stderr` 字段**（`bash.ts:314-319` 的 `{code, stdout, stderr}` 形状不变）——模型经 tool_result 可见，TUI 经 `meta.stderr` 旁路可见（`bash.ts:320-326`）。
-3. **前缀与 tier 入口**：回灌文本以既有 `VIOLATION_PREFIXES.networkDenied`（`[network_denied]`，`prefixes.ts:25`）起头。
+1. **Record**: the `filter(port, host, ...)` callback this repo passes to the proxy is **our** code. When it returns false, record a structured violation in place: `{host, port, reason: "not-in-allowlist" | "address-denied" | "no-approval-inlet", command}`. This is the sole authoritative rejection observation point.
+2. **Feedback**: at call closeout the bash handler drains this call's violation records and **appends actionable text to the returned `stderr` field** (the `{code, stdout, stderr}` shape at `bash.ts:314-319` unchanged) — visible to the model via tool_result, visible to the TUI via the `meta.stderr` side channel (`bash.ts:320-326`).
+3. **Prefix and tier entry**: the feedback text starts with the existing `VIOLATION_PREFIXES.networkDenied` (`[network_denied]`, `prefixes.ts:25`).
 
-**第 3 跳的既有挂点在当前形状下不可达（ACR 实证，本节必须连带改）**：`violation-handling.ts:120-122` 对**非 `execution_failed`** 的结果直接返回 `tier: undefined`，而 bash 沙箱内命令非零退出时 handler 正常 return，结果恒为 `kind: "ok"`（`tools/executor.ts:259-275` 的 `buildOkResult`），exit code 仅作 payload 的 JSON 字段（`bash.ts:316`）。因此 `:139` 的 `networkDenied → mid` 分支在「追加 stderr」形态下**永不命中**。
+**The third hop's existing hook is unreachable in the current shape (ACR evidence; this section must change along)**: `violation-handling.ts:120-122` returns `tier: undefined` directly for results that are **not `execution_failed`**, while a non-zero exit of a sandboxed bash command still returns normally from the handler, so the result is always `kind: "ok"` (`buildOkResult` at `tools/executor.ts:259-275`) and the exit code is merely a JSON field of the payload (`bash.ts:316`). Hence the `networkDenied → mid` branch at `:139` **never hits** under the "append to stderr" shape.
 
-**选定形态（(a)：转 typed failure）**：域判定拒绝是**边界表态**，不是命令的执行结果——被拒时该次调用**没有真正执行**，语义上就是失败，把它塞进 `ok` 的 stderr 是形状错配。
+**Selected shape ((a): convert to typed failure)**: a domain-decision rejection is a **boundary statement**, not a command's execution result — when rejected the call **never truly executed**, semantically it is a failure; stuffing it into an `ok`'s stderr is a shape mismatch.
 
-- bash handler 收尾 drain 到违例记录时，**不**返回 `ok`，改返回 `execution_failed`（typed，message 含完整违例文案）——由此走通既有 tier 门。
-- 该失败**仍然执行完毕**（进程已 spawn 并退出），因此文案必须同时交代「命令已跑完但出网被拒」，避免模型误判为进程崩溃。
-- **反例（已否决）**：扩展 tier 门去识别 ok-payload 内的违例——那会让「成功的调用」与「被边界拒绝的调用」在观测面上同形，且 `violation-executor.ts:72-75` 只对 failure 取 `message`，需连改三处。
+- When the bash handler's closeout drains violation records, it does **not** return `ok`; it returns `execution_failed` (typed, with the full violation text in the message) — thereby the existing tier gate becomes reachable.
+- That failure **still ran to completion** (the process was spawned and exited), so the text must also state "the command finished but egress was denied", so the model does not misjudge it as a process crash.
+- **Counterexample (rejected)**: extending the tier gate to detect violations inside ok payloads — that would make "successful calls" and "calls rejected by the boundary" observationally identical, and since `violation-executor.ts:72-75` only reads `message` for failures, three places would need changing.
 
-**测试必须走 bash 的真实返回形状**（`{code, stdout, stderr}` 经 handler → executor），不得复用 `violation-handling.test.ts:269-279` 那种直接构造 `kind: "execution_failed"` 的造法——后者对本条是**假绿**。
+**Tests must go through bash's real return shape** (`{code, stdout, stderr}` via handler → executor); never reuse the direct-`kind: "execution_failed"` construction style of `violation-handling.test.ts:269-279` — for this item that style is a **false green**.
 
-**三类信号必须互相可区分**（实测证据，见 Evidence pointers）：
+**The three classes of signals must be mutually distinguishable** (measured evidence, see Evidence pointers):
 
-| 情形            | 代理侧信号                                  | 归类         |
-| --------------- | ------------------------------------------- | ------------ |
-| 未命中允许集    | 403 + `X-Proxy-Error: blocked-by-allowlist` | 域判定拒绝   |
-| 命中但上游失败  | 502                                         | 上游故障     |
-| 代理 / 桥进程死 | 连接层拒绝（ECONNREFUSED / 桥亡）           | 基础设施故障 |
-| 非代理感知程序  | 无路由（ENETUNREACH）                       | 无出网资格   |
+| Case                    | Proxy-side signal                             | Category        |
+| ----------------------- | --------------------------------------------- | --------------- |
+| allowlist miss          | 403 + `X-Proxy-Error: blocked-by-allowlist`  | domain rejection |
+| admitted, upstream fails | 502                                          | upstream failure |
+| proxy / bridge process dead | connection-layer refusal (ECONNREFUSED / bridge down) | infrastructure failure |
+| non-proxy-aware program | no route (ENETUNREACH)                        | no egress qualification |
 
-违例文案对「未命中」必须含：被拒域名、当前允许集来源（会话级 / 已持久化 / 预置配置）、补配指引（配置键名 + 交互入口的批准提示）。对「基础设施故障」不得表述为「域名被拒」——两者修复动作完全不同。
+For "allowlist miss", the violation text must contain: the rejected domain, the current allowlist source (session-level / persisted / preset configuration), and remediation guidance (configuration key names + the interactive entry's approval prompt). For "infrastructure failure" the text must never phrase it as "domain rejected" — the two repair actions are entirely different.
 
-## Failure paths（ACR error-handling 项要求的具名路径）
+## Failure paths (named paths required by the ACR error-handling item)
 
-| 路径                                | 行为                                                                                                           | 留痕                                         |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| 宿主无 `socat`（实测未 vendored）   | **启动探测**：桥装配前检查可执行；缺失 → 网络能力 fail-closed 拒绝，不静默降级为「无网」                       | typed 错误 + 补装指引（包名 + 本机实测路径） |
-| 沙箱内无 socat / 桥装配失败         | 代理不可达 → 全部出网调用失败（fail-closed），**不**回落直连                                                   | 归类为基础设施故障，附装配失败原因           |
-| stale unix socket（代理重启）       | socket 路径带 per-session 随机 id + 启动前清理；残留 socket 的连接拒绝归类为基础设施故障，不得误报为域判定拒绝 | 启动时清理动作 + 连接失败归因                |
-| 批准后写回用户层 settings 失败      | **降级为仅会话放行**；已批准的调用**必须照常执行**，不得因持久化失败而失败                                     | 一次性警告（说明本次放行不持久）             |
-| 批准流 pending 期间同域名第二次请求 | **等待**（合并为一次询问的结果），不重复问、不立即拒                                                           | 合并计数入诊断                               |
-| 非交互入口首见新域名                | 直接拒绝（无 ask 面可问）                                                                                      | 违例含缺失域名 + 建议的配置键                |
+| Path                                      | Behavior                                                                                                           | Trace                                          |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| host lacks `socat` (measured: not vendored) | **startup probe**: check the executable before bridge assembly; missing → the network capability fails closed, never silently degrading to "no network" | typed error + installation guidance (package name + local measured path) |
+| no socat in the sandbox / bridge assembly failure | proxy unreachable → all egress calls fail (fail-closed), **no** fallback to direct connection                        | classified as infrastructure failure, with the assembly-failure cause |
+| stale unix socket (proxy restart)          | socket path carries a per-session random id + cleanup before startup; connection refusals on leftover sockets are classified as infrastructure failure, never misreported as domain rejection | startup cleanup action + connection-failure attribution |
+| approved write-back to user settings fails | **degrades to session-only admission**; the approved call **must execute normally**, never failing because persistence failed | one-time warning (explaining this admission is not persisted) |
+| second request for the same domain while approval is pending | **wait** (merged into the result of one ask); no repeated asking, no immediate rejection                            | merged count into diagnostics |
+| non-interactive entry, first-seen domain   | direct rejection (no ask surface to query)                                                                          | violation carries the missing domain + suggested configuration key |
 
 ## Input-contract classes (public surfaces)
 
 | Surface                  | empty                        | invalid/negative                                                                                                                 | overflow                                      | concurrent                                    | exception                            |
 | ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------- | ------------------------------------ |
-| 允许集条目（配置层）     | 空数组 → 全拒（fail-closed） | 非字符串 / trim 空 / allowed 中出现裸 `*` → **丢弃该条目 + 警告**（不抛）                                                        | 条目数上限实现定，超出 → 丢弃超出部分 + 警告  | N/A                                           | 不抛（对齐 settings 纪律），但恒留痕 |
-| 允许集 pattern（语义层） | N/A                          | `:port` 越界（0 / >65535 / 非数字 / 空）→ **拒绝该条目 + 可行动诊断**（不得透传给匹配器静默退化为永不匹配）；通配位置非法 → 同左 | N/A                                           | N/A                                           | 不抛；诊断经警告面上报               |
-| 首次域名批准             | N/A                          | 拒绝 → 该域名本会话不再问                                                                                                        | N/A                                           | 同域名并发首见 → 合并为一次询问（后到者等待） | ask 面不可用（非交互）→ 直接拒       |
-| 代理请求                 | N/A                          | 未命中名单 → 403 + 违例回灌；**畸形 CONNECT**（空行 / 超长行 / 非 CONNECT method / 缺 authority）→ 拒绝，不得静默放行或崩溃      | 超长请求行 → 拒绝（实测代理已 403/400，不崩） | 并发请求共享代理进程                          | 代理死 → 连接失败（fail-closed）     |
-| bash input               | N/A                          | 旧 `network` 字段传入 → 未知字段（`additionalProperties: false` 已钉，`bash.ts:352`）                                            | N/A                                           | N/A                                           | N/A                                  |
+| allowlist entries (config layer) | empty array → deny all (fail-closed) | non-string / trim-empty / bare `*` in allowed → **drop that entry + warn** (no throw)                                            | entry-count cap set in implementation, excess dropped + warn | N/A                                           | never throws (aligned with settings discipline), always traces |
+| allowlist pattern (semantics layer) | N/A                          | `:port` out of range (0 / >65535 / non-numeric / empty) → **reject that entry + actionable diagnostic** (must not pass through to the matcher to silently degrade into never-matching); illegal wildcard position → same as left | N/A                                           | N/A                                           | no throw; diagnostics via the warning channel |
+| first-seen domain approval | N/A                          | reject → that domain is not asked again this session                                                                              | N/A                                           | concurrent first-seen of the same domain → merged into one ask (later arrivals wait) | ask surface unavailable (non-interactive) → direct reject |
+| proxy request             | N/A                          | allowlist miss → 403 + violation feedback; **malformed CONNECT** (empty line / over-long line / non-CONNECT method / missing authority) → reject, never silent admission or crash | over-long request line → reject (measured: the proxy already 403/400s, no crash) | concurrent requests share the proxy process  | proxy dead → connection failure (fail-closed) |
+| bash input                | N/A                          | old `network` field passed in → unknown field (`additionalProperties: false` already pinned, `bash.ts:352`)                        | N/A                                           | N/A                                           | N/A                                  |
 
 ## Success criteria
 
-- **SC1**: `--unshare-net` 在全部 3 处 fence 装配点（前台 / background / verify）恒在——探针断言逐条覆盖，含旧 `network:true` 路径不复存在。
-- **SC2**: 命中允许集的域名经代理可达（探针：`curl` 经代理拿到 HTTP 响应）。
-- **SC3**: 未命中域名被拒，且模型可见违例含被拒域名、允许集来源与补配指引（**经 Violation feedback channel 的三跳通道**，以 `execution_failed` 形态落在 tool_result 的 message，非静默）；测试走 bash 真实返回形状（handler → executor），不得直接构造 `execution_failed` 造绿。
-- **SC4**: 地址守卫：允许集域名解析到私网/loopback → 拒（DNS rebinding 防线）。
-- **SC5**: 代理/桥进程被杀 → 后续出网调用失败（fail-closed），不出现直连回落；且**归类为基础设施故障**，不与域判定拒绝混淆（有测试断言两类信号可区分）。
-- **SC6**: 非代理感知程序（如 raw socket）在沙箱内无路由——探针断言。
-- **SC7**: `STATIC_NETWORK_WHITELIST` / `NetworkPolicy.assertDomain` / `createNetworkPolicy` 死码移除或升级为真匹配器，无「声明未实施」残留；`VIOLATION_PREFIXES.networkDenied` 保留并接线到真拒绝路径。
-- **SC8**: 删除面全仓无残留（grep 断言，清单见「Deletion surface」），含 ACR 点名的四处耦合点。
-- **SC9**: 项目层 settings 写 `isolation.network` → 丢弃（不生效），有测试钉住。
-- **SC10**: 首次域名批准流：交互入口新域名触发一次 ask，批准后本会话内不再问；pending 期间同域名并发请求合并为一次询问；非交互入口直接 fail-closed（各有测试）。
-- **SC11**: 既有 sandbox probe 全部类别保持全绿（§security-boundaries 纪律：新增 fence flag 必跑 `npm run probe:sandbox`）。
-- **SC12**: 配置层契约：空允许集全拒、`*` 被丢弃、`:65536` 被拒绝且**不**透传为静默永不匹配、非法条目丢弃有留痕——逐条有测试。
-- **SC13**: 宿主缺 `socat` 时网络能力 fail-closed 且给出补装指引（有测试，用注入的探测结果断言，不依赖 CI 是否装了 socat）。
+- **SC1**: `--unshare-net` is present at all 3 fence assembly points (foreground / background / verify) — the probe asserts each one, including that the old `network:true` path no longer exists.
+- **SC2**: a domain on the allowlist is reachable via the proxy (probe: `curl` through the proxy gets an HTTP response).
+- **SC3**: an off-list domain is rejected, and the model-visible violation contains the rejected domain, the allowlist source, and remediation guidance (**through the three-hop Violation feedback channel**, landing in the tool_result message as `execution_failed`, never silent); tests go through bash's real return shape (handler → executor), never constructing `execution_failed` directly to fake green.
+- **SC4**: address guard: an allowlisted domain resolving to private/loopback → reject (the DNS rebinding defense line).
+- **SC5**: killing the proxy/bridge process → subsequent egress calls fail (fail-closed) with no direct-connection fallback; and it is **classified as infrastructure failure**, never confused with domain rejection (a test asserts the two signal classes are distinguishable).
+- **SC6**: non-proxy-aware programs (e.g. raw sockets) have no route inside the sandbox — probe assertion.
+- **SC7**: the dead code `STATIC_NETWORK_WHITELIST` / `NetworkPolicy.assertDomain` / `createNetworkPolicy` is removed or upgraded into real matchers, no "declared but unimplemented" residue; `VIOLATION_PREFIXES.networkDenied` is kept and wired to the real rejection path.
+- **SC8**: the deletion surface leaves no repo-wide residue (grep assertions, list under "Deletion surface"), including the four coupling points named by the ACR.
+- **SC9**: project-layer settings writing `isolation.network` → dropped (no effect), pinned by a test.
+- **SC10**: first-seen approval flow: an interactive entry asks once for a new domain, and after approval no further asking within the session; concurrent requests for the same domain while pending merge into one ask; non-interactive entries fail closed directly (each with tests).
+- **SC11**: all existing sandbox probe categories stay green (§security-boundaries discipline: any new fence flag requires `npm run probe:sandbox`).
+- **SC12**: configuration-layer contract: empty allowlist denies all, `*` is dropped, `:65536` is rejected and **not** passed through as silent never-matching, illegal entries are dropped with a trace — each item has a test.
+- **SC13**: with `socat` missing on the host, the network capability fails closed with installation guidance (tested with an injected probe result, not depending on whether CI happens to install socat).
 
-## Deletion surface（ACR minimal-change 项收敛：grep 实证清单）
+## Deletion surface (converging the ACR minimal-change item: grep-proven list)
 
-**生产代码（逐点，全部需清空；共 17 个文件）**：
+**Production code (point by point, all to be cleared; 17 files total)**:
 
-| 文件                                            | 位置                                                                                         | 对象                                                                                                                  |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `src/harness/aci/tools/bash.ts`                 | `:43`/`:45`、`:213-222`、`:261-278`、`:343-350`、`:368-375`、`:411-413`                      | `network` 字段 + schema 项 + description + `wantsHostNetwork` 全部分支                                                |
-| `src/harness/permission/policy.ts`              | `:36`/`:40`、`:64`、`:109`                                                                   | `isBashNetworkTrue` SSOT + `code-ask-bash-network` 规则                                                               |
-| `src/harness/permission/permission-executor.ts` | `:29`、`:331-342`、`:497-547`                                                                | `isNetworkBash` / hint 分支 / `NETWORK_HINT_MARKER` / `summarizeNetworkBash` / `NETWORK_HINT_TAIL` / `SECRET_WARNING` |
-| `src/harness/permission/types.ts`               | `:117-124`                                                                                   | `AskUser` ctx 的 `network?: boolean`                                                                                  |
-| `src/harness/permission/declarative.ts`         | `:419-441`                                                                                   | `network:` specifier 家族（`buildBashMatcher` 分支）                                                                  |
-| `src/harness/background/manager.ts`             | `:34`、`:130-133`、`:265`、`:278-285`                                                        | `BackgroundSpawnRequest.network` + `createNetworkPolicy()` + fence opt                                                |
-| `src/harness/verify/sandbox-run.ts`             | `:16`、`:69`                                                                                 | `createNetworkPolicy()`                                                                                               |
-| `src/harness/sandbox/index.ts`                  | `:17`                                                                                        | `createNetworkPolicy` 导出                                                                                            |
-| `src/harness/sandbox/bwrap.ts`                  | `:154`（`network` 参数）、`:160-162`、`:196`、`:220-224`                                     | 条件 `--unshare-net` + `void opts.networkPolicy`                                                                      |
-| `src/harness/permission/ask-user.ts`            | `:136-138`、`:200`                                                                           | `PendingAskView.network` 字段 + 透传                                                                                  |
-| `src/tui/ask-user.ts`                           | `:20`、`:22`、`:86`                                                                          | TUI 侧 ask 视图的 `network` 字段与透传                                                                                |
-| `src/tui/app.tsx`                               | `:3573`、`:3629`                                                                             | `[宿主网络]` 标记渲染 + 透传                                                                                          |
-| `src/tui/modal.tsx`                             | `:65-67`、`:77`、`:79`、`:141`                                                               | **第二处** `[宿主网络]` 渲染点（`:79`）+ 三处 `network` 字段声明                                                      |
-| `web/src/api/client.ts`                         | `:312`、`:314`                                                                               | `PendingAskView.network` 的 web 侧类型与透传                                                                          |
-| `web/src/components/PermissionDialog.tsx`       | `:52`、`:63`、`:65`                                                                          | web 侧 `host network` 标记渲染（`aria-label` 亦需改）                                                                 |
-| `scripts/sandbox-probe.ts`                      | `:58`、`:76`、`:127`、`:134`、`:137`、`:162`、`:169`、`:172`、`:489`、`:494`、`:503`、`:518` | `NETWORK_POLICY` 常量 + `network` 形参 + 两个 opt-in 探针类别                                                         |
-| `scripts/sandbox-probe-subagent.ts`             | `:16-19`、`:228`、`:488`                                                                     | 探针说明文案中的 `network:true` 选参（围栏姿态本身不变，改文案与 marker 即可）                                        |
+| File                                              | Location                                                                                     | Object                                                                                                                  |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `src/harness/aci/tools/bash.ts`                   | `:43`/`:45`, `:213-222`, `:261-278`, `:343-350`, `:368-375`, `:411-413`                       | the `network` field + schema item + description + all `wantsHostNetwork` branches                                        |
+| `src/harness/permission/policy.ts`                | `:36`/`:40`, `:64`, `:109`                                                                    | the `isBashNetworkTrue` SSOT + the `code-ask-bash-network` rule                                                          |
+| `src/harness/permission/permission-executor.ts`   | `:29`, `:331-342`, `:497-547`                                                                 | `isNetworkBash` / hint branches / `NETWORK_HINT_MARKER` / `summarizeNetworkBash` / `NETWORK_HINT_TAIL` / `SECRET_WARNING` |
+| `src/harness/permission/types.ts`                 | `:117-124`                                                                                    | the `network?: boolean` on the `AskUser` ctx                                                                             |
+| `src/harness/permission/declarative.ts`           | `:419-441`                                                                                    | the `network:` specifier family (`buildBashMatcher` branches)                                                            |
+| `src/harness/background/manager.ts`               | `:34`, `:130-133`, `:265`, `:278-285`                                                         | `BackgroundSpawnRequest.network` + `createNetworkPolicy()` + fence opt                                                    |
+| `src/harness/verify/sandbox-run.ts`               | `:16`, `:69`                                                                                  | `createNetworkPolicy()`                                                                                                  |
+| `src/harness/sandbox/index.ts`                    | `:17`                                                                                         | the `createNetworkPolicy` export                                                                                         |
+| `src/harness/sandbox/bwrap.ts`                    | `:154` (`network` parameter), `:160-162`, `:196`, `:220-224`                                  | the conditional `--unshare-net` + `void opts.networkPolicy`                                                              |
+| `src/harness/permission/ask-user.ts`              | `:136-138`, `:200`                                                                             | the `PendingAskView.network` field + pass-through                                                                        |
+| `src/tui/ask-user.ts`                             | `:20`, `:22`, `:86`                                                                           | the `network` field on the TUI-side ask view + pass-through                                                              |
+| `src/tui/app.tsx`                                 | `:3573`, `:3629`                                                                               | the host-network marker rendering + pass-through |
+| `src/tui/modal.tsx`                               | `:65-67`, `:77`, `:79`, `:141`                                                                | the **second** host-network marker rendering point (`:79`) + three `network` field declarations |
+| `web/src/api/client.ts`                           | `:312`, `:314`                                                                                 | the web-side type + pass-through of `PendingAskView.network`                                                             |
+| `web/src/components/PermissionDialog.tsx`         | `:52`, `:63`, `:65`                                                                           | web-side `host network` marker rendering (`aria-label` also needs changing)                                              |
+| `scripts/sandbox-probe.ts`                        | `:58`, `:76`, `:127`, `:134`, `:137`, `:162`, `:169`, `:172`, `:489`, `:494`, `:503`, `:518` | the `NETWORK_POLICY` constant + the `network` parameter + two opt-in probe categories                                    |
+| `scripts/sandbox-probe-subagent.ts`               | `:16-19`, `:228`, `:488`                                                                      | the `network:true` option in probe explanatory text (the fence posture itself unchanged; text + marker edit suffices)     |
 
-**注意**：`VIOLATION_PREFIXES.networkDenied`（`prefixes.ts:25`）**不删**——升级为真拒绝路径的发射前缀（见 Violation feedback channel）。
+**Note**: `VIOLATION_PREFIXES.networkDenied` (`prefixes.ts:25`) is **not deleted** — it is upgraded into the emission prefix of the real rejection path (see Violation feedback channel).
 
-**测试迁移清单（直接钉住被删轴，需改写而非删除；共 20 个文件）**：
+**Test migration list (directly pinning the deleted axis; rewrite rather than delete; 20 files total)**:
 
-| 测试文件                                                | network 引用数 | 处置                                                                                                             |
-| ------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `tests/harness/permission/policy.test.ts`               | 34             | `isBashNetworkTrue` + `code-ask-bash-network` 断言移除（`:17`/`:403-429`）                                       |
-| `tests/harness/permission/bash-network-ask.test.ts`     | 29             | 重写为新批准流（首见域名 ask / 会话放行 / 非交互 fail-closed）                                                   |
-| `tests/harness/aci/bash-fence-parity.test.ts`           | 29             | 改为断言「`--unshare-net` 恒在」的前后台集合相等                                                                 |
-| `tests/harness/permission/project-settings.test.ts`     | 24             | `isolation.network` 项目层丢弃断言                                                                               |
-| `tests/harness/aci/bash-service-loop.e2e.test.ts`       | 15             | e2e 前提依赖 `network:true`（`:5`/`:13-14`）→ 改建为经代理可达                                                   |
-| `tests/harness/aci/bash-sandbox.test.ts`                | 13             | `networkOptIn` suite（`:386+`）专断「摘除 `--unshare-net`」→ 反转                                                |
-| `tests/harness/aci/permission.test.ts`                  | 12             | 移除 network 轴，保留其余                                                                                        |
-| `tests/harness/permission/declarative-rules.test.ts`    | 11             | `network:` specifier 规则移除断言                                                                                |
-| `tests/harness/permission/ask-user.test.ts`             | 8              | `network` 字段断言移除（`:243-262`）                                                                             |
-| `tests/harness/sandbox/bwrap.test.ts`                   | 7              | `--unshare-net` 恒在断言                                                                                         |
-| `tests/tui/ask-modal.test.tsx`                          | 6              | 移除 `network` 标记字段                                                                                          |
-| `tests/harness/aci/tools/bash.test.ts`                  | 4              | 移除 `network` 入参相关断言                                                                                      |
-| `tests/harness/aci/bash-main-session-fence-tmp.test.ts` | 2              | 移除 `createNetworkPolicy` 引用（`:25`/`:80`）                                                                   |
-| `tests/harness/sandbox/bwrap-rebind.test.ts`            | 2              | 移除 `createNetworkPolicy` import 与 `networkPolicy` 构造（`:14`/`:44`）                                         |
-| `tests/harness/sandbox/fs-mode-workspace.test.ts`       | 3              | 移除 `createNetworkPolicy`（`:44`/`:102`/`:314`）                                                                |
-| `tests/harness/sandbox/fs-policy-boundary.test.ts`      | 4              | 移除 `createNetworkPolicy`（`:8`/`:53`/`:148`/`:172`）                                                           |
-| `tests/harness/verify/sandbox-run.test.ts`              | 2              | 移除 `createNetworkPolicy`（`:34`/`:180`）                                                                       |
-| `tests/harness/sandbox/network-policy.test.ts`          | 2              | 被测模块整件将删（`:24`）→ 删除该测试文件或改为新匹配器测试                                                      |
-| `tests/harness/sandbox/violation-handling.test.ts`      | —              | `networkDenied` 前缀升级后的 tier 断言；**且须走 bash 真实返回形状**（见 Violation feedback channel 的假绿警告） |
-| `tests/harness/sandbox/secrets-no-leak.test.ts`         | 2              | 移除 `createNetworkPolicy`（`:9`/`:66`）；secret 面断言保留                                                      |
+| Test file                                                   | network reference count | Disposition                                                                                                      |
+| ----------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `tests/harness/permission/policy.test.ts`                   | 34                      | remove the `isBashNetworkTrue` + `code-ask-bash-network` assertions (`:17`/`:403-429`)                            |
+| `tests/harness/permission/bash-network-ask.test.ts`         | 29                      | rewrite for the new approval flow (first-seen domain ask / session admission / non-interactive fail-closed)       |
+| `tests/harness/aci/bash-fence-parity.test.ts`               | 29                      | change to asserting the foreground/background sets are equal with `--unshare-net` always present                   |
+| `tests/harness/permission/project-settings.test.ts`         | 24                      | assertion that `isolation.network` is dropped at the project layer                                                 |
+| `tests/harness/aci/bash-service-loop.e2e.test.ts`           | 15                      | the e2e premise depends on `network:true` (`:5`/`:13-14`) → rebuild as proxy-reachable                              |
+| `tests/harness/aci/bash-sandbox.test.ts`                    | 13                      | the `networkOptIn` suite (`:386+`) specifically asserts "removing `--unshare-net`" → flip                          |
+| `tests/harness/aci/permission.test.ts`                      | 12                      | remove the network axis, keep the rest                                                                             |
+| `tests/harness/permission/declarative-rules.test.ts`        | 11                      | assertions that `network:` specifier rules are removed                                                             |
+| `tests/harness/permission/ask-user.test.ts`                 | 8                       | remove the `network` field assertions (`:243-262`)                                                                 |
+| `tests/harness/sandbox/bwrap.test.ts`                       | 7                       | assertion that `--unshare-net` is always present                                                                   |
+| `tests/tui/ask-modal.test.tsx`                              | 6                       | remove the `network` marker field                                                                                  |
+| `tests/harness/aci/tools/bash.test.ts`                      | 4                       | remove `network` parameter-related assertions                                                                      |
+| `tests/harness/aci/bash-main-session-fence-tmp.test.ts`     | 2                       | remove the `createNetworkPolicy` references (`:25`/`:80`)                                                          |
+| `tests/harness/sandbox/bwrap-rebind.test.ts`                | 2                       | remove the `createNetworkPolicy` import and `networkPolicy` construction (`:14`/`:44`)                             |
+| `tests/harness/sandbox/fs-mode-workspace.test.ts`           | 3                       | remove `createNetworkPolicy` (`:44`/`:102`/`:314`)                                                                 |
+| `tests/harness/sandbox/fs-policy-boundary.test.ts`          | 4                       | remove `createNetworkPolicy` (`:8`/`:53`/`:148`/`:172`)                                                            |
+| `tests/harness/verify/sandbox-run.test.ts`                  | 2                       | remove `createNetworkPolicy` (`:34`/`:180`)                                                                        |
+| `tests/harness/sandbox/network-policy.test.ts`              | 2                       | the module under test is deleted entirely (`:24`) → delete the test file or retarget it at the new matcher         |
+| `tests/harness/sandbox/violation-handling.test.ts`          | —                       | tier assertions after the `networkDenied` prefix upgrade; **and they must go through bash's real return shape** (see the false-green warning in Violation feedback channel) |
+| `tests/harness/sandbox/secrets-no-leak.test.ts`             | 2                       | remove `createNetworkPolicy` (`:9`/`:66`); keep the secret-surface assertions                                      |
 
-**CI 排除说明**：`bash-service-loop.e2e.test.ts` 与 `bash-sandbox.test.ts` 在 `vitest.ci-excludes.ts:43,46` 内（CI 不跑），但语义照样要迁移——不得因 CI 不跑而跳过改写。
+**CI exclusion note**: `bash-service-loop.e2e.test.ts` and `bash-sandbox.test.ts` are in `vitest.ci-excludes.ts:43,46` (not run in CI), but their semantics still require migration — the rewrite must not be skipped because CI doesn't run them.
 
-**`createNetworkPolicy` 编译连锁**（grep 实证）：`tests/` 共 **10 个文件** import 它（bwrap / fence-parity / bash-sandbox / fence-tmp / bwrap-rebind / fs-mode-workspace / fs-policy-boundary / sandbox-run.test / network-policy / secrets-no-leak）——T8 删除 `network-policy.ts` 时这些文件**编译失败**，全部在上表内；迁移时一并摘除该 import 与 `networkPolicy:` 传参（`createBwrapFence` 不再收该字段）。
+**`createNetworkPolicy` compile cascade** (grep-proven): **10 files** under `tests/` import it (bwrap / fence-parity / bash-sandbox / fence-tmp / bwrap-rebind / fs-mode-workspace / fs-policy-boundary / sandbox-run.test / network-policy / secrets-no-leak) — when T8 deletes `network-policy.ts` these files **fail to compile**, all listed above; during migration remove the import and the `networkPolicy:` argument together (`createBwrapFence` no longer accepts that field).
 
-**全仓命中面（复裁 grep 复验）**：`src/` 16 文件 + `web/` 2 文件 + `scripts/` 2 文件 = 生产面 17 文件（表列齐）；`tests/` 23 文件命中，其中 20 个需迁移（表列齐），其余为无害的通用词命中（如 `tests/tui/modal.test.tsx` 零引用）。
+**Repo-wide hit surface (re-verified by re-running grep)**: 16 files in `src/` + 2 in `web/` + 2 in `scripts/` = 17 production files (fully listed in the table); 23 files hit under `tests/`, of which 20 need migration (fully listed), the rest being harmless generic-word hits (e.g. zero references in `tests/tui/modal.test.tsx`).
 
-## Dependency fork（ACR minimal-change 项：spike 已闭环）
+## Dependency fork (ACR minimal-change item: spike closed)
 
-**实测结论（2026-09-16，包 `@anthropic-ai/sandbox-runtime@0.0.76`）**：
+**Measured conclusions (2026-09-16, package `@anthropic-ai/sandbox-runtime@0.0.76`)**:
 
-- **纯逻辑件可独立导入**（无 node_modules 时即成功）：`domain-pattern.js`、`address.js`、`resolved-address-guard.js`、`parent-proxy.js`。四者只依赖 `node:*` 与彼此。
-- **代理服务器件需完整依赖安装后可导入**：`http-proxy.js`（缺 `node-forge` 即 `ERR_MODULE_NOT_FOUND`）、`socks-proxy.js`（缺 `@pondwader/socks5-server`）。
-- **`http-proxy.js` 无条件拉入 `node-forge`**（复裁实证，修正先前误判）：`http-proxy.js:8` 静态 import `CRL_PATH` ← `mitm-ca.js:10` 顶层 `import forge from 'node-forge'`。**「MITM 是惰性路径」只在运行时成立**（不传 `mitmCA` 即不终止 TLS），**在模块加载图上不成立**——node-forge 是硬依赖。这不改变「不做内容检查」的语义，但依赖面比预想大：node-forge 随包引入，无法裁掉。
-- **包无 `exports` 字段**——深路径导入可用但**无契约稳定性**。
-- **`socat` 是宿主前置依赖，未 vendored**（包内 `vendor/` 只有 seccomp / srt-win / java-proxy-agent）。
+- **Pure-logic pieces import standalone** (works even without node_modules): `domain-pattern.js`, `address.js`, `resolved-address-guard.js`, `parent-proxy.js`. These four depend only on `node:*` and each other.
+- **Proxy server pieces need a full dependency install to import**: `http-proxy.js` (missing `node-forge` → `ERR_MODULE_NOT_FOUND`), `socks-proxy.js` (missing `@pondwader/socks5-server`).
+- **`http-proxy.js` unconditionally pulls in `node-forge`** (re-adjudicated evidence, correcting the earlier misjudgment): `http-proxy.js:8` statically imports `CRL_PATH` ← `mitm-ca.js:10` top-level `import forge from 'node-forge'`. **"MITM is a lazy path" holds only at runtime** (without `mitmCA` no TLS is terminated); **it does not hold on the module load graph** — node-forge is a hard dependency. This changes no "no content inspection" semantics, but the dependency surface is larger than assumed: node-forge arrives with the package and cannot be trimmed.
+- **The package has no `exports` field** — deep-path imports work but carry **no contract stability**.
+- **`socat` is a host precondition dependency, not vendored** (the package's `vendor/` holds only seccomp / srt-win / java-proxy-agent).
 
-**裁定**：
+**Adjudications**:
 
-- 复用其**匹配器与地址守卫**（`domain-pattern` / `resolved-address-guard` / `address`），**不复刻**——但经**单一适配层**收口（`src/harness/sandbox/egress/upstream.ts` 或同址单文件），版本升级只改该文件，不外溢。
-- 代理 server 亦复用（`http-proxy` / `socks-proxy`），拒绝文案不回改（由本仓 `filter` 侧记录承担，见 Violation feedback channel）。
-- **`socat` 缺失**按 Failure paths 处理（探测 + fail-closed + 指引），不在本 spec 引入 socat 分发（供应链成本另议）。
-- **地址守卫只有一份实现**：复用 sandbox-runtime 的 `resolved-address-guard`，**不**在 `network-guard` 栈旁再写第二份私网判定（`docs/CONTEXT.md` 声明两栈互不替代，但 private-IP 判定漂移是真实风险）。
-- **私网拒绝必须显式 opt-in**（复裁实证，否则 SC4 落空）：复用件的 `DENIED_CLASSES`（`resolved-address-guard.js:52-65`）**故意不含 RFC 1918 / ULA / CGNAT**，注释明写「allow-listing an intranet hostname is legitimate, so those are opt-in via `network.deniedResolvedAddresses`」（`:131` 即该入口）。本 spec 的地址守卫语义要求**拒私网**，因此**适配层必须传入 `deniedResolvedAddresses`**（值域 = RFC 1918 + ULA + CGNAT + 既有的 link-local / loopback / metadata）。这不是可选项，是 SC4 的落地前提；T3 验收须包含该注入。
-- **文件承载纪律**：桥生命周期与新配置键解析各入独立文件；`background/manager.ts`（已 836 行）与 `config/settings.ts`（已 1639 行）只加接线点，不加实现体。
+- Reuse its **matcher and address guard** (`domain-pattern` / `resolved-address-guard` / `address`), **do not reimplement** — but consolidated behind a **single adapter layer** (`src/harness/sandbox/egress/upstream.ts` or a single file at the same site), so version upgrades touch only that file and never leak outward.
+- Reuse the proxy servers too (`http-proxy` / `socks-proxy`); do not rewrite the rejection text (borne by this repo's `filter`-side recording, see Violation feedback channel).
+- **Missing `socat`** is handled per Failure paths (probe + fail-closed + guidance); this spec does not introduce socat distribution (supply-chain cost discussed separately).
+- **Exactly one implementation of the address guard**: reuse sandbox-runtime's `resolved-address-guard`; do **not** write a second private-IP check beside the `network-guard` stack (`docs/CONTEXT.md` declares the two stacks non-interchangeable, but private-IP decision drift is a real risk).
+- **Private-network rejection must be explicitly opt-in** (re-adjudicated evidence, otherwise SC4 falls flat): the reused piece's `DENIED_CLASSES` (`resolved-address-guard.js:52-65`) **deliberately excludes RFC 1918 / ULA / CGNAT**, with a comment stating "allow-listing an intranet hostname is legitimate, so those are opt-in via `network.deniedResolvedAddresses`" (`:131` is that entry). This spec's address-guard semantics require **rejecting private networks**, therefore **the adapter layer must pass `deniedResolvedAddresses`** (value domain = RFC 1918 + ULA + CGNAT + the existing link-local / loopback / metadata). This is not optional but the landing precondition of SC4; T3 acceptance must include that injection.
+- **File-bearing discipline**: the bridge lifecycle and the new configuration-key parsing each go into separate files; `background/manager.ts` (already 836 lines) and `config/settings.ts` (already 1639 lines) gain wiring points only, no implementation bodies.
 
-## Ownership / dispose contract（ACR 非阻断观察：spec 阶段先钉形状）
+## Ownership / dispose contract (ACR non-blocking observation: pin the shape at spec stage)
 
-代理实例三形态，plan 必须落成显式接口（不留给实现即兴）：
+Three shapes of proxy instances; the plan must land them as explicit interfaces (nothing left to implementation improvisation):
 
-| 形态            | 生命周期               | 释放时机               |
-| --------------- | ---------------------- | ---------------------- |
-| 前台 bash 调用  | per-call               | 调用收尾（含异常路径） |
-| background 任务 | per-task，活到任务结束 | 任务终止 / 会话结束    |
-| verify          | 随宿主进程，可复用     | 进程退出               |
+| Shape             | Lifecycle                | Release timing         |
+| ----------------- | ------------------------ | ---------------------- |
+| foreground bash call | per-call              | call closeout (exception paths included) |
+| background task   | per-task, lives to task end | task termination / session end |
+| verify            | with the host process, reusable | process exit         |
 
-三形态共用同一「起桥 → 绑定 socket → 注入环境变量 → 收尾清理」接口；**异常路径必须释放**（泄漏的 socat 进程会成为下一次调用的 stale socket 来源）。
+All three shapes share the "start bridge → bind socket → inject env vars → cleanup" interface; **exception paths must release** (leaked socat processes become the next call's stale-socket source).
 
 ## Open Questions
 
-- background 任务的桥生命周期收口细节（代理进程随任务存活，任务结束如何收口）——`Confirms with human` 已列，plan 阶段定形。
-- 批准流的 ask 文案与既有 `PendingAskView` 三视图（hub / TUI / web）如何整合。
-- `socat` 是否最终改为随包分发（本 spec 按「宿主前置依赖」处理）。
+- The bridge-lifecycle closeout details for background tasks (the proxy process lives with the task; how to close at task end) — listed under `Confirms with human`, shaped in the plan stage.
+- How the approval flow's ask text integrates with the three existing `PendingAskView` views (hub / TUI / web).
+- Whether `socat` ultimately ships with the package (this spec treats it as a "host precondition dependency").
 
 ## Inherits / Changes
 
-- **继承**：`src/harness/sandbox/bwrap.ts` 的 argv 顺序纪律（`.claude/rules/security-boundaries.md`「Sandbox argv」：系统 ro-bind → 用户 bind → `--size`/`--tmpfs` → cwd 重绑 → `--proc`/`--dev-bind` → `--chdir` → `--`）；`fence-tmp` 装配；`network-guard` 六层防线（`web_fetch`/`web_search` 用，不改）；`VIOLATION_PREFIXES` + `categorizeResult` mid-tier 升级挂点（`violation-handling.ts:139`）；`PendingAskView` 追问面（三视图）；`settings.ts` 的「非法值丢弃不抛错」纪律（`:34-43`）。
-- **变更**：ADR-0022 → `superseded by 0097`；ADR-0072 补记 amended；ADR-0097（`proposed`，本 rev 补 socat 前置 / 硬编码拒绝文案 / 深路径导入三项实测事实）；`docs/CONTEXT.md` 三条词条已落。
-- **依赖**：`@anthropic-ai/sandbox-runtime`（Apache-2.0，pin 精确版；其 zod ^3 与项目 zod ^4 嵌套共存，不动项目 zod；lockfile 变更在 commit 正文留引入依据）。
+- **Inherits**: the argv ordering discipline of `src/harness/sandbox/bwrap.ts` (`.claude/rules/security-boundaries.md` "Sandbox argv": system ro-bind → user bind → `--size`/`--tmpfs` → cwd rebind → `--proc`/`--dev-bind` → `--chdir` → `--`); the `fence-tmp` assembly; the six-layer `network-guard` defense line (used by `web_fetch`/`web_search`, unchanged); `VIOLATION_PREFIXES` + the `categorizeResult` mid-tier upgrade hook (`violation-handling.ts:139`); the `PendingAskView` follow-up-question surface (three views); the `settings.ts` "illegal values dropped without throwing" discipline (`:34-43`).
+- **Changes**: ADR-0022 → `superseded by 0097`; an amended addendum to ADR-0072; ADR-0097 (`proposed`; this rev adds the three measured facts: the socat precondition / hard-coded rejection text / deep-path imports); the three `docs/CONTEXT.md` entries already landed.
+- **Dependency**: `@anthropic-ai/sandbox-runtime` (Apache-2.0, exact version pinned; its zod ^3 coexists nested with the project's zod ^4, project zod untouched; the lockfile change carries its introduction justification in the commit body).
 
 ## Evidence pointers
 
-- 代理拒绝文案硬编码：`@anthropic-ai/sandbox-runtime/dist/sandbox/http-proxy.js:10-13`（`ALLOWLIST_DENY`）、`:236-239`、`:458`。
-- 三类信号实测（2026-09-16 spike）：未命中 → `403 + X-Proxy-Error: blocked-by-allowlist`；命中但上游死 → `502`；畸形 → `400`；空行 → 连接关闭；超长行（8 KB host）→ 403 不崩。
-- 域匹配语义实测：`*.example.com` 匹配 `api.example.com` / `a.b.example.com`，**不**匹配 apex；`evilexample.com` / `example.com.evil.com` 不匹配（后缀锚定正确）；大小写不敏感；尾部点**不**归一。
-- 端口解析实测：`:0` / `:65536` / `:99999` / `:abc` / `:` / `:-1` **不抛错**，原样成为永不匹配的 hostname pattern（→ 本 spec 要求配置层拒绝，不透传）。
-- socat 前置：`linux-sandbox-utils.js:437-438`（`socat not installed`）、`:472`（`initializeLinuxNetworkBridge`）；本机 `which socat` = 无；包 `vendor/` 无 socat。
-- 死码锚点：`src/harness/sandbox/network-policy.ts:4`、`bwrap.ts:220-224`（`void opts.networkPolicy`）、`src/harness/sandbox/network-policy.ts:30`（`createNetworkPolicy`，零生产 caller）。
-- 回灌形状：`src/harness/aci/tools/bash.ts:314-326`（`{code,stdout,stderr}` + `meta` 旁路）；tier 挂点：`src/harness/sandbox/violation-handling.ts:139`。
-- 项目层丢弃纪律：`src/config/settings.ts:34-43`、`:1124-1145`（`parseIsolation`）。
+- Hard-coded proxy rejection text: `@anthropic-ai/sandbox-runtime/dist/sandbox/http-proxy.js:10-13` (`ALLOWLIST_DENY`), `:236-239`, `:458`.
+- Three signal classes measured (2026-09-16 spike): allowlist miss → `403 + X-Proxy-Error: blocked-by-allowlist`; admitted but upstream dead → `502`; malformed → `400`; empty line → connection closed; over-long line (8 KB host) → 403 without crashing.
+- Domain-matching semantics measured: `*.example.com` matches `api.example.com` / `a.b.example.com`, does **not** match the apex; `evilexample.com` / `example.com.evil.com` do not match (suffix anchoring correct); case insensitive; trailing dot **not** normalized.
+- Port parsing measured: `:0` / `:65536` / `:99999` / `:abc` / `:` / `:-1` **do not throw**; they become never-matching hostname patterns as-is (→ this spec requires the configuration layer to reject them, not pass them through).
+- socat precondition: `linux-sandbox-utils.js:437-438` (`socat not installed`), `:472` (`initializeLinuxNetworkBridge`); this machine's `which socat` = none; the package `vendor/` has no socat.
+- Dead-code anchors: `src/harness/sandbox/network-policy.ts:4`, `bwrap.ts:220-224` (`void opts.networkPolicy`), `src/harness/sandbox/network-policy.ts:30` (`createNetworkPolicy`, zero production callers).
+- Feedback shape: `src/harness/aci/tools/bash.ts:314-326` (`{code,stdout,stderr}` + the `meta` side channel); tier hook: `src/harness/sandbox/violation-handling.ts:139`.
+- Project-layer drop discipline: `src/config/settings.ts:34-43`, `:1124-1145` (`parseIsolation`).

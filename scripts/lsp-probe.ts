@@ -77,7 +77,7 @@ const LANGS = ["typescript", "python", "yaml", "json", "dockerfile"] as const;
 type Lang = (typeof LANGS)[number];
 
 function parseLang(argv: string[]): Lang {
-  // Accept both `--lang=X` and `--lang X`: `npm run probe:lsp -- --lang python`
+  // Accept both `--lang=X` and `--lang X`: `npx tsx scripts/lsp-probe.ts --lang python`
   // passes them as two separate argv entries; direct calls usually use --lang=python.
   const eq = argv.find((a) => a.startsWith("--lang="));
   const raw = eq?.slice("--lang=".length);

@@ -1,223 +1,223 @@
-# Spec: tui-activity-block — TUI 过程块（思考与安静工具共用正文槽）
+# Spec: tui-activity-block — TUI activity blocks (shared body slot for thinking and quiet tools)
 
-> 输入 = `plans/tui-activity-block.md`（ACR 5/5 yes；访谈锁句 8 条；本 worktree 随 plan persist flush 落 `docs/CONTEXT.md`）。
-> 修订 = `plans/tui-activity-block-live-signal.md`（锁句 1–9；supersede「live 安静 = 全 retract」，锁定 **live noise vs live signal** 划分与 `web_search` / `web_fetch` 实卡；本文件 Locked sentences 为现行合同，Live-signal revision 章为修订层）。
-> 修订 2 = `plans/tui-thinking-at-bottom.md`（锁句 1–6；supersede Live-signal revision 锁句 1 的「思考永远画在动作**上面**」，改钉 **live 思考在最底下 / 原地变 `Thought for` / 下沉顺序与时间线一致**）。
-> 范围 = TUI 过程 chrome 按 assistant 消息切成**过程块**；纯派生模块产出块列表，ChatView 只消费；不改 Ctrl+O、不改 `thinkingMs` 落盘、不改 harness 工具形状、不改 web。
-> 落地 = T1 本 spec → T3–T7 实施（TDD）→ code-review → verification-before-completion。
+> Input = `plans/tui-activity-block.md` (ACR 5/5 yes; 8 interview-locked sentences; this worktree flushes `docs/CONTEXT.md` together with the plan persist).
+> Revision = `plans/tui-activity-block-live-signal.md` (locked sentences 1–9; supersedes "live quiet = retract everything", locking in the **live noise vs live signal** split and the `web_search` / `web_fetch` solid cards; the Locked sentences section below is the current contract, the Live-signal revision section is the revision layer).
+> Revision 2 = `plans/tui-thinking-at-bottom.md` (locked sentences 1–6; supersedes Live-signal locked sentence 1's "thinking is always drawn **above** the actions it drives", re-pinning **live thinking at the very bottom / in-place `Thought for` / sink order matching the timeline**).
+> Scope = TUI process chrome is cut into **activity blocks** per assistant message; a pure derivation module produces the block list and ChatView only consumes it; no Ctrl+O changes, no `thinkingMs` persistence changes, no harness tool-shape changes, no web changes.
+> Landing = T1 this spec → T3–T7 implementation (TDD) → code-review → verification-before-completion.
 
 ## Objective
 
-把 TUI 里「一轮一次收敛」的过程 chrome 换成**按 assistant 消息切块**的时态模型：一条消息至多一块过程块，块内只有一行标题 + 一个正文槽，槽在「思考流」与「一行 dim 安静工具预览」之间交接；块按时间追加，中间正文把焊接切开。
+Replace TUI's "one convergence per turn" process chrome with a tense model **cut into blocks per assistant message**: at most one activity block per message, each block holding one title line + one body slot, the slot handing off between "thinking stream" and "one dim quiet-tool preview line"; blocks append chronologically, and intermediate body text breaks the weld.
 
-**用户**：iknow 单用户单项目本机产品；TUI 是主验收面（`npm run dev:tui`）。
+**User**: iknow is a single-user, single-project local product; the TUI is the main acceptance surface (`npm run dev:tui`).
 
-**要建什么**：
+**What to build**:
 
-1. **纯派生模块**（无 React）：`messages + live runs → activity blocks`，块列表是唯一过程 chrome 事实源。
-2. **消费面收敛**：ChatView 消费块列表；旧的双摘要器（live activity group 现在时行 与 unit fold 结束态行）不再对同一批 retract 同时作画。
-3. **槽位交接**：思考仍在流 → 槽归思考；安静工具接手 → 槽归一行 dim 当前预览；安静工具全部结束 → 预览收掉、标题转 `called`。
+1. **Pure derivation module** (no React): `messages + live runs → activity blocks`; the block list is the single source of truth for process chrome.
+2. **Converged consumption**: ChatView consumes the block list; the old dual summarizers (the live-activity-group present-tense line and the unit-fold end-state line) no longer draw the same retract batch simultaneously.
+3. **Slot handoff**: thinking still streaming → slot belongs to thinking; quiet tools take over → slot belongs to the one-line dim current preview; all quiet tools finished → preview retracted, title turns `called`.
 
-**成功形态**：一次真实会话里，思考→安静工具→正文→安静工具的序列在屏上表现为「块标题逐段演化 + 槽位交接」，没有第二套现在时摘要行并行，没有整轮一行 stub。
+**Success shape**: in one real session, the sequence thinking → quiet tools → body → quiet tools appears on screen as "block titles evolving segment by segment + slot handoff", with no second present-tense summary line in parallel and no whole-turn one-line stub.
 
 ## Locked sentences
 
-八句锁句（本切片冻结合同；实施与 review 均以此为准）：
+Eight locked sentences (contract frozen for this slice; implementation and review both defer to them):
 
-1. 一条 assistant 消息至多一块过程块；块按时间追加；禁止把整轮收成一行 stub。
-2. 过程块 = 一行标题 + 一个正文槽；槽同一时刻只归思考流或一行 dim 工具预览。
-3. 仅相邻的「思考 + 安静工具」（中间无正文 / keep / accent / 失败）才把时长与 calling/called 焊在同一标题。
-4. 安静工具仍在跑 → 标题用 `calling`；该块安静工具都结束 → `called`，预览槽收掉。
-5. 思考阶段结束的切点 = 该消息出现 `text_delta` 或 `tool_call_start`（与既有 `thinkingMs` 测量边界一致）；此后思考正文让出槽位，时长留在标题。
-6. keep / accent / 失败仍是块外实卡；安静工具不刷独立标题。
-7. 下一次思考只开新块；已 `called`（或已被正文切开）的块不再改计数。
-8. Ctrl+O 本切片不做。
+1. One assistant message yields at most one activity block; blocks append chronologically; collapsing a whole turn into one stub line is forbidden.
+2. An activity block = one title line + one body slot; at any moment the slot belongs either to the thinking stream or to a one-line dim tool preview.
+3. Only adjacent "thinking + quiet tools" (nothing in between: no body / keep / accent / failure) weld their durations and calling/called counts into the same title.
+4. Quiet tools still running → the title uses `calling`; all quiet tools of the block finished → `called`, preview slot retracted.
+5. The thinking-phase end cut = the message's first `text_delta` or `tool_call_start` (consistent with the existing `thinkingMs` measurement boundary); afterward the thinking text yields the slot and the duration stays in the title.
+6. keep / accent / failure remain solid cards outside blocks; quiet tools never refresh an independent title.
+7. The next thinking only opens a new block; a block already `called` (or already cut by body text) never changes its counts again.
+8. Ctrl+O is not in this slice.
 
 ## Superseded
 
-本合同取代以下三条现行行为（实施时须一并拆除，不留并行路径）：
+This contract supersedes the following three current behaviors (implementation must remove them together, leaving no parallel path):
 
-| 被取代行为                                                | 现行落点                                         | 取代后                                                                  |
-| --------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------- |
-| 整轮 `unit fold` 焊计数                                   | `src/tui/turn-fold-lines.ts`                     | 块标题 = 该消息 `thinkingMs` 的 `Thought for …`，相邻才接 `called` 计数 |
-| `live activity group` 与 `unit fold` 同时画同一批 retract | `src/tui/live-activity-group.ts`                 | 安静工具 live 只进过程块正文槽，settled 只进该块 `called` 计数          |
-| 工具 running 即关思考 panel，且思考行仍可提前出现         | ChatView 互斥闸（`hideThinking` / 整轮 running） | `hideThinking` 只跟**过程块槽位主人**走；已冻 stub 不关下一块的思考槽   |
+| Superseded behavior                                            | Current location                                 | After supersession                                                        |
+| -------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------- |
+| whole-turn `unit fold` welded counts                           | `src/tui/turn-fold-lines.ts`                     | block title = that message's `thinkingMs` as `Thought for …`; `called` counts only when adjacent |
+| `live activity group` and `unit fold` drawing the same retract batch at once | `src/tui/live-activity-group.ts` | live quiet tools only enter the block's body slot; settled only enter that block's `called` counts |
+| tool running closes the thinking panel immediately, and thinking lines may still appear early | ChatView mutual-exclusion gate (`hideThinking` / whole-turn running) | `hideThinking` follows only **the activity block's slot owner**; a frozen stub never closes the next block's thinking slot |
 
-**不授权**（本切片明确排除）：Ctrl+O 展开、改 `thinkingMs` 落盘算法、改 keep / accent / 失败分类表、改 CLI 非 TUI 面、改 web。
+**Not authorized** (explicitly excluded from this slice): Ctrl+O expansion, changing the `thinkingMs` persistence algorithm, changing the keep / accent / failure classification table, changing the non-TUI CLI surface, changing web.
 
-## Live-signal revision（plans/tui-activity-block-live-signal.md 锁句 1–9）
+## Live-signal revision (plans/tui-activity-block-live-signal.md locked sentences 1–9)
 
-修订层取代「live 安静 = 现 retract 整表折进过程块」：**live 谁进过程块** 改问 live noise / live signal 划分（settled 面的 retract 计数不变）。锁定句如下，与上文八句冲突时以本节为准：
+The revision layer supersedes "live quiet = fold the whole current retract table into activity blocks": **what enters a block while live** is now decided by the live noise / live signal split (the settled-side retract counting is unchanged). Locked sentences follow; where they conflict with the eight above, this section wins:
 
-1. 思考永远画在它驱动的那批动作**上面**；该段思考结束（`text_delta` 或任何 `tool_call_start`）后，**原位**变成 `Thought for Ns`，不跳到 tail panel。
-2. 过程块正文槽同一时刻只归：仍在流的思考，或当前一次**噪音**的 dim 预览。有语义工具不占这个槽。
-3. **live noise（实时噪音）** 才进过程块：`grep` / `glob` / `read_file` / 列举与内部查询（`tool_search`、list MCP、多数 LSP 扫、`memory_recall`、`bash_output` 等既有 retract 侦察）。未注册名缺省仍当噪音。
-4. **live signal（实时有语义）** 永不进 `calling`/`called`：既有 keep / accent / 失败，外加 **`web_search` / `web_fetch`**。live 与落定都留一行标题；search/fetch 的查询或 URL 用一行 dim 预览，不摊长文。
-5. 相邻焊接只发生在「思考 + 噪音」之间（中间无正文、无有语义工具、无失败）。`Thought for` 不准焊上 `web_search` 计数。
-6. 仅噪音、无思考：可以只有 `calling`/`called` 行。仅有语义工具、无噪音：只有 `Thought for`（若有秒数）+ 实卡，**不出现**空的 `calling`。
-7. `hideThinking` 只藏已不当槽主的思考正文；不准掐 assistant 正文，不准用「任意 tool running」关下一块思考。
-8. 保留未提交漏计：噪音已进 transcript 但仍 running → 块为 `calling` + 预览；unanchored 按 id 去重。MessageBlocks 只抽掉**噪音**的独立标题，不抽 web_* / keep。
-9. Ctrl+O、思考 peek 行数、改 `thinkingMs` 落盘，本切片不做。
+1. Thinking is always drawn **above** the batch of actions it drives; after that thinking segment ends (`text_delta` or any `tool_call_start`), it turns into `Thought for Ns` **in place**, never jumping to the tail panel.
+2. The block's body slot at any moment belongs only to: still-streaming thinking, or the current **noise** call's dim preview. Signal-bearing tools never take this slot.
+3. Only **live noise** enters activity blocks: `grep` / `glob` / `read_file` / listing and internal queries (`tool_search`, MCP list, most LSP scans, `memory_recall`, `bash_output`, and other existing retract reconnaissance). Unregistered names still default to noise.
+4. **Live signal** never enters `calling`/`called`: existing keep / accent / failure, plus **`web_search` / `web_fetch`**. Both live and settled keep a title line; search/fetch queries or URLs show as a one-line dim preview, never unfurling long text.
+5. Adjacent welding only occurs between "thinking + noise" (no body text, no signal tool, no failure in between). `Thought for` must not weld on `web_search` counts.
+6. Noise only, no thinking: a `calling`/`called` line alone is fine. Signal tools only, no noise: just `Thought for` (if there are seconds) + solid cards; an empty `calling` **never appears**.
+7. `hideThinking` only hides thinking text that no longer owns the slot; it must never cut off assistant body text, and "any tool running" must never close the next block's thinking.
+8. Keep the uncommitted under-count: noise already in the transcript but still running → block is `calling` + preview; unanchored entries dedupe by id. MessageBlocks strips only **noise**'s independent titles, not web_* / keep.
+9. Ctrl+O, thinking peek line counts, changing `thinkingMs` persistence: not in this slice.
 
-| 被取代行为                                             | 现行落点                                 | 取代后                                                      |
-| ------------------------------------------------------ | ---------------------------------------- | ----------------------------------------------------------- |
-| 「live 安静 = 现 retract」整表折进过程块               | 派生把全部 retract 进 `calling`/`called` | 只有 live noise 进块；`web_search` / `web_fetch` 实卡       |
-| `web_search` / `web_fetch` 当 retract 整体收           | `TOOL_SETTLED_CLASS` 内 web_* = retract  | settled 仍 retract 计数口径；live 实卡 + 查询/URL 一行 dim  |
-| `liveThinking: false` / 任意 tool running 关思考 panel | chat-view.tsx（hotfix 临时态）           | 思考槽位主权：只有正文或工具出现才原位收秒；stub 不关下一段 |
+| Superseded behavior                                          | Current location                             | After supersession                                                |
+| ------------------------------------------------------------ | -------------------------------------------- | ----------------------------------------------------------------- |
+| "live quiet = current retract" folding the whole table into activity blocks | derivation puts all retracts into `calling`/`called` | only live noise enters blocks; `web_search` / `web_fetch` stay solid cards |
+| treating `web_search` / `web_fetch` as retract wholesale     | web_* = retract inside `TOOL_SETTLED_CLASS`  | settled still uses the retract counting basis; live keeps solid card + one-line dim query/URL |
+| `liveThinking: false` / any tool running closing the thinking panel | chat-view.tsx (temporary hotfix state)       | thinking-slot sovereignty: only body or tool appearance freezes the seconds in place; a stub never closes the next segment |
 
-**不授权**（修订层排除）：Ctrl+O、思考 peek 行数、改 `thinkingMs` 落盘、给 `read_file` 摊正文、恢复 `web_search` 计数焊进思考标题。
+**Not authorized** (revision-layer exclusions): Ctrl+O, thinking peek line counts, changing `thinkingMs` persistence, unfurling `read_file` bodies, restoring `web_search` count welding into the thinking title.
 
-## Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–6）
+## Thinking-at-bottom revision (plans/tui-thinking-at-bottom.md locked sentences 1–6)
 
-修订层的修订层：**位置合同**改钉「最底下」，其余（live noise / signal 划分、相邻焊接、`hideThinking` 口径、`thinkingMs` 落盘算法）全部继承 Live-signal revision。与上文冲突时以本节为准 —— 唯一被取代的现行锁句是 Live-signal revision 锁句 1 的「思考永远画在它驱动的那批动作**上面**」。
+A revision of the revision layer: the **position contract** is re-pinned to "at the bottom"; everything else (live noise / signal split, adjacent welding, `hideThinking` semantics, `thinkingMs` persistence algorithm) is inherited from the Live-signal revision. Where it conflicts with the above, this section wins — the only current locked sentence superseded here is Live-signal locked sentence 1's "thinking is always drawn **above** the batch of actions it drives".
 
-1. 思考还在流、后面还没有本段已经结束的内容时，`Thinking…` 画在 transcript **最底下**，用户能看见正在流的思考。
-2. 该段思考结束（既有切点：`text_delta` 或任何 `tool_call_start`）后，**就在那一行**变成 `Thought for Ns`；新出现的工具卡或正文追加在它**下面**。不准把还在流的 `Thinking…` 钉在已经画出的工具卡上面。
-3. 下一段思考（通常是工具结果回来后的下一条 assistant）出现在**新的最底下**，低于已经可见的工具。
-4. 落定后的上下顺序与这条时间线相同：`Thought for` → 该段工具 → 下一行 `Thought for` → 下一批工具 → 正文。标题按过程块锚点插进内容顺序，禁止整包甩在消息尾巴。
-5. live noise / live signal、相邻焊接、`hideThinking` 只藏不当槽主的思考正文、`thinkingMs` 仍 per-message 第一段爆发 —— 均继承 Live-signal revision；本切片不改落盘算法。
-6. Ctrl+O、思考 peek 行数产品变更、harness 工具形状、web、CLI 非 TUI，本切片不做。
+1. While thinking is still streaming and nothing already-finished from this segment follows it yet, `Thinking…` is drawn at the very **bottom** of the transcript, so the user sees the thinking in flight.
+2. After that thinking segment ends (existing cut: `text_delta` or any `tool_call_start`), it turns into `Thought for Ns` **on that same line**; newly appearing tool cards or body text append **below** it. A still-streaming `Thinking…` must never be pinned above already-drawn tool cards.
+3. The next thinking segment (usually the next assistant message after tool results return) appears at the **new bottom**, below already-visible tools.
+4. After settling, the vertical order matches this timeline: `Thought for` → that segment's tools → next `Thought for` line → next tool batch → body text. Titles are inserted into content order by activity-block anchors; dumping the whole bundle at the message tail is forbidden.
+5. live noise / live signal, adjacent welding, `hideThinking` only hiding non-slot-owning thinking text, `thinkingMs` still the per-message first burst — all inherited from the Live-signal revision; this slice does not change the persistence algorithm.
+6. Ctrl+O, thinking peek line-count product change, harness tool shapes, web, non-TUI CLI: not in this slice.
 
-| 被取代行为                                         | 现行落点                                                        | 取代后                                                                        |
-| -------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 「live 思考钉在它驱动的那批动作上面」作为钉死题头  | `src/tui/activity-block.ts` `appendLiveBlocks`（思考块先 push） | live 思考画在 transcript 最底下；出现工具后该段原地转 `Thought for`，卡在其下 |
-| 落定标题整包甩在消息尾巴（或全消息块共用一个锚点） | `src/tui/turn-fold-lines.ts` 按 messageIndex 分组               | 标题按过程块锚点（`contentBlockIndex`）插进内容顺序                           |
+| Superseded behavior                                          | Current location                                               | After supersession                                                                    |
+| ------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| "live thinking pinned above the actions it drives" as a nailed headline | `src/tui/activity-block.ts` `appendLiveBlocks` (thinking block pushed first) | live thinking drawn at the transcript bottom; once tools appear the segment turns in place into `Thought for`, with cards below it |
+| settled titles dumped at the message tail (or all blocks of one message sharing one anchor) | `src/tui/turn-fold-lines.ts` grouped by messageIndex           | titles inserted into content order by activity-block anchors (`contentBlockIndex`)     |
 
-**不授权**（本节排除）：Ctrl+O 展开、思考 peek 行数、改 `thinkingMs` 落盘、改 keep / accent / 失败分类表、改 CLI 非 TUI 面、改 web。
+**Not authorized** (this section's exclusions): Ctrl+O expansion, thinking peek line counts, changing `thinkingMs` persistence, changing the keep / accent / failure classification table, changing the non-TUI CLI surface, changing web.
 
 ## Tech Stack
 
-| 项     | 取值                                                   | 备注                            |
-| ------ | ------------------------------------------------------ | ------------------------------- |
-| 语言   | TypeScript（与 harness 一致，5.x ESM）                 | —                               |
-| 渲染   | `@opentui/react` 0.5.1                                 | 既有；本切片不加渲染依赖        |
-| 测试   | vitest（纯派生）+ `$HOME/.bun/bin/bun test tests/tui/` | 既有双跑（`npm test`）          |
-| 新依赖 | 无                                                     | 纯派生 + 消费面收敛，不引第三方 |
+| Item           | Value                                                | Notes                                       |
+| -------------- | ---------------------------------------------------- | ------------------------------------------- |
+| Language       | TypeScript (consistent with harness, 5.x ESM)        | —                                           |
+| Rendering      | `@opentui/react` 0.5.1                               | existing; this slice adds no rendering dependency |
+| Testing        | vitest (pure derivation) + `$HOME/.bun/bin/bun test tests/tui/` | existing dual run (`npm test`)    |
+| New dependencies | none                                               | pure derivation + converged consumption, no third-party imports |
 
 ## Commands
 
 ```bash
-npm test                                    # vitest 全套 + bun test tests/tui/
+npm test                                    # full vitest suite + bun test tests/tui/
 npm run typecheck                           # tsc --noEmit
-npm run lint:s5                             # complexity 硬门（改动集）
-npm run dev:tui                             # 真实 TUI（MCP pty 实测面）
+npm run lint:s5                             # complexity hard gate (changed set)
+npm run dev:tui                             # real TUI (MCP pty acceptance surface)
 ```
 
 ## Project Structure
 
-| 路径                                         | 形态    | 说明                                                           |
-| -------------------------------------------- | ------- | -------------------------------------------------------------- |
-| `src/tui/<activity-block 派生>.ts`           | **新**  | 纯派生：`messages + live runs → 块列表`（无 React、无 IO）     |
-| `src/tui/turn-fold-lines.ts`                 | 改      | 块标题构造收敛到新合同（`Thought for` / `calling` / `called`） |
-| `src/tui/live-activity-group.ts`             | 改      | 退役现在时摘要行；或收薄为槽预览取用                           |
-| `src/tui/turn-activity.ts`                   | 改      | live 工具聚合改喂块列表                                        |
-| `src/tui/chat-view.tsx`                      | 改      | 消费块列表；互斥闸改跟槽位主人                                 |
-| `src/tui/message-blocks.tsx`                 | 改      | 行装配对齐块两态                                               |
-| `src/tui/think-fold.ts` / `thinking-gate.ts` | 改/不动 | 思考折叠判定沿用；`hideThinking` 语义改接槽位主人              |
-| `src/tui/tool-settled.ts`                    | 不动    | keep / accent / retract 分类表本切片不改                       |
-| `tests/tui/*`                                | 改/新   | 旧双摘要器测试改钉新合同；新增派生夹具用例                     |
+| Path                                         | Form          | Notes                                                        |
+| -------------------------------------------- | ------------- | ------------------------------------------------------------ |
+| `src/tui/<activity-block derivation>.ts`     | **new**       | pure derivation: `messages + live runs → block list` (no React, no IO) |
+| `src/tui/turn-fold-lines.ts`                 | change        | block-title construction converges to the new contract (`Thought for` / `calling` / `called`) |
+| `src/tui/live-activity-group.ts`             | change        | retire the present-tense summary line; or thin it to slot-preview sourcing |
+| `src/tui/turn-activity.ts`                   | change        | live tool aggregation feeds the block list instead           |
+| `src/tui/chat-view.tsx`                      | change        | consumes the block list; the mutual-exclusion gate follows the slot owner |
+| `src/tui/message-blocks.tsx`                 | change        | line assembly aligns with the block's two states             |
+| `src/tui/think-fold.ts` / `thinking-gate.ts` | change/keep   | thinking-fold decision retained; `hideThinking` semantics rewired to the slot owner |
+| `src/tui/tool-settled.ts`                    | unchanged     | keep / accent / retract classification table unchanged in this slice |
+| `tests/tui/*`                                | change/new    | old dual-summarizer tests re-pinned to the new contract; new derivation fixture cases |
 
 ## Testing Strategy
 
-| 等级 | 范围                                                                                                                                               | 工具                                     |
-| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Unit | 纯派生块列表：焊 / 切开 / 新消息新块 / `calling` vs `called` / 失败件不进块计数 / keep / accent 块外                                               | vitest                                   |
-| Unit | 槽位交接：思考流→思考正文、安静工具接手→dim 预览、全结束→预览收掉                                                                                  | vitest                                   |
-| Unit | 互斥闸：同一批 retract 不同时出现现在时行与结束态行；已冻 stub 不关下一块思考槽                                                                    | vitest                                   |
-| Unit | 边界：无思考无工具 / 思考后无工具直接正文 / 思考后直接安静工具（无正文）/ 正文夹在思考与安静工具之间                                               | vitest                                   |
-| Unit | 位置合同：仅思考时 live `Thinking…` 在最底下 / 段结束原地转 `Thought for` 且工具在其下 / 第二段思考在已可见工具之下 / 落定标题按锚点插入不进消息尾 | vitest                                   |
-| TUI  | 真实会话：思考→安静工具→正文→安静工具 的屏上序列                                                                                                   | `mcp__aiterm__pty_*` + `npm run dev:tui` |
+| Level | Scope                                                                                                                                        | Tool                                     |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Unit  | pure derivation block list: weld / cut / new message new block / `calling` vs `called` / failure items excluded from block counts / keep / accent outside blocks | vitest |
+| Unit  | slot handoff: thinking stream → thinking text, quiet tools take over → dim preview, all finished → preview retracted                          | vitest                                   |
+| Unit  | mutual-exclusion gate: the same retract batch never shows a present-tense line and an end-state line at once; a frozen stub never closes the next block's thinking slot | vitest |
+| Unit  | boundaries: no thinking no tools / body directly after thinking without tools / quiet tools directly after thinking (no body) / body between thinking and quiet tools | vitest |
+| Unit  | position contract: thinking-only live `Thinking…` at the bottom / segment end turns in place into `Thought for` with tools below it / second thinking segment below already-visible tools / settled titles inserted by anchor, never at message tail | vitest |
+| TUI   | real session: on-screen sequence of thinking → quiet tools → body → quiet tools                                                              | `mcp__aiterm__pty_*` + `npm run dev:tui` |
 
-**`npm test` = 唯一门**：交付门槛 = `npm test` 退出 0 + `npm run typecheck` 退出 0 + `npm run lint:s5` 退出 0。
+**`npm test` = the only gate**: delivery bar = `npm test` exit 0 + `npm run typecheck` exit 0 + `npm run lint:s5` exit 0.
 
 ## Boundaries
 
 ### Always
 
-- 过程块是 TUI 显示面的派生：不改 harness 工具形状、不改 session transcript、不改 `thinkingMs` 落盘、不改 web。
-- `docs/CONTEXT.md` 只经 `domain-modeling` 写入（`pre-context-write-guard` hook 守卫）；本 spec 引用词条，不重定义。
-- 失败件（failure overlay）横切：不进过程块计数、不占 dim 预览槽。
-- `thinkingMs` 仍 per-message；块时长 = 该条消息的 `thinkingMs`，不跨消息求和。
+- Activity blocks are a derivation of the TUI display surface: do not change harness tool shapes, the session transcript, `thinkingMs` persistence, or web.
+- `docs/CONTEXT.md` is only written via `domain-modeling` (guarded by the `pre-context-write-guard` hook); this spec references entries, never redefines them.
+- Failure items (failure overlay) cut across: never enter activity-block counts, never take the dim preview slot.
+- `thinkingMs` stays per-message; block duration = that message's `thinkingMs`, never summed across messages.
 
 ### Ask first
 
-- 删除 `live-activity-group.ts` 文件本体（vs 收薄保留）——影响面超出显示面时先问。
-- 旧测试的**归档**（vs 改钉新合同）——按 test.md「先评估认证目标」判据，命中「不变式已永久消失」才归档。
+- Deleting the `live-activity-group.ts` file itself (vs thinning it in place) — ask first if the blast radius exceeds the display surface.
+- **Archiving** old tests (vs re-pinning them to the new contract) — apply test.md's "assess what the test certifies first" criterion; archive only when "the invariant has permanently disappeared".
 
 ### Never
 
-- 不做 Ctrl+O 展开（本切片）。
-- 不改 keep / accent / 失败分类表。
-- 不把失败吞成 `called`（静默降级）。
-- 不加第二套摘要器（禁止第三套时态）。
+- No Ctrl+O expansion (this slice).
+- Do not change the keep / accent / failure classification table.
+- Do not swallow failures into `called` (silent degradation).
+- Do not add a second summarizer (a third tense is forbidden).
 
 ## Success Criteria
 
-| #   | Criterion                     | Check                                                                                    |
-| --- | ----------------------------- | ---------------------------------------------------------------------------------------- |
-| S1  | 块列表纯派生可单测            | 无 React import 的派生模块导出块列表函数；vitest 直接调                                  |
-| S2  | 焊成立（思考 + 相邻安静工具） | 夹具：思考后直接安静工具 → 标题含 `Thought for` + `calling`                              |
-| S3  | 切开成立（中间有正文）        | 夹具：思考→正文→安静工具 → `Thought for` / 正文 / `called name × N` 三段分离             |
-| S4  | `calling` → `called` 转移     | 夹具：安静工具 running → 标题 `calling`；全结束 → `called` 且预览收掉                    |
-| S5  | 新消息开新块                  | 夹具：两条 assistant → 两块；第二条不改第一块计数                                        |
-| S6  | 失败件不进块计数              | 夹具：失败安静工具 → 块计数不含它；仍走 failure overlay                                  |
-| S7  | keep / accent 仍块外实卡      | 夹具：keep 工具 → 不焊进块标题；accent 同理                                              |
-| S8  | 双摘要器不再叠画              | 夹具：同一批 retract 不同时产出「现在时行」与「结束态行」                                |
-| S9  | 槽位交接：思考让位            | 夹具：思考流中出现 `text_delta` / `tool_call_start` → 思考正文离开槽位、时长留标题       |
-| S10 | 边界四类覆盖                  | 夹具：无思考无工具 / 思考后直接正文 / 思考后直接安静工具 / 正文夹在思考与安静工具之间    |
-| S11 | `hideThinking` 只跟槽位主人   | 夹具：已冻 stub 不影响下一块思考槽开合                                                   |
-| S12 | 主路径全绿                    | `npm test` 退出 0；`npm run typecheck` 退出 0；`npm run lint:s5` 退出 0                  |
-| S13 | 真实 TUI 实测                 | MCP pty 起 `npm run dev:tui`，注入 prompt，读屏验证过程块序列                            |
-| S14 | live 思考在最底下             | 夹具：仅思考在流 → `Thinking…` 是 tail 的最末块，其后无已画工具卡                        |
-| S15 | 落定原地转 `Thought for`      | 夹具：该段出现 `tool_call_start` → 同一锚点变 `Thought for Ns`，工具卡在其下             |
-| S16 | 第二段思考在新底              | 夹具：第一条 assistant 的工具卡已可见 → 第二条的 live 思考排在这些卡之后                 |
-| S17 | 标题按锚点插入                | 夹具：一封消息思考→`web_search`→正文 → 屏序 `Thought for` → search 卡 → 正文，无尾部折行 |
+| #   | Criterion                                | Check                                                                                     |
+| --- | ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| S1  | Block list unit-testable as pure derivation | a derivation module with no React import exports the block-list function; vitest calls it directly |
+| S2  | Weld holds (thinking + adjacent quiet tools) | fixture: quiet tools directly after thinking → title contains `Thought for` + `calling`   |
+| S3  | Cut holds (body in between)              | fixture: thinking → body → quiet tools → `Thought for` / body / `called name × N` as three separate segments |
+| S4  | `calling` → `called` transition          | fixture: quiet tools running → title `calling`; all finished → `called` and preview retracted |
+| S5  | New message opens new block              | fixture: two assistant messages → two blocks; the second never changes the first's counts |
+| S6  | Failure items excluded from block counts | fixture: failed quiet tool → block counts exclude it; still goes to the failure overlay   |
+| S7  | keep / accent remain solid cards outside blocks | fixture: keep tool → not welded into the block title; accent likewise                     |
+| S8  | No stacked dual summarizers              | fixture: one retract batch never yields both a "present-tense line" and an "end-state line" |
+| S9  | Slot handoff: thinking yields            | fixture: `text_delta` / `tool_call_start` during the thinking stream → thinking text leaves the slot, duration stays in the title |
+| S10 | Four boundary classes covered            | fixture: no thinking no tools / thinking then body directly / thinking then quiet tools directly / body between thinking and quiet tools |
+| S11 | `hideThinking` follows only the slot owner | fixture: a frozen stub never affects the next block's thinking-slot open/close            |
+| S12 | Main path all green                      | `npm test` exit 0; `npm run typecheck` exit 0; `npm run lint:s5` exit 0                   |
+| S13 | Real TUI measured                        | MCP pty starts `npm run dev:tui`, inject a prompt, read the screen to verify the activity-block sequence |
+| S14 | live thinking at the bottom              | fixture: thinking-only in flight → `Thinking…` is the tail's last block, with no already-drawn tool card after it |
+| S15 | Settled turns into `Thought for` in place | fixture: the segment's `tool_call_start` → the same anchor becomes `Thought for Ns`, tool cards below it |
+| S16 | Second thinking at the new bottom        | fixture: first assistant's tool cards already visible → the second message's live thinking ordered after those cards |
+| S17 | Titles inserted by anchor                | fixture: one message thinking → `web_search` → body → screen order `Thought for` → search card → body, no tail fold line |
 
 ## Open Questions
 
-本期不答（范围外，仅声明不静默）：
+Not answered this cycle (out of scope, declared rather than silent):
 
-- **Ctrl+O 展开过程块**：本切片不做；触发时机 = 过程块时态稳定后（下一票）。
-- **`live-activity-group.ts` 的去留形态**：文件删除 or 收薄为槽预览取用，实施时按依赖面决定（见 Boundaries Ask first）。
-- **块与块的视觉间距 / 折叠符**：属设计细节，本切片只钉时态与文本合同。
+- **Ctrl+O expansion of activity blocks**: not in this slice; trigger timing = once block tenses stabilize (next ticket).
+- **The fate of `live-activity-group.ts`**: file deletion vs thinning to slot-preview sourcing, decided at implementation by the dependency surface (see Boundaries Ask first).
+- **Visual spacing / fold glyph between blocks**: design detail; this slice only pins the tense and text contracts.
 
 ## Glossary
 
-> 来自 `docs/CONTEXT.md`（spec 引用，不重定义）。
+> From `docs/CONTEXT.md` (referenced by the spec, never redefined).
 
-- **activity block**：TUI 对齐一条 assistant 消息的过程 chrome——一行标题加一个 **body slot**，live 与 settled 两态。块按消息追加，不把整轮收成一行。
-- **body slot**：过程块里唯一给正文的位置。思考仍在流时归思考；安静工具接手后归一行 dim `⎿` 当前预览。二者不同时占槽。
-- **adjacent weld**：仅当思考与安静工具之间没有正文、keep、accent、失败时，标题才写成 `Thought for …, calling/called …`。
-- **retract class（收 / 安静工具）**：不占脚印卡的工具类（读取 / 搜索 / 查询）。live 只进过程块正文槽；settled 只进该块 `called` 计数。
-- **keep class / accent class / failure overlay**：分别为落定留标题的工作类、点名着色类、失败横切（三者本切片都不改）。
-- **thinking duration**：assistant 消息的落盘属性 `thinkingMs`（adapter 流式路径测量）；过程块时长 = 该条消息的 `thinkingMs`，不跨消息求和。
-- **unit fold / live activity group / open unit / live tool line**：本切片改写的词条（见 `docs/CONTEXT.md` 现行定义）。
+- **activity block**: TUI process chrome aligned to one assistant message — one title line plus one **body slot**, with live and settled states. Blocks append per message; never collapse a whole turn into one line.
+- **body slot**: the block's only slot for body content. Thinking owns it while still in flight; after quiet tools take over it holds a one-line dim `⎿` current preview. The two never own it simultaneously.
+- **adjacent weld**: only when nothing sits between thinking and quiet tools — no body, keep, accent, failure — may the title be written as `Thought for …, calling/called …`.
+- **retract class (quiet tools)**: the tool class that takes no footprint card (reads / searches / queries). Live only enters the block's body slot; settled only enters that block's `called` counts.
+- **keep class / accent class / failure overlay**: respectively the work class that keeps a title when settled, the named colorization class, and the cross-cutting failure (none changed in this slice).
+- **thinking duration**: the persisted attribute `thinkingMs` of an assistant message (measured on the adapter streaming path); block duration = that message's `thinkingMs`, not summed across messages.
+- **unit fold / live activity group / open unit / live tool line**: entries rewritten by this slice (see their current definitions in `docs/CONTEXT.md`).
 
 ## Architectural Constraints
 
-| ADR / 规则                                | 引用形式                                            |
-| ----------------------------------------- | --------------------------------------------------- |
-| `.claude/rules/code-quality.md`（SSOT）   | 块列表单一权威来源；ChatView 只消费不重算           |
-| `.claude/rules/test.md`（TUI 实测地面）   | 进会话的改动必须 `npm test` + MCP pty 真实 TUI 读屏 |
-| S5 complexity 硬门（cyc ≤ 10 / nest ≤ 4） | 派生模块纯函数化，失败分类不膨胀；`lint:s5` 退出 0  |
+| ADR / rule                                      | Citation form                                          |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| `.claude/rules/code-quality.md` (SSOT)          | block list as the single source of truth; ChatView consumes only, never recomputes |
+| `.claude/rules/test.md` (TUI real-ground acceptance) | changes reaching a session must run `npm test` + MCP pty real TUI screen reads |
+| S5 complexity hard gate (cyc ≤ 10 / nest ≤ 4)   | pure-functional derivation module, failure classification never inflates; `lint:s5` exit 0 |
 
-## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
+## ACR Verdict (architecture-change-reviewer · 5-verdict gate)
 
-> 来自 `plans/tui-activity-block.md`（该 plan 已含 ACR 段；此处照录）。
+> From `plans/tui-activity-block.md` (that plan already contains the ACR section; transcribed here as recorded).
 
 ```text
-bounded-context-guardian: yes — chrome 只留在 tui 显示面；不改 harness 工具形状、不改 session transcript / thinkingMs 落盘、不改 web。
-input-contract-tests: yes — 无思考无工具；思考后无工具直接正文；思考后直接安静工具（无正文）；正文夹在思考与安静工具之间；失败安静工具走 failure overlay 不进 stub；下一条 assistant 新块（并发 live 与已冻 stub 并存）。
-error-handling-enforcer: yes — failure overlay 横切不进过程块计数；派生拒绝画块时 `// EXIT:`；不把失败吞成 `called`。
-complexity-anti-drift: yes — 一块两态由纯派生模块产出，ChatView 只消费；禁止再叠第三套摘要器；不把 Listing/Reading/Searching 与 Thought for 并行保留。
-minimal-change-verifier: yes — 一任务 = 过程块时态；不改 Ctrl+O、不改 CLI 非 TUI 面、不改 TOOL_SETTLED_CLASS 的 keep/accent 名单（安静 = 现 retract）。
+bounded-context-guardian: yes — chrome stays only in the tui display surface; harness tool shapes unchanged, session transcript / thinkingMs persistence unchanged, web unchanged.
+input-contract-tests: yes — no thinking no tools; body directly after thinking with no tools; quiet tools directly after thinking (no body); body between thinking and quiet tools; failed quiet tools go to the failure overlay and not into the stub; the next assistant opens a new block (concurrent live and frozen stub coexist).
+error-handling-enforcer: yes — the failure overlay cuts across and never enters activity-block counts; when derivation refuses to draw a block, `// EXIT:`; failures are never swallowed into `called`.
+complexity-anti-drift: yes — one block, two states, produced by the pure derivation module; ChatView only consumes; a third stacked summarizer is forbidden; Listing/Reading/Searching must not remain in parallel with Thought for.
+minimal-change-verifier: yes — one task = activity-block tenses; no Ctrl+O changes, no changes to the non-TUI CLI surface, no changes to TOOL_SETTLED_CLASS's keep/accent lists (quiet = current retract).
 ```
 
-**Gate 结果：5/5 yes，hand to implementation。**
+**Gate result: 5/5 yes, hand to implementation.**
 
 - affects: docs/CONTEXT.md
-- affects: specs/tui-activity-block.md (新)
-- affects: src/tui/<activity-block 派生>.ts (新)
+- affects: specs/tui-activity-block.md (new)
+- affects: src/tui/<activity-block derivation>.ts (new)
 - affects: src/tui/turn-fold-lines.ts
 - affects: src/tui/live-activity-group.ts
 - affects: src/tui/turn-activity.ts

@@ -1,85 +1,86 @@
-# Spec: 251-lsp-tool — ACI LSP 工具（代码跳转 · TS 首期 · 自建客户端）
+# Spec: 251-lsp-tool — ACI LSP tools (code navigation · TS first phase · self-built client)
 
-> 输入 = [map #245 Decisions so far](https://github.com/winter6205/iknow/issues/245)（#246/#247/#248/#249/#250 已 close）+ #251（本票）复核决议。
-> 范围 = ACI 工具层加 10 件 LSP 工具（9 operation + `lsp_diagnostics`），自建 LSP 客户端，TS 单语言首期。
-> 落地 = spec → ACR → writing-plans，本 spec 不含实施代码。
+> Input = [map #245 Decisions so far](https://github.com/winter6205/iknow/issues/245) (#246/#247/#248/#249/#250 already closed) + #251 (this ticket) review decisions.
+> Scope = add 10 LSP tools to the ACI tool layer (9 operation + `lsp_diagnostics`), self-built LSP client, TS single-language first phase.
+> Delivery = spec → ACR → writing-plans; this spec contains no implementation code.
 
 ## Objective
 
-给 iknow harness 增加 **ACI LSP 工具（代码跳转）**，供 agent 在 loop 内做符号定位。这是 map #220「8 件之后首批新工具」的 LSP 分支，也是 spec 224 扩展通路（tool_search/lazy/discover）实施后的**第一波真实住客**。
+Add **ACI LSP tools (code navigation)** to the iknow harness so the agent can do symbol lookup inside the loop. This is the LSP branch of map #220 "first batch of new tools after the 8", and the **first real tenants** after the spec 224 extension pathway (tool_search/lazy/discover) is implemented.
 
-**用户**：iknow 单用户单项目本机产品；CLI `chat` / `ask` / TUI / `serve` 四个入口共享同一份 ACI registry（`build-engine.ts` SSOT）。
+**Users**: iknow is a single-user, single-project, local product; the four entry points CLI `chat` / `ask` / TUI / `serve` share one ACI registry (`build-engine.ts` SSOT).
 
-**要建什么**：
+**What to build**:
 
-1. **自建 LSP 客户端**——`src/harness/lsp/` 新目录，TS 单语言首期。
-2. **LSP 工具 append**（11 → 21 件 ACI 工具，10 件新增）：
-   - 9 件 operation 工具：`lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_document_symbol` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls`（#248 B 档决议；shared position schema）
-   - `lsp_diagnostics` 独立顶层工具（#250 决议，不在 9 件内）
-   - > **计数勘误（2026-08-08 实施确认）**：早期草稿写「9 件 = 8 operation + lsp_diagnostics」且「11 → 20」，但 operation 清单实际列出 9 个名字。实施按清单全量导出 9 operation + lsp_diagnostics = 10 件，总量 11 → 21。S1/S4/S5/Glossary/ADR-0004 引用已同步为 9 件 operation / 21 件总量。
-3. **引擎内部联动**：`edit_file` 成功后自动给 tsserver 发 invalidation，agent 无需感知（Q2 决议）。
+1. **Self-built LSP client** — new directory `src/harness/lsp/`, TS single-language first phase.
+2. **LSP tools append** (11 → 21 ACI tools, 10 new):
+   - 9 operation tools: `lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_document_symbol` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls` (#248 tier-B decision; shared position schema)
+   - `lsp_diagnostics` as an independent top-level tool (#250 decision, not among the 9)
+   - > **Count correction (confirmed at implementation, 2026-08-08)**: early drafts wrote "9 = 8 operation + lsp_diagnostics" and "11 → 20", but the operation list actually enumerated 9 names. Implementation exports all 9 operation + lsp_diagnostics = 10 tools per the list, total 11 → 21. S1/S4/S5/Glossary/ADR-0004 references are synced to 9 operation tools / 21 total.
+3. **Engine-internal linkage**: after `edit_file` succeeds, automatically send invalidation to tsserver; the agent need not be aware (Q2 decision).
 
-**成功形态**：agent 在 loop 内可对 TS/JS 文件做符号定位（定义跳转/找引用/悬停/大纲/实现/调用图/诊断拉取），tsserver 常驻复用消除 cold start，`permission/` 零改动，9 件全走契约 X/Y1。
+**Success shape**: the agent can do symbol lookup on TS/JS files inside the loop (go-to-definition / find references / hover / outline / implementation / call graph / diagnostics pull), tsserver stays resident and is reused to eliminate cold start, `permission/` has zero changes, and all 9 tools follow contracts X/Y1.
 
 ## Tech Stack
 
-| 项             | 取值                                            | 备注                                                                                               |
-| -------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| 语言           | TypeScript（与 harness 一致，5.x ESM）          | —                                                                                                  |
-| 运行时         | Node.js                                         | —                                                                                                  |
-| LSP 客户端底层 | `vscode-jsonrpc`（`node` 入口）                 | **新增依赖**；提供 requestId/响应路由/cancel 协议层（Q1/Q3 决议）                                  |
-| LSP 翻译层     | `typescript-language-server`                    | **新增依赖**（项目 devDependencies）；保留翻译层 + `tsserver.path` 本地化（#247 Q1 REJECT 自写桥） |
-| TS 内核        | `typescript`（已依赖 5.9.3）                    | tsserver = `typescript/lib/tsserver.js`（零额外 dep）                                              |
-| 进程管理       | `child_process.spawn`                           | 标准库                                                                                             |
-| 测试           | vitest                                          | `npm test`                                                                                         |
-| 新依赖         | `vscode-jsonrpc` + `typescript-language-server` | LSP 路径核心依赖，**不守** spec 224 的零新依赖守门（#251 票 Ask first 已列）                       |
+| Item                    | Value                                             | Notes                                                                                             |
+| ----------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Language                | TypeScript (consistent with harness, 5.x ESM)     | —                                                                                                 |
+| Runtime                 | Node.js                                           | —                                                                                                 |
+| LSP client substrate    | `vscode-jsonrpc` (`node` entry)                   | **New dependency**; provides requestId/response-routing/cancel protocol layer (Q1/Q3 decisions)   |
+| LSP translation layer   | `typescript-language-server`                      | **New dependency** (project devDependencies); keep translation layer + `tsserver.path` localization (#247 Q1 REJECT of hand-written bridge) |
+| TS kernel               | `typescript` (already depended on, 5.9.3)         | tsserver = `typescript/lib/tsserver.js` (zero extra dep)                                          |
+| Process management      | `child_process.spawn`                             | standard library                                                                                  |
+| Testing                 | vitest                                            | `npm test`                                                                                        |
+| New dependencies        | `vscode-jsonrpc` + `typescript-language-server`   | core LSP-path dependencies, **exempt from** spec 224's zero-new-dependency gate (#251 ticket's Ask first already lists them) |
 
 ## Commands
 
 ```bash
 # Build
-npm run typecheck       # 入口文件类型校验
+npm run typecheck       # type check of entry files
 
-# Test（产品主路径）
+# Test (main product path)
 npm test                # vitest: unit + harness + integration
 
 # Lint
-npm run lint            # 项目根 lint 入口
+npm run lint            # project-root lint entry
 
-# LSP 探针（真实 tsserver 烟测）
-npm run probe:lsp       # 脚本化 spawn tsserver + 9 operation 烟测（对照 sandbox-probe.ts）
+# LSP probe (real tsserver smoke test)
+npx tsx scripts/lsp-probe.ts       # scripted spawn of tsserver + 9-operation smoke test (modeled on sandbox-probe.ts)
 ```
 
 ## Project Structure
 
-新增 / 改动点：
+New / changed points:
 
-| 路径                                   | 形态        | 角色                                                                                                                                                                                                                  |
-| -------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/harness/lsp/`                     | **新目录**  | LSP 客户端层                                                                                                                                                                                                          |
-| `src/harness/lsp/server.ts`            | **新**      | LSP server 声明（`Info` 类型 + TS 单语言：`id`/`extensions`/`root`/`spawn`），保留扁平结构（#247 Q2 决议不拆）；`NearestRoot`（#247 Q6 决议保留，TS lockfile pattern + deno.json exclude，上界 stop=`ctx.directory`） |
-| `src/harness/lsp/client.ts`            | **新**      | JSON-RPC over stdio（`vscode-jsonrpc/node`）；`getClient(root,id)` 缓存 + broken + inflight 三件套（Q1/Q8 决议）                                                                                                      |
-| `src/harness/lsp/notifier.ts`          | **新**      | edit_file 联动：`invalidate(file)` 给 tsserver 发 `workspace/xrefs`（Q2/A13 决议）                                                                                                                                    |
-| `src/harness/aci/tools/lsp.ts`         | **新**      | 10 件 LSP 工具工厂（9 operation + `lsp_diagnostics`）；handler 极薄（Q3 决议）                                                                                                                                        |
-| `src/harness/aci/tools/registry.ts`    | 改动        | `ACI_TOOLSET_NAMES` append 9 件；`createDefaultAciRegistry` 注册；`CreateDefaultAciRegistryOptions` 加可选 `onEdit` 透传给 `createEditFileTool`                                                                       |
-| `src/harness/aci/tools/edit-file.ts`   | 改动        | 工厂签名扩参：`createEditFileTool(root, opts?: { onEdit?: (file: string) => void })`；handler 成功路径 `opts.onEdit?.(absPath)`；handler 返回仍是纯字符串（守契约 Y1）（Q2/A13 决议）                                 |
-| `src/harness/build-engine.ts`          | 改动        | 装配 `lsp` 工具集 + 构造 `notifier.invalidate` 作为 `onEdit` 透传给 `createDefaultAciRegistry`                                                                                                                        |
-| `src/harness/permission/`              | **不动**    | 零改动（#249 决议）                                                                                                                                                                                                   |
-| `src/harness/aci/tools/tool-search.ts` | **不动**    | 保持现状（lsp 不与 tool_search 同名）                                                                                                                                                                                 |
-| `tests/harness/lsp/client.test.ts`     | **新**      | vscode-jsonrpc mock：requestId/响应路由/cancel                                                                                                                                                                        |
-| `tests/harness/aci/lsp.test.ts`        | **新**      | 9 件 handler 单测：输入校验/无匹配/共享 schema                                                                                                                                                                        |
-| `tests/harness/aci/registry.test.ts`   | 改          | `ACI_TOOLSET_NAMES` 锁 21 件                                                                                                                                                                                          |
-| `scripts/lsp-probe.ts`                 | **新**      | 真实 tsserver 烟测：spawn + 9 operation + diagnostics                                                                                                                                                                 |
-| `specs/251-lsp-tool.md`                | **本 spec** | —                                                                                                                                                                                                                     |
+| Path                                   | Form          | Role                                                                                                                                                                                                                  |
+| -------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/harness/lsp/`                     | **New dir**   | LSP client layer                                                                                                                                                                                                      |
+| `src/harness/lsp/server.ts`            | **New**       | LSP server declaration (`Info` type + TS single-language: `id`/`extensions`/`root`/`spawn`), keeping the flat structure (#247 Q2 decision: no split); `NearestRoot` (#247 Q6 decision: keep; TS lockfile pattern + deno.json exclude, upper bound stop=`ctx.directory`) |
+| `src/harness/lsp/client.ts`            | **New**       | JSON-RPC over stdio (`vscode-jsonrpc/node`); `getClient(root,id)` with the caching + broken + inflight triple (Q1/Q8 decisions)                                                                                       |
+| `src/harness/lsp/notifier.ts`          | **New**       | edit_file linkage: `invalidate(file)` sends `workspace/xrefs` to tsserver (Q2/A13 decision)                                                                                                                           |
+| `src/harness/aci/tools/lsp.ts`         | **New**       | factory for the 10 LSP tools (9 operation + `lsp_diagnostics`); handlers kept very thin (Q3 decision)                                                                                                                |
+| `src/harness/aci/tools/registry.ts`    | Modified      | `ACI_TOOLSET_NAMES` appends the 9 tools; `createDefaultAciRegistry` registers them; `CreateDefaultAciRegistryOptions` gains optional `onEdit` passed through to `createEditFileTool`                                   |
+| `src/harness/aci/tools/edit-file.ts`   | Modified      | factory signature widened: `createEditFileTool(root, opts?: { onEdit?: (file: string) => void })`; on the handler success path `opts.onEdit?.(absPath)`; handler return stays a plain string (upholds contract Y1) (Q2/A13 decision) |
+| `src/harness/build-engine.ts`          | Modified      | assembles the `lsp` toolset + constructs `notifier.invalidate` as `onEdit` passed through to `createDefaultAciRegistry`                                                                                               |
+| `src/harness/permission/`              | **Untouched** | zero changes (#249 decision)                                                                                                                                                                                          |
+| `src/harness/aci/tools/tool-search.ts` | **Untouched** | keep as-is (lsp does not collide with tool_search names)                                                                                                                                                              |
+| `tests/harness/lsp/client.test.ts`     | **New**       | vscode-jsonrpc mock: requestId/response-routing/cancel                                                                                                                                                                |
+| `tests/harness/aci/lsp.test.ts`        | **New**       | unit tests for the 9 handlers: input validation / no match / shared schema                                                                                                                                            |
+| `tests/harness/aci/registry.test.ts`   | Modified      | `ACI_TOOLSET_NAMES` locked at 21 tools                                                                                                                                                                                |
+| `scripts/lsp-probe.ts`                 | **New**       | real tsserver smoke test: spawn + 9 operations + diagnostics                                                                                                                                                          |
+| `specs/251-lsp-tool.md`                | **This spec** | —                                                                                                                                                                                                                     |
 
 ## Code Style
 
-### `server.ts` — 扁平 `Info` 声明 + NearestRoot
+### `server.ts` — flat `Info` declaration + NearestRoot
 
 ```ts
-// NearestRoot（#247 Q6：保留，不砍）。从 path.dirname(file) 向上找第一个
-// 含 lockfile 的祖先当 root，exclude deno.json；找不到回 ctx.directory。
-// 上界 stop=ctx.directory 防止跨出工作目录。
+// NearestRoot (#247 Q6: keep, do not cut). Walk up from path.dirname(file)
+// to find the first ancestor containing a lockfile as root, excluding deno.json;
+// fall back to ctx.directory if none found.
+// Upper bound stop=ctx.directory prevents escaping the working directory.
 const TS_LOCKFILES = [
   "package-lock.json",
   "bun.lockb",
@@ -107,14 +108,14 @@ export const Typescript: Info = {
 };
 ```
 
-### `client.ts` — `getClient()` 三件套缓存
+### `client.ts` — `getClient()` triple cache
 
 ```ts
-// #247 Q8：复用三件套（root+id 缓存 / broken 记忆 / inflight 去重）
-// iknow 没有 InstanceContext；ctx 由 lsp 模块自己持有 {directory, root}，
-// build-engine 装配时把 process.cwd() 作为 directory 透入。
+// #247 Q8: reuse triple (root+id cache / broken memory / inflight dedup)
+// iknow has no InstanceContext; the lsp module holds its own ctx {directory, root},
+// and build-engine passes process.cwd() in as directory at assembly time.
 export interface LspCtx {
-  readonly directory: string; // 上界 stop（NearestRoot 不允许跨出）
+  readonly directory: string; // upper bound stop (NearestRoot must not escape it)
 }
 
 const clients = new Map<string, LspClient>();
@@ -125,13 +126,13 @@ export async function getClient(
   file: string,
   ctx: LspCtx
 ): Promise<LspClient | undefined> {
-  const server = Typescript; // TS 单语言首期
+  const server = Typescript; // TS single-language first phase
   const root = await server.root(file, ctx);
   if (!root) return undefined;
   const key = `${root}:${server.id}`;
   if (broken.has(key)) return undefined;
   if (clients.has(key)) return clients.get(key);
-  if (inflight.has(key)) return inflight.get(key); // 并发去重：共享一次 spawn
+  if (inflight.has(key)) return inflight.get(key); // concurrent dedup: share one spawn
 
   const task = spawnClient(server, root, ctx)
     .then((c) => (c ? (clients.set(key, c), c) : (broken.add(key), undefined)))
@@ -141,12 +142,12 @@ export async function getClient(
 }
 ```
 
-### `aci/tools/lsp.ts` — 9 件 handler 极薄
+### `aci/tools/lsp.ts` — the 9 handlers kept very thin
 
 ```ts
-// #247 Q3（MCP 无状态思路）：handler 只做参数校验 + await client.sendRequest，
-// per-request 状态归 vscode-jsonrpc（requestId + 响应路由）。
-// 9 件共享同一 position schema {file, line, character}（#248 决议）。
+// #247 Q3 (MCP statelessness idea): handlers only validate params + await client.sendRequest;
+// per-request state belongs to vscode-jsonrpc (requestId + response routing).
+// All 9 share the same position schema {file, line, character} (#248 decision).
 const POSITION_SCHEMA = {
   type: "object",
   properties: {
@@ -169,28 +170,28 @@ function makeOperationTool(
     inputSchema: { ...POSITION_SCHEMA, ...extraSchema },
     aci: {
       category: "read-only" as const,
-      isConcurrencySafe: false, // 有状态 LSP 实例；loop 串行天然无并发（#249）
-      interruptBehavior: "cancel" as const, // 走 $/cancelRequest，不杀 tsserver（Q2/A9）
-      timeoutTier: "default" as const, // 30s（#249）
+      isConcurrencySafe: false, // stateful LSP instance; serial loop yields no concurrency naturally (#249)
+      interruptBehavior: "cancel" as const, // via $/cancelRequest, do not kill tsserver (Q2/A9)
+      timeoutTier: "default" as const, // 30s (#249)
     },
     handler: async (input) => {
-      const params = parse(input); // ajv 校验
-      const client = await getClient(params.file, ctx); // 按需 spawn + 复用
+      const params = parse(input); // ajv validation
+      const client = await getClient(params.file, ctx); // spawn on demand + reuse
       if (!client) return "(no LSP server available for file)";
       const result = await client.sendRequest(method, toParams(params)); // vscode-jsonrpc
-      return stringify(result); // 契约 Y1：纯字符串
+      return stringify(result); // contract Y1: plain string
     },
   });
 }
-// 10 件 = 9 operation + lsp_diagnostics（#250）
+// 10 tools = 9 operation + lsp_diagnostics (#250)
 ```
 
-### `aci/tools/edit-file.ts` — `onEdit` opts 注入（Q2/A13 决议）
+### `aci/tools/edit-file.ts` — `onEdit` opts injection (Q2/A13 decision)
 
 ```ts
-// Q2/A13：edit_file 成功 → 发出「文件编辑完成」事件，由装配层接 LSP notifier。
-// edit_file handler 零 LSP 知识（opts.onEdit 是个通用回调，不知道谁消费）。
-// handler 返回仍是纯字符串（守契约 Y1，不暴露结构体）。
+// Q2/A13: edit_file success → emit a "file edited" event; the assembly layer wires it to the LSP notifier.
+// The edit_file handler carries zero LSP knowledge (opts.onEdit is a generic callback, unaware of the consumer).
+// Handler return stays a plain string (upholds contract Y1, no struct exposed).
 export interface EditFileOpts {
   readonly onEdit?: (file: string) => void;
 }
@@ -200,210 +201,210 @@ export function createEditFileTool(
   opts?: EditFileOpts
 ): AciToolDef {
   const handler = async (input: unknown): Promise<unknown> => {
-    // ... 原有 readFile / lintPatch / countOccurrences 不变 ...
+    // ... existing readFile / lintPatch / countOccurrences unchanged ...
     await writeFile(absPath, replaced, "utf8");
-    // ★ 写入成功后、返回前调 opts.onEdit
+    // ★ Call opts.onEdit after successful write, before return
     opts?.onEdit?.(absPath);
     return `[edit_file] replaced ${occurrences} occurrence(s) in ${absPath}`;
   };
-  // ... 冻结返回不变 ...
+  // ... frozen return unchanged ...
 }
 ```
 
-### `aci/tools/registry.ts` + `build-engine.ts` — `onEdit` 透传
+### `aci/tools/registry.ts` + `build-engine.ts` — `onEdit` pass-through
 
 ```ts
-// registry.ts: CreateDefaultAciRegistryOptions 加 onEdit 字段，
-// 透传给 createEditFileTool(root, { onEdit: options.onEdit })
+// registry.ts: CreateDefaultAciRegistryOptions gains an onEdit field,
+// passed through to createEditFileTool(root, { onEdit: options.onEdit })
 export interface CreateDefaultAciRegistryOptions {
   readonly env: Pick<IknowEnv, "web">;
   readonly sandboxRoot: string;
   readonly memoryDir?: string;
-  readonly onEdit?: (file: string) => void; // ★ LSP 联动缝（spec 251）
+  readonly onEdit?: (file: string) => void; // ★ LSP linkage seam (spec 251)
 }
 
-// build-engine.ts: 装配 lsp 工具时构造 notifier.invalidate 作为 onEdit
+// build-engine.ts: when assembling lsp tools, construct notifier.invalidate as onEdit
 const lspNotifier = createLspNotifier(/* ... */);
 const registry = createDefaultAciRegistry({
   env,
   sandboxRoot,
   memoryDir,
-  onEdit: (file) => lspNotifier.invalidate(file), // ★ 装配层接 LSP
+  onEdit: (file) => lspNotifier.invalidate(file), // ★ assembly layer wires LSP
 });
 ```
 
 ## Testing Strategy
 
-| 等级        | 范围                                                                                                                           | 工具                    |
+| Level       | Scope                                                                                                                           | Tool                    |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| Unit        | 9 件 operation handler：输入校验（缺 line/character）、ajv 拒非法类型、无 client 返回 `"(no LSP server available)"`、wire 形态 | vitest stub             |
-| Unit        | `lsp_diagnostics` handler：latest-wins map、severity 过滤、每文件封顶 20、`<diagnostics file>` XML                             | vitest                  |
-| Unit        | `client.ts`：vscode-jsonrpc mock 验证 requestId 唯一 + 响应路由（MCP 无状态契约）                                              | vitest mock             |
-| Unit        | 三件套缓存：同 root 复用 / broken 记忆不重试 / inflight 并发去重                                                               | vitest                  |
-| Unit        | 契约 X 反例：mock handler 返回 `{truncated:false,total:100}`，断言 executor 自截 20000 不信字段                                | vitest（对齐 ADR-0006） |
-| Unit        | 契约 Y1 反例：mock handler 返回对象，断言 executor 按 plain-string 处理                                                        | vitest                  |
-| Integration | `scripts/lsp-probe.ts`：真实 spawn tsserver + 9 operation 烟测 + diagnostics                                                   | tsx script              |
-| Integration | edit_file 联动：edit 后 `onEdit` 被调 + notifier 发 invalidation                                                               | vitest                  |
+| Unit        | 9 operation handlers: input validation (missing line/character), ajv rejecting illegal types, no client returning `"(no LSP server available)"`, wire shape | vitest stub             |
+| Unit        | `lsp_diagnostics` handler: latest-wins map, severity filter, per-file cap 20, `<diagnostics file>` XML                           | vitest                  |
+| Unit        | `client.ts`: vscode-jsonrpc mock verifying requestId uniqueness + response routing (MCP statelessness contract)                | vitest mock             |
+| Unit        | triple cache: same-root reuse / broken memory no retry / inflight concurrent dedup                                             | vitest                  |
+| Unit        | contract X counterexample: mock handler returns `{truncated:false,total:100}`, assert executor self-truncates at 20000 without trusting the field | vitest (per ADR-0006)   |
+| Unit        | contract Y1 counterexample: mock handler returns an object, assert executor treats it as plain-string                          | vitest                  |
+| Integration | `scripts/lsp-probe.ts`: real spawn tsserver + 9-operation smoke test + diagnostics                                             | tsx script              |
+| Integration | edit_file linkage: after edit, `onEdit` is called + notifier sends invalidation                                                 | vitest                  |
 
-**覆盖率门槛**：handler 单测 + 契约 X/Y1 反例行覆盖 ≥ 90%；integration 覆盖完整「按需 spawn → operation → 复用」路径。
+**Coverage threshold**: handler unit tests + contract X/Y1 counterexample lines covered ≥ 90%; integration covers the full "spawn on demand → operation → reuse" path.
 
-**`npm test` = 唯一门**：交付门槛 = `npm test` 退出 0 + `npm run typecheck` 退出 0。
+**`npm test` = the only gate**: delivery gate = `npm test` exit 0 + `npm run typecheck` exit 0.
 
 ## Boundaries
 
 ### Always
 
-- `permission/` **零改动**（#249 决议）；`category=read-only` → DEFAULT_BY_CATEGORY → allow
-- 字符串 wire（契约 Y1 守门）；9 件 handler 永不返回结构化 payload
-- 中断走 `$/cancelRequest`，**不杀 tsserver 进程**（Q2/A9）—— cancel ≠ 池回收：只有池回收与退出路径终结子进程（见「生命周期 / EXIT 合同」）
-- tsserver 常驻 + 复用三件套（root+id / broken / inflight），按需 spawn、不留 env flag（#247 Q4）。**装配期 warmup 预热已在场**（`startLspWarmup`，二期 B4 / fire-and-forget）：对扫描到的样本文件 spawn + `ensureOpen`，样本被 pin（见下节 pin 例外）。「常驻」指子进程与连接；未被 pin 的文档不保持打开（打开文档按请求级 refcount，见下节）
-- 装配期三闸门（自举守卫 / `mcp__` 命名空间防撞 / `ACI_TOOLSET_NAMES` append-only 纪律）
-- LSP 工具名不与 `tool_search` 同名、不以 `mcp__` 起头
+- `permission/` **zero changes** (#249 decision); `category=read-only` → DEFAULT_BY_CATEGORY → allow
+- string wire (contract Y1 gatekept); the 9 handlers never return structured payloads
+- interrupts go through `$/cancelRequest`, **never kill the tsserver process** (Q2/A9) — cancel ≠ pool eviction: only pool eviction and the exit path terminate the child process (see "Lifecycle / EXIT contract")
+- tsserver resident + reuse triple (root+id / broken / inflight), spawn on demand, leave no env flag (#247 Q4). **Assembly-time warmup is in scope** (`startLspWarmup`, phase-2 B4 / fire-and-forget): spawn + `ensureOpen` on scanned sample files; samples get pinned (pin exception in the next section). "Resident" refers to the child process and connection; unpinned documents are not kept open (open documents use per-request refcount, next section)
+- three assembly-time gates (bootstrap guard / `mcp__` namespace collision guard / `ACI_TOOLSET_NAMES` append-only discipline)
+- LSP tool names never collide with `tool_search` and never start with `mcp__`
 
 ### Ask first
 
-- 加新依赖 / 改 lockfile（`vscode-jsonrpc` + `typescript-language-server` 是**有意新增**，非违反）
-- 改 `permission/` 任何文件（本期零改动，违反需显式确认）
+- adding new dependencies / changing the lockfile (`vscode-jsonrpc` + `typescript-language-server` are **intentional additions**, not a violation)
+- changing any file under `permission/` (zero changes this phase; violation needs explicit confirmation)
 
 ### Never
 
-- 自写 tsserver 桥（#247 Q1 REJECT；破坏 LSP 多语言抽象）
-- 拆 `server.ts` 为 registry/spawn/client 三文件（#247 Q2 REJECT；保留扁平）
-- 删 `NearestRoot`（#247 Q6 REJECT；多项目仓库真场景）
-- 杀 tsserver 进程来 cancel（Q2/A9；cancel 只发 `$/cancelRequest`，不涉池回收）
-- 预热默认开 / 加预热 env flag（#247 Q4）
-- 改 `permission/` 模块任何文件
-- 跨 session 持久化 LSP client 缓存（A16：同进程同生）
-- 实时盘监听：`didChangeWatchedFiles` 或其它 watcher 一律不加（盘上变化在请求前对齐，见下节）
-- 新语言 / PATH server、新 ACI 工具（completion / codeAction / rename 等）
-- Location payload 的 1-based 翻译、incremental `didChange`、换 JSON-RPC 栈
-- `workspaceFolders` 多根（现有 `rootUri` + `NearestRoot` 足够）
+- hand-writing a tsserver bridge (#247 Q1 REJECT; breaks the LSP multi-language abstraction)
+- splitting `server.ts` into registry/spawn/client files (#247 Q2 REJECT; keep it flat)
+- deleting `NearestRoot` (#247 Q6 REJECT; real multi-project-repo scenarios)
+- killing the tsserver process to cancel (Q2/A9; cancel only sends `$/cancelRequest`, unrelated to pool eviction)
+- warmup on by default / adding a warmup env flag (#247 Q4)
+- changing any file in the `permission/` module
+- persisting LSP client caches across sessions (A16: same-process, co-born)
+- live disk watching: no `didChangeWatchedFiles` or any other watcher (on-disk changes are reconciled before requests, next section)
+- new languages / PATH servers, new ACI tools (completion / codeAction / rename etc.)
+- 1-based translation of Location payloads, incremental `didChange`, swapping the JSON-RPC stack
+- `workspaceFolders` multi-root (existing `rootUri` + `NearestRoot` suffice)
 
-## 生命周期 / EXIT 合同
+## Lifecycle / EXIT contract
 
-> 本节是 lsp-client-hardening 票的冻结合同；下文「停进程」「didOpen / didClose」「哨兵」均以本节为准。
+> This section is the frozen contract of the lsp-client-hardening ticket; below, "stop the process", "didOpen / didClose" and "sentinel" are all defined by this section.
 
-### 进程生命周期（EXIT）
+### Process lifecycle (EXIT)
 
-| 路径                                     | 行为                                                                                  |
-| ---------------------------------------- | ------------------------------------------------------------------------------------- |
-| 工具 timeout / abort / cancel            | 只发 JSON-RPC `$/cancelRequest`，**不终止子进程**（Q2/A9 不变；cancel ≠ 池回收）      |
-| idle sweep / worktree rebind stale sweep | 与退出路径一样**终结子进程**：dispose 连接 + SIGTERM + 逐出缓存                       |
-| `disposeAll`                             | 同上终结子进程；**不 latch**——后续调用可重新 spawn 新子进程                           |
-| `shutdownAll`                            | 同上终结子进程；额外**单向 latch**——此后 `getClient` 一律 spawn-failed，禁止 re-spawn |
+| Path                                       | Behavior                                                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| tool timeout / abort / cancel              | only send JSON-RPC `$/cancelRequest`, **do not terminate the child process** (Q2/A9 unchanged; cancel ≠ pool eviction) |
+| idle sweep / worktree rebind stale sweep   | **terminate the child process** just like the exit path: dispose the connection + SIGTERM + evict from cache |
+| `disposeAll`                               | same termination of the child process; **does not latch** — later calls may spawn new child processes |
+| `shutdownAll`                              | same termination of the child process; additionally **one-way latch** — thereafter `getClient` always returns spawn-failed, re-spawn forbidden |
 
-- 池回收三条缝（idle sweep / worktree rebind stale sweep / `disposeAll`）与退出路径（`shutdownAll`）**同一终态**。理由：stdio 管道句柄不随连接关闭释放，只关连接会让宿主事件循环排不空。
-- `shutdownAll` 的 latch 单向——无反向解除路径（A16 同进程同生）。
-- 工具路径不存在任何进程终止调用。既有「唯一杀进程点是宿主退出」的表述按本表改写，不再成立。
+- The three pool-eviction seams (idle sweep / worktree rebind stale sweep / `disposeAll`) and the exit path (`shutdownAll`) share **the same terminal state**. Rationale: stdio pipe handles are not released by closing the connection alone; closing only the connection would leave the host event loop unable to drain.
+- The `shutdownAll` latch is one-way — no reverse unlatch path (A16 same-process, co-born).
+- No process-termination call exists anywhere on the tool path. The earlier wording "the only process-kill point is host exit" is rewritten by this table and no longer holds.
 
-### 打开文档生命周期
+### Open-document lifecycle
 
-- **请求级 refcount**：同一连接上同一 uri 的重叠请求共享一次 `didOpen`；refcount 归零发 `didClose`。
-- 归零时**同时丢弃**该 uri 的打开记录（version 计数）与该 uri 的诊断缓存。
-- 两次调用之间文件不对 server 保持打开；下次请求重新 `didOpen`（直接读盘，天然取最新文本）。
-- **pin 例外（预热）**：裸 `ensureOpen`（warmup 预热样本走这条）把该 uri 标为 pinned —— 被 pin 的文档不随作用域归零关闭，其打开记录与诊断缓存一并保留，直到池回收/退出路径终结连接。预热是「打开即目的」，不是请求级作用域：上一条的「不保持打开」对**未被 pin** 的 uri 成立。被 pin 的 uri 仍走盘外对齐（见下节），不会拿到陈旧文本。
-- `edit_file` 联动语义不变：写盘成功后即时同步——未打开 → `didOpen` 等价路径；已打开 → full sync `didChange`，version++。
+- **Per-request refcount**: overlapping requests for the same uri on one connection share a single `didOpen`; when the refcount hits zero, send `didClose`.
+- On reaching zero, **also discard** that uri's open record (version counter) and that uri's diagnostics cache.
+- Between two calls the file is not kept open on the server; the next request re-`didOpen`s (reading disk directly naturally picks up the latest text).
+- **Pin exception (warmup)**: a bare `ensureOpen` (warmup sample path) marks the uri as pinned — a pinned document is not closed when the scope refcount hits zero; its open record and diagnostics cache are retained until pool eviction / the exit path terminates the connection. Warmup is "opening is the purpose", not a per-request scope: the previous bullet's "not kept open" holds for **unpinned** uris. Pinned uris still go through out-of-band disk reconciliation (next section) and never see stale text.
+- `edit_file` linkage semantics unchanged: sync immediately after a successful write — not open → `didOpen`-equivalent path; already open → full-sync `didChange`, version++.
 
-### 盘外变更对齐
+### Out-of-band disk reconciliation
 
-- **不做** watcher / `didChangeWatchedFiles` / 任何实时盘监听。
-- 未打开的文件由 language server 自己跟磁盘；harness 不接收也不需要实时推送。
-- 发 RPC 前，对**当前仍打开**的 uri（含即将使用的目标文件）`stat` mtime；与上次同步时记录的 mtime 不同 → 重读文件发 full-sync `didChange`（version++）。
+- **Do not** use watchers / `didChangeWatchedFiles` / any live disk monitoring.
+- Files not open are tracked by the language server itself against disk; the harness neither receives nor needs live pushes.
+- Before sending an RPC, `stat` the mtime of every uri **currently open** (including the target file about to be used); if it differs from the mtime recorded at last sync → re-read the file and send a full-sync `didChange` (version++).
 
-### initialize 能力广告 + 缺方法哨兵
+### initialize capability advertisement + missing-method sentinel
 
-- `initialize` 的 `capabilities` **非空**，只广告 iknow 实际会发的 method：textDocument 的 definition / references / hover / documentSymbol / implementation / prepareCallHierarchy / callHierarchy 双向、workspace/symbol，以及诊断推送订阅所需的文本同步声明。
-- server 在 initialize 结果中**缺席**某能力 ≠ 不支持 → 照发。
-- server **显式声明 `false`** → 不发 RPC，返回哨兵。
-- RPC 返回 `-32601` / `Unhandled method` → 返回同一哨兵，**不算 spawn 失败**（不写 broken、不逐出 client、不归入 `no-server` / `spawn-failed` 类）。
-- 哨兵守契约 Y1（纯字符串，模型可读）；`scripts/lsp-probe.ts` 把该哨兵视为「server 未实现该方法」skip（不计 FAIL、不计入 total）。
-- TS call hierarchy 仍真实执行（不得因能力广告而跳过）。
-- 语言表（`SERVERS` 5 门）与 `ACI_TOOLSET_NAMES` **不变**。
+- `initialize`'s `capabilities` is **non-empty**, advertising only the methods iknow actually sends: textDocument definition / references / hover / documentSymbol / implementation / prepareCallHierarchy / callHierarchy both directions, workspace/symbol, plus the text-sync declaration needed for diagnostics push.
+- A capability **absent** from the server's initialize result ≠ unsupported → send anyway.
+- Server **explicitly declares `false`** → do not send the RPC, return the sentinel.
+- RPC returning `-32601` / `Unhandled method` → return the same sentinel, **not counted as spawn failure** (no broken write, no client eviction, not classified under `no-server` / `spawn-failed`).
+- The sentinel upholds contract Y1 (plain string, model-readable); `scripts/lsp-probe.ts` treats this sentinel as "server has not implemented the method" skip (neither FAIL nor counted in total).
+- TS call hierarchy still truly executes (must not be skipped due to capability advertisement).
+- The language table (`SERVERS` 5 entries) and `ACI_TOOLSET_NAMES` are **unchanged**.
 
 ## Success Criteria
 
-全部为二元（是/否），每条对应可执行的检查：
+All binary (yes/no), each mapped to an executable check:
 
 | #   | Criterion                          | Check                                                                                                                                                                                                                                                                                        |
 | --- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1  | 10 件 LSP 工具全量进 prompt        | `tests/harness/aci/registry.test.ts` 锁 `ACI_TOOLSET_NAMES.length === 21` 含 11 件原工具                                                                                                                                                                                                     |
-| S2  | `server.ts` 保留扁平结构           | 无 `registry.ts` / `spawn.ts` 拆分文件；`server.ts` 含 `Info` + spawn 内联                                                                                                                                                                                                                   |
-| S3  | `NearestRoot` 保留                 | `server.ts` 含 `NearestRoot(TS_LOCKFILES, TS_EXCLUDE)` 且上界 stop=ctx.directory                                                                                                                                                                                                             |
-| S4  | 9 件 operation handler 输入校验    | 单测：缺 line/character → 拒；ajv 拒非法类型；无 client → `"(no LSP server available)"`                                                                                                                                                                                                      |
-| S5  | 9 件共享 position schema           | 单测：`lsp_definition` / `lsp_references` 等 inputSchema 含 `{file,line,character}`                                                                                                                                                                                                          |
-| S6  | `lsp_diagnostics` wire = 纯字符串  | 单测：返回 `<diagnostics file>` XML；severity=1 过滤；每文件封顶 20                                                                                                                                                                                                                          |
-| S7  | 契约 X 反例被锁                    | 单测：mock handler 输出 `{truncated:false,total:100,text:"x".repeat(25000)}`，断言 executor 自截 20000（ADR-0006）                                                                                                                                                                           |
-| S8  | 契约 Y1 反例被锁                   | 单测：mock handler 返回对象 `{code,stdout,stderr}`，断言 executor 按 plain-string 处理                                                                                                                                                                                                       |
-| S9  | 复用三件套                         | 单测：同 root 复用不重 spawn / broken 记忆不重试 / inflight 并发去重                                                                                                                                                                                                                         |
-| S10 | `permission/` 零改动               | `git diff --stat src/harness/permission/` 输出空                                                                                                                                                                                                                                             |
-| S11 | edit_file 联动                     | 单测：edit_file 成功后 `onEdit` 被调 + notifier 发 invalidation                                                                                                                                                                                                                              |
-| S12 | 真实 tsserver 烟测                 | `npm run probe:lsp` 退出 0：spawn + 9 operation + diagnostics 全通                                                                                                                                                                                                                           |
-| S13 | CI 主路径全绿                      | `npm test` 退出 0；`npm run typecheck` 退出 0                                                                                                                                                                                                                                                |
-| S14 | LSP client 缓存同进程同生          | 无跨 session 持久化代码路径；进程退出 → client dispose                                                                                                                                                                                                                                       |
-| S15 | 池回收终结子进程                   | 单测：idle sweep / rebind stale sweep / `disposeAll` 后子进程 exit 落地；`disposeAll` 之后可重新 spawn；`shutdownAll` 之后一律 spawn-failed                                                                                                                                                  |
-| S16 | 请求级 didOpen / didClose          | 单测：单次请求顺序为打开 → RPC → 关闭；同 uri 重叠请求只关一次（最后一位），且**重叠作用域内文档始终处于打开态**（第二个作用域进入 body 时不得落在已 `didClose` 的窗口）；关闭后下次请求重新 `didOpen`；refcount 归零丢弃该 uri 打开记录与诊断缓存；被 pin 的 uri（warmup 预热）不随归零关闭 |
-| S17 | 盘外变更对齐                       | 单测：打开后改盘 mtime（不经 `edit_file`）→ 下一次请求前发出 full-sync `didChange`，version++                                                                                                                                                                                                |
-| S18 | `-32601` 缺方法哨兵不算 spawn 失败 | 单测：server 显式 `false` 不发 RPC；`-32601` / `Unhandled method` → Y1 纯字符串哨兵；client 未被逐出、未写 broken、后续请求仍可复用                                                                                                                                                          |
+| S1  | all 10 LSP tools enter the prompt  | `tests/harness/aci/registry.test.ts` locks `ACI_TOOLSET_NAMES.length === 21` including the 11 original tools                                                                                                                                                                                 |
+| S2  | `server.ts` keeps the flat structure | no `registry.ts` / `spawn.ts` split files; `server.ts` contains `Info` + inline spawn                                                                                                                                                                                                        |
+| S3  | `NearestRoot` kept                 | `server.ts` contains `NearestRoot(TS_LOCKFILES, TS_EXCLUDE)` with upper bound stop=ctx.directory                                                                                                                                                                                             |
+| S4  | input validation in the 9 operation handlers | unit test: missing line/character → reject; ajv rejects illegal types; no client → `"(no LSP server available)"`                                                                                                                                                                            |
+| S5  | 9 tools share the position schema  | unit test: `lsp_definition` / `lsp_references` etc. inputSchema contains `{file,line,character}`                                                                                                                                                                                             |
+| S6  | `lsp_diagnostics` wire = plain string | unit test: returns `<diagnostics file>` XML; severity=1 filtering; per-file cap 20                                                                                                                                                                                                           |
+| S7  | contract X counterexample locked   | unit test: mock handler outputs `{truncated:false,total:100,text:"x".repeat(25000)}`, assert executor self-truncates at 20000 (ADR-0006)                                                                                                                                                     |
+| S8  | contract Y1 counterexample locked  | unit test: mock handler returns object `{code,stdout,stderr}`, assert executor treats it as plain-string                                                                                                                                                                                     |
+| S9  | reuse triple                       | unit test: same root reused without respawn / broken memory no retry / inflight concurrent dedup                                                                                                                                                                                            |
+| S10 | `permission/` zero changes         | `git diff --stat src/harness/permission/` outputs empty                                                                                                                                                                                                                                      |
+| S11 | edit_file linkage                  | unit test: after edit_file succeeds, `onEdit` is called + notifier sends invalidation                                                                                                                                                                                                        |
+| S12 | real tsserver smoke test           | `npx tsx scripts/lsp-probe.ts` exits 0: spawn + 9 operations + diagnostics all pass                                                                                                                                                                                                                     |
+| S13 | CI main path green                  | `npm test` exits 0; `npm run typecheck` exits 0                                                                                                                                                                                                                                              |
+| S14 | LSP client cache same-process, co-born | no cross-session persistence code path; process exit → client dispose                                                                                                                                                                                                                        |
+| S15 | pool eviction terminates child processes | unit test: after idle sweep / rebind stale sweep / `disposeAll`, the child process exit lands; after `disposeAll`, respawn is possible; after `shutdownAll`, all calls return spawn-failed                                                                                                   |
+| S16 | per-request didOpen / didClose     | unit test: a single request orders open → RPC → close; overlapping requests on the same uri close only once (last holder), and **the document stays open throughout the overlapping scope** (when the second scope enters its body it must not fall into an already-`didClose` window); after close, the next request re-`didOpen`s; refcount hitting zero discards that uri's open record and diagnostics cache; pinned uris (warmup) are not closed on zero |
+| S17 | out-of-band disk reconciliation    | unit test: after opening, modify disk mtime (not via `edit_file`) → before the next request a full-sync `didChange` is sent, version++                                                                                                                                                       |
+| S18 | `-32601` missing-method sentinel not spawn failure | unit test: server explicit `false` → no RPC sent; `-32601` / `Unhandled method` → Y1 plain-string sentinel; client not evicted, no broken written, later requests can still reuse                                                                                                            |
 
 ## Open Questions
 
-本期不答（已在范围外 / 等后续地图推动），仅声明不静默：
+Not answered this phase (out of scope / awaiting later map push), declared only, not silent:
 
-- **多语言扩展触发时机**：Python（pyright）/ Rust（rust-analyzer）何时进、什么信号触发（等 TS 首期实测精度/效率后）
-- **预热 env flag 默认值**：复用缓存后的实测数据，决定预热是否默认开（本期不做、不留 flag）
-- **`rename` operation 是否进后续期**：首期明确不含；重审时机 = write 类 LSP 政策定型 + permission 规则演进
-- ~~**LSP 有状态工具与 executor「无状态假设」的张力**~~ **已决（lsp-client-hardening）**：文档维度以请求级 refcount 收口（见「生命周期 / EXIT 合同 § 打开文档生命周期」）——两次调用之间不对 server 保持打开，per-request 状态仍由 vscode-jsonrpc 承担（Q3 决议）
-- **人类 UI 代码跳转**：IDE 的事，非 agent 产品
-- **LSP 联动降级**：当前 spec 形式下，`edit_file` handler 内 `opts?.onEdit?.(absPath)` 若抛错（如 notifier 已 dispose），整次 edit_file 会走 `execution_failed`。是否用 try/catch 包一层使 LSP 联动降级（不影响主路径写盘），留给实施时按经验决定
-- **部署前置：`npm install` 跑通**：当前 `vscode-jsonrpc` / `typescript-language-server` 未安装，`npm run probe:lsp` 与 LSP 相关单测在 `npm install` 前无法跑——属部署前置条件，plan 任务的早期 bullet 应设显式 checkpoint
+- **Trigger timing for multi-language expansion**: when do Python (pyright) / Rust (rust-analyzer) enter, on what signal (pending measured accuracy/efficiency of the TS first phase)
+- **Warmup env flag default value**: with measured data from cache reuse, decide whether warmup defaults on (not done this phase, no flag left)
+- **Whether the `rename` operation enters a later phase**: explicitly excluded from phase 1; revisit trigger = write-class LSP policy settled + permission rule evolution
+- ~~**Tension between stateful LSP tools and the executor "statelessness assumption"**~~ **Decided (lsp-client-hardening)**: the document dimension is closed by per-request refcount (see "Lifecycle / EXIT contract § Open-document lifecycle") — nothing is kept open on the server between two calls; per-request state is still carried by vscode-jsonrpc (Q3 decision)
+- **Human-UI code navigation**: an IDE concern, not an agent-product one
+- **LSP linkage degradation**: under the current spec shape, if `opts?.onEdit?.(absPath)` inside the `edit_file` handler throws (e.g. the notifier is already disposed), the whole edit_file run goes `execution_failed`. Whether to wrap a try/catch so the LSP linkage degrades (without affecting the main-path write) is left to implementation judgment by experience
+- **Deployment prerequisite: `npm install` must succeed**: currently `vscode-jsonrpc` / `typescript-language-server` are not installed; `npx tsx scripts/lsp-probe.ts` and LSP-related unit tests cannot run before `npm install` — a deployment precondition, so early bullets of plan tasks should set an explicit checkpoint
 
 ## Glossary
 
-> 来自 `docs/CONTEXT.md`（spec 引用，不重定义）。
+> From `docs/CONTEXT.md` (spec cites, does not redefine).
 
-- **ACI tool set**：Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`；当前 11 件，本 spec 后 21 件。
-- **Loop Engine**：Foundation 的状态机运行内核，驱动模型 → 工具 → 真实结果 → 下一轮模型 → 明确停止；位于 `src/harness/`。
-- **executor truncation authority**（契约 X，ADR-0004 / ADR-0006）：executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段。
-- **plain-string tool output**（契约 Y1，ADR-0004）：生产工具输出为纯字符串；bash 是唯一例外保留结构化 `{code, stdout, stderr}`（Y1b）。
-- **append-only messages**：Foundation 的权威 Anthropic 原生会话历史，是唯一事实来源；消息只能以不可变追加（`[...prev, x]`）更新。
-- **LoopTrace**：`run()` 的第二返回面 `{ result, trace }`—— A 层结构元数据（严格不含 payload）；diagnostics payload 走 messages 权威历史（#250 决议）。
+- **ACI tool set**: the tool set registered by the harness assembly layer (`src/harness/aci/`); SSOT factory = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`; currently 11 tools, 21 after this spec.
+- **Loop Engine**: Foundation's state-machine run kernel, driving model → tools → real results → next model turn → explicit stop; lives in `src/harness/`.
+- **executor truncation authority** (contract X, ADR-0004 / ADR-0006): the executor is the sole authority over tool-result truncation metadata — it self-measures serialized character count, self-truncates, self-composes the marker; tools return pure data without truncated/total meta-fields.
+- **plain-string tool output** (contract Y1, ADR-0004): production tools output plain strings; bash is the sole exception retaining the structured `{code, stdout, stderr}` (Y1b).
+- **append-only messages**: Foundation's authoritative Anthropic-native conversation history, the single source of truth; messages may only be updated by immutable append (`[...prev, x]`).
+- **LoopTrace**: the second return surface of `run()`, `{ result, trace }` — layer-A structural metadata (strictly no payloads); diagnostics payloads travel via the authoritative messages history (#250 decision).
 
-> 本 spec 引入的新术语（待实施完成后经 `domain-modeling` 落 `docs/CONTEXT.md`；当前作 spec 内工作术语使用）：
+> New terms introduced by this spec (to be landed into `docs/CONTEXT.md` via `domain-modeling` after implementation; currently working terms inside the spec):
 
-- **LSP client**：`vscode-jsonrpc` 驱动的 JSON-RPC over stdio 客户端，按 root+id 复用（MCP 无状态协议思路：协议层无状态、tsserver 有状态）。
-- **getClient() 三件套**：root+id 缓存 `Map` / broken 记忆 `Set` / inflight 去重 `Map`——复用消除 cold start，spawn 失败不重试，并发请求共享一次 spawn。
-- **NearestRoot**：从 `path.dirname(file)` 向上找含 lockfile 的最近祖先当 LSP root；上界 stop=ctx.directory。
-- **onEdit seam**：`createEditFileTool(root, opts?: { onEdit?: (file: string) => void })` 工厂 opts 注入——handler 写入成功后调 `opts.onEdit?.(absPath)`，handler 内部零 LSP 知识；`CreateDefaultAciRegistryOptions` 加 `onEdit` 字段透传；`build-engine.ts` 装配时把 `lspNotifier.invalidate` 作为 `onEdit` 注入。
+- **LSP client**: a `vscode-jsonrpc`-driven JSON-RPC over stdio client, reused by root+id (MCP statelessness-protocol idea: the protocol layer is stateless, tsserver is stateful).
+- **getClient() triple**: root+id cache `Map` / broken memory `Set` / inflight dedup `Map` — reuse eliminates cold start, spawn failures are not retried, concurrent requests share one spawn.
+- **NearestRoot**: walk up from `path.dirname(file)` to the nearest ancestor containing a lockfile as the LSP root; upper bound stop=ctx.directory.
+- **onEdit seam**: `createEditFileTool(root, opts?: { onEdit?: (file: string) => void })` factory opts injection — after the handler writes successfully it calls `opts.onEdit?.(absPath)`, with zero LSP knowledge inside the handler; `CreateDefaultAciRegistryOptions` gains an `onEdit` field for pass-through; `build-engine.ts` injects `lspNotifier.invalidate` as `onEdit` at assembly time.
 
 ## Architectural Constraints
 
-| ADR                              | 引用形式                                                                           |
-| -------------------------------- | ---------------------------------------------------------------------------------- |
-| ADR-0004（6 工具集 + 契约 X/Y1） | 10 件 LSP 工具作为第 12-21 件 append；wire 守契约 Y1；handler 不带截断字段守契约 X |
-| ADR-0006（封顶 20000）           | 9 件输出也受 20000 字符封顶；不为 LSP 单独立例外                                   |
+| ADR                              | Reference form                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| ADR-0004 (6 tool sets + contracts X/Y1) | the 10 LSP tools append as tools 12-21; wire upholds contract Y1; handlers carry no truncation fields, upholding contract X |
+| ADR-0006 (cap 20000)             | output of the 9 tools is also capped at 20000 characters; no LSP-specific exception   |
 
-## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
+## ACR Verdict (architecture-change-reviewer · 5-verdict gate)
 
-> 受影响文件 11 件（7 源 + 4 测试 + 1 脚本）≥ 3 件门槛达成。
+> 11 affected files (7 source + 4 test + 1 script) — the ≥ 3-files threshold is met.
 
 ```text
-bounded-context-guardian:     yes — src/harness/lsp/ 与 aci/tools/ 之间无反向依赖；lsp/notifier.invalidate 仅在 build-engine 装配时通过工厂闭包接进 registry；handler 内部零 LSP 知识；permission/ 零改动 + DEFAULT_BY_CATEGORY read-only → allow 路径成立。
-defensive-contract-validator: yes — 5 边界类全覆盖（empty / negative / overflow / concurrent / exception）；契约 X/Y1 反例 S7/S8 显式 lock；handler inputSchema 走 ajv 严格编译同源校验；edit_file 联动新增 S11 integration。
-error-handling-enforcer:      yes — spawn 失败 broken.add(key) + inflight 释放；handler 无 client 返明确字符串；cancel 走 $/cancelRequest 不杀进程；契约 Y1 强制纯字符串；edit_file opts?.onEdit?.(absPath) 写入成功后调（失败路径不触发避免误通知）；handler 错误仍 throw ToolExecutionError 走 executor 转 execution_failed，无静默吞错。
-complexity-anti-drift:        yes — server.ts 扁平 Info + NearestRoot + spawn 内联；client.ts 三件套 Map/Set/Map 各一职责；handler makeOperationTool 工厂统一 9 件；POSITION_SCHEMA 单次声明共享；edit_file opts 单字段 EditFileOpts；registry 透传 1 行；无嵌套膨胀、无参数爆炸。
-minimal-change-verifier:      yes — 1 逻辑任务（9 件 LSP 工具 + 自建客户端 + edit_file 联动）；seam 改走 edit-file.ts 工厂扩参 1 个可选 opts + registry.ts 接口加 1 个字段 + build-engine.ts 装配 1 行 closure；loop-engine.ts 零改动；permission/ 零改动；2 个新依赖有意新增；不预热、不留 env flag；接口向后兼容（onEdit optional）不破现有 stub 装配测试。
+bounded-context-guardian:     yes — no reverse dependency between src/harness/lsp/ and aci/tools/; lsp/notifier.invalidate is wired into the registry only at build-engine assembly time via a factory closure; handlers carry zero LSP knowledge internally; permission/ zero changes + DEFAULT_BY_CATEGORY read-only → allow path holds.
+defensive-contract-validator: yes — all 5 boundary classes covered (empty / negative / overflow / concurrent / exception); contract X/Y1 counterexamples S7/S8 explicitly locked; handler inputSchema validated against the same source compiled strictly by ajv; edit_file linkage adds integration test S11.
+error-handling-enforcer:      yes — spawn failure does broken.add(key) + releases inflight; handler with no client returns an explicit string; cancel goes through $/cancelRequest without killing the process; contract Y1 enforces plain strings; edit_file calls opts?.onEdit?.(absPath) only after a successful write (failure paths do not fire it, avoiding false notifications); handler errors still throw ToolExecutionError, converted by the executor into execution_failed, no silent error swallowing.
+complexity-anti-drift:        yes — server.ts flat Info + NearestRoot + inline spawn; client.ts triple Map/Set/Map, one responsibility each; handler makeOperationTool factory unifies the 9 tools; POSITION_SCHEMA declared once and shared; edit_file opts is a single-field EditFileOpts; registry pass-through is 1 line; no nesting bloat, no parameter explosion.
+minimal-change-verifier:      yes — 1 logical task (9 LSP tools + self-built client + edit_file linkage); the seam goes through edit-file.ts factory gaining one optional opts parameter + registry.ts interface gaining 1 field + build-engine.ts assembly adding 1 closure line; loop-engine.ts zero changes; permission/ zero changes; 2 new dependencies are intentional additions; no warmup, no env flag left behind; interfaces are backward compatible (onEdit optional) and break no existing stub assembly tests.
 ```
 
-**Gate 结果：5/5 yes，hand to writing-plans。**
+**Gate result: 5/5 yes, hand to writing-plans.**
 
-- affects: src/harness/lsp/server.ts (新)
-- affects: src/harness/lsp/client.ts (新)
-- affects: src/harness/lsp/notifier.ts (新)
-- affects: src/harness/aci/tools/lsp.ts (新)
+- affects: src/harness/lsp/server.ts (new)
+- affects: src/harness/lsp/client.ts (new)
+- affects: src/harness/lsp/notifier.ts (new)
+- affects: src/harness/aci/tools/lsp.ts (new)
 - affects: src/harness/aci/tools/registry.ts
 - affects: src/harness/aci/tools/edit-file.ts
 - affects: src/harness/build-engine.ts
-- affects: tests/harness/lsp/client.test.ts (新)
-- affects: tests/harness/aci/lsp.test.ts (新)
+- affects: tests/harness/lsp/client.test.ts (new)
+- affects: tests/harness/aci/lsp.test.ts (new)
 - affects: tests/harness/aci/registry.test.ts
-- affects: scripts/lsp-probe.ts (新)
+- affects: scripts/lsp-probe.ts (new)

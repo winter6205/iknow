@@ -1,73 +1,73 @@
-# Spec: 路径读图进 Anthropic vision
+# Spec: Path-based image reading into Anthropic vision
 
 **Status:** draft
-**Basis:** 操作员授权代理裁 + 本回合要求写 spec/plan（决策过程已归档于 `docs/archive/027-retire-wayfinder-charts/`，不作引用依据）
-**Surface:** ACI 读工具 + tools executor + session 落盘（`tool_result.content`）+ Anthropic adapter 原样上 wire
+**Basis:** operator-authorized agent discretion + this turn's request to write spec/plan (the decision process is archived under `docs/archive/027-retire-wayfinder-charts/`, which is not a citation basis)
+**Surface:** ACI read tool + tools executor + session persistence (`tool_result.content`) + Anthropic adapter passing it to the wire verbatim
 
 ## Objective
 
-让主会话（及共用默认 ACI 注册表的入口）能对**工作区围栏内指定路径**的图片调用工具，把像素作为 Anthropic SDK 0.115 的 `ImageBlockParam` 放进 `tool_result.content`，下一轮 `step` 原样到达 `messages.create` / `.stream`。用户仍只发文本（`encodeUserText` 不动）。`read_file` 的文本契约（NUL 拒二进制、行分页）不变。
+Let the main session (and any entry sharing the default ACI registry) invoke a tool on an image at a **path inside the workspace fence**, placing the pixels as an Anthropic SDK 0.115 `ImageBlockParam` inside `tool_result.content`, so the next `step` reaches `messages.create` / `.stream` unchanged. Users still send text only (`encodeUserText` untouched). The `read_file` text contract (NUL rejects binary, line pagination) is unchanged.
 
-成功：模型调 `read_image` 读一张 ≤1MB 的 jpeg/png/gif/webp，权威历史里出现 SDK 形状的 image block，resume 后再 `step` 仍带同一块；非图二进制与超限仍 typed 失败。
+Success: the model calls `read_image` on a ≤1MB jpeg/png/gif/webp file, an SDK-shaped image block appears in the authoritative history, and after resume a further `step` still carries the same block; non-image binaries and oversize files still fail as typed errors.
 
-## Assumptions（已确认，不再等回复）
+## Assumptions (confirmed, no further replies awaited)
 
-操作员已裁目的地与 G1–G3；本列表写入合同。
+The operator has ruled on the destination and G1–G3; this list is part of the contract.
 
-1. 钉 `@anthropic-ai/sdk` 0.115 的 stable `ImageBlockParam`（base64 + `media_type` ∈ jpeg/png/gif/webp）。不用 beta `file_id`。
-2. 新 ACI 工具名冻结为 **`read_image`**。不扩 `read_file`。
-3. 路径解析与 `read_file` 共用同一套围栏（`resolveReadTarget` / `resolveWithinRoot` 语义）。
-4. MIME 用魔数，不看扩展名。
-5. 体积顶 = 现行 `read_file` 的 1MB，在编码前判定。
-6. 成功 payload 活在 **`tool_result.content`**，不把 `{ type: "image" }` 放到消息顶层（session `isValidContentBlock` 顶层无 image）。
-7. `safeContent` **仅**为 `read_image` 成功臂开洞；其余工具仍压成 text。image 臂不适用 ADR-0006 的字符硬顶（那是文本度量）。
-8. 不建模型 vision 能力表；非 vision 送上 wire，4xx 走既有 API error 面。
-9. 权威历史持久化 SDK base64（嵌在 `tool_result`）；adapter 不按 path hydrate。
-10. `read_image` **不入** last-read ledger。
-11. TUI：与 `read_file` 同属 retract / live noise；不摊像素。
-12. 子代理 / worker：跟默认 `createDefaultAciRegistry` 走，不单开缝。
-13. 贴图、MCP image 透传、`web_fetch` `image/*`、生成图、助手输出 image：本 spec 不做。
+1. Pin the stable `ImageBlockParam` of `@anthropic-ai/sdk` 0.115 (base64 + `media_type` ∈ jpeg/png/gif/webp). No beta `file_id`.
+2. The new ACI tool name is frozen as **`read_image`**. Do not extend `read_file`.
+3. Path resolution shares the same fence as `read_file` (`resolveReadTarget` / `resolveWithinRoot` semantics).
+4. MIME is decided by magic bytes, not by extension.
+5. Size cap = the current `read_file` 1MB, judged before encoding.
+6. The success payload lives in **`tool_result.content`**; never put `{ type: "image" }` at the message top level (session `isValidContentBlock` has no top-level image).
+7. `safeContent` opens the hole **only** for the `read_image` success arm; all other tools still collapse to text. The image arm is not subject to ADR-0006's character hard cap (that is a text measure).
+8. No model vision-capability table; sending to a non-vision model surfaces 4xx through the existing API error surface.
+9. The authoritative history persists the SDK base64 (embedded in `tool_result`); the adapter does not hydrate by path.
+10. `read_image` does **not** enter the last-read ledger.
+11. TUI: same retract / live noise class as `read_file`; pixels are not rendered.
+12. Sub-agents / workers: follow the default `createDefaultAciRegistry`, no separate seam.
+13. Pasted images, MCP image pass-through, `web_fetch` `image/*`, generated images, assistant-output images: not in this spec.
 
 ## Boundaries
 
 - **Does:**
-  - 新增 `read_image`：input `{ path: string }`；成功则 `tool_result.content` 含一条 `{ type: "image", source: { type: "base64", media_type, data } }`（可另附极短 text 标 path，像素权威在 image block）。
-  - 魔数只放行 jpeg/png/gif/webp；其它含 NUL 或非允许魔数的文件 typed 拒绝（与「当文本读」失败可区分）。
-  - `stat` 目录 / ENOENT / >1MB：typed `ToolExecutionError`，不写盘、不编 image。
-  - executor 成功臂识别图像 content blocks 并原样交给 `encodeToolResults`；失败臂仍 text。
-  - `ACI_TOOLSET_NAMES` **append-only** 追加 `read_image`（Gate 3：名单与 factories 同序）。
-  - `read_file` 对同一 png：仍 NUL 拒二进制（回归）。
-  - session save/load：嵌在 `tool_result.content` 的 image 往返后形状可再上 SDK。
-  - description：D9 STATIC 锁；轨迹集 **登记不建**（无选型分歧，硬闸在 handler + schema）。
-  - compact / token 估算：含嵌套 image 的 messages **不得估成 0**（公式不钉，只要非零且 evaluateCompactTrigger 不崩）。
-- **Confirms with human:** （none — 假设门已关）
+  - Add `read_image`: input `{ path: string }`; on success `tool_result.content` contains one `{ type: "image", source: { type: "base64", media_type, data } }` (an optional very short text labelling the path may accompany it; the pixels are authoritative in the image block).
+  - Magic bytes admit only jpeg/png/gif/webp; files containing NUL or a non-allowlisted magic number are typed-rejected (distinguishable from the "read as text" failure).
+  - `stat` directory / ENOENT / >1MB: typed `ToolExecutionError`, no disk write, no image encoding.
+  - The executor success arm recognizes image content blocks and hands them to `encodeToolResults` verbatim; the failure arm stays text.
+  - `ACI_TOOLSET_NAMES` gains `read_image` **append-only** (Gate 3: the names list and factories stay in the same order).
+  - `read_file` on the same png: still NUL-rejects as binary (regression).
+  - Session save/load: an image embedded in `tool_result.content` round-trips into a shape the SDK can accept again.
+  - Description: D9 STATIC lock; trajectory set **registered, not built** (no selection divergence; the hard gate sits in handler + schema).
+  - compact / token estimation: messages containing nested images **must not estimate to 0** (the formula is not pinned; only nonzero, and evaluateCompactTrigger must not crash).
+- **Confirms with human:** (none — the assumption gate is closed)
 - **Out of this spec:**
-  - TUI / Web 用户贴图、剪贴板。
-  - MCP `type: "image"` 透传。
-  - `web_fetch` 放行 `image/*`。
-  - 助手回合 `image`（既有 ProtocolError 保持）。
-  - 改 `encodeUserText` / 用户消息顶层 image。
-  - 模型能力登记表、按 model id 预拒。
-  - last-read 入账、`write_file` 闸语义。
-  - 图片 token 精确公式、compact 优先丢图策略。
-  - TUI 新 UI 展示缩略图。
-  - 供应商无关第二套 content model。
+  - TUI / Web user image pasting, clipboard.
+  - MCP `type: "image"` pass-through.
+  - `web_fetch` admitting `image/*`.
+  - Assistant-turn `image` (the existing ProtocolError stands).
+  - Changing `encodeUserText` / top-level image on user messages.
+  - Model capability registry, pre-rejection by model id.
+  - Last-read bookkeeping, `write_file` gate semantics.
+  - Exact image token formula, compact strategies that prefer dropping images.
+  - New TUI thumbnail rendering.
+  - A provider-agnostic second content model.
 
 ## Success Criteria
 
-每条均可 `vitest` 绿/红（实现落点由 plan 选测试文件，不在本 spec 发明路径当合同）。
+Every criterion is verifiable via `vitest` green/red (the plan picks the test files for implementation; this spec does not invent paths as contracts).
 
-- **SC1** `read_image` 对魔数为 PNG/JPEG/GIF/WEBP 且 ≤1MB 的文件：ok 的 `tool_result.content` 含 `type === "image"` 且 `source.type === "base64"` 且 `media_type` 落在 SDK 四值内，`data` 非空。
-- **SC2** 同一 PNG 调 `read_file`：仍 `binary file rejected`（或现行等价 typed 文案），不返回 image。
-- **SC3** 含 NUL 但非四类魔数（或无法识别为允许图）：`read_image` typed 失败，不产出 image block。
-- **SC4** `path` 空 / 非字符串 / 越围栏 / ENOENT / 目录 / size>1MB：typed 失败，无 image。
-- **SC5** 其它 ACI 工具成功路径仍只产出 text tool_result（`safeContent` 洞不泄漏）。
-- **SC6** `ACI_TOOLSET_NAMES` 含 `read_image` 且与 factories Gate 3 一致；缺席装配条件若无则常驻。
-- **SC7** 将含该 `tool_result` 的 `SessionFileV1` sanitize → save → load 后，嵌套 image 仍在，`buildMessageParams` 不剥掉。
-- **SC8** `interpretMessage` 对 assistant `image` 仍 ProtocolError。
-- **SC9** `estimateMessagesTokens`（或现行 compact 估算入口）对仅含嵌套 image、无 text 的 tool_result：**结果 > 0** 且 `evaluateCompactTrigger` 不抛。
-- **SC10** `read_image` 成功不把 path 写入 last-read ledger（随后对无关文本文件的 `write_file` 闸行为不因读过图而改变；读过图的 png 覆写不因本工具入账而放行——本工具根本不入账）。
-- **SC11** description 进入 D9 STATIC 锁；`docs/guides/prompt-development.md` 名册为该工具补一行：STATIC + 轨迹集登记不建。
+- **SC1** `read_image` on a file whose magic is PNG/JPEG/GIF/WEBP and ≤1MB: the ok `tool_result.content` contains `type === "image"` with `source.type === "base64"` and `media_type` within the SDK's four values, `data` non-empty.
+- **SC2** `read_file` on the same PNG: still `binary file rejected` (or the current equivalent typed message), never returns an image.
+- **SC3** Contains NUL but not one of the four magics (or not recognizable as an allowed image): `read_image` fails typed, no image block produced.
+- **SC4** `path` empty / non-string / outside the fence / ENOENT / directory / size>1MB: typed failure, no image.
+- **SC5** Success paths of all other ACI tools still produce text-only tool_results (the `safeContent` hole does not leak).
+- **SC6** `ACI_TOOLSET_NAMES` contains `read_image` and agrees with factories at Gate 3; if there is no absence-assembly condition it is always resident.
+- **SC7** After sanitizing → saving → loading a `SessionFileV1` containing that `tool_result`, the nested image is still there and `buildMessageParams` does not strip it.
+- **SC8** `interpretMessage` still raises ProtocolError for assistant `image`.
+- **SC9** `estimateMessagesTokens` (or the current compact estimation entry) on a tool_result containing only a nested image with no text: **result > 0** and `evaluateCompactTrigger` does not throw.
+- **SC10** A successful `read_image` does not write the path into the last-read ledger (subsequent `write_file` gate behavior on unrelated text files is unchanged by having read an image; overwriting a read png is not allowed by ledger entry — this tool never books entries at all).
+- **SC11** The description enters the D9 STATIC lock; the roster in `docs/guides/prompt-development.md` gains a line for this tool: STATIC + trajectory set registered, not built.
 
 ## Open Questions
 
@@ -75,45 +75,45 @@
 
 ## Inherits / Changes
 
-### 引用 CONTEXT.md（原文，不重定义）
+### Cited from CONTEXT.md (verbatim, not redefined)
 
-**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；**基线 8 件**（`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`）之后按 append-only 批次增长（memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace 读侧 / **符号工具面** 15 / worktree 5 …）。**当前件数以 `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` 数组长度为唯一 SSOT，本词条不复述数字**（该文件自己声明「本表长度以数组为 source of truth」）。SSOT 工厂 = 同文件 `createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
+**ACI tool set**: the tool set registered by the harness assembly layer (`src/harness/aci/`); **baseline 8** (`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`) growing since in append-only batches (memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace read side / **symbol tool surface** 15 / worktree 5 …). **The current count takes the length of the `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` array as the sole SSOT and this entry does not restate a number** (that file itself declares "this table's length takes the array as source of truth"). The SSOT factory = `createDefaultAciRegistry` in the same file; every entry (`build-engine` / `tui/deps`) takes it from here (#141 / #191 / a277f68). Every tool call passes through the permission middleware (ADR-0004) and timeout tier decoration.
 
-**last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
+**last-read ledger**: the register of "spec paths seen" within this conversation. **Process memory**, keyed by conversationId, never persisted to the session folder. Booked on: successful `read_file`, or successful allowlisted `bash` from which a single path can be extracted (`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`; single file, no pipes, no redirection). Consulted only by `write_file` against files that exist and have size>0; missing means hard reject, no disk write; new files and empty files are exempt. `edit_file` does not consult the table. Does not scan `ctx.messages`. Without a conversationId, non-empty overwrite fails closed. Resume starts with an empty table. ADR-0084.
 
-**retract class（收）**: 落定后不摊正文预览的工具类（读 / 多数搜 / 查询）。live 是否进过程块改问 **live noise**，不是本表整表折进 `calling`。`read_file` 仍不摊文件内容；`web_search` / `web_fetch` 走 **live signal**。
+**retract class (set)**: tool classes that, once settled, do not spread a body preview (reads / most searches / queries). Whether live output enters the progress block is asked of **live noise**, not folding this whole table into `calling`. `read_file` still does not render file content; `web_search` / `web_fetch` follow **live signal**.
 
-### 本仓已有、合同依赖的缝
+### Existing seams in this repo that the contract depends on
 
-- `encodeUserText` 只编 text user message；`buildMessageParams` 滤 system 后 `as MessageParam[]` 原样上 wire。
-- `safeContent`（`src/harness/tools/executor.ts`）今日把成功 payload 压成 `[{ type: "text", text }]`。
-- `AnthropicContentBlock` 无顶层 `image`；`tool_result.content` 为 `unknown`；session `isValidContentBlock` 对 `tool_result` 不递归校验 content。
-- `read_file`：NUL → binary rejected；`MAX_FILE_BYTES` 1MB。
-- SDK `ToolResultBlockParam.content` 允许 `ImageBlockParam`。
-- 提示词：`docs/guides/prompt-development.md` — 说明书不是闸；新工具 description 走 D9 STATIC。
+- `encodeUserText` encodes only text user messages; `buildMessageParams` filters system then sends `as MessageParam[]` verbatim to the wire.
+- `safeContent` (`src/harness/tools/executor.ts`) today compresses success payloads into `[{ type: "text", text }]`.
+- `AnthropicContentBlock` has no top-level `image`; `tool_result.content` is `unknown`; session `isValidContentBlock` does not recursively validate the content of a `tool_result`.
+- `read_file`: NUL → binary rejected; `MAX_FILE_BYTES` 1MB.
+- SDK `ToolResultBlockParam.content` permits `ImageBlockParam`.
+- Prompting: `docs/guides/prompt-development.md` — the guide is not a gate; a new tool's description goes through D9 STATIC.
 
-### Changes（相对现状）
+### Changes (relative to current state)
 
-- ACI 增 1 件 `read_image`（append-only）。
-- executor 增加图像 content 直通臂（仅该工具成功路径）。
-- compact 估算对嵌套 image 非零（SC9）。
-- TUI retract / live noise 名册纳入 `read_image`（与 `read_file` 同类）。
+- ACI gains 1 tool, `read_image` (append-only).
+- The executor gains an image-content pass-through arm (only this tool's success path).
+- Compact estimation is nonzero for nested images (SC9).
+- The TUI retract / live noise roster includes `read_image` (same class as `read_file`).
 
-### 待写入（persist）
+### Pending write-in (persist)
 
-- CONTEXT：**ACI tool set** 增长批次加 `read_image`（仍不在词条复述件数）；**last-read** _Avoid_ 或正文标明 `read_image` 不入账；**retract / live noise** 点名 `read_image` 与 `read_file` 同类。
-- ADR：本切片不新开 ADR（协议不改顶层 `AnthropicContentBlock`；失败走既有 `ToolExecutionError` / API error）。若落地时必须改顶层联合，再开 ADR 并停在 persist。
+- CONTEXT: the **ACI tool set** growth batch gains `read_image` (still no count restated in the entry); **last-read** _Avoid_ or body marks that `read_image` does not book entries; **retract / live noise** names `read_image` as same class as `read_file`.
+- ADR: this slice opens no new ADR (the protocol does not change the top-level `AnthropicContentBlock`; failures use the existing `ToolExecutionError` / API error). If landing forces a change to the top-level union, open an ADR then and stop at persist.
 
-persist（spec Step 4）：上列 CONTEXT 已写入本 worktree `docs/CONTEXT.md`（含新词 **read_image**）。无新 ADR。
+persist (spec Step 4): the CONTEXT entries above have been written into this worktree's `docs/CONTEXT.md` (including the new term **read_image**). No new ADR.
 
 ## architecture-change-reviewer
 
 ```
-bounded-context-guardian: yes — 无新 BC：工具落 ACI + executor 直通臂 + compress estimate（仍 harness）；TUI 只改既有名册；ACI_TOOLSET_NAMES 尾部 append-only
-input-contract-tests: yes — 公共入口 read_image({path})：empty/非法/越栏=SC4，负例魔数=SC3，overflow>1MB=SC4，ENOENT/目录=SC4；concurrent N/A（不入 last-read；executor 串行）
-error-handling-enforcer: yes — 目录/ENOENT/>1MB/非四类魔数均 ToolExecutionError 且不写盘不编图；失败臂仍 text；非 vision 走既有 API 4xx；SC5 钉 safeContent 洞不泄漏
-complexity-anti-drift: yes — 独立 read_image 文件（不塞进 read-file.ts）；registry 只追加一名；handler 管魔数/体积，executor 只识别 image block 直通
-minimal-change-verifier: yes — 单任务「路径读图经 Anthropic native tool_result」；贴图/MCP/web_fetch/顶层 user image 划出
+bounded-context-guardian: yes — no new BC: the tool lands in ACI + executor pass-through arm + compress estimate (all still harness); TUI only edits existing rosters; ACI_TOOLSET_NAMES gets a tail append-only
+input-contract-tests: yes — public entry read_image({path}): empty/invalid/out-of-fence=SC4, non-allowlisted magic=SC3, overflow>1MB=SC4, ENOENT/directory=SC4; concurrent N/A (not in last-read; executor serial)
+error-handling-enforcer: yes — directory/ENOENT/>1MB/non-allowlisted magic all yield ToolExecutionError with no disk write and no image encoding; failure arm stays text; non-vision uses the existing API 4xx; SC5 pins that the safeContent hole does not leak
+complexity-anti-drift: yes — standalone read_image file (not stuffed into read-file.ts); registry appends one name only; handler owns magic/size, executor only recognizes the image block for pass-through
+minimal-change-verifier: yes — single task "path image read via Anthropic native tool_result"; pasted images/MCP/web_fetch/top-level user image carved out
 ```
 
 OVERALL: PASS — hand to writing-plans

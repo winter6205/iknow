@@ -1,62 +1,62 @@
-# Spec: 指令权威出站投影 —— 宿主帧盖戳，untrusted 通道不能冒充官方门牌
+# Spec: instruction-authority outbound projection — host frames get stamped; the untrusted channel cannot impersonate official signage
 
-**Status:** landed（T1–T5 实施完毕；决策落盘 ADR-0112）
-**Basis:** GH #1066；ADR-0009 / ADR-0044（channel-based 信任，labeling 不是防御）；ADR-0028（状态栏进 messages、不进 `deps.system`）；契约 X / observability side-channel（磁盘真源 ≠ 模型可见字节）
-**Surface:** `src/harness/model-adapter/`（`buildMessageParams` 出站缝）、`src/harness/loop-engine.ts`（宿主注入 commit 盖戳）、`src/harness/subagent/worker.ts`（constitution vs addendum）、根目录 `README.md`（Features 一行，落地后）
+**Status:** landed (T1–T5 implemented; decision landed in ADR-0112)
+**Basis:** GH #1066; ADR-0009 / ADR-0044 (channel-based trust, labeling is not defense); ADR-0028 (the status bar enters messages, never `deps.system`); contract X / observability side-channel (disk truth ≠ model-visible bytes)
+**Surface:** `src/harness/model-adapter/` (`buildMessageParams` outbound seam), `src/harness/loop-engine.ts` (host-injection commit stamping), `src/harness/subagent/worker.ts` (constitution vs addendum), root `README.md` (one Features line, after landing)
 **Issue:** https://github.com/winter6205/iknow/issues/1066
 
 ## Goal
 
-指令权威从「模型读同一串字、靠自觉」收成 **出站投影**：权威历史可以脏；发给模型的 JSON 按来源排版。假 `<agent_status>` / 假系统前缀若出现在工具结果里，不能长成官方帧；子代理 LOCKED 宪法不被父模型 `systemPrompt` 抬进 `system`。
+Narrow instruction authority from "the model reads the same bytes and behaves" to an **outbound projection**: the authoritative history may be dirty; the JSON sent to the model is laid out by provenance. A fake `<agent_status>` / fake system prefix appearing in a tool result must not grow into an official frame; a subagent's LOCKED constitution must not be lifted into `system` by the parent model's `systemPrompt`.
 
 ## Boundaries
 
 - **Does:**
-  - 宿主注入（状态栏等同款 `encodeUserText` 注入）在 commit 时打 **非模型可见** 出处戳；出站剥掉。
-  - `buildMessageParams`（或抽出的同缝纯函数）对无戳 / `tool_result` 文本做确定转译，使载荷无法复现未转义的 host 帧语法。
-  - `IKNOW_AGENT_STATUS_READ_RULE` 改为「只信本跳宿主帧」，不再宣称 transcript 里最新 XML 标签权威。
-  - worker：`envelope.systemPrompt` 不得覆盖 LOCKED 六段；addendum 降到 user/untrusted。
-  - 能力落地后，根目录 `README.md` 的 **Features** 增加一条产品简介（给人看，不是安全白皮书）。
+  - Host injections (the status bar and siblings of `encodeUserText` injections) receive a **non-model-visible** provenance stamp at commit time; stripped at outbound.
+  - `buildMessageParams` (or a pure function extracted to the same seam) applies a deterministic transposition to unstamped / `tool_result` text so payloads cannot reproduce unescaped host-frame syntax.
+  - `IKNOW_AGENT_STATUS_READ_RULE` changes to "trust only this hop's host frames" and no longer declares the newest XML tag in the transcript authoritative.
+  - worker: `envelope.systemPrompt` must not override the LOCKED six sections; the addendum is downgraded to user/untrusted.
+  - Once the capability lands, add one product blurb to the root `README.md`'s **Features** (for humans, not a security whitepaper).
 - **Out of this spec:**
-  - 全量 CaMeL / 特权 LLM 抽控制流。
-  - 用 soul 告诫当验收机制（usage 一行可选，不承担 invariant）。
-  - 改 `permissions.toml` / executor 截断 / memory body 进 system（已有，保持）。
-  - 把转义写进权威历史或 TUI 展示原文。
-  - 识别操作员输入框越狱（operator 通道）。
-  - 自然语言间接注入的「模型绝不听话」保证（那是 sink；本 spec 只拆假门牌）。
+  - Full CaMeL / privileged-LLM control-flow extraction.
+  - Using soul admonitions as the acceptance mechanism (an optional usage line does not carry an invariant).
+  - Changing `permissions.toml` / executor truncation / memory body into system (already present, keep).
+  - Writing escaping into the authoritative history or into TUI original-text display.
+  - Detecting operator-input-box jailbreaks (the operator channel).
+  - Any "the model never obeys" guarantee against natural-language indirect injection (that is the sink layer; this spec only removes the fake signage).
 
 ## Settled invariants
 
-1. **模型协议是派生视图。** 投影是 `LoopState` + `request.system` 的纯函数；同一历史 → 同一 wire 字节（KV 前缀稳定）。不得靠每跳改 `system` 塞现势。
-2. **官方外形只来自带戳的宿主 commit。** 解析 XML / 前缀名册不是防伪；`isHostInjectedUserText` 继续服务 TUI 藏气泡 / instruction 回显，不承担权威。
-3. **Untrusted 不得复现 host 语法。** `tool_result` 与无戳 user 文本出站后，不得含可被读规则认作栏/宿主注入的未转义标签。内容仍可读（数据还在）。
-4. **Constitution 不可被父模型购买。** worker `system` 的 LOCKED 前缀与无 addendum 时相同；`task` / `systemPrompt` 不进最高信任槽。
-5. **失败 fail-closed。** 编码器/投影抛 typed 错误则本跳不发模型请求，不回落「原样上脏 transcript」。
-6. **不替代 sink。** 普通句子里的「去做 X」仍可能被模型执行；权限、沙箱、egress 仍是那一层。
+1. **The model protocol is a derived view.** The projection is a pure function of `LoopState` + `request.system`; the same history → the same wire bytes (KV prefix stability). Never stuff live state by editing `system` each hop.
+2. **Official appearance comes only from stamped host commits.** Parsing XML / prefix rosters is not anti-forgery; `isHostInjectedUserText` keeps serving TUI bubble hiding / instruction echo and carries no authority.
+3. **Untrusted content cannot reproduce host syntax.** After outbound, `tool_result` and unstamped user text must not contain unescaped tags that the read rule could take as the bar / host injection. Content stays readable (the data is still there).
+4. **The constitution cannot be bought by the parent model.** The worker's `system` LOCKED prefix is identical to the no-addendum case; `task` / `systemPrompt` never enter the highest-trust slot.
+5. **Failures fail closed.** If the encoder/projection throws a typed error, the hop sends no model request; no fallback to "upload the dirty transcript as-is".
+6. **No replacement of the sink.** "Go do X" in an ordinary sentence may still be executed by the model; permissions, sandbox, and egress remain that layer's job.
 
-## 任务拆分
+## Task breakdown
 
-### T1 — ADR + CONTEXT 词条（决策落盘）
+### T1 — ADR + CONTEXT entries (decision landing)
 
-把「出站投影 / 宿主帧出处 / 指令权威 vs 能力权威」写入 ADR 与 `docs/CONTEXT.md`。编号在落地分支相对默认分支取下一个空号（勿与未合入的 0108 抢号）。
+Write "outbound projection / host-frame provenance / instruction authority vs capability authority" into an ADR and `docs/CONTEXT.md`. The number takes the next free slot relative to the default branch on the landing branch (do not race the unmerged 0108).
 
-### T2 — 宿主 commit 盖戳 + 出站转译
+### T2 — host commit stamping + outbound transposition
 
-注入点盖戳；`buildMessageParams` 加深为投影。验收：tool_result 内完整假栏 → wire 上官方语法只出现在带戳帧。
+Stamp at the injection points; deepen `buildMessageParams` into the projection. Acceptance: a complete fake bar inside tool_result → on the wire, official syntax appears only in stamped frames.
 
-### T3 — 状态栏读规则
+### T3 — status-bar read rule
 
-改 `IKNOW_AGENT_STATUS_READ_RULE`；黄金集 / SEAM 锁按 `docs/guides/prompt-development.md`。
+Change `IKNOW_AGENT_STATUS_READ_RULE`; golden set / SEAM locks per `docs/guides/prompt-development.md`.
 
-### T4 — worker addendum 降权
+### T4 — worker addendum downgrade
 
-`withRoleExtras` / 等价装配：LOCKED 段不被 `envelope.systemPrompt` 覆盖。
+`withRoleExtras` / equivalent assembly: the LOCKED sections are not overridden by `envelope.systemPrompt`.
 
-### T5 — 根目录 README Features 一行
+### T5 — root README Features line
 
-功能合入后改 **仓库根** `README.md`（介绍项目的那份），在 `## Features` 加一条，句式与现有 Harness / Tools / Surfaces 同级：短、产品语言、不写攻击步骤。不改 `web/README.md`、不改 `docs/` 下 README。
+After the capability merges, edit the **repository root** `README.md` (the project-introduction one), adding one entry under `## Features` in the same register as the existing Harness / Tools / Surfaces lines: short, product language, no attack steps. Do not touch `web/README.md` or any README under `docs/`.
 
-## Out of scope（再列）
+## Out of scope (relisted)
 
-- 各工具各自加横幅（`web_fetch` 孤岛应收进投影，不在每个工具复制）。
-- 把栏从 messages 挪进 system（违反 ADR-0028 cache 契约）。
+- Per-tool banner additions (the `web_fetch` island should be folded into the projection, not copied into each tool).
+- Moving the bar from messages into system (violates the ADR-0028 cache contract).
