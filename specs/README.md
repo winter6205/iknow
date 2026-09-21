@@ -21,7 +21,7 @@
 
 ### Harness / state and transport
 
-- `code-restore.md` — rewind can restore workspace bytes from per-write preimages on the abandoned head chain (ADR-0027 / ADR-0071 / ADR-0110)
+- `code-restore.md` — rewind can restore workspace bytes from per-write preimages on the abandoned head chain (ADR-0119; ADR-0027 / ADR-0071 / ADR-0110)
 - `context-occupancy-autocompact.md` — the usage bar and the proactive compaction gate share one occupancy numerator (ADR-0118)
 - `session-list-title.md` — list title: standalone transcript event + lite-model generation (ADR-0113)
 - `agent-status-instruction-echo.md` — status-bar echo upgrade: verbatim `instruction:` replay segment + one-shot pivot reconcile marker (ADR-0103 amends ADR-0028; ACR PASS)

@@ -1,6 +1,6 @@
 # Spec: code restore on rewind
 
-**Status:** assumptions confirmed; architecture-change-reviewer not yet run  
+**Status:** ACR all-yes (see `plans/code-restore.md`)  
 **Surface:** session transcript projection + session-folder blobs + harness write-tool port + TUI confirm + rewind HTTP
 
 ## Objective
@@ -30,6 +30,7 @@ Settings stay in `src/config/settings.ts`: user-layer `codeRestore.enabled?: boo
   - TUI confirm offers three actions: rewind transcript and restore code, rewind transcript only, cancel.
   - HTTP rewind accepts an explicit `restoreCode` boolean; omitted means false.
   - Drift (current bytes differ from the last captured post-image) or a live **taskRoot** identity different from the captured root: skip workspace writes for the mismatched paths, list them on the rewind receipt, still move the rewind head.
+  - A transcript event whose preimage blob cannot be read: typed failure, zero workspace writes, rewind head unchanged.
   - `codeRestore.enabled: false` stops new captures. Already stored preimages remain usable.
 - **Confirms with human:** (none — assumption list confirmed)
 - **Out of this spec:**
@@ -49,6 +50,7 @@ Settings stay in `src/config/settings.ts`: user-layer `codeRestore.enabled?: boo
 - A capture-port failure (injected IO error) rejects the tool call and leaves the workspace file unchanged.
 - Two identical preimages in one session folder produce one blob file.
 - A parent rewind whose abandoned segment contains a worker `edit_file` or `write_file` restores that worker's file under the same drift rule.
+- A rewind whose abandoned segment references a preimage blob that cannot be read leaves workspace bytes unchanged and leaves the rewind head unchanged.
 - Picker confirm content lists the three actions; the execute action carries the boolean the hub receives.
 
 ## Open Questions
