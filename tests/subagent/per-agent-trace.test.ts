@@ -478,3 +478,77 @@ describe("T5 spec SC8 acceptance — 项目根顶层不存在 agent-* 目录", (
     );
   });
 });
+
+describe("T3 gate-blocked spawn forensic record", () => {
+  it("recordBlockedSpawn appends one subagent_spawn status:error line under the per-conversation subagents dir", async () => {
+    const { manager } = makeManager({ projectDir: projectSlugDir });
+    const notice =
+      "[worktree_isolation] This call would write the workspace, and it was not executed.";
+    manager.recordBlockedSpawn!({
+      conversationId: "conv-blk-1",
+      toolUseId: "toolu_blk",
+      parentTurnId: "turn-blk",
+      input: { task: "make the change", subagent_type: "general-purpose" },
+      notice,
+    });
+
+    const convSubagentsDir = join(projectSlugDir, "conv-blk-1", "subagents");
+    const records = listSubagentRecordPaths(convSubagentsDir);
+    assert.equal(records.length, 1, records.join(","));
+    const rows = readFileSync(records[0]!, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(rows.length, 1);
+    const row = rows[0]!;
+    assert.equal(row.record_type, "subagent_spawn");
+    assert.equal(row.status, "error");
+    assert.equal(row.origin, "parent");
+    assert.equal(row.parent_turn_id, "turn-blk");
+    assert.equal(row.task_preview, "make the change");
+    const err = row.error as { type: string; message: string };
+    assert.equal(err.type, "execution_failed");
+    assert.equal(err.message, notice);
+    const forensicId = row.subagent_id as string;
+    assert.match(forensicId, /^[0-9a-f-]{36}$/i);
+    assert.equal(row.task_id, forensicId);
+    // no lifecycle behind the forensic line: the task tables never saw it,
+    // no concurrency slot was taken, and no worker .meta.json was written.
+    assert.equal(manager.queryBuffer(forensicId).status, "not_found");
+    assert.deepEqual([...manager.listActive()], []);
+    assert.equal(
+      existsSync(workerMetaPath(convSubagentsDir, forensicId)),
+      false,
+      "blocked-spawn forensics must not fake a worker meta.json"
+    );
+    await manager.shutdown();
+  });
+
+  it("def-less forensic under subagentsDir assembly lands directly beside live spawn records", async () => {
+    const { manager } = makeManager({ subagentsDir });
+    manager.recordBlockedSpawn!({
+      notice: "[worktree_isolation] x",
+      input: {},
+    });
+    const records = listSubagentRecordPaths(subagentsDir);
+    assert.equal(records.length, 1, records.join(","));
+    const row = JSON.parse(readFileSync(records[0]!, "utf8").trim()) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(row.record_type, "subagent_spawn");
+    assert.equal(row.status, "error");
+    // empty / absent task → task_preview is the SSOT "" (never undefined)
+    assert.equal(row.task_preview, "");
+    // no turn attribution → key omitted (Postel), never null
+    assert.equal("parent_turn_id" in row, false);
+    await manager.shutdown();
+  });
+
+  it("no assembly dirs (subagentsDir / projectDir absent) → forensic call is a silent no-op", () => {
+    const { manager } = makeManager({});
+    assert.doesNotThrow(() =>
+      manager.recordBlockedSpawn!({ notice: "x", input: undefined })
+    );
+  });
+});

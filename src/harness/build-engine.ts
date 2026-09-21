@@ -1878,6 +1878,24 @@ export async function buildHarnessEngine(
           // foreign_worktree); no engine-level bound marker, since one
           // engine can serve several sessions.
           classify: classifyWithSubagentIsolation,
+          // T3 forensic: a blocked writable-role spawn lands one
+          // subagent_spawn status:error line in a fresh per-agent record
+          // (same JSONL layout as live spawns) before the manager ever ran;
+          // non-spawn blocked calls notify nothing extra.
+          onUnboundBlockedCall: (info) => {
+            if (info.toolName !== "spawn_subagent") return;
+            subagentManager?.recordBlockedSpawn?.({
+              notice: info.message,
+              input: info.input,
+              ...(info.conversationId !== undefined
+                ? { conversationId: info.conversationId }
+                : {}),
+              ...(info.turnId !== undefined
+                ? { parentTurnId: info.turnId }
+                : {}),
+              toolUseId: info.toolUseId,
+            });
+          },
           inner: executor,
         })
       : executor;

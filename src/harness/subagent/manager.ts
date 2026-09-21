@@ -258,6 +258,16 @@ export interface SubAgentManager {
    * new value immediately.
    */
   readonly getCapacity: () => SubagentCapacityValue;
+  /**
+   * T3 forensic: the worktree-isolation gate blocked a `spawn_subagent` call
+   * before any manager code ran (no worker, no slot, no parent content
+   * trace). Appends exactly one `subagent_spawn` status:"error" line —
+   * carrying the verbatim block notice — into a fresh per-agent record at
+   * the same JSONL layout normal spawns use, so the interception stays
+   * queryable after restart. Never registers a task and never throws.
+   * Optional so poll-only fakes stay structural.
+   */
+  readonly recordBlockedSpawn?: (info: BlockedSpawnForensics) => void;
 }
 
 /** Spawn DI factory signature: injected by the caller (test fakes / production defaultSubAgentSpawn). */
@@ -266,6 +276,20 @@ export type SubAgentSpawn = (
   taskId: string,
   stdinPayload: WorkerEnvelope
 ) => ChildProcess;
+
+/**
+ * One `spawn_subagent` call the worktree-isolation gate blocked before the
+ * manager ever ran (no worker, no slot). build-engine forwards the gate's
+ * unbound-block notification here verbatim; `notice` is the block receipt
+ * text the model saw.
+ */
+export interface BlockedSpawnForensics {
+  readonly notice: string;
+  readonly input: unknown;
+  readonly conversationId?: string;
+  readonly parentTurnId?: string;
+  readonly toolUseId?: string;
+}
 
 /** Typed rejection reasons for waitFor timeout / shutdown collection (status/reason constants passed through to the caller). */
 export class SubAgentWaitTimeoutError extends Error {
@@ -823,6 +847,32 @@ function readIsolationOn(
   return typeof value === "function" ? value() : value === true;
 }
 
+/**
+ * Minimal def-shape for the blocked-spawn forensic record: only the fields
+ * the interception actually knows (the spawn tool's raw input + turn
+ * attribution), Postel — absent values keep the key omitted. The record is
+ * rendered through the same helpers as live spawns, so a forensic row and a
+ * real spawn row share one shape.
+ */
+function blockedSpawnDefinition(
+  info: BlockedSpawnForensics
+): SubAgentDefinition {
+  const input = (info.input ?? {}) as Record<string, unknown>;
+  const role =
+    typeof input.subagent_type === "string" ? input.subagent_type : undefined;
+  return {
+    task: typeof input.task === "string" ? input.task : "",
+    ...(role !== undefined ? { role } : {}),
+    ...(info.conversationId !== undefined
+      ? { conversationId: info.conversationId }
+      : {}),
+    ...(info.parentTurnId !== undefined
+      ? { parentTurnId: info.parentTurnId }
+      : {}),
+    ...(info.toolUseId !== undefined ? { toolUseId: info.toolUseId } : {}),
+  };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -1103,6 +1153,48 @@ export function createSubAgentManager(opts: {
       return join(opts.projectDir, segment, SUBAGENT_TRACE_DIR_NAME);
     }
     return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
+  }
+
+  /**
+   * T3 forensic landing for a gate-blocked spawn (see the
+   * SubAgentManager.recordBlockedSpawn doc). Same path helpers as a live
+   * spawn (resolveSubagentsDirForDef + resolvePerAgentTrace →
+   * `<subagentsDir>/<taskId>/agent-<taskId>.jsonl`), same error-with-no-
+   * outcome shape as the spawn-failure precedent, and the same taskId
+   * minting (randomUUID — the blocked call never had a real task, the
+   * forensic UUID only keys the record file). No tasks.set, no slot, no
+   * meta, no state_change / stop (there is no lifecycle to terminate), and
+   * never a write to the parent content trace. A forensic write must never
+   * turn the gate's block receipt into an execution error, so sync IO
+   * failures degrade like the final-text pad (warn-once per call, never
+   * rethrow); async trace rejections are already swallowed by safeTrace.
+   */
+  function recordBlockedSpawn(info: BlockedSpawnForensics): void {
+    const taskId = randomUUID();
+    const def = blockedSpawnDefinition(info);
+    const startedAt = new Date().toISOString();
+    try {
+      const taskTrace = resolvePerAgentTrace(taskId, def);
+      if (taskTrace === null) return;
+      void safeTrace(() =>
+        taskTrace.recordSubagentSpawn({
+          id: taskId,
+          taskId,
+          ...parentTurnFields(def),
+          origin: "parent",
+          startedAt,
+          status: "error",
+          ts: startedAt,
+          taskPreview: truncateTaskPreview(def),
+          error: { type: "execution_failed", message: info.notice },
+        })
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[subagent] blocked-spawn forensic record skipped for ${taskId}: ${detail}`
+      );
+    }
   }
 
   /**
@@ -2487,5 +2579,8 @@ export function createSubAgentManager(opts: {
     // SubAgentCapacityError share one source (ADR-0096); the holder is the same one the
     // spawn gate holds.
     getCapacity: currentCapacity,
+    // T3 forensic entry: gate-blocked spawn_subagent calls land one
+    // subagent_spawn status:error line here (no task lifecycle behind it).
+    recordBlockedSpawn,
   });
 }

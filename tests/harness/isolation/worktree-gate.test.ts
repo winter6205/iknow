@@ -48,7 +48,10 @@ import {
   unboundMutateNotice,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
-import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
+import type {
+  GitRunner,
+  WorktreeIsolationGateOpts,
+} from "../../../src/harness/isolation/worktree-gate.ts";
 // Guard: the readonly-mode SSOT must stay untouched by the gate split.
 import {
   ReadonlyViolationError,
@@ -967,6 +970,137 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(second[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  // T3 forensic seam — the unbound-block branch notifies the host seam with
+  // the blocked call's identity and the verbatim block text (the gate itself
+  // performs no record IO); every other pass / block path stays silent.
+  it("T3 forensic seam — onUnboundBlockedCall fires once per unbound-blocked call with identity + verbatim notice", async () => {
+    type SeamInfo = Parameters<
+      NonNullable<WorktreeIsolationGateOpts["onUnboundBlockedCall"]>
+    >[0];
+    const seen: SeamInfo[] = [];
+    const { inner, calls } = fakeInner();
+    const gate = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        throw new Error("must not provision");
+      },
+      inner,
+      onUnboundBlockedCall: (info) => {
+        seen.push(info);
+      },
+    });
+
+    const out = await gate.executeAll(
+      [writeCall("c1")],
+      undefined,
+      undefined,
+      "conv-9",
+      undefined,
+      "turn-3"
+    );
+    expect(out[0]!.kind).toBe("execution_failed");
+    expect(calls).toHaveLength(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.toolName).toBe("write_file");
+    expect(seen[0]!.toolUseId).toBe("c1");
+    expect(seen[0]!.conversationId).toBe("conv-9");
+    expect(seen[0]!.turnId).toBe("turn-3");
+    expect(seen[0]!.input).toEqual({ path: "hello.txt", content: "hi" });
+    // the notified text is exactly the model-visible receipt text
+    expect(seen[0]!.message).toBe(unboundMutateNotice());
+    expect(seen[0]!.message).toBe(out[0]!.message);
+  });
+
+  it("T3 forensic seam — spawn_subagent toolName reaches the host unmodified under the injected classifier", async () => {
+    const seen: string[] = [];
+    const { inner } = fakeInner();
+    const gate = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        throw new Error("must not provision");
+      },
+      classify: (call) =>
+        call.name === "spawn_subagent" ? "mutate" : classifyCall(call),
+      inner,
+      onUnboundBlockedCall: (info) => {
+        seen.push(info.toolName);
+      },
+    });
+    const out = await gate.executeAll([
+      { id: "s1", name: "spawn_subagent", input: { task: "t" } },
+    ]);
+    expect(out[0]!.kind).toBe("execution_failed");
+    expect(seen).toEqual(["spawn_subagent"]);
+  });
+
+  it("T3 forensic seam — silent when the switch is OFF and on read passthrough", async () => {
+    let fired = 0;
+    const { inner } = fakeInner();
+    const off = createWorktreeIsolationExecutor({
+      enabled: { get: () => false },
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => "/wt",
+      inner,
+      onUnboundBlockedCall: () => {
+        fired += 1;
+      },
+    });
+    const offOut = await off.executeAll([writeCall()]);
+    expect(offOut[0]!.kind).toBe("ok");
+    expect(fired).toBe(0);
+
+    const on = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        throw new Error("must not provision");
+      },
+      inner,
+      onUnboundBlockedCall: () => {
+        fired += 1;
+      },
+    });
+    const readOut = await on.executeAll([
+      { id: "r1", name: "read_file", input: { path: "a" } },
+    ]);
+    expect(readOut[0]!.kind).toBe("ok");
+    expect(fired).toBe(0);
+  });
+
+  it("T3 forensic seam — the unbound seam is the ONLY notification branch: rebind and provision-failure blocks stay silent", async () => {
+    let fired = 0;
+    const notify = () => {
+      fired += 1;
+    };
+    const { inner } = fakeInner();
+    const rebound = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
+      provision: async () => "/other-wt",
+      inner,
+      onUnboundBlockedCall: notify,
+    });
+    const reboundOut = await rebound.executeAll([writeCall()]);
+    expect(reboundOut[0]!.kind).toBe("execution_failed");
+    expect(reboundOut[0]!.message).toContain("/other-wt");
+    expect(fired).toBe(0);
+
+    const failed = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-2"),
+      provision: async () => {
+        throw new WorktreeIsolationError("rebind_failed", "probe failure");
+      },
+      inner,
+      onUnboundBlockedCall: notify,
+    });
+    const failedOut = await failed.executeAll([writeCall("c8")]);
+    expect(failedOut[0]!.kind).toBe("execution_failed");
+    expect(fired).toBe(0);
   });
 
   // issue 1059 / ADR-0109 — the executor-face counterpart of the flip: in
