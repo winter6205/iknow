@@ -1,18 +1,22 @@
 /**
- * Worker 装配 × last-read 账本（ADR-0084 / specs/aci-file-search-surface.md D1）。
+ * Worker assembly x last-read ledger (ADR-0084).
  *
- * 不变式（spec D1「子代理新 conversation 空表」的装配层含义）：
- *   - 子代理是**独立** conversation：worker 按 envelope.taskId 拿自己的一份
- *     **空桶**，不共享父会话的账本条目；
- *   - 于是 worker 内「先 `read_file` 同一文件、再 `write_file`」必须成功
- *     （那次读入了它自己的桶）；
- *   - 没读过的非空文件仍拒（typed `last_read_required`），字节不变；
- *   - 桶是**空的**起点：只因为读过 a.ts 就放行 b.ts 的覆写是错的。
+ * Invariant (assembly-layer meaning of "a subagent is a fresh conversation
+ * with an empty table"):
+ *   - a subagent is an **independent** conversation: the worker gets its own
+ *     **empty bucket** keyed by envelope.taskId, sharing no ledger entries
+ *     with the parent session;
+ *   - hence inside a worker, "read_file then write_file the same file" must
+ *     succeed (the read landed in its own bucket);
+ *   - an unread non-empty file is still refused (typed
+ *     `last_read_required`), bytes unchanged;
+ *   - the bucket starts **empty**: reading a.ts must never allow overwriting b.ts.
  *
- * 走真实装配：`createWorkerDeps` → `createDefaultAciRegistry` →
- * `createAciExecutor`，再经 `runWorkerOnce` 跑真 loop-engine（stub-model
- * 脚本化 read→write 两跳）。刻意不 stub 账本、不直调 handler —— 否则
- * 「装配层漏传 conversationId」这条缺陷会被测试自己绕过去。
+ * Uses the real assembly path: `createWorkerDeps` → `createDefaultAciRegistry`
+ * → `createAciExecutor`, then a real loop-engine via `runWorkerOnce`
+ * (stub-model scripted read→write two hops). Deliberately no ledger stub and
+ * no direct handler calls — otherwise the "assembly forgot to pass
+ * conversationId" defect would be bypassed by the test itself.
  */
 
 import assert from "node:assert/strict";
@@ -39,7 +43,7 @@ import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 
-/** 测试用 minimal IknowEnv — createWorkerDeps 路径类型要求，不真发请求。 */
+/** Minimal test IknowEnv — required by createWorkerDeps typing; no real requests. */
 const TEST_ENV: IknowEnv = {
   llm: {
     apiKey: "test-key",
@@ -81,11 +85,12 @@ afterEach(async () => {
 });
 
 /**
- * stub-model 包装：每次 step 入口抓一份 messages 快照。
+ * stub-model wrapper: capture a messages snapshot at each step entry.
  *
- * loop-engine 的 RunResult 不回传工具结果，`runWorkerOnce` 的 envelope 也不
- * 带它们 —— 想断言「write_file 是被拒还是被放行」，只能从权威历史里读那条
- * tool_result（模型实际看到的就是它）。
+ * loop-engine's RunResult never returns tool results and `runWorkerOnce`'s
+ * envelope doesn't carry them either — to assert "was write_file refused or
+ * allowed" we must read that tool_result from the authoritative history
+ * (it is exactly what the model saw).
  */
 function capturingAdapter(responses: AssistantTurnResult[]): {
   readonly adapter: LoopEngineDeps["adapter"];
@@ -103,7 +108,7 @@ function capturingAdapter(responses: AssistantTurnResult[]): {
   return { adapter, seen };
 }
 
-/** 从权威历史里取某个 tool_use_id 的 tool_result 文本（模型可见判据）。 */
+/** tool_result text for a tool_use_id from the authoritative history (model-visible). */
 function toolResultText(
   messages: ReadonlyArray<AnthropicNativeMessage> | undefined,
   toolUseId: string
@@ -126,7 +131,7 @@ function toolResultText(
   return undefined;
 }
 
-/** hermetic worker 装配缝：scratch root + scratch home + noop trace。 */
+/** Hermetic worker assembly seam: scratch root + scratch home + noop trace. */
 function workerOpts(
   root: string,
   adapter: LoopEngineDeps["adapter"],
@@ -168,7 +173,7 @@ function readThenWrite(callIds: { read: string; write: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// A. conversationId 接线 —— 子代理拿到自己的 id（不是父会话的，不伪造）
+// A. conversationId wiring — the subagent gets its own id (not the parent's, never fabricated)
 // ---------------------------------------------------------------------------
 
 describe("worker 装配：last-read 账本的 conversationId 接线", () => {
@@ -193,9 +198,10 @@ describe("worker 装配：last-read 账本的 conversationId 接线", () => {
   });
 
   it("taskId 在场但 traceFilePath 缺席 → 账本 id 仍生效（两键不是绑死的）", async () => {
-    // 与 trace 的契约不同:file-mode 要求 traceFilePath + taskId 配对
-    // (缺席则装配期 fail-loud),而账本只需要 taskId。这条锁住「不把账本
-    // 挂在 traceFilePath 分支里」——否则只传 taskId 的 caller 会静默没 id。
+    // Unlike the trace contract: file-mode requires traceFilePath + taskId
+    // paired (fail-loud at assembly if missing), while the ledger only needs
+    // taskId. This pins "the ledger is not nested in the traceFilePath
+    // branch" — otherwise taskId-only callers would silently lose their id.
     const root = await makeScratch("worker-last-read-wire-");
     const adapter = createStubModel({ responses: [] });
 
@@ -207,14 +213,15 @@ describe("worker 装配：last-read 账本的 conversationId 接线", () => {
   });
 
   it("两次装配 = 两份独立账本 host：上一次 worker 的读不残留到下一次", async () => {
-    // worker 每次 spawn 都是新进程 + 新 registry，故每份 host 各自从空表开始
-    // —— spec「子代理新 conversation 空表」里「空」的那一半。若 host 是进程级
-    // 单例（或挂在模块级常量上），下面第二次装配会因上一次的读而放行，变红。
+    // Each spawn is a new process + new registry, so every host starts from
+    // an empty table — the "empty" half of "subagent = fresh conversation".
+    // If the host were a process-level singleton (or a module-level constant),
+    // the second assembly below would be allowed through by the first read and go red.
     const root = await makeScratch("worker-last-read-fresh-");
     const target = join(root, "a.ts");
     await writeFile(target, "original\n");
 
-    // 第一次装配：真读入账（走完整装配路径,不直调 handler）。
+    // First assembly: a real read lands in the ledger (full assembly path, no direct handler call).
     const first = capturingAdapter([
       assistantResult({
         texts: [],
@@ -235,7 +242,7 @@ describe("worker 装配：last-read 账本的 conversationId 接线", () => {
       `第一次装配的 read_file 应先成功，实际: ${readResult}`
     );
 
-    // 第二次装配：同一 TASK_ID、同一路径 —— 但这是另一次 spawn，桶重新是空的。
+    // Second assembly: same TASK_ID, same path — but a different spawn, so the bucket is empty again.
     const second = capturingAdapter([
       assistantResult({
         texts: [],
@@ -269,7 +276,7 @@ describe("worker 装配：last-read 账本的 conversationId 接线", () => {
 });
 
 // ---------------------------------------------------------------------------
-// B. SC1 在 worker 装配路径上成立 —— 先读后写放行
+// B. read-before-write is allowed on the worker assembly path
 // ---------------------------------------------------------------------------
 
 describe("worker 装配路径：read_file 后 write_file 同一文件", () => {
@@ -310,7 +317,7 @@ describe("worker 装配路径：read_file 后 write_file 同一文件", () => {
 });
 
 // ---------------------------------------------------------------------------
-// C. SC3 在 worker 装配路径上成立 —— 未读非空文件仍拒（typed 文案 + 字节不变）
+// C. unread non-empty files stay refused on the worker assembly path (typed message + bytes unchanged)
 // ---------------------------------------------------------------------------
 
 describe("worker 装配路径：未读的非空文件仍被拒", () => {
@@ -407,7 +414,7 @@ describe("worker 装配路径：未读的非空文件仍被拒", () => {
 });
 
 // ---------------------------------------------------------------------------
-// D. legacy envelope（无 taskId）—— 无 id → 非空覆写 fail-closed（spec D1 不变）
+// D. legacy envelope (no taskId) — no id -> non-empty overwrite fails closed
 // ---------------------------------------------------------------------------
 
 describe("worker 装配路径：无 id 的 legacy envelope 保持 fail-closed", () => {
@@ -441,7 +448,7 @@ describe("worker 装配路径：无 id 的 legacy envelope 保持 fail-closed", 
 
     const finalMessages = seen.at(-1);
     assert.ok(finalMessages);
-    // 读仍然成功（无 id 只影响入账，不拒绝读）。
+    // Reads still succeed (no id only affects ledger writes, never blocks reads).
     const readResult = toolResultText(finalMessages, "c1");
     assert.ok(
       readResult !== undefined && !readResult.startsWith("[execution_failed]"),

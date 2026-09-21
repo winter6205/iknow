@@ -1,17 +1,20 @@
 /**
  * tests/tui/quit-abort.test.ts
  *
- * SC12（`specs/agent-control-surface.md` Slice D）/ plan task 7：`/quit` 必须
- * 先 abort 当前前台 turn，再等收尾 —— 否则前景 `spawn_subagent(wait:true)`
- * 的 inflight promise 会一直等到子代理 per-task 墙钟（缺省 7200s），退出挂起。
+ * `/quit` must abort the current foreground turn first, then wait for
+ * settle — otherwise a foreground `spawn_subagent(wait:true)` inflight
+ * promise would wait out the sub-agent's per-task wall clock (default 7200s)
+ * and quit would hang.
  *
- * 本测钉纯助手 `abortForegroundTurnOnQuit`（不渲染 TUI）：只 abort 活跃会话
- * 的 `running-fg` controller；后台会话（`running-bg`）与 draft 会话不动。
- * 助手内用的是 `canInterrupt` 单一判据（Ctrl+C / Esc / 双 Esc 同源消费），
- * 所以这里同时是那条状态机不变式的回归锚点。
+ * This test pins the pure helper `abortForegroundTurnOnQuit` (no TUI render):
+ * it aborts only the active session's `running-fg` controller; background
+ * sessions (`running-bg`) and draft sessions are left alone. The helper uses
+ * the single `canInterrupt` predicate (consumed by Ctrl+C / Esc / double-Esc
+ * from the same source), so this doubles as the regression anchor for that
+ * state-machine invariant.
  *
- * abort 出口链路（R2 票面已核实）在本测之外由
- * `tests/tui/wait-cancel-abort.test.tsx` 走到真实 manager.waitFor。
+ * The abort exit path is covered outside this test by
+ * `tests/tui/wait-cancel-abort.test.tsx`, which reaches the real manager.waitFor.
  */
 import { describe, expect, test } from "bun:test";
 import { abortForegroundTurnOnQuit } from "../../src/tui/quit-abort.js";

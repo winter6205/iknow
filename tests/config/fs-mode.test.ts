@@ -1,16 +1,15 @@
 /**
- * ADR-0092 / SC13: `/config` 命令 SSOT 单测（解析 + 执行 + 文案）。
+ * ADR-0092: `/config` command SSOT unit tests (parsing + execution + copy).
  *
- * 命令 SSOT 三函数（`parseConfigCommand` / `applyFsModeCommand` /
- * `formatFsModeStatus`）落在 `src/harness/sandbox/fs-mode.ts`（T7 持有该
- * 文件主体；T8 仅追加这三个函数 + 相关类型 / 用法常量）。本测试在
- * vitest 面覆盖命令 SSOT 的值域与文案，TUI / serve 集成面见
- * `tests/tui/fs-mode.test.tsx` 与 `tests/tui/slash.test.ts` 的 `/config`
- * 词表断言。
+ * The three command-SSOT functions (`parseConfigCommand` / `applyFsModeCommand` /
+ * `formatFsModeStatus`) live in `src/harness/sandbox/fs-mode.ts`. This test covers
+ * the command SSOT's value domain and user-visible copy on the vitest side; the
+ * TUI / serve integration is in `tests/tui/fs-mode.test.tsx` and the `/config`
+ * vocabulary assertions in `tests/tui/slash.test.ts`.
  *
- * 镜像 `tests/harness/graph-mode.test.ts`（D-α V1）的 `parseGraphCommand`
- * / `applyGraphCommand` / `formatGraphStatus` 三函数 SSOT 覆盖形态：
- * 值域闭环、多余 args 拒绝、文案锁定、单字 trim/小写、holder 接通与切换。
+ * Coverage shape mirrors the graph-mode three-function SSOT pattern (parse /
+ * apply / format): value-domain closure, extra-args rejection, copy locking,
+ * single-token trim/lowercase, holder wiring and switching.
  */
 import { describe, expect, test } from "vitest";
 
@@ -26,10 +25,11 @@ import {
   type FsIsolationMode,
 } from "../../src/harness/sandbox/fs-mode.ts";
 
-// 注意：本函数是**命令面**（`/config` args + holder `set` 兜底）的字面守卫。
-// settings 段不走它 —— `isolation.fsMode` 在 `src/config/settings.ts` 按
-// **大小写敏感**字面量单独校验（`"Workspace"` 在 settings.json 被丢弃，
-// 走 `/config fs Workspace` 却命中）。放宽 settings 侧需 ADR 裁定。
+// Note: this function is the literal guard for the **command surface** only
+// (`/config` args + holder `set` fallback). The settings section bypasses it —
+// `isolation.fsMode` is validated separately in `src/config/settings.ts` against
+// **case-sensitive** literals (`"Workspace"` is dropped in settings.json yet hits
+// via `/config fs Workspace`). Relaxing the settings side requires an ADR ruling.
 describe("parseFsModeFlag（命令面值域：/config args + holder set）", () => {
   test("'global' → 'global'", () => {
     expect(parseFsModeFlag("global")).toBe("global");
@@ -108,10 +108,12 @@ describe("parseConfigCommand（/config args 解析）", () => {
     expect(parseConfigCommand(["fs", ""])).toEqual({ kind: "usage" });
   });
 
-  // 穷尽性纪律（镜像 tests/harness/isolation/recoverability.test.ts 的
-  // RECOVERABILITY 形态）：Record 的键类型是 ConfigCommand["kind"]，所以
-  // 增删 kind 而不同步本表 → `npm run typecheck` 失败（主防线）；下表再把
-  // 「每个 kind 确实能被解析器产出来」钉成运行时断言（副防线）。
+  // Exhaustiveness discipline (mirrors the RECOVERABILITY shape in
+  // tests/harness/isolation/recoverability.test.ts): the Record's key type is
+  // ConfigCommand["kind"], so adding/removing a kind without syncing this table
+  // fails `npm run typecheck` (primary defense); the table below additionally
+  // pins "every kind really is producible by the parser" as a runtime assertion
+  // (secondary defense).
   const KIND_PROBE: Record<ConfigCommand["kind"], () => ConfigCommand["kind"]> =
     {
       status: () => parseConfigCommand([]).kind,
@@ -121,7 +123,7 @@ describe("parseConfigCommand（/config args 解析）", () => {
 
   test("每个 kind 都有可达的解析入口，且解析结果落在声明闭集内", () => {
     const observed = Object.entries(KIND_PROBE).map(([declared, probe]) => {
-      // 探针返回的 kind 必须就是它自称覆盖的那个 —— 否则「有入口」是假的。
+      // The kind the probe returns must be exactly the one it claims to cover — otherwise "has an entry" is fake.
       expect(probe()).toBe(declared);
       return declared;
     });
@@ -146,8 +148,9 @@ describe("parseConfigCommand（/config args 解析）", () => {
   });
 
   test("越界 args 不崩：非字符串 / 空洞 / 超长数组 → usage（fail-closed，不抛）", () => {
-    // 上限：wire 来的 args 未必干净。`?? ""` 只在 [0] 兜底，[1] 直接透传
-    // 给 parseFsModeFlag（后者 typeof 守卫）。这些输入不得抛。
+    // Upper bound: args from the wire may be dirty. `?? ""` backstops only [0];
+    // [1] passes straight to parseFsModeFlag (which has a typeof guard).
+    // These inputs must not throw.
     expect(parseConfigCommand([undefined as unknown as string])).toEqual({
       kind: "usage",
     });
@@ -157,7 +160,7 @@ describe("parseConfigCommand（/config args 解析）", () => {
     expect(parseConfigCommand(["fs", null as unknown as string])).toEqual({
       kind: "usage",
     });
-    // 下限：超长 args 只认前两 token，多余一律 usage。
+    // Lower bound: overlong args honor only the first two tokens; extras → usage.
     expect(parseConfigCommand(["fs", "global", "a", "b", "c"])).toEqual({
       kind: "usage",
     });
@@ -168,7 +171,7 @@ describe("formatFsModeStatus（状态回显文案单点）", () => {
   test("global 档文案：明示「宿主真路径可读写，拦写靠权限 + hard-wall」", () => {
     const text = formatFsModeStatus("global");
     expect(text).toContain("global");
-    // 文案必须可读、与 spec SC13 / ADR-0092 概念一致。
+    // Copy must be readable and consistent with ADR-0092 concepts.
     expect(text).toMatch(/宿主|权限|hard-wall/);
   });
 
@@ -214,7 +217,7 @@ describe("applyFsModeCommand（holder 上执行 + 用户可见文案）", () => 
     const ctx = createFsModeContext("global");
     const res = applyFsModeCommand(ctx, ["fs", "bad"]);
     expect(res.ok).toBe(false);
-    expect(ctx.get()).toBe("global"); // 不动 holder
+    expect(ctx.get()).toBe("global"); // holder untouched
     expect(res.text).toBe(FS_MODE_USAGE_TEXT);
   });
 
@@ -265,7 +268,7 @@ describe("createFsModeContext（T7 提供的 holder 工厂）", () => {
     const ctx = createFsModeContext("global");
     const before = ctx.get();
     ctx.set("workspace");
-    expect(before).toBe("global"); // 旧 snapshot 不变
+    expect(before).toBe("global"); // old snapshot unchanged
     expect(ctx.get()).toBe("workspace");
   });
 });

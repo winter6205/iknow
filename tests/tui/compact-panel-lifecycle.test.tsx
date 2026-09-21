@@ -2,20 +2,24 @@
 /**
  * tests/tui/compact-panel-lifecycle.test.tsx
  *
- * compact 进度面板的 **app 级生命周期**测试（bun:test）。
+ * **App-level lifecycle** tests for the compact progress panel (bun:test).
  *
- * 与 `compact-progress.test.tsx`（纯函数 + 组件 smoke）互补：那份测的是
- * 归约与渲染，这份测的是 **app.tsx 的接线契约** —— 面板何时被建立、何时被
- * 卸载。存在的直接原因：Spec review High —— 面板卸载要靠 HOLD_MS timer，
- * 而 timer 原先只在手动路径的 `settleCompactPanelFor` 里武装，turn 内
- * auto-compact 的终态事件直接把 `terminal` 置位却不武装 timer，导致
- * `✓ done` 面板永久挂在屏上并持续顶高 chrome 行账（+7 行）。
+ * Complements `compact-progress.test.tsx` (pure functions + component
+ * smoke): that file covers reduction and rendering, this one covers the
+ * **app.tsx wiring contract** — when the panel mounts and when it unmounts.
+ * Direct reason for existing: panel unmount relies on the HOLD_MS timer,
+ * which was originally armed only in the manual path's
+ * `settleCompactPanelFor`; a mid-turn auto-compact terminal event set
+ * `terminal` without arming the timer, leaving the `✓ done` panel on screen
+ * forever and permanently inflating the chrome row account (+7 rows).
  *
- * 覆盖：
- *  1. turn 内 compaction_completed → 面板出现 → 终态后 HOLD_MS 内卸载
- *     （High 回归防线：不卸载即永久残留）；
- *  2. turn 内 compaction_started 后 turn 结束、无终态事件 → finally 强扫
- *     立即卸载（plan D3.5 的「漏 settle 不留伪在途」）。
+ * Covers:
+ *  1. mid-turn compaction_completed → panel appears → unmounts within
+ *     HOLD_MS after the terminal state (regression guard: un-unmounted =
+ *     permanent residue);
+ *  2. compaction_started then turn end with no terminal event → the finally
+ *     sweep unmounts immediately (a missed settle must not leave a fake
+ *     in-flight panel).
  */
 import { describe, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -36,7 +40,8 @@ import type { CompactReason } from "../../src/harness/compress/index.js";
 import { COMPACT_HOLD_MS } from "../../src/tui/compact-progress.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
-/** 帧等待：mockInput 字节经 stdin 异步解析，需轮询 renderOnce。 */
+/** Frame wait: mockInput bytes parse asynchronously via stdin, so poll
+ *  renderOnce. */
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
@@ -53,7 +58,8 @@ async function untilFrame(
   throw new Error(`untilFrame timeout ${label}:\n${setup.captureCharFrame()}`);
 }
 
-/** 轮询直到断言成立（面板卸载是异步的：hold timer 到点后才消失）。 */
+/** Poll until the assertion holds (panel unmount is async: it disappears
+ *  only after the hold timer fires). */
 async function until(
   cond: () => boolean | Promise<boolean>,
   ms = 8000,
@@ -74,8 +80,9 @@ interface DrivenApp {
 }
 
 /**
- * mount 一个 TuiApp，stub 模型在 turns 的流式臂里发给定事件序列
- * （`streamEventsByStep` 是 stub-model 的既有缝，max-turns / hub 测试同款用法）。
+ * Mount a TuiApp whose stub model emits the given event sequence in the
+ * turn's streaming arm (`streamEventsByStep` is the stub-model's existing
+ * seam, same usage as the max-turns / hub tests).
  */
 async function mountWithTurnEvents(
   events: ReadonlyArray<HarnessStreamEvent>
@@ -93,7 +100,8 @@ async function mountWithTurnEvents(
   return mountWithBridge(bridge, dataDir);
 }
 
-/** 手动路径：把 bridge.compactSession 换成给定实现（包一层真 bridge）。 */
+/** Manual path: swap bridge.compactSession for a given implementation
+ *  (wrapping the real bridge). */
 async function mountWithCompactSession(
   result:
     { readonly compacted: boolean; readonly reason: CompactReason } | Error
@@ -183,9 +191,10 @@ describe("compact 面板 app 级生命周期（Spec review High 回归防线）"
     await app.typeText("hi");
     await app.pressEnter();
 
-    // 面板出现（turn 内 auto-compact 此前对用户完全静默，这是首个可见化）。
+    // Panel appears (mid-turn auto-compact was previously fully silent to
+    // the user; this is its first visualization).
     await untilFrame(app.setup, (f) => f.includes("Compacting"), 8000, "panel");
-    // 终态：done 状态行可见（✓ + done）。
+    // Terminal state: the done status line is visible (✓ + done).
     await untilFrame(
       app.setup,
       (f) => f.includes("✓") && f.includes("done"),
@@ -193,8 +202,9 @@ describe("compact 面板 app 级生命周期（Spec review High 回归防线）"
       "terminal"
     );
 
-    // **关键断言**：HOLD_MS 之后面板必须消失。修复前 turn 路径不武装 timer，
-    // 这一步会超时（面板永久挂屏 + chrome 行账永久 +7）。
+    // **Key assertion**: the panel must vanish after HOLD_MS. Before the
+    // fix the turn path never armed the timer, so this step times out
+    // (panel stuck on screen + chrome row account permanently +7).
     await until(
       () => {
         void app.setup.renderOnce();
@@ -210,17 +220,20 @@ describe("compact 面板 app 级生命周期（Spec review High 回归防线）"
   test("turn 内 compaction_started 后无终态事件 → turn finally 强扫，终帧不留面板（不留伪在途）", async () => {
     const app = await mountWithTurnEvents([
       { type: "compaction_started", droppedCount: 3 },
-      // 故意不发 completed / failed / cancelled：模拟 reactive 早返回 /
-      // 事件被吞咽的「缺终态」路径。
+      // Deliberately no completed / failed / cancelled: simulates the
+      // "missing terminal" path from a reactive early return / swallowed
+      // event.
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("hi");
     await app.pressEnter();
 
-    // 面板的建立与 finally 强扫都发生在同一个 turn 内，帧上可能一闪而过 ——
-    // 契约是**终帧**不留面板，故断言 turn 结束后的稳定帧（修复前：面板带
-    // `◐ Ns · 3 messages folded` 永久残留，本断言失败）。
+    // Both panel mount and the finally sweep happen inside the same turn,
+    // possibly a frame flash — the contract is that the **final frame**
+    // holds no panel, so assert on the settled frame after the turn ends
+    // (before the fix: the panel lingered forever with
+    // `◐ Ns · 3 messages folded` and this assertion failed).
     await untilFrame(app.setup, (f) => f.includes("ok"), 8000, "answer");
     await until(
       () => {
@@ -241,7 +254,8 @@ describe("compact 面板 app 级生命周期（Spec review High 回归防线）"
     });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 先建会话（draft 会走 guard 分支，不进 panel 路径）。
+    // Seed a session first (a draft goes through the guard branch, not the
+    // panel path).
     await app.typeText("hi");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("ok"), 8000, "seed");
@@ -255,7 +269,8 @@ describe("compact 面板 app 级生命周期（Spec review High 回归防线）"
       8000,
       "noop-notice"
     );
-    // no-op = 压根没发生压缩：面板必须清掉（修复前的伪 done 会留 `✓ done`）。
+    // no-op = compaction never happened: the panel must be cleared (before
+    // the fix the fake done left `✓ done`).
     await until(
       () => {
         void app.setup.renderOnce();

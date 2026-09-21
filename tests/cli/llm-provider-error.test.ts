@@ -1,22 +1,25 @@
 /**
- * ADR-0093 / spec SC4 —— CLI 侧 `LlmProviderConfigError` 渲染（typed-error
- * catch 契约，`.claude/rules/code-quality.md`）。
+ * ADR-0093 — CLI-side rendering of `LlmProviderConfigError` (typed-error catch
+ * contract, `.claude/rules/code-quality.md`).
  *
- * `loadIknowEnv` 在 provider 命中但 `apiKeyEnv` 未设时抛的是**plain object**
- * （判别联合，不是 Error 实例）。CLI 两个 catch 点必须走
- * `isLlmProviderConfigError` 守卫 + `formatLlmProviderConfigError`，否则
- * `String(err)` 会打成 `[object Object]`，providerId / env 名全部不可见 ——
- * 与 `src/tui/run.tsx` 同 PR 已修的形态对齐。
+ * When a provider matches but its `apiKeyEnv` is unset, `loadIknowEnv` throws a
+ * **plain object** (a discriminated union, not an Error instance). Both CLI
+ * catch points must route through the `isLlmProviderConfigError` guard +
+ * `formatLlmProviderConfigError`; otherwise `String(err)` prints
+ * `[object Object]` and providerId / env name become invisible — aligned with
+ * the shape already fixed in `src/tui/run.tsx` in the same PR.
  *
- * 观测手段（为什么走真实子进程）：`printCliError` / `printChatError` 是
- * cli.ts 的模块私有函数，而 cli.ts 顶层会自跑 `main()`（无法 import 单测，
- * 同 tests/cli/trace-default-mode.test.ts 的结论）。端到端跑真实 CLI 才是
- * 「用户实际看到的 stderr」这一承重面的黑盒证明：oneshot 走 `main().catch`
- * → `printCliError`，chat 的 `prepareRuntime` 抛出 → `printChatError`。
+ * Why a real child process: `printCliError` / `printChatError` are module-private
+ * in cli.ts, and cli.ts runs `main()` at import time (unit-import impossible,
+ * same conclusion as tests/cli/trace-default-mode.test.ts). Spawning the real
+ * CLI end-to-end is the black-box proof of the load-bearing surface — "the
+ * stderr the user actually sees": oneshot goes `main().catch` →
+ * `printCliError`; a chat `prepareRuntime` throw goes → `printChatError`.
  *
- * 隔离：HOME 指向 scratch（settings.llm.model 命中 `acme` provider，其
- * apiKeyEnv 显式从子进程环境里删掉）→ `loadIknowEnv` 必抛；cwd 为空目录，
- * 不读真实项目 settings。
+ * Isolation: HOME points at scratch (settings.llm.model matches the `acme`
+ * provider whose apiKeyEnv is explicitly deleted from the child env) →
+ * `loadIknowEnv` must throw; cwd is an empty dir so real project settings are
+ * never read.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** 与 tests/cli/trace-default-mode.test.ts 同款 tsx 定位（worktree node_modules）。 */
+/** Same tsx lookup as tests/cli/trace-default-mode.test.ts (worktree node_modules). */
 function resolveTsxCli(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
@@ -42,7 +45,7 @@ function resolveTsxCli(): string {
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
-      // 继续向上
+      // keep walking up
     }
     const parent = join(dir, "..");
     if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
@@ -66,7 +69,7 @@ beforeAll(() => {
     join(home, ".iknow", "settings.json"),
     JSON.stringify({
       llm: {
-        // provider/model 形态命中注册表 → baseUrl/apiKey 走 provider 三元组。
+        // provider/model shape matches the registry → baseUrl/apiKey come from the provider triple.
         model: `${PROVIDER_ID}/foo`,
         providers: [
           {
@@ -85,13 +88,13 @@ afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** 跑一次真实 CLI 子进程，返回 exit code + stderr。 */
+/** Run one real CLI child process; return exit code + stderr. */
 function runCli(args: string[]): Promise<{ code: number | null; err: string }> {
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: join(scratch, "home"),
   };
-  // 显式删掉 provider 的 env var —— 断言的就是「未设」这一档。
+  // Explicitly delete the provider env var — the asserted state IS "unset".
   delete childEnv[API_KEY_ENV];
   const child = spawn(
     process.execPath,
@@ -114,7 +117,7 @@ describe("CLI 渲染 LlmProviderConfigError（SC4 / typed-error catch 契约）"
   it("ask（printCliError 路径）→ stderr 含 providerId + env 名，不含 [object Object]", async () => {
     const { code, err } = await runCli(["ask", "hi"]);
     assert.equal(code, 1, `expected exit 1, stderr=${err}`);
-    // 修复前：String(plain object) → "[object Object]"，provider/env 全不可见。
+    // Before the fix: String(plain object) → "[object Object]"; provider/env invisible.
     assert.equal(
       err.includes("[object Object]"),
       false,

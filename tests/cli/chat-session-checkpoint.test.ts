@@ -1,21 +1,24 @@
 /**
- * T2: chat REPL 会话中断/退出 checkpoint 落盘 + Ctrl+C 信号接线。
+ * Chat REPL checkpoint persistence on interrupt/exit, plus Ctrl+C wiring.
  *
- * 覆盖(ACR 要求 4 条 + #222 六类路径):
- *   1. empty-messages:turn-0 cancelled(空 messages)→ 不写文件;
- *   2. MaxTurnsExceeded-at-turn-0(delta=0)→ no-op,不写文件;
- *   3. resumed-then-cancelled:同 conversationId 续跑再 cancelled → 累计
- *      turnCount 断言(checkpoint 序列可连续,镜像 hub.ts:739 约定);
- *   4. signal-then-save:abort → run resolve "cancelled" → checkpoint 落盘,
- *      文件含 interruptReason="cancelled";
- *   + 正常路径:completed 落盘含完整 messages;
- *   + 失败路径:write_failed → warn+continue 不重抛;
- *   + 边界:prior==state.messages 引用不受 run 后 host 替换影响(delta 正确);
- *   + 空/非法:conversationId=null → 跳过持久化;
- *   + 并发/重复:重复 commit(同 conversationId 两轮 completed)→ 顺序累计。
+ * Paths covered:
+ *   1. empty-messages: turn-0 cancel (no messages) writes no file;
+ *   2. MaxTurnsExceeded-at-turn-0 (delta=0) is a no-op, writes no file;
+ *   3. resumed-then-cancelled: continuing under the same conversationId then
+ *      cancelling accumulates turnCount (checkpoint sequence stays contiguous,
+ *      mirroring the hub.ts convention);
+ *   4. signal-then-save: abort → run resolves "cancelled" → checkpoint lands on
+ *      disk with interruptReason="cancelled";
+ *   + happy path: completed persists full messages;
+ *   + failure path: write_failed warns and continues, never rethrows;
+ *   + boundary: the prior==state.messages reference survives host replacement
+ *     after run, so the delta is correct;
+ *   + empty/invalid: conversationId=null skips persistence;
+ *   + concurrency: repeated commits under one conversationId accumulate in
+ *     order.
  *
- * 复用既有测试模式:processChatLine(pipe 模拟)+ stub deps + 隔离 temp dir
- * SessionStore(绝不写真实 ~/.iknow)。
+ * Reuses the established pattern: processChatLine over a pipe, stub deps, and a
+ * SessionStore in an isolated temp dir (never the real ~/.iknow).
  */
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -93,7 +96,7 @@ const warnCollector = (): { warn: (line: string) => void; lines: string[] } => {
   };
 };
 
-// -- persistChatSessionCheckpoint (纯 IO helper, 直测) -----------------------
+// -- persistChatSessionCheckpoint (pure IO helper, tested directly) ----------
 
 describe("persistChatSessionCheckpoint", () => {
   it("cancelled 空 messages(turn-0)→ shouldPersist false → 不写文件", async () => {
@@ -124,7 +127,7 @@ describe("persistChatSessionCheckpoint", () => {
       store: s,
       conversationId: id,
       jsonMode: false,
-      // prior=[] run 产生 [user, assistant] (delta>0)
+      // prior=[] and the run yields [user, assistant] (delta>0)
       result: buildResult({
         stopReason: "cancelled",
         messages: [userMsg("q"), assistantMsg("partial")],
@@ -144,15 +147,17 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("protocolError(delta=user)→ 只落 user 消息;失败的 assistant 不进历史 (spec invariant 8)", async () => {
-    // chat 与 hub 共用 decideCheckpointPersist 的 partial_user_only 分支:
-    // protocolError 后用户那句话留在盘上,失败的 assistant 不进历史。
+    // chat and hub share decideCheckpointPersist's partial_user_only branch:
+    // after protocolError the user's sentence stays on disk, the failed
+    // assistant turn never enters history.
     const s = await storeFor();
     const id = "protocol-partial";
     await persistChatSessionCheckpoint({
       store: s,
       conversationId: id,
       jsonMode: false,
-      // 引擎在失败前已编码 user query(末条是 dangling user,无 assistant)。
+      // The engine had already encoded the user query before failing (last
+      // entry is a dangling user, no assistant).
       result: buildResult({
         stopReason: "protocolError",
         messages: [userMsg("keep my sentence")],
@@ -175,8 +180,9 @@ describe("persistChatSessionCheckpoint", () => {
       "failed assistant turn must not reach disk"
     );
     assert.equal(file.turnCount, 0);
-    // 该 user 消息是可回退锚点(rewind picker 消费 checkpoints 的 interruptedAt;
-    // toInterruptReason 对 protocolError 有 label,故记录被 append)。
+    // The user message is a rewind anchor (the rewind picker consumes
+    // checkpoints' interruptedAt; toInterruptReason labels protocolError, so
+    // the record is appended).
     assert.deepEqual(
       file.checkpoints?.map((c) => c.interruptReason),
       ["protocolError"]
@@ -185,8 +191,9 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("protocolError(仅 tool_result delta)→ 不写文件(orphan 不进盘)", async () => {
-    // tool_result-only user 消息是续跑不是 query(isTurnQuery SSOT);单独落盘
-    // 会留下无 assistant tool_use 配对的孤儿。
+    // A tool_result-only user message is a continuation, not a query (isTurnQuery
+    // SSOT); persisting it alone would leave an orphan with no paired assistant
+    // tool_use.
     const s = await storeFor();
     const id = "protocol-tool-result-only";
     const prior = [userMsg("q"), assistantMsg("a")];
@@ -218,11 +225,12 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("protocolError(delta 混合 query + tool_result-only)→ 只落 query,不落 tool_result 孤儿", async () => {
-    // mid-tool-loop 的 protocolError:delta 同时含真 user query、它触发的
-    // assistant tool_use、以及只带 tool_result 的续跑 user 消息。tool_result
-    // 是 continuation 不是 query(isTurnQuery SSOT),其配对的 assistant
-    // tool_use 在 partial 路径被丢弃 —— 落盘它会留下畸形孤儿。role === "user"
-    // 裸判会把它一起写盘,本用例钉住两者分歧。
+    // protocolError mid-tool-loop: the delta holds a real user query, the
+    // assistant tool_use it triggered, and a tool_result-only continuation.
+    // tool_result is a continuation, not a query (isTurnQuery SSOT), and its
+    // paired assistant tool_use is dropped on the partial path — persisting it
+    // would leave a malformed orphan. A bare role === "user" check would write
+    // both; this case pins the divergence.
     const s = await storeFor();
     const id = "protocol-mixed-delta";
     const prior = [userMsg("earlier turn"), assistantMsg("earlier answer")];
@@ -287,8 +295,9 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("protocolError(delta 末尾是 drain 摘要)→ 无 query 增量 → 不写文件", async () => {
-    // subagent drain 摘要也是 SSOT 排除的 user 消息(host 注入,不是用户
-    // query)。整个 delta 只有它 → 零 query 增量 → 不落盘。
+    // The subagent drain summary is also an SSOT-excluded user message (host
+    // injected, not a user query). When it is the whole delta there is no query
+    // increment, so nothing is written.
     const s = await storeFor();
     const id = "protocol-drain-only";
     const prior = [userMsg("q"), assistantMsg("a")];
@@ -390,7 +399,7 @@ describe("persistChatSessionCheckpoint", () => {
   it("resumed-then-cancelled: 同 conversationId 二次写 → turnIndex 从既有累计(镜像 hub 约定)", async () => {
     const s = await storeFor();
     const id = "resumed-cancelled";
-    // 第一轮 completed:盘上 turnCount=1, messages=[user q1, assistant a1]。
+    // Round 1 completed: on disk turnCount=1, messages=[user q1, assistant a1].
     const first = [userMsg("q1"), assistantMsg("a1")];
     await persistChatSessionCheckpoint({
       store: s,
@@ -407,7 +416,8 @@ describe("persistChatSessionCheckpoint", () => {
     let file = await s.load(id);
     assert.equal(file.turnCount, 1);
 
-    // 第二轮 cancelled:prior=first,run 追加 [user q2](delta>0)→ 落 checkpoint。
+    // Round 2 cancelled: prior=first, the run appends [user q2] (delta>0) → a
+    // checkpoint is written.
     const second = [...first, userMsg("q2")];
     await persistChatSessionCheckpoint({
       store: s,
@@ -423,7 +433,7 @@ describe("persistChatSessionCheckpoint", () => {
     file = await s.load(id);
     assert.equal(file.turnCount, 1, "cancelled 不完成回合,不增 turnCount");
     assert.equal(file.messages.length, 3);
-    // 累计 turnIndex = session.turnCount(1) + result.turnCount(0) = 1。
+    // Cumulative turnIndex = session.turnCount(1) + result.turnCount(0) = 1.
     assert.equal(file.checkpoints?.length, 1);
     assert.equal(file.checkpoints?.[0]?.interruptReason, "cancelled");
     assert.equal(file.checkpoints?.[0]?.turnIndex, 1);
@@ -464,7 +474,7 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("write_failed → warn+continue,绝不重抛(REPL 不 crash)", async () => {
-    // store 的 baseDir 是「一个文件」→ save 的 mkdir 必然失败 → write_failed。
+    // The store's baseDir is "a file", so save's mkdir must fail → write_failed.
     const blocker = await mkdtemp(join(tmpdir(), "iknow-chat-cp-block-"));
     tempDirs.push(blocker);
     const blockerPath = join(blocker, "blocker");
@@ -489,8 +499,9 @@ describe("persistChatSessionCheckpoint", () => {
   });
 
   it("既有文件损坏(parse_failed)→ 静默重建为新 v3 文件,本次 turn 仍可落盘", async () => {
-    // 不可用文件不应阻断本次 turn 落盘(非用户主动错误,即便 warn 也会让后续
-    // 每次 turn 都触发噪声)—— 走 reconstruct → save 路径,无声成功。
+    // An unreadable file must not block this turn's write (it is not a
+    // user-caught error, and warning would make it noisy on every turn) — the
+    // reconstruct → save path succeeds silently.
     const tmp = await mkdtemp(join(tmpdir(), "iknow-chat-cp-corrupt-"));
     tempDirs.push(tmp);
     const s = new SessionStore(tmp, process.cwd());
@@ -513,7 +524,7 @@ describe("persistChatSessionCheckpoint", () => {
       workspaceRoot: process.cwd(),
     });
     assert.equal(collector.lines.length, 0, "load 错误走静默重建,不发 warn");
-    // 文件已被本 turn 成功覆盖。
+    // This turn overwrote the file successfully.
     const file = await s.load(id);
     assert.equal(file.turnCount, 1);
     assert.equal(file.messages.length, 2);
@@ -521,7 +532,7 @@ describe("persistChatSessionCheckpoint", () => {
   });
 });
 
-// -- processChatLine 集成:conversationId=null 跳过 + completed 落盘 ----------
+// -- processChatLine integration: conversationId=null skips, completed writes --
 
 describe("processChatLine checkpoint 落盘接线", () => {
   it("conversationId=null(缺省)→ 不写文件(零变化路径)", async () => {
@@ -558,7 +569,7 @@ describe("processChatLine checkpoint 落盘接线", () => {
 
   it("cancelled(delta>0)→ checkpoint 落盘 interruptReason=cancelled", async () => {
     const s = await storeFor();
-    // delayMs 保证 model in-flight 时 abort 生效(S12 语义)。
+    // delayMs ensures the abort lands while the model is still in flight.
     const controller = new AbortController();
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["never"] })],
@@ -572,8 +583,9 @@ describe("processChatLine checkpoint 落盘接线", () => {
     controller.abort();
     const r = await pending;
     assert.equal(r.ranQuery, true);
-    // cancelled 不 append assistant(整回合不进历史)→ messages 含 seed user +
-    // #392 T4 system 中断消息 transcript 追加。
+    // cancelled does not append the assistant turn (the whole round stays out of
+    // history) → messages hold the seed user plus the transcript-appended system
+    // interruption message.
     assert.equal(ctx.state.messages.length, 2);
     assert.equal(ctx.state.messages[1]!.role, "system");
     const file = await s.load("pcl-cancelled");
@@ -585,8 +597,9 @@ describe("processChatLine checkpoint 落盘接线", () => {
 
   it("MaxTurnsExceeded-at-turn-0 → delta=0 → 不写文件(#120 裁决 + ACR)", async () => {
     const s = await storeFor();
-    // maxTurns=1 + 第一轮 tool-call:第 2 轮 step 入口 throw MaxTurnsExceeded,
-    // run() 不 resolve → 不产生 turnCount/messages → catch 分支不落盘。
+    // maxTurns=1 with a tool-call in round 1: the round-2 step entry throws
+    // MaxTurnsExceeded, run() never resolves → no turnCount/messages → the catch
+    // branch writes nothing.
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);

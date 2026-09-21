@@ -1,17 +1,17 @@
 /**
- * #358 T9 — envelope wire schema 冻结断言 + maxTurns undefined 用例
+ * envelope wire schema freeze assertions + maxTurns undefined cases.
  *
- * SC9（契约不破）：envelope.ts wire schema snapshot — status/reason 枚举
- * + `minimum: 1` + `additionalProperties: false` 全部维持。零生产代码改动。
+ * Contract-not-broken: envelope.ts wire schema snapshot — status/reason enums
+ * + `minimum: 1` + `additionalProperties: false` all maintained. Zero production-code changes.
  *
- * SC10（maxTurns 语义对齐）：worker maxTurns undefined = 无限（ADR-0012），
- * 显式值经 envelope 透传生效。新增 worker 装配层 `opts.maxTurns === undefined`
- * → deps.maxTurns 保持 undefined（不注入层自动值）。
+ * maxTurns semantics alignment: worker maxTurns undefined = unlimited (ADR-0012);
+ * explicit values pass through the envelope and take effect. Worker assembly keeps
+ * `opts.maxTurns === undefined` → deps.maxTurns stays undefined (no auto-injected value).
  *
- * Acceptance（plans/358 §T9）：
- *   1. envelope wire schema snapshot 锁定。
- *   2. maxTurns undefined 用例绿。
- *   3. npm test 全量回归闸（已通过，记录在本测试外的 final 验证报告）。
+ * Acceptance:
+ *   1. envelope wire schema snapshot locked.
+ *   2. maxTurns undefined cases green.
+ *   3. full npm test regression gate (verified separately outside this test).
  */
 
 import assert from "node:assert/strict";
@@ -24,8 +24,8 @@ import {
 } from "../../src/harness/subagent/envelope.ts";
 
 /**
- * 深度遍历 schema 对象，收集所有 `{ enum: [...] }` 子句 + `{ minimum: <n> }` 约束，
- * 用于快照比对——任何新增的枚举值或 missing 最小值都立刻被识别。
+ * Deep-walk the schema object, collecting every `{ enum: [...] }` clause + `{ minimum: <n> }`
+ * constraint for snapshot comparison — any new enum value or missing minimum is caught immediately.
  */
 function collectEnumConstraints(
   node: unknown,
@@ -59,7 +59,7 @@ function collectMinConstraints(
   return out;
 }
 
-// ─── SC9: wire schema 冻结快照 ─────────────────────────────────────────────
+// ─── wire schema freeze snapshot ─────────────────────────────────────────────
 
 describe("envelope wire schema freeze (#358 SC9)", () => {
   it("PARENT_SCHEMA.status enum 锁定为 [ok, failed]，未扩", () => {
@@ -177,7 +177,7 @@ describe("envelope wire schema freeze (#358 SC9)", () => {
   });
 });
 
-// ─── SC10: maxTurns undefined = 无限（ADR-0012 对齐）────────────────────────
+// ─── maxTurns undefined = unlimited (ADR-0012 alignment) ────────────────────
 
 describe("subagent maxTurns undefined = 无限（ADR-0012，#358 SC10）", () => {
   it("WorkerEnvelope.maxTurns 缺省不影响解析（undefined 透传）", () => {
@@ -199,9 +199,10 @@ describe("subagent maxTurns undefined = 无限（ADR-0012，#358 SC10）", () =>
   });
 
   it("createWorkerDeps: opts.maxTurns undefined → 缺省透传（不注入自动值）", async () => {
-    // 装配层 createWorkerDeps（worker.ts）应在 opts.maxTurns 为 undefined 时
-    // 保留 deps.maxTurns = env.llm.maxTurns（undefined），不向 deps 注入伪造值。
-    // 该契约保证 loop-engine 见到 undefined 即按"无限"处理（ADR-0012）。
+    // The assembly layer createWorkerDeps (worker.ts) must keep
+    // deps.maxTurns = env.llm.maxTurns (undefined) when opts.maxTurns is
+    // undefined — no fabricated value injected into deps. This contract lets
+    // loop-engine treat undefined as "unlimited" (ADR-0012).
     const { createWorkerDeps } =
       await import("../../src/harness/subagent/worker.ts");
     const deps = await createWorkerDeps({

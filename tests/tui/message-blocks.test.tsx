@@ -1,22 +1,25 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/message-blocks.test.tsx — #343 T6-B MessageBlocks 渲染验收。
+ * tests/tui/message-blocks.test.tsx — MessageBlocks rendering acceptance.
  *
- * 覆盖范围（bun:test）：
- *  - user 消息 → ❯ accent 前缀，无 Markdown 渲染；
- *  - system 消息 → 独立分支：[已打断] 前缀 + 固定文案 Interrupted by user.，
- *    不进 Markdown 解析（#392 T3）；
- *  - assistant 文本 → Markdown 渲染（headings/code/lists 节选）；
- *  - thinking 折叠（默认）：无秒数不画摘要；有秒 → `Thought for Ns`（1 行）；
- *  - thinking 展开：thinking 文本全文 + redacted 占位；
- *  - tool_use 摘要行 + statusMap 驱动 ok/failed/running 染色（running 走英文
- *    过程行，无 `[运行中]` 括号）；
- *  - content 边界：空文本 user 消息返回 null，不渲染任何节点。
- *  - T7 间距 + 底色：消息块根 marginTop={1} → 字符帧消息间出现空白分隔行；
- *    底色为渲染元数据（captureCharFrame 字符帧不含背景色），结构层断言 =
- *    底色 box 包裹后渲染不崩 + marginTop 空行存在。
+ * Coverage (bun:test):
+ *  - user message → ❯ accent prefix, no Markdown rendering;
+ *  - system message → separate branch: `[已打断]` ("interrupted") prefix +
+ *    fixed text "Interrupted by user.", never parsed as Markdown;
+ *  - assistant text → Markdown rendering (headings/code/lists excerpts);
+ *  - thinking collapsed (default): no summary without seconds; with seconds →
+ *    `Thought for Ns` (single line);
+ *  - thinking expanded: full thinking text + redacted placeholder;
+ *  - tool_use summary line + statusMap-driven ok/failed/running coloring
+ *    (running uses the English process line, no `[运行中]` bracket);
+ *  - content boundary: empty-text user message returns null, renders nothing;
+ *  - spacing + background: message root marginTop={1} → blank separator lines
+ *    between messages; background is render metadata (captureCharFrame carries
+ *    no bg color), so assert structurally = bg box wrap renders without
+ *    crashing + marginTop blank line present.
  *
- * 渲染形态 OpenTUI 元素树（禁 ink Box/Text 原语）。captureCharFrame 文本断言。
+ * Render form is the OpenTUI element tree (ink Box/Text primitives banned).
+ * Assertions on captureCharFrame text.
  */
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -64,7 +67,7 @@ test("user 消息：渲染 ❯ 文本前缀（accent），原文不进 markdown 
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 你好 iknow");
-  // user 消息不进 markdown bold 解析 → **`** 应保持原样（存档字面）。
+  // user text skips markdown bold parsing → ** markers stay literal (archived verbatim).
   expect(frame).toContain("**不要加粗**");
   await setup.renderer.destroy();
 });
@@ -95,7 +98,7 @@ test("user 空文本 + 纯 tool_result：返回 null 不渲染任何节点", asy
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  // 空 user content：frame 应为空或纯占位（不出现 ❯ 标记、不出现 tool_result 字段名）。
+  // empty user content: frame stays blank — no ❯ marker, no tool_result field names.
   expect(frame.includes("❯")).toBe(false);
   expect(frame.includes("tool_result")).toBe(false);
   await setup.renderer.destroy();
@@ -171,9 +174,9 @@ test("agent_status 栏注入：不渲染为 ❯ 用户气泡", async () => {
 });
 
 test("graph_mode 三条现势通知注入：不渲染为 ❯ 用户气泡（SC7 帧级）", async () => {
-  // spec D8 / SC7：与 agent_status 同纪律同谓词面（isGraphModeText）。
-  // 三条常量（翻转 ON / 翻转 OFF / 每 run presence）都不得上屏 —— 帧里既无
-  // ❯ 气泡，也不出现标签本身。
+  // Same discipline and predicate surface as agent_status (isGraphModeText).
+  // All three constants (ON flip / OFF flip / per-run presence) must stay off
+  // screen: no ❯ bubble and no label itself anywhere in the frame.
   for (const text of [
     IKNOW_GRAPH_MODE_ON_NOTIFICATION,
     IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -233,7 +236,7 @@ test("system 消息：不进 markdown 解析（字面保留，无 bullet 产物�
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  // 若走 markdown：** 被解析、- 变 •；字面保留则证明走独立分支。
+  // markdown would parse ** and turn - into •; literal survival proves the separate branch.
   expect(frame).toContain("**不加粗**");
   expect(frame).toContain("- 列表");
   expect(frame.includes("•")).toBe(false);
@@ -313,10 +316,10 @@ test("thinking 展开态：渲染 thinking 全文 + redacted 占位", async () =
   };
   const setup = await renderBlocks(msg, { thinkingExpanded: true });
   const frame = setup.captureCharFrame();
-  // 无秒数时不画 [思考] 摘要；展开只出正文 + redacted 占位。
+  // Without seconds no `[思考]` summary; expand renders body + redacted placeholder only.
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).toContain("展开的思维链");
-  // redacted 占位（REDACTED_PLACEHOLDER = "[已加密思考]"）。
+  // redacted placeholder (REDACTED_PLACEHOLDER = "[已加密思考]").
   expect(frame).toContain("[已加密思考]");
   expect(frame).toContain("正文短句");
   await setup.renderer.destroy();
@@ -338,10 +341,10 @@ test("tool_use 完成态折叠摘要：bash 完成 → bash · npm test（无 [�
     statusMap: new Map([["tu-bash-1", false]]),
   });
   const frame = setup.captureCharFrame();
-  // #tui-render-overhaul T3:成功态去掉 [完成] 前缀,状态由颜色表达。
+  // Success state drops the `[完成]` prefix; state is carried by color.
   expect(frame).toContain("bash · npm test");
   expect(frame.includes("[完成]")).toBe(false);
-  // 2026-08-14：工具行不再拼 ran-N 后缀（计数统一由 ThinkingSummary 汇总）。
+  // Tool lines no longer append a ran-N suffix (counts aggregate in ThinkingSummary).
   expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -372,7 +375,7 @@ test("tool_use 完成态折叠摘要：同消息多 bash → 各摘要行均无 
     ]),
   });
   const frame = setup.captureCharFrame();
-  // 同消息 2 个 bash block：摘要行只显 `bash · detail`，去 [完成] 前缀。
+  // Two bash blocks in one message: each summary line is `bash · detail` only, no `[完成]` prefix.
   expect(frame).toContain("bash · npm test");
   expect(frame).toContain("bash · git status");
   expect(frame.includes("ran")).toBe(false);
@@ -398,7 +401,7 @@ test("tool_use 非 bash 工具（write_file）：无 ran 计数，无 [完成] �
   const frame = setup.captureCharFrame();
   expect(frame).toContain("write_file · Wrote a.ts (1 lines)");
   expect(frame.includes("ran")).toBe(false);
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  // success state has no `[完成]` prefix.
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -423,11 +426,11 @@ test("thinking 折叠态 + thinkingSeconds：渲染 `Thought for Ns` 替换 [思
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 新格式（spec D2 / CONTEXT `unit fold`）：折叠行 = `Thought for 3s`
-  // （英文，替换 [思考] 标记）。
+  // CONTEXT `unit fold`: collapsed line = `Thought for 3s`
+  // (English, replaces the `[思考]` marker).
   expect(frame).toContain("Thought for 3s");
   expect(frame.includes("[思考]")).toBe(false);
-  // text block 仍渲染（正式回答保留）。
+  // the text block still renders.
   expect(frame).toContain("正式回答");
   await setup.renderer.destroy();
 });
@@ -514,9 +517,9 @@ test("thinking 折叠态 + thinkingSeconds + bash：折叠摘要不另起 ran �
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 不变式（spec D2 / CONTEXT `unit fold`）：折叠时长行只到
-  // `Thought for 3s`，原 `ran N command(s)` 第二行语义整体废弃 ——
-  // 计数只出现在 turn 级 `name × N` 折叠行，不在 message 级摘要里。
+  // Invariant (CONTEXT `unit fold`): the collapsed duration line is only
+  // `Thought for 3s`; the old `ran N command(s)` second line is retired —
+  // counts live solely in turn-level `name × N` folds, not message summaries.
   expect(frame).toContain("Thought for 3s");
   expect(frame.includes("ran 1 command")).toBe(false);
   expect(frame.includes("思考了")).toBe(false);
@@ -525,9 +528,9 @@ test("thinking 折叠态 + thinkingSeconds + bash：折叠摘要不另起 ran �
 });
 
 test("tool_use 状态染色：statusMap 缺位 = 过程行（无 [运行中]），failed = [失败]，成功 = 无状态前缀", async () => {
-  // #tui-render-overhaul T3:成功态去掉 [完成] 前缀，状态由颜色/glyph 表达。
-  // spec D1（本轮）:running 也去掉 `[运行中]` —— 过程行改为英文
-  // `name · detail`，状态只由颜色表达。失败仍保留 `[失败]` 明示前缀。
+  // Success drops the `[完成]` prefix (color/glyph carries state); running drops
+  // `[运行中]` too — the process line is English `name · detail`, state shown by
+  // color only. Failure keeps the explicit `[失败]` prefix.
   const okStatus = new Map<string, boolean>([["tu-ok", false]]);
   const failedStatus = new Map<string, boolean>([["tu-fail", true]]);
   const cases: ReadonlyArray<{
@@ -535,7 +538,7 @@ test("tool_use 状态染色：statusMap 缺位 = 过程行（无 [运行中]）�
     readonly id: string;
     readonly map: ReadonlyMap<string, boolean>;
     readonly mark: string;
-    /** 成功态的额外字节校验:成功态无 [完成]。 */
+    /** Extra byte check: success state carries no `[完成]`. */
     readonly expectNoCompleteMark?: boolean;
   }> = [
     {
@@ -570,10 +573,10 @@ test("tool_use 状态染色：statusMap 缺位 = 过程行（无 [运行中]）�
     const frame = setup.captureCharFrame();
     expect(frame).toContain(c.mark);
     if (c.expectNoCompleteMark === true) {
-      // #tui-render-overhaul T3:成功态无 [完成] 前缀(由颜色表达)。
+      // success state has no `[完成]` prefix (color expresses it).
       expect(frame.includes("[完成]")).toBe(false);
     }
-    // spec D1：三条分支（成功 / 失败 / 未配对）都不出现 `[运行中]`。
+    // none of the three branches (ok / failed / unpaired) shows `[运行中]`.
     expect(frame.includes("[运行中]")).toBe(false);
     await setup.renderer.destroy();
   }
@@ -603,8 +606,8 @@ test("tool_use 摘要行：cols 收口单行不折（narrow cols）", async () =
   );
   await setupNarrow.waitForVisualIdle();
   const frame = setupNarrow.captureCharFrame();
-  // spec D1：running 过程行 = `write_file · <detail>`（英文，无状态括号），
-  // 且 cols=20 下仍收口在单行内（wrapMode none → 视觉裁剪，不折行）。
+  // running process line = `write_file · <detail>` (English, no state bracket),
+  // still clamped to one line at cols=20 (wrapMode none → visual clip, no wrap).
   const lines = frame.split("\n").filter((l) => l.includes("write_file"));
   expect(lines.length).toBeGreaterThan(0);
   for (const l of lines) {
@@ -639,13 +642,13 @@ test("tool_use preview 截断窗：新文件代码首窗可见，溢出标记，
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用 write_file 行内
-  // 内容断言「write_file」标题与「line-00」预览共存。
+  // success state has no `[完成]` prefix → assert coexistence of the
+  // "write_file" title and the "line-00" preview inside the line instead.
   expect(frame).toContain("write_file");
   expect(frame).toContain("line-00");
   expect(frame).not.toContain("line-19");
-  // spec D3 / CONTEXT `write create preview`：溢出文案英文 `+N more lines`
-  // （20 行正文 − 10 行窗 = 10 行溢出）。
+  // CONTEXT `write create preview`: overflow text is English `+N more lines`
+  // (20 body lines − 10-line window = 10 overflow).
   expect(frame).toContain("+10 more lines");
   expect(frame).not.toContain("还有");
   expect(frame).not.toContain("+line-00");
@@ -674,7 +677,7 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用内容断言。
+  // success state has no `[完成]` prefix → assert on content instead.
   expect(frame).toContain("edit_file");
   expect(frame).toContain("-old");
   expect(frame).toContain("+new");
@@ -682,16 +685,17 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
   await setup.renderer.destroy();
 });
 
-// -- T7：消息间距 + 底色 ------------------------------------------------
-// 底色 = 渲染元数据，captureCharFrame 字符帧不含背景色 → 底色断言走结构层：
-// 底色 box 包裹后渲染不崩 + 内层文本可见。
+// -- message spacing + background ----------------------------------------
+// Background is render metadata (captureCharFrame carries no bg color), so the
+// assertion is structural: bg box wrap renders without crashing + text visible.
 //
-// 间距归属（2026-08-22 变更）：消息间 1 行节奏由 MessageBlocks 根节点的
-// `marginTop` prop 提供（ChatView 传 `visibleIndex===0?0:1`）。此前由
-// ChatView wrapper `<box marginTop>` 提供，但折叠（工具标题行收掉）后
-// 渲染为 null 的消息仍残留 wrapper margin，连成幻影空位 —— margin 改随
-// MessageBlocks 根节点存亡。缺省无 margin：单条渲染首行前无空白行（T9
-// 抖动修复后的 SSOT 边界不变）。
+// Spacing ownership: the 1-line rhythm between messages comes from the
+// MessageBlocks root `marginTop` prop (ChatView passes
+// `visibleIndex===0?0:1`). It used to live on a ChatView wrapper `<box
+// marginTop>`, but messages rendering null after collapse still left the
+// wrapper margin behind, chaining into phantom gaps — margin now lives and
+// dies with the MessageBlocks root. Default is no margin: a single-message
+// render starts at the first line (SSOT boundary unchanged).
 
 test("T7 多消息交替：marginTop prop={i===0?0:1} 提供 1 行节奏（首条无 margin）", async () => {
   const messages: AnthropicNativeMessage[] = [
@@ -702,7 +706,7 @@ test("T7 多消息交替：marginTop prop={i===0?0:1} 提供 1 行节奏（首�
     },
     { role: "user", content: [{ type: "text", text: "第二条提问" }] },
   ];
-  // 模拟 ChatView 接线：每条消息传 marginTop={i===0?0:1}。
+  // mirror ChatView wiring: each message gets marginTop={i===0?0:1}.
   const setup = await testRender(
     <>
       {messages.map((message, i) => (
@@ -720,13 +724,13 @@ test("T7 多消息交替：marginTop prop={i===0?0:1} 提供 1 行节奏（首�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // 首条 user 文本首行应在第 0 行（无顶部 margin）。
+  // first user text must land on line 0 (no top margin).
   const firstTextLine = lines.findIndex((l) => l.includes("第一条提问"));
   expect(firstTextLine).toBe(0);
-  // 第二条（assistant）与第一条间应有 1 行空白间隔。
+  // exactly 1 blank line between the first and second message.
   const secondTextLine = lines.findIndex((l) => l.includes("第一个回答"));
   expect(secondTextLine).toBeGreaterThan(firstTextLine + 1);
-  // 第三条（user）与第二条间同样有 1 行空白。
+  // same 1 blank line between second and third.
   const thirdTextLine = lines.findIndex((l) => l.includes("第二条提问"));
   expect(thirdTextLine).toBeGreaterThan(secondTextLine + 1);
   await setup.renderer.destroy();
@@ -740,8 +744,9 @@ test("T7 user 消息：底色 box 包裹后渲染不崩，❯ 前缀保留（结
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 带底色的提问");
-  // 单条 MessageBlocks 渲染：marginTop prop 缺省 → 文本首行 = frame[0]，
-  // 底色块紧贴内容（paddingY=0）；消息间距由 ChatView 传 marginTop 提供。
+  // single MessageBlocks render: default marginTop → text starts at frame[0];
+  // the bg box hugs content (paddingY=0); inter-message spacing comes from
+  // ChatView's marginTop.
   const lines = frame.split("\n");
   const textLine = lines.findIndex((l) => l.includes("带底色的提问"));
   expect(textLine).toBe(0);
@@ -777,8 +782,9 @@ test("history write_file 未配对（空 statusMap）：仅过程行摘要，不
   };
   const setup = await renderBlocks(msg, { statusMap: emptyStatusMap() });
   const frame = setup.captureCharFrame();
-  // D1：过程行是英文 live tool line，无 `[运行中]` 括号；行数只在 content
-  // 已成形时出现（此处 input 是权威完整 input → 2 行）。
+  // the process line is the English live tool line, no `[运行中]` bracket; the
+  // line count appears only once content is complete (input here is the
+  // authoritative full input → 2 lines).
   expect(frame).toContain("write_file · Wrote a.ts (2 lines)");
   expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain(bodyLine);
@@ -787,9 +793,9 @@ test("history write_file 未配对（空 statusMap）：仅过程行摘要，不
 });
 
 test("纯 retract 工具落定消息：全部收起 → 渲染为 null（无幻影空壳）", async () => {
-  // D3/D7（spec specs/tui-tool-settled-appearance.md）：纯 read_file 消息
-  // 落定后标题与预览同假（retract）→ MessageBlocks 返回 null，不留空壳
-  // box（空壳会让消息间距残留幻影空白）。
+  // a pure read_file message settles with title and preview both false
+  // (retract) → MessageBlocks returns null, leaving no empty shell box
+  // (shells would strand phantom spacing).
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -805,13 +811,14 @@ test("纯 retract 工具落定消息：全部收起 → 渲染为 null（无幻�
     statusMap: new Map([["tu-rd-null", false]]),
   });
   const frame = setup.captureCharFrame();
-  // 帧内不得出现任何工具痕迹（null 契约在帧上的投影 = 空白帧；
-  // captureCharFrame 恒返回铺满空白的画布，故以「无内容字符」判定）。
+  // no tool trace may appear in the frame (the null contract projects to a
+  // blank frame; captureCharFrame always returns a full blank canvas, so the
+  // test is "no content characters").
   expect(frame.includes("read_file")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("[失败]")).toBe(false);
   expect(frame.trim().length).toBe(0);
-  // 结构层：spans 无非空 span —— 空白帧 + 零内容 span 共同钉住 null 契约。
+  // structural layer: no non-empty spans — blank frame + zero content spans pin the null contract together.
   const { lines } = setup.captureSpans();
   const contentSpans = lines.flatMap((line) =>
     line.spans.filter((span) => span.text.trim().length > 0)
@@ -839,10 +846,10 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
   await setup.renderer.destroy();
 });
 
-// -- 子代理工具专属显示（plans/tui-chrome-interaction.md T7） ---------------
-// 不变式：子代理工具不再以 `▣ 子代理` 形态作为 live/history 工具卡（dual
-// render 移除）——状态由 spawn 卡两行投影 + SubagentPanel 表达，
-// 工具卡仅显示 detail。
+// -- sub-agent tool display ------------------------------------------------
+// Invariant: sub-agent tools no longer render a `▣ 子代理` live/history tool
+// card (dual render removed) — status comes from the spawn card's two-line
+// projection + SubagentPanel; the tool card shows detail only.
 
 test("spawn_subagent 运行中 → 仅 detail（无 `▣` glyph，无 `[运行中] spawn_subagent` 残留）", async () => {
   const msg: AnthropicNativeMessage = {
@@ -946,8 +953,8 @@ test("bash 回归：过程行 `Running 1 shell command…` + 命令可见，完�
   };
   const setup = await renderBlocks(running);
   const frame = setup.captureCharFrame();
-  // spec D1 / CONTEXT `live tool line`：running 的 bash 过程行带
-  // `Running 1 shell command…` 前缀且命令可见，无状态括号。
+  // CONTEXT `live tool line`: running bash process line carries the
+  // `Running 1 shell command…` prefix with the command visible, no state bracket.
   expect(frame).toContain("Running 1 shell command… · ls");
   expect(frame.includes("[运行中]")).toBe(false);
   await setup.renderer.destroy();
@@ -967,7 +974,7 @@ test("bash 回归：过程行 `Running 1 shell command…` + 命令可见，完�
     statusMap: new Map([["tu-bash-3", false]]),
   });
   const doneFrame = setupDone.captureCharFrame();
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  // success state has no `[完成]` prefix.
   expect(doneFrame).toContain("bash · npm test");
   expect(doneFrame.includes("[完成]")).toBe(false);
   await setupDone.renderer.destroy();
@@ -1017,7 +1024,7 @@ function rgbaEq(a: RGBA, b: RGBA): boolean {
   return a.r === b.r && a.g === b.g && a.b === b.b;
 }
 
-/** 抓含 needle 文本的 span 的 fg（无匹配 → undefined）。 */
+/** fg of the first span whose text contains needle (undefined if no match). */
 function fgOfSpanWith(
   setup: Awaited<ReturnType<typeof testRender>>,
   needle: string
@@ -1031,7 +1038,7 @@ function fgOfSpanWith(
   return undefined;
 }
 
-// -- SC4（spec D5）：失败横切 —— 红标题 + 一行短错误，不 dim 堆长文 -------
+// -- failure cross-cut: red title + one short error line, no dim long-text stack --
 
 const LONG_FAILURE_RECEIPT = [
   "[worktree_isolation] workspace mutation blocked: bash in this session",
@@ -1064,11 +1071,11 @@ test("SC4 失败 mutate：红标题 + 一行短错误（截断长回执）", asy
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 标题行保留（[失败] 形态）。
+  // title line kept (`[失败]` form).
   expect(frame).toContain("[失败]");
-  // 一行短错误：错误内容以单行截断形态出现（首行文本在场）。
+  // one short error line: the error surfaces truncated to its first line.
   expect(frame).toContain("[worktree_isolation]");
-  // 整个失败块只占 1 行标题 + 1 行错误（不摊开长回执多行）。
+  // the failure block occupies only title + error line (long receipts are not spread out).
   const failLines = frame
     .split("\n")
     .filter(
@@ -1112,7 +1119,7 @@ test("SC4 失败件：无 dim 结果预览块堆长文", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 失败件不画 dim ⎿ 结果预览（D5：不堆长文；长 stderr 只进一行短错误）。
+  // failed tools skip the dim ⎿ result preview (no long-text stack; long stderr goes to the one short error line).
   expect(frame.includes("⎿")).toBe(false);
   expect(frame.includes("line-2")).toBe(false);
   await setup.renderer.destroy();
@@ -1143,7 +1150,7 @@ test("SC4 失败标题 error 色 token（ToolSummaryRow fg = palette.error）", 
   const fg = fgOfSpanWith(setup, "[失败]");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedErr)).toBe(true);
-  // 失败不落 dim（dim 只属成功 bash 尾巴）。
+  // failure is not dimmed (dim belongs to successful bash tails only).
   const dimFg = RGBA.fromHex(tuiPalette.dim);
   expect(rgbaEq(fg!, dimFg)).toBe(false);
   await setup.renderer.destroy();
@@ -1172,12 +1179,12 @@ test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文结果
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 人读表述：`skill <name>`（D6）。
+  // human-readable form: `skill <name>`.
   expect(frame).toContain("skill playwright-cli");
-  // 不摊 skill 正文（无 ⎿ 结果预览）。
+  // skill body is not spread out (no ⎿ result preview).
   expect(frame.includes("⎿")).toBe(false);
   expect(frame.includes("body-5")).toBe(false);
-  // accent 色 token 落到标题行（非 dim）。
+  // the accent token lands on the title line (not dim).
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
   const fg = fgOfSpanWith(setup, "skill playwright-cli");
   expect(fg).toBeDefined();
@@ -1208,9 +1215,10 @@ test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // D1（specs/tui-human-display.md）人读过程行随摘要注册表改英文并点名目标
-  // （specs/create-worktree-tools.md D5：人读行用新注册名，语义仍是 task
-  // worktree）。accen 色断言不变 —— 强于旧断言的是此处再加「无中文残留」。
+  // human-readable process lines follow the summary registry in English and
+  // name the target with its registered name (semantics still task worktree).
+  // The accent assertion is unchanged; stronger than before, this also checks
+  // that no Chinese residue remains.
   expect(frame).toContain("Entered worktree abc-leaf-123");
   expect(frame.includes("进入任务工作树")).toBe(false);
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
@@ -1245,7 +1253,7 @@ test("SC4/D6 error 优先于 accent：accent 工具失败走 error 色（渲染�
   const fg = fgOfSpanWith(setup, "[失败]");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedErr)).toBe(true);
-  // accent 失败不得落 accent 色。
+  // a failed accent tool must not keep accent color.
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
   expect(rgbaEq(fg!, expectedAccent)).toBe(false);
   await setup.renderer.destroy();
@@ -1268,24 +1276,25 @@ test("marginTop prop：根节点产顶部间距（缺省无间距，首条消息
   await setup.waitForVisualIdle();
   const lines = setup.captureCharFrame().split("\n");
   const textLine = lines.findIndex((l) => l.includes("带间距的提问"));
-  // marginTop={1} → 文本上方恰 1 行空白。
+  // marginTop={1} → exactly 1 blank line above the text.
   expect(textLine).toBe(1);
   await setup.renderer.destroy();
 });
 
-// -- #tui-render-overhaul T2:keep / accent 标题不再 dim,accent 加 bold ---------
+// -- keep / accent titles no longer dim; accent gains bold ------------------
 //
-// 不变式：
-//  - keep 标题（bash / write_file 等成功落定）走正文色 token,不再走 dim ——
-//    dim 只属装饰（结果预览前缀/溢出、折叠行、思考摘要）；
-//  - accent 标题（skill / create-task-worktree 等）保持 accent 色 + 加 bold,
-//    让「点名的稀有能力」在终端里看得出来（theme.ts 的 accent 与正文几乎
-//    同色,光改色值不够,故加 bold 区分）；
-//  - 副作用：RUNNING_SLOT 也是 default → 改后 running 态标题从 dim 变 text,
-//    让 running 态更醒目（用户诉求：running 是用户在等的动作,该清楚）。
+// Invariants:
+//  - keep titles (bash / write_file settled ok) use the text color token,
+//    never dim — dim is decoration only (result-preview prefix/overflow,
+//    fold lines, thinking summary);
+//  - accent titles (skill / create-task-worktree etc.) keep accent color and
+//    gain bold so "named rare capabilities" read distinctly in the terminal
+//    (theme.ts accent is nearly the text color, so color alone is not enough);
+//  - side effect: RUNNING_SLOT maps through the same default, so running
+//    titles move dim → text, making the action the user waits on clearer.
 //
-// 不动 theme.ts 色值；只在 message-blocks / live-tool-preview 的渲染映射
-// 处把 default 改 tuiPalette.text,并给 accent 加 <b>。
+// theme.ts color values untouched; only the render maps in message-blocks /
+// live-tool-preview switch default → tuiPalette.text and wrap accent in <b>.
 
 test("T2 keep 标题：write_file 成功 fg = palette.text（非 dim）", async () => {
   const msg: AnthropicNativeMessage = {
@@ -1314,7 +1323,7 @@ test("T2 keep 标题：write_file 成功 fg = palette.text（非 dim）", async 
   const fg = fgOfSpanWith(setup, "write_file · Wrote a.ts");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedText)).toBe(true);
-  // 钉死不变式:不得是 dim。
+  // pin the invariant: must not be dim.
   expect(rgbaEq(fg!, expectedDim)).toBe(false);
   await setup.renderer.destroy();
 });
@@ -1371,7 +1380,7 @@ test("T2 accent 标题：skill 成功 fg = palette.accent + span 含 BOLD attrib
   );
   await setup.waitForVisualIdle();
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
-  // OpenTUI TextAttributes.BOLD = 1 << 0 = 1。
+  // OpenTUI TextAttributes.BOLD = 1 << 0 = 1.
   const { lines } = setup.captureSpans();
   const skillSpans = lines
     .flatMap((l) => l.spans)
@@ -1379,15 +1388,16 @@ test("T2 accent 标题：skill 成功 fg = palette.accent + span 含 BOLD attrib
   expect(skillSpans.length).toBeGreaterThan(0);
   for (const span of skillSpans) {
     expect(rgbaEq(span.fg, expectedAccent)).toBe(true);
-    // BOLD 位掩码 1;其它位不强制,只断言 BOLD 已设。
+    // assert the BOLD bit only; other bits unconstrained.
     expect(span.attributes & 1).toBe(1);
   }
   await setup.renderer.destroy();
 });
 
 test("D7 slot：retract 落定 → 标题与预览同假（read_file 不再出 [完成] 行）；keep 预览仍在", async () => {
-  // D3/D7：渲染只消费 deriveSlot。成功 retract（read_file）标题与预览都
-  // 从屏幕拿掉（只进折叠计数）；keep（write_file）标题 + 既有 6 行预览保留。
+  // rendering consumes deriveSlot only: a successful retract (read_file) pulls
+  // title and preview off screen (fold count only); keep (write_file) retains
+  // title + its existing preview.
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -1423,17 +1433,17 @@ test("D7 slot：retract 落定 → 标题与预览同假（read_file 不再出 [
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame.includes("[思考]")).toBe(false);
-  // retract 件：无标题行、无预览。
+  // retract items: no title line, no preview.
   expect(frame.includes("read_file")).toBe(false);
-  // keep 件：标题 + 预览内容都在。
+  // keep items: title + preview content both present.
   expect(frame).toContain("write_file");
   expect(frame).toContain("export const x = 1;");
   await setup.renderer.destroy();
 });
 
-// -- #693 T4 D4:历史 bash / skill 结果预览（结果预览块） -----------------
+// -- history bash / skill result previews (result preview block) ------------
 
-/** 构造一个 bash 工具 + 配对 tool_result 的最小 messages 集。 */
+/** Minimal messages: one bash tool_use + its paired tool_result. */
 function bashCallMessages(
   toolUseId: string,
   resultText: string
@@ -1486,21 +1496,22 @@ test("D4 bash 历史：成功落定画折叠后的 result preview 尾窗", async
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("bash · ls");
-  // 10 行取尾部 3（docs/CONTEXT.md **result preview**）→ out-7..out-9，溢出 7。
+  // tail 3 of 10 lines per docs/CONTEXT.md **result preview** → out-7..out-9, 7 overflow.
   expect(frame).toContain("… +7 行");
   expect(frame).not.toContain("out-0");
   expect(frame).not.toContain("out-6");
   expect(frame).toContain("out-7");
   expect(frame).toContain("out-9");
-  // user 消息不画（user 不在 assistant message 块里,但 testRender 也没传 user 块）
+  // user message not rendered (not part of the assistant block; testRender got no user block either)
   void user;
   await setup.renderer.destroy();
 });
 
 test("T3 相邻 keep 卡之间空一行：同消息两条成功 bash 标题不贴行", async () => {
-  // plans/tui-tool-rhythm.md T3 / spec D7：相邻 keep class 标题卡之间空一行
-  // （卡间距节奏 = 消息内块间距 withBlockSpacing）。两条连续成功 bash 的落定
-  // 帧上，第一张卡的正文行与第二张卡的标题行之间必须恰有 1 行空白。
+  // Adjacent keep-class title cards are separated by one blank line (card
+  // rhythm = intra-message block spacing, withBlockSpacing). In the settled
+  // frame of two consecutive successful bash calls, exactly 1 blank line must
+  // sit between the first card's body and the second card's title.
   const stdout = (n: number): string =>
     Array.from({ length: n }, (_, i) => `row-${i}`).join("\n");
   const setup = await testRender(
@@ -1556,8 +1567,9 @@ test("T3 相邻 keep 卡之间空一行：同消息两条成功 bash 标题不�
 });
 
 test("D7 失败横切：失败 bash 标题行保留、不画 dim ⎿ 结果预览（slot.showPreview 假）", async () => {
-  // D5/D7：失败横切在核内最后一步 → showTitle 真（一行短错误的完整实现是
-  // 后续 bullet）、showPreview 假 —— 不用 dim ⎿ 堆长回执。
+  // the failure cross-cut is the core's last step → showTitle true (the full
+  // one-line short error is a later bullet), showPreview false — no dim ⎿
+  // stacking of long receipts.
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1586,9 +1598,9 @@ test("D7 失败横切：失败 bash 标题行保留、不画 dim ⎿ 结果预�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 标题行保留（失败染色的 error 色 token 由 ToolSummaryRow 承担）。
+  // title line kept (ToolSummaryRow owns the failure error-color token).
   expect(frame).toContain("[失败]");
-  // 不画 dim ⎿ 结果预览（D5：不堆长文）。
+  // no dim ⎿ result preview (no long-text stacking).
   expect(frame.includes("⎿")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -1615,17 +1627,17 @@ test("D7 成功 retract：read_file 落定后标题与预览同假（内容不�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // retract 落定：标题与预览同假（核保证，渲染不复活）—— 整块不出节点。
+  // retract settled: title and preview both false (core-guaranteed, rendering must not resurrect) — the block emits no node.
   expect(frame.includes("read_file")).toBe(false);
   expect(frame.includes("⎿")).toBe(false);
-  // 也不应泄露模型面 tool_result 文本
+  // must not leak model-facing tool_result text either
   expect(frame.includes("x".repeat(50))).toBe(false);
   await setup.renderer.destroy();
 });
 
-// live-signal revision：web_search / web_fetch 落定后走实卡 —— MessageBlocks
-// 抽出标题行 `Search <query>` / `Fetch <url>`。已注册 retract 其它名（read_file）
-// 仍按 D7 走「标题与预览同假」。
+// live-signal revision: web_search / web_fetch settle into real cards —
+// MessageBlocks lifts the title line `Search <query>` / `Fetch <url>`. Other
+// registered retract names (read_file) still fold title and preview to false.
 
 test("live-signal revision: web_search 落定 → 标题 'Search <query>' 可见", async () => {
   const setup = await testRender(
@@ -1649,10 +1661,10 @@ test("live-signal revision: web_search 落定 → 标题 'Search <query>' 可见
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 实卡：标题 = `Search <query>` 可见（formatToolStatusLine 单源）。
+  // real card: title `Search <query>` visible (formatToolStatusLine single source).
   expect(frame).toContain("Search");
   expect(frame).toContain("今天的AI新闻");
-  // 落定后 preview 槽 = empty（不摊长文，specs revision #4）。
+  // after settling the preview slot is empty (no long-text spread).
   expect(frame.includes("⎿")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -1686,8 +1698,8 @@ test("live-signal revision: web_fetch 落定 → 标题 'Fetch <url>' 可见", a
 });
 
 test("live-signal revision: 已注册 retract (read_file) 仍被抽掉，不出标题", async () => {
-  // 守住 D7 合同：除 web_search / web_fetch 外的 retract 名仍走
-  // 「标题与预览同假」路径（不被 live-signal revision 改写）。
+  // Guards the retract contract: names other than web_search / web_fetch still
+  // take the "title and preview both false" path (unchanged by live-signal).
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1756,7 +1768,7 @@ test("D4 bash 空输出 / 全空白 → 不渲染预览块", async () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用 bash 标题内容断言。
+    // success state has no `[完成]` prefix → assert on the bash title content instead.
     expect(frame, `case=${c.label}`).toContain("bash");
     expect(frame, `case=${c.label}`).not.toContain("⎿");
     expect(frame, `case=${c.label}`).not.toContain("[完成]");
@@ -1860,9 +1872,9 @@ test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // statusMap 缺位 → 等同 running 态：不画结果预览（spec D4 未配对不渲染）。
-  // spec D1：过程行是英文 live tool line（running bash 带 `Running 1 shell
-  // command…` 前缀 + 可见命令），无 `[运行中]` 括号。
+  // missing statusMap entry → treated as running: no result preview (unpaired never renders).
+  // The process line is the English live tool line (running bash carries the
+  // `Running 1 shell command…` prefix + visible command), no `[运行中]` bracket.
   expect(frame).toContain("Running 1 shell command… · ls");
   expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain("⎿");
@@ -1907,14 +1919,15 @@ test("D4 keep 足迹：bash 落定标题 + 折叠结果预览", async () => {
   await setup.renderer.destroy();
 });
 
-// -- T4：assistant 内部块间 1 行间距（#tui-render-overhaul T4）--------------
-// assistant 内多个节点（thinking 折叠 / thinking 明文 / 文本 / 工具行 /
-// 错误行）顺序渲染时，相邻节点之间补 1 行空白；首块不补顶 margin。跨
-// MessageShell 内容宽度内做行差判定（captureCharFrame 返回整帧字符串）。
+// -- 1 blank line between assistant inner blocks -----------------------------
+// When an assistant message renders several nodes in order (thinking fold /
+// thinking body / text / tool line / error line), a blank line is inserted
+// between adjacent nodes; the first block gets no top margin. Row-difference
+// checks run across the full frame from captureCharFrame.
 
 test("T4 assistant 内部块：thinking 折叠 + 工具行 + 文本，节点间 1 行空白", async () => {
-  // 三个不同类型的节点顺序：thinking 折叠（带秒数）→ bash 工具行 → 文本。
-  // 折叠行 / 工具行 / 文本行各占 1 行；节点间应有 1 行空白。
+  // three node types in order: thinking fold (with seconds) → bash tool line →
+  // text. Each occupies 1 line; 1 blank line sits between nodes.
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -1941,23 +1954,23 @@ test("T4 assistant 内部块：thinking 折叠 + 工具行 + 文本，节点间 
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // 锚点行号。
+  // anchor line indices.
   const thinkIdx = lines.findIndex((l) => l.includes("Thought for 3s"));
   const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
   const textIdx = lines.findIndex((l) => l.includes("跑完了"));
   expect(thinkIdx).toBeGreaterThanOrEqual(0);
   expect(bashIdx).toBeGreaterThanOrEqual(0);
   expect(textIdx).toBeGreaterThanOrEqual(0);
-  // #tui-render-overhaul T4:节点间 1 行空白（≥ 2 行差 = 1 行间距）。
+  // 1 blank line between nodes (≥ 2-row gap = 1 spacer line).
   expect(bashIdx - thinkIdx).toBeGreaterThanOrEqual(2);
   expect(textIdx - bashIdx).toBeGreaterThanOrEqual(2);
-  // 首块（思考折叠行）位于第 0 行,无顶部 margin。
+  // the first block (thinking fold line) sits on row 0, no top margin.
   expect(thinkIdx).toBe(0);
   await setup.renderer.destroy();
 });
 
 test("T4 assistant 单块无内部空白：仅 1 个文本块时,文本独占首行", async () => {
-  // 仅 1 个节点时不应有空白行（首块不补顶 margin,且无后续节点可比）。
+  // a lone node must produce no blank lines (no top margin, nothing to space against).
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [{ type: "text", text: "唯一文本块" }],
@@ -1971,9 +1984,10 @@ test("T4 assistant 单块无内部空白：仅 1 个文本块时,文本独占首
 });
 
 test("T4 assistant 思考折叠块只占 1 行：无 ran 第二行，与工具行保持块间间距", async () => {
-  // spec D2：message 级思考折叠只有 `Thought for <duration>` 一行；原
-  // `ran M commands` 第二行语义整体废弃（计数只属 turn 级 `name × N` 折叠），
-  // 因此本块恒 1 行，块间间距判定回到「折叠行 → 工具行」。
+  // message-level thinking fold is the single `Thought for <duration>` line;
+  // the old `ran M commands` second line is retired (counts belong to
+  // turn-level `name × N` folds only), so this block is always 1 line and the
+  // spacing check reduces to "fold line → tool line".
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -2003,21 +2017,22 @@ test("T4 assistant 思考折叠块只占 1 行：无 ran 第二行，与工具�
   const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
   expect(thinkIdx).toBeGreaterThanOrEqual(0);
   expect(bashIdx).toBeGreaterThanOrEqual(0);
-  // 折叠块只有 1 行（无 `ran N command(s)` 第二行）。
+  // the fold block is 1 line only (no `ran N command(s)` second line).
   expect(frame.includes("ran 1 command")).toBe(false);
-  // 折叠行与下一块 bash 之间补 1 行空白（≥ 2 行差）。
+  // 1 blank line is inserted between the fold line and the next bash block (≥ 2-row gap).
   expect(bashIdx - thinkIdx).toBeGreaterThanOrEqual(2);
   await setup.renderer.destroy();
 });
 
 /**
- * plans/tui-chrome-interaction.md Task 5：skill-load 投影在 user 分支渲染。
- *  - 命中形态 → chip-only（remainder 空）/ chip+remainder（remainder 非空），
- *    正文（SKILL body）绝不进 ❯ 气泡；
- *  - 拒绝形态（短前缀命中但 name 没闭合 / 不以 [skill-load 开头）→ 走
- *    现有 user 文本路径（视为普通 user 输入）；
- *  - 中文 `[加载技能 echo]` 历史 displayText（非 skill-load 闭合形态）→
- *    仍按普通 user 文本显示（不误投影为 chip）。
+ * skill-load projection renders in the user branch.
+ *  - matched form → chip-only (empty remainder) / chip + remainder (non-empty);
+ *    the SKILL body never enters a ❯ bubble;
+ *  - rejected form (prefix hit but name unclosed / not starting with
+ *    [skill-load) → falls through to the plain user-text path (treated as
+ *    ordinary user input);
+ *  - legacy Chinese displayText `[加载技能 echo]` (not a closed skill-load
+ *    form) → still shown as ordinary user text, never mis-projected as a chip.
  */
 describe("user: skill-load chip projection（plans T5）", () => {
   test("chip-only：remainder 空 → 只画 `loading skill <name>`，正文不渲染", async () => {
@@ -2033,7 +2048,7 @@ describe("user: skill-load chip projection（plans T5）", () => {
     const setup = await renderBlocks(msg);
     const frame = setup.captureCharFrame();
     expect(frame).toContain("loading skill echo");
-    // SKILL body 不进 ❯ 气泡（也不进任何文本节点）：
+    // SKILL body must not enter the ❯ bubble (nor any text node):
     expect(frame.includes("# 回声技能")).toBe(false);
     expect(frame.includes("Base directory")).toBe(false);
     expect(frame.includes("<skill_files>")).toBe(false);
@@ -2055,7 +2070,7 @@ describe("user: skill-load chip projection（plans T5）", () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain("loading skill echo");
     expect(frame).toContain("❯ 帮我做 X");
-    // body 不进任何文本节点：
+    // body enters no text node:
     expect(frame.includes("# 回声技能")).toBe(false);
     expect(frame.includes("Base directory")).toBe(false);
     expect(frame.includes("<skill_files>")).toBe(false);
@@ -2077,7 +2092,7 @@ describe("user: skill-load chip projection（plans T5）", () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain("loading skill echo");
     expect(frame).toContain("❯ 帮我做 X");
-    // 巨大 body 不应泄漏（也不应触发 wrap 之后的整篇渲染）。
+    // the huge body must not leak (nor trigger a full wrapped render).
     expect(frame.includes("xxxxxx")).toBe(false);
     await setup.renderer.destroy();
   });
@@ -2088,14 +2103,14 @@ describe("user: skill-load chip projection（plans T5）", () => {
       content: [
         {
           type: "text",
-          // 形态破坏：name=echo] 后缺 `\n` 引导 → projection 拒绝。
+          // malformed: missing `\n` after name=echo] → projection rejects.
           text: "[skill-load name=echo]\nbody\n\n帮我做 X",
         },
       ],
     };
     const setup = await renderBlocks(msg);
     const frame = setup.captureCharFrame();
-    // 不投影为 chip，整段原样进 ❯ 气泡：
+    // not projected to a chip; the whole text goes into the ❯ bubble verbatim:
     expect(frame.includes("loading skill")).toBe(false);
     expect(frame).toContain("❯");
     expect(frame).toContain("[skill-load name=echo]");

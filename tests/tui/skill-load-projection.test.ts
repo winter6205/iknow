@@ -1,27 +1,27 @@
 /**
  * tests/tui/skill-load-projection.test.ts
  *
- * plans/tui-chrome-interaction.md Task 5：skill-load chip 投影。
+ * skill-load chip projection.
  *
- * 给渲染层（message-blocks user 分支）+ 给 echo 的 displayText 复用同一组纯函数
- * `projectSkillLoadUserText`，从 user message 文本中抽出 `{name, remainder}`。
- * 渲染层只消费这两个字段，正文（SKILL body）永不进 ❯ 气泡。
+ * The render layer (message-blocks user branch) and the echo's displayText reuse the same
+ * pure function `projectSkillLoadUserText` to extract `{name, remainder}` from user message
+ * text. The render layer consumes only these two fields; the body (SKILL body) never enters the ❯ bubble.
  *
- * 接受形态（与 `buildSkillLoadText` 装配一致）：
+ * Accepted shape (matches `buildSkillLoadText` assembly):
  *   `[skill-load name="<name>"]\n<body>[ + \n\n<remainder>]`
  *
- * 拒绝形态（返回 null → 落回普通 user 文本渲染）：
- *   - 完全不以 `[skill-load ` 开头；
- *   - `[skill-load name="` 之后没有闭合的 `"`（短前缀命中但 name 没闭合）；
- *   - `]` 之后没有 `\n`（不是 buildSkillLoadText 形态）。
+ * Rejected shapes (return null → fall back to plain user-text rendering):
+ *   - does not start with `[skill-load ` at all;
+ *   - no closing `"` after `[skill-load name="` (short prefix hits but name unclosed);
+ *   - no `\n` after `]` (not buildSkillLoadText shape).
  *
- * 边界：
- *   - body 巨大（huge SKILL.md）：lastIndexOf `\n\n` 仍能定位 buildSkillLoadText
- *     唯一添加的分隔符（约定 `createSkillBody` 末尾是 `</skill_files>` 不带
- *     末尾 `\n\n`，所以 body 自身不会撞上分隔符）；
- *   - remainder 非空 → `{name, remainder}`；
- *   - remainder 空 → `{name, ""}`（chip-only 路径）；
- *   - body 含 `\n\n` 内部段 → 仍是最后一个 `\n\n` 分隔 remainder。
+ * Boundaries:
+ *   - huge body (huge SKILL.md): lastIndexOf `\n\n` still locates the single separator
+ *     buildSkillLoadText adds (by convention `createSkillBody` ends with `</skill_files>`
+ *     without trailing `\n\n`, so the body itself never collides with the separator);
+ *   - remainder non-empty → `{name, remainder}`;
+ *   - remainder empty → `{name, ""}` (chip-only path);
+ *   - body containing internal `\n\n` segments → still the last `\n\n` separates the remainder.
  */
 import { describe, expect, test } from "bun:test";
 import { projectSkillLoadUserText } from "../../src/tui/session-state.js";
@@ -90,10 +90,10 @@ describe("projectSkillLoadUserText: 闭合形态命中", () => {
     });
   });
 
-  // Bug 复现（2026-09-07）：session-api 落盘的 user turn 是
-  // attachPrefetchOverlay(overlay + MEMORY_PREFETCH_END + envelope)，
-  // 带 memory advisory 前缀的磁盘文本必须仍命中 chip，否则 reload 后
-  // 投影失败 → 78KB body 全文溢出渲染（Ctrl+C 强制重排才「弹回」）。
+  // bug repro: session-api persists the user turn as
+  // attachPrefetchOverlay(overlay + MEMORY_PREFETCH_END + envelope);
+  // disk text with a memory advisory prefix must still hit the chip, otherwise projection
+  // fails after reload → the whole 78KB body floods the render (only Ctrl+C forced reflow "snaps it back").
   test("memory prefetch overlay 前缀 + envelope → 剥离 overlay 后命中 chip", () => {
     const envelope = buildSkillLoadText("echo", "body text", "帮我做 X");
     const overlay = `${MEMORY_ADVISORY_PREFIX}\n\n${MEMORY_PREFETCH_DISCIPLINE}\n\n### 过去的工作\nid: m1\n\n一些正文`;
@@ -134,10 +134,10 @@ describe("projectSkillLoadUserText: 拒绝形态（不 throw，按普通文本�
   });
 
   test("[skill-load 短前缀命中但 name 没闭合 → null", () => {
-    // # AC: malformed `[skill-load` 没闭合 name → 不 throw, 按普通用户文本
+    // malformed `[skill-load` with unclosed name → no throw, treated as plain user text
     expect(projectSkillLoadUserText("[skill-load name=echo]\nbody")).toBeNull();
     expect(projectSkillLoadUserText("[skill-load name=]")).toBeNull();
-    // 整段没有 `"`:
+    // no `"` anywhere in the segment:
     expect(projectSkillLoadUserText("[skill-load name=echo]\nbody")).toBeNull();
   });
 
@@ -146,7 +146,7 @@ describe("projectSkillLoadUserText: 拒绝形态（不 throw，按普通文本�
   });
 
   test("[skill-load name=...] 但 ] 后没有 \\n → null（不是 buildSkillLoadText 形态）", () => {
-    // 形态被人工破坏：缺 newline。
+    // shape manually broken: newline missing.
     expect(projectSkillLoadUserText('[skill-load name="echo"]body')).toBeNull();
   });
 

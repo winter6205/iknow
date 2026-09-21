@@ -1,22 +1,24 @@
 /**
  * tests/tui/deps-skill-mcp.test.ts
  *
- * #337 Phase B + #disclosure-index-align T2：TUI 装配 skill catalog + MCP manager 的单测覆盖。
+ * Unit coverage for the TUI assembling the skill catalog + MCP manager.
  *
- * 与 tests/tui/deps-tools.test.ts 共享同一 #343 装配断言取向，但本文件
- * 隔离真实 ~/.iknow / cwd —— 用 mkdtemp 造 tmp fixture，userHome 注入
- * `<root>/home`，cwd 注入 `<root>`，plant 一个 SKILL.md 让 skill scanner
- * 发现。镜像 tests/harness/build-engine.test.ts:257-315（#337 T8 skill
- * 装配）与 :317-378（#337 T8 MCP 装配）的形态。
+ * Shares the assembly-assertion style with tests/tui/deps-tools.test.ts, but
+ * isolates the real ~/.iknow / cwd — mkdtemp builds a tmp fixture, userHome
+ * injects `<root>/home`, cwd injects `<root>`, and a planted SKILL.md lets the
+ * skill scanner find it. Mirrors the shape of
+ * tests/harness/build-engine.test.ts:257-315 (skill assembly) and :317-378
+ * (MCP assembly).
  *
- * 三个断言（与 task brief 一致）：
- *   1. buildTuiDeps 装配后 deps.registry.list() 含 skill,不含 skill_search
- *      （disclosure-index-align T2 / SC5:skill_search 已删,只剩 1 件）；
- *   2. onExtensions 回调收到 skillCatalog（available() 含 planted skill）
- *      + mcp.status() 返回数组（可调用）；
- *   3. mcp reload 不抛（tmp 无 mcp.json → servers 空 → reload 空集幂等）。
+ * Three assertions:
+ *   1. after buildTuiDeps, deps.registry.list() includes skill but not
+ *      skill_search (skill_search was removed, only 1 tool left);
+ *   2. the onExtensions callback receives skillCatalog (available() contains
+ *      the planted skill) + mcp.status() returns a callable array;
+ *   3. mcp reload does not throw (no mcp.json in tmp → servers empty → reload
+ *      is an idempotent empty set).
  *
- * #337 Phase B 实现契约：buildTuiDeps 现在 async；所有断言 await 装配。
+ * Implementation contract: buildTuiDeps is now async; every assertion awaits the assembly.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -33,13 +35,14 @@ import { createMcpManager } from "../../src/harness/mcp/manager.js";
 import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 
-// #378 根因 B: 捕获 createMcpManager 入参 —— 通过 buildTuiDeps 注入缝
-// (opts.createMcpManager) 委托真实实现, 不影响既有断言(skill catalog /
-// reload / listMcpTools 仍走真实 manager)。避免 mock.module 触发 bun 1.3.14
-// require 死锁(见 deps.ts createMcpManager 缝注释)。
+// Capture createMcpManager's args via the buildTuiDeps injection seam
+// (opts.createMcpManager) delegating to the real implementation, without
+// affecting existing assertions (skill catalog / reload / listMcpTools still
+// go through the real manager). This avoids mock.module triggering the bun
+// 1.3.14 require deadlock (see the createMcpManager seam comment in deps.ts).
 const capturedMcpManagerOpts: Array<Record<string, unknown>> = [];
 
-/** 最小合法 RuntimeBundle — buildTuiDeps 只读 env 字段，其余 stub。 */
+/** Minimal valid RuntimeBundle — buildTuiDeps reads only the env field; the rest are stubs. */
 function makeBundle(): RuntimeBundle {
   const env: IknowEnv = {
     llm: {
@@ -57,15 +60,15 @@ function makeBundle(): RuntimeBundle {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    // subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
   };
   return { env } as unknown as RuntimeBundle;
 }
 
-/** 在 cwd 下铺一个 SKILL.md fixture（合法 frontmatter）。 */
+/** Lay down a SKILL.md fixture under cwd (valid frontmatter). */
 async function plantSkill(
   cwd: string,
   skillName: string,
@@ -96,14 +99,14 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
 
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
-      // 隔离真实 ~/.iknow：userHome 注入空 home 子目录，cwd 注入 root。
+      // Isolate the real ~/.iknow: userHome points at an empty home subdir, cwd at root.
       userHome: join(root, "home"),
       cwd: root,
     });
 
     const names = new Set(deps.registry.list().map((d) => d.name));
     expect(names.has("skill")).toBe(true);
-    // disclosure-index-align T2 / SC5:skill_search 已删,不在注册表。
+    // skill_search was deleted; not in the registry.
     expect(names.has("skill_search")).toBe(false);
   });
 
@@ -124,21 +127,21 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     await buildTuiDeps(makeBundle(), opts);
 
     expect(captured).toBeDefined();
-    // skillCatalog：available() 含 planted "echo"（按 description 过滤、localesort）。
+    // skillCatalog: available() contains the planted "echo" (filtered by description, locale-sorted).
     const available = captured!.skillCatalog.available();
     expect(available.length).toBeGreaterThan(0);
     expect(available.find((e) => e.name === "echo")).toBeDefined();
-    // T6 / SC8：rescan 缝必须透出 —— TuiApp 的斜杠候选面靠它「当场热」。
-    // 这是生产接线断言（缝在 build-engine 里造出来，若 deps 不透传则 TUI
-    // 永远拿不到刷新路径 → SC8 在生产不成立，与本切片前的缺陷同形）。
+    // The rescan seam must be exposed — TuiApp's slash-candidate surface relies on it being hot in-place.
+    // This is a production-wiring assertion (the seam is built inside build-engine; if deps doesn't pass
+    // it through, the TUI never gets a refresh path — the same defect shape as before this slice).
     expect(captured!.skillRescanner).toBeDefined();
-    // 缝是活的：rescan() 交出可加载面（含 planted echo）。
+    // The seam is live: rescan() yields a loadable surface (containing the planted echo).
     const rescanned = await captured!.skillRescanner!.rescan();
     expect(rescanned.loadable().find((e) => e.name === "echo")).toBeDefined();
-    // mcp.status()：返回数组（即使 servers 空 → []）。
+    // mcp.status(): returns an array (even when servers are empty → []).
     const status = captured!.mcp.status();
     expect(Array.isArray(status)).toBe(true);
-    // mcp.shutdown()：幂等调用不抛（manager 创建 + 空 config → 无 client 关闭）。
+    // mcp.shutdown(): idempotent call does not throw (manager created + empty config → no client to close).
     await captured!.shutdown();
   });
 
@@ -157,12 +160,11 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     });
 
     expect(captured).toBeDefined();
-    // reload 空集不抛（manager 内部 shutdown → rebuild([]) → bootstrapAll → 全部
-    // disabled/空 → no-op）。配合 SC8 不阻塞装配：reload 返回前必须完成。
+    // Reloading an empty set does not throw (manager internally: shutdown → rebuild([]) → bootstrapAll → all disabled/empty → no-op). Must complete before reload returns so it never blocks assembly.
     await expect(captured!.mcp.reload()).resolves.toBeUndefined();
-    // 二次 reload 仍幂等：保证可重复调用。
+    // A second reload is still idempotent: guarantees repeatable calls.
     await expect(captured!.mcp.reload()).resolves.toBeUndefined();
-    // 收口：避免跨测试泄漏 manager 状态。
+    // Tear down: avoid leaking manager state across tests.
     await captured!.shutdown();
   });
 
@@ -182,7 +184,7 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
 
     expect(captured).toBeDefined();
     expect(typeof captured!.listMcpTools).toBe("function");
-    // 无 mcp.json → 无 mcp__* 工具 → 空数组（幂等，可重复调用）。
+    // no mcp.json → no mcp__* tools → empty array (idempotent, callable repeatedly).
     const tools = captured!.listMcpTools();
     expect(Array.isArray(tools)).toBe(true);
     expect(tools).toEqual([]);
@@ -228,7 +230,7 @@ describe("buildTuiDeps — #378 根因 B timeoutMsOverride 透传", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-timeout-default-"));
     roots.push(root);
 
-    // makeBundle() 的 mcp 字段默认 60_000（与 loadIknowEnv 未设 env 时一致）。
+    // makeBundle()'s mcp field defaults to 60_000 (matching loadIknowEnv when the env var is unset).
     await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
       userHome: join(root, "home"),
@@ -334,7 +336,7 @@ describe("T6 — buildTuiDeps stable productRoot threading", () => {
     expect(cfg.map((s) => s.name)).toContain("from-product");
     expect(cfg.map((s) => s.name)).not.toContain("from-task");
 
-    // reload 仍从 productRoot 读配置，不漂移到 task cwd
+    // reload still reads config from productRoot, never drifting to the task cwd
     await mkdir(join(productRoot, ".iknow"), { recursive: true });
     await writeFile(
       join(productRoot, ".iknow", "mcp.json"),

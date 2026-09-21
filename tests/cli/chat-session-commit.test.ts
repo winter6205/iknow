@@ -1,13 +1,14 @@
 /**
- * T3 (#620): chat 路径 turn 内 commit 钩子。
+ * tests/cli/chat-session-commit.test.ts
  *
- * 验证 createChatSessionCommitHook:
- * 1) 首个 commit 时 JSONL 不存在 → 用 getPriors() 的内存消息 bootstrap 建文件,
- *    再 append(不丢 user query);
- * 2) 后续 commit 链接到当前 head;
- * 3) legacy .json-only 会话 → 首个 commit 触发迁出 JSONL,title/turnCount 保留;
- * 4) 底层 IO 失败 → 以 typed store error 传播(不吞);
- * 5) processChatLine 把 deps.commitMessages 透传进 harness run。
+ * In-turn commit hook on the chat path. Verifies createChatSessionCommitHook:
+ * 1) first commit with no JSONL on disk → bootstrap the file from getPriors()
+ *    in-memory messages, then append (the user query is never lost);
+ * 2) later commits chain onto the current head;
+ * 3) a legacy .json-only session → the first commit migrates out a JSONL,
+ *    keeping title/turnCount;
+ * 4) underlying IO failure propagates as a typed store error (never swallowed);
+ * 5) processChatLine passes deps.commitMessages through to the harness run.
  */
 
 import { describe, it } from "vitest";
@@ -191,7 +192,7 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
 
   it("底层 IO 失败:以 typed store error 传播(不吞)", async () => {
     await withTempDir(async (baseDir) => {
-      // projects/ 位置放一个普通文件 → mkdir/读写全部 ENOTDIR。
+      // A plain file at the projects/ path → every mkdir/read/write hits ENOTDIR.
       await writeFile(join(baseDir, "projects"), "not a dir", "utf8");
       const store = new SessionStore(baseDir, process.cwd());
       const commit = createChatSessionCommitHook({

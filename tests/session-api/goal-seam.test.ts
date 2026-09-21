@@ -1,18 +1,13 @@
 /**
- * #408 T4 + #449 B8 (修订 per #473 / #605 T2): verify-loop seam — userText =
- * `goal.text ?? query`(#605 T2 后唯一公式)。任务焦点曾由 taskFocus 段提供
- * (稳定锚,首次 seed 后不变 — OQ2),但 #473 消费端移除 + #605 T2 字段整段
- * 退休后,`goal.text ?? query` 成为唯一公式。
+ * verify-loop seam — userText = `goal.text ?? query` (the only formula
+ * since the taskFocus field's retirement). Task focus was once provided by
+ * a taskFocus segment (a stable anchor, unchanged after first seeding);
+ * after its removal from the verify consumer and the field's wholesale
+ * retirement, `goal.text ?? query` is the sole formula.
  *
- * History:
- *   - #408 T4: hub.ts userText seam = `goal.text ?? query`.
- *   - #449 B8: 三段 fallback (`goal.text ?? taskFocus.text ?? query`)。
- *   - #473: 消费端 taskFocus 段移除 → `goal.text ?? query`。
- *   - #605 T2: `session.taskFocus` 字段整段退休 → 数据侧 fallback 退化为
- *     `goal.text ?? query`。
- *
- * #605 T2 后本文件只守护 CONSUMER-side seam (verify-loop userText 绑定),
- * DATA-side 三段公式与 `session.taskFocus` 一同退役,不再独立描述。
+ * This file guards only the CONSUMER-side seam (verify-loop userText
+ * binding); the DATA-side three-segment formula retired together with
+ * `session.taskFocus` and is no longer described separately.
  */
 import {
   afterAll,
@@ -272,11 +267,11 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     assert.equal(after.goal?.source, "user_pin");
   });
 
-  // -- #449 B8 (SC5, 修订 per #473): userText 消费端公式
-  // `goal.text ?? query`。taskFocus 段已从 verify 输入移除 (#473 根因:
-  // taskFocus 是稳定焦点锚,喂进 verify 会让新任务被旧焦点遮蔽而误判
-  // PASS)。数据侧三段公式(SC3)见下方独立 describe 块,不受影响。
-  // empty-goal-skip 纪律不变(空文本不喂 verify-loop)。
+  // -- Consumer-side userText formula: `goal.text ?? query`. The taskFocus
+  // segment is removed from verify input — taskFocus is a stable focus
+  // anchor, and feeding it into verify lets a new task be shadowed by the
+  // old focus and mis-verdicted PASS. The empty-goal-skip discipline is
+  // unchanged (empty text never feeds verify-loop).
 
   it("goal absent + taskFocus present → userText === query (taskFocus 不遮蔽当前 query, #473)", async () => {
     const id = "taskfocus-binds";

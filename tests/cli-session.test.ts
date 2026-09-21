@@ -1,5 +1,5 @@
 /**
- * CLI host processChatLine + parseArgs + usage tests (T5 acceptance).
+ * CLI host processChatLine + parseArgs + usage tests.
  *
  * Rewrite against the harness `LoopEngineDeps` API (020 cutover). The source
  * has frozen shape:
@@ -250,7 +250,7 @@ describe("processChatLine (pipe simulation)", () => {
   });
 
   it("serial two-query pipe: second sees priors; order preserved", async () => {
-    // Same ctx reused across two queries proves the host 续传 priorMessages.
+    // Reusing one ctx across two queries proves the host resumes via priorMessages.
     // Each query independently produces [user, assistant]; messages strictly grows.
     const ctx = makeCtx({
       responses: [
@@ -572,8 +572,9 @@ describe("chat subagent wake", () => {
         },
       ]
     );
-    // ADR-0112 Does #1:drain 信封是宿主注入 commit —— 必须带出处戳，
-    // 否则出站投影把 "## Sub-agent " 官方前缀锚按 untrusted 转义。
+    // ADR-0112 Do #1: the drain envelope is a host-injected commit and must carry
+    // the provenance stamp, otherwise the outbound projection would escape the
+    // "## Sub-agent " official prefix anchor as untrusted.
     const stampedDrain = seen[0]?.find((message) =>
       message.content.some(
         (block) =>
@@ -639,7 +640,7 @@ describe("chat subagent wake", () => {
     );
     assert.ok(drainMsg, "query 行 prior 含 drain 消息");
     assert.equal(drainMsg.hostInjected, true);
-    // 操作员原文 query 不被连带盖戳（戳只属于宿主 commit）。
+    // The operator's raw query must not get stamped too (the stamp belongs to host commits only).
     const operatorMsg = seen[0]?.find((message) =>
       message.content.some(
         (block) => block.type === "text" && block.text === "next question"
@@ -738,13 +739,14 @@ describe("chat subagent wake", () => {
 });
 
 /**
- * #152 T5 + #T6 (D5) 接线：chat-session `processChatLine` 尊重 `showThinking`。
+ * Wiring test: chat-session `processChatLine` honors `showThinking`.
  *
- * 默认（缺省/`false`）：输出面（`r.output`）不含 thinking 文本。
- * `ctx.showThinking === true`：输出面显示折叠摘要行 + 答案正文
- * （T6 行为变更 — 之前为展开全文；TTY 无折叠交互，摘要行即折叠态，
- * 与 TUI 默认折叠一致）。本测试不直接测渲染函数本身（那在
- * tests/cli/format.test.ts），只测接线。
+ * Default (unset / `false`): the output surface (`r.output`) contains no thinking text.
+ * `ctx.showThinking === true`: the output surface shows a collapsed summary line +
+ * the answer body (behavior change — previously the full text was expanded; a TTY
+ * has no collapse interaction, so the summary line IS the collapsed state,
+ * matching the TUI default). The render functions themselves are tested in
+ * tests/cli/format.test.ts; only the wiring is covered here.
  */
 describe("chat-session thinking 可见开关接线 (#152 T5 + #T6 折叠摘要)", () => {
   it("showThinking 缺省（false）：output 不含 thinking 文本", async () => {
@@ -772,8 +774,8 @@ describe("chat-session thinking 可见开关接线 (#152 T5 + #T6 折叠摘要)"
   });
 
   it("ctx.showThinking === true：output 含折叠摘要 + 仍含 text（全文不展开）", async () => {
-    // T6 (D5): chat 端 showThinking=true 改为折叠摘要行（不再展开 thinking
-    // 全文），与 TUI 默认折叠一致。
+    // showThinking=true on the chat side renders a collapsed summary line (no
+    // full thinking text), matching the TUI's default collapse.
     const ctx = makeCtx({
       responses: [
         assistantResult({
@@ -826,8 +828,8 @@ describe("chat-session thinking 可见开关接线 (#152 T5 + #T6 折叠摘要)"
   });
 
   it("thinking 进 ctx.state.messages（权威历史）但不出现在默认 output（两面分离）", async () => {
-    // 可见面 = 展示通道（output）；保留面 = 权威历史（state.messages）。
-    // 默认开关关闭时：历史仍含 thinking（可被后续 replay），但 output 无 thinking。
+    // Visible surface = display channel (output); retention surface = authoritative history (state.messages).
+    // With the switch off by default, history still contains thinking (available for later replay) but output shows none.
     const ctx = makeCtx({
       responses: [
         assistantResult({
@@ -843,9 +845,9 @@ describe("chat-session thinking 可见开关接线 (#152 T5 + #T6 折叠摘要)"
       ],
     });
     const r = await processChatLine({ line: "any question", ctx });
-    // output 面：不含 thinking。
+    // Output surface: no thinking.
     assert.ok(!r.output.includes("KEEP_IN_HISTORY_BUT_HIDE_FROM_OUTPUT"));
-    // 权威历史：含 thinking 全字段（保留面不被可见开关影响）。
+    // Authoritative history: full thinking fields (the retention surface is unaffected by the visibility switch).
     const assistantMsg = ctx.state.messages[1]!;
     assert.equal(assistantMsg.role, "assistant");
     const thinkingBlock = assistantMsg.content[0] as {

@@ -162,6 +162,8 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0084 last-read：createWorkerDeps → createDefaultAciRegistry →
   // createBashTool → requireBwrap（装配期 throw，test-fast 不装 bwrap）。
   "tests/subagent/worker-last-read-ledger.test.ts",
+  // #1071：untrusted addendum 契约同走 createWorkerDeps 装配链 → requireBwrap
+  "tests/subagent/worker-addendum-untrusted.test.ts",
   // #562：subagent 契约测试同走 createWorkerDeps 装配链
   "tests/subagent/envelope-role.test.ts",
   "tests/subagent/tool-constraints.test.ts",

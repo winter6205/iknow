@@ -111,10 +111,11 @@ describe("projectToolResultsFromTrace", () => {
   });
 
   it("reads blob references from traceFilePath (SC7)", async () => {
-    // SC7: blob 目录由 `dirname(traceFilePath)/blobs` 派生 —— 不再单独传
-    // traceDir, 调用方只提供 trace 文件路径即可, 派生在 `dereferenceTraceMessages`
-    // 内完成。fixture: 临时会话文件夹 + trace.jsonl + 同目录 blobs/, 验证 blob
-    // 被读出且 dereferenced 输出与 fullMessages 等价。
+    // The blob dir is derived from `dirname(traceFilePath)/blobs` — callers pass
+    // only the trace file path, and the derivation happens inside
+    // `dereferenceTraceMessages`. Fixture: a temp session folder with
+    // trace.jsonl + a sibling blobs/, asserting the blob is read and the
+    // dereferenced output equals fullMessages.
     const sessionFolder = mkdtempSync(
       join(tmpdir(), "iknow-project-tool-results-")
     );

@@ -1,16 +1,17 @@
 /**
- * T7 (#344) — MCP manager 生命周期 / 并发 / registerExternal 接线 单测。
+ * MCP manager lifecycle / concurrency / registerExternal wiring unit tests.
  *
- * 覆盖 SC8 / SC9 / SC11 / SC15 / SC16 + Manager spec 验收 1-4：
- *  - 状态机 pending → connected | failed | disabled
- *  - start() 早返回，连接在后台完成（SC8）
- *  - 注册 30s 超时 → failed + warn（SC9）
- *  - connected → registerExternal 追加，discover 可见
- *  - list_changed 重注册：在途 callTool 不打断 + 同名不重复（SC15）
- *  - shutdown 取消在途调用 + stdio 子孙 SIGTERM（SC11 / SC16）
- *  - onclose → failed，不重连
+ * Covers the manager spec's acceptance points:
+ *  - state machine pending → connected | failed | disabled
+ *  - start() returns early, connections finish in the background
+ *  - registration timeout (30s) → failed + warn
+ *  - connected → registerExternal appends, discover sees the tools
+ *  - list_changed re-registration: in-flight callTool not interrupted + no duplicate same-name
+ *  - shutdown cancels in-flight calls + SIGTERMs stdio descendants
+ *  - onclose → failed, no reconnect
  *
- * Stub client 测客户端语义；SIGTERM 子进程用真 node 子进程断言信号。
+ * Stub clients test client semantics; SIGTERM child processes use real node
+ * subprocesses to assert the signal.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -35,7 +36,7 @@ import {
 import type { McpServerConfig } from "../../src/harness/mcp/config.ts";
 import { McpLifecycleError } from "../../src/harness/errors.ts";
 
-/** T4 fixture — absolute workspace root used by manager cwd contract tests. */
+/** Absolute workspace root used by manager cwd contract tests. */
 const TEST_WORKSPACE_ROOT = "/tmp/iknow-mcp-manager-test-workspace";
 
 // ---------------------------------------------------------------------------
@@ -43,27 +44,27 @@ const TEST_WORKSPACE_ROOT = "/tmp/iknow-mcp-manager-test-workspace";
 // ---------------------------------------------------------------------------
 
 interface StubClientOptions {
-  /** connect 之前等待的毫秒数；-1 表示永不完成；省略表示立即完成。 */
+  /** Milliseconds to wait before connect; -1 means never finishes; omitted = immediate. */
   connectDelayMs?: number;
-  /** connect 时拒绝；触发 failed 路径。 */
+  /** Reject at connect; triggers the failed path. */
   rejectConnect?: boolean;
-  /** connect 完成后首次 listTools 的延迟 ms（用于 SC8 慢 connect 测）。 */
+  /** Delay of the first listTools after connect (for slow-connect tests). */
   firstListToolsDelayMs?: number;
-  /** connect 后 listTools 的初始工具列表。 */
+  /** Initial tool list returned by listTools after connect. */
   initialTools?: McpTool[];
-  /** callTool 的延迟（便于构造"在途"）。 */
+  /** callTool delay (convenient for constructing "in-flight"). */
   callToolDelayMs?: number;
-  /** callTool 拒绝；用于 shutdown 取消语义对真实业务错误的对照。 */
+  /** callTool rejects; contrast for shutdown-cancel against a real business error. */
   rejectCallTool?: boolean;
-  /** mock 控制柄。 */
+  /** mock handles. */
   listChangedHandlers: Array<(tools: McpTool[]) => void>;
   closeHandlers: Array<() => void>;
 }
 
 /**
- * 完全内存假 client。暴露：
- *  - `triggerListChanged(tools)` —— 测试可同步触发 list_changed 回调；
- *  - `triggerClose()` —— 测试可模拟服务器关闭（onclose → failed）。
+ * Fully in-memory fake client. Exposes:
+ *  - `triggerListChanged(tools)` — tests can fire the list_changed callback synchronously;
+ *  - `triggerClose()` — tests can simulate server close (onclose → failed).
  */
 function makeStubClient(opts: StubClientOptions): McpClientHandle {
   const handlers: StubClientOptions = {
@@ -78,7 +79,7 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
     connect: async () => {
       const d = handlers.connectDelayMs ?? 0;
       if (d === -1) {
-        // 永不 resolve；外部用 timeout 标 failed
+        // never resolves; external timeout marks failed
         await new Promise<never>(() => {});
         return;
       }
@@ -97,7 +98,7 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
       _args: unknown,
       options?: { signal?: AbortSignal }
     ): Promise<CallToolResult> => {
-      // 检查 abort：shutdown/timeout 会传 signal
+      // check abort: shutdown/timeout passes a signal
       const signal = options?.signal;
       const d = handlers.callToolDelayMs ?? 0;
       if (d > 0) {
@@ -134,7 +135,7 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
     onClose: (cb) => {
       handlers.closeHandlers!.push(cb);
     },
-    // 暴露手动触发器
+    // expose manual triggers
     ...({
       _triggerListChanged: (tools: McpTool[]) => {
         for (const cb of handlers.listChangedHandlers!) cb(tools);
@@ -144,7 +145,7 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
       },
     } as unknown as Record<string, unknown>),
   };
-  // 直接挂到 opts 上让 builder 也能拿到
+  // attach directly to opts so the builder can reach it too
   (handle as unknown as { _opts: StubClientOptions })._opts = handlers;
   return handle;
 }
@@ -199,7 +200,7 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-/** 等待 manager 完成后台 connect + 工具注册。 */
+/** Wait for the manager to finish background connect + tool registration. */
 async function waitForStatus(
   manager: McpManager,
   name: string,
@@ -219,7 +220,7 @@ async function waitForStatus(
 }
 
 // =========================================================================
-// State machine + SC8 (early return)
+// State machine (start() early return)
 // =========================================================================
 
 describe("MCP manager — state machine", () => {
@@ -255,12 +256,12 @@ describe("MCP manager — state machine", () => {
       registerExternal: () => {},
       createClient: () => {
         const handle = makeStubClient({
-          // connect 等外部 signal 才完成（模拟慢 server）
+          // connect completes only on external signal (simulates a slow server)
           connectDelayMs: null,
           listChangedHandlers: [],
           closeHandlers: [],
         });
-        // 覆写 connect：用可控 promise
+        // override connect: use a controllable promise
         const slowConnect = new Promise<void>((res) => {
           connectResolve = res;
         });
@@ -268,7 +269,7 @@ describe("MCP manager — state machine", () => {
           async () => {
             await slowConnect;
           };
-        // listTools：connect 后才返回
+        // listTools: returns only after connect
         (
           handle as unknown as { listTools: () => Promise<McpTool[]> }
         ).listTools = async () => {
@@ -284,11 +285,11 @@ describe("MCP manager — state machine", () => {
     await mgr.start();
     const elapsed = Date.now() - t0;
 
-    // 早返回：start() 立即 resolve
+    // early return: start() resolves immediately
     expect(elapsed).toBeLessThan(200);
     expect(mgr.status()[0]?.state).toBe("pending");
 
-    connectResolve(); // 放行 background connect
+    connectResolve(); // release the background connect
     await waitForStatus(mgr, "slow", "connected", 2000);
     await mgr.shutdown();
   });
@@ -313,12 +314,12 @@ describe("MCP manager — state machine", () => {
     await mgr.start();
     await waitForStatus(mgr, "good", "connected", 2000);
 
-    // 必须把 mcp__ 前缀工具塞进 registerExternal
+    // must feed mcp__-prefixed tools into registerExternal
     expect(registered.map((d) => d.name).sort()).toEqual([
       "mcp__good__echo",
       "mcp__good__ping",
     ]);
-    // 注册后的工具在 catalog 可见 —— 用真实的 AciRegistry 装一遍
+    // registered tools are visible in the catalog — install once through the real AciRegistry
     const reg = createAciRegistry([]);
     for (const d of registered) reg.registerExternal([d]);
     expect(reg.catalog.get("mcp__good__echo")).toBeDefined();
@@ -328,7 +329,7 @@ describe("MCP manager — state machine", () => {
 });
 
 // =========================================================================
-// SC9 — 30s connect timeout
+// 30s connect timeout
 // =========================================================================
 
 describe("MCP manager — 30s connect timeout (SC9)", () => {
@@ -340,7 +341,7 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
       workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow"), makeStdio("fast")],
       registerExternal: () => {},
-      timeoutMsOverride: 80, // 缩到测试可用
+      timeoutMsOverride: 80, // shrink for testability
       createClient: (server) => {
         createCalls.push(server.name);
         if (server.name === "slow") {
@@ -357,9 +358,9 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
             handle as unknown as { listTools: () => Promise<McpTool[]> }
           ).listTools = async () => {
             await new Promise((r) => setTimeout(r, 5));
-            // 释放后是"超时 + 迟到 listTools **真抛错**"——保持 failed。
-            // flip-back 只对"超时 + 迟到成功"生效（#378 根因 A），
-            // 迟到失败不翻。这个用例即"失败路径"的固定锚点。
+            // After release this is "timeout + late listTools that truly throws" — stays failed.
+            // flip-back only applies to "timeout + late success";
+            // a late failure never flips back. This case is the anchor for the failure path.
             throw new Error("stub: listTools rejected after timeout");
           };
           return handle;
@@ -384,8 +385,8 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
       warnCalls.some((w) => w.includes("slow") && w.includes("timeout"))
     ).toBe(true);
 
-    // 释放 slow：迟到 listTools 会真抛错 → 保持 failed（超时 + 迟到失败不翻）。
-    // 对照 #378 根因 A：只有"超时 + 迟到成功"才会 flip-back 到 connected。
+    // Release slow: the late listTools truly throws → stays failed (timeout + late failure never flips).
+    // Contrast: only "timeout + late success" flips back to connected.
     slowConnectResolve?.();
     await new Promise((r) => setTimeout(r, 50));
     expect(mgr.status().find((s) => s.name === "slow")?.state).toBe("failed");
@@ -397,13 +398,13 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
 });
 
 // =========================================================================
-// #378 根因 A — 连接超时后"迟到成功"的 flip-back 语义
+// connect-timeout "late success" flip-back semantics
 // =========================================================================
 
 describe("MCP manager — connect timeout late-success flip-back (#378)", () => {
   it("flips a timed-out slot back to connected when connect+listTools late-succeed (root cause A)", async () => {
-    // 慢 connect：超时先 fire（failed + timedOut）→ 释放后 connect 成功 →
-    // listTools 迟到成功 → 同一 bootSlot 任务内 flip-back 到 connected。
+    // Slow connect: the timeout fires first (failed + timedOut) → then connect
+    // succeeds → listTools late-succeeds → flip-back to connected within the same bootSlot task.
     let slowConnectResolve!: () => void;
     let registered: AciToolDef[] = [];
 
@@ -435,13 +436,13 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
 
     await mgr.start();
 
-    // 1) 超时先 fire → 标 failed + warn
+    // 1) timeout fires first → marked failed + warn
     await waitForStatus(mgr, "slow", "failed", 2000);
     expect(
       warnCalls.some((w) => w.includes("slow") && w.includes("timeout"))
     ).toBe(true);
 
-    // 2) 迟到成功 → 同一 boot 任务 flip-back 到 connected + 工具注册
+    // 2) late success → flip-back to connected within the same boot task + tools registered
     slowConnectResolve();
     await waitForStatus(mgr, "slow", "connected", 2000);
     expect(registered.map((d) => d.name)).toEqual(["mcp__slow__echo"]);
@@ -450,8 +451,9 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
   });
 
   it("does NOT flip back when connect fails before any timeout (true failure, error wins)", async () => {
-    // 失败路径：connect 真抛错先于超时 → timedOut 从未设置 → failed 定型，
-    // 即便超时窗口过后也不翻（catch 里 clearTimeout 取消了超时器）。
+    // Failure path: connect truly rejects before any timeout → timedOut is never
+    // set → failed is final, and it stays failed even past the timeout window
+    // (the catch clearTimeout'd the timer).
     let rejectConnect!: (err: Error) => void;
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
@@ -475,7 +477,8 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     rejectConnect(new Error("stub: hard connect failure"));
     await waitForStatus(mgr, "slow", "failed", 2000);
 
-    // 等待超过超时窗口：若超时器未清除会 fire markFailed —— 断言未发生（不误翻、不覆盖 error）
+    // Wait past the timeout window: had the timer not been cleared it would fire markFailed —
+    // assert that did not happen (no spurious flip, error not overwritten).
     await new Promise((r) => setTimeout(r, 300));
     const s = mgr.status().find((x) => x.name === "slow")!;
     expect(s.state).toBe("failed");
@@ -486,9 +489,9 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
   });
 
   it("keeps failed when listTools itself throws after a timeout (exception path)", async () => {
-    // 超时已 fire（failed + timedOut）→ listTools 迟到抛错 → catch 的
-    // markFailed 被"failed 不重复标记"守卫挡住：保持 failed，不翻。
-    // error 停在超时原因（markFailed 不重复标记，不覆盖）。
+    // Timeout already fired (failed + timedOut) → listTools throws late → the catch's
+    // markFailed is blocked by the "no repeat marking on failed" guard: stays failed, no flip.
+    // error remains the timeout reason (markFailed does not re-mark, does not overwrite).
     let slowConnectResolve!: () => void;
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
@@ -528,9 +531,9 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
   });
 
   it("flips back even when the timeout fires while listTools is still in flight (boundary: timeout ~ listTools completion)", async () => {
-    // 边界：connect 立即成功，listTools 很慢（100ms）；超时（60ms）在
-    // listTools 在途时 fire → failed + timedOut → listTools 迟到成功 →
-    // 第二守卫 flip-back 到 connected + 工具注册。
+    // Boundary: connect succeeds immediately, listTools is very slow (100ms); the timeout
+    // (60ms) fires while listTools is in flight → failed + timedOut → listTools late-succeeds →
+    // second guard flips back to connected + tools registered.
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
@@ -567,9 +570,10 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
   });
 
   it("does not wrongly flip back when a timeout lands after a genuine failure (concurrent markFailed)", async () => {
-    // 并发：真失败先定型（timedOut 从未设置）→ 超时随后 fire 的 markFailed
-    // 被"failed 不重复标记"守卫挡住 —— 状态保持 failed、error 保持真错误、
-    // 不误翻（timedOut 未被置位，因此不存在 flip-back 通道）。
+    // Concurrent: a true failure settles first (timedOut never set) → the markFailed fired
+    // by the later timeout is blocked by the "no repeat marking on failed" guard — state stays
+    // failed, error stays the true one, no spurious flip (timedOut was never set, so there is
+    // no flip-back channel).
     let rejectConnect!: (err: Error) => void;
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
@@ -593,7 +597,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     rejectConnect(new Error("stub: hard connect failure"));
     await waitForStatus(mgr, "slow", "failed", 2000);
 
-    // 等待跨过超时窗口 —— 超时 fire 的 markFailed 必须被守卫挡住
+    // Wait across the timeout window — the markFailed fired by the timeout must be blocked by the guard
     await new Promise((r) => setTimeout(r, 300));
     const s = mgr.status().find((x) => x.name === "slow")!;
     expect(s.state).toBe("failed");
@@ -634,7 +638,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     slowConnectResolve();
     await waitForStatus(mgr, "slow", "connected", 2000);
 
-    // flip-back 后 onclose → failed（不重连；onclose 不设 timedOut → 不翻）
+    // after flip-back, onclose → failed (no reconnect; onclose does not set timedOut → no flip)
     const handle = (mgr as unknown as { _handles: McpClientHandle[] })
       ._handles[0]!;
     const triggers = handle as unknown as { _triggerClose: () => void };
@@ -657,7 +661,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     await mgr.start();
     expect(mgr.status()).toEqual([]);
     await mgr.shutdown();
-    // 二次 shutdown 幂等（不抛、不悬挂）。
+    // second shutdown is idempotent (no throw, no hang).
     await mgr.shutdown();
   });
 
@@ -675,7 +679,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
         }),
     });
     await mgr.start();
-    // 负数超时 → setTimeout(0) 语义 → 立即 failed；迟到 connect 仍可 flip-back。
+    // negative timeout → setTimeout(0) semantics → immediate failed; a late connect can still flip back.
     await waitForStatus(mgr, "neg", "failed", 2000);
     await mgr.shutdown();
   });
@@ -700,7 +704,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
 });
 
 // =========================================================================
-// SC15 — list_changed 重注册，不打断在途 callTool，不重复注册同名
+// list_changed re-registration: no interrupt of in-flight callTool, no duplicate same-name
 // =========================================================================
 
 describe("MCP manager — list_changed re-registration (SC15)", () => {
@@ -730,18 +734,18 @@ describe("MCP manager — list_changed re-registration (SC15)", () => {
 
     await mgr.start();
     await waitForStatus(mgr, "svc", "connected", 2000);
-    expect(registerCount).toBe(1); // 初次注册
+    expect(registerCount).toBe(1); // initial registration
 
-    // 触发在途 callTool
+    // trigger an in-flight callTool
     const callHandle = (mgr as unknown as { _handles: McpClientHandle[] })
       ._handles?.[0];
     expect(callHandle).toBeDefined();
     const inflight = callHandle!.callTool("alpha", {}, {});
 
-    // 短暂等待让 callTool 进入在途
+    // brief wait so callTool enters flight
     await new Promise((r) => setTimeout(r, 20));
 
-    // 触发 list_changed：新增 gamma + 重出 alpha 同名
+    // fire list_changed: adds gamma + re-emits alpha under the same name
     const triggers = callHandle as unknown as {
       _triggerListChanged: (ts: McpTool[]) => void;
     };
@@ -752,19 +756,19 @@ describe("MCP manager — list_changed re-registration (SC15)", () => {
     ]);
 
     await new Promise((r) => setTimeout(r, 30));
-    // 在途 callTool 不被打断，正常 resolve
+    // the in-flight callTool is not interrupted and resolves normally
     const result = await inflight;
     expect(result.content[0]).toMatchObject({ type: "text", text: "ok" });
 
-    // 注册次数：初次 1 + 一次 list_changed 触发 alpha/gamma 重注册
+    // registration count: 1 initial + one list_changed re-registering alpha/gamma
     await waitForRegister(() => registerCount, 2, 1000);
 
-    // 增量注册 —— 同名 alpha/beta 已 registered,只追加 gamma
+    // incremental registration — same-name alpha/beta already registered, only gamma appended
     const last = registerCalls.at(-1)!;
     const newNames = last.map((d) => d.name).sort();
     expect(newNames).toEqual(["mcp__svc__gamma"]);
 
-    // 完整外部注册集应当包含 alpha/beta/gamma,无重复
+    // the full external registration set should contain alpha/beta/gamma, no duplicates
     expect(external.map((d) => d.name).sort()).toEqual([
       "mcp__svc__alpha",
       "mcp__svc__beta",
@@ -789,13 +793,13 @@ async function waitForRegister(
 }
 
 // =========================================================================
-// SC16 / SC11 — shutdown cancel semantics + stdio SIGTERM
+// shutdown cancel semantics + stdio SIGTERM
 // =========================================================================
 
 describe("MCP manager — shutdown (SC11 / SC16)", () => {
   it("shutdown cancels in-flight callTool with a clear rejection (not success, not hanging)", async () => {
-    // 走 manager 注册的 ACI tool handler —— 这样 mergeAbort 把 slot.callAbort
-    // 串到了 stub.callTool 的 signal,shutdown 时能被传播。
+    // Go through the ACI tool handler the manager registered — that way mergeAbort
+    // chains slot.callAbort into stub.callTool's signal, so shutdown propagates.
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
@@ -806,7 +810,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
       createClient: () =>
         makeStubClient({
           initialTools: [sampleTool("slowOp")],
-          callToolDelayMs: 5000, // 5s 长任务
+          callToolDelayMs: 5000, // 5s long task
           listChangedHandlers: [],
           closeHandlers: [],
         }),
@@ -822,7 +826,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
     const callP = handler!.handler!({}, {});
     await new Promise((r) => setTimeout(r, 30));
 
-    // 关键：shutdown 后 call 必须 reject 且类型明确
+    // key: after shutdown the call must reject, with a definite type
     const shutdownP = mgr.shutdown();
 
     let rejected = false;
@@ -831,7 +835,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
       resolved = await callP;
     } catch (err) {
       rejected = true;
-      // 必须明确——不悬挂,不冒充成功
+      // must be definite — no hanging, no false success
       expect(err).toBeDefined();
     }
     await shutdownP;
@@ -858,16 +862,17 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
     const handle = (mgr as unknown as { _handles: McpClientHandle[] })
       ._handles[0]!;
     await mgr.shutdown();
-    // close 已被调：再次 close 应立即 resolve（connected=false）
+    // close was invoked: calling close again should resolve immediately (connected=false)
     await expect(handle.close()).resolves.toBeUndefined();
   });
 
   it("forwards SIGTERM to stdio child subprocess on shutdown (SC11)", async () => {
     /**
-     * 真子进程：node 启动一个 sleep 子进程并打印其 pid。
-     * 我们手动构造 McpClientHandle 让它 spawn 这个真子进程（覆盖 stub）。
+     * Real child process: node starts a sleeping subprocess and prints its pid.
+     * We hand-construct a McpClientHandle so it spawns this real subprocess
+     * (overriding the stub).
      */
-    // 用 echo 进程：sleep + 等待 SIGTERM 退出的 node 子进程
+    // a sleep + SIGTERM-exit node subprocess that reports its pid
     const child = spawn(
       process.execPath,
       [
@@ -892,27 +897,27 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
       if (s.includes("SIGNAL:SIGTERM")) gotSignal = true;
     });
 
-    // 等子进程报告 pid
+    // wait for the child to report its pid
     const t0 = Date.now();
     while (pidReported < 0 && Date.now() - t0 < 3000) {
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(pidReported).toBeGreaterThan(0);
 
-    // 手动构造 McpClientHandle，模拟 manager 的 stdio handle：close 时 SIGTERM 子进程
+    // hand-construct a McpClientHandle simulating the manager's stdio handle: close SIGTERMs the child
     const handle: McpClientHandle = {
       connect: async () => {},
       listTools: async () => [],
       callTool: async () => ({ content: [{ type: "text", text: "x" }] }),
       close: async () => {
-        // 关键 —— SIGTERM 孙子
+        // key — SIGTERM the grandchild
         child.kill("SIGTERM");
       },
       onListChanged: () => {},
       onClose: () => {},
     };
 
-    // 借用 manager 但替换 createClient 工厂
+    // borrow the manager but replace the createClient factory
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
@@ -924,20 +929,20 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
     await new Promise((r) => setTimeout(r, 20));
     await mgr.shutdown();
 
-    // 等孙子实际收到信号
+    // wait for the grandchild to actually receive the signal
     const t1 = Date.now();
     while (!gotSignal && Date.now() - t1 < 3000) {
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(gotSignal).toBe(true);
 
-    // 兜底清理：万一断言前断言失败，避免子进程泄漏
+    // safety cleanup: if an assertion fails beforehand, avoid leaking the child process
     if (!child.killed) child.kill("SIGTERM");
   });
 });
 
 // =========================================================================
-// onclose → failed 不重连
+// onclose → failed, no reconnect
 // =========================================================================
 
 describe("MCP manager — onclose semantics", () => {
@@ -963,7 +968,7 @@ describe("MCP manager — onclose semantics", () => {
     triggers._triggerClose();
     await waitForStatus(mgr, "svc", "failed", 2000);
 
-    // 再触发一次也不重连（仍 failed）
+    // firing again still does not reconnect (remains failed)
     triggers._triggerClose();
     await new Promise((r) => setTimeout(r, 50));
     expect(mgr.status().find((s) => s.name === "svc")?.state).toBe("failed");
@@ -973,7 +978,7 @@ describe("MCP manager — onclose semantics", () => {
 });
 
 // =========================================================================
-// reload — Phase A harness seam（TUI 看板 refresh）
+// reload — harness seam for the TUI dashboard refresh
 // =========================================================================
 
 describe("MCP manager — reload", () => {
@@ -994,12 +999,12 @@ describe("MCP manager — reload", () => {
     await waitForStatus(mgr, "alpha", "connected", 2000);
     expect(mgr.status().map((s) => s.name)).toEqual(["alpha"]);
 
-    // 重载：改名 alpha → gamma，新增 beta，删除原 alpha 对应 server
+    // reload: rename alpha → gamma, add beta, drop the original alpha server
     await mgr.reload([makeStdio("beta"), makeStdio("gamma")]);
 
-    // reload 不阻塞在连接上（SC8）——状态立即反映新 server 集
+    // reload does not block on connections — status immediately reflects the new server set
     expect(mgr.status().map((s) => s.name)).toEqual(["beta", "gamma"]);
-    // 后台 connect 完成后转 connected
+    // transitions to connected once background connect finishes
     await waitForStatus(mgr, "beta", "connected", 2000);
     await waitForStatus(mgr, "gamma", "connected", 2000);
     expect(mgr.status().every((s) => s.state === "connected")).toBe(true);
@@ -1032,7 +1037,7 @@ describe("MCP manager — reload", () => {
     const callP = handler!.handler!({}, {});
     await new Promise((r) => setTimeout(r, 30));
 
-    // reload 内部先 shutdown → 取消 in-flight（复用 SC16 语义）
+    // reload internally shuts down first → cancels in-flight (reuses shutdown-cancel semantics)
     const reloadP = mgr.reload([makeStdio("svc")]);
 
     let rejected = false;
@@ -1070,10 +1075,10 @@ describe("MCP manager — reload", () => {
     await waitForStatus(mgr, "svc", "connected", 2000);
     expect(handles).toHaveLength(1);
 
-    // 重载为 disabled —— 不建 client，状态直接 disabled
+    // reload to disabled — no client constructed, status goes straight to disabled
     await mgr.reload([makeStdio("svc", "disabled")]);
 
-    expect(handles).toHaveLength(1); // 未新增 client
+    expect(handles).toHaveLength(1); // no new client
     expect(mgr.status()).toHaveLength(1);
     expect(mgr.status()[0]).toMatchObject({ name: "svc", state: "disabled" });
 
@@ -1100,7 +1105,7 @@ describe("MCP manager — reload", () => {
     await mgr.start();
     await waitForStatus(mgr, "alpha", "connected", 2000);
 
-    // reload 到只剩 beta —— alpha 已注册的工具名必须被撤回
+    // reload leaving only beta — alpha's registered tool names must be revoked
     await mgr.reload([makeStdio("beta")]);
 
     expect(unregistered).toHaveLength(1);
@@ -1113,8 +1118,8 @@ describe("MCP manager — reload", () => {
   });
 
   it("reload purges stale names and allows same-name re-register without Gate2 duplicate (case B)", async () => {
-    // 真 AciRegistry 装配：registerExternal / unregisterExternal 双闭包直连。
-    // 两个 server 都暴露同名工具 lookup —— 旧名不撤回则重注册触发 duplicate。
+    // Real AciRegistry assembly: registerExternal / unregisterExternal closures wired directly.
+    // Both servers expose a tool named lookup — without revoking the old name, re-registration hits duplicate.
     const reg = createAciRegistry([]);
     let mgr: McpManager | undefined;
     const createClientFor = (): McpClientHandle =>
@@ -1135,11 +1140,11 @@ describe("MCP manager — reload", () => {
     await waitForStatus(mgr, "old", "connected", 2000);
     expect(reg.catalog.get("mcp__old__lookup")).toBeDefined();
 
-    // 重载：old → new（同名工具 lookup）。旧名未撤回会触发 duplicate。
+    // reload: old → new (same tool name lookup). A non-revoked old name would throw duplicate.
     await mgr.reload([makeStdio("new")]);
     await waitForStatus(mgr, "new", "connected", 2000);
 
-    // stale 名从 catalog 消失，新名成功注册（未抛 RegistryConstructionError）
+    // stale name gone from catalog, new name registered (no RegistryConstructionError)
     expect(reg.catalog.get("mcp__old__lookup")).toBeUndefined();
     expect(reg.catalog.get("mcp__new__lookup")).toBeDefined();
 
@@ -1151,7 +1156,7 @@ describe("MCP manager — reload", () => {
       workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
       registerExternal: () => {},
-      // 故意不注入 unregisterExternal
+      // deliberately no unregisterExternal injected
       createClient: () =>
         makeStubClient({
           initialTools: [sampleTool("echo")],
@@ -1171,7 +1176,7 @@ describe("MCP manager — reload", () => {
   });
 
   it("reload → 新 server 慢 connect 超时 → failed 且 error 含 connect timeout（T4 #378 reload 冷启动场景）", async () => {
-    // createClient 按 server 名分派：cold 慢（悬挂），fast 快（立即成功）。
+    // createClient dispatches by server name: cold hangs, fast succeeds immediately.
     const mgr = createMcpManager({
       workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
@@ -1194,9 +1199,9 @@ describe("MCP manager — reload", () => {
     await mgr.start();
     await waitForStatus(mgr, "alpha", "connected", 2000);
 
-    // reload 换 cold：reload 内部 shutdown 旧 + 重建 + 后台 start（SC8 不阻塞）。
+    // reload swaps in cold: reload shuts down old + rebuilds + background start (does not block).
     await mgr.reload([makeStdio("cold")]);
-    // 慢 connect 永不 resolve → 超时 → failed + error 含 connect timeout
+    // cold connect never resolves → timeout → failed + error contains connect timeout
     await waitForStatus(mgr, "cold", "failed", 2000);
     expect(mgr.status().find((s) => s.name === "cold")?.error).toContain(
       "connect timeout"
@@ -1207,7 +1212,7 @@ describe("MCP manager — reload", () => {
 });
 
 // =========================================================================
-// T4 — workspaceRoot as stdio transport cwd + late-connect lifecycle guard
+// workspaceRoot as stdio transport cwd + late-connect lifecycle guard
 // =========================================================================
 
 describe("MCP manager — workspaceRoot transport cwd (T4)", () => {
@@ -1393,7 +1398,7 @@ describe("MCP manager — workspaceRoot transport cwd (T4)", () => {
 });
 
 // =========================================================================
-// manual reconnect — B4 / ADR-0043 §4（H1 review fix）
+// manual reconnect — ADR-0043 §4
 // =========================================================================
 
 describe("MCP manager — manual reconnect notification", () => {
@@ -1415,14 +1420,14 @@ describe("MCP manager — manual reconnect notification", () => {
       events.push({ server: serverName, tools: [...toolNames] });
     });
 
-    // 首次 start 连接成功 = 初连,不是重连 → 零派发。
+    // first start connecting successfully = initial connection, not a reconnect → zero dispatch.
     await mgr.start();
     await waitForStatus(mgr, "svc", "connected", 2000);
     await new Promise((r) => setTimeout(r, 30));
     expect(events).toEqual([]);
 
-    // 手动重连路径:reload(同 config 模拟 UI 重连)后再次连上 → 派发一次,
-    // 工具名 = mcp__<server>__<tool>(与 registerExternal 命名一致)。
+    // Manual reconnect path: reload (same config, simulating a UI reconnect) then
+    // connecting again → dispatch once, tool names = mcp__<server>__<tool> (matching registerExternal).
     await mgr.reload([makeStdio("svc")]);
     await waitForStatus(mgr, "svc", "connected", 2000);
     await new Promise((r) => setTimeout(r, 30));
@@ -1433,7 +1438,7 @@ describe("MCP manager — manual reconnect notification", () => {
       },
     ]);
 
-    // fire-once:list_changed 增量重注册不重复播报。
+    // fire-once: list_changed incremental re-registration does not re-announce.
     const handle = (mgr as unknown as { _handles: McpClientHandle[] })
       ._handles[0]!;
     const triggers = handle as unknown as {
@@ -1482,8 +1487,8 @@ describe("MCP manager — manual reconnect notification", () => {
     await waitForStatus(mgr, "bad", "connected", 2000);
     await new Promise((r) => setTimeout(r, 30));
 
-    // reload 后「新连上」的两个 server 各派发一次(已 connected 的 good 在
-    // reload 内也经历 shutdown → pending → connected,同属重连成功)。
+    // After reload, both "newly connected" servers dispatch once each (the already-connected
+    // good also goes through shutdown → pending → connected inside reload, so it counts as a successful reconnect).
     expect(events.map((e) => e.server).sort()).toEqual(["bad", "good"]);
     for (const e of events) {
       expect(e.tools).toEqual([`mcp__${e.server}__t`]);

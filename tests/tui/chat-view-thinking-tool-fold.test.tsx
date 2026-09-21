@@ -1,17 +1,22 @@
 /** @jsxImportSource @opentui/react */
 /**
- * D3（spec specs/tui-tool-settled-appearance.md）落定态折叠：
- *  - 折叠计数行只聚合成功且 retract 的件（inFoldCount === true）；
- *  - keep（bash / write / edit）标题 + 预览留；accent / 失败出独立标题行；
- *  - 零条收 → 无工具计数行（思考秒数行可单独在）；
- *  - running 态的 retract 件由 unanchored 活动块承接（`deriveActivityBlocks`
- *    单源：`calling name × N` 标题 + 一行 dim 预览槽）；keep / accent / 失败件
- *    仍逐条留标题（块外实卡）；
- *  - 折叠簇思考秒数 = 落盘 thinkingMs（该条消息的 `thinkingMs`，
- *    `thinkingMsToSeconds` 换算，不跨消息求和）。
+ * Settled-state folding:
+ *  - the fold count line aggregates only successful retract entries
+ *    (inFoldCount === true);
+ *  - keep (bash / write / edit) keeps title + preview; accent / failed get a
+ *    standalone title line;
+ *  - zero retract entries → no tool-count line (the thinking-seconds line
+ *    may stand alone);
+ *  - running retract entries are carried by the unanchored activity block
+ *    (`deriveActivityBlocks` single source: `calling name × N` title + one
+ *    dim preview slot); keep / accent / failed entries still keep their
+ *    per-entry titles (real cards outside the block);
+ *  - fold-cluster thinking seconds = the persisted thinkingMs of that
+ *    message (converted via `thinkingMsToSeconds`, never summed across
+ *    messages).
  *
- * 渲染只消费 deriveSlot 的 slot（D7）——message-blocks 按标题/预览/收三类
- * 自治，ChatView 不再传组合开关。
+ * Rendering consumes only deriveSlot's slot — message-blocks self-manages
+ * title / preview / fold; ChatView no longer passes combined switches.
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -75,7 +80,8 @@ function toolResultMessage(id: string): AnthropicNativeMessage {
   };
 }
 
-/** 用户截图同构：一轮提问 + 多轮「思考 → bash」+ 末条思考后回答。 */
+/** Mirrors a user screenshot: one query + several think→bash turns + a final
+ *  thinking-then-answer message. */
 function interleavedThinkingToolMessages(): AnthropicNativeMessage[] {
   return [
     {
@@ -107,16 +113,17 @@ function interleavedThinkingToolMessages(): AnthropicNativeMessage[] {
   ];
 }
 
-/** thinkingMs 与 messages 一一对应。null = 该位置无 thinkingMs;
- *  number(ms) = 该 assistant 回合的思考时长。三个 bashTurn 的 thinkingMs 落在
- *  index 1, 3, 5(final assistant 的思考在 index 7)。 */
+/** thinkingMs is 1:1 with messages. null = no thinkingMs at that position;
+ *  number(ms) = that assistant turn's thinking duration. The three bashTurns'
+ *  thinkingMs sit at index 1, 3, 5 (the final assistant's thinking at
+ *  index 7). */
 function thinkingMsForInterleaved(
   values: ReadonlyArray<number | null>
 ): ReadonlyArray<number | null> {
   // messages: [user(0), asst-1(1), user-result(2), asst-2(3), user-result(4),
   //            asst-3(5), user-result(6), asst-final(7)]
-  // values 顺序与 assistant messageIndex 对齐:values[0] → index 1,values[1]
-  // → index 3,values[2] → index 5,values[3] → index 7。
+  // values align with assistant messageIndex: values[0] → index 1,
+  // values[1] → index 3, values[2] → index 5, values[3] → index 7.
   const anchors = [1, 3, 5, 7] as const;
   const out: Array<number | null> = [
     null,
@@ -138,8 +145,9 @@ function thinkingMsForInterleaved(
 }
 
 test("idle：思考秒数 + 多轮 bash keep → 标题留、零条收无计数行", async () => {
-  // bash 是 keep 类：落定后标题行逐条留（D4 足迹）；本 turn 零 retract
-  // 条目 → 无工具计数行（D3）。思考秒数行仍按簇落盘 thinkingMs 画。
+  // bash is keep-class: once settled its title lines stay per-entry; this
+  // turn has zero retract entries → no tool-count line. The thinking-seconds
+  // line still renders per cluster from persisted thinkingMs.
   const setup = await testRender(
     <ChatView
       session={sessionWith(
@@ -155,22 +163,25 @@ test("idle：思考秒数 + 多轮 bash keep → 标题留、零条收无计数�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // keep 标题行逐条可见（bash 成功）—— #tui-render-overhaul T3:无 [完成] 前缀。
+  // keep title lines visible per entry (successful bash): no `[完成]`
+  // ("done") prefix.
   expect(frame).toContain("bash · ");
-  // 零条收 → 无工具计数行。
+  // Zero retract entries → no tool-count line.
   expect(frame.includes("× ")).toBe(false);
-  // 不变式:成功态无 [完成] 前缀。
+  // Invariant: success state has no `[完成]` ("done") prefix.
   expect(frame.includes("[完成]")).toBe(false);
-  // 思考秒数行仍在（簇 thinkingMs 求和，思考行可单独在）。
+  // The thinking-seconds line is still there (cluster thinkingMs; the thinking
+  // line may stand alone).
   expect(frame).toContain("Thought for 2s");
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行（spec D3 全轮生效）", async () => {
-  // 两轮:每轮一条 user query + assistant(thinking + bash)+ tool_result user。
-  // thinkingMs = [null, 4000, null, 6000, null] (assistant 思考 4s / 6s)。
-  // bash keep 标题在两轮各留一条；零 retract → 无计数行。
+  // Two rounds: each has a user query + assistant(thinking + bash) +
+  // tool_result user.
+  // thinkingMs = [null, 4000, null, 6000, null] (assistant thinking 4s / 6s).
+  // The bash keep title stays in both rounds; zero retract → no count line.
   const messages: AnthropicNativeMessage[] = [
     {
       role: "user",
@@ -200,7 +211,7 @@ test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行�
       content: [{ type: "tool_result", tool_use_id: "tu-2", content: "ok" }],
     },
   ];
-  // messages 长度 6:asst-1 在 index 1、asst-2 在 index 4。
+  // messages length 6: asst-1 at index 1, asst-2 at index 4.
   const thinkingMs: ReadonlyArray<number | null> = [
     null,
     4000,
@@ -221,13 +232,14 @@ test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 两轮各自出思考秒数行:各带独立 thinkingMs。
+  // Each round gets its own thinking-seconds line with its own thinkingMs.
   expect(frame).toContain("Thought for 4s");
   expect(frame).toContain("Thought for 6s");
-  // keep 标题两轮各留（全轮生效，旧轮标题不消失）—— #tui-render-overhaul T3
-  // 成功态无 [完成] 前缀;bash 标题行以 `bash` 起头（detail 空时只有 `bash`,
-  // detail 非空时为 `bash · ...`）。数裸 `bash` 标题行（剥离 `× ` 计数行
-  // 与秒数行）。
+  // keep titles stay in both rounds (applies to all rounds; old-round titles
+  // never vanish): success state has no `[完成]` ("done") prefix; a bash
+  // title line starts with `bash` (just `bash` when detail is empty,
+  // `bash · ...` otherwise). Count bare `bash` title lines (excluding `× `
+  // count lines and seconds lines).
   const bashLines = frame
     .split("\n")
     .filter(
@@ -235,14 +247,15 @@ test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行�
         /^\s*bash(\s|$)/.test(l) && !l.includes("× ") && !l.includes("思考")
     );
   expect(bashLines.length).toBe(2);
-  // 零条收 → 无工具计数行。
+  // Zero retract entries → no tool-count line.
   expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留、无计数行", async () => {
-  // bash 是 keep 类：无秒数轮次思考行不画（无落盘 thinkingMs），标题行
-  // 独立留 —— 折叠计数行只数 retract，bash 不进。
+  // bash is keep-class: rounds without seconds draw no thinking line (no
+  // persisted thinkingMs) but keep their title line — the fold count only
+  // counts retract entries, bash is not in it.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -254,7 +267,7 @@ test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留�
       content: [{ type: "tool_result", tool_use_id: "tu-solo", content: "ok" }],
     },
   ];
-  // 全 null thinkingMs(模拟 legacy 文件 / 无落盘 thinkingMs)。
+  // All-null thinkingMs (simulates a legacy file / no persisted thinkingMs).
   const setup = await testRender(
     <ChatView
       session={sessionWith(messages, [null, null, null])}
@@ -267,20 +280,21 @@ test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀;bash 标题行以 `bash` 起头
-  // （detail 空时只有 `bash`,detail 非空时为 `bash · ...`）。
+  // Success state has no `[完成]` ("done") prefix; a bash title line starts
+  // with `bash` (just `bash` when detail is empty, `bash · ...` otherwise).
   expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
-  // 无秒数 → 不显示 `Thought for` 行。
+  // No seconds → no `Thought for` line.
   expect(frame.includes("Thought for")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留、无秒数行", async () => {
-  // 旧会话:文件不携带 thinkingMs(SessionFileV1.thinkingMs undefined)。
-  // attachSession 透传 undefined → session.thinkingMs = undefined →
-  // thinkingMs 缺席按 0 计入 → 无秒数行；keep 标题行留。
+  // Legacy session: the file carries no thinkingMs (SessionFileV1.thinkingMs
+  // undefined). attachSession passes undefined through → session.thinkingMs =
+  // undefined → missing thinkingMs counts as 0 → no seconds line; the keep
+  // title line stays.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -309,7 +323,8 @@ test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀;bash 标题行以 `bash` 起头。
+  // Success state has no `[完成]` ("done") prefix; a bash title line starts
+  // with `bash`.
   expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
@@ -318,7 +333,8 @@ test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留�
 });
 
 test("idle：文本→工具时，keep 标题出现在前置文本之后", async () => {
-  // bash keep 标题按 content 顺序渲染在文本之后（slot 消费，无计数行）。
+  // The bash keep title renders after the preceding text, in content order
+  // (slot consumption, no count line).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     { role: "assistant", content: [{ type: "text", text: "先说明" }] },
@@ -338,7 +354,7 @@ test("idle：文本→工具时，keep 标题出现在前置文本之后", async
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   const textIdx = lines.findIndex((line) => line.includes("先说明"));
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
+  // No `[完成]` ("done") prefix in success state → match the bash title line.
   const titleIdx = lines.findIndex((line) => /^\s*bash\b/.test(line));
   expect(textIdx).toBeGreaterThanOrEqual(0);
   expect(titleIdx).toBeGreaterThan(textIdx);
@@ -347,7 +363,7 @@ test("idle：文本→工具时，keep 标题出现在前置文本之后", async
 });
 
 test("idle：工具→文本时，keep 标题出现在后续文本之前", async () => {
-  // bash keep 标题按 content 顺序渲染在文本之前。
+  // The bash keep title renders before the following text, in content order.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     ...bashTurn("tu-before-text", "先调用工具", "pwd"),
@@ -369,7 +385,7 @@ test("idle：工具→文本时，keep 标题出现在后续文本之前", async
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
+  // No `[完成]` ("done") prefix in success state → match the bash title line.
   const titleIdx = lines.findIndex((line) => /^\s*bash\b/.test(line));
   const textIdx = lines.findIndex((line) => line.includes("后续总结"));
   expect(titleIdx).toBeGreaterThanOrEqual(0);
@@ -399,7 +415,7 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
         )
         .map((block) => toolResultMessage(block.id)),
     ];
-    // assistant 在 index 1 → thinkingMs[1] = value。
+    // assistant at index 1 → thinkingMs[1] = value.
     const setup = await testRender(
       <ChatView
         session={sessionWith(messages, [null, thinkingMsValue, null, null])}
@@ -413,15 +429,16 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
     await setup.waitForVisualIdle();
     const lines = setup.captureCharFrame().split("\n");
     const textIdx = lines.findIndex((line) => line.includes(text));
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
+    // No `[完成]` ("done") prefix in success state → match bash title lines.
     const titleIndices = lines.flatMap((line, index) =>
       /^\s*bash\b/.test(line) ? [index] : []
     );
     return { setup, textIdx, titleIndices };
   };
 
-  // tool_then_text:同一 assistant 内先 tool 后 text → keep 标题在 text 前。
-  // D7:渲染按 content 块顺序消费 slot —— 标题位置即 tool_use 块位置。
+  // tool_then_text: tool before text within one assistant → keep title
+  // before the text. Rendering consumes slots in content-block order — the
+  // title sits exactly where the tool_use block is.
   const toolThenText = await renderCase(
     [
       { type: "tool_use", id: "tu-same-1", name: "bash", input: {} },
@@ -450,11 +467,13 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
 });
 
 test("idle：同一 assistant 消息拆成两个 tools 簇 → `Thought for` 不重复画（同消息去重）", async () => {
-  // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考一行时长;
-  // 去重单位 = 同一消息内的重复展示。同一条 assistant 消息内
-  // tool → text → tool 切出两个 tools 簇,两簇 anchor 是同一
-  // messageIndex → 簇时长相同 → 不去重会重复画同一时长。不同 assistant
-  // 消息之间不互相吞(见 thinking-fold-placement.test.tsx 分段各自画)。
+  // CONTEXT.md unit fold: one thinking stretch → one duration line; the
+  // dedup unit is repetition inside the same message. tool → text → tool
+  // inside one assistant message splits into two tools clusters whose anchor
+  // is the same messageIndex → same cluster duration → without dedup the same
+  // duration would be painted twice. Different assistant messages never
+  // swallow each other (see thinking-fold-placement.test.tsx: each segment
+  // draws its own).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -505,8 +524,9 @@ test("idle：同一 assistant 消息拆成两个 tools 簇 → `Thought for` 不
 });
 
 test("idle：无秒数（thinkingMs 全 null）→ 无 `Thought for` 行、无 [思考] 回落、无思考正文", async () => {
-  // CONTEXT.md unit fold:无秒数（thinkingMs 缺席/非有限）→ 不画该行、
-  // 不回落 `[思考]`、也不画思考正文（折叠态默认收）。
+  // CONTEXT.md unit fold: no seconds (thinkingMs absent / non-finite) → draw
+  // no such line, no fallback to `[思考]` ("thinking"), and no thinking body
+  // (folded state stays collapsed).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -533,14 +553,14 @@ test("idle：无秒数（thinkingMs 全 null）→ 无 `Thought for` 行、无 [
   expect(frame.includes("Thought for")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("不该被看见的思考正文")).toBe(false);
-  // 正文照常可见。
+  // The answer body stays visible as usual.
   expect(frame).toContain("回答正文");
   await setup.renderer.destroy();
 });
 
 test("idle：Ctrl+O 展开 → 思考正文可见", async () => {
-  // CONTEXT.md unit fold:正文默认收,Ctrl+O 展开后 thinking 明文可见,
-  // 不论该消息有无落盘 thinkingMs。
+  // CONTEXT.md unit fold: the thinking body is collapsed by default; Ctrl+O
+  // reveals the thinking plaintext regardless of persisted thinkingMs.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -569,9 +589,10 @@ test("idle：Ctrl+O 展开 → 思考正文可见", async () => {
 });
 
 test("idle：无历史 activity 时已完成 live retract 工具收出 tail（keep 留标题）", async () => {
-  // D3:已完成 retract（read_file）进折叠计数、离开尾巴；keep（bash）
-  // 标题独立留 —— tail 里不出现 live 完成形态 `· ok` 尾缀。
-  // 计数行锚在最近 text 段（草稿段）之后。
+  // Completed retract (read_file) folds into the count and leaves the tail;
+  // keep (bash) holds its own title — the tail must not show the live
+  // completion form with a `· ok` suffix. The count line anchors after the
+  // nearest text segment (draft segment).
   const setup = await testRender(
     <ChatView
       session={sessionWith([
@@ -605,19 +626,22 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // retract 件收起：不出现 live 完成形态（计数行锚点在历史 text 段，
-  // 无历史 activity 时无可锚段 —— 计数行缺席属既有边界，SC3 历史路径覆盖）。
+  // Retract entries collapse: no live completion form. (The count line's
+  // anchor is a history text segment; with no history activity there is no
+  // anchorable segment — the count line's absence is an existing boundary,
+  // covered by the history-path test.)
   expect(frame).not.toContain("Read a.ts · ok");
-  // keep 件标题留（live 完成行同 SSOT 形态）—— #tui-render-overhaul T3
-  // 成功态无 [完成] 前缀。
+  // The keep entry's title stays (live completion row uses the same SSOT
+  // form): success state has no `[完成]` ("done") prefix.
   expect(frame).toContain("bash · pwd");
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("T3 live 尾巴：相邻两张 keep 卡之间空一行", async () => {
-  // plans/tui-tool-rhythm.md T3 / spec D7：相邻 keep class 标题卡（历史
-  // MessageBlocks 与 live 尾巴）之间空一行；此测在 ChatView 整帧上钉住卡间距。
+  // Adjacent keep-class title cards (history MessageBlocks and the live
+  // tail) get one blank line between them; this test pins the card spacing
+  // on the full ChatView frame.
   const runs: ReadonlyArray<LiveToolRun> = [
     {
       id: "t3-live-1",
@@ -655,15 +679,17 @@ test("T3 live 尾巴：相邻两张 keep 卡之间空一行", async () => {
   const second = lines.findIndex((l) => l.includes("bash · cmd-beta"));
   expect(first).toBeGreaterThanOrEqual(0);
   expect(second).toBeGreaterThan(first);
-  // 两卡之间恰 1 行空行（首卡 stdout 行与次卡标题不贴行）。
+  // Exactly 1 blank line between the two cards (the first card's stdout row
+  // must not touch the second card's title).
   const between = lines.slice(first + 1, second);
   expect(between.filter((l) => l.trim().length === 0)).toHaveLength(1);
   await setup.renderer.destroy();
 });
 
 test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 收进计数", async () => {
-  // spec SC3：成功 read_file（retract）→ 无标题、无预览、进折叠计数
-  // `read_file × 1`；成功 bash（keep）→ 标题留 + 折叠结果预览，不进计数。
+  // Successful read_file (retract) → no title, no preview, folded into the
+  // count `read_file × 1`; successful bash (keep) → title stays + collapsed
+  // result preview, not counted.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -715,17 +741,19 @@ test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 
   expect(frame).toContain("bash · pwd");
   expect(frame).toContain("│ /tmp");
   expect(frame.includes("[完成]")).toBe(false);
-  // read_file retract：无标题、无预览。
+  // read_file retract: no title, no preview.
   expect(frame.includes("read_file ·")).toBe(false);
   expect(frame).toContain("read_file × 1");
-  // bash 不进折叠计数。
+  // bash is not in the fold count.
   expect(frame.includes("bash × ")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不进折叠计数", async () => {
-  // spec SC4 / D5：失败横切覆盖成功分类 —— 失败 read_file 出独立标题行
-  // （[失败]）+ 一行短错误；折叠计数行不得把失败件计入（`read_file ×` 缺席）。
+  // Failure overrides the success classification across the cut — a failed
+  // read_file gets a standalone title line (`[失败]`, "failed") + one short
+  // error line; the fold count line must not include failed entries
+  // (`read_file ×` absent).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -768,21 +796,23 @@ test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 失败件：红标题留 + 一行短错误在场。
+  // Failed entry: red title stays + one short error line present.
   expect(frame).toContain("[失败] read_file");
   expect(frame).toContain("ENOENT");
-  // 失败不进折叠计数行（计数行不含该失败件）。
+  // Failed entries never join the fold count line.
   expect(frame.includes("read_file ×")).toBe(false);
   await setup.renderer.destroy();
 });
 
 test("running-fg：live 单条 bash 走细节槽（不聚合），历史成功 bash 标题仍可见", async () => {
-  // D9(spec specs/tui-tool-settled-appearance.md / CONTEXT `live activity
-  // group`):running 面不提前把 live 件收成 turn 计数行(`bash × N` 缺席);
-  // 单条 keep bash 不达 >=2 聚合阈值 → 它自己就是细节槽卡片(命令可见);
-  // settled history 的 keep bash 标题照旧逐条留。
-  // spec D3 删除了 `thinkingFrozenSeconds` 副通道 —— running 期间不再有
-  // 冻结 `Thought for` 分支,流式面板恒 `Thinking…`(测试 `thinking-peek.test.tsx`)。
+  // Per CONTEXT `live activity group`: the running surface does not
+  // prematurely fold live entries into a turn count line (`bash × N`
+  // absent); a single keep bash stays below the >=2 aggregation threshold →
+  // it is itself the detail-slot card (command visible); settled-history keep
+  // bash titles still stay per-entry as before.
+  // The `thinkingFrozenSeconds` side channel was removed — during running
+  // there is no frozen `Thought for` branch; the streaming panel always shows
+  // `Thinking…` (see `thinking-peek.test.tsx`).
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-live",
@@ -808,18 +838,21 @@ test("running-fg：live 单条 bash 走细节槽（不聚合），历史成功 b
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // T7（specs/tui-activity-block.md S4/S6 / plans T7）：live bash 是 keep
-  // 类（`deriveSlot(name)` = KEEP_WITH_PREVIEW），不进 unanchored 活动块
-  // （避免与 tail 工具卡双画）—— 走 tail `liveToolRunsBox` 渲染预览行
-  // `Running 1 shell command… · <命令>`。活活断言：原 `bash × N` 折叠
-  // 计数 / `calling bash × 1` 块标题在 T7 下都不应出现。
+  // Per specs/tui-activity-block.md S4/S6: live bash is keep-class
+  // (`deriveSlot(name)` = KEEP_WITH_PREVIEW) and does not enter the
+  // unanchored activity block (avoids double-painting with the tail tool
+  // card) — it goes through the tail `liveToolRunsBox` and renders the
+  // preview line `Running 1 shell command… · <command>`. Live assertion: the
+  // old `bash × N` fold count / `calling bash × 1` block title must not
+  // appear.
   expect(frame.includes("bash ×")).toBe(false);
   expect(frame.includes("calling bash ×")).toBe(false);
   expect(frame).toContain("Running 1 shell command…");
-  // 不叠完成卡。
+  // No stacked completion card.
   expect(frame.includes("bash · Recall")).toBe(false);
-  // 历史消息的成功 bash 标题仍逐条可见（settled history 归 unit fold 面）。
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改找 bash · 行。
+  // Successful bash titles in history messages stay visible per entry
+  // (settled history belongs to the unit-fold surface); with no `[完成]`
+  // ("done") prefix, match `bash ·` lines.
   expect(frame.split("\n").some((l) => l.includes("bash ·"))).toBe(true);
   await setup.renderer.destroy();
 });

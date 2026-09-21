@@ -1,20 +1,24 @@
 /**
- * ADR-0092 / SC11–SC13 + Amendment 2026-09-13 —— hub 的 verify 调用点必须
- * 把会话 fs 档与 homeRoot 透传给 `runVerifyLoop`。
+ * ADR-0092: hub's verify call point must pass the session fs mode and
+ * homeRoot through to `runVerifyLoop`.
  *
- * 缺口背景：`SessionHub` 已有 `opts.fsMode` holder（喂给 build-engine 的
- * bash 工厂），但 `postMessage` 里 `runVerifyLoop({...})` 的调用点漏了这两个
- * 字段 → 工作区档下 verify 命令（`config.command`）的围栏仍是全局档，而
- * bash 工具已是工作区档：同一会话两条执行面档位不一致。
+ * Gap background: `SessionHub` already carries an `opts.fsMode` holder (fed
+ * to build-engine's bash factory), but the `runVerifyLoop({...})` call site
+ * in `postMessage` omitted these two fields → under workspace mode the verify
+ * command's (`config.command`) fence stayed on the global mode while the bash
+ * tool was already workspace mode: two execution planes disagreeing in one
+ * session.
  *
- * 本测试与 `tests/session-api/goal-seam.test.ts` 同款：stub 掉
- * `harness/verify/index.ts` 的 `runVerifyLoop`，捕获 hub 实际传入的 opts。
- * 锁两条契约：
- *   1. holder 在场 → 传 `fsMode: holder.get()` 的**当前值**（每次调用现读，
- *      不是装配期快照 —— 与 `/config` 翻转「下一次 bash 调用生效」同语义）；
- *   2. `homeRoot` 恒在（与 build-engine 装配 `opts.homeRoot ?? userHome
- *      (= homedir())` 同源）—— 工作区档 home ro-bind 源端必须落在与 bash
- *      工具同一个 home 上，否则两条执行面的 home 可见面会漂移。
+ * Same pattern as `tests/session-api/goal-seam.test.ts`: stub
+ * `runVerifyLoop` from `harness/verify/index.ts` and capture the opts hub
+ * actually passes. Pins two contracts:
+ *   1. holder present → pass `fsMode: holder.get()`'s **current value**
+ *      (read fresh per call, not an assembly-time snapshot — same semantics
+ *      as a `/config` flip taking "effect on the next bash call");
+ *   2. `homeRoot` always present (same source as build-engine's
+ *      `opts.homeRoot ?? userHome (= homedir())`) — the workspace-mode home
+ *      ro-bind source must sit on the same home the bash tool uses, or the
+ *      two planes' home visibility drifts apart.
  */
 import {
   afterAll,
@@ -85,7 +89,7 @@ afterEach(() => {
   runVerifyLoopMock.mockClear();
 });
 
-/** 装配带 verifyConfig 的 hub；fsMode holder 可选注入。 */
+/** Assemble a hub with verifyConfig; fsMode holder injected optionally. */
 function makeHub(fsMode?: ReturnType<typeof createFsModeContext>): SessionHub {
   const store = new SessionStore(baseDir, process.cwd());
   const verifyConfig: VerifyConfig = { command: "/bin/true" };
@@ -134,8 +138,9 @@ describe("hub verify 调用点透传 fs 档 (ADR-0092 SC11)", () => {
       "holder 当前值必须到达 runVerifyLoop 调用点"
     );
 
-    // `/config` 翻 holder（serve 走 POST /api/v1/fs-mode，同一 holder 实例）
-    // → 下一次 postMessage 的 verify 调用点读到新档，无需重建引擎。
+    // `/config` flips the holder (serve uses POST /api/v1/fs-mode, same holder
+    // instance) → the next postMessage's verify call reads the new mode with
+    // no engine rebuild.
     fsMode.set("global");
     await hub.postMessage({
       conversationId: session.conversation_id,
@@ -166,20 +171,22 @@ describe("hub verify 调用点透传 fs 档 (ADR-0092 SC11)", () => {
   });
 
   it("前提守卫：TUI 生产启动路径不注入 userHome（否则 home 面会分裂）", () => {
-    // 上一条用例断言 hub 的 homeRoot === homedir()，而 build-engine 的 home
-    // ro-bind 源端是 `opts.userHome ?? homedir()`。两者只在**没有任何生产
-    // caller 注入 userHome** 时同源 —— 这是 hub.ts verify 调用点注释记载的
-    // 「已知同源假设」，不是巧合。
+    // The previous case asserts hub homeRoot === homedir(), while build-engine's
+    // home ro-bind source is `opts.userHome ?? homedir()`. They agree only when
+    // **no production caller injects userHome** — a known same-source
+    // assumption documented at the hub.ts verify call point, not a coincidence.
     //
-    // 可达的漂移路径是 `buildTuiDeps` 的 `opts.userHome` 缝（src/tui/deps.ts：
-    // `...(opts.userHome ? { userHome } : {})`）。TUI 启动路径若开始传它，
-    // 工作区档下 bash 的 home ro-bind 会指向注入 home、而 hub 的 verify 仍指
-    // 真 homedir() —— 两条执行面的 home 可见面分裂。
+    // The reachable drift path is `buildTuiDeps`'s `opts.userHome` seam
+    // (src/tui/deps.ts: `...(opts.userHome ? { userHome } : {})`). If the TUI
+    // startup path ever passes it, workspace-mode bash home ro-binds the
+    // injected home while hub's verify still points at the real homedir() —
+    // the two planes' home visibility splits.
     //
-    // 本用例把「启动路径不传」钉成可执行断言：届时红，提示按 hub.ts 调用点
-    // 注释的收口方案（SessionHubOptions 加 home 并改现读）一并处理。
-    // 只查**启动路径** run.tsx —— deps.ts 自身的测试缝保持可用（测试注入
-    // userHome 不经 hub 的 verify 面，不受此约束）。
+    // This case pins "startup path doesn't pass it" as an executable
+    // assertion: it turns red then, pointing to the closure plan in the hub.ts
+    // call-point comment (add home to SessionHubOptions and read it fresh).
+    // Checks **only the startup path** run.tsx — deps.ts's own test seam stays
+    // usable (test-injected userHome never reaches hub's verify plane).
     const src = readFileSync(join(process.cwd(), "src/tui/run.tsx"), "utf8");
     assert.equal(
       /\buserHome\s*:/.test(src),
@@ -189,9 +196,11 @@ describe("hub verify 调用点透传 fs 档 (ADR-0092 SC11)", () => {
   });
 
   it("tmpDir = <projectDir>/<convId>/fence-tmp（ADR-0092 SC12，与 bash 面同一 helper）", async () => {
-    // 判别力：修复前该 key 根本不在 —— verify 面 `$TMPDIR` 缺席且工作区档
-    // 写白名单是进程 tmpdir()，会话 tmp 落在 home 下反被 `--ro-bind <home>`
-    // 盖住（EROFS）。本用例钉调用点解析出的路径形状与来源。
+    // Discriminating power: before the fix this key was absent at all — the
+    // verify plane had no `$TMPDIR`, and the workspace-mode write allowlist
+    // was the process tmpdir(), so session tmp under home was covered by
+    // `--ro-bind <home>` (EROFS). This case pins the call point's resolved
+    // path shape and origin.
     const hub = makeHub(createFsModeContext("workspace"));
     const { session } = await hub.createSession();
     await hub.postMessage({

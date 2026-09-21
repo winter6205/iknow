@@ -2,8 +2,9 @@
 /**
  * tests/tui/completed-tool-preview-view.test.tsx
  *
- * 完成态 write_file 代码预览须复用 markdown c4 CodeBlock（深灰底 + 语法高亮），
- * 不得裸 <text> 无底色行。
+ * The completed write_file code preview must reuse the markdown c4
+ * CodeBlock (dark-gray background + syntax highlighting), never bare <text>
+ * rows without a background.
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -106,7 +107,7 @@ describe("CompletedToolPreviewView write_file code c4", () => {
   });
 });
 
-// -- #693 T4 D4:CompletedToolPreviewView resultPreview 通道 ----------------
+// -- CompletedToolPreviewView resultPreview channel --------------------------
 
 import { type ResultPreview } from "../../src/tui/tool-summary.js";
 
@@ -179,7 +180,8 @@ describe("CompletedToolPreviewView resultPreview: │ gutter 5 行尾部 + 溢�
       { path: "a.ts", content: "export const x = 1;\n" },
       { oldContent: "", newContent: "export const x = 1;\n" }
     );
-    // 模拟一个奇怪的工具既写文件又产出 stdout（实际不发生，验渲染）。
+    // Simulate an odd tool that both writes a file and emits stdout (never
+    // happens in practice; exercises rendering).
     const resultPreview: ResultPreview = {
       kind: "result",
       lines: ["side-effect-output"],
@@ -202,12 +204,14 @@ describe("CompletedToolPreviewView resultPreview: │ gutter 5 行尾部 + 溢�
   });
 });
 
-// -- #tui-render-overhaul T1:resultPreview 内容行不再 dim ----------------------
+// -- resultPreview content lines are no longer dim ----------------------------
 //
-// 不变式：装饰元素（`│` gutter、`… +N 行` 溢出）保留 dim，让读者一眼识别
-// 为辅助形态；正文内容（bash stdout/stderr 实际产出）走正文色，与终端其
-// 余渲染一致——避免「结果预览一坨灰、读者看不到内容」。spec D4 词条由
-// 「dim 只属成功 bash 尾巴」改为「dim 只属装饰（gutter/溢出）」。
+// Invariant: decorative elements (the `│` gutter, the `… +N 行` overflow)
+// stay dim so readers recognize them as auxiliary at a glance; body content
+// (actual bash stdout/stderr) uses the normal text color, consistent with
+// the rest of the terminal — avoiding "a gray blob of result preview nobody
+// can read". The rule is: dim belongs only to decoration (gutter /
+// overflow), not to the successful-bash tail.
 
 describe("CompletedToolPreviewView squeeze（spec D5）", () => {
   test("squeezed 投影 = 只留标题行 `Wrote N lines to <path>`，正文预览整段让位", async () => {
@@ -218,9 +222,11 @@ describe("CompletedToolPreviewView squeeze（spec D5）", () => {
     );
     expect(preview.kind).toBe("squeeze");
     if (preview.kind !== "squeeze") return;
-    // 标题行是 D5 的唯一人读面（`Wrote N lines to path`）。
+    // The title line is the only human-readable surface
+    // (`Wrote N lines to path`).
     expect(preview.line).toBe("Wrote 3 lines to a.ts");
-    // 正文整段让位（不是被截成 10 行）：预览行账 = 0，标题由调用方拼。
+    // The body fully yields (not truncated to 10 lines): preview row count
+    // = 0, the title is assembled by the caller.
     expect(completedToolPreviewTextLines(preview, 80)).toEqual([]);
     const setup = await testRender(
       <CompletedToolPreviewView preview={preview} cols={80} />,
@@ -252,14 +258,16 @@ describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装�
     const expectedText = RGBA.fromHex(tuiPalette.text);
     const expectedDim = RGBA.fromHex(tuiPalette.dim);
     const { lines } = setup.captureSpans();
-    // 正文 span: 含 "RESULT_CONTENT_LINE" 字符的 span 必须走 text 色。
+    // Body span: any span containing "RESULT_CONTENT_LINE" must use the text
+    // color.
     const contentSpan = lines
       .flatMap((l) => l.spans)
       .find((s) => s.text.includes("RESULT_CONTENT_LINE"));
     expect(contentSpan).toBeDefined();
     expect(rgbaEq(contentSpan!.fg, expectedText)).toBe(true);
     expect(rgbaEq(contentSpan!.fg, expectedDim)).toBe(false);
-    // gutter span: 含 "│" 的 span 必须保留 dim 色，且不再出现 `>`。
+    // Gutter span: any span containing "│" must keep the dim color, and `>`
+    // no longer appears.
     const prefixSpan = lines
       .flatMap((l) => l.spans)
       .find((s) => s.text.includes("│"));

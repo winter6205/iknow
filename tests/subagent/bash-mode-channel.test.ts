@@ -1,23 +1,24 @@
 /**
- * #562 T6 — bashMode 通道缝贯通 (worker → registry → bash tool)。
- * 双闸 (validator + fence) 集成断言:
- *   (1) readonly worker bash 越界 → 抛 ReadonlyViolationError;
- *   (2) readonly worker bash 穿越 validator 后 → fence 收 cwdReadonly:true。
- * V1 byte-stable: role 缺省 / 未知 → bashMode 显式 "any"/缺省 → bash 字节与 V1 一致。
+ * bashMode wiring through the whole seam (worker → registry → bash tool).
+ * Dual-gate integration assertions (validator + fence):
+ *   (1) readonly worker running an out-of-bounds bash command → ReadonlyViolationError;
+ *   (2) readonly worker bash passing the validator → fence receives cwdReadonly:true.
+ * V1 byte-stable: role absent / unknown → bashMode explicit "any"/absent → bash bytes identical to V1.
  */
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
-// T3 闭世界适配:bash handler 内的 createFsPolicy(真实)对 taskRoot 做盘上
-// 校验 → sandboxRoot fixtures 必须存在。本文件 mock 了 createBwrapFence /
-// runInSandbox(不真起 bwrap),只补目录,不动断言面。
+// Closed-world adaptation: the real createFsPolicy inside the bash handler
+// validates taskRoot on disk → sandboxRoot fixtures must exist. This file mocks
+// createBwrapFence / runInSandbox (no real bwrap), so we only create the dirs,
+// without touching the assertion surface.
 for (const dir of ["/tmp/sb", "/tmp/sb-bash-mode"]) {
   mkdirSync(dir, { recursive: true });
 }
 
-// vi.mock 提至模块图顶端 — 后续 import 命中 mock (bash.ts 通过
-// '../../sandbox/index.js' 引到 createBwrapFence)。
+// vi.mock hoisted to module-graph top — later imports hit the mock
+// (bash.ts reaches createBwrapFence via '../../sandbox/index.js').
 vi.mock("../../src/harness/sandbox/index.ts", async () => {
   const actual = await vi.importActual<
     typeof import("../../src/harness/sandbox/index.ts")
@@ -45,7 +46,7 @@ import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
-// IknowEnv 装配只读 seeder —— 给测试 hermetic 注入。lifecycle 完全 stub 化。
+// Hermetic IknowEnv seeder — injects a fully stubbed lifecycle into tests.
 const TEST_ENV = {
   llm: {
     apiKey: "test-key",
@@ -71,7 +72,8 @@ interface FenceOpts {
 const capturedFenceOpts: FenceOpts[] = [];
 
 function installFenceSpy(): void {
-  // fence argv 形态断言。每次 beforeEach 重置实现,确保前测试不留状态。
+  // Assert on fence argv shape. Reset the implementation each beforeEach so no
+  // state leaks from previous tests.
   vi.mocked(sandboxIndex.createBwrapFence)
     .mockReset()
     .mockImplementation((opts) => {
@@ -92,8 +94,9 @@ function installFenceSpy(): void {
     .mockResolvedValue({ exitCode: 0, stdout: "OK\n", stderr: "" });
 }
 
-// 默认装 fence spy — 让所有 bash handler 调用都走 fake fence + fake runInSandbox,
-// 不真起 bwrap,也避免 vi.fn() 默认返回 undefined 触发 TypeError。
+// Install fence spy by default — every bash handler call goes through the fake
+// fence + fake runInSandbox, so no real bwrap and no TypeError from vi.fn()
+// returning undefined.
 beforeEach(() => {
   capturedFenceOpts.length = 0;
   installFenceSpy();
@@ -116,7 +119,7 @@ function hermeticOpts(
   };
 }
 
-// ─── A. bash.ts: bashMode → validator + fence 双闸 (T4+T5 integration) ──────
+// ─── A. bash.ts: bashMode → validator + fence dual gate ─────────────────────
 
 describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
   it("bashMode='readonly' + 'env' → 抛 ReadonlyViolationError", async () => {
@@ -143,9 +146,10 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
       output: string;
       meta: { stdout: string; stderr: string };
     };
-    // #693 T4 D4:handler 返回 envelope `{ output, meta }`(走 fake fence + runInSandbox,
-    // 顶层保持 envelope 形态);output 字段里 JSON 化的 code/stdout/stderr 仍守原
-    // 契约(模型视野不变)。
+    // The handler returns an envelope `{ output, meta }` (via fake fence +
+    // runInSandbox; top level keeps envelope shape); the JSON-encoded
+    // code/stdout/stderr inside `output` still honor the original contract
+    // (model's view unchanged).
     const parsed = JSON.parse(out.output) as {
       code: number;
       stdout: string;
@@ -157,7 +161,7 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
   });
 
   it("bashMode='readonly' + 'ls' → 穿 validator, fence 收 cwdReadonly:true (双闸 1+2)", async () => {
-    // ls 在 READONLY_ALLOWED → 通过 validator; fence 收 cwdReadonly:true。
+    // ls is in READONLY_ALLOWED → passes the validator; fence receives cwdReadonly:true.
     const tool = createBashTool("/tmp/sb", { bashMode: "readonly" });
     const out = (await tool.handler({ command: "ls" })) as {
       output: string;
@@ -180,7 +184,7 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
   });
 });
 
-// ─── B. registry.ts: createDefaultAciRegistry bashMode 透传 (T6) ────────────
+// ─── B. registry.ts: createDefaultAciRegistry bashMode pass-through ──────────
 
 describe("registry.ts: createDefaultAciRegistry bashMode 透传 (#562 T6)", () => {
   it("bashMode='readonly' → bash handler 抛 ROE on 'env'", async () => {
@@ -220,7 +224,7 @@ describe("registry.ts: createDefaultAciRegistry bashMode 透传 (#562 T6)", () =
   });
 });
 
-// ─── C. worker.ts: createWorkerDeps bashMode derivation from role (T6) ─────
+// ─── C. worker.ts: createWorkerDeps bashMode derivation from role ────────────
 
 describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
   it("role=explore → bash 抛 ROE on 'env' (validator 闸)", async () => {
@@ -238,19 +242,20 @@ describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
     const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
     const bash = deps.registry.get("bash");
     assert.ok(bash);
-    // #693 T4 D4:handler 返回 envelope;output 字段里 JSON 化 code/stdout/stderr。
+    // The handler returns an envelope; code/stdout/stderr are JSON-encoded in `output`.
     const envelope = (await bash!.handler({ command: "echo hi" })) as {
       output: string;
     };
     const out = JSON.parse(envelope.output) as { code: number };
-    // (1) readonly validator 已通过 (echo 在 READONLY_ALLOWED);
-    // (2) fence 形态断言: cwdReadonly=true 已传导。
+    // (1) readonly validator passed (echo is in READONLY_ALLOWED);
+    // (2) fence shape assertion: cwdReadonly=true propagated.
     assert.equal(out.code, 0);
     assert.equal(capturedFenceOpts[0]!.cwdReadonly, true);
   });
 
-  // role 缺省 / 未知 / general-purpose / bashMode='any' 显式覆盖 → 全部 V1 baseline:
-  // bashMode 派生 "any" 或显式 "any" → bash handler 不启用 readonly validator, fence 不收 cwdReadonly。
+  // role absent / unknown / general-purpose / explicit bashMode='any' override → all V1 baseline:
+  // bashMode derives "any" or is explicitly "any" → bash handler disables the readonly
+  // validator, fence receives no cwdReadonly.
   for (const { label, opt } of [
     { label: "role=general-purpose", opt: { role: "general-purpose" } },
     { label: "role 缺省", opt: {} },
@@ -268,8 +273,8 @@ describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
         output: string;
         meta: { stdout: string; stderr: string };
       };
-      // #693 T4 D4:handler 返回 envelope;output 字段里 JSON 化 code/stdout/stderr,
-      // 解析后与 V1 byte-stable。
+      // The handler returns an envelope; code/stdout/stderr are JSON-encoded in
+      // `output`, byte-stable with V1 after parsing.
       const parsed = JSON.parse(out.output) as {
         code: number;
         stdout: string;

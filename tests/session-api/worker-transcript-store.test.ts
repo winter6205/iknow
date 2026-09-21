@@ -1,14 +1,15 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T3 — 工人 transcript 的
- * session-api 缝测试。
+ * ADR-0102 — seam tests for worker transcripts in session-api.
  *
- * 钉两件事：
- *   1. append/load 复用 SessionFileV1 读路径（同一 jsonl codec：首批建账
- *      header + 链 + head，续批从 maxEventIndex+1 挂链；typed-error 词汇与
- *      SessionStore 同 kind，conversation_id 槽承载 task_id）；
- *   2. `listSessions`（SessionStore.list）不收录工人 —— 工人账嵌在父会话
- *      文件夹的 `subagents/` 里，项目池叶子枚举看不见它（ADR-0102 Decision 3
- *      / ADR-0071 不开平级子会话叶子的延续）。
+ * Pins two things:
+ *   1. append/load reuse the SessionFileV1 read path (same jsonl codec: the
+ *      first batch creates header + chain + head, later batches splice on from
+ *      maxEventIndex+1; typed-error vocabulary shares SessionStore kinds, with
+ *      the conversation_id slot carrying task_id);
+ *   2. `listSessions` (SessionStore.list) never includes workers — worker
+ *      ledgers are nested inside the parent session folder's `subagents/`,
+ *      invisible to the project-pool leaf enumeration (ADR-0102 Decision 3 /
+ *      continuation of ADR-0071: no peer sub-session leaves).
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -147,7 +148,7 @@ describe("worker transcript append/load（SessionFileV1 读路径可吃）", () 
     await appendFile(transcriptPath, '{"type":"message","id":"e2","parent":"e1","mes', "utf8");
     const file = await loadWorkerTranscript(loc);
     assert.equal(file.messages.length, 2);
-    // 清掉半截行再确认下一批仍能从 e2 续编号。
+    // Clear the half-written line, then confirm the next batch still continues numbering from e2.
     await writeFile(transcriptPath, before, "utf8");
     await appendWorkerTranscript({ location: loc, events: [user("next")] });
     const after = await loadWorkerTranscript(loc);
@@ -176,14 +177,14 @@ describe("listSessions 不收录工人（工人账嵌在父会话文件夹）", 
       },
     });
     const projectDir = store.getProjectDir();
-    // 工人账落父会话文件夹内（键 (父 conversationId, task_id)）。
+    // The worker ledger lands inside the parent session folder (keyed by (parent conversationId, task_id)).
     const workerTaskId = "worker-task-1";
     await appendWorkerTranscript({
       location: {
         transcriptPath: join(projectDir, parent, "subagents", workerTaskId, `${workerTaskId}.jsonl`),
         taskId: workerTaskId,
       },
-      // 带 assistant 文本：证明它不被收录不是因为「无 assistant 跳过」规则。
+      // With assistant text: proves it is not listed due to the "skip when no assistant" rule.
       events: [user("do work"), assistant("worked")],
     });
 

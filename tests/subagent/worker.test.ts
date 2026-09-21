@@ -5,13 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * specs/tui-model-command SC9：worker 的 client 构造（未注入 `model` 时的
- * 默认分支）把 `env.llm.headers` 透传为 SDK `defaultHeaders`，缺席不传该键。
+ * The worker client construction (default branch when no `model` is injected)
+ * passes `env.llm.headers` through as SDK `defaultHeaders`; when absent, the
+ * key is not sent at all.
  *
- * 观测手段 = 子类化真实 Anthropic（不是替身）：`createWorkerDeps` 不把 client
- * 交回调用方，构造参数是唯一可观察面；继承真类保证 `new Anthropic(...)` 的
- * 其余行为（含 key/baseURL）不受影响。默认 `opts.model` 注入的用例走 stub，
- * 不经过本记录器 —— 既有装配语义不变。
+ * Observation technique = subclass the real Anthropic (not a stand-in):
+ * `createWorkerDeps` never hands the client back, so constructor args are the
+ * only observable surface; extending the real class guarantees everything else
+ * about `new Anthropic(...)` (key/baseURL included) is unaffected. Cases using
+ * the default `opts.model` injection go through the stub and bypass this
+ * recorder — existing assembly semantics unchanged.
  */
 const anthropicCtorOpts = vi.hoisted(
   () => [] as Array<Record<string, unknown>>
@@ -60,7 +63,7 @@ import { assistantResult } from "../cli/_fixtures.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
-/** 测试用 minimal IknowEnv — createWorkerDeps 路径类型要求, 不真发请求。 */
+/** Minimal test IknowEnv — required by createWorkerDeps typing; no real requests. */
 const TEST_ENV: IknowEnv = {
   llm: {
     apiKey: "test-key",
@@ -79,8 +82,8 @@ const TEST_ENV: IknowEnv = {
   chat: { showThinking: false, quiet: false },
 };
 
-/** 构造 stub-model + LoopEngineDeps。registry/executor 占位 (run 路径需要 list/get)；
- *  system/promptTools 必须是函数形态 (loop-engine:509 promptTools?.()). */
+/** Build stub-model + LoopEngineDeps. registry/executor are placeholders (the run path needs list/get);
+ *  system/promptTools must be function-shaped (loop-engine:509 promptTools?.()). */
 function makeDeps(adapter: LoopEngineDeps["adapter"]): LoopEngineDeps {
   return {
     adapter,
@@ -94,7 +97,7 @@ function makeDeps(adapter: LoopEngineDeps["adapter"]): LoopEngineDeps {
   } as unknown as LoopEngineDeps;
 }
 
-/** 构造 minimal RunResult for toOkEnvelope 直接验证。 */
+/** Minimal RunResult for direct toOkEnvelope verification. */
 function fakeResult(finalText: string | null) {
   return {
     finalText,
@@ -106,7 +109,7 @@ function fakeResult(finalText: string | null) {
 }
 
 // ---------------------------------------------------------------------------
-// A. envelope 派生纯函数 (toOkEnvelope / toFailedEnvelope) — 直接覆盖
+// A. envelope-derivation pure functions (toOkEnvelope / toFailedEnvelope) — direct coverage
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
@@ -128,7 +131,7 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
 
   it("SC10: result 超 20000 → 截断为短交差且保持成功状态", async () => {
     const big = "y".repeat(25000);
-    // 直接调 truncateEnvelopeResult 验证 (与 envelope.ts 行为对齐)
+    // call truncateEnvelopeResult directly (aligned with envelope.ts behavior)
     const { truncateEnvelopeResult } =
       await import("../../src/harness/subagent/envelope.ts");
     const env = toOkEnvelope(fakeResult(big));
@@ -190,9 +193,9 @@ describe("subagent worker: toFailedEnvelope (SC6 reason 五值, ADR-0111 修订 
 });
 
 // ---------------------------------------------------------------------------
-// B. runWorkerOnce 集成测试 — stub-model 走真 loop-engine 短链 (单 step)
-//    单测只覆盖最小语义: stub 给 ok → ok envelope / stub 给空 queue →
-//    ProtocolError → failed envelope。
+// B. runWorkerOnce integration — stub-model through the real loop-engine,
+//    short chain (single step). Unit tests cover only minimal semantics:
+//    stub ok -> ok envelope / stub empty queue -> ProtocolError -> failed envelope.
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () => {
@@ -229,8 +232,8 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
   });
 
   it("SC6 protocolError: stub queue 耗尽 → run() 抛 ProtocolError → envelope status=failed, reason=protocolError", async () => {
-    // responses:[] → stub.step() 立即抛 ProtocolError "responses exhausted"
-    // runWorkerOnce 捕到 → toFailedEnvelope("protocolError")
+    // responses:[] → stub.step() throws ProtocolError "responses exhausted" immediately
+    // runWorkerOnce catches it → toFailedEnvelope("protocolError")
     const adapter = createStubModel({ responses: [] });
     const env = await runWorkerOnce({
       workerEnvelope: baseEnvelope,
@@ -298,10 +301,12 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
 });
 
 // ---------------------------------------------------------------------------
-// B2. ADR-0111 T4 — protocolError 收口支的 apiError 分流 (Decision 2(a)) 与
-//     run() 逃逸 catch 的子类排序 (Decision 2(b))。
-//     不变式 (Decision 2(c)): RunResult.apiError 在场 ⇔ 带 cause 的瞬时模型
-//     流/传输失败 → 父侧拿到 modelTransient 而非 protocolError。
+// B2. ADR-0111 — apiError routing of the protocolError convergence branch
+//     (Decision 2(a)) and subclass ordering of the run() escape catch
+//     (Decision 2(b)).
+//     Invariant (Decision 2(c)): RunResult.apiError present <=> a transient
+//     model stream/transport failure with a cause -> the parent sees
+//     modelTransient instead of protocolError.
 // ---------------------------------------------------------------------------
 
 function adapterStepThrowing(err: unknown): LoopEngineDeps["adapter"] {
@@ -390,7 +395,7 @@ describe("subagent worker: runWorkerOnce protocolError 收口 apiError 分流 (A
   });
 
   it("run() 逃逸 catch: ModelStreamIncompleteError 支排在 ProtocolError 通用支之前 → modelTransient (Decision 2(b))", async () => {
-    // encodeUserText 在 step 收口面之外抛出本类错误 (loop 收口面之外的逃逸形态)。
+    // encodeUserText throws this class outside the step convergence surface (an escape shape beyond loop convergence).
     const env = await runWorkerOnce({
       workerEnvelope: { ...baseEnvelope, finalText: "host dialogue" },
       deps: makeDeps(
@@ -467,10 +472,11 @@ describe("subagent worker: runEscapeEnvelope (ADR-0111 不变式 (b) run 阶段�
 });
 
 // ---------------------------------------------------------------------------
-// G. #358 T2 / D8: applyEnvelopeOverrides + runWorkerOnce 的 per-call 隔离
-//    deps.timeoutMs 只能来自 env (createWorkerDeps 侧), 绝不从 spawn 的
-//    per-task timeoutMs 渗入 —— 否则一次正常 LLM 调用会按任务寿命竞速
-//    (per-call 保护失效 / 显式小值误杀)。
+// G. applyEnvelopeOverrides + per-call isolation in runWorkerOnce.
+//    deps.timeoutMs may only come from env (the createWorkerDeps side), never
+//    leaking in from a spawn's per-task timeoutMs — otherwise one normal LLM
+//    call would race against the whole task lifetime (per-call protection
+//    defeated / explicit small values would mis-kill it).
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", () => {
@@ -488,7 +494,7 @@ describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", ()
       deps
     );
     assert.equal(out.timeoutMs, deps.timeoutMs, "timeoutMs 不被 envelope 覆盖");
-    // 仅 maxTurns 生效, 其余字段逐位保留 (spread 守卫)
+    // only maxTurns takes effect, every other field preserved bit for bit (spread guard)
     assert.equal(out.maxTurns, 7);
     assert.equal(out.adapter, deps.adapter);
     assert.equal(out.registry, deps.registry);
@@ -513,22 +519,23 @@ describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", ()
   it("runWorkerOnce 端到端: envelope timeoutMs:1 + 宽松 deps.timeoutMs → 正常完成 (旧 spread 会在 1ms 竞速超时)", async () => {
     vi.useFakeTimers();
     try {
-      // 单条 ok 回应:NEW 路径由正常 step 消费 (完成); OLD 路径 1ms 竞速
-      // 超时 → 该回应被 epilogue 摘要消费 → finalText null → result ""。
+      // One ok response: the NEW path consumes it in the normal step (completes);
+      // the OLD path's 1ms race times out -> the response is consumed by the
+      // epilogue summary -> finalText null -> result "".
       const adapter = createStubModel({
         responses: [assistantResult({ texts: ["complete"] })],
         delayMs: 200,
       });
       const p = runWorkerOnce({
         workerEnvelope: { ...baseEnvelope, timeoutMs: 1 },
-        // deps.timeoutMs 宽松 (60s) — envelope.timeoutMs=1 是 per-task 寿命,
-        // 渗入 per-call 竞速会杀掉这次正常调用 (D8)。
+        // deps.timeoutMs stays generous (60s) — envelope.timeoutMs=1 is per-task
+        // lifetime; leaking it into the per-call race would kill this normal call.
         deps: { ...makeDeps(adapter), timeoutMs: 60_000 },
       });
-      // 让 run 的初始微任务 (system?.() / raceModel 计时器注册) 先落盘
+      // let run's initial microtasks (system?.() / raceModel timer registration) settle first
       await Promise.resolve();
       await Promise.resolve();
-      // 推进 300ms:NEW 下 200ms 步完成;OLD 下 1ms 竞速超时 + 摘要延时收敛
+      // advance 300ms: under NEW the 200ms step completes; under OLD the 1ms race times out + summary delay converges
       await vi.advanceTimersByTimeAsync(300);
       const env = await p;
       assert.equal(env.status, "ok");
@@ -540,7 +547,7 @@ describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", ()
 });
 
 // ---------------------------------------------------------------------------
-// C. parseWorkerEnvelope 失败 → ProtocolError 上抛 (SC13) — worker.ts 透传
+// C. parseWorkerEnvelope failure -> ProtocolError rethrown (worker.ts passthrough)
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: parseWorkerEnvelope 失败 → ProtocolError 上抛 (SC13)", () => {
@@ -564,7 +571,7 @@ describe("subagent worker: parseWorkerEnvelope 失败 → ProtocolError 上抛 (
 });
 
 // ---------------------------------------------------------------------------
-// D. buildThinkingParams + createRealAnthropicAdapter seam (轻量 type sanity)
+// D. buildThinkingParams + createRealAnthropicAdapter seam (light type sanity)
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", () => {
@@ -590,7 +597,7 @@ describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", ()
 });
 
 // ---------------------------------------------------------------------------
-// E. CreateWorkerDepsOptions 类型契约 (不下沉到装配路径)
+// E. CreateWorkerDepsOptions type contract (does not sink into the assembly path)
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", () => {
@@ -795,14 +802,15 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
 });
 
 // ---------------------------------------------------------------------------
-// F. #468 disallowedTools 消费 — worker 装配期把 deny-list 透传给
-//    createDefaultAciRegistry, 声明工具面 = 实际工具面 (inner + visibleSchemas
-//    双面断言)。不真发 LLM / 不写盘 / 不扫 fs —— 用 stub-model + noop trace +
-//    空 skill catalog 保持 hermetic。
+// F. disallowedTools consumption — at worker assembly the deny-list is passed
+//    through to createDefaultAciRegistry, declared tool surface = actual tool
+//    surface (assertions on both inner + visibleSchemas). No real LLM calls /
+//    no disk writes / no fs scans — stub-model + noop trace + empty skill
+//    catalog keep it hermetic.
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry (声明面 = 实际面)", () => {
-  /** hermetic 装配缝: stub-model (零模型调用) + 空 skill catalog + noop trace。 */
+  /** Hermetic assembly seam: stub-model (zero model calls) + empty skill catalog + noop trace. */
   function hermeticOpts(
     extra?: Partial<CreateWorkerDepsOptions>
   ): CreateWorkerDepsOptions {
@@ -870,13 +878,15 @@ describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry 
 });
 
 // ---------------------------------------------------------------------------
-// G. T5 review-fix H1 — worker content trace file-mode 接线。envelope
-//    traceFilePath 是「文件路径」(manager 已在 spawn 期建好普通文件
-//    `agent-<taskId>.jsonl`),worker 侧必须用 JsonlTraceOptions 的 file-mode
-//    键 `traceFilePath`,不能用目录模式键 `filePath`(那会把文件路径当目录,
-//    落 `agent-<taskId>.jsonl/<taskId>.jsonl` → ENOTDIR → 静默零行)。
-//    断言锚点:worker content 记录与 manager lifecycle 行共存于同一
-//    `agent-<taskId>.jsonl` 单文件,conversation_id 一律 == taskId。
+// G. H1 review-fix — worker content trace file-mode wiring. The envelope
+//    traceFilePath is a *file path* (manager already created the plain file
+//    `agent-<taskId>.jsonl` at spawn time); the worker side must use
+//    JsonlTraceOptions' file-mode key `traceFilePath`, not the directory-mode
+//    key `filePath` (which would treat the file path as a directory and write
+//    `agent-<taskId>.jsonl/<taskId>.jsonl` -> ENOTDIR -> silently zero lines).
+//    Assertion anchor: worker content records coexist with manager lifecycle
+//    rows in the same single `agent-<taskId>.jsonl` file, conversation_id
+//    always == taskId.
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", () => {
@@ -889,8 +899,9 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
     const previousTraceOut = process.env.IKNOW_TRACE_OUT;
     delete process.env.IKNOW_TRACE_OUT;
     try {
-      // 模拟 manager 已建好的普通文件 + 一条 lifecycle 行 (file-mode 写入
-      // 必须以 append 方式共存,不能因路径被同名目录占据而 ENOTDIR)。
+      // Simulate the plain file + one lifecycle row the manager already created
+      // (file-mode writes must coexist via append, never ENOTDIR because the
+      // path is occupied by a same-named directory).
       const { appendFileSync } = await import("node:fs");
       appendFileSync(
         traceFilePath,
@@ -913,9 +924,10 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
         taskId,
       });
 
-      // worker content 记录经这条 trace 服务落盘 —— 若走错目录模式键,
-      // appendFileSync 目标是 <traceFilePath>/<taskId>.jsonl (ENOTDIR) 或
-      // 构造期 EEXIST 失败 → traceWriteFailures > 0 / 无行落盘。
+      // Worker content records land via this trace service — if the wrong
+      // directory-mode key were used, appendFileSync would target
+      // <traceFilePath>/<taskId>.jsonl (ENOTDIR) or construction would fail
+      // with EEXIST -> traceWriteFailures > 0 / zero rows landed.
       const trace = deps.trace;
       assert.ok(trace, "traceFilePath 在场时必须装配 JsonlTraceService");
       const id = await trace.recordTurn({
@@ -935,11 +947,11 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
         .split("\n")
         .filter(Boolean)
         .map((l) => JSON.parse(l) as Record<string, unknown>);
-      // manager lifecycle 行仍在,worker turn 行追加其后。
+      // the manager lifecycle row is still there, the worker turn row appended after it.
       assert.equal(lines[0]?.record_type, "subagent_spawn");
       assert.equal(lines[lines.length - 1]?.record_type, "turn");
       assert.equal(lines[lines.length - 1]?.conversation_id, taskId);
-      // 绝无把 traceFilePath 当目录二次嵌套的产物。
+      // never a product of re-nesting traceFilePath as a directory.
       assert.equal(
         statSync(traceFilePath).isFile(),
         true,
@@ -975,12 +987,12 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
 });
 
 // ---------------------------------------------------------------------------
-// G. specs/tui-model-command SC9: provider.headers → SDK defaultHeaders
-//    (worker 侧 client 构造, 未注入 model 的默认分支)
+// G. provider.headers -> SDK defaultHeaders (worker-side client construction,
+//    the default branch when no model is injected)
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: env.llm.headers → client defaultHeaders (SC9)", () => {
-  /** 裸装配选项: 不传 model → 走默认分支真构造 Anthropic client。 */
+  /** Bare assembly options: no model passed -> the default branch really constructs an Anthropic client. */
   function headerProbeOpts(env: IknowEnv): CreateWorkerDepsOptions {
     return {
       env,

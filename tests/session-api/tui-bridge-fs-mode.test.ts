@@ -1,20 +1,22 @@
 /**
- * ADR-0092 / SC13 —— TUI 入口的 fs 档必须同时到达 **verify 命令面**。
+ * ADR-0092 — the fs mode chosen at the TUI entry must also reach the **verify command surface**.
  *
- * 缺口背景（Spec 轴 code-review Medium）：`createTuiBridge` 未把 fs holder
- * 交给 `SessionHub`，于是 TUI 的 bash 工具面（经 buildTuiDeps）是工作区档、
- * 而 verify 命令面（经 hub 的 runVerifyLoop）还是全局档 —— 同一会话两条执行
- * 面档位不一致，工作区档的 home 写保护在 verify 这条臂上失效。serve 入口
- * 早已按同款接线（session-api/serve.ts），TUI 独缺。
+ * Gap background: `createTuiBridge` did not hand the fs holder to `SessionHub`, so the
+ * TUI bash tool surface (via buildTuiDeps) ran in workspace mode while the verify
+ * surface (via hub's runVerifyLoop) stayed in global mode — two execution surfaces of
+ * one session with inconsistent modes, leaving the workspace mode's home write
+ * protection ineffective on the verify arm. The serve entry had long been wired the
+ * same way (session-api/serve.ts); only the TUI was missing it.
  *
- * 本测试直接走 `createTuiBridge → SessionHub`（不经 TUI 渲染层，OpenTUI 的
- * 渲染面有既有 flake，且这条契约与渲染无关），stub 掉 runVerifyLoop 捕获
- * hub 实际传入的 opts。断言三条：
- *   1. holder 在场 → `fsMode` 到达 runVerifyLoop 且为 holder 当前值；
- *   2. 翻档后下一次调用读到新值（per-call 现读，不是装配期快照）；
- *   3. holder 缺席 → 不打 `fsMode` key（V1 baseline 入参形状）。
+ * This test goes straight through `createTuiBridge → SessionHub` (skipping the TUI
+ * render layer: OpenTUI rendering has pre-existing flakes and this contract is
+ * render-independent), stubbing runVerifyLoop to capture the opts the hub actually
+ * passes. Three assertions:
+ *   1. holder present -> `fsMode` reaches runVerifyLoop with the holder's current value;
+ *   2. after flipping the mode, the next call reads the new value (read per call, not an assembly-time snapshot);
+ *   3. holder absent -> no `fsMode` key (V1 baseline argument shape).
  *
- * `hub-bridge.ts` 不 import OpenTUI / React，故可在 vitest 面加载。
+ * `hub-bridge.ts` imports neither OpenTUI nor React, so it loads in the vitest environment.
  */
 import {
   afterAll,
@@ -82,7 +84,7 @@ afterEach(() => {
   runVerifyLoopMock.mockClear();
 });
 
-/** 装配 TUI bridge；fsMode holder 可选注入。 */
+/** Assembles the TUI bridge; the fsMode holder is optionally injected. */
 function makeBridge(fsMode?: ReturnType<typeof createFsModeContext>) {
   const verifyConfig: VerifyConfig = { command: "/bin/true" };
   return createTuiBridge({
@@ -133,7 +135,7 @@ describe("createTuiBridge — fs holder 到达 hub 的 verify 面 (ADR-0092 SC13
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(capturedOpts()["fsMode"], "global");
 
-    // TUI 的 `/config` 翻的是同一个 holder 实例。
+    // The TUI's `/config` flips this same holder instance.
     fsMode.set("workspace");
     await bridge.hub.postMessage({
       conversationId: session.conversation_id,

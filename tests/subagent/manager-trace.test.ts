@@ -1,16 +1,17 @@
 /**
- * #358 T4 — SubAgentManager 三类 trace 事件 (subagent_spawn / subagent_state_change / subagent_stop)
- * 落盘集成测试（double-track：trace assert + no-trace deepEqual 基线）.
+ * Integration test: SubAgentManager's three trace events (subagent_spawn /
+ * subagent_state_change / subagent_stop) persisted to disk (double-track:
+ * trace assert + no-trace deepEqual baseline).
  *
- * 契约（plans/358 §SC1 + spec Testing Strategy 三角矩阵）:
- * 1. spawn → subagent_spawn 落盘 (manager 注入 memory-spy trace)
- * 2. state 迁移 starting → running → 至少 1 条 subagent_state_change
- * 3. 终态 (completed) → 1 条 subagent_stop（subagent_id 跨 spawn/stop 一致）
- * 4. 失败 spawn（spawn 工厂 throw）→ subagent_spawn + subagent_stop with reason="crashed"
- * 5. sibling 配对：两个 spawn 各一条 subagent_spawn + 各一条 subagent_stop
- * 6. NoopTraceService baseline：可观测行为 (queryBuffer / listActive / drainCompleted)
- *    与带 trace 形态 deepEqual
- * 7. 真实 jsonl 文件落盘：spawn → envelope → exit 后 >=3 行 subagent_*
+ * Contract:
+ * 1. spawn → subagent_spawn recorded (manager injected with a memory-spy trace)
+ * 2. state transition starting → running → at least 1 subagent_state_change
+ * 3. terminal state (completed) → 1 subagent_stop (subagent_id consistent across spawn/stop)
+ * 4. failed spawn (spawn factory throw) → subagent_spawn + subagent_stop with reason="crashed"
+ * 5. sibling pairing: two spawns → one subagent_spawn + one subagent_stop each
+ * 6. NoopTraceService baseline: observable behavior (queryBuffer / listActive / drainCompleted)
+ *    deepEqual to the traced form
+ * 7. real jsonl persistence: spawn → envelope → exit yields >=3 subagent_* lines
  */
 
 import assert from "node:assert/strict";
@@ -39,7 +40,7 @@ import type {
   SubagentStateChangeRecord,
 } from "../../src/harness/trace/types.ts";
 
-// ─── fake ChildProcess 工厂 (复用 manager.test.ts 的 makeFakeChild 模式) ───
+// ─── fake ChildProcess factory (reuses the makeFakeChild pattern from manager.test.ts) ───
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -78,7 +79,7 @@ function emitEnvelope(child: FakeChild, env: SubAgentEnvelope): void {
   child.emit("exit", 0, null);
 }
 
-// ─── 录制式 trace spy ──────────────────────────────────────────────────────
+// ─── recording trace spy ──────────────────────────────────────────────────────
 
 interface RecordedTrace {
   readonly spawns: ReadonlyArray<SubagentSpawnRecord>;
@@ -132,8 +133,9 @@ function makeTracingHarness(
   };
   const impl = opts.spawnImpl ?? defaultImpl;
 
-  // 满足 TraceService 接口的最小 spy(只实现 subagent 三件,其它签名调用即抛错)。
-  // 这里我们不知类型是否要求全部方法,所以用最小子集 + casts 处理。
+  // Minimal spy satisfying the TraceService interface (only the three subagent
+  // methods; calling any other signature throws). The interface may not require
+  // every method, so use the minimal subset + casts.
   const trace = {
     recordSubagentSpawn: (
       rec: SubagentSpawnRecord
@@ -157,7 +159,7 @@ function makeTracingHarness(
 
   const manager = createSubAgentManager({
     spawn: impl,
-    // `trace` 接口形 = TraceService,这里仅注入 subagent 相关三件
+    // `trace`'s interface shape = TraceService; only the three subagent methods injected here
     trace: trace as unknown as Parameters<
       typeof createSubAgentManager
     >[0]["trace"],
@@ -170,7 +172,7 @@ function makeTracingHarness(
   };
 }
 
-// ─── SC1 #1: 三类事件落盘 + spawn/stop 配对 ────────────────────────────────
+// ─── SC1 item 1: three event kinds on disk + spawn/stop pairing ─────────────
 
 describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
   it("spawn → envelope emit → exit 0 配对: 1 spawn + ≥1 state_change + 1 stop, subagent_id 一致", async () => {
@@ -182,10 +184,10 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
       maxTurns: 5,
       timeoutMs: 60000,
     });
-    // 触发 completed (emit envelope + exit)
+    // trigger completed (emit envelope + exit)
     emitEnvelope(h.spawned[0]!, okEnvelope("done"));
 
-    // safeTrace 包裹的 recordXxx 是 fire-and-forget: 等下一次 microtask flush
+    // safeTrace-wrapped recordXxx is fire-and-forget: wait for the next microtask flush
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(h.recorded.spawns.length, 1);
@@ -195,7 +197,7 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
     );
     assert.equal(h.recorded.stops.length, 1);
 
-    // record 的 id (= manager taskId) 跨 record 一致
+    // record id (= manager taskId) consistent across records
     assert.equal(h.recorded.spawns[0]!.id, taskId);
     assert.equal(h.recorded.stops[0]!.id, taskId);
     assert.equal(h.recorded.stateChanges[0]!.id, taskId);
@@ -217,7 +219,7 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
     assert.ok(stop.endedAt !== undefined);
     assert.match(stop.endedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 
-    // 至少一条 state_change: starting → running
+    // at least one state_change: starting → running
     const runningChange = h.recorded.stateChanges.find(
       (s) => s.toState === "running"
     );
@@ -225,7 +227,7 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
   });
 });
 
-// ─── SC1 #4: spawn 工厂 throw 失败路径 ────────────────────────────────────
+// ─── SC1 item 4: spawn-factory throw failure path ───────────────────────────
 
 describe("SubAgentManager trace 失败路径 (spawn 抛错)", () => {
   it("spawn factory throws → 1 subagent_spawn + 1 subagent_stop with reason=crashed", async () => {
@@ -249,7 +251,7 @@ describe("SubAgentManager trace 失败路径 (spawn 抛错)", () => {
   });
 });
 
-// ─── SC1 #5: sibling 配对 ────────────────────────────────────────────────
+// ─── SC1 item 5: sibling pairing ───────────────────────────────────────────
 
 describe("SubAgentManager trace sibling 配对 (SC1)", () => {
   it("sequential 2 spawns → 2 subagent_spawn + 2 subagent_stop 同 taskId 一一配对", async () => {
@@ -278,7 +280,7 @@ describe("SubAgentManager trace sibling 配对 (SC1)", () => {
 
 describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () => {
   it("createNoopTraceService 注入 → 可观测行为 (queryBuffer / listActive / drainCompleted / spawn 返回) 与带 trace 形态 deepEqual", async () => {
-    // 含 trace 形态
+    // traced form
     const withTrace = makeTracingHarness();
     const { taskId: withTraceTaskId } = withTrace.manager.spawn({
       task: "thing",
@@ -291,7 +293,7 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
     const withTraceDrain = withTrace.manager.drainCompleted();
     assert.equal(withTrace.recorded.stops.length, 1, "trace 形态落 stop");
 
-    // 无 trace 形态: 用 NoopTraceService 注入 + 同一 spawn 路径
+    // no-trace form: NoopTraceService injected + the same spawn path
     const noopSpawned: FakeChild[] = [];
     const noop = createSubAgentManager({
       spawn: (_def, _taskId, _payload) => {
@@ -308,9 +310,9 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
     const noopList = noop.listActive();
     const noopDrain = noop.drainCompleted();
 
-    // queryBuffer status shape 完全一致 (envelope 不同 result 是预期 — payload 不同)
+    // queryBuffer status shape identical (different envelope results are expected — payloads differ)
     assert.equal(noopQuery.status, withTraceQuery.status);
-    // shape deep equal: same union status + 同 envelope 字段 (status / summary / result)
+    // shape deep equal: same union status + same envelope fields (status / summary / result)
     if (noopQuery.status === "ok" && withTraceQuery.status === "ok") {
       const a = noopQuery as SubAgentEnvelope;
       const b = withTraceQuery as SubAgentEnvelope;
@@ -318,9 +320,9 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
       assert.equal(typeof a.summary, typeof b.summary, "summary shape");
       assert.equal(typeof a.result, typeof b.result, "result shape");
     }
-    // listActive: 两条都 emit 后,空数组等
+    // listActive: both empty arrays after the two emits
     assert.deepEqual([...noopList], [...withTraceList]);
-    // drainCompleted 长度与 envelope.status 一致
+    // drainCompleted length and envelope.status agree
     assert.equal(noopDrain.length, withTraceDrain.length);
     assert.equal(noopDrain.length, 1);
     assert.equal(
@@ -328,12 +330,12 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
       (withTraceDrain[0]!.envelope as SubAgentEnvelope).status
     );
 
-    // NoopTraceService 路径不发任何埋点 → manager 行为与带 trace 完全一致 (可观测面 deepEqual)
-    // Already covered by listActive + drainCompleted + queryBuffer shape 断言。
+    // The NoopTraceService path emits no records → manager behavior is identical to the traced form (observable surface deepEqual)
+    // Already covered by the listActive + drainCompleted + queryBuffer shape assertions.
   });
 });
 
-// ─── jsonl 文件适配: 直接用 createJsonlTraceService 真实落盘 ─────────────
+// ─── jsonl file adapter: real persistence via createJsonlTraceService ───────
 
 describe("SubAgentManager trace 真实 jsonl 落盘 (T4 SC1 grep -c subagent_ >= 3)", () => {
   it("spawn → envelope → exit 后 grep -c subagent_ >= 3", async () => {
@@ -356,9 +358,9 @@ describe("SubAgentManager trace 真实 jsonl 落盘 (T4 SC1 grep -c subagent_ >=
 
       manager.spawn({ task: "do" });
       emitEnvelope(spawned[0]!, okEnvelope("r"));
-      // 等 trace 的 safeTrace 包装 + write flush
+      // wait for trace's safeTrace wrapper + write flush
       await new Promise((resolve) => setImmediate(resolve));
-      // 再 await 一个 microtask 兜底 (safeTrace 是 Promise + writeLine 是同步)
+      // one extra microtask as a safety net (safeTrace returns a Promise; writeLine is sync)
       await Promise.resolve();
 
       const filePath = join(scratchDir, "conv-mgr-trace.jsonl");

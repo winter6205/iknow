@@ -1,13 +1,16 @@
 /**
- * D-α V1 graph mode T5 —— serve 入口的 `/graph` 对等物（spec SC3）。
+ * The serve entry's `/graph` equivalent.
  *
- * serve 没有键盘也没有命令行，所以 `/graph on|off|status` 的载体是
- * `POST /api/v1/graph-mode`：wire 上传的就是已经切好的 args 数组，语义与
- * 文案走 `harness/graph/mode.ts` 同一个 `applyGraphCommand` —— 三入口
- * 一份值域。holder 与 hub 共用同一实例，所以翻完的下一条 postMessage 才
- * 进装配（round 语义由 hub 侧测试守）。
+ * serve has neither a keyboard nor a command line, so the carrier for
+ * `/graph on|off|status` is `POST /api/v1/graph-mode`: the wire carries the
+ * already-split args array, and semantics plus wording go through the same
+ * `applyGraphCommand` in `harness/graph/mode.ts` — one value domain across
+ * all three entries. The holder is the same instance the hub uses, so the
+ * flip only enters assembly on the next postMessage (round semantics are
+ * guarded by hub-side tests).
  *
- * holder 缺席 → 两端点 404（与 permission-mode 未挂载同模式）。
+ * Missing holder → both endpoints 404 (same pattern as an unmounted
+ * permission-mode).
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -83,7 +86,7 @@ describe("GET/POST /api/v1/graph-mode", () => {
     assert.equal(on.status, 200);
     assert.equal(on.body["enabled"], true);
     assert.match(String(on.body["message"]), /on/);
-    // 同一 holder：HTTP 翻的就是 hub 拿到的那个（SC3）。
+    // Same holder: what HTTP flips is exactly what the hub reads.
     assert.equal(graphMode.get().enabled, true);
 
     const off = await post(origin, { args: ["off"] });

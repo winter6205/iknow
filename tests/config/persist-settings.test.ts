@@ -1,38 +1,37 @@
 /**
- * T1: persist-settings 纯函数模块 —— settings.json 反向持久化。
+ * persist-settings pure module — reverse persistence into settings.json.
  *
- * 覆盖（plans/settings-bidirectional-persist.md T1 验收 + plans/workspace-root-launch.md T3 验收，≥14 用例）：
- *  1. 新文件起步：llm 缺失 → 写入 `{llm:{thinking,thinkingEffort}}`。
- *  2. 已有文件：保留 apiKey / model / fallback / secrets 全部原字段。
- *  3. thinkingEffort: null → 删除键（auto 语义），不残留空串。
- *  4. 坏 JSON 起步：从空对象合并后写回（不覆盖用户文件原内容本身）。
- *  5. 原子性：写回后是完整可 parse JSON，无 `.tmp` 残留。
- *  6. 权限：tmp 文件 mode 0600（rename 前断言）。
- *  7. 父目录缺失 → mkdir -p 后成功写。
- *  8. merge 对非法 patch 值防御（thinking / thinkingEffort 越界 → throw）。
- *  9. resolveThinkingSettingsPath（ADR-0084 写回落对层）：thinking / memory 是
- *     用户层键 → 目标恒为 `<home>/.iknow/settings.json`，**与 project 文件是否
- *     存在解耦**（旧 ADR-0019 D1.3 的「project 存在 → project」档已退役：
- *     项目文件不采纳 llm / memory，写进去静默无效）。home 缺省 homedir()。
- * 10. hashSettingsContent：同串同哈希，异串异哈希。
- * 11. 并发类：串行 await 两次 persist → 最终 = 第二次 patch + 保留字段。
- * 12. 异常类：目标父路径为普通文件（ENOTDIR）→ reject，错误含路径。
- * 13. 防御分支：readFile 非 ENOENT / JSON.parse 非 SyntaxError → 重抛
- *    （分别用真实 fs 错误 EISDIR 与 JSON.parse spy 注入）。
- * 14. T3 acceptance #2：并行双写 → atomic rename 保证最终文件可 parse 且
- *     thinking ∈ 两个 patch 之一（NOT merge disaster），保留字段全在。
- * 15. /model（specs/tui-model-command.md SC5 / SC6）：mergeModelPatch 值域门禁
- *     （非字符串 / 空串 / 无斜杠 / 段空 / 未知 provider → TypeError）、只改
- *     `llm.model` 且 providers 等字段原样、跨 provider 往返、与 thinking patch
- *     共存、raw 缺 llm 段 / llm 非对象起点、persistModelChanges 原子写 +
- *     bytes sha256 稳定、非法 patch 不落盘。
+ * Coverage:
+ *  1. fresh file: missing llm → writes `{llm:{thinking,thinkingEffort}}`.
+ *  2. existing file: apiKey / model / fallback / secrets all preserved.
+ *  3. thinkingEffort: null → key deleted (auto semantics), no empty string left behind.
+ *  4. bad JSON start: merge from empty object then write back (user file content itself not clobbered).
+ *  5. atomicity: result parses as complete JSON, no `.tmp` leftovers.
+ *  6. permissions: tmp file mode 0600 (asserted before rename).
+ *  7. missing parent dir → mkdir -p then successful write.
+ *  8. merge defends against invalid patch values (thinking / thinkingEffort out of range → throw).
+ *  9. resolveThinkingSettingsPath（ADR-0084 write-back target layer）: thinking / memory are
+ *     user-layer keys → target is always `<home>/.iknow/settings.json`, **decoupled from whether
+ *     the project file exists**（the old ADR-0019 D1.3 "project exists → project" rule is retired:
+ *     project files do not adopt llm / memory, writing there fails silently）. home defaults to homedir().
+ * 10. hashSettingsContent: same string same hash, different string different hash.
+ * 11. concurrency: two serial awaited persists → final = second patch + preserved fields.
+ * 12. error path: target parent is a regular file (ENOTDIR) → reject, error contains the path.
+ * 13. defensive branches: non-ENOENT readFile / non-SyntaxError JSON.parse → rethrow
+ *    (injected via a real EISDIR fs error and a JSON.parse spy respectively).
+ * 14. parallel double write → atomic rename guarantees the final file parses and
+ *     thinking ∈ one of the two patches (NOT a merge disaster), preserved fields intact.
+ * 15. /model: mergeModelPatch value-domain gating (non-string / empty / no slash / empty segment /
+ *     unknown provider → TypeError), touches only `llm.model` with providers etc. intact,
+ *     cross-provider round trips, coexists with thinking patches, starts from raw missing llm /
+ *     non-object llm, persistModelChanges atomic write + stable bytes sha256, invalid patch never lands.
  *
- * 纪律：
- *  - mkdtempSync + afterAll rmSync（tmp 隔离，绝不碰真实 ~/.iknow）；
- *  - vitest（tests/config 既有框架；bun test 亦可跑，兼容）；
- *  - 失败路径用例用真实 fs 错误（父路径为文件 → ENOTDIR；叶子为目录 → EISDIR）
- *    替代 chmod / spy：WSL2 tmpfs 不按 mode 位拦 uid 1000 写，vitest 也不允许
- *    spy ESM namespace；ENOTDIR 用例保留 win32 跳过（该平台映射为 ENOENT）。
+ * Discipline:
+ *  - mkdtempSync + afterAll rmSync (tmp isolation, never touch the real ~/.iknow);
+ *  - vitest (framework already used in tests/config; bun test compatible);
+ *  - failure-path cases use real fs errors (parent is a file → ENOTDIR; leaf is a directory → EISDIR)
+ *    instead of chmod / spy: WSL2 tmpfs does not enforce mode bits for uid 1000, and vitest cannot spy
+ *    ESM namespaces; the ENOTDIR case keeps its win32 skip (that platform maps it to ENOENT).
  */
 import { afterAll, describe, expect, test, vi } from "vitest";
 import {
@@ -63,7 +62,7 @@ import {
   resolveThinkingSettingsPath,
 } from "../../src/config/persist-settings.ts";
 
-/** 每个测试的隔离 tmp 根目录（afterAll 统一清理）。 */
+/** Per-test isolated tmp root (cleaned in afterAll). */
 const tmpBases: string[] = [];
 
 function makeTmpRoot(prefix: string): string {
@@ -76,7 +75,7 @@ afterAll(() => {
   for (const base of tmpBases) rmSync(base, { recursive: true, force: true });
 });
 
-/** 含 apiKey / model / fallback / secrets 的完整 settings raw JSON 字符串。 */
+/** Full settings raw JSON string with apiKey / model / fallback / secrets. */
 function fullSettingsJson(): string {
   return JSON.stringify(
     {
@@ -94,13 +93,13 @@ function fullSettingsJson(): string {
   );
 }
 
-/** 断言目标文件存在、可 parse、无 .tmp 残留、mode 0600。 */
+/** Asserts the file exists, parses, leaves no .tmp, and has mode 0600. */
 function expectAtomicWrite(target: string): Record<string, unknown> {
   const dir = dirname(target);
   const entries = readdirSync(dir);
   expect(entries.some((e) => e.endsWith(".tmp"))).toBe(false);
   const stat = statSync(target);
-  // POSIX mode 位：0600（owner rw only）；Windows 无意义。
+  // POSIX mode bits: 0600 (owner rw only); meaningless on Windows.
   if (process.platform !== "win32") {
     expect(stat.mode & 0o777).toBe(0o600);
   }
@@ -112,7 +111,7 @@ describe("mergeThinkingPatch（纯函数）", () => {
     expect(
       mergeThinkingPatch({}, { thinking: "adaptive", thinkingEffort: "high" })
     ).toEqual({ llm: { thinking: "adaptive", thinkingEffort: "high" } });
-    // llm 非普通对象（字符串）：原值整体丢弃，重新由 patch 字段起步。
+    // llm is a non-plain object (string): old value dropped wholesale, rebuilt from patch fields.
     expect(
       mergeThinkingPatch({ llm: "not-an-object" }, { thinking: "off" })
     ).toEqual({
@@ -133,7 +132,7 @@ describe("mergeThinkingPatch（纯函数）", () => {
       },
       secrets: { enabled: true, patterns: ["token"] },
     });
-    // 原对象不被修改（纯函数无副作用）。
+    // base object untouched (pure function, no side effects).
     expect((raw.llm as Record<string, unknown>).thinking).toBe("off");
   });
 
@@ -185,7 +184,7 @@ describe("resolveThinkingSettingsPath（ADR-0084 写回落对层）", () => {
     const cwd = join(base, "cwd");
     mkdirSync(join(cwd, ".iknow"), { recursive: true });
     const projectFile = join(cwd, ".iknow", "settings.json");
-    // 项目文件里带一个「用户层键」llm（允许名单外）与一个允许名单内的 verify。
+    // Project file carries a user-layer key llm (outside the allowlist) plus an allowlisted verify.
     writeFileSync(
       projectFile,
       JSON.stringify({
@@ -195,13 +194,13 @@ describe("resolveThinkingSettingsPath（ADR-0084 写回落对层）", () => {
       "utf8"
     );
 
-    // 目标 = user 路径（不是 project），与 project 是否存在解耦。
+    // Target = user path (not project), decoupled from whether project exists.
     const target = resolveThinkingSettingsPath({ home });
     expect(target).toBe(join(home, ".iknow", "settings.json"));
     expect(target).not.toBe(projectFile);
 
     await persistThinkingChanges(target, { thinking: "adaptive" });
-    // user 文件拿到 thinking；project 文件的 llm 逐字节不变（未创建 / 未修改）。
+    // user file gets thinking; project file's llm is byte-identical (never created / modified).
     expect(
       (JSON.parse(readFileSync(target, "utf8")) as { llm: unknown }).llm
     ).toEqual({ thinking: "adaptive" });
@@ -231,7 +230,7 @@ describe("resolveThinkingSettingsPath（ADR-0084 写回落对层）", () => {
   test("无 cwd / workspaceRoot 入参：目标恒为 home 层（写回锚点只有 home）", () => {
     const base = makeTmpRoot("iknow-persist-cwd-");
     const home = join(base, "home");
-    // 项目文件存在也不改变目标层（签名已收窄为 { home }，项目文件探测退役）。
+    // An existing project file never changes the target layer (signature narrowed to { home }; project probing retired).
     const cwd = join(base, "cwd");
     mkdirSync(join(cwd, ".iknow"), { recursive: true });
     writeFileSync(join(cwd, ".iknow", "settings.json"), "{}", "utf8");
@@ -268,7 +267,7 @@ describe("persistThinkingChanges（原子写）", () => {
     mkdirSync(join(base, "home", ".iknow"), { recursive: true });
     writeFileSync(file, fullSettingsJson());
     const res = await persistThinkingChanges(file, { thinking: "adaptive" });
-    // 只应改 thinking 两键，apiKey / model / fallback / maxTurns / secrets 原样。
+    // Only the two thinking keys change; apiKey / model / fallback / maxTurns / secrets stay.
     expect(JSON.parse(res.bytes)).toEqual({
       llm: {
         model: "claude-sonnet",
@@ -349,12 +348,12 @@ describe("persistThinkingChanges（原子写）", () => {
     const file = join(base, "home", ".iknow", "settings.json");
     mkdirSync(join(base, "home", ".iknow"), { recursive: true });
     writeFileSync(file, fullSettingsJson());
-    // 第一次：adaptive + effort=high（保留字段：model/apiKey/fallback/maxTurns/secrets）。
+    // First call: adaptive + effort=high (preserved fields: model/apiKey/fallback/maxTurns/secrets).
     await persistThinkingChanges(file, {
       thinking: "adaptive",
       thinkingEffort: "high",
     });
-    // 第二次：只改 thinking=off，不传 effort → 第一次的 effort 按 merge 语义保留。
+    // Second call: thinking=off only, no effort → first effort survives via merge semantics.
     await persistThinkingChanges(file, { thinking: "off" });
     const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<
       string,
@@ -375,14 +374,13 @@ describe("persistThinkingChanges（原子写）", () => {
   });
 
   test("T3 acceptance #2：并行双写同一文件 → atomic rename 保证可 parse 且为两者之一", async () => {
-    // 边界类 concurrent（test.md）：两个 persistThinkingChanges 并行 Promise.all
-    // 打同一个 settings 文件。既有 atomic 写（同目录 tmp + rename 原子替换）
-    // 保证最终文件无 half-written JSON / 无 torn file —— 最终必是完整某个
-    // 写入的落盘（文件状态原子交换），不会是 merge disaster。断言语义：
-    //   - JSON.parse 成功（无 torn）；
-    //   - thinking ∈ {off, adaptive}（patch1 或 patch2 之一，非二者混合）；
-    //   - effort 保留字段（model / apiKey / fallback / maxTurns / secrets）仍在
-    //     （merge 起点完整，非空起步覆盖）。
+    // Two persistThinkingChanges racing via Promise.all on the same file. The atomic
+    // write (same-dir tmp + rename) guarantees no half-written / torn JSON — the final
+    // file is exactly one complete write, never a merge disaster. Asserting:
+    //   - JSON.parse succeeds (no torn state);
+    //   - thinking ∈ {off, adaptive} (one of the two patches, not a blend);
+    //   - preserved fields (model / apiKey / fallback / maxTurns / secrets) still present
+    //     (merge started from the full file, not from empty).
     const base = makeTmpRoot("iknow-persist-parallel-");
     const file = join(base, "home", ".iknow", "settings.json");
     mkdirSync(join(base, "home", ".iknow"), { recursive: true });
@@ -394,9 +392,8 @@ describe("persistThinkingChanges（原子写）", () => {
         thinkingEffort: "high",
       }),
     ]);
-    // assert 顺序放 resolved detach 内：await 已保证两写完成，但异常先行时
-    // 不留悬挂（vitest 对 detached 未处理 rejection 会告警，此处 resolve 处
-    // 无 reject 风险 —— 仅读最终文件）。
+    // The await already guarantees both writes finished; reading the final file here
+    // cannot produce a detached rejection.
     const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<
       string,
       unknown
@@ -413,13 +410,13 @@ describe("persistThinkingChanges（原子写）", () => {
   });
 
   test("异常类：目标父路径是普通文件（ENOTDIR）→ reject 且错误含路径", async () => {
-    // chmod 0555 在 WSL2 tmpfs 下不拦 uid 1000 写（测试曾解析成功而误挂），
-    // 改为制造确定性的 ENOTDIR：把 settings 的父层建造成普通文件，
-    // 模块的 mkdir(dirname, {recursive:true}) 必失败且错误带路径。
-    if (process.platform === "win32") return; // win32 将 ENOTDIR 映射为 ENOENT，无法复现
+    // chmod 0555 does not block uid 1000 writes on WSL2 tmpfs (this test once passed the
+    // write and failed spuriously). Instead create a deterministic ENOTDIR: the settings
+    // parent is a regular file, so the module's mkdir(dirname, {recursive:true}) must fail.
+    if (process.platform === "win32") return; // win32 maps ENOTDIR to ENOENT, unreproducible
     const base = makeTmpRoot("iknow-persist-enotdir-");
     const file = join(base, "not-a-dir", "settings.json");
-    writeFileSync(join(base, "not-a-dir"), ""); // 父层存在但为文件，mkdir 必失败
+    writeFileSync(join(base, "not-a-dir"), ""); // parent exists but is a file → mkdir must fail
     await expect(
       persistThinkingChanges(file, { thinking: "adaptive" })
     ).rejects.toThrow();
@@ -429,14 +426,14 @@ describe("persistThinkingChanges（原子写）", () => {
   });
 
   test("防御分支：readFile 抛非 ENOENT 错误 → 重抛（不静默吞）", async () => {
-    // 真实 EISDIR：settings 叶子路径是目录，readFile 必失败且非 ENOENT，
-    // 走 readSettingsRaw 的 catch-rethrow 分支（避免 spy ESM namespace）。
+    // Real EISDIR: the settings leaf path is a directory, so readFile fails with a non-ENOENT
+    // error, exercising readSettingsRaw's catch-rethrow branch (no ESM-namespace spy needed).
     const base = makeTmpRoot("iknow-persist-eisdir-");
     const file = join(base, "home", ".iknow", "settings.json");
-    mkdirSync(file, { recursive: true }); // settings.json 本身是目录
-    // 断言错误码而非路径：fs 的 EISDIR 消息是 "EISDIR: illegal operation on
-    // a directory, read"（node 侧含逗号后缀，bun 侧无，且不带路径），跨运行时
-    // 不一致 —— 但 code === "EISDIR" 两运行时都稳定，且正好锁定非 ENOENT 重抛分支。
+    mkdirSync(file, { recursive: true }); // settings.json itself is a directory
+    // Assert the error code, not the message: fs EISDIR text differs across runtimes
+    // (node adds a comma suffix, bun does not, and neither includes the path) — but
+    // code === "EISDIR" is stable everywhere and pins exactly the non-ENOENT rethrow branch.
     await expect(
       persistThinkingChanges(file, { thinking: "off" })
     ).rejects.toMatchObject({ code: "EISDIR" });
@@ -447,8 +444,8 @@ describe("persistThinkingChanges（原子写）", () => {
     const file = join(base, "home", ".iknow", "settings.json");
     mkdirSync(join(base, "home", ".iknow"), { recursive: true });
     writeFileSync(file, "{}");
-    // 注意：不把写文件放进 mock 窗口 —— readFile 在文件系统上真实读到 "{}"，
-    // JSON.parse 才命中 mock（顺序依赖 fs 先于 JSON.parse 完成）。
+    // Keep the file write outside the mock window — readFile really reads "{}",
+    // so only JSON.parse hits the mock (order: fs completes before parse).
     const spy = vi.spyOn(JSON, "parse").mockImplementation(() => {
       throw new TypeError("boom from spy");
     });
@@ -514,8 +511,8 @@ describe("persistMemoryChanges（原子写）", () => {
   });
 });
 
-// ADR-0092 / SC13：filesystem isolation 档（fsMode）— 反向持久化通道。
-// 镜像 persistMemoryChanges 形态：raw-merge、原子写、非法值 TypeError。
+// ADR-0092: filesystem isolation tier (fsMode) — reverse persistence channel.
+// Mirrors persistMemoryChanges: raw-merge, atomic write, TypeError on invalid values.
 describe("mergeFsModePatch（纯函数）", () => {
   test("isolation 缺失 → 创建；其它字段原样保留", () => {
     expect(
@@ -581,7 +578,7 @@ describe("persistFsModeChanges（原子写）", () => {
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
       isolation: { fsMode: "workspace" },
     });
-    // 原子写无 .tmp 残留、mode 0600。
+    // Atomic write: no .tmp leftovers, mode 0600.
     expectAtomicWrite(file);
   });
 
@@ -626,7 +623,7 @@ describe("persistFsModeChanges（原子写）", () => {
     await expect(
       persistFsModeChanges(file, { fsMode: "wrong" as never })
     ).rejects.toThrow(TypeError);
-    // 文件原样保留（写回未发生）。
+    // File untouched (write-back never happened).
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
       isolation: { fsMode: "global" },
     });
@@ -643,7 +640,7 @@ describe("persistFsModeChanges（原子写）", () => {
   });
 });
 
-// ── ADR-0096 T2: subagent 并发上限 patch（cap 3|5|9|15|unlimited） ──────────
+// ── ADR-0096: subagent concurrency cap patch (cap 3|5|9|15|unlimited) ───────
 
 describe("mergeSubagentCapPatch（纯函数）", () => {
   test("subagent 缺失 → 创建 subagent.maxConcurrentWorkers", () => {
@@ -690,8 +687,8 @@ describe("mergeSubagentCapPatch（纯函数）", () => {
     }
   });
 
-  // 闭集外数字 → TypeError（与 fsMode / thinking 同步；TUI 面板永远不会
-  // 传这种值 —— 边界 5 类之一，捕获异常防止污染磁盘）。
+  // Numbers outside the closed set → TypeError (same discipline as fsMode / thinking:
+  // the TUI panel can never emit such values; catching here keeps bad data off disk).
   test("闭集外数字（0 / 1 / 2 / 4 / 7 / 99） → TypeError", () => {
     for (const v of [0, 1, 2, 4, 7, 99]) {
       expect(() =>
@@ -760,7 +757,7 @@ describe("persistSubagentCapChanges（原子写）", () => {
       subagent: { maxConcurrentWorkers: 9 },
     });
     expectAtomicWrite(file);
-    // self-write 哨兵：bytes 哈希与文件内容哈希同源
+    // Self-write sentinel: hash of returned bytes matches the file content hash
     expect(hashSettingsContent(res.bytes)).toBe(
       hashSettingsContent(readFileSync(file, "utf8"))
     );
@@ -813,7 +810,7 @@ describe("persistSubagentCapChanges（原子写）", () => {
     await expect(
       persistSubagentCapChanges(file, { maxConcurrentWorkers: 7 as never })
     ).rejects.toThrow(TypeError);
-    // 文件原样保留（写回未发生）
+    // File untouched (write-back never happened)
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
       subagent: { maxConcurrentWorkers: 9 },
     });
@@ -827,7 +824,7 @@ describe("persistSubagentCapChanges（原子写）", () => {
   });
 });
 
-// ── ADR-0096 T3: worktree 门禁 patch（ON | OFF） ────────────────────────────
+// ── ADR-0096: worktree gate patch (ON | OFF) ────────────────────────────────
 
 describe("mergeWorktreeOnMutatePatch（纯函数）", () => {
   test("isolation 缺失 → 创建；其它顶层键原样保留", () => {
@@ -883,7 +880,7 @@ describe("mergeWorktreeOnMutatePatch（纯函数）", () => {
         mergeWorktreeOnMutatePatch({}, { worktreeOnMutate: bad as never })
       ).toThrowError(/worktreeOnMutate/);
     }
-    // 字段整体缺失同拒（边界 5 类：空 patch 不落盘）
+    // Key entirely missing is also rejected (empty patch must not land on disk)
     expect(() => mergeWorktreeOnMutatePatch({}, {} as never)).toThrow(
       TypeError
     );
@@ -1058,7 +1055,7 @@ describe("persistWorktreeOnMutateChanges（原子写）", () => {
   });
 });
 
-/** T4: 含 volcengine-ark / minimax-cn 两 provider 的 raw settings（spec 例模板形状）。 */
+/** Raw settings with volcengine-ark / minimax-cn providers (the spec example shape). */
 function rawWithProviders(): Record<string, unknown> {
   return {
     llm: {
@@ -1090,7 +1087,7 @@ function rawWithProviders(): Record<string, unknown> {
   };
 }
 
-/** raw.llm.providers 注册表（断言复用，避免硬编码副本漂移）。 */
+/** The raw.llm.providers registry (reused in assertions to avoid hardcoded-copy drift). */
 function providersOf(raw: Record<string, unknown>): unknown {
   return (raw.llm as Record<string, unknown>).providers;
 }
@@ -1104,13 +1101,13 @@ describe("mergeModelPatch（纯函数：/model 切换，SC5 只改 llm.model）"
     const expected = rawWithProviders();
     (expected.llm as Record<string, unknown>).model =
       "volcengine-ark/deepseek-v3-250324";
-    // 整个 merged 与「raw 仅换 model」深度相等 —— 无任何其它 delta。
+    // merged deep-equals "raw with only model swapped" — no other delta.
     expect(merged).toEqual(expected);
-    // providers 注册表整段保留（不裁剪成只剩被选 provider）。
+    // The providers registry stays whole (not trimmed to only the selected provider).
     expect((merged.llm as Record<string, unknown>).providers).toEqual(
       providersOf(raw)
     );
-    // 纯函数：raw 未被就地修改。
+    // Pure function: raw is not mutated in place.
     expect((raw.llm as Record<string, unknown>).model).toBe(
       "minimax-cn/MiniMax-M3"
     );
@@ -1170,7 +1167,7 @@ describe("mergeModelPatch（纯函数：/model 切换，SC5 只改 llm.model）"
     expect(() =>
       mergeModelPatch(rawWithProviders(), { model: "unknown/foo" })
     ).toThrowError(/unknown provider/);
-    // 注册表缺席 / 非数组 / 项 id 非字符串 → 该 provider 不构成合法目标。
+    // Registry absent / not an array / item id non-string → that provider is not a legal target.
     expect(() =>
       mergeModelPatch({ llm: { model: "p/m" } }, { model: "p/m" })
     ).toThrow(TypeError);
@@ -1228,7 +1225,7 @@ describe("mergeModelPatch（纯函数：/model 切换，SC5 只改 llm.model）"
     expect(afterModel.permissions).toEqual({ defaultMode: "ask" });
     expect(afterModel.memory).toEqual({ autoExtract: true });
     expect(afterModel.secrets).toEqual({ enabled: true, patterns: ["token"] });
-    // 反向顺序（先 model 后 thinking）同样互不破坏。
+    // Reverse order (model first, thinking second) likewise leaves both intact.
     const reverse = mergeThinkingPatch(
       mergeModelPatch(raw, { model: "volcengine-ark/deepseek-v3-250324" }),
       { thinking: "off", thinkingEffort: "low" }
@@ -1252,7 +1249,7 @@ describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
       model: "volcengine-ark/deepseek-v3-250324",
     });
     expect(res.path).toBe(file);
-    // self-write 哨兵：bytes 即落盘内容，内容哈希可比对（语义未改）。
+    // Self-write sentinel: bytes is exactly what landed on disk, so content hashes compare (semantics unchanged).
     expect(hashSettingsContent(res.bytes)).toBe(
       hashSettingsContent(readFileSync(file, "utf8"))
     );
@@ -1295,7 +1292,7 @@ describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
     ).rejects.toThrow(TypeError);
     expect(readFileSync(file, "utf8")).toBe(before);
 
-    // raw 缺 llm 段 → 无注册表 → TypeError，文件不被写。
+    // raw missing the llm section → no registry → TypeError, file untouched.
     const noLlm = join(dir, "settings-nollm.json");
     writeFileSync(noLlm, "{}\n");
     await expect(
@@ -1303,7 +1300,7 @@ describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
     ).rejects.toThrow(TypeError);
     expect(readFileSync(noLlm, "utf8")).toBe("{}\n");
 
-    // llm 非普通对象 → 同款拒绝。
+    // llm not a plain object → same rejection.
     const badLlm = join(dir, "settings-badllm.json");
     writeFileSync(badLlm, JSON.stringify({ llm: "nope" }));
     await expect(
@@ -1311,7 +1308,7 @@ describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
     ).rejects.toThrow(TypeError);
     expect(readFileSync(badLlm, "utf8")).toBe(JSON.stringify({ llm: "nope" }));
 
-    // 文件不存在 + 非法 patch → 不创建文件、无 tmp 残留。
+    // File missing + invalid patch → no file created, no tmp leftovers.
     const missing = join(dir, "settings-missing.json");
     await expect(
       persistModelChanges(missing, { model: "no-slash" })

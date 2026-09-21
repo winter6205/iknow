@@ -1,5 +1,5 @@
 /**
- * `iknow trace` CLI tests (spec #183 R2).
+ * `iknow trace` CLI tests.
  *
  * Covers:
  *   - parseArgs recognizes the `trace` positional
@@ -7,7 +7,8 @@
  *   - defaults: port 24881, host 127.0.0.1, noOpen=false
  *   - bad --port throws a parse error
  *   - integration: startTraceServe from parsed opts → /api/v1/health live
- *   - serve 与 trace 的 parseArgs 隔离(T3 后保留的唯一 T7 不变式)
+ *   - parseArgs isolation between serve and trace (the sole surviving
+ *     invariant from the original task breakdown)
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -80,7 +81,7 @@ describe("parseArgs — `trace` subcommand", () => {
     assert.equal(maxBytes, 1048576);
   });
 
-  // T7 SC-C 19: --no-open 布尔 flag → ParsedCli.noOpen=true。
+  // --no-open boolean flag → ParsedCli.noOpen=true.
   it("parses --no-open → noOpen=true", () => {
     const parsed = parseArgs({
       argv: ["trace", "--no-open"],
@@ -156,23 +157,25 @@ describe("iknow trace — integration", () => {
   });
 });
 
-// -- T7: runTrace 真实 CLI（子进程） -------------------------------------------
+// -- runTrace real CLI (subprocess) ---------------------------------------------
 //
-// T3 (SC6, ADR-0071): 该 describe 块原 4 条测试中,
-// 「默认读 ./trace/」「旧 ./trace.jsonl fail-fast」「--trace-out 指向旧单文件
-// fail-fast」三条钉死的形态已随 T3 退役(`DEFAULT_TRACE_DIR` / `LEGACY_TRACE_FILE`
-// / `detectLegacyTrace` 从 cli.ts 移除),整块连同子进程脚手架归档到
-// archive/tests/cli/trace-t7-retired-fail-fast.test.ts(附归档原因)。
-// 「serve 与 trace 分开」认证的不变式仍然成立且等强于原断言, 重写保留于下。
+// ADR-0071: of the 4 tests this describe block originally held, three pinned
+// shapes retired with the session-folder merge ("default reads ./trace/",
+// "legacy ./trace.jsonl fail-fast", "--trace-out pointing at the legacy single
+// file fail-fast") — `DEFAULT_TRACE_DIR` / `LEGACY_TRACE_FILE` /
+// `detectLegacyTrace` were removed from cli.ts; that block and its subprocess
+// scaffolding were archived (with an archival reason). The invariant the
+// "serve vs trace separation" test still certifies holds and is at least as
+// strong as the original assertions, so it was rewritten and kept below.
 describe("parseArgs — serve 与 trace 命令的 traceOut 隔离", () => {
   it("serve 解析不连带 trace 读侧字段（--no-open / 默认 trace 目录都不污染 serve）", () => {
-    // SC-C 20/22 升级: serve 不再被 trace 默认锚点影响。traceOut 仍 undefined
-    // (仅 flag / env 显式设),noOpen 仍 false(trace 专属 flag)。
+    // Strengthened contract: serve is no longer influenced by trace's default anchor.
+    // traceOut stays undefined (set only by explicit flag / env); noOpen stays false (trace-only flag).
     const serve = parseArgs({ argv: ["serve"] });
     assert.equal(serve.command, "serve");
     assert.equal(serve.traceOut, undefined, "serve 不应自动获得 trace 读默认");
     assert.equal(serve.noOpen, false, "no-open 是 trace 专属 flag，serve 不设");
-    // serve 显式传 --trace-out 仍只表达写路径（test 不校验行为，仅示切换）。
+    // An explicit --trace-out on serve still denotes the write path only (this test checks no behavior, just the split).
     const serveWithTrace = parseArgs({
       argv: ["serve", "--trace-out", "/tmp/t"],
     });

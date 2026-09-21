@@ -1,16 +1,16 @@
 /**
- * user agents 目录 (~/.iknow/agents/) 扫描 + merged catalog resolver 单测。
+ * Unit tests for the user agents dir scan and the merged catalog resolver.
  *
- * 覆盖:
- *   - 目录缺失 → 空数组 (静默, 纯 builtin 字节级等价)
- *   - 目录布局 <id>/AGENTS.md 与平铺 <id>.md 双支持
- *   - frontmatter description / bashMode / disallowedTools 解析 + 非法值降级
- *   - 无 frontmatter → 整文件 body + description 兜底
- *   - 空 body → skip + warn; 非角色目录 (无 AGENTS.md) → 静默跳过
- *   - id 冲突 (dir vs file) → 排序序先到者赢 + warn
- *   - createMergedCatalogResolver: builtin 在前 / user 追加 / 同名 id 冲突
- *     保留 builtin + warn; 非法 id warn + skip
- *   - 记忆化: 同 agentsDir 二次调用不重扫, resetUserAgentsCache() 后重扫
+ * Covers:
+ *   - missing dir -> empty array (silent; byte-equivalent to builtin-only)
+ *   - both layouts supported: <id>/AGENTS.md and flat <id>.md
+ *   - frontmatter description / bashMode / disallowedTools parsing + invalid-value degradation
+ *   - no frontmatter -> whole file as body + description fallback
+ *   - empty body -> skip + warn; non-role dir (no AGENTS.md) -> silent skip
+ *   - id clash (dir vs file) -> first in sort order wins + warn
+ *   - createMergedCatalogResolver: builtins first / user appended / same-id clash
+ *     keeps builtin + warn; invalid id warn + skip
+ *   - memoization: second call with same agentsDir does not rescan; resetUserAgentsCache() forces rescan
  *   - entry / resolver frozen
  */
 import assert from "node:assert/strict";
@@ -37,19 +37,20 @@ function makeAgentsDir(): string {
 }
 
 /**
- * 隔离扫描参数：每个测试用临时 `home`（无 ~/.iknow/plugins ledger、无
- * 用户 agent 目录），保证 `createMergedCatalogResolver` 默认路径
- * （review C1：ledger 优先 + 目录扫描兜底）不读到本机已装插件。
- * 旧测试用 `agentsDir` + 隐式 `homedir()` 隔离，足以跳过 user agent 扫
- * 描，但 enumeratePluginAgentDirs（自 C1 修复起 ledger-aware）会读
- * 真实 `<home>/.iknow/plugins/installed_plugins.json` —— 必须也隔离。
+ * Isolated scan params: each test uses a temp `home` (no ~/.iknow/plugins
+ * ledger, no user agent dir) so createMergedCatalogResolver's default path
+ * (ledger first + dir-scan fallback) never reads locally installed plugins.
+ * Old tests isolated via `agentsDir` + implicit `homedir()`, enough to skip
+ * the user-agent scan, but enumeratePluginAgentDirs is ledger-aware and
+ * would read the real `<home>/.iknow/plugins/installed_plugins.json` — it
+ * must be isolated too.
  */
 let isoHome: string;
 function scanOpts(agentsDir: string): UserAgentScanOptions {
   return { agentsDir, home: isoHome, warn: () => {} };
 }
 
-/** builtin explore 的 persona body（冲突测试断言 builtin 被保留）。 */
+/** Builtin explore persona body (clash tests assert the builtin is kept). */
 function builtinExploreBody(): string {
   return resolveAgentCatalog().find((e) => e.id === "explore")!.body;
 }
@@ -57,9 +58,9 @@ function builtinExploreBody(): string {
 let dir: string;
 beforeEach(() => {
   dir = makeAgentsDir();
-  // 隔离 home: 用一个**不存在 ~/.iknow/plugins 子树**的临时目录
-  // 阻止 enumeratePluginAgentDirs 读到本机已装插件
-  // (review C1：默认路径 ledger-aware 后，旧 fixtures 漏隔离)。
+  // Isolate home: a temp dir without a ~/.iknow/plugins subtree, so
+  // enumeratePluginAgentDirs cannot see locally installed plugins
+  // (needed since the default path became ledger-aware).
   isoHome = mkdtempSync(path.join(tmpdir(), "iknow-user-iso-home-"));
   resetUserAgentsCache();
 });
@@ -153,7 +154,7 @@ describe("loadUserAgentEntries: 扫描", () => {
       warn: (m) => warnings.push(m),
     });
     assert.equal(entries.length, 1);
-    // sorted: "clash" (dir) < "clash.md" → dir 版本赢
+    // sorted: "clash" (dir) < "clash.md" -> the dir version wins
     assert.equal(entries[0]!.body, "from dir");
     assert.equal(warnings.length, 1);
   });
@@ -253,7 +254,7 @@ describe("resolveUserAgentsDir", () => {
   });
 });
 
-// ─── #global-plugins T1 (§4.3): 插件 agent 加载 ──────────────────────────────
+// ─── plugin agent loading ───────────────────────────────────────────────────
 
 describe("createMergedCatalogResolver × plugin agents", () => {
   it("pluginAgentDirs 注入 → canonical id 进 list, 裸名别名单独命中", () => {
@@ -272,7 +273,7 @@ describe("createMergedCatalogResolver × plugin agents", () => {
     });
 
     const ids = resolver.list().map((e) => e.id);
-    // 规范 id 进 list;builtin 仍在最前
+    // canonical id is in the list; builtins still come first
     assert.ok(ids.includes("plugA:reviewer"));
     assert.ok(ids.includes("explore"));
 
@@ -281,7 +282,7 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       resolver.get("plugA:reviewer").body,
       "You are PLUGIN REVIEWER."
     );
-    // bare alias 也命中
+    // bare alias also matches
     assert.equal(resolver.get("reviewer").body, "You are PLUGIN REVIEWER.");
   });
 
@@ -297,9 +298,9 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       warn: (m) => warnings.push(m),
     });
 
-    // canonical `plugA:explore` 不撞 builtin `explore` → plugin entry 留
+    // canonical `plugA:explore` does not collide with builtin `explore` -> plugin entry kept
     assert.equal(resolver.get("plugA:explore").body, "hostile plugin explore");
-    // bare alias `explore` 撞 builtin → builtin 权威,plugin bare 丢 + warn
+    // bare alias `explore` collides with builtin -> builtin wins, plugin bare alias dropped + warn
     const builtinExplore = resolver.get("explore");
     assert.notEqual(builtinExplore.body, "hostile plugin explore");
     assert.ok(warnings.some((w) => /collides with earlier entry/.test(w)));
@@ -320,17 +321,17 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       warn: (m) => warnings.push(m),
     });
 
-    // canonical 各自命中
+    // canonical ids each hit their own entry
     assert.equal(resolver.get("plugA:shared").body, "from A");
     assert.equal(resolver.get("plugB:shared").body, "from B");
-    // bare alias 'shared' → 先到者 (A) 赢
+    // bare alias 'shared' -> first arrival (A) wins
     assert.equal(resolver.get("shared").body, "from A");
-    // B 的 alias 被丢 → warn
+    // B's alias dropped -> warn
     assert.ok(warnings.some((w) => /collides with earlier entry/.test(w)));
   });
 
   it("canonical id 与 user 已用同名 id 撞 → 丢整条 plugin entry + warn", () => {
-    // user 占名 'plugA:reviewer'
+    // user takes the name 'plugA:reviewer'
     writeFileSync(path.join(dir, "plugA:reviewer.md"), "user override");
     const pluginDir = path.join(dir, "plugA", "agents");
     mkdirSync(pluginDir, { recursive: true });
@@ -342,9 +343,9 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       pluginNames: ["plugA"],
       warn: (m) => warnings.push(m),
     });
-    // user entry 赢
+    // user entry wins
     assert.equal(resolver.get("plugA:reviewer").body, "user override");
-    // warn (plugin 与 earlier user 撞)
+    // warn (plugin collides with the earlier user entry)
     assert.ok(warnings.some((w) => /collides with earlier entry/.test(w)));
   });
 
@@ -358,7 +359,7 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       pluginNames: ["plugA"],
       warn: () => {},
     });
-    // 'plugA:reviewer' 含 ':' → 旧 ROLE_ID_PATTERN 会拒,新应接受
+    // 'plugA:reviewer' contains ':' -> old ROLE_ID_PATTERN would reject; new one must accept
     assert.equal(resolver.get("plugA:reviewer").body, "namespace body");
   });
 
@@ -374,7 +375,7 @@ describe("createMergedCatalogResolver × plugin agents", () => {
     });
     assert.ok(first.list().some((e) => e.id === "plugA:first"));
 
-    // 加新文件后未 reset → 缓存命中,看不到 second
+    // add a new file without reset -> cache hit, second is invisible
     writeFileSync(path.join(pluginDir, "second.md"), "second");
     const cached = createMergedCatalogResolver({
       agentsDir: dir,
@@ -384,7 +385,7 @@ describe("createMergedCatalogResolver × plugin agents", () => {
     });
     assert.ok(!cached.list().some((e) => e.id === "plugA:second"));
 
-    // reset → 重新加载 → 看得到
+    // reset -> reload -> visible
     resetUserAgentsCache();
     const refreshed = createMergedCatalogResolver({
       agentsDir: dir,
@@ -396,12 +397,12 @@ describe("createMergedCatalogResolver × plugin agents", () => {
   });
 
   it("ledger-only 默认路径 (review C1): 不传 pluginAgentDirs 也能看见 ledger agent, capability 同源解析", () => {
-    // 真实 end-to-end probe: <root>/installed_plugins.json 指向一个不
-    // 在 root 下扫得到的目录 (装在 cache/...)；默认路径 (不传
-    // pluginAgentDirs) 必须以 ledger 名为命名空间加载 agent。
-    // 之前 C1 bug: enumeratePluginAgentDirs 走目录扫描兜底，看不见
-    // ledger 命名的 agent → resolver.list() 漏，capability 抛
-    // catalogError。
+    // Real end-to-end probe: <root>/installed_plugins.json points to a dir
+    // not discoverable by root scan (installed under cache/...); the default
+    // path (no pluginAgentDirs) must load agents namespaced by ledger name.
+    // The old bug: enumeratePluginAgentDirs fell back to dir scanning and
+    // missed ledger-named agents -> resolver.list() omitted them and
+    // capability threw catalogError.
     const home = path.join(dir, "home");
     const pluginRoot = path.join(home, ".iknow", "plugins");
     const pluginInstallPath = path.join(dir, "cache", "ledgerplugin");
@@ -433,27 +434,27 @@ describe("createMergedCatalogResolver × plugin agents", () => {
       warn: () => {},
     });
 
-    // canonical 进 list (命名空间 = ledger key 前段)
+    // canonical id in list (namespace = ledger key prefix)
     const ids = resolver.list().map((e) => e.id);
     assert.ok(
       ids.includes("ledgerplugin:reviewer"),
       `expected ledgerplugin:reviewer in list, got: ${ids.join(", ")}`
     );
 
-    // canonical get 命中
+    // canonical get matches
     const entry = resolver.get("ledgerplugin:reviewer");
     assert.equal(entry.body, "Ledger reviewer body.");
     assert.equal(entry.bashMode, "readonly");
     assert.deepEqual([...(entry.disallowedTools ?? [])], ["edit_file"]);
 
-    // 关键 (C1 修复断言): capability 解析面同源 —— 用同一 resolver
-    // 解析 ledgerplugin:reviewer 角色，得到 bashMode/disallowedTools
-    // 而不是 catalogError。直接复用 build-engine / spawn 工厂的
-    // 默认 path。
-    // resolveSubagentCapabilities 默认走 createMergedCatalogResolver
-    // 无 opts，构造时 opts.catalog 传我们的 resolver 以便断言「同源
-    // resolver 上 capability 拿到 bashMode」，但 enum 派生面 = 同
-    // 一份 resolver.list()。
+    // Key assertion: the capability-resolution side shares the same source —
+    // resolving the ledgerplugin:reviewer role through this same resolver
+    // yields bashMode/disallowedTools instead of catalogError, reusing the
+    // same default path as build-engine / the spawn factory.
+    // resolveSubagentCapabilities normally uses createMergedCatalogResolver
+    // with no opts; here we pass our resolver as opts.catalog to assert the
+    // same resolver exposes bashMode for capability, while the
+    // enum-derivation side is that very resolver.list().
     const capabilities = resolveSubagentCapabilities({
       role: "ledgerplugin:reviewer",
       catalog: resolver,

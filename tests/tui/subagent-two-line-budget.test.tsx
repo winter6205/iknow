@@ -2,18 +2,23 @@
 /**
  * tests/tui/subagent-two-line-budget.test.tsx
  *
- * specs/tui-subagent-transcript-live.md 锁句 1–3 的行账 + 渲染回归：两行改画
- * 在会话 transcript 里的 `spawn_subagent` 卡上（滚动区），prompt 上方身份条
- * 拆除 —— **live 子代理存在与否都不再进 chrome 行账**（`subagentRowBudget`
- * 恒 0，`chromeReserveRows.subagentRows` 缺省即不占行）。
+ * Line-budget + render regression for lock clauses 1–3 of
+ * specs/tui-subagent-transcript-live.md: the two lines now render on the
+ * `spawn_subagent` card inside the session transcript (scroll region); the
+ * identity strip above the prompt was removed — **whether or not live
+ * subagents exist they no longer enter the chrome line budget**
+ * (`subagentRowBudget` is constant 0; omitting `chromeReserveRows.subagentRows`
+ * reserves nothing).
  *
- * 此前本测钉的是相反命题（strip 画在输入框上方、每 live 子代理入账 2 行）；
- * 位置合同被取代后主体消失，本测重写为「不再占 prompt 行账 + 卡上两行不
- * 粘连」。粘连是这个回归的原始指纹（Yoga 把两行块压成一行 →
- * `查找文档explore running...`），与承载位置无关，故保留该断言并钉在两个
- * 真实宿主上：
- *   - `SubagentCardView`（历史卡 + live 卡共用的渲染面）；
- *   - `liveToolPreviewBox`（live tail 宿主，带 card 投影）。
+ * This test formerly pinned the opposite proposition (strip above the input
+ * box, 2 budgeted rows per live subagent); once the placement contract was
+ * superseded that subject vanished, so it was rewritten to "no prompt line
+ * budget + the card's two lines never weld together". Welding is the original
+ * fingerprint of this regression (Yoga squashing the two-line block into one →
+ * `查找文档explore running...`), independent of placement, so that assertion is
+ * kept and pinned on two real hosts:
+ *   - `SubagentCardView` (render surface shared by history and live cards);
+ *   - `liveToolPreviewBox` (live-tail host, with card projection).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -75,7 +80,7 @@ function rgbaEq(a: RGBA, b: RGBA): boolean {
 }
 
 // ============================================================================
-// 1) 行账：prompt 上方不再为子代理预留行（锁句 3）
+// 1) Line budget: no rows reserved above the prompt for subagents (lock clause 3)
 // ============================================================================
 
 describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => {
@@ -92,8 +97,9 @@ describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => 
   });
 
   test("case 2：live 数不改变 chrome 预算（行账与 live 解耦，恒 0）", () => {
-    // 两行已画在 transcript 卡上（滚动区）——chrome 预算不得随 live 数增长，
-    // 否则 prompt 上方会凭空多出空行（旧合同的反向回归闸）。
+    // The two lines are on the transcript card now (scroll region) — the chrome
+    // budget must not grow with the live count, or blank rows appear above the
+    // prompt (the reverse-regression gate of the old contract).
     for (const subagents of [
       [makeSubagent({ state: "starting" })],
       [makeSubagent({ state: "running" }), makeSubagent()],
@@ -119,7 +125,7 @@ describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => 
 });
 
 // ============================================================================
-// 2) 卡上两行：形状、颜色、不粘连（锁句 1–2）
+// 2) Two lines on the card: shape, color, no welding (lock clauses 1–2)
 // ============================================================================
 
 async function renderCard(card: {
@@ -155,7 +161,8 @@ describe("SubagentCardView（两行渲染面）", () => {
     expect(lines.indexOf("查找文档")).toBe(
       lines.indexOf("explore running...") + 1
     );
-    // 粘连形态必须不存在（压行的直接指纹）：身份行不得与任何其它文本同排。
+    // The welded form must not exist (direct fingerprint of line squashing):
+    // the identity line may not share a row with any other text.
     expect(
       lines.some(
         (l) => l.includes("running...") && !/^\S+( \S+)* running\.\.\.$/.test(l)
@@ -199,27 +206,31 @@ describe("SubagentCardView（两行渲染面）", () => {
       .captureCharFrame()
       .split("\n")
       .map((l) => l.trim());
-    // 概述必须在场（被字面 `done` 顶掉是 reopen 的直接动因）。
+    // Summary must be present (being pushed out by the literal `done` is what
+    // triggered the reopen).
     expect(lines).toContain("查找文档");
     expect(lines).toContain("✓ Done");
     expect(lines).toContain("explore");
     expect(lines.some((l) => l.includes("running..."))).toBe(false);
-    // 顺序：概述在前，完成标记紧随其下。
+    // Order: summary first, completion marker directly below it.
     expect(lines.indexOf("✓ Done")).toBe(lines.indexOf("查找文档") + 1);
     const doneSpan = spanWithText(setup, "✓ Done");
     expect(doneSpan).toBeDefined();
     expect(rgbaEq(doneSpan!.fg, RGBA.fromHex(tuiPalette.add))).toBe(true);
-    // 概述行仍是 dim（完成态不改它的着色，绿只属于完成标记）。
+    // The summary line stays dim (completion does not recolor it; green belongs
+    // to the completion marker only).
     const previewSpan = spanWithText(setup, "查找文档");
     expect(rgbaEq(previewSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
     await setup.renderer.destroy();
   });
 
   test("无 emoji 断言：卡渲染文本不含 U+1F300–U+1FAFF（几何字形纪律）", async () => {
-    // 旧身份条测试（已归档）在宿主上钉过这条；两行换了宿主后由本测接棒 ——
-    // 渲染面不得**自行引入** emoji 装饰（spec #146:86 几何字形：面板用
-    // ● / ✓，卡的完成标记 `✓ Done` 同用几何 ✓，落在这个区间之外）。输入取
-    // 纯文本，故帧里任何 emoji 都只可能来自渲染面自己加的字形。
+    // The archived identity-strip test pinned this on the old host; after the
+    // two lines changed hosts this test takes over — the render surface must
+    // not **introduce** emoji decoration on its own (spec geometric-glyph
+    // discipline: panel uses ● / ✓, the card's `✓ Done` marker likewise uses
+    // geometric ✓, outside this range). Inputs are plain text, so any emoji in
+    // the frame could only come from glyphs the render surface added itself.
     const card = subagentCardLinesMap(
       [
         makeSubagent({
@@ -239,7 +250,7 @@ describe("SubagentCardView（两行渲染面）", () => {
 });
 
 // ============================================================================
-// 3) live tail 宿主：card 命中 → 走两行；失败 → 走既有 failure overlay
+// 3) live-tail host: card hit → two lines; failure → existing failure overlay
 // ============================================================================
 
 function spawnRun(overrides: Partial<LiveToolRun> = {}): LiveToolRun {
@@ -287,7 +298,7 @@ describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
       .captureCharFrame()
       .split("\n")
       .map((l) => l.trim());
-    // 既有 detail-only 文案（dotless，来自 formatToolStatusLine）仍在。
+    // Existing detail-only text (dotless, from formatToolStatusLine) is still there.
     expect(
       lines.some((l) => l.includes("explore running") && !l.includes("..."))
     ).toBe(true);
@@ -305,7 +316,7 @@ describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
       card
     );
     const frame = setup.captureCharFrame();
-    // 失败横切优先：不画绿 done / dim 预览行。
+    // Failure overlay takes precedence: no green done / dim preview lines.
     expect(frame.includes("done")).toBe(false);
     expect(frame).toBeDefined();
     await setup.renderer.destroy();

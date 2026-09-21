@@ -1,27 +1,31 @@
 /**
- * checkpoint/rewind 5 类边界矩阵 — 补 T1 (checkpoint.test.ts) / T2+T3
- * (chat-session-checkpoint.test.ts) / T4 (chat-session-resume.test.ts) 未覆盖
- * 的真缺口。audit 结论(逐类盘点既有覆盖):
+ * checkpoint/rewind 5-class boundary matrix — fills the real gaps left by
+ * checkpoint.test.ts / chat-session-checkpoint.test.ts / chat-session-resume.test.ts.
+ * Audit conclusion (existing coverage per class):
  *
- *   - empty(空输入)→ splitTurns([]) / turnSliceEnd 空 / shouldPersist
- *     delta=0 / appendCheckpoint delta=0 / rewind keepTurns=0 均已有,跳过。
- *   - negative(负值/非法)→ turnSliceEnd(-1) / appendCheckpoint 负 delta /
- *     rewind clamp / schema 拒非数组 messages 均已有,跳过。
- *   - overflow(大输入)→ 只有 extractTitle 80 字符上限;缺大 messages 数组
- *     与大 checkpoints 数组。本文件补 3 例。
- *   - concurrent(并发)→ 既有仅 immutability(T1)+ 顺序重复 commit(T2/T4);
- *     缺并行 save() 到同一 id 的撕裂防护。本文件补 1 例(核心)。
- *   - exception(异常)→ write_failed → warn+continue 已覆盖;更深 IO 树
- *     (ENOTDIR / 只读目录 / primitive root / checkpoints=null)本文件补 4 例;
- *     resume 路径的 checkpoints 畸形在 chat-session-resume.test.ts 追加 1 例。
+ *   - empty → splitTurns([]) / empty turnSliceEnd / shouldPersist delta=0 /
+ *     appendCheckpoint delta=0 / rewind keepTurns=0 all covered; skipped.
+ *   - negative → turnSliceEnd(-1) / appendCheckpoint negative delta / rewind
+ *     clamp / schema rejecting non-array messages all covered; skipped.
+ *   - overflow → only extractTitle's 80-char cap existed; large messages and
+ *     checkpoints arrays were missing. This file adds 3 cases.
+ *   - concurrent → previously only immutability + sequential repeated commit;
+ *     torn-write protection for parallel save() to the same id was missing.
+ *     This file adds 1 case (the core one).
+ *   - exception → write_failed → warn+continue covered; the deeper IO tree
+ *     (ENOTDIR / read-only dir / primitive root / checkpoints=null) gets 4
+ *     cases here; malformed checkpoints on the resume path add 1 case in
+ *     chat-session-resume.test.ts.
  *
- * 注意(与任务描述的一处偏差):「checkpoints 畸形 → sanitize 归一化」与生产
- * 裁决相反 —— schema.ts:94-96 明确「never silently coerce」,checkpoints=null
- * 是硬拒(schema.test.ts:176 已固化)。生产代码不改(硬约束),故本文件验证实际
- * 契约:load 抛 typed schema_invalid(field="checkpoints"),resume 路径 warn
- * [schema_invalid] + 锚点保留,绝不裸 Error、绝不静默吞。
+ * Deviation from the task brief: "malformed checkpoints → sanitize
+ * normalization" contradicts the production ruling — schema.ts:94-96 says
+ * "never silently coerce" and checkpoints=null is a hard reject (pinned in
+ * schema.test.ts:176). Production code stays unchanged (hard constraint), so
+ * this file verifies the actual contract: load throws typed
+ * schema_invalid(field="checkpoints"), the resume path warns
+ * [schema_invalid] and keeps the anchor — never a bare Error, never silent swallowing.
  *
- * 隔离:全部 mkdtemp,绝不写真实 ~/.iknow。
+ * Isolation: all mkdtemp; never writes the real ~/.iknow.
  */
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -88,9 +92,9 @@ afterAll(async () => {
   }
 });
 
-/** mkdtemp + SessionStore(默认 cwd,与既有测试一致)+ 记录清理。返回
- *  `{store, baseDir}` —— baseDir 用于直接 stat/readFile
- *  `<base>/projects/<slug>/...`,store 不暴露该路径。 */
+/** mkdtemp + SessionStore (default cwd, consistent with existing tests) + tracked cleanup.
+ *  Returns `{store, baseDir}` — baseDir is for direct stat/readFile of
+ *  `<base>/projects/<slug>/...`, which the store does not expose. */
 async function storeFor(
   prefix: string
 ): Promise<{ store: SessionStore; baseDir: string }> {
@@ -99,12 +103,12 @@ async function storeFor(
   return { store: new SessionStore(baseDir, process.cwd()), baseDir };
 }
 
-/** store 的会话目录(直接文件操作 / stat 用)。 */
+/** The store's session directory (for direct file ops / stat). */
 function sessionDirFor(baseDir: string): string {
   return resolveProjectSessionDir(baseDir, process.cwd());
 }
 
-// -- overflow / 大输入 ---------------------------------------------------------
+// -- overflow / large inputs ---------------------------------------------------
 
 describe("overflow — large inputs", () => {
   it("splitTurns: 10k messages → 5000 个 turn slice,边界精确", () => {
@@ -126,7 +130,7 @@ describe("overflow — large inputs", () => {
       messages.push(userMsg(`q${i}`), assistantMsg(`a${i}`));
     }
     const out = resolveRewindAnchor(messages, 50);
-    // turn 49 结束于 messages[99](每 turn 2 条)→ headIndex = 50*2-1。
+    // Turn 49 ends at messages[99] (2 messages per turn) → headIndex = 50*2-1.
     assert.equal(out.headIndex, 99);
     assert.equal(out.turnCount, 50);
   });
@@ -169,26 +173,29 @@ describe("overflow — large inputs", () => {
   });
 });
 
-// -- concurrent / 并行写同一 id ------------------------------------------------
+// -- concurrent / parallel writes to the same id --------------------------------
 
 describe("concurrent — N 并行 save() 到同一 id", () => {
-  // 重要偏离(与任务描述的差距):
-  //  任务说「tmp→rename 原子写应防撕裂」,但 store 用的是**共享**
-  //  `${path}.tmp` 路径 —— 并行 save() 时两个 writeFile 竞争同一 tmp,
-  //  实测可产生两个 payload 串联的撕裂(Unexpected non-whitespace ... after
-  //  JSON,position ≈ 2× 单 payload 长度)。这是 store 文档明确的职责划分
-  //  (session-store.ts:4「concurrency serialization is the hub's
-  //  responsibility」),共享 tmp 是有意的 —— hub 必须串行化。
+  // Key deviation from the task brief: the brief says "tmp→rename atomic write
+  // should prevent tearing", but the store uses a SHARED `${path}.tmp` path —
+  // parallel save() races two writeFile calls on one tmp, which measurably
+  // produces tearing that concatenates two payloads (Unexpected
+  // non-whitespace ... after JSON, position ≈ 2x single-payload length).
+  // This is the store's documented division of responsibility
+  // (session-store.ts:4 "concurrency serialization is the hub's
+  // responsibility"); the shared tmp is intentional — the hub must serialize.
   //
-  // 故本测试不能确定性断言「最终文件 = 某候选」(会 flaky)。改为断言 store
-  // 在并发下**实际保证**的契约:
-  //   1. 所有 rejection 都是 typed write_failed(绝不裸 Error / 绝不宽 kind);
-  //   2. settle 后不残留 .tmp(原子 rename 的 crash-safety 部分仍然成立);
-  //   3. 最坏情况守护:若最终文件存在且 JSON.parse 成功且 validateSessionFile
-  //      通过,则必须等于某候选 —— 即「静默有效撕裂」(downstream load() 会
-  //      误接受的伪合法文件)绝不出现。可解析失败(parse_failed)属可接受的
-  //      crash-safety 兜底,downstream load() 会 typed 拒绝,REPL 走
-  //      重建路径,行为与 corrupt 既有文件一致。
+  // So this test cannot deterministically assert "final file = some candidate"
+  // (it would be flaky). It asserts the contract the store ACTUALLY guarantees
+  // under concurrency:
+  //   1. every rejection is typed write_failed (never a bare Error / never a wide kind);
+  //   2. no .tmp residue after settle (the crash-safety half of atomic rename still holds);
+  //   3. worst-case guard: if the final file exists, parses, and passes
+  //      validateSessionFile, it must equal some candidate — i.e. "silent
+  //      valid tearing" (a pseudo-valid file that downstream load() would
+  //      wrongly accept) never occurs. A parse failure (parse_failed) is an
+  //      acceptable crash-safety fallback: downstream load() rejects it typed
+  //      and the REPL takes the rebuild path, same as for a pre-corrupted file.
   it("N 并行 save() 同一 id:typed 错误 + 无 .tmp 残留 + 静默有效撕裂为 0", async () => {
     const { store: s, baseDir } = await storeFor("iknow-boundary-race-");
     const id = "race-target";
@@ -196,7 +203,7 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
     const candidates: SessionFileV1[] = Array.from({ length: N }, (_, i) => ({
       ...baseFile(),
       conversation_id: id,
-      // 每个候选可辨识:turnCount=i + title="title-i" + 60 条消息。
+      // Each candidate is identifiable: turnCount=i + title="title-i" + 60 messages.
       turnCount: i,
       title: `title-${i}`,
       messages: Array.from({ length: 60 }, (_, m) =>
@@ -208,8 +215,8 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
       candidates.map((file) => s.save({ id, file }))
     );
 
-    // (1) typed-error 契约:任何 rejection 必须是 write_failed,绝不裸 Error,
-    // 绝不别的 kind,绝不宽化错误种类。
+    // (1) typed-error contract: any rejection must be write_failed — never a
+    // bare Error, never another kind, never a widened error set.
     for (const r of results) {
       if (r.status === "rejected") {
         const e = r.reason as SessionStoreError;
@@ -219,35 +226,37 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
       }
     }
 
-    // (2) settle 后不得残留 .tmp(原子 rename 的 crash-safety 部分)。
+    // (2) No .tmp residue after settle (the crash-safety half of atomic rename).
     await assert.rejects(
       stat(join(sessionDirFor(baseDir), `${id}.json.tmp`)),
       "settle 后不得残留 .tmp"
     );
 
-    // (3) 静默有效撕裂守护:若文件存在且可解析为有效 v3,则必须等于某候选。
+    // (3) Silent-valid-tearing guard: if the file exists and parses as valid v3, it must equal some candidate.
     const finalPath = join(sessionDirFor(baseDir), `${id}.json`);
     let raw: string;
     try {
       raw = await readFile(finalPath, "utf8");
     } catch {
-      // (a) 文件不存在 —— 所有 save 都 throw(rename 竞争全失败)。可接受:
-      // hub 没串行化时,极端时序下所有 rename 都吃 ENOENT;REPL 端会收到
-      // 写失败告警,但绝不静默写错数据。
+      // (a) File absent — every save threw (all rename races failed). Acceptable:
+      // without hub serialization, extreme orderings can ENOENT every rename;
+      // the REPL side gets write-failure warnings but data is never silently wrong.
       return;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      // (b) 文件存在但不可解析 —— 共享 tmp writeFile 竞争产生的串联撕裂。
-      // 属可接受的 crash-safety 兜底:downstream load() 抛 typed
-      // parse_failed,REPL 走"既有文件损坏 → 重建"路径(同 chat-session
-      // checkpoint 测试覆盖的 corrupt-rebuild 行为),不静默。
+      // (b) File exists but unparseable — tearing from the shared-tmp writeFile
+      // race concatenating payloads. Acceptable crash-safety fallback:
+      // downstream load() throws typed parse_failed and the REPL takes the
+      // "existing file corrupt → rebuild" path (same corrupt-rebuild behavior
+      // covered by the chat-session checkpoint tests) — never silent.
       return;
     }
-    // (c) 文件可解析。必须满足 v3 形状且等于某候选 —— 否则就是"静默有效
-    // 撕裂",downstream load() 会误接受。这是真正不能出现的失败模式。
+    // (c) File parses. It must satisfy the v3 shape and equal some candidate —
+    // otherwise it is "silent valid tearing" that downstream load() would wrongly
+    // accept. This is the failure mode that truly must never occur.
     const { validateSessionFile } =
       await import("../../../src/session-api/store/index.ts");
     const vf = validateSessionFile(parsed);
@@ -264,7 +273,7 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
         matchIndex = i;
         break;
       } catch {
-        // 继续找下一个候选
+        // keep trying the next candidate
       }
     }
     assert.notEqual(
@@ -272,22 +281,21 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
       -1,
       "文件可解析且 v3 合法,但不匹配任何候选 —— 静默有效撕裂"
     );
-    // 一致性:命中的 i 必须与其 turnCount/title 自洽(防 partial 撕裂)。
+    // Consistency: the matched i must agree with its own turnCount/title (guards against partial tearing).
     const m = candidates[matchIndex]!;
     assert.equal((parsed as SessionFileV1).turnCount, m.turnCount);
     assert.equal((parsed as SessionFileV1).title, m.title);
   });
 });
 
-// -- exception / 深层 IO 树 ----------------------------------------------------
+// -- exception / deep IO tree ---------------------------------------------------
 
 describe("exception — deeper IO tree (typed errors)", () => {
   it("save: 路径穿越普通文件(ENOTDIR)→ typed write_failed", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "iknow-boundary-enotdir-"));
     tempDirs.push(tmp);
-    // T1 (session-folder-consolidation):把 <tmp>/projects 做成普通文件:
-    // resolveProjectSessionDir 产出的 <tmp>/projects/<proj>-<hash> 穿越它
-    // → mkdir/writeFile ENOTDIR。
+    // Make <tmp>/projects a plain file: the resolveProjectSessionDir output
+    // <tmp>/projects/<proj>-<hash> traverses it → mkdir/writeFile ENOTDIR.
     await writeFile(join(tmp, "projects"), "blocker", "utf8");
     const s = new SessionStore(tmp, process.cwd());
     await assert.rejects(
@@ -306,7 +314,7 @@ describe("exception — deeper IO tree (typed errors)", () => {
   });
 
   it("save: 会话目录只读(EACCES)→ typed write_failed", async () => {
-    // root 绕过权限位,CI/容器 root 下不可复现 EACCES → 跳过。
+    // root bypasses permission bits, so EACCES is not reproducible under CI/container root → skip.
     if (typeof process.getuid === "function" && process.getuid() === 0) {
       return;
     }
@@ -314,7 +322,7 @@ describe("exception — deeper IO tree (typed errors)", () => {
     tempDirs.push(tmp);
     const dir = sessionDirFor(tmp);
     await mkdir(dir, { recursive: true });
-    await chmod(dir, 0o555); // r-x:不可创建文件
+    await chmod(dir, 0o555); // r-x: no file creation allowed
     try {
       const s = new SessionStore(tmp, process.cwd());
       await assert.rejects(
@@ -330,7 +338,7 @@ describe("exception — deeper IO tree (typed errors)", () => {
         }
       );
     } finally {
-      // 恢复权限,保证 afterAll 的 rm 能清掉只读目录里的文件。
+      // Restore permissions so the afterAll rm can delete files inside the read-only dir.
       await chmod(dir, 0o755).catch(() => {});
     }
   });
@@ -359,8 +367,9 @@ describe("exception — deeper IO tree (typed errors)", () => {
   });
 
   it("load: v3 文件 checkpoints=null → typed schema_invalid field='checkpoints'", async () => {
-    // 生产裁决「never silently coerce」(schema.ts:94-96):畸形 checkpoints
-    // 是硬拒,绝不归一化。load 必须抛 typed schema_invalid 而非裸 Error。
+    // Production ruling "never silently coerce" (schema.ts:94-96): malformed
+    // checkpoints is a hard reject, never normalized. load must throw typed
+    // schema_invalid rather than a bare Error.
     const tmp = await mkdtemp(join(tmpdir(), "iknow-boundary-cpnull-"));
     tempDirs.push(tmp);
     const dir = resolveConversationDir({

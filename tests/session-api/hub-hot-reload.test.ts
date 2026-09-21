@@ -1,18 +1,22 @@
 /**
- * T3: SessionHub env 源接缝 + adapter 热重建（settings-hot-reload）。
+ * SessionHub env-source seam + adapter hot rebuild (settings hot-reload).
  *
- * 覆盖（plans/settings-hot-reload.md T3 验收，≥5 用例）：
- *  1. envProvider 注入后，ensureDeps 用其返回值建（不回落 loadIknowEnv）。
- *  2. reloadFromEnv 后下一次 postMessage 拿到新 adapter（走 createAdapterFromEnv
- *     最小面热重建）；registry / executor / maxTurns 引用保持稳定（不重建）。
- *  3. onEnvChange 在 env 变化时触发一次（连续 reload 同值不重复触发）。
- *  4. 不传 envProvider 行为零变化（向后兼容；既有 fixture 回归）。
- *  5. reload 抛错（model 缺失）→ cachedDeps 不动，process 不崩。
+ * Coverage (≥5 cases):
+ *  1. With envProvider injected, ensureDeps builds from its return value
+ *     (never falls back to loadIknowEnv).
+ *  2. After reloadFromEnv, the next postMessage gets a new adapter (hot
+ *     rebuild via the minimal createAdapterFromEnv surface); registry /
+ *     executor / maxTurns references stay stable (not rebuilt).
+ *  3. onEnvChange fires once on env change (repeat reloads with the same
+ *     value do not refire).
+ *  4. Omitting envProvider keeps behavior identical (backward compat;
+ *     existing fixture regression).
+ *  5. reload throws (model missing) → cachedDeps untouched, no crash.
  *
- * 纪律：
- *  - 隔离 tmp store（mkdtemp + afterAll rm）；
- *  - capture-server 用例显式 close（避免端口泄漏）；
- *  - 框架 vitest（与 tests/session-api 既有测试一致）。
+ * Discipline:
+ *  - isolated tmp store (mkdtemp + afterAll rm);
+ *  - capture-server cases closed explicitly (no port leaks);
+ *  - vitest (consistent with the rest of tests/session-api).
  */
 import { afterAll, describe, expect, test } from "vitest";
 import assert from "node:assert/strict";
@@ -52,7 +56,7 @@ function makeStore(): SessionStore {
   return store;
 }
 
-/** 构造完整 IknowEnv（全字段，隔离 tmp home 读不到真实 settings）。 */
+/** Build a full IknowEnv (all fields; the isolated tmp home cannot read real settings). */
 function makeFullEnv(overrides: {
   readonly model?: string;
   readonly apiKey?: string;
@@ -66,22 +70,24 @@ function makeFullEnv(overrides: {
     llm: {
       baseUrl: overrides.baseUrl ?? "http://invalid",
       model: overrides.model ?? "test-model",
-      // headers 缺席 ⇔ 键不产出（与生产 env 的「有值才有该键」同形）。
+      // headers absent ⇔ key not emitted (same shape as production env's "key present only when set").
       ...(overrides.headers !== undefined
         ? { headers: overrides.headers }
         : {}),
       fallback: [],
-      // apiKey 缺省 "test-key"；仅在显式传 undefined 时透传 undefined（测试
-      // apiKey 解析失败降级路径）。用 `in` 判断「显式传了 key」，避免与「未传
-      // key 走默认」混淆。
+      // apiKey defaults to "test-key"; undefined passes through only when
+      // explicitly given (to test the apiKey-resolution downgrade path).
+      // `in` detects "key explicitly passed", so it is not confused with
+      // "key omitted → default".
       apiKey: "apiKey" in overrides ? overrides.apiKey : "test-key",
       maxOutputTokens: overrides.maxOutputTokens ?? 128,
       timeoutMs: 5000,
       temperature: overrides.temperature ?? 0,
       thinking: "off",
       thinkingEffort: "",
-      // 默认 off（非流式臂）→ capture-server 单 JSON 响应即可解释；
-      // on 走 client.messages.stream，要求 SSE 流，capture 不满足。
+      // Default off (non-streaming arm) → the capture-server's single JSON
+      // response explains it; "on" uses client.messages.stream and requires
+      // an SSE stream the capture server cannot satisfy.
       stream: overrides.stream ?? "off",
       maxTurns: undefined,
     },
@@ -92,7 +98,7 @@ function makeFullEnv(overrides: {
   };
 }
 
-/** 最小 adapter（step 永不调用；仅验证「引用替换」语义）。 */
+/** Minimal adapter (step never called; only pins "reference replacement" semantics). */
 const stubAdapter: LoopAdapter = {
   step: async () => {
     throw new Error("not invoked");
@@ -129,9 +135,10 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       providerEnv = makeFullEnv({ model: "provider-model" });
       return providerEnv;
     };
-    // 注入 stub deps（reviewer minor：保持目录内其它测试同纪律 —— 不跑真实
-    // buildHarnessEngine，避免污染真实 home）。envProvider 的唯一消费面是
-    // reloadFromEnv（不经 ensureDeps 的 buildHarnessEngine）。
+    // Inject stub deps (same discipline as other tests in this directory:
+    // do not run the real buildHarnessEngine, keeping the real home
+    // unpolluted). envProvider's only consumer surface is reloadFromEnv
+    // (not ensureDeps' buildHarnessEngine).
     const hub = new SessionHub({
       store: store0,
       askUser: createNoAskUser(),
@@ -142,14 +149,14 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       await hub.reloadFromEnv();
       expect(providerEnv).toBeDefined();
       expect(providerEnv!.llm.model).toBe("provider-model");
-      // adapter 被替换为 createAdapterFromEnv 产物（AnthropicAdapter 形态）。
+      // adapter replaced by the createAdapterFromEnv product (AnthropicAdapter shape).
       const deps = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
       expect(typeof deps.adapter.step).toBe("function");
       expect(deps.adapter).not.toBe(baseDeps().adapter);
     } finally {
-      // 无真实 LLM 调用，无需 close。
+      // No real LLM call, no close needed.
     }
   });
 
@@ -177,7 +184,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       const registryBefore = depsBefore.registry;
       const maxTurnsBefore = depsBefore.maxTurns;
 
-      // 改 model → reloadFromEnv → adapter 替换、其它字段稳定。
+      // Change model → reloadFromEnv → adapter replaced, other fields stable.
       currentModel = "model-b";
       await hub.reloadFromEnv();
       const depsAfter = await (
@@ -203,9 +210,10 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
         apiKey: "test-key",
         baseUrl: cap.origin,
       });
-    // 注入 stub deps（reviewer minor：隔离真实 home）。首次 postMessage 用注入
-    // stub（不联网）；reloadFromEnv 后才走 envProvider 重建真实 adapter —— 正是
-    // T3 最小面热重建通路（不经 buildHarnessEngine 整链）。
+    // Inject stub deps (isolate the real home). The first postMessage uses
+    // the injected stub (offline); only after reloadFromEnv does the
+    // envProvider rebuild the real adapter — exactly the minimal hot-rebuild
+    // path (bypassing the full buildHarnessEngine chain).
     const hub = new SessionHub({
       store: store0,
       askUser: createNoAskUser(),
@@ -214,11 +222,11 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     });
     try {
       const id = await createSessionId(hub);
-      // reloadFromEnv（model-1）→ adapter 指向 capture。
+      // reloadFromEnv (model-1) → adapter points at the capture server.
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "hi" });
       expect(cap.bodies.length).toBe(1);
-      // 改 model → reloadFromEnv → 下次 postMessage 的 wire model 变化。
+      // Change model → reloadFromEnv → the next postMessage's wire model changes.
       currentModel = "model-2";
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "hi again" });
@@ -244,26 +252,27 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       onEnvChange: (env) => changes.push(env.llm.model),
     });
     try {
-      // 首次 ensureDeps 不触发（没有「变化」）。
+      // First ensureDeps does not fire (no "change" yet).
       await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
       expect(changes.length).toBe(0);
 
-      // env 变化 → reloadFromEnv → 触发一次。
+      // env changes → reloadFromEnv → fires once.
       currentModel = "model-b";
       await hub.reloadFromEnv();
       expect(changes.length).toBe(1);
       expect(changes[0]).toBe("model-b");
 
-      // 同值 reload → 不重复触发（reviewer major：settings 文件 touch 但内容
-      // 没变 → 不重建 adapter、不触发 onEnvChange。EnvLoader.get() 每次返回新
-      // 对象，靠关键字段值比较去重 —— 见 hub.ts sameHotReloadKeyFields）。
+      // Same-value reload → no refire (touching the settings file without
+      // changing content → no adapter rebuild, no onEnvChange).
+      // EnvLoader.get() returns a new object every call, so dedup relies on
+      // comparing key field values — see sameHotReloadKeyFields in hub.ts.
       await hub.reloadFromEnv();
       expect(changes.length).toBe(1);
       expect(changes[0]).toBe("model-b");
 
-      // 值真正变化 → 再次触发一次。
+      // Value genuinely changed → fires once more.
       currentModel = "model-c";
       await hub.reloadFromEnv();
       expect(changes.length).toBe(2);
@@ -283,7 +292,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       const id = await createSessionId(hub);
       const res = await hub.postMessage({ conversationId: id, text: "q" });
       expect(res.turn.answer.finalText).toBe("cached reply");
-      // reloadFromEnv 无 envProvider → no-op（不抛错）。
+      // reloadFromEnv without envProvider → no-op (no throw).
       await hub.reloadFromEnv();
     } finally {
       // no-op
@@ -306,11 +315,12 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       ).ensureDeps();
       const adapterBefore = depsBefore.adapter;
 
-      // 模拟 reload 抛错：envProvider 抛（坏 JSON / model 缺失同路径）。
+      // Simulate reload throwing: envProvider throws (bad JSON / missing model take the same path).
       const originalProvider = envProvider;
       (hub as unknown as { envProvider: () => IknowEnv }).envProvider = () => {
-        // 复用原 provider 构造的 env，但把 model 清空 → createAdapterFromEnv
-        // 仍可构造（Anthropic 接受空 model）；为模拟「model 缺失」守卫，直接抛。
+        // Reuse the env built by the original provider but blank the model →
+        // createAdapterFromEnv would still construct (Anthropic accepts an
+        // empty model); to simulate the "model missing" guard, throw directly.
         throw new Error("no LLM model configured in settings.llm.model");
       };
       await assert.rejects(
@@ -318,7 +328,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
         /no LLM model configured/
       );
 
-      // cachedDeps 未动（adapter 仍是旧引用）。
+      // cachedDeps untouched (adapter is still the old reference).
       const depsAfter = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
@@ -346,8 +356,8 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       ).ensureDeps();
       const adapterBefore = depsBefore.adapter;
 
-      // settings `${VAR}` 解析不到 → loadIknowEnv 返回 apiKey=undefined（不抛错）；
-      // reloadFromEnv 必须在此抛 ValidationError，cachedDeps 保持旧 adapter。
+      // settings `${VAR}` fails to resolve → loadIknowEnv returns apiKey=undefined (no throw);
+      // reloadFromEnv must throw ValidationError here while cachedDeps keeps the old adapter.
       apiKey = undefined;
       await assert.rejects(() => hub.reloadFromEnv(), /LLM mode needs API key/);
 
@@ -356,7 +366,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       ).ensureDeps();
       expect(depsAfter.adapter).toBe(adapterBefore);
 
-      // 修复 apiKey → reloadFromEnv 恢复重建。
+      // Fix apiKey → reloadFromEnv resumes rebuilding.
       apiKey = "test-key";
       await hub.reloadFromEnv();
       const depsFixed = await (
@@ -369,7 +379,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
   });
 
   test("只改 baseUrl → 触发 adapter 重建（新 adapter 指向新 origin）", async () => {
-    // 两个 capture server：reload 切换 baseUrl 后，下一个 postMessage 命中 cap2。
+    // Two capture servers: after reload switches baseUrl, the next postMessage hits cap2.
     const cap1 = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const cap2 = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
@@ -388,18 +398,18 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     });
     try {
       const id = await createSessionId(hub);
-      // 首次 reload → adapter 指向 cap1。
+      // First reload → adapter points at cap1.
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "first" });
       expect(cap1.bodies.length).toBe(1);
       expect(cap2.bodies.length).toBe(0);
 
-      // 只改 baseUrl → reloadFromEnv → adapter 重建指向 cap2。
+      // Change only baseUrl → reloadFromEnv → adapter rebuilt pointing at cap2.
       currentBaseUrl = cap2.origin;
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "second" });
-      expect(cap1.bodies.length).toBe(1); // cap1 不再被命中
-      expect(cap2.bodies.length).toBe(1); // 新 adapter 命中 cap2
+      expect(cap1.bodies.length).toBe(1); // cap1 no longer hit
+      expect(cap2.bodies.length).toBe(1); // new adapter hits cap2
       expect((cap2.bodies[0] as { model?: string }).model).toBe("baseurl-test");
     } finally {
       await cap1.close();
@@ -426,13 +436,13 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     });
     try {
       const id = await createSessionId(hub);
-      // 首次 reload（temperature=0）→ adapter 重建。
+      // First reload (temperature=0) → adapter rebuilt.
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "cold" });
       expect(cap.bodies.length).toBe(1);
       expect((cap.bodies[0] as { temperature?: number }).temperature).toBe(0);
 
-      // 只改 temperature → reloadFromEnv → adapter 重建、wire temperature 变化。
+      // Change only temperature → reloadFromEnv → adapter rebuilt, wire temperature changes.
       currentTemperature = 0.7;
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "warm" });
@@ -444,23 +454,26 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
   });
 });
 
-// -- thinking override 路径的 env 新鲜度 + headers 热重载比较 ------------------
-//
-// 观测手段（为什么这样选）：
-//   - override 一侧走 **wire**：withThinkingOverride 不把 client 交回调用方，
-//     baseUrl/model 是唯二可观察面，而 capture server 记录的正是「SDK 实际把
-//     请求发去了哪里、带了什么 model」——比 stub/spy 更黑盒，且能顺带证明
-//     请求真的发出去了。
-//   - headers 一侧必须留在 **真实 adapter 的构造面**：SDK 把 defaultHeaders
-//     冻结在 client._options 上；wire 上也看得到头，但「仅 headers 变化」的
-//     断言要先证明 client 是新造的（同一 client 不会改头），故先取 client
-//     引用再比对。两处引用都可从 hub 的 cachedDeps 读到，无需注入新缝。
+// -- env freshness on the thinking-override path + headers hot-reload comparison --
+
+// Observation strategy (why these choices):
+//   - The override side is observed on the **wire**: withThinkingOverride
+//     never hands the client back to the caller, and baseUrl/model are the
+//     only two observable surfaces; the capture server records exactly
+//     "where the SDK actually sent the request, with what model" — blacker
+//     box than stubs/spies, and it also proves the request really went out.
+//   - The headers side must stay on the **real adapter's construction
+//     surface**: the SDK freezes defaultHeaders in client._options; headers
+//     are visible on the wire too, but a "headers-only change" assertion
+//     must first prove the client is newly constructed (an existing client
+//     never changes its headers), so grab the client reference and compare.
+//     Both references are readable from hub's cachedDeps — no new seam needed.
 describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）", () => {
   test("thinking override 路径用 envProvider 的最新 env（新 baseUrl + model），不用构造期快照", async () => {
     const capOld = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const capNew = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
-    // 构造期快照 = capOld；envProvider（生产 TUI 的 EnvLoader.get）返回新 env。
+    // Construction-time snapshot = capOld; envProvider (production TUI's EnvLoader.get) returns the new env.
     const initial = makeFullEnv({
       model: "snapshot-model",
       apiKey: "test-key",
@@ -480,7 +493,7 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
     });
     try {
       const id = await createSessionId(hub);
-      // /model 切换后的状态：envProvider 返回新 provider 的 baseUrl + model。
+      // State after a /model switch: envProvider returns the new provider's baseUrl + model.
       latest = makeFullEnv({
         model: "switched-model",
         apiKey: "test-key",
@@ -491,7 +504,8 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
         text: "think hard",
         thinking: { mode: "adaptive", effort: "high" },
       });
-      // 修复前：override 分支读 overrideEnv（构造期快照）→ 请求命中 capOld。
+      // The override branch must not read a construction-time snapshot env
+      // (that bug would send this request to capOld).
       expect(capOld.bodies.length).toBe(0);
       expect(capNew.bodies.length).toBe(1);
       expect((capNew.bodies[0] as { model?: string }).model).toBe(
@@ -544,8 +558,9 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
       envProvider,
       deps: baseDeps(),
     });
-    // adapter 引用 = 「是否重建」的可观察面；wire 上的请求头 = headers 真透传
-    // 的黑盒面（同一个 client 不会改头，所以头值变化 ⟺ 新 client）。
+    // The adapter reference observes "was it rebuilt"; request headers on
+    // the wire black-box that headers truly pass through (one client never
+    // changes its headers, so a header-value change ⟺ a new client).
     const readAdapter = async () => {
       const deps = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
@@ -554,18 +569,18 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
     };
     try {
       const id = await createSessionId(hub);
-      // 首次 reload（headers 在场）→ adapter 重建。
+      // First reload (headers present) → adapter rebuilt.
       await hub.reloadFromEnv();
       const adapterA = await readAdapter();
       expect(adapterA).not.toBe(stubAdapter);
 
-      // 同值（新对象、逐键相同）→ 判定「内容未变」→ 不重建，adapter 引用不变。
+      // Same value (new object, key-for-key equal) → judged "content unchanged" → no rebuild, adapter reference unchanged.
       currentHeaders = { "X-Foo": "bar" };
       await hub.reloadFromEnv();
       const adapterB = await readAdapter();
       expect(adapterB).toBe(adapterA);
 
-      // 仅 headers 变化 → 关键字段比较必须察觉 → adapter 重建；wire 带新头。
+      // Headers-only change → the key-field comparison must notice → adapter rebuilt; the wire carries the new header.
       currentHeaders = { "X-Foo": "baz" };
       await hub.reloadFromEnv();
       const adapterC = await readAdapter();
@@ -574,8 +589,9 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
       expect(cap.headers.length).toBe(1);
       expect(cap.headers[0]!["x-foo"]).toBe("baz");
 
-      // headers 整体消失（provider 换到无 headers 的档）也算变化 → 再重建，
-      // wire 不再带该头。
+      // Headers disappearing entirely (provider switching to a headers-less
+      // tier) also counts as a change → rebuild again, and the wire no
+      // longer carries the header.
       currentHeaders = undefined as unknown as Readonly<Record<string, string>>;
       await hub.reloadFromEnv();
       const adapterE = await readAdapter();

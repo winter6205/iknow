@@ -1,13 +1,14 @@
 /**
- * Trace panel entry helpers (ADR-0020, plan T5) — pure-function coverage.
- * web 包无渲染测试框架（spec A8/A10），入口语义抽到 web/src/lib/trace-entry.ts
- * 后在 root vitest（node env）单测。
+ * Trace panel entry helpers (ADR-0020) — pure-function coverage.
+ * The web package has no render-test framework, so the entry semantics are
+ * extracted into web/src/lib/trace-entry.ts and unit-tested under root vitest
+ * (node env).
  *
- * 5 boundary classes (plan §T5 列):
- *   - empty: 会话列表空 → null（deep-link 也救不了空列表）；param 缺省 → mtime 最新
- *   - negative: deep-link 会话不存在 → 静默 fallback 最近会话（不报错）
- *   - overflow: 超长 conversationId → deep-link 构造不崩（encodeURIComponent 兜底）
- *   - exception: URL-unsafe 字符 id → round-trip 可解码还原
+ * Boundary classes:
+ *   - empty: no sessions → null (deep-link cannot save an empty list); no param → latest mtime
+ *   - negative: deep-linked session absent → silent fallback to the newest one (no error)
+ *   - overflow: very long conversationId → deep-link construction survives (encodeURIComponent fallback)
+ *   - exception: URL-unsafe chars in id → round-trip decodes back intact
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

@@ -5,16 +5,16 @@
  * exercises the endpoints with fetch and asserts the nested wire shape
  * (records / total / skipped_lines / truncated / offset).
  *
- * v2 目录语义 (spec SC-R 10-16): traceOut 是「每会话一文件」的目录；
- * /api/v1/traces?conversation_id=<id> 路由到 `<traceDir>/<id>.jsonl`，
- * 缺省 → 最近活跃会话 (readdir+stat 按 mtime)，不 400、不混看。
+ * v2 directory semantics: traceOut is a "one file per session" directory;
+ * /api/v1/traces?conversation_id=<id> routes to `<traceDir>/<id>.jsonl`,
+ * default → most-recently-active session (readdir+stat by mtime), never 400, never mixed.
  *
  * Categories (S2 defensive contract):
  *   - 200 happy path with snake_case wire keys (default → most-recent session)
- *   - filtering: record_type / status / conversation_id (下钻不混看)
+ *   - filtering: record_type / status / conversation_id (drill down, no mixing)
  *   - pagination: limit + offset; total before slicing
  *   - default conversation_id → most-recent session (by mtime)
- *   - /sessions: 列表返回 conversation_id/mtime/size/agent_version; 无 traceOut→404
+ *   - /sessions: list returns conversation_id/mtime/size/agent_version; no traceOut → 404
  *   - poll: 0/500 → 200; -1/abc/2.5 → 400 validation (field poll)
  *   - resume_offset: 0 → 200; -1/abc → 400 validation (field resume_offset)
  *   - 400 validation: limit/offset/record_type/status/conversation_id
@@ -99,9 +99,10 @@ function writeSessionFile(dir: string, convId: string, lines: string[]): void {
 }
 
 /**
- * 写两个会话文件: c2 先写并回拨 mtime (较旧), c1 后写 (较新 = 最近活跃)。
- * c1 含 turn + llm_call + 2 坏行; c2 含 tool_call error。
- * 这样缺省 /api/v1/traces 恒路由到 c1, 与「不混看」断言解耦。
+ * Write two session files: c2 first with mtime rolled back (older), c1 second
+ * (newer = most active). c1 holds turn + llm_call + 2 bad lines; c2 holds a
+ * tool_call error. So the default /api/v1/traces always routes to c1, decoupled
+ * from the 「不混看」 ("no mixing") assertions.
  */
 function writeSampleTraceDir(dir: string): void {
   writeSessionFile(dir, "c2", [
@@ -120,7 +121,7 @@ function writeSampleTraceDir(dir: string): void {
       status: "error",
     }),
   ]);
-  // 回拨 c2 的 mtime, 保证 c1 是最近活跃。
+  // Roll back c2's mtime so c1 stays the most active.
   utimesSync(
     join(dir, "projects", TEST_PROJECT_SLUG, "c2", "trace.jsonl"),
     new Date(0),
@@ -315,7 +316,7 @@ describe("GET /api/v1/traces — default conversation_id → most-recent session
   it("routes to the session with the newest mtime when conversation_id is absent", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-default-"));
     tmpDirs.push(tmp);
-    // 旧会话 (回拨 mtime)。
+    // Older session (mtime rolled back).
     writeSessionFile(tmp, "old", [
       JSON.stringify({
         conversation_id: "old",
@@ -330,7 +331,7 @@ describe("GET /api/v1/traces — default conversation_id → most-recent session
       new Date(0),
       new Date(0)
     );
-    // 新会话 (最近活跃)。
+    // Newer session (most active).
     writeSessionFile(tmp, "new", [
       JSON.stringify({
         conversation_id: "new",
@@ -525,8 +526,8 @@ describe("GET /api/v1/traces — IO error mapping", () => {
   it("returns 500 internal when traceOut points at a regular file", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-io-"));
     tmpDirs.push(tmp);
-    // traceOut 是普通文件 (而非目录) → listSessions readdir ENOTDIR →
-    // TraceReadError → 500 (不泄漏 fs 细节)。
+    // traceOut is a regular file (not a directory) → listSessions readdir
+    // ENOTDIR → TraceReadError → 500 (no fs details leaked).
     const file = join(tmp, "not-a-dir.jsonl");
     writeFileSync(file, "{}\n", "utf8");
     await startServer({ traceOut: file });

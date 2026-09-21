@@ -1,15 +1,17 @@
 /**
- * ADR-0111 T4 — `iknow __subagent_worker__` 真子进程的 exit-code 语义。
+ * ADR-0111 — exit-code semantics of the real `iknow __subagent_worker__` subprocess.
  *
- * 观测手段 = 真实 CLI 子进程（tsx 启动，同 tests/cli/llm-provider-error.test.ts
- * 的结论：cli.ts 顶层自跑 main()，catch 分流的承重面只有黑盒可证）。
+ * Observation method = a real CLI subprocess (launched via tsx; same conclusion
+ * as tests/cli/llm-provider-error.test.ts: cli.ts runs main() at top level, so
+ * only a black box can prove the load-bearing catch routing).
  *
- * 钉住的不变式（ADR-0111 不变式 (b)，成文化 assumption 16 / SC13）：
- *   1. exit 2 = **仅**信封协议错误（stdin JSON parse 失败 / WorkerEnvelope
- *      字段缺失 → 无信封可写）→ stderr `[subagent-worker] fatal`；
- *   2. parse 之后的 run 阶段逃逸（本例：loadIknowEnv 抛 typed plain object）
- *      → best-effort failed envelope 写 stdout + exit 1，**不再冒用 2**，
- *      stderr 无 `[subagent-worker] fatal` 误报。
+ * Pinned invariant (ADR-0111 invariant (b), codifying assumption 16 / SC13):
+ *   1. exit 2 = envelope protocol errors **only** (stdin JSON parse failure /
+ *      missing WorkerEnvelope fields → no envelope writable) → stderr
+ *      `[subagent-worker] fatal`;
+ *   2. an escape in the run phase after parse (here: loadIknowEnv throws a
+ *      typed plain object) → best-effort failed envelope on stdout + exit 1,
+ *      **no longer reusing 2**, and no `[subagent-worker] fatal` false alarm on stderr.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -27,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** 与 tests/cli/llm-provider-error.test.ts 同款 tsx 定位（worktree node_modules）。 */
+/** Same tsx resolution as tests/cli/llm-provider-error.test.ts (worktree node_modules). */
 function resolveTsxCli(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
@@ -35,7 +37,7 @@ function resolveTsxCli(): string {
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
-      // 继续向上
+      // keep climbing
     }
     const parent = join(dir, "..");
     if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
@@ -58,8 +60,9 @@ beforeAll(() => {
   mkdirSync(join(home, ".iknow"), { recursive: true });
   mkdirSync(sandboxRoot, { recursive: true });
   mkdirSync(join(scratch, "cwd"), { recursive: true });
-  // provider `acme` 的 apiKeyEnv 显式不设 → 合法信封 parse 之后 loadIknowEnv
-  // 必抛（run 阶段逃逸面）。信封协议错误路径在 settings 之前抛出，两态互不干扰。
+  // provider `acme`'s apiKeyEnv is deliberately unset → after a legal envelope parses,
+  // loadIknowEnv must throw (the run-phase escape surface). Envelope protocol errors
+  // throw before settings loading, so the two states never interfere.
   writeFileSync(
     join(home, ".iknow", "settings.json"),
     JSON.stringify({
@@ -82,7 +85,7 @@ afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** 跑一次真 worker 子进程：stdin 喂一行文本，收 stdout/stderr/exit code。 */
+/** Runs the real worker subprocess once: feeds one line on stdin, collects stdout/stderr/exit code. */
 function runWorkerProcess(
   stdinLine: string
 ): Promise<{ code: number | null; out: string; err: string }> {
@@ -137,7 +140,7 @@ describe("iknow --subagent-worker exit-code 语义（ADR-0111 不变式 (b)）",
     };
     assert.equal(envelope.status, "failed");
     assert.equal(envelope.reason, "crashed");
-    // typed plain-object 逃逸按字段渲染（不塌缩 [object Object]），exit 2 专码归还。
+    // A typed plain-object escape renders by fields (never collapses to [object Object]); the reserved exit code 2 is restored.
     assert.equal(envelope.summary.includes("[object Object]"), false);
     assert.match(envelope.summary, /acme/);
     assert.equal(

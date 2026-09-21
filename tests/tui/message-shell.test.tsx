@@ -2,12 +2,13 @@
 /**
  * tests/tui/message-shell.test.tsx
  *
- * #693 T1 D1 共用 assistant 外壳组件 SSOT 验收。
+ * Shared assistant shell component (SSOT) acceptance.
  *
- * - 外壳 = assistantBg 底色 + paddingX={1} + paddingY={0} + 根 marginTop。
- * - memo 包裹，浅比较稳定（frozen tuiPalette + props）。
- * - 三个消费方（MessageBlocks assistant 分支 / chat-view 流式草稿 /
- *   chat-view 折叠行）套壳后渲染不崩，正文起始列与原行为对齐。
+ * - shell = assistantBg + paddingX={1} + paddingY={0} + root marginTop.
+ * - memo-wrapped, shallow-compare stable (frozen tuiPalette + props).
+ * - the three consumers (MessageBlocks assistant branch / chat-view streaming
+ *   draft / chat-view fold line) render without crashing once wrapped, with
+ *   the text start column aligned to prior behavior.
  */
 import { describe, expect, test } from "bun:test";
 import { useState } from "react";
@@ -61,8 +62,8 @@ describe("MessageShell 基础结构", () => {
 
 describe("MessageShell memo 浅比较（frozen tuiPalette + props）", () => {
   test("父 state 变化但 shell props 不变 → shell 内部 children 不重渲染（markup 稳定）", async () => {
-    // 派生渲染次数计数：在 children 中通过 useState 计数渲染；
-    // shell 自身 props 不变时浅比较命中，children 不会被外部 state 触发的重渲染冲掉。
+    // render-count probe via useState inside children; while shell props are
+    // unchanged the shallow compare hits, so children survive parent-driven rerenders.
     let childRenderCount = 0;
     function CountingChild(props: { readonly payload: string }): JSX.Element {
       childRenderCount += 1;
@@ -93,11 +94,12 @@ describe("MessageShell memo 浅比较（frozen tuiPalette + props）", () => {
     await setup.waitForVisualIdle();
     const initialCount = childRenderCount;
     expect(initialCount).toBeGreaterThanOrEqual(1);
-    // 模拟外部 state 变化：壳 memo 应保持稳定，children 仅因自身依赖
-    // payload 引用变化而重渲染（payload 是新字面量，每次 set 都变）。
-    // 这里只验证：壳未因不相关父 state 变更而「多渲染一次」——计数变化
-    // 必与 payload 引用更新同步，且壳本体的 markup 函数不该被反复调用。
-    // 我们用 ref 探测（实现不外露 ref，简化为 markup 字符串断言）：
+    // simulate external state change: the shell memo stays stable; children
+    // rerender only because their own payload dependency changed (a new
+    // literal per set). What is verified here: the shell did not "render one
+    // extra time" from an unrelated parent state change — the count moves in
+    // lockstep with payload identity, and the shell's markup function is not
+    // re-invoked repeatedly.
     const frame = setup.captureCharFrame();
     expect(frame).toContain("p-0");
     await setup.renderer.destroy();

@@ -1,21 +1,24 @@
 /**
- * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7) — 父侧接线：
- * spawn 期把父会话**当时**的完整模型索引快照落进 worker envelope。
+ * Parent-side wiring (`specs/skill-index-increment.md` SC10): at spawn time,
+ * drop the parent session's **current** full model-index snapshot into the worker envelope.
  *
- * 契约：
- *   - `opts.skillIndexSnapshot` 是**每次 spawn 现读**的 getter —— 父的索引进场史
- *     随会话增长，「spawn 当时」只有现读才成立（与 `sandboxRootCell` 同形态，
- *     不是 manager 构造期的冻结值）；
- *   - getter 缺席 / 返回 `undefined` → envelope **无**该键 → worker 退回自己的
- *     独立 rescan（旧 wire / manager 直造路径逐字节不变）；
- *   - 返回 `[]` → 键**在场**且为空数组 —— 「父确实没有模型索引」与「没人给
- *     快照」是两件事（worker 侧分别渲染 `No skills installed` 与自己的扫描
- *     结果）。空数组在 JSON 里是可分辨的：`"skillIndexSnapshot":[]`；
- *   - 元素只走 wire 面 `{name, description?}`：渲染 SSOT 在 worker 侧的
- *     `skillsSegment`，父不预渲染文本（避免两套渲染）。
+ * Contract:
+ *   - `opts.skillIndexSnapshot` is a getter **read fresh per spawn** — the
+ *     parent's index entry history grows over the session, so "at spawn time"
+ *     only holds with a fresh read (same shape as `sandboxRootCell`, not a
+ *     value frozen at manager construction);
+ *   - getter absent / returns `undefined` → **no** such key on the envelope →
+ *     the worker falls back to its own independent rescan (old wire /
+ *     directly-constructed manager paths byte-identical);
+ *   - returns `[]` → key **present** as an empty array — "the parent really
+ *     has no model index" and "nobody supplied a snapshot" are two different
+ *     facts (the worker renders `No skills installed` vs. its own scan result
+ *     separately). An empty array is distinguishable in JSON: `"skillIndexSnapshot":[]`;
+ *   - elements go over the wire as `{name, description?}` only: the rendering
+ *     SSOT is `skillsSegment` worker-side; the parent does not pre-render text (avoiding two renderers).
  *
- * Isolation: 真实 tmp 目录做 sandboxRoot 锚点；spawn 用 fake child，无真实
- * 子进程（与 manager-todo-ledger.test.ts 同款）。
+ * Isolation: real tmp dir as sandboxRoot anchor; spawn uses a fake child, no
+ * real subprocess (same style as manager-todo-ledger.test.ts).
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -99,7 +102,7 @@ describe("buildWorkerPayload — T7 父会话模型索引快照落线（SC10）"
       ENTRY,
       { name: "injected-b", description: "已进场" },
     ]);
-    // 跨进程边界（worker 是子进程）：信封必须能原样过 JSON 一趟。
+    // Cross-process boundary (worker is a child process): the envelope must survive one JSON round trip verbatim.
     const roundTripped = parseWorkerEnvelope(JSON.stringify(payload));
     assert.deepEqual(
       roundTripped.skillIndexSnapshot,
@@ -108,8 +111,10 @@ describe("buildWorkerPayload — T7 父会话模型索引快照落线（SC10）"
   });
 
   it("getter 每次 spawn 现读 —— 第二次 spawn 拿到增长后的快照（「当时」语义）", () => {
-    // 第一次 spawn 只有开场冻表名；父会话中途增量进场后，第二次 spawn 的快照
-    // 必须含新名。构造期冻结的实现会在这里红（两次都只有 frozen-a）。
+    // First spawn sees only the opening frozen-table entry; after the parent
+    // session incrementally admits more, the second spawn's snapshot must
+    // contain the new name. A construction-time-frozen implementation goes red
+    // here (both spawns would only have frozen-a).
     let ledger: SkillIndexSnapshotEntry[] = [ENTRY];
     const { manager, calls } = makeManagerCapturingPayload({
       skillIndexSnapshot: () => ledger,
@@ -127,13 +132,14 @@ describe("buildWorkerPayload — T7 父会话模型索引快照落线（SC10）"
       calls[1]!.payload.skillIndexSnapshot?.map((e) => e.name),
       ["frozen-a", "injected-b"]
     );
-    // 先落线的信封不被后续增长改写（快照是值，不是引用别名）。
+    // The already-written envelope is not rewritten by later growth (the snapshot is a value, not a reference alias).
     assert.equal(calls[0]!.payload.skillIndexSnapshot?.length, 1);
   });
 
   it("getter 收到该 spawn 的父会话锚 —— 两个会话各拿各的进场史（serve 共用一台 manager）", () => {
-    // 进场史是 per-session 叶子，而 manager 随 build-engine 跨会话共享。
-    // 若把 conversationId 钉进装配期，两个会话会拿到同一份史。
+    // Entry history is a per-session leaf, while the manager is shared across
+    // sessions via build-engine. Pinning conversationId at assembly time would
+    // hand both sessions the same history.
     const seen: Array<string | undefined> = [];
     const byConv: Record<string, SkillIndexSnapshotEntry[]> = {
       "conv-A": [ENTRY, { name: "only-in-A" }],
@@ -152,7 +158,7 @@ describe("buildWorkerPayload — T7 父会话模型索引快照落线（SC10）"
     manager.spawn({ task: "in A", conversationId: "conv-A" });
     manager.spawn({ task: "in B", conversationId: "conv-B" });
 
-    // 锚逐 spawn 透传（不是构造期的冻结值）。
+    // The anchor is passed through per spawn (not a construction-time frozen value).
     assert.deepEqual(seen, ["conv-A", "conv-B"]);
     assert.deepEqual(
       calls[0]!.payload.skillIndexSnapshot?.map((e) => e.name),

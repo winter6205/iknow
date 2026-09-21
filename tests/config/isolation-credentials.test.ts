@@ -1,20 +1,22 @@
 /**
- * specs/egress-credential-sentinel.md T1 / plans 子弹 1：
- * 用户层 settings 新段 `isolation.credentials` 的解析契约。
+ * specs/egress-credential-sentinel.md: parsing contract for the new user-layer
+ * settings section `isolation.credentials`.
  *
- * 钉住的不变式：
- *  - schema：files[]（path / 可选 extract（须含捕获组 1）/ 可选 decode:"jwt" /
- *    injectHosts 必填）与 envVars[]（name / injectHosts 必填）；
- *  - 非法处置对齐 settings.ts 既有纪律：drop-not-throw、非对象段丢段、
- *    非法条目丢该条 + [settings] 警告；
- *  - injectHosts 必填（缺省不吃放行集扩张——invariant 3 的数据面）；
- *  - extract 捕获组 1 校验（sandbox-config.js group-1 教训）；命名组不占
- *    编号，不算捕获组 1；
- *  - 用户层条目总数上限 16，超出丢尾 + 警告（Input-contract overflow 档）；
- *  - 项目层同段出现即丢弃（ADR-0084 allowlist 既有整段警告，前 spec SC9 同族）；
- *  - 深 frozen（递归，对齐 immutable 纪律）。
+ * Pinned invariants:
+ *  - schema: files[] (path / optional extract (must contain capture group 1) /
+ *    optional decode:"jwt" / injectHosts required) and envVars[]
+ *    (name / injectHosts required);
+ *  - invalid handling aligned with settings.ts discipline: drop-not-throw,
+ *    non-object section drops the section, invalid entry drops that entry + [settings] warning;
+ *  - injectHosts required (absence never feeds allowlist expansion — spec invariant 3's data surface);
+ *  - extract capture-group-1 validation (the sandbox-config.js group-1 lesson);
+ *    named groups do not occupy numbering and do not count as group 1;
+ *  - user-layer entry cap 16; excess tail dropped + warning (input-contract overflow class);
+ *  - project-layer occurrence of the same section discards it wholesale (ADR-0084
+ *    allowlist's existing whole-section warning; same family as spec SC9);
+ *  - deep frozen (recursive, aligned with immutable discipline).
  *
- * fixture 全部使用生成的假域名 / 假路径，不含任何真实凭据。
+ * All fixtures use generated fake domains / paths; no real credentials.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -174,7 +176,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
       },
     });
     const { settings, warnings } = loadWithWarnings(home, cwd);
-    // 丢弃后空集 → 保留空数组事实（network 同款纪律：不合成、不静默消失）
+    // After dropping, empty set → keep the empty-array fact (same discipline as network: never synthesize, never silently vanish)
     assert.deepEqual(settings.isolation, { credentials: { envVars: [] } });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /\[settings\]/);

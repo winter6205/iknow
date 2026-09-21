@@ -1,35 +1,35 @@
 /**
- * T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 amendment 2026-09-05 (e))
- * — 子代理 worker 看见当前写根。
+ * The subagent worker sees its current write root (ADR-0037 §4 amendment (e)).
  *
- * Acceptance (合同):
- *   - 改绑后，worker (子代理) 在跑工具前能在 messages 里读到当前写根 =
- *     envelope `sandboxRoot`（= 活 `taskRoot`）;
- *   - 未改绑时 worker prior 不含额外写根段（与今日字节一致，按最小改动原则定）;
- *   - system `## Project path` 字节仍为 `projectIdentityRoot`（不动）;
- *   - spawn `task` 正文不被 manager 改写（不在本测试覆盖范围）。
+ * Contract:
+ *   - After a re-bind, the worker can read the current write root = envelope
+ *     `sandboxRoot` (= live `taskRoot`) from its messages before running tools;
+ *   - with no write situation on the envelope, no extra write-root segment is
+ *     injected (byte-identical to the pre-change shape, minimal-diff principle);
+ *   - system `## Project path` bytes remain `projectIdentityRoot` (untouched);
+ *   - spawn `task` text is not rewritten by the manager (out of scope here).
  *
- * T6 (plans/write-situation-disclosure.md) — worker prior 按 envelope 上的
- * 处境枚举（`writeSituation`）渲染，consumer 不再自行判定形状（ADR-0069
- * D2/D3；spec SC4 / OQ1）。
- *   - `writeSituation: "writable_main" | "writable_tree"` → 与改造前逐字节
- *     相等的写根段（SC2 硬约束，前缀缓存与 skill-load-write-root SC2 守门）;
- *   - `writeSituation: "no_writable_root"` → ③ 态披露，不点名建树工具,
- *     不嵌入 sandboxRoot（spec SC3）;
- *   - 旧 envelope（无 `writeSituation` 字段）→ typed skip，不注入写根段
- *     不回落旧文案（OQ1 采纳 (b)）—— 保持「宁可不说、不可说错」立意。
+ * The worker prior renders from the envelope's `writeSituation` enum; the
+ * consumer no longer infers the shape itself:
+ *   - `writable_main` | `writable_tree` → byte-equal to the pre-change write-root
+ *     segment (hard constraint guarding the prefix cache);
+ *   - `no_writable_root` → the no-root disclosure: never names the worktree tool,
+ *     never embeds sandboxRoot;
+ *   - legacy envelope (no `writeSituation` field) → typed skip: no segment and no
+ *     fallback to the old wording — better silent than wrong.
  *
- * ADR-0040: 子代理 = 父会话执行臂，写根 = 父会话生效根。worker envelope 携带的
- * `sandboxRoot` 已经是活根的快照（manager.buildWorkerPayload 经 sandboxRootCell
- * getter 读出），因此 worker 装配期直接读 envelope 字段即可，不需另接 LiveTaskRoot
- * cell —— 这是按计划里"envelope 值 = 活根快照"的最小改动路径。
+ * ADR-0040: a subagent is the parent session's execution arm, so its write root
+ * is the parent's effective root. The envelope's `sandboxRoot` is already a live
+ * root snapshot (manager.buildWorkerPayload reads it via the sandboxRootCell
+ * getter), so worker assembly just reads the envelope field — no extra
+ * LiveTaskRoot cell wiring, the minimal-diff "envelope value = live snapshot" path.
  *
- * 五类边界自检:
- *   - empty   : sandboxRoot = "" → 不注入额外写根段（fail-closed:envelope 校验已拒）;
- *   - negative: sandboxRoot 是合法绝对路径但目录不存在 → 仍注入（envelope 校验负责）;
- *   - overflow: 极长 sandboxRoot → 注入文本长度正常，不截断到无意义;
- *   - concurrent: 同 envelope 多次 run → 每次都注入（无残留状态）;
- *   - exception: encodeUserText 抛错 → 不传播异常（与 prior 段同形态）。
+ * Boundary cases:
+ *   empty: sandboxRoot = "" → no segment (fail-closed: envelope validation rejects it);
+ *   negative: valid absolute path, directory missing → still injected (validation's job);
+ *   overflow: very long sandboxRoot → text passes through untruncated;
+ *   concurrent: repeated runs on one envelope → injected every time (no state);
+ *   exception: encodeUserText throws → not propagated (same shape as prior segments).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -46,19 +46,20 @@ import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import { writeRootSegment } from "../../src/harness/skill/body.ts";
 import type { WriteSituation } from "../../src/harness/session-roots.ts";
 
-/** encodeUserText passthrough — priorMessagesFromEnvelope 直接调它。 */
+/** encodeUserText passthrough — priorMessagesFromEnvelope calls it directly. */
 function passthroughEncodeUserText(
   text: string
 ): import("../../src/harness/model-adapter/types.ts").AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
 }
 
-// ── 1. priorMessagesFromEnvelope 直接覆盖 ─────────────────────────────────────
+// ── 1. priorMessagesFromEnvelope direct coverage ─────────────────────────────
 
 describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4 (e))", () => {
-  // T6 重写: 旧 envelope（无 writeSituation 字段）→ typed skip,不注入写根段。
-  // 本节保留 T3 形态但全部 explicit writeSituation 走双参形态 —— 与改造后
-  // 装配路径（manager.buildWorkerPayload）一致。
+  // Legacy envelopes (no writeSituation field) → typed skip, no write-root
+  // segment. This section keeps the original shapes but passes an explicit
+  // writeSituation through the two-arg form — matching the current assembly
+  // path (manager.buildWorkerPayload).
   const TREE_ROOT = "/repo/.iknow/worktrees/conv1234";
   const MAIN_ROOT = "/home/u/projects/iknow-tasks/task-abc";
 
@@ -98,7 +99,8 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
     const text = prior![0]!.content
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
-    // 容许 'current write root (...)' 包装:实现里用了括号注释形式。
+    // Tolerates the 'current write root (...)' wrapping: the implementation
+    // uses a parenthetical annotation form.
     assert.match(
       text,
       new RegExp(
@@ -108,8 +110,8 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 
   it("envelope 同时带 finalText + writable_tree → prior 段 = [host dialogue, write root] (顺序：原 finalText 在前，写根段在后)", () => {
-    // finalText 与 sandboxRoot/writeSituation 同时在场时 prior 数组先是
-    // host dialogue（保持现状）再加写根段。
+    // When finalText coexists with sandboxRoot/writeSituation, the prior array
+    // is host dialogue first (unchanged behavior), then the write-root segment.
     const env: WorkerEnvelope = {
       task: "judge",
       sandboxRoot: "/tmp/sb-root",
@@ -185,12 +187,12 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 
   it("写根段字节 = writeRootSegment helper（文案 SSOT，specs/skill-load-write-root.md）", () => {
-    // worker prior 与 skill 正文 trailer（createSkillBody）共用同一文案
-    // 函数 —— 这里锁死字节相等，防止 worker 源内再长出第二份写根长句。
-    // T6 (write-situation-disclosure)：worker envelope 上的处境字段由 spawn
-    // 期算好后透传（manager.buildWorkerPayload），此处用真实枚举重写：
-    // ① writable_main（隔离 OFF）/ ② writable_tree（隔离 ON + 树形）→ 两态
-    // 与改造前**逐字节相等**（SC2 硬约束），文案 SSOT = writeRootSegment。
+    // worker prior and the skill-body trailer share one wording function —
+    // pin byte equality here so no second write-root sentence can grow inside
+    // the worker source. The envelope's situation field is computed at spawn
+    // time and passed through unchanged (manager.buildWorkerPayload).
+    // writable_main (isolation OFF) and writable_tree (isolation ON + tree)
+    // must both stay byte-equal to the pre-change wording; SSOT = writeRootSegment.
     const sandboxRoot = "/tmp/task-wt";
     for (const situation of ["writable_main", "writable_tree"] as const) {
       const env: WorkerEnvelope = {
@@ -208,8 +210,9 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 
   it("T6: writeSituation = no_writable_root（隔离 ON + 未绑树）→ ③ 态披露，不含 sandboxRoot", () => {
-    // spec SC3 / ADR-0069 D3:trailer 在装配期进上下文,早于任何写意图;
-    // ③ 态披露陈述事实,点名工具 = 对每个未绑会话推一次建树,故绝不点名。
+    // The trailer enters context at assembly time, before any write intent;
+    // the no-root disclosure states facts only — naming a tool would push
+    // every unbound session toward creating a tree, so it never names one.
     const sandboxRoot = "/repo/main-checkout";
     const env: WorkerEnvelope = {
       task: "t",
@@ -221,40 +224,42 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
     const text = prior[0]!.content
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
-    // ③ 态披露 = writeRootSegment helper 同一份字面量。
+    // No-root disclosure = the same literal from the writeRootSegment helper.
     assert.equal(text, writeRootSegment("no_writable_root", sandboxRoot)!);
-    // 不嵌入 sandboxRoot（无可写根 → 不能告诉模型去写哪个根）
+    // Does not embed sandboxRoot (no writable root → cannot point the model at one)
     assert.ok(!text.includes(sandboxRoot));
-    // 不点名建树工具
+    // Does not name the worktree-creation tool
     assert.ok(!text.includes("create-worktree"));
   });
 
   it("T6: 旧 envelope（无 writeSituation 字段）→ typed skip,不注入写根段（OQ1 采纳 (b)）", () => {
-    // spec OQ1 (b): 跨版本 resume / 旧 worker bootstrap 时,worker envelope
-    // 上没有 writeSituation 字段 → 不注入写根段,不回落旧文案(旧的
-    // `writable_main` 假设在 ③ 态会继续说谎)。宁可不告知,不可说错。
+    // On cross-version resume / legacy worker bootstrap the envelope carries no
+    // writeSituation → skip the segment, no fallback to the old wording (the
+    // old `writable_main` assumption would keep lying in the no-root state).
+    // Better silent than wrong.
     const sandboxRoot = "/repo/main-checkout";
     const env: WorkerEnvelope = {
       task: "t",
       sandboxRoot,
-      // 故意不写 writeSituation —— 模拟旧 worker bootstrap / 跨版本 envelope。
+      // Intentionally omits writeSituation — legacy bootstrap / cross-version envelope.
     };
     const prior = priorMessagesFromEnvelope(env, passthroughEncodeUserText);
-    // typed skip:无 finalText / evidenceContext 也无写根段 → return undefined。
+    // typed skip: no finalText / evidenceContext and no write-root segment → undefined.
     assert.equal(prior, undefined);
-    // 也没有任何含 current write root 字样的 prior message（防御:实现误把
-    // 缺席默认值当成 "writable_main" 渲染出旧文案）。
+    // Also no prior message containing "current write root" (defense against the
+    // implementation defaulting the absent field to "writable_main").
     assert.ok(prior === undefined);
   });
 
   it("T6: 旧 envelope 缺 writeSituation 但带 finalText → typed skip 写根段,host dialogue 保留", () => {
-    // legacy 跨版本兼容:host dialogue / evidence 仍照常注入;只有写根段被
-    // 跳过(typed skip 不回落)。理由同上一用例 —— OQ1 采纳 (b)。
+    // Legacy cross-version compat: host dialogue / evidence are still injected
+    // as usual; only the write-root segment is skipped (typed skip, no
+    // fallback) — same rationale as the previous case.
     const env: WorkerEnvelope = {
       task: "judge",
       sandboxRoot: "/tmp/legacy-task",
       finalText: "previous host text",
-      // 缺 writeSituation —— 旧 envelope 形态。
+      // writeSituation omitted — legacy envelope shape.
     };
     const prior = priorMessagesFromEnvelope(env, passthroughEncodeUserText);
     assert.ok(prior);
@@ -267,7 +272,8 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 
   it("T6: writeSituation = no_writable_root + sandboxRoot 为空（typed stable）", () => {
-    // ③ 态披露与根无关 —— empty 臂 typed 不 throw（spec SC1 + A 表 empty 臂）。
+    // The no-root disclosure is root-independent — the empty-root arm stays
+    // typed and never throws.
     const env: WorkerEnvelope = {
       task: "t",
       sandboxRoot: "",
@@ -278,15 +284,16 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
     const text = prior[0]!.content
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
-    // ③ 态披露 = writeRootSegment helper 同一份字面量。
+    // No-root disclosure = the same literal from the writeRootSegment helper.
     assert.equal(text, writeRootSegment("no_writable_root", "")!);
     assert.ok(!text.includes("create-worktree"));
   });
 
   it("T6: writeSituation = writable_tree + 空 sandboxRoot → 不渲染（empty 臂 typed）", () => {
-    // ① / ② + 空根 → 不渲染「写根 = 」半句（A 表 empty 臂）。注意：①/②
-    // 形态下沙箱根是必填,空值意味着 spawn 未传 sandboxRoot —— 仍 typed 不 throw,
-    // 直接跳过该段(与写根段缺席形态一致)。
+    // Writable-root situations + empty root → the write-root half-sentence is
+    // not rendered. In these shapes sandboxRoot is mandatory, so an empty value
+    // means spawn omitted it — still typed (no throw); the segment is skipped
+    // outright, matching the write-root-absent shape.
     const env: WorkerEnvelope = {
       task: "t",
       sandboxRoot: "",
@@ -297,14 +304,15 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 
   it("T6: 顺序契约 [host dialogue?, evidence?, write root] 在 typed skip 下仍守", () => {
-    // 顺序契约: 写根段总是末段。typed skip 时该 slot 在 extras 数组过滤掉,
-    // 顺序保持不变（与原有 §1 §2 §3 形态逐字节一致）。
+    // Ordering contract: the write-root segment is always last. Under typed
+    // skip the slot is filtered from extras, so the order stays byte-identical
+    // to the original shapes.
     const env: WorkerEnvelope = {
       task: "judge",
       sandboxRoot: "/tmp/legacy-task",
       finalText: "truncated",
       evidenceContext: { doc: "y" },
-      // 缺 writeSituation —— typed skip 路径。
+      // writeSituation omitted — typed-skip path.
     };
     const prior = priorMessagesFromEnvelope(env, passthroughEncodeUserText);
     assert.ok(prior);
@@ -322,7 +330,7 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   });
 });
 
-// ── 2. runWorkerOnce 端到端：worker 写根随 envelope.sandboxRoot 注入 ─────────
+// ── 2. runWorkerOnce end-to-end: write root injected from envelope.sandboxRoot ─
 
 describe("runWorkerOnce — worker write-root prior end-to-end (T3)", () => {
   const baseEnvelope: WorkerEnvelope = {
@@ -344,9 +352,9 @@ describe("runWorkerOnce — worker write-root prior end-to-end (T3)", () => {
   }
 
   it("runWorkerOnce 经 stub adapter 看到 prior 段包含 sandboxRoot（写根快照）", async () => {
-    // 用 stub-model 抓取它消费到的 user messages 来断言 prior 段已注入。
+    // The stub-model records only its fixed response; asserting status/result
+    // here proves the prior injection path runs without breaking the loop.
     const sandboxRoot = "/tmp/task-write-root";
-    // 让 stub 把入参 messages 原样 echo 到最终文本（verify 性质）。
     const adapter = createStubModel({
       responses: [
         {
@@ -373,9 +381,10 @@ describe("runWorkerOnce — worker write-root prior end-to-end (T3)", () => {
       deps: makeDeps(adapter),
     });
     assert.equal(env.status, "ok");
-    // stub-model 的 step 方法不暴露 messages —— 通过 envelope.result 拿到
-    // finalText;这里只验证 status=ok 且最终 envelope 不污染;写根段的
-    // 实际注入由 §1 priorMessagesFromEnvelope 的直接断言覆盖。
+    // stub-model's step does not expose messages — envelope.result carries the
+    // finalText; this only verifies status=ok and an unpolluted envelope. The
+    // actual write-root injection is covered by the direct
+    // priorMessagesFromEnvelope asserts above.
     assert.equal(env.result, "saw prior");
   });
 });

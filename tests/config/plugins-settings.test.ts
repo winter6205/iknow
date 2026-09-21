@@ -1,13 +1,13 @@
 /**
- * settings.plugins 段单测（plans/global-plugins-loading.md §3.3 / §12 T1）。
+ * settings.plugins section unit tests.
  *
- * 覆盖:
- *   - user 层 plugins 段合法解析 (roots / disabled 数组)
- *   - 非对象 / 非数组 / 非字符串元素 → 丢弃该字段
- *   - 全部字段非法 → 段缺席（消费方按未配处理）
- *   - project 层 plugins → 被 PROJECT_SETTINGS_ALLOWED_KEYS 丢弃 + 告警
- *     （ADR-0084：plugins 携带 hooks = 任意命令执行 → 不允许项目层写）
- *   - user 与 project 都写 plugins → user 胜出 + warn（project 被丢）
+ * Coverage:
+ *   - user-layer plugins section parses (roots / disabled arrays)
+ *   - non-object / non-array / non-string elements → field dropped
+ *   - all fields invalid → section absent (consumers treat it as unconfigured)
+ *   - project-layer plugins → discarded by PROJECT_SETTINGS_ALLOWED_KEYS + warning
+ *     （ADR-0084: plugins carry hooks = arbitrary command execution → project layer not writable）
+ *   - user and project both set plugins → user wins + warn (project discarded)
  *   - settings.plugins.frozen
  */
 import assert from "node:assert/strict";
@@ -95,7 +95,7 @@ describe("loadIknowSettings — plugins 段 (#global-plugins T1)", () => {
       {}
     );
     const s = loadIknowSettings({ home, cwd });
-    // isNonEmptyString 过滤 42 + 空串 → 剩 [/good, /also-good]
+    // isNonEmptyString filters out 42 and "" → leaves [/good, /also-good]
     assert.deepEqual(s.plugins?.roots, ["/good", "/also-good"]);
   });
 
@@ -131,9 +131,9 @@ describe("loadIknowSettings — plugins 段 (#global-plugins T1)", () => {
       cwd,
       onWarn: (m) => warnings.push(m),
     });
-    // 项目层被丢 → 不进入合并结果
+    // project layer discarded → never enters the merged result
     assert.equal(s.plugins, undefined);
-    // 警告含 "plugins"
+    // warning mentions "plugins"
     assert.ok(warnings.some((w) => /"plugins"/.test(w)));
   });
 
@@ -148,10 +148,10 @@ describe("loadIknowSettings — plugins 段 (#global-plugins T1)", () => {
       cwd,
       onWarn: (m) => warnings.push(m),
     });
-    // user 胜出
+    // user wins
     assert.deepEqual(s.plugins?.roots, ["/user-root"]);
     assert.deepEqual(s.plugins?.disabled, ["plugUser"]);
-    // project 被丢 → 警告
+    // project discarded → warning
     assert.ok(warnings.some((w) => /"plugins"/.test(w)));
   });
 
@@ -166,11 +166,11 @@ describe("loadIknowSettings — plugins 段 (#global-plugins T1)", () => {
       cwd,
       onWarn: (m) => warnings.push(m),
     });
-    // user 段未配,project 被丢 → 整个 plugins 缺席
+    // user section unset, project discarded → plugins absent entirely
     assert.equal(s.plugins, undefined);
-    // user llm 仍在
+    // user llm still there
     assert.equal(s.llm?.model, "u");
-    // warning 仍触发
+    // warning still fires
     assert.ok(warnings.some((w) => /"plugins"/.test(w)));
   });
 });

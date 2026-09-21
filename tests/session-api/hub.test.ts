@@ -70,7 +70,7 @@ const neverResolvingAdapter: LoopAdapter = {
   encodeToolResults: () => [],
 };
 
-/** B1: 单文本 user 消息构造(B1 直测 conditionalSave 用)。 */
+/** Build a single-text user message (for direct conditionalSave tests). */
 function userMsg(t: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text: t }] };
 }
@@ -204,7 +204,7 @@ describe("SessionHub subagent wake", () => {
           )
         )
       ).toBe(true);
-      // ADR-0112 Does #1:drain 宿主 commit 带出处戳且随落盘链存活。
+      // ADR-0112: the drain host commit carries the provenance stamp and survives the persistence chain.
       const drainMsg = file.messages.find((message) =>
         message.content.some(
           (block) =>
@@ -568,8 +568,9 @@ describe("boundary: exception — cancelled signal", () => {
     assert.equal(res.turn.answer.finalText, "");
     // T1: cancelled WITH delta>0 now persists — the user query landed before
     // the abort, so the interrupted turn is recoverable via a checkpoint.
-    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民),
-    // 所以 messages 长度 = seed user(1) + system interrupt(1) = 2。
+    // On cancelled, the system interrupt message is appended at the end
+    // (first-class transcript citizen), so messages length = seed user(1) +
+    // system interrupt(1) = 2.
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 2);
     assert.equal(loaded.messages[1]!.role, "system");
@@ -587,8 +588,9 @@ describe("boundary: exception — cancelled signal", () => {
   });
 
   it("cancelled + delta>0 → answer.interrupted === true (B1)", async () => {
-    // 与上一个用例同诱导:delayMs 保证 model in-flight 时 abort 生效,
-    // run resolve cancelled,且本轮已追加 user 消息(delta=1 > 0)→ 实际落盘。
+    // Same induction as the previous case: delayMs ensures the abort lands
+    // while the model is in flight, run resolves cancelled, and this turn
+    // already appended the user message (delta=1 > 0) → actually persisted.
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
@@ -609,17 +611,19 @@ describe("boundary: exception — cancelled signal", () => {
       signal: controller.signal,
     });
     assert.equal(res.turn.answer.stopReason, "cancelled");
-    // B1: interrupted 必须存在且为 true(shouldPersistCheckpoint=true)。
+    // interrupted must be present and true (shouldPersistCheckpoint=true).
     assert.equal("interrupted" in res.turn.answer, true);
     assert.equal(res.turn.answer.interrupted, true);
   });
 
   it("conditionalSave cancelled + delta=0 → 返回 false 且不落盘 (B1)", async () => {
-    // 真实 hub 路径下 run() 总在 abort 前追加 user 消息(delta 恒 ≥1),delta=0
-    // 分支只能以合成 RunResult 直测 conditionalSave —— 计划原文:「conditionalSave
-    // cancelled + delta=0 → returns false」。private 成员经
-    // `hub as unknown as { conditionalSave: (...) => Promise<boolean> }` 收窄
-    // (TypeScript 对同一字面量类型的窄化在运行时无存根,直接调真实实现)。
+    // On the real hub path run() always appends the user message before
+    // abort (delta ≥ 1), so the delta=0 branch can only be tested by
+    // feeding a synthetic RunResult straight into conditionalSave —
+    // "conditionalSave cancelled + delta=0 → returns false". The private
+    // member is narrowed via `hub as unknown as { conditionalSave: (...) =>
+    // Promise<boolean> }` (narrowing the same literal type has no runtime
+    // stub; the real implementation is called directly).
     const hub = makeHub(makeDeps([]));
     const file = sampleFile({
       id: "b1-delta0",
@@ -641,8 +645,8 @@ describe("boundary: exception — cancelled signal", () => {
         }): Promise<boolean>;
       }
     ).conditionalSave;
-    // cancelled + delta=0(prior=[q] 与 result.messages 同长)→ false,不写文件。
-    // 解构出的方法丢 this,须 .call(hub, …) 绑定 store。
+    // cancelled + delta=0 (prior=[q] same length as result.messages) → false, no file write.
+    // The destructured method loses `this`; bind the store via .call(hub, …).
     const savedFalse = await conditionalSave.call(hub, {
       conversationId: file.conversation_id,
       session: file,
@@ -662,7 +666,7 @@ describe("boundary: exception — cancelled signal", () => {
       "delta=0 不得落盘任何文件"
     );
 
-    // cancelled + delta>0 → true 且落盘(与 shouldPersistCheckpoint 判定一致)。
+    // cancelled + delta>0 → true and persisted (consistent with the shouldPersistCheckpoint decision).
     const id2 = "b1-delta1";
     const file2 = sampleFile({
       id: id2,
@@ -697,7 +701,7 @@ describe("postMessage answer wire fields — interrupted (B1)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal("interrupted" in res.turn.answer, false);
-    // 与既有 byte-stable 断言同键集(无新增键泄漏)。
+    // Same key set as the existing byte-stable assertion (no leaked new keys).
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
       "stopReason",
@@ -812,8 +816,9 @@ describe("boundary: exception — run-level timeout", () => {
       registry,
       maxTurns: 5,
       timeoutMs: 1,
-      // plan T4:异常停收尾摘要 re-uses 同一 never-resolving adapter;缩短摘要
-      // 独立超时,避免该测试被 15s default 拖成超时。
+      // The abnormal-stop closing summary re-uses the same never-resolving
+      // adapter; shorten the summary's own timeout so this test is not
+      // dragged past the 15s default.
       summaryTimeoutMs: 1,
     };
     const hub = makeHub(deps);
@@ -871,7 +876,7 @@ describe("boundary: exception — tool timeout persists execution_failed", () =>
       conversationId: session.conversation_id,
       text: "trigger tool timeout",
     });
-    // File IS saved (timeout → save per 裁决#8)
+    // File IS saved (timeout → save).
     const loaded = await store.load(session.conversation_id);
     assert.ok(loaded.messages.length > 0, "file must be saved on tool timeout");
     // Look for the executor-encoded execution_failed tool_result (is_error=true).
@@ -1091,9 +1096,10 @@ describe("drop-context stop reasons keep user message only", () => {
     assert.equal(loaded.turnCount, 0);
   });
 
-  // ADR-0094 SC4-SC5 (viewport API error): hub 透传 RunResult.apiError 到
-  // TurnAnswerDto.apiError (status + message);非 transport 失败 → 字段
-  // 缺席(byte-stable)。SC4 (transport-continue-persist) keeps the user
+  // ADR-0094 SC4-SC5 (viewport API error): hub passes RunResult.apiError
+  // through to TurnAnswerDto.apiError (status + message); non-transport
+  // failure → field absent (byte-stable). SC4 (transport-continue-persist)
+  // keeps the user
   // message on disk for protocolError.
   it("TransportRetryExhaustedError → apiError present in DTO + user message on disk", async () => {
     const apiErrLike = {
@@ -1128,7 +1134,7 @@ describe("drop-context stop reasons keep user message only", () => {
       text: "trigger transport exhausted",
     });
     assert.equal(res.turn.answer.stopReason, "protocolError");
-    // apiError 字段透传 status + message
+    // apiError field passes through status + message
     assert.deepEqual(res.turn.answer.apiError, {
       status: 404,
       message:
@@ -1162,7 +1168,7 @@ describe("drop-context stop reasons keep user message only", () => {
       text: "ok",
     });
     assert.equal(res.turn.answer.stopReason, "completed");
-    // 字段缺席 = key 不在 (byte-stable); 不能用 res.turn.answer.apiError !== undefined
+    // Field absent = key not present (byte-stable); must not use res.turn.answer.apiError !== undefined
     assert.equal("apiError" in res.turn.answer, false);
   });
 });
@@ -1212,9 +1218,7 @@ describe("resetSession", () => {
 });
 
 // -- compactSession ----------------------------------------------------------
-// 边界类覆盖：正常压缩（> keepRecent 触发裁剪）、幂等 no-op（低于阈值不落盘）、
-// 空会话 no-op、missing session → not_found。DEFAULT_KEEP_RECENT=6，每 turn 2
-// 条消息（user+assistant），4 turns = 8 条 → 触发裁剪。
+// Boundary-class coverage: normal compaction (> keepRecent triggers trimming), idempotent no-op (below threshold, no persist), empty-session no-op, missing session → not_found. DEFAULT_KEEP_RECENT=6, 2 messages per turn (user+assistant), 4 turns = 8 messages → triggers trimming.
 
 describe("compactSession", () => {
   async function seedTurns(hub: SessionHub, id: string, n: number) {
@@ -1238,10 +1242,10 @@ describe("compactSession", () => {
 
     const res = await hub.compactSession(session.conversation_id);
     assert.equal(res.compacted, true);
-    // keepRecent=6 尾窗 + 1 条边界占位符 = 7 条 < 8。
+    // keepRecent=6 tail window + 1 boundary placeholder = 7 messages < 8.
     assert.equal(res.beforeCount, 8);
     assert.equal(res.afterCount, 7);
-    // same conversation id，turnCount 不重置。
+    // Same conversation id, turnCount is not reset.
     assert.equal(res.session.conversation_id, session.conversation_id);
     assert.equal(res.session.turn_count, 4);
 
@@ -1267,7 +1271,7 @@ describe("compactSession", () => {
     assert.equal(res.afterCount, 2);
 
     const after = await store.load(session.conversation_id);
-    assert.equal(after.updatedAt, before.updatedAt); // 未 touch
+    assert.equal(after.updatedAt, before.updatedAt); // untouched
     assert.equal(after.messages.length, 2);
   });
 
@@ -1292,9 +1296,9 @@ describe("compactSession", () => {
   });
 
   it("title 保留 pre-compact 首条 user 意图(review-fix:不被 placeholder/preamble 污染)", async () => {
-    // stub model 对 full-compact prompt 返回 empty → fallback placeholder 路径。
-    // 修复前:title = extractTitle(compacted) = "[compaction boundary..." 前缀。
-    // 修复后:title = extractTitle(before) = 首条 user 文本("q0")。
+    // The stub model returns empty for the full-compact prompt → fallback placeholder path.
+    // Buggy behavior: title = extractTitle(compacted) = "[compaction boundary..." prefix.
+    // Correct behavior: title = extractTitle(before) = first user text ("q0").
     const deps = makeDeps(
       Array.from({ length: 4 }, (_, i) =>
         assistantResult({ texts: [`answer ${i}`] })
@@ -1309,8 +1313,9 @@ describe("compactSession", () => {
     assert.equal(after.title, "q0");
   });
 
-  // #548:opts.onStream 透传到 runFullCompact,host 收到 compaction_started /
-  // completed 序列;opts.signal 未传 → 行为零变化(向后兼容)。
+  // opts.onStream passes through to runFullCompact; the host receives the
+  // compaction_started / completed sequence; opts.signal not passed → zero
+  // behavior change (backward compatible).
   it("opts.onStream 透传:runFullCompact 生命周期事件序列被 host observer 捕获", async () => {
     const deps = makeDeps(
       Array.from({ length: 4 }, (_, i) =>
@@ -1326,9 +1331,10 @@ describe("compactSession", () => {
       onStream: (e) => events.push(e.type),
     });
     assert.equal(res.compacted, true);
-    // stub model 对 full-compact prompt 返回 empty_response → fallback
-    // placeholder;compaction_started + compaction_failed(reason=empty_response)
-    // 必出,completed 不出(fail 不代表成功)。
+    // The stub model returns empty_response for the full-compact prompt →
+    // fallback placeholder; compaction_started + compaction_failed
+    // (reason=empty_response) must appear, completed must not (fail does
+    // not imply success).
     assert.ok(
       events.includes("compaction_started"),
       "compaction_started 必 emit"
@@ -1339,15 +1345,18 @@ describe("compactSession", () => {
     );
   });
 
-  // #548:opts.signal 中途 abort → runFullCompact 返回 signal_aborted →
-  // hub 走 keep-state 路径(不 fallback 截断、不落盘、不 bump updatedAt)、
-  // 响应带 cancelled:true。Claude Code 取消语义对齐。
+  // Mid-flight opts.signal abort → runFullCompact returns signal_aborted →
+  // hub takes the keep-state path (no fallback truncation, no persist, no
+  // updatedAt bump) and the response carries cancelled:true. Aligned with
+  // Claude Code cancellation semantics.
   it("opts.signal 中途 abort → compacted=false, cancelled=true,会话保持原样", async () => {
-    // 4 turns × 2 msgs = 8 → 触发 splitForCompaction(dropped ≠ []),
-    // 走 runFullCompact 路径。stub-model 默认 delayMs=0,无延迟;但 mid-flight
-    // abort 仍能触发 — 关键时序是 microtask 排在前 + controller.abort 紧跟。
-    // 我们走"pre-aborted"路径(更简单、更稳):构造已 aborted 的 signal,
-    // hub.compactSession 内 runFullCompact 第一行检查就立刻返回 signal_aborted。
+    // 4 turns × 2 msgs = 8 → triggers splitForCompaction (dropped ≠ []),
+    // taking the runFullCompact path. stub-model defaults to delayMs=0, no
+    // delay; mid-flight abort can still fire — the key timing is microtask
+    // first + controller.abort right after. We take the "pre-aborted" path
+    // (simpler, more stable): construct an already-aborted signal, and the
+    // very first check inside runFullCompact in hub.compactSession returns
+    // signal_aborted immediately.
     const deps = makeDeps(
       Array.from({ length: 4 }, (_, i) =>
         assistantResult({ texts: [`answer ${i}`] })
@@ -1359,7 +1368,7 @@ describe("compactSession", () => {
 
     const before = await store.load(session.conversation_id);
     const controller = new AbortController();
-    controller.abort(); // pre-aborted → runFullCompact 早退 signal_aborted
+    controller.abort(); // pre-aborted → runFullCompact early-returns signal_aborted
 
     const res = await hub.compactSession(session.conversation_id, {
       signal: controller.signal,
@@ -1373,15 +1382,15 @@ describe("compactSession", () => {
     assert.equal(res.beforeCount, before.messages.length);
     assert.equal(res.afterCount, before.messages.length);
 
-    // 会话保持原样:落盘文件未 touch(updatedAt 不动、messages 不变)。
+    // Session stays as-is: the persisted file is untouched (updatedAt unchanged, messages unchanged).
     const after = await store.load(session.conversation_id);
     assert.equal(after.updatedAt, before.updatedAt, "未 bump updatedAt");
     assert.equal(after.messages.length, before.messages.length, "未裁剪");
     assert.equal(after.turnCount, before.turnCount, "turnCount 不重置");
   });
 
-  // #548:opts.onStream 缺席 → 行为零变化(旧调用点不变);stub empty_response
-  // 路径下 fallback 截断,compacted:true。
+  // opts.onStream absent → zero behavior change (old call sites intact);
+  // on the stub empty_response path the fallback truncation runs, compacted:true.
   it("opts 缺席 → 行为零变化(compat 旧调用点)", async () => {
     const deps = makeDeps(
       Array.from({ length: 4 }, (_, i) =>
@@ -1498,11 +1507,13 @@ describe("postMessage validation", () => {
     );
   });
 
-  // 修复方向：机器装配的 skill-load 消息（`[skill-load name="<id>"]\n<body>`，
-  // TUI `app.tsx:1780` 与 Web `use-slash-commands.ts:251` 唯一拼接形态）跳过
-  // 用户输入长度上限，与模型侧 tool result 通道无字符上限对称。78KB 的
-  // SKILL.md 一次性加载会立即撞 8000 上限 —— 不豁免则 skill-load slash
-  // 路径不可用。允许它真的走到 stub 模型返回（不再抛 ValidationError）。
+  // Machine-assembled skill-load messages (`[skill-load name="<id>"]\n<body>`
+  // — the only join shape in TUI app.tsx and Web use-slash-commands.ts)
+  // skip the user-input length cap, symmetric with the model-side tool
+  // result channel having no character limit. A 78KB SKILL.md loaded in one
+  // shot would instantly hit the 8000 cap — without the exemption the
+  // skill-load slash path is unusable. It must actually reach the stub
+  // model response (no ValidationError thrown).
   it("accepts machine-assembled skill-load message exceeding MAX_MESSAGE_CHARS", async () => {
     const deps = makeDeps([assistantResult({ texts: ["ok"] })]);
     const hub = makeHub(deps);
@@ -1515,8 +1526,9 @@ describe("postMessage validation", () => {
     assert.equal(res.turn.answer.finalText, "ok");
   });
 
-  // Review Medium 3 守卫：半截前缀（无闭合双引号）即使超长也必须被拒，
-  // 否则手打恶意文本可绕过 8000 上限豁免。
+  // Half-cut prefix (no closing double quote) must be rejected even when
+  // overlong, otherwise hand-typed malicious text bypasses the 8000-cap
+  // exemption.
   it("rejects a half-prefixed long text (no closing quote) (review Medium 3)", async () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
@@ -1829,9 +1841,10 @@ describe("postMessage onStream forwarding (#188)", () => {
   });
 
   it("without onStream: stub still emits but no caller-side capture (zero behavior change)", async () => {
-    // 没传 onStream → opts.onStream 为 undefined;hub 透传 undefined 给 run();
-    // stub 的 onStream 也是 undefined,emit 被 no-op(side-effect 内部不抛错)。
-    // 此用例守住"无 onStream 时行为零变化"的反向兼容契约。
+    // No onStream → opts.onStream is undefined; hub passes undefined to run();
+    // the stub's onStream is also undefined, so emit is a no-op (no throw in
+    // the side-effect path). This case guards the backward-compat contract
+    // "zero behavior change without onStream".
     const hub = makeHub(
       makeDeps([assistantResult({ texts: ["same"] })], {
         streamEventsByStep: [[{ type: "text_delta", text: "same" }]],
@@ -2004,12 +2017,14 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
   });
 });
 
-// -- T3 (#620): turn 内 commit(边跑边写) -------------------------------------
+// -- In-turn commit (write while running) -------------------------------------
 
 describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () => {
   it("工具执行时 assistant 事件已落在盘上 JSONL(commit 先于工具,不绕开 serialize 队列)", async () => {
-    // 探针工具在 runOne 内读盘上 JSONL:assistant commit 必须先于工具执行落盘。
-    // 断言在工具外做(工具内 throw 会被 executor 收成 execution_failed,防假绿)。
+    // The probe tool reads the on-disk JSONL inside runOne: the assistant
+    // commit must land before tool execution. Assertions go outside the
+    // tool (a throw inside gets swallowed into execution_failed by the
+    // executor, which would mask a false green).
     const idRef: { current: string | null } = { current: null };
     const observed: Array<{
       readonly events: number;
@@ -2063,15 +2078,16 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     });
     assert.equal(res.turn.answer.stopReason, "completed");
 
-    // 工具执行瞬间:盘上恰有 2 条事件 —— T5 起 user query 随首个引擎 commit
-    // 一并落盘(append-only save 的对齐前提),随后才是 assistant(含 tool_use),
-    // head 指向 assistant。
+    // Moment of tool execution: disk holds exactly 2 events — the
+    // user query lands with the first engine commit (alignment prerequisite
+    // for append-only save), then assistant (with tool_use); head → assistant.
     assert.equal(observed.length, 1);
     assert.equal(observed[0]!.events, 2);
     assert.equal(observed[0]!.lastRole, "assistant");
     assert.equal(observed[0]!.head, "e1");
 
-    // 收尾 save 重写整份 log 后,最终 transcript 与既有行为一致(4 条消息)。
+    // After the closing save rewrites the whole log, the final transcript
+    // matches pre-existing behavior (4 messages).
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 4);
     const raw = await readFile(
@@ -2090,10 +2106,13 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
   });
 
   it("legacy .json-only 会话:首次 commit 触发 bootstrap 迁出 JSONL,run 正常完成", async () => {
-    // 升级前遗留:盘上只有 <id>.json(无 .jsonl)。appendEvents 对 legacy 直抛
-    // write_failed;hub 钩子须先全量 save 迁出 JSONL 再重试,否则 legacy 会话
-    // 永远无法再跑。探针工具在 runOne 内读盘上 JSONL,证明 bootstrap + commit
-    // 在工具执行前已完成(断言在工具外做,防 executor 收吞 assertion 假绿)。
+    // Pre-upgrade legacy: disk has only <id>.json (no .jsonl). appendEvents
+    // throws write_failed straight on legacy; the hub hook must first
+    // full-save into JSONL, then retry — else a legacy session could never
+    // run again. The probe tool reads the on-disk JSONL inside runOne to
+    // prove bootstrap + commit finished before tool execution (assertions go
+    // outside the tool: a throw inside gets swallowed by the executor,
+    // masking a false green).
     const id = "legacy-only-t3";
     const dir = resolveConversationDir({
       projectDir: sessionDir,
@@ -2153,8 +2172,9 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     const res = await hub.postMessage({ conversationId: id, text: "new q" });
     assert.equal(res.turn.answer.stopReason, "completed");
 
-    // 工具执行瞬间:legacy 已迁出 JSONL —— 旧 2 条事件 + 本次 user query +
-    // assistant(T5 起 query 随首个引擎 commit 一并落盘),head 指向新 assistant。
+    // Moment of tool execution: legacy migrated to JSONL — old 2 events +
+    // this user query + assistant (query lands with the first engine commit),
+    // head → new assistant.
     assert.equal(observed.length, 1);
     assert.equal(observed[0]!.events, 4);
     assert.deepEqual(observed[0]!.roles, [
@@ -2165,8 +2185,9 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     ]);
     assert.equal(observed[0]!.head, "e3");
 
-    // 收尾 save 后:旧 2 条 + 新 4 条(user query + assistant(tool_use) +
-    // user(tool_result) + assistant final),事件链完整,turnCount 累计。
+    // After the closing save: old 2 + new 4 (user query + assistant(tool_use)
+    // + user(tool_result) + assistant final); event chain intact, turnCount
+    // accumulates.
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 6);
     assert.equal(loaded.turnCount, 3);
@@ -2179,7 +2200,7 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
   });
 });
 
-// -- T5 (#622): rewind 改 head、旧链保留 ----------------------------------------
+// -- rewind moves head, old chain retained -------------------------------------
 
 describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
   const textOf = (m: AnthropicNativeMessage): string => {

@@ -1,14 +1,15 @@
 /**
- * #358 T7 — GET /api/v1/sessions/:id/subagents 只读端点 (spec SC7)。
+ * GET /api/v1/sessions/:id/subagents is a pure read-only projection.
  *
- * 端点是纯只读投影: hub 先经 store.load 做会话存在性门 (typed not_found →
- * 404), 再返回 manager.listSubagents() 在场列表;manager 缺席 → 200 []。
- * 本文件用 fake SubAgentManager 注入 hubOpts.subagentManager (constructor
- * 优先, ensureDeps 的 ?? 不会覆写 —— #358 T4 透传链), 断言:
- *   - happy path: 三态 (running/completed/failed) 字段完整 + Postel 在场
- *   - 无会话 → typed 404 (不裸抛)
- *   - manager 缺席 → 200 + `[]`
- *   - 只读: 两次 GET 同 snapshot + 仅只读方法被调 (写方法零调用)
+ * The hub gates session existence via store.load (typed not_found ->
+ * 404), then returns manager.listSubagents(); an absent manager -> 200 [].
+ * A fake SubAgentManager is injected via hubOpts.subagentManager (the
+ * constructor takes precedence — the ?? in ensureDeps never overwrites
+ * it), asserting:
+ *   - happy path: all three states (running/completed/failed) field-complete + Postel present
+ *   - unknown session -> typed 404 (never a bare throw)
+ *   - absent manager -> 200 + `[]`
+ *   - read-only: two GETs see the same snapshot + only read methods are called (zero write-method calls)
  */
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
@@ -57,7 +58,7 @@ const DEFAULT_RESPONSES: AssistantTurnResult[] = [
   assistantResult({ texts: ["hello"] }),
 ];
 
-/** 完整成员面 fake: 写方法全 spy, 只读投影由调用方固定。 */
+/** Full-surface fake: every write method is a spy; the read-only projection is fixed by the caller. */
 function makeFakeManager(
   subagents: SubagentInfo[] = [],
   listProjection: (
@@ -181,7 +182,7 @@ describe("GET /api/v1/sessions/:id/subagents — 正常路径", () => {
         reason: "crashed",
       },
     ]);
-    // 注: fake manager 已注入管理面, 重建 server 以接入注入。
+    // The fake manager is injected at the hub surface; rebuild the server to pick it up.
     await listening!.close();
     await startServer(DEFAULT_RESPONSES, { subagentManager: manager });
 
@@ -190,7 +191,7 @@ describe("GET /api/v1/sessions/:id/subagents — 正常路径", () => {
     assert.equal(status, 200);
     const b = body as { subagents: SubagentInfo[] };
     assert.equal(b.subagents.length, 3);
-    // running 态 Postel: 可选字段缺席 (不落 undefined 键)。
+    // Postel on the running state: optional fields absent (no undefined keys emitted).
     assert.deepEqual(b.subagents[0], {
       taskId: "run-1",
       state: "running",
@@ -207,7 +208,7 @@ describe("GET /api/v1/sessions/:id/subagents — 正常路径", () => {
   });
 
   it("manager 缺席 → 200 + 空列表 []", async () => {
-    // hubOpts 不注入 subagentManager (服务 "ask 形态") → no-op 空投影。
+    // hubOpts without subagentManager (the service's "ask 形态" ("ask-mode")) -> no-op empty projection.
     const sid = await createSession();
     const { status, body } = await getJson(`/api/v1/sessions/${sid}/subagents`);
     assert.equal(status, 200);
@@ -276,7 +277,7 @@ describe("GET /api/v1/sessions/:id/subagents — 正常路径", () => {
     const second = await getJson(url);
     assert.equal(first.status, 200);
     assert.deepEqual(second.body, first.body);
-    // 端点无写路径: 写方法零调用; 只读投影按需调用。
+    // The endpoint has no write path: zero write-method calls; read projection called on demand.
     assert.equal(spawn.mock.calls.length, 0);
     assert.equal(abortTask.mock.calls.length, 0);
     assert.equal(listSubagents.mock.calls.length, 2);

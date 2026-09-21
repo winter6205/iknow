@@ -1,15 +1,16 @@
 /**
- * serveStaticRequest `stripPrefix` unit coverage (ADR-0020 D1.2, plan T3).
+ * serveStaticRequest `stripPrefix` unit coverage (ADR-0020 D1.2).
  *
- * pipeFile 走 fs.createReadStream().pipe(res)，fake res 无法承接（与
- * tests/traceserver/serve-static.test.ts:23-29 同一结论），因此用最小
- * node:http server 直挂 serveStaticRequest 实测。
+ * pipeFile uses fs.createReadStream().pipe(res), which a fake res cannot
+ * receive (same finding as tests/traceserver/serve-static.test.ts:23-29),
+ * so a minimal node:http server mounts serveStaticRequest directly.
  *
- * 5 boundary classes (plan §T3 stripPrefix 行):
- *   - empty: /trace（strip 后余空）→ trace.html 200
- *   - overflow: /trace/<4096 字符路径> → SPA fallback 不 crash
- *   - exception: /trace/%2e%2e/index.html → 归一化后仍在 webRoot 内，
- *     不泄漏 webRoot 之外文件（与 http.test.ts traversal 同款安全断言）
+ * Boundary classes covered:
+ *   - empty: /trace (strips to empty) → trace.html 200
+ *   - overflow: /trace/<4096-char path> → SPA fallback, no crash
+ *   - exception: /trace/%2e%2e/index.html → after normalization stays inside
+ *     webRoot, leaks nothing outside it (same security assert as the
+ *     traversal case in http.test.ts)
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -99,7 +100,7 @@ describe("serveStaticRequest stripPrefix", () => {
   });
 });
 
-// -- exception: traversal 守卫（直调 fake res —— 403 路径不走 pipeFile） --------
+// -- exception: traversal guard (direct call with fake res — the 403 path never reaches pipeFile) --
 
 describe("serveStaticRequest stripPrefix — traversal defense-in-depth", () => {
   it("stripped path 解析出 webRoot → 403 且不泄漏细节（直调，不经 URL 归一化）", () => {
@@ -133,9 +134,10 @@ describe("serveStaticRequest stripPrefix — traversal defense-in-depth", () => 
   });
 
   it("HTTP-encoded traversal 被 URL 归一化挡在 mount 之外（安全结果）", async () => {
-    // WHATWG URL 把 %2e%2e 当 dot segment 归一化：/trace/%2e%2e/index.html
-    // → /index.html，已不在 /trace mount 下 → 本 harness 返 404（session
-    // server 则会落回 chat SPA fallback）——两种结局都不泄漏 webRoot 外文件。
+    // WHATWG URL normalizes %2e%2e as a dot segment: /trace/%2e%2e/index.html
+    // → /index.html, no longer under the /trace mount → this harness returns
+    // 404 (the session server would fall back to the chat SPA) — either
+    // outcome leaks nothing outside webRoot.
     const res = await fetch(`${origin}/trace/%2e%2e/index.html`);
     assert.equal(res.status, 404);
   });

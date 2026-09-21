@@ -1,9 +1,10 @@
 /**
  * tests/web/slash-command-menu.test.tsx
  *
- * SlashCommandMenu 渲染断言：候选 hint + 说明、选中项 aria-selected、
- * 空候选 → 不渲染、selectedIndex 越界钳制。
- * renderToStaticMarkup 模式沿用 tests/web 既有约定。
+ * SlashCommandMenu rendering asserts: candidate hint + description,
+ * aria-selected on the selected item, empty candidates render nothing,
+ * out-of-range selectedIndex is clamped.
+ * renderToStaticMarkup follows the existing tests/web convention.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -47,7 +48,7 @@ describe("SlashCommandMenu — 候选渲染", () => {
       "exactly one option selected"
     );
     assert.equal((html.match(/aria-selected="false"/g) ?? []).length, 2);
-    // 选中高亮 class 落在第二项（bg-accent-soft 完整形式仅出现于选中项）。
+    // The highlight class lands on the second item (the full bg-accent-soft form appears only on the selected one).
     const secondIdx = html.indexOf("/new");
     const before = html.slice(0, secondIdx);
     assert.ok(before.includes('bg-accent-soft"'));

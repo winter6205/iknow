@@ -1,10 +1,10 @@
 /**
  * tests/web/message-list-notice.test.tsx
  *
- * MessageList 的 notice 消息渲染：居中灰色小卡片、多行文本保留、
- * 与 user/agent 消息共存。/help 输出（多行）经 whitespace-pre-line 呈现。
- * renderToStaticMarkup 模式沿用 tests/web 既有约定（useEffect 不执行，
- * scrollIntoView 不触发）。
+ * MessageList notice rendering: centered gray card, multiline text preserved,
+ * coexists with user/agent messages. /help output (multiline) renders via
+ * whitespace-pre-line. renderToStaticMarkup follows the existing tests/web
+ * convention (useEffect never runs, so scrollIntoView is not triggered).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";

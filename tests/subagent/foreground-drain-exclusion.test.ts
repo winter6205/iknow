@@ -1,20 +1,23 @@
 /**
- * Locked sentence 1 (plans/session-fg-handoff-interrupt.md) — 前景交差通道互斥。
+ * Locked sentence 1 — foreground handoff channel mutual exclusion.
  *
- * 不变式：`wait:true` 的前景 worker，其信封只在**这一次工具调用的 tool_result**
- * 里交付；同一份信封不得再经 host drain 或 mailbox silent wake 二进父 messages
- * （那会把交差画成 user message / 重复一份）。
+ * Invariant: a `wait:true` foreground worker's envelope is delivered **only**
+ * in the tool_result of that one tool call; the same envelope must not enter
+ * parent messages again via host drain or mailbox silent wake (that would
+ * redraw the handoff as a user message / duplicate it).
  *
- *   - fg (`wait:true`)  → def.excludeFromHostDrain = true → drainCompleted 空返
- *                         + mailbox 无 terminal notice
- *   - bg (`wait:false`) → 仍 mailbox 发布 + 仍被 drainCompleted 收走
- *   - `listSubagents()` 把同一等价关系投成 `foreground`（父侧 in-band 等待 =
- *     judge / graph-node / wait:true 同一population），下游 Ctrl+C 扇出按它选目标。
+ *   - fg (`wait:true`)  → def.excludeFromHostDrain = true → drainCompleted returns empty
+ *                         + no terminal notice in the mailbox
+ *   - bg (`wait:false`) → still mailbox-published + still collected by drainCompleted
+ *   - `listSubagents()` projects the same equivalence into `foreground` (parent-side
+ *     in-band wait = judge / graph-node / wait:true, same population); downstream
+ *     Ctrl+C fan-out selects targets by it.
  *
- * rig：真 handler + 真 manager + fake child（stdout 写一行合法 envelope），
- * 与 tests/subagent/foreground-contract.test.ts / mailbox.test.ts 同款；
- * fg 臂必须真经 `manager.waitFor` 返回 tool_result，才能证明「同一份信封只走
- * 一跳」而不是各自为政的两条断言。
+ * Rig: real handler + real manager + fake child (writes one valid envelope line
+ * to stdout), same style as tests/subagent/foreground-contract.test.ts /
+ * mailbox.test.ts; the fg arm must really return tool_result via
+ * `manager.waitFor`, so "the same envelope travels exactly one hop" is proven
+ * rather than being two disconnected assertions.
  */
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
@@ -33,7 +36,7 @@ import {
   SUBAGENT_DRAIN_PREFIX,
 } from "../../src/harness/subagent/host-drain.ts";
 
-/** 最小 fake child：stdout 可写一行 envelope，stdin/stderr 齐备（同 mailbox.test.ts）。 */
+/** Minimal fake child: stdout can write one envelope line; stdin/stderr present (same as mailbox.test.ts). */
 function makeFakeChild(): ChildProcess {
   return Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
@@ -50,16 +53,18 @@ interface Rig {
   readonly tool: ReturnType<typeof createSpawnSubAgentTool>;
   readonly children: ChildProcess[];
   /**
-   * 订阅者**后注册**（`subscribeNow()`）—— mailbox 会把注册前已发布的
-   * notice 重放给新订阅者（mailbox.ts 的 late-subscriber 语义），所以只有
-   * 「终态之后再订」才能证明终态那一刻**没有**发布。这也是 drain 恒为空
-   * 断言之外的独立通道：前者盯 drain 读侧，后者盯 publish 写侧。
+   * The subscriber registers **afterwards** (`subscribeNow()`) — mailbox
+   * replays already-published notices to new subscribers (late-subscriber
+   * semantics in mailbox.ts), so only "subscribe after terminal" proves
+   * nothing was published at the terminal moment. This is a channel independent
+   * from the always-empty drain assertion: the former watches the drain read
+   * side, this one watches the publish write side.
    */
   readonly subscribeNow: () => void;
   readonly notices: SubAgentTerminalNotice[];
 }
 
-/** 真 manager + 真 handler；spawn 工厂按调用序产出 fake child。 */
+/** Real manager + real handler; the spawn factory yields fake children in call order. */
 function makeRig(): Rig {
   const children: ChildProcess[] = [];
   const manager = createSubAgentManager({
@@ -81,7 +86,7 @@ function makeRig(): Rig {
   };
 }
 
-/** 写回一行合法终态信封（manager stdout newline-JSON 协议）。 */
+/** Write back one legal terminal envelope (manager stdout newline-JSON protocol). */
 function emitEnvelope(child: ChildProcess, summary: string): void {
   child.stdout!.write(
     `${JSON.stringify({ status: "ok", summary, result: `${summary} result` })}\n`
@@ -97,20 +102,21 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
       { task: "fg", wait: true },
       { conversationId: CONVERSATION }
     );
-    // handler 已 spawn 完并挂在 waitFor 上（fake child 无 exit，只有 stdout 信封）。
+    // The handler has spawned and is parked on waitFor (fake child never exits; only the stdout envelope ends it).
     await vi.waitFor(() => expect(rig.children).toHaveLength(1));
     emitEnvelope(rig.children[0]!, "fg done");
 
     const result = (await pending) as { status: string; summary: string };
-    // 交付面 1：当跳 tool_result 拿到信封。
+    // Delivery surface 1: this hop's tool_result receives the envelope.
     expect({ status: result.status, summary: result.summary }).toEqual({
       status: "ok",
       summary: "fg done",
     });
-    // 交付面 2（必须缺席）—— 读侧 + 写侧 + 浓缩文本三层，同一条断言：
-    //   drained  = host drain 读不到；
-    //   notices  = 终态之后再订阅（重放语义）仍然收不到；
-    //   drainText = 真消费面（host-drain 的父可见浓缩格式）不产出。
+    // Delivery surface 2 (must be absent) — read side + write side + condensed
+    // text, three layers in one assertion:
+    //   drained   = host drain can't read it;
+    //   notices   = subscribing after terminal (replay semantics) still receives nothing;
+    //   drainText = the real consumption surface (host-drain's parent-visible condensed format) produces nothing.
     rig.subscribeNow();
     expect({
       drained: rig.manager.drainCompleted(CONVERSATION),
@@ -128,7 +134,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
       { task: "bg", wait: false },
       { conversationId: CONVERSATION }
     );
-    // wait:false 臂的 tool_result 是 {task_id} JSON 串（异步臂不阻塞）。
+    // The wait:false arm's tool_result is a {task_id} JSON string (async arm, non-blocking).
     const { task_id: bgTaskId } = JSON.parse(raw as string) as {
       task_id: string;
     };
@@ -146,8 +152,9 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
       drained: rig.manager
         .drainCompleted(CONVERSATION)
         .map(({ taskId }) => taskId),
-      // 后景臂的父可见文本仍是既有浓缩通道（前缀 SSOT + 任务身份 + 摘要）。
-      // 不钉 envelope 投影的折叠细节 —— 那是 envelope.ts 自己的测试面。
+      // The background arm's parent-visible text stays the existing condensed
+      // channel (prefix SSOT + task identity + summary). Don't pin the envelope
+      // projection's folding details — that's envelope.ts's own test surface.
       drainChannel: drainText.startsWith(
         `${SUBAGENT_DRAIN_PREFIX}${bgTaskId} result: `
       ),
@@ -179,11 +186,12 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
     emitEnvelope(rig.children[1]!, "bg done");
 
     const infos = rig.manager.listSubagents(CONVERSATION);
-    // def.task 是唯一投影锚（taskPreview 不截断短任务，见 truncateTaskPreview）。
+    // def.task is the only projection anchor (taskPreview doesn't truncate short tasks; see truncateTaskPreview).
     const fgInfo = infos.find((i) => i.taskPreview === "fg")!;
     const bgInfo = infos.find((i) => i.taskPreview === "bg")!;
-    // foreground 的定义 = 父侧 in-band 等待（= judge / graph-node / wait:true
-    // 同一 population）；下游 Ctrl+C 扇出按此字段选目标，语义必须钉死。
+    // foreground is defined as parent-side in-band wait (= judge / graph-node /
+    // wait:true, same population); downstream Ctrl+C fan-out selects targets by
+    // this field, so its semantics must be pinned.
     expect({
       conversationId: fgInfo.conversationId,
       foreground: fgInfo.foreground,

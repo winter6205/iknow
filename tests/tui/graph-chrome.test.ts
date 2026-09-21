@@ -1,7 +1,8 @@
 /**
- * TUI run_graph chrome 一行（spec SC1 / plan T2）。
+ * TUI run_graph chrome line.
  *
- * 无快照 → 0 行；有快照 → 恒 1 行英文 `graph` + 计数 + now；窄屏仍单行。
+ * No snapshot → 0 rows; with a snapshot → always 1 English line `graph` +
+ * counts + now; stays a single line on narrow screens.
  */
 import { describe, expect, test } from "bun:test";
 import type { GraphProgressSnapshot } from "../../src/harness/graph/progress.js";

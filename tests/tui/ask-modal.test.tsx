@@ -2,17 +2,20 @@
 /**
  * tests/tui/ask-modal.test.tsx
  *
- * #343 T4：权限 ask modal 安全契约（specs/security-guardrails —— y/n/a =
- * once/always/reject，行为与归档版一致）。T4 层覆盖组件 + 桥接接线：
- *  - y/n/a 三键直选 → resolveAsk 真放行/拒绝（promise 落值断言）；
- *  - a → resolve true + always 信号上抛（宿主登记 session 层规则的接缝）；
- *  - ↑↓ 移动选中标记 + Enter 选中当前项（每个分支的回调与选中态断言）；
- *  - Esc 收起 → modal 消失、ask 保持 pending（退回兼容路径仍可 resolve）；
- *  - ask-user 桥接纯语义：approve/deny、超时 fail-closed、未知 id、FIFO、
- *    subscribe 通知计数。
+ * Permission ask modal security contract: y/n/a = once/always/reject,
+ * behavior aligned with the archived version. Coverage: component + bridge wiring:
+ *  - y/n/a direct keys → resolveAsk truly approves/rejects (promise value asserted);
+ *  - a → resolve true + always signal raised (seam for the host to register
+ *    session-level rules);
+ *  - ↑↓ move the selection marker + Enter picks the current item (callback and
+ *    selection state asserted per branch);
+ *  - Esc dismisses → modal gone, ask stays pending (compat path can still resolve);
+ *  - ask-user bridge pure semantics: approve/deny, timeout fail-closed,
+ *    unknown id, FIFO, subscribe notification counts.
  *
- * 注：sessionGrants 登记 + policy 级放行在 app.tsx 接线（T6），此处断言
- * always 信号到达宿主回调（契约接缝不漂移）。
+ * Note: sessionGrants registration + policy-level approval is wired in
+ * app.tsx; here we only assert the always signal reaches the host callback
+ * (the contract seam must not drift).
  */
 import { describe, expect, test } from "bun:test";
 import { useEffect, useRef, useState } from "react";
@@ -30,7 +33,7 @@ import {
   type TuiAskUserBridge,
 } from "../../src/tui/ask-user.js";
 
-/** 轮询式帧等待（mockInput 字节经 stdin 异步解析）。 */
+/** Polling frame wait (mockInput bytes parse asynchronously via stdin). */
 async function untilFrame(
   setup: Awaited<ReturnType<typeof testRender>>,
   pred: (frame: string) => boolean,
@@ -46,7 +49,7 @@ async function untilFrame(
   throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
 }
 
-/** 非 React 断言等待（promise 落值 / 回调计数）。 */
+/** Non-React assertion wait (promise settlement / callback counts). */
 async function until(cond: () => boolean, ms = 3000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
@@ -55,8 +58,9 @@ async function until(cond: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-/** 等 ask promise 落值：必须边等边 renderOnce —— mock stdin 字节只在渲染
- *  pass 里被解析派发，裸 await promise 会让按键永远送不到 handler。 */
+/** Wait for the ask promise to settle: must keep calling renderOnce while
+ * waiting — mock stdin bytes are only parsed and dispatched during render
+ * passes, so a bare await would never see the keys reach the handler. */
 async function awaitAsk(
   setup: Awaited<ReturnType<typeof testRender>>,
   promise: Promise<boolean>,
@@ -87,9 +91,10 @@ function makeRecorder(): AskRecorder {
 }
 
 /**
- * 权限 ask modal 接线 harness（T6 app 接线的同构缩小版）：
- * bridge.pending → ModalHost(permission)，键路由走 reduceModalKey 纯函数，
- * select 分支按 once/always/reject 落 resolveAsk。
+ * Permission ask modal wiring harness (a shrunk isomorph of the app-level
+ * wiring): bridge.pending → ModalHost(permission), key routing through the
+ * reduceModalKey pure function, select branches land resolveAsk per
+ * once/always/reject.
  */
 function AskHarness(props: {
   readonly bridge: TuiAskUserBridge;
@@ -106,7 +111,7 @@ function AskHarness(props: {
   );
 
   const pending = props.bridge.pending();
-  // 新 ask 出现 → 选中态 / 收起态复位（useEffect 保证不破坏渲染期纯净）。
+  // New ask appears → reset selection / dismissed state (via useEffect to keep render pure).
   useEffect(() => {
     if (pending?.id !== lastId.current) {
       lastId.current = pending?.id;
@@ -170,8 +175,8 @@ async function askAndWaitModal(
   setup: Awaited<ReturnType<typeof testRender>>,
   bridge: TuiAskUserBridge
 ): Promise<{ readonly promise: Promise<boolean> }> {
-  // 注意：不能把 ask promise 直接作为 async 返回值让调用方 await ——
-  // await 会展平 Promise<Promise<boolean>>，在按键落值前就死等 resolve。
+  // Note: never return the ask promise for the caller to await — awaiting
+  // flattens Promise<Promise<boolean>> and dead-waits before keys land.
   const promise = bridge.ask(askCtx);
   await untilFrame(setup, (f) => f.includes("允许执行 bash？"));
   return { promise };
@@ -228,7 +233,7 @@ describe("权限 ask modal：y/n/a 三键直选（安全契约）", () => {
     await untilFrame(setup, (f) => f.includes("允许执行 bash？"));
     expect(recorder.resolved).toHaveLength(0);
     expect(bridge.pendingCount()).toBe(1);
-    // 之后仍可用 n 拒绝（ignore 不污染状态）。
+    // n can still reject afterwards (ignore does not pollute state).
     await setup.mockInput.typeText("n");
     expect(await awaitAsk(setup, promise)).toBe(false);
     await setup.renderer.destroy();
@@ -247,12 +252,12 @@ describe("权限 ask modal：↑↓ + Enter 导航选择", () => {
     expect(frame).not.toContain("❯ [y]");
     setup.mockInput.pressArrow("down");
     frame = await untilFrame(setup, (f) => f.includes("❯ [n]"));
-    // 底端 clamp：再 ↓ 仍在 [n]。
+    // bottom clamp: another ↓ stays on [n].
     setup.mockInput.pressArrow("down");
     await new Promise((r) => setTimeout(r, 50));
     await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("❯ [n]");
-    // ↑ 回移到 [a]，连续 ↑ 在 [y] clamp。
+    // ↑ moves back to [a]; repeated ↑ clamps at [y].
     setup.mockInput.pressArrow("up");
     await untilFrame(setup, (f) => f.includes("❯ [a]"));
     setup.mockInput.pressArrow("up");
@@ -310,10 +315,10 @@ describe("权限 ask modal：Esc 收起（兼容路径）", () => {
     const { promise } = await askAndWaitModal(setup, bridge);
     setup.mockInput.pressEscape();
     await untilFrame(setup, (f) => !f.includes("允许执行 bash？"));
-    // modal 收起：三选项行消失，兼容提示出现。
+    // modal dismissed: option rows gone, compat hint present.
     expect(setup.captureCharFrame()).not.toContain("总是允许（本会话）");
     expect(setup.captureCharFrame()).toContain("输入 y/a/n");
-    // ask 未被 resolve（fail-closed 前宿主仍可走兼容路径）。
+    // ask unresolved (host can still use the compat path before fail-closed).
     expect(bridge.pendingCount()).toBe(1);
     expect(recorder.resolved).toHaveLength(0);
     const id = bridge.pending()!.id;
@@ -405,7 +410,7 @@ describe("createTuiAskUserBridge（queue-based + fail-closed）", () => {
     const bridge = createTuiAskUserBridge();
     const promise = bridge.ask(askCtx);
     const info = bridge.pending()!;
-    // 无按输入改写的第二套审批轴字段 —— TUI 渲染面因此只有一条标记分支。
+    // No second approval-axis field rewritten per input — the TUI render surface therefore has a single marker branch.
     expect(Object.keys(info).sort()).toEqual(["id", "summaryHint", "tool"]);
     expect(info.tool).toBe("bash");
     bridge.resolveAsk(info.id, true);

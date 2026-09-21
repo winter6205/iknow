@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 /**
- * Web `/graph` 对等物（#721 漏摘 4e2a0cb 的 Composer 半边）。
+ * Web equivalent of the CLI/TUI `/graph` command.
  *
- * 语义不在前端复制：args 原样 POST `/api/v1/graph-mode`，文案用服务端
- * `GraphModeResponse.message`（D-α V1 契约，不是草稿链的 `text`）。
+ * Semantics are not duplicated in the frontend: args are POSTed verbatim to
+ * `/api/v1/graph-mode`, and the notice text comes from the server's
+ * `GraphModeResponse.message` (the live contract, not the draft chain's `text`).
  */
 import assert from "node:assert/strict";
 import { beforeEach, describe, it, vi } from "vitest";

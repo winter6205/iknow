@@ -1,13 +1,13 @@
 /**
- * user agents 目录 → spawn_subagent / capability / worker persona 接线测试。
+ * Wiring tests: user agents catalog -> spawn_subagent / capability / worker persona.
  *
- * 覆盖:
- *   - merged resolver 注入 spawn 工具 → enum + prose list 含用户角色 id
- *   - handler subagent_type=用户角色 → def.role 透传 + frontmatter
- *     disallowedTools 与 parent deny union
- *   - resolveSubagentCapabilities 消费用户角色 frontmatter (bashMode/deny)
- *   - createWorkerDeps(userHome=fixture) → deps.system() 注入用户角色 body
- *   - 空用户目录经 merged resolver 注入 → builtin 两条仍在 (hermetic)
+ * Covers:
+ *   - merged resolver injected into the spawn tool -> enum + prose list include user role ids
+ *   - handler with subagent_type=<user role> -> def.role passthrough + frontmatter
+ *     disallowedTools unioned with the parent deny list
+ *   - resolveSubagentCapabilities consumes user-role frontmatter (bashMode/deny)
+ *   - createWorkerDeps(userHome=fixture) -> deps.system() injects the user role body
+ *   - empty user dir through merged resolver -> both builtins still present (hermetic)
  */
 import assert from "node:assert/strict";
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -40,7 +40,7 @@ afterEach(() => {
   resetUserAgentsCache();
 });
 
-/** 用户角色 fixture: readonly bash + deny 两个写工具。 */
+/** User-role fixture: readonly bash + two write tools denied. */
 function writeReviewerRole(): void {
   mkdirSync(path.join(agentsDir, "reviewer"));
   writeFileSync(
@@ -68,8 +68,8 @@ function makeFakeManager() {
     listActive: () => [],
     abortTask: () => false,
     listSubagents: () => [],
-    // ADR-0096 T2: spawn_subagent tool description getter 读 capacity。
-    // 退化路径：测试 fake 不接 holder → 走 manager.getCapacity()。
+    // ADR-0096: the spawn_subagent description getter reads capacity.
+    // Degraded path: this fake wires no holder -> falls back to manager.getCapacity().
     getCapacity: () => 15,
   };
   return { manager, spawn };
@@ -150,7 +150,7 @@ describe("capability × 用户角色", () => {
   });
 });
 
-// ─── worker persona 注入 (userHome fixture → ~/.iknow/agents) ────────────────
+// ─── worker persona injection (userHome fixture -> ~/.iknow/agents) ──────────
 
 const TEST_ENV: IknowEnv = {
   llm: {

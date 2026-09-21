@@ -1,23 +1,28 @@
 /**
- * T4 (`specs/skill-index-increment.md` / ADR-0098) — 索引进场史跟 session 落盘。
+ * Index-entry history persisted with the session (`specs/skill-index-increment.md` / ADR-0098).
  *
- * 本文件钉住的不变式（出处见括号）：
- *   - 进场史 = 开场冻表 name ∪ 已追加增量（docs/CONTEXT.md「索引进场史」）。
- *   - 新 session 初值 = 该 session 开场模型索引名集；恢复同一 session 不
- *     重复追加（spec SC3）。
- *   - 只有现行模型索引名能写入；未知 / 非法 name 写入被忽略（spec
- *     Input-contract invalid 列；SC7「信封 ≠ 进场」的落盘侧闸）。
- *   - 追加与落盘同一拍：落盘失败 → typed 错误，调用方**拿不到 receipt**，
- *     内存集不变（spec Input-contract exception 列 / ADR-0098）。
- *   - 集合不依赖 messages：compact 重写 messages 后同一 session 的集仍在
- *     （spec SC4；用「新建实例 + 冻表已不含该名」表达）。
- *   - 落点与 todo ledger 同构：`<projectDir>/<sanitize(conversationId)>/<leaf>`
- *     （`resolveConversationTodoPath` 的会话文件夹叶子形态，净化 SSOT =
- *     `sanitizeConversationSegment`）。
+ * Invariants pinned here (sources in parentheses):
+ *   - entry history = opening frozen-table names ∪ appended deltas
+ *     (docs/CONTEXT.md "索引进场史" — "index entry history").
+ *   - new session initial value = that session's opening model-index name set;
+ *     restoring the same session does not re-append (spec SC3).
+ *   - only current model-index names may be written; unknown / invalid names
+ *     are ignored (spec Input-contract invalid column; SC7 "envelope ≠ entry"
+ *     persistence-side gate).
+ *   - append and persist are one beat: persist failure → typed error, caller
+ *     **gets no receipt**, in-memory set unchanged (spec Input-contract
+ *     exception column / ADR-0098).
+ *   - the set does not depend on messages: after compact rewrites messages the
+ *     same session's set remains (spec SC4; expressed as "new instance + the
+ *     frozen table no longer contains the name").
+ *   - storage layout mirrors the todo ledger:
+ *     `<projectDir>/<sanitize(conversationId)>/<leaf>` (the session-folder
+ *     leaf form of `resolveConversationTodoPath`; sanitization SSOT =
+ *     `sanitizeConversationSegment`).
  *
- * 失败注入一律走真实 IO（把叶子路径做成目录 → EISDIR），不 mock fs：
- * 契约是「原子写失败时盘上不留半成品、调用方拿不到 receipt」，只有真盘子
- * 能证明。
+ * Failure injection always uses real IO (turn the leaf path into a directory →
+ * EISDIR), no fs mocks: the contract is "no half-written file on atomic-write
+ * failure and caller gets no receipt", provable only on a real disk.
  */
 import {
   chmod,
@@ -54,9 +59,10 @@ async function makeRoot(): Promise<string> {
 }
 
 /**
- * 现行模型索引（`catalog.modelIndex()` 面的测试替身）。ledger 不复制
- * 「有 description 且未 disable」判据（那是 `isModelIndexEligible` 的
- * SSOT），只消费调用方给的现行谓词 —— 故这里只需给出名字集合。
+ * Current model index (test double for the `catalog.modelIndex()` face). The
+ * ledger does not duplicate the "has description and not disabled" predicate
+ * (that is `isModelIndexEligible`'s SSOT); it only consumes the caller's
+ * current predicate — so a name set suffices here.
  */
 const MODEL_INDEX: readonly string[] = ["alpha", "beta", "gamma"];
 const isIndexedName = (name: string): boolean => MODEL_INDEX.includes(name);
@@ -84,12 +90,14 @@ async function openLedger(
 }
 
 /**
- * 失败注入（压 mkdir 臂）：把**目录段**（`<projectDir>/<conversationId>`）
- * 占成一个普通文件 —— 原子写的 `mkdir(dir, recursive)` 必然 ENOTDIR，
- * tmp 还没写出，现有叶子一定保持完整。
+ * Failure injection (hits the mkdir arm): replace the **directory segment**
+ * (`<projectDir>/<conversationId>`) with a plain file — the atomic write's
+ * `mkdir(dir, recursive)` necessarily gets ENOTDIR before any tmp is written,
+ * so the existing leaf always stays intact.
  *
- * 注入本身会移走目录段（连带叶子），故只在「叶子不存在」的用例里用；
- * 已有成功写入的用例用 `blockLeafWriteWithPermissions`。
+ * The injection itself removes the directory segment (leaf included), so use
+ * it only in "leaf does not exist" cases; cases with a prior successful write
+ * use `blockLeafWriteWithPermissions`.
  */
 async function blockConversationDir(projectDir: string): Promise<void> {
   await rm(join(projectDir, CONVERSATION), { recursive: true, force: true });
@@ -97,10 +105,12 @@ async function blockConversationDir(projectDir: string): Promise<void> {
 }
 
 /**
- * 失败注入（压原子写臂，**不动旧文件**）：目录段只读 —— 同目录段内
- * 先建叶子目录（旧叶子的替身）再对父目录 `chmod 0o500`，`mkdir` 命中
- * 既有目录返回成功，`writeFile(tmp)` 才 EACCES。用例尾部必须把权限
- * 还原（`chmod 0o700`），否则 afterEach 的 rm 清不掉临时根。
+ * Failure injection (hits the atomic-write arm **without touching the old
+ * file**): make the directory segment read-only — first create the leaf
+ * directory inside the segment (stand-in for the old leaf), then `chmod 0o500`
+ * the parent: `mkdir` on the existing dir succeeds and `writeFile(tmp)` gets
+ * EACCES. Tests must restore permissions (`chmod 0o700`) at the end, or
+ * afterEach's rm cannot clean the temp root.
  */
 async function blockLeafWriteWithPermissions(
   projectDir: string
@@ -109,8 +119,9 @@ async function blockLeafWriteWithPermissions(
 }
 
 /**
- * 失败注入（读侧）：叶子路径被占成**目录** —— `readFile(leaf)` 必然 EISDIR。
- * 目录段还不存在时由 `mkdir(recursive)` 一并建出，注入自带前置条件。
+ * Failure injection (read side): leaf path occupied by a **directory** —
+ * `readFile(leaf)` necessarily gets EISDIR. When the directory segment does
+ * not exist yet, `mkdir(recursive)` creates it as part of the injection.
  */
 async function blockLeafAsDirectory(projectDir: string): Promise<void> {
   await rm(leafPath(projectDir), { recursive: true, force: true });
@@ -149,7 +160,7 @@ describe("索引进场史：初值 / 恢复（SC3）", () => {
 
     expect(receipt.added).toEqual(["alpha"]);
 
-    // 同一 session、同一冻表：恢复后仍含该名，重复 add 不再追加（SC3）。
+    // Same session, same frozen table: after restore the name is still there and re-adding does not append (SC3).
     const restored = await openLedger(projectDir, { initialNames: ["gamma"] });
     expect(restored.snapshot()).toEqual(["alpha", "gamma"]);
     expect(restored.has("alpha")).toBe(true);
@@ -163,7 +174,7 @@ describe("索引进场史：初值 / 恢复（SC3）", () => {
     const first = await openLedger(projectDir, { initialNames: ["alpha"] });
     await first.addMany(["beta"]);
 
-    // 恢复时冻表（开场模型索引）已含 beta —— 与落盘史重叠也不重复入集。
+    // On restore the frozen table (opening model index) already contains beta — overlap with the on-disk history does not double-enter the set.
     const restored = await openLedger(projectDir, {
       initialNames: ["alpha", "beta"],
     });
@@ -176,8 +187,8 @@ describe("索引进场史：写入闸（未知 / 非法输入忽略）", () => {
     const projectDir = await makeRoot();
     const ledger = await openLedger(projectDir);
 
-    // "undocumented" / "frozen" 这类人侧可加载技能名（无 description /
-    // disable）不在模型索引面 —— slash 信封灌过也不算进场（SC7）。
+    // Names like "undocumented" / "frozen" are human-side loadable skills (no description /
+    // disabled) outside the model-index face — passing a slash envelope does not count as entry (SC7).
     const receipt = await ledger.addMany(["undocumented", "frozen"]);
 
     expect(receipt.added).toEqual([]);
@@ -203,9 +214,9 @@ describe("索引进场史：写入闸（未知 / 非法输入忽略）", () => {
 
     const receipt = await ledger.addMany([
       "",
-      // @ts-expect-error 运行期非法输入（hand-edited 调用点 / 未类型化 JSON）
+      // @ts-expect-error runtime-invalid input (hand-edited call site / untyped JSON)
       null,
-      // @ts-expect-error 同上
+      // @ts-expect-error same as above
       42,
       "alpha",
     ]);
@@ -239,14 +250,14 @@ describe("索引进场史：追加与落盘同一拍（exception 列）", () => 
 
     expect(err).toBeInstanceOf(SkillIndexLedgerError);
     expect((err as SkillIndexLedgerError).kind).toBe("write_failed");
-    // 「同一拍」的调用方侧保证：拿不到 receipt = 不得把 messages 追加当成已进场。
+    // Caller-side guarantee of "one beat": no receipt = appending to messages must not count as entered.
     expect((err as SkillIndexLedgerError).conversationId).toBe(CONVERSATION);
-    // 失败不改内存集 —— 下一次 diff 仍会把它当新建，不会静默丢名。
-    // （此臂下盘上读不回旧史，实现若在失败路径重读来复原会拿到 ENOTDIR，
-    //  故这条同时钉住「失败状态不依赖读盘」。）
+    // Failure leaves the in-memory set unchanged — the next diff still treats it as new, never silently dropping the name.
+    // (On-disk history cannot be read back on this arm; re-reading to restore state on the failure path would hit ENOTDIR,
+    //  so this also pins "failure state does not depend on disk reads".)
     expect(ledger.has("beta")).toBe(false);
     expect(ledger.snapshot()).toEqual(["alpha"]);
-    // 失败路径不碰盘：占位符原样，没有 tmp / 叶子被创建。
+    // The failure path never touches disk: the blocker stays as-is, no tmp / leaf created.
     expect(await readFile(join(projectDir, CONVERSATION), "utf8")).toBe(
       "blocker"
     );
@@ -261,7 +272,7 @@ describe("索引进场史：追加与落盘同一拍（exception 列）", () => 
     await blockLeafWriteWithPermissions(projectDir);
 
     const err = await ledger.addMany(["beta"]).catch((e: unknown) => e);
-    await chmod(join(projectDir, CONVERSATION), 0o700); // 还原，供 afterEach 清理
+    await chmod(join(projectDir, CONVERSATION), 0o700); // restore, so afterEach can clean up
 
     expect((err as SkillIndexLedgerError).kind).toBe("write_failed");
     expect(ledger.snapshot()).toEqual(["alpha"]);
@@ -335,9 +346,9 @@ describe("索引进场史：compact 不删集（SC4）/ 下架不对齐（Assump
     const first = await openLedger(projectDir, { initialNames: ["alpha"] });
     await first.addMany(["beta"]);
 
-    // compact 只重写 messages（增量那条 user 消息消失），会话文件夹不动。
-    // 用「新建实例 + 空冻表」表达「messages 里增量不见了」：集必须还在，
-    // 否则下一轮会把 beta 当新建再贴一次 listing。
+    // Compact only rewrites messages (the delta's user message disappears); the session folder is untouched.
+    // "New instance + empty frozen table" expresses "the delta vanished from messages": the set must survive,
+    // otherwise the next round would treat beta as new and re-post the listing.
     const afterCompact = await openLedger(projectDir, { initialNames: [] });
 
     expect(afterCompact.has("beta")).toBe(true);
@@ -349,13 +360,13 @@ describe("索引进场史：compact 不删集（SC4）/ 下架不对齐（Assump
     const projectDir = await makeRoot();
     const ledger = await openLedger(projectDir, {
       initialNames: ["alpha"],
-      isIndexedName: () => false, // alpha 本会话中被下架
+      isIndexedName: () => false, // alpha was withdrawn in this session
     });
 
     const receipt = await ledger.addMany(["alpha"]);
 
-    expect(receipt.added).toEqual([]); // 不再重复贴
-    expect(ledger.has("alpha")).toBe(true); // 但也没有被清出进场史
+    expect(receipt.added).toEqual([]); // no re-post
+    expect(ledger.has("alpha")).toBe(true); // but also not evicted from entry history
   });
 
   it("会话重冻（/reset 或新 conversationId）：新 id 的初值 = 新冻表，不带旧 id 的史", async () => {
@@ -363,7 +374,7 @@ describe("索引进场史：compact 不删集（SC4）/ 下架不对齐（Assump
     const before = await openLedger(projectDir);
     await before.addMany(["alpha"]);
 
-    // /reset 后宿主给新 conversationId + 新冻表：新会话从零起算，旧史不迁移。
+    // After /reset the host gives a new conversationId + new frozen table: the new session counts from zero, old history does not migrate.
     const after = await openLedger(projectDir, {
       conversationId: "conv-reset-456",
       initialNames: ["beta"],
@@ -371,7 +382,7 @@ describe("索引进场史：compact 不删集（SC4）/ 下架不对齐（Assump
 
     expect(after.snapshot()).toEqual(["beta"]);
     expect(after.has("alpha")).toBe(false);
-    // 旧会话自己的史不受影响（两个 id 各自一个叶子）。
+    // The old session's own history is unaffected (each id has its own leaf).
     expect((await openLedger(projectDir)).has("alpha")).toBe(true);
   });
 });

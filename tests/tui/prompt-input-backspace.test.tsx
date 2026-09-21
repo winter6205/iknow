@@ -2,60 +2,71 @@
 /**
  * tests/tui/prompt-input-backspace.test.tsx
  *
- * 2026-08-15 用户反馈「输入框内容到多行的时候按 backspace，光标就会直接从
- * 尾部跳到第一个字」—— 即多行输入下 backspace 后光标被重置到 buffer 起点。
+ * User report: "when the input box has multiple lines, pressing backspace
+ * jumps the caret from the end straight to the first character" — i.e. after
+ * backspace on multiline input the caret resets to buffer start.
  *
- * 侦察结论（前 agent 实测）：
- *  - 多行 CJK wrap 成 2 视觉行内部 backspace：光标正常后退（visualCol
- *    42→40，删 1 个 CJK），不跳头 —— 库内部 visualCol/logicalCol 账目自洽；
- *  - prompt-input.tsx 受控同步 effect 的 `ta.plainText !== props.value`
- *    守卫在正常打字/backspace 路径一直成立，setText 覆盖从未发生。
+ * Recon (prior agent, measured):
+ *  - multiline CJK wrapped to 2 visual lines, internal backspace: caret steps
+ *    back normally (visualCol 42→40, one CJK deleted), no jump-to-start — the
+ *    library's visualCol/logicalCol accounting is self-consistent;
+ *  - the `ta.plainText !== props.value` guard in prompt-input.tsx's controlled
+ *    sync effect always holds on normal type/backspace paths; the setText
+ *    overwrite never fires there.
  *
- * 2026-08-15 本轮定位结论（实测证据）：
- *  - 纯 backspace 各场景（wrap 内部 / unwrap 边界 / 跨 \n 边界 / 单行）光标
- *    均正常后退 —— backspace 本身无 bug；
- *  - 真凶 = prompt-input.tsx 受控同步 effect：程序写入路径（↑ 历史召回 /
- *    Tab 补全 / 回退 anchor 填回）调 `ta.setText(value)`，OpenTUI upstream
- *    setText 把光标重置到 offset 0（实测 "历史消息二" 召回后 offset=0）。
- *    用户随后按 backspace 想删尾部 → 光标已停第一个字，表现为「光标跳到开头」。
- *  - 修复：setText 后补 `ta.gotoBufferEnd()` 恢复末尾（本 app 程序写入全是
- *    全量替换 / 尾部追加，末尾光标 = 正确 UX）。
- *  - 排除项（修订 2026-08-15）：mockInput.typeText / 用户逐字输入 / 删除路
- *    径不触发 setText —— buffer 已先行经 onContentChange 回读更新，
- *    `ta.plainText !== props.value` 守卫恒为 false（恒不成立），分支不进
- *    入。paste（app.tsx:586 usePaste 直接 setInputValue(prev => prev + text)
- *    走 setState）会触发 setText + gotoBufferEnd：pasteBracketedText 实测
- *    多行粘贴后 plainText = 末尾追加文本（保留 \n），offset = 文本末尾列
- *    —— paste 后末尾光标是正确 UX，故也纳入回归（见 (h)）。
- *  - 补充：rewind 回退后 anchor 填回（app.tsx:1101 setInputValue(anchor)
- *    走 setState）与 submit 清空（app.tsx:1109 setInputValue("") 走 setText
- *    空串 + gotoBufferEnd no-op）均经同一受控同步 effect，分别见 (i)/(j)。
+ * Root cause (measured evidence):
+ *  - pure backspace in every scenario (inside wrap / unwrap boundary / across
+ *    \n / single line) moves the caret back normally — backspace itself is fine;
+ *  - culprit = prompt-input.tsx controlled sync effect: programmatic-write
+ *    paths (↑ history recall / Tab completion / rewind anchor refill) call
+ *    `ta.setText(value)`, and OpenTUI upstream setText resets the caret to
+ *    offset 0 (measured: offset=0 after recalling "历史消息二"). The user then
+ *    presses backspace to delete at the end → caret already sits at the first
+ *    char, appearing as "caret jumped to start".
+ *  - fix: after setText call `ta.gotoBufferEnd()` to restore end-of-text
+ *    (every programmatic write in this app is a full replace / tail append,
+ *    so end caret = correct UX).
+ *  - excluded: mockInput.typeText / per-char user typing / delete paths do not
+ *    trigger setText — the buffer is pre-updated via onContentChange, so
+ *    `ta.plainText !== props.value` stays false and the branch never runs.
+ *    paste (app.tsx usePaste setInputValue(prev => prev + text) via setState)
+ *    does trigger setText + gotoBufferEnd: pasteBracketedText measured keeps
+ *    \n with tail-append semantics, offset = end-of-text column — end caret
+ *    after paste is correct UX, so it is pinned here too (see (h)).
+ *  - additionally: rewind anchor refill (app.tsx setInputValue(anchor) via
+ *    setState) and submit clear (app.tsx setInputValue("") → setText of empty
+ *    string + gotoBufferEnd no-op) both flow through the same controlled sync
+ *    effect; see (i)/(j).
  *
- * 本文件把边界补全为回归套件：
- *  (a) wrap 跨 unwrap 边界：文本恰好 2 视觉行，backspace 到缩回 1 行的那
- *      一击，光标必须仍在文本末尾（offset = 新宽度列，非 0）；
- *  (b) 真实换行（Shift+Enter 产 \n）多行 backspace 跨行边界 → 光标不跳头；
- *  (c) 单行 backspace 不回归（光标正常后退）；
- *  (d) wrap 多行内部 backspace（不跨边界）光标正常（固化防回归）；
- *  (e) 程序写入（历史召回 ↑）→ 光标在末尾（setText 归零回归）；
- *  (f) 程序写入（Tab 补全）→ 光标在末尾（setText 归零回归）；
- *  (g) 单行程序写入 → 光标也在末尾（不回归，轮询等待降低并行 flaky）；
- *  (h) 程序写入（paste 多行追加）→ 光标在末尾（usePaste setState 触发
- *      setText 回归；pasteBracketedText 实测保留 \n 走末尾追加语义，
- *      plainText = "ab历\n史\n回\n退"）；
- *  (i) 程序写入（anchor 填回，长多行）→ 光标在末尾（组件级 setState 模拟
- *      app.tsx:1101，因 rewind 端到端需会话+checkpoint+picker UI 联动，
- *      单元级直接验证受控同步 effect 等价）；
- *  (j) submit 清空（Enter 提交）→ setInputValue("") → setText 空串 +
- *      gotoBufferEnd no-op → offset 0，文本 0，无 crash。
+ * This file completes the boundary into a regression suite:
+ *  (a) wrap crossing the unwrap boundary: text is exactly 2 visual lines; the
+ *      backspace that shrinks it to 1 line must leave the caret at text end
+ *      (offset = new-width column, not 0);
+ *  (b) real newline (Shift+Enter emits \n) multiline backspace across the line
+ *      boundary → caret does not jump to start;
+ *  (c) single-line backspace does not regress (caret steps back);
+ *  (d) inside wrapped multiline (no boundary crossed) caret stays normal (pinned against regression);
+ *  (e) programmatic write (history recall ↑) → caret at end (setText-to-zero regression);
+ *  (f) programmatic write (Tab completion) → caret at end (setText-to-zero regression);
+ *  (g) single-line programmatic write → caret also at end (no regression; polling wait reduces parallel flakiness);
+ *  (h) programmatic write (multiline paste append) → caret at end (usePaste
+ *      setState triggers setText; pasteBracketedText keeps \n with
+ *      tail-append semantics, plainText = "ab历\n史\n回\n退");
+ *  (i) programmatic write (anchor refill, long multiline) → caret at end
+ *      (component-level setState emulates app.tsx, since rewind end-to-end
+ *      needs session+checkpoint+picker UI wiring; unit-level verification of
+ *      the controlled sync effect is equivalent);
+ *  (j) submit clear (Enter) → setInputValue("") → setText("") + gotoBufferEnd
+ *      no-op → offset 0, text 0, no crash.
  *
- * 观察手段：walk renderer.root 找 textarea renderable（plainText +
- * visualCursor），直查 `offset`/`visualCol`（screen cursorState 只能拿到
- * 屏幕坐标，受 chrome 布局/滚动影响，不够精确）。
+ * Observation method: walk renderer.root to find the textarea renderable
+ * (plainText + visualCursor) and read `offset`/`visualCol` directly — the
+ * screen cursorState only gives screen coordinates, distorted by chrome
+ * layout/scroll, not precise enough.
  *
- * offset 语义（实测）：visualCursor.offset = 文本宽列（CJK 1 字=2 列，
- * "abc"→3，"历史消息二"→10，"第一行\n第二行"→13）。文本末尾 offset =
- * 每行宽度列之和 + 换行符数。
+ * offset semantics (measured): visualCursor.offset = text-width columns (one
+ * CJK char = 2 cols: "abc"→3, "历史消息二"→10, "第一行\n第二行"→13). End-of-text
+ * offset = sum of per-line width columns + number of newlines.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -124,11 +135,13 @@ async function settle(setup: TestRendererSetup, ms = 120): Promise<void> {
 }
 
 /**
- * 轮询式等待：直到 textarea 快照满足断言或超时（默认 2000ms，25ms 间隔）。
- * 替代固定 sleep —— 并行全量下新用例 (g) 偶发时序抖动源于固定 sleep 不足
- * （effect/setState 流未 flush 完就读快照）；轮询等到真实条件成立才能稳。
+ * Polling wait: until the textarea snapshot satisfies the predicate or times
+ * out (default 2000ms, 25ms interval). Replaces fixed sleeps — under parallel
+ * full runs the new cases and (g) flake occasionally from too-short fixed
+ * sleeps (snapshot read before effect/setState streams flush); only polling
+ * on the real condition is stable.
  *
- * 只在新用例与 (g) 处替换 settle；其余已有用例的 settle 路径不动。
+ * Used only by the new cases and (g); existing settle paths untouched.
  */
 async function waitUntil(
   setup: TestRendererSetup,
@@ -209,7 +222,7 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       app.setup.mockInput.pressBackspace();
       await settle(app.setup);
       const after = taSnapshot(app.setup)[0];
-      // 删 1 字符，光标停在末尾（offset=2，非 0）。
+      // delete 1 char, caret stays at the end (offset=2, not 0).
       expect(after.textLen).toBe(2);
       expect(after.offset).toBe(2);
     } finally {
@@ -220,13 +233,13 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(d) wrap 多行内部 backspace：光标正常后退（不跨 unwrap 边界）", async () => {
     const app = await mount();
     try {
-      // 39 CJK 全角 → 视觉宽 78 > inner 74 → wrap 2 行（实测）。
+      // 39 full-width CJK → visual width 78 > inner 74 → wraps to 2 lines (measured).
       const cjk =
         "的换行行为是否正确本汉字序列测试一下长文本的换行行为是否正确汉字序列测试一下长";
       await app.setup.mockInput.typeText(cjk, 0);
       await settle(app.setup);
       const before = taSnapshot(app.setup)[0];
-      // 39 字符；offset=78 = 文本宽列（CJK 1 字=2 列），wrap 2 行。
+      // 39 chars; offset=78 = text-width columns (1 CJK = 2 cols), wrapped to 2 lines.
       expect(before.textLen).toBe(39);
       expect(before.offset).toBe(78);
       expect(before.height).toBe(2);
@@ -234,7 +247,7 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       app.setup.mockInput.pressBackspace();
       await settle(app.setup);
       const after = taSnapshot(app.setup)[0];
-      // 删 1 CJK，仍在 wrap 2 行内，光标停在末尾（offset=76，非 0）。
+      // delete 1 CJK, still inside the 2-line wrap, caret stays at the end (offset=76, not 0).
       expect(after.textLen).toBe(38);
       expect(after.offset).toBe(76);
       expect(after.height).toBe(2);
@@ -246,11 +259,12 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(a) wrap 跨 unwrap 边界 backspace：光标仍停在文本末尾（不跳头）", async () => {
     const app = await mount();
     try {
-      // 用较短的超长文本把 wrap 行数压到 2，并让删 1 个 CJK 后恰好退回 1 行。
-      // innerCols = 80 - 6 = 74；需 visualWidth(文本) > 74 但 visualWidth(删尾1) <= 74。
-      // visualWidth 为偶数，取 76：文本 38 个 CJK（宽 76 → 2 行），删 1 个后 74 → 1 行。
-      // base 33 字 → 补 5 个「换」垫到 38 字（实测：38 字宽 76 = 2 行；
-      // 删 1 → 37 字宽 74 = 恰 1 行）。
+      // Use a shorter overlong text to hold the wrap at 2 lines, such that
+      // deleting 1 CJK falls back to exactly 1 line.
+      // innerCols = 80 - 6 = 74; need visualWidth(text) > 74 but visualWidth(minus one) <= 74.
+      // visualWidth is even, pick 76: 38 CJK chars (width 76 → 2 lines), after deleting 1 → 74 → 1 line.
+      // base is 33 chars → pad 5 "换" up to 38 (measured: 38 chars width 76 = 2 lines;
+      // delete 1 → 37 chars width 74 = exactly 1 line).
       const base =
         "本汉字序列测试一下长文本的换行行为是否正确本汉字序列测试一下长文本";
       const cjk = (base + "换换换换换").slice(0, 38);
@@ -265,13 +279,13 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       expect(full.offset).toBe(76);
       expect(full.height).toBe(2);
 
-      // 删 1 个 CJK → 视觉宽 74 = innerCols → 恰好缩回 1 行（unwrap 边界）。
+      // delete 1 CJK → visual width 74 = innerCols → shrinks to exactly 1 line (unwrap boundary).
       app.setup.mockInput.pressBackspace();
       await settle(app.setup);
       const unwrapped = taSnapshot(app.setup)[0];
       expect(unwrapped.textLen).toBe(37);
       expect(unwrapped.height).toBe(1);
-      // 回归断言：光标必须仍在文本末尾（offset=74，非 0）。
+      // regression assertion: caret must still sit at text end (offset=74, not 0).
       expect(unwrapped.offset).toBe(74);
     } finally {
       await app.destroy();
@@ -281,26 +295,26 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(b) 真实换行（Shift+Enter 产 \\n）backspace 跨行边界：光标停在合并行末尾", async () => {
     const app = await mount();
     try {
-      // 第一行短文本 + Shift+Enter 换行 → 光标停在 \n 后（新行行首，实测
-      // visualRow=1 visualCol=0 offset=7）；此时 backspace 即删 \n 跨行。
+      // short first line + Shift+Enter newline → caret after the \n (start of the
+      // new line, measured visualRow=1 visualCol=0 offset=7); backspace now deletes the \n across lines.
       await app.setup.mockInput.typeText("第一行");
       await settle(app.setup);
       app.setup.mockInput.pressEnter({ shift: true });
       await settle(app.setup);
 
       const before = taSnapshot(app.setup)[0];
-      // 内容 = "第一行\n"：字符数 4；offset=7 = 6+1（CJK 双宽 + \n 1 列）。
+      // content = "第一行\n": 4 chars; offset=7 = 6+1 (CJK double width + \n 1 col).
       expect(before.textLen).toBe(4);
       expect(before.offset).toBe(7);
       expect(before.height).toBe(2);
 
-      // 光标在 \n 后（新行行首），backspace → 删 \n，两行合并，光标停合并行末尾。
+      // caret after the \n (start of new line); backspace → deletes \n, lines merge, caret lands at merged line end.
       app.setup.mockInput.pressBackspace();
       await settle(app.setup);
       const after = taSnapshot(app.setup)[0];
-      expect(after.textLen).toBe(3); // "第一行" 3 个字符
+      expect(after.textLen).toBe(3); // "第一行" is 3 chars
       expect(after.height).toBe(1);
-      // 不跳头：offset=6（3 字 × 2 列）是文本末尾。
+      // no jump to start: offset=6 (3 chars × 2 cols) is text end.
       expect(after.offset).toBe(6);
     } finally {
       await app.destroy();
@@ -310,7 +324,7 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(e) 程序写入（↑ 历史召回多行）→ 光标在末尾（setText 归零回归）", async () => {
     const app = await mount();
     try {
-      // 种一条多行历史：Shift+Enter 换行 + Enter 提交 → handleSubmit 入历史。
+      // seed one multiline history: Shift+Enter newline + Enter submit → handleSubmit enqueues history.
       await app.setup.mockInput.typeText("历史第一行");
       await settle(app.setup);
       app.setup.mockInput.pressEnter({ shift: true });
@@ -320,11 +334,11 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       app.setup.mockInput.pressEnter();
       await settle(app.setup, 300);
 
-      // 空输入下 ↑ 召回 → props.onChange(历史多行) → setText + gotoBufferEnd。
+      // ↑ recall on empty input → props.onChange(multiline history) → setText + gotoBufferEnd.
       app.setup.mockInput.pressArrow("up");
       await settle(app.setup);
       const after = taSnapshot(app.setup)[0];
-      // 内容 = "历史第一行\n历史第二行"：字符数 5+1+5 = 11；末尾 offset = 10+1+10 = 21 列。
+      // content = "历史第一行\n历史第二行": 5+1+5 = 11 chars; end offset = 10+1+10 = 21 cols.
       expect(after.textLen).toBe(11);
       expect(after.offset).toBe(21);
       expect(after.height).toBe(2);
@@ -336,13 +350,13 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(f) 程序写入（Tab 补全）→ 光标在末尾（setText 归零回归）", async () => {
     const app = await mount();
     try {
-      // "/hel" 唯一匹配 → Tab 补全为 "/help "（全量替换路径）。
+      // "/hel" unique match → Tab completes to "/help " (full-replace path).
       await app.setup.mockInput.typeText("/hel", 0);
       await settle(app.setup);
       app.setup.mockInput.pressTab();
       await settle(app.setup);
       const after = taSnapshot(app.setup)[0];
-      // 内容 "/help "：6 字符；末尾 offset = 6（全 ASCII）。
+      // content "/help ": 6 chars; end offset = 6 (all ASCII).
       expect(after.textLen).toBe(6);
       expect(after.offset).toBe(6);
     } finally {
@@ -353,23 +367,24 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(g) 单行程序写入 → 光标也在末尾（不回归）", async () => {
     const app = await mount();
     try {
-      // 种一条单行历史。
+      // seed one single-line history.
       await app.setup.mockInput.typeText("历史消息");
       await settle(app.setup);
       app.setup.mockInput.pressEnter();
       await settle(app.setup, 300);
 
-      // ↑ 召回单行历史 → setText + gotoBufferEnd。
+      // ↑ recalls the single-line history → setText + gotoBufferEnd.
       app.setup.mockInput.pressArrow("up");
-      // 轮询等待替换固定 sleep：并行全量下 (g) 曾偶发在 effect/setState 流
-      // 尚未 flush 完就读到旧快照而失败，等 textLen 到 4 才继续。
+      // polling wait replaces the fixed sleep: under parallel full runs (g)
+      // occasionally read a stale snapshot before the effect/setState streams
+      // finished flushing; continue only once textLen reaches 4.
       const after = await waitUntil(
         app.setup,
         (snaps) => snaps[0]?.textLen === 4 && snaps[0]?.offset === 8,
         "(g) 单行召回后光标在末尾"
       );
       expect(after[0].textLen).toBe(4);
-      // 4 字 × 2 列 = 8，光标在末尾非 0。
+      // 4 chars × 2 cols = 8, caret at end, not 0.
       expect(after[0].offset).toBe(8);
     } finally {
       await app.destroy();
@@ -379,9 +394,9 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   test("(h) 程序写入（paste 多行追加）→ 光标在末尾（usePaste setState 触发 setText 回归）", async () => {
     const app = await mount();
     try {
-      // 真实 paste 事件（pasteBracketedText 发 bracketed-paste 序列，走
-      // app.tsx:586 usePaste setInputValue(prev => prev + text) setState）。
-      // 实测保留 \n：plainText = "ab历\n史\n回\n退"，末尾追加语义。
+      // real paste event (pasteBracketedText emits the bracketed-paste
+      // sequence, reaching app.tsx usePaste setInputValue(prev => prev + text) setState).
+      // Measured: \n preserved, plainText = "ab历\n史\n回\n退", tail-append semantics.
       await app.setup.mockInput.typeText("ab", 0);
       await settle(app.setup);
       expect(taSnapshot(app.setup)[0].offset).toBe(2);
@@ -393,11 +408,11 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
         "(h) paste 多行追加后光标在末尾"
       );
       const snap = after[0];
-      // 内容 "ab历\n史\n回\n退"：9 字符（2 ASCII + 4 CJK + 3 \n）。
+      // content "ab历\n史\n回\n退": 9 chars (2 ASCII + 4 CJK + 3 \n).
       expect(snap.textLen).toBe(9);
-      // 末尾 offset = 2(ab) + 2+1+2+1+2+1+2("历\n史\n回\n退" 宽) = 13 列；非 0。
+      // end offset = 2(ab) + 2+1+2+1+2+1+2 (width of "历\n史\n回\n退") = 13 cols; not 0.
       expect(snap.offset).toBe(13);
-      // 视觉末行首列（"退" CJK 宽 2），光标真在最后一行末尾。
+      // first column of the last visual row ("退" CJK width 2) — caret is truly at the last line's end.
       expect(snap.visualCol).toBe(2);
     } finally {
       await app.destroy();
@@ -405,11 +420,13 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
   }, 30_000);
 
   test("(i) 程序写入（anchor 填回，长多行）→ 光标在末尾（setText 归零回归）", async () => {
-    // rewind 端到端需 会话文件 + checkpoint + rewind picker UI 联动，且
-    // app.tsx:1101 只是 setInputValue(anchorTextForInput) 的 setState —— 与
-    // 本组件受控同步 effect 的交互等价。此处组件级直接 render PromptInput +
-    // 外部改 value 模拟该程序写入路径，聚焦断言「setText + gotoBufferEnd 后
-    // 光标在末尾」这一回归点（历史召回 (e)/(g) 已覆盖同 effect 端到端路径）。
+    // rewind end-to-end needs session file + checkpoint + rewind picker UI
+    // wiring, and app.tsx is just a setInputValue(anchorTextForInput)
+    // setState — equivalent to this component's controlled sync effect. Here
+    // we render PromptInput directly at component level and change value
+    // externally to emulate the programmatic write path, asserting exactly the
+    // regression point "caret at end after setText + gotoBufferEnd" (history
+    // recall (e)/(g) already covers the same effect end-to-end).
     let fill: ((s: string) => void) | null = null;
     function Harness() {
       const [v, setV] = useState("");
@@ -435,7 +452,7 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
 
-      // 长多行 anchor（3 行 CJK）填回 —— setState → setText + gotoBufferEnd。
+      // refill a long multi-line anchor (3 CJK lines) — setState → setText + gotoBufferEnd.
       const ANCHOR = "锚点第一行\n锚点第二行\n锚点第三行";
       fill!(ANCHOR);
       const after = await waitUntil(
@@ -444,12 +461,12 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
         "(i) anchor 填回后光标在末尾"
       );
       const snap = after[0];
-      // "锚点第一行\n锚点第二行\n锚点第三行" = 5+1+5+1+5 = 17 字符。
+      // "锚点第一行\n锚点第二行\n锚点第三行" = 5+1+5+1+5 = 17 chars.
       expect(snap.textLen).toBe(17);
-      // 末尾 offset = 10+1+10+1+10 = 32 列；非 0（setText 归零回归）。
+      // end offset = 10+1+10+1+10 = 32 cols; not 0 (setText-to-zero regression).
       expect(snap.offset).toBe(32);
-      // 视觉末行首列（"锚点第三行" 首字），证明光标真在最后一行不是恰巧在
-      // 某行行首。
+      // first column of the last visual row (leading char of "锚点第三行"), proving the
+      // caret is truly on the last line rather than coincidentally at some line start.
       expect(snap.visualCol).toBe(10);
     } finally {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
@@ -463,9 +480,9 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
       await settle(app.setup);
       expect(taSnapshot(app.setup)[0].offset).toBe(3);
 
-      // Enter 提交 → app.tsx:1109 setInputValue("") → setText("") +
-      // gotoBufferEnd（空串上 no-op）。空消息 no-op（handleSubmit 早退），
-      // 不产生辅助内容。
+      // Enter submits → app.tsx setInputValue("") → setText("") +
+      // gotoBufferEnd (no-op on the empty string). Empty-message submit is a
+      // no-op (handleSubmit early-returns), producing no side content.
       app.setup.mockInput.pressEnter();
       const after = await waitUntil(
         app.setup,

@@ -1,28 +1,34 @@
 /** @jsxImportSource @opentui/react */
 /**
- * T3：同一条工具只画一次。
+ * Each tool line must be painted exactly once.
  *
- * 复现两类叠画路径：
- *  - **历史 vs live tail**：idle（runState=idle、fold 行在场）的同一帧，
- *    `session.messages` 已经包含 tool_use + tool_result（statusMap 配对），
- *    同时 `liveToolRuns` 仍残留该 tool_use_id 的 `ok` 完成态（模拟
- *    `turnFinished` 与 `setLiveToolRuns([])` 之间的 race、或 live 通道
- *    与历史 commit 之间的并行）→ bash keep 标题应只画一次（来自历史
- *    `MessageBlocks.ToolSummaryRow`，不是 tail 的 `liveToolPreviewBox`）。
- *  - **legacy 工具行挂预览**：`liveToolLines` 残留的 legacy 字符串行不
- *    得在历史里再叠一份完成标题（legacy 行无 tool_use_id，但同 name
- *    tool_use_id 在历史已渲染）。
+ * Two double-paint paths are reproduced:
+ *  - **history vs live tail**: in one idle frame (fold line present),
+ *    `session.messages` already contains tool_use + tool_result (paired via
+ *    statusMap) while `liveToolRuns` still holds the same tool_use_id as an
+ *    `ok` completion (the race between `turnFinished` and
+ *    `setLiveToolRuns([])`, or live channel running parallel to the history
+ *    commit) → the bash keep title must paint once, from history
+ *    (`MessageBlocks.ToolSummaryRow`), not from the tail
+ *    (`liveToolPreviewBox`).
+ *  - **legacy tool lines with preview**: leftover legacy string rows in
+ *    `liveToolLines` must not stack another completion title on top of
+ *    history (legacy rows carry no tool_use_id, but the same-name
+ *    tool_use_id is already rendered in history).
  *
- * 收口思路（同 consumedThinkingMessageIndices 一致）：
- *  - tail 过滤除掉 `session.messages` 已含 tool_result 的 live 完成件
- *    （即 `statusMap.has(run.id)`）；保留 status=running（未 commit）。
- *  - retract slot（inFoldCount=true）已在 collapseToolRows=true 时被
- *    折叠计数收走，不应再独立画标题。
- *  - legacy 行不挂新结果预览（已落定的工具历史侧已渲染）。
+ * Convergence approach (same shape as consumedThinkingMessageIndices):
+ *  - the tail filter drops live completed entries whose tool_result is
+ *    already in `session.messages` (i.e. `statusMap.has(run.id)`); keeps
+ *    status=running (not yet committed).
+ *  - retract slots (inFoldCount=true) are already collected by the fold
+ *    count when collapseToolRows=true, so they must not paint a standalone
+ *    title.
+ *  - legacy rows carry no fresh result preview (settled tools are rendered
+ *    on the history side).
  *
- * 测试目的：跑通本文件即视为双画路径已堵（acceptance 第 3 条）；
- * 跑不通则需要回 chat-view.tsx 的 tailSlots 过滤逻辑、live-tool-preview
- * 与 message-blocks 的边界。
+ * Passing this file means the double-paint paths are plugged; if it fails,
+ * look at the tailSlots filter in chat-view.tsx and the live-tool-preview /
+ * message-blocks boundary.
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -54,10 +60,10 @@ function sessionWith(
   return attachSession(file);
 }
 
-/** 一轮典型场景：成功 read_file（retract）+ 成功 bash（keep）+ 末条
- *  assistant 文本回答。历史里三个 block：thinking + tool_use(read) +
- *  tool_use(bash)。tool_result user 已配对。idle 帧（runState 缺省 =
- *  attachSession 的 idle）。 */
+/** A typical turn: successful read_file (retract) + successful bash (keep)
+ *  + a final assistant text answer. History holds three blocks: thinking +
+ *  tool_use(read) + tool_use(bash); the tool_result user message is paired.
+ *  Idle frame (runState default = attachSession's idle). */
 function bashPlusReadHistory(): AnthropicNativeMessage[] {
   return [
     { role: "user", content: [{ type: "text", text: "看下 a.ts 然后跑 pwd" }] },
@@ -110,11 +116,13 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 test("T3 idle race：history 已渲染 bash 标题 + liveToolRuns 残留 bash ok → bash 标题只画一次", async () => {
-  // 模拟 turnFinished 已 commit messages 但 liveToolRuns 还没被清空的
-  // race 窗口。session.messages 含 bash tool_use + tool_result,statusMap
-  // 配对 → MessageBlocks 会画一次 bash 标题;liveToolRuns 同时含同
-  // tool_use_id 的 ok 完成件 → live-tool-preview 也会画一次。
-  // 修复后 tail 必须把 statusMap 配对的 live 完成件过滤掉,只画 running。
+  // Simulate the race window where turnFinished has committed messages but
+  // liveToolRuns is not yet cleared. session.messages contains bash
+  // tool_use + tool_result, paired via statusMap → MessageBlocks paints the
+  // bash title once; liveToolRuns concurrently holds the `ok` completion for
+  // the same tool_use_id → live-tool-preview would paint it again.
+  // After the fix the tail must filter out statusMap-paired live completions
+  // and paint only running ones.
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-sh",
@@ -136,12 +144,13 @@ test("T3 idle race：history 已渲染 bash 标题 + liveToolRuns 残留 bash ok
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // bash keep 标题只画一次(行级 / 整帧总命中数 = 1)。
-  // bash · pwd 是 bash keep 完成态的视觉形态;completion 状态无 [完成] 前缀。
+  // The bash keep title paints once (line-level / whole-frame hit count = 1).
+  // `bash · pwd` is the visual form of a completed bash keep; completion state
+  // carries no `[完成]` ("done") prefix.
   expect(countOccurrences(frame, "bash · pwd")).toBe(1);
-  // read_file retract 不画标题(只进折叠计数)。
+  // read_file is retract-class: no title, only the fold count.
   expect(frame.includes("read_file ·")).toBe(false);
-  // 折叠计数行含 read_file × 1(bash 不进)。
+  // The fold-count line contains read_file × 1 (bash is not counted in).
   expect(frame).toContain("read_file × 1");
   expect(frame.includes("bash ×")).toBe(false);
   expect(frame).toContain("│ /tmp");
@@ -149,8 +158,8 @@ test("T3 idle race：history 已渲染 bash 标题 + liveToolRuns 残留 bash ok
 });
 
 test("T3 idle race：keep 完成态 + accent 完成态 同 tool_use_id → 每件各画一次", async () => {
-  // accent(skill) + keep(bash) 同时存在 race;两条 tool_use_id 都应
-  // 只画一次。
+  // accent(skill) + keep(bash) race at the same time; each tool_use_id
+  // must paint exactly once.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "加载 echo 技能" }] },
     {
@@ -214,7 +223,7 @@ test("T3 idle race：keep 完成态 + accent 完成态 同 tool_use_id → 每�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 两条完成态各画一次。
+  // Each of the two completions paints once.
   expect(countOccurrences(frame, "skill echo")).toBe(1);
   expect(countOccurrences(frame, "bash · echo hi")).toBe(1);
   expect(frame).toContain("│ hi");
@@ -222,11 +231,13 @@ test("T3 idle race：keep 完成态 + accent 完成态 同 tool_use_id → 每�
 });
 
 test("T3 running：bash 还在 running（liveToolRuns）→ history 与 live 同名不算双画", async () => {
-  // running 态：历史 messages 还没 commit 本 turn 的 tool_use(session
-  // messages 是上一轮的尾巴);liveToolRuns 含 status=running 的同
-  // tool_use_id。这是正常 live 渲染,不算双画。
-  // 修复边界：tail 过滤条件应只在 status !== "running" 时排除 statusMap
-  // 配对的件 —— running 件保留(tail 唯一渲染面)。
+  // Running state: history has not committed this turn's tool_use yet
+  // (session.messages is the tail of the previous turn); liveToolRuns holds
+  // status=running for the same tool_use_id. This is normal live rendering,
+  // not a double paint.
+  // Fix boundary: the tail filter should exclude statusMap-paired entries
+  // only when status !== "running" — running entries stay (tail is their
+  // only rendering surface).
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "上一轮尾巴" }] },
     { role: "assistant", content: [{ type: "text", text: "上轮回答" }] },
@@ -254,18 +265,20 @@ test("T3 running：bash 还在 running（liveToolRuns）→ history 与 live 同
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // running 标题在 tail(历史无该 tool_use)→ 1 次。spec D1：过程行
-  // `Running 1 shell command… · <命令>`，无 `[运行中]`。
+  // The running title lives in the tail (no such tool_use in history) →
+  // painted once. The process line is `Running 1 shell command… · <command>`,
+  // no `[运行中]` ("running").
   expect(frame).toContain("Running 1 shell command… · pwd");
   expect(countOccurrences(frame, "Running 1 shell command…")).toBe(1);
   await setup.renderer.destroy();
 });
 
 test("T3 legacy 行：liveToolLines 残留 legacy 完成行不与历史同件叠画", async () => {
-  // legacy 路径(无 toolUseId)产出的字符串行不应与历史同 name 工具叠
-  // 画。acceptance:画面里不应同时存在两条 [完成] bash 行。
-  // legacy 行已无 [完成] 前缀(uni/forma live 收口),所以"双画"实际表
-  // 现为同一 bash 标题(bash · ...)出现两次。
+  // String rows from the legacy path (no toolUseId) must not stack on top of
+  // a same-name tool already in history — the frame must never show two
+  // completed bash lines. Legacy rows no longer carry a `[完成]` ("done")
+  // prefix, so the "double paint" surfaces as the same bash title
+  // (bash · ...) appearing twice.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "上轮" }] },
     {
@@ -290,7 +303,7 @@ test("T3 legacy 行：liveToolLines 残留 legacy 完成行不与历史同件叠
       ],
     },
   ];
-  const legacyLine = "bash · pwd"; // formatLiveToolEvent 形态
+  const legacyLine = "bash · pwd"; // formatLiveToolEvent shape
   const setup = await testRender(
     <ChatView
       session={sessionWith(messages)}
@@ -302,16 +315,18 @@ test("T3 legacy 行：liveToolLines 残留 legacy 完成行不与历史同件叠
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 落定的 bash 在历史中已渲染;legacy 行若未被过滤也会带"bash · pwd"。
-  // acceptance:同 name 工具的标题只画一次。legacy 行若与历史叠画,
-  // 计数 = 2;正确实现 = 1(history only)。
+  // The settled bash is already rendered in history; an unfiltered legacy
+  // row would also carry "bash · pwd". A same-name tool title paints once:
+  // if the legacy row stacks with history the count = 2; correct = 1
+  // (history only).
   expect(frame).toContain("│ /tmp");
   await setup.renderer.destroy();
 });
 
 test("T3 fold line：fold 行不替代 bash keep 标题（一条 bash 标题仍可见）", async () => {
-  // acceptance 第 3 条细化：fold 行在场时 retract 进计数、bash 标题仍
-  // 可见（来自历史 message-blocks，不是 live tail）。回归用。
+  // Refinement: with the fold line present, retract entries fold into the
+  // count while the bash title stays visible (from history message-blocks,
+  // not the live tail). Regression guard.
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "看下 a.ts 再跑" }] },
     {

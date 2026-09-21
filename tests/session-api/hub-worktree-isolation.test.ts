@@ -59,8 +59,8 @@ import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 const roots: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {
-  // gitTestEnv 免疫：push hook 注入的 GIT_DIR 等会让临时 repo 的 commit 钉到
-  // 父仓库（幽灵失败，见 tests/_helpers/git-env.ts 头注）。
+  // gitIn immunizes against GIT_DIR etc. injected by push hooks, which would
+  // pin temp-repo commits to the parent repo (see tests/_helpers/git-env.ts header).
   return gitIn(cwd, args);
 }
 
@@ -376,8 +376,8 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
   it("session on an unrelated (manual) git worktree: gate blocks without provisioning; the create-worktree tool fail-closed foreign_worktree", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
-    // 唯一路径而非固定名：上一轮被强杀时 afterAll 不执行，固定名残留会让
-    // `git worktree add` 报 already exists（非幂等幽灵失败）。
+    // Unique path, not a fixed name: a killed run skips afterAll, and a
+    // leftover fixed name makes `git worktree add` fail "already exists".
     const manualWt = mkdtempSync(join(tmpdir(), "iknow-wt-hub-manual-"));
     roots.push(manualWt);
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-x");
@@ -437,8 +437,8 @@ describe("worktree isolation wiring (switch OFF)", () => {
   it("T4 boundary — switch OFF: a session on a foreign/unrelated worktree mutates exactly like today (no gate, no block)", async () => {
     await setSettingsIsolation(false);
     const repo = makeGitRepo();
-    // 唯一路径而非固定名：上一轮被强杀时 afterAll 不执行，固定名残留会让
-    // `git worktree add` 报 already exists（非幂等幽灵失败）。
+    // Unique path, not a fixed name: a killed run skips afterAll, and a
+    // leftover fixed name makes `git worktree add` fail "already exists".
     const manualWt = mkdtempSync(join(tmpdir(), "iknow-wt-hub-off-"));
     roots.push(manualWt);
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-off");
@@ -594,11 +594,12 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     const wtRoot = join(productRoot, ".iknow", "worktrees", "conv-t6");
     await mkdir(wtRoot, { recursive: true });
     await mkdir(join(productRoot, ".iknow"), { recursive: true });
-    // 被测对象 = mcpConfigRoot 的**路径来源**(product 级 mcp.json 而非 task
-    // 树级),不是 server 能否连上。server 用立即退出的 command,slot 迅速进
-    // failed 终态,装配期 firstTurnReady 窗口据此提前 resolve,不必等满生产
-    // 30s 上限。failed 槽仍进 status()(manager.status() 对终态槽一律输出),
-    // 下面按名断言 from-product 在场 / from-task 缺席的语义不变。
+    // Under test: where mcpConfigRoot resolves from (product-level mcp.json,
+    // not the task tree's), not whether the server connects. The server exits
+    // immediately, its slot reaches the failed terminal state fast, and the
+    // firstTurnReady window resolves early instead of waiting out the 30s
+    // production cap. manager.status() still reports terminal slots, so the
+    // by-name assertions (from-product present / from-task absent) hold.
     await writeFile(
       join(productRoot, ".iknow", "mcp.json"),
       JSON.stringify({
@@ -665,10 +666,11 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     } finally {
       await priv.shutdown();
     }
-  }, 60_000); // B4 / ADR-0043 §4:每个 buildHarnessEngine 装配期 await
-  // firstTurnReady 窗口。fixture 的 server 用 `node -e process.exit(1)`
-  // 立即进 failed 终态 → 窗口提前 resolve(不等满生产 30s 上限)。test 断言
-  // 只看 mcpRoots 形状与 status 名集,与 server 连接结果无关。
+  }, 60_000); // ADR-0043 §4: each buildHarnessEngine awaits the
+  // firstTurnReady window during assembly. The fixture server exits
+  // immediately → failed terminal state → the window resolves early
+  // (never the full 30s cap). Assertions only look at mcpRoots shape
+  // and the status name set, independent of connection results.
 
   it("serve.ts / hub.ts：productRoot 字段贯通，reload 不读 process.cwd() 作 config root", () => {
     const serveSrc = readFileSync(
@@ -682,10 +684,10 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     expect(serveSrc).toMatch(/productRoot/);
     expect(hubSrc).toMatch(/readonly productRoot\?/);
     expect(hubSrc).toMatch(/productRoot:/);
-    // reloadMcp 不得再用 process.cwd() 当 mcpConfigRoot 求值（注释提及可）
+    // reloadMcp must not evaluate process.cwd() as mcpConfigRoot (a mention in a comment is fine)
     const reloadIdx = hubSrc.indexOf("async reloadMcp");
     assert.ok(reloadIdx >= 0);
-    // T7:公开 reloadMcp 串行入口 + private reloadMcpTransaction 同属 reload 面
+    // the public serial reloadMcp entry and the private reloadMcpTransaction both belong to the reload surface
     const reloadBlock = hubSrc.slice(reloadIdx, reloadIdx + 2800);
     expect(reloadBlock).not.toMatch(
       /mcpConfigRoot[^\n]*=[^\n]*process\.cwd\(\)|process\.cwd\(\)\s*[;,]|mcpConfigRoot:\s*process\.cwd\(\)/

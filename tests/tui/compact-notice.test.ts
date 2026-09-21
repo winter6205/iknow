@@ -1,13 +1,17 @@
 /**
- * compactNoticeFor(reason, compacted) 纯函数的文案决策单测。
+ * Copy-decision unit tests for the pure function
+ * compactNoticeFor(reason, compacted).
  *
- * 认证的不变式（plan manual-compact-trigger T2）：
- * 1. 手动 /compact 路径的成功文案（windowed / full_summary）只说「压缩已发生」；
- * 2. 「auto token 门未过」类文案禁止出现在手动路径 —— T1 后 hub.compactSession
- *    不再返回 below_token_threshold，收到该 reason 属于契约破坏，必须抛错而非
- *    降级成阈值文案；
- * 3. noop 路径（reason=messages_too_few）语义是「没有可压缩的上下文」，覆盖
- *    空会话幂等与压缩整体失败两种来源，不引用 auto 阈值。
+ * Certified invariants:
+ * 1. manual /compact success copy (windowed / full_summary) says only
+ *    "compaction happened";
+ * 2. "auto token gate not met" copy is forbidden on the manual path —
+ *    hub.compactSession no longer returns below_token_threshold, so
+ *    receiving that reason is a contract breach and must throw rather than
+ *    degrade into threshold copy;
+ * 3. the noop path (reason=messages_too_few) means "nothing compactable",
+ *    covering both the empty-session idempotent case and total compaction
+ *    failure, without referencing the auto threshold.
  */
 import { describe, expect, test } from "bun:test";
 import { compactNoticeFor } from "../../src/tui/app.tsx";
@@ -33,8 +37,9 @@ describe("compactNoticeFor — /compact notice 文案决策", () => {
   });
 
   test("auto token 门文案禁止出现在手动路径:below_token_threshold 在 compacted=false 下抛错", () => {
-    // T1 后手动 compactSession 不返回 below_token_threshold;若出现即契约破坏,
-    // 抛错优于把 auto 阈值文案呈现给用户(manual-compact-trigger T2)。
+    // Manual compactSession never returns below_token_threshold; its
+    // appearance is a contract breach, so throwing beats showing auto
+    // threshold copy to the user.
     expect(() => compactNoticeFor("below_token_threshold", false)).toThrow(
       /unexpected reason in manual noop branch/
     );

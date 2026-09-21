@@ -2,17 +2,22 @@
 /**
  * tests/tui/context-bar.test.tsx
  *
- * #343 T4：ContextBar（OpenTUI 版）——只读展示 RunResult.lastUsage
- * （ADR-0008 D5：数据路径不变，只换渲染组件；本组件不写 token 账本）。
- *  - 数值语义：used = input + cacheRead + cacheCreation（cache null → 0）；
- *    pct = round(used / contextWindow * 100)；tokens 数字 `X.Xk/Y.Yk` 渲染；
- *  - 三档色阈值 <50% CTX_BLUE / 50-80% running / >80% error（captureSpans）；
- *  - lastUsage null（首轮前）→ 完整 0% 框；窄列 cols<40 降级仅 `ctx NN%`；
- *  - activeToolName 尾缀指示器（[tool] name，不新增 chrome 行）；
- *  - 组件本身按 flex-start 左对齐渲染（父容器 justifyContent 由 app.tsx
- *    控制，组件内不右对齐）；
- *  - model 前段来自 envDisplay store 订阅（#1021）：host publish 即刷新，
- *    不需要换 props（回归钉——/model 切换只动本行，不触发全树 repaint）。
+ * ContextBar (OpenTUI version) — read-only display of RunResult.lastUsage
+ * (ADR-0008 D5: the data path is unchanged, only the rendering component is
+ * swapped; this component never writes the token ledger).
+ *  - Number semantics: used = input + cacheRead + cacheCreation (cache
+ *    null → 0); pct = round(used / contextWindow * 100); token figures
+ *    render as `X.Xk/Y.Yk`;
+ *  - three color thresholds: <50% CTX_BLUE / 50-80% running / >80% error
+ *    (captureSpans);
+ *  - lastUsage null (before the first turn) → full 0% frame; narrow cols
+ *    (<40) degrade to just `ctx NN%`;
+ *  - activeToolName suffix indicator ([tool] name, no extra chrome row);
+ *  - the component renders left-aligned with flex-start (parent
+ *    justifyContent is controlled by app.tsx; no right-align inside);
+ *  - the model prefix comes from an envDisplay store subscription: host
+ *    publish refreshes it without prop changes (regression pin — /model
+ *    switching touches this line only, no full-tree repaint).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -58,7 +63,7 @@ function hex01(hex: string): [number, number, number] {
   ];
 }
 
-/** 帧中是否存在含 needle 的 span 且 fg = hex（±1/255）。 */
+/** Whether the frame contains a span holding needle with fg = hex (±1/255). */
 function hasFg(frame: CapturedFrame, needle: string, hex: string): boolean {
   const [r, g, b] = hex01(hex);
   const eps = 1.5 / 255;
@@ -91,12 +96,14 @@ async function renderBar(props: {
   return setup;
 }
 
-/** 单 model 的 env store：`model` 为路由串，显示名由 providers 注册表投影。 */
+/** Single-model env store: `model` is the routing string; the display name
+ *  is projected by the providers registry. */
 function storeWithModel(model: string | undefined): EnvDisplayStore {
   return createEnvDisplayStore({ model, defaultThinking: undefined });
 }
 
-/** 模型注册表（路由串 → 显示名投影的 SSOT；与 /model picker 同源形状）。 */
+/** Model registry (SSOT for routing-string → display-name projection; same
+ *  shape as the /model picker source). */
 const PROVIDERS: ReadonlyArray<IknowSettingsLlmProvider> = [
   {
     id: "minimax-cn",
@@ -142,7 +149,7 @@ describe("纯函数（数值语义 SSOT）", () => {
   });
 
   test("toolIndicator：放得下原样；放不下前缀 → 空串；超宽 CJK 尾截断补 …", () => {
-    // "[tool] " 前缀 7 列；name budget = cols - 7。
+    // "[tool] " prefix = 7 columns; name budget = cols - 7.
     expect(toolIndicator("Bash", 11)).toBe("[tool] Bash");
     expect(toolIndicator("Bash", stringWidth("[tool] Bash"))).toBe(
       "[tool] Bash"
@@ -158,16 +165,17 @@ describe("纯函数（数值语义 SSOT）", () => {
   test("modelPrefix：短名原样 / 超宽 CJK 尾截断补 … / 预算过小回退空串", () => {
     expect(modelPrefix("m3-combo", 20)).toBe("m3-combo");
     expect(modelPrefix("Qwen3.8-Max Model", 40)).toBe("Qwen3.8-Max Model");
-    // 超预算：CJK 按 2 列计（visualWidth 口径），结果宽 ≤ 预算且尾部补 …。
+    // Over budget: CJK counts as 2 columns (visualWidth metric); result
+    // width ≤ budget with a trailing ….
     const long = "Qwen3.8-Max-Exp-1234567890-abcde";
     const out = modelPrefix(long, 20);
     expect(out.endsWith("…")).toBe(true);
     expect(stringWidth(out)).toBeLessThanOrEqual(20);
     expect(out).not.toContain("\n");
-    // 预算过小（连 … 都放不下）→ 空串。
+    // Budget too small (can't even fit …) → empty string.
     expect(modelPrefix(long, 0)).toBe("");
     expect(modelPrefix(long, 1)).toBe("");
-    // 预算能放单字符时仍截断。
+    // Still truncated when the budget fits only one character.
     const tiny = modelPrefix(long, 2);
     expect(stringWidth(tiny)).toBeLessThanOrEqual(2);
   });
@@ -176,28 +184,33 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(modelDisplayName("minimax-cn/MiniMax-M3", PROVIDERS)).toBe(
       "MiniMax M3"
     );
-    // 条目存在但未配 name → 回退路由串，不伪造空串。
+    // Entry exists but has no name → fall back to the routing string; never
+    // fabricate an empty string.
     expect(modelDisplayName("minimax-cn/MiniMax-M2", PROVIDERS)).toBe(
       "minimax-cn/MiniMax-M2"
     );
     expect(modelDisplayName("unknown/model", PROVIDERS)).toBe("unknown/model");
-    // 注册表缺席 / 空 → 无从投影，回退路由串本身。
+    // Registry missing / empty → nothing to project, fall back to the routing
+    // string itself.
     expect(modelDisplayName("minimax-cn/MiniMax-M3", undefined)).toBe(
       "minimax-cn/MiniMax-M3"
     );
     expect(modelDisplayName("minimax-cn/MiniMax-M3", [])).toBe(
       "minimax-cn/MiniMax-M3"
     );
-    // model 未接线 → undefined（渲染侧据此不渲染 model 段）。
+    // model not wired → undefined (the render side skips the model segment).
     expect(modelDisplayName(undefined, PROVIDERS)).toBeUndefined();
   });
 
   test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
-    // 换行 + 多空格 → 折叠后单空格；预算内原样返回。
-    // "[tool] a b c" 宽 12 列,精确预算 12 → 折叠后原样返回。
+    // Newlines + runs of spaces → collapse to single spaces; returned as-is
+    // within budget.
+    // "[tool] a b c" is 12 columns wide, exact budget 12 → returned collapsed
+    // as-is.
     const inBudget = toolIndicator("a\nb  c", stringWidth("[tool] a b c"));
     expect(inBudget).toBe("[tool] a b c");
-    // 超预算截断：迭代折叠后文本，输出不含原换行。
+    // Over-budget truncation: iterate over the collapsed text; output
+    // contains no original newline.
     const truncated = toolIndicator("alpha\nbeta  gamma", 14);
     expect(truncated.startsWith("[tool] ")).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
@@ -245,7 +258,7 @@ describe("渲染（只读 lastUsage）", () => {
       cols: 80,
     });
     expect(setup.captureCharFrame()).toContain("50% warn 5.0k/10.0k");
-    // 只读契约：组件不修改传入的 usage 对象。
+    // Read-only contract: the component never mutates the passed usage object.
     expect(usage.inputTokens).toBe(1000);
     expect(usage.cacheReadInputTokens).toBe(2000);
     await setup.renderer.destroy();
@@ -278,7 +291,8 @@ describe("渲染（只读 lastUsage）", () => {
         cols: 80,
       });
       const spans = setup.captureSpans();
-      // band 字符（█/░）与 pct 数字同档色，取 band 首字符断言。
+      // The band characters (█/░) share the pct number's band color; assert
+      // on the band's first character.
       const bandChar = c.used >= 5000 ? "█" : "░";
       expect(
         hasFg(spans, bandChar, c.hex),
@@ -369,8 +383,9 @@ describe("渲染（只读 lastUsage）", () => {
       contextWindow: 10000,
       running: false,
       cols: 80,
-      // 未传 providers → 无注册表可查，显示名回退路由串本身（本用例钉的是
-      // 前缀拼接与预算，与显示名投影无关）。
+      // No providers passed → no registry to consult, display name falls
+      // back to the routing string (this case pins prefix concatenation and
+      // budget, not display-name projection).
       envDisplay: storeWithModel("Qwen3.8-Max Model"),
       effortLabel: "medium",
     });
@@ -467,8 +482,9 @@ describe("渲染（只读 lastUsage）", () => {
   });
 
   test("model 切换只经 store.publish：props 不变，本行自行重渲染到新显示名", async () => {
-    // #1021 回归钉：/model 改写路由后 host 只 publish（不重渲染 TuiApp、不换
-    // 组件 props）。若 model 退回 props 传递，本用例在 props 不变时不会更新。
+    // Regression pin: after /model rewrites the routing string, the host
+    // only publishes (no TuiApp re-render, no prop swap). If model went back
+    // to prop passing, this case would not update under unchanged props.
     const store = storeWithModel("minimax-cn/MiniMax-M3");
     const setup = await renderBar({
       lastUsage: makeUsage(5000),
@@ -485,13 +501,14 @@ describe("渲染（只读 lastUsage）", () => {
       model: "volcengine-ark/deepseek-v3-250324",
       defaultThinking: undefined,
     });
-    // store.publish 是 React 树外的事件源：手动 flush 一次即模拟宿主渲染循环
-    // （同 stream-draft 集成测试的 store 推送口径）。
+    // store.publish is an event source outside the React tree: one manual
+    // flush simulates the host render loop (same store-push discipline as
+    // the stream-draft integration tests).
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).toContain("DeepSeek V3 · medium ·");
     expect(frame).not.toContain("MiniMax M3");
-    // 单行不变（model 段换名不新增行）。
+    // Still one line (renaming the model segment adds no line).
     expect(frame.split("\n").filter((l) => l.trim().length > 0)).toHaveLength(
       1
     );
@@ -535,9 +552,11 @@ describe("渲染（只读 lastUsage）", () => {
   });
 
   test("app 级左对齐：TuiHarness 父容器 justify-content=flex-start 下 ContextBar 首列于 frame 首列", async () => {
-    // 集成视角（app.tsx 的 `<box flexDirection="row" justifyContent="flex-start">`
-    // 包裹 ContextBar）：用 TuiHarness 全装配渲染，ContextBar 行贴左——
-    // 该行首字符（左 border │）落在 frame 首列（无 leading 空格）。
+    // Integration view (app.tsx wraps ContextBar in
+    // `<box flexDirection="row" justifyContent="flex-start">`): rendered with
+    // the full TuiHarness assembly, the ContextBar line hugs the left edge —
+    // its first character (left border │) lands in column 0 (no leading
+    // space).
     const setup = await testRender(<TuiHarness />, {
       width: 80,
       height: 30,
@@ -553,8 +572,8 @@ describe("渲染（只读 lastUsage）", () => {
   });
 });
 
-// #377 项 B 相关：activeToolNameOf 把 MCP 工具名剥为 <server>/<tool> 短形态
-// （ContextBar 尾缀单一消费方），非 MCP 名原样。
+// activeToolNameOf strips MCP tool names to the <server>/<tool> short form
+// (ContextBar's only suffix consumer); non-MCP names pass through unchanged.
 describe("activeToolNameOf / shortenMcpToolName", () => {
   test("activeToolNameOf 取最后一个 running；无 running → undefined", () => {
     const runs = [
@@ -584,11 +603,12 @@ describe("activeToolNameOf / shortenMcpToolName", () => {
     expect(shortenMcpToolName("mcp__codebase-memory__search_code")).toBe(
       "codebase-memory/search_code"
     );
-    // server / tool 段本身含 __（manager sanitize 只把非 [A-Za-z0-9_] 替换）：
-    // 只剥第一个 __ 之后的第一个 __，其余保留在 tool 段。
+    // server / tool segments may themselves contain __ (manager sanitize only
+    // replaces non-[A-Za-z0-9_]): strip only the first __ after the first
+    // __; the rest stays in the tool segment.
     expect(shortenMcpToolName("mcp__a__b__c")).toBe("a/b__c");
     expect(shortenMcpToolName("read_file")).toBe("read_file");
-    // 畸形 mcp__ 形态（无分隔）原样返回
+    // Malformed mcp__ shapes (no separator) are returned as-is.
     expect(shortenMcpToolName("mcp__nosep")).toBe("mcp__nosep");
   });
 });

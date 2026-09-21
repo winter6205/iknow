@@ -1,16 +1,16 @@
 /**
- * T3 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 两级 config 解析器单测。
+ * Unit tests for the two-level MCP config resolver.
  *
- * 验收:
- *  1. 两级 union:`~/.iknow/mcp.json`(user) + `<mcpConfigRoot>/.iknow/mcp.json`
- *     (project),同名 server **条目级整体覆盖**(无字段级深合并)。
- *  2. 项目级**只**读 `mcpConfigRoot`,绝不读 task worktree / `process.cwd()`。
- *  3. 文件缺失 → 该级空集;非缺失 IO / JSON / 顶层结构失败 →
- *     `McpLifecycleError` kind `config_load_failed`。
- *  4. 判别联合 / disabled / 坏条目 skip+warn / Never 区保持既有合同。
+ * Acceptance:
+ *  1. two-level union: `~/.iknow/mcp.json` (user) + `<mcpConfigRoot>/.iknow/mcp.json`
+ *     (project); same-named server → **whole entry-level override** (no field-wise deep merge).
+ *  2. project level reads **only** `mcpConfigRoot`, never the task worktree / `process.cwd()`.
+ *  3. missing file → empty for that level; any other IO / JSON / top-level structure
+ *     failure → `McpLifecycleError` kind `config_load_failed`.
+ *  4. discriminated union / disabled / bad-entry skip+warn / Never zone keep the existing contract.
  *
- * 测试只用 tmp fixture(never 真实 ~/.iknow);warn 通过 console.warn spy
- * 收集并断言内容。
+ * Tests use only tmp fixtures (never the real ~/.iknow); warnings are
+ * collected via a console.warn spy and asserted for content.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile, chmod } from "node:fs/promises";
@@ -26,7 +26,7 @@ import {
   type McpServerSource,
 } from "../../src/harness/mcp/config.ts";
 
-/** 写一个 fixture 文件,自动 mkdir parent。 */
+/** Write a fixture file, mkdir'ing the parent automatically. */
 async function writeJsonFixture(path: string, body: unknown): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
   if (typeof body === "string") {
@@ -36,7 +36,7 @@ async function writeJsonFixture(path: string, body: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(body), "utf8");
 }
 
-/** 断言异步调用抛出指定 kind 的 typed error。 */
+/** Assert an async call throws a typed error of the given kind. */
 async function expectLifecycleError(
   call: () => Promise<unknown>,
   kind: McpLifecycleErrorKind
@@ -55,7 +55,7 @@ async function expectLifecycleError(
   return error;
 }
 
-/** 收集 console.warn 调用,返回单测结束时的快照。 */
+/** Collect console.warn calls; returns the snapshot at test end. */
 let warnCalls: string[] = [];
 let warnSpy: ReturnType<typeof vi.spyOn>;
 
@@ -445,7 +445,7 @@ describe("loadMcpConfig — 文件缺失 / hard fail / 形态", () => {
     await writeJsonFixture(projectPath, {
       mcpServers: { a: { type: "stdio", command: "x" } },
     });
-    // 去掉读权限 → EACCES(若平台允许;否则 skip 本断言)。
+    // remove read permission → EACCES (where the platform enforces perms; otherwise this assertion is moot).
     await chmod(projectPath, 0);
     try {
       await expectLifecycleError(

@@ -1,23 +1,27 @@
 /**
- * spec skill-index-increment SC8 —— CLI slash 候选「当场热」。
+ * Spec skill-index-increment SC8 — CLI slash candidates go "hot in place".
  *
- * 钉住的不变式（人侧可观察的结果，不是「某处调了 rescan」这种实现细节）：
- * 装配之后新出现在技能根里的可加载条目，在**下一条** slash 输入上就能命中，
- * 不必等下一个 turn；`loadable()` 面（含无 description 条目）的语义在热路径
- * 上与装配期一致。
+ * Pinned invariant (an operator-observable outcome, not an implementation
+ * detail like "rescan is called somewhere"): a loadable entry that appears in
+ * a skill root after assembly must hit on the **next** slash input without
+ * waiting for the next turn; the `loadable()` surface (including
+ * description-less entries) keeps the same semantics on the hot path as at
+ * assembly time.
  *
- * 四条覆盖面：
- *   1. 正常路径：rescan 缝在场 → 装配后新装的技能当场可加载，信封 byte 与
- *      `buildSkillLoadText` 同源；
- *   2. 对照组：同一行在**没有** rescan 缝的会话上必须 miss —— 否则钉不住
- *      「热」来自重扫而不是别的东西（防伪覆盖）；
- *   3. 失败路径：rescan 抛 typed `SkillRescanError`（根不可读）→ 退回缓存
- *      catalog（已装技能不因一次 IO 故障变 unknown command），降级在 stderr
- *      可见；
- *   4. 空输入：空行不触发重扫（无谓 IO 不进 REPL 编辑路径）。
+ * Four coverage faces:
+ *   1. happy path: rescan seam present → a skill installed after assembly is
+ *      loadable in place, envelope bytes same-source as `buildSkillLoadText`;
+ *   2. control: the same line must miss on a session **without** the rescan
+ *      seam — otherwise "hot" could come from something other than the rescan
+ *      (anti-false-coverage);
+ *   3. failure path: rescan throws a typed `SkillRescanError` (unreadable
+ *      root) → fall back to the cached catalog (installed skills never become
+ *      unknown commands due to one IO failure), degradation visible on stderr;
+ *   4. empty input: blank lines never trigger a rescan (pointless IO must stay
+ *      out of the REPL edit path).
  *
- * 真实 SessionStore（temp dir）+ 真实 conversationId（不预存会话文件）——
- * 与 tests/cli 既有纪律一致；不写真实 ~/.iknow。
+ * Real SessionStore (temp dir) + real conversationId (no pre-stored session
+ * file) — per the existing tests/cli discipline; never writes to ~/.iknow.
  */
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -50,7 +54,7 @@ afterAll(async () => {
   }
 });
 
-/** 写一条真实技能目录（scanner 只认 `<root>/<name>/SKILL.md`）。 */
+/** Writes a real skill directory (the scanner only recognizes `<root>/<name>/SKILL.md`). */
 async function writeSkill(
   root: string,
   name: string,
@@ -75,7 +79,7 @@ interface Roots {
   readonly userHome: string;
   readonly projectIdentityRoot: string;
   readonly skillsRoot: string;
-  /** 与 scanner / rescanner 共用的那一份 env 对象（生产是 process.env）。 */
+  /** The one env object shared by scanner / rescanner (process.env in production). */
   readonly env: Record<string, string | undefined>;
 }
 
@@ -93,15 +97,17 @@ async function makeRoots(): Promise<Roots> {
 }
 
 /**
- * 装配一条与 CLI 生产接线同形的会话：装配期 catalog 只扫一次 —— 正是被
- * 冻住的那份快照；`withRescanner !== false` 时再挂上 rescan 缝（生产由
- * cli.ts 传 `built.skillRescanner`）。调用前先写好的技能才进装配期快照。
+ * Assemble a session with the same shape as the CLI production wiring: the
+ * assembly-time catalog is scanned exactly once — that is the frozen snapshot;
+ * with `withRescanner !== false` the rescan seam is attached too (production
+ * passes `built.skillRescanner` from cli.ts). Only skills written before the
+ * call land in the assembly-time snapshot.
  */
 function makeCtxFor(
   roots: Roots,
   opts: {
     readonly conversationId: string;
-    /** false → 不接 rescan 缝（对照组：装配期冻结面）。 */
+    /** false → no rescan seam (control group: assembly-time frozen surface). */
     readonly withRescanner?: boolean;
   },
   bootEntries: Awaited<
@@ -109,7 +115,7 @@ function makeCtxFor(
   >
 ): ChatLineContext {
   const ctx = makeCtx({
-    // 技能名 miss 时这行落 unknown 分支，不会跑引擎；命中时才用得上。
+    // If the skill name misses, this line falls into the unknown branch and never runs the engine; only a hit needs it.
     responses: [assistantResult({ texts: ["收到"] })],
     stateOverrides: { conversationId: opts.conversationId },
     checkpointStore: new SessionStore(
@@ -129,7 +135,7 @@ function makeCtxFor(
   return ctx;
 }
 
-/** 装配期扫描（调用点与 build-engine 同形：一次 scan → createSkillCatalog）。 */
+/** Assembly-time scan (same shape as the build-engine call site: one scan → createSkillCatalog). */
 function bootScan(roots: Roots) {
   return createSkillScanner({
     userHome: roots.userHome,
@@ -138,7 +144,7 @@ function bootScan(roots: Roots) {
   }).scan();
 }
 
-/** 首条 user 消息文本（模型可见的 skill-load 信封）。 */
+/** Text of the first user message (the model-visible skill-load envelope). */
 function firstUserText(ctx: ChatLineContext): string {
   const message = ctx.state.messages[0];
   assert.ok(message !== undefined, "turn 必须已落一张 user 消息");
@@ -156,8 +162,8 @@ describe("SC8 — CLI slash 候选当场热", () => {
       await bootScan(roots)
     );
 
-    // 装配期之后才出现的可加载条目：无 description —— 正落在 loadable()
-    // 面而 modelIndex() 面之外（SC5 的人侧面）。
+    // A loadable entry that appears only after assembly: no description —
+    // lands on the loadable() surface but outside modelIndex() (SC5's operator-side face).
     await writeSkill(roots.skillsRoot, "late-skill");
 
     const result = await processChatLine({
@@ -206,12 +212,12 @@ describe("SC8 — CLI slash 候选当场热", () => {
       { conversationId: "conv-sc8-fallback" },
       await bootScan(roots)
     );
-    // 装配期快照里 boot 已在 → 首行就该能加载（热路径成功那一支）。
+    // boot is already in the assembly-time snapshot → the first line must load (the hot-path success branch).
     const first = await processChatLine({ line: "/boot", ctx });
     assert.equal(first.ranQuery, true, `首行必须可加载：${first.stderr}`);
     assert.equal(ctx.state.messages.length > 0, true);
 
-    // 技能根换成不可读路径（ENOTDIR，非 ENOENT）→ rescan 抛 SkillRescanError。
+    // Swap the skill root for an unreadable path (ENOTDIR, not ENOENT) → rescan throws SkillRescanError.
     const notADir = join(roots.skillsRoot, "..", "skills-as-a-file");
     await writeFile(notADir, "not a directory", "utf8");
     roots.env.IKNOW_SKILL_DIRS = notADir;
@@ -228,7 +234,7 @@ describe("SC8 — CLI slash 候选当场热", () => {
       stderr.includes("slash 候选刷新失败"),
       `降级必须可见（stderr），实际：${stderr}`
     );
-    // 缓存 catalog 没被清空 / 没被换成空面。
+    // The cached catalog was neither cleared nor replaced by an empty surface.
     assert.ok(ctx.skillCatalog?.get("boot") !== undefined);
   });
 
@@ -246,7 +252,7 @@ describe("SC8 — CLI slash 候选当场热", () => {
     };
     const empty = await processChatLine({ line: "   ", ctx });
     assert.deepEqual(empty, { quit: false, output: "" });
-    // /quit 也是静态词表行：重扫对它的结果没有可观察作用。
+    // /quit is also a static-word-list line: a rescan cannot observably change its result.
     const quit = await processChatLine({ line: "/quit", ctx });
     assert.equal(quit.quit, true);
     assert.equal(calls, 0, "空行 / 静态词表行都不得触发 rescan");
@@ -261,7 +267,7 @@ describe("SC8 — CLI slash 候选当场热", () => {
       await bootScan(roots)
     );
 
-    // 改绑后的新根：与旧根不同的技能根（会话文件已指向它）。
+    // The new root after rebind: a skill root different from the old one (the session file already points to it).
     const newRootSkills = join(roots.skillsRoot, "..", "new-root-skills");
     await mkdir(newRootSkills, { recursive: true });
     await writeSkill(newRootSkills, "new-root-skill");
@@ -279,7 +285,7 @@ describe("SC8 — CLI slash 候选当场热", () => {
       }).scan()
     );
 
-    // 生产接线（cli.ts rebuildDeps）返回的 bundle：catalog 与 rescanner 同台。
+    // The bundle returned by the production wiring (cli.ts rebuildDeps): catalog and rescanner on the same stage.
     const newRoot = join(roots.projectIdentityRoot, "worktree");
     await ctx.checkpointStore!.save({
       id: "conv-sc8-rebind",
@@ -304,8 +310,8 @@ describe("SC8 — CLI slash 候选当场热", () => {
       skillRescanner: newRescanner,
     });
 
-    // rebind 检测按设计只跑在**引擎行**路径（slash 行不读 store，收敛修复
-    // 2026-08-29）—— 先用一条查询行触发换血。
+    // By design, rebind detection only runs on the **engine-line** path (slash
+    // lines don't read the store — convergence fix). Trigger the swap with a query line first.
     const query = await processChatLine({ line: "改绑", ctx });
     assert.equal(query.ranQuery, true);
     assert.equal(

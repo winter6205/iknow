@@ -1,19 +1,22 @@
 /**
- * ADR-0085 / SC9 — `manager.buildWorkerPayload` 在 spawn 期把**父会话账本
- * 锚点**落进 worker envelope（`todoLedger: { projectDir, conversationId }`）。
+ * ADR-0085 — `manager.buildWorkerPayload` writes the **parent session ledger
+ * anchor** into the worker envelope at spawn time
+ * (`todoLedger: { projectDir, conversationId }`).
  *
- * 契约（ADR-0085「同一主会话内子代理与父共用账本」）：
- *   - worker 可读取与更新父账本；添加仅父会话（工具侧 typed 拒绝，见
- *     `worker-tool-surface.test.ts` 的 SC9 描述块）。
- *   - 锚点数据源 = host 注入的 `opts.todoDir`（与主 loop registry 同一值）
- *     + `def.conversationId`（父会话 id）——**不**从 trace 文件布局反推
- *     （fragile coupling），落值与 `resolveConversationTodoPath`
- *     （todo-write.ts SSOT）同一对 (projectDir, conversationId)。
- *   - 缺 `opts.todoDir` 或缺 `def.conversationId` → 整个字段省略（旧 wire
- *     形态，worker 工具面不含 todo_write，byte-stable）。
+ * Contract (ADR-0085 "sub-agents share the parent ledger within one session"):
+ *   - worker may read and update the parent ledger; adding is parent-only
+ *     (rejected tool-side via typed error, see the SC9 block in
+ *     `worker-tool-surface.test.ts`).
+ *   - Anchor source = host-injected `opts.todoDir` (same value as the main
+ *     loop registry) + `def.conversationId` (parent session id) — **not**
+ *     derived from trace file layout (fragile coupling); the written
+ *     (projectDir, conversationId) pair matches `resolveConversationTodoPath`
+ *     (todo-write.ts SSOT).
+ *   - Missing `opts.todoDir` or `def.conversationId` → field omitted entirely
+ *     (legacy wire shape, worker tool surface excludes todo_write, byte-stable).
  *
- * Isolation: 真实 tmp 目录做 sandboxRoot 锚点；spawn 用 fake child，
- * 无真实子进程。
+ * Isolation: real tmp dir as sandboxRoot anchor; fake child for spawn,
+ * no real subprocess.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -81,8 +84,9 @@ describe("buildWorkerPayload — ADR-0085 SC9 todoLedger 落线", () => {
   });
 
   it("projectDir 与 conversationId 逐字节透传（不改写、不 sanitize —— sanitize 归 resolveConversationTodoPath）", () => {
-    // 落线是「数据搬运」：路径分段清洗只发生在消费端（工具 handler 的
-    // resolveConversationTodoPath），此处不得发明第二套形状。
+    // Wire-through is pure data transport: path-segment sanitization happens
+    // only at the consumer (the tool handler's resolveConversationTodoPath);
+    // do not invent a second shape here.
     const { manager, calls } = makeManagerCapturingPayload({
       todoDir: "/srv/iknow/projects/my-repo-deadbeef1234",
       parentSandboxRoot: tempRoot,
@@ -116,8 +120,9 @@ describe("buildWorkerPayload — ADR-0085 SC9 todoLedger 落线", () => {
   });
 
   it("def.conversationId 空串 → 字段整个省略（空 id 不得指向根 todos.md）", () => {
-    // 空 conversationId 会被 resolveConversationTodoPath 解释成 legacy 根账本
-    // —— 那会让 worker 读到一个非会话账本，语义错位；装配层直接不发锚点。
+    // An empty conversationId would be read by resolveConversationTodoPath as
+    // the legacy root ledger — the worker would target a non-session ledger,
+    // wrong semantics; the assembly layer simply omits the anchor.
     const { manager, calls } = makeManagerCapturingPayload({
       todoDir: "/data/projects/repo-abc123",
       parentSandboxRoot: tempRoot,

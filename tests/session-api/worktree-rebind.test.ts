@@ -1310,25 +1310,26 @@ describe("createTaskWorktreeProvisioner", () => {
   });
 });
 
-// -- T3 / plans/worktree-exclusive-lock.md --------------------------------------
+// -- enter pre-check occupancy + `worktree_claimed` --------------------------------------
 //
-// enter 前置占用检查 + `worktree_claimed`（ADR-0070 Decision 2 / SC3–SC8）。
-// 默认档（OFF）行为不变；ON 档占用 → typed 拒绝 + 占用者会话 id + 释放路径。
+// ADR-0070: enter runs an occupancy pre-check. Default (OFF) behavior is unchanged;
+// ON + occupied -> typed rejection carrying the occupying session id + the release path.
 //
-// 输入五类表（spec SC 末）：
-//   - empty          → list() 空 / 记录缺 workspaceRoot / 字段空串 → 放行；
-//   - negative       → OFF 档 + 占用 → 放行（OFF 档零回归 SC2）；
-//   - overflow       → 路径归一化（尾随分隔符 / 长绝对路径）；
-//   - concurrent     → T4 bullet：TOCTOU 双成功——本 ticket 不测，留给 L2 钉住测试；
-//   - exception      → listSessions 抛非 ENOENT → 原样 rethrow 或 typed
-//                      fail-closed（**绝不**静默放行）。
+// Five input classes:
+//   - empty          -> list() empty / record lacks workspaceRoot / empty-string fields -> pass through;
+//   - negative       -> OFF mode + occupancy -> pass through (zero regression for OFF);
+//   - overflow       -> path normalization (trailing separator / long absolute path);
+//   - concurrent     -> TOCTOU double-success — not tested here, left to the pinning test below;
+//   - exception      -> listSessions throws non-ENOENT -> rethrow as-is or typed
+//                       fail-closed (**never** silently pass).
 //
-// 自占用不算占用：占用记录里 `conversation_id === self` 跳过（幂等 re-enter
-// 走 `bound.get(self) === target` 早返回，本身不会走到这里；但 self 通过
-// store.list() 显式枚举到也要排除——fresh 进程 bound Map 为空时尤其重要）。
+// Self-occupancy is not occupancy: skip records where `conversation_id === self`
+// (idempotent re-enter takes the `bound.get(self) === target` early return and never
+// reaches here; but self enumerated explicitly via store.list() must still be
+// excluded — especially important when a fresh process has an empty bound Map).
 //
-// 不写盘：占用检查纯只读 store.list()，绝不调 store.save / mkdir / writeFile
-// 等任何写盘动作（SC7 审查项）。
+// No disk writes: the occupancy check is purely a read of store.list(); it must never
+// call store.save / mkdir / writeFile or any other write (review constraint).
 describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktree_claimed", () => {
   it("ON档 + 目标树被别的现存会话记录占用 → typed worktree_claimed 含占用者会话 id + 释放路径", async () => {
     const repo = makeGitRepo();
@@ -1377,10 +1378,10 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     ).rejects.toMatchObject({
       message: expect.stringMatching(/exit-worktree|delete the session record/),
     });
-    // T4 / L1 弱档披露钉住（spec L1「三处强制披露」之回执处）：回执必须
-    // 显式说「occupancy is visible only within the current process」——不让
-    // 操作员误以为拿到了跨进程排他（强档需要扫遍 <dataDir>/sessions/* 全
-    // 部项目命名空间，本 spec 不做）。
+    // Weak-mode disclosure pinning (receipt point of the three mandatory disclosures): the
+    // receipt must explicitly state "occupancy is visible only within the current process" —
+    // so operators do not mistake it for cross-process exclusivity (strong mode would have
+    // to scan every project namespace under <dataDir>/sessions/*, which is out of scope here).
     await expect(
       guestProv.enter({
         conversationId: "conv-guest",
@@ -1615,7 +1616,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     await ownerProv.provision({ conversationId: "conv-a", root: repo });
 
     // Injecting a listSessions that would refuse to be called. If the
-    // provisioner calls it under OFF档, the test fails fast.
+    // provisioner calls it under OFF mode, the test fails fast.
     let listCalls = 0;
     const listSessions = () => {
       listCalls += 1;
@@ -1743,18 +1744,20 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     });
   });
 
-  // T4 / plans/worktree-exclusive-lock.md — L2 TOCTOU 行为钉住。
+  // TOCTOU behavior pinning.
   //
-  // 已知行为（spec L2 + 输入五类表 concurrent 臂 + ADR-0070 已知限制）：
-  // 占用来自持久化记录，记录在「工具成功 + 会话保存」时才写。两个会话在
-  // 同一时间窗内 enter 同一棵尚未被任何记录指向的树，可能都读到「无占用」
-  // 而双双成功。spec 明确不解决（解决要锁文件或注册表，Confirms with human
-  // 已明确不做），只要求**钉住这个行为**——不假装互斥，不掩盖窗口。
+  // Known behavior (ADR-0070 known limitation; concurrent arm of the five input classes):
+  // occupancy comes from persisted records, written only on "tool success + session save".
+  // Two sessions entering the same never-recorded tree within one time window may both
+  // read "unclaimed" and both succeed. This is deliberately not solved (solving would need
+  // a lock file or a registry — explicitly ruled out with the human); the requirement is
+  // to **pin the behavior** — no fake mutual exclusion, no hiding the window.
   //
-  // 构造方式：两个独立 provisioner 实例，各自 stub 一个 listSessions 永远
-  // 返回 []。这模拟「两会话的持久记录都还没写」的真实时序——等价于
-  // SessionStore.list() 在 enter 缝的 assertNotClaimed 与 persistWorkspaceRoot
-  // 之间的同一时间窗内的视角。注释与测试名明示这是 L2 已知行为，非缺陷。
+  // Construction: two independent provisioner instances, each stubbing a listSessions that
+  // always returns []. This simulates the real timing where "neither session's persistent
+  // record is written yet" — equivalent to the view SessionStore.list() gives inside the
+  // time window between assertNotClaimed and persistWorkspaceRoot at the enter seam.
+  // Comments and the test name state this is known behavior, not a defect.
   it("L2 TOCTOU 行为钉住：两会话同窗 enter 同一棵无记录树 → 双双成功（已知行为，spec 不假装互斥）", async () => {
     const repo = makeGitRepo();
     // A bare-bones owner provisions the target tree (no occupancy check, no
@@ -1792,12 +1795,12 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
       targetConversationId: "conv-owner",
     });
 
-    // L2 钉住：双双成功，路径相同。这是已知行为，不是 bug，不许 fail 这条
-    // 测试去"修正"成互斥——修正会破坏 SC7 零新写盘 + Confirms with
-    // human「不做锁文件 / 不做占用注册表」。
+    // Pinning: both succeed with the same path. This is known behavior, not a bug — do not
+    // fail this test to "fix" it into mutual exclusion; a fix would break the zero-new-disk-writes
+    // constraint and the human-confirmed "no lock file / no occupancy registry".
     expect(r1.path).toBe(tree);
     expect(r2.path).toBe(tree);
-    // 各自的 bound Map 各自认领——TOCTOU 窗口后的事实态。
+    // Each bound Map claims for itself — the de-facto state after the TOCTOU window.
     expect(guest1.isTaskWorktreeRoot(tree)).toBe(true);
     expect(guest2.isTaskWorktreeRoot(tree)).toBe(true);
   });

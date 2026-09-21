@@ -1,5 +1,5 @@
 /**
- * T1 (#618): JSONL 形态权威。
+ * JSONL-as-authority store format.
  *
  * Covers spec session-jsonl-resume Testing Decisions classes that apply to T1:
  *   - empty: new empty session → header + head:null, loads back empty.
@@ -498,7 +498,7 @@ describe("thinkingMs / thinkingMs parallel array (assistant duration)", () => {
   it("projectSessionLog collects thinkingMs aligned with messages, root → head order", () => {
     // Mixed chain: e0 user (no thinkingMs), e1 assistant with thinkingMs,
     // e2 user (no thinkingMs). Conditional emit fires; the user holes
-    // surface as null in the array (consumer ?? undefined 兜底).
+    // surface as null in the array (the consumer falls back via ?? undefined).
     const raw = buildJsonl(
       baseHeader,
       [
@@ -1199,7 +1199,7 @@ describe("title event records (ADR-0113: 标题事件权威, header title 缓存
     assert.equal(log.head, "e0");
     assert.equal(log.events.length, 1);
     assert.equal(latestTitleText(log), "事件标题");
-    // records 原样保留 title 记录（serializeSessionLog round-trip 依赖）。
+    // records keep the title record verbatim (serializeSessionLog round-trip relies on it).
     const kinds = log.records.map((r) => r.type);
     assert.deepEqual(kinds, ["message", "head", "title", "head"]);
   });
@@ -1256,7 +1256,7 @@ describe("title event records (ADR-0113: 标题事件权威, header title 缓存
     const file = projectSessionLog(log);
     assert.equal(file.title, "事件标题");
     assert.equal(file.messages.length, 2);
-    // 事件正文绝不混入 transcript 消息。
+    // title-event bodies must never leak into transcript messages.
     assert.ok(
       !JSON.stringify(file.messages).includes("事件标题"),
       "title 事件不得投影进 messages"

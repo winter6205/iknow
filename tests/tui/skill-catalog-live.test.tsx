@@ -2,18 +2,19 @@
 /**
  * tests/tui/skill-catalog-live.test.tsx
  *
- * `specs/skill-index-increment.md` SC8（slash 侧）—— TUI 斜杠候选面「当场
- * 热」的三条不变式：
+ * `specs/skill-index-increment.md` SC8 (slash side) — three invariants for keeping the TUI
+ * slash-candidate surface hot on the spot:
  *
- *   1. 面板**打开**（输入 "/" 上升沿）→ 经 T6 rescan 缝重扫，现行可加载面
- *      替换装配期缓存（会话中途落盘的 SKILL.md 立刻进候选，不必等下一 turn）；
- *   2. rescan **失败**（typed `SkillRescanError`）→ 保留缓存候选、不抛、不
- *      清空（人侧宽松面：坏根不该让人连既有 `/help` 都用不了），失败经
- *      notice 呈现且带 faults 明细（typed-error catch 契约）；
- *   3. 缝**缺席**（fixture / ask）→ 恒等透传缓存 catalog（旧行为逐字节一致）。
+ *   1. panel **opens** (rising edge of "/") → rescan through the rescan seam, the current
+ *      loadable surface replaces the assembly-time cache (a SKILL.md written mid-session
+ *      enters the candidates immediately, no need to wait for the next turn);
+ *   2. rescan **fails** (typed `SkillRescanError`) → keep cached candidates, don't throw,
+ *      don't clear (the human-facing lenient surface: a bad root shouldn't make even the
+ *      existing `/help` unusable); the failure surfaces via notice with fault detail (typed-error catch contract);
+ *   3. seam **absent** (fixture / ask) → pass through the cached catalog identically (byte-for-byte the old behavior).
  *
- * 端到端那一条走真实 TuiApp + mockInput 按键 + captureCharFrame —— 与当初
- * 坐实 SC8 缺失（「一轮 turn 之后 /live 仍无候选」）的探针同一条路径。
+ * The end-to-end case drives the real TuiApp + mockInput keys + captureCharFrame — the same
+ * path that first pinned the SC8 gap (after one turn, /live still had no candidate).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -52,7 +53,7 @@ async function makeRoots(): Promise<{ root: string; userHome: string }> {
   return { root, userHome };
 }
 
-/** 落一个 user 级 skill（`<userHome>/.iknow/skills/<name>/SKILL.md`）。 */
+/** plant a user-level skill (`<userHome>/.iknow/skills/<name>/SKILL.md`). */
 async function plantSkill(
   userHome: string,
   name: string,
@@ -82,12 +83,12 @@ async function untilFrame(
   throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
 }
 
-/** 空 catalog（缝两端都缺的退化形态）。 */
+/** empty catalog (degenerate shape with the seam missing on both ends). */
 function emptyCatalog() {
   return createSkillCatalog([]);
 }
 
-/** 装配期扫描（与真实 run.tsx 同路径：scanner → createSkillCatalog）。 */
+/** assembly-time scan (same path as real run.tsx: scanner → createSkillCatalog). */
 async function scanCatalog(userHome: string, root: string) {
   const entries = await createSkillScanner({
     userHome,
@@ -161,8 +162,8 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
   test("装配后落盘新 skill → 输入 / 即出候选（不等下一 turn）", async () => {
     const { root, userHome } = await makeRoots();
     await plantSkill(userHome, "before-scan", "开场就在的技能");
-    // 装配期扫描：只有 before-scan（此刻 live-skill 尚未落盘 —— 正是 SC8
-    // 的场景：会话中途才出现）。
+    // assembly-time scan: only before-scan (live-skill isn't on disk yet — exactly the
+    // SC8 scenario: it appears mid-session).
     const frozenCatalog = await scanCatalog(userHome, root);
     expect(frozenCatalog.loadable().map((e) => e.name)).toEqual([
       "before-scan",
@@ -173,7 +174,7 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
       projectIdentityRoot: root,
       env: {},
     });
-    // 会话中途落盘（「安装当下」）。
+    // written mid-session (the "moment of install").
     await plantSkill(userHome, "live-skill", "会话中途落盘的技能");
 
     const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-live-data-"));
@@ -184,8 +185,8 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
     });
     try {
       await untilFrame(app.setup, (f) => f.includes("Version"));
-      // 无本 hook 时：候选恒为冻表 → 这里只会看到 /before-scan。打开面板
-      // → rescan → live-skill 进候选（SC8 的判据）。
+      // without this hook: candidates stay the frozen table → only /before-scan visible here.
+      // opening the panel → rescan → live-skill enters candidates (SC8's criterion).
       await app.typeText("/live");
       await untilFrame(app.setup, (f) => f.includes("/live-skill"), 8000);
     } finally {
@@ -203,11 +204,11 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
       projectIdentityRoot: root,
       env: {},
     });
-    // 确定性失败：坏根 = 扫描根 chmod 000（根 readdir 必 EACCES → typed
-    // SkillRescanError；ENOENT 才是合法空态）。真实 chmod 而非 stub —— 失败
-    // 是从 scanner 的 onIoFailure 通道真造出来的（tests/skill/index-delta
-    // 同款夹具）。用 user 技能根而非插件根：前者必然在扫描面内，不受
-    // 「插件根是否被 consumer 走」影响。
+    // deterministic failure: bad root = scan root chmod 000 (root readdir must EACCES → typed
+    // SkillRescanError; only ENOENT is a legal empty state). real chmod rather than a stub — the
+    // failure is genuinely produced via the scanner's onIoFailure channel (same fixture as
+    // tests/skill/index-delta). use the user skill root not the plugin root: the former is always
+    // in the scan surface, unaffected by "whether the plugin root is walked by a consumer".
     const skillRoot = join(userHome, ".iknow", "skills");
     await chmod(skillRoot, 0o000);
 
@@ -220,8 +221,8 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
     try {
       await untilFrame(app.setup, (f) => f.includes("Version"));
       await app.typeText("/before");
-      // 失败面两条同时成立：缓存候选仍在（不清空）+ notice 带 faults 明细
-      // （而非 [object Object]）。
+      // both halves of the failure surface hold: cached candidates remain (not cleared)
+      // + notice carries faults detail (not [object Object]).
       await untilFrame(app.setup, (f) => f.includes("/before-scan"), 8000);
       await untilFrame(app.setup, (f) => f.includes("技能重扫失败"), 8000);
     } finally {
@@ -241,7 +242,7 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
     try {
       await untilFrame(app.setup, (f) => f.includes("Version"));
       await app.typeText("/live");
-      // 缝缺席 → 不重扫 → live-skill 不出现（与本切片前的旧行为同）。
+      // seam absent → no rescan → live-skill never appears (same as the old pre-change behavior).
       await new Promise((r) => setTimeout(r, 500));
       await app.setup.renderOnce();
       expect(app.setup.captureCharFrame()).not.toContain("/live-skill");
@@ -252,9 +253,10 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
 });
 
 describe("SC8 提交期竞态 — 快速键入/粘贴后立刻 Enter", () => {
-  // 真实 TUI 实测坐实的缺陷：面板打开时那次 rescan 是异步的，键入
-  // `/zz-live` 后立刻 Enter（粘贴形态、无逐键停顿）会赶在它落地之前 ——
-  // 只看缓存列表就把刚装的技能报成「未知命令」。下面直接钉提交期解析。
+  // defect confirmed on the real TUI: the rescan on panel open is async, so typing
+  // `/zz-live` and hitting Enter immediately (paste shape, no per-key pause) can beat it —
+  // consulting only the cached list reports the just-installed skill as 「未知命令」 ("unknown command").
+  // The cases below pin submit-time resolution directly.
   test("缓存里没有、重扫后有了 → 必须 hit（不得报未知命令）", async () => {
     const { root, userHome } = await makeRoots();
     await plantSkill(userHome, "zz-frozen", "开场就在");
@@ -375,7 +377,7 @@ describe("formatSkillRescanFailure — typed-error catch 契约", () => {
     expect(text).toContain("/x/skills");
     expect(text).toContain("EACCES");
     expect(text).toContain("/y/SKILL.md");
-    // 契约核心：不得退化成 [object Object]。
+    // contract core: must never degrade to [object Object].
     expect(text).not.toContain("[object Object]");
   });
 
@@ -385,9 +387,9 @@ describe("formatSkillRescanFailure — typed-error catch 契约", () => {
   });
 
   test("plain object 错误 → 不得打成 [object Object]（typed-error 契约核心）", () => {
-    // 契约禁止 `err instanceof Error ? err.message : String(err)`：plain
-    // object 走 String() 会丢全部结构。sanctioned renderer（errorMessage）
-    // 经 JSON.stringify 保住字段 —— 本断言在禁止形态上必红。
+    // the contract forbids `err instanceof Error ? err.message : String(err)`: a plain
+    // object through String() loses all structure. the sanctioned renderer (errorMessage)
+    // keeps fields via JSON.stringify — this assertion must go red on the forbidden shape.
     const text = formatSkillRescanFailure({
       kind: "session_store_error",
       context: "conversation_id",
@@ -397,7 +399,7 @@ describe("formatSkillRescanFailure — typed-error catch 契约", () => {
   });
 });
 
-// `roots` 清理：bun:test 无全局 afterAll 跨文件，本文件内每个 test 自带
-// try/finally destroy；tmp 目录留给 OS 回收（与 tests/tui 既有 fixture 同）。
+// `roots` cleanup: bun:test has no cross-file global afterAll, so every test here carries its
+// own try/finally destroy; tmp dirs are left for OS reclaim (same as existing tests/tui fixtures).
 void roots;
 void rm;

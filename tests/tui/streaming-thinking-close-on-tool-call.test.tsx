@@ -2,13 +2,14 @@
 /**
  * tests/tui/streaming-thinking-close-on-tool-call.test.tsx
  *
- * 不变式：流式 thinking 面板在 turn 内思考阶段结束（模型从 thinking 进入
- * tool_call_start 或 text_delta）时必须收起，不再继续累积 / 渲染——
- * 不应等整轮 turn 结束才消失。后续 thinking_delta 重新累积为新一段。
+ * Invariant: the streaming thinking panel must collapse when the thinking
+ * phase ends mid-turn (model moves from thinking to tool_call_start or
+ * text_delta) — it must not linger until the whole turn finishes. Later
+ * thinking_delta accumulates as a new segment.
  *
- * 本测试通过 stub streamDraft 事件序列（thinking_delta 若干 →
- * tool_call_start → 断言 `thinkingMasked()` 返回空串 + 已通知
- * listener）锁住不变式；不依赖真实模型。
+ * Locks the invariant via a stubbed streamDraft event sequence (thinking_delta
+ * ×N → tool_call_start → assert `thinkingMasked()` returns "" + listener
+ * notified); no real model involved.
  */
 import { expect, test } from "bun:test";
 import { createStreamDraft } from "../../src/cli/stream-draft.js";
@@ -17,16 +18,16 @@ test("tool_call_start 后 thinkingMasked() 返回空串：thinking 阶段结束"
   const draft = createStreamDraft();
   draft.append({ type: "thinking_delta", text: "思考甲" });
   draft.append({ type: "thinking_delta", text: "思考乙" });
-  // 累积后未清空 → 思考正文在场
+  // not yet cleared → thinking body still present
   expect(draft.thinkingMasked()).toContain("思考");
-  // 工具调用起点 → 思考阶段结束 → thinkingBuffer 必须清空
+  // tool-call start ends the thinking phase → thinkingBuffer must be cleared
   draft.append({
     type: "tool_call_start",
     name: "bash",
     id: "tu-tool-1",
   });
   expect(draft.thinkingMasked()).toBe("");
-  // thinkingRaw 也清空(若实现走 raw 而不是 masked,这里一并钉)。
+  // pin thinkingRaw too (in case the implementation tracks raw instead of masked).
   expect(draft.thinkingRaw()).toBe("");
 });
 
@@ -38,9 +39,10 @@ test("tool_call_start 触发 listener 通知,让 ChatView 重渲染", () => {
   });
   draft.append({ type: "thinking_delta", text: "思考正文" });
   const notifyBeforeToolStart = notifyCount;
-  // tool_call_start 后必须立即 flush(不等 50ms 节流),让 ChatView 同步
-  // 重渲染并隐藏 thinking 面板——节流延迟会让面板在工具调用后仍持续
-  // 可见 50ms,与「思考阶段结束就收起」的合同冲突。
+  // Must flush immediately after tool_call_start (no 50ms throttle wait) so
+  // ChatView re-renders synchronously and hides the thinking panel — a throttled
+  // flush keeps the panel visible 50ms past the tool call, contradicting the
+  // "collapse when the thinking phase ends" contract.
   draft.append({
     type: "tool_call_start",
     name: "bash",
@@ -51,8 +53,8 @@ test("tool_call_start 触发 listener 通知,让 ChatView 重渲染", () => {
 });
 
 test("tool_call_start 后续 text_delta 不重新启用流式 thinking 面板", () => {
-  // 场景：思考 → 工具 → 工具结果 → 后续 text_delta(正式回答)→ 此时不应
-  // 误把 text_delta 重新触发 thinking 面板的累积或重新渲染。
+  // Sequence: thinking → tool → tool result → later text_delta (final answer)
+  // must not re-trigger thinking-panel accumulation or re-render.
   const draft = createStreamDraft();
   draft.append({ type: "thinking_delta", text: "思考正文" });
   draft.append({
@@ -60,11 +62,11 @@ test("tool_call_start 后续 text_delta 不重新启用流式 thinking 面板", 
     name: "bash",
     id: "tu-tool-1",
   });
-  // thinking 已清空,正文仍为空
+  // thinking already cleared, text body still empty
   expect(draft.thinkingMasked()).toBe("");
   draft.append({ type: "text_delta", text: "正式回答" });
-  // thinking 仍为空(text_delta 不写 thinkingBuffer;若实现错把 text_delta
-  // 写进 thinking 就会在这里把 thinkingMasked 重新非空,锁住不变式)。
+  // thinking stays empty (text_delta must not write thinkingBuffer; an
+  // implementation leaking text_delta into thinking re-non-blanks thinkingMasked here).
   expect(draft.thinkingMasked()).toBe("");
 });
 

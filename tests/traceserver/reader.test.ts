@@ -611,7 +611,7 @@ describe("createJsonlTraceReader — contains filter", () => {
     const out = reader.query({ contains: ".iknow/skills/tail" });
     assert.equal(out.total, 1);
     assert.equal(out.records[0]?.["tool_call_id"], "tool-tail");
-    // 不带 contains 的现状查询仍受 8 MiB 帽约束 — 同一 reader 上两臂对照。
+    // A plain query without contains is still capped at 8 MiB — compare both arms on the same reader.
     const plain = reader.query({ recordType: "tool_call" });
     assert.equal(plain.total, 0);
     assert.equal(plain.truncated, true);
@@ -647,9 +647,10 @@ describe("createJsonlTraceReader — contains filter", () => {
   });
 
   it("leaves byte-level semantics (offset, truncated) untouched when contains filters lines", () => {
-    // contains 过滤发生在行边界切分之后, 所以 nextOffset 仍指向最后一条
-    // **完整行**的结尾 (含未命中行), truncated 仍由字节帽决定 — 轮询续读
-    // 不会因过滤而丢行。
+    // contains filtering happens after line-boundary splitting, so nextOffset
+    // still points at the end of the last **complete line** (non-matching lines
+    // included), and truncated is still decided by the byte cap — polling
+    // resumes without losing lines just because of filtering.
     const filler = JSON.stringify({
       record_type: "turn",
       turn_id: "pad",
@@ -671,8 +672,8 @@ describe("createJsonlTraceReader — contains filter", () => {
     writeFileSync(tracePath, content, "utf8");
     const reader = createJsonlTraceReader({ filePath: tracePath });
     const out = reader.query({ contains: ".iknow/skills/tail" });
-    // contains 走 containsMaxBytes (256 MiB) > 文件大小, 故不截断; offset
-    // 指向文件结尾 (tail + "\n" 之后), 即全文件的完整行边界。
+    // contains uses containsMaxBytes (256 MiB) > file size, so no truncation;
+    // offset points at end of file (after tail + "\n"), i.e. the full line boundary.
     assert.equal(out.truncated, false);
     assert.equal(out.offset, Buffer.byteLength(content));
   });

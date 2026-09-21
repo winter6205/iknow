@@ -1,12 +1,16 @@
 /**
- * ADR-0113 session-list-title T4: hub 侧 lite 标题生成触发语义集成测试。
- * 真实 SessionStore(temp dir) + stub deps + stub titleGenerator 注入。
- * 每条触发语义一个 describe/(case):
- *   (a) 第一次 completed + 实质 user → fire-and-forget,不挡主回合;
- *   (b) lite(generator)缺席 → 完全不触发,无报错;
- *   (c) 生成抛错 / undefined → log-and-continue,title 留占位;
- *   (d) 已有标题事件 → 第二次 completed 不写第二条(进程内 + 跨 hub 磁盘闸);
- *   (e) 寒暄-only → 不生成;后续实质提问的 completed 才生成。
+ * ADR-0113 session-list-title: integration tests for hub-side lite title
+ * generation trigger semantics. Real SessionStore (temp dir) + stub deps +
+ * stub titleGenerator. One describe per trigger case:
+ *   (a) first completed + substantive user msg → fire-and-forget, never
+ *       blocks the main turn;
+ *   (b) lite (generator) absent → never triggers, no error;
+ *   (c) generator throws / returns undefined → log-and-continue, title stays
+ *       placeholder;
+ *   (d) title event already exists → second completed writes no second event
+ *       (in-process gate + cross-hub disk gate);
+ *   (e) small-talk-only → no generation; a later completed turn with a
+ *       substantive question does generate.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
@@ -58,7 +62,7 @@ async function titleEventsOf(conversationId: string): Promise<string[]> {
         titles.push(rec.text);
       }
     } catch {
-      // 非 JSON 行忽略(仅本测试的计数视角;真实解析在 store)。
+      // Ignore non-JSON lines (counting view local to this test; real parsing is in the store).
     }
   }
   return titles;
@@ -106,13 +110,13 @@ describe("(a) 第一次 completed + 实质 user → 异步生成不挡主回合"
     const hub = makeHubWith(gen);
     const { session } = await hub.createSession();
 
-    // 生成器尚未 settle —— postMessage 仍必须返回(若 hub await 生成,此 await 悬挂超时)。
+    // Generator has not settled yet — postMessage must still return (if the hub awaited generation, this await would hang to timeout).
     const res = await hub.postMessage({
       conversationId: session.conversation_id,
       text: "帮我重构登录模块并补齐单元测试",
     });
     expect(res.turn.answer.stopReason).toBe("completed");
-    // 此刻标题事件尚未落盘 —— 证明主回合没有被生成阻塞。
+    // Title event not yet on disk — proves the main turn was not blocked by generation.
     expect(await titleEventsOf(session.conversation_id)).toEqual([]);
 
     gate.resolve("登录模块重构");
@@ -123,13 +127,13 @@ describe("(a) 第一次 completed + 实质 user → 异步生成不挡主回合"
       .toEqual(["登录模块重构"]);
     const loaded = await store.load(session.conversation_id);
     expect(loaded.title).toBe("登录模块重构");
-    // 生成器恰好调用一次,输入含实质 user 查询
+    // Generator invoked exactly once, input contains the substantive user query
     expect(sources.length).toBe(1);
     expect(sources[0].userQueries).toEqual(["帮我重构登录模块并补齐单元测试"]);
   });
 });
 
-// -- (b) lite 缺席 --------------------------------------------------------------
+// -- (b) lite (generator) absent -------------------------------------------------
 
 describe("(b) lite 缺席 → 完全不触发,无报错", () => {
   it("未注入 titleGenerator 的 hub 正常 completed,无标题事件、无 warn", async () => {
@@ -147,7 +151,7 @@ describe("(b) lite 缺席 → 完全不触发,无报错", () => {
   });
 });
 
-// -- (c) 生成失败 → log-and-continue,占位保留 ------------------------------------
+// -- (c) generation fails → log-and-continue, placeholder kept --------------------
 
 describe("(c) 生成抛错 / 无结果 → 静默 log-and-continue", () => {
   it("generator 抛异常:postMessage 正常返回,标题留占位,一次 warn", async () => {
@@ -186,7 +190,7 @@ describe("(c) 生成抛错 / 无结果 → 静默 log-and-continue", () => {
   });
 });
 
-// -- (d) 已有标题事件 → 不写第二条 -------------------------------------------------
+// -- (d) title event exists → no second write -------------------------------------
 
 describe("(d) 已有标题事件 → 跳过", () => {
   it("第二次 completed 不再调用生成器、不写第二条事件", async () => {
@@ -209,7 +213,7 @@ describe("(d) 已有标题事件 → 跳过", () => {
       conversationId: session.conversation_id,
       text: "再补一段导出功能",
     });
-    // 让任何误触发的异步尾巴跑完
+    // let any wrongly-triggered async tail finish
     await new Promise((r) => setTimeout(r, 50));
     expect(calls).toBe(1);
     expect(await titleEventsOf(session.conversation_id)).toEqual([
@@ -245,9 +249,11 @@ describe("(d) 已有标题事件 → 跳过", () => {
   });
 
   it("check-then-act 同槽位:预筛通过后标题事件才落盘 → 槽位内复检拦截第二条", async () => {
-    // 钉住 review-fix Medium:hasTitleEvent 的权威判定与 appendTitle 在同一
-    // serialize work 回调内顺序执行。生成期间(预筛已读空之后)外部写入一条
-    // 标题事件 → 落盘前槽位内复检必须看见它并跳过,磁盘上只有一条事件。
+    // Invariant: the authoritative hasTitleEvent check and appendTitle run
+    // sequentially inside the same serialize work callback. If an external
+    // title event lands during generation (after the pre-screen read empty),
+    // the in-slot re-check before writing must see it and skip — exactly one
+    // event on disk.
     const gate = deferred<string | undefined>();
     let genStarted = false;
     const gen: TitleGenerator = () => {
@@ -261,7 +267,7 @@ describe("(d) 已有标题事件 → 跳过", () => {
       text: "让标题判定和写入落在同一个槽位里",
     });
     await vi.waitFor(() => expect(genStarted).toBe(true));
-    // 此刻 hub 的队列外预筛已判定「无标题事件」;现在落一条事件。
+    // Hub's out-of-queue pre-screen has just concluded "no title event"; write one now.
     await store.appendTitle({ id: session.conversation_id, text: "期间写入" });
     gate.resolve("不该出现的第二条");
     await new Promise((r) => setTimeout(r, 50));
@@ -269,14 +275,14 @@ describe("(d) 已有标题事件 → 跳过", () => {
   });
 });
 
-// -- (e) 寒暄闸 -------------------------------------------------------------------
+// -- (e) small-talk gate -----------------------------------------------------------
 
 describe("(e) 寒暄-only → 不生成;后续实质提问才生成", () => {
   it("首条为寒暄:生成器不被调用;第二条实质提问 completed 后调用一次", async () => {
     let calls = 0;
     const gen: TitleGenerator = async (source) => {
       calls += 1;
-      // 寒暄不进 prompt:只有实质查询
+      // small talk never enters the prompt: only substantive queries
       expect(source.userQueries).toEqual(["帮我把侧栏标题渲染改完"]);
       return "侧栏标题渲染";
     };
@@ -301,7 +307,7 @@ describe("(e) 寒暄-only → 不生成;后续实质提问才生成", () => {
   });
 });
 
-// -- hub 侧 sanitize(防生成器返回多行/超长原文) ------------------------------------
+// -- hub-side sanitize (guards against multi-line / oversized generator output) ------
 
 describe("hub 落盘前统一 sanitize", () => {
   it("生成器返回多行超长文本 → 落盘为单行 ≤80 字", async () => {

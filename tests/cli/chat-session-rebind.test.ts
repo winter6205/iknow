@@ -1,22 +1,25 @@
 /**
- * Review High-1 (2026-08-29, plans/worktree-isolation-on-mutate.md) — CLI
- * chat 入口的 per-turn 引擎重建缝。
+ * Per-turn engine-rebuild seam for the CLI chat entry point.
  *
- * chat REPL 的 deps 在 runChatSession 装配一次；T3 门禁 rebind 后会话文件
- * 的 workspaceRoot 指向 task worktree，下一回合必须以该根重建 deps
- * （rebuildDeps 缝，cli.ts 提供），否则 mutate 会被 stale 引擎永久拦下。
- * 钉死三条：
- *   1. 会话文件 workspaceRoot 变化 → 查询行开跑前以新根重建并重包
- *      （violation executor + conversationId + commitMessages 语义保持）；
- *   2. 根未变化 / 无 workspaceRoot / 文件缺席 → 不重建（零额外行为）；
- *   3. 重建失败 → 可见 stderr + 保持旧 deps（mutate 仍 fail-closed）。
+ * chat REPL assembles deps once in runChatSession; after the permission gate
+ * rebinds, the session file's workspaceRoot points at the task worktree, so the
+ * next turn must rebuild deps from that root (the rebuildDeps seam, supplied by
+ * cli.ts) —— otherwise mutate stays blocked by the stale engine forever. Pinned:
+ *   1. changed workspaceRoot in the session file → rebuild with the new root and
+ *      re-wrap before a query line runs (violation executor + conversationId +
+ *      commitMessages semantics preserved);
+ *   2. unchanged root / no workspaceRoot / missing file → no rebuild (zero extra
+ *      behaviour);
+ *   3. rebuild failure → visible stderr plus the old deps kept (mutate stays
+ *      fail-closed).
  *
- * 收敛修复（2026-08-29 第二轮 review）：rebuildDeps 返回完整句柄 bundle
- * （对齐 TUI buildEngine 缝 / hub per-root 形状），refresh 成功后 rewire
- * ctx 的 subagentManager / graphAssembly / autoMemory / overlayMemoryPrefetch
- * （split-brain 修复：drain 消费新 manager，/graph 快照反映新装配），并把
- * 旧引擎 shutdown 先收口、新 shutdown 注册进 engineShutdown.current
- * （cli.ts 的 registerShutdown 闭包读 current —— SC11/SC16 纪律）。
+ * Follow-up fix: rebuildDeps returns the full handle bundle (matching the TUI
+ * buildEngine seam and the hub's per-root shape); after a successful refresh the
+ * ctx handles subagentManager / graphAssembly / autoMemory /
+ * overlayMemoryPrefetch are rewired (split-brain fix: drain consumes the new
+ * manager, /graph snapshots reflect the new assembly), the old engine's shutdown
+ * is closed out first, and the new shutdown is registered into
+ * engineShutdown.current (cli.ts's registerShutdown closure reads current).
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -73,8 +76,8 @@ function afterEachCleanup(): void {
   });
 }
 
-// stderr 拦截走共享 helper captureStderrOf（writeErr SSOT）—— 可见降级 /
-// 静默性断言共用（suppress 语义）。
+// stderr interception goes through the shared helper captureStderrOf (writeErr
+// SSOT), so visible-degradation and silence assertions share one suppress path.
 
 function makeManagerStub(
   opts: {
@@ -124,7 +127,8 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
       return { deps: rebuiltDeps };
     };
 
-    // 模拟 T3 rebind 已落盘（上一回合门禁拦下 + store.save workspaceRoot）
+    // Simulate the gate rebind already on disk (previous turn blocked by the
+    // permission gate + store.save wrote the new workspaceRoot)
     const file = await store.load(conversationId);
     await store.save({
       id: conversationId,
@@ -137,18 +141,21 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
     assert.deepEqual(rebuilds, [wtRoot]);
     assert.equal(ctx.engineRoot, wtRoot);
-    // 重包语义：不是 rebuiltDeps 原样（conversationId 已收敛 / 包装层生效）
+    // Re-wrap semantics: not rebuiltDeps verbatim (conversationId converged /
+    // wrapping layer applied)
     assert.notEqual(ctx.deps, rebuiltDeps);
     assert.equal(ctx.deps.conversationId, conversationId);
     assert.equal(ctx.deps.adapter, rebuiltDeps.adapter);
   });
 
   it("runChatSession 为重建装配 wrapRebuiltDeps（violation/commit 包装与初始装配同源）", () => {
-    // 结构性钉子：装配必须把**同一个** wrapChatDeps 同时用在初始 deps 与
-    // 重建缝（rebuildDeps.wrapRebuiltDeps），否则 rebuilt 引擎会丢 violation
-    // counter 与 commitMessages 钩子，或与初始装配漂移成两套包装语义。
-    // S5 抽出 assembleChatSessionContext 后接线移到 helper，故断言两半各自
-    // 成立：调用点把闭包传进装配，装配把它绑到重建缝。
+    // Structural pin: assembly must use the **same** wrapChatDeps for both the
+    // initial deps and the rebuild seam (rebuildDeps.wrapRebuiltDeps); otherwise
+    // the rebuilt engine loses the violation counter and the commitMessages hook,
+    // or drifts into two competing wrapping semantics.
+    // Since assembly was extracted into assembleChatSessionContext the wiring
+    // lives in the helper, so both halves are asserted separately: the call site
+    // passes the closure into assembly, and assembly binds it to the rebuild seam.
     const src = readFileSync(
       join(import.meta.dirname, "..", "..", "src", "cli", "chat-session.ts"),
       "utf8"
@@ -179,12 +186,13 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
       return { deps: ctx.deps };
     };
 
-    // workspaceRoot 与 engineRoot 相同（serve bind 写主根的形态）
+    // workspaceRoot equals engineRoot (the shape serve writes when bound to the
+    // main root)
     await processChatLine({ line: "q", ctx });
     assert.equal(rebuilds, 0);
 
-    // 会话文件缺席（not_found）→ 静默（typed not_found 是「无 rebind 信号」
-    // 的正常形态，不算错误）
+    // Missing session file (not_found) → stay silent: typed not_found is the
+    // normal "no rebind signal" shape, not an error
     ctx.state.conversationId = "conv-unknown";
     const stderr = await captureStderrOf(async () => {
       await processChatLine({ line: "q2", ctx });
@@ -219,13 +227,14 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
       file: { ...file, workspaceRoot: wtRoot },
     });
 
-    // refresh 的可见降级走 process.stderr（writeErr SSOT）—— 拦截捕获
+    // The refresh's visible degradation goes to process.stderr (writeErr SSOT),
+    // so capture it here
     let r;
     const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
-    assert.equal(ctx.engineRoot, mainRoot); // 未切换
+    assert.equal(ctx.engineRoot, mainRoot); // root not switched
     assert.ok(stderr.includes("引擎重建失败"), "重建失败必须可见（stderr）");
   });
 });
@@ -522,15 +531,17 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     const r = await processChatLine({ line: "q", ctx });
     assert.equal(r.ranQuery, true);
 
-    // split-brain 修复：ctx 四个句柄全部指向重建引擎
+    // split-brain fix: all four ctx handles point at the rebuilt engine
     assert.equal(ctx.subagentManager, newManager);
     assert.equal(ctx.graphAssembly, ga2);
     assert.equal(ctx.autoMemory, am2);
     assert.equal(ctx.overlayMemoryPrefetch, om2);
-    // shutdown 句柄换血：旧引擎收口一次（先收口），新 shutdown 注册
+    // Shutdown handle swapped: the old engine is closed out exactly once (first),
+    // then the new shutdown is registered
     assert.equal(oldShutdownCalls, 1, "旧引擎 shutdown 必须在切换点收口");
     assert.equal(ctx.engineShutdown?.current === undefined, false);
-    // 信号路径现在指向重建引擎的 shutdown（cli.ts registerShutdown 闭包读 current）
+    // The signal path now reaches the rebuilt engine's shutdown (cli.ts
+    // registerShutdown reads current through a closure)
     await ctx.engineShutdown?.current?.();
     assert.equal(rebuiltShutdownCalls, 1);
     assert.deepEqual(
@@ -622,7 +633,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       rebuilds += 1;
       return { deps: ctx.deps };
     };
-    // 注入 io_error（磁盘读失败等真实异常形态）
+    // Inject io_error (the shape of a real failure such as a disk read error).
     (store as { load: unknown }).load = async () => {
       throw {
         kind: "io_error",
@@ -672,20 +683,22 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       return { deps: makeDeps([assistantResult({ texts: ["rebuilt"] })]) };
     };
 
-    // slash 行：不跑引擎 → 不触发 rebind 检测（会话文件已偏离也不重建）
+    // slash line: no engine run → no rebind check (no rebuild even though the
+    // session file already diverged)
     await processChatLine({ line: "/help", ctx });
     assert.deepEqual(rebuilds, [], "slash 行不得触发 rebind 检测");
 
-    // 查询行：照常检测并重建
+    // query line: checked and rebuilt as usual
     await processChatLine({ line: "q", ctx });
     assert.deepEqual(rebuilds, [wtRoot]);
     assert.equal(ctx.engineRoot, wtRoot);
   });
 
   it("cli.ts 装配钉：registerShutdown 经 activeEngineShutdown 盒读最新引擎 + engineShutdown 透传 ctx", () => {
-    // 结构性钉子：重建引擎的 shutdown 必须接进进程信号路径（SC11/SC16）——
-    // registerShutdown 只挂一次，信号收口读 activeEngineShutdown.current；
-    // refresh 换血后 current 指向重建引擎。
+    // Structural pin: the rebuilt engine's shutdown must stay wired into the
+    // process signal path —— registerShutdown hooks once and the signal
+    // close-out reads activeEngineShutdown.current; after the refresh swaps
+    // handles, current points at the rebuilt engine.
     const src = readFileSync(
       join(import.meta.dirname, "..", "..", "src", "cli.ts"),
       "utf8"
@@ -708,19 +721,20 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
       join(import.meta.dirname, "..", "..", "src", "cli.ts"),
       "utf8"
     );
-    // 启动 workspace 成为稳定 productRoot（= workspaceRoot at first assembly）
+    // The startup workspace is the stable productRoot (= workspaceRoot at first
+    // assembly)
     expect(src).toMatch(/productRoot\s*=\s*workspaceRoot/);
     expect(src).toMatch(/productRoot(?:\s*,|\s*:)/);
-    // rebuild 闭包不得把 productRoot 改成 task root
+    // The rebuild closure must not repoint productRoot at the task root
     const rebuildIdx = src.indexOf("rebuildDeps:");
     assert.ok(rebuildIdx >= 0, "rebuildDeps 缝必须存在");
     const rebuildBlock = src.slice(rebuildIdx, rebuildIdx + 900);
     expect(rebuildBlock).toMatch(/workspaceRoot:\s*root/);
     expect(rebuildBlock).toMatch(/cwd:\s*root/);
-    // productRoot 原样透传（变量引用），不得写成 productRoot: root
+    // productRoot is forwarded as-is (variable reference), never productRoot: root
     expect(rebuildBlock).not.toMatch(/productRoot:\s*root\b/);
     expect(rebuildBlock).toMatch(/productRoot(?:\s*,|\s*\})/);
-    // engineRoot 与启动 product/workspace 对齐（非裸 process.cwd()）
+    // engineRoot aligns with the startup product/workspace, not bare process.cwd()
     expect(src).toMatch(/engineRoot:\s*(?:productRoot|workspaceRoot)\b/);
   });
 
@@ -730,19 +744,21 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
       "utf8"
     );
     expect(src).toMatch(/productRoot\?:\s*string/);
-    // wrapper 不得用 process.cwd() 派生 productRoot
+    // The wrapper must not derive productRoot from process.cwd()
     expect(src).not.toMatch(/productRoot:\s*process\.cwd\(\)/);
-    // 「确实透传到了」由真跑守门：tests/cli/runtime-forwards-roots.test.ts 断言
-    // 每个根都落到 build-engine 的 opts 上。这里不再钉转发的**写法** ——
-    // round 4 起 wrapper 不手写白名单，改为 rest 整体透传（手写白名单只关住
-    // 「宿主写了接口没声明的字段」一个方向，反方向漏接编译全绿）。
+    // "it really got forwarded" is guarded by a real-run test asserting every
+    // root reaches the build-engine opts, so this no longer pins the forwarding
+    // *style*: the wrapper passes the rest object through wholesale instead of
+    // hand-writing a whitelist, which would only catch one direction (a host
+    // field absent from the interface) while silently missing the other.
     expect(src).toMatch(/withoutUndefined\(passthrough\)/);
   });
 });
 
-// 写根 trailer（specs/skill-load-write-root.md T5）：改绑成功后主会话在
-// 下一次查询行给模型再给一次写根段（writeRootSegment 同一文案），仅一次；
-// 未改绑不多段；重建失败不注入。文案不进 system / env_snapshot。
+// Write-root trailer: after a successful rebind the main session hands the model
+// one write-root segment (same wording as writeRootSegment) on the next query
+// line, exactly once; no rebind adds no segment; a failed rebuild injects
+// nothing. The text never enters system / env_snapshot.
 describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", () => {
   async function userTextsOf(
     messages: ReadonlyArray<{
@@ -795,22 +811,24 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
     });
 
     await processChatLine({ line: "q1", ctx });
-    // turn-1 后 result.messages 进 ctx.state.messages —— 模型看见的面上
-    // 必须出现一次写根段（文案与 writeRootSegment helper 字节一致）。
+    // After turn-1, result.messages feed ctx.state.messages —— the model-facing
+    // surface must show the write-root segment exactly once (byte-identical to the
+    // writeRootSegment helper).
     const segments1 = (await userTextsOf(ctx.state.messages)).filter((t) =>
       t.includes(WRT_MARK)
     );
     assert.equal(segments1.length, 1, "改绑后第一次查询行恰好注入一次");
-    // T4 (write-situation-disclosure)：rebind 通知由处境枚举驱动。本测试
-    // 没显式设 isolationOn → 默认 false → `writable_main`，wtRoot 是树形
-    // 但 `writable_main` 与 `writable_tree` 输出逐字节相等（SC2 硬约束）。
+    // The rebind notice is driven by the write-situation enum. This test leaves
+    // isolationOn unset → false → `writable_main`; wtRoot is a tree shape, but
+    // `writable_main` and `writable_tree` render byte-identically (hard
+    // constraint).
     assert.equal(
       segments1[0],
       writeRootSegment("writable_main", wtRoot),
       "文案必须与 writeRootSegment helper 字节一致"
     );
 
-    // 第二行不再注入（非每条用户消息）。
+    // The second line injects nothing (not per user message).
     await processChatLine({ line: "q2", ctx });
     const segments2 = (await userTextsOf(ctx.state.messages)).filter((t) =>
       t.includes(WRT_MARK)
@@ -880,10 +898,11 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
   });
 
   it("exit-worktree 回主仓（活写根 = 身份根）→ 不注入写根段（spec 合同 7：仅当写根 ≠ 身份根）", async () => {
-    // 会话已在 task worktree（engineRoot = wtRoot），上一回合 /exit 把
-    // workspaceRoot 改绑回主仓 → 重建触发。此时 newRoot = mainRoot =
-    // mainCheckoutOf(newRoot)，注入的写根文案会与「Project path 只读」
-    // 自相矛盾 → 必须不置入。
+    // The session already sits in the task worktree (engineRoot = wtRoot) and the
+    // previous turn's /exit rebound workspaceRoot back to the main repo → rebuild
+    // fires. Here newRoot = mainRoot = mainCheckoutOf(newRoot), so injecting the
+    // write-root text would contradict "Project path is read-only" → it must not
+    // be placed.
     const dir = makeStoreDir();
     const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-wrt-exit";

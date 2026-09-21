@@ -1,13 +1,14 @@
 /**
- * T2 (plans/worktree-mcp-rebind-lifecycle.md) — `resolveMcpRoots` 双根合同单测。
+ * Unit tests for the `resolveMcpRoots` dual-root contract.
  *
- * 验收:
- *  1. 一次纯解析产生规范化的 `{ workspaceRoot, mcpConfigRoot }`;
- *     `mcpConfigRoot` 只由 `productRoot` 派生,rebind 后不随 task worktree 漂移。
- *  2. 缺根 / 空白 / 相对 / 无法规范化 / 与既有根不一致的输入,在任何文件读取、
- *     spawn 或工具执行前以 T1 的 `McpLifecycleError` typed kind fail-closed,
- *     绝不回退 `process.cwd()`。
- *  3. resolver 是纯函数:不读 git、不读文件系统、不持会话状态。
+ * Acceptance:
+ *  1. one pure parse yields normalized `{ workspaceRoot, mcpConfigRoot }`;
+ *     `mcpConfigRoot` derives from `productRoot` only and does not drift to the
+ *     task worktree after rebind.
+ *  2. missing / blank / relative / unnormalizable roots and roots inconsistent
+ *     with the existing root fail-closed with a typed `McpLifecycleError` kind
+ *     before any file read, spawn, or tool execution — never falling back to `process.cwd()`.
+ *  3. the resolver is a pure function: no git reads, no filesystem reads, no session state.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -20,7 +21,7 @@ import { resolveMcpRoots } from "../../src/harness/mcp/roots.ts";
 const PRODUCT_ROOT = "/repo/iknow";
 const TASK_WORKTREE = "/repo/iknow/.iknow/worktrees/conv-1";
 
-/** 断言调用抛出指定 kind 的 typed error,并返回它以便继续断言细节。 */
+/** Assert the call throws a typed error of the given kind; return it for further detail assertions. */
 function expectLifecycleError(
   call: () => unknown,
   kind: McpLifecycleErrorKind

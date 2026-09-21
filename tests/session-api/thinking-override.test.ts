@@ -14,12 +14,14 @@ import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 
 /**
- * specs/tui-model-command SC9：`withThinkingOverride` 的 client 构造与
- * build-engine `createAdapterFromEnv` 同形（provider.headers →
- * `defaultHeaders`，缺席不传该键）。本文件其余用例走真实 SDK + 本地
- * capture server（验 wire 上的 thinking 字段），这里只在 SDK 构造点包一层
- * 记录器 —— 子类化真实 Anthropic（不是替身），既有用例行为不变；而
- * `withThinkingOverride` 不把 client 交回调用方，构造参数是唯一可观察面。
+ * `withThinkingOverride` must build its client in the same shape as
+ * build-engine's `createAdapterFromEnv` (provider.headers ->
+ * `defaultHeaders`; the key is omitted when absent). The rest of this file
+ * uses the real SDK + a local capture server (checking thinking fields on
+ * the wire); here we only wrap a recorder at the SDK construction point —
+ * subclassing the real Anthropic (not a stand-in), so existing cases behave
+ * unchanged. `withThinkingOverride` never returns the client to the caller,
+ * so constructor args are the only observable surface.
  */
 const anthropicCtorOpts = vi.hoisted(
   () => [] as Array<Record<string, unknown>>
@@ -311,7 +313,7 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     assert.equal("output_config" in body, false);
   });
 
-  // -- SC9 (tui-model-command): provider.headers 透传 ------------------
+  // -- provider.headers passthrough ------------------
 
   it("env.llm.headers 在场 → client 构造收到 defaultHeaders（与 build-engine 同形）", () => {
     anthropicCtorOpts.length = 0;
@@ -346,7 +348,7 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     );
   });
 
-  // -- ADR-0094 T1 / SC7: wire-model 只放尾段（与 build-engine 同形） ----
+  // -- ADR-0094: wire-model carries only the tail segment (same shape as build-engine) ----
 
   it("route 含 provider 前缀 → wire model = 尾段（provider id 不上 wire）", async () => {
     capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
@@ -380,9 +382,10 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     assert.equal(body.model?.includes("9router"), false);
   });
 
-  // -- ADR-0094 SC7: thinking 单工厂（两路径 client 字段表同形） ----------
-  // 覆盖与无覆盖对同一 env 必须解析出同一 client 构造形状（apiKey/baseUrl/
-  // headers 同形），证明 thinking 只改入参、不存在第二套装配抄写。
+  // -- ADR-0094: single thinking factory (client field table identical across both paths) ----------
+  // With-override and no-override on the same env must resolve to the same client
+  // construction shape (apiKey/baseUrl/headers identical), proving thinking only changes
+  // its inputs and no second assembly copy exists.
 
   it("SC7: 同一 env 下 override / 无 override 的 client 构造 options 同形", () => {
     const baseEnv = {
@@ -397,7 +400,7 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     });
     const withOverride = [...anthropicCtorOpts];
     anthropicCtorOpts.length = 0;
-    // 无覆盖对照：直接调 createAdapterFromEnv（= build-engine / reloadFromEnv 同一路径）。
+    // No-override control: call createAdapterFromEnv directly (the same path as build-engine / reloadFromEnv).
     createAdapterFromEnv(makeTestLlmEnv(baseEnv));
     const withoutOverride = [...anthropicCtorOpts];
 
@@ -407,8 +410,8 @@ describe("withThinkingOverride — request-side thinking fields via local captur
   });
 
   it("SC7: override thinking 覆盖只改 adapter 入参（capture server 验 thinking 字段形状）", async () => {
-    // 单一 capture server、同一 env 对象：先走无覆盖工厂（= build-engine /
-    // reloadFromEnv 同一路径），再走 thinking 覆盖路径，比较两次 wire 形状。
+    // One capture server, one env object: run the no-override factory first (= the
+    // build-engine / reloadFromEnv path), then the thinking-override path, and compare the two wire shapes.
     capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const env = makeTestLlmEnv({ baseUrl: capture.origin });
     await createAdapterFromEnv(env).adapter.step(
@@ -425,15 +428,15 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     await overrideAdapter.step({ messages: [], turnCount: 0 }, { tools: [] });
     const overrideBody = capture.bodies[1] as Record<string, unknown>;
 
-    // model / client 形状同源（同一 env）；thinking 入参只被覆盖改写。
+    // model / client shape share one source (same env); only the thinking input is rewritten by the override.
     assert.equal(overrideBody.model, baseBody.model);
-    assert.equal("thinking" in baseBody, false); // env 默认 off
+    assert.equal("thinking" in baseBody, false); // env default is off
     assert.deepEqual(overrideBody.thinking, { type: "adaptive" });
     assert.deepEqual(overrideBody.output_config, { effort: "high" });
   });
 });
 
-/** SC9 用例的 deps：override 只换 adapter，executor / registry 不参与。 */
+/** deps for the override cases: the override swaps only the adapter; executor / registry are not involved. */
 function baseDepsForHeaderProbe(): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);

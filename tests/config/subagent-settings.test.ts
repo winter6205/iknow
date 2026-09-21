@@ -1,13 +1,15 @@
 /**
- * #358 T1 — subagent settings 双字段集成（per-call llm.timeoutMs + per-task subagent.taskTimeoutMs）。
+ * subagent settings two-field integration (per-call llm.timeoutMs + per-task subagent.taskTimeoutMs).
  *
- * settings + env 联合：
- *  - settings 文件层 parse/merge（drop-not-throw）；ADR-0084 后 llm/subagent
- *    均为用户层键 → 项目文件里的同名段被允许名单丢弃，不参与合并；
- *  - env 文件层 + process.env 层 fallback（env > settings）；
- *  - 跨进程继承（子代理自装配同 cwd + 同 home → 继承 user settings 的两个字段）。
+ * settings + env together:
+ *  - settings file-layer parse/merge (drop-not-throw); since ADR-0084 llm/subagent
+ *    are both user-layer keys → same-named sections in the project file are dropped
+ *    by the allowlist and never merged;
+ *  - env file layer + process.env fallback (env > settings);
+ *  - cross-process inheritance (a subagent self-assembles with the same cwd + home →
+ *    inherits both user-settings fields).
  *
- * 覆盖：单字段、双字段并存、合并覆盖、env 覆盖 settings、跨进程继承、frozen。
+ * Coverage: single field, both fields coexisting, merge override, env overriding settings, cross-process inheritance, frozen.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -29,10 +31,10 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-/** env loader：须命中 providers 注册表。 */
+/** env loader: must hit the providers registry. */
 const EMPTY = withTestLlmProvider();
 
-/** 写 user / project 各一个 settings 文件，返回隔离的 LoadSettingsOpts。 */
+/** Writes one settings file per layer (user / project), returns isolated LoadSettingsOpts. */
 async function makeSettings(
   user: Record<string, unknown>,
   project: Record<string, unknown>
@@ -257,9 +259,9 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
   });
 
   it("子代理 process 在相同 cwd + 相同 home → 继承 user settings 的 llm.timeoutMs + subagent.taskTimeoutMs", async () => {
-    // ADR-0084：llm/subagent 都是用户层键 → 继承锚点是 <home>/.iknow/settings.json；
-    // home 显式注入（POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作但
-    // 隐式、易被破坏）。
+    // ADR-0084: llm/subagent are user-layer keys → the inheritance anchor is <home>/.iknow/settings.json;
+    // home is injected explicitly (on POSIX os.homedir() does follow $HOME, and relying on it works
+    // but is implicit and easy to break).
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-t1-"));
     const emptyHome = await mkdtemp(
       join(tmpdir(), "iknow-subagent-inherit-home-")

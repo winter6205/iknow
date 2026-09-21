@@ -1,5 +1,5 @@
 /**
- * T5 CLI --trace-out flag tests (GH #64).
+ * CLI --trace-out flag tests.
  */
 import { afterAll, beforeAll, describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
@@ -29,8 +29,8 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(() => {
-  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，startSessionServe 装配的 loadIknowEnv()
-  // 需要 settings.llm.model 来源（仅 serve 用例需要）→ HOME 重定向到 tmp。
+  // IKNOW_LLM_MODEL is retired; loadIknowEnv() inside startSessionServe needs a
+  // settings.llm.model source (serve cases only) → redirect HOME to tmp.
   settingsSource = installTestSettingsSource();
 });
 
@@ -85,10 +85,10 @@ describe("parse-args --trace-out", () => {
   });
 });
 
-// T3 (SC6): 原 describe 块「trace path priority resolution」钉死的
-// `./trace/` 默认已退役,整块归档到 archive/tests/cli/trace-out-priority.test.ts
-// (附归档原因)。现行优先级 SSOT = `cli.ts:resolveTraceRoot`:
-// flag > env > `resolveServeDataDir()`(≈ `<home>/.iknow`,与读侧同源)。
+// The old "trace path priority resolution" describe block pinned the now-retired
+// `./trace/` default; the whole block was archived (with an archival reason).
+// Current priority SSOT = `cli.ts:resolveTraceRoot`:
+// flag > env > `resolveServeDataDir()`(≈ `<home>/.iknow`, same source as the read side).
 
 describe("ask path: trace service injected into harness", () => {
   let scratch: string;
@@ -157,9 +157,9 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub with traceOut writes trace.jsonl under session folder on postMessage", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-"));
-    // T3 (SC6): per-session trace 锚在 `<projectDir>/<convId>/trace.jsonl`。
-    // `projectDir` 由 `resolveProjectSessionDir(scratch, process.cwd())` 派生,
-    // 与 hub.store.getProjectDir() 一致 → 两边指向同一文件。
+    // Per-session trace is anchored at `<projectDir>/<convId>/trace.jsonl`.
+    // `projectDir` derives from `resolveProjectSessionDir(scratch, process.cwd())`,
+    // matching hub.store.getProjectDir() → both sides point at the same file.
     const projectDir = resolveProjectSessionDir(scratch, process.cwd());
     const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
@@ -228,7 +228,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);
     const roots = lines.filter((l) => l.includes('"record_type":"session"'));
-    // SC-W 6/7:serve 产品路径注入 agentVersion → run 末尾写 session 根记录。
+    // The serve product path injects agentVersion → session root record at run end.
     assert.equal(
       roots.length,
       1,
@@ -260,7 +260,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       conversationId: created.session.conversation_id,
       text: "q",
     });
-    // T3: 缺 traceOut → 不写 trace.jsonl(同会话文件夹下也不写)。
+    // Missing traceOut → no trace.jsonl written (not even under the session folder).
     const expectedTrace = resolveConversationTraceFilePath({
       projectDir,
       conversationId: created.session.conversation_id,
@@ -325,8 +325,8 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     });
 
     const ids = [s1.session.conversation_id, s2.session.conversation_id];
-    // T3 (SC6): 每个 session 各自一个 `<convId>/trace.jsonl`, 不共写单文件;
-    // 文件名固定 `trace.jsonl`(SSOT = `TRACE_FILE_NAME`),与会话文件夹共寿命。
+    // Each session gets its own `<convId>/trace.jsonl`, never a shared single file;
+    // the name is fixed `trace.jsonl` (SSOT = `TRACE_FILE_NAME`), co-lifetime with the session folder.
     const total = ids.reduce((acc, id) => {
       const file = resolveConversationTraceFilePath({
         projectDir,

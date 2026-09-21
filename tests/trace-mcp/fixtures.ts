@@ -10,7 +10,7 @@ export interface TraceFixture {
 export function createTraceFixture(): TraceFixture {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-"));
   mkdirSync(traceDir, { recursive: true });
-  // T6 (SC16): 会话落两级树 `<traceDir>/projects/<slug>/<convId>/trace.jsonl`。
+  // Sessions land in the two-level tree `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
   const convDir = join(
     traceDir,
     "projects",

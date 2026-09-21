@@ -8,11 +8,11 @@
  *   GET /trace + /trace/*         → trace.html SPA (stripPrefix mount)
  *   GET /                         → index.html NOT regressed
  *
- * 5 boundary classes (plan §T3 acceptance, new cases):
- *   - concurrent: /api/v1/traces + /trace 并发各自 200
- *   - exception: traceDir 指向普通文件 → TraceReadError → 500 信封
- *     `trace file read failed`（wire 无 fs 路径/errno）；
- *     POST /api/v1/traces → 404（router 只接 GET，static 层拒 /api）
+ * 5 boundary classes (new cases):
+ *   - concurrent: /api/v1/traces + /trace each return 200 in parallel
+ *   - exception: traceDir pointing at a plain file -> TraceReadError -> 500 envelope
+ *     `trace file read failed` (no fs path/errno on the wire);
+ *     POST /api/v1/traces -> 404 (router accepts GET only; static layer rejects /api)
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -32,7 +32,7 @@ let traceDir: string;
 let listening: ListeningServer;
 let origin: string;
 
-/** 写一个单会话 trace 目录（T6 两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`）。 */
+/** Write a single-session trace dir (two-level tree `<dir>/projects/<slug>/<convId>/trace.jsonl`). */
 async function writeSession(dir: string, convId: string): Promise<void> {
   await mkdir(join(dir, "projects", "test-project-trace-mounted", convId), {
     recursive: true,

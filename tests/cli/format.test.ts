@@ -1,9 +1,9 @@
 /**
- * CLI `src/cli/format.ts` projection tests (T2 acceptance).
+ * CLI `src/cli/format.ts` projection tests.
  *
  * `formatRunHuman` / `formatRunJson` / `renderAssistantAnswer` consume harness
  * `RunResult` + `LoopTrace`. Imports go through `../../src/cli/format.ts`
- * directly (test files use `.ts` extension per repo convention).
+ * directly (test files use the `.ts` extension per repo convention).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -33,7 +33,8 @@ function mkResult(over: Partial<RunResult> = {}): RunResult {
     messages: [],
     turnCount: 1,
     stopReason: "completed",
-    // #160 T4:RunResult.lastUsage 必填字段;mkResult 默认 null(无 usage 视图)。
+    // RunResult.lastUsage is a required field; mkResult defaults to null (no usage
+    // view).
     lastUsage: null,
     ...over,
   };
@@ -135,7 +136,7 @@ describe("formatRunHuman", () => {
     assert.ok(out.includes("stop=fused"));
   });
 
-  // -- B1: Ctrl+C 打断反馈（interruptNote 前缀） -------------------------------
+  // -- Ctrl+C interrupt feedback (interruptNote prefix) -----------------------
 
   it("cancelled + interruptNote=已保存 → 输出含 ⏹ 已打断 与 已保存", () => {
     const out = formatRunHuman({
@@ -150,7 +151,7 @@ describe("formatRunHuman", () => {
     assert.ok(out.includes("⏹ 已打断"), "note 前缀必须出现;got: " + out);
     assert.ok(out.includes("已保存"), "note 文案必须透传;got: " + out);
     assert.ok(out.includes("stop=cancelled"), "状态行仍在;got: " + out);
-    // 前缀独立成行,状态行紧随其后。
+    // The prefix stands on its own line, with the status line right after it.
     assert.match(out, /⏹ 已打断，已保存\nstop=cancelled/);
   });
 
@@ -224,11 +225,12 @@ describe("formatRunJson", () => {
 });
 
 /**
- * #152 T5:renderAssistantAnswer — 纯渲染函数,thinking 可见开关落点。
+ * renderAssistantAnswer —— pure render function, the landing point of the
+ * thinking visibility switch.
  *
- * 切片:此函数读 last assistant回合;开关决定是否暴露 thinking 文本;
- * projection.texts / finalText / trace 任何字段不动;
- * tool_use / tool_result 块不进展示通道。
+ * Slice: the function reads the last assistant turn; the switch decides whether
+ * thinking text is exposed; projection.texts / finalText / trace fields are
+ * untouched; tool_use / tool_result blocks never enter the display channel.
  */
 describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
   function mkMessage(
@@ -265,8 +267,8 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       ]),
     ];
     const out = renderAssistantAnswer({ messages: msgs, showThinking: true });
-    // 精确钉住完整形状:THINKING_PREFIX + thinking 文本 + "\n\n" + text 文本。
-    // 防止 THINKING_PREFIX / 分隔符被静默修改。
+    // Pins the exact shape: THINKING_PREFIX + thinking text + "\n\n" + text, so the
+    // prefix or separator cannot be changed silently.
     assert.equal(out, `${THINKING_PREFIX}step-by-step reasoning\n\nanswer`);
   });
 
@@ -295,10 +297,11 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       !outOn.includes("ENCRYPTED_BLOB_DO_NOT_LEAK"),
       "redacted data must not leak to display"
     );
-    // 精确钉住 redacted_thinking 占位形状:THINKING_PREFIX + REDACTED_PLACEHOLDER
-    // + "\n\n" + text。防止 REDACTED_PLACEHOLDER 常量被静默改动。
+    // Pins the exact redacted_thinking placeholder shape: THINKING_PREFIX +
+    // REDACTED_PLACEHOLDER + "\n\n" + text, so REDACTED_PLACEHOLDER cannot be
+    // changed silently.
     assert.equal(outOn, `${THINKING_PREFIX}${REDACTED_PLACEHOLDER}\n\nanswer`);
-    // 开关关闭:同样不出现 redacted 内容。
+    // Switch off: the redacted content is absent just the same.
     const outOff = renderAssistantAnswer({
       messages: msgs,
       showThinking: false,
@@ -354,7 +357,8 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       messages: msgs,
       showThinking: true,
     });
-    // 精确钉住:last assistant 的 thinking + text 完整形状(含 THINKING_PREFIX)。
+    // Pins the exact shape of the last assistant turn's thinking + text (including
+    // THINKING_PREFIX).
     assert.equal(outOn, `${THINKING_PREFIX}FINAL\n\nfinal answer`);
     assert.ok(!outOn.includes("earlier answer"));
   });
@@ -366,7 +370,7 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       result: mkResult({ finalText: "hello" }),
       trace: mkTrace([]),
     });
-    // 精确钉住:走 finalText + 确定状态行(mkTrace([]) -> 0ms, tools=-)。
+    // Pins finalText + the deterministic status line (mkTrace([]) -> 0ms, tools=-).
     assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
   });
 
@@ -380,8 +384,8 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
   });
 
   it("showThinking=true 走 renderAssistantAnswer 输出取代 finalText", () => {
-    // 构造一个 messages 含 thinking 块,但 finalText 只含 text 拼接过(true 开关下
-    // 显示 thinking 区隔前缀)。
+    // messages carries a thinking block while finalText holds only the
+    // concatenated text (the true switch shows the thinking separator prefix).
     const result = {
       finalText: "final answer text",
       messages: [
@@ -403,7 +407,7 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       ],
       turnCount: 1,
       stopReason: "completed" as const,
-      // #160 T4:RunResult.lastUsage 必填字段;此用例未测 token 显示面,默认 null。
+      // lastUsage is a required RunResult field; this case does not test the token view, so default null.
       lastUsage: null,
     };
     const out = formatRunHuman({
@@ -411,8 +415,8 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       trace: mkTrace([]),
       showThinking: true,
     });
-    // 精确钉住:showThinking=true 走 renderAssistantAnswer(含 THINKING_PREFIX
-    // + thinking + "\n\n" + text),后接确定状态行。
+    // Pins: showThinking=true routes through renderAssistantAnswer (THINKING_PREFIX
+    // + thinking + "\n\n" + text), followed by the deterministic status line.
     assert.equal(
       out,
       `思考（1 段）\n\nfinal answer text\n\nstop=completed · turns=1 · tools=- · 0ms`
@@ -420,7 +424,7 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
   });
 
   it("开关不影响 trace / finalText 等其他字段(只影响渲染面)", () => {
-    // 验证实现层:result.finalText 不被修改,trace 不被修改(只读 → 比较前后相等)。
+    // Implementation-level check: result.finalText and trace stay untouched (read-only — compare before/after).
     const result = mkResult({ finalText: "hello" });
     const trace = mkTrace([mkTurn({ toolNames: ["echo"] })]);
     const before = {
@@ -433,8 +437,8 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
   });
 
   it("开关不影响 JSON 投影(formatRunJson 不接 showThinking 参数)", () => {
-    // 防御:JSON 路径仍只含 finalText + trace,不含 thinking(供后续票);
-    // 显示通道与机器消费通道正交。
+    // Defense: the JSON path still carries only finalText + trace, no thinking;
+    // the display channel stays orthogonal to the machine-consumption channel.
     const parsed = JSON.parse(
       formatRunJson({
         result: mkResult({ finalText: "hello" }),
@@ -450,18 +454,20 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
 });
 
 /**
- * #156 M2:off-path(`renderAssistantAnswer({showThinking:false})`)与
- * `deriveFinalText`(`result.finalText` 权威派生)的不变量回归测试。
+ * Invariant regression tests for `renderAssistantAnswer({showThinking:false})`
+ * (the display path) vs `deriveFinalText` (the authoritative `result.finalText`
+ * derivation).
  *
- * 两者在非分歧边界(最后一条 assistant 含非空 text)必须一致;
- * 在分歧边界(最后一条 assistant 空 text,如纯 tool_use 回合)行为有差异
- * (renderAssistantAnswer 停在最后一条 assistant -> "";deriveFinalText
- * 越过空 text 继续回扫 -> 前一条 assistant 的 text)。
+ * They must agree away from the divergence boundary (last assistant message has
+ * non-empty text); at the boundary (last assistant text empty, e.g. a pure
+ * tool_use turn) they differ: renderAssistantAnswer stops at the last assistant
+ * ("") while deriveFinalText scans past empty text to the previous assistant.
  *
- * 此处显式钉住两者的当前行为,作为 tripwire:任一方被静默改动都会触发,
- * 强制未来贡献者在改其中一处时 conscious 决定是否同步另一处。
- * 生产路径 formatRunHuman(false) 走 result.finalText(deriveFinalText),
- * 故分歧仅在 renderAssistantAnswer(false) 直接测试调用暴露。
+ * Pin both current behaviors as a tripwire: any silent change to one side trips
+ * here, forcing future contributors to decide consciously whether to sync the
+ * other. The production path formatRunHuman(false) uses result.finalText
+ * (deriveFinalText), so the divergence is only exposed by direct
+ * renderAssistantAnswer(false) test calls.
  */
 describe("renderAssistantAnswer(false) vs deriveFinalText 不变量 (#156 M2)", () => {
   function mkMessage(
@@ -499,8 +505,8 @@ describe("renderAssistantAnswer(false) vs deriveFinalText 不变量 (#156 M2)", 
   });
 
   it("分歧边界:最后一条 assistant 空 text(纯 tool_use) -> 两者不同(tripwire)", () => {
-    // renderAssistantAnswer 停在最后一条 assistant(空 text -> "");
-    // deriveFinalText 越过空 text 回扫到前一条 assistant -> "real answer"。
+    // renderAssistantAnswer stops at the last assistant (empty text -> "");
+    // deriveFinalText scans past it back to the previous assistant -> "real answer".
     const msgs: AnthropicNativeMessage[] = [
       mkMessage("user", [{ type: "text", text: "q" }]),
       mkMessage("assistant", [{ type: "text", text: "real answer" }]),
@@ -534,17 +540,17 @@ describe("renderAssistantAnswer(false) vs deriveFinalText 不变量 (#156 M2)", 
 });
 
 /**
- * #160 T5:显示面接通 `lastUsage`(ADR-0008 显示路径)。
+ * Display surface wired to `lastUsage` (ADR-0008 display path).
  *
- * 形状锚点(ADR-0008 Decision 2 + T1 Resolution):
- * - 域类型 `TokenUsage` 四字段 camelCase:`inputTokens` / `outputTokens` 必填
- *   + `cacheCreationInputTokens` / `cacheReadInputTokens: number | null`。
- * - `RunResult.lastUsage: TokenUsage | null` —— 必填字段,null = run 无成功
- *   模型调用。投影面锁死:
- *   - JSON:有 usage → 增 `lastUsage` 键(camelCase 四字段);null → 键缺席
- *     (与 messages 省略同风格,见 format.ts 设计注释)。
- *   - Human:有 usage → 状态行追加 `tokens in/out: <in>/<out>`;null → 不显示
- *     (cache 命中暂不进人类展示面,最小清晰原则)。
+ * Shape anchors (ADR-0008 Decision 2):
+ * - Domain type `TokenUsage`: four camelCase fields — required `inputTokens` /
+ *   `outputTokens` plus `cacheCreationInputTokens` / `cacheReadInputTokens: number | null`.
+ * - `RunResult.lastUsage: TokenUsage | null` — required field; null = the run
+ *   had no successful model call. Projection locked:
+ *   - JSON: usage present → add the `lastUsage` key (camelCase four fields);
+ *     null → key absent (same style as omitting messages, see format.ts design note).
+ *   - Human: usage present → status line appends `tokens in/out: <in>/<out>`;
+ *     null → nothing shown (cache hits stay out of the human view for now, minimal clarity).
  */
 describe("formatRunJson — lastUsage (#160 T5)", () => {
   it("lastUsage 非 null:JSON 增 camelCase 四字段", () => {
@@ -561,7 +567,7 @@ describe("formatRunJson — lastUsage (#160 T5)", () => {
         trace: mkTrace([]),
       })
     );
-    // 钉死四字段 camelCase 形状;防止 JSON 投影被改回 snake_case。
+    // Pins the four camelCase fields; guards the JSON projection against reverting to snake_case.
     assert.deepEqual(parsed.lastUsage, {
       inputTokens: 1234,
       outputTokens: 56,
@@ -598,7 +604,7 @@ describe("formatRunHuman — lastUsage token 读数 (#160 T5)", () => {
       }),
       trace: mkTrace([]),
     });
-    // 钉死完整状态行:既有 `<ms>ms` 之后追加 ` · tokens in/out: <in>/<out>`。
+    // Pins the full status line: ` · tokens in/out: <in>/<out>` appended after the existing `<ms>ms`.
     assert.equal(
       out,
       "hello\n\nstop=completed · turns=1 · tools=- · 0ms · tokens in/out: 1234/56"
@@ -614,18 +620,19 @@ describe("formatRunHuman — lastUsage token 读数 (#160 T5)", () => {
       !out.includes("tokens"),
       "lastUsage = null 时人类展示不应带 token 读数:got " + out
     );
-    // 钉死无 token 段的完整状态行(反向兼容既有消费者)。
+    // Pins the token-free status line (backward compatible with existing consumers).
     assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
   });
 });
 
 /**
- * T6 (D5):renderThinkingSummary — 终稿 thinking 折叠摘要行(chat 端 showThinking
- * 的折叠态展示)。
+ * renderThinkingSummary — collapsed thinking summary line for the final answer
+ * (the chat-side folded view of showThinking).
  *
- * 语义:chat 端 showThinking=true 时不再展开 thinking 全文,改为显示摘要行
- * (TTY 无折叠交互,摘要行即"折叠态"),与 TUI 默认折叠一致。redacted_thinking
- * 计入「已加密」计数;无 thinking 块返回空串。
+ * Semantics: with showThinking=true the chat no longer expands full thinking;
+ * it shows a summary line instead (a TTY has no fold interaction, so the summary
+ * line IS the folded state), matching the TUI default. redacted_thinking counts
+ * toward the encrypted count; no thinking blocks returns an empty string.
  */
 describe("renderThinkingSummary (#T6 thinking 折叠摘要)", () => {
   function mkMessage(
@@ -701,11 +708,12 @@ describe("renderThinkingSummary (#T6 thinking 折叠摘要)", () => {
 });
 
 /**
- * T2 (#458):formatVerifyReport — passed 成功态分支。
+ * formatVerifyReport — the passed success branch.
  *
- * 此前参数联合仅 failed/unstable/escalated(失败面报告);T2 把 passed
- * 纳入 wire 后, chat-session.ts:354 的调用点类型自然放宽, 需要成功
- * label。abort/disabled 不进 wire, 不加分支。
+ * The parameter union used to be failed/unstable/escalated only (failure-side
+ * reports); once passed joined the wire, the chat-session.ts call site's type
+ * widened naturally and needs a success label. abort/disabled never reach the
+ * wire, so they get no branch.
  */
 describe("formatVerifyReport — passed 成功态 (T2)", () => {
   it("passed → `[验证] 验证通过（N 轮）`", () => {
@@ -718,9 +726,10 @@ describe("formatVerifyReport — passed 成功态 (T2)", () => {
 });
 
 /**
- * T3 (verify-claim-window SC2): chat 装配层不把 HITL 闲聊 passed 印成绿勾。
- * formatVerifyReport("passed") 仍可产出文案（给非 chat 调用方），但
- * formatChatVerifyReport 对 passed 静默 —— 钉住 chat-session 既有 gate。
+ * The chat assembly must not print a green check for HITL small-talk passed.
+ * formatVerifyReport("passed") still produces the label (for non-chat callers),
+ * but formatChatVerifyReport stays silent on passed — pinning the existing
+ * chat-session gate.
  */
 describe("formatChatVerifyReport — chat 不印 passed 绿勾 (SC2)", () => {
   it("passed → undefined（不印 `[验证] 验证通过`）", () => {
@@ -744,8 +753,9 @@ describe("formatChatVerifyReport — chat 不印 passed 绿勾 (SC2)", () => {
 });
 
 /**
- * T3 hub/TUI 投影: HITL + INSUFFICIENT + hitl_skip_completion_judge
- * 不得上 wire passed（人读绿勾）。SUFFICIENT 短路仍可 passed。
+ * hub/TUI projection: HITL + INSUFFICIENT + hitl_skip_completion_judge must
+ * never put passed (a human-readable green check) on the wire. The SUFFICIENT
+ * short-circuit may still pass.
  */
 describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
   it("HITL skip + INSUFFICIENT + passed → 字段缺席（无绿勾）", () => {

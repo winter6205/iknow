@@ -1,18 +1,16 @@
 /**
  * tests/config/settings-llm-providers.test.ts
  *
- * ADR-0093 / #1010: `settings.llm.providers` schema + drop-not-throw 校验。
+ * ADR-0093: `settings.llm.providers` schema + drop-not-throw validation.
  *
- * provider 形态：
- *  - `id`（非空串，trim）
- *  - `baseUrl`（非空串，trim）
- *  - `apiKeyEnv`（非空串，trim）—— V1 仅 anthropic 格式，env 变量名
- *  - `headers?`（普通对象，键值均为字符串；非字符串值 drop 整键）
- *  - `models[]`（非空数组；每项 id 非空 + 可选 name/contextWindow/maxTokens）
+ * provider shape:
+ *  - `id` (non-empty string, trimmed)
+ *  - `baseUrl` (non-empty string, trimmed)
+ *  - `apiKeyEnv` (non-empty string, trimmed) — V1 supports only anthropic-format env var names
+ *  - `headers?` (plain object, string keys and values; non-string value drops the whole key)
+ *  - `models[]` (non-empty array; each item's id non-empty + optional name/contextWindow/maxTokens)
  *
- * 用户层键：项目文件写 `llm.providers` 整段丢弃并告警。
- *
- * 跑法：`npx vitest run tests/config/settings-llm-providers.test.ts`。
+ * User-layer key: writing `llm.providers` in the project file drops the whole section with a warning.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -108,15 +106,15 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
       {
         llm: {
           providers: [
-            { id: "", baseUrl: "https://x", apiKeyEnv: "K", models: [] }, // id 空串
-            { id: "ok-a", baseUrl: 123, apiKeyEnv: "K", models: [] }, // baseUrl 非字符串
-            { id: "ok-b", baseUrl: "https://x", models: [] }, // apiKeyEnv 缺失
+            { id: "", baseUrl: "https://x", apiKeyEnv: "K", models: [] }, // empty id
+            { id: "ok-a", baseUrl: 123, apiKeyEnv: "K", models: [] }, // baseUrl not a string
+            { id: "ok-b", baseUrl: "https://x", models: [] }, // apiKeyEnv missing
             {
               id: "ok-c",
               baseUrl: "https://x",
               apiKeyEnv: "K",
               models: "no",
-            }, // models 非数组
+            }, // models not an array
             {
               id: "ok-good",
               baseUrl: "https://x",
@@ -143,8 +141,8 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
               baseUrl: "https://x",
               apiKeyEnv: "K",
               models: [
-                { id: "" }, // id 空串 → 整 model drop
-                { id: "ok", contextWindow: 0 }, // 0 不合法(>0 才是合法正数)→ 仅 contextWindow 字段 drop,model 保留
+                { id: "" }, // empty id → whole model dropped
+                { id: "ok", contextWindow: 0 }, // 0 invalid (only >0 legal) → only contextWindow dropped, model kept
                 { id: "ok2", name: "OK2" },
               ],
             },
@@ -156,7 +154,7 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
     const s = loadIknowSettings({ home, cwd });
     const provider = s.llm?.providers?.[0];
     assert.equal(provider?.models.length, 2);
-    // 第二个 model(contextWindow 0)被保留但 contextWindow 字段缺席
+    // second model (contextWindow 0) kept, but its contextWindow field absent
     assert.equal(provider?.models[0]?.id, "ok");
     assert.equal(provider?.models[0]?.contextWindow, undefined);
     assert.equal(provider?.models[1]?.id, "ok2");

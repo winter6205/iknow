@@ -1,14 +1,16 @@
 /**
  * tests/tui/subagent-card-lines.test.ts
  *
- * specs/tui-subagent-transcript-live.md（锁句 1/2/5/6）—— 卡级两行投影的
- * 纯函数单测（无 OpenTUI / 无 React，直接 import 纯函数模块）。
+ * Pure-function unit tests for the card-level two-line projection (no OpenTUI
+ * / no React; imports the pure module directly) — lock clauses 1/2/5/6 of
+ * specs/tui-subagent-transcript-live.md.
  *
- * 不变式：一个活着的 `spawn_subagent` 在**会话 transcript 那张卡**上第 1 行
- * `{role} running...`（三点）、第 2 行 dim `taskPreview`；该 worker **completed**
- * 后概述留下、其下绿 `✓ Done`，且第 1 行不再带 `running...`（身份行只作身份）。
- * join 键 = `SubagentInfo.toolUseId`，缺关联键既不产生卡行、也不借用别的 worker
- * 的预览（锁句 6）。
+ * Invariant: a live `spawn_subagent` shows, on **the session transcript card**,
+ * line 1 `{role} running...` (with ellipsis) and line 2 a dim `taskPreview`;
+ * once the worker **completed**, the summary stays with a green `✓ Done` below
+ * and line 1 drops `running...` (identity line is identity only). Join key =
+ * `SubagentInfo.toolUseId`; a missing join key produces no card line and never
+ * borrows another worker's preview (lock clause 6).
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -152,7 +154,8 @@ describe("projectSubagentCardLines — live 与 completed 的卡形状", () => {
     expect(card!.detailLine).toBe("已完成的概述");
     expect(card!.doneLine).toBe("✓ Done");
     expect(card!.done).toBe(true);
-    // 概述不得被字面 `done` 顶掉（完成态丢任务概述是 reopen 的直接动因）。
+    // The summary must not be replaced by the literal `done` (losing the task
+    // summary on completion is what triggered the reopen).
     expect(card!.detailLine).not.toBe("done");
   });
 
@@ -333,9 +336,11 @@ describe("projectSubagentCardLines — overflow（视觉宽度 ≤ cols，永不
   });
 
   test("completed 的概述同样按 cols 截断；`✓ Done` 逐字优先于列宽", () => {
-    // 旧合同里 completed 的第 2 行是免截断的字面 `done`，概述整行消失；
-    // reopen 后概述回到页面上，就必须和 live 一样受列宽收口。完成标记本身
-    // 仍是固定字面（宿主 wrapMode="none" 裁边），与旧 `done` 同纪律。
+    // The old contract rendered completed's line 2 as a truncation-exempt
+    // literal `done`, hiding the summary entirely; after the reopen the summary
+    // is back on screen and must obey column clipping like live. The completion
+    // marker itself stays a fixed literal (host wrapMode="none" edge-cuts),
+    // same discipline as the old `done`.
     const card = projectSubagentCardLines(
       [
         makeSubagent({
@@ -532,8 +537,9 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
   });
 
   test("failed 条目整条跳过、不占位：同键的后续合格条目仍按首个合格者入 map", () => {
-    // spec「Input-contract classes」：failed 条目整体跳过（不入 map）；重复键
-    // 在**合格条目**之间取列表序首个 —— 被跳过的条目不为该键占位。
+    // Per the spec's "Input-contract classes": failed entries are skipped whole
+    // (never enter the map); duplicate keys take the first entry in list order
+    // **among eligible entries** — a skipped entry does not reserve the key.
     const map = subagentCardLinesMap(
       [
         makeSubagent({
@@ -649,7 +655,8 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询不炸历史 mem
   });
 
   test("空数组 / 顺序敏感：签名是纯函数（同入参两次调用逐字相等）", () => {
-    // 空数组的签名 = 空 JSON 数组字面（编码走 JSON.stringify，见函数注释）。
+    // Empty-array signature = empty JSON array literal (encoding is
+    // JSON.stringify, see the function's comment).
     expect(subagentCardsKey([])).toBe("[]");
     const two = [
       makeSubagent({ toolUseId: "toolu_k3" }),
@@ -661,12 +668,14 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询不炸历史 mem
   });
 
   test("单射：分隔符 / 引号 / 反斜杠注入不撞签名（手拼分隔符会撞的那组）", () => {
-    // role（`subagent_type` 入参）与 taskPreview（`def.task`）都是模型给的
-    // 任意字符串。若签名靠字面分隔符拼接，下面两条**不同的**元组会拼出同
-    // 一串（`a` + sep + `b` + sep + `c`）→ memo 返回上一个 worker 的卡。
-    // 每个候选分隔符都要挡：JSON 转义让字段边界不可伪造。
+    // role (the `subagent_type` argument) and taskPreview (`def.task`) are
+    // arbitrary model-supplied strings. If the signature were joined with a
+    // literal separator, the two **different** tuples below would serialize to
+    // one string (`a` + sep + `b` + sep + `c`) → memo would return the previous
+    // worker's card. Every candidate separator must be blocked: JSON escaping
+    // makes field boundaries unforgeable.
     const seps = [
-      "\\u0000", // NUL：曾被用作字面分隔符（且让模块被 git 当二进制）
+      "\\u0000", // NUL: once used as a literal separator (and made git treat the module as binary)
       "\\u0001",
       " ",
       "|",
@@ -692,9 +701,10 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询不炸历史 mem
       ];
       const leftKey = subagentCardsKey(left);
       expect(leftKey).not.toBe(subagentCardsKey(right));
-      expect(leftKey).toBe(subagentCardsKey(left)); // 纯函数
-      // 源码侧纪律：签名里不得出现**字面控制字节**（会让 git 把模块当
-      // 二进制，diff / rg 双双失明）—— 必须走 JSON 转义。
+      expect(leftKey).toBe(subagentCardsKey(left)); // pure function
+      // Source-side discipline: the signature must contain no **literal control
+      // bytes** (git would treat the module as binary, blinding diff / rg) —
+      // JSON escaping is mandatory.
       expect(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(leftKey)).toBe(
         false
       );

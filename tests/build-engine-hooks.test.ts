@@ -1,10 +1,11 @@
 /**
- * #365 T1 tests: build-engine hooks 透传观测缝。
+ * Observability seam for build-engine hooks pass-through.
  *
- * 验证 `BuildEngineOpts.hooks` (单个 `PostToolUseHook` 函数) 被包装成
- * `createAciExecutor` 的 `hooks: { postToolUse }` 形态并在 executor 层触发:
- * 真实调用一次 read_file 工具后,stub hook 收到含 toolUseId / name / kind 的参数。
- * 同时验证不传 hooks 时装配照常(chat/serve 零变化)。
+ * Verifies `BuildEngineOpts.hooks` (a single `PostToolUseHook` function) is
+ * wrapped into the `hooks: { postToolUse }` shape consumed by
+ * `createAciExecutor` and fires at executor level: after one real read_file
+ * call, the stub hook receives args containing toolUseId / name / kind.
+ * Also verifies wiring still works without hooks (chat/serve unaffected).
  */
 import { describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -32,10 +33,11 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
-    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传。test fixture
-    // 默认 contextWindow=200000, thresholdTokens=undefined(由 threshold.ts 推)。
+    // IknowCompressEnv is required (build-engine passes it through).
+    // Test fixture defaults: contextWindow=200000, thresholdTokens=undefined
+    // (derived by threshold.ts).
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connection timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
   };
@@ -47,7 +49,7 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
     const filePath = join(root, "note.txt");
     await writeFile(filePath, "hello hooks\n", "utf8");
 
-    // stub hook:push 每次调用参数,断言透传形态。
+    // stub hook: records call args so we can assert the pass-through shape.
     const calls: Array<Parameters<PostToolUseHook>[0]> = [];
     const hooks: PostToolUseHook = (result) => {
       calls.push(result);
@@ -62,17 +64,18 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
         productRoot: root,
         sandboxRoot: root,
         hooks,
-        // 本文件验 hooks 透传,不验溢出退场 / 索引降档(专测见
-        // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-        // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+        // This file only covers hooks pass-through, not overflow eviction or
+        // index downgrade (see build-engine-tool-overflow.test.ts and
+        // disclosure-index-align/). countTokens is bypassed during wiring;
+        // semantics of the seam are documented on BuildEngineOpts.skipCountTokens.
         skipCountTokens: true,
       });
 
-      // createAciExecutor 返回 Executor 类型(executeAll 是函数)。
+      // createAciExecutor returns an Executor (executeAll is a function).
       expect(built.deps.executor).toBeDefined();
       expect(typeof built.deps.executor.executeAll).toBe("function");
 
-      // 真实调用 read_file(读沙箱根内文件 → ok),postToolUse 在 step5 触发。
+      // Real read_file call on a file inside the sandbox root -> ok; postToolUse fires at step5.
       const [result] = await built.deps.executor.executeAll([
         {
           id: "hook-read",
@@ -82,14 +85,14 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
       ]);
       expect(result.kind).toBe("ok");
 
-      // 关键断言:hook 被调用且参数含 toolUseId / name / kind。
+      // Key assertion: hook fired with toolUseId / name / kind present.
       expect(calls.length).toBeGreaterThan(0);
       const hookCall = calls[0];
       expect(hookCall.toolUseId).toBe("hook-read");
       expect(hookCall.name).toBe("read_file");
       expect(hookCall.kind).toBe("ok");
 
-      // cleanup:MCP + subagent 组合 shutdown(空 config,不抛)。
+      // cleanup: combined MCP + subagent shutdown (empty config, must not throw).
       if (built.shutdown) await built.shutdown();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -109,7 +112,7 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
         workspaceRoot: root,
         productRoot: root,
         sandboxRoot: root,
-        skipCountTokens: true, // 同上:验不传 hooks 时装配照常。
+        skipCountTokens: true, // same as above: wiring must work without hooks.
       });
 
       expect(typeof built.deps.executor.executeAll).toBe("function");

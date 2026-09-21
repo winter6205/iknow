@@ -1,23 +1,24 @@
 /**
- * #356 T5 — subagent_result ACI 工具单测（fake SubAgentManager，不真启子进程）。
+ * subagent_result ACI tool unit tests (fake SubAgentManager, no real child process).
  *
- * 覆盖票面 11 断言：
+ * Coverage (11 assertions):
  *   1. taskId="unknown" → JSON {status:"not_found"}
  *   2. taskId="running" → JSON {status:"running"}
- *   3. taskId="ok" → completed envelope 透传（status:"ok" + summary + result
- *      + fileRefs/usage 字段）
+ *   3. taskId="ok" → completed envelope passed through (status:"ok" + summary + result
+ *      + fileRefs/usage fields)
  *   4. taskId="crashed" → {status:"failed", reason:"crashed", summary}
  *   5. taskId="maxTurnsExceeded" → reason:"maxTurnsExceeded"
  *   6. taskId="timeout" → reason:"timeout"
  *   7. taskId="protocolError" → reason:"protocolError"
- *   8. handler 同步返回（返回值形态，非墙钟）
- *   9. task_id 缺失 → 抛 ToolExecutionError
- *   10. task_id:123（非 string）→ 抛 ToolExecutionError
- *   11. aci 元数据：category:"read-only" / timeoutTier:"fast" / lazy:false
+ *   8. handler returns synchronously (return shape, not wall clock)
+ *   9. task_id missing → throws ToolExecutionError
+ *   10. task_id:123 (non-string) → throws ToolExecutionError
+ *   11. aci metadata: category:"read-only" / timeoutTier:"fast" / lazy:false
  *
- * 超字段 {task_id:"x", foo:"bar"} 的严格性由 registry 的 ajv strict 校验守门
- * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
- * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
+ * Extra fields {task_id:"x", foo:"bar"} strictness is enforced by the registry's
+ * ajv strict validation (createAciRegistry compiles inputSchema with
+ * additionalProperties:false); the handler receives already-validated input —
+ * not re-tested here.
  */
 import { EventEmitter } from "node:events";
 import {
@@ -43,7 +44,7 @@ import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
 
-/** fake manager：queryBuffer 按 taskId 映射四态之一；其余成员面 stub。 */
+/** fake manager: queryBuffer maps taskId to one of four states; other members are stubs. */
 function makeFakeManager(): SubAgentManager {
   return {
     spawn: () => ({ taskId: "fake-id" }),
@@ -96,7 +97,7 @@ function makeFakeManager(): SubAgentManager {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
-    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    // interface gained a read-only enumeration surface — fake fills it in for structural compatibility.
     getCapacity: () => 15,
     listSubagents: () => [],
   };
@@ -173,9 +174,10 @@ describe("subagent_result — 正常路径", () => {
 
   it("handler 同步返回（返回值而非 Promise）", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
-    // 同步非阻塞 = 结构性契约:handler 是普通函数,只查 buffer/pad,
-    // 不 await、不 waitFor/drain。用返回值形态钉它 —— 墙钟上界只是机器
-    // 速度的代理,负载下必假红(同 build-engine 的时间下界改法)。
+    // Synchronous non-blocking is a structural contract: the handler is a plain
+    // function that only checks buffer/pad — no await, no waitFor/drain. Pin it by
+    // return shape; a wall-clock bound is only a proxy for machine speed and false-
+    // reds under load (same fix as build-engine's time-bound removal).
     const out = tool.handler({ task_id: "ok" });
     expect(typeof out).toBe("string");
     expect(out).not.toBeInstanceOf(Promise);
@@ -329,9 +331,9 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
   }
 
   it("S2-B empty: 合法 task_id + 垫底只有 host 落稿 → 不报错，名单只含 final.md", async () => {
-    // Locked sentence 2 之后，任何带终稿的 pad 都至少含 host 写下的 final.md；
-    // 不变式仍是「合法 task_id + 无 worker 产物 → 非错误」，名单从 SSOT 常量
-    // 派生，不留硬编码。
+    // After Locked sentence 2, any pad holding a final draft at least contains the
+    // host-written final.md; the invariant stays "valid task_id + no worker artifact
+    // → not an error", with the name list derived from the SSOT constant, no hardcoded literal.
     const { tool, taskId } = await spawnSettled();
     const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
       status: string;
@@ -427,7 +429,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       name: "z",
       body: "x",
     });
-    // 同上:同步性由返回形态钉死,不用墙钟(负载下必假红)。
+    // Same as above: synchrony is pinned by return shape, not wall clock (false-red under load).
     const out = tool.handler({ task_id: taskId, tmp_path: "z" });
     expect(typeof out).toBe("string");
     expect(out).not.toBeInstanceOf(Promise);

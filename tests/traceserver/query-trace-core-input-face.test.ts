@@ -249,10 +249,10 @@ describe("query_trace core input face (T7)", () => {
   });
 
   it("raises session_not_found, not the silent empty envelope, when the conversation_id has no file", async () => {
-    // T7: a typo'd conversation_id used to be indistinguishable from a session
-    // that recorded nothing. Plan §执行期前提修正 第 14 条 — this throw is the
-    // reason the read side's `TraceSessionNotFoundError` was given a real kind
-    // (T6) before T7 reused it on the row axis.
+    // A typo'd conversation_id used to be indistinguishable from a session
+    // that recorded nothing. This throw is the reason the read side's
+    // `TraceSessionNotFoundError` was given a real kind before being
+    // reused on the row axis.
     const traceDir = makeTraceDir();
     mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, "present"), {
       recursive: true,

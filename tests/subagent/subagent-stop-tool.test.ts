@@ -1,16 +1,19 @@
 /**
- * ADR-0101 / plan subagent-stop-and-continue T2 — `subagent_stop` ACI 工具单测。
+ * ADR-0101 — `subagent_stop` ACI tool unit tests.
  *
- * 覆盖票面（ACR input-contract-tests）：
- *   - 空 task_id / 非 string task_id → ToolExecutionError（输入校验）；
- *   - 未知 id → 结构化说明（ok tool_result，不抛「任务失败幻觉」）；
- *   - 本会话 running → 走既有 abortTask（与 Ctrl+X 同路径：先 settle 在飞
- *     waitFor，再 SIGTERM + 5s SIGKILL 兜底）；进程结束后状态可查 failed；
- *   - 终态幂等 → 二次 stop 返回 already_terminal 结构化说明，不再发信号；
- *   - 跨会话 → typed 拒收（ToolExecutionError），不发 abortTask。
+ * Coverage:
+ *   - empty task_id / non-string task_id → ToolExecutionError (input validation);
+ *   - unknown id → structured explanation (ok tool_result; no "task failed" illusion);
+ *   - running in this conversation → existing abortTask (same path as Ctrl+X:
+ *     settle in-flight waitFor first, then SIGTERM with 5s SIGKILL fallback);
+ *     after process exit the state is queryable as failed;
+ *   - terminal idempotence → second stop returns already_terminal structured
+ *     explanation, no further signal;
+ *   - cross-conversation → typed rejection (ToolExecutionError), abortTask not called.
  *
- * manager 用真实 createSubAgentManager + fake child（沿用 manager.test.ts
- * 先例），abortTask 的传播链（kill → exit → settleCrash）走真实实现。
+ * manager = real createSubAgentManager + fake child (same precedent as
+ * manager.test.ts); the abortTask propagation chain (kill → exit → settleCrash)
+ * runs the real implementation.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -43,8 +46,8 @@ interface FakeChild {
 function makeFakeChild(opts: { readonly exitOnKill?: boolean } = {}): FakeChild {
   const kill = vi.fn(() => {
     if (opts.exitOnKill !== false) {
-      // 真 worker 对 SIGTERM 收尾后退出；fake 立即 end + exit（无 stdout
-      // 信封 → manager settleCrash → failed）。
+      // A real worker exits after wrapping up on SIGTERM; the fake ends + emits exit
+      // immediately (no stdout envelope → manager settleCrash → failed).
       setImmediate(() => {
         child.stderr.end();
         child.emit("exit", null, "SIGTERM");
@@ -61,7 +64,7 @@ function makeFakeChild(opts: { readonly exitOnKill?: boolean } = {}): FakeChild 
   return child;
 }
 
-/** 真实 manager + fake spawn：记录每个 taskId 对应的 child。 */
+/** Real manager + fake spawn: records the child for each taskId. */
 function makeManagerHarness() {
   const children = new Map<string, FakeChild>();
   const manager = createSubAgentManager({
@@ -156,7 +159,7 @@ describe("subagent_stop — 结构化说明与幂等（不抛任务失败幻觉�
       await tool.handler({ task_id: taskId }, { conversationId: "c1" })
     );
     assert.equal(second.status, "already_terminal");
-    // 幂等：终态后 stop 不再向进程发信号。
+    // idempotent: after terminal state, stop no longer signals the process.
     assert.equal(child.kill.mock.calls.length, 0);
   });
 });
@@ -176,7 +179,7 @@ describe("subagent_stop — running 走既有 abortTask（与 Ctrl+X 同路径�
     );
     assert.equal(out.status, "stopped");
     assert.equal(out.task_id, taskId);
-    // abortTask 的传播 = child.kill("SIGTERM")（与 TUI Ctrl+X 同一入口）。
+    // abortTask propagation = child.kill("SIGTERM") (same entry as TUI Ctrl+X).
     assert.ok(
       child.kill.mock.calls.some((call) => call[0] === "SIGTERM"),
       "stop must go through abortTask's SIGTERM path"
@@ -199,7 +202,7 @@ describe("subagent_stop — running 走既有 abortTask（与 Ctrl+X 同路径�
     void child;
     const waiting = manager.waitFor(taskId, 5000);
     await tool.handler({ task_id: taskId }, { conversationId: "c1" });
-    // abortTask 先以 SubAgentAbortError 拒绝在飞 waitFor（SC14 顺序契约）。
+    // abortTask first rejects the in-flight waitFor with SubAgentAbortError (abort-before-signal ordering contract).
     await assert.rejects(
       () => waiting,
       (err: unknown) => (err as Error).name === "SubAgentAbortError"
@@ -209,9 +212,10 @@ describe("subagent_stop — running 走既有 abortTask（与 Ctrl+X 同路径�
 
 describe("subagent_stop — 中止快照竞态（不伪造终态）", () => {
   it("abortTask 返回 false 且任务已出账 → not_found 结构化说明，无伪造 state", async () => {
-    // fake manager 精确造竞态窗口：首查 running（过所有权 + 终态闸），
-    // abortTask 时对 manager 已不可见返回 false，重查列表已空 —— 真实
-    // manager 里这是「TTL 清出恰在两次枚举之间」的形态。
+    // fake manager with a precise race window: first lookup running (passes ownership +
+    // terminal gate), abortTask returns false when the task is already invisible to the
+    // manager, re-list is empty — in the real manager this is the shape of "TTL eviction
+    // landing exactly between two enumerations".
     const running: SubagentInfo = {
       taskId: "t-gone",
       state: "running",
@@ -232,7 +236,7 @@ describe("subagent_stop — 中止快照竞态（不伪造终态）", () => {
       await tool.handler({ task_id: "t-gone" }, { conversationId: "c1" })
     );
     assert.equal(out.status, "not_found");
-    // 关键钉：消失态不得兜底伪造任何 state（旧实现写 state:"failed" 是幻觉）。
+    // Key pin: a vanished task must not fabricate any state via fallback (writing state:"failed" was a hallucination).
     assert.ok(!("state" in out), "vanished task must not carry a fabricated state");
   });
 });
@@ -254,9 +258,9 @@ describe("subagent_stop — 跨会话拒", () => {
         ),
       ToolExecutionError
     );
-    // 所有权判定先于 abortTask：越权调用不能杀别人的进程。
+    // ownership verdict precedes abortTask: an unauthorized call must not kill someone else's process.
     assert.equal(child.kill.mock.calls.length, 0);
-    // 无 ctx.conversationId 的调用面同样不能碰带归属的任务。
+    // A call surface without ctx.conversationId likewise must not touch owned tasks.
     await assert.rejects(
       () => Promise.resolve(tool.handler({ task_id: taskId })),
       ToolExecutionError

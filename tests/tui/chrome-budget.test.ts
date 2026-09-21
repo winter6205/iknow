@@ -1,20 +1,26 @@
 /**
  * tests/tui/chrome-budget.test.ts
  *
- * #321 T5-P0-2：chromeReserveRows + noticeRenderRows 纯函数单测（行账 SSOT）。
- * 这些函数承担 viewportRows 动态预算的逐项入账逻辑，新增底部行必须同步。
+ * Unit tests for the pure functions chromeReserveRows + noticeRenderRows
+ * (the line-accounting SSOT). They own the per-item budget logic for
+ * viewportRows; any new bottom line must be accounted here.
  *
- *  - chromeReserveRows：headroom 1 + mode 1 + 输入框(inputRows 动态) + hint +
- *    ContextBar 1 + ask 1 + notice (rows + 1) + modal (rows + 1) + bgLine；
- *    #647 T3 新增 agentStatusRows（agent 现势显示，0-6 行动态，缺省 0 ——
- *    基线用例零影响；专项用例见 agent-status-panel.test.ts）。
- *  - noticeRenderRows：空 / 空字符串 / 多行 / 视觉宽度折行 后行数。
- *  - compactProgressRows（/compact 进度面板，6 行）单独一节：compactRows
- *    缺省 0 —— 基线用例与旧调用方零影响。
+ *  - chromeReserveRows: headroom 1 + mode 1 + input box (dynamic
+ *    inputRows) + hint + ContextBar 1 + ask 1 + notice (rows + 1) + modal
+ *    (rows + 1) + bgLine; plus agentStatusRows (live agent status, 0-6 rows
+ *    dynamic, default 0 — zero impact on baseline cases; see
+ *    agent-status-panel.test.ts).
+ *  - noticeRenderRows: line count after empty / empty-string / multi-line /
+ *    visual-width wrapping.
+ *  - compactProgressRows (/compact progress panel, 6 rows) is its own
+ *    section: compactRows defaults to 0 — zero impact on baseline cases and
+ *    old callers.
  *
- * T8：输入框行账从固定 3 → `inputRows` 动态（默认 1 内容行 + 2 圆角边框行）。
- * inputRows 缺省 = 1 → 3（等价旧固定值）；5 行输入 / 8 行输入（maxLines 上限）
- * 时返回递增预算 —— 视图区高度随之减，不挤掉历史消息。
+ * The input-box line count moved from a fixed 3 to dynamic `inputRows`
+ * (default: 1 content row + 2 rounded-border rows). inputRows default = 1 →
+ * 3 (same as the old fixed value); with 5-row / 8-row input (maxLines cap)
+ * the budget grows accordingly — the viewport shrinks with it instead of
+ * squeezing out history.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -208,8 +214,9 @@ describe("inputVisibleLineCount", () => {
   });
 
   test("T8：行数严格单调增 —— 高度增长 SSOT 证据（1 → 2 → 3 → 4 → 5）", () => {
-    // chromeReserveRows 行账随 inputVisibleLineCount 严格递增；与
-    // textarea height={min(rows, MAX)} 联动 → 高度增长。
+    // The chromeReserveRows budget grows strictly with
+    // inputVisibleLineCount, coupled with textarea height={min(rows, MAX)}
+    // → height growth.
     const base = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -223,13 +230,14 @@ describe("inputVisibleLineCount", () => {
         bgLine: false,
         inputRows: inputVisibleLineCount(Array(n).fill("行").join("\n")),
       });
-      expect(expanded - base).toBe(n - 1); // 每增一行预算 +1
+      expect(expanded - base).toBe(n - 1); // +1 budget per added row
     }
   });
 
   test("T8：到达 MAX_INPUT_LINES 封顶 —— 内部滚动证据（inputRows=7/8/9/20 同预算）", () => {
-    // textarea 内部滚动的 SSOT 证据：超过 MAX_INPUT_LINES（8）后行账不再
-    // 增长 —— chromeReserveRows 内部 Math.min(..., MAX_INPUT_LINES)。
+    // SSOT evidence for textarea internal scrolling: past
+    // MAX_INPUT_LINES (8) the line count stops growing — chromeReserveRows
+    // clamps internally with Math.min(..., MAX_INPUT_LINES).
     const a = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -254,7 +262,8 @@ describe("inputVisibleLineCount", () => {
       bgLine: false,
       inputRows: 20,
     });
-    // 7 → 8 仍递增一行；8 → 9 → 20 封顶同预算（textarea 内部滚动吸收）
+    // 7 → 8 still adds one row; 8 → 9 → 20 cap at the same budget
+    // (absorbed by textarea internal scrolling)
     expect(b - a).toBe(1);
     expect(b).toBe(c);
     expect(c).toBe(d);
@@ -271,7 +280,7 @@ describe("inputWrapLineCount: T9 wrap-aware 输入框行数（修「输入多少
   });
 
   test("长 ASCII 文本无换行（100 字符，cols=80）→ ceil(100/74)=2 行（innerCols=cols-6）", () => {
-    // innerCols = 80 - 6 = 74（圆角 2 + paddingX 2 + ❯ 2）
+    // innerCols = 80 - 6 = 74 (rounded border 2 + paddingX 2 + ❯ 2)
     expect(inputWrapLineCount("x".repeat(100), 80)).toBe(2);
   });
 
@@ -284,7 +293,7 @@ describe("inputWrapLineCount: T9 wrap-aware 输入框行数（修「输入多少
   });
 
   test("窄终端 cols=20：innerCols=14，长文本 'xxx...' 折多行", () => {
-    // 50 字符 ASCII / 14 = 4 行
+    // 50 ASCII chars / 14 = 4 rows
     expect(inputWrapLineCount("x".repeat(50), 20)).toBe(4);
   });
 
@@ -298,11 +307,12 @@ describe("inputWrapLineCount: T9 wrap-aware 输入框行数（修「输入多少
 
   test("cols=0 / cols=5 极端：innerCols 被 Math.max(1,..) 守护为 1", () => {
     expect(inputWrapLineCount("ab", 0)).toBe(2); // innerCols=1 → a=1, b=1
-    expect(inputWrapLineCount("a", 5)).toBe(1); // innerCols=1 → 1 行
+    expect(inputWrapLineCount("a", 5)).toBe(1); // innerCols=1 → 1 line
   });
 
   test("T9 chrome 联动：长无换行文本 → chromeReserveRows 行账同步增长", () => {
-    // 80 字符 ASCII, cols=80 → wrap-aware = 2 行 → chrome inputRows=2 比 1 大 1
+    // 80 ASCII chars at cols=80 → wrap-aware = 2 rows → chrome inputRows=2
+    // is 1 more than 1
     const base = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -370,12 +380,14 @@ describe("bgStatusLine", () => {
 });
 
 /**
- * thinkingPickerRows 行账（design-25 thinking-picker，双面板版）。
+ * Line accounting for thinkingPickerRows (thinking-picker dual panel).
  *
- * 按面板 kind 分派：thinking 开关面板 5 行（圆角边框 2 行 + 内容 3 行：标题 /
- * 状态行 / 键位提示，**无进度条**）；effort 档位面板 7 行（圆角边框 2 行 + 内容
- * 5 行：标题 / 状态行 / 进度条 / 档位标签 / 键位提示）。**不含 marginBottom=1**
- * —— 与 modalRows 同约定：marginBottom 由 chromeReserveRows 的 +1 入账。
+ * Dispatched by panel kind: the thinking toggle panel is 5 rows (rounded
+ * border 2 + content 3: title / status line / key hint, **no progress
+ * bar**); the effort-level panel is 7 rows (border 2 + content 5: title /
+ * status line / progress bar / level label / key hint). **Excludes
+ * marginBottom=1** — same convention as modalRows: marginBottom is
+ * accounted by chromeReserveRows' +1.
  */
 describe("thinkingPickerRows（design-25 面板行账）", () => {
   test("thinking 开关面板（无进度条）：5 行 = 边框 2 + 内容 3", () => {
@@ -387,15 +399,15 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
   });
 
   test("thinking 面板 +1 marginBottom = 6 行 delta；effort +1 = 8 行 delta", () => {
-    // 与 modalRows 的 `+1` 约定一致（面板 marginBottom 由 chromeReserveRows
-    // 入账）。
+    // Consistent with modalRows' `+1` convention (panel marginBottom is
+    // accounted by chromeReserveRows).
     expect(thinkingPickerRows("thinking") + 1).toBe(6);
     expect(thinkingPickerRows("effort") + 1).toBe(8);
   });
 
   test("有 picker：pickerRows + 1（marginBottom，与 modalRows 同款 delta）", () => {
-    // T3 把 pickerRows 并入 chromeReserveRows 入账：thinking 5 行 + marginBottom
-    // 1 = 6 行 delta；effort 7 行 + 1 = 8 行 delta。
+    // pickerRows is folded into the chromeReserveRows budget: thinking 5
+    // rows + marginBottom 1 = 6-row delta; effort 7 rows + 1 = 8-row delta.
     const base = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -438,8 +450,9 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(a).toBe(b);
   });
 
-  // #358 T7：chromeReserveRows 仍接受 panelRows；产品路径恒传 0，
-  // 子代理画在输入框下方，不把输入框往上顶。
+  // chromeReserveRows still accepts panelRows; the product path always
+  // passes 0 — the subagent panel renders below the input box instead of
+  // pushing it upward.
   test("panelRows 缺省（undefined / 未传）= 0，不占底部行账", () => {
     const base = chromeReserveRows({
       noticeRows: 0,
@@ -476,10 +489,12 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(withPanel - base).toBe(4);
   });
 
-  // #1044（取代原「panelRows 恒 0」守卫）：底部 chrome 无显式高度、默认
-  // flexShrink=1，面板行不入账时总高超出终端 → Yoga 把负空间按比例摊给输入框
-  // （live 子代理 ≥7 必现）。现行合同：panelRows = 折叠后实际行数（有界，
-  // 上限 SUBAGENT_PANEL_MAX_ROWS），与渲染高度恒等 —— 输入框正常上移且完整。
+  // Bottom chrome has no explicit height and defaults to flexShrink=1; when
+  // panel rows are unaccounted the total exceeds the terminal → Yoga
+  // distributes the negative space proportionally to the input box (always
+  // reproducible with >=7 live subagents). Current contract: panelRows =
+  // actual collapsed row count (bounded by SUBAGENT_PANEL_MAX_ROWS), equal
+  // to the rendered height — the input box shifts up intact.
   test("app 产品路径 panelRows 入账且有界（subagentPanelRows 接线，#1044）", () => {
     const src = readFileSync(
       join(import.meta.dir, "..", "..", "src/tui/app.tsx"),
@@ -489,8 +504,9 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(src).not.toMatch(/panelRows:\s*0/);
   });
 
-  // #647 T3: agent 现势显示行数入账（与 panelRows 同款：缺省不占行，显式
-  // 按值入账；组件无 marginBottom）。专项投影用例见 agent-status-panel.test.ts。
+  // Agent status line-count accounting (same shape as panelRows: default
+  // takes no rows, explicit values are accounted; the component has no
+  // marginBottom). Projection cases live in agent-status-panel.test.ts.
   test("agentStatusRows 缺省（undefined）= 0，不占底部行账（基线 7 不变）", () => {
     const base = chromeReserveRows({
       noticeRows: 0,
@@ -568,11 +584,12 @@ describe("memoryPickerRows（/memory 双开关面板行账）", () => {
 });
 
 /**
- * compactProgressRows 行账（design-25 压缩进度面板）。
+ * Line accounting for compactProgressRows (compaction progress panel).
  *
- * 6 行 = 边框 2 + 内容 4（标题 / 状态行 / 读条 / 键位提示），**不含
- * marginBottom=1** —— 与 pickerRows / modalRows 同约定，由 chromeReserveRows
- * 的 +1 入账。缺省 0：旧调用方（无压缩面板）行账零影响。
+ * 6 rows = border 2 + content 4 (title / status line / progress bar / key
+ * hint), **excludes marginBottom=1** — same convention as pickerRows /
+ * modalRows, accounted by chromeReserveRows' +1. Default 0: zero impact on
+ * old callers (no compaction panel).
  */
 describe("compactProgressRows（compact 进度面板行账）", () => {
   test("6 行 = 边框 2 + 内容 4", () => {
@@ -616,11 +633,12 @@ describe("compactProgressRows（compact 进度面板行账）", () => {
 });
 
 /**
- * ADR-0096 T1 — configPickerRows 行账（design-25 设置面板）。
+ * ADR-0096 — line accounting for configPickerRows (settings panel).
  *
- * 7 行 = 边框 2 + 标题 1 + 内容 3（FS 隔离档 / worktree 门禁 / 子代理并发上限）
- * + 键位提示 1。**不含 marginBottom=1** —— 与 modelPickerRows / thinkingPickerRows
- * / memoryPickerRows 同约定，由 chromeReserveRows 的 +1 入账。
+ * 7 rows = border 2 + title 1 + content 3 (FS isolation tier / worktree
+ * gate / subagent concurrency cap) + key hint 1. **Excludes
+ * marginBottom=1** — same convention as modelPickerRows /
+ * thinkingPickerRows / memoryPickerRows, accounted by chromeReserveRows' +1.
  */
 describe("configPickerRows（/config 设置面板行账）", () => {
   test("7 行 = 边框 2 + 标题 1 + 内容 3 + 键位提示 1", () => {

@@ -1,16 +1,20 @@
 /**
- * live-graph-phase1 T1 — SessionHub 侧活图账本生命周期（SC3 后半段 + SC4）。
+ * SessionHub-side live-graph ledger lifecycle.
  *
- * 三条钉死的边界：
- *   1. SC3 — `resetSession(conversationId)` 销毁该 conversation 的账本,
- *     旧冻结 id 不再被拒,可重新提交 run_graph;
- *   2. SC4 — `compactSession(conversationId)` **不**销毁账本（in-process
- *     对象,compact 只动 JSONL 文件;冻结 id 仍拒重跑）;
- *   3. 进程级 `shutdown()` — `destroyAll` 销毁全部 conversation 账本,无
- *     泄漏到下一个 hub 实例（hub 是多会话入口,SC3 后半段的最强边界）。
+ * Three pinned boundaries:
+ *   1. resetSession(conversationId) destroys that conversation's ledger;
+ *     previously frozen ids are no longer rejected and run_graph may be
+ *     resubmitted;
+ *   2. compactSession(conversationId) does NOT destroy the ledger (it is an
+ *     in-process object; compact only touches the JSONL file, so frozen ids
+ *     still block re-runs);
+ *   3. process-level shutdown() — destroyAll destroys every conversation's
+ *     ledger with no leak into the next hub instance (the hub is a
+ *     multi-session entry point, the strongest lifecycle boundary).
  *
- * `LiveGraphLedgerHost` 由测试自己建,经 `liveGraphLedger` 字段注入 hub,
- * 与 CLI / TUI / serve 三入口的实际装配对齐(都把单例 host 交给 hub)。
+ * The test builds `LiveGraphLedgerHost` itself and injects it via the
+ * `liveGraphLedger` field, matching how CLI / TUI / serve actually assemble
+ * (all hand the singleton host to the hub).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -47,8 +51,9 @@ function makeHubWithLedger(host: LiveGraphLedgerHost): SessionHub {
   });
 }
 
-/** 与 handler 同型:ensure() 后 freeze(id, status) —— 把"已冻结"状态装入
- *  真实 LiveGraphLedger,避免 stub 漂移（handler 接线由 run-graph-ledger.test.ts 覆盖）。 */
+/** Same shape as the handler: ensure() then freeze(id, status) — loads the
+ *  "already frozen" state into the real LiveGraphLedger to avoid stub drift
+ *  (handler wiring is covered by run-graph-ledger.test.ts). */
 function freezeLedger(
   host: LiveGraphLedgerHost,
   convId: string,
@@ -84,8 +89,8 @@ describe("SessionHub 活图账本生命周期（SC3 后半段 + SC4）", () => {
     try {
       await hub.bindWorkspace(process.cwd());
       const convId = (await hub.createSession()).session.conversation_id;
-      // 写两条消息让 compact 真的裁（空会话早退 compacted=false 也行,但
-      // 走一遍真实 save 让 compact 动过文件再断言"账本不动"更硬）。
+      // Two real messages so compact actually trims; going through a real
+      // save makes the "ledger untouched" assert harder than an early-exit.
       const baseFile = await store.load(convId);
       await store.save({
         id: convId,
@@ -107,7 +112,7 @@ describe("SessionHub 活图账本生命周期（SC3 后半段 + SC4）", () => {
 
       await hub.compactSession(convId);
 
-      // SC4:账本不在 JSONL,compact 只动文件 —— 冻结 id 必须仍被拒。
+      // The ledger is not in the JSONL; compact only touches the file — frozen ids must stay rejected.
       const after = host.ledgerFor(convId);
       expect(after.exists()).toBe(true);
       expect(after.frozenIds()).toEqual(before);
@@ -130,8 +135,8 @@ describe("SessionHub 活图账本生命周期（SC3 后半段 + SC4）", () => {
   });
 
   it("conversationId 无 session 文件 → resetSession 抛 typed 但账本销毁先于 load 已生效", async () => {
-    // 账本销毁发生在 work() 第一行（store.load 之前）—— 即使 load 抛
-    // not_found,销毁也已生效。SC3 销毁时机的最严边界。
+    // Ledger destruction happens on the first line of work() (before
+    // store.load) — it stands even when load throws not_found.
     const host = createLiveGraphLedgerHost();
     const hub = makeHubWithLedger(host);
     try {

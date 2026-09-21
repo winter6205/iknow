@@ -1,27 +1,34 @@
 /**
- * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7) — worker 侧：
- * spawn 时 worker system 的 `<available_skills>` 含**父会话当时的完整模型索引
- * 快照**；worker **不**往 prior 抄父的增量 user 消息。
+ * Worker side of `specs/skill-index-increment.md` SC10 + assumption 7:
+ * at spawn, the worker system's `<available_skills>` carries the **full
+ * model-index snapshot of the parent session at that moment**; the worker
+ * never copies the parent's incremental user messages into its prior.
  *
- * 契约（worker 侧）：
- *   - envelope 带 `skillIndexSnapshot` → 该快照是 worker 索引面的唯一来源
- *     （含父已追加进场的名 —— 这些名不在 worker 自己的扫描里）；
- *   - 渲染复用 `skillsSegment`（`identity/assemble.ts` 的唯一 SSOT），worker
- *     不留第二套渲染；
- *   - 快照是**值**语义：worker 进程内相邻两次求值 byte-stable（冻表纪律）；
- *     交付点拷贝，父侧 / 调用方后续改写不回流；
- *   - envelope **无**该字段（旧 wire / 直连装配）→ 逐字节退回 worker 自己的
- *     独立 rescan（`createSkillScanner`），两侧 system 文本 deep-equal；
- *   - 快照里的名在 worker catalog 缺席 → 仍渲染（按名 + description 直出）：
- *     spec 的判据是「完整」，不因 worker 自己的扫描根较窄而丢条目 —— 该名
- *     在 worker 里变成一个 description 可见、正文不可加载的条目（与索引降档
- *     的裸名条目同一性质，ADR-0046 Decision 2）；缺席行为在 worker 侧是
- *     **确定**的（渲染可见 / `skill()` 报 not found），不静默改写成第二条
- *     更窄的清单；
- *   - prior 面：`priorMessagesFromEnvelope` 不因快照在场而多出任何段
- *     （assumption 7 —— 父的隐藏增量 user 消息不进 worker prior）。
+ * Contract (worker side):
+ *   - envelope carries `skillIndexSnapshot` -> that snapshot is the sole
+ *     source of the worker's index surface (including names the parent
+ *     already pulled in — names absent from the worker's own scan);
+ *   - rendering reuses `skillsSegment` (the single SSOT in
+ *     `identity/assemble.ts`); the worker keeps no second renderer;
+ *   - the snapshot has **value** semantics: two adjacent evaluations inside
+ *     the worker process are byte-stable (frozen-table discipline); it is
+ *     copied at the delivery point, later parent/caller mutation never flows back;
+ *   - envelope **without** the field (legacy wire / direct assembly) -> falls
+ *     back byte-for-byte to the worker's own independent rescan
+ *     (`createSkillScanner`); both sides' system text deep-equals;
+ *   - a snapshot name missing from the worker catalog -> still rendered (name +
+ *     description verbatim): the spec's criterion is "complete", so entries are
+ *     never dropped because the worker's scan roots are narrower — such a name
+ *     becomes an entry in the worker whose description is visible but whose body
+ *     cannot be loaded (same nature as a bare-name demoted index entry,
+ *     ADR-0046 Decision 2); the absence behavior is **deterministic** on the
+ *     worker side (visible in render / `skill()` reports not found), never
+ *     silently rewritten into a narrower second listing;
+ *   - prior surface: `priorMessagesFromEnvelope` gains no extra segment from a
+ *     present snapshot (assumption 7 — the parent's hidden incremental user
+ *     messages never enter the worker prior).
  *
- * Isolation: 全部 tmp fixture；模型面 = stub（零真实调用）。
+ * Isolation: all tmp fixtures; model surface = stub (zero real calls).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -68,7 +75,7 @@ function entry(
   return { name, description, dir, disabled: false };
 }
 
-/** `<available_skills>` 段从整份 system 文本里切出来（断言面 = 模型看到的那段）。 */
+/** Slice the `<available_skills>` block out of the full system text (assertion surface = what the model sees). */
 function availableSkillsBlock(system: string): string {
   const start = system.indexOf("<available_skills>");
   const end = system.indexOf("</available_skills>");
@@ -77,11 +84,12 @@ function availableSkillsBlock(system: string): string {
 }
 
 /**
- * hermetic 装配缝：stub-model（零模型调用）+ noop trace + 注入 catalog。
+ * Hermetic assembly seam: stub-model (zero model calls) + noop trace + injected catalog.
  *
- * `userHome` / `cwd` / `projectIdentityRoot` 指到一个**不存在的 tmp 路径**
- * （不是真实 HOME）：身份 / 说明书 / 技能根的读取全部落空 → 段文本只由本
- * 用例给的数据决定，运行机器上装了什么技能都不影响断言。
+ * `userHome` / `cwd` / `projectIdentityRoot` point at a **nonexistent tmp
+ * path** (not the real HOME): identity / instruction / skill-root reads all
+ * miss -> segment text is decided solely by this case's data, whatever skills
+ * are installed on the run machine never affects assertions.
  */
 function hermeticOpts(
   extra: Partial<CreateWorkerDepsOptions> & {
@@ -106,7 +114,7 @@ describe("worker system — 父会话模型索引快照（SC10）", () => {
     const frozen = entry("frozen-a", "开场冻表条目", "/no/such/dir/frozen-a");
     const deps = await createWorkerDeps(
       hermeticOpts({
-        // worker 自己的扫描只看得见 frozen-a：父中途进场的 injected-b 不在其中。
+        // The worker's own scan only sees frozen-a: injected-b (pulled in mid-way by the parent) is not in it.
         skillCatalog: createSkillCatalog([frozen]),
         skillIndexSnapshot: [
           { name: "frozen-a", description: "开场冻表条目" },
@@ -162,7 +170,7 @@ describe("worker system — 父会话模型索引快照（SC10）", () => {
   it("空快照 → 空清单句（「父无模型索引」不退回 worker 自扫结果）", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({
-        // worker 自扫看得见一条：空快照在场时它**不得**出现（快照是唯一来源）。
+        // The worker's own scan sees one entry: with an empty snapshot present it **must not** appear (snapshot is the sole source).
         skillCatalog: createSkillCatalog([
           entry("worker-only", "worker 自扫条目", "/no/such/dir/w"),
         ]),
@@ -178,11 +186,14 @@ describe("worker system — 父会话模型索引快照（SC10）", () => {
   });
 
   it("快照名在 worker catalog 缺席 → 仍按快照渲染（「完整」优先于 worker 扫描根）", async () => {
-    // 设计取舍（(a) 名单 + worker 侧按名解析 vs 直出条目）：父快照带着完整
-    // description 过界，worker **不**按自己的 catalog 过滤 —— 否则插件根不同
-    // 的场景会丢条目，与「完整模型索引」判据相悖。代价是此名在 worker 里
-    // 无正文可加载（skill() 报 not found），这是「索引可见、正文取不到」的
-    // 已知退化，不是静默丢行。
+    // Design trade-off ((a) name list + name-based resolution on the worker
+    // side vs emitting entries directly): the parent snapshot crosses the
+    // boundary with full descriptions, and the worker does **not** filter by
+    // its own catalog — otherwise differing plugin roots would drop entries,
+    // violating the "complete model index" criterion. The cost is that such a
+    // name has no loadable body in the worker (skill() reports not found): a
+    // known "index visible, body unavailable" degradation, never a silently
+    // dropped row.
     const deps = await createWorkerDeps(
       hermeticOpts({
         skillCatalog: createSkillCatalog([]),
@@ -241,7 +252,7 @@ describe("worker system — 无父快照时退回独立 rescan（byte-stable）"
     );
     const skillCatalog = createSkillCatalog([workerOnly]);
     const baseline = await createWorkerDeps(hermeticOpts({ skillCatalog }));
-    // 带 `skillIndexSnapshot: undefined` 键（显式缺席）与完全无键同形。
+    // With the `skillIndexSnapshot: undefined` key (explicit absence) shaped identically to no key at all.
     const explicitUndefined = await createWorkerDeps(
       hermeticOpts({ skillCatalog, skillIndexSnapshot: undefined })
     );
@@ -277,8 +288,9 @@ describe("worker system — 无父快照时退回独立 rescan（byte-stable）"
   });
 
   it("真装配（未注入 skillCatalog / system）时 snapshot 缺席仍走到 worker 自扫路径", async () => {
-    // 判别力：这条走 createWorkerDeps 的真装配分支（plugin 解析 + scanner），
-    // 直接钉「无人给快照 → 行为不变」在生产装配路径上成立。
+    // Discriminating power: this walks the real createWorkerDeps assembly
+    // branch (plugin resolution + scanner), pinning "no snapshot given ->
+    // behavior unchanged" on the production assembly path.
     const sandboxRoot = await mkdtemp(join(tmpdir(), "iknow-worker-snap-"));
     try {
       const deps = await createWorkerDeps({
@@ -292,7 +304,7 @@ describe("worker system — 无父快照时退回独立 rescan（byte-stable）"
         role: "general-purpose",
       });
       const system = (await deps.system?.()) ?? "";
-      // 该 fixture 下没有任何技能根 → 空清单句（而不是段缺席）。
+      // Under this fixture no skill roots exist at all -> empty-listing sentence (not a missing segment).
       assert.equal(
         availableSkillsBlock(system),
         "<available_skills>\nNo skills installed\n</available_skills>"
@@ -305,7 +317,7 @@ describe("worker system — 无父快照时退回独立 rescan（byte-stable）"
   it("真装配 + snapshot 在场 → 段 = 快照（不经 worker 自扫）", async () => {
     const sandboxRoot = await mkdtemp(join(tmpdir(), "iknow-worker-snap-"));
     try {
-      // 磁盘上放一条 worker 自扫能看见的技能：它**不得**出现在快照渲染里。
+      // Put one on-disk skill the worker's own scan would see: it **must not** appear in the snapshot rendering.
       const skillDir = join(sandboxRoot, ".iknow", "skills", "on-disk");
       await mkdir(skillDir, { recursive: true });
       await writeFile(

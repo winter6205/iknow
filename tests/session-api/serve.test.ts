@@ -6,10 +6,12 @@
  * wires them together. Without this test the file shows 0% coverage and
  * SC21's 80/70 gate fails for src/session-api/.
  *
- * SC6 必须走真实装配：占位 adapter 会让 wire model 断言失去意义。装配链会经
- * bash 工具的沙箱探针，而 CI 的 test-fast 不装 bubblewrap，故此处只把装配期
- * 探针替换为 no-op，其余（真实 HTTP、EnvLoader、SDK adapter、capture server）
- * 全部保持真实。物理执行路径在本文件中从未被调用。
+ * The SC6 case must use real assembly: a placeholder adapter would empty the
+ * wire-model assertion. The assembly chain hits the bash tool's sandbox probe,
+ * and CI test-fast installs no bubblewrap, so only that assembly-time probe is
+ * stubbed to a no-op here; everything else (real HTTP, EnvLoader, SDK adapter,
+ * capture server) stays real. Physical execution paths are never invoked in
+ * this file.
  */
 import {
   afterAll,
@@ -65,9 +67,10 @@ let hub: SessionHub | undefined;
 let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(() => {
-  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，模型唯一来源 = settings.llm.model。
-  // startSessionServe 装配的 loadIknowEnv() 需要 settings 来源 → HOME 重定向到
-  // tmp（settings.json 含 model + `${VAR}` apiKey），不依赖真实 ~/.iknow。
+  // IKNOW_LLM_MODEL was retired: the only model source is settings.llm.model.
+  // startSessionServe's loadIknowEnv() needs a settings source → redirect HOME
+  // to a tmp dir (settings.json carries model + `${VAR}` apiKey), never touching
+  // the real ~/.iknow.
   settingsSource = installTestSettingsSource();
 });
 
@@ -193,12 +196,12 @@ describe("startSessionServe — option propagation", () => {
 
 describe("startSessionServe — trace health wiring", () => {
   it("health counts failures from a trace service created by the hub", async () => {
-    // T3 (SC6): 主会话 trace 锚在 `<projectDir>/<convId>/trace.jsonl`, 写侧
-    // 命中该路径后 appendFileSync 必报 EISDIR → traceWriteFailures ≥ 1。
-    // 策略: 先 createSession 让 store 在 `<projectDir>/<convId>/` 落 JSONL,
-    // 然后 mkdir 该 `<projectDir>/<convId>/trace.jsonl` 作为目录占据, 主
-    // 会话 trace 写入路径 `trace.jsonl` 时遇到同名目录 → appendFileSync 抛
-    // EISDIR → JsonlTraceService warn-once → traceWriteFailures += 1。
+    // The main session's trace is anchored at `<projectDir>/<convId>/trace.jsonl`;
+    // once the write side hits that path, appendFileSync must report EISDIR →
+    // traceWriteFailures ≥ 1. Strategy: createSession lets the store drop JSONL
+    // under `<projectDir>/<convId>/`, then mkdir a directory named trace.jsonl to
+    // occupy the path → the trace write hits the same-named directory → EISDIR →
+    // JsonlTraceService warn-once → traceWriteFailures += 1.
     baseDir = await mkdtemp(join(tmpdir(), "iknow-serve-trace-health-"));
     const traceOut = join(baseDir, "trace-out-file");
     await writeFile(traceOut, "", "utf8");
@@ -226,14 +229,15 @@ describe("startSessionServe — trace health wiring", () => {
       }
     ).session.conversation_id;
 
-    // 计算与 hub.store 同一 projectDir, 占据同名 trace.jsonl 为目录 →
-    // appendFileSync 必报 EISDIR。
-    // 必须镜像 serve.ts 的派生: hub 的 projectIdentityRoot 走
-    // `deriveProjectIdentityRoot({cwd: workspaceRoot})`, 本用例无 flag/env →
-    // workspaceRoot undefined → `mainCheckoutOf(process.cwd())`。cwd 是 task
-    // worktree 路径时会被折回主 checkout; 若直接用 process.cwd() 会派到另一个
-    // `<basename>-<sha1>` 文件夹(CI 平铺 checkout 下两者恰好相同 —— 这正是
-    // 该用例只在 worktree 开发时红的原因)。
+    // Compute the same projectDir as hub.store and occupy trace.jsonl with a
+    // directory → appendFileSync must report EISDIR.
+    // Must mirror serve.ts's derivation: the hub's projectIdentityRoot goes
+    // through `deriveProjectIdentityRoot({cwd: workspaceRoot})`; with no flag/env
+    // here → workspaceRoot undefined → `mainCheckoutOf(process.cwd())`. A task
+    // worktree cwd folds back to the main checkout; using process.cwd() directly
+    // would resolve a different `<basename>-<sha1>` folder (under CI's flat
+    // checkout both coincide — which is exactly why this case only went red in
+    // worktree development).
     const projectDir = resolveProjectSessionDir(
       baseDir,
       deriveProjectIdentityRoot({ cwd: undefined })
@@ -308,14 +312,14 @@ describe("startSessionServe — dataDir resolution", () => {
 
 // -- workspace pre-bind (T4 + T9a, ADR-0023) --------------------------------
 //
-// Acceptance (plans/serve-workspace.md T4 + issue #536 + plans/serve-workspace-folder-browse.md T9a):
-//   - 无 flag/env 启动 → hub auto-bound 到 `<homedir()>/.iknow/default`
-//     (T9a)。`initIknowWorkspaceSafe` 在缺省时跳过 identity seed(同 T4)。
-//   - --workspace-root <abs> / IKNOW_WORKSPACE_ROOT → 启动即预绑 picker 根
-//     （hub.getWorkspaceState().bound === true 且 root === 解析值）。
-//   - recentsHome = homedir() wired → 显式预绑 / auto-bind 时 recents 文件被写入
-//     `<homedir>/.iknow/workspaces.json`(test 通过 installTestSettingsSource
-//     把 HOME 重定向到 tmp,天然隔离)。
+// Acceptance (ADR-0023):
+//   - start with no flag/env → hub auto-binds to `<homedir()>/.iknow/default`.
+//     `initIknowWorkspaceSafe` skips the identity seed on the default (same as the explicit path).
+//   - --workspace-root <abs> / IKNOW_WORKSPACE_ROOT → pre-bind the picker root at startup
+//     (hub.getWorkspaceState().bound === true and root === resolved value).
+//   - recentsHome = homedir() wired → on explicit pre-bind / auto-bind the recents file is
+//     written to `<homedir>/.iknow/workspaces.json` (tests redirect HOME to a tmp dir via
+//     installTestSettingsSource, so isolation comes for free).
 
 describe("startSessionServe — workspace pre-bind (T4)", () => {
   // Helper: read the raw session file from disk via
@@ -326,11 +330,11 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
     workspaceRoot: string,
     conversationId: string
   ): Promise<string | undefined> {
-    // #629: read the JSONL authority; the legacy `.json` mirror is no longer
+    // Read the JSONL authority; the legacy `.json` mirror is no longer
     // written. The session header record carries `workspaceRoot`. project
-    // identity is keyed off the workspace root (session-folder-consolidation
-    // T1: namespace key = projectIdentityRoot, not cwd), so the test must use
-    // the same root serve.ts derived for its store.
+    // identity is keyed off the workspace root (namespace key =
+    // projectIdentityRoot, not cwd), so the test must use the same root
+    // serve.ts derived for its store.
     const projectIdentityRoot = deriveProjectIdentityRoot({
       cwd: workspaceRoot,
     });
@@ -349,8 +353,9 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
   }
 
   it("无 flag/env → hub auto-bound to ~/.iknow/default (T9a)", async () => {
-    // Defensive: 防止更早的 describe 残留 env（虽然同 fork 内 file 顺序跑 +
-    // 本 describe 是本 file 第一组,理论上无残留,但 confirm zero 状态更稳）。
+    // Defensive: guard against leftover env from earlier describes (files run in
+    // order within a fork and this is the first group here, so residue is
+    // unlikely, but confirming a zero state is safer).
     const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
     delete process.env.IKNOW_WORKSPACE_ROOT;
     const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t9a-autobind-"));
@@ -361,28 +366,29 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
         port: 0,
       });
       listening = out.listening;
-      // (a) picker auto-bound to `<homedir()>/.iknow/default` (T9a)。函数形式
-      // `resolveSessionDefaultWorkspace()` 在运行时解析 HOME,所以跟随
-      // installTestSettingsSource 重定向后的 tmp home —— 不写用户真实 $HOME。
+      // (a) picker auto-bound to `<homedir()>/.iknow/default`. The function form
+      // `resolveSessionDefaultWorkspace()` resolves HOME at runtime, so it follows
+      // the tmp home redirected by installTestSettingsSource — never the user's real $HOME.
       const expectedRoot = resolveSessionDefaultWorkspace();
       assert.deepEqual(out.hub.getWorkspaceState(), {
         bound: true,
         root: expectedRoot,
       });
-      // (b) recents wired(homedir = installTestSettingsSource 的 tmp home),
-      // 自动预绑以 confirmTrust:true 写入 default → recents 文件存在且包含。
+      // (b) recents wired (homedir = installTestSettingsSource's tmp home); the
+      // auto pre-bind writes default with confirmTrust:true → recents file exists and contains it.
       const recents = await out.hub.listTrustedWorkspaces();
       assert.ok(
         recents.includes(expectedRoot),
         `recents should include auto-bound default: ${expectedRoot} (got ${JSON.stringify(recents)})`
       );
-      // (c) 创建会话后写盘文件携带 workspaceRoot = 默认 workspace(T1
-      // additivity: 缺字段 → cwd;这里 = default root,不是 cwd)。
+      // (c) after creating a session, the on-disk file carries workspaceRoot =
+      // the default workspace (additivity: missing field → cwd; here = default root, not cwd).
       const created = await out.hub.createSession();
-      // serve.ts 没有显式 flag/env 时,projectIdentityRoot 退到
+      // With no explicit flag/env, serve.ts's projectIdentityRoot falls back to
       // `deriveProjectIdentityRoot({cwd: undefined})` → `mainCheckoutOf(process.cwd())`,
-      // 与 productRoot(expectedRoot) 不同 —— 测试必须镜像 serve.ts 的派生,
-      // 否则会把同 id 文件读到错误的 projects/<basename>-<hash> 下。
+      // which differs from productRoot (expectedRoot) — the test must mirror
+      // serve.ts's derivation or it would look for the same id under the wrong
+      // projects/<basename>-<hash> folder.
       const ws = await readSessionWorkspaceRoot(
         localBaseDir,
         process.cwd(),
@@ -408,15 +414,15 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
         port: 0,
       });
       listening = out.listening;
-      // (a) picker bound 到显式 absolute root。
+      // (a) picker bound to the explicit absolute root.
       assert.deepEqual(out.hub.getWorkspaceState(), { bound: true, root });
-      // (b) recents wired,显式预绑以 confirmTrust:true 写入 recents 文件。
+      // (b) recents wired; the explicit pre-bind writes the root into the recents file with confirmTrust:true.
       const recents = await out.hub.listTrustedWorkspaces();
       assert.ok(
         recents.includes(root),
         `recents should include the pre-bound root: ${root} (got ${JSON.stringify(recents)})`
       );
-      // (c) T1 additivity: session file 携带 workspaceRoot = bound root。
+      // (c) additivity: the session file carries workspaceRoot = bound root.
       const created = await out.hub.createSession();
       const ws = await readSessionWorkspaceRoot(
         localBaseDir,
@@ -465,15 +471,15 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-env-"));
     const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t4-env-base-"));
     const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
-    // env 在 startSessionServe 内经 loadIknowEnv → envOptional 读出,所以必须
-    // 在调用前 set;finally 还原避免污染后续 case。
+    // startSessionServe reads env via loadIknowEnv → envOptional, so it must be
+    // set before the call; the finally restores it to avoid polluting later cases.
     process.env.IKNOW_WORKSPACE_ROOT = root;
     try {
       const out = await startSessionServe({
         hubOptions: { askUser: createNoAskUser() },
         dataDir: localBaseDir,
         port: 0,
-        // 不传 workspaceRoot —— 由 env SSOT 透传到 resolver。
+        // No workspaceRoot passed — the env SSOT feeds it through to the resolver.
       });
       listening = out.listening;
       assert.deepEqual(out.hub.getWorkspaceState(), { bound: true, root });
@@ -505,9 +511,9 @@ describe("startSessionServe — port fallback", () => {
     const prev = process.env.IKNOW_SERVE_PORT;
     delete process.env.IKNOW_SERVE_PORT;
     try {
-      // 8787 是真实绑定端口：forks 池下多个测试进程并发时，另一个进程
-      // 可能恰好也 fallback 到 8787 → EADDRINUSE（偶发失败，非真失败）。
-      // 重试 2 次 + 退避，让瞬态端口占用不影响断言。
+      // 8787 is really bound: with the forks pool, another test process may
+      // fall back to 8787 concurrently → EADDRINUSE (flaky, not a real failure).
+      // Retry twice with backoff so transient port contention doesn't break the assertion.
       let lastErr: unknown;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -559,18 +565,19 @@ describe("startSessionServe — port fallback", () => {
 
 // -- runtime LLM env wiring (SC6 / ADR-0094) ----------------------------------
 //
-// 验收：serve 入口装配 EnvLoader → envProvider 注入 hub → 改用户层
-// settings.json 的 llm.model 之后，下一条 POST /messages 的 wire 跟着新
-// env 走（不再是启动期一次性 loadIknowEnv）。
+// Acceptance: the serve entry assembles EnvLoader → envProvider injected into
+// the hub → after editing llm.model in the user-level settings.json, the next
+// POST /messages' wire model follows the new env (no longer a one-shot
+// loadIknowEnv at startup).
 //
-// 形态：本地 LLM capture server 作 SDK 的 baseURL 终点 → capture 收到的
-// 请求体里 `model` 字段 = wire model。设置 provider `prov` 含 m1 / m2 两
-// 个 model id，初始 settings.json = prov/m1，第一条 POST → 命中 m1；改写
-// settings.json = prov/m2，等 EnvLoader watcher 触发 reload + hub.adapter
-// 热重建，第二条 POST → 命中 m2。
+// Shape: a local LLM capture server as the SDK's baseURL endpoint → the
+// captured request body's `model` field = wire model. The provider `prov`
+// carries two model ids, initial settings.json = prov/m1, first POST → hits
+// m1; rewrite settings.json = prov/m2, wait for the EnvLoader watcher to
+// trigger reload + hub.adapter hot rebuild, second POST → hits m2.
 //
-// 注意：本测试假设 T1（wire model 切尾）已合入 —— 路由 `prov/m1` 经
-// provider 注册表命中 → SDK wire = `m1`（ADR-0094）。T1 与 T3 同 PR 落地。
+// Note: this test relies on the wire-model tail split (ADR-0094) — route
+// `prov/m1` hits the provider registry → SDK wire = `m1`.
 
 describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
   let capture: LlmCapture | undefined;
@@ -581,8 +588,8 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
   let sc6PrevStream: string | undefined;
   let sc6PrevMaxTokens: string | undefined;
 
-  /** 在 tmpHome/.iknow/settings.json 写一段：provider `prov` 含 m1/m2 +
-   *  baseUrl 指向 capture server，model = 当前路由。 */
+  /** Write tmpHome/.iknow/settings.json: provider `prov` with m1/m2 +
+   *  baseUrl pointing at the capture server, model = the current route. */
   async function writeProvSettings(modelRoute: string): Promise<void> {
     if (!sc6Home) throw new Error("sc6Home missing");
     const settingsJson = {
@@ -605,10 +612,11 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     );
   }
 
-  /** 等待 capture 收到含指定文本 user 消息的 body（envLoader watcher 异步）。
-   *  按 messages 内文过滤,而不是按索引 —— harness 在不同表面下首轮可能
-   *  触发 prefill / 后续 多次 SDK call(同一 postMessage 内 runAutoLoopSteps
-   *  多次迭代 + agentStatus 注入),硬编码 body[N] 易脆。 */
+  /** Wait for a capture body containing a user message with the given text (the
+   *  envLoader watcher is async). Filter by message content, not index — under
+   *  different surfaces the first round may trigger a prefill / several SDK
+   *  calls (multiple runAutoLoopSteps iterations + agentStatus injection within
+   *  one postMessage), so hardcoded body[N] is brittle. */
   async function waitForBodyWithUserText(
     needle: string,
     timeoutMs = 3000
@@ -646,8 +654,8 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
   }
 
   beforeEach(async () => {
-    // 自己起 tmp home（不依赖 installTestSettingsSource 的硬编码 provider
-    // 形状 —— 本测试要自定义 provider 注册表含两个 model id）。
+    // Bring up our own tmp home (not installTestSettingsSource's hardcoded
+    // provider shape — this test needs a custom registry with two model ids).
     sc6Home = await mkdtemp(join(tmpdir(), "iknow-sc6-home-"));
     sc6BaseDir = await mkdtemp(join(tmpdir(), "iknow-sc6-base-"));
     await mkdir(join(sc6Home, ".iknow"), { recursive: true });
@@ -657,17 +665,18 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     sc6PrevMaxTokens = process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"];
     process.env.HOME = sc6Home;
     process.env["IKNOW_SC6_API_KEY"] = "sc6-test-key";
-    // capture server 返回 JSON envelope（非 SSE）—— SDK 走非流式臂才能解。
-    // 默认 stream="on" → SDK 等不到 SSE chunk → 500（与现状一致）。
+    // The capture server returns a JSON envelope (not SSE) — only the SDK's
+    // non-streaming arm can parse it. Default stream="on" → the SDK waits for
+    // SSE chunks forever → 500 (consistent with current behavior).
     process.env["IKNOW_LLM_STREAM"] = "off";
-    // Anthropic SDK：max_tokens > 8192 时强制要求 streaming。
-    // 测试走非流式臂 → max_tokens 必 <= 8192。
+    // Anthropic SDK: max_tokens > 8192 forces streaming. The test uses the
+    // non-streaming arm → max_tokens must be <= 8192.
     process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"] = "128";
     capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
   });
 
   afterEach(async () => {
-    // 注：listening 在外层 afterEach 关；这里只关 capture + 还原 env。
+    // Note: `listening` is closed by the outer afterEach; here only capture is closed and env restored.
     if (capture) await capture.close();
     capture = undefined;
     if (sc6Home) await rm(sc6Home, { recursive: true, force: true });
@@ -686,20 +695,20 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
   });
 
   it("改用户层 settings.json 后,下一条 POST /messages 的 wire model 跟 EnvLoader 更新", async () => {
-    // (a) 初始 settings = prov/m1 → 启动 serve。
+    // (a) initial settings = prov/m1 → start serve.
     await writeProvSettings("prov/m1");
     const out = await startSessionServe({
       dataDir: sc6BaseDir,
-      // home 不传 —— serve 默认走 homedir()，beforeEach 把 process.env.HOME
-      // 改写到 sc6Home（sc6BaseDir 仅承担 SessionStore 路径，与 EnvLoader
-      // 的 settings 来源严格分离）。
+      // No home passed — serve defaults to homedir(), which beforeEach redirected
+      // to sc6Home (sc6BaseDir only carries the SessionStore path, strictly
+      // separate from the EnvLoader's settings source).
       hubOptions: { askUser: createNoAskUser() },
       port: 0,
     });
     listening = out.listening;
     const origin = `http://${listening.host}:${listening.port}`;
 
-    // (b) 建会话 → 第一条 POST /messages → 期待 capture 收到 wire model = m1。
+    // (b) create session → first POST /messages → expect capture to see wire model = m1.
     const created = await fetch(`${origin}/api/v1/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -723,10 +732,10 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     const firstBody = await waitForBodyWithUserText("first");
     assert.equal(firstBody.model, "m1");
 
-    // (c) 改用户层 settings.json → prov/m2 → EnvLoader watcher 触发 →
-    // envProvider 返回新 env → hub.reloadFromEnv 重建 adapter（白名单字段
-    // model 变化触发）。watcher 100ms debounce + writeFile 原子写 + reload
-    // + adapter 重建实测 < 300ms,留 500ms 缓冲。
+    // (c) rewrite user-level settings.json → prov/m2 → EnvLoader watcher fires →
+    // envProvider returns the new env → hub.reloadFromEnv rebuilds the adapter
+    // (whitelisted field `model` changed). Watcher 100ms debounce + atomic
+    // writeFile + reload + adapter rebuild measures < 300ms; keep a 500ms buffer.
     await writeProvSettings("prov/m2");
     await new Promise((r) => setTimeout(r, 500));
 

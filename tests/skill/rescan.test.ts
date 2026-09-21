@@ -1,16 +1,17 @@
 /**
- * skill/rescan.ts × 可加载面「当时热」+ 自动 diff 覆盖现行 scan 根
- * （spec `skill-index-increment` T6 / SC8 / SC11；assumption 9 / 10）。
+ * skill/rescan.ts × loadable-face "hot at load time" + auto-diff over current scan roots
+ * (spec `skill-index-increment` SC8 / SC11; assumption 9 / 10).
  *
- * 覆盖:
- *   - rescan 覆盖现行 scan() 全部技能根（user / project / IKNOW_SKILL_DIRS / plugin）;
- *   - 已 scan 根下新落 SKILL.md → 下一次 rescan 立刻可见（无 description 条目进
- *     可加载面、不进模型索引）;
- *   - 每次 rescan 返回新 catalog，旧实例不被改写;
- *   - plugin 根**只在显式换血后**进可见集 —— 未换血时磁盘上插件包变化看不见
- *     （SC11 的结构性证据：缝不读 installed_plugins.json）;
- *   - 真 IO 故障（不可读根目录 / 不可读 SKILL.md）→ typed SkillRescanError;
- *   - 缺目录 / 缺文件（ENOENT）仍是合法空态，不抛。
+ * Coverage:
+ *   - rescan covers every scan() skill root (user / project / IKNOW_SKILL_DIRS / plugin);
+ *   - a SKILL.md dropped under an already-scanned root → visible on the next rescan
+ *     (no-description entries enter the loadable face, not the model index);
+ *   - every rescan returns a new catalog; old instances are never rewritten;
+ *   - plugin roots enter the visible set **only after an explicit swap** — without a
+ *     swap, on-disk plugin package changes are invisible (structural evidence of SC11:
+ *     the seam never reads installed_plugins.json);
+ *   - real IO faults (unreadable root dir / unreadable SKILL.md) → typed SkillRescanError;
+ *   - missing dir / missing file (ENOENT) remains a legal empty state, no throw.
  */
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,7 +28,7 @@ import {
 } from "../../src/harness/plugin/roots.js";
 
 const roots: string[] = [];
-/** 权限位恢复闭包 —— 只读目录不恢复则 afterEach 的 rm 清不掉。 */
+/** Permission-restore closures — read-only dirs must be restored or afterEach's rm cannot clean them. */
 const restores: Array<() => Promise<void>> = [];
 
 async function fixture(
@@ -45,7 +46,7 @@ async function fixture(
 const sortedNames = (entries: ReadonlyArray<{ name: string }>): string[] =>
   entries.map(({ name }) => name).sort((a, b) => a.localeCompare(b));
 
-/** root 绕过权限位 → EACCES 不可复现（同 store/boundary.test.ts 纪律）。 */
+/** Running as root bypasses permission bits → EACCES is not reproducible (same discipline as store/boundary.test.ts). */
 const runningAsRoot = (): boolean =>
   typeof process.getuid === "function" && process.getuid() === 0;
 
@@ -67,9 +68,9 @@ describe("createSkillRescanner", () => {
       env: {},
     });
 
-    // 三根全缺（home 都还没建）→ 空集，不抛。
+    // All three roots missing (even home is unbuilt) → empty set, no throw.
     expect((await rescanner.rescan()).loadable()).toEqual([]);
-    // 根存在但为空 → 同样空集，不抛。
+    // Roots exist but empty → likewise empty set, no throw.
     await mkdir(join(home, ".iknow", "skills"), { recursive: true });
     const catalog = await rescanner.rescan();
     expect(catalog.loadable()).toEqual([]);
@@ -155,9 +156,10 @@ describe("createSkillRescanner", () => {
       pluginSkillDirs: [{ dir: pluginSkills, plugin: "plug" }],
     });
 
-    // 同名 user/env 只剩一条，描述 = 最高优先级根（env）；插件条目 canonical
-    // 名不同（`plug:shared`），是另一条 —— 证明 rescan 走的是 scan() 本身
-    // 的根序与覆盖纪律，而不是「把各根结果并起来」的近似实现。
+    // Same-named user/env entries collapse to one, description = highest-priority root (env);
+    // the plugin entry has a different canonical name (`plug:shared`) and stays separate —
+    // proving rescan follows scan()'s own root order and override discipline rather than an
+    // approximate "union all roots" implementation.
     const catalog = await rescanner.rescan();
     expect(sortedNames(catalog.loadable())).toEqual(["plug:shared", "shared"]);
     expect(catalog.get("shared")).toMatchObject({ description: "env" });
@@ -185,7 +187,7 @@ describe("createSkillRescanner", () => {
       "alpha",
     ]);
 
-    // 会话开始后新装的技能：无 description = 人侧可加载、不进模型索引。
+    // A skill installed after the session started: no description = human-side loadable only, not in the model index.
     await fixture(userSkills, "human-only", "---\nname: human-only\n---\nbody");
     const after = await rescanner.rescan();
 
@@ -219,7 +221,7 @@ describe("createSkillRescanner", () => {
 
     expect(second).not.toBe(first);
     expect(sortedNames(second.loadable())).toEqual(["alpha", "later"]);
-    // 旧实例是当时的快照：新技能不进它，也不反过来被清空。
+    // The old instance is a point-in-time snapshot: new skills do not enter it, and it is not emptied in turn.
     expect(sortedNames(first.loadable())).toEqual(["alpha"]);
     expect(first.get("later")).toBeUndefined();
     expect(second.get("later")).toBeDefined();
@@ -245,10 +247,11 @@ describe("createSkillRescanner", () => {
       "---\nname: late-skill\ndescription: late\n---\nbody"
     );
 
-    // 非空洞前提：走真实的插件发现链，这个包**确实**在盘上、**确实**
-    // 被解析得出来 —— 所以下面的「看不见」只可能归因于根列表没换血，
-    // 而不是包本身有问题。userHome 必须指向 fixture，否则默认根
-    // `<home>/.iknow/plugins` 会把本机已装的插件也扫进来。
+    // Non-vacuous premise: going through the real plugin discovery chain, this package
+    // **is** on disk and **is** resolvable — so the "invisible" below can only be
+    // attributed to the root list not being swapped, not to a broken package. userHome
+    // must point into the fixture, or the default root `<home>/.iknow/plugins` would
+    // also scan this machine's installed plugins.
     const sandboxHome = join(root, "home");
     const { enabled } = await resolvePluginCatalog({
       roots: resolvePluginRoots({
@@ -269,11 +272,11 @@ describe("createSkillRescanner", () => {
       env: {},
       pluginSkillDirs: [],
     });
-    // 缝不自己读 ledger：插件包与新 SKILL.md 都在盘上，未换血 → 不可见。
+    // The seam never reads the ledger itself: the plugin package and its new SKILL.md are both on disk, but without a swap → invisible.
     expect((await rescanner.rescan()).loadable()).toEqual([]);
     expect((await rescanner.rescan()).loadable()).toEqual([]);
 
-    // host 显式 reload：把这一轮重新解析出的根列表整体换血。
+    // Explicit host reload: swap the whole root list with this round's re-resolved roots.
     rescanner.setPluginSkillDirs(reloadedDirs);
     expect(rescanner.pluginSkillDirs()).toEqual([
       { dir: join(installed, "skills"), plugin: "plugB" },
@@ -282,7 +285,7 @@ describe("createSkillRescanner", () => {
       "plugB:late-skill",
     ]);
 
-    // 置换语义 = 整体替换（不是合并）：再次换血回空 → 该插件根退出可见集。
+    // Replacement semantics = wholesale replace (not merge): swapping back to empty → that plugin root leaves the visible set.
     rescanner.setPluginSkillDirs([]);
     expect((await rescanner.rescan()).loadable()).toEqual([]);
   });
@@ -321,7 +324,7 @@ describe("createSkillRescanner", () => {
     });
     expect(typed.faults[0]!.cause.length).toBeGreaterThan(0);
 
-    // 故障不改任何既有状态：健康 catalog 仍是当时快照；恢复后 rescan 照常。
+    // Failure changes no existing state: the healthy catalog stays its snapshot; after recovery rescan works as usual.
     expect(sortedNames(healthy.loadable())).toEqual(["alpha"]);
     for (const restore of restores.splice(0)) await restore();
     expect(sortedNames((await rescanner.rescan()).loadable())).toEqual([
@@ -361,7 +364,7 @@ describe("createSkillRescanner", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-rescan-"));
     roots.push(root);
     const home = join(root, "home");
-    // `~/.iknow/skills` 被一个同名文件占位 —— EOF 之外的坏根形态。
+    // `~/.iknow/skills` occupied by a same-named file — a bad-root shape beyond EOF.
     await mkdir(join(home, ".iknow"), { recursive: true });
     await writeFile(join(home, ".iknow", "skills"), "not a directory", "utf8");
     const rescanner = createSkillRescanner({
@@ -405,7 +408,7 @@ describe("createSkillRescanner", () => {
     restores.push(() => chmod(extra, 0o755));
 
     await expect(rescanner.rescan()).rejects.toBeInstanceOf(SkillRescanError);
-    // 装配期观测面（warn）与 rescan 缝的 typed 出口同时成立。
+    // The assembly-time observation surface (warn) and the rescan seam's typed exit both hold.
     expect(warn).toHaveBeenCalledExactlyOnceWith(
       `skill scan skipped directory: ${extra}`
     );

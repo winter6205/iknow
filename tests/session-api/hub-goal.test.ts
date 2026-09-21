@@ -1,9 +1,10 @@
 /**
- * #458 T2/T5 (SC2) + #605 T2 退休字段后:hub **不再 seed** `taskFocus`,
- * sanitize 也不再迁移 `user_initial` 到 `taskFocus`;盘上遗留的
- * legacy taskFocus key 在 load 时无条件 drop。goal 仍由 `## GOAL:`
- * / `/goal <text>` 写入(用户固定锚,model 不可写),first postMessage
- * 在无 goal / 无 taskFocus 状态下 goal 也保持 undefined。
+ * Post taskFocus-field retirement: hub **no longer seeds** `taskFocus`,
+ * sanitize no longer migrates `user_initial` into `taskFocus`, and a legacy
+ * taskFocus key left on disk is dropped unconditionally at load. Goal is
+ * still written by `## GOAL:` / `/goal <text>` (user-pinned anchor, not
+ * model-writable); on first postMessage with no goal / no taskFocus, goal
+ * stays undefined.
  *
  * The `## GOAL:` path additionally gates goal text through
  * `validateGoalText` (2000-char cap) before the pin reaches the store.

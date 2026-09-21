@@ -4,8 +4,8 @@
  * Three LLM-bound test files (hub.test.ts, http.test.ts,
  * thinking-override.test.ts) each used to define their own ~80-line capture
  * server + the same 10-field LlmEnv literal + a near-identical SdkMessage
- * body. M4 / code-review 双轴整改 consolidates those into one helper so
- * the test surface stays single-source for the helper shape (the wire
+ * body. A code-review consolidation folds them into one helper so the test
+ * surface stays single-source for the helper shape (the wire
  * assertions still belong to the call sites).
  *
  * Usage:
@@ -111,12 +111,13 @@ export function makeTestLlmEnv(overrides: Partial<TestLlmEnv> = {}): {
 /**
  * Subset of `LlmEnv` we use in tests — a separate alias keeps the helper
  * independent of the live `LlmEnv` type's evolution while still being
- * assignable (each field's value type matches). settings-model-extension
- * (i164 第二阶段)：LlmEnv 退役 `apiKeyEnv` 字段，本 type 不再包含。
+ * assignable (each field's value type matches). The retired `apiKeyEnv`
+ * field is not part of this type.
  *
- * tui-model-command SC9 加可选 `headers`：provider.headers 透传面
- * （settings.llm.providers[i].headers）默认缺席 —— 与生产 env 的「有值才有
- * 该键」同形；要在场必须显式 override。
+ * Optional `headers` mirrors provider.headers
+ * (settings.llm.providers[i].headers): absent by default — same shape as
+ * production env's "key present only when set"; inclusion requires an
+ * explicit override.
  */
 export type TestLlmEnv = {
   readonly baseUrl: string;

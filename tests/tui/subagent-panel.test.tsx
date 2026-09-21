@@ -2,17 +2,20 @@
 /**
  * tests/tui/subagent-panel.test.tsx
  *
- * #358 T3 / TUI 子代理状态面板测试。
+ * TUI subagent status panel tests.
  *
- * 覆盖：
- *   1. 可见性 9 类（空 / 1 running / starting / failed ≤30s / failed >30s /
- *      全 completed ≤5s / 全 completed >5s / 4 active 折叠 / 窄列 / 无 emoji）；
- *   2. 纯函数边界（elapsedSec 非法 ISO / 空串 / 整秒差）。
- *   3. 秒→字符串格式边界（`formatRunDuration`，run-stats.ts SSOT）已并入
- *      `tests/tui/run-stats.test.ts` 的 formatRunDuration describe（与 mode
- *      行 / Crunched 行共享同一纯函数，测试收敛到一处）。
+ * Coverage:
+ *   1. visibility, 9 classes (empty / 1 running / starting / failed ≤30s /
+ *      failed >30s / all completed ≤5s / all completed >5s / 4 active without
+ *      folding / narrow cols / no emoji);
+ *   2. pure-function edges (elapsedSec illegal ISO / empty string / whole-second diff).
+ *   3. second→string format edges (`formatRunDuration`, run-stats.ts SSOT) have
+ *      been merged into the formatRunDuration describe in
+ *      `tests/tui/run-stats.test.ts` (shared pure function with the mode line /
+ *      Crunched line; tests converge in one place).
  *
- * 时间戳用相对 T0 构造 ISO 串（不依赖真实 Date.now），保证确定性。
+ * Timestamps build ISO strings relative to T0 (no reliance on real Date.now)
+ * for determinism.
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -26,7 +29,7 @@ import {
 import { visualWidth } from "../../src/tui/tool-summary.js";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
 
-// 固定基准时间：所有 fixture 的 ISO 偏移相对 T0 计算。
+// Fixed baseline time: all fixtures compute ISO offsets relative to T0.
 const T0 = Date.parse("2026-08-18T10:00:00.000Z");
 
 function iso(offsetMs: number): string {
@@ -63,7 +66,7 @@ async function renderPanel(props: {
 }
 
 // ============================================================================
-// 纯函数：elapsedSec
+// Pure function: elapsedSec
 // ============================================================================
 
 describe("elapsedSec startedAt 防御", () => {
@@ -75,13 +78,13 @@ describe("elapsedSec startedAt 防御", () => {
   test("合法 ISO → 整秒差", () => {
     expect(elapsedSec(iso(-2500), T0)).toBe(2);
     expect(elapsedSec(iso(0), T0)).toBe(0);
-    // nowMs 早于 startedAt（时钟漂移 / future-dated 启动） → 0 兜底
+    // nowMs earlier than startedAt (clock drift / future-dated start) → clamp to 0
     expect(elapsedSec(iso(1000), T0 - 5_000)).toBe(0);
   });
 });
 
 // ============================================================================
-// 纯函数：projectSubagentLines（不挂载 OpenTUI）
+// Pure function: projectSubagentLines (no OpenTUI mount)
 // ============================================================================
 
 describe("projectSubagentLines 可见性 + 折叠", () => {
@@ -126,7 +129,7 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
     });
     const lines = projectSubagentLines([recent, expired], T0, 80);
     expect(lines.some((l) => l.icon === "✗")).toBe(true);
-    // 只有 1 条 failed 可见（≤30s）；footer 不该出现（live 行 < 3）
+    // Only 1 failed row visible (≤30s); no footer expected (live rows < 3)
     expect(lines).toHaveLength(1);
     expect(lines[0]?.text).toContain("timeout");
   });
@@ -268,9 +271,9 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
     const lines = projectSubagentLines(subs, T0, 80);
     expect(lines).toHaveLength(1);
     expect(lines[0]?.icon).toBe("✗");
-    // 完整行视觉宽度 ≤ cols（visualWidth 口径，不再有 CJK 溢出）
+    // Full line visual width ≤ cols (visualWidth metric; no more CJK overflow)
     expect(visualWidth(lines[0]?.text ?? "")).toBeLessThanOrEqual(80);
-    // 短 reason 不受影响（原样保留）
+    // Short reasons are untouched (kept verbatim)
     const short = projectSubagentLines(
       [
         makeSubagent({
@@ -307,7 +310,7 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
 });
 
 // ============================================================================
-// 渲染（testRender + captureCharFrame）
+// Rendering (testRender + captureCharFrame)
 // ============================================================================
 
 describe("SubagentPanel 渲染（OpenTUI）", () => {
@@ -506,7 +509,7 @@ describe("SubagentPanel 渲染（OpenTUI）", () => {
 });
 
 // ============================================================================
-// T7：聚焦行展开 taskPreview（chrome-focus reducer 接线验证）
+// Focused row expands taskPreview (chrome-focus reducer wiring)
 // ============================================================================
 
 describe("projectSubagentLines focusedRow — T7 子代理行聚焦展开", () => {
@@ -532,8 +535,10 @@ describe("projectSubagentLines focusedRow — T7 子代理行聚焦展开", () =
     const lines = projectSubagentLines([sa], T0, 80, 0);
     expect(lines.length).toBe(1);
     expect(lines[0]!.text.startsWith("> ")).toBe(true);
-    // 展开：原文 taskPreview 完整在场（受 cols 视觉宽度兜底，但长 preview
-    // 应远超 cols；本断言钉住「展开」行为 —— 单测 cols=80 时展开行含原 preview）。
+    // Expanded: the original taskPreview is fully present (cols visual width
+    // still backstops, but a long preview far exceeds cols; this assertion
+    // pins the "expand" behavior — with cols=80 the expanded line contains
+    // the original preview).
     expect(lines[0]!.text).toContain("完整内容");
   });
 
@@ -588,12 +593,13 @@ describe("projectSubagentLines focusedRow — T7 子代理行聚焦展开", () =
       endedAt: iso(-1000),
       taskPreview: "failed task",
     });
-    // focusedRow=1 指向 failed 行；按 plan 仅 live 行参与 focus → 不展开。
+    // focusedRow=1 points at the failed row; per plan only live rows take
+    // focus → no expansion.
     const lines = projectSubagentLines([sa0, sa1], T0, 80, 1);
     expect(lines.length).toBe(2);
-    // 第 0 行 (live running) 不应被聚焦
+    // Line 0 (live running) is not focused
     expect(lines[0]!.text.startsWith("> ")).toBe(false);
-    // 第 1 行 (failed) 不参与 focus
+    // Line 1 (failed) does not participate in focus
     expect(lines[1]!.text.startsWith("> ")).toBe(false);
   });
 
@@ -632,14 +638,14 @@ describe("SubagentPanel focusedRow 渲染（OpenTUI）", () => {
     );
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    // 第二行带 `> `
+    // Second line carries `> `
     expect(frame).toContain("> ○");
-    // 找两行：第一行无 `> ` 前缀
+    // Find both lines: first line has no `> ` prefix
     const lines = frame
       .split("\n")
       .filter((l) => l.includes("子代理") || l.includes("> "));
     expect(lines.length).toBeGreaterThanOrEqual(2);
-    // 至少一行无 `> `（focusedRow=1 的情况下，row=0 不带前缀）
+    // At least one line without `> ` (with focusedRow=1, row=0 keeps no prefix)
     expect(lines.some((l) => !l.trimStart().startsWith(">"))).toBe(true);
     await setup.renderer.destroy();
   });
@@ -662,7 +668,7 @@ describe("SubagentPanel focusedRow 渲染（OpenTUI）", () => {
 });
 
 // ============================================================================
-// #1044：maxRows 折叠 + 焦点环可见行数上界
+// maxRows folding + visible-row ceiling for the focus ring
 // ============================================================================
 
 describe("projectSubagentLines maxRows 折叠（#1044）", () => {
@@ -690,11 +696,11 @@ describe("projectSubagentLines maxRows 折叠（#1044）", () => {
   });
 
   test("超限 → 截到 maxRows，末行 `… +N`，N = 被隐藏行数", () => {
-    // 8 live、maxRows=5 → 前 4 行原样 + 折叠行（隐藏 8-4=4）
+    // 8 live, maxRows=5 → first 4 lines verbatim + fold line (hides 8-4=4)
     const lines = projectSubagentLines(liveN(8), T0, 80, undefined, 5);
     expect(lines).toHaveLength(5);
     expect(lines[4]?.text).toBe("… +4");
-    // 前 4 行仍是 live 行、聚焦语义未被折叠破坏
+    // First 4 lines are still live lines; focus semantics survive the fold
     expect(
       lines.slice(0, 4).every((l) => l.icon === "●" || l.icon === "○")
     ).toBe(true);
@@ -721,7 +727,7 @@ describe("visibleLiveRowCount（#1044 焦点环上界）", () => {
     const subs = [
       makeSubagent({ state: "running" }),
       makeSubagent({ state: "completed", endedAt: iso(-1000) }),
-      makeSubagent({ state: "failed", endedAt: iso(-60_000) }), // >30s 窗口
+      makeSubagent({ state: "failed", endedAt: iso(-60_000) }), // >30s window
     ];
     expect(visibleLiveRowCount(subs, T0, 80, 5)).toBe(1);
   });
@@ -734,8 +740,9 @@ describe("visibleLiveRowCount（#1044 焦点环上界）", () => {
   });
 
   test("窗口内 failed 行穿插占可见槽位 → 不虚报（焦点不落隐藏行）", () => {
-    // 反例钉住：min(live, maxRows-1) 公式会返 4 —— [✗, ●, ●, ●, ●] 折叠后
-    // 可见前 4 行是 [✗, ●, ●, ●]，实际可见 live 只有 3。
+    // Pins the counterexample: the min(live, maxRows-1) formula would return 4
+    // — after folding [✗, ●, ●, ●, ●], the visible first 4 lines are
+    // [✗, ●, ●, ●], so only 3 live rows are actually visible.
     const subs = [
       makeSubagent({ state: "failed", endedAt: iso(-5_000), reason: "boom" }),
       ...Array.from({ length: 5 }, (_, i) =>
@@ -743,7 +750,8 @@ describe("visibleLiveRowCount（#1044 焦点环上界）", () => {
       ),
     ];
     expect(visibleLiveRowCount(subs, T0, 80, 5)).toBe(3);
-    // 与渲染投影逐行同口径：可见 ●/○ 行数恒等。
+    // Same per-line accounting as the render projection: visible ●/○ count is
+    // always equal.
     const projected = projectSubagentLines(subs, T0, 80, undefined, 5);
     expect(
       projected.filter((l) => l.icon === "●" || l.icon === "○").length

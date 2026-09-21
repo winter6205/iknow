@@ -1,8 +1,9 @@
 /**
- * ADR-0113 session-list-title T4: lite 无工具标题生成模块单测。
- * 覆盖 sanitize / prompt 构造 / collectTitleSource 触发闸(寒暄、过短)/
- * createLiteTitleGenerator 单次补全的 happy / throw / 空响应 / timeout 分支。
- * 纯模块测试不碰 hub —— hub 触发语义见 tests/session-api/hub-title-generation.test.ts。
+ * Unit tests for the lite tool-less title-generation module (ADR-0113).
+ * Covers sanitize / prompt construction / collectTitleSource trigger gate (chit-chat,
+ * too short) / the happy / throw / empty-response / timeout branches of a single
+ * createLiteTitleGenerator completion. Pure module tests — hub trigger semantics live
+ * in tests/session-api/hub-title-generation.test.ts.
  */
 import { describe, expect, it } from "vitest";
 import type {
@@ -42,7 +43,7 @@ function toolResultUser(): AnthropicNativeMessage {
   return { role: "user", content: [block] };
 }
 
-/** 脚本化 CompactAdapter：step 返回给定结果 / 抛错 / 永挂起；记录调用入参。 */
+/** Scripted CompactAdapter: step returns the given result / throws / hangs forever; records call args. */
 function makeAdapter(
   behavior:
     | { kind: "text"; text: string }
@@ -159,7 +160,7 @@ describe("buildTitlePrompt", () => {
   });
 });
 
-// -- collectTitleSource (触发闸：spec Does 5 / 语义 (e)) ------------------------
+// -- collectTitleSource (trigger gate: chit-chat / too-short, per specs/session-list-title.md "Does" item 5) ------------------------
 
 describe("collectTitleSource", () => {
   it("returns source for a normal substantive first query", () => {
@@ -229,11 +230,11 @@ describe("createLiteTitleGenerator", () => {
       assistantText: "好的",
     });
     expect(out).toBe("登录模块重构");
-    // 恰好一次 step 调用；请求对象冻结且不含 tools（无工具补全）
+    // exactly one step call; request object frozen and without tools (tool-less completion)
     expect(calls.length).toBe(1);
     expect(calls[0].request.onStream).toBeUndefined();
     expect("tools" in calls[0].request).toBe(false);
-    // state 只含 1 条 prompt user 消息
+    // state contains only the 1 prompt user message
     expect(calls[0].state.messages.length).toBe(1);
     expect(calls[0].state.messages[0].role).toBe("user");
   });
@@ -267,7 +268,7 @@ describe("createLiteTitleGenerator", () => {
   });
 });
 
-// -- liteTitleGeneratorOptions (host 装配缝：键缺席纪律) -------------------------
+// -- liteTitleGeneratorOptions (host assembly seam: key-absence discipline) -------------------------
 
 describe("liteTitleGeneratorOptions", () => {
   const liteEnv = {

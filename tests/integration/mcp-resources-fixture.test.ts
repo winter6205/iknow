@@ -1,31 +1,32 @@
 /**
- * T13 (#440 Stream B) — 集成链：fixture stdio MCP server 真子进程链路
- * + resources 通道端到端断言。
+ * Integration chain: fixture stdio MCP server, real subprocess + resources
+ * channel end-to-end assertions.
  *
- * 与 tests/integration/mcp-chain.test.ts（T10 tools 链路）配对：
- * 那个 fixture 暴露 tools/echo/fail/slow + list_changed；
- * 本 fixture (tests/fixtures/mcp-resource-server/server.ts) 仅暴露 4 个
- * resource（small / large / blob / empty）。两 fixture 隔离 = tools / resources
- * 协议路径互不污染。
+ * Paired with tests/integration/mcp-chain.test.ts (the tools chain): that
+ * fixture exposes echo/fail/slow tools + list_changed; this fixture
+ * (tests/fixtures/mcp-resource-server/server.ts) exposes only 4 resources
+ * (small / large / blob / empty). Two isolated fixtures = tools / resources
+ * protocol paths cannot pollute each other.
  *
- * 验收（plans/440-wayfinder-toolset.md T13）：
+ * Acceptance:
  *   1. spawn fixture server → createMcpManager(createRealClient) → start()
- *      → connected；fixture server 启动期在 stderr 行输出资源数（诊断可见）
- *   2. manager.listResources() → 含 4 个 fixture resource，wire shape 完整
- *      （server/uri/name/description/mimeType 字段投影正确）
- *   3. manager.listResources({server:"alpha"}) → 仅该 server 的资源；
- *      未连接的 server 在 perServer 暴露当前 state 而不抛
- *   4. manager.readResource(server, uri) → 真实内容返回；
- *      small → text 字段；blob → blob 字段（text/blob 互斥）；empty → text 空串
- *   5. large 资源 → 返回 50000 字符内容（manager 不截断；
- *      executor 截断是下游契约，超出 T13 scope）
- *   6. read 不存在的 uri → ToolExecutionError（manager 层 SDK 错误屏蔽）
- *   7. list_mcp_resources / read_mcp_resource 工具 handler 端到端接通
- *      （走真实 wire 形态：line-JSON / envelope JSON），让 T9/T10 工厂
- *      与 manager 的契约也同测试连通
- *   8. shutdown SIGTERM：fixture 子孙必须真正退出（SC11）
+ *      → connected; the fixture prints its resource count on a stderr startup
+ *      line (diagnostic anchor)
+ *   2. manager.listResources() → contains the 4 fixture resources with full
+ *      wire shape (server/uri/name/description/mimeType projected correctly)
+ *   3. manager.listResources({server:"alpha"}) → that server's resources only;
+ *      a not-connected server surfaces its current state in perServer without throwing
+ *   4. manager.readResource(server, uri) → real content returned;
+ *      small → text field; blob → blob field (text/blob mutually exclusive); empty → text empty string
+ *   5. large resource → full 50000-char content (manager does not truncate;
+ *      executor truncation is a downstream contract, out of scope here)
+ *   6. read of a nonexistent uri → ToolExecutionError (manager hides SDK errors)
+ *   7. list_mcp_resources / read_mcp_resource tool handlers wired end-to-end
+ *      (real wire formats: line-JSON / envelope JSON), so the factory-vs-manager
+ *      contract is exercised through the same test
+ *   8. shutdown SIGTERM: the fixture child must really exit
  *
- * 无 LLM、无外部 server — 仅 fixture 子进程 + 真实 SDK Client/Transport。
+ * No LLM, no external server — fixture subprocess + real SDK Client/Transport.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -48,7 +49,7 @@ import { createExecutor } from "../../src/harness/tools/executor.js";
 import { createRegistry } from "../../src/harness/tools/registry.js";
 
 // ---------------------------------------------------------------------------
-// fixture server 路径解析 — 与 mcp-chain.test.ts 同形态
+// fixture server path resolution — same shape as mcp-chain.test.ts
 // ---------------------------------------------------------------------------
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -72,7 +73,7 @@ interface SpawnedResourceFixture {
 }
 
 function spawnResourceFixture(): SpawnedResourceFixture {
-  // 触发文件非必需（资源 fixture 无 list_changed），但保持同 scratch 隔离模式
+  // No trigger file needed (resources fixture has no list_changed), but keep the same scratch-isolation pattern
   const scratch = join(
     tmpdir(),
     `iknow-mcp-rsrc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -135,9 +136,10 @@ async function waitForConnected(
 }
 
 /**
- * stderr 启动行 poll —— 子进程 stderr 'data' 事件与 SDK 握手竞态：
- * waitForConnected（stdout 协议路径）通过后 stderr 行可能尚未投递，
- * 并行套件负载下同步 find 会偶发漏检（code-review Standards Medium 修复）。
+ * stderr startup-line poll — the child's stderr 'data' event races the SDK
+ * handshake: even after waitForConnected (stdout protocol path) passes, the
+ * stderr line may not have been delivered yet, and a synchronous find flakes
+ * under parallel-suite load.
  */
 async function waitForStderrLine(
   lines: string[],
@@ -156,7 +158,7 @@ async function waitForStderrLine(
 }
 
 // ---------------------------------------------------------------------------
-// 全局清理 — 与 mcp-chain.test.ts 同形态
+// Global cleanup — same shape as mcp-chain.test.ts
 // ---------------------------------------------------------------------------
 
 let activeFixtures: SpawnedResourceFixture[] = [];
@@ -181,7 +183,7 @@ afterEach(async () => {
       ])
     )
   );
-  // 回收 fixture scratch 目录（避免 /tmp 污染；独立 rm 失败不影响其它回收入）
+  // Reclaim fixture scratch dirs (no /tmp pollution; a failed rm must not block the others)
   for (const f of activeFixtures) {
     try {
       await rm(f.scratch, { recursive: true, force: true });
@@ -193,7 +195,7 @@ afterEach(async () => {
 });
 
 // =========================================================================
-// 1. fixture server 真子进程链路 — spawn → connect → listResources 聚合
+// 1. Real fixture subprocess chain — spawn → connect → listResources aggregation
 // =========================================================================
 
 describe("MCP resources integration — end-to-end real subprocess chain", () => {
@@ -206,25 +208,25 @@ describe("MCP resources integration — end-to-end real subprocess chain", () =>
       workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {
-        /* 资源通道不走 mcp__ 工具注册 */
+        /* the resources channel does not go through mcp__ tool registration */
       },
     });
 
     await manager.start();
     await waitForConnected(manager, "rsrc_server");
 
-    // 真链路断言 1：stderr 启动行含资源数（fixture 端到端契约的诊断锚点）
+    // Chain assertion 1: stderr startup line carries the resource count (diagnostic anchor for the fixture contract)
     const started = await waitForStderrLine(
       spawned.stderrLines,
       (l) => l.includes("fixture-mcp-resources") && l.includes("started pid=")
     );
     expect(started).toMatch(/resources=4/);
 
-    // 真链路断言 2：listResources 聚合返回 4 个 fixture resource
+    // Chain assertion 2: listResources aggregates the 4 fixture resources
     const list = await manager.listResources();
     expect(list.resources).toHaveLength(4);
 
-    // 真链路断言 3：每个 resource 字段投影正确（fixture server 协议实现校验）
+    // Chain assertion 3: every resource field projects correctly (validates the fixture server's protocol implementation)
     const byUri = new Map(list.resources.map((r) => [r.uri, r]));
     expect(byUri.get("small://fixture")).toEqual({
       server: "rsrc_server",
@@ -239,7 +241,7 @@ describe("MCP resources integration — end-to-end real subprocess chain", () =>
     );
     expect(byUri.get("empty://fixture")?.mimeType).toBe("text/plain");
 
-    // 真链路断言 4：perServer 状态正确反映 connected + 无 nextCursor
+    // Chain assertion 4: perServer reflects connected correctly + no nextCursor
     expect(list.perServer).toEqual([
       { server: "rsrc_server", state: "connected" },
     ]);
@@ -249,7 +251,7 @@ describe("MCP resources integration — end-to-end real subprocess chain", () =>
 });
 
 // =========================================================================
-// 2. listResources 过滤 — server 参数 + 未连接 server 行为
+// 2. listResources filtering — server param + not-connected server behavior
 // =========================================================================
 
 describe("MCP resources integration — listResources scope + state surfaces", () => {
@@ -271,7 +273,7 @@ describe("MCP resources integration — listResources scope + state surfaces", (
     expect(list.resources).toHaveLength(4);
     expect(list.resources.every((r) => r.server === "solo")).toBe(true);
 
-    // 不存在的 server → 空集合（manager 不抛；perServer 不含该项）
+    // Nonexistent server -> empty set (manager does not throw; perServer has no such entry)
     const none = await manager.listResources({ server: "ghost" });
     expect(none.resources).toEqual([]);
     expect(none.perServer).toEqual([]);
@@ -280,9 +282,9 @@ describe("MCP resources integration — listResources scope + state surfaces", (
   });
 
   it("listResources against not-yet-connected server skips it in resources but surfaces state in perServer", async () => {
-    // 创建立即失败的 server（命令不存在 → connect 抛 → markFailed）
-    // + 一个 fixture 资源 server。fixture 资源 server 仍 connected，
-    // 失败的 server 在 perServer 暴露 failed state 但 listResources 不抛。
+    // A server whose command fails immediately (connect throws -> markFailed)
+    // plus a fixture resources server. The fixture server stays connected; the
+    // failed one surfaces failed state in perServer but listResources does not throw.
     const spawned = spawnResourceFixture();
     activeFixtures.push(spawned);
 
@@ -304,23 +306,23 @@ describe("MCP resources integration — listResources scope + state surfaces", (
     });
 
     await manager.start();
-    // 等 ok_server 真正 connected；failing 注定 failed
+    // Wait until ok_server is truly connected; failing is destined to fail
     await waitForConnected(manager, "ok_server");
-    // 给 failing server 一个窗口让 connect 抛错
+    // Give the failing server a window for connect to throw
     await new Promise((r) => setTimeout(r, 500));
 
     const list = await manager.listResources();
 
-    // ok_server 的 4 条 resource 全部入列
+    // All 4 ok_server resources are listed
     expect(list.resources).toHaveLength(4);
     expect(list.resources.every((r) => r.server === "ok_server")).toBe(true);
 
-    // failing server 在 perServer 暴露 failed state 而不抛（M3 决议：不崩）
+    // failing server exposes failed state in perServer without throwing (must not crash)
     const failingEntry = list.perServer.find((s) => s.server === "failing");
     expect(failingEntry).toBeDefined();
     expect(failingEntry?.state).toBe("failed");
 
-    // ok_server perServer 仍 connected
+    // ok_server's perServer entry remains connected
     const okEntry = list.perServer.find((s) => s.server === "ok_server");
     expect(okEntry?.state).toBe("connected");
 
@@ -329,7 +331,7 @@ describe("MCP resources integration — listResources scope + state surfaces", (
 });
 
 // =========================================================================
-// 3. readResource — happy / empty / blob / large / not_found 边界
+// 3. readResource — happy / empty / blob / large / not_found boundaries
 // =========================================================================
 
 describe("MCP resources integration — readResource content fidelity", () => {
@@ -378,10 +380,10 @@ describe("MCP resources integration — readResource content fidelity", () => {
     expect(result.contents).toHaveLength(1);
     const content = result.contents[0];
     expect(content.mimeType).toBe("application/octet-stream");
-    // text 缺席，blob 在场 → 互斥守住
+    // text absent, blob present -> mutual exclusion held
     expect(content.text).toBeUndefined();
     expect(content.blob).toBeDefined();
-    // base64 还原后与 fixture 写入的字节一致
+    // base64-decoded bytes match what the fixture wrote
     const decoded = Buffer.from(content.blob!, "base64").toString("utf8");
     expect(decoded).toBe("binary-fixture-data");
 
@@ -428,10 +430,10 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const result = await manager.readResource("rsrc_server", "large://fixture");
     const content = result.contents[0];
-    // 50000 字符完整返回 — manager 层守"原内容",截断是 executor/契约 X 的活
+    // Full 50000 chars returned — the manager keeps the original content; truncation is the executor's job
     expect(content.text).toBeDefined();
     expect(content.text!.length).toBe(50_000);
-    // 内容一致性:fixture 是 "ABCDEFGHIJ" × 5000
+    // Content consistency: the fixture emits "ABCDEFGHIJ" x 5000
     expect(content.text!.startsWith("ABCDEFGHIJ")).toBe(true);
     expect(content.text!.endsWith("ABCDEFGHIJ")).toBe(true);
 
@@ -452,7 +454,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
     await manager.start();
     await waitForConnected(manager, "rsrc_server");
 
-    // fixture resources/read 未找到 uri → 返回 JSON-RPC 错误 -32002 → manager 抛 ToolExecutionError
+    // fixture resources/read cannot find the uri -> JSON-RPC error -32002 -> manager throws ToolExecutionError
     await expect(
       manager.readResource("rsrc_server", "nonexistent://does-not-exist")
     ).rejects.toThrow(ToolExecutionError);
@@ -482,8 +484,8 @@ describe("MCP resources integration — readResource content fidelity", () => {
   });
 
   it("readResource(server 在 config 但未 connected) → ToolExecutionError 携带 state 上下文", async () => {
-    // 双 server：一个 fixture 资源 server (connected) + 一个注定 failed 的 server
-    // 对 failed server 调 readResource → 期望 ToolExecutionError 携带 state=failed
+    // Two servers: a fixture resources server (connected) + one destined to fail.
+    // readResource against the failed server -> ToolExecutionError carrying state=failed
     const spawned = spawnResourceFixture();
     activeFixtures.push(spawned);
 
@@ -517,7 +519,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 });
 
 // =========================================================================
-// 4. list_mcp_resources / read_mcp_resource 工具 handler 端到端接通
+// 4. list_mcp_resources / read_mcp_resource tool handlers wired end-to-end
 // =========================================================================
 
 describe("MCP resources integration — tool handlers wire format end-to-end", () => {
@@ -542,11 +544,11 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
     expect(listTool.name).toBe("list_mcp_resources");
 
     const output = (await listTool.handler!({})) as string;
-    // wire 形态：每条 resource 一行 JSON + 空行 + "--- perServer ---" + perServer 行
+    // Wire shape: one JSON line per resource + blank line + "--- perServer ---" + perServer lines
     const lines = output.split("\n");
-    // 4 条 resource + 1 空行 + 1 "--- perServer ---" + 1 perServer 行 = 7 行
+    // 4 resources + 1 blank + 1 "--- perServer ---" + 1 perServer line = 7 lines
     expect(lines).toHaveLength(7);
-    // 前 4 行：resource JSON 解析
+    // First 4 lines: parse as resource JSON
     const resources = lines.slice(0, 4).map((l) => JSON.parse(l));
     expect(
       resources.every((r: { server: string }) => r.server === "rsrc_tool_wire")
@@ -557,11 +559,11 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
       "large://fixture",
       "small://fixture",
     ]);
-    // 第 5 行：空行
+    // Line 5: blank
     expect(lines[4]).toBe("");
-    // 第 6 行：perServer 头
+    // Line 6: perServer header
     expect(lines[5]).toBe("--- perServer ---");
-    // 第 7 行：perServer JSON
+    // Line 7: perServer JSON
     const perServer = JSON.parse(lines[6]);
     expect(perServer).toEqual({ server: "rsrc_tool_wire", state: "connected" });
   });
@@ -572,16 +574,16 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
       server: "rsrc_tool_wire",
     })) as string;
     const lines = output.split("\n");
-    // 4 条 resource + perServer 头尾 = 7 行（同上）
+    // 4 resources + perServer head/tail = 7 lines (same as above)
     expect(lines).toHaveLength(7);
   });
 
   it('list_mcp_resources handler {server:"ghost"} → 仅 perServer tail,资源为空 → 含 perServer 行', async () => {
-    // manager 不抛；resources 为空但 perServer 也不含 ghost（filter 在 manager 层）
-    // 触发 list handler 的 (no resources) 占位：resources 0 且 perServer 0
+    // manager does not throw; resources empty and perServer has no ghost either (filtering happens in the manager)
+    // Exercise the list handler's (no resources) placeholder: 0 resources and 0 perServer
     const listTool = createListMcpResourcesTool({ getManager: () => manager });
     const output = (await listTool.handler!({ server: "ghost" })) as string;
-    // list-mcp-resources.ts: resources 0 且 perServer 0 → (no resources)
+    // list-mcp-resources.ts: 0 resources and 0 perServer -> (no resources)
     expect(output).toBe("(no resources)");
   });
 
@@ -651,9 +653,10 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
   });
 
   it("read_mcp_resource(large) → executor 截断契约 e2e（≤20000 + 截断 marker，M6 / T13 验收）", async () => {
-    // plan T13 acceptance「大内容触发 executor 截断行为」：manager 层不截断
-    // （忠实返回 50000），截断发生在 executor 边界（ADR-0006 契约 X：
-    // executor 是截断权威）。本测试把工具经 createExecutor 接通真链路验证。
+    // Acceptance "large content triggers executor truncation": the manager does
+    // not truncate (faithfully returns 50000); truncation happens at the
+    // executor boundary (ADR-0006 contract X: executor is the truncation
+    // authority). This test wires the tool through createExecutor for the real chain.
     const readTool = createReadMcpResourceTool({ getManager: () => manager });
     const exec = createExecutor(createRegistry([readTool]));
     const results = await exec.executeAll([
@@ -672,17 +675,17 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
     expect(blocks).toHaveLength(1);
     expect(blocks[0]!.type).toBe("text");
     const text = blocks[0]!.text ?? "";
-    // 截断上限：OUTPUT_HARD_CAP = 20000（executor.ts SSOT）
+    // Truncation cap: OUTPUT_HARD_CAP = 20000 (executor.ts SSOT)
     expect(text.length).toBeLessThanOrEqual(20_000);
-    // 截断 marker：契约 X 的可诊断形态
+    // Truncation marker: the diagnosable shape of contract X
     expect(text).toContain("[executor: 输出超长已截断，原长");
-    // manager 原内容（50000）确实被压到上限内 —— 保留段是前缀
+    // The manager's original 50000-char content really got capped — the kept segment is a prefix
     expect(text.startsWith('{"server":"rsrc_tool_wire"')).toBe(true);
   });
 });
 
 // =========================================================================
-// 5. shutdown SIGTERM — fixture 子孙必须真正退出（SC11）
+// 5. shutdown SIGTERM — the fixture child must really exit
 // =========================================================================
 
 describe("MCP resources integration — shutdown SIGTERM child exit (SC11)", () => {
@@ -702,7 +705,7 @@ describe("MCP resources integration — shutdown SIGTERM child exit (SC11)", () 
 
     await manager.shutdown();
 
-    // 子孙必须真正退出，不能悬挂
+    // The child must really exit, never hang
     const exitInfo = await Promise.race([
       spawned.exited,
       new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
@@ -714,9 +717,9 @@ describe("MCP resources integration — shutdown SIGTERM child exit (SC11)", () 
       ),
     ]);
 
-    // 资源 fixture: process.on("SIGTERM") → exit(143)
-    // SDK transport.close() 先关 stdin → 'end' 路径 → exit(0)
-    // 两种合法退出都算 PASS
+    // Resources fixture: process.on("SIGTERM") -> exit(143)
+    // Or SDK transport.close() shuts stdin first -> 'end' path -> exit(0)
+    // Both legal exits count as PASS
     const okExit =
       exitInfo.signal === "SIGTERM" ||
       exitInfo.code === 143 ||
@@ -726,7 +729,7 @@ describe("MCP resources integration — shutdown SIGTERM child exit (SC11)", () 
 });
 
 // ---------------------------------------------------------------------------
-// 兜底：fixture server 文件存在性 guard（防止 fixture 文件被误删时静默跳过）
+// Backstop: fixture server file-existence guard (no silent skip if the fixture file gets deleted)
 // ---------------------------------------------------------------------------
 
 describe("MCP resources integration — fixture server file presence", () => {

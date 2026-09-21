@@ -1,21 +1,22 @@
 /**
- * #556 T1 — builtin subagent catalog (resolver + entries) 单测。
+ * Unit tests for the builtin subagent catalog (resolver + entries).
  *
- * 覆盖 plan T1 acceptance:
- *   - resolveAgentCatalog 返回 explore + general-purpose 两条 entry
- *   - 数组 + 每条 entry 冻结
- *   - getAgentEntry 已知 id 返回冻结 entry;未知 id fail-fast 抛 typed error
- *   - explore entry 的 disallowedTools 经 buildWorkerToolSurface 合并默认 deny
- *     (spawn_subagent, 实际无变化) + 用户 deny (edit_file / write_file) →
- *     tool surface 同时剔除两者
+ * Coverage:
+ *   - resolveAgentCatalog returns explore + general-purpose entries
+ *   - array + every entry frozen
+ *   - getAgentEntry: known id returns a frozen entry; unknown id fail-fast with a typed error
+ *   - explore entry's disallowedTools merged via buildWorkerToolSurface with the
+ *     default deny (spawn_subagent, no-op in practice) + user deny (edit_file /
+ *     write_file) → tool surface drops both
  *
- * 设计取舍 (T2 / T6 后续用):
- *   - 未知 id fail-fast 用本地 typed error (AgentCatalogLookupError),
- *     precedent 仿 manager.ts 的 SubAgentCapacityError / SubAgentAbortError
- *     (manager-local, 不进 errors.ts 单点);
- *   - entry.disallowedTools 是 additive 字段, 由 worker 装配期合并进
- *     buildWorkerToolSurface —— 不在 catalog 内部直接裁剪工具面 (catalog
- *     是只读数据, 不持有 available toolset 引用, 也无法做裁剪)。
+ * Design tradeoffs:
+ *   - unknown-id fail-fast uses a local typed error (AgentCatalogLookupError),
+ *     following the precedent of manager.ts's SubAgentCapacityError /
+ *     SubAgentAbortError (manager-local, not in the errors.ts single point);
+ *   - entry.disallowedTools is an additive field merged into
+ *     buildWorkerToolSurface at worker assembly time — the catalog does not trim
+ *     the tool surface itself (it is read-only data, holds no reference to the
+ *     available toolset, and cannot trim).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -28,7 +29,7 @@ import {
 import { FILE_WRITE_TOOL_NAMES } from "../../src/harness/subagent/catalog.ts";
 import { buildWorkerToolSurface } from "../../src/harness/subagent/role.ts";
 
-/** Sample worker toolset (mirror role.test.ts WORKER_TOOLSET) — 不含 spawn_subagent。 */
+/** Sample worker toolset (mirror role.test.ts WORKER_TOOLSET) — excludes spawn_subagent. */
 const WORKER_TOOLSET: ReadonlyArray<{ readonly name: string }> = Object.freeze([
   { name: "bash" },
   { name: "read_file" },
@@ -105,14 +106,15 @@ describe("subagent catalog: general-purpose entry (B1 builtin)", () => {
     assert.ok(entry.description.length > 0);
     assert.equal(typeof entry.body, "string");
     assert.ok(entry.body.length > 0);
-    // bashMode absent → V1 等价 "any" (per T6 fallback 决议)
+    // bashMode absent → V1-equivalent "any" (per the assembly-chain fallback decision)
     assert.equal(
       entry.bashMode,
       undefined,
       "general-purpose bashMode 缺省, 由 T6 装配链路默认 any"
     );
-    // disallowedTools absent → 用户不额外 deny, 默认 deny spawn_subagent
-    // 由 buildWorkerToolSurface 自动叠加 (worker toolset 本来就不含, 静默)
+    // disallowedTools absent → no extra user deny; the default deny of
+    // spawn_subagent is auto-added by buildWorkerToolSurface (silent, since the
+    // worker toolset never contains it)
     assert.equal(entry.disallowedTools, undefined);
   });
 });
@@ -152,8 +154,9 @@ describe("subagent catalog: getAgentEntry 已知 / 未知 id (B3 fail-fast)", ()
 describe("subagent catalog: entry.disallowedTools 合并 buildWorkerToolSurface (SC9 deny-list)", () => {
   it("explore disallowedTools (edit_file + write_file) 合并默认 deny → 工具面同步剔除", () => {
     const explore = getAgentEntry("explore");
-    // merge 路径: catalog 拿到的 disallowedTools 经 buildWorkerToolSurface 合并
-    // 默认 deny (spawn_subagent, worker toolset 不含, 静默) + entry deny
+    // merge path: disallowedTools from the catalog goes through
+    // buildWorkerToolSurface, merged with the default deny (spawn_subagent, not
+    // in the worker toolset, silent) + entry deny
     const surface = buildWorkerToolSurface(
       WORKER_TOOLSET,
       explore.disallowedTools
@@ -161,9 +164,9 @@ describe("subagent catalog: entry.disallowedTools 合并 buildWorkerToolSurface 
     const names = surface.map((t) => t.name);
     assert.equal(names.includes("edit_file"), false);
     assert.equal(names.includes("write_file"), false);
-    // 默认 deny spawn_subagent 在 worker toolset 不含 → 静默, 数量变化 = -2
+    // default deny of spawn_subagent is absent from the worker toolset → silent, count drops by 2
     assert.equal(surface.length, WORKER_TOOLSET.length - 2);
-    // 其它工具保留
+    // other tools retained
     assert.equal(names.includes("read_file"), true);
     assert.equal(names.includes("bash"), true);
     assert.equal(Object.isFrozen(surface), true);
@@ -178,7 +181,7 @@ describe("subagent catalog: entry.disallowedTools 合并 buildWorkerToolSurface 
 
 describe("subagent catalog: AgentCatalogEntry 类型形态", () => {
   it("类型级别字段: id / description / body 必填;bashMode / disallowedTools 可选", () => {
-    // typecheck-only 验证: 必填字段缺失编译期应当失败 (运行时不需要再 assert)
+    // typecheck-only verification: missing required fields must fail at compile time (no runtime assert needed)
     const full: AgentCatalogEntry = {
       id: "x",
       description: "d",
@@ -193,6 +196,6 @@ describe("subagent catalog: AgentCatalogEntry 类型形态", () => {
     };
     assert.equal(full.id, "x");
     assert.equal(minimal.id, "y");
-    // readonly 字段 typecheck 验证 (运行时不需要)
+    // readonly fields verified via typecheck (no runtime check needed)
   });
 });

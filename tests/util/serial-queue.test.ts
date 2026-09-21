@@ -1,10 +1,14 @@
 /**
- * src/util/serial-queue.ts 的单元测试。
+ * Unit tests for src/util/serial-queue.ts.
  *
- * 钉住的不变式（= 两处原私有实现的收敛契约）：
- *  1. 严格 FIFO：乱序完成的并发入队仍按入队顺序执行；
- *  2. reject 不卡链：失败任务只把 reject 回给自己的调用方，后续任务照常跑；
- *  3. 任务内 fire-and-forget 重入同队列不死锁（嵌套任务排到当前任务之后）。
+ * Pinned invariants (= the convergence contract of the two former private
+ * implementations):
+ *  1. Strict FIFO: concurrent enqueues that finish out of order still run in
+ *     enqueue order;
+ *  2. A reject doesn't jam the chain: a failed task routes its reject only to
+ *     its own caller, later tasks run normally;
+ *  3. Fire-and-forget re-entry from inside a task doesn't deadlock (the nested
+ *     task is queued after the current one).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -17,7 +21,7 @@ describe("createSerialQueue", () => {
   it("FIFO：乱序发起的任务按入队顺序执行", async () => {
     const queue = createSerialQueue();
     const order: number[] = [];
-    // 第一个任务慢、后续任务快：若并发交叠，order 会变成 [2,3,4,1]。
+    // First task slow, rest fast: with concurrent overlap, order would become [2,3,4,1].
     const p1 = queue(async () => {
       await tick(30);
       order.push(1);
@@ -48,7 +52,7 @@ describe("createSerialQueue", () => {
     await assert.rejects(boom, /boom/);
     assert.equal(await after, "after");
     assert.deepEqual(ran, ["after"]);
-    // 失败后队列仍可用（连续再排两拍，含一个 reject，链不复活卡死）
+    // After a failure the queue stays usable (two more beats, one rejecting; the chain must not re-jam)
     const third = queue(async () => {
       ran.push("third");
       return "third";
@@ -63,7 +67,7 @@ describe("createSerialQueue", () => {
     let nestedResult = "";
     const outer = queue(async () => {
       order.push("outer-start");
-      // 嵌套入队不 await：排到 outer 之后执行。await 它会死锁（契约见头注释）。
+      // Don't await the nested enqueue: it runs after outer. Awaiting it would deadlock (contract in the header comment).
       void queue(async () => {
         order.push("nested");
         nestedResult = "done";
@@ -73,7 +77,7 @@ describe("createSerialQueue", () => {
       return "outer";
     });
     assert.equal(await outer, "outer");
-    // 等嵌套任务被排干
+    // Drain the nested task
     await queue(async () => undefined);
     assert.deepEqual(order, ["outer-start", "outer-end", "nested"]);
     assert.equal(nestedResult, "done");
@@ -81,7 +85,7 @@ describe("createSerialQueue", () => {
 
   it("同步抛出的任务同样不卡链（then(task, task) 直接排后序）", async () => {
     const queue = createSerialQueue();
-    // 任务函数本身同步 throw（不是返回 rejected promise）
+    // The task function throws synchronously (it does not return a rejected promise)
     const bad = queue(() => {
       throw new Error("sync-boom");
     });

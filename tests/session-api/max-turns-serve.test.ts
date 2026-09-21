@@ -1,16 +1,18 @@
 /**
  * tests/session-api/max-turns-serve.test.ts
  *
- * plan T6: serve 入口适配 MaxTurnsExceeded throw + stop_summary 呈现。
+ * serve entry: adaptation to the MaxTurnsExceeded throw + stop_summary presentation.
  *
- * 覆盖:
- *   1. SessionHub.postMessage 带 deps.maxTurns=1 + looping responses →
- *      turn.stopReason="maxTurns"、turn.answer.turnCount=err.turnsRan、
- *      turn.answer.stopSummary=...;throw 路径不调 conditionalSave(turnCount /
- *      checkpoints 不变),但 #620 T3 起 turn 内 commit 把部分进度(assistant
- *      tool_use + tool_result)即时落盘 —— 文件不再 byte-stable;
- *   2. serve 侧 IKNOW_LLM_MAX_TURNS env 流经 ensureDeps → deps.maxTurns
- *      (验证既有 env→deps 接线,不走 CLI flag)。
+ * Covers:
+ *   1. SessionHub.postMessage with deps.maxTurns=1 + looping responses →
+ *      turn.stopReason="maxTurns", turn.answer.turnCount=err.turnsRan,
+ *      turn.answer.stopSummary=...; the throw path never calls
+ *      conditionalSave (turnCount / checkpoints unchanged), but since the
+ *      mid-turn commit was introduced, partial progress (assistant tool_use +
+ *      tool_result) lands on disk as it runs — the file is no longer
+ *      byte-stable;
+ *   2. the serve-side IKNOW_LLM_MAX_TURNS env flows through ensureDeps into
+ *      deps.maxTurns (verifying the existing env→deps wiring, not the CLI flag).
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -35,8 +37,8 @@ let settingsSource: ReturnType<typeof installTestSettingsSource>;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-max-turns-serve-"));
   store = new SessionStore(baseDir, process.cwd());
-  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，serve 装配的 loadIknowEnv() 需要
-  // settings.llm.model 来源 → HOME 重定向到 tmp（settings.json 含 model + apiKey）。
+  // IKNOW_LLM_MODEL was retired: serve's loadIknowEnv() needs settings.llm.model,
+  // so redirect HOME to a tmp dir (settings.json carries model + apiKey).
   settingsSource = installTestSettingsSource();
 });
 
@@ -46,8 +48,9 @@ afterAll(async () => {
 });
 
 /**
- * maxTurns=1 的 deps:第 1 轮 tool-call 用掉预算 → 第 2 轮 step 入口 throw;
- * 摘要 epilogue 消费第 2 条 scripted 响应(摘要轮不计 maxTurns)。
+ * maxTurns=1 deps: turn 1's tool-call spends the budget → turn 2 throws at
+ * step entry; the summary epilogue consumes the 2nd scripted response
+ * (the summary turn is not counted against maxTurns).
  */
 function makeMaxTurnsDeps(): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
@@ -73,7 +76,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
       workspaceRoot: process.cwd(),
     });
     const { session } = await hub.createSession();
-    // run 前快照(用于比较 conditionalSave 负责的最终化字段)
+    // pre-run snapshot (to compare the fields conditionalSave finalizes)
     const before = await store.load(session.conversation_id);
 
     const res = await hub.postMessage({
@@ -81,19 +84,20 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
       text: "do it",
     });
 
-    // turn 呈现:stopReason + turnCount + stopSummary
+    // turn presentation: stopReason + turnCount + stopSummary
     assert.equal(res.turn.answer.stopReason, "maxTurns");
     assert.equal(res.turn.answer.turnCount, 1); // err.turnsRan
     assert.equal(res.turn.answer.finalText, "");
     assert.equal(res.turn.answer.stopSummary, "serve 收尾摘要：已达上限");
-    // 摘要字段只在该 turn 上有(不走 completed 正常停)
+    // The summary field exists only on this turn (a normal stop does not go through completed)
     assert.equal("stopSummary" in res.turn.answer, true);
 
-    // #620 T3 新契约(spec D4 边跑边写):maxTurns 是被中断 turn,其部分进度
-    // 应在盘上 —— turn 内 commit 已把 assistant(tool_use) + tool_result
-    // append 进 JSONL;throw 路径仍不调 conditionalSave。
-    // #622 T5:首次 engine commit 带上懒提交的 user query,故盘上部分进度
-    // 为 [query, assistant, tool_result] 三条。
+    // Contract of "commit while running": maxTurns marks an interrupted turn,
+    // so its partial progress must be on disk — the mid-turn commit has
+    // appended assistant(tool_use) + tool_result to the JSONL; the throw path
+    // still does not call conditionalSave. The first engine commit also carries
+    // the lazily-submitted user query, so on-disk progress is
+    // [query, assistant, tool_result].
     const after = await store.load(session.conversation_id);
     assert.equal(after.messages.length, 3);
     const [queryEvt, assistantEvt, toolResultEvt] = after.messages;
@@ -103,7 +107,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     assert.equal(assistantEvt!.content[0]!.type, "tool_use");
     assert.equal(toolResultEvt!.role, "user");
     assert.equal(toolResultEvt!.content[0]!.type, "tool_result");
-    // conditionalSave 最终化未运行:turnCount / checkpoints 保持 run 前状态。
+    // conditionalSave finalization did not run: turnCount / checkpoints keep the pre-run state.
     assert.equal(after.turnCount, before.turnCount);
     assert.deepEqual(after.checkpoints, before.checkpoints);
   });
@@ -112,7 +116,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    // 只 script 1 轮:摘要 epilogue 时 stub 响应耗尽 → catch-all 吞 → 无摘要
+    // Only 1 scripted turn: the summary epilogue exhausts the stub responses → swallowed by the catch-all → no summary
     const adapter = createStubModel({
       responses: [
         assistantResult({
@@ -133,10 +137,10 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "maxTurns");
     assert.equal("stopSummary" in res.turn.answer, false);
-    // #620 T3:turn 内 commit 的部分进度在盘上(assistant tool_use + 其
-    // tool_result);conditionalSave 仍未运行 —— turnCount / checkpoints 不变。
-    // #622 T5:首次 engine commit 带上懒提交的 user query,故 messages[0]
-    // 是 query,assistant / tool_result 顺移。
+    // The mid-turn commit leaves partial progress on disk (assistant tool_use +
+    // its tool_result); conditionalSave still has not run — turnCount /
+    // checkpoints unchanged. The first engine commit carries the lazily-submitted
+    // user query, so messages[0] is the query and assistant / tool_result shift by one.
     const after = await store.load(session.conversation_id);
     assert.equal(after.messages.length, 3);
     assert.equal(after.messages[0]!.role, "user");
@@ -168,7 +172,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal("stopSummary" in res.turn.answer, false);
-    // 正常停保存照常
+    // a normal stop saves as usual
     const after = await store.load(session.conversation_id);
     assert.equal(after.messages.length, 2);
   });

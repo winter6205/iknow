@@ -1,11 +1,12 @@
 /**
  * tests/tui/tool-summary.test.ts
  *
- * #343 T4：工具摘要行（纯格式化，bun:test 重写归档语义）：
- *  - summarizeToolCall 参数摘要（生成/编辑类增强）+ cols 视觉宽度收口；
- *  - projectToolLines tool_use_id 精确配对状态回填；
- *  - formatLiveToolEvent 运行时事件文案 SSOT；
- *  - toolPreviewRows 统一 diff 预览行（side-channel 精确 diff / intent 回退）。
+ * Tool summary lines (pure formatting, bun:test rewrite of archived semantics):
+ *  - summarizeToolCall argument summary (enhanced for create/edit tools) +
+ *    cols visual-width cap;
+ *  - projectToolLines exact tool_use_id pairing for status backfill;
+ *  - formatLiveToolEvent runtime-event wording SSOT;
+ *  - toolPreviewRows unified diff preview rows (side-channel exact diff / intent fallback).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -51,7 +52,8 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
       new_str: "bar",
     });
     expect(detail).toBe("Edited src/x.ts (1 → 1 lines)");
-    // 旧内联 old→new 片段已下线：改动由 D4 diff 预览表达，标题行不再夹片段。
+    // The old inline old→new fragment is retired: the change is expressed by
+    // the diff preview; the title line no longer carries a fragment.
     expect(detail).not.toContain("foo");
   });
 
@@ -73,7 +75,7 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
   test("未知工具 → 占位符摘要（避免 JSON 全文外露）", () => {
     const { detail } = summarizeToolCall("mystery", { a: "x".repeat(200) });
     expect(detail).toBe("(mystery)");
-    // 未知工具不再 stringify 整个 input —— 不落 JSON 全文。
+    // Unknown tools no longer stringify the whole input -- no full-JSON leakage.
     expect(detail.includes("x".repeat(200))).toBe(false);
   });
 
@@ -114,10 +116,11 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
   });
 
   test("unknown name → 走默认 placeholder,不抛(SC5 删 skill_search 后默认 fallback)", () => {
-    // 历史 tool_result 仍可能含 skill_search(消息写入在 deletion 之前)。
-    // summary 函数对未注册名走默认 placeholder:工具名小括号包住,
-    // 不抛、不替未注册名造专属显示。SC5 删 skill_search 后,本测试锁的是
-    // 「未知工具 = 默认 placeholder」路径存在且稳定。
+    // Historical tool_result may still carry skill_search (messages were
+    // written before its deletion). The summary function sends unregistered
+    // names to the default placeholder: tool name wrapped in parentheses, no
+    // throw, no bespoke display for unregistered names. This test locks that
+    // the "unknown tool = default placeholder" path exists and is stable.
     const { detail } = summarizeToolCall("skill_search", { query: "tui" });
     expect(detail).toBe("(skill_search)");
   });
@@ -163,15 +166,16 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
 });
 
 describe("countBashCalls / formatRanSuffix: 已退役的 ran N 语义", () => {
-  // spec D2 / CONTEXT `unit fold`：`ran N command(s)` 第二行语义整体废弃，
-  // 计数只由 turn 级 `formatToolUseCounts`（`bash × N`）承担；两个 helper
-  // 及其测试一并退役到 archive/tests/tui/（不变式已永久消失，不是断言漂移）。
+  // docs/CONTEXT.md `unit fold`: the `ran N command(s)` second-line semantics
+  // is abolished wholesale; counting is carried only by the turn-level
+  // `formatToolUseCounts` (`bash × N`); both helpers and their tests retired to
+  // archive/tests/tui/ (the invariant is permanently gone, not assertion drift).
   test("生产面不再有任何 ran N 后缀调用方（退役闸）", () => {
     const src = readFileSync(
       new URL("../../src/tui/message-blocks.tsx", import.meta.url),
       "utf8"
     );
-    // 只看代码：注释里提到旧语义不算调用方（`formatRanSuffix(` 调用形态）。
+    // Code only: mentions of the old semantics inside comments are not callers (the `formatRanSuffix(` call form).
     const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(code.includes("formatRanSuffix")).toBe(false);
     expect(code.includes("countBashCalls")).toBe(false);
@@ -233,10 +237,12 @@ describe("projectToolLines: tool_use_id 配对状态", () => {
 });
 
 describe("formatLiveToolEvent", () => {
-  // #693 T1 D7：live 完成行文案收敛为历史形态。
-  // 人读合同（specs/tui-human-display.md D1）：完成态只画 `name · detail`，
-  // 无 `[完成]`、无 `[运行中]`；失败仍显式 `[失败]` 前缀（failure overlay 不在
-  // 本票改动面）。不变式：detail 非空 → `name · detail`；detail 空 → `name`。
+  // Live completion-line wording converges to the historical form.
+  // Human-readable contract: the completed state draws only `name · detail`,
+  // no `[完成]` ("done"), no `[运行中]` ("running"); failure still shows an
+  // explicit `[失败]` ("failed") prefix (the failure overlay is out of this
+  // change's scope). Invariant: non-empty detail -> `name · detail`; empty
+  // detail -> `name`.
   test("完成态 ok → `name · detail`（无 [完成] 前缀，与 ToolSummaryRow 同源）", () => {
     const line = formatLiveToolEvent({
       toolName: "read_file",
@@ -244,7 +250,7 @@ describe("formatLiveToolEvent", () => {
       kind: "ok",
     });
     expect(line).toBe("read_file · Read a.ts");
-    // 不变式:成功态无状态前缀。
+    // Invariant: success state carries no status prefix.
     expect(line.includes("[完成]")).toBe(false);
   });
 
@@ -368,8 +374,9 @@ describe("formatToolStatusLine: running 人读行（D1 无状态括号）", () =
 describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", () => {
   test("窄终端：running 人读形态 `Running 1 shell command… · <detail>` 单行放得下", () => {
     const cols = 60;
-    // D1：running 拼装 = 英文前缀 + ` · ` + detail（不再有状态括号）；
-    // 前缀变长后由 formatToolStatusLine 对整行兜底收口。
+    // Running assembly = English prefix + ` · ` + detail (no status brackets
+    // anymore); with a longer prefix, formatToolStatusLine caps the whole line
+    // as a fallback.
     const line = formatToolStatusLine({
       toolName: "bash",
       input: { command: "x".repeat(300) },
@@ -382,9 +389,10 @@ describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", 
 
   test("窄终端：失败完成形态单行放得下（断言真实发射字节，非手拼串）", () => {
     const cols = 60;
-    // 宽度不变式必须挂在 formatToolStatusLine 真正发射的形态上：
-    // 手拼 `name · detail · failed` 在失败分支下并不存在（真实是
-    // `[失败] name · detail`），拼串断言会认证一条生产不发射的行。
+    // The width invariant must attach to the form formatToolStatusLine
+    // actually emits: a hand-built `name · detail · failed` does not exist in
+    // the failure branch (the real one is `[失败] name · detail`), and a
+    // hand-strung assertion would certify a line production never emits.
     const liveLine = formatToolStatusLine({
       toolName: "bash",
       input: { command: "x".repeat(300) },
@@ -463,7 +471,8 @@ describe("toolPreviewRows: 写/改文件内容可见（统一 diff）", () => {
     });
     expect(preview.kind).toBe("code");
     if (preview.kind !== "code") return;
-    // SC3：窗数字面钉死 10（不是从常量派生 —— 派生写 6 也照样绿）。
+    // Pin the window as the literal 10 (not derived from the constant -- a
+    // derived assertion would stay green even if someone wrote 6).
     expect(WRITE_CREATE_PREVIEW_WINDOW).toBe(10);
     expect(preview.lines).toHaveLength(10);
     expect(preview.lines[0]).toBe("line-0");
@@ -558,11 +567,12 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       input: { task: "调查渲染层" },
       kind: "ok",
     });
-    // plans/tui-chrome-interaction.md T7：子代理工具不再以 `▣ 子代理` 形态
-    // 渲染 live / history 工具卡 —— 子代理状态由 spawn 卡两行投影 +
-    // SubagentPanel 单独表达，避免 dual render。formatToolStatusLine 内仅返 detail。
+    // Subagent tools no longer render live / history tool cards in the
+    // `▣ 子代理` form -- subagent state is expressed by the spawn card's
+    // two-line projection + SubagentPanel alone, avoiding dual render.
+    // formatToolStatusLine returns only detail for them.
     expect(line).toBe("general-purpose");
-    // 钉死无 `▣` glyph、无 `✓` 状态前缀；task 正文不进 transcript
+    // Pinned: no `▣` glyph, no `✓` status prefix; the task body never enters the transcript
     expect(line.includes("调查渲染层")).toBe(false);
     expect(line.includes("▣")).toBe(false);
     expect(line.includes("✓")).toBe(false);
@@ -589,8 +599,9 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
   });
 
   test("formatLiveToolEvent 子代理 detail 空（显式 override）→ 空串（无 glyph / `· ` 残留）", () => {
-    // 子代理 detail 空（detail 显式 override 路径）→ formatToolStatusLine
-    // 仅返 detail，故空 detail → 空串。组件渲染层负责决定是否隐藏空行。
+    // Subagent with empty detail (explicit-override path) -> formatToolStatusLine
+    // returns detail only, so empty detail -> empty string. The component layer
+    // decides whether to hide empty lines.
     const line = formatLiveToolEvent({
       toolName: "subagent_result",
       input: { task_id: "t-1" },
@@ -607,14 +618,14 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       kind: "ok",
     });
     expect(line).toBe("bash · npm test");
-    // 不再有尾缀 ` · ok`（spec D7 消除的不一致）。
+    // No trailing ` · ok` suffix anymore (an inconsistency this unification removes).
     expect(line.endsWith(" · ok")).toBe(false);
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] prefix.
     expect(line.includes("[完成]")).toBe(false);
   });
 
   test("formatLiveToolEvent tool_search detail 空（普通分支）→ `tool_search`（无 `· ` 残留）", () => {
-    // 工具 search / 神秘工具在 detail 空时仍走普通分支；子代理分支不被波及。
+    // tool_search / mystery tools still take the normal branch when detail is empty; the subagent branch is unaffected.
     const line = formatLiveToolEvent({
       toolName: "tool_search",
       input: {},
@@ -709,7 +720,8 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     });
     expect(preview.kind).toBe("code");
     if (preview.kind !== "code") return;
-    // 字面 10：从常量派生会让「常量被改成 6」也照样绿（旧 6 行闸回归无感）。
+    // Literal 10: deriving from the constant would stay green even if someone
+    // reverted it to 6 (the old 6-line-gate regression would go unnoticed).
     expect(preview.lines).toHaveLength(10);
     expect(preview.hiddenLineCount).toBe(10);
   });
@@ -727,8 +739,8 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     const preview = completedToolPreview("edit_file", input, opts);
     expect(preview.kind).toBe("diff");
     if (preview.kind !== "diff") return;
-    // spec D4 / CONTEXT `edit diff preview`：人必须看见**本次改动**的
-    // diff，不套新建那 10 行帽 —— rows 即全量，无隐藏行。
+    // docs/CONTEXT.md `edit diff preview`: the human must see the diff of
+    // **this change** -- no 10-line create cap; rows are the full diff, no hidden lines.
     expect(preview.rows).toEqual(all);
     expect(preview.hiddenLineCount).toBe(0);
     expect(preview.rows.length).toBeGreaterThan(10);
@@ -748,8 +760,9 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     );
     expect(preview.kind).toBe("diff");
     if (preview.kind !== "diff") return;
-    // 反面对照：同长度的 write_file 新建走 10 行帽并产出 hiddenLineCount，
-    // edit diff 两者都不出现 —— 两条预览路径的帽互相独立。
+    // Negative control: a same-length write_file create walks the 10-line cap
+    // and yields a hiddenLineCount; the edit diff has neither -- the two
+    // preview paths' caps are independent.
     const create = completedToolPreview("write_file", {
       path: "a.ts",
       content: newContent,
@@ -769,13 +782,14 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
   });
 });
 
-// M5 fixup：formatLiveToolEvent opts.cols 透传 —— detail override 缺省时
-// 走 summarizeToolCall(name, input, cols) 视觉宽度收口（窄终端 CJK 不溢出）。
-// 人读合同（spec D1）：成功态 `name · detail`（无 `[完成]` 前缀、无 `· ok`
-// 尾缀）；running 态走英文过程行（无 `[运行中]`）；只有失败态保留 `[失败]`。
+// formatLiveToolEvent opts.cols pass-through -- when the detail override is
+// absent it goes through summarizeToolCall(name, input, cols) with visual-width
+// capping (CJK does not overflow on narrow terminals). Human-readable contract:
+// success is `name · detail` (no `[完成]` prefix, no ` · ok` suffix); running
+// uses an English process line (no `[运行中]`); only failure keeps `[失败]`.
 describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口", () => {
   test("窄 cols + CJK 长 command → 单行 ≤ cols（不在中间换行）", () => {
-    // detail 空走 summarizeToolCall；提供 cols 时 detail 按视觉宽度收口。
+    // Empty detail goes through summarizeToolCall; when cols is given, detail is capped by visual width.
     const cols = 40;
     const line = formatLiveToolEvent({
       toolName: "bash",
@@ -796,14 +810,15 @@ describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口"
       input: { command: "x".repeat(200) },
       kind: "ok",
     });
-    // 80 字符截断 + `bash · ` 前缀总长不超过 100（去掉 [完成] 5 字节后更短）。
+    // 80-char truncation + the `bash · ` prefix keeps total length under 100
+    // (shorter now that the [完成] prefix is gone).
     expect(line.length).toBeLessThanOrEqual(100);
     expect(line.startsWith("bash · x")).toBe(true);
     expect(line.includes("[完成]")).toBe(false);
   });
 });
 
-// ── #693 T4 D4:结果预览（resultToolPreview / stripAnsi / 注册表） ──────────
+// ── Result preview (resultToolPreview / stripAnsi / registry) ──────────
 
 describe("stripAnsi: 剥 CSI / OSC 转义序列", () => {
   test("CSI SGR 颜色序列（git/npm 输出）全部吞掉", () => {
@@ -875,14 +890,15 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
     expect(p.lines).toHaveLength(RESULT_PREVIEW_WINDOW);
-    // 尾部 3 行：line-9..line-11（SSOT = docs/CONTEXT.md **result preview**）。
+    // Tail 3 lines: line-9..line-11 (SSOT = docs/CONTEXT.md **result preview**).
     expect(p.lines[0]).toBe("line-9");
     expect(p.lines[2]).toBe("line-11");
     expect(p.hiddenLineCount).toBe(9);
   });
 
   test("RESULT_PREVIEW_WINDOW 字面 = 3（docs/CONTEXT.md **result preview** SSOT）", () => {
-    // 字面钉死：从常量派生的断言在常量被改回 5 时照样绿，起不到闸作用。
+    // Pinned as a literal: a constant-derived assertion would stay green if the
+    // constant were changed back to 5, failing as a gate.
     expect(RESULT_PREVIEW_WINDOW).toBe(3);
   });
 
@@ -904,7 +920,7 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     const p = resultToolPreview("bash", { command: "x" }, { stderr });
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 7 行取尾部 3 → err-5..err-7，hidden = 4。
+    // 7 lines, tail window 3 -> err-5..err-7, hidden = 4.
     expect(p.lines).toEqual(["err-5", "err-6", "err-7"]);
     expect(p.hiddenLineCount).toBe(4);
   });
@@ -966,13 +982,13 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 颜色码不重新染色 → 原样透传,行内仍含 ESC 序列。
+    // Color codes are not re-tinted -> passed through verbatim; rows still contain the ESC sequences.
     expect(p.lines[0]).toBe("\x1b[31mERROR\x1b[0m line");
     expect(p.lines[1]).toBe("\x1b[32mOK\x1b[0m line");
   });
 
   test("bash stdout 截断按 stripped 长度计数（ANSI 不计列）", () => {
-    // 8 行：line-0..line-7 → 取尾部 3 → line-5..line-7
+    // 8 lines: line-0..line-7 -> tail 3 -> line-5..line-7
     const stdout = Array.from({ length: 8 }, (_, i) =>
       i % 2 === 0 ? `\x1b[31mline-${i}\x1b[0m` : `line-${i}`
     ).join("\n");
@@ -990,7 +1006,7 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 
   test("bash ANSI 序列不被切断（行级截断不切字符，仅按行数）", () => {
-    // 单行含多个 SGR：行内整体保留
+    // A single line with multiple SGRs: kept whole within the line
     const stdout = "\x1b[31m\x1b[1m\x1b[4mUNDERLINE_RED_BOLD\x1b[0m";
     const p = resultToolPreview(
       "bash",
@@ -999,15 +1015,15 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 序列从 \x1b[31m 起，\x1b[0m 收尾 → 整段在 result 里
+    // Sequence opens with \x1b[31m and closes with \x1b[0m -> the whole span is in the result
     expect(p.lines[0]?.startsWith("\x1b[31m")).toBe(true);
     expect(p.lines[0]?.endsWith("\x1b[0m")).toBe(true);
   });
 
   test("skill 无预览声明（D6 accent 点名着色）：多行正文不摊成 result preview", () => {
-    // spec specs/tui-tool-settled-appearance.md D6：skill 是 accent 类 ——
-    // 只点名着色（`skill <name>`），不把 skill 正文摊成浅色结果预览；
-    // 注册表不声明 preview，任何 resultText 一律 empty。
+    // skill is the accent class: name-only coloring (`skill <name>`); the skill
+    // body is never flattened into a dim result preview. The registry declares
+    // no preview for it, so any resultText yields empty.
     const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
     expect(
       resultToolPreview("skill", { name: "demo" }, { resultText: body }).kind
@@ -1129,8 +1145,9 @@ describe("SC5：bash 进度先折再 result preview 尾窗（旧合同「最后 
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 折后 7 行（最后一跳 + L0..L5）→ 尾窗 3 = L3..L5，hidden = 4。
-    // 旧合同若先取尾窗再谈折：hidden 会是 21（20 百分行 + L0 被窗切掉）。
+    // After folding: 7 rows (last hop + L0..L5) -> tail window 3 = L3..L5, hidden = 4.
+    // Under the old contract (tail window before folding) hidden would be 21
+    // (20 percentage rows + L0 cut by the window).
     expect(p.lines).toEqual(["L3", "L4", "L5"]);
     expect(p.hiddenLineCount).toBe(4);
     expect(resultPreviewTextLines(p).some((l) => l.includes("5%"))).toBe(false);
@@ -1149,12 +1166,13 @@ describe("SC5：bash 进度先折再 result preview 尾窗（旧合同「最后 
 
 describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () => {
   test("注册表至少覆盖 EXPECTED_TOOLSET_30 的所有工具名（声明密度单点）", () => {
-    // spec D7：新增一种工具的显示只需在 TOOL_DISPLAYS 加一条声明。
-    // 该测试保证 buildTuiDeps 装配的工具,每件都有显示声明（哪怕仅
-    // summary、无 preview）。disclosure-index-align T2 删 skill_search 后
-    // 总件数由 35 → 34。本闸与 deps-tools.test.ts 的 EXPECTED_TUI_TOOLSET
-    // 正交但同源：装配闸校验"在不在"，本闸校验"是否声明了显示规则"，
-    // 二者形成 spec D7「注册表完备性」双轨。
+    // Adding a new tool kind needs only one new TOOL_DISPLAYS declaration.
+    // This test guarantees every tool assembled by buildTuiDeps has a display
+    // declaration (summary only, no preview, still counts). After
+    // skill_search's deletion the total went 35 -> 34. This gate is orthogonal
+    // yet same-source as deps-tools.test.ts's EXPECTED_TUI_TOOLSET: the
+    // assembly gate checks "is it present", this gate checks "is a display
+    // rule declared", together forming the registry-completeness twin tracks.
     const EXPECTED_TOOLSET_30 = [
       "bash",
       "read_file",
@@ -1185,10 +1203,13 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "read_mcp_resource",
       "bash_output",
       "bash_stop",
-      // spec D2：建树四件 + list-worktrees 进入显示注册表。TUI 装配面
-      // 仍按 host 缝条件化装配（deps-tools EXPECTED_TUI_TOOLSET 剥除不动），
-      // 显示注册表完备性与装配条件化解耦 —— 覆盖闸从 30 件扩为 35 件，
-      // 不变量（注册表每件都有显示声明）等于或强于原断言。
+      // The four worktree-build tools + list-worktrees enter the display
+      // registry. The TUI assembly side still assembles conditionally by host
+      // seam (deps-tools EXPECTED_TUI_TOOLSET stripping is untouched); display
+      // registry completeness is decoupled from conditional assembly -- the
+      // coverage gate grows from 30 to 35 tools, and the invariant (every
+      // registry entry has a display declaration) is equal or stronger than
+      // the original assertion.
       "create-worktree",
       "enter-worktree",
       "exit-worktree",
@@ -1203,8 +1224,9 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
 });
 
 describe("settledClass: 落定态三分类（spec D2/D8）", () => {
-  // spec D2：缺 settledClass 的声明非法。ToolDisplay 接口把字段钉成必填
-  // （编译期闸），本测试在运行时再兜一层：注册表每件必须带合法 class 值。
+  // A declaration without settledClass is illegal. ToolDisplay pins the field
+  // required (compile-time gate); this test adds a runtime backstop: every
+  // registry entry must carry a legal class value.
   test("TOOL_DISPLAYS 每件都有合法 settledClass（缺声明即非法）", () => {
     const LEGAL: ReadonlyArray<string> = [
       "keep",
@@ -1215,8 +1237,9 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
     for (const name of registeredToolDisplayNames()) {
       const cls = settledClassOfDisplay(name);
       expect(LEGAL).toContain(cls);
-      // 非 "subagent" 值必须来自 D8 三分类真值；"subagent" 只允许出现在
-      // 核内 isSubagentSettledName 覆盖的两个名字上（跨核闸在 tool-settled.test）。
+      // Values other than "subagent" must come from the three-way ground
+      // truth; "subagent" is allowed only on the two names covered by the
+      // core's isSubagentSettledName (the cross-core gate lives in tool-settled.test).
       if (cls === "subagent") {
         expect(["spawn_subagent", "subagent_result"]).toContain(name);
       }
@@ -1224,8 +1247,8 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
   });
 
   test("D8 分类表 sentinel：keep / retract / accent 各类代表名对号", () => {
-    // keep：写路径与会话动作；retract：查询 / 读取 / 未注册兜底；
-    // accent：skill 与建树四件。
+    // keep: write paths and session actions; retract: query / read / unregistered
+    // fallback; accent: skill and the four worktree-build tools.
     expect(settledClassOfDisplay("bash")).toBe("keep");
     expect(settledClassOfDisplay("write_file")).toBe("keep");
     expect(settledClassOfDisplay("todo_write")).toBe("keep");
@@ -1244,9 +1267,10 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
   });
 
   test('子代理两件显式声明 "subagent" class（D8 三类之外，无 ! 断言兜底）', () => {
-    // spec D8：spawn_subagent / subagent_result 不进 keep/retract/accent 三类，
-    // 核在 class 分派之前按 keep-title-only 特判。注册表声明必须诚实 ——
-    // 若靠 undefined + 兜底「碰巧」解析成 retract，本测试拒绝。
+    // spawn_subagent / subagent_result do not join the keep/retract/accent
+    // three-way split; the core special-cases them as keep-title-only before
+    // class dispatch. The registry declaration must be honest -- resolving to
+    // retract "by accident" via undefined + fallback is rejected here.
     expect(settledClassOfDisplay("spawn_subagent")).toBe("subagent");
     expect(settledClassOfDisplay("subagent_result")).toBe("subagent");
   });

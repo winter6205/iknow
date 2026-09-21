@@ -2,12 +2,12 @@
 /**
  * tests/tui/slash-hint-new-session.test.tsx
  *
- * #343 T6-C：任务 B — slash 候选 ↑/↓ 选中 + Enter 触发 onSelectHint。
+ * Slash candidates ↑/↓ selection + Enter firing onSelectHint.
  *
- * 关键点：cursor 默认 0 = sessions；如果 ↓ + Enter 触发的是 sessions
- * → 切到 list 视图；如果是 new → 切到新 draft。我们断言：↓ + Enter
- * 之后应用未退出、也未切到列表视图（list 视图特征 = "+ 新建会话"），
- * 而是新 draft 创建（inputValue 清空，可继续发消息）。
+ * Key point: cursor default 0 = sessions; if ↓ + Enter triggers sessions → switches to the
+ * list view; if new → switches to a new draft. We assert: after ↓ + Enter the app has not
+ * exited and has not switched to the list view (list view marker = `+ 新建会话`, "new session"),
+ * but a new draft is created (inputValue cleared, can keep sending messages).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -131,11 +131,11 @@ describe("#377 系列 /effort：hint 候选 → Enter 选中触发", () => {
     await untilFrame(app.setup, (f) => f.includes("Version"));
     await untilFrame(app.setup, (f) => f.includes("输入消息"));
 
-    // 输入 "/ef" → slashSuggestions 唯一命中 effort（静态命令）。
+    // "/ef" → slashSuggestions unique hit effort (static command).
     await app.typeText("/ef");
 
-    // Enter → onSelectHint(effort) → handleSubmit("/effort") → effort 无参 →
-    // 打开档位面板（seed 当前档，标题「思考强度」可见）。
+    // Enter → onSelectHint(effort) → handleSubmit("/effort") → bare /effort →
+    // opens the tier panel (seeded with current tier; title 「思考强度」 ("thinking effort") visible).
     await app.pressEnter();
     await untilFrame(
       app.setup,
@@ -155,22 +155,22 @@ describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 1) 输入 "/" → 候选出现（hint 渲染依赖 PromptInput 内部 state，
-    //    captureCharFrame 可能未反映 — 直接跳过对候选 frame 的断言）
+    // 1) type "/" → candidates appear (hint rendering depends on PromptInput
+    //    internal state, may not show in captureCharFrame — skip asserting on the candidate frame)
     await app.typeText("/");
     await new Promise((r) => setTimeout(r, 200));
 
-    // 2) ↓ 一次 → cursor 从 0 (sessions) 移到 1 (new)
+    // 2) ↓ once → cursor moves from 0 (sessions) to 1 (new)
     await app.pressArrow("down");
 
-    // 3) Enter → onSelectHint("new") 触发 → handleSubmit("/new") → newSession()
-    //    验证：未退出、未切到 list 视图（list 视图特征 = "+ 新建会话"）。
+    // 3) Enter → onSelectHint("new") → handleSubmit("/new") → newSession()
+    //    verify: no exit, no switch to list view (list-view marker = "+ 新建会话" ("new session")).
     await app.pressEnter();
     const frame = app.setup.captureCharFrame();
     expect(frame).not.toContain("+ 新建会话");
     expect(frame).toContain("输入消息");
 
-    // 4) 后续发消息：落盘到新 session
+    // 4) send a follow-up message: lands in the new session
     await app.typeText("new-draft-msg");
     await app.pressEnter();
     await until(
@@ -182,7 +182,7 @@ describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
     expect(list).toBeDefined();
     expect(list.length).toBe(1);
     expect(list[0]!.title).toBe("new-draft-msg");
-    // 5) assistant 答复渲染出来
+    // 5) the assistant reply renders
     await untilFrame(
       app.setup,
       (f) => f.includes("new-draft-reply"),

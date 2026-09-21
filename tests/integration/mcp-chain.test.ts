@@ -1,17 +1,17 @@
 /**
- * T10 (#344) — 集成链：fixture stdio MCP server 真子进程链路 + 端到端断言。
+ * Integration chain: fixture stdio MCP server, real subprocess + e2e assertions.
  *
- * 验收（spec 337-skill-mcp-extension.md + plans/337 T10）:
- *  1. 真子进程链路：
+ * Acceptance:
+ *  1. real subprocess chain:
  *     spawn fixture server → createMcpManager(createRealClient + AciRegistry.registerExternal)
- *     → start() → connected → `tool_search({query:"mcp"})` discover → 调
- *     `mcp__<server>__echo` 真实执行 → 断言 structuredContent 返回
- *  2. list_changed 触发：touch triggerFile → 期望新工具 added-on-listchange
- *     出现在 catalog,旧工具仍可调用
- *  3. Gate 2 防撞:registerExternal 收到非 mcp__ 前缀 → RegistryConstructionError
- *  4. shutdown SIGTERM：fixture 子孙收到 SIGTERM 必须退出(SC11)
+ *     → start() → connected → `tool_search({query:"mcp"})` discover → real call of
+ *     `mcp__<server>__echo` → assert structuredContent return
+ *  2. list_changed trigger: touch triggerFile → expect new tool added-on-listchange
+ *     in the catalog while old tools stay callable
+ *  3. Gate 2 collision guard: registerExternal receiving a non-mcp__ prefix → RegistryConstructionError
+ *  4. shutdown SIGTERM: the fixture child must really exit on SIGTERM
  *
- * 无 LLM、无外部 server — 仅 fixture 子进程 + 真实 SDK Client/Transport。
+ * No LLM, no external server — fixture subprocess + real SDK Client/Transport only.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -32,7 +32,7 @@ import {
 import type { McpServerConfig } from "../../src/harness/mcp/config.js";
 
 // ---------------------------------------------------------------------------
-// fixture server 路径解析 — 复用 tests/cli/trace.test.ts 的 tsx 定位模式
+// fixture server path resolution — reuses the tsx locating pattern from tests/cli/trace.test.ts
 // ---------------------------------------------------------------------------
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -52,19 +52,19 @@ interface SpawnedFixture {
   readonly child: ChildProcess;
   readonly triggerFile: string;
   readonly stderrLines: string[];
-  /** 子进程是否真正退出(供 SIGTERM 断言)。 */
+  /** Whether the child really exited (for the SIGTERM assertion). */
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
 function spawnFixture(): SpawnedFixture {
-  // 触发文件:放到一个本测试独享的 tmp 目录,避免和别的并发实例冲突
+  // Trigger file: a tmp dir private to this test, no clash with concurrent instances
   const scratch = join(
     tmpdir(),
     `iknow-mcp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   );
   mkdirSync(scratch, { recursive: true });
   const triggerFile = join(scratch, "listchanged.flag");
-  // 创建空文件 — fs.watch 才能触发 change 事件
+  // Create the empty file first — only then does fs.watch fire change events
   writeFileSync(triggerFile, "");
 
   const child = spawn(process.execPath, [fixtureServer], {
@@ -110,9 +110,9 @@ interface Harness {
 }
 
 /**
- * 装配 fixture:registry = 静态工具 + toolSearch → manager 通过
- * registry.registerExternal 追加 mcp__ 工具。`registered` 数组捕获所有
- * registerExternal 调用,便于测试断言每次注册的形状。
+ * Assembly fixture: registry = static tools + toolSearch → manager appends
+ * mcp__ tools via registry.registerExternal. The `registered` array captures
+ * every registerExternal call so tests can assert each registration's shape.
  */
 function buildHarness(cfg: McpServerConfig): Harness {
   const registered: AciToolDef[] = [];
@@ -130,7 +130,7 @@ function buildHarness(cfg: McpServerConfig): Harness {
     workspaceRoot: repoRoot,
     config: [cfg],
     registerExternal: (defs) => {
-      // 真实调用 AciRegistry.registerExternal — 验证 Gate 2
+      // Real call into AciRegistry.registerExternal — verifies Gate 2
       registry.registerExternal(defs);
       for (const d of defs) registered.push(d);
     },
@@ -192,13 +192,13 @@ async function waitForToolCallable(
 }
 
 // ---------------------------------------------------------------------------
-// 全局清理
+// Global cleanup
 // ---------------------------------------------------------------------------
 
 let activeFixtures: SpawnedFixture[] = [];
 
 afterEach(async () => {
-  // 优先让 manager 走正常 shutdown 路径
+  // Let the manager take its normal shutdown path first
   for (const f of activeFixtures) {
     if (!f.child.killed) {
       try {
@@ -208,7 +208,7 @@ afterEach(async () => {
       }
     }
   }
-  // 等所有子进程真正退出,最多 3s
+  // Wait for every child to really exit, max 3s
   await Promise.all(
     activeFixtures.map((f) =>
       Promise.race([
@@ -223,7 +223,7 @@ afterEach(async () => {
 });
 
 // =========================================================================
-// 1. 真子进程链路 — spawn → connect → registerExternal → discover → call
+// 1. Real subprocess chain — spawn → connect → registerExternal → discover → call
 // =========================================================================
 
 describe("MCP integration — end-to-end real subprocess chain", () => {
@@ -237,7 +237,7 @@ describe("MCP integration — end-to-end real subprocess chain", () => {
     await manager.start();
     await waitForConnected(manager, "echo_server");
 
-    // 真链路断言 1：registerExternal 至少被调用过 echo/fail/slow 三个工具
+    // Chain assertion 1: registerExternal saw echo/fail/slow at minimum
     const names = registered.map((d) => d.name).sort();
     expect(names).toEqual([
       "mcp__echo_server__echo",
@@ -245,12 +245,12 @@ describe("MCP integration — end-to-end real subprocess chain", () => {
       "mcp__echo_server__slow",
     ]);
 
-    // 真链路断言 2：所有 mcp__ 工具在 AciRegistry catalog 可见
+    // Chain assertion 2: every mcp__ tool is visible in the AciRegistry catalog
     expect(registry.catalog.get("mcp__echo_server__echo")).toBeDefined();
     expect(registry.catalog.get("mcp__echo_server__fail")).toBeDefined();
     expect(registry.catalog.get("mcp__echo_server__slow")).toBeDefined();
 
-    // 真链路断言 3：tool_search({query:"echo"}) discover → 返回真实工具 schema
+    // Chain assertion 3: tool_search({query:"echo"}) discovery → real tool schema returned
     const searchOutput = toolSearch.handler!(
       { query: "echo" },
       undefined
@@ -263,37 +263,37 @@ describe("MCP integration — end-to-end real subprocess chain", () => {
     const discoveredNames = parsed.map((p) => p.name);
     expect(discoveredNames).toContain("mcp__echo_server__echo");
 
-    // 真链路断言 4：discover 后 visibleSchemas 包含该工具
+    // Chain assertion 4: after discovery, visibleSchemas contains the tool
     const visible = registry.visibleSchemas().map((t) => t.name);
     expect(visible).toContain("mcp__echo_server__echo");
 
-    // 真链路断言 5：实际执行 mcp__echo_server__echo → 真实 structuredContent
+    // Chain assertion 5: actually run mcp__echo_server__echo → real structuredContent
     const echo = registry.catalog.get("mcp__echo_server__echo")!;
     expect(echo.handler).toBeDefined();
     const result = await echo.handler!({ text: "hello fixture" });
     expect(result).toBe('{"text":"hello fixture"}');
 
-    // 真链路断言 6：fail 工具走 isError 分支 → 返回 text（adapter 不抛）
+    // Chain assertion 6: fail tool takes the isError branch → returns text (adapter does not throw)
     const fail = registry.catalog.get("mcp__echo_server__fail")!;
     const failResult = await fail.handler!({ reason: "intentional" });
     expect(failResult).toBe("intentional");
 
     await manager.shutdown();
 
-    // 断言 shutdown 后子进程真正退出(SC11)
+    // Assert the child really exited after shutdown
     const exitInfo = await Promise.race([
       spawned.exited,
       new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((r) =>
         setTimeout(() => r({ code: null, signal: null }), 3_000)
       ),
     ]);
-    // 子孙应已退出(可能被 SIGTERM 杀掉,code=null + signal=SIGTERM,或 code=143)
+    // Child must have exited (killed by SIGTERM: code=null + signal=SIGTERM, or code=143)
     expect(exitInfo.code !== null || exitInfo.signal === "SIGTERM").toBe(true);
   });
 });
 
 // =========================================================================
-// 2. list_changed — touch 触发文件 → 期待新工具被注册
+// 2. list_changed — touch the trigger file → expect the new tool registered
 // =========================================================================
 
 describe("MCP integration — list_changed hot re-registration", () => {
@@ -307,7 +307,7 @@ describe("MCP integration — list_changed hot re-registration", () => {
     await manager.start();
     await waitForConnected(manager, "lc_server");
 
-    // 初始注册完成断言
+    // Initial registration complete
     expect(registered.map((d) => d.name).sort()).toEqual([
       "mcp__lc_server__echo",
       "mcp__lc_server__fail",
@@ -315,12 +315,13 @@ describe("MCP integration — list_changed hot re-registration", () => {
     ]);
     const beforeCount = registered.length;
 
-    // 触发 list_changed：touch 触发文件 + 写点内容(确保 watcher 收到 change)
+    // Trigger list_changed: touch the file + write content (ensure the watcher sees the change)
     writeFileSync(spawned.triggerFile, "go\n");
 
-    // 等待新工具出现 — sanitize 保留连字符/点（与 mcpServerOfToolName
-    // 反解契约一致：#361 面板 bug 修复后 `-` 不再被替换成 `_`，因此
-    // fixture 工具名 `added-on-listchange` 原样保留）。
+    // Wait for the new tool — sanitize keeps hyphens/dots (consistent with the
+    // mcpServerOfToolName reverse-parse contract: after the panel bugfix `-`
+    // is no longer replaced by `_`, so the fixture tool name
+    // `added-on-listchange` is preserved verbatim).
     const newTool = await waitForToolRegistered(
       registered,
       "mcp__lc_server__added-on-listchange",
@@ -328,7 +329,7 @@ describe("MCP integration — list_changed hot re-registration", () => {
     );
     expect(newTool).toBeDefined();
 
-    // 旧工具仍在 catalog(没有被打断,SC15)
+    // Old tools stay in the catalog (not dropped by the re-registration)
     expect(registry.catalog.get("mcp__lc_server__echo")).toBeDefined();
     expect(registry.catalog.get("mcp__lc_server__fail")).toBeDefined();
     expect(registry.catalog.get("mcp__lc_server__slow")).toBeDefined();
@@ -336,10 +337,10 @@ describe("MCP integration — list_changed hot re-registration", () => {
       registry.catalog.get("mcp__lc_server__added-on-listchange")
     ).toBeDefined();
 
-    // 注册次数应当 ≥ beforeCount + 1
+    // registration count should be >= beforeCount + 1
     expect(registered.length).toBeGreaterThan(beforeCount);
 
-    // 重复 touch 不应再注册(同名跳过,manager 增量 diff)
+    // Repeated touch must not re-register (same name skipped, manager incremental diff)
     writeFileSync(spawned.triggerFile, "go2\n");
     await new Promise((r) => setTimeout(r, 300));
     const newToolCount = registered.filter(
@@ -352,14 +353,15 @@ describe("MCP integration — list_changed hot re-registration", () => {
 });
 
 // =========================================================================
-// 3. Gate 2 防撞 — 非 mcp__ 前缀注册必须抛 RegistryConstructionError
+// 3. Gate 2 collision guard — non-mcp__ prefix registration must throw RegistryConstructionError
 // =========================================================================
 
 describe("MCP integration — Gate 2 namespace collision", () => {
   it("registerExternal rejects an external tool name that lacks the mcp__ prefix", () => {
-    // 直接复刻 Gate 2:不启动子进程也能复现。这条用例是单元级,放在集成
-    // 文件是为了和 T10 spec 验收集中在一处。createMcpManager 始终通过
-    // mcp__ 前缀注册,所以反向断言用 AciRegistry.registerExternal。
+    // Reproduces Gate 2 directly, no subprocess needed. This case is
+    // unit-level; it lives in the integration file to keep the MCP chain
+    // acceptance in one place. createMcpManager always registers with the
+    // mcp__ prefix, so the negative assertion goes through AciRegistry.registerExternal.
     const toolSearchHolder: { reg?: AciRegistry } = {};
     const toolSearch = createToolSearchTool({
       getRegistry: () => {
@@ -372,7 +374,7 @@ describe("MCP integration — Gate 2 namespace collision", () => {
     toolSearchHolder.reg = registry;
 
     const badTool: AciToolDef = Object.freeze({
-      name: "bash", // ← 静态名,无 mcp__ 前缀
+      name: "bash", // ← static name, no mcp__ prefix
       description: "should be rejected",
       inputSchema: {
         type: "object",
@@ -426,7 +428,7 @@ describe("MCP integration — Gate 2 namespace collision", () => {
 });
 
 // =========================================================================
-// 4. shutdown SIGTERM — fixture 子进程必须真正退出(SC11)
+// 4. shutdown SIGTERM — the fixture child must really exit
 // =========================================================================
 
 describe("MCP integration — shutdown SIGTERM child exit (SC11)", () => {
@@ -440,10 +442,10 @@ describe("MCP integration — shutdown SIGTERM child exit (SC11)", () => {
     await manager.start();
     await waitForConnected(manager, "sigterm_server");
 
-    // 触发 shutdown
+    // Trigger shutdown
     await manager.shutdown();
 
-    // 子孙必须真正退出,不能悬挂
+    // The child must really exit, never hang
     const exitInfo = await Promise.race([
       spawned.exited,
       new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
@@ -455,10 +457,10 @@ describe("MCP integration — shutdown SIGTERM child exit (SC11)", () => {
       ),
     ]);
 
-    // SDK StdioClientTransport.close() 通过 process.kill(pid, "SIGTERM");
-    // 子孙在 server.ts 里 process.on("SIGTERM") 退出 code=143。
-    // SDK transport.close 也可能先关 stdin 触发 'end' 路径 → code=0。
-    // 两种合法退出都算 PASS。
+    // SDK StdioClientTransport.close() calls process.kill(pid, "SIGTERM");
+    // the child exits via process.on("SIGTERM") in server.ts with code=143.
+    // transport.close may also close stdin first, hitting the 'end' path -> code=0.
+    // Both legal exits count as PASS.
     const okExit =
       exitInfo.signal === "SIGTERM" ||
       exitInfo.code === 143 ||
@@ -468,7 +470,7 @@ describe("MCP integration — shutdown SIGTERM child exit (SC11)", () => {
 });
 
 // =========================================================================
-// 5. 完整链路 tool_search → discover → invoke(含 ToolExecutionError 边界)
+// 5. Full chain tool_search → discover → invoke (incl. ToolExecutionError boundary)
 // =========================================================================
 
 describe("MCP integration — tool_search discovery feeds real call", () => {
@@ -482,31 +484,31 @@ describe("MCP integration — tool_search discovery feeds real call", () => {
     await manager.start();
     await waitForConnected(manager, "disc_server");
 
-    // 模拟 lazy 路径:discover 之前 visibleSchemas 不含 mcp__ 工具
-    // (我们设的 lazy=true via adapter)。但 createAciRegistry 的 visibleSchemas
-    // 只在 discovered 集合 + !lazy 拼接,我们的 ACI 工具都是 lazy,所以
-    // discover 之前不会出现在 visible。discover 后才出现。
+    // Simulate the lazy path: visibleSchemas excludes mcp__ tools before
+    // discovery. createAciRegistry concatenates visibleSchemas only from the
+    // discovered set + non-lazy tools, and our ACI tools are all lazy, so
+    // they appear only after discover.
     const before = registry
       .visibleSchemas()
       .map((t) => t.name)
       .filter((n) => n.startsWith("mcp__"));
-    expect(before).toEqual([]); // 还没 discover
+    expect(before).toEqual([]); // not discovered yet
 
-    // tool_search 真实 discover
+    // Real tool_search discovery
     const out = toolSearch.handler!(
       { names: ["mcp__disc_server__echo"] },
       undefined
     ) as string;
     expect(out).toContain("mcp__disc_server__echo");
 
-    // discover 副作用触发后,visible 出现该工具
+    // After the discovery side effect, the tool shows up in visible
     const after = registry
       .visibleSchemas()
       .map((t) => t.name)
       .filter((n) => n.startsWith("mcp__"));
     expect(after).toContain("mcp__disc_server__echo");
 
-    // 真实调用 discovered 工具
+    // Really invoke the discovered tool
     const echo = registry.catalog.get("mcp__disc_server__echo")!;
     const result = await echo.handler!({ text: "discovered call" });
     expect(result).toBe('{"text":"discovered call"}');
@@ -516,10 +518,10 @@ describe("MCP integration — tool_search discovery feeds real call", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 局部:不在 afterEach 里清 tmp(子进程已 SIGTERM,文件无害)
+// Local choice: no tmp cleanup in afterEach (children already SIGTERM'd; leftover files are harmless)
 // ---------------------------------------------------------------------------
 
-// 兜底:测试全部结束后,如仍有 tmp dir/flag file,清理一下(失败场景的兜底)
+// Backstop: after all tests, sweep any leftover tmp dir/flag file (failure-scenario safety net)
 const scratchDirs = new Set<string>();
 const _origSpawnFixture = spawnFixture;
 void _origSpawnFixture;

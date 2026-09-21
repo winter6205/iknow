@@ -1,16 +1,17 @@
 /**
- * 旧 trace 迁移脚本 tests（spec T4）。
+ * Tests for the legacy-trace migration script (S2 defensive contract).
  *
- * 覆盖（S2 defensive contract）：
- *   - 单文件 → 多文件（按 conversation_id 分文件）。
- *   - 按 conversation_id 分文件（同一会话多行聚到一个文件）。
- *   - 保留原行（逐行原样，不 re-serialize）。
- *   - 坏行处理（JSON 解析失败 / 标量 / 数组 / null / 无 conversation_id 跳过 + 计入报告）。
- *   - 空文件 / 输入不存在 → 空结果不抛错。
- *   - 输出目录不存在时自动创建。
- *   - 报告计数（sessions / totalLines / skippedLines / conversationIds）。
- *   - 删除旧输入：干净迁移后 unlink 旧单文件（CLI fail-fast 不残留触发）；
- *     有坏行 / 输入不存在 / 空输入时不删除。
+ * Covers:
+ *   - single file → many files (split by conversation_id).
+ *   - per-conversation files (multiple lines of one session aggregate into one file).
+ *   - original lines preserved (line verbatim, no re-serialization).
+ *   - bad-line handling (JSON parse failure / scalar / array / null / missing conversation_id → skip + count in report).
+ *   - empty file / missing input → empty result, no throw.
+ *   - output directory created automatically when absent.
+ *   - report counts (sessions / totalLines / skippedLines / conversationIds).
+ *   - deleting the legacy input: unlink after a clean migration (so the CLI
+ *     fail-fast never trips on leftovers); not deleted when bad lines exist or
+ *     the input is absent.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -40,12 +41,12 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** 构造一条带 conversation_id 的 JSONL 行（内容可含任意字段）。 */
+/** Build a JSONL line with conversation_id (content may carry any fields). */
 function makeLine(convId: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ conversation_id: convId, ...extra });
 }
 
-// -- 单文件 → 多文件 -----------------------------------------------------------
+// -- single file → many files ---------------------------------------------------
 
 describe("migrateTraceFile — 单文件 → 多文件", () => {
   it("split by conversation_id into per-session files", () => {
@@ -83,16 +84,17 @@ describe("migrateTraceFile — 单文件 → 多文件", () => {
   });
 });
 
-// -- 保留原行 ------------------------------------------------------------------
+// -- original lines preserved ---------------------------------------------------
 
 describe("migrateTraceFile — 保留原行", () => {
   it("writes the exact original line text without re-serialization", () => {
-    // 原始行带有非规范的空格/键序，re-serialize 会改变它；迁移必须原样保留。
+    // The raw line carries non-canonical spacing/key order; re-serializing would change
+    // it, so migration must keep it verbatim.
     const rawLine =
       '  {  "conversation_id" : "c1" , "record_type" : "turn" , "note" : "keep me" }';
-    // 注意：JSON.stringify 会压平空格，这里手动拼一个带多余空格的合法 JSON。
+    // Note: JSON.stringify collapses spacing, so this legal JSON with extra spaces is hand-built.
     const spaced = '{"conversation_id":"c1",   "note":"spacing kept"}';
-    // 用带前导空格的原始文本（合法 JSONL 允许行首空白）。
+    // Original text with leading whitespace (legal JSONL allows leading whitespace on a line).
     const leading = '   {"conversation_id":"c1","note":"leading space"}';
     writeFileSync(
       inputPath,
@@ -104,7 +106,7 @@ describe("migrateTraceFile — 保留原行", () => {
 
     const out = readFileSync(join(outputDir, "c1.jsonl"), "utf8");
     const outLines = out.split("\n").filter((l) => l.length > 0);
-    // 逐行与输入完全一致（含前导空格），证明未 re-serialize。
+    // Lines match the input exactly (leading whitespace included), proving no re-serialization happened.
     assert.equal(outLines[0], rawLine);
     assert.equal(outLines[1], spaced);
     assert.equal(outLines[2], leading);
@@ -112,14 +114,14 @@ describe("migrateTraceFile — 保留原行", () => {
 
   it("preserves a trailing line without a final newline", () => {
     const line = makeLine("c1", { turn_index: 0 });
-    writeFileSync(inputPath, line, "utf8"); // 无末尾换行
+    writeFileSync(inputPath, line, "utf8"); // no trailing newline
     migrateTraceFile(inputPath, outputDir);
     const out = readFileSync(join(outputDir, "c1.jsonl"), "utf8");
     assert.equal(out, line + "\n");
   });
 });
 
-// -- 坏行处理 ------------------------------------------------------------------
+// -- bad-line handling ----------------------------------------------------------
 
 describe("migrateTraceFile — 坏行处理", () => {
   it("skips invalid JSON and counts it in the report", () => {
@@ -179,7 +181,7 @@ describe("migrateTraceFile — 坏行处理", () => {
   });
 });
 
-// -- 空 / 缺失输入 --------------------------------------------------------------
+// -- empty / missing input ------------------------------------------------------
 
 describe("migrateTraceFile — 空 / 缺失输入", () => {
   it("returns an empty report for an empty file (no throw)", () => {
@@ -206,7 +208,7 @@ describe("migrateTraceFile — 空 / 缺失输入", () => {
   });
 });
 
-// -- 报告计数 ------------------------------------------------------------------
+// -- report counts ---------------------------------------------------------------
 
 describe("migrateTraceFile — 报告计数", () => {
   it("reports per-session counts and conversationIds in first-seen order", () => {
@@ -228,7 +230,7 @@ describe("migrateTraceFile — 报告计数", () => {
   });
 });
 
-// -- 删除旧输入 -----------------------------------------------------------------
+// -- deleting the legacy input ---------------------------------------------------
 
 describe("migrateTraceFile — 删除旧输入", () => {
   it("deletes the legacy single-file after a clean migration", () => {
@@ -253,7 +255,7 @@ describe("migrateTraceFile — 删除旧输入", () => {
     assert.equal(report.skippedLines, 1);
     assert.equal(report.removedInput, false);
     assert.equal(existsSync(inputPath), true);
-    // 迁移结果照常落盘，只是不删输入。
+    // Migration output lands as usual; only the input is kept.
     const out = readFileSync(join(outputDir, "c1.jsonl"), "utf8");
     assert.equal(out.split("\n").filter((l) => l.length > 0).length, 2);
   });

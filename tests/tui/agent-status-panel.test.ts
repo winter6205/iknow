@@ -1,16 +1,20 @@
 /**
  * tests/tui/agent-status-panel.test.ts
  *
- * #647 T3 / ADR-0028 / CONTEXT「状态栏」:TUI 只读最新现势 ——
- *   - 状态唯一来源是 harness 在注入 `<agent_status>` 栏的同一计算点发出的
- *     `agent_status` 流事件(agentStatusFromEvent 投影;replace-on-event,
- *     每个事件产**完整独立**的快照 → 单 state 槽整体替换,无历史、无合并);
- *   - 显示:有未勾项 → 单行 `□ a · b · c`(不印 last_tool);无未勾项 → 0 行;
- *   - src/tui 绝不读 todos.md / 不 import 账本读取器(grep 守卫:不出现
- *     第二份 todo 状态源);
- *   - 行数入账 chromeReserveRows.agentStatusRows(行账 SSOT)。
+ * ADR-0028 / CONTEXT `状态栏` (status bar): the TUI is read-only on the latest
+ * current state ——
+ *   - sole status source: the `agent_status` stream event the harness emits at
+ *     the same computation point that injects the `<agent_status>` bar
+ *     (agentStatusFromEvent projection; replace-on-event: each event yields a
+ *     **complete, standalone** snapshot → one state slot replaced wholesale,
+ *     no history, no merge);
+ *   - display: open items → single line `□ a · b · c` (last_tool not printed);
+ *     no open items → 0 lines;
+ *   - src/tui never reads todos.md / never imports the ledger reader
+ *     (grep guard: no second todo-state source);
+ *   - line count feeds chromeReserveRows.agentStatusRows (line-ledger SSOT).
  *
- * bun:test(纯函数直驱,不依赖 React 渲染)。
+ * bun:test (pure functions driven directly, no React rendering).
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -43,7 +47,7 @@ function agentStatusEvent(
 }
 
 // ---------------------------------------------------------------------------
-// 冷启动 hydrate:栏文本 parse + messages 末栏投影
+// Cold-start hydrate: bar-text parse + last-bar projection from messages
 // ---------------------------------------------------------------------------
 
 describe("parseAgentStatusText / agentStatusFromMessages: resume hydrate SSOT", () => {
@@ -106,7 +110,7 @@ describe("parseAgentStatusText / agentStatusFromMessages: resume hydrate SSOT", 
 });
 
 // ---------------------------------------------------------------------------
-// 状态来源:事件 → 快照(replace-on-event 语义的构造性证据)
+// Status source: event → snapshot (constructive evidence of replace-on-event)
 // ---------------------------------------------------------------------------
 
 describe("agentStatusFromEvent: 事件是快照的唯一来源", () => {
@@ -131,9 +135,10 @@ describe("agentStatusFromEvent: 事件是快照的唯一来源", () => {
   });
 
   test("latest-only:后一事件的快照与前一份零共享 —— 整体替换而非合并", () => {
-    // replace-on-event 的构造性证据:每个事件的投影都是自包含快照,不读取、
-    // 不保留任何先前状态 → app 的单 state 槽 setAgentStatus(投影) 即
-    // 「旧快照被整体替换」,不可能出现新旧混合(第二份账本)。
+    // Constructive evidence of replace-on-event: each event's projection is a
+    // self-contained snapshot that reads/keeps no prior state → the app's
+    // single-slot setAgentStatus(projection) is wholesale replacement; a mix of
+    // old and new (a second ledger) cannot occur.
     const older = agentStatusFromEvent(
       agentStatusEvent("idle", ["- [ ] old task"])
     )!;
@@ -141,14 +146,15 @@ describe("agentStatusFromEvent: 事件是快照的唯一来源", () => {
     expect(newer.lastTool).toBe("bash");
     expect([...newer.openTodoLines]).toEqual([]);
     expect([...older.openTodoLines]).toEqual(["- [ ] old task"]);
-    // 不同引用、无共享数组。
+    // distinct references, no shared arrays
     expect(newer).not.toBe(older);
   });
 });
 
 // ---------------------------------------------------------------------------
-// spec agent-status-instruction-echo 子弹5 / T4：显示面不动 —— 事件映射扩
-// （容忍并透传 instruction/reconcile），AgentStatusLine 消费面零变化。
+// spec agent-status-instruction-echo bullet 5: display surface unchanged ——
+// event mapping extends (tolerates and passes through instruction/reconcile),
+// AgentStatusLine consumption surface sees zero change.
 // ---------------------------------------------------------------------------
 
 describe("agentStatusFromEvent: instruction/reconcile 透传（事件映射扩）", () => {
@@ -247,7 +253,7 @@ describe("agentStatusFromMessages: 新格式栏冷启动 hydrate（TUI 消费面
     expect(snapshot!.instruction).toBe("换方向");
     expect(snapshot!.reconcile).toBe(true);
     expect([...snapshot!.openTodoLines]).toEqual(["- [ ] [t1] keep going"]);
-    // 显示面不动:hydrate 出来的新字段照样只投影 todo 行
+    // Display surface unchanged: hydrated new fields still project only todo lines
     const lines = agentStatusLines(snapshot, 80);
     expect(lines.length).toBe(1);
     expect(lines[0]!.text).toContain("keep going");
@@ -255,7 +261,7 @@ describe("agentStatusFromMessages: 新格式栏冷启动 hydrate（TUI 消费面
 });
 
 // ---------------------------------------------------------------------------
-// 投影:快照 → 显示行
+// Projection: snapshot → display lines
 // ---------------------------------------------------------------------------
 
 describe("agentStatusLines: 现势投影", () => {
@@ -309,7 +315,7 @@ describe("agentStatusLines: 现势投影", () => {
     );
     expect(lines.length).toBe(1);
     for (const line of lines) {
-      // 视觉宽度(CJK 2 列)不超 cols。
+      // CJK chars count as 2 columns; total must not exceed cols.
       const width = [...line.text].reduce((acc, ch) => {
         const cp = ch.codePointAt(0)!;
         return acc + (cp > 0x2e7f ? 2 : 1);
@@ -328,7 +334,7 @@ describe("agentStatusLines: 现势投影", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 不另建账本:src/tui 绝不读 todos.md(grep 守卫)
+// No second ledger: src/tui never reads todos.md (grep guard)
 // ---------------------------------------------------------------------------
 
 describe("no second todo ledger: src/tui 不读 todos.md", () => {
@@ -358,9 +364,10 @@ describe("no second todo ledger: src/tui 不读 todos.md", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 行账联动:agentStatusLines 投影 ↔ chromeReserveRows(投影-入账 linkage)
-// 注:缺省 → 基线 7 不变的 invariant 由 SSOT 本家 chrome-budget.test.ts 钉死
-//(本文件不重复;此处只测「投影行数 == 入账行数」的联动)。
+// Line-ledger linkage: agentStatusLines projection ↔ chromeReserveRows.
+// The "default → baseline 7 unchanged" invariant is pinned by its SSOT home
+// chrome-budget.test.ts (not duplicated here; only "projected rows ==
+// accounted rows" linkage is tested).
 // ---------------------------------------------------------------------------
 
 describe("chromeReserveRows: agentStatusRows 投影联动", () => {
@@ -398,8 +405,9 @@ describe("chromeReserveRows: agentStatusRows 投影联动", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 端到端:loop emit → hub wrappedOnStream 透传 → bridge postMessage → 宿主回调
-// (TUI 读口的产品路径;AC ①「同一份现势」在真实链路上交叉断言)
+// End-to-end: loop emit → hub wrappedOnStream passthrough → bridge
+// postMessage → host callback (the TUI read path; the spec's "same current
+// state" claim is cross-asserted on the real chain)
 // ---------------------------------------------------------------------------
 
 describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
@@ -411,8 +419,8 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
       const bridge = createTuiBridge({
         dataDir: baseDir,
         workspaceRoot: baseDir,
-        // makeDeps 不带 agentStatus;显式补上 chat surface 的装配形状
-        //(build-engine surface !== "ask" 时装 agentStatus,见 build-engine.ts)。
+        // makeDeps omits agentStatus; explicitly add the chat-surface assembly
+        // shape (agentStatus is wired when build-engine surface !== "ask", see build-engine.ts).
         deps: {
           ...makeDeps([assistantResult({ texts: ["ok"] })]),
           agentStatus: { todoDir },
@@ -420,10 +428,10 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
         inflight: createInflightRegistry(),
       });
       const id = await bridge.ensureSession(undefined);
-      // #304601e3:loop-engine 现按 conversationId 读
-      // `<todoDir>/<conversationId>/todos.md`(与 todo_write 写入侧同一 SSOT,
-      // 见 resolveConversationTodoPath)。先 ensureSession 拿到 conversationId,
-      // 再把种子账本写到该会话自己的子目录。
+      // loop-engine now reads `<todoDir>/<conversationId>/todos.md` by
+      // conversationId (same SSOT as the todo_write writer side, see
+      // resolveConversationTodoPath). ensureSession first to obtain the
+      // conversationId, then seed the ledger in that conversation's subdir.
       await mkdir(join(todoDir, id), { recursive: true });
       await writeFile(
         join(todoDir, id, "todos.md"),
@@ -447,8 +455,9 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
         "- [ ] [t1] e2e open task",
       ]);
 
-      // 同一份现势:落盘会话里模型实际看到的栏文本含同一字段(未勾项在场、
-      // 已勾项缺席)。
+      // Same current state: the bar text the model actually sees in the
+      // persisted conversation carries the same fields (open items present,
+      // done items absent).
       const file = await bridge.loadSessionFile(id);
       const barMsg = [...file.messages]
         .reverse()

@@ -1,31 +1,33 @@
 /**
- * #358 T3 — SIGTERM 优雅收尾 (graceful closeout) 专项。
+ * SIGTERM graceful closeout — dedicated tests.
  *
- * 覆盖三面:
- *   A. worker 侧 runWorkerOnce:进程收 SIGTERM → AbortController.abort
- *      ("subagent-timeout") → run() 返回 stopReason=cancelled →
- *      以**未中止的新 signal** 自跑一轮收尾摘要(reason: "timeout")
- *      捕获 stop_summary → toFailedEnvelope("timeout", summary)
- *      → stdout + exit 0 (runSubagentWorker 既有形态)。
- *        - 摘要轮成功 → summary 非空;
- *        - 摘要轮抛错 / 超时 → envelope 仍写 (D3 失败跳过不阻塞)。
- *   B. manager 侧优雅窗口:timeout SIGTERM 后、SIGKILL(5s)前,子进程
- *      在 stdout 上写回 timeout envelope → stdout handler 的
- *      `task.envelope = env` 用子进程信封**替换** fallback 信封
- *      (child summary 优先于 generic "timeout after <n>ms"),reason
- *      = timeout 不被 crashed 覆盖 (exit handler `timedOut` guard)。
- *   C. SIGKILL 兜底回归:子进程忽略 SIGTERM → 5s 后 SIGKILL,reason 仍
- *      = timeout (SC6 / #356 高优 fix)。
+ * Covers three surfaces:
+ *   A. worker-side runWorkerOnce: process receives SIGTERM → AbortController.abort
+ *      ("subagent-timeout") → run() returns stopReason=cancelled →
+ *      self-runs one summary round with a **fresh, unaborted signal** (reason: "timeout")
+ *      captures stop_summary → toFailedEnvelope("timeout", summary)
+ *      → stdout + exit 0 (runSubagentWorker's existing shape).
+ *        - summary round succeeds → non-empty summary;
+ *        - summary round throws / times out → envelope still written (failure-skip must not block).
+ *   B. manager-side graceful window: after timeout SIGTERM and before SIGKILL(5s),
+ *      the child writes a timeout envelope back on stdout → the stdout handler's
+ *      `task.envelope = env` **replaces** the fallback envelope with the child's
+ *      (child summary wins over generic "timeout after <n>ms"); reason = timeout
+ *      is not overwritten by crashed (exit handler `timedOut` guard).
+ *   C. SIGKILL fallback regression: child ignores SIGTERM → SIGKILL after 5s,
+ *      reason still = timeout.
  *
- * envelope.ts / loop-engine.ts 语义冻结,测试只断言 worker/manager 侧
- * 行为映射,不触碰冻结面。
+ * envelope.ts / loop-engine.ts semantics are frozen; tests only assert the
+ * worker/manager-side behavior mapping, never touching the frozen surface.
  *
- * SIGTERM 触发方式: 单测进程不可真发 SIGTERM(会杀掉 vitest fork 自身),
- * 沿用 tests/cli/register-shutdown.test.ts 先例 `process.emit("SIGTERM")`
- * 同步触发已注册 listener —— 与真实投递共享同一 listener 代码路径。
- * 时序: 先调 runWorkerOnce(其同步前奏注册 SIGTERM handler),随后同步
- * emit → controller 立即 abort → run() 首轮 raceModel 在创建点看到
- * signal.aborted → callerAbort → cancelled(与真实收 SIGTERM 同路径)。
+ * SIGTERM trigger: the test process cannot really receive SIGTERM (it would
+ * kill the vitest fork itself); following the tests/cli/register-shutdown.test.ts
+ * precedent, `process.emit("SIGTERM")` synchronously fires the registered
+ * listener — sharing the same listener code path as real delivery.
+ * Timing: call runWorkerOnce first (its synchronous preamble registers the
+ * SIGTERM handler), then emit synchronously → the controller aborts immediately
+ * → run()'s first raceModel sees signal.aborted at the creation point →
+ * callerAbort → cancelled (same path as a real SIGTERM).
  */
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
@@ -55,7 +57,7 @@ import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 
 // ---------------------------------------------------------------------------
-// makeDeps: stub adapter + 最小 loop deps(与 worker.test.ts 同构)。
+// makeDeps: stub adapter + minimal loop deps (same shape as worker.test.ts).
 // ---------------------------------------------------------------------------
 
 function makeDeps(adapter: ModelAdapter): LoopEngineDeps {
@@ -71,7 +73,7 @@ function makeDeps(adapter: ModelAdapter): LoopEngineDeps {
   } as unknown as LoopEngineDeps;
 }
 
-/** scripted adapter:每次 step 调用走同一条脚本(调用序 = callIndex)。 */
+/** scripted adapter: each step call walks the same script (call order = callIndex). */
 function createScriptedAdapter(
   script: (callIndex: number) => Promise<AssistantTurnResult>
 ): ModelAdapter {
@@ -88,8 +90,9 @@ function createScriptedAdapter(
 }
 
 // ---------------------------------------------------------------------------
-// A1. isSubagentTimeoutAbort — 纯谓词(判定线:signal.reason ===
-//     "subagent-timeout";非本 abort 的 cancelled 不误标)。
+// A1. isSubagentTimeoutAbort — pure predicate (decision line:
+//     signal.reason === "subagent-timeout"; cancelled not caused by this
+//     abort must not be mislabeled).
 // ---------------------------------------------------------------------------
 
 describe("subagent graceful timeout: isSubagentTimeoutAbort 纯谓词", () => {
@@ -114,7 +117,8 @@ describe("subagent graceful timeout: isSubagentTimeoutAbort 纯谓词", () => {
 
 // ---------------------------------------------------------------------------
 // A2. toFailedEnvelope(reason, summary?) — optional summary additive:
-//     无 summary 时行为与旧签名逐位一致(空串),不 breaking 既有 callers。
+//     without summary the behavior is bit-identical to the old signature (empty
+//     string), not breaking existing callers.
 // ---------------------------------------------------------------------------
 
 describe("subagent graceful timeout: toFailedEnvelope 携带 summary (additive)", () => {
@@ -140,9 +144,9 @@ describe("subagent graceful timeout: toFailedEnvelope 携带 summary (additive)"
 });
 
 // ---------------------------------------------------------------------------
-// B. runWorkerOnce 集成 — SIGTERM → 优雅收尾信封 (SC6 核心):
-//    exit code 0 的协议承载 = stdout newline-JSON envelope (runSubagentWorker
-//    形态);此处断言 envelope 内容 + 摘要。manager 侧见 C。
+// B. runWorkerOnce integration — SIGTERM → graceful closeout envelope:
+//    protocol carrier with exit code 0 = stdout newline-JSON envelope (runSubagentWorker
+//    shape); here assert envelope content + summary. Manager side: see C.
 // ---------------------------------------------------------------------------
 
 describe("subagent graceful timeout: runWorkerOnce SIGTERM 优雅收尾", () => {
@@ -152,8 +156,9 @@ describe("subagent graceful timeout: runWorkerOnce SIGTERM 优雅收尾", () => 
   };
 
   it("摘要轮成功 → envelope {failed, timeout, summary 非空}", async () => {
-    // 主回路 step(被立即 abort 丢弃)与收尾摘要 step 都返回同一摘要文本;
-    // run() 因 signal.aborted → callerAbort → cancelled;worker 自跑摘要轮。
+    // The main-loop step (aborted immediately) and the closeout-summary step
+    // return the same summary text; run() observes signal.aborted → callerAbort
+    // → cancelled, and the worker runs the summary round itself.
     const adapter = createScriptedAdapter(async () =>
       assistantResult({
         texts: ["completed most of the task before timeout"],
@@ -164,7 +169,8 @@ describe("subagent graceful timeout: runWorkerOnce SIGTERM 优雅收尾", () => 
       workerEnvelope: baseEnvelope,
       deps: makeDeps(adapter),
     });
-    // 同步触发:runWorkerOnce 同步前奏已注册 SIGTERM handler。
+    // Triggered synchronously: runWorkerOnce registers its SIGTERM handler during
+    // the synchronous prologue, so emitting here is already observable.
     process.emit("SIGTERM");
     const env = await p;
     assert.equal(env.status, "failed");
@@ -173,8 +179,9 @@ describe("subagent graceful timeout: runWorkerOnce SIGTERM 优雅收尾", () => 
   });
 
   it("摘要轮抛错 → 仍写 {failed, timeout},summary 空,不崩 (D3)", async () => {
-    // 主回路 step 被丢弃;收尾摘要 step 抛 ProtocolError → runSummaryWithTimeout
-    // catch-all 收敛 null → summary 空,envelope 照常写。
+    // The main-loop step is discarded; the closeout-summary step throws
+    // ProtocolError → runSummaryWithTimeout's catch-all folds it to null → empty
+    // summary, and the envelope is written as normal.
     const adapter = createScriptedAdapter(async (callIndex) => {
       if (callIndex >= 1) {
         throw new ProtocolError("summary round synthetic failure");
@@ -194,7 +201,8 @@ describe("subagent graceful timeout: runWorkerOnce SIGTERM 优雅收尾", () => 
 });
 
 // ---------------------------------------------------------------------------
-// C. manager 侧优雅窗口 + SIGKILL 兜底(沿用 manager.test.ts fake child 形态)。
+// C. manager-side graceful window + SIGKILL fallback (reuses the fake-child
+//    shape from manager.test.ts).
 // ---------------------------------------------------------------------------
 
 interface FakeChild {
@@ -240,7 +248,7 @@ function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
   return { manager, spawned };
 }
 
-/** 在 stdout 上写 timeout envelope 后随 SIGTERM 退出(模拟 worker 优雅收尾)。 */
+/** Writes a timeout envelope on stdout then exits with SIGTERM (simulates the worker's graceful closeout). */
 function emitTimeoutEnvelope(child: FakeChild, summary: string): void {
   const env: SubAgentEnvelope = {
     status: "failed",
@@ -258,7 +266,7 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
     try {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({ timeoutMs: 50 });
-      // 50ms timeout 触发 → fallback envelope + SIGTERM
+      // 50ms timeout fires → fallback envelope + SIGTERM
       await vi.advanceTimersByTimeAsync(50);
       let q = manager.queryBuffer(taskId);
       assert.equal(q.status, "failed");
@@ -271,7 +279,7 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
         ["SIGTERM"]
       );
 
-      // 优雅窗口内 child 写出自己的 timeout envelope(含真实进度摘要)
+      // Within the graceful window the child writes its own timeout envelope (with a real progress summary)
       emitTimeoutEnvelope(
         spawned[0]!,
         "worker-level graceful summary: got half the way"
@@ -286,7 +294,7 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
           "summary = child envelope(替换 generic fallback)"
         );
       }
-      // SIGKILL 兜底窗口(5s)尚未执行 → 无第二信号
+      // The SIGKILL fallback window (5s) has not fired yet → no second signal
       assert.deepEqual(
         spawned[0]!.kill.mock.calls.map((c) => c[0]),
         ["SIGTERM"]
@@ -302,11 +310,11 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({ timeoutMs: 50 });
       await vi.advanceTimersByTimeAsync(50);
-      // child 不退出(忽略 SIGTERM)→ SIGKILL 兜底 5s 后发
+      // child does not exit (it ignores SIGTERM) → the SIGKILL fallback fires 5s later
       await vi.advanceTimersByTimeAsync(5000);
       const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
       assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
-      // SIGKILL 被杀 → exit handler timedOut guard 保 reason
+      // Killed by SIGKILL → the exit handler's timedOut guard preserves the reason
       spawned[0]!.emit("exit", null, "SIGKILL");
       const q = manager.queryBuffer(taskId);
       assert.equal(q.status, "failed");
@@ -320,11 +328,12 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
 });
 
 // ---------------------------------------------------------------------------
-// D. review-fix (Fix 2): emitStateChange self-loop guard —— timeout 路径
-//    timer fire (running→failed) 后, stdout handler 收到 worker 的 timeout
-//    envelope 再次 emitStateChange (failed→failed) 是 spurious 自环, 不得
-//    再落一条 from_state === to_state === "failed" 的 subagent_state_change。
-//    断言真实 jsonl 中不存在该 spurious 记录, 且迁移序列只含真实迁移。
+// D. emitStateChange self-loop guard: on the timeout path, the timer fire
+//    (running→failed) is followed by the stdout handler receiving the worker's
+//    timeout envelope and calling emitStateChange again (failed→failed). That
+//    is a spurious self-loop and must not persist another subagent_state_change
+//    with from_state === to_state === "failed". Assert the real jsonl contains
+//    no such record and the transition sequence holds only genuine moves.
 // ---------------------------------------------------------------------------
 
 describe("subagent graceful timeout: emitStateChange self-loop guard (Fix 2)", () => {
@@ -345,11 +354,12 @@ describe("subagent graceful timeout: emitStateChange self-loop guard (Fix 2)", (
         },
         trace,
       });
-      // 短 timeout 触发 timer fire: starting→running (spawn) → failed (timer)
+      // Short timeout fires the timer: starting→running (spawn) → failed (timer)
       const { taskId } = manager.spawn({ timeoutMs: 50 });
       await vi.advanceTimersByTimeAsync(50);
-      // 优雅窗口内 child 写回 timeout envelope → stdout handler 再次
-      // emitStateChange("failed") —— 自环应被 guard 吞掉, 不落盘。
+      // Within the graceful window the child writes back its timeout envelope →
+      // the stdout handler calls emitStateChange("failed") again — the self-loop
+      // should be swallowed by the guard and not persisted.
       emitTimeoutEnvelope(spawned[0]!, "worker graceful summary");
       await Promise.resolve();
       await Promise.resolve();
@@ -376,7 +386,7 @@ describe("subagent graceful timeout: emitStateChange self-loop guard (Fix 2)", (
           "failed→failed 自环记录存在"
         );
       }
-      // 真实迁移序列仍完整: starting→running + running→failed 各一条。
+      // The real transition sequence is still complete: one starting→running and one running→failed.
       assert.ok(
         stateChanges.some(
           (r) => r.from_state === "starting" && r.to_state === "running"

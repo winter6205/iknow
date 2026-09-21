@@ -2,18 +2,19 @@
 /**
  * tests/tui/max-turns.test.tsx
  *
- * #343 T6-C：plan T6 — TUI 适配 stop_summary 呈现（maxTurns 边界归
- * archive/tui-ink/tests/max-turns.test.tsx 同语义，本测聚焦 onStream
- * stop_summary → notice 路径）。
+ * TUI adaptation of stop_summary presentation. The maxTurns boundary itself
+ * is covered by the archived ink-era max-turns test with the same semantics;
+ * this test focuses on the onStream stop_summary → notice path.
  *
- * 流程：mount TuiApp + 单 response 模型 → 发消息 → runTurnOnce 路径：
+ * Flow: mount TuiApp + single-response model → send a message → runTurnOnce path:
  *   1. bridge.postMessage → hub.postMessage；
- *   2. adapter 在 streaming 路径中可下发 stop_summary 事件；
- *   3. runTurnOnce onStream 收到 stop_summary → setNotice({ lines: [text] })。
+ *   2. the adapter may emit stop_summary events while streaming；
+ *   3. runTurnOnce onStream receives stop_summary → setNotice({ lines: [text] })。
  *
- * 受限于 makeDeps 当前未暴露 maxTurns override，本测聚焦「stream 事件
- * stop_summary 渲染」语义（即 notice 收到 onStream 推来的文本）。后续
- * makeDeps 增强后可加 maxTurns=2 跨多轮验证 hub catch MaxTurnsExceeded。
+ * makeDeps currently exposes no maxTurns override, so this test only pins the
+ * "render the stop_summary stream event" semantics (the notice receives text
+ * pushed via onStream). Once makeDeps supports it, add a maxTurns=2
+ * multi-turn test verifying the hub catches MaxTurnsExceeded.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -71,7 +72,7 @@ async function mountWithStopSummary(
   stopSummaryText: string
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-max-turns-"));
-  // 流式事件脚本：第 1 步发 stop_summary（模拟 maxTurns 触发的收尾摘要）。
+  // Stream-event script: step 1 emits stop_summary (simulating the wrap-up summary triggered by maxTurns).
   const deps = makeDeps([assistantResult({ texts: [""] })], {
     streamEventsByStep: [
       [
@@ -152,7 +153,7 @@ describe("TUI stop_summary 呈现（plan T6 / maxTurns 边界）", () => {
     await app.pressEnter();
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
 
-    // notice 区呈现摘要文本
+    // The notice area shows the summary text
     await untilFrame(
       app.setup,
       (f) => f.includes("TUI 收尾摘要"),

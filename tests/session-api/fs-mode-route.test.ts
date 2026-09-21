@@ -1,14 +1,17 @@
 /**
- * ADR-0092 / SC13 —— serve 入口的 `/config` 对等物。
+ * ADR-0092 — the serve entry's `/config` equivalent.
  *
- * serve 没有键盘也没有命令行，所以 `/config [status|fs global|fs
- * workspace]` 的载体是 `GET/POST /api/v1/fs-mode`：wire 上传的就是已经切好
- * 的 args 数组，语义与文案走 `harness/sandbox/fs-mode.ts` 同一个
- * `applyFsModeCommand` —— 三入口一份值域。holder 与 hub 共用同一实例，
- * 所以翻完的下一次装配才读到新档（round 语义由 hub 侧测试守）。
+ * serve has neither keyboard nor command line, so the carrier for
+ * `/config [status|fs global|fs workspace]` is `GET/POST /api/v1/fs-mode`:
+ * the wire carries a pre-split args array, and semantics plus wording go
+ * through the same `applyFsModeCommand` in `harness/sandbox/fs-mode.ts` —
+ * one value domain across all three entries. The holder is the same
+ * instance the hub uses, so the next assembly after a flip sees the new
+ * mode (round semantics are guarded by hub-side tests).
  *
- * holder 缺席 → 两端点 404（与 graph-mode / permission-mode 未挂载同模式）。
- * 本文件与 `graph-mode-route.test.ts` 同形（镜像纪律）。
+ * Missing holder → both endpoints 404 (same pattern as unmounted
+ * graph-mode / permission-mode). This file mirrors
+ * `graph-mode-route.test.ts` (mirror discipline).
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -84,7 +87,7 @@ describe("GET/POST /api/v1/fs-mode", () => {
     assert.equal(toWorkspace.status, 200);
     assert.equal(toWorkspace.body["mode"], "workspace");
     assert.match(String(toWorkspace.body["message"]), /已切换/);
-    // 同一 holder：HTTP 翻的就是 hub 拿到的那个（SC3）。
+    // Same holder: what HTTP flips is exactly the instance the hub reads.
     assert.equal(fsMode.get(), "workspace");
 
     const toGlobal = await post(origin, { args: ["fs", "global"] });

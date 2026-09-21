@@ -1,64 +1,74 @@
 /**
- * tests/cli/register-shutdown.test.ts
+ * registerShutdown coverage (fallback test surface for the "tui" wiring cleanup).
  *
- * #365 T5:registerShutdown 测试覆盖(surface:"tui" 接线清理的兜底测试面)。
+ * Contract (src/cli/runtime.ts:128-172, calibrated against real behavior):
+ *   - registerShutdown(built) attaches SIGINT / SIGTERM / beforeExit(once) listeners;
+ *   - any signal → dispose() → built.shutdown?.() (no-op when absent);
+ *   - shuttingDown is one shared guard: the first dispose runs shutdown once,
+ *     every later dispose (signal or manual) is a no-op — idempotent (measured:
+ *     emitting three signals in order still leaves counter === 1, not one per signal);
+ *   - the parameter is widened to the structural
+ *     `{ readonly shutdown?: () => Promise<void> }`: no BuiltEngine / deps /
+ *     engine / subagentManager shape is required, the TUI entry passes only the
+ *     shutdown handle.
  *
- * 契约(src/cli/runtime.ts:128-172,实测校准):
- *   - registerShutdown(built) 挂 SIGINT / SIGTERM / beforeExit(once) 三个监听器;
- *   - 任意信号触发 → dispose() → built.shutdown?.()(缺席则 no-op);
- *   - shuttingDown 是单一共享守卫:首个 dispose 执行 shutdown 一次,后续任何
- *     dispose(信号 / 主动调用)都是 no-op — 幂等(实测:三信号顺序 emit 后
- *     counter === 1,不是每信号各 1 次);
- *   - 参数放宽为结构 `{ readonly shutdown?: () => Promise<void> }`(#365
- *     DRIFT-1):不要求 BuiltEngine / deps / engine / subagentManager 形态,
- *     TUI 入口只透 shutdown 句柄(Gap B)。
+ * Signal-exit semantics (calibrated by real signal delivery):
+ *   - the first signal sets reKilled at entry; after dispose() completes,
+ *     setImmediate re-issues process.kill(process.pid, sig) once so external
+ *     handlers (e.g. chat-session's onSigint counter) get a chance to
+ *     force-exit; setImmediate keeps Unix same-signal merging from swallowing
+ *     the second delivery;
+ *   - the reKilled guard: once the second signal lands, process.exit(code)
+ *     exits directly without re-killing — an unconditional re-kill with no
+ *     external handler would ping-pong against its own handler into a microtask
+ *     loop (the old implementation hung on real SIGINT under node/bun, only
+ *     SIGKILL ended it; vitest's process.emit synchronous path masked the bug);
+ *   - final exit code for a single signal: SIGINT → 130, SIGTERM → 143.
  *
- * 信号退出语义(DRIFT-1,真实信号投递实测校准 — #365 review blocker):
- *   - 首次信号入口置 reKilled,dispose() 完成后 setImmediate 里
- *     process.kill(process.pid, sig) 重发一次,让外部处理器
- *     (chat-session 的 onSigint 计数器等)有机会强退;setImmediate 避免
- *     Unix 同信号合并把二次投递吃掉;
- *   - reKilled 守门:第二次信号落地后 process.exit(code) 直接退出,不再
- *     re-kill — 避免无外部处理器时 unconditional re-kill 与自身 handler
- *     互踢成 microtask 死循环(旧实现 node/bun 真实 SIGINT 挂死,SIGKILL
- *     才退;vitest process.emit 同步路径掩盖了该 bug);
- *   - 单次信号最终退出码:SIGINT → 130,SIGTERM → 143。
+ * Test discipline: process-level signal assertions must use a real child +
+ * child.kill, never process.emit as a stand-in — emit only runs listeners
+ * synchronously and does not deliver signals, masking the re-kill loop (the old
+ * comment claiming kill is async and non-reentrant on Linux was disproven).
+ * The child registers the real registerShutdown (runtime.ts); the parent kills
+ * a real signal after ready, under a 60s timeout guard — a hang fails.
  *
- * 测试纪律:进程级信号断言必须走真实子进程 + child.kill,不能用
- * process.emit 假装验证 — emit 只同步跑 listener,不真投递信号,掩盖
- * DRIFT-1 的 re-kill 死循环(旧测试注释"单次 emit 后 kill 在 Linux 异步
- * 投递、不重入"实测为假)。子进程内注册真实 registerShutdown(runtime.ts),
- * ready 就绪后 kill 真实信号;父进程 60s 超时 guard — 挂死即 fail。
+ * The child topology must have no wrapper:
+ *   - `node <tsx/dist/cli.mjs> -e <script>` is not a single process — the tsx
+ *     CLI starts a wrapper which then spawns the real script process.
+ *     child.kill(signal) only hits the wrapper; the script gets the signal via
+ *     tsx's relay.
+ *   - tsx 4.23.0 relay semantics (measured): after forwarding the signal it
+ *     waits only 30ms for the child (`waitForSignalFromChild`'s 30ms race),
+ *     escalates to SIGKILL on "Previous process hasn't exited yet", then the
+ *     wrapper itself does `process.exit(128+signo)` — SIGINT is also 130,
+ *     indistinguishable from the script process's re-kill exit code.
+ *   - Consequence: on cold start/load, if dispose is slower than 30ms the
+ *     script process is SIGKILL'd before writeFileSync and the parent sees
+ *     code=130 with the sentinel missing (measured: 200ms handler work → 4/4
+ *     sentinels lost; within the 30ms boundary → normal). That is a
+ *     child-kill race, not a registerShutdown race (production runs
+ *     `bin/iknow → dist/cli.js` directly, no tsx wrapper).
+ *   - This file uses `node --import tsx/esm --input-type=module -e`, so the
+ *     script under test IS the directly spawned process (measured
+ *     `process.pid === child.pid`); signals reach the handler with no relay
+ *     window. A re-kill hang is still caught (more deterministically without a
+ *     wrapper). `--input-type=module` is declared explicitly rather than
+ *     relying on Node's future syntax-detection defaults.
  *
- * 子进程拓扑必须无 wrapper:
- *   - `node <tsx/dist/cli.mjs> -e <script>` 不是单进程 —— tsx CLI 先起一个
- *     wrapper,再由 wrapper spawn 真正的脚本进程。child.kill(signal) 只打到
- *     wrapper,脚本进程靠 tsx 的 relay 转发。
- *   - tsx 4.23.0 relay 语义(实测校准):转发信号后只等子进程 30ms
- *     (`waitForSignalFromChild` 的 30ms race),"Previous process hasn't
- *     exited yet" 即升级 SIGKILL,然后 wrapper 自己 `process.exit(128+signo)`
- *     ——SIGINT 恰好也是 130,与脚本进程的 re-kill 退出码不可区分。
- *   - 后果:冷启动/负载下 dispose 比 30ms 慢时,脚本进程被 SIGKILL 打断在
- *     writeFileSync 之前,父进程看到 code=130 但哨兵缺失。实测:handler
- *     200ms 工作 → 4/4 哨兵丢失;handler 30ms 边界内 → 正常。这是子进程
- *     互杀竞态,不是 registerShutdown 的竞态(产品 `bin/iknow → dist/cli.js`
- *     直跑,无 tsx wrapper)。
- *   - 本文件用 `node --import tsx/esm --input-type=module -e`,被测脚本即直接
- *     spawn 的进程(实测 `process.pid === child.pid`),信号直达 handler,
- *     无 relay 窗口。DRIFT-1 挂死仍被捕获(无 wrapper 兜底下挂死更确定)。
- *     `--input-type=module` 是显式声明(不依赖 Node 未来的语法探测默认值)。
+ * Side-effect isolation:
+ *   - in-process emit tests stub process.kill via vi.spyOn to no-op so the
+ *     re-kill does not bounce a real SIGINT into the vitest worker; the second
+ *     emit hits the reKilled guard and would call process.exit(code) — also
+ *     stubbed. Real signal exit codes (130/143) are verified only via the child
+ *     spawn cases below.
+ *   - the child's shutdown hook writes a "dispose-ran" sentinel through a file
+ *     side-channel: process.exit does not drain stdio pipes, so stderr buffers
+ *     may be lost before exit; fs.writeFileSync lands synchronously and is
+ *     deterministically readable.
  *
- * 副作用隔离:
- *   - fork 内 emit 测试用 vi.spyOn(process, 'kill') 把 re-kill 桩成 no-op,
- *     避免真实 SIGINT 回投到 vitest worker;二次 emit 命中 reKilled 守门会
- *     走 process.exit(code) — 也被桩成 no-op 拦截。真实信号退出码(130/143)
- *     只走 child spawn 路径(下方 3 个 case)验证。
- *   - 子进程内 shutdown 钩子通过文件侧通道写入"dispose-ran"哨兵:
- *     process.exit 不排空 stdio pipe,stderr 在退出前可能丢缓冲;文件
- *     写入 fs.writeFileSync 同步落盘,确定性可读。
- *
- * 信号清理:vitest fork 内 process.listeners 跨 test 不自动清理,故
- * beforeEach / afterEach removeAllListeners 三个信号,避免污染其它测试。
+ * Signal cleanup: in vitest forks, process.listeners are not cleaned between
+ * tests, so beforeEach / afterEach removeAllListeners for the three signals to
+ * avoid polluting other tests.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
@@ -86,13 +96,15 @@ function cleanupSignalListeners(): void {
 }
 
 /**
- * 定位 tsx 的 ESM register 入口(worktree 的 node_modules 是空的,依赖从主
- * 仓库提升):从本文件目录逐级向上找第一个含 node_modules/tsx/dist/esm/index.mjs
- * 的目录(与 tests/cli/trace.test.ts 同款解析)。
+ * Locate tsx's ESM register entry (a worktree's node_modules may be empty with
+ * deps hoisted to the main repo): walk up from this file's directory to the
+ * first one containing node_modules/tsx/dist/esm/index.mjs (same resolution as
+ * tests/cli/trace.test.ts).
  *
- * 注意用 `dist/esm/index.mjs`(node --import 的 register 入口),不是
- * `dist/cli.mjs` —— 后者是 wrapper CLI,会再生一层子进程 + 30ms relay
- * 升级 SIGKILL(见文件头无 wrapper 拓扑说明)。
+ * Use `dist/esm/index.mjs` (the node --import register entry), NOT
+ * `dist/cli.mjs` — the latter is the wrapper CLI that spawns another child
+ * layer with a 30ms relay escalating to SIGKILL (see the no-wrapper note in
+ * the header).
  */
 function resolveTsxEsm(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
@@ -110,7 +122,7 @@ function resolveTsxEsm(): string {
         return candidate;
       }
     } catch {
-      // 继续向上
+      // keep climbing
     }
     const parent = join(dir, "..");
     if (parent === dir) throw new Error("cannot locate tsx/dist/esm/index.mjs");
@@ -118,28 +130,31 @@ function resolveTsxEsm(): string {
   }
 }
 
-// 与 `node --import tsx` 的模块解析一致:子进程 cwd = 仓库根,内联脚本用相对 import。
+// Consistent with `node --import tsx` module resolution: child cwd = repo root, inline script uses relative imports.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tsxEsm = resolveTsxEsm();
 
 /**
- * 真实信号投递子进程:`node --import tsx` 内注册真实 registerShutdown
- * (runtime.ts),ready 就绪后由父进程 kill 真实信号。返回
- * { code, timedOut, disposeRan }。
- *   - code:子进程退出码(130/143=期望;null=SIGKILL timeout);
- *   - timedOut:true = 父进程 60s guard 触发 → DRIFT-1 旧实现在此挂死被捕获;
- *   - disposeRan:shutdown 钩子是否真跑过(文件侧通道同步写,绕开 process.exit
- *     不排空 stdio pipe 的丢失风险)。
+ * Real-signal-delivery child: registers the real registerShutdown under
+ * `node --import tsx` (runtime.ts); after ready the parent kills it with a real
+ * signal. Returns { code, timedOut, disposeRan }.
+ *   - code: child exit code (130/143 = expected; null = SIGKILL timeout);
+ *   - timedOut: true = the parent's 60s guard fired → the old infinite
+ *     re-kill hang is caught here;
+ *   - disposeRan: whether the shutdown hook really ran (synchronous file
+ *     side-channel, dodging process.exit's un-drained stdio pipe loss).
  *
- * 哨兵写入走 child 侧 `import { writeFileSync } from 'node:fs'`(ESM 语法,
- * 内联脚本内 require 不可用 —— 实测 exit 1:ReferenceError: require is not
- * defined),文件名由 SIG_SENTINEL 环境变量注入,不依赖 stdio pipe 排空。
+ * The sentinel is written via child-side `import { writeFileSync } from 'node:fs'`
+ * (ESM syntax; require is unavailable in the inline script — measured exit 1:
+ * ReferenceError: require is not defined), with the filename injected through
+ * the SIG_SENTINEL env var, independent of stdio pipe draining.
  *
- * 为什么不是 `node <tsx/dist/cli.mjs> -e`:tsx CLI 是 wrapper,会再 spawn
- * 一层真正跑脚本的子进程,并在收到信号后只等 30ms 就 SIGKILL(见文件头)。
- * `node --import tsx/esm` + `--input-type=module` 让脚本进程就是 spawn 出来
- * 的那个进程(实测 process.pid === child.pid),信号直达 handler。
- * `--input-type=module` 显式声明模块类型;相对 import 与 cwd 仍按仓库根解析。
+ * Why not `node <tsx/dist/cli.mjs> -e`: the tsx CLI is a wrapper that spawns
+ * another script layer and SIGKILLs after waiting only 30ms on a signal (see
+ * header). `node --import tsx/esm` + `--input-type=module` makes the script
+ * process the one that was spawned (measured process.pid === child.pid), so
+ * signals reach the handler directly. `--input-type=module` declares the module
+ * type explicitly; relative imports and cwd still resolve from the repo root.
  */
 function runSignalChild(
   shutdownStub: string | null,
@@ -150,20 +165,21 @@ function runSignalChild(
   timedOut: boolean;
   disposeRan: boolean;
   stderr: string;
-  /** 子进程自报的 process.pid(脚本进程身份,用于无 wrapper 不变量断言)。 */
+  /** Self-reported process.pid of the child (script-process identity, for the no-wrapper invariant assert). */
   selfPid: number | null;
-  /** spawn() 返回的 pid(= selfPid 当且仅当没有中间 wrapper)。 */
+  /** pid returned by spawn() (== selfPid iff there is no intermediate wrapper). */
   spawnPid: number | null;
 }> {
   const sentinel = join(sentinelDir, "dispose-ran");
-  // 通过环境变量把哨兵路径传给子进程,内联脚本从 process.env.SIG_SENTINEL 读。
-  // shutdownStub 是 `_shutdown` 声明本体(顶层出现一次,不得重复拼接)。
+  // Pass the sentinel path to the child via env var; the inline script reads process.env.SIG_SENTINEL.
+  // shutdownStub is the `_shutdown` declaration body itself (appears once at top level; must not be concatenated twice).
   const shutdownBody = shutdownStub
     ? `${shutdownStub}\n    registerShutdown({ shutdown: _shutdown });`
     : "registerShutdown({});";
-  // selfPid 随 ready 行一起自报:若 spawn 的是 wrapper(如 tsx CLI),它会
-  // 再 spawn 一层脚本进程 → selfPid !== spawnPid,测试据此 fail-fast
-  // (wrapper 的 30ms relay 会升级 SIGKILL 丢哨兵,见文件头)。
+  // selfPid is reported with the ready line: if the spawn target is a wrapper
+  // (like the tsx CLI), it spawns another script layer → selfPid !== spawnPid,
+  // and the test fails fast (the wrapper's 30ms relay would escalate to
+  // SIGKILL and lose the sentinel; see header).
   const script = `
     import { registerShutdown } from './src/cli/runtime.ts';
     import { writeFileSync } from 'node:fs';
@@ -184,7 +200,7 @@ function runSignalChild(
   let signalled = false;
   let selfPid: number | null = null;
   child.stdout.on("data", () => {
-    /* 抑制 stdout;只用 stderr 判定 ready */
+    /* suppress stdout; ready is judged via stderr only */
   });
   child.stderr.on("data", (d) => {
     err += String(d);
@@ -196,7 +212,7 @@ function runSignalChild(
     }
   });
   child.on("error", () => {
-    /* exit 事件兜底 resolve */
+    /* the exit event's resolve covers spawn errors */
   });
   return new Promise((resolve) => {
     let settled = false;
@@ -212,10 +228,11 @@ function runSignalChild(
       settled = true;
       resolve(r);
     };
-    // 60s guard:冷启动 import runtime.ts 图约 4-9s(全量并行套件负载下
-    // vitest forks ×3 + tsx 解析竞争可达 10-20s+),60s 给足冷启动余量,
-    // 又仍能捕获 DRIFT-1 旧实现的无限 re-kill 挂死。旧 30s 在重负载
-    // 下偶发超时 → 测试误报 fail(2026-08-19 全量套件 flaky 排查结论)。
+    // 60s guard: cold-start import of the runtime.ts graph takes ~4-9s (under a
+    // full parallel suite, vitest forks ×3 + tsx resolution contention can
+    // reach 10-20s+), so 60s leaves cold-start headroom while still catching
+    // the old infinite re-kill hang. The previous 30s flaked to false failures
+    // under heavy load.
     const guard = setTimeout(() => {
       child.kill("SIGKILL");
       finish({
@@ -227,9 +244,10 @@ function runSignalChild(
         spawnPid: child.pid ?? null,
       });
     }, 60000);
-    // close(而非 exit)收尾:close 在 stdio 流完全关闭后触发,err 缓冲
-    // 保证完整(exit 可能在 stderr 管道数据尚未 flush 时触发)。
-    // writeFileSync 在 dispose 里同步落盘,close 后立即可读。
+    // Finish on close (not exit): close fires after the stdio streams fully
+    // close, guaranteeing a complete err buffer (exit may fire before stderr
+    // pipe data is flushed). writeFileSync lands synchronously inside dispose,
+    // so the sentinel is readable right after close.
     child.on("close", (code) => {
       clearTimeout(guard);
       finish({
@@ -245,11 +263,12 @@ function runSignalChild(
 }
 
 /**
- * 无 wrapper 不变量:脚本进程必须就是 spawn 出来的那个进程。
- * 若回退成 `node <tsx/dist/cli.mjs> -e`,tsx CLI 会再 spawn 一层脚本进程,
- * 父进程的 kill 只打到 wrapper,脚本进程被 30ms relay 升级 SIGKILL 打断
- * → 哨兵随负载随机丢失。此处 fail-fast 把这条拓扑约束钉在测试里,避免
- * 日后改回去又变成偶发红。
+ * No-wrapper invariant: the script process must be the spawned process itself.
+ * If this regressed to `node <tsx/dist/cli.mjs> -e`, the tsx CLI would spawn
+ * another script layer, the parent's kill would only hit the wrapper, and the
+ * script would be SIGKILL'd by the 30ms relay → sentinels randomly lost under
+ * load. This fail-fast pins the topology constraint in the test so a future
+ * revert cannot flake.
  */
 function expectNoWrapper(r: {
   selfPid: number | null;
@@ -273,13 +292,14 @@ describe("registerShutdown (#365 T5)", () => {
   beforeEach(() => {
     cleanupSignalListeners();
     sentinelDir = mkdtempSync(join(tmpdir(), "reg-shut-"));
-    // fork 内 emit-based 测试用桩 process.kill 避免 re-kill 真投递 SIGINT
-    // 回投到 vitest worker;二次 emit 会触发 reKilled 守门 process.exit(130),
-    // 同样被 vitest 拦截报 unhandled rejection → 一并桩成 no-op。真实信号
-    // 退出码(130/143)只走下方 child spawn case 验证。
+    // The in-fork emit tests stub process.kill so the re-kill does not deliver
+    // a real SIGINT back into the vitest worker; the second emit triggers the
+    // reKilled guard's process.exit(130), which vitest would report as an
+    // unhandled rejection → stub that too. Real signal exit codes (130/143)
+    // are only verified via the child spawn cases below.
     vi.spyOn(process, "kill").mockImplementation(() => true);
     vi.spyOn(process, "exit").mockImplementation(() => {
-      // no-op:拦截 reKilled 守门的强杀路径,避免污染 vitest worker。
+      // no-op: intercept the reKilled guard's forced-exit path so it cannot pollute the vitest worker.
     });
   });
 
@@ -301,15 +321,17 @@ describe("registerShutdown (#365 T5)", () => {
 
     const { dispose } = registerShutdown(built);
 
-    // fork 内 process.emit 只同步跑 listener,re-kill 被 process.kill 桩
-    // 截掉。真实信号语义走下方 child spawn case。
+    // Inside the fork, process.emit only runs listeners synchronously and the
+    // re-kill is cut off by the process.kill stub. Real signal semantics go
+    // through the child spawn cases below.
     process.emit("SIGINT");
-    // dispose().finally(...) 是微任务链,setImmediate 排空后断言。
+    // dispose().finally(...) is a microtask chain; assert after setImmediate drains.
     await new Promise((r) => setImmediate(r));
     expect(callCount).toBe(1);
 
-    // shuttingDown 单一守卫:首个 dispose 已消费,后续 dispose(信号 / 主动)
-    // 均 no-op → 计数保持 1(幂等,实测校准:ticket 原预期 2 与实际不符)。
+    // The shuttingDown single guard: the first dispose consumed it, every later
+    // dispose (signal or manual) is a no-op → count stays 1 (idempotent;
+    // measured — the original expectation of one call per signal was wrong).
     process.emit("SIGINT");
     await new Promise((r) => setImmediate(r));
     expect(callCount).toBe(1);
@@ -325,7 +347,7 @@ describe("registerShutdown (#365 T5)", () => {
     const built: BuiltEngine = {
       deps: {} as unknown as LoopEngineDeps,
       engine: createLoopEngine({} as unknown as LoopEngineDeps),
-      // shutdown 字段缺席(#356 T6 契约:ask surface manager 未创建 → 缺席)。
+      // shutdown field absent (contract: on the ask surface the manager was never created → absent).
     };
 
     const { dispose } = registerShutdown(built);
@@ -349,21 +371,21 @@ describe("registerShutdown (#365 T5)", () => {
 
     registerShutdown(built);
 
-    // 三类信号都挂了监听(接线覆盖:each 1 listener)。
+    // Listeners attached for all three signal kinds (wiring coverage: 1 listener each).
     expect(process.listenerCount("SIGINT")).toBe(1);
     expect(process.listenerCount("SIGTERM")).toBe(1);
     expect(process.listenerCount("beforeExit")).toBe(1);
 
-    // 顺序 emit 三类信号,每类信号都走到 dispose 路径。shuttingDown 单一
-    // 守卫 → 首个 dispose 执行 shutdown 一次,后续信号 no-op(实测校准:
-    // counter === 1,不是 ticket 预期的每信号各 1 次)。
+    // Emit all three signal kinds in order; each reaches the dispose path. The
+    // shuttingDown single guard → the first dispose runs shutdown once, later
+    // signals are no-op (measured: counter === 1, not one per signal).
     for (const sig of SIGNALS) {
       process.emit(sig);
       await new Promise((r) => setImmediate(r));
     }
     expect(callCount).toBe(1);
 
-    // beforeExit 监听是 once → emit 消费后计数归零;SIGINT/SIGTERM 常驻。
+    // The beforeExit listener is once → its count drops to 0 after one emit; SIGINT/SIGTERM stay resident.
     expect(process.listenerCount("beforeExit")).toBe(0);
     expect(process.listenerCount("SIGINT")).toBe(1);
     expect(process.listenerCount("SIGTERM")).toBe(1);
@@ -371,7 +393,7 @@ describe("registerShutdown (#365 T5)", () => {
 
   it("参数放宽(Gap B):TUI 入口只透 shutdown 句柄也能注册", async () => {
     let callCount = 0;
-    // 与 src/tui/run.tsx 同形:不传 deps / engine / subagentManager。
+    // Same shape as src/tui/run.tsx: no deps / engine / subagentManager passed.
     const { dispose } = registerShutdown({
       shutdown: async () => {
         callCount += 1;
@@ -386,10 +408,11 @@ describe("registerShutdown (#365 T5)", () => {
   });
 
   it("真实 SIGINT 投递:dispose 完成后二次强杀语义 → 进程以 130 退出(不挂死)", async () => {
-    // 真实子进程 + child.kill('SIGINT') —— process.emit 只同步跑 listener,
-    // 掩盖 DRIFT-1 的 re-kill 死循环(旧实现 node/bun 真实 SIGINT 挂死)。
-    // 单次 SIGINT:首次信号入口置 reKilled → dispose() → setImmediate
-    // 重发一次 → 二次信号落地 reKilled 守门 → process.exit(130)。
+    // Real child + child.kill('SIGINT') — process.emit only runs listeners
+    // synchronously and would mask the re-kill loop (the old implementation
+    // hung on real SIGINT under node/bun). Single SIGINT: first signal sets
+    // reKilled → dispose() → setImmediate re-issues once → the second delivery
+    // hits the reKilled guard → process.exit(130).
     const r = await runSignalChild(
       "const _shutdown = async () => { writeFileSync(process.env.SIG_SENTINEL, 'ran') }",
       "SIGINT",

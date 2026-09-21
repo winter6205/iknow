@@ -2,19 +2,23 @@
 /**
  * tests/tui/history-rerender-cost.test.tsx
  *
- * 「聊几轮之后 TUI 变卡」的回归闸（诊断证据见 scripts/tui-perf-probe.tsx）。
+ * Regression gate for "the TUI gets laggy after a few turns" (diagnostic
+ * evidence in scripts/tui-perf-probe.tsx).
  *
- * 症状：一次流式增量 / 一次与 ChatView props 无关的父状态更新，都会把
- * **全部已挂载历史消息** 重新走一遍 markdown 渲染 —— 24 轮历史下单次更新
- * 触发约 96 次 `marked.lexer`，成本 O(历史体量)。
+ * Symptom: one streaming delta / one parent-state update unrelated to ChatView
+ * props re-runs markdown rendering over **all mounted history messages** — with
+ * 24 turns of history a single update fires ~96 `marked.lexer` calls, cost
+ * O(history size).
  *
- * 本文件的断言口径（唯一 instrumentation）：patch `marked.lexer` 统计调用，
- * 并按 src 文本区分「历史消息正文」与「流式草稿」。历史正文的 lexer 调用数
- * 就是「有多少历史消息被重新解析」，与视口挂载条数无关，故对
- * `selectViewportMountWindow` 的切片策略免疫。
+ * Assertion metric here (the only instrumentation): patch `marked.lexer` to
+ * count calls, distinguishing "history message bodies" from "streaming draft"
+ * by src text. The lexer-call count on history bodies equals "how many history
+ * messages got re-parsed", independent of how many rows the viewport mounts, so
+ * it is immune to `selectViewportMountWindow`'s slicing strategy.
  *
- * 异步等待纪律沿用 chat-view-scroll.test.tsx：`waitForVisualIdle()` 是唯一
- * 异步等待入口，React 状态更新一律 act 包裹。
+ * Async-wait discipline follows chat-view-scroll.test.tsx:
+ * `waitForVisualIdle()` is the only async wait entry; React state updates are
+ * always wrapped in act.
  */
 import { afterAll, expect, test } from "bun:test";
 import { act, useEffect, useMemo, useState } from "react";
@@ -35,14 +39,16 @@ const COLS = 120;
 const ROWS = 40;
 const TURNS = 24;
 
-// ── marked.lexer 计数（历史正文 vs 其它文本分开计）────────────────────
+// ── marked.lexer counting (history bodies vs other text, counted separately) ──
 //
-// 历史正文用本文件专属后缀，避免与同进程其它测试文件共用 markdown 缓存时
-// 相互污染计数。
+// History bodies carry a suffix unique to this file so that sharing the module
+// markdown cache with other test files in the same process can't cross-pollute
+// the counts.
 
 const HISTORY_TAG = "history-rerender-cost";
-/** 每个用例一份专属正文：markdown 解析缓存是模块级的，共用正文会让「首次
- *  挂载必须真的解析过历史」的空转守卫被上一个用例的缓存命中打掉。 */
+/** One dedicated body per case: the markdown parse cache is module-level, so a
+ *  shared body would let a previous case's cache hit defeat the "first mount
+ *  must really parse the history" no-op guard. */
 const historyTexts = new Set<string>();
 let historyLexCalls = 0;
 let totalLexCalls = 0;
@@ -70,7 +76,7 @@ function resetLexCounters(): void {
   totalLexCalls = 0;
 }
 
-// ── 会话构造：一轮 = user 提问 + assistant（thinking + 工具 + markdown）+ tool_result ──
+// ── session construction: one turn = user ask + assistant (thinking + tool + markdown) + tool_result ──
 
 function assistantBody(nonce: string, turn: number): string {
   return `这是第 ${turn} 轮的结论（${HISTORY_TAG} / ${nonce}）。
@@ -160,14 +166,14 @@ function sessionWithTurns(nonce: string, turns: number): TuiSessionState {
   return attachSession(file);
 }
 
-// ── harness：模拟「只有流式草稿在变」与「只有无关父状态在变」两种更新 ──
+// ── harness: simulates the two update kinds — "only the streaming draft changes" and "only unrelated parent state changes" ──
 
 interface HarnessApi {
-  /** 流式增量：改 draftSegments（ChatView 唯一变化的 prop）。 */
+  /** Streaming delta: changes draftSegments (the only ChatView prop that varies). */
   setDraft(text: string): void;
-  /** 输入框按键 / 1Hz tick：只改与 ChatView props 无关的父状态。 */
+  /** Input keystrokes / 1Hz tick: changes only parent state unrelated to ChatView props. */
   bumpUnrelated(): void;
-  /** 终端 resize：改 cols（历史消息必然重渲染，memo 拦不住）。 */
+  /** Terminal resize: changes cols (history messages must re-render; memo can't stop it). */
   setCols(cols: number): void;
 }
 
@@ -178,8 +184,9 @@ function Harness(props: {
   const [draft, setDraft] = useState("");
   const [, setUnrelated] = useState(0);
   const [cols, setCols] = useState(COLS);
-  // app.tsx 侧 draftSegments 是 state（引用稳定）；harness 同样稳定，否则
-  // useDeferredValue 每次父渲染都多跑一遍，污染 parent 模式计数。
+  // In app.tsx draftSegments is state (stable reference); the harness must stay
+  // equally stable, otherwise useDeferredValue re-runs on every parent render
+  // and pollutes the parent-mode counts.
   const segments = useMemo(() => (draft === "" ? [] : [draft]), [draft]);
   useEffect(() => {
     props.register({
@@ -222,10 +229,10 @@ async function mountChat(nonce: string): Promise<{
 test("流式增量：24 轮历史挂载后，已挂载历史消息不再重跑 markdown lexer", async () => {
   resetLexCounters();
   const { setup, api } = await mountChat("stream");
-  // 首次挂载必须真的解析过历史，否则本用例为空转。
+  // First mount must really parse the history, else this case spins vacuously.
   expect(historyLexCalls).toBeGreaterThan(0);
 
-  // 预热一次增量，让 itemHeights 量测收敛后再计数。
+  // Warm up with one delta so itemHeights measurement converges before counting.
   await act(async () => {
     api.setDraft("流式草稿第一段。");
   });
@@ -267,8 +274,9 @@ test("终端 resize（cols 变化）：历史消息重新排版，但正文不�
   const { setup, api } = await mountChat("resize");
   expect(historyLexCalls).toBeGreaterThan(0);
 
-  // resize 让每条历史消息的 cols prop 都变化 —— memo 必然失效，只有按 text
-  // 记忆的解析结果能挡住重解析（markdown 解析与宽度无关，换行由渲染层做）。
+  // Resize changes the cols prop of every history message — memo is guaranteed
+  // to miss; only text-keyed parse results can block re-parsing (markdown
+  // parsing is width-independent; wrapping happens in the render layer).
   resetLexCounters();
   await act(async () => {
     api.setCols(COLS - 20);
@@ -285,8 +293,9 @@ test("历史消息重新挂载（滚出视口再滚回）：同一段正文不�
   expect(historyLexCalls).toBeGreaterThan(0);
   await first.setup.renderer.destroy();
 
-  // 视口挂载会把滚出去的消息整棵卸载，回滚时组件重新 mount —— 组件内的
-  // useMemo 记忆随之丢失，只有跨实例的解析缓存能挡住重解析。
+  // Viewport mounting unmounts scrolled-out messages wholesale and remounts
+  // them on scroll-back — per-component useMemo memory is lost, so only a
+  // cross-instance parse cache can block re-parsing.
   resetLexCounters();
   const second = await mountChat("remount");
 

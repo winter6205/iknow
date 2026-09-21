@@ -2,23 +2,27 @@
 /**
  * tests/tui/error-stop-notice.test.tsx
  *
- * Bug（2026-09-07）：模型 429/网络类故障走 loop-engine 的静默路径 ——
- * TransportRetryExhaustedError 被压平成 stopReason:"protocolError" 的正常
- * RunResult（loop-engine.ts modelStop），finalText 为空，TUI runTurnOnce 的
- * notice 分支只覆盖 throw 路径与 cancelled → 一轮静默结束，UI 毫无反馈。
+ * Regression: 429/network-class model failures used to take loop-engine's
+ * silent path — TransportRetryExhaustedError was flattened into a normal
+ * RunResult with stopReason:"protocolError" (loop-engine.ts modelStop), empty
+ * finalText, and runTurnOnce's notice branch only covered the throw path and
+ * cancelled → the turn ended silently with zero UI feedback.
  *
- * 修复：非 completed / 非 cancelled / 非 maxTurns 的异常 stopReason 落
- * notice（复用 cancelled 同一渲染面）。maxTurns 已有专属完成反馈（验证行
- * 「验证通过（N 轮）」），不并入本映射。
+ * Fix: any stopReason that is not completed / cancelled / maxTurns renders a
+ * notice (reusing the cancelled render path). maxTurns has its own completion
+ * feedback (`验证通过（N 轮）` — "verification passed (N turns)") and stays out
+ * of this mapping.
  *
- * ADR-0094 SC4-SC5: transport 失败时 bridge 透传 apiError;protocolError +
- * apiError 走专用文案「API error (status): message」,让网关侧信息可见。
- * sibling 用例:protocolError 无 apiError → 仍保留旧「turn 未成功结束」文案,
- * 表明升级是分支化的、不替换通用文案。
+ * ADR-0094: on transport failure the bridge passes apiError through;
+ * protocolError + apiError uses the dedicated text
+ * "API error (status): message" so gateway-side detail is visible.
+ * The sibling case (protocolError without apiError) keeps the old
+ * `turn 未成功结束` ("turn did not end successfully") text —
+ * the upgrade is branched, not a replacement of the generic message.
  *
- * 测法与 interrupt-notice.test.tsx 同模式：fake bridge 注入已解析的
- * TuiPostResult，只钉 app 层 notice 映射；wire 产生与透传分别在 hub /
- * hub-bridge 层钉死。
+ * Same test shape as interrupt-notice.test.tsx: a fake bridge injects a
+ * resolved TuiPostResult, pinning only the app-layer notice mapping; wire
+ * generation and pass-through are pinned at the hub / hub-bridge layers.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -51,9 +55,9 @@ async function untilFrame(
 
 interface FakeBridgeOptions {
   readonly stopReason: TuiPostResult["stopReason"];
-  /** ADR-0094 SC4-SC5: 模拟 transport 失败摘要;undefined = 走原通用文案。 */
+  /** ADR-0094: simulated transport-failure summary; undefined = old generic text. */
   readonly apiError?: { readonly status?: number; readonly message: string };
-  /** 4xx 非瞬态失败走 run() reject 抛到这里(ADR-0094 实测补刀);设了就 reject。 */
+  /** 4xx non-transient failures reject from run() into here (ADR-0094); set it and it rejects. */
   readonly throwLike?: unknown;
 }
 
@@ -188,7 +192,7 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     await app.typeText("go");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("连接或模型"), 8000);
-    // 正常完成文案不得误现。
+    // Normal-completion text must not leak in.
     expect(app.setup.captureCharFrame()).not.toContain("验证通过");
 
     await new Promise((r) => setTimeout(r, 500));
@@ -197,9 +201,9 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     await app.destroy();
   }, 30_000);
 
-  // ADR-0094 SC4-SC5: protocolError + apiError → 专用文案「API error
-  // (status): message」。sibling 上面的 protocolError(无 apiError) 仍走
-  // 旧「turn 未成功结束」通用文案 → 升级是分支化的、不替换通用文案。
+  // ADR-0094: protocolError + apiError → dedicated "API error (status): message"
+  // text. The sibling protocolError (no apiError) above still uses the old
+  // generic `turn 未成功结束` text → the upgrade is branched, not a replacement.
   test("protocolError + apiError → 专用 API error 文案（gateway 摘要可见）", async () => {
     const app = await mount({
       stopReason: "protocolError",
@@ -217,7 +221,7 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
       (f) => f.includes("API error (404): No active credentials"),
       8000
     );
-    // 旧通用文案不得误现(避免 API error 分支被通用文案吞掉)。
+    // Old generic text must not leak in (the API-error branch must not be swallowed by it).
     expect(app.setup.captureCharFrame()).not.toContain("连接或模型");
 
     await new Promise((r) => setTimeout(r, 500));
@@ -226,7 +230,7 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     await app.destroy();
   }, 30_000);
 
-  // ADR-0094 SC4-SC5: apiError 无 status 时不带前缀括号,落到 "API error: msg"。
+  // ADR-0094: when apiError has no status, omit the parenthesized prefix → "API error: msg".
   test("protocolError + apiError (no status) → API error: message 文案", async () => {
     const app = await mount({
       stopReason: "protocolError",
@@ -254,8 +258,9 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
 
     await app.typeText("go");
     await app.pressEnter();
-    // fake bridge 无 verify DTO → 无「验证通过」banner；等 turn 收尾
-    // (notice 渲染面稳定)后断言异常文案不出现。
+    // fake bridge has no verify DTO → no `验证通过` ("verification passed") banner;
+    // wait for the turn to settle (notice render surface stable), then assert the
+    // error text is absent.
     await new Promise((r) => setTimeout(r, 1500));
     await app.setup.renderOnce();
     expect(app.setup.captureCharFrame()).not.toContain("连接或模型");
@@ -266,10 +271,12 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     await app.destroy();
   }, 30_000);
 
-  // ADR-0094 实测补刀: 4xx 非瞬态供应商失败不包 TransportRetryExhausted,
-  // 从 run() reject 直达 app 层 catch。SDK APIError 形状({status, message,
-  // error:{error:{message}}}) → catch 侧 summarizeTransportCause 提炼,
-  // 同样落「API error (status): 原文」文案,而不是「turn 失败:[object Object]」。
+  // ADR-0094: 4xx non-transient provider failures are not wrapped in
+  // TransportRetryExhausted — they reject straight from run() into the app-layer
+  // catch. SDK APIError shape ({status, message, error:{error:{message}}}) is
+  // distilled by summarizeTransportCause on the catch side, landing on the same
+  // `API error (status): <original>` text instead of
+  // `turn 失败:[object Object]` ("turn failed: [object Object]").
   test("throw 路径 (4xx APIError shape) → API error 文案（服务商原文可见）", async () => {
     const app = await mount({
       stopReason: "completed",
@@ -294,7 +301,7 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
       (f) => f.includes("API error (404): No active credentials"),
       8000
     );
-    // throw 路径旧文案不得误现。
+    // Old throw-path text must not leak in.
     expect(app.setup.captureCharFrame()).not.toContain("turn 失败");
 
     await new Promise((r) => setTimeout(r, 500));
@@ -303,11 +310,13 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     await app.destroy();
   }, 30_000);
 
-  // repair (code-review Spec Low): hub 本地校验错误（ValidationError 无
-  // status）不冒充 API error —— 只有带 HTTP status 的提炼结果才置 apiError
-  // 并走 API error 文案；无 status → apiError 不置位 → notice 分支落回既有
-  // 「turn 未成功结束」通用文案（catch 侧「turn 失败」为过渡帧，最终被通用
-  // notice 覆盖，与 pre-ADR-0094 throw 路径 durable 行为一致）。
+  // Hub-local validation errors (ValidationError without status) must not
+  // impersonate an API error — only distilled results carrying an HTTP status
+  // set apiError and take the API-error text; no status → apiError unset → the
+  // notice branch falls back to the generic `turn 未成功结束` ("turn did not end
+  // successfully") text (the catch-side `turn 失败` / "turn failed" is a
+  // transitional frame, ultimately replaced by the generic notice — same durable
+  // behavior as the pre-ADR-0094 throw path).
   test("throw 路径 (无 status 的本地 Error) → 通用 turn 未成功文案，不冒充 API error", async () => {
     const app = await mount({
       stopReason: "completed",

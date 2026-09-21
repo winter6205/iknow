@@ -1,5 +1,5 @@
 /**
- * `startTraceServe` HTTP integration tests (spec #183 R1 + v2 目录语义).
+ * `startTraceServe` HTTP integration tests (v2 directory semantics).
  *
  * Boots the standalone trace inspection server on 127.0.0.1:0 (ephemeral),
  * exercises the endpoints with fetch, and asserts wire shape:
@@ -71,8 +71,9 @@ afterEach(async () => {
 // -- helpers ------------------------------------------------------------------
 
 /**
- * 写一个单会话 trace 目录 (v2 每会话一文件): `<dir>/c1.jsonl` 含 2 好行 + 2 坏行。
- * 缺省 /api/v1/traces 路由到唯一会话。
+ * Write a single-session trace directory (v2: one file per session):
+ * `<dir>/c1.jsonl` with 2 good lines + 2 bad lines.
+ * The default /api/v1/traces routes to the only session.
  */
 function writeSampleTraceDir(dir: string): void {
   const lines: string[] = [
@@ -189,8 +190,7 @@ describe("startTraceServe — GET /api/v1/traces", () => {
   // End-to-end regression for review finding: `--max-bytes` must reach the
   // JSONL reader (not be silently dropped at the serve layer). With a 200-byte
   // cap and a session file whose lines are ~90 bytes, the response must report
-  // truncated=true and drop at least one record. maxBytes 作用于按会话文件
-  // (SC-R 16)。
+  // truncated=true and drop at least one record. maxBytes applies per session file.
   it("honors maxBytes (truncates + drops records past the cap)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-mb-"));
     tmpDirs.push(tmp);

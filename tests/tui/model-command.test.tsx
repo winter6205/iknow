@@ -2,16 +2,19 @@
 /**
  * tests/tui/model-command.test.tsx
  *
- * /model 命令的 TuiApp 端到端（specs/tui-model-command.md SC8 / SC10 / SC11）：
- *  - 注册表非空 → /model 打开面板，↑↓ 移焦点，Enter 选定 → onPersistModel 收到
- *    `{ model: "<provider>/<model>" }`（spec SC5 持久化契约）且面板关闭；
- *  - 注册表空 / 缺省 → notice 含「未配置 providers」，面板不打开；
- *  - Esc → 只关闭，不触发 onPersistModel（无 cancel 语义，焦点移动不产生 staged
- *    状态，故既非保存退出也非放弃修改）；
- *  - /info 输出 `Model: <当前 model 串>`（SC11）。
+ * TuiApp end-to-end for the /model command:
+ *  - non-empty registry → /model opens the picker, ↑↓ move focus, Enter selects
+ *    → onPersistModel receives `{ model: "<provider>/<model>" }` (persistence
+ *    contract) and the picker closes;
+ *  - empty / absent registry → notice contains 「未配置 providers」 ("no
+ *    providers configured"), picker stays shut;
+ *  - Esc → close only, no onPersistModel (no cancel semantics: focus moves
+ *    stage nothing, so Esc is neither "save and quit" nor "discard");
+ *  - /info prints `Model: <current model string>`.
  *
- * 用真实 bridge/hub + stub deps（makeDeps）+ 真实 TUI 渲染器：slash 路径必须
- * 经真实按键投递验证（纯函数测试覆盖不到 app 层键路由）。
+ * Real bridge/hub + stub deps (makeDeps) + real TUI renderer: the slash path
+ * must be verified through real key delivery (pure-function tests cannot
+ * cover app-level key routing).
  */
 import { describe, expect, test } from "bun:test";
 import { act } from "react";
@@ -83,10 +86,11 @@ interface Mounted {
   readonly bridge: TuiBridge;
   readonly setup: TestRendererSetup;
   readonly destroy: () => void;
-  /** 宿主 env 派生显示快照的发布口（run.tsx onEnvChange 的等价物）。 */
+  /** Publish point for the host-env-derived display snapshot (equivalent of run.tsx onEnvChange). */
   readonly store: ReturnType<typeof createEnvDisplayStore>;
-  /** 模拟宿主 env reload：只 publish，**不**重渲染 React 树（#1021 的核心
-   *  回归钉 —— 旧接线正是靠重渲染整树把新 model 传下去的）。 */
+  /** Simulate host env reload: publish only, do **not** rerender the React tree —
+   *  the core regression pin (old wiring propagated the new model precisely by
+   *  rerendering the whole tree). */
   readonly publish: (seed: EnvDisplaySeed) => Promise<void>;
   readonly typeText: (text: string) => Promise<void>;
   readonly pressEnter: () => Promise<void>;
@@ -98,12 +102,12 @@ interface Mounted {
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
-/** thinking 基线：off + 无档位（与旧 `props.defaultThinking` 缺省同形）。 */
+/** thinking baseline: off + no tier (same shape as the old absent `props.defaultThinking`). */
 const BASELINE_OFF: DefaultThinkingShape = { mode: "off", effort: "" };
 
 async function mountAsync(opts: {
   readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
-  /** envDisplay 初始快照（等价旧 `model` / `defaultThinking` prop）。 */
+  /** initial envDisplay snapshot (replaces the old `model` / `defaultThinking` props). */
   readonly env?: EnvDisplaySeed;
   readonly onPersistModel?: TuiAppProps["onPersistModel"];
 }): Promise<Mounted> {
@@ -229,14 +233,16 @@ async function until(
   }
 }
 
-/** 抹掉 pty 光标渲染块（U+2588）。光标闪烁与 env publish 无关，逐行 diff 前
- *  必须中和它，否则会造出与本次变更无关的「变化行」。 */
+/** Erase the pty cursor block (U+2588). Cursor blink is unrelated to env
+ *  publish and must be neutralized before per-line diffing, otherwise it
+ *  manufactures "changed lines" that have nothing to do with the change. */
 function stripCursor(frame: string): string {
   return frame.replaceAll("█", " ");
 }
 
-/** 两帧间**发生变化的行**（按行下标配对；长度不等 → 全部视为变化）。
- *  captureCharFrame 只取字符面（不含颜色），脉动色不会制造假差异。 */
+/** Lines that **changed** between two frames (paired by row index; unequal
+ *  length → all treated as changed). captureCharFrame yields the char plane
+ *  only (no color), so pulsing colors create no false diffs. */
 function diffLines(before: string, after: string): ReadonlyArray<string> {
   const a = before.split("\n");
   const b = after.split("\n");
@@ -297,8 +303,9 @@ describe("modelDisplayName（状态栏显示名投影）", () => {
 });
 
 /**
- * reducer → applyModelPickerKey 的宿主链路（与 app.tsx 的 onMove/onSelect 接线
- * 同形）：焦点下标只由 reducer 的 move 结果驱动，Enter 提交的正是该下标。
+ * Host wiring from reducer → applyModelPickerKey (same shape as app.tsx's
+ * onMove/onSelect): the focus index is driven only by the reducer's move
+ * result, and Enter commits exactly that index.
  */
 function driveKeys(
   entries: ReadonlyArray<ModelPickerEntry>,
@@ -331,7 +338,7 @@ describe("applyModelPickerKey 的 fix 落地（宿主提交面）", () => {
   test("13 条注册表：一路 ↓ 到底后 Enter 提交的是**可见**条目（不是隐藏的第 13 项）", () => {
     const entries: ModelPickerEntry[] = [];
     for (let i = 0; i < 13; i++) entries.push(entry("prov", `model-${i}`));
-    // 渲染只出前 12 项；若 clamp 到 entryCount-1，Enter 会提交 model-12。
+    // only the first 12 entries render; clamping to entryCount-1 would make Enter commit model-12.
     const { selected, closed } = driveKeys(entries, [
       ...Array.from({ length: 20 }, () => ({ downArrow: true })),
       { return: true },
@@ -392,13 +399,13 @@ describe("/model 端到端（真实键盘投递）", () => {
       "picker-open"
     );
     expect(opened).toContain("volcengine-ark/deepseek-v3-250324");
-    // 焦点 seed 到当前 model（第 0 项）：游标落在该行。
+    // focus seeded on the current model (entry 0): cursor lands on that line.
     const focusedLine = opened
       .split("\n")
       .find((l) => l.includes("minimax-cn/MiniMax-M3"));
     expect(focusedLine).toContain("▸ ");
 
-    // ↓ ↓ → 第 2 项（volcengine-ark/deepseek-v3-250324）。
+    // ↓ ↓ → entry 2 (volcengine-ark/deepseek-v3-250324).
     await app.pressArrow("down");
     await app.pressArrow("down");
     const moved = await untilFrame(
@@ -416,9 +423,9 @@ describe("/model 端到端（真实键盘投递）", () => {
 
     await app.pressEnter();
     await until(() => calls.length === 1, 8000, "persist-called");
-    // spec SC5：持久化 patch = 选中的路由 ID。
+    // persistence patch = the selected routing ID.
     expect(calls[0]).toEqual({ model: "volcengine-ark/deepseek-v3-250324" });
-    // 面板关闭（选定动作完成，写回是后台行为）。
+    // picker closed (selection is done; write-back is a background action).
     await untilFrame(
       app.setup,
       (f) => !f.includes("模型选择中"),
@@ -458,7 +465,7 @@ describe("/model 端到端（真实键盘投递）", () => {
       8000,
       "picker-closed"
     );
-    // 写回未被触发（Esc 不是保存路径）。
+    // write-back not triggered (Esc is not a save path).
     await sleep(300);
     expect(calls).toEqual([]);
 
@@ -477,7 +484,7 @@ describe("/model 端到端（真实键盘投递）", () => {
       8000,
       "notice"
     );
-    // 面板未打开：无键位提示、无标题行。
+    // picker not opened: no key hint, no title line.
     expect(frame).not.toContain("[Enter] 切换");
     expect(frame).not.toContain("模型选择中");
 
@@ -615,7 +622,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
       providers: PROVIDERS,
       env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
     });
-    // 等状态栏渲染出显示名（ContextBar 在 prompt 之下第一行）。
+    // wait until the status bar shows the display name (ContextBar is the first line below the prompt).
     const frame = await untilFrame(
       app.setup,
       (f) => f.includes("MiniMax M3") && f.includes("ctx"),
@@ -625,7 +632,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
     const bar = frame
       .split("\n")
       .find((l) => l.includes("ctx") && l.includes("MiniMax M3"));
-    // 状态栏里出现的应是 name，不是路由串（/info 的 Model 行未打开）。
+    // the status bar should show name, not the routing string (/info's Model line is not open).
     expect(bar).toBeDefined();
     expect(bar).not.toContain("minimax-cn/MiniMax-M3");
 
@@ -675,8 +682,9 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
       "contextbar-before-reload"
     );
 
-    // 模拟宿主 env reload（run.tsx onEnvChange 接线）：只 publish 新快照，
-    // **不**重渲染 React 树 —— 订阅方（ContextBar）自行重投影为新路由的 name。
+    // simulate host env reload (run.tsx onEnvChange wiring): publish the new
+    // snapshot only, do **not** rerender the React tree — subscribers
+    // (ContextBar) re-project the new routing's name themselves.
     await app.publish({
       model: "volcengine-ark/deepseek-v3-250324",
       defaultThinking: BASELINE_OFF,
@@ -687,18 +695,20 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
       8000,
       "contextbar-after-reload"
     );
-    // 旧 name 不再出现在状态栏行上（同帧 picker 未开，无其他来源）。
+    // the old name no longer appears on the status-bar line (picker closed in the same frame, no other source).
     expect(
       reloaded
         .split("\n")
         .find((l) => l.includes("ctx") && l.includes("DeepSeek V3"))
     ).not.toContain("MiniMax M3");
 
-    // #1021 (c)：model 切换只允许影响「显示模型名的那一行」—— 逐行 diff，
-    // 其余行必须逐字节不变。走到全树重绘（React 树 remount / 消息区重算）时
-    // 这里会先失败，是「没有用户可见闪烁」最直接的回归钉（比较前抹掉输入框
-    // 光标列：光标闪烁与本次 publish 无关，且 captureCharFrame 不含颜色面，
-    // 无法把它从字符里区分出来）。
+    // a model switch may only affect "the line that displays the model name"
+    // — per-line diff, every other line must stay byte-identical. If the
+    // change ever triggers a full-tree redraw (React remount / message-area
+    // recompute), this fails first; it is the most direct regression pin for
+    // "no user-visible flicker" (the input caret column is stripped before
+    // comparing: caret blink is unrelated to this publish and
+    // captureCharFrame's char plane cannot distinguish it).
     const changedLines = diffLines(stripCursor(before), stripCursor(reloaded));
     expect(changedLines).toHaveLength(1);
     expect(changedLines[0]).toContain("DeepSeek V3");
@@ -713,7 +723,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
     });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 基线 off → /thinking 面板 Esc 提交 ON（用户手改，effort 未碰）。
+    // baseline off → /thinking picker Esc commits ON (user hand-set; effort untouched).
     await app.typeText("/thinking");
     await app.pressEnter();
     await untilFrame(
@@ -731,7 +741,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
       "picker-saved"
     );
 
-    // 只换模型的 env 快照：thinking 基线仍为 off，但用户已手改为 ON。
+    // env snapshot that changes only the model: thinking baseline stays off, but the user hand-set ON.
     await app.publish({
       model: "volcengine-ark/deepseek-v3-250324",
       defaultThinking: BASELINE_OFF,
@@ -745,13 +755,14 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
       8000,
       "info-after-model-publish"
     );
-    // (a) 手改的 thinking 覆盖存活（旧实现会被基线 off 拽回去）。
+    // (a) the hand-set thinking override survives (old implementation would snap back to baseline off).
     expect(frame).toContain("thinking: adaptive (auto)");
-    // 模型本身确实跟着新快照走了。
+    // the model itself did follow the new snapshot.
     expect(frame).toContain("Model: volcengine-ark/deepseek-v3-250324");
 
-    // (b) 未碰过的 effort 字段仍跟随基线变化：新基线 adaptive/high →
-    // thinking 已被用户占住，effort 无覆盖 → 取新值 high。
+    // (b) the untouched effort field still follows baseline changes: new
+    // baseline adaptive/high → thinking is held by the user, effort has no
+    // override → takes the new value high.
     await app.publish({
       model: "volcengine-ark/deepseek-v3-250324",
       defaultThinking: { mode: "adaptive", effort: "high" },

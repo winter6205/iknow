@@ -1,18 +1,18 @@
 /**
- * T2: EnvLoader 工厂 + 热更新集成。
+ * EnvLoader factory + hot-reload integration.
  *
- * 覆盖（plans/settings-hot-reload.md T2 验收，≥6 用例）：
- *  1. get() 首次 lazy load；再次 get() 返回同一引用（缓存命中）。
- *  2. reload() 强制重读返回新引用。
- *  3. watch 触发后 subscriber 自动收到新 env。
- *  4. reload 抛错（坏 JSON）→ 缓存不变 + onError 注册收到错。
- *  5. stop() 后 watch 不再触发 + subscribe 的回调不被调用。
- *  6. createEnvLoader 多次实例化互不干扰。
+ * Covers:
+ *  1. get() lazy-loads on first call; a second get() returns the same reference (cache hit).
+ *  2. reload() forces a re-read and returns a new reference.
+ *  3. after a watch fires, subscribers automatically receive the new env.
+ *  4. reload throws (bad JSON) → cache unchanged + onError handlers get the error.
+ *  5. after stop(), watch no longer fires + subscriber callbacks are not invoked.
+ *  6. multiple createEnvLoader instances do not interfere.
  *
- * 纪律：
- *  - 隔离 home / cwd（tmp 目录注入），不碰真实 ~/.iknow；
- *  - 每个用例结束显式 stop() + rmSync（watcher 句柄 + tmp 清理）；
- *  - 测试框架 vitest（与 tests/config 既有测试一致；bun 亦可跑）。
+ * Discipline:
+ *  - isolated home / cwd (tmp dirs injected); never touches the real ~/.iknow;
+ *  - each case ends with an explicit stop() + rmSync (watcher handles + tmp cleanup);
+ *  - vitest, consistent with the other tests/config suites.
  */
 import { describe, expect, test } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -27,8 +27,9 @@ import {
 } from "../_helpers/test-llm-settings.ts";
 
 const TEST_TIMEOUT_MS = 3000;
-/** 等待 watcher 事件送达的稳定窗口。必须 ≥ 750ms（reviewer minor）：主通道
- *  fs.watch 偶发慢时需靠 watchFile 轮询（interval=500ms）冗余兜底。 */
+/** Stable window for watcher events to arrive. Must be ≥ 750ms: fs.watch (the
+ *  primary channel) is occasionally slow and the watchFile poll (interval=500ms)
+ *  serves as the redundant fallback. */
 const SETTLE_MS = 750;
 
 interface Dirs {
@@ -36,7 +37,7 @@ interface Dirs {
   cwd: string;
   home: string;
   userFile: string;
-  /** 项目文件不承载 llm（ADR-0084 允许名单外）——仅用于 watcher/哨兵路径断言。 */
+  /** Project files never carry llm (not on the ADR-0084 allowlist) — used only for watcher/sentinel path assertions. */
   projectFile: string;
 }
 
@@ -56,9 +57,10 @@ function makeDirs(): Dirs {
 }
 
 /**
- * 写 llm 段。ADR-0084：llm 是用户层键 → 恒写 user 文件；project 文件里的
- * 同名字段会被允许名单丢弃。watcher 仍同时监听两个文件，故传 target 可把
- * 内容投到 project 路径（哨兵路径断言用）。
+ * Writes the llm section. ADR-0084: llm is a user-layer key → always write the user
+ * file; the same field in a project file is dropped by the allowlist. The watcher
+ * still watches both files, so passing target routes the content to the project
+ * path (for sentinel path assertions).
  */
 function routeModel(model: string): string {
   return model.includes("/") ? model : `test/${model}`;
@@ -77,7 +79,7 @@ function writeSettings(
   writeFileSync(target, settingsBytes(model), "utf8");
 }
 
-/** 等待条件成立（poll），超时抛错。 */
+/** Polls until the condition holds; throws on timeout. */
 async function waitUntil(
   cond: () => boolean,
   msg: string,
@@ -103,7 +105,7 @@ describe("createEnvLoader", () => {
         const env1: IknowEnv = loader.get();
         expect(env1.llm.model).toBe("test/model-a");
         const env2: IknowEnv = loader.get();
-        expect(env2).toBe(env1); // 同一引用（缓存命中）
+        expect(env2).toBe(env1); // same reference (cache hit)
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -122,9 +124,9 @@ describe("createEnvLoader", () => {
         const env1 = loader.get();
         writeSettings(dirs, "model-b");
         const env2 = loader.reload();
-        expect(env2).not.toBe(env1); // 新引用
+        expect(env2).not.toBe(env1); // new reference
         expect(env2.llm.model).toBe("test/model-b");
-        expect(loader.get()).toBe(env2); // reload 后缓存 = 新 env
+        expect(loader.get()).toBe(env2); // after reload the cache = the new env
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -142,12 +144,12 @@ describe("createEnvLoader", () => {
       try {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
-        loader.get(); // 确保 watcher 就绪后才有后续事件
+        loader.get(); // make sure the watcher is up before later events
         await new Promise((r) => setTimeout(r, 80));
         writeSettings(dirs, "model-b");
         await waitUntil(() => received.length >= 1, "subscriber 收到 model-b");
         expect(received[0]).toBe("test/model-b");
-        // 缓存也已更新（subscriber 拿到的是 reload 后的新 env）。
+        // Cache is updated too (the subscriber got the post-reload env).
         expect(loader.get().llm.model).toBe("test/model-b");
       } finally {
         loader.stop();
@@ -167,10 +169,10 @@ describe("createEnvLoader", () => {
         const env1 = loader.get();
         const errors: unknown[] = [];
         loader.onError((err) => errors.push(err));
-        // 写坏 JSON → watcher 触发 → reload 抛错 → 缓存保持旧值。
+        // Write bad JSON → watcher fires → reload throws → cache keeps the old value.
         writeFileSync(dirs.userFile, "{ not-json", "utf8");
         await waitUntil(() => errors.length >= 1, "onError 收到坏 JSON 错误");
-        expect(loader.get()).toBe(env1); // 缓存不变（旧引用）
+        expect(loader.get()).toBe(env1); // cache unchanged (old reference)
         expect(loader.get().llm.model).toBe("test/model-a");
       } finally {
         loader.stop();
@@ -183,15 +185,16 @@ describe("createEnvLoader", () => {
   test(
     "opts 缺省（cwd/home 均未注入）→ 构造可用且 stop() 幂等",
     async () => {
-      // 不调 get()（避免触碰真实 ~/.iknow / <cwd>/.iknow 读取）；仅验证缺省
-      // 路径下 watcher 构造 + markSelfWrite（纯内存 LRU）+ stop() 幂等。
+      // Deliberately no get() (avoids reading the real ~/.iknow / <cwd>/.iknow);
+      // verify only that on the default path the watcher constructs,
+      // markSelfWrite (pure in-memory LRU) works, and stop() is idempotent.
       const loader = createEnvLoader({});
       expect(typeof loader.get).toBe("function");
       expect(() =>
         loader.markSelfWrite("/tmp/iknow-sentinel-unused.json", "{}")
       ).not.toThrow();
       expect(() => loader.stop()).not.toThrow();
-      expect(() => loader.stop()).not.toThrow(); // stop() 幂等
+      expect(() => loader.stop()).not.toThrow(); // stop() is idempotent
     },
     TEST_TIMEOUT_MS
   );
@@ -216,7 +219,7 @@ describe("createEnvLoader", () => {
           "第二个 subscriber 收到 model-b"
         );
         expect(received[0]).toBe("test/model-b");
-        expect(loader.get().llm.model).toBe("test/model-b"); // 缓存已更新
+        expect(loader.get().llm.model).toBe("test/model-b"); // cache updated
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -235,7 +238,7 @@ describe("createEnvLoader", () => {
         loader.get();
         const unsubscribe = loader.subscribe(() => {});
         loader.stop();
-        expect(() => unsubscribe()).not.toThrow(); // 退订闭包幂等
+        expect(() => unsubscribe()).not.toThrow(); // unsubscribe closure is idempotent
       } finally {
         rmSync(dirs.base, { recursive: true, force: true });
       }
@@ -257,9 +260,9 @@ describe("createEnvLoader", () => {
         loader.onError((err) => errors.push(err));
         loader.get();
         await new Promise((r) => setTimeout(r, 80));
-        writeFileSync(dirs.userFile, "{ not-json", "utf8"); // 坏 JSON → reload 抛错
+        writeFileSync(dirs.userFile, "{ not-json", "utf8"); // bad JSON → reload throws
         await waitUntil(() => errors.length >= 1, "第二个 onError 收到错误");
-        expect(loader.get().llm.model).toBe("test/model-a"); // 缓存保持旧值
+        expect(loader.get().llm.model).toBe("test/model-a"); // cache keeps the old value
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -281,10 +284,10 @@ describe("createEnvLoader", () => {
         await new Promise((r) => setTimeout(r, 80));
         loader.stop();
         writeSettings(dirs, "model-b");
-        // 窗口内不应有新通知。
+        // No new notification should arrive within the window.
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
-        // stop() 幂等（可重复调，不抛错）。
+        // stop() is idempotent (callable repeatedly, no throw).
         loader.stop();
       } finally {
         rmSync(dirs.base, { recursive: true, force: true });
@@ -311,7 +314,7 @@ describe("createEnvLoader", () => {
       try {
         expect(loaderA.get().llm.model).toBe("test/model-a");
         expect(loaderB.get().llm.model).toBe("test/model-b");
-        // A 的 watcher 事件不通知 B 的 subscriber。
+        // A's watcher events must not notify B's subscribers.
         const bReceived: string[] = [];
         loaderB.subscribe((env) => bReceived.push(env.llm.model));
         writeSettings(dirsA, "model-a2");
@@ -331,18 +334,21 @@ describe("createEnvLoader", () => {
 });
 
 /**
- * T2 self-write 哨兵：写回登记 → 相同内容命中 → 跳过 reload（写回不回环）。
+ * Self-write sentinel: write-back registration → same content hits → reload skipped
+ * (a write-back never loops back into itself).
  *
- * 基于既有 watcher 集成路径断言（事件经 settings-watch 真实到达 onChange，
- * 判定逻辑 = 读文件 + 哈希比对，不经任何 mock）：
- *  - 命中 → subscriber 不被调 + 缓存引用不变（跳过 reload）；
- *  - 未命中（外部内容）→ subscriber 正常收到新 env（PR #413 行为不变）；
- *  - 一次性消费：相同登记只吞第一次，第二次按外部 reload；
- *  - LRU 容量 8：第 9 条挤掉最旧路径，旧路径登记不再命中；
- *  - 读失败（目标被删）→ 按外部走 reload（保守，不吞事件）。
+ * Asserted over the real watcher integration path (events reach onChange through
+ * settings-watch; the decision = read file + hash compare, no mocks):
+ *  - hit → subscriber not called + cache reference unchanged (reload skipped);
+ *  - miss (external content) → subscriber still receives the new env;
+ *  - one-shot consumption: a registration swallows only the first matching event,
+ *    the second is treated as an external reload;
+ *  - LRU capacity 8: the 9th entry evicts the oldest path, whose registration no longer hits;
+ *  - read failure (target deleted) → treated as external reload (conservative; never swallow events).
  *
- * 注意 watchFile 兜底（interval 500ms）会掩盖事件缺失，故正向跳过断言仍需
- * SETTLE_MS 窗口内的「引用不变」，而非无通知。
+ * Note: the watchFile fallback (interval 500ms) can mask a missing event, so the
+ * positive skip assertion relies on "reference unchanged" within the SETTLE_MS
+ * window, not on absence of notifications.
  */
 describe("createEnvLoader self-write 哨兵 (T2)", () => {
   test(
@@ -356,15 +362,16 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 模拟一次写回：内容写入文件 + 登记同一 bytes（run.tsx 写回后的接线；
-        // ADR-0084：写回目标是用户文件）。
+        // Simulate one write-back: content written to file + same bytes registered
+        // (mirrors the wiring after run.tsx's write-back; ADR-0084: the write-back
+        // target is the user file).
         const bytes = settingsBytes("model-a");
         writeFileSync(dirs.userFile, bytes, "utf8");
         loader.markSelfWrite(dirs.userFile, bytes);
-        // 同一内容稳定窗口内不得触发 reload（跳过）。
+        // The same content must not trigger a reload within the settle window (skipped).
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
-        expect(loader.get()).toBe(env1); // 缓存引用不变（未 reload）
+        expect(loader.get()).toBe(env1); // cache reference unchanged (no reload)
         expect(loader.get().llm.model).toBe("test/model-a");
       } finally {
         loader.stop();
@@ -385,17 +392,17 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 同一路径登记两个不同内容（thinking 面板 + effort 面板两次写回）。
+        // Register two different contents on the same path (thinking panel + effort panel write-backs).
         const bytesX = settingsBytes("model-x");
         const bytesY = settingsBytes("model-y");
         loader.markSelfWrite(dirs.userFile, bytesX);
         loader.markSelfWrite(dirs.userFile, bytesY);
-        // 写回内容 X → 命中登记（Set 剩 Y）→ 跳过 reload。
+        // Write back content X → hits the registration (Set keeps Y) → reload skipped.
         writeFileSync(dirs.userFile, bytesX, "utf8");
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
         expect(loader.get()).toBe(env1);
-        // 写回内容 Y → 命中剩余登记（Set 清空）→ 跳过 reload。
+        // Write back content Y → hits the remaining registration (Set emptied) → reload skipped.
         writeFileSync(dirs.userFile, bytesY, "utf8");
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
@@ -419,9 +426,9 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 登记一个「当前文件」的哨兵，但外部写的内容不同 → 不该被吞。
+        // Register a sentinel for the "current file", but the external write differs → must not be swallowed.
         loader.markSelfWrite(dirs.userFile, settingsBytes("model-ghost"));
-        writeSettings(dirs, "model-b"); // 外部改动：内容 ≠ 登记内容
+        writeSettings(dirs, "model-b"); // external change: content ≠ registered content
         await waitUntil(() => received.length >= 1, "subscriber 收到 model-b");
         expect(received[0]).toBe("test/model-b");
         expect(loader.get()).not.toBe(env1);
@@ -446,15 +453,17 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
         const bytes = settingsBytes("model-b");
-        // 第一次写回：写盘后登记（100ms debounce 窗口内登记必先于 onChange 到达，
-        // 与 run.tsx 的 persist → markSelfWrite 时序一致）→ 哨兵命中吞掉。
-        // 路径 = write-back 目标（ADR-0084：用户层键写用户文件）。
+        // First write-back: register after writing to disk (within the 100ms debounce
+        // window the registration always arrives before onChange, matching run.tsx's
+        // persist → markSelfWrite ordering) → sentinel hit swallows the event.
+        // Path = write-back target (ADR-0084: user-layer keys write the user file).
         writeFileSync(dirs.userFile, bytes, "utf8");
         loader.markSelfWrite(dirs.userFile, bytes);
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
-        expect(loader.get()).toBe(env1); // 未 reload（缓存引用不变）
-        // 同一内容再次出现（外部重复写，无新登记）→ 哨兵已一次性消费 → 按外部 reload。
+        expect(loader.get()).toBe(env1); // no reload (cache reference unchanged)
+        // Same content appears again (external repeat write, no new registration) →
+        // sentinel already consumed one-shot → treated as external reload.
         writeFileSync(dirs.userFile, bytes, "utf8");
         await waitUntil(
           () => received.length >= 1,
@@ -482,13 +491,13 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 登记 9 条不同路径 → 第 1 条（userFile，即写回目标）被 LRU 挤掉。
+        // Register 9 distinct paths → the 1st (userFile, the write-back target) is evicted by the LRU.
         const filler = (i: number): string => settingsBytes(`filler-${i}`);
         loader.markSelfWrite(dirs.userFile, filler(0));
         for (let i = 1; i < 9; i++) {
           loader.markSelfWrite(join(dirs.base, `other-${i}.json`), filler(i));
         }
-        // userFile 是最旧路径 → 被挤掉 → 同内容事件按外部 reload。
+        // userFile is the oldest path → evicted → same-content event goes through external reload.
         writeFileSync(dirs.userFile, filler(0), "utf8");
         await waitUntil(() => received.length >= 1, "旧路径不再命中 → reload");
         expect(received[0]).toBe("test/filler-0");
@@ -513,14 +522,15 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 登记当前内容 → 删除文件（外部操作）→ watcher 事件触发时读失败 →
-        // consumeSelfWrite 返回 false → 照常 reload（模型缺失 → onError）。
+        // Register current content → delete the file (external action) → read fails when
+        // the watcher event arrives → consumeSelfWrite returns false → reload proceeds as
+        // external (missing model → onError).
         loader.markSelfWrite(dirs.userFile, settingsBytes("model-a"));
         rmSync(dirs.userFile);
         const errors: unknown[] = [];
         loader.onError((err) => errors.push(err));
         await waitUntil(() => errors.length >= 1, "onError 收到模型缺失错误");
-        expect(loader.get()).toBe(env1); // 缓存不变（reload 抛错降级语义）
+        expect(loader.get()).toBe(env1); // cache unchanged (reload-throws degradation semantics)
         expect(received.length).toBe(0);
       } finally {
         loader.stop();

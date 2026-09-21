@@ -1,23 +1,25 @@
 /**
- * T8 (#128): SessionHub postMessage 装配 verify-loop 接线测试。
+ * SessionHub postMessage verify-loop wiring test.
  *
- * 全真实装配链, 无测试缝:
- *   - SessionHubOptions.verifyConfig (command 指向 cwd 内脚本);
- *   - runVerifyLoop 缺省 runVerify = runInSandbox + bwrap (真实沙箱执行,
- *     hasBwrap 守卫, 与 verify-loop 测试同纪律);
- *   - runFn 经 hub.postMessage 走真实 run() (stub model deps)。
+ * Fully real assembly chain, no test seams:
+ *   - SessionHubOptions.verifyConfig (command points at a script in cwd);
+ *   - runVerifyLoop default runVerify = runInSandbox + bwrap (real sandboxed
+ *     execution, hasBwrap guard, same discipline as verify-loop tests);
+ *   - runFn goes through hub.postMessage into the real run() (stub model deps).
  *
- * 闭环激活的铁证 = 验证命令确实执行: 脚本往 cwd 写 marker 文件。
+ * Hard proof the loop activated = the verify command really executed: the
+ * script writes a marker file into cwd.
  *
- * 覆盖:
- *   1. verifyConfig 缺席 → 原 run 路径 (SC7): completed 结果 + 验证命令
- *      未执行 (marker 不存在);
- *   2. verifyConfig 配置 + 验证 exit 0 → 闭环激活 (marker 存在) + 单轮
- *      通过, wire finalText 保留;
- *   3. verifyConfig 配置 + 验证真失败 → 注入信封 (下一轮 priorMessages
- *      含 [VALIDATION FAILED] user 消息)。
+ * Coverage:
+ *   1. verifyConfig absent → plain run path: completed result + verify
+ *      command not executed (no marker);
+ *   2. verifyConfig set + verify exit 0 → loop activated (marker exists) +
+ *      single-round pass, wire finalText preserved;
+ *   3. verifyConfig set + verify genuinely fails → envelope injected (next
+ *      round's priorMessages contains a [VALIDATION FAILED] user message).
  *
- * 与 chat 侧装配测试同纪律: 验证命令只在隔离 tmpdir (cwd) 内读写。
+ * Same discipline as the chat-side assembly tests: the verify command reads
+ * and writes only inside an isolated tmpdir (cwd).
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -37,7 +39,7 @@ import { SessionStore } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 
-/** bwrap 可用性守卫: 缺省 runVerify (runInSandbox) 只在 bwrap 存在时可用。 */
+/** bwrap availability guard: default runVerify (runInSandbox) needs bwrap. */
 function hasBwrap(): boolean {
   return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
 }
@@ -68,7 +70,7 @@ beforeAll(() => {
   );
   chmodSync(passScript, 0o755);
   chmodSync(failScript, 0o755);
-  // 闭环沙箱 cwd = process.cwd() → 切到隔离工作目录 (不碰真实工作区)。
+  // Loop sandbox cwd = process.cwd() → chdir into an isolated work dir (never touch the real workspace).
   process.chdir(workDir);
 });
 
@@ -78,7 +80,7 @@ afterAll(() => {
   rmSync(workDir, { recursive: true, force: true });
 });
 
-/** 装配带 verifyConfig 的 hub; responses 缺省空 (调用方显式给响应)。 */
+/** Assemble a hub with verifyConfig; responses default empty (caller passes them explicitly). */
 function makeHub(opts: {
   verifyConfig?: VerifyConfig;
   responses?: Parameters<typeof makeDeps>[0];
@@ -137,10 +139,11 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     }
   );
 
-  // T2 (#458 / #128 wire): verify 闭环最终判定为 passed 时,
-  // VerifyAnswerView.outcome 必须 = "passed" 且 rounds 落在 wire DTO 上
-  // (此前三态白名单缺 passed → 字段缺席, 与 passed 实际是合法终态矛盾)。
-  // abort / disabled 仍维持字段缺席 (本测试不覆盖, 见 contract.test.ts)。
+  // When the verify loop's final verdict is passed,
+  // VerifyAnswerView.outcome must be "passed" with rounds on the wire DTO
+  // (the old three-value whitelist lacked passed → field absent, contradicting
+  // passed being a legitimate terminal state).
+  // abort / disabled still omit the field (not covered here, see contract.test.ts).
   it.skipIf(!hasBwrap())(
     'verifyConfig 配置 + 验证 exit 0 → DTO 出现 verify.outcome="passed" rounds=N (T2 wire)',
     async () => {
@@ -154,9 +157,10 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
         conversationId: session.conversation_id,
         text: "fix this",
       });
-      // T2: passed 是合法终态, 必须挂到 VerifyAnswerView DTO 上。
-      // 与 failed/unstable/escalated 同 surface;abort/disabled 仍字段缺席
-      // (byte-stable, 仅契约测试单独钉住)。
+      // passed is a legitimate terminal state and must surface on the
+      // VerifyAnswerView DTO — same surface as failed/unstable/escalated;
+      // abort/disabled still omit the field (byte-stable, pinned only by the
+      // contract tests).
       assert.deepEqual(res.turn.answer.verify, {
         outcome: "passed",
         rounds: 1,
@@ -168,8 +172,9 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     "verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)",
     async () => {
       rmSync(markerPath, { force: true });
-      // 两条 stub 响应: 第一条 run 返回 (completed) → 验证挂 → 注入信封;
-      // 第二条 run (信封在 priorMessages 中) 返回 → 验证仍挂 → 停滞停。
+      // Two stub responses: first run returns (completed) → verify fails →
+      // envelope injected; second run (envelope in priorMessages) returns →
+      // verify still fails → stall stops it.
       const hub = makeHub({
         verifyConfig: { command: failScript },
         responses: [
@@ -184,9 +189,9 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
       });
       assert.equal(res.turn.answer.stopReason, "completed");
       assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
-      // 信封注入在第二轮 run 的 priorMessages 里 (messages 含
-      // [VALIDATION FAILED] user 消息)。postMessage 已 conditionalSave 落盘,
-      // 从盘上 load 最新文件断言。
+      // The envelope lands in the second run's priorMessages (messages contain
+      // a [VALIDATION FAILED] user message). postMessage already persisted via
+      // conditionalSave — load the newest file from disk and assert there.
       const saved = await new SessionStore(dataDir, process.cwd()).load(
         session.conversation_id
       );

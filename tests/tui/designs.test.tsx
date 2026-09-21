@@ -1,12 +1,14 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/designs.test.tsx — 思考面板 5 版设计渲染 smoke（bun:test）。
+ * tests/tui/designs.test.tsx — thinking-panel design render smoke (bun:test).
  *
- * 验证每个 design 实现 ThinkingDesign 契约且能被 OpenTUI reconciler 渲染
- * 出帧（无运行时崩溃）。逐 design 断言一个唯一标志字符，防止渲染退化为空。
+ * Verifies each design implements the ThinkingDesign contract and renders a
+ * frame via the OpenTUI reconciler without crashing. Each design asserts a
+ * unique marker char so render can't silently degrade to empty.
  *
- * 不动效断言：testRender 的 renderOnce 截一帧即够（动画 timeline 在真实
- * demo 里继续跑；这里只验证可渲染 + 标志字符在帧里）。
+ * No animation assertions: renderOnce captures one frame (the animation
+ * timeline keeps running in the real demo; here we only check renderability +
+ * marker presence).
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -17,7 +19,7 @@ import {
   type PickerModel,
 } from "../../src/tui/designs/index.js";
 
-/** 每个 design 的标志字符（在其面板帧里必然出现，用于证明渲染非空）。 */
+/** Per-design marker char (always present in its panel frame, proving non-empty render). */
 const SIGNATURE: ReadonlyArray<{ id: string; marker: string }> = [
   { id: "design-1-restrained", marker: "THINKING" },
   { id: "design-2-neon", marker: "THINKING" },
@@ -40,7 +42,7 @@ const SIGNATURE: ReadonlyArray<{ id: string; marker: string }> = [
   { id: "design-25-flow-edge", marker: "Thinking" },
 ];
 
-/** 全部 design 都实现了契约（meta.id 唯一、render 是函数）。 */
+/** All designs implement the contract (unique meta.id, render is a function). */
 test("19 版设计均实现 ThinkingDesign 契约且 id 唯一", () => {
   expect(THINKING_DESIGNS.length).toBe(19);
   const ids = THINKING_DESIGNS.map((d) => d.meta.id);
@@ -53,9 +55,10 @@ test("19 版设计均实现 ThinkingDesign 契约且 id 唯一", () => {
   }
 });
 
-/** 每个 design 在 open + 默认模型态下渲染出一帧且含标志字符。
- *  用 waitForFrame 而非 captureCharFrame：等入场动画（marginTop 滑落 /
- *  打字机标题 / 渐变边框等）落定后再断言，确保标题行 `THINKING` 进入视口。 */
+/** Each design renders one frame with the marker in open + default-model state.
+ *  Uses waitForFrame rather than captureCharFrame: waits for entrance animations
+ *  (marginTop slide / typewriter title / gradient border) to settle so the title
+ *  row `THINKING` is in view. */
 test("15 版设计各渲染出一帧且含标志字符", async () => {
   for (const sig of SIGNATURE) {
     const d = THINKING_DESIGNS.find((x) => x.meta.id === sig.id);
@@ -64,11 +67,11 @@ test("15 版设计各渲染出一帧且含标志字符", async () => {
       <d.render model={{ ...DEFAULT_PICKER_MODEL, open: true }} cols={60} />,
       { width: 64, height: 24 }
     );
-    // 等若干帧让入场动画推进（marginTop 滑落 / 渐变边框 / 打字机标题）
+    // Let entrance animations advance a few frames (marginTop slide / gradient border / typewriter title)
     await setup.waitForFrame(() => true, { maxPasses: 6 });
     const frame = setup.captureCharFrame();
-    // 双重断言：marker 出现 OR 帧非空（部分 design 入场动画较慢
-    // marker 出现在 maxPasses 之后，frame 非空证明渲染非崩溃）
+    // Dual assertion: marker present OR frame non-empty (some designs'
+    // entrance animation finishes after maxPasses; non-empty frame proves no crash)
     expect(frame.length).toBeGreaterThan(100);
     if (!frame.includes(sig.marker)) {
       console.warn(
@@ -79,25 +82,25 @@ test("15 版设计各渲染出一帧且含标志字符", async () => {
   }
 });
 
-/** 模型 reducer：←/→ 切档、Tab/Space 切 Auto、Enter 确认、Esc 取消。 */
+/** Model reducer: ←/→ move tier, Tab/Space toggle Auto, Enter confirm, Esc cancel. */
 test("reducePickerModel 状态机：切档/切 Auto/确认/取消", () => {
   let m: PickerModel = { ...DEFAULT_PICKER_MODEL, open: true };
-  // → 切高档（medium → high）
+  // → moves up a tier (medium → high)
   m = reducePickerModel(m, { type: "right" });
   expect(m.focusIndex).toBe(2);
-  // Tab 切 Auto（off → on，档位禁用）
+  // Tab toggles Auto (off → on, tiers disabled)
   m = reducePickerModel(m, { type: "tab" });
   expect(m.autoOn).toBe(true);
   expect(m.focusIndex).toBe(-1);
-  // Auto 下 ← 不生效
+  // ← is inert while in Auto
   m = reducePickerModel(m, { type: "left" });
   expect(m.focusIndex).toBe(-1);
-  // Space 切回手动，焦点回到当前档
+  // Space returns to manual, focus lands on current tier
   m = reducePickerModel(m, { type: "space" });
   expect(m.autoOn).toBe(false);
   expect(m.focusIndex).toBe(m.currentIndex);
-  // Enter 确认关闭
+  // Enter confirms and closes
   m = reducePickerModel(m, { type: "confirm" });
   expect(m.open).toBe(false);
-  expect(m.currentIndex).toBe(1); // 未移动 → 保持 medium
+  expect(m.currentIndex).toBe(1); // never moved → stays medium
 });

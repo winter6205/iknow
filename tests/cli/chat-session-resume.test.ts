@@ -1,23 +1,28 @@
 /**
- * T4: chat REPL `--resume <id>` 续跑 —— `seedResumeMessages` 辅助 + 续跑接线。
+ * Chat REPL `--resume <id>` continuation —— the `seedResumeMessages` helper plus
+ * the resume wiring.
  *
- * 覆盖(ACR 4 + #222 六类边界):
- *   1. empty:resumeId 未设 → 零 IO,空 messages,行为与 T2 完全一致;
- *   2. negative:not_found / parse_failed / schema_invalid / io_error 全部
- *      typed 错误 → 守卫:返回空 messages + 触发 warn 回调,但**保留
- *      conversationId 锚点**,使后续 turn 的 checkpoint 写回同一 `<id>.jsonl`;
- *   3. overflow / concurrent:同 conversationId 多次 completed → turnCount
- *      累计到 prior+N,消息累计;cancelled-带-turnCount=1 → checkpoint 序列
- *      在既有索引后继续 append;
- *   4. exception:未知 throw(非 typed)→ 原样重抛,绝不静默吞咽;
- *   + 成功路径:load 命中 → state.messages == file.messages;首轮续跑经
- *     processChatLine 完成 → file.turnCount = prior + 1,messages 累计,
- *     checkpoints 保序。
+ * Coverage across the six boundary classes:
+ *   1. empty: no resumeId → zero IO, empty messages, behaviour identical to the
+ *      plain new-session path;
+ *   2. negative: not_found / parse_failed / schema_invalid / io_error, all typed
+ *      → guard returns empty messages and fires the warn callback while
+ *      **keeping the conversationId anchor**, so later checkpoints write back to
+ *      the same `<id>.jsonl`;
+ *   3. overflow / concurrent: repeated completed turns under one conversationId
+ *      accumulate turnCount to prior+N and messages; a cancelled turn with
+ *      turnCount=1 appends its checkpoint after the existing index;
+ *   4. exception: an unknown (non-typed) throw is rethrown as-is, never silently
+ *      swallowed;
+ *   + success: load hit → state.messages == file.messages; a first resumed turn
+ *     through processChatLine → file.turnCount = prior + 1, messages accumulate,
+ *     checkpoints keep order.
  *
- * 设计:`runChatSession` 本身是 TTY/管道入口(integration-heavy,不可单元测),
- * 但其核心 IO(`store.load` 一次 + 写入 state)被抽取到纯辅助 `seedResumeMessages`,
- * 便于单测。续跑接线(state.messages = seed 结果)则通过 processChatLine
- * 间接验证 —— prior 视图一致即可证。
+ * Design: `runChatSession` is itself a TTY/pipe entry point (integration-heavy,
+ * not unit-testable), but its core IO (`store.load` once + write to state) is
+ * extracted into the pure helper `seedResumeMessages`. The resume wiring
+ * (state.messages = seed result) is verified indirectly through
+ * processChatLine —— agreement on the prior view is sufficient proof.
  */
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
@@ -111,8 +116,9 @@ function buildResult(opts: {
 // -- stderr capture (spyOn) --------------------------------------------------
 
 /**
- * `seedResumeMessages` 的 warn 回调内部走 `writeErr` → `process.stderr.write`。
- * vitest spyOn 与 tui/run-errors.test.ts 同源(bun:test 版),跨文件复用稳定模式。
+ * `seedResumeMessages`' warn callback goes through `writeErr` →
+ * `process.stderr.write`. Same vitest spyOn pattern as
+ * tui/run-errors.test.ts (bun:test variant), reused across files.
  */
 // Capture stderr.write spy. vi.spyOn's generic resolution with
 // `process.stderr.write` overloads is brittle: TS picks an overload
@@ -141,7 +147,7 @@ afterEach(() => {
   stderrSpy.mockRestore();
 });
 
-// -- seedResumeMessages (纯 IO 辅助) ----------------------------------------
+// -- seedResumeMessages (pure IO helper) ------------------------------------
 
 describe("seedResumeMessages — T4 seed helper", () => {
   it("resumeId 未设 → 空 messages,无 warn (empty-class 零 IO)", async () => {
@@ -230,8 +236,9 @@ describe("seedResumeMessages — T4 seed helper", () => {
       projectDir,
       conversationId: id,
     });
-    // 把 conversation subfolder 替换成一个普通文件:readFile 解析其子路径时
-    // ENOTDIR → store.readRaw 把 ENOENT 之外的失败映射为 io_error。
+    // Replace the conversation subfolder with a plain file: readFile resolving a
+    // path under it gets ENOTDIR → store.readRaw maps anything other than ENOENT
+    // to io_error.
     await mkdir(join(tmp, "projects"), { recursive: true });
     await mkdir(projectDir, { recursive: true });
     await writeFile(convDir, "blocker", "utf8");
@@ -244,8 +251,9 @@ describe("seedResumeMessages — T4 seed helper", () => {
   });
 
   it("未知异常(防御性)→ 原样重抛,绝不静默吞咽", async () => {
-    // 构造一个形状上满足 SessionStore.load 但抛裸 Error 的 fake,模拟
-    // store 契约外的不寻常故障。强转为 unknown-SessionStore 仅限测试。
+    // Build a fake that satisfies SessionStore.load's shape but throws a bare
+    // Error, simulating a fault outside the store contract. The cast to an
+    // unknown SessionStore is test-only.
     const fake = {
       load: () => Promise.reject(new Error("explosion")),
     } as unknown as SessionStore;
@@ -286,7 +294,8 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
       }),
     });
 
-    // seed 步骤 —— 与 runChatSession 内同源,验证 state.messages 严格匹配。
+    // Seed step —— same source as inside runChatSession; state.messages must match
+    // exactly.
     const seeded = await seedResumeMessages({ store: s, id });
     assert.equal(seeded.messages.length, 6);
     assert.deepEqual(
@@ -295,7 +304,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
       "state.messages 必须严格匹配文件 messages"
     );
 
-    // 构造与 runChatSession 同形态的 ctx(state.messages = seed 结果)。
+    // Build a ctx with runChatSession's shape (state.messages = seed result).
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["a4"] })],
       checkpointStore: s,
@@ -308,23 +317,24 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     const r = await processChatLine({ line: "q4", ctx });
     assert.equal(r.ranQuery, true);
 
-    // 累计:3 (seeded) + 1 (completed) = 4。completed 不 append checkpoint。
+    // Accumulation: 3 (seeded) + 1 (completed) = 4. completed appends no checkpoint.
     const file = await s.load(id);
     assert.equal(file.turnCount, 4, "completed 续跑必须累计 turnCount");
     assert.equal(file.messages.length, 8, "messages 累计到 8");
     assert.equal(file.checkpoints?.length, 1, "completed 不 append checkpoint");
     assert.deepEqual(
       file.checkpoints?.[0],
-      // #622 T5 (spec D3): checkpoint 以 event id 为权威锚点 —— save/load
-      // 从 messagesCount=4 派生出链上第 4 个事件 e3。
+      // The checkpoint's authoritative anchor is its event id: save/load derive
+      // e3, the 4th event on the chain, from messagesCount=4.
       { ...seededCheckpoint, anchorEventId: "e3" },
       "既有 checkpoints 必须保序不丢"
     );
   });
 
   it("成功(resume + cancelled-turn 累计 turnIndex=4):prior turnCount=3 → checkpoint 从既有序列继续", async () => {
-    // 端到端验证 `session.turnCount + result.turnCount` 在 resume 上下文中
-    // 仍镜像 hub.ts:739 累计约定。结果 turnCount=1 → turnIndex=3+1=4。
+    // End-to-end check that `session.turnCount + result.turnCount` still mirrors
+    // the hub's accumulation convention in a resume context. Result
+    // turnCount=1 → turnIndex=3+1=4.
     const s = await storeFor();
     const id = "resume-cancelled";
     const seeded = [
@@ -351,8 +361,8 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
       }),
     });
 
-    // 模拟一轮 cancelled(模型产生 partial 后被中断)的后置落盘。prior =
-    // 文件既有 messages。
+    // Persist the aftermath of one cancelled round (interrupted after the model
+    // produced a partial). prior = the file's existing messages.
     await persistChatSessionCheckpoint({
       store: s,
       conversationId: id,
@@ -377,7 +387,8 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.equal(latest?.turnIndex, 4, "累计 turnIndex = 3 + 1 = 4");
     assert.equal(latest?.messagesCount, 8, "messagesCount cumulative");
     assert.equal(latest?.interruptReason, "cancelled");
-    // 既有 checkpoint 保序不丢（T5: 派生 anchorEventId=e3，见上例注释）。
+    // Existing checkpoints stay in order and are not lost (derived
+    // anchorEventId=e3, see the note above).
     assert.deepEqual(file.checkpoints?.[0], {
       ...priorCheckpoint,
       anchorEventId: "e3",
@@ -387,15 +398,15 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
   it("not_found → seed 返空 + 锚点保留;后续 completed 写回同一 <id>.jsonl(anchor-preserved 验收)", async () => {
     const s = await storeFor();
     const id = "anchor-keep";
-    // 文件不存在(seed 必走 not_found 分支)。
+    // No file exists (seed must take the not_found branch).
     const seeded = await seedResumeMessages({ store: s, id });
     assert.deepEqual(seeded.messages, []);
     assert.equal(typeof seeded.warn, "function");
     seeded.warn!();
     assert.match(capturedStderr(), new RegExp(`恢复会话 ${id} 失败`));
 
-    // state.messages = [], conversationId = id(锚点保留)。运行一轮
-    // completed → 应当写到 <id>.json,而不是碎片化成新 UUID。
+    // state.messages = [], conversationId = id (anchor kept). One completed
+    // round should land in <id>.json, not fragment into a new UUID.
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["hello"] })],
       checkpointStore: s,
@@ -412,11 +423,12 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
   });
 
   it("resume 文件 checkpoints=null(畸形)→ seed 空 + warn [schema_invalid] + 锚点保留", async () => {
-    // 5-category boundary:exception 的深树 —— v3 文件 `checkpoints: null`
-    // 是畸形(生产裁决「never silently coerce」,schema.ts:94-96,绝不归一化)。
-    // load 抛 typed schema_invalid(field="checkpoints")→ seed 走 typed
-    // 守卫:空 messages + warn 触发且含 [schema_invalid] + 锚点保留(id 不丢)。
-    // 绝不裸 Error、绝不静默吞。
+    // Deep branch of the exception class: a v3 file with `checkpoints: null` is
+    // malformed —— the production ruling is "never silently coerce" (schema.ts),
+    // so it is never normalized. load throws typed schema_invalid
+    // (field="checkpoints") → seed takes its typed guard: empty messages + warn
+    // fired and containing `[schema_invalid]` + anchor kept (id not lost).
+    // Never a bare Error, never silently swallowed.
     const tmp = await mkdtemp(join(tmpdir(), "iknow-chat-resume-cpnull-"));
     tempDirs.push(tmp);
     const s = new SessionStore(tmp, process.cwd());
@@ -452,7 +464,8 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.match(text, /\[schema_invalid\]/);
     assert.match(text, new RegExp(`仍锚定 ${id}`));
 
-    // 锚点保留:后续 completed 写回同一 <id>.jsonl,重建为干净 v5 文件。
+    // Anchor kept: the next completed round writes back to the same
+    // `<id>.jsonl`, rebuilt as a clean v5 file.
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["hello"] })],
       checkpointStore: s,
@@ -494,7 +507,8 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
       }),
     });
 
-    // 两轮 completed —— 复用同一 store + conversationId,直接模拟重复 commit。
+    // Two completed turns —— same store + conversationId, simulating repeated
+    // commits directly.
     await persistChatSessionCheckpoint({
       store: s,
       conversationId: id,
@@ -523,14 +537,15 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     const file = await s.load(id);
     assert.equal(file.turnCount, 4, "累计 turnCount = prior(2) + 2 = 4");
     assert.equal(file.messages.length, 8);
-    // completed 不 append checkpoint → 既有 1 条保留不变;若要增长,需经
-    // cancelled(已在「resume-cancelled」用例覆盖 turnIndex 累计)。
+    // completed appends no checkpoint → the existing single entry is preserved
+    // unchanged; growth requires a cancelled turn (the resume-cancelled case
+    // covers turnIndex accumulation).
     assert.equal(
       file.checkpoints?.length,
       1,
       "completed 重复 commit 不增长 checkpoints(既有保序)"
     );
-    // T5: 派生 anchorEventId=e3（messagesCount=4 → 链上第 4 个事件）。
+    // Derived anchorEventId=e3 (messagesCount=4 → the 4th event on the chain).
     assert.deepEqual(file.checkpoints?.[0], {
       ...priorCheckpoint,
       anchorEventId: "e3",
@@ -539,15 +554,17 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// review-fix (H2): ChatSessionOpts.conversationId SSOT —— 调用方 (cli.ts) 显式
-// 注入的 conversationId 必须能贯穿到 ctx.state.conversationId,REPL 内的
-// processChatLine + persistChatSessionCheckpoint 都用 state.conversationId,
-// 二者必须共享同一 id (resume 时不能分裂成 cli.ts 子代理目录 id ≠ REPL id)。
+// ChatSessionOpts.conversationId SSOT: a conversationId explicitly injected by
+// the caller (cli.ts) must reach ctx.state.conversationId. Both
+// processChatLine and persistChatSessionCheckpoint inside the REPL read
+// state.conversationId, so they must share one id —— resume must not split into
+// "cli.ts sub-agent dir id ≠ REPL id".
 //
-// runChatSession 是 TTY / pipe 入口(integration-heavy),不在此处直接调;
-// 改在 type-level 钉契约 + 用 runChatSession 的种子路径(seedResumeMessages)
-// 间接证:给定 conversationId 时,seed + persist 闭环都写到同一 id 的
-// checkpoint 文件,不另起 UUID。
+// runChatSession is a TTY / pipe entry point (integration-heavy) and is not
+// called here; instead the contract is pinned at type level and proved
+// indirectly through its seeding path (seedResumeMessages): given a
+// conversationId, the seed + persist loop writes the checkpoint file of that
+// same id and never starts a new UUID.
 // ---------------------------------------------------------------------------
 
 describe("review-fix H2 — ChatSessionOpts.conversationId SSOT (resume 时单源)", () => {
@@ -560,13 +577,14 @@ describe("review-fix H2 — ChatSessionOpts.conversationId SSOT (resume 时单�
       file: seededFile({ id: fixedId, messages: seededMessages, turnCount: 1 }),
     });
 
-    // seed 步骤 —— runChatSession 内同源 (lines 2130-2160)。
+    // Seed step —— same source as inside runChatSession.
     const seeded = await seedResumeMessages({ store: s, id: fixedId });
     assert.equal(seeded.messages.length, 2);
 
-    // 构造与 runChatSession 同形态的 ctx (state.conversationId 来自 opts,
-    // 正是 H2 的修复点)。`opts.conversationId ?? opts.resumeId ?? randomUUID()`
-    // → 这里 opts.conversationId === fixedId 优先,绝不另起 UUID。
+    // Build a ctx with runChatSession's shape (state.conversationId comes from
+    // opts, which is exactly the point of this fix):
+    // `opts.conversationId ?? opts.resumeId ?? randomUUID()` → here
+    // opts.conversationId === fixedId wins and no new UUID is started.
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["a2"] })],
       checkpointStore: s,
@@ -578,14 +596,16 @@ describe("review-fix H2 — ChatSessionOpts.conversationId SSOT (resume 时单�
     });
     const r = await processChatLine({ line: "q2", ctx });
     assert.equal(r.ranQuery, true);
-    // 关键断言:文件依然以 fixedId 命名,未因 REPL 二次 randomUUID 漂移。
+    // Key assertion: the file is still named after fixedId, undrifted by a second
+    // randomUUID inside the REPL.
     const file = await s.load(fixedId);
     assert.equal(file.conversation_id, fixedId);
     assert.equal(file.turnCount, 2);
   });
 
   it("type-level: ChatSessionOpts 接收可选 conversationId (compile-time 契约钉死)", () => {
-    // 编译期契约:不 import 实际函数体也能写出 opts 形态。仅 type assertion。
+    // Compile-time contract: the opts shape is writable without importing the
+    // actual function body. Type assertion only.
     type Opts = Parameters<
       typeof import("../../src/cli/chat-session.ts").runChatSession
     >[0];
@@ -593,8 +613,9 @@ describe("review-fix H2 — ChatSessionOpts.conversationId SSOT (resume 时单�
       deps: {} as Opts["deps"],
       session: {} as Opts["session"],
       jsonMode: false,
-      // 关键字段 —— review-fix H2 加性 seam,缺省 (ask / 旧测试 seam) 退路
-      // 维持 `resumeId ?? randomUUID()`,与 byte-stable 行为对齐。
+      // Key field —— an additive seam; when absent (ask / legacy test seam) the
+      // fallback stays `resumeId ?? randomUUID()`, aligned with byte-stable
+      // behaviour.
       conversationId: "explicit-conv-id",
     };
     assert.equal(opts.conversationId, "explicit-conv-id");

@@ -1,9 +1,9 @@
 /**
- * hastText pure-helper tests (H1 / code-review 双轴整改).
+ * hastText pure-helper tests.
  *
  * Mirrors tests/web/stop-reason.test.ts style: vitest describe/it +
  * node:assert/strict, root vitest (node env). The web package has no test
- * framework (spec A8/A10 forbid adding one).
+ * framework (project constraints forbid adding one).
  *
  * What we assert:
  *   - hastText recovers the original source text from the structural shape

@@ -12,7 +12,7 @@ interface NamedTool {
   readonly name: string;
 }
 
-/** ACI 工具集样本 (worker 装配后不含 spawn_subagent) — 用于 deny-list 裁剪测试。 */
+/** Sample worker toolset (no spawn_subagent after assembly) for deny-list pruning tests. */
 const WORKER_TOOLSET: ReadonlyArray<NamedTool> = Object.freeze([
   { name: "bash" },
   { name: "read_file" },
@@ -56,7 +56,7 @@ describe("subagent role: SubAgentDefinition 类型形态", () => {
     assert.equal(def.timeoutMs, 30000);
     assert.equal(def.role, "explore");
     assert.equal(def.excludeFromHostDrain, true);
-    // 只读字段 typecheck 验证: 下列赋值编译期就应当失败 (运行时不需要再 assert)
+    // readonly enforced by typecheck only; no runtime assert needed
   });
 
   it("SubAgentDefinition 可为零字段 (worker 全默认)", () => {
@@ -108,7 +108,7 @@ describe("subagent role: applyRoleDenyList 严格模式 (SC9 越界 fail-fast)",
   });
 
   it("allowlist 含 spawn_subagent (子代理 + parent 都启用) → 严格模式正常剔除", () => {
-    // 父代理装配形态: spawn_subagent 在 available 中。
+    // parent-agent assembly: spawn_subagent present in available set
     const parentToolset: ReadonlyArray<NamedTool> = Object.freeze([
       ...WORKER_TOOLSET,
       { name: "spawn_subagent" },
@@ -128,7 +128,7 @@ describe("subagent role: applyRoleDenyList 严格模式 (SC9 越界 fail-fast)",
 
 describe("subagent role: buildWorkerToolSurface 宽容模式 (worker 装配路径)", () => {
   it("默认 deny 含 spawn_subagent (不在 available) → 静默跳过, 不抛", () => {
-    // worker 工具集不含 spawn_subagent — 默认 deny 是冗余保护
+    // worker toolset lacks spawn_subagent — default deny is redundant protection
     const out = buildWorkerToolSurface(WORKER_TOOLSET);
     assert.equal(out.length, WORKER_TOOLSET.length);
     assert.equal(Object.isFrozen(out), true);
@@ -138,13 +138,13 @@ describe("subagent role: buildWorkerToolSurface 宽容模式 (worker 装配路�
     const out = buildWorkerToolSurface(WORKER_TOOLSET, ["edit_file"]);
     const names = out.map((t) => t.name);
     assert.equal(names.includes("edit_file"), false);
-    assert.equal(names.includes("spawn_subagent"), false); // worker 工具集本来就不含
+    assert.equal(names.includes("spawn_subagent"), false); // already absent from worker toolset
     assert.equal(out.length, WORKER_TOOLSET.length - 1);
   });
 
   it("用户 deny 含未知工具名 → 静默跳过 (宽容模式)", () => {
     const out = buildWorkerToolSurface(WORKER_TOOLSET, ["foo_typo"]);
-    // 不抛错, 移除默认 deny 的 spawn_subagent (无变化) + 跳过 foo_typo
+    // no throw: default deny removes spawn_subagent (no-op) + unknown name skipped
     assert.equal(out.length, WORKER_TOOLSET.length);
   });
 
@@ -160,7 +160,7 @@ describe("subagent role: buildWorkerToolSurface 宽容模式 (worker 装配路�
 
   it("默认 deny + 用户重复声明 spawn_subagent → Set 去重, 无重复越界", () => {
     const out = buildWorkerToolSurface(WORKER_TOOLSET, ["spawn_subagent"]);
-    assert.equal(out.length, WORKER_TOOLSET.length); // spawn_subagent 本来就不在
+    assert.equal(out.length, WORKER_TOOLSET.length); // spawn_subagent already not present
   });
 
   it("undefined 用户 deny → 仅默认 deny 生效 (无变化)", () => {

@@ -1,19 +1,22 @@
 /**
- * live-graph-phase1 T1 — CLI `/reset` 销毁活图账本（SC3）。
+ * CLI `/reset` destroys the live-graph ledger.
  *
- * 命令 handler 集成测试纪律（.claude/rules/test.md）：接真实 SessionStore
- * （temp dir）+ 真实 fresh conversationId（不预存 session 文件），走
- * `processChatLine` 的 slash 路径 —— 纯 applySlashCommand 总线测试拿不到
- * `ctx.liveGraphLedger` / `ctx.state.conversationId`，会漏掉 reset 的真实
- * 销毁边界。
+ * Command-handler integration discipline (`.claude/rules/test.md`): a real
+ * SessionStore (temp dir) plus a real fresh conversationId (no pre-stored
+ * session file), driven through `processChatLine`'s slash path —— a pure
+ * applySlashCommand bus test cannot reach `ctx.liveGraphLedger` /
+ * `ctx.state.conversationId` and would miss the real destruction boundary.
  *
- * 三件事：
- *   1. 账本建立（先手工 ensure 模拟"之前跑过 run_graph"—— handler 建
- *      账的接线由 run-graph-ledger.test.ts 覆盖，这里只证销毁时机）；
- *   2. `/reset` 之后同一 conversationId 的账本已销毁：旧 id 不再冻结、
- *      `exists()` 回 false —— 下一次 run_graph 可重用旧 id 真正 spawn；
- *   3. conversationId 为 null（fresh REPL 尚未跑过查询行）→ /reset 不抛
- *      （typed 合法态，不是错误）。
+ * Three things:
+ *   1. the ledger exists (seeded by hand to simulate an earlier run_graph ——
+ *      the handler wiring that builds it is covered by
+ *      run-graph-ledger.test.ts, so only the destruction timing is proved
+ *      here);
+ *   2. after `/reset` the ledger for that conversationId is gone: the old id is
+ *      no longer frozen and `exists()` is false again —— the next run_graph can
+ *      reuse the old id and really spawn;
+ *   3. conversationId null (fresh REPL, no query line yet) → /reset does not
+ *      throw (a typed legal state, not an error).
  */
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -40,7 +43,8 @@ describe("CLI /reset — 活图账本销毁（SC3）", () => {
   it("reset 后同一 conversationId 的账本被销毁：旧 id 不再冻结", async () => {
     const convId = randomUUID();
     const host = createLiveGraphLedgerHost();
-    // 模拟"此前 run_graph 已建账并冻结"（handler 接线另有集成测试）。
+    // Simulate "a previous run_graph already built and froze the ledger"
+    // (the handler wiring has its own integration test).
     const ledger = host.ledgerFor(convId);
     ledger.ensure();
     ledger.freeze("old-id", "done");
@@ -56,8 +60,8 @@ describe("CLI /reset — 活图账本销毁（SC3）", () => {
     expect(result.quit).toBe(false);
     expect(result.output).toBe("Session cleared.");
 
-    // 销毁之后：exists 回 false，旧 id 不再冻结 —— 下一次 run_graph 可
-    // 重用旧 id 真正 spawn（SC3 的可观察行为）。
+    // After destruction: exists is false and the old id is unfrozen —— the next
+    // run_graph may reuse it and really spawn.
     expect(host.size()).toBe(0);
     const fresh = host.ledgerFor(convId);
     expect(fresh.exists()).toBe(false);
@@ -103,7 +107,8 @@ describe("CLI /reset — 活图账本销毁（SC3）", () => {
     });
     ctx.liveGraphLedger = host;
 
-    // 跑一条真实查询行（落盘 → reset → messages 清空、账本销毁）。
+    // One real query line (write to disk → reset → messages cleared, ledger
+    // destroyed).
     const ran = await processChatLine({ line: "hello", ctx });
     expect(ran.quit).toBe(false);
     expect(ctx.state.messages.length).toBeGreaterThan(0);

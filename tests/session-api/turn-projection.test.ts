@@ -385,9 +385,9 @@ describe("boundary: block order across multiple assistant turns", () => {
 });
 
 // -- boundary 9: subagent drain user messages ---------------------------
-// host-drain 把 completed 子代理结果浓缩成 `## Sub-agent <id> result: ...`
-// user message 拼入历史；显示投影既不得把它当 query 露出，也不得让它切断
-// 前一个 turn 的 slice。
+// host-drain condenses completed sub-agent results into a
+// `## Sub-agent <id> result: ...` user message appended to history; the display
+// projection must neither expose it as a query nor let it cut the previous turn's slice.
 
 describe("boundary: subagent drain messages in projectMessagesToTurns", () => {
   const drainText = "## Sub-agent task_1 result: sum\n\nresult body";
@@ -433,7 +433,7 @@ describe("boundary: subagent drain messages in projectMessagesToTurns", () => {
     const turns = projectMessagesToTurns(messages);
     assert.equal(turns.length, 2);
     assert.equal(turns[0]?.query, "q1");
-    // slice 未被 drain 切断：tool_result 仍落在 turn 1 内，配对成功。
+    // slice not cut by the drain: tool_result still lands inside turn 1, pairing succeeds.
     assert.equal(turns[0]?.answer.toolCalls?.[0]?.outputPreview, "ok");
     assert.equal(turns[0]?.answer.finalText, "final");
     assert.equal(turns[1]?.query, "q2");
@@ -450,10 +450,11 @@ describe("boundary: subagent drain messages in projectMessagesToTurns", () => {
 });
 
 // -- boundary 10: graph_mode presence user messages --------------------
-// ADR-0081：开着图时每个 run() 开头贴一条短 <graph_mode> 现势（落在本轮
-// query 之后、assistant 之前）。它是 host 注入信封，既不得自己在 serve/web
-// 面开一个新 turn，也不得把前一个 turn 的 slice 从 query 处切断 —— 否则
-// 真实 query 的 answer 会被吞进 presence 的 turn。
+// ADR-0081: while the graph is open, each run() starts with a short <graph_mode>
+// presence line (after the turn's query, before the assistant reply). It is a
+// host-injected envelope: it must neither open a new turn on the serve/web surface
+// nor cut the previous turn's slice at its query — otherwise the real query's answer
+// would be swallowed into the presence's turn.
 
 describe("boundary: graph_mode presence in projectMessagesToTurns", () => {
   const presenceMsg = assistant("user", [
@@ -497,7 +498,7 @@ describe("boundary: graph_mode presence in projectMessagesToTurns", () => {
     const turns = projectMessagesToTurns(messages);
     assert.equal(turns.length, 2);
     assert.equal(turns[0]?.query, "q1");
-    // slice 未被 presence 切断：tool_result 仍落在 turn 1 内，配对成功。
+    // slice not cut by the presence line: tool_result still lands inside turn 1, pairing succeeds.
     assert.equal(turns[0]?.answer.toolCalls?.[0]?.outputPreview, "ok");
     assert.equal(turns[0]?.answer.finalText, "final");
     assert.equal(turns[1]?.query, "q2");
@@ -595,8 +596,8 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
     );
   });
 
-  // spec agent-status-instruction-echo 子弹5 / SC4：栏加性扩 instruction /
-  // reconcile 段后仍是 `<agent_status>` 前缀命中 —— turn 边界谓词零变化。
+  // spec agent-status-instruction-echo SC4: after the bar additively grows
+  // instruction / reconcile sections it still matches on the `<agent_status>` prefix — turn-boundary predicate unchanged.
   it("含 instruction/reconcile 段的新格式栏 → false；真实消息含该字样不误伤", () => {
     const bar = buildAgentStatusText({
       lastTool: "bash",
@@ -618,9 +619,9 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
     );
   });
 
-  // spec D8 / SC7：三条 graph 现势通知都是 host 注入信封，不是操作员键入 ——
-  // 与 TUI `isTuiHiddenUserMessage` 同一份「hidden 注入」名单。谓词来源必须是
-  // 生产者本家（isGraphModeText），消费侧不得再写一份前缀检查。
+  // The three graph presence notifications are all host-injected envelopes, not operator
+  // keystrokes — the same "hidden injection" list as TUI's `isTuiHiddenUserMessage`. The
+  // predicate must come from the producer itself (isGraphModeText); consumers must not write their own prefix check.
   it("graph_mode 三条现势通知 user 消息 → false（host 注入非 query）", () => {
     for (const text of [
       IKNOW_GRAPH_MODE_ON_NOTIFICATION,
@@ -660,10 +661,11 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
     );
   });
 
-  // spec SC1–SC4 / ADR-0098：增量 listing 是 host 注入信封（第五类），不是
-  // 操作员键入 —— Web 用户气泡 / turn 边界同上。谓词来源必须是生产者本家
-  // （isSkillIndexDeltaText），消费侧不得再写一份前缀检查（与 graph_mode
-  // 用例同款：先钉生产者谓词命中自家常量，再钉消费侧返回 false）。
+  // ADR-0098: the incremental listing is a host-injected envelope (the fifth kind), not
+  // operator keystrokes — Web user bubble / turn boundary as above. The predicate must
+  // come from the producer itself (isSkillIndexDeltaText); consumers must not write their
+  // own prefix check (same shape as the graph_mode case: first pin that the producer's
+  // predicate hits its own constant, then pin that the consumer side returns false).
   it("skill-index delta listing user 消息 → false（host 注入非 query）", () => {
     const listing = `${SKILL_INDEX_DELTA_PREFIX}\nalpha: Alpha skill\n</available_skills>`;
     assert.equal(
@@ -703,14 +705,14 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
   });
 });
 
-// -- #604 T1: extractRecentUserTasks — 任务摘录纯函数 -------------------------
+// -- extractRecentUserTasks — pure task-excerpt function -------------------------
 //
-// 契约(plan T1 acceptance):
-//   - 倒序遍历 messages,至多取 3 条合格 user-turn 原文(trim 后);
-//   - 合格 = isTurnQuery + shouldSeedTaskFocus(寒暄过滤)+ 非 self-reference
-//     (前缀 TASK_EXCERPT_PREFIX 的摘录文本本身不被下一轮抽到);
-//   - 0 句 → []; assistant / tool_result / 寒暄 / drain / whitespace 一律不取;
-//   - 顺序:返回 chronological(最早→最新),latest 在最后。
+// Contract:
+//   - iterate messages in reverse, taking at most 3 qualifying user-turn texts (trimmed);
+//   - qualifying = isTurnQuery + shouldSeedTaskFocus (chit-chat filter) + non self-reference
+//     (excerpt text carrying the TASK_EXCERPT_PREFIX is never re-extracted by the next round);
+//   - 0 sentences -> []; assistant / tool_result / chit-chat / drain / whitespace are never taken;
+//   - order: returns chronological (oldest -> newest), latest last.
 
 describe("extractRecentUserTasks — task excerpt pure function (#604 T1)", () => {
   // empty ---------------------------------------------------------------
@@ -907,14 +909,13 @@ describe("shouldSeedTaskFocus — greeting filter (#605 T2 relocation)", () => {
 
 // -- D2 (tui-display-consistency) wire surface: per-turn thinkingMs sum -----
 //
-// 镜像 src/tui/turn-activity.ts sumThinkingMsInRange 语义,但落点是
-// session-api / web wire —— 与 TUI 折叠簇求和不 import 跨模块。本组用例
-// 钉死 sumAssistantThinkingMsInRange 的 8 类输入形态 + projectMessagesToTurns
-// 透传到 TurnDto.answer.thinkingMs 的两条路径(getSession 与 byte-stable
-// 缺席)。
+// Mirrors src/tui/turn-activity.ts sumThinkingMsInRange semantics, but lands on the
+// session-api / web wire — no cross-module import of the TUI fold-cluster sum. This group
+// pins sumAssistantThinkingMsInRange over 8 input shapes + the two pass-through paths
+// into TurnDto.answer.thinkingMs via projectMessagesToTurns (getSession and byte-stable absence).
 
 describe("D2 wire surface — sumAssistantThinkingMsInRange", () => {
-  // helper: 构造 messages + thinkingMs 并行数组,索引一一对应
+  // helper: build messages + thinkingMs parallel arrays with index-to-index correspondence
   const userMsg = assistant("user", [{ type: "text", text: "q" }]);
   const asstMsg = assistant("assistant", [{ type: "text", text: "a" }]);
 
@@ -979,7 +980,7 @@ describe("D2 wire surface — sumAssistantThinkingMsInRange", () => {
   });
 
   it("startIndex 偏移: 用 messages 切片起点对齐全局并行数组", () => {
-    // messages 切片 = messages.slice(2, 5),thinkingMs 是 file 级别并行数组
+    // messages slice = messages.slice(2, 5); thinkingMs is a file-level parallel array
     assert.equal(
       sumAssistantThinkingMsInRange({
         messages: [asstMsg, asstMsg, asstMsg],
@@ -1020,10 +1021,10 @@ describe("D2 wire surface — sumAssistantThinkingMsInRange", () => {
 });
 
 describe("D2 wire surface — projectMessagesToTurns thinkingMs 透传", () => {
-  // T2 (TUI 折叠) + T5 (web wire) 共享同一磁盘 SSOT。
-  // 本组钉死 TurnAnswerDto.thinkingMs (ms) 字段的两条接线:
-  //   1. file.thinkingMs 求和后挂到 answer (sum > 0 才挂, byte-stable)
-  //   2. thinkingMs 缺席 (旧会话) → 字段不挂 key
+  // TUI folding and web wire share the same on-disk SSOT.
+  // This group pins the two wirings of the TurnAnswerDto.thinkingMs (ms) field:
+  //   1. file.thinkingMs summed then attached to answer (attached only when sum > 0, byte-stable)
+  //   2. thinkingMs absent (old sessions) -> key not attached
 
   it("file.thinkingMs 求和到 answer.thinkingMs (多 assistant 求和)", () => {
     const messages: AnthropicNativeMessage[] = [
@@ -1033,8 +1034,8 @@ describe("D2 wire surface — projectMessagesToTurns thinkingMs 透传", () => {
       assistant("assistant", [{ type: "text", text: "a2" }]),
       assistant("assistant", [{ type: "text", text: "a3" }]),
     ];
-    // 与 messages 一一对应: turn1 末条 assistant[1]=1500;
-    // turn2 末两条 assistant[3]=800 + assistant[4]=1200 = 2000.
+    // one-to-one with messages: turn1 last assistant[1]=1500;
+    // turn2 last two assistants[3]=800 + assistant[4]=1200 = 2000.
     const thinkingMs = [null, 1500, null, 800, 1200];
     const turns = projectMessagesToTurns(messages, thinkingMs);
     assert.equal(turns.length, 2);
@@ -1061,17 +1062,17 @@ describe("D2 wire surface — projectMessagesToTurns thinkingMs 透传", () => {
       assistant("user", [{ type: "text", text: "q" }]),
       assistant("assistant", [{ type: "text", text: "a" }]),
     ];
-    const turns = projectMessagesToTurns(messages, []); // 空并行数组
+    const turns = projectMessagesToTurns(messages, []); // empty parallel array
     assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
   });
 
   it("thinkingMs=0 (该 turn slice 无 assistant) → 字段缺席, byte-stable", () => {
-    // 单 user message 无后续 assistant → turn slice 内无 assistant → sum=0
+    // single user message with no following assistant -> no assistant in the turn slice -> sum=0
     const messages: AnthropicNativeMessage[] = [
       assistant("user", [{ type: "text", text: "q" }]),
     ];
     const turns = projectMessagesToTurns(messages, [1200]);
-    // user 单条也是一个 turn (没有 assistant 收尾,但仍是一段 turn query)
+    // a lone user message is still a turn (no assistant closing it, but it is a turn query)
     assert.equal(turns.length, 1);
     assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
   });

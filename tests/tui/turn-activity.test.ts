@@ -1,8 +1,8 @@
 /**
  * tests/tui/turn-activity.test.ts
  *
- * last-turn 切片 + 工具计数折叠文案。5 类边界：empty / negative /
- * overflow / concurrent / exception。
+ * Last-turn slice + tool-count fold wording. Five input classes:
+ * empty / negative / overflow / concurrent / exception.
  */
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -57,8 +57,8 @@ describe("lastTurnQueryIndex / sliceTurnFrom（empty）", () => {
 });
 
 describe("orderedTurnActivitySegments", () => {
-  // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合 resolver
-  // 判定为 true 的件（成功且 retract）。resolver 缺省 = 全部计入（兜底）。
+  // Fold counting aggregates only calls the resolver judges true (settled and
+  // retracted). Resolver omitted = count everything (fallback).
   describe("inFoldCountOf resolver（D3 只数成功的收）", () => {
     const neverCount = () => false;
     const all = () => true;
@@ -243,7 +243,7 @@ describe("orderedTurnActivitySegments", () => {
     expect(orderedTurnActivitySegments([malformed], 0)).toEqual([]);
   });
 
-  // concurrent：N/A — helper 是纯同步扫描，不存在共享异步状态。
+  // concurrent: N/A — the helper is a pure synchronous scan, no shared async state.
 });
 
 describe("countToolUsesByName（negative：末条无 tool_use）", () => {
@@ -362,9 +362,9 @@ describe("formatToolUseCounts", () => {
   });
 
   test("恒 ≤1 行硬合同不存在（活动块把多行收成单行由 deriveActivityBlocks 保证）", () => {
-    // plans/tui-activity-block.md T7：旧 `formatTurnActivityFold` 的硬合同
-    // 已退役 —— 活动块标题由 `deriveActivityBlocks` 单源派生，本函数只
-    // 负责行内拼接，不再承接 ≤1 行的整形。
+    // The old `formatTurnActivityFold` hard contract is retired — the activity
+    // block title is derived from a single source by `deriveActivityBlocks`;
+    // this function only joins within a line and no longer owns ≤1-line shaping.
     expect(formatToolUseCounts([])).toBe("");
   });
 });

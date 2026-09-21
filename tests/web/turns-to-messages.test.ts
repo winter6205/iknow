@@ -1,11 +1,11 @@
 /**
- * turnsToMessages pure-helper tests (H2 / code-review 双轴整改).
+ * turnsToMessages pure-helper tests.
  *
  * Mirrors tests/web/stop-reason.test.ts style: vitest describe/it +
  * node:assert/strict, root vitest (node env). Only imports the pure function
  * (the module's react hook imports are module-level and never invoked here).
  *
- * Covers the H2 regression: a turn with empty finalText but tool_use and/or
+ * Covers the regression: a turn with empty finalText but tool_use and/or
  * thinking must still emit an agent message (previously the whole turn was
  * dropped by `if (t.answer.finalText.trim())`).
  */

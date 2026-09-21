@@ -1,8 +1,9 @@
 /**
- * F-4 parentTurnId 填实 — `spawn_subagent` 工具把 `ctx.turnId` 写进 def。
+ * parentTurnId fill-in — `spawn_subagent` writes `ctx.turnId` into def.
  *
- * 工具是「哪一回合派出了这个子代理」这条信息唯一的过路点：loop-engine 知道
- * 回合、manager 知道子代理，中间只有 tool ctx 连着两边。
+ * The tool is the only waypoint for "which turn dispatched this subagent":
+ * loop-engine knows the turn, manager knows the subagent, and only tool ctx
+ * connects the two sides.
  */
 
 import assert from "node:assert/strict";

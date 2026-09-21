@@ -1,17 +1,17 @@
 /**
- * #337 T11 + #disclosure-index-align T2 — E2E A 验收：stub-model 脚本化全链路（spec SC13 + SC8）。
+ * E2E A acceptance: stub-model scripted full chain. After ADR-0046 removed
+ * `skill_search`, the model calls `skill({name:"echo"})` directly →
+ * `tool_search` → `mcp__*`, asserting real results at each step. When
+ * codebase-memory-mcp is absent → explicit skip + Not-run record; the other
+ * sub-assertions still run.
  *
- * 链路：spec ADR-0046 删 `skill_search` 后,直呼 `skill({name:"echo"})` →
- * `tool_search` → `mcp__*`。每步断言真实结果;codebase-memory-mcp 缺席
- * → 显式 skip + Not run 记录（spec 假设 14 格式），其余子断言照跑。
+ * Wiring: real buildHarnessEngine (skill catalog scans a tmp fixture dir,
+ * MCP manager is conditional on surface). Fixture skills live under tmp
+ * `<cwd>/.iknow/skills/echo/` so the real ~/.iknow is never polluted.
  *
- * 装配：buildHarnessEngine 真实装配（skill catalog 扫 tmp fixture 目录，
- * MCP manager 按 surface 条件化）。fixture skill 放在 tmp 的
- * `<cwd>/.iknow/skills/echo/`（T8 测试同法，不污染真实 ~/.iknow）。
- *
- * stub-model 脚本（SC13 + SC8）：模型回合依次
+ * stub-model script: model turns in order
  *   turn1: tool_use(skill, { name: "echo" })
- *   turn2: 最终 text → stopReason completed
+ *   turn2: final text -> stopReason completed
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -25,7 +25,7 @@ import type { IknowEnv } from "../../src/config/env.ts";
 import type { LoopState } from "../../src/harness/model-adapter/types.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 
-/** 与 tests/harness/build-engine.test.ts 同构的测试 env fixture。 */
+/** Test env fixture mirroring tests/harness/build-engine.test.ts. */
 function makeEnv(apiKey: string): IknowEnv {
   return {
     llm: {
@@ -43,15 +43,15 @@ function makeEnv(apiKey: string): IknowEnv {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
-    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    // MCP connection timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
-    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    // Subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
   };
 }
 
-/** fixture skill：写入 <root>/.iknow/skills/<name>/SKILL.md（T8 同法）。
- *  `disabled` 时 frontmatter 加 `disable-model-invocation: true`（SC3 隐形活体样本）。 */
+/** Fixture skill: writes <root>/.iknow/skills/<name>/SKILL.md.
+ *  When `disabled`, frontmatter gains `disable-model-invocation: true` (invisible live sample). */
 async function plantSkill(
   root: string,
   name: string,
@@ -69,7 +69,7 @@ async function plantSkill(
   );
 }
 
-/** 模型回合脚本：tool_use → tool_use → final text。 */
+/** Model turn script: one tool_use per turn, then final text. */
 function scriptedTurns(
   calls: ReadonlyArray<{ name: string; input: unknown }>
 ): ReadonlyArray<ReturnType<typeof assistantResult>> {
@@ -113,30 +113,33 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13 + SC8）", () =
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      // 本文件验 skill / MCP 链本身,不验溢出退场 / 索引降档 —— 断言只看
-      // 名字在场(降档也只剥描述、名字永在),两条路径的专测见
-      // build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
-      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      // This file verifies the skill / MCP chain itself, not overflow eviction
+      // or index downgrade — assertions only check name presence (downgrade
+      // strips descriptions only, names always remain); dedicated tests:
+      // build-engine-tool-overflow.test.ts and disclosure-index-align/.
+      // countTokens bypassed during wiring; seam semantics are on
+      // BuildEngineOpts.skipCountTokens.
       skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // fixture skill 在场 → catalog 含 skill 一件（disclosure-index-align T2
-    // / SC5 删 skill_search 后只剩 1 件）。
+    // Fixture skill present -> catalog contains exactly the `skill` tool
+    // (only one left after skill_search was deleted).
     expect(built.deps.registry.get("skill")).toBeDefined();
-    // SC5：skill_search 不在注册表（连 fixture 也无此工具）。
+    // skill_search must not be in the registry (not even with the fixture).
     expect(built.deps.registry.get("skill_search")).toBeUndefined();
 
-    // stub-model 脚本:disclosure-index-align T2 删 skill_search 后,模型直接
-    // 调 skill({name:"echo"})（SC8 直呼路径不依赖二次检索）。
+    // stub-model script: with skill_search deleted, the model calls
+    // skill({name:"echo"}) directly (no reliance on a second retrieval step).
     const stub = createStubModel({
       responses: scriptedTurns([{ name: "skill", input: { name: "echo" } }]),
     });
 
-    // build-engine 的 adapter 是真实 Anthropic；stub-model 脚本化时覆写。
-    // deps 其余字段（registry/executor/promptTools/system/…）保留真实装配。
+    // build-engine's adapter is the real Anthropic one; overridden here for
+    // stub scripting. All other deps fields (registry/executor/promptTools/
+    // system/…) keep the real wiring.
     const deps = { ...built.deps, adapter: stub };
 
     const state: LoopState = {
@@ -146,7 +149,7 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13 + SC8）", () =
     const { result } = await run("test e2e", deps);
 
     expect(result.stopReason).toBe("completed");
-    // 简化断言:skill 直呼未拒（回合完成即证明）。
+    // Simplified assertion: the direct skill call was not rejected (turn completion proves it).
     expect(result.finalText).toBe("E2E chain complete");
     void state;
   }, 30_000);
@@ -155,7 +158,7 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13 + SC8）", () =
 describe("#337 T11 E2E A：<available_skills> 段装配（SC3/SC4）", () => {
   it("deps.system() 文本含 3 个可调用种子 + session-handoff 隐形", async () => {
     root = await mkdtemp(join(tmpdir(), "iknow-t11-seg-"));
-    // 复刻 T9 种子形态：3 个可调用 + 1 个 disable-model-invocation（SC3/SC4）
+    // Mirror the prior seed shape: 3 callable + 1 disable-model-invocation
     await plantSkill(
       root,
       "systematic-debugging",
@@ -188,7 +191,7 @@ describe("#337 T11 E2E A：<available_skills> 段装配（SC3/SC4）", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验 skills 段在场,不验溢出 / 索引降档。
+      skipCountTokens: true, // same as above: skills section presence only, not overflow / downgrade.
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
@@ -196,9 +199,9 @@ describe("#337 T11 E2E A：<available_skills> 段装配（SC3/SC4）", () => {
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
-    // 段在（含 fixture echo skill 名字序渲染）
+    // Section present (fixture skill names rendered inside)
     expect(systemText).toContain("<available_skills>");
-    // 3 个可调用种子 skill 出现在段内
+    // The 3 callable seed skills appear inside the section
     for (const seed of [
       "systematic-debugging",
       "verification-before-completion",
@@ -206,14 +209,14 @@ describe("#337 T11 E2E A：<available_skills> 段装配（SC3/SC4）", () => {
     ]) {
       expect(systemText).toContain(seed);
     }
-    // session-handoff 隐形（SC3）
+    // session-handoff stays invisible
     expect(systemText).not.toContain("session-handoff");
   }, 30_000);
 });
 
 describe("#337 T11 E2E A：MCP 链（codebase-memory-mcp 条件，SC13/假设 14）", () => {
   it("tool_search discover → mcp__ 调用（server 缺席 → 显式 skip + Not run）", async () => {
-    // 探测 codebase-memory-mcp 是否可用（本机依赖）
+    // Probe whether codebase-memory-mcp is available (local-machine dependency)
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
     const execFileP = promisify(execFile);
@@ -236,7 +239,7 @@ Validation:
       return;
     }
 
-    // server 在场：装配 manager（surface=chat 自动创建）+ 后台连接
+    // Server present: wire the manager (auto-created for surface=chat) + background connect
     root = await mkdtemp(join(tmpdir(), "iknow-t11-mcp-"));
     await plantSkill(
       root,
@@ -251,19 +254,19 @@ Validation:
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
-      skipCountTokens: true, // 同上:验 MCP 工具注册,不验溢出 / 索引降档。
+      skipCountTokens: true, // same as above: MCP tool registration only, not overflow / downgrade.
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // manager 在场（chat surface）→ shutdown 句柄存在
+    // manager present (chat surface) -> shutdown handle exists
     expect(typeof built.shutdown).toBe("function");
-    // disclosure-index-align T2 / SC5:skill_search 已删;skill 仍在场。
+    // skill_search is gone; skill remains registered.
     expect(built.deps.registry.get("skill")).toBeDefined();
     expect(built.deps.registry.get("skill_search")).toBeUndefined();
-    // MCP 工具经 registerExternal 动态注册 → catalog 中 mcp__* 名字
-    // 等待后台连接完成（30s 注册超时内）
+    // MCP tools register dynamically via registerExternal -> mcp__* names in the catalog.
+    // Wait for the background connection to finish (within the 30s registration timeout).
     const names = built.deps.registry.list().map((d) => d.name);
     const mcpTools = names.filter((n) => n.startsWith("mcp__"));
     if (mcpTools.length === 0) {

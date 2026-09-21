@@ -2,15 +2,17 @@
 /**
  * tests/tui/copy-osc52-gate.test.tsx
  *
- * #343 follow-up: 当 OpenTUI 检测到 OSC52 不被终端支持时，不应盲信
- * `copyToClipboardOSC52` 返回 true；否则会显示「已复制」但剪贴板为空。
+ * When OpenTUI detects that the terminal does not support OSC52, we must not
+ * blindly trust a `true` return from `copyToClipboardOSC52` — otherwise the UI
+ * shows `已复制` ("copied") while the clipboard stays empty.
  *
- * 用户报告：「有时候点右键不复制」—— 候选根因：终端禁用 OSC52（安全策略）
- * 但 OpenTUI 返回 true，doCopy 直接返回 kind:ok、method:pbcopy，跳过原生
- * fallback 链（pbcopy/wl-copy/xclip/xsel/last_copy.txt）。
+ * User report: "sometimes right-click does not copy". Candidate root cause:
+ * the terminal disables OSC52 (security policy) yet OpenTUI still returns
+ * true, so doCopy returns kind:ok / method:pbcopy and skips the native
+ * fallback chain (pbcopy/wl-copy/xclip/xsel/last_copy.txt).
  *
- * 修复：在调用 OSC52 之前先问 renderer.isOsc52Supported()；false 则直接走
- * 完整 fallback。
+ * Fix: ask renderer.isOsc52Supported() before calling OSC52; if false, go
+ * straight to the full fallback.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -55,8 +57,9 @@ describe("OSC52 终端支持门控", () => {
     };
     r.currentSelection = fakeSelection("OSC52 fake success but unsupported");
 
-    // 假设：终端不支持 OSC52，但 copyToClipboardOSC52 仍返回 true
-    // （zig 端只管写字节，不管终端真收到没）。
+    // Premise: the terminal does not support OSC52, yet copyToClipboardOSC52
+    // still returns true (the zig side only writes bytes, it cannot know
+    // whether the terminal actually received them).
     const realSupported = r.isOsc52Supported();
     const realCopy = r.copyToClipboardOSC52;
     let osc52Calls = 0;
@@ -66,7 +69,7 @@ describe("OSC52 终端支持门控", () => {
       r as unknown as { copyToClipboardOSC52: (t: string) => boolean }
     ).copyToClipboardOSC52 = (text: string) => {
       osc52Calls += 1;
-      // 模拟 OSC52 字节写成功但终端忽略
+      // Simulate OSC52 bytes written successfully but ignored by the terminal
       return realCopy.call(setup.renderer, text);
     };
 
@@ -77,21 +80,22 @@ describe("OSC52 终端支持门控", () => {
 
     const frame = setup.captureCharFrame();
 
-    // 期望：不应把"OSC52=true"当真；应走到 fallback 链。
-    // 在 test 环境 PATH 无 binary，最后会落到 last_copy.txt 写文件。
-    expect(osc52Calls).toBe(0); // ← 关键：isOsc52Supported=false 时不应调 OSC52
+    // Expectation: "OSC52=true" must not be taken at face value; the fallback
+    // chain must run. In the test env PATH has no clipboard binary, so it
+    // ends at the last_copy.txt file write.
+    expect(osc52Calls).toBe(0); // ← key: OSC52 must not be called when isOsc52Supported=false
     expect(frame).toMatch(/已复制|已写入/);
 
     const fallbackPath = join(tmpDataDir, "last_copy.txt");
     if (frame.includes("已写入")) {
-      // 写文件 fallback 命中
+      // file-write fallback hit
       expect(existsSync(fallbackPath)).toBe(true);
       expect(readFileSync(fallbackPath, "utf8")).toBe(
         "OSC52 fake success but unsupported"
       );
     }
 
-    // 还原
+    // restore
     (r as unknown as { isOsc52Supported: () => boolean }).isOsc52Supported =
       () => realSupported;
     (

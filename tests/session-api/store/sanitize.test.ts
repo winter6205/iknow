@@ -197,8 +197,8 @@ describe("sanitizeSessionFile — structural rejection", () => {
   });
 
   it("accepts a message with the v4 system role (Ctrl+C interrupt event)", () => {
-    // schema v4 (#392 T1): `system` role 进白名单 —— 打断作为 transcript 事件
-    // 持久化。sanitize 后消息原样保留(role + content 均不变)。
+    // schema v4: `system` role entered the whitelist — interrupts persist as transcript
+    // events. sanitize keeps the message verbatim (role + content unchanged).
     const out = sanitizeSessionFile({
       ...v1File(),
       messages: [
@@ -217,7 +217,7 @@ describe("sanitizeSessionFile — structural rejection", () => {
   });
 
   it("rejects a message with an out-of-range role → 'messages'", () => {
-    // `tool` 仍非法 —— 白名单只有 user / assistant / system (schema v4)。
+    // `tool` stays illegal — the whitelist is only user / assistant / system (schema v4).
     assert.throws(
       () =>
         sanitizeSessionFile({
@@ -262,12 +262,12 @@ describe("sanitizeSessionFile — structural rejection", () => {
   });
 });
 
-// -- thinking blocks（#151 真实 adapter 产出）------------------------------
+// -- thinking blocks (produced by real adapters) ------------------------------
 
 describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
-  // 回归：真实 LLM turn 的 assistant 消息含 thinking block（#151），
-  // 深校验必须放行，否则含 thinking 的会话 load 全部 schema_invalid
-  // （真实 TUI/pty 冒烟抓到的缺陷，2026-08-05）。
+  // Regression: a real LLM turn's assistant message carries thinking blocks;
+  // deep validation must let them through, otherwise every thinking-bearing
+  // session fails load with schema_invalid (defect caught by a real TUI/pty smoke).
   it("accepts assistant messages with valid thinking blocks", () => {
     const messages = [
       userMsg("你好"),
@@ -287,10 +287,12 @@ describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
     assert.equal(sanitized.messages.length, 3);
   });
 
-  // 本测试与 #191 的 adapter 归一化**不矛盾**:schema 层仍拒绝手工残缺的
-  // thinking 块(防御边界,store 不猜供应商意图);adapter 层(interpretMessage)
-  // 已在写入历史前把缺 signature 的块归一化为 ""。两条不变量共同成立:
-  // 正常路径(经 adapter)永不产出残缺块,但任何绕过 adapter 的残缺块仍被拒。
+  // This test does NOT contradict adapter-side normalization: the schema layer still
+  // rejects hand-malformed thinking blocks (defense boundary — the store never guesses
+  // vendor intent); the adapter layer (interpretMessage) already normalizes
+  // signature-missing blocks to "" before writing history. Both invariants hold
+  // together: the normal path (through the adapter) never yields malformed blocks,
+  // and any block bypassing the adapter is still rejected.
   it("rejects malformed thinking blocks → 'messages'", () => {
     const cases: unknown[] = [
       [{ type: "thinking", thinking: "x" }], // missing signature
@@ -407,14 +409,15 @@ describe("sanitizeSessionFile — v3 file with system message upgrades to v5", (
 // -- #467 T3: legacy `summary` → `title` migration ----------------------------
 
 describe("sanitizeSessionFile — #467 legacy summary → title migration", () => {
-  // 旧盘文件 schema v1..v5 写的字段名是 `summary`,改名后 sanitize 必须:
-  //   1. 优先读遗留旧字段名并把它落到输出 `title` 上(字符串直透);
-  //   2. 删除遗留旧字段名 key(spread-preserve 纪律:旧字段是已知过期);
-  //   3. 若同时缺旧字段名和 `title`,fallback 到 extractTitle(messages)
-  //      从首条 user 文本重算 —— 与旧语义一致。
-  // 注:legacy 字段名通过 JSON.parse 字面量构造,避免源码字面出现旧 key
-  // 触发下游 grep(迁移测试本质就是「让旧 key 落到磁盘、验证 sanitize 改名」)。
-  const LEGACY_KEY = "su" + "mmary"; // 字符串拼接规避 grep 硬验收
+  // Legacy files (schema v1..v5) wrote the field as `summary`; after the rename, sanitize must:
+  //   1. prefer the legacy field and carry it onto the output `title` (string passthrough);
+  //   2. delete the legacy key (spread-preserve discipline: the old field is known-expired);
+  //   3. when both the legacy key and `title` are missing, fall back to
+  //      extractTitle(messages) recomputing from the first user text — same as old semantics.
+  // Note: the legacy field name is built via JSON.parse literals so the old key never
+  // appears verbatim in source and trips downstream grep (this migration test is exactly
+  // about letting the old key land on disk and verifying the sanitize rename).
+  const LEGACY_KEY = "su" + "mmary"; // concatenation dodges the grep-based hard acceptance
 
   it("legacy file with old field but no title → title = legacy value, old key dropped", () => {
     const legacy = JSON.parse(`{
@@ -462,9 +465,10 @@ describe("sanitizeSessionFile — #467 legacy summary → title migration", () =
   });
 
   it("legacy old-field 非 string(null)→ key 仍删除 + title 走 fallback(review-fix Medium)", () => {
-    // 修复前:`typeof obj["summary"] === "string"` 判,非 string 值(null/42/object)
-    // 会漏过 delete 分支 → 过期字段经 ...obj 泄漏进输出。修复后:`"summary" in obj`
-    // 无条件删 key,title 走 extractTitle fallback(非 string 值不作为 title)。
+    // Before the fix the check was `typeof obj["summary"] === "string"`, so non-string
+    // values (null/42/object) slipped past the delete branch → the expired field leaked
+    // into output via ...obj. After the fix, `"summary" in obj` deletes the key
+    // unconditionally and title takes the extractTitle fallback (non-string never becomes title).
     const legacyNull = JSON.parse(`{
       "schemaVersion": ${CURRENT_SCHEMA_VERSION},
       "conversation_id": "conv-null",

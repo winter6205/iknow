@@ -6,7 +6,6 @@
  * Used by:
  *   - tests/cli-session.test.ts
  *   - tests/cli/process-chat-line-harness.test.ts
- *   - tests/chat-repl.test.ts (harness integration block)
  */
 import type {
   AnthropicContentBlock,
@@ -36,7 +35,7 @@ export interface AssistantResultOpts {
   readonly texts: string[];
   readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
   readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
-  /** #152 T5: optional thinking blocks; full fields kept in nativeMessage.content. */
+  /** Optional thinking blocks; full fields kept in nativeMessage.content. */
   readonly thinkingBlocks?: ReadonlyArray<{
     readonly type: "thinking" | "redacted_thinking";
     readonly thinking?: string;
@@ -44,13 +43,14 @@ export interface AssistantResultOpts {
     readonly data?: string;
   }>;
   /**
-   * D2 (tui-display-consistency):本 assistant 回合的思考时长(ms)。stub
-   * 路径默认字段缺席(模拟"测不到"的真实情况);传入则附带。
+   * This assistant turn's thinking duration (ms). Absent by default on the stub
+   * path (simulating the real "not measurable" case); attached only when passed
+   * in.
    */
   readonly thinkingMs?: number;
   /**
-   * #160 T4: optional token usage(传入时附带于返回对象;不传则字段缺席,
-   * 保持 stub 路径无 usage 的设计语义)。
+   * Optional token usage: attached to the returned object when passed; when
+   * omitted the field is absent, keeping the stub path's no-usage design.
    */
   readonly usage?: TokenUsage;
 }
@@ -93,10 +93,11 @@ export function assistantResult(
       supplierStop === "success" &&
       texts.length === 0 &&
       toolCalls.length === 0,
-    // D2 (tui-display-consistency):thinkingMs 字段缺省语义(stub 默认不传);
-    // 传入则原样附带。
+    // thinkingMs default-field semantics: the stub passes nothing; when supplied it
+    // is attached verbatim.
     ...(opts.thinkingMs !== undefined && { thinkingMs: opts.thinkingMs }),
-    // 不传 usage 则字段缺席(stub 路径默认语义);传入时原样附带。
+    // No usage passed → field absent (the stub path's default); passed → attached
+    // verbatim.
     ...(opts.usage !== undefined && { usage: opts.usage }),
   };
 }
@@ -104,13 +105,13 @@ export function assistantResult(
 /**
  * Build LoopEngineDeps backed by stub-model (createStubModel).
  *
- * #179 T6: optional `streamEventsByStep` forwards to the stub's
- * `streamEventsByStep` seam (T4 wiring). When set, each step emits the
- * scripted events before returning its `responses` entry.
+ * Optional `streamEventsByStep` forwards to the stub's `streamEventsByStep`
+ * seam. When set, each step emits the scripted events before returning its
+ * `responses` entry.
  *
- * #343 T7: optional `delayMs` forwards to stub-model's step delay seam so
- * stream-driven UI states (e.g. `tool_call_start` → `[运行中]` tail) have
- * time to render before the turn completes.
+ * Optional `delayMs` forwards to stub-model's step delay seam so stream-driven UI
+ * states (e.g. `tool_call_start` → `[运行中]` ("running") tail) have time to
+ * render before the turn completes.
  */
 export function makeDeps(
   responses: AssistantTurnResult[],
@@ -148,19 +149,19 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
 export interface MakeCtxOpts {
   readonly responses: AssistantTurnResult[];
   readonly stateOverrides?: Partial<CliChatState>;
-  /** #179 T6: per-step stream-event script (stub-model streamEventsByStep seam). */
+  /** Per-step stream-event script (stub-model streamEventsByStep seam). */
   readonly streamEventsByStep?: ReadonlyArray<
     ReadonlyArray<HarnessStreamEvent>
   >;
-  /** T2: per-step stub-model delay (milliseconds). */
+  /** Per-step stub-model delay (milliseconds). */
   readonly delayMs?: number;
-  /** T2: checkpoint 落盘 store；注入时 processChatLine 走持久化分支。 */
+  /** Checkpoint store; when injected, processChatLine takes its persistence branch. */
   readonly checkpointStore?: import("../../src/session-api/store/index.ts").SessionStore;
-  /** T1: resolved root used when processChatLine bootstraps a session file. */
+  /** Resolved root used when processChatLine bootstraps a session file. */
   readonly workspaceRoot?: string;
-  /** T2: abort controller；注入时 processChatLine 把 controller.signal 传 run()。 */
+  /** Abort controller; when injected, processChatLine passes controller.signal to run(). */
   readonly abortController?: AbortController;
-  /** ADR-0092 / SC13: fs 隔离档 holder；注入时 processChatLine 把它透给 verify 面。 */
+  /** ADR-0092: fs isolation-mode holder; when injected, processChatLine passes it to the verify surface. */
   readonly fsMode?: import("../../src/harness/sandbox/fs-mode.ts").FsModeContext;
 }
 

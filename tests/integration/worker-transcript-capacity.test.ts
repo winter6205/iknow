@@ -1,19 +1,23 @@
 /**
- * 容量回归 — 工人 transcript 单写者契约在并行压力下的集成压测（ADR-0110）。
+ * Capacity regression — integration stress of the worker-transcript
+ * single-writer contract under parallel load (ADR-0110).
  *
- * 产品容量目标：单会话 ≥5 个 worker 并行、≥3 个会话并行互不干扰。
- * 写者模型（已核）：一文件一写者进程；per-instance 串行队列在装配点
- * （src/cli/worker-transcript.ts 的 createSerialQueue），store 层无锁是
- * 架构纪律（锁在装配边界）。本测试不起真子进程，而是同形装配：每个
- * (conversationId, taskId) 一个 storeWorkerTranscriptIo 实例 = 一个 worker
- * 写者进程，实例内不 await 并发发起多批 append（含 tool_use/tool_result
- * 形态），实例间 Promise.all 确定性交错（不 sleep 赌时序）。
+ * Product capacity target: ≥5 workers in one conversation and ≥3 conversations
+ * in parallel, without interference. Writer model (verified): one writer
+ * process per file; the per-instance serial queue lives at the assembly point
+ * (createSerialQueue in src/cli/worker-transcript.ts) — the lock-free store
+ * layer is an architectural discipline (locks at the assembly boundary). This
+ * test spawns no real subprocesses; it assembles the same shape: one
+ * storeWorkerTranscriptIo instance per (conversationId, taskId) = one worker
+ * writer process, with multiple append batches fired concurrently (no await)
+ * inside each instance (tool_use/tool_result shapes included), and
+ * Promise.all deterministic interleaving across instances (no sleep-based timing bets).
  *
- * 钉住的不变式（每本账）：
- *   1. parseSessionJsonl 通过（交错 read-modify-write 造的重复 event id 在此抛）；
- *   2. 零重复 event id、parent 链按文件序合法、生效 head 指向链尾；
- *   3. 批次按入队顺序齐全（串行队列 FIFO）；
- *   4. 各 taskId 的事件只出现在各自文件（互不串写）。
+ * Pinned invariants (per ledger):
+ *   1. parseSessionJsonl passes (duplicate event ids from interleaved read-modify-write throw here);
+ *   2. zero duplicate event ids, parent chain legal in file order, effective head points at the chain tail;
+ *   3. all batches present in enqueue order (serial queue FIFO);
+ *   4. each taskId's events appear only in its own file (no cross-writes).
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -29,16 +33,17 @@ import type {
   AnthropicNativeMessage,
 } from "../../src/harness/model-adapter/types.ts";
 
-// ── 批次构造 ─────────────────────────────────────────────────────────────────
+// ── batch construction ───────────────────────────────────────────────────────
 
 function textBlock(text: string): AnthropicContentBlock {
   return { type: "text", text };
 }
 
 /**
- * 一批 = 一轮真实 worker 流量的形状：user 种子 → assistant tool_use →
- * user tool_result → assistant 收口文本。所有 text 带 `[taskId]` 前缀，
- * 串写检测据此判定（事件只要属于别的 taskId 就会破前缀不变式）。
+ * One batch = one real worker turn's shape: user seed → assistant tool_use →
+ * user tool_result → assistant closing text. Every text carries a `[taskId]`
+ * prefix, which is how cross-write detection works (an event from another
+ * taskId breaks the prefix invariant).
  */
 function makeBatch(taskId: string, batchIndex: number): AnthropicNativeMessage[] {
   const tag = `[${taskId}]`;
@@ -70,7 +75,7 @@ function flattenTexts(messages: ReadonlyArray<AnthropicNativeMessage>): string[]
   );
 }
 
-// ── 场景驱动 ─────────────────────────────────────────────────────────────────
+// ── scenario driver ──────────────────────────────────────────────────────────
 
 const BATCHES_PER_WORKER = 4;
 
@@ -80,9 +85,10 @@ interface WorkerDrive {
 }
 
 /**
- * 模拟一个 worker 写者进程：一个 io 实例，不 await 地并发发起多批 append。
- * 同一实例内串行队列决定落盘顺序（FIFO），首批并行的 mkdir 竞态发生在
- * 共享的 `<convDir>/subagents` 前缀上。
+ * Simulate one worker writer process: one io instance, multiple append batches
+ * fired concurrently without awaiting. Within the same instance the serial
+ * queue decides on-disk order (FIFO); the first-batch mkdir race happens on the
+ * shared `<convDir>/subagents` prefix.
  */
 async function driveWorker(
   rootDir: string,
@@ -106,7 +112,7 @@ async function driveWorker(
 
 async function assertLedgerClean(drive: WorkerDrive, taskId: string): Promise<void> {
   const raw = await readFile(drive.transcriptPath, "utf8");
-  const log = parseSessionJsonl(raw); // 重复 id / 断链在此抛 schema_invalid
+  const log = parseSessionJsonl(raw); // duplicate ids / broken chains throw schema_invalid here
 
   const ids = log.events.map((e) => e.id);
   assert.equal(new Set(ids).size, ids.length, `${taskId}: event id 不得重复`);
@@ -121,7 +127,7 @@ async function assertLedgerClean(drive: WorkerDrive, taskId: string): Promise<vo
   const texts = flattenTexts(log.events.map((e) => e.message));
   assert.deepEqual(texts, drive.expectedTexts, `${taskId}: 批次齐全且按入队顺序`);
 
-  // 串写检测：本账每个事件都带本 task 前缀（别的 taskId 混入即破）。
+  // Cross-write detection: every event here carries this task's prefix (any other taskId breaks it).
   for (const text of texts) {
     assert.ok(text.startsWith(`[${taskId}]`), `${taskId}: 账上混入非本 task 事件: ${text}`);
   }
@@ -131,7 +137,7 @@ function taskIds(n: number, prefix: string): string[] {
   return Array.from({ length: n }, (_, i) => `${prefix}-w${i}`);
 }
 
-// ── 测试 ─────────────────────────────────────────────────────────────────────
+// ── tests ────────────────────────────────────────────────────────────────────
 
 let dir: string;
 beforeEach(() => {

@@ -2,18 +2,19 @@
 /**
  * tests/tui/app.test.tsx
  *
- * #343 T6-C：TuiApp 端到端（tracer bullet + 三态/slash/list/quit/info/
- * compact / 池约束 / 候选 + Tab）。
+ * TuiApp end-to-end (tracer bullet + tri-state / slash / list / quit / info /
+ * compact / pool constraints / candidates + Tab).
  *
- * 用 stub deps（makeDeps from tests/cli/_fixtures.ts）+ 真实 bridge/hub。
- * mockInput.pressKey 走 OpenTUI stdin 异步解析，需配合 renderOnce 轮询。
+ * Stub deps (makeDeps from tests/cli/_fixtures.ts) + real bridge/hub.
+ * mockInput.pressKey goes through OpenTUI's async stdin parsing, so it must
+ * be paired with renderOnce polling.
  *
- * 端到端覆盖：
- *  1. 消息提交 → lazy create 建档 → turn 渲染（tracer）；
- *  2. 未知命令 → 「未知命令：...」notice；/info → 元信息行；
- *  3. /compact draft 会话 → 「Nothing to compact yet」（空会话护栏，英文）；
- *  4. turn 运行中发第二条 → 「正在运行」护栏 + 池内仅 1 个会话；
- *  5. slash 候选（输入 "/" 后 9 命令全显示）+ Tab 唯一匹配补全。
+ * E2E coverage:
+ *  1. submit → lazy-create session file → turn renders (tracer);
+ *  2. unknown command → `未知命令：...` ("unknown command") notice; /info → meta lines;
+ *  3. /compact on a draft → 「Nothing to compact yet」 (empty-session guard);
+ *  4. second submit while a turn runs → busy guard + exactly 1 session in pool;
+ *  5. slash candidates + Tab unique-match completion.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -43,7 +44,7 @@ import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/typ
 import { attachSession } from "../../src/tui/session-state.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
-/** 帧等待：mockInput 字节经 stdin 异步解析，需轮询 renderOnce。 */
+/** Frame wait: mockInput bytes parse asynchronously via stdin; poll renderOnce. */
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
@@ -59,7 +60,7 @@ async function untilFrame(
   throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
 }
 
-/** 条件等待（无帧返回）。 */
+/** Condition wait (returns no frame). */
 async function until(
   cond: () => boolean | Promise<boolean>,
   ms = 8000,
@@ -141,12 +142,12 @@ async function mountAppAsync(
       height: 30,
       exitOnCtrlC: false,
       consoleMode: "disabled",
-      // T8：Shift+Enter 需携带 shift 修饰（kitty 协议编码 [13;2u）。
+      // Shift+Enter must carry the shift modifier (kitty protocol encodes [13;2u).
       kittyKeyboard: true,
     }
   );
   setupRef = setup;
-  // 等键盘 / useEffect 注册完成（mount 后异步）。
+  // Wait for keyboard / useEffect registration to finish (async after mount).
   await new Promise((r) => setTimeout(r, 500));
   await setup.waitForVisualIdle();
   await setup.waitForVisualIdle();
@@ -157,21 +158,21 @@ async function mountAppAsync(
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
     typeText: async (text: string) => {
-      // 预热：先按一个无害键让 mockInput 解析器启动。
+      // Warm-up: press a harmless key to start the mockInput parser.
       setup.mockInput.pressKey("/");
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
-      // 清掉预热键（按 Backspace 多次）。
+      // Clear the warm-up key (repeated Backspace).
       for (let i = 0; i < 5; i++) {
         setup.mockInput.pressBackspace();
         await new Promise((r) => setTimeout(r, 30));
       }
-      // 真正要输入的内容。
+      // The actual content to type.
       for (const ch of text) {
         setup.mockInput.pressKey(ch);
         await new Promise((r) => setTimeout(r, 30));
       }
-      // 让 React 状态更新落地。
+      // Let React state updates settle.
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
     },
@@ -208,19 +209,19 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     const app = await mountAppAsync([
       assistantResult({ texts: ["## 答复标题\n\n正文内容"] }),
     ]);
-    // 启动：banner 版本行可见
+    // startup: banner version line visible
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 提交消息
+    // submit message
     await app.typeText("你好");
     await app.pressEnter();
-    // turn 完成 → inflight 清空
+    // turn done → inflight cleared
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     const list = await app.bridge.listSessions();
     expect(list.length).toBe(1);
     expect(list[0]!.title).toBe("你好");
 
-    // assistant 答复渲染
+    // assistant answer rendered
     await untilFrame(app.setup, (f) => f.includes("答复标题"), 8000, "answer");
     expect(app.setup.captureCharFrame()).toContain("正文内容");
 
@@ -231,8 +232,8 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     const app = await mountAppAsync([assistantResult({ texts: ["多行答复"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // 输入两行（Shift+Enter 分隔后 Enter 提交）。第二行用 raw type（不走
-    // typeText 的 "/" 预热 + Backspace——会清掉第一行）。
+    // Type two lines (Shift+Enter separates, Enter submits). The second line
+    // uses raw typing (typeText's "/" warm-up + Backspace would wipe line one).
     await app.typeText("行一");
     app.setup.mockInput.pressEnter({ shift: true });
     await new Promise((r) => setTimeout(r, 100));
@@ -245,7 +246,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.setup.renderOnce();
     await app.pressEnter();
 
-    // turn 完成 → 消息流渲染两行内容（user 消息块 wrapMode=word 多行）。
+    // turn done → stream renders both lines (user block wrapMode=word multi-line).
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "multi-done");
     const frame = await untilFrame(
       app.setup,
@@ -263,7 +264,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
     await app.typeText("/foobar");
     await app.pressEnter();
-    // 第一次 submit 不响应（空）；第二次以 /foobar 真提 → unknown
+    // first submit is a no-op (empty); the second truly submits /foobar → unknown
     await untilFrame(app.setup, (f) => f.includes("未知命令"), 8000, "unknown");
     await app.destroy();
   }, 30_000);
@@ -274,8 +275,8 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
     await app.typeText("/info");
     await app.pressEnter();
-    // /info 走 notice + 行展开；frame 可能因 scrollbox wrap 渲染为：
-    // "updatedAt:o—_id: __draft__（draft…）"（conversation_id 折断）
+    // /info renders notice + expanded lines; scrollbox wrap may fold the
+    // conversation_id across lines (e.g. `_id: __draft__` breaks up).
     await untilFrame(
       app.setup,
       (f) => f.includes("tokens") && f.includes("runState"),
@@ -288,8 +289,8 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   }, 30_000);
 
   test("turn 运行中 → mode 行右侧实时秒数；turn 结束 → mode 行清空 + 流末尾 `Crunched for`", async () => {
-    // delayMs=3000 让 turn 停留 running-fg ~3s —— 运行中实时秒数（`· Ns`，
-    // 每秒跳）有足够窗口被 untilFrame 抓到。
+    // delayMs=3000 keeps the turn running ~3s so live seconds (`· Ns`,
+    // ticking each second) have enough window for untilFrame to catch them.
     const app = await mountAppAsync(
       [assistantResult({ texts: ["答复"] })],
       makeDeps([assistantResult({ texts: ["答复"] })], { delayMs: 3000 })
@@ -298,7 +299,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
     await app.typeText("你好");
     await app.pressEnter();
-    // 运行中：mode 行右侧出现实时秒数（`mode: Default · Ns`）。
+    // running: live seconds appear right of the mode line (`mode: Default · Ns`).
     await untilFrame(
       app.setup,
       (f) => /mode: Default · \d+s/.test(f),
@@ -306,7 +307,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       "running-elapsed"
     );
 
-    // turn 完成 → 流末尾 Crunched 行（快照秒数 ≥1，3s delay 保证）。
+    // turn done → trailing `Crunched` line in the stream (snapshot seconds ≥1, guaranteed by 3s delay).
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     const frame = await untilFrame(
       app.setup,
@@ -315,21 +316,22 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       "crunched-summary"
     );
 
-    // mode 行清空：无 `·`、无秒数尾缀（trim 精确等于 `mode: Default`）。
+    // mode line cleared: no `·`, no seconds suffix (trim equals exactly `mode: Default`).
     const modeLine = frame
       .split("\n")
       .find((l) => l.includes("mode:"))
       ?.trim();
     expect(modeLine).toBe("mode: Default");
-    // token 统计段已随 #426 修订移除：帧内无 `↓` / `tokens`。
+    // token stats segment was removed in a later revision: frame has no `↓` / `tokens`.
     expect(frame.includes("↓")).toBe(false);
     expect(frame.includes("tokens")).toBe(false);
     await app.destroy();
   }, 30_000);
 
   test("快速 turn（<1s）→ mode 行无运行统计段 + 流末尾无 Crunched（gate 守 <1s）", async () => {
-    // stub 无 delay → turn 立即完成；秒数冻结 0s → formatCrunched 返回空串
-    // + ChatView `>0` gate 把 Crunched 行排除（不渲染难看的 `Crunched for 0s`）。
+    // stub has no delay → turn completes instantly; seconds freeze at 0 →
+    // formatCrunched returns "" + ChatView's `>0` gate drops the Crunched
+    // line (no ugly `Crunched for 0s`).
     const app = await mountAppAsync([assistantResult({ texts: ["普通答复"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
@@ -338,7 +340,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(app.setup, (f) => f.includes("普通答复"), 8000, "answer");
 
-    // 等一个 render 周期后断言：mode 行仍显示、无运行统计段；流末尾无 Crunched。
+    // After one render cycle assert: mode line still shown, no running stats; no trailing Crunched.
     await new Promise((r) => setTimeout(r, 1200));
     await app.setup.renderOnce();
     const frame = app.setup.captureCharFrame();
@@ -366,9 +368,10 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   }, 30_000);
 
   test("turn 运行中发第二条 → busy 护栏 / 池内 1 会话（busy 窗口测试需 stub delayMs，本条覆盖 idle 顺序）", async () => {
-    // 注：当前 makeDeps 不支持 delayMs（archive T6 用 stub-model delayMs 控制
-    // busy 窗口）；本测覆盖「第一条完成后第二条顺序提交 → 池内 1 会话 turnCount=2」
-    // — 即 busy-guard 在 idle 状态下不误拒。
+    // Note: current makeDeps has no delayMs support (the archived stub-model
+    // used delayMs to control the busy window); this case covers "second
+    // submit after the first completes → 1 session in pool, turnCount=2"
+    // — i.e. the busy-guard does not false-reject while idle.
     const app = await mountAppAsync([
       assistantResult({ texts: ["答复"] }),
       assistantResult({ texts: ["第二条"] }),
@@ -388,8 +391,8 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     );
     const list = (await app.bridge.listSessions()) ?? [];
     expect(list.length).toBe(1);
-    expect(list[0]!.title).toBe("第一条"); // title = 首条 user（#120 SC 6）
-    // turnCount 查 session 文件（list 不携带）
+    expect(list[0]!.title).toBe("第一条"); // title = first user message
+    // turnCount is read from the session file (list does not carry it)
     const sessionId = list[0]!.conversation_id;
     const file = await app.bridge.loadSessionFile(sessionId);
     expect(file.turnCount).toBe(2);
@@ -397,11 +400,10 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.destroy();
   }, 30_000);
 
-  // 注：slash 候选渲染依赖 PromptInput 内部 hintCursor state — frame 不
-  // 一定反映内部 state（hint 通过组件内嵌子节点渲染，可能未触发
-  // captureCharFrame 的文本变化）。直接验证：通过 /q + Tab 唯一匹配补全
-  // （已在 Tab 补全测试中覆盖）作为候选行为最终落点；候选完整渲染属于
-  // PromptInput 单测范畴，archive PromptInput 切片测试在 T7 收口时一并迁移。
+  // Note: slash-candidate rendering depends on PromptInput's internal
+  // hintCursor state, which captureCharFrame may not reflect. Candidate
+  // behavior lands via the Tab unique-match test below; full candidate
+  // rendering belongs to PromptInput unit tests.
 
   test("/sessions → 列表视图（+ 新建会话 + title）→ Esc 返回聊天", async () => {
     const app = await mountAppAsync([assistantResult({ texts: ["reply-A"] })]);
@@ -421,7 +423,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       "list-summary"
     );
 
-    // Esc 返回聊天视图
+    // Esc returns to the chat view
     await app.pressEscape();
     await untilFrame(app.setup, (f) => f.includes("输入消息"), 8000, "back");
 
@@ -440,16 +442,16 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 });
 
 /**
- * /thinking — design-25 thinking-picker（双面板版）：/thinking 不再立即翻转
- * 开关 + notice，改为打开纯开关面板（ON/OFF）。Enter 固定（面板保持打开）、
- * Esc 保存退出（写 thinkingEnabled，无 cancel 路径）。
+ * /thinking — thinking-picker (dual-panel): /thinking no longer flips the
+ * toggle + notice immediately; it opens a pure ON/OFF panel. Enter pins
+ * (panel stays open), Esc saves and exits (writes thinkingEnabled, no cancel path).
  */
 describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
   test("defaultThinking off → /thinking 开面板（无 notice）→ Space 切换 ON → Enter 不关闭 → Esc 保存退出 → /info adaptive (auto)", async () => {
     const app = await mountAppAsync([]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /thinking Enter → 面板打开（标题「思考开关」），不设 notice「思考：开」。
+    // /thinking + Enter → panel opens (title `思考开关`), no `思考：开` notice set.
     await app.typeText("/thinking");
     await app.pressEnter();
     await untilFrame(
@@ -461,7 +463,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     expect(app.setup.captureCharFrame()).not.toContain("思考：开");
     expect(app.setup.captureCharFrame()).not.toContain("思考：关");
 
-    // 面板内 Space（OFF → ON）：开关预览翻转，面板保持打开。
+    // Space inside the panel (OFF → ON): preview flips, panel stays open.
     await app.pressSpace();
     await untilFrame(
       app.setup,
@@ -470,14 +472,14 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
       "preview-on"
     );
 
-    // Enter（固定当前预览 ON，不翻转、不退出）：面板**保持打开**（核心新增
-    // 断言：Enter 固定不关闭）。随后 Esc 保存退出。
+    // Enter pins the current preview (no flip, no exit): panel **stays open**
+    // (key assertion: Enter does not close). Esc then saves and exits.
     await app.pressEnter();
     const afterEnter = app.setup.captureCharFrame();
     expect(afterEnter).toContain("思考开关");
     expect(afterEnter).toContain("ON");
 
-    // Esc 保存退出（写 thinkingEnabled=true）→ 面板关闭、回输入正常。
+    // Esc saves and exits (writes thinkingEnabled=true) → panel closes, input normal again.
     await app.pressEscape();
     await untilFrame(
       app.setup,
@@ -488,7 +490,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     expect(app.setup.captureCharFrame()).toContain("Version");
     expect(app.setup.captureCharFrame()).toContain("输入消息");
 
-    // /info 反射：enabled=true + effort="" → adaptive (auto)。
+    // /info reflects: enabled=true + effort="" → adaptive (auto).
     await app.typeText("/info");
     await app.pressEnter();
     const frame = await untilFrame(
@@ -515,8 +517,9 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
       "picker-open"
     );
 
-    // Esc 保存退出（无任何切换 → 写回 seed OFF）：面板关闭，无 notice 噪音
-    // （无「思考：开」也无「已取消」），且 state 已写（/info 显示 off）。
+    // Esc saves and exits (no toggles → writes back seeded OFF): panel closes
+    // with no notice noise (neither `思考：开` nor `已取消`), and state is
+    // written (/info shows off).
     await app.pressEscape();
     await untilFrame(
       app.setup,
@@ -531,7 +534,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     expect(frame).toContain("Version");
     expect(frame).toContain("输入消息");
 
-    // /info 反射：Esc 保存退出（非 cancel）→ state 已写为 off。
+    // /info reflects: Esc save-exit (not cancel) → state written as off.
     await app.typeText("/info");
     await app.pressEnter();
     const infoFrame = await untilFrame(
@@ -553,7 +556,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /thinking → Space 切 ON → Esc 保存退出（写 thinkingEnabled + 持久化）。
+    // /thinking → Space to ON → Esc saves and exits (writes thinkingEnabled + persists).
     await app.typeText("/thinking");
     await app.pressEnter();
     await untilFrame(
@@ -577,7 +580,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
       "picker-saved"
     );
 
-    // 断言：prop 恰好被调一次，payload = 面板 commit 结果（thinking=adaptive）。
+    // Assert: prop called exactly once, payload = panel commit result (thinking=adaptive).
     await until(() => calls.length === 1, 8000, "persist-called");
     expect(calls[0]).toEqual({ thinking: "adaptive" });
 
@@ -590,7 +593,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     );
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
-    // /thinking → Esc 保存退出（无切换 → 写回 seed OFF → payload { thinking:"off" }）。
+    // /thinking → Esc save-exit (no toggle → writes back seeded OFF → payload { thinking:"off" }).
     await app.typeText("/thinking");
     await app.pressEnter();
     await untilFrame(
@@ -601,7 +604,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     );
     await app.pressEscape();
 
-    // 失败 notice 出现（含「写回 settings.json 失败」+ 错误消息），面板已关闭。
+    // Failure notice appears (`写回 settings.json 失败` + error message), panel already closed.
     await untilFrame(
       app.setup,
       (f) => f.includes("写回 settings.json 失败"),
@@ -617,22 +620,26 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #647 T3 回归:end-of-round review Spec Medium —— 多会话 staleness。
-// agentStatus 若是全局单槽(不按 conversationId key),会话 A 的 last_tool /
-// 未勾 todo 会在切到 B / 新草稿后继续渲染在别人的视图里(T3 AC① 违例:
-// 「主 HITL 会话进行中,TUI 显示与即将送进模型的同一份现势」)。断言用面板
-// 专属字形前缀(◇ / □)做标记 —— 与 transcript 里可能出现的原始栏文本
-// (<agent_status> user 消息)区分开,只测面板渲染。
+// Regression from an end-of-round review (Spec, Medium): multi-session
+// staleness. If agentStatus were a global single slot (not keyed by
+// conversationId), session A's last_tool / open todos would keep rendering
+// in other views after switching to B / a fresh draft, violating "while the
+// main HITL session runs, the TUI shows the same current state that is about
+// to be fed to the model". Assertions mark panel-only glyph prefixes (◇ / □)
+// to distinguish panel rendering from raw bar text (<agent_status> user
+// messages) that may appear in the transcript.
 // ---------------------------------------------------------------------------
 describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归）", () => {
   test("A 收到 agent_status → /new 切新草稿无残留 → /sessions 切回 A 快照仍在", async () => {
-    // deps 带 agentStatus(todoDir 有未勾项)→ turn 内 harness 在注入栏的
-    // 同一计算点发 agent_status 事件(产品路径,与 e2e bridge 用例同形)。
-    // #304601e3:loop-engine 现按 conversationId 读 `<todoDir>/<conv>/todos.md`
-    // (与 todo_write 写入侧同一 SSOT),不再是根路径。先用 bridge.ensureSession
-    // 预建档拿到 conversationId,再把 todos 写到该会话自己的子目录,最后把
-    // 这个会话作为 initialSession 挂进 app —— 首条 user 提交走 lazy create
-    // 拿到同一 id,读到本测试的种子账本。
+    // deps carry agentStatus (todoDir has open items) → within the turn the
+    // harness emits the agent_status event at the same computation point that
+    // injects the bar (product path, same shape as the e2e bridge case).
+    // loop-engine reads `<todoDir>/<conv>/todos.md` by conversationId (same
+    // SSOT as the todo_write writer), not the root path. Pre-create the
+    // session via bridge.ensureSession to get the conversationId, write the
+    // todos into that conversation's own subdir, then attach it as
+    // initialSession — the first submit's lazy create reuses the same id and
+    // reads this test's seeded ledger.
     const baseDir = mkdtempSync(join(tmpdir(), "iknow-tui-agent-status-key-"));
     const todoDir = join(baseDir, "todos-dir");
     const responses = [assistantResult({ texts: ["A 答复"] })];
@@ -668,7 +675,7 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       );
       await untilFrame(app.setup, (f) => f.includes("Version"));
 
-      // 会话 A:提交 → turn 完成 → 面板渲染 A 的未勾项(不印 last_tool)。
+      // Session A: submit → turn done → panel renders A's open items (last_tool not printed).
       await app.typeText("你好A");
       await app.pressEnter();
       await until(
@@ -684,8 +691,9 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       );
       expect(frameA).not.toContain("last_tool:");
 
-      // /new → 新草稿(draft 无 conversationId):面板不得残留 A 的现势。
-      // (staleness 回归点:全局单槽实现会在这里继续渲染 A 的快照。)
+      // /new → fresh draft (no conversationId): panel must not retain A's state.
+      // (Staleness regression point: a global single-slot implementation would
+      // keep rendering A's snapshot here.)
       await app.typeText("/new");
       await app.pressEnter();
       const frameDraft = await untilFrame(
@@ -696,8 +704,9 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       );
       expect(frameDraft).not.toContain("□ regression item A");
 
-      // /sessions → ↓ 选中 A(index 1,伪条目后第一条)→ Enter 打开 →
-      // A 的现势仍在(keyed 保留:切走不丢、切回复现)。
+      // /sessions → ↓ select A (index 1, first after the pseudo entry) → Enter
+      // → A's state is still there (keyed retention: switching away keeps it,
+      // switching back restores it).
       await app.typeText("/sessions");
       await app.pressEnter();
       await untilFrame(
@@ -726,7 +735,7 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
 });
 
 // ---------------------------------------------------------------------------
-// T4b: resume 冷启动 hydrate —— transcript 末栏 → footer,无需新 turn
+// Resume cold-start hydrate: last bar in transcript → footer, no new turn needed
 // ---------------------------------------------------------------------------
 describe("T4b: agent_status resume hydrate", () => {
   function sessionFileWithAgentStatusBar(): SessionFileV1 {
@@ -775,7 +784,7 @@ describe("T4b: agent_status resume hydrate", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-0037 T5: session worktree 隔离现势行（改绑后可演示）
+// ADR-0037: session worktree isolation — location line (demoable after rebinding)
 // ---------------------------------------------------------------------------
 
 describe("D7 / SC6: 会话位置行常驻（主仓也画、绑树只换路径）", () => {
@@ -807,9 +816,10 @@ describe("D7 / SC6: 会话位置行常驻（主仓也画、绑树只换路径）
       undefined,
       attachSession(file)
     );
-    // 绑树后位置行 = 项目根叶子 + 相对段（`repo/.iknow/worktrees/<叶>`），
-    // 不再是旧 `worktree: …` 前缀行。tui 测试的 props.cwd = "/tmp/proj"，
-    // 绑根在其外 → 显示原样根路径。
+    // After binding, the location line = project-root leaf + relative segment
+    // (`repo/.iknow/worktrees/<leaf>`), no longer the old `worktree: …` prefix
+    // line. tui tests use props.cwd = "/tmp/proj"; its bound root lies outside
+    // it → shown verbatim as the root path.
     const frame = await untilFrame(
       app.setup,
       (f) => f.includes("/repo/.iknow/worktrees/conv-wt-isolation"),
@@ -821,14 +831,16 @@ describe("D7 / SC6: 会话位置行常驻（主仓也画、绑树只换路径）
   }, 30_000);
 
   test("未绑定（draft / 开关 OFF）→ 位置行仍在（主仓路径），不是 0 行", async () => {
-    // spec D7 / SC6：位置行常驻 —— 未绑树时画项目根，不得靠「绑了才出现」
-    // 当「在不在树上」的信号。
+    // The location line is always resident — unbound it draws the project
+    // root; it must not appear only-when-bound as an "am I on a worktree" signal.
     const app = await mountAppAsync([assistantResult({ texts: ["unused"] })]);
     const frame = await untilFrame(app.setup, (f) => f.includes("proj"), 8000);
-    // 断言位置行**独占一行**（与投影同源），而不是随便一个含 "proj" 的
-    // 片段：substring 可能命中其它 chrome（banner / 路径提示），认证力不足。
-    // cwd=/tmp/proj 非 git 仓 → 分支未知 → 按 spec「只画路径段、不写占位符」，
-    // 该行即 `proj`；断言整行 trim 相等即钉住「这一行就是位置行在画」。
+    // Assert the location line owns a full line (same source as the
+    // projection), not any substring containing "proj": a substring could hit
+    // other chrome (banner / path hints) and proves too little. cwd=/tmp/proj
+    // is not a git repo → branch unknown → per spec, path segment only with no
+    // placeholder → the line is `proj`; full-line trim equality pins "this line
+    // is the location line being drawn".
     const expected = sessionLocationLines({
       projectRoot: "/tmp/proj",
       cols: 80,

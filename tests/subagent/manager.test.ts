@@ -1,20 +1,20 @@
 /**
- * #356 T2 — SubAgentManager 单测(fake spawn 工厂,不真启子进程)。
+ * SubAgentManager unit tests (fake spawn factory, no real child processes).
  *
- * 覆盖 10 fixture(票面):
- *   1. spawn → stdout 合法 envelope → completed
+ * Covers 10 fixtures:
+ *   1. spawn → valid envelope on stdout → completed
  *   2. spawn → exit code=1 → crashed
- *   3. spawn → stdout 非法 JSON → protocolError
- *   4. spawn → stdout 超 20000 result → truncated envelope
+ *   3. spawn → invalid JSON on stdout → protocolError
+ *   4. spawn → stdout result over 20000 chars → truncated envelope
  *   5. spawn → 'error' ENOENT → crashed
- *   6. shutdown:两 running child 收 SIGTERM;fake 不退出 → 兜底 SIGKILL
- *   7. queryBuffer 四态覆盖(not_found / running / completed / failed)
- *   8. waitFor timeout:fake 不 emit → reject reason=timeout
- *   9. drainCompleted 只列举 completed(running / failed 不出现)
- *  10. SubAgentDefinition 本地定义 typecheck
+ *   6. shutdown: two running children get SIGTERM; fakes that never exit → SIGKILL fallback
+ *   7. queryBuffer four states (not_found / running / completed / failed)
+ *   8. waitFor timeout: fake never emits → reject reason=timeout
+ *   9. drainCompleted lists completed only (running / failed absent)
+ *  10. SubAgentDefinition local definition typecheck
  *
- * fake ChildProcess 构造沿用 tests/harness/lsp/client.test.ts 先例:
- * EventEmitter + PassThrough stdin/stdout/stderr + kill spy。
+ * fake ChildProcess follows the precedent in tests/harness/lsp/client.test.ts:
+ * EventEmitter + PassThrough stdin/stdout/stderr + kill spy.
  */
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
@@ -42,7 +42,7 @@ import type {
   WorkerEnvelope,
 } from "../../src/harness/subagent/envelope.ts";
 
-// ── fake ChildProcess 工厂 ────────────────────────────────────────────────────
+// ── fake ChildProcess factory ─────────────────────────────────────────────────
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -72,8 +72,8 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-/** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。
- *  `opts.taskTimeoutMs` 透传给 createSubAgentManager (T2 三层缺省链中段)。 */
+/** Capture wrapper: records each spawned child + inputs so tests can emit.
+ *  `opts.taskTimeoutMs` passes through to createSubAgentManager (middle layer of the three-tier default chain). */
 function makeHarness(
   opts: {
     readonly taskTimeoutMs?: number;
@@ -188,7 +188,7 @@ describe("SubAgentManager concurrency capacity", () => {
     assert.throws(() => manager.spawn({ task: "fallback-overflow" }));
   });
 
-  // ADR-0096 T2 ── capacity holder（运行期翻转）+ unlimited 语义。
+  // ADR-0096 ── capacity holder (runtime flip) + unlimited semantics.
   it("subagentCapacityHolder 缺席 → 回退到 opts.maxConcurrentWorkers（既有行为）", () => {
     const holder = createSubagentCapacityHolder(2);
     const manager = createSubAgentManager({
@@ -201,7 +201,7 @@ describe("SubAgentManager concurrency capacity", () => {
 });
 
 describe("SubagentCapacityHolder（ADR-0096 T2）", () => {
-  // holder 是纯函数工厂（不读任何全局），TDD 把契约钉成单测。
+  // holder is a pure factory (reads no globals) — the contract is pinned by unit tests.
   it("初始值正整数 → get() 返同值", () => {
     const h = createSubagentCapacityHolder(7);
     assert.equal(h.get(), 7);
@@ -230,7 +230,7 @@ describe("SubagentCapacityHolder（ADR-0096 T2）", () => {
     assert.equal(h.get(), 5);
     h.set(-1);
     assert.equal(h.get(), 5);
-    h.set(1.5); // 非整数
+    h.set(1.5); // non-integer
     assert.equal(h.get(), 5);
     h.set("garbage" as unknown as number);
     assert.equal(h.get(), 5);
@@ -285,8 +285,9 @@ describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimi
     const holder = createSubagentCapacityHolder(7);
     const manager = createSubAgentManager({
       spawn: () => makeFakeChild() as unknown as ChildProcess,
-      // opts.maxConcurrentWorkers 在场会被 holder 覆盖（ADR-0096 T2 决议）：
-      // holder 在场 → 闸值每次现读 holder.get()，opts 仅作 holder 缺席时初值。
+      // a present holder overrides opts.maxConcurrentWorkers (ADR-0096 ruling):
+      // with a holder, the gate reads holder.get() live each time; opts is only
+      // the initial value when no holder is given.
       maxConcurrentWorkers: 999,
       subagentCapacityHolder: holder,
     });
@@ -302,21 +303,21 @@ describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimi
       subagentCapacityHolder: holder,
     });
 
-    // 闸 = 2 时：3 次 spawn 第 3 次抛 SubAgentCapacityError
+    // gate = 2: the 3rd of three spawns throws SubAgentCapacityError
     manager.spawn({ task: "t1" });
     manager.spawn({ task: "t2" });
     assert.throws(() => manager.spawn({ task: "t3" }), SubAgentCapacityError);
 
-    // 运行时调到 5 → 3 个新 spawn 全过（既有 2 个仍占位，第 5 个填满，第 6 个溢出）
+    // runtime raise to 5 → three more spawns pass (the existing 2 still hold slots; the 5th fills the gate, the 6th overflows)
     holder.set(5);
     manager.spawn({ task: "t4" }); // active=3
     manager.spawn({ task: "t5" }); // active=4
-    manager.spawn({ task: "t6" }); // active=5, 闸=5 → 命中边界（active < cap 通过，= cap 拒）
+    manager.spawn({ task: "t6" }); // active=5, gate=5 → boundary hit (active < cap passes, == cap rejects)
     assert.throws(
       () => manager.spawn({ task: "t7" }),
       (error: unknown) => {
         assert.ok(error instanceof SubAgentCapacityError);
-        // active = 5 个 running/starting；max = 5（holder 现读，与 check-time 一致）
+        // active = 5 running/starting; max = 5 (read live from holder, matches check-time)
         assert.equal(error.active, 5);
         assert.equal(error.maxConcurrentWorkers, 5);
         assert.match(error.message, /5\/5/);
@@ -332,7 +333,7 @@ describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimi
       subagentCapacityHolder: holder,
     });
 
-    // 远超默认 15 —— unlimited 闸下不抛。
+    // far above the default 15 — no throw under the unlimited gate.
     for (let i = 0; i < 20; i++) {
       assert.doesNotThrow(() => manager.spawn({ task: `u-${i}` }));
     }
@@ -369,7 +370,7 @@ describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimi
       }
     );
 
-    // holder 翻转 → 闸值即下次抛错里的 maxConcurrentWorkers
+    // holder flip → the gate value is the maxConcurrentWorkers of the next thrown error
     holder.set(9);
     for (let i = 0; i < 6; i++) manager.spawn({ task: `flip-${i}` });
     assert.throws(
@@ -384,9 +385,9 @@ describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimi
   });
 
   it("opts.maxConcurrentWorkers 非法（0 / -1） + holder 在场 → 闸值 = holder 初值", () => {
-    // holder 在场时 opts.maxConcurrentWorkers 不会回退默认值 —— 它的角色
-    // 仅是 holder 缺席时的初值兜底。这是 ADR-0096 T2 的明确决议（opts 一旦
-    // 失效即归零语义，不与 holder 互校验）。
+    // With a holder present, an illegal opts.maxConcurrentWorkers never falls
+    // back to the default — its only role is the initial value when no holder
+    // is given (ADR-0096 ruling: opts is inert once a holder exists; no cross-validation).
     const holder = createSubagentCapacityHolder(4);
     const manager = createSubAgentManager({
       spawn: () => makeFakeChild() as unknown as ChildProcess,
@@ -452,12 +453,12 @@ describe("SubAgentManager spawn → completed", () => {
     manager.spawn(def);
     assert.equal(spawnCalls.length, 1);
     const { payload, taskId } = spawnCalls[0]!;
-    // taskId 是 manager 内部 randomUUID 唯一真值(SC3)
+    // taskId is manager's internal randomUUID — the single source of truth
     assert.ok(taskId.length > 0);
     assert.equal(payload.task, "");
-    // #357 T1 (承 #365): def 缺席 sandboxRoot → manager 以父 sandboxRoot 补齐。
-    // makeHarness 不传 sandboxRoot opt → fallback = realpathSync(process.cwd())。
-    // 缺省继承父根而非 process.cwd() 字面值(SC8 锁定行为变更)。
+    // when def omits sandboxRoot, the manager fills in the parent sandboxRoot.
+    // makeHarness passes no sandboxRoot opt → fallback = realpathSync(process.cwd()).
+    // The default inherits the parent root rather than a literal process.cwd() (locked behavior change).
     assert.equal(payload.sandboxRoot, realpathSync(process.cwd()));
     assert.equal(payload.systemPrompt, "p");
     assert.deepEqual(payload.disallowedTools, ["edit_file"]);
@@ -470,8 +471,9 @@ describe("SubAgentManager spawn → completed", () => {
     const { manager, spawned, spawnCalls } = makeHarness();
     manager.spawn({ systemPrompt: "p", model: "opus" });
     const chunks: string[] = [];
-    // 真 worker 的消费形态:for-await 到 EOF。manager 不 end() stdin 时这里
-    // 永远收不到 EOF,worker 永远不开跑(T8 live e2e 的挂死形态)。
+    // mirrors the real worker's consumption shape: for-await to EOF. If the
+    // manager never end()s stdin, EOF never arrives here and the worker never
+    // starts (the hang seen in the live e2e).
     for await (const chunk of spawned[0]!.stdin) chunks.push(String(chunk));
     const raw = chunks.join("");
     assert.equal(raw.endsWith("\n"), true, "payload 必须以换行收尾");
@@ -481,7 +483,7 @@ describe("SubAgentManager spawn → completed", () => {
   it("waitFor resolves envelope on completed", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    // 先同步标 completed(emit 在 data/exit 同步派发,waitFor 首查即收敛)
+    // mark completed synchronously first (emit dispatches on data/exit, so waitFor converges on its first check)
     emitEnvelope(spawned[0]!, okEnvelope("w"));
     const env = await manager.waitFor(taskId, 1000);
     assert.equal(env.status, "ok");
@@ -597,7 +599,7 @@ describe("SubAgentManager spawn → crashed", () => {
   });
 });
 
-// ── ADR-0111 T5:modelTransient 归因(上游瞬时失败 ≠ 进程级崩溃) ──────────────
+// ── ADR-0111: modelTransient attribution (upstream transient failure ≠ process-level crash) ──
 
 describe("SubAgentManager spawn → modelTransient (ADR-0111 attribution)", () => {
   it("failed envelope reason=modelTransient + exit 0 → failed modelTransient + 续跑引导文案", () => {
@@ -612,9 +614,9 @@ describe("SubAgentManager spawn → modelTransient (ADR-0111 attribution)", () =
     const q = manager.queryBuffer(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
-      // 归因走信封, 不冒用 crashed(SC16 只属非 0/信号杀且无已消费信封)。
+      // attribution comes from the envelope, never impersonates crashed (crashed is reserved for non-zero/signal exits with no consumed envelope).
       assert.equal(q.reason, "modelTransient");
-      // 空 summary 由 failedSummary 投影填父可见引导 (ADR-0102 Decision 1 出路)。
+      // an empty summary is projected by failedSummary into parent-visible continuation guidance (ADR-0102 Decision 1).
       assert.match(q.summary, /modelTransient/);
       assert.match(q.summary, /subagent_continue/);
     }
@@ -687,7 +689,7 @@ describe("SubAgentManager spawn → protocolError", () => {
     const { taskId } = manager.spawn({});
     spawned[0]!.stdout.write(
       JSON.stringify({ status: "ok", summary: "s" }) + "\n"
-    ); // 缺 result
+    ); // missing result
     const q = manager.queryBuffer(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") assert.equal(q.reason, "protocolError");
@@ -720,7 +722,7 @@ describe("SubAgentManager envelope truncation (SC10)", () => {
   });
 });
 
-// ── fixture 7:queryBuffer 四态 ────────────────────────────────────────────────
+// ── fixture 7: queryBuffer four states ─────────────────────────────────────────
 
 describe("SubAgentManager queryBuffer 四态 (SC5)", () => {
   it("unknown taskId → not_found", () => {
@@ -755,7 +757,7 @@ describe("SubAgentManager queryBuffer 四态 (SC5)", () => {
   });
 });
 
-// ── fixture 6b:per-task timeout (High #2 / SC6 / 假设 14) ────────────────────────
+// ── fixture 6b: per-task timeout ───────────────────────────────────────────────
 
 describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
   it("timeoutMs 到期且 child 未完成 → failed reason=timeout + SIGTERM", async () => {
@@ -763,10 +765,10 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
     try {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({ timeoutMs: 50 });
-      // 初始 running
+      // initially running
       assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
 
-      // 50ms 后 timer 触发 → failed reason=timeout + SIGTERM
+      // after 50ms the timer fires → failed reason=timeout + SIGTERM
       await vi.advanceTimersByTimeAsync(50);
       const q = manager.queryBuffer(taskId);
       assert.equal(q.status, "failed");
@@ -774,7 +776,7 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
         assert.equal(q.reason, "timeout");
         assert.match(q.summary, /timeout after 50ms/);
       }
-      // child 收到 SIGTERM(第一击)
+      // child received SIGTERM (first strike)
       const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
       assert.deepEqual(signals, ["SIGTERM"]);
     } finally {
@@ -788,7 +790,7 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({ timeoutMs: 50 });
       await vi.advanceTimersByTimeAsync(50);
-      // timeout 已标 failed;child 随后以信号退出 → 不覆盖为 crashed
+      // already marked failed by timeout; the child's later signal exit must not overwrite it with crashed
       spawned[0]!.emit("exit", null, "SIGTERM");
       const q = manager.queryBuffer(taskId);
       assert.equal(q.status, "failed");
@@ -811,7 +813,7 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
         (manager.queryBuffer(taskId) as SubAgentEnvelope).status,
         "ok"
       );
-      // 越过 timeout 窗口:已 completed,timer 回调应被 exit 清理 / 不再覆写
+      // past the timeout window: already completed, the timer callback was cleared by the exit handler / must not overwrite
       await vi.advanceTimersByTimeAsync(100);
       const q = manager.queryBuffer(taskId);
       assert.equal(q.status, "ok");
@@ -826,13 +828,13 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
     try {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({ timeoutMs: 50 });
-      // 立即 shutdown(timeoutTimer 尚未到期)
+      // shutdown immediately (timeoutTimer not yet due)
       const done = manager.shutdown();
-      // 越过 50ms timeout 窗口 + shutdown 5s 兜底
+      // past the 50ms timeout window + the 5s shutdown fallback
       await vi.advanceTimersByTimeAsync(5000);
       await done;
-      // 若 timeoutTimer 未清,50ms 时会再发一次 SIGTERM。
-      // shutdown 兜底会再发 SIGKILL(fake 不退),不计入 SIGTERM 计数。
+      // if timeoutTimer were not cleared, another SIGTERM would fire at 50ms.
+      // The shutdown fallback sends SIGKILL (the fake never exits) — not counted as SIGTERM.
       const sigtermCount = spawned[0]!.kill.mock.calls.filter(
         (c) => c[0] === "SIGTERM"
       ).length;
@@ -844,7 +846,7 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
   });
 });
 
-// ── #358 T2: per-task 三层缺省链 def.timeoutMs ?? opts.taskTimeoutMs ?? 常量 ──
+// ── per-task three-tier default chain: def.timeoutMs ?? opts.taskTimeoutMs ?? constant ──
 
 describe("SubAgentManager per-task 缺省链 (T2: def ?? taskTimeoutMs ?? 7200s)", () => {
   it("层 1: def.timeoutMs=111 优先 → 111ms 触发 SIGTERM (不 shell 到下方层)", async () => {
@@ -955,11 +957,11 @@ describe("SubAgentManager shutdown (SC12)", () => {
       assert.ok(a && b);
 
       const done = manager.shutdown();
-      // 两个 child 都收到 SIGTERM(第一击)
+      // both children receive SIGTERM (first strike)
       for (const child of spawned) {
         assert.deepEqual(child.kill.mock.calls.at(-1), ["SIGTERM"]);
       }
-      // fake 不 emit exit → 兜底 SIGKILL(第二击)
+      // fakes never emit exit → SIGKILL fallback (second strike)
       await vi.advanceTimersByTimeAsync(5000);
       await done;
 
@@ -967,7 +969,7 @@ describe("SubAgentManager shutdown (SC12)", () => {
         const signals = child.kill.mock.calls.map((c) => c[0]);
         assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
       }
-      // shutdown 后 buffer 清空 → not_found
+      // buffer cleared after shutdown → not_found
       assert.deepEqual(manager.queryBuffer(a), { status: "not_found" });
       assert.deepEqual(manager.queryBuffer(b), { status: "not_found" });
     } finally {
@@ -981,7 +983,7 @@ describe("SubAgentManager shutdown (SC12)", () => {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({});
       const done = manager.shutdown();
-      // child 收到 SIGTERM 后同步退出(emit exit)
+      // child exits synchronously after SIGTERM (emit exit)
       spawned[0]!.emit("exit", null, "SIGTERM");
       await vi.advanceTimersByTimeAsync(5000);
       await done;
@@ -999,7 +1001,7 @@ describe("SubAgentManager shutdown (SC12)", () => {
       const { manager } = makeHarness();
       const { taskId } = manager.spawn({});
       const pending = manager.waitFor(taskId, 60000);
-      // 立即挂 handler,避免 shutdown 主动拒绝时触发 unhandledRejection
+      // attach the rejection handler up front so shutdown's active reject does not surface as unhandledRejection
       const rejected = assert.rejects(pending, SubAgentWaitTimeoutError);
       const done = manager.shutdown();
       await vi.advanceTimersByTimeAsync(5000);
@@ -1026,11 +1028,11 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
     assert.equal(drained.length, 1);
     assert.equal(drained[0]!.taskId, doneTask);
     assert.equal(drained[0]!.envelope.status, "ok");
-    // 不修改状态(host drain 是读操作):再次枚举结果一致
+    // no state mutation (host drain is a read): re-enumeration yields the same result
     const drained2 = manager.drainCompleted();
     assert.equal(drained2.length, 1);
     assert.equal(drained2[0]!.taskId, doneTask);
-    // running / failed 不出现
+    // running / failed absent
     assert.ok(!drained.some((d) => d.taskId === runningTask));
     assert.ok(!drained.some((d) => d.taskId === failedTask));
   });
@@ -1064,18 +1066,18 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
   });
 });
 
-// ── fixture 11:#361 T5 abortTask ─────────────────────────────────────────────
+// ── fixture 11: abortTask ──────────────────────────────────────────────────────
 
 describe("SubAgentManager abortTask (#361 T5)", () => {
   it("running task → SIGTERM 一次(arm SIGKILL 兜底复用同一 armKillFallback 路径)", () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    // 初始 running
+    // initially running
     assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
 
     const ok = manager.abortTask(taskId);
     assert.equal(ok, true);
-    // 第一击 SIGTERM
+    // first strike: SIGTERM
     const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
     assert.deepEqual(signals, ["SIGTERM"]);
   });
@@ -1086,11 +1088,11 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
       const { manager, spawned } = makeHarness();
       const { taskId } = manager.spawn({});
       manager.abortTask(taskId);
-      // 5s 后 killFallback 兜底 SIGKILL
+      // after 5s killFallback sends the SIGKILL safety net
       await vi.advanceTimersByTimeAsync(5000);
       const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
       assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
-      // 防止后续 spawn 留下 stray timer
+      // keep later spawns from leaving a stray timer
       spawned[0]!.stderr.end();
       spawned[0]!.emit("exit", null, "SIGKILL");
       await vi.advanceTimersByTimeAsync(500);
@@ -1104,7 +1106,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
     const { manager } = makeHarness();
     const { taskId } = manager.spawn({});
     manager.abortTask(taskId);
-    // 无直接断言面:确保不抛 + 状态仍 running(buffer 不变,等待 exit handler)。
+    // no direct assertion surface: ensure no throw and the state stays running (buffer unchanged, awaiting the exit handler).
     assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
   });
 
@@ -1113,7 +1115,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
     assert.equal(manager.abortTask("nope"), false);
   });
 
-  // ── SC14: 操作员强杀必须 settle 本任务在飞的 waitFor ─────────────────────
+  // ── an operator kill must settle this task's in-flight waitFor ──────────────
   it("SC14: in-flight waitFor → abortTask 以 SubAgentAbortError 拒绝(非 WaitTimeout)", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
@@ -1129,7 +1131,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
     });
     assert.equal(manager.abortTask(taskId), true);
     await rejected;
-    // 拒绝之后才轮到 SIGTERM(顺序契约:先 settle 父侧 wait,再杀 worker)。
+    // SIGTERM comes only after the rejection (order contract: settle the parent-side wait first, then kill the worker).
     assert.deepEqual(
       spawned[0]!.kill.mock.calls.map((c) => c[0]),
       ["SIGTERM"]
@@ -1153,7 +1155,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
     await victimWait;
     await new Promise((r) => setTimeout(r, 60));
     assert.equal(bystanderSettled, false, "bystander wait must stay pending");
-    // 旁观任务仍活:终态信封到达后正常 resolve。
+    // the bystander task stays live: resolves normally once its terminal envelope arrives.
     emitEnvelope(spawned[1]!, okEnvelope("bystander done"));
     assert.equal((await bystanderWait).summary, "done");
     assert.equal(bystanderSettled, true);
@@ -1165,7 +1167,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
     const first = manager.waitFor(taskId, 1000);
     emitEnvelope(spawned[0]!, okEnvelope("early"));
     assert.equal((await first).summary, "done");
-    // task 已 completed → abortTask no-op(既有契约),且不会抛 / 二次 reject。
+    // task already completed → abortTask is a no-op (existing contract), no throw / no second reject.
     assert.equal(manager.abortTask(taskId), false);
   });
 
@@ -1189,7 +1191,7 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
   });
 });
 
-// ── fixture 10:SubAgentDefinition 本地定义 typecheck ─────────────────────────
+// ── fixture 10: SubAgentDefinition local definition typecheck ─────────────────
 
 describe("SubAgentDefinition local definition typecheck", () => {
   it("accepts all optional camelCase fields", () => {
@@ -1218,12 +1220,12 @@ describe("SubAgentDefinition local definition typecheck", () => {
     assert.equal(typeof api.shutdown, "function");
     assert.equal(typeof api.drainCompleted, "function");
     assert.equal(typeof api.listActive, "function");
-    // #358 T7: 只读枚举面（Session API 端点消费；running/completed/failed 三态合一）。
+    // read-only enumeration surface (consumed by Session API endpoints; running/completed/failed unified).
     assert.equal(typeof api.listSubagents, "function");
   });
 });
 
-// ── #358 T7:listSubagents (只读枚举面,Session API 端点消费) ──────────────────
+// ── listSubagents (read-only enumeration surface, consumed by Session API endpoints) ────
 
 describe("SubAgentManager listSubagents (#358 T7)", () => {
   it("空管理面 → 返回空数组", () => {
@@ -1244,10 +1246,10 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(item.taskId, taskId);
     assert.equal(item.state, "completed");
     assert.equal(typeof item.startedAt, "string");
-    // 权限行: taskPreview 截断 ≤120,不落 task 全文 (spec 358 权限 row)。
+    // permission row: taskPreview is truncated to ≤120, never the full task text.
     assert.ok(item.taskPreview.length <= 120);
     assert.equal(item.taskPreview, "第一个任务提示词".repeat(40).slice(0, 120));
-    // Postel: completed 必有 endedAt + summary。
+    // Postel: completed always carries endedAt + summary.
     assert.equal(typeof item.endedAt, "string");
     assert.equal(item.summary, "done");
     assert.equal(item.reason, undefined);
@@ -1300,7 +1302,7 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     manager.spawn({ task: "empty id", toolUseId: "" });
     const items = manager.listSubagents();
     assert.equal(items.length, 2);
-    // ask / direct-handler / 测试注入的 spawn 不带 toolUseId：键缺席而非值 undefined。
+    // ask / direct-handler / test-injected spawns carry no toolUseId: the key is absent, not an undefined value.
     assert.equal("toolUseId" in items[0]!, false);
     assert.equal("toolUseId" in items[1]!, false);
   });

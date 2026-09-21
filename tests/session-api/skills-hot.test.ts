@@ -1,19 +1,25 @@
 /**
- * SC8（serve / hub 侧「slash 侧当场热」）—— `SessionHub.listSkills` 必须在
- * **调用期**取可加载面，而不是读装配期快照（spec
- * `specs/skill-index-increment.md` T6 / SC8；ADR-0098）。
+ * SC8 (serve / hub side "slash candidates hot in place") — `SessionHub.listSkills`
+ * must fetch the loadable surface at CALL time, not read an assembly-time
+ * snapshot (spec `specs/skill-index-increment.md` SC8; ADR-0098).
  *
- * 覆盖:
- *   - 生产 serve 形态（hub 带 `workspaceRoot` → 会话根即 boundRoot → per-root
- *     引擎路径）发布 skill 面：listSkills 非空，且装配期之后新落的 SKILL.md
- *     下一次 listSkills 立刻可见（不必等下一 turn）；
- *   - 活跃引擎切换（会话 B 在另一根）后 listSkills 跟活跃引擎走，仍热；
- *   - rescan 失败（EACCES → typed `SkillRescanError`）→ 退回装配期缓存的可
- *     加载面（人侧 slash 不因一次 IO 故障变空，且不钉成永久降级）；
- *   - 缝缺席（注入 deps / buildEngine 缝只回 catalog）→ 旧行为逐字节不变。
+ * Covers:
+ *   - production serve shape (hub with `workspaceRoot` → session root = boundRoot
+ *     → per-root engine path): the skill surface is published, listSkills is
+ *     non-empty, and a SKILL.md planted after assembly is visible on the very
+ *     next listSkills call (no waiting for the next turn);
+ *   - after the active engine switches (session B on another root), listSkills
+ *     follows the active engine and stays hot;
+ *   - rescan failure (EACCES → typed `SkillRescanError`) → fall back to the
+ *     assembly-time cached loadable surface (the human-side slash list never
+ *     empties due to one IO fault, and failure is never pinned as permanent
+ *     degradation);
+ *   - seam absent (injected deps / buildEngine seam returning only a catalog) →
+ *     old behavior byte-for-byte unchanged.
  *
- * 断言面是公开的 `listSkills()` DTO（hosts 消费的那一层）—— 不探私有字段，
- * 否则「热」在 API 上不可见时测试仍会绿。
+ * The assertion surface is the public `listSkills()` DTO (the layer hosts
+ * consume) — no private-field probing, otherwise tests would stay green even
+ * when "hot" is invisible on the API.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -51,7 +57,7 @@ afterAll(async () => {
   settingsSource.restore();
 });
 
-/** root 下架一层 `<name>/SKILL.md`（scanner 的目录约定）。 */
+/** Plant `<name>/SKILL.md` one level under root (the scanner's directory convention). */
 async function plantSkill(
   root: string,
   name: string,
@@ -120,8 +126,8 @@ describe("SC8 — serve per-root 引擎路径的 slash 候选当场热", () => {
 
     await withSkillRoot(skillRoot, async () => {
       const store = await makeStore();
-      // 生产 serve 形态：serve.ts 把 productRoot 同时作 workspaceRoot 传入 →
-      // 构造器 boundRoot = 该根 → listSkills → ensureDeps() → per-root 引擎。
+      // Production serve shape: serve.ts passes productRoot as workspaceRoot →
+      // constructor boundRoot = that root → listSkills → ensureDeps() → per-root engine.
       const root = await mkdtemp(join(baseDir, "root-"));
       await makeBoundSession(store, root, "conv-hot");
       const hub = new SessionHub({
@@ -135,13 +141,13 @@ describe("SC8 — serve per-root 引擎路径的 slash 候选当场热", () => {
       const before = await hub.listSkills();
       assert.deepEqual(namesOf(before), ["alpha"]);
 
-      // 会话中途落盘（装配期之后）——无 description = 人侧可加载、不进模型索引。
+      // Planted mid-session (after assembly) — no description = human-loadable, not in the model index.
       await plantSkill(skillRoot, "beta");
 
-      // SC8 主句：不必等下一 turn，下一次 listSkills 当场可见。
+      // SC8 core claim: visible on the very next listSkills, no need to wait for the next turn.
       const after = await hub.listSkills();
       assert.deepEqual(namesOf(after), ["alpha", "beta"]);
-      // SC9 面的一份：无 description 条目 description 缺席（不补 ""）。
+      // One facet of SC9: an entry without description has the key absent (not filled with "").
       const beta = after.find((s) => s.name === "beta");
       assert.ok(beta !== undefined, "新条目必须在可加载面");
       assert.equal(
@@ -190,10 +196,10 @@ describe("SC8 — serve per-root 引擎路径的 slash 候选当场热", () => {
       },
     });
 
-    // boundRoot = rootA → 第一台引擎。
+    // boundRoot = rootA → the first engine.
     assert.deepEqual(namesOf(await hub.listSkills()), ["plug:only-a"]);
 
-    // 会话 B 在另一根：postMessage 把它变成活跃引擎。
+    // Session B lives on another root: postMessage makes its engine the active one.
     const res = await hub.postMessage({ conversationId: "conv-b", text: "hi" });
     assert.equal(res.turn.answer.finalText, `from:${rootB}`);
     assert.deepEqual(
@@ -202,15 +208,16 @@ describe("SC8 — serve per-root 引擎路径的 slash 候选当场热", () => {
       "listSkills 必须读活跃引擎的可加载面"
     );
 
-    // 换根之后「当场热」仍然成立。
+    // After the root switch, "hot in place" still holds.
     await plantSkill(skillDirB, "late-b", "name: late-b\ndescription: late");
     assert.deepEqual(namesOf(await hub.listSkills()), [
       "plug:late-b",
       "plug:only-b",
     ]);
 
-    // 切回**已缓存**的第一台引擎（getOrBuildEngine 的 hit 分支）：活跃面必须
-    // 跟着回到 rootA 的缝 —— 否则 listSkills 会拿 rootB 的候选冒充 rootA 的。
+    // Switch back to the ALREADY CACHED first engine (getOrBuildEngine's hit
+    // branch): the active surface must follow back to rootA's seam — otherwise
+    // listSkills would pass off rootB's candidates as rootA's.
     const back = await hub.postMessage({
       conversationId: "conv-a",
       text: "hi",
@@ -244,15 +251,15 @@ describe("SC8 — 候选与正文同源（新条目必须点得动）", () => {
       });
       assert.deepEqual(namesOf(await hub.listSkills()), ["alpha"]);
 
-      // 会话中途落盘的人侧技能（无 description）。
+      // Human-side skill planted mid-session (no description).
       await plantSkill(skillRoot, "beta");
 
-      // 候选面先看见它……
+      // The candidate surface sees it first…
       assert.ok(
         (await hub.listSkills()).some((s) => s.name === "beta"),
         "新条目必须在候选面"
       );
-      // ……正文面必须能点动它（同一现行面；装配期快照会让这里 404）。
+      // …and the body surface must be able to open it (same current surface; an assembly-time snapshot would 404 here).
       const { body } = await hub.loadSkillBody("beta");
       assert.ok(body.includes("body"), "新条目正文必须可读");
       await hub.shutdown();
@@ -262,7 +269,7 @@ describe("SC8 — 候选与正文同源（新条目必须点得动）", () => {
 
 describe("SC8 — rescan 失败退回缓存可加载面", () => {
   it("根目录 EACCES → listSkills 仍返回装配期缓存面（不空、不上抛），恢复后重新热", async () => {
-    if (runningAsRoot()) return; // root 绕过权限位 → EACCES 不可复现
+    if (runningAsRoot()) return; // root bypasses permission bits → EACCES not reproducible
     const skillRoot = join(baseDir, "locked-env");
     await plantSkill(skillRoot, "alpha", "name: alpha\ndescription: Alpha");
 
@@ -279,14 +286,14 @@ describe("SC8 — rescan 失败退回缓存可加载面", () => {
       });
       assert.deepEqual(namesOf(await hub.listSkills()), ["alpha"]);
 
-      // 装配期之后根目录变得不可读 → rescan 抛 typed SkillRescanError。
+      // After assembly the root becomes unreadable → rescan throws typed SkillRescanError.
       await chmod(skillRoot, 0o000);
       restores.push(() => chmod(skillRoot, 0o755));
 
-      // 人侧是宽松面：候选保留缓存快照，不因一次 IO 故障变空、不上抛。
+      // The human side is a lenient surface: candidates keep the cached snapshot — one IO fault neither empties the list nor propagates.
       assert.deepEqual(namesOf(await hub.listSkills()), ["alpha"]);
 
-      // 恢复后可读 → 再次热起来（失败没有被钉成永久降级）。
+      // Once readable again it goes hot again (failure was not pinned as permanent degradation).
       for (const restore of restores.splice(0)) await restore();
       await plantSkill(skillRoot, "beta");
       assert.deepEqual(namesOf(await hub.listSkills()), ["alpha", "beta"]);
@@ -323,7 +330,7 @@ describe("SC8 — 只吞 typed rescan 失败，编程错误继续上抛", () => 
         }),
       });
 
-      // 编程错误必须可见：契约只有 typed SkillRescanError 才允许退缓存。
+      // Programming errors must stay visible: the contract allows cache fallback only for typed SkillRescanError.
       await assert.rejects(() => hub.listSkills(), /rescanner 内部缺陷/);
       await assert.rejects(
         () => hub.loadSkillBody("alpha"),

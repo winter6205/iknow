@@ -1,15 +1,13 @@
 /**
- * TUI 入口的 worktree isolation host 缝（src/tui/worktree-host.ts）回归：
- * run.tsx 原内联手工解构只取 { conversationId, root }，把
- * WorktreeProvisionContext 的 `name` 静默丢弃 → TUI 入口所有带名字的
- * create-worktree 退化为 UUID-only leaf（编译仍绿）；旧注册名
- * `create-task-worktree` 见 ADR-0082 改名。与 CLI 缝
- * tests/cli/worktree-host.test.ts 同构的本测试接捕获 ctx 的 spy hub，
- * 钉死 TUI 装配层必须整 ctx 透传（含 `name`）； labeled leaf 端到端
- * 形态由 session-api provisioner 侧测试覆盖。
- *
- * 背景（iknow trace dfce6b4f 实测发现，2026-09-05 修复；CLI 同类问题
- * 见 PR #881）。
+ * Regression for the TUI-entry worktree isolation host seam (src/tui/worktree-host.ts):
+ * run.tsx formerly inline-destructured only { conversationId, root }, silently
+ * dropping WorktreeProvisionContext's `name` → every named create-worktree from
+ * the TUI entry degraded to a UUID-only leaf (still compiling). The old
+ * registration name `create-task-worktree` was renamed per ADR-0082.
+ * Mirrors tests/cli/worktree-host.test.ts: a spy hub captures ctx to pin that
+ * the TUI assembly must pass the full ctx through (including `name`); the
+ * labeled-leaf end-to-end shape is covered by session-api provisioner tests.
+ * Bug surfaced by a real trace run.
  */
 import { describe, expect, it } from "vitest";
 
@@ -62,9 +60,10 @@ describe("createTuiWorktreeIsolationHost (TUI provision seam)", () => {
   });
 
   it("propagates the bridge's fail-closed rejection when the hub is absent", async () => {
-    // run.tsx 桥接委托语义：bridgeRef.hub 缺席 → `?? Promise.reject`。
-    // 壳本身只做纯透传（fail-closed 归属桥接层），本用例钉住：委托
-    // 产生的 rejection 原样穿过壳到达 executor 侧，不被吞不改写。
+    // run.tsx bridge delegation semantics: hub absent → `?? Promise.reject`.
+    // The shell is pure pass-through (fail-closed belongs to the bridge layer);
+    // this case pins that the delegated rejection crosses the shell verbatim
+    // to the executor side — neither swallowed nor rewritten.
     const host = createTuiWorktreeIsolationHost({
       provisionWorktree: () =>
         Promise.reject(

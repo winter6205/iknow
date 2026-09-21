@@ -1,15 +1,19 @@
 /** @jsxImportSource @opentui/react */
 /**
- * D-α V1 graph mode T5 — TUI 入口的 `/graph` 与 Shift+Tab（spec SC3 斜杠对等）。
+ * Graph mode at the TUI entry: `/graph` and Shift+Tab are equivalent paths.
  *
- * 三层：
- *   1. 词表层：`/graph` 进 TUI 自建 slash 词表（parse / 候选 / help 行）；
- *   2. 应用层：`/graph on|off` 与 Shift+Tab 翻的是**同一个** holder ——
- *      测试注入 holder 后直接读它，证明两条路径不是各自一份状态；
- *   3. 状态行：Graph 时模式行显示 Graph（进入前的 permission 不被改写）。
+ * Three layers:
+ *   1. vocabulary: `/graph` joins the TUI's own slash vocabulary
+ *      (parse / candidates / help rows);
+ *   2. application: `/graph on|off` and Shift+Tab flip the **same** holder —
+ *      the test injects the holder and reads it directly, proving the two
+ *      paths don't keep separate state;
+ *   3. status line: in Graph mode the mode row shows Graph (the pre-entry
+ *      permission is never rewritten).
  *
- * 渲染层用 app.test.tsx 同款 testRender 驱动（bun:test），因为要证的正是
- * 「用户在 TUI 里敲这一行 / 按这个键」这条真实路径。
+ * The render layer drives via testRender as in app.test.tsx (bun:test),
+ * because what must be proven is exactly the real path: "the user types this
+ * line / presses this key in the TUI".
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -43,7 +47,7 @@ import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
-/** buildTuiDeps 只读 env 字段（与 tests/tui/deps-tools.test.ts 同款最小 bundle）。 */
+/** buildTuiDeps reads only the env field (same minimal bundle as tests/tui/deps-tools.test.ts). */
 function makeTuiBundle(): RuntimeBundle {
   const env: IknowEnv = {
     llm: {
@@ -102,7 +106,7 @@ describe("TUI 装配：holder → 装配快照 → hub round", () => {
         graphMode: mode,
       });
       expect(built.graphAssembly).toBeDefined();
-      // 关着装配 → 本 round 快照关；翻开后要下一次 beginRound 才生效。
+      // Assembled while off → this round's snapshot is off; flipping on only takes effect at the next beginRound.
       expect(built.graphAssembly!.enabled()).toBe(false);
       mode.setEnabled(true);
       expect(built.graphAssembly!.enabled()).toBe(false);
@@ -313,7 +317,7 @@ describe("TUI `/graph` 与 Shift+Tab 翻同一 holder（SC3）", () => {
       expect(graphMode.get().enabled).toBe(false);
 
       await app.pressShiftTab();
-      // 进 Graph：编排开，授权冻结在进入前的 full_auto。
+      // Entering Graph: orchestration on, authorization frozen at full_auto from before entry.
       expect(graphMode.get().enabled).toBe(true);
       expect(permissionMode.get()).toBe("full_auto");
       expect(app.setup.captureCharFrame()).toContain("Graph");

@@ -16,9 +16,9 @@ function entry(
 }
 
 /**
- * spec `skill-index-increment` Input-contract 的四类条目：合格 / disable /
- * 无 description / 两者叠加；外加一条 plugin canonical —— 它的裸名别名
- * 不得在任一面出现重复。
+ * The four entry classes from spec `skill-index-increment` Input-contract:
+ * qualifying / disabled / no description / both combined; plus one plugin
+ * canonical — its bare-name alias must never appear duplicated in any face.
  */
 const FIXTURE: readonly SkillEntry[] = [
   entry({ name: "zulu" }),
@@ -63,8 +63,8 @@ describe("skill catalog faces（技能模型索引 vs 可加载技能面）", ()
       "undocumented",
       "zulu",
     ]);
-    // 可加载面 = 全部 canonical 条目；all() 保插入序、loadable() 名字排序，
-    // 故按名比较集合相等，不比较顺序。
+    // loadable face = all canonical entries; all() keeps insertion order while
+    // loadable() sorts by name, so compare set equality by name, not order.
     expect(sortedNames(catalog.loadable())).toEqual(sortedNames(catalog.all()));
   });
 

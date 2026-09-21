@@ -12,7 +12,7 @@ export const TEST_LLM_PROVIDER: IknowSettingsLlmProvider = {
   models: [{ id: "model" }],
 };
 
-/** 为 loadIknowEnv 注入最小 provider 注册表（默认 `test/model`）。 */
+/** Inject a minimal provider registry for loadIknowEnv (default `test/model`). */
 export function withTestLlmProvider(
   llm: Partial<NonNullable<IknowSettings["llm"]>> = {}
 ): IknowSettings {

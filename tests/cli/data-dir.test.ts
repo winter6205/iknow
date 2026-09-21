@@ -65,28 +65,30 @@ describe("usageText — --data-dir advertisement", () => {
 });
 
 describe("chat / ask entry-point dataDir threading (review-fix M-2)", () => {
-  // review fix: 此前 `runChat` / `runOneShot` 不把 `parsed.dataDir` 透传给内部
-  // `SessionStore` / `chat-session.checkpointStore` —— 显式 `--data-dir <alt>`
-  // 时 SessionStore 仍然落 `~/.iknow`，与 serve / trace 行为分叉。这条钉
-  // 不变式：所有 CLI 入口把 `parsed.dataDir` 一致地解析成同一条 baseDir。
+  // Review fix: `runChat` / `runOneShot` used to not pass `parsed.dataDir` through
+  // to the inner `SessionStore` / `chat-session.checkpointStore` —— with an
+  // explicit `--data-dir <alt>` the SessionStore still landed in `~/.iknow`,
+  // diverging from serve / trace behaviour. This pins the invariant: every CLI
+  // entry point resolves `parsed.dataDir` to one and the same baseDir.
   it("resolveServeDataDir is the single pool resolver across entry points", () => {
     const alt = "/tmp/iknow-explicit-pool";
-    // serve / chat / ask / trace 入口共享同一函数 + 同一语义：显式胜出。
+    // serve / chat / ask / trace share the same function and semantics: explicit
+    // wins.
     assert.equal(resolveServeDataDir(alt), alt);
     assert.equal(resolveServeDataDir(undefined), join(homedir(), ".iknow"));
-    // 解析两次幂等（同一 alt 必须解到同一绝对路径）。
+    // Resolving twice is idempotent (the same alt yields the same absolute path).
     assert.equal(resolveServeDataDir(alt), resolveServeDataDir(alt));
   });
 
   it("chat checkpointStore lands at <alt> when opts.dataDir is passed", () => {
-    // 与 Finding #1 同源：跨函数等式 —— 不重算 slug、不重算 baseDir,
-    // 直接构造 SessionStore 比对 underlying projectDir 的前缀是不是
-    // `<alt>/projects/<slug>/`。若 chat-session 不把 opts.dataDir 透传给
-    // SessionStore,projectDir 会落到 ~/.iknow 下,显式 --data-dir 即
-    // 被静默吞。
+    // Same root cause, stated as a cross-function equation: no recomputed slug, no
+    // recomputed baseDir —— build a SessionStore and compare whether its underlying
+    // projectDir is prefixed with `<alt>/projects/<slug>/`. If chat-session does not
+    // pass opts.dataDir to SessionStore, projectDir lands under ~/.iknow and an
+    // explicit --data-dir is silently swallowed.
     const alt = "/tmp/iknow-chat-alt-pool";
     const workspaceRoot = "/tmp/repo";
-    // 模拟 chat-session.ts:2180 的构造：new SessionStore(resolveServeDataDir(opts.dataDir), ...)
+    // Mirrors chat-session's construction: new SessionStore(resolveServeDataDir(opts.dataDir), ...)
     const store = new SessionStore(
       resolveServeDataDir(alt),
       deriveProjectIdentityRoot({ cwd: workspaceRoot })

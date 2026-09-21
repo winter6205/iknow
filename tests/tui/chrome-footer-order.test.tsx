@@ -2,9 +2,10 @@
 /**
  * tests/tui/chrome-footer-order.test.tsx
  *
- * 回归：输入框之下第一行永远是 ContextBar（model + ctx 用量条）；其后是
- * session location（路径 · 分支）、再是子代理任务预览、再是 graph。
- * JSX 顺序 = 视觉顺序（根容器 flexDirection="column"）。
+ * Regression: the first line below the input box is always the ContextBar
+ * (model + ctx usage bar); then session location (path · branch), then the
+ * subagent task preview, then the graph. JSX order = visual order (root
+ * container flexDirection="column").
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";

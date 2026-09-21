@@ -2,14 +2,15 @@
 /**
  * tests/web/tool-call-list-preview.test.tsx
  *
- * ToolCallList 渲染层断言（D4 / D6 同规则消费 wire `outputPreview`）:
- *  - 展开后 bash 多行 → 5 行尾部预览 + `… +N 行` 溢出标签；
- *  - `isError=true` → 输出 pre 套 danger 色（border / text-danger），文本不变；
- *  - read_file / 空 outputPreview / ANSI-only 等 → 展开后也无 OutputBlock（不发
- *    出第二个 `<pre>`)。
+ * ToolCallList render-layer asserts (consumes the wire `outputPreview` under the
+ * same rule as the TUI):
+ *  - expanded multi-line bash → 5-line tail preview + `… +N 行` ("+N lines") overflow label;
+ *  - `isError=true` → output pre gets danger colors (border / text-danger), text unchanged;
+ *  - read_file / empty outputPreview / ANSI-only etc. → still no OutputBlock when
+ *    expanded (no second `<pre>` emitted).
  *
- * 使用 happy-dom + @testing-library/react fireEvent.click 触发 ToolCallList 内
- * 部 useState 展开分支 —— 模拟用户展开工具调用。
+ * happy-dom + @testing-library/react fireEvent.click drives ToolCallList's internal
+ * useState expand branch — simulating a user expanding a tool call.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -36,8 +37,8 @@ function setup(tools: readonly ToolCallView[]): {
 } {
   const result = render(<ToolCallList toolCalls={tools} />);
   const expandAll = (): void => {
-    // 一行一行点开:每个 ToolCallItem 的展开按钮 = 第一个 <button>。
-    // 这里点第一个 (唯一) tool。
+    // Expand items one by one: each ToolCallItem's expand button is its first <button>.
+    // Here there is a single tool.
     const buttons = result.container.querySelectorAll("button");
     for (const button of buttons) fireEvent.click(button);
   };
@@ -62,12 +63,12 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
         }),
       }),
     ]);
-    // 闭合态:无 <pre>
+    // collapsed state: no <pre>
     assert.equal(env.html().includes("<pre"), false);
-    // 展开
+    // expand
     env.expandAll();
     const expanded = env.html();
-    // 5 行尾部:line-7..line-11 应在 <pre> 里出现（不是 line-6 之前）
+    // tail 5 lines: line-7..line-11 must appear in <pre> (line-6 or earlier must not)
     assert.ok(
       expanded.includes("line-7"),
       "must show line-7 (tail position 0)"
@@ -81,9 +82,9 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
       false,
       "must NOT show line-6 (above tail window)"
     );
-    // 溢出标签
+    // overflow label
     assert.ok(/…\s*\+7\s*行/.test(expanded), "overflow label: … +7 行");
-    // 应至少 1 个 <pre>（输入 + 输出 都挂）
+    // input + output <pre> should both be mounted
     const preCount = (expanded.match(/<pre/g) ?? []).length;
     assert.ok(preCount >= 2, "must render input + output <pre>");
   });
@@ -102,7 +103,7 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
     env.expandAll();
     const html = env.html();
     assert.ok(html.includes("single line"));
-    // 单行不会有 `… +N 行`
+    // a single line never yields `… +N 行`
     assert.equal(/…\s*\+\d+\s*行/.test(html), false);
   });
 
@@ -120,10 +121,10 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
     ]);
     env.expandAll();
     const html = env.html();
-    // 失败行整体标红:border-danger + text-danger 同时出现
+    // failed output is all red: border-danger + text-danger appear together
     assert.ok(html.includes("border-danger"), "danger border class");
     assert.ok(html.includes("text-danger"), "danger text class");
-    // 文本仍可读
+    // text stays readable
     assert.ok(html.includes("fail output"));
   });
 
@@ -137,7 +138,7 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
     env.expandAll();
     const html = env.html();
     assert.ok(html.includes("read_file"));
-    // 只有输入 <pre>（1 个）,无输出 <pre>
+    // only the input <pre> (1), no output <pre>
     const preCount = (html.match(/<pre/g) ?? []).length;
     assert.equal(preCount, 1, "only input <pre> remains");
   });
@@ -152,7 +153,7 @@ describe("ToolCallList output preview — D4 / D6 规则一致", () => {
     env.expandAll();
     const html = env.html();
     assert.ok(html.includes("bash"));
-    // bash 但空 → OutputBlock 不挂载;只剩 input pre
+    // bash but empty → OutputBlock not mounted; only the input pre remains
     const preCount = (html.match(/<pre/g) ?? []).length;
     assert.equal(preCount, 1, "only input <pre>; empty bash → no output block");
   });

@@ -2,22 +2,24 @@
 /**
  * tests/tui/settle-store-only.test.tsx
  *
- * 出处: specs/interrupt-frozen-prefix-keep.md invariant 2 + input-contract 表
- * 「TUI settle」行（specs/interrupt-frozen-prefix-keep.md / ADR-0108）。
+ * From specs/interrupt-frozen-prefix-keep.md invariant 2 + the "TUI settle" row of its
+ * input-contract table (also ADR-0108).
  *
- * 钉住的不变式：SSOT 在 closeout（store），不在 TUI overlay。
- *   1. overlay 空、store 有 freeze prefix → settle 后墙画 store（prefix 看得见）；
- *   2. 不得用 overlay 残稿（tailRaw，已被 harness 丢弃）覆盖 store ——
- *      settle 后墙上永不出现流式期间画过的残尾；
- *   3. `finally` 卸 draft（app.tsx draft.reset/setStreamDraft(null)）早于
- *      `turnFinished` 换快照（loadSessionFile）：最终帧以快照为准，
- *      已卸 draft 不会被写回历史（延迟刷新窗口后仍无残尾）。
- *   4. 无 prefix 盘（store 仅 user+interrupt）→ settle 后墙不画任何假 assistant。
+ * Pinned invariant: the SSOT is the closeout (store), not the TUI overlay.
+ *   1. overlay empty, store holds the frozen prefix → after settle the wall shows the store
+ *      (prefix visible);
+ *   2. the overlay's leftover draft (tailRaw, already dropped by the harness) must never
+ *      overwrite the store — after settle the wall never shows the tail drawn during streaming;
+ *   3. `finally` unloading the draft (app.tsx draft.reset/setStreamDraft(null)) happens before
+ *      `turnFinished` swaps the snapshot (loadSessionFile): the final frame follows the
+ *      snapshot, and the unloaded draft is never written back into history (no leftover tail
+ *      even after the delayed-refresh window).
+ *   4. no-prefix disk (store has only user+interrupt) → the settled wall draws no fake assistant.
  *
- * 装配沿用 interrupt-notice.test.tsx 的 fake-bridge 纪律：本测只认证 app 层
- * settle 的墙渲染映射（overlay 卸载 + 快照接管）；harness closeout 的
- * prefix commit 本身由 tests/harness（SC1/SC2）钉死，与本面解耦。
- * 流式期间先 assert 残尾**曾**上屏，使 settle 后的 not.toContain 非空洞。
+ * Assembly follows the fake-bridge discipline of interrupt-notice.test.tsx: this file only
+ * certifies the app-layer settle wall-render mapping (overlay unmount + snapshot takeover);
+ * the harness closeout's prefix commit itself is pinned by tests/harness, decoupled from here.
+ * During streaming we first assert the tail **was** on screen, so the post-settle not.toContain is not vacuous.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -34,10 +36,10 @@ import { createSessionGrants } from "../../src/harness/permission/session-grants
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
-/** 流式期间画过、但 store 里没有的残尾标记（tailRaw 替身）。纯 ASCII：
- *  墙上 pangu 会在 CJK 与拉丁之间插空格，混排标记会破坏 includes 断言。 */
+/** tail marker drawn during streaming but absent from the store (tailRaw stand-in). Pure ASCII:
+ *  pangu on the wall inserts spaces between CJK and Latin, a mixed marker would break includes assertions. */
 const TAIL_MARK = "GrowingTailX9";
-/** harness closeout 已 commit 进 store 的钉住前缀（prefixRaw 替身）。 */
+/** the pinned prefix harness closeout already committed to the store (prefixRaw stand-in). */
 const PREFIX_TEXT = "KeptPrefixA7 pinned block";
 
 async function untilFrame(
@@ -56,18 +58,19 @@ async function untilFrame(
 }
 
 interface SettleBridgeOptions {
-  /** store（loadSessionFile）里是否有 assistant(prefix)：
-   *  true = SC1 形状（user + assistant(prefix) + interrupt）；
-   *  false = SC2 形状（user + interrupt，无 assistant）。 */
+  /** whether the store (loadSessionFile) holds assistant(prefix):
+   *  true = shape with user + assistant(prefix) + interrupt;
+   *  false = shape with user + interrupt, no assistant. */
   readonly persistPrefix: boolean;
-  /** loadSessionFile 延迟：放大「finally 卸 draft 早于快照替换」的竞争窗口。 */
+  /** loadSessionFile delay: widens the race window where "finally unloads draft" precedes "snapshot swap". */
   readonly loadDelayMs?: number;
 }
 
 /**
- * fake bridge：postMessage 期间经 onStream 推 text_delta（prefix + tail 两段，
- * 与真实 draft 累积路径同源），随后按 closeout 形状落盘 —— store 只含 prefix，
- * tail 被 harness 丢弃。cancelled + interrupted=true。
+ * fake bridge: during postMessage it pushes text_delta via onStream (prefix + tail in two
+ * chunks, same source as the real draft accumulation path), then writes to disk in closeout
+ * shape — the store contains only the prefix, the tail is dropped by the harness.
+ * cancelled + interrupted=true.
  */
 function settleBridge(opts: SettleBridgeOptions): TuiBridge {
   const inflight = createInflightRegistry();
@@ -121,7 +124,7 @@ function settleBridge(opts: SettleBridgeOptions): TuiBridge {
           onStream?.(event);
         };
         emit({ type: "text_delta", text: PREFIX_TEXT });
-        // 让运行中帧至少渲染一次（残尾上屏依赖此窗口）。
+        // let the running frame render at least once (the tail going on screen depends on this window).
         await new Promise((r) => setTimeout(r, 80));
         emit({ type: "text_delta", text: `\n\n${TAIL_MARK}` });
         await new Promise((r) => setTimeout(r, 250));
@@ -231,20 +234,20 @@ describe("TUI settle 只画 store（spec invariant 2 / T5）", () => {
 
     await app.typeText("go");
     await app.pressEnter();
-    // 前提：残尾确实在 overlay 上屏过（否则 settle 后的 not.toContain 是空洞断言）。
+    // precondition: the tail really was on the overlay (otherwise the post-settle not.toContain is a vacuous assertion).
     await untilFrame(app.setup, (f) => f.includes(TAIL_MARK));
-    // settle：notice「已打断」出现 → 卸 draft + 快照替换均已完成。
+    // settle: the 「已打断」 notice appears → draft unload + snapshot swap are both done.
     await untilFrame(app.setup, (f) => f.includes("已打断，checkpoint 已保存"));
 
     const frame = app.setup.captureCharFrame();
-    // 墙画 store：prefix 正文与 interrupt 行都看得见。
+    // the wall shows the store: both the prefix body and the interrupt line are visible.
     expect(frame).toContain(PREFIX_TEXT);
     expect(frame).toContain("Interrupted by user.");
-    // overlay 残稿不覆盖 store、不写回历史。
+    // the overlay's leftover draft neither overwrites the store nor writes back into history.
     expect(frame).not.toContain(TAIL_MARK);
 
-    // 竞争窗放大后的复检：快照晚到 300ms，卸 draft 早于换快照 —— 以快照为准，
-    // 已卸 draft 不会在后续帧复活。
+    // re-check with the widened race window: snapshot arrives 300ms late, draft unload precedes it —
+    // the snapshot wins and the unloaded draft never revives in later frames.
     await new Promise((r) => setTimeout(r, 600));
     await app.setup.renderOnce();
     const settled = app.setup.captureCharFrame();
@@ -275,8 +278,8 @@ describe("TUI settle 只画 store（spec invariant 2 / T5）", () => {
     await app.destroy();
   }, 30_000);
 
-  // afterAll 而非伪 test：前面任一用例崩溃时钩子仍执行，避免监听器泄漏给
-  // 同进程后续测试文件（review 遗留 Std-Low）。
+  // afterAll rather than a pseudo-test: the hook still runs when an earlier case crashes, keeping
+  // the listener from leaking into later test files in the same process.
   afterAll(() => {
     process.off("unhandledRejection", listener);
   });

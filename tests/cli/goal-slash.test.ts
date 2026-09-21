@@ -1,16 +1,15 @@
 /**
- * #458 T6: /goal 三面解析单测（status / clear / <text> pin）。
+ * /goal parse unit tests across the three entry points (status / clear / <text> pin).
  *
- * - status → { type: "goal", action: "status" }（空 args / ["status"]）
+ * - status → { type: "goal", action: "status" } (empty args / ["status"])
  * - clear → { type: "goal", action: "clear" }
- * - 其它 → { type: "goal", action: "pin", text: <join+trim> }
- * - 大小写敏感（CLEAR ≠ clear → pin）
+ * - anything else → { type: "goal", action: "pin", text: <join+trim> }
+ * - case-sensitive (CLEAR ≠ clear → pin)
  *
- * mirrors worktree-408-not-yet-specified-impl/tests/cli/goal-slash.test.ts，
- * 但裁剪掉 T6-only 弃用形态（goal_status / goal_clear 独立 effect 不落地，
- * 统一收口到 SlashEffect { type: "goal"; action: ... } 三态）。
+ * Deprecated standalone effects (goal_status / goal_clear) never landed: all
+ * three states funnel into one SlashEffect { type: "goal"; action: ... }.
  *
- * 覆盖五类边界（defensive-contract-validator）:
+ * Covers five defensive boundary classes:
  *  - empty / negative / overflow / concurrent / exception
  */
 import { describe, expect, test } from "vitest";
@@ -83,13 +82,13 @@ describe("/goal 三面 (T6)", () => {
     expect(eff.type).toBe("error");
   });
 
-  // === 非法子命令 ===
+  // === invalid subcommand ===
   test("goal ['foo']（非 status/clear）→ 按 <text> pin 处理", () => {
     const eff = goalOf({ args: ["foo"] });
     expect(eff).toEqual({ type: "goal", action: "pin", text: "foo" });
   });
 
-  // === 大小写 ===
+  // === case sensitivity ===
   test("goal ['CLEAR']（大写）→ 不识别为命令，按 <text> pin 处理", () => {
     const eff = goalOf({ args: ["CLEAR"] });
     expect(eff).toEqual({ type: "goal", action: "pin", text: "CLEAR" });
@@ -102,7 +101,7 @@ describe("/goal 三面 (T6)", () => {
     expect(HELP_TEXT).toMatch(/--max-turns/);
   });
 
-  // === 五类边界 (defensive-contract-validator) ===
+  // === five defensive boundary classes ===
   test("empty: 空 args → status effect（合法态，host 端显示未设置 goal）", () => {
     const eff = goalOf({ args: [] });
     expect(eff).toEqual({ type: "goal", action: "status", text: "" });

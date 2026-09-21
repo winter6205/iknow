@@ -1,24 +1,25 @@
 /**
- * #353: settings 文件机制 —— user/project 双层加载 + 非法值回退。
+ * settings file mechanism — user/project two-layer loading + invalid-value fallback.
  *
- * ADR-0084 项目允许名单：项目文件只贡献 verify / secrets / permissions
- * 三个顶层键（hooks 仅用户层）。其余顶层键整段丢弃并告警。双层纪律：
- *   - 允许名单键（verify / secrets / permissions）→ project 逐字段覆盖 user；
- *   - 名单外键（llm / isolation / hooks / ...）→ project 值被丢弃，user 值胜出。
+ * ADR-0084 project allowlist: the project file only contributes the verify / secrets /
+ * permissions top-level keys (hooks is user-layer only). Other top-level keys are dropped
+ * wholesale with a warning. Two-layer discipline:
+ *   - allowlisted keys (verify / secrets / permissions) → project overrides user field by field;
+ *   - non-allowlisted keys (llm / isolation / hooks / ...) → project value dropped, user value wins.
  *
- * 覆盖：
- *  - 文件不存在 → 空对象（不抛错）；
- *  - 允许名单键 user 值读取 / project 逐字段覆盖 user（如 verify.command、
- *    secrets.enabled）；
- *  - 名单外键（llm）project 值丢弃 → user 值胜出；
- *  - 坏 JSON → 空对象（user / project 分别测）；
- *  - 非法值丢弃（maxTurns 0 / -5 / "abc" / 1.5；contextWindow 0 / "bad"；
- *    thresholdTokens 0）；
- *  - 非法字段不覆盖 user 合法值（project 非法 → 保留 user 值）；
- *  - llm 是数组 / 字符串 → 丢弃该层；
- *  - 返回对象深 frozen。
+ * Coverage:
+ *  - file missing → empty object (no throw);
+ *  - allowlisted key user read / project field-by-field override of user (e.g. verify.command,
+ *    secrets.enabled);
+ *  - non-allowlisted key (llm): project value dropped → user value wins;
+ *  - bad JSON → empty object (user / project tested separately);
+ *  - invalid values dropped (maxTurns 0 / -5 / "abc" / 1.5; contextWindow 0 / "bad";
+ *    thresholdTokens 0);
+ *  - invalid fields do not override valid user values (project invalid → user value kept);
+ *  - llm is an array / string → that layer dropped;
+ *  - returned object deeply frozen.
  *
- * 每个用例独立 tmp dir，通过 opts.home / opts.cwd 隔离，不碰真实 ~/.iknow。
+ * Each case uses its own tmp dir via opts.home / opts.cwd, never touching the real ~/.iknow.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -37,8 +38,8 @@ afterAll(async () => {
 });
 
 /**
- * 写 user / project 各一个 settings 文件，返回隔离的 LoadSettingsOpts。
- * 始终创建 .iknow 目录（空对象用例也保证目录存在，避免 writeFile ENOENT）。
+ * Writes one settings file per layer (user / project) and returns isolated LoadSettingsOpts.
+ * Always creates the .iknow dirs (even the empty-object case, so writeFile never hits ENOENT).
  */
 async function makeSettings(
   user: Record<string, unknown>,
@@ -893,7 +894,7 @@ describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)"
     assert.deepEqual(loadIknowSettings({ home, cwd }), {});
   });
 
-  // M7: validator 与 env.ts resolver 语义对齐——「整串所有 ${...} 形态都合法」
+  // Validator semantics aligned with the env.ts resolver — "every ${...} form in the whole string must be legal"
   it("M7 收紧：${A}${1B} 混合合法 + 非法 → 丢弃（残骸检测）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { apiKey: "${A}${1B}" } },
@@ -1287,8 +1288,8 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
     }, TypeError);
   });
 
-  // #128 装配层修复: command 缺失时 resolveVerifyConfig 以 { command: "" } 兜底
-  // (分类器判官接管, spec Objective), 不再是 undefined 透明关闭。
+  // Assembly-layer fix: when command is missing, resolveVerifyConfig falls back to { command: "" }
+  // (the classifier judge takes over, per spec Objective), no longer an undefined transparent close.
   it("resolveVerifyConfig(undefined)（verify 段完全缺失）→ { command: '' }（分类器接管，不再透明关闭）", async () => {
     const { home, cwd } = await makeSettings({}, {});
     const settings = loadIknowSettings({ home, cwd });
@@ -1349,7 +1350,7 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
   });
 
   it("resolveVerifyConfig 非法值降级：字段级非法 → 丢弃（不产字段），command 空串兜底", async () => {
-    // command 空串非法 → settings 层丢弃 command；timeoutSec 非法 → 丢弃。
+    // Empty-string command is invalid → settings layer drops command; invalid timeoutSec → dropped.
     const { home, cwd } = await makeSettings(
       { verify: { command: "   ", timeoutSec: -1 } },
       {}

@@ -1,19 +1,21 @@
 /**
- * T6 (plans/write-situation-disclosure.md) — manager.buildWorkerPayload 在
- * spawn 期算 `writeSituation` 并透传到 envelope（ADR-0069 D2）。
+ * manager.buildWorkerPayload computes `writeSituation` at spawn time and
+ * passes it through to the envelope.
  *
  * Acceptance:
- *   - `isolationOn: false` → writable_main（无论 sandboxRoot 是否树形,
- *     negative 臂钉死防形状判断被单独误用 — 与 writeSituation.test.ts 对齐);
- *   - `isolationOn: true` + 树形 sandboxRoot → writable_tree;
- *   - `isolationOn: true` + 非树形 sandboxRoot → no_writable_root;
- *   - `isolationOn: undefined` → 默认 false（manager 直造场景如
- *     manager.test.ts makeHarness 走默认行为,与改造前 byte-equal);
- *   - 透传字段名 = writeSituation,值是三态枚举字面量（typed,非字符串）。
+ *   - `isolationOn: false` → writable_main (regardless of sandboxRoot shape;
+ *     the negative arm pins this so shape detection is never used on its own —
+ *     aligned with writeSituation.test.ts);
+ *   - `isolationOn: true` + tree-shaped sandboxRoot → writable_tree;
+ *   - `isolationOn: true` + non-tree sandboxRoot → no_writable_root;
+ *   - `isolationOn: undefined` → defaults false (direct manager construction
+ *     as in manager.test.ts makeHarness keeps byte-equal pre-change behavior);
+ *   - pass-through field name = writeSituation, value is the tri-state enum
+ *     literal (typed, not string).
  *
- * 装配 SSOT: 写处境判定函数 = `writeSituation(isolationOn, sandboxRoot)`
- * (src/harness/isolation/write-situation.ts);manager 只是用 sandboxRoot 的
- * resolved 值调用 —— 不重复形状判断(ACR bounded-context-guardian 钉死)。
+ * Assembly SSOT: the decision function is `writeSituation(isolationOn,
+ * sandboxRoot)` (src/harness/isolation/write-situation.ts); manager only calls
+ * it with the resolved sandboxRoot — no duplicated shape logic here.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -28,12 +30,12 @@ import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 
-// `isTaskWorktreePath` 接受 `<repo>/.iknow/worktrees/<convId>` 形态。构造真实
-// 的 tmp 路径作为 parentSandboxRoot（realpath 必须解析得到），并模拟树形 vs
-// 主仓两种形态 —— 用真实存在的子路径触发对应分支。
-//   - `treePath` 在 temp root 下创建真实目录 `<root>/.iknow/worktrees/<convId>`,
-//     树形形态可命中 isTaskWorktreePath;
-//   - `mainPath` 直接用 temp root(非 `.iknow/worktrees/...` 形态),非树形。
+// `isTaskWorktreePath` accepts the `<repo>/.iknow/worktrees/<convId>` shape.
+// Use real tmp paths as parentSandboxRoot (realpath must resolve) to trigger
+// the tree vs main-repo branches:
+//   - `treePath`: real dir `<root>/.iknow/worktrees/<convId>` under the temp
+//     root, hitting isTaskWorktreePath;
+//   - `mainPath`: the temp root itself (not `.iknow/worktrees/...`), non-tree.
 
 let tempRoot: string;
 let mainPath: string;
@@ -41,9 +43,9 @@ let treePath: string;
 
 beforeEach(() => {
   tempRoot = mkdtempSync(join(tmpdir(), "iknow-mgr-ws-"));
-  // 主仓形态: tempRoot 直接做 sandboxRoot（非 `.iknow/worktrees/<x>` 形态）。
+  // main-repo shape: tempRoot itself as sandboxRoot (not `.iknow/worktrees/<x>`).
   mainPath = tempRoot;
-  // 树形形态: <root>/.iknow/worktrees/convXXXX 真实存在。
+  // tree shape: <root>/.iknow/worktrees/convXXXX really exists.
   treePath = join(tempRoot, ".iknow", "worktrees", "convXXXX");
   mkdirSync(treePath, { recursive: true });
 });
@@ -87,8 +89,9 @@ function makeManagerCapturingPayload(opts: {
 
 describe("buildWorkerPayload — T6 writeSituation 透传 (ADR-0069 D2)", () => {
   it("isolationOn = false + 树形 sandboxRoot → writeSituation = writable_main", () => {
-    // negative 臂钉死(对齐 writeSituation.test.ts):隔离 OFF 时即使沙箱根
-    // 是树形路径,仍说 writable_main(防形状判断被单独误用)。
+    // negative arm (aligned with writeSituation.test.ts): with isolation OFF,
+    // even a tree-shaped sandbox root still reports writable_main, so the
+    // shape check can never be used on its own.
     const { manager, calls } = makeManagerCapturingPayload({
       isolationOn: false,
       parentSandboxRoot: treePath,
@@ -116,9 +119,9 @@ describe("buildWorkerPayload — T6 writeSituation 透传 (ADR-0069 D2)", () => 
   });
 
   it("isolationOn = true + 非树形 sandboxRoot（未绑树）→ writeSituation = no_writable_root", () => {
-    // 这是 T6 的核心 acceptance:未绑树的父会话派出的子代理,envelope 上
-    // 带的 writeSituation = no_writable_root —— worker 据此渲染 ③ 态披露,
-    // 不会向模型说「写主仓」。
+    // Core acceptance: children of a parent not bound to a tree carry
+    // writeSituation = no_writable_root — the worker renders the state-3
+    // disclosure from it and never tells the model it can write the main repo.
     const { manager, calls } = makeManagerCapturingPayload({
       isolationOn: true,
       parentSandboxRoot: mainPath,
@@ -128,8 +131,8 @@ describe("buildWorkerPayload — T6 writeSituation 透传 (ADR-0069 D2)", () => 
   });
 
   it("isolationOn 缺省 → 默认 false + writable_main（manager 直造场景向后兼容）", () => {
-    // 既有 manager.test.ts makeHarness 路径不传 isolationOn;manager 内部
-    // 默认 false → writable_main,与改造前 byte-equal。
+    // The existing manager.test.ts makeHarness path omits isolationOn; the
+    // internal default false → writable_main stays byte-equal to before.
     const { manager, calls } = makeManagerCapturingPayload({
       parentSandboxRoot: mainPath,
     });
@@ -138,7 +141,8 @@ describe("buildWorkerPayload — T6 writeSituation 透传 (ADR-0069 D2)", () => 
   });
 
   it("envelope.writeSituation 是写处境枚举字面量（typed,不丢类型）", () => {
-    // shape: 直接断言字段是三态枚举字面量之一,防止意外写成字符串拼接。
+    // shape: assert the field is one of the three enum literals, guarding
+    // against an accidental string-concatenated value.
     const { manager, calls } = makeManagerCapturingPayload({
       isolationOn: true,
       parentSandboxRoot: treePath,

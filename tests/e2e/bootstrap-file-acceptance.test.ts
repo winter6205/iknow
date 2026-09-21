@@ -1,24 +1,24 @@
 /**
- * #196 rev 2026-08-11 T12 — E2E: 首启引导文件驱动隐式完成。
+ * E2E: first-run bootstrap completes implicitly via file removal.
  *
- * 全链路(隔离 HOME,不碰真实用户数据,直接调最低层装配函数避开
- * build-engine 跨分支未提交改动):
- * 1. initializeIknowWorkspace 首次 → seed user.md + state.json(bs=true)
+ * Full chain (isolated HOME, no real user data; calls the lowest-level
+ * wiring functions directly to avoid uncommitted build-engine changes):
+ * 1. initializeIknowWorkspace first run -> seeds user.md + state.json(bs=true)
  *    + ~/.iknow/BOOTSTRAP.md
- * 2. assembleIdentityContext(bootstrapActive=true) → system 含 "First Contact"
- * 3. 模拟 agent 引导对话完成:对文件系统操作 = bash 等价物(bwrap 把整个
- *    home --bind 进沙箱,bash 可自由写 ~/.iknow/)。
- *    写 ~/.iknow/user.md + rm ~/.iknow/BOOTSTRAP.md
- * 4. assembleIdentityContext 二次 → 不含 "First Contact"(BOOTSTRAP.md
- *    缺失 → 装配不注入 → 引导完成)
- * 5. user.md 内容 turn 级生效
+ * 2. assembleIdentityContext(bootstrapActive=true) -> system contains "First Contact"
+ * 3. Simulate the agent finishing the bootstrap chat: filesystem ops stand in
+ *    for bash (bwrap --binds the whole home into the sandbox, so bash can
+ *    freely write ~/.iknow/). Writes ~/.iknow/user.md + rm ~/.iknow/BOOTSTRAP.md
+ * 4. Second assembleIdentityContext -> no "First Contact" (BOOTSTRAP.md
+ *    missing -> not injected -> bootstrap done)
+ * 5. user.md content takes effect per turn
  *
- * 断言点:
- *  - 首次 system 含 "First Contact" / "Goals"
- *  - user.md 内容 turn 级生效
- *  - 删 BOOTSTRAP.md 后二次 system 不含 bootstrap 段
- *  - state.json bootstrap_seeded=true(seed 即翻旗,可审计)
- *  - ask 入口(bootstrapActive=false)即使文件存在也不注入
+ * Asserted:
+ *  - first system contains "First Contact" / "Goals"
+ *  - user.md content takes effect per turn
+ *  - after deleting BOOTSTRAP.md, second system has no bootstrap section
+ *  - state.json bootstrap_seeded=true (flag flips at seed time, auditable)
+ *  - ask surface (bootstrapActive=false) never injects, even if the file exists
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -56,7 +56,7 @@ afterAll(async () => {
 
 describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
   it("首次 init → system 注入 BOOTSTRAP;写 user.md + rm BOOTSTRAP.md → 二次不注入", async () => {
-    // 1. 首次初始化:seed user.md + state(bs=true) + BOOTSTRAP.md
+    // 1. First init: seeds user.md + state (bs=true) + BOOTSTRAP.md
     const init = await initializeIknowWorkspace({ workspace: fakeIknow });
     expect(init.state.bootstrap_seeded).toBe(true);
     const bootstrapContent = await readFile(
@@ -65,7 +65,7 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     );
     expect(bootstrapContent).toContain("First Contact");
 
-    // 2. 首次装配 → system 注入 bootstrap 段
+    // 2. First assembly -> system includes the bootstrap section
     const firstSystem =
       (await assembleIdentityContext({
         cwd: fakeHome,
@@ -77,9 +77,10 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     expect(firstSystem).toContain("Goals");
     expect(firstSystem).toContain("User Profile");
 
-    // 3. 模拟 agent 引导对话完成:bwrap 把整个 home --bind 进沙箱,bash 可
-    //    自由读写 ~/.ikknow/(硬墙不拦 .iknow 路径,non-allowlisted 命令
-    //    走 ask tier)。这里用文件系统操作等价模拟 bash 执行。
+    // 3. Simulate the agent finishing bootstrap: bwrap --binds the whole home
+    //    into the sandbox, so bash can freely read/write ~/.iknow/ (the hard
+    //    wall does not block .iknow paths; non-allowlisted commands go to the
+    //    ask tier). Filesystem ops stand in for bash execution here.
     const userProfile = join(fakeIknow, "user.md");
     await writeFile(
       userProfile,
@@ -88,7 +89,7 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     );
     await unlink(join(fakeIknow, "BOOTSTRAP.md"));
 
-    // 4. 二次装配 → user.md 内容生效 + bootstrap 段消失
+    // 4. Second assembly -> user.md content live + bootstrap section gone
     const secondSystem =
       (await assembleIdentityContext({
         cwd: fakeHome,
@@ -100,13 +101,13 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     expect(secondSystem).toContain("- Goal: test bootstrap");
     expect(secondSystem).not.toContain("First Contact");
 
-    // 5. state 审计:bs=true(seed 即翻旗,可审计)
+    // 5. State audit: bs=true (flag flips at seed time, auditable)
     const state = await readIknowState(fakeIknow);
     expect(state.bootstrap_seeded).toBe(true);
   });
 
   it("ask surface (bootstrapActive=false): 即使 BOOTSTRAP.md 存在也不注入", async () => {
-    // 重建 BOOTSTRAP.md(模拟首次未完成)
+    // Recreate BOOTSTRAP.md (simulates first run not yet finished)
     await writeFile(
       join(fakeIknow, "BOOTSTRAP.md"),
       "# BOOTSTRAP.md - First Contact\n\nnot done yet\n",
@@ -120,7 +121,7 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
         memoryEnabled: false,
       })) ?? "";
     expect(askSystem).not.toContain("First Contact");
-    // 清掉,留给其它测试干净状态
+    // Clean up so other tests see a pristine state
     await unlink(join(fakeIknow, "BOOTSTRAP.md")).catch(() => {});
   });
 });

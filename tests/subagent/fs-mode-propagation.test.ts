@@ -1,28 +1,30 @@
 /**
- * ADR-0092 Amendment 2026-09-13 / SC11 —— fs 档的父子传播通道（父会话 → worker）。
+ * ADR-0092 Amendment — the parent→worker propagation channel for the fs mode.
  *
- * 缺口（code-review High）：`CreateWorkerDepsOptions.fsMode` 缝此前只有测试
- * 覆盖，唯一生产入口 `runSubagentWorker` 不传；父会话在工作区档时，模型经
- * `subagent → bash` 拿到的仍是「可写 home」的全局档围栏 —— SC11 在同一会话内
- * 可绕过。本文件钉住修复后的整条通道：
+ * Gap (code-review High): the `CreateWorkerDepsOptions.fsMode` seam was
+ * previously test-covered only; the sole production entry `runSubagentWorker`
+ * did not pass it. When the parent session is in workspace mode, the model
+ * still got the writable-home global fence via `subagent → bash` —
+ * escapable within the same session. This file pins the fixed whole channel:
  *
- *   build-engine `opts.fsMode`（holder）
+ *   build-engine `opts.fsMode` (holder)
  *     → `createDefaultSubAgentSpawn({ fsMode })`
- *     → 子进程 env `IKNOW_FS_MODE`（spawn 期读 holder，D2 语义）
- *     → `runSubagentWorker` 的 `fsModeOptionFromEnv`
- *     → `createWorkerRuntime` 的 `fsMode` holder
- *     → registry → bash 工厂 → bwrap fence 的 workspace 三层 mount。
+ *     → child-process env `IKNOW_FS_MODE` (holder read at spawn time)
+ *     → `runSubagentWorker`'s `fsModeOptionFromEnv`
+ *     → `createWorkerRuntime`'s `fsMode` holder
+ *     → registry → bash factory → bwrap fence's workspace three-layer mount.
  *
- * 通道形态 = env（与 `IKNOW_WORKSPACE_ROOT` / `IKNOW_PRODUCT_ROOT` 同款
- * 「父进程设、worker 读」先例）；信封（envelope）是 untrusted 输入面
- * （`additionalProperties:false` + ajv），不承载本字段。
+ * Channel shape = env (same "parent sets, worker reads" precedent as
+ * `IKNOW_WORKSPACE_ROOT` / `IKNOW_PRODUCT_ROOT`); the envelope is an untrusted
+ * input surface (`additionalProperties:false` + ajv) and does not carry this field.
  *
- * 断言分四段：
- *   A. 父侧写：env 键值 = spawn 期 holder 当前值；缺省 holder → 键缺席；
- *   B. worker 侧读：合法值 → holder；缺省 / 非法 → 缺省（fail-closed）；
- *   C. 端到端：走 worker 的装配入口，bash 工厂产出的**真实 fence argv**
- *      在工作区档叠 `--ro-bind <home>` + `--bind <taskRoot>`；缺省档不叠；
- *   D. build-engine 把同一个 holder 对象交给 spawn 工厂（链头不断）。
+ * Assertions in four segments:
+ *   A. parent-side write: env key value = holder's current value at spawn time; absent holder → key absent;
+ *   B. worker-side read: valid value → holder; absent / invalid → default (fail-closed);
+ *   C. end to end: through the worker's assembly entry, the **real fence argv**
+ *      produced by the bash factory stacks `--ro-bind <home>` + `--bind <taskRoot>`
+ *      in workspace mode; not stacked in default mode;
+ *   D. build-engine hands the same holder object to the spawn factory (chain head unbroken).
  */
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -30,8 +32,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// D 段用：捕获 build-engine → `createDefaultSubAgentSpawn` 的 opt 面。
-// 包装而非替换 —— A 段仍调用真实现（真 spawn 子进程）。
+// For segment D: capture the opt surface build-engine → `createDefaultSubAgentSpawn`.
+// Wrap, not replace — segment A still calls the real implementation (really spawns children).
 const spawnOptsCapture = vi.hoisted(() => ({
   current: undefined as Record<string, unknown> | undefined,
 }));
@@ -52,9 +54,9 @@ vi.mock("../../src/harness/subagent/spawn.js", async (importOriginal) => {
   };
 });
 
-// C 段用：bash 工厂期 requireBwrap() / handler 期 runInSandbox 不假设宿主有
-// bwrap（与 worker-identity-root.test.ts 同款，registry / bash.ts / fs-policy /
-// bwrap.ts 全部保持真实，只有 spawn 出口被挡）。
+// For segment C: at bash-factory time requireBwrap() / at handler time runInSandbox
+// do not assume the host has bwrap (same as worker-identity-root.test.ts;
+// registry / bash.ts / fs-policy / bwrap.ts all stay real, only the spawn exit is blocked).
 vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -113,7 +115,7 @@ async function makeScratch(prefix: string): Promise<string> {
   return path;
 }
 
-/** 父进程 ambient env 不得干扰断言（通道值只应由 spawn opts 决定）。 */
+/** Parent-process ambient env must not interfere with assertions (the channel value should be decided only by spawn opts). */
 const originalEnvValue = process.env[FS_MODE_ENV_KEY];
 
 afterEach(async () => {
@@ -128,12 +130,12 @@ afterEach(async () => {
   );
 });
 
-// ── A. 父侧写：spawn env ────────────────────────────────────────────────────
+// ── A. parent-side write: spawn env ─────────────────────────────────────────
 
 /**
- * 真 spawn 一个 node 子进程打印它看到的 env 值（与 spawn-argv.test.ts 的
- * IKNOW_TRACE_OUT 用例同款：断言的是**真实到达子进程的字节**，不是我们传给
- * spawn 的 options 对象）。
+ * Really spawn a node child that prints the env value it sees (same style as
+ * spawn-argv.test.ts's IKNOW_TRACE_OUT case: asserting the **bytes that
+ * actually reach the child**, not the options object we handed to spawn).
  */
 async function spawnAndReadFsMode(
   fsMode: FsModeContext | undefined
@@ -174,8 +176,9 @@ describe("A. createDefaultSubAgentSpawn — fs 档写入子进程 env", () => {
   });
 
   it("global holder → 显式写 IKNOW_FS_MODE=global（holder 在场即钉值，不省略）", async () => {
-    // 取舍：holder 在场 = 本会话显式钉了档位，即使值是缺省档也写线 ——
-    // 父/子两侧对「缺省」的解释因此只有一种（键缺席 = 这条通道未接）。
+    // Tradeoff: holder present = this session explicitly pinned a mode, so the
+    // value is written even when it equals the default — leaving parent and
+    // child exactly one interpretation of "default" (key absent = channel unwired).
     expect(await spawnAndReadFsMode(createFsModeContext("global"))).toBe(
       "global"
     );
@@ -186,9 +189,10 @@ describe("A. createDefaultSubAgentSpawn — fs 档写入子进程 env", () => {
   });
 
   it("spawn 期读 holder（D2）：工厂建好后 /config 翻档，下一次 spawn 带新值", async () => {
-    // build-engine 只在装配期建一次 spawn 工厂；若在工厂期把 holder 求值成
-    // 字符串，运行期 `/config fs workspace` 就再也到不了子进程。两次 spawn
-    // 之间翻档，第二次必须看到新档。
+    // build-engine creates the spawn factory once at assembly time; if the
+    // holder were evaluated into a string at factory time, a runtime
+    // `/config fs workspace` could never reach the child. Flipping the mode
+    // between two spawns must be visible to the second one.
     delete process.env[FS_MODE_ENV_KEY];
     const root = await makeScratch("iknow-fs-mode-wire-flip-");
     const script = join(root, "print-fs-mode.js");
@@ -222,7 +226,7 @@ describe("A. createDefaultSubAgentSpawn — fs 档写入子进程 env", () => {
   });
 });
 
-// ── B. worker 侧读：env 键 → holder（fail-closed）───────────────────────────
+// ── B. worker-side read: env key → holder (fail-closed) ─────────────────────
 
 describe("B. fsModeOptionFromEnv — worker 侧 env → holder", () => {
   it("IKNOW_FS_MODE=workspace → workspace holder", () => {
@@ -250,7 +254,7 @@ describe("B. fsModeOptionFromEnv — worker 侧 env → holder", () => {
   );
 });
 
-// ── C. 端到端：worker 装配 → bash 工厂 → 真实 fence argv ────────────────────
+// ── C. end to end: worker assembly → bash factory → real fence argv ─────────
 
 function roBindIndex(argv: readonly string[], root: string): number {
   return argv.findIndex(
@@ -272,9 +276,10 @@ function hasHostRootBind(argv: readonly string[]): boolean {
 }
 
 /**
- * 走 worker 的装配入口（`createWorkerDeps` + `fsModeOptionFromEnv`，与
- * `runSubagentWorker` 的调用面同一形态），驱动 bash handler，取真实 fence
- * argv。断言面 = argv（不是 env 字符串、不是 holder 对象）。
+ * Go through the worker's assembly entry (`createWorkerDeps` +
+ * `fsModeOptionFromEnv`, same call shape as `runSubagentWorker`), drive the
+ * bash handler, and capture the real fence argv. Assertion surface = argv
+ * (not the env string, not the holder object).
  */
 async function workerBashArgv(
   rawEnv: Record<string, string | undefined>
@@ -312,14 +317,14 @@ describe("C. worker 端到端 — env 档决定 bash fence 的 mount 层", () =>
       [FS_MODE_ENV_KEY]: "workspace",
     });
     expect(hasHostRootBind(argv)).toBe(true);
-    // home 可见：ro-bind；且不得再有可写的 home bind（后者会覆盖回可写）。
+    // home visible: ro-bind; and no writable home bind may remain (the latter would override back to writable).
     expect(roBindIndex(argv, userHome)).toBeGreaterThan(-1);
     expect(bindIndex(argv, userHome)).toBe(-1);
-    // 写白名单：worker 的活 taskRoot = harness 侧 sandboxRoot（waveRoot 无
-    // liveTaskRoot cell，回落工厂 cwd）。
+    // Write whitelist: the worker's live taskRoot = harness-side sandboxRoot
+    // (waveRoot has no liveTaskRoot cell, falls back to the factory cwd).
     expect(bindIndex(argv, sandboxRoot)).toBeGreaterThan(-1);
-    // mount 序 last-mount-wins：home ro-bind 必须在 taskRoot 可写 bind 之前，
-    // 否则后发射的 ro-bind 会把写白名单重新冻住。
+    // Mount order is last-mount-wins: home ro-bind must precede the taskRoot
+    // writable bind, otherwise a later-emitted ro-bind refreezes the whitelist.
     expect(roBindIndex(argv, userHome)).toBeLessThan(
       bindIndex(argv, sandboxRoot)
     );
@@ -339,7 +344,7 @@ describe("C. worker 端到端 — env 档决定 bash fence 的 mount 层", () =>
   );
 });
 
-// ── D. 链头：build-engine 把 holder 交给 spawn 工厂 ─────────────────────────
+// ── D. chain head: build-engine hands the holder to the spawn factory ───────
 
 describe("D. buildHarnessEngine — fs 档 holder 进入 spawn 工厂 opt 面", () => {
   it("opts.fsMode holder 原样透传（同一对象，装配期不求值）", async () => {

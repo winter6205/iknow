@@ -207,7 +207,7 @@ describe("T6 empty handoff pad roster (SC5)", () => {
 
     const env = await manager.waitFor(taskId);
     assert.equal(env.truncated, true);
-    // host 落稿（Locked sentence 2）也在这个 pad 上，名单断言从 SSOT 常量派生。
+    // The host draft (Locked sentence 2) lands on this pad too; roster assertions derive from the SSOT constant.
     assertRosterNamesOnly(env, ["huge.md", FINAL_TEXT_PAD_NAME]);
     await manager.shutdown();
   });

@@ -7,8 +7,9 @@
  * (that persist path drops the assistant delta and undoes ADR-0108 keep).
  * The violation event is still written to the JSONL trace when traceOut is set.
  *
- * SC-W 6/7 (v2): serve 产品路径注入 agentVersion → run 末尾写 session 根记录
- * (含 agent_version 字段)。本文件是 serve 产品路径集成断言的落点。
+ * The serve product path injects agentVersion → a session root record
+ * (carrying the agent_version field) is written at run end. This file is
+ * where the serve-path integration assertion lives.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -41,7 +42,8 @@ beforeAll(async () => {
   // Reference the namespaced dir so the store is rooted under baseDir.
   resolveProjectSessionDir(baseDir, process.cwd());
   store = new SessionStore(baseDir, process.cwd());
-  // T2 每会话独立文件: traceOut 是目录, violation 写 <traceDir>/<convId>.jsonl。
+  // Per-session independent files: traceOut is a directory, violation
+  // writes <traceDir>/<convId>.jsonl.
   traceDir = baseDir;
 });
 
@@ -139,8 +141,9 @@ describe("SessionHub violation kill (serve entry)", () => {
       );
       // Serve must never kill the process: exitCode stays 0.
       assert.equal(process.exitCode, 0);
-      // T3 (SC6): violation 写 `<projectDir>/<convId>/trace.jsonl`,
-      // 与 hub.recordViolationTrace 共派生。读侧复用同一 SSOT,避免漂移。
+      // Violation writes `<projectDir>/<convId>/trace.jsonl`, derived
+      // jointly with hub.recordViolationTrace. The read side reuses the same
+      // SSOT to avoid drift.
       const tracePath = resolveConversationTraceFilePath({
         projectDir: store.getProjectDir(),
         conversationId: convId,
@@ -154,7 +157,8 @@ describe("SessionHub violation kill (serve entry)", () => {
       assert.ok(lines.length >= 1, `expected violation record, got: ${raw}`);
       assert.match(lines[0] ?? "", /"conversation_id":"[^"]+"/);
       assert.match(lines[0] ?? "", /hard_wall/);
-      // SC-W 6/7 集成断言:run 末尾写 session 根记录,含 serve 注入的 agent_version。
+      // Integration assertion: the session root record written at run end
+      // carries the agent_version injected by serve.
       const allLines = raw.trim().split("\n");
       const roots = allLines.filter((l) =>
         l.includes('"record_type":"session"')

@@ -49,8 +49,9 @@ describe("toAciToolDef", () => {
   });
 
   it("不落输出闸豁免声明（ADR-0083：MCP 不可取得）", () => {
-    // 转换路径只映射 name / description / inputSchema / aci / handler，
-    // 外部源天然是第三方数据 —— 豁免只对内建 createSkillTool 装配期落值。
+    // The conversion path maps only name / description / inputSchema / aci /
+    // handler; an external source is third-party data by nature — the exemption
+    // is set at assembly time only for the built-in createSkillTool.
     const definition = toAciToolDef({
       server: "server",
       tool: tool({ exemptFromOutputCap: true } as Partial<McpTool>),
@@ -71,7 +72,7 @@ describe("toAciToolDef", () => {
           type: "object",
           properties: {
             value: { type: "string" },
-            // 非顶层的 $schema 出现处必须原样保留，只剥顶层一处
+            // non-top-level $schema occurrences must stay verbatim; only the top-level one is stripped
             nested: {
               type: "object",
               properties: {

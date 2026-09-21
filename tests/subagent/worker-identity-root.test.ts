@@ -1,18 +1,20 @@
 /**
- * worker bash 围栏可见性 (ADR-0092 全局档)。
+ * Worker bash fence visibility (ADR-0092 global mode).
  *
- * 取代 T5b 的 `projectIdentityRoot` 读白名单接线:worker 的 bash 是真实执行面
- * (createWorkerRuntime → createDefaultAciRegistry → bash → createFsPolicy →
- * createBwrapFence)。Round 1 起全局档 `--bind / /` 让宿主真实路径本就可见,
- * 主仓 checkout / worktree 的 `.git` gitdir 都可达,不再是逐根读白名单——
- * 因此原本认证的 `--ro-bind <identityRoot>` 断言随闭世界退役。
+ * Replaces the old per-root `projectIdentityRoot` read-whitelist wiring:
+ * worker bash is a real execution surface (createWorkerRuntime →
+ * createDefaultAciRegistry → bash → createFsPolicy → createBwrapFence). Since
+ * the global-mode `--bind / /`, host real paths are already visible — main
+ * checkout and worktree gitdirs are all reachable — so the former
+ * `--ro-bind <identityRoot>` assertions retired with the closed world.
  *
- * 仍然真实的命题:worker bash 围栏绑定宿主根(主仓可达),系统前缀只读,
- * 不存在逐根 identity/installRoot 读白名单。
+ * Still-true propositions: the worker bash fence binds the host root (main
+ * repo reachable), system prefixes are read-only, and no per-root
+ * identity/installRoot read whitelist exists.
  *
- * 手法:module-mock runner.js(捕获 fence,registry / bash.ts / fs-policy /
- * bwrap.ts 保持真实),穿整条 worker deps → registry → bash 工厂 →
- * createBwrapFence 链路拿 argv。
+ * Method: module-mock runner.js (capture the fence; registry / bash.ts /
+ * fs-policy / bwrap.ts stay real) and drive the whole
+ * worker deps → registry → bash factory → createBwrapFence chain to get argv.
  */
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,7 +28,7 @@ vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
     >();
   return {
     ...actual,
-    // bash.ts 工厂期 requireBwrap();测试环境不假设 bwrap 在场。
+    // bash.ts calls requireBwrap() at factory time; do not assume bwrap exists here.
     requireBwrap: () => {},
     runInSandbox: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
   };
@@ -66,7 +68,7 @@ async function makeScratch(prefix: string): Promise<string> {
   return path;
 }
 
-/** task-worktree 形状的主仓 fixture:`<base>/repo/.iknow/worktrees/w1--conv1`。 */
+/** Main-repo fixture in task-worktree shape: `<base>/repo/.iknow/worktrees/w1--conv1`. */
 async function makeWorktreeFixture(prefix: string): Promise<{
   readonly repo: string;
   readonly worktree: string;

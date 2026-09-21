@@ -1,9 +1,10 @@
 /**
  * tests/tui/thinking-override.test.ts
  *
- * thinking-gate.ts 纯函数单测（bun:test；无 React 依赖 —— 独立模块规避
- * app.tsx import 链拉起渲染器）。reviewer Spec Low#3：runTurnOnce 的
- * stateChanged / override 决策抽出后可独立验证。
+ * Pure-function unit tests for thinking-gate.ts (bun:test; no React
+ * dependency — a standalone module avoids the app.tsx import chain pulling in
+ * the renderer). Reviewer "Spec Low#3": extracting runTurnOnce's
+ * stateChanged / override decision makes it independently verifiable.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -12,7 +13,7 @@ import {
 } from "../../src/tui/thinking-gate.js";
 import type { ThinkingEffortWire } from "../../src/session-api/contract.js";
 
-/** defaultThinking 最小投影：default{adaptive,""} = {mode:"adaptive", effort:""}。 */
+/** Minimal defaultThinking projection: default{adaptive,""} = {mode:"adaptive", effort:""}. */
 const ADAPTIVE_EMPTY = { mode: "adaptive", effort: "" } as const;
 const OFF_EMPTY = { mode: "off", effort: "" } as const;
 const ADAPTIVE_HIGH = { mode: "adaptive", effort: "high" } as const;

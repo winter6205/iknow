@@ -226,8 +226,9 @@ describe("validateSessionFile — system role (schema v4)", () => {
   });
 
   it("rejects any role outside user / assistant / system → 'messages'", () => {
-    // validateSessionFile 只查顶层形状（不深校验 message 元素）——role 白名单
-    // 校验在 sanitizeSessionFile 的 isValidMessagesList 里，拒绝用例走 sanitize。
+    // validateSessionFile only checks the top-level shape (no deep validation of message
+    // elements) — the role whitelist is enforced in sanitizeSessionFile's
+    // isValidMessagesList, so rejection cases go through sanitize.
     for (const role of ["tool", "function", "model", "developer", "nope"]) {
       assert.throws(
         () =>
@@ -559,8 +560,8 @@ describe("validateSessionFile — thinkingMs field (assistant thinking duration)
   });
 
   it("accepts an array mixing positive numbers and null (JSON round-trip holes)", () => {
-    // appendEvents 仅在 assistant + 合法边界时挂 thinkingMs;非 assistant /
-    // 流式回合无思考 → null 孔洞。Validator 必须接受 number | null 混合。
+    // appendEvents attaches thinkingMs only for assistant + valid boundaries; non-assistant /
+    // streaming turns without thinking leave null holes. The validator must accept number | null mixtures.
     assert.equal(
       validateSessionFile({
         ...valid,
@@ -590,9 +591,10 @@ describe("validateSessionFile — thinkingMs field (assistant thinking duration)
   });
 
   it("validator does NOT enforce positivity (boundary filter lives in appendEvents entry)", () => {
-    // appendEvents 入口过滤掉 <= 0 / NaN / Infinity —— schema validator 只
-    // 验证 element 类型,任何 number(包括 0 / 负数 / NaN / Infinity 文字)
-    // 都接受。理由:Validator 是"是否合法字段"检查,不重复边界过滤职责。
+    // appendEvents filters <= 0 / NaN / Infinity at entry — the schema validator
+    // only checks element types and accepts any number (including 0 / negative /
+    // NaN / Infinity literals). Rationale: the validator answers "is this a
+    // legal field", it does not duplicate the boundary-filter duty.
     assert.equal(
       validateSessionFile({
         ...valid,
@@ -603,11 +605,11 @@ describe("validateSessionFile — thinkingMs field (assistant thinking duration)
   });
 });
 
-// -- #458 T2: goal source union shrunk (SC1) --------------------------------
+// -- goal source union shrunk -------------------------------------------------
 
 describe("validateSessionFile / sanitizeSessionFile — goal source union shrunk (#458)", () => {
-  // 字面量拼接规避 SC1 grep 硬验收: 旧盘残留值在运行时构造, 源码与注释中
-  // 都不出现该字符串。
+  // Literal concatenation dodges the grep-based hard acceptance: the legacy
+  // on-disk value is built at runtime so it appears in neither source nor comments.
   const LEGACY_REMOVED_SOURCE = "model" + "_proposed";
 
   it("accepts user_initial and user_pin sources (validation)", () => {
@@ -862,9 +864,10 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
   });
 
   it('#191 regression: adapter-normalized thinking block (missing signature → "") passes schema', async () => {
-    // deepseek-flash-combo 返回无 signature 的 thinking 块;interpretMessage
-    // 归一化为空串后,session store 校验必须通过 — 这是线上 schema_invalid
-    // (field=messages) 的回归护栏。
+    // deepseek-flash-combo returns thinking blocks without a signature; after
+    // interpretMessage normalizes to an empty string, session store validation
+    // must pass — the regression guard for the production schema_invalid
+    // (field=messages) incident.
     const sdkResp = {
       id: "msg_think_nosig_schema",
       type: "message",
@@ -883,7 +886,7 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
     } as unknown as SdkMessage;
     const result = interpretMessage(sdkResp);
 
-    // 归一化后 signature 存在(空串),可过 schema 校验
+    // After normalization signature exists (empty string), so schema validation passes
     const file = {
       ...valid,
       conversation_id: "schema-regression",

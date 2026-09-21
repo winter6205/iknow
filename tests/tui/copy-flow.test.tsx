@@ -2,16 +2,18 @@
 /**
  * tests/tui/copy-flow.test.tsx
  *
- * #343 B1：右键复制 copy-flow 契约（#238）回归测试，覆盖 OpenTUI 选区 +
- * 原生 fallback 链：
- *  - `copyToClipboard` 单元：空文本 / PATH=nonexistent 退化写文件 / 命令
- *    成功返回 method；
- *  - 拖选（renderer "selection" 事件）**不再**自动触发复制（#343 删除项）；
- *  - 右键 down+up → 复制当前选区 → notice 显示「已复制（N 字）」/「已写入…」
- *    /「选中区域为空」；
- *  - CJK 双宽：选区文本原样透传（OpenTUI 内置解析器负责）。
+ * Right-click copy contract regressions: OpenTUI selection plus the native
+ * fallback chain:
+ *  - `copyToClipboard` unit: empty text / PATH=nonexistent degrades to a file
+ *    write / success returns the method used;
+ *  - mouse-drag (renderer "selection" event) no longer auto-copies;
+ *  - right-button down+up → copies the current selection → notice shows
+ *    `已复制（N 字）` ("copied (N chars)") / `已写入…` ("written…") /
+ *    `选中区域为空` ("selection is empty");
+ *  - CJK double-width: selection text passes through verbatim (OpenTUI's
+ *    built-in parser handles it).
  *
- * 异步纪律：setup.waitForVisualIdle() 是唯一异步等待入口。
+ * Async discipline: setup.waitForVisualIdle() is the only async wait entry.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -25,7 +27,7 @@ import { copyToClipboard } from "../../src/tui/clipboard.js";
 const COLS = 80;
 const ROWS = 24;
 
-/** 临时 dataDir：用于 copyToClipboard fallback 写文件断言。 */
+/** Temp dataDir: for copyToClipboard fallback file-write assertions. */
 let tmpDataDir: string;
 beforeEach(() => {
   tmpDataDir = mkdtempSync(join(tmpdir(), "iknow-copy-"));
@@ -74,8 +76,9 @@ describe("copyToClipboard（原生 fallback 链）", () => {
 });
 
 /**
- * 构造一个 fake Selection 对象（duck-type getSelectedText + touchedRenderables）。
- * 测试中直接写入 renderer.currentSelection，触发右键复制 handler。
+ * Fake Selection object (duck-types getSelectedText + touchedRenderables),
+ * written directly into renderer.currentSelection to drive the right-click
+ * copy handler.
  */
 function fakeSelection(text: string): {
   getSelectedText(): string;
@@ -115,7 +118,8 @@ describe("TuiApp 右键复制（#343 B1）", () => {
     (
       setup.renderer as unknown as { currentSelection: unknown }
     ).currentSelection = fakeSelection(text);
-    // 真实右键序列：down（应被 onMouseDown preventDefault 保留选区）+ up。
+    // Real right-click sequence: down (selection preserved via onMouseDown
+    // preventDefault) + up.
     await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
     await setup.waitForVisualIdle();
     await new Promise((r) => setTimeout(r, 50));

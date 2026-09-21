@@ -1,12 +1,15 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T3 — cli 注入缝
- * `storeWorkerTranscriptIo` 的路径护栏接线测试。
+ * ADR-0102 — path-guard wiring test for the CLI injection seam
+ * `storeWorkerTranscriptIo`.
  *
- * 钉住的不变式：envelope 是 untrusted 输入面，工人账路径必须是父进程算好的
- * 绝对路径；相对路径 / 空串在工厂入口 typed 拒绝（`isWorkerTranscriptPathSafe`
- * 是唯一判定源），不给「父没算好」留静默写到 process.cwd() 的通道。
- * 合法绝对路径照常构造 IO：load 只折叠 not_found → absent，其余 typed
- * kind 原样上抛（损坏的账不得被读成无账）。
+ * Pinned invariant: the envelope is an untrusted input surface, so the worker
+ * ledger path must be an absolute path computed by the parent process. A
+ * relative path / empty string is rejected typed at the factory entry
+ * (`isWorkerTranscriptPathSafe` is the sole arbiter), leaving no silent
+ * write-to-process.cwd() channel for "the parent didn't compute it".
+ * Legal absolute paths still build IO: load collapses only not_found → absent;
+ * every other typed kind propagates unchanged (a corrupt ledger must never be
+ * read as "no ledger").
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -34,7 +37,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** typed 错误按 kind 分流校验（禁 instanceof Error 折叠渲染）。 */
+/** Validates typed errors by kind (no `instanceof Error` collapse rendering). */
 function assertTypedPathRefusal(err: unknown): true {
   const e = err as SessionStoreError;
   assert.equal(e.kind, "schema_invalid");
@@ -100,11 +103,13 @@ describe("storeWorkerTranscriptIo — 合法绝对路径形态", () => {
 
 describe("storeWorkerTranscriptIo — 并发 append 串行化", () => {
   /**
-   * 钉住的不变式：worker loop 的 flushPrefix 可被并发回调重入，同一实例的
-   * appendMessages/loadMessages 必须按调用顺序串行执行 —— store 的
-   * appendWorkerTranscript 是 read-modify-write 且无内部锁（架构纪律：锁在
-   * 装配边界，不在 store）。交错实现下两批读到同一 head → 重复 event id →
-   * parseSessionJsonl 抛 schema_invalid，或首批交错 → 先批被覆盖丢失。
+   * Pinned invariant: the worker loop's flushPrefix can be re-entered by concurrent
+   * callbacks, so appendMessages/loadMessages on one instance must serialize in call
+   * order — the store's appendWorkerTranscript is read-modify-write with no internal
+   * lock (architecture discipline: the lock lives at the assembly boundary, not in
+   * the store). An interleaving implementation would have two batches read the same
+   * head → duplicate event ids → parseSessionJsonl throws schema_invalid, or the
+   * first batch interleaves → the earlier batch is overwritten and lost.
    */
   it("不 await 地并发发起多批 append，全部完成后账上无重复 id、链合法、批次按入队顺序齐全", async () => {
     const transcriptPath = join(dir, "t-race", "t-race.jsonl");
@@ -124,7 +129,7 @@ describe("storeWorkerTranscriptIo — 并发 append 串行化", () => {
     await Promise.all(inFlight);
 
     const raw = await readFile(transcriptPath, "utf8");
-    const log = parseSessionJsonl(raw); // 重复 id / 断链会在此抛 schema_invalid
+    const log = parseSessionJsonl(raw); // duplicate ids / broken chains throw schema_invalid here
     const ids = log.events.map((e) => e.id);
     assert.equal(new Set(ids).size, ids.length, "event id 不得重复");
     let parent: string | null = null;
@@ -148,8 +153,9 @@ describe("storeWorkerTranscriptIo — 并发 append 串行化", () => {
       taskId: "t-recover",
       cwd: dir,
     });
-    // 往路径里塞一本无法解析的坏账：append / load 都必须 typed reject
-    // （store 折叠后的 schema_invalid），且队列不被前序 reject 卡死。
+    // Plant an unparseable corrupt ledger at the path: append / load must both
+    // reject typed (schema_invalid as folded by the store), and the queue must not
+    // be wedged by the earlier rejection.
     mkdirSync(join(dir, "t-recover"), { recursive: true });
     await writeFile(transcriptPath, "not-a-jsonl-line\n", "utf8");
     await assert.rejects(

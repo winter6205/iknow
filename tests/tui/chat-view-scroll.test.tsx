@@ -2,24 +2,28 @@
 /**
  * tests/tui/chat-view-scroll.test.tsx
  *
- * #343 T6-B：ChatView 会话视图（OpenTUI `<scrollbox stickyScroll>`，T3
- * sticky 行为沿用 + T6-B 扩展为 session-state 接线版）：
- *  - sticky 滚动：追加消息自动贴底；mockMouse.scroll 上滚后追加内容停留在
- *    用户位置（不跟随）；滚轮回到底部后追加恢复跟随（落底即落回 sticky
- *    位置，_hasManualScroll 复位）；
- *  - 强制滚底通道：ChatViewHandle.scrollToBottom()（用户发新消息 / turn 完成）；
- *  - 长会话（100 条 >3 屏）滚动文档全量：顶见最早气泡，无尾窗 stub；
- *    布局位置经 ref 直查（scrollTop / scrollHeight / viewport.height），不靠行数估算；
- *  - 空会话（0 条消息）渲染收敛不崩（empty 边界）；
- *  - session 接线：TuiSessionState.messages + runState / 流式草稿 / liveTool /
- *    banner 段都能正确渲染（MessageBlocks 视觉一致性）。
+ * ChatView session view (OpenTUI `<scrollbox stickyScroll>`):
+ *  - sticky scroll: appended messages auto-pin to bottom; after
+ *    mockMouse.scroll scrolls up, appended content stays at the user position
+ *    (does not follow); scrolling back to bottom restores following (landing
+ *    at the bottom re-engages sticky, _hasManualScroll resets);
+ *  - forced scroll channel: ChatViewHandle.scrollToBottom() (new user
+ *    message / turn completion);
+ *  - long session (100 msgs > 3 screens) keeps the full scroll document: top
+ *    shows the earliest bubble, no tail-window stub; layout positions queried
+ *    via ref directly (scrollTop / scrollHeight / viewport.height), never
+ *    estimated by line counts;
+ *  - empty session (0 messages) renders and converges without crash (empty boundary);
+ *  - session wiring: TuiSessionState.messages + runState / streaming draft /
+ *    liveTool / banner segments all render (MessageBlocks visual consistency).
  *
- * T6-B 改动：原 T3 测试驱动 TuiChatMessage 简化壳，已被 T6-B 完整 session
- * 接线替换 → 重写测试 harness 直接驱动 TuiSessionState（构造 user/assistant
- * 文本消息数组 + runState + 流式草稿），保留 sticky 滚动覆盖（T3 验收 SSOT）。
+ * The harness drives TuiSessionState directly (user/assistant text message
+ * arrays + runState + streaming draft), keeping the sticky-scroll coverage as
+ * the acceptance SSOT.
  *
- * 异步等待纪律：setup.waitForVisualIdle() 是唯一异步等待入口
- * （禁止 setTimeout 裸 sleep 轮询）；React 状态更新用 act 包裹。
+ * Async-wait discipline: setup.waitForVisualIdle() is the only async wait
+ * entry (no bare setTimeout sleep polling); React state updates are wrapped
+ * in act.
  */
 import { expect, test } from "bun:test";
 import { Profiler, act, useEffect, useRef, useState } from "react";
@@ -116,11 +120,10 @@ function Harness(props: HarnessProps): ReturnType<typeof ChatView> {
       handle: chatRef.current,
     });
   });
-  // `drafts` / `liveToolRuns` 是 session 的运行时流式字段（T6-B 假想扩展）
-  // — 本 harness 用闭包内 state 注入（非 session state 字段），避免改
-  // TuiSessionState 形状影响其他测试。ChatView props 走 session 之外的
-  // 通道：T6-B 直接传 props.draftsMasked / props.liveToolRuns，由 harness
-  // 联动更新。
+  // `drafts` / `liveToolRuns` are runtime streaming fields — this harness
+  // injects them via closure state (not TuiSessionState fields) to avoid
+  // reshaping TuiSessionState for other tests. ChatView receives them through
+  // props.draftsMasked / props.liveToolRuns, updated in lockstep by the harness.
   return (
     <ChatView
       ref={chatRef}
@@ -146,7 +149,7 @@ function msg(
   return { role, content: [{ type: "text", text }] };
 }
 
-/** 生成 n 条 user/assistant 交替的多段落消息。 */
+/** Generate n alternating user/assistant multi-paragraph messages. */
 function makeMessages(n: number, offset = 0): AnthropicNativeMessage[] {
   return Array.from({ length: n }, (_, i) => {
     const k = offset + i;
@@ -159,9 +162,9 @@ function makeMessages(n: number, offset = 0): AnthropicNativeMessage[] {
   });
 }
 
-/** 构造带 messages 的 TuiSessionState（用于 T6-B harness）。D3:thinkingMs
- *  可显式传入(否则 SessionFileV1.thinkingMs undefined → session.thinkingMs
- *  undefined,折叠行只显示工具计数)。 */
+/** Build a TuiSessionState with messages. thinkingMs may be passed
+ *  explicitly (otherwise SessionFileV1.thinkingMs is undefined and the fold
+ *  line shows tool counts only). */
 function sessionWith(
   msgs: ReadonlyArray<AnthropicNativeMessage>,
   thinkingMs?: ReadonlyArray<number | null>,
@@ -207,7 +210,7 @@ async function renderChat(
   return { setup, api: holder.api };
 }
 
-/** ref 直查：贴底位置 = scrollHeight - 视口高。 */
+/** Ref-based ground truth: bottom position = scrollHeight - viewport height. */
 function maxScrollTop(handle: ChatViewHandle): number {
   const sb = handle.scrollbox;
   if (sb === null) throw new Error("scrollbox 未挂载");
@@ -225,13 +228,14 @@ test("空会话（0 条消息）渲染收敛不崩", async () => {
 });
 
 test("短会话（内容不足一屏）：全部消息挂载、无尾窗 stub", async () => {
-  // spec invariant 4 / Testing strategy 短会话条：内容全部落在视口（+overscan）
-  // 内时，挂载窗口换算结果与全量 visibleMessages.map 等价 —— 画面含全部
-  // 可见消息，且无「↑ N 条更早的消息」尾窗 stub。
+  // spec invariant (short-session clause): when content fits the viewport
+  // (+overscan), the mounted-window result equals a full visibleMessages.map —
+  // the frame contains all visible messages and no "↑ N 条更早的消息"
+  // ("earlier messages") tail-window stub.
   const initial = sessionWith(makeMessages(3));
   const { setup, api } = await renderChat(initial, { rows: 24 });
   const sb = api.handle!.scrollbox!;
-  // 前提认证：内容总高落在视口内（否则「全部挂上」不可达）。
+  // Precondition: total content height fits in the viewport (otherwise "all mounted" is unreachable).
   expect(sb.scrollHeight).toBeLessThanOrEqual(sb.viewport.height);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("msg-000");
@@ -239,7 +243,7 @@ test("短会话（内容不足一屏）：全部消息挂载、无尾窗 stub", 
   expect(frame).toContain("msg-002");
   expect(frame.includes("条更早的消息")).toBe(false);
   expect(frame.includes("↑ ")).toBe(false);
-  // 窗口覆盖全部 3 条（可见下标 0..2 都在树上）。
+  // Window covers all 3 messages (visible indices 0..2 all on the tree).
   for (let i = 0; i < 3; i++) {
     expect(sb.getRenderable(`tmsg-${i}`)).toBeDefined();
   }
@@ -251,7 +255,7 @@ test("sticky 贴底：追加消息自动滚底（ref 直查 scrollTop === max）
   const { setup, api } = await renderChat(initial);
   const handle = api.handle!;
   expect(handle.scrollbox!.scrollTop).toBe(0);
-  // 追加到溢出一屏：stickyScroll 自动贴底。
+  // Append past one screen: stickyScroll auto-pins to bottom.
   for (const m of makeMessages(6, 2)) {
     if (m.role === "user") api.appendUser(m.content[0]!.text);
     else api.appendAssistant(m.content[0]!.text);
@@ -260,14 +264,15 @@ test("sticky 贴底：追加消息自动滚底（ref 直查 scrollTop === max）
   const sb = handle.scrollbox!;
   expect(sb.scrollHeight).toBeGreaterThan(ROWS);
   expect(sb.scrollTop).toBe(maxScrollTop(handle));
-  // 最新消息可见（assistant 段「reply-007」应可见）。
+  // Latest message visible (assistant segment "reply-007").
   expect(setup.captureCharFrame()).toContain("reply-007");
   await setup.renderer.destroy();
 });
 
-// skip 依据（操作员授权）：滚轮步进 SSOT = CHAT_WHEEL_SCROLL_MULTIPLIER
-// (src/tui/wheel-scroll.ts)，「一步 3 行」断言与其不一致；步进加速后本
-// 用例前提失效。
+// Skip rationale (operator-approved): the wheel-step SSOT is
+// CHAT_WHEEL_SCROLL_MULTIPLIER (src/tui/wheel-scroll.ts) and no longer
+// matches the "one step = 3 lines" assertion; this case's premise lapsed
+// after step acceleration.
 test.skip("滚轮一步移动 3 行（略快于 OpenTUI 默认 1 行/格）", async () => {
   const initial = sessionWith(makeMessages(10));
   const { setup, api } = await renderChat(initial);
@@ -298,7 +303,7 @@ test("上滚后追加：停留在用户位置不跟随（_hasManualScroll 暂停
   const topBefore = sb.scrollTop;
   expect(topBefore).toBeGreaterThan(0);
   const topMarker = setup.captureCharFrame().split("\n")[0];
-  // 追加新 assistant 消息：停留在用户位置，不跳底。
+  // Append a new assistant message: stays at the user position, no jump to bottom.
   api.appendAssistant("brand-new-100 第一段\n\nbrand-new-100 第二段");
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBe(topBefore);
@@ -321,7 +326,7 @@ test("滚回底部后追加：恢复跟随贴底（sticky reengage）", async ()
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBeGreaterThan(0);
   expect(sb.scrollTop).toBeLessThan(maxScrollTop(handle));
-  // 滚轮回底。
+  // Scroll back down to the bottom.
   for (let i = 0; i < 30; i++) {
     await act(async () => {
       await setup.mockMouse.scroll(5, 2, "down");
@@ -360,11 +365,12 @@ test("强制滚底通道：scrollToBottom() 从上滚位置直达底部并恢复
 });
 
 test("中长会话（超一屏、不足三屏）：树上只挂视口+overscan，顶/底仍达首末", async () => {
-  // spec invariant 4：挂载窗口只由 scrollTop + 视口 + overscan 决定，与内容
-  // 总高无关（20 条短消息总高超过一屏）—— 树上不出现全部 20 条，窗口本身
-  // 可以短于总条数。断言口径 = 真实渲染树里 MessageRow 的 id 契约
-  // `tmsg-<visibleIndex>`（通过 scrollbox.getRenderable 直查，不由实现细节
-  // 推断条数）。
+  // spec invariant: the mounted window depends only on scrollTop + viewport +
+  // overscan, not on total content height (20 short messages exceed one
+  // screen) — the tree must not contain all 20 and the window may be shorter
+  // than the total count. Assertion surface = the real render tree's
+  // MessageRow id contract `tmsg-<visibleIndex>` (via scrollbox.getRenderable,
+  // not inferred from implementation details).
   const MESSAGES = 20;
   const initial = sessionWith(makeMessages(MESSAGES));
   const { setup, api } = await renderChat(initial);
@@ -377,27 +383,30 @@ test("中长会话（超一屏、不足三屏）：树上只挂视口+overscan�
       (i) => sb.getRenderable(`tmsg-${i}`) !== undefined
     );
   const mountedCount = (): number => mountedIndices().length;
-  // 高度量测经 useLayoutEffect 写回 itemHeights 后才收敛；等一轮视觉
-  // 静止再读树，避免读到「尚未量测」的中间态。
+  // Height measurement converges only after useLayoutEffect writes itemHeights
+  // back; wait one visual-idle round before reading the tree to avoid the
+  // "not yet measured" intermediate state.
   await setup.waitForVisualIdle();
 
-  // 树跟视口走：不是全部 20 条。
+  // Tree follows the viewport: not all 20 messages.
   expect(mountedCount()).toBeLessThan(MESSAGES);
   expect(mountedCount()).toBeGreaterThan(0);
-  // 贴底：末条挂上、首条已滚出（spacer 撑住）。
+  // At bottom: last message mounted, first scrolled out (spacer holds the height).
   expect(sb.scrollTop).toBe(maxScrollTop(handle));
   expect(sb.getRenderable(`tmsg-${MESSAGES - 1}`)).toBeDefined();
 
-  // 滚到顶：首条挂上且画面含最早消息。赋值必须 act 包裹 —— scrollbar
-  // change 引发的 setScrollTop 是 React 状态更新，裸赋值会让提交与
-  // waitForVisualIdle（只等 OpenTUI scheduler 空闲）赛跑，读出未提交的树。
+  // Scroll to top: first message mounted and frame contains the earliest one.
+  // Assignment must be act-wrapped — the setScrollTop triggered by the
+  // scrollbar change is a React state update; a bare assignment races
+  // waitForVisualIdle (which only waits for the OpenTUI scheduler) and reads
+  // an uncommitted tree.
   await act(async () => {
     sb.scrollTop = 0;
   });
   await setup.waitForVisualIdle();
   expect(sb.getRenderable("tmsg-0")).toBeDefined();
   expect(setup.captureCharFrame()).toContain("msg-000");
-  // 顶部窗口不含末条（窗口仍短于总条数）。
+  // Top window excludes the last message (window still shorter than total count).
   expect(sb.getRenderable(`tmsg-${MESSAGES - 1}`)).toBeUndefined();
   expect(mountedIndices()[0]).toBe(0);
 
@@ -405,9 +414,11 @@ test("中长会话（超一屏、不足三屏）：树上只挂视口+overscan�
 });
 
 test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底 / 置顶仍提交", async () => {
-  // spec invariant 8 量化条款：连续亚阈值 `change` 不得各自 setScrollTop
-  // （每次提交都让整棵 ChatView 重算）；跨越量化步长、贴底、置顶必须提交。
-  // 计数口径 = React Profiler 的 onRender 次数（React 侧真值，不断言实现）。
+  // spec quantization clause: consecutive sub-threshold `change` events must
+  // not each setScrollTop (every commit recomputes the whole ChatView);
+  // crossing the quantization step, hitting bottom, and hitting top must
+  // commit. Counting surface = React Profiler onRender count (React-side
+  // truth, no implementation assertion).
   const commits: string[] = [];
   const handleRef = { current: null as ChatViewHandle | null };
   const initial = sessionWith(makeMessages(100));
@@ -433,7 +444,7 @@ test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底
   if (handle === null) throw new Error("ChatView ref 未挂载");
   const sb = handle.scrollbox!;
   const max = maxScrollTop(handle);
-  // 先落到中段（必然提交），再以亚阈值增量推进。
+  // First land mid-range (necessarily commits), then advance in sub-threshold increments.
   await act(async () => {
     sb.scrollTop = Math.floor(max / 2);
   });
@@ -443,34 +454,35 @@ test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底
   expect(mid).toBeLessThan(max);
   expect(commits.length).toBeGreaterThan(0);
   const step = resolveScrollCommitStep(sb.viewport.height);
-  expect(step).toBeGreaterThan(1); // 步长 1 时本用例退化为「每次都提交」，失去意义
+  expect(step).toBeGreaterThan(1); // a step of 1 degenerates this case to "commit every time", losing its meaning
 
-  // 亚阈值 change（+1 行 < step）必须零提交：量化生效的可观测形式。
+  // Sub-threshold change (+1 line < step) must produce zero commits: the observable form of quantization taking effect.
   commits.length = 0;
   await act(async () => {
     sb.scrollTop = mid + 1;
   });
   await setup.waitForVisualIdle();
   expect(commits).toEqual([]);
-  // scrollbox 自身位置已动（用户看到画面跟随），只是 React 窗口未重算。
+  // The scrollbox itself moved (user sees the follow), only the React window has not recomputed.
   expect(sb.scrollTop).toBe(mid + 1);
 
-  // 继续亚阈值推进到「已提交位置 + step - 1」仍不提交（位移未达量子）。
+  // Keep advancing sub-threshold to "last committed position + step - 1" without commit (displacement below one quantum).
   await act(async () => {
     sb.scrollTop = mid + step - 1;
   });
   await setup.waitForVisualIdle();
   expect(commits).toEqual([]);
 
-  // 跨越量化步长 → 提交。
+  // Crossing the quantization step → commit.
   await act(async () => {
     sb.scrollTop = mid + step;
   });
   await setup.waitForVisualIdle();
   expect(commits.length).toBeGreaterThan(0);
 
-  // 贴底仍可到达（量化不得挡住 sticky 的落底路径）：滚到 max 后
-  // scrollTop === maxScrollTop，且末条消息在画面里。
+  // Bottom remains reachable (quantization must not block sticky's landing
+  // path): after scrolling to max, scrollTop === maxScrollTop and the last
+  // message is on screen.
   await act(async () => {
     sb.scrollTop = maxScrollTop(handle);
   });
@@ -478,7 +490,7 @@ test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底
   expect(sb.scrollTop).toBe(maxScrollTop(handle));
   expect(setup.captureCharFrame()).toContain("reply-099");
 
-  // 置顶：从底部直接回 0 也必须提交，最早气泡要挂上。
+  // Top: jumping from bottom straight to 0 must also commit; the earliest bubble must mount.
   commits.length = 0;
   await act(async () => {
     sb.scrollTop = 0;
@@ -491,10 +503,10 @@ test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底
 });
 
 test("滚轮一步即推动窗口：量化不得吞掉单次滚轮", async () => {
-  // T4 步长正当性 (c)：量化步长上限 = 一次滚轮步长
-  // （`CHAT_WHEEL_SCROLL_MULTIPLIER`，见 resolveScrollCommitStep 注释），
-  // 所以单次滚轮必然跨越量子边界并提交 —— 否则用户滚一格看不见画面变化。
-  // 计数口径 = React Profiler onRender（React 侧真值，不断言实现）。
+  // Quantization step ceiling = one wheel step (`CHAT_WHEEL_SCROLL_MULTIPLIER`,
+  // see resolveScrollCommitStep), so a single wheel event necessarily crosses a
+  // quantum boundary and commits — otherwise the user scrolls one notch and
+  // sees no change. Counting surface = React Profiler onRender (React-side truth).
   const commits: string[] = [];
   const handleRef = { current: null as ChatViewHandle | null };
   const initial = sessionWith(makeMessages(100));
@@ -521,32 +533,33 @@ test("滚轮一步即推动窗口：量化不得吞掉单次滚轮", async () =>
   const sb = handle.scrollbox!;
   const max = maxScrollTop(handle);
 
-  // 第一次滚轮走「首次提交」通道（prev 未设 → 必提交），不计入本断言。
+  // The first wheel event goes through the "first commit" channel (prev unset → must commit); excluded from this assertion.
   await act(async () => {
     await setup.mockMouse.scroll(5, 2, "up");
   });
   await setup.waitForVisualIdle();
-  expect(sb.scrollTop).toBeLessThan(max); // 离开底部，且未到顶
+  expect(sb.scrollTop).toBeLessThan(max); // left the bottom, not at the top yet
   expect(sb.scrollTop).toBeGreaterThan(0);
 
-  // 第二次滚轮走量化通道：位移 = 一滚轮步长 ≥ 量化步长 → 必须提交。
+  // The second wheel event goes through the quantization channel: displacement = one wheel step ≥ quantization step → must commit.
   commits.length = 0;
   const before = sb.scrollTop;
   await act(async () => {
     await setup.mockMouse.scroll(5, 2, "up");
   });
   await setup.waitForVisualIdle();
-  expect(sb.scrollTop).toBeLessThan(before); // 位置确实动了
-  expect(commits.length).toBeGreaterThan(0); // 且窗口跟着重算
+  expect(sb.scrollTop).toBeLessThan(before); // position really moved
+  expect(commits.length).toBeGreaterThan(0); // and the window recomputed along
 
   await setup.renderer.destroy();
 });
 
 test("换会话后首次亚阈值 change 提交：量化游标随 conversationId 复位", async () => {
-  // spec invariant 8：首次提交与置顶必须立即生效，不得让新会话窗口停在
-  // 旧会话位置。换会话 = 同一 ChatView 换 session prop（conversationId 变），
-  // 量化游标的生命周期必须与同一处的 itemHeights / scrollTop 复位对齐。
-  // 计数口径 = React Profiler onRender（React 侧真值，不断言实现）。
+  // spec: first commit and hitting top must take effect immediately; a new
+  // session's window must not sit at the old session's position. Switching
+  // sessions = same ChatView with a new session prop (conversationId changes);
+  // the quantization cursor's lifetime must align with the itemHeights /
+  // scrollTop reset at the same site. Counting surface = React Profiler onRender.
   const commits: string[] = [];
   const handleRef = { current: null as ChatViewHandle | null };
   const nextRef = {
@@ -601,19 +614,20 @@ test("换会话后首次亚阈值 change 提交：量化游标随 conversationId
   await setup.waitForVisualIdle();
   const step = resolveScrollCommitStep(sb.viewport.height);
   expect(step).toBeGreaterThan(1);
-  // 换会话前：亚阈值位移不提交（量化已生效，游标非空）。
+  // Before switching: sub-threshold displacement does not commit (quantization in effect, cursor non-empty).
   commits.length = 0;
   await act(async () => {
     sb.scrollTop = sb.scrollTop + 1;
   });
   await setup.waitForVisualIdle();
   expect(commits).toEqual([]);
-  // 换会话：scrollTop 复位等 React 更新。
+  // Switch session: wait for scrollTop reset and other React updates.
   commits.length = 0;
   holder.fn!();
   await setup.waitForVisualIdle();
-  // 换会话后首个 change 只推进 1 行（< step）：游标未复位则被吞掉，
-  // 复位则必须提交（首次提交必生效）。
+  // First change after switching advances only 1 line (< step): a cursor
+  // not reset on session switch would swallow it; a reset cursor must commit
+  // (first commit must take effect).
   commits.length = 0;
   await act(async () => {
     sb.scrollTop = sb.scrollTop + 1;
@@ -630,8 +644,9 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
   expect(sb.scrollHeight).toBeGreaterThan(ROWS * 3);
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("reply-099");
-  // act 包裹：scrollbar change → setScrollTop 是 React 更新，裸赋值与
-  // waitForVisualIdle（只等 OpenTUI scheduler）赛跑会读到未提交的树。
+  // act-wrapped: scrollbar change → setScrollTop is a React update; a bare
+  // assignment races waitForVisualIdle (OpenTUI scheduler only) and reads an
+  // uncommitted tree.
   await act(async () => {
     sb.scrollTop = 0;
   });
@@ -649,11 +664,13 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
 });
 
 /**
- * 滚动条观感（scrollbar-style.ts 的策略在真实 scrollbox 上生效）：
- * idle 极淡、指针移入显色、移开回落；track 始终全透明。
+ * Scrollbar appearance (the scrollbar-style.ts strategy on a real scrollbox):
+ * idle is nearly invisible, pointer hover brings the color out, moving away
+ * falls back; the track stays fully transparent throughout.
  *
- * 断言取 scrollbar 滑块的实际 RGBA（渲染取色），不读样式常量 —— 常量本身
- * 已由 scrollbar-style.test.ts 钉住，此处钉的是「常量确实接到了控件上」。
+ * Assertions read the thumb's actual RGBA (rendered color), not the style
+ * constants — the constants themselves are pinned by scrollbar-style.test.ts;
+ * this pins that the constants are genuinely wired to the control.
  */
 function scrollbarColors(handle: ChatViewHandle): {
   thumbAlpha: number;
@@ -672,7 +689,7 @@ function scrollbarColors(handle: ChatViewHandle): {
 }
 
 test("滚动条：idle 极淡、指针移入显色、移开回落，track 恒隐形", async () => {
-  const initial = sessionWith(makeMessages(30)); // 溢出视口 → 滚动条可见
+  const initial = sessionWith(makeMessages(30)); // overflow the viewport → scrollbar visible
   const { setup, api } = await renderChat(initial);
   const handle = api.handle!;
   const sb = handle.scrollbox!;
@@ -686,7 +703,7 @@ test("滚动条：idle 极淡、指针移入显色、移开回落，track 恒隐
   expect(idle.thumbAlpha).toBe(SCROLLBAR_THUMB_IDLE_ALPHA);
   expect(idle.trackAlpha).toBe(0);
 
-  // 指针移入滚动条所在列。
+  // Move the pointer into the scrollbar's column.
   await act(async () => {
     await setup.mockMouse.moveTo(bar.x, bar.y + 4);
   });
@@ -694,9 +711,9 @@ test("滚动条：idle 极淡、指针移入显色、移开回落，track 恒隐
   const hovered = scrollbarColors(handle);
   expect(hovered.thumbAlpha).toBe(SCROLLBAR_THUMB_HOVER_ALPHA);
   expect(hovered.thumbAlpha).toBeGreaterThan(idle.thumbAlpha);
-  expect(hovered.trackAlpha).toBe(0); // hover 只点亮 thumb，不加轨道噪音
+  expect(hovered.trackAlpha).toBe(0); // hover lights the thumb only, no track noise
 
-  // 移开 → 回落到 idle（可重复，不是一次性）。
+  // Move away → falls back to idle (repeatable, not one-shot).
   await act(async () => {
     await setup.mockMouse.moveTo(2, bar.y + 4);
   });
@@ -713,8 +730,9 @@ test("滚动条：idle 极淡、指针移入显色、移开回落，track 恒隐
 });
 
 test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async () => {
-  // D3（spec specs/tui-tool-settled-appearance.md）：write_file 是 keep 类 ——
-  // 落定后标题行留在屏幕上（渲染只消费 slot，D7），不进折叠计数。
+  // write_file is a keep-class tool (spec tui-tool-settled-appearance): once
+  // settled its title line stays on screen (rendering consumes the slot only),
+  // and it is not counted in the fold.
   const initial = sessionWith([
     msg("m-1", "user", "帮我写一个文件"),
     {
@@ -744,8 +762,8 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 帮我写一个文件");
   expect(frame).toContain("write_file");
-  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
-  // spec D1：摘要统一英文 `Wrote <path> (N lines)`。
+  // Success state has no `[完成]` ("done") prefix; the summary is uniform
+  // English `Wrote <path> (N lines)` per spec.
   expect(frame).toContain("write_file · Wrote hello.ts (1 lines)");
   expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("× ")).toBe(false);
@@ -756,7 +774,7 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
 test("流式 draft 渲染：running-fg 时挂载，turn 结束落定消失", async () => {
   const initial = sessionWith(makeMessages(2));
   const { setup, api } = await renderChat(initial);
-  // running + 流式 draft。
+  // running + streaming draft.
   api.setRunning(true);
   api.setDrafts("增量草稿 ★stream★");
   await setup.waitForVisualIdle();
@@ -766,9 +784,9 @@ test("流式 draft 渲染：running-fg 时挂载，turn 结束落定消失", asy
 });
 
 test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", async () => {
-  // 直接用 messages 里嵌 thinking 来测 MessageBlocks 经由 ChatView 的
-  // 视觉一致性 — 折叠/展开由 setThinkingExpanded 控制（如果 ChatView
-  // 接受 thinkingExpanded prop；T6-B 接受该 prop，默认 false）。
+  // Embed thinking directly in messages to test MessageBlocks visual
+  // consistency through ChatView — fold/expand is controlled by
+  // setThinkingExpanded (ChatView accepts the thinkingExpanded prop here, default false).
   const initial = sessionWith([
     msg("m-1", "user", "复杂问题"),
     {
@@ -797,9 +815,10 @@ test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", as
 });
 
 test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant 折叠行 → ", async () => {
-  // 场景：turn 结束后流式面板消失，秒数由历史消息末条 assistant 的折叠行
-  // 接棒。D3:折叠行思考秒数改读 session.thinkingMs(落盘数据,attachSession
-  // 透传 SessionFileV1.thinkingMs);末条 assistant(index 1)thinkingMs = 4000ms。
+  // Scenario: after the turn ends the streaming panel disappears; the seconds
+  // are carried on by the last assistant message's fold line. The fold line
+  // reads session.thinkingMs (persisted data, attachSession passes through
+  // SessionFileV1.thinkingMs); last assistant (index 1) thinkingMs = 4000ms.
   const initial = sessionWith(
     [
       msg("m-1", "user", "复杂问题"),
@@ -825,16 +844,17 @@ test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant �
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // 末条 assistant 折叠行显示 （spec D2 英文 unit fold）。
+  // Last assistant fold line shows the duration (English unit fold per spec).
   expect(frame).toContain("Thought for 4s");
   expect(frame.split("Thought for 4s").length - 1).toBe(1);
   await setup1.renderer.destroy();
 });
 
 test("流式 thinking 未冻结：折叠行显示 Thinking…，无实时秒数、不叠加 [思考] 前缀", async () => {
-  // 场景：turn 运行中，thinking 阶段进行中（frozen=0）→ 折叠行显示静态
-  // `Thinking…`（实时递增秒数已下线 —— 思考时长由事后 frozen
-  // 摘要 `Thought for <duration>` 承担，避免与 mode 行运行时长视觉重复）。
+  // Scenario: turn running, thinking phase in progress (frozen=0) → fold line
+  // shows static `Thinking…` (live ticking seconds retired — duration is
+  // carried by the post-hoc frozen summary `Thought for <duration>`, avoiding
+  // visual duplication with the mode line's run time).
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -856,8 +876,9 @@ test("流式 thinking 未冻结：折叠行显示 Thinking…，无实时秒数�
 });
 
 test("流式 thinking 子秒未冻结：折叠行显示 Thinking… 不显 0 秒", async () => {
-  // 场景：thinking 已开始但 <1s（子秒）→ 折叠行保持静态 `Thinking…`
-  // （流式行无实时秒数，PR 1 后恒不显秒数 —— 子秒自然不显「0 秒」伪精度）。
+  // Scenario: thinking started but <1s (sub-second) → fold line keeps static
+  // `Thinking…` (streaming lines never show live seconds — sub-second
+  // naturally avoids a "0 秒" fake-precision display).
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -879,11 +900,11 @@ test("流式 thinking 子秒未冻结：折叠行显示 Thinking… 不显 0 秒
 });
 
 test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", async () => {
-  // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs —
-  // — 每条 assistant message 按其索引读对应 thinkingMs。旧 assistant
-  // (index 1) thinkingMs = null → 不画思考摘要;新 assistant (index 3)
-  // thinkingMs = 7000ms → 画 `Thought for 7s`;秒数只属于该 message 自身
-  // (不再像旧 lastThinkingSeconds 那样只传给末条)。
+  // Fold-line thinking seconds read session.thinkingMs per assistant message
+  // index. Old assistant (index 1) thinkingMs = null → no thinking summary;
+  // new assistant (index 3) thinkingMs = 7000ms → `Thought for 7s`; seconds
+  // belong to the message itself (no longer handed only to the last message as
+  // in the old lastThinkingSeconds).
   const initial = sessionWith(
     [
       msg("m-1", "user", "旧问题"),
@@ -917,7 +938,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // 末条「新回答」带 7 秒；前一条「旧回答」无秒 → 不回落 [思考]。
+  // The latest answer carries 7s; the older one has no seconds → no fallback to `[思考]`.
   expect(frame).toContain("Thought for 7s");
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).toContain("旧回答");
@@ -925,8 +946,9 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
 });
 
 test("crunchedSeconds prop → 流末尾渲染 `Crunched for 3m 46s`", async () => {
-  // 最近一次完成 turn 的运行时长（app 层 finally 快照）在消息流末尾渲染：
-  // 末条消息之后、live tail 之前的 dim 留存行（formatRunDuration 纯格式化）。
+  // The most recent completed turn's run time (app-layer finally snapshot)
+  // renders at the stream tail: a dim retention line after the last message
+  // and before the live tail (formatRunDuration pure formatting).
   const initial = sessionWith([
     msg("m-1", "user", "复杂问题"),
     {
@@ -946,15 +968,16 @@ test("crunchedSeconds prop → 流末尾渲染 `Crunched for 3m 46s`", async () 
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // 完整端到端串（Crunched 前缀 + 时长段）——与 run-stats 单测分开，确保
-  // ChatView 渲染路径把 formatCrunched 的完整输出落到画面（非只时长段）。
+  // Full end-to-end string (Crunched prefix + duration segment) — separate
+  // from the run-stats unit test, ensuring ChatView's render path lands
+  // formatCrunched's complete output on screen (not just the duration segment).
   expect(frame).toContain("Crunched for 3m 46s");
   await setup1.renderer.destroy();
 });
 
 test("crunchedSeconds 0 / undefined → 不渲染 Crunched", async () => {
-  // 缺省 undefined（= 0）→ 消息流末尾不产 crunched 留存行；sub-second 回合
-  // （0 秒）同样不渲染 `0s`。
+  // Default undefined (= 0) → no crunched retention line at the stream tail;
+  // sub-second turns (0s) likewise render no `0s`.
   const initial = sessionWith(makeMessages(2));
   const setup1 = await testRender(
     <ChatView session={initial} cols={COLS} rows={ROWS} liveToolLines={[]} />,
@@ -1006,26 +1029,30 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // T7（specs/tui-activity-block.md）：retract 落定（post_tool_use ok）→ 收
-  // 入 unanchored 块（块计数 + tail 过程行）。同批 retract 只在块 called 计
-  // 数出现一次；tail 过程行逐条画，不画完整「[完成]」前缀。
-  // - running 过程行 = 英文 `grep · Search`，无 `[运行中]`。
+  // Per the activity-block spec: retract settled (post_tool_use ok) →
+  // collected into the unanchored block (block count + tail process lines).
+  // Same-batch retracts appear once in the block `called` count; tail process
+  // lines draw per item without a full `[完成]` prefix.
+  // - running process line = English `grep · Search`, no `[运行中]` ("running").
   expect(frame).toContain("grep · Search");
   expect(frame.includes("[运行中]")).toBe(false);
-  // - 未画错（grep 还 running），所以无 `[失败]` / `ENOENT` 残留。
+  // - not drawn as failed (grep still running), so no `[失败]` ("failed") / `ENOENT` residue.
   expect(frame.includes("[失败]")).toBe(false);
   expect(frame.includes("GREP_FAIL_MARKER")).toBe(false);
-  // - 块聚合标题（首现顺序）：read_file × 20 · grep × 1 → 落 tail。
-  //   视口较小，块在 tail 之后，扩 rows 让断言可见。
+  // - block aggregate title (first-seen order): read_file × 20 · grep × 1 →
+  //   lands in the tail. Small viewport; the block sits after the tail, so
+  //   rows are enlarged to keep the assertion visible.
   expect(frame).toContain("read_file × 20");
   expect(frame).toContain("grep × 1");
   await setup.renderer.destroy();
 });
 
 test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不含完成读行", async () => {
-  // 同 #589，但把 grep 中途标失败、再补一条 running search：覆
-  // 盖「失败横切 + 同批 retract 双计数」不出现于块标题、不画 OK / ERROR
-  // 行尾的合同。Tail 视口需要足够高以容纳 20 条 read_file 详情行 + 块标题。
+  // Same as the case above but marks the mid grep failed and adds one running
+  // search: covers the contract that "failure cross-cut + same-batch retract
+  // double count" never appears in block titles and no OK / ERROR line endings
+  // are drawn. The tail viewport must be tall enough for 20 read_file detail
+  // lines + block titles.
   let runs: ReadonlyArray<LiveToolRun> = [];
   for (let i = 0; i < 20; i++) {
     const id = `cv-rf-${String(i).padStart(2, "0")}`;
@@ -1078,15 +1105,15 @@ test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 失败件横切：不进块计数（块标题里没有 `grep × 1` 之外的失败 grep）。
+  // Failure cross-cut: not counted in the block (no failed grep beyond `grep × 1` in block titles).
   expect(frame).toContain("read_file × 20");
-  // 失败件仍以 `[失败] grep · no matches` 形式贴在 tail（live-tool-preview
-  // 的失败行），不双画一张完成卡。
+  // The failed item still shows in the tail as `[失败] grep · no matches`
+  // (live-tool-preview failure line), without double-drawing a completion card.
   expect(frame).toContain("[失败] grep");
   expect(frame).toContain("no matches");
-  // 仍在运行的 grep → 预览槽 `grep · Search ?`。
+  // Still-running grep → preview slot `grep · Search ?`.
   expect(frame).toContain("grep · Search");
-  // 同批 retract 只在块 called 计数出现一次。
+  // Same-batch retract appears once, in the block called count.
   expect(frame.includes("read_file × 20 · grep × 1")).toBe(true);
   await setup.renderer.destroy();
 });
@@ -1101,7 +1128,7 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
       id: "tu-w",
       name: "write_file",
       status: "ok",
-      // 草稿后开始的工具（draftEpoch ≥ 1）→ 渲染在对应草稿段之下。
+      // Tool started after the draft (draftEpoch ≥ 1) → renders below the matching draft segment.
       draftEpoch: 1,
       input: {
         path: "archive/luxury.html",
@@ -1132,9 +1159,10 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
 });
 
 test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位", async () => {
-  // 场景：turn 进行中尾部铺 2 个已完成搜索工具 + 草稿；turn 结束后 retract
-  // 件收进折叠计数（D3），原先逐条显示的工具区域不得留下大段空白 ——
-  // 折叠行与最终文本之间最多 1 行消息间距。
+  // Scenario: during the turn the tail shows 2 completed search tools + a
+  // draft; after the turn retracts collapse into the fold count, and the
+  // previously itemized tool area must not leave large blank space — at most
+  // 1 line of message gap between the fold line and the final text.
   const finalMessages: AnthropicNativeMessage[] = [
     msg("m-1", "user", "搜索今天的AI新闻"),
     {
@@ -1231,11 +1259,12 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
       <ChatView
         session={{
           ...session,
-          // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs。
-          // finalMessages 6 条 messages(0..5);末条 assistant(index 5)
-          // thinkingMs = 12000ms → `Thought for 12s`;两段 web_search 在同一 turn
-          // (index 1 / 3)合并成 "web_search × 2" 折叠行,工具簇 anchor 思考
-          // 落空 → 折叠行只显工具计数。
+          // Fold-line thinking seconds read session.thinkingMs (per message).
+          // finalMessages has 6 messages (0..5); last assistant (index 5)
+          // thinkingMs = 12000ms → `Thought for 12s`; the two web_search calls
+          // in one turn (index 1 / 3) merge into a "web_search × 2" fold line;
+          // the tool-cluster anchor thinking falls through → the fold line
+          // shows the tool count only.
           thinkingMs: [null, null, null, null, null, 12000],
         }}
         cols={COLS}
@@ -1261,43 +1290,44 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Thought for 12s");
-  // live-signal revision #4：web_search / web_fetch 走实卡 —— 块标题
-  // 不出现 `called web_search × 1` 计数；实卡 `Search <query>` 在 MessageBlocks
-  // 抽出（formatToolStatusLine 单源）。该断言替换旧「called web_search × 1」。
+  // Per spec, web_search / web_fetch render as real cards — the block title
+  // never shows a `called web_search × 1` count; the real card `Search <query>`
+  // is extracted in MessageBlocks (formatToolStatusLine single source).
   expect(frame.includes("called web_search × 1")).toBe(false);
   expect(frame.includes("calling web_search × 1")).toBe(false);
   expect(frame).toContain("Search");
   expect(frame).toContain("今天的AI新闻");
-  // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
+  // assistant text through Markdown rendering + pangu spacing: 今天的AI → 今天的 AI.
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
   const lines = frame.split("\n");
-  // live-signal revision：折叠锚点从 `called web_search × 1` 改为
-  // 实卡标题 `Search` —— web_search 不进计数，折叠行无 web_* 子项，
-  // 块标题只剩 `Thought for 12s` 一行（末条 assistant 的 thinkingMs）。
+  // The fold anchor moved from `called web_search × 1` to the real-card title
+  // `Search` — web_search is not counted, so the fold line has no web_*
+  // children and the block title is just the `Thought for 12s` line (last
+  // assistant's thinkingMs).
   const iFold = lines.findIndex((l) => l.includes("Thought for 12s"));
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
-  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 4;被折叠的纯工具 /
-  // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
-  // D3 后末条 assistant 多 1 行 ThinkingSummary `Thought for Ns`（legacy ≤ 2
-  // 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧形态;D3 改
-  // per-message ThinkingSummary 后行距自然多 1 → ≤ 3）。
-  // #tui-render-overhaul T4:assistant 内部块间补 1 行节奏（ThinkingSummary
-  // → 文本 markdown 节点间多 1 行空白)→ ≤ 4。
+  // fold line → (1-line message gap) → final text: distance ≤ 4; folded
+  // pure-tool / pure-tool_result messages must not each leave a phantom
+  // margin line that joins into blank space. Legacy global lastThinkingSeconds
+  // + collapsed last thinking allowed ≤ 2; per-message ThinkingSummary added a
+  // line (≤ 3); the assistant-internal block rhythm (ThinkingSummary →
+  // markdown text gap) adds one more → ≤ 4.
   expect(iText - iFold).toBeLessThanOrEqual(4);
   await setup.renderer.destroy();
 });
 
 test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式草稿之上（按事件顺序插入）", async () => {
-  // 场景：模型先调工具、后流式输出回答 —— 工具显示应在上、草稿在下
-  // （与历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变）。
-  // 拆分依据 = 条目追加时由 app 层打入的 draftEpoch（缺省 0 = 先于
-  // 第一段草稿）。
-  // plans/tui-chrome-interaction.md T1:retract 类（web_search）一旦完成
-  // 即进折叠计数,不再占 tail —— 本测试改用 keep 类（bash）验证草稿前后
-  // 工具的插入顺序。
+  // Scenario: model calls a tool first, then streams the answer — the tool
+  // line must sit above the draft, matching the final history order in
+  // MessageBlocks (content order) so nothing jumps at turn end.
+  // Split basis = draftEpoch stamped by the app layer when each entry is
+  // appended (missing = 0 = before the first draft segment).
+  // retract-class tools (web_search) fold into the count once done and no
+  // longer occupy the tail — this test uses a keep-class tool (bash) to
+  // check insertion order around the draft.
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
     runState: "running-fg",
@@ -1326,7 +1356,7 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const iTool = frame.indexOf("bash");
-  // 草稿经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
+  // draft goes through Markdown + pangu spacing: 今天的AI → 今天的 AI.
   const iDraft = frame.indexOf("以下是今天的 AI 新闻");
   expect(iTool).toBeGreaterThanOrEqual(0);
   expect(iDraft).toBeGreaterThanOrEqual(0);
@@ -1335,11 +1365,12 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
 });
 
 test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具在下", async () => {
-  // 场景：keep 工具（epoch 0）→ 流式回答 → write 工具（epoch 1）。
-  // 拆分按 draftEpoch（位置无关 filter）。T7 之后：keep 类（bash /
-  // write_file）不进 unanchored 块，由 tail 工具卡 + draft 段交错渲染；
-  // 不变式 = epoch 0 工具的 keep 标题在草稿之前，epoch 1 工具的 keep
-  // 标题在草稿之后（不被 draft 顶到上面）。
+  // Scenario: keep tool (epoch 0) → streamed answer → write tool (epoch 1).
+  // Split is by draftEpoch (position-independent filter). keep-class tools
+  // (bash / write_file) do not enter the unanchored block; they render
+  // interleaved via tail tool cards + draft segments. Invariant: the epoch-0
+  // tool's keep title is before the draft, the epoch-1 tool's keep title is
+  // after it (never pushed above by the draft).
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索并写入")]),
     runState: "running-fg",
@@ -1388,12 +1419,14 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
 });
 
 test("running：第二段草稿画在后续工具之下（tool→text→tool→text 不把新工具顶下去）", async () => {
-  // plans T1:web_search(已完成 retract)进折叠,不再占 tail —— 改用
-  // bash(keep)以验证 draftEpoch 与两段草稿的插入顺序。
-  // T7 后：bash 是 keep 类，**不**进 unanchored 块（避免双画），由
-  // tail 工具卡（live-tool-preview 的 `Running 1 shell command…`）承接；
-  // 不变式 = epoch 1 工具的细节槽按 draftEpoch 落在两段草稿之间（不被
-  // 第二段草稿顶到上面）。
+  // A completed retract tool (web_search) folds into the count and no longer
+  // occupies the tail — use bash (keep) to check draftEpoch ordering across
+  // two draft segments.
+  // bash is keep-class, so it does **not** enter the unanchored block (no
+  // double paint); the tail tool card (`Running 1 shell command…` from
+  // live-tool-preview) carries it. Invariant: the epoch-1 tool's detail slot
+  // lands between the two drafts by draftEpoch (never pushed above by the
+  // second draft).
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜完再写")]),
     runState: "running-fg",
@@ -1427,10 +1460,11 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // bash keep 类不进 unanchored 块 → 不画 `calling bash × 2` / `bash × N`。
+  // keep-class bash never enters the unanchored block → no `calling bash × 2`
+  // / `bash × N` is painted.
   expect(frame.includes("bash ×")).toBe(false);
   expect(frame.includes("calling bash ×")).toBe(false);
-  // epoch 1 running 件 → tail 卡 `Running 1 shell command…`。
+  // The epoch-1 running entry → tail card `Running 1 shell command…`.
   expect(frame).toContain("Running 1 shell command…");
   const lines = frame.split("\n");
   const iFirstDraft = lines.findIndex((l) => l.includes("第一段回答"));
@@ -1450,9 +1484,10 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
 });
 
 test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", async () => {
-  // D3（spec specs/tui-tool-settled-appearance.md）：bash 是 keep 类 ——
-  // 落定后标题逐条留（含既有 thinking 摘要 `Thought for Ns` 随消息渲染），
-  // 零 retract 条目 → 无工具计数行。"完成。"文本独立行。
+  // bash is keep-class: once settled its title lines stay per-entry (the
+  // thinking summary `Thought for Ns` renders with the message), and with
+  // zero retract entries there is no tool-count line. The `完成。` ("done.")
+  // text is its own line.
   const session = sessionWith(
     [
       msg("m-1", "user", "写个页面"),
@@ -1499,7 +1534,7 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
         ],
       },
     ],
-    // messages 长度 5:asst-1 index 1、asst-2 index 2、asst-3 index 4。
+    // messages length 5: asst-1 at index 1, asst-2 at index 2, asst-3 at index 4.
     [null, 29000, 29000, null, null]
   );
   const setup = await testRender(
@@ -1509,15 +1544,15 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Thought for 29s");
-  // keep 标题按 slot 渲染：tu-b2 落定成功 → 成功态无 [完成] 前缀
-  // (#tui-render-overhaul T3);tu-b1 未配对 → running 过程行（spec D1：
-  // `Running 1 shell command… · <命令>`，无 `[运行中]`）。
+  // keep titles render per slot: settled-successful tu-b2 shows no `[完成]`
+  // ("done") prefix; unmatched tu-b1 renders as a running process line
+  // (`Running 1 shell command… · <command>`, no `[运行中]` ("running")).
   expect(frame).toContain("bash · ls -la");
   expect(frame).toContain("Running 1 shell command… · ls archive");
   expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).toContain("完成。");
   expect(frame.includes("[完成]")).toBe(false);
-  // 零条收 → 无工具计数行。
+  // Zero retract entries → no tool-count line.
   expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });

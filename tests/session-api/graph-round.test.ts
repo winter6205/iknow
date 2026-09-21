@@ -1,9 +1,10 @@
 /**
- * D-α T3 —— hub host 的 round 边界（serve + TUI 走同一条 postMessage 路径）。
+ * The hub host's round boundary (serve + TUI share one postMessage path).
  *
- * chat 那侧的 round 是「一条查询行」，hub 这侧是「一条 postMessage」。两处
- * 语义必须一致，否则同一个 `/graph on` 在 CLI 与 TUI 上生效时机不同 ——
- * SC3 的「三入口同一 overlay」就名存实亡。
+ * The round is "one query line" on the chat side and "one postMessage" on
+ * the hub side. The two semantics must agree, or the same `/graph on`
+ * takes effect at different moments in CLI vs TUI — "three entries, one
+ * overlay" would exist in name only.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -77,14 +78,15 @@ describe("SessionHub — graph 装配 round 边界", () => {
     });
     seen.push(graphAssembly.enabled());
 
-    // 第一条消息把「已翻开」拍进去；第二条把「已翻关」拍进去。
+    // The first message captures "flipped on"; the second captures "flipped off".
     expect(seen).toEqual([true, false]);
   });
 
   it("注入 deps 的 host（TUI）自带 graphAssembly → 同样每条消息拍一次快照", async () => {
-    // TUI 的 engine 在 run.tsx 就装好了（buildTuiDeps），hub 只拿到成品 deps
-    // —— 快照句柄因此必须能从构造 opts 直接进来，否则 TUI 的 `/graph` 永远
-    // 停留在 holder 层、进不了下一次装配（SC3 会在 TUI 上破功）。
+    // The TUI engine is assembled back in run.tsx (buildTuiDeps); the hub
+    // only receives finished deps — so the snapshot handle must be passable
+    // directly via constructor opts, otherwise TUI's `/graph` would stay
+    // stuck at the holder layer and never enter the next assembly.
     const store = new SessionStore(
       await tmpDir("iknow-graph-round-store3-"),
       process.cwd()

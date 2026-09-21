@@ -1,13 +1,12 @@
 /**
- * CLI 入口的 worktree isolation host 缝（src/cli/worktree-host.ts）回归：
- * PR #869 在 hub 入口让 create-worktree 的 `name` label 透传到
- * provisioner（labeled leaf `<label>--<conversationId>`），但 cli.ts main()
- * 内联的手工解构 wrapper 把 `name` 静默丢弃 → CLI 入口全部退化为
- * UUID-only leaf（编译仍绿）。本测试接**真实 provisioner** + 临时 git repo
- * + fresh conversationId，钉死 CLI 装配层必须整 ctx 透传（含 `name`）。
- *
- * 背景（iknow trace 0cee57d3-39cc-45b3 自查发现，2026-09-04 修复）。
- * 2026-09-06：labeled leaf 改为纯 `fix-648`（uuid 不进文件夹名）。
+ * Regression for the CLI worktree-isolation host seam (src/cli/worktree-host.ts):
+ * the hub entry passes create-worktree's `name` label through to the provisioner,
+ * but cli.ts main() once hand-destructured the ctx and silently dropped `name`,
+ * degrading every CLI provision to a UUID-only leaf while still compiling. Wire
+ * the host to the **real provisioner** over a temp git repo with a fresh
+ * conversationId so the CLI assembly must forward ctx intact (including `name`).
+ * Invariant: a labeled leaf directory is the label alone — the uuid is not part
+ * of the folder name.
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";

@@ -2,17 +2,18 @@
 /**
  * tests/tui/live-tool-preview.test.tsx
  *
- * #343 T4：live-tool-preview（OpenTUI 版）——工具运行行：
- *  - 运行态：仅 `[运行中] name` 状态行（1 行账）；
- *  - 完成态：摘要行 + 统一 diff 预览（hunk 头 + 行号）；
- *  - 运行态 → 完成态切换：reducer 事件驱动，帧从 `[运行中]` 变为摘要 + diff；
- *  - 行账 parity：渲染行数 === liveToolPreviewRows。
+ * live-tool-preview (OpenTUI edition) — tool running lines:
+ *  - running state: only the `[运行中] name` ("running") status line (1-line budget)；
+ *  - completed state: summary line + unified diff preview (hunk header + line numbers)；
+ *  - running → completed switch: reducer-event-driven, the frame goes from
+ *    `[运行中]` to summary + diff；
+ *  - line-budget parity: rendered line count === liveToolPreviewRows.
  *
- * T5 (tui-render-optimization)：tool_input_delta 增量消费 —
- *  - reducer 累积 partialJson 到 running 条目 partialInput；
- *  - running 渲染 `[运行中] bash · <partial 摘要>`（parse 成功走
- *    summarizeToolCall，不完整 JSON 原样截断显示）；
- *  - post_tool_use 完成用完整 input 覆盖并清除 partialInput。
+ * tool_input_delta incremental consumption:
+ *  - the reducer accumulates partialJson into the running entry's partialInput；
+ *  - running renders `[运行中] bash · <partial summary>` (successful parse goes
+ *    through summarizeToolCall; incomplete JSON is truncated verbatim)；
+ *  - post_tool_use completion overwrites with the full input and clears partialInput.
  */
 import { describe, expect, test } from "bun:test";
 import { useState } from "react";
@@ -39,7 +40,7 @@ function rgbaEq(a: RGBA, b: RGBA): boolean {
   return a.r === b.r && a.g === b.g && a.b === b.b;
 }
 
-/** 轮询式帧等待（同 list-view-scroll 注释）。 */
+/** Polling frame waiter (same as the list-view-scroll comment). */
 async function untilFrame(
   setup: Awaited<ReturnType<typeof testRender>>,
   pred: (frame: string) => boolean,
@@ -78,7 +79,7 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
   test("cols=80 完成态：摘要行 + hunk 头 + 双列行号", async () => {
     const setup = await renderBox(editRun, 80);
     const frame = setup.captureCharFrame();
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] ("[done]") prefix.
     expect(frame).toContain("edit_file · 编辑 a.ts：old → new");
     expect(frame.includes("[完成]")).toBe(false);
     expect(frame).toContain("@@ -1,5 +1,5 @@");
@@ -121,8 +122,8 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
     };
     const setup = await renderBox(running, 80);
     const frame = setup.captureCharFrame();
-    // spec D1：running process line —— input 未到（detail 空）时仍立 shell
-    // 过程行，不退化成裸工具名、不留悬空 ` ·`。
+    // Running process line — even before input arrives (detail empty) the shell
+    // process line stands; it never degrades to a bare tool name or a dangling ` ·`.
     expect(frame).toContain("Running 1 shell command…");
     expect(frame.includes("[运行中]")).toBe(false);
     expect(frame).not.toContain("@@");
@@ -173,7 +174,7 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       newContent: "hello\n",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] ("[done]") prefix.
     expect(rows[0]).toBe("write_file · Wrote a.ts (1 lines)");
     expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toContain("hello");
@@ -216,7 +217,7 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows).toContain("body-0");
     expect(rows.some((r) => r.includes("body-19"))).toBe(false);
-    // spec D3 / CONTEXT `write create preview`：溢出文案英文 `+N more lines`。
+    // CONTEXT `write create preview`: overflow text is English `+N more lines`.
     expect(rows.some((r) => r.includes("+10 more lines"))).toBe(true);
   });
 
@@ -238,8 +239,9 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
 
 describe("运行态 → 完成态切换（reducer 驱动）", () => {
   function SwitchHarness() {
-    // 运行态由「start + 首个 input 增量」构成：write_file 的过程行要有路径
-    // 就必须读到流式 input（权威 input 只在完成事件一次性交付）。
+    // Running state = start + the first input deltas: the write_file process
+    // line needs the streamed input to show a path (authoritative input is
+    // delivered only once, on the completion event).
     const [runs, setRuns] = useState<ReadonlyArray<LiveToolRun>>(() =>
       liveToolReduce(
         liveToolReduce([], {
@@ -282,13 +284,14 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
       exitOnCtrlC: false,
     });
     await setup.renderOnce();
-    // spec D1：running 是英文过程行（write_file 有 path → `Wrote <path>`；
-    // 行数要等 content 到齐才可信，半成品里不显示），无 `[运行中]` 括号。
+    // Running is an English process line (write_file with path → `Wrote
+    // <path>`; line count is untrustworthy until content arrives, so
+    // half-streamed input never shows it), no `[运行中]` ("running") brackets.
     const runningFrame = setup.captureCharFrame();
     expect(runningFrame).toContain("write_file · Wrote a.ts");
     expect(runningFrame.includes("[运行中]")).toBe(false);
     setup.mockInput.pressEnter();
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] ("[done]") prefix.
     const frame = await untilFrame(
       setup,
       (f) =>
@@ -336,14 +339,14 @@ describe("T5: tool_input_delta 增量累积（reducer）", () => {
       input: { command: "ls" },
       ok: true,
     });
-    // 完成态条目收到增量 → 忽略（非 running）。
+    // A completed entry receiving a delta → ignored (not running).
     const afterDone = liveToolReduce(done, {
       kind: "tool_input_delta",
       id: "tu-1",
       partialJson: '{"command":"ls"}',
     });
     expect(afterDone[0]?.partialInput).toBeUndefined();
-    // 完全未匹配的 id → 原样返回。
+    // Unmatched id → returned as-is.
     const ghost = liveToolReduce(started, {
       kind: "tool_input_delta",
       id: "no-such-id",
@@ -386,7 +389,7 @@ describe("T5: tool_input_delta 增量累积（reducer）", () => {
       id: "tu-2",
       name: "read_file",
     });
-    // 后发的事件可属于较早的条目（按 id 配对而非 FIFO 位置）。
+    // Later events may belong to earlier entries (pairing by id, not FIFO position).
     const m1 = liveToolReduce(s2, {
       kind: "tool_input_delta",
       id: "tu-1",
@@ -413,10 +416,10 @@ describe("T5: running 态 partial 摘要渲染", () => {
       partialInput: '{"command":"ls"}',
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // spec D1：running bash 过程行 = `Running 1 shell command… · <命令>`。
+    // Running bash process line = `Running 1 shell command… · <command>`.
     expect(rows[0]).toContain("Running 1 shell command…");
     expect(rows[0]).toContain("ls");
-    expect(rows[0]).not.toContain(" · {"); // parse 成功走摘要
+    expect(rows[0]).not.toContain(" · {"); // parse success → summarized
   });
 
   test('partial 不完整 JSON → 原样截断显示（含 `{"co`）', () => {
@@ -474,11 +477,13 @@ describe("T5: running 态 partial 摘要渲染", () => {
       partialInput: `{"command":"${"x".repeat(300)}"}`,
     };
     const rows = liveToolPreviewTextLines(run, 30);
-    // spec D1/D6 的单行契约：无论终端多窄、命令多长，过程行都只占 1 行
-    // （行账 parity：`liveToolPreviewRows` 也必须是 1）。截断按视觉宽度，
-    // 长命令以 `…` 收口而不是折成第二行 —— 才是「不折」的真实不变式；
-    // 宽度收口由 tool-summary 的 clipDetail 预算保证（回归见
-    // tool-summary.test.ts 的 running 前缀用例）。
+    // Single-line contract: however narrow the terminal or how long the
+    // command, the process line occupies exactly 1 row (line-budget parity:
+    // `liveToolPreviewRows` must also be 1). Truncation is by visual width;
+    // long commands end with `…` instead of wrapping to a second line — that
+    // is the real "no wrap" invariant. Width clamping is guaranteed by
+    // tool-summary's clipDetail budget (regression covered by the running
+    // prefix cases in tool-summary.test.ts).
     expect(rows.length).toBe(1);
     expect(liveToolPreviewRows(run, 30)).toBe(1);
     const line = rows[0] ?? "";
@@ -636,13 +641,16 @@ describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () =
     return runs;
   }
 
-  /** 消费侧（ChatView running 面）的逐条面预览 —— T7 退役
-   * `splitLiveActivityRuns` 的运行/空闲分面之后，逐条面 = 全部 live runs
-   * 原序（含失败件、收类件、keep），由 `liveTailSlots` 消费侧决定哪些进
-   * unanchored 块。本测的「无完成读文案 / 失败行仍在 / running 行仍在」
-   * 断言只问 **行** —— 完成收类件曾经因 `splitLiveActivityRuns` 抽出组
-   * 后在逐条面消失；新合同下逐条面保留全部 runs，过滤只发生在 unanchored
-   * 块派生（`deriveActivityBlocks`）。 */
+  /** Per-entry preview for the consumer side (ChatView running surface) —
+   * after `splitLiveActivityRuns`' running/idle split was retired, the
+   * per-entry surface = all live runs in original order (failed, collected,
+   * keep), and the `liveTailSlots` consumer decides which enter the
+   * unanchored block. This test's "no completed-read copy / failed line still
+   * there / running line still there" asserts ask only about **lines** —
+   * completed collected entries once vanished from the per-entry surface when
+   * `splitLiveActivityRuns` extracted them into groups; under the new
+   * contract the per-entry surface keeps all runs and filtering happens only
+   * in unanchored-block derivation (`deriveActivityBlocks`). */
   function previewLines(runs: ReadonlyArray<LiveToolRun>): string {
     return runs
       .flatMap((run) => [...liveToolPreviewTextLines(run, 80)])
@@ -650,17 +658,21 @@ describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () =
   }
 
   test("20 条 read_file ok + failed grep + 1 running：完成读逐条仍在，失败行与运行中仍在", () => {
-    // T5（plans/tui-live-activity-fold.md）：reducer **不再删除**完成的
-    // 收类件（直删 + history-id 过滤叠加成双删，帧上无处安放）。可见性
-    // 闸移到消费侧。
+    // The reducer **no longer deletes** completed collected-class entries
+    // (direct delete + history-id filtering stacked into a double delete,
+    // leaving nowhere to place them on the frame). The visibility gate moved
+    // to the consumer side.
     //
-    // T7（specs/tui-activity-block.md）后：完成收类件（read_file ok）不
-    // 再被 `splitLiveActivityRuns` 抽出 —— 逐条面保留全部 runs 原序；
-    // 它们的「不双画」由 `liveTailSlots` 的 retract 过滤保证（不尾添
-    // tail 工具卡），由 unanchored 块以 `read_file × N` 计数行承接。
-    // 本测只校验 `liveToolPreviewTextLines` 单件渲染的形态：完成收类
-    // 件也仍走同一预览通道（detail 行可见），失败件保留 `[失败]`，运
-    // 行中件保留「Read ?」占位。组计数 / 块标题断言在 #589 测试。
+    // Since specs/tui-activity-block.md: completed collected entries
+    // (read_file ok) are no longer extracted by `splitLiveActivityRuns` — the
+    // per-entry surface keeps all runs in order; their "no double paint" is
+    // guaranteed by `liveTailSlots`' retract filter (no tail tool cards
+    // appended), with the unanchored block carrying the `read_file × N` count
+    // line. This test only checks the single-entry render shape of
+    // `liveToolPreviewTextLines`: completed collected entries still go through
+    // the same preview channel (detail line visible), failed entries keep
+    // `[失败]` ("failed"), running entries keep the "Read ?" placeholder.
+    // Group-count / block-title assertions live in the activity-block tests.
     const events: Parameters<typeof liveToolReduce>[1][] = [];
     for (let i = 0; i < 20; i++) {
       const id = `tu-rf-${String(i).padStart(2, "0")}`;
@@ -696,21 +708,24 @@ describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () =
     });
     const runs = reduceTail(events);
     const text = previewLines(runs);
-    // spec D1：read_file 的运行过程行（细节槽）。
+    // read_file running process line (detail slot).
     expect(text).toContain("read_file · Read ?");
-    // 失败横切：错误行仍在逐条面（不进组计数）。
+    // Failures cut across: the error line stays on the per-entry surface
+    // (never group-counted).
     expect(text).toContain("GREP_FAIL_MARKER");
-    // T7 后：完成收类件也走同一预览通道（detail 行可见）—— 不再由
-    // `splitLiveActivityRuns` 抽出。reducer / 单件渲染两者都保留完整
-    // 信息；消费侧（`liveTailSlots` + `appendLiveBlocks`）按 retract
-    // 过滤决定进 tail 还是进 unanchored 块。
+    // Completed collected entries also go through the same preview channel
+    // (detail line visible) — no longer extracted by
+    // `splitLiveActivityRuns`. Both reducer and single-entry render keep full
+    // information; the consumer side (`liveTailSlots` + `appendLiveBlocks`)
+    // applies the retract filter to decide tail vs unanchored block.
     expect(text).toContain("MARKER_READ_OK_");
   });
 
   test("SC4 live 失败件：一行短错误截断长回执，不堆 dim 预览多行", () => {
-    // D5（spec specs/tui-tool-settled-appearance.md）：live 失败件同样走
-    // 一行短错误 —— message 长回执被 clipErrorLine 截成单行，且不再画
-    // dim stderr 预览（失败件 resultPreviewOf 恒 empty）。
+    // Live failed entries also render one short error line — the long
+    // message receipt is clipped to a single line by clipErrorLine, and no
+    // dim stderr preview is drawn (failed entries' resultPreviewOf is always
+    // empty).
     const run: LiveToolRun = {
       id: "tu-bash-fail-live2",
       name: "bash",
@@ -724,19 +739,19 @@ describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () =
       stderr: "boom-1\nboom-2\nboom-3",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // 标题行 + 恰 1 行错误 = 2 行账。
+    // title line + exactly 1 error line = 2-line budget.
     expect(rows.length).toBe(2);
     expect(rows[0]).toBe("[失败] bash · false");
-    // 一行短错误：以 … 截断（长回执收进单行）。
+    // One short error line: clipped with … (long receipt fits one line).
     expect(rows[1]!.startsWith("[worktree_isolation]")).toBe(true);
     expect(rows[1]!.endsWith("…")).toBe(true);
-    // 不堆 stderr 长文。
+    // No stacked stderr body.
     expect(rows.some((r) => r.includes("> "))).toBe(false);
     expect(rows.some((r) => r.includes("boom-"))).toBe(false);
   });
 });
 
-// -- #693 T4 D4:live 路径 bash / skill 结果预览 ---------------------------
+// -- live-path bash / skill result preview ---------------------------------
 
 describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览", () => {
   test("完成态 bash + stdout 旁路：尾部 result preview 窗 + 溢出", () => {
@@ -750,18 +765,18 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout,
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // 首行：完成态摘要（#tui-render-overhaul T3:无 [完成] 前缀）
+    // First line: completion summary (no [完成] ("[done]") prefix).
     expect(rows[0]).toBe("bash · ls");
     expect(rows[0]?.includes("[完成]")).toBe(false);
-    // 尾 3 行带 │ gutter，不再以 `>` 开头（SSOT = docs/CONTEXT.md
-    // **result preview**：bash 尾部最多 3 行）。
+    // Tail 3 lines carry a │ gutter and no longer start with `>` (SSOT =
+    // docs/CONTEXT.md **result preview**: bash tail is at most 3 lines).
     expect(rows).toContain("│ out-5");
     expect(rows).toContain("│ out-7");
     expect(rows.some((r) => r.startsWith("> "))).toBe(false);
-    // 早于尾窗的不出现
+    // Anything earlier than the tail window does not appear
     expect(rows.some((r) => r.includes("│ out-0"))).toBe(false);
     expect(rows.some((r) => r.includes("│ out-4"))).toBe(false);
-    // 溢出 +N 行（无 `>` / `> `）
+    // Overflow +N line (no `>` / `> `)
     const overflow = rows.find((r) => r.includes("… +") && r.includes("行"));
     expect(overflow).toBeDefined();
     expect(overflow!.includes(">")).toBe(false);
@@ -769,10 +784,10 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
   });
 
   test("相邻 live keep 卡之间空一行（卡间距节奏 = 历史 MessageBlocks 同款）", async () => {
-    // spec specs/tui-tool-settled-appearance.md D7 / plans/tui-tool-rhythm.md T3：
-    // 相邻 keep class 标题卡（历史 MessageBlocks 与 live 尾巴）之间空一行。
-    // 历史侧 MessageBlocks 的 withBlockSpacing 已保证；此测钉住 live runs
-    // 容器的卡间距。
+    // Adjacent keep-class title cards (history MessageBlocks and the live
+    // tail) get one blank line between them. History-side MessageBlocks are
+    // already guaranteed by withBlockSpacing; this test pins the card spacing
+    // of the live-runs container.
     const runs: ReadonlyArray<LiveToolRun> = [
       {
         id: "gap-1",
@@ -804,7 +819,8 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     const secondTitle = lines.findIndex((l) => l.includes("bash · two"));
     expect(firstTitle).toBeGreaterThanOrEqual(0);
     expect(secondTitle).toBeGreaterThanOrEqual(0);
-    // 两卡之间恰 1 行空行（首卡正文与次卡标题不相邻）。
+    // Exactly one blank line between the two cards (first card's body is not
+    // adjacent to the second card's title).
     expect(secondTitle - firstTitle).toBeGreaterThanOrEqual(3);
     const between = lines.slice(firstTitle + 1, secondTitle);
     expect(between.some((l) => l.trim().length === 0)).toBe(true);
@@ -834,8 +850,8 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
   });
 
   test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {
-    // D5（spec specs/tui-tool-settled-appearance.md）：失败件核置
-    // showPreview 假 —— 失败只有一行截断短错误，无 dim 预览块。
+    // Failed entries set showPreview false — a failure renders only one
+    // truncated short-error line, no dim preview block.
     const run: LiveToolRun = {
       id: "tu-bash-fail-live",
       name: "bash",
@@ -860,7 +876,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout: "   \n\t\n  ",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] ("[done]") prefix.
     expect(rows[0]).toBe("bash · x");
     expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toHaveLength(1);
@@ -893,7 +909,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     };
     const setup = await renderBox(run, 80);
     const frame = setup.captureCharFrame();
-    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    // Success state carries no [完成] ("[done]") prefix.
     expect(frame).toContain("bash · ls");
     expect(frame.includes("[完成]")).toBe(false);
     expect(frame).toContain("│ file-a");
@@ -922,11 +938,12 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       status: "ok",
       input: { name: "demo" },
       detail: "skill demo",
-      // live 路径：skill 无旁路 → resultText 也缺 → 实际为 empty
-      // （live previewer 走 resultText，未挂旁路）。
+      // live path: skill has no side-channel → resultText absent too →
+      // effectively empty (the live previewer reads resultText, no
+      // side-channel attached).
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // 缺 resultText → 不画预览前缀行
+    // resultText absent → no preview prefix lines drawn
     expect(rows.some((r) => r.includes("> "))).toBe(false);
   });
 
@@ -963,9 +980,10 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     const setup = await renderBox(run, 80);
     const expectedDim = RGBA.fromHex(tuiPalette.dim);
     const { lines } = setup.captureSpans();
-    // D1（specs/tui-human-display.md）：人读行英文并点名新注册名
-    // （specs/create-worktree-tools.md D5）；渲染的 detail 必须真出现在帧上，
-    // 否则色断言空转（旧名断言在改名后失效，此处钉住实际可见文本）。
+    // Human-readable lines are English and name the new registered tool;
+    // the rendered detail must actually appear on the frame, or the color
+    // assertion spins vacuously (old-name assertions broke after the rename —
+    // pin the actually visible text here).
     let sawLine = false;
     for (const line of lines) {
       for (const span of line.spans) {

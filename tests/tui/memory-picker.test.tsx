@@ -2,7 +2,7 @@
 /**
  * tests/tui/memory-picker.test.tsx
  *
- * /memory 双开关面板：自动记忆 + Dream（Dream 依赖自动记忆）。
+ * /memory dual-toggle panel: auto-memory + Dream (Dream requires auto-memory).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";

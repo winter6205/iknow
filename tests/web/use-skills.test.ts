@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 /**
- * spec skill-index-increment SC8（Web 半边）—— slash 候选「当场热」。
+ * specs/skill-index-increment.md SC8 (web half) — slash candidates go "hot" live.
  *
- * `GET /api/v1/skills` 服务端已按**现行**技能根作答（hub 侧 rescan）；Web 的
- * 缺口在客户端只拉一次：装配后新装的技能永远不进候选。本测试钉住人侧可观察
- * 的结果 —— 窗口重新获得焦点时重取，新条目进候选；重取失败**不清空**已知
- * 候选（一次网络抖动不该让 `/` 面变空）；卸载后不再写入（无泄漏）。
+ * `GET /api/v1/skills` already answers from the current skill roots server-side
+ * (hub-side rescan); the web gap was a client that fetched only once, so skills
+ * installed after assembly never entered the candidates. This pins the
+ * user-observable outcome: refetch when the window regains focus and new entries
+ * appear; a failed refetch must NOT clear known candidates (one network blip
+ * should not empty the `/` surface); no writes after unmount (no leak).
  */
 import assert from "node:assert/strict";
 import { describe, it, vi, afterEach } from "vitest";
@@ -24,7 +26,7 @@ afterEach(() => {
   mockListSkills.mockReset();
 });
 
-/** 等待已排空的 promise 链（mock 解析 → setState 落地）。 */
+/** Wait for the drained promise chain (mock resolution → setState commit). */
 async function flush(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
@@ -42,7 +44,7 @@ describe("SC8 — Web slash 候选当场热", () => {
       ["boot"]
     );
 
-    // 装配之后新装的可加载条目（无 description —— SC5/SC9 的人侧面）。
+    // A loadable entry installed after assembly (no description — the user-facing side of SC5/SC9).
     mockListSkills.mockResolvedValueOnce({
       skills: [{ name: "boot" }, { name: "late-skill" }],
     });

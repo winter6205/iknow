@@ -1,7 +1,7 @@
 /**
- * T3 (#689): CLI `/continue` slash + pending-only NL.
+ * CLI `/continue` slash + pending-only NL.
  *
- * Boundary classes (spec continue_pending Testing):
+ * Boundary classes:
  *   empty     — empty session /continue → nothing_pending, run not called
  *   negative  — table NL skip-append; single-token + prose append; not-pending
  *               NL is query; slash args → usage; ask/oneshot have no continue
@@ -65,7 +65,7 @@ function toolResultOnly(id: string): AnthropicNativeMessage {
   };
 }
 
-/** P4 pending tail (tool_result-only last user). */
+/** Pending tail (tool_result-only last user). */
 function pendingMessages(): AnthropicNativeMessage[] {
   return [userText("do"), assistantToolUse("t1"), toolResultOnly("t1")];
 }
@@ -316,10 +316,11 @@ describe("T3 overflow: overlong non-exact NL still MAX_MESSAGE_CHARS", () => {
     assert.equal(ctx.state.messages.length, pending.length);
   });
 
-  // 对称于 hub.ts 处的豁免：机器装配的 skill-load 消息跳过 8000 上限。
-  // 78KB SKILL.md 一次性加载会撞 8000；不豁免则 skill-load slash 路径
-  // 不可用。该消息由 TUI/Web 装配拼出，本测试断言它真的走到了 run 并落
-  // 历史（不再被 `message text exceeds max length` 拦截）。
+  // Mirrors the hub.ts exemption: machine-assembled skill-load messages skip the
+  // MAX_MESSAGE_CHARS cap. Loading a 78KB SKILL.md at once would hit the cap, so
+  // without the exemption the skill-load slash path is unusable. The host builds
+  // this message; the assertions below prove it reaches run and lands in history
+  // (no longer blocked by `message text exceeds max length`).
   it("machine-assembled skill-load message exceeding MAX_MESSAGE_CHARS is NOT refused", async () => {
     const line = `[skill-load name="foo"]\n${"x".repeat(MAX_MESSAGE_CHARS + 100)}`;
     const ctx = makeCtx({
@@ -327,22 +328,22 @@ describe("T3 overflow: overlong non-exact NL still MAX_MESSAGE_CHARS", () => {
     });
     const spy = spyAdapter(ctx);
     const r = await processChatLine({ line, ctx });
-    // 不再返回 max-length stderr
+    // No max-length stderr returned anymore
     assert.equal(
       /max length/i.test(r.stderr ?? ""),
       false,
       `unexpected max-length stderr: ${r.stderr ?? ""}`
     );
-    // run 实际跑到模型 stub
+    // run actually reaches the model stub
     assert.equal(r.ranQuery, true);
     assert.equal(spy.encodeCount.n, 1);
     assert.equal(spy.stepCalls.n, 1);
-    // skill-load 文本原样进入历史
+    // the skill-load text enters history verbatim
     assert.equal(lastUserText(ctx.state.messages), line);
     assert.match(r.output, /loaded/);
   });
 
-  // Review Medium 3 守卫：半截前缀（无闭合双引号）即使超长也必须被拒。
+  // Guard: a half-open prefix (no closing quote) must still be refused when long.
   it("half-prefixed long text (no closing quote) IS refused (review Medium 3)", async () => {
     const line = `[skill-load name="${"x".repeat(MAX_MESSAGE_CHARS + 100)}`;
     const ctx = makeCtx({

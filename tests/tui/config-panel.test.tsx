@@ -1,21 +1,25 @@
 /** @jsxImportSource @opentui/react */
 /**
- * ADR-0096 T1 — `/config` 设置面板：FS 隔离档行变活（翻转 + 落盘），worktree
- * 与 cap 行 display-only（本票）；面板打开时与其他 picker 互斥关闭。
+ * ADR-0096 — `/config` settings panel: the FS isolation row is live (toggle
+ * + persist); worktree and cap rows are display-only at this stage; opening
+ * the panel closes other pickers (mutual exclusion).
  *
- * 镜像 `tests/tui/fs-mode.test.tsx` 的 mountApp / typeText / pressEnter 辅助
- * 形态（bun:test + testRender），覆盖：
- *  1. 无参 `/config` 打开面板（三行可见：标题「设置」+ FS / worktree / cap
- *     三行标签）；
- *  2. FS 行 Enter 翻 holder（fsMode.get() 前后值变化） + onPersistFsMode 被调；
- *  3. Esc 关闭面板；
- *  4. 互斥：memory picker 开着时 `/config` 打开 → memory 关闭；
- *  5. FS 行 Enter 失败（onPersistFsMode reject）→ notice 出现，holder 已翻
- *     （运行期生效 + 落盘失败 notice 与 runConfigSlashCommand 有参路径同款
- *     fire-and-forget 失败兜底契约）；
- *  6. cap 行 Enter no-op；worktree 行 Enter no-op；
- *  7. 重开面板 seed 自当前 holder（翻 holder 后 Esc 关闭、再开，FS 行显示
- *     已翻转的值）。
+ * Mirrors the mountApp / typeText / pressEnter helper shape of
+ * `tests/tui/fs-mode.test.tsx` (bun:test + testRender). Covers:
+ *  1. bare `/config` opens the panel (three rows visible: title `设置`
+ *     ("settings") + FS / worktree / cap row labels);
+ *  2. Enter on the FS row flips the holder (fsMode.get() before/after
+ *     differ) + onPersistFsMode is called;
+ *  3. Esc closes the panel;
+ *  4. mutual exclusion: opening `/config` while the memory picker is open →
+ *     memory closes;
+ *  5. FS row Enter failure (onPersistFsMode rejects) → notice appears,
+ *     holder already flipped (runtime effect + persist-failure notice share
+ *     the fire-and-forget failure fallback contract with the argumented
+ *     runConfigSlashCommand path);
+ *  6. Enter on the cap row is a no-op; Enter on the worktree row is a no-op;
+ *  7. reopening the panel seeds from the current holder (flip, Esc, reopen →
+ *     FS row shows the flipped value).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -65,7 +69,7 @@ async function mountApp(opts: {
   readonly fsMode?: FsModeContext;
   readonly onPersistFsMode?: (mode: FsIsolationMode) => Promise<void>;
   readonly isolationOn?: boolean;
-  // ADR-0096 T2 — cap 行可选接线（holder + 落盘回调）。
+  // ADR-0096 — cap row optional wiring (holder + persist callback).
   readonly subagentCapHolder?: ReturnType<
     typeof import("../../src/harness/subagent/manager.js").createSubagentCapacityHolder
   >;
@@ -73,7 +77,7 @@ async function mountApp(opts: {
     readonly maxConcurrentWorkers: number | "unlimited";
   }) => Promise<{ ok: true } | { ok: false; reason: string }>;
   readonly subagentCapDisplay?: number | "unlimited";
-  // ADR-0096 T3 — worktree 行可选接线（holder + 落盘回调）。
+  // ADR-0096 — worktree row optional wiring (holder + persist callback).
   readonly worktreeOnMutateHolder?: {
     get: () => boolean;
     set: (v: boolean) => void;
@@ -183,7 +187,7 @@ async function untilFrame(
   );
 }
 
-// ── pure 单元（reducer / formatter / rows） ─────────────────────────────────
+// ── pure units (reducer / formatter / rows) ────────────────────────────────
 
 const noKey = {
   upArrow: false,
@@ -262,7 +266,7 @@ describe("toggleFsMode", () => {
   });
 });
 
-// ADR-0096 T2 ── cap 行 Enter 循环（pure：nextSubagentCap）
+// ADR-0096 ── cap row Enter cycle (pure: nextSubagentCap)
 describe("nextSubagentCap", () => {
   test("闭集循环 3 → 5 → 9 → 15 → unlimited → 3", () => {
     expect(nextSubagentCap(3)).toBe(5);
@@ -312,8 +316,9 @@ describe("configPickerRows", () => {
 });
 
 describe("CONFIG_PICKER_WIDTH 行预算（code-review High2 回归）", () => {
-  // CJK=2 列宽（OpenTUI 同口径）；▸/·/空格 ASCII。无依赖实现（string-width
-  // 是 ESM-only，bun:test 环境直接内联同口径计数，注释锁语义）。
+  // CJK = 2 columns wide (same metric as OpenTUI); ▸/·/space are ASCII.
+  // Dependency-free implementation (string-width is ESM-only, so bun:test
+  // inlines a same-metric counter; this comment pins the semantics).
   function displayWidth(s: string): number {
     let w = 0;
     for (const ch of s) {
@@ -323,9 +328,11 @@ describe("CONFIG_PICKER_WIDTH 行预算（code-review High2 回归）", () => {
   }
   const prefix = "▸ ";
   const rows: ReadonlyArray<readonly [string, string]> = [
-    // [label, value+hints 全组合] —— 值域闭集全覆盖（FS 两档、worktree 两档、
-    // cap 五档 × 各自 hint 最长形态）。任一组合超内宽 → wrap → 顶破
-    // configPickerRows() 行账挤 transcript（High2 事故形态）。
+    // [label, value+hints full cross-product] — complete coverage of the
+    // closed value domain (FS 2 tiers, worktree 2 tiers, cap 5 tiers × each
+    // one's longest hint form). Any combination exceeding the inner width →
+    // wrap → overflows configPickerRows()' row budget and squeezes the
+    // transcript.
     ["文件系统隔离档", "global  ·  Enter 切换为 workspace"],
     ["文件系统隔离档", "workspace  ·  Enter 切换为 global"],
     ["worktree 门禁", "ON  ·  Enter 切换为 OFF"],
@@ -335,7 +342,7 @@ describe("CONFIG_PICKER_WIDTH 行预算（code-review High2 回归）", () => {
     ["子代理并发上限", "3  ·  Enter 切换为 5"],
   ];
   test("CONFIG_PICKER_WIDTH − 边框 2 − paddingX 2 ≥ 最宽行（所有值域组合）", () => {
-    // CONFIG_PICKER_WIDTH − 边框 2 − paddingX 左右各 1 = 内宽
+    // CONFIG_PICKER_WIDTH − border 2 − paddingX 1 on each side = inner width
     const inner = CONFIG_PICKER_WIDTH - 4;
     let max = 0;
     for (const [label, rest] of rows) {
@@ -343,8 +350,9 @@ describe("CONFIG_PICKER_WIDTH 行预算（code-review High2 回归）", () => {
       if (w > max) max = w;
       expect(w).toBeLessThanOrEqual(inner);
     }
-    // 最宽行 = 51（FS 行 workspace→global 形态）；内宽 52 ≥ 51 且不再是大
-    // 无谓冗余（50 宽的 PICKER_WIDTH 内宽 46 < 51，正是被修复的缺陷）。
+    // Widest row = 51 (FS row workspace→global form); inner width 52 ≥ 51
+    // without large waste (a 50-wide PICKER_WIDTH leaves inner 46 < 51 —
+    // exactly the defect that was fixed).
     expect(max).toBe(51);
     expect(inner).toBe(52);
   });
@@ -361,7 +369,7 @@ describe("CONFIG_PICKER_WIDTH 行预算（code-review High2 回归）", () => {
   });
 });
 
-// ── app 集成（mountApp + 屏帧断言） ─────────────────────────────────────────
+// ── app integration (mountApp + screen-frame assertions) ───────────────────
 
 describe("TUI /config 面板集成（ADR-0096 T1）", () => {
   test("无参 /config 打开面板：三行可见（FS / worktree / cap）+ 标题「设置」", async () => {
@@ -385,7 +393,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       expect(frame).toContain("文件系统隔离档");
       expect(frame).toContain("global");
       expect(frame).toContain("worktree 门禁");
-      expect(frame).toContain("ON"); // isolationOn=true → worktree 行显示 ON
+      expect(frame).toContain("ON"); // isolationOn=true → the worktree row shows ON
       expect(frame).toContain("子代理并发上限");
     } finally {
       app.destroy();
@@ -408,9 +416,9 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
-      // FS 行 focus 在 index=0（默认 seed）；Enter 翻 holder
+      // FS row focus at index=0 (default seed); Enter flips the holder
       await app.pressEnter();
-      // 屏上值变化（屏帧断言）
+      // The on-screen value changed (screen-frame assertion)
       await untilFrame(
         app.setup,
         (f) => f.includes("workspace"),
@@ -433,7 +441,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
       await app.pressEscape();
-      // Esc 后标题消失 —— 等 5 帧让 React commit 走出
+      // Title gone after Esc — wait 5 frames for the React commit to land
       for (let i = 0; i < 8; i++) {
         await new Promise((r) => setTimeout(r, 80));
         await app.setup.renderOnce();
@@ -451,7 +459,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
     const fsMode = createFsModeContext("global");
     const app = await mountApp({ permissionMode, fsMode });
     try {
-      // 先开 memory picker
+      // Open the memory picker first
       await app.typeText("/memory");
       await app.pressEnter();
       await untilFrame(
@@ -460,15 +468,16 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
         8000,
         "memory open"
       );
-      // memory picker 打开 → 输入框 disabled；直接走面板键位：Esc 关 memory
-      // （memory picker 的 Esc = 保存退出，等价关闭面板），然后再用 typeText
-      // 重新填 /config（输入框恢复 active）。
+      // Memory picker open → input disabled; drive panel keys directly: Esc
+      // closes memory (memory picker's Esc = save-and-exit, equivalent to
+      // closing the panel), then typeText refills /config (input active
+      // again).
       app.setup.mockInput.pressEscape();
       await new Promise((r) => setTimeout(r, 200));
       await app.setup.renderOnce();
       await new Promise((r) => setTimeout(r, 200));
       await app.setup.renderOnce();
-      // 再开 /config —— 应开 config（memory 已关）
+      // Open /config again — config should open (memory already closed)
       await app.typeText("/config");
       await app.pressEnter();
       const frame = await untilFrame(
@@ -478,7 +487,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
         "config open"
       );
       expect(frame).toContain("设置");
-      // memory picker 标题消失（互斥关闭生效）
+      // Memory picker title gone (mutual-exclusion close worked)
       expect(frame).not.toContain("记忆开关");
     } finally {
       app.destroy();
@@ -500,9 +509,9 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
       await app.pressEnter();
-      // holder 已翻（运行期生效，UI 兜底语义）
+      // Holder already flipped (effective at runtime; UI fallback semantics)
       expect(fsMode.get()).toBe("workspace");
-      // 屏上落失败语义（notice 段）
+      // Fail notice on screen (notice section)
       await untilFrame(
         app.setup,
         (f) => f.includes("失败") || f.includes("boom"),
@@ -529,16 +538,16 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
-      // ↓ 到 worktree 行（index=1）—— 无 holder，Enter no-op
+      // ↓ to the worktree row (index=1) — no holder, Enter is a no-op
       await app.pressArrow("down");
       await app.pressEnter();
-      // ↑ 回 FS 行（index=0）
+      // ↑ back to the FS row (index=0)
       await app.pressArrow("up");
-      // 再 ↓ ↓ 到 cap 行（index=2）—— 无 holder，Enter no-op
+      // Then ↓ ↓ to the cap row (index=2) — no holder, Enter is a no-op
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
-      // FS holder 没翻；persist 没调
+      // FS holder not flipped; persist not called
       expect(fsMode.get()).toBe("global");
       expect(calls).toEqual([]);
     } finally {
@@ -551,14 +560,14 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
     const fsMode = createFsModeContext("global");
     const app = await mountApp({ permissionMode, fsMode });
     try {
-      // 第一次开 + 翻
+      // First open + flip
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open1");
       await app.pressEnter();
       expect(fsMode.get()).toBe("workspace");
       await app.pressEscape();
-      // 关掉后再开 —— FS 行应显示新值
+      // Close and reopen — the FS row should show the new value
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(
@@ -577,7 +586,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
   test("cap 行 + worktree 行在 props 缺席时显示占位（— / OFF）", async () => {
     const permissionMode = createPermissionModeContext("default");
     const fsMode = createFsModeContext("workspace");
-    // isolationOn / subagentCapDisplay 均不传 → 占位
+    // Neither isolationOn nor subagentCapDisplay passed → placeholder
     const app = await mountApp({ permissionMode, fsMode });
     try {
       await app.typeText("/config");
@@ -585,7 +594,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
       const frame = app.setup.captureCharFrame();
       expect(frame).toContain("workspace");
-      expect(frame).toMatch(/OFF/); // worktree 缺省 false → OFF
+      expect(frame).toMatch(/OFF/); // worktree defaults to false → OFF
       expect(frame).toContain("—"); // cap undefined → —
     } finally {
       app.destroy();
@@ -593,7 +602,7 @@ describe("TUI /config 面板集成（ADR-0096 T1）", () => {
   }, 30_000);
 });
 
-// ── ADR-0096 T2 ── cap 行变活：Enter 循环 + 落盘 + holder 即时反映 ─────────
+// ── ADR-0096 ── cap row live: Enter cycle + persist + immediate holder reflection
 
 describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
   test("cap 行 Enter 循环 holder（3 → 5） + onPersistSubagentCap 被调", async () => {
@@ -620,13 +629,13 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
-      // ↓ 到 cap 行（index=2），Enter 翻 3 → 5
+      // ↓ to the cap row (index=2), Enter flips 3 → 5
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
       expect(holder.get()).toBe(5);
       expect(calls).toEqual([{ maxConcurrentWorkers: 5 }]);
-      // 屏上反映新值（capValue = "5"）
+      // The screen reflects the new value (capValue = "5")
       await untilFrame(
         app.setup,
         (f) => /子代理并发上限\s+5/.test(f),
@@ -669,9 +678,11 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
   }, 30_000);
 
   test("Enter 翻 holder 后单帧内屏上即变（回归：holder 非订阅源，须显式触发重渲染）", async () => {
-    // 实测缺陷（真实 TUI）：holder 是普通对象，`get()` 不订阅 —— 只翻 holder
-    // 不触发 re-render，屏上值会停到下一次焦点移动。断言 Enter 之后**不做任何
-    // 其他按键**，屏上就已反映新值（固定 3 帧时序，不靠 untilFrame 长轮询）。
+    // Observed defect (real TUI): the holder is a plain object and `get()`
+    // does not subscribe — flipping only the holder triggers no re-render,
+    // so the screen value lags until the next focus move. Assert that after
+    // Enter, with **no other key pressed**, the screen already shows the new
+    // value (fixed 3-frame timing, not a long untilFrame poll).
     const { createSubagentCapacityHolder } =
       await import("../../src/harness/subagent/manager.js");
     const { createWorktreeOnMutateHolder } =
@@ -693,15 +704,16 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
-      // 焦点 → cap 行，Enter 后仅推进 3 帧
+      // Focus → cap row, advance only 3 frames after Enter
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
-      // 单帧渲染（不轮询、不额外按键）：修复前这里仍显示旧值
+      // Single-frame render (no polling, no extra keys): before the fix this
+      // still showed the old value
       await app.setup.renderOnce();
       expect(capHolder.get()).toBe(5);
       expect(app.setup.captureCharFrame()).toMatch(/子代理并发上限\s+5/);
-      // worktree 行同理：↑ 到 index=1，Enter 后单帧
+      // Same for the worktree row: ↑ to index=1, single frame after Enter
       await app.pressArrow("up");
       await app.pressEnter();
       await app.setup.renderOnce();
@@ -734,9 +746,9 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
-      // holder 已翻（运行期生效；UI 兜底语义）
+      // Holder already flipped (effective at runtime; UI fallback semantics)
       expect(holder.get()).toBe(9);
-      // 屏上落失败语义（notice 段）
+      // Fail notice on screen (notice section)
       await untilFrame(
         app.setup,
         (f) => f.includes("失败") || f.includes("boom"),
@@ -755,7 +767,8 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       permissionMode,
       fsMode,
       subagentCapDisplay: 15,
-      // 故意不传 subagentCapHolder —— cap 行退化为 read-only
+      // Deliberately not passing subagentCapHolder — the cap row degrades to
+      // read-only
     });
     try {
       await app.typeText("/config");
@@ -764,7 +777,7 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
-      // 屏上仍显示 15（无变化）
+      // The screen still shows 15 (unchanged)
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/子代理并发上限\s+15/);
     } finally {
@@ -773,10 +786,11 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
   }, 30_000);
 
   test("cap persist 返回 {ok:false}（不 reject）→ 屏上落失败语义（回归：结构化失败曾静默吞掉）", async () => {
-    // code-review High1 回归：persistSubagentCapImpl 捕获错误后**返回**
-    // `{ok:false, reason}` 而非 throw —— 修复前 app.tsx 只接 .catch，resolved
-    // 的失败结果被 `void` 丢弃，屏上无任何失败提示。断言 {ok:false} 路径
-    // 同样落 notice（双通道失败语义等价）。
+    // persistSubagentCapImpl **returns** `{ok:false, reason}` after catching
+    // an error instead of throwing — before the fix app.tsx only attached
+    // .catch, so the resolved failure result was discarded by `void` and no
+    // failure notice appeared. Assert the {ok:false} path also lands a
+    // notice (both failure channels are semantically equal).
     const { createSubagentCapacityHolder } =
       await import("../../src/harness/subagent/manager.js");
     const permissionMode = createPermissionModeContext("default");
@@ -799,9 +813,11 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
       await app.pressArrow("down");
       await app.pressArrow("down");
       await app.pressEnter();
-      // holder 已翻（运行期生效；persist 失败不回滚）
+      // Holder already flipped (effective at runtime; persist failure does
+      // not roll back)
       expect(holder.get()).toBe(9);
-      // {ok:false} 的 reason 也落屏（非 reject 路径的 notice）
+      // The {ok:false} reason also lands on screen (notice on the non-reject
+      // path)
       await untilFrame(
         app.setup,
         (f) => f.includes("保存失败") && f.includes("EACCES"),
@@ -814,7 +830,7 @@ describe("TUI /config 面板 cap 行激活（ADR-0096 T2）", () => {
   }, 30_000);
 });
 
-// ── ADR-0096 T3 ── worktree 门禁行变活：Enter 翻转 + 落盘 + holder 即时反映 ──
+// ── ADR-0096 ── worktree gate row live: Enter flip + persist + immediate holder reflection ──
 
 describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
   test("worktree 行 Enter 翻 holder（OFF → ON）+ onPersistWorktreeOnMutate 被调", async () => {
@@ -836,19 +852,19 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
-      // ↓ 到 worktree 行（index=1），Enter 翻 OFF → ON
+      // ↓ to the worktree row (index=1), Enter flips OFF → ON
       await app.pressArrow("down");
       await app.pressEnter();
       expect(holder.get()).toBe(true);
       expect(calls).toEqual([true]);
-      // 屏上反映新值
+      // The screen reflects the new value
       await untilFrame(
         app.setup,
         (f) => /worktree 门禁\s+ON/.test(f),
         4000,
         "value flipped to ON"
       );
-      // 再 Enter 翻回 OFF（ON → OFF 对称）
+      // Enter again flips back to OFF (ON → OFF is symmetric)
       await app.pressEnter();
       expect(holder.get()).toBe(false);
       expect(calls).toEqual([true, false]);
@@ -883,7 +899,8 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
       await app.pressEnter();
       expect(holder.get()).toBe(true);
       await app.pressEscape();
-      // 关掉后再开 —— worktree 行应显示 ON（holder 驱动，不是启动快照）
+      // Close and reopen — the worktree row should show ON (holder-driven,
+      // not a boot snapshot)
       await app.typeText("/config");
       await app.pressEnter();
       await untilFrame(
@@ -917,7 +934,8 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
       await app.pressArrow("down");
       await app.pressEnter();
-      // holder 已翻（门禁下一次 wave 即按新值裁决；失败不撤回 —— 与 FS / cap 同款）
+      // Holder already flipped (the gate's next wave adjudicates by the new
+      // value; failure is not withdrawn — same as FS / cap)
       expect(holder.get()).toBe(true);
       await untilFrame(
         app.setup,
@@ -959,7 +977,7 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
       permissionMode: createPermissionModeContext("default"),
       fsMode: createFsModeContext("global"),
       isolationOn: true,
-      // 不传 holder → T1 display-only 形态
+      // No holder passed → display-only form
     });
     try {
       await withSnapshot.typeText("/config");
@@ -970,7 +988,8 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
         8000,
         "open snapshot"
       );
-      // 静态快照仍驱动显示值（ON），但行是 read-only
+      // The static snapshot still drives the display value (ON), but the row
+      // is read-only
       expect(frame).toMatch(/worktree 门禁\s+ON/);
       expect(frame).toContain("仅显示");
     } finally {
@@ -1001,7 +1020,7 @@ describe("TUI /config 面板 worktree 行激活（ADR-0096 T3）", () => {
       await untilFrame(app.setup, (f) => f.includes("设置"), 8000, "open");
       await app.pressArrow("down");
       await app.pressEnter();
-      // worktree 翻了；FS / cap 未动
+      // worktree flipped; FS / cap untouched
       expect(fsMode.get()).toBe("global");
       expect(capHolder.get()).toBe(9);
       expect(app.setup.captureCharFrame()).toMatch(/文件系统隔离档\s+global/);
@@ -1025,6 +1044,8 @@ describe("toggleWorktreeOnMutate（pure）", () => {
   });
 });
 
-// 组件挂载以 TuiApp 集成为主（与 model-picker / memory-picker 同款纪律 ——
-// `useTimeline` 持续动画让 waitForVisualIdle 不达 idle，standalone 挂载无
-// 落点；JSX runtime 由 TuiApp 集成的 8 个用例覆盖）。
+// Component mounting goes through TuiApp integration (same discipline as
+// model-picker / memory-picker — `useTimeline`'s continuous animation keeps
+// waitForVisualIdle from ever reaching idle, so standalone mounting has no
+// landing point; the JSX runtime is covered by the 8 TuiApp integration
+// cases).

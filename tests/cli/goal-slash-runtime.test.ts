@@ -1,19 +1,20 @@
 /**
- * #458 T6: /goal 三面 runtime 集成测试 — 真实 SessionStore（temp dir）
- * + fresh conversationId（不预存 session 文件）。
+ * /goal runtime integration tests across the three entry points — real
+ * SessionStore (temp dir) + fresh conversationId (no pre-existing session file).
  *
- * 按项目测试规范（commands handler 集成测试必须接真实 store +
- * fresh conversationId）覆盖 typed-error catch 契约：fresh 上
- * not_found = 合法态（非错误，stderr 静默 + 友好 output），与 schema_invalid
- * 真实故障在 catch 处分流（禁止 instanceof Error 平铺）。
+ * Per the project test rules (commands-handler integration tests must use a
+ * real store + fresh conversationId), this covers the typed-error catch
+ * contract: not_found on a fresh conversation is a legitimate state (not an
+ * error — silent stderr + friendly output), split from real schema_invalid
+ * failures in the catch (flat `instanceof Error` is forbidden).
  *
- * 覆盖：
- *  - happy path: fresh + pin → 落盘 goal.status="active" && goal.text=args
- *  - fresh + status → not_found 合法态 → output「未设置 goal」,stderr 静默
- *  - fresh + clear → not_found 合法态 → output「无 goal 可清」,无副作用
- *  - legacy on-disk taskFocus(被 sanitize-drop)+ pinned goal → /goal status
- *    输出不泄露 taskFocus 段
- *  - schema_invalid 真实故障 → stderr `${kind}: ${conversation_id}`
+ * Covers:
+ *  - happy path: fresh + pin → on disk goal.status="active" && goal.text=args
+ *  - fresh + status → legitimate not_found → output 「未设置 goal」 ("no goal set"), stderr silent
+ *  - fresh + clear → legitimate not_found → output 「无 goal 可清」 ("nothing to clear"), no side effects
+ *  - legacy on-disk taskFocus (sanitize-dropped) + pinned goal → /goal status
+ *    output must not leak the taskFocus section
+ *  - real schema_invalid failure → stderr `${kind}: ${conversation_id}`
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -120,7 +121,7 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     });
     await mkdir(dir, { recursive: true });
     const now = new Date().toISOString();
-    // 畸形 goal：text 字段为 number → isValidGoal false → sanitize 抛 schema_invalid。
+    // Malformed goal: text is a number → isValidGoal false → sanitize throws schema_invalid.
     const bad = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -146,8 +147,8 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
   });
 
   it("pinned goal + legacy on-disk taskFocus → /goal status excludes taskFocus text", async () => {
-    // #605 T2 regression guard:盘上 legacy taskFocus key 被 sanitize-drop,
-    // /goal status 输出不应泄露 taskFocus 段或焦点文本。
+    // Regression guard: a legacy on-disk taskFocus key is sanitize-dropped;
+    // /goal status output must not leak the taskFocus section or its text.
     const { store, baseDir } = await storeFor();
     const id = "pinned-with-legacy-taskfocus";
     const dir = resolveConversationDir({

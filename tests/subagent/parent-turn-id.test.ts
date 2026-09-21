@@ -1,14 +1,17 @@
 /**
- * F-4 parentTurnId 填实 — manager 侧写点。
+ * manager-side writer for parentTurnId.
  *
- * `SubAgentDefinition.parentTurnId` 是**父侧独占**字段：它告诉 manager「这个
- * 子代理是哪个 turn 派出去的」。三类生命周期 record（spawn / state_change /
- * stop）都带上它，`?parent_turn_id=` 才能一次捞出某回合派出的全部子代理。
+ * `SubAgentDefinition.parentTurnId` is **parent-side only**: it tells the
+ * manager which turn dispatched a sub-agent. All three lifecycle records
+ * (spawn / state_change / stop) carry it so `?parent_turn_id=` can pull every
+ * child of a turn in one query.
  *
- * 锁三条：
- * 1. def 带 parentTurnId → 三类 record 全部落该值（含 spawn 工厂抛错的失败路径）；
- * 2. def 不带 → 三类 record 上该键缺席（Postel，不落 null / 空串）；
- * 3. parentTurnId **不进 WorkerEnvelope** —— 冻结的 wire 契约一个字节不动。
+ * Locks three invariants:
+ * 1. def with parentTurnId → all three record kinds carry it (incl. the
+ *    spawn-factory throw path);
+ * 2. def without → key absent on all records (Postel; no null / empty string);
+ * 3. parentTurnId never enters WorkerEnvelope — the frozen wire contract is
+ *    byte-for-byte unchanged.
  */
 
 import assert from "node:assert/strict";

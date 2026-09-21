@@ -1,8 +1,10 @@
 /**
- * 会话文件夹归并（ADR-0071 + ADR-0087）之后的读侧根派生回归测试。
+ * Read-side root-derivation regression after session-folder consolidation
+ * (ADR-0071 + ADR-0087).
  *
- * 不变式：trace 读侧缺省派生与写侧 SessionStore 数据根必须是同一个
- * baseDir。会话池不跟 workspaceRoot 分片（显式 dataDir 除外）。
+ * Invariant: the trace read-side default must resolve to the same baseDir as
+ * the write-side SessionStore data root. The session pool does not shard by
+ * workspaceRoot (explicit dataDir excepted).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

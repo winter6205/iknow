@@ -1,15 +1,16 @@
 /**
- * Phase 1 settings-model-extension：为 serve-path 测试提供隔离 settings.json 来源。
+ * Isolated settings.json source for serve-path tests.
  *
- * 背景（#164 第二阶段 + ADR-0093）：
- *  `IKNOW_LLM_MODEL` 已退役，模型唯一来源 = `settings.llm.model`（`provider/model`
- *  路由 ID）。serve 组合根在不注入 settings 时走 settings 文件解析，worktree
- *  `.iknow/` 不含 settings.json 会触发 fail-fast。
+ * Background (ADR-0093): `IKNOW_LLM_MODEL` is retired; the only model source
+ * is `settings.llm.model` (a `provider/model` route ID). The serve composition
+ * root, when no settings are injected, resolves the settings file — and a
+ * worktree `.iknow/` without settings.json triggers fail-fast.
  *
- *  本 helper 把 HOME 重定向到 fork-local tmp，写用户层 `llm.providers` 注册表 +
- *  `process.env[apiKeyEnv] = "test-key"`，让 serve-path 测试不污染真实 `~/.iknow`。
+ * This helper redirects HOME to a fork-local tmp dir, writes a user-level
+ * `llm.providers` registry + `process.env[apiKeyEnv] = "test-key"`, so
+ * serve-path tests never pollute the real `~/.iknow`.
  *
- * 每个 vitest fork 进程各建独立 tmp home（pool: forks，每文件一 fork）。
+ * Each vitest fork process builds its own tmp home (pool: forks, one fork per file).
  */
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,19 +19,19 @@ import { llmSettingsJson } from "./test-llm-settings.ts";
 
 export interface TestSettingsSource {
   readonly home: string;
-  /** provider.apiKeyEnv 指向的变量名（已被设值 "test-key"）。 */
+  /** The variable named by provider.apiKeyEnv (already set to "test-key"). */
   readonly apiKeyVar: string;
   readonly model: string;
-  /** 恢复 process.env.HOME / apiKeyVar 原值，并删除 tmp。 */
+  /** Restores process.env.HOME / apiKeyVar and deletes the tmp dir. */
   restore(): void;
 }
 
 export interface InstallTestSettingsOpts {
-  /** settings.llm.model 路由 ID（默认 "test/model"）。 */
+  /** settings.llm.model route ID (default "test/model"). */
   model?: string;
-  /** provider.apiKeyEnv 变量名（默认 "IKNOW_TEST_API_KEY"）。 */
+  /** provider.apiKeyEnv variable name (default "IKNOW_TEST_API_KEY"). */
   apiKeyVar?: string;
-  /** 注入 apiKeyVar 的值（默认 "test-key"）。 */
+  /** Value injected into apiKeyVar (default "test-key"). */
   apiKeyValue?: string;
 }
 

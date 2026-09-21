@@ -1,9 +1,10 @@
 /**
- * D-α V1 graph mode T2 — `settings.graph` 段（新会话默认；缺省关）。
+ * Graph mode — the `settings.graph` section (new-conversation default; off by default).
  *
- * 纪律镜像 `settings.subagent`：drop-not-throw（非法字段丢弃、不抛）、
- * 全段非法/缺席 → 不产出 graph 段。合并层（ADR-0084）：`graph` 属用户层键，
- * 项目文件里的 graph 段被允许名单丢弃，永不覆盖 user 值。
+ * Discipline mirrors `settings.subagent`: drop-not-throw (invalid fields are
+ * dropped silently), whole section invalid/absent → no graph section produced.
+ * Merge layer (ADR-0084): `graph` is a user-layer key, so a graph section in a
+ * project file is dropped by the allowlist and never overrides the user value.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";

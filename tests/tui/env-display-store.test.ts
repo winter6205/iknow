@@ -1,13 +1,16 @@
 /**
  * tests/tui/env-display-store.test.ts
  *
- * env-display-store.ts 单测（bun:test；无 React 依赖 —— 与 thinking-override
- * 同策略，独立模块规避 app.tsx import 链拉起渲染器）。
+ * Unit tests for env-display-store.ts (bun:test; no React dependency — same
+ * strategy as thinking-override: a standalone module avoids the app.tsx import
+ * chain that would pull in the renderer).
  *
- * 契约核心：两次 publish 之间 get() 必须返回**同一对象身份** ——
- * `useSyncExternalStore` 用 Object.is 比较 getSnapshot 的返回值，每次现造新
- * 对象会被判成「变了」并触发无限重渲染。其余用例钉住发布序号单调、退订幂等、
- * listener 异常隔离，以及「通知期间变更订阅集合」的快照语义（复制后再遍历）。
+ * Core contract: between two publishes, get() must return the **same object
+ * identity** — `useSyncExternalStore` compares getSnapshot with Object.is, and
+ * a freshly built object each time is seen as "changed" and causes infinite
+ * re-renders. Other cases pin monotonic publish sequence, idempotent
+ * unsubscribe, listener exception isolation, and the snapshot semantics when
+ * the subscription set changes mid-notify (iterate a copy).
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -15,7 +18,7 @@ import {
   type EnvDisplaySnapshot,
 } from "../../src/tui/env-display-store.js";
 
-/** defaultThinking 最小投影（thinking-gate.ts 的 DefaultThinkingShape）。 */
+/** Minimal defaultThinking projection (DefaultThinkingShape in thinking-gate.ts). */
 const ADAPTIVE_HIGH = { mode: "adaptive", effort: "high" } as const;
 const OFF_EMPTY = { mode: "off", effort: "" } as const;
 
@@ -119,7 +122,7 @@ describe("publish: 发布序号与快照替换", () => {
 
     expect(snapshot.defaultThinking).toBeUndefined();
     expect(snapshot.model).toBe("b/two");
-    // 模型缺失与基线缺失是两个独立维度，缺 baseline 不得回填 off/adaptive。
+    // Missing model and missing baseline are independent dimensions; absent baseline must not backfill off/adaptive.
     store.publish({ model: undefined, defaultThinking: undefined });
     expect(store.get().model).toBeUndefined();
     expect(store.get().defaultThinking).toBeUndefined();
@@ -196,7 +199,7 @@ describe("listener 异常隔离", () => {
     }).not.toThrow();
     expect(received).toEqual(["B"]);
 
-    // 一次抛异常不得污染 store 状态：后续 publish 照常投递。
+    // One throwing listener must not corrupt store state: later publishes still deliver.
     store.publish({ model: "c/three", defaultThinking: undefined });
     expect(received).toEqual(["B", "B"]);
     expect(store.get().version).toBe(2);
@@ -237,11 +240,11 @@ describe("通知期间变更订阅集合：复制后遍历（快照语义）", (
     unsubscribeLater = store.subscribe(() => calls.push("B"));
 
     store.publish({ model: "b/two", defaultThinking: undefined });
-    // 复制后遍历：B 虽已被删除，本次通知仍按发布时刻的订阅集合投递。
+    // Iterate a copy: B was already removed, but this notify still delivers to the subscription set as of publish time.
     expect(calls).toEqual(["A", "B"]);
 
     store.publish({ model: "c/three", defaultThinking: undefined });
-    // A 仍在订阅：B 的移除只影响后续发布，不得让 A 少收一次。
+    // A is still subscribed: removing B only affects later publishes, A must not miss one.
     expect(calls).toEqual(["A", "B", "A"]);
   });
 
@@ -260,7 +263,7 @@ describe("通知期间变更订阅集合：复制后遍历（快照语义）", (
     expect(calls).toEqual(["A"]);
 
     store.publish({ model: "c/three", defaultThinking: undefined });
-    // 第二次通知：late 已在集合中，按订阅顺序排在 A 之后。
+    // Second notify: late is now in the set, ordered after A by subscription order.
     expect(calls).toEqual(["A", "A", "late"]);
   });
 });

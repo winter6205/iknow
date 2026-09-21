@@ -1,7 +1,7 @@
 /**
  * tests/cli/parse-args-tui.test.ts
  *
- * #146 parse-args tui 分支：`tui` / `tui <session-id>` / flags 透传。
+ * parse-args `tui` branch: `tui` / `tui <session-id>` / flag pass-through.
  */
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "../../src/cli/parse-args.js";

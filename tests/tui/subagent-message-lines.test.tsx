@@ -1,25 +1,33 @@
 /**
  * tests/tui/subagent-message-lines.test.tsx
  *
- * specs/tui-subagent-transcript-live.md —— `src/tui/subagent-message-lines.ts`
- * 的**保留面**（跨模块共享与单源）认证。
+ * Certification of the **retained surface** (cross-module sharing and
+ * single-source) of `src/tui/subagent-message-lines.ts`, per
+ * specs/tui-subagent-transcript-live.md.
  *
- * 本文件原认证「live 列表整体铺开」投影与 prompt 上方身份条的渲染；该行为已
- * 被取代（投影改为按 `toolUseId` 卡级 join，身份条拆除）。被取代的命题连主体
- * 一起消失，故不在此重写；卡级 join 的完整 input-contract 矩阵在
- * `tests/tui/subagent-card-lines.test.ts`（该模块的投影 SSOT 测）。
+ * This file formerly certified the "live list spread flat" projection and the
+ * identity strip above the prompt; that behavior was superseded (the
+ * projection became a per-card join keyed by `toolUseId`, the identity strip
+ * was removed). The superseded propositions vanished with their subject and
+ * are deliberately not rewritten here; the full input-contract matrix for the
+ * card-level join lives in `tests/tui/subagent-card-lines.test.ts` (the SSOT
+ * projection test for this module).
  *
- * 本文件现在钉三件仍然为真、且删除后会失守的事：
- *   1) `isLiveSubagent` 仍是对外导出的共享判据 —— `SubagentPanel`
- *      （`src/tui/subagent-panel.tsx`）与 Ctrl+X 强杀分派
- *      （`src/tui/subagent-kill.ts`）都 import 它，判据漂移会让
- *      「聚焦行 ↔ 杀谁」错位；`resolveIdentityRole` /
- *      `IDENTITY_FALLBACK_ROLE` 是卡级投影与本文件共用的 role 解析面；
- *   2) 单源：`IDENTITY_FALLBACK_ROLE` 与 `src/shared/tool-line.ts` 的
- *      `SUBAGENT_ROLE_FALLBACK` 同值（工具卡与两行投影不得各印一个角色名）；
- *   3) 组合：卡级投影的第 1 行 = 同源 role 解析 + 逐字 ` running...`（后缀在
- *      投影输出侧断言，不从模块重新导出比对 —— 那是同义反复），且 join 不上
- *      的键不借用别的 worker 的预览（锁句 6）。
+ * What this file now pins — three things still true and lost if deleted:
+ *   1) `isLiveSubagent` remains the shared exported predicate — `SubagentPanel`
+ *      (`src/tui/subagent-panel.tsx`) and the Ctrl+X kill dispatch
+ *      (`src/tui/subagent-kill.ts`) both import it; predicate drift would
+ *      desynchronize "focused row ↔ whom to kill". `resolveIdentityRole` /
+ *      `IDENTITY_FALLBACK_ROLE` are the role-resolution surface shared by the
+ *      card projection and this file;
+ *   2) single source: `IDENTITY_FALLBACK_ROLE` equals `SUBAGENT_ROLE_FALLBACK`
+ *      in `src/shared/tool-line.ts` (tool card and two-line projection must
+ *      not each print their own role name);
+ *   3) composition: line 1 of the card projection = same-source role
+ *      resolution + verbatim ` running...` (asserted on the projection's
+ *      output, not by re-exporting the module constant — that would be
+ *      tautological), and an unjoinable key never borrows another worker's
+ *      preview (lock clause 6).
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -52,7 +60,7 @@ function makeSubagent(overrides: Partial<SubagentInfo> = {}): SubagentInfo {
 }
 
 // ============================================================================
-// 1) 共享面仍在：isLiveSubagent / resolveIdentityRole / RUNNING_SUFFIX
+// 1) Shared surface intact: isLiveSubagent / resolveIdentityRole / RUNNING_SUFFIX
 // ============================================================================
 
 describe("isLiveSubagent — 面板 / Ctrl+X 分派共用判据", () => {
@@ -101,9 +109,11 @@ describe("resolveIdentityRole — negative 边界（永不输出「子代理」�
 
 describe("第 1 行后缀 — 锁句的逐字形态（三个点）", () => {
   test("live 第 1 行以逐字 ` running...` 收尾；completed 只作身份不带后缀", () => {
-    // 断言投影的**输出字节**而非模块内的常量：常量重新导出只是把
-    // 实现照抄一遍（同义反复），输出侧才是 spec 锁句「三个点」的落点。
-    // 锁句 2 reopen：completed 第 1 行去 running（角色标题只作身份）。
+    // Assert the projection's **output bytes**, not the module-internal
+    // constant: re-exporting the constant just copies the implementation
+    // (tautology); the output side is where the spec's lock clause "three
+    // dots" lands. Lock clause 2 reopen: completed drops running from line 1
+    // (the role title is identity only).
     for (const state of ["starting", "running"] as const) {
       const info = makeSubagent({ role: "explore", state, toolUseId: "t-sfx" });
       expect(projectSubagentCardLines([info], "t-sfx", 80)!.roleLine).toBe(
@@ -122,7 +132,7 @@ describe("第 1 行后缀 — 锁句的逐字形态（三个点）", () => {
 });
 
 // ============================================================================
-// 2) 单源：fallback 与 src/shared/tool-line.ts 同值
+// 2) Single source: fallback equals src/shared/tool-line.ts
 // ============================================================================
 
 describe("IDENTITY_FALLBACK_ROLE — 与 shared 侧单源", () => {
@@ -133,7 +143,7 @@ describe("IDENTITY_FALLBACK_ROLE — 与 shared 侧单源", () => {
 });
 
 // ============================================================================
-// 3) 组合：卡级投影消费同源 role 解析 + 逐字后缀
+// 3) Composition: card projection consumes same-source role resolution + verbatim suffix
 // ============================================================================
 
 describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", () => {

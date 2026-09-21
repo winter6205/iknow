@@ -2,18 +2,23 @@
 /**
  * tests/tui/chrome-overflow.test.tsx
  *
- * #1044 布局越界回归：底部 chrome（输入框 / ContextBar / 位置行 / 子代理
- * 面板）均无显式高度、opentui 默认 flexShrink=1 —— 面板行不入账时总高超出
- * 终端，Yoga 把负空间按比例摊给底部 chrome，输入框内容行被压进边框
- * （live 子代理 ≥7 必现，与终端高无关）。
+ * Layout-overflow regression: the bottom chrome (input box / ContextBar /
+ * location line / subagent panel) has no explicit height and opentui
+ * defaults to flexShrink=1 — when panel rows go unaccounted the total
+ * exceeds the terminal, Yoga distributes the negative space proportionally
+ * to the bottom chrome, and the input box's content row gets crushed into
+ * its border (always reproducible with >=7 live subagents, independent of
+ * terminal height).
  *
- * 修复（候选 C）：面板行数入账（panelRows = 折叠后行数，上限
- * SUBAGENT_PANEL_MAX_ROWS）→ 输入框随子代理增加正常上移、始终完整显示，
- * 且上移有界（不再回归 47faa754 修掉的「每加一个子代理上移一行」的无界形态）。
+ * Fix: account the panel row count (panelRows = collapsed rows, capped at
+ * SUBAGENT_PANEL_MAX_ROWS) → the input box shifts up normally as subagents
+ * grow, always displays intact, and the shift is bounded (no regression to
+ * the unbounded "one row up per added subagent" shape).
  *
- * 断言指标（探针 v3 转正）：
- *   - inputRows = ctx 行号 − mode 行号 − 1（输入框完好 = 3）；
- *   - promptRow 收敛：n 超过折叠边界后不再随 n 变化（有界上移）。
+ * Assertion metrics:
+ *   - inputRows = ctx line number − mode line number − 1 (intact box = 3);
+ *   - promptRow convergence: past the collapse boundary it stops changing
+ *     with n (bounded shift-up).
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -115,7 +120,8 @@ async function frameFor(
   return { frame: setup.captureCharFrame(), setup };
 }
 
-/** 输入框完好行数：mode 行与 ctx 行之间的距离 − 1（健康 = 3：上边框+内容+下边框）。 */
+/** Intact input-box row count: distance between the mode line and the ctx
+ *  line − 1 (healthy = 3: top border + content + bottom border). */
 function inputRowCount(frame: string): number {
   const lines = frame.split("\n");
   const modeIdx = lines.findIndex((l) => l.includes("mode: Default"));
@@ -124,7 +130,8 @@ function inputRowCount(frame: string): number {
   return ctxIdx - modeIdx - 1;
 }
 
-/** 输入框提示符所在行（用于「上移有界」断言）；找不到 → -1。 */
+/** Line of the input prompt (for the bounded-shift-up assertion); -1 when
+ *  not found. */
 function promptRowIndex(frame: string): number {
   return frame.split("\n").findIndex((l) => l.includes("❯"));
 }
@@ -150,10 +157,12 @@ describe("chrome-overflow（#1044）：底部 chrome 比例压缩回归", () => 
       rows.push(promptRowIndex(frame));
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     }
-    // 折叠边界之后 promptRow 恒定（面板行账封顶，ChatView 不再变矮）。
+    // Past the collapse boundary promptRow stays constant (panel row
+    // account caps out, ChatView stops shrinking).
     const tail = rows.slice(boundary);
     expect(new Set(tail).size).toBe(1);
-    // 且整体单调不增（上移有方向性：只往上或不动）。
+    // And overall monotonically non-increasing (the shift has direction: up
+    // or nowhere).
     for (let i = 1; i < rows.length; i++) {
       expect(rows[i]).toBeLessThanOrEqual(rows[i - 1]);
     }

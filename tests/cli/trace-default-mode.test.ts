@@ -1,13 +1,14 @@
 /**
- * `iknow trace` 默认探测模式三态测试（ADR-0020 D2.1/D2.2，plan T4）。
+ * Three-state test for `iknow trace`'s default probe mode (ADR-0020 D2.1/D2.2).
  *
- * 真实 CLI 子进程（cli.ts 顶层 main().catch 副作用，无法 import 单测）：
- *   1. 探测成功（假 serve health 在目标端口）→ exit 0 + 打印 /trace URL
- *   2. 探测失败（端口无 serve）→ exit 1 + 提示 --separate
- *   3. --separate → 起独立进程（port 0 实测 health 后 kill）
+ * Real CLI subprocess (cli.ts runs main().catch at top level, so it cannot be
+ * unit-tested by import):
+ *   1. probe success (fake serve health on the target port) → exit 0 + prints the /trace URL
+ *   2. probe failure (no serve on the port) → exit 1 + hints --separate
+ *   3. --separate → spawns an independent process (health-probed on port 0, then killed)
  *
- * parseArgs 侧：--separate flag 解析 + trace 默认端口按模式分派
- * （默认 8787 探测 / --separate 24881）。
+ * parseArgs side: --separate flag parsing + mode-dependent default port
+ * (8787 for probing / 24881 for --separate).
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -22,7 +23,7 @@ import { parseArgs } from "../../src/cli/parse-args.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** 与 tests/cli/trace.test.ts 同款 tsx 定位（worktree node_modules 为空）。 */
+/** Same tsx resolution as tests/cli/trace.test.ts (a worktree's node_modules may be empty). */
 function resolveTsxCli(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
@@ -30,7 +31,7 @@ function resolveTsxCli(): string {
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
-      // 继续向上
+      // keep climbing
     }
     const parent = join(dir, "..");
     if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
@@ -57,7 +58,7 @@ function spawnTrace(cwd: string, args: string[]): SpawnedCli {
   child.stderr.on("data", (d) => (err += String(d)));
   const exited = new Promise<{ code: number | null; output: string }>(
     (resolve) => {
-      // close 而非 exit:stdio flush 完成后再断言,避免并行负载下 output 截断。
+      // close rather than exit: assert after stdio flush completes, avoiding truncated output under parallel load.
       child.on("close", (code) => resolve({ code, output: out + err }));
       child.on("error", () => resolve({ code: null, output: out + err }));
     }
@@ -65,7 +66,7 @@ function spawnTrace(cwd: string, args: string[]): SpawnedCli {
   return { child, exited };
 }
 
-/** SIGTERM 后等 close;超时再 SIGKILL。已退出则立刻返回。 */
+/** After SIGTERM wait for close; SIGKILL on timeout. Returns immediately if already exited. */
 async function terminateChild(
   child: ChildProcess,
   timeoutMs = 5_000
@@ -83,7 +84,7 @@ async function terminateChild(
   });
 }
 
-// -- parseArgs 侧 --------------------------------------------------------------
+// -- parseArgs side --------------------------------------------------------------
 
 describe("parseArgs — --separate flag + 模式端口默认", () => {
   it("默认模式（无 --separate）→ separate=false，port 默认 8787（探测 serve）", () => {
@@ -112,7 +113,7 @@ describe("parseArgs — --separate flag + 模式端口默认", () => {
   });
 });
 
-// -- 三态行为（真实 CLI 子进程） ---------------------------------------------------
+// -- three-state behavior (real CLI subprocess) -------------------------------------
 
 describe("runTrace — ADR-0020 默认探测三态", () => {
   let scratch: string;
@@ -131,7 +132,7 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
 
   it("探测成功 → exit 0 + 打印 http://host:port/trace", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-probe-ok-"));
-    // 假 serve：health 返回 { ok: true }（session-api health 形态的最小面）。
+    // Fake serve: health returns { ok: true } (the minimal session-api health shape).
     const fake = http.createServer((req, res) => {
       if (req.url === "/api/v1/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -156,9 +157,9 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
 
   it("探测失败 → exit 1 + 提示 iknow serve / --separate", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-probe-fail-"));
-    // 独占 ephemeral 端口并保持 listen:health 回 404 → probeServeHealth
-    // false。不 close-then-reuse,避免并行 fork listen(0) 抢走端口,
-    // 把本应 exit 1 的探测变成成功。
+    // Occupy an ephemeral port and keep it listening: health returns 404 → probeServeHealth
+    // false. Not close-then-reuse — a parallel fork's listen(0) could steal the freed port
+    // and turn this should-exit-1 probe into a false success.
     const occupied = http.createServer((_req, res) => {
       res.writeHead(404).end();
     });
@@ -190,8 +191,8 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
       "0",
     ]);
     children.push(spawned.child);
-    // 等 stderr 打出 URL（startTraceServe 成功后立刻打）。累加 buffer
-    // 再 match,避免 URL 跨 chunk 时单片 regex 漏匹配。
+    // Wait for the URL printed on stderr (startTraceServe prints it right after success).
+    // Match against the accumulated buffer so a URL split across chunks is not missed.
     const url = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("--separate 未在时限内打出 URL")),

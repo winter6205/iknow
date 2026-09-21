@@ -1,11 +1,14 @@
 /**
  * tests/tui/banner-lines.test.ts
  *
- * #321 T5-P0-1：renderBannerLines 纯函数单测（与消息共享 scroll space，
- * 方案 B）。无 React / 无 ANSI，行数与内容可直接断言。
+ * Unit tests for the renderBannerLines pure function (banner shares the
+ * scroll space with messages). No React / no ANSI; line counts and content
+ * are directly assertable.
  *
- *  - cols 放得下 32 列眼睛 → 13 行完整眼（79 列仍是眼睛，不塌单行）。
- *  - 极窄、眼睛本身放不下 → 1 行 bannerShortLine(version)，无分隔线。
+ *  - cols wide enough for the 32-column eye → full 13-line eye (79 cols is
+ *    still the eye, no collapse to a single line).
+ *  - Extremely narrow, the eye itself does not fit → 1 line
+ *    bannerShortLine(version), no divider.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -25,12 +28,12 @@ const INFO = {
   dataDir: "/tmp/proj/.data",
 };
 
-// 眼睛与 info 栏之间 GAP=3（DESIGN-BANNER.md 定案，banner.ts 私有常量同值）。
+// GAP=3 between the eye and the info column (same value as banner.ts's private constant).
 const GAP = 3;
 const EYE_W = [...(EYE_LINES[0] ?? "")].length;
 const LINE_W = EYE_W + GAP + BANNER_INFO_WIDTH; // 32 + 3 + 43 = 78
 
-/** 与 banner.ts 同语义：info 行右补空格到 BANNER_INFO_WIDTH 保持右缘对齐。 */
+/** Same semantics as banner.ts: pad info lines right to BANNER_INFO_WIDTH to keep the right edge aligned. */
 function padInfo(s: string): string {
   return s.padEnd(BANNER_INFO_WIDTH);
 }
@@ -41,7 +44,7 @@ describe("renderBannerLines", () => {
     expect(lines.length).toBe(EYE_LINES.length);
     lines.forEach((line, r) => {
       expect(line.startsWith(EYE_LINES[r] ?? "")).toBe(true);
-      // 每行宽度恒定 = 32 + 3 + 43 = 78 列 ≤ 80 不溢出。
+      // Every line has constant width = 32 + 3 + 43 = 78 cols ≤ 80, no overflow.
       expect([...line]).toHaveLength(LINE_W);
     });
   });
@@ -49,7 +52,7 @@ describe("renderBannerLines", () => {
   test("info 三行垂直居中：第 5/6/7 行右侧含 Version / Cwd / Data dir", () => {
     const lines = renderBannerLines(INFO, BANNER_MIN_COLS);
     const infoLines = bannerInfoLines(INFO);
-    // 眼睛 13 行中部 3 行（0-indexed 5/6/7），info 段右补到 43 列。
+    // Middle 3 of the 13 eye lines (0-indexed 5/6/7); info segment padded right to 43 cols.
     expect(lines[5]).toBe(
       `${EYE_LINES[5] ?? ""}${" ".repeat(GAP)}${padInfo(infoLines[0] ?? "")}`
     );
@@ -59,7 +62,7 @@ describe("renderBannerLines", () => {
     expect(lines[7]).toBe(
       `${EYE_LINES[7] ?? ""}${" ".repeat(GAP)}${padInfo(infoLines[2] ?? "")}`
     );
-    // 其余 10 行 info 段为纯空格（右缘对齐，无文本泄漏）。
+    // The remaining 10 lines' info segment is pure spaces (right-aligned, no text leakage).
     const notInfo = [0, 1, 2, 3, 4, 8, 9, 10, 11, 12];
     for (const r of notInfo) {
       const line = lines[r] ?? "";
@@ -73,7 +76,7 @@ describe("renderBannerLines", () => {
     const row = lines[5] ?? "";
     expect(row).toContain("Version");
     expect(row).toContain("9.9.9-test");
-    // info 文本位于右侧：眼睛行 32 列 + GAP 3 列之后。
+    // Info text sits on the right: after the 32-col eye line + 3-col GAP.
     expect(row.indexOf("Version")).toBeGreaterThanOrEqual(EYE_W + GAP);
   });
 
@@ -104,8 +107,8 @@ describe("renderBannerLines", () => {
 });
 
 describe("eyeGradientCells", () => {
-  const FROM = "#1a1d6e"; // 深蓝紫（e2 起点）
-  const TO = "#ffafaf"; // 粉金（e2 终点）
+  const FROM = "#1a1d6e"; // dark blue-violet (gradient start)
+  const TO = "#ffafaf"; // pink-gold (gradient end)
 
   test("13 行 × 32 cell：逐 cell 输出 {text, hex}", () => {
     const cells = eyeGradientCells({
@@ -118,7 +121,7 @@ describe("eyeGradientCells", () => {
     for (const row of cells) {
       expect(row.length).toBe(32);
     }
-    // 每个 cell 是 { text, hex }，text 来自 EYE_LINES，hex 是 #rrggbb。
+    // Each cell is { text, hex }: text from EYE_LINES, hex is #rrggbb.
     for (const row of cells) {
       for (const cell of row) {
         expect(typeof cell.text).toBe("string");
@@ -185,7 +188,7 @@ describe("eyeGradientCells", () => {
     });
     expect(cells[0]![31]!.hex).toBe("#ffafaf");
     expect(cells[0]![0]!.hex).toBe("#1a1d6e");
-    // 中间行 (r=6) 任意列都受 r=0 影响，仅 c 决定 t。
+    // Any column in row r=6 feels zero row weight: t is determined by column only.
     expect(cells[6]![0]!.hex).toBe("#1a1d6e");
     expect(cells[6]![31]!.hex).toBe("#ffafaf");
   });

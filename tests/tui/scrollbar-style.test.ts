@@ -1,13 +1,14 @@
 /**
  * tests/tui/scrollbar-style.test.ts
  *
- * 滚动条观感策略的纯函数边界（S2 五类：empty / negative / overflow /
- * concurrent / exception）。
+ * Pure-function boundaries of the scrollbar appearance policy
+ * (five classes: empty / negative / overflow / concurrent / exception).
  *
- * 钉住的不变式：track 恒定全透明（显形 = 回归到「与背景同色的可见轨道」）；
- * thumb 的 alpha 只在 idle / hover 两档之间取值，且 idle 严格低于 hover
- * （「平时极淡、移入显色」的可测形式）。颜色一律 8 位 hex —— 7 位 hex 或
- * 颜色名会让 OpenTUI 回落到默认不透明色，把淡出效果整条吞掉。
+ * Pinned invariants: the track is always fully transparent (any visible track = regression to a
+ * "track the same color as the background"); thumb alpha takes only two values, idle / hover, with
+ * idle strictly lower than hover (the testable form of "barely visible at rest, lights up on hover").
+ * Colors are always 8-digit hex — 7-digit hex or color names make OpenTUI fall back to its default
+ * opaque color, swallowing the fade-out entirely.
  */
 import { expect, test } from "bun:test";
 import {
@@ -83,7 +84,7 @@ test("hover：进出各翻转一次，重复同向事件被去重", () => {
   const detach = attachScrollbarHover(target, (h) => seen.push(h));
 
   target.onMouseOver?.(undefined as never);
-  target.onMouseOver?.(undefined as never); // 逐帧 move 重放：不该再通知
+  target.onMouseOver?.(undefined as never); // per-frame move replay: must not notify again
   target.onMouseOut?.(undefined as never);
   target.onMouseOut?.(undefined as never);
   target.onMouseOver?.(undefined as never);
@@ -99,7 +100,7 @@ test("hover：detach 复位到未 hover 并清空槽（卸载后事件不再改�
   target.onMouseOver?.(undefined as never);
   expect(seen).toEqual([true]);
 
-  // detach 需先复位（指针已不在条上，残留 hover 会让 thumb 常亮）。
+  // detach must reset first (pointer is off the bar; a lingering hover would keep the thumb lit).
   const detach = attachScrollbarHover(target, (h) => seen.push(h));
   target.onMouseOver?.(undefined as never);
   detach();

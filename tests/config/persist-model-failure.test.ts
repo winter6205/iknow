@@ -1,8 +1,9 @@
 /**
- * persistModelFailure：/model 写盘 vs reload 失败必须分 stage。
+ * persistModelFailure: the /model write-to-disk stage and the reload stage must be distinguished.
  *
- * 写盘已成功、reload 因 provider_api_key_missing 抛 typed plain object 时，
- * 不得再把失败标成 write（TUI 会误报「写回 settings.json 失败」）。
+ * When the write already succeeded but reload throws the typed plain object
+ * provider_api_key_missing, the failure must not be labeled "write" anymore
+ * (otherwise the TUI falsely reports "failed to write settings.json").
  */
 import { describe, expect, it } from "vitest";
 import {
