@@ -410,17 +410,11 @@ export type BuildEngineOpts = {
    * value (`createWorktreeOnMutateHolder(startup reading)`): gate shape is
    * byte-identical to today and the OFF setting has zero regression.
    *
-   * Deliberate asymmetry: the gate's block/no-block decision follows the
-   * holder (ON→OFF→ON allowed), but other consumers of the same setting —
-   * worker write-situation (`isolationOn`), the git discipline prompt section,
-   * the projectIdentityRoot read-bar, and the create-worktree tool assembly —
-   * still read startup-frozen values (`isolationOnStartup` / presence of
-   * `opts.worktreeIsolation`). Reason: the gate is always assembled (see the
-   * loopExecutor comment) and OFF just reads false transparently, while the
-   * worker/tool sides are assembly-time structure (registry membership) —
-   * changing them at runtime would destabilize the static "no write tools =
-   * read-only" determination. The runtime amendment authorizes only the gate
-   * blocking behavior.
+   * Deliberate live consumers of the same holder: the mutate gate, worker
+   * write-situation (`isolationOn` read at spawn), the git discipline prompt
+   * section (re-read each system()), and spawn classification. Registry
+   * membership (create-worktree present when the host seam exists) stays
+   * assembly-time — tools stay registered; only policy follows the switch.
    *
    // (ADR-0096)
    */
@@ -570,12 +564,11 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
-   * Worktree isolation mode, decided once at assembly
-   * (`resolveWorktreeOnMutate(settings)`; settings are read at startup only).
-   * Chat-session rebind and the ACI registry use it to compute
-   * `writeSituation(isolationOn, currentRoot)` — without re-reading settings
-   * or re-deciding in the host layer. Since ADR-0079 skill-body assembly no
-   * longer consumes it. Absent → consumers default to `writable_main`.
+   * Worktree isolation mode. Chat-session rebind and the ACI registry use it
+   * to compute `writeSituation(isolationOn, currentRoot)`. The value follows
+   * the live worktree-on-mutate holder when the isolation host is present
+   * (panel flip takes effect on the next read). Absent → consumers default
+   * to `writable_main`.
    */
   readonly isolationOn?: boolean;
   /**
@@ -798,6 +791,8 @@ export async function buildHarnessEngine(
   // separately, the holder-absent path would build independent cells — the
   // panel would flip one and the gate vs physical fence verdicts would split.
   const worktreeOnMutateSource = resolveWorktreeOnMutateSource(opts, settings);
+  const isolationOnLive = (): boolean =>
+    isolationHost !== undefined && worktreeOnMutateSource.get();
   // Enter-worktree exclusive-lock switch, resolved at assembly with the same
   // (ADR-0070)
   // fail-closed reading as `isolationEnabled` (missing / not true → false).
@@ -992,9 +987,9 @@ export async function buildHarnessEngine(
           // Pass the worktree isolation mode: manager.buildWorkerPayload
           // combines it with the resolved sandboxRoot to compute
           // `writeSituation` into the envelope; the worker prior renders the
-          // write-root segment from it. Source = `isolationEnabled` (single
-          // read point); workers never re-decide.
-          isolationOn: isolationEnabled,
+          // write-root segment from it. Source = live holder (same cell as
+          // the mutate gate); workers never re-decide.
+          isolationOn: isolationOnLive,
           // opts.subagentsDir present → per-agent file-mode JsonlTraceService
           // inside the manager, replacing the old aggregated `subagentTrace`
           // single instance; absent → manager uses NoopTrace (same semantics
@@ -1664,23 +1659,16 @@ export async function buildHarnessEngine(
   // the worker deny-list in the classifier below — this keeps host-only tools
   // (create-worktree, bash_stop) out of the isolation decision without a
   // second exclusion list.
-  const workerBaseTools = isolationEnabled
-    ? createDefaultAciRegistry({
-        env,
-        sandboxRoot,
-        skillCatalog,
-        lspCtx,
-        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
-        // ADR-0092 (worker-derived surface): fs isolation holder + homeRoot to
-        // the bash factory, same shape as the parent session. The worker
-        // surface derives from the same registry factory — assembly is byte-
-        // identical, only the deny-list differs. homeRoot = this layer's userHome.
-        fsMode: opts.fsMode,
-        homeRoot: userHome,
-        // UNBOUND_FENCE holder (worker-derived surface, same singleton).
-        worktreeOnMutate: worktreeOnMutateSource,
-      }).catalog.all()
-    : [];
+  const workerBaseTools = createDefaultAciRegistry({
+    env,
+    sandboxRoot,
+    skillCatalog,
+    lspCtx,
+    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    fsMode: opts.fsMode,
+    homeRoot: userHome,
+    worktreeOnMutate: worktreeOnMutateSource,
+  }).catalog.all();
   // Dynamic registry wrapper so the executor resolves registerExternal mcp__
   // tools (see createDynamicExecutorRegistry for the contract).
   const dynamicExecutorRegistry = createDynamicExecutorRegistry(reg);
@@ -1793,6 +1781,7 @@ export async function buildHarnessEngine(
   // inner executor performs schema validation.
   const classifyWithSubagentIsolation = (call: ToolCall): MutateClass => {
     if (call.name !== "spawn_subagent") return classifyCall(call);
+    if (!isolationOnLive()) return "read";
     const input = (call.input ?? {}) as Record<string, unknown>;
     const rawRole = input.subagent_type;
     const role =
@@ -1824,9 +1813,9 @@ export async function buildHarnessEngine(
   // (ADR-0096)
   // OFF the gate stays assembled and reads the holder per wave (falsy =
   // transparent). **Never auto-provision**: flipping ON only restores "block
-  // unbound mutate + point at create-worktree". Consumers that stay frozen
-  // at startup still read `isolationEnabled` (see
-  // BuildEngineOpts.worktreeOnMutateHolder doc). The gate reads the live
+  // unbound mutate + point at create-worktree". Git-work prompt, worker
+  // writeSituation, and spawn classification re-read the same holder.
+  // The gate reads the live
   // `liveTaskRoot` cell (single write point `withLiveTaskRootWrite`),
   // snapshotted once per executeAll wave; before any rebind it equals the
   // old assembly-frozen sandboxRoot.
@@ -2007,12 +1996,12 @@ export async function buildHarnessEngine(
       // frozen in session. Degenerate states (not a git repo / git unusable /
       // cwd unresolvable) → provider returns undefined → section absent, no error.
       git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
-      // Git work-discipline section: same judgment source as isolationEnabled
-      // (read once at startup, session-stable). ON → injected for
-      // chat/tui/serve; OFF → field absent (byte-equal to not passing the
-      // gate). ask is blocked again inside createIknowSystemResolver (no
-      // worktree tools); worker createWorkerDeps bypasses this layer entirely.
-      ...(isolationEnabled ? { gitWorkDiscipline: true } : {}),
+      // Git work-discipline section: same live source as isolationOnLive
+      // (host present ∧ holder.get()). ON → injected for chat/tui/serve;
+      // OFF → field evaluates false each system() call (segment absent).
+      // ask is blocked again inside createIknowSystemResolver; worker
+      // createWorkerDeps bypasses this layer entirely.
+      gitWorkDiscipline: isolationOnLive,
       // The `orchestration` system section was retired — its content moved
       // into the graph mode-switch hints (loop-engine tail append, see the
       // graphModeChange seam below). The graph assembly snapshot is now a
@@ -2186,11 +2175,12 @@ export async function buildHarnessEngine(
     // Live taskRoot cell exposed so the hub's loadSkillBody reads a snapshot
     // at call time — the same cell instance the registry factory consumes.
     liveTaskRoot,
-    // Isolation-tier judgment exposed for the hub / ACI skill / chat-session
-    // rebind consumers to compute writeSituation(isolationOn, currentRoot).
-    // Single source = `isolationEnabled` (read once at engine startup), same
-    // source that arms the gate.
-    isolationOn: isolationEnabled,
+    // Isolation-tier judgment for hub / chat-session rebind writeSituation.
+    // Same live holder as the mutate gate — a panel flip is visible on the
+    // next property read.
+    get isolationOn() {
+      return isolationOnLive();
+    },
     // Enter-occupancy-lock setting passthrough — the session-api hub reads it
     // (ADR-0070)
     // when constructing the `worktreeEnter` host closure to decide whether to

@@ -35,6 +35,7 @@ import addFormats from "ajv-formats";
 
 import {
   createSpawnSubAgentTool,
+  SPAWN_DISPATCH_ISOLATION_CLAUSE,
   SPAWN_DISPATCH_LESSON,
   SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN,
 } from "../../src/harness/subagent/spawn-subagent-tool.ts";
@@ -53,6 +54,7 @@ import {
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../src/config/settings.ts";
 import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
+import { createWorktreeOnMutateHolder } from "../../src/harness/isolation/worktree-gate.ts";
 import {
   resolveAgentCatalog,
   getAgentEntry,
@@ -596,6 +598,19 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     // 5 topics unchanged + dispatch lesson still present
     expect(desc).toMatch(/multi-step exploration/);
     expect(desc.indexOf(SPAWN_DISPATCH_LESSON)).toBeGreaterThan(-1);
+  });
+
+  it("isolation holder OFF → dispatch lesson omits create-worktree clause", () => {
+    const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+    const holder = createWorktreeOnMutateHolder(true);
+    const tool = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+      worktreeOnMutate: holder,
+    });
+    expect(tool.description).toContain(SPAWN_DISPATCH_ISOLATION_CLAUSE);
+    holder.set(false);
+    expect(tool.description).not.toContain(SPAWN_DISPATCH_ISOLATION_CLAUSE);
+    expect(tool.description).toMatch(/skill catalog/i);
   });
 
   it("description holder.set 后即时反映（不冻结旧值）", () => {

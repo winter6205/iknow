@@ -881,6 +881,9 @@ export function createDefaultAciRegistry(
               ...(opts.subagentCapacityHolder !== undefined
                 ? { capacityHolder: opts.subagentCapacityHolder }
                 : {}),
+              ...(opts.worktreeOnMutate !== undefined
+                ? { worktreeOnMutate: opts.worktreeOnMutate }
+                : {}),
             }),
         }
       : {}),

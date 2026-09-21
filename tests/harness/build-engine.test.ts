@@ -2259,9 +2259,7 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
       expect(after.message ?? "").toContain("create-worktree");
       expect(provisionCalls).toBe(0);
 
-      // (d) BuiltEngine.isolationOn stays the startup value (assembly-time
-      //     consumers are NOT re-derived by a panel flip).
-      expect(built.isolationOn).toBe(false);
+      expect(built.isolationOn).toBe(true);
 
       await built.shutdown?.();
     } finally {
@@ -2312,8 +2310,59 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
         "conv-1"
       );
       expect(through.kind).toBe("ok");
-      expect(built.isolationOn).toBe(true);
+      expect(built.isolationOn).toBe(false);
 
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+
+  it("panel flip ON → OFF drops Git work from the next system assembly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-git-work-flip-"));
+    try {
+      const holder = createWorktreeOnMutateHolder(true);
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-git-work-flip"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: { provision: async () => root },
+        worktreeOnMutateHolder: holder,
+      });
+      const onText = (await built.deps.system?.()) ?? "";
+      expect(onText).toContain("## Git work");
+      holder.set(false);
+      const offText = (await built.deps.system?.()) ?? "";
+      expect(offText).not.toContain("## Git work");
+      expect(offText).not.toContain(
+        "Do not write the main checkout to work around isolation"
+      );
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+
+  it("panel flip ON → OFF reports isolationOn false for rebind/spawn consumers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-iso-flip-"));
+    try {
+      const holder = createWorktreeOnMutateHolder(true);
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-iso-flip"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: { provision: async () => root },
+        worktreeOnMutateHolder: holder,
+      });
+      expect(built.isolationOn).toBe(true);
+      holder.set(false);
+      expect(built.isolationOn).toBe(false);
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);

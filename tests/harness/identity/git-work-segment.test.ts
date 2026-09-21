@@ -140,6 +140,21 @@ describe("git work additive segment — absence does not write empty system", ()
     expect(out.length).toBeGreaterThan(0);
     expect(out).not.toContain("## Git work");
   });
+
+  it("createIknowSystemResolver re-reads a gitWorkDiscipline getter each call", async () => {
+    let on = true;
+    const live = createIknowSystemResolver({
+      cwd: workDir,
+      projectIdentityRoot: workDir,
+      userHome: workDir,
+      surface: "chat",
+      memoryEnabled: false,
+      gitWorkDiscipline: () => on,
+    });
+    expect((await live()) ?? "").toContain("## Git work");
+    on = false;
+    expect((await live()) ?? "").not.toContain("## Git work");
+  });
 });
 
 describe("git work additive segment — immutable body (concurrent/pure)", () => {

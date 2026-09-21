@@ -58,6 +58,7 @@ import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
 import type { AgentCatalogResolver } from "./catalog.js";
 import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities } from "./capability.js";
+import type { WorktreeGateReader } from "../isolation/worktree-gate.js";
 
 /**
  * The dispatch lesson is one SSOT string: the tool description embeds it
@@ -71,10 +72,13 @@ import { resolveSubagentCapabilities } from "./capability.js";
  * build the isolation tree via `create-worktree` before dispatching mutating
  * work; check the skill catalog before improvising a procedure.
  */
+export const SPAWN_DISPATCH_ISOLATION_CLAUSE =
+  "when the task mutates files under isolation, run `create-worktree` first so the workers land in the isolated tree; ";
+
 export const SPAWN_DISPATCH_LESSON =
   "\n\nDispatch lesson: start with an `explore` sub-agent before dispatching any work that writes; " +
   "keep at most 3 sub-agents in flight for operator workflows (a working discipline, not the enforced cap); " +
-  "when the task mutates files under isolation, run `create-worktree` first so the workers land in the isolated tree; " +
+  SPAWN_DISPATCH_ISOLATION_CLAUSE +
   "check the skill catalog before improvising a procedure.";
 
 /**
@@ -122,6 +126,12 @@ export interface SpawnSubAgentToolDeps {
    * getter), byte-identical to the older static description.
    */
   readonly capacityHolder?: SubagentCapacityHolder;
+  /**
+   * Live isolation switch. When present and `get()` is false, the dispatch
+   * lesson omits the create-worktree clause. Absent → full lesson (tests /
+   * holder-less assembly stay byte-identical).
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
 }
 
 /**
@@ -331,26 +341,34 @@ export function createSpawnSubAgentTool(
   // clause. The splice closure re-reads the holder each time, so the model
   // sees the current N when it reads the description.
   const descriptionPrefix = `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. `;
-  const descriptionSuffix =
+  const descriptionCatalog =
     `\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
-    proseLines +
-    SPAWN_DISPATCH_LESSON;
+    proseLines;
   const capClause = (cap: SubagentCapacityValue): string => {
     if (cap === "unlimited") {
       return "Concurrency cap is unlimited in this session; the OS / memory budget is still the practical limit. When a spawn would clearly overload the host, reduce parallelism.";
     }
     return `At most ${cap} workers run simultaneously in this session; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.`;
   };
+  const dispatchLesson = (): string => {
+    if (
+      deps.worktreeOnMutate !== undefined &&
+      deps.worktreeOnMutate.get() !== true
+    ) {
+      return SPAWN_DISPATCH_LESSON.replace(SPAWN_DISPATCH_ISOLATION_CLAUSE, "");
+    }
+    return SPAWN_DISPATCH_LESSON;
+  };
   return Object.freeze({
     name: "spawn_subagent",
-    // Live description: getter — Object.freeze locks the accessor, callers
-    // (ADR-0096)
-    // re-read `readCapacity()` on every `.description` access so a gate
-    // change reflects immediately (handler / schema / aci metadata
-    // untouched).
     get description(): string {
       const cap = readCapacity();
-      return descriptionPrefix + capClause(cap) + descriptionSuffix;
+      return (
+        descriptionPrefix +
+        capClause(cap) +
+        descriptionCatalog +
+        dispatchLesson()
+      );
     },
     inputSchema: {
       type: "object",

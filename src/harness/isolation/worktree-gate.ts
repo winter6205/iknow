@@ -1049,10 +1049,10 @@ export interface WorktreeIsolationHostOpts {
  * SAME instance in-session. Consumers read `get()` at their own decision
  * boundary; the gate reads it once per wave.
  *
- * Flipping this holder does NOT change any assembly-time derivation that
- * other consumers snapshot from the same setting (worker write-situation,
- * git-work-discipline prompt segment, project-identity read fence): those
- * stay frozen at the startup value. Only the mutate gate is live.
+ * Flipping this holder updates the mutate gate, git-work system segment,
+ * worker writeSituation, and spawn isolation classification on the next
+ * read. Registry membership of worktree ACI tools stays keyed on host-seam
+ * presence, not this switch.
  */
 export interface WorktreeOnMutateHolder {
   readonly get: () => boolean;

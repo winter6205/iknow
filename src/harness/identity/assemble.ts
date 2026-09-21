@@ -309,6 +309,12 @@ export function shouldIncludeBootstrap(
   return surface !== "ask";
 }
 
+function readGitWorkDiscipline(
+  value: boolean | (() => boolean) | undefined
+): boolean {
+  return typeof value === "function" ? value() : value === true;
+}
+
 /** deps.system factory shared by every assembly layer (no copy-paste wiring).
  *  Resolved once per turn so user.md edits take effect at turn granularity
  *  (no TTL caching). */
@@ -354,8 +360,10 @@ export function createIknowSystemResolver(opts: {
    *  factory time and freezes it for the session. See AssemblyContext.git. */
   readonly git?: () => GitSnapshot | undefined;
   /** Git-work discipline segment; see AssemblyContext.gitWorkDiscipline.
-   *  Never forwarded on the ask surface even when true. */
-  readonly gitWorkDiscipline?: boolean;
+   *  Never forwarded on the ask surface even when true. A function is
+   *  re-read on every system() call so a live isolation switch can drop
+   *  the segment without rebuilding the engine. */
+  readonly gitWorkDiscipline?: boolean | (() => boolean);
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -379,7 +387,8 @@ export function createIknowSystemResolver(opts: {
         : {}),
       ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
       ...(opts.git ? { git: opts.git } : {}),
-      ...(opts.gitWorkDiscipline && opts.surface !== "ask"
+      ...(opts.surface !== "ask" &&
+      readGitWorkDiscipline(opts.gitWorkDiscipline)
         ? { gitWorkDiscipline: true }
         : {}),
     });

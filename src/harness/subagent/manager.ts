@@ -760,6 +760,12 @@ function resumeDefinition(
   };
 }
 
+function readIsolationOn(
+  value: boolean | (() => boolean) | undefined
+): boolean {
+  return typeof value === "function" ? value() : value === true;
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -843,9 +849,10 @@ export function createSubAgentManager(opts: {
    * `writable_main`), byte-equal with the pre-change state (build-engine's
    * assembly layer always passes this value; the seam exists only for
    * manager-direct scenarios like the existing manager.test.ts makeHarness
-   * falling back to default behavior).
+   * falling back to default behavior). A function is re-read at every spawn
+   * so a live isolation switch can flip writeSituation without rebuilding.
    */
-  readonly isolationOn?: boolean;
+  readonly isolationOn?: boolean | (() => boolean);
   /**
    * ADR-0071: subagent per-agent trace + meta home directory =
    * `<parent session folder>/subagents/`. When present: each spawn lazily
@@ -1877,7 +1884,10 @@ export function createSubAgentManager(opts: {
       // existing manager-direct scenarios (manager.test.ts makeHarness).
       ...(opts.isolationOn !== undefined
         ? {
-            writeSituation: writeSituation(opts.isolationOn, resolved),
+            writeSituation: writeSituation(
+              readIsolationOn(opts.isolationOn),
+              resolved
+            ),
           }
         : { writeSituation: writeSituation(false, resolved) }),
       // ADR-0071: the parent manager already created

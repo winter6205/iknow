@@ -709,7 +709,12 @@ export async function refreshChatDepsForRebind(
   ctx.pendingWriteRootNotice =
     newRoot !== mainCheckoutOf(newRoot)
       ? (writeRootSegment(
-          writeSituation(ctx.isolationOn ?? false, newRoot),
+          writeSituation(
+            ctx.worktreeOnMutate !== undefined
+              ? ctx.worktreeOnMutate.get()
+              : (ctx.isolationOn ?? false),
+            newRoot
+          ),
           newRoot
         ) ?? undefined)
       : undefined;

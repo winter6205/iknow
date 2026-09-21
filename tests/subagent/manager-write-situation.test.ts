@@ -66,7 +66,7 @@ interface CapturedSpawn {
 }
 
 function makeManagerCapturingPayload(opts: {
-  readonly isolationOn?: boolean;
+  readonly isolationOn?: boolean | (() => boolean);
   readonly parentSandboxRoot: string;
 }): {
   readonly manager: ReturnType<typeof createSubAgentManager>;
@@ -128,6 +128,19 @@ describe("buildWorkerPayload — writeSituation 透传", () => {
     });
     manager.spawn({ task: "hello" });
     assert.equal(calls[0]!.payload.writeSituation, "no_writable_root");
+  });
+
+  it("isolationOn getter 在 spawn 时再读：ON→OFF 后 writeSituation = writable_main", () => {
+    let on = true;
+    const { manager, calls } = makeManagerCapturingPayload({
+      isolationOn: () => on,
+      parentSandboxRoot: mainPath,
+    });
+    manager.spawn({ task: "first" });
+    assert.equal(calls[0]!.payload.writeSituation, "no_writable_root");
+    on = false;
+    manager.spawn({ task: "second" });
+    assert.equal(calls[1]!.payload.writeSituation, "writable_main");
   });
 
   it("isolationOn 缺省 → 默认 false + writable_main（manager 直造场景向后兼容）", () => {
