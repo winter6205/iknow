@@ -193,8 +193,8 @@ describe("纯函数（数值语义 SSOT）", () => {
     for (const c of OCCUPANCY_CASES) {
       expect(occupancyFromUsage(c.usage), c.name).toBe(c.used);
     }
-    // 结构不可能「总量再加 cacheRead 2×」：pre_call 形态（两 cache 字段均
-    // null）走 inputTokens-only 分支，cache 字段不参与任何加法。
+    // Structurally impossible to "add cacheRead onto a total" twice: the pre_call
+    // shape (both cache fields null) takes the inputTokens-only branch; cache never joins an addition.
     for (const input of [0, 1, 12800, 15000]) {
       expect(occupancyFromUsage(makeUsage(input))).toBe(input);
     }
@@ -343,8 +343,8 @@ describe("渲染（只读 lastUsage）", () => {
       cols: 80,
     });
     const frame = setup.captureCharFrame();
-    // pct 数字与 k/k 原样显示 150% / 15.0k/10.0k（不截断读数）；
-    // 仅容量 band 通过 valueBand 的 0..100 clamp 封顶为全填。
+    // pct and the k/k figures render verbatim at 150% / 15.0k/10.0k (readings are never clamped);
+    // only the capacity band caps at full via valueBand's 0..100 clamp.
     expect(frame).toContain("ctx ██████████ 150% alert 15.0k/10.0k");
     await setup.renderer.destroy();
   });

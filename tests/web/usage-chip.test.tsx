@@ -6,9 +6,9 @@
  * nothing) × cache null treated as 0 × hover title details. The percentage math was
  * migrated semantically from the retired context-usage-strip.test.tsx (component
  * retired whole, not weakened asserts): numerator = context occupancy
- * (ADR-0118: pre_call cache 全 null → inputTokens-only；post_call =
- * inputTokens + cacheReadInputTokens + cacheCreationInputTokens, null cache
- * → 0), denominator = contextWindow, pct = round(used/window×100).
+ * (ADR-0118: pre_call with all cache fields null → inputTokens only;
+ * post_call = inputTokens + cacheReadInputTokens + cacheCreationInputTokens,
+ * null cache → 0), denominator = contextWindow, pct = round(used/window×100).
  *
  * renderToStaticMarkup follows the existing tests/web convention (node env, no DOM framework).
  */
@@ -195,8 +195,8 @@ describe("UsageChip — contextOccupancy（ADR-0118 共享分子表）", () => {
     for (const c of OCCUPANCY_CASES) {
       assert.equal(contextOccupancy(c.usage), c.used, c.name);
     }
-    // 结构不可能「总量再加 cacheRead 2×」：pre_call 形态（两 cache 字段均
-    // null）走 inputTokens-only 分支，cache 字段不参与任何加法。
+    // Structurally impossible to "add cacheRead onto a total" twice: the pre_call
+    // shape (both cache fields null) takes the inputTokens-only branch; cache never joins an addition.
     for (const input of [0, 1, 12800, 15000]) {
       assert.equal(
         contextOccupancy({

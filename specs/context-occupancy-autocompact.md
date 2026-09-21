@@ -1,30 +1,30 @@
-# Spec: context occupancy 闸条同分子
+# Spec: context occupancy — one numerator for gate and bar
 
-用量条与 proactive auto-compact 看同一占用数字。分母仍是策略预算窗口。
+The usage bar and the proactive auto-compact read the same occupancy number. The denominator stays the policy budget window.
 
 ## Does
 
-- 条的百分比分子 = **context occupancy**（TUI 与 Web 同一公式）。
-- proactive 闸在每次 `step` 前用 occupancy 与 `floor(0.95 × contextWindow)`（或显式 threshold）比较。
-- occupancy 优先级：本拍有限且 >0 的 `countTokens` → 上一拍 occupancy(usage) → `estimateMessagesTokens`。
-- pre_call cache 缺席：occupancy = `inputTokens`。post_call：三类相加。
-- 手动 `/compact` 仍不过 token 闸。
+- The bar's percentage numerator = **context occupancy** (one formula shared by TUI and Web).
+- Before every `step`, the proactive gate compares occupancy against `floor(0.95 × contextWindow)` (or an explicit threshold).
+- Occupancy priority: this beat's finite, >0 `countTokens` → previous-beat occupancy(usage) → `estimateMessagesTokens`.
+- pre_call with cache fields absent: occupancy = `inputTokens`. post_call: the three token classes are summed.
+- Manual `/compact` still does not pass through the token gate.
 
 ## Does not
 
-- 改策略预算窗口缺省或 95% 公式。
-- 用供应商 1M 当分母。
-- 改 window / full_summary 压缩器。
-- 用 chars/N 填 trace 或 `lastUsage`。
-- 把 countTokens 总量再加 cache 字段。
+- Change the policy budget window default or the 95% formula.
+- Use the vendor's 1M window as the denominator.
+- Change the window / full_summary compactors.
+- Fill trace or `lastUsage` with chars/N estimates.
+- Add cache fields on top of a countTokens total that already includes them.
 
 ## Contract
 
-- EXIT：缺 `countTokens` / throw / 非有限或 ≤0 → 本拍无实测，不得收成 `below_token_threshold`；继续上一拍 occupancy，再估算。
-- empty：无实测且估算低于阈值 → noop。
-- overflow：occupancy 高于阈值（即使估算低于）→ 不得 noop。
-- concurrent：本拍测量与上一拍不一致时用本拍。
-- 无 `onStream` 可不打显示用 countTokens；闸仍走上一拍 → 估算。
-- 闸探针口径：本拍 `countTokens` 只测闸所见 messages（不含 system/tools）；显示 pre_call 拍测 system+tools+messages。同拍两数之差由上一拍 API usage 进链补合（一拍滞后，非永久分叉），此为登记口径。
+- EXIT: missing `countTokens` / throw / non-finite or ≤0 → this beat has no measurement; must not collapse into `below_token_threshold`; fall through to previous-beat occupancy, then estimation.
+- empty: no measurement and the estimate is below the threshold → noop.
+- overflow: occupancy above the threshold (even when the estimate is below) → must not noop.
+- concurrent: when this beat's measurement disagrees with the previous beat's, this beat wins.
+- Without `onStream` the display may skip countTokens; the gate still falls through previous beat → estimation.
+- Gate probe scope: this beat's `countTokens` measures only the messages the gate sees (excluding system/tools); the display's pre_call beat measures system+tools+messages. The same-beat gap between the two numbers is stitched back by the previous beat's API usage entering the chain (one-beat lag, never a permanent fork) — this is the registered accounting.
 
-依据：ADR-0118；ADR-0100；ADR-0008 D6 显示半边。
+Basis: ADR-0118; ADR-0100; ADR-0008 D6 display half.
