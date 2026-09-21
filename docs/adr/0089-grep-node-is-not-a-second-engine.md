@@ -1,23 +1,23 @@
-# 0089. grep Node 降级不是第二台 ripgrep
+# 0089. The Node grep fallback is not a second ripgrep
 
 Date: 2026-09-13
 Status: accepted
 
 ## Context
 
-ADR-0004 规定 grep：ripgrep 子进程优先，ENOENT 则 Node fallback。`feat/aci-grep-surface` 把「自带 rg 起不来仍要能搜」读成「JS `RegExp` 必须实现与 rg 相同的命中集」，并用门禁 fuzz `DIVERGE=0`（甚至 `--engine=auto`）当验收。两套形式语言没有同一判据；测错函数不能证明生产 handler。
+ADR-0004 defines grep as: ripgrep subprocess first, Node fallback on ENOENT. `feat/aci-grep-surface` read "search must still work when the bundled rg won't start" as "the JS `RegExp` must reproduce rg's exact hit set", and made a gate fuzz `DIVERGE=0` (even `--engine=auto`) the acceptance criterion. Two formal languages share no common criterion; testing the wrong function cannot prove the production handler.
 
 ## Decision
 
-**有可用 rg 时，匹配只出 rg，不经 JS 再滤。** 无 rg（对该二进制 ENOENT / 无法执行）时，Node 只做遍历 + 当前 `RegExp` 编得过的 pattern，调用仍成功。允许两条路命中集不同。Node **不**模仿 rg 默认引擎拒绝集。发布门是 `createGrepTool` handler，不是方言对齐 fuzz。禁止为凑同判去改 rg 引擎开关。落点不在本 ADR（ADR-0088）。
+**When rg is usable, matching comes only from rg, never re-filtered in JS.** Without rg (ENOENT for that binary / not executable), Node does only traversal plus whatever patterns the current `RegExp` can compile, and the call still succeeds. The two paths may return different hit sets. Node does **not** imitate rg's default-engine rejection set. The release gate is the `createGrepTool` handler, not a dialect-alignment fuzz. Flipping rg engine flags to force a shared criterion is prohibited. The landing point is not in this ADR (ADR-0088).
 
 ## Why not
 
-**Why not Node 全语义对齐 rg：** 没有可维护的同构；fuzz 绿在门禁上会假过。
+**Why not full rg semantic alignment in Node:** there is no maintainable isomorphism; a green fuzz in the gate is a false pass.
 
-**Why not 无 rg 就拒绝调用：** 无自带/无 PATH rg 的机器仍要能搜（操作员已选）。
+**Why not refuse the call when rg is absent:** machines without a bundled or PATH rg still need to search (the operator has chosen this).
 
 ## Consequences
 
-- (+) 验收对象回到生产 handler。
-- (−) 无 rg 档 lookaround 等可能比 rg 更宽；文档与测试必须当特性，不当漏测。
+- (+) Acceptance returns to the production handler.
+- (−) In the no-rg tier, lookarounds and the like may be broader than rg; docs and tests must treat this as a feature, not a missed failure.

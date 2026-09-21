@@ -1,6 +1,6 @@
-# 0094. 运行时 EnvLoader 单源;wire model = models[].id;API 错只进 viewport
+# 0094. Single runtime EnvLoader source; wire model = models[].id; API errors only in the viewport
 
 Date: 2026-09-14
 Status: accepted
 
-Amends ADR-0093. `settings.llm.model` 仍是路由 ID `provider/model`，只用来查注册表（baseUrl / apiKeyEnv / headers）和 picker。SDK 请求的 `model` 是 `models[].id`（路由里第一个 `/` 之后的原文）；provider `id` 不上 wire。网关若要前缀，前缀写在模型名里，不由装配层拼接。运行时 LLM env 只由一份 EnvLoader 持有（TUI 与 serve 同挂）；hub 禁止构造期 `overrideEnv` 快照，thinking 覆盖走同一 `createAdapterFromEnv`，不得第二套 client 工厂。供应商/API 失败对人画在对话流（薄外壳 `API error (status):` + 原文），不追加进 session transcript；`StopReason` / `protocolError` 不当 UX 文案。harness 控制流 envelope（如 LOOP_DETECTED）仍进权威 messages 喂模型。
+Amends ADR-0093. `settings.llm.model` remains the routing ID `provider/model`, used only for registry lookup (baseUrl / apiKeyEnv / headers) and the picker. The `model` on SDK requests is `models[].id` (the raw text after the first `/` in the routing ID); the provider `id` never goes on the wire. If a gateway needs a prefix, the prefix is written into the model name, not stitched together by the assembly layer. Runtime LLM env is held by one EnvLoader (mounted identically by TUI and serve); the hub must not snapshot `overrideEnv` at construction; thinking overrides go through the same `createAdapterFromEnv` — no second client factory. Vendor/API failures are drawn for the human in the conversation stream (thin shell `API error (status):` + verbatim message), not appended to the session transcript; `StopReason` / `protocolError` are not UX copy. Harness control-flow envelopes (e.g. LOOP_DETECTED) still enter the authoritative messages fed to the model.

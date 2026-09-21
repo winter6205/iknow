@@ -1,13 +1,13 @@
-# 0046. todo 账本可 replace；旧文件留快照；换表不灌 messages
+# 0046. The todo ledger may be replaced; old files stay as snapshots; replacing the table does not feed messages
 
 Date: 2026-09-06
 Status: accepted
 
-主会话 `todo_write` 是可修订的任务清单，不是 Plan Mode、也不是图上的管线。允许开跑前写一版全局步骤；任务变了用 **replace** 写出新的现行 `todos.md`，旧文件留在同一会话目录当快照。replace 当跳不把新列表追加进 `messages`（tool call 里已有）；后续回合的全局观仍只靠状态栏投影现行未勾项（ADR-0028）。
+The main session's `todo_write` is a revisable task list — not Plan Mode, and not a pipeline on the graph. Writing one global set of steps before starting is allowed; when tasks change, **replace** writes a new current `todos.md`, and the old file stays in the same session directory as a snapshot. A replace-as-jump does not append the new list into `messages` (the tool call already carries it); later turns keep their global view solely via the status bar projecting the current unchecked items (ADR-0028).
 
 ## Why not
 
-- **Plan Mode 相位**：只读写计划再切执行。否决的是相位，不是「先有一张能改的清单」。
-- **同一文件纯追加、旧 `- [ ]` 仍开着**：两套待办并存，全局观碎掉。
-- **覆盖并丢掉旧文件**：历史不可查。
-- **把 todo 并进 `run_graph`**：默认 chat 的轻规划不该依赖图 overlay。Dynamic Pipeline / replan 另案，挂在图上。
+- **A Plan Mode phase**: plan read/write first, then flip to execution. What is rejected is the phase, not "having an editable list to begin with".
+- **Pure append to the same file, old `- [ ]` lines left open**: two todo sets coexist and the global view shatters.
+- **Overwrite and lose the old file**: history becomes unrecoverable.
+- **Fold todos into `run_graph`**: light planning in default chat should not depend on the graph overlay. Dynamic Pipeline / replan is a separate matter, hung on the graph.

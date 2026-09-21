@@ -1,25 +1,25 @@
-# 0044. 记忆正文不再进入 system — promote 只服务 GC
+# 0044. Memory bodies never enter system — promote serves only GC
 
 Date: 2026-09-05
 Status: accepted
 
 ## Context
 
-ADR-0009 D3 规定：记忆默认走低信任通道（`memory_recall` / `tool_result`）；跨 ≥2 个不同 session 召回后，正文可以装进 `system` 的 promote 段。ADR-0034 D4 把这段装配与 `autoExtract === true` 同闸。结果是「今天正在做的题」只要被两个会话翻过，就会变成下一场的常驻说明书。高信任位应只留在人写的 `AGENTS.md`。`memory_recall` 合同是纯读，生产路径并未调用 `recordRecall`，所以现网这段多半是空的；留下装配等于以后谁把计数接上，枪就响。
+ADR-0009 D3 established: memories default to the low-trust channel (`memory_recall` / `tool_result`); after being recalled across ≥2 distinct sessions, a body may be assembled into system's promote section. ADR-0034 D4 gated that assembly behind `autoExtract === true`. The result: whatever problem you are working on today, once two sessions have paged through it, becomes next session's permanent operating manual. High-trust placement should be reserved for human-written `AGENTS.md`. The `memory_recall` contract is read-only and production paths never call `recordRecall`, so in practice this section is mostly empty today; keeping the assembly means the moment anyone wires up the counter, it fires.
 
 ## Decision
 
-1. **任何 provenance 的记忆 body 都不得进入 `system`。** 手写、`source: auto`、`source: dream` 同一条。装配不再拼 promote 段。
-2. **`usage.json` / `eligibleForPromote`（≥2 个不同 session）留下，只给 `memory_gc` 效用。** 不把 `recordRecall` 接到 `memory_recall`（保持纯读）。
-3. **prefetch 不得再按 promote 资格排除 id。** system 已无对应段，排除会让这些条从用户侧也消失。
-4. 本票不决定 catalog 是否仍进 `system`，也不改 prefetch 载荷形状。
+1. **No memory body of any provenance may enter `system`.** Hand-written, `source: auto`, `source: dream` — one rule. Assembly no longer builds a promote section.
+2. **Keep `usage.json` / `eligibleForPromote` (≥2 distinct sessions), but only for `memory_gc`'s utility.** Do not wire `recordRecall` into `memory_recall` (it stays read-only).
+3. **prefetch must no longer exclude ids by promote eligibility.** System has no corresponding section anymore, so excluding would make those entries disappear from the user side too.
+4. This ADR does not decide whether the catalog still enters `system`, and does not change the prefetch payload shape.
 
 ## Consequences
 
-- **正面 / Applied:** 召回次数不再买 system 席位；常驻说明书只在 `AGENTS.md`。修订 ADR-0009 D3 的 promote-in-system 条款与 ADR-0034 D4。
-- **负面 / Trade-offs:** 记忆库失去「核实后当说明书」的通道。要把某条变成规矩，须写入 `AGENTS.md`。
+- **Positive / Applied:** recall counts no longer buy system seats; the permanent manual lives only in `AGENTS.md`. Amends ADR-0009 D3's promote-in-system clause and ADR-0034 D4.
+- **Negative / Trade-offs:** the memory store loses its "vet it, then run on it as a manual" path. To make a memory into a rule, write it into `AGENTS.md`.
 
 ## Why not
 
-- **只禁 `source: auto|dream`，手写仍可 promote：** `memory_save` 记下的「今天的题」仍能买席位，与 destination 冲突。
-- **装配保持现状（现网多半为空）：** 合同仍允许开火；与「不因 recall 进入下一会话 system」冲突。
+- **Ban only `source: auto|dream`, keep hand-written promotable:** whatever `memory_save` recorded of "today's problem" could still buy a system seat, conflicting with the destination.
+- **Leave the assembly as is (it is mostly empty in practice):** the contract would still permit it to fire; conflicts with "recall must not enter the next session's system".

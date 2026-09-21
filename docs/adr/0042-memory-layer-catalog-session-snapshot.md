@@ -1,36 +1,36 @@
-# 0042. memory_layer catalog 会话级快照 — 开局取一次、会话内冻结
+# 0042. memory_layer catalog session-level snapshot — taken once at start, frozen for the session
 
 Date: 2026-09-04
 Status: accepted
 
-> **Amendment 2026-09-05**（ADR-0044）：promote 段不再装配进 `system`，因此不再是本 ADR 的快照住户。catalog（若仍装）与 git 块仍按本票快照。
+> **Amendment 2026-09-05** (ADR-0044): the promote section is no longer assembled into `system`, so it is no longer a resident of this ADR's snapshot. The catalog (if still assembled) and the git block still snapshot per this ADR.
 
-> **Amendment 2026-09-11**（memory-toggle-live）：快照前提是「输入构造上不可能在会话内变」，但 TUI `/memory` 面板把 autoExtract 变成了宿主可翻转的 live flag——翻转后快照继续输出旧开关态的 catalog，违背装配层既有契约（`autoExtract === false` → 不注入 catalog）。修订：**显式用户开关翻转是快照的受控例外**——TUI 表面的 resolver 按 flag 值分档快照（每值各冻结一份，无翻转时字节稳定不变），宿主在 commit 时经 `invalidateMemorySystem` 作废快照，翻转在**下一轮**生效；一次性 KV 缓存失效是该例外的已接受代价。仅限显式用户动作，auto-memory 落盘仍不触发失效（D1 原裁决不变）。
+> **Amendment 2026-09-11** (memory-toggle-live): the snapshot's premise is that its inputs "cannot change within the session by construction", but the TUI `/memory` panel turned autoExtract into a host-flippable live flag — after a flip, the snapshot keeps emitting the catalog for the old flag state, breaking the assembly layer's existing contract (`autoExtract === false` → no catalog injected). Revision: **an explicit user toggle flip is a controlled exception to the snapshot** — the resolver behind the TUI surface snapshots per flag value (one frozen copy per value; byte-stable when nothing flips), and the host invalidates the snapshot at commit time via `invalidateMemorySystem`, so the flip takes effect on the **next run**; the one-off KV cache invalidation is the accepted cost of this exception. Explicit user actions only: auto-memory writes still do not trigger invalidation (the original D1 ruling stands).
 
 ## Context
 
-wayfinder 图「模型面前缀分层与缓存兑现」G1 票（前缀稳定边界）盘问中段裁决。G1 采用从严资格线：一段内容要有资格留在前缀区（`tools` + `system`），其输入来源必须**构造上**不可能在会话内变——「实测没变」不算数。按线盘点，`memory_layer` 中不合格的只有 catalog 段（[ADR-0034](0034-auto-memory-catalog-prefetch-channels.md) D1 允许进 system 的 live titles/hooks + 纪律句）：它经 `memory/refresh.ts` 的 mtime 门控读取，auto-memory 落盘（ADR-0031，completed 闸后异步、成簇写入）当下一次装配就变——R4 实测每会话抖 1~3 次，每次废掉 system 之后**整条 messages history** 的被动缓存。ADR-0034 D2 已把重载荷（bodies / prefetch）放在 user 消息侧、不碰前缀，本票只处理 catalog。
+Ruling made mid-deliberation on ticket G1 (prefix stability boundary) of the wayfinder map "model-facing prefix layering and cache realization". G1 adopts a strict eligibility line: for content to qualify for the prefix region (`tools` + `system`), its input source must be **constructionally** incapable of changing within a session — "measured not to have changed" doesn't count. Auditing against that line, the only unqualified part of `memory_layer` is the catalog section (the live titles/hooks plus discipline sentence that [ADR-0034](0034-auto-memory-catalog-prefetch-channels.md) D1 allows into system): it is read through `memory/refresh.ts`'s mtime gating, and an auto-memory write (ADR-0031, asynchronous after the completed gate, arriving in clusters) changes it on the very next assembly — R4 measured 1–3 wobbles per session, each invalidating the passive cache of the **entire messages history** after system. ADR-0034 D2 already moved the heavy payloads (bodies / prefetch) to the user-message side, off the prefix; this ADR deals only with the catalog.
 
 ## Decision
 
-1. **catalog 快照化**：`memory_layer` 中的 catalog 段（+ promote 段同层）在会话**首次装配时取一次快照，此后会话内冻结**——实现语义从「mtime 比对缓存（变了会刷新）」改为「快照（永不再算）」。新落盘的记忆对**当前会话**的 catalog 不可见，下个会话才入索引；这是已接受代价，且对 catalog 影响极小（模型刚写完的记忆不需要从索引里再看见）。
-2. **bodies / prefetch 通道不变**：维持 ADR-0034 D2（prefetch 挂 user 消息、标 advisory），本票不动它们。
-3. **既有 channel / 信任语义不变**：ADR-0034 D1 的「catalog in system、bodies not」、un-promoted body 不进 system、英文纪律句均原样保留；变的只有 catalog 内容的**新鲜度时机**（每落盘刷新 → 会话级冻结）。
-4. 冻结后，`memory_layer` 成为会话级常量段，通过 G1 从严资格线；「auto-memory 写入时机与缓存边界对齐」这一悬置问题随之消解（写入时机不再影响缓存）。
+1. **Snapshot the catalog**: the catalog section inside `memory_layer` (plus the promote section at the same layer) is snapshotted **once at the session's first assembly, then frozen for the session** — the implementation semantics change from "mtime-compared cache (refreshes on change)" to "snapshot (never recomputed)". Memories written during the session are invisible to the **current session's** catalog and enter the index next session; this is an accepted cost with minimal impact for a catalog (a memory the model just wrote doesn't need to re-see itself via the index).
+2. **bodies / prefetch channels unchanged**: ADR-0034 D2 stands (prefetch attaches to user messages, marked advisory); this ADR does not touch them.
+3. **Existing channel / trust semantics unchanged**: ADR-0034 D1's "catalog in system, bodies not", the rule that un-promoted bodies never enter system, and the English discipline sentence are all kept as-is; the only thing that changes is the **freshness timing** of catalog content (refresh on every write → frozen per session).
+4. Once frozen, `memory_layer` becomes a session-level constant section and passes G1's strict eligibility line; the open question "aligning auto-memory write timing with the cache boundary" dissolves (write timing no longer affects the cache).
 
 ## Why not
 
-- **catalog 也搬出 system（并进 user 消息侧与 prefetch 同槽）**：要动 ADR-0034 D1 的「catalog in system」通道设计，改动面大；而快照化以一处时机改动即达目的。
-- **维持现状（mtime 门控、落盘即刷新）**：每会话 1~3 次全量 messages 缓存作废；「写入要不要节流」会变成新的无休止权衡（需要节流才保缓存，节流又伤记忆时效）。
-- **放宽资格线容忍抖动**：与 G1 从严线（构造上不可能变才合格）及 destination「不靠个人判断」冲突；「容忍几次」无机械答案。
+- **Move the catalog out of system too (merge into the user-message side, same slot as prefetch)**: would disturb ADR-0034 D1's "catalog in system" channel design — a large blast radius; snapshotting reaches the goal with a single timing change.
+- **Keep the status quo (mtime gating, refresh on every write)**: 1–3 full messages-cache invalidations per session; "should writes be throttled" becomes a new endless trade-off (throttling preserves the cache but hurts memory freshness).
+- **Relax the eligibility line to tolerate wobble**: conflicts with G1's strict line (only constructional immutability qualifies) and the destination "don't rely on individual judgment"; "how many wobbles to tolerate" has no mechanical answer.
 
 ## Consequences
 
-- **正面 / Applied:** R4 抖动表中「system 任一段变（记忆落盘）→ 全部 messages 作废，每会话 1~3 次」整行消除；system 侧剩余不合格段仅 `<mcp_tools_overview>`（另裁）。
-- **负面 / Trade-offs:** 长会话中途落盘的记忆在当前会话的 catalog / promote 段不可见（`memory_recall` 仍可实时召回， bodies 走 prefetch 亦不受影响）——损失仅限「模型对自采记忆的目录级可见性」，被判定可接受。
+- **Positive / Applied:** the row in the R4 wobble table — "any system section changes (memory written) → all messages invalidated, 1–3 times per session" — is eliminated; the only remaining unqualified system-side section is `<mcp_tools_overview>` (ruled separately).
+- **Negative / Trade-offs:** memories written mid-way through a long session are invisible to the current session's catalog / promote sections (`memory_recall` can still fetch them in real time, and bodies via prefetch are unaffected) — the loss is limited to "the model's catalog-level visibility of its own auto-collected memories", judged acceptable.
 
 ## Evidence pointers
 
-- R4 实测（wayfinder 图「模型面前缀分层与缓存兑现」）：`memory/refresh.ts` mtime 门控 + 记忆化机制；记忆落盘成簇（08-28 16:49 / 17:02、09-02 22:46 等）。
-- ADR-0009 D3 / D6；ADR-0031（异步抽取与写入成簇）；ADR-0034 D1 / D2。
-- D1（本图）：git 块「开局快照、会话期间不刷新」同款先例，代价结构相同。
+- R4 measurement (wayfinder map "model-facing prefix layering and cache realization"): `memory/refresh.ts` mtime gating + memoization mechanics; auto-memory writes arrive in clusters (08-28 16:49 / 17:02, 09-02 22:46, etc.).
+- ADR-0009 D3 / D6; ADR-0031 (async extraction, clustered writes); ADR-0034 D1 / D2.
+- D1 (of the same map): the git block's precedent — "snapshot at start, never refresh during the session" — same cost structure.

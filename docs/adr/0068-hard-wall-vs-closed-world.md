@@ -1,17 +1,17 @@
-# 0068. hard-wall 相对闭世界的层职责
+# 0068. Layer responsibilities: hard-wall vs the closed world
 
 Date: 2026-09-08
 
 Status: accepted
 
-> **Amendment 2026-09-09**（ADR-0074）：`/tmp` 仍不是交付落点，可写集仍是 `taskRoot` + `/tmp`。寿命改为每身份宿主垫底、跟会话文件夹走，不再是一次 bash 一块空 tmpfs。`write_file` / `edit_file` 可写当前身份的 `/tmp`。
+> **Amendment 2026-09-09** (ADR-0074): `/tmp` is still not a delivery landing spot; the writable set is still `taskRoot` + `/tmp`. The lifetime changes to a per-identity host-backed dir following the session folder, instead of a fresh empty tmpfs per bash call. `write_file` / `edit_file` may write the current identity's `/tmp`.
 
-> **Amendment 2026-09-13**（ADR-0092）：闭世界围栏不再是**默认**姿态。默认改为全局档（宿主真路径可读可写，home 不藏）；围栏仍跑（网络 / env / rlimit / FS 沙箱），hard-wall 不变，闭世界退为工作区档（后做）的可选姿态。
+> **Amendment 2026-09-13** (ADR-0092): the closed-world fence is no longer the **default** posture. The default becomes the global tier (real host paths readable and writable, home not hidden); the fence still runs (network / env / rlimit / FS sandbox), the hard-wall is unchanged, and the closed world retreats to an optional posture of the workspace tier (to come later).
 
-闭世界围栏（ADR-0037 §9）是 bash 的唯一物理沙箱。（默认 FS 姿态 amended by ADR-0092：默认全局档；围栏仍跑，hard-wall 不变。）hard-wall 只做 spawn 前意图过滤：围栏看不见或拦不住的意图（对可写根的毁灭性 argv、命令替换、敏感路径、fork-bomb）。换行不是危险模式（只作分段符）；`"format"` 不得子串匹配。这取代用语法黑名单模拟沙箱的补丁（含「换行即危险」）。
+The closed-world fence (ADR-0037 §9) is bash's only physical sandbox. (Default FS posture amended by ADR-0092: default global tier; the fence still runs, hard-wall unchanged.) The hard-wall does only pre-spawn intent filtering: intents the fence cannot see or cannot stop (destructive argv against the writable root, command substitution, sensitive paths, fork bombs). A newline is not a danger pattern (it is only a segment separator); `"format"` must not be substring-matched. This replaces the patches that simulated a sandbox with a syntax blacklist (including "newline equals danger").
 
-耐久交付只落活 `taskRoot`。bash `/tmp` 是围栏临时面，不是产品交付落点。（默认 FS 姿态 amended by ADR-0092：默认全局档，可写集不再是 `taskRoot` + `/tmp`；会话 tmp 用宿主路径，不 bind 成 `/tmp`。）子代理与父会话同一写根（ADR-0040），不另开产物目录。`spawn_subagent` 的 `sandboxRoot`：父根下词法包含与越界分家；尚未存在不得报 outside。
+Durable deliverables land only in the live `taskRoot`. The bash `/tmp` is the fence's transient surface, not a product delivery landing spot. (Default FS posture amended by ADR-0092: default global tier, the writable set is no longer `taskRoot` + `/tmp`; the session tmp uses a host path and is no longer bound as `/tmp`.) Subagents share the parent session's write root (ADR-0040); no separate artifact directory. For `spawn_subagent`'s `sandboxRoot`: lexical containment under the parent root and boundary crossing are separate checks; "does not exist yet" must not be reported as outside.
 
-**Why not 只放宽换行：** 可写集分裂与错误分类仍在，下一枪仍会误杀。
+**Why not only loosen the newline rule:** the writable-set split and the misclassification would remain, and the next shot would still mis-kill.
 
-**Why not 语义 shell AST：** 闭世界已覆盖主机打不穿；AST 是另一扇门，本 ADR 不做。
+**Why not a semantic shell AST:** the closed world already covers what the host cannot punch through; an AST is a different door, out of scope for this ADR.

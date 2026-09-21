@@ -3,78 +3,78 @@
 Date: 2026-07-29
 Status: deprecated
 
-iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主模型：把 `NINE_ROUTER_KEY`（LLM/embedding 共用 key 变量名）、`m3-combo`（9router 路由 ID）焊进 `src/config/env.ts` 作为代码默认。`.env.local` 只需持有密钥值本身，不再需要重复声明 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` / `IKNOW_EMBEDDING_API_KEY_ENV`。
+iknow pinned 9router as the sole LLM/embedding provider plus m3-combo as the primary model: `NINE_ROUTER_KEY` (the key variable name shared by LLM and embedding) and `m3-combo` (a 9router routing ID) were hard-wired into `src/config/env.ts` as code defaults. `.env.local` only needed to hold the secret value itself, no longer re-declaring `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` / `IKNOW_EMBEDDING_API_KEY_ENV`.
 
 **Why not B/C:**
 
-- _Pure transport (env.ts 0 默认，所有 9router 配置全靠 .env.local + .env.example)_：贴合"env 只传 local"心智，但项目栈完全不进 git，新 clone 必须先建 `.env.local`，且 git 历史无法回答"iknow 主打哪个 model"——对一个固定打 9router 的产品而言代价过高。
-- _每台机器都覆盖（不设默认，依赖 .env.local）_：等于 (1) 的退化版，重复 .env.example 的负担且无任何收益。
+- _Pure transport (zero defaults in env.ts; all 9router configuration via .env.local + .env.example)_: fits the "env.ts only transports local overrides" mental model, but the project stack would live entirely outside git — a fresh clone must first create `.env.local`, and git history cannot answer "which model is iknow's primary". Too costly for a product committed to 9router.
+- _Per-machine override (no defaults, rely on .env.local)_: a degenerate version of (1); duplicates the burden of .env.example with no benefit.
 
 **Consequences / Trade-offs:**
 
-- _Applied:_ drift 根因（同一变量在 env.ts 默认 + .env.local 双源）消失；新 clone 填 key 即跑；`loadIknowEnv` 默认链与 `.env.local` 真值对齐；活测试断言的 key 名同步成 `NINE_ROUTER_KEY`。
-- _Trade-offs:_ 切换 model 需改代码（env.ts 默认），不再纯靠 `.env.local` 切换——可接受，因为 9router 路由切换属于项目级栈决策，git history 留痕比 .env.local 更稳。
+- _Applied:_ root cause of drift eliminated (the same variable sourced from both env.ts default and .env.local); a fresh clone runs as soon as the key is filled in; `loadIknowEnv`'s default chain and `.env.local`'s real values are aligned; key names asserted by live tests synced to `NINE_ROUTER_KEY`.
+- _Trade-offs:_ switching models now requires a code change (the env.ts default) instead of a pure `.env.local` switch — acceptable, because 9router routing changes are a project-level stack decision, and git history records them more reliably than `.env.local`.
 
 **Evidence pointers:**
 
-- env.ts 默认值 drift 导致 `NINE_ROUTER_API_KEY` (默认) vs `NINE_ROUTER_KEY` (.env.local) 的两源歧义，本次 commit `3d4da40` 统一。
-- 全套 vitest (25 files / 233 tests) 通过；纯代码默认探针（空 cwd 无 .env.local）输出 `m3-combo` / `NINE_ROUTER_KEY` ✓。
+- env.ts default drift produced a two-source ambiguity between `NINE_ROUTER_API_KEY` (default) and `NINE_ROUTER_KEY` (.env.local); unified by commit `3d4da40`.
+- Full vitest suite (25 files / 233 tests) passed; a pure-code-default probe (empty cwd, no .env.local) outputs `m3-combo` / `NINE_ROUTER_KEY` ✓.
 
 ---
 
-## Update (2026-08-05): key 变量名默认 NINE_ROUTER_KEY -> ANTHROPIC_AUTH_TOKEN
+## Update (2026-08-05): key variable name default NINE_ROUTER_KEY -> ANTHROPIC_AUTH_TOKEN
 
-本 ADR 原决策「`NINE_ROUTER_KEY` 焊进 env.ts 作 key 变量名默认」的**现态部分**已修正：`src/config/env.ts` 的 fallback 从 `NINE_ROUTER_KEY` 改为 `ANTHROPIC_AUTH_TOKEN`，对齐实际部署（部署环境只有 `ANTHROPIC_AUTH_TOKEN`，无 `NINE_ROUTER_KEY`）+ 通用生态命名。
+The **current-state part** of this ADR's original decision ("bake `NINE_ROUTER_KEY` into env.ts as the key variable name default") has been corrected: the fallback in `src/config/env.ts` changed from `NINE_ROUTER_KEY` to `ANTHROPIC_AUTH_TOKEN`, aligning with the actual deployment (the deployment environment has only `ANTHROPIC_AUTH_TOKEN`, no `NINE_ROUTER_KEY`) and with general-ecosystem naming.
 
-**为何修正（不是推翻整条 ADR）：** ADR-0001 的核心主张 -- "key 变量名 + 主模型作为代码默认焊进 env.ts，`.env.local` 只持值" -- 依然成立并保留。被修正的只是"具体变量名选哪个"这一可逆细节：`NINE_ROUTER_KEY` 是 9router 专属命名，对不接触 9router 历史的人/项目是噪声（探针变量名漂移即其一）；`ANTHROPIC_AUTH_TOKEN` 是通用生态名，新 clone 配一个变量即跑。
+**Why corrected (not a repudiation of the whole ADR):** ADR-0001's core claim — "key variable name + primary model baked into env.ts as code defaults; `.env.local` holds only values" — still holds and is retained. Only the reversible detail of which variable name to pick was corrected: `NINE_ROUTER_KEY` is 9router-specific naming and is noise for people/projects untouched by 9router history (the probe variable-name drift above is one instance); `ANTHROPIC_AUTH_TOKEN` is a general-ecosystem name, so a fresh clone runs with one variable configured.
 
-**未变部分：**
+**Unchanged parts:**
 
-- `m3-combo` 作为主模型默认 -- 保留。
-- `.env.local` 只持值、`IKNOW_LLM_API_KEY_ENV` 可覆盖变量名 -- 保留（机制不变，只是默认值变了，原 `.env.local` 里冗余的 `IKNOW_LLM_API_KEY_ENV=ANTHROPIC_AUTH_TOKEN` 行可删）。
-- `process.env > .env.local > .env` 优先级 -- 保留。
+- `m3-combo` as the primary model default — retained.
+- `.env.local` holds values only; `IKNOW_LLM_API_KEY_ENV` can still override the variable name — retained (mechanism unchanged, only the default value moved; the now-redundant `IKNOW_LLM_API_KEY_ENV=ANTHROPIC_AUTH_TOKEN` line in the original `.env.local` may be deleted).
+- `process.env > .env.local > .env` precedence — retained.
 
-**关联：** 历史叙事中的 `NINE_ROUTER_KEY` / `NINE_ROUTER_API_KEY` 字面值在 CHANGELOG / handoff / plans 等历史记录中保留不擦（git 可追溯性）。
-
----
-
-## Update (2026-08-06): Status → deprecated
-
-本 ADR 状态标记为 `deprecated`（非 `superseded by NNNN`——它未被单一新 ADR 取代）。原因：原始决策的 **embedding 臂已随 023 归档**（harness 为通用 agent，无向量检索），**key 变量名默认已由 2026-08-05 Update 段修正为 `ANTHROPIC_AUTH_TOKEN`**。核心机制（「项目栈默认焊进 `env.ts`，`.env.local` 只持值」）仍有效，故保留文件、不删不归档；`docs/archive/024-archive-memory-assistant-era/` 记录了同批归档。读取本 ADR 时以 2026-08-05 Update 段的现态为准。
+**Related:** the literal values `NINE_ROUTER_KEY` / `NINE_ROUTER_API_KEY` in historical narrative are preserved un-erased in historical records such as CHANGELOG / handoff / plans (git traceability).
 
 ---
 
-## Update (2026-08-12): 模型默认条款 supersede — settings.llm.model 可配置，移除 hardcoded m3-combo
+## Update (2026-08-06): Status -> deprecated
 
-本 ADR 原决策「`m3-combo` 作为主模型焊进 `src/config/env.ts` 代码默认」的**现态部分**已由 settings 机制（第二阶段）supersede：模型默认从「焊死」改为「可配置 + fail-fast」——`src/config/settings.ts` 的 `IknowSettingsLlm` 新增 `model?: string` 与 `fallback?: string[]` 字段，`src/config/env.ts` 的 model 链改为 `env > settings`，**无任何代码默认**。
-
-**supersede 边界（其余条款保留）：**
-
-- **移除 hardcoded `m3-combo`**：`env.ts` 不再回退 `"m3-combo"`。
-- **未配置 model → fail-fast（typed error）**：`IKNOW_LLM_MODEL` 与 `settings.llm.model` 均缺席时，env loader 抛「iknow: no LLM model configured…」，不再静默走任何默认。
-- **fallback 由用户自配**：新增 `settings.llm.fallback?: string[]`（用户声明模型 fallback 路由 ID 列表），代码不预置任何 fallback；`env.llm.fallback` 未配时 = `[]`。
-- **env 仍最高**：`IKNOW_LLM_MODEL`（env）优先于 `settings.llm.model`；fallback 仅来自 settings。
-- **未变部分**：key 变量名默认 `ANTHROPIC_AUTH_TOKEN`、provider/baseUrl `http://localhost:20128/v1` 仍焊进 env.ts 代码默认；`.env.local` 只持值、`IKNOW_LLM_API_KEY_ENV` 可覆盖变量名 —— 保留。
-
-**关联：** settings 机制第一阶段。
+This ADR is marked `deprecated` (not `superseded by NNNN` — no single new ADR replaces it). Reasons: the original decision's **embedding arm was archived along with 023** (the harness is a general agent with no vector retrieval), and the **key variable name default was corrected to `ANTHROPIC_AUTH_TOKEN` by the 2026-08-05 Update section**. The core mechanism ("project-stack defaults baked into `env.ts`; `.env.local` holds values only") remains valid, so the file is kept, neither deleted nor archived; `docs/archive/024-archive-memory-assistant-era/` records the same archival batch. When reading this ADR, take the 2026-08-05 Update section as the current state.
 
 ---
 
-## Update (2026-08-12): 后续条款 supersede — ADR-0015 settings 单承载收敛
+## Update (2026-08-12): model-default clause superseded — settings.llm.model configurable, hardcoded m3-combo removed
 
-本 ADR 剩余「项目栈默认焊进 `env.ts`」条款中，**key 变量名间接寻址 + model 的 env 覆盖机制**已被 `docs/adr/0015-llm-config-settings-single-source.md`（settings-model-extension Phase 1+2）supersede：LLM 配置收敛到 `settings.json` 单承载。
+The **current-state part** of this ADR's original decision ("bake `m3-combo` into `src/config/env.ts` as the primary model code default") has been superseded by the settings mechanism (phase 2): the model default moves from "hard-wired" to "configurable + fail-fast" — `IknowSettingsLlm` in `src/config/settings.ts` gains `model?: string` and `fallback?: string[]` fields, and the model chain in `src/config/env.ts` becomes `env > settings` with **no code default at all**.
 
-**supersede 边界（本次新增，覆盖上文 2026-08-12 段的部分内容）：**
+**Supersede boundary (other clauses retained):**
 
-- **`apiKeyEnv` 间接寻址退役**：`LlmEnv.apiKeyEnv` 字段已删。key 唯一来源 = `settings.llm.apiKey`（字面值或 `${VAR}` / `$VAR` 占位符），经 `expandPlaceholders` 从 `process.env[VAR]` > `.env.local` > `.env` 解析；不再有「key 变量名」概念。
-- **`IKNOW_LLM_API_KEY_ENV` 机制退役**：不再有覆盖 key 变量名的 env 支（ADR-0001 2026-08-05 Update 段的该条款随之失效）。
-- **`IKNOW_LLM_MODEL` 退役**：上文 2026-08-12 段「env 仍最高：`IKNOW_LLM_MODEL`（env）优先于 `settings.llm.model`」条款失效——`env.ts` 不再读 `IKNOW_LLM_MODEL`，model 唯一来源 = `settings.llm.model` 字面值（缺失 fail-fast）。
-- **`.env.local` 职责收窄**：退化为占位符真值源（`settings.llm.apiKey` 的 `${VAR}` 变量在 `.env.local` 里的值），不再直接当 model / key 变量名的配置口。
+- **Hardcoded `m3-combo` removed**: `env.ts` no longer falls back to `"m3-combo"`.
+- **Unconfigured model -> fail-fast (typed error)**: when both `IKNOW_LLM_MODEL` and `settings.llm.model` are absent, the env loader throws "iknow: no LLM model configured…" instead of silently using any default.
+- **Fallback is user-configured**: new `settings.llm.fallback?: string[]` (user-declared list of fallback routing IDs); no fallback is pre-baked in code; `env.llm.fallback` unset = `[]`.
+- **Env still highest**: `IKNOW_LLM_MODEL` (env) takes precedence over `settings.llm.model`; fallback comes only from settings.
+- **Unchanged parts**: the key variable name default `ANTHROPIC_AUTH_TOKEN` and provider/baseUrl `http://localhost:20128/v1` remain baked into env.ts code defaults; `.env.local` holds values only and `IKNOW_LLM_API_KEY_ENV` can still override the variable name — retained.
 
-**保留条款（未被 0015 supersede）：**
+**Related:** settings mechanism phase 1.
 
-- provider = 9router、baseUrl 代码默认 `http://localhost:20128/v1` 仍焊进 `env.ts`（`IKNOW_LLM_BASE_URL` fallback）。
-- `.env.local` 只持值（占位符真值）；`process.env > .env.local > .env` 优先级对非 LLM 配置字段仍保留。
-- 无默认变量名、无硬编码兜底 model（0015 延续 2026-08-12 段的 fail-fast 纪律）。
+---
 
-**关联：** `docs/adr/0015-llm-config-settings-single-source.md`、`docs/CONTEXT.md` §83。
+## Update (2026-08-12): remaining clauses superseded — convergence onto ADR-0015 settings single source
+
+Among this ADR's remaining "project-stack defaults baked into `env.ts`" clauses, the **key variable name indirection + model env-override mechanism** has been superseded by `docs/adr/0015-llm-config-settings-single-source.md` (settings-model-extension Phase 1+2): LLM configuration converges onto `settings.json` as the single carrier.
+
+**Supersede boundary (new in this section, overwriting parts of the 2026-08-12 section above):**
+
+- **`apiKeyEnv` indirection retired**: the `LlmEnv.apiKeyEnv` field is deleted. The key's only source = `settings.llm.apiKey` (a literal or a `${VAR}` / `$VAR` placeholder), resolved by `expandPlaceholders` from `process.env[VAR]` > `.env.local` > `.env`; the notion of a "key variable name" no longer exists.
+- **`IKNOW_LLM_API_KEY_ENV` mechanism retired**: no env lever remains for overriding the key variable name (the corresponding clause in ADR-0001's 2026-08-05 Update section is void).
+- **`IKNOW_LLM_MODEL` retired**: the clause above ("env still highest: `IKNOW_LLM_MODEL` (env) takes precedence over `settings.llm.model`") is void — `env.ts` no longer reads `IKNOW_LLM_MODEL`; the model's only source = the literal in `settings.llm.model` (fail-fast when missing).
+- **`.env.local` responsibility narrowed**: it degrades to a placeholder-value source (the `.env.local` values for `${VAR}` variables in `settings.llm.apiKey`), no longer a direct configuration entry point for model / key variable name.
+
+**Retained clauses (not superseded by 0015):**
+
+- provider = 9router and the baseUrl code default `http://localhost:20128/v1` remain baked into `env.ts` (`IKNOW_LLM_BASE_URL` fallback).
+- `.env.local` holds values only (placeholder values); the `process.env > .env.local > .env` precedence is retained for non-LLM configuration fields.
+- No default variable names, no hardcoded fallback model (0015 continues the fail-fast discipline of the 2026-08-12 section).
+
+**Related:** `docs/adr/0015-llm-config-settings-single-source.md`, `docs/CONTEXT.md` §83.

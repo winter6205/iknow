@@ -1,11 +1,10 @@
-# 0079. skill() 二次短路；写处境不进 skill 正文
+# 0079. skill() second-call short circuit; write locus stays out of the skill body
 
 Date: 2026-09-10
 Status: accepted
 
-`skill()` 灌的是技能程序，不是写哪。同名再调时，若可见 messages 仍有该名成功全文 `tool_result`，只回短回执、不重装正文；compact 丢掉该条后才再灌。闸只罩 ACI `skill()`，不用只增不减的会话 Set（会和截断窗口打架，也会把已加载集合写进可变会话态）。slash / Web `getSkillBody` 不闸。磁盘 SKILL.md 本会话变了不自动再灌。写处境变化不是再灌理由。
+`skill()` installs the skill program, not where to write. On a same-name re-invocation, if a visible message still carries that name's full-text successful `tool_result`, only a short receipt returns and the body is not reinstalled; only after compaction drops that entry does the body get installed again. The gate covers only the ACI `skill()`; no monotonic session Set is used (it would fight the truncation window and would write the loaded set into mutable session state). Slash / Web `getSkillBody` are not gated. A on-disk SKILL.md that changed within the session is not auto-reinstalled. A change in the write locus is not grounds for reinstall.
 
-写处境的告知面组成在此收窄：去掉 skill 正文 trailer。剩余告知面 = 子代理 worker prior + 改绑后主会话一次（用户消息缝）。回执仍是门禁与 typed 错误。不在写工具成功路径另注写处境段。未绑树时模型可能按 skill 先伸手写一次再看到回执——用一次自洽失败换两条轴不再互绑。
+The composition of the write-locus notification surface narrows here: the skill-body trailer is dropped. Remaining notification surface = subagent worker prior + once in the main session after rebind (the user-message seam). The receipt remains the gate and the typed error. No write-locus segment is appended on the write tool's success path. On an unbound tree the model may reach for a skill and try one write before seeing the receipt — one self-consistent failure buys the two axes no longer binding each other.
 
-**Why not 会话 Set / 写时另注 / 维持三面 trailer：** Set 在 compact 后误禁再灌；写时另注是门禁回执之外的第三份同类信息；挂在 skill 上会把「还要用这个技能」误读成「要重载技能」。
-
+**Why not session Set / annotate-at-write / keep the three-surface trailer:** a Set wrongly bans reinstallation after compaction; annotating at write time is a third copy of the same information beyond the gate receipt; hanging it on the skill invites misreading "I still need this skill" as "reload the skill".

@@ -1,81 +1,82 @@
-# 0040. 子代理身份与按能力派发门禁
+# 0040. Subagent identity and capability-based dispatch gate
 
 Date: 2026-08-31
 
 Status: accepted
 
-> 本 ADR 是对 ADR-0037 §2 子代理条款的补充与收窄。ADR-0037 继续管辖
-> worktree isolation mode 的开关、创建、改绑和失败语义；涉及子代理根归属、
-> 双重 conversationId 与派发门禁时，以本 ADR 为准。
+> This ADR supplements and narrows the subagent clause of ADR-0037 §2. ADR-0037
+> keeps governing the worktree isolation mode's switch, creation, rebind, and failure
+> semantics; for subagent root ownership, the dual conversationId, and the dispatch
+> gate, this ADR prevails.
 
 ## Context
 
-本次核验确认，ADR-0037 §2 已经规定「子代理 spawn 自父会话，跟随父会话改绑后的同一棵树，不触发第二棵树」（`docs/adr/0037-worktree-isolation-on-mutate.md:27-29`）；`docs/CONTEXT.md` 也已有父会话改绑后 spawn 的子代理继承该根、不另建树的描述（`docs/CONTEXT.md:350`）。因此这里不是从零定义 worktree 继承规则，而是把该句未展开的身份、会话标识和门禁边界写成独立合同。
+This verification pass confirmed that ADR-0037 §2 already states "a subagent spawns from the parent session, follows the same tree after the parent's rebind, and does not trigger a second tree" (`docs/adr/0037-worktree-isolation-on-mutate.md:27-29`); `docs/CONTEXT.md` likewise already says a subagent spawned after the parent session rebinds inherits that root without building a new tree (`docs/CONTEXT.md:350`). So this is not defining worktree inheritance from scratch — it writes out, as a standalone contract, the identity, session-identifier, and gate boundaries that sentence left unexpanded.
 
-现有术语已经区分声明工具面与 worker 装配后的实际工具面，且要求二者相等（`docs/CONTEXT.md:98`）。隔离开关 ON 时，若只按 `subagent_type` 角色名判断，catalog 扩展或自定义角色会把真实可写能力与门禁结论分离；若把每个子代理当成独立隔离单元，又会破坏父会话对同一 task worktree 的统一编排。
+Existing terminology already separates the declared tool surface from the worker's actually-assembled tool surface and requires the two to be equal (`docs/CONTEXT.md:98`). With the isolation switch ON, gating by `subagent_type` role name alone would let catalog growth or custom roles detach real write capability from the gate's verdict; treating every subagent as an independent isolation unit would break the parent session's unified orchestration of one task worktree.
 
 ## Decision
 
-### 1. 子代理的身份与根归属
+### 1. Subagent identity and root ownership
 
-子代理身份 = **父会话的执行臂**，不是一个拥有独立工作区的平行会话。它与父会话共享同一棵 task worktree，并继承父会话当前生效根：
+A subagent's identity = **an execution arm of the parent session**, not a parallel session with its own workspace. It shares the parent's task worktree and inherits the root currently in effect for the parent:
 
-- 父会话已经 rebind 到 task worktree 时，子代理使用这同一棵 task worktree，不再创建第二棵树。
-- 父会话尚未 rebind 时，满足只读门禁的子代理可以留在主仓执行只读工作；这仍不授予它独立根，也不改变父会话后续 rebind 的归属。
-- 子代理写能力是否触发父会话的既有 worktree 门禁，由第 3 节按有效工具面判定；门禁触发后，子代理跟随父会话完成 rebind，不自行拥有另一棵树。
+- If the parent session has already rebound to a task worktree, the subagent uses that same task worktree; no second tree is created.
+- If the parent has not rebound yet, a subagent that satisfies the read-only gate may stay in the main checkout and do read-only work; this still grants it no independent root and does not change the parent's later rebind ownership.
+- Whether a subagent's write capability triggers the parent session's existing worktree gate is decided in section 3 by the effective tool surface; once the gate fires, the subagent follows the parent through the rebind and never owns a separate tree.
 
-### 2. 双重 `conversationId` 身份
+### 2. Dual `conversationId` identity
 
-同一子代理调用同时存在两层身份，不能用一个 ID 混代：
+A single subagent invocation carries two layers of identity at once; one ID must not stand in for both:
 
-- **manager 层**使用父会话的 `conversationId`。它表示谁派出了 worker，并用于该父会话的 mailbox、host drain、wake 和结果归属。
-- **worker / LoopEngine 层**使用该 worker 自己的 `conversationId`。它表示子代理自身的 trace、运行状态和回合执行身份，避免不同 worker 的运行记录碰撞。
+- The **manager layer** uses the parent session's `conversationId`. It records who dispatched the worker and serves that parent's mailbox, host drain, wake, and result attribution.
+- The **worker / LoopEngine layer** uses the worker's own `conversationId`. It is the subagent's own execution identity for trace, run state, and turns, keeping different workers' run records from colliding.
 
-因此，父 ID 负责父侧路由与归属，worker ID 负责子侧执行与观测；二者的分工不因前景/后景 spawn 改变。
+So the parent ID owns parent-side routing and attribution, and the worker ID owns child-side execution and observation; this division does not change between foreground and background spawn.
 
-### 3. 派发门禁：按有效工具面能力推导
+### 3. Dispatch gate: derived from effective tool-surface capability
 
-判据按**有效工具面能力**推导，**不按角色名匹配**。只有下列两维同时成立，子代理才允许留在主仓只读运行：
+The criterion derives from **effective tool-surface capability**, **never from role-name matching**. A subagent may stay read-only in the main checkout only if both dimensions hold:
 
-1. 有效工具面不含 `write_file`，也不含 `edit_file`；
-2. 有效工具面不含 `bash`，或该角色 `bashMode === "readonly"`。
+1. the effective tool surface contains neither `write_file` nor `edit_file`;
+2. the effective tool surface contains no `bash`, or that role has `bashMode === "readonly"`.
 
-任一维不成立，即判为会写：隔离 ON 且父会话仍在主仓时，按 ADR-0037 既有门禁拦截并触发 task worktree 创建/改绑流程；隔离 OFF 时保持既有关闭档行为。判据结果必须同时保留结论与未通过维度，供门禁消息和诊断使用。
+If either dimension fails, the subagent is classified as writing: with isolation ON and the parent still in the main checkout, the existing ADR-0037 gate intercepts and drives the task-worktree creation/rebind flow; with isolation OFF, existing off-mode behavior holds. The verdict must retain both the conclusion and the failing dimension, for the gate message and diagnostics.
 
-`bashMode` 只以角色 catalog 的定义为准；父代理的 `disallowedTools` 不能把 `bashMode: "any"` 变成 `"readonly"`。未知角色按 fail-closed 处理，`bashMode` 取保守的 `"any"`，因此判为会写并拦截。
+`bashMode` is taken solely from the role catalog definition; the parent's `disallowedTools` cannot turn `bashMode: "any"` into `"readonly"`. Unknown roles fail closed with the conservative `bashMode` of `"any"`, hence are classified as writing and intercepted.
 
 ## Rejected alternatives
 
-### (a) 每个子代理建立独立 worktree
+### (a) One independent worktree per subagent
 
-否决。子代理是父会话的执行臂，不是独立任务所有者；另建 worktree 会把同一任务的写入拆成多棵树，使父会话的 task worktree、结果路径和后续工具调用失去单一归属，还会引入合并、回收和权限授权的新协议。ADR-0037 已明确禁止子代理触发第二棵树，本 ADR 将其身份含义固定下来。
+Rejected. A subagent is the parent's execution arm, not an independent task owner; a separate worktree would split one task's writes across multiple trees, leaving the parent's task worktree, result paths, and subsequent tool calls without single ownership, and would additionally require new protocols for merge, reclamation, and permission grants. ADR-0037 already forbids subagents triggering a second tree; this ADR pins down that rule's identity implications.
 
-### (b) isolation ON 时子代理一律只读
+### (b) All subagents read-only when isolation is ON
 
-否决。该方案会让合法的实现型子代理无法完成父会话委托的工作，迫使父会话重新实现或增加额外搬运回合，失去派发的价值。只读能力应按有效工具面放行；真实具备写能力的角色则由第 3 节拦截并让父会话完成既有 rebind，而不是把所有角色粗暴降级为只读。
+Rejected. That would leave legitimate implementation subagents unable to do the work the parent delegated, forcing the parent to reimplement it or spend extra shuttling turns — defeating the point of dispatch. Read-only capability is admitted by the effective tool surface; genuinely writable roles are intercepted by section 3 so the parent completes its existing rebind, rather than blanket-demoting every role to read-only.
 
 ## Consequences
 
 ### Positive
 
-- 父会话和子代理共享一个明确的 task worktree 归属，不产生隐式第二棵树。
-- 父侧 mailbox/drain/wake 与子侧 LoopEngine trace 各有稳定 ID，结果路由和运行观测不互相污染。
-- catalog 增加角色或工具时，门禁仍按实际能力工作；未知角色 fail-closed，避免角色名白名单漏放可写能力。
+- Parent and subagent share one clearly-owned task worktree; no implicit second tree.
+- Parent-side mailbox/drain/wake and child-side LoopEngine trace each have a stable ID; result routing and run observation do not pollute each other.
+- As the catalog grows roles or tools, the gate still works off actual capability; unknown roles fail closed, so a role-name allowlist can never leak write capability.
 
 ### Negative / Trade-offs
 
-- 一个 spawn 需要同时维护父路由 ID 与 worker 执行 ID，诊断和 trace 查询必须明确层次。
-- isolation ON 下，写能力子代理首次派发可能先触发父会话的 worktree 门禁，再在新根上重派；只读子代理则可直接留在主仓。
-- 有效工具面的计算必须与 worker 装配共用同一来源，否则声明面与实际面漂移会改变门禁结论。
+- One spawn must maintain both a parent routing ID and a worker execution ID; diagnostics and trace queries must state the layer explicitly.
+- Under isolation ON, a writable subagent's first dispatch may trigger the parent's worktree gate and then be redispatched on the new root; read-only subagents can stay in the main checkout directly.
+- The effective tool surface must be computed from the same source the worker assembly uses, or drift between declared and actual surfaces would change gate verdicts.
 
 ## Reversibility
 
-若未来要允许子代理拥有独立 worktree，必须另立 ADR，明确结果合并、权限授权、生命周期和父可见路径协议；不能把本 ADR 的共享根语义静默改成每子代理一棵树。若角色工具面模型改变，也必须同时更新两维判据和 fail-closed 规则。
+Allowing subagents their own worktrees in the future requires a new ADR spelling out result merge, permission grants, lifecycle, and the parent-visible path protocol; this ADR's shared-root semantics must not be silently turned into one-tree-per-subagent. Any change to the role tool-surface model must also update the two-dimension criterion and the fail-closed rule.
 
 ## Evidence
 
-- `docs/adr/0037-worktree-isolation-on-mutate.md:27-29`：既有 ADR-0037 §2 已定义子代理继承父会话改绑后的同一棵树、不触发第二棵树。
-- `docs/CONTEXT.md:98`：既有「声明工具面 vs 实际工具面」术语。
-- `docs/CONTEXT.md:344`：既有 `session worktree rebind` 术语已写明父会话改绑后 spawn 的子代理继承该根。
-- `src/harness/subagent/spawn-subagent-tool.ts:277-281`：spawn 将当前上下文的父会话 `conversationId` 写入子代理定义。
-- `src/harness/subagent/worker.ts:415-419`：worker 的 trace 装配使用自身生成的 `conversationId`。
+- `docs/adr/0037-worktree-isolation-on-mutate.md:27-29`: existing ADR-0037 §2 already defines the subagent inheriting the parent's rebound tree and not triggering a second tree.
+- `docs/CONTEXT.md:98`: existing "declared vs actual tool surface" terminology.
+- `docs/CONTEXT.md:344`: the `session worktree rebind` term already states that subagents spawned after the parent rebinds inherit that root.
+- `src/harness/subagent/spawn-subagent-tool.ts:277-281`: spawn writes the parent session's `conversationId` from the current context into the subagent definition.
+- `src/harness/subagent/worker.ts:415-419`: the worker's trace assembly uses its own freshly generated `conversationId`.

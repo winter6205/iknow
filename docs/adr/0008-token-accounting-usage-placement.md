@@ -3,13 +3,13 @@
 Date: 2026-08-05
 Status: accepted
 
-> **Amendment 2026-09-21**（Track A，call-beat 显示粒度）：D5/D6 的显示粒度叙述修订——Running 用量条不再是「整轮 `run()` 结束才刷新（one-beat lag 可接受）」，改为 **call-beat**：宿主在每次模型调用发出前收到 `context_usage` 流事件（pre-call 实测输入占用，经 `ModelAdapter.countTokens`），该次调用成功后立即收到携带其 API `usage` 的校正事件；第 N 次成功调用后条已是该次读数，不必等工具循环收尾。D6 的「无成功 usage 不估算、字段缺席画 0%」仍然有效且加强（缺实拍的拍直接不发事件）。`RunResult.lastUsage` 仍是 run 级终值；每拍暴露只走既有 stream 通道，不引入第二份 token 账本。会话文件持久化该真值（`SessionFileV1.lastUsage`），`attachSession` / Web load 回放之（曾有成功 usage 的会话重开不显示 0%）。
+> **Amendment 2026-09-21** (Track A, call-beat display granularity): revises the display-granularity narrative of D5/D6 — the Running usage bar no longer refreshes only at the end of the whole `run()` (a one-beat lag was acceptable); it becomes **call-beat**: the host receives a `context_usage` stream event before each model call is issued (measured pre-call input occupancy via `ModelAdapter.countTokens`), and immediately after that call succeeds receives a correction event carrying its API `usage`; after the Nth successful call the bar already shows that call's reading, without waiting for the tool loop to finish. D6's "no estimation without successful usage; absent fields render as 0%" remains valid and is strengthened (beats lacking measured data simply emit no event). `RunResult.lastUsage` is still the run-level final value; per-beat exposure travels only the existing stream channel — no second token ledger is introduced. The session file persists this ground truth (`SessionFileV1.lastUsage`), and `attachSession` / Web load replay it (a session that once had successful usage no longer shows 0% on reopen).
 
 ## Context
 
 GH issue (winter6205/iknow) — the design grilling graduated from a predecessor issue (adapter usage consumption + token accounting foundation, closed 2026-08-04 for deferral discipline). iknow's harness currently has **zero** token / usage / context-window code (`src/harness/` grep-empty; `anthropic-adapter.ts` `interpretMessage` silently drops `sdkResp.usage`; `AssistantTurnResult` has no usage field; `LlmCallRecord` has zero token fields). Meanwhile 9router / MiniMax-M3 provably returns Anthropic-compatible `usage` (`input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens`; probe D measured `cache_read_input_tokens: 128`). The TraceService module (`src/harness/trace/`, ADR-0003) is already landed and the trace-service spec draft pre-drafts nullable token fields.
 
-Two constraints shape the design: (a) the 017 two-tier discipline — `tokenUsage` is B-layer / conditional-remediation (017:103), `RunResult` is forbidden from carrying diagnostics (017:67), and `LoopTrace` triple-bans payload-token-cost (CONTEXT.md + `loop-trace.ts` + spec判据12); (b) the "has-failure-evidence" trigger principle (EXECUTION-ORDER.md:79, 017:157) — don't build runtime machinery without a live consumer. An external reference (`docs/harness-report/`, the upstream reference v0.1.9 mapping report) was studied: the upstream reference fragments usage across three surfaces but has **no runtime consumer** (`CostTracker` accumulates into dead data), uses only `input_tokens`+`output_tokens` (cache fields dropped — flagged as its top gap), and drives compression from char-estimation + provider-error reactive fallback rather than usage.
+Two constraints shape the design: (a) the 017 two-tier discipline — `tokenUsage` is B-layer / conditional-remediation (017:103), `RunResult` is forbidden from carrying diagnostics (017:67), and `LoopTrace` triple-bans payload-token-cost (CONTEXT.md + `loop-trace.ts` + spec criterion 12); (b) the "has-failure-evidence" trigger principle (EXECUTION-ORDER.md:79, 017:157) — don't build runtime machinery without a live consumer. An external reference (`docs/harness-report/`, the upstream reference v0.1.9 mapping report) was studied: the upstream reference fragments usage across three surfaces but has **no runtime consumer** (`CostTracker` accumulates into dead data), uses only `input_tokens`+`output_tokens` (cache fields dropped — flagged as its top gap), and drives compression from char-estimation + provider-error reactive fallback rather than usage.
 
 ## Decision
 
@@ -27,7 +27,7 @@ Six decisions settled in the 2026-08-05 grilling session:
 
 6. **No chars/N estimation fallback; estimation serves compression, never accounting/display.** When a call returns no usage, the record omits the field (Decision 3) — estimation never substitutes for observed truth (Postel). Char-estimation is reserved exclusively for the future compression trigger's decision input (anchor + delta, where anchor = last real `usage.input_tokens` and delta = the just-appended-but-unsent content). The display path reads real usage (reactive, one-beat lag is acceptable for a display), never an estimate.
 
-**Implementation split (sequencing decision):** the display path (adapter → `AssistantTurnResult` → loop-engine → `recordLlmCall` + `RunResult.lastUsage`) has a real consumer (TUI) and **may proceed**. The compression path (in-run anchor, incremental estimation, trigger logic) **remains blocked by failure evidence + the compression-path rulings**. This is the Q6 "分路实施" ruling.
+**Implementation split (sequencing decision):** the display path (adapter → `AssistantTurnResult` → loop-engine → `recordLlmCall` + `RunResult.lastUsage`) has a real consumer (TUI) and **may proceed**. The compression path (in-run anchor, incremental estimation, trigger logic) **remains blocked by failure evidence + the compression-path rulings**. This is the Q6 "split implementation by path" ruling.
 
 ## Consequences
 
@@ -40,7 +40,7 @@ Six decisions settled in the 2026-08-05 grilling session:
 - (−) The two cache fields may be null on providers that don't return them; consumers must null-check. No 9router `cache_creation` observation yet — field is present-but-null until a provider returns it.
 - (−) The trace-service spec draft (:120) drafts three fields (`inputTokens`/`outputTokens`/`cacheReadTokens`) and is now superseded by this four-field shape; the spec needs a one-line update.
 - Reversibility: placement/shape are hard to reverse once TUI depends on `RunResult.lastUsage`; the sealed-seam design keeps the future runtime-usage upgrade additive.
-- 回退 = drop the four `LlmCallRecord` columns, the `AssistantTurnResult` transport field, and `RunResult.lastUsage`; the trace module reverts to ADR-0003 shape. Low cost; all additive.
+- Rollback = drop the four `LlmCallRecord` columns, the `AssistantTurnResult` transport field, and `RunResult.lastUsage`; the trace module reverts to ADR-0003 shape. Low cost; all additive.
 
 **Why not alternatives:**
 
@@ -63,5 +63,5 @@ Six decisions settled in the 2026-08-05 grilling session:
 - `src/harness/loop-engine.ts:549-577` — the two `recordLlmCall` instrumentation sites.
 - The TUI context-usage display spec draft — the real consumer for Decision 5.
 - `docs/archive/wayfinder/issues/017-loop-hardening-for-migration.md` — 017:103 (B-layer tokenUsage), 017:67 (RunResult diagnostics refusal), 017:157 (conditional remediation).
-- `docs/archive/wayfinder/EXECUTION-ORDER.md:79` — "条件式修复：只修复有失败证据的问题".
+- `docs/archive/wayfinder/EXECUTION-ORDER.md:79` — "conditional remediation: only fix problems that have failure evidence" (translated from the Chinese source line).
 - Numbering note: the predecessor issue threads cite "ADR candidate 0007", but 0007 is reserved by the session-persistence and TUI spec drafts for the session-storage disk-shape decision. Per "docs/adr/ max + 1, avoid collision", this ADR takes **0008**; 0007 stays reserved for session storage.

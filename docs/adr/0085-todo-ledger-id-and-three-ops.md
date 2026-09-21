@@ -1,17 +1,16 @@
-# 0085. todo 账本：id + 三件事；worker 共用同一主会话
+# 0085. Todo ledger: id + three ops; workers share the same main session
 
 Date: 2026-09-11
 Status: accepted
 
-修正 `docs/adr/0046-todo-ledger-replace-and-snapshots.md` 的主路径（该文件编号曾与另一 0046 撞号——即现 `0114-exact-name-load-and-index-demotion.md`，撞号已由重编号解决——amendment 无法写回原文件）。快照纪律与「换表不灌 messages」仍有效。
+Corrects the main path of `docs/adr/0046-todo-ledger-replace-and-snapshots.md` (that file's number once collided with another 0046 — now `0114-exact-name-load-and-index-demotion.md`; the collision was resolved by renumbering — so the amendment could not be written back into the original file). The snapshot discipline and "swap the table, don't refill messages" remain in force.
 
-现行账本每条有稳定 **id**，状态 `pending` | `in_progress` | `completed`。主路径是三件事：一次可多条的**添加**（追加不覆盖）、按 id **更新**（subject / status / 删除；`check` 并入）、**读取**现行。`replace` 降为整表逃生口，不是换计划主路径。
+Each current-ledger entry has a stable **id** and status `pending` | `in_progress` | `completed`. The main path is three ops: **add** (one call may carry many; appends, never overwrites), **update** by id (subject / status / deletion; `check` merged in), and **read** the current table. `replace` demotes to a whole-table escape hatch, not the main path for changing plans.
 
-id 的稳定域是**表内**：`add` 取现有最大编号 +1（删中间项不释放号，旧 id 不被后来者复用），`replace` 换整表后**从 `t1` 重新编号**——旧 id 随旧表作废，不跨 replace 继承，模型需重新 `read` 取新 id。回执仍是短串 `Updated todos.md`，不逐条列 id（整表作废不是「新增 N 条」）。
+The id's stability domain is **within the table**: `add` takes existing-max-number + 1 (deleting a middle entry does not free its number; old ids are never reused by later entries), and after `replace` swaps the whole table numbering **restarts from `t1`** — old ids die with the old table, do not carry across a replace, and the model must `read` again for the new ids. The receipt stays the short string `Updated todos.md`, without listing ids per entry (whole-table invalidation is not "N entries added").
 
-同一**主会话**内子代理与父共用账本：worker 可读取与更新；**添加仅父会话**，worker `add` typed 拒绝。跨主会话共用不做。
+Within one **main session**, subagents and the parent share the ledger: workers may read and update; **add is parent-session only**, and a worker `add` gets a typed rejection. Sharing across main sessions is not done.
 
-状态栏仍只投影未完成项（ADR-0028），不把整表灌进 messages。限额与原子写沿用既有 64KB / 500 与不半写。
+The status bar still projects only unfinished items (ADR-0028) and does not dump the whole table into messages. Size limits and atomic writes keep the existing 64KB / 500 and no-half-write guarantees.
 
-**Why not 只放宽 add 收数组：** 模型还要按条改状态；没有 id 就只能整表重写。**Why not 跨主会话任务池：** 本切片到达标志是「一次会话能写下多步并让 worker 看见」，不引入列表身份与 opt-in。
-
+**Why not only widen `add` to accept an array:** the model still needs per-entry status updates; without ids the only option is rewriting the whole table. **Why not a cross-main-session task pool:** this slice's done-marker is "one session can write down multi-step work and workers see it"; no list identity or opt-in is introduced.

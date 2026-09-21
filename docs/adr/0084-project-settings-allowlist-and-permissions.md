@@ -1,18 +1,18 @@
-# 0084. 项目 settings 允许名单；权限 SSOT 进 JSON
+# 0084. Project settings allowlist; permission SSOT moves into JSON
 
 Date: 2026-09-11
 Status: accepted
 
-用户层 `~/.iknow/settings.json` 与共享项目层 `<仓>/.iknow/settings.json` 仍是仅有的两层文件（无第三层 local）。ADR-0015「project 盖 user」收窄为：**项目文件只采纳** `hooks`、`verify`、`secrets`、`permissions`。其余顶层段（含 `isolation` / `llm` / `memory` / `subagent` / `web` / `lsp` / `loop` / `graph`）出现在项目文件 → 丢弃、不覆盖用户值，启动可见警告。
+The user layer `~/.iknow/settings.json` and the shared project layer `<repo>/.iknow/settings.json` remain the only two file layers (no third local layer). ADR-0015's "project overrides user" narrows to: **the project file adopts only** `hooks`, `verify`, `secrets`, `permissions`. Any other top-level section (including `isolation` / `llm` / `memory` / `subagent` / `web` / `lsp` / `loop` / `graph`) appearing in the project file → dropped, never overriding user values, with a visible warning at startup.
 
-写回落对层：用户层键只写用户文件；不得因「项目文件已存在」把 thinking 等写入项目。
+Write-back respects the layer: user-layer keys go only to the user file; keys such as thinking must not be written into the project file just because "the project file already exists".
 
-权限机械层从 `permissions.toml` 迁入项目 `settings.permissions`。**停读 toml**。两份同时存在 → 启动/加载 fail-loud。用户层不接 `permissions`。
+The mechanical permission layer migrates from `permissions.toml` into the project's `settings.permissions`. **Reading toml stops.** Both present at once → fail-loud at startup/load. The user layer does not accept `permissions`.
 
-> **Amendment 2026-09-13**（ADR-0090）：上段「谓词语义不换成字符串列表」**superseded**。允许名单、停读 toml、用户层不接 permissions 仍有效。现行规则形态 = **声明式权限规则**（`allow`/`ask`/`deny` 字符串）。
+> **Amendment 2026-09-13** (ADR-0090): the preceding paragraph's "predicate semantics are not to be replaced by string lists" is **superseded**. The allowlist, the toml reading stop, and the user-layer rejection of permissions all remain in force. Current rule form = **declarative permission rules** (`allow`/`ask`/`deny` strings).
 
-**Why not 项目继续盖 isolation / llm：** 一次项目 `isolation: false` 会卸掉全员门禁或（旧装配下）卸掉工作树工具，把个人开关变成仓库契约。允许名单把团队契约（钩子、校验、密钥、权限）与个人运行时（模型、隔离、子代理）切开。
+**Why not let the project keep overriding isolation / llm:** one project `isolation: false` would strip the gating for everyone or (under the old assembly) remove the worktree tools, turning a personal switch into a repository contract. The allowlist separates team contracts (hooks, verification, secrets, permissions) from personal runtime (model, isolation, subagents).
 
-**Why not 第三层 local：** 两层已够「共享 vs 个人」；再加一层只增加覆盖顺序与写回歧义。
+**Why not a third local layer:** two layers already cover "shared vs personal"; a third only adds override-ordering and write-back ambiguity.
 
-关联：CONTEXT **项目 settings 允许名单**。
+Related: CONTEXT topic "project settings allowlist".

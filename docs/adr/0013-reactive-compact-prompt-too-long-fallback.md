@@ -1,70 +1,42 @@
-# 0013. Reactive compact: prompt-too-long 兜底,推翻 Q3 "reactive 不实现"
+# 0013. Reactive compact: prompt-too-long fallback, overturning the Q3 "no reactive implementation" ruling
 
 Date: 2026-08-08
 Status: accepted
 
 ## Context
 
-`src/harness/compress/index.ts:1` 的 Q3 决议写明 "proactive trigger, reactive
-不实现"。proactive compact (`loop-engine.ts:919-929`) 靠 `estimateMessagesTokens`
-**估算** token 数,超阈值提前压。但估算永远有误差,极端情况下 (突发增长 / 估算
-失准) 窗口仍会被撑爆 —— 此时 SDK 抛 prompt-too-long (400 `BadRequestError`),
-R1 已证 adapter 层对其零翻译,裸 rethrow 到 `loop-engine.ts:430-439` 只有
-`ProtocolError` 分支,其余 `throw err` 直接崩 run。proactive + 校准只能**降低**
-崩溃概率，消灭不了"估算漏了"的硬崩溃。reactive 列为 loop contract
-的一部分 (`query.py:768-777`),不是可选项。
+The Q3 resolution written at `src/harness/compress/index.ts:1` stated "proactive trigger, reactive not implemented". Proactive compact (`loop-engine.ts:919-929`) **estimates** token counts via `estimateMessagesTokens` and compresses ahead of time when the threshold is exceeded. But estimation always carries error, and in extreme cases (sudden growth / mis-estimation) the window can still blow out — the SDK then throws prompt-too-long (400 `BadRequestError`); R1 proved the adapter layer performs zero translation of it, and the bare rethrow reaches `loop-engine.ts:430-439`, which has only a `ProtocolError` branch, so everything else hits `throw err` and crashes the run. Proactive + calibration can only **lower** crash probability; it cannot eliminate the hard crash of "estimation missed it". Reactive is part of the loop contract (`query.py:768-777`), not an option.
 
 ## Decision
 
-推翻 Q3,补 reactive compact 兜底:
+Overturn Q3; add the reactive compact fallback:
 
-1. **触发**: SDK 抛 prompt-too-long (400) → adapter 加
-   `PromptTooLongError extends ProtocolError` (R1 最小改动: `errors.ts` 加类 +
-   `anthropic-adapter.ts:643/:510` 两个 SDK 调用点包 try/catch, `instanceof APIError
-&& status 400 && invalid_request_error && 含 prompt length` → 抛
-   `PromptTooLongError`) → `loop-engine.ts:430-439` 捕获 (`instanceof ProtocolError`
-   分支命中)。
-2. **patch 契约**: 每 run 限 **1 次** (`reactive_compact_attempted`)。压缩后重试仍超 → throw (交回 ADR-0012 超限语义收场)。避免
-   "压→抛→压→抛" 的浪费循环。
-3. **压缩函数**: 复用 `compactMessages` (`loop-engine.ts:930`),与 proactive
-   同一逻辑,只是错误触发 vs 估算触发。不引入 proactive/reactive 的力度区分。
-4. **与 proactive 共存**: reactive (离散"错误触发") + proactive (连续"估算触发")
-   双保险,天然不冲突,无需额外优先级/阈值设计。
+1. **Trigger**: SDK throws prompt-too-long (400) -> the adapter adds `PromptTooLongError extends ProtocolError` (R1 minimal change: add the class in `errors.ts` + wrap try/catch at the two SDK call sites `anthropic-adapter.ts:643/:510`, detecting `instanceof APIError && status 400 && invalid_request_error && mentions prompt length` -> throw `PromptTooLongError`) -> captured at `loop-engine.ts:430-439` (the `instanceof ProtocolError` branch hits).
+2. **Patch contract**: limited to **1 attempt** per run (`reactive_compact_attempted`). If the retry after compaction still exceeds the limit -> throw (handed back to ADR-0012's over-limit semantics for closure). Avoids a wasteful "compress->throw->compress->throw" loop.
+3. **Compression function**: reuse `compactMessages` (`loop-engine.ts:930`), the same logic as proactive, differing only in error-triggered vs estimation-triggered. No proactive/reactive intensity distinction is introduced.
+4. **Coexistence with proactive**: reactive (discrete, "error-triggered") + proactive (continuous, "estimation-triggered") form double insurance, naturally conflict-free, needing no extra priority/threshold design.
 
 ## Considered Options
 
-- **维持 Q3 (不补 reactive)**: 靠 R3 估算校准降低概率,但估算永远是估算,
-  极端情况 (估算漏了) 仍硬崩溃。崩 run 是"最后一层防御"缺失,不可接受。被否。
-- **reactive 用更强制压缩 (`force=True`, 全量)**: 折衷是 proactive 轻量 / reactive 全量;iknow 的 `compactMessages` 本身已能做压缩,
-  proactive 没有轻量/全量之分,复用最干净。被否。
-- **限多次 reactive**: 无限重试只会在"压缩降不下窗口"时陷入浪费循环,烧 token
-  不解决问题。限 1 次,超了就 throw。被否。
+- **Keep Q3 (no reactive)**: rely on R3 estimation calibration to lower the probability, but estimation remains estimation, and extreme cases (estimation misses) still hard-crash. Crashing the run means the "last line of defense" is missing — unacceptable. Rejected.
+- **Reactive with a more forceful compression (`force=True`, full)**: the trade-off being proactive-light / reactive-full; iknow's `compactMessages` can already compress, proactive has no light/full distinction, and reuse is the cleanest. Rejected.
+- **Allow multiple reactive attempts**: unlimited retries only fall into a wasteful loop when "compression cannot shrink the window", burning tokens without solving anything. Limit to 1; throw once exceeded. Rejected.
 
 ## Consequences
 
-- (+) proactive 估算失败时兜底压缩重试,loop 不崩 —— 消灭"估算漏了"的硬崩溃。
-- (+) loop contract 对齐。
-- (+) 最小改动: 一个 `PromptTooLongError` + 两个 SDK 调用点 try/catch +
-  loop-engine 一个分支,纯增量。
-- (−) 多一次模型调用 (压缩重试) 在"估算漏了"时发生;但限 1 次 + 超了就 throw,
-  成本有界。
-- (−) 推翻既有 Q3 决议 —— 需更新 `compress/index.ts:1` 注释 ("reactive 不实现"
-  → "reactive 已实现"),该代码改动留给 spec/实现阶段 (spec-driven-development),
-  ADR 只记决策不碰代码。
-- 回退 = 移除 `PromptTooLongError` + loop-engine reactive 分支,恢复 Q3;但一旦
-  surface 消费者依赖 reactive 兜底,回退成本上升。
+- (+) When proactive estimation fails, the fallback compresses and retries, and the loop does not crash — eliminating the hard crash of "estimation missed it".
+- (+) Loop contract alignment restored.
+- (+) Minimal change: one `PromptTooLongError` + try/catch at two SDK call sites + one loop-engine branch; purely additive.
+- (−) One extra model call (compression retry) occurs when "estimation missed it"; but with a 1-attempt limit and throw-on-exceed, cost is bounded.
+- (−) Overturns the existing Q3 resolution — the `compress/index.ts:1` comment must be updated ("reactive not implemented" -> "reactive implemented"); that code change is deferred to the spec/implementation phase (spec-driven-development); the ADR records the decision only and does not touch code.
+- Rollback = remove `PromptTooLongError` + the loop-engine reactive branch and restore Q3; but once surface consumers rely on the reactive fallback, rollback cost rises.
 
 ## Evidence pointers
 
-- `src/harness/compress/index.ts:1` — Q3 决议 "proactive trigger, reactive 不实现"。
-- `src/harness/loop-engine.ts:919-929` — proactive compact 估算触发。
-- `src/harness/loop-engine.ts:430-439` — 唯一 `ProtocolError` 捕获点 (reactive 分支落点)。
-- `src/harness/model-adapter/anthropic-adapter.ts:643/:510` — 两个 SDK 调用点
-  (reactive try/catch 落点)。
-- R1 ticket (closed) — adapter 错误翻译 inventory;验证 prompt-too-long
-  当前零翻译、裸 rethrow 崩 run。
-- 基准: `query.py:768-777`
-  (reactive compact → continue) · `query.py:66-87` (`_is_prompt_too_long_error`) ·
-  `query.py:651` (`reactive_compact_attempted`)。
-- `docs/adr/0012-max-turns-user-switch-default-unlimited.md` — 超限语义,
-  reactive 压后重试仍超时 throw 依赖它收场。
+- `src/harness/compress/index.ts:1` — the Q3 resolution "proactive trigger, reactive not implemented".
+- `src/harness/loop-engine.ts:919-929` — proactive compact, estimation-triggered.
+- `src/harness/loop-engine.ts:430-439` — the sole `ProtocolError` capture point (landing spot for the reactive branch).
+- `src/harness/model-adapter/anthropic-adapter.ts:643/:510` — the two SDK call sites (landing spots for the reactive try/catch).
+- R1 ticket (closed) — the adapter error-translation inventory; verified prompt-too-long currently gets zero translation and the bare rethrow crashes the run.
+- Baselines: `query.py:768-777` (reactive compact -> continue) · `query.py:66-87` (`_is_prompt_too_long_error`) · `query.py:651` (`reactive_compact_attempted`).
+- `docs/adr/0012-max-turns-user-switch-default-unlimited.md` — over-limit semantics; the "throw if the reactive retry still exceeds the limit" behavior depends on it for closure.

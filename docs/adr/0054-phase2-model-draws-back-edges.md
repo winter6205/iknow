@@ -1,6 +1,6 @@
-# 0054. 阶段 2 回边由模型画在图上；host 只执行、计数、挡 done、挡转死
+# 0054. Phase-2 back edges are drawn by the model on the graph; the host only executes, counts, blocks done, blocks spinning
 
 Date: 2026-09-08
 Status: accepted
 
-图内绕回的边是分解的一部分，由模型写进该次提交的图，不由 host 在失败时自动接回上游。Host 按边走、每次进入节点计 effort、拒绝再跑已 done 的 id、用 effort 缝防止转死。阶段 1 无回边、`validateGraph` 仍拒环。不开子票；进阶段 2 spec。
+Edges that loop back inside the graph are part of the decomposition: the model writes them into the graph it submits, and the host does not auto-wire failed work back upstream. The host walks the edges, counts effort on each node entry, refuses to re-run ids already done, and uses the effort seam to prevent infinite spinning. Phase 1 has no back edges and `validateGraph` still rejects cycles. No follow-up tickets; proceed to the phase-2 spec.

@@ -1,10 +1,10 @@
-# 0026. compact 保焦改用任务摘录，不再把 taskFocus 写进会话
+# 0026. Compact focus retention switches to task excerpts instead of storing taskFocus in the session
 
 Date: 2026-08-21
 Status: accepted
 
-Context: ADR-0018 把 `session.taskFocus` 做成常驻焦点（首条像样任务句 seed 一次、compact 用 240+history 渲染）。盘问后确认：模型要的是压缩当时的用户任务原话，不是会话里一张会过期的卡；每回合填卡和压缩 LLM 填卡都浪费一轮。
+Context: ADR-0018 made `session.taskFocus` a resident focus (seeded once from the first substantial task sentence, rendered at compact time with 240+history). After grilling it was confirmed: what the model needs is the user's own task wording as of the compression moment, not a card in the session that goes stale; filling the card every turn — and having the compression LLM fill it — each wastes a round.
 
-Decision: 正常模式 compact 只从当时 `messages` 现抽现贴至多 3 句合格用户任务原文（任务摘录）；不落盘、不 seed、自动模式不贴。ADR-0018 的 `session.goal` 拆分与模型零写入仍成立；`session.taskFocus` 常驻与焦点渲染段作废。
+Decision: compact in normal mode now extracts at-compact-time and pastes up to 3 qualifying verbatim user-task sentences from the current `messages` (task excerpts); no persistence, no seeding, and auto mode pastes none. ADR-0018's `session.goal` split and zero model writes still hold; its `session.taskFocus` residency and focus-rendering sections are void.
 
-Why: 原话比摘要卡可核对；现抽避免卡与对话分叉；复用 `isTurnQuery` + 寒暄过滤，不为摘录加模型。
+Why: verbatim wording is checkable against the conversation, unlike a summary card; extracting on the fly prevents card/conversation divergence; reuses `isTurnQuery` + the greeting filter, adding no model just for excerpting.

@@ -1,25 +1,25 @@
-# 0046. 有描述则按名加载；无描述才 search；索引降档不删名
+# 0046. Load by exact name when a description exists; search only when one is missing; index demotion never removes names
 
 Date: 2026-09-06
 Status: accepted
 
 ## Context
 
-MCP 短描述曾一度进 system，被 ADR-0043 B4 收成裸名；`skill_search` 与「未加载必须 tool_search」把检索和加载焊死。本票修订 ADR-0043 §2/§5/§7 中「必经 tool_search」读法，不推翻 schema 不 upfront、开局等待、前缀冻结。
+MCP short descriptions were once in system, trimmed to bare names by ADR-0043 B4; `skill_search` plus "unloaded must go through tool_search" welded retrieval to loading. This ADR revises the "tool_search is mandatory" reading of ADR-0043 §2/§5/§7 without overturning schema-not-upfront, start-of-session waiting, or the prefix freeze.
 
 ## Decision
 
-1. **加载 vs 检索**：前缀已有描述 → 按精确名灌贵载荷（`skill({name})`；未 discover 的工具/MCP 直呼 `discover`，参数齐则执行）。前缀没有描述 → 才用 `tool_search` 补描述+schema。删除 `skill_search`。
-2. **超限梯子**：内建 schema 超窗口 10% → 退场件索引为名+描述，不剥描述。MCP/skill 索引超 10% → 只剥这两类条目的描述，名字保留。退场内建不参与剥描述。永不从目录删名。
-3. **目录外 skill**：不经检索件；对话指路径后 `read_file`。
+1. **Load vs search:** description already in the prefix → load the full payload by exact name (`skill({name})`; for tools/MCP not yet discovered, call `discover` directly, and execute once parameters are complete). No description in the prefix → only then use `tool_search` to fetch description+schema. Delete `skill_search`.
+2. **Over-limit ladder:** built-in schemas over 10% of the window → evicted items keep indexing as name+description; descriptions are not stripped. MCP/skill index over 10% → strip descriptions only from those two entry kinds; names stay. Evicted built-ins never participate in description stripping. Names are never removed from the catalog.
+3. **Out-of-catalog skill:** not reached via any retrieval artifact; once the conversation points at a path, `read_file` it.
 
 ## Why not
 
-- **工具超限也剥成仅名字**：会让本有描述的退场件去走 search，与「search 只补缺失描述」冲突。
-- **保留 skill_search**：对已常驻或仅差正文的清单做子串检索，弱于模型注意力且多一跳。
-- **未加载一律报错指路 tool_search**：与有描述即可直呼矛盾。
+- **Strip over-limit tools to names only:** would force description-bearing evicted items into search, conflicting with "search only fills missing descriptions".
+- **Keep `skill_search`:** substring search over lists that are already resident or only missing their body is weaker than model attention and costs an extra hop.
+- **Uniformly error-route unloaded to `tool_search`:** conflicts with direct-by-exact-name whenever a description exists.
 
 ## Consequences
 
-- **正面 / Applied:** 短描述与 ADR-0043 前缀冻结可并存；`tool_search` 岗位收窄为无描述。
-- **负面 / Trade-offs:** 仅剩名字的 MCP 仍可能关键词 miss；本票不升级检索算法。
+- **Positive / Applied:** short descriptions and ADR-0043's prefix freeze can coexist; `tool_search`'s post narrows to the no-description case.
+- **Negative / Trade-offs:** name-only MCP entries can still miss on keywords; this ADR does not upgrade the retrieval algorithm.

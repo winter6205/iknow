@@ -1,14 +1,14 @@
-# 0090. 项目权限规则改为声明式字符串列表
+# 0090. Project permission rules become declarative string lists
 
 Date: 2026-09-13
 Status: accepted
 
-项目 `settings.permissions` 不再使用 `schema_version` + `rule[]` 谓词 DSL。操作员写 `allow` / `ask` / `deny` 字符串（`Tool` / `Tool(specifier)`），可选 `defaultMode`（仅 `default` | `plan`）。加载编译为既有 `NormalRuleSpec`；同层 **deny → ask → allow**。旧形态与项目 `full_auto` 均 fail-loud。用户层仍不接 `permissions`；toml 双源仍按 ADR-0084 fail-loud。
+Project `settings.permissions` no longer uses the `schema_version` + `rule[]` predicate DSL. The operator writes `allow` / `ask` / `deny` strings (`Tool` / `Tool(specifier)`), plus an optional `defaultMode` (only `default` | `plan`). Loading compiles them into the existing `NormalRuleSpec`; within the same layer the order is **deny → ask → allow**. The old form and `full_auto` in a project file both fail-loud. The user layer still does not accept `permissions`; the toml dual-source case stays fail-loud per ADR-0084.
 
-**Why not 保留谓词 DSL：** 入库后每条要写 id/tool/decision/reason，九个固定谓词加不出 glob，和 hooks 段形态分裂。
+**Why not keep the predicate DSL:** after being stored, every rule would need id/tool/decision/reason fields, the nine fixed predicates can add no glob, and the form would diverge from the hooks section's shape.
 
-**Why not 双形态并存读取：** 与 toml→json 同一纪律——两套 SSOT 会让「到底哪条生效」不可审计。
+**Why not read both forms side by side:** the same discipline as the toml→json move — two SSOTs make "which rule actually wins" unauditable.
 
-**Why not 项目文件写 `full_auto`：** 共享仓库不得把自动模式变成团队契约；自动模式仍是操作员会话选择（ADR-0032）。
+**Why not allow `full_auto` in project files:** a shared repository must not turn automatic mode into a team contract; automatic mode stays an operator's session choice (ADR-0032).
 
-关联：ADR-0084（允许名单与权限家仍在项目 settings；本 ADR 只换规则形态）。
+Related: ADR-0084 (the allowlist and the permissions' home remain in project settings; this ADR only swaps the rule form).

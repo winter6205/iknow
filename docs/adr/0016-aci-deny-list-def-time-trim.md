@@ -1,10 +1,10 @@
-# 0016. ACI deny-list 裁剪必须在 def-list 期（createAciRegistry 之前），不给 AciRegistry 加 .tools 字段
+# 0016. ACI deny-list trimming must happen at def-list time (before createAciRegistry), no `.tools` field on AciRegistry
 
 Date: 2026-08-16
 Status: accepted
 
-Context: 子代理判官面裁剪要求 worker 消费 `SubAgentDefinition.disallowedTools`，把判官（及任何声明 deny-list 的子代理）的实际工具面裁成声明面。`AciRegistry` 只暴露 `inner` / `catalog` / `visibleSchemas`（aci-registry.ts:18-35），`inner` 是构造期冻结快照，构造后裁剪不可行。
+Context: Trimming the sub-agent judge surface requires the worker to consume `SubAgentDefinition.disallowedTools`, cutting the judge's (and any sub-agent declaring a deny-list) actual tool surface down to its declared surface. `AciRegistry` only exposes `inner` / `catalog` / `visibleSchemas` (aci-registry.ts:18-35); `inner` is a snapshot frozen at construction time, so trimming after construction is infeasible.
 
-Decision: 裁剪发生在 `createDefaultAciRegistry` 工厂内的 def-list 期——`createAciRegistry(tools)` 调用**之前**用既有 `buildWorkerToolSurface`（宽容模式）过滤 def-list，Gate 3 的 `toolsetNames` 同步镜像剔除禁项再对照 factories 键集；`inner`（执行面）与 `visibleSchemas`（可见面）由构造期快照天然同步，声明面 = 实际面由构造保证。不给 `AciRegistry` 加 `.tools` 字段。
+Decision: Trimming happens at def-list time inside the `createDefaultAciRegistry` factory — before the `createAciRegistry(tools)` call, filter the def-list with the existing `buildWorkerToolSurface` (permissive mode); Gate 3's `toolsetNames` mirrors the removals in sync before comparing against the factories key set; `inner` (execution surface) and `visibleSchemas` (visibility surface) are naturally kept in sync by the construction-time snapshot, so declared surface = actual surface is guaranteed by construction. No `.tools` field is added to `AciRegistry`.
 
-Why not .tools: 加字段会诱导「产物上事后裁剪」反模式，破坏冻结快照不变量，且诱使实现者重建 executor/Gate 3 逻辑（god-function）。正确解法是挪裁剪时机到构造之前，现有结构够用——这是本需求 spec ACR Round 1 BLOCKED 的整改结论（Round 2 PASS 5/5）。
+Why not .tools: adding the field would invite the "trim the artifact after the fact" anti-pattern, break the frozen-snapshot invariant, and tempt implementers to re-derive executor/Gate 3 logic (god-function). The right fix is to move the trimming point to before construction — the existing structure suffices. This is the remediation conclusion from the requirement spec's ACR Round 1 BLOCKED (Round 2 PASS 5/5).

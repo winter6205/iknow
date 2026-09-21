@@ -1,12 +1,12 @@
-# 0029. FaultClass 并行于 StopReason，工具环以 fused 停止
+# 0029. FaultClass runs parallel to StopReason; the tool loop stops with fused
 
 Date: 2026-08-25
 Status: accepted
 
-StopReason 继续只回答「这一次 run 为什么停」（追加不重排）。失败要不要传输重试、要不要计入工具环，用并行闭集 FaultClass（retry / fuse / none），避免把 API/工具/上下文/控制流塞进停止联合。本 run 内工具环在结果已写入 append-only messages 之后判定停滞，则注入 LOOP_DETECTED 信封并以新停因 `fused` 结束（017 追加 cancelled/timeout 的同一纪律）。传输重试装饰 ModelAdapter，不进 loop、不进 session-api、不绑某一家 SDK。子代理必须把 fused 当失败信封。否决：新停因却不改 worker；只给人看熔断、下一轮不喂模型；用连续 N=3 代替周期+停滞。
+StopReason continues to answer only "why did this run stop" (append-only, no re-ordering). Whether a failure warrants transport retry and whether it counts toward the tool loop uses a parallel closed set FaultClass (retry / fuse / none), avoiding cramming API/tool/context/control-flow failures into the stop union. Within a run, if the tool loop is judged stalled after the result has already been written to the append-only messages, a LOOP_DETECTED envelope is injected and the run ends with the new stop reason `fused` (the same discipline that appended cancelled/timeout in 017). Transport retry decorates ModelAdapter — it stays out of the loop, out of session-api, and unbound to any single SDK. Subagents must treat fused as a failure envelope. Rejected: a new stop reason without changing the worker; a circuit-break visible only to humans and not fed to the model next round; using consecutive N=3 instead of period+stall detection.
 
 ## Why not
 
-- **把故障类写进 StopReason**：与 completed/cancelled 混语义，session-api 与 worker 穷尽分支会静默错。
-- **复用 nonSuccessStop**：那是供应商截断/拒绝，测试无法断言环检测。
-- **环检测放进 verify-loop**：verify 只在 completed 后跑，管不到 run 内工具空转。
+- **Writing fault classes into StopReason**: mixes semantics with completed/cancelled, and the exhaustive branches in session-api and the worker would silently go wrong.
+- **Reusing nonSuccessStop**: that is provider truncation/refusal, and tests could not assert loop detection.
+- **Putting loop detection in verify-loop**: verify runs only after completed and cannot reach tool idling inside a run.

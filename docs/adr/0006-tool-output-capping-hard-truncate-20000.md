@@ -3,50 +3,50 @@
 Date: 2026-08-04
 Status: accepted
 
-Amendment 2026-09-12：`grep` 工具入参默认条数改为 50（硬顶 2000 不变），参数名 **`head_limit`**。`read_file` 不写 `limit` 则读到 EOF，不再以默认 200 或 2000 行当整读策略；显式 `limit` 硬顶 2000；文件 1MB 拒与本 ADR 的 executor 20000 字符封顶不改。见 ADR-0084。
+Amendment 2026-09-12: the `grep` tool's default entry count became 50 (hard cap 2000 unchanged), parameter name **`head_limit`**. `read_file` without a `limit` reads to EOF, no longer treating a default 200 or 2000 lines as a whole-file read strategy; an explicit `limit` caps at 2000; the 1MB file-size rejection and this ADR's executor 20000-char floor are unchanged. See ADR-0084.
 
 ## Context
 
-GH issue 的 C+D 块（Q9 截断策略 / Q10 封顶阈值，吸收自先前的封顶设计票）。问题域：单条工具结果可能撑爆上下文窗口（“单条撑爆”轴，与“累积增长”轴的压缩策略正交）。前置契约（ADR-0004 契约 X）已定：工具返回纯数据，executor 是截断唯一权威。曾有草稿 Resolution（8000 字符 / 双层策略），被操作员标记“跳过 grilling，非决议”并 reopen；本轮 grilling 正式重新裁决。iknow 无 token 核算（未做），字符级是当前唯一可行兜底。操作员 2026-08-04 裁决。
+Blocks C+D of the GH issue (Q9 truncation policy / Q10 cap threshold, absorbed from an earlier cap-design ticket). Problem domain: a single tool result can blow up the context window (the "single-result blowout" axis, orthogonal to the compression policy on the "cumulative growth" axis). The upstream contract (ADR-0004 contract X) already settled it: tools return pure data, and the executor is the sole truncation authority. An earlier draft Resolution (8000 chars / two-layer policy) was flagged by the operator as "skipped grilling, not a decision" and reopened; this round's grilling re-adjudicated formally. iknow has no token accounting (not built), so char-level is the only viable safety net today. Operator ruling on 2026-08-04.
 
 ## Decision
 
-**Q9 = 硬截断丢尾巴，不落盘。**
+**Q9 = hard truncation, tail discarded, no disk offload.**
 
-1. executor 兜底超过阈值时：截断 + 追加统一标记（含原长/保留长 + "如需更多信息，用更精确的输入重新调用"引导）。完整内容**不写盘**。
-2. 否决落盘（microcompact 写文件 + 预览 + 路径，`_offload_tool_output_if_needed` 范式）：落盘需文件路径协议 + 生命周期 + session-api 暴露 = 范围扩张；记忆层地图既定“与压缩策略阶段 2 滑动窗口统一讨论历史序列化协议”，本期不碰。
-3. 理由：iknow 工具多为"读文件/搜内容"等**可再生查询**——被截断后模型可 grep 收窄 pattern / read_file 换 offset / bash 加过滤重新获取，成本低于维护落盘文件生命周期。落盘是为"数据不可再生"场景（沙箱内昂贵命令输出）设计，iknow 主场景不适用。
+1. When the executor safety net exceeds the threshold: truncate + append a uniform marker (including original length / retained length + guidance along the lines of "reinvoke with more precise input if you need more information"). The full content is **not written to disk**.
+2. Disk offload rejected (microcompact write-file + preview + path, the `_offload_tool_output_if_needed` pattern): offloading requires a file-path protocol + lifecycle + session-api exposure = scope expansion; the memory-layer map already decided to "discuss the history serialization protocol together with compression-policy phase 2 sliding window" — untouched this phase.
+3. Rationale: most iknow tools are **regenerable queries** ("read a file / search content") — after truncation the model can grep with a narrower pattern / read_file at a different offset / bash with extra filters to re-fetch, at lower cost than maintaining an offloaded-file lifecycle. Disk offload is designed for "data cannot be regenerated" scenarios (expensive in-sandbox command output); iknow's main scenarios do not fit.
 
-**Q10 = executor 兜底阈值 20000 字符。**
+**Q10 = executor safety-net threshold of 20000 chars.**
 
-4. 硬约束：≥ 各工具正常最大输出，避免双层重复截断。各工具正常最大：bash 12000（工具级已截）/ grep 200 条×~70 字 ≈ 14000 / glob 200 条×~50 字 ≈ 10000 / read_file 受 1MB 文件大小上限约束。20000 ≈ 5000-10000 tokens。
-5. 对照 inline 阈值 16000：iknow 略宽——因本期无落盘第二层，单阈值需更宽。
-6. 两层各司其职：工具级管"读多少"（语义单位：行/条/字符），executor 管"输出不超多少"（字符兜底）。
+4. Hard constraint: >= each tool's normal maximum output, avoiding duplicated two-layer truncation. Per-tool normal maxima: bash 12000 (already truncated at tool level) / grep 200 entries x ~70 chars ≈ 14000 / glob 200 entries x ~50 chars ≈ 10000 / read_file bounded by the 1MB file-size cap. 20000 ≈ 5000-10000 tokens.
+5. Against the inline threshold of 16000: iknow is slightly looser — because there is no second offload layer this phase, the single threshold must be wider.
+6. The two layers each own their lane: tool level governs "how much to read" (semantic units: lines/entries/chars), executor governs "output never exceeds how much" (char-level floor).
 
-**工具级截断参数（随 ADR-0004 工具集一并定案）**：bash 12000 字符（按 code point，修 surrogate 拆断）/ read_file limit 默认 200 上限 2000 行 + 文件大小 1MB / grep limit 默认 200 上限 2000 / glob limit 默认 200 上限 5000。
+**Tool-level truncation parameters (settled together with the ADR-0004 tool set)**: bash 12000 chars (counted by code point, fixing surrogate-pair splits) / read_file limit default 200, cap 2000 lines + file size 1MB / grep limit default 200, cap 2000 / glob limit default 200, cap 5000.
 
 **Why not alternatives**:
 
-- _落盘 + 预览 + 路径_：见 Decision 2-3；且记忆层地图已将其占位至压缩策略阶段 2 统一讨论，本期落地会割裂历史序列化协议设计。
-- _先前草稿的 8000 字符兜底_：8000 < bash 工具级 12000 → bash 截到 12000 后 executor 再截到 8000，双层重复截断 + 标记冲突。正式推翻。
-- _按 modelWindow 比例的相对阈值_：依赖 token 核算（未做），本期不可行；列为记忆层地图阶段 2 衍生。
-- _executor 信任工具的 truncated 字段跳过兜底_：违反契约 X（executor 永不信任工具声称字段）；MCP 第三方可伪造 `truncated:true` 绕过封顶。
+- _Offload + preview + path_: see Decision 2-3; moreover the memory-layer map has reserved it for compression-policy phase 2's unified discussion, and landing it this phase would fragment the history-serialization protocol design.
+- _The earlier draft's 8000-char floor_: 8000 < bash's tool-level 12000 -> bash truncates to 12000 then the executor truncates again to 8000 — duplicated two-layer truncation + marker conflict. Formally overturned.
+- _Relative threshold as a fraction of modelWindow_: depends on token accounting (not built), infeasible this phase; filed as a memory-layer-map phase-2 derivative.
+- _Executor trusts the tool's truncated field and skips the safety net_: violates contract X (the executor never trusts fields claimed by tools); MCP third parties could forge `truncated:true` to bypass the cap.
 
 ## Consequences
 
-- (+) "单条撑爆"轴闭环：任何工具（含未来 MCP 第三方）输出经 executor 总闸必不超 20000 字符。
-- (+) 两层截断无冲突：工具级（语义单位）与 executor 级（字符兜底）阈值不重叠（20000 > 各工具正常最大）。
-- (+) 无落盘 = 无文件生命周期/路径协议/session-api 暴露的运维负担；实现面小。
-- (−) 超阈输出**不可恢复**（尾巴真丢）——模型靠"收窄输入重新调用"恢复；对不可再生输出（如一次昂贵的构建日志）是真实损失。缓解：bash 工具级 12000 已先截，executor 层 rarely 触发；压缩策略阶段 2 重审落盘。
-- (−) 字符级 ≠ token 级精度：20000 字符按 1:1~1:4 浮动约 5000-10000 tokens，误差在上限下可控；token 级精度等 token 核算落地。
-- (−) 推翻先前草稿数字（8000）：以本 ADR 为准；该 Resolution 存档标注“草稿，经本轮 grill 推翻”。
+- (+) The "single-result blowout" axis is closed: any tool's output (including future MCP third parties) passes the executor master gate and can never exceed 20000 chars.
+- (+) The two truncation layers do not conflict: tool-level (semantic units) and executor-level (char floor) thresholds do not overlap (20000 > each tool's normal maximum).
+- (+) No offload = no operational burden of file lifecycles / path protocols / session-api exposure; small implementation surface.
+- (−) Over-threshold output is **unrecoverable** (the tail is truly lost) — recovery relies on the model "re-invoking with narrower input"; for non-regenerable output (e.g. one expensive build log) this is a real loss. Mitigation: bash's tool-level 12000 truncates first, so the executor layer rarely fires; disk offload to be revisited in compression-policy phase 2.
+- (−) Char-level != token-level precision: 20000 chars floats at roughly 1:1~1:4, i.e. about 5000-10000 tokens; the error is controllable under the ceiling; token-level precision waits for token accounting to land.
+- (−) Overturns the earlier draft number (8000): this ADR is authoritative; that Resolution archive is annotated "draft, overturned by this grilling round".
 
 **Evidence pointers**:
 
-- GH issue 的 C+D 块决议评论 + Resolution（2026-08-04）。
-- 前置 issue（closed）— 草稿 Resolution（8000 字符）存档，正式被本 ADR 推翻。
-- 参照：`engine/query.py:524-553`（`_offload_tool_output_if_needed`，16000 阈值 + 3000 预览 + 落盘）/ `services/tool_outputs.py:10-12`（阈值可配 + microcompact 4000）/ `tools/bash_tool.py:139-140`（12000 硬编码）。
-- 关联 issue：token 核算（相对阈值的前置）、压缩策略（落盘重审点）。
-- 关联 ADR：0004（工具集 + 契约 X）/ 0005（executor 加固——兜底执行的主体）。
+- The C+D block resolution comments + Resolution on the GH issue (2026-08-04).
+- Predecessor issue (closed) — the draft Resolution (8000 chars) archived, formally overturned by this ADR.
+- Reference: `engine/query.py:524-553` (`_offload_tool_output_if_needed`, 16000 threshold + 3000 preview + disk offload) / `services/tool_outputs.py:10-12` (configurable threshold + microcompact 4000) / `tools/bash_tool.py:139-140` (12000 hardcoded).
+- Related issues: token accounting (precondition for relative thresholds), compression policy (offload revisit point).
+- Related ADRs: 0004 (tool set + contract X) / 0005 (executor hardening — the body that executes this safety net).
 
-**适用面收窄（ADR-0083）**：`skill()` 的装配正文移出本 ADR 的兜底闸——豁免是装配期静态声明（`ToolDef.exemptFromOutputCap`），不是运行期字段、不破契约 X。其余工具（含 MCP）的 20000 字符裁决不变。见 `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`。
+**Scope narrowed (ADR-0083)**: `skill()`'s assembled body is moved out of this ADR's safety-net gate — the exemption is a static declaration at assembly time (`ToolDef.exemptFromOutputCap`), not a runtime field, so contract X stays intact. The 20000-char ruling for all other tools (including MCP) is unchanged. See `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`.

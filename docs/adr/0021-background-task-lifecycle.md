@@ -1,50 +1,50 @@
-# 0021. background task lifecycle：iknow 进程单锚 + registry 落盘 + 启动 stale 清扫
+# 0021. background task lifecycle: iknow process as the single physical anchor + on-disk registry + stale sweep at startup
 
 Date: 2026-08-18
 Status: accepted
 
-> **Amendment 2026-09-13**（ADR-0088）：落盘命名空间锚从 `workspaceRoot` 改为 **home 项目树**。D1.3 路径 = `<dataDir 或 ~/.iknow>/projects/<slug>/tasks/<task_id>.{json,log}`，slug 键 = `projectIdentityRoot`。`--workspace-root` 不再隔开 task 登记。进程物理锚、conversation 可见性锚、stale 清扫、task_id 格式不变。登记表仍**不**进会话文件夹叶子。
+> **Amendment 2026-09-13** (ADR-0088): the on-disk namespace anchor moved from `workspaceRoot` to the **home project tree**. D1.3 path = `<dataDir or ~/.iknow>/projects/<slug>/tasks/<task_id>.{json,log}`, slug key = `projectIdentityRoot`. `--workspace-root` no longer separates task registries. The physical process anchor, the conversation visibility anchor, the stale sweep, and the task_id format are unchanged. The registry still does **not** enter the session-folder leaf.
 
 ## Context
 
-bash 工具要支持「起长驻服务 → 验证 → 停」闭环，需要 background 执行（spawn 后立即返回 task_id）、日志回读（bash_output）、终止句柄（bash_stop）三件能力。关键前提：**iknow 尚无 conversation 拆除事件** —— 对 `removeSession` / `deleteSession` / `closeSession` 的 src 全域检索零命中（2026-08-18 实测），只有 `registerShutdown`（`src/cli/runtime.ts:172-218`）在进程退出时走唯一一层收尾。因此生命周期锚点只能在现有事件面内选取。resolution 见 grilling 决议（D1-D6）；本篇按该决议方向定稿未被锁定的细项（task_id 格式），并给出三条件论证。
+The bash tool needs to support the "start a long-running service → verify → stop" loop, which requires three capabilities: background execution (return a task_id immediately after spawn), log readback (bash_output), and a termination handle (bash_stop). Key premise: **iknow has no conversation-teardown event** — a repo-wide src search for `removeSession` / `deleteSession` / `closeSession` returned zero hits (measured 2026-08-18); only `registerShutdown` (`src/cli/runtime.ts:172-218`) runs a single layer of cleanup at process exit. Therefore the lifecycle anchor can only be chosen from the existing event surface. The resolution comes from the grilling decisions (D1-D6); this document finalizes the unlocked details (task_id format) in that resolution's direction and gives the three-condition argument.
 
 ## Decision
 
-background task 的生命周期由三个锚各司一段，其中**物理锚 = iknow 进程**：
+The background task lifecycle is anchored three ways, one segment each, where the **physical anchor = the iknow process**:
 
-- **conversation = 可见性 + 操作权锚**：conversationId 仅作记账字段与 bash_output / bash_stop 的入参过滤（`task_not_in_scope` 拒绝跨 conversation 读/停的范围），**不参与 kill 锚点** —— 没有 conversation 拆除事件可挂（检索零命中），不为不存在的消费者发明机制。
-- **iknow 进程 = 物理边界锚**：退出前 reap 全部 running child + bwrap `--die-with-parent` 兜底宿主被强杀（SIGKILL）场景。
-- **home 项目树 = 落盘命名空间锚**（ADR-0088；原文 workspace root **superseded**）：registry 落在 `<dataDir 或 ~/.iknow>/projects/<slug>/tasks/`，与会话记录同一 slug。`--workspace-root` 互不可见 **不再**适用于 tasks。
+- **conversation = visibility + operation-rights anchor**: conversationId serves only as a bookkeeping field and an input filter for bash_output / bash_stop (the `task_not_in_scope` rejection bounds cross-conversation read/stop), and **takes no part in the kill anchor** — there is no teardown event to hook (zero search hits), and no mechanism is invented for consumers that do not exist.
+- **iknow process = physical boundary anchor**: before exit, reap all running children + bwrap `--die-with-parent` as backstop for the host being force-killed (SIGKILL).
+- **home project tree = on-disk namespace anchor** (ADR-0088; the original workspace root is **superseded**): the registry lives at `<dataDir or ~/.iknow>/projects/<slug>/tasks/`, the same slug as session records. "`--workspace-root` mutual invisibility" **no longer** applies to tasks.
 
-关键子决策：
+Key sub-decisions:
 
-- **D1.1 退出前 reap（mirror subagent）**：`registerShutdown`（`src/cli/runtime.ts:172-218`）→ manager.shutdown() 复刻 `src/harness/subagent/manager.ts:479` shutdown 链：清 timer / killFallback → abort in-flight → SIGTERM 全部 running child → ≤5s 等退出（`SHUTDOWN_SIGKILL_GRACE_MS = 5000`）→ SIGKILL 兜底。
-- **D1.2 保留 bwrap `--die-with-parent`**：内核在父进程死亡时无条件投递死亡信号，含宿主被 SIGKILL 的场景——它与 background（detached 进程组、独立生命周期）不是冲突方，而是防泄漏的正确语义。后台 task 必须能横跨 sandbox runner 的返回而存活，同时必须随 iknow 进程死亡而终止，两层由不同机制承担。
-- **D1.3 registry 双层**：内存 Map（child/pgid/status 活句柄，仅进程内有效）+ 落盘 `<dataDir 或 ~/.iknow>/projects/<slug>/tasks/<task_id>.{json,log}`（ADR-0088）。json 记 owner_pid + conversationId。路径派生与会话池同一 `(baseDir, projectIdentityRoot)` 公式，不再 mirror memory 的 workspace-root 先例。
-- **D1.4 conversationId 纯记账**：不参与 kill 锚点；可见性 scope（bash_output / bash_stop 按 conversationId 过滤）是独立轴，本 ADR 只声明三锚分工终版（见 decision 首段）。
-- **D1.5 启动 stale 清扫**：启动扫 tasks/，只对 owner_pid 已死的记录动手（owner 活着 = 另一 iknow 进程的活 task，跳过）：杀进程组 + 标 dead + 日志卫生。无文件锁——单写者（每 iknow 进程只写自己的 task 文件）+ 幂等清扫（`/proc/<pid>/stat` 的 starttime 与 registry 记录比对，不一致只标 dead 不动手——pgid 已被内核回收复用而误杀它是不可接受故障）。
-- **D1.6 治理值定稿（引该决议 D6，此处即 SSOT）**：并发上限 **8**；达到上限时以正面措辞拒绝（说明现状 + 可用动作，不用负面禁令）；日志读取只回尾部防 context 爆：默认 **12KB**、上限 **100KB**（bash_output 的 max_bytes 参数语义）。
-- **D1.7 task_id 格式定稿（此前未定稿，本篇定稿）**：`bg-` 前缀 + 12 位随机 hex（`crypto.randomBytes(6).toString("hex")`，等价 randomUUID）。理由：短前缀便于日志 / ask hint 辨认；12 hex = 48 bit 熵碰撞概率可忽略；不自增、不泄露递增计数；文件名安全（无路径分隔符/点问题）、检索友好、与 bash_stop / bash_output 入参一一对应。
-- **D1.8 bash_stop 句柄语义**：host 侧 `kill(-pgid)`，SIGTERM → 2s → SIGKILL（复用 `src/harness/sandbox/runner.ts:121-129` stopTree 模式）；不给模型裸 pid——沙箱内 pid namespace 与宿主不同，task_id 是唯一干净句柄。
-- **D1.9 Out of scope（入 fog / 单独跟踪）**：conversation lifecycle v2（createdAt/archivedAt schema、archive、session events、busy/idle、SSE 接缝）——单独 grilling issue 跟踪，实施票仅预留 `onConversationDeleted(conversationId)` 订阅缝；服务完成通知机制（模型用 bash_output 轮询，先观察）；egress 侧 secret 审计。
+- **D1.1 Reap before exit (mirror subagent)**: `registerShutdown` (`src/cli/runtime.ts:172-218`) → manager.shutdown() replicates the `src/harness/subagent/manager.ts:479` shutdown chain: clear timers / killFallback → abort in-flight → SIGTERM all running children → wait ≤5s for exit (`SHUTDOWN_SIGKILL_GRACE_MS = 5000`) → SIGKILL as backstop.
+- **D1.2 Keep bwrap `--die-with-parent`**: the kernel unconditionally delivers the death signal when the parent dies, including when the host is SIGKILLed — it is not in conflict with background (detached process group, independent lifecycle) but is the correct anti-leak semantics. A background task must survive the sandbox runner's return, and must die with the iknow process; the two layers are carried by different mechanisms.
+- **D1.3 Two-layer registry**: in-memory Map (child/pgid/status live handles, valid only within the process) + on-disk `<dataDir or ~/.iknow>/projects/<slug>/tasks/<task_id>.{json,log}` (ADR-0088). The json records owner_pid + conversationId. Path derivation uses the same `(baseDir, projectIdentityRoot)` formula as the session pool, no longer mirroring the memory workspace-root precedent.
+- **D1.4 conversationId is pure bookkeeping**: not part of the kill anchor; visibility scope (bash_output / bash_stop filtered by conversationId) is an independent axis — this ADR only declares the final three-anchor division of labor (see the opening paragraph of the Decision).
+- **D1.5 Stale sweep at startup**: scan tasks/ at boot, act only on records whose owner_pid is dead (a live owner = a live task of another iknow process, skip): kill the process group + mark dead + log hygiene. No file locks — single writer (each iknow process writes only its own task files) + idempotent sweep (compare `/proc/<pid>/stat` starttime against the registry record; on mismatch only mark dead without acting — mistakenly killing a pgid already recycled by the kernel is an unacceptable failure).
+- **D1.6 Governance values finalized (cites that resolution's D6; this is the SSOT)**: concurrency cap **8**; at the cap, refuse in positive wording (state the current situation + available actions, no prohibitive phrasing); log reads return the tail only to prevent context blowup: default **12KB**, cap **100KB** (the semantics of bash_output's max_bytes parameter).
+- **D1.7 task_id format finalized (previously open, finalized here)**: `bg-` prefix + 12 random hex characters (`crypto.randomBytes(6).toString("hex")`, equivalent to randomUUID). Rationale: a short prefix aids recognition in logs / ask hints; 12 hex = 48 bits of entropy, collision probability negligible; no auto-increment, no leaked counter; filename-safe (no path separators / dot issues), search-friendly, one-to-one with bash_stop / bash_output inputs.
+- **D1.8 bash_stop handle semantics**: host-side `kill(-pgid)`, SIGTERM → 2s → SIGKILL (reuses the `src/harness/sandbox/runner.ts:121-129` stopTree pattern); never hand the model a bare pid — the pid namespace inside the sandbox differs from the host, and task_id is the only clean handle.
+- **D1.9 Out of scope (into fog / tracked separately)**: conversation lifecycle v2 (createdAt/archivedAt schema, archive, session events, busy/idle, SSE seams) — tracked as its own grilling issue, the implementation ticket only reserves an `onConversationDeleted(conversationId)` subscription seam; service-completion notification mechanism (the model polls with bash_output, observe first); egress-side secret auditing.
 
-## 三条件论证
+## Three-Condition Argument
 
-- **hard-to-reverse**：registry 落盘形状 + task_id 对外契约（bash_output / bash_stop 入参）一旦有真实 task 即难迁移——换格式要动存量 `<task_id>.json/log` 与模型侧工具调用；生命周期锚选择决定孤儿进程的清理语义，事后换锚要么漏清泄漏孤儿，要么误杀别人进程。
-- **surprising-without-context**：三个「新手必踩」点——为何不做 conversation 拆除 reap（没有拆除事件可挂，不发明无消费者的机制，答案在一个检索之内）；为何保留 `--die-with-parent`（看起来与长驻服务冲突，实为防泄漏的正确语义，后台独立性由 detached 进程组承担）；为何 stale 清扫只动 owner 已死记录（多 iknow 进程共存时误杀他人活 task 是不可接受的事故）。
-- **real-trade-off**：生命周期锚三选——「三锚分治（conversation = 可见性 / iknow 进程 = 物理边界 / workspace root = 命名空间）」vs 单锚 conversation（无事件可挂，直接否决）vs 完全落盘自治（脱离进程边界则无法在宿主存活时保证干净退出前清理）；有文件锁 vs 单写者 + 幂等清扫（锁引入跨进程耦合与死锁面，幂等清扫以 starttime 比对换取等价安全）；starttime 校验 vs 信任 pgid（信任 pgid 在 PID 回收复用场景下会杀错进程）。
+- **hard-to-reverse**: the registry's on-disk shape + the task_id external contract (bash_output / bash_stop inputs) become hard to migrate once real tasks exist — a format change touches the existing `<task_id>.json/log` files and model-side tool calls; the lifecycle-anchor choice determines orphan-process cleanup semantics, and switching anchors afterwards either leaks orphans or kills someone else's process.
+- **surprising-without-context**: three "every newcomer trips" points — why no conversation-teardown reap (no teardown event to hook; no mechanisms invented without consumers; the answer is one search away); why keep `--die-with-parent` (it looks like it conflicts with long-running services but is in fact the correct anti-leak semantics, background independence being carried by the detached process group); why the stale sweep only touches records whose owner is dead (with multiple iknow processes coexisting, killing another's live task is an unacceptable incident).
+- **real-trade-off**: three-way lifecycle-anchor choice — "three-anchor division (conversation = visibility / iknow process = physical boundary / workspace root = namespace)" vs single conversation anchor (no event to hook, rejected outright) vs fully on-disk self-governance (outside the process boundary you cannot guarantee a clean pre-exit sweep while the host lives); file locks vs single writer + idempotent sweep (locks introduce cross-process coupling and a deadlock surface; the idempotent sweep buys equivalent safety with the starttime comparison); starttime verification vs trusting pgid (trusting pgid kills the wrong process under PID recycling).
 
 ## Consequences
 
-- bash 工具出现第三形态：`background: true` 的 task 不再被 sandbox runner 的 tier timer 收割，存活语义移交给 manager + bwrap `--die-with-parent` 两层。
-- iknow 进程必须保证退出路径完整：`registerShutdown` 是唯一出口，serve / chat 的既有 shutdown 链不变，manager.shutdown 以镜像方式接入。
-- 多个 iknow 进程共享同一 `projects/<slug>/tasks/` 时互不干扰：各写各的文件，清扫只动 owner 已死记录。
-- 治理数值（并发 8 / 日志 12KB 默认 100KB 上限 / task_id 格式）自此固定在 ADR，实施与 CLI 文档一律引用本篇，不写死于计划。
-- 实施按 manager + registry 落盘 + 状态机 → bash background e2e → bash_output / bash_stop + 装配 → conversation scope + 并发上限 → 退出 reap + 启动清扫 + onConversationDeleted 接缝共 5 commits 提供证据，各 commit 单逻辑任务。
+- The bash tool gains a third form: a `background: true` task is no longer harvested by the sandbox runner's tier timer; survival semantics transfer to the two layers of manager + bwrap `--die-with-parent`.
+- The iknow process must guarantee a complete exit path: `registerShutdown` is the only exit; the existing shutdown chains of serve / chat stay unchanged, manager.shutdown hooks in by mirroring.
+- Multiple iknow processes sharing one `projects/<slug>/tasks/` do not interfere: each writes its own files, and the sweep only touches records whose owner is dead.
+- Governance values (concurrency 8 / log 12KB default 100KB cap / task_id format) are pinned in this ADR from now on; implementation and CLI docs reference this document, none hard-coded in plans.
+- Implementation provides evidence across 5 commits, one logical task each: manager + on-disk registry + state machine → bash background e2e → bash_output / bash_stop + assembly → conversation scope + concurrency cap → exit reap + startup sweep + onConversationDeleted seam.
 
 ## Evidence
 
-- grilling resolution（D1-D6 + post-close 修订 comment）；architecture-change-reviewer PASS（2026-08-18，5/5 yes，记录于 bash-service-loop plan）。
-- 前提断言（conversation 拆除事件检索零命中、registerShutdown / shutdown / stopTree / fs-policy 各锚点的源码位置）2026-08-18 对当前 HEAD 实测确认。
-- ACR 5 维 PASS（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier）。
+- Grilling resolution (D1-D6 + post-close revision comment); architecture-change-reviewer PASS (2026-08-18, 5/5 yes, recorded in the bash-service-loop plan).
+- Premise assertions (zero search hits for conversation-teardown events; source locations of the registerShutdown / shutdown / stopTree / fs-policy anchors) confirmed by measurement against the then-current HEAD on 2026-08-18.
+- ACR 5-dimension PASS (bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier).

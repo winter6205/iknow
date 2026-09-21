@@ -1,100 +1,100 @@
-# 0070. worktree 占用锁：可选档位、零新状态、释放靠显式 exit
+# 0070. Worktree occupancy lock: opt-in tier, zero new state, release by explicit exit
 
 Date: 2026-09-08
 
 Status: accepted
 
-> 依赖同日建立的可恢复性分类轴（新 kind `worktree_claimed` 进表）。
+> Depends on the recoverability classification axis established the same day (new kind `worktree_claimed` enters the table).
 
 ## Context
 
-`enter-task-worktree` 今天有四道检查（调用方在主仓 / 目标存在 / 目标是 linked 检出 / 同仓库），**没有一道是归属**。因此两个活会话可以同时绑同一棵树：交错编辑、共享同一个 git index、提交互相插队。ADR-0037 的立项理由正是「多个会话并行改动会互相踩踏」，而这条路径上没有闸。
+`enter-task-worktree` today has four checks (caller in the main checkout / target exists / target is a linked checkout / same repository), and **not one of them is ownership**. So two live sessions can bind the same tree at once: interleaved edits, one shared git index, commits cutting in front of each other. ADR-0037 was justified precisely by "parallel sessions mutating each other's work", and this path has no gate.
 
-同时，操作员日常并不需要这把锁——多数时候允许共用（例如新会话接手上一会话保留下来的树继续任务）正是想要的工作流。所以问题不是「要不要排他」，而是「排他该不该是默认」。
+Meanwhile the operator's daily use does not need this lock — allowing sharing most of the time (e.g. a new session taking over a tree a previous session kept, to continue the task) is exactly the wanted workflow. So the question is not "exclusivity or not" but "should exclusivity be the default".
 
-一个已被排除的错误方向：把 owner sidecar 当授权凭据。sidecar 的职责是**告知**，且 `enter-task-worktree` 刻意不查它；用它当锁会把「新会话接手旧树」这条正当工作流一并堵死。
+One wrong direction already ruled out: treating the owner sidecar as an authorization credential. The sidecar's job is to **inform**, and `enter-task-worktree` deliberately does not consult it; making it a lock would also block the legitimate "new session continues on the old tree" workflow.
 
 ## Decision
 
-### 1. 可选档位
+### 1. Opt-in tier
 
-新增 `isolation.worktreeExclusive`（boolean-only，**默认 OFF**），与 `isolation.worktreeOnMutate` **同一套值域纪律**：缺失或非 `true` 一律按 OFF（fail-closed）；只在启动加载点读取一次；config 层不读 git、不持会话状态；会话根改绑不隐式重载 settings（ADR-0037 §5）。
+New `isolation.worktreeExclusive` (boolean-only, **default OFF**), following the **same value-domain discipline** as `isolation.worktreeOnMutate`: missing or anything other than `true` means OFF (fail-closed); read once at the startup load point; the config layer does not read git and holds no session state; session-root rebind does not implicitly reload settings (ADR-0037 §5).
 
-**OFF 档行为与今日逐字节一致**——四道检查不变、不新增任何拒绝路径。零回归是本档位的验收项，不是隐含假设。
+**OFF-tier behavior is byte-identical to today's** — the four checks unchanged, no new rejection path. Zero regression is this tier's acceptance criterion, not an implicit assumption.
 
-### 2. 占用判据：现存会话记录的 `workspaceRoot`
+### 2. Occupancy criterion: `workspaceRoot` of live session records
 
-ON 时 enter 前置一道检查：目标树是否被**别的现存会话**占用。
+When ON, enter gains one pre-check: is the target tree occupied by **another live session**.
 
-**占用 = 现存会话记录里有别人的 `workspaceRoot` 指着这棵树。** 判据只有这一条。
+**Occupancy = among live session records, someone else's `workspaceRoot` points at this tree.** That is the only criterion.
 
-于是释放是自动的：会话正常 `exit-task-worktree` → 其 `workspaceRoot` 改回主仓根 → 占用消失 → 别人自然能进。**不需要任何释放机制。**
+Release is therefore automatic: a session exits normally via `exit-task-worktree` → its `workspaceRoot` rebinds to the main-checkout root → the occupancy disappears → others can enter. **No release mechanism is needed at all.**
 
-### 3. 零新持久状态
+### 3. Zero new persistent state
 
-不写锁文件、不给 owner sidecar 加字段、不建占用注册表、不加跨调用存活的内存 Map。
+No lock file, no new owner-sidecar field, no occupancy registry, no in-memory Map surviving across calls.
 
-这条是硬约束而非偏好：任何跨进程共享状态一旦失效（进程崩溃、机器重启、记录过期）就重新制造僵尸占用，而僵尸占用正是本 ADR 要消除的东西。用既有字段当判据，僵尸问题在定义上不存在——**记录不在，占用就不在**。
+This is a hard constraint, not a preference: any cross-process shared state, once stale (process crash, machine reboot, expired record), recreates zombie occupancy — and zombie occupancy is exactly what this ADR exists to eliminate. Using an existing field as the criterion makes the zombie problem undefined by construction: **no record, no occupancy**.
 
-### 4. 僵尸占用的恢复走既有路径
+### 4. Zombie occupancy recovers via existing paths
 
-会话是持久可恢复的：恢复 A 会话时引擎带着 A 的绑定起来（`worktree-rebind.ts:790-798`「restart-safe explicit opt-in」、`worktree-gate.ts:913` `initiallyBound`），A 自己调 `exit-task-worktree` 即释放。**不丢历史、不删会话、不需要新命令。**
+Sessions are persistent and restorable: restoring session A starts the engine with A's binding (the "restart-safe explicit opt-in" adoption at `worktree-rebind.ts:790-798`; `worktree-gate.ts:913` `initiallyBound`), and A calling `exit-task-worktree` itself releases the claim. **No history lost, no session deleted, no new command needed.**
 
-次级路径：删除该会话记录，占用同样消失（代价是丢掉那段历史）。
+Secondary path: deleting that session record also clears the occupancy (at the cost of losing that history).
 
-### 5. 模型侧无 force
+### 5. No model-side force
 
-`enter-task-worktree` 的 `inputSchema` **不新增**任何覆盖 / 强制字段。
+`enter-task-worktree`'s `inputSchema` gains **no** override or force field.
 
-被锁约束的一方不得持有覆盖开关，否则锁等于建议——而操作员打开这个档位，恰恰是因为需要它真的拦得住。覆盖权只在操作员侧（Decision 4 的两条路径）。
+A party locked out by the gate must not hold the override switch, or the lock is a suggestion — and the operator turned this tier on precisely because it needed to really block. Override authority lives only on the operator side (the two paths in Decision 4).
 
-### 6. 新 kind 与分类
+### 6. New kind and classification
 
-撞上占用 → typed 拒绝，`kind === "worktree_claimed"`，回执含**占用者会话 id** 与**释放路径**。
+Colliding with an occupancy → typed rejection, `kind === "worktree_claimed"`, receipt includes the **occupier's session id** and the **release path**.
 
-该 kind 进可恢复性分类表并归 `operator_required`——模型解不了别人的占用，因此回执自带停止指令，不得让模型重试。
+This kind enters the recoverability classification table and is classified `operator_required` — the model cannot resolve someone else's occupancy, so the receipt carries its own stop instruction and must not invite a model retry.
 
-### 7. 归属告知与本档位解耦
+### 7. Ownership disclosure is decoupled from this tier
 
-`enter-task-worktree` 成功回执告知「这棵树由会话 X 创建」是**恒定开**的：零成本（一次文件读）、永不阻塞、不受任何设置控制。
+The `enter-task-worktree` success receipt noting "this tree was created by session X" is **always on**: zero cost (one file read), never blocks, controlled by no setting.
 
-告知与拦截是两件事：告知让共用成为**知情**的决定，拦截让共用成为**被禁止**的决定。操作员可以只要前者（默认档），也可以两者都要（ON 档）。
+Informing and blocking are two things: informing makes sharing an **informed** decision, blocking makes sharing a **prohibited** decision. The operator can want only the former (default tier) or both (ON tier).
 
-## 已知限制
+## Known limitations
 
-- **L1 枚举范围**：占用判据依赖枚举现存会话记录，其入口与成本**未验**（spec Open Questions 1）。若代价过高而退回「只查当前 hub 已加载的会话」，语义**弱一档**：跨进程 / 跨 hub 的占用看不见，两个独立 CLI 进程可同时 enter 同一棵树而互不拦截。退回时必须在设置项文档、回执文案与 spec 三处显式写明，**不得**让操作员以为拿到了跨进程排他。
-- **L2 并发 TOCTOU**：占用来自持久化记录，而记录在「工具成功 + 会话保存」时才写。两个会话在同一时间窗内 enter 同一棵尚无记录指向的树，可能都读到「无占用」而双双成功。本 ADR **不解决**——解决它需要锁文件或注册表，与 Decision 3 冲突。要求该窗口被测试**钉住行为**（而非假装互斥）并在文档写明；L1 的枚举越全，窗口越窄。
+- **L1 enumeration scope**: the occupancy criterion enumerates live session records; the entry point and cost are **unverified** (spec Open Questions 1). If the cost is too high and we fall back to "only sessions already loaded in the current hub", the semantics are **one notch weaker**: cross-process / cross-hub occupancy is invisible, and two independent CLI processes can enter the same tree without blocking each other. On fallback it must be stated explicitly in three places — the setting's documentation, the receipt text, and the spec — and the operator **must not** be left believing they got cross-process exclusivity.
+- **L2 concurrent TOCTOU**: occupancy comes from persisted records, and records are written only on "tool success + session save". Two sessions entering, within the same window, a tree no record points at yet may both read "no occupancy" and both succeed. This ADR **does not solve it** — solving it needs a lock file or a registry, conflicting with Decision 3. Tests must **pin the behavior** of that window (rather than pretend mutual exclusion) and the docs must state it; the fuller L1's enumeration is, the narrower the window.
 
 ## Why not
 
-- **Why not 排他作为默认档**：会堵死「新会话接手旧树继续任务」这条正当且常用的工作流；且默认档变更是全档位语义变更，代价与 ADR-0037 §9.1 的围栏反转同级，而收益只对少数多会话并行场景成立。
-- **Why not 活性检测（PID 探活 / 心跳 TTL）**：PID 探活有进程号复用与 serve 跨机失效；心跳要每会话一个定时器，是新机制新状态面。两者都是**不能保证可靠**的机制，而 Decision 4 已用既有 restart-safe 设计覆盖同一需求，零成本。
-- **Why not 新增 `release` 命令**：它的唯一独立价值是「解绑但保留会话记录」，而 Decision 4 的主路径（恢复会话 + 自己 exit）已经能不丢历史地解绑。将来若真的出现「为放开一棵树而不得不删掉想留的历史」并且觉得痛，再补；形状已想清（只改绑定记录、不动树、不动未提交改动），不会返工。
-- **Why not 锁文件 / 占用注册表**：见 Decision 3——引入跨进程共享状态就重新引入僵尸失效面。
-- **Why not 用 owner sidecar 当授权**：见 Context 末段；且 sidecar 归属反演是纯路径/文件推导，`enter-task-worktree` 刻意不查它，改查会同时破坏 ADR-0037 Amendment 2026-08-30 的「含他人树」语义。
+- **Why not exclusive-by-default**: it would block the legitimate and common "new session takes over the old tree to continue the task" workflow; and changing the default is an all-tier semantics change whose cost is on par with the fence reversal in ADR-0037 §9.1, while the benefit holds only for the minority multi-session-parallel scenario.
+- **Why not liveness detection (PID probe / heartbeat TTL)**: PID probing suffers pid reuse and breaks across machines under serve; heartbeats need a per-session timer — a new mechanism and a new state surface. Both are mechanisms that **cannot be guaranteed reliable**, whereas Decision 4 already covers the same need with the existing restart-safe binding design at zero cost.
+- **Why not a new `release` command**: its only standalone value is "unbind but keep the session record", and Decision 4's main path (restore the session, let it exit itself) already unbinds without losing history. If a real pain appears later — "deleting history I want to keep just to free a tree" — add it then; the shape is already worked out (touch only the binding record, never the tree, never uncommitted changes), so no rework.
+- **Why not a lock file / occupancy registry**: see Decision 3 — cross-process shared state reintroduces the zombie staleness surface.
+- **Why not the owner sidecar for authorization**: see the closing paragraph of Context; sidecar ownership is pure path/file derivation, `enter-task-worktree` deliberately does not consult it, and starting to consult it would also break the "includes someone else's tree" semantics of ADR-0037 Amendment 2026-08-30.
 
 ## Consequences
 
 ### Positive
 
-- 需要归属隔离的操作员有一个真的拦得住的档位；不需要的操作员零变化（OFF 档字节不变）。
-- 零新持久状态 ⇒ 零僵尸失效面；释放是 `exit` 的自动后果，不是需要维护的机制。
-- 与归属告知正交组合：默认档也能把共用变成知情决定。
+- Operators who need ownership isolation get a tier that really blocks; operators who don't see zero change (OFF tier byte-identical).
+- Zero new persistent state ⇒ zero zombie staleness surface; release is an automatic consequence of `exit`, not a mechanism to maintain.
+- Orthogonal composition with ownership disclosure: even the default tier turns sharing into an informed decision.
 
 ### Negative / Trade-offs
 
-- ON 档下 A 崩溃未 exit 时，B 被拒；恢复需要操作员介入（恢复 A 会话或删除其记录）。这是显式 opt-in 档位所接受的成本。
-- L1 / L2 是真实语义缺口，必须随实施一并写进文档，否则操作员会高估这把锁的强度。
-- 新增一个设置项即新增一档组合状态（`worktreeOnMutate` × `worktreeExclusive`），测试矩阵相应增加。
+- With ON, if A crashes without exiting, B is rejected; recovery requires operator action (restore session A, or delete its record). This is the accepted cost of an explicit opt-in tier.
+- L1 / L2 are real semantic gaps and must be documented alongside the implementation, or the operator will overestimate this lock's strength.
+- Every new setting is a new combination state (`worktreeOnMutate` × `worktreeExclusive`); the test matrix grows accordingly.
 
 ### Reversibility
 
-- 开关 OFF 即完整还原今日行为；已产生的 typed 拒绝不留任何持久痕迹（Decision 3）。
-- 移除该档位只需删设置项与一道前置检查；`worktree_claimed` kind 与表中一行可同批移除，无迁移。
+- Flipping the switch OFF fully restores today's behavior; typed rejections already produced leave no persistent trace (Decision 3).
+- Removing the tier takes only the setting plus one pre-check; the `worktree_claimed` kind and its row in the table can go in the same change — no migration.
 
 ## Evidence
 
-- enter 四道检查无归属：`src/session-api/worktree-rebind.ts:896-944`。
-- restart-safe adoption 与 `initiallyBound`：`worktree-rebind.ts:790-798`、`src/harness/isolation/worktree-gate.ts:913`。
-- 值域纪律参照：`src/config/settings.ts:223-226`（`worktreeOnMutate`）、`:299-303`（单读点 `resolveWorktreeOnMutate`）。
-- 幂等 re-enter：`worktree-rebind.ts` `if (current === target) return target`。
+- The four enter checks contain no ownership: `src/session-api/worktree-rebind.ts:896-944`.
+- Restart-safe adoption and `initiallyBound`: `worktree-rebind.ts:790-798`, `src/harness/isolation/worktree-gate.ts:913`.
+- Value-domain discipline reference: `src/config/settings.ts:223-226` (`worktreeOnMutate`), `:299-303` (single read point `resolveWorktreeOnMutate`).
+- Idempotent re-enter: `worktree-rebind.ts` `if (current === target) return target`.

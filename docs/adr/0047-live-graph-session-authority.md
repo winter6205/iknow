@@ -1,11 +1,11 @@
-# 0047. 长程图的权威态是会话级活图状态，不是无状态多次 run_graph
+# 0047. The long-run graph's authority state is session-level live graph state, not stateless repeated run_graph
 
 Date: 2026-09-07
 Status: accepted
 
-长程图执行要已完成不重演。V1 每次 `run_graph` 只在调用栈里留下 `GraphExecution`，父代理只拿到 condense JSON，TUI 进度在调用结束清掉，节点 `id` 跨调用挂不上旧 worker。因此 host 必须在会话持有 **活图状态**；不得把长程寄托在模型对 transcript 的记忆上。术语见 `docs/CONTEXT.md`。本 ADR 仍不锁修订 wire、活图创建/销毁时机。
+Long-run graph execution must never re-enact completed work. In V1 each `run_graph` leaves `GraphExecution` only on the call stack: the parent agent receives just condensed JSON, TUI progress is cleared when the call ends, and node `id`s cannot be matched to prior workers across calls. Therefore the host must hold **live graph state** at the session level; long-running work must not depend on the model's memory of the transcript. Terminology: see `docs/CONTEXT.md`. This ADR still does not lock revision wire formats or live-graph creation/teardown timing.
 
 ## Why not
 
-- **无状态多次 `run_graph`（票 B）**：host 不能强制跳过已完成 id；compact 之后更不可靠。
-- **把权威放进 todo 账本**：ADR-0046 已否把清单当管线。
+- **Stateless repeated `run_graph` (alternative B)**: the host cannot force skipping already-done ids; after compact it is even less reliable.
+- **Put the authority in the todo ledger**: ADR-0046 already rejected treating a list as a pipeline.

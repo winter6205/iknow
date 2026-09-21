@@ -1,14 +1,14 @@
-# 0024. 完成判定分成 HITL 与 `/goal` 自动模式两套逻辑模块
+# 0024. Completion judgment split into two logic modules: HITL and `/goal` auto mode
 
 Date: 2026-08-20
 Status: accepted
 
-产品口：本文「自动模式」= **goal 功能**（斜杠钉使命后的续跑），不是权限 `full_auto`。活人读 ADR-0032 + CONTEXT「自动模式」「goal 功能」。
+Product wording: "auto mode" in this document = the **goal feature** (continuation after a slash-pinned mission), not the permission mode `full_auto`. For current behavior read ADR-0032 + CONTEXT entries "auto mode" and "goal feature".
 
-Context: 字段已拆成 goal/taskFocus，但 verify 仍用一条 `goal ?? query`（及更早的 taskFocus）链，把 HITL 聊天接成完成向 LLM 判官；`/goal` 也没有独立自动循环。
+Context: the fields had been split into goal/taskFocus, but verify still used a single `goal ?? query` chain (and earlier taskFocus), wiring HITL chat into a completion-oriented LLM judge; `/goal` also had no independent auto loop.
 
-Decision: 同一套只读判官系统挂两套逻辑模块。正常模式（HITL）不请 LLM 评语义完成；`/goal` 钉上即自动循环，`task` 仅 `goal.text`，成功也评，停档为 Impossible 清 goal / 空转停循环不清 goal / 不可恢复错误清 goal。无默认轮次硬顶；命令可可选指定上限。自动模式内不存在 taskFocus（`session.taskFocus` 字段已由 ADR-0026 退役；compact 改任务摘录，自动模式不贴）。ADR-0017 的 checker 三级流 shape 保留；其「SUFFICIENT 永不请判官 / INSUFFICIENT 必请」仅覆盖完成向邀请。ADR-0018 的字段拆分与模型零写入保留；判定层三段公式作废。HITL 对 checker CONTRADICTED 的消费与声称窗口坐标 **amended by ADR-0073**（正常会话不因毁测试打回；`claimIndex` ≠ `round`）。
+Decision: one shared read-only judge system, two logic modules. Normal mode (HITL) does not ask the LLM about semantic completion; pinning `/goal` starts an auto loop where `task` is only `goal.text`, success is also judged, and stop tiers are: Impossible clears the goal / spinning-in-place stops the loop without clearing the goal / unrecoverable error clears the goal. No default hard round cap; a command may optionally specify one. taskFocus does not exist inside auto mode (the `session.taskFocus` field was retired by ADR-0026; compact switched to task excerpts, not pasted in auto mode). ADR-0017's checker three-tier flow shape is kept; its "SUFFICIENT never invites the judge / INSUFFICIENT always does" covers completion-oriented invitations only. ADR-0018's field split and zero model writes are kept; its three-segment judging formula is voided. HITL's consumption of a checker CONTRADICTED and the claim-window coordinates are **amended by ADR-0073** (normal sessions are not bounced for broken tests; `claimIndex` ≠ `round`).
 
-Why: 参考 Claude Code 默认聊天 vs `/goal` Stop hook；统一公式是职责错配。
+Why: mirrors the split between plain chat behavior and Stop-hook-driven `/goal` continuation; a single unified formula mismatched the two responsibilities.
 
-Evidence: 完成判官门控的 grilling 决议。
+Evidence: the grilling resolution on completion-judge gating.

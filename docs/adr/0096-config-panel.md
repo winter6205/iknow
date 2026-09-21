@@ -1,16 +1,16 @@
-# 0096. `/config` 升为设置面板；FS / worktree 门禁 / 子代理并发上限同屏
+# 0096. `/config` becomes a settings panel; FS / worktree gating / subagent concurrency cap on one screen
 
 Date: 2026-09-15
 Status: accepted
 
-TUI 无参 `/config` 打开与 `/model` 同族的浮层面板（↑↓ 选行、Enter 改值、Esc 保存退出并落盘用户层 settings），不再只靠命令行参数翻文件系统隔离档。首版三行：文件系统隔离档（全局 / 工作区）、worktree isolation mode（ON/OFF）、子代理并发上限预设 `3 | 5 | 9 | 15 | unlimited`。有参 `/config …` 仍留给 chat/serve 与脚本，语义与面板同一 holder + 同一持久化。后续设置只加行，不加新 slash。规格后续 `specs/` 承接，本 ADR 只锁形状与上限告知策略。
+Parameterless `/config` in the TUI opens a floating panel of the same family as `/model` (↑↓ selects a row, Enter edits the value, Esc saves, exits, and persists to user-layer settings), instead of only flipping filesystem isolation levels through command-line arguments. The first version has three rows: filesystem isolation level (global / workspace), worktree isolation mode (ON/OFF), and the subagent concurrency cap preset `3 | 5 | 9 | 15 | unlimited`. The parameterized `/config …` form stays for chat/serve and scripts, sharing the panel's single holder and single persistence semantics. Future settings only add rows, never new slashes. The spec is picked up later under `specs/`; this ADR locks only the shape and the cap-disclosure policy.
 
-**Why not 每个开关一个 slash：** `/config` 已占词表；再加 `/isolation` `/subagent-cap` 会把词表和面板族打散，和 `/model` 已证明的「一词表入口 + 一块面板」相反。
+**Why not one slash per toggle:** `/config` already occupies the vocabulary; adding `/isolation` `/subagent-cap` would scatter the command table and the panel family — the opposite of what `/model` already proved: one vocabulary entry + one panel.
 
-**Why not 把并发上限写进 system 前缀：** 前缀要稳；上限会在面板里改。常驻 system 要么过期要么每改一次抖缓存。闸是 manager 硬顶；模型侧靠两处现势——`spawn_subagent` 工具 description 插入当前上限，以及超限时 `SubAgentCapacityError` 回 tool_result（已含 `active/max`）。人看面板与 `/info`。不在会话开头另灌一段「当前上限 N」。
+**Why not write the concurrency cap into the system prefix:** the prefix must stay stable while the cap changes in the panel. A resident system value either goes stale or busts the cache on every change. The gate is the manager's hard cap; the model side learns the current state through two surfaces — the `spawn_subagent` tool description embeds the current cap, and on overflow `SubAgentCapacityError` returns a tool_result (which already carries `active/max`). Humans see the panel and `/info`. No extra "current cap N" is injected at session start.
 
-**Why not 超限才告诉模型、description 里不写 N：** 模型在打出第 N+1 张之前需要规划并行度；description 里的 N 与错误回执必须同一数字。超限回执保留，不是唯一告知通道。
+**Why not disclose the cap only on overflow, not in the description:** the model must plan its parallelism before issuing the (N+1)-th spawn; the N in the description and the N in the error receipt must be the same number. The overflow receipt stays; it just is not the only disclosure channel.
 
-**Why not 去掉硬顶（只靠「unlimited」一种）：** 无帽会把本机进程与上下文打满。`unlimited` 是预设之一：manager 不做并发拒绝，OS / 内存仍是事实顶。默认仍 15。
+**Why not drop the hard cap (keep only `unlimited`):** with no cap, local processes and context get saturated. `unlimited` is one of the presets: the manager performs no concurrency rejection; OS / memory remain the factual ceiling. The default stays 15.
 
-Amends ADR-0092（TUI `/config` 入口从「参数翻 FS 档」扩成面板；FS 两档值域不变）。Amends ADR-0037（`worktreeOnMutate` 可在会话内由面板翻转并落盘，不改变门禁从不 auto-provision）。Amends ADR-0014（上限可在运行中经同一 manager 顶调整；图节点仍计入同一顶；`unlimited` 视为该顶不拒绝）。
+Amends ADR-0092 (the TUI `/config` entry widens from "arguments flip the FS level" to a panel; the two-level FS value range is unchanged). Amends ADR-0037 (`worktreeOnMutate` can be toggled in-session by the panel and persisted; the gate still never auto-provisions). Amends ADR-0014 (the cap can be adjusted at runtime through the same manager ceiling; graph nodes still count against the same ceiling; `unlimited` means that ceiling never rejects).

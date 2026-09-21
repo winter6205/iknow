@@ -1,47 +1,47 @@
-# 0045. sandbox 执行面 server 化：同进程 router + 两型协议（短生命周期 / 长生命周期 task-handle）
+# 0045. Server-izing the sandbox execution surface: same-process router + two protocol shapes (short-lived / long-lived task-handle)
 
 Date: 2026-09-06
 Status: accepted
 
-> 本 ADR 承接 closed-world bash fence 轨道的决策 ticket，落定 sandbox 执行面的边界形态与消息合同；实施据此推进。本 ADR 只锁合同边界（消息形状、超时/中断、截断、fail-loud、IPC 故障分型），文件 / 模块 / 类型名留给实施 bullet。
+> This ADR lands the decision ticket of the closed-world bash fence track: it fixes the boundary shape of the sandbox execution surface and the message contracts, and implementation proceeds from here. This ADR locks contract boundaries only (message shapes, timeout/interrupt, truncation, fail-loud, IPC failure typing); file / module / type names are left to implementation.
 >
-> ADR-0022 / ADR-0037 §9 继续管辖 bash 围栏的**物理语义**（per-call network opt-in、闭世界白名单、fail-loud 分型）；本 ADR 只挪**执行面位置**（in-process 直调 → server 边界），不改 fence argv 形状、不动白名单、不动 `--unshare-net` 行为。
+> ADR-0022 / ADR-0037 §9 keep governing the **physical semantics** of the bash fence (per-call network opt-in, closed-world allowlist, fail-loud typing); this ADR only moves the **execution-surface position** (in-process direct call → server boundary) — it does not change fence argv shape, the allowlist, or `--unshare-net` behavior.
 
 ## Context
 
-`sandbox/execution` 面今日为 in-process 直调：bash tool（`src/harness/aci/tools/bash.ts:218-224`）经 `runInSandbox` → `spawnWithStopSignal` 同步等子进程退出；background（`src/harness/background/manager.ts:239-291` 的 `defaultBackgroundSpawn`）绕过 `runInSandbox`，**直接** `nodeSpawn(fence.argv[0], …)` 起 detached 进程组，host 侧持 `child.pid` 落 `record.pgid`（`manager.ts:388`），`bash_stop` 在 host 侧经 `process.kill(-pid, …)` 升级（`manager.ts:587-624`）；verify（`src/harness/verify/sandbox-run.ts:60-77` 的 `makeDefaultRunVerify`）经 `runInSandbox` 同步等子进程退出。三处装配虽 fence argv 同源（`createBwrapFence` + `createClosedWorldFsPolicy`（**2026-09-13 已随 ADR-0092 退役**，现为 `createFsPolicy`）），但**执行体裸用 `node:child_process`**——bash 工具经 `runInSandbox`、background 经 `nodeSpawn`、verify 又经 `runInSandbox`，是三条不同的 `child_process.spawn` 接入点。
+Today the `sandbox/execution` surface is in-process direct calls: the bash tool (`src/harness/aci/tools/bash.ts:218-224`) goes `runInSandbox` → `spawnWithStopSignal` and waits synchronously for child exit; background (`defaultBackgroundSpawn` at `src/harness/background/manager.ts:239-291`) bypasses `runInSandbox` and **directly** `nodeSpawn(fence.argv[0], …)` a detached process group, with the host keeping `child.pid` as `record.pgid` (`manager.ts:388`) and `bash_stop` escalating host-side via `process.kill(-pid, …)` (`manager.ts:587-624`); verify (`makeDefaultRunVerify` at `src/harness/verify/sandbox-run.ts:60-77`) waits synchronously for child exit through `runInSandbox`. The three sites assemble from the same fence source (`createBwrapFence` + `createClosedWorldFsPolicy` (**retired with ADR-0092 as of 2026-09-13**, now `createFsPolicy`)), but the **executors use `node:child_process` raw** — bash via `runInSandbox`, background via `nodeSpawn`, verify again via `runInSandbox`: three distinct `child_process.spawn` entry points.
 
-2026-09-06 closed-world bash fence 轨道 Round 2 ACR（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer）开轨评审的 `unclear/no` 项指出三个缺口：
+Round-2 ACR review (bounded-context-guardian / defensive-contract-validator / error-handling-enforcer) of the 2026-09-06 closed-world bash fence track opened the track with `unclear/no` items naming three gaps:
 
-1. **缺统一执行面**——三处独立 spawn 入口，未来接新隔离 / 新资源限制 / 新 audit 钩子时三处同改，违反 `min-change-verifier`。
-2. **缺 IPC 边界 5 类故障路径（empty / negative / overflow / concurrent / exception）的统一合同**——今日各自 catch `child.once("error")` 与 `truncateByCodePoint` 落点，`RangeError` / 空帧 / server-down mid-spawn 在 background 路径完全裸奔。
-3. **缺失败合同（server 不可达 / signal abort）**——若直接退化为 in-process spawn，等于悄悄旁路 ADR-0037 §9 闭世界围栏物理合同，违反 `error-handling-enforcer` 的「fail-loud 不静默降级」纪律。
+1. **No unified execution surface** — three independent spawn entries; any future new isolation / resource limit / audit hook means changing all three, violating `min-change-verifier`.
+2. **No unified contract for the IPC boundary's 5 failure classes (empty / negative / overflow / concurrent / exception)** — today each site catches `child.once("error")` and lands `truncateByCodePoint` on its own; `RangeError` / empty frames / server-down mid-spawn are entirely unhandled on the background path.
+3. **No failure contract (server unreachable / signal abort)** — degrading straight back to in-process spawn would quietly bypass ADR-0037 §9's closed-world fence physical contract, violating `error-handling-enforcer`'s "fail-loud, never silently degrade" discipline.
 
-`BwrapFence` 本身已经是 `Object.freeze({argv, sealed: true})` 的纯数据 token（`bwrap.ts:172`）——**无 IPC 状态、无跨会话状态、无跨进程 mutable state**；现有 `session-api/http.ts:8787`（TCP 127.0.0.1 暴露给 SPA / 外部 CLI 客户端）和 `traceserver/serve.ts` 都是给**进程外**消费者用的 HTTP server。bash sandbox server 的三个消费方全部在**同一 Node 进程内**（harness CLI / chat / hub），引入跨进程 IPC 边界（Unix socket / fork / TCP loopback）对纯数据 token 形态是 over-engineering。
+`BwrapFence` itself is already a pure-data token `Object.freeze({argv, sealed: true})` (`bwrap.ts:172`) — **no IPC state, no cross-session state, no cross-process mutable state**; the existing `session-api/http.ts:8787` (TCP 127.0.0.1 exposed to the SPA / external CLI clients) and `traceserver/serve.ts` are HTTP servers for **out-of-process** consumers. All three consumers of a bash sandbox server live **in the same Node process** (harness CLI / chat / hub), so introducing a cross-process IPC boundary (Unix socket / fork / TCP loopback) for a pure-data token shape is over-engineering.
 
-本 ADR 裁决：把执行面整理成 **同进程 router**（参考 `createTraceRouter` 的 mountable router 形态，`traceserver/serve.ts:51-83`），由 `runInSandbox` 等直调变成 router handler；不 fork 子进程、不起独立 daemon、不走 Unix socket；协议分两型（短生命周期 request/response、长生命周期 task-handle）覆盖前台 / verify / 后台三类调用方。
+This ADR rules: consolidate the execution surface into a **same-process router** (mirroring `createTraceRouter`'s mountable router shape, `traceserver/serve.ts:51-83`), turning `runInSandbox` and friends from direct calls into router handlers; no forked child process, no standalone daemon, no Unix socket; the protocol splits into two shapes (short-lived request/response, long-lived task-handle) covering the foreground / verify / background caller classes.
 
 ## Decision
 
-### 1. server 形态：同进程 router（mountable，模块边界）
+### 1. Server shape: same-process router (mountable, module boundary)
 
-新模块 `src/harness/sandbox/server/` 暴露 `createSandboxServer(opts)`，返回一个 in-process router（`(req: SandboxRequest) => Promise<SandboxResponse>` 或对长生命周期 task-handle 的 `AsyncIterable<SandboxTaskEvent>`）。形态镜像 `createTraceRouter`（`traceserver/serve.ts:61`）——纯工厂、无 server、无共享 mutable state；调用方在 harness 装配期持一份 router 引用，三处消费方（bash tool / background manager / verify）共用。
+A new module `src/harness/sandbox/server/` exports `createSandboxServer(opts)`, returning an in-process router (`(req: SandboxRequest) => Promise<SandboxResponse>`, or for long-lived task-handles an `AsyncIterable<SandboxTaskEvent>`). The shape mirrors `createTraceRouter` (`traceserver/serve.ts:61`) — pure factory, no server, no shared mutable state; callers hold one router reference from harness assembly, shared by the three consumers (bash tool / background manager / verify).
 
-**不**做的事（明确否决于 §3 Alternatives）：
+Explicitly **not** doing (rejected in §3 Alternatives):
 
-- **不 fork 子进程跑 server**——fence 是纯数据 token，fork 把无状态 token 装进独立进程，引入与主进程无关的 state，违反「fence 是纯数据 frozen argv token」的最小化。
-- **不起独立 daemon / TCP server**——三个消费方全部在同一 Node 进程内，daemon 强制跨 IPC 边界给同进程消费增加延迟、复杂度、端口冲突、生命周期治理（supervisor / reaper / heartbeat）新成本。
-- **不走 Unix socket / `child_process.fork` 的 IPC channel**——仓库无 Unix socket 或 fork 先例（grep `child_process.fork` / `net.createServer` / `unix:` 均为零命中），引入全新基建面；同进程 router 用函数调用即可，不需要 IPC channel。
+- **No forked child process running the server** — the fence is a pure-data token; forking parks a stateless token in a separate process, introducing state unrelated to the main process and violating the minimalism of "fence is a pure-data frozen argv token".
+- **No standalone daemon / TCP server** — all three consumers are inside one Node process; a daemon forces an IPC crossing that adds latency, complexity, port conflicts, and lifecycle governance (supervisor / reaper / heartbeat) costs for in-process consumers.
+- **No Unix socket / `child_process.fork` IPC channel** — the repo has no Unix-socket or fork precedent (grep `child_process.fork` / `net.createServer` / `unix:` all zero hits), so it would be an entirely new infrastructure surface; a same-process router is just a function call and needs no IPC channel.
 
-`runInSandbox` 在迁移期内**降级为 router handler 的薄包装**——直接 `router(req) → response`，不做 `child_process.spawn` 直调。**降级 = 不删**（兼容既有 30+ 测试 fixture），但其 spawn 调用点经 server 边界表达；验收项 (a) 写「in-process 直调路径删除或降级为 server 内部实现」，本 ADR 选「降级」，删除由后续 ticket 在所有 fixture 迁完后裁决。
+During migration, `runInSandbox` **demotes to a thin wrapper over the router handler** — straight `router(req) → response`, no direct `child_process.spawn`. **Demotion = deletion-not** (to stay compatible with the existing 30+ test fixtures), but its spawn call sites are expressed through the server boundary; acceptance item (a) reads "the in-process direct-call path is deleted or demoted to a server-internal implementation" — this ADR chooses "demote"; deletion is deferred to a later ticket once all fixtures have migrated.
 
-### 2. 运行时合同：两型协议（短生命周期 / 长生命周期 task-handle）
+### 2. Runtime contract: two protocol shapes (short-lived / long-lived task-handle)
 
-#### 2.1 短生命周期 request/response（前台 + verify）
+#### 2.1 Short-lived request/response (foreground + verify)
 
-适用：bash tool 前台（`bash.ts:218-224` `await runInSandbox(...)`）、verify（`sandbox-run.ts:71-77` `await runVerify(...)`）。调用语义 = 等子进程退出、取一次性结果。
+Applies to: bash tool foreground (`bash.ts:218-224` `await runInSandbox(...)`), verify (`sandbox-run.ts:71-77` `await runVerify(...)`). Call semantics = wait for child exit, take a one-shot result.
 
-消息形状（合同边界，具体类型名留给实施）：
+Message shape (contract boundary; concrete type names left to implementation):
 
 ```
 request:
@@ -59,13 +59,13 @@ response:
   stderr: string             # 同上
 ```
 
-**截断沿用** `DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000`（`runner.ts:16`）的 **code-point** 截断，`truncateByCodePoint` 契约（`runner.ts:84-89`）不在 server 形态下改变。`SIGNAL_EXIT_CODES` 映射（`runner.ts:21-54`）不变。
+**Truncation carries over** the **code-point** truncation of `DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000` (`runner.ts:16`); the `truncateByCodePoint` contract (`runner.ts:84-89`) does not change under the server form. The `SIGNAL_EXIT_CODES` mapping (`runner.ts:21-54`) is unchanged.
 
-#### 2.2 长生命周期 task-handle（后台）
+#### 2.2 Long-lived task-handle (background)
 
-适用：bash tool 后台（`bash.ts:160-167` → `manager.spawn` → `defaultBackgroundSpawn`）。调用语义 = fire-and-forget spawn + log stream + stop control。
+Applies to: bash tool background (`bash.ts:160-167` → `manager.spawn` → `defaultBackgroundSpawn`). Call semantics = fire-and-forget spawn + log stream + stop control.
 
-消息形状：
+Message shape:
 
 ```
 spawn request:
@@ -94,115 +94,115 @@ stop control message:
   graceMs?: number           # 缺省 2_000
 ```
 
-`bash_stop` 仍经 host 侧 `process.kill(-pgid, …)` 升级（`manager.ts:587-624`），**不绕过 host 直接发信号**——task-handle 协议把"kill 升级的中间状态"封装进 server router，client 只发 `stop` control message，不直接 import `node:child_process`。pid 物理所有权**仍在 host**（`child.pid` 落 `record.pgid`），与 `bash_stop` 经 server 转发 `kill(-pgid)` 是**协议层抽象**，与「pid 在哪个进程内持有」正交——同进程 router 形态下二者天然重合（host = server），独立 daemon 形态下二者才会分裂；本 ADR 选同进程 router，`pid ownership transfer` 不在本 ADR 范围。
+`bash_stop` still escalates via host-side `process.kill(-pgid, …)` (`manager.ts:587-624`) and **never bypasses the host to signal directly** — the task-handle protocol encapsulates "the intermediate state of kill escalation" inside the server router; the client only sends a `stop` control message and never imports `node:child_process` directly. Physical pid ownership **remains with the host** (`child.pid` stored as `record.pgid`); `bash_stop` relaying `kill(-pgid)` through the server is a **protocol-layer abstraction**, orthogonal to "which process holds the pid" — under the same-process router form the two coincide naturally (host = server), and they only split under a standalone-daemon form; this ADR chooses the same-process router, so `pid ownership transfer` is out of scope here.
 
-#### 2.3 超时与中断
+#### 2.3 Timeout and interrupt
 
-- `ctx.signal` abort → **client 侧**：发 `stop` control message（task-handle 协议）或取消 await（短生命周期协议）。**不只丢 client promise**——server router 收到 abort 必须把信号传到 fence 子进程（task-handle 走 `kill(-pgid)`、短生命周期走 `spawnWithStopSignal` 的 abort listener，`runner.ts:131-132`）。
-- timeout（`maxOutputCodePoints` / `killGraceMs`）在 spawn 端按既有 `spawnWithStopSignal` 升级路径处理，不在 router 层加额外 timer。
+- `ctx.signal` abort → **client side**: send a `stop` control message (task-handle protocol) or cancel the await (short-lived protocol). **Never just drop the client promise** — upon abort the server router must propagate the signal to the fenced child process (task-handle via `kill(-pgid)`; short-lived via the abort listener in `spawnWithStopSignal`, `runner.ts:131-132`).
+- Timeouts (`maxOutputCodePoints` / `killGraceMs`) keep the existing `spawnWithStopSignal` escalation path at the spawn end; no extra timer is added at the router layer.
 
-### 3. violation-handling 归属：留 client 侧
+### 3. violation-handling stays on the client side
 
-`violation-executor.ts`（后置 hook，executor 层 wrap）是**应用层观察者**，观察 `tool_result` 文本前缀（`VIOLATION_PREFIXES`），与 sandbox 内部完全解耦。裁决：留 client 侧（`executor` 仍 wrap），不进 server。
+`violation-executor.ts` (post-hook, wrapped at the executor layer) is an **application-layer observer** watching `tool_result` text prefixes (`VIOLATION_PREFIXES`), fully decoupled from sandbox internals. Ruling: it stays client-side (`executor` keeps the wrap); it does not move into the server.
 
-理由：
+Reasons:
 
-1. **violation 分类依赖 tool 层语义**（permission_denied / dangerous / sensitive path / escape attempt），这些语义都在 client 侧（bash tool handler 的 `isDangerousCommand` / `commandContainsSensitivePath`），server 看到的是已 spawn 的 fence 子进程的 stdout/stderr/exit_code，**没有 tool 层语义可分类**。
-2. **kill-session 钩子是会话级语义**（counter 累计 → session-level escalation），不是 sandbox 子进程级语义；放 server 侧会跨边界泄漏会话状态。
-3. **server 跨进程化后（未来如果发生），violation hook 走 IPC 观察 server 回执是反向耦合**——server 是被观察对象，不是观察者。
+1. **Violation classification depends on tool-layer semantics** (permission_denied / dangerous / sensitive path / escape attempt), and all those semantics live client-side (the bash tool handler's `isDangerousCommand` / `commandContainsSensitivePath`); the server only sees the already-spawned fence child's stdout/stderr/exit_code and **has no tool-layer semantics to classify with**.
+2. **The kill-session hook is session-level semantics** (counter accumulation → session-level escalation), not sandbox-child-process semantics; putting it server-side would leak session state across the boundary.
+3. **If the server ever crosses processes (possible future), a violation hook observing server replies over IPC would be inverted coupling** — the server is the observed, not the observer.
 
-后置 hook 在 server 化后**消费面不变**：client 拿到 `response` 或 `task event` 后仍走 `wrapWithViolationHook`，按既有 prefix 匹配分型。
+The post-hook's consumption is unchanged after server-ization: the client still runs `wrapWithViolationHook` on the `response` or `task event` it receives, classifying by the existing prefix match.
 
-### 4. IPC 边界 4 类故障路径（合同分型）
+### 4. Four IPC boundary failure classes (contract typing)
 
-server 形态下，IPC 边界（router 调用本身——同进程下为函数调用，跨进程下为 IPC message）须覆盖 4 类故障(overflow 已并入 §2.1 truncateByCodePoint 契约)。
+Under the server form, the IPC boundary (the router call itself — a function call in-process, an IPC message if ever cross-process) must cover 4 failure classes (overflow has been folded into §2.1's truncateByCodePoint contract).
 
-| 边界类         | 触发条件                                                                    | 合同                                                                                                                                                                                 | 测试面                             |
-| -------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| **empty**      | request 帧缺失 `command`（spawn）/ `fence`（exec）字段 / `task_id` 字段     | typed fail-loud（`ToolExecutionError` 系），**不 spawn**、不返回 fake response                                                                                                       | (e) 配套测试                    |
-| **negative**   | `maxOutputCodePoints <= 0` / `killGraceMs < 0`                              | `RangeError`，沿 `runner.ts:84-86` `truncateByCodePoint` 契约不丢失                                                                                                                  | (e)                             |
-| **overflow**   | 子进程 stdout/stderr > `maxOutputCodePoints`                                | router handler 按 `truncateByCodePoint` 截断后再下发，**不**抛 typed error(`SandboxServerError` 联合不含 overflow kind,§2.1 语义已如此)                                              | (e)                             |
-| **concurrent** | 多个 request 并行（同一 router 实例）                                       | fence 无共享 mutable state（fence argv 冻结、fsPolicy 工厂期 / per-call rebuild 各自独立、`createBwrapFence` 返回 frozen token），并行允许，决策**显式记录**                         | (e) 配套测试覆盖并发 fence 构造 |
-| **exception**  | server 不可达（未来跨进程场景）/ accept 后子进程退出未回执（orphan 进程组） | typed fail-loud + **orphan 进程组 reap 纪律**——router 必须在子进程退出但 frame 解析失败时显式 `process.kill(-pgid, SIGKILL)`，参考 `background/stale-reap.ts:184`（pgid-reuse 加固） | (e)                             |
+| Boundary class | Trigger condition                                                                                                                                                              | Contract                                                                                                                                                                                                                                            | Test surface                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| **empty**      | request frame missing `command` (spawn) / `fence` (exec) field / `task_id` field                                                                                                | typed fail-loud (`ToolExecutionError` family), **no spawn**, no fake response returned                                                                                                                                                              | (e) companion tests                                  |
+| **negative**   | `maxOutputCodePoints <= 0` / `killGraceMs < 0`                                                                                                                                  | `RangeError`, preserving the `runner.ts:84-86` `truncateByCodePoint` contract, nothing lost                                                                                                                                                         | (e)                                                  |
+| **overflow**   | child stdout/stderr > `maxOutputCodePoints`                                                                                                                                     | the router handler truncates via `truncateByCodePoint` before sending out, and does **not** throw a typed error (the `SandboxServerError` union carries no overflow kind; §2.1 semantics already say so)                                              | (e)                                                  |
+| **concurrent** | multiple requests in flight (same router instance)                                                                                                                              | the fence shares no mutable state (fence argv frozen; fsPolicy factory-time / per-call rebuild each independent; `createBwrapFence` returns a frozen token), concurrency is allowed, and the decision is **explicitly recorded**                     | (e) companion tests cover concurrent fence construction |
+| **exception**  | server unreachable (future cross-process scenario) / child exited after accept without an ack (orphan process group)                                                            | typed fail-loud + an **orphan process-group reap discipline** — on child exit with frame-parse failure the router must explicitly `process.kill(-pgid, SIGKILL)`, per `background/stale-reap.ts:184` (pgid-reuse hardening)                            | (e)                                                  |
 
-同进程 router 形态下「server 不可达」物理上不发生（函数调用 stack trace 自然冒泡），但合同仍写明 typed fail-loud 语义——为未来跨进程化留接口稳定，**不**为「反正同进程不会失败」省略测试覆盖（违反 `min-change-verifier` 的契约稳定性）。
+Under the same-process router form "server unreachable" physically cannot happen (a function call's stack trace bubbles naturally), but the contract still spells out typed fail-loud semantics — keeping interface stability for a possible future cross-process move; **never** skip test coverage on the grounds that "it can't fail in-process anyway" (that would violate `min-change-verifier`'s contract stability).
 
-### 5. 失败合同（fail-loud 不降级）
+### 5. Failure contract (fail-loud, no degradation)
 
-- **server 不可达** = typed fail-loud（`ToolExecutionError` + 明确 `kind: "server_unreachable"`），**不静默降级**到 in-process spawn。理由：降级 = 旁路 ADR-0037 §9 闭世界围栏物理合同统一（围栏由 server 构造 → server 不可达 → 直调等于绕过白名单构造、绕过 fail-loud 分型），违反 `error-handling-enforcer` 的「fail-loud 不静默降级」。
-- **`ctx.signal` abort** = server 端 control message 取消（task-handle 协议发 `stop`、短生命周期协议在 handler 内把 signal 透传到 `spawnWithStopSignal`），**不只丢 client promise**。理由：只丢 promise = orphan 进程组继续在 bwrap 内跑，host 没拿到信号、kill 升级不会发生，违反 ADR-0037 §9.4 的「配置故障型 fail-loud」纪律（orphan = 闭世界围栏外的不可观察执行面）。
-- **client 端 `Promise.reject`** = server handler 内 `try/catch` 包住 `child.once("error")`（`runner.ts:135-140` 既有契约），typed error 冒泡。
+- **Server unreachable** = typed fail-loud (`ToolExecutionError` + explicit `kind: "server_unreachable"`), **never silently degrade** to in-process spawn. Reason: degrading = bypassing ADR-0037 §9's unified closed-world fence physical contract (the fence is built by the server → server unreachable → a direct call sidesteps allowlist construction and the fail-loud typing), violating `error-handling-enforcer`'s "fail-loud, never silently degrade".
+- **`ctx.signal` abort** = cancellation via control message on the server end (task-handle protocol sends `stop`; the short-lived protocol forwards the signal inside the handler to `spawnWithStopSignal`), **never just drop the client promise**. Reason: dropping the promise alone leaves the orphan process group running inside bwrap with the host never seeing a signal and kill escalation never happening — violating ADR-0037 §9.4's "configuration-failure fail-loud" discipline (an orphan = an unobservable execution surface outside the closed-world fence).
+- **Client-side `Promise.reject`** = the server handler's `try/catch` wraps `child.once("error")` (the existing `runner.ts:135-140` contract); the typed error bubbles.
 
 ## Alternatives considered
 
-### (a) 同进程 Unix socket 单例（fork 子进程跑 server，主进程经 Unix socket 通信）
+### (a) Same-process Unix socket singleton (forked child runs the server, main process talks over a Unix socket)
 
-否决。证据三件：
+Rejected. Three pieces of evidence:
 
-1. `BwrapFence` 是 `Object.freeze({argv, sealed: true})` 的纯数据 token（`bwrap.ts:172`）——fork 把无状态 token 装进独立进程，**没有 IPC 状态需要跨进程承载**；fork 的 state（server 内部计数器、registry、reaper）都是 server 自身的，不是 fence 的。
-2. Unix socket 在 Node 同进程内可通过 `child_process.fork` 的 IPC channel 直接走，**不需要显式 socket**——但 fork 本身是 overkill，同进程 router 用函数调用即可。
-3. 仓库**无 Unix socket 或 fork 先例**（`child_process.fork` / `net.createServer` / `unix:` 零命中），引入全新基建面；与既有 `createTraceRouter`（mountable router、`traceserver/serve.ts:61`）的同进程形态正交。
+1. `BwrapFence` is a pure-data token `Object.freeze({argv, sealed: true})` (`bwrap.ts:172`) — forking parks a stateless token in a separate process, and **there is no IPC state that needs a process crossing**; the state a fork would introduce (server-internal counters, registry, reaper) belongs to the server itself, not to the fence.
+2. A Unix socket inside the same Node process could go straight through `child_process.fork`'s IPC channel **without an explicit socket** — but forking itself is overkill; a same-process router is just a function call.
+3. The repo has **no Unix-socket or fork precedent** (zero hits for `child_process.fork` / `net.createServer` / `unix:`), so it would be an entirely new infrastructure surface; and it is orthogonal to the existing same-process `createTraceRouter` (mountable router, `traceserver/serve.ts:61`) form.
 
-### (b) 独立 daemon（外部进程，TCP 127.0.0.1 或 Unix socket）
+### (b) Standalone daemon (external process, TCP 127.0.0.1 or Unix socket)
 
-否决。证据三件：
+Rejected. Three pieces of evidence:
 
-1. 三处消费方（bash tool / background manager / verify）**全部在同一 Node 进程内**（harness CLI / chat / hub），daemon 强制跨 IPC 边界给同进程消费增加延迟（Unix domain socket ≈ 10µs、TCP loopback ≈ 50µs，与 `runInSandbox` 同进程函数调用 < 1µs 相比是 10~50× 退化）、增加端口冲突 / 生命周期治理（supervisor / reaper / heartbeat）新成本。
-2. `session-api/http.ts:8787`（TCP 127.0.0.1 暴露给 SPA / 外部 CLI 客户端）和 `traceserver/serve.ts` 都是给**进程外**消费者用的 server；bash sandbox server 的消费者**全部进程内**，与既有 server pattern **作用域不同**，复用该 pattern 是范畴错配。
-3. 启动 / 监督 / 端口冲突 / lifecycle 是新成本——daemon 需要 SIGTERM 优雅退出、stale socket 清理、port-already-in-use 治理、host 进程崩溃后 socket 孤儿清理；同进程 router 全部由 host 进程 lifecycle 承担，零新增。
+1. All three consumers (bash tool / background manager / verify) **live in the same Node process** (harness CLI / chat / hub); a daemon forces an IPC crossing that adds latency for in-process consumers (Unix domain socket ≈ 10µs, TCP loopback ≈ 50µs — a 10~50× regression against `runInSandbox`'s in-process function call < 1µs) and adds port-conflict and lifecycle-governance (supervisor / reaper / heartbeat) costs.
+2. `session-api/http.ts:8787` (TCP 127.0.0.1 exposed to the SPA / external CLI clients) and `traceserver/serve.ts` are servers for **out-of-process** consumers; the bash sandbox server's consumers are **all in-process** — a different **scope** from the existing server patterns, so reusing that pattern is a category error.
+3. Startup / supervision / port conflicts / lifecycle are new costs — a daemon needs graceful SIGTERM exit, stale-socket cleanup, port-already-in-use handling, and orphaned-socket cleanup after a host crash; the same-process router pushes all of that onto the host process's existing lifecycle, i.e. zero additions.
 
-### (c) MCP 面（`@modelcontextprotocol/sdk`）
+### (c) MCP surface (`@modelcontextprotocol/sdk`)
 
-否决。证据三件：
+Rejected. Three pieces of evidence:
 
-1. MCP 是**给模型看的工具面协议**（schema 暴露给 LLM 客户端，spinning JSON-RPC over stdio / SSE），bash sandbox server 的三个消费方是**应用代码内**（harness / background manager / verify），不是 LLM 客户端。
-2. MCP 协议层（`tools/list` / `tools/call` / `initialize` handshake / capability negotiation）是为跨进程 LLM 工具发现设计的，**与 sandbox 内部执行面边界错位**——把 `runInSandbox` 装进 MCP 等于把内部库函数包成跨进程工具，violate least astonishment。
-3. ADR-0043 已经锁定 MCP 工具面的披露分层（首轮定稿、`lazy: true` 收编）；sandbox server 不该混入 MCP 工具面通道，避免工具面 schema 抖动波及内部执行体。
+1. MCP is a **tool-surface protocol meant for the model** (schemas exposed to LLM clients, spinning JSON-RPC over stdio / SSE), while the bash sandbox server's three consumers are **in application code** (harness / background manager / verify), not LLM clients.
+2. The MCP protocol layer (`tools/list` / `tools/call` / `initialize` handshake / capability negotiation) is designed for cross-process LLM tool discovery and **misaligns with the sandbox's internal execution boundary** — wrapping `runInSandbox` as an MCP tool packages an internal library function as a cross-process tool and violates least astonishment.
+3. ADR-0043 has already fixed the MCP tool-surface disclosure tiering (finalized on the first turn, `lazy: true` consolidated); the sandbox server must not join the MCP tool-surface channel, to keep tool-schema churn away from the internal executor.
 
 ## Consequences
 
 ### Positive
 
-- 三处 spawn 入口（bash 前台 / verify / background）收敛到一个 router，未来接新隔离 / 新资源限制 / 新 audit 钩子时**只改一处**。
-- IPC 边界 5 类故障路径（empty / negative / overflow / concurrent / exception）**集中一处**测试覆盖，违反 `defensive-contract-validator` 的边界覆盖缺口闭合。
-- 失败合同（server 不可达 typed fail-loud、`ctx.signal` abort 经 control message 取消）经 ADR 锁定，**不静默降级**到 in-process spawn，围栏物理合同统一保持。
-- 同进程 router 形态 = 零新基建（无 socket / 无 fork / 无 daemon），与既有 `createTraceRouter` mountable router 形态同构，review 友好。
+- The three spawn entries (bash foreground / verify / background) converge on one router; future isolation / resource-limit / audit-hook work **changes one place**.
+- The 5 IPC-boundary failure classes (empty / negative / overflow / concurrent / exception) get **focused** test coverage in one place, closing the boundary-coverage gap `defensive-contract-validator` flagged.
+- The failure contract (server-unreachable typed fail-loud, `ctx.signal` abort via control message) is locked by ADR and **never silently degrades** to in-process spawn, keeping the fence's physical contract unified.
+- Same-process router = zero new infrastructure (no socket / no fork / no daemon), structurally isomorphic with the existing `createTraceRouter` mountable-router pattern, review-friendly.
 
 ### Negative / Trade-offs
 
-- router 模块引入新的工厂函数 + 两型协议（request/response + task-handle）类型面，实施成本非零——但这是**整理**成本，不重复计到现有 fixture（既有测试 fixture 走 `runInSandbox` / `defaultBackgroundSpawn` 薄包装，行为对外 observable 不变）。
-- 同进程 router 形态下「server 不可达」物理上不发生——但合同仍写明 typed fail-loud 语义并保留测试覆盖，为未来跨进程化留接口稳定（契约稳定性优先于当下实现简洁）。
-- task-handle 协议把「kill 升级的中间状态」封装进 router（`stop` control message），但 pid 物理所有权仍在 host——两个层（协议层 / 物理层）的语义正交，未来若 server 跨进程化需要明确二者如何分裂，再立 ADR。
+- The router module introduces a new factory function plus the type surface of two protocol shapes (request/response + task-handle) — real implementation cost, but it is **consolidation** cost and is not re-billed onto existing fixtures (tests keep using the thin `runInSandbox` / `defaultBackgroundSpawn` wrappers; externally observable behavior is unchanged).
+- Under the same-process router form "server unreachable" physically cannot happen — yet the contract still spells out typed fail-loud semantics and keeps test coverage, preserving interface stability for a future cross-process move (contract stability over present-day brevity).
+- The task-handle protocol encapsulates "the intermediate state of kill escalation" into the router (`stop` control message), but physical pid ownership stays with the host — the two layers (protocol / physical) are semantically orthogonal; if the server ever crosses processes, how they split needs a dedicated ADR.
 
 ### Reversibility
 
-- 同进程 router → 独立 daemon 的迁移：保留 router 函数签名与两型协议形态，把 router 内部 `runInSandbox` / `defaultBackgroundSpawn` 直调换成 IPC client 调用即可，**不**需要 consumer 三处迁移（消费面已是 router 调用，不绑内部实现）。
-- 协议变更：消息形状 §2 是合同边界，变更需新 ADR（合同即「实现是这次、契约是更久」）；改形状 = 改合同，不是改实现。
+- Migrating same-process router → standalone daemon: keep the router function signature and the two protocol shapes, swap the router internals' direct `runInSandbox` / `defaultBackgroundSpawn` calls for IPC client calls; the three consumer sites **need no migration** (they already call the router, not the internal implementation).
+- Protocol changes: the §2 message shapes are the contract boundary; changing them needs a new ADR (a contract means "the implementation is for now, the contract is for longer"). Changing shape = changing the contract, not just the implementation.
 
 ## Evidence
 
-- `src/harness/sandbox/bwrap.ts:172`：`BwrapFence = Object.freeze({argv, sealed: true})` —— 纯数据 frozen argv token 证据。
-- `src/harness/sandbox/runner.ts:16-54, 84-89, 96-150`：默认截断上限 12_000、code-point 截断契约、`spawnWithStopSignal` 升级路径、`SIGNAL_EXIT_CODES` 映射。
-- `src/harness/aci/tools/bash.ts:160-167, 218-224`：bash 工具前后台两条入口；前台 `await runInSandbox`、后台 `manager.spawn`。
-- `src/harness/background/manager.ts:239-291, 587-624`：`defaultBackgroundSpawn` 绕过 `runInSandbox` 直接 `nodeSpawn(fence.argv[0], …)`；`bash_stop` 经 host 侧 `process.kill(-pgid, …)` 升级。
-- `src/harness/verify/sandbox-run.ts:60-77`：`makeDefaultRunVerify` 走 `runInSandbox`。
-- `src/harness/sandbox/violation-executor.ts, violation-handling.ts`：后置 hook 基于 `tool_result` 文本前缀（`VIOLATION_PREFIXES`），与 sandbox 内部解耦——violation 留 client 侧证据。
-- `src/session-api/http.ts:130-157` + `src/traceserver/serve.ts:61-83`：既有 TCP server / mountable router 形态——同进程 router 形态镜像 `createTraceRouter` 的 mountable router 模式证据。
-- `src/harness/background/stale-reap.ts:184`：orphan 进程组 reap 纪律参考（`process.kill(-pgid, SIGKILL)` + starttime pgid-reuse 加固）。
-- ADR-0022：per-call `network: true` 的 fence 物理合同边界（被本 ADR 继承、不修改）。
-- ADR-0037 §7.2 / §9：batch 快照语义（前台 / 后台 / verify 同波消费同一 fence token）、闭世界围栏白名单裁决——server 化不修改这些物理合同。
-- ADR-0037 §9.4：白名单 miss 的 fail-loud 分型（配置故障型 / 运行时可观察型）——server 化的失败合同承接「typed fail-loud 不静默降级」纪律。
-- ADR-0021 D1.7：`bg-` + 12 hex task_id 命名合同（被本 ADR §2.2 继承）。
-- closed-world bash fence 轨道的决策 ticket 上下文与 Round 2 ACR 评审（2026-09-06）。
+- `src/harness/sandbox/bwrap.ts:172`: `BwrapFence = Object.freeze({argv, sealed: true})` — evidence of the pure-data frozen argv token.
+- `src/harness/sandbox/runner.ts:16-54, 84-89, 96-150`: default truncation cap 12_000, the code-point truncation contract, the `spawnWithStopSignal` escalation path, the `SIGNAL_EXIT_CODES` mapping.
+- `src/harness/aci/tools/bash.ts:160-167, 218-224`: the bash tool's foreground/background entries; foreground `await runInSandbox`, background `manager.spawn`.
+- `src/harness/background/manager.ts:239-291, 587-624`: `defaultBackgroundSpawn` bypassing `runInSandbox` to call `nodeSpawn(fence.argv[0], …)` directly; `bash_stop` escalating via host-side `process.kill(-pgid, …)`.
+- `src/harness/verify/sandbox-run.ts:60-77`: `makeDefaultRunVerify` going through `runInSandbox`.
+- `src/harness/sandbox/violation-executor.ts, violation-handling.ts`: the post-hook based on `tool_result` text prefixes (`VIOLATION_PREFIXES`), decoupled from sandbox internals — evidence that violation handling stays client-side.
+- `src/session-api/http.ts:130-157` + `src/traceserver/serve.ts:61-83`: the existing TCP server / mountable router patterns — the same-process router mirrors `createTraceRouter`'s mountable router mode.
+- `src/harness/background/stale-reap.ts:184`: the orphan process-group reap reference (`process.kill(-pgid, SIGKILL)` + starttime pgid-reuse hardening).
+- ADR-0022: the fence physical contract boundary for per-call `network: true` (inherited here, unmodified).
+- ADR-0037 §7.2 / §9: batch-snapshot semantics (foreground / background / verify consume the same fence token within a wave) and the closed-world fence allowlist rulings — server-ization modifies none of these physical contracts.
+- ADR-0037 §9.4: the fail-loud typing for allowlist misses (configuration-failure vs runtime-observable classes) — this ADR's failure contract carries on "typed fail-loud, never silently degrade".
+- ADR-0021 D1.7: the `bg-` + 12 hex task_id naming contract (inherited by §2.2).
+- The closed-world bash fence track's decision ticket context and the Round-2 ACR review (2026-09-06).
 
-## Acceptance 自查清单
+## Acceptance self-check
 
-| Acceptance 项                  | 本 ADR 落点                                                                                                                                                                |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (a) server 形态选型            | §1 同进程 router（mountable 工厂），理由 + 否决 Unix socket / 独立 daemon / MCP 面于 §3 Alternatives                                                                       |
-| (b) 运行时合同                 | §2.1 短生命周期 request/response + §2.2 长生命周期 task-handle + §2.3 超时/中断；截断沿用 12_000 code-point，SIGNAL_EXIT_CODES 不变                                        |
-| (c) 消费方迁移路径与兼容期策略 | §1 「降级为 router handler 薄包装，不删」——保留兼容既有 30+ fixture；§2 两型协议覆盖 bash 前台 / verify / background 三处消费方                                            |
-| (d) violation-handling 归属    | §3 留 client 侧，理由三条（语义依赖 / 会话级语义 / 未来跨进程化反向耦合）                                                                                                  |
-| (e) 两型协议 + pid 所有权      | §2.1 / §2.2 两型分型；§2.2 末段说明 pid 物理所有权仍在 host，task-handle 协议是「kill 升级的中间状态封装」（同进程 router 形态下二者天然重合，独立 daemon 形态下才会分裂） |
-| (f) IPC 边界 5 类故障路径      | §4 表格：empty / negative / overflow / concurrent / exception 逐条合同 + 测试面                                                                                            |
-| (g) 失败合同                   | §5：server 不可达 typed fail-loud 不静默降级；ctx.signal abort 走 control message 取消不只丢 promise；理由（围栏物理合同统一 / orphan 进程组 reap 纪律）逐条说明           |
+| Acceptance item | Where this ADR lands it |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| (a) server shape choice | §1 same-process router (mountable factory), with reasons + rejection of Unix socket / standalone daemon / MCP surface in §3 Alternatives |
+| (b) runtime contract | §2.1 short-lived request/response + §2.2 long-lived task-handle + §2.3 timeout/interrupt; truncation carries over 12_000 code-points; SIGNAL_EXIT_CODES unchanged |
+| (c) consumer migration path and compatibility policy | §1 "demote to a thin router-handler wrapper, do not delete" — keeps compatibility with the existing 30+ fixtures; §2's two protocol shapes cover the bash foreground / verify / background consumers |
+| (d) violation-handling ownership | §3 stays client-side, three reasons (semantics dependency / session-level semantics / inverted coupling under future cross-process move) |
+| (e) two protocol shapes + pid ownership | §2.1 / §2.2 shape split; §2.2's closing paragraph explains physical pid ownership stays with the host and the task-handle protocol is "encapsulated kill-escalation state" (the two coincide naturally in-process and only split under a standalone daemon) |
+| (f) 5 IPC boundary failure classes | §4 table: empty / negative / overflow / concurrent / exception, each with contract + test surface |
+| (g) failure contract | §5: server-unreachable typed fail-loud, no silent degradation; ctx.signal abort canceled via control message, never just a dropped promise; reasons (unified fence physical contract / orphan process-group reap discipline) stated item by item |
