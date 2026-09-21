@@ -193,8 +193,11 @@ _Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删
 **工具职分**: `bash` 跑进程 / 构建 / git，ACI `grep` 搜正文，**符号工具面** 问程序结构；三件在 ACI 上同等可调用，职分不可替代。ADR-0117。
 _Avoid_: 按谁更高级排序；把三件当同一 sink；用说明书当职分
 
-**替岗拒绝**: 扮演他职的调用 fail-closed，回执只指向正职；放行证据认本会话工具轨迹（usage 三类回退），不认自觉。bash 的 grep 族 / `rg` 扮演搜文件 → 拒；ACI `grep` 扮演代码结构查询且无回退证据 → 拒。`sed`/`cat`/`nl` 行窗仍是读。实施验收 = worktree + **轨迹集**；对照树只允许「ACI `grep` 不闸」、同一集、比完只合入本政策。不是 **hard-wall**。ADR-0117。
-_Avoid_: 源码扩展名启发式；警告仍执行；加长 usage；塞进 hard-wall；无黄金集成宣称完成
+**替岗拒绝**: 扮演他职的调用 fail-closed，回执只指向正职；放行证据认本会话工具轨迹（usage 三类回退），不认自觉。bash 段首 grep 族 / `rg` → 拒；ACI `grep` 命中**结构形**且无回退证据 → 拒。`sed`/`cat`/`nl` 行窗仍是读。实施验收 = worktree + **轨迹集**；对照树只允许「ACI `grep` 不闸」、同一集、比完只合入本政策。不是 **hard-wall**。ADR-0117。
+_Avoid_: 源码扩展名启发式；警告仍执行；加长 usage；塞进 hard-wall；无黄金集成宣称完成；把未锚定 ident+`(` / `git grep` / 段首以外的间接 grep 写成必须拦
+
+**结构形**: ACI `grep` 替岗闸认的 pattern 子集：冻结定义语法表（`function`/`class`/`def`/`impl`/`export` 等关键字、行首 `^` 绑 ident+`(`、修饰组），不是「这个调用像在问结构」。ADR-0117。
+_Avoid_: 未锚定 ident+`(`；按语言扩展名推断；把表外关键字（Go `func`、Rust `fn`）默认当成结构形
 
 **请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有**首次** `lsp_*` 同族调用触发的 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts`）；装配完成且从未调用这类工具则不起 language server。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts` / `symbol.ts`）。
 _Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
@@ -808,6 +811,7 @@ _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
 - **工具职分 vs hard-wall**: 职分是 bash / grep / 符号工具面各管一职；hard-wall 是围栏拦不住的危险意图。替岗拒绝走 handler，不进硬墙
 - **替岗拒绝 vs usage**: usage 仍写三类回退；不变量由拒绝执法。加长说明书不代替本闸
+- **结构形 vs 结构意图**: 闸认 ADR-0117 定义语法表（关键字 / 行首锚 / 修饰组）；未锚定 ident+`(` 是正文面，不是漏写的结构查询
 - **blob 引用模式 vs 内容寻址正文池**: 前者是已退役开关名；后者是现行唯一落盘形态。messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
