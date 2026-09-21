@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -605,7 +606,8 @@ describe("get_record core — arm selection", () => {
       (error: unknown) =>
         error instanceof TraceQueryValidationError &&
         error.field === "detail" &&
-        error.message === "detail must be one of: messages, tool_results"
+        error.message ===
+          "detail must be one of: tool_results, messages, system, tools"
     );
   });
 
@@ -1643,6 +1645,168 @@ describe("get_record core — role projection (v1.2)", () => {
     assert.ok(
       !("role" in window),
       `window response must not carry role, got: ${JSON.stringify(window)}`
+    );
+  });
+});
+
+describe("get_record core — ADR-0116 detail=system / detail=tools", () => {
+  const SYSTEM_BODY =
+    "You are iknow. Use the symbol tools — do not start with grep. " +
+    "proactively offer subagents when the ask warrants one.";
+  const SYSTEM_SHA = createHash("sha256")
+    .update(JSON.stringify({ kind: "str", v: SYSTEM_BODY }), "utf8")
+    .digest("hex");
+
+  function systemRow(traceDir: string): GetRecordCoreHandler {
+    const core = coreFor(traceDir, [
+      llmCallRow("c1", 1, {
+        messages: [],
+        system: { sha: SYSTEM_SHA, bytes: Buffer.byteLength(SYSTEM_BODY) },
+        tool_names: ["read_file", "get_record"],
+      }),
+    ]);
+    writeBlobFile(traceDir, "c1", SYSTEM_SHA, { kind: "str", v: SYSTEM_BODY });
+    return core;
+  }
+
+  it("detail=system manifest: 单一 part, chars=正文长度, 无 role", async () => {
+    const core = systemRow(makeTraceDir());
+    const manifest = await manifestOf(core, {
+      record_id: "llm-1",
+      detail: "system",
+    });
+    assert.equal(manifest.detail, "system");
+    assert.equal(manifest.parts.length, 1);
+    assert.deepEqual(manifest.parts[0], {
+      part_index: 0,
+      chars: SYSTEM_BODY.length,
+    });
+  });
+
+  it("detail=system window: 走 part-window 机制读出 blob 正文", async () => {
+    const core = systemRow(makeTraceDir());
+    const window = await windowOf(core, {
+      record_id: "llm-1",
+      detail: "system",
+      part_index: 0,
+      from_char: 13,
+      count: 40,
+    });
+    assert.equal(window.detail, "system");
+    assert.equal(window.part_chars, SYSTEM_BODY.length);
+    assert.equal(window.text, SYSTEM_BODY.slice(13, 53));
+  });
+
+  it("detail=system: 行无 system 键 → 空清单; blob 缺失/形状错 → 同样空清单, 不抛", async () => {
+    const absentCore = coreFor(makeTraceDir(), [
+      llmCallRow("c1", 1, { messages: [] }),
+    ]);
+    const absent = await manifestOf(absentCore, {
+      record_id: "llm-1",
+      detail: "system",
+    });
+    assert.deepEqual(absent.parts, []);
+
+    const missingBlobDir = makeTraceDir();
+    const missingCore = coreFor(missingBlobDir, [
+      llmCallRow("c1", 1, {
+        messages: [],
+        system: { sha: SYSTEM_SHA, bytes: 1 },
+      }),
+    ]);
+    const missing = await manifestOf(missingCore, {
+      record_id: "llm-1",
+      detail: "system",
+    });
+    assert.deepEqual(missing.parts, []);
+
+    const wrongShapeDir = makeTraceDir();
+    const wrongCore = coreFor(wrongShapeDir, [
+      llmCallRow("c1", 1, {
+        messages: [],
+        system: { sha: SYSTEM_SHA, bytes: 1 },
+      }),
+    ]);
+    writeBlobFile(wrongShapeDir, "c1", SYSTEM_SHA, { kind: "blocks", v: [] });
+    const wrong = await manifestOf(wrongCore, {
+      record_id: "llm-1",
+      detail: "system",
+    });
+    assert.deepEqual(wrong.parts, []);
+  });
+
+  it("detail=tools manifest: 每个名字一个 part, identity 携带 name", async () => {
+    const core = systemRow(makeTraceDir());
+    const manifest = await manifestOf(core, {
+      record_id: "llm-1",
+      detail: "tools",
+    });
+    assert.equal(manifest.detail, "tools");
+    assert.deepEqual(manifest.parts, [
+      { part_index: 0, chars: "read_file".length, name: "read_file" },
+      { part_index: 1, chars: "get_record".length, name: "get_record" },
+    ]);
+  });
+
+  it("detail=tools window: part_index 1 读出 'get_record'", async () => {
+    const core = systemRow(makeTraceDir());
+    const window = await windowOf(core, {
+      record_id: "llm-1",
+      detail: "tools",
+      part_index: 1,
+      count: "get_record".length,
+    });
+    assert.equal(window.text, "get_record");
+    assert.equal(window.part_chars, "get_record".length);
+  });
+
+  it("detail=tools: 无 tool_names 键 → 空清单 (Postel 缺席对称)", async () => {
+    const core = coreFor(makeTraceDir(), [llmCallRow("c1", 1, { messages: [] })]);
+    const manifest = await manifestOf(core, {
+      record_id: "llm-1",
+      detail: "tools",
+    });
+    assert.deepEqual(manifest.parts, []);
+  });
+
+  it("新 arms 拒绝 message_index, 报错点名各自寻址词汇", async () => {
+    const core = systemRow(makeTraceDir());
+    for (const [detail, phrase] of [
+      ["system", "the record's system body"],
+      ["tools", "the record's tool name list"],
+    ] as const) {
+      await assert.rejects(
+        () =>
+          manifestOf(core, { record_id: "llm-1", detail, message_index: 0 }),
+        (error: unknown) =>
+          error instanceof TraceQueryValidationError &&
+          error.field === "message_index" &&
+          error.message.includes(phrase) &&
+          error.message.includes("not message-indexed"),
+        `detail=${detail} must reject message_index`
+      );
+    }
+  });
+
+  it("新 arms 的 part_index 越界报真实数量", async () => {
+    const core = systemRow(makeTraceDir());
+    await assert.rejects(
+      () => windowOf(core, { record_id: "llm-1", detail: "system", part_index: 1 }),
+      (error: unknown) =>
+        error instanceof TraceQueryValidationError &&
+        error.field === "part_index" &&
+        error.message ===
+          "part_index 1 is out of range: this record has 1 system body parts",
+      "detail=system part_index 1 must be out of range"
+    );
+    await assert.rejects(
+      () => windowOf(core, { record_id: "llm-1", detail: "tools", part_index: 2 }),
+      (error: unknown) =>
+        error instanceof TraceQueryValidationError &&
+        error.field === "part_index" &&
+        error.message ===
+          "part_index 2 is out of range: this record has 2 tool names",
+      "detail=tools part_index 2 must be out of range"
     );
   });
 });

@@ -34,6 +34,7 @@ export {
   type QueryTracePage,
 } from "./envelope.js";
 export {
+  dereferenceSystemBody,
   dereferenceTraceMessages,
   projectToolResults,
   projectToolResultsFromTrace,
@@ -71,6 +72,7 @@ export {
   GET_RECORD_DEFAULT_COUNT,
   GET_RECORD_MAX_COUNT,
   GET_RECORD_DESCRIPTION,
+  GET_RECORD_DETAIL_VALUES,
   type GetRecordCoreHandler,
   type GetRecordCoreOptions,
 } from "./get-record-core.js";

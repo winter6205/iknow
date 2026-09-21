@@ -134,6 +134,22 @@ import {
 } from "./graph/notification.js";
 
 /**
+ * ADR-0116 Postel pair for one step's recordLlmCall payload: the identity
+ * channels are present only when actually sent (undefined system text and
+ * an empty tool-name list both stay omitted keys, never empty values).
+ * Computed once so the ok / error trace branches cannot drift apart.
+ */
+function sentIdentityFields(
+  systemText: string | undefined,
+  stepToolNames: ReadonlyArray<string>
+): { system?: string; toolNames?: ReadonlyArray<string> } {
+  return {
+    ...(systemText !== undefined ? { system: systemText } : {}),
+    ...(stepToolNames.length > 0 ? { toolNames: stepToolNames } : {}),
+  };
+}
+
+/**
  * Map an arbitrary reason string to TraceErrorType without `as` casts.
  * Known values pass through; anything else (including nonSuccessStop /
  * maxTurns / completed) falls back to "unknown".
@@ -2188,6 +2204,9 @@ async function runModelPhase(opts: {
   /** ADR-0013: run-scoped reactive-compact attempted flag;
    *  true = already compacted and retried once this run, no second time. */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /** ADR-0011: resolved once per step by stepWithTrace so the trace record
+   *  can name exactly what was sent (undefined = system not sent → absent). */
+  readonly systemText: string | undefined;
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | {
@@ -2199,10 +2218,6 @@ async function runModelPhase(opts: {
   | { kind: "reactive_compact_pending"; state: LoopState }
 > {
   try {
-    // Resolve deps.system?.() once per turn; undefined → field omitted, the
-    // adapter's conditional spread sends no system field → byte-zero change
-    // to the KV cache prefix.
-    const systemText = await opts.deps.system?.();
     // When a clock expires with zero model-output deltas this attempt, resend
     // the whole call (bounded attempts, second-scale exponential backoff)
     // instead of judging the turn timed out — a stalled connection is not a
@@ -2220,7 +2235,7 @@ async function runModelPhase(opts: {
         modelHardCapMs: opts.modelHardCapMs,
         modelIdleTimeoutMs: opts.modelIdleTimeoutMs,
         onStream: opts.onStream,
-        systemText,
+        systemText: opts.systemText,
       });
       if (attempt.kind === "ok") return attempt;
       const verdict = attemptVerdict(
@@ -2789,6 +2804,24 @@ async function stepWithTrace(opts: {
   // never written twice.
   const modelStreamRef = opts.modelStreamRef;
   const modelOnStream = openModelInFlightWindow(modelStreamRef, opts.onStream);
+  // Resolve deps.system?.() once per step; undefined → the field is omitted
+  // both on the wire (the adapter's conditional spread sends no system field
+  // → byte-zero change to the KV cache prefix) and on the trace row
+  // (ADR-0116 Postel). The resolver is session-stable, so the reactive-
+  // compact retry phase and the recorded `system` all carry the same bytes.
+  const systemText = await opts.deps.system?.();
+  // ADR-0116: the tool names handed to the model this step — the same seam
+  // raceModel passes to adapter.step; names only, never schemas. Snapshot
+  // semantics: raceModel re-resolves promptTools per retry attempt, but
+  // promptTools is static within a step in current assembly, so these names
+  // are a valid step-start snapshot (same stability assumption as systemText).
+  const stepToolNames = (
+    opts.deps.promptTools?.() ?? opts.deps.registry.list()
+  ).map((tool) => tool.name);
+  // The Postel identity pair shared by both recordLlmCall branches (ok /
+  // stop): a channel that was not sent stays an omitted key, never an empty
+  // value — computed once so the two branches cannot drift apart.
+  const sentIdentity = sentIdentityFields(systemText, stepToolNames);
   const firstPhase = await runModelPhase({
     state: deltaState,
     deps: opts.deps,
@@ -2798,6 +2831,7 @@ async function stepWithTrace(opts: {
     modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
     onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
+    systemText,
   });
   // Non-reactive path: the last message the model saw is deltaState (with the injected delta).
   let effectiveState: LoopState = deltaState;
@@ -2871,6 +2905,7 @@ async function stepWithTrace(opts: {
             modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
             onStream: retryOnStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
+            systemText,
           });
           if (compressedAttempt.kind === "reactive_compact_pending") {
             // Invariant violated — reactive_compact is disabled or already
@@ -2920,6 +2955,10 @@ async function stepWithTrace(opts: {
           // semantics unchanged (Postel); messages is the independent "what
           // did the model actually see" channel, filled regardless of error, aligned with the ok branch.
           messages: effectiveState.messages,
+          // ADR-0116: the identity prefix and tool names this step sent are
+          // recorded on their own channels (Postel: absent when not sent —
+          // never an empty string, never an entry faked into `messages`).
+          ...sentIdentity,
           // Error branch: the three model fields are wholly absent (Postel,
           // same shape as ADR-0008) — the adapter never exposes a model, so
           // there is nothing to fill on success or failure alike.
@@ -2953,9 +2992,13 @@ async function stepWithTrace(opts: {
           // now on. Trade-off: full messages in the trace inflate the jsonl,
           // but LlmCallRecord.messages means precisely "messages the model
           // actually saw", satisfying the ADR's acceptance discipline
-          // (messages_captured:true + the messages array including the
-          // coordinator-section proactive keywords).
+          // (messages_captured:true + the messages array). ADR-0116: the
+          // coordinator-section proactive keywords hang on the captured
+          // `system` field below, never inside `messages`.
           messages: effectiveState.messages,
+          // ADR-0116: identity prefix + tool names actually sent this step
+          // (Postel: absent when not sent).
+          ...sentIdentity,
           status: "ok",
           ...(usage !== undefined ? usage : {}),
         })

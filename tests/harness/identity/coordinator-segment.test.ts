@@ -16,8 +16,10 @@
  *
  *   - The copy carries the model-visible hard hooks in the assembled system
  *     prompt: proactive (proactively) · parallelizable · blocks until finished.
- *     A real-link messages_captured assertion that the model's actual system
- *     prompt contains the "proactive" keyword hangs on this segment.
+ *     The real-link acceptance for these keywords reads the `system` field
+ *     captured on the llm_call row (ADR-0014 D6 amended 2026-09-21 by
+ *     ADR-0116) — never `messages`, which is not allowed to impersonate the
+ *     system channel.
  *
  *   - The wording "Default contract today" leaves room for a future async
  *     discipline segment in V2.

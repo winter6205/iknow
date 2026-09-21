@@ -24,6 +24,7 @@ import type { AciToolDef } from "../types.js";
 import {
   createGetRecordCore,
   GET_RECORD_DEFAULT_COUNT,
+  GET_RECORD_DETAIL_VALUES,
   GET_RECORD_MAX_COUNT,
   GET_RECORD_DESCRIPTION,
   TraceQueryRecordScanError,
@@ -161,7 +162,7 @@ export function createGetRecordTool(
         record_id: { type: "string" },
         detail: {
           type: "string",
-          enum: ["tool_results", "messages"],
+          enum: [...GET_RECORD_DETAIL_VALUES],
           default: "tool_results",
         },
         message_index: { type: "integer", minimum: 0 },
