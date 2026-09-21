@@ -84,6 +84,8 @@ import { resolvePluginCatalog, resolvePluginRoots } from "../plugin/roots.js";
 import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
+import { TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT } from "../stream.js";
+import { resetsModelIdle } from "../race-timers.js";
 import {
   errorMessage,
   MaxTurnsExceeded,
@@ -1335,6 +1337,75 @@ function stopFailureEnvelope(
   );
 }
 
+/** Inputs the stopReason → envelope mapping needs beyond the RunResult. */
+export type StopEnvelopeContext = {
+  /** Live-at-settle hang fingerprint from the run()'s bookkeeping tap
+   *  (stream-hang-detect T4, see runWorkerOnce's tap comment). */
+  readonly sawInvisibleStallResend: boolean;
+  readonly observability: EnvelopeObservabilityOpts;
+};
+
+/**
+ * stopReason → envelope derivation chain (test seam, exported for direct
+ * unit coverage of the T4 branch without driving a whole run()): pure mapping
+ * of a normally-returned RunResult onto the failed/ok envelope, side effects
+ * limited to the stderr `log` lines. The cancelled-by-SIGTERM path is NOT
+ * here — it needs the caller's controller and the async epilogue round.
+ */
+export function mapStopReasonToEnvelope(
+  result: import("../model-adapter/types.js").RunResult,
+  ctx: StopEnvelopeContext
+): SubAgentEnvelope {
+  if (result.stopReason === "fused") {
+    log(`run() stopReason=fused`);
+    return toFailedEnvelope(
+      "protocolError",
+      "fused",
+      observabilityFields(result, ctx.observability)
+    );
+  }
+  if (
+    result.stopReason === "protocolError" ||
+    result.stopReason === "emptyFinalResponse"
+  ) {
+    log(`run() stopReason=${result.stopReason}`);
+    return stopFailureEnvelope(result, ctx.observability);
+  }
+  if (result.stopReason === "nonSuccessStop") {
+    // EXIT: supplier non-success stop must not report ok
+    log(`run() stopReason=nonSuccessStop`);
+    return toFailedEnvelope(
+      "protocolError",
+      "nonSuccessStop (e.g. truncation)",
+      observabilityFields(result, ctx.observability)
+    );
+  }
+  if (result.stopReason === "timeout") {
+    // stream-hang-detect T4: a timeout stop preceded by invisible-stall
+    // resends means the shared clock-retry budget was spent on upstream
+    // silence — ADR-0111 "transient model-stream/transport failure", so
+    // modelTransient (subagent-continuable), not the lifetime-timeout
+    // label. Without any resend the stop is a plain per-call race expiry
+    // and keeps its existing attribution (nonsuccess-stop-mapping pin).
+    if (ctx.sawInvisibleStallResend) {
+      log(`run() stopReason=timeout (stalled-stream budget exhausted)`);
+      return toFailedEnvelope(
+        "modelTransient",
+        "stream stalled; invisible-clock resend budget exhausted",
+        observabilityFields(result, ctx.observability)
+      );
+    }
+    // EXIT: per-call race timeout must not report ok
+    log(`run() stopReason=timeout`);
+    return toFailedEnvelope(
+      "timeout",
+      "per-call model timeout",
+      observabilityFields(result, ctx.observability)
+    );
+  }
+  return toOkEnvelope(result, ctx.observability);
+}
+
 /**
  * Test seam (exported for tests only): envelope → run → truncateEnvelopeResult.
  *
@@ -1359,6 +1430,15 @@ function stopFailureEnvelope(
  *   - run() returns normally with stopReason=protocolError and RunResult.apiError
  *     present → reason:modelTransient, absent → protocolError (ADR-0111,
  *     invariant: apiError present ⇔ transient model-stream/transport failure with a cause);
+ *   - run() returns normally with stopReason=timeout preceded by the loop's
+ *     invisible-stall resends (transport_retry detail=invisible_timeout —
+ *     the shared clock-retry budget spent on an open-but-silent stream,
+ *     stream-hang-detect T4) → reason:modelTransient; without any such resend
+ *     it stays a per-call race expiry → reason:timeout. The fingerprint is
+ *     live-at-settle only: the tap clears it on any model-output progress
+ *     after the resend (visible delta / successful call's post_call beat), so
+ *     an earlier turn's resend never reattributes a later turn's plain
+ *     timeout (see mapStopReasonToEnvelope);
  *   - other run() errors → throw (runSubagentWorker's run-phase convergence →
  *     best-effort failed envelope + exit 1, no longer misusing exit 2).
  *
@@ -1409,12 +1489,40 @@ export async function runWorkerOnce(opts: {
   const controller = new AbortController();
   const onSigterm = (): void => controller.abort("subagent-timeout");
   process.once("SIGTERM", onSigterm);
+  // stream-hang-detect T4: the hang fingerprint, live only for the run's
+  // latest model-call face. Set on an invisible-stall resend and CLEARED by
+  // any model-output progress after it (a visible delta round, or the
+  // post_call usage beat of a successful call): the idle machine only
+  // resends zero-delta attempts, so progress past a resend means that
+  // resend's call already settled — a later timeout must not inherit it
+  // (turn1 resends-then-succeeds + turn2 plain race expiry stays "timeout").
+  let sawInvisibleStallResend = false;
+  const observeStreamEvent = (event: HarnessStreamEvent): void => {
+    if (event.type === "transport_retry") {
+      if (event.detail === TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT) {
+        sawInvisibleStallResend = true;
+      }
+      return;
+    }
+    if (
+      resetsModelIdle(event) ||
+      (event.type === "context_usage" && event.phase === "post_call")
+    ) {
+      sawInvisibleStallResend = false;
+    }
+  };
   try {
-    // Pass the signal through at runtime. onStream is not passed: (a) the worker
-    // has no display consumer for hot-path events like text_delta; (b) when the
+    // Pass the signal through at runtime. onStream is only a bookkeeping tap
+    // (hostStreamPresent=false → no #1079 probe cost): the worker has no
+    // display consumer for hot-path events like text_delta, and when the
     // signal is already aborted run() does not run its internal epilogue and
     // won't emit stop_summary — summary capture happens only in the self-run
-    // epilogue round below (runTimeoutEpilogue).
+    // epilogue round below (runTimeoutEpilogue). What the tap exists for:
+    // stream-hang-detect T4 — the loop's shared clock-retry machine emits
+    // transport_retry(detail=invisible_timeout) on every stall resend, the
+    // only hang fingerprint observable here (RunResult just carries
+    // stopReason=timeout), so the timeout branch can tell "upstream stream
+    // stalled through the whole budget" from a plain per-call timeout stop.
     const envelopePrior = priorMessagesFromEnvelope(
       env,
       baseRunDeps.adapter.encodeUserText
@@ -1429,33 +1537,16 @@ export async function runWorkerOnce(opts: {
     });
     const runDeps = wired?.deps ?? baseRunDeps;
     const priorMessages = wired ? wired.priorMessages : envelopePrior;
-    const { result } = await run(
-      env.task,
-      runDeps,
-      controller.signal,
-      priorMessages !== undefined ? { priorMessages } : undefined
-    );
+    const { result } = await run(env.task, runDeps, controller.signal, {
+      ...(priorMessages !== undefined ? { priorMessages } : {}),
+      onStream: observeStreamEvent,
+      hostStreamPresent: false,
+    });
     // run() returning normally ≠ success: harness protocol-layer errors / empty
     // final response return via stopReason (no throw), but the worker must mark
     // failed — the parent's drain receiving ok with a protocolError stopReason
-    // would misjudge the subagent as successful.
-    if (result.stopReason === "fused") {
-      log(`run() stopReason=fused`);
-      return truncateEnvelopeResult(
-        toFailedEnvelope(
-          "protocolError",
-          "fused",
-          observabilityFields(result, observability)
-        )
-      );
-    }
-    if (
-      result.stopReason === "protocolError" ||
-      result.stopReason === "emptyFinalResponse"
-    ) {
-      log(`run() stopReason=${result.stopReason}`);
-      return truncateEnvelopeResult(stopFailureEnvelope(result, observability));
-    }
+    // would misjudge the subagent as successful. stopReason → envelope lives
+    // in mapStopReasonToEnvelope (T4 branch directly unit-testable there).
     // Timeout epilogue: stopReason=cancelled and genuinely this worker's SIGTERM
     // abort (signal.reason === "subagent-timeout"; tool-side cancelled is not mislabeled).
     if (
@@ -1476,29 +1567,12 @@ export async function runWorkerOnce(opts: {
         )
       );
     }
-    if (result.stopReason === "nonSuccessStop") {
-      // EXIT: supplier non-success stop must not report ok
-      log(`run() stopReason=nonSuccessStop`);
-      return truncateEnvelopeResult(
-        toFailedEnvelope(
-          "protocolError",
-          "nonSuccessStop (e.g. truncation)",
-          observabilityFields(result, observability)
-        )
-      );
-    }
-    if (result.stopReason === "timeout") {
-      // EXIT: per-call race timeout must not report ok
-      log(`run() stopReason=timeout`);
-      return truncateEnvelopeResult(
-        toFailedEnvelope(
-          "timeout",
-          "per-call model timeout",
-          observabilityFields(result, observability)
-        )
-      );
-    }
-    return truncateEnvelopeResult(toOkEnvelope(result, observability));
+    return truncateEnvelopeResult(
+      mapStopReasonToEnvelope(result, {
+        sawInvisibleStallResend,
+        observability,
+      })
+    );
   } catch (err) {
     // Escaped-throw type → reason mapping goes through SSOT (escapeFailureReason).
     // Errors reaching the loop's normal step path are caught there and never hit

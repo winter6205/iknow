@@ -605,6 +605,47 @@ type StreamMeasurement = {
   sawVisibleDelta?: boolean;
 };
 
+/**
+ * An aborted signal must end the step promise: a hung stream body (open
+ * connection, no chunk, no end event) never settles `finalMessage()`, so
+ * without this race the engine's idle / hard-cap clock abort would only
+ * settle its own outcome while the attempt dangles past the clock (the
+ * 698s/0-token hang shape). The rejection is the SDK-native
+ * `APIUserAbortError` — the translate layer reads the `clock_abort` marker
+ * on the signal first (clock_timeout / timeout), and an unmarked abort
+ * classifies as user_cancel; never `stream_incomplete`, which stays
+ * reserved for a stream that ended on its own without a Message (ADR-0111).
+ */
+function settleOnAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined
+): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) {
+    // The real SDK rejects finalMessage() once its signal is aborted, so the
+    // discarded promise here already carries (or will soon carry) a rejection.
+    // Without a handler attached here the race outcome is dropped and Node
+    // reports an orphaned unhandled rejection — the entry branch must
+    // silence it before rejecting its own APIUserAbortError.
+    void promise.catch(() => {});
+    return Promise.reject(new APIUserAbortError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new APIUserAbortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function stepStreamArm(deps: {
   readonly client: Anthropic;
   readonly params: MessageCreateParamsNonStreaming;
@@ -625,9 +666,10 @@ async function stepStreamArm(deps: {
   const measurement: StreamMeasurement = {};
   wireStreamEvents(stream, deps.onStream, measurement);
   // Broken stream / abort → finalMessage() reject → no AssistantTurnResult
-  // is constructed.
+  // is constructed. The abort race (see `settleOnAbort`) guarantees a hung
+  // stream body cannot keep this promise pending past the caller's abort.
   try {
-    const final = await stream.finalMessage();
+    const final = await settleOnAbort(stream.finalMessage(), deps.signal);
     const result = interpretMessage(final);
     // Derive thinkingMs. `start` absent (no thinking_delta) → not produced.
     // `end` absent (thinking only, no follow-up) → not produced (both ends
@@ -862,8 +904,9 @@ export function buildMessageParams(
  * not caught here — raceModel's existing catch routing handles them:
  *   signal.aborted → "cancelled"; MODEL_TIMEOUT → "timeout";
  *   ProtocolError → "protocolError"; anything else → rethrow (`run()` rejects).
- * Known gap: a real HTTP request may not cancel on engine timeout (raceModel
- * abort plumbing pending).
+ * Known gap: a real HTTP request may not cancel on engine timeout (socket-
+ * level teardown is still the SDK's); the step promise itself now always
+ * lands on abort (stream arm: `settleOnAbort`).
  *
  * Contract: `step` routes between two arms by `opts.stream` (non-stream:
  * `client.messages.create`; stream: `client.messages.stream` +

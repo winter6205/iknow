@@ -144,6 +144,18 @@ export type HarnessStreamEvent =
     };
 
 /**
+ * SSOT for the `transport_retry.detail` value that marks an invisible-stall
+ * resend (stream-hang-detect T3/T4). The loop-engine's clock-retry machine
+ * emits it once per resend of a zero-delta attempt; the subagent worker taps
+ * it as the hang fingerprint that distinguishes "budget exhausted on open-
+ * but-silent stream" (→ modelTransient) from a plain per-call timeout stop.
+ * Production-side drift here would silently degrade the attribution, so both
+ * the emit site and the consumer import this constant rather than
+ * duplicating the string literal.
+ */
+export const TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT = "invisible_timeout";
+
+/**
  * Observer errors must not back-flow into the emit path (aligned with
  * ADR-0003's `safeTrace` MUST NOT throw and the wireStreamEvents precedent).
  * Single wrapper: both the anthropic-adapter stream translation and the
