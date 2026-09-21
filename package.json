@@ -49,7 +49,6 @@
     "install:search-engine": "tsx scripts/install-search-engine.ts",
     "designs:tui-preview": "bun run scripts/tui-designs-preview.tsx",
     "worktree:gc": "tsx scripts/task-worktree-gc.ts",
-    "migrate:workspace-iknow": "tsx scripts/workspace-iknow-migrate.ts",
     "prepare": "husky"
   },
   "devDependencies": {
