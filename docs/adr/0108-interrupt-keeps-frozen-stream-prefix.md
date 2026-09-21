@@ -1,32 +1,32 @@
-# 0108. 模型在途打断：留下 freeze 前缀，丢掉正在长的块
+# 0108. In-flight interrupt: keep the frozen prefix, drop the block still growing
 
 Date: 2026-09-19
 Status: accepted
 
 ## Context
 
-**in-flight closeout** 旧读法：模型在途则整条 assistant 不进历史。实现上 cancelled 只保留 user + `Interrupted by user.`，流式 overlay settle 后卸掉。操作员指出这与既定截断单位不一致：实时过程里**已经成形的消息要留**，只截**还在生成的半截**；粒度已选 **streaming block freeze**（钉住除最后一个顶层块外的前缀）。工具在途路径本来就会留下已 append 的 assistant，不在本 ADR 重开。
+The old reading of **in-flight closeout**: if the model is still in flight, the entire assistant message never enters history. In the implementation, cancelled kept only the user message + `Interrupted by user.`, and the streaming overlay was unloaded after settling. The operator pointed out that this is inconsistent with the established truncation unit: in the realtime process **messages already formed must be kept**, and only the **half-formed block still generating** is cut; the granularity has already been chosen as **streaming block freeze** (pinning the prefix except for the last top-level block). The tool-in-flight path already leaves appended assistant messages behind — it is not reopened by this ADR.
 
 ## Decision
 
-Esc **前台打断**（cancelled）且模型仍在途时：
+When an Esc **foreground interrupt** (cancelled) lands while the model is still in flight:
 
-1. 对已累积的流式 markdown 跑与墙上同一刀：`splitStreamingMarkdown` 的 `prefixRaw` 作为本轮 assistant 写入 **append-only messages** 并 commit；`tailRaw` 丢弃。
-2. 无 prefix（全文都在最后一个还在长的块里）→ 不落 assistant，只留 user + **interrupt system message**。
-3. 已闭合的 `tool_use` 块算成形，留下；尚未执行的 call 走既有工具在途 closeout（`execution_failed` / `"cancelled"`）。
-4. 打断当下 TUI、重开/load、普通下一句 prior **同一形状**。禁止只在墙上冻草稿、盘上没有。
-5. timeout / 进程死亡 resume 仍不加 `Interrupted by user.`；timeout 的 keep 刀与 cancelled 相同（前缀留下），文案规则不改。
-6. **切刀模块**须是 harness 已能 import 的层（现有 `src/shared` 缝）。TUI Markdown 改为调用方。**禁止** `src/harness` import `src/tui`。
+1. Run the same cut over the accumulated streaming markdown that the live wall runs: `splitStreamingMarkdown`'s `prefixRaw` is written as this round's assistant into the **append-only messages** and committed; `tailRaw` is dropped.
+2. No prefix (the whole text sits inside the last block still growing) → no assistant record; keep only the user + **interrupt system message**.
+3. A closed `tool_use` block counts as formed and is kept; calls not yet executed follow the existing tool-in-flight closeout (`execution_failed` / `"cancelled"`).
+4. The interrupt moment in the TUI, a restart/load, and the prior seen by the next ordinary turn all carry the **same shape**. Freezing the draft on the live wall while the disk lacks it is forbidden.
+5. timeout / process-death resume still does not add `Interrupted by user.`; timeout's keep-cut is the same as cancelled's (prefix kept) — the wording rules are unchanged.
+6. The **cut module** must be a layer the harness can already import (the existing `src/shared` seam). TUI Markdown becomes a caller. `src/harness` importing `src/tui` is **forbidden**.
 
 ## Why not
 
-- **整步不落 assistant（旧 closeout）：** 把已钉住的完整块当成半截扔掉，墙上像整轮蒸发。已否。
-- **流过的 token 全留：** 半截粒度不是 freeze；操作员选了钉住块。
-- **只改 TUI、不改权威历史：** 打断当下和重开分叉；下一句模型看不见人刚看见的完整块。拒。
-- **harness 直接 import `src/tui`：** 反向依赖显示层。拒。
+- **No assistant record for the whole step (the old closeout):** throws away complete blocks that were already pinned as if they were half-formed; on the live wall it looks like the whole turn evaporated. Already vetoed.
+- **Keep every streamed token:** half-token granularity is not freeze; the operator chose pinned blocks.
+- **Change only the TUI, not the authoritative history:** the interrupt moment and a restart diverge; the next model turn cannot see the complete block the human just saw. Rejected.
+- **harness directly importing `src/tui`:** a reverse dependency on the display layer. Rejected.
 
 ## Consequences
 
-- freeze 切法是 closeout keep 与墙的同一 SSOT，不是 TUI 私有 lexer。
-- 单块还在长、前面没有钉住块时，打断后可以没有 assistant 正文——这是粒度推论，不是退回「整步丢弃」。
-- 既有「cancelled 不 append assistant」测试与 CONTEXT 旧句一并作废，由后续 spec/计划改锁。
+- The freeze cut is one SSOT shared by the closeout keep and the live wall, not a TUI-private lexer.
+- When a single block is still growing with no pinned block ahead of it, an interrupt may leave no assistant body — that is a corollary of the chosen granularity, not a regression to "drop the whole step".
+- The existing "cancelled does not append assistant" tests and the old `docs/CONTEXT.md` sentence are voided together, to be re-locked by the follow-up spec/plan.

@@ -3,7 +3,7 @@
 Date: 2026-08-26
 Status: accepted
 
-> **Amendment 2026-09-11**（ADR-0086）：D1 默认完成回合闸从 N≥2 改为 **N≥3**。D5「`autoExtract` 非 true 则钩子缺席、零写盘」收窄为：**零 LLM**；extract 与 dream 均关时仍可装配机械-only 钩子，跑 `memory_gc` 与 capability memory sweep。ingest 失败仍不得 fail 用户 turn。
+> **Amendment 2026-09-11** (ADR-0086): D1's default completed-turn gate moves from N≥2 to **N≥3**. D5's "`autoExtract` non-true means the hook is absent, zero writes" narrows to **zero LLM**: when both extract and dream are off, a mechanical-only hook may still be assembled, running `memory_gc` and the capability memory sweep. Ingest failure still must not fail the user turn.
 
 ## Context
 
@@ -49,7 +49,7 @@ Five decisions, D1–D5.
 - (−) One extra LLM call per trigger when the flag is on. Accepted: the trigger is gated (not per-turn) and the call is off the user's critical path (fire-and-forget after the turn completes).
 - (−) The near-duplicate floor and the utility formula are static heuristics with no tuning evidence yet. Accepted for v0 — same posture as ADR-0009 D6's static caps; revisit when there is failure evidence, not before.
 - (−) Wrong extractions will land. That is the risk ADR-0009 D5 named and it is real; the mitigations are the affirmative-phrasing gate (reused verbatim), the `source: auto` label, the no-auto-promote rule, and reversible soft-disable — not the absence of the feature.
-- Reversibility: 回退 = flip the default (already OFF) or drop the host wiring. Auto-written entries on disk stay readable and are distinguishable by `source: auto`, so a bulk `disabled: true` sweep undoes the accumulation without touching hand-written entries.
+- Reversibility: rollback = flip the default (already OFF) or drop the host wiring. Auto-written entries on disk stay readable and are distinguishable by `source: auto`, so a bulk `disabled: true` sweep undoes the accumulation without touching hand-written entries.
 
 **Why not alternatives:**
 

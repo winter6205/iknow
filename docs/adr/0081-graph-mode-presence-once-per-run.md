@@ -1,10 +1,21 @@
-# 0081. 开着 graph mode 时每个 run() 开头贴一次短现势
+# 0081. With graph mode on, emit the short presence once per run()
 
 Date: 2026-09-10
 Status: accepted
 
-「此刻开着图」按**一次 `run()`**（一条人话的那一轮）在 messages 尾贴一句短 `<graph_mode>`，不按内环每一次即将调模型。翻转当拍仍可一条长 ON/OFF；同一 `run()` 已贴长 ON 则不叠短句。不进 system、不进 `run_graph` 回执、不进 `<agent_status>`。关着或从未开过：不贴。人读面：TUI/CLI 不把 `<graph_mode>` 画成用户气泡，与 `<agent_status>` 同纪律。
+## Context
 
-忘用仍靠常驻 `run_graph` description + 每轮人话一次短现势 + 翻转长句，不靠同一轮工具循环里反复追加同一句。
+An earlier design (ADR-0080) appended the short `<graph_mode>` presence line on every inner-loop hop about to call the model. Repeatedly appending the same line per hop would flood the transcript with duplicate presence lines, and on the human-facing surface — if not filtered — they would read as user bubbles.
 
-**Why not 每跳（0080）：** 同一短句每跳追加会把 transcript 刷成重复现势；人读若不过滤更会当成用户气泡。一轮开头一次已经标明本轮 overlay。
+## Decision
+
+"While the graph is open" is stated **once per `run()`** (one human-turn): a single short `<graph_mode>` line is appended at the tail of `messages`, not per inner-loop model invocation. The flip itself may still carry one long ON/OFF line; if the same `run()` already emitted a long ON, the short line is not stacked on top. The line never enters system, never enters `run_graph` receipts, never enters `<agent_status>`. When graph mode is off or was never turned on: nothing is emitted. Human-facing rule: TUI/CLI must not render `<graph_mode>` as a user bubble — same discipline as `<agent_status>`.
+
+## Consequences
+
+- Forgetting to use the graph is still countered by the resident `run_graph` description + one short presence line per human turn + the long flip line — not by re-appending the same line throughout one tool loop.
+- One opening line per turn is enough to mark the current run's overlay, while the transcript stays free of repeated presence noise.
+
+## Why not
+
+**Why not per hop (0080):** appending the same short line on every hop turns the transcript into repeated presence spam; on the human side, without filtering, those lines look like user bubbles. Once at the start of a run already marks the overlay for that turn.

@@ -3,8 +3,8 @@
 Date: 2026-08-28
 Status: accepted
 
-> **Amendment 2026-09-04**：existence pointer 只声明库在，**不得**下令 `Use memory_recall`。catalog 纪律句须写明目录是索引不是待办、标题与用户句撞词不构成必须召回。prefetch 通道不变。`memory_recall` 默认命中条数改为 3；工具说明不得写 “at the start of a task”。D1–D3 通道形状（目录进 system、正文不进 system、预取进用户消息、召回返回原文）当时不变。
-> **Amendment 2026-09-05**（ADR-0044）：D4 废止。合格 promote 正文不再进入 `system`。D1 catalog 通道本票不动。
+> **Amendment 2026-09-04**: the existence pointer may only declare that the store exists — it **must not** order the model to `Use memory_recall`. The catalog discipline sentence must state that the catalog is an index, not a to-do list, and that a title colliding with the user's words does not make recall mandatory. The prefetch channel is unchanged. `memory_recall`'s default hit count moves to 3; the tool description must not say "at the start of a task". D1–D3's channel shape (catalog into `system`, bodies not into `system`, prefetch into the user message, recall returning verbatim entries) stood unchanged at this date.
+> **Amendment 2026-09-05** (ADR-0044): D4 withdrawn. Qualified promoted bodies no longer enter `system`. D1's catalog channel is untouched by this vote.
 
 ## Context
 

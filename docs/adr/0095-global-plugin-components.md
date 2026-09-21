@@ -1,22 +1,28 @@
-# 0095. 全局插件组件加载：ledger 优先、目录扫描兜底、hook 文件源第二刀
+# 0095. Global plugin component loading: ledger-first, directory-scan fallback, second slice of the hook file source
 
 Date: 2026-09-14
 Status: accepted
 
-iknow 增加读取本机全局安装插件所携带组件（skills / agents / hooks）的能力。
+> **Live-behavior carrier**: the `Global plugin component loading (ADR-0095)` row of `docs/STATUS.md` restates the shipped behavior. This ADR keeps the decision rationale.
 
-## 决议
+## Context
 
-1. **插件根不是会话根**：`~/.iknow/plugins`（默认，与 `~/.iknow/skills` / `~/.iknow/agents` 同构）+ `IKNOW_PLUGIN_ROOTS` env + 用户设置 `plugins.roots`。与 `session-roots.ts` 的会话三根正交——插件根是组件来源路径，跨 worktree rebind 不变，不进 `resolveSessionRoots`。
-2. **发现 = ledger 优先、目录扫描兜底**：`<root>/installed_plugins.json`（`<plugin>@<marketplace>` → installPath/version/scope）给精确插件名与任意深度路径；无 ledger / JSON 损坏 → 目录扫描（含 `<root>/<plugin>/<version>/` 嵌套布局）。命名空间精确性依赖 ledger key——插件 skill 正文以 `<plugin>:<agent>` 引用 agent，目录猜名会错。
-3. **命名空间 id**：skill 与 agent 均登记规范名 `<plugin>:<name>` + 裸名别名（冲突丢弃 + warn）；agent 的 `ROLE_ID_PATTERN` 放宽允许 `:`。id 三段（enum / 模型传参 / capability）**原样传递零 normalize**。
-4. **hook 文件源第二刀**：`HookContribution`（`hooks/index.ts` 预留接缝）落地为 `hooks/plugin-hooks.ts`——`hooks/hooks.json` 的 `PreToolUse` / `PostToolUse` 编译为异步子进程钩子。matcher 按字符类分流（精确备选 vs 非锚定正则）；iknow 工具名映射到对外名候选集（`write_file`→`Write`、`edit_file`→`Edit|MultiEdit`；`todo_write` **不**映射 `Write`）；envelope 附通用键别名（`file_path`←`path` 等）；`${*_PLUGIN_ROOT}` / `${*_PLUGIN_DATA}` / `${*_PROJECT_DIR}` 按后缀替换并导出 env。exit 2 = Pre 拦（stderr JSON `systemMessage`/`permissionDecisionReason` 优先）；其余 fail-open。
-5. **钩子链异步化（additive 类型放宽）**：`PreToolUseHook` / `PostToolUseHook` 返回类型允诺 Promise；`permission-executor` 两个调用点与 `violation-executor` 的 observe 全部 `await`（post 拒绝必须进 catch，否则 unhandledRejection）；`composePreHooks` 异步先拦先赢。既有同步钩子零改动。
-6. **`plugins` 仅用户层**：不进 `PROJECT_SETTINGS_ALLOWED_KEYS`。插件贡献 hooks = 任意命令执行；项目层可配插件根等于 clone 即执行（供应链）。bun 启动器会把仓库 `.env` 自动载入 `process.env`，`IKNOW_PLUGIN_ROOTS` 旁路在该路径仍可达——判据：bun 路径执行 iknow 自身仓库，脚本信任已主导，风险等同既有 `npm run` 系；记录于此，不作代码阻塞。
+Plugins installed globally on this machine carry components (skills / agents / hooks) that iknow does not read. This ADR adds that loading capability; its shape (roots, discovery, naming, hooks) is decided below.
 
-**Why not 解析 `.claude-plugin/plugin.json` 类插件清单**：绑定第三方私有 schema；ledger + 目录扫描对两种安装布局同构，半装自然降级。
-**Why not `spawnSync` 执行 hook**：TUI 下每工具调用串行阻塞事件循环不可接受。
-**Why not Post 改变工具结果**：`PostToolUseHook`「observability only」既有不变量不动。
-**Why not fail-closed**：钩子是可拦截面，误拦代价高于漏拦（与 user-hook-router 同判据）。
+## Decision
 
-Amends ADR-0055（hook 文件源 H1 第二刀落地）。
+1. **Plugin roots are not session roots**: `~/.iknow/plugins` (default, isomorphic to `~/.iknow/skills` / `~/.iknow/agents`) + the `IKNOW_PLUGIN_ROOTS` env + the user setting `plugins.roots`. Orthogonal to the three session roots of `session-roots.ts` — plugin roots are component source paths, invariant across worktree rebind, and never enter `resolveSessionRoots`.
+2. **Discovery = ledger first, directory-scan fallback**: `<root>/installed_plugins.json` (`<plugin>@<marketplace>` → installPath/version/scope) supplies exact plugin names and arbitrary-depth paths; no ledger / broken JSON → directory scan (covering the nested `<root>/<plugin>/<version>/` layout). Namespace precision depends on the ledger key — plugin skills reference agents in their bodies as `<plugin>:<agent>`, so guessing names from the directory would be wrong.
+3. **Namespaced ids**: skills and agents register the canonical name `<plugin>:<name>` plus a bare-name alias (conflicts dropped + warned); the agent `ROLE_ID_PATTERN` is relaxed to allow `:`. The id travels **verbatim with zero normalization** across all three segments (enum / model-supplied argument / capability).
+4. **Second slice of the hook file source**: the `HookContribution` seam (reserved in `hooks/index.ts`) lands as `hooks/plugin-hooks.ts` — `PreToolUse` / `PostToolUse` in `hooks/hooks.json` compile into async subprocess hooks. Matchers split by character class (exact alternation vs non-anchored regex); iknow tool names map to candidate sets of the external names (`write_file`→`Write`, `edit_file`→`Edit|MultiEdit`; `todo_write` is **not** mapped to `Write`); the envelope carries common key aliases (`file_path`←`path` etc.); `${*_PLUGIN_ROOT}` / `${*_PLUGIN_DATA}` / `${*_PROJECT_DIR}` are substituted by suffix and exported as env. exit 2 = block at Pre (stderr JSON `systemMessage`/`permissionDecisionReason` take priority); anything else fails open.
+5. **Async hook chain (additive type widening)**: `PreToolUseHook` / `PostToolUseHook` return types allow Promises; the two call sites in `permission-executor` and the observe call in `violation-executor` all `await` (a rejected post hook must enter the catch, otherwise unhandledRejection); `composePreHooks` is async, first block wins. Existing synchronous hooks need zero changes.
+6. **`plugins` is user layer only**: not added to `PROJECT_SETTINGS_ALLOWED_KEYS`. Plugin-contributed hooks mean arbitrary command execution; allowing the project layer to configure plugin roots amounts to clone-then-execute (supply chain). The bun launcher auto-loads the repo `.env` into `process.env`, so the `IKNOW_PLUGIN_ROOTS` bypass is still reachable on that path — judgment: the bun path executes the iknow repo itself, script trust already dominates there, risk equals the existing `npm run` surface; recorded here, not a code blocker.
+
+**Why not parse plugin manifests such as `.claude-plugin/plugin.json`**: it binds a third party's private schema; ledger + directory scan are isomorphic across the two install layouts, and a half-installed plugin degrades naturally.
+**Why not run hooks via `spawnSync`**: serial blocking of the event loop on every tool call is unacceptable under the TUI.
+**Why not let Post change tool results**: the existing `PostToolUseHook` invariant "observability only" stays untouched.
+**Why not fail-closed**: hooks are an interception surface; the cost of a false block is higher than a false pass (same judgment basis as user-hook-router).
+
+## Consequences
+
+- Amends ADR-0055 (the second slice of hook file source H1 lands).

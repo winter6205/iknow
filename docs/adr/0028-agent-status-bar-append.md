@@ -1,37 +1,37 @@
-# 0028. 状态栏追加注入，不替换历史条
+# 0028. Status-bar append injection, never replace the history strip
 
 Date: 2026-08-23
 Status: accepted
 
-> **Superseded clause（ADR-0085 / 2026-09-11）**：本文正文两处「`todo_write` 的 add/check/list 不变」已过时 —— 主路径改为 **add / update / read** 三件事（`check` 并入 update，`replace` 降为整表逃生口），条目带稳定 id。栏的投影纪律（只投影未完成项、追加不替换）不变；正文该半句按 ADR-0085 读。
+> **Superseded clause (ADR-0085 / 2026-09-11)**: the two in-text claims "`todo_write`'s add/check/list unchanged" are outdated — the main path is now the three verbs **add / update / read** (`check` folded into update, `replace` demoted to a whole-table escape hatch), with stable ids on entries. The strip's projection discipline (project only unfinished items, append never replace) is unchanged; read that half-sentence per ADR-0085.
 
-> **Amended clause（ADR-0103 / 2026-09-19）**：Consequences 的「现势字段仅 `last_tool` + 有未勾项时才出现的 todo 段」已修订 —— 字段集新增 `instruction:` 段（最新用户指令首行逐字回显、截断，代码计算不摘要）与新用户消息进场后的一次性 pivot reconcile 标记；「不把任务摘录抄进栏」的禁令不变（instruction 回显是逐字回显，不是语义抽取）。注入纪律（每跳追加、append-only、不替换）逐字不变。
+> **Amended clause (ADR-0103 / 2026-09-19)**: the Consequences line "live fields are only `last_tool` + a todo section that appears only when unchecked items exist" is amended — the field set gains an `instruction:` segment (verbatim echo, truncated, of the latest user instruction's first line, computed by code with no summarization) plus a one-shot pivot-reconcile marker after a new user message lands; the ban on "copying task excerpts into the strip" stands (the instruction echo is verbatim, not semantic extraction). The injection discipline (append before every model hop, append-only, never replace) is unchanged verbatim.
 
 ## Context
 
-给模型看的状态栏（代码现算的现势快照）要进请求。候选是每轮替换最后一条栏，或像普通消息一样只追加。替换看起来「永远只有最新现势」，但会改已经发出过的前缀，KV cache 不友好，也违反 append-only messages（错了也是再写一条，不把旧条剔掉）。
+The status strip shown to the model (a live snapshot computed by code) must enter the request. The candidates: replace the last strip every turn, or append it like a normal message. Replacement looks like "always exactly the latest state", but it rewrites a prefix that was already sent — hostile to the KV cache and in violation of append-only messages (when something is wrong you write another one, you never evict the old entry).
 
-「以最后一条为准」这条读规则是静态的，可以进系统提示词，也可以印在每条栏上。
+The read rule "the last one is authoritative" is static: it can live in the system prompt, or be printed on every strip.
 
 ## Decision
 
-状态栏在**每次即将调用模型前**以 user 消息追加在当时 `messages` 末尾（含同一用户回合内的 tool loop）；旧栏留在 transcript 里。不在发送前 splice 掉历史栏。不写进 `deps.system`。UI 只读最新一份现势，不另建账本。
+The status strip is appended as a **user** message at the end of the current `messages` **immediately before each model call** (including the tool loop within the same user turn); old strips stay in the transcript. No splicing out of historical strips before sending. Not written into `deps.system`. The UI reads only the newest snapshot and keeps no separate ledger.
 
-读规则写进系统提示词一次，不写进每条栏。会变的提醒（模式、日期）日后走栏或 user 侧 reminder，不改 system。
+The read rule is written into the system prompt once, not onto every strip. Changing reminders (mode, date) go through the strip or user-side reminders later, never by mutating `system`.
 
-Todo 段按未勾项在场：有 `- [ ]` 才写入栏，且只投影这些未勾行；缺席 / 空 / 全勾则整段缺席。`todo_write` 的 add/check/list 不变；跳过条件只放在 tool description。
+The todo section is present only when unchecked items exist: write it into the strip only when `- [ ]` is present, and project only those unchecked lines; absent / empty / all-checked means the whole section is absent. `todo_write`'s add/check/list unchanged (read per ADR-0085 — see the superseded-clause note above); skip conditions live only in the tool description.
 
 ## Why
 
-前缀稳定才能复用 cache；长任务里少重算前缀通常比少几段栏文本更省。现势靠「最新一条栏」表达，不靠改写历史。规则不变，进 system 不破前缀；栏只承载事实。
+Prefix stability is what reuses the cache; in long tasks, recomputing less prefix usually beats saving a few strips' worth of text. The live state is expressed by "the newest strip", not by rewriting history. The rule is invariant, so putting it in `system` does not break the prefix; the strip carries only facts.
 
 ## Consequences
 
-现势字段仅 `last_tool`（上一跳刚完成的工具名；本回合尚未跑过工具则为 idle）+ **有未勾项时才出现的** todo 段。Todo 段只投影 `todos.md` 里的 `- [ ]` 行；文件缺席、空文件、或只剩 `- [x]` 时整段缺席（不印空列表、不把已勾项带进栏）。不把任务摘录、cwd、技能/MCP 索引抄进栏。`todo_write` 仍是模型自维护账本（add/check/list 语义不变）；栏只读文件，宿主不替模型建清单、不在工具回执里宣布「已擦掉」。跳过条件（下一步就能做完用户这句则不要 `add`）只写在 `todo_write` 的 tool description，不进栏、不进「简单任务」式模糊禁令。in-flight 只给 TUI 副产物，不进模型栏。
+Live fields are only `last_tool` (the tool that just completed on the previous hop; idle if this turn has run no tool yet) + a todo section **that appears only when unchecked items exist**. The todo section projects only the `- [ ]` lines from `todos.md`; when the file is absent, empty, or left with only `- [x]` lines, the whole section is absent (never print an empty list, never carry checked items into the strip). Task excerpts, cwd, and skill/MCP indexes are not copied into the strip. `todo_write` remains the model's self-maintained ledger (add/check/list semantics unchanged, per the ADR-0085 reading above); the strip only reads the file — the host does not build a checklist on the model's behalf and does not announce "erased" in tool results. The skip condition (don't `add` when the user's request is already done on the next step) is written only in `todo_write`'s tool description, never in the strip and never as a vague "simple tasks" ban. In-flight state goes only to TUI side products, never into the model strip.
 
-同一跳里模型可以一边改账本一边做别的工具：新栏在**下一次** `adapter.step` 前按工具跑完后的文件重算，不在当跳推理中途更新。
+Within one hop the model can edit the ledger while running other tools: the new strip is recomputed from the post-tool file **before the next** `adapter.step`, not mid-hop during reasoning.
 
-- 系统提示词增加一句稳定读法，字节应跨回合不变。
-- 每条 `<agent_status>` 不含政策散文，只含代码算出的现势。
-- TUI 显示侧最多投影 4 行未勾项并以 footer 披露溢出计数；这是显示侧防线，账本写入口的条数/长度硬顶另案处理（不在本 ADR）。
-- 弱模型若忽略系统里那一句，再评估是否在栏末加固定短指针，而不是改回替换历史。
+- The system prompt gains one stable reading-rule sentence whose bytes should not change across turns.
+- Each `<agent_status>` contains no policy prose, only code-computed live state.
+- The TUI display side projects at most 4 unchecked lines and discloses the overflow count in a footer; this is a display-side defense line — hard caps on entry count/length at the ledger write path are handled separately (outside this ADR).
+- If weak models ignore that one system sentence, re-evaluate adding a fixed short pointer at the strip's end, rather than reverting to replacing history.

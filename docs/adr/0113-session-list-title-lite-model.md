@@ -1,30 +1,32 @@
-# 0113. 会话列表标题：独立事件 + lite model
+# 0113. Session list titles: a standalone transcript event + lite model
 
 Date: 2026-09-19
 Status: proposed
 
+> **Carrier note**: the settings-routing consequence of this decision is already carried by ADR-0015's Amendment 2026-09-19 (main-session `settings.llm.model` fail-fast unchanged; optional `settings.llm.liteModel` is a separate field). The live contract is `specs/session-list-title.md`.
+
 ## Context
 
-列表行现在靠 `extractTitle`（首条 user trim + 80）写入 `SessionFileV1.title`。TUI 已渲染该字段，但寒暄、操作剧本半截、compact preamble 都会变成列表名；且每次 save / compact 会重算，生成结果没有闸。主会话只有 `settings.llm.model`（ADR-0015）；标题生成若走主模型会进 Loop Engine 贵路径。需要和 compact 的 LLM 摘要拆开（`title` 不是压缩摘要）。
+List rows today rely on `extractTitle` (first user message trimmed + 80) written into `SessionFileV1.title`. The TUI already renders that field, but pleasantries, half-finished operation scripts, and compact preambles all become list names; and every save / compact recomputes it, with no gate on the generated result. The main session has only `settings.llm.model` (ADR-0015); routing title generation through the main model would drag it into Loop Engine's expensive path. It also needs separating from compact's LLM summary (`title` is not a compaction summary).
 
 ## Decision
 
-1. **标题权威是 transcript 独立事件**（与 `message` 并列的 JSONL type，本仓自定名字）。header `title` 只是 `GET /sessions` / TUI / Web 的缓存：等于最新一条标题事件正文；没有事件时才是 `extractTitle` 占位。
-2. **生成走单独模块**：一次无工具文本补全，不进 Loop Engine，不挡主回合。host 在第一次 `StopReason=completed` 且已有实质 user 文本后 fire-and-forget；失败静默，占位保留。
-3. **`settings.llm.liteModel`**：用户层、与 `llm.model` 同形的 `provider/model` 路由，走同一 `providers[]`。缺席或调用失败不 fail-fast。本 ADR 只授权**会话标题生成**消费该槽；compact / memory extract / dream 不改路由。
-4. 已有标题事件后，`extractTitle` 与 compact 不得回写 header `title`。不提供给人改会话名的命令或 UI。
-5. 三条列表面主文案对齐缓存 `title`。`lastFinalText` 只给搜索，不进行。
+1. **Title authority is a standalone transcript event** (a JSONL type alongside `message`, named by this repo). The header `title` is only the cache for `GET /sessions` / TUI / Web: it equals the body of the latest title event; only when no event exists is it the `extractTitle` placeholder.
+2. **Generation lives in its own module**: a single tool-free text completion, not through Loop Engine, never blocking the main turn. The host fires it fire-and-forget after the first `StopReason=completed` once substantive user text exists; failures are silent and the placeholder stays.
+3. **`settings.llm.liteModel`**: a user-level `provider/model` route shaped the same as `llm.model`, going through the same `providers[]`. Absence or a failed call does not fail-fast. This ADR authorizes **session title generation** only as the consumer of that slot; compact / memory extract / dream do not change routing.
+4. Once a title event exists, `extractTitle` and compact must not write back into the header `title`. No command or UI is offered for humans to rename a session.
+5. The primary text of the three list surfaces aligns with the cached `title`. `lastFinalText` is for search only and does not enter the row.
 
 ## Why not
 
-- **继续只截首条 user：** TUI 已证明接线不等于可扫。
-- **把 compact 摘要当列表名：** 两个语义已拆开。
-- **第二套 provider / 全局 apiKey：** 重复 ADR-0015 注册表。
-- **lite 缺席 fail-fast：** 标题是增强，不是主会话前提。
-- **给人改会话名：** 列表标题是机器生成的扫读标签，不是用户资产名。拒。
+- **Keep truncating the first user message:** the TUI has shown that being wired in does not make the list scannable.
+- **Use the compact summary as the list name:** the two semantics have been separated.
+- **A second provider set / global apiKey:** would duplicate the ADR-0015 registry.
+- **fail-fast when lite is absent:** the title is an enhancement, not a main-session precondition.
+- **Letting humans rename sessions:** the list title is a machine-generated scanning label, not a user-facing asset name. Rejected.
 
 ## Consequences
 
-- JSONL 解析联合必须认识标题事件，未知 type 纪律与现有 unknown-field 策略对齐，不得把标题事件投影进 `messages`。
-- ADR-0015 的「`settings.llm.model` 是主会话路由唯一来源」仍成立；lite 是**另一字段**，不是替换 model。
-- 项目 settings 仍不采纳 `llm`（ADR-0084）。
+- The JSONL parsing union must recognize the title event; the unknown-type discipline aligns with the existing unknown-field strategy, and the title event must never be projected into `messages`.
+- ADR-0015's rule that "`settings.llm.model` is the sole source of the main-session route" still holds; lite is **a separate field**, not a replacement of model.
+- Project settings still do not adopt `llm` (ADR-0084).

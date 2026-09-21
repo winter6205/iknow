@@ -1,12 +1,21 @@
-# 0073. 声称窗口用 messages 下标；HITL 不因 checker CONTRADICTED 打回
+# 0073. Claim window uses the messages index; HITL is not bounced back by a checker CONTRADICTED
 
 Date: 2026-09-09
 Status: accepted
 
-Context: `checkEvidence` 的 `claimIndex` 被 `verify-loop` 传成验证 `round`（首轮恒 1），现场只看 `messages[0]`，证据前级对真实多 turn transcript 失明。同时 HITL 把 checker `EVIDENCE_CONTRADICTED`（`rm` / 写空测试文件）映射成打回，会惩罚「整理测试」这种合法会话。ADR-0024 的模块划分（HITL 不请完成向 LLM）仍然成立；本决策只改**窗口坐标**和 **HITL 对 CONTRADICTED 的消费**。
+## Context
 
-Decision: （1）`claimIndex` 是声称位置 = `messages` 下标，与 `deriveFinalText` 同一次回扫「最后一条有非空 text 的 assistant」；`round` 只记账。找不到该 assistant → INSUFFICIENT。（2）正常模式不把 CONTRADICTED 当 `true-failure`；**goal 功能**仍硬否决（接线 flag `completionMode === "auto"`，是 goal 功能模块，不是自动模式）。（3）HITL 且证据不够且跳过完成向判官时，人对面不显示「验证通过」。
+`checkEvidence`'s `claimIndex` was passed by `verify-loop` as the verification `round` (always 1 on the first round), so the checker only looked at `messages[0]` — blind to the evidence prefix of a real multi-turn transcript. At the same time, HITL mapped checker `EVIDENCE_CONTRADICTED` (e.g. `rm`, writing an empty test file) into a bounce-back, punishing legitimate "tidy up the tests" conversations. ADR-0024's module split (HITL does not ask the LLM for the completion vector) still holds; this decision changes only the **window coordinates** and **how HITL consumes CONTRADICTED**.
 
-Why: 检查器要看见声称之前的测试与编辑，否则 CONTRADICTED / SUFFICIENT / stale 都是空转。HITL 人在键盘旁，删旧测试不是作弊信号；把「没验过」显示成绿勾是假通过。goal 功能仍要防「删测试装绿」。
+## Decision
 
-Evidence: 会话 8ff77b89 两条 verification 均为 `hitl_skip_completion_judge` + `EVIDENCE_INSUFFICIENT` + `passed`。
+1. `claimIndex` is the claim position = the `messages` index, resolved in the same backward scan as `deriveFinalText` ("the last assistant message with non-empty text"); `round` is bookkeeping only. If that assistant message cannot be found → INSUFFICIENT.
+2. In normal (HITL) mode, CONTRADICTED is not treated as a `true-failure`; the **goal feature** still hard-vetoes (wired via the flag `completionMode === "auto"` — that is the goal feature module, not an "automatic mode").
+3. Under HITL, when evidence is insufficient and the completion judge is skipped, the human-facing UI must not show "verification passed".
+
+## Consequences
+
+- The checker sees the tests and edits preceding the claim; otherwise CONTRADICTED / SUFFICIENT / stale are all no-ops.
+- A human at the keyboard tidying old tests is not a cheating signal, so HITL no longer bounces it back; but showing a green check for "not verified" would be a false pass — hence rule 3: chit-chat gets no green check.
+- The goal feature keeps its defense against "delete tests to fake green".
+- Evidence: conversation 8ff77b89 — both verification records are `hitl_skip_completion_judge` + `EVIDENCE_INSUFFICIENT` + `passed`.
