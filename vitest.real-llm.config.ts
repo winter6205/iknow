@@ -44,6 +44,9 @@ export default defineConfig({
       "archive/tests-real-llm/agent-status-instruction-echo.test.ts",
       "archive/tests-real-llm/egress-real-git-push.test.ts",
       "archive/tests-real-llm/tool-role-substitution.test.ts",
+      // #1089 section B: three inductions over the same runner (no means named
+      // in prompt, verbal bash-grep induction, non-TypeScript arm).
+      "archive/tests-real-llm/role-substitution-boundaries-real.test.ts",
     ],
     exclude: ["**/node_modules/**"],
     pool: "forks",
