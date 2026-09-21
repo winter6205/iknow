@@ -114,6 +114,7 @@ import {
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
 import { shutdownDefaultLspPool } from "../harness/lsp/client.js";
+import { beginStderrGate, endStderrGate } from "./stderr-gate.js";
 
 /** Typed error prefix for renderer startup failures (message constants, no magic strings). */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
@@ -923,6 +924,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // probe the terminal (OSC 10/11 capability queries + alternate screen)
     // and leave capability replies stranded after a throw.
     renderer = await factory(RENDERER_CONFIG);
+    // Alternate screen is live from here on: bare `process.stderr.write`
+    // from background modules (lsp warmup / notifier / memory …) would land
+    // at the cursor position — visibly inside the input box. Gate the trace
+    // for the renderer's lifetime and replay it after terminal restore.
+    beginStderrGate();
 
     const root = createRoot(renderer);
     // This function is the **only** root.render call site for <TuiApp>
@@ -1025,6 +1031,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // early (the renderer is not destroyed twice), so here we only add drain
     // + raw-mode fallback.
     teardownTerminal();
+    // Terminal is back on the main screen: release the stderr gate so the
+    // buffered background traces replay here (visible, correctly ordered)
+    // instead of having bled into the live TUI.
+    endStderrGate();
     // Backstop — exit paths not taken over by onQuit (signals / direct
     // destroy): if shutdownExtensions has started it is a no-op; otherwise
     // ensure MCP shutdown completes before runTui returns, avoiding leaked
@@ -1048,6 +1058,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       `${TUI_RENDERER_ERROR_PREFIX}：${cause}。请重新安装依赖（npm ci）后重试\n`
     );
     teardownTerminal();
+    // Same gate release as the normal path: when the throw came after
+    // arming, the error line above was buffered and replays here (order
+    // preserved); pre-assembly throws never armed it → already written.
+    endStderrGate();
     // Best-effort MCP close on the error path too (if the throw came after
     // buildTuiDeps, tuiExtensions is already injected; if buildTuiDeps itself
     // threw, no-op). Does not affect the exit code.

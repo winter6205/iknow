@@ -475,3 +475,37 @@ test("T2：渲染器工厂调用点在装配链之后（prepareRuntime 之前不
   // non-TTY fail-fast still first (before any assembly and renderer).
   expect(runSrc.indexOf("!process.stdin.isTTY")).toBeLessThan(prepareIdx);
 });
+
+// ---------------------------------------------------------------------------
+// structural pin — stderr gate 生命周期接线（输入框漏字修复）
+// ---------------------------------------------------------------------------
+
+test("T7：stderr gate begin 落在 renderer 创建之后、mountApp 之前", () => {
+  const factoryIdx = runSrc.indexOf(
+    "renderer = await factory(RENDERER_CONFIG);"
+  );
+  const beginIdx = runSrc.indexOf("beginStderrGate();");
+  const mountIdx = runSrc.indexOf("mountApp();");
+  expect(factoryIdx).toBeGreaterThan(-1);
+  // alt-screen 自 factory 起生效：门必须在此之后立刻武装，且在首帧挂载前
+  expect(beginIdx).toBeGreaterThan(factoryIdx);
+  expect(mountIdx).toBeGreaterThan(beginIdx);
+});
+
+test("T7：两条 runTui 退出口都 endStderrGate，且都在 teardownTerminal 之后", () => {
+  expect(runSrc.match(/endStderrGate\(\);/g)?.length).toBe(2);
+  // 正常路径：whenDestroyed → teardownTerminal → end（回放落主屏）
+  const whenIdx = runSrc.indexOf("await whenDestroyed(renderer);");
+  const normalEnd = runSrc.indexOf(
+    "endStderrGate();",
+    runSrc.indexOf("teardownTerminal();", whenIdx)
+  );
+  expect(normalEnd).toBeGreaterThan(whenIdx);
+  // catch 路径：end 在 teardownTerminal 之后、shutdownExtensions 之前
+  const catchTeardown = runSrc.lastIndexOf("teardownTerminal();");
+  const catchEnd = runSrc.indexOf("endStderrGate();", catchTeardown);
+  expect(catchEnd).toBeGreaterThan(catchTeardown);
+  expect(
+    runSrc.indexOf("await shutdownExtensions();", catchEnd)
+  ).toBeGreaterThan(catchEnd);
+});
