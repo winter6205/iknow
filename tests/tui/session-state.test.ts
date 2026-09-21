@@ -178,7 +178,8 @@ describe("session-state: 三态转换表（Q1a）", () => {
     const next = withLastUsage(started, usage);
     expect(next).not.toBe(started);
     expect(next.lastUsage).toEqual(usage);
-    // 纯替换：原对象不被修改（Object.freeze 纪律下的整体替换语义）
+    // pure replacement: the original object is never mutated (whole-object
+    // replacement semantics under the Object.freeze discipline)
     expect(started.lastUsage).toBeNull();
     expect(next.runState).toBe("running-fg");
     expect(Object.isFrozen(next)).toBe(true);

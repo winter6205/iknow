@@ -391,7 +391,7 @@ describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", 
     const cols = 60;
     // The width invariant must attach to the form formatToolStatusLine
     // actually emits: a hand-built `name · detail · failed` does not exist in
-    // the failure branch (the real one is `[失败] name · detail`), and a
+    // the failure branch (the real one is failure-marker prefix + `name · detail`), and a
     // hand-strung assertion would certify a line production never emits.
     const liveLine = formatToolStatusLine({
       toolName: "bash",
@@ -568,7 +568,7 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       kind: "ok",
     });
     // Subagent tools no longer render live / history tool cards in the
-    // `▣ 子代理` form -- subagent state is expressed by the spawn card's
+    // `▣ subagent` form -- subagent state is expressed by the spawn card's
     // two-line projection + SubagentPanel alone, avoiding dual render.
     // formatToolStatusLine returns only detail for them.
     expect(line).toBe("general-purpose");
@@ -620,7 +620,7 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
     expect(line).toBe("bash · npm test");
     // No trailing ` · ok` suffix anymore (an inconsistency this unification removes).
     expect(line.endsWith(" · ok")).toBe(false);
-    // Success state carries no [完成] prefix.
+    // Success state carries no completion prefix.
     expect(line.includes("[完成]")).toBe(false);
   });
 
@@ -785,8 +785,8 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
 // formatLiveToolEvent opts.cols pass-through -- when the detail override is
 // absent it goes through summarizeToolCall(name, input, cols) with visual-width
 // capping (CJK does not overflow on narrow terminals). Human-readable contract:
-// success is `name · detail` (no `[完成]` prefix, no ` · ok` suffix); running
-// uses an English process line (no `[运行中]`); only failure keeps `[失败]`.
+// success is `name · detail` (no completion prefix, no ` · ok` suffix); running
+// uses an English process line (no running prefix); only failure keeps the failure prefix.
 describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口", () => {
   test("窄 cols + CJK 长 command → 单行 ≤ cols（不在中间换行）", () => {
     // Empty detail goes through summarizeToolCall; when cols is given, detail is capped by visual width.
@@ -811,7 +811,7 @@ describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口"
       kind: "ok",
     });
     // 80-char truncation + the `bash · ` prefix keeps total length under 100
-    // (shorter now that the [完成] prefix is gone).
+    // (shorter now that the completion prefix is gone).
     expect(line.length).toBeLessThanOrEqual(100);
     expect(line.startsWith("bash · x")).toBe(true);
     expect(line.includes("[完成]")).toBe(false);

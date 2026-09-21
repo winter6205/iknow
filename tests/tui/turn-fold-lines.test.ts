@@ -86,8 +86,8 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
   });
 
   test("concurrent：已画 unit fold 不是关闭信号（有折叠 + 有草稿 → 仍 true）", () => {
-    // docs/CONTEXT.md open unit _Avoid_: 「已画折叠不是关 thinking panel 的
-    // 信号」 ("a drawn fold is not a signal to close the thinking panel").
+    // docs/CONTEXT.md "open unit" _Avoid_: a drawn fold is not a signal to
+    // close the thinking panel.
     // The toolRunning gate was later retired — this check looks only at
     // running + draft length, independent of tool running state.
     expect(

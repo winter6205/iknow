@@ -3,16 +3,16 @@
  * tests/tui/live-tool-preview.test.tsx
  *
  * live-tool-preview (OpenTUI edition) — tool running lines:
- *  - running state: only the `[运行中] name` ("running") status line (1-line budget)；
- *  - completed state: summary line + unified diff preview (hunk header + line numbers)；
+ *  - running state: only the "running" status line for the tool name (1-line budget);
+ *  - completed state: summary line + unified diff preview (hunk header + line numbers);
  *  - running → completed switch: reducer-event-driven, the frame goes from
- *    `[运行中]` to summary + diff；
+ *    the running marker to summary + diff;
  *  - line-budget parity: rendered line count === liveToolPreviewRows.
  *
  * tool_input_delta incremental consumption:
- *  - the reducer accumulates partialJson into the running entry's partialInput；
- *  - running renders `[运行中] bash · <partial summary>` (successful parse goes
- *    through summarizeToolCall; incomplete JSON is truncated verbatim)；
+ *  - the reducer accumulates partialJson into the running entry's partialInput;
+ *  - running renders the running marker + `bash · <partial summary>` (successful parse goes
+ *    through summarizeToolCall; incomplete JSON is truncated verbatim);
  *  - post_tool_use completion overwrites with the full input and clears partialInput.
  */
 import { describe, expect, test } from "bun:test";

@@ -236,7 +236,7 @@ describe("TUI settle 只画 store（spec invariant 2 / T5）", () => {
     await app.pressEnter();
     // precondition: the tail really was on the overlay (otherwise the post-settle not.toContain is a vacuous assertion).
     await untilFrame(app.setup, (f) => f.includes(TAIL_MARK));
-    // settle: the 「已打断」 notice appears → draft unload + snapshot swap are both done.
+    // settle: the interrupted-with-checkpoint notice appears → draft unload + snapshot swap are both done.
     await untilFrame(app.setup, (f) => f.includes("已打断，checkpoint 已保存"));
 
     const frame = app.setup.captureCharFrame();

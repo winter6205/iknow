@@ -34,8 +34,8 @@ import { TraceReadError } from "../../src/traceserver/types.ts";
  * every assertion below.
  *
  *   1. A coordinate that does not take part in addressing is **rejected**, never
- *      ignored (the contract: 「参与寻址的坐标必须被回答，不被使用的坐标必须被拒」 —
- *      coordinates that participate in addressing must be answered, unused ones rejected).
+ *      ignored (the contract: coordinates that participate in addressing must
+ *      be answered, unused ones must be rejected).
  *   2. A window must lie entirely inside its part, so a successful call returns
  *      **exactly `count` characters** — that is what makes `count` a read unit
  *      whose response size can be budgeted in advance.
@@ -867,7 +867,7 @@ describe("get_record core — the window arm", () => {
         assert.equal(error.kind, "window_overflow");
         assert.equal(error.partChars, partChars);
         assert.equal(error.remaining, 1);
-        // 「不回传任何 part 字节」 ("return no part bytes"): the natural wrong
+        // "return no part bytes": the natural wrong
         // answer is "you asked for 3
         // past the end, here are the 1 that fit". assert.rejects already proves no
         // text was returned; this proves the message does not smuggle any either.
@@ -885,7 +885,7 @@ describe("get_record core — the window arm", () => {
   });
 
   it("keeps every surface of the overflow error free of part bytes", async () => {
-    // 「不回传任何 part 字节」 ("return no part bytes") as a property, not a
+    // "return no part bytes" as a property, not a
     // substring spot-check. The case
     // above pins `message` exactly, which covers the message; it cannot see a
     // field added to the error later (a `text` holding "the part that fitted",

@@ -102,7 +102,7 @@ function writeSessionFile(dir: string, convId: string, lines: string[]): void {
  * Write two session files: c2 first with mtime rolled back (older), c1 second
  * (newer = most active). c1 holds turn + llm_call + 2 bad lines; c2 holds a
  * tool_call error. So the default /api/v1/traces always routes to c1, decoupled
- * from the 「不混看」 ("no mixing") assertions.
+ * from the "no mixing" assertions.
  */
 function writeSampleTraceDir(dir: string): void {
   writeSessionFile(dir, "c2", [

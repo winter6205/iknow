@@ -4,10 +4,10 @@
  *
  * Keyboard / paste wiring regression tests, covering the OpenTUI
  * `useKeyboard` + `usePaste` protocols:
- *  - plain keys (press key "a") flow through the input state machine；
- *    early phases did not consume them — assert only no-crash + stable frame；
+ *  - plain keys (press key "a") flow through the input state machine;
+ *    early phases did not consume them — assert only no-crash + stable frame;
  *  - modifier combos: ctrl+c is routed inside the useKeyboard handler to its
- *    own handler (Ctrl+C → notice)；
+ *    own handler (Ctrl+C → notice);
  *  - bracketed paste: mockInput.pasteBracketedText(text) → usePaste fires →
  *    controlled inputValue updates → the input box shows the text (no longer
  *    the `输入消息…` "type a message…" placeholder).
@@ -337,7 +337,7 @@ test("bracketed paste：pasteBracketedText → 输入框显示粘贴文本", asy
   await setup.mockInput.pasteBracketedText(text);
   await settle(setup);
   const frame = setup.captureCharFrame();
-  // The pasted text should appear in the input box (replacing the `输入消息…` placeholder).
+  // The pasted text should appear in the input box (replacing the input-message placeholder).
   expect(frame).toContain(text);
   await setup.renderer.destroy();
 });
@@ -401,7 +401,7 @@ test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
   // thinking text, expanded state shows it. Use the full mount (TuiApp + bridge) for
   // one turn, then Ctrl+O twice to assert visibility flips.
   const { setup } = await renderAppWithThinking();
-  // Collapsed: full thinking text not visible; without seconds, [思考] is not drawn.
+  // Collapsed: full thinking text not visible; without seconds, the thinking-fold marker is not drawn.
   let frame = setup.captureCharFrame();
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).not.toContain("链上推理");
@@ -531,7 +531,7 @@ describe("/effort 思考强度调整", () => {
     setup.mockInput.pressEnter();
     // No argument → open the level panel (title `思考强度` "thinking intensity" visible),
     // no longer via notice; current thinkingEffort="" → panel shows adaptive state
-    // (AUTO · 自适应, no level cursor).
+    // (AUTO · adaptive state, no level cursor).
     const frame = await waitFrame(
       setup,
       (f) => f.includes("思考强度"),
@@ -653,7 +653,7 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     await typeMultilineText(setup, "第二行");
     setup.mockInput.pressEnter();
     await waitTurnDone(setup, bridge);
-    // After submit the input box clears: the placeholder (输入消息 or /help) becomes visible again.
+    // After submit the input box clears: the placeholder (input-message hint or /help) becomes visible again.
     await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
     // ↑ recall: placeholder disappears (input box restores the full multiline text; cursor position doesn't affect the frame).
     setup.mockInput.pressArrow("up");
@@ -661,7 +661,7 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     // Baseline: transcript 1 copy + input box 1 copy (≥2 also guards against a vacuous "recall failed" pass).
     const before = countOccurrences(setup.captureCharFrame(), "第二行");
     expect(before).toBeGreaterThanOrEqual(2);
-    // Backspace: cursor should be at the end → deletes 「行」, the input-box copy disappears (count -1).
+    // Backspace: cursor should be at the end → deletes the final character, the input-box copy disappears (count -1).
     // Before the fix setText reset the cursor to offset 0 → native backspace no-op, count unchanged.
     setup.mockInput.pressBackspace();
     await waitFrame(
@@ -684,9 +684,9 @@ describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）"
     await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
     setup.mockInput.pressArrow("up");
     await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
-    // Type X: cursor at the end → X appends after 「第二行」. The transcript copy has
-    // no X after the line end, so "第二行X" can only come from the input box's append
-    // position; before the fix X prepended as "X第一行".
+    // Type X: cursor at the end → X appends after the recalled second line. The transcript copy
+    // has no X after the line end, so the "second-line + X" form can only come from the input
+    // box's append position; before the fix X prepended to the first line instead.
     setup.mockInput.pressKey("X");
     await waitFrame(setup, (f) => f.includes("第二行X"), 8000, "append-at-end");
     expect(setup.captureCharFrame()).not.toContain("X第一行");

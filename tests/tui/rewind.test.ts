@@ -587,7 +587,7 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     const content = rewindPickerContent(targets, 0, false);
     // 3 user messages, one option each; the main label must be the real text
     expect(content.options.map((o) => o.label)).toEqual(["q1", "q2", "q3"]);
-    // no 「回到会话起点」 or 「保留前」 literals
+    // no "rewind to session start" or "keep previous…" literals
     for (const opt of content.options) {
       expect(opt.label).not.toContain("回到会话起点");
       expect(opt.label).not.toMatch(/保留前/);

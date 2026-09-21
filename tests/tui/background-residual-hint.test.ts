@@ -12,7 +12,8 @@
  *   - formatBackgroundRunningHint: dim English count line text; singular vs
  *     plural; 0 (and absent) → undefined so the tail renders no line. The
  *     only producer is countLiveBackgroundSubagents, so negatives are not a
- *     representable input. Never Chinese 「运行中」 (CONTEXT 后景残留提示 _Avoid_).
+ *     representable input. Never the Chinese "running" label (CONTEXT.md
+ *     "background residual hint" entry, _Avoid_ list).
  */
 import { describe, expect, test } from "bun:test";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";

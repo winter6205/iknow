@@ -483,7 +483,7 @@ test("running 中间态:前段已落定的工具折叠行,在后段思考开始�
   const frame = setup.captureCharFrame();
   // The earlier segment's settled fold line is still there (retract count).
   expect(frame).toContain("read_file × 1");
-  // No `[思考]` fallback; the earlier thinking body (folded) stays unfolded.
+  // No thinking-fold marker fallback; the earlier thinking body (folded) stays unfolded.
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("先读文件")).toBe(false);
   await setup.renderer.destroy();

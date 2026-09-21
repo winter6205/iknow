@@ -5,8 +5,9 @@
  *
  *   T1: with a live `wait:false` background worker projected, Esc aborts the
  *       parent turn only; the parent returns to idle, input is unlocked
- *       (no 「请等本轮结束」), and no chrome paints the worker as the parent's
- *       「运行中」. abortSessionForegroundWork keeps background workers out of
+ *       (no "please wait for this turn to finish" notice), and no chrome
+ *       paints the worker as the parent's "running". abortSessionForegroundWork
+ *       keeps background workers out of
  *       its set (the fake models the hub-side criterion: foreground===true).
  *   T2: while live background workers remain after the parent went idle, the
  *       transcript tail shows a dim English count line
@@ -302,7 +303,7 @@ describe("1081 T1: Esc → parent idle, chrome only binds running-fg", () => {
       await settle(app.setup);
       const frame = app.setup.captureCharFrame();
       expect(frame).not.toContain("请等本轮结束");
-      // No parent 「运行中」 chrome while idle with a live background worker.
+      // No parent "running" chrome while idle with a live background worker.
       expect(frame).not.toContain("运行中");
     } finally {
       await app.dispose();

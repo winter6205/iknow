@@ -878,7 +878,7 @@ test("流式 thinking 未冻结：折叠行显示 Thinking…，无实时秒数�
 test("流式 thinking 子秒未冻结：折叠行显示 Thinking… 不显 0 秒", async () => {
   // Scenario: thinking started but <1s (sub-second) → fold line keeps static
   // `Thinking…` (streaming lines never show live seconds — sub-second
-  // naturally avoids a "0 秒" fake-precision display).
+  // naturally avoids a fake "0 seconds" precision display).
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -938,7 +938,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // The latest answer carries 7s; the older one has no seconds → no fallback to `[思考]`.
+  // The latest answer carries 7s; the older one has no seconds → no fallback to the thinking-fold marker.
   expect(frame).toContain("Thought for 7s");
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).toContain("旧回答");
@@ -1032,7 +1032,7 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   // Per the activity-block spec: retract settled (post_tool_use ok) →
   // collected into the unanchored block (block count + tail process lines).
   // Same-batch retracts appear once in the block `called` count; tail process
-  // lines draw per item without a full `[完成]` prefix.
+  // lines draw per item without a full done-marker prefix.
   // - running process line = English `grep · Search`, no `[运行中]` ("running").
   expect(frame).toContain("grep · Search");
   expect(frame.includes("[运行中]")).toBe(false);
@@ -1107,7 +1107,8 @@ test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不�
   const frame = setup.captureCharFrame();
   // Failure cross-cut: not counted in the block (no failed grep beyond `grep × 1` in block titles).
   expect(frame).toContain("read_file × 20");
-  // The failed item still shows in the tail as `[失败] grep · no matches`
+  // The failed item still shows in the tail as a failure-marked grep line
+  // `grep · no matches`
   // (live-tool-preview failure line), without double-drawing a completion card.
   expect(frame).toContain("[失败] grep");
   expect(frame).toContain("no matches");
@@ -1297,7 +1298,7 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   expect(frame.includes("calling web_search × 1")).toBe(false);
   expect(frame).toContain("Search");
   expect(frame).toContain("今天的AI新闻");
-  // assistant text through Markdown rendering + pangu spacing: 今天的AI → 今天的 AI.
+  // assistant text through Markdown rendering + pangu spacing: "today's-AI" gets a space inserted before the Latin run.
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
   const lines = frame.split("\n");
@@ -1356,7 +1357,7 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const iTool = frame.indexOf("bash");
-  // draft goes through Markdown + pangu spacing: 今天的AI → 今天的 AI.
+  // draft goes through Markdown + pangu spacing: a space is inserted between the CJK run and the adjacent Latin run.
   const iDraft = frame.indexOf("以下是今天的 AI 新闻");
   expect(iTool).toBeGreaterThanOrEqual(0);
   expect(iDraft).toBeGreaterThanOrEqual(0);

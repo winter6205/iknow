@@ -1,14 +1,18 @@
 /**
- * #1076: `iknow tui` 在 Node 下自动用 PATH 上的 Bun 重跑同一 CLI 文件、同一 cwd。
+ * #1076: under Node, `iknow tui` automatically re-runs the same CLI file with
+ * the Bun found on PATH, in the same cwd.
  *
- * 黑盒子进程测试：cli.ts 顶层自跑 main()，spawn 接线只有端到端可证
- * （同 tests/cli/subagent-worker-exit.test.ts 的结论）。
- * 钉住的不变式：
- *   1. PATH 有 bun → 子进程以 `bun <本CLI文件> tui <原argv...>` 启动，argv 作为离散
- *      数组元素透传（含空格的参数不拆分），cwd 不变，子进程 exit code 原样传播；
- *   2. 子进程死于信号 → 按 shell 约定以 128+signum 退出（区别于普通失败 1）；
- *   3. PATH 无 bun → 不进入 TUI，stderr 给拦截文案（含可复制的 `bun <file> tui`），
- *      exit 1。
+ * Black-box subprocess test: cli.ts runs main() at top level, so the spawn
+ * wiring is only provable end-to-end (same conclusion as
+ * tests/cli/subagent-worker-exit.test.ts).
+ * Pinned invariants:
+ *   1. bun on PATH → the child starts as `bun <this CLI file> tui <orig argv...>`,
+ *      argv passed through as discrete array elements (spaced args not split),
+ *      cwd unchanged, child exit code propagated verbatim;
+ *   2. child killed by a signal → exit with 128+signum per shell convention
+ *      (distinct from plain failure code 1);
+ *   3. no bun on PATH → never enter the TUI, emit the intercept message on
+ *      stderr (including a copy-pasteable `bun <file> tui`), exit 1.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -28,7 +32,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cliTs = join(repoRoot, "src", "cli.ts");
 
-/** 与 tests/cli/subagent-worker-exit.test.ts 同款 tsx 定位。 */
+/** Same tsx lookup strategy as tests/cli/subagent-worker-exit.test.ts. */
 function resolveTsxCli(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
@@ -36,7 +40,7 @@ function resolveTsxCli(): string {
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
-      // 继续向上
+      // keep walking up
     }
     const parent = join(dir, "..");
     if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
@@ -62,7 +66,7 @@ beforeAll(() => {
   mkdirSync(binWithBun, { recursive: true });
   mkdirSync(binEmpty, { recursive: true });
   mkdirSync(binSuicide, { recursive: true });
-  // 假 bun：逐参数打印 argv 与 cwd 后 exit 7，用于验证离散透传与传播。
+  // fake bun: print each argv element and the cwd, then exit 7 — verifies discrete pass-through and code propagation.
   const fakeBun = join(binWithBun, "bun");
   writeFileSync(
     fakeBun,
@@ -75,7 +79,7 @@ beforeAll(() => {
     ].join("\n")
   );
   chmodSync(fakeBun, 0o755);
-  // 假 bun：自我 SIGTERM，验证父进程按 128+15 传播信号死亡。
+  // fake bun: SIGTERM itself — verifies the parent propagates signal death as 128+15.
   const suicideBun = join(binSuicide, "bun");
   writeFileSync(suicideBun, "#!/bin/sh\nkill -TERM $$\n");
   chmodSync(suicideBun, 0o755);

@@ -376,7 +376,7 @@ async function renderPickerText(
 }
 
 /** True if any physical line contains both `[Esc]` and `保存退出` ("save and exit") --
- *  the hint may wrap on narrow terminals, so `[Esc 保存退出]` is not guaranteed
+ *  the hint may wrap on narrow terminals, so the combined hint is not guaranteed
  *  contiguous on one line; relaxed to a cross-line existence assertion. */
 function frameHasSaveEscHint(frame: string): boolean {
   return frame
@@ -756,7 +756,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     // /effort with no arg + thinkingEffort="" -> panel opens showing auto state
-    // (AUTO · 自适应, 5 levels greyed with no cursor).
+    // (AUTO with the adaptive label; 5 levels greyed with no cursor).
     await app.typeText("/effort");
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考强度"), 8000, "open");
@@ -844,7 +844,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
   test("#19 开关面板打开时 Ctrl+O → 折叠/展开不被吞", async () => {
     // Tall terminal (60 rows): after the picker opens, the chrome budget eats
     // 8 rows, so the viewport still needs enough height to hold the message
-    // area's [思考] fold line / expanded thinking full text.
+    // area's thinking-fold line / expanded thinking full text.
     const app = await mountAppAsync(
       [
         assistantResult({
@@ -877,7 +877,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     );
     expect(frame).toContain("思考开关"); // panel still open (Ctrl+O neither swallows the key nor closes the panel)
 
-    // Ctrl+O again -> fold back (full text hidden, does not fall back to [思考]).
+    // Ctrl+O again -> fold back (full text hidden, does not fall back to the thinking-fold marker).
     await app.pressCtrlO();
     frame = await untilFrame(
       app.setup,

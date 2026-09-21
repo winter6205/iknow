@@ -13,7 +13,7 @@
  *   - printCliError JSON envelope shape (for `oneshot` / `serve` /
  *     `main().catch` paths that re-throw non-LLM errors);
  *   - printChatError chat text shape (for `chat` path's typed-error
- *     rendering with `错误 <prefix>: ...`).
+ *     rendering with `错误 ("error") <prefix>: ...`).
  *
  * The catch path inside `runOneShot` for `llm_mode_missing_api_key` and the
  * chat REPL's `buildHarnessEngine` call both flow through these printers,

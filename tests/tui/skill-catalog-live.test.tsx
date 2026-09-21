@@ -255,7 +255,7 @@ describe("SC8 slash 当场热 — 打开面板即见中途落盘的 skill", () =
 describe("SC8 提交期竞态 — 快速键入/粘贴后立刻 Enter", () => {
   // defect confirmed on the real TUI: the rescan on panel open is async, so typing
   // `/zz-live` and hitting Enter immediately (paste shape, no per-key pause) can beat it —
-  // consulting only the cached list reports the just-installed skill as 「未知命令」 ("unknown command").
+  // consulting only the cached list reports the just-installed skill as an "unknown command" notice.
   // The cases below pin submit-time resolution directly.
   test("缓存里没有、重扫后有了 → 必须 hit（不得报未知命令）", async () => {
     const { root, userHome } = await makeRoots();

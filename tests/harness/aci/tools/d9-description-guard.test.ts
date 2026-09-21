@@ -17,7 +17,7 @@
  *
  * The guard fails fast if any future description edit accidentally
  * re-introduces an imperative ("do not", "never", …) or a CJK blocklist
- * word ("不要", "禁止", …). Mirrors the style block already pinned in
+ * word ("不要", "禁止", … = negative imperatives). Mirrors the style block already pinned in
  * tests/harness/aci/tools/todo-write.test.ts.
  *
  * Isolation: pure in-memory fixture (no real fs mutations); mkdtemp dirs
@@ -67,7 +67,7 @@ import type { RemoveWorktreeToolDeps } from "../../../../src/harness/aci/tools/r
 /** 12-word blocklist — mirrors the list in tests/harness/aci/tools/todo-write.test.ts.
  *
  * Discipline verdict: this table bans only model-facing negative imperatives
- * (do not / never / 不要…). Risk/refusal description words (reject / out of
+ * ("do not" / "never" / "不要"…). Risk/refusal description words (reject / out of
  * scope / guard…) are objective statements of tool behavior (web_fetch's SSRF
  * guard rejects, edit_file's lint rejects, memory_save's negative-form reject)
  * — they issue no prohibition to the model, and the guard paradigm allows

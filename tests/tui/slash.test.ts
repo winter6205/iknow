@@ -1733,8 +1733,8 @@ describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", 
   });
 
   test("agents 不进斜杠：真实插件布局里 agents 目录不进 skill catalog", async () => {
-    // spec invariant 6 / CONTEXT 「agents 不进斜杠」 ("agents never enter the
-    // slash"). Assembly = real plugin layout: skills/ and agents/ side by side
+    // spec invariant 6 / CONTEXT rule "agents never enter the
+    // slash". Assembly = real plugin layout: skills/ and agents/ side by side
     // under one plugin, the scanner only consumes the skills root — if a future
     // scan swept agents/ into the catalog (or slash opened its own agent path),
     // the assertions below fail.

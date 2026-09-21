@@ -12,7 +12,7 @@
  *     namespace) — verifies that spec tui-skill-slash-catalog's bare-name alias projection
  *     holds in the TUI end-to-end (bare-name and canonical-name paths share one envelope).
  * createSkillBody runs the real harness assembly (same call path as app.tsx); assertions
- * pin 「发送文本 = [skill-load name="..."]\n<body>」 (sent text = the envelope + body).
+ * pin that the sent text equals the skill-load envelope (`[skill-load name="..."]` + body).
  *
  * Sent text goes through bridge.postMessage → run() encodeUserText and becomes the whole
  * user message; tests read the on-disk session file directly to assert model-history text

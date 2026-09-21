@@ -37,7 +37,7 @@ describe("hintWindowStart — slash hint 滚动窗口", () => {
     for (let cursor = 0; cursor < TOTAL; cursor++) {
       const start = hintWindowStart(cursor, TOTAL, HINT_MAX_ROWS);
       expect(start + HINT_MAX_ROWS).toBeLessThanOrEqual(TOTAL);
-      // 光标必须始终落在窗口内
+      // the cursor must always fall inside the window
       expect(cursor).toBeGreaterThanOrEqual(start);
       expect(cursor).toBeLessThan(start + HINT_MAX_ROWS);
     }

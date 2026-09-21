@@ -1,5 +1,6 @@
 /**
- * #1076: Node 拦截 TUI 的文案不得把人指到只在 iknow 仓库才有的 npm script。
+ * #1076: the Node intercept message for TUI must not point users at an npm
+ * script that only exists in the iknow repo.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

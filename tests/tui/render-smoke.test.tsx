@@ -31,7 +31,7 @@ test("空会话帧含 banner 与输入框且无崩溃", async () => {
   const frame = setup.captureCharFrame();
   // banner frame and input box both use rounded borders (borderStyle="rounded").
   expect(frame).toContain("╭");
-  // input placeholder present (ASCII/CJK placeholder, Chinese 「输入消息」).
+  // input placeholder present (the Chinese input-message placeholder).
   expect(frame).toContain("输入消息");
   await setup.renderer.destroy();
 });
