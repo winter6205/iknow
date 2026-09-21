@@ -40,6 +40,7 @@
     "probe:lsp": "tsx scripts/lsp-probe.ts",
     "probe:sandbox:subagent": "tsx scripts/sandbox-probe-subagent.ts",
     "probe:aci-web-backend": "tsx scripts/aci-web-backend-exa-probe.ts",
+    "probe:role-substitution:sampling": "tsx scripts/role-substitution-sampling-probe.ts",
     "bench:transcript": "tsx scripts/bench-transcript-baseline.ts",
     "dev": "tsx src/cli.ts",
     "dev:tui": "bun run src/cli.ts tui",

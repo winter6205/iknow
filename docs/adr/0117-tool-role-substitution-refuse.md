@@ -25,6 +25,7 @@ Status: accepted
 
 **正面 / Applied:** 能力面与 usage 三类回退对齐；bash 不再是搜代码的合法逃生口。  
 **负面 / Trade-offs:** 关键字形（`class Foo`）在源码里当字符串搜、且本会话尚无符号工具轨迹时会被拒；对照树 B 量化误伤，比完不留第二政策。  
+**实测（#1089 采样，真实模型 31 次；`npm run probe:role-substitution:sampling`，`--report` 只重算不落模型）:** bash 段首 grep 族 11/11 被拒，正文面误伤 0；结构问题到达符号面 TS 臂 10/10、py/go 臂 9/11——旁落那 2 次都是先 `glob` 再走行窗读，属接受面不属违规。换行段与下表各口即此 11/11 的余量来源，故登记而不加启发式。  
 **接受面（登记，不在本政策加启发式堵）：**
 
 - bash：只查段首 token，且段边界用 `splitShellSegments` 的 `;` / `&&` / `||` / `|`——**换行不算本闸的段边界**（与 ADR-0068 危险扫描那道墙的按行分岔语义不同，两道墙各用各的），故 `printf x\ngrep …` 一类换行后置的 grep 可穿过；`git grep` 放行；`find … | xargs grep`、`$(which grep)` 一类间接调用可穿过。
