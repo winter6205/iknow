@@ -234,6 +234,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const sbRef = useRef<ScrollBoxRenderable | null>(null);
     const [scrollTop, setScrollTop] = useState(Number.MAX_SAFE_INTEGER);
     const [itemHeights, setItemHeights] = useState<ReadonlyArray<number>>([]);
+    // Measured height of scroll content before message 0 (the banner is the
+    // first scroll segment); scrollTop arrives in real coordinates and the
+    // window math maps message coordinates.
+    const [contentOriginHeight, setContentOriginHeight] = useState(0);
     const conversationId = props.session.conversationId;
     // Projection tracking: itemHeights / scrollTop reset when the
     // transcript projection is replaced (see projectionTransition).
@@ -363,8 +367,15 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           scrollTop,
           viewportHeight,
           heights: itemHeights,
+          contentOriginHeight,
         }),
-      [visibleMessages, scrollTop, viewportHeight, itemHeights]
+      [
+        visibleMessages,
+        scrollTop,
+        viewportHeight,
+        itemHeights,
+        contentOriginHeight,
+      ]
     );
     useLayoutEffect(() => {
       measureMountedHeights(
@@ -375,11 +386,17 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         mountWindow.endIndex,
         setItemHeights
       );
+      measureContentOrigin(
+        sbRef.current,
+        (props.bannerLines?.length ?? 0) > 0,
+        setContentOriginHeight
+      );
     }, [
       mountWindow.startIndex,
       mountWindow.endIndex,
       visibleMessages,
       itemHeights,
+      props.bannerLines,
     ]);
     // Fold counting aggregates only successful retract-class tools — the
     // resolver derives each item's slot from statusMap (tool_use_id →
@@ -612,6 +629,25 @@ function measureMountedHeights(
     }
   }
   if (next !== null) setHeights(next); // EXIT: nothing changed → no setState
+}
+
+/**
+ * Measure the banner segment (node id contract `transcript-banner`) that
+ * occupies scroll content before message 0. Absent banner / unmeasurable node
+ * → 0, which reproduces the pre-origin window. setState bails on equal value,
+ * so a stable banner costs no re-render.
+ */
+function measureContentOrigin(
+  sb: ScrollBoxRenderable | null,
+  hasBanner: boolean,
+  setOrigin: (next: number | ((prev: number) => number)) => void
+): void {
+  if (sb === null) return; // EXIT: unmounted during measure
+  const h = hasBanner
+    ? sb.getRenderable("transcript-banner")?.height
+    : undefined;
+  const next = typeof h === "number" && h > 0 ? Math.trunc(h) : 0;
+  setOrigin((prev) => (prev === next ? prev : next));
 }
 
 /**

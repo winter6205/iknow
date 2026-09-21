@@ -413,6 +413,58 @@ test("中长会话（超一屏、不足三屏）：树上只挂视口+overscan�
   await setup.renderer.destroy();
 });
 
+test("banner 占滚动坐标：长会话一次上滚即见视口顶消息（无需来回滚动）", async () => {
+  // banner 是滚动内容第一段，其真实高度 = 消息 0 的 origin。窗口推导若不
+  // 减掉 origin，mount 窗整体下移 banner 高，视口顶部落在空白 spacer 带
+  // （上滚黑屏），要靠来回滚动才追上。认证面：首个挂载 `tmsg-<i>` 节点的
+  // 顶边 y ≤ scrollTop，且屏上有消息文本。
+  const MESSAGES = 100;
+  const bannerLines = Array.from({ length: 13 }, (_, r) => `banner-${r}`);
+  const initial = sessionWith(makeMessages(MESSAGES));
+  const { setup, api } = await renderChat(initial, { bannerLines, rows: 24 });
+  const sb = api.handle!.scrollbox!;
+  await setup.waitForVisualIdle();
+
+  const banner = sb.getRenderable("transcript-banner");
+  expect(banner).toBeDefined();
+  expect(banner!.height).toBe(15); // 13 行点阵 + 圆角边框上下各 1
+  const max = maxScrollTop(api.handle!);
+  expect(max).toBeGreaterThan(banner!.height + 2 * sb.viewport.height);
+
+  const mountedIndices = (): number[] =>
+    Array.from({ length: MESSAGES }, (_, i) => i).filter(
+      (i) => sb.getRenderable(`tmsg-${i}`) !== undefined
+    );
+
+  // 一次手势：从底部上滚两屏。
+  await act(async () => {
+    sb.scrollTop = max - 2 * sb.viewport.height;
+  });
+  await setup.waitForVisualIdle();
+
+  // `node.y` 是视口相对坐标（负 = 顶边已滚出视口上方）。首挂载节点顶边必须
+  // 在视口内或更上（≤0）：无 banner 坐标修正时 mount 窗整体下移 banner 高，
+  // 首节点 y 是正的 spacer 带。骑跨视口顶的消息必须以正文出现在帧里
+  // （排除"挂了但没画"）；banner 在列表中部不应重新入画。
+  const topIndex = mountedIndices()[0]!;
+  const topNode = sb.getRenderable(`tmsg-${topIndex}`)!;
+  expect(topNode.y).toBeLessThanOrEqual(0);
+  const visibleIndex = mountedIndices().find((i) => {
+    const nd = sb.getRenderable(`tmsg-${i}`)!;
+    return nd.y + nd.height > 0;
+  })!;
+  expect(visibleIndex).toBeDefined();
+  const visibleMarker =
+    visibleIndex % 2 === 0
+      ? `msg-${String(visibleIndex).padStart(3, "0")}`
+      : `reply-${String(visibleIndex).padStart(3, "0")}`;
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain(visibleMarker);
+  expect(frame).not.toContain("banner-0");
+
+  await setup.renderer.destroy();
+});
+
 test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底 / 置顶仍提交", async () => {
   // spec quantization clause: consecutive sub-threshold `change` events must
   // not each setScrollTop (every commit recomputes the whole ChatView);

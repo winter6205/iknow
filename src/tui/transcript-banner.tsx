@@ -34,6 +34,7 @@ export function TranscriptBanner(props: {
   if (lines.length === 1) {
     return (
       <box
+        id="transcript-banner"
         flexDirection="column"
         borderStyle="rounded"
         borderColor={pal.border}
@@ -57,6 +58,7 @@ export function TranscriptBanner(props: {
   });
   return (
     <box
+      id="transcript-banner"
       flexDirection="column"
       borderStyle="rounded"
       borderColor={pal.border}
