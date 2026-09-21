@@ -72,6 +72,13 @@ export interface ViewportMountOpts {
   readonly heights?: ReadonlyArray<number>;
   readonly overscan?: number;
   readonly placeholderHeight?: number;
+  /**
+   * Rows the scroll content occupies before message 0 (the banner is the
+   * first scroll segment). `scrollTop` arrives in real content coordinates;
+   * the window math maps message coordinates, so it subtracts this origin
+   * first. Missing / non-finite / negative → 0 (pre-origin behavior).
+   */
+  readonly contentOriginHeight?: number;
 }
 
 export interface ViewportMountWindow<T> {
@@ -124,6 +131,13 @@ function clampScrollTop(
   if (Number.isNaN(scrollTop) || scrollTop < 0) return 0; // EXIT: NaN|negative
   if (!Number.isFinite(scrollTop) || scrollTop > maxScroll) return maxScroll; // EXIT: Infinity|overflow
   return scrollTop;
+}
+
+function resolveContentOrigin(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw) || raw <= 0) {
+    return 0; // EXIT: missing|invalid|zero → message 0 sits at content top
+  }
+  return Math.trunc(raw);
 }
 
 function emptyWindow<T>(): ViewportMountWindow<T> {
@@ -232,7 +246,7 @@ export function selectViewportMountWindow<T>(
   const viewportHeight = resolveViewport(opts.viewportHeight);
   const overscan = resolveOverscan(opts.overscan, viewportHeight);
   const scrollTop = clampScrollTop(
-    opts.scrollTop,
+    opts.scrollTop - resolveContentOrigin(opts.contentOriginHeight),
     contentHeight,
     viewportHeight
   );

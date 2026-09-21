@@ -147,6 +147,65 @@ describe("selectViewportMountWindow", () => {
     expect(bottom.spacerBefore).toBeGreaterThan(0);
   });
 
+  test("contentOriginHeight: scrollTop 先减 origin 再映射消息坐标", () => {
+    // 20×4=80 行消息内容，viewport 12 → overscan 3，origin 15（banner）。
+    // 真实 scrollTop 30 的视口顶 = 消息坐标 15 → range [12, 30]。
+    const w = selectViewportMountWindow(ids(20), {
+      scrollTop: 30,
+      viewportHeight: 12,
+      heights: uniformHeights(20, 4),
+      contentOriginHeight: 15,
+    });
+    expect(w.startIndex).toBe(3);
+    expect(w.spacerBefore).toBe(12);
+    expect(w.endIndex).toBe(8);
+  });
+
+  test("contentOriginHeight: scrollTop 落在 origin 区间内 → 钉在消息 0", () => {
+    const w = selectViewportMountWindow(ids(20), {
+      scrollTop: 5,
+      viewportHeight: 12,
+      heights: uniformHeights(20, 4),
+      contentOriginHeight: 15,
+    });
+    expect(w.startIndex).toBe(0);
+    expect(w.spacerBefore).toBe(0);
+  });
+
+  test("contentOriginHeight: 缺省 / 非法值退化为 0（旧调用行为不变）", () => {
+    const base = {
+      scrollTop: 30,
+      viewportHeight: 12,
+      heights: uniformHeights(20, 4),
+    };
+    const legacy = selectViewportMountWindow(ids(20), base);
+    for (const bad of [
+      undefined,
+      0,
+      -9,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      const w = selectViewportMountWindow(ids(20), {
+        ...base,
+        contentOriginHeight: bad,
+      });
+      expect(w).toEqual(legacy);
+    }
+  });
+
+  test("contentOriginHeight: 底部 / Infinity 仍收敛到尾窗", () => {
+    const w = selectViewportMountWindow(ids(20), {
+      scrollTop: Number.POSITIVE_INFINITY,
+      viewportHeight: 12,
+      heights: uniformHeights(20, 4),
+      contentOriginHeight: 15,
+    });
+    expect(w.mounted.at(-1)).toBe("m-19");
+    expect(w.endIndex).toBe(20);
+    expect(w.spacerAfter).toBe(0);
+  });
+
   test("overscan: 默认小于一屏（视口 >= 2 行），显式值不再被抬到一屏", () => {
     // Invariant 4 / EXIT: when viewport.height >= 2 the default overscan is
     // strictly less than one screen; an explicit smaller value is respected
