@@ -18,6 +18,7 @@ import { yoloHolderSpread } from "../../sandbox/yolo.js";
 import type { IknowEnv } from "../../../config/env.js";
 import { createAciRegistry, type AciRegistry } from "../aci-registry.js";
 import type { AciToolDef } from "../types.js";
+import type { PreimageCapture } from "../preimage-port.js";
 import { createBashTool } from "./bash.js";
 import type { SecretRegistry } from "../../secret-roundtrip/index.js";
 import { createReadFileTool } from "./read-file.js";
@@ -300,6 +301,11 @@ export interface CreateDefaultAciRegistryOptions {
   readonly mcpManager?: McpManager;
   /** onEdit seam: callback after edit_file writes successfully (assembly wires the LSP notifier). */
   readonly onEdit?: (file: string) => void;
+  /** ADR-0036: pre-write capture seam forwarded to the three workspace write
+   *  tools (edit_file / write_file / symbol-mutate). A throw before a write
+   *  aborts it; absent → plain write. The concrete closure lives host-side, so
+   *  no harness file imports session-api through this. */
+  readonly preimageCapture?: PreimageCapture;
   /**
    * Full LspCtx passed through to the symbol toolset (symbol.ts /
    * symbol-resolver.ts / symbol-mutate.ts take this ctx when consuming the
@@ -583,9 +589,16 @@ function symbolQueryTools(ctx: LspCtx): Record<string, () => AciToolDef> {
  */
 function symbolMutateTools(
   ctx: LspCtx,
-  onEdit: ((file: string) => void) | undefined
+  onEdit: ((file: string) => void) | undefined,
+  preimageCapture: PreimageCapture | undefined,
+  rootIdentity: string
 ): Record<string, () => AciToolDef> {
-  const tools = createSymbolMutateToolSet({ ctx, onEdit });
+  const tools = createSymbolMutateToolSet({
+    ctx,
+    onEdit,
+    preimageCapture,
+    rootIdentity,
+  });
   const map: Record<string, () => AciToolDef> = {};
   for (const t of tools) {
     map[t.name] = () => t;
@@ -607,11 +620,23 @@ function resolveLastReadLedger(
   return opts.lastReadLedger ?? createLastReadLedgerHost();
 }
 
+/** ADR-0036: the identity root a captured preimage `relPath` is stamped with.
+ *  Writes stay contained to the live task root (projectIdentityRoot is never a
+ *  write root); this is metadata only, so a rewind can locate the file by
+ *  stable project identity even after a worktree rebind. */
+function resolvePreimageRootIdentity(
+  opts: CreateDefaultAciRegistryOptions
+): string {
+  return opts.projectIdentityRoot ?? opts.sandboxRoot;
+}
+
 export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
   const { env, sandboxRoot } = opts;
   const onEdit = opts.onEdit;
+  // ADR-0036: identity root for captured preimage `relPath` (see helper).
+  const preimageRootIdentity = resolvePreimageRootIdentity(opts);
   const proxyUrl = env.web.proxy;
   const searchUrl = env.web.searchUrl;
   const memoryDir = opts.memoryDir;
@@ -801,6 +826,12 @@ export function createDefaultAciRegistry(
         onEdit,
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
+        ...(opts.preimageCapture !== undefined
+          ? {
+              preimageCapture: opts.preimageCapture,
+              rootIdentity: preimageRootIdentity,
+            }
+          : {}),
       }),
     write_file: () =>
       createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot, {
@@ -809,6 +840,12 @@ export function createDefaultAciRegistry(
         // ADR-0084: non-empty overwrite consults the last-read table (the
         // write gate added by this slice).
         lastReadLedger,
+        ...(opts.preimageCapture !== undefined
+          ? {
+              preimageCapture: opts.preimageCapture,
+              rootIdentity: preimageRootIdentity,
+            }
+          : {}),
       }),
     web_fetch: () =>
       createWebFetchTool({
@@ -1028,7 +1065,12 @@ export function createDefaultAciRegistry(
     // — after a write, textDocument/didChange fires through the same chain
     // as edit_file. Key order must match the last 5 entries of
     // ACI_TOOLSET_NAMES item by item (Gate 3).
-    ...symbolMutateTools(lspCtx, onEdit),
+    ...symbolMutateTools(
+      lspCtx,
+      onEdit,
+      opts.preimageCapture,
+      preimageRootIdentity
+    ),
     // This key used to be the literal's last key — Gate 3 compares factory
     // key order against ACI_TOOLSET_NAMES (same tail item in the list). The
     // directory comes from traceReadDir(), same source as query_trace, so

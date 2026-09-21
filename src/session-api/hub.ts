@@ -158,6 +158,13 @@ import {
 } from "./store/index.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "./store/schema.js";
+import {
+  createPreimageLedger,
+  type PreimageLedgerHost,
+} from "./store/preimage-ledger.js";
+import { createPreimageCapture } from "./store/preimage-capture.js";
+import type { PreimageCapture } from "../harness/aci/preimage-port.js";
+import type { PreimageRef } from "./store/jsonl.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
@@ -715,6 +722,11 @@ export type SessionHubOptions = {
    * graphAssembly default).
    */
   liveGraphLedger?: LiveGraphLedgerHost;
+  /** ADR-0036: inject the preimage ledger shared with the host's engine assembly
+   *  (TUI builds the capture in deps.ts against this instance). Absent → the hub
+   *  self-creates one and wires `preimageCapture` into the engines it builds
+   *  (serve path). */
+  preimageLedger?: PreimageLedgerHost;
   /** Env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -1169,6 +1181,14 @@ export class SessionHub {
    * handler keeps no ledger (same shape as the graphAssembly absence).
    */
   private readonly liveGraphLedger: LiveGraphLedgerHost | undefined;
+  /** ADR-0036: preimage accumulator shared by every per-root engine this hub
+   *  builds. The write tools fill it (via the injected `PreimageCapture`) and
+   *  `appendSessionEvents` drains the batch's ids onto the transcript. Cleared
+   *  per conversation on reset. Never persisted — restart → empty. The TUI
+   *  injects the same instance its own engine assembly (deps.ts) fills, so
+   *  parent commits stamp what the injected engine captured. Absent → self-created
+   *  (serve path, where this hub also builds the engine). */
+  private readonly preimageLedger: PreimageLedgerHost;
   /** serve-workspace: recents/trust roster home (absent → roster-less behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
@@ -1219,6 +1239,7 @@ export class SessionHub {
     this.yolo = opts.yolo;
     this.injectedGraphAssembly = opts.graphAssembly;
     this.liveGraphLedger = opts.liveGraphLedger;
+    this.preimageLedger = opts.preimageLedger ?? createPreimageLedger();
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -2457,6 +2478,7 @@ export class SessionHub {
         // Reset destroys the live-graph ledger, so a later run_graph in the
         // same session can reuse old ids and really spawn. No ledger → no-op.
         this.liveGraphLedger?.destroy(conversationId);
+        this.preimageLedger.clear(conversationId);
         const session = await this.store.load(conversationId);
         const reset: SessionFileV1 = {
           ...session,
@@ -3309,6 +3331,7 @@ export class SessionHub {
      *  appendEvents omits the key. */
     readonly thinkingMs?: number;
   }): Promise<void> {
+    const preimages = this.pullPreimages(opts.conversationId, opts.events);
     try {
       await this.store.appendEvents({
         id: opts.conversationId,
@@ -3316,6 +3339,7 @@ export class SessionHub {
         ...(opts.thinkingMs !== undefined
           ? { thinkingMs: opts.thinkingMs }
           : {}),
+        ...(preimages !== undefined ? { preimages } : {}),
       });
     } catch (err) {
       if (!isSessionStoreError(err)) throw err;
@@ -3326,8 +3350,41 @@ export class SessionHub {
         ...(opts.thinkingMs !== undefined
           ? { thinkingMs: opts.thinkingMs }
           : {}),
+        ...(preimages !== undefined ? { preimages } : {}),
       });
     }
+  }
+
+  /** ADR-0036: build the pre-write capture closure the assembly injects into the
+   *  write tools. Reads the capture switch live so a config flip lands without
+   *  an engine rebuild; shares this hub's ledger so the commit side can drain
+   *  what the tools recorded. Gate B: the closure is constructed host-side and
+   *  only the port type crosses into the harness. */
+  private preimageCapture(): PreimageCapture {
+    return createPreimageCapture({
+      getProjectDir: () => this.store.getProjectDir(),
+      ledger: this.preimageLedger,
+      isEnabled: () => this.startupSettings?.codeRestore?.enabled !== false,
+    });
+  }
+
+  /** Pull the ledger refs matching this batch's `tool_result` events, so
+   *  appendEvents can stamp them. Undefined when nothing captured in-batch
+   *  (byte-identical append). */
+  private pullPreimages(
+    conversationId: string,
+    events: ReadonlyArray<AnthropicNativeMessage>
+  ): ReadonlyMap<string, PreimageRef> | undefined {
+    const ids: string[] = [];
+    for (const message of events) {
+      if (!Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        if (block.type === "tool_result") ids.push(block.tool_use_id);
+      }
+    }
+    if (ids.length === 0) return undefined;
+    const consumed = this.preimageLedger.consume(conversationId, ids);
+    return consumed.size > 0 ? consumed : undefined;
   }
 
   /** Save condition based on stopReason and progress delta.
@@ -3703,6 +3760,7 @@ export class SessionHub {
       // loadIknowSettings({cwd}) would silently drop project settings
       // (`.iknow/` is gitignored inside the worktree).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      preimageCapture: this.preimageCapture(),
       // ADR-0037: mutate-gate host seam — the switch is read at the
       // build-engine startup load point; provision builds the tree and rebinds
       // only this session's root. Passthrough does not go through
@@ -3870,6 +3928,7 @@ export class SessionHub {
       // Review High-2 (hard req 9): fallback path reuses the startup settings
       // object too (rebind-rebuilt engines must not reload settings).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      preimageCapture: this.preimageCapture(),
       // ADR-0037: the un-bound-root fallback path also wires the isolation
       // host seam (repoRoot = sandboxRoot ?? process.cwd(); sessions lacking a
       // workspaceRoot take the per-root engine path on the turn after a

@@ -29,6 +29,9 @@ export const SUBAGENT_TRACE_DIR_NAME = "subagents";
 /** `<sessionFolder>/fence-tmp/` — host backing pad for the main session's fenced `/tmp` (ADR-0074). Must not collide with `subagents/`. */
 export const MAIN_SESSION_FENCE_TMP_DIR_NAME = "fence-tmp";
 
+/** `<sessionFolder>/code-snapshots/` — content-addressed preimage blobs a successful workspace write captured (ADR-0036 / ADR-0071). Sibling of `subagents/` and `fence-tmp/`. */
+export const CODE_SNAPSHOTS_DIR_NAME = "code-snapshots";
+
 /** `<projectDir>/tasks/` — background task registry root (ADR-0088). Sibling of the session folder leaves. */
 export const TASKS_DIR_NAME = "tasks";
 

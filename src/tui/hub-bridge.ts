@@ -264,6 +264,10 @@ export interface CreateTuiBridgeOptions {
    * by resetSession / hub.shutdown). Absent = no live graph on this entry.
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /** ADR-0036: preimage accumulator shared with the engine built at the TUI
+   *  assembly point. Forwarded to SessionHub so the commit side drains what the
+   *  write tools captured. Absent → the hub builds its own (never fed here). */
+  readonly preimageLedger?: import("../session-api/store/preimage-ledger.js").PreimageLedgerHost;
   /** Denominator for context-usage display (the **strategy budget
    *  window**, tokens). Defaults to `DEFAULT_CONTEXT_WINDOW =
    *  DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000` (ADR-0100). */
@@ -370,6 +374,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     ...(opts.graphAssembly ? { graphAssembly: opts.graphAssembly } : {}),
     // Ledger host injected into the hub — resolved by conversationId.
     ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
+    // ADR-0036: the same preimage accumulator the engine's write tools fill.
+    // Undefined → the hub builds its own (never fed here).
+    preimageLedger: opts.preimageLedger,
     // LLM env override source — the env validated at TUI startup goes to
     // the override path, so rebuilding the adapter there never falls back to
     // process.env.

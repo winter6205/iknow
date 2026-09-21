@@ -61,6 +61,12 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
 import {
+  capturePreimageBeforeWrite,
+  type PreimageCallIds,
+  type PreimageCapture,
+  type PreimageOpts,
+} from "../preimage-port.js";
+import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   compileValidator,
   createRequestCancellation,
@@ -531,9 +537,23 @@ function offsetFor(lines: string[], pos: LspPosition): number {
  * throws `ToolExecutionError` immediately (refusing to pass a silent failure
  * off as a successful rename); every file that succeeded is recorded in
  * `writtenFiles` for the return value and the invalidate trigger. */
+/** Per-call preimage-capture wiring handed down from the tool handler: the
+ *  seam opts plus the root `relPath` is measured against. The call's
+ *  transcript ids ride in `WritePreimageContext` (`execCtx` forwarded whole,
+ *  so no optional chaining lands in the big handlers). */
+interface PreimageThread {
+  readonly opts: PreimageOpts;
+  readonly rootAtCall: string;
+}
+
+interface WritePreimageContext extends PreimageThread {
+  readonly call: PreimageCallIds | undefined;
+}
+
 async function applyWorkspaceEdit(
   edits: ReadonlyArray<TextDocumentEdit>,
-  onEdit: ((file: string) => void) | undefined
+  onEdit: ((file: string) => void) | undefined,
+  preimage: WritePreimageContext
 ): Promise<{
   readonly writtenFiles: ReadonlyArray<string>;
   readonly editCount: number;
@@ -554,6 +574,14 @@ async function applyWorkspaceEdit(
     }
     const next = applyEditsToText(text, fileEdits);
     if (next === text) continue;
+    await capturePreimageBeforeWrite(
+      preimage.opts,
+      preimage.call,
+      preimage.rootAtCall,
+      filePath,
+      text,
+      next
+    );
     try {
       await writeFile(filePath, next, "utf8");
     } catch (err) {
@@ -672,7 +700,8 @@ async function withResolvedSymbolForMutate<T>(
 function makeRenameSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
-  description: string
+  description: string,
+  preimage: PreimageThread
 ): AciToolDef {
   const name = "rename_symbol";
   const validate = compileValidator(RENAME_SCHEMA, name);
@@ -744,7 +773,10 @@ function makeRenameSymbolTool(
                 message: `rename produced no edits (symbol already named "${params.new_name}")`,
               });
             }
-            const applied = await applyWorkspaceEdit(docEdits, onEdit);
+            const applied = await applyWorkspaceEdit(docEdits, onEdit, {
+              ...preimage,
+              call: execCtx,
+            });
             return stringifyResult({
               renamed: true,
               symbol_path: target.path,
@@ -775,7 +807,8 @@ function makeRenameSymbolTool(
 function makeReplaceSymbolBodyTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
-  description: string
+  description: string,
+  preimage: PreimageThread
 ): AciToolDef {
   const name = "replace_symbol_body";
   const validate = compileValidator(REPLACE_BODY_SCHEMA, name);
@@ -814,7 +847,10 @@ function makeReplaceSymbolBodyTool(
               textDocument: { uri: fileURLFromPath(params.file) },
               edits: [{ range, newText: params.new_body }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit);
+            const applied = await applyWorkspaceEdit([edit], onEdit, {
+              ...preimage,
+              call: execCtx,
+            });
             return stringifyResult({
               replaced: true,
               symbol_path: target.path,
@@ -852,7 +888,8 @@ function makeInsertSymbolTool(
     readonly name: string;
     readonly direction: "before" | "after";
     readonly description: string;
-  }
+  },
+  preimage: PreimageThread
 ): AciToolDef {
   const validate = compileValidator(INSERT_SCHEMA, spec.name);
   return Object.freeze({
@@ -899,7 +936,10 @@ function makeInsertSymbolTool(
               textDocument: { uri: fileURLFromPath(params.file) },
               edits: [{ range: { start: anchor, end: anchor }, newText }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit);
+            const applied = await applyWorkspaceEdit([edit], onEdit, {
+              ...preimage,
+              call: execCtx,
+            });
             return stringifyResult({
               inserted: true,
               direction: spec.direction,
@@ -935,7 +975,8 @@ function makeInsertSymbolTool(
 function makeSafeDeleteSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
-  description: string
+  description: string,
+  preimage: PreimageThread
 ): AciToolDef {
   const name = "safe_delete_symbol";
   const validate = compileValidator(DELETE_SCHEMA, name);
@@ -1013,7 +1054,10 @@ function makeSafeDeleteSymbolTool(
               textDocument: { uri },
               edits: [{ range, newText: "" }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit);
+            const applied = await applyWorkspaceEdit([edit], onEdit, {
+              ...preimage,
+              call: execCtx,
+            });
             return stringifyResult({
               deleted: true,
               symbol_path: target.path,
@@ -1121,12 +1165,25 @@ export const FILE_WRITE_TOOL_NAMES = Object.freeze([
 export interface CreateSymbolMutateToolSetOptions {
   readonly ctx: LspCtx;
   readonly onEdit?: (file: string) => void;
+  /** Pre-write capture seam (ADR-0036). Forwarded to every mutate tool; a
+   *  throw before a write aborts it. Absent → plain write. */
+  readonly preimageCapture?: PreimageCapture;
+  /** Project identity root captured `relPath` is measured against; defaults
+   *  to the LSP context root (`ctx.directory` ≡ sandboxRoot). */
+  readonly rootIdentity?: string;
 }
 
 export function createSymbolMutateToolSet(
   opts: CreateSymbolMutateToolSetOptions
 ): ReadonlyArray<AciToolDef> {
   const { ctx, onEdit } = opts;
+  const preimage: PreimageThread = {
+    opts: {
+      preimageCapture: opts.preimageCapture,
+      rootIdentity: opts.rootIdentity,
+    },
+    rootAtCall: ctx.directory,
+  };
   // Order matches SYMBOL_MUTATE_TOOL_NAMES (Gate 3 indexes by name; the
   // order is the contract).
   const tools: AciToolDef[] = [
@@ -1137,7 +1194,8 @@ export function createSymbolMutateToolSet(
         "The language server computes every reference site (declaration + all references across the project), " +
         "the edits are applied to disk and the workspace LSP views are invalidated. " +
         "Returns the list of files touched and the edit count. " +
-        "Returns a typed failure string if the rename would conflict with an existing declaration; in that case nothing is written."
+        "Returns a typed failure string if the rename would conflict with an existing declaration; in that case nothing is written.",
+      preimage
     ),
     makeReplaceSymbolBodyTool(
       ctx,
@@ -1145,30 +1203,42 @@ export function createSymbolMutateToolSet(
       "Replace the entire definition body of a symbol — including the declaration header and body — by its file path and symbol_path. " +
         "The replacement range is the symbol's full LSP range (selectionRange alone is too narrow). " +
         "The file is written and the workspace LSP view is invalidated; returns the files touched. " +
-        "Use it after find_declaration / get_hover to confirm the symbol, before writing the new body."
+        "Use it after find_declaration / get_hover to confirm the symbol, before writing the new body.",
+      preimage
     ),
-    makeInsertSymbolTool(ctx, onEdit, {
-      name: "insert_before_symbol",
-      direction: "before",
-      description:
-        "Insert code immediately before a symbol's definition (anchored to the start of the symbol's range) by its file path and symbol_path. " +
-        "Use it to add a decorator, a sibling helper, or a leading comment block; pair with insert_after_symbol to bracket the symbol. " +
-        "Returns the files touched and the edit count.",
-    }),
-    makeInsertSymbolTool(ctx, onEdit, {
-      name: "insert_after_symbol",
-      direction: "after",
-      description:
-        "Insert code immediately after a symbol's definition (anchored to the end of the symbol's range) by its file path and symbol_path. " +
-        "Use it to add a follow-up function, a trailing comment block, or a sibling symbol; pair with insert_before_symbol to bracket the symbol. " +
-        "Returns the files touched and the edit count.",
-    }),
+    makeInsertSymbolTool(
+      ctx,
+      onEdit,
+      {
+        name: "insert_before_symbol",
+        direction: "before",
+        description:
+          "Insert code immediately before a symbol's definition (anchored to the start of the symbol's range) by its file path and symbol_path. " +
+          "Use it to add a decorator, a sibling helper, or a leading comment block; pair with insert_after_symbol to bracket the symbol. " +
+          "Returns the files touched and the edit count.",
+      },
+      preimage
+    ),
+    makeInsertSymbolTool(
+      ctx,
+      onEdit,
+      {
+        name: "insert_after_symbol",
+        direction: "after",
+        description:
+          "Insert code immediately after a symbol's definition (anchored to the end of the symbol's range) by its file path and symbol_path. " +
+          "Use it to add a follow-up function, a trailing comment block, or a sibling symbol; pair with insert_before_symbol to bracket the symbol. " +
+          "Returns the files touched and the edit count.",
+      },
+      preimage
+    ),
     makeSafeDeleteSymbolTool(
       ctx,
       onEdit,
       "Delete a symbol only if it has no references anywhere in the project. The tool first queries `textDocument/references` " +
         "(including the declaration); if any reference exists, it returns `{ deleted: false, references: [...] }` and writes nothing. " +
-        "Use it as the safety wrapper around delete; resolve the references first, then retry."
+        "Use it as the safety wrapper around delete; resolve the references first, then retry.",
+      preimage
     ),
   ];
   // Fail fast at construction when the name list and the factories diverge,

@@ -88,6 +88,17 @@ export interface SessionHeaderRecord {
   readonly lastUsage?: TokenUsage;
 }
 
+/** Content-addressed preimage reference a successful workspace write leaves
+ *  behind (ADR-0036). `preimageSha` / `postimageSha` name blobs under the
+ *  session's `code-snapshots/` directory (see code-snapshot-store.ts); the
+ *  restore path resolves them back against `rootIdentity` + `relPath`. */
+export interface PreimageRef {
+  readonly relPath: string;
+  readonly rootIdentity: string;
+  readonly preimageSha: string;
+  readonly postimageSha: string;
+}
+
 /** One message event: unique id + parent chain + verbatim native message.
  *  `createdAt` is the ingest timestamp (ISO) written by appendEvents;
  *  optional for legacy JSONL compat — parseSessionJsonl does not strictly
@@ -95,7 +106,11 @@ export interface SessionHeaderRecord {
  *  projection lands it as messageCreatedAt[i] = null. `thinkingMs` is the
  *  assistant-turn thinking duration in ms, attached by appendEvents via
  *  conditional spread on assistant events only; non-assistant / streamed
- *  turns without thinking → field absent. */
+ *  turns without thinking → field absent. `codePreimage` is attached by
+ *  appendEvents only onto a successful (non-`is_error`) tool_result event
+ *  whose `tool_use_id` matched a captured preimage; every other event →
+ *  field absent. It is transcript-side only — never projected into model
+ *  message content. */
 export interface SessionEventRecord {
   readonly type: "message";
   readonly id: string;
@@ -103,6 +118,7 @@ export interface SessionEventRecord {
   readonly message: AnthropicNativeMessage;
   readonly createdAt?: string;
   readonly thinkingMs?: number;
+  readonly codePreimage?: PreimageRef;
 }
 
 /** The persisted rewind head pointer; id null means an empty transcript. */

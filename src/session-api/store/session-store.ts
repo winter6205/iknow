@@ -52,6 +52,7 @@ import {
 } from "./checkpoint.js";
 import type {
   ParsedSessionLog,
+  PreimageRef,
   SessionEventRecord,
   SessionHeadRecord,
   SessionTitleRecord,
@@ -255,6 +256,24 @@ function requireValidRoot(value: string, label: string): void {
   }
 }
 
+/** Find the captured preimage ref for an event, if it is a successful
+ *  (non-`is_error`) tool_result whose `tool_use_id` was captured. A batch may
+ *  carry several tool_result blocks (parallel tools); the first captured,
+ *  non-error one wins — under the per-tool commit each event holds exactly
+ *  one, so the choice is deterministic. */
+function matchCodePreimage(
+  message: AnthropicNativeMessage,
+  preimages: ReadonlyMap<string, PreimageRef> | undefined
+): PreimageRef | undefined {
+  if (preimages === undefined || preimages.size === 0) return undefined;
+  for (const block of message.content) {
+    if (block.type !== "tool_result" || block.is_error === true) continue;
+    const ref = preimages.get(block.tool_use_id);
+    if (ref !== undefined) return ref;
+  }
+  return undefined;
+}
+
 export class SessionStore {
   private readonly projectDir: string;
 
@@ -430,6 +449,13 @@ export class SessionStore {
    * undefined — even if a message happens to be assistant the key stays
    * off, since the hub's commit closure passes thinkingMs only on the main
    * stepWithTrace path).
+   *
+   * `preimages` maps `tool_use_id → PreimageRef` for workspace writes captured
+   * during this commit batch. A `tool_result` block whose id is present and is
+   * NOT an error gets `codePreimage` stamped on its event record; every other
+   * event (and an errored tool_result) leaves the key absent. The stamp is
+   * transcript-side only — model message content is never modified. Absent map
+   * → byte-identical to the pre-capture behavior.
    */
   async appendEvents(opts: {
     readonly id: string;
@@ -437,8 +463,11 @@ export class SessionStore {
     /** Thinking duration (ms) carried by assistant commits; tool_result /
      *  other batches = undefined. */
     readonly thinkingMs?: number;
+    /** tool_use_id → captured preimage, for stamping successful tool_result
+     *  events; absent/empty → no stamping. */
+    readonly preimages?: ReadonlyMap<string, PreimageRef>;
   }): Promise<void> {
-    const { id, events, thinkingMs } = opts;
+    const { id, events, thinkingMs, preimages } = opts;
     if (events.length === 0) return;
     const path = this.jsonlPath(id);
     const log = await this.readJsonlLog(id, path, {
@@ -460,6 +489,7 @@ export class SessionStore {
       // Each event carries its own ingest timestamp (under the per-tool
       // commit pattern the user/assistant/tool stamps are close but
       // distinguishable).
+      const codePreimage = matchCodePreimage(message, preimages);
       const record: SessionEventRecord = {
         type: "message",
         id: eventId,
@@ -474,6 +504,10 @@ export class SessionStore {
         ...(message.role === "assistant" && stampableThinkingMs !== undefined
           ? { thinkingMs: stampableThinkingMs }
           : {}),
+        // Successful tool_result whose tool_use_id was captured → stamp its
+        // preimage ref. Errored tool_results are excluded (matchCodePreimage),
+        // so a failed write never claims a preimage it did not produce.
+        ...(codePreimage !== undefined ? { codePreimage } : {}),
       };
       lines.push(JSON.stringify(record));
       parent = eventId;
