@@ -21,8 +21,12 @@
  * (never re-buffered, never replayed twice).
  *
  * begin/end are idempotent (double begin = no-op; end without begin =
- * no-op), so every runTui exit path (normal / catch / signal) can call
- * `end()` unconditionally.
+ * no-op), so every runTui exit path may call `end()` unconditionally. The
+ * replay guarantee is wired on the two runTui exits (normal / catch) that
+ * restore the terminal first; a signal shutdown (runtime.ts re-kill path)
+ * never restores the main screen at all — a pre-existing gap outside this
+ * module — so on that path the buffer is lost with the process, by design
+ * of the wiring, not silently contradicted here.
  */
 
 /** Minimal shape of `process.stderr` the gate patches (injectable for tests). */
@@ -30,11 +34,15 @@ export interface StderrWriteTarget {
   write(chunk: string | Uint8Array): boolean;
 }
 
-export interface StderrGateHandle {
+/** begin/end lifecycle surface — what the process-wide wiring exposes. */
+export interface StderrGateLifecycle {
   /** Arm the gate (idempotent). While armed, routed writes buffer. */
   begin(): void;
   /** Disarm and replay buffered chunks in order (idempotent, safe unpaired). */
   end(): void;
+}
+
+export interface StderrGateHandle extends StderrGateLifecycle {
   /** Write path for callers routed into the gate (the patched `write`). */
   capture(chunk: string): boolean;
 }
@@ -73,14 +81,14 @@ export function createStderrGate(
       for (const chunk of pending) write(chunk);
       if (lost > 0) {
         write(
-          `[stderr-gate] ${lost} more line(s) dropped at the ${MAX_BUFFERED_CHUNKS}-chunk cap\n`
+          `[stderr-gate] ${lost} more chunk(s) dropped at the ${MAX_BUFFERED_CHUNKS}-chunk cap\n`
         );
       }
     },
     capture(chunk: string): boolean {
       if (buffer !== undefined) {
         if (buffer.length < MAX_BUFFERED_CHUNKS) buffer.push(chunk);
-        else dropped += 1;
+        else dropped += 1; // EXIT: over cap → counted drop, surfaced as one note at end().
         return true;
       }
       // EXIT: gate not armed (or mid-teardown) → straight to the real stream.
@@ -93,49 +101,64 @@ export function createStderrGate(
  * Production gate over a `process.stderr`-shaped stream: begin swaps the
  * stream's own `write` property, so every in-process bare
  * `process.stderr.write` (all background modules, no per-module opt-in) is
- * gated for the TUI's lifetime. The original writer is captured **at begin**
- * (not at construction) and restored at end — an outer interceptor installed
- * earlier (e.g. a subprocess test driver that swaps `process.stderr.write`
- * before importing) regains the property, and the replay is delivered to it
- * rather than stranding the capture. The target parameter defaults to the
- * real stream and exists so the swap/restore contract is unit-testable.
+ * gated for the TUI's lifetime. The incumbent writer is captured **at begin**
+ * (not at construction) and restored **by reference** at end — an outer
+ * interceptor installed earlier (e.g. a subprocess test driver that swaps
+ * `process.stderr.write` before importing) regains the exact property it
+ * owned, and the replay is delivered to it rather than stranding the capture.
+ * The target parameter defaults to the real stream and exists so the
+ * swap/restore contract is unit-testable.
  */
 export function createProcessStderrGate(
   stream: StderrWriteTarget = process.stderr
-): StderrGateHandle {
-  let installed:
-    | {
-        original: (chunk: string) => boolean;
-        gate: StderrGateHandle;
-      }
-    | undefined;
+): StderrGateLifecycle {
+  let installed: { restore(): void; gate: StderrGateHandle } | undefined;
   return {
     begin(): void {
       if (installed !== undefined) return; // EXIT: double begin — one patch per begin/end cycle.
-      const original = stream.write.bind(stream);
-      // sink=original（begin 期捕获）：回放恒走当时链上的真实写入（可能是
-      // 外层拦截器），不经本门的 patch → 无递归。
-      const gate = createStderrGate(stream, original);
-      installed = { original, gate };
-      stream.write = ((chunk: string | Uint8Array): boolean =>
-        gate.capture(String(chunk))) as typeof stream.write;
+      // 还原按引用而非 bind 副本（spy/mockRestore 类消费方按身份比较）；
+      // 但回放恒经 bind 后的 sink，不经被替换后的 stream.write → 无递归。
+      const hadOwnWrite = Object.prototype.hasOwnProperty.call(stream, "write");
+      const incumbent = stream.write;
+      const gate = createStderrGate(stream, incumbent.bind(stream));
+      installed = {
+        restore(): void {
+          if (hadOwnWrite) stream.write = incumbent;
+          else delete (stream as { write?: unknown }).write; // 原本在原型上：交回原型解析。
+        },
+        gate,
+      };
+      stream.write = ((
+        chunk: string | Uint8Array,
+        encodingOrCb?: unknown,
+        maybeCb?: unknown
+      ): boolean => {
+        gate.capture(
+          typeof chunk === "string"
+            ? chunk
+            : Buffer.from(chunk).toString("utf8")
+        );
+        // Node write 重载 (chunk, cb) / (chunk, encoding, cb)：缓冲是同步的，
+        // 无错误即同步履行回调（丢弃 cb 会让等待回调的调用方挂起）。
+        const cb =
+          typeof encodingOrCb === "function"
+            ? (encodingOrCb as () => void)
+            : typeof maybeCb === "function"
+              ? (maybeCb as () => void)
+              : undefined;
+        cb?.();
+        return true;
+      }) as typeof stream.write;
       gate.begin();
     },
     end(): void {
       if (installed === undefined) return; // EXIT: end without begin (assembly threw before arming).
-      const { original, gate } = installed;
+      const { restore, gate } = installed;
       installed = undefined;
-      stream.write = original as typeof stream.write;
+      restore();
       // Replay after the restore: flushed lines land on whoever owned the
       // stream before us (real stderr → main screen post-teardown).
       gate.end();
-    },
-    capture(chunk: string): boolean {
-      // EXIT: not installed → pass-through to the current stream owner.
-      return (
-        installed?.gate.capture(chunk) ??
-        Reflect.apply(stream.write, stream, [chunk])
-      );
     },
   };
 }

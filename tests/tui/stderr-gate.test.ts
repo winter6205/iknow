@@ -19,7 +19,7 @@ import {
   createProcessStderrGate,
   createStderrGate,
   MAX_BUFFERED_CHUNKS,
-  type StderrGateHandle,
+  type StderrGateLifecycle,
   type StderrWriteTarget,
 } from "../../src/tui/stderr-gate.js";
 
@@ -53,7 +53,7 @@ function makeProcessLikeTarget() {
   return { proc, written };
 }
 
-let lastGate: StderrGateHandle | undefined;
+let lastGate: StderrGateLifecycle | undefined;
 afterEach(() => {
   // 兜底释放：用例失败时也不把门留在装配态污染后续用例。
   lastGate?.end();
@@ -142,6 +142,60 @@ describe("stderr gate：live 期缓冲、end 按序回放", () => {
     expect(written.join("")).toBe("bleed-1\nbleed-2\npost\n");
   });
 
+  it("生产门幂等：未 begin 的 end 不抛不碰属性；双 begin 只回一份；双 end 只回一次", () => {
+    const { proc, written } = makeProcessLikeTarget();
+    const gate = createProcessStderrGate(proc);
+    const before = proc.write;
+    gate.end(); // 从未 begin → no-op，属性原封
+    expect(proc.write).toBe(before);
+    expect(written.length).toBe(0);
+    gate.begin();
+    gate.begin(); // 双 begin：第二次不得再叠一层 patch/清空已缓冲内容
+    proc.write("dup\n");
+    gate.end();
+    expect(written.join("")).toBe("dup\n"); // 只回放一份
+    gate.end();
+    expect(written.join("")).toBe("dup\n"); // 双 end 幂等
+  });
+
+  it("生产门 end 还原 write 属性本体（引用相等），按身份比较的消费方不受欺骗", () => {
+    // bind 副本语义等价但引用不等——spy mockRestore / `write === mySpy` 守卫
+    // 这类按身份操作的消费方会误判流被换过。还原必须交还原函数引用。
+    const { proc } = makeProcessLikeTarget();
+    const incumbent = proc.write;
+    const gate = createProcessStderrGate(proc);
+    gate.begin();
+    gate.end();
+    expect(proc.write).toBe(incumbent);
+  });
+
+  it("生产门保真 Uint8Array chunk（utf8 解码）并同步履行 write 回调", () => {
+    // StderrWriteTarget 契约显式接受 Uint8Array；String(bytes) 会回放成
+    // "104,105,10" 字节清单。Node 的 write(chunk, cb) / (chunk, encoding, cb)
+    // 两形回调都必须被调用（缓冲是同步的，无错误即可同步履行）。
+    const { proc, written } = makeProcessLikeTarget();
+    const gate = createProcessStderrGate(proc);
+    lastGate = gate;
+    gate.begin();
+    const wide = proc.write as (
+      chunk: string | Uint8Array,
+      a?: unknown,
+      b?: unknown
+    ) => boolean;
+    let cb1 = false;
+    let cb2 = false;
+    wide(new Uint8Array([104, 105, 10]), () => {
+      cb1 = true;
+    });
+    wide("tail\n", "utf8", () => {
+      cb2 = true;
+    });
+    expect(cb1).toBe(true);
+    expect(cb2).toBe(true);
+    gate.end();
+    expect(written.join("")).toBe("hi\ntail\n");
+  });
+
   it("生产门与外层 write 拦截器组合：begin 捕获外层、end 还原外层并投喂回放", () => {
     // run-errors 子进程 driver 的形状：先替换 process.stderr.write 做捕获，
     // 再进 runTui。门若在外层拦截器装载后构造、又用构造期绑定还原，会把
@@ -176,6 +230,6 @@ describe("stderr gate：live 期缓冲、end 按序回放", () => {
     gate.end();
     expect(t.written.length).toBe(MAX_BUFFERED_CHUNKS + 1); // 500 条 + 1 条说明
     expect(t.written[0]).toBe("line-0\n");
-    expect(t.written[MAX_BUFFERED_CHUNKS]).toContain("5 more line(s) dropped");
+    expect(t.written[MAX_BUFFERED_CHUNKS]).toContain("5 more chunk(s) dropped");
   });
 });
