@@ -39,5 +39,5 @@ wayfinder 图「模型面前缀分层与缓存兑现」G1 票（前缀稳定边�
 - R2/R3 实测（asset: `scripts/wayfinder-measure-prefix.ts`）：tools 42 件 ≈ 10.4K tok（chars/4 估算，真实值待 countTokens 实测）。
 - R5：MCP 连接抖动路径与 lazy 机制现状（`lazy: true` 零命中）；尾部追加纪律注释（`src/harness/aci/aci-registry.ts:143`）。
 - R4 抖动表：每会话 3~5 次全量 messages 作废的事件构成。
-- D7（ADR-0041）：会话内可变闸门只许落位 messages 尾部或 handler 层。
+- D7：会话内可变闸门只许落位 messages 尾部或 handler 层。
 - D8（ADR-0042）：memory_layer catalog 会话级快照先例。

@@ -25,7 +25,7 @@ export default defineConfig({
     // model-prefix-layering B8 (SC9):本轮 LLM-touching 改动(B3/B4/B6)的
     // 真实模型 e2e,同走 settings 单承载 + HAS_KEY 守卫。
     // web discover vs read: 黄金集首工具轨迹（有 key 跑同一集；缺 key skip）。
-    // graph mode notification: 同一形态的集（ADR-0041 / 0080 通知文是否
+    // graph mode notification: 同一形态的集（通知文是否
     // 真把模型转向 run_graph vs spawn_subagent；有 key 跑同一集，缺 key skip）。
     // worktree tool names (ADR-0082): 建树/列出首工具轨迹，同 HAS_KEY 守卫。
     // agent_status pivot reconcile (spec agent-status-instruction-echo T5):

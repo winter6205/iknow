@@ -13,4 +13,4 @@ TUI 无参 `/config` 打开与 `/model` 同族的浮层面板（↑↓ 选行、
 
 **Why not 去掉硬顶（只靠「unlimited」一种）：** 无帽会把本机进程与上下文打满。`unlimited` 是预设之一：manager 不做并发拒绝，OS / 内存仍是事实顶。默认仍 15。
 
-Amends ADR-0092（TUI `/config` 入口从「参数翻 FS 档」扩成面板；FS 两档值域不变）。Amends ADR-0037（`worktreeOnMutate` 可在会话内由面板翻转并落盘，不改变门禁从不 auto-provision）。Amends ADR-0014 / ADR-0077（上限可在运行中经同一 manager 顶调整；图节点仍计入同一顶；`unlimited` 视为该顶不拒绝）。
+Amends ADR-0092（TUI `/config` 入口从「参数翻 FS 档」扩成面板；FS 两档值域不变）。Amends ADR-0037（`worktreeOnMutate` 可在会话内由面板翻转并落盘，不改变门禁从不 auto-provision）。Amends ADR-0014（上限可在运行中经同一 manager 顶调整；图节点仍计入同一顶；`unlimited` 视为该顶不拒绝）。

@@ -4,7 +4,7 @@ Date: 2026-09-08
 
 Status: accepted
 
-> 来源：`specs/worktree-exclusive-lock.md`。依赖 ADR-0069 的可恢复性分类轴（新 kind `worktree_claimed` 进表）。
+> 依赖同日建立的可恢复性分类轴（新 kind `worktree_claimed` 进表）。
 
 ## Context
 
@@ -12,7 +12,7 @@ Status: accepted
 
 同时，操作员日常并不需要这把锁——多数时候允许共用（例如新会话接手上一会话保留下来的树继续任务）正是想要的工作流。所以问题不是「要不要排他」，而是「排他该不该是默认」。
 
-一个已被排除的错误方向：把 owner sidecar 当授权凭据。sidecar 的职责是**告知**（ADR-0069），且 `enter-task-worktree` 刻意不查它；用它当锁会把「新会话接手旧树」这条正当工作流一并堵死。
+一个已被排除的错误方向：把 owner sidecar 当授权凭据。sidecar 的职责是**告知**，且 `enter-task-worktree` 刻意不查它；用它当锁会把「新会话接手旧树」这条正当工作流一并堵死。
 
 ## Decision
 
@@ -52,11 +52,11 @@ ON 时 enter 前置一道检查：目标树是否被**别的现存会话**占用
 
 撞上占用 → typed 拒绝，`kind === "worktree_claimed"`，回执含**占用者会话 id** 与**释放路径**。
 
-该 kind 进 ADR-0069 的可恢复性表并归 `operator_required`——模型解不了别人的占用，因此回执自带停止指令，不得让模型重试。
+该 kind 进可恢复性分类表并归 `operator_required`——模型解不了别人的占用，因此回执自带停止指令，不得让模型重试。
 
 ### 7. 归属告知与本档位解耦
 
-`enter-task-worktree` 成功回执告知「这棵树由会话 X 创建」（ADR-0069 / spec SC10）是**恒定开**的：零成本（一次文件读）、永不阻塞、不受任何设置控制。
+`enter-task-worktree` 成功回执告知「这棵树由会话 X 创建」是**恒定开**的：零成本（一次文件读）、永不阻塞、不受任何设置控制。
 
 告知与拦截是两件事：告知让共用成为**知情**的决定，拦截让共用成为**被禁止**的决定。操作员可以只要前者（默认档），也可以两者都要（ON 档）。
 
@@ -79,7 +79,7 @@ ON 时 enter 前置一道检查：目标树是否被**别的现存会话**占用
 
 - 需要归属隔离的操作员有一个真的拦得住的档位；不需要的操作员零变化（OFF 档字节不变）。
 - 零新持久状态 ⇒ 零僵尸失效面；释放是 `exit` 的自动后果，不是需要维护的机制。
-- 与 ADR-0069 的归属告知正交组合：默认档也能把共用变成知情决定。
+- 与归属告知正交组合：默认档也能把共用变成知情决定。
 
 ### Negative / Trade-offs
 
@@ -94,7 +94,6 @@ ON 时 enter 前置一道检查：目标树是否被**别的现存会话**占用
 
 ## Evidence
 
-- `specs/worktree-exclusive-lock.md`（本 ADR 的 spec）；SC1–SC11、已知限制 L1/L2、输入五类表。
 - enter 四道检查无归属：`src/session-api/worktree-rebind.ts:896-944`。
 - restart-safe adoption 与 `initiallyBound`：`worktree-rebind.ts:790-798`、`src/harness/isolation/worktree-gate.ts:913`。
 - 值域纪律参照：`src/config/settings.ts:223-226`（`worktreeOnMutate`）、`:299-303`（单读点 `resolveWorktreeOnMutate`）。

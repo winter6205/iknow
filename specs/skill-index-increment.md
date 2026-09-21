@@ -84,7 +84,7 @@
 - **skill() 二次短路 / skill-load display projection / skill bare alias：** 闸只罩 `skill()`；slash 信封仍灌全文；解析问 catalog。
 - **session transcript / 会话文件夹：** 进场史跟 session 走，不另造权威 messages。
 
-**Inherits（ADR）：** ADR-0043 前缀冻结与 messages 侧闸；ADR-0046 开场降档与直呼；ADR-0079 `skill()` 短路与 slash 不短路；ADR-0041 可变不进前缀；ADR-0095 插件技能发现（本切片：包启用靠 reload）。
+**Inherits（ADR）：** ADR-0043 前缀冻结与 messages 侧闸；ADR-0046 开场降档与直呼；ADR-0079 `skill()` 短路与 slash 不短路；ADR-0095 插件技能发现（本切片：包启用靠 reload）。
 
 **Amends：** `specs/tui-skill-slash-catalog.md` 将 CLI 划出范围——本 spec **收回** CLI，与 TUI/Web 同一 slash 入口。`specs/tui-skill-slash-catalog.md` 的 catalog.get / remainder / 静态优先 / agents 不进 slash **仍然有效**。
 

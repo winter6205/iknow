@@ -17,7 +17,7 @@ import {
 import type { WriteSituation } from "../../src/harness/session-roots.ts";
 import { writeRootSegment } from "../../src/harness/skill/body.ts";
 
-describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
+describe("WorkerEnvelope.writeSituation — wire schema (additive)", () => {
   it("envelope 缺 writeSituation（旧 wire）→ 解析成功,writeSituation = undefined", () => {
     // Old worker bootstrap / cross-version resume: no writeSituation on the
     // envelope. ajv accepts it → the worker performs a typed skip accordingly.
@@ -106,7 +106,7 @@ describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
  * (do not fold `/tmp` into the write-root segment). The two boundary sentences
  * live in the bash / write-tool descriptions, not in this segment.
  */
-describe("T8 write-root segment names the delivery root only (ADR-0069)", () => {
+describe("write-root segment names the delivery root only", () => {
   it("writeRootSegment 三态都不提 /tmp（交付根路径本身也不在 /tmp 下）", () => {
     const deliveryRoot = "/repo/.iknow/worktrees/conv-t8";
     const situations: ReadonlyArray<WriteSituation> = [

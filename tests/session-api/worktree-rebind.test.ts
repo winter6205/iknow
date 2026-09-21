@@ -937,7 +937,7 @@ describe("createTaskWorktreeProvisioner", () => {
 
   // write-situation-disclosure T9 / SC10 — the enter success receipt tells the
   // model WHO created the tree it just entered (sidecar = disclosure, never
-  // authorization; ADR-0069). Constant-on: the receipt path reads no setting
+  // authorization). Constant-on: the receipt path reads no setting
   // at all (specs/worktree-exclusive-lock.md SC10 keeps the two features
   // independent). Read failure degrades to sentence omission — never a throw,
   // never a placeholder (typed catch: missing/unreadable sidecar is a legal

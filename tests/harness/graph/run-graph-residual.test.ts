@@ -1,5 +1,5 @@
 /**
- * Residual-subgraph merge + per-id freezing (ADR-0050).
+ * Residual-subgraph merge + per-id freezing.
  *
  * Uses a real `SubAgentManager` (fake spawn + fake child, same pattern as
  * run-graph-ledger.test.ts — mocking the manager would mock away exactly
@@ -16,10 +16,10 @@
  *     failure requires a new id).
  *   - An id skipped by upstream failure may re-spawn in a later residual
  *     subgraph, and its downstream still receives its output.
- *   - ADR-0066 regression: a dep on an unknown, unfrozen id is still
+ *   - Regression: a dep on an unknown, unfrozen id is still
  *     rejected as unknown-dep with zero spawns (merge semantics must never
  *     swallow unknown ids).
- *   - ADR-0065 serialisation contract: `aci.isConcurrencySafe === false` is
+ *   - Serialisation contract: `aci.isConcurrencySafe === false` is
  *     pinned — the ACI executor's single-flight wave makes a second
  *     run_graph in the same session wait for the first to settle.
  */
@@ -326,10 +326,10 @@ describe("run_graph 剩余子图合并：SC7 skipped 未冻", () => {
   });
 });
 
-// ── ADR-0066 regression + serialisation contract ───────────────────────
+// ── unknown-dep regression + serialisation contract ────────────────────
 
 describe("run_graph 剩余子图合并：校验边界不因合并放松", () => {
-  it("dep 指向未知且未冻结的 id → 仍 unknown-dep typed 拒、零 spawn（ADR-0066 / spec SC12）", async () => {
+  it("dep 指向未知且未冻结的 id → 仍 unknown-dep typed 拒、零 spawn（spec SC12）", async () => {
     const { manager, children } = makeManager();
     const host = createLiveGraphLedgerHost();
     const tool = createRunGraphTool({
@@ -366,7 +366,7 @@ describe("run_graph 剩余子图合并：校验边界不因合并放松", () => 
     await manager.shutdown();
   });
 
-  it("ADR-0065 串行契约：run_graph aci.isConcurrencySafe === false", () => {
+  it("串行契约：run_graph aci.isConcurrencySafe === false", () => {
     const { manager } = makeManager();
     const tool = createRunGraphTool({ manager, isEnabled: () => true });
     expect(tool.aci.isConcurrencySafe).toBe(false);

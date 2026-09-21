@@ -288,7 +288,7 @@ describe("runGraphWithFailureEdges — 汇聚失败边（同波 + 跨波）", ()
     // or abort is awkward: with plain deps the later start never enters, and
     // with self-edges the scheduler spins. So this test gates b — b's failure
     // edge must settle strictly after a and t — making the second edge observe
-    // results[t] === "done" and raise the violation (ADR-0060).
+    // results[t] === "done" and raise the violation.
     const release: { fn?: () => void } = {};
     const gate = new Promise<void>((resolve) => {
       release.fn = resolve;
@@ -315,7 +315,7 @@ describe("runGraphWithFailureEdges — 汇聚失败边（同波 + 跨波）", ()
     // Entries happen synchronously in spec order (a, b, t all enter in the
     // wave-0 batch; b suspends on the gate after entering, settling later
     // than a and t). In the second pass over settled nodes, a is seen first
-    // → results[t] === "done" → immediate violation (ADR-0060). b settles
+    // → results[t] === "done" → immediate violation. b settles
     // later and never reaches the loop again — a's edge wins the raise.
     expect(entries).toEqual(["a", "b", "t"]);
     expect(violation).toEqual({ from: "a", target: "t" });
@@ -341,7 +341,7 @@ describe("runGraphWithFailureEdges — 汇聚失败边（同波 + 跨波）", ()
     // wave 0: a, b, t in one batch. t settles done; a and b settle failed.
     // Second pass: a's edge checks results[t] === "done" first → violation
     // raised immediately (b's kick never runs). A done node is never re-run
-    // via a failure edge (ADR-0060).
+    // via a failure edge.
     expect(entries).toEqual(["a", "b", "t"]);
     expect(violation).toEqual({ from: "a", target: "t" });
     expect(execution.statuses.t).toBe("done");
@@ -349,7 +349,7 @@ describe("runGraphWithFailureEdges — 汇聚失败边（同波 + 跨波）", ()
 });
 
 describe("runGraphWithFailureEdges — 失败边终点同波 settle（双向）", () => {
-  it("a failed、b 同波 settled done → violation（目标本段已 done，ADR-0060）", async () => {
+  it("a failed、b 同波 settled done → violation（目标本段已 done）", async () => {
     const entries: string[] = [];
     const exec = recordingExec(entries, (id) =>
       id === "b"

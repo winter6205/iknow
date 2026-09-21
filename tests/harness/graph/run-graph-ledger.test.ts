@@ -191,7 +191,7 @@ describe("run_graph handler + ledger：SC2 关 overlay 不毁账本", () => {
     await first;
     expect(host.ledgerFor(CONV).isFrozen("a")).toBe(true);
 
-    // Overlay off → handler rejects (per ADR-0041 gating behavior).
+    // Overlay off → handler rejects (per the overlay gating behavior).
     graphOn = false;
     await expect(
       tool.handler(

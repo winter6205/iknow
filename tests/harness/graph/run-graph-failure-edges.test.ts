@@ -210,7 +210,7 @@ describe("run_graph failure edges — mid-run violation", () => {
     await manager.shutdown();
   });
 
-  it("violation 波内已落定 done 的同波兄弟也冻结（整波先记录再判违规，ADR-0050）", async () => {
+  it("violation 波内已落定 done 的同波兄弟也冻结（整波先记录再判违规）", async () => {
     const { manager, children } = makeManager();
     const host = createLiveGraphLedgerHost();
     const t = createRunGraphTool({
@@ -352,7 +352,7 @@ describe("run_graph failure edges — abort-frozen 后再指向冻结（phase2 �
     expect(ledger.statusOf("a")).toBe("done");
 
     // Second segment: submit r(onFailure: a) where a is a frozen done in the
-    // ledger (ADR-0060: done never re-runs via a failure edge). Both
+    // ledger (done never re-runs via a failure edge). Both
     // mergeResidual's frozen-resubmission rejection and the failure edge's
     // frozen-target rejection fire: typed rejection, zero spawns, and the
     // ledger's frozen set stays unchanged.

@@ -3,7 +3,7 @@
 Date: 2026-09-11
 Status: accepted
 
-修正 `docs/adr/0046-todo-ledger-replace-and-snapshots.md` 的主路径（该文件编号与 `0046-exact-name-load-and-index-demotion.md` 撞号，amendment 无法写回原文件）。快照纪律与「换表不灌 messages」仍有效。
+修正 `docs/adr/0046-todo-ledger-replace-and-snapshots.md` 的主路径（该文件编号曾与另一 0046 撞号——即现 `0114-exact-name-load-and-index-demotion.md`，撞号已由重编号解决——amendment 无法写回原文件）。快照纪律与「换表不灌 messages」仍有效。
 
 现行账本每条有稳定 **id**，状态 `pending` | `in_progress` | `completed`。主路径是三件事：一次可多条的**添加**（追加不覆盖）、按 id **更新**（subject / status / 删除；`check` 并入）、**读取**现行。`replace` 降为整表逃生口，不是换计划主路径。
 
@@ -15,4 +15,3 @@ id 的稳定域是**表内**：`add` 取现有最大编号 +1（删中间项不�
 
 **Why not 只放宽 add 收数组：** 模型还要按条改状态；没有 id 就只能整表重写。**Why not 跨主会话任务池：** 本切片到达标志是「一次会话能写下多步并让 worker 看见」，不引入列表身份与 opt-in。
 
-关联：`specs/agent-control-surface.md` Slice C。

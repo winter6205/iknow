@@ -1,18 +1,18 @@
 /**
- * `onFailure` failure-edge schema + validation (ADR-0053–ADR-0066).
+ * `onFailure` failure-edge schema + validation.
  *
  * Pinned invariants:
  *   - **Legal failure edge**: the target is among this submission's `nodes`
- *     (pointing at self = a declared single-node re-entry, ADR-0053) → passes
+ *     (pointing at self = a declared single-node re-entry) → passes
  *     readNodes + validation. Cycles formed only by `onFailure` are legal
- *     (ADR-0058 / ADR-0059: an explicitly declared back edge is accepted;
+ *     (an explicitly declared back edge is accepted;
  *     cycle detection looks at `deps` only). Legal failure edges are
  *     scheduled as normal deps-DAGs; failure-edge execution semantics are
  *     covered by outcome-scheduler / failure-edges tests.
  *   - **Illegal failure edge → typed rejection, zero spawns**:
  *       (a) the target is not among the ids of this submission;
  *       (b) the target is already frozen in the live-graph ledger (done or
- *           failed, frozen across calls; ADR-0060: done never re-runs via a
+ *           failed, frozen across calls; done never re-runs via a
  *           failure edge);
  *       (c) the value is not a string (array / number — the schema's
  *           `type: "string"` is the primary contract; readNodes is the
@@ -72,7 +72,7 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
     await manager.shutdown();
   });
 
-  it("onFailure 指向自己 = 标明的单格再进入，合法（spec Changes / ADR-0053）", async () => {
+  it("onFailure 指向自己 = 标明的单格再进入，合法（spec Changes）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = t.handler(
@@ -87,7 +87,7 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
     await manager.shutdown();
   });
 
-  it("仅因 onFailure 形成的圈合法（ADR-0058/0059：环检测只对 deps）", async () => {
+  it("仅因 onFailure 形成的圈合法（环检测只对 deps）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = t.handler(
@@ -136,7 +136,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     await manager.shutdown();
   });
 
-  it("目标是账本上已冻结 done 的 id → typed 拒、零 spawn（ADR-0060）", async () => {
+  it("目标是账本上已冻结 done 的 id → typed 拒、零 spawn", async () => {
     const { manager, children } = makeManager();
     const host = createLiveGraphLedgerHost();
     const t = createRunGraphTool({
@@ -169,7 +169,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     await manager.shutdown();
   });
 
-  it("目标是账本上已冻结 failed 的 id → typed 拒、零 spawn（ADR-0060）", async () => {
+  it("目标是账本上已冻结 failed 的 id → typed 拒、零 spawn", async () => {
     const { manager, children } = makeManager();
     const host = createLiveGraphLedgerHost();
     const t = createRunGraphTool({
@@ -304,12 +304,12 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     await manager.shutdown();
   });
 
-  it("onFailure 不能洗白 deps 环：纯 deps 环上叠加合法 onFailure → 仍 topo cycle 拒、零 spawn（ADR-0059）", async () => {
+  it("onFailure 不能洗白 deps 环：纯 deps 环上叠加合法 onFailure → 仍 topo cycle 拒、零 spawn", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     // a deps[b] with onFailure:b (target in this batch — alone a legal failure
     // edge); b deps[a] — at the deps level a↔b forms a cycle. Cycle detection
-    // only looks at deps; failure edges are no Kahn exemption (ADR-0059: an
+    // only looks at deps; failure edges are no Kahn exemption (an
     // undeclared back edge does not count — a deps cycle must become a DAG via
     // deps itself, onFailure never changes topology).
     await expect(
@@ -363,7 +363,7 @@ describe("run_graph onFailure 校验：阶段 1 拒绝规则不回退", () => {
     await manager.shutdown();
   });
 
-  it("仅 deps 成环（无 onFailure 标明）仍拒（ADR-0059：未标圈拒）", async () => {
+  it("仅 deps 成环（无 onFailure 标明）仍拒（未标圈拒）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     await expect(

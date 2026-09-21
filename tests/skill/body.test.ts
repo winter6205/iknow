@@ -459,7 +459,7 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
     expect(out.toLowerCase()).toMatch(/(no.{0,3}writable|writable.{0,3}root)/);
   });
 
-  it("③ no_writable_root → 不点名 create-worktree（SC3 / ADR-0069 D3：trailer 在装配时进上下文，早于写意图）", () => {
+  it("③ no_writable_root → 不点名 create-worktree（SC3：trailer 在装配时进上下文，早于写意图）", () => {
     const out = writeRootSegment("no_writable_root", TREE_ROOT)!;
     expect(out).not.toContain("create-worktree");
     // No other advisory literals either (specific "create-*" tree tools, the "run"

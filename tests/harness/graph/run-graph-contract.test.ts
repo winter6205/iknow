@@ -1,14 +1,14 @@
 /**
- * Contract locks (ADR-0052 / ADR-0065 / ADR-0067).
+ * Contract locks.
  *
  * Four blocks, each pinning one invariant:
  *
- *   - No outer-loop attempt gate (ADR-0052): many consecutive legal residual
+ *   - No outer-loop attempt gate: many consecutive legal residual
  *     subgraph submissions (≥3) all run to completion — there is no "Nth
  *     outer loop" failure that could ever be written into behavior. Uses a
  *     real `SubAgentManager` (fake spawn + fake child, same pattern as
  *     run-graph-residual.test.ts), mixing chained and fan-out submissions.
- *   - Blocking + no `wait` (ADR-0065): inputSchema keeps
+ *   - Blocking + no `wait`: inputSchema keeps
  *     `additionalProperties: false`, root properties are exactly {nodes}, and
  *     the whole schema has no `wait`; calling the handler directly with
  *     `wait` → typed rejection, zero spawns (the readNodes direct-call
@@ -16,7 +16,7 @@
  *     tests (handler awaits runGraph before condensing) plus
  *     `aci.isConcurrencySafe === false`.
  *   - onFailure has two defense layers: phase-1's "reject on sight of the
- *     failure marker" (ADR-0067, phase-1 scoped) is superseded — `onFailure`
+ *     failure marker" (phase-1 scoped) is superseded — `onFailure`
  *     is now a declared property, and legal shapes (target present in this
  *     batch's nodes) pass both layers; illegal shapes (non-string value,
  *     unknown or frozen target) get typed rejection, zero spawns. The root
@@ -46,7 +46,7 @@ import {
 
 const CONV = "conv-t4";
 
-// ── No outer-loop attempt gate (ADR-0052) ──────────────────────────────
+// ── No outer-loop attempt gate ─────────────────────────────────────────
 
 describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () => {
   it("链式 4 段剩余子图提交全部跑完（a→b→c→d），每段恰多 spawn 1 个 child", async () => {
@@ -160,7 +160,7 @@ describe("run_graph 合同锁：SC9 连续剩余子图提交无次数闸", () =>
   });
 });
 
-// ── Blocking + no wait (ADR-0065) ──────────────────────────────────────
+// ── Blocking + no wait ─────────────────────────────────────────────────
 
 describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   const tool = createRunGraphTool({
@@ -199,12 +199,12 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
     expect(nodes.items.additionalProperties).toBe(false);
   });
 
-  it("整个 schema 无 wait 属性（ADR-0065：没有图上的 wait:false）", () => {
+  it("整个 schema 无 wait 属性（没有图上的 wait:false）", () => {
     expect(JSON.stringify(schema)).not.toContain('"wait"');
   });
 
   it("ACI 元数据钉住阻塞语义：isConcurrencySafe false + unbounded（与既有测试互证）", () => {
-    // ADR-0065: while one graph segment runs, the parent agent must not work
+    // While one graph segment runs, the parent agent must not work
     // in parallel — the executor-layer single wave is guaranteed by
     // isConcurrencySafe=false; handler-await-before-condense is pinned by the
     // wave assertions in run-graph-executor.test.ts.
@@ -232,7 +232,7 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   });
 });
 
-// ── onFailure two defense layers (supersedes ADR-0067's reject-on-sight) ─
+// ── onFailure two defense layers (supersedes the phase-1 reject-on-sight rule) ─
 
 describe("run_graph 合同锁：SC11 onFailure schema + 直调兜底（两道防御层）", () => {
   /** Same schema source as the executor: the registry compiles the one inputSchema at construction. */

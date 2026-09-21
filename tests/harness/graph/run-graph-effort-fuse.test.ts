@@ -1,5 +1,5 @@
 /**
- * Effort fuse (ADR-0057 / ADR-0064).
+ * Effort fuse.
  *
  * Division of labor with outcome-scheduler.test.ts / run-graph-failure-edges.test.ts:
  * the fuse gate lives at the handler's executor entry (run-graph-tool.ts's
@@ -13,7 +13,7 @@
  *     partial-results channel as the violation path: freeze first, then reject).
  *   - **Per-call counting**: the next outer-loop segment with new ids spawns normally.
  *   - **No regression**: the plain Kahn path (no onFailure) installs no counter.
- *   - **ADR-0064**: threshold constant = 8, deliberately not in settings
+ *   - **Threshold**: constant = 8, deliberately not in settings
  *     (createRunGraphTool deps expose no threshold knob — a typecheck-level
  *     guard; this file pins the constant itself).
  */
@@ -61,7 +61,7 @@ describe("createEffortFuse — 计数器单元", () => {
     expect(fuse.trippedBy).toBe("a");
   });
 
-  it("ADR-0064：阈值常量 = 8（不进 settings —— deps 类型无旋钮，typecheck 守门）", () => {
+  it("阈值常量 = 8（不进 settings —— deps 类型无旋钮，typecheck 守门）", () => {
     expect(EFFORT_FUSE_THRESHOLD).toBe(8);
   });
 });
@@ -192,7 +192,7 @@ describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 faile
     expect(children).toHaveLength(9);
     // A fuse trip is not a caller-side abort — genuinely failed ids in this
     // segment must freeze, otherwise the next residual-subgraph segment could
-    // resubmit d / c and spawn again, violating ADR-0050.
+    // resubmit d / c and spawn again.
     const ledger = host.ledgerFor(CONV);
     expect(ledger.statusOf("d")).toBe("failed");
     expect(ledger.statusOf("c")).toBe("failed");

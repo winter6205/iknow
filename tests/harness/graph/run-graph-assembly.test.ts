@@ -117,7 +117,7 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 
 // ── 2. resident conditional assembly ──────────────────────────────────────
 
-describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
+describe("run_graph — ACI 常驻注册(关键边界)", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only(worktree 3 件 + 10 件符号查询 + 5 件符号改 + 目录轴读 + 内容轴读 + 任务树 lifecycle 2 件,不重排既有件)", () => {
     // Length 45; the actual indices are taken from the registry (append-only
     // discipline, pinned against reordering):
@@ -429,7 +429,7 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
 
   it("graphMode 缺席 → registry 仍含 run_graph(常驻);promptTools 暴露给模型看", async () => {
     await withEngine(undefined, (built) => {
-      // ADR-0041: even without graphMode (subagentManager present → run_graph
+      // Even without graphMode (subagentManager present → run_graph
       // is resident), the tool surface still lists run_graph (the handler's
       // isEnabled defaults to a closed gate).
       expect(built.deps.registry.list().map((d) => d.name)).toContain(
@@ -447,7 +447,7 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
   });
 
   it("SC5 graph 关 → 开 → 关:promptTools 与 system 字节逐字不变", async () => {
-    // ADR-0041 key boundary: across adjacent rounds (any in-session graph
+    // Key boundary: across adjacent rounds (any in-session graph
     // toggle sequence) promptTools and system must stay byte-identical —
     // toggling the graph is no longer a cache-jitter source; the model's only
     // channel for graph state is the `<graph_mode>` line appended to messages.

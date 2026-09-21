@@ -3,7 +3,7 @@
 Date: 2026-09-07
 Status: accepted
 
-长程图执行要已完成不重演。V1 每次 `run_graph` 只在调用栈里留下 `GraphExecution`，父代理只拿到 condense JSON，TUI 进度在调用结束清掉，节点 `id` 跨调用挂不上旧 worker。因此 host 必须在会话持有 **活图状态**；不得把长程寄托在模型对 transcript 的记忆上。术语见 `docs/CONTEXT.md`。改图刀口见 ADR-0048。本 ADR 仍不锁修订 wire、活图创建/销毁时机。
+长程图执行要已完成不重演。V1 每次 `run_graph` 只在调用栈里留下 `GraphExecution`，父代理只拿到 condense JSON，TUI 进度在调用结束清掉，节点 `id` 跨调用挂不上旧 worker。因此 host 必须在会话持有 **活图状态**；不得把长程寄托在模型对 transcript 的记忆上。术语见 `docs/CONTEXT.md`。本 ADR 仍不锁修订 wire、活图创建/销毁时机。
 
 ## Why not
 

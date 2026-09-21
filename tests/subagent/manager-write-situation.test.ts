@@ -87,7 +87,7 @@ function makeManagerCapturingPayload(opts: {
   return { manager, calls };
 }
 
-describe("buildWorkerPayload — T6 writeSituation 透传 (ADR-0069 D2)", () => {
+describe("buildWorkerPayload — writeSituation 透传", () => {
   it("isolationOn = false + 树形 sandboxRoot → writeSituation = writable_main", () => {
     // negative arm (aligned with writeSituation.test.ts): with isolation OFF,
     // even a tree-shaped sandbox root still reports writable_main, so the

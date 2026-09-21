@@ -1,6 +1,6 @@
 /**
  * Concurrent handler calls on one conversationId — honest pin of the
- * serialisation contract (ADR-0065).
+ * serialisation contract.
  *
  * **What this test pins (and deliberately does not pin)**:
  *
