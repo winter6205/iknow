@@ -1,17 +1,17 @@
-# 用户钩子（user hooks）— settings.json Claude command 形态
+# User hooks — command hooks in `settings.json`
 
-> 操作员指南。Schema = `src/config/settings.ts` 的 `IknowSettingsHooks`。
-> 运行时编译与插件 `hooks/hooks.json` 同一套（`createSettingsHookContribution`）。
-
----
-
-## 一句话
-
-在用户层 `~/.iknow/settings.json` 写 Claude 同款 `hooks.PreToolUse` / `hooks.PostToolUse`：`matcher` + `{ type: "command", command, timeout? }`。引擎在工具执行前/后 spawn 该命令。Pre **exit 2** 拦截；其余退出码 fail-open。项目 `.iknow/settings.json` **不采纳** `hooks`（任意 shell = clone 即执行）。
+> Operator guide. Schema = `IknowSettingsHooks` in `src/config/settings.ts`.
+> Runtime compilation shares one mechanism with plugin `hooks/hooks.json` (`createSettingsHookContribution`).
 
 ---
 
-## 模板
+## Summary
+
+Write `hooks.PreToolUse` / `hooks.PostToolUse` in command form into the user-level `~/.iknow/settings.json`: `matcher` + `{ type: "command", command, timeout? }`. The engine spawns that command before/after each tool execution. In a Pre hook, **exit 2** blocks the call; all other exit codes fail open. `hooks` in a project `.iknow/settings.json` are **not adopted** (arbitrary shell = clone-and-execute risk).
+
+---
+
+## Template
 
 ```jsonc
 {
@@ -40,25 +40,25 @@
 }
 ```
 
-stdin 是 JSON envelope（`hook_event_name`、`tool_name`、`tool_input` 含 `file_path` 等别名、`cwd`）。Pre 拦：stderr 优先 JSON 的 `systemMessage` / `permissionDecisionReason`，否则原文；模型看到 `[hook_blocked] …`。
+stdin receives a JSON envelope (`hook_event_name`, `tool_name`, `tool_input` — including `file_path` and its aliases —, `cwd`). When a Pre hook blocks, the reason is taken from `systemMessage` / `permissionDecisionReason` in a JSON payload on stderr if present, otherwise from raw stderr; the model sees `[hook_blocked] …`.
 
-`timeout` 单位秒，缺省 30，上限 600。
+`timeout` is in seconds, default 30, max 600.
 
-未知事件名（`SessionStart` 等）忽略。非 `command` type 忽略。
+Unknown event names (e.g. `SessionStart`) are ignored. Non-`command` types are ignored.
 
 ---
 
 ## matcher
 
-与插件 hooks 相同：只含 `[A-Za-z0-9_ ,|-]` → 精确备选（`Write|Edit`）；含其他字符 → 正则。缺席 / `*` → 通配。工具名候选集：`bash`↔`Bash`，`write_file`↔`Write`，`edit_file`↔`Edit|MultiEdit`，`read_file`↔`Read`，等等。
+Same rules as plugin hooks: a matcher containing only `[A-Za-z0-9_ ,|-]` is an exact alternation (`Write|Edit`); anything else is treated as a regex. Missing or `*` = match all tools. Tool-name mappings: `bash`↔`Bash`, `write_file`↔`Write`, `edit_file`↔`Edit|MultiEdit`, `read_file`↔`Read`, and so on.
 
 ---
 
-## 纪律
+## Rules
 
-- 仅用户层。项目文件出现 `hooks` → 丢弃并 warn。
-- 段缺席 = 无用户 command 钩子。没有 `enabled` 总闸。
-- 链序：builtin（secrets）→ settings command → 插件 command。Post：TUI 观测 → settings Post → 插件 Post。
-- 改完需重启进程。
-- 不扫描 `~/.iknow/hooks/` 目录；脚本路径自己写在 `command` 里。
-- 旧 `{ enabled, rules }` deny-only **不再生效**。
+- User layer only. `hooks` in a project file → dropped with a warning.
+- Missing section = no user command hooks. There is no global `enabled` switch.
+- Execution order — Pre: builtin (secrets) → settings command → plugin command; Post: TUI observation → settings Post → plugin Post.
+- Restart the process after editing.
+- The `~/.iknow/hooks/` directory is not scanned; put script paths directly in `command`.
+- The legacy `{ enabled, rules }` deny-only form no longer takes effect.

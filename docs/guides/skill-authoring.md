@@ -1,127 +1,127 @@
-# skill 作者契约 — 正文精简，细则进 `references/`
+# Skill authoring contract — keep the body lean, push details into `references/`
 
-> 面向写 skill 的人。写「怎么写出可用的 skill」，不写运行时实现。
-> 装配形态 SSOT = `src/harness/skill/body.ts`；扫描 / 索引 = `src/harness/skill/scanner.ts` + `src/harness/skill/catalog.ts`
-> （本文与代码冲突时以代码为准）。
-
----
-
-## 一句话
-
-`SKILL.md` 的正文是**一次装配进上下文、按需加载的整份程序**；`references/` 是**零成本直到被读**的细则仓库。
-正文精简是**作者纪律**，不是运行时闸——运行时不对正文大小设限，所以没人替你兜底。
+> For skill authors: how to write a usable skill, not the runtime implementation.
+> Body-assembly SSOT = `src/harness/skill/body.ts`; scanning / indexing = `src/harness/skill/scanner.ts` + `src/harness/skill/catalog.ts`
+> (where this page and the code disagree, the code wins).
 
 ---
 
-## 一、一个 skill 的最小构成
+## Summary
 
-一个 skill = 一个目录，目录下必须有 `SKILL.md`：
+The `SKILL.md` body is **a complete program assembled into the context once and loaded on demand**; `references/` is a details repository that costs **nothing until read**.
+Keeping the body lean is **author discipline**, not a runtime gate — the runtime imposes no size limit on the body, so nothing catches you.
+
+---
+
+## 1. Minimal anatomy of a skill
+
+One skill = one directory that must contain a `SKILL.md`:
 
 ```
-.iknow/skills/<name>/          # 或 <home>/.iknow/skills/<name>/
-├── SKILL.md                   # 必需：frontmatter + 正文
-├── references/                # 可选：细则（不进 <skill_files>，见 §二）
-└── <其它文件或子目录>          # 可选：会被列进 <skill_files>
+.iknow/skills/<name>/          # or <home>/.iknow/skills/<name>/
+├── SKILL.md                   # required: frontmatter + body
+├── references/                # optional: details (never listed in <skill_files>, see §2)
+└── <other files or subdirs>   # optional: listed in <skill_files>
 ```
 
-安装位置（扫描根；按顺序扫描，同名者**后者覆盖前者**）：
+Install locations (scan roots, scanned in order; on a name collision the **later one wins**):
 
 1. `<home>/.iknow/skills/<name>/`
 2. `<projectIdentityRoot>/.iknow/skills/<name>/`
-3. `IKNOW_SKILL_DIRS` 里列出的目录（`path.delimiter` 分隔）
+3. directories listed in `IKNOW_SKILL_DIRS` (`path.delimiter`-separated)
 
-`SKILL.md` 没有 `---` frontmatter 块会被**整条跳过**（warn 一行），不会进索引。
-
-```markdown
----
-name: my-skill # 省略则取目录名
-description: 一句话说清「什么时候该用它」 # 决定它是否出现在 <available_skills>
----
-
-# 在这里写正文
-```
-
-- `description` 超过 1536 字符会被截断并 warn——**写一句话**，别在 description 里做正文。
-- 只有「有 `description` 且未 `disable-model-invocation: true`」的 skill 会进入 **技能模型索引**——`<available_skills>` 清单（开场冻表 + 会话内新建增量）与模型侧 `skill({name})` 都只认这份资格。
-- **人侧 slash 走「可加载技能面」，比模型索引宽**：TUI `/` 候选、Web `GET /api/v1/skills`、CLI `/` 候选都含**无 `description`** 与 **`disable-model-invocation: true`** 的条目（三宿主同一入口），按名取正文也只拒「不存在」。所以缺 `description` 或标了 disable 的技能，人仍能 `/name` 加载。ADR-0098 / `specs/skill-index-increment.md`。
-- 两条闸互不越界：模型侧 `skill({name})` 对不合格名返回 typed 拒绝（文案写明改走 `/name`），**不**拦 `read_file` 读同一份 SKILL.md（SC5 末句）。
-
----
-
-## 二、模型加载时实际看到什么（装配形态）
-
-四条加载路径（TUI slash / Web `GET /api/v1/skills/:name` / CLI `/name` / ACI `skill({name})`）交付**同一份** `createSkillBody` 产物，形态固定为三段，用空行连接：
-
-1. **frontmatter 剥离后的正文**（正文为空则整段省略）
-2. **`Base directory: <skill 目录绝对路径>`**
-3. **`<skill_files>` 段**
-
-`<skill_files>` 段的实际行为：
-
-- 列出 skill 目录下的**文件**（绝对路径），**字典序排序**；
-- **最多列 10 条**，超出时追加一行 `file list is sampled`——清单是采样，不是全量；
-- `SKILL.md` 自己不出现；
-- **`references/` 整个子树不进清单**（不递归、不列出）；
-- `node_modules` / `.git` 目录跳过。
-
-同输入两次装配结果**字节级相等**——所以正文里不要写会漂移的内容（时间戳、随机数）。
-
----
-
-## 三、作者契约：正文精简，细则进 `references/`
-
-**正文只放「每次执行都必须遵守的程序」**：入口、步骤骨架、判定关卡、失败路径。
-**细则放 `references/`**：长表格、模板、示例集、参考资料、按需查阅的清单。
-
-在正文里**显式指路**，模型才知道去哪读：
+A `SKILL.md` without a `---` frontmatter block is **skipped entirely** (one warning line) and never indexed.
 
 ```markdown
-套用 `references/handoff-template.md` 骨架；只在模板「已固化工件」表里填路径，不 inline 复制。
+---
+name: my-skill # omit to take the directory name
+description: one line stating when to use this skill # decides whether it appears in <available_skills>
+---
+
+# write the body here
 ```
 
-这条纪律不是风格偏好，是加载模型的直接后果：正文是一次装配产物、**整份语义**，不是可再生查询。半份技能程序比没有更危险——模型会把半份当全份执行，而本会话内没有「换更精确的输入重调」这条恢复路径。这正是 ADR-0083 把 skill 正文移出通用输出闸的理由：`docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`。
+- A `description` longer than 1536 characters is truncated with a warning — **write one sentence**; don't turn the description into a body.
+- Only skills that have a `description` and do not set `disable-model-invocation: true` enter the **model-facing skill index** — both the `<available_skills>` list (frozen at session start + in-session increments) and the model-side `skill({name})` honor only that qualification.
+- **The human-side slash uses the loadable-skill surface, which is wider than the model index**: TUI `/` candidates, Web `GET /api/v1/skills`, and CLI `/` candidates all include entries **without a `description`** and with **`disable-model-invocation: true`** (one shared entry point for the three hosts); fetching a body by name rejects only "not found". So skills missing a description or marked disabled can still be loaded by a human via `/name`. ADR-0098 / `specs/skill-index-increment.md`.
+- The two gates do not cross: model-side `skill({name})` returns a typed rejection for unqualified names (the message points to `/name`), and does **not** block `read_file` on the same SKILL.md.
 
 ---
 
-## 四、运行时不对正文大小设限（纪律在你这边）
+## 2. What the model actually sees on load (assembled form)
 
-**没有 skill 专属的正文上限，也没有运行期的大小校验**：
+All four load paths (TUI slash / Web `GET /api/v1/skills/:name` / CLI `/name` / ACI `skill({name})`) deliver the **same** `createSkillBody` product, fixed as three sections joined by blank lines:
 
-- 扫描期不检查 `SKILL.md` 正文长度——唯一按大小裁剪的是 frontmatter `description`（1536 字符 + warn）；
-- 装配期不按大小裁剪正文：frontmatter 剥离 + 追加两段，全程没有长度判断；
-- 不存在 `SKILL_MAX_*` 一类的 skill 专属上限常量，也没有「正文超限就拒绝扫描 / 拒绝加载」的判定；
-- 没有 skill 专属的截断 / 预览 / 补读回退机制。
+1. **Body after frontmatter stripping** (omitted entirely if empty)
+2. **`Base directory: <absolute path of the skill directory>`**
+3. **The `<skill_files>` section**
 
-**不要指望运行时帮你拦**。正文写长了，代价是每次加载都占上下文、挤掉别的东西；这是设计取舍（机制上不设限，纪律留在作者面），所以要你自己守住。
+Actual `<skill_files>` behavior:
 
-**交付面：正文不经 executor 通用输出闸。** `skill()` 装配出的正文是**完整到达**的 —— executor 的 20000 字符兜底截断（`OUTPUT_HARD_CAP`）对它不适用，不会出现「截断 + 引导重调」的标记。豁免是**装配期静态声明**：只有内建 `skill` 工具在装配时落 `exemptFromOutputCap`，其余内建工具与 MCP 工具照旧走通用闸（MCP 转换路径结构性不落该声明）。也就是说，正文一旦写长，运行期没有第二道兜底——这加重了上面那条作者纪律。缘由见 `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`。
+- Lists **files** in the skill directory (absolute paths), **sorted lexicographically**;
+- **At most 10 entries**; when truncated, one `file list is sampled` line is appended — the list is a sample, not the whole;
+- `SKILL.md` itself never appears;
+- **The whole `references/` subtree is excluded** (not recursed, not listed);
+- `node_modules` / `.git` directories are skipped.
 
----
-
-## 五、`references/` 怎么被读到
-
-`references/` 不进 `<skill_files>`，所以模型**不会自动知道里面有什么**。读法：
-
-1. 从正文的指路句拿到相对路径；
-2. 用 `Base directory:` 给的绝对路径拼出目标文件；
-3. 调 `read_file` 读。
-
-**可达性取决于安装位置**（`read_file` 的围栏约束）：
-
-| skill 安装位置                        | `references/` 能否 `read_file` |
-| ------------------------------------- | ------------------------------ |
-| `<projectIdentityRoot>/.iknow/skills` | 能                             |
-| `<home>/.iknow/skills`                | 能（`~/.iknow/` 是常驻读根）   |
-| `IKNOW_SKILL_DIRS` 指向的外部目录     | **不能**（围栏外，会被拒绝）   |
-
-要发到外部目录的 skill，别把「必须读得到」的内容只放在 `references/` 里。
+Two assemblies of the same input are **byte-identical** — so never put drifting content (timestamps, random numbers) in the body.
 
 ---
 
-## 六、不要
+## 3. Author contract: lean body, details in `references/`
 
-- 把正文写成百科——细则下沉到 `references/`。
-- 在 description 里塞正文——它只用于索引与触发判定，且有 1536 截断。
-- 假设 `<skill_files>` 是全量——它是采样 ≤10，且不含 `references/`。
-- 假设 `references/` 会自动加载——它零成本，直到被 `read_file` 读到。
-- 依赖「运行时拦超长正文」——不设限是契约的一部分，兜底在作者。
+The body holds **only the program every execution must follow**: entry, step skeleton, decision gates, failure paths.
+Details go to `references/`: long tables, templates, example sets, reference material, look-up lists.
+
+**Point explicitly** in the body, or the model won't know where to read:
+
+```markdown
+Use the skeleton in `references/handoff-template.md`; fill paths only into the template's "finalized artifacts" table — no inline copies.
+```
+
+This discipline isn't stylistic; it follows directly from the load model: the body is a one-shot assembly carrying **complete meaning**, not a re-runnable query. A half-finished skill program is worse than none — the model executes the half as if it were the whole, and within a session there is no "re-invoke with a more precise input" recovery path. That is exactly why ADR-0083 exempts skill bodies from the general output cap: `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`.
+
+---
+
+## 4. The runtime sets no body-size limit (discipline is on you)
+
+**No skill-specific body limit and no runtime size validation**:
+
+- Scanning never checks `SKILL.md` body length — the only size truncation anywhere is the frontmatter `description` (1536 characters + warning);
+- Assembly never trims by size: strip frontmatter, append two sections, no length checks anywhere;
+- There are no `SKILL_MAX_*`-style skill-specific limit constants and no "over-limit → refuse to scan / load" decision;
+- No skill-specific truncation / preview / read-more fallback.
+
+**Don't count on the runtime to stop you.** A long body costs context on every load and squeezes everything else out; this is a deliberate trade-off (no mechanical limit, discipline on the author side), so you have to hold the line yourself.
+
+**Delivery: bodies bypass the executor's general output cap.** A `skill()`-assembled body **arrives in full** — the executor's 20000-character fallback truncation (`OUTPUT_HARD_CAP`) does not apply, and no "truncated + re-invoke" marker ever appears. The exemption is a **static, assembly-time declaration**: only the built-in `skill` tool sets `exemptFromOutputCap` at assembly; all other built-in and MCP tools still pass through the general cap (the MCP conversion path structurally never sets it). In other words, once the body runs long there is no second fallback at runtime — which sharpens the author discipline above. Rationale: `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`.
+
+---
+
+## 5. How `references/` gets read
+
+`references/` never appears in `<skill_files>`, so the model **cannot know its contents automatically**. The read path:
+
+1. Take the relative path from the pointer sentence in the body;
+2. join it with the absolute path given by `Base directory:`;
+3. call `read_file`.
+
+**Reachability depends on install location** (`read_file`'s fence constraints):
+
+| Skill install location                  | `references/` readable via `read_file` |
+| --------------------------------------- | -------------------------------------- |
+| `<projectIdentityRoot>/.iknow/skills`   | yes                                    |
+| `<home>/.iknow/skills`                  | yes (`~/.iknow/` is a resident read root) |
+| external dirs via `IKNOW_SKILL_DIRS`    | **no** (outside the fence; refused)    |
+
+For skills installed to external directories, never put must-read content only in `references/`.
+
+---
+
+## 6. Don't
+
+- Don't write the body as an encyclopedia — sink details into `references/`.
+- Don't cram body content into the description — it only drives indexing and trigger decisions, and gets truncated at 1536.
+- Don't assume `<skill_files>` is complete — it is a ≤10 sample and excludes `references/`.
+- Don't assume `references/` loads automatically — it costs nothing until `read_file` reads it.
+- Don't rely on the runtime to catch long bodies — the absence of limits is part of the contract; the fallback is the author.

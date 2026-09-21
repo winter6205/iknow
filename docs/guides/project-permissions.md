@@ -1,16 +1,16 @@
-# 项目权限规则（`settings.permissions`）
+# Project permission rules (`settings.permissions`)
 
-操作员指南。合同 SSOT = `specs/declarative-project-permissions.md` + ADR-0090。加载实现 = `src/harness/permission/`（勿以本页为 schema 权威）。
-
----
-
-## 一句话
-
-在共享项目 `<仓>/.iknow/settings.json` 里用 `allow` / `ask` / `deny` 字符串声明工具政策。只写项目层；`~/.iknow/settings.json` 里的 `permissions` 会被忽略。
+Operator guide. Contract SSOT = ADR-0090. Loading implementation = `src/harness/permission/` (this page is not the schema authority).
 
 ---
 
-## 模板
+## Summary
+
+Declare tool policy with `allow` / `ask` / `deny` strings in the shared project file `<repo>/.iknow/settings.json`. This is a project-layer setting only; `permissions` in `~/.iknow/settings.json` is ignored.
+
+---
+
+## Template
 
 ```json
 {
@@ -37,23 +37,23 @@
 }
 ```
 
-`defaultMode` 可省略。合法值只有 `default` 与 `plan`。不要在仓库里写自动模式。
+`defaultMode` is optional; the only valid values are `default` and `plan`. Do not put an auto-approve mode in a repo file.
 
 ---
 
-## 语法
+## Syntax
 
-- `Bash` / `Read` / `Edit`：族名，映射到 ACI 工具（`bash` / 读文件一族 / 写文件一族）。
-- 也可以写 ACI 字面名（`web_fetch`、`mcp__…`）。
-- 无括号 = 该工具全部调用。`Bash(*)` 等同 `Bash`。
-- Bash：`*` 通配；`:*` 只当**尾缀**（`Bash(git status:*)` ≡ `Bash(git status *)`）。
-- 路径：gitignore 风格。`Read(.env)` 挡住工作根下任意深度的 `.env`。
-- 同文件里 **deny 先于 ask 先于 allow**。
+- `Bash` / `Read` / `Edit` are family names mapped to concrete tools (`bash` / the read-file family / the write-file family).
+- Literal tool names also work (`web_fetch`, `mcp__…`).
+- No parentheses = every call of that tool; `Bash(*)` equals `Bash`.
+- Bash: `*` is a wildcard; `:*` is valid only as a **suffix** (`Bash(git status:*)` ≡ `Bash(git status *)`).
+- Paths are gitignore-style: `Read(.env)` blocks `.env` at any depth under the work root.
+- Within one file, **deny beats ask beats allow**.
 
-硬墙（`.ssh` 等）仍不可被 allow 放行。`Bash` 整工具 allow 也会盖住 code 层对 `network:true` 的 ask——需要保留出网询问时，不要写裸 `Bash` allow，改写命令前缀。
+Hard walls (e.g. `.ssh`) can never be allowed. An allow for the whole `Bash` tool also overrides the code-level ask on `network:true` — if you want outbound-network prompts to survive, allow command prefixes instead of bare `Bash`.
 
 ---
 
-## 与 hooks
+## Relationship to hooks
 
-`permissions` 是默认生效的团队政策。`hooks` 是可关总闸的额外拦截（正则 / PreWrite / PreCommit），见 `docs/guides/user-hooks.md`。不要把路径 deny 只写在 hooks 里指望替代本段。
+`permissions` is the team policy that applies by default; `hooks` are extra interceptions (regex / PreWrite / PreCommit) that can be switched off wholesale — see `docs/guides/user-hooks.md`. Don't rely on hook-only path denies as a substitute for this section.

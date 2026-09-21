@@ -1,18 +1,18 @@
-# iknow LLM 配置快速上手 — settings.json 单承载（ADR-0015）
+# iknow LLM config quickstart — settings.json as the single carrier (ADR-0015)
 
-> 本文件是 `.env.local` 模板 + `settings.json` 模板的落地文档。合并后从 PR 文件列表可见。
-> SSOT = ADR-0015（`docs/adr/0015-llm-config-settings-single-source.md`）+ ADR-0084
-> （`docs/adr/0084-project-settings-allowlist-and-permissions.md`；项目 settings 允许名单）。
-
----
-
-## 一、一句话总结
-
-**所有模型 / 密钥配置都写在 `settings.json` 一个地方，且只写用户层 `~/.iknow/settings.json`**。共享项目层 `<cwd>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions`；`hooks` 与 `llm`（以及 `web` / `isolation` / `memory` / `subagent` / `lsp` / `loop` / `graph`）是**用户层键**，写进项目文件会被丢弃且不覆盖用户值，启动时打警告（ADR-0084）。`.env.local` 退化为**纯 env var 装载器**——只负责提供占位符 `${VAR}` 的真值，不再直接当配置口。
+> Templates for `.env.local` and `settings.json`.
+> SSOT = ADR-0015 (`docs/adr/0015-llm-config-settings-single-source.md`) + ADR-0084
+> (`docs/adr/0084-project-settings-allowlist-and-permissions.md`; project settings allowlist).
 
 ---
 
-## 二、`.env.local` 模板（复制到 `<cwd>/.env.local`，替换 `<ANGLE_BRACKET>`）
+## 1. In one sentence
+
+**All model / key configuration lives in exactly one place: the user-layer `~/.iknow/settings.json`**. The shared project-layer `<cwd>/.iknow/settings.json` only adopts `verify` / `secrets` / `permissions`; `hooks` and `llm` (as well as `web` / `isolation` / `memory` / `subagent` / `lsp` / `loop` / `graph`) are **user-layer keys** — written into a project file they are discarded, never shadow the user value, and a startup warning is printed (ADR-0084). `.env.local` degrades to a **pure env-var loader**: it only supplies the real values behind `${VAR}` placeholders and is no longer a configuration surface.
+
+---
+
+## 2. `.env.local` template (copy to `<cwd>/.env.local`, replace `<ANGLE_BRACKET>`)
 
 ```env
 # iknow .env.local — 纯 env var 装载器（ADR-0015 settings 单承载）
@@ -42,11 +42,11 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 # IKNOW_WEB_SEARCH_BACKEND=exa
 ```
 
-> ⚠️ **红线**：`.env.local` 不要 commit 进 git（应在 `.gitignore`）。真实 key 只写这里（或 OS secret store / shell export），**绝不写进 `settings.json` 字面值**（除非你确实想字面落盘，但那样 SC20 遮蔽依赖内存值集，见 ADR-0015 Concrete Quiddity）。
+> ⚠️ **Hard rule**: never commit `.env.local` to git (it belongs in `.gitignore`). Real keys go only here (or an OS secret store / shell export), **never as a literal in `settings.json`** — unless you truly want the key on disk; note that a literal key makes the output-masking pass depend on the in-memory value set (see ADR-0015 "Concrete Quiddity").
 
 ---
 
-## 三、`settings.json` 模板（只写用户层 `~/.iknow/settings.json`）
+## 3. `settings.json` template (user layer `~/.iknow/settings.json` only)
 
 ```json
 {
@@ -61,41 +61,41 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 }
 ```
 
-- **`model`**：字面模型路由 ID（必填）。缺失 → fail-fast 抛「no LLM model configured in settings.llm.model」。
-- **`apiKey`**：两种写法二选一——
-  - 占位符（推荐）：`"${ANTHROPIC_AUTH_TOKEN}"`，解析时从 `process.env[VAR]` > `.env.local` > `.env` 找真值；
-  - 字面值：`"sk-..."` 直接落 key（不依赖 env，但 key 会进 settings 文件）。
-  - 不写 → `undefined`，消费点守卫抛「LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder) in ~/.iknow/settings.json. llm is a user-layer key (ADR-0084)...」。
-- **`fallback`**（可选）：模型 fallback 路由 ID 数组，用户自配，代码不预置。
+- **`model`**: literal model routing ID (required). Missing → fail-fast, throws "no LLM model configured in settings.llm.model".
+- **`apiKey`**: exactly one of two forms —
+  - placeholder (recommended): `"${ANTHROPIC_AUTH_TOKEN}"`, resolved at load time from `process.env[VAR]` > `.env.local` > `.env`;
+  - literal: `"sk-..."` stores the key directly (no env dependency, but the key lands in the settings file).
+  - Omitted → `undefined`, and the consumer-site guard throws "LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder) in ~/.iknow/settings.json. llm is a user-layer key (ADR-0084)...".
+- **`fallback`** (optional): array of fallback model routing IDs; user-configured, never preset by code.
 
-> **层级归属（ADR-0084）**：以下 `llm` / `web` 两段都是**用户层键**——只写 `~/.iknow/settings.json`。项目文件 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`，项目文件里的 `llm` / `web` 段被丢弃（`filterProjectSettingsKeys`，`src/config/settings.ts`）、不覆盖用户值，启动打 `[settings] project settings key "..." ignored` 警告。
+> **Layer ownership (ADR-0084)**: the `llm` and `web` sections below are both **user-layer keys** — write them only in `~/.iknow/settings.json`. The project file `<cwd>/.iknow/settings.json` adopts only `hooks` / `verify` / `secrets` / `permissions`; its `llm` / `web` sections are dropped (`filterProjectSettingsKeys`, `src/config/settings.ts`), never override user values, and print a startup warning `[settings] project settings key "..." ignored`.
 
-### 3.1 `settings.json` schema 全字段参考
+### 3.1 `settings.json` full schema reference
 
-用户层 `settings.json` 实际只承载 **`llm` 层与 `web` 层**，且只接受下表中的字段（`parseLlm` / `parseWeb` 逐字段校验，非法值丢弃不抛错）。字段来自 `src/config/settings.ts` 的 `IknowSettingsLlm` / `IknowSettingsWeb`（SSOT，勿以本表为准而以代码为准）。
+The user-layer `settings.json` actually carries only the **`llm` and `web` sections**, accepting only the fields below (`parseLlm` / `parseWeb` validate field by field; invalid values are dropped, not thrown). Fields come from `IknowSettingsLlm` / `IknowSettingsWeb` in `src/config/settings.ts` (SSOT — trust the code over this table).
 
-| 字段路径                       | 类型                                              | 默认（未配）        | 说明                                                                                                                                                                                                                                                                                                                                                         |
+| Field path                       | Type                                              | Default (unset)        | Notes                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------ | ------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `llm.model`                    | string（trim 非空）                               | **fail-fast 抛错**  | 模型路由 ID 字面值，唯一来源，**必填**。                                                                                                                                                                                                                                                                                                                     |
-| `llm.apiKey`                   | string（字面或 `${VAR}` / `$VAR`）                | `undefined`         | key 来源；消费点守卫抛「LLM mode needs API key.」。                                                                                                                                                                                                                                                                                                          |
-| `llm.fallback`                 | string[]（非空）                                  | `[]`                | fallback 路由 ID 列表，用户自配。                                                                                                                                                                                                                                                                                                                            |
-| `llm.thinking`                 | `"off" \| "adaptive"`                             | `"off"`             | 缺省思考开关；`IKNOW_LLM_THINKING` env 显式设置时覆盖它（env > settings > 默认）。                                                                                                                                                                                                                                                                           |
-| `llm.thinkingEffort`           | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `""`（不发）        | 缺省 effort；`IKNOW_LLM_THINKING_EFFORT` env 显式设置时覆盖它。                                                                                                                                                                                                                                                                                              |
-| `llm.maxTurns`                 | number（≥1 整数）                                 | `undefined`（无限） | 单次会话最大循环轮数；`IKNOW_LLM_MAX_TURNS` env 覆盖。                                                                                                                                                                                                                                                                                                       |
-| `llm.compress.contextWindow`   | number（>0 有限）                                 | `256000`            | **策略预算窗口**（用量显示分母与 auto-compact 闸，不是供应商上限）；`IKNOW_MODEL_CONTEXT_WINDOW` env 覆盖。ADR-0100。                                                                                                                                                                                                                                        |
-| `llm.compress.thresholdTokens` | number（>0 有限）                                 | `undefined`（推导） | proactive auto-compact 阈值；未设时 `floor(0.95 × contextWindow)`；`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` env 覆盖且必须 `< contextWindow`。ADR-0100。                                                                                                                                                                                                        |
-| `web.searchBackend`            | `"bing" \| "exa" \| "tavily" \| "brave"`          | `"bing"`            | **ACI web backend** 一个名字同时驱动发现与阅读；`IKNOW_WEB_SEARCH_BACKEND` env 覆盖。本轮只适配 Exa（`EXA_API_KEY` → search + contents）。`tavily` / `brave` / 无 key 的 `exa` 缺的那一头回落：搜走现行默认检索，抓走本机 `web_fetch` + `network-guard`。非法 id 装配期 typed fail-loud，不静默改名。通话仍是 `bash` + `network: true`（host-net amplify）。 |
+| `llm.model`                    | string (trimmed, non-empty)                               | **fail-fast throw**  | Literal model routing ID, sole source, **required**.                                                                                                                                                                                                                                                                                                                     |
+| `llm.apiKey`                   | string (literal or `${VAR}` / `$VAR`)                | `undefined`         | Key source; consumer-site guard throws "LLM mode needs API key.".                                                                                                                                                                                                                                                                                                          |
+| `llm.fallback`                 | string[] (non-empty)                                  | `[]`                | Fallback routing ID list, user-configured.                                                                                                                                                                                                                                                                                                                            |
+| `llm.thinking`                 | `"off" \| "adaptive"`                             | `"off"`             | Default thinking switch; overridden when env `IKNOW_LLM_THINKING` is explicitly set (env > settings > default).                                                                                                                                                                                                                                                                           |
+| `llm.thinkingEffort`           | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `""` (not sent)        | Default effort; overridden when env `IKNOW_LLM_THINKING_EFFORT` is explicitly set.                                                                                                                                                                                                                                                                                              |
+| `llm.maxTurns`                 | number (integer ≥1)                                 | `undefined` (unlimited) | Max loop turns per conversation; overridden by env `IKNOW_LLM_MAX_TURNS`.                                                                                                                                                                                                                                                                                                       |
+| `llm.compress.contextWindow`   | number (>0, finite)                                 | `256000`            | **Strategy budget window** (denominator of usage display and the auto-compact gate, not a provider ceiling); overridden by env `IKNOW_MODEL_CONTEXT_WINDOW`. ADR-0100.                                                                                                                                                                                                                                        |
+| `llm.compress.thresholdTokens` | number (>0, finite)                                 | `undefined` (derived) | Proactive auto-compact threshold; when unset, `floor(0.95 × contextWindow)`; overridden by env `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`, which must be `< contextWindow`. ADR-0100.                                                                                                                                                                                                        |
+| `web.searchBackend`            | `"bing" \| "exa" \| "tavily" \| "brave"`          | `"bing"`            | **ACI web backend**: one name drives both discovery and reading; overridden by env `IKNOW_WEB_SEARCH_BACKEND`. Currently only Exa is adapted (`EXA_API_KEY` → search + contents). The missing leg for `tavily` / `brave` / `exa` without a key falls back: search uses the current default engine, fetching uses local `web_fetch` + `network-guard`. An invalid ID fails loud with a typed error at assembly, never silently renamed. The call itself remains `bash` + `network: true` (host-net amplify). |
 
-**带默认值的字段都是可选**：不写 `thinking` / `thinkingEffort` 时，thinking 默认 `off`、effort 默认不发 —— 这不是「没读到」，而是「你用了默认」。
+**Every field with a default is optional**: omitting `thinking` / `thinkingEffort` means thinking defaults to `off` and effort is not sent — that is "using the default", not "failed to read".
 
-**注意**：以下字段 **不在 settings.json 承载范围**，仍走 env（`process.env > .env.local > .env > 代码默认`），写进 settings.json 会被 `parseLlm` / `parseWeb` 忽略：
+**Note**: the following fields are **not carried by settings.json**; they stay env-only (`process.env > .env.local > .env > code default`), and `parseLlm` / `parseWeb` ignore them if written into settings.json:
 
-- `baseUrl`（`IKNOW_LLM_BASE_URL`）、`maxOutputTokens`（`IKNOW_LLM_MAX_OUTPUT_TOKENS`）、`timeoutMs`（`IKNOW_LLM_TIMEOUT_MS`）、`temperature`（`IKNOW_LLM_TEMPERATURE`）、`stream`（`IKNOW_LLM_STREAM`）
-- `chat.showThinking`（`IKNOW_CHAT_SHOW_THINKING`）、`web.searchUrl` / `web.proxy`（`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`）、`mcp.connectTimeoutMs`（`IKNOW_MCP_CONNECT_TIMEOUT_MS`）
+- `baseUrl` (`IKNOW_LLM_BASE_URL`), `maxOutputTokens` (`IKNOW_LLM_MAX_OUTPUT_TOKENS`), `timeoutMs` (`IKNOW_LLM_TIMEOUT_MS`), `temperature` (`IKNOW_LLM_TEMPERATURE`), `stream` (`IKNOW_LLM_STREAM`)
+- `chat.showThinking` (`IKNOW_CHAT_SHOW_THINKING`), `web.searchUrl` / `web.proxy` (`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`), `mcp.connectTimeoutMs` (`IKNOW_MCP_CONNECT_TIMEOUT_MS`)
 
-**例外**：`web.searchBackend`（**ACI web backend** 一个名字）**已在 settings.json 承载**——`"bing" | "tavily" | "exa" | "brave"` 闭集，回退链 `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > 默认 `"bing"`。env 侧非法值抛 typed error；settings 侧非法值由 `src/config/settings.ts` 的 `parseWeb` 丢弃该字段（drop-not-throw，回落默认）。本轮厂商只接 Exa（`EXA_API_KEY`）；缺搜/缺抓回落默认，不把 stub 报成已接通。通话仍是 amplify（`bash` + `network: true`），不另开 curl 工具。装配期字段：改完需重启进程生效（不在热更新白名单，见下文「热更新」）。
+**Exception**: `web.searchBackend` (the **ACI web backend** single name) **is carried by settings.json** — closed set `"bing" | "tavily" | "exa" | "brave"`, resolution chain `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > default `"bing"`. An invalid env value throws a typed error; an invalid settings value is dropped by `parseWeb` in `src/config/settings.ts` (drop-not-throw, falls back to default). Currently only Exa is connected (`EXA_API_KEY`); missing search/fetch legs fall back to defaults, and stubs are never reported as connected. The call remains amplify (`bash` + `network: true`); no separate curl tool. Assembly-time field: a process restart is required after changing it (not on the hot-reload allowlist, see "hot reload" below).
 
-#### 完整示例（含思考默认档）
+#### Full example (with the thinking default tier)
 
 ```json
 {
@@ -109,33 +109,33 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 }
 ```
 
-> **关于「热更新」**：settings.json 是**热更新生效**的 —— `src/config/settings-watch.ts`（`fs.watch` + `fs.watchFile`，100ms debounce）监听 `~/.iknow/settings.json` 与 `<cwd>/.iknow/settings.json`，改动后下一轮 postMessage 即以新 env 调 LLM。**热更新生效字段仅限白名单 9 项**——`model` / `apiKey` / `thinking` / `thinkingEffort` / `fallback` / `baseUrl` / `maxOutputTokens` / `temperature` / `stream`（即 `createAdapterFromEnv` 的全部入参面，详 `src/harness/build-engine.ts:124-142`）；不在白名单的字段，如 `llm.compress.contextWindow` / `llm.compress.thresholdTokens`（loop-engine `compress` 配置，hub 热重建不重跑）、`llm.maxTurns`（loop-engine `maxTurns`，同款原因）、`chat.showThinking` / `web.searchUrl` / `web.proxy` / `mcp.connectTimeoutMs`（装配期/`IknowEnv` 其它臂，非 adapter 入参）等，**改完需重启进程**才生效。reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）→ **保留旧 env**（不崩进程，默认写 stderr `[settings-hot-reload] reload failed: ...`）。TUI chat 路径已接入：ContextBar 的 model 名实时刷新，thinking 基线按「用户未手动接管」的字段刷新——`/model` / `/thinking` / `/effort` 面板提交会置位该字段的接管标记，此后本会话的 settings 变化不再改写它（#1021：切模型不得复位使用中的覆盖；重开进程即回到 settings 基线）。切换模型只重画 ContextBar 的模型段，不再整树 repaint（env 显示快照经 store 订阅下发，`src/tui/env-display-store.ts`）。`.env.local` / `.env` 同链路热重读（`loadIknowEnv` 每次 reload 重读）。
+> **On "hot reload"**: settings.json **takes effect via hot reload** — `src/config/settings-watch.ts` (`fs.watch` + `fs.watchFile`, 100ms debounce) watches `~/.iknow/settings.json` and `<cwd>/.iknow/settings.json`; after a change, the next postMessage round calls the LLM with the new env. **Only these 9 fields are on the hot-reload allowlist**: `model` / `apiKey` / `thinking` / `thinkingEffort` / `fallback` / `baseUrl` / `maxOutputTokens` / `temperature` / `stream` (the full input surface of `createAdapterFromEnv`, see `src/harness/build-engine.ts:124-142`). Fields outside the allowlist — `llm.compress.contextWindow` / `llm.compress.thresholdTokens` (loop-engine `compress` config; hub hot-rebuild does not re-run it), `llm.maxTurns` (loop-engine `maxTurns`, same reason), `chat.showThinking` / `web.searchUrl` / `web.proxy` / `mcp.connectTimeoutMs` (assembly-time / other arms of `IknowEnv`, not adapter inputs) — **require a process restart**. A failed reload (bad JSON / missing model / apiKey resolution failure) → **the old env is kept** (the process does not crash; a message goes to stderr by default: `[settings-hot-reload] reload failed: ...`). The TUI chat path is wired in: the ContextBar model name refreshes live, and the thinking baseline refreshes only for fields "not manually taken over" — submitting via the `/model` / `/thinking` / `/effort` panels sets the takeover flag for that field, after which settings changes in this session no longer rewrite it (switching models must never reset an in-use override; reopening the process returns to the settings baseline). Switching models redraws only the model segment of the ContextBar, no whole-tree repaint (the env display snapshot is pushed via store subscription, `src/tui/env-display-store.ts`). `.env.local` / `.env` are hot-reloaded on the same chain (`loadIknowEnv` re-reads on every reload).
 >
-> **关于「反向通道 / 面板写回」**：运行时 `/thinking` / `/effort` 面板 **Esc 保存退出**会写回 `settings.json`（ADR-0084 写回落对层：`thinking` / `effort` / `memory` 都是用户层键，**恒写用户层 `~/.iknow/settings.json`**，与项目文件是否存在无关；合并 llm 子树，apiKey/model/secrets 等其它字段原样保留），写回不触发自身 reload（sha256 self-write 哨兵内容哈希命中即跳过，防回环；PR #413 文件 → 运行时单向通道不变）；写回失败（EACCES / 磁盘满 / 序列化失败）→ TUI notice 提示，in-memory override 保留、不 crash。面板内 Enter 固定 / Space-Tab 预览不落盘；重启后回到 settings.json（或默认）值。
+> **On the "reverse channel / panel write-back"**: saving and exiting the `/thinking` / `/effort` panels with **Esc** writes back to `settings.json` (ADR-0084 write-back layer: `thinking` / `effort` / `memory` are user-layer keys, **always written to the user layer `~/.iknow/settings.json`** regardless of whether a project file exists; the llm subtree is merged, apiKey/model/secrets and other fields preserved verbatim). The write-back does not trigger its own reload (a sha256 self-write sentinel skips on content-hash match, preventing a loop; the one-way file → runtime channel is unchanged). A failed write-back (EACCES / disk full / serialization failure) → a TUI notice; the in-memory override is kept, no crash. Enter-pin / Space-Tab preview inside the panel never persists; after restart the value returns to settings.json (or the default).
 
 ---
 
-## 四、三种典型配法
+## 4. Three typical setups
 
-| 场景                     | 做法                                                                                                               |
+| Scenario                     | How                                                                                                               |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| **推荐**（key 不进文件） | settings `"apiKey": "${ANTHROPIC_AUTH_TOKEN}"` + `.env.local` 写 `ANTHROPIC_AUTH_TOKEN=<key>`                      |
-| 临时切模型（不落盘）     | `export IKNOW_LLM_MODEL` 已退役。改：settings `"model"` 换成目标值，或临时 `export` 后 settings 用 `${VAR}` 占位符 |
-| 字面 key（不依赖 env）   | settings `"apiKey": "sk-..."` 直接写                                                                               |
+| **Recommended** (key never in a file) | settings `"apiKey": "${ANTHROPIC_AUTH_TOKEN}"` + `ANTHROPIC_AUTH_TOKEN=<key>` in `.env.local`                      |
+| Temporary model switch (nothing persisted)     | `export IKNOW_LLM_MODEL` is retired. Instead: change `"model"` in settings to the target value, or temporarily `export` a var and reference it via a `${VAR}` placeholder in settings |
+| Literal key (no env dependency)   | write `"apiKey": "sk-..."` directly in settings                                                                               |
 
 ---
 
-## 五、云端开发 / 远程 LLM 端点
+## 5. Cloud development / remote LLM endpoints
 
-本机 WSL 网关（`http://localhost:20128/v1` / `9router`）在云端开发场景不可达。iknow 走任意 Anthropic 兼容 endpoint —— `IKNOW_LLM_BASE_URL` 切远程、模型路由 ID 写进 settings 即可，无需改代码。
+The local WSL gateway (`http://localhost:20128/v1` / `9router`) is unreachable in cloud development. iknow talks to any Anthropic-compatible endpoint — point `IKNOW_LLM_BASE_URL` at the remote and put the model routing ID in settings; no code changes needed.
 
-**完整模板在项目根 `.env.example`（git 跟踪），复制到 `.env.local` 后填真值：**
+**The full template is in the project root `.env.example` (git-tracked); copy it to `.env.local` and fill in real values:**
 
 ```bash
 cp .env.example .env.local     # .env.local 已 gitignore
 ```
 
-**`.env.local` 关键三行（MiniMax 中国站示例）：**
+**The key lines of `.env.local` (MiniMax China example):**
 
 ```env
 IKNOW_LLM_BASE_URL=https://api.minimaxi.com/anthropic
@@ -147,7 +147,7 @@ IKNOW_LLM_TEMPERATURE=0
 IKNOW_LLM_STREAM=on
 ```
 
-**`~/.iknow/settings.json`（用户层）补 model + apiKey 占位符：**
+**Add model + apiKey placeholder in `~/.iknow/settings.json` (user layer):**
 
 ```json
 {
@@ -158,25 +158,25 @@ IKNOW_LLM_STREAM=on
 }
 ```
 
-> `llm` 是用户层键（ADR-0084）——写进 `<cwd>/.iknow/settings.json` 会被丢弃、不生效。
+> `llm` is a user-layer key (ADR-0084) — writing it into `<cwd>/.iknow/settings.json` gets it dropped and has no effect.
 
-- `llm.model` 走字面值（env 已退役，ADR-0015）；MiniMax-M3 = 1M context 最新模型，支持 tool use / streaming / thinking。备选 `MiniMax-M2.7` / `MiniMax-M2.5` / `MiniMax-M2.1` / `MiniMax-M2` / `-highspeed` 变体。
-- `llm.apiKey` 用 `${MINIMAX_API_KEY}` 占位符 → `expandPlaceholders`（`src/config/env.ts`）经 `resolveValueFromFilename` 按 `process.env[VAR] > .env.local > .env` 优先级解析真值；文件侧 `fileMap` 由 `loadIknowEnv` 内的 `parseEnvFile` 合并构造（不引行号，避免随代码漂移）。
-- 变量名不强制 `MINIMAX_API_KEY`：写什么变量名都行，settings.json 和 `.env.local` 里对齐即可（如 `"${ANTHROPIC_AUTH_TOKEN}"` + `ANTHROPIC_AUTH_TOKEN=<key>` 也可）。
+- `llm.model` is a literal (the env route is retired, ADR-0015); MiniMax-M3 = the latest 1M-context model, supports tool use / streaming / thinking. Alternatives: `MiniMax-M2.7` / `MiniMax-M2.5` / `MiniMax-M2.1` / `MiniMax-M2`, plus `-highspeed` variants.
+- `llm.apiKey` uses the `${MINIMAX_API_KEY}` placeholder → `expandPlaceholders` (`src/config/env.ts`) resolves the real value through `resolveValueFromFilename` with priority `process.env[VAR] > .env.local > .env`; the file-side `fileMap` is merged and built by `parseEnvFile` inside `loadIknowEnv` (no line numbers are carried, to avoid drift with the code).
+- The variable name need not be `MINIMAX_API_KEY`: any name works as long as settings.json and `.env.local` agree (e.g. `"${ANTHROPIC_AUTH_TOKEN}"` + `ANTHROPIC_AUTH_TOKEN=<key>` is equally fine).
 
-**其它 Anthropic 兼容 endpoint（同一链路）：**
+**Other Anthropic-compatible endpoints (same chain):**
 
-| 场景                            | `IKNOW_LLM_BASE_URL`                                                      |
+| Scenario                            | `IKNOW_LLM_BASE_URL`                                                      |
 | ------------------------------- | ------------------------------------------------------------------------- |
-| 本地 WSL 网关 / 9router（默认） | 留空 → `http://localhost:20128/v1`                                        |
-| MiniMax 中国（Anthropic 兼容）  | `https://api.minimaxi.com/anthropic`                                      |
-| MiniMax 国际（Anthropic 兼容）  | `https://api.minimax.io/anthropic`                                        |
-| Anthropic 官方                  | `https://api.anthropic.com`                                               |
-| 自建 proxy / 其它 OpenAI 兼容   | `https://<host>/v1`（需 OpenAI 兼容 client；iknow 默认走 Anthropic 协议） |
+| Local WSL gateway / 9router (default) | Leave empty → `http://localhost:20128/v1`                                        |
+| MiniMax China (Anthropic-compatible)  | `https://api.minimaxi.com/anthropic`                                      |
+| MiniMax International (Anthropic-compatible)  | `https://api.minimax.io/anthropic`                                        |
+| Anthropic official                  | `https://api.anthropic.com`                                               |
+| Self-hosted proxy / other OpenAI-compatible   | `https://<host>/v1` (needs an OpenAI-compatible client; iknow defaults to the Anthropic protocol) |
 
 ---
 
-## 六、验证
+## 6. Verification
 
 ```bash
 # 配置后确认 iknow 能加载（settings 生效 + 真模型可达）
@@ -189,13 +189,13 @@ npm run test:real-llm
 
 ---
 
-## 七、零摩擦：本机 → 云端三步走（跨机一键通）
+## 7. Zero friction: local → cloud in three steps
 
-适用：本地 WSL 网关在云端 VM 不可达，但本机仍能写文件 → 直接把配置文件 scp 到云端，**用户只填一行 API key**。
+For: the local WSL gateway is unreachable from a cloud VM, but the local machine can still write files → scp the config files to the cloud directly, and **the user fills in only one API key line**.
 
-### 步骤 1：本地一次性配置（脚手架已就位）
+### Step 1: one-time local setup (scaffolding already in place)
 
-`<cwd>/.env.example`（git tracked，commit `b17875f`）+ `~/.iknow/settings.json`（用户层，本机已含 model + apiKey 占位符）已就位。用户只需：
+`<cwd>/.env.example` (git-tracked) + `~/.iknow/settings.json` (user layer, already contains model + apiKey placeholder). The user only needs:
 
 ```bash
 cd /path/to/iknow
@@ -209,9 +209,9 @@ vim .env.local
 #   MINIMAX_API_KEY=eyJhbGciOi...
 ```
 
-> `~/.iknow/settings.json` 已含 `model: "MiniMax-M3"` + `apiKey: "${MINIMAX_API_KEY}"`，无需再动；变量名变更时改这一处对齐即可。
+> `~/.iknow/settings.json` already contains `model: "MiniMax-M3"` + `apiKey: "${MINIMAX_API_KEY}"`, nothing more to change; if the variable name changes, align it at this one place.
 
-### 步骤 2：scp 两个文件到云端
+### Step 2: scp the two files to the cloud
 
 ```bash
 scp .env.local user@cloud-vm:/path/to/iknow/.env.local
@@ -219,7 +219,7 @@ scp ~/.iknow/settings.json user@cloud-vm:~/.iknow/settings.json   # llm 是用�
 # .env.example 已 git tracked，云端 git pull 后自动有；.env.local 是 gitignored、用户层 settings 在仓库外，两者都逐机传
 ```
 
-### 步骤 3：云端 VM 验证
+### Step 3: verify on the cloud VM
 
 ```bash
 ssh user@cloud-vm
@@ -229,20 +229,20 @@ ls -la .env.local ~/.iknow/settings.json   # 应都存在
 npm run probe:settings-model        # 远程 A1/A2 应 PASS（settings 加载 + 占位符解析）
 ```
 
-### 旋转 key
+### Rotating the key
 
-key 换时只改云端一行即可，无需重传 settings.json：
+When the key changes, edit the one line on the cloud; no need to re-upload settings.json:
 
 ```bash
 ssh user@cloud-vm
 vim .env.local                       # 改 MINIMAX_API_KEY= 一行
 ```
 
-settings.json 不变，env 链 (`process.env > .env.local > .env`) 自动热重读（`src/config/settings-watch.ts` 100ms debounce）。
+settings.json stays untouched; the env chain (`process.env > .env.local > .env`) is hot-reloaded automatically (`src/config/settings-watch.ts`, 100ms debounce).
 
-### 新机器全新 clone
+### Fresh clone on a new machine
 
-git clone 后本机用户层没有 `~/.iknow/settings.json` —— 此时 iknow fail-fast 抛「no LLM model configured in settings.llm.model. Set it in ~/.iknow/settings.json.」。补建（**用户层**，不是 `<cwd>/.iknow/settings.json`）：
+After git clone there is no user-layer `~/.iknow/settings.json` — iknow then fail-fasts with "no LLM model configured in settings.llm.model. Set it in ~/.iknow/settings.json.". Create it (**user layer**, not `<cwd>/.iknow/settings.json`):
 
 ```bash
 mkdir -p ~/.iknow
@@ -261,11 +261,8 @@ cp .env.example .env.local && chmod 600 .env.local && vim .env.local
 
 ---
 
-## 关联
+## Related
 
 - ADR-0015 `docs/adr/0015-llm-config-settings-single-source.md`
-- ADR-0084 `docs/adr/0084-project-settings-allowlist-and-permissions.md`（项目 settings 允许名单：项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`）
-- `docs/integration-materials.env.example`（完整变量名文档）
-- `plans/settings-model-extension.md`
-- `.env.example`（项目根；git 跟踪；远程端点 + 占位符真值模板）
-- commit `b17875f`（`.env.example` 首版）
+- ADR-0084 `docs/adr/0084-project-settings-allowlist-and-permissions.md` (project settings allowlist: project files adopt only `hooks` / `verify` / `secrets` / `permissions`)
+- `.env.example` (project root; git-tracked; remote endpoint + placeholder-value template)
