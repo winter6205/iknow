@@ -10,12 +10,15 @@
  * semantics mirror TUI src/tui/context-bar.tsx — changing either side must
  * sync the other (formula / thresholds change together).
  *
- * Numeric semantics (migrated from ContextUsageStrip, see CONTEXT.md
- * `context usage (display)`): used = inputTokens + cacheReadInputTokens +
- * cacheCreationInputTokens (null cache → 0); pct = round(used /
- * contextWindow × 100). Missing contextWindow → null; null usage (no reading
- * before the first turn) → render as 0 (the strip is always present; it does
- * not wait for a computed value to appear).
+ * Numeric semantics = context occupancy (migrated from ContextUsageStrip, see
+ * CONTEXT.md `context usage (display)` / ADR-0118): pre_call shape (both
+ * cache fields null/absent) → used = inputTokens (the countTokens total
+ * already includes cached tokens; cache fields never added on top);
+ * post_call → inputTokens + cacheReadInputTokens + cacheCreationInputTokens
+ * (null cache → 0); pct = round(used / contextWindow × 100). Missing
+ * contextWindow → null; null usage (no reading before the first turn) →
+ * render as 0 (the strip is always present; it does not wait for a computed
+ * value to appear).
  */
 import { useMemo } from "react";
 import type { TokenUsage } from "../api/types";
@@ -32,12 +35,19 @@ const COLOR_SAFE = "#7ab8ff";
 const COLOR_WARN = "#d9a343";
 const COLOR_ALERT = "#c95d47";
 
-function ctxUsed(u: TokenUsage): number {
-  return (
-    u.inputTokens +
-    (u.cacheReadInputTokens ?? 0) +
-    (u.cacheCreationInputTokens ?? 0)
-  );
+/**
+ * Context occupancy (ADR-0118) — bar numerator, same formula as the TUI
+ * mirror src/tui/context-bar.tsx (changing one side must change the other):
+ * pre_call shape (both cache fields null/absent) → inputTokens only, so
+ * cache is never added onto a total that already includes it; post_call
+ * (at least one cache field non-null) → three disjoint categories summed,
+ * null cache counting as 0. Exported for tests (shared numerator table).
+ */
+export function contextOccupancy(u: TokenUsage): number {
+  const read = u.cacheReadInputTokens ?? null;
+  const creation = u.cacheCreationInputTokens ?? null;
+  if (read === null && creation === null) return u.inputTokens;
+  return u.inputTokens + (read ?? 0) + (creation ?? 0);
 }
 
 function fmtK(n: number): string {
@@ -54,7 +64,7 @@ export function UsageChip({
       return null;
     }
     // usage absent (before first turn) → used=0: the strip persists, never hidden awaiting a reading.
-    const used = usage === null ? 0 : ctxUsed(usage);
+    const used = usage === null ? 0 : contextOccupancy(usage);
     return {
       used,
       pct: Math.round((used / contextWindow) * 100),
