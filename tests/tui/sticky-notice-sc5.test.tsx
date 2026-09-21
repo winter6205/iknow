@@ -174,7 +174,7 @@ async function mount(opts: {
     continueSession: async () => {
       throw new Error("continueSession unused in sticky-notice SC5 tests");
     },
-    rewindSession: async (_id, _head) => file,
+    rewindSession: async (_id, _head) => ({ file }),
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,

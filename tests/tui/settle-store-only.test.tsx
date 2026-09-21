@@ -146,7 +146,7 @@ function settleBridge(opts: SettleBridgeOptions): TuiBridge {
     },
     rewindSession: async (id) => {
       void id;
-      return file;
+      return { file };
     },
     listRewindTargets: async () => [],
     inflight,

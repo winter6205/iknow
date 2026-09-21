@@ -101,6 +101,7 @@ import {
   type TuiView,
 } from "./session-state.js";
 import {
+  codeRestoreNoticeLines,
   reduceRewindKey,
   rewindModalRows,
   rewindPickerContent,
@@ -667,6 +668,7 @@ function modalRowsForBudget(opts: {
         readonly targets: ReadonlyArray<RewindTarget>;
         readonly index: number;
         readonly confirming: boolean;
+        readonly rowIndex: number;
       }
     | undefined;
   readonly ask:
@@ -679,7 +681,8 @@ function modalRowsForBudget(opts: {
       opts.rewind.targets,
       opts.cols,
       opts.rewind.index,
-      opts.rewind.confirming
+      opts.rewind.confirming,
+      opts.rewind.rowIndex
     );
   }
   if (opts.ask !== undefined) return permissionModalRows(opts.ask, opts.cols);
@@ -1760,9 +1763,10 @@ function handleYoloSlash(
 interface RewindKeySetters {
   readonly setIndex: (index: number) => void;
   readonly setConfirming: (confirming: boolean) => void;
+  readonly setConfirmIndex: (index: number) => void;
   /** cancel: clears targets + index + confirming + notice (Esc collapses). */
   readonly cancel: () => void;
-  readonly execute: (target: RewindTarget) => void;
+  readonly execute: (target: RewindTarget, restoreCode: boolean) => void;
 }
 
 /**
@@ -1779,6 +1783,7 @@ function applyRewindModalKey(opts: {
   readonly targets: ReadonlyArray<RewindTarget>;
   readonly index: number;
   readonly confirming: boolean;
+  readonly confirmIndex: number;
   readonly keyEvent: KeyEvent;
   readonly setters: RewindKeySetters;
 }): void {
@@ -1786,17 +1791,22 @@ function applyRewindModalKey(opts: {
     targets: opts.targets,
     selectedIndex: opts.index,
     confirming: opts.confirming,
+    confirmIndex: opts.confirmIndex,
   });
   switch (action.type) {
     case "move":
-      opts.setters.setIndex(action.index);
+      // While confirming, move walks the action rows; otherwise the anchors.
+      if (opts.confirming) opts.setters.setConfirmIndex(action.index);
+      else opts.setters.setIndex(action.index);
       break;
     case "confirm":
       opts.setters.setConfirming(true);
+      opts.setters.setConfirmIndex(0);
       break;
     case "execute": {
       const target = opts.targets[opts.index];
-      if (target !== undefined) opts.setters.execute(target);
+      if (target !== undefined)
+        opts.setters.execute(target, action.restoreCode);
       break;
     }
     case "cancel":
@@ -1837,6 +1847,7 @@ function dispatchActiveModalKey(opts: {
     readonly targets: ReadonlyArray<RewindTarget> | undefined;
     readonly index: number;
     readonly confirming: boolean;
+    readonly confirmIndex: number;
     readonly setters: RewindKeySetters;
   };
   readonly keyEvent: KeyEvent;
@@ -1854,6 +1865,7 @@ function dispatchActiveModalKey(opts: {
     targets: opts.rewind.targets,
     index: opts.rewind.index,
     confirming: opts.rewind.confirming,
+    confirmIndex: opts.rewind.confirmIndex,
     keyEvent: opts.keyEvent,
     setters: opts.rewind.setters,
   });
@@ -2158,6 +2170,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // branch (mirrored after exit() returns); startup `--yolo` is read once by
   // the useState seed.
   const [yoloOn, setYoloOn] = useState(() => seedYoloOn(props));
+  // Highlighted row of the three confirm actions. Only read while confirming,
+  // and armed to the first action on every entry into the confirm state, so it
+  // never carries a stale choice across pickers.
+  const [rewindConfirmIndex, setRewindConfirmIndex] = useState(0);
   const lastEscAtRef = useRef<number | undefined>(undefined);
 
   // Terminals (iTerm2 / WezTerm / kitty etc.) **automatically** paste "the
@@ -3624,15 +3640,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** Move head after confirmation; with fillInput, put the anchor text back into the input. */
+  /** Move head after confirmation; with fillInput, put the anchor text back into
+   *  the input. `restoreCode` = the hub also wrote the abandoned segment's files
+   *  back, so its report joins the notice (a rewind that refused some paths must
+   *  not read as a clean success). */
   async function executeRewind(
     targetId: string,
-    target: RewindTarget
+    target: RewindTarget,
+    restoreCode: boolean
   ): Promise<void> {
     setRewindTargets(undefined);
     setRewindConfirming(false);
     try {
-      await props.bridge.rewindSession(targetId, target.head);
+      const { codeRestore } = await props.bridge.rewindSession(
+        targetId,
+        target.head,
+        restoreCode
+      );
       const fresh = await props.bridge.loadSessionFile(targetId);
       setSessions((prev) => {
         const current = prev[targetId];
@@ -3649,7 +3673,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       const noticeText = target.userMessageText || "(无文本)";
       setNotice({
-        lines: [`已回退到 ［${noticeText}］ 之前。`],
+        lines: [
+          `已回退到 ［${noticeText}］ 之前。`,
+          ...(codeRestore !== undefined
+            ? codeRestoreNoticeLines(codeRestore)
+            : []),
+        ],
       });
       if (target.fillInput) setInputValue(target.fullText);
     } catch (err) {
@@ -4396,21 +4425,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           targets: rewindTargets,
           index: rewindIndex,
           confirming: rewindConfirming,
+          confirmIndex: rewindConfirmIndex,
           setters: {
             setIndex: setRewindIndex,
             setConfirming: setRewindConfirming,
+            setConfirmIndex: setRewindConfirmIndex,
             cancel: () => {
               setRewindTargets(undefined);
               setRewindIndex(0);
               setRewindConfirming(false);
+              setRewindConfirmIndex(0);
               setNotice(undefined);
             },
             // Confirm-state Enter: the reducer yields execute without move, so
             // taking the target by the current index is safe (done in helper).
             // Missing session id (draft) → do not execute.
-            execute: (target) => {
+            execute: (target, restoreCode) => {
               if (activeConversationId !== undefined) {
-                void executeRewind(activeConversationId, target);
+                void executeRewind(activeConversationId, target, restoreCode);
               }
             },
           },
@@ -4501,6 +4533,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const bgLine = bgSession !== undefined;
   const modalAsk =
     view === "chat" && askModalDismissed === false ? askPending : undefined;
+  // The picker highlights the anchor row while selecting and an action row
+  // while confirming; row accounting and ModalHost must agree on one index.
+  const rewindRow = rewindConfirming ? rewindConfirmIndex : rewindIndex;
   // The modal row budget places yolo-confirm first, in the same order as the
   // ModalHost slot (priority rationale in the render-slot comment); the
   // existing ask / rewind order is preserved between them (the two never
@@ -4515,6 +4550,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             targets: rewindTargets,
             index: rewindIndex,
             confirming: rewindConfirming,
+            rowIndex: rewindRow,
           },
     ask: modalAsk,
     cols,
@@ -4783,7 +4819,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                   ...yoloEnterConfirmContent(),
                   // Confirmation state carries no selection semantics (the
                   // reducer ignores ↑↓); the highlighted row stays pinned to the
-                  // execute option (same as rewind confirm pinning index 0).
+                  // execute option.
                   selectedIndex: 0,
                 }
               : rewindTargets !== undefined
@@ -4794,7 +4830,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                       rewindIndex,
                       rewindConfirming
                     ),
-                    selectedIndex: rewindConfirming ? 0 : rewindIndex,
+                    selectedIndex: rewindRow,
                   }
                 : askModalActive && askPending !== undefined
                   ? {

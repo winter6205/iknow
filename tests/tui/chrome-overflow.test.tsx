@@ -86,7 +86,7 @@ function fakeBridge(subagents: ReadonlyArray<SubagentInfo>): TuiBridge {
     continueSession: async () => {
       throw new Error("unused");
     },
-    rewindSession: async () => file,
+    rewindSession: async () => ({ file }),
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
