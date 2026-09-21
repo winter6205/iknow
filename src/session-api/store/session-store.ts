@@ -63,6 +63,7 @@ import {
   headChainEvents,
   jsonDeepEqual,
   latestTitleText,
+  matchCodePreimage,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
@@ -254,24 +255,6 @@ function requireValidRoot(value: string, label: string): void {
       `${label} must be an absolute path, got '${trimmed.slice(0, MAX_ROOT_DETAIL_CHARS)}'`
     );
   }
-}
-
-/** Find the captured preimage ref for an event, if it is a successful
- *  (non-`is_error`) tool_result whose `tool_use_id` was captured. A batch may
- *  carry several tool_result blocks (parallel tools); the first captured,
- *  non-error one wins — under the per-tool commit each event holds exactly
- *  one, so the choice is deterministic. */
-function matchCodePreimage(
-  message: AnthropicNativeMessage,
-  preimages: ReadonlyMap<string, PreimageRef> | undefined
-): PreimageRef | undefined {
-  if (preimages === undefined || preimages.size === 0) return undefined;
-  for (const block of message.content) {
-    if (block.type !== "tool_result" || block.is_error === true) continue;
-    const ref = preimages.get(block.tool_use_id);
-    if (ref !== undefined) return ref;
-  }
-  return undefined;
 }
 
 export class SessionStore {
@@ -724,14 +707,15 @@ export class SessionStore {
   }
 
   /**
-   * The preimage-bearing events a rewind to `newHead` would abandon: the
-   * current head chain, minus everything still kept under `newHead`, in
-   * current-chain order. Read-only — a legacy `.json`-only session has no
-   * captured refs (JSONL is a prerequisite), so it returns empty rather than
-   * forcing the migrate-on-write the head move already does. Unknown `newHead`
-   * surfaces as schema_invalid, same as rewindToHead.
+   * Every event a rewind to `newHead` would abandon: the current head chain,
+   * minus everything still kept under `newHead`, in current-chain order — no
+   * content filter. The rewind orchestrator reads the unfiltered segment to
+   * find the `spawn_subagent` tool_uses inside it (worker transcripts join the
+   * restore through those ids); file refs come from `rewindablePreimages`.
+   * Read-only and same error surface as `rewindToHead` (unknown `newHead` →
+   * schema_invalid).
    */
-  async rewindablePreimages(
+  async abandonedEvents(
     id: string,
     newHead: string | null
   ): Promise<ReadonlyArray<SessionEventRecord>> {
@@ -747,9 +731,23 @@ export class SessionStore {
       throw this.attachId(id, err);
     }
     const keptIds = new Set(kept.map((e) => e.id));
-    return current.filter(
-      (e) => e.codePreimage !== undefined && !keptIds.has(e.id)
-    );
+    return current.filter((e) => !keptIds.has(e.id));
+  }
+
+  /**
+   * The preimage-bearing events a rewind to `newHead` would abandon: the
+   * current head chain, minus everything still kept under `newHead`, in
+   * current-chain order. Read-only — a legacy `.json`-only session has no
+   * captured refs (JSONL is a prerequisite), so it returns empty rather than
+   * forcing the migrate-on-write the head move already does. Unknown `newHead`
+   * surfaces as schema_invalid, same as rewindToHead.
+   */
+  async rewindablePreimages(
+    id: string,
+    newHead: string | null
+  ): Promise<ReadonlyArray<SessionEventRecord>> {
+    const abandoned = await this.abandonedEvents(id, newHead);
+    return abandoned.filter((e) => e.codePreimage !== undefined);
   }
 
   private async persistHeadMove(

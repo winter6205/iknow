@@ -25,11 +25,14 @@ import type { SessionStoreError } from "./errors.js";
 import { splitTurns } from "./checkpoint.js";
 import { closeoutOrphanToolUses } from "./closeout-projection.js";
 import {
+  headChainEvents,
+  matchCodePreimage,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
   sessionFileToJsonl,
   type ParsedSessionLog,
+  type PreimageRef,
   type SessionEventRecord,
   type SessionHeadRecord,
 } from "./jsonl.js";
@@ -85,6 +88,83 @@ export async function loadWorkerTranscript(
 }
 
 /**
+ * The `codePreimage`-bearing events on the worker transcript's current head
+ * chain — the worker half of the rewind/restore input (ADR-0119 T3). Raw
+ * records are read (not the `loadWorkerTranscript` projection) because the
+ * stamp lives on the event record, never in model message content.
+ *
+ * Missing file → empty (legal: the worker exited before its first commit,
+ * exactly the `not_found`-is-fresh posture of the load path). Any other read
+ * or parse fault propagates typed — a corrupt ledger must never be mistaken
+ * for "no preimages", same as `loadWorkerTranscript`.
+ */
+export async function loadWorkerPreimageEvents(
+  loc: WorkerTranscriptLocation
+): Promise<ReadonlyArray<SessionEventRecord>> {
+  const { transcriptPath, taskId } = loc;
+  let raw: string;
+  try {
+    raw = await readFile(transcriptPath, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return [];
+    throw {
+      kind: "io_error",
+      conversation_id: taskId,
+      cause: fsErrMsg(err),
+    } satisfies SessionStoreError;
+  }
+  try {
+    return headChainEvents(parseSessionJsonl(raw)).filter(
+      (e) => e.codePreimage !== undefined
+    );
+  } catch (err) {
+    throw attachTaskId(taskId, err);
+  }
+}
+
+/**
+ * Read one worker's spawn join key: `toolUseId` in
+ * `subagents/<taskId>/agent-<taskId>.meta.json` = the PARENT transcript's
+ * `spawn_subagent` tool_use id (written by the manager at spawn). Absent
+ * meta file or absent field → undefined (legacy worker / Postel meta: no
+ * link exists, so the restore scan skips it). A present-but-corrupt meta
+ * propagates `parse_failed` — an unparseable link is indistinguishable from
+ * a matching one and must abort the restore, not silently drop a worker.
+ * `metaPath` is computed by the caller from the fence-tmp path SSOT; this
+ * module stays path-agnostic like the rest of the worker-transcript seam.
+ */
+export async function readWorkerSpawnToolUseId(
+  metaPath: string,
+  taskId: string
+): Promise<string | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(metaPath, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return undefined;
+    throw {
+      kind: "io_error",
+      conversation_id: taskId,
+      cause: fsErrMsg(err),
+    } satisfies SessionStoreError;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw {
+      kind: "parse_failed",
+      conversation_id: taskId,
+      reason: "worker_meta_json",
+    } satisfies SessionStoreError;
+  }
+  const toolUseId = (parsed as { toolUseId?: unknown }).toolUseId;
+  return typeof toolUseId === "string" && toolUseId.length > 0
+    ? toolUseId
+    : undefined;
+}
+
+/**
  * Append-as-you-run: chain a batch of messages already in the authoritative
  * history onto the on-disk head plus one new head record (same numbering /
  * chaining / createdAt stamping discipline as SessionStore.appendEvents).
@@ -94,11 +174,18 @@ export async function loadWorkerTranscript(
  *
  * Empty batch = no-op. `thinkingMs` shares appendEvents' boundary: the key
  * is attached only for assistant events with a finite >0 value.
+ * `preimages` shares `SessionStore.appendEvents`' stamping contract (via the
+ * same `matchCodePreimage`): a successful tool_result whose tool_use_id was
+ * captured gets `codePreimage` on its event record — the worker transcript's
+ * restore surface (ADR-0119 T3).
  */
 export async function appendWorkerTranscript(opts: {
   readonly location: WorkerTranscriptLocation;
   readonly events: ReadonlyArray<AnthropicNativeMessage>;
   readonly thinkingMs?: number;
+  /** tool_use_id → captured preimage, for stamping successful tool_result
+   *  events; absent/empty → no stamping. */
+  readonly preimages?: ReadonlyMap<string, PreimageRef>;
   /** Working root written into the header when creating the ledger
    *  (worker = envelope.sandboxRoot). */
   readonly cwd?: string;
@@ -154,6 +241,7 @@ export async function appendWorkerTranscript(opts: {
     const lines: string[] = [];
     for (const message of events) {
       const eventId = messageEventId(next++);
+      const codePreimage = matchCodePreimage(message, opts.preimages);
       const record: SessionEventRecord = {
         type: "message",
         id: eventId,
@@ -163,6 +251,7 @@ export async function appendWorkerTranscript(opts: {
         ...(message.role === "assistant" && stampableThinkingMs !== undefined
           ? { thinkingMs: stampableThinkingMs }
           : {}),
+        ...(codePreimage !== undefined ? { codePreimage } : {}),
       };
       lines.push(JSON.stringify(record));
       parent = eventId;

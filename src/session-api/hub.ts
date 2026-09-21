@@ -95,7 +95,12 @@ import type {
 } from "../harness/sandbox/fs-mode.js";
 import type { YoloContext } from "../harness/sandbox/yolo.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
-import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
+import {
+  listSubagentRecordPaths,
+  resolveSessionFenceTmp,
+  workerMetaPath,
+  workerTranscriptPath,
+} from "../harness/sandbox/fence-tmp.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -126,7 +131,7 @@ import {
   withApiError,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import {
@@ -169,7 +174,11 @@ import {
   applyCodeRestore,
   buildCodeRestorePlan,
   type CodeRestoreReport,
+  loadWorkerPreimageEvents,
+  readWorkerSpawnToolUseId,
   resolveConversationDir,
+  resolveSubagentTraceDir,
+  type SessionEventRecord,
 } from "./store/index.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
@@ -2892,7 +2901,13 @@ export class SessionHub {
   /** Restore the workspace files a rewind to `head` would abandon (ADR-0119).
    *  Called before the head moves: an unreadable preimage blob throws here, so
    *  the transcript never advances past history whose code we could not put
-   *  back. Drift and root-identity mismatches are reported skips. */
+   *  back. Drift and root-identity mismatches are reported skips.
+   *
+   *  The abandoned set spans two ledgers (ADR-0119 T3): the parent's own
+   *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
+   *  in the abandoned segment — a worker edit is the parent's abandoned
+   *  history too. Both write their blobs into this parent session folder, so
+   *  one plan and one `applyCodeRestore` cover them. */
   private async restoreAbandonedCode(
     conversationId: string,
     head: string | null
@@ -2901,7 +2916,11 @@ export class SessionHub {
       conversationId,
       head
     );
-    const ops = buildCodeRestorePlan(abandoned);
+    const workerEvents = await this.abandonedWorkerPreimages(
+      conversationId,
+      head
+    );
+    const ops = buildCodeRestorePlan([...abandoned, ...workerEvents]);
     const { workspaceRoot } = await this.store.load(conversationId);
     return applyCodeRestore({
       sessionFolder: resolveConversationDir({
@@ -2912,6 +2931,60 @@ export class SessionHub {
       rootIdentity: this.rootIdentityFor(workspaceRoot),
       ops,
     });
+  }
+
+  /** Preimage-bearing events of workers spawned from the segment a rewind to
+   *  `head` would abandon. Join key: `spawn_subagent` tool_use ids in the
+   *  segment ↔ `subagents/<taskId>/agent-<taskId>.meta.json`'s `toolUseId`.
+   *  Absent meta/transcript → skipped (legacy worker or one that exited
+   *  before its first commit — no link or no stamped history exists). A
+   *  corrupt meta or transcript propagates typed: an unreadable link is
+   *  indistinguishable from a matching one, so the whole restore aborts
+   *  before the head moves, same posture as an unreadable blob. */
+  private async abandonedWorkerPreimages(
+    conversationId: string,
+    head: string | null
+  ): Promise<ReadonlyArray<SessionEventRecord>> {
+    const segment = await this.store.abandonedEvents(conversationId, head);
+    const spawnIds = new Set<string>();
+    for (const event of segment) {
+      const content = event.message.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        const b = block as { type?: unknown; name?: unknown; id?: unknown };
+        if (
+          b.type === "tool_use" &&
+          b.name === "spawn_subagent" &&
+          typeof b.id === "string"
+        ) {
+          spawnIds.add(b.id);
+        }
+      }
+    }
+    if (spawnIds.size === 0) return [];
+    const subagentsDir = resolveSubagentTraceDir({
+      projectDir: this.store.getProjectDir(),
+      conversationId,
+    });
+    const out: SessionEventRecord[] = [];
+    for (const recordPath of listSubagentRecordPaths(subagentsDir)) {
+      // Glob guarantees `agent-<taskId>.jsonl`; the nested layout (ADR-0102)
+      // names the directory the same, so the record's basename identifies the
+      // task in both layouts.
+      const taskId = basename(recordPath, ".jsonl").replace(/^agent-/, "");
+      const toolUseId = await readWorkerSpawnToolUseId(
+        workerMetaPath(subagentsDir, taskId),
+        taskId
+      );
+      if (toolUseId === undefined || !spawnIds.has(toolUseId)) continue;
+      out.push(
+        ...(await loadWorkerPreimageEvents({
+          transcriptPath: workerTranscriptPath(subagentsDir, taskId),
+          taskId,
+        }))
+      );
+    }
+    return out;
   }
 
   /** The live project-identity root a captured preimage `rootIdentity` is

@@ -121,12 +121,31 @@ export interface SessionEventRecord {
   readonly codePreimage?: PreimageRef;
 }
 
+/** Find the captured preimage ref for an event, if it is a successful
+ *  (non-`is_error`) tool_result whose `tool_use_id` was captured. A batch may
+ *  carry several tool_result blocks (parallel tools); the first captured,
+ *  non-error one wins — under the per-tool commit each event holds exactly
+ *  one, so the choice is deterministic. Shared by the parent append
+ *  (`SessionStore.appendEvents`) and the worker append
+ *  (`appendWorkerTranscript`): one stamping rule for both transcripts. */
+export function matchCodePreimage(
+  message: AnthropicNativeMessage,
+  preimages: ReadonlyMap<string, PreimageRef> | undefined
+): PreimageRef | undefined {
+  if (preimages === undefined || preimages.size === 0) return undefined;
+  for (const block of message.content) {
+    if (block.type !== "tool_result" || block.is_error === true) continue;
+    const ref = preimages.get(block.tool_use_id);
+    if (ref !== undefined) return ref;
+  }
+  return undefined;
+}
+
 /** The persisted rewind head pointer; id null means an empty transcript. */
 export interface SessionHeadRecord {
   readonly type: "head";
   readonly id: string | null;
 }
-
 /** ADR-0113: title event — the authoritative form of the title. Not part of
  *  the message chain, never projected into messages or model prior; the
  *  header `title` is demoted to its cache (latest event text; an

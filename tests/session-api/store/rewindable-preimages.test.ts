@@ -166,3 +166,60 @@ describe("SessionStore.rewindablePreimages", () => {
     assert.equal(await store.readHead(id), "e1");
   });
 });
+
+// ADR-0119 T3: the hub's worker-spawn scan needs the FULL abandoned segment
+// (spawn tool_use ids live on events without any preimage), so
+// rewindablePreimages is now the codePreimage filter of abandonedEvents.
+describe("SessionStore.abandonedEvents", () => {
+  it("returns every abandoned event, stamped or not, in current-chain order", async () => {
+    const id = "ae-mixed";
+    await seed(
+      id,
+      [
+        event("e0", null, false),
+        event("e1", "e0", true),
+        event("e2", "e1", false),
+        event("e3", "e2", true),
+      ],
+      "e3"
+    );
+    const out = await store.abandonedEvents(id, "e1");
+    assert.deepEqual(
+      out.map((e) => e.id),
+      ["e2", "e3"]
+    );
+  });
+
+  it("newHead=null abandons the whole chain", async () => {
+    const id = "ae-null";
+    await seed(id, [event("e0", null, false), event("e1", "e0", false)], "e1");
+    assert.deepEqual(
+      (await store.abandonedEvents(id, null)).map((e) => e.id),
+      ["e0", "e1"]
+    );
+  });
+
+  it("rewindablePreimages is exactly the codePreimage filter of abandonedEvents", async () => {
+    const id = "ae-filter";
+    await seed(
+      id,
+      [
+        event("e0", null, false),
+        event("e1", "e0", true),
+        event("e2", "e1", false),
+        event("e3", "e2", true),
+      ],
+      "e3"
+    );
+    const all = await store.abandonedEvents(id, "e0");
+    const stamped = await store.rewindablePreimages(id, "e0");
+    assert.deepEqual(
+      stamped.map((e) => e.id),
+      all.filter((e) => e.codePreimage !== undefined).map((e) => e.id)
+    );
+    assert.deepEqual(
+      stamped.map((e) => e.id),
+      ["e1", "e3"]
+    );
+  });
+});

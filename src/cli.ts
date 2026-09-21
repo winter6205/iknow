@@ -21,7 +21,10 @@ import {
   WORKER_EXIT_ENVELOPE_PROTOCOL,
   WORKER_EXIT_RUN_PHASE,
 } from "./harness/subagent/worker.js";
-import { storeWorkerTranscriptIo } from "./cli/worker-transcript.js";
+import {
+  storeWorkerPreimageCapture,
+  storeWorkerTranscriptIo,
+} from "./cli/worker-transcript.js";
 import { shutdownDefaultLspPool } from "./harness/lsp/client.js";
 import {
   buildHarnessEngine,
@@ -674,7 +677,14 @@ async function runSubagentWorkerCommand(): Promise<void> {
   try {
     // ADR-0102: worker transcript IO is injected here (the codec belongs to
     // session-api; the harness only sees the narrow interface).
-    await runSubagentWorker(storeWorkerTranscriptIo);
+    // ADR-0119 (T3): the worker preimage-capture factory likewise lands here
+    // (Gate B — the session blob store is session-api, invisible to the
+    // harness); the write-tool port it builds is threaded into the worker's
+    // registry by runSubagentWorker.
+    await runSubagentWorker(
+      storeWorkerTranscriptIo,
+      storeWorkerPreimageCapture
+    );
   } catch (err) {
     if (err instanceof ProtocolError) {
       const msg = err.stack ?? err.message;

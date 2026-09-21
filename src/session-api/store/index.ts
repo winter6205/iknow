@@ -67,7 +67,9 @@ export {
 export {
   appendWorkerTranscript,
   isWorkerTranscriptPathSafe,
+  loadWorkerPreimageEvents,
   loadWorkerTranscript,
+  readWorkerSpawnToolUseId,
   type WorkerTranscriptLocation,
 } from "./worker-transcript.js";
 export {
