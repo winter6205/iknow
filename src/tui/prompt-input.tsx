@@ -156,6 +156,16 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
     const pal = tuiPalette;
     const suggestions = props.hintSuggestions ?? [];
     const hasHint = suggestions.length > 0;
+    // Descriptions align to one column: every `/<label>` is padded to the
+    // longest candidate's visual width (skill names may carry wide chars,
+    // hence visualWidth rather than length).
+    const hintLabelWidth = hasHint
+      ? Math.max(
+          ...suggestions.map((c) =>
+            visualWidth(`/${c.kind === "command" ? c.command : c.name}`)
+          )
+        )
+      : 0;
     const history = props.history ?? [];
 
     const [hintCursor, setHintCursor] = useState(0);
@@ -556,11 +566,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
                   : (candidate.description ?? "加载技能");
               // Clip descriptions to visual column width (trailing …) so long
               // skill descriptions never push lines off-screen. Budget = cols −
-              // the `/${label}  ` prefix − 3 columns of slack.
-              const budget = Math.max(
-                4,
-                props.cols - visualWidth(`/${label}  `) - 3
-              );
+              // the padded `/label  ` prefix (labelWidth + 2) − 3 slack.
+              const labelCell = `/${label}`;
+              const prefix = `${labelCell}${" ".repeat(
+                hintLabelWidth - visualWidth(labelCell)
+              )}  `;
+              const budget = Math.max(4, props.cols - hintLabelWidth - 2 - 3);
               const descShown = clipOneLineVisual(desc, budget);
               return (
                 <text
@@ -568,7 +579,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
                   fg={selected ? pal.selected : pal.dim}
                   attributes={selected ? 1 : 0}
                 >
-                  {`/${label}  ${descShown}`}
+                  {`${prefix}${descShown}`}
                 </text>
               );
             })}
