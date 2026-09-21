@@ -1,19 +1,23 @@
 /**
- * 安装自带搜引擎（D6）—— 按平台下载钉死版本 + 校验和，解到安装根。
+ * Install the bundled search engine: download the pinned version and verify
+ * its checksum per platform, then unpack into the install root.
  *
- * 用法：
- *   npx tsx scripts/install-search-engine.ts            # 当前平台
+ * Usage:
+ *   npx tsx scripts/install-search-engine.ts            # current platform
  *   npx tsx scripts/install-search-engine.ts --platform linux-x64
- *   npx tsx scripts/install-search-engine.ts --force    # 已存在也重装
+ *   npx tsx scripts/install-search-engine.ts --force    # reinstall even if present
  *
- * 契约（D6）：
- *   - 版本 / URL / 校验和 / 归档内路径全部来自 `engine-manifest.ts`（单一真值），
- *     本脚本不另存一份映射。
- *   - 下载产物落到 `<installRoot>/vendor/ripgrep/...`，该目录已 gitignore，
- *     **不得 commit**。
- *   - 校验和不符 → 删掉临时文件并 fail（不落一个来路不明的二进制）。
- *   - 平台无登记资产 → 明确说「该平台走 Node 引擎」，退出码 0（这不是错误，
- *     是 D6 允许的降级）。
+ * Contract:
+ *   - Version / URL / checksum / in-archive path all come from
+ *     `engine-manifest.ts` (single source of truth); this script keeps no
+ *     second mapping.
+ *   - Artifacts land under `<installRoot>/vendor/ripgrep/...`, which is
+ *     gitignored — must never be committed.
+ *   - Checksum mismatch → delete the temp file and fail (never leave an
+ *     unverified binary behind).
+ *   - No registered asset for a platform → state clearly that the platform
+ *     falls back to the Node engine and exit 0 (not an error; a sanctioned
+ *     degradation).
  */
 
 import { createHash } from "node:crypto";
@@ -77,7 +81,7 @@ function fail(message: string): never {
 }
 
 async function download(url: string): Promise<Buffer> {
-  // 用 Node 自己的 fetch（>=18）——不引第三个依赖，也不依赖 curl 在不在。
+  // Use Node's own fetch (>=18): avoids a third dependency and any assumption that curl exists.
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok) {
     fail(`download failed: ${String(response.status)} ${url}`);

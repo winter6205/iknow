@@ -1,39 +1,48 @@
 #!/usr/bin/env node
 /**
- * 工作区 `.iknow` 存量挪盘 — ADR-0087 / ADR-0088 的一次性操作（plan T3）。
+ * One-off migration of leftover `.iknow` state out of a workspace — ADR-0087 / ADR-0088.
  *
- * 背景：ADR-0019 T2 一度让会话池与后台任务登记落 `<workspaceRoot>/.iknow/`。
- * ADR-0087 把会话池钉回 home（显式 `--data-dir` 除外），ADR-0088 让 tasks 跟
- * 同一棵 home 项目树。工作区里因此残留三类 harness 落盘：
+ * Context: ADR-0019 briefly put the session pool and the background-task
+ * registry under `<workspaceRoot>/.iknow/`. ADR-0087 pinned the session pool
+ * back to home (unless `--data-dir` is explicit) and ADR-0088 moved tasks onto
+ * the same home project tree, so workspaces may still hold three kinds of legacy drops:
  *
- *   - `<ws>/.iknow/projects/<slug>/<convId>/`  误写的工作区会话文件夹
- *   - `<ws>/.iknow/sessions/<proj>/<id>.jsonl` 退役扁 jsonl 旧树
- *   - `<ws>/.iknow/tasks/<task_id>.{json,log}` 误写的后台任务登记
+ *   - `<ws>/.iknow/projects/<slug>/<convId>/`  conversation folders mis-written into the workspace
+ *   - `<ws>/.iknow/sessions/<proj>/<id>.jsonl` retired flat-jsonl tree
+ *   - `<ws>/.iknow/tasks/<task_id>.{json,log}` background-task registry mis-written into the workspace
  *
- * 语义 = **按项并入对应池位置**，冲突 skip 不覆盖：
- *   - `projects/` → `<pool>/projects/<slug>/<convId>/`（ADR-0087 «存量» 明确：
- *     误写的会话文件夹迁到 `~/.iknow/projects/`，同 conversation 叶子冲突保留池侧）。
- *   - `sessions/` → `<pool>/sessions/` 退役旧池（ADR-0087：产品零写入、**不**自动
- *     迁成会话文件夹 —— 扁 jsonl 保形并入同形旧树，不转 `projects/` 叶子）。
- *   - `tasks/` → `<pool>/projects/<identity-slug>/tasks/`（ADR-0088：登记者挪进
- *     home 项目树，目标已存在 skip）。
+ * Semantics = merge item-by-item into the matching pool location; conflicts are
+ * skipped, never overwritten:
+ *   - `projects/` → `<pool>/projects/<slug>/<convId>/` (ADR-0087: mis-written
+ *     conversation folders go to `~/.iknow/projects/`; on a same-conversation
+ *     leaf conflict the pool side is kept).
+ *   - `sessions/` → `<pool>/sessions/` retired pool (ADR-0087: the product
+ *     never writes here; flat jsonl merges shape-preserved into the same-shaped
+ *     old tree, deliberately NOT converted into `projects/` leaves).
+ *   - `tasks/` → `<pool>/projects/<identity-slug>/tasks/` (ADR-0088: registries
+ *     move into the home project tree; existing targets are skipped).
  *
- * 行为契约：
- *   - 只并入，不转换：`sessions/` 的扁 jsonl 永远不变成会话文件夹（ADR-0071 L3）。
- *   - 不覆盖：目标已存在的**项**（会话叶子 / jsonl / task 文件）SKIP 并计数。
- *   - 幂等：源不存在 / 已空 → 0 条；移空后的源目录（含中间的 slug / 类别目录）
- *     按空即删，非空保留 —— 「残留要么空/删除，要么仅冲突 SKIP 叶子」。
- *   - 默认 report-only；`--apply` 才动盘（对齐 scripts/task-worktree-gc.ts）。
- *   - 不是 grep 排除的替代：本脚本动的是落点，搜面修法见 #1000。
+ * Behaviour contract:
+ *   - merge only, never convert: flat jsonl under `sessions/` never becomes a
+ *     conversation folder (ADR-0071 L3).
+ *   - never overwrite: an existing target **item** (conversation leaf / jsonl /
+ *     task file) is SKIPped and counted.
+ *   - idempotent: missing or empty source → 0 items; source dirs emptied by the
+ *     move (including intermediate slug / category dirs) are deleted when empty,
+ *     kept when not — residue is either gone or only conflict-SKIPped leaves.
+ *   - report-only by default; disk is touched only with `--apply` (same posture
+ *     as scripts/task-worktree-gc.ts).
+ *   - not a substitute for grep exclusions: this script only moves storage locations.
  *
- * 用法：
+ * Usage:
  *   npx tsx scripts/workspace-iknow-migrate.ts [--workspace <dir>] [--pool <dir>]
  *                                              [--identity-root <dir>] [--apply]
  *
- * 缺省 `--workspace` = 仓库根（import.meta.url 上溯）；`--pool` = `~/.iknow`
- * （ADR-0087 公式；显式 `--data-dir` 用户自行传 `--pool`）；`--identity-root`
- * = `deriveProjectIdentityRoot({ cwd: workspaceRoot })`（task 落点 slug 用，
- * 与产品代码同一公式 —— 不新发明第二套 slug）。
+ * Defaults: `--workspace` = repo root (walked up from import.meta.url);
+ * `--pool` = `~/.iknow` (ADR-0087 formula; users with an explicit `--data-dir`
+ * pass their own `--pool`); `--identity-root` =
+ * `deriveProjectIdentityRoot({ cwd: workspaceRoot })` for the task destination
+ * slug — same formula as product code, never a second slug scheme.
  */
 import {
   cpSync,
@@ -51,42 +60,45 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveProjectSessionDir } from "../src/session-api/store/index.ts";
 import { deriveProjectIdentityRoot } from "../src/harness/session-roots.ts";
 
-/** 一条按项挪动：一个源路径 → 池侧目标路径。 */
+/** One item-level move: a source path → its pool-side target path. */
 export interface WorkspaceIknowMove {
-  /** 类别（报告分组用）。 */
+  /** Category (for report grouping). */
   readonly category: "projects" | "sessions" | "tasks";
-  /** 源绝对路径。 */
+  /** Absolute source path. */
   readonly source: string;
-  /** 池侧目标绝对路径。 */
+  /** Absolute pool-side target path. */
   readonly target: string;
   /**
-   * review-fix:若该 entry 被归为 conflict 的原因(target 已存在 / 源是
-   * symlink / 路径敌意 / 之类),由 plan 写入;非 conflict 留 undefined。
-   * apply 阶段不再重算(avoid second walk)—— 仅展示用。
+   * Why this entry was classified as a conflict (target already exists / source
+   * is a symlink / hostile path name / …), decided by the plan; undefined for
+   * non-conflicts. The apply phase never recomputes it (avoids a second walk) —
+   * display only.
    */
   readonly reason?: string;
 }
 
-/** 计划：可挪项 + 因目标已存在而跳过的项。 */
+/** Plan: movable items plus items skipped (target exists / never-processable source kinds). */
 export interface WorkspaceIknowPlan {
-  /** 可执行的按项挪动。 */
+  /** Executable item-level moves. */
   readonly moves: ReadonlyArray<WorkspaceIknowMove>;
-  /** 目标已存在、源是 symlink / 路径敌意等绝不处理的项（源路径）。 */
+  /** Items never processed: target already exists, symlink source, hostile path name (source paths). */
   readonly conflicts: ReadonlyArray<WorkspaceIknowMove>;
 }
 
-/** 执行结果。 */
+/** Execution result. */
 export interface WorkspaceIknowReport {
   readonly moved: ReadonlyArray<WorkspaceIknowMove>;
   readonly conflicts: ReadonlyArray<WorkspaceIknowMove>;
-  /** 移空后删掉的目录（含中间 slug / 类别目录）。 */
+  /** Dirs deleted after being emptied (incl. intermediate slug / category dirs). */
   readonly removedDirs: ReadonlyArray<string>;
   /**
-   * review-fix:本趟挪不动的项 —— 非 EXDEV 类失败 / 路径敌意 / 符号链接等。
-   * 不抛错，继续跑剩余 moves；调用方按 `failed.length > 0` 设 exitCode=1。
-   * 之前在非 EXDEV 上 `throw`,前序 move 已落盘但剩余 moves 不再执行,
-   * 重入时计划自然重算(已挪走的项消失)—— 与本字段语义收敛为「尽可能
-   * 完成 + 报告失败」。
+   * Items this pass could not move — non-EXDEV failures, hostile paths,
+   * symlinks, etc. Errors are accumulated, not thrown, so remaining moves
+   * still run; callers set exitCode=1 on `failed.length > 0`. Previously a
+   * non-EXDEV error threw mid-loop: earlier moves had landed but later ones
+   * were skipped, and a re-run just recomputed the plan (moved items vanish);
+   * this field converges the semantics to "finish as much as possible +
+   * report failures".
    */
   readonly failed: ReadonlyArray<{
     readonly category: "projects" | "sessions" | "tasks";
@@ -96,13 +108,14 @@ export interface WorkspaceIknowReport {
 }
 
 /**
- * 路径敌意判定 —— 包含 `/` / `\` / NUL 之一,或等于 `.` / `..` 的名字
- * 视为 unsafe:即便绕过 readdir 也不得参与 join(否则可逃出目标目录或
- * 撞上 NUL 系统调用 reject)。命中时由 plan/apply 各自归类为 conflict。
+ * Hostile-name guard — a name containing `/`, `\` or NUL, or equal to `.` /
+ * `..`, is unsafe: even if readdir bypasses it, it must never participate in a
+ * join (it could escape the target dir or hit a NUL syscall rejection).
+ * plan/apply classify hits as conflicts.
  *
- * readdirSync 的返回是单段 basename(无分隔符),但磁盘上真实路径可能
- * 含这些字符(罕见但合法),需在 join 之前过滤 —— 这是 fail-closed 守卫,
- * 不是 UX 优化。
+ * readdirSync returns single-segment basenames, but real on-disk names may
+ * contain these characters (rare but legal), so filtering must happen before
+ * the join — a fail-closed guard, not a UX nicety.
  */
 export function isHostileName(name: string): boolean {
   if (name === "." || name === "..") return true;
@@ -121,16 +134,19 @@ function listEntries(dir: string): string[] {
 }
 
 /**
- * 列举一层目录,把路径敌意名 / symlink 剥离出来单独归类:
+ * List one directory level, splitting hostile names and symlinks out:
  *
- *   - `safe`:可继续参与 join 的普通条目(常规文件 / 目录,名字单段无分隔符);
- *   - `rejected`:含 `/` / `\` / NUL 或等于 `.` / `..` 的名字 —— 绝不 join
- *     进目标路径(否则可逃出目标根或触发 NUL 系统调用 reject);
- *   - `symlinks`:lstat 显示为符号链接的条目 —— 绝不 rename/cp 穿过
- *     (renameSync 会跟随链目标,cpSync 的 verbatimSymlinks 又会保留原链,
- *     两套语义在同一字段里互斥,直接拒收最安全)。
+ *   - `safe`: ordinary entries eligible for join (regular files / dirs with a
+ *     single-segment, separator-free name);
+ *   - `rejected`: names containing `/` / `\` / NUL or equal to `.` / `..` —
+ *     never joined into a target path (escape or syscall-rejection risk);
+ *   - `symlinks`: entries whose lstat says symbolic link — never moved through
+ *     (renameSync would follow the link target, while cpSync's verbatimSymlinks
+ *     would preserve the link; two mutually exclusive semantics on one field,
+ *     so refusing outright is safest).
  *
- * 返回结构而非裸数组:调用方要按 (a,b) 的层级位置分别归类,不能丢层级信息。
+ * Returns a struct, not a bare array: callers classify by (a, b) level, so the
+ * level information cannot be lost.
  */
 function scanLevel(dir: string): {
   readonly safe: string[];
@@ -159,10 +175,10 @@ function scanLevel(dir: string): {
 }
 
 /**
- * 深度 2 列举 `<base>/<a>/<b>`（b 为文件或目录），a/b 均须存在。
- * review-fix:每层 scanLevel 后把 rejected / symlinks 一并以带 reason 的
- * conflict 形态返回,让 plan 阶段就能把它们计入 `conflicts`(exit-code 也
- * 非零),而不是静默 skip。
+ * Depth-2 enumeration of `<base>/<a>/<b>` (b is file or dir); both levels must exist.
+ * Each level's scanLevel output folds rejected / symlinks back in as reasoned
+ * conflicts, so the plan phase counts them (nonzero exit code) instead of
+ * skipping them silently.
  */
 function listTwoLevel(base: string): {
   readonly items: Array<{ readonly a: string; readonly b: string }>;
@@ -189,8 +205,8 @@ function listTwoLevel(base: string): {
 }
 
 /**
- * 深度 1 列举 `<base>/<a>`（a 为文件或目录），同 listTwoLevel 的
- * conflict 归类语义。
+ * Depth-1 enumeration of `<base>/<a>` (a is file or dir), same conflict
+ * classification as listTwoLevel.
  */
 function listOneLevel(base: string): {
   readonly items: readonly string[];
@@ -210,14 +226,16 @@ function listOneLevel(base: string): {
 }
 
 /**
- * 只读计划：算出三类遗留目录下每个可并入项、以及目标已存在的冲突项。
+ * Read-only plan: every mergeable item under the three legacy dirs, plus
+ * conflicts whose target already exists.
  *
- * 纯查询（不建目录、不移动）。排序稳定（字典序），便于报告与测试。
+ * Pure query (creates no dirs, moves nothing). Stable lexicographic order so
+ * reports and tests are reproducible.
  *
- * review-fix:把 scanLevel 列出的 rejected / symlinks 折叠进 `conflicts`
- * —— 它们不是「目标已存在」类冲突,而是「源类型/名字不允许 migrate」
- * 类冲突,但语义同(都不覆盖、不继续),CLI 一并按 conflict 报告并把
- * exit code 顶到 1。
+ * scanLevel rejections fold into `conflicts` too — they are "source type / name
+ * not migratable" rather than "target exists", but share the same semantics
+ * (never overwrite, never continue); the CLI reports all of them as conflicts
+ * and forces exit code 1.
  */
 export function planWorkspaceIknowMigrate(opts: {
   readonly workspaceRoot: string;
@@ -236,7 +254,7 @@ export function planWorkspaceIknowMigrate(opts: {
   const candidates: WorkspaceIknowMove[] = [];
   const rejected: WorkspaceIknowMove[] = [];
 
-  // projects/<slug>/<convId> → <pool>/projects/<slug>/<convId>（逐会话叶子）
+  // projects/<slug>/<convId> → <pool>/projects/<slug>/<convId> (per conversation leaf)
   {
     const { items, rejected: bad } = listTwoLevel(join(legacyRoot, "projects"));
     for (const r of bad) {
@@ -255,7 +273,7 @@ export function planWorkspaceIknowMigrate(opts: {
       });
     }
   }
-  // sessions/<proj>/<item> → <pool>/sessions/<proj>/<item>（保形，不转会话文件夹）
+  // sessions/<proj>/<item> → <pool>/sessions/<proj>/<item> (shape preserved; never converted to conversation folders)
   {
     const { items, rejected: bad } = listTwoLevel(join(legacyRoot, "sessions"));
     for (const r of bad) {
@@ -304,8 +322,8 @@ export function planWorkspaceIknowMigrate(opts: {
       conflicts.push({ ...c, reason: "目标已存在（不覆盖）" });
     } else moves.push(c);
   }
-  // source-only 类冲突(symlink / 路径敌意)没有可比较的 target —— 显式带
-  // reason 归 conflict,不进入 moves 也绝不 join 进目标路径。
+  // Source-only conflicts (symlink / hostile name) have no comparable target —
+  // they carry an explicit reason, never enter moves, and are never joined into a target path.
   conflicts.push(...rejected);
   conflicts.sort((x, y) =>
     x.source < y.source ? -1 : x.source > y.source ? 1 : 0
@@ -314,14 +332,15 @@ export function planWorkspaceIknowMigrate(opts: {
 }
 
 /**
- * 执行计划：同盘 `rename` 优先（原子、零拷贝），跨盘（EXDEV）回落 `cp -R` +
- * 删源。移走的项若把源目录（及其中间 slug / 类别目录）掏空，按空即删。
+ * Execute the plan: same-device `rename` first (atomic, zero-copy); on EXDEV
+ * fall back to recursive copy + source delete. Source dirs (and their
+ * intermediate slug / category dirs) emptied by the moves are deleted when empty.
  *
- * review-fix (Medium-2 / 失败语义)：**任一条失败不再抛错** —— 之前
- * 非 EXDEV 错误直接 throw,前序已完成 move 落盘但剩余 moves 跳过,重入
- * 计划重算会自然吸收已挪走的项,但一次性 dry-run 看不完整。当前改成
- * 单条失败累积进 `failed`,继续剩余 moves;CLI 入口按 `failed.length > 0`
- * 设 exitCode=1。报告阶段一并打印 failed 列表。
+ * Failure semantics: **no single failure throws** — previously a non-EXDEV
+ * error aborted the loop, so completed moves had landed but the remaining ones
+ * were skipped and one dry-run report looked incomplete. Now a failure
+ * accumulates into `failed`, remaining moves continue, and the CLI entry sets
+ * exitCode=1 on `failed.length > 0`. The report prints the failed list too.
  */
 export function applyWorkspaceIknowMigrate(
   plan: WorkspaceIknowPlan,
@@ -364,7 +383,7 @@ export function applyWorkspaceIknowMigrate(
   };
 }
 
-/** 从已移走的项向上收空目录：类别/<slug> 与类别目录本身，空即删。 */
+/** Walk up from moved items and delete emptied dirs: category/<slug> and the category dir itself. */
 function pruneEmptyLegacyDirs(
   wsRoot: string,
   moved: ReadonlyArray<WorkspaceIknowMove>
@@ -374,7 +393,7 @@ function pruneEmptyLegacyDirs(
   for (const m of moved) {
     let dir = join(m.source, "..");
     const stop = join(wsRoot, ".iknow");
-    // 只收类别层及其下一层（sessions/<proj>、projects/<slug>、tasks 自身）
+    // collect only the category level and one below (sessions/<proj>, projects/<slug>, tasks itself)
     while (dir.startsWith(stop) && dir !== stop) {
       candidates.add(dir);
       const parent = join(dir, "..");
@@ -382,7 +401,7 @@ function pruneEmptyLegacyDirs(
       dir = parent;
     }
   }
-  // 深的先删，父目录随后才可能变空
+  // delete deepest first so parents can become empty afterwards
   const ordered = [...candidates].sort((x, y) => y.length - x.length);
   for (const dir of ordered) {
     try {
@@ -391,9 +410,10 @@ function pruneEmptyLegacyDirs(
         removed.push(dir);
       }
     } catch (err) {
-      // review-fix (Medium-2): 显式 ENOENT-tolerant —— 目录已不存在 =
-      // 已达成「空/删除」契约;其它 readdir 错误属「读失败」,**不静默吞**,
-      // 留给调用方/操作员在日志中看见(避免掩盖 fs 故障)。
+      // Explicitly ENOENT-tolerant: dir already gone = the "empty / deleted"
+      // contract is met. Any other readdir error is a real read failure and is
+      // rethrown, never swallowed silently, so callers / operators see fs faults
+      // in the logs (avoids masking broken filesystems).
       if (!isEnoent(err)) {
         throw err;
       }
@@ -499,9 +519,9 @@ function main(): void {
       console.log(`  收空目录 ${report.removedDirs.length} 个：`);
       for (const d of report.removedDirs) console.log(`    - ${d}`);
     }
-    // review-fix (Medium-2):非 EXDEV 失败不再抛错,单条失败累积在此 ——
-    // 逐条列出,exit code 顶到 1。之前在第一处失败即 throw,操作员看不到
-    // 已完成 / 未完成的分布。
+    // Non-EXDEV failures no longer throw; they accumulate per item here and
+    // are listed one by one with exit code forced to 1. Previously the first
+    // failure aborted the run, so operators could not see the completed / pending split.
     failedCount = report.failed.length;
     if (report.failed.length > 0) {
       console.log(`  失败 ${report.failed.length} 项（继续跑完剩余项）：`);
@@ -512,13 +532,13 @@ function main(): void {
   } else {
     printPlan(plan, false);
   }
-  // 非零退出条件:有冲突(含路径敌意 / symlink)或 apply 阶段有失败。
+  // Nonzero exit: any conflict (incl. hostile name / symlink) or any apply-stage failure.
   process.exitCode = plan.conflicts.length > 0 || failedCount > 0 ? 1 : 0;
 }
 
 /**
- * 直接执行（`npx tsx scripts/workspace-iknow-migrate.ts`）时运行 CLI；
- * 被测试 import 作模块时不触发。
+ * Run the CLI only when invoked directly
+ * (`npx tsx scripts/workspace-iknow-migrate.ts`); importing as a test module never triggers it.
  */
 const isDirectRun =
   process.argv[1] !== undefined &&

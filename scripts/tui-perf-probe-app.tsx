@@ -2,19 +2,23 @@
 /**
  * scripts/tui-perf-probe-app.tsx
  *
- * 产品路径（TuiApp 整机）按键延迟探针（诊断用，非产品路径）。
+ * Keystroke-latency probe on the product path (full TuiApp). Diagnostic
+ * only — not shipped behavior.
  *
- * 复现「聊几轮之后，连打字都卡」：注入 N 轮历史的 initialSession 挂 TuiApp，
- * 然后逐个按键（只改输入框 inputValue，与会话历史完全无关），统计每次按键
- * 触发的 `marked.lexer` 重解析量 —— 证明这条 O(历史) 重渲染在产品整机路径
- * 上同样成立，不只是 ChatView 单测装配的产物。
+ * Reproduces "typing gets laggy after a few chat turns": mount TuiApp with
+ * an initialSession carrying N turns of history, then press keys one at a
+ * time (touching only the input box's inputValue, fully independent of
+ * session history) and count the `marked.lexer` re-parses each keystroke
+ * triggers — proving the O(history) re-render also holds on the full
+ * product path, not just in ChatView unit-test assemblies.
  *
- * `cpu ms/keystroke` 已扣掉同节奏空转基线，但仍混入 stdin 解析 / 帧循环噪声，
- * 只做量级参考；干净的时序曲线看 `scripts/tui-perf-probe.tsx`。
+ * `cpu ms/keystroke` subtracts an idle baseline of the same cadence but
+ * still mixes in stdin-parsing / frame-loop noise: order-of-magnitude
+ * reference only. For a clean timing curve use `scripts/tui-perf-probe.tsx`.
  *
- * 开关：`PROBE_TURNS`（历史轮数列表）、`PROBE_KEYS`（每档按键次数）。
+ * Knobs: `PROBE_TURNS` (history turn counts), `PROBE_KEYS` (keys per case).
  *
- * 运行：$HOME/.bun/bin/bun run scripts/tui-perf-probe-app.tsx
+ * Run: $HOME/.bun/bin/bun run scripts/tui-perf-probe-app.tsx
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -147,12 +151,12 @@ async function measure(
   await new Promise((r) => setTimeout(r, 500));
   await setup.waitForVisualIdle();
 
-  // 预热：mockInput 解析器启动。
+  // Warm up: start the mockInput parser.
   setup.mockInput.pressKey("x");
   await new Promise((r) => setTimeout(r, 120));
   await setup.waitForVisualIdle();
 
-  // 空转基线：同样的等待节奏但不按键 → 扣掉帧循环本身的 CPU。
+  // Idle baseline: same waiting cadence but no keystrokes → subtracts the frame loop's own CPU.
   let cpuIdle = 0;
   for (let i = 0; i < keys; i++) {
     const c0 = process.cpuUsage();

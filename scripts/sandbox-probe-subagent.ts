@@ -1,31 +1,38 @@
 /**
- * scripts/sandbox-probe-subagent.ts — #357 T4 子代理沙箱违规探针（3 类）。
- * 与 scripts/sandbox-probe.ts 同形态:独立 tsx 脚本,数组 + ✓/✗ 打印,
- * process.exit(0|1) 收口,不依赖测试框架。
+ * scripts/sandbox-probe-subagent.ts — subagent-sandbox violation probes (3 classes).
+ * Same shape as scripts/sandbox-probe.ts: standalone tsx script, array + ✓/✗
+ * printing, process.exit(0|1) to finish, no test framework.
  *
- * 断言形态（D5）:真实 spawn（node tsx src/cli.ts --subagent-worker）向子代理
- * 派发违规命令,断言 ① 违规被拦截(trace jsonl 含本类违规标记),② worker 终态
- * status==="ok"(completed;违规是工具层失败,不扩 envelope reason 枚举)。
+ * Assertion form: really spawn (node tsx src/cli.ts --subagent-worker),
+ * dispatch a violating command to the subagent, then assert ① the violation was
+ * intercepted (trace jsonl carries this class's violation marker) and ② the
+ * worker's final status==="ok" (completed; a violation is a tool-layer failure
+ * and must not extend the envelope reason enum).
  *
- * 3 类违规(handler 门 + bwrap 物理层):
- *   - fs sensitive:cat ~/.ssh/id_rsa —— commandContainsSensitivePath 硬墙;
- *   - fs write /etc:touch /etc/iknow-probe-357 —— 系统前缀 --ro-bind /etc 只读;
- *   - net:curl -sS https://example.com —— --unshare-net 断网。
+ * The 3 violation classes (handler gate + bwrap physical layer):
+ *   - fs sensitive: cat ~/.ssh/id_rsa — commandContainsSensitivePath hard wall;
+ *   - fs write /etc: touch /etc/iknow-probe-357 — system prefix --ro-bind /etc is read-only;
+ *   - net: curl -sS https://example.com — --unshare-net cuts egress.
  *
- * 三条探针的 task 模板都显式要求「只用 required command 参数,不要设
- * background 选参」:worker 侧 askUser = createNoAskUser(always approve,
- * #162 平权),模型不应引入任何非必需参数,探针命中的才是默认装配姿态。
- * ADR-0097 后断网是常量(`--unshare-net` 恒在,无 per-call opt-in 面),
- * 出网只经 egress 缝;默认隔离姿态本身由 sandbox-probe.ts 的 network
- * denied 直验,本探针只验 worker 在默认选参下的断网。
+ * Every probe's task template explicitly demands "use only the required command
+ * parameter, set no background option": the worker-side askUser is
+ * createNoAskUser (always approve, permission parity with the main loop), so
+ * the model should introduce no non-essential parameter and a hit reflects the
+ * default assembly posture. Since ADR-0097 net-cutting is constant
+ * (`--unshare-net` always present, no per-call opt-in surface) and egress goes
+ * only through the egress seam; the default isolation posture itself is
+ * verified directly by sandbox-probe.ts's network-denied probe — this probe only
+ * checks that the worker cuts net under default options.
  *
- * 退役类(ADR-0092 全局档):tmp over-limit —— 旧断言依赖 `--size 1GiB` +
- * `--tmpfs /tmp` 的 tmpfs 配额;全局档不发这两条 flag(guest `/tmp` = 宿主
- * `/tmp`),配额不再由围栏表达。此类永久消失(不改成伪覆盖),会话 tmp 的
- * host-path 语义由 worker-session-layout / sandbox-probe 覆盖。
+ * Retired class (ADR-0092 global mode): tmp over-limit — the old assertion
+ * relied on the tmpfs quota from `--size 1GiB` + `--tmpfs /tmp`; the global
+ * mode sends neither flag (guest `/tmp` = host `/tmp`), so the quota is no
+ * longer expressed by the fence. That invariant is permanently gone (kept
+ * retired rather than faked as pseudo-coverage); session tmp host-path
+ * semantics are covered by worker-session-layout / sandbox-probe.
  *
- * 环境硬依赖:bwrap 缺失 → skip + exit 1。host-layer guard 断言只碰
- * harness/config;运行:npm run probe:sandbox:subagent。
+ * Hard environment dependency: bwrap missing → skip + exit 1. Host-layer guard
+ * assertions touch harness/config only. Run: npm run probe:sandbox:subagent.
  */
 
 import { readFileSync } from "node:fs";
@@ -42,19 +49,19 @@ const __filename = fileURLToPath(import.meta.url);
 const HERE = dirname(__filename);
 const TSX_BIN = join(HERE, "..", "node_modules", ".bin", "tsx");
 const CLI_ENTRY = join(HERE, "..", "src", "cli.ts");
-/** 单次 spawn → waitFor 的墙钟上限(> worker loop 的 env.llm.timeoutMs=60s,留余量)。 */
+/** Wall-clock cap for one spawn → waitFor (comfortably above the worker loop's env.llm.timeoutMs=60s). */
 const WAIT_FOR_TIMEOUT_MS = 90_000;
-/** 每个 probe 的最大 spawn 次数:上游模型网关瞬时 429/quota 滚动 reset 用重试吸收。 */
+/** Max spawns per probe: transient upstream gateway 429/quota rolling resets are absorbed by retries. */
 const MAX_ATTEMPTS = 3;
-/** retry backoff 基准(2s * attempt)。 */
+/** Retry backoff base (2s * attempt). */
 const BACKOFF_MS = 2_000;
-/** 上游模型网关预检(fetch /chat/completions,key 不落日志)。超时 8s。 */
+/** Upstream model gateway preflight (one minimal request; the key never hits logs). Timeout 8s. */
 const PREFLIGHT_TIMEOUT_MS = 8_000;
 
-/** 探针结果三态:pass(证据齐) / failed(真失败) / not-run(上游模型不可用)。 */
+/** Probe outcome: pass (evidence complete) / failed (real failure) / not-run (upstream model unavailable). */
 type ProbeOutcome = "pass" | "failed" | "not-run";
 
-/** 预检响应状态分类;"ok" 以外都不 spawn worker,但原因要说准。 */
+/** Preflight response classification; anything but "ok" skips the worker spawn, but the reason must be accurate. */
 export type PreflightStatus =
   "ok" | "quota" | "unauthorized" | "not-found" | "unavailable";
 
@@ -67,10 +74,12 @@ export function classifyPreflightStatus(status: number): PreflightStatus {
 }
 
 /**
- * 预检请求形态。必须与 worker 说同一种协议:worker 走
- * `new Anthropic({ baseURL: env.llm.baseUrl })`,SDK 打 `${baseUrl}/v1/messages`
- * 并用 `x-api-key`。预检若改打 OpenAI 形态的 `/chat/completions` + Bearer,
- * 在 Anthropic 形态网关上恒 404 —— 探针永远 not-run 且误报成配额问题。
+ * Preflight request shape. It must speak the worker's protocol: the worker uses
+ * `new Anthropic({ baseURL: env.llm.baseUrl })`, so the SDK hits
+ * `${baseUrl}/v1/messages` with `x-api-key`. An OpenAI-shaped
+ * `/chat/completions` + Bearer preflight would always 404 against an
+ * Anthropic-shaped gateway — the probe would sit permanently not-run and be
+ * misreported as a quota problem.
  */
 export function buildPreflightRequest(env: IknowEnvLike): {
   readonly url: string;
@@ -93,8 +102,9 @@ export function buildPreflightRequest(env: IknowEnvLike): {
 }
 
 /**
- * 上游模型网关预检:与 worker 相同的 URL/key 发一条最小 messages 请求。
- * 仅用于决定"是否值得 spawn worker" —— worker 真跑不走此预检结果。
+ * Upstream gateway preflight: one minimal messages request with the same
+ * URL/key the worker uses. It only decides whether spawning a worker is worth
+ * it — the actual worker run does not consume this result.
  */
 async function preflightUpstream(env: IknowEnvLike): Promise<PreflightStatus> {
   const req = buildPreflightRequest(env);
@@ -111,7 +121,7 @@ async function preflightUpstream(env: IknowEnvLike): Promise<PreflightStatus> {
   }
 }
 
-/** loadIknowEnv 返回类型中最小的字段面(避免引入 config 类型依赖)。 */
+/** Minimal field surface of loadIknowEnv's return type (avoids a config type dependency). */
 interface IknowEnvLike {
   readonly llm: {
     readonly apiKey?: string;
@@ -121,8 +131,8 @@ interface IknowEnvLike {
 }
 
 /**
- * 上游模型网关预检 + 滚动检测:quota 429 有 reset 窗口(实测 2-3min)。
- * 最长 GATEWAY_RETRY_MINS 分钟内 15s 间隔重查,超时返回 "out"。
+ * Preflight + rolling detection: a quota 429 has a reset window (measured
+ * 2-3min). Re-check every 15s for up to maxMinutes; past the deadline return the last state.
  */
 async function waitForUpstream(
   env: IknowEnvLike,
@@ -134,8 +144,9 @@ async function waitForUpstream(
     attempts += 1;
     const state = await preflightUpstream(env);
     if (state === "ok") return "ok";
-    // 配置类失败(端点打错 / key 不认)不会因为等待而好转 —— 立刻返回,
-    // 不烧满重试窗口,也不把它叫成配额问题。
+    // Config-class failures (wrong endpoint / unrecognized key) never improve
+    // by waiting — return immediately without burning the retry window, and
+    // without mislabeling them as a quota problem.
     if (state === "not-found" || state === "unauthorized") {
       console.error(
         `gateway preflight ${state}: ${buildPreflightRequest(env).url} — ` +
@@ -157,8 +168,9 @@ async function waitForUpstream(
 }
 
 /**
- * host-layer guard:只碰 harness / config(T4 探针,与 t4-smoke 同纪律)。
- * 扫描自身源码,禁词命中即 throw;豁免声明禁词的行(const forbidden = / 注释)。
+ * Host-layer guard: touches harness / config only. Scans this file's own
+ * source; any forbidden-keyword hit throws. Lines declaring the forbidden list
+ * itself (`const forbidden =`) and comments are exempt.
  */
 function assertHostLayerGuard(): void {
   const src = readFileSync(__filename, "utf8");
@@ -184,9 +196,9 @@ function assertHostLayerGuard(): void {
   }
 }
 
-/** 真实 spawn 工厂(worker 重入):`node tsx src/cli.ts --subagent-worker`。
- *  env 继承父进程并覆写 IKNOW_TRACE_OUT → 探针 trace 目录(worker 侧
- *  createJsonlTraceService 落点,作为违规证据面)。 */
+/** Real-spawn factory (worker re-entry): `node tsx src/cli.ts --subagent-worker`.
+ *  Inherits the parent env but overrides IKNOW_TRACE_OUT → the probe's trace
+ *  dir (where the worker's createJsonlTraceService writes — the violation evidence surface). */
 function productionLikeSpawn(traceDir: string): ReturnType<typeof spawn> {
   return spawn(process.execPath, [TSX_BIN, CLI_ENTRY, "--subagent-worker"], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -203,9 +215,9 @@ interface ProbeResult {
 interface ProbeDef {
   readonly id: string;
   readonly command: string;
-  /** trace jsonl 全文里该类的违规标记(正则)。 */
+  /** Violation marker for this class in the full trace jsonl (regex). */
   readonly marker: RegExp;
-  /** 缺省 = 继承父 sandboxRoot(SC8 继承语义覆盖)。 */
+  /** Default = inherit the parent sandboxRoot (inheritance semantics). */
   readonly withSandboxRoot?: boolean;
 }
 
@@ -214,7 +226,7 @@ const PROBES: ReadonlyArray<ProbeDef> = [
     id: "fs sensitive (~/.ssh)",
     command: "cat ~/.ssh/id_rsa",
     marker: /hard_wall|sensitive/i,
-    withSandboxRoot: false, // 继承父 sandboxRoot 的探针
+    withSandboxRoot: false, // probe that inherits the parent sandboxRoot
   },
   {
     id: "fs write /etc",
@@ -230,7 +242,7 @@ const PROBES: ReadonlyArray<ProbeDef> = [
   },
 ];
 
-/** 递归搜内容:bash tool_result / llm_call messages content 里的违规标记。 */
+/** Recursive content search: violation markers inside bash tool_result / llm_call message content. */
 function deepSearch(value: unknown): string | null {
   if (typeof value === "string") return value;
   if (!value || typeof value !== "object") return null;
@@ -243,7 +255,7 @@ function deepSearch(value: unknown): string | null {
   return null;
 }
 
-/** 提取第一条命中标记的 trace 行(证据摘要,截断到 160 字符)。 */
+/** First trace line matching the marker (evidence digest, truncated to 160 chars). */
 function firstMatchingLine(traceLines: string[], marker: RegExp): string {
   for (const line of traceLines) {
     if (marker.test(line)) return line.slice(0, 160);
@@ -251,7 +263,7 @@ function firstMatchingLine(traceLines: string[], marker: RegExp): string {
   return "";
 }
 
-/** worker trace 的浓缩诊断视图:bash 是否被尝试 + LLM 调用是否失败。 */
+/** Condensed diagnostics from the worker trace: was bash attempted + did LLM calls fail. */
 interface WorkTraceDiagnostics {
   attemptedBash: boolean;
   rejectedVsBlocked: boolean;
@@ -261,8 +273,8 @@ interface WorkTraceDiagnostics {
 }
 
 /**
- * 从 trace jsonl 行提取诊断:是否有 bash tool_call record / llm_call 失败 /
- * 工具失败形态(rejected ≠ blocked)。
+ * Extract diagnostics from trace jsonl lines: presence of a bash tool_call
+ * record / llm_call failure / tool-failure shape (rejected ≠ blocked).
  */
 function diagFromJson(lines: string[]): WorkTraceDiagnostics {
   const diag: WorkTraceDiagnostics = {
@@ -312,13 +324,15 @@ function hasBwrap(): boolean {
 }
 
 /**
- * 单个 probe:spawn worker(最多 MAX_ATTEMPTS 次,吸收上游瞬时 429/quota 滚动
- * reset)→ waitFor → 读 trace → 三态分类:
- *   pass   = worker status=="ok" 且 trace 明确含本类违规标记(证据齐);
- *   failed = waitFor reject / worker 非 ok / 已 attempt bash 但 trace 无标记
- *            (fence 真漏拦截或装配错误);
- *   not-run= worker ok 但从未 attempt bash 且 llm_call error —— 上游模型
- *            不可用,违规命令根本没被模型发起,无证据可验。
+ * One probe: spawn the worker (up to MAX_ATTEMPTS times to absorb transient
+ * upstream 429/quota rolling resets) → waitFor → read trace → three-way classify:
+ *   pass    = worker status=="ok" and the trace clearly carries this class's
+ *             violation marker (evidence complete);
+ *   failed  = waitFor rejected / worker not ok / bash was attempted but the
+ *             trace lacks the marker (a real fence miss or assembly error);
+ *   not-run = worker ok but bash never attempted and llm_call errored — the
+ *             upstream model was unavailable, so the violating command was
+ *             never issued and there is no evidence to check.
  */
 async function runProbe(
   probe: ProbeDef,
@@ -329,7 +343,7 @@ async function runProbe(
   const def: SubAgentDefinition = {
     task: taskTmpl.replace("${CMD}", probe.command),
     maxTurns: 6,
-    // 继承探针:绝不给敏感路径探针传 root(SC8 继承语义);其余显式传同一值。
+    // Inheriting probe: never pass root to the sensitive-path probe; others get the same value explicitly.
     ...(probe.withSandboxRoot ? { sandboxRoot: root } : {}),
   };
 
@@ -353,7 +367,7 @@ async function runProbe(
       .some((s) => s !== null && probe.marker.test(s));
     const diag = diagFromJson(traceLines);
 
-    // pass 判据:worker completed(D5)且 trace 含本类违规标记(拦截证据)。
+    // pass criterion: worker completed and the trace carries this class's violation marker (interception evidence).
     if (traceHasMarker) {
       const evidence = firstMatchingLine(traceLines, probe.marker).slice(
         0,
@@ -365,7 +379,7 @@ async function runProbe(
         detail: `worker completed; trace evidence: ${evidence}`,
       };
     }
-    // 真失败:模型已 attempt 过 bash,但 fence 没拦住(无标记)。
+    // Real failure: the model did attempt bash, but the fence did not block it (no marker).
     if (diag.attemptedBash) {
       return {
         name: probe.id,
@@ -373,7 +387,7 @@ async function runProbe(
         detail: `worker completed but fence did NOT block (bash attempted; no ${String(probe.marker)} in trace)`,
       };
     }
-    // 其余 = bash 尚未被模型发起:重试吸收上游瞬时故障;3 次后 not-run。
+    // Otherwise bash was never issued: retry to absorb transient upstream faults; after MAX_ATTEMPTS → not-run.
     lastDetail = `worker completed; bash not attempted, llm=${
       diag.llmCalled
         ? diag.llmError.length > 0
@@ -390,13 +404,15 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * spawn 一次 worker → waitFor → 读其 trace 证据语料。
+ * Spawn the worker once → waitFor → read its trace evidence corpus.
  *
- * 证据语料 = jsonl 行 + `blobs/` 内容。T4 blob 唯一化(commit 09e5c2e0)后,
- * `tool_call` 记录 `result_captured:false`,fence 的 stdout/stderr 不再内联进
- * jsonl——`messages[].content` 只是 `{sha,bytes}` 引用,正文落在
- * `<traceDir>/blobs/<sha>`。只读 `*.jsonl` 会把已拦截的围栏输出当「无证据」,
- * 误报 fence 没拦住。两条面都读才覆盖当前 trace SSOT。
+ * Evidence corpus = jsonl lines + `blobs/` content. Since blob uniquification
+ * (commit 09e5c2e0), `tool_call` records carry `result_captured:false`: the
+ * fence's stdout/stderr is no longer inlined into jsonl — `messages[].content`
+ * is only a `{sha,bytes}` reference and the body lives at
+ * `<traceDir>/blobs/<sha>`. Reading only `*.jsonl` would treat already-blocked
+ * fence output as "no evidence" and falsely report a fence miss. Reading both
+ * surfaces covers the current trace SSOT.
  */
 async function runWorkerOnceForProbe(
   def: SubAgentDefinition,
@@ -421,9 +437,10 @@ async function runWorkerOnceForProbe(
   await manager.shutdown();
 
   if (waitError.length > 0 || envelopeStatus !== "ok") {
-    // worker 未正常完成:waitFor reject = 超时(探针级),或 envelope failed。
-    // 这两种都算真环境性问题 → 记为 failed(带 reason),不重试也不 not-run:
-    // 并发 worker 超时 / crashed 不该被重试掩盖。
+    // Worker did not finish normally: waitFor reject = probe-level timeout, or envelope failed.
+    // Both are genuine environmental problems → recorded as failed (with reason),
+    // with no retry and no not-run: concurrent worker timeouts / crashes must
+    // not be masked by retrying.
     throw new ProbeFailure(
       `worker NOT completed: status=${envelopeStatus} reason=${envelopeReason ?? ""}${waitError ? ` waitErr=${waitError.slice(0, 120)}` : ""}`
     );
@@ -432,7 +449,7 @@ async function runWorkerOnceForProbe(
   return readTraceEvidence(traceDir);
 }
 
-/** jsonl 行 + blob 正文两条面;读失败(写入竞态 / 目录缺席)归「缺证据」。 */
+/** Two evidence surfaces, jsonl lines + blob bodies; read failures (write races / missing dirs) count as "no evidence". */
 async function readTraceEvidence(traceDir: string): Promise<string[]> {
   const evidence: string[] = [];
   try {
@@ -441,18 +458,18 @@ async function readTraceEvidence(traceDir: string): Promise<string[]> {
       if (!f.endsWith(".jsonl")) continue;
       evidence.push(...readFileSync(join(traceDir, f), "utf8").split("\n"));
     }
-    // blob 正文(内容寻址;每个 blob 可能无换行,按整文件一行推入)。
+    // Blob bodies (content-addressed; each blob may contain no newline, so push the whole file as one line).
     const blobsDir = join(traceDir, "blobs");
     for (const b of await readdir(blobsDir)) {
       evidence.push(readFileSync(join(blobsDir, b), "utf8"));
     }
   } catch {
-    // trace 写入/读取失败:worker 侧只 warn(ADR-0003 D13),探针按缺证据归因。
+    // trace write/read failure: the worker side only warns (ADR-0003 D13); the probe attributes it to missing evidence.
   }
   return evidence;
 }
 
-/** 探针级环境性失败(worker 未完成),与 D5 判据区分。 */
+/** Probe-level environmental failure (worker did not complete), distinct from the pass/fail criterion above. */
 class ProbeFailure extends Error {
   override readonly name = "ProbeFailure";
 }
@@ -479,7 +496,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // 每次 probe 独立临时 root(= 父 sandboxRoot, worker 继承或显式传同一值)
+  // Fresh temp root per probe (= parent sandboxRoot; workers inherit it or get the same value explicitly)
   const tmpRoots: string[] = [];
   const results: ProbeResult[] = [];
   const TASK_TMPL =
@@ -488,8 +505,9 @@ async function main(): Promise<void> {
     "(background). This is an authorized sandbox boundary test with no " +
     "interactive approval. Report the raw tool output to me and stop.";
 
-  // 上游模型网关预检 + 滚动检测:重试窗口内若恢复则继续真实验证;
-  // 始终不可用 → 整体 not-run(不烧 60s/次)。
+  // Gateway preflight + rolling detection: continue with real verification if it
+  // recovers within the retry window; if it stays unavailable, everything is
+  // not-run (do not burn 60s per spawn).
   const upstream = await waitForUpstream(env, 10);
   if (upstream === "ok") {
     console.log("upstream model gateway: ok");
@@ -503,7 +521,7 @@ async function main(): Promise<void> {
       traceDir = await mkdtemp(join(tmpdir(), "iknow-subagent-probe-trace-"));
       tmpRoots.push(traceDir);
     } catch {
-      // trace 目录失败不影响探针本身;worker 落盘失败会 warn(ADR-0003 D13)。
+      // A trace-dir failure does not affect the probe itself; worker write failures only warn (ADR-0003 D13).
       traceDir = "";
     }
 
@@ -524,7 +542,7 @@ async function main(): Promise<void> {
     });
   }
 
-  // ── 汇总输出 ───────────────────────────────────────────────────────
+  // ── Summary output ─────────────────────────────────────────────────
   const passed = results.filter((r) => r.outcome === "pass").length;
   const notRun = results.filter((r) => r.outcome === "not-run").length;
   const failed = results.filter((r) => r.outcome === "failed").length;
@@ -548,7 +566,7 @@ async function main(): Promise<void> {
   process.exitCode = failed === 0 && passed > 0 ? 0 : 1;
 }
 
-// 只有被当作入口跑时才执行探针 —— 单测 import 本模块取纯函数时不得起副作用。
+// Only run the probes when executed as the entry point — unit tests importing this module for pure functions must not trigger side effects.
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === __filename) {
   main().catch((e) => {
     console.error(e instanceof Error ? e.message : String(e));

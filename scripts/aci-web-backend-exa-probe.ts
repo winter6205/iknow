@@ -1,16 +1,17 @@
 /**
- * ACI web backend Exa 真出网探针（specs/aci-web-backend.md SC10）。
+ * Real-network Exa probe for the ACI web backend (specs/aci-web-backend.md).
  *
- * 与 #826 T8 同档：真打 api.exa.ai，不进默认 `npm test` 收集。
- * 缺 / 空白 `EXA_API_KEY` → 打印 Not run 并以 0 退出，不得 mock 声称 SC10 已过。
- * 有 key → 同一次跑通 createWebSearchTool（Exa search）与
- * createWebFetchTool（Exa contents），backend=exa + key（阅读意图路径
- * 是 api.exa.ai/contents，不是本机 guard）。handler 带 AbortSignal.timeout
- * （SEARCH_TIMEOUT_MS / FETCH_TIMEOUT_MS）；超时是 typed 失败，不是 hang。
- * 非 2xx / 超时走工具 typed 失败。
- * 永不打印 key。
+ * Hits api.exa.ai for real; not collected by the default `npm test` run.
+ * Missing / blank `EXA_API_KEY` → print Not run and exit 0; never mock the
+ * call and claim the acceptance criterion passed.
+ * With a key → one run exercises both createWebSearchTool (Exa search) and
+ * createWebFetchTool (Exa contents), backend=exa + key (the reading-intent
+ * path is api.exa.ai/contents, not the local guard). Handlers carry
+ * AbortSignal.timeout (SEARCH_TIMEOUT_MS / FETCH_TIMEOUT_MS); a timeout is
+ * a typed failure, not a hang. Non-2xx / timeout go through the tools'
+ * typed failure. The key is never printed.
  *
- * 运行：`npm run probe:aci-web-backend`
+ * Run: `npm run probe:aci-web-backend`
  */
 import { ToolExecutionError } from "../src/harness/errors.js";
 import {

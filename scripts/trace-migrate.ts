@@ -1,46 +1,51 @@
 #!/usr/bin/env node
 /**
- * 旧 trace 迁移脚本 — 把写侧升级前留下的单文件 `./trace.jsonl` 按行内
- * `conversation_id` 分文件到 `./trace/<convId>.jsonl`（v2 每会话独立文件语义）。
+ * Legacy trace migration: split the pre-upgrade single file `./trace.jsonl`
+ * into per-conversation `./trace/<convId>.jsonl` files by each line's
+ * `conversation_id` (the per-session-file layout the new writer expects).
  *
- * 行为契约（spec T4）：
- *   - 读旧单文件（每行一个 JSON 对象）。
- *   - 按行的 `conversation_id` 字段分文件，写到 `<outputDir>/<convId>.jsonl`。
- *   - 保留原行 —— 逐行原样写入，不 re-serialize、不修改内容。
- *   - 坏行（JSON 解析失败 / 非对象 / 无 conversation_id）跳过，计入报告。
- *   - 输出迁移报告（处理的会话数、总行数、跳过行数）。
+ * Behavior contract:
+ *   - Read the old single file (one JSON object per line).
+ *   - Group lines by their `conversation_id` into `<outputDir>/<convId>.jsonl`.
+ *   - Keep lines verbatim — write each raw line through, never re-serialize
+ *     or alter content.
+ *   - Skip malformed lines (JSON parse failure / non-object / missing
+ *     conversation_id) and count them in the report.
+ *   - Print a migration report (sessions, total lines, skipped lines).
  *
- * 可执行：`npx tsx scripts/trace-migrate.ts`。默认从 `./trace.jsonl` 迁到
- * `./trace/`；可用 `--input` / `--output` 覆盖（见 CLI main）。
+ * Runnable: `npx tsx scripts/trace-migrate.ts`. Defaults migrate
+ * `./trace.jsonl` to `./trace/`; `--input` / `--output` override (see CLI main).
  *
- * 独立可测：导出纯函数 `migrateTraceFile(inputPath, outputDir)`，无副作用
- * 依赖；CLI main 只做 argv 解析 + 报告打印。与 reader.ts parseOneLine 的
- * 坏行判据对齐（无效 JSON / 标量 / 数组 / null 均跳过）。
+ * Independently testable: the pure `migrateTraceFile(inputPath, outputDir)`
+ * has no side dependencies; CLI main only parses argv and prints the report.
+ * Malformed-line criteria align with parseOneLine in reader.ts (invalid JSON /
+ * scalar / array / null all skipped).
  */
 import { readFileSync, appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-/** 迁移结果报告。 */
+/** Migration result report. */
 export interface TraceMigrateReport {
-  /** 迁移到的不同 conversation_id 数（不含坏行）。 */
+  /** Number of distinct conversation_ids migrated (malformed lines excluded). */
   readonly sessions: number;
-  /** 输入文件总行数（含坏行）。 */
+  /** Total input lines (malformed lines included). */
   readonly totalLines: number;
-  /** 跳过的坏行数（JSON 解析失败 / 非对象 / 无 conversation_id）。 */
+  /** Skipped malformed lines (JSON parse failure / non-object / missing conversation_id). */
   readonly skippedLines: number;
-  /** 迁移到的会话 id 列表（按其首次出现顺序）。 */
+  /** Migrated session ids, in order of first appearance. */
   readonly conversationIds: ReadonlyArray<string>;
-  /** 是否在迁移成功后删除了旧单文件（干净迁移才删除，见 migrateTraceFile）。 */
+  /** Whether the old single file was deleted after migration (clean migration only, see migrateTraceFile). */
   readonly removedInput: boolean;
 }
 
-/** conversation_id 字段名（写侧 ADR-0003 D4 蛇形键）。 */
+/** conversation_id field name (snake_case key mandated by the trace writer, ADR-0003). */
 const CONVERSATION_ID_KEY = "conversation_id";
 
 /**
- * 解析单行 JSON。失败或非普通对象 → undefined（与 reader.ts parseOneLine
- * 判据一致：数组也算坏行，因为数组不是每会话记录对象）。
+ * Parse one JSON line; failure or non-plain-object → undefined. Same criteria
+ * as parseOneLine in reader.ts: arrays count as malformed because a session
+ * record is always an object.
  */
 function parseOneLine(line: string): Record<string, unknown> | undefined {
   let parsed: unknown;
@@ -56,17 +61,22 @@ function parseOneLine(line: string): Record<string, unknown> | undefined {
 }
 
 /**
- * 把单文件 trace.jsonl 迁移到按 conversation_id 分文件。
+ * Migrate a single trace.jsonl into files split by conversation_id.
  *
- * 保留原行：appendFileSync 写入与输入完全一致的原始行（含原有换行缺失时
- * 由调用方补充），不修改内容。坏行跳过并计数。输出目录不存在时创建。
+ * Lines are preserved: each appended output line is byte-identical to the
+ * input line (a newline is added when the input lacks one), never
+ * re-serialized. Malformed lines are skipped and counted. The output
+ * directory is created when missing.
  *
- * 删除输入：干净迁移（skippedLines === 0）后 unlink 旧单文件，保证 CLI 的
- * fail-fast 检测（./trace.jsonl 存在即提示迁移）在迁移完成后不再触发 ——
- * 否则跑完迁移仍被挡。存在坏行时保留输入文件，供人工核对/重试后再删。
+ * Input removal: only a clean migration (skippedLines === 0) unlinks the old
+ * single file, so the CLI's fail-fast check (a present ./trace.jsonl prompts
+ * for migration) stops firing afterwards — otherwise the repo would stay
+ * blocked even after migrating. When malformed lines exist the input is kept
+ * for manual inspection/retry before deleting.
  *
- * 一次迁移以 inputPath 不存在视为空输入（0 行 0 会话），不抛错 —— 与
- * reader 对 ENOENT 的静默处理一致，便于在无旧文件的仓库里安全执行。
+ * A missing inputPath counts as empty input (0 lines, 0 sessions) without
+ * throwing — matching the reader's silent ENOENT handling, so running the
+ * migration in a repo with no legacy file stays safe.
  */
 export function migrateTraceFile(
   inputPath: string,
@@ -97,7 +107,7 @@ export function migrateTraceFile(
   const seen = new Set<string>();
 
   for (const line of lines) {
-    // 空行（含末尾换行产生的尾随 ""）不计入总行数。
+    // Blank lines (including the trailing "" produced by a final newline) do not count toward totalLines.
     if (line.length === 0) continue;
     totalLines += 1;
 
@@ -112,21 +122,21 @@ export function migrateTraceFile(
       seen.add(convId);
       conversationIds.push(convId);
     }
-    // 保留原行：精确写回原始文本 + 换行，不 re-serialize。
+    // Preserve the raw line: write back exactly the original text + newline, no re-serialization.
     appendFileSync(join(outputDir, `${convId}.jsonl`), line + "\n", "utf8");
   }
 
-  // 干净迁移后删除旧单文件，避免 CLI fail-fast 在迁移完成后仍被旧文件挡住。
-  // 有坏行时保留输入（数据可能未完整迁移，删了无法恢复），返回 removedInput: false。
-  // 空文件也算干净（无数据可丢）：删除它同样解除 fail-fast 的残留触发。
+  // Remove the legacy file only after a clean migration so the CLI fail-fast stops blocking.
+  // With malformed lines keep the input (data may be partially migrated; deleting is unrecoverable) and return removedInput: false.
+  // An empty file also counts as clean (nothing to lose): removing it clears the stale fail-fast trigger too.
   let removedInput = false;
   if (skippedLines === 0) {
     try {
       rmSync(inputPath, { force: true });
       removedInput = true;
     } catch (err) {
-      // 删除失败不阻断迁移结果：文件留着，fail-fast 会继续提示，下次再删。
-      // 删除失败时静默（坏行路径保留文件是契约，unlink 失败保留文件也安全）。
+      // A failed unlink never fails the migration: the file stays, fail-fast keeps prompting, a later run deletes it.
+      // Silence is safe — keeping the input here matches the malformed-line contract of preserving the file.
       void err;
     }
   }
@@ -150,18 +160,18 @@ function isEnoent(err: unknown): boolean {
 
 // -- CLI main -----------------------------------------------------------------
 
-/** 默认输入：仓库根下的旧单文件。 */
+/** Default input: the legacy single file at the repo root. */
 const DEFAULT_INPUT = resolve(
   fileURLToPath(new URL("..", import.meta.url)),
   "trace.jsonl"
 );
-/** 默认输出：仓库根下的每会话目录。 */
+/** Default output: the per-session directory at the repo root. */
 const DEFAULT_OUTPUT = resolve(
   fileURLToPath(new URL("..", import.meta.url)),
   "trace"
 );
 
-/** 纯函数参数形式，便于测试直接调用（不触发 CLI）。 */
+/** Arg parsing as a pure function so tests can call it without triggering the CLI. */
 function parseArgs(argv: ReadonlyArray<string>): {
   input: string;
   output: string;
@@ -207,8 +217,8 @@ function main(): void {
 }
 
 /**
- * 直接执行（`npx tsx scripts/trace-migrate.ts`）时运行 CLI main；
- * 被测试 import 作为模块时不触发。
+ * Run CLI main only on direct execution (`npx tsx scripts/trace-migrate.ts`);
+ * importing this module from tests must not trigger it.
  */
 const isDirectRun =
   process.argv[1] !== undefined &&

@@ -1,50 +1,56 @@
 /**
- * LSP 探针夹具表 — spec 302-lsp-multilang（§ PROBE_TARGETS，#307 Q3）。
+ * LSP probe fixture table — consumed by lsp-probe.ts (spec 251-lsp-tool).
  *
- * 每门语言一个 `{ serverId, targetFile, line, char }` 条目，probe（lsp-probe.ts）
- * 遍历本表 × 生产 `SERVERS` 跑 9-op 真实 server 烟测。
+ * One `{ serverId, targetFile, line, char }` entry per language; the probe
+ * walks this table × production `SERVERS` running a 9-op smoke test against
+ * real language servers.
  *
- * 目标文件分两类：
- *  - **真实仓库文件**（typescript / yaml / json）：`targetFile` 是绝对路径，
- *    probe 直接以其为 9-op 目标；`line`/`char` 指向文件内真实符号。
- *  - **运行时生成夹具**（python / dockerfile）：仓库无对应真实目标文件（pyright
- *    需要 root 标记、dockerfile 仓库无 Dockerfile），`fixture` 提供源内容、
- *    `targetFile` 是夹具项目内的相对文件名，probe 在 `.iknow/probe-lsp/<lang>/`
- *    （gitignore）写入后作为目标。`rootMarkers` 是夹具项目根需的标记文件
- *    （pyright 靠 `pyrightconfig.json` 定 root）。
+ * Two kinds of targets:
+ *  - **Real repo files** (typescript / json): `targetFile` is an absolute
+ *    path used directly as the 9-op target; `line`/`char` point at a real
+ *    symbol inside it.
+ *  - **Runtime-generated fixtures** (python / yaml / dockerfile): no usable
+ *    in-repo target exists (pyright needs a root marker, yaml-language-server
+ *    returns empty definition/hover for workflow files, the repo has no
+ *    Dockerfile), so `fixture` carries the source, `targetFile` is a filename
+ *    inside the fixture project, and the probe writes them into
+ *    `.iknow/probe-lsp/<lang>/` (gitignored) before probing. `rootMarkers`
+ *    lists the marker files the fixture project root needs (pyright locates
+ *    its root via `pyrightconfig.json`).
  *
- * 夹具放在 `.iknow/`（gitignore）而非 repo 根，避免被误当真实部署文件。
+ * Fixtures live under `.iknow/` (gitignored) so they are never mistaken for
+ * real deployment files.
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** 仓库根（= worktree 根）。真实仓库文件路径以此为基准。 */
+/** Repo root (= worktree root); real-repo target paths resolve from here. */
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 export interface ProbeTarget {
-  /** 生产 `SERVERS` 中对应的 server id（probe 据此选 server）。 */
+  /** Server id in production `SERVERS`; the probe selects the server by it. */
   readonly serverId: string;
-  /** 真实仓库文件绝对路径，或夹具项目内相对文件名（`fixture` 存在时）。 */
+  /** Absolute path to a real repo file, or a filename inside the fixture project (when `fixture` is set). */
   readonly targetFile: string;
-  /** 1-based line（handler 层转 0-based）。 */
+  /** 1-based line (converted to 0-based at the handler layer). */
   readonly line: number;
-  /** 0-based character。 */
+  /** 0-based character. */
   readonly char: number;
-  /** 夹具源内容；存在时 probe 写入 `.iknow/probe-lsp/<lang>/` 后作为目标。 */
+  /** Fixture source; when present the probe writes it to `.iknow/probe-lsp/<lang>/` and uses that as target. */
   readonly fixture?: string;
-  /** 夹具项目根需要的 root 标记文件（如 pyrightconfig.json）。 */
+  /** Root-marker files the fixture project needs (e.g. pyrightconfig.json). */
   readonly rootMarkers?: readonly string[];
 }
 
 /**
- * 各语言夹具表。`--lang` 取值即本表 key（typescript/python/yaml/json/dockerfile）。
+ * Fixture table per language. `--lang` values are exactly the keys here
+ * (typescript/python/yaml/json/dockerfile).
  *
- * 位置核实（真实文件）：
- *  - typescript：`client.ts:94` `export async function getClient(`，char 22 指向
- *    `getClient` 标识符起始（0-based）。
- *  - yaml：`.github/workflows/s4-red-test-first.yml:9` `    runs-on: ubuntu-latest`，
- *    char 4 指向 `runs-on` 键起始。
- *  - json：`tsconfig.json:2` `  "compilerOptions": {`，char 1 指向键起始。
+ * Verified symbol positions in the real repo files:
+ *  - typescript: `client.ts:94` `export async function getClient(`, char 22 is
+ *    the start of the `getClient` identifier (0-based).
+ *  - json: `tsconfig.json:2` `  "compilerOptions": {`, char 1 is the start of
+ *    the key.
  */
 export const PROBE_TARGETS: Record<string, ProbeTarget> = {
   typescript: {
@@ -71,10 +77,10 @@ export const PROBE_TARGETS: Record<string, ProbeTarget> = {
     targetFile: "probe.yml",
     line: 5,
     char: 9,
-    // yaml-language-server 对仓库 .github/workflows/*.yml 的 definition/hover
-    // 实测为空（无锚点）。改用运行时夹具（同 python/dockerfile），在
-    // `.iknow/probe-lsp/yaml/probe.yml` 写入含 YAML 锚点的源 —— anchor
-    // reference `*defaults` 的 definition 实测返回非空（跳到锚点定义处）。
+    // definition/hover came back empty for real .github/workflows/*.yml files
+    // (no resolvable anchor), so yaml uses a runtime fixture like python /
+    // dockerfile: the anchor reference `*defaults` (line 5, char 9) verifiably
+    // resolves to the anchor declaration (`&defaults`) instead.
     rootMarkers: [],
     fixture:
       "defaults: &defaults\n" +
@@ -94,12 +100,13 @@ export const PROBE_TARGETS: Record<string, ProbeTarget> = {
     targetFile: "Dockerfile",
     line: 1,
     char: 5,
-    // dockerfile-language-server-nodejs 对 FROM 镜像名 / ARG 引用的 definition
-    // 实测为 null；但对 `ARG NAME=value` 的**变量名**（本例 `BASE_VERSION`，
-    // line 1 char 4-16）definition 返非空（自指 range），hover 返回 value
-    // （`{"contents":"20"}`）。夹具带 ARG 引用 + 变量名定位，让 definition/hover
-    // 真实非空；references / implementation / workspaceSymbol / callHierarchy
-    // 该 server 未声明 provider（见 probe 能力裁剪日志）。
+    // This server returns null for FROM image names and ARG references, but
+    // definition on the variable NAME of `ARG BASE_VERSION=20` (line 1, chars
+    // 4-16) is non-empty (self range) and hover returns the value
+    // (`{"contents":"20"}`). The fixture therefore combines an ARG reference
+    // with a variable-name target so definition/hover are truly non-empty;
+    // references / implementation / workspaceSymbol / callHierarchy have no
+    // provider on this server (see the probe's capability-trimming log).
     rootMarkers: [],
     fixture:
       "ARG BASE_VERSION=20\n" +

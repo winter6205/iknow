@@ -1,47 +1,57 @@
 /**
- * CI guard: 校验 CI vitest 排除集（SSOT: `vitest.ci-excludes.ts`）双向自洽。
+ * CI guard: verify the CI vitest exclude sets are self-consistent
+ * (SSOT: `vitest.ci-excludes.ts`).
  *
- * 排除集从 workflow 命令行串迁到 SSOT 模块后，本脚本不再 grep
- * `.github/workflows/test.yml`，改为 import 模块本身；workflow 只负责把
- * 对应的 config overlay 传给 vitest。校验分三向：
+ * After the exclude sets moved from workflow command strings into the SSOT
+ * module, this script imports the module instead of grepping
+ * `.github/workflows/test.yml`; the workflow only passes the matching config
+ * overlay to vitest. Three checks:
  *
- *   正向（bwrap 依赖覆盖）：扫 tests/ 下所有 vitest 可收集的 test 文件，
- *     命中 bwrap 依赖装配链锚点的文件必须出现在 test-fast 的排除集
- *     （CI_EXCLUDES ∪ CI_FAST_EXCLUDES）内。这是最严格的必要条件：test-fast
- *     不装 bwrap，漏一个就在装配期 fail-loud。不按 test-full 逐 job 强校验
- *     的理由见下方「正向」注释（装了 bwrap 的 full 能跑通仅装配的那批文件）。
+ *   Forward (bwrap dependency coverage): scan every vitest-collectable test
+ *     file under tests/; any file hitting a bwrap-dependency anchor must be in
+ *     the test-fast exclude aggregate (CI_EXCLUDES ∪ CI_FAST_EXCLUDES). This
+ *     is the strictest necessary condition: test-fast does not install bwrap,
+ *     so one miss fails loudly at assembly time. Not enforced per-job against
+ *     test-full — the rationale is in the forward-check comment below (with
+ *     bwrap installed, assembly-only files genuinely pass there).
  *
- *   反向（无死条目）：exclude 集里每条必须至少命中一个磁盘上真实存在的
- *     test 文件（`dir/**` glob 语义）。指向已删除文件的条目是配置腐烂 ——
- *     它会让「已排除」的假象掩盖真实的收集范围。
+ *   Reverse (no dead entries): every entry in an exclude set must match at
+ *     least one test file on disk (`dir/**` glob semantics). Entries pointing
+ *     at deleted files are configuration rot — the illusion of "already
+ *     excluded" hides what is really collected.
  *
- *   tests/tui 禁令：exclude 条目命中 `tests/tui/` 即报错。该目录由
- *     bun:test 驱动（OpenTUI 原生 FFI 仅 bun 可用），vitest.config.ts 的
- *     exclude 已含 `tests/tui/**`，vitest 永不收集 —— 此处的 tui 条目对
- *     vitest 是死配置。历史上正是「守卫扫全 tests/ + 塞 tui 条目消警」的
- *     组合制造了 tests/tui/deps-tools.test.ts 这类死条目；现在把守卫的
- *     正向扫描域收敛到 vitest 可收集域，tui 条目直接判违规。
+ *   tests/tui ban: any exclude entry matching `tests/tui/` is an error. That
+ *     directory runs under bun:test (OpenTUI native FFI requires bun) and
+ *     vitest.config.ts already excludes `tests/tui/**`, so vitest never
+ *     collects it — a tui entry is dead config for vitest. Historically the
+ *     combination of a guard scanning all of tests/ plus tui entries added to
+ *     silence its warnings produced dead entries; the forward scan domain is
+ *     now narrowed to what vitest can collect and tui entries are judged
+ *     violations outright.
  *
- * 背景:GitHub Actions runner 无 user-namespace → bwrap 无法物理执行;
- * 但 requireBwrap() 守卫在 createBashTool / createDefaultAciRegistry /
- * createWorkerDeps / runInSandbox 装配阶段就 throw,导致 CI 在装配期
- * fail-loud(2026-08-19 #467 merge 时 tests/harness/aci/bash-background.test.ts
- * 漏入 CI exclude → test-fast 10/14 fail)。该脚本确保下一次 merge 进同类
- * 测试时 CI 立刻报警(指明漏了哪个文件),而不是沉默破坏 PR 流程。
+ * Background: GitHub Actions runners lack user-namespace → bwrap cannot
+ * execute physically; but requireBwrap() throws already during assembly in
+ * createBashTool / createDefaultAciRegistry / createWorkerDeps /
+ * runInSandbox, so CI fails loudly at assembly time — including the past
+ * regression where a bwrap-dependent test leaked into the exclude set and
+ * reddened test-fast. This script makes CI alert immediately when such a
+ * test is merged next (naming the missing file) instead of silently breaking
+ * the PR flow.
  *
- * 锚点(必须命中其一即视为 bwrap-依赖):
- *   - requireBwrap(...):src/harness/sandbox/runner.ts 显式守卫
- *   - runInSandbox(...):sandbox 入口
- *   - createBashTool(...):bash 工具构造期调 requireBwrap
- *   - createDefaultAciRegistry(...):ACI 8 件装配 → createBashTool
- *   - createWorkerDeps(...):subagent worker 装配 → createBashTool
- *   - buildHarnessEngine(...):buildEngine → createDefaultAciRegistry
+ * Anchors (hitting any one marks the file bwrap-dependent):
+ *   - requireBwrap(...): explicit guard in src/harness/sandbox/runner.ts
+ *   - runInSandbox(...): sandbox entry
+ *   - createBashTool(...): bash tool constructor calls requireBwrap
+ *   - createDefaultAciRegistry(...): ACI assembly → createBashTool
+ *   - createWorkerDeps(...): subagent worker assembly → createBashTool
+ *   - buildHarnessEngine(...): buildEngine → createDefaultAciRegistry
  *
- * 只匹配调用形态(`\bidentifier\s*\(`),避免 type-only import / vi.mock
- * 路径里的符号命中误报 —— 真依赖是装配期 requireBwrap throw,只有实际
- * 调到那几个 factory 的文件才会 fail-loud。
+ * Only call shapes match (`\bidentifier\s*\(`) to avoid false positives from
+ * type-only imports or vi.mock paths — the real dependency is an assembly-time
+ * requireBwrap throw, so only files actually invoking those factories fail
+ * loudly.
  *
- * 用法:`npx tsx scripts/ci-check-test-excludes.ts`（exit 0 = 通过）。
+ * Usage: `npx tsx scripts/ci-check-test-excludes.ts` (exit 0 = pass).
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -60,19 +70,20 @@ const BWRAP_PATTERNS: ReadonlyArray<RegExp> = [
   /\bcreateBashTool\s*\(/,
   /\bcreateDefaultAciRegistry\s*\(/,
   /\bcreateWorkerDeps\s*\(/,
-  // 传递链:buildHarnessEngine → createDefaultAciRegistry → createBashTool
-  // → requireBwrap(与既有排除集注释"装配依赖 bwrap 类"同链;
-  // CI 实证:build-engine-hooks / build-engine-subagent-trace 均经此装配,
-  // bwrap 缺失即 fail-loud)。
+  // Transitive chain: buildHarnessEngine → createDefaultAciRegistry →
+  // createBashTool → requireBwrap. CI-verified: build-engine hook/trace tests
+  // assemble through this path and fail loudly when bwrap is missing.
   /\bbuildHarnessEngine\s*\(/,
 ];
 
 /**
- * 收集域直接读自 vitest.config.ts 本体（include + exclude），不手抄 ——
- * 手抄副本会在配置变更时静默漂移，而本守卫的存在理由正是防配置腐烂。
+ * The collection domain is read straight from vitest.config.ts (include +
+ * exclude), never hand-copied — a copy would drift silently on config
+ * changes, and preventing exactly that rot is why this guard exists.
  *
- * 两个值都必须存在且非空：若将来 config 形状换成函数式 / projects 形式，
- * 这里直接 fail-loud，绝不退化成「拿 undefined 比较而 vacuous 通过」。
+ * Both values must exist and be non-empty: if the config ever becomes a
+ * function / projects form, fail loudly here instead of degrading into a
+ * vacuous pass comparing against undefined.
  */
 const testConfig = baseConfig.test;
 if (
@@ -90,10 +101,10 @@ if (
   process.exit(1);
 }
 
-/** vitest 收集的候选域（vitest.config.ts 的 include）。 */
+/** Candidate domain vitest collects from (include in vitest.config.ts). */
 const TEST_INCLUDE: readonly string[] = testConfig.include;
 
-/** vitest 永不收集的目录（vitest.config.ts 的 exclude；含 tests/tui）。 */
+/** Directories vitest never collects (exclude in vitest.config.ts; includes tests/tui). */
 const VITEST_UNCOLLECTED: readonly string[] = testConfig.exclude;
 
 function walk(dir: string, out: string[]): void {
@@ -107,7 +118,7 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-/** 磁盘上 tests/ 下全部 test 文件（用于反向「死条目」核验）。 */
+/** All test files under tests/ on disk (input for the reverse dead-entry check). */
 const testsDir = join(repoRoot, "tests");
 const allTestFiles: string[] = [];
 walk(testsDir, allTestFiles);
@@ -115,8 +126,9 @@ walk(testsDir, allTestFiles);
 const tuiFiles = allTestFiles.filter((f) => f.startsWith("tests/tui/"));
 
 /**
- * vitest 实际会收集的域。用 tinyglobby（vitest 收集用的同一引擎）
- * 以 ignore=VITEST_UNCOLLECTED 求差，与 CI 上真实的收集范围一致。
+ * The domain vitest actually collects: tinyglobby (the same engine vitest uses
+ * for collection) with ignore=VITEST_UNCOLLECTED, matching the real CI
+ * collection scope.
  */
 const collectible = new Set(
   globSync(TEST_INCLUDE, {
@@ -136,17 +148,18 @@ const bwrapFiles = [...collectible]
   .sort();
 
 /**
- * glob（单条或数组）命中的文件集合，cwd 恒为仓库根。
+ * Files matched by glob(s), single or array, cwd always the repo root.
  *
- * 正向的「排除集并集覆盖了哪些文件」与逐条目的「这条 glob 命中了哪些
- * 文件」是同一套 globSync 语义，只是入参形态不同（数组 vs 单条），故共用
- * 此处一个实现。
+ * The forward check ("which files the exclude aggregate covers") and the
+ * per-entry check ("which files this one glob hits") share one globSync
+ * semantics and differ only in argument shape, so both use this
+ * implementation.
  */
 function globMatches(patterns: string | readonly string[]): Set<string> {
   return new Set(globSync(patterns, { cwd: repoRoot, dot: true }));
 }
 
-/** 单条 exclude 条目（glob）在给定文件集中命中的文件。 */
+/** Files hit by one exclude entry (glob) within a given file set. */
 function matchesAny(entry: string, files: readonly string[]): string[] {
   const hit = globMatches(entry);
   return files.filter((f) => hit.has(f));
@@ -154,17 +167,19 @@ function matchesAny(entry: string, files: readonly string[]): string[] {
 
 const problems: string[] = [];
 
-// ---- 正向：bwrap 依赖文件必须被覆盖（#467 契约）----
+// ---- Forward: bwrap-dependent files must be covered ----
 //
-// 最严格的必要条件是「不装 bwrap 的 test-fast 也不漏」：无 bwrap 时装配期
-// 即 throw，所以 test-fast 的排除集（CI_EXCLUDES ∪ CI_FAST_EXCLUDES）必须
-// 覆盖全部 bwrap 触达文件。CI_EXCLUDES ⊆ 该并集，故这一条同时覆盖两个 job。
+// The strictest necessary condition is "no misses even for test-fast without
+// bwrap": without bwrap the assembly throws, so the test-fast exclude
+// aggregate (CI_EXCLUDES ∪ CI_FAST_EXCLUDES) must cover every bwrap-touching
+// file. CI_EXCLUDES ⊆ that aggregate, so this single check covers both jobs.
 //
-// 有意不按 test-full 逐 job 强校验：full 装了 bwrap，`buildHarnessEngine`
-// 只装配、不真跑 bash 工具的那批文件（tests/e2e/subagent-*.test.ts 等，stub
-// model 只脚本化 run_graph / spawn_subagent / skill）在 runner 上真实通过
-// （nightly run 34576438392 实测 418 passed，其中含这 4 份 e2e）。要求把它们
-// 塞进 CI_EXCLUDES 等于收缩 test-full 覆盖 —— 那是 CI 语义变化，不是修腐烂。
+// Deliberately not enforced per-job against test-full: full installs bwrap,
+// and files where buildHarnessEngine only assembles without really running
+// the bash tool (tests/e2e/subagent-*.test.ts etc., stub model scripting only
+// run_graph / spawn_subagent / skill) genuinely pass on those runners
+// (observed green in nightly test-full). Forcing them into CI_EXCLUDES would
+// shrink test-full coverage — a CI semantics change, not rot repair.
 const fastAggregate = [...CI_EXCLUDES, ...CI_FAST_EXCLUDES];
 
 const fastCovered = globMatches(fastAggregate);
@@ -182,18 +197,18 @@ if (missing.length > 0) {
 }
 
 /**
- * 逐条目校验的两张清单：(对外展示名, 条目集)。
+ * Per-entry check lists: (display name, entries).
  *
- * 反向（死条目）与 tests/tui 禁令都以「单条 glob 在某个文件集里命中多少」
- * 为判据，故合并成一趟遍历 —— 两个检查共用同一份条目清单，避免清单增删
- * 时两处漏改。
+ * The reverse dead-entry check and the tests/tui ban both key off "how many
+ * files one glob hits in a given set", so they share one traversal and one
+ * entry list — adding or removing lists can never leave one check behind.
  */
 const EXCLUDE_LISTS = [
   ["CI_EXCLUDES", CI_EXCLUDES],
   ["CI_FAST_EXCLUDES", CI_FAST_EXCLUDES],
 ] as const;
 
-// ---- 反向 + tests/tui 禁令：逐条目一趟校验 ----
+// ---- Reverse + tests/tui ban: one pass per entry ----
 for (const [listName, entries] of EXCLUDE_LISTS) {
   for (const entry of entries) {
     const hitAll = matchesAny(entry, allTestFiles);
@@ -204,8 +219,9 @@ for (const [listName, entries] of EXCLUDE_LISTS) {
       );
     }
 
-    // tests/tui 禁令：vitest 不收 tui（OpenTUI 原生 FFI 仅 bun 可用），
-    // 此处的条目对 vitest 是死配置，只会掩盖真实收集范围。
+    // tests/tui ban: vitest never collects tui (OpenTUI native FFI is
+    // bun-only), so entries here are dead config that only hides the real
+    // collection scope.
     const hitTui = matchesAny(entry, tuiFiles);
     if (hitTui.length > 0) {
       problems.push(
