@@ -4,7 +4,8 @@
  * Fully real assembly chain, no test seams:
  *   - real VerifyConfig (command points at a script inside cwd);
  *   - runVerifyLoop's default runVerify = runInSandbox + bwrap (real sandbox
- *     execution, hasBwrap guard, same discipline as the verify-loop tests);
+ *     execution, canRunSandbox capability probe, same discipline as the
+ *     verify-loop tests);
  *   - runFn goes through processChatLine into the real runHarness (stub model).
  *
  * Proof that the closed loop activated = the verification command **really ran**:
@@ -49,9 +50,23 @@ import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 
-/** bwrap availability guard: the default runVerify (runInSandbox) only works when bwrap exists. */
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
+/**
+ * Physical-sandbox capability probe. `hasBwrap()` (binary presence) is not the
+ * right gate here: on a GitHub Actions runner bwrap is installed, so the binary
+ * check passes, but the container disallows user-namespace network isolation, so
+ * `createBwrapFence`'s constant `--unshare-net` fails at spawn (RTM_NEWADDR:
+ * Operation not permitted) → the default runVerify throws → the loop never
+ * executes the check. The gate must therefore test execution, not mere presence:
+ * run the same `--unshare-net` spawn the default runVerify performs and require
+ * exit 0. True only on a host that can actually build the fence (local WSL).
+ */
+function canRunSandbox(): boolean {
+  const r = spawnSync(
+    "bwrap",
+    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    { stdio: "ignore" }
+  );
+  return r.status === 0;
 }
 
 // -- isolated workdir (cwd for the closed loop's sandbox) ---------------------
@@ -111,7 +126,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     );
   });
 
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过",
     async () => {
       rmSync(markerPath, { force: true });
@@ -136,7 +151,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     }
   );
 
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "verifyConfig 配置 + 验证真失败 → 注入失败信封",
     async () => {
       rmSync(markerPath, { force: true });
@@ -281,7 +296,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
   // holder never reached the verify surface (regression), the sandbox would be
   // global-tier and the write would succeed — both outcomes are directly
   // observable, not just an opts-field check.
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "fsMode=workspace → verify 命令落在工作区档围栏 (写 home 被 EROFS 拒)",
     async () => {
       const homeProbe = join(osHomedir(), ".iknow-verify-fsmode-probe");
@@ -316,7 +331,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
   // Negative control (rules out a false green from "the write always fails"):
   // the same script writing home under the global tier must succeed. Only the
   // pair proves the assertion is about the **tier difference**, not the script being unwriteable.
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "fsMode=global（对照）→ 同一 verify 脚本写 home 成功",
     async () => {
       const homeProbe = join(osHomedir(), ".iknow-verify-fsmode-probe-global");

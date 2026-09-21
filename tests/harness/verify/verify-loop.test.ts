@@ -6,7 +6,7 @@
  *    misjudged as pass);
  *  - exec launch failure (spawn error -> exit 127 -> true-failure branch);
  *  - real-sandbox default assembly (runInSandbox executes via bwrap, guarded
- *    by hasBwrap).
+ *    by a canRunSandbox() fence probe).
  *
  * Orchestration:
  *  - runFn seam: real run() + stub model, or a deterministic scripted stand-in;
@@ -261,8 +261,21 @@ function failN(prefix: string, n: number): SandboxRunResult {
   };
 }
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
+/**
+ * Physical-sandbox capability probe for the default-runVerify test below.
+ * `hasBwrap()` (binary presence) is the wrong gate: a GitHub Actions runner
+ * installs bwrap but disallows user-namespace network isolation, so the fence's
+ * constant `--unshare-net` fails at spawn (RTM_NEWADDR) and the default
+ * runVerify throws. Require an actual fence spawn to succeed so this case only
+ * runs on a host that can really build the sandbox (local WSL).
+ */
+function canRunSandbox(): boolean {
+  const r = spawnSync(
+    "bwrap",
+    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    { stdio: "ignore" }
+  );
+  return r.status === 0;
 }
 
 function defaultOptions(over: {
@@ -898,8 +911,8 @@ describe("边界: 空输出 / exec 启动失败 / 真实沙箱", () => {
   });
 
   it("默认 runVerify 经 bwrap 沙箱执行验证命令", async () => {
-    if (!hasBwrap()) {
-      console.warn("skip: bwrap not available");
+    if (!canRunSandbox()) {
+      console.warn("skip: bwrap fence cannot run here (no user-namespace)");
       return;
     }
     const cwd = mkdtempSync(join(tmpdir(), "verify-loop-"));

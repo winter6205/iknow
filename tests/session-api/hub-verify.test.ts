@@ -4,7 +4,8 @@
  * Fully real assembly chain, no test seams:
  *   - SessionHubOptions.verifyConfig (command points at a script in cwd);
  *   - runVerifyLoop default runVerify = runInSandbox + bwrap (real sandboxed
- *     execution, hasBwrap guard, same discipline as verify-loop tests);
+ *     execution, canRunSandbox capability probe, same discipline as verify-loop
+ *     tests);
  *   - runFn goes through hub.postMessage into the real run() (stub model deps).
  *
  * Hard proof the loop activated = the verify command really executed: the
@@ -39,9 +40,21 @@ import { SessionStore } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 
-/** bwrap availability guard: default runVerify (runInSandbox) needs bwrap. */
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
+/**
+ * Physical-sandbox capability probe. `hasBwrap()` (binary presence) is the wrong
+ * gate: a GitHub Actions runner installs bwrap but disallows user-namespace
+ * network isolation, so the fence's constant `--unshare-net` fails at spawn
+ * (RTM_NEWADDR) → the default runVerify throws → the loop never executes the
+ * check. Test execution, not mere presence, so the physical cases only run on a
+ * host that can actually build the fence (local WSL).
+ */
+function canRunSandbox(): boolean {
+  const r = spawnSync(
+    "bwrap",
+    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    { stdio: "ignore" }
+  );
+  return r.status === 0;
 }
 
 const text = (t: string) => ({ type: "text" as const, text: t });
@@ -116,7 +129,7 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     );
   });
 
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过",
     async () => {
       rmSync(markerPath, { force: true });
@@ -144,7 +157,7 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
   // (the old three-value whitelist lacked passed → field absent, contradicting
   // passed being a legitimate terminal state).
   // abort / disabled still omit the field (not covered here, see contract.test.ts).
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     'verifyConfig 配置 + 验证 exit 0 → DTO 出现 verify.outcome="passed" rounds=N (T2 wire)',
     async () => {
       rmSync(markerPath, { force: true });
@@ -168,7 +181,7 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     }
   );
 
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!canRunSandbox())(
     "verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)",
     async () => {
       rmSync(markerPath, { force: true });

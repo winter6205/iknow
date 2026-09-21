@@ -80,6 +80,14 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/aci/bash-global-mode-visibility.test.ts",
   "tests/harness/aci/bash-main-session-fence-tmp.test.ts",
   "tests/harness/verify/sandbox-run.test.ts",
+  // egress-ssh-bridge T6: private-key readability across the two fs tiers really
+  // spawns bwrap (createBwrapFence → spawnSync), mirroring
+  // bash-workspace-mode-fence.test.ts. The file header already defers to "the CI
+  // exclusion set handled separately"; it was never registered, so on test-full
+  // (bwrap installed but the container disallows user-namespace → `--unshare-net`
+  // → RTM_NEWADDR) all three cases turned red. Registered here; local WSL keeps
+  // full verification.
+  "tests/harness/sandbox/ssh-key-fs-modes.test.ts",
   // ADR-0092 SC11/SC12: workspace-tier real bwrap behavior certification on
   // the **verify command surface** (`$TMPDIR` = session tmp nested under home,
   // home write EROFS, home read OK). Parallel to
@@ -98,6 +106,15 @@ export const CI_EXCLUDES: readonly string[] = [
   // tool_search discover → real invocation); cannot start on a runner
   // without user-namespace.
   "tests/integration/mcp-chain.test.ts",
+  // #440 T13 resources twin of mcp-chain: spawns the resources fixture with
+  // `spawn(process.execPath, ["…/server.ts"])`. The runner pins Node 20, which
+  // cannot execute a bare `.ts` entry (ERR_UNKNOWN_FILE_EXTENSION) — the child
+  // exits before the stdio handshake, so createMcpManager marks every real
+  // fixture server "failed: Connection closed" and waitForConnected throws.
+  // Structurally unrunnable on CI (same class as mcp-chain, not a bwrap-anchor
+  // file); the resources-channel invariant stays certified on WSL (Node 22
+  // type-stripping): all 21 cases green via `npx vitest run <this file>`.
+  "tests/integration/mcp-resources-fixture.test.ts",
   // #337 T11 E2E A: buildHarnessEngine → createDefaultAciRegistry →
   // createBashTool → requireBwrap, fail-loud at assembly time on the runner
   // (added after #349 was rebased onto master).
