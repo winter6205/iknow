@@ -852,4 +852,44 @@ describe("session-state: message reference reuse", () => {
     expect(echoed.messages[0]).toBe(session.messages[0]);
     expect(echoed.messages).toHaveLength(session.messages.length + 1);
   });
+
+  test("turnFinished on a state without a messages key does not throw (partial-seed guard)", () => {
+    // Invariant: 611aa6d7's stated guard intent — a malformed/partial prior
+    // state (e.g. `{}` seeded via `turnStarted({} as never)`, no messages
+    // key) must degrade to a wholesale copy of the input, never throw. This
+    // is the shape rewind.test.ts's idleAfterTurn() builds.
+    const started = turnStarted({} as never);
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("问"),
+      msg("答", "assistant"),
+    ];
+    const done = turnFinished(started, {
+      conversationId: "conv-partial",
+      messages,
+      turnCount: 1,
+      updatedAt: "2026-09-21T00:00:00.000Z",
+      jsonMode: false,
+      stopReason: "completed",
+    } as never);
+    expect(done.runState).toBe("idle");
+    expect(done.messages).toHaveLength(2);
+    expect(Object.isFrozen(done.messages)).toBe(true);
+    // no prior references existed: element identities come from the input.
+    expect(done.messages[0]).toBe(messages[0]);
+  });
+
+  test("turnFinished on a messages-less state with empty input keeps freeze discipline", () => {
+    // prev missing + next empty: the fully-equal exit leg must hand back a
+    // frozen array too (never the mutable [] produced by the guard).
+    const done = turnFinished({} as never, {
+      conversationId: "conv-empty",
+      messages: [],
+      turnCount: 0,
+      updatedAt: "",
+      jsonMode: false,
+      stopReason: "cancelled",
+    } as never);
+    expect(done.messages).toHaveLength(0);
+    expect(Object.isFrozen(done.messages)).toBe(true);
+  });
 });

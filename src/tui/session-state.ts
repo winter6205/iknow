@@ -36,6 +36,11 @@ export type TuiView = "chat" | "list" | "mcp";
 /** In-memory placeholder key for an unmaterialized session (lazy create: it enters SessionStore only when the first message is sent). */
 export const DRAFT_SESSION_ID = "__draft__";
 
+/** Shared frozen empty projection for `reuseMessageReferences` on a messages-less prior state. */
+const EMPTY_MESSAGES: ReadonlyArray<AnthropicNativeMessage> = Object.freeze(
+  [] as AnthropicNativeMessage[]
+);
+
 export interface TuiSessionState {
   /** undefined = lazy draft (createSession not yet called). */
   readonly conversationId: string | undefined;
@@ -167,16 +172,25 @@ export interface TurnFinishedInput {
  * session-store SSOT `jsonDeepEqual`: a key present with value `undefined`
  * is treated as absent (plain-JSON semantics), matching how a rehydrated
  * transcript looks after a JSON round-trip.
+ *
+ * A partial-seed prior state (e.g. `{}` cast via `as never`, no `messages`
+ * key) has no references to reuse: it degrades to a wholesale copy of the
+ * input instead of throwing (the guard 611aa6d7's transcript-first-cut
+ * commit message stated but did not implement).
  */
 function reuseMessageReferences(
-  prev: ReadonlyArray<AnthropicNativeMessage>,
+  prev: ReadonlyArray<AnthropicNativeMessage> | undefined,
   next: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlyArray<AnthropicNativeMessage> {
+  // Frozen module constant: the fully-equal exit leg on a missing prev and an
+  // empty input must still hand back a frozen array (Object.freeze discipline).
+  const prevMessages = prev ?? EMPTY_MESSAGES;
   let i = 0;
-  const limit = Math.min(prev.length, next.length);
-  while (i < limit && jsonDeepEqual(prev[i], next[i])) i++;
-  if (i === prev.length && i === next.length) return prev; // EXIT: fully content-equal projection
-  return Object.freeze(prev.slice(0, i).concat(next.slice(i)));
+  const limit = Math.min(prevMessages.length, next.length);
+  while (i < limit && jsonDeepEqual(prevMessages[i], next[i])) i++;
+  if (i === prevMessages.length && i === next.length)
+    return prevMessages; // EXIT: fully content-equal projection
+  return Object.freeze(prevMessages.slice(0, i).concat(next.slice(i)));
 }
 
 /** Turn end (natural completion / cancelled / timeout all land here): back to idle + whole frozen replacement. */
