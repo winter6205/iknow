@@ -1,5 +1,5 @@
 /**
- * T3 (plans/worktree-isolation-on-mutate.md) — session-api host seam:
+ * Session-api host seam:
  * task worktree provisioning + session-root rebind.
  *
  * The provisioner owns the "create → rebind" pipeline on the host side:

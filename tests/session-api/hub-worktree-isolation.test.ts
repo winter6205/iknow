@@ -1,5 +1,5 @@
 /**
- * T3 (plans/worktree-isolation-model-provision.md) — wiring test: hub →
+ * Wiring test: hub →
  * buildHarnessEngine → worktree isolation gate (full chain, real git).
  *
  * Pins the end-to-end contract for the ON path under the ADR-0037 amendment
@@ -1219,7 +1219,7 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
   });
 
-  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-worktree.md):
+  // ADR-0037 §6 amendment 2026-09-07:
   // the two usable-repo layouts — a bare gitdir with commits, and a
   // core.bare=true checkout holding the working files — must provision +
   // rebind through the hub exactly like a normal repo. The not_a_git_repo
@@ -1327,7 +1327,7 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
 // -- T4: create-worktree ACI tool (model-facing provision entry) ---------
 
 /**
- * T4 (plans/worktree-isolation-model-provision.md) — the model calls the
+ * The model calls the
  * `create-worktree` ACI tool through the SAME gated executor the loop
  * engine uses (executeAll carries conversationId). These tests pin:
  *   - the tool is present in the session engine's registry whenever the host
@@ -1592,7 +1592,7 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
 // -- T7: enter-worktree (explicit adoption of an existing task worktree) --
 
 /**
- * T7 (plans/worktree-isolation-model-provision.md) - the enter face of the
+ * The enter face of the
  * tool contract: session B, anchored at the MAIN repo, calls the
  * enter-worktree ACI tool through its engine executor (target = the
  * tree conversation A owns) and lands ON A's tree. Authorization lives in
@@ -1749,7 +1749,7 @@ describe("worktree isolation wiring (T7 - enter-worktree)", () => {
 // -- T8: exit-worktree (symmetric return to the main repo root) ----------
 
 /**
- * T8 (plans/worktree-isolation-model-provision.md) - the exit face of the
+ * The exit face of the
  * tool contract: a session currently rebound to a task worktree calls the
  * exit-worktree ACI tool and returns to the MAIN repo root. The tree is
  * preserved (orphan cleanup is a plan non-goal); after the conditional save

@@ -1,7 +1,7 @@
 /**
- * T2: SessionHub per-root engine cache + serve unbound postMessage reject.
+ * SessionHub per-root engine cache + serve unbound postMessage reject.
  *
- * Acceptance (plans/serve-workspace.md T2):
+ * Acceptance:
  *   - surface serve + session without workspaceRoot → ValidationError field
  *     workspaceRoot, before ensureDeps / buildHarnessEngine(cwd)
  *   - after bindWorkspace, createSession writes the root; engine factory sees

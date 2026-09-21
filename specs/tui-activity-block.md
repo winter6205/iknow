@@ -1,8 +1,8 @@
 # Spec: tui-activity-block — TUI activity blocks (shared body slot for thinking and quiet tools)
 
-> Input = `plans/tui-activity-block.md` (ACR 5/5 yes; 8 interview-locked sentences; this worktree flushes `docs/CONTEXT.md` together with the plan persist).
-> Revision = `plans/tui-activity-block-live-signal.md` (locked sentences 1–9; supersedes "live quiet = retract everything", locking in the **live noise vs live signal** split and the `web_search` / `web_fetch` solid cards; the Locked sentences section below is the current contract, the Live-signal revision section is the revision layer).
-> Revision 2 = `plans/tui-thinking-at-bottom.md` (locked sentences 1–6; supersedes Live-signal locked sentence 1's "thinking is always drawn **above** the actions it drives", re-pinning **live thinking at the very bottom / in-place `Thought for` / sink order matching the timeline**).
+> Input = the interview plan (ACR 5/5 yes; 8 interview-locked sentences; this worktree flushes `docs/CONTEXT.md` together with the plan persist).
+> Revision = live-signal plan (locked sentences 1–9; supersedes "live quiet = retract everything", locking in the **live noise vs live signal** split and the `web_search` / `web_fetch` solid cards; the Locked sentences section below is the current contract, the Live-signal revision section is the revision layer).
+> Revision 2 = thinking-at-bottom plan (locked sentences 1–6; supersedes Live-signal locked sentence 1's "thinking is always drawn **above** the actions it drives", re-pinning **live thinking at the very bottom / in-place `Thought for` / sink order matching the timeline**).
 > Scope = TUI process chrome is cut into **activity blocks** per assistant message; a pure derivation module produces the block list and ChatView only consumes it; no Ctrl+O changes, no `thinkingMs` persistence changes, no harness tool-shape changes, no web changes.
 > Landing = T1 this spec → T3–T7 implementation (TDD) → code-review → verification-before-completion.
 
@@ -45,7 +45,7 @@ This contract supersedes the following three current behaviors (implementation m
 
 **Not authorized** (explicitly excluded from this slice): Ctrl+O expansion, changing the `thinkingMs` persistence algorithm, changing the keep / accent / failure classification table, changing the non-TUI CLI surface, changing web.
 
-## Live-signal revision (plans/tui-activity-block-live-signal.md locked sentences 1–9)
+## Live-signal revision (locked sentences 1–9)
 
 The revision layer supersedes "live quiet = fold the whole current retract table into activity blocks": **what enters a block while live** is now decided by the live noise / live signal split (the settled-side retract counting is unchanged). Locked sentences follow; where they conflict with the eight above, this section wins:
 
@@ -67,7 +67,7 @@ The revision layer supersedes "live quiet = fold the whole current retract table
 
 **Not authorized** (revision-layer exclusions): Ctrl+O, thinking peek line counts, changing `thinkingMs` persistence, unfurling `read_file` bodies, restoring `web_search` count welding into the thinking title.
 
-## Thinking-at-bottom revision (plans/tui-thinking-at-bottom.md locked sentences 1–6)
+## Thinking-at-bottom revision (locked sentences 1–6)
 
 A revision of the revision layer: the **position contract** is re-pinned to "at the bottom"; everything else (live noise / signal split, adjacent welding, `hideThinking` semantics, `thinkingMs` persistence algorithm) is inherited from the Live-signal revision. Where it conflicts with the above, this section wins — the only current locked sentence superseded here is Live-signal locked sentence 1's "thinking is always drawn **above** the batch of actions it drives".
 
@@ -203,7 +203,7 @@ Not answered this cycle (out of scope, declared rather than silent):
 
 ## ACR Verdict (architecture-change-reviewer · 5-verdict gate)
 
-> From `plans/tui-activity-block.md` (that plan already contains the ACR section; transcribed here as recorded).
+> From the interview plan (which already contains the ACR section; transcribed here as recorded).
 
 ```text
 bounded-context-guardian: yes — chrome stays only in the tui display surface; harness tool shapes unchanged, session transcript / thinkingMs persistence unchanged, web unchanged.

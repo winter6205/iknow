@@ -12,7 +12,7 @@
  * `fs.read` of file contents); treated as a meta-query, not a read.
  *
  * Mirror of `IknowIdentityError` (`identity/workspace.ts:37-41`)
- * discriminated union. Full spec: `plans/workspace-root-launch.md` T1.
+ * discriminated union.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -21,7 +21,7 @@ import path from "node:path";
 export const WORKSPACE_ROOT_ENV_KEY = "IKNOW_WORKSPACE_ROOT";
 
 /**
- * T3 (plans/worktree-session-roots.md / ADR-0037 §4): env var carrying the
+ * ADR-0037 §4: env var carrying the
  * session's `productRoot` across a process boundary (parent session → subagent
  * worker). Lives beside `WORKSPACE_ROOT_ENV_KEY` because both are root env
  * keys; the roles differ — `workspaceRoot` anchors per-root state, while

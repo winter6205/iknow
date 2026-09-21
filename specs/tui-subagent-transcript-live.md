@@ -3,9 +3,9 @@
 **Status:** ready for plan
 **Surface:** `src/tui/subagent-message-lines.ts`, `src/tui/live-tool-preview.tsx`, `src/tui/message-blocks.tsx`, `src/tui/app.tsx`, `src/harness/subagent/manager.ts` (read-only projection)
 
-> Input = `plans/tui-subagent-transcript-live.md` (ACR 5/5 yes; nine locked sentences; the `docs/CONTEXT.md` entry `subagent card live` already flushed).
+> Input = the interview plan (ACR 5/5 yes; nine locked sentences; the `docs/CONTEXT.md` entry `subagent card live` already flushed).
 > Supersedes = Slice D / SC14, which made the two lines chrome above the prompt (`SubagentIdentityStrip`) — this spec re-awards the position to **the `spawn_subagent` card inside the session transcript**.
-> **Reopen (`plans/strategy-window-and-subagent-card.md` T1)**: locked sentence 2 / the completed-state table / SC2 — after completion the summary stays and gains `✓ Done`; line 2 is no longer replaced by a literal `done`, and `running...` is no longer kept either.
+> **Reopen (strategy-window plan)**: locked sentence 2 / the completed-state table / SC2 — after completion the summary stays and gains `✓ Done`; line 2 is no longer replaced by a literal `done`, and `running...` is no longer kept either.
 > Scope = position move + completed state + read-only `toolUseId` join; SubagentPanel, harness spawn/abort, web, Ctrl+X, and activity-block live-signal are untouched.
 > Landing = T1 this spec → T2 projection (incl. `listSubagents` read-only `toolUseId`) → T3 card carries the two lines, strip removal → code-review → verification-before-completion.
 
@@ -24,7 +24,7 @@ A live sub-agent is no longer drawn directly above the input box; it is drawn un
 
 ## Locked sentences
 
-Nine locked sentences (inherited from `plans/tui-subagent-transcript-live.md`; implementation and review both defer to them):
+Nine locked sentences (from the interview plan; implementation and review both defer to them):
 
 1. Each live `spawn_subagent` occupies two lines on **that card in the session transcript**: line 1 `{role} running...` (three dots), line 2 dim = that worker's task summary (`taskPreview`).
 2. Once the worker is **completed**, the task summary stays, with a green `✓ Done` beneath it; the summary must not be replaced by a literal `done`; `running...` must not appear again. Nothing moves next to the input box, and nothing disappears with the bottom panel's fade-out.
@@ -115,7 +115,6 @@ Both hosts share the table above: the live tail (`liveToolPreviewBox` / `liveToo
 
 ## Evidence pointers
 
-- Plan: `plans/tui-subagent-transcript-live.md` (position move); completed-state revision: `plans/strategy-window-and-subagent-card.md`.
 - Predecessor: Slice D / SC14 (`specs/agent-control-surface.md`, archived) landed the two lines as chrome above the prompt.
 - Domain term: the `docs/CONTEXT.md` entry **subagent card live** (flushed; this slice lands it).
 - Join-key upstream: `SubAgentDefinition.toolUseId` (`src/harness/subagent/role.ts`) ← `ToolExecutionContext.toolUseId` (executor `call.id`) ← written into the def by `spawn-subagent-tool`.

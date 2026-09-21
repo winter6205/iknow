@@ -1,6 +1,5 @@
 /**
- * hard-wall: root `find` walks are denied before spawn (T4,
- * plans/tui-durable-open.md).
+ * Hard-wall: root `find` walks are denied before spawn.
  *
  * Invariant pinned here: a `find` whose search root denotes the filesystem
  * root never reaches the bash handler — no grant, no `full_auto`, and no

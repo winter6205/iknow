@@ -102,4 +102,4 @@ minimal-change-verifier: yes — only the skill model-index increment + one huma
 
 ## Persist
 
-Already flushed: ADR-0098, four CONTEXT.md entries plus vs sections, the CLI pointer in `specs/tui-skill-slash-catalog.md`, the current-status line in `docs/STATUS.md`, `plans/skill-index-increment.md`.
+Already flushed: ADR-0098, four CONTEXT.md entries plus vs sections, the CLI pointer in `specs/tui-skill-slash-catalog.md`, the current-status line in `docs/STATUS.md`.

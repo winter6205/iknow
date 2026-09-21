@@ -1,7 +1,7 @@
 /**
- * serve-workspace T3 — workspaces-recents module tests.
+ * Workspaces-recents module tests.
  *
- * Acceptance (plans/serve-workspace.md T3):
+ * Acceptance:
  *   - parse_failed on corrupt JSON / non-object JSON
  *   - io_error when path is unreadable (EISDIR probe)
  *   - concurrent_write on expectedRev mismatch (rev-based optimistic CAS)

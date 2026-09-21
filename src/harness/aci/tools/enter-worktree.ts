@@ -1,9 +1,8 @@
 /**
  * src/harness/aci/tools/enter-worktree.ts
  *
- * T7 (plans/worktree-isolation-model-provision.md) — the explicit-enter ACI
- * tool of the model-provision contract (ADR-0037 amended 2026-08-30, T7
- * tool-surface extension): when worktree isolation is ON, a session anchored
+ * The explicit-enter ACI tool of the model-provision contract (ADR-0037
+ * amended 2026-08-30, tool-surface extension): when worktree isolation is ON, a session anchored
  * at the MAIN repo can adopt an EXISTING task worktree of THIS repository —
  * including the tree another conversation owns — by passing the owner's
  * conversationId or a unique label returned by list-worktrees. The target

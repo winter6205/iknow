@@ -1,9 +1,8 @@
 /**
  * src/harness/aci/tools/exit-worktree.ts
  *
- * T8 (plans/worktree-isolation-model-provision.md) — the symmetric-exit ACI
- * tool of the model-provision contract (ADR-0037 amended 2026-08-30, T8
- * tool-surface extension): a session currently rebound to a task worktree
+ * The symmetric-exit ACI tool of the model-provision contract (ADR-0037
+ * amended 2026-08-30, tool-surface extension): a session currently rebound to a task worktree
  * returns to its MAIN repo root. Takes no parameters — the tree is the
  * engine root, and the main repo root is derived from the tree itself by
  * the host seam (git common dir; restart-safe). The task worktree is

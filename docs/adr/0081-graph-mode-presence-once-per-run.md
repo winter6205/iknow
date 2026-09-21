@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-An earlier design (ADR-0080) appended the short `<graph_mode>` presence line on every inner-loop hop about to call the model. Repeatedly appending the same line per hop would flood the transcript with duplicate presence lines, and on the human-facing surface — if not filtered — they would read as user bubbles.
+An earlier design appended the short `<graph_mode>` presence line on every inner-loop hop about to call the model. Repeatedly appending the same line per hop would flood the transcript with duplicate presence lines, and on the human-facing surface — if not filtered — they would read as user bubbles.
 
 ## Decision
 
