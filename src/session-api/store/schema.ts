@@ -49,7 +49,10 @@
  * `extractRecentUserTasks` (compact-boundary recent-tasks excerpt).
  */
 import path from "node:path";
-import type { AnthropicNativeMessage } from "../../harness/index.js";
+import type {
+  AnthropicNativeMessage,
+  TokenUsage,
+} from "../../harness/index.js";
 import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 
 /** Why a turn ended in an interrupt state — the checkpoint's discriminating
@@ -180,6 +183,14 @@ export interface SessionFileV1 {
    *  stays 5). Array length is not enforced (consumers fall back with
    *  ?? undefined, as today for messageCreatedAt). */
   readonly thinkingMs?: ReadonlyArray<number | null>;
+  /** Additive (CURRENT stays 5): usage of the latest successful model call,
+   *  mirroring `RunResult.lastUsage`. Display-only replay source for the
+   *  context-usage bar (TUI attach / web load) so a session that ever had a
+   *  successful usage never reopens at 0% (#1079). Absent = no successful
+   *  usage ever persisted (legacy files load unchanged → 0% posture); the
+   *  writers omit the key when usage is null and validate the shape when
+   *  present (never silently coerce). */
+  readonly lastUsage?: TokenUsage;
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -262,6 +273,16 @@ export function validateSessionFile(value: unknown): string | null {
     !isValidThinkingMs(obj["thinkingMs"])
   ) {
     return "thinkingMs";
+  }
+  // Additive optional TokenUsage: absent is valid (no usage ever recorded —
+  // legacy files and never-successful sessions). Present values must match
+  // the harness TokenUsage shape; a malformed object fails validate with
+  // field "lastUsage" instead of poisoning the display readers with NaN
+  // arithmetic (never silently coerce — same posture as goal / workspaceRoot).
+  // Whole-field null is rejected: the writers omit the key on null usage, and
+  // JSON round-trip only spells inner cache holes as null, never the record.
+  if (obj["lastUsage"] !== undefined && !isValidUsageRecord(obj["lastUsage"])) {
+    return "lastUsage";
   }
   return null;
 }
@@ -672,4 +693,45 @@ function isValidThinkingMs(value: unknown): boolean {
     if (typeof el !== "number") return false;
   }
   return true;
+}
+
+/** File-level lastUsage shape check (mirrors harness TokenUsage): all four
+ *  members required — input/output token counts finite numbers, cache counts
+ *  number | null (JSON round-trips the null holes). No value-bound checks:
+ *  the only writers persist complete RunResult.lastUsage readings. A partial
+ *  or non-finite object can only come from a broken writer, so it fails
+ *  validate loudly instead of reaching the bar's arithmetic. */
+function isValidUsageRecord(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  if (
+    typeof o["inputTokens"] !== "number" ||
+    !Number.isFinite(o["inputTokens"]) ||
+    typeof o["outputTokens"] !== "number" ||
+    !Number.isFinite(o["outputTokens"])
+  ) {
+    return false;
+  }
+  return (
+    isNullishNumber(o["cacheCreationInputTokens"]) &&
+    isNullishNumber(o["cacheReadInputTokens"])
+  );
+}
+
+function isNullishNumber(value: unknown): boolean {
+  return (
+    value === null || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+/** Single persistence rule for lastUsage (#1079): a non-null reading persists
+ *  as `{ lastUsage }`; null omits the key so an earlier persisted reading
+ *  survives reopen (a session that ever had a successful usage never regresses
+ *  to 0%). Every writer of a persisted lastUsage spread calls this — the
+ *  invariant stays in one place instead of scattered inline conditionals.
+ *  Internal to the module tree: not re-exported through store/index.js. */
+export function persistedLastUsage(usage: TokenUsage | null): {
+  readonly lastUsage?: TokenUsage;
+} {
+  return usage !== null ? { lastUsage: usage } : {};
 }

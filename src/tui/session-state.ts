@@ -95,8 +95,10 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     jsonMode: file.jsonMode,
     runState: "idle",
     lastStopReason: undefined,
-    // lastUsage comes only from runtime receipts, never from the session file (initial null).
-    lastUsage: null,
+    // #1079: reopen replays the file's persisted usage snapshot so a session
+    // that ever had a successful usage never reopens at 0%. Missing field
+    // (legacy file / never-successful session) → null → 0% (never chars/N).
+    lastUsage: file.lastUsage ?? null,
     // ADR-0037: the rebound task-worktree root is restored with the session file (still current after restart).
     workspaceRoot: file.workspaceRoot,
     // Carry the persisted parallel array into session state — fold lines
@@ -173,6 +175,19 @@ export function turnFinished(
     // Refresh thinkingMs from the persisted file; absent -> keep the existing array (partial-recovery case).
     thinkingMs: input.thinkingMs ?? session.thinkingMs,
   });
+}
+
+/**
+ * #1079 call-beat: replace the usage reading mid-run when a context_usage
+ * stream event arrives (pre-call measurement or post-call correction),
+ * without touching run state or messages. Whole-replacement freeze discipline
+ * as in every other reducer here.
+ */
+export function withLastUsage(
+  session: TuiSessionState,
+  usage: TokenUsage
+): TuiSessionState {
+  return Object.freeze({ ...session, lastUsage: usage });
 }
 
 /** Foreground interrupt guard (consumed by Esc): only running-fg can be interrupted. */

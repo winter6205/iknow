@@ -93,6 +93,7 @@ import {
   turnFinished,
   turnStarted,
   userMessageEchoed,
+  withLastUsage,
   type TuiSessionState,
   type TuiView,
 } from "./session-state.js";
@@ -2822,6 +2823,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         if (nextEnv !== null) {
           setEnvSnapshot(nextEnv);
         }
+      }
+      if (event.type === "context_usage") {
+        // #1079 call-beat: replace this conversation's usage reading mid-run
+        // (pre-call measurement, then post-call correction of the same call).
+        // UI-only display input; never feeds model-facing fields.
+        setSessions((prev) => {
+          const current = prev[targetId];
+          if (!current) return prev;
+          return {
+            ...prev,
+            [targetId]: withLastUsage(current, event.usage),
+          };
+        });
       }
       const nextGraph = graphProgressFromEvent(event);
       if (nextGraph !== undefined) {

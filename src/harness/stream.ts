@@ -32,6 +32,7 @@
 import type { AgentStatusSnapshot } from "./agent-status.js";
 import type { EnvSnapshot } from "./env-snapshot.js";
 import type { GraphProgressSnapshot } from "./graph/progress.js";
+import type { TokenUsage } from "./model-adapter/types.js";
 
 export type HarnessStreamEvent =
   | { type: "text_delta"; text: string }
@@ -122,6 +123,24 @@ export type HarnessStreamEvent =
       attempt: number;
       maxAttempts: number;
       detail: string;
+    }
+  // Context-usage call-beat reading (#1079 Track A) — the display truth for
+  // the usage bar, one beat per model call instead of one per run(). Two
+  // phases ride the same event: `pre_call` is emitted at the same turn
+  // boundary as `agent_status` / `env_snapshot`, just before the model call,
+  // and carries the **measured** outgoing input occupancy (system + tools +
+  // messages via `ModelAdapter.countTokens`; outputTokens 0 / cache null —
+  // nothing is invented for fields the measurement cannot know);
+  // `post_call` is emitted as soon as that call succeeds and carries the
+  // call's real API usage (the `AssistantTurnResult.usage` sealed
+  // passthrough). A beat without a successful real reading emits nothing —
+  // chars/N estimation must never fill the bar (ADR-0008 D6). Hosts narrow
+  // on `phase` only if they distinguish; the TUI display consumes both
+  // phases verbatim as the latest reading.
+  | {
+      type: "context_usage";
+      phase: "pre_call" | "post_call";
+      usage: TokenUsage;
     };
 
 /**

@@ -28,6 +28,7 @@ import {
   turnFinished,
   turnStarted,
   userMessageEchoed,
+  withLastUsage,
 } from "../../src/tui/session-state.js";
 import {
   IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -92,7 +93,19 @@ describe("session-state: draft / attach", () => {
     expect(attached.messages).not.toBe(file.messages);
   });
 
-  test("attachSession：lastUsage 初值 null（lastUsage 只来自运行时回执，不从文件读）", () => {
+  test("attachSession：lastUsage 从会话文件回放（#1079 重开不得回 0%）", () => {
+    // Invariant: a session that ever had a successful usage must not reopen at
+    // 0%; a legacy file without the field loads null (0% posture, never
+    // chars/N). SSOT: ADR-0008 amendment / CONTEXT "context usage (display)".
+    const usage = {
+      inputTokens: 12800,
+      outputTokens: 7,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: 2048,
+    };
+    expect(attachSession(sampleFile({ lastUsage: usage })).lastUsage).toEqual(
+      usage
+    );
     expect(attachSession(sampleFile()).lastUsage).toBeNull();
   });
 });
@@ -151,6 +164,23 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(done.messages).toHaveLength(2);
     expect(done.lastStopReason).toBe("completed");
     expect(Object.isFrozen(done.messages)).toBe(true);
+  });
+
+  test("withLastUsage：mid-run 用量替换 —— 新冻结整体，原 state 不动，其余字段保留", () => {
+    const started = turnStarted(createDraftSession());
+    const usage = {
+      inputTokens: 12800,
+      outputTokens: 7,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const next = withLastUsage(started, usage);
+    expect(next).not.toBe(started);
+    expect(next.lastUsage).toEqual(usage);
+    // 纯替换：原对象不被修改（Object.freeze 纪律下的整体替换语义）
+    expect(started.lastUsage).toBeNull();
+    expect(next.runState).toBe("running-fg");
+    expect(Object.isFrozen(next)).toBe(true);
   });
 
   test("turnFinished：cancelled 也落回 idle（hub DROP_REASONS 不落盘由 hub 保证）", () => {
