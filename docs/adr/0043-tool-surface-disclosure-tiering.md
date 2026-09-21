@@ -3,7 +3,7 @@
 Date: 2026-09-04
 Status: accepted
 
-> **Amendment 2026-09-06**（ADR-0046 / `specs/disclosure-index-align.md`）：§2「完整定义经 tool_search」「未加载即调用 → 报错并提示先 tool_search」、§5「要用即走 tool_search」、§7「信息由名字目录 + tool_search 结果消息承载」中**必经 tool_search** 的读法 **superseded**。名字目录默认名+短描述（#631 T2）；有描述则直呼 `discover`；`tool_search` 仅当前缀无描述。schema 不 upfront、开局等待、前缀冻结、§3 schema 退场次序与 10% 闸仍有效。
+> **Amendment 2026-09-06**（ADR-0046）：§2「完整定义经 tool_search」「未加载即调用 → 报错并提示先 tool_search」、§5「要用即走 tool_search」、§7「信息由名字目录 + tool_search 结果消息承载」中**必经 tool_search** 的读法 **superseded**。名字目录默认名+短描述；有描述则直呼 `discover`；`tool_search` 仅当前缀无描述。schema 不 upfront、开局等待、前缀冻结、§3 schema 退场次序与 10% 闸仍有效。
 
 ## Context
 

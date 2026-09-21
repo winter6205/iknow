@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-MCP 短描述曾由 #631 T2 进 system，被 ADR-0043 B4 收成裸名；`skill_search` 与「未加载必须 tool_search」把检索和加载焊死。本票修订 ADR-0043 §2/§5/§7 中「必经 tool_search」读法，不推翻 schema 不 upfront、开局等待、前缀冻结。
+MCP 短描述曾一度进 system，被 ADR-0043 B4 收成裸名；`skill_search` 与「未加载必须 tool_search」把检索和加载焊死。本票修订 ADR-0043 §2/§5/§7 中「必经 tool_search」读法，不推翻 schema 不 upfront、开局等待、前缀冻结。
 
 ## Decision
 
@@ -21,5 +21,5 @@ MCP 短描述曾由 #631 T2 进 system，被 ADR-0043 B4 收成裸名；`skill_s
 
 ## Consequences
 
-- **正面 / Applied:** #631 短描述与 ADR-0043 前缀冻结可并存；`tool_search` 岗位收窄为无描述。
+- **正面 / Applied:** 短描述与 ADR-0043 前缀冻结可并存；`tool_search` 岗位收窄为无描述。
 - **负面 / Trade-offs:** 仅剩名字的 MCP 仍可能关键词 miss；本票不升级检索算法。

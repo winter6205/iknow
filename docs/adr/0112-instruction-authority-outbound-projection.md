@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-GH #1066 暴露的问题：模型对「官方外形」的信赖建立在**消息长相**上——工具结果里出现一段完整的 `<agent_status>` 或系统前缀式文本，就能在指令面冒充宿主帧抬权。现有读规则（`IKNOW_AGENT_STATUS_READ_RULE`）宣称 transcript 里最新的 XML 标签权威，等于把防伪交给「模型读同一串字、靠自觉」。
+暴露的问题：模型对「官方外形」的信赖建立在**消息长相**上——工具结果里出现一段完整的 `<agent_status>` 或系统前缀式文本，就能在指令面冒充宿主帧抬权。现有读规则（`IKNOW_AGENT_STATUS_READ_RULE`）宣称 transcript 里最新的 XML 标签权威，等于把防伪交给「模型读同一串字、靠自觉」。
 
 三条既有裁决界定了本决策的落点：
 
@@ -42,9 +42,9 @@ GH #1066 暴露的问题：模型对「官方外形」的信赖建立在**消息
 - **KV 前缀稳定**：投影是纯函数，wire 字节只随历史增长而追加，不随拼装时序漂移。
 - **磁盘可脏、wire 是派生视图**：权威 transcript 里假标签原样存在（审计、复现不受损），只有出站字节被转译——与 observability side-channel / 契约 X 同构。
 - **不替代 sink**：普通句子里的「去做 X」仍可能被模型执行；指令权威与能力权威分两层，权限、沙箱、egress 仍是能力面的执法者。拆假门牌 ≠ 免疫自然语言间接注入。
-- 落地面：`src/harness/model-adapter/`（出站缝加深为投影）、`src/harness/loop-engine.ts`（宿主注入 commit 盖戳）、`src/harness/subagent/worker.ts`（constitution vs addendum）、读规则常量与黄金集（T3）、根 README Features 一行（T5，排在能力落地后）。
+- 落地面：`src/harness/model-adapter/`（出站缝加深为投影）、`src/harness/loop-engine.ts`（宿主注入 commit 盖戳）、`src/harness/subagent/worker.ts`（constitution vs addendum）、读规则常量与黄金集、根 README Features 一行（排在能力落地后）。
 
 ## Evidence pointers
 
-- GH #1066；`specs/instruction-authority-projection.md` Settled invariants 1–6。
+- `specs/instruction-authority-projection.md` Settled invariants 1–6。
 - ADR-0009（labeling 不是防御）、ADR-0028（栏进 messages 不进 system）、ADR-0044（低完整度来源不买 system 席位）、ADR-0036（磁盘真源 ≠ 模型可见字节）。

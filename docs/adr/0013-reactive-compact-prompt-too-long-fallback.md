@@ -61,7 +61,7 @@ R1 已证 adapter 层对其零翻译,裸 rethrow 到 `loop-engine.ts:430-439` �
 - `src/harness/loop-engine.ts:430-439` — 唯一 `ProtocolError` 捕获点 (reactive 分支落点)。
 - `src/harness/model-adapter/anthropic-adapter.ts:643/:510` — 两个 SDK 调用点
   (reactive try/catch 落点)。
-- R1 ticket (#271, closed) — adapter 错误翻译 inventory;验证 prompt-too-long
+- R1 ticket (closed) — adapter 错误翻译 inventory;验证 prompt-too-long
   当前零翻译、裸 rethrow 崩 run。
 - 基准: `query.py:768-777`
   (reactive compact → continue) · `query.py:66-87` (`_is_prompt_too_long_error`) ·

@@ -1,9 +1,9 @@
-# 0020. trace 检测读侧融合回 `iknow serve`：同进程路由子树挂载（推翻 #183 独立进程拆分）
+# 0020. trace 检测读侧融合回 `iknow serve`：同进程路由子树挂载（推翻独立进程拆分）
 
 Date: 2026-08-17
 Status: accepted
 
-Context: PR #183（commit `9ae9cf5e`，spec 归档于 `docs/archive/025-retire-completed-specs-and-plans/specs/iknow-trace-standalone-service.md`）把 trace 读 API 从 `iknow serve` 拆成独立 `iknow trace` 进程（默认 24881），三条理由：慢读拖累对话、故障不隔离、独立部署/横扩。2026-08-17 复盘：trace 是 **A-scenario（developer local debug）专用**（ADR-0003，B-scenario production OTel 显式排除），单用户本机调试无横扩语义；前两条理由可由 per-query cap（reader 已有 `MAX_TRACE_BYTES` 8MiB 封顶）与路由级 try/catch 缓解，不依赖分进程。同时双进程带来真实成本：两个端口心智、两个 SPA 同源却跨 origin 无法互链、启动提示要用户另起一条命令。决策者裁定融合。
+Context: 该 PR（commit `9ae9cf5e`）把 trace 读 API 从 `iknow serve` 拆成独立 `iknow trace` 进程（默认 24881），三条理由：慢读拖累对话、故障不隔离、独立部署/横扩。2026-08-17 复盘：trace 是 **A-scenario（developer local debug）专用**（ADR-0003，B-scenario production OTel 显式排除），单用户本机调试无横扩语义；前两条理由可由 per-query cap（reader 已有 `MAX_TRACE_BYTES` 8MiB 封顶）与路由级 try/catch 缓解，不依赖分进程。同时双进程带来真实成本：两个端口心智、两个 SPA 同源却跨 origin 无法互链、启动提示要用户另起一条命令。决策者裁定融合。
 
 Decision: `iknow serve` 同进程、同端口（8787）挂载 trace 读侧路由子树 + `/trace` SPA；`iknow trace` 默认行为反转为探测入口（`--separate` escape hatch 保留独立进程）。写侧（`src/harness/trace/` 经 `session-api/hub.ts`）零改动。`src/traceserver/` 与 `src/session-api/` 保持兄弟目录（S1 bounded context），不物理合并。
 
@@ -17,6 +17,6 @@ Decision: `iknow serve` 同进程、同端口（8787）挂载 trace 读侧路由
 - **D2.2 `--separate` escape hatch**：保留现行为（独立进程 24881，动态 import `traceserver/serve.js` 保留——chat/ask 启动路径零新增依赖）。
 - **D2.3 legacy 检测**：`detectLegacyTrace` fail-fast 保留，且先于探测执行（两种模式都需要迁移后的目录语义）。
 
-Consequences: (1) CHANGELOG Breaking：`iknow trace` 默认行为反转；脚本依赖旧行为者用 `iknow trace --separate`。(2) 慢读缓解依赖 per-query cap（MAX_TRACE_BYTES + result-row cap），极端大 trace 单查询仍可能短暂阻塞 event loop——A-scenario 可接受，B-scenario 由 OTel 路径解决（ADR-0003 排除范围内）。(3) standalone 别名 `/api/v1/sessions` 保留一个版本后删除。(4) `tests/session-api/trace-mount-removed.test.ts`（#183 回归守卫）重命名为 `trace-mounted.test.ts` 并反转断言。(5) 同进程单端口消除双 origin 割裂——chat ↔ trace 页面可普通互链（`/trace?session=<id>` deep-link），trace 数据与 serve 写侧天然同进程（hub 每会话写 `<traceDir>/<convId>.jsonl`，读侧就地可见）。
+Consequences: (1) CHANGELOG Breaking：`iknow trace` 默认行为反转；脚本依赖旧行为者用 `iknow trace --separate`。(2) 慢读缓解依赖 per-query cap（MAX_TRACE_BYTES + result-row cap），极端大 trace 单查询仍可能短暂阻塞 event loop——A-scenario 可接受，B-scenario 由 OTel 路径解决（ADR-0003 排除范围内）。(3) standalone 别名 `/api/v1/sessions` 保留一个版本后删除。(4) `tests/session-api/trace-mount-removed.test.ts`（回归守卫）重命名为 `trace-mounted.test.ts` 并反转断言。(5) 同进程单端口消除双 origin 割裂——chat ↔ trace 页面可普通互链（`/trace?session=<id>` deep-link），trace 数据与 serve 写侧天然同进程（hub 每会话写 `<traceDir>/<convId>.jsonl`，读侧就地可见）。
 
-Evidence: `plans/merge-trace-into-serve.md`（ACR 5 维 PASS：Pass 1 三 yes + Pass 2 两 unclear 维度补 5-boundary-classes 映射与 commit 策略后复审 yes）；issue #492（D1）/ #493（D2）。
+Evidence: ACR 5 维 PASS（Pass 1 三 yes + Pass 2 两 unclear 维度补 5-boundary-classes 映射与 commit 策略后复审 yes）；对应 D1 / D2。

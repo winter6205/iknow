@@ -26,7 +26,7 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 
 本 ADR 原决策「`NINE_ROUTER_KEY` 焊进 env.ts 作 key 变量名默认」的**现态部分**已修正：`src/config/env.ts` 的 fallback 从 `NINE_ROUTER_KEY` 改为 `ANTHROPIC_AUTH_TOKEN`，对齐实际部署（部署环境只有 `ANTHROPIC_AUTH_TOKEN`，无 `NINE_ROUTER_KEY`）+ 通用生态命名。
 
-**为何修正（不是推翻整条 ADR）：** ADR-0001 的核心主张 -- "key 变量名 + 主模型作为代码默认焊进 env.ts，`.env.local` 只持值" -- 依然成立并保留。被修正的只是"具体变量名选哪个"这一可逆细节：`NINE_ROUTER_KEY` 是 9router 专属命名，对不接触 9router 历史的人/项目是噪声（issue #173 暴露的探针变量名漂移即其一）；`ANTHROPIC_AUTH_TOKEN` 是通用生态名，新 clone 配一个变量即跑。
+**为何修正（不是推翻整条 ADR）：** ADR-0001 的核心主张 -- "key 变量名 + 主模型作为代码默认焊进 env.ts，`.env.local` 只持值" -- 依然成立并保留。被修正的只是"具体变量名选哪个"这一可逆细节：`NINE_ROUTER_KEY` 是 9router 专属命名，对不接触 9router 历史的人/项目是噪声（探针变量名漂移即其一）；`ANTHROPIC_AUTH_TOKEN` 是通用生态名，新 clone 配一个变量即跑。
 
 **未变部分：**
 
@@ -34,7 +34,7 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 - `.env.local` 只持值、`IKNOW_LLM_API_KEY_ENV` 可覆盖变量名 -- 保留（机制不变，只是默认值变了，原 `.env.local` 里冗余的 `IKNOW_LLM_API_KEY_ENV=ANTHROPIC_AUTH_TOKEN` 行可删）。
 - `process.env > .env.local > .env` 优先级 -- 保留。
 
-**关联：** issue #173（探针变量名漂移）、PR #190。历史叙事中的 `NINE_ROUTER_KEY` / `NINE_ROUTER_API_KEY` 字面值在 CHANGELOG / handoff / plans 等历史记录中保留不擦（git 可追溯性）。
+**关联：** 历史叙事中的 `NINE_ROUTER_KEY` / `NINE_ROUTER_API_KEY` 字面值在 CHANGELOG / handoff / plans 等历史记录中保留不擦（git 可追溯性）。
 
 ---
 
@@ -46,7 +46,7 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 
 ## Update (2026-08-12): 模型默认条款 supersede — settings.llm.model 可配置，移除 hardcoded m3-combo
 
-本 ADR 原决策「`m3-combo` 作为主模型焊进 `src/config/env.ts` 代码默认」的**现态部分**已由 settings 机制（#353 第二阶段）supersede：模型默认从「焊死」改为「可配置 + fail-fast」——`src/config/settings.ts` 的 `IknowSettingsLlm` 新增 `model?: string` 与 `fallback?: string[]` 字段，`src/config/env.ts` 的 model 链改为 `env > settings`，**无任何代码默认**。
+本 ADR 原决策「`m3-combo` 作为主模型焊进 `src/config/env.ts` 代码默认」的**现态部分**已由 settings 机制（第二阶段）supersede：模型默认从「焊死」改为「可配置 + fail-fast」——`src/config/settings.ts` 的 `IknowSettingsLlm` 新增 `model?: string` 与 `fallback?: string[]` 字段，`src/config/env.ts` 的 model 链改为 `env > settings`，**无任何代码默认**。
 
 **supersede 边界（其余条款保留）：**
 
@@ -56,7 +56,7 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 - **env 仍最高**：`IKNOW_LLM_MODEL`（env）优先于 `settings.llm.model`；fallback 仅来自 settings。
 - **未变部分**：key 变量名默认 `ANTHROPIC_AUTH_TOKEN`、provider/baseUrl `http://localhost:20128/v1` 仍焊进 env.ts 代码默认；`.env.local` 只持值、`IKNOW_LLM_API_KEY_ENV` 可覆盖变量名 —— 保留。
 
-**关联：** `plans/settings-model-extension.md`（tracer bullets / validation 详述）、#353（settings 机制第一阶段）。
+**关联：** settings 机制第一阶段。
 
 ---
 
@@ -77,4 +77,4 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 - `.env.local` 只持值（占位符真值）；`process.env > .env.local > .env` 优先级对非 LLM 配置字段仍保留。
 - 无默认变量名、无硬编码兜底 model（0015 延续 2026-08-12 段的 fail-fast 纪律）。
 
-**关联：** `docs/adr/0015-llm-config-settings-single-source.md`、`plans/settings-model-extension.md`、`docs/CONTEXT.md` §83。
+**关联：** `docs/adr/0015-llm-config-settings-single-source.md`、`docs/CONTEXT.md` §83。

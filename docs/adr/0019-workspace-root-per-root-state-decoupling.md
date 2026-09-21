@@ -7,7 +7,7 @@ Status: accepted
 > **Amendment 2026-09-18**（ADR-0099）：**memory** 也不跟 `workspaceRoot` 分片，落 home 项目树 `projects/<slug>/memory/`。D1 其余 per-root 仍是 settings 写回 / worktrees。Positive 里 throwaway 隔离对 **serve / 会话记录 / tasks / 项目记忆** 均不成立。
 > **Amendment 2026-09-13**（ADR-0088）：**tasks** 也不跟 `workspaceRoot` 分片，落 home 项目树 `projects/<slug>/tasks/`。D1 其余 per-root 仍是 memory / settings 写回 / worktrees。Positive 里 throwaway 隔离对 **serve / 会话记录 / tasks** 均不成立。
 >
-> **Amendment 2026-09-13**（ADR-0087 / #1000）：会话池（transcript / todos / trace / blobs）**不**跟 `workspaceRoot` 分片，落 `~/.iknow/projects/…`（显式 `--data-dir` 除外）。T2 把 serve data 写成 `<workspaceRoot>/.iknow` 的读法 **superseded**（仅就会话记录）。memory / settings 写回 / worktrees 仍 per-root（tasks 见上条 0088）。Positive 里「throwaway dir 完全隔离 identity / memory / serve / settings」对 **serve/会话记录** 不再成立。
+> **Amendment 2026-09-13**（ADR-0087）：会话池（transcript / todos / trace / blobs）**不**跟 `workspaceRoot` 分片，落 `~/.iknow/projects/…`（显式 `--data-dir` 除外）。早期实施把 serve data 写成 `<workspaceRoot>/.iknow` 的读法 **superseded**（仅就会话记录）。memory / settings 写回 / worktrees 仍 per-root（tasks 见上条 0088）。Positive 里「throwaway dir 完全隔离 identity / memory / serve / settings」对 **serve/会话记录** 不再成立。
 
 ## Context
 
@@ -53,7 +53,7 @@ Status: accepted
 
 - resolver `resolveWorkspaceRoot` 是纯函数（无 I/O），priority chain `[explicit, env, process.cwd()]`；4 种 validation error 抛 `WorkspaceRootError` 判别联合（`empty_explicit` / `empty_env` / `non_absolute` / `not_found`），mirror `IknowIdentityError`。
 - `workspaceRoot` **不**加入 `LoopEngineDeps`（per-root consumers 都在 build-engine / tui-deps 层）。
-- `fs-policy` protected-path 扩展到 `<workspaceRoot>/.iknow` 及其 children —— 与既有 `<home>/.iknow` 同模式保护。**2026-09-13（ADR-0092 修复轮）**：fs-policy 的 `isSensitive` 谓词与 `home` / `workspaceRoot` 选项随 ADR-0092 退役（零消费者）；`<home>/.iknow` / `<workspaceRoot>/.iknow`「protected-state」fs-policy 谓词面不再存在，写拦截落到 permission 链 + hard-wall；Round-2 工作区档会按 `specs/fs-isolation-modes.md` SC11 重新引入 write-set 合同。
+- `fs-policy` protected-path 扩展到 `<workspaceRoot>/.iknow` 及其 children —— 与既有 `<home>/.iknow` 同模式保护。**2026-09-13（ADR-0092 修复轮）**：fs-policy 的 `isSensitive` 谓词与 `home` / `workspaceRoot` 选项随 ADR-0092 退役（零消费者）；`<home>/.iknow` / `<workspaceRoot>/.iknow`「protected-state」fs-policy 谓词面不再存在，写拦截落到 permission 链 + hard-wall；Round-2 工作区档会按 fs-isolation-modes spec 重新引入 write-set 合同。
 - tilde expansion（`~`）仍指向 `home`（global）—— tilde 是用户输入便利，workspace 是状态边界。
 
 ### Reversibility
@@ -62,5 +62,5 @@ Status: accepted
 
 ## Evidence
 
-- `plans/workspace-root-launch.md` ACR 5/5 PASS（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier）。
-- 实施证据由 T1（resolver + CLI flag + env SSOT + 5 boundary classes 测试）→ T2（build-engine / run.tsx / identity / memory / serve 7 个 seam 解耦 + integration probe 4 个 binary asserts）→ T3（settings 写回 fallback 重定向 + concurrent dual-write 测试）→ T4（fs-policy 双 root 保护 + policy-refusal 测试）→ T5（CLAUDE.md / docs/architecture.md / CHANGELOG.md）共 5 commits 提供，各 commit 单逻辑任务。
+- 实施 plan ACR 5/5 PASS（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier）。
+- 实施证据由 5 个切片共 5 commits 提供，各 commit 单逻辑任务：resolver + CLI flag + env SSOT + 5 boundary classes 测试 → build-engine / run.tsx / identity / memory / serve 7 个 seam 解耦 + integration probe 4 个 binary asserts → settings 写回 fallback 重定向 + concurrent dual-write 测试 → fs-policy 双 root 保护 + policy-refusal 测试 → CLAUDE.md / docs/architecture.md / CHANGELOG.md。

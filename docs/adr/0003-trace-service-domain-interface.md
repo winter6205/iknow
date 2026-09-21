@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-GH issue #64 (winter6205/iknow) — spawned from #51 Session API migration. When an AI run goes wrong, the developer has no content-level record (LLM messages, tool arguments, tool results) to inspect. The existing `LoopTrace` at `src/harness/loop-trace.ts` (017 spec) records _loop health_ metadata only (turn index / supplier stop / tool call kind / duration / timeout / signal aborted) and **strictly excludes payload** (per `docs/CONTEXT.md` `LoopTrace` _Avoid_ "在 trace 里塞 input/output/token/cost（B 层字段）"). The new TraceService fills the _content_ gap for **A-scenario (developer local debug)** — a JSONL file the dev can `grep`. B-scenario (production OTel export) is explicitly out of scope; 017 spec's "conditional remediation layer" includes "OTel-span-metric 树 017 显式禁止", and OTel GenAI semconv is still shifting (v1.37 / v1.41 / v1.42 between 2024-2026, with messages moved from event to attribute and `execute_tool` span name forced to include tool name).
+GH issue (winter6205/iknow) — spawned from the Session API migration. When an AI run goes wrong, the developer has no content-level record (LLM messages, tool arguments, tool results) to inspect. The existing `LoopTrace` at `src/harness/loop-trace.ts` (017 spec) records _loop health_ metadata only (turn index / supplier stop / tool call kind / duration / timeout / signal aborted) and **strictly excludes payload** (per `docs/CONTEXT.md` `LoopTrace` _Avoid_ "在 trace 里塞 input/output/token/cost（B 层字段）"). The new TraceService fills the _content_ gap for **A-scenario (developer local debug)** — a JSONL file the dev can `grep`. B-scenario (production OTel export) is explicitly out of scope; 017 spec's "conditional remediation layer" includes "OTel-span-metric 树 017 显式禁止", and OTel GenAI semconv is still shifting (v1.37 / v1.41 / v1.42 between 2024-2026, with messages moved from event to attribute and `execute_tool` span name forced to include tool name).
 
 ## Decision
 
@@ -65,12 +65,12 @@ GH issue #64 (winter6205/iknow) — spawned from #51 Session API migration. When
 
 **Evidence pointers**:
 
-- GH issue #64 (winter6205/iknow) — origin, intent, 5 settled decisions (2026-07-29), T1-T5 plan, Non-goals.
+- GH issue (winter6205/iknow) — origin, intent, 5 settled decisions, Non-goals.
 - 14 decisions from 2026-07-31 grilling session recorded in this ADR.
 - Agent-trace-guide research (2026-07-31) — OTel GenAI semconv stability analysis, span-tree model, three mandatory correlation keys, three red lines (no CoT/keys in trace,埋点 failure never breaks business, no eval in span).
-- `specs/loop-hardening-for-migration.md` (017 spec) — LoopTrace A7 field-set lock.
+- 017 spec — LoopTrace A7 field-set lock.
 - `src/harness/loop-trace.ts` — current LoopTrace shape (read-only reference).
 - `docs/CONTEXT.md` — `LoopTrace` definition + _Avoid_, `turnCount` definition, `append-only messages` _Avoid_.
 - `docs/adr/0001-9router-stack-as-code-defaults.md` — `IKNOW_*` env var naming convention.
 - `docs/adr/0002-web-ui-variant-a-tailwind.md` — web UI ADR (for distinguishing from this one; this ADR is 0003, not 0002).
-- Companion spec: `specs/trace-service.md` (interface contract, scope boundaries, 20 binary success criteria, ACR 5-verdict gate).
+- Companion spec — interface contract, scope boundaries, 20 binary success criteria, ACR 5-verdict gate.

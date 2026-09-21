@@ -69,7 +69,7 @@ caller abort 后，调用方必须收到明确的可见反馈，至少区分以�
 
 ## Evidence
 
-- `plans/ctrl-c-interrupt.md` T3：不可取消等待、用户反馈与 `block` tier 语义定案。
+- 不可取消等待、用户反馈与 `block` tier 语义定案。
 - `src/harness/aci/aci-executor.ts:306-310, 349-377`：`block` 排除 caller signal，并在收尾后归一 `cancelled`。
 - `src/harness/permission/types.ts:97-107`、`src/harness/permission/permission-executor.ts:209-223`：权限等待当前没有 signal 入参。
 - `src/harness/mcp/manager.ts:237-241, 659-676`：`readResource` 已支持并合并 caller signal。

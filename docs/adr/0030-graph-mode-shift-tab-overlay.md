@@ -3,7 +3,7 @@
 Date: 2026-08-27
 Status: accepted
 
-D-α 产品入口：Shift+Tab 进入 graph mode（编排 overlay），不把 Graph 塞进 `PermissionMode`。三态轮 `Default → Auto → Graph → Default`；`/graph` 是非 TTY 对等物，settings 一项作新会话默认（默认关）。进 Graph 冻结当时 permission（ask/auto 不变）。编排段与 `run_graph` 只在**下一次 `run()` 装配**时注入/露出——切好模式后模型开始跑再生效。过程中切换不拦、不中途重装配、不为此加防抖。override 父图 #540 先前「Shift+Tab 仍是权限模式、不占用」。进图任务数 N **不锁**——不是「≥2 就必须走图」；N 与 prompt 建议时机留给实施时真任务实测。#545。
+D-α 产品入口：Shift+Tab 进入 graph mode（编排 overlay），不把 Graph 塞进 `PermissionMode`。三态轮 `Default → Auto → Graph → Default`；`/graph` 是非 TTY 对等物，settings 一项作新会话默认（默认关）。进 Graph 冻结当时 permission（ask/auto 不变）。编排段与 `run_graph` 只在**下一次 `run()` 装配**时注入/露出——切好模式后模型开始跑再生效。过程中切换不拦、不中途重装配、不为此加防抖。override 父图先前「Shift+Tab 仍是权限模式、不占用」。进图任务数 N **不锁**——不是「≥2 就必须走图」；N 与 prompt 建议时机留给实施时真任务实测。
 
 ## Why not
 

@@ -30,6 +30,5 @@ ADR-0031 shipped extract + four-state ingest + mechanical GC and deferred LLM of
 
 ## Evidence pointers
 
-- `specs/auto-memory-complete-upgrade.md`
 - `docs/adr/0031-auto-memory-extract-and-mechanical-gc.md` (merge deferral)
 - `docs/STATUS.md` §2.5 (CJK tokenize; first-root hook; dual notify)

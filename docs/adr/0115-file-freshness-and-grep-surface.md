@@ -7,7 +7,7 @@ Status: accepted
 
 `read_file` 不写 `limit` 则从 `offset` 尽量读到 EOF；工具整读页 **16000** code point，正文提示续读。`>1MB` 仍拒。显式 `limit` 硬顶 2000 行。executor **20000** 字符总闸不改。
 
-`grep` 默认只回路径；匹配行 / 计数为显式出法。结果名单条数参数为 **`head_limit`**（默认 50、硬顶 2000），不与 `read_file` 的行 `limit` 同名。附近几行、结果名单分页、文件名 `glob`、语言 `type`、行窗与 parser/排序/自带安装根搜引擎同属搜面契约（`specs/aci-file-search-surface.md`）。
+`grep` 默认只回路径；匹配行 / 计数为显式出法。结果名单条数参数为 **`head_limit`**（默认 50、硬顶 2000），不与 `read_file` 的行 `limit` 同名。附近几行、结果名单分页、文件名 `glob`、语言 `type`、行窗与 parser/排序/自带安装根搜引擎同属搜面契约。
 
 **Amends** ADR-0004：`grep` 不再默认 `路径:行号:行内容`；`read_file` 不写 `limit` 则读到 EOF（废默认 200 行）。`edit_file` 唯一匹配 / `replace_all` 不改 ADR-0004。**Amends** ADR-0006：`grep` 默认条数 200→50；`read_file` 整读不再用 200/2000 行当默认窗（1MB 与 executor 20000 仍在）。PATH `rg` 不再是生产主路径。
 

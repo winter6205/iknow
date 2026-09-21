@@ -3,7 +3,7 @@
 Date: 2026-09-13
 Status: accepted
 
-权限三层（问不问人）与 bash 能碰哪些路径拆成两层。默认 **全局档**：宿主真路径可读可写，拦写靠权限 + hard-wall，home 不藏。可选 **工作区档**：home 可见，写 = 活 `taskRoot` + **会话 tmp**，home 其余默认不能写。会话 tmp 是会话文件夹里每身份一块宿主目录，`$TMPDIR` 指向它，**不** bind 成 Linux `/tmp`。与 `worktreeOnMutate` 正交。规格：`specs/fs-isolation-modes.md`。
+权限三层（问不问人）与 bash 能碰哪些路径拆成两层。默认 **全局档**：宿主真路径可读可写，拦写靠权限 + hard-wall，home 不藏。可选 **工作区档**：home 可见，写 = 活 `taskRoot` + **会话 tmp**，home 其余默认不能写。会话 tmp 是会话文件夹里每身份一块宿主目录，`$TMPDIR` 指向它，**不** bind 成 Linux `/tmp`。与 `worktreeOnMutate` 正交。
 
 **Why not 继续默认闭世界：** 藏 home 逼出垫底与 `/tmp` 两套名字，模型写不到 `~/.iknow` 真路径；操作员要的默认是本机路径 + 权限拦截。
 

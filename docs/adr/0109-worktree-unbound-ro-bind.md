@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-ADR-0037 门禁在「gate ON 且未绑 task worktree」档位对 bash 做**预测式拦截**：`classifyCall` 自行裁决「会不会写工作区」，`>` 重定向 / `rm` / **未知命令一律 fail-closed 判 mutate**（Amendment 2026-09-04 锁定的语义）。deny-by-default 的预测表在结构上误触只读命令：trace 实测 23 个会话出现 `cd` 组合 15 次、`curl` 10 次、`gh` 4 次、`sleep` 3 次等只读命令被判 mutate 遭拦（issue #1059）。补全读臂白名单是打地鼠——命令语言面无穷，预测分类永远枚举不完，而每一次误触都把「模型正常干活」变成「门禁回执 + 模型绕行」的上下文污染。
+ADR-0037 门禁在「gate ON 且未绑 task worktree」档位对 bash 做**预测式拦截**：`classifyCall` 自行裁决「会不会写工作区」，`>` 重定向 / `rm` / **未知命令一律 fail-closed 判 mutate**（Amendment 2026-09-04 锁定的语义）。deny-by-default 的预测表在结构上误触只读命令：trace 实测 23 个会话出现 `cd` 组合 15 次、`curl` 10 次、`gh` 4 次、`sleep` 3 次等只读命令被判 mutate 遭拦。补全读臂白名单是打地鼠——命令语言面无穷，预测分类永远枚举不完，而每一次误触都把「模型正常干活」变成「门禁回执 + 模型绕行」的上下文污染。
 
 门禁要认证的真实不变式是「**写不落主 checkout**」，不是「命令被预测为读」。bwrap 的 last-mount-wins 挂载序（ADR-0037 Amendment 2026-09-05 (b) 已确立「后挂覆盖先挂」纪律）允许把这个不变式直接做成物理保证：主 checkout 在围栏内以 `--ro-bind` 存在，真写自然 EROFS。
 
@@ -32,13 +32,13 @@ ADR-0037 门禁在「gate ON 且未绑 task worktree」档位对 bash 做**预�
 
 ## Why not
 
-- **短期批量补读臂（扩白名单救预测表）**：打地鼠。issue #1059 的 trace 已证明误触面由「命令语言 ∩ 未知命令 fail-closed」结构性生成，补不完；每轮补表还引入「哪些算读」的二次裁决债。拒。
+- **短期批量补读臂（扩白名单救预测表）**：打地鼠。trace 已证明误触面由「命令语言 ∩ 未知命令 fail-closed」结构性生成，补不完；每轮补表还引入「哪些算读」的二次裁决债。拒。
 - **保留预测拦截、仅放宽未知命令为放行**：把 fail-closed 换成 fail-open，真写的首次拦截靠运气，主 checkout 写保护出现洞。拒。
 - **FILE_WRITE 工具也改事后回灌**：结构化工具的调用面就是完整意图，预测分类零误触，事后化只损失「不执行即不写」的更强保证。维持拦前。
 
 ## Consequences
 
-- 「未知命令 fail-closed 拦截」条款**对 bash 作废**：门禁的 bash 执法从拦前移到事后——命令确实执行，但 mount 面保证主 checkout 零写入落盘；非 FS 侧效应（网络、进程）本就不在 worktree 门禁管辖内，不受本翻转影响。旧 spec `casual-ask-context-hygiene.md`（已于 `5ae9889a` 退役）钉住的 SC5/SC6 bash 半边随之作废。
+- 「未知命令 fail-closed 拦截」条款**对 bash 作废**：门禁的 bash 执法从拦前移到事后——命令确实执行，但 mount 面保证主 checkout 零写入落盘；非 FS 侧效应（网络、进程）本就不在 worktree 门禁管辖内，不受本翻转影响。旧 spec `casual-ask-context-hygiene.md`（已于 `5ae9889a` 退役）钉住的 bash 半边验收约束随之作废。
 - unbound 会话误触面归零：`cd` / `curl` / `gh` / `sleep` 类只读命令不再收到门禁回执。
 - 真写的反馈时点从「调用前」变为「执行中 EROFS」，模型看到的错误从门禁文案变为文件系统违例回灌（含同等指引）。
 - 写保护的正确性锚点从分类表移到 argv 组装：`--ro-bind` 的位置（rw bind 后、`--proc` 前）与 pad 重绑序成为必须实测的合同（`npm run probe:sandbox` + TUI）。
@@ -46,7 +46,7 @@ ADR-0037 门禁在「gate ON 且未绑 task worktree」档位对 bash 做**预�
 
 ## Evidence pointers
 
-- issue #1059：trace 实测 23 会话误触样本（cd 15 / curl 10 / gh 4 / sleep 3 等）。
-- 旧钉作废对象：`git show 5ae9889a^:specs/casual-ask-context-hygiene.md` SC5/SC6（引用不作恢复）。
+- trace 实测 23 会话误触样本（cd 15 / curl 10 / gh 4 / sleep 3 等）。
+- 旧钉作废对象：`5ae9889a` 退役的旧 spec 验收条款（引用不作恢复）。
 - ADR-0037 Amendment 2026-09-04、Amendment 2026-09-05 (b)（后挂覆盖纪律）、§9.2（写白名单）。
 - spec `specs/worktree-unbound-ro-bind.md`（验收三条：unbound 零误触 / EROFS 回灌含指引且主 checkout 无污染 / bound byte-identical + probe 全绿）。

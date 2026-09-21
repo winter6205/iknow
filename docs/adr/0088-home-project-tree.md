@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-工作区 `.iknow/{projects,sessions,tasks}` 是错配：前两者把 harness 日记写进会被 grep 扫到的树（#1000），后者把后台登记钉在 checkout（ADR-0021 D1.3），同一 `projectIdentityRoot` 的多份 checkout 各一份账本。ADR-0087 已把会话池根钉到 home，但 tasks 仍 per-root，`sessions/` 退役树仍可能躺在工作区。
+工作区 `.iknow/{projects,sessions,tasks}` 是错配：前两者把 harness 日记写进会被 grep 扫到的树，后者把后台登记钉在 checkout（ADR-0021 D1.3），同一 `projectIdentityRoot` 的多份 checkout 各一份账本。ADR-0087 已把会话池根钉到 home，但 tasks 仍 per-root，`sessions/` 退役树仍可能躺在工作区。
 
 ## Decision
 

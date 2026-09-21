@@ -9,10 +9,10 @@ Status: accepted
 
 权限机械层从 `permissions.toml` 迁入项目 `settings.permissions`。**停读 toml**。两份同时存在 → 启动/加载 fail-loud。用户层不接 `permissions`。
 
-> **Amendment 2026-09-13**（ADR-0090 / #1004）：上段「谓词语义不换成字符串列表」**superseded**。允许名单、停读 toml、用户层不接 permissions 仍有效。现行规则形态 = **声明式权限规则**（`allow`/`ask`/`deny` 字符串）。
+> **Amendment 2026-09-13**（ADR-0090）：上段「谓词语义不换成字符串列表」**superseded**。允许名单、停读 toml、用户层不接 permissions 仍有效。现行规则形态 = **声明式权限规则**（`allow`/`ask`/`deny` 字符串）。
 
 **Why not 项目继续盖 isolation / llm：** 一次项目 `isolation: false` 会卸掉全员门禁或（旧装配下）卸掉工作树工具，把个人开关变成仓库契约。允许名单把团队契约（钩子、校验、密钥、权限）与个人运行时（模型、隔离、子代理）切开。
 
 **Why not 第三层 local：** 两层已够「共享 vs 个人」；再加一层只增加覆盖顺序与写回歧义。
 
-关联：`specs/agent-control-surface.md` Slice B；CONTEXT **项目 settings 允许名单**。
+关联：CONTEXT **项目 settings 允许名单**。

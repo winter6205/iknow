@@ -3,7 +3,7 @@
 Date: 2026-09-14
 Status: accepted
 
-iknow 增加读取本机全局安装插件所携带组件（skills / agents / hooks）的能力。设计 `plans/global-plugins-loading.md`（ACR PASS）。
+iknow 增加读取本机全局安装插件所携带组件（skills / agents / hooks）的能力。
 
 ## 决议
 
@@ -19,4 +19,4 @@ iknow 增加读取本机全局安装插件所携带组件（skills / agents / ho
 **Why not Post 改变工具结果**：`PostToolUseHook`「observability only」既有不变量不动。
 **Why not fail-closed**：钩子是可拦截面，误拦代价高于漏拦（与 user-hook-router 同判据）。
 
-Amends ADR-0055（hook 文件源 H1 第二刀落地）。规格：`plans/global-plugins-loading.md`。
+Amends ADR-0055（hook 文件源 H1 第二刀落地）。

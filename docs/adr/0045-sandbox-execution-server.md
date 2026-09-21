@@ -3,7 +3,7 @@
 Date: 2026-09-06
 Status: accepted
 
-> 本 ADR 承接 `plans/closed-world-bash-fence.md` T7 决策 ticket，落定 sandbox 执行面的边界形态与消息合同；T8 据此实施。本 ADR 只锁合同边界（消息形状、超时/中断、截断、fail-loud、IPC 故障分型），文件 / 模块 / 类型名留给实施 bullet。
+> 本 ADR 承接 closed-world bash fence 轨道的决策 ticket，落定 sandbox 执行面的边界形态与消息合同；实施据此推进。本 ADR 只锁合同边界（消息形状、超时/中断、截断、fail-loud、IPC 故障分型），文件 / 模块 / 类型名留给实施 bullet。
 >
 > ADR-0022 / ADR-0037 §9 继续管辖 bash 围栏的**物理语义**（per-call network opt-in、闭世界白名单、fail-loud 分型）；本 ADR 只挪**执行面位置**（in-process 直调 → server 边界），不改 fence argv 形状、不动白名单、不动 `--unshare-net` 行为。
 
@@ -11,7 +11,7 @@ Status: accepted
 
 `sandbox/execution` 面今日为 in-process 直调：bash tool（`src/harness/aci/tools/bash.ts:218-224`）经 `runInSandbox` → `spawnWithStopSignal` 同步等子进程退出；background（`src/harness/background/manager.ts:239-291` 的 `defaultBackgroundSpawn`）绕过 `runInSandbox`，**直接** `nodeSpawn(fence.argv[0], …)` 起 detached 进程组，host 侧持 `child.pid` 落 `record.pgid`（`manager.ts:388`），`bash_stop` 在 host 侧经 `process.kill(-pid, …)` 升级（`manager.ts:587-624`）；verify（`src/harness/verify/sandbox-run.ts:60-77` 的 `makeDefaultRunVerify`）经 `runInSandbox` 同步等子进程退出。三处装配虽 fence argv 同源（`createBwrapFence` + `createClosedWorldFsPolicy`（**2026-09-13 已随 ADR-0092 退役**，现为 `createFsPolicy`）），但**执行体裸用 `node:child_process`**——bash 工具经 `runInSandbox`、background 经 `nodeSpawn`、verify 又经 `runInSandbox`，是三条不同的 `child_process.spawn` 接入点。
 
-2026-09-06 `plans/closed-world-bash-fence.md` Round 2 ACR（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer）开轨评审的 `unclear/no` 项指出三个缺口：
+2026-09-06 closed-world bash fence 轨道 Round 2 ACR（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer）开轨评审的 `unclear/no` 项指出三个缺口：
 
 1. **缺统一执行面**——三处独立 spawn 入口，未来接新隔离 / 新资源限制 / 新 audit 钩子时三处同改，违反 `min-change-verifier`。
 2. **缺 IPC 边界 5 类故障路径（empty / negative / overflow / concurrent / exception）的统一合同**——今日各自 catch `child.once("error")` 与 `truncateByCodePoint` 落点，`RangeError` / 空帧 / server-down mid-spawn 在 background 路径完全裸奔。
@@ -33,7 +33,7 @@ Status: accepted
 - **不起独立 daemon / TCP server**——三个消费方全部在同一 Node 进程内，daemon 强制跨 IPC 边界给同进程消费增加延迟、复杂度、端口冲突、生命周期治理（supervisor / reaper / heartbeat）新成本。
 - **不走 Unix socket / `child_process.fork` 的 IPC channel**——仓库无 Unix socket 或 fork 先例（grep `child_process.fork` / `net.createServer` / `unix:` 均为零命中），引入全新基建面；同进程 router 用函数调用即可，不需要 IPC channel。
 
-`runInSandbox` 在迁移期内**降级为 router handler 的薄包装**——直接 `router(req) → response`，不做 `child_process.spawn` 直调。**降级 = 不删**（兼容既有 30+ 测试 fixture），但其 spawn 调用点经 server 边界表达；T8 验收 (a) 写「in-process 直调路径删除或降级为 server 内部实现」，本 ADR 选「降级」，删除由后续 ticket 在所有 fixture 迁完后裁决。
+`runInSandbox` 在迁移期内**降级为 router handler 的薄包装**——直接 `router(req) → response`，不做 `child_process.spawn` 直调。**降级 = 不删**（兼容既有 30+ 测试 fixture），但其 spawn 调用点经 server 边界表达；验收项 (a) 写「in-process 直调路径删除或降级为 server 内部实现」，本 ADR 选「降级」，删除由后续 ticket 在所有 fixture 迁完后裁决。
 
 ### 2. 运行时合同：两型协议（短生命周期 / 长生命周期 task-handle）
 
@@ -41,7 +41,7 @@ Status: accepted
 
 适用：bash tool 前台（`bash.ts:218-224` `await runInSandbox(...)`）、verify（`sandbox-run.ts:71-77` `await runVerify(...)`）。调用语义 = 等子进程退出、取一次性结果。
 
-消息形状（合同边界，具体类型名留给 T8）：
+消息形状（合同边界，具体类型名留给实施）：
 
 ```
 request:
@@ -119,11 +119,11 @@ server 形态下，IPC 边界（router 调用本身——同进程下为函数�
 
 | 边界类         | 触发条件                                                                    | 合同                                                                                                                                                                                 | 测试面                             |
 | -------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| **empty**      | request 帧缺失 `command`（spawn）/ `fence`（exec）字段 / `task_id` 字段     | typed fail-loud（`ToolExecutionError` 系），**不 spawn**、不返回 fake response                                                                                                       | T8 (e) 配套测试                    |
-| **negative**   | `maxOutputCodePoints <= 0` / `killGraceMs < 0`                              | `RangeError`，沿 `runner.ts:84-86` `truncateByCodePoint` 契约不丢失                                                                                                                  | T8 (e)                             |
-| **overflow**   | 子进程 stdout/stderr > `maxOutputCodePoints`                                | router handler 按 `truncateByCodePoint` 截断后再下发，**不**抛 typed error(`SandboxServerError` 联合不含 overflow kind,§2.1 语义已如此)                                              | T8 (e)                             |
-| **concurrent** | 多个 request 并行（同一 router 实例）                                       | fence 无共享 mutable state（fence argv 冻结、fsPolicy 工厂期 / per-call rebuild 各自独立、`createBwrapFence` 返回 frozen token），并行允许，决策**显式记录**                         | T8 (e) 配套测试覆盖并发 fence 构造 |
-| **exception**  | server 不可达（未来跨进程场景）/ accept 后子进程退出未回执（orphan 进程组） | typed fail-loud + **orphan 进程组 reap 纪律**——router 必须在子进程退出但 frame 解析失败时显式 `process.kill(-pgid, SIGKILL)`，参考 `background/stale-reap.ts:184`（pgid-reuse 加固） | T8 (e)                             |
+| **empty**      | request 帧缺失 `command`（spawn）/ `fence`（exec）字段 / `task_id` 字段     | typed fail-loud（`ToolExecutionError` 系），**不 spawn**、不返回 fake response                                                                                                       | (e) 配套测试                    |
+| **negative**   | `maxOutputCodePoints <= 0` / `killGraceMs < 0`                              | `RangeError`，沿 `runner.ts:84-86` `truncateByCodePoint` 契约不丢失                                                                                                                  | (e)                             |
+| **overflow**   | 子进程 stdout/stderr > `maxOutputCodePoints`                                | router handler 按 `truncateByCodePoint` 截断后再下发，**不**抛 typed error(`SandboxServerError` 联合不含 overflow kind,§2.1 语义已如此)                                              | (e)                             |
+| **concurrent** | 多个 request 并行（同一 router 实例）                                       | fence 无共享 mutable state（fence argv 冻结、fsPolicy 工厂期 / per-call rebuild 各自独立、`createBwrapFence` 返回 frozen token），并行允许，决策**显式记录**                         | (e) 配套测试覆盖并发 fence 构造 |
+| **exception**  | server 不可达（未来跨进程场景）/ accept 后子进程退出未回执（orphan 进程组） | typed fail-loud + **orphan 进程组 reap 纪律**——router 必须在子进程退出但 frame 解析失败时显式 `process.kill(-pgid, SIGKILL)`，参考 `background/stale-reap.ts:184`（pgid-reuse 加固） | (e)                             |
 
 同进程 router 形态下「server 不可达」物理上不发生（函数调用 stack trace 自然冒泡），但合同仍写明 typed fail-loud 语义——为未来跨进程化留接口稳定，**不**为「反正同进程不会失败」省略测试覆盖（违反 `min-change-verifier` 的契约稳定性）。
 
@@ -170,7 +170,7 @@ server 形态下，IPC 边界（router 调用本身——同进程下为函数�
 
 ### Negative / Trade-offs
 
-- router 模块引入新的工厂函数 + 两型协议（request/response + task-handle）类型面，T8 实施成本非零——但这是**整理**成本，不重复计到现有 fixture（既有测试 fixture 走 `runInSandbox` / `defaultBackgroundSpawn` 薄包装，行为对外 observable 不变）。
+- router 模块引入新的工厂函数 + 两型协议（request/response + task-handle）类型面，实施成本非零——但这是**整理**成本，不重复计到现有 fixture（既有测试 fixture 走 `runInSandbox` / `defaultBackgroundSpawn` 薄包装，行为对外 observable 不变）。
 - 同进程 router 形态下「server 不可达」物理上不发生——但合同仍写明 typed fail-loud 语义并保留测试覆盖，为未来跨进程化留接口稳定（契约稳定性优先于当下实现简洁）。
 - task-handle 协议把「kill 升级的中间状态」封装进 router（`stop` control message），但 pid 物理所有权仍在 host——两个层（协议层 / 物理层）的语义正交，未来若 server 跨进程化需要明确二者如何分裂，再立 ADR。
 
@@ -193,9 +193,9 @@ server 形态下，IPC 边界（router 调用本身——同进程下为函数�
 - ADR-0037 §7.2 / §9：batch 快照语义（前台 / 后台 / verify 同波消费同一 fence token）、闭世界围栏白名单裁决——server 化不修改这些物理合同。
 - ADR-0037 §9.4：白名单 miss 的 fail-loud 分型（配置故障型 / 运行时可观察型）——server 化的失败合同承接「typed fail-loud 不静默降级」纪律。
 - ADR-0021 D1.7：`bg-` + 12 hex task_id 命名合同（被本 ADR §2.2 继承）。
-- `plans/closed-world-bash-fence.md` T7：决策 ticket 上下文与 Round 2 ACR 评审（2026-09-06）。
+- closed-world bash fence 轨道的决策 ticket 上下文与 Round 2 ACR 评审（2026-09-06）。
 
-## T7 acceptance 自查清单
+## Acceptance 自查清单
 
 | Acceptance 项                  | 本 ADR 落点                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

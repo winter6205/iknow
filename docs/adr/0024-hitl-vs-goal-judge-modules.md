@@ -11,4 +11,4 @@ Decision: 同一套只读判官系统挂两套逻辑模块。正常模式（HITL
 
 Why: 参考 Claude Code 默认聊天 vs `/goal` Stop hook；统一公式是职责错配。
 
-Evidence: specs/verify-goal-gate.md；issue #569 grilling。
+Evidence: 完成判官门控的 grilling 决议。

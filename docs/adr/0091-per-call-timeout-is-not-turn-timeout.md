@@ -25,8 +25,8 @@ ACI default 档（30s）到点时，executor 对该**一条**调用返回 `execu
 
 - (+) 单 call 工具超时只失败该条 tool_result（仍为 `execution_failed` + `"timeout"`，ADR-0005 不变）；同波其它调用继续。
 - (+) 回合时钟 abort 与 caller cancel 在 trace 与控制流上各占一条独立路径。
-- (−) `TURN_CLOCK_ABORT_REASON` 的字面与 `StopReason: timeout` 的字面分家；任何对 `signal.reason` 的 substring / prefix 比较都视为 bug（peer 修改常量值的同时也修了 SC16 单测的对接锚，从 `"timeout"` 改到 `"turn-timeout"`）。
+- (−) `TURN_CLOCK_ABORT_REASON` 的字面与 `StopReason: timeout` 的字面分家；任何对 `signal.reason` 的 substring / prefix 比较都视为 bug（peer 修改常量值的同时也修了单测的对接锚，从 `"timeout"` 改到 `"turn-timeout"`）。
 
 ## Status of the turn-clock producer
 
-工具阶段当前**没有**真正的回合/宿主钟 producer：`computeToolStopFlags` 的 `timedOut === true` 现在只可能来自测试接缝（`tests/harness/aci/interrupt-routing.test.ts` 的 SC16/ADR-0091 单测直接 `controller.abort("turn-timeout")`）。未来 host / turn 时钟 producer 接入时，必须以 `signal.reason === "turn-timeout"` 的 `AbortSignal` 形态 abort，与现有锚同字面，**不要**复用 `"timeout"` 字面以免重回同名歧义。本 ADR 不为那个 producer 开票。
+工具阶段当前**没有**真正的回合/宿主钟 producer：`computeToolStopFlags` 的 `timedOut === true` 现在只可能来自测试接缝（`tests/harness/aci/interrupt-routing.test.ts` 的 ADR-0091 单测直接 `controller.abort("turn-timeout")`）。未来 host / turn 时钟 producer 接入时，必须以 `signal.reason === "turn-timeout"` 的 `AbortSignal` 形态 abort，与现有锚同字面，**不要**复用 `"timeout"` 字面以免重回同名歧义。本 ADR 不为那个 producer 开票。

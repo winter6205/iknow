@@ -9,7 +9,7 @@ Status: accepted
 
 本文修正一条已记录的旧判断：**「非特权环境下做强制出口过滤不可能」对 TUN 不成立**。
 
-之前判「不可能」对 **veth** 成立（非特权 user namespace 建不了 veth pair），对 **TUN** 不成立。实测证据（2026-09-08，#954）：
+之前判「不可能」对 **veth** 成立（非特权 user namespace 建不了 veth pair），对 **TUN** 不成立。实测证据（2026-09-08）：
 
 1. `/dev/net/tun` 存在且权限 `crw-rw-rw-`，可正常打开；
 2. `bwrap.ts:137-139` 已 `--dev-bind /dev /dev`，沙箱内可见该设备；
@@ -31,9 +31,9 @@ Status: accepted
 
 **当前替代方案的真实强度（诚实标注）：**
 
-- #951（批准文案说真话）+ #952（`network_equals` 资格门禁）= **知情 + 资格**，不是强制过滤；
-- `web_fetch` / `web_search` 默认路径的第 4 层防线存在一个真实可达的 DNS rebinding TOCTOU（#953）—— **正在修**（spike 已定聚焦补丁臂，实施票 #957）。
-- **不能让后来读者以为已有出口管控**：批准后（或未设资格规则时）出站内容仍零过滤；TOCTOU 在 #957 落地前是已知真实洞。
+- 批准文案说真话 + `network_equals` 资格门禁 = **知情 + 资格**，不是强制过滤；
+- `web_fetch` / `web_search` 默认路径的第 4 层防线存在一个真实可达的 DNS rebinding TOCTOU—— **正在修**（spike 已定聚焦补丁臂）。
+- **不能让后来读者以为已有出口管控**：批准后（或未设资格规则时）出站内容仍零过滤；TOCTOU 在补丁落地前是已知真实洞。
 
 **重开触发条件** —— 什么情况下这件事变成该做：
 
@@ -48,4 +48,3 @@ Status: accepted
 ## Consequences
 
 - `docs/adr/` 内 `0046` / `0055` 各有两个同号文件（并发会话产物）—— 预存 hygiene 问题，操作员单独裁定口径，本文不 renumber。
-- #951 / #952 / #953 是当前替代与相邻议题（批准轴知情 + 资格门禁 + web_fetch 第 4 层 TOCTOU 修复）。

@@ -3,17 +3,17 @@
 Date: 2026-08-04
 Status: accepted
 
-Amendment 2026-09-12：`grep` 默认输出与条数参数 **`head_limit`** 见 ADR-0084 / `specs/aci-file-search-surface.md`。本文件 L16「输出纯字符串 `路径:行号:行内容`」不再是默认出法（那是 `output=content`）。同日改口：`read_file` 不写 `limit` 则从 offset 读到 EOF（L14「默认 200 行」作废；曾草案的默认/顶皆 2000 亦否决）；显式 `limit` 硬顶仍 2000。`write_file` 非空未读硬拒见 ADR-0084，`edit_file` 不硬前置 last-read。曾草案的「过短锚禁止 `replace_all`」否决；L17 的唯一匹配 + 显式 `replace_all` 维持。
+Amendment 2026-09-12：`grep` 默认输出与条数参数 **`head_limit`** 见 ADR-0084。本文件 L16「输出纯字符串 `路径:行号:行内容`」不再是默认出法（那是 `output=content`）。同日改口：`read_file` 不写 `limit` 则从 offset 读到 EOF（L14「默认 200 行」作废；曾草案的默认/顶皆 2000 亦否决）；显式 `limit` 硬顶仍 2000。`write_file` 非空未读硬拒见 ADR-0084，`edit_file` 不硬前置 last-read。曾草案的「过短锚禁止 `replace_all`」否决；L17 的唯一匹配 + 显式 `replace_all` 维持。
 
 ## Context
 
-GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计，父 #114 记忆层地图）。现行 5 个 ACI 工具（`shell_exec` / `fs_search` / `fs_view` / `fs_edit` / `context_manager`）自身均标 `PROTOTYPE（throwaway）`，且逐个有致命硬伤：shell_exec timeout 不杀进程 + allowlist 是可执行文件名非能力；fs_search 单工具混"搜内容/找文件"两语义（`pattern:""` 匹配所有文件）；fs_view 标 `isConcurrencySafe:true` 却用闭包共享状态 `lastPath/lastOffset`；context_manager 实际是死的（`lazy:true` 真实 CLI 路径失效）。#125 已裁决 context_manager 删除。重写是兑现既定 graduation 债务。业界参照：SWE-agent。操作员 2026-08-03~04 经 10 轮逐题 HITL grilling 裁决。
+GH issue（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计，父 issue 为记忆层地图）。现行 5 个 ACI 工具（`shell_exec` / `fs_search` / `fs_view` / `fs_edit` / `context_manager`）自身均标 `PROTOTYPE（throwaway）`，且逐个有致命硬伤：shell_exec timeout 不杀进程 + allowlist 是可执行文件名非能力；fs_search 单工具混"搜内容/找文件"两语义（`pattern:""` 匹配所有文件）；fs_view 标 `isConcurrencySafe:true` 却用闭包共享状态 `lastPath/lastOffset`；context_manager 实际是死的（`lazy:true` 真实 CLI 路径失效）。此前已裁决 context_manager 删除。重写是兑现既定 graduation 债务。业界参照：SWE-agent。操作员 2026-08-03~04 经 10 轮逐题 HITL grilling 裁决。
 
 ## Decision
 
 **6 工具集定型，业界通用名，executor/registry/契约层 production-ready 保留并加固**：
 
-1. **bash**（替代 shell_exec）。安全边界 = OS 沙箱（#123 阻塞前置），allowlist 降级为沙箱落地前过渡措施。输出截断 12000 字符照搬（修现行 UTF-16 surrogate 拆断 → 按 code point）；timeout 不暴露给模型（统一 executor 层）；输出保留结构化 `{code, stdout, stderr}`（供 eval/trajectory）。
+1. **bash**（替代 shell_exec）。安全边界 = OS 沙箱（阻塞前置），allowlist 降级为沙箱落地前过渡措施。输出截断 12000 字符照搬（修现行 UTF-16 surrogate 拆断 → 按 code point）；timeout 不暴露给模型（统一 executor 层）；输出保留结构化 `{code, stdout, stderr}`（供 eval/trajectory）。
 2. **read_file**（替代 fs_view）。纯无状态（废闭包），输入 `path` + `offset`（0 基）+ `limit`（默认 200 / 上限 2000）；NUL 二进制检测；文件大小上限 1MB（读前 stat，超限拒绝并引导 grep）；输出纯字符串带行号 `<n:>6\t<line>`。废除现行 `{path, lines, from, to, nextOffset, eof}` 六字段——`nextOffset`/`eof` 模型自推可得，零信息增量。
 3. **grep**（拆自 fs_search 的搜内容半）。ripgrep 子进程优先 + Node fallback；正则；默认大小写敏感（`ignoreCase` 可选）；`limit`（默认 200 / 上限 2000）；输出纯字符串 `路径:行号:行内容`。
 4. **glob**（拆自 fs_search 的找文件半）。真 glob 模式（废子串匹配）；`rg --files` + Node fallback；`limit`（默认 200 / 上限 5000）；输出字母序相对路径纯字符串。
@@ -23,8 +23,8 @@ GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计�
 **跨工具契约**：
 
 - **契约 X（截断元数据单一权威）**：工具返回纯数据，不带 `truncated`/`total` 元字段；executor 是唯一权威——自测序列化字符数、自截断、自合成标记、永不信任工具声称字段。防 MCP 第三方伪造面。
-- **契约 Y1（输出纯字符串，deprecated→#298）**：wire 边界 `serialize_content_block` 丢弃 metadata。bash 例外（Y1b 保结构化 code）。**#298 起 Y1「纯字符串」读法被 observability side-channel 取代**——model-facing tool_result 仍为纯字符串（Y1 精神保留），但 handler 可返回 envelope `{ output, meta? }`，executor 拆分后仅 `output` 串行化进 model tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 走观测旁路，永不进模型视野。
-- **symlink**：resolve + containment 本期落地；挂载边界 OS 隔离归 #123。
+- **契约 Y1（输出纯字符串，已 deprecated）**：wire 边界 `serialize_content_block` 丢弃 metadata。bash 例外（Y1b 保结构化 code）。**此后 Y1「纯字符串」读法被 observability side-channel 取代**——model-facing tool_result 仍为纯字符串（Y1 精神保留），但 handler 可返回 envelope `{ output, meta? }`，executor 拆分后仅 `output` 串行化进 model tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 走观测旁路，永不进模型视野。
+- **symlink**：resolve + containment 本期落地；挂载边界 OS 隔离归后续沙箱工作。
 
 **工作流语义**：grep/glob 发现 → read_file 精读；大文件永不整体进上下文。
 
@@ -43,15 +43,15 @@ GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计�
 - (+) write_file 弥补"无法新建文件"缺口，agent 可做完整编码任务。
 - (+) read_file 无状态化消除并发矛盾 + 隐藏耦合。
 - (−) rename 到业界名需同步 permission/category 装配 + eval/trajectory 引用（`shell_exec` 等旧名）。
-- (−) bash 生产路径阻塞于 #123 沙箱（allowlist 仅过渡）；5 条沙箱痕迹清单留 #140 评论区 + #123 已留指针。
+- (−) bash 生产路径阻塞于 OS 沙箱（allowlist 仅过渡）；5 条沙箱痕迹清单留对应 issue 评论区并已留指针。
 - (−) edit_file/write_file 的 poka-yoke linter 对"合法但不配对"内容（如 markdown 代码块）有误报风险——先应用，真实误报再放宽（记录在案）。
 - (−) 契约 Y1 使模型失去结构化 `total`（"200/347 matches"），靠截断标记 + "re-invoke with narrower input" 引导——模型可读文本 marker 正确决策。
-- (+→−) 契约 Y1 在 #298 被 observability side-channel 取代：model-facing tool_result 仍纯字符串（Y1 精神保留），但 handler envelope 的 `meta` 字段经独立旁路供 TUI 等观测消费者，模型视野不被结构化字段污染。
+- (+→−) 契约 Y1 此后被 observability side-channel 取代：model-facing tool_result 仍纯字符串（Y1 精神保留），但 handler envelope 的 `meta` 字段经独立旁路供 TUI 等观测消费者，模型视野不被结构化字段污染。
 
 **Evidence pointers**:
 
-- GH issue #140（winter6205/iknow）— 10 轮 grilling 逐题裁决 + Resolution + 各工具决议评论。
-- GH issue #125（closed）— context_manager 删除决议。
+- GH issue（winter6205/iknow）— 10 轮 grilling 逐题裁决 + Resolution + 各工具决议评论。
+- 前置 issue（closed）— context_manager 删除决议。
 - 业界工具源码参照（bash_tool / file_read_tool / grep_tool / glob_tool / file_edit_tool / file_write_tool）。
 - 关联 ADR：0005（executor 加固）/ 0006（封顶策略）。
 - `src/harness/aci/tools/` — 现行 5 个 PROTOTYPE 工具（重写对象）。

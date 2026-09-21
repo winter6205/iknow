@@ -7,7 +7,7 @@ Status: accepted
 
 ## Context
 
-ADR-0104 放开了数据面（预放行档），凭据面姿态悬而未决。既有 **secret-roundtrip mask**（#406）只保护**可见面**：真值在围栏内（执行时还原），模型可见面（工具输出 / trace / 回显）被掩码——它防不住围栏内代码「不看见也能用」：把真值塞进放行域上的任意数据出口（gist / repo / issue）即可外带，全程不经过任何模型可见输出，域白名单防不住「滥用放行域」（与 ADR-0097 承认 domain fronting 不可防同族）。实测事故（2026-09-18，conversation `ee13c787`）证实围栏内 `gh` / git push 对凭据的真实需求：若 HTTP 系凭据以真值形态进围栏，与放行域组合即成完整外泄通道。
+ADR-0104 放开了数据面（预放行档），凭据面姿态悬而未决。既有 **secret-roundtrip mask** 只保护**可见面**：真值在围栏内（执行时还原），模型可见面（工具输出 / trace / 回显）被掩码——它防不住围栏内代码「不看见也能用」：把真值塞进放行域上的任意数据出口（gist / repo / issue）即可外带，全程不经过任何模型可见输出，域白名单防不住「滥用放行域」（与 ADR-0097 承认 domain fronting 不可防同族）。实测事故（2026-09-18，conversation `ee13c787`）证实围栏内 `gh` / git push 对凭据的真实需求：若 HTTP 系凭据以真值形态进围栏，与放行域组合即成完整外泄通道。
 
 ## Decision
 
@@ -17,7 +17,7 @@ ADR-0104 放开了数据面（预放行档），凭据面姿态悬而未决。�
 2. 真值仅存在于宿主侧出口代理；**出口处仅对放行域**做假换真（headers 代换 + body 流式代换，body 不整体缓冲，内存以单 chunk + sentinel 长度回持为界）。
 3. 代换方向恒 **fake→real**：任何漏代换（压缩体、base64 包裹、被编码器拆散）= 假值原样到达 API = 认证失败，**永不为真值泄露**——失败方向是设计出来的。
 4. 代理需 **TLS 终止**（mitmCA）才能见请求明文；围栏内客户端经环境注入信任代理 CA。mitmCA / sentinel / body-substitution 模块均为 pin 依赖 `@anthropic-ai/sandbox-runtime` 内现成件——无新增第三方依赖（node-forge 已在模块加载图上，ADR-0097 实测记录）。
-5. **SSH 凭据不在本决策内**：私钥可读性与 `SSH_AUTH_SOCK` 形态归出口 ssh 桥（ADR-0097 T7/T8 形态扩展）；key 进围栏的姿态沿用「出口域限制兜底」（key 只能用于向放行域认证）。
+5. **SSH 凭据不在本决策内**：私钥可读性与 `SSH_AUTH_SOCK` 形态归出口 ssh 桥（ADR-0097 形态扩展）；key 进围栏的姿态沿用「出口域限制兜底」（key 只能用于向放行域认证）。
 6. 既有 secret-roundtrip mask（可见面）**保留**，两层并存不互替：sentinel 管**存在面**，mask 管**可见面**。
 
 ## Why not
@@ -38,4 +38,4 @@ ADR-0104 放开了数据面（预放行档），凭据面姿态悬而未决。�
 - pin 依赖包内参考实现：`node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/body-substitution.js`（流式 fake→real + 失败方向注释）、`credential-decode.js`（JWT 提取 / 校验 / 同形假值铸造）、`credential-sentinel.js`（`SENTINEL_PREFIX`）、`http-proxy.js`（SentinelRegistry headers 代换；`:271` SSH 例外注记）、`mitm-ca.js`。
 - 会话 `ee13c787` transcript（2026-09-18）：`gh auth status → X Failed to log in`（围栏内凭据真实需求）。
 - `docs/adr/0097-*.md` §Trade-offs（domain fronting 不可防）；`docs/adr/0104-*.md`（「围栏内有 key，预放行 = secret 直传通道」同款逻辑）。
-- `docs/CONTEXT.md`「secret-roundtrip mask（#406）」（可见面现状）。
+- `docs/CONTEXT.md`「secret-roundtrip mask」（可见面现状）。

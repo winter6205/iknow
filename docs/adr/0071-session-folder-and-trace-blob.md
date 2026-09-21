@@ -107,7 +107,6 @@ blobs 写不进去时**永不写内联全量行**(操作员明确要求)。但�
 
 ## Evidence pointers
 
-- 归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/session-folder-consolidation.md`(SC1–SC20 + 输入五类三表 + ACR 两轮 PASS)
 - 盘上实测(2026-09-08):`~/.iknow/sessions/` 127 目录 / 7 个 `agent-*`;`~/projects/iknow/trace/` 337M / 82 jsonl;`~/.iknow/sessions/` 12M;同一会话 trace 41 行 264K vs transcript 88 行 72K;`agent_status` trace 14 / transcript 11
 - 参考形状:`~/.claude/projects/<slug>/<conversationId>/{tool-results/,subagents/}` + `~/.claude/tasks/<conversationId>/`(盘上实测;`tasks/` 抽样 8 个 uuid 全命中 `projects/*/<uuid>`,确认按 conversationId 键)。openharness 部分(`get_project_session_dir` / `read_task_output(task_id, max_bytes=12000)` → "Return the tail of a task's output file")来自 `~/.cache/codebase-memory-mcp/…upstream-openharness.db` 索引 docstring,**证据等级低于读源码**(源码已从 `.reference/` 清空)。
 - **误引修正**:ADR-0036 把「所见即所填」溯源为「ADR-0014 验收纪律」,但 `0014-subagent-foreground-spawn-default.md` 实为「Subagent spawn 语义」,全文不含该短语;该短语全仓**只出现在 ADR-0036 自己正文里**。ADR-0014 `:46` 只是把 trace 当验收 ground truth。本 ADR 与 CONTEXT 词条的溯源一律指向 ADR-0036。

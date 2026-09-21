@@ -9,4 +9,4 @@ Decision: （1）`claimIndex` 是声称位置 = `messages` 下标，与 `deriveF
 
 Why: 检查器要看见声称之前的测试与编辑，否则 CONTRADICTED / SUFFICIENT / stale 都是空转。HITL 人在键盘旁，删旧测试不是作弊信号；把「没验过」显示成绿勾是假通过。goal 功能仍要防「删测试装绿」。
 
-Evidence: specs/verify-claim-window.md；会话 8ff77b89 两条 verification 均为 `hitl_skip_completion_judge` + `EVIDENCE_INSUFFICIENT` + `passed`。
+Evidence: 会话 8ff77b89 两条 verification 均为 `hitl_skip_completion_judge` + `EVIDENCE_INSUFFICIENT` + `passed`。

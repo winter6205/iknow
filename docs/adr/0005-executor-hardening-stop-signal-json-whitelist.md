@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-GH issue #140 B 块（Q6/Q7/Q8，executor 底盘加固）。executor 是 Foundation 工具执行的总闸（所有工具结果必经 `safeContent` chokepoint），现行有三处既定债：① timeout 只等不杀——`executor.ts:94-103` 用 `Promise.race` 约束等待时长，到点放弃等待但 handler 继续跑（`:93` 注释"timeout 在外层约束执行时长，不依赖 handler 内部支持取消"是**故意的设计意图**）；② cancel 靠 handler 自愿——executor 原样透传 signal（`:87`），5 个工具仅 shell_exec 监听（`ctx?.signal` 传给 `exec()`），其余 4 个 handler 签名不接 ctx；③ `isJsonCompatible`（`:38-48`）过宽——NaN/Infinity 按 typeof number 放行（JSON.stringify 静默变 null）、Date/Map/Set/类实例因 `Object.values` 返回空数组误判兼容（JSON 化变 `{}` 丢数据）、循环引用致检查本身栈溢出。平台限制：Node.js 无法强行中断正在执行的同步代码；可终止的只有外部进程与等待中的操作。操作员 2026-08-04 grilling 裁决。
+GH issue 的 B 块（Q6/Q7/Q8，executor 底盘加固）。executor 是 Foundation 工具执行的总闸（所有工具结果必经 `safeContent` chokepoint），现行有三处既定债：① timeout 只等不杀——`executor.ts:94-103` 用 `Promise.race` 约束等待时长，到点放弃等待但 handler 继续跑（`:93` 注释"timeout 在外层约束执行时长，不依赖 handler 内部支持取消"是**故意的设计意图**）；② cancel 靠 handler 自愿——executor 原样透传 signal（`:87`），5 个工具仅 shell_exec 监听（`ctx?.signal` 传给 `exec()`），其余 4 个 handler 签名不接 ctx；③ `isJsonCompatible`（`:38-48`）过宽——NaN/Infinity 按 typeof number 放行（JSON.stringify 静默变 null）、Date/Map/Set/类实例因 `Object.values` 返回空数组误判兼容（JSON 化变 `{}` 丢数据）、循环引用致检查本身栈溢出。平台限制：Node.js 无法强行中断正在执行的同步代码；可终止的只有外部进程与等待中的操作。操作员 2026-08-04 grilling 裁决。
 
 ## Decision
 
@@ -40,7 +40,7 @@ GH issue #140 B 块（Q6/Q7/Q8，executor 底盘加固）。executor 是 Foundat
 
 **Evidence pointers**:
 
-- GH issue #140 B-1 / B-2 决议评论（2026-08-04）。
+- GH issue 的 B-1 / B-2 决议评论（2026-08-04）。
 - `src/harness/tools/executor.ts:38-48`（isJsonCompatible 现状）/ `:86-103`（timeout/cancel 现状）/ `:93`（被推翻的设计意图注释）。
 - 参照：`tools/bash_tool.py:55-100`（wait_for → SIGTERM → 2s → SIGKILL，仅杀一层）；iknow 补进程树 kill。
 - CONTEXT.md `cancelKind` 四值枚举 + `in-flight closeout` 语义（停止原因区分沿用，不新发明）。

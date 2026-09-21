@@ -5,9 +5,9 @@ Status: accepted
 
 > **Amendment 2026-09-19**（ADR-0113）：§1 仍是**主会话** `settings.llm.model` 缺失 fail-fast。可选 `settings.llm.liteModel` 不改变本条。
 >
-> **Amendment 2026-09-12**（ADR-0084 / `specs/agent-control-surface.md` Slice B）：§1 与 §2 引用的守卫文案中指向 `<cwd>/.iknow/settings.json` 的尾句 **superseded**——`llm` 是用户层键，项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`，文案只指向 `~/.iknow/settings.json`（`src/config/messages.ts`）。§1 model 字面唯一来源、§2 apiKey 单字段与占位符语义、§5 不动范围均不变。
+> **Amendment 2026-09-12**（ADR-0084 Slice B）：§1 与 §2 引用的守卫文案中指向 `<cwd>/.iknow/settings.json` 的尾句 **superseded**——`llm` 是用户层键，项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`，文案只指向 `~/.iknow/settings.json`（`src/config/messages.ts`）。§1 model 字面唯一来源、§2 apiKey 单字段与占位符语义、§5 不动范围均不变。
 >
-> **Amendment 2026-09-13**（ADR-0093 / #1010）：§2「取代 `apiKeyEnv` 间接寻址」**重开**——`settings.llm.providers[i].apiKeyEnv` 在**用户层注册表内**重新引入 per-provider 变量名（只直读 `process.env[apiKeyEnv]`，不回落 `.env.local` / `.env` fileMap；env 缺席 → typed 抛错，不回退字面 `apiKey`）。§2 其余条款不变：全局 `IKNOW_LLM_API_KEY_ENV`、`LlmEnv.apiKeyEnv` 字段、未命中 provider 路径的 `settings.llm.apiKey` 占位符链路均仍如原文。§1 model 字面唯一来源与缺失 fail-fast 不变，该字面现可读作 `provider/model` 路由 ID。
+> **Amendment 2026-09-13**（ADR-0093）：§2「取代 `apiKeyEnv` 间接寻址」**重开**——`settings.llm.providers[i].apiKeyEnv` 在**用户层注册表内**重新引入 per-provider 变量名（只直读 `process.env[apiKeyEnv]`，不回落 `.env.local` / `.env` fileMap；env 缺席 → typed 抛错，不回退字面 `apiKey`）。§2 其余条款不变：全局 `IKNOW_LLM_API_KEY_ENV`、`LlmEnv.apiKeyEnv` 字段、未命中 provider 路径的 `settings.llm.apiKey` 占位符链路均仍如原文。§1 model 字面唯一来源与缺失 fail-fast 不变，该字面现可读作 `provider/model` 路由 ID。
 
 ## Context
 
@@ -18,9 +18,9 @@ iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现
 - **`process.env[IKNOW_LLM_MODEL]`**（env 直读覆盖 model）
 - **`.env.local`** 兜底
 
-四个口 + 两条 precedence，开发者心智分裂；用户视角"模型到底在哪改"无唯一答案（issue #353 第二阶段已立项）。硬编码兜底 + 间接寻址也使 iknow 业务接口对外暴露外部企业的变量名（`ANTHROPIC_AUTH_TOKEN`），与「让 iknow 业务接口不出现外部企业变量名」的项目目标冲突。
+四个口 + 两条 precedence，开发者心智分裂；用户视角"模型到底在哪改"无唯一答案（第二阶段已立项）。硬编码兜底 + 间接寻址也使 iknow 业务接口对外暴露外部企业的变量名（`ANTHROPIC_AUTH_TOKEN`），与「让 iknow 业务接口不出现外部企业变量名」的项目目标冲突。
 
-`#353 settings 机制`（第一阶段）已建好 `settings.json` 的承载能力（user + project 合并、drop-not-throw、深 frozen），但模型 / API key 两个字段未接入。
+`settings 机制`（第一阶段）已建好 `settings.json` 的承载能力（user + project 合并、drop-not-throw、深 frozen），但模型 / API key 两个字段未接入。
 
 ## Decision
 
@@ -52,8 +52,8 @@ iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现
 
 `src/harness/sandbox/env-isolation.ts` 的 `placeholderVarNames()` / `configuredSecretNames()` / `currentSecretValues()` 改为解析 `settings.llm.apiKey` 原始形态：
 
-- **占位符串**（`${VAR}` / `$VAR` 任意合法组合，含多段 `${A}${B}` 与字面 + 占位符混合如 `${A}literal`）→ 变量名去重数组进 `configuredSecretNames()`（`extractPlaceholders` 共用 settings.ts 的占位符正则源）。SC20 遮蔽作用到多段 / 混合形态（M1 修复多段遮蔽漏洗）。
-- **字面值**（trim 后非空、不含 `$IDENT` / `${VAR}` 形态）→ 变量名不进 env 扫描；其 trimmed 值进 `currentSecretValues()` 的内存遮蔽集（M3 修复字面密钥回显 SC20 遮蔽失效）。drift 风险（字面值变化时遮蔽集不自动更新）见 ADR Concrete Quiddity。
+- **占位符串**（`${VAR}` / `$VAR` 任意合法组合，含多段 `${A}${B}` 与字面 + 占位符混合如 `${A}literal`）→ 变量名去重数组进 `configuredSecretNames()`（`extractPlaceholders` 共用 settings.ts 的占位符正则源）。遮蔽作用到多段 / 混合形态（M1 修复多段遮蔽漏洗）。
+- **字面值**（trim 后非空、不含 `$IDENT` / `${VAR}` 形态）→ 变量名不进 env 扫描；其 trimmed 值进 `currentSecretValues()` 的内存遮蔽集（M3 修复字面密钥回显遮蔽失效）。drift 风险（字面值变化时遮蔽集不自动更新）见 ADR Concrete Quiddity。
 
 **完全 settings 驱动**，业务层（含 `LlmEnv` 接口）不再含任何外部企业变量名。
 
@@ -80,10 +80,10 @@ iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现
 
 ### Concrete Quiddity
 
-字面 apiKey（settings.llm.apiKey 形如 `"sk-..."`）的 SC20 遮蔽依赖 `currentSecretValues()` 在每次调用时**实时**读 settings 拿 trimmed 值（`env-isolation.literalApiKey()`，每次 call 现取 `loadIknowSettings()`，模块顶层 SECRET_ENV_NAMES 不缓存字面值）。drift 风险：
+字面 apiKey（settings.llm.apiKey 形如 `"sk-..."`）的遮蔽依赖 `currentSecretValues()` 在每次调用时**实时**读 settings 拿 trimmed 值（`env-isolation.literalApiKey()`，每次 call 现取 `loadIknowSettings()`，模块顶层 SECRET_ENV_NAMES 不缓存字面值）。drift 风险：
 
 - settings.llm.apiKey 字面值在两次遮蔽调用之间被改 → 旧字面值仍进遮蔽集直到缓存失效（M3 实施选择：**不缓存字面值**，每次 call 现取，避免此 drift）。
-- 字面值在 trace 文件、stdout、stderr 中如已被原样打印 → 历史数据无法事后回溯遮蔽（这是输出写侧的纪律，非 SC20 能修复）。settings 写入 / 改写期间必须配合 `currentSecretValues()` 的实时语义。
+- 字面值在 trace 文件、stdout、stderr 中如已被原样打印 → 历史数据无法事后回溯遮蔽（这是输出写侧的纪律，非遮蔽机制能修复）。settings 写入 / 改写期间必须配合 `currentSecretValues()` 的实时语义。
 
 ### Reversibility
 
@@ -113,12 +113,11 @@ iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现
   - C 组：settings `{model: "..."}` + `ANTHROPIC_AUTH_TOKEN=""` → 守卫抛「no API key configured」, exit 1
   - D 组：settings 字面 `"apiKey": "sk-..."` → 不依赖 env 跑通
 - `npx tsc --noEmit` 退出 0
-- `npm test` 2416/2417 通过（仅 SC8 预存 flaky；与本改动无关）
+- `npm test` 2416/2417 通过（仅预存 flaky；与本改动无关）
 - 全程 key 仅通过 `ANTHROPIC_AUTH_TOKEN` env 注入；settings 文件、fixtures、scripts、日志均无明文 key 落盘
 
 ## 关联
 
-- `plans/settings-model-extension.md`（tracer bullet / validation 详述）
-- `#353 settings 机制`（settings 读取能力基建）
+- `settings 机制`（settings 读取能力基建）
 - `docs/CONTEXT.md §83`（LLM 配置 SSOT 边界，需同步更新）
-- PR #391（实现 PR）
+- 实现 PR

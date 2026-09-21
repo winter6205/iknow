@@ -7,6 +7,6 @@ Status: accepted
 
 ## Why not
 
-- **OS / IPC hook server**：Pre 必须同步 fail-closed（#126 D3）；IPC 超时会把热路径变成全工具拒绝。
+- **OS / IPC hook server**：Pre 必须同步 fail-closed；IPC 超时会把热路径变成全工具拒绝。
 - **一个 Policy 巨兽**：四套 SSOT 与失败语义不同，焊在一起会让改 isolation 碰到用户规则。
 - **用户钩子与 `/memory` 共用 enable**：关 hooks 会误关自动记忆。

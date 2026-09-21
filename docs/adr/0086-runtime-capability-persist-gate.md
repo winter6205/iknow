@@ -9,4 +9,4 @@ Status: accepted
 
 **Why not 只加 TTL / 只改 prompt：** TTL 猜寿命且掏空 `constraint` 词义；包装句挡不住高 importance 假闸。**Why not 开局同步 GC：** 挡首包；本会话看见记忆之前用读滤即可。
 
-合同：`specs/runtime-capability-memory-gate.md`。ADR-0031 D1/D5 同日 amendment。
+ADR-0031 D1/D5 同日 amendment。

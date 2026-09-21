@@ -3,7 +3,7 @@
 Date: 2026-08-26
 Status: accepted
 
-> **Amendment 2026-09-11**（#988 / ADR-0086 / `specs/runtime-capability-memory-gate.md`）：D1 默认完成回合闸从 N≥2 改为 **N≥3**。D5「`autoExtract` 非 true 则钩子缺席、零写盘」收窄为：**零 LLM**；extract 与 dream 均关时仍可装配机械-only 钩子，跑 `memory_gc` 与 capability memory sweep。ingest 失败仍不得 fail 用户 turn。
+> **Amendment 2026-09-11**（ADR-0086）：D1 默认完成回合闸从 N≥2 改为 **N≥3**。D5「`autoExtract` 非 true 则钩子缺席、零写盘」收窄为：**零 LLM**；extract 与 dream 均关时仍可装配机械-only 钩子，跑 `memory_gc` 与 capability memory sweep。ingest 失败仍不得 fail 用户 turn。
 
 ## Context
 
@@ -13,11 +13,11 @@ That deferral has held long enough to collect its own cost. The consequence reco
 
 There is also no cleanup at all today. `ttl_days` is honored by `listPromotableEntries` at read time but nothing ever flips `disabled`; `supersedes` is a frontmatter field with no enforcement; the store has no cap. An auto-write path without a cleanup path is a monotonically growing pile of unreviewed model output, which is exactly the failure ADR-0009 was protecting against.
 
-`specs/auto-memory.md` is the thin spec that fixes D1–D5 for this module; this ADR is its design-truth landing. Scope is deliberately narrow: this ADR lands the deferred item and does **not** revisit ADR-0009 D1–D4 / D6 (three-layer placement, split-frequency injection timing, dual-channel trust routing, affirmative-phrasing discipline, static caps) or ADR-0010 (`memory_layer` single slot; `ask` fully opted out of the memory layer).
+The thin spec fixing D1–D5 for this module; this ADR is its design-truth landing. Scope is deliberately narrow: this ADR lands the deferred item and does **not** revisit ADR-0009 D1–D4 / D6 (three-layer placement, split-frequency injection timing, dual-channel trust routing, affirmative-phrasing discipline, static caps) or ADR-0010 (`memory_layer` single slot; `ask` fully opted out of the memory layer).
 
 ## Decision
 
-Five decisions, mirroring `specs/auto-memory.md` D1–D5.
+Five decisions, D1–D5.
 
 1. **Trigger = host-side, async, after a successful run.** Auto-extraction fires only after `StopReason=completed`, on the host side (chat / tui / serve), never inside the loop engine. The gate is session wind-down or an N≥3 completed-turn counter — **not** per-turn forced consolidation. Rationale: per-turn extraction doubles the LLM call count on the hot path, and a single turn rarely contains a cross-session fact worth persisting; a turn counter is a cheap mechanical proxy for "this conversation has accumulated something". `ask` gets no wiring at all (ADR-0010 D3 opt-out stands).
 
@@ -32,7 +32,7 @@ Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 
    Persistence reuses the `memory_save` write discipline verbatim — tmp + rename atomic replace, affirmative-phrasing gate, frontmatter serialization. `extract` / `decide ops` / `persist` stay three separate functions so the LLM half can be faked in tests and the deterministic half can be unit-tested with no model at all.
 
-   **Amendment 2026-08-29** (`specs/auto-memory-layering.md`): extract `decide ops` no longer maps low token-agreement to `SUPERSEDE`. Extract is ADD / conservative UPDATE / NOOP. `SUPERSEDE` remains a persist op when dream names `replaces`; old files are still soft-disabled by `memory_gc`, not by the extract heuristic.
+   **Amendment 2026-08-29**: extract `decide ops` no longer maps low token-agreement to `SUPERSEDE`. Extract is ADD / conservative UPDATE / NOOP. `SUPERSEDE` remains a persist op when dream names `replaces`; old files are still soft-disabled by `memory_gc`, not by the extract heuristic.
 
 3. **Provenance = `source: auto` frontmatter, low-trust channel only.** Every auto-written entry carries `source: auto` in its frontmatter (an unknown-extra field that `sanitizeMemoryFile` / `serializeMemoryEntry` already round-trip, so no schema version bump). Auto entries reach the model **only** through `memory_recall` tool results — the ADR-0009 D3 dual-channel rule is unchanged — and are never blind-injected into `system`. Auto entries are not exempt from the promote gate: they still need ≥2 distinct-session recalls, same as hand-written ones. There is no auto-promote path.
 
@@ -65,6 +65,5 @@ Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 
 - `docs/adr/0009-memory-file-layered-injection.md` Decision 5 — the deferral this ADR discharges (now carries a superseded-by pointer scoped to D5 only).
 - `docs/adr/0010-memory-injection-landing-seam-integration.md` — `memory_layer` single slot; `ask` opt-out that this ADR preserves by not wiring `ask`.
-- `specs/auto-memory.md` — the thin spec (D1–D5) this ADR lands; `plans/auto-memory.md` — the five-ticket implementation order.
 - `src/harness/memory/` — the reused mechanisms: `frontmatter.ts` (unknown-extra round-trip → `source: auto` needs no schema bump), `bm25.ts` (`scoreMemoryEntries` neighbor lookup), `promote.ts` (`usage.json` sidecar + expiry predicate), `tools/save.ts` (affirmative-phrasing gate + tmp/rename atomic write).
 - arXiv 2606.25161 (consolidation errors become persistent system-state errors) — the risk that justified the 0009 deferral and that D3/D4/D5 here mitigate rather than dismiss.

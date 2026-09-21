@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-#356 子代理 V1（PR #359 draft）落地后，#361 真链路 e2e（真 LLM + chat pipe，
+子代理 V1（draft PR）落地后，真链路 e2e（真 LLM + chat pipe，
 trace 为 ground truth）实测发现两个叠加问题：
 
 1. **引导层缺失**：`spawn-subagent-tool.ts` description 只写机制不写时机，
@@ -40,7 +40,7 @@ trace 为 ground truth）实测发现两个叠加问题：
 4. **代价收口**：`aci.timeoutTier` 由 `fast` 升长时层；signal abort 传播终止
    worker（in-flight closeout 语义不变）；前景结果作为 tool_result 走契约 X
    executor 截断（ADR-0006 20000 封顶）；并发 worker 上限设常量（建议 4）。
-5. **spec 修订**：#356 spec "立即返回 task_id" 承诺改为"默认前景同步，
+5. **spec 修订**：V1 spec "立即返回 task_id" 承诺改为"默认前景同步，
    `wait:false` 为异步选项"。
 6. **验收纪律**：真链路 e2e 断言 trace 出现 spawn_subagent tool_call；
    `messages_captured` 断言模型实际看到的 system prompt 含 proactive 关键词。
@@ -75,7 +75,7 @@ trace 为 ground truth）实测发现两个叠加问题：
 
 ## Amendment (2026-08-29)
 
-事件驱动唤醒不再是本 ADR 的暂缓项。默认契约仍是前景 spawn；后景臂在 chat / tui / serve 经 mailbox 终态投递，由 host 自发起 `run()` 注入 host drain 浓缩结果。ask 不装配该通道。`run()` 边界不再为「至少一个终态」阻塞轮询。范围与切片见 `plans/subagent-cancel-wait.md`。
+事件驱动唤醒不再是本 ADR 的暂缓项。默认契约仍是前景 spawn；后景臂在 chat / tui / serve 经 mailbox 终态投递，由 host 自发起 `run()` 注入 host drain 浓缩结果。ask 不装配该通道。`run()` 边界不再为「至少一个终态」阻塞轮询。
 
 ## Amendment (2026-09-18)
 
@@ -83,8 +83,8 @@ trace 为 ground truth）实测发现两个叠加问题：
 
 ## Evidence pointers
 
-- issue #361 — 实测证据（4 次 e2e trace 0 spawn、幻觉报告）与根因分析。
-- issue #356 / PR #359 (draft) — V1 实现（worktree `spec-356-subagent-v1`：
+- 真链路 e2e issue — 实测证据（4 次 e2e trace 0 spawn、幻觉报告）与根因分析。
+- V1 实现 issue / draft PR — V1 实现（worktree `spec-356-subagent-v1`：
   `src/harness/subagent/` spawn-subagent-tool / host-drain / manager / worker）。
 - `src/cli/chat-session.ts` — drain 调用点（run() 边界注入 priorMessages）。
 - 开源 task 工具 `packages/<task-tool>/src/tool/task.ts` + `task.txt` — "Use proactively"

@@ -3,7 +3,7 @@
 Date: 2026-09-13
 Status: accepted
 
-模型路由 ID `provider/model`(沿用今日 `minimax-cn/MiniMax-M3` 形状)由 `settings.llm.providers` 注册表解析:命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`;未命中 → 旧路径 `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`(back-compat)。`/model` 选 → 持久化 + `reloadFromEnv`(下一轮生效,与 thinking 同款 round-trip)。仅 anthropic 格式(沿 `@anthropic-ai/sdk`,client 工厂单一),`provider.headers?` 透传到 `defaultHeaders`。规格:`specs/tui-model-command.md`。
+模型路由 ID `provider/model`(沿用今日 `minimax-cn/MiniMax-M3` 形状)由 `settings.llm.providers` 注册表解析:命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`;未命中 → 旧路径 `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`(back-compat)。`/model` 选 → 持久化 + `reloadFromEnv`(下一轮生效,与 thinking 同款 round-trip)。仅 anthropic 格式(沿 `@anthropic-ai/sdk`,client 工厂单一),`provider.headers?` 透传到 `defaultHeaders`。
 
 **Why not 仓库内置 provider 连接信息:** 供应商名 + URL 写进公开仓库是污染;用户自家 key 与 endpoint 不应被 `git pull` 覆盖。注册表走用户层 `~/.iknow/settings.json`(项目文件不采纳,沿 ADR-0084)。
 

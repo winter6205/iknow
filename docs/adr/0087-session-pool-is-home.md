@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-ADR-0071 Decision 1 把会话文件夹钉在 `~/.iknow/projects/<slug>/<conversationId>/`。ADR-0019 T2 却让 `resolveServeDataDir` 在有 `workspaceRoot` 时落到 `<workspaceRoot>/.iknow`。TUI / serve 把会话 jsonl 与 blobs 写进工作区，grep 用 `--no-ignore` 扫工作区时命中刚写进 transcript 的 pattern（#1000）。`workspaceRoot` 词条一度把 sessions 算进 per-root，和「会话文件夹」词条冲突。
+ADR-0071 Decision 1 把会话文件夹钉在 `~/.iknow/projects/<slug>/<conversationId>/`。ADR-0019 却让 `resolveServeDataDir` 在有 `workspaceRoot` 时落到 `<workspaceRoot>/.iknow`。TUI / serve 把会话 jsonl 与 blobs 写进工作区，grep 用 `--no-ignore` 扫工作区时命中刚写进 transcript 的 pattern。`workspaceRoot` 词条一度把 sessions 算进 per-root，和「会话文件夹」词条冲突。
 
 ## Decision
 

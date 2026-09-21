@@ -4,7 +4,7 @@ Date: 2026-09-08
 
 Status: accepted
 
-> **Amendment 2026-09-09**（ADR-0074）：`/tmp` 仍不是交付落点，可写集仍是 `taskRoot` + `/tmp`。寿命改为每身份宿主垫底、跟会话文件夹走，不再是一次 bash 一块空 tmpfs。`write_file` / `edit_file` 可写当前身份的 `/tmp`。详见 `specs/parent-visible-tmp.md`。
+> **Amendment 2026-09-09**（ADR-0074）：`/tmp` 仍不是交付落点，可写集仍是 `taskRoot` + `/tmp`。寿命改为每身份宿主垫底、跟会话文件夹走，不再是一次 bash 一块空 tmpfs。`write_file` / `edit_file` 可写当前身份的 `/tmp`。
 
 > **Amendment 2026-09-13**（ADR-0092）：闭世界围栏不再是**默认**姿态。默认改为全局档（宿主真路径可读可写，home 不藏）；围栏仍跑（网络 / env / rlimit / FS 沙箱），hard-wall 不变，闭世界退为工作区档（后做）的可选姿态。
 

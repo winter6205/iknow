@@ -3,9 +3,7 @@
 Date: 2026-09-20
 Status: accepted
 
-Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；viewport 纪律不变）。Amends ADR-0101 / ADR-0102 的父侧终态归因词汇（envelope reason 联合 4 值 → 5 值，见 Decision 2 对 SC9 冻结的显式修订）。成文化归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/356-subagent-v1.md` assumption 16（:34）/ SC13（:361）的 worker exit-code 语义，并裁决两处原文微差（见 Decision 3）。**修订 SC9「reason 枚举 V1 冻结四值」**：本 ADR 显式批准追加第五值 `modelTransient`（envelope-freeze.test.ts 期望随之更新，属契约变更而非断言削弱）。
-
-关联：issue #1065；实施 plan 已归档于 `docs/archive/025-retire-completed-specs-and-plans/plans/model-stream-incomplete-fault.md`（T1 载体）；证据 `…/model-stream-incomplete-fault.evidence.md`。
+Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；viewport 纪律不变）。Amends ADR-0101 / ADR-0102 的父侧终态归因词汇（envelope reason 联合 4 值 → 5 值，见 Decision 2 对 SC9 冻结的显式修订）。成文化归档 spec 356-subagent-v1 assumption 16 / SC13 的 worker exit-code 语义，并裁决两处原文微差（见 Decision 3）。**修订 SC9「reason 枚举 V1 冻结四值」**：本 ADR 显式批准追加第五值 `modelTransient`（envelope-freeze.test.ts 期望随之更新，属契约变更而非断言削弱）。
 
 ## Context
 
@@ -15,7 +13,7 @@ Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；
 2. 裸 Error 不进 loop-engine 收口支（:1949-1952 只认 `ProtocolError` / `TransportRetryExhaustedError`），穿出 `run()`；
 3. worker 场景落到 cli.ts catch-all（:615-626）→ `[subagent-worker] fatal` + **exit 2** —— 冒用了 assumption 16 / SC13 保留给信封协议崩溃的专码，父侧（manager.ts:1512-1543 SC16）标 `crashed`，无法与「信封坏了」区分。
 
-不新建重试机制：`withTransportRetry` 本体零改动（文件 diff 为空或仅注释，T3 硬闸），重试预算 / 退避 / `retry-after` / `transport_retry` 流事件全部由既有机器承载（with-transport-retry.ts:125-156）。
+不新建重试机制：`withTransportRetry` 本体零改动（文件 diff 为空或仅注释，硬闸），重试预算 / 退避 / `retry-after` / `transport_retry` 流事件全部由既有机器承载（with-transport-retry.ts:125-156）。
 
 ## Decision
 
@@ -29,7 +27,7 @@ Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；
 
 ### 2. envelope reason 新值 = `modelTransient`（显式修订 SC9 冻结枚举）
 
-- 不复用 `protocolError` + cause 字段：T5 父侧归因需要显式区分「上游瞬时可续」vs「真协议损坏」；cause 藏在字符串里不构成判定面。
+- 不复用 `protocolError` + cause 字段：父侧归因需要显式区分「上游瞬时可续」vs「真协议损坏」；cause 藏在字符串里不构成判定面。
 - 落点三处同步：`SubAgentEnvelope.reason` TS union（envelope.ts:167-168）、`PARENT_SCHEMA.properties.reason.enum`（:316-318）、manager 消费联合（manager.ts:67、:1466-1478 两处 cast）。
 - **冲突记录（基准 → 修正）**：envelope.ts:173-176 与 `tests/subagent/envelope-freeze.test.ts:72-76` 把 reason 枚举钉为「V1 冻结四值」（SC9 判定面，enum 外值拒收 :156-163）。追加第五值与本 ADR 基准（裁决 2）正面冲突。按最小改动原则裁决：**本 ADR 即 SC9 冻结的显式修订授权**，freeze 测试期望更新为 5 值（断言仍是封闭枚举校验，非削弱）。跨版本退化：旧父收新 worker 的 `modelTransient` 信封 → ajv 拒 → 父侧按现状归 `crashed`（不比今日差）；单仓 CLI 父子同 version，属理论态。
 - 发射点（本裁决同时钉住映射机制，见 Decision 5 可达性事实）：
@@ -48,21 +46,21 @@ Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；
 - **run 阶段逃逸错误 → best-effort failed envelope（stdout）+ exit 1**：不再冒用 2。结构化 typed 逃逸按 reason 映射（Decision 2(b)）；**非结构化逃逸**（装配/收尾等 loop 收口面之外的 unknown 错误）→ best-effort envelope reason=`crashed`（进程以错误结束 = 本 ADR 收窄后的「进程级异常死亡」词汇）+ exit 1——与父侧 SC16「exit≠0 无信封 → crashed」分层不矛盾：有信封按信封 reason。
 - exit 0 + failed 信封 = run() 派生的结构化失败（reason ∈ 5 值枚举），父侧按信封归因。
 - **SC13 / assumption 16 微差裁决**：两处原文都只钉「exit ≠ 0」，**未钉死码值 2**；微差在父侧标记——SC13 说父管理标 `crashed`，assumption 16 说 `reason=protocolError`。实现现状采 assumption 16 侧的**信封派生面**（worker.ts:1141-1148 doc + :1289：run() 抛 ProtocolError → 信封 reason=protocolError），父侧对 **exit≠0 无信封** 的崩溃标 `crashed`（manager.ts:1512-1543 SC16 + :1205-1214 settleCrash，即 SC13 侧）——二者不矛盾，分层成立：_协议层崩溃（无信封）→ 父侧 crashed；有信封 → 按信封 reason_。本 ADR 把该分层定为契约正文；「exit 2 归还」的准确表述是「归还 assumption 16 的协议层崩溃**专码**」，`crashed` 语义收窄回「进程级异常死亡（非 0 无信封 / 信号杀）」。
-- **ADR-0094 引用写法**（钉清 evidence §5.2 漂移）：ADR-0094 正文无字面 SC4/SC5 编号（单段 Decision，docs/adr/0094-…md:6）。代码注释「ADR-0094 SC4-SC5」所指为其中两句：「供应商/API 失败对人画在对话流（薄外壳 `API error (status):` + 原文），不追加进 session transcript（#120）；`StopReason` / `protocolError` 不当 UX 文案」。字面 SC4/SC5 编号的出处是活跃 spec `specs/transport-continue-persist.md:43-44`（回合落盘 + sticky notice，另一面）。新文档/注释引用时写「ADR-0094 viewport API error 段（对应 `specs/transport-continue-persist.md` SC4/SC5）」，不再裸写「ADR-0094 SC4-SC5」。
+- **ADR-0094 引用写法**（钉清 evidence §5.2 漂移）：ADR-0094 正文无字面 SC4/SC5 编号（单段 Decision，docs/adr/0094-…md:6）。代码注释「ADR-0094 SC4-SC5」所指为其中两句：「供应商/API 失败对人画在对话流（薄外壳 `API error (status):` + 原文），不追加进 session transcript；`StopReason` / `protocolError` 不当 UX 文案」。字面 SC4/SC5 编号的出处是活跃 spec `specs/transport-continue-persist.md:43-44`（回合落盘 + sticky notice，另一面）。新文档/注释引用时写「ADR-0094 viewport API error 段（对应 `specs/transport-continue-persist.md` SC4/SC5）」，不再裸写「ADR-0094 SC4-SC5」。
 
 ### 4. default 支可观测性 = `nonClockFaultOf` default 内 console.warn 诊断
 
-核实：`nonClockFaultOf` / `translateAnthropicTransportFault` 均为纯函数（无注入 log/trace 通道，anthropic-adapter.ts:862-873、:898-915）；唯一消费点 `withTransportRetry` :134 与 rethrow :141 受**本体零改动**硬闸约束（plan settled / T3 Completion），「由消费点记录」不可行；`classifyFault` 亦纯且 default→none 语义不改。裁决取侵入最小形态：**default 支 return 前 `console.warn` 一条诊断**（`err.name` + `errorMessage(err)`，其中 message 截断 ≤200 字符、name 不计入预算，不打 stack / 不打请求体），分类结果不变（仍 `protocol_error`）。先例：harness 诊断走 console.warn（trace/jsonl.ts:239、memory/prefetch.ts:184）；worker stdout 是信封协议面、warn 走 stderr 不污染，父侧 stderr 只在 exit≠0 取证时读（CONTEXT「stderr 指针」）。测试以 spy 捕获，不新增机制、不加 injectable 旋钮。
+核实：`nonClockFaultOf` / `translateAnthropicTransportFault` 均为纯函数（无注入 log/trace 通道，anthropic-adapter.ts:862-873、:898-915）；唯一消费点 `withTransportRetry` :134 与 rethrow :141 受**本体零改动**硬闸约束，「由消费点记录」不可行；`classifyFault` 亦纯且 default→none 语义不改。裁决取侵入最小形态：**default 支 return 前 `console.warn` 一条诊断**（`err.name` + `errorMessage(err)`，其中 message 截断 ≤200 字符、name 不计入预算，不打 stack / 不打请求体），分类结果不变（仍 `protocol_error`）。先例：harness 诊断走 console.warn（trace/jsonl.ts:239、memory/prefetch.ts:184）；worker stdout 是信封协议面、warn 走 stderr 不污染，父侧 stderr 只在 exit≠0 取证时读（CONTEXT「stderr 指针」）。测试以 spy 捕获，不新增机制、不加 injectable 旋钮。
 
-### 5. T4 可达性确认（代码核实结论）
+### 5. 可达性确认（代码核实结论）
 
 evidence §5.5 属实且已扩全：
 
 - **`TransportRetryExhaustedError`（不可见断流耗尽）**：with-transport-retry :139 抛出 → loop :1951 收口 → stopReason `protocolError` + apiError（cause 摘要）→ runWorkerOnce :1229-1241 派生 failed 信封 → **exit 0**。不裸抛、不达 worker catch、不达 cli exit 2。worker 侧适配器同构（worker.ts:533-544 装配 `withTransportRetry({ translate: translateAnthropicTransportFault })`）。
 - **`ModelStreamIncompleteError`（visible=true 直抛）**：:141 rethrow → loop :1950 `instanceof ProtocolError` 命中（extends 关系保证）→ 同一收口支 → stopReason `protocolError`（apiError 按 Decision 2(c) 挂上）。
-- **既有派生路径**：run() 正常返回 stopReason=protocolError 时，envelope 由 worker.ts:1229-1241 派生（`toFailedEnvelope("protocolError", "", observabilityFields(result, …))`，stop_reason 观测字段带 `protocolError`）。**即 T2 落地后 issue #1065 的 exit 2 冒用即自然消灭**（裸 Error 变 typed 即被 loop 收口）。
+- **既有派生路径**：run() 正常返回 stopReason=protocolError 时，envelope 由 worker.ts:1229-1241 派生（`toFailedEnvelope("protocolError", "", observabilityFields(result, …))`，stop_reason 观测字段带 `protocolError`）。**即落地后 exit 2 冒用即自然消灭**（裸 Error 变 typed 即被 loop 收口）。
 
-**T4 范围结论**：不是纯「测试钉住既有行为」——「钉住既有行为」只保证 reason=protocolError；而 Decision 2 要求父侧拿到 `modelTransient`，故 worker 产品码需小改（Decision 2(a) 分流 + 2(b) 防御排序支），外加 cli.ts catch-all 收窄（Decision 3 不变式 b）。loop-engine 零改动（:1949-1963 原样），withTransportRetry 零改动。
+**范围结论**：不是纯「测试钉住既有行为」——「钉住既有行为」只保证 reason=protocolError；而 Decision 2 要求父侧拿到 `modelTransient`，故 worker 产品码需小改（Decision 2(a) 分流 + 2(b) 防御排序支），外加 cli.ts catch-all 收窄（Decision 3 不变式 b）。loop-engine 零改动（:1949-1963 原样），withTransportRetry 零改动。
 
 ## Consequences
 
@@ -74,4 +72,4 @@ evidence §5.5 属实且已扩全：
 
 ## Evidence
 
-- errors.ts:27-31 / :43-45 / :51-60 / :368-395；anthropic-adapter.ts:516-525 / :541-542 / :561-565 / :584-674 / :862-873 / :881-896 / :898-915；fault-class.ts:71-99 / :146-162；with-transport-retry.ts:125-156；loop-engine.ts:1912-1963 / :2273-2275；worker.ts:533-544 / :1134-1148 / :1219-1241 / :1285-1293；envelope.ts:160-215 / :308-319；manager.ts:67 / :1205-1214 / :1466-1478 / :1512-1543；cli.ts:608-627；race-timers.ts:50-55 / :112-118；tests/subagent/envelope-freeze.test.ts:72-76 / :156-163；tests/tui/error-stop-notice.test.tsx；归档 spec docs/archive/025-retire-completed-specs-and-plans/specs/356-subagent-v1.md:32-34 / :361；specs/transport-continue-persist.md:43-44。
+- errors.ts:27-31 / :43-45 / :51-60 / :368-395；anthropic-adapter.ts:516-525 / :541-542 / :561-565 / :584-674 / :862-873 / :881-896 / :898-915；fault-class.ts:71-99 / :146-162；with-transport-retry.ts:125-156；loop-engine.ts:1912-1963 / :2273-2275；worker.ts:533-544 / :1134-1148 / :1219-1241 / :1285-1293；envelope.ts:160-215 / :308-319；manager.ts:67 / :1205-1214 / :1466-1478 / :1512-1543；cli.ts:608-627；race-timers.ts:50-55 / :112-118；tests/subagent/envelope-freeze.test.ts:72-76 / :156-163；tests/tui/error-stop-notice.test.tsx；specs/transport-continue-persist.md:43-44。

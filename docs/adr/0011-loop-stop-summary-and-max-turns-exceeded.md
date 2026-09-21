@@ -65,7 +65,7 @@ Status: accepted
 - `run_query()` 状态机,`max_turns` 超限 raise `MaxTurnsExceeded`。
 - `src/harness/stream.ts:20-23` — `HarnessStreamEvent` 三成员,无终态事件,
   需加终态成员承载摘要。
-- `specs/trace-service.md:124` — `recordTurn` decision 已预声明
+- trace-service spec 草案 :124 — `recordTurn` decision 已预声明
   `max_turns_exceeded` 停因。
 - `docs/adr/0008-token-accounting-usage-placement.md` — usage
   observability-first,`LlmCallRecord` 承载 token。
