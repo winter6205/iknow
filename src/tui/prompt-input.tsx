@@ -571,6 +571,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
           <textarea
             ref={textareaRef}
             focused={!props.disabled}
+            cursorStyle={{ blinking: false }}
             placeholder={props.placeholder ?? ""}
             placeholderColor={pal.dim}
             textColor={pal.text}
