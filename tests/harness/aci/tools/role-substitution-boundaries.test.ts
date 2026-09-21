@@ -127,7 +127,7 @@ async function expectGrepRefusal(
   return caught.message;
 }
 
-describe("#1089 bash arm — accepted escape surface (B1..B3)", () => {
+describe("#1089 bash arm — accepted escape surface (B1..B3b)", () => {
   // B1 — Category A (positive control): still refuses the plain grep family
   // via the real handler. Distinct spellings from the pinned set: `-n`
   // flag-before-operand and recursive `-rn` (the ADR "Why not" line calls
@@ -221,6 +221,31 @@ describe("#1089 bash arm — accepted escape surface (B1..B3)", () => {
     assert.ok(
       !msg.includes(ROLE_SUBSTITUTION_PREFIX),
       `must NOT be a role_substitution refusal (gate let it through), got: ${msg}`
+    );
+  });
+
+  // B3b — Category B, registered by ADR-0117 after the #1089 boundary matrix
+  // ran: this gate segments on `splitShellSegments` (`;` / `&&` / `||` / `|`),
+  // which does NOT treat a newline as a segment boundary — unlike the ADR-0068
+  // dangerous-scan face, which splits per line. Locking the divergence, not
+  // plugging it: the product bar is majority routing, not airtight enforcement.
+  it("B3b [B]: grep after a newline escapes the gate and really executes (newline is not this gate's segment boundary)", async () => {
+    assert.equal(
+      detectBashGrepSubstitution("printf x\ngrep needle a.ts"),
+      undefined,
+      "grep on a following line is not a segment-leading token for this gate"
+    );
+
+    // It is neither dangerous nor sensitive, so it reaches the sandbox — and
+    // there the second line really runs, which is the escape being registered.
+    const cwd = await makeScratch("b1089-b3b-newline-");
+    await writeFile(join(cwd, "a.ts"), "needle here\n");
+    const bash = createBashTool(cwd);
+    const result = await runBash(bash, "printf x\ngrep needle a.ts");
+    assert.equal(typeof result.code, "number");
+    assert.ok(
+      result.stdout.includes("needle"),
+      `grep must have actually executed (proves the gate let the segment through), got: ${result.stdout}`
     );
   });
 });

@@ -27,6 +27,6 @@ Status: accepted
 **负面 / Trade-offs:** 关键字形（`class Foo`）在源码里当字符串搜、且本会话尚无符号工具轨迹时会被拒；对照树 B 量化误伤，比完不留第二政策。  
 **接受面（登记，不在本政策加启发式堵）：**
 
-- bash：只查段首 token；`git grep` 放行；`find … | xargs grep`、`$(which grep)` 一类间接调用可穿过。
+- bash：只查段首 token，且段边界用 `splitShellSegments` 的 `;` / `&&` / `||` / `|`——**换行不算本闸的段边界**（与 ADR-0068 危险扫描那道墙的按行分岔语义不同，两道墙各用各的），故 `printf x\ngrep …` 一类换行后置的 grep 可穿过；`git grep` 放行；`find … | xargs grep`、`$(which grep)` 一类间接调用可穿过。
 - ACI grep：未锚定 ident+`(`；表外定义关键字（如 Go `func`、Rust `fn`）在未叠加 `^`/修饰组时当正文。
 - 语言：不按扩展名封搜；无 LSP 时走 E3 后结构形 grep 仍合法。
