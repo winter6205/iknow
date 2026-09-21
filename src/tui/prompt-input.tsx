@@ -571,6 +571,9 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
           <textarea
             ref={textareaRef}
             focused={!props.disabled}
+            // OpenTUI replaces (never merges) cursorStyle — restate the
+            // default block style and only turn blinking off.
+            cursorStyle={{ style: "block", blinking: false }}
             placeholder={props.placeholder ?? ""}
             placeholderColor={pal.dim}
             textColor={pal.text}
