@@ -1,298 +1,753 @@
 # Changelog
 
+All notable changes to this project are documented in this file. The format
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This changelog
+is a curated snapshot; the complete development history lives in the git log.
+
 ## 0.1.0 (unreleased)
 
-### Fix
-
-- **TUI 静默提示不再在工具执行期误报，文案改英文（2026-09-17）**: 「~20s 无新流字节」的等待提示此前只认 `onStream` 事件重置，而 harness 在**工具执行期**（bash 长命令、前台子代理、权限 / ask 弹窗等待）按设计不发任何流事件——任何跑过 20s 的工具都会误报「仍在等待模型输出……检查网络连接」。新增**工具相位门**：`tool_call_start`（模型交出 tool_use）→ 下一次模型调用边界（`agent_status` / `env_snapshot`）之间为工具相位，该相位内计时器到期只重排满窗、不落文案（回到模型相位后若确实静默，仍会给出提示）。判据取事件语义而非展示态 `liveToolRuns`：被权限拦下的调用不发 postToolUse，展示态会整轮卡在 running。另修：**成功收尾**现在会清掉仍在屏的等待文案（原只清 transport_retry 进度，成功回合会残留过期网络提示）。文案改英文（`Waiting for model output — ~20s with no new stream bytes.`），对齐 `docs/CONTEXT.md` 的 sticky notice 英文约定。spec `specs/transport-continue-persist.md` 不变式 3 / SC6 / SC7；`nextToolPhaseActive` 纯函数 + 相位门回归用例钉承重性。测试侧：`streaming-silence-notice.test.tsx` 的 fake bridge 改为 **release 闩驱动**（事件时序与回合收尾由测试显式控制，不再按固定 `waitMs` 圈观察窗）——旧写法在机器有并发负载时会被 mount + 输入开销吃掉窗口，把收尾塞进两步断言之间（本文件此前 flaky 的根因）。
-
-- **TUI `/model` 切换不再整树重渲染、不再复位 thinking/effort 手动覆盖（#1021，2026-09-15）**: env 派生的显示快照（模型路由串 + thinking 基线）改经框架无关 store 下发（`src/tui/env-display-store.ts`，`useSyncExternalStore` 消费）——`hub.reloadFromEnv` 成功后的 `onEnvChange` 只 publish 快照，不再 `root.render(<TuiApp/>)`；ContextBar 的模型段自行订阅重投影，`/model` 切换只动该行（回归测试以逐行 frame-diff 钉住）。thinking/effort 引入接管分层：`/thinking` / `/effort` 面板提交置位对应字段标记，此后会话内 settings 基线变化不再改写该字段（旧实现每次 env 变化都把三个 state 无条件拖回新基线）；未接管的字段仍跟随基线，外部 settings 热更新显示同步保留。`/info` 的 Model 行与 per-turn thinking override 基线改为调用时读 store 最新快照（避免渲染期过期基线发出错误 override）。`modelDisplayName` 与注册表展平下沉到 `src/tui/model-picker.tsx`（叶子模块，避免 app ↔ context-bar 成环的重复实现）。
-
 ### Breaking
 
-- **`settings.hooks` 改为 Claude command 形态（2026-09-20）**: 用户层 `~/.iknow/settings.json` 的 `hooks` 只认 `PreToolUse` / `PostToolUse`（`matcher` + `type: command`），与 Claude Code / 插件 `hooks.json` 同形；Pre exit 2 拦截。旧 `{ enabled, rules }` deny-only（含 `PreWrite` / `PreCommit`）拆除、不再生效。`hooks` 退出项目允许名单（项目文件写了会 warn 丢弃）。指南 `docs/guides/user-hooks.md`；ADR-0055 / 0084 amendment。
+- **`settings.hooks` switched to the Claude-compatible command shape (2026-09-20)**:
+  user-level `~/.iknow/settings.json` `hooks` now accepts only `PreToolUse` /
+  `PostToolUse` entries (`matcher` + `type: "command"`), the same form as plugin
+  `hooks.json`; a Pre hook exiting 2 blocks the tool call. The legacy deny-only
+  `{ enabled, rules }` shape (including `PreWrite` / `PreCommit`) was removed and
+  no longer takes effect. `hooks` left the project-settings allowlist — a project
+  file declaring it warns and is discarded. Guide: `docs/guides/user-hooks.md`;
+  ADR-0055 / ADR-0084 amendments.
 
-- **worktree 门禁 bash 预测拦截 → 物理 ro-bind（ADR-0109，2026-09-19）**: 门禁 ON 且未绑 task 树（unbound，waveRoot = 主 checkout）时，bash 不再按「会不会写工作区」预测拦——围栏对主 checkout 追加 `--ro-bind`（置于可写 bind 后、`--proc` 前，last-mount-wins；session fence tmp pad 在其后重绑 rw，scratch 写走 pad），unbound bash 一律放行执行；真写主仓（含 `.git`，命中 gitdir 路径线索时给 git 元数据专属指引）以 EROFS typed 违例回灌、含 `create-worktree` 与重发指引，后台 detached 命令因 stderr 不上回执、改在 spawn 回执带只读 preflight notice（仅 unbound 态在场，bound / OFF 形状不变），出路复用既有重绑机器（建树成功后本 run 下一波在新根重发）。`write_file` / `edit_file` 与 root_flip（enter/exit）拦前不变；bound / gate OFF 装配 byte-identical。行为变更：对 bash 的「未知命令 fail-closed 拦截」条款作废（ADR-0037 Amendment 2026-09-04 bash 判定核心 superseded，in-place 注记见 0037）；trace 实测误触面（23 会话：cd 15 / curl 10 / gh 4 / sleep 3 等）归零。ADR `docs/adr/0109-worktree-unbound-ro-bind.md`；spec `specs/worktree-unbound-ro-bind.md`。
+- **Worktree gate: unbound bash predictive interception replaced by a physical read-only bind (ADR-0109, 2026-09-19)**:
+  with the gate ON and the session not bound to a task tree, bash commands are no
+  longer intercepted based on a guess of whether they might write the workspace.
+  Instead the fence adds `--ro-bind` for the main checkout (placed after the
+  writable bind, last-mount-wins; the session's scratch pad is re-bound writable
+  afterwards, so scratch writes still work) and unbound bash always executes.
+  Real writes to the main repo — including `.git`, with dedicated guidance when
+  git-metadata paths are hit — come back as a typed EROFS violation that offers
+  `create-worktree` and a re-issue guide; detached background commands, whose
+  stderr never reaches a receipt, get a read-only preflight notice on the spawn
+  receipt (unbound state only; bound / gate-OFF assembly is byte-identical).
+  `write_file` / `edit_file` and root flip (enter/exit) are unchanged, and the
+  previous "fail-closed on unknown bash commands" clause (the bash adjudication
+  core of ADR-0037) is superseded in place. Trace evidence: the previously
+  observed mis-trigger surface across 23 sessions (cd / curl / gh / sleep and
+  friends) dropped to zero. Spec: `specs/worktree-unbound-ro-bind.md`.
 
-- **项目记忆落 home 项目树（ADR-0099，2026-09-18）**: 项目记忆库从 `<workspaceRoot>/.iknow/memory/<slug>/` 改到与会话、tasks 同棵的 `<dataDir 或 ~/.iknow>/projects/<slug>/memory/`。`--workspace-root` 不再隔离项目记忆；另池用 `--data-dir`。工作区存量不自动迁移。
+- **Project settings allowlist and permission DSL relocated into `settings.permissions` (ADR-0084, 2026-09-12)**:
+  the project-level `<cwd>/.iknow/settings.json` now adopts only four top-level
+  sections — `hooks`, `verify`, `secrets`, `permissions`; every other section
+  (`isolation`, `llm`, `subagent`, `web`, `lsp`, `memory`, `loop`, `graph`) is
+  dropped, does not override user-level values, and warns per key at startup.
+  `llm`-class keys live only in `~/.iknow/settings.json`. The permission machinery
+  (schema version + rule DSL with allow/deny/ask, predicate semantics unchanged)
+  moved from `.iknow/permissions.toml` into the project `settings.permissions`;
+  the toml file is no longer read. Both present → a typed fail-loud
+  `ProjectSettingsError` at assembly; toml alone is tolerated (retired file is
+  inert). The user layer does not accept `permissions` (warn-and-ignore per key).
+  Settings write-back now targets the right layer: user-level keys always write
+  `~/.iknow/settings.json`; the old "write to the project file if one exists"
+  two-tier rule is retired. See also `docs/guides/project-permissions.md`.
 
-- **会话文件夹归并（session folder consolidation，T1–T7，2026-09-09）**: 会话存储统一为两级树 `~/.iknow/projects/<slug>/<conversationId>/`——叶子是会话文件夹，`<id>.jsonl`（历史权威）、`todos.md`、`trace.jsonl`（trace 锚点，T3 起不再写仓库根 `./trace/`）、`blobs/`（content 级 blob，整条 message 替换退役 → `last_assistant_preview` 等 role 投影在 blob 模式下恢复）、`subagents/agent-<taskId>.jsonl`（per-agent 子代理 trace，随机 UUID 聚合文件退役）、`stderr/` 全部锚进叶子。同一 `(projectIdentityRoot, conversationId)` 派生唯一稳定路径，跨 cwd / 跨 worktree 启动同一会话不再漂移（SC6）。读侧三工具（`list_sessions` / `query_trace` / `get_record`，ACI 与 stdio MCP 两张皮）走两级树；`query_trace` 的 message preview 在 blob 模式下解引用为正文。**旧布局存量全部失效，无自动迁移**: 旧会话（`~/.iknow/sessions/` 旧锚 + 仓库根 `trace/` + 根级 todos）`--resume` 全部续跑不了、TUI 会话列表清空（旧条目不进两级树枚举）；旧 trace 锚点（81 jsonl / 337M）已归档至 `~/.iknow/archive/trace-legacy/`，恢复需手动移回并按旧代码读。归档 spec/plan `docs/archive/025-retire-completed-specs-and-plans/{specs,plans}/session-folder-consolidation.md`；handoff `docs/handoff/2026-09-09-session-folder-consolidation-t1-t7.md`。
+- **Project memory relocated into the home project tree (ADR-0099, 2026-09-18)**:
+  the project memory store moved from `<workspaceRoot>/.iknow/memory/<slug>/` to
+  `<dataDir or ~/.iknow>/projects/<slug>/memory/`, the same tree as sessions and
+  tasks. `--workspace-root` no longer isolates project memory; a separate pool
+  uses `--data-dir`. Existing workspace-local stores are not migrated
+  automatically.
 
-### Feature
+- **Session folder consolidation (2026-09-09)**: session storage is unified into a
+  two-level tree `~/.iknow/projects/<slug>/<conversationId>/`. The leaf is the
+  session folder holding `<id>.jsonl` (history of record), `todos.md`,
+  `trace.jsonl` (trace anchor; the repo-root `./trace/` directory is no longer
+  written), `blobs/` (content-addressed blob store; whole-message replacement was
+  retired and role projections such as `last_assistant_preview` were restored in
+  blob mode), `subagents/agent-<taskId>.jsonl` (per-agent subagent traces; the
+  random-UUID aggregate file was retired), and `stderr/` — all anchored at the
+  leaf. One `(project identity root, conversationId)` derives one stable path;
+  starting the same conversation from a different cwd or worktree no longer drifts
+  to a different store. The three read-side trace tools (`list_sessions`,
+  `query_trace`, `get_record`, exposed both as ACI tools and over stdio MCP) walk
+  the two-level tree, and `query_trace` message previews dereference blobs into
+  full text in blob mode. **Existing data in the old layout no longer resolves;
+  there is no automatic migration**: sessions under the old `~/.iknow/sessions/`
+  anchor, repo-root `trace/`, and root-level todos cannot be resumed and no longer
+  appear in the TUI session list; legacy trace anchors were archived under
+  `~/.iknow/archive/trace-legacy/` (restoring them requires moving files back and
+  reading them with the old code).
 
-- **TUI slash 认技能裸名别名（spec `tui-skill-slash-catalog`，2026-09-15）**: `/using-agent-skills` 与 `/arthurpower:using-agent-skills` 解析到同一条目 —— slash 的候选/补全/`parseSkillLoad` 统一认**规范名或唯一裸名别名**（大小写不敏感），出条与载荷里的 name 恒为规范名，`/help` 名册与 Tab 补全展示同 canonical 形；静态词表（`/help` 等）在精确碰撞时优先。别名由 `app.tsx` 的 `toSlashEntries` 从 `SkillCatalog.available()/get()` 投影推导（不动 harness catalog 接口，不写第二套 `:` 拆名规则）：候选裸名与全部规范名按小写折叠进占用表，折叠后不唯一的整组不发别名（宁可不可用，不可歧义），`.iknow/skills/` 与插件 skills 同框。agents 不进 slash（结构性排除 + 真实插件布局回归）。remarks: 载荷 remainder 按**输入 token 长度**切，裸名 token 短于规范名时不吃掉提示词前缀。
+- **Global user profile no longer follows the workspace root (2026-08-21)**:
+  `user.md`, `BOOTSTRAP.md`, and the identity `state.json` are seeded into and
+  read only from `~/.iknow/`. `--workspace-root` and a project `.iknow/` no
+  longer seed empty templates, and the assembly layer ignores the workspace root
+  as a persona root. ADR-0019 D1.1–D1.3 / D1.5 (memory / settings fallback / serve
+  data) are unchanged; D1.4 (per-root persona) is superseded by ADR-0025. Files
+  already mis-seeded into a project directory are not auto-deleted.
 
-- **全局插件组件加载（ADR-0095，2026-09-14）**: 读取本机全局安装插件携带的 skills / agents / hooks 并完整使用。插件根 = `~/.iknow/plugins`（默认）+ `IKNOW_PLUGIN_ROOTS` env + 设置 `plugins.roots`（**仅用户层**，不进项目 allowlist——插件贡献 hooks = 任意命令执行，项目层可配即 clone 即执行的供应链面；bun 启动器 `.env` 自动入 `process.env` 的旁路已记录未阻塞）。发现 = `<root>/installed_plugins.json` ledger 优先（`<plugin>@<marketplace>` key 前段 = 命名空间，installPath 任意深度）+ 目录扫描兜底（含 `<root>/<plugin>/<version>/` 嵌套）。skill / agent 规范名 `<plugin>:<name>` + 裸名别名（冲突丢裸名 + warn），agent `ROLE_ID_PATTERN` 放宽允许 `:`，id 原样传递零 normalize，spawn enum 与 capability 两解析面同源。hooks：`hooks/hooks.json` 经 `HookContribution` 接缝编译为异步子进程钩子——matcher 按字符类分流（精确备选 vs 非锚定正则）+ 工具名候选集（`write_file`↔`Write`、`edit_file`↔`Edit|MultiEdit`、`todo_write` 不映射 `Write`）+ envelope 通用键别名（`file_path`←`path` 等）+ `${*_PLUGIN_ROOT}` / `${*_PLUGIN_DATA}` / `${*_PROJECT_DIR}` 按后缀替换并导出 env；Pre exit 2 = 拦截（stderr JSON `systemMessage`/`permissionDecisionReason` 优先），其余 fail-open；`HookErrorEvent.phase` 增 `plugin-init` / `plugin-exec`。钩子链 additive 异步化：`PreToolUseHook`/`PostToolUseHook` 返回类型允诺 Promise，executor 与 violation-executor 调用点全部 `await`（post 拒绝进 catch，无 unhandledRejection），`composePreHooks` 异步先拦先赢，既有同步钩子零改动。设计 `plans/global-plugins-loading.md`；ADR `docs/adr/0095-global-plugin-components.md`。
+- **`iknow serve` explicit workspace bind (ADR-0023, 2026-08-19)**: `iknow serve`
+  no longer falls back to `process.cwd()` as workspace root — a long-running
+  server's cwd is not necessarily the user's project root, so the serve hub stays
+  unbound by default. The WebUI picker (chip + `/workspace` slash command) is the
+  canonical bind surface; before binding,
+  `POST /api/v1/sessions/:id/messages` returns 400 `validation` on field
+  `workspaceRoot`. After binding, `workspaceRoot` is recorded in every session
+  file and the engine converges `cwd === workspaceRoot === sandboxRoot` to one
+  absolute path. The trust roster lives in `~/.iknow/workspaces.json`; a new
+  absolute path requires `confirmTrust` on PUT (optimistic revision CAS). CLI
+  `--workspace-root <abs>` and `IKNOW_WORKSPACE_ROOT` still support an explicit
+  pre-bind (unchanged for `chat` / `tui` / `ask`).
 
-- **项目 settings 允许名单 + 权限 DSL 搬进 `settings.permissions`（ADR-0084，2026-09-12）**: 项目层 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions` 四段，其余顶层段（`isolation` / `llm` / `subagent` / `web` / `lsp` / `memory` / `loop` / `graph`）出现在项目文件即**丢弃、不覆盖用户层值**并逐键启动告警（drop-not-throw）——`llm` 等是**用户层键**，只承载于 `~/.iknow/settings.json`。权限机械层（`schema_version` + rule DSL / allow|deny|ask / 谓词语义不变）从 `.iknow/permissions.toml` 迁入项目 `settings.permissions`，**toml 不再被读取**；toml 与 `permissions` 段并存 → 装配期 typed `ProjectSettingsError` fail-loud（`kind: toml_and_json_present`），仅 toml 单独在场不拦（退役文件是惰性的）。用户层不接 `permissions`（写了逐条告警忽略）。写回**落对层**：thinking / memory 等用户层键恒写 `~/.iknow/settings.json`，「项目文件存在就写项目」的旧两档判定退役（读回一个不再采纳 `llm` 的项目文件等于静默无效 + 污染共享仓库）。spec `specs/agent-control-surface.md` Slice B；ADR `docs/adr/0084-project-settings-allowlist-and-permissions.md`。
+- **`iknow trace` default behavior inverted (ADR-0020, 2026-08-17)**: the command
+  no longer starts a standalone server (former default port 24881) by default. It
+  now probes `http://<host>:<port>/api/v1/health` (default `127.0.0.1:8787`); on
+  success it prints the mounted `http://host:port/trace` URL and opens a browser
+  (`--no-open` suppresses), on failure it reports that no `iknow serve` was
+  detected and exits 1. Scripts depending on the old standalone behavior switch to
+  `iknow trace --separate` (escape hatch keeping the standalone process on port
+  24881 for one version). The `detectLegacyTrace` migration check remains in
+  front of both modes.
 
-- **graph mode 短现势 once-per-run（ADR-0081，PR #989，2026-09-11）**: 开着图时每个 `run()` 开头贴一句短 `<graph_mode>`，同一轮内环不再每跳追加。翻转当拍仍可贴长 ON/OFF，已贴长 ON 则本轮不叠短句。取代 ADR-0080 每跳语义。
-
-- **活图阶段 1+2（#929，PR #944，2026-09-10）**: 同会话多次 `run_graph` 共用进程内活图账本（剩余子图、按 id 冻结、取消只留 done）；阶段 2 增加 `onFailure`、同 id 再进、每 id 进入 8 次熔断。账本不进 JSONL。spec `specs/live-graph-phase1.md` / `live-graph-phase2.md`。
-
-- **web_fetch HTML 窗口（2026-08-28）**: 传输层解码体 1 MiB 上限（流式读 + stub 二次拒绝）。`start_chars` 续抓，头部 `Window:` / `Representation:` 在 untrusted banner 之前；`max_chars` 上限 16000，整段 output ≤ executor 20000。opt-in `as=html` 返回 markup（仅 html content-type）；二进制类型拒绝。沙箱 curl / fence env 不改——看网页主路径仍是 SSRF 守卫下的 `web_fetch`。计划 `plans/web-fetch-html-window.md`。
-
-- **自动记忆 dream 双闸（#774，2026-08-28）**: `settings.memory.dream` 与抽取解绑。做梦须同时满足距上次成功或 skip 至少 24h、以及至少 5 个 distinct session（chat/TUI 进程内会话；serve `conversation_id`）。游标 JSON 落在各 `memoryDir`。现行条 &lt; 2 时 skip merge LLM 并推进时间闸。抽取仍为 `completed` + N≥2。
-
-- **子代理运行时与冷启动交差（PR #773，2026-08-28）**: 非正 timeout/token env 回退 settings/默认（`0` 不当关钟、不当 `max_tokens=0`）；无信封干净 `exit(0)` 立即 `protocolError` 并放槽；worker 透传父级 idle/hard-cap；并发上限可配、默认 15、超限立即失败不排队；父模型交差为短摘要+路径（IPC 与 `run_graph` 边仍保留产物）；通用 worker 注入说明书静态层且关记忆工具，explore 不灌完整 AGENTS.md；缺省 `subagent_type` 为 `general-purpose`。计划 `plans/subagent-runtime-and-handoff.md`。
-
-- **自动记忆：抽取 + 机械 GC（ADR-0031，2026-08-26）**: 兑现 ADR-0009 D5 的延期项。新开关 `settings.memory.autoExtract`（boolean-only，**默认 OFF**）——缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，行为与现网逐字节一致。开启后 chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟；`ask` 不接线，ADR-0010 D3 opt-out 保持）：LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理为零 LLM 的机械 GC（`ttl_days` 过期 / 被 `supersedes` 指名 / 超 store cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败落 typed `MemoryError`，host 侧 `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。抽取 prompt 不进 loop-engine：闸在 `src/harness/memory/auto-hook.ts`，`ModelAdapter` → `MemoryExtractLlm` 端口的桥在 `src/harness/auto-memory-wire.ts`。spec `specs/auto-memory.md`；计划 `plans/auto-memory.md` §T1–T5。
-
-- **故障恢复（#672，2026-08-25）**: FaultClass 闭集、`ModelAdapter.step` 有界传输重试、工具环 `StopReason: fused` + LOOP_DETECTED。传输耗尽映射为 `protocolError` 停止。PR #683/#684/#685。
-
-- **Harness 包2：沙箱纪律 + 并行工具调度（horizon-653，PR #671，2026-08-25）**: 前台与后台 `bash` 共用同一套 bwrap 围栏；同一 tool 阶段连续 `isConcurrencySafe` 调用重叠执行，unsafe 串行，结果顺序与 `tool_use` 一致。spec/plan 归档 `docs/archive/025-retire-completed-specs-and-plans/`。
-
-- **TUI Verify 终态可见 + 环境现势（horizon-653 包1，PR #666，2026-08-24）**: HITL 与自动模式在 TUI 显示验证成败（`VerifyBanner`，宿主投影含 `passed`）；人读 **环境现势**（cwd / git / diff，≤2000 codepoints）挂 chrome，不写入 ADR-0028 状态栏。spec/plan 归档见 `docs/archive/025-retire-completed-specs-and-plans/`。
-
-### Chore
-
-- **移除 `.json` 兼容双写镜像（#629, 2026-08-23）**: `SessionStore.save()` 与 `persistHeadMove()` 不再写 `<id>.json` 兼容镜像 —— 单文件 JSONL 是会话历史唯一权威形态。`load()` 仍保留 `.json` fallback 作为迁移窗口（#619 T2 的 legacy-only 758 个 session 一次性迁移脚本未跑前不能下刀）。`delete()` 仍遍历两条路径；`list()` 仍 `.jsonl + .json` dedupe。`jsonl.test.ts` / `jsonl-migration.test.ts` / `rewind.test.ts` / `list-exposes-workspace-root.test.ts` 的镜像契约测试删除或更新；直读 `.json` 的 `http.test.ts` / `cross-entry-consistency.test.ts` / `hub.test.ts` / `tui-cross-entry.test.ts` / `serve.test.ts` 迁去读 JSONL 头记录或 `store.load()`。`hub.ts:1823` / `cli/chat-session.ts:824,1147` / `cli/slash.ts:29` 措辞同步；`plans/session-jsonl-resume.md` / `specs/session-jsonl-resume.md` / `docs/adr/0027-session-jsonl-transcript.md` 同步。
-
-### Docs
-
-- **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。现已落地并归档。
-
-- **horizon-653 包1 后文档对齐（2026-08-24）**: 入库 `docs/coding-agent-capability-gap.md`（状态栏≠环境现势；§6.4 内建 lazy 作废；后台 bash 已 bwrap、包2 对齐纪律）；`docs/STATUS.md` §1/§3/§4 同步可见闭环与 ACI/JSONL 口径。
-
-- **compact 保焦改为任务摘录（ADR-0026，2026-08-22）**: spec `specs/recent-user-tasks.md`、计划 `plans/recent-user-tasks.md`。会话不再常驻 `taskFocus`；wayfinder 地图 #594–#599 已关。T1–T3 已随 PR #607 落地。
-
-- **CLAUDE.md 收成行为文件（2026-08-20）**: always-on 层只留约束 + SSOT 指针，不再复述模块清单、LLM/settings 实现、workspace-root 细节、本机 key/pty 状态。架构 / 配置 / 现状仍以 `docs/architecture.md`、`docs/STATUS.md`、`docs/llm-config-quickstart.md`、ADR-0015 / ADR-0019 为准；session start 不再全量加载 docs。
-
-### Breaking
-
-- **全局画像不再跟 workspaceRoot（#584，2026-08-21）**: `user.md` / `BOOTSTRAP.md` / identity `state.json` 只种、只读 `~/.iknow/`（测试缝 `userHome`）。`--workspace-root` / 项目 `.iknow/` 不再 seed 空模板；装配层忽略 `ctx.workspaceRoot` 作为 persona 根。ADR-0019 D1.1–D1.3 / D1.5（memory / settings fallback / serve data）不变；D1.4 per-root persona 由 ADR-0025 supersede。已误种在项目目录的文件不自动删除。计划 `plans/global-user-profile.md`。
-
-- **serve-workspace explicit bind（ADR-0023, #531, 2026-08-19）**: `iknow serve` 不再回退到 `process.cwd()` 作为 workspace root —— long-running 进程的 cwd ≠ 用户项目根，serve hub 默认保持 unbound。WebUI Picker（chip + `/workspace` slash）是 canonical bind surface；未 bind 前 `POST /api/v1/sessions/:id/messages` 返回 400 `validation` field=`workspaceRoot`。Bind 后 `workspaceRoot` 写入每个 session 文件，引擎 `cwd === workspaceRoot === sandboxRoot` 收敛到同一绝对路径。Trust roster 落 `~/.iknow/workspaces.json`，新绝对路径需 `confirmTrust` on PUT（乐观 rev-CAS）。CLI `--workspace-root <abs>` / `IKNOW_WORKSPACE_ROOT` 仍支持显式 pre-bind（ADR-0019 D1.1 对 `chat` / `tui` / `ask` 保持不变）。详见 `docs/adr/0023-serve-workspace-explicit.md` + `specs/serve-workspace.md`；计划 `plans/serve-workspace.md` §T1-T6。
-
-- **`iknow trace` 默认行为反转（ADR-0020, 2026-08-17）**: 不再默认起独立进程（默认端口 24881）——改为探测 `http://<host>:<port>/api/v1/health`（默认 `127.0.0.1:8787`），成功则打印 `http://host:port/trace` 并自动开浏览器（`--no-open` 关闭），失败则提示「未检测到 iknow serve，请先 `iknow serve` 或用 `iknow trace --separate`」并 `exit 1`。脚本依赖旧独立进程行为者改用 `iknow trace --separate`（escape hatch，保留独立进程 24881 行为一个版本）。`detectLegacyTrace` 迁移检测在两种模式里都前置保留。context：`#183` 的三条拆分理由（慢读、故障不隔离、横扩）在 A-scenario（developer local debug）下无语义，前两条以 per-query cap（`MAX_TRACE_BYTES` 8MiB + 行截断 + reader cap） + 路由级 try/catch 缓解；详见 `docs/adr/0020-trace-inspection-mount-into-serve.md`。计划：`plans/merge-trace-into-serve.md` §T6。
+- **Breaking (internal, pre-release)** — recorded for API audit traceability; the
+  package is private and unreleased, so there are no external consumers:
+  - `iknow serve` no longer hosts the `/api/v1/traces` read API; the inspection
+    panel moved to a separate `iknow trace` process (default port 24881;
+    `iknow trace --trace-out <path>` reads the same JSONL written by
+    `serve --trace-out`). Write-side `--trace-out` on `serve` / `chat` / `ask` is
+    unchanged.
+  - `getApiKey` / `assertOfflineCompatible` (re-exported from the package entry)
+    changed to a single options-object parameter; repo-wide refactor of all
+    two-plus positional-argument functions to options objects (41 files, zero
+    behavior change; frozen contracts — step / run / LoopAdapter /
+    Executor.executeAll / Registry / TurnTrace and the Error constructors —
+    untouched).
+  - Archived the `kb_retrieve` / `kb_verify_citation` / `kb_compile` /
+    `kb_governance` four-tool suite and the `src/tools/registry.ts` assembly
+    facade. The CLI product path stopped consuming them after the harness switch;
+    package exports and related shared types were trimmed accordingly, and the
+    runtime vector-index/embedding path was removed. Orphan surfaces
+    (`--governance-timeout`, `simulate_governance_timeout`, `--embeddings`) were
+    left pending later cleanup. Archive, not deletion.
+  - Removed the package entry's re-exports of the old `src/agent-loop/` and
+    `src/eval/` layers (13 loop symbols + 5 eval symbols).
+  - Session API paths switched to the harness foundation (`src/session-api/` has
+    zero imports from the old loop; `SessionHub` calls `run()` directly with
+    `priorMessages` continuation): `TurnDto.answer` changed from the G2 envelope
+    (`IknowAnswer`) to `TurnAnswerDto {finalText, stopReason, turnCount}`;
+    `SessionSummary` dropped `caller_role` and the wire no longer accepts or
+    returns a caller role; `POST /api/v1/sessions/:id/commands` was deleted (404);
+    `GET /api/v1/sessions` was added; `IknowAnswer` / `ToolCallLog` were removed
+    from shared schema types; `src/interaction/` and `src/agent-loop/` were
+    archived.
 
 ### Added
 
-- **Trace 读侧融合进 `iknow serve`（ADR-0020, 2026-08-17）**: `iknow serve` 同进程同端口（8787）挂载 trace 读侧——路由子树 `/api/v1/traces/*`（`/api/v1/traces` filter + paginate + `/api/v1/traces/fields` + `/api/v1/traces/sessions`） + `/trace` SPA（共享 `web/dist` 多入口，Vite 零构建改动）；`createTraceRouter({traceDir?, maxBytes?, version})` 工厂注入解除 traceserver 对 `cli/usage` 的反向依赖，`serveStaticRequest({stripPrefix})` 复用支持 `/trace` path-prefix mount（D1.1/D1.2/D1.5）。`/api/v1/sessions` 旧别名在 `--separate` 模式保留一个版本（back-compat，CHANGELOG 标 deprecate）。`tests/session-api/trace-mounted.test.ts`（`#183` 回归守卫反转） + `tests/session-api/http.test.ts` mounted 用例 + `tests/web/serve-static-prefix.test.ts` stripPrefix 边界。错误信封统一走 session-api `sendError`（`ValidationError` 400 / `TraceReadError` 500 `trace file read failed` 不 echo fs 细节）。web 入口：header 全局 Trace 链接 + 会话行 `⇱trace` deep-link（`/trace?session=<conversationId>`）+ 面板内「← 返回对话」链接（`web/src/components/ChatHeader.tsx` / `SessionSidebar.tsx` / `TracePanel.tsx`）。`src/traceserver/` 与 `src/session-api/` 保持兄弟目录（S1 bounded context，不物理合并）。写侧 `src/harness/trace/` + `session-api/hub.ts` 零改动。计划：`plans/merge-trace-into-serve.md` §T3-T5。
+- **TUI slash commands accept bare-name skill aliases (2026-09-15)**:
+  `/using-agent-skills` and `/arthurpower:using-agent-skills` resolve to the same
+  entry — candidate lists, completion, and skill-load parsing accept a canonical
+  name or a unique bare-name alias (case-insensitive), while emitted entries and
+  payloads always carry the canonical name; `/help` and Tab completion display the
+  canonical form. Static command words win exact collisions. Aliases fold-case
+  across plugin and workspace skills; a bare name colliding with more than one
+  canonical name yields no alias at all (unavailable beats ambiguous). The
+  remainder after a bare-name invocation is cut by the input token's length, so
+  short aliases no longer eat the prompt prefix. Agents are structurally excluded
+  from slash. Spec: `specs/tui-skill-slash-catalog.md`.
 
-### Feature
+- **Global plugin component loading (ADR-0095, 2026-09-14)**: skills, agents, and
+  hooks carried by locally installed plugins are now read and fully used. Plugin
+  roots: `~/.iknow/plugins` (default), plus `IKNOW_PLUGIN_ROOTS` env and the
+  user-level `plugins.roots` setting (user layer only — plugin-contributed hooks
+  execute arbitrary commands, so the project layer is deliberately excluded).
+  Discovery prefers the `installed_plugins.json` ledger (the marketplace key's
+  leading segment is the namespace, install paths at any depth) with a directory
+  scan fallback including `<root>/<plugin>/<version>/` nesting. Canonical names are
+  `<plugin>:<name>` with bare-name aliases (conflicts drop the alias and warn);
+  agent ids allow `:` and pass through verbatim. Hooks from `hooks/hooks.json`
+  compile into async subprocess hooks: matcher dispatch by character class
+  (exact alternation vs unanchored regex), tool-name candidate sets, envelope key
+  aliases, and `${*_PLUGIN_ROOT}` / `${*_PLUGIN_DATA}` / `${*_PROJECT_DIR}`
+  substitution exported as env; Pre exit 2 blocks, everything else fails open;
+  hook errors gain `plugin-init` / `plugin-exec` phases. The pre/post tool-hook
+  chain became additive-async (hooks may return promises; existing synchronous
+  hooks unchanged).
 
-- **per-root workspace 状态隔离（ADR-0019，2026-08-17）**: iknow 在任意根目录启动时，per-root 状态（identity workspace seed / `user.md` / `BOOTSTRAP.md` / memory store / serve data / settings 写回 fallback）跟从该启动根目录，与 `home`（global 配置锚，settings merge 兜底 + `~/.iknow/init.sh` host-init + user-level memory global scope）解耦。新增 `--workspace-root <dir>` CLI flag（mirror `--data-dir`）+ `IKNOW_WORKSPACE_ROOT` env var（`src/config/env.ts` SSOT 注册）；优先级链 `[explicit, env, process.cwd()]`，无 flag 且无 env → 默认 `process.cwd()`；迁移窗口 `--workspace-root "$HOME"` opt-out。核心：`src/config/workspace-root.ts`（pure resolver，4 typed-error 判别联合 mirror `IknowIdentityError`）；`build-engine.ts` / `run.tsx` / `identity/assemble.ts` / `identity/workspace.ts` / `memory/paths.ts` / `memory/assembly.ts` / `session-api/serve.ts` 七个 seam 解耦（D1.4 user.md / BOOTSTRAP.md reads 跟随 workspaceRoot；D1.3 settings 写回 fallback 重定向 `<workspaceRoot>/.iknow/settings.json`，`persistThinkingChanges` tmp 名改 per-invocation unique 修并发踩踏缺陷；D1.2 host-init 仍 global）；`fs-policy` protected-path 扩展到 `<workspaceRoot>/.iknow` 及其 children（与 `<home>/.iknow` 同模式保护）。边界测试：resolver 5 边界 classes（empty / negative / overflow / concurrent / exception）；`persistThinkingChanges` concurrent dual-write atomic rename；fs-policy 双 root refusal + positive control；T2 集成探针 `chat --workspace-root $FAKE` 4/4 binary asserts（user.md / state.json / memory/ 落在 workspace，`~/.iknow/state.json` hash 不变）。详见 `docs/adr/0019-workspace-root-per-root-state-decoupling.md`。
+- **Graph-mode short presence line, once per run (ADR-0081, 2026-09-11)**: with
+  the graph open, a single short `<graph_mode>` line is stamped at the start of
+  each run instead of appended on every hop of the same turn. Flip moments can
+  still carry the long ON/OFF line; a long ON already stamped suppresses the
+  short line for that turn. Supersedes the previous per-hop stamping semantics.
+
+- **Live graph, phases 1 + 2 (2026-09-10)**: repeated `run_graph` calls in one
+  session share an in-process live-graph ledger (remaining subgraph, per-id
+  freeze, cancellation keeps only done nodes). Phase 2 adds `onFailure`, re-entry
+  by id, and an 8-entry fuse per id. The ledger never enters the JSONL transcript.
+
+- **`web_fetch` HTML window (2026-08-28)**: transport-level decoded-body cap of
+  1 MiB (streamed read plus a second refusal at stub level); `start_chars`
+  continuation fetch; `Window:` / `Representation:` headers before the untrusted
+  banner; `max_chars` cap 16000 so total output stays within the executor's
+  20000-char truncate budget. Opt-in `as: "html"` returns markup (html
+  content-types only); binary types are refused. Sandbox curl and fence env are
+  unchanged — browsing still goes through the SSRF-guarded `web_fetch`.
+
+- **Auto-memory dream gate (2026-08-28)**: `settings.memory.dream` is decoupled
+  from extraction. A dream run requires both at least 24h since the last
+  success-or-skip and at least 5 distinct sessions (in-process chat/TUI
+  sessions; serve `conversation_id`). A cursor JSON lives in each memory
+  directory. With fewer than 2 current entries the merge LLM call is skipped and
+  the time gate still advances. Extraction remains `completed`-turn-triggered
+  with N≥2.
+
+- **Subagent runtime and handoff alignment (2026-08-28)**: non-positive
+  timeout/token env values fall back to settings/defaults (`0` no longer means a
+  dead clock or `max_tokens=0`); a clean `exit(0)` without an envelope is an
+  immediate `protocolError` and frees the slot; workers inherit the parent's
+  idle/hard-cap; the concurrency cap is configurable, default 15, and over-limit
+  calls fail immediately instead of queueing; the parent-model handoff is now a
+  short summary plus paths (artifacts remain reachable through IPC and
+  `run_graph` edges); generic workers get the static instruction layer and memory
+  tools off, and explore agents are not fed the full AGENTS.md; the default
+  `subagent_type` is `general-purpose`.
+
+- **Automatic memory extraction with mechanical GC (ADR-0031, 2026-08-26)**:
+  delivers the long-deferred item of ADR-0009 D5. New switch
+  `settings.memory.autoExtract` (boolean, **default off**) — when absent or not
+  `true`, nothing is wired: zero extra calls, LLM usage, or writes, byte-for-byte
+  matching previous behavior. When on, chat / tui / serve trigger an async
+  extraction after a `completed` turn (one pass once N≥2 turns complete; the
+  `ask` entry stays opt-out per ADR-0010 D3): the LLM extracts atomic candidates,
+  BM25-lite neighbors are found, an ADD/UPDATE/SUPERSEDE/NOOP verdict is decided,
+  and the existing affirmative-sentence gate plus tmp+rename atomic write store
+  the entry tagged `source: auto`. Cleanup is a zero-LLM mechanical GC (expired
+  `ttl_days`, entries named by `supersedes`, or eviction by
+  `importance × recency × (1 + recall_count)` over the store cap) that
+  **retires without deleting files**. Auto entries do not bypass the promote gate
+  and do not enter the `system` channel. Extraction or IO failures surface as
+  typed memory errors that the host logs and swallows; the user turn still
+  succeeds.
+
+- **Fault-class recovery and fused stop (2026-08-25)**: a closed-set FaultClass
+  taxonomy, bounded transport retry inside `ModelAdapter.step`, and a tool-loop
+  `StopReason: fused` + LOOP_DETECTED path. Transport retries exhausted map to a
+  `protocolError` stop.
+
+- **Shared sandbox discipline for foreground/background bash and parallel tool scheduling (2026-08-25)**:
+  foreground and background `bash` now share one bwrap fence. Within a tool phase,
+  consecutive `isConcurrencySafe` calls overlap; unsafe calls stay serial; result
+  order still matches `tool_use` order.
+
+- **TUI verify end-state visibility and environment snapshot (2026-08-24)**: HITL
+  and auto mode show verification pass/fail in the TUI (host projection includes
+  `passed`). A human-readable environment snapshot (cwd / git / diff, up to 2000
+  codepoints) rides on chrome and is deliberately not written into the
+  ADR-0028 append-only status bar.
+
+- **Settings.json reverse channel (2026-08-13)**: saving and exiting the
+  `/thinking` / `/effort` panels with Esc now writes changes back to
+  `settings.json` (merging the `llm` subtree while preserving apiKey / model /
+  secrets and all unrelated fields). The write-back skips its own reload via a
+  sha256 self-write sentinel, so the one-way external hot-reload channel is
+  unaffected. On failure a TUI notice shows, the in-memory override stays, and
+  nothing crashes; Enter inside the panel pins, Space/Tab preview without
+  writing.
+
+- **Trace read side fused into `iknow serve` (ADR-0020, 2026-08-17)**: same
+  process, same port — route subtree `/api/v1/traces/*` (filter + paginate,
+  `/traces/fields`, `/traces/sessions`) plus a `/trace` SPA sharing the web
+  multi-entry build. A trace-router factory with injected options removed the
+  reverse dependency from the trace server onto CLI usage, and static serving
+  gained path-prefix mounting. The legacy `/api/v1/sessions` alias under
+  `--separate` mode was kept one version (deprecated). Error envelopes are unified
+  (validation 400 / trace-read 500 without echoing filesystem detail). Web entry
+  points: a global Trace link, per-session deep-link `/trace?session=<id>`, and a
+  back-to-chat link. The trace server and session API stay sibling modules; the
+  write side is untouched.
+
+- **Per-root workspace state isolation (ADR-0019, 2026-08-17)**: per-root state
+  (identity workspace seed, `user.md`, `BOOTSTRAP.md`, memory store, serve data,
+  settings write-back fallback) follows the launch root, decoupled from `home`
+  (global config anchor, settings merge fallback, host-init script, global-scope
+  memory). New `--workspace-root <dir>` CLI flag (mirroring `--data-dir`) and
+  `IKNOW_WORKSPACE_ROOT` env, precedence explicit > env > `process.cwd()`; a
+  migration opt-out `--workspace-root "$HOME"`. The protected-path policy extends
+  to `<workspaceRoot>/.iknow` and its children. Settings write-back redirects to
+  `<workspaceRoot>/.iknow/settings.json`, and thinking persistence uses a
+  per-invocation unique temp name, fixing a concurrent-clobber defect. Boundary
+  coverage for the resolver (empty / invalid / overflow / concurrent / exception)
+  and an integration probe verified persona files land in the workspace while
+  `~/.iknow/state.json` stays untouched.
+
+- **TUI skill and MCP extension sources (2026-08-11)**: the TUI entry assembles the
+  skill scanner/catalog (`skill` / `skill_search` tools plus the
+  `<available_skills>` system section) and a live MCP manager (`mcp__*` tools
+  resolvable by the executor; idempotent shutdown of stdio children on exit).
+  Slash candidates mix static commands with dynamic skill entries; Tab completion
+  spans both; `/skill-name [prompt]` deterministically loads the skill body with
+  the prompt appended (not relying on model initiative), echoing exactly what is
+  sent. A `/mcp` board shows per-server status colors, tool counts, Enter for
+  detail, `r` to reload, Esc to back out. Supporting harness seams: external-tool
+  unregister for reload and a non-blocking `McpManager.reload`.
+
+- **Settings inheritance channel for loop configuration (2026-08-11)**:
+  `.iknow/settings.json` becomes the single source for loop config (maxTurns and
+  compaction contextWindow/thresholdTokens), user- and project-layer with project
+  overriding user, per-layer merge, invalid-value fallback, and deep freeze.
+  Precedence `process.env > .env.local > .env > settings.json (project > user) >
+  hardcoded defaults` for those three fields only; other fields unchanged.
+  Subagents self-assemble through the same loader and inherit naturally. With
+  nothing set, behavior matches the previous defaults (unlimited maxTurns,
+  proactive compaction off).
+
+- **Manual session compaction (TUI `/compact` + web button)**: the harness
+  `compactMessages` (shared by proactive/reactive paths) gained manual entry.
+  Backend: an idempotent `compactSession` on the hub (below threshold: no write,
+  no `updatedAt` bump) exposed as `POST /api/v1/sessions/:id/compact`. TUI: the
+  `/compact` slash command (refused while running, notice when there is no
+  context, refreshes from disk afterwards preserving the usage readout). Web: a
+  compact button beside the context-usage strip with non-blocking local error
+  display.
+
+- **TUI mouse drag selection (ink era, 2026-08)**: an in-app selection layer —
+  drag coordinates, inverted highlight, and mouseup copying the selection to the
+  system clipboard through a multi-platform fallback chain; Ctrl+Y as a keyboard
+  escape hatch. Superseded by OpenTUI's `<text selectable>` drag selection after
+  the rendering-backend migration.
+
+- **Memory injection v0 (ADR-0009 / ADR-0010)**: layered memory-file injection
+  landing (`src/harness/memory/`: paths, schema, discovery, BM25, promote,
+  assembly, refresh) and the `memory_recall` / `memory_save` tools registered in
+  the default ACI registry. The system assembly order converged to five sections
+  (identity / soul / user_profile / bootstrap / memory_layer); the memory layer is
+  a single slot delegating to a cached, in-flight-deduplicated resolver that never
+  poisons assembly on failure. Surface split: `ask` strips memory tools and the
+  memory layer; chat / tui / serve default to on.
+
+- **Shift+Tab toggles auto permission mode**: TUI and REPL flip in place between
+  `default` and `full_auto` (label "Auto") — no ask-bridge detour, no engine
+  rebuild, no `/permissions` roundtrip. `plan` mode is kept but excluded from the
+  cycle to avoid silently denying mutating tools; pressing Shift+Tab while in
+  `plan` goes straight to `full_auto`. TUI shows a dim mode indicator (narrow
+  columns degrade to a short tag); REPL hooks the same flip on stdin keypress.
+
+- **Identity assembly layer**: identity (Name/Kind/Signature), soul (core
+  truths/boundaries/vibe/continuity), the `~/.iknow/user.md` profile, and a
+  first-run BOOTSTRAP guide, all injected through the `deps.system` seam by every
+  entry point (chat / tui / ask / serve). `state.json` records `bootstrap_seeded`
+  so the BOOTSTRAP section is skipped on later runs. Workspace initialization is
+  eager and idempotent at the build seam and all four entry points; failure warns
+  instead of blocking assembly.
+
+- **Single-source ACI tool registry**: the eight default tools
+  (bash / read_file / grep / glob / edit_file / write_file + web_fetch /
+  web_search) moved from a hand-written array to one assembly factory shared by
+  the engine builder and the TUI deps, ending the TUI entry's tool-set drift
+  (which had been missing web tools and ignoring `IKNOW_WEB_PROXY`). Factory
+  inputs are narrowed (web config + sandbox root, no secrets); an invalid proxy
+  URL fails fast at assembly; out-of-root file access stays refused at execution.
+
+- **Streaming render seam across chat and TUI (2026-08)**: a shared stream-draft
+  accumulator (pure append/mask/raw/reset/subscribe, full re-mask of the current
+  secret values per snapshot, cross-delta truncated keys masked on the accumulated
+  text, no fd / no React dependency); the hub's `postMessage` gained an optional
+  `onStream` passed to `run()`; TUI deps enable streaming from the same env SSOT
+  as the engine, so the TUI truly streams. The TUI renders the masked draft as
+  markdown before the spinner and commits it at turn end (abort clears it and
+  shows an "interrupted" notice). The chat TTY preview switched to the same
+  draft, making the full secret-masking path effective. Thinking display
+  collapsed-state unified: chat `showThinking` now renders a collapsed summary
+  row instead of the full text, and TUI gained the folding toggle wired to row
+  estimation.
+
+- **Trace inspection panel (2026-08)**: a read-only trace server module — synced
+  JSONL reader (`MAX_TRACE_BYTES = 8 MiB`, line-boundary truncation, filesystem
+  errors wrapped as `TraceReadError`), `GET /api/v1/traces` (filters:
+  conversation_id / record_type / status; pagination limit 1..200 / offset ≥ 0;
+  malformed lines counted in `skipped_lines`; snake_case wire) and
+  `GET /api/v1/traces/fields` (field declaration table as single source, unique-key
+  self-check at load). The web UI gained the trace panel (stats bar, filter bar,
+  table, expandable rows, column picking) with view switching that keeps chat
+  state mounted. Adding a trace field = one type + one declaration row.
+
+- **Trace panel moved to a standalone `iknow trace`-hosted page (2026-08)**:
+  extracted from the chat SPA, which returned to chat-only form. Shared Vite
+  multi-entry build and assets; the trace process reuses the static-serving helper
+  (index route, SPA fallback, path-traversal 403, `/api` refusal); API routes take
+  precedence over static files.
+
+- **ACI web tools `web_fetch` / `web_search` with a shared SSRF egress guard (2026-08)**:
+  URL syntax, embedded credentials, non-public IP literals and DNS results, local
+  hostnames, single-label hosts, ≤5 redirect hops re-validated per hop, non-2xx
+  refused; fetch and DNS deps injectable so tests run fully offline. Shared HTML →
+  text and IP-classification primitives. Tool metadata: read-only category
+  (default allow), concurrency-safe, cancel-on-interrupt, default timeout tier.
+  `web_fetch` prefixes an untrusted-content banner against prompt injection and
+  clamps `max_chars` (default 12000, 500..50000); `web_search` defaults to 5
+  results (1..10) with an overridable search URL (env or parameter, same SSRF
+  validation). The registry grew append-only 6 → 8 tools keeping existing order.
+  The default user agent is a browser-style string to pass common anti-bot
+  filtering.
+
+- **Outbound proxy arm for the web tools (`IKNOW_WEB_PROXY`)**: explicit
+  configuration only (`trust_env=False` semantics — system `HTTP(S)_PROXY` is
+  never read). The proxy URL passes the same SSRF syntax validation as targets
+  (http/https, host, credentials; no public-IP refusal for the proxy itself, local
+  proxies must be allowed); both web tools fail fast at assembly on a bad proxy
+  config. New env field in the config SSOT; dependency added: `undici`.
+
+- **Early web/CLI foundation (2026-07)**: see the dated narrative sections below.
+
+### Changed
+
+- **TUI `/model` switching no longer re-renders the whole tree and no longer resets manual thinking/effort overrides (2026-09-15)**:
+  env-derived display snapshots (model routing string + thinking baseline) flow
+  through a framework-agnostic store consumed with `useSyncExternalStore`; a
+  successful env reload publishes a snapshot instead of re-rendering the root, and
+  the context bar's model segment re-projects on its own (regression pinned with
+  line-by-line frame diffs). Takeover layering for thinking/effort: submitting via
+  the `/thinking` / `/effort` panels marks the field, after which in-session
+  settings-baseline changes no longer overwrite it (the old behavior dragged all
+  three states back to each new baseline); unclaimed fields still follow the
+  baseline and external settings hot-reloads keep updating the display. `/info`'s
+  model line and per-turn thinking-override baseline read the store's latest
+  snapshot at call time. Model display naming and registry flattening moved to the
+  picker leaf module (no app ↔ context-bar cycle).
+
+- **Unified secret handling — roundtrip mask (2026-08-13)**: replaces the earlier
+  deny-only guard. Recognition replaces secret-shaped text in user input with
+  per-engine in-memory placeholders; the bash restore layer substitutes real
+  values back at spawn; output masking falls back to the registry's values —
+  **the real key value physically exists only in the bash process while it
+  constructs the HTTP request**. `settings.secrets.mode`: `roundtrip` (default:
+  recognize + placeholder + restore + fallback mask) or `block` (legacy deny-only
+  guard, kept for backward compatibility). End-to-end matrix across the four
+  surfaces (chat / ask / tui / serve) × two modes.
+
+- **Settings.json file-level hot reload for the TUI chat path (2026-08-13)**: after
+  editing `~/.iknow/settings.json` or `<cwd>/.iknow/settings.json`, a running TUI
+  chat process needs no restart — from the next turn it calls the LLM with the new
+  environment. A whitelist of nine adapter fields takes effect live (model,
+  apiKey, thinking, thinkingEffort, fallback, baseUrl, maxOutputTokens,
+  temperature, stream); fields outside it (loop-engine assembly inputs,
+  display/env-only fields) still need a restart. The context bar's model and
+  thinking labels refresh in real time. A failed reload (bad JSON, missing model,
+  unresolvable key) keeps the old environment with a notice instead of crashing.
+  Implementation: a pure fs watcher (primary channel plus a missing-directory
+  fallback, debounced, idempotent stop), an env-loader factory, and hub seams for
+  env-provider / on-change / reload with a minimal adapter rebuild surface.
+
+- **LLM configuration converged onto `settings.json` as the single carrier (ADR-0015, 2026-08-12)**:
+  completing the previous phase ("model configurable + fail-fast + hardcoded
+  default removed"), this phase converges key configuration too —
+  `settings.llm.apiKey` accepts a literal, `${VAR}`, or `$VAR` form. The
+  `IKNOW_LLM_API_KEY_ENV` (key-variable-name) and `IKNOW_LLM_MODEL` env channels
+  were retired. Unified placeholder expansion resolves process.env > `.env.local`
+  > `.env`; `.env.local` degrades to a placeholder-value source.
+  `IKNOW_LLM_BASE_URL` remains (provider/baseUrl is the project-stack decision
+  recorded in ADR-0001). Illegal placeholder forms resolve to undefined with
+  discard semantics aligned to the validator; sandbox secret-name derivation now
+  parses placeholders from settings (a literal key contributes no variable name;
+  the pattern-based sweep remains). Context docs rewritten; ADR-0001 carries a
+  supersede note for the retired indirection; probe/smoke scripts cleaned of the
+  removed env names and point missing-key errors at `settings.llm.apiKey`.
+
+- **Settings field extension: `llm.model` configurable + `llm.fallback` + fail-fast (2026-08-12)**:
+  `.iknow/settings.json` extends to `llm.model` and a user-configured
+  `llm.fallback` model list, and the hardcoded combo default was removed.
+  Precedence `process.env > .env.local > .env > settings.json (project > user)`:
+  with neither `IKNOW_LLM_MODEL` nor `settings.llm.model` set, startup now fails
+  fast with "no LLM model configured" instead of silently picking a default.
+  Invalid project values never override valid user values (drop, not throw). The
+  single addressable model-config spot is the user settings file plus an optional
+  project override. ADR-0001's "welded default" clause is superseded (key variable
+  name / baseUrl / provider retained).
+
+- **TUI thinking control split: `/thinking` toggle + new `/effort` level (2026-08-12)**:
+  fixed the semantic overlap where `/thinking` and Ctrl+O only folded the panel —
+  `/thinking` now toggles the thinking request itself (aligned with the web
+  setting), Ctrl+O stays fold/expand. `/effort <low|medium|high|xhigh|max>` picks
+  one of five concrete levels (deliberately excluding the adaptive tier), and
+  implies `enabled=true`, matching web radio behavior. Level values reuse the
+  wire-contract SSOT. The TUI enables the existing per-turn thinking-override path
+  with a validated env passthrough; a gate forwards the override only when the
+  user actually changed thinking relative to the baseline. A pure-function module
+  holds the override computation and label formatting. `/help` and `/info`
+  updated. Also fixed a real bug: slash remainder was dropped for exact
+  same-command first tokens (`/effort high` lost `high`).
+
+- **Real-LLM end-to-end tests moved out of the default vitest collection (2026-08-12)**:
+  the two real-model e2e suites took ~75% of the full run and flaked on model
+  prompt paths; they now live under an archive directory the default include does
+  not collect, with a dedicated on-demand `npm run test:real-llm` entry. Missing
+  keys still skip explicitly.
+
+- **TUI rendering backend migrated from ink to `@opentui/react` 0.5.1 (2026-08-10)**:
+  a one-shot backend swap closing four known rendering problems — scrollback
+  pollution (alternate-screen + double-buffered dirty-cell diff eliminated ink's
+  per-frame history leakage); line-count drift (the whole row-counting path across
+  nine files was deleted; scrolling reads layout positions from the scrollbox);
+  ANSI-color test fragility (five skipped cases removed or rewritten as
+  structured span assertions); keyboard probe swallowing keys (custom Kitty
+  parsing deleted in favor of the built-in parser with input mocking). Selection
+  moved to `<text selectable>` with OSC52 clipboard plus a native fallback chain.
+  The old TUI is archived read-only. The test runner switched for the TUI suite
+  (Node 22 lacked the needed FFI), so `npm test` runs both suites. Platform:
+  Linux (incl. WSL2) verified; **macOS / Windows unverified**. `ask` / pipe /
+  `serve` paths are unaffected.
+
+- **TUI startup banner restyled (2026-08-06, three review rounds folded into the final form)**:
+  from a large square dot-matrix eye with a single-line frame to a full-width
+  rounded frame (matching the prompt input style), a small braille eye
+  (32x13 cells) at the left, an info column (version / cwd / data dir) vertically
+  centered at the right, and a centered `◆ iknow` title. Narrow-terminal
+  degradation threshold settled at 80 columns; the gold glyph accent stays.
+  Design doc: `docs/design/DESIGN-BANNER.md`.
+
+- **Session persistence relocated (2026-08)**: the session pool root moved from
+  `<cwd>/data` to `~/.iknow`, with the project namespace
+  `<basename>-<sha1(cwd)[:12]>`; `serve --data-dir` still overrides, and the old
+  `<cwd>/data` is neither read, migrated, nor deleted. The session-file schema
+  upgraded v1 → v2 (new top-level `summary` / `cwd` / `sanitized_at`);
+  `sanitizeSessionFile` forward-compatibly fills v1 on read with zero writes and
+  refuses newer/ malformed files without repair. `SessionStore.list()` entries
+  gained `summary` (existing fields unchanged). CLI chat state messages are now
+  frozen readonly arrays.
+
+- **Shared static-serving helper extracted** for the session HTTP server and the
+  trace process (MIME table, web-root resolution, path-traversal 403 + `/api`
+  refusal + SPA fallback); pure refactor, chat behavior byte-aligned.
+
+- **Web thinking/tool/markdown display (wire additive extension)**: `TurnAnswerDto`
+  gained optional `thinking` (entry texts + `redactedCount`) and `toolCalls`
+  (name / input / output preview / isError / truncated) projections — per-entry
+  character caps, everything masked before truncation; encrypted thinking data and
+  signatures never reach the wire (count only). One projection serves postMessage
+  and history replay. `PostMessageRequest` gained an optional per-request thinking
+  override (`off` | `adaptive` + effort), validated strictly (illegal → 400, no
+  silent fallback), applied by a per-turn adapter rebuild; without an override the
+  wire is byte-identical and env values remain defaults. Web UI gained markdown
+  rendering (GFM + highlighted code with a copy button), a collapsed thinking
+  block (redacted entries render as an encrypted placeholder), tool-call cards
+  (single expand + truncation marker), and thinking controls persisted in
+  localStorage. Non-`completed` stop reasons show a notice with turn count. The
+  SSE `/events` route remains 501.
+
+- **`web_search` default endpoint switched to Bing (2026-08)**: the DDG html
+  endpoint (upstream default) is unreachable in some network environments —
+  observed as local DNS pollution of the whole duckduckgo.com domain family plus
+  egress blocking (DNS-over-HTTPS resolved the real IP while direct connects timed
+  out or were unroutable). Bing returned 200 with complete result structure and is
+  reachable in affected regions. Parsing dispatches by endpoint hostname: DDG
+  selectors kept (reachable via the `search_url` parameter or
+  `IKNOW_WEB_SEARCH_URL`), Bing parsed via its organic-result layout; DDG redirect
+  normalization applies only to DDG parse paths. Verified end-to-end with an
+  unstubbed live search returning titled, linked, snippeted results.
+
+- **Compact focus retention switched to recent-task excerpts (ADR-0026, 2026-08-22)**:
+  sessions no longer carry a persistent single `taskFocus`; compaction keeps
+  recent user task excerpts instead.
+
+- **Documentation restructure**: the always-on agent-instructions file was
+  condensed to constraints plus SSOT pointers — module lists, LLM/settings
+  implementation, workspace-root details, and local tooling state moved out;
+  architecture/config/status remain authoritative in `docs/architecture.md`,
+  `docs/STATUS.md`, `docs/llm-config-quickstart.md`, ADR-0015 and ADR-0019;
+  session start no longer loads all docs. The runtime path table duplicated by the
+  architecture doc was replaced by a short module-boundaries callout list; dead
+  references removed; the capability-gap analysis doc (status bar vs environment
+  snapshot, lazy tool-surface claims, background-bash sandbox parity) was filed
+  and status sections synced.
+
+### Removed
+
+- **`.json` compatibility double-write mirrors dropped (2026-08-23)**: session save
+  and head-move persistence no longer write `<id>.json` mirror files — the
+  single-file JSONL is the only history format. `load()` keeps a `.json` fallback
+  during the migration window, `delete()` still sweeps both paths, and `list()`
+  still de-duplicates across both extensions until the legacy-only sessions
+  migration script runs. Mirror-contract tests removed or updated; readers migrated
+  to JSONL head records or the store API. Related ADR-0027 synced.
 
 ### Fixed
 
-- **CLI worktree isolation 装配缝透传 `name`（2026-09-04）**: 修复 cli.ts main() 内联 wrapper 手工解构静默丢 `name` 的 bug——`createTaskWorktreeProvisioner.provision({ conversationId, root })` 未透传 `name`（及任何未来 `WorktreeProvisionContext` 字段），CLI 入口退化为 UUID-only leaf（编译仍绿，无运行时信号；hub 侧 PR #869 已正确透传）。新增 `src/cli/worktree-host.ts` `createWorktreeIsolationHost` 工厂做整 ctx 透传；`src/cli.ts:316-321` 调用点改用工厂；`tests/cli/worktree-host.test.ts` 回归（真 `SessionStore` + temp git repo + fresh `conversationId`，两条用例：labeled leaf `fix-648--conv-cli-a` 与 UUID-only fallback）。同步把 4 个随 PR #869 过期的陈旧测试对齐到新 SSOT：`tests/harness/aci/tools/{get-record,list-sessions,query-trace}.test.ts` 索引改 SSOT 派生（`ACI_TOOLSET_NAMES` 由 30 件扩到 44 件，其中 `get-record.test.ts` 「is assembled last」前提永久失效，按 review 重写为「unconditional + ajv-bound + append-only tail + host-seam-conditional-only 收尾」不变式）；`tests/tui/deps-isolation.test.ts` 按 T3 model-provision 契约永久翻转（`calls === []` + 断言 block 文案含 "create-task-worktree"）；`tests/tui/deps-tools.test.ts` 工具集计数改 SSOT 派生（`ACI_TOOLSET_NAMES.filter(n => !EXCLUDED.includes(n))`，剥 6 件本测试 opts 未透传的 host 缝条件化件）。详见 `plans/task-worktree-lifecycle.md` T3。
+- **TUI silence notice no longer misfires during tool execution; copy moved to English (2026-09-17)**:
+  the "~20s with no new stream bytes" waiting notice reset only on stream events,
+  but the harness deliberately emits none while a tool runs (long bash commands,
+  foreground subagents, permission/ask dialogs) — any tool past 20s triggered a
+  bogus "still waiting for model output — check your network" message. A
+  tool-phase gate now treats the window from `tool_call_start` to the next
+  model-call boundary as tool phase, where an expiring timer simply rearms
+  (a genuine model-phase silence still warns). The gate keys on event semantics,
+  not display state, because permission-blocked calls never post the after-hook
+  and display state would stall the round as running. Also fixed: a successful
+  finish now clears any still-displayed waiting text (previously only transport
+  retry progress was cleared, leaving a stale network hint on screen). Copy is
+  English, aligned with the sticky-notice convention in `docs/CONTEXT.md`.
+  Invariants 3 / acceptance criteria 6–7 of `specs/transport-continue-persist.md`;
+  a pure phase-predicate plus regression cases pin load-bearingness. Test-side:
+  the fake bridge became release-latch driven (timing controlled explicitly, not
+  by fixed observation windows) — the root cause of this file's earlier flakiness.
 
-- **检索输出完整性（PR #745，2026-08-27）**: skill frontmatter 遇到不可解析的续行时跳过该行而不丢弃整个 skill，保留 `disable-model-invocation` 等有效字段；`tool_search` / `skill_search` 对 query 做 trim，空白查询不再倾倒全量结果；`tool_search` 增加 schema 校验的可选 `limit`、默认 20 条上限与整行输出预算，超限时追加收窄查询/精确取名引导，不泄漏 `truncated` / `total` 元字段。详见 `plans/search-output-integrity.md`。
+- **CLI worktree isolation assembly seam passed `name` through again (2026-09-04)**:
+  an inline CLI wrapper hand-destructured the provision context and silently
+  dropped `name` (and any future field), so the CLI entry degraded to UUID-only
+  worktree leaves while compilation stayed green and no runtime signal appeared.
+  A host factory now forwards the whole context; a regression test with a real
+  session store, a temp git repo, and fresh conversation ids covers both the
+  labeled leaf and the UUID-only fallback, mirroring the hub-side behavior that
+  was already correct. Stale tests whose assumptions expired with the hub-side
+  change were re-grounded on derived-from-SSOT counts and current contracts.
 
-- **spawn_subagent ACI 超时不再提前砍子代理（2026-08-23）**: 前景 `wait:true` 曾套 `timeoutTier: long`（30 min）且工具 description 写「5 min default」，均短于 manager `PER_TASK_TIMEOUT_MS`（2 h）。ACI abort 把真任务打成 cancelled。现 `unbounded=0`（executor 不设 timer，寿命归 per-task 钟，不套短超时）；文案改为 2 hours；`SubAgentWaitTimeoutError` 按 `queryBuffer` 分流（not_found 抛错 / running → timeout envelope / 已失败 buffer 原样）。计划 `plans/632-subagent-aci-timeout-alignment.md`。
+- **Search output integrity (2026-08-27)**: an unparseable continuation line in
+  skill frontmatter no longer discards the whole skill — the line is skipped and
+  valid fields such as `disable-model-invocation` are kept. `tool_search` /
+  `skill_search` trim the query, so blank queries no longer dump full results.
+  `tool_search` gained an optional schema-validated `limit` (default cap 20) and
+  a whole-line output budget, appending narrowing guidance instead of leaking
+  `truncated` / `total` meta fields.
 
-- **LLM 默认对齐 coding-agent 标准帽（2026-08-21）**: `maxOutputTokens` 16384 → **32000**（Claude Code `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认；按实际生成计费）；`timeoutMs` 60s → **300s**（thinking + 长 tool_use 的 per-call 竞速）。不再按单次任务逐步加码。MCP `connectTimeoutMs` 仍 60s。历史 2048→8192 / 8192→16384 条目保留。
+- **`spawn_subagent` foreground wait no longer cuts subagents short (2026-08-23)**:
+  the wait path had carried a 30-minute tier while the tool description claimed a
+  5-minute default, both shorter than the manager's 2-hour per-task budget, so an
+  ACI abort turned real tasks into cancelled ones. The wait is now unbounded at
+  the executor (lifetime belongs to the per-task clock), the description says 2
+  hours, and the wait-timeout error dispatches by buffer state (not_found throws,
+  running returns a timeout envelope, already-failed buffers pass through).
 
-- **maxOutputTokens 默认 8192 → 16384（#578，2026-08-21）**: `thinking: "adaptive"` + 奢侈品腕表自包含 HTML（约 150–200 行）的 `write_file` JSON 超出 8192，撞 `max_tokens` 截断导致缺 `content`。fallback 提到 16384（容纳 thinking budget + 完整 HTML）；文档示例同步。不改 `timeoutMs` / loop-engine truncation 语义。先前 2048→8192（贪吃蛇 HTML，2026-08-17）历史条目保留。
+- **LLM defaults raised to coding-agent standard ceilings (2026-08-21)**:
+  `maxOutputTokens` 16384 → 32000 (billed for actual generation) and `timeoutMs`
+  60s → 300s (thinking + long tool_use turns compete per call). No per-task
+  ratcheting. MCP `connectTimeoutMs` stays 60s.
 
-- **TUI live tail 不渲染无 start 的失败工具（#578，2026-08-21）**: `max_tokens` 截断导致 `write_file` 缺 `content` 时，无 `tool_call_start` 配对；`liveToolReduce` 对 unmatched `post_tool_use` 不再 append 幽灵 `failed` 行（完成态只走 history `[失败]`）。
+- **`maxOutputTokens` default raised 8192 → 16384 (2026-08-21)**: `thinking:
+  "adaptive"` plus a self-contained multi-hundred-line HTML `write_file` payload
+  exceeded 8192 and was truncated with the tool call left without `content`. The
+  fallback now fits the thinking budget plus a complete document; doc examples
+  synced. `timeoutMs` and the loop-engine truncation semantics unchanged. The
+  earlier 2048 → 8192 step remains logged below.
 
-- **maxOutputTokens 默认 2048 → 8192（trace 8e05e04c 根因修复，2026-08-17）**: 最新 trace 8e05e04c 中用户任务（贪吃蛇 HTML 生成）在第三段会话因 `stop_reason=max_tokens`（output_tokens=2047 贴 2048 上限）被截断，`supplierStop="truncation"` 折叠进 `nonSuccessStop` → turn/session 双双 `status: "error"`，用户拿到 0 输出。根因：`IKNOW_LLM_MAX_OUTPUT_TOKENS` 默认 2048 在 `thinking: "adaptive"`（thinking tokens 计入 output 预算）+ 长生成任务下必然撞顶。修复：`src/config/env.ts` fallback 2048 → 8192（容纳 thinking budget + 完整响应，不放大成本）；`docs/integration-materials.env.example` / `docs/llm-config-quickstart.md` 示例值同步。`tests/config/env.test.ts` 新增 2 例锁定新默认值（红→绿）。未动 loop-engine 的 truncation→nonSuccessStop 折叠语义（S7 契约不变；截断仍是合法的非成功停止，只是撞顶概率大幅降低）。
+- **TUI live tail no longer renders failed tool rows without a start (2026-08-21)**:
+  when `max_tokens` truncation left a `write_file` call without `content` and no
+  matching start event, the live reducer used to append a ghost `failed` row;
+  unmatched post-tool events are now ignored live (the completed turn still shows
+  it in history).
 
-### 双向持久化（settings.json 反向通道）
+- **`maxOutputTokens` default raised 2048 → 8192 (2026-08-17)**: a trace showed a
+  user task truncated at `stop_reason=max_tokens` (2047 output tokens at the 2048
+  cap) folding into a non-success stop and surfacing as an error with zero output.
+  Root cause: the 2048 default collides inevitably with `thinking: "adaptive"`
+  (thinking tokens count against the output budget) on long generations. Config
+  fallback raised (fits a thinking budget + full response without inflating cost);
+  env-example and quickstart values synced, new default locked by tests. The
+  truncation → non-success-stop contract in the loop engine was deliberately left
+  intact.
 
-- **settings.json 反向通道（2026-08-13）**: 运行时 `/thinking` / `/effort` 面板 **Esc 保存退出**把改动写回 `settings.json`（project 级文件存在写 project，否则写 user 级，合并 llm 子树保留 apiKey/model/secrets 全部原字段）；写回用 sha256 self-write 哨兵跳过自身 reload 防回环（PR #413 单向通道不变，外部改动照常热更新）；失败 TUI notice 提示、in-memory override 保留、不 crash；面板内 Enter 固定 / Space-Tab 预览不落盘。四个 commit：
-  - `feat(config): settings.json 反向持久化 — persist-settings 纯函数模块 (T1)`
-  - `feat(config): EnvLoader self-write 哨兵 — 写回不回环 (T2)`
-  - `feat(tui/thinking-picker): commit payload 上提 — 可持久化投影 (T3)`
-  - `feat(tui): /thinking /effort Esc 写回 settings.json — app/run 接线 (T4)`
+### Web MVP prototype → CLI integration (iknow-prototype, 2026-07)
 
-### Changed
+- Prototype `/api/chat` mock removed; the frontend now consumes the real Session
+  HTTP API (`iknow serve`).
+- Typed Session API client with error envelope and graceful degrade.
+- Non-streaming chat hook (the API returns one full answer envelope per turn):
+  lazy session, host-side fake typewriter, abort/reset/commands; shared via a
+  chat provider.
+- Machine panel: governance-status badge, snapshot id, tool-call trajectory,
+  cited source spans, hops, notes — replacing the demo card.
+- Caller role (employee|manager|admin) + mode (deterministic|llm) wired to the
+  live session's commands endpoint.
+- Same-origin proxy to the local API target, or a public base-URL override to
+  call a backend directly.
+- Mock-only dependencies removed (`ai` / `@ai-sdk/react` / `zod`).
+- E2E rewritten against real `iknow serve` (Playwright dual webServer): six specs
+  green.
+- Typecheck / lint / static-export build / e2e all verified green.
+- Unchanged / not claimed: the Session API contract, the 4-tool protocol, and the
+  existing Vite `web/` SPA; the prototype was not yet the shipped UI path.
 
-- **统一 Secret 处理层 — Roundtrip Mask（#406，2026-08-13）**: 替代 #126 hook-system（PR #405，已关闭 superseded）。识别层把用户文本里的密钥形态替换为 `<<<SECRET_N>>>` 占位符（per-engine registry，in-memory），bash 还原层在 spawn 前回填真值，output mask 经 `currentSecretValues(registry.values())` 兜底遮蔽 registry 值——**key 真值仅在 bash 进程构造 HTTP 请求那一瞬间物理存在**。`settings.secrets.mode` 控制：`roundtrip` 默认（识别+占位符+还原+兜底）、`block` 兼容旧 deny-only guard。新增模块 `src/harness/secret-roundtrip/`（patterns SSOT / registry / recognize）；secrets-guard 仅作 `mode:"block"` 向后兼容。4 surface（chat/ask/tui/serve）× 2 mode 端到端矩阵验收：`tests/harness/secret-roundtrip/e2e.test.ts`（12 case：8 装配矩阵 + 4 全流）。详见 `specs/406-secret-roundtrip-mask.md`。
-- **#126 — hook-system（superseded by #406，2026-08-13）**: 已关闭 superseded by #406。deny-only 拦截被 roundtrip 完全替代 — 真值仍能进 bash 跑 API，仅在 shell 进程构造 HTTP 请求那一瞬间物理存在。
+### Web MVP prototype (iknow-prototype, standalone, 2026-07)
 
-- **settings.json 文件级热更新（TUI chat 路径，2026-08-13）**: 修改 `~/.iknow/settings.json` 或 `<cwd>/.iknow/settings.json` 后，运行中的 iknow TUI chat 进程**无需重启**——下一轮 postMessage 起以新 env 调 LLM，**白名单 9 字段生效**：`model` / `apiKey` / `thinking` / `thinkingEffort` / `fallback` / `baseUrl` / `maxOutputTokens` / `temperature` / `stream`（即 `createAdapterFromEnv` 的全部入参面，`src/harness/build-engine.ts:124-142`）；不在白名单的字段（如 `llm.compress.contextWindow` / `llm.maxTurns` 走 loop-engine 装配；`chat.showThinking` / `web.searchUrl` / `mcp.connectTimeoutMs` 等装配期/env-非-adapter 字段）改完需重启。ContextBar 的 model 名 + thinking 档位实时刷新；reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）**降级保留旧 env** + onError 提示，不让进程崩。`src/config/settings-watch.ts` 纯函数 watcher（fs.watch 主通道 + watchFile 缺失目录兜底，100ms debounce，stop 幂等）+ `src/config/env-loader.ts` 工厂（get lazy load / reload 失败保留 / subscribe 回调）；`src/session-api/hub.ts` 新增 `envProvider` / `onEnvChange` / `reloadFromEnv` 接缝（adapter 热重建最小面，不重跑 MCP/subagent/skill 装配），`overrideEnv` 旧接口保持向后兼容；`src/harness/build-engine.ts` 抽出 `createAdapterFromEnv` 纯函数；从 `src/tui/run.tsx` 装配 EnvLoader + 接管退出句钩释放 watcher 句柄（/quit + 信号 + catch 三路径全覆盖）+ `[envVersion]` useEffect 驱动 ContextBar 显示层刷新。测试：settings-watch 8 / env-loader 6 / hub-hot-reload 7 / tui hub-bridge envProvider 2 + smoke 真值 A/B/C 三组 14/14。详见 `plans/settings-hot-reload.md`。
+- New `iknow-prototype/`: Next.js 15.5 + React 19 App Router MVP, TypeScript
+  strict.
+- Stack: Vercel AI SDK (streaming + tool-call rendering), Tailwind 3.4 +
+  shadcn-style button, Zustand + TanStack Query, Framer Motion, Lucide,
+  react-markdown + rehype-highlight.
+- Design: light base, ≤5-color palette, no emoji.
+- Key-free mock backend: a deterministic streaming model plus one demo tool call;
+  no real LLM/auth.
+- E2E: Playwright six specs using the installed Chrome channel.
+- Typecheck / lint / build / e2e all green.
+- Unchanged / not claimed: existing `web/` SPA, Session API contract, tool
+  protocol; not yet wired to the CLI backend.
 
-- **LLM 配置收敛到 settings.json 单承载（settings-model-extension 第二阶段，ADR-0015，2026-08-12）**: 继第一阶段「model 可配置 + fail-fast + 移除 hardcoded `m3-combo`」后，本阶段完成 key 配置的同源收敛 —— `settings.llm.apiKey` 接纳字面 / `${VAR}` / `$VAR` 三种形态，**退役 `IKNOW_LLM_API_KEY_ENV` 与 `IKNOW_LLM_MODEL` env 支**（不再有「key 变量名」概念，`LlmEnv.apiKeyEnv` 字段已删）。`expandPlaceholders(value, fileMap)` 统一解析（process.env > `.env.local` > `.env`），`.env.local` 退化为「占位符真值源」（不再当 model / key 配置口）；`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目级栈决策）。`src/config/env.ts` 新增 `expandPlaceholders`（非法占位符 `${}` / `${1VAR}` / `${VAR` 未闭合 → undefined，对齐 settings.ts isApiKeyOrPlaceholder 丢弃语义）；`src/harness/sandbox/env-isolation.ts` 的 `configuredSecretNames` 从 settings 占位符解析 secret 变量名（字面 key 不贡献变量名，SECRET_PATTERN 兜底扫描保留）。`scripts/i135-settings-model-extension-smoke.ts` 整脚本重写为 A/B/C/D 四组真实模型验证（settings 占位符 / 无 settings fail-fast / 缺 key 守卫 / 字面 key 不依赖 env）。`scripts/i153-probe-9router-thinking.ts` model 解析改 `loadIknowEnv().llm.model`（移除 `IKNOW_LLM_MODEL` env 回退与硬编码 `minimax-cn/MiniMax-M3` 兜底）。`scripts/i9/i10/i11/i132/i4/i12/t4` 7 个 probe/smoke 同步清理 `apiKeyEnv` / `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 字面值，缺 key 文案统一指向 `settings.llm.apiKey`。测试新增 `tests/config/env-expansion.test.ts`（25 个边界用例：字面 / 占位符 / fileMap 兜底 / 非法形态 / "yes" 过滤）+ `tests/config/settings.test.ts` 新增 16 个 apiKey validator 用例 + `tests/config/env.test.ts` 新增 10 个 apiKey 解析路径用例 + `tests/harness/sandbox/env-isolation.test.ts` 新增占位符 secret 名 / 字面 key / SC20 遮蔽 4 个用例。`docs/CONTEXT.md` §83 重写为 settings 单承载描述；`docs/adr/0001-9router-stack-as-code-defaults.md` 增 2026-08-12 supersede 段标注 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` / `apiKeyEnv` 间接寻址已被 0015 覆盖；`plans/settings-model-extension.md` 同步收尾。详见 `docs/adr/0015-llm-config-settings-single-source.md`。
-- **settings 机制扩字段 — `llm.model` 可配置 + `llm.fallback` + fail-fast（2026-08-12）**: `.iknow/settings.json`（#353 第一阶段的 loop-config 三字段）扩展 `llm.model` 为可配置位、`llm.fallback` 为用户自配的模型 fallback 列表，并**移除 hardcoded `m3-combo` 兜底**。precedence `process.env > .env.local > .env > settings.json (project > user)`：`IKNOW_LLM_MODEL`（env）最高，`settings.llm.model` 在 env 之下；**未配置 `settings.llm.model` 且未设 `IKNOW_LLM_MODEL` → 启动 fail-fast 抛「iknow: no LLM model configured…」**（不再静默走任何默认）。`.env.local` 不再背负 model 值（第二源 drift 消除，ADR-0001 §CONTEXT.md 早有限定）——模型配置的单一可寻址位 = `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project 覆盖 user）。`src/config/settings.ts` `IknowSettingsLlm` 新增 `model?: string` + `fallback?: string[]` + `isNonEmptyString`/`isNonEmptyStringArray` validator + `parseLlm`/`mergeLlm` 接入（project 非法不覆盖 user 合法，drop-not-throw）；`src/config/env.ts` model 链改为 `envOptional(IKNOW_LLM_MODEL) ?? settings.llm.model`，空 → 抛错；`env.llm.fallback` = `settings.llm.fallback ?? []`（代码不预置 fallback）。ADR-0001「m3-combo 焊死」条款 supersede（key 变量名 / baseUrl / provider 保留）。测试：`settings.test.ts` 新增 model/fallback 解析/合并/非法值用例 + `env.test.ts` 优先级链 + fail-fast + fallback 透传用例。详见 `plans/settings-model-extension.md`。
-- **TUI 思考控制面拆分：/thinking 改思考开关 + 新增 /effort 调档位（2026-08-12）**: 修正原 `/thinking` 与 Ctrl+O 都只切折叠态的语义重叠 — `/thinking` 改为「思考开关」（影响模型请求，与 web `ThinkingSettings.enabled` 对齐），Ctrl+O 仍为「折叠/展开思考面板」（UI 折叠态，与开关解耦）。新增 `/effort <low|medium|high|xhigh|max>` 调档位（5 档 concrete 档，**不含**自适应档 —— 用户原意「自适应档位不用加在调整档位里」），`/effort` 成功后隐式 `enabled=true`（与 web radio onSelect 行为一致）。档位值域复用 `src/session-api/contract.ts:THINKING_EFFORT_VALUES` SSOT（`ADJUSTABLE_EFFORT_LEVELS` 派生 `filter(v !== "")`）。TUI 启用既有 per-turn thinking override 通路：`TuiBridge.postMessage` opts 加 `thinking: WireThinkingOverride` 字段透传到 `hub.postMessage`（web 已用此路径），`createTuiBridge` 新增 `overrideEnv` 透传 TUI 启动期校验过的 `bundle.env.llm` 给 hub 的 `withThinkingOverride`，避免回退 `loadIknowEnv()`/`process.env`。Gate：仅当用户实际改了 thinking 状态（相对 `defaultThinking` env 基线）才透传 override（保持 stub-model 测试的 cached deps 路径不受影响）；新模块 `src/tui/thinking-gate.ts` 纯函数 `computeThinkingOverride` + `formatEffortLabel`（消除 `|| "auto"` 重复 + 抽 gate 可单测）。`/help` 文案更新：`/thinking` 切思考开关，`/effort` 调档（5 档动态拼），`Ctrl+O` 折叠/展开。`/info` 加 `thinking: off / adaptive (auto) / adaptive (high)` 状态行。修一个真实 bug：`onSelectHint` 命令分支原丢弃 remainder（`/effort high` Enter 丢 high），现在 input 首 token 精确命中同 command 时提整个 raw（与 skill-load 同纪律）。测试：slash 词表 + `parseEffortLevel` 边界 21 例 / hub-bridge wire 透传 5 例（含 capture-server 真实 LLM 字节断言 + `overrideEnv` 透传）/ app 端 `/thinking` 翻转 1 例 / keyboard `/effort` 三档 notice 3 例 / thinking-gate 7+2 例。未触达 LLM 客户端/模型适配器/loop 多回合契约（`src/harness/model-adapter/` 零改动），`archive/tests-real-llm/` 未配套真模型 e2e（capture-server 断言已等价验证请求构造）。
-- **real-LLM e2e 移出默认 vitest 收集（2026-08-12）**: 全量 profiling 实测两个真实模型 e2e（`bootstrap-real-llm` / `tui-subagent-wiring-acceptance`）每次 `vitest run` 真打 LLM，占全量 189s 中约 143s（75%），且 model 提示路径偶发失败拖红 pre-push。归档到 `archive/tests-real-llm/`（对齐 `archive/tui-ink/` 惯例：在 `tests/` 之外，include 不收集；`vitest.config.ts` 增 `archive/**` 防御性 exclude），新增独立入口 `npm run test:real-llm`（`vitest.real-llm.config.ts`）按需触发，缺 key 仍显式 skip + Not run。默认 `npm test` / `test:pre-push` 不再收集 real-LLM e2e，推送前如需验证真模型显式跑 `npm run test:real-llm`。
-- **TUI 渲染后端迁移 ink → @opentui/react 0.5.1（#321/#343，2026-08-10）**: 一次性替换渲染后端，四大已知渲染问题全部收口 — (1) **scrollback 污染**：ink 每帧重绘泄漏到终端历史 → OpenTUI alternate-screen + Zig 双缓冲 dirty-cell diff 架构消除；(2) **行计数漂移**：删除整条行计数路径（`markdown-lines.ts` / `message-rows.ts` / `row-window.ts` / `chat-flow.ts` 窗口函数 9 文件），滚动交给 `<scrollbox stickyScroll>` 布局位置 ref 直查（`.scrollTop` / `.screenY`）；(3) **ANSI 着色测试脆弱**：5 个 skip 用例删除/重写，着色断言用 `captureSpans()` 结构化表达；(4) **keyboard probe 吞键**：自实现 Kitty 解析删除，全走 OpenTUI 内置键盘解析器 + `mockInput` 模拟。输入协议：`<text selectable>` 拖选 → `renderer.copyToClipboardOSC52`（OSC52 失败退回原生 `clipboard.ts` fallback 链）。旧 TUI 全量归档 `archive/tui-ink/`（只读参考，禁 import）。测试运行器 D2 裁决 B：`tests/tui/` 切 bun:test（Node 22 无 FFI），`npm test` = `vitest run && ~/.bun/bin/bun test tests/tui/`。平台：Linux（含 WSL2）实测验收；**macOS / Windows 未验证**。`ask` / 管道 / `serve` 路径零影响（`src/cli/` `src/harness/` `src/session-api/` 零改动）。
+### LLM client resilience (2026-07)
 
-- **TUI 启动 banner 改版**（2026-08-06）：从「大号方形点阵 + 单线外框 + 整体水平居中」改为「占满整行宽度的圆角线框（与输入框 PromptInput 同款 borderStyle="round"）+ 小号扁平眼睛居左（16×6 braille，16 列 × 6 行）+ info 栏（Version / Cwd / Data dir）居右垂直居中 + 顶框左对齐 `◆ iknow tui`」。眼睛不再是大号方形（用户复看裁定"不要放太大、放左边一小块"），窄终端降级阈值随小眼 96 → 64 列。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新；`scripts/gen-banner-art.py` 保留为旧全构图大眼存档档。
-- **TUI 启动 banner 二轮**（2026-08-06，复看裁定）：首轮裁瞳孔 ±95px 方窗生成 16×6 小眼，**把眼睛裁掉了**——完整眼形（眼睑 / 眼框 / R 符文周围）丢失。改用操作员提供的新源图 `docs/design/eyeshape.png`（836×836 RGBA 透明底，主体 = 完整眼睛），alpha 隔离背景后**不裁切**，点阵改为 24×12 braille（24 列 × 12 行终端，显示比 1.000 近方形）。`BANNER_MIN_COLS` 随眼睛宽度 64 → 72；金色 R 符文仍在中间显示。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新；旧 `scripts/gen-banner-art.py` 仍为旧全构图大眼存档档。
-- **TUI 启动 banner 三轮**（2026-08-06，复看裁定）：眼睛扩到 **32×13 braille**（32 列 × 13 行终端，显示比 1.231 略扁；操作员确认贴图同款）；顶框 title 从 `◆ iknow tui` 改为 **居中** `◆ iknow`（去 tui）。`BANNER_MIN_COLS` 随眼睛宽度 72 → 80。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新。
+- Full deterministic / embeddings / llm CLI + Session HTTP interaction smoke.
+- LLM client forces `stream: false`; response parsing tolerates SSE
+  `data: [DONE]` trailers.
 
-### Feature
+### Frontend stack upgrade — Vite + React + TS (2026-07)
 
-- **TUI 接入 skill + MCP 扩展源（#337，2026-08-11）**: TUI 入口补齐 skill 与 MCP 扩展源接线 + 两件 UX 能力。(1) **装配**：`buildTuiDeps` 装配 skill scanner+catalog → `skill`/`skill_search` 工具入注册表 + `<available_skills>` 系统段渲染；新建 MCP manager（`loadMcpConfig` + `createMcpManager` + fire-and-forget start）+ 复刻 `createDynamicExecutorRegistry` 包装使 `mcp__*` 工具可被 executor 解析；`TuiExtensions` seam 透出 skillCatalog / mcp.status / mcp.reload / shutdown，退出路径幂等收口 stdio 子孙。(2) **slash 扩展**：`SlashCandidate` 判别联合混显静态命令 + 动态 skill 候选，Tab 补全跨两者唯一匹配；`/skill-name [提示词]` 确定性加载——`createSkillBody` 取正文 + `[skill-load name=<name>]` 头 + 提示词拼成 user message 发送（不依赖模型主动性），echo 与发送文本一致。(3) **/mcp 看板**：词表加 `/mcp`，`TuiView` 扩 `mcp`，新 `McpView` 组件——server 状态着色（connected/failed/pending/disabled）+ 工具数 + `Enter` 详情看工具名/描述 + `r` reload（`loadMcpConfig` 重读 + manager.reload）+ `Esc` 二级返回。(4) **harness 前置缝**：`AciRegistry.unregisterExternal`（reload 先 unregister 再 register）+ `McpManager.reload`（shutdown → rebuildSlots → bootstrapAll，SC8 不阻塞）。测试：aci-registry-external +8 / manager +6 / deps-skill-mcp 4 / slash 82 / mcp-view 8 / skill-load 3；`bun test tests/tui/` 355 pass（run-errors 预存 flaky 除外），typecheck 0 错。
+- Product UI package under `web/`: Vite 6 + React 19 + TypeScript SPA.
+- Build output `web/dist`; `iknow serve` prefers dist, falling back to `web/`.
+- Design tokens ("forest cockpit"); the API client mirrors Session API DTOs.
+- Dev workflow via a proxy to the local serve; prod via build + serve.
+- Unchanged / not claimed: Session API contract; SSE still 501; no production
+  auth.
 
-- **settings 机制完善——loop 配置继承通道 (#353)**: 新增 `.iknow/settings.json` 作为 loop 配置（maxTurns · 压缩 contextWindow/thresholdTokens）的用户可设置、跨进程可继承单一事实源。`src/config/settings.ts` 双层加载 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project，覆盖 user），逐层合并 + 非法值回退 + 深 frozen；`loadIknowEnv(cwd, settings?)` 增加 settings 注入缝，precedence `process.env > .env.local > .env > settings.json (project > user) > hardcoded defaults`（仅 loop-config 三字段引入 settings 回退，其它字段行为不变）。子代理自装配走同一 `loadIknowEnv()` 自动读 settings 文件，跨进程天然继承。未设置时行为与现状一致（默认无限 maxTurns / 默认关 proactive compact），无回归。测试：`settings.test.ts` 19 例 + `env.test.ts` 新增 7 例（settings 注入 / env 覆盖 / 非法 env 回退 / 真实文件集成 / serve·hub 同源暴露 / 子代理继承·不继承）。
+### Session HTTP API + Web UI (2026-07)
 
-- **手动压缩会话（TUI `/compact` + web 压缩按钮）**: harness 层已有的 `compactMessages`（proactive/reactive 双保险共用收口）补手动入口。后端：`compactMessages` 从 `src/harness/index.ts` 公共出口导出；`SessionHub.compactSession` 走 serialize → load → compact → save（幂等 no-op：低于阈值不落盘、不 bump updatedAt），`POST /api/v1/sessions/:id/compact` 路由 + `CompactSessionResponse` wire 类型（session + turns + compacted + before/afterCount）。TUI：词表新增第 9 条 `/compact`（running 拒绝 / draft 提示无上下文 / 压缩后从磁盘刷新并保留 lastUsage 读数）。Web：`ContextUsageStrip` 右侧压缩按钮 + `useSessionChat.compact()`（轻操作不置 loading/error 全屏，失败局部提示）。测试：hub 4 边界 + http 2 例 + web hook 3 例 + strip 4 例 + slash 6 例 + session-state 2 例 + hub-bridge 2 例 + app 端到端 2 例。
+- `iknow serve`: in-process Session API plus SPA static host (`web/dist`
+  preferred).
+- Routes: health, sessions create/list, messages, commands, reset.
+- Every message returns the full answer envelope; human projection optional.
+- Reserved: the per-session events route replies 501 (SSE future).
 
-- **TUI 鼠标拖选复制 (#238)**: 应用内选区层 — DECSET 1002h drag 模式上报拖动坐标，app 维护 anchor/active 选区并渲染反色高亮（ink `<Text inverse>`），mouseup 自动把选中文本复制到系统剪贴板（复用 `copyToClipboard` 多平台 fallback 链）。Ctrl+Y 作为键盘逃生口（复制当前选区；无选区提示先拖选）。移除 `/copy` 命令与 `extractLastAssistantText`（#237 取消，词表 9→8 条）。新模块 `src/tui/selection.ts`（选区模型/坐标映射/文本提取纯函数）、`src/tui/selection-render.tsx`（反色高亮组件）；`mouse.ts` 扩展 `parseMouseAllEvents` 全 SGR 解析 + DECSET 1002h。测试：`selection.test.ts`（29 例）、`mouse.test.ts` 扩展（23 例）、`copy-flow.test.tsx` 重写为拖选 e2e（3 例）。
+### Product CLI chat (2026-07)
 
-- **Memory injection v0 (#121/#228, ADR-0009/0010)**: 记忆文件分层注入着陆 — `src/harness/memory/` 模块（paths/schema/frontmatter/errors/discovery/bm25/promote/assembly/refresh）+ `memory_recall` / `memory_save` 工具入 `createDefaultAciRegistry` SSOT（8→10）。`IKNOW_ASSEMBLY_ORDER` 9 段收敛为 5 段（identity/soul/user_profile/bootstrap/memory_layer），memory_layer 单 slot 委托 `createSystemResolver`（mtime 缓存 + inflight 去重 + 装配失败不毒化）。surface split：ask 入口剥离 memory 工具 + memory_layer 不挂（identity 层恒在）；chat/tui/serve 默认开启。
+- TTY REPL plus pipe-aware serial turns.
+- Conversation state with prior-chunk bridging and slash commands
+  (`/status` `/mode` `/role` …).
+- Human view is the default in chat; `ask` / oneshot stay machine JSON for
+  scripts.
+- Explicit `--mode` wins over the env var; an empty ask prints usage (no demo
+  query).
+- SIGINT: first warns, second exits immediately (status 130).
 
-- **Shift+Tab 切换 auto 权限模式（W2 扩展）**: TUI 与 REPL 在 `default ↔ full_auto`（显示标签 `"Auto"`）之间就地翻转模式——不动 ask 桥接、不重建 engine、不绕 `/permissions` 命令。`plan` 模式保留但**不进 shift+tab 序列**（避免误触让 mutating 工具被静默拒绝）；按 shift+tab 在 `plan` 时直达 `full_auto`。TUI：`<TuiApp>` 持一个可变 `PermissionModeContext`，chat 视图右上 dim `mode: <Label>` 指示行（窄列降级 `[auto]`/`[def]`），全局 useInput 监听 `key.tab && key.shift`。PromptInput 让出 shift+tab（不消费），广播给 app 层 handler。REPL：`runInteractive` 挂 `process.stdin` keypress 监听，调抽出的 `applyShiftTabModeFlip()`（单测覆盖）。`modeLabel()` / `nextShiftTabMode()` 导出（`src/harness/permission/modes.ts`），TUI deps 直连 v2 `createPermissionPolicy`（不再用 aci prototype 包装）。测试：`modes.test.ts` +3 例（`modeLabel` / `nextShiftTabMode`），`tests/cli/chat-mode-shift-tab.test.ts` 新 6 例（含 shift+ctrl+tab 守卫 / ctx 缺省短路），`tests/tui/app.test.tsx` +1 例（CSI `Z` 发 stdin → mode 翻 + 标签可见）。1974 全绿。
-- **Identity assembly (#196)**: 在 `deps.system` 注入缝上装配身份层 — `identity` (Name/Kind/Signature) + `soul` (core truths/boundaries/vibe/continuity) + `~/.iknow/user.md` 用户画像 + 首启 `BOOTSTRAP` 引导。所有 iknow 入口 (chat / tui / ask / serve) 走同一装配层。`state.json` 持久化 `bootstrap_seeded`,二次启动跳过 BOOTSTRAP 段。`initializeIknowWorkspace()` eager + idempotent,在 `build-engine.ts` 与 4 入口(chat / serve / tui / ask)各调一次,失败降级 warn 不阻塞装配。
+### Model wiring (2026-07)
 
-- **ACI 8 工具集 SSOT 注册层 (`createDefaultAciRegistry`)**: 新增 `src/harness/aci/tools/registry.ts`,把 `build-engine.ts` 手写的 8 件工具数组(bash/read_file/grep/glob/edit_file/write_file + web_fetch/web_search)抽成单一装配工厂,并对齐 upstream `create_default_tool_registry()`(`tools/__init__.py:48`)。`build-engine.ts` 与 `tui/deps.ts` 改为共用该工厂,消除 TUI 入口工具集分裂 — 修复 `iknow tui` 漏注册 `web_fetch`/`web_search` 且不消费 `IKNOW_WEB_PROXY` 的历史问题。工厂入参收窄为 `Pick<IknowEnv,"web">` + `sandboxRoot`(不传 LLM key 等敏感字段);`proxyUrl` 非法在装配期 fail-fast;`sandboxRoot` 越界保持执行期由 fs 工具拒绝(装配期不做 fs IO)。测试:`registry.test.ts` 新 7 例(5 边界类)+ `deps-tools.test.ts` 新 3 例(TUI tracer bullet,重构前红后绿);1422 全绿;ask 端到端 web_search 真出结果。
+- Embedding vector arm (OpenAI-compatible) plus an optional LLM tool agent.
+- Fail-closed offline / key / protocol checks; the deterministic path remains the
+  CI default.
 
-### Breaking (internal, pre-release)
+### Trajectory eval harness (2026-07)
 
-- `iknow serve` 不再托管 `/api/v1/traces` 读 API；检测面板改由独立 `iknow trace` 子命令进程提供（默认端口 24881；`iknow trace --trace-out <path>` 读 `serve --trace-out <path>` 写入的同一 JSONL）。`--trace-out` 在 `serve` / `chat` / `ask` 上的写语义未变（仍由 hub 写埋点落到 JSONL）。详见 #183。
-- `src/session-api/http.ts` 移除 `handleTracesRequest` import + `/api/v1/traces` prefix-dispatch + `SessionHttpServerOptions.traceFilePath`；`SessionHttpServerOptions` 仅保留 `hub` / `webRoot` / `host` / `port`。`src/session-api/serve.ts` 不再将 `traceOut` 转发到 session server，但 `serve` 仍 `accept --trace-out` 用于写侧。web 端：`getTraces` / `getTraceFields` 走 `TRACE_API = import.meta.env.VITE_TRACE_API_BASE ?? "/api/v1/traces"`；其余 session API 端点仍 `/api/v1`。Vite dev proxy 新增 `/api/v1/traces` → `http://127.0.0.1:24881`（`IKNOW_DEV_TRACE_API` 可覆盖）。`TraceReadError` 包裹不带 fs 细节，仍 500 internal。
+- `npm run eval`: full 32-sample trajectory suite.
+- Structured `tool_calls` on every answer.
+- Hard gates plus a sprint-1 soft target on mean trajectory score.
+- Result artifacts gitignored.
 
-- `getApiKey` / `assertOfflineCompatible`（`src/config/env.ts`，经 `src/index.ts` re-export）改签名为单 `opts` 参数（`{ envVarName, fileMap? }` / `{ env, agentMode? }`）；随 024 全仓库位置参数 → options object 重构，全仓库 ≥2 位置参数函数统一改为 opts 形态（41 文件，纯重构行为零变更；014/015/016/017 冻结契约 step/run/LoopAdapter/Executor.executeAll/Registry/TurnTrace 与 Error 构造器均不动）。包状态 `private: true` + `0.1.0 (unreleased)` 未发布，无外部消费者，仅记录内部 API 变更，审计可追溯。详见 #97（024）。
-- 归档 `src/kb-*` 4-tool 套件（`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`）+ 装配 facade `src/tools/registry.ts` -> `docs/archive/023-retire-kb-tools/`。CLI 产品路径（`buildHarnessEngine`）在 020 切到 harness 后已不再消费 `kb_*`（只跑 `echo` / `get_time` demo 工具），4-tool 套件仅作为 `src/index.ts` 导出 + 4 个 test 文件存活，零生产消费者。连带修剪：`src/index.ts` 删 13 行 export；`src/shared/schema.ts` 删 `Kb*Input/Output` / `Chunk` / `PriorChunk` / `SourceSpan` / `CompiledFact` / `SnapshotPayload` / `RRF_K` 等类型（保留 `CallerRole` / `SessionContext`，CLI slash 仍用）；`src/runtime/create-runtime.ts` 删 embedding/vector-index 路径，简化为 `store + env`；`src/cli/runtime.ts` 的 `RuntimeBundle` 删 `vectorIndex` 字段；删 4 个 test（`verify` / `compile` / `rrf` / `embedding`）。**保留为孤儿待后续清理**：`SessionContext.simulate_governance_timeout` / `--governance-timeout` flag / `prepareRuntime.degrade`（0 消费者）；`--embeddings` flag（runtime 内 no-op）。归档非删除，对齐 021/022 惯例。
-- 移除 `src/index.ts` 对旧 `src/agent-loop/` 与 `src/eval/` 的 re-export（13 旧 loop 符号 + 5 EVAL 符号 + `eval/types` type re-export）；包状态 `private: true` + `0.1.0 (unreleased)` 未发布，无外部消费者，仅记录内部 API 变更，审计可追溯。详见 #48（021）Resolution Q3。
-- `TurnDto.answer` 从 `IknowAnswer`（G2 envelope）改为 `TurnAnswerDto {finalText, stopReason, turnCount}`（harness RunResult 投影）；G2 envelope 在 Session API wire 退役。详见 #51（022）Resolution Q1。
-- `SessionSummary` 移除 `caller_role` 字段；wire 不再接受/返回 caller role（harness 路径退役）。详见 #51（022）Resolution Q2-G4。
-- 删除 `POST /api/v1/sessions/:id/commands` slash 端点（404）；slash 命令在 harness 路径退役。详见 #51（022）Resolution Q3。
-- 新增 `GET /api/v1/sessions` 列表端点（`{sessions: SessionListEntry[]}`）+ web 会话历史侧栏（`SessionSidebar`）。详见 #51（022）Resolution Q1。
-- `src/shared/schema.ts` 删除 `IknowAnswer` + `ToolCallLog` 类型定义；公开面经 `export type *` 不再 export（BREAKING for internal consumers）。详见 #51（022）Resolution Q1。
-- 归档 `src/interaction/`（5 文件）→ `docs/archive/022-retire-interaction/` + `src/agent-loop/`（7 文件）→ `docs/archive/022-retire-agent-loop/`；归档非删除，对齐 021 惯例。详见 #51（022）Resolution Q5。
-- Session API 路径切到 harness foundation（`src/session-api/` 零 import 旧 loop）；`SessionHub` 直接调用 `run()` + `priorMessages` 续传。详见 #51（022）Resolution Q1-Q5。
-
-- ACI Web 类工具出站代理臂（`IKNOW_WEB_PROXY`，trust_env=False 语义 —— 显式配置才生效，不读系统 `HTTP(S)_PROXY`）：`network-guard.createDefaultGuardDeps` 接受 `proxyUrl` 选项，构造 `undici.ProxyAgent` dispatcher 挂到 fetch 路径；代理 URL 走与目标同套 SSRF 语法校验（http/https / host / 凭据），host 不做公网 IP 防线（本地代理必须允许）；`web_fetch` / `web_search` 工厂 fail-fast 在装配时验证 proxy 配置（坏的 `IKNOW_WEB_PROXY` 在 build 期即抛，CLI 启动可见而非首次搜索暴露）。`env.ts` 新增 `IknowEnv.web.proxy`（`IKNOW_WEB_PROXY` 经 `loadIknowEnv` SSOT 读取），`buildHarnessEngine` 透传到两 Web 工具。`undici@^7.29` 入 `dependencies`（fetch 的 dispatcher 类型在 `undici-types@6`（`@types/node`）与 `undici@7` 间结构不兼容，在单一赋值边界用 `as unknown as` 桥接，附类型注释）。新增依赖：`undici@^7.29`。测试：`network-guard.test.ts` +5 例（非法 / 凭据 / 合法 proxyUrl / 缺省 / 旧 UA 签名兼容）+ `build-engine.test.ts` +1 例（坏 proxy 装配时报错 / 空 proxy 装配成功）；1396 全绿；smoke 验证 in-process HTTP proxy 看到 `CONNECT html.duckduckgo.com:443`（dispatcher 端到端生效）。
-
-- web_search 默认端点切到 Bing（`cn.bing.com/search`，B1 决策）：DDG html 端点（upstream 默认）在部分网络环境不可达——实测 WSL2 + Windows host 解析器把整个 duckduckgo.com 域族解析到 Facebook/Meta IP（199.59.149.239 + face:b00c IPv6）且直连超时/ENETUNREACH，Google DNS 却解析到真实 DDG IP（104.244.43.229），本地 DNS 污染 + egress 阻断双重叠加导致 `web_search failed: fetch failed`。Bing 实测本机 200 + 结果结构完整、中国区可达。结果解析按端点 hostname 分派：DDG html 走 `result__a` / `result-link` + `result__snippet`（保留，经 `search_url` / `IKNOW_WEB_SEARCH_URL` 覆写可达）；Bing 走 `li.b_algo → h2>a + div.b_caption`。DDG `/l/?uddg=` 重定向归一仅作用于 DDG 解析器。测试：`web-search.test.ts` +4 例（默认端点指向 Bing / Bing HTML 解析出 title/URL/snippet / max_results 截断 / 空结果）+ 旧 DDG fixture 显式声明 DDG 端点（`searchDeps` 第三参）；**真实端到端验证**：工具无 stub 在 `cn.bing.com` 搜索 "rust async" 返回 3 条带 title/URL/snippet 的结果（rust-lang.org / runoob.com 等），非 mock。1400 全绿 + typecheck 绿。
-
-### Added
-
-- 流式渲染接缝贯通 chat + TUI（#188 + #198，wayfinder #201 决策集落地）：新建 `src/cli/stream-draft.ts` 共享层（纯累积 `append`/`masked`/`raw`/`reset`/`subscribe`，全量重 mask currentSecretValues，跨 delta 截断密钥由累积后整段遮蔽，无 fd / 无 React 依赖）；`SessionHub.postMessage` 新增可选 `onStream` 透传到 `run()`；`buildTuiDeps` adapter 装配 `stream: env.llm.stream === "on"` 与 `build-engine.ts` SSOT 同源——TUI 真实走流式臂；TUI `runTurnOnce` 构造 `createStreamDraft`，`useState + subscribe` 等价 `useSyncExternalStore` 快照语义（避免 getSnapshot 每调用返新串无限 re-render），`ChatView` 在 spinner 前以 Markdown 渲染 `draftsMasked`，turn 结束 commit 进 transcript、abort 清空草稿 + 「已打断」提示。chat TTY `createStreamPreviewSink` 改用 stream-draft，`lastWrittenLen` 增量写 `masked()` 切片，**完整密钥 SC20 路径生效**（跨 delta 截断已知边界在 D4 裁决后文档化）。thinking 折叠态统一：chat `showThinking=true` 从「展开全文」改为「折叠摘要行」（新增 `renderThinkingSummary` 导出函数，TTY 无折叠交互，摘要即折叠态）；TUI 新增 `/thinking` 斜杠命令切换 ChatView 折叠面板（全局运行态，不落盘），`estimateMessageRows` / `buildMessageRowSpans` 联动 `thinkingExpanded`（折叠=1 行 / 展开按文本行数累加）。plan: `plans/streaming-rendering.md`（6 tracer bullets，T1-T6 各为独立 commit）。回归验证：1359 测试全绿。
-
-- Trace inspection panel：新增 `src/traceserver/`（read-only）：同步 JSONL reader（`MAX_TRACE_BYTES = 8 MiB` + 行边界截断 + `TraceReadError` 包裹 fs 错误）+ `GET /api/v1/traces`（filter：conversation_id / record_type / status；pagination：limit 1..200 / offset ≥ 0；坏行计入 `skipped_lines`；snake_case wire）+ `GET /api/v1/traces/fields`（字段声明表 `TRACE_FIELD_DEFS` SSOT，加载时自检 key 唯一性，违则 throw）；`SessionHttpServerOptions.traceFilePath` 接线（`serve --trace-out` 经 `path.resolve` 相对 CWD，对齐 ADR-0003 D3）；未配置 traceFilePath → 404 `not_found`、`TraceReadError` → 500 `internal`、参数非法 → 400 `validation`（含 `field`）。前端：web `TracePanel` 容器 + `TraceStatsBar` / `TraceFilterBar` / `TraceTable` / `TraceExpandedRow` 子组件；`App.tsx` 顶层 view 切换 `对话` / `Trace 面板`，chat view 始终挂载（`useSessionChat` 状态不丢），TracePanel 卸载/挂载可重新拉数；字段列选择 / datetime 格式化 / cell tone 抽到 `web/src/components/traceFields.ts` 供单测。**新增 trace 字段 = `src/harness/trace/types.ts` 加类型 + `TRACE_FIELD_DEFS` 加一行，面板自动生效**；写侧（`src/harness/trace/jsonl.ts` / `loop-engine.ts` / `hub.ts.recordViolationTrace`）未触碰，验证：33 单测 + 集成全绿。
-
-- Trace 检测面板独立成由 `iknow trace` 进程托管的页面（trace.html），从 chat SPA 摘除；chat 页面回归纯对话形态。共享 vite 多 entry + 共享 `web/dist/assets/` chunk；trace 进程经 `src/web/serve-static.ts` 复用 chat 的静态托管 helper，落地 `/` → trace.html、SPA fallback、路径穿越 403、`/api` 拒绝守卫四件套；`/api/v1/*` 路由优先于静态（health 不会被 trace.html 遮蔽）。`web/src/App.tsx` 删 `Root` / `ViewTabs` / `TracePanel` 装配块，回到 chat-only 形态。详见 `plans/trace-separate-page.md`。
-
-- ACI Web 类工具 `web_fetch` / `web_search`（`src/harness/aci/tools/web-fetch.ts` / `web-search.ts`，行为真值参考上游 Python 实现的 `web_fetch_tool.py` / `web_search_tool.py`）+ 共享 SSRF 出口层 `network-guard.ts`（URL 语法 / 嵌入凭据 / 非公网 IP 字面量与 DNS 结果 / 本地主机名 / 单标签 / ≤5 跳重定向逐跳重验 / 非 2xx 拒绝；fetch + DNS 解析 deps 注入，测试全离线；生产默认出口 `createDefaultGuardDeps` SSOT）+ 共享原语 `html-text.ts`（HTML→文本 / 实体解码）与 `ip-classify.ts`（IPv4/IPv6 非公网分类）。两工具 `aci` 元数据：`category=read-only`（权限默认 allow）/ `isConcurrencySafe=true` / `interruptBehavior=cancel` / `timeoutTier=default`（30s）。`web_fetch` 输出含 `UNTRUSTED_BANNER` 防 prompt injection 横幅 + HTML→文本提取（跳过 script/style + 实体解码 + 收边 trim + 段落换行 `\n` 保留以对齐 HTMLParser 状态机可读性）+ `max_chars` 截断（默认 12000，运行时 clamp 500..50000）；`web_search` 默认 DuckDuckGo html 端点（`search_url` 入参或 `IKNOW_WEB_SEARCH_URL` 可覆写，覆写同受 SSRF 校验；env 读取经 `loadIknowEnv` SSOT——`IknowEnv.web.searchUrl`，工具不直读 process.env），`max_results` 默认 5（1..10），`/l/?uddg=` 重定向链接归一。`buildHarnessEngine` 装配 append-only 6 → 8 工具（既有顺序不动，policy byName 键空间稳定）。生产默认出口 UA 改为浏览器伪装串 `DEFAULT_USER_AGENT`（network-guard.ts SSOT；Mozilla/Chrome/AppleWebKit + `iknow/0.1` 后缀），应对 Cloudflare 等反爬 UA 过滤（实测：旧产品 UA 被 Ars Technica 返 202 challenge；新 UA 使 TechCrunch 完整通过 200 + 301KB + 191 链接）。测试：web 工具 3 文件 66 例 + env 3 例 + html-text 38 例 + UA 默认值 3 例，共新增 110 例（正常 / 失败 / 边界 / 权限 / 空输入 / 并发扇出 / pathological HTML 6 类）。code-review 双轴审查：Standards 0 High（4 Medium 全整改：decodeEntities/defaultLookup 去重抽共享层、fetchPublicResponse 拆 followGuardedRedirects ≤30 行、env.ts SSOT 接线、clamp 运行时测试补齐）。
-
-### Changed
-
-- #120 会话持久化：会话池根从 `<cwd>/data` 迁至 `~/.iknow`，项目命名空间采用 `<basename>-<sha1(cwd)[:12]>`（`resolveProjectSessionDir`）；`serve --data-dir` 覆盖保留，旧 `<cwd>/data` 不读、不迁移、不删除。`SessionFileV1` schema 升级为 v2，新增顶层 `summary` / `cwd` / `sanitized_at`；`sanitizeSessionFile` 前向兼容 v1（读取时补齐并零写盘），拒绝 `schemaVersion > 2` 及形状错误的 `messages`，不做修复。`SessionStore.list()` 条目新增 `summary`，既有 `conversation_id` / `updatedAt` / `lastFinalText` 保持不变；CLI `CliChatState.messages` 改为 `ReadonlyArray` + `Object.freeze`（#120 Q3）。详见 `specs/120-session-persistence.md`。
-
-- 抽取共享静态托管 helper `src/web/serve-static.ts`（`resolveDefaultWebRoot` + `serveStaticRequest({res, webRoot, pathname, fallbackHtml})`），从 `src/session-api/http.ts` 抽出 `MIME` / `resolveDefaultWebRoot` / `tryServeStatic` + `pipeFile`。`/api` 拒绝守卫 + 路径穿越 403 + SPA fallback 三件套行为不变；`src/session-api/http.ts` 改为 import helper（chat 行为零变化），trace 进程复用同一 helper（fallbackHtml `"trace.html"`）。纯重构，行为字节对齐。
-
-### Web thinking/tool/markdown 显示（wire 加法式扩展）
-
-- **session-api wire 加法式扩展**：`TurnAnswerDto` 新增可选 `thinking`（entries 文本列表 + `redactedCount` 计数）与 `toolCalls`（name / inputPreview / outputPreview / isError / truncated）投影；新模块 `src/session-api/turn-projection.ts`（纯函数）：thinking 每条目截断 `MAX_THINKING_TEXT_CHARS=2000`，tool input 预览截断 `MAX_TOOL_INPUT_PREVIEW_CHARS=500`、output 预览截断 `MAX_TOOL_OUTPUT_PREVIEW_CHARS=1500`，全部先经 `createOutputMask` mask 再截断（SC20 输出边界，与 finalText mask 一致）；`redacted_thinking.data` / `thinking.signature` 永不上 wire（replay 材料，仅计数）。postMessage 与历史回放（GET session）共用同一投影。
-- **每请求 thinking 覆盖**：`PostMessageRequest` 新增可选 `thinking: { mode: "off" | "adaptive", effort?: "" | low | medium | high | xhigh | max }`；新模块 `src/session-api/thinking-override.ts`：wire 解析 + 值域校验（非法 → `ValidationError` → 400 嵌套 envelope，不静默回退）+ 按回合一次性 adapter 重建（仅替换 adapter，executor/registry/maxTurns/timeoutMs 复用缓存 deps）。无覆盖请求行为与既有 wire 字节一致；env `IKNOW_LLM_THINKING` / `IKNOW_LLM_THINKING_EFFORT` 仍为默认 SSOT。
-- **web 显示**：markdown 渲染（react-markdown + remark-gfm + rehype-highlight；`MarkdownBody` + `CodeBlock` 语言标签 + 复制按钮）；`ThinkingBlock` 思考内容默认折叠（aria-expanded），redacted 仅渲染 `[已加密思考]` 计数占位；`ToolCallList` 工具调用卡片（单展开 + 截断标记「已截断」）；`ThinkingControls` 思考开关 + 强度分段选择（localStorage `iknow:thinking` 持久化，`toWireOverride` 随每次 postMessage 下发）。
-- **web 已有功能完善**：非 completed stopReason 停止原因提示 + turnCount「N 轮」元信息（`StopNotice`；文案映射纯函数 `web/src/lib/stop-reason.ts`，completed / 未知值不显示）。
-- 测试：`tests/session-api/turn-projection.test.ts` / `thinking-override.test.ts` + hub/http 扩展；`tests/web/thinking-settings.test.ts` / `tests/web/stop-reason.test.ts`（根 vitest；web 包禁测试框架的 spec 约束不变）。
-- **不变 / 不声明**：SSE `/events` 仍 **501**（non-goal 不变）；G2 evidence 未回 wire（spec 022 退役，独立票）；`ask` JSON 通道与 CLI 投影零变化；harness 零 diff。决策补录：`docs/design/frontend-stack-upgrade-v1.md` §0.1；计划与 ACR 门禁：`plans/web-thinking-tool-display.md`。
-
-### Docs (CLAUDE.md + architecture.md 整理)
-
-- CLAUDE.md 删除 `### Runtime map` 14 行 path 表（~80% 与 `docs/architecture.md` Capability modules 表重复，且漏 `src/harness/` 等新模块），替换为 5 行 `### Module boundaries`（仅保留非显而易见边界 callouts），并指向 architecture.md 为 SSOT
-- `docs/architecture.md` Capability modules 表补 `src/harness/`（Foundation，标注暂不接产品流量）/ `src/runtime/` / `src/tools/` / `src/config/` / `src/eval/`，并标 `src/agent-loop/` 待退役（016->018 路线）
-- CLAUDE.md 删除「下阶段焦点」行（动态路线信息归 `docs/STATUS.md`，避免 always-on 层持有易腐数据）
-- CLAUDE.md 上下文读取顺序：删除两个死引用（`docs/git-workflow.md` / `docs/testing.md` 不存在），加 codebase-memory 定位提示
-- CLAUDE.md Domain docs 补 `specs/minimum-sequential-agent-loop.md` + `plans/minimum-sequential-agent-loop.md`；修正 `CHANGELOG.md` 路径为根目录（原 `docs/CHANGELOG.md` 不存在）
-- CLAUDE.md `npm test` 注释更新：vitest 入口，含 `tests/harness/**`
-- CLAUDE.md「I4」行去掉展望尾巴（I5 退到 STATUS 展望）
-
-### Web MVP prototype → CLI integration (iknow-prototype)
-
-- Prototype `/api/chat` **mock removed**; frontend now consumes the real **Session HTTP API** (`iknow serve`)
-- New Session API client with typed DTOs + error envelope + graceful degrade (`src/lib/iknow-api.ts`)
-- Non-streaming chat hook (v0 API returns one full **G2** `IknowAnswer` per turn): lazy session, host-side fake typewriter, abort/reset/commands (`src/hooks/use-iknow-chat.ts`); shared via `chat-provider.tsx`
-- **G2 machine panel** (`src/components/answer-meta.tsx`): governance-status badge, `snapshot_id`, tool-call trajectory, cited `source_spans`, hops, notes — replaces the demo weather card
-- Caller role (`employee|manager|admin`) + mode (`deterministic|llm`) wired to `…/commands` on the live session (`ui-store.ts`, `sidebar.tsx`)
-- Same-origin proxy `/api/v1/*` → `IKNOW_API_PROXY_TARGET` (default `127.0.0.1:8787`); or set `NEXT_PUBLIC_IKNOW_API_BASE` to call a backend directly (CORS-free static-export path)
-- Removed `ai` / `@ai-sdk/react` / `zod` deps + `serverExternalPackages` workaround (were mock-only)
-- E2E rewritten against real `iknow serve` (Playwright dual `webServer`): 6 specs green — G2 envelope (governance=conflict), snapshot, source/tool spans, role switch, new-session reset, sidebar
-- Verified: `typecheck` / `biome check` / `next build` (2 static routes) / `test:e2e` green
-- **Decision (proposed, needs ratification):** product UI stack A (prototype → Next static export, `iknow serve`-hosted) vs B (port look/components back to Vite `web/`) — recommend **A**, flags conflict with `frontend-stack-upgrade-v1`: `docs/design/prototype-cli-integration-and-ui-stack-decision-v0.md`
-
-### Web MVP prototype (iknow-prototype, standalone)
-
-- New **`iknow-prototype/`**: Next.js 15.5 + React 19 App Router MVP, TypeScript strict
-- Stack: Vercel AI SDK (`@ai-sdk/react` `useChat`, streaming + tool-call render), Tailwind 3.4 + shadcn-style `Button`, Zustand (UI state) + TanStack Query (history), Framer Motion, Lucide, react-markdown + rehype-highlight (code copy)
-- Design: light/white base, <=5-color palette, non-AI aesthetic, no emoji
-- Backend is a **key-free mock**: `MockLanguageModelV1` streams a deterministic answer + a `getWeather` tool call (`src/lib/mock-model.ts`); no real LLM/auth
-- E2E: Playwright 6 specs (empty state, streaming+copy, weather tool card, suggestions, sidebar toggle, role switch); uses installed Chrome (`channel: chrome`)
-- Verified: `typecheck` / `biome check` / `next build` / `test:e2e` all green
-- Branch `feat/web-mvp-prototype` (not pushed); commits `66208c4`→`58af68a`
-- **Unchanged / not claimed:** existing `web/` SPA, Session API contract, 4 tool protocol; prototype not yet wired to the CLI backend
-- Handoff + next task (原型接入 CLI): `docs/handoff/2026-07-21-web-mvp-prototype.md`
-
-### I4 smoke + LLM client resilience
-
-- Full I4 interaction smoke: deterministic / embeddings / llm CLI + Session HTTP (`docs/handoff/i4-smoke/`)
-- LLM client: force `stream: false`; `parseLlmResponseJson` tolerates SSE `data: [DONE]` trailers
-- Tests: `tests/llm-client-parse.test.ts`
-- Note: env name is `NINE_ROUTER_API_KEY`; some agent shells saw `models` 200 but chat/embeddings 401 on the same value (endpoint auth / env inheritance)
-- Session closeout: CONTEXT / Claude.md runtime map / `docs/handoff/2026-07-13-session-closeout.md`
-
-### Frontend stack upgrade (Vite + React + TS)
-
-- Product UI package under **`web/`**: Vite 6 + React 19 + TypeScript SPA (`iknow-web`)
-- Build output **`web/dist`**; `iknow serve` prefers dist (fallback to `web/` when absent)
-- Design language: forest cockpit tokens (`web/src/styles/tokens.css`); API client mirrors Session API DTOs
-- Dev: `npm run dev --prefix web` (proxy `/api` → `:8787`); prod: `npm run build --prefix web` then `npm run serve`
-- Decision record: `docs/design/frontend-stack-upgrade-v1.md` · plan: `plans/frontend-stack-upgrade.md`
-- **Unchanged / not claimed:** Session API contract; SSE still **501**; no production auth
-
-### Session HTTP API + Web UI (host interaction)
-
-- **`iknow serve`**: in-process Session API (`src/session-api/`) + SPA static host (`web/dist` preferred)
-- Routes: `GET /api/v1/health`, `POST/GET /api/v1/sessions`, `…/messages`, `…/commands`, `…/reset`
-- Every message returns full **G2** `IknowAnswer`; human projection optional
-- Reserved: `GET …/sessions/:id/events` → **501** (SSE future)
-- Contract: `docs/design/session-http-api-v0.md` · plan: `plans/web-interaction-session-api.md`
-- Tests: `tests/session-api.test.ts` (hub + HTTP + static index)
-
-### Product CLI chat (host interaction)
-
-- **TTY REPL** + **pipe-aware** serial turns (`src/cli/chat-session.ts`)
-- Session: `ConversationState`, `prior_chunks` bridge, slash `/status` `/mode` `/role` …
-- Human view default in chat; `ask` / oneshot remain G2 JSON for scripts
-- Explicit `--mode` wins over `IKNOW_AGENT_MODE`; empty ask → usage (no demo query)
-- SIGINT: first warns, second exits immediately (`process.exit(130)`)
-- Commits of note: `ffc475e` (CLI polish), `f431436` (ffc475e review SIGINT/chain)
-
-### M1 / M2 model wiring
-
-- Embedding vector arm (OpenAI-compatible) + optional LLM tool agent
-- Fail-closed offline/key/protocol checks; deterministic remains CI default
-
-### Trajectory eval harness (ADLC Phase 4 / P3 closeout)
-
-- **`npm run eval`**: full 32-sample trajectory suite (`src/eval/*`)
-- Structured `tool_calls` on every answer (trajectory-eval-spec §1.2)
-- Hard gates: G2 / hops / edge policies; Sprint-1 soft target mean trajectory ≥0.6
-- Results artifact path gitignored: `docs/iknow-spec/docs/eval/results/`
-
-### P3 scaffold
+### P3 scaffold (2026-07)
 
 Standalone enterprise KB agent (no external runtime dependency):
 
-- **4 tools**: `kb_retrieve`, `kb_verify_citation`, `kb_compile`, `kb_governance`
-- **Agent loop**: hop-bounded loop (`max_hops`) with G2 response envelope
-- **Knowledge store**: in-memory store (fixture seed for demos/eval)
-- **Capability layout**: `src/kb-retrieve/`, `src/kb-verify/`, `src/kb-compile/`, `src/kb-governance/`, `src/agent-loop/`, `src/knowledge-store/`
-- **Tests**: `npm test` — unit + eval-set + trajectory
-- **Upstream**: `_upstream_ref/` gitignored READ-ONLY reference only — runtime has zero link
-
-### Initial scaffold
-
-Bootstrap scaffold from project template.
-
-- `bash scripts/bootstrap.sh` — 6-step idempotent setup
-- `bash .evals/run.sh` — default = tier=fast baseline
-- tier-grouped eval framework: fast/medium/slow, parallel within tier
-- 3-layer memory model: CLAUDE.md / auto memory / `docs/`
+- Four tools: `kb_retrieve`, `kb_verify_citation`, `kb_compile`,
+  `kb_governance` (later retired; see Breaking).
+- Hop-bounded agent loop with an envelope response.
+- In-memory knowledge store with fixture seed for demos/eval.
+- Unit + eval-set + trajectory tests under `npm test`.
 
 ### Review hardening (trajectory OCR + staged reviews)
 
-- Shared `src/eval/lexicon.ts` + policy-string scorer (`policy-checks.ts`)
-- Data-driven `session_overrides` on eval samples; resilient suite runner
-- `ToolCallLog.ordinal`; `release_gates`; draft eval-set warn
-- Store/compile/loop root-cause fixes from prior staged review
+- Shared lexicon module plus a policy-string scorer in the eval layer.
+- Data-driven `session_overrides` on eval samples; resilient suite runner.
+- `ToolCallLog.ordinal`; release gates; draft eval-set warning.
+- Store / compile / loop root-cause fixes from the prior staged review.
 
 ### Ops
 
-- Remote: private `https://github.com/winter6205/iknow` (`master` tracking `origin/master`)
+- Remote: `https://github.com/winter6205/iknow` (`master` tracks
+  `origin/master`).
 
-### Next
+### Initial scaffold
 
-- Web/TTY interaction polish; optional session export; SSE streaming behind reserved path
-- Ratify `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
-- Replace draft eval samples with real queries; calibrate soft gates
-- Persist sessions + KB / observability / deploy (P4)
+Bootstrap scaffold from the project template: an idempotent bootstrap script, a
+default fast-tier evaluation runner, a tier-grouped eval framework, and a
+three-layer memory model.
