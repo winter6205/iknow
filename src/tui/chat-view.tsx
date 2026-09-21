@@ -212,6 +212,11 @@ export interface ChatViewProps {
    *  attribution; ChatView only conditionally renders). Undefined → not
    *  rendered. */
   readonly crunchedSeconds?: number;
+  /** Live background (`wait:false`) worker count for the transcript-tail
+   *  residual-hint line (docs/CONTEXT.md 后景残留提示). Derived by the app
+   *  from `bridge.listSubagents()`; 0 / absent → no line (passed through to
+   *  TranscriptTail without an extra branch). */
+  readonly backgroundRunningCount?: number;
   /** askUser pending prompt (undefined = no pending ask). */
   readonly askLine?: string;
   /** thinking collapse-panel expanded state (false = hide thinking plaintext). */
@@ -564,6 +569,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
         crunchedSeconds={props.crunchedSeconds ?? 0}
+        backgroundRunningCount={props.backgroundRunningCount}
         unanchoredBlocks={activityBlockFoldLines.unanchoredBlocks}
       />
     );
@@ -729,6 +735,7 @@ function ChatScrollbox(props: {
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
   readonly crunchedSeconds: number;
+  readonly backgroundRunningCount?: number;
   readonly unanchoredBlocks: ReadonlyArray<
     import("./activity-block.js").ActivityBlock
   >;
@@ -800,6 +807,7 @@ function ChatScrollbox(props: {
         thinkingExpanded={props.thinkingExpanded}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
+        backgroundRunningCount={props.backgroundRunningCount}
         unanchoredBlocks={props.unanchoredBlocks}
       />
     </scrollbox>
