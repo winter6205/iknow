@@ -1,5 +1,5 @@
 /**
- * ADR-0119 T3, host seam (cli): the worker's capture → drain → stamp chain,
+ * ADR-0119, host seam (cli): the worker's capture → drain → stamp chain,
  * assembled entirely OUTSIDE the harness (Gate B: the harness only declares
  * the `PreimageCapture` port; this host constructs the implementation the
  * `__subagent_worker__` dispatch injects into `runSubagentWorker`).
@@ -104,7 +104,7 @@ describe("worker preimage host chain (capture → drain → stamp)", () => {
     const postSha = codeSnapshotSha("new content\n");
     assert.ok(
       await exists(join(codeSnapshotDir(sessionDir), preSha)),
-      "preimage blob lands in the parent session folder (T2 applyCodeRestore's read point)"
+      "preimage blob lands in the parent session folder (applyCodeRestore read point)"
     );
     assert.ok(await exists(join(codeSnapshotDir(sessionDir), postSha)));
     // no blob in the worker's own folder (no addressable leaf → dead storage)

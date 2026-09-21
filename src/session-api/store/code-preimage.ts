@@ -10,7 +10,11 @@
  */
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { codeSnapshotSha, readCodeSnapshot } from "./code-snapshot-store.js";
+import {
+  codeSnapshotSha,
+  isCodeSnapshotSha,
+  readCodeSnapshot,
+} from "./code-snapshot-store.js";
 import type { SessionEventRecord } from "./jsonl.js";
 
 /** One path's inverse op: put `restoreSha` bytes back at `relPath`, but only
@@ -39,9 +43,11 @@ export interface CodeRestoreReport {
  * Fold the abandoned segment into inverse ops. A path's `restoreSha` is the
  * EARLIEST preimage on the segment (bytes before it was first touched) and its
  * `expectedPostimageSha` the LATEST postimage (what a live file must still look
- * like to write back safely). Refs that are absolute or climb out of the root
- * are dropped: a transcript is history, not a licence to write outside the
- * workspace.
+ * like to write back safely). A ref is dropped when any of its three
+ * transcript-supplied locators is unusable — a relative path that is absolute
+ * or climbs out of the root, or a blob name that is not sha256 hex: a
+ * transcript is history, not a licence to touch anything outside the
+ * workspace's own content-addressed store.
  */
 export function buildCodeRestorePlan(
   abandoned: ReadonlyArray<SessionEventRecord>
@@ -50,7 +56,14 @@ export function buildCodeRestorePlan(
   const order: string[] = [];
   for (const event of abandoned) {
     const ref = event.codePreimage;
-    if (ref === undefined || !isSafeRelPath(ref.relPath)) continue;
+    if (ref === undefined) continue;
+    if (
+      !isSafeRelPath(ref.relPath) ||
+      !isCodeSnapshotSha(ref.preimageSha) ||
+      !isCodeSnapshotSha(ref.postimageSha)
+    ) {
+      continue;
+    }
     const key = `${ref.rootIdentity}\u0000${ref.relPath}`;
     const existing = byPath.get(key);
     if (existing === undefined) {

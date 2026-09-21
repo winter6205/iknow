@@ -1,16 +1,20 @@
 /**
- * T1 (ADR-0036): content-addressed preimage blob store.
+ * ADR-0036: content-addressed preimage blob store.
  * Pins the capture/read contract the rewind restore layer depends on:
  *   - capture writes a sha256-named blob under `<sessionFolder>/code-snapshots/`
  *   - identical bytes dedup to ONE blob (write-if-missing `flag:"wx"`)
  *   - read round-trips bytes; a missing blob throws the typed
  *     `{ kind:"code_snapshot_missing" }` (NOT a bare ENOENT Error), so the
  *     caller can tell "absent" from a real IO fault (typed-error catch契约).
+ *   - the sha is the store's only transcript-supplied filename, so it is
+ *     gated to sha256's own alphabet before any filesystem access:
+ *     `{ kind:"code_snapshot_invalid_sha" }` otherwise, and a traversal name
+ *     can never read a file that happens to sit next to the blob dir.
  * Uses an isolated temp dir so the repo's data/ tree is never touched.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -19,6 +23,7 @@ import {
   captureCodeSnapshot,
   codeSnapshotDir,
   codeSnapshotSha,
+  isCodeSnapshotSha,
   readCodeSnapshot,
 } from "../../../src/session-api/store/code-snapshot-store.ts";
 import { CODE_SNAPSHOTS_DIR_NAME } from "../../../src/shared/session-tree-names.ts";
@@ -100,5 +105,34 @@ describe("captureCodeSnapshot / readCodeSnapshot", () => {
         return true;
       }
     );
+  });
+});
+
+describe("blob name gate (the sha is transcript-supplied)", () => {
+  it("accepts exactly 64 lowercase hex; rejects length, case and shape off-alphabet", () => {
+    assert.equal(isCodeSnapshotSha("0".repeat(64)), true);
+    assert.equal(isCodeSnapshotSha("a".repeat(63)), false);
+    assert.equal(isCodeSnapshotSha("a".repeat(65)), false);
+    assert.equal(isCodeSnapshotSha("A".repeat(64)), false);
+    assert.equal(isCodeSnapshotSha("g".repeat(64)), false);
+    assert.equal(isCodeSnapshotSha(""), false);
+  });
+
+  it("a traversal name reaches no file outside code-snapshots/: typed invalid, bytes unread", async () => {
+    const neighbour = join(sessionFolder, "not-a-blob.txt");
+    await writeFile(neighbour, "SECRET ADJACENT BYTES\n", "utf8");
+
+    await assert.rejects(
+      () => readCodeSnapshot(sessionFolder, "../not-a-blob.txt"),
+      (err: unknown) => {
+        assert.ok(!(err instanceof Error), "必须抛 plain typed object");
+        assert.equal(
+          (err as { kind?: string }).kind,
+          "code_snapshot_invalid_sha"
+        );
+        return true;
+      }
+    );
+    assert.deepEqual(await readdir(sessionFolder), ["not-a-blob.txt"]);
   });
 });

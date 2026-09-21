@@ -1,12 +1,14 @@
 /**
- * T2 (ADR-0119): the code-restore plan + apply.
+ * ADR-0119: the code-restore plan + apply.
  *
  * Locked here:
  *   - plan folds a path's segment writes into one op: EARLIEST preimage = the
  *     restore target, LATEST postimage = the drift expectation; ordering is by
  *     first appearance (never a directory scan).
- *   - absolute / `..`-climbing refs are dropped — a transcript is not a licence
- *     to write outside the workspace.
+ *   - every transcript-supplied locator is gated: a ref whose path is absolute
+ *     or climbs out of the root, or whose blob name is not sha256 hex, is
+ *     dropped — a transcript is not a licence to reach outside the workspace
+ *     and its own blob store.
  *   - apply writes a path back only when the live root identity matches AND the
  *     file's current bytes equal the expected postimage; otherwise it is a
  *     reported skip (drift / root_identity).
@@ -98,24 +100,52 @@ describe("buildCodeRestorePlan", () => {
     );
   });
 
-  it("drops absolute and `..`-climbing refs", async () => {
-    const escape = (id: string, relPath: string): SessionEventRecord => ({
+  /** A hand-written ref carrying whatever sha the case needs — the plan's
+   *  locator gate is fed forged transcript data here, never a real capture. */
+  function refEvent(
+    id: string,
+    over: Partial<PreimageRef>
+  ): SessionEventRecord {
+    return {
       type: "message",
       id,
       parent: null,
       message: text(id),
       codePreimage: {
-        relPath,
+        relPath: "a.ts",
         rootIdentity: taskRoot,
-        preimageSha: "x",
-        postimageSha: "y",
+        preimageSha: codeSnapshotSha("A"),
+        postimageSha: codeSnapshotSha("B"),
+        ...over,
       },
-    });
+    };
+  }
+
+  it("drops absolute and `..`-climbing refs", async () => {
     const ops = buildCodeRestorePlan([
-      escape("e1", "/etc/passwd"),
-      escape("e2", "../outside.ts"),
+      refEvent("e1", { relPath: "/etc/passwd" }),
+      refEvent("e2", { relPath: "../outside.ts" }),
     ]);
     assert.deepEqual(ops, []);
+  });
+
+  it("drops a ref whose blob name is not sha256 hex, leaving the workspace alone", async () => {
+    await writeFile(join(taskRoot, "a.ts"), "B");
+    const events = [
+      refEvent("e1", { preimageSha: "../outside-target" }),
+      refEvent("e2", { postimageSha: "deadbeef" }),
+      refEvent("e3", { preimageSha: codeSnapshotSha("A").toUpperCase() }),
+    ];
+    // The gate is the plan; the report and the bytes show it has no effect.
+    assert.deepEqual(buildCodeRestorePlan(events), []);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      ops: buildCodeRestorePlan(events),
+    });
+    assert.deepEqual(report, { restored: [], skipped: [] });
+    assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
   });
 
   it("keeps the same path under two different roots as two ops", async () => {

@@ -318,14 +318,12 @@ async function commitWrite(
     readonly callCtx: PreimageCallIds | undefined;
   }
 ): Promise<unknown> {
-  await capturePreimageBeforeWrite(
-    ctx.preimageOpts,
-    ctx.callCtx,
-    ctx.rootAtCall,
-    target,
-    ctx.oldContent,
-    params.content
-  );
+  await capturePreimageBeforeWrite(ctx.preimageOpts, ctx.callCtx, {
+    rootAtCall: ctx.rootAtCall,
+    absPath: target,
+    preBytes: ctx.oldContent,
+    postBytes: params.content,
+  });
   try {
     await writeFile(target, params.content, "utf8");
   } catch (error) {

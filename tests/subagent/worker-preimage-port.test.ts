@@ -1,5 +1,5 @@
 /**
- * ADR-0119 T3, Gate-B harness side: `createWorkerDeps` threads the injected
+ * ADR-0119, Gate-B harness side: `createWorkerDeps` threads the injected
  * `PreimageCapture` PORT (a pure harness type — no session-api import here)
  * into the worker's write tools, exactly like the parent chain's
  * build-engine → registry seam.

@@ -1,5 +1,5 @@
 /**
- * T2 (ADR-0119): `SessionStore.rewindablePreimages` — the abandoned segment a
+ * ADR-0119: `SessionStore.rewindablePreimages` — the abandoned segment a
  * rewind would restore.
  *
  * Locked here:
@@ -167,7 +167,7 @@ describe("SessionStore.rewindablePreimages", () => {
   });
 });
 
-// ADR-0119 T3: the hub's worker-spawn scan needs the FULL abandoned segment
+// ADR-0119: the hub's worker-spawn scan needs the FULL abandoned segment
 // (spawn tool_use ids live on events without any preimage), so
 // rewindablePreimages is now the codePreimage filter of abandonedEvents.
 describe("SessionStore.abandonedEvents", () => {

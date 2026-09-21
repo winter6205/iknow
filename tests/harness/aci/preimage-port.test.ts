@@ -1,5 +1,5 @@
 /**
- * T1 (ADR-0036 / Gate B): the harness-owned capturePreimageBeforeWrite seam.
+ * ADR-0036 / Gate B: the harness-owned capturePreimageBeforeWrite seam.
  * Pure unit — verifies the port is fired with the correctly-derived payload and
  * that a throwing port propagates (so the write tool can abort). Pins:
  *   - opts with no preimageCapture → no-op (never touches the callback path)
@@ -21,24 +21,24 @@ import type { PreimageCaptureInput } from "../../../src/harness/aci/preimage-por
 describe("capturePreimageBeforeWrite", () => {
   it("(a) opts 无 preimageCapture → no-op, 不抛 (无端口可调)", async () => {
     // 端口缺席时 helper 必须原样 resolve, 不制造任何失败面。
-    // 有 call/bytes 但 opts 里没有 preimageCapture:
+    // 有 call/site 但 opts 里没有 preimageCapture:
     await capturePreimageBeforeWrite(
       { rootIdentity: "/id" },
       { toolUseId: "t", conversationId: "c" },
-      "/root",
-      "/root/a.ts",
-      "old",
-      "new"
+      {
+        rootAtCall: "/root",
+        absPath: "/root/a.ts",
+        preBytes: "o",
+        postBytes: "n",
+      }
     );
     // opts 整体 undefined 同样 no-op
-    await capturePreimageBeforeWrite(
-      undefined,
-      undefined,
-      "/root",
-      "/root/a.ts",
-      "o",
-      "n"
-    );
+    await capturePreimageBeforeWrite(undefined, undefined, {
+      rootAtCall: "/root",
+      absPath: "/root/a.ts",
+      preBytes: "o",
+      postBytes: "n",
+    });
   });
 
   it("(b/c) 端口收到正确 relPath/rootIdentity/preBytes/postBytes + 转发的 ids", async () => {
@@ -52,10 +52,12 @@ describe("capturePreimageBeforeWrite", () => {
     await capturePreimageBeforeWrite(
       { preimageCapture: capture },
       { toolUseId: "tool-42", conversationId: "conv-7" },
-      rootAtCall,
-      absPath,
-      "OLD BYTES",
-      "NEW BYTES"
+      {
+        rootAtCall,
+        absPath,
+        preBytes: "OLD BYTES",
+        postBytes: "NEW BYTES",
+      }
     );
 
     assert.equal(seen.length, 1);
@@ -83,10 +85,12 @@ describe("capturePreimageBeforeWrite", () => {
         rootIdentity: "/canonical/id",
       },
       {},
-      "/live/root",
-      "/live/root/x.ts",
-      "",
-      ""
+      {
+        rootAtCall: "/live/root",
+        absPath: "/live/root/x.ts",
+        preBytes: "",
+        postBytes: "",
+      }
     );
     assert.equal(captured?.rootIdentity, "/canonical/id");
     // relPath 仍相对 rootAtCall 计算, 不受 rootIdentity 影响
@@ -102,10 +106,12 @@ describe("capturePreimageBeforeWrite", () => {
         },
       },
       undefined,
-      "/root",
-      "/root/f.ts",
-      "p",
-      "q"
+      {
+        rootAtCall: "/root",
+        absPath: "/root/f.ts",
+        preBytes: "p",
+        postBytes: "q",
+      }
     );
     assert.equal(captured?.toolUseId, undefined);
     assert.equal(captured?.conversationId, undefined);
@@ -123,10 +129,12 @@ describe("capturePreimageBeforeWrite", () => {
             },
           },
           { toolUseId: "t", conversationId: "c" },
-          "/root",
-          "/root/a.ts",
-          "o",
-          "n"
+          {
+            rootAtCall: "/root",
+            absPath: "/root/a.ts",
+            preBytes: "o",
+            postBytes: "n",
+          }
         ),
       /capture exploded/
     );

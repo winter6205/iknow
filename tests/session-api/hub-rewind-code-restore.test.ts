@@ -1,5 +1,5 @@
 /**
- * T2 (ADR-0119): `SessionHub.rewindSession(conversationId, head, restoreCode)`.
+ * ADR-0119: `SessionHub.rewindSession(conversationId, head, restoreCode)`.
  *
  * Locked here (real store + fresh conversationId, workspace on temp disk):
  *   - restoreCode=true writes the abandoned files back to their preimages,

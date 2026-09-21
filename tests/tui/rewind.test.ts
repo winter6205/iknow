@@ -1046,8 +1046,8 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
 
   test("restoreCode=false → 报告字段缺席；true → hub 的 codeRestore 原样带出", async () => {
     // The bridge's only job here is to forward the boolean and surface the hub's
-    // report; whether files really went back is T2's contract
-    // (tests/session-api/hub-rewind-code-restore.test.ts).
+    // report; whether files really went back is pinned by
+    // tests/session-api/hub-rewind-code-restore.test.ts.
     await seedFile(sampleFile());
     const bridge = makeBridge();
     const plain = await bridge.rewindSession("conv-rewind", "e3", false);

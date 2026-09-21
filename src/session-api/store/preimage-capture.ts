@@ -8,6 +8,10 @@
  *
  * A throw from `captureCodeSnapshot` propagates to the write tool and aborts
  * the pending workspace write — the tool must not swallow it.
+ *
+ * `recordPreimagePair` is the shared capture body; the worker transcript's
+ * port (src/cli/worker-transcript.ts) calls it too, against the parent session
+ * folder, so blob layout and ref shape stay single-sourced here.
  */
 import type {
   PreimageCapture,
@@ -31,23 +35,43 @@ export function createPreimageCapture(deps: {
     // tool_result event, which needs both routing ids. Missing either → no
     // blob, no ledger entry (byte-identical to the pre-capture behavior).
     if (conversationId === undefined || toolUseId === undefined) return;
-    const sessionFolder = resolveConversationDir({
-      projectDir: deps.getProjectDir(),
-      conversationId,
-    });
-    const preimageSha = await captureCodeSnapshot(
-      sessionFolder,
-      input.preBytes
-    );
-    const postimageSha = await captureCodeSnapshot(
-      sessionFolder,
-      input.postBytes
-    );
-    deps.ledger.set(conversationId, toolUseId, {
-      relPath: input.relPath,
-      rootIdentity: input.rootIdentity,
-      preimageSha,
-      postimageSha,
+    await recordPreimagePair({
+      sessionFolder: resolveConversationDir({
+        projectDir: deps.getProjectDir(),
+        conversationId,
+      }),
+      ledger: deps.ledger,
+      ledgerKey: conversationId,
+      toolUseId,
+      input,
     });
   };
+}
+
+/**
+ * Capture both byte sides of one write as blobs and record the ref under the
+ * key the commit side drains with. Shared by the parent session's capture port
+ * and the worker's: they differ only in which session folder holds the blobs
+ * and which ledger key the later `tool_result` is stamped onto, so the blob
+ * layout and the ref shape have exactly one owner.
+ */
+export async function recordPreimagePair(opts: {
+  readonly sessionFolder: string;
+  readonly ledger: PreimageLedgerHost;
+  readonly ledgerKey: string;
+  readonly toolUseId: string;
+  readonly input: PreimageCaptureInput;
+}): Promise<void> {
+  const { sessionFolder, ledger, ledgerKey, toolUseId, input } = opts;
+  const preimageSha = await captureCodeSnapshot(sessionFolder, input.preBytes);
+  const postimageSha = await captureCodeSnapshot(
+    sessionFolder,
+    input.postBytes
+  );
+  ledger.set(ledgerKey, toolUseId, {
+    relPath: input.relPath,
+    rootIdentity: input.rootIdentity,
+    preimageSha,
+    postimageSha,
+  });
 }

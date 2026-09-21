@@ -114,8 +114,10 @@ import {
 } from "../session-api/store/index.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "../session-api/store/schema.js";
-import type { PreimageLedgerHost } from "../session-api/store/preimage-ledger.js";
-import type { PreimageRef } from "../session-api/store/jsonl.js";
+import {
+  drainPreimageRefs,
+  type PreimageLedgerHost,
+} from "../session-api/store/preimage-ledger.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
@@ -2407,26 +2409,6 @@ export async function persistChatSessionCheckpoint(opts: {
 
 /* ---------------- in-turn commit hook ---------------- */
 
-/** Pull the ledger refs matching this batch's `tool_result` events, so
- *  appendEvents can stamp them. No ledger → undefined (byte-identical append). */
-function pullPreimages(
-  ledger: PreimageLedgerHost | undefined,
-  conversationId: string,
-  messages: ReadonlyArray<AnthropicNativeMessage>
-): ReadonlyMap<string, PreimageRef> | undefined {
-  if (ledger === undefined) return undefined;
-  const ids: string[] = [];
-  for (const message of messages) {
-    if (!Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      if (block.type === "tool_result") ids.push(block.tool_use_id);
-    }
-  }
-  if (ids.length === 0) return undefined;
-  const consumed = ledger.consume(conversationId, ids);
-  return consumed.size > 0 ? consumed : undefined;
-}
-
 /**
  * Chat-path in-turn commit hook: append harness-produced messages to the
  * session JSONL log immediately. The chat path has no serialize queue;
@@ -2455,7 +2437,7 @@ export function createChatSessionCommitHook(opts: {
   return async (messages) => {
     // Pull exactly this batch's captured preimages once so the fast JSONL path
     // and the legacy-bootstrap fallback stamp the same events.
-    const preimages = pullPreimages(
+    const preimages = drainPreimageRefs(
       opts.preimageLedger,
       conversationId,
       messages

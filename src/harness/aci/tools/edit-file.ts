@@ -197,14 +197,12 @@ export function createEditFileTool(
     // Capture the pre/post bytes before the write; a throwing port aborts the
     // write so the file stays at `content`. The helper is a no-op when no port
     // is injected (legacy / direct-factory callers).
-    await capturePreimageBeforeWrite(
-      opts,
-      ctx,
+    await capturePreimageBeforeWrite(opts, ctx, {
       rootAtCall,
       absPath,
-      content,
-      replaced
-    );
+      preBytes: content,
+      postBytes: replaced,
+    });
     await writeFile(absPath, replaced, "utf8");
 
     // Success-path seam: callback fires only after the write succeeds. Failure

@@ -391,8 +391,8 @@ export interface CreateWorkerDepsOptions {
    */
   readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
   /**
-   * ADR-0119 (T3): pre-write capture port for the worker's write tools
-   * (edit_file / write_file / symbol_mutate), threaded to
+   * ADR-0119: pre-write capture port for the worker's write tools
+   * (`FILE_WRITE_TOOL_NAMES`), threaded to
    * `createDefaultAciRegistry` exactly like the parent build-engine seam.
    * Gate B: the harness declares and forwards only the port; the
    * implementation is built host-side (the cli `__subagent_worker__`
@@ -804,7 +804,7 @@ export async function createWorkerRuntime(
       : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
     ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
-    // ADR-0119 (T3): conditional spread keeps the no-port registry call
+    // ADR-0119: conditional spread keeps the no-port registry call
     // byte-identical to the pre-capture shape (same posture as the parent
     // build-engine → registry seam).
     ...(opts.preimageCapture !== undefined
@@ -1292,7 +1292,7 @@ export type WorkerTranscriptIOFactory = (loc: {
 }) => WorkerTranscriptIO;
 
 /**
- * ADR-0119 (T3) — worker preimage-capture injection seam, same Gate B
+ * ADR-0119 — worker preimage-capture injection seam, same Gate B
  * posture as `WorkerTranscriptIOFactory`: the cli entry constructs the
  * implementation (it may reach session-api; the worker may not) and the
  * harness only forwards the resulting port into the registry.
@@ -1952,7 +1952,7 @@ async function assembleAndRunWorker(
     ...(workerEnvelope.skillIndexSnapshot !== undefined
       ? { skillIndexSnapshot: workerEnvelope.skillIndexSnapshot }
       : {}),
-    // ADR-0119 (T3): write-tool preimage capture, host-built through the
+    // ADR-0119: write-tool preimage capture, host-built through the
     // injected factory (see workerPreimageCaptureOption for the anchors).
     ...workerPreimageCaptureOption(workerEnvelope, preimageCaptureFactory),
   });

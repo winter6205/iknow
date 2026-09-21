@@ -55,7 +55,14 @@ Settings stay in `src/config/settings.ts`: user-layer `codeRestore.enabled?: boo
 
 ## Open Questions
 
-(none)
+- **Deferred: delete-a-created-file restore** (module cut §4 "delete a created file
+  only under the same check"). A preimage of an empty file and the absence of a
+  preimage are currently the same observable, so a created file restores to zero
+  bytes rather than being removed. Needs an existence bit on `PreimageRef`, which
+  ripples through capture, the JSONL schema and every reader. No Success Criteria
+  bullet depends on the delete case, so it is a named follow-up ticket, not a gap
+  in the landed contract. Until then restore is honestly "write back the earliest
+  captured bytes of the abandoned segment".
 
 ## Inherits / Changes
 

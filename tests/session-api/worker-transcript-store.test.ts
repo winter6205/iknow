@@ -255,7 +255,7 @@ describe("listSessions 不收录工人（工人账嵌在父会话文件夹）", 
   });
 });
 
-describe("ADR-0119 T3: worker ledger preimage stamp + readers", () => {
+describe("worker-ledger preimage stamp + readers (ADR-0119)", () => {
   const ref: PreimageRef = {
     relPath: "w.ts",
     rootIdentity: "/root",

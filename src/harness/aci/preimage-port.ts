@@ -49,6 +49,17 @@ export interface PreimageCallIds {
   readonly conversationId?: string;
 }
 
+/** Where one write lands and what it changes. Bundled so the helper takes the
+ *  same three arguments every write tool already has in hand (its opts, its
+ *  call ids, this site) instead of four loose positionals. */
+export interface PreimageWriteSite {
+  /** Live task root the write resolved against — `relPath` is measured from here. */
+  readonly rootAtCall: string;
+  readonly absPath: string;
+  readonly preBytes: string;
+  readonly postBytes: string;
+}
+
 /**
  * Fire the pre-write capture seam, absorbing every `?.` / `??` branch so the
  * write handlers stay at their baseline complexity. A no-op when `opts`
@@ -58,19 +69,16 @@ export interface PreimageCallIds {
 export async function capturePreimageBeforeWrite(
   opts: PreimageOpts | undefined,
   call: PreimageCallIds | undefined,
-  rootAtCall: string,
-  absPath: string,
-  preBytes: string,
-  postBytes: string
+  site: PreimageWriteSite
 ): Promise<void> {
   const capture = opts?.preimageCapture;
   if (capture === undefined) return;
   await capture({
     toolUseId: call?.toolUseId,
     conversationId: call?.conversationId,
-    relPath: relative(rootAtCall, absPath),
-    rootIdentity: opts?.rootIdentity ?? rootAtCall,
-    preBytes: Buffer.from(preBytes, "utf8"),
-    postBytes: Buffer.from(postBytes, "utf8"),
+    relPath: relative(site.rootAtCall, site.absPath),
+    rootIdentity: opts?.rootIdentity ?? site.rootAtCall,
+    preBytes: Buffer.from(site.preBytes, "utf8"),
+    postBytes: Buffer.from(site.postBytes, "utf8"),
   });
 }

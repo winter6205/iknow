@@ -1,5 +1,5 @@
 /**
- * T1 (ADR-0036) E2E: a real write tool fires the preimage port BEFORE writing.
+ * ADR-0036 E2E: a real write tool fires the preimage port BEFORE writing.
  * End-to-end through createWriteFileTool's handler (no gate host passed → the
  * ADR-0084 last-read gate is off, so an overwrite is allowed): pins that
  *   - the injected capture is called exactly once, just before the write, with

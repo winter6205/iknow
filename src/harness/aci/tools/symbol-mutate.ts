@@ -559,8 +559,12 @@ async function applyWorkspaceEdit(
   readonly editCount: number;
 }> {
   const grouped = groupEditsByPath(edits);
-  const written: string[] = [];
+  const staged: Array<{ readonly filePath: string; readonly next: string }> =
+    [];
   let editCount = 0;
+  // Two passes: a rename is one logical change, so every file's preimage is
+  // captured before any byte lands — a port that refuses on the third file
+  // leaves all of them untouched (same posture as applyCodeRestore).
   for (const [filePath, fileEdits] of grouped) {
     editCount += fileEdits.length;
     let text: string;
@@ -574,14 +578,16 @@ async function applyWorkspaceEdit(
     }
     const next = applyEditsToText(text, fileEdits);
     if (next === text) continue;
-    await capturePreimageBeforeWrite(
-      preimage.opts,
-      preimage.call,
-      preimage.rootAtCall,
-      filePath,
-      text,
-      next
-    );
+    await capturePreimageBeforeWrite(preimage.opts, preimage.call, {
+      rootAtCall: preimage.rootAtCall,
+      absPath: filePath,
+      preBytes: text,
+      postBytes: next,
+    });
+    staged.push({ filePath, next });
+  }
+  const written: string[] = [];
+  for (const { filePath, next } of staged) {
     try {
       await writeFile(filePath, next, "utf8");
     } catch (err) {

@@ -165,11 +165,11 @@ import {
 import { persistedLastUsage } from "./store/schema.js";
 import {
   createPreimageLedger,
+  drainPreimageRefs,
   type PreimageLedgerHost,
 } from "./store/preimage-ledger.js";
 import { createPreimageCapture } from "./store/preimage-capture.js";
 import type { PreimageCapture } from "../harness/aci/preimage-port.js";
-import type { PreimageRef } from "./store/jsonl.js";
 import {
   applyCodeRestore,
   buildCodeRestorePlan,
@@ -2903,7 +2903,7 @@ export class SessionHub {
    *  the transcript never advances past history whose code we could not put
    *  back. Drift and root-identity mismatches are reported skips.
    *
-   *  The abandoned set spans two ledgers (ADR-0119 T3): the parent's own
+   *  The abandoned set spans two ledgers (ADR-0119): the parent's own
    *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
    *  in the abandoned segment — a worker edit is the parent's abandoned
    *  history too. Both write their blobs into this parent session folder, so
@@ -3454,7 +3454,11 @@ export class SessionHub {
      *  appendEvents omits the key. */
     readonly thinkingMs?: number;
   }): Promise<void> {
-    const preimages = this.pullPreimages(opts.conversationId, opts.events);
+    const preimages = drainPreimageRefs(
+      this.preimageLedger,
+      opts.conversationId,
+      opts.events
+    );
     try {
       await this.store.appendEvents({
         id: opts.conversationId,
@@ -3489,25 +3493,6 @@ export class SessionHub {
       ledger: this.preimageLedger,
       isEnabled: () => this.startupSettings?.codeRestore?.enabled !== false,
     });
-  }
-
-  /** Pull the ledger refs matching this batch's `tool_result` events, so
-   *  appendEvents can stamp them. Undefined when nothing captured in-batch
-   *  (byte-identical append). */
-  private pullPreimages(
-    conversationId: string,
-    events: ReadonlyArray<AnthropicNativeMessage>
-  ): ReadonlyMap<string, PreimageRef> | undefined {
-    const ids: string[] = [];
-    for (const message of events) {
-      if (!Array.isArray(message.content)) continue;
-      for (const block of message.content) {
-        if (block.type === "tool_result") ids.push(block.tool_use_id);
-      }
-    }
-    if (ids.length === 0) return undefined;
-    const consumed = this.preimageLedger.consume(conversationId, ids);
-    return consumed.size > 0 ? consumed : undefined;
   }
 
   /** Save condition based on stopReason and progress delta.

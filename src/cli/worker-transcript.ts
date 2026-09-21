@@ -32,12 +32,13 @@ import {
   resolveConversationDir,
   type SessionStoreError,
 } from "../session-api/store/index.js";
-import { captureCodeSnapshot } from "../session-api/store/code-snapshot-store.js";
-import { createPreimageLedger } from "../session-api/store/preimage-ledger.js";
-import type { PreimageRef } from "../session-api/store/jsonl.js";
+import {
+  createPreimageLedger,
+  drainPreimageRefs,
+} from "../session-api/store/preimage-ledger.js";
+import { recordPreimagePair } from "../session-api/store/preimage-capture.js";
 import { loadIknowSettings } from "../config/settings.js";
 import { homedir } from "node:os";
-import type { AnthropicNativeMessage } from "../harness/index.js";
 import type {
   WorkerPreimageCaptureFactory,
   WorkerTranscriptIOFactory,
@@ -45,7 +46,7 @@ import type {
 import { createSerialQueue } from "../util/serial-queue.js";
 
 /**
- * ADR-0119 (T3): the worker process's preimage accumulator, shared by the
+ * ADR-0119: the worker process's preimage accumulator, shared by the
  * two host seams assembled in this module — the injected capture port
  * (`createWorkerPreimageCaptureFactory` fills it the moment a write is about
  * to land) and `appendMessages` (drains exactly the committed batch's
@@ -91,7 +92,11 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
       serialize(async () => {
         // Drain inside the queue so the consume ↔ append pair stays ordered
         // like the parent's hub serialize → appendEvents pair.
-        const preimages = pullWorkerPreimages(loc.taskId, events);
+        const preimages = drainPreimageRefs(
+          workerPreimageLedger,
+          loc.taskId,
+          events
+        );
         await appendWorkerTranscript({
           location: { transcriptPath: loc.transcriptPath, taskId: loc.taskId },
           events,
@@ -104,29 +109,7 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
 };
 
 /**
- * Mirror of SessionHub.pullPreimages (the parent's commit-side drain): pull
- * exactly the ledger refs whose tool_use_id appears in this batch's
- * tool_result blocks. Undefined when nothing was captured in-batch, keeping
- * the append byte-identical to the pre-capture shape.
- */
-function pullWorkerPreimages(
-  taskId: string,
-  events: ReadonlyArray<AnthropicNativeMessage>
-): ReadonlyMap<string, PreimageRef> | undefined {
-  const ids: string[] = [];
-  for (const message of events) {
-    if (!Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      if (block.type === "tool_result") ids.push(block.tool_use_id);
-    }
-  }
-  if (ids.length === 0) return undefined;
-  const consumed = workerPreimageLedger.consume(taskId, ids);
-  return consumed.size > 0 ? consumed : undefined;
-}
-
-/**
- * ADR-0119 (T3): build the cli entry's `WorkerPreimageCaptureFactory` — the
+ * ADR-0119: build the cli entry's `WorkerPreimageCaptureFactory` — the
  * worker-side sibling of `createPreimageCapture` (parent path).
  *
  * The asymmetry against the parent implementation is deliberate: a worker's
@@ -158,23 +141,15 @@ export function createWorkerPreimageCaptureFactory(opts?: {
       // keeps the ledger's "never a wrong stamp" posture (same guard as the
       // parent's createPreimageCapture).
       if (toolUseId === undefined) return;
-      const sessionFolder = resolveConversationDir({
-        projectDir,
-        conversationId: parentConversationId,
-      });
-      const preimageSha = await captureCodeSnapshot(
-        sessionFolder,
-        input.preBytes
-      );
-      const postimageSha = await captureCodeSnapshot(
-        sessionFolder,
-        input.postBytes
-      );
-      workerPreimageLedger.set(loc.taskId, toolUseId, {
-        relPath: input.relPath,
-        rootIdentity: input.rootIdentity,
-        preimageSha,
-        postimageSha,
+      await recordPreimagePair({
+        sessionFolder: resolveConversationDir({
+          projectDir,
+          conversationId: parentConversationId,
+        }),
+        ledger: workerPreimageLedger,
+        ledgerKey: loc.taskId,
+        toolUseId,
+        input,
       });
     };
   };

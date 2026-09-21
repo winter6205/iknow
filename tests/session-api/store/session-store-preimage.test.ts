@@ -1,5 +1,5 @@
 /**
- * T1 (ADR-0036): transcript-side preimage stamping via SessionStore.appendEvents.
+ * ADR-0036: transcript-side preimage stamping via SessionStore.appendEvents.
  * appendEvents stamps `codePreimage` (the captured PreimageRef) onto the FIRST
  * non-error tool_result block whose `tool_use_id` matched. Pins:
  *   - matched id → the persisted event record carries the exact ref

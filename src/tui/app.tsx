@@ -5208,7 +5208,22 @@ function describeError(err: unknown): string {
   }
   if (typeof err === "object" && err !== null && "kind" in err) {
     const kind = String((err as { kind: unknown }).kind);
-    return `会话存储错误 [${kind}]`;
+    const detail = typedErrorDetail(
+      err as { conversation_id?: unknown; sha?: unknown }
+    );
+    return `会话存储错误 [${kind}]${detail === "" ? "" : ` ${detail}`}`;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Which locator a typed store error names: the session it failed on, or —
+ *  for the preimage blob store — the content address it could not read. Kind
+ *  alone says what went wrong; without this the operator sees no target. */
+function typedErrorDetail(err: {
+  conversation_id?: unknown;
+  sha?: unknown;
+}): string {
+  if (typeof err.conversation_id === "string") return err.conversation_id;
+  if (typeof err.sha === "string") return `blob ${err.sha}`;
+  return "";
 }

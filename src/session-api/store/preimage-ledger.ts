@@ -14,6 +14,7 @@
  * `tool_result` (cancelled mid-tool) linger harmlessly until `clear` on reset;
  * `tool_use_id` is unique per call, so a lingering entry can never mis-stamp.
  */
+import type { AnthropicNativeMessage } from "../../harness/index.js";
 import type { PreimageRef } from "./jsonl.js";
 
 export interface PreimageLedgerHost {
@@ -64,4 +65,29 @@ export function createPreimageLedger(): PreimageLedgerHost {
     },
   };
   return Object.freeze(host);
+}
+
+/**
+ * Commit-side drain: pull exactly the refs whose `tool_use_id` appears in this
+ * batch's `tool_result` blocks. Shared by every ledger owner (parent hub,
+ * chat commit hook, worker transcript) so the three drains cannot drift apart.
+ * Undefined when nothing is pending for the batch — the caller then appends
+ * without the `preimages` key, byte-identical to the pre-capture shape.
+ */
+export function drainPreimageRefs(
+  ledger: PreimageLedgerHost | undefined,
+  key: string,
+  events: ReadonlyArray<AnthropicNativeMessage>
+): ReadonlyMap<string, PreimageRef> | undefined {
+  if (ledger === undefined) return undefined;
+  const toolUseIds: string[] = [];
+  for (const message of events) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (block.type === "tool_result") toolUseIds.push(block.tool_use_id);
+    }
+  }
+  if (toolUseIds.length === 0) return undefined;
+  const consumed = ledger.consume(key, toolUseIds);
+  return consumed.size > 0 ? consumed : undefined;
 }

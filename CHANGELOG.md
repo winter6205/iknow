@@ -141,6 +141,30 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
+- **Code restore on rewind (ADR-0119, 2026-09-22)**: a successful workspace write
+  by `edit_file`, `write_file` or one of the five symbol-mutation tools first
+  captures the bytes it replaced. Blobs are content-addressed (`sha256`,
+  write-if-missing so identical content dedups) under the session folder's
+  `code-snapshots/`, and the committed `tool_result` event carries the ref:
+  relative path, root identity, preimage sha, post-image sha. Capture is ON by
+  default and user-layer only (`codeRestore.enabled`; a project settings file's
+  value is dropped). A rewind can then put the abandoned segment's files back:
+  `restoreCode` on `POST /api/v1/sessions/:id/rewind` (absent → transcript-only,
+  no `codeRestore` key), and the TUI's double-Esc confirm now offers three
+  actions — restore code, transcript only, cancel. The transcript stays
+  append-only (ADR-0027): only the head moves. Restore is all-or-nothing — every
+  blob is read before any file is written, so an unreadable preimage aborts and
+  the head never advances past code that could not be put back. A path is written
+  back only while its live bytes still equal the last recorded postimage and the
+  workspace identity is unchanged; drift and identity mismatch are reported
+  skips, not errors. Worker writes join the parent's plan (their blobs land in
+  the parent session folder, ADR-0102). Transcript-supplied locators are
+  validated: a ref whose path is absolute or climbs out of the root, or whose
+  blob name is not sha256 hex, is dropped — a transcript is history, not a
+  license to touch anything outside the workspace's own store. A multi-file
+  rename likewise captures every file's preimage before the first write. Spec:
+  `specs/code-restore.md`.
+
 - **TUI slash commands accept bare-name skill aliases (2026-09-15)**:
   `/using-agent-skills` and `/arthurpower:using-agent-skills` resolve to the same
   entry — candidate lists, completion, and skill-load parsing accept a canonical
@@ -293,7 +317,7 @@ is a curated snapshot; the complete development history lives in the git log.
   compaction contextWindow/thresholdTokens), user- and project-layer with project
   overriding user, per-layer merge, invalid-value fallback, and deep freeze.
   Precedence `process.env > .env.local > .env > settings.json (project > user) >
-  hardcoded defaults` for those three fields only; other fields unchanged.
+hardcoded defaults` for those three fields only; other fields unchanged.
   Subagents self-assemble through the same loader and inherit naturally. With
   nothing set, behavior matches the previous defaults (unlimited maxTurns,
   proactive compaction off).
@@ -442,14 +466,15 @@ is a curated snapshot; the complete development history lives in the git log.
   `settings.llm.apiKey` accepts a literal, `${VAR}`, or `$VAR` form. The
   `IKNOW_LLM_API_KEY_ENV` (key-variable-name) and `IKNOW_LLM_MODEL` env channels
   were retired. Unified placeholder expansion resolves process.env > `.env.local`
+
   > `.env`; `.env.local` degrades to a placeholder-value source.
-  `IKNOW_LLM_BASE_URL` remains (provider/baseUrl is the project-stack decision
-  recorded in ADR-0001). Illegal placeholder forms resolve to undefined with
-  discard semantics aligned to the validator; sandbox secret-name derivation now
-  parses placeholders from settings (a literal key contributes no variable name;
-  the pattern-based sweep remains). Context docs rewritten; ADR-0001 carries a
-  supersede note for the retired indirection; probe/smoke scripts cleaned of the
-  removed env names and point missing-key errors at `settings.llm.apiKey`.
+  > `IKNOW_LLM_BASE_URL` remains (provider/baseUrl is the project-stack decision
+  > recorded in ADR-0001). Illegal placeholder forms resolve to undefined with
+  > discard semantics aligned to the validator; sandbox secret-name derivation now
+  > parses placeholders from settings (a literal key contributes no variable name;
+  > the pattern-based sweep remains). Context docs rewritten; ADR-0001 carries a
+  > supersede note for the retired indirection; probe/smoke scripts cleaned of the
+  > removed env names and point missing-key errors at `settings.llm.apiKey`.
 
 - **Settings field extension: `llm.model` configurable + `llm.fallback` + fail-fast (2026-08-12)**:
   `.iknow/settings.json` extends to `llm.model` and a user-configured
@@ -620,7 +645,7 @@ is a curated snapshot; the complete development history lives in the git log.
   ratcheting. MCP `connectTimeoutMs` stays 60s.
 
 - **`maxOutputTokens` default raised 8192 → 16384 (2026-08-21)**: `thinking:
-  "adaptive"` plus a self-contained multi-hundred-line HTML `write_file` payload
+"adaptive"` plus a self-contained multi-hundred-line HTML `write_file` payload
   exceeded 8192 and was truncated with the tool call left without `content`. The
   fallback now fits the thinking budget plus a complete document; doc examples
   synced. `timeoutMs` and the loop-engine truncation semantics unchanged. The

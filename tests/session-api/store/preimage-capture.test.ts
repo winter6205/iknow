@@ -1,5 +1,5 @@
 /**
- * T1 (ADR-0036): host-side PreimageCapture (session-api impl).
+ * ADR-0036: host-side PreimageCapture (session-api impl).
  * The capture closure the assembly injects into harness write tools. Pins:
  *   - enabled → writes BOTH pre and post blobs to the conversation's
  *     code-snapshots dir and records a ledger ref { relPath, rootIdentity,

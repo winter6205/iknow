@@ -8,9 +8,10 @@
  * decisions and the bridge's flag forwarding; this file pins the chain
  * keystroke → confirm-row state → `bridge.rewindSession(id, head, restoreCode)`,
  * i.e. that ↑/↓ really moves the action row, that the executed row's boolean is
- * what the hub receives, and that the restore report reaches the operator.
- * The fake bridge only replaces outlets with a call log (same shape as
- * tests/tui/esc-session-foreground.test.tsx); workspace bytes are T2's contract.
+ * what the hub receives, that the restore report reaches the operator, and how a
+ * typed hub failure renders. The fake bridge only replaces outlets with a call log
+ * (same shape as tests/tui/esc-session-foreground.test.tsx); workspace bytes are
+ * pinned by tests/session-api/store/code-preimage.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -93,8 +94,12 @@ async function untilFrame(
 }
 
 /** `report` = the hub's answer to a restore-code rewind, injected so the notice
- *  text can be pinned without a real workspace. */
-async function mountApp(report?: RewindCodeRestoreResult): Promise<Rig> {
+ *  text can be pinned without a real workspace. `rejection` = what the hub throws
+ *  instead of answering, for the failure-render path. */
+async function mountApp(
+  report?: RewindCodeRestoreResult,
+  rejection?: unknown
+): Promise<Rig> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-rewind-3action-"));
   const file = makeFile(dataDir);
   const rewindCalls: Rig["rewindCalls"] = [];
@@ -116,6 +121,7 @@ async function mountApp(report?: RewindCodeRestoreResult): Promise<Rig> {
     },
     rewindSession: async (_id, head, restoreCode) => {
       rewindCalls.push({ head, restoreCode });
+      if (rejection !== undefined) throw rejection;
       return report === undefined ? { file } : { file, codeRestore: report };
     },
     listRewindTargets: async () => [anchor("e1", "q2"), anchor(null, "q1")],
@@ -281,6 +287,36 @@ describe("回退确认三动作（app 层按键 → bridge 调用）", () => {
         "Esc 后选择器仍开"
       );
       expect(rig.rewindCalls).toEqual([]);
+    } finally {
+      await rig.dispose();
+    }
+  }, 30_000);
+
+  test("typed hub failure renders kind + blob address, never [object Object]", async () => {
+    // The preimage store throws a PLAIN typed object, so the generic
+    // `err.message` path would print [object Object] and hide both the kind
+    // and the content address the operator needs.
+    const rig = await mountApp(undefined, {
+      kind: "code_snapshot_missing",
+      sha: "ab".repeat(32),
+    });
+    try {
+      await openPicker(rig);
+      await enterConfirm(rig);
+      await rig.pressEnter();
+      await untilFrame(
+        rig.setup,
+        (f) => f.includes("code_snapshot_missing"),
+        `typed error 未按 kind 渲染：\n${rig.setup.captureCharFrame()}`
+      );
+      const frame = rig.setup.captureCharFrame();
+      expect(frame).toContain("回退失败");
+      expect(frame).toContain("会话存储错误 [code_snapshot_missing]");
+      // The 90-col notice wraps, so the address is matched on its own run of
+      // hex rather than as one continuous "blob <sha>" token.
+      expect(frame).toContain("blob");
+      expect(frame).toContain("abababababababab");
+      expect(frame).not.toContain("[object Object]");
     } finally {
       await rig.dispose();
     }
