@@ -37,6 +37,7 @@
     "test:ci:full": "vitest run --config vitest.ci.config.ts",
     "test:real-llm": "vitest run --config vitest.real-llm.config.ts",
     "ci:check-excludes": "tsx scripts/ci-check-test-excludes.ts",
+    "probe:lsp": "tsx scripts/lsp-probe.ts",
     "bench:transcript": "tsx scripts/bench-transcript-baseline.ts",
     "dev": "tsx src/cli.ts",
     "dev:tui": "bun run src/cli.ts tui",
