@@ -591,8 +591,9 @@ function userMessageNode(
  *    session.messages);
  *  - `cols`: terminal width (shared by Markdown wrap and ToolSummaryRow
  *    single-line clipping);
- *  - `statusMap`: `toolResultStatusMap(session.messages)` (tool_use → failed
- *    or not);
+ *  - `statusMap`: the ChatView incremental transcript index
+ *    (`syncToolIndex(...).statusMap`, byte-equivalent to
+ *    `toolResultStatusMap(session.messages)`) (tool_use → failed or not);
  *  - `thinkingExpanded`: thinking fold-panel state (false = thinking text
  *    hidden; the `Thought for <N>s` summary renders only with positive
  *    seconds — no seconds, no summary, no fallback to `[思考]`); Ctrl+O
@@ -610,8 +611,10 @@ function userMessageNode(
  *  without memo every historical message reruns markdown parsing — 24 turns
  *  of history mean ~96 `marked.lexer` calls per delta, O(history size). All
  *  props above are primitives or useMemo-stable references on the ChatView
- *  side (`message` from session.messages, `statusMap` from
- *  toolResultStatusMap), so a shallow compare hits. Regression gate:
+ *  side (`message` from session.messages, `statusMap` / `resultTextMap`
+ *  from the incremental `syncToolIndex`; `toolResultStatusMap` /
+ *  `toolResultTextMap` in tool-summary.ts remain the full-build oracles
+ *  used by tests and the bench), so a shallow compare hits. Regression gate:
  *  tests/tui/history-rerender-cost.test.tsx.
  */
 export const MessageBlocks = memo(function MessageBlocks(props: {

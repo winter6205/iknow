@@ -136,42 +136,84 @@ function emptyWindow<T>(): ViewportMountWindow<T> {
   };
 }
 
-function sumRange(
-  heights: ReadonlyArray<number>,
-  from: number,
-  to: number
-): number {
-  let sum = 0;
-  for (let i = from; i < to; i++) sum += heights[i]!;
-  return sum;
+/**
+ * Resolved-height prefix sums cached per heights-array identity.
+ *
+ * Scroll commits re-run `selectViewportMountWindow` with the *same*
+ * `itemHeights` reference (measurement only replaces it when a mounted row's
+ * height actually changed). Re-resolving and re-summing O(N) heights per
+ * commit is exactly the repeated computation this cut removes; the WeakMap
+ * follows the array's lifetime so no eviction policy is needed. `n` /
+ * `placeholder` are validated on hit because the messages list can grow
+ * while the heights array stays the old reference.
+ */
+interface HeightsPrefix {
+  readonly n: number;
+  readonly placeholder: number;
+  /** prefix[i] = sum of resolved heights for rows [0, i); non-decreasing
+   *  (a resolved height can be 0 — `Math.trunc` of a raw height in (0, 1)).
+   *  Length n + 1. */
+  readonly prefix: ReadonlyArray<number>;
 }
 
-function findVisibleSpan(
-  heights: ReadonlyArray<number>,
+const prefixCache = new WeakMap<ReadonlyArray<number>, HeightsPrefix>();
+
+function heightsPrefix(
+  heights: ReadonlyArray<number> | undefined,
+  n: number,
+  placeholder: number
+): HeightsPrefix {
+  if (heights !== undefined) {
+    const cached = prefixCache.get(heights);
+    if (
+      cached !== undefined &&
+      cached.n === n &&
+      cached.placeholder === placeholder
+    ) {
+      return cached; // EXIT: same array + same shape → reuse sums
+    }
+  }
+  const prefix: number[] = new Array<number>(n + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < n; i++) {
+    prefix[i + 1] = prefix[i]! + resolveItemHeight(heights?.[i], placeholder);
+  }
+  const entry: HeightsPrefix = { n, placeholder, prefix };
+  if (heights !== undefined) prefixCache.set(heights, entry);
+  return entry;
+}
+
+/** Binary search over the non-decreasing prefix — same decisions as the
+ *  retired linear scan: first row whose running end passes rangeStart, first
+ *  row from there whose running start reaches rangeEnd. */
+function findVisibleSpanFast(
+  prefix: ReadonlyArray<number>,
+  n: number,
   rangeStart: number,
   rangeEnd: number
 ): { startIndex: number; endIndex: number } {
-  const n = heights.length;
-  let acc = 0;
-  let startIndex = 0;
-  let endIndex = n;
-  let foundStart = false;
-  for (let i = 0; i < n; i++) {
-    const next = acc + heights[i]!;
-    if (!foundStart && next > rangeStart) {
-      startIndex = i;
-      foundStart = true;
-    }
-    if (foundStart && acc >= rangeEnd) {
-      endIndex = i;
-      break;
-    }
-    acc = next;
+  // startIndex = first i with prefix[i + 1] > rangeStart.
+  let lo = 1;
+  let hi = n + 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (prefix[mid]! > rangeStart) hi = mid;
+    else lo = mid + 1;
   }
-  if (!foundStart) {
+  if (lo > n) {
+    // EXIT: rangeStart past all content → same last-row fallback as the scan.
     return { startIndex: Math.max(0, n - 1), endIndex: n };
   }
-  return { startIndex, endIndex };
+  const startIndex = lo - 1;
+  // endIndex = first i >= startIndex with prefix[i] >= rangeEnd.
+  let a = startIndex;
+  let b = n + 1;
+  while (a < b) {
+    const mid = (a + b) >> 1;
+    if (prefix[mid]! >= rangeEnd) b = mid;
+    else a = mid + 1;
+  }
+  return { startIndex, endIndex: a > n ? n : a };
 }
 
 export function selectViewportMountWindow<T>(
@@ -185,10 +227,8 @@ export function selectViewportMountWindow<T>(
   const placeholder = resolvePlaceholder(opts.placeholderHeight);
   if (n === 0) return emptyWindow();
 
-  const heights = Array.from({ length: n }, (_, i) =>
-    resolveItemHeight(opts.heights?.[i], placeholder)
-  );
-  const contentHeight = heights.reduce((sum, h) => sum + h, 0);
+  const { prefix } = heightsPrefix(opts.heights, n, placeholder);
+  const contentHeight = prefix[n]!;
   const viewportHeight = resolveViewport(opts.viewportHeight);
   const overscan = resolveOverscan(opts.overscan, viewportHeight);
   const scrollTop = clampScrollTop(
@@ -201,8 +241,9 @@ export function selectViewportMountWindow<T>(
     contentHeight,
     scrollTop + viewportHeight + overscan
   );
-  const { startIndex, endIndex } = findVisibleSpan(
-    heights,
+  const { startIndex, endIndex } = findVisibleSpanFast(
+    prefix,
+    n,
     rangeStart,
     rangeEnd
   );
@@ -210,8 +251,8 @@ export function selectViewportMountWindow<T>(
     mounted: messages.slice(startIndex, endIndex),
     startIndex,
     endIndex,
-    spacerBefore: sumRange(heights, 0, startIndex),
-    spacerAfter: sumRange(heights, endIndex, n),
+    spacerBefore: prefix[startIndex]!,
+    spacerAfter: contentHeight - prefix[endIndex]!,
   };
 }
 

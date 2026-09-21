@@ -29,6 +29,7 @@ import {
   turnStarted,
   userMessageEchoed,
   withLastUsage,
+  type TuiSessionState,
 } from "../../src/tui/session-state.js";
 import {
   IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -710,5 +711,144 @@ describe("session-state: appendInputHistory（提交追加）", () => {
 
   test("text 保持原样（不 trim；上游 handleSubmit 已 trim）", () => {
     expect(appendInputHistory([], "  keep  ")).toEqual(["  keep  "]);
+  });
+});
+
+describe("session-state: message reference reuse", () => {
+  const richMessages = (): AnthropicNativeMessage[] => [
+    msg("question one"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "deep", signature: "s1" },
+        { type: "text", text: "answer one" },
+        { type: "tool_use", id: "tu1", name: "bash", input: { cmd: "ls" } },
+      ],
+    } as AnthropicNativeMessage,
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tu1",
+          content: "out",
+          is_error: false,
+        },
+      ],
+    } as AnthropicNativeMessage,
+  ];
+  const rehydrate = (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): AnthropicNativeMessage[] =>
+    JSON.parse(JSON.stringify(messages)) as AnthropicNativeMessage[];
+  const turnInput = (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): Parameters<typeof turnFinished>[1] => ({
+    conversationId: "conv-r",
+    messages,
+    turnCount: 1,
+    updatedAt: "2026-09-01T00:00:00.000Z",
+    jsonMode: false,
+    stopReason: "completed",
+  });
+  const baseSession = (): TuiSessionState =>
+    turnFinished(turnStarted(createDraftSession()), turnInput(richMessages()));
+
+  test("turnFinished with content-identical re-hydration keeps the same messages array reference", () => {
+    const session = baseSession();
+    const done = turnFinished(session, turnInput(rehydrate(session.messages)));
+    expect(done.messages).toBe(session.messages);
+    expect(done).not.toBe(session); // runState / lastStopReason still update
+    expect(Object.isFrozen(done.messages)).toBe(true);
+  });
+
+  test("re-hydration equality is the session-store SSOT (jsonDeepEqual): a key present with value undefined equals an absent key", () => {
+    const session = baseSession();
+    // Plain-JSON semantics: a rehydrated transcript loses explicit-undefined
+    // fields, so treating them as equal keeps the reference-reuse property.
+    const withUndefined = session.messages.map(
+      (m) => ({ ...m, model: undefined }) as AnthropicNativeMessage
+    );
+    const done = turnFinished(session, turnInput(withUndefined));
+    expect(done.messages).toBe(session.messages);
+    // A defined value differing from the original still breaks equality.
+    const withModel = session.messages.map(
+      (m) => ({ ...m, model: "claude-x" }) as AnthropicNativeMessage
+    );
+    const changed = turnFinished(session, turnInput(withModel));
+    expect(changed.messages).not.toBe(session.messages);
+  });
+
+  test("turnFinished append keeps old element references and adopts the tail", () => {
+    const session = baseSession();
+    const nextTail: AnthropicNativeMessage = msg("answer two", "assistant");
+    const done = turnFinished(
+      session,
+      turnInput([...rehydrate(session.messages), nextTail])
+    );
+    expect(done.messages).not.toBe(session.messages);
+    expect(Object.isFrozen(done.messages)).toBe(true);
+    for (let i = 0; i < session.messages.length; i++) {
+      expect(done.messages[i]).toBe(session.messages[i]);
+    }
+    expect(done.messages[session.messages.length]).toBe(nextTail);
+  });
+
+  test("mid-list divergence reuses only the equal prefix; later entries are the new objects", () => {
+    const session = baseSession();
+    const changed = rehydrate(session.messages);
+    changed[0] = msg("edited question");
+    const done = turnFinished(session, turnInput(changed));
+    expect(done.messages[0]).toBe(changed[0]);
+    expect(done.messages[1]).not.toBe(session.messages[1]);
+  });
+
+  test("sessionCompacted identical projection keeps reference; changed head does not", () => {
+    const session = baseSession();
+    const input = {
+      messages: rehydrate(session.messages),
+      turnCount: session.turnCount,
+      updatedAt: session.updatedAt,
+      jsonMode: session.jsonMode,
+    };
+    expect(sessionCompacted(session, input).messages).toBe(session.messages);
+    const compactedHead = [msg("summary", "assistant"), ...input.messages];
+    const next = sessionCompacted(session, {
+      ...input,
+      messages: compactedHead,
+    });
+    expect(next.messages).not.toBe(session.messages);
+    expect(Object.isFrozen(next.messages)).toBe(true);
+    expect(next.lastStopReason).toBe(session.lastStopReason);
+    expect(next.lastUsage).toBe(session.lastUsage);
+  });
+
+  test("sessionRewound truncation reuses prefix references", () => {
+    const session = baseSession();
+    const truncated = rehydrate(session.messages.slice(0, 1));
+    const next = sessionRewound(session, {
+      messages: truncated,
+      turnCount: 0,
+      updatedAt: session.updatedAt,
+      jsonMode: session.jsonMode,
+    });
+    expect(next.messages).not.toBe(session.messages);
+    expect(next.messages).toHaveLength(1);
+    expect(Object.isFrozen(next.messages)).toBe(true);
+  });
+
+  test("mutating the caller array after turnFinished cannot leak into state", () => {
+    const session = baseSession();
+    const mutable = rehydrate(session.messages);
+    const done = turnFinished(session, turnInput(mutable));
+    mutable.push(msg("smuggled"));
+    expect(done.messages).toHaveLength(session.messages.length);
+  });
+
+  test("userMessageEchoed keeps existing element references", () => {
+    const session = baseSession();
+    const echoed = userMessageEchoed(session, "hello");
+    expect(echoed.messages[0]).toBe(session.messages[0]);
+    expect(echoed.messages).toHaveLength(session.messages.length + 1);
   });
 });

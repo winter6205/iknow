@@ -703,18 +703,54 @@ export function toolResultStatusMap(
   return map;
 }
 
-/** tool_use_id → tool_result text map (data-source SSOT for historical
- *  result previews).
- *  - content is a string → passed through as-is (the common shape: bash
- *    JSON envelope / skill body);
- *  - content is AnthropicContentBlock[] → concatenate all text blocks in
- *    appearance order, skipping empty ones. The block shape appears on the
- *    ACI path: complex handler returns (e.g. structured objects) are encoded
- *    as AnthropicContentBlock[] via blocks; bash / skill use strings, so the
+/** One content block's joinable text: a `{type:"text", text:string}` block
+ *  with non-empty text; anything else (null entries, other block types,
+ *  malformed shapes) contributes nothing. */
+function textOfContentPart(part: unknown): string | null {
+  if (
+    part !== null &&
+    typeof part === "object" &&
+    "type" in part &&
+    (part as { type?: unknown }).type === "text" &&
+    "text" in part &&
+    typeof (part as { text?: unknown }).text === "string"
+  ) {
+    const t = (part as { text: string }).text;
+    return t.length > 0 ? t : null;
+  }
+  return null;
+}
+
+/** tool_result text extraction (single implementation — the incremental
+ *  index in tool-result-index.ts calls this same function, so the
+ *  byte-equivalence contract is structural, not duplicated logic):
+ *  - string content → passed through as-is unless empty (the common shape:
+ *    bash JSON envelope / skill body);
+ *  - AnthropicContentBlock[] → concatenate all text blocks in appearance
+ *    order, skipping empty ones. The block shape appears on the ACI path:
+ *    complex handler returns (e.g. structured objects) are encoded as
+ *    AnthropicContentBlock[] via blocks; bash / skill use strings, so the
  *    string branch is what actually hits in practice.
- *  - unpaired tool_result / neither string nor array → absent (consumers fall
+ *  - neither string nor array (or nothing joinable) → null (consumers fall
  *    back to the empty preview).
  */
+export function toolResultTextOf(content: unknown): string | null {
+  if (typeof content === "string") {
+    return content.length > 0 ? content : null;
+  }
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const part of content) {
+    const t = textOfContentPart(part);
+    if (t !== null) parts.push(t);
+  }
+  const joined = parts.join("");
+  return joined.length > 0 ? joined : null;
+}
+
+/** tool_use_id → tool_result text map (full-build derivation oracle for
+ *  historical result previews — production renders consume the incremental
+ *  `syncToolIndex` result, which must stay byte-equivalent to this map). */
 export function toolResultTextMap(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): Map<string, string> {
@@ -722,29 +758,8 @@ export function toolResultTextMap(
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type !== "tool_result") continue;
-      const content = block.content;
-      if (typeof content === "string") {
-        if (content.length > 0) map.set(block.tool_use_id, content);
-        continue;
-      }
-      if (Array.isArray(content)) {
-        const parts: string[] = [];
-        for (const part of content) {
-          if (
-            part !== null &&
-            typeof part === "object" &&
-            "type" in part &&
-            (part as { type?: unknown }).type === "text" &&
-            "text" in part &&
-            typeof (part as { text?: unknown }).text === "string"
-          ) {
-            const t = (part as { text: string }).text;
-            if (t.length > 0) parts.push(t);
-          }
-        }
-        const joined = parts.join("");
-        if (joined.length > 0) map.set(block.tool_use_id, joined);
-      }
+      const text = toolResultTextOf(block.content);
+      if (text !== null) map.set(block.tool_use_id, text);
     }
   }
   return map;
