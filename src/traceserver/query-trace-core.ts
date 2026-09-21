@@ -1,5 +1,4 @@
 import {
-  dereferenceSystemBody,
   dereferenceTraceMessages,
   messageRole,
   projectToolResultsFromTrace,
@@ -48,8 +47,7 @@ export const QUERY_TRACE_DESCRIPTION =
   "shorter than the echoed limit means the filter has no more rows and offset + " +
   "rows returned continues it. Use contains (case-sensitive substring match " +
   "on the raw record line, covering llm_call messages and tool_call " +
-  "arguments, plus the dereferenced system body and tool name list on " +
-  "llm_call rows) to search record content, optionally combined with " +
+  "arguments) to search record content, optionally combined with " +
   "record_type to narrow the hit type. conversation_id is required: discover " +
   "it with list_sessions, then pair this tool with get_record to reach a " +
   "record's content. If the model ends the turn without a following " +
@@ -102,23 +100,7 @@ export function createQueryTraceCore(
       limit: parsed.limit,
       offset: parsed.offset,
     };
-    // Per-query memo for the system-body deref (contains arm only): the
-    // blob pool is content-addressed, so the same sha always resolves to
-    // the same body — one disk read + JSON.parse per sha per query.
-    const systemBodies = new Map<string, string | undefined>();
-    const result =
-      parsed.contains === undefined
-        ? reader.query(query)
-        : // ADR-0116: the raw-line substring stays the fast path, but
-          // llm_call rows are additionally matched after blob dereference —
-          // otherwise "did the usage lock sentence go out" would still be
-          // a blind spot for blob-stored bodies.
-          await reader.queryContains(
-            { ...query, contains: parsed.contains },
-            isLlmCallLine,
-            (row) =>
-              llmCallBlobContains(row, filePath, parsed.contains!, systemBodies)
-          );
+    const result = reader.query(query);
     const projected = await Promise.all(
       result.records.map((row) => projectRecord(row, filePath))
     );
@@ -205,65 +187,6 @@ function requireNonEmptyString(value: unknown, field: string): string {
     );
   }
   return value;
-}
-
-/**
- * Line-scope for the contains deref arm (ADR-0116): llm_call rows are the
- * only records whose searchable body lives in the blob pool (system text;
- * message bodies stay out of contains semantics — the raw line still matches
- * them inline via the fast path). The mark relies on the writer's
- * JSON.stringify (compact, no spaces around the colon); a line that misses
- * it degrades to the historical raw-only behavior, never to a false hit.
- */
-const LLM_CALL_LINE_MARK = '"record_type":"llm_call"';
-
-function isLlmCallLine(line: string): boolean {
-  return line.includes(LLM_CALL_LINE_MARK);
-}
-
-/** Post-prefilter match for one llm_call row: system body (blob-dereferenced) or any tool_names entry (ADR-0116). `systemBodies` is the per-query sha memo. */
-async function llmCallBlobContains(
-  row: TraceRecordRow,
-  traceFilePath: string,
-  needle: string,
-  systemBodies: Map<string, string | undefined>
-): Promise<boolean> {
-  if (row["record_type"] !== "llm_call") return false;
-  const systemText = await memoizedSystemBody(
-    row["system"],
-    traceFilePath,
-    systemBodies
-  );
-  if (systemText !== undefined && systemText.includes(needle)) return true;
-  const names = Array.isArray(row["tool_names"]) ? row["tool_names"] : [];
-  return names.some((name) => typeof name === "string" && name.includes(needle));
-}
-
-/**
- * Dereference the system blob body at most once per sha (content-addressed
- * pool ⇒ same sha = same body). The shape gate mirrors
- * `dereferenceSystemBody`'s ref check so only rows that would pay for blob
- * IO get a memo entry; unreadable bodies memo as undefined exactly like the
- * direct call degrades them.
- */
-async function memoizedSystemBody(
-  system: unknown,
-  traceFilePath: string,
-  systemBodies: Map<string, string | undefined>
-): Promise<string | undefined> {
-  if (
-    typeof system !== "object" ||
-    system === null ||
-    typeof (system as { sha?: unknown }).sha !== "string" ||
-    typeof (system as { bytes?: unknown }).bytes !== "number"
-  ) {
-    return undefined;
-  }
-  const { sha } = system as { sha: string };
-  if (systemBodies.has(sha)) return systemBodies.get(sha);
-  const body = await dereferenceSystemBody(system, { traceFilePath });
-  systemBodies.set(sha, body);
-  return body;
 }
 
 function parseRecordType(value: unknown): TraceRecordType | undefined {

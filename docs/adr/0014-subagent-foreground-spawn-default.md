@@ -42,9 +42,8 @@ trace 为 ground truth）实测发现两个叠加问题：
    executor 截断（ADR-0006 20000 封顶）；并发 worker 上限设常量（建议 4）。
 5. **spec 修订**：#356 spec "立即返回 task_id" 承诺改为"默认前景同步，
    `wait:false` 为异步选项"。
-6. **验收纪律**：真链路 e2e 断言 trace 出现 spawn_subagent tool_call；**captured `system`**（ADR-0116）含 proactive 关键词。不得再用 `messages` 数组冒充 identity system 前缀。
-
-> **Amendment 2026-09-21**（ADR-0116）：原 D6「`messages_captured` 断言模型实际看到的 system prompt」与活路径不符——usage / coordinator 在 `deps.system()`，不在 `effectiveState.messages`。改打在落盘的 `system` 字段上。
+6. **验收纪律**：真链路 e2e 断言 trace 出现 spawn_subagent tool_call；
+   `messages_captured` 断言模型实际看到的 system prompt 含 proactive 关键词。
 
 ## Considered Options
 

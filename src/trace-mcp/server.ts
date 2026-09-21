@@ -7,7 +7,6 @@ import {
   createListSessionsCore,
   createQueryTraceCore,
   GET_RECORD_DESCRIPTION,
-  GET_RECORD_DETAIL_VALUES,
   GET_RECORD_MAX_COUNT,
   LIST_SESSIONS_DESCRIPTION,
   LIST_SESSIONS_MAX_LIMIT,
@@ -50,7 +49,7 @@ const getRecordInputSchema = z
   .object({
     conversation_id: z.string(),
     record_id: z.string(),
-    detail: z.enum(GET_RECORD_DETAIL_VALUES).optional(),
+    detail: z.enum(["tool_results", "messages"]).optional(),
     message_index: z.number().int().min(0).optional(),
     part_index: z.number().int().min(0).optional(),
     from_char: z.number().int().min(0).optional(),

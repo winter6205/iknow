@@ -648,20 +648,6 @@ describe("T12: messages_captured 真值 (loop-engine.ts 三处 recordLlmCall)", 
         assert.equal(llm["messages_captured"], true);
         assert.ok(Array.isArray(llm["messages"]));
         assert.ok((llm["messages"] as unknown[]).length >= 1);
-        // ADR-0014 D6 (amended 2026-09-21, ADR-0116): the proactive-keyword
-        // acceptance hangs on the captured `system` body — dereferenced from
-        // the session blob pool — never on `messages`, which stay free of any
-        // identity-prefix impersonation.
-        const systemRef = llm["system"] as { sha: string; bytes: number };
-        assert.ok(systemRef && typeof systemRef.sha === "string");
-        const systemBody = JSON.parse(
-          readFileSync(join(tmpDir, "blobs", systemRef.sha), "utf8")
-        ) as { kind: string; v: string };
-        assert.equal(systemBody.kind, "str");
-        assert.ok(systemBody.v.includes("proactively"));
-        assert.ok(systemBody.v.includes("blocks until finished"));
-        const messages = llm["messages"] as Array<{ role: string }>;
-        assert.equal(messages.some((m) => m.role === "system"), false);
       }
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

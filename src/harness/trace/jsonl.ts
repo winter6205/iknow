@@ -109,35 +109,6 @@ interface BlobPayload {
 }
 
 /**
- * Write one body into the session-folder content-addressed pool
- * (ADR-0036 / ADR-0071): mask → sha256 over the masked serialization →
- * `blobs/<sha>` with `flag:"wx"` (write-if-missing, so identical bodies
- * occupy exactly one file). Shared by message content refs and the
- * ADR-0116 `system` body — one pool, one naming rule. Directory creation is
- * delegated to `ensureBlobsDir` so it runs once per service, not once per
- * blob (the dir path is stable for a given traceDir).
- */
-function writeContentBlob(
-  traceDir: string,
-  payload: BlobPayload,
-  outputMask: ReturnType<typeof createOutputMask>,
-  ensureBlobsDir: (blobsDir: string) => void
-): { sha: string; bytes: number } {
-  const blobsDir = join(traceDir, "blobs");
-  ensureBlobsDir(blobsDir);
-  const serialized = JSON.stringify(payload) ?? "null";
-  const masked = outputMask.mask(serialized);
-  const bytes = Buffer.byteLength(masked, "utf8");
-  const sha = createHash("sha256").update(masked, "utf8").digest("hex");
-  try {
-    writeFileSync(join(blobsDir, sha), masked, { encoding: "utf8", flag: "wx" });
-  } catch (error) {
-    if (!isAlreadyPresentError(error)) throw error;
-  }
-  return { sha, bytes };
-}
-
-/**
  * Content-level blob references (ADR-0036 amendment): `messages[i]` stays a
  * `{role, content}` pair, with `content` replaced by `{sha, bytes}` — role
  * stays inline so the read-side `messageRole()` needs no change. Empty
@@ -148,9 +119,10 @@ function writeContentBlob(
 function toBlobReferences(
   messages: ReadonlyArray<unknown>,
   traceDir: string,
-  outputMask: ReturnType<typeof createOutputMask>,
-  ensureBlobsDir: (blobsDir: string) => void
+  outputMask: ReturnType<typeof createOutputMask>
 ): Array<{ role: unknown; content: { sha: string; bytes: number } }> {
+  const blobsDir = join(traceDir, "blobs");
+  mkdirSync(blobsDir, { recursive: true });
   return messages.map((message) => {
     if (
       typeof message !== "object" ||
@@ -170,10 +142,19 @@ function toBlobReferences(
       kind: typeof content === "string" ? "str" : "blocks",
       v: content,
     };
-    return {
-      role,
-      content: writeContentBlob(traceDir, payload, outputMask, ensureBlobsDir),
-    };
+    const serialized = JSON.stringify(payload) ?? "null";
+    const masked = outputMask.mask(serialized);
+    const bytes = Buffer.byteLength(masked, "utf8");
+    const sha = createHash("sha256").update(masked, "utf8").digest("hex");
+    try {
+      writeFileSync(join(blobsDir, sha), masked, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (!isAlreadyPresentError(error)) throw error;
+    }
+    return { role, content: { sha, bytes } };
   });
 }
 
@@ -244,17 +225,6 @@ export function createJsonlTraceService(
       appendFileSync(targetFile, line + "\n", "utf8");
     });
 
-  // Blob-dir creation is hoisted out of the per-blob write: the path is
-  // stable for this service, so mkdir runs once instead of once per blob.
-  // A failed mkdir is not memoized — the next write retries and its error
-  // still routes through the warn-once recordXxx path (ADR-0003).
-  const createdBlobsDirs = new Set<string>();
-  function ensureBlobsDir(blobsDir: string): void {
-    if (createdBlobsDirs.has(blobsDir)) return;
-    mkdirSync(blobsDir, { recursive: true });
-    createdBlobsDirs.add(blobsDir);
-  }
-
   // Instance-level hygiene: warn once on the first write failure, then stay quiet (ADR-0003).
   let warnedOnce = false;
   let traceWriteFailures = 0;
@@ -283,11 +253,6 @@ export function createJsonlTraceService(
         llm_call_id: id,
         ...toSnakeCaseRecord(record),
       };
-      // ADR-0116 Postel on the disk format: an empty tool-name list is the
-      // same fact as no list — the key is dropped, never written as `[]`.
-      if (Array.isArray(record.toolNames) && record.toolNames.length === 0) {
-        delete fullLine.tool_names;
-      }
       // No inline fallback: blobs are the only storage mode. If blob IO
       // fails, nothing is written for this call (warn-once, return undefined,
       // never throw) — the turn survives.
@@ -296,25 +261,7 @@ export function createJsonlTraceService(
           fullLine.messages = toBlobReferences(
             record.messages,
             targetDir,
-            currentOutputMask(),
-            ensureBlobsDir
-          );
-        } catch (err) {
-          recordFailure(err);
-          return undefined;
-        }
-      }
-      // ADR-0116: the system body shares the message blob pool, so the
-      // row carries only the `{sha, bytes}` ref — the snake-case spread's
-      // raw string is replaced here, never inlined per row. Blob IO failure
-      // drops the whole row (same warn-once discipline as messages).
-      if (record.system !== undefined) {
-        try {
-          fullLine.system = writeContentBlob(
-            targetDir,
-            { kind: "str", v: record.system },
-            currentOutputMask(),
-            ensureBlobsDir
+            currentOutputMask()
           );
         } catch (err) {
           recordFailure(err);
