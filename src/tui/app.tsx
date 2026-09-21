@@ -209,7 +209,10 @@ import { type ChromeFocus, reduceChromeFocus } from "./chrome-focus.js";
 // order shares the same source as the panel).
 import { dispatchKillFocusedSubagent } from "./subagent-kill.js";
 // Live subagent predicate (single source for Ctrl+X dispatch / panel / focus count).
-import { isLiveSubagent } from "./subagent-message-lines.js";
+import {
+  countLiveBackgroundSubagents,
+  isLiveSubagent,
+} from "./subagent-message-lines.js";
 // Agent current-status display (ADR-0028) — distinct from ContextBar's
 // context usage by design: read-only latest snapshot of the agent_status event stream.
 import {
@@ -4311,6 +4314,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               crunchedSeconds={
                 crunchedOf === activeKey ? crunchedSeconds : undefined
               }
+              backgroundRunningCount={countLiveBackgroundSubagents(
+                subagents,
+                active.conversationId
+              )}
             />
           </box>
         </>

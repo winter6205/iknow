@@ -10,8 +10,8 @@
  *
  * Render order: crunched line → unanchored non-thinking blocks
  * (non-thinking among unanchoredBlocks) → tail slots → legacy liveToolLines →
- * askLine → unanchored thinking blocks (thinking among unanchoredBlocks) →
- * spinner.
+ * askLine → background residual-hint line → unanchored thinking blocks
+ * (thinking among unanchoredBlocks) → spinner.
  *
  * The block list (`buildActivityBlockFoldLines`) is the sole source of
  * folding / preview; the old one-line `live activity group` summary
@@ -35,6 +35,7 @@ import { renderActivityBlockRows } from "./activity-block-rows.js";
 import { Spinner } from "./components.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingLive, thinkingPeekLines } from "./think-fold.js";
+import { formatBackgroundRunningHint } from "./subagent-message-lines.js";
 import type { LiveTailSlot, LiveToolRun } from "./live-tool-state.js";
 import { tuiPalette } from "./theme.js";
 import type { ActivityBlock } from "./activity-block.js";
@@ -52,6 +53,10 @@ export interface TranscriptTailProps {
   readonly thinkingExpanded: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
+  /** Live background (`wait:false`) worker count for the residual hint line
+   *  (docs/CONTEXT.md 后景残留提示). 0 / absent → no line. Tail chrome only
+   *  — never a model message, never the parent's 「运行中」. */
+  readonly backgroundRunningCount?: number;
   /** Activity blocks not anchored to a messageIndex — live blocks
    *  (uncommitted thinking / quiet tools) must appear in the tail. Each block
    *  renders as "title + one preview line", the same shape as blocks inside
@@ -74,6 +79,10 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
       nonThinkingBlocks.push(block);
     }
   }
+  // After askLine / before the thinking blocks: the residual hint is the
+  // last line of the tail when the parent is idle, and never displaces the
+  // thinking-at-bottom position contract while a turn streams.
+  const bgHint = formatBackgroundRunningHint(props.backgroundRunningCount);
   return (
     <>
       {props.crunchedSeconds > 0 && (
@@ -109,6 +118,11 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
       {props.askLine !== undefined && (
         <text fg={pal.running} wrapMode="word" width={props.contentWidth}>
           {props.askLine}
+        </text>
+      )}
+      {bgHint !== undefined && (
+        <text fg={pal.dim} wrapMode="none">
+          {bgHint}
         </text>
       )}
       {thinkingBlocks.length > 0 && (

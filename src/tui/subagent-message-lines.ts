@@ -88,6 +88,53 @@ export function isLiveSubagent(info: SubagentInfo): boolean {
 }
 
 /**
+ * Live **background** worker count for one session (docs/CONTEXT.md
+ * 后景残留提示): live per isLiveSubagent AND `foreground !== true` AND
+ * `conversationId === activeConversationId`. A foreground (`wait:true`)
+ * worker is already truthfully represented by the parent's running-fg
+ * chrome, so counting it here would paint the worker as parent 「运行中」;
+ * terminal states never count so the tail line disappears with the last
+ * live worker (including never-spawned sessions). The bridge list is the
+ * global projection — rows owned by another session tab, and rows without a
+ * conversationId (judge / graph-node / direct-manager population, which the
+ * manager's own scoped listSubagents likewise attributes to no session),
+ * never count here.
+ */
+export function countLiveBackgroundSubagents(
+  infos: ReadonlyArray<SubagentInfo>,
+  activeConversationId: string | undefined
+): number {
+  if (activeConversationId === undefined) return 0;
+  let count = 0;
+  for (const info of infos) {
+    if (
+      isLiveSubagent(info) &&
+      info.foreground !== true &&
+      info.conversationId === activeConversationId
+    )
+      count += 1;
+  }
+  return count;
+}
+
+/**
+ * Dim English count line text for the transcript tail; 0 / absent → undefined
+ * (no line). English on purpose: the Chinese 「运行中」 belongs to parent
+ * chrome alone (CONTEXT 后景残留提示 _Avoid_). Takes undefined so the tail
+ * can pass the optional prop through without an extra branch. The only
+ * producer is countLiveBackgroundSubagents (non-negative by construction), so
+ * no negative-input branch.
+ */
+export function formatBackgroundRunningHint(
+  count: number | undefined
+): string | undefined {
+  if (count === undefined || count === 0) return undefined;
+  return count === 1
+    ? "1 background subagent running"
+    : `${count} background subagents running`;
+}
+
+/**
  * Role projection for one live subagent:
  *   - role present and non-blank (after trim) → role.trim();
  *   - role absent / empty / whitespace-only → IDENTITY_FALLBACK_ROLE; the

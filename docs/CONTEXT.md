@@ -149,7 +149,10 @@ _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可
 **subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。角色行 = catalog id（`subagent_type` / `SubagentInfo.role`，缺省 `general-purpose`）；task 正文里的 `ROLE: implementation worker` 不是角色。同一 worker 不得再并排一张未 join 的 `general-purpose running`。
 _Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出；把 task 里的 ROLE 文案当 catalog；已 join 的卡旁边再画一条 fallback 运行行
 
-**前台打断**: TUI **Esc** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。双击 Esc（≤1000ms）是回退选择器，前台有活时第一击先打断（2026-09-18 键位迁移：打断自 Ctrl+C 迁入，Ctrl+C 只剩选区复制；chat 视图外 Esc 由 list/mcp/graph 视图与各面板先消费）。Ctrl+X 仍可单杀焦点行（含后景）。_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；把 Ctrl+C 复制臂与打断绑回同一键；面板内重载 Esc 的返回/保存语义
+**前台打断**: TUI **Esc** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。双击 Esc（≤1000ms）是回退选择器，前台有活时第一击先打断（2026-09-18 键位迁移：打断自 Ctrl+C 迁入，Ctrl+C 只剩选区复制；chat 视图外 Esc 由 list/mcp/graph 视图与各面板先消费）。Ctrl+X 仍可单杀焦点行（含后景）。_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；把 Ctrl+C 复制臂与打断绑回同一键；面板内重载 Esc 的返回/保存语义；把后景工人画成父 chrome「运行中」
+
+**后景残留提示**: 父 **前台打断** 后 `runState` 必须 idle、输入解锁；仍 live 的后景（`wait:false`）工人只在 transcript 末尾 dim 英文标个数（`N background subagent(s) running`），不占「运行中」/「请等本轮结束」；终态仍经 **mailbox** silent wake 把父拉回 `running-fg` 收信封（底栏 SubagentPanel 仍可 Ctrl+X）。
+_Avoid_: 把后景工人标成父 `running-fg`；把这叫 `running-bg`；打断后锁输入等工人结束；用中文「运行中」当后景计数
 
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
@@ -808,6 +811,8 @@ _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读
 - **工作树说明书 vs 闸 vs 提示词**: description 先回答 agent 能不能调、做什么；写被拦点名是 harness；人喊创建是 usage/夹具
 - **create-worktree vs create-task-worktree**: 模型面用前者；后者是旧注册名，不再给模型
 - **前台打断 vs chrome focus**: Esc 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
+- **运行中 vs 后景残留提示**: chrome「运行中」/「请等本轮结束」只绑父 `running-fg`；父 idle 后后景工人只在消息末尾 dim 英文计数
+- **running-bg vs 后景 spawn**: `running-bg` 是切走该会话 tab、父 turn 还在跑；后景是 `wait:false` 工人，父可以 idle
 - **完成态 ✓ Done vs 替换概述**: 子代理卡 completed 后概述留下、其下 `✓ Done`；不是把第 2 行换成字面 `done`
 - **父可见信封 vs host drain**: 前景交差是 tool_result 上的信封；drain 只服务后景 mailbox 叫醒
 - **settled appearance vs result preview**: 落定三类决定谁还上屏；成功 bash 的结果预览是折叠后的尾窗，不是百分比轨迹
