@@ -54,8 +54,8 @@ export interface TranscriptTailProps {
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
   /** Live background (`wait:false`) worker count for the residual hint line
-   *  (docs/CONTEXT.md 后景残留提示). 0 / absent → no line. Tail chrome only
-   *  — never a model message, never the parent's 「运行中」. */
+   *  (docs/CONTEXT.md background-residual hint). 0 / absent → no line. Tail chrome only
+   *  — never a model message, never the parent's 「运行中」 ("running"). */
   readonly backgroundRunningCount?: number;
   /** Activity blocks not anchored to a messageIndex — live blocks
    *  (uncommitted thinking / quiet tools) must appear in the tail. Each block

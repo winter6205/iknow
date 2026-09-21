@@ -6,32 +6,33 @@ import { defineConfig } from "vitest/config";
  * Why a separate config: real-LLM e2e make ~95s of live LLM calls on this
  * dev shell (when ANTHROPIC_AUTH_TOKEN is set) and historically flake on
  * the model prompt path. They are run on demand via `npm run test:real-llm`,
- * matching scripts/i9-*-smoke.ts pattern (缺 key 退出 1).
+ * matching scripts/i9-*-smoke.ts pattern (missing key → exit 1).
  *
- * settings-model-extension (review fix M5)：
- * 真实 LLM e2e（bootstrap-real-llm + tui-subagent-wiring-acceptance）原本
- * 收在 `archive/tests-real-llm/`，因 phase 2 收敛后仍引用退役变量
- * `process.env.IKNOW_LLM_MODEL` 和 `apiKeyEnv: "ANTHROPIC_AUTH_TOKEN"`,
- * 与 settings-model-extension 的 key 单承载语义不符，移出 vitest 收集。
- * 该目录作为历史快照保留（README 说明），不再被 `npm run test:real-llm`
- * 拉起。新 real-LLM 走 `scripts/i135-settings-model-extension-smoke.ts` +
- * `npm run probe:settings-model`。
+ * settings-model-extension (review fix M5):
+ * The original real-LLM e2e (bootstrap-real-llm + tui-subagent-wiring-acceptance)
+ * lived under `archive/tests-real-llm/`, but after phase 2 convergence they still
+ * referenced the retired `process.env.IKNOW_LLM_MODEL` and
+ * `apiKeyEnv: "ANTHROPIC_AUTH_TOKEN"`, which conflicts with settings-model-extension's
+ * single-key-bearing semantics, so they were dropped from vitest collection.
+ * The directory is kept as a historical snapshot (see README) and is no longer
+ * pulled up by `npm run test:real-llm`. New real-LLM runs go through
+ * `scripts/i135-settings-model-extension-smoke.ts` + `npm run probe:settings-model`.
  */
 export default defineConfig({
   test: {
-    // #556 T8:t8-live-subagent-routing 走 settings 单承载 + 走 HAS_KEY 守卫,
-    // 与 settings-model-extension 收敛兼容,纳入 include。
-    // 其他 archive/tests-real-llm/ 文件仍按 M5 不收。
-    // model-prefix-layering B8 (SC9):本轮 LLM-touching 改动(B3/B4/B6)的
-    // 真实模型 e2e,同走 settings 单承载 + HAS_KEY 守卫。
-    // web discover vs read: 黄金集首工具轨迹（有 key 跑同一集；缺 key skip）。
-    // graph mode notification: 同一形态的集（通知文是否
-    // 真把模型转向 run_graph vs spawn_subagent；有 key 跑同一集，缺 key skip）。
-    // worktree tool names (ADR-0082): 建树/列出首工具轨迹，同 HAS_KEY 守卫。
+    // #556 T8: t8-live-subagent-routing rides settings single-bearing + HAS_KEY guard,
+    // compatible with settings-model-extension convergence, so kept in include.
+    // Other archive/tests-real-llm/ files stay excluded per M5.
+    // model-prefix-layering B8 (SC9): real-model e2e for this round's LLM-touching
+    // changes (B3/B4/B6), same settings single-bearing + HAS_KEY guard.
+    // web discover vs read: golden-set first-tool trace (same set with key; skip without).
+    // graph mode notification: same-shape set — does the notification text actually
+    // steer the model toward run_graph vs spawn_subagent (same set with key; skip without).
+    // worktree tool names (ADR-0082): create-tree / list first-tool trace, same HAS_KEY guard.
     // agent_status pivot reconcile (spec agent-status-instruction-echo T5):
-    // <agent_status> 黄金集真模型半边（首工具 todo_write 判定），同守卫。
-    // egress real push (ssh-bridge 子弹 7): 非 LLM 面但同目录纪律——默认
-    // skip，仅 IKNOW_EGRESS_REAL_PUSH_E2E=1 显式开启（spec assumption 9）。
+    // <agent_status> golden-set real-model half (first-tool todo_write verdict), same guard.
+    // egress real push (ssh-bridge bullet 7): non-LLM surface but same directory discipline —
+    // default skip; only enabled explicitly by IKNOW_EGRESS_REAL_PUSH_E2E=1 (spec assumption 9).
     include: [
       "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
       "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",

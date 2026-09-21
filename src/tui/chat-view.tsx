@@ -192,7 +192,7 @@ export interface ChatViewProps {
   readonly liveToolLines: ReadonlyArray<string>;
   /**
    * Structured real-time tool-call state. Running entries render as
-   * `[运行中] name`; completed entries use the unified diff preview.
+   * `[运行中] name` ("running"); completed entries use the unified diff preview.
    * liveToolReduce maintains order; default = empty array.
    */
   readonly liveToolRuns?: ReadonlyArray<LiveToolRun>;
@@ -213,7 +213,7 @@ export interface ChatViewProps {
    *  rendered. */
   readonly crunchedSeconds?: number;
   /** Live background (`wait:false`) worker count for the transcript-tail
-   *  residual-hint line (docs/CONTEXT.md 后景残留提示). Derived by the app
+   *  residual-hint line (docs/CONTEXT.md background-residual hint). Derived by the app
    *  from `bridge.listSubagents()`; 0 / absent → no line (passed through to
    *  TranscriptTail without an extra branch). */
   readonly backgroundRunningCount?: number;

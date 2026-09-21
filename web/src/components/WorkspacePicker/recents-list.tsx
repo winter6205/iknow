@@ -13,7 +13,7 @@
  *  - basename span gets an explicit color: active inherits the button's
  *    `text-accent`; non-active adds `text-ink-2` for label clarity (previously
  *    relied on body default color, which layered badly on hover). The spec literally
- *    asks "顶层 label = basename(root)(accent)" — chose active-only accent
+ *    asks "top-level label = basename(root)(accent)" — chose active-only accent
  *    (clearer active/inactive distinction); this note records the tradeoff.
  *
  * The first recents item carries `data-ws-picker-autofocus="true"` — after

@@ -74,7 +74,7 @@ export function printUsage(): void {
   process.stdout.write(`${usageText()}\n`);
 }
 
-/** Node 跑 `tui` 但 PATH 上无 Bun 时的拦截兜底文案。cliFile = 本进程这条 CLI 的绝对路径。 */
+/** Fallback intercept message for when Node runs `tui` but PATH has no Bun. cliFile = absolute path of this process's CLI entry. */
 export function tuiNodeInterceptMessage(cliFile: string): string {
   return (
     `未找到 Bun，TUI 未启动（OpenTUI 原生 FFI 仅 Bun 支持；当前进程是 Node）。\n` +

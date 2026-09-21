@@ -25,8 +25,8 @@
  *     `null` (no correlator — never borrow another worker's preview);
  *   - negative: no match / match is `failed` → `null` (failed goes to that
  *     card's existing failure overlay, not the green `✓ Done`); role absent /
- *     empty / whitespace-only → catalog fallback (the literal 子代理 is never
- *     emitted);
+ *     empty / whitespace-only → catalog fallback (the Chinese "subagent"
+ *     literal is never emitted);
  *   - overflow: the two live lines are each truncated to cols visual width
  *     (CJK-safe) and never wrap; `cols <= 0` → a 1-column budget. The
  *     completed card's overview is width-clamped the same way (once back on
@@ -89,10 +89,10 @@ export function isLiveSubagent(info: SubagentInfo): boolean {
 
 /**
  * Live **background** worker count for one session (docs/CONTEXT.md
- * 后景残留提示): live per isLiveSubagent AND `foreground !== true` AND
+ * background-residual hint): live per isLiveSubagent AND `foreground !== true` AND
  * `conversationId === activeConversationId`. A foreground (`wait:true`)
  * worker is already truthfully represented by the parent's running-fg
- * chrome, so counting it here would paint the worker as parent 「运行中」;
+ * chrome, so counting it here would paint the worker as parent 「运行中」 ("running");
  * terminal states never count so the tail line disappears with the last
  * live worker (including never-spawned sessions). The bridge list is the
  * global projection — rows owned by another session tab, and rows without a
@@ -119,8 +119,9 @@ export function countLiveBackgroundSubagents(
 
 /**
  * Dim English count line text for the transcript tail; 0 / absent → undefined
- * (no line). English on purpose: the Chinese 「运行中」 belongs to parent
- * chrome alone (CONTEXT 后景残留提示 _Avoid_). Takes undefined so the tail
+ * (no line). English on purpose: the Chinese 「运行中」 ("running") belongs to
+ * parent chrome alone (CONTEXT background-residual hint _Avoid_). Takes
+ * undefined so the tail
  * can pass the optional prop through without an extra branch. The only
  * producer is countLiveBackgroundSubagents (non-negative by construction), so
  * no negative-input branch.
@@ -138,7 +139,7 @@ export function formatBackgroundRunningHint(
  * Role projection for one live subagent:
  *   - role present and non-blank (after trim) → role.trim();
  *   - role absent / empty / whitespace-only → IDENTITY_FALLBACK_ROLE; the
- *     literal 子代理 is never emitted.
+ *     Chinese "subagent" literal is never emitted.
  */
 export function resolveIdentityRole(info: SubagentInfo): string {
   const role = info.role;

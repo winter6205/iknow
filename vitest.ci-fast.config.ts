@@ -4,14 +4,17 @@ import baseConfig from "./vitest.config.js";
 import { CI_EXCLUDES, CI_FAST_EXCLUDES } from "./vitest.ci-excludes.js";
 
 /**
- * Vitest config for CI — test-fast（PR 级快速门，目标 ~5min 内反馈）。
+ * Vitest config for CI — test-fast (PR-level quick gate, target feedback
+ * within ~5min).
  *
- * = 本地 vitest.config.ts + CI_EXCLUDES + CI_FAST_EXCLUDES
- * （SSOT: vitest.ci-excludes.ts）。本 job 不装 bubblewrap，因此比
- * test-full 多排 e2e / integration / secret-roundtrip 整目录 —— 这些在
- * 缺 bwrap 时装配期即 throw。逐条理由见 SSOT 模块。
+ * = local vitest.config.ts + CI_EXCLUDES + CI_FAST_EXCLUDES
+ * (SSOT: vitest.ci-excludes.ts). This job does not install bubblewrap, so
+ * compared with test-full it additionally excludes the whole
+ * e2e / integration / secret-roundtrip directories — these throw at
+ * assembly time when bwrap is missing. Per-entry rationale lives in the
+ * SSOT module.
  *
- * 时序 flaky 由 workflow 的 --retry 1 吸收，不在这里表达。
+ * Timing flakiness is absorbed by --retry 1 in the workflow, not expressed here.
  */
 export default mergeConfig(baseConfig as UserConfig, {
   test: {

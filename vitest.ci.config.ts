@@ -4,19 +4,23 @@ import baseConfig from "./vitest.config.js";
 import { CI_EXCLUDES } from "./vitest.ci-excludes.js";
 
 /**
- * Vitest config for CI — test-full（nightly cron + manual dispatch）。
+ * Vitest config for CI — test-full (nightly cron + manual dispatch).
  *
- * = 本地 vitest.config.ts + CI_EXCLUDES（SSOT: vitest.ci-excludes.ts）。
- * 继承而非复制，保证本地 `npm test` / `test:changed` 语义不变，CI 只是在
- * 其基础上多排一批 runner 上跑不了的文件。
+ * = local vitest.config.ts + CI_EXCLUDES (SSOT: vitest.ci-excludes.ts).
+ * Inherit rather than copy, so local `npm test` / `test:changed` semantics
+ * stay unchanged and CI only excludes an extra batch of files that cannot
+ * run on the runner.
  *
- * Why the extra excludes: GHA runner 无 user-namespace，bwrap 物理执行
- * 起不来；且 requireBwrap() 在 createBashTool / createDefaultAciRegistry /
- * createWorkerDeps / runInSandbox 装配期就 throw。逐条归类与引入缘由见
- * vitest.ci-excludes.ts，本文件不再复述。装了 bwrap 后仍不能物理执行的
- * 那一批依旧要排 —— 装 bwrap 只解决装配期 fail-loud。
+ * Why the extra excludes: the GHA runner has no user-namespace, so bwrap
+ * physical execution cannot start; and requireBwrap() already throws at
+ * assembly time in createBashTool / createDefaultAciRegistry /
+ * createWorkerDeps / runInSandbox. Per-entry classification and rationale
+ * live in vitest.ci-excludes.ts, not restated here. The batch that still
+ * cannot physically execute even with bwrap installed must remain excluded
+ * — installing bwrap only resolves assembly-time fail-loud.
  *
- * 本 config 只影响 CI；本地沙箱/ACI 测试继续由 WSL 全量验证。
+ * This config affects CI only; local sandbox/ACI tests keep being fully
+ * verified on WSL.
  */
 export default mergeConfig(baseConfig as UserConfig, {
   test: {

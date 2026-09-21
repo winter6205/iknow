@@ -53,7 +53,8 @@ const CAPABILITY_SUBJECTS = [
 
 /**
  * Intrinsic capability predicates: unavailability that cannot be read as a
- * process rule ("is unavailable", "cannot reach the network", "没有真实出网").
+ * process rule ("is unavailable", "cannot reach the network",
+ * "没有真实出网" (no real outbound network)).
  * Deliberately excludes generic failure words ("fails", "timeout"): a retry
  * policy is a fact worth keeping, while "is unavailable" is a snapshot of one
  * environment. These fire on a capability subject alone.
@@ -77,8 +78,10 @@ const INTRINSIC_PATTERNS: ReadonlyArray<RegExp> = [
 ];
 
 /**
- * Ambiguous policy verbs: the same vocabulary a product rule uses ("禁用浏览器
- * 工具" in CI, "生产网络策略……拦截入站"). A sentence carrying one of these is a
+ * Ambiguous policy verbs: the same vocabulary a product rule uses, e.g.
+ * "禁用浏览器工具" (disable the browser tool) in CI or
+ * "生产网络策略……拦截入站" (production network policy blocks inbound).
+ * A sentence carrying one of these is a
  * capability snapshot only when it also names the environment it describes —
  * the footing below — so policy / convention text stays writable
  * (spec Assumption 3). Without footing, `disable`/`block`/`restrict` say
@@ -119,9 +122,10 @@ const FOOTING_PATTERNS: ReadonlyArray<RegExp> = [
  * environment-availability observation, or null when it may be persisted.
  *
  * A segment (sentence / line) must carry both a capability subject and an
- * availability predicate, so a product-policy `constraint` ("隔离 ON 时 mutate
- * 须先建 worktree") and a test-command convention pass while "this sandbox has
- * no DNS, so web_search is unavailable" is rejected.
+ * availability predicate, so a product-policy `constraint`
+ * ("隔离 ON 时 mutate 须先建 worktree" — with isolation ON, a mutate
+ * requires creating a worktree first) and a test-command convention pass
+ * while "this sandbox has no DNS, so web_search is unavailable" is rejected.
  *
  * The draft's `type` is deliberately not an input: relabeling a capability
  * observation as `constraint` must not buy it a way into the store, and the
