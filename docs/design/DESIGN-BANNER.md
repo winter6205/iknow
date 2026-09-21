@@ -1,192 +1,252 @@
-# 启动 banner 视觉定案 · 智慧之眼（#171 支线 → #146 TUI 搬入）
+# Startup banner visual decision · Eye of Wisdom (prototype branch merged into the TUI)
 
-> 正式实现：`src/tui/banner.ts` + `src/tui/banner-art.ts`（搬入自原型分支
-> `worktree-tui-design-prototype` `tui-prototype/src/logo-braille/`）。
-> 本文件 = 原型分支 `tui-prototype/docs/DESIGN-BANNER.md` 的实施期搬入定稿版：
-> 保留设计裁决过程，路径改写为正式实现。源图：`docs/design/1785827453.png`
-> （1785827447 / 1785827458 为同批候选稿）。
+> Formal implementation: `src/tui/banner.ts` + `src/tui/banner-art.ts` (moved in
+> from the prototype branch `worktree-tui-design-prototype`,
+> `tui-prototype/src/logo-braille/`).
+> This file is the implementation-time copy of the prototype branch's
+> `tui-prototype/docs/DESIGN-BANNER.md`: it keeps the design adjudication record
+> while paths are rewritten to the formal implementation. Source image:
+> `docs/design/1785827453.png` (1785827447 / 1785827458 are same-batch candidates).
 
-## 定案一句话
+## Decision in one sentence
 
-启动 banner = 智慧之眼（braille 变体 C）：**占满整行宽度的圆角线框**（与输入框
-PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**（32×13 braille，
-32 列 × 13 行终端；源图 `docs/design/eyeshape.png`，不裁切）居左，info 栏
-（Version / Cwd / Data dir）居右垂直居中；顶框内嵌**居中** title `◆ iknow`；
-双色分层（墨绿线稿 + 金棕 R 符文强调）；窄终端（cols < 80）降级为不渲染。
-字形 = U+2800-28FF 盲文（非 ASCII、非 emoji）——#146 spec 的「banner 纯 ASCII」
-要求由本定案显式覆盖（specs/146-tui.md Code Style 已按此回填）。
+Startup banner = Eye of Wisdom (braille variant C): **a rounded line frame that
+fills the whole row width** (same `borderStyle="round"` as the PromptInput box,
+no horizontal centering); the **complete eye** (32×13 braille, 32 cols × 13
+terminal rows; source `docs/design/eyeshape.png`, uncropped) sits left, the info
+column (Version / Cwd / Data dir) sits right, vertically centered; the top frame
+inlays a **centered** title `◆ iknow`; two-color layering (ink-green line art +
+gold-brown R-rune accent); on narrow terminals (cols < 80) the banner degrades
+to not rendering. Glyphs = U+2800-28FF braille (not ASCII, not emoji) — the
+earlier spec's "banner is pure ASCII" requirement is explicitly superseded by
+this decision.
 
-## 1. 改版（2026-08-06）：占满行宽 + 小眼 + info 居右
+## 1. Revision: full row width + smaller layout + info on the right
 
-诊断过程（四次迭代，留档防回退）：
+Diagnosis history (four iterations, archived so we don't regress):
 
-1. 全构图内容 bbox 实测 816×785（比例 1.04，**本质方形**）——眼 + 环 + 8 个
-   符文方框的构图就是方块；源画布 1664×928 的"宽"几乎全是背景留白。
-2. 曾试宽幅网格（36×10，显示比 1.80）letterbox——方形图案缩成小块居中，
-   左右大段空白，观感更差，否决。
-3. 曾试裁主体（只留眼形，bbox 810×431=1.879 天然横宽）——操作员裁定
-   **"符文还是需要"**，否决。
-4. 首轮改版：从全构图大眼（48×21 braille）→ **裁瞳孔 ±95px 方窗生成 16×6
-   小眼**——眼睛小但完整眼形（眼睑/眼框/R 符文周围）被裁掉了，操作员复看
-   裁定 **"把眼睛裁掉了，要完整地显示"**，作废。
-5. 三轮：二轮 24×12 → **32×13**（操作员确认贴图同款），title 去 `tui` 改为
-   **居中** `◆ iknow`。COLS=32, ROWS=13（FACTOR≈2.37），显示比
-   32/(13×2)=1.231 略扁。
+1. Measured content bbox of the full composition is 816×785 (ratio 1.04,
+   **inherently square**) — the eye + ring + 8 rune boxes simply form a square;
+   almost all of the 1664×928 source canvas's "width" is background whitespace.
+2. Tried a wide grid (36×10, display ratio 1.80) letterboxed — the square motif
+   shrank into a small centered block with large empty side margins; looked
+   worse; rejected.
+3. Tried cropping to the subject (eye shape only, bbox 810×431 = 1.879,
+   naturally wide) — the operator ruled **"the runes are still needed"**;
+   rejected.
+4. First revision: from the full-composition large eye (48×21 braille) to a
+   **16×6 small eye generated from a ±95px square window around the pupil** —
+   the eye was small but parts of the complete eye shape (lid, frame, the area
+   around the R rune) had been cut off; on re-review the operator ruled **"you
+   cropped the eye; show it in full"**; that attempt was voided.
+5. Third round: second round's 24×12 → **32×13** (operator confirmed it matches
+   the reference image); the title drops `tui` and becomes **centered**
+   `◆ iknow`. COLS=32, ROWS=13 (FACTOR≈2.37), display ratio
+   32/(13×2)=1.231 — slightly flat.
 
-**最终方案（操作员"用新图完整显示"）**：操作员提供新源图
-`docs/design/eyeshape.png`（836×836 RGBA 透明底，主体 = 完整眼睛：眼睑 +
-眼框 + 瞳孔 R 符文 + 下眼睑）。RGBA alpha 天然隔离背景，**不再裁切**，直接
-取 alpha>128 像素 = 主体（bbox 实测 (13,27,826,810)，size=813×783，
-ratio=1.038 近方形）。点阵生成走：
+**Final plan (operator: "show the new image in full")**: the operator supplied a
+new source image `docs/design/eyeshape.png` (836×836 RGBA with transparent
+background; subject = the complete eye: lid + frame + pupil R rune + lower lid).
+RGBA alpha isolates the background naturally, so there is **no cropping** —
+pixels with alpha>128 are the subject (measured bbox (13,27,826,810),
+size=813×783, ratio=1.038, near-square). Raster generation goes:
 
-- TH=200 灰度阈值（深绿线稿 RGB≈(24,50,35) 亮度≈43，安全隔离）
-- COLS=32, ROWS=13（终端 32 列 × 13 行；FACTOR≈2.37 = 32×783/(13×813)
-  字符高宽比补偿；显示比 32/(13×2)=1.231 略扁）
-- 主层墨绿（alpha>128 → 主体）+ 金棕 R 符文（RGB mask `r>140 ∧ b<80 ∧
-(r-b)>80`，限定在主体像素内）
+- TH=200 grayscale threshold (dark-green line art RGB≈(24,50,35), luminance≈43,
+  safely separated)
+- COLS=32, ROWS=13 (32 cols × 13 terminal rows; FACTOR≈2.37 =
+  32×783/(13×813) compensates the character height-to-width ratio; display
+  ratio 32/(13×2)=1.231, slightly flat)
+- main layer ink-green (alpha>128 → subject) + gold-brown R rune (RGB mask
+  `r>140 ∧ b<80 ∧ (r-b)>80`, restricted to subject pixels)
 
-- info 栏 = 宽矩形，图案自然靠左。**方形图案不可横向拉宽（拉伸会畸变眼睛）。**
-- threshold=180 / trimThreshold=200（点阵生成参数，勿动）。
+- The info column is a wide rectangle, so the motif lands naturally on the
+  left. **A square motif must not be stretched horizontally (stretching
+  distorts the eye).**
+- threshold=180 / trimThreshold=200 (raster-generation parameters; do not
+  touch).
 
-## 2. 双色分层（按源 PNG 上色；背景不上色）
+## 2. Two-color layering (painted from the source PNG; background unpainted)
 
-配色代理全分辨率实测（1664×928 直方图 + 连通域分区）：
+Color-probe measurements at full resolution (1664×928 histogram +
+connected-component partitioning):
 
-| 色族     | HEX     | 占比           | 用途                                       |
-| -------- | ------- | -------------- | ------------------------------------------ |
-| 暖白背景 | #f7f7f1 | 90%            | **不渲染**，终端背景承担                   |
-| 墨绿线稿 | #183223 | ~94%（非背景） | 眼轮廓 + 环带符文 + 8 个交叉方框（同色）   |
-| 金棕强调 | #b97f1c | ~6%（非背景）  | **仅**瞳孔内 R 符文（bbox 内无绿像素混入） |
+| Color family   | HEX     | Share            | Usage                                        |
+| -------------- | ------- | ---------------- | -------------------------------------------- |
+| warm-white bg  | #f7f7f1 | 90%              | **not rendered**; the terminal background is |
+| ink-green line | #183223 | ~94% (non-bg)    | eye outline + ring runes + 8 crossing boxes (same color) |
+| gold-brown acc | #b97f1c | ~6% (non-bg)     | **only** the R rune inside the pupil (no green pixels bleed into its bbox) |
 
-渲染为双色分层：绿层 = threshold 管线（180 天然滤掉 V≈185 的金棕像素）；
-金层 = RGB mask（r>140 ∧ b<80 ∧ r−b>80）走与绿层**同一几何**（同 bbox / 网格）
-的 mask → braille，两层逐 cell 对齐；`banner.ts` 合并时金层非空 cell 整体金色
-（少量绿点被覆盖，定案可接受），其余墨绿。
+Rendering is two-color layered: the green layer uses the threshold pipeline
+(180 naturally filters out gold-brown pixels at V≈185); the gold layer uses the
+RGB mask (r>140 ∧ b<80 ∧ r−b>80) run through the **same geometry** as the green
+layer (same bbox / grid) mask → braille, with both layers aligned per cell;
+when `banner.ts` merges, non-empty gold cells render fully gold (a few green
+dots get covered — accepted in the final decision), everything else stays
+ink-green.
 
-色源：COLORTERM=truecolor → `38;2;24;50;35` / `38;2;185;127;28`（实测值直出）；
-否则 ANSI256 → 22 `#005f00` / 136 `#af8700`（CIE76 最近候选）。
-NO_COLOR / 非 TTY：paint 退化为 no-op，纯文本渲染（no-color.org 纪律）。
+Color source: COLORTERM=truecolor → `38;2;24;50;35` / `38;2;185;127;28`
+(measured values emitted directly); otherwise ANSI256 → 22 `#005f00` / 136
+`#af8700` (nearest CIE76 candidates). NO_COLOR / non-TTY: paint degrades to a
+no-op and renders plain text (no-color.org discipline).
 
-## 3. 布局与降级（正式实现收口）
+## 3. Layout and degradation (formal-implementation wrap-up)
 
-> **2026-08-06 覆盖**：本节"单线外框 + 整体水平居中 + 96 列降级"为 V7 搬入期
-> 方案，已被 §1 改版（占满行宽圆角框、图案居左 + info 居右、顶框 title
-> 居中 `◆ iknow`、`BANNER_MIN_COLS` 现 = 32 + 3 + 43 + 2 = 80）取代，保留作
-> 历史存档。
+> **Later override**: this section's "single-line frame + whole-panel horizontal
+> centering + 96-column degradation" was the V7 plan at move-in time; it has
+> been superseded by the §1 revision (full-width rounded frame, motif left +
+> info right, centered title `◆ iknow` in the top frame, `BANNER_MIN_COLS` now
+> = 32 + 3 + 43 + 2 = 80). Kept as a historical archive.
 
-- V7 布局：banner **自带单线外框**（任务 A，borderStyle="single"），框顶 /
-  框底内嵌居中 title `◆ iknow tui ◆`；info 栏仅 version / cwd / dataDir
-  （原型 sessionId / tools 等运行时项不搬）。
-- 外框与输入框线框（borderStyle="round"）风格区分开，色走 `FG_BORDER`
-  （ink 256 色 244 ≈ #8a877e，与 theme.ts `tuiPalette.dim` 同源）。
-- **整体水平居中**：图案 + GAP + info 栏 + 外框（左右各 1 列）组成的整体面板
-  在 `cols` 内左右等量留白（braille 方形图案不拉宽，靠空白对称即可；这修复了
-  "图案 + info 栏挤左边一块"的视觉问题）。cols > `BANNER_MIN_COLS` 时两侧均分
-  余量，cols === `BANNER_MIN_COLS` 时左侧 padding = 0。
-- **图案与 info 栏间距 GAP=3**：原 GAP=1 让两块读作左堆，扩到 3 列给呼吸。
-- **info 栏长值中段截断**：dataDir 等绝对路径超出 `VAL_W=32` 列时，保留首段
-  路径前缀 + 尾段文件名/扩展名，中间 `…` 衔接（中段截断比末尾截断更易识别）。
-- **窄终端降级**：cols < 96（`BANNER_MIN_COLS = 48 + 3 + 43 + 2`）-> 返回空行集
-  （不渲染 banner），避免断行破碎。
-- SHORT 档（单行 `◆ iknow`）：原型 V7 矮终端档，随搬入保留渲染能力，
-  产品路径未接线（#146 未要求高度自适应；留 #154 后续）。
-- 点阵重生成走 `scripts/gen-banner-art.py`（一次性设计期脚本，按 §4 公式
-  裁主体 + 比例补偿）；字形原样搬入 `src/tui/banner-art.ts`，**勿手改**。
+- V7 layout: the banner **carries its own single-line frame**
+  (borderStyle="single") with a centered `◆ iknow tui ◆` title inlaid at the
+  top / bottom border; the info column covers only version / cwd / dataDir
+  (prototype runtime items like sessionId / tools were not moved over).
+- The frame is deliberately distinct from the input box's line frame
+  (borderStyle="round"); its color follows `FG_BORDER` (ink 256-color 244 ≈
+  #8a877e, same source as `tuiPalette.dim` in theme.ts).
+- **Whole-panel horizontal centering**: the panel made of motif + GAP + info
+  column + frame (1 column padding each side) gets equal left/right whitespace
+  within `cols` (the square braille motif is not stretched — symmetric
+  whitespace is enough; this fixed the "motif + info column jammed on the
+  left" look). When cols > `BANNER_MIN_COLS` the slack splits evenly on both
+  sides; at cols === `BANNER_MIN_COLS` the left padding = 0.
+- **GAP=3 between motif and info column**: the original GAP=1 made the two
+  read as a left-aligned lump; 3 columns give them room to breathe.
+- **Mid-string truncation for long info values**: when an absolute path such
+  as dataDir exceeds `VAL_W=32` columns, keep the leading path prefix + the
+  trailing filename/extension joined by a middle `…` (mid-truncation is easier
+  to recognize than tail truncation).
+- **Narrow-terminal degradation**: cols < 96 (`BANNER_MIN_COLS = 48 + 3 + 43 +
+  2`) -> return an empty line set (render no banner) to avoid broken wrapping.
+- SHORT tier (single line `◆ iknow`): the prototype V7 tier for short
+  terminals; its rendering capability was kept at move-in but it is not wired
+  into the product path (height auto-fit was not required; left as a later
+  follow-up).
+- Raster regeneration goes through `scripts/gen-banner-art.py` (a one-off
+  design-time script that crops the subject and compensates the ratio per the
+  §4 formula); the glyphs were moved verbatim into `src/tui/banner-art.ts` —
+  **do not hand-edit**.
 
-## 4. 关于"logo 被横向挤压"问题（方案 4 定案）
+## 4. On the "logo squeezed horizontally" problem (option 4, final)
 
-用户问题："logo被横向挤压的问题怎么解决，是因为原图png是一个有背景的图造成的吗，
-实体在中间所有被挤压了吗"。
+User question: "how do we fix the logo looking horizontally squeezed — is it
+because the source PNG has a background, and the solid subject in the middle
+gets compressed?"
 
-### 4.1 根因（用户公式一针见血）
+### 4.1 Root cause (the user's formula hit the nail on the head)
 
-用户给出两个根因 + 正确流程，实测确认：
+The user gave two root causes + the correct pipeline; confirmed by measurement:
 
-1. **比例基准错了**。源 PNG `docs/design/1785827453.png` 画布是 1664×928（比例
-   1.79 横宽），但主体（眼睛 + 环 + 8 符文方框）的 bbox 实测只有
-   **816×785（比例 1.04 方形）**--主体只占画布中部约一半宽度，两侧大段是背景
-   暖白 `#f7f7f1`。旧点阵（34×17）按**整个画布**采样，主体被"按画布比例"缩进
-   点阵中部，横向只剩约 16.7 cols，显示比例 = 16.7 : (17×2) = **0.49 瘦高**--
-   这就是"横向被压扁"的真相。
-2. **终端字符格不是正方形**。等宽字符宽:高 ≈ 1:2，braille 码点
-   （U+2800-28FF）1 列宽 × 2 行高（1 码点 = 2×4 点阵）。所以"按主体像素比
-   1:1 采样到 cols×rows"会把主体显示瘦 2 倍，必须用 `FACTOR=2.0` 补偿。
-3. **背景本身不引起变形**，但必须先 `image.crop(mask.getbbox())` 裁掉，否则
-   参与采样的比例是画布的 1.79 而非主体的 1.04。
+1. **Wrong ratio baseline**. The source PNG `docs/design/1785827453.png` has a
+   1664×928 canvas (ratio 1.79, wide), but the subject's (eye + ring + 8 rune
+   boxes) measured bbox is only **816×785 (ratio 1.04, square)** — the subject
+   occupies roughly the middle half of the canvas width; both sides are mostly
+   warm-white background `#f7f7f1`. The old raster (34×17) sampled the **whole
+   canvas**, so the subject was scaled into the middle of the raster "by
+   canvas ratio", leaving only ~16.7 columns horizontally; display ratio =
+   16.7 : (17×2) = **0.49 — tall and thin**. That is the truth behind "squeezed
+   horizontally".
+2. **Terminal character cells are not square**. Monospace width:height ≈ 1:2,
+   and a braille codepoint (U+2800-28FF) is 1 column wide × 2 rows tall (1
+   codepoint = a 2×4 dot matrix). So sampling "1:1 by subject pixel ratio"
+   into cols×rows shows the subject twice as thin; `FACTOR=2.0` compensation is
+   required.
+3. **The background itself causes no distortion**, but it must first be removed
+   via `image.crop(mask.getbbox())`; otherwise the sampled ratio is the
+   canvas's 1.79 rather than the subject's 1.04.
 
-正确流程（用户原话精简）：**裁主体 -> 按 `cols = rows × (主体宽/主体高) × FACTOR`
-补偿字符比 -> 按 braille 点阵采样（1 字符 = 2×4 点）-> 输出静态字符串**。
+Correct pipeline (condensed from the user's own words): **crop the subject ->
+compensate the character ratio with `cols = rows × (subject width / subject
+height) × FACTOR` -> sample the braille dot matrix (1 char = 2×4 dots) -> emit
+a static string**.
 
-### 4.2 旧点阵 34×17 的诊断证据（保留防回退）
+### 4.2 Diagnostic evidence for the old 34×17 raster (kept to prevent regression)
 
-旧 `EYE_LINES`（34×17，按画布采样）整体非空 bbox：cols `[0, 34)` × rows
-`[0, 17)`（全 34×17 网格都在用，所有 34 列都至少有一行有点）。**点阵本身没有
-背景留白**--但主体被按画布比例缩进中部，横向只占 ~16.7 cols，这才是挤压来源。
-bbox 表证明"不是点阵有留白"，而是"采样基准错了"。
+Overall non-empty bbox of the old `EYE_LINES` (34×17, sampled by canvas): cols
+`[0, 34)` × rows `[0, 17)` (the whole 34×17 grid is in use; all 34 columns have
+at least one dotted row). **The raster itself has no background whitespace** —
+but the subject had been scaled into the middle by canvas ratio, occupying only
+~16.7 columns horizontally; that is the squeeze source. The bbox table proves
+"it is not raster padding" — it is "wrong sampling baseline".
 
-### 4.3 方案对比与定案
+### 4.3 Option comparison and decision
 
-| 方案               | 做法                                     | 结果                                               |
+| Option             | Approach                                 | Result                                             |
 | ------------------ | ---------------------------------------- | -------------------------------------------------- |
-| 方案 1             | 运行时 trim cols 0-1 + cols 32-33        | 删除眼睛两翼 -> 失去横展，**反而更挤**             |
-| 方案 2             | 重新生成但不裁主体                       | 仍按画布 1664×928 采样，主体照样被压扁             |
-| 方案 3             | 文档说明终端字符比，不改代码             | **已被否决**--用户明确要求按公式重生成             |
-| **方案 4（定案）** | **裁主体 bbox + FACTOR=2 补偿 + 重采样** | 主体按 816×785 比例 + 字符比补偿，终端显示为正方形 |
+| option 1           | runtime trim of cols 0-1 + cols 32-33    | deletes the eye's wings -> loses the horizontal spread, **actually more cramped** |
+| option 2           | regenerate but keep the background       | still samples the 1664×928 canvas; the subject is squashed just the same |
+| option 3           | document the terminal character ratio, change no code | **rejected** — the user explicitly asked to regenerate per the formula |
+| **option 4 (final)** | **crop to subject bbox + FACTOR=2 compensation + resample** | subject rendered at the 816×785 ratio with character-ratio compensation; square on screen |
 
-### 4.4 实施参数（`scripts/gen-banner-art.py`）
+### 4.4 Implementation parameters (`scripts/gen-banner-art.py`)
 
-- `TH=200`：背景近白（~245）/ 主体深色，阈值 200 安全（实测 TH=180/200 bbox 一致）。
-- `COLS=48`：主体方形、够大、info 栏并排放得下。`ROWS = round(48 × 785 / (2.2 × 816)) = 21`。
-- `FACTOR=2.2`：终端 braille 字符高宽比。**校准基准**：原图 45° 斜线在终端里
-  仍呈 45° 即对；字体特殊（字符比偏离 1:2）时微调 2.1/2.2 后固定。
-  **2026-08-06 扁化迭代**：用户复看后裁定「被挤瘦了，应该稍微扁一点」，
-  FACTOR 由 2.0 调至 2.2 → ROWS 23→21、显示比 1.04 → 1.14（略扁），
-  banner 高度同步变矮（缓解「太大」观感）。
-- 金棕层（瞳孔 R 符文）= RGB mask `r>140 ∧ b<80 ∧ (r-b)>80`，与主层**同几何**
-  （同样先 crop 主体 bbox 再 resize 到 `(48×2, 21×4)`），逐 cell 对齐。
-- 新点阵 `48×21`：`cols/(rows×2) = 48/42 = 1.143`，终端显示为略扁
-  （旧 34×17 的 `34/(17×2)=1.000` 看似方形，但主体只占 0.49；FACTOR=2.0 档
-  `48/23` 显示方形 ≈1.043）。
-- `BANNER_MIN_COLS` 不变 96（`48 + 3 + 43 + 2`）；80-col 终端仍按窄终端
-  降级返空（与旧 82 阈值行为一致）。
+- `TH=200`: background is near-white (~245), subject dark; 200 is a safe
+  threshold (measured: TH=180 and TH=200 yield identical bboxes).
+- `COLS=48`: subject is square and big enough, and the info column fits
+  alongside. `ROWS = round(48 × 785 / (2.2 × 816)) = 21`.
+- `FACTOR=2.2`: terminal braille character height-to-width ratio.
+  **Calibration baseline**: a 45° diagonal in the source still looks 45° in
+  the terminal; fonts with a character ratio off 1:2 need a small 2.1/2.2
+  adjustment, then it is frozen.
+  **Flattening iteration**: after review the user ruled "it is squeezed too
+  thin, make it a bit flatter", so FACTOR moved 2.0 → 2.2 → ROWS 23→21,
+  display ratio 1.04 → 1.14 (slightly flat), and the banner height shrank
+  accordingly (easing the "too big" impression).
+- gold-brown layer (pupil R rune) = RGB mask `r>140 ∧ b<80 ∧ (r-b)>80`, using
+  the **same geometry** as the main layer (crop the subject bbox first, then
+  resize to `(48×2, 21×4)`), aligned per cell.
+- New raster `48×21`: `cols/(rows×2) = 48/42 = 1.143`, rendering slightly flat
+  (the old 34×17's `34/(17×2)=1.000` looked square, but the subject only
+  filled 0.49 of it; the FACTOR=2.0 tier `48/23` renders square at ≈1.043).
+- `BANNER_MIN_COLS` stays 96 (`48 + 3 + 43 + 2`); 80-column terminals still
+  degrade to empty like any narrow terminal (consistent with the old 82
+  threshold behavior).
 
-### 4.5 字体调优（辅助）
+### 4.5 Font tuning (supporting)
 
-方案 4 修复了采样基准，但终端字体字符比仍影响最终观感：若字符宽高比偏离 0.5:1
-（braille 1 列 × 2 行），正方形主体仍会略扁。推荐 iTerm + Cascadia Code /
-JetBrains Mono（字符宽高比接近 0.5:1，braille 显示最接近正方形）。
+Option 4 fixed the sampling baseline, but the terminal font's character ratio
+still affects the final look: if the character width-to-height ratio deviates
+from 0.5:1 (braille is 1 col × 2 rows), the square subject still renders
+slightly flat. iTerm + Cascadia Code / JetBrains Mono are recommended
+(character ratios close to 0.5:1; braille renders most nearly square).
 
-## 5. 验证记录（搬入后 + 二轮改版）
+## 5. Verification record (after move-in + second revision)
 
-- `tests/tui/render-smoke.test.tsx`：banner 在 80 / 120 / 160 列 renderToString
-  无溢出、每行占满 cols（无水平居中）、窄终端（cols < 80）降级返回空、
-  圆角外框（╭/╰/╮/╯）+ 居中 title `◆ iknow`、info 栏（Version /
-  Cwd / Data dir）+ 完整眼（32×13 braille）断言；UI 元素层无 emoji
-  （U+1F300-1FAFF 缺席）。
-- pty 冒烟：真实 TTY 下 banner 渲染正常（见
-  `docs/handoff/2026-08-05-tui-implementation.md` 手工表）。
+- `tests/tui/render-smoke.test.tsx`: banner renders via renderToString at 80 /
+  120 / 160 columns without overflow, every line fills cols (no horizontal
+  centering), narrow terminals (cols < 80) degrade to an empty result, the
+  rounded frame (╭/╰/╮/╯) + centered title `◆ iknow`, the info column
+  (Version / Cwd / Data dir) + the complete eye (32×13 braille) are asserted;
+  the UI element layer contains no emoji (U+1F300-1FAFF absent).
+- pty smoke: the banner renders correctly on a real TTY (see the manual table
+  in `docs/handoff/2026-08-05-tui-implementation.md`).
 
-## 6. e2 黄昏魔法石渐变定稿（2026-08-11）
+## 6. e2 dusk philosopher's-stone gradient, final
 
-> 本节是 §1-§5 所述「双色分层（墨绿线稿 + 金棕 R 符文）」之后的配色升级
-> 定稿存档。探索全记录见 `docs/design/DESIGN-BANNER-GRADIENT.md`。
+> This section archives the palette upgrade that supersedes the
+> "two-color layering (ink-green line art + gold-brown R rune)" described in
+> §1-§5. Full exploration record: `docs/design/DESIGN-BANNER-GRADIENT.md`.
 
-操作员 #321 logo 重设计验收后定稿 **e2 v0 黄昏魔法石**：
+After the logo-redesign acceptance, the operator finalized **e2 v0 dusk
+philosopher's stone**:
 
-- **探索过程**：16 个渐变方案族（上下 v / 左右 h / 放射 r / 异色系 e，
-  每族 4 方案）第一轮 → e2 方向确认 → e2 5 变体（v0-v4）第二轮并排对比 →
-  操作员选定 **e2 v0 原版**。
-- **端点**：`#1a1d6e`（深蓝紫）→ `#ffafaf`（粉金）。
-- **公式**：13×32 逐 cell 上色，对角线 `t = 0.6·(c/31) + 0.4·(r/12)`，
-  RGB 空间线性插值（`c 权重 0.6` / `r 权重 0.4`）。实现见
-  `src/tui/banner.ts` `eyeGradientCells({from, to, cWeight, rWeight})`；
-  端点 SSOT = `src/tui/theme.ts` `logoInk` / `logoGold`。
-- **这是对 §2 双色分层的升级**：不规则对角线渐变替代双色分层。几何
-  （13×32 braille + alpha>128 主体 mask）不变；颜色从「墨绿 + 金棕」两层
-  离散 mask 升级为「蓝紫 → 粉金」单层连续渐变；旧 `EYE_GOLD_LINES` /
-  `BannerSegment` / `eyeSegments()` 金层管线删除（PR #360 commit
-  `6d3a3f2`）。
-- **窄终端降级保留**：`BANNER_MIN_COLS = 80`、单行 `◆ iknow <version>`、
-  降级单色 = §2 同款。
-- **细节 / 各候选否决理由 / ANSI256 退化调研**：见
-  `docs/design/DESIGN-BANNER-GRADIENT.md`。
+- **Exploration**: 16 gradient candidates in 4 families (vertical v /
+  horizontal h / radial r / exotic-hue e, 4 candidates per family) in the
+  first round → e2 direction confirmed → second round compared 5 e2 variants
+  (v0-v4) side by side → the operator selected the **e2 v0 original**.
+- **Endpoints**: `#1a1d6e` (deep blue-purple) → `#ffafaf` (pink-gold).
+- **Formula**: per-cell coloring on the 13×32 grid, diagonal
+  `t = 0.6·(c/31) + 0.4·(r/12)`, linear interpolation in RGB space
+  (`c` weight 0.6 / `r` weight 0.4). See `src/tui/banner.ts`
+  `eyeGradientCells({from, to, cWeight, rWeight})`; endpoint SSOT =
+  `logoInk` / `logoGold` in `src/tui/theme.ts`.
+- **This upgrades §2's two-color layering**: an irregular diagonal gradient
+  replaces the two discrete color layers. The geometry (13×32 braille +
+  alpha>128 subject mask) is unchanged; color moves from two discrete masks
+  ("ink-green + gold-brown") to one continuous layer ("blue-purple →
+  pink-gold"); the old gold-layer pipeline `EYE_GOLD_LINES` / `BannerSegment`
+  / `eyeSegments()` was deleted (commit `6d3a3f2`).
+- **Narrow-terminal degradation kept**: `BANNER_MIN_COLS = 80`, single line
+  `◆ iknow <version>`, degraded monochrome = same as §2.
+- **Details / rejection reasons per candidate / ANSI256 degradation research**:
+  see `docs/design/DESIGN-BANNER-GRADIENT.md`.

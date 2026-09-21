@@ -1,43 +1,90 @@
-# thinking-picker 设计文档（编辑器极简风）
+# thinking-picker design (editor-minimalist style)
 
-> 状态：**定案（双面板版）**。可直接据此实现。
-> 输入：`/thinking` 或 `/effort` 回车 → **不直接生效**，弹出浮层面板。
-> 语义基线：与现网 `/thinking` 开关 + `/effort` 档位（`thinkingEnabled` / `thinkingEffort` state）**同源同值**，本设计只改交互入口，不触碰 `computeThinkingOverride` 语义。
+> Status: **final (two-panel version)** — implement directly from this
+> document.
+> Input: `/thinking` or `/effort` + Enter → **does not take effect directly**;
+> an overlay panel pops up.
+> Semantic baseline: same source, same values as the live `/thinking` toggle +
+> `/effort` level states (`thinkingEnabled` / `thinkingEffort`). This design
+> only changes the interaction entry point and does not touch
+> `computeThinkingOverride` semantics.
 
-## 修订记录（双面板版，最终定案）
+## Revision record (two-panel version, final)
 
-早期版本（下方 §0–§8 正文）把 `/thinking` 与 `/effort` 合并为**单一三态面板**（off/auto/manual），Enter 提交即关闭、Esc 取消。经用户澄清后**废弃**，最终定案改为**两个独立面板**：
+The early version (§0–§8 below) merged `/thinking` and `/effort` into a
+**single three-state panel** (off/auto/manual): Enter submitted and closed, Esc
+cancelled. After user clarification that version was **discarded**; the final
+design uses **two independent panels**:
 
-- **`/thinking` = 纯开关面板**（ON/OFF），只影响 `thinkingEnabled`，不碰 `thinkingEffort`。标题 `思考开关`。
-- **`/effort` = 纯档位面板**（low/medium/high/xhigh/max 5 档），只影响 `thinkingEffort`（隐式 `thinkingEnabled=true`），不碰开关。标题 `思考强度`。
-- 两面板视觉风格一致（design-25：圆角流光边框 + 紫渐变进度条 + 边界水线）。
-- **Enter = 选定并固定**：把当前选择固定为面板内已提交值，**面板保持打开**，可继续调（开关面板 Enter 固定当前 ON/OFF 预览、不翻转；档位面板 Enter 把焦点档固定为已提交档）。
-- **Esc = 保存退出**：把面板内「已固定」的值写入真实 `thinkingEnabled` / `thinkingEffort`，然后关闭面板。**没有 cancel/放弃路径**。
+- **`/thinking` = a pure toggle panel** (ON/OFF): affects only
+  `thinkingEnabled`, never `thinkingEffort`. Its on-screen title is the
+  "thinking toggle" label (exact string in `src/tui/thinking-picker.tsx`).
+- **`/effort` = a pure level panel** (low/medium/high/xhigh/max, 5 levels):
+  affects only `thinkingEffort` (implicitly `thinkingEnabled=true`), never the
+  toggle. Its on-screen title is the "thinking intensity" label (exact string
+  in `src/tui/thinking-picker.tsx`).
+- The two panels share one visual style: rounded flowing-light border + purple
+  gradient progress bar + boundary water-line.
+- **Enter = select and pin**: pins the current choice as the panel's committed
+  value while the **panel stays open** for further adjustment (in the toggle
+  panel Enter pins the current ON/OFF preview without flipping it; in the level
+  panel Enter pins the focused level as the committed one).
+- **Esc = save and exit**: writes the panel's pinned values into the real
+  `thinkingEnabled` / `thinkingEffort`, then closes the panel. **There is no
+  cancel/discard path.**
 
-下方 §0–§8 保留为历史设计过程；键路由与渲染以源码 `src/tui/thinking-picker.tsx` 的 `reduceThinkingSwitchKey` / `reduceThinkingEffortKey` / `ThinkingPicker`（`ThinkingPickerState` 判别联合）为准。
+§0–§8 below are kept as the historical design process; key routing and
+rendering follow the source `src/tui/thinking-picker.tsx` —
+`reduceThinkingSwitchKey` / `reduceThinkingEffortKey` / `ThinkingPicker` (the
+`ThinkingPickerState` discriminated union).
 
 ---
 
-## §0 设计基线（代码事实，实现者必读）
+## §0 Design baseline (code facts, required reading for the implementer)
 
-- 状态已存在于 `src/tui/app.tsx`（9f8a4e0 引入）：
-  - `thinkingEnabled: boolean` — `/thinking` 开关（影响模型请求），初始 `props.defaultThinking?.mode === "adaptive"`，**默认 off**。
-  - `thinkingEffort: ThinkingEffortWire` — `"" | "low" | "medium" | "high" | "xhigh" | "max"`，初始 `props.defaultThinking?.effort ?? ""`，**默认 medium**（env `IKNOW_LLM_THINKING_EFFORT` 缺省 `""` → 展示层映射为 `medium`）。
-  - 生效路径：`runTurnOnce` → `computeThinkingOverride(defaultThinking, thinkingEnabled, thinkingEffort)` → `bridge.postMessage({ thinking })`。**本设计不修改这个 gate**；picker 只是 `setThinkingEnabled` / `setThinkingEffort` 的新入口。
-- 语义（本设计必须维持）：
-  - **Auto 开** → `setThinkingEffort("")`；5 档灰显（不可选）。
-  - **选某档** → `setThinkingEffort(picked)` + `setThinkingEnabled(true)`（隐式开）；Auto 圆点自动转 ○。
-  - **档位默认 medium**（env 默认 `""` → 展示 `medium`；env 显式档位则回显该档）。
-  - **Auto 默认 off**。
-- 面板触发后**输入框已清空**（`handleSubmit` 开头 `setInputValue("")`），Enter/Esc 后输入框仍空——本设计维持该行为。
-- 键位冲突：OpenTUI 全局 `useKeyboard` 是**单通道**（app.tsx 现有 rewind/ask modal 都是"活跃时独占"模式）。picker 用同一纪律：**pickerOpen ≠ null 时，`useKeyboard` 顶部先拦 ←/→/Tab/Space/Enter/Esc/可打印字符**，否则落回既有路由。**必须**在 Shift+Tab / Ctrl+C 分支**之后**、在 rewind picker 分支**之前**插入（优先级：Ctrl 组合 > picker > rewind > 双 Esc > ask modal）。
-- 键名：`KeyEvent.name` 的 `space`、`left`、`right`、`tab`、`return`、`escape`（现有代码 `e.name === "return"` 同款）。`e.ctrl` / `e.meta` 组合一律不拦（让给 app 层）。
+- The state already lives in `src/tui/app.tsx` (introduced in 9f8a4e0):
+  - `thinkingEnabled: boolean` — the `/thinking` toggle (affects model
+    requests), initial `props.defaultThinking?.mode === "adaptive"`,
+    **default off**.
+  - `thinkingEffort: ThinkingEffortWire` —
+    `"" | "low" | "medium" | "high" | "xhigh" | "max"`, initial
+    `props.defaultThinking?.effort ?? ""`, **default medium** (env
+    `IKNOW_LLM_THINKING_EFFORT` default `""` → the display layer maps it to
+    `medium`).
+  - Effect path: `runTurnOnce` →
+    `computeThinkingOverride(defaultThinking, thinkingEnabled, thinkingEffort)`
+    → `bridge.postMessage({ thinking })`. **This design does not modify that
+    gate**; the picker is only a new entry point to `setThinkingEnabled` /
+    `setThinkingEffort`.
+- Semantics (this design must preserve them):
+  - **Auto on** → `setThinkingEffort("")`; the 5 levels gray out
+    (unselectable).
+  - **Pick a level** → `setThinkingEffort(picked)` +
+    `setThinkingEnabled(true)` (implicit on); the Auto dot flips to ○
+    automatically.
+  - **Level default medium** (env default `""` → displays `medium`; an
+    explicit env level echoes that level).
+  - **Auto default off**.
+- After the panel opens, **the input box is already cleared** (`handleSubmit`
+  starts with `setInputValue("")`); it stays empty after Enter/Esc — this
+  design keeps that behavior.
+- Key routing conflict: OpenTUI's global `useKeyboard` is **single-channel**
+  (app.tsx's existing rewind/ask modals all use the "exclusive while active"
+  pattern). The picker follows the same discipline: **while pickerOpen ≠ null,
+  `useKeyboard` intercepts ←/→/Tab/Space/Enter/Esc/printable chars at the
+  top**, otherwise they fall through to existing routing. The interception
+  **must** be inserted **after** the Shift+Tab / Ctrl+C branches and **before**
+  the rewind-picker branch (priority: Ctrl combos > picker > rewind > double
+  Esc > ask modal).
+- Key names: `KeyEvent.name` values `space`, `left`, `right`, `tab`, `return`,
+  `escape` (same pattern as existing `e.name === "return"`). Anything with
+  `e.ctrl` / `e.meta` is never intercepted (left to the app layer).
 
 ---
 
-## §1 面板 ASCII 草图
+## §1 Panel ASCII sketches
 
-### 静态骨架（打开时，占 5 行）
+### Static skeleton (when open, occupies 5 rows)
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -49,9 +96,12 @@
 └──────────────────────────────────────────────┘
 ```
 
-终端宽 ≥ 40 列；面板**固定 5 行**，不随档位/状态变高。圆点行与档位行之间、档位行与提示行之间各 1 空行（用 `<box flexDirection="column" gap={1}>` 实现，见 §6）。
+Terminal width ≥ 40 columns; the panel is **fixed at 5 rows** regardless of
+level/state. Between the dot row and the level row, and between the level row
+and the hint row, one blank row each (implemented with
+`<box flexDirection="column" gap={1}>`, see §6).
 
-### 变体 a：auto off + medium 当前档
+### Variant a: auto off + medium as current level
 
 ```
  思考控制          auto ○   [Esc 取消]
@@ -62,7 +112,7 @@
  ←/→ 切档 · Tab/Space 开关 · Enter 生效
 ```
 
-### 变体 b：auto off + high 当前档
+### Variant b: auto off + high as current level
 
 ```
  思考控制          auto ○   [Esc 取消]
@@ -74,7 +124,7 @@
  ←/→ 切档 · Tab/Space 开关 · Enter 生效
 ```
 
-### 变体 c：auto on + 5 档 disabled
+### Variant c: auto on + all 5 levels disabled
 
 ```
  思考控制          auto ●   [Esc 取消]
@@ -85,50 +135,83 @@
  ←/→ 切档 · Tab/Space 开关 · Enter 生效
 ```
 
-### v1/v2 根本差异（对比候选 → 最终选择）
+### The fundamental v1/v2 differences (candidate comparison → final choice)
 
-- **候选 1（顶/底各一条 `─` 线框）**：需 `<box borderStyle="single" border={["top","bottom"]}>` 或自定义 `customBorderChars`。OpenTUI 0.5 的 `border` 支持 `BorderSides[]`，可实现，但引入 2 行硬线框，与"零装饰"冲突，且 `border` 数组形态无现成代码先例。
-- **候选 2（完全无边框，纯空行分隔 + 标题加粗）**：v2 的"纯空行分隔"需要 panel 自带 margin 才能与输入框拉开视觉距离——面板高 5 行 + 前后空行 = 行账复杂化。
-- **候选 3（仅标题行 + 单列）**：单列无法容纳双交互面（Auto 圆点 + 5 档并行），信息密度不足。
-- **最终选择：`rounded` 边框 + `borderColor={pal.border}` 灰，`paddingX={1}`，`marginBottom={1}`，标题行**。理由：直接复用 app.tsx 中 **PromptInput 同款圆角灰框**（`chat-view.tsx` banner 也是 `borderColor={pal.border}`）——单色灰、低视觉噪音；`rounded` 是既有测试断言过的行数形态；**色阶克制**由 token 选择保证（不新造色）。与 SelectModal 的关键差异在 §5 列表。顶/底 `─` 分隔线 = **不用**；提示分块 = **用空行**（`gap`）+ 语义色，不用线。
-
----
-
-## §2 视觉决策表
-
-| 元素                                            | 颜色 token                        | attribute             | 动画                           | 备注                                                                       |
-| ----------------------------------------------- | --------------------------------- | --------------------- | ------------------------------ | -------------------------------------------------------------------------- |
-| 标题 `思考控制`                                 | `text`                            | BOLD                  | 无                             | 左侧第一 token                                                             |
-| 标题行 `[Esc 取消]` 提示                        | `dim`                             | DIM                   | 无                             | 右侧同行为标题，左对齐排布（`justifyContent="space-between"`）             |
-| Auto 标签 `auto`                                | auto 开→`running`；auto 关→`text` | auto 开→BOLD；关→NONE | 无                             | 值语义色 + 字重                                                            |
-| Auto 圆点 `●`/`○`                               | 开→`running`；关→`text`           | 无                    | **无**（静态）                 | 圆点本身就是状态位                                                         |
-| 5 档标签（非当前、auto 关）                     | `text`                            | NONE                  | 无                             | 全部同色，无递进                                                           |
-| 当前档标签（auto 关）                           | `accent`                          | BOLD                  | **50ms 反白闪过（inOutQuad）** | 唯一动效，见 §3                                                            |
-| 当前档反白底                                    | `selected`（bg）                  | —                     | 同上 50ms                      | 与 BOLD 并存；`<span fg={pal.accent} bg={pal.selected} attributes={BOLD}>` |
-| 5 档标签（auto 开 disabled）                    | `dim`                             | DIM                   | 无                             | 灰显，无高亮、无反白                                                       |
-| 档位间分隔                                      | 无（用空格）                      | —                     | 无                             | 纯空格 2 列分隔，不用竖线/不用块字符                                       |
-| 提示行 `←/→ 切档 · Tab/Space 开关 · Enter 生效` | `dim`                             | DIM                   | 无                             | 固定文案，不随状态变化                                                     |
-| 面板边框                                        | `border`（灰）                    | —                     | 无                             | rounded，`paddingX={1}`，`marginBottom={1}`（与 PromptInput 同款）         |
-| 面板背景                                        | 无（透明）                        | —                     | 无                             | 不用 `codeBlockBg` 等块底色                                                |
+- **Candidate 1 (one `─` rule at top and bottom)**: would need
+  `<box borderStyle="single" border={["top","bottom"]}>` or custom
+  `customBorderChars`. OpenTUI 0.5's `border` supports `BorderSides[]` so it is
+  doable, but it introduces 2 rows of hard rules, conflicts with "zero
+  decoration", and the `border` array form has no existing code precedent.
+- **Candidate 2 (no border at all, pure blank-row separation + bold title)**:
+  the blank-row separation needs panel margins to create visual distance from
+  the input box — panel height 5 rows plus surrounding blank rows complicates
+  the row budget.
+- **Candidate 3 (title row only + single column)**: one column cannot host two
+  interaction surfaces (Auto dot + 5 levels in parallel); information density
+  is insufficient.
+- **Final choice: `rounded` border + `borderColor={pal.border}` gray,
+  `paddingX={1}`, `marginBottom={1}`, with a title row**. Rationale: directly
+  reuse the **same rounded gray frame as PromptInput** in app.tsx (the
+  `chat-view.tsx` banner also uses `borderColor={pal.border}`) — single-color
+  gray, low visual noise; `rounded` is a row-count shape already asserted by
+  existing tests; the **restrained color scale** is guaranteed by token
+  selection (no new colors invented). The key differences from SelectModal are
+  listed in §5. Top/bottom `─` rules = **not used**; hint blocks are separated
+  by **blank rows** (`gap`) + semantic colors, not by rules.
 
 ---
 
-## §3 动效（0~1 个，定案：**1 个**）
+## §2 Visual decision table
 
-**原则**：用户操作才有反馈；反馈 <150ms；不接受 loop/alternate/pulse/呼吸；无入场/出场动画（picker 弹出即现、Esc 即隐——极简拒绝装饰性过渡）。
-
-**定案：档位切换时当前档字符 50ms 反白闪过一次。**
-
-- 实现：`useTimeline({ autoplay: false })`（本组件内新建，不全局共享）；`Timeline.add(flashTarget, { duration: 50, ease: "inOutQuad", onUpdate, onComplete })`。
-  - `flashTarget` = 一个普通对象 `{ t: 0 }`；`onUpdate(a)` 里把 `a.targets[0].t` 读为 0→1 进度，映射为**反白强度**：`t < 0.5 ? 反白底 on : 反白底 off`（即 50ms 内前半程亮、后半程灭——**无平滑淡出，是硬切换**，符合"闪"）。
-  - 或者更简单：`useTimeline` + `add` + `onComplete` 里 `setState` 关掉反白标记。实现者二选一，**禁止**把 `t` 直接映射成不存在的"透明度"。
-- 只闪一次；切到新档立即重触发（重置 timeline 或重新 add）。
-- **无动画的替代方案拒绝**：纯状态切换会让"当前档"位置变化无可感知（见 §8 风险 1），50ms 硬闪是最低成本的补偿，且严格 <150ms、无 loop。
-- **Auto 圆点不闪**、**禁用灰显不闪**：动效预算只给"档位切换"这一个动作。
+| Element                                           | Color token                     | attribute             | Animation                        | Notes                                                                      |
+| ------------------------------------------------- | ------------------------------- | --------------------- | -------------------------------- | -------------------------------------------------------------------------- |
+| title text (panel heading, see the §1 sketch)     | `text`                          | BOLD                  | none                             | the first token on the left                                                |
+| Esc hint in the title row (see the §1 sketch)     | `dim`                           | DIM                   | none                             | shares the title row on the right, space-between layout (`justifyContent="space-between"`) |
+| Auto label `auto`                                 | auto on → `running`; auto off → `text` | auto on → BOLD; off → NONE | none                        | value-semantic color + weight                                              |
+| Auto dot `●`/`○`                                  | on → `running`; off → `text`    | none                  | **none** (static)                | the dot itself is the state bit                                            |
+| 5 level labels (not current, auto off)            | `text`                          | NONE                  | none                             | all same color, no progression                                             |
+| current level label (auto off)                    | `accent`                        | BOLD                  | **one 50ms reverse flash (inOutQuad)** | the only animation, see §3                                                 |
+| current-level reverse background                  | `selected` (bg)                 | —                     | same 50ms                        | coexists with BOLD; `<span fg={pal.accent} bg={pal.selected} attributes={BOLD}>` |
+| 5 level labels (auto on, disabled)                | `dim`                           | DIM                   | none                             | grayed out; no highlight, no reverse                                       |
+| separators between levels                         | none (spaces)                   | —                     | none                             | plain 2-column space separators; no pipes, no block characters             |
+| hint row (switch levels / toggle / commit; see the §1 sketch) | `dim`           | DIM                   | none                             | fixed text; never changes with state                                       |
+| panel border                                      | `border` (gray)                 | —                     | none                             | rounded, `paddingX={1}`, `marginBottom={1}` (same as PromptInput)          |
+| panel background                                  | none (transparent)              | —                     | none                             | do not use block backgrounds like `codeBlockBg`                            |
 
 ---
 
-## §4 键盘交互状态机
+## §3 Animation (0~1 allowed, final: **1**)
+
+**Principle**: only user actions get feedback; feedback <150ms; no
+loop/alternate/pulse/breathing; no enter/exit animation (the picker appears the
+instant it opens and vanishes the instant Esc is pressed — minimalism rejects
+decorative transitions).
+
+**Final: when the level changes, the current-level glyph flashes in reverse
+once for 50ms.**
+
+- Implementation: `useTimeline({ autoplay: false })` (created locally in this
+  component, not shared globally); `Timeline.add(flashTarget, { duration: 50,
+  ease: "inOutQuad", onUpdate, onComplete })`.
+  - `flashTarget` = a plain object `{ t: 0 }`; in `onUpdate(a)` read
+    `a.targets[0].t` as 0→1 progress and map it to the **reverse intensity**:
+    `t < 0.5 ? reverse bg on : off` (first half of the 50ms lit, second half
+    off — **no smooth fade-out; it is a hard switch**, which matches "flash").
+  - Or simpler: `useTimeline` + `add`, and clear the reverse flag via
+    `setState` in `onComplete`. The implementer picks one; mapping `t` to a
+    nonexistent "opacity" is **forbidden**.
+- Flashes once; switching to a new level re-triggers immediately (reset the
+  timeline or add again).
+- **The no-animation alternative was rejected**: with a pure state switch the
+  current level's position change would be imperceptible (see §8 risk 1); the
+  50ms hard flash is the lowest-cost compensation, strictly <150ms with no
+  loop.
+- **The Auto dot never flashes** and **disabled gray never flashes**: the
+  animation budget is spent only on level switching.
+
+---
+
+## §4 Keyboard interaction state machine
 
 ```
 状态空间：
@@ -171,32 +254,52 @@ cancel() 语义：
   Esc 重复按 → 第二次时 picker 已 null，落回既有双 Esc 路由（不冲突：picker 分支只在 ≠null 时短路）。
 ```
 
-**边界**：`pickerOpen` 与既有 rewind picker / ask modal 互斥——本设计在 `useKeyboard` 里**先于** rewind 分支拦截，所以二者不可能同时活跃。渲染槽同理互斥（§5 行账 5）。
+**Boundary**: `pickerOpen` is mutually exclusive with the existing rewind
+picker / ask modal — this design intercepts **before** the rewind branch in
+`useKeyboard`, so the two can never be active at once. Render slots are
+mutually exclusive for the same reason (§5 row budget 5).
 
 ---
 
-## §5 与现有 modal 的关系
+## §5 Relationship to existing modals
 
-**不要复刻的（SelectModal 特征）**：
+**Not to copy (SelectModal traits):**
 
-- 圆角边框 `borderColor={pal.running}`（金框）→ 换 `pal.border` 灰框。
-- 标题 running 色 + BOLD → 换 `text` BOLD。
-- `❯ ` 前缀选中光标 → **不用**（极简：当前档用反白底，不用光标前缀）。
-- 键位提示行文案风格（`↑↓ 选择 · Enter 确认 · Esc 收起`）→ 换成本面板的 `←/→ 切档 · Tab/Space 开关 · Enter 生效`。
+- rounded border `borderColor={pal.running}` (gold frame) → switch to the
+  gray `pal.border` frame.
+- title in running color + BOLD → switch to `text` BOLD.
+- `❯ ` selection cursor prefix → **not used** (minimalist: the current level
+  uses a reverse background, no cursor prefix).
+- key-hint row wording style (the SelectModal "up/down select · Enter confirm
+  · Esc collapse" pattern) → replaced by this panel's own hint (switch levels
+  / toggle / commit; see the §1 sketch).
 
-**借鉴的（chat-view.tsx banner 极简）**：
+**To borrow (chat-view.tsx banner minimalism):**
 
-- `borderStyle="rounded"` + `borderColor={pal.border}`（灰棕，低噪音）。
-- `paddingX={1}`、`marginBottom={1}`（与输入框/picker 距既有 chrome 同距）。
-- 标题靠左（`titleAlignment="left"` 已是 banner 用过的模式）。
+- `borderStyle="rounded"` + `borderColor={pal.border}` (gray-brown, low
+  noise).
+- `paddingX={1}`, `marginBottom={1}` (same distances the existing chrome uses
+  to the input box / picker).
+- left-aligned title (`titleAlignment="left"` is a pattern the banner already
+  uses).
 
-**模块归属：独立 `src/tui/thinking-picker.tsx`，不 inline 到 app.tsx。**
+**Module ownership: a standalone `src/tui/thinking-picker.tsx`, not inlined
+into app.tsx.**
 
-- 理由：与 `rewind-picker.tsx` 同构（picker 独立模块 + 宿主持状态）；纯函数 reducer（`reduceThinkingPickerKey`）可单测（现有 rewind/ask 均此纪律）；渲染组件 + 行账函数同文件 SSOT。
-- 文件内容：`THINKING_LEVELS`（复用 `ADJUSTABLE_EFFORT_LEVELS`，不重复定义）、`effortToIndex` / `indexToEffort`（SSOT 映射）、`ThinkingPicker` 渲染组件、`reduceThinkingPickerKey` 纯函数、`thinkingPickerRows()` 行账。
-- app.tsx 职责：持有 `pickerOpen / autoOn / focusedIndex` state；`useKeyboard` 顶部短路路由；渲染 `{pickerOpen !== null && <ThinkingPicker .../>}`；`commit/cancel` 写既有 `setThinkingEnabled/setThinkingEffort`。
+- Rationale: same shape as `rewind-picker.tsx` (picker as its own module +
+  host holds state); a pure-function reducer (`reduceThinkingPickerKey`) is
+  unit-testable (the existing rewind/ask follow the same discipline); render
+  component + row-budget function share one file (SSOT).
+- File contents: `THINKING_LEVELS` (reuse `ADJUSTABLE_EFFORT_LEVELS`, no
+  duplicate definition), `effortToIndex` / `indexToEffort` (SSOT mapping),
+  `ThinkingPicker` render component, `reduceThinkingPickerKey` pure function,
+  `thinkingPickerRows()` row budget.
+- app.tsx responsibilities: hold the `pickerOpen / autoOn / focusedIndex`
+  state; short-circuit routing at the top of `useKeyboard`; render
+  `{pickerOpen !== null && <ThinkingPicker .../>}`; `commit/cancel` write the
+  existing `setThinkingEnabled/setThinkingEffort`.
 
-**行账（5 行，不需 wrapModalLines）**：
+**Row budget (5 rows; wrapModalLines not needed):**
 
 ```
 thinkingPickerRows(cols) 恒返回 5：
@@ -207,77 +310,144 @@ thinkingPickerRows(cols) 恒返回 5：
   行5 提示行
 ```
 
-- 不折行（5 档标签定宽，标题 auto 提示定长，最短 40 列足够）；不产 `wrapModalLines` 物理行预测（模态无折行）。
-- 但要**计入 chromeReserveRows**：新增 `pickerRows` 参数（与 `modalRows` 同款 `+1` marginBottom 入账），否则 viewport 高度被挤。这是 app.tsx 必须同步改的唯二点（另一个是 useKeyboard 短路）。
+- No wrapping (the 5 level labels are fixed width; the title row's auto + Esc
+  hints are fixed length; the minimum 40 columns is enough); it produces no
+  `wrapModalLines` physical-row prediction (modals never wrap).
+- But it must be **counted into chromeReserveRows**: a new `pickerRows`
+  parameter (the same `+1` marginBottom accounting as `modalRows`), otherwise
+  the viewport height gets squeezed. Together with the useKeyboard
+  short-circuit, these are the only two places app.tsx must change in sync.
 
 ---
 
-## §6 OpenTUI 渲染细节
+## §6 OpenTUI rendering details
 
-- **边框**：`<box borderStyle="rounded" borderColor={pal.border} paddingX={1} marginBottom={1}>`，**不用** `─` 单线分隔、不用 top/bottom 半框（border 数组形态无先例，且视觉噪音更大）。`rounded` 是既有测试断言行数的形态（modal/input/banner 同款），风险最低。
-- **内边距**：`paddingX={1}`（与 PromptInput/banner 同）；行内对齐：标题行 `justifyContent="space-between"`，档位行 `justifyContent="flex-start"`（左对齐，不居中——居中会让档位跳动，极简左对齐更稳）。
-- **列宽预算（≥40 列）**：标题 `思考控制`（4 CJK 宽 8） + `auto` + 圆点 + `[Esc 取消]` + 右侧提示 `←/→ 切档 · Tab/Space 开关 · Enter 生效`（~24 列）——40 列内放得下，不需要折行/截断。
-- **5 档不递进色**：全部 `text`（auto 关）/ `dim`（auto 开 disabled）；**只有当前档** `fg={pal.accent} bg={pal.selected} attributes={BOLD}`（反白底 = `selected` token，`TextAttributes.REVERSE` 不可用——见下）。
-- **TextAttributes.REVERSE 可用性**：`utils.d.ts` 的 `createTextAttributes` 签名里 `inverse` 位存在，但 `types.d.ts` 暴露的 `TextAttributes` 常量**没有 REVERSE**（只有 NONE/BOLD/DIM/ITALIC/UNDERLINE/BLINK/INVERSE/HIDDEN/STRIKETHROUGH）。**定案：用 `bg={pal.selected}` 反白底，不用 `TextAttributes.INVERSE`**（INVERSE 依赖终端反色渲染，跨终端不稳定；显式 bg 确定）。反白底与 BOLD 并存：`<span fg={pal.accent} bg={pal.selected} attributes={TextAttributes.BOLD}>`。
-- **档位可视化：纯文字标签，空格分隔**——`low  medium  high  xhigh  max`（2 空格定宽分隔）。**不用** `[low] [medium] …` 方括号（方括号是代码/状态符号约定，档位是值）、**不用** `|` 竖线分隔（竖线是"分隔符"不是"可选值"）。档位间 2 空格 = 最少的装饰性间隔，符合极简。
-- **标题 `[思考控制]` vs `── 思考控制 ──`**：定案**`思考控制`（无括号、无线）**。理由：括号 `[思考]` 已是"thinking 折叠行"的既存符号（`message-blocks.tsx THINKING_FOLD_LINE`），面板标题再加 `[思考控制]` 会与消息区折叠行视觉混淆；`── ──` 是装饰线，极简拒绝。标题 = 无装饰、BOLD、text 色。
-- **Auto 圆点**：`auto ●` / `auto ○`（fullwidth 点，2 列对齐，`●` U+25CF / `○` U+25CB——窄终端也稳定）。`running` 金当"开"，`text` 白当"关"。**5 档 disabled 时圆点自动为 ●**（autoOn 即 ●），与 §1 变体 c 一致。
-- **面板定位**：`render` 在 app.tsx 渲染树的 `ModalHost` 之上、notice 之下（先于输入框的位置，即"输入框正上方"）。用 `<box flexDirection="column">` 按渲染序自然上浮。
-- **禁用态档位行**：autoOn=true 时整行 `<text fg={pal.dim} attributes={DIM}>`，无 BOLD、无 bg。
-
----
-
-## §7 测试矩阵（≥8，设计为纯函数 + 渲染断言，均可直接落 test）
-
-**reducer 单测（`reduceThinkingPickerKey`，`tests/tui/thinking-picker.test.tsx`）**：
-
-| #   | picker 状态                        | 键事件                                | 期望输出                                     |
-| --- | ---------------------------------- | ------------------------------------- | -------------------------------------------- |
-| 1   | autoOn=false, focusedIndex=2(high) | →                                     | move, index=3（xhigh），闪                   |
-| 2   | autoOn=false, focusedIndex=4(max)  | →                                     | move, index=4（clamp 顶）                    |
-| 3   | autoOn=false, focusedIndex=0(low)  | ←                                     | move, index=0（clamp 底）                    |
-| 4   | autoOn=true, focusedIndex=2        | →                                     | ignore（disabled，不可聚焦）                 |
-| 5   | autoOn=false, focusedIndex=1       | Tab                                   | toggle, autoOn=true                          |
-| 6   | autoOn=false, focusedIndex=1       | Space                                 | toggle, autoOn=true（与 Tab 同效）           |
-| 7   | autoOn=true, focusedIndex=1        | Space                                 | toggle, autoOn=false                         |
-| 8   | 任意                               | Enter（autoOn=false, focusedIndex=3） | commit, { autoOn:false, level:xhigh }        |
-| 9   | 任意                               | Enter（autoOn=true）                  | commit, { autoOn:true }（不读 focusedIndex） |
-| 10  | 任意                               | Esc                                   | cancel（放弃全部）                           |
-| 11  | 任意                               | up / down / ctrl+c                    | ignore（让给既有路由）                       |
-| 12  | 任意                               | 可打印字符 'a'                        | ignore（不设 hotkey）                        |
-
-**app 层集成（`tests/tui/thinking-picker.test.tsx` 或扩 `app.test.tsx`）**：
-
-| #   | 操作                                       | 期望                                                                                                                              |
-| --- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| 13  | 输入 `/thinking` Enter                     | 输入框清空；面板出现；标题 `思考控制`；auto 显示当前 `thinkingEnabled`（默认 ○）；档位反白 = 当前 effort 映射（默认 medium 反白） |
-| 14  | 面板内 Space + Enter                       | thinkingEnabled=true、thinkingEffort="" 写入（Auto 生效）；面板消失                                                               |
-| 15  | 面板内 →→ + Enter                          | thinkingEffort=high（从 medium 右移 2）；thinkingEnabled=true；面板消失                                                           |
-| 16  | 面板内 Esc                                 | state 不变（thinkingEnabled/Effort 原值）；面板消失                                                                               |
-| 17  | 输入 `/effort` Enter                       | 面板打开（同 /thinking 面板）；初始 focusedIndex = 当前档                                                                         |
-| 18  | `/effort` 打开后直接 Enter（autoOn=false） | 效果等同 `/effort <当前档>`：写 thinkingEffort=当前档 + thinkingEnabled=true（与现网 notice 语义等价）                            |
-| 19  | 打开面板时按 Ctrl+O                        | Ctrl+O 不被吞：折叠态切换仍生效（picker 分支只拦无 ctrl 键）                                                                      |
-| 20  | 打开面板时按 Ctrl+C                        | 复制逻辑不因 picker 破坏（ctrl 分支在 picker 前；打断已迁 Esc，见 2026-09-18 键位迁移）                                           |
-
-**行账单测（`tests/tui/chrome-budget.test.ts` 增补）**：
-
-| #   | 输入                                    | 期望                            |
-| --- | --------------------------------------- | ------------------------------- |
-| 21  | thinkingPickerRows(80)                  | 5                               |
-| 22  | chromeReserveRows({...}) vs +pickerRows | 差 = 6（5 行 + marginBottom 1） |
+- **Border**: `<box borderStyle="rounded" borderColor={pal.border}
+  paddingX={1} marginBottom={1}>`; **do not use** `─` single-rule separators
+  or top/bottom half frames (the border-array form has no precedent and adds
+  visual noise). `rounded` is the shape whose row counts existing tests
+  already assert (same family as modal/input/banner), the lowest-risk choice.
+- **Inner padding**: `paddingX={1}` (same as PromptInput/banner); inline
+  alignment: title row `justifyContent="space-between"`, level row
+  `justifyContent="flex-start"` (left-aligned, never centered — centering
+  makes the levels jump; minimalist left-alignment is steadier).
+- **Column-width budget (≥40 columns)**: title (4 wide CJK glyphs = 8 columns
+  in the sketch) + `auto` + dot + the Esc hint + the right-side hint (~24
+  columns) — fits within 40 columns; no wrapping or truncation needed.
+- **No progressive colors for the 5 levels**: all `text` (auto off) / `dim`
+  (auto on, disabled); **only the current level** gets `fg={pal.accent}
+  bg={pal.selected} attributes={BOLD}` (reverse background = the `selected`
+  token; `TextAttributes.REVERSE` is unavailable — see below).
+- **TextAttributes.REVERSE availability**: the `createTextAttributes` signature
+  in `utils.d.ts` has an `inverse` bit, but the `TextAttributes` constants
+  exposed in `types.d.ts` **have no REVERSE** (only
+  NONE/BOLD/DIM/ITALIC/UNDERLINE/BLINK/INVERSE/HIDDEN/STRIKETHROUGH).
+  **Final: use the `bg={pal.selected}` reverse background, not
+  `TextAttributes.INVERSE`** (INVERSE relies on the terminal's reverse-video
+  rendering and is unstable across terminals; an explicit bg is
+  deterministic). Reverse background coexists with BOLD:
+  `<span fg={pal.accent} bg={pal.selected}
+  attributes={TextAttributes.BOLD}>`.
+- **Level visualization: plain text labels, space-separated** — `low  medium
+  high  xhigh  max` (fixed 2-space separators). **No** `[low] [medium] …`
+  brackets (brackets are a code/state-symbol convention; levels are values),
+  **no** `|` pipes (a pipe reads as a separator, not an option). 2 spaces
+  between levels = the minimum decorative gap, in keeping with minimalism.
+- **Title style: bare vs bracketed vs ruled** — **final: the bare heading, no
+  brackets, no rules**. The bracketed form is already the established symbol
+  of the collapsed thinking line (`THINKING_FOLD_LINE` in
+  `message-blocks.tsx`), so bracketing the panel title would visually clash
+  with the message-area fold lines; `── ──` rules are decoration, rejected by
+  minimalism. Title = undecorated, BOLD, `text` color.
+- **Auto dot**: `auto ●` / `auto ○` (fullwidth dots, 2-column aligned, `●`
+  U+25CF / `○` U+25CB — stable even on narrow terminals). `running` gold reads
+  as "on", `text` white as "off". **When the 5 levels are disabled the dot is
+  automatically ●** (autoOn means ●), consistent with variant c in §1.
+- **Panel placement**: in the app.tsx render tree the panel sits above
+  `ModalHost` and below the notice (positioned ahead of the input box, i.e.
+  "directly above the input"). `<box flexDirection="column">` floats it
+  naturally in render order.
+- **Disabled level row**: when autoOn=true the whole row is `<text
+  fg={pal.dim} attributes={DIM}>`, no BOLD, no bg.
 
 ---
 
-## §8 风险与权衡（≤5）
+## §7 Test matrix (≥8; the design is pure functions + render assertions, all directly testable)
 
-1. **无持续视觉反馈，用户不知道"当前档"**：反白只在 50ms 闪一下，之后当前档仅靠 `accent`+`selected` 底色（变体 a/b 中 current 档**常驻反白底**——不是只闪 50ms 就消失，闪是"切换瞬间的强调"，常驻反白是"当前位置"）。若实现者按 §3 只做"闪后消失"，会退回风险 1——**必须在 §2 表里让当前档常驻 `selected` 反白底**（已定案）。
-2. **缺少过渡显得突兀**：面板弹出/收起无动画。极简取舍，接受；补偿 = 面板位置固定（输入框正上方）、5 行固定高度，不跳动。
-3. **picker 无"关闭思考"通道**：Auto off 必须选 concrete 档（隐含 enabled=true）。需要纯 off 的用例仍走输入框 `/thinking`。若用户期望 picker 也能关思考，属需求缺口——**有意不扩**（拒绝"第二套切换机制"），记入待确认。
-4. **Enter 直接提交 = 用户没看面板就改了状态**（`/effort` 直接 Enter 等价旧 `/effort <当前档>`）。风险低：旧语义就是"立即生效"，picker 只是加了预览层；且面板默认反白当前档，Enter 是"确认现状"。
-5. **键位抢注风险**：Space 在输入框里是输入字符，但 picker 打开时输入框无焦点（`PromptInput disabled`），全局 useKeyboard 单通道短路——需测试 #20 确认 Ctrl 组合键不被吞（本设计在 Ctrl 分支之后拦截，已规避）。
+**Reducer unit tests (`reduceThinkingPickerKey`,
+`tests/tui/thinking-picker.test.tsx`):**
+
+| #   | picker state                       | key event                           | expected output                                  |
+| --- | ---------------------------------- | ----------------------------------- | ------------------------------------------------ |
+| 1   | autoOn=false, focusedIndex=2(high) | →                                   | move, index=3 (xhigh), flash                     |
+| 2   | autoOn=false, focusedIndex=4(max)  | →                                   | move, index=4 (clamped at top)                   |
+| 3   | autoOn=false, focusedIndex=0(low)  | ←                                   | move, index=0 (clamped at bottom)                |
+| 4   | autoOn=true, focusedIndex=2        | →                                   | ignore (disabled, cannot focus)                  |
+| 5   | autoOn=false, focusedIndex=1       | Tab                                 | toggle, autoOn=true                              |
+| 6   | autoOn=false, focusedIndex=1       | Space                               | toggle, autoOn=true (same effect as Tab)         |
+| 7   | autoOn=true, focusedIndex=1        | Space                               | toggle, autoOn=false                             |
+| 8   | any                                | Enter (autoOn=false, focusedIndex=3) | commit, { autoOn:false, level:xhigh }           |
+| 9   | any                                | Enter (autoOn=true)                 | commit, { autoOn:true } (focusedIndex not read)  |
+| 10  | any                                | Esc                                 | cancel (discard everything)                      |
+| 11  | any                                | up / down / ctrl+c                  | ignore (fall through to existing routing)        |
+| 12  | any                                | printable char 'a'                  | ignore (no hotkeys defined)                      |
+
+**App-layer integration (`tests/tui/thinking-picker.test.tsx` or an extension
+of `app.test.tsx`):**
+
+| #   | operation                                    | expected                                                                                                                      |
+| --- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 13  | type `/thinking`, Enter                      | input cleared; panel appears; panel heading as in the §1 sketch; auto shows the current `thinkingEnabled` (default ○); the reverse highlight sits on the level mapped from the current effort (default medium) |
+| 14  | Space + Enter inside the panel               | thinkingEnabled=true, thinkingEffort="" written (Auto takes effect); panel closes                                             |
+| 15  | →→ + Enter inside the panel                  | thinkingEffort=high (2 right of medium); thinkingEnabled=true; panel closes                                                   |
+| 16  | Esc inside the panel                         | state unchanged (thinkingEnabled/Effort keep their old values); panel closes                                                  |
+| 17  | type `/effort`, Enter                        | panel opens (same panel as /thinking); initial focusedIndex = current level                                                   |
+| 18  | `/effort` opened, then plain Enter (autoOn=false) | equivalent to `/effort <current level>`: writes thinkingEffort=current level + thinkingEnabled=true (semantics equal to the existing notice) |
+| 19  | Ctrl+O while the panel is open               | Ctrl+O is not swallowed: fold-state toggling still works (the picker branch only intercepts unmodified keys)                  |
+| 20  | Ctrl+C while the panel is open               | copy logic is not broken by the picker (the ctrl branch precedes the picker; the interrupt key has since moved to Esc in the keybinding migration) |
+
+**Row-budget unit tests (additions to `tests/tui/chrome-budget.test.ts`):**
+
+| #   | input                                   | expected                      |
+| --- | --------------------------------------- | ----------------------------- |
+| 21  | thinkingPickerRows(80)                  | 5                             |
+| 22  | chromeReserveRows({...}) vs +pickerRows | difference = 6 (5 rows + marginBottom 1) |
 
 ---
 
-## 一句话总结
+## §8 Risks and trade-offs (≤5)
 
-本版核心审美特征 = **克制**
+1. **No sustained visual feedback; the user may not know the current level**:
+   the reverse only flashes for 50ms, after which the current level relies on
+   the `accent` + `selected` background (in variants a/b the current level
+   keeps a **persistent reverse background** — the flash is the
+   switching-moment emphasis; the persistent reverse marks the current
+   position). If the implementer builds "flash then disappear" per §3 alone,
+   this risk comes back — **the §2 table must keep the persistent `selected`
+   reverse background on the current level** (already final).
+2. **Missing transitions feel abrupt**: the panel opens/closes with no
+   animation. A minimalist trade-off, accepted; compensation = the panel's
+   position is fixed (directly above the input) and its height fixed at 5
+   rows, so nothing jumps.
+3. **The picker has no "turn thinking off" channel**: Auto off requires
+   choosing a concrete level (implying enabled=true). Cases needing pure off
+   still go through `/thinking` in the input box. If users expect the picker
+   to also close thinking, that is a requirements gap — **deliberately not
+   extended** (refusing a "second toggle mechanism"), recorded as pending
+   confirmation.
+4. **Enter commits directly = the user may change state without looking at the
+   panel** (plain Enter on `/effort` equals the old `/effort <current
+   level>`). Low risk: the old semantics already meant "effective immediately";
+   the picker only adds a preview layer, the current level is reversed by
+   default, and Enter "confirms the status quo".
+5. **Key hijacking risk**: Space types a character into the input box, but
+   while the picker is open the input has no focus (`PromptInput disabled`)
+   and the global single-channel useKeyboard short-circuits — test #20 must
+   confirm Ctrl combos are not swallowed (this design intercepts after the
+   Ctrl branches, already mitigated).
+
+---
+
+## One-sentence summary
+
+The defining aesthetic of this version = **restraint**.

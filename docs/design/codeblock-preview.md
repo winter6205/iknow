@@ -1,143 +1,165 @@
-# Markdown 围栏代码块渲染候选 · c4 定稿
+# Markdown fenced code-block rendering candidates · c4 final
 
-> 任务：#321 logo 重设计支线——TUI 围栏代码块（fenced code block）从 ink
-> 期 baseline → 5 个候选 → c4 定稿。**正式实现**：PR #360 合并（commit
-> `30df69d`）。本档是探索过程的存档，防回退。
+> Task: a side branch of the logo redesign — moving the TUI fenced code block
+> from the ink-era baseline through 5 candidates to the c4 final. **Formal
+> implementation**: the merged PR (commit `30df69d`). This file archives the
+> exploration so we don't regress.
 >
-> 关联：`docs/design/DESIGN-BANNER.md`（同批 banner 重设计收口）、
-> `docs/design/DESIGN-BANNER-GRADIENT.md`（同批渐变定稿）。
+> Related: `docs/design/DESIGN-BANNER.md` (the same-batch banner redesign
+> wrap-up), `docs/design/DESIGN-BANNER-GRADIENT.md` (the same-batch gradient
+> final).
 
-## 定案一句话
+## Decision in one sentence
 
-围栏代码块 = **c4**：深灰底 `#1e1e1e`（VSCode dark+ 编辑区同款）+ 默认
-字色 `#d4d4d4` + 4 色语法高亮（关键字紫 `#c586c0` / 字符串橙 `#ce9178` /
-数字浅青 `#b5cea8` / 注释绿 `#6a9955` + DIM + ITALIC）+ 行内 codespan 保留
-`#66b8ae` 不变 + **无边框 + 无 lang 标签**。
+Fenced code block = **c4**: dark-gray background `#1e1e1e` (same as the VSCode
+dark+ editor area) + default text color `#d4d4d4` + 4-color syntax highlighting
+(keyword purple `#c586c0` / string orange `#ce9178` / number light-green
+`#b5cea8` / comment green `#6a9955` + DIM + ITALIC) + inline codespan keeps
+`#66b8ae` unchanged + **no border + no lang label**.
 
-## 5 个候选
+## The 5 candidates
 
-5 候选由 `scripts/codeblock-preview/c1.tsx` ~ `c5.tsx` 跑出（脚本已随
-worktree 删除，本档记录决策过程）。每个候选对应一个真 TUI 截图，操作员
-按视觉感受选。
+The 5 candidates were rendered by `scripts/codeblock-preview/c1.tsx` ~ `c5.tsx`
+(the scripts were deleted with the prototype worktree; this file records the
+decision process). Each candidate came with a real TUI screenshot, and the
+operator chose by visual feel.
 
-### c1 现状 baseline
+### c1 current baseline
 
-- 形态：box border single（顶 / 底 / 左右单线边框）+ 顶框内嵌居中 title
-  `<lang>` 标签
-- 配色：整块单色 `#66b8ae`（沿用行内 codespan 同款）
-- 问题：
-  - 顶框 + lang 标签把代码块读成「面板」，不像 inline content
-  - 单色 = 没有 token 区分，缩进 / 引号 / 关键字视觉权重一致，扫读
-    困难
-  - border 在 scrollbox 内视觉过重
+- Form: box border single (top / bottom / left / right single-line border) +
+  a centered `<lang>` label inlaid in the top border
+- Colors: the whole block in one color `#66b8ae` (same as the inline codespan)
+- Problems:
+  - the top border + lang label make the block read as a "panel", not like
+    inline content
+  - single color = no token distinction; indentation / quotes / keywords all
+    carry the same visual weight, hard to skim
+  - the border is visually too heavy inside the scrollbox
 
-### c2 淡灰底 + 无边框
+### c2 light-gray background + no border
 
-- 形态：去 border，去 title，整块底色 `#2b2f36`
-- 配色：整块单色 `#e6e4dc`（warm off-white）
-- 优点：去框后代码块融入正文，无视觉冲击
-- 问题：
-  - 单色问题同上（无 token 区分）
-  - 淡灰底在深色主题下边缘对比弱，边界不清晰
+- Form: no border, no title, whole-block background `#2b2f36`
+- Colors: the whole block in one color `#e6e4dc` (warm off-white)
+- Pros: without the frame the block blends into the body text, no visual
+  clash
+- Problems:
+  - same single-color problem as above (no token distinction)
+  - under a dark theme, the light-gray background has weak edge contrast and
+    the block boundary is unclear
 
-### c3 淡灰底 + 正则语法高亮
+### c3 light-gray background + regex syntax highlighting
 
-- 形态：同 c2（淡灰底 `#2b2f36` + 无边框）
-- 配色：手写正则 tokenize，4 色语法高亮：
-  - 关键字紫 `#c586c0`
-  - 字符串橙 `#ce9178`
-  - 数字浅青 `#b5cea8`
-  - 注释绿（c3 试过加 DIM + ITALIC）
-- 默认字色： `#e6e4dc`（沿用 c2）
-- 优点：扫读性明显提升
-- 问题：
-  - 淡灰底 `#2b2f36` 与品牌暗色不够贴，调研决定再深一档
-  - 行内 codespan 与代码块字色撞（都走 warm 系），inline 上下文衔接弱
+- Form: same as c2 (light-gray background `#2b2f36` + no border)
+- Colors: hand-written regex tokenizer, 4-color syntax highlighting:
+  - keyword purple `#c586c0`
+  - string orange `#ce9178`
+  - number light-green `#b5cea8`
+  - comment green (c3 tried adding DIM + ITALIC)
+- Default text color: `#e6e4dc` (kept from c2)
+- Pros: skimmability clearly improved
+- Problems:
+  - the light-gray `#2b2f36` doesn't sit close enough to the brand dark;
+    research decided to go one step darker
+  - inline codespan and code-block text color clash (both warm-family),
+    weakening the inline-to-block transition
 
-### **c4（定稿）**
+### **c4 (final)**
 
-- 形态：去 border，去 title，深灰底 `#1e1e1e`（VSCode dark+ 编辑区同款）
-- 配色：
-  - 整块底色 `#1e1e1e`
-  - 默认字色 `#d4d4d4`（VSCode dark+ 默认前背景）
-  - 关键字紫 `#c586c0` / 字符串橙 `#ce9178` / 数字浅青 `#b5cea8` /
-    注释绿 `#6a9955` + DIM + ITALIC
-- 行内 codespan：**保留** `#66b8ae` 不动（与围栏代码块差异化）
-- 几何：
-  - 超宽不折行 `wrapMode="none"`
-  - 空行铺底不塌缩（每行 bg 仍铺 `#1e1e1e`）
-  - 块间 marginTop/Bottom = 1
-- diff 围栏：首字符 `+` / `-` 行整行绿红底色遮罩（`#2ea043` / `#d73a49`
-  fg + `#1f3d2b` / `#3d1f24` bg，与 theme.ts `add`/`del`/`bgAdd`/`bgDel`
-  4 token 对齐）
-- 优点：
-  - VSCode dark+ 编辑区同款 → 用户认知零成本
-  - 4 色语法高亮 + 注释 DIM/ITALIC = 扫读性最大化
-  - 行内 codespan 与块内字色差异化（`#66b8ae` vs `#d4d4d4`），inline 上下文
-    衔接自然
-  - 无边框让代码块读作正文流的一部分，不抢戏
-- 选定理由（操作员 2026-08-11 决策）：「**VSCode 风格一眼对，深灰底贴产品
-  暗主题，无边框 + 无 lang 让代码块像 markdown 一部分**」
+- Form: no border, no title, dark-gray background `#1e1e1e` (same as the
+  VSCode dark+ editor area)
+- Colors:
+  - whole-block background `#1e1e1e`
+  - default text color `#d4d4d4` (VSCode dark+ default editor fg)
+  - keyword purple `#c586c0` / string orange `#ce9178` / number light-green
+    `#b5cea8` / comment green `#6a9955` + DIM + ITALIC
+- Inline codespan: **keeps** `#66b8ae` untouched (differentiated from the
+  fenced block)
+- Geometry:
+  - over-wide lines don't wrap: `wrapMode="none"`
+  - empty lines still paint the background, no collapse (each row's bg stays
+    `#1e1e1e`)
+  - marginTop/Bottom between blocks = 1
+- diff fences: lines starting with `+` / `-` get a full-line green/red
+  background mask (`#2ea043` / `#d73a49` fg + `#1f3d2b` / `#3d1f24` bg,
+  aligned with the 4 `add`/`del`/`bgAdd`/`bgDel` tokens in theme.ts)
+- Pros:
+  - same as the VSCode dark+ editor area → zero cognitive cost for users
+  - 4-color syntax highlighting + DIM/ITALIC comments = maximum skimmability
+  - inline codespan vs block text color differentiated (`#66b8ae` vs
+    `#d4d4d4`), so the inline context flows naturally
+  - no border makes the block read as part of the text stream, not stealing
+    the scene
+- Selection rationale (operator's decision): "the VSCode style matches at a
+  glance, the dark-gray background suits the product's dark theme, and no
+  border + no lang label makes the code block feel like part of the markdown"
 
-### c5 c3 + 首行前置语言标签
+### c5 c3 + leading language tag on the first row
 
-- 形态：c3 基础上首行前置 `ts │` 标签（行内、非边框）
-- 问题：
-  - c4 已证明「无 lang 标签」是更优解，c5 改回加标签走回头路
-  - 前置标签与 markdown 文本流不连贯（首行多一列特殊字符）
+- Form: c3 plus a leading `ts │` tag on the first row (inline, not a border)
+- Problems:
+  - c4 already proved "no lang label" is the better answer; c5 re-adding a
+    label backtracks
+  - the leading tag breaks the markdown text flow (the first row gains an
+    extra column of special characters)
 
-## 产品实现（PR #360 commit `30df69d`）
+## Product implementation (commit `30df69d`)
 
-### theme.ts 新增 6 token
+### 6 new tokens in theme.ts
 
 ```ts
-codeBlockBg: "#1e1e1e",   // VSCode dark+ 编辑区
-codeDefault: "#d4d4d4",   // plain 文本（未匹配语法 token）
-syntaxComment: "#6a9955", // 注释（+ DIM + ITALIC）
-syntaxString: "#ce9178",  // 字符串
-syntaxNumber: "#b5cea8",  // 数字
-syntaxKeyword: "#c586c0", // 关键字
+codeBlockBg: "#1e1e1e",   // VSCode dark+ editor area
+codeDefault: "#d4d4d4",   // plain text (no syntax token matched)
+syntaxComment: "#6a9955", // comment (+ DIM + ITALIC)
+syntaxString: "#ce9178",  // string
+syntaxNumber: "#b5cea8",  // number
+syntaxKeyword: "#c586c0", // keyword
 ```
 
-`code: "#66b8ae"` 字段保留，**只**给行内 codespan 用，与代码块差异化。
+The `code: "#66b8ae"` field stays, used **only** for the inline codespan,
+differentiated from code blocks.
 
-### markdown.tsx 重写
+### markdown.tsx rewrite
 
-- `tokenizeCodeLine(line: string): CodeToken[]` **导出**纯函数——拆分是为
-  单测正则 / 捕获组逻辑时不必渲染 JSX（直接断言 `CodeToken[]`）。返回
-  类型 `CodeToken { kind: CodeTokenKind, text: string }`，
-  `CodeTokenKind = "plain" | "comment" | "string" | "number" | "keyword"`。
-- `CodeBlock` 容器 + `CodeBlockLine` 行渲染器重写：
-  - `CodeBlock` 外层 `<box backgroundColor={codeBlockBg}>`，无 border 无
+- `tokenizeCodeLine(line: string): CodeToken[]` is an **exported** pure
+  function — the split exists so unit tests can exercise the regex / capture
+  group logic without rendering JSX (assert on `CodeToken[]` directly). Return
+  type `CodeToken { kind: CodeTokenKind, text: string }`,
+  `CodeTokenKind = "plain" | "comment" | "string" | "number" | "keyword"`.
+- `CodeBlock` container + `CodeBlockLine` row renderer rewritten:
+  - `CodeBlock` outer `<box backgroundColor={codeBlockBg}>`, no border no
     title
-  - `CodeBlockLine` 每行 `<text bg={codeBlockBg} wrapMode="none">`，
-    按 `tokenizeCodeLine` 切分后逐 token 嵌 `<span fg={对应色}>`，其中
-    `comment` token 同时挂 `attributes={DIM | ITALIC}`
-- 其它 markdown 元素（heading / paragraph / list / quote / table / html /
-  行内 codespan）零改动。
+  - `CodeBlockLine` renders each row as `<text bg={codeBlockBg}
+    wrapMode="none">`, split by `tokenizeCodeLine`, then each token embedded
+    in `<span fg={matching color}>`, with `comment` tokens also carrying
+    `attributes={DIM | ITALIC}`
+- All other markdown elements (heading / paragraph / list / quote / table /
+  html / inline codespan) are untouched.
 
-### 测试
+### Tests
 
-`tests/tui/markdown.test.tsx`：
+`tests/tui/markdown.test.tsx`:
 
-- 删 1 旧测试（lang 标签在边框行，c4 已无）
-- 新增 11 个 c4 契约断言（`codeBlockBg` 背景色 / 4 类 syntax token 着色 /
-  plain 着色 / 无边框字符 / 无 lang 标签 / diff `+` / `-` 行 / 空行不塌缩）
-- 4 个 `tokenizeCodeLine` 单元测试（关键字 / 字符串 / 数字 / 注释切分）
+- removed 1 old test (the lang label sat in the border row; c4 has none)
+- added 11 c4 contract assertions (`codeBlockBg` background color / 4 syntax
+  token classes colored / plain coloring / no border characters / no lang
+  label / diff `+` / `-` rows / empty lines keep their background)
+- 4 `tokenizeCodeLine` unit tests (keyword / string / number / comment
+  splitting)
 
-## 验证记录
+## Verification record
 
-- `tests/tui/markdown.test.tsx`：上述 11 c4 + 4 tokenize 单测全绿
-- 真 TTY 冒烟：`npm run dev:tui` 真实终端代码块渲染贴 VSCode dark+ 视觉
-  （`docs/handoff/2026-08-10-tui-321-regression-fixes.md` 验收清单）
+- `tests/tui/markdown.test.tsx`: the 11 c4 + 4 tokenize tests above all green
+- Real-TTY smoke: `npm run dev:tui` renders code blocks matching the VSCode
+  dark+ look in a real terminal
+  (`docs/handoff/2026-08-10-tui-321-regression-fixes.md` acceptance checklist)
 
-## 引用
+## References
 
-| 类型                     | 路径 / 引用                                                       |
-| ------------------------ | ----------------------------------------------------------------- |
-| 产品实现（PR #360 合并） | commit `30df69d` feat(tui): markdown 代码块改 c4 形态             |
-| theme 6 token SSOT       | `src/tui/theme.ts:42-53`（注释 + 值 86-91）                       |
-| CodeBlock 重写           | `src/tui/markdown.tsx:158-` `CodeToken` 类型 + `tokenizeCodeLine` |
-| 单元测试                 | `tests/tui/markdown.test.tsx`                                     |
-| 关联                     | `docs/design/DESIGN-BANNER.md`（同批 banner 重设计）              |
-| 关联                     | `docs/design/DESIGN-BANNER-GRADIENT.md`（同批渐变定稿）           |
+| Type                         | Path / reference                                                      |
+| ---------------------------- | --------------------------------------------------------------------- |
+| product implementation (merged) | commit `30df69d` — feat(tui): markdown code blocks to the c4 form |
+| theme 6-token SSOT           | `src/tui/theme.ts:42-53` (comments + values at 86-91)                 |
+| CodeBlock rewrite            | `src/tui/markdown.tsx:158-` `CodeToken` type + `tokenizeCodeLine`     |
+| unit tests                   | `tests/tui/markdown.test.tsx`                                         |
+| related                      | `docs/design/DESIGN-BANNER.md` (same-batch banner redesign)           |
+| related                      | `docs/design/DESIGN-BANNER-GRADIENT.md` (same-batch gradient final)   |

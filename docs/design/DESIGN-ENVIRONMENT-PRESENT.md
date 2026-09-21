@@ -1,90 +1,115 @@
-# DESIGN-ENVIRONMENT-PRESENT · 环境现势 TUI 锚点（#655 G1）
+# DESIGN-ENVIRONMENT-PRESENT · environment-presence anchor in the TUI
 
-> 包：`horizon-653 / 包1-感知` · G1 验收画像锁定
-> Plan：`plans/653-horizon-pkg1-perception.md` T1
-> Spec：`specs/653-horizon-pkg1-perception.md` Boundaries · Success Criteria
-> 状态：决议（2026-08-24，钉死 T1）
+> Package: horizon perception · acceptance profile locked
+> Plan: the perception plan (anchor item)
+> Spec: the perception spec — Boundaries · Success Criteria
+> Status: decided (anchor locked)
 
 ## Context
 
-`#655` G1 要求 TUI 操作员一眼看到工作区现势（cwd / git 摘要 / diff 要点），
-且 **不**污染 ADR-0028 状态栏（`agent_status` user 消息）。spec 已明确：
+The acceptance goal requires the TUI operator to see the workspace's current
+state (cwd / git summary / diff highlights) at a glance, while **not**
+polluting the ADR-0028 status bar (`agent_status` user messages). The spec
+already fixes:
 
-- 数据**给人不给模型**——**不**进 `messages`、**不**当 verify 输入、**不**进
-  ADR-0028 状态栏 user 消息。
-- 锚点由 plan 在 banner 旁 / strip / footer 之一**钉死一个**固定落点。
-- 摘要默认 **2000 codepoints** 上限（plan 可调数字，不得取消上限）。
-- 失败态（cwd 不可解析 / 非 git / 刷新抛错）走 degraded 占位，**不 throw**。
+- The data is **for the human, not the model** — **not** into `messages`,
+  **not** as verify input, **not** into the ADR-0028 status-bar user messages.
+- The anchor must be **one fixed landing spot**, pinned by the plan among
+  next-to-banner / strip / footer.
+- The summary defaults to a **2000 codepoints** cap (the plan may tune the
+  number; the cap itself must not be removed).
+- Failure states (cwd unresolvable / not a git repo / refresh throws) render a
+  degraded placeholder and **never throw**.
 
-TUI 已有一个 `AgentStatusLine`（`src/tui/agent-status-line.tsx`），是**模型向
-状态栏**（ADR-0028）在 TUI chrome 的**只读投影**——读的是 `agent_status` 流事件
-/ 快照，**不**反向写。两套概念（人读 vs. 模型向）若共用同一条流 / 同一槽位，会
-出现「人读字段被模型读走」或「模型字段被人读 UI 误投影」的双向污染，违反 spec
-「不进 messages / 不进 verify 输入 / 不写状态栏」的负向契约。
+The TUI already has `AgentStatusLine` (`src/tui/agent-status-line.tsx`), which
+is the **model-facing status bar** (ADR-0028) as a **read-only projection** in
+the TUI chrome — it reads `agent_status` stream events / snapshots and never
+writes back. If the two concepts (human-read vs model-facing) shared one
+stream or one slot, you would get bidirectional pollution — "human-read fields
+being read by the model" or "model fields mis-projected onto human UI" —
+violating the spec's negative contract (not in messages / not verify input /
+not written to the status bar).
 
-调研见 Explore 阶段结论：另起 `EnvironmentPane` / `EnvPresenceStrip` 命名（避免
-与 `AgentStatusLine` 重名），挂点应是 TUI chrome 区，**不**进 `agent_status`
-流事件、**不**进 `messages`。
+The exploration-phase conclusion: introduce a separate `EnvironmentPane` /
+`EnvPresenceStrip` naming (avoiding collision with `AgentStatusLine`), mounted
+in the TUI chrome area, **not** in the `agent_status` stream events and **not**
+in `messages`.
 
 ## Decision
 
-**环境现势 = TUI 人读 chrome 条的新独立槽位，与 `AgentStatusLine` 并列、不复用
-其数据源。** 具体决议四条：
+**Environment presence = a new independent slot in the human-read TUI chrome,
+alongside `AgentStatusLine`, not reusing its data source.** Four pinned
+resolutions:
 
-1. **锚点**：TUI 人读 chrome 条（与 `AgentStatusLine` 同 chrome 区、并列）。
-   - 命名建议：`EnvironmentPane`（含 cwd + git 摘要 + diff 要点整块）或
-     `EnvPresenceStrip`（仅 cwd + git 短摘要一行）；二者**不**与 `AgentStatusLine`
-     重名。
-   - 实现者可两选一，但须**全文一致**——一个组件名 = 一处定义 = 一处挂点。
-2. **数据源**：与 `AgentStatusLine` **平行的独立流**——harness / TUI 计算的
-   「环境现势快照」事件。
-   - **不**复用 `agent_status` 事件；**不**复用其快照结构；**不**走
-     `session-api/turn-projection.ts` 现有 verify 投影缝。
-   - 快照在用户可见的回合边界刷新；不每 tool 跳追加进模型上下文（spec 刷新
-     纪律）。
-3. **上限**：摘要 ≤ **2000 codepoints**（`String.prototype.length` 计 Unicode
-   码点；超长 diff 走截断 + 显式 `(truncated)` 标记）。
-4. **不进 verify 输入**：环境现势组件**不**被 verify / 判官 / goal / advisor
-   任何路径读取；其数据流与 `VerificationRecord` 互不交叉。
+1. **Anchor**: the human-read TUI chrome row (same chrome region as
+   `AgentStatusLine`, in parallel).
+   - Naming options: `EnvironmentPane` (a whole block with cwd + git summary +
+     diff highlights) or `EnvPresenceStrip` (a single row with cwd + short git
+     summary); neither collides with `AgentStatusLine`.
+   - The implementer may pick either, but must stay **consistent throughout** —
+     one component name = one definition = one mount point.
+2. **Data source**: an independent stream **parallel** to `AgentStatusLine` —
+   an "environment presence snapshot" event computed by harness / TUI.
+   - **Do not** reuse the `agent_status` events, its snapshot structure, or the
+     existing verify projection seam in `session-api/turn-projection.ts`.
+   - The snapshot refreshes at user-visible turn boundaries; it is not
+     appended per tool call into the model context (the spec's refresh
+     discipline).
+3. **Cap**: summary ≤ **2000 codepoints** (measured with
+   `String.prototype.length`); an over-long diff is truncated with an explicit
+   `(truncated)` marker.
+4. **Not verify input**: the environment-presence component is read by **no**
+   path of verify / judge / goal / advisor; its data flow and
+   `VerificationRecord` never cross.
 
 ## Consequences
 
-**正向：**
+**Positive:**
 
-- 锚点**唯一**，plan Acceptance 可一次 grep 断言（`src/tui/`
-  下仅一处 `EnvironmentPane` / `EnvPresenceStrip` 定义 + 挂点）。
-- 人读 / 模型向两套流**物理隔离**——`agent_status` 仍是 ADR-0028 状态栏专用，
-  环境现势另起新事件类型；任何「把人读字段写进模型栏」的回归都会被编译/类型
-  边界拦下。
-- 上限 2000 codepoints 写入 Acceptance 强约束，T5（`npx vitest run tests/tui
-tests/harness/verify tests/session-api`）的 overflow 路径有据可查。
-- 命名 `EnvironmentPane` / `EnvPresenceStrip` 避开 `AgentStatusLine` 同名
-  冲突，避免后人误以为「同一组件换个数据源」即可接。
+- The anchor is **unique**, so the plan's acceptance can assert with a single
+  grep (exactly one `EnvironmentPane` / `EnvPresenceStrip` definition + mount
+  point under `src/tui/`).
+- The human-read and model-facing streams are **physically isolated** —
+  `agent_status` remains exclusive to the ADR-0028 status bar, and environment
+  presence introduces a new event type; any regression that "writes
+  human-read fields into the model bar" is caught at the compile/type boundary.
+- The 2000-codepoint cap is written into the acceptance as a hard constraint,
+  so the overflow path exercised by the closing test run
+  (`npx vitest run tests/tui tests/harness/verify tests/session-api`) has a
+  documented basis.
+- The naming `EnvironmentPane` / `EnvPresenceStrip` avoids the
+  `AgentStatusLine` collision, so a later contributor cannot assume "same
+  component, swap the data source" will work.
 
-**负向（必须守住）：**
+**Negative (must hold):**
 
-- **不**进 `agent_status` 追加路径——grep `agent_status` 在
-  `src/tui/environment-*.tsx` / `src/harness/env-snapshot.ts` 类新增文件中
-  应**零命中**（T5 收尾 grep 反向契约）。
-- **不**进 `messages`——快照消费侧（`src/tui/**`）**不**调用
-  `messages.push` / 不向 hub 提交任何含 cwd/git/diff 的 user 消息。
-- **不**当 verify 输入——`VerificationRecord` / hub 任何读路径
-  **不**反向引 `EnvSnapshot` / `EnvironmentPane`。
-- **不**写 ADR-0028 状态栏——`src/harness/agent-status.ts` / `build-engine.ts`
-  的状态栏写入路径**不**接收 cwd/git/diff 字段。
+- **Not** on the `agent_status` append path — grepping `agent_status` in new
+  files such as `src/tui/environment-*.tsx` / `src/harness/env-snapshot.ts`
+  must return **zero hits** (the closing grep enforces the negative contract).
+- **Not** into `messages` — the snapshot consumer side (`src/tui/**`) must
+  **not** call `messages.push` nor submit any user message containing
+  cwd/git/diff to the hub.
+- **Not** verify input — no read path of `VerificationRecord` / the hub may
+  back-reference `EnvSnapshot` / `EnvironmentPane`.
+- **Not** written to the ADR-0028 status bar — the status-bar write paths in
+  `src/harness/agent-status.ts` / `build-engine.ts` do **not** accept
+  cwd/git/diff fields.
 
-**EXIT（typed failure 边界，spec Boundaries 节对齐）：**
+**EXIT (typed-failure boundaries, aligned with the spec's Boundaries section):**
 
-- cwd 不可解析 → 占位 `(cwd unavailable)`，**不 throw**。
-- 非 git 工作区 / `git` 失败 → `(not a git repo)` / `(git unavailable)`，
-  **不 throw**。
-- 刷新抛错 → 保留上一帧快照或占位；错误进 trace/log 旁路，**不**进模型上下文。
-- 整段快照缺席 → 组件静默缺席（**不**渲染占位行），避免空字符串进 UI。
+- cwd unresolvable → placeholder `(cwd unavailable)`, **no throw**.
+- non-git workspace / `git` failure → `(not a git repo)` /
+  `(git unavailable)`, **no throw**.
+- refresh throws → keep the previous frame's snapshot or a placeholder; the
+  error goes to the trace/log side channel, **not** into the model context.
+- whole snapshot absent → the component silently disappears (**no** placeholder
+  row rendered), avoiding empty strings in the UI.
 
-**验收锚点（plan T1 Acceptance 收口）：**
+**Acceptance anchors (plan item closure):**
 
-- 本决议文件存在并指向唯一组件名 → `plans/653-horizon-pkg1-perception.md` T1
-  bullet `Status: [x] done — <commit sha>`。
-- T5 收尾：`src/tui/` 下 `EnvironmentPane` / `EnvPresenceStrip` **唯一**
-  定义 + 挂点；`grep -r agent_status src/tui/environment-*` **零命中**；
-  `npx vitest run tests/tui tests/harness/verify tests/session-api` 绿。
+- This decision file exists and points to exactly one component name → the
+  plan's acceptance bullet is checked off as `Status: [x] done — <commit sha>`.
+- Closing run: exactly one `EnvironmentPane` / `EnvPresenceStrip` definition +
+  mount point under `src/tui/`; `grep -r agent_status src/tui/environment-*`
+  returns **zero hits**; `npx vitest run tests/tui tests/harness/verify
+  tests/session-api` is green.

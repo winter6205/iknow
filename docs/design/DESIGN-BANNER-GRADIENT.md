@@ -1,176 +1,210 @@
-# 启动 banner 眼睛配色渐变探索 · e2 黄昏魔法石定稿
+# Startup banner eye-color gradient exploration · e2 dusk philosopher's stone, final
 
-> 任务：#321 logo 重设计（接 #343 ink→@opentui/react 迁移）。本档是
-> 「banner 眼睛配色从双色分层 → 不规则对角线渐变」的探索全存档。
-> 正式实现：`src/tui/banner.ts` `eyeGradientCells()`（PR #360 合并）。
+> Task: the logo redesign (continuing the ink→@opentui/react migration). This
+> file is the full exploration archive for moving the banner eye palette "from
+> two discrete color layers to an irregular diagonal gradient".
+> Formal implementation: `eyeGradientCells()` in `src/tui/banner.ts` (merged).
 >
-> 本档是 `docs/design/DESIGN-BANNER.md` §2（双色分层，墨绿线稿 + 金棕 R
-> 符文）的**升级**而非替代；§2 的几何裁切 / 阈值管线 / 真彩退化仍成立，
-> 升级点是**配色从两个离散色 → 一条对角线渐变**。
+> This file is an **upgrade** of `docs/design/DESIGN-BANNER.md` §2 (two-color
+> layering: ink-green line art + gold-brown R rune), not a replacement; §2's
+> geometry cropping / threshold pipeline / truecolor degradation still hold.
+> What changes is **the palette: from two discrete colors to one diagonal
+> gradient**.
 
-## 定案一句话
+## Decision in one sentence
 
-banner 眼睛配色 = **e2 黄昏魔法石**：13×32 逐 cell 上色，端点
-`#1a1d6e`（深蓝紫）→ `#ffafaf`（粉金），对角线方向
-`t = 0.6·(c/31) + 0.4·(r/12)`，RGB 空间线性插值。每行 32 个 cell 携带
-`{ text, hex }`，由渲染器 fg 着色。
+Banner eye color = **e2 dusk philosopher's stone**: per-cell coloring on the
+13×32 grid, endpoints `#1a1d6e` (deep blue-purple) → `#ffafaf` (pink-gold),
+diagonal direction `t = 0.6·(c/31) + 0.4·(r/12)`, linear interpolation in RGB
+space. Each row's 32 cells carry `{ text, hex }` and are fg-colored by the
+renderer.
 
-## 1. 背景与动机
+## 1. Background and motivation
 
-原 `DESIGN-BANNER.md` §2 是「双色分层」：墨绿 `#183223`（眼轮廓 + 环 + 8
-个交叉方框）+ 金棕 `#b97f1c`（仅瞳孔内 R 符文）。优点是 **几何信息保留完
-整**（眼睛轮廓清晰），但操作员 #321 验收时反馈「**颜色想重新画**」——
-具体诉求是配色跳出双色离散，看能不能往「**柔和过渡 / 氛围感**」方向走一
-步。#154（视觉验证）开放，#321 重新发起探索。
+The original `DESIGN-BANNER.md` §2 was "two-color layering": ink-green
+`#183223` (eye outline + ring + 8 crossing boxes) + gold-brown `#b97f1c` (only
+the R rune inside the pupil). Its strength is **complete preservation of
+geometric information** (crisp eye outline), but at the logo-redesign
+acceptance the operator asked to **"repaint the colors"** — concretely, to move
+the palette beyond the discrete two-color scheme toward "soft transitions /
+atmosphere". Visual verification stayed open, and the redesign re-opened the
+exploration.
 
-约束（探索前定下，约束死了再开候选）：
+Constraints (fixed before exploring, so candidates started bounded):
 
-- **不换字形**：32×13 braille 点阵（`EYE_LINES`）照搬不动——字形重生成会
-  引发「眼睛不一样」的回归，规避。
-- **不换几何**：眼轮廓 / 环 / R 符文 / 下眼睑的空间分布就是 `EYE_LINES` 的
-  alpha>128 主体 mask，配色变不能破几何。
-- **要暗到亮**：瞳孔区（中央）必须落在视觉亮区，否则「瞳孔」信息丢失。
-- **真彩终端是前提**（COLORTERM=truecolor）；ANSI256 退化档作为次要约束
-  调研（§5）。
+- **Keep the glyphs**: the 32×13 braille raster (`EYE_LINES`) is reused
+  untouched — regenerating glyphs risks a "the eye looks different" regression;
+  avoided.
+- **Keep the geometry**: the spatial distribution of eye outline / ring / R
+  rune / lower lid is exactly the alpha>128 subject mask of `EYE_LINES`;
+  recoloring must not break the geometry.
+- **Dark to light**: the pupil zone (center) must land in the visually bright
+  area, otherwise the "pupil" information is lost.
+- **Truecolor terminals are the premise** (COLORTERM=truecolor); the ANSI256
+  degradation tier was researched as a secondary constraint (§5).
 
-## 2. 16 个渐变方案族（第一轮：四族 × 四方案）
+## 2. 16 gradient candidates in 4 families (round one: four families × four)
 
-第一轮用「族」表达方向（行向 / 列向 / 放射 / 异色系），每个族内 4 方案
-对端点色与权重做微调。视觉描述基于 13×32 网格逐 cell 渲染的预期效果。
+Round one expressed directions as "families" (row-wise / column-wise / radial /
+exotic-hue), each family with 4 candidates fine-tuning the endpoint colors and
+weights. The visual descriptions state the expected effect of rendering the
+13×32 grid cell by cell.
 
-### 2.1 上下渐变族 v（按行插值，r 方向）
+### 2.1 Vertical family v (interpolate per row, r direction)
 
-| 方案 | 端点 / 公式                                             | 视觉一句话                                 |
-| ---- | ------------------------------------------------------- | ------------------------------------------ |
-| v1   | `#5a3a10` → `#ffe082`，上下线性                         | 眼睑上暗、瞳孔区中亮、下缘中暗（金色梯度） |
-| v2   | `#ffffff` → `#b97f1c`（设计稿原金棕）                   | 白热降落到金棕穹顶（沿用设计稿金棕终点）   |
-| v3   | `#4a1d6e` → `#ffd75f`，瞳孔行 r=5/6/7 加 `0.2·sin` 鼓包 | 瞳孔烧金（中央三行亮度人为鼓包）           |
-| v4   | `#e8e4d8` → `#3a2410`，书卷气                           | 上缘白、下缘金黑沉淀（古卷调）             |
+| Cand. | Endpoints / formula                                        | Visual in one line                           |
+| ----- | ---------------------------------------------------------- | -------------------------------------------- |
+| v1    | `#5a3a10` → `#ffe082`, linear top-to-bottom                | dark lid on top, mid-bright pupil zone, mid-dark lower edge (gold ramp) |
+| v2    | `#ffffff` → `#b97f1c` (the design's original gold-brown)   | white-hot landing into a gold-brown dome (keeps the design's gold endpoint) |
+| v3    | `#4a1d6e` → `#ffd75f`, `0.2·sin` bump on pupil rows r=5/6/7 | burning-gold pupil (artificial brightness bump on the middle three rows) |
+| v4    | `#e8e4d8` → `#3a2410`, manuscript feel                     | white top, aged gold-black sediment at the bottom (old-scroll tone) |
 
-### 2.2 左右渐变族 h（按列插值，c 方向）
+### 2.2 Horizontal family h (interpolate per column, c direction)
 
-| 方案 | 端点 / 公式                    | 视觉一句话                             |
-| ---- | ------------------------------ | -------------------------------------- |
-| h1   | `#b97f1c` → `#ffffff`          | 光从右照进（左金右白，对侧照明）       |
-| h2   | `#1a1004` → `#ffd75f`          | 同色异度，左暗右亮像「睁开」（起床感） |
-| h3   | 两端 `#8a5a14`，中点 `#fff4b0` | 瞳孔列最亮横向光带（U 形）             |
-| h4   | `#4a1d6e` → `#ffd75f`          | 冷暖横扫（紫 → 金，单行水平）          |
+| Cand. | Endpoints / formula            | Visual in one line                                   |
+| ----- | ------------------------------ | ---------------------------------------------------- |
+| h1    | `#b97f1c` → `#ffffff`          | light shines in from the right (gold left, white right — side lighting) |
+| h2    | `#1a1004` → `#ffd75f`          | same hue, different intensity; dark-left/bright-right reads like "opening" (a waking-up feel) |
+| h3    | both ends `#8a5a14`, midpoint `#fff4b0` | brightest at the pupil column: a horizontal light band (U-shaped) |
+| h4    | `#4a1d6e` → `#ffd75f`          | cool-to-warm sweep (purple → gold, single horizontal row) |
 
-### 2.3 放射渐变族 r（欧氏距离中心 `(6,16)` 归一化）
+### 2.3 Radial family r (Euclidean distance from center `(6,16)`, normalized)
 
-| 方案 | 端点 / 公式                                                     | 视觉一句话                           |
-| ---- | --------------------------------------------------------------- | ------------------------------------ |
-| r1   | `#fff4b0` → `#8a5a14`，中心向外                                 | 瞳孔高光向四周衰减（标准发光）       |
-| r2   | 双中心 `(6,12)` `(6,20)`，`#ffd75f` → `#1a1004`，Voronoi 最近点 | 双瞳孔眼（艺术感强，但不像智慧之眼） |
-| r3   | 5 阶量化 `#fff4b0/#b97f1c/#3a2410`，光圈分层                    | 同心圆环（漫画分镜感）               |
-| r4   | `#1a1004` → `#ffd75f`，反向放射                                 | 中心暗边缘亮（神秘，艺术感）         |
+| Cand. | Endpoints / formula                                                   | Visual in one line                             |
+| ----- | --------------------------------------------------------------------- | ---------------------------------------------- |
+| r1    | `#fff4b0` → `#8a5a14`, center outward                                 | pupil highlight decays outward (standard glow) |
+| r2    | dual centers `(6,12)` `(6,20)`, `#ffd75f` → `#1a1004`, Voronoi nearest point | two-pupil eye (strong artistic feel, but no longer reads as the Eye of Wisdom) |
+| r3    | 5-step quantization of `#fff4b0/#b97f1c/#3a2410`, aperture banding    | concentric rings (comic-panel feel)            |
+| r4    | `#1a1004` → `#ffd75f`, inverted radial                                 | dark center, bright rim (mysterious, artsy)    |
 
-### 2.4 异色系族 e（实验：色相跨度大）
+### 2.4 Exotic-hue family e (experiment: wide hue span)
 
-| 方案   | 端点 / 公式                                                      | 视觉一句话                                                       |
-| ------ | ---------------------------------------------------------------- | ---------------------------------------------------------------- |
-| e1     | `#ffffff` → `#ffe082` → `#1a1004` 三停靠，瞳孔区强制白热         | 熔金白热（火感最强；瞳孔过亮吞细节，否决）                       |
-| **e2** | **`#1a1d6e` → `#ffafaf` 对角线 c 权重 0.6 / r 权重 0.4**         | **黄昏魔法石（蓝紫 → 粉金，不规则对角线，**定稿**）**            |
-| e3     | 线稿墨绿 `#0a3a2a` 单色 + 瞳孔 `EYE_GOLD_LINES` 金渐变 `#ffd75f` | 墨绿眼 + 金瞳（双色分层基线，唯一贴原 §2；操作员确认要跳出双色） |
-| e4     | `#3a0e08` → `#d9a343` + 中央红铜光 `#dc7a2c`                     | 古铜铸器，文物鎏金（太重）                                       |
+| Cand.   | Endpoints / formula                                                      | Visual in one line                                                       |
+| ------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| e1      | `#ffffff` → `#ffe082` → `#1a1004` three stops, pupil zone forced white-hot | molten white heat (strongest fire feel; the pupil gets too bright and swallows detail — rejected) |
+| **e2**  | **`#1a1d6e` → `#ffafaf` diagonal, c weight 0.6 / r weight 0.4**          | **dusk philosopher's stone (blue-purple → pink-gold, irregular diagonal — the finalist)** |
+| e3      | ink-green line art `#0a3a2a` monochrome + pupil gold ramp `#ffd75f` via `EYE_GOLD_LINES` | green eye, gold pupil (the two-color-layer baseline, the only one close to the original §2; the operator confirmed wanting out of two-color) |
+| e4      | `#3a0e08` → `#d9a343` + central copper glow `#dc7a2c`                     | cast bronze, gilded artifact (too heavy)                                  |
 
-第一轮观察：
+Round-one observations:
 
-- v/h 两族「单方向」插值观感呆板（一眼看出渐变方向 = 设计感流失）。
-- r 族放射感强，但 r2/r3/r4 都「不像眼睛」了——瞳孔中心不对，否决。
-- e 族「色相跨度大」+ 方向不规则最有氛围感。e1 瞳孔过亮吞细节，e3 是双色
-  分层包装没跳出去，e4 太重，**e2 黄昏魔法石一稿定稿方向**。
+- The v/h families' single-direction interpolation looks stiff (a gradient
+  whose direction is obvious at a glance = design value lost).
+- The r family has a strong radial feel, but r2/r3/r4 all "stopped looking
+  like an eye" — the pupil center is wrong; rejected.
+- The e family — wide hue span + irregular direction — had the best
+  atmosphere. e1's pupil is too bright and swallows detail, e3 is just the
+  two-color layering in a wrapper, e4 is too heavy; **e2 dusk philosopher's
+  stone settled the direction in one draft**.
 
-## 3. e2 黄昏魔法石 5 变体（第二轮：基于 e2 调端点 + 公式）
+## 3. e2 dusk philosopher's stone: 5 variants (round two: tune endpoints + formula)
 
-e2 v0（原始端点 + 对角线权重）已经被操作员确认为方向，第二轮不动方向只
-调端点 / 公式 / 瞳孔锁定，5 个变体并排对比：
+e2 v0 (original endpoints + diagonal weights) was already confirmed by the
+operator as the direction; round two kept the direction and varied only
+endpoints / formula / pupil lock, comparing 5 variants side by side:
 
-| 变体   | 端点 / 公式                                                                      | 视觉一句话                                                        |
-| ------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **v0** | **`#1a1d6e` → `#ffafaf`，对角线 `t = 0.6·(c/31) + 0.4·(r/12)`**                  | **原版黄昏魔法石，**操作员定稿****                                |
-| v1     | 三停靠 `#1a1d6e` → `#b97f1c` → `#ffd75f`（紫 → 设计稿原金棕 → 亮金）             | 紫金经典（三段叙事感，但 1/3 区间金棕太接近原设计稿，被否决）     |
-| v2     | 两端 `#4a1d6e`（紫缘），瞳孔中心强制金 `#ffd75f`（中央圆形 mask 强制覆盖渐变色） | 金心紫缘（瞳孔被强制金 = 唯一金色焦点；与 v0 渐变区别不大，否决） |
-| v3     | `#1a1d6e` → `#8a5a14`（前 35%）→ `#8a5a14` → `#ffd75f`（后 65%），金主导         | 重金（前段太暗被否决——失去蓝紫冷感）                              |
-| v4     | 对角 t 量化 4 段 `紫→金→紫→金`，瞳孔段强制亮金                                   | 紫金条纹（量化斑驳感，被否决——失去渐变平滑度）                    |
+| Variant | Endpoints / formula                                                                      | Visual in one line                                                          |
+| ------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **v0**  | **`#1a1d6e` → `#ffafaf`, diagonal `t = 0.6·(c/31) + 0.4·(r/12)`**                         | **the original dusk philosopher's stone — the operator's final pick**        |
+| v1      | three stops `#1a1d6e` → `#b97f1c` → `#ffd75f` (purple → the design's gold-brown → bright gold) | purple-gold classic (a three-part narrative, but its middle third is too close to the original design's gold-brown — rejected) |
+| v2      | both ends `#4a1d6e` (purple rim), pupil center forced gold `#ffd75f` (circular mask overriding the gradient) | gold heart, purple rim (the forced-gold pupil is the only gold focal point; barely different from v0's gradient — rejected) |
+| v3      | `#1a1d6e` → `#8a5a14` (first 35%) → `#8a5a14` → `#ffd75f` (last 65%), gold-led            | heavy gold (the front segment is too dark — it loses the blue-purple coolness — rejected) |
+| v4      | diagonal t quantized into 4 segments purple→gold→purple→gold, pupil segment forced bright gold | purple-gold stripes (quantized patchiness — rejected: loses the gradient's smoothness) |
 
-第二轮观察：**v0 原版即定稿**。v1/v3 端点变化都把渐变特征污染了；v2/v4 加
-锁定后渐变本质被绕过；只有 v0「蓝紫冷感 + 粉金暖感 + 对角线无锁定」保留了
-**「柔和过渡 + 氛围感 + 瞳孔自然落在中部暖色区」** 三者。
+Round-two observation: **the v0 original is the final**. v1/v3's endpoint
+changes polluted the gradient's character; v2/v4's locks bypassed the gradient
+itself; only v0 — "blue-purple coolness + pink-gold warmth + unlocked
+diagonal" — kept all three of **soft transitions + atmosphere + the pupil
+naturally landing in the central warm zone**.
 
-## 4. 定稿结论（操作员 2026-08-10 决策）
+## 4. Final decision (operator's call)
 
-**e2 v0 黄昏魔法石**：
+**e2 v0 dusk philosopher's stone**:
 
-- 端点：`from = #1a1d6e`（深蓝紫） / `to = #ffafaf`（粉金）
-- 公式：13×32 逐 cell 上色，`t = clamp01(0.6·(c/31) + 0.4·(r/12))`，
-  `lerpColor(from, to, t)`，RGB 空间线性插值返回 `#rrggbb`。
-- 颜色权重语义：**c 权重 0.6 = 横向（瞳孔列向）主导**，**r 权重 0.4 = 纵向
-  （行向）辅助**——瞳孔行 r≈5/6/7 与中央列 c≈14/15/16/17 落在视觉中央，
-  三处自然指向蓝紫 → 粉金 的暖色焦点，瞳孔区不需要人为锁定也能落在亮金
-  端附近（实测 t≈0.5 → rgb(143,103,143) = `#8f678f`，趋近粉金）。
-- 产品实现：`src/tui/banner.ts:149` `eyeGradientCells({from, to, cWeight,
-rWeight})` 纯函数；`src/tui/chat-view.tsx:128-160` 每行 `<text>` 内嵌
-  `<span fg={hex}>` 逐 cell 上色；`src/tui/theme.ts:99-100` `logoInk = #
-1a1d6e` / `logoGold = #ffafaf`（端点 SSOT）。
-- 验证：`tests/tui/banner-lines.test.ts:100-` 6 个单元测试覆盖形状 /
-  端点 / 中点 / 权重方向。
+- Endpoints: `from = #1a1d6e` (deep blue-purple) / `to = #ffafaf` (pink-gold)
+- Formula: per-cell coloring on 13×32, `t = clamp01(0.6·(c/31) + 0.4·(r/12))`,
+  `lerpColor(from, to, t)`; linear interpolation in RGB space returning
+  `#rrggbb`.
+- Color-weight semantics: **c weight 0.6 = horizontal (pupil-column direction)
+  leads**, **r weight 0.4 = vertical (row direction) assists** — the pupil rows
+  r≈5/6/7 and the central columns c≈14/15/16/17 land in the visual middle, so
+  all three cues point naturally at the blue-purple → pink-gold warm focus;
+  the pupil zone sits near the bright gold end without any artificial lock
+  (measured t≈0.5 → rgb(143,103,143) = `#8f678f`, approaching pink-gold).
+- Product implementation: pure function
+  `eyeGradientCells({from, to, cWeight, rWeight})` at `src/tui/banner.ts:149`;
+  `src/tui/chat-view.tsx:128-160` embeds `<span fg={hex}>` per cell inside
+  each row's `<text>`; `src/tui/theme.ts:99-100` `logoInk = #1a1d6e` /
+  `logoGold = #ffafaf` (endpoint SSOT).
+- Verification: 6 unit tests at `tests/tui/banner-lines.test.ts:100-` cover
+  shape / endpoints / midpoint / weight direction.
 
-## 5. ANSI256 退化注意（调研结论）
+## 5. ANSI256 degradation notes (research conclusion)
 
-调研问题：ANSI256 档（COLORTERM 不含 truecolor）下，hex 渐变经量化后会塌
-成什么？
+Research question: under ANSI256 (COLORTERM without truecolor), what does the
+hex gradient collapse to after quantization?
 
-- **金色系（`#1a1d6e → #ffafaf` 区间）**：32 阶渐变塌到 **2-3 阶**——
-  蓝紫端落在 ANSI256 cube `#5f00ff` 附近，粉金端落在 `#ffaf87`/`#ffafaf`
-  cube 附近，中段被量化跳变。比「双色精确命中」还糟：双色时金棕能命中
-  `#af8700` cube，渐变下连中间过渡都没有、只剩两段色块。
-- **6×6×6 RGB cube**：gold-pink 区间（黄 → 粉）亮度只有 3 个台阶，渐变
-  步进肉眼可见。
-- **结论**：**真彩终端是 e2 渐变的前提**。ANSI256 终端退化为单色
-  `logoInk`（保留产品语义但放弃氛围感），由渲染器按终端能力降级，应用层
-  不手写 ANSI（`theme.ts:17-18`「应用层不手写 ANSI」纪律）。
+- **The gold family (the `#1a1d6e → #ffafaf` range)**: the 32-step gradient
+  collapses to **2-3 steps** — the blue-purple end lands near the ANSI256 cube
+  `#5f00ff`, the pink-gold end near the `#ffaf87`/`#ffafaf` cube, with
+  quantization jumps in between. Worse than "two colors hit exactly": with two
+  discrete colors, gold-brown could hit the `#af8700` cube; under the gradient
+  there is not even a middle transition — just two flat blocks.
+- **6×6×6 RGB cube**: the gold-pink range (yellow → pink) offers only 3
+  brightness steps; the gradient steps are visible to the eye.
+- **Conclusion**: **truecolor terminals are the premise of the e2 gradient**.
+  On ANSI256 terminals it degrades to single-color `logoInk` (product semantics
+  kept, atmosphere given up); the renderer degrades by terminal capability, and
+  the application layer never hand-writes ANSI (the "no hand-written ANSI in
+  the application layer" discipline at `theme.ts:17-18`).
 
-回退方案（已在产品中实现）：窄终端（`cols < BANNER_MIN_COLS = 80`）走
-单行 `◆ iknow <version>`，统一 `logoInk` 单色——这本身就是 ANSI256 友好
-的降级路径，不需要额外 fallback。
+Fallback (already implemented in the product): narrow terminals
+(`cols < BANNER_MIN_COLS = 80`) render the single line `◆ iknow <version>` in
+uniform `logoInk` monochrome — that itself is the ANSI256-friendly degradation
+path, so no extra fallback is needed.
 
-## 6. 与原 DESIGN-BANNER.md §2 双色分层的关系
+## 6. Relationship to the original two-color layering in DESIGN-BANNER.md §2
 
-升级而非替代：
+An upgrade, not a replacement:
 
-- **几何不变**：13×32 braille 字形 + alpha>128 主体 mask 同款。
-- **颜色从离散 → 连续**：原 §2 是「墨绿线稿 + 金棕 R 符文」两层 mask 合并；
-  现在是「蓝紫 → 粉金」单层对角线渐变，不再有 EYE_GOLD_LINES 第二层 mask。
-- **死代码清理**：旧 `EYE_GOLD_LINES` 常量、`BannerSegment` 类型、
-  `eyeSegments()` 函数、`src/tui/banner.ts` 中所有 RGB mask `r>140 ∧
-b<80 ∧ (r-b)>80` 的金棕层管线（PR #360 commit `6d3a3f2` 删除）——都不再
-  需要，因为渐变本身就是「金棕 + 紫」的连续化产物。
-- **窄终端降级保留**：`BANNER_MIN_COLS = 80` 阈值、`bannerShortLine` 单行
-  模式、降级单色 = §2 同款。
+- **Geometry unchanged**: the same 13×32 braille glyphs + alpha>128 subject
+  mask.
+- **Color goes discrete → continuous**: original §2 merged two masks
+  ("ink-green line art + gold-brown R rune"); now it is a single diagonal
+  gradient ("blue-purple → pink-gold") with no second `EYE_GOLD_LINES` mask.
+- **Dead-code cleanup**: the old `EYE_GOLD_LINES` constant, `BannerSegment`
+  type, `eyeSegments()` function, and the whole RGB-mask `r>140 ∧ b<80 ∧
+  (r-b)>80` gold-layer pipeline in `src/tui/banner.ts` (deleted in commit
+  `6d3a3f2`) — none of it is needed anymore, since the gradient itself is the
+  continuous product of "gold-brown + purple".
+- **Narrow-terminal degradation kept**: the `BANNER_MIN_COLS = 80` threshold,
+  the `bannerShortLine` single-line mode, and the degraded monochrome are the
+  same as §2.
 
-## 7. 验证记录（与 PR #360 合并产物一致）
+## 7. Verification record (matches the merged artifact)
 
-- `tests/tui/banner-lines.test.ts:100-`：`eyeGradientCells` 6 单测
-  - 13 行 × 32 cell 形状
-  - 每 cell `{text, hex}` + hex `#rrggbb` 格式
-  - text 与 `EYE_LINES` 逐 cell 一致（braille 点阵宽度不漂）
-  - 首 cell `(0,0)` = `#1a1d6e`（t = 0）
-  - 末 cell `(12,31)` = `#ffafaf`（t = 1）
-  - 中 cell `(6,16)` = `#8f678f`（与预览脚本 `exotic-e2.ts` 对齐，t ≈ 0.51）
-  - 权重方向：c/r 权重分别置 1.0 验证方向正确
-- 真 TTY 冒烟：`npm run dev:tui` 真终端渲染正常（见
-  `docs/handoff/2026-08-10-tui-321-regression-fixes.md` 验收清单）。
+- `tests/tui/banner-lines.test.ts:100-`: 6 unit tests for `eyeGradientCells`
+  - 13 rows × 32 cells shape
+  - every cell `{text, hex}` with hex in `#rrggbb` format
+  - text identical to `EYE_LINES` cell by cell (braille raster width must not drift)
+  - first cell `(0,0)` = `#1a1d6e` (t = 0)
+  - last cell `(12,31)` = `#ffafaf` (t = 1)
+  - middle cell `(6,16)` = `#8f678f` (aligned with the preview script
+    `exotic-e2.ts`, t ≈ 0.51)
+  - weight direction: setting c/r weights to 1.0 respectively verifies direction
+- Real-TTY smoke: `npm run dev:tui` renders correctly in a real terminal (see
+  the acceptance checklist in
+  `docs/handoff/2026-08-10-tui-321-regression-fixes.md`).
 
-## 8. 引用
+## 8. References
 
-| 类型                     | 路径 / 引用                                                                      |
-| ------------------------ | -------------------------------------------------------------------------------- |
-| 产品实现（PR #360 合并） | `src/tui/banner.ts` `eyeGradientCells`                                           |
-| 调用点                   | `src/tui/chat-view.tsx:128-160`（banner 段渲染）                                 |
-| 端点 SSOT                | `src/tui/theme.ts:99-100` `logoInk` / `logoGold`                                 |
-| 单元测试                 | `tests/tui/banner-lines.test.ts:100-`                                            |
-| 旧双色分层（已废弃）     | `docs/design/DESIGN-BANNER.md §2`；前实现 `git show 6d3a3f2~1:src/tui/banner.ts` |
-| 字形 SSOT（不动）        | `src/tui/banner.ts:29-43` `EYE_LINES`（braille 32×13）                           |
-| 源图                     | `docs/design/eyeshape.png`（836×836 RGBA 透明底）                                |
-| 关联定案                 | `docs/design/DESIGN-BANNER.md §6`（e2 黄昏魔法石渐变定稿，2026-08-11 追加）      |
+| Kind                          | Path / reference                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| product implementation (merged) | `src/tui/banner.ts` `eyeGradientCells`                                             |
+| call site                     | `src/tui/chat-view.tsx:128-160` (banner segment rendering)                             |
+| endpoint SSOT                 | `src/tui/theme.ts:99-100` `logoInk` / `logoGold`                                       |
+| unit tests                    | `tests/tui/banner-lines.test.ts:100-`                                                |
+| old two-color layering (deprecated) | `docs/design/DESIGN-BANNER.md §2`; previous implementation via `git show 6d3a3f2~1:src/tui/banner.ts` |
+| glyph SSOT (untouched)        | `src/tui/banner.ts:29-43` `EYE_LINES` (braille 32×13)                                 |
+| source image                  | `docs/design/eyeshape.png` (836×836 RGBA transparent)                                |
+| related final                 | `docs/design/DESIGN-BANNER.md §6` (the e2 dusk philosopher's-stone gradient final)   |
