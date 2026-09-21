@@ -223,11 +223,26 @@ export type CompactCallerOpts = {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 };
 
-/** POST /api/v1/sessions/:id/rewind — mirrors TUI rewindSession (head-based). */
+/** POST /api/v1/sessions/:id/rewind — mirrors TUI rewindSession (head-based).
+ *  `codeRestore` is present only when the request asked to restore workspace
+ *  code; it reports what the rewind wrote back and what it refused to touch. */
 export type RewindSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
   head: string | null;
+  codeRestore?: RewindCodeRestoreResult;
+};
+
+/** Workspace paths the rewind restored / skipped (drift or a root-identity
+ *  mismatch), carried on a rewind that requested `restoreCode`. */
+export type RewindCodeRestoreSkip = {
+  readonly relPath: string;
+  readonly reason: "drift" | "root_identity";
+};
+
+export type RewindCodeRestoreResult = {
+  readonly restored: ReadonlyArray<string>;
+  readonly skipped: ReadonlyArray<RewindCodeRestoreSkip>;
 };
 
 /** GET /api/v1/sessions/:id/rewind-targets — user-message anchors on the

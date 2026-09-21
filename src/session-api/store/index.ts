@@ -57,6 +57,14 @@ export {
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 export {
+  applyCodeRestore,
+  buildCodeRestorePlan,
+  type ApplyCodeRestoreOpts,
+  type CodeRestoreOp,
+  type CodeRestoreReport,
+  type CodeRestoreSkip,
+} from "./code-preimage.js";
+export {
   appendWorkerTranscript,
   isWorkerTranscriptPathSafe,
   loadWorkerTranscript,

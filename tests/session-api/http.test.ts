@@ -672,6 +672,34 @@ describe("POST /api/v1/sessions/:id/rewind", () => {
     assert.equal(b.session.turn_count, 0);
     assert.deepEqual(b.turns, []);
   });
+
+  it("restoreCode 非布尔 → 400", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: null, restoreCode: "yes" },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+  });
+
+  it("restoreCode:true 无捕获写入 → 200，codeRestore 空回执", async () => {
+    const id = await createSession();
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "msg" },
+    });
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: null, restoreCode: true },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      codeRestore?: { restored: unknown[]; skipped: unknown[] };
+    };
+    assert.deepEqual(b.codeRestore?.restored, []);
+    assert.deepEqual(b.codeRestore?.skipped, []);
+  });
 });
 
 describe("GET /api/v1/sessions/:id/rewind-targets", () => {

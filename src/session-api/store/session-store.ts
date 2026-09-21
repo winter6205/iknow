@@ -723,6 +723,35 @@ export class SessionStore {
     );
   }
 
+  /**
+   * The preimage-bearing events a rewind to `newHead` would abandon: the
+   * current head chain, minus everything still kept under `newHead`, in
+   * current-chain order. Read-only — a legacy `.json`-only session has no
+   * captured refs (JSONL is a prerequisite), so it returns empty rather than
+   * forcing the migrate-on-write the head move already does. Unknown `newHead`
+   * surfaces as schema_invalid, same as rewindToHead.
+   */
+  async rewindablePreimages(
+    id: string,
+    newHead: string | null
+  ): Promise<ReadonlyArray<SessionEventRecord>> {
+    const raw = await this.tryReadFile(this.jsonlPath(id), id);
+    if (raw === null) return [];
+    let current: ReadonlyArray<SessionEventRecord>;
+    let kept: ReadonlyArray<SessionEventRecord>;
+    try {
+      const log = parseSessionJsonl(raw);
+      current = headChainEvents(log);
+      kept = chainFromHead(log, newHead);
+    } catch (err) {
+      throw this.attachId(id, err);
+    }
+    const keptIds = new Set(kept.map((e) => e.id));
+    return current.filter(
+      (e) => e.codePreimage !== undefined && !keptIds.has(e.id)
+    );
+  }
+
   private async persistHeadMove(
     id: string,
     path: string,

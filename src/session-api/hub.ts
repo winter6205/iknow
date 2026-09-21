@@ -165,6 +165,12 @@ import {
 import { createPreimageCapture } from "./store/preimage-capture.js";
 import type { PreimageCapture } from "../harness/aci/preimage-port.js";
 import type { PreimageRef } from "./store/jsonl.js";
+import {
+  applyCodeRestore,
+  buildCodeRestorePlan,
+  type CodeRestoreReport,
+  resolveConversationDir,
+} from "./store/index.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
@@ -2838,14 +2844,24 @@ export class SessionHub {
    * transcript). Runs through the serialize queue. Input is an event id, no
    * longer keepTurns. Legacy .json-only sessions are load+save migrated to
    * JSONL first, then the rewind is retried.
+   *
+   * `restoreCode` (default false) additionally writes the abandoned segment's
+   * workspace files back to their captured preimages before the head moves —
+   * see `restoreAbandonedCode`. The transcript head movement never depends on
+   * whether a restore happened; a restore that fails on an unreadable blob
+   * aborts the whole call and leaves the head where it was.
    */
   async rewindSession(
     conversationId: string,
-    head: string | null
+    head: string | null,
+    restoreCode = false
   ): Promise<RewindSessionResponse> {
     return this.serialize({
       conversationId,
       work: async () => {
+        const codeRestore = restoreCode
+          ? await this.restoreAbandonedCode(conversationId, head)
+          : undefined;
         let file: SessionFileV1;
         try {
           ({ file } = await this.store.rewindToHead({
@@ -2867,9 +2883,43 @@ export class SessionHub {
           session: this.summarize({ file }),
           turns: projectMessagesToTurns(file.messages),
           head: await this.store.readHead(conversationId),
+          ...(codeRestore !== undefined ? { codeRestore } : {}),
         };
       },
     });
+  }
+
+  /** Restore the workspace files a rewind to `head` would abandon (ADR-0119).
+   *  Called before the head moves: an unreadable preimage blob throws here, so
+   *  the transcript never advances past history whose code we could not put
+   *  back. Drift and root-identity mismatches are reported skips. */
+  private async restoreAbandonedCode(
+    conversationId: string,
+    head: string | null
+  ): Promise<CodeRestoreReport> {
+    const abandoned = await this.store.rewindablePreimages(
+      conversationId,
+      head
+    );
+    const ops = buildCodeRestorePlan(abandoned);
+    const { workspaceRoot } = await this.store.load(conversationId);
+    return applyCodeRestore({
+      sessionFolder: resolveConversationDir({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      }),
+      taskRoot: workspaceRoot ?? "",
+      rootIdentity: this.rootIdentityFor(workspaceRoot),
+      ops,
+    });
+  }
+
+  /** The live project-identity root a captured preimage `rootIdentity` is
+   *  checked against — the same derivation the engine build feeds the write
+   *  tools (`buildProductionEngine` → `resolvePreimageRootIdentity`). */
+  private rootIdentityFor(root: string | undefined): string {
+    if (root === undefined) return "";
+    return this.projectIdentityRoot ?? this.boundRoot ?? mainCheckoutOf(root);
   }
 
   async listRewindTargets(
