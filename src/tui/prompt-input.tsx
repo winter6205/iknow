@@ -49,6 +49,24 @@ import { tuiPalette } from "./theme.js";
  *  from the textarea's real height. */
 export const INPUT_MAX_LINES = 8;
 
+/** Hint-list row cap (SSOT): more candidates than this render a scroll
+ *  window following the hint cursor, and the app row budget
+ *  (chromeReserveRows.inputHintRows) clamps to the same value — a short
+ *  terminal never gets its chrome squeezed into overlapping rows. */
+export const HINT_MAX_ROWS = 8;
+
+/** Scroll-window start row (SSOT, unit-testable): the smallest start that
+ *  keeps `cursor` inside `[start, start + maxRows)`, clamped to
+ *  `[0, total - maxRows]`; `total <= maxRows` → 0 (no windowing). */
+export function hintWindowStart(
+  cursor: number,
+  total: number,
+  maxRows: number
+): number {
+  if (total <= maxRows) return 0;
+  return Math.min(Math.max(cursor - maxRows + 1, 0), total - maxRows);
+}
+
 /**
  * Visible line count of the input (SSOT, unit-testable): physical lines
  * split by `\n`, empty → 1.
@@ -526,6 +544,18 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
       1,
       Math.min(inputWrapLineCount(props.value, props.cols), maxLines)
     );
+    // Scroll window for the hint list: only shifts when the cursor crosses
+    // the window edge; labelWidth stays computed over the full list so the
+    // description column does not jitter between window positions.
+    const hintStart = hintWindowStart(
+      hintCursor,
+      suggestions.length,
+      HINT_MAX_ROWS
+    );
+    const visibleHints = suggestions.slice(
+      hintStart,
+      hintStart + HINT_MAX_ROWS
+    );
 
     return (
       <box flexDirection="column">
@@ -554,8 +584,8 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
         </box>
         {hasHint && (
           <box flexDirection="column" marginTop={0}>
-            {suggestions.map((candidate, i) => {
-              const selected = i === hintCursor;
+            {visibleHints.map((candidate, i) => {
+              const selected = hintStart + i === hintCursor;
               const label =
                 candidate.kind === "command"
                   ? candidate.command

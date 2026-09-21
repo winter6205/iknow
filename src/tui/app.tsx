@@ -259,6 +259,7 @@ import {
   type VerifySlot,
 } from "./verify-banner.js";
 import {
+  HINT_MAX_ROWS,
   INPUT_MAX_LINES as MAX_INPUT_LINES,
   inputVisibleLineCount,
   inputWrapLineCount,
@@ -4105,8 +4106,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // Chrome is budgeted item by item (chromeReserveRows SSOT): input 3 + mode
   // 1 + ContextBar 1 + ask slot 1 + headroom 1 + slash suggestions + notice /
   // modal wrapped rows + bgLine.
+  // Budget only what can actually render: PromptInput windows the list to
+  // HINT_MAX_ROWS rows, so a bare "/" (16 candidates) reserves 8, not 16 —
+  // otherwise the surplus rows squeeze the chrome into overlapping lines on
+  // short terminals.
   const hintRows = inputValue.trim().startsWith("/")
-    ? slashSuggestions(inputValue, skillList).length
+    ? Math.min(slashSuggestions(inputValue, skillList).length, HINT_MAX_ROWS)
     : 0;
   const bgSession = Object.values(sessions).find(
     (s) => s.runState === "running-bg"
