@@ -8,6 +8,9 @@
  *   iknow ask "<query>" [options] → one-shot JSON
  *   iknow "<query>" [options]     → one-shot JSON
  */
+import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
+import { fileURLToPath } from "node:url";
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
 // Subagent worker headless re-entry: the child process returns early from main dispatch.
@@ -27,7 +30,11 @@ import {
   type RuntimeBundle,
 } from "./cli/runtime.js";
 import { isInteractive, writeErr } from "./cli/session-io.js";
-import { getVersion, printUsage } from "./cli/usage.js";
+import {
+  getVersion,
+  printUsage,
+  tuiNodeInterceptMessage,
+} from "./cli/usage.js";
 import { formatRunJson } from "./cli/format.js";
 import {
   run as runHarness,
@@ -738,14 +745,16 @@ async function runTui(parsed: ParsedCli): Promise<void> {
   // Dynamic import: same lazy path as serve, so chat/ask do not carry the opentui dependency tree.
   // The OpenTUI render entry; runTui returns an exit code (typed errors converge at the single
   // catch point in tui/run.tsx, no try/catch here). Runtime guard: OpenTUI 0.5.1 only works under
-  // Bun (~/.bun/bin/bun); Node lacks node:ffi (only Node 26 has it), so tsx+Node running tui
-  // inevitably fails FFI. Intercept early and point to npm run dev:tui instead of surfacing an FFI stack.
+  // Bun; Node lacks node:ffi (only Node 26 has it), so tsx+Node running tui inevitably fails FFI.
   if (process.versions.bun === undefined) {
-    process.stderr.write(
-      `TUI 需用 Bun 运行（OpenTUI 原生 FFI 仅 Bun 支持，Node 22 无 node:ffi）。\n` +
-        `请改用：npm run dev:tui\n`
-    );
-    process.exitCode = 1;
+    const cliFile = fileURLToPath(import.meta.url);
+    const reexec = await reexecTuiUnderBun(cliFile, process.argv.slice(2));
+    if (reexec.kind === "missing") {
+      process.stderr.write(tuiNodeInterceptMessage(cliFile));
+      process.exitCode = 1;
+      return;
+    }
+    process.exitCode = reexec.code;
     return;
   }
   const { runTui: startTui } = await import("./tui/run.js");
@@ -767,6 +776,39 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
+}
+
+// Bun lives on PATH (a runtime, not an npm dependency). Re-exec this same CLI file under it with
+// the cwd untouched, so ADR-0019 workspace-root semantics survive the handoff. No loop guard is
+// needed: the child defines process.versions.bun and skips this branch.
+type BunReexecResult = { kind: "exit"; code: number } | { kind: "missing" };
+
+async function reexecTuiUnderBun(
+  cliFile: string,
+  args: string[]
+): Promise<BunReexecResult> {
+  return new Promise((resolve) => {
+    const child = spawn("bun", [cliFile, ...args], { stdio: "inherit" });
+    child.once("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        resolve({ kind: "missing" });
+        return;
+      }
+      writeErr(
+        `tui: bun 子进程启动失败 / failed to spawn bun: ${err.message}\n`
+      );
+      resolve({ kind: "exit", code: 1 });
+    });
+    child.once("close", (code, signal) => {
+      // Shell convention: a signal death must map to 128+signum, so callers can tell
+      // SIGTERM/SIGKILL apart from the child's own exit 1. code wins when non-null.
+      const signum = signal === null ? undefined : osConstants.signals[signal];
+      resolve({
+        kind: "exit",
+        code: code ?? (signum === undefined ? 1 : 128 + signum),
+      });
+    });
+  });
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
