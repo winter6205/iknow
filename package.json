@@ -38,6 +38,8 @@
     "test:real-llm": "vitest run --config vitest.real-llm.config.ts",
     "ci:check-excludes": "tsx scripts/ci-check-test-excludes.ts",
     "probe:lsp": "tsx scripts/lsp-probe.ts",
+    "probe:sandbox:subagent": "tsx scripts/sandbox-probe-subagent.ts",
+    "probe:aci-web-backend": "tsx scripts/aci-web-backend-exa-probe.ts",
     "bench:transcript": "tsx scripts/bench-transcript-baseline.ts",
     "dev": "tsx src/cli.ts",
     "dev:tui": "bun run src/cli.ts tui",

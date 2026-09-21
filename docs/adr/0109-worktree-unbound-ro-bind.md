@@ -43,7 +43,7 @@ Locked sub-decisions:
 - The "unknown commands fail closed" clause is **void for bash**: the gate's bash enforcement moves from pre-interception to after-the-fact — commands genuinely execute, but the mount surface guarantees zero writes land in the main checkout; non-FS side effects (network, processes) were never under the worktree gate's jurisdiction and are unaffected by this flip. The bash half of the acceptance constraints pinned by the old spec `casual-ask-context-hygiene.md` (already retired in `5ae9889a`) is voided along with it.
 - The misfire surface for unbound sessions drops to zero: `cd` / `curl` / `gh` / `sleep`-class read-only commands no longer receive gate receipts.
 - The feedback point for real writes moves from "before the call" to "EROFS during execution"; what the model sees shifts from gate wording to a filesystem-violation feedback carrying equivalent guidance.
-- The correctness anchor of write protection moves from the classification table to argv assembly: the position of `--ro-bind` (after the rw binds, before `--proc`) and the pad re-bind order become a contract that must be measured (`npm run probe:sandbox` + TUI).
+- The correctness anchor of write protection moves from the classification table to argv assembly: the position of `--ro-bind` (after the rw binds, before `--proc`) and the pad re-bind order become a contract that must be measured (`npm run probe:sandbox:subagent` for the violation arms + the archived physical-category probe `iknow-archive/scripts-probes/sandbox-probe.ts` + TUI).
 - The byte-identical promise for the bound / gate-OFF tiers gives the regression floor: the flip introduces differences only in the unbound tier.
 
 ## Evidence pointers
