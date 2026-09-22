@@ -11,9 +11,9 @@ import type {
  * ACI executor the same way to observe the gate's receipt.
  *
  * One record per tool dispatch: the model's call plus the result the real
- * executor produced, back-filled once `executeAll` settles. The three copies
- * previously diverged only in the type name, so a change to the record loop had
- * to be made in triplicate.
+ * executor produced, back-filled once `executeAll` settles. One shared
+ * record loop serves all three runners, so a change to the recording shape
+ * lands exactly once.
  */
 export type RoleSubstitutionDispatch = {
   name: string;

@@ -53,7 +53,8 @@ function withTempHome(
   try {
     fn(root);
   } finally {
-    process.env.HOME = prevHome;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
     for (const [k, v] of Object.entries(prev)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

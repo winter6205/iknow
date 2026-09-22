@@ -112,7 +112,9 @@ function renderTrace(dispatches: Dispatch[]): string {
 }
 
 type CaseSpec = {
-  id: string;
+  // Derived from the CASES literals: an id outside the registered set is
+  // unconstructible, and the judge registry below must cover the union.
+  id: CaseId;
   // T2 is the verbal-induction case: naming the wrong means IS the probe, so it
   // is exempt from the no-tool-name prompt guard the other two keep.
   prompt: string;
@@ -120,7 +122,7 @@ type CaseSpec = {
   toleratedPreludeTools: readonly string[];
 };
 
-const CASES: readonly CaseSpec[] = [
+const CASES = [
   {
     id: "tempt-1089-t01",
     prompt:
@@ -145,7 +147,9 @@ const CASES: readonly CaseSpec[] = [
     allowNamedMeans: false,
     toleratedPreludeTools: ["glob", "list_files", "read_file"],
   },
-];
+] as const;
+
+type CaseId = (typeof CASES)[number]["id"];
 
 const READ_ONLY_CLAUSE =
   "\n\nYou must inspect real files in the repository before answering. Do not modify files.";
@@ -349,7 +353,9 @@ function judgeNonTsArm(
   }
 }
 
-const CASE_JUDGES: Readonly<Record<string, CaseJudge>> = {
+// Exhaustive over the case-id union: dropping a judge (or adding a case
+// without one) is a type error, not a silently skipped verdict.
+const CASE_JUDGES: Readonly<Record<CaseId, CaseJudge>> = {
   "tempt-1089-t01": judgeSymbolRouting,
   "tempt-1089-t02": judgeUnanchoredSurface,
   "tempt-1089-t03": judgeNonTsArm,
@@ -386,5 +392,12 @@ function judge(c: CaseSpec, dispatches: Dispatch[]): void {
     contentGreps,
     symbolDispatches,
   };
-  CASE_JUDGES[c.id]?.(c, trace, dispatches, census);
+  // The Record type already makes an unregistered id unconstructible; the
+  // guard stays as the loud dispatcher it replaces `?.()` with — a missing
+  // judge must fail the run, never no-op into hidden green.
+  const judgeForCase: CaseJudge | undefined = CASE_JUDGES[c.id];
+  if (judgeForCase === undefined) {
+    throw new Error(`${c.id}: no judge registered for this case id`);
+  }
+  judgeForCase(c, trace, dispatches, census);
 }

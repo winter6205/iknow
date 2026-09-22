@@ -3,9 +3,9 @@
  * (sampling probe live census + retrace, both real-llm golden verdicts):
  * a bash dispatch is classified as a grep substitution exactly when the
  * gate classifies it as one — `detectBashGrepSubstitution` — and an
- * enforcement failure is a detected dispatch that completed ok. The old
- * witness regexes drifted from the gate in both directions (over- and
- * under-counting), so the gate predicate itself is the only scorer.
+ * enforcement failure is a detected dispatch that completed ok. The gate
+ * predicate itself is the only scorer: any separate witness regex can drift
+ * from the gate in both directions (over- and under-counting).
  */
 import { describe, expect, it } from "vitest";
 
