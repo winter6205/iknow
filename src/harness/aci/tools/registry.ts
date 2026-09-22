@@ -14,6 +14,7 @@
  * from build-engine.ts; memory_recall / memory_save (conditional: omitted
  * without memoryDir) come after them; `tool_search` is appended last.
  */
+import { yoloHolderSpread } from "../../sandbox/yolo.js";
 import type { IknowEnv } from "../../../config/env.js";
 import { createAciRegistry, type AciRegistry } from "../aci-registry.js";
 import type { AciToolDef } from "../types.js";
@@ -34,6 +35,7 @@ import { createSymbolQueryToolSet } from "./symbol.js";
 import { createSymbolMutateToolSet } from "./symbol-mutate.js";
 import type { LspCtx } from "../../lsp/types.js";
 import type { FsModeContext } from "../../sandbox/fs-mode.js";
+import type { YoloContext } from "../../sandbox/yolo.js";
 import { createSkillTool } from "./skill.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
@@ -459,6 +461,16 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder — same shape as
+   * `fsMode` (holder pass-through, handler `get()` read once per call).
+   * Present and reading true → the bash fence emits bare argv, `requireBwrap`
+   * is skipped at assembly, and the egress seam retires entirely (ADR-0119
+   * ruling 3). Absent / false → today's shape byte-for-byte unchanged (V1
+   * baseline). The assembly layer (build-engine) passes the session-level
+   * holder once.
+   */
+  readonly yolo?: YoloContext;
+  /**
    * ADR-0092: workspace-tier home ro-bind source, a host absolute path.
    * Default: the build-engine assembly layer derives it from `userHome`
    * (tests may inject).
@@ -716,6 +728,12 @@ export function createDefaultAciRegistry(
         // global mode (V1 baseline). homeRoot is derived from userHome by the
         // assembly layer.
         ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
+        // ADR-0119 / specs/yolo-mode.md: yolo holder pass-through — same shape
+        // as the fsMode line above (the key is produced only when the holder
+        // is present). The projection is extracted into yoloHolderSpread to
+        // keep this arrow under the S5 complexity gate (the branch lives in
+        // the helper).
+        ...yoloHolderSpread(opts.yolo),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
         // UNBOUND_FENCE holder pass-through (absent = segment never emitted).
         ...(opts.worktreeOnMutate !== undefined

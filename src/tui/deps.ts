@@ -33,6 +33,7 @@ import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
+import type { YoloContext } from "../harness/sandbox/yolo.js";
 import type { SubagentCapacityHolder } from "../harness/subagent/manager.js";
 import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
@@ -128,6 +129,17 @@ export interface BuildTuiDepsOptions {
    * has no fs tier (the engine defaults to the global tier).
    */
   readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (same shape as
+   * fsMode). Passed through to build-engine — `BuildEngineOpts.yolo` → the bash
+   * factory reads per call (foreground fence / background spawn / verify /
+   * subagent env wire share one source). Absent = this entry point did not wire
+   * the yolo axis (the engine uses the non-yolo fail-closed default).
+   *
+   * Not persisted: the yolo axis never enters settings / session files / a
+   * config panel row (spec §5).
+   */
+  readonly yolo?: YoloContext;
   /**
    * Runtime subagent concurrency cap holder (ADR-0096; same shape as fsMode).
    * Passed through to build-engine — `BuildEngineOpts.subagentCapacityHolder`
@@ -454,6 +466,10 @@ export async function buildTuiDeps(
     // call (build-engine guards on `!== undefined`, so absent and explicit
     // undefined are equivalent).
     fsMode: opts.fsMode,
+    // ADR-0119 / specs/yolo-mode.md: yolo holder passthrough — the bash factory
+    // reads per call (build-engine treats `undefined` and "key absent" the same
+    // = non-yolo fail-closed).
+    yolo: opts.yolo,
     // ADR-0096: cap holder passthrough — build-engine uses it instead of a
     // one-shot boot snapshot of env.subagent.maxConcurrentWorkers (the spawn
     // gate reads holder.get() each time); forwarded in the same source to

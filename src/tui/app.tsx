@@ -67,7 +67,10 @@ import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { isDoubleEsc, type TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
-import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type {
+  PermissionMode,
+  PermissionModeContext,
+} from "../harness/permission/modes.js";
 import {
   modalKeyEventOf,
   ModalHost,
@@ -103,6 +106,15 @@ import {
   rewindPickerContent,
   type RewindTarget,
 } from "./rewind-picker.js";
+// ADR-0119 / specs/yolo-mode.md: /yolo confirm-modal content + row accounting
+// + key routing (pure module; the state host is this component — see
+// yoloConfirming / yoloOn state).
+import {
+  reduceYoloConfirmKey,
+  yoloEnterConfirmContent,
+  yoloModalRows,
+  type YoloKeyAction,
+} from "./yolo-picker.js";
 import {
   helpLines,
   parseSkillLoad,
@@ -310,6 +322,12 @@ import {
   type FsIsolationMode,
   type FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
+// ADR-0119 / specs/yolo-mode.md: yolo-axis types (holder + enter/exit action
+// single point). Type-only import — the flip semantics live in
+// harness/sandbox/yolo.ts (snapshot + full_auto + fsMode→global + symmetric
+// bwrap probe on enter and exit); this component never rebuilds them and never
+// writes the holder directly.
+import type { YoloContext, YoloController } from "../harness/sandbox/yolo.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillRescanner } from "../harness/skill/rescan.js";
 import {
@@ -585,20 +603,108 @@ function pickerRowsForBudget(opts: {
 }
 
 /**
+ * mode-row base label (no yolo marker; the existing wide / narrow
+ * projections, folded out of the mode-row JSX). Folding motivation: the yolo
+ * red marker (specs/yolo-mode.md) requires the narrow-column (`cols < 40`) and
+ * wide-column forms both be visible and each is tested, yet TuiApp clamps cols
+ * at a floor of 40 (`Math.max(width ?? 80, 40)`) — the narrow branch is
+ * unreachable in a real mount, so it can only be asserted through this pure
+ * function.
+ */
+export function modeRowBaseLabel(opts: {
+  readonly graphOn: boolean;
+  readonly permMode: PermissionMode;
+  readonly cols: number;
+}): string {
+  return opts.cols < 40
+    ? `[${opts.graphOn ? "graph" : opts.permMode === "full_auto" ? "auto" : "def"}]`
+    : `mode: ${agentModeLabel({ permission: opts.permMode, graph: opts.graphOn })}`;
+}
+
+/**
+ * ADR-0119 / specs/yolo-mode.md: the yolo red-marker token — the red
+ * (pal.error) text appended to the mode row's tail when yolo is ON,
+ * persistent and visible at a glance. The narrow column uses the bracket form
+ * (same family as the existing [graph|auto|def]); the wide column uses the
+ * ` · ` separator (same separator as the running-seconds suffix). Never
+ * empty: the caller renders this node conditionally on yoloOn, so when yolo
+ * is OFF the whole node is absent (the mode row is byte-identical to before).
+ */
+export function modeRowYoloMarker(cols: number): string {
+  return cols < 40 ? "[YOLO]" : " · YOLO";
+}
+
+/**
+ * The full mode-row pure projection (specs/yolo-mode.md assertion surface):
+ * when yolo is ON both forms contain the YOLO text; when OFF it equals the
+ * existing label byte-for-byte. The render slot (mode-row JSX) splits into two
+ * text nodes by this projection — the red marker is colored pal.error
+ * separately (no new theme token, no new bottom-bar row, the row budget is
+ * unchanged).
+ */
+export function modeRowText(opts: {
+  readonly yoloOn: boolean;
+  readonly graphOn: boolean;
+  readonly permMode: PermissionMode;
+  readonly cols: number;
+}): string {
+  return (
+    modeRowBaseLabel(opts) + (opts.yoloOn ? modeRowYoloMarker(opts.cols) : "")
+  );
+}
+
+/**
+ * modal-row budget entry (chrome budget slot): the yolo-confirm > rewind >
+ * ask order, returning the matched row count. Folded out of the TuiApp inline
+ * ternary into a helper (S5 hard gate, same motivation as
+ * `pickerRowsForBudget`): with yolo-confirm closed this function is
+ * byte-identical to the old inline form (zero modal row-budget regression).
+ */
+function modalRowsForBudget(opts: {
+  readonly yoloConfirmOpen: boolean;
+  readonly rewind:
+    | {
+        readonly targets: ReadonlyArray<RewindTarget>;
+        readonly index: number;
+        readonly confirming: boolean;
+      }
+    | undefined;
+  readonly ask:
+    { readonly tool: string; readonly summaryHint: string } | undefined;
+  readonly cols: number;
+}): number {
+  if (opts.yoloConfirmOpen) return yoloModalRows(opts.cols);
+  if (opts.rewind !== undefined) {
+    return rewindModalRows(
+      opts.rewind.targets,
+      opts.cols,
+      opts.rewind.index,
+      opts.rewind.confirming
+    );
+  }
+  if (opts.ask !== undefined) return permissionModalRows(opts.ask, opts.cols);
+  return 0;
+}
+
+/**
  * Input placeholder text while a picker is open (check order = panel
- * priority: rewind > model > memory > thinking). Any picker open → its key
- * hint, else undefined (caller falls back to the default text / ask branch).
- * The chain lives in this helper so the component only reads a value
- * (complexity gate: branch bodies in helpers; the text SSOT is here, so the
- * Chinese strings asserted by tests don't scatter across JSX).
+ * priority: yolo-confirm > rewind > config > model > memory > thinking). Any
+ * picker open → its key hint, else undefined (caller falls back to the
+ * default text / ask branch). The chain lives in this helper so the component
+ * only reads a value (complexity gate: branch bodies in helpers; the text SSOT
+ * is here, so the strings asserted by tests don't scatter across JSX).
  */
 export function pickerPlaceholderFor(opts: {
+  readonly yoloConfirmOpen: boolean;
   readonly rewindOpen: boolean;
   readonly configPickerOpen: boolean;
   readonly modelPickerOpen: boolean;
   readonly memoryPickerOpen: boolean;
   readonly thinkingPickerOpen: null | "thinking" | "effort";
 }): string | undefined {
+  if (opts.yoloConfirmOpen) {
+    return "yolo 确认中（Enter 确认 · Esc 取消）";
+  }
   if (opts.rewindOpen) {
     return "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）";
   }
@@ -1118,6 +1224,26 @@ export interface TuiAppProps {
    */
   readonly fsMode?: FsModeContext;
   /**
+   * ADR-0119 / specs/yolo-mode.md: the yolo-axis holder (same shape as
+   * fsMode). `/yolo` reads it to decide the confirm direction; the holder is
+   * always the authority (this component never writes it directly — a flip
+   * only goes through yoloController's enter / exit action; the snapshot +
+   * symmetric bwrap-probe semantics live in harness/sandbox/yolo.ts). Absent
+   * → `/yolo` warns not-wired (test / fixture compat; the product path
+   * injects it via run.tsx).
+   */
+  readonly yolo?: YoloContext;
+  /**
+   * ADR-0119 / specs/yolo-mode.md: the yolo enter / exit action single point
+   * (permission snapshot + full_auto, fsMode snapshot + global, exit restores
+   * the snapshot, symmetric bwrap probe on both the enter and exit sides).
+   * `/yolo` calls enter() / exit() after confirmation, and
+   * YoloActionResult.text goes to the notice. Absent → `/yolo` warns
+   * not-wired and does not open the confirm modal (fail-closed: never give
+   * the user a panel whose confirmation has no action behind it).
+   */
+  readonly yoloController?: YoloController;
+  /**
    * ADR-0092: persist callback after a `/config` switch (fire-and-forget).
    * Product path injects a closure over `persistFsModeChanges(resolveThinkingSettingsPath(), …)`
    * from run.tsx; tests may inject a spy. Failure never throws (UI fallback
@@ -1566,6 +1692,234 @@ export function toSlashEntries(
   return projectSlashEntries(catalog);
 }
 
+/**
+ * ADR-0119: initial-value seeding for the yolo ON mirror — S5 extraction
+ * (inlining three `??` in TuiApp's useState seed would push the god component
+ * past the complexity gate).
+ *
+ * Precedence: the controller's holder is the authority (when present, its
+ * reading wins) → the bare holder → false (not-wired = non-yolo, fail-closed).
+ */
+function seedYoloOn(props: TuiAppProps): boolean {
+  const fromController = props.yoloController?.context.get();
+  if (fromController !== undefined) return fromController;
+  return props.yolo?.get() ?? false;
+}
+
+/** The three setter surface of the yolo confirm modal (a narrowed pass-through of host state). */
+interface YoloSetters {
+  readonly setYoloConfirming: (v: boolean | undefined) => void;
+  readonly setYoloOn: (v: boolean) => void;
+  readonly setNotice: (v: { lines: readonly string[] } | undefined) => void;
+  /** The permMode mirror (mode-row label). Enter/exit move the permission
+   *  holder inside the controller; the mirror has no subscription, so these
+   *  branches must re-read it after the flip lands. */
+  readonly setPermMode: (mode: PermissionMode) => void;
+  readonly permissionMode: PermissionModeContext;
+}
+
+/**
+ * ADR-0119: the directional asymmetric routing of `/yolo` — S5 extraction
+ * (adding this case to handleSubmit's switch would push the god function past
+ * the complexity gate).
+ *
+ *   - not-yolo → open the **enter** confirm modal (dangerous-operation copy,
+ *     shaped like /rewind);
+ *   - already-yolo → **exit immediately**, no modal (exit is always safe; the
+ *     enter/exit asymmetry is pinned by specs/yolo-mode.md), but still through
+ *     the bwrap probe — the probe lives inside `controller.exit()`, and on
+ *     refusal the state is unchanged and only a notice is shown;
+ *   - controller absent = not-wired → typed notice, no panel opened (same
+ *     fail-closed as /graph).
+ *
+ * No idle guard: enter/exit are synchronous holder flips, orthogonal by
+ * construction to the in-flight turn's per-call snapshot semantics.
+ */
+function handleYoloSlash(
+  controller: YoloController | undefined,
+  setters: YoloSetters
+): void {
+  if (controller === undefined) {
+    setters.setNotice({
+      lines: ["yolo 未接线（本入口未注入 yolo controller）。"],
+    });
+    return;
+  }
+  if (controller.context.get()) {
+    // Exit immediately: no confirmation. Probe refusal → ok:false, holder untouched.
+    const result = controller.exit();
+    setters.setYoloOn(controller.context.get());
+    setters.setPermMode(setters.permissionMode.get());
+    setters.setNotice({ lines: [result.text] });
+    return;
+  }
+  setters.setYoloConfirming(true);
+}
+
+/** rewind picker's key-action landing surface (a narrowed pass-through of host state). */
+interface RewindKeySetters {
+  readonly setIndex: (index: number) => void;
+  readonly setConfirming: (confirming: boolean) => void;
+  /** cancel: clears targets + index + confirming + notice (Esc collapses). */
+  readonly cancel: () => void;
+  readonly execute: (target: RewindTarget) => void;
+}
+
+/**
+ * Key routing landing while the rewind picker is active — folded out of the
+ * host `useKeyboard` closure inline (S5 hard gate; that god closure is already
+ * on the ratchet baseline).
+ *
+ * The reducer is a pure function (rewind-picker); this function only dispatches
+ * actions: move/confirm are taken up by host state; execute is produced on
+ * confirm-state Enter (at which point the reducer emits no move, so reading the
+ * target by the current index is safe); cancel collapses and clears the notice.
+ */
+function applyRewindModalKey(opts: {
+  readonly targets: ReadonlyArray<RewindTarget>;
+  readonly index: number;
+  readonly confirming: boolean;
+  readonly keyEvent: KeyEvent;
+  readonly setters: RewindKeySetters;
+}): void {
+  const action = reduceRewindKey(modalKeyEventOf(opts.keyEvent), {
+    targets: opts.targets,
+    selectedIndex: opts.index,
+    confirming: opts.confirming,
+  });
+  switch (action.type) {
+    case "move":
+      opts.setters.setIndex(action.index);
+      break;
+    case "confirm":
+      opts.setters.setConfirming(true);
+      break;
+    case "execute": {
+      const target = opts.targets[opts.index];
+      if (target !== undefined) opts.setters.execute(target);
+      break;
+    }
+    case "cancel":
+      opts.setters.cancel();
+      break;
+    case "ignore":
+      break;
+  }
+}
+
+/**
+ * Exclusive key dispatch for the active modal (ADR-0119): priority
+ * yolo-confirm > rewind. Folded out of the host `useKeyboard` closure (S5 hard
+ * gate: the closure sits on the ratchet baseline, and merging the arms into one
+ * call **nets down** its branch count — the switch cases move out too).
+ *
+ * yolo-confirm is placed before rewind / double-Esc: a dangerous-operation
+ * confirmation is the most explicit pending intent, so Enter/Esc must reach it
+ * directly, not be hijacked by double-Esc / ask keys. yolo and rewind never
+ * actually coexist (both disable the input box and cannot open past each other);
+ * the only stackable case is the engine-side ask (tool-authorization wait) —
+ * both the render slot and the row accounting are yolo-first, and the ask
+ * blocks until the confirmation ends (consistent with the ask's own blocking
+ * semantics).
+ *
+ * @returns true → the key was consumed by the active modal; the caller must
+ *   return immediately. false → no active modal; the caller continues the
+ *   remaining key routing (the modal-discrimination SSOT is this function —
+ *   callers must not re-derive it).
+ */
+function dispatchActiveModalKey(opts: {
+  readonly yolo: {
+    readonly confirming: boolean | undefined;
+    readonly controller: YoloController | undefined;
+    readonly setters: YoloSetters;
+  };
+  readonly rewind: {
+    readonly targets: ReadonlyArray<RewindTarget> | undefined;
+    readonly index: number;
+    readonly confirming: boolean;
+    readonly setters: RewindKeySetters;
+  };
+  readonly keyEvent: KeyEvent;
+}): boolean {
+  if (opts.yolo.confirming !== undefined) {
+    applyYoloConfirmKey(
+      reduceYoloConfirmKey(modalKeyEventOf(opts.keyEvent)),
+      opts.yolo.controller,
+      opts.yolo.setters
+    );
+    return true;
+  }
+  if (opts.rewind.targets === undefined) return false;
+  applyRewindModalKey({
+    targets: opts.rewind.targets,
+    index: opts.rewind.index,
+    confirming: opts.rewind.confirming,
+    keyEvent: opts.keyEvent,
+    setters: opts.rewind.setters,
+  });
+  return true;
+}
+
+function applyYoloConfirmKey(
+  action: YoloKeyAction,
+  controller: YoloController | undefined,
+  setters: YoloSetters
+): void {
+  if (action === "ignore") return;
+  setters.setYoloConfirming(undefined);
+  if (action === "cancel") {
+    setters.setNotice(undefined);
+    return;
+  }
+  if (controller === undefined) {
+    // The open path is already guarded (no wiring → no panel); the defensive
+    // branch keeps the same typed notice.
+    setters.setNotice({
+      lines: ["yolo 未接线（本入口未注入 yolo controller）。"],
+    });
+    return;
+  }
+  const result = controller.enter();
+  setters.setYoloOn(controller.context.get());
+  setters.setPermMode(setters.permissionMode.get());
+  setters.setNotice({ lines: [result.text] });
+}
+
+/**
+ * With askPending, an input y/n/a answers directly (the modal has yielded the
+ * keys → the input box is the fallback).
+ *
+ * Folding motivation for the module-level helper: every extra `case` in
+ * handleSubmit's switch counts toward the S5 complexity gate
+ * (SwitchCase[test]), so the branch is extracted per the repo's standing remedy
+ * (semantics byte-unchanged: y/yes → once, a/always → always, n/no → reject).
+ *
+ * Returns true when answered (the caller returns immediately); no pending /
+ * not an answer word → false, and the caller continues the slash / message
+ * routing below.
+ */
+function applyAskShortcut(
+  pending: TuiPendingAsk | undefined,
+  text: string,
+  resolve: (ask: TuiPendingAsk, answer: PermissionAnswer) => void
+): boolean {
+  if (pending === undefined) return false;
+  const lower = text.toLowerCase();
+  if (lower === "y" || lower === "yes") {
+    resolve(pending, "once");
+    return true;
+  }
+  if (lower === "a" || lower === "always") {
+    resolve(pending, "always");
+    return true;
+  }
+  if (lower === "n" || lower === "no") {
+    resolve(pending, "reject");
+    return true;
+  }
+  return false;
+}
+
 export function TuiApp(props: TuiAppProps): ReactNode {
   const pal = tuiPalette;
   const permissionMode = props.permissionMode ?? defaultPermissionModeContext;
@@ -1783,6 +2137,27 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   >(undefined);
   const [rewindIndex, setRewindIndex] = useState(0);
   const [rewindConfirming, setRewindConfirming] = useState(false);
+  // ADR-0119 / specs/yolo-mode.md: the /yolo **enter**-confirmation modal slot
+  // (only entry is confirmed; exit is immediate and bypasses the modal — see
+  // case "yolo"). undefined = closed; true = enter-confirmation (currently
+  // non-yolo). Same discipline as rewind: pure rendering, no internal state,
+  // selected index pinned to 0 (the reducer ignores ↑↓). Session switching does
+  // not clear this state: yolo is a harness-level axis (not persisted, never
+  // enters session files), not session-level UI; and while the confirmation is
+  // open the input box is disabled and keys are exclusive, so session switching
+  // is unreachable — no cross-session residue path.
+  const [yoloConfirming, setYoloConfirming] = useState<boolean | undefined>(
+    undefined
+  );
+  // ADR-0119: the yolo ON mirror (only drives the mode-row red marker
+  // re-render; the holder is the authority). The holder's get() does not
+  // subscribe (same constraint as the permMode / graphOn mirrors) — flips only
+  // happen in this component's confirmation execute branch (mirrored
+  // synchronously after enter() returns, together with the permMode mirror the
+  // controller's permission flip needs) and case "yolo"'s immediate-exit
+  // branch (mirrored after exit() returns); startup `--yolo` is read once by
+  // the useState seed.
+  const [yoloOn, setYoloOn] = useState(() => seedYoloOn(props));
   const lastEscAtRef = useRef<number | undefined>(undefined);
 
   // Terminals (iTerm2 / WezTerm / kitty etc.) **automatically** paste "the
@@ -3288,21 +3663,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const text = raw.trim();
     if (text.length === 0) return;
     // With askPending, y/n/a answer directly (modal yielded keys → input fallback).
-    if (askPending) {
-      const lower = text.toLowerCase();
-      if (lower === "y" || lower === "yes") {
-        resolvePermissionAsk(askPending, "once");
-        return;
-      }
-      if (lower === "a" || lower === "always") {
-        resolvePermissionAsk(askPending, "always");
-        return;
-      }
-      if (lower === "n" || lower === "no") {
-        resolvePermissionAsk(askPending, "reject");
-        return;
-      }
-    }
+    if (applyAskShortcut(askPending, text, resolvePermissionAsk)) return;
     // Exact /skill-name [prompt] match → deterministic skill-load send
     // (static commands win first: parseSkillLoad returns undefined on a hit,
     // falling through to normal routing). Re-scan once at submit time: the
@@ -3407,6 +3768,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         );
         return;
       }
+      case "yolo":
+        // ADR-0119: the routing body is folded into a helper (S5 complexity
+        // gate; see the helper header for the enter/exit asymmetry).
+        handleYoloSlash(props.yoloController, {
+          setYoloConfirming,
+          setYoloOn,
+          setNotice,
+          setPermMode,
+          permissionMode,
+        });
+        return;
       case "thinking": {
         // /thinking opens a pure ON/OFF toggle panel (the panel itself is
         // the feedback, no notice). Seeded from current thinkingEnabled;
@@ -4002,40 +4374,50 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // Rewind picker: exclusive keys while open (Esc cancels; ↑/↓ move; Enter
-    // confirms in select state / executes in confirm state). Routing lives in
-    // the rewind-picker pure reducer.
-    if (rewindTargets !== undefined) {
-      const action = reduceRewindKey(modalKeyEventOf(e), {
-        targets: rewindTargets,
-        selectedIndex: rewindIndex,
-        confirming: rewindConfirming,
-      });
-      switch (action.type) {
-        case "move":
-          setRewindIndex(action.index);
-          break;
-        case "confirm":
-          setRewindConfirming(true);
-          break;
-        case "execute": {
-          const targetId = active.conversationId;
-          // In confirm state the reducer yields execute without move, so this index is safe.
-          const t = rewindTargets[rewindIndex];
-          if (targetId !== undefined && t !== undefined) {
-            void executeRewind(targetId, t);
-          }
-          break;
-        }
-        case "cancel":
-          setRewindTargets(undefined);
-          setRewindIndex(0);
-          setRewindConfirming(false);
-          setNotice(undefined);
-          break;
-        case "ignore":
-          break;
-      }
+    // Active-modal exclusive keys: yolo-confirm > rewind (ADR-0119).
+    // The modal discriminator + routing body both live in the helper (S5
+    // complexity gate; see the helper header for the priority rationale), so
+    // the closure makes one dispatch call.
+    const activeConversationId = active.conversationId;
+    if (
+      dispatchActiveModalKey({
+        yolo: {
+          confirming: yoloConfirming,
+          controller: props.yoloController,
+          setters: {
+            setYoloConfirming,
+            setYoloOn,
+            setNotice,
+            setPermMode,
+            permissionMode,
+          },
+        },
+        rewind: {
+          targets: rewindTargets,
+          index: rewindIndex,
+          confirming: rewindConfirming,
+          setters: {
+            setIndex: setRewindIndex,
+            setConfirming: setRewindConfirming,
+            cancel: () => {
+              setRewindTargets(undefined);
+              setRewindIndex(0);
+              setRewindConfirming(false);
+              setNotice(undefined);
+            },
+            // Confirm-state Enter: the reducer yields execute without move, so
+            // taking the target by the current index is safe (done in helper).
+            // Missing session id (draft) → do not execute.
+            execute: (target) => {
+              if (activeConversationId !== undefined) {
+                void executeRewind(activeConversationId, target);
+              }
+            },
+          },
+        },
+        keyEvent: e,
+      })
+    ) {
       return;
     }
     // Double Esc (Esc is the sole interrupt entry): if the foreground has
@@ -4119,12 +4501,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const bgLine = bgSession !== undefined;
   const modalAsk =
     view === "chat" && askModalDismissed === false ? askPending : undefined;
-  const modalRowsForBudget =
-    modalAsk !== undefined
-      ? permissionModalRows(modalAsk, cols)
-      : rewindTargets !== undefined
-        ? rewindModalRows(rewindTargets, cols, rewindIndex, rewindConfirming)
-        : 0;
+  // The modal row budget places yolo-confirm first, in the same order as the
+  // ModalHost slot (priority rationale in the render-slot comment); the
+  // existing ask / rewind order is preserved between them (the two never
+  // coexist, so no practical effect). The discrimination is folded into a
+  // module-level helper (S5 hard gate; see the helper header).
+  const modalRows = modalRowsForBudget({
+    yoloConfirmOpen: yoloConfirming !== undefined,
+    rewind:
+      rewindTargets === undefined
+        ? undefined
+        : {
+            targets: rewindTargets,
+            index: rewindIndex,
+            confirming: rewindConfirming,
+          },
+    ask: modalAsk,
+    cols,
+  });
   // Picker row budget (thinking 5 / effort 7 + margins) joins the chrome
   // budget like modalRows, or the viewport would shrink. The
   // config/thinking/memory/model discrimination lives in a module-level helper.
@@ -4222,7 +4616,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         inputHintRows: hintRows,
         bgLine,
         inputRows: inputContentRows,
-        modalRows: modalRowsForBudget,
+        modalRows,
         pickerRows: pickerRows,
         compactRows:
           view === "chat" && activeCompact !== undefined
@@ -4374,24 +4768,42 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <ModalHost
           modal={
-            rewindTargets !== undefined
+            // Modal slot priority: yolo-confirm > rewind > ask (ADR-0119).
+            // yolo-confirm first: a dangerous-operation confirmation is the
+            // most explicit pending intent, so Enter/Esc must reach it
+            // directly; yolo and rewind never actually coexist (both disable
+            // the input and cannot open past each other), and when the
+            // engine-side ask opens during the confirmation, yolo-first lets
+            // the confirmation finish first (the ask blocks — consistent with
+            // its own blocking semantics). The row budget (modalRowsForBudget)
+            // opens with the same order.
+            yoloConfirming !== undefined
               ? {
                   kind: "select",
-                  ...rewindPickerContent(
-                    rewindTargets,
-                    rewindIndex,
-                    rewindConfirming
-                  ),
-                  selectedIndex: rewindConfirming ? 0 : rewindIndex,
+                  ...yoloEnterConfirmContent(),
+                  // Confirmation state carries no selection semantics (the
+                  // reducer ignores ↑↓); the highlighted row stays pinned to the
+                  // execute option (same as rewind confirm pinning index 0).
+                  selectedIndex: 0,
                 }
-              : askModalActive && askPending !== undefined
+              : rewindTargets !== undefined
                 ? {
-                    kind: "permission",
-                    tool: askPending.tool,
-                    summaryHint: askPending.summaryHint,
-                    selectedIndex: permissionIndex,
+                    kind: "select",
+                    ...rewindPickerContent(
+                      rewindTargets,
+                      rewindIndex,
+                      rewindConfirming
+                    ),
+                    selectedIndex: rewindConfirming ? 0 : rewindIndex,
                   }
-                : undefined
+                : askModalActive && askPending !== undefined
+                  ? {
+                      kind: "permission",
+                      tool: askPending.tool,
+                      summaryHint: askPending.summaryHint,
+                      selectedIndex: permissionIndex,
+                    }
+                  : undefined
           }
           cols={cols}
         />
@@ -4404,10 +4816,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           <text
             fg={graphOn || permMode === "full_auto" ? pal.running : pal.dim}
           >
-            {cols < 40
-              ? `[${graphOn ? "graph" : permMode === "full_auto" ? "auto" : "def"}]`
-              : `mode: ${agentModeLabel({ permission: permMode, graph: graphOn })}`}
+            {modeRowBaseLabel({ graphOn, permMode, cols })}
           </text>
+          {/* ADR-0119: the yolo red marker (pal.error, no new theme token, no
+              new bottom-bar row — it rides the existing mode row). When yolo
+              is OFF this node is not rendered (the mode row is byte-identical
+              to before). The two-form projection lives in modeRowText /
+              modeRowYoloMarker. */}
+          {yoloOn && <text fg={pal.error}>{modeRowYoloMarker(cols)}</text>}
           {/* Live run seconds to the right of mode (`· Xs`, ticks per
               second); cleared at turn end — stats move to the trailing
               `Crunched for X` line. Real-time token counting is not done. */}
@@ -4439,6 +4855,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // Picker placeholder text (incl. /model) lives in
             // pickerPlaceholderFor; no picker open → ask / default text.
             pickerPlaceholderFor({
+              yoloConfirmOpen: yoloConfirming !== undefined,
               rewindOpen: rewindTargets !== undefined,
               configPickerOpen,
               modelPickerOpen,
@@ -4455,6 +4872,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           disabled={
             askModalActive ||
             rewindTargets !== undefined ||
+            yoloConfirming !== undefined ||
             thinkingPickerOpen !== null ||
             memoryPickerOpen ||
             modelPickerOpen ||

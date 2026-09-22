@@ -104,6 +104,22 @@ export interface BwrapFenceOptions {
     readonly mainCheckout: string;
     readonly tmpPad?: string;
   };
+  /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox switch (the whole fence
+   * retires).
+   *
+   * Strict boolean: only `=== true` hits the yolo branch; absent / false /
+   * non-boolean all take today's fence path (illegal input stays fail-closed,
+   * keeps the fence, does not throw).
+   *
+   * The yolo branch argv is bare argv: command + args, no bwrap prefix, no
+   * netns, no mount, no clearenv / setenv; cwd and env are handed to spawn by
+   * the caller (server/index.ts's req.cwd / req.env).
+   *
+   * Absent (`undefined`) must stay byte-for-byte identical to today (V1
+   * baseline regression contract).
+   */
+  readonly yolo?: boolean;
 }
 
 export interface BwrapFence {
@@ -359,6 +375,30 @@ function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
 }
 
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
+  // ADR-0119 / specs/yolo-mode.md: yolo branch — the whole fence retires.
+  //
+  // Strict `=== true` check (illegal input stays fail-closed, keeps the fence,
+  // does not throw). All four routes (foreground bash / background spawn /
+  // verify sandbox-run / subagent worker) go through this factory, so retiring
+  // the fence here is automatically transparent to all four — no re-check at
+  // each call site.
+  //
+  // bare argv: no bwrap prefix / netns / mount / clearenv / setenv emitted.
+  // cwd and env are handed to spawn by the caller (server/index.ts's req.cwd /
+  // req.env). The egress seam is skipped wholesale under yolo (no socket bind,
+  // no proxy env) — no fence means no netns, so the domain allowlist does not
+  // intervene (ADR-0119 ruling 3).
+  //
+  // This early return also precedes the ADR-0109 `unboundFence` ro-bind: since
+  // the entire fence is gone, its physical main-checkout guarantee is inside the
+  // yolo exemption by construction (bare argv wins over ro-bind; see the
+  // ADR-0119 Amendment).
+  if (opts.yolo === true) {
+    return Object.freeze({
+      argv: Object.freeze([opts.command, ...opts.args]),
+      sealed: true as const,
+    });
+  }
   // Egress env injection: spec.env is the session-computed proxy
   // (ADR-0097)
   // keys + NO_PROXY; the fence splices them into its own envArgs (same form as

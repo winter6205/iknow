@@ -8,6 +8,7 @@
  */
 import { tmpdir } from "node:os";
 import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
+import type { YoloContext } from "../sandbox/yolo.js";
 import type {
   EgressPolicyInput,
   EgressSession,
@@ -90,6 +91,15 @@ export function makeDefaultRunVerify(opts: {
    */
   readonly egressPolicy?: EgressPolicyInput;
   /**
+   * ADR-0119: --yolo no-sandbox holder (same holder shape as the bash factory).
+   * Read once at assembly via get() — this factory rebuilds the closure per
+   * round from verify-loop, so the snapshot vintage matches the bash handler
+   * entry's D2. Under yolo the fence takes bare argv and starts no egress
+   * session (no fence means no netns, the proxy seam is meaningless, ADR-0119
+   * ruling 3). Absent / false → today's shape byte-for-byte unchanged.
+   */
+  readonly yolo?: YoloContext;
+  /**
    * worktree-on-mutate holder (read-only view). This closure is rebuilt per
    * round by verify-loop, so the factory-time `get()` equals that round's
    * snapshot (same vintage as the fsMode snapshot above). gate ON ∧ cwd is
@@ -110,6 +120,10 @@ export function makeDefaultRunVerify(opts: {
     gateOn: opts.worktreeOnMutate?.get() === true,
     root: opts.cwd,
   });
+  // ADR-0119: read the yolo holder once at factory time — the caller rebuilds
+  // this closure per round, so the snapshot vintage matches the bash handler
+  // entry's D2.
+  const yolo = opts.yolo?.get() === true;
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   // Module-level per-session egress singleton — lazy-started on first call.
@@ -143,8 +157,11 @@ export function makeDefaultRunVerify(opts: {
     // intentionally overridden (the session tmp comes from the caller, not
     // (ADR-0097)
     // from host env).
-    // Egress session lazy start — begins on first call, reused after.
-    const session = await ensureEgressSession();
+    // Egress session lazy start — begins on first call, reused after. Under
+    // yolo it is skipped wholesale (no session, no socket bind, no proxy env):
+    // no fence means no netns (ADR-0119 ruling 3); non-yolo is byte-for-byte
+    // unchanged.
+    const session = yolo ? undefined : await ensureEgressSession();
     // Inner-bridge command prefix, identical in shape to the bash tool's
     // foreground / background spawn; the single concat point is the egress
     // module's `wrapCommandWithInnerBridge` — with a session the payload is
@@ -183,6 +200,11 @@ export function makeDefaultRunVerify(opts: {
             },
           }
         : {}),
+      // ADR-0119: the whole-fence-retirement switch — spread-guard keeps the
+      // non-yolo fence opts byte-identical; when true the fence factory emits
+      // bare argv (the fsMode tier and the egress field both have nothing to
+      // carry — yolo wins).
+      ...(yolo ? { yolo: true } : {}),
     });
     return runInSandbox({
       fence,

@@ -3,9 +3,9 @@
  * Pure TS: no ink / OpenTUI dependencies.
  *
  * Vocabulary: /sessions /new /quit /exit /help /info /thinking /effort /memory
- * /compact /continue /rewind /mcp /graph /config /model — VOCABULARY below is
- * the single source (don't duplicate the count here, it drifts). /reset is
- * absent from the vocabulary and thus unreachable.
+ * /compact /continue /rewind /mcp /graph /config /model /yolo — VOCABULARY
+ * below is the single source (don't duplicate the count here, it drifts).
+ * /reset is absent from the vocabulary and thus unreachable.
  * - /config: ADR-0092 filesystem-isolation mode switch; value domain and copy
  *   live in harness/sandbox/fs-mode.ts; chat / TUI / serve share semantics.
  * - /graph: non-TTY peer of the graph-mode overlay; value domain and copy
@@ -68,7 +68,8 @@ export type TuiSlashCommand =
   | "mcp"
   | "graph"
   | "config"
-  | "model";
+  | "model"
+  | "yolo";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -120,6 +121,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "graph",
   "config",
   "model",
+  "yolo",
 ]);
 
 /** Parse input-box content; empty / whitespace-only → message (callers ignore empty input). */
@@ -159,6 +161,7 @@ export function helpLines(
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/graph     图模式开关（on|off|status；下一次 run() 装配生效）",
     "/config    文件系统隔离档（status|fs global|fs workspace；下一次 bash 调用生效）",
+    "/yolo      无沙箱模式开关（确认后切换；会话级不落盘）",
     "/model     切换模型（provider/model；下一轮生效）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
@@ -184,6 +187,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   rewind: "回退到更早的回合",
   graph: "图模式开关（on|off|status）",
   config: "文件系统隔离档（status|fs global|fs workspace）",
+  yolo: "无沙箱模式（确认后切换）",
   model: "切换模型",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",

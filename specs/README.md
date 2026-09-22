@@ -15,6 +15,7 @@
 - `egress-ssh-bridge.md` — SSH goes through the same allowlist; implementation switched to a self-contained relay, socat dependency forbidden (ADR-0107)
 - `egress-credential-sentinel.md` — sentinel optional, not auto-enabled by 0107 (ADR-0105)
 - `worktree-unbound-ro-bind.md` — worktree gate: physical ro-bind for unbound bash + EROFS feedback, replacing predictive interception (ADR-0109, supersedes ADR-0037 bash prediction clauses)
+- `yolo-mode.md` — `--yolo` no-sandbox mode: the fence retires entirely, four-route bare argv, TUI-only entry with confirm modal (ADR-0119)
 - `subagent-layers-worktree-deps.md` — subagent three layers + worktree project deps
 
 ### Harness / state and transport

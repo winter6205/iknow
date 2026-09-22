@@ -123,6 +123,7 @@ function makeTool(opts: {
   readonly pad: string;
   readonly holder: Holder | undefined;
   readonly background?: boolean;
+  readonly yoloOn?: boolean;
 }) {
   return createBashTool(opts.mainCheckout, {
     liveTaskRoot: createLiveTaskRoot(opts.mainCheckout),
@@ -130,6 +131,7 @@ function makeTool(opts: {
     ...(opts.holder !== undefined
       ? { worktreeOnMutate: { get: () => opts.holder!.get() } }
       : {}),
+    ...(opts.yoloOn === true ? { yolo: makeHolder(true) } : {}),
     ...(opts.background === true
       ? {
           backgroundManager: createBackgroundTaskManager({
@@ -437,6 +439,23 @@ describe("bash background unbound preflight notice (issue 1059 / M1)", () => {
     expect("notice" in result).toBe(false);
     expect(typeof result.task_id).toBe("string");
     expect(typeof result.log_path).toBe("string");
+  });
+
+  it("yolo ON + unbound + background → no notice key (ADR-0119: the fence is retired, so the EROFS pre-disclosure would claim a mount that never exists)", async () => {
+    const MAIN = makeScratch("unbound-main-");
+    const PAD = makeScratch("unbound-pad-");
+    const holder = makeHolder(true);
+    const result = await backgroundCall(
+      makeTool({
+        mainCheckout: MAIN,
+        pad: PAD,
+        holder,
+        background: true,
+        yoloOn: true,
+      })
+    );
+    expect("notice" in result).toBe(false);
+    expect(typeof result.task_id).toBe("string");
   });
 });
 

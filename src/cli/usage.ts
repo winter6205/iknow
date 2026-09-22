@@ -23,7 +23,7 @@ export function usageText(): string {
   iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
   iknow serve [options]         HTTP 会话 API + Web UI + trace 面板(/trace) / session API + web UI + trace panel
   iknow trace [options]         打开 trace 面板（探测 serve）/ open trace panel (probes serve)
-  iknow tui [session-id] [--auto-mode] 终端多会话交互界面（需 Bun）/ multi-session TUI (needs Bun on PATH)
+  iknow tui [session-id] [--auto-mode] [--yolo] 终端多会话交互界面（需 Bun）/ multi-session TUI (needs Bun on PATH)
   iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
   iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
   iknow -h | --help             显示本帮助 / show this help
@@ -45,6 +45,12 @@ export function usageText(): string {
   --auto-mode                   tui 启动即 full_auto（跳过工具 ask）/ tui starts in full_auto (skip tool asks)
                                 \`iknow tui --auto-mode\`（iknow 仓库根也可 npm run dev:tui -- --auto-mode）
                                 / \`iknow tui --auto-mode\` (or npm run dev:tui -- --auto-mode at the iknow repo root)
+  --yolo                        仅 tui：无沙箱模式（bwrap 围栏整体退场，网络与文件系统不限）
+                                / tui only: no-sandbox mode (the bwrap fence is retired entirely)
+                                不落盘（不进 settings / session 文件）；会话内切换（/yolo）需确认
+                                / not persisted; the in-session /yolo toggle asks for confirmation
+                                chat / serve / ask / oneshot / trace 携带 → 报错并非零退出、不启动
+                                / rejected with a typed error (non-zero exit) for those five commands
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset
@@ -58,6 +64,8 @@ export function usageText(): string {
     （--no-open 关闭）；检测不到 serve → exit 1 提示先起 serve 或 --separate
     / trace probes iknow serve then opens /trace (auto browser; --no-open disables);
     no serve → exit 1, start serve first or use --separate
+  • trace 属会话命令，--yolo 与其不兼容（仅 tui 可达）→ 报错并非零退出、不启动
+    / trace is a session command: --yolo is incompatible (tui only) and is rejected
 • trace --separate 保留独立进程读 ./trace/ 目录（/api/v1/traces + /fields + /health）；
     写侧由 serve/chat/ask 的 --trace-out 负责；检测到旧 ./trace.jsonl 需先跑迁移脚本
     / trace --separate keeps the standalone reader on ./trace/;

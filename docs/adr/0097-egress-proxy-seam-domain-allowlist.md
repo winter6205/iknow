@@ -67,3 +67,15 @@ Stale-socket defense (matching the spec's Failure paths): the socket path carrie
 - Measured signal separability: no match → 403 + `X-Proxy-Error: blocked-by-allowlist`; matched but upstream dead → 502; malformed → 400 (no crash).
 - Measured domain-matching semantics: `*.example.com` matches sub-domains but **not** the apex; `evilexample.com` does not match (suffix anchoring is correct); case-insensitive; illegal port values (`:0` / `:65536` / `:abc` / empty) **do not throw** and silently degrade to never-match (→ the configuration layer must reject them).
 - Spec landing: `specs/network-egress-allowlist.md` (rev 2, the three ACR items resolved to `no`).
+
+## Amendment 2026-09-18 (ADR-0119)
+
+**`--yolo` no-sandbox mode is the explicit exemption face of this ADR's invariant #1** (`specs/network-egress-allowlist.md` "Settled invariants" #1: "`--unshare-net` is permanent; egress flows only through the proxy seam. There is no second exit and no escape hatch"; the Decision's first sentence "`--unshare-net` becomes a **permanent item** (never removed by any path)" points at the same thing).
+
+Under yolo the **fence retires entirely** — `--unshare-net` disappears together with the rest of the bwrap flags (bare argv), and the **egress seam is skipped wholesale**: no unix socket bind, no `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` injection (no netns, so the proxy env has nothing to carry). The domain allowlist does not intervene in this mode.
+
+**Relationship = Amendment, not supersede**: the non-yolo path's `--unshare-net` permanence, sole-egress property, and byte-for-byte argv shape are **all preserved**; the rest of this ADR (domain decision reads only the CONNECT host, full fail-closed coverage, the `socat` prerequisite, the approval-flow and dispose contract, the address guard) is unaffected. The exemption face is **named and greppable to a pointer**, not "silently switched on by a conditional branch" — that is exactly what this ADR's landing comment "No conditional, no escape hatch" (`src/harness/sandbox/bwrap.ts:174-177`) guards against; yolo is the explicit named version of that hatch, reachable only through the TUI entry (`--yolo` flag + `/yolo` confirmation modal).
+
+**In-fence guarantees ride the exemption (P5 ruling)**: yolo removes the *entire* fence, so the other physical in-fence guarantee — ADR-0109's `--ro-bind <mainCheckout> <mainCheckout>` for the unbound worktree-gate tier — is exempt together with it (the factory early-returns to the unbound fence before any mount assembly). Two axes are distinguished: the **ro-bind axis** (the in-fence physical read-only overlay) is exempt because its carrier is gone; the **which-tree axis** (which checkout receives writes — worktree binding / re-bind) is NOT exempt: yolo changes the enforcement layer (physical EROFS → none), not the routing (tool calls still resolve against the live `taskRoot`). The full ruling lives in ADR-0119.
+
+The ruling and its basis (the eight questions, the two conflict resolutions, non-goals) are in ADR-0119; the contract and EXIT are in `specs/yolo-mode.md`.

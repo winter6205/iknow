@@ -197,6 +197,17 @@ export interface VerifyLoopOptions {
    * "no sandbox-layer imports" discipline above).
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
+  /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder. Passed through to
+   * `makeDefaultRunVerify` (read once at assembly via `get()`, same vintage as
+   * the bash handler entry's per-call snapshot); under yolo the verify fence takes
+   * bare argv and starts no egress session (ADR-0119 ruling 3). Absent / false
+   * → today's shape byte-for-byte unchanged (V1 baseline). One deliberate
+   * difference from the fsMode value: this passes the **holder**, not the tier
+   * value — the default runner rebuilds its closure per round, so the snapshot
+   * belongs inside `makeDefaultRunVerify`.
+   */
+  readonly yolo?: import("../sandbox/yolo.js").YoloContext;
   readonly homeRoot?: string;
   /**
    * worktree-on-mutate holder (read-only view) — passed through to
@@ -1247,6 +1258,7 @@ function runClassifierLoop(
 function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
   cwd: string;
   fsMode?: VerifyLoopOptions["fsMode"];
+  yolo?: VerifyLoopOptions["yolo"];
   homeRoot?: string;
   tmpDir?: string;
   egressPolicy?: VerifyLoopOptions["egressPolicy"];
@@ -1258,6 +1270,7 @@ function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
     ...(options.worktreeOnMutate !== undefined
       ? { worktreeOnMutate: options.worktreeOnMutate }
       : {}),
+    ...(options.yolo !== undefined ? { yolo: options.yolo } : {}),
     ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
     ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
     ...(options.egressPolicy !== undefined

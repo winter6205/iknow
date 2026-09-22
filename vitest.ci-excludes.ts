@@ -222,6 +222,27 @@ export const CI_EXCLUDES: readonly string[] = [
   // #406: chat × roundtrip cases have createBashTool really spawn echo to restore placeholders
   // (full excludes only e2e.test.ts; fast excludes the whole directory, see CI_FAST_EXCLUDES).
   "tests/harness/secret-roundtrip/e2e.test.ts",
+  // ADR-0119 / specs/yolo-mode.md: yolo four-route consistency + holder
+  // assembly-chain acceptance. All four go through the bash factory / registry /
+  // worker assembly chain → requireBwrap (throws at assembly time; test-fast
+  // installs no bwrap); yolo-four-routes calls createBashTool directly.
+  // Listed one-by-one rather than by directory: pure-logic cases in the same
+  // directories (argv projections etc.) do not depend on physical bwrap
+  // execution and stay runnable.
+  "tests/harness/aci/yolo-four-routes.test.ts",
+  "tests/harness/verify/yolo-build-engine-threading.test.ts",
+  "tests/harness/verify/yolo-holder-wiring.test.ts",
+  "tests/subagent/yolo-env-wire.test.ts",
+  // ADR-0119 background handler-hop: the guard anchor is call-shape, so the
+  // createBashTool call here counts as bwrap-dependent even though every
+  // construction uses a yolo-ON holder (the assembly probe is skipped by
+  // design). Excluded to keep test-fast green; local WSL runs it in full.
+  "tests/harness/background/yolo-background-fence.test.ts",
+  // ADR-0119 contrast arm for the yolo probe parity: really spawns bwrap
+  // (same `it.skipIf(!hasBwrap())` shape as ssh-key-fs-modes.test.ts). The
+  // test-full runner installs bwrap but disallows user namespaces, so the
+  // physical spawn would turn red there; local WSL keeps full verification.
+  "tests/harness/sandbox/yolo-fence-contrast.test.ts",
 ];
 
 /**

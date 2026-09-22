@@ -696,6 +696,30 @@ async function runSubagentWorkerCommand(): Promise<void> {
   }
 }
 
+/**
+ * ADR-0119 ruling 7 / spec yolo-mode EXIT: `--yolo` is reachable only from the
+ * TUI entry. When any of the five non-TUI public session commands (chat /
+ * serve / ask / oneshot / trace) carries it, parse time has already filled a
+ * typed rejection (discriminated union) — here we only read that one value,
+ * not re-decide `yolo` at dispatch (single read point, so the two decisions
+ * cannot drift). The message is built once in `yolo.ts` (includes the
+ * `${kind}: ...` prefix and the command name) and written straight to stderr.
+ *
+ * Exit code 1, no service / session started, no settings / session file
+ * written. The display paths (`-h` / `--help` / `-V` / `--version` and bare
+ * `--yolo` → help) already returned before this call — an explicitly declared
+ * pass-through (exit 0, no session started). The subagent-worker early arm runs
+ * above this call; `__subagent_worker__` is never one of the five non-TUI
+ * commands, so it carries no yoloRejection and the ordering is immaterial.
+ */
+function rejectNonTuiYoloEntry(parsed: ParsedCli): void {
+  const rejection = parsed.yoloRejection;
+  if (rejection !== undefined) {
+    writeErr(rejection.message);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const parsed = parseArgs({
     argv: process.argv.slice(2),
@@ -716,6 +740,8 @@ async function main(): Promise<void> {
     printUsage();
     return;
   }
+
+  rejectNonTuiYoloEntry(parsed);
 
   if (parsed.command === "chat") {
     await runChat(parsed);
@@ -774,6 +800,13 @@ async function runTui(parsed: ParsedCli): Promise<void> {
       resolveServeDataDir(parsed.dataDir)
     ),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
+    // ADR-0119 / spec yolo-mode: the start-in-yolo switch — same
+    // spread-guard shape as `--auto-mode` (absent = key not present = the
+    // non-yolo fail-closed default). Reachable only via the tui command: the
+    // other five public entries already filled a typed rejection at parse
+    // time, and main() exits non-zero via `rejectNonTuiYoloEntry` before
+    // dispatch (nothing started).
+    ...(parsed.yolo === true ? { yolo: true } : {}),
   });
   process.exitCode = exitCode;
 }

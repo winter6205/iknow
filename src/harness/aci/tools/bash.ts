@@ -33,13 +33,17 @@ import {
   type FsIsolationMode,
   type FsModeContext,
 } from "../../sandbox/fs-mode.js";
+import type { YoloContext } from "../../sandbox/yolo.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   requireBwrap,
   runInSandbox,
 } from "../../sandbox/runner.js";
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
-import type { BackgroundTaskManager } from "../../background/manager.js";
+import type {
+  BackgroundSpawnRequest,
+  BackgroundTaskManager,
+} from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 import {
@@ -129,6 +133,16 @@ export interface CreateBashToolOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
+   * ADR-0119: the `--yolo` no-sandbox mode holder (see `sandbox/yolo.ts`).
+   * The handler reads `get() === true` once per call (per-call snapshot, same
+   * discipline as `fsMode`); the foreground fence and the background spawn
+   * share that one frozen value. Under yolo the fence emits bare argv, the
+   * egress seam is skipped entirely (ADR-0119 ruling 3) and the factory
+   * skips `requireBwrap` (ruling 5 (requireBwrap timing)). Absent / false → today's
+   * shape byte-identical.
+   */
+  readonly yolo?: YoloContext;
+  /**
    * ADR-0092: workspace-mode home ro-bind source host absolute path.
    * Default `homedir()` — same injection shape as `tmpDir` (testable).
    * Production assembly passes it through (build-engine: userHome;
@@ -209,18 +223,20 @@ export interface CreateBashToolOptions {
 function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
+  readonly yolo: boolean;
 } {
   return {
     mode: opts?.fsMode?.get() ?? FS_ISOLATION_MODE_DEFAULT,
     homeRoot: opts?.homeRoot ?? homedir(),
+    yolo: opts?.yolo?.get() === true,
   };
 }
 
 /**
  * Batch-snapshotted fence inputs (frozen at handler entry): fs mode holder
- * / homeRoot / tmpDir share one vintage — foreground fence and background
- * spawn use the same snapshot; later holder or cell flips cannot leak into
- * the current call.
+ * / homeRoot / tmpDir / yolo share one vintage — foreground fence and
+ * background spawn use the same snapshot; later holder or cell flips
+ * cannot leak into the current call.
  */
 interface FenceSnapshot {
   readonly mode: FsIsolationMode;
@@ -228,6 +244,8 @@ interface FenceSnapshot {
   readonly tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (absent = no segment). */
   readonly unboundMainCheckout: string | undefined;
+  /** ADR-0119: D2-frozen yolo reading (shared by fence and spawn). */
+  readonly yolo: boolean;
 }
 
 /**
@@ -272,6 +290,7 @@ async function runForegroundBash(
     homeRoot,
     tmpDir,
     unboundMainCheckout,
+    yolo,
     fsPolicy,
     fenceEnv,
     fenceIsReadonly,
@@ -282,10 +301,17 @@ async function runForegroundBash(
   // start session → build fence → run sandbox → install mask → record
   // ledger → finalize: 6 steps, each an extracted sub-function; this
   // function only orchestrates them in order.
-  const egress = await startEgressSessionForCall(
-    effectiveEgressPolicyFactory,
-    opts?.createEgressSessionFactory
-  );
+  // ADR-0119 ruling 3: under yolo the egress seam is skipped wholesale — no
+  // fence means no netns, so a proxy seam would be meaningless (no session
+  // started, no socket bound, no proxy env injected). The non-yolo path is
+  // byte-identical (the egress assembly below stays intact).
+  const egress =
+    yolo === true
+      ? {}
+      : await startEgressSessionForCall(
+          effectiveEgressPolicyFactory,
+          opts?.createEgressSessionFactory
+        );
   const fence = buildForegroundFence({
     finalCommand,
     fsPolicy,
@@ -296,6 +322,7 @@ async function runForegroundBash(
     homeRoot,
     tmpDir,
     unboundMainCheckout,
+    yolo,
     egressSession: egress.session,
   });
   const result = await runSandboxDisposingEgress(
@@ -341,6 +368,8 @@ interface RunForegroundBashArgs {
   tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (undefined = no segment). */
   unboundMainCheckout: string | undefined;
+  /** ADR-0119: D2-frozen yolo reading (same value foreground and background). */
+  yolo: boolean;
   fsPolicy: ReturnType<typeof createFsPolicy>;
   fenceEnv: Record<string, string>;
   fenceIsReadonly: boolean;
@@ -385,6 +414,7 @@ function buildForegroundFence(args: {
   readonly homeRoot: string;
   readonly tmpDir: string;
   readonly unboundMainCheckout: string | undefined;
+  readonly yolo: boolean;
   readonly egressSession: EgressSession | undefined;
 }): ReturnType<typeof createBwrapFence> {
   const payload = wrapCommandWithInnerBridge(
@@ -411,9 +441,14 @@ function buildForegroundFence(args: {
     ...(args.egressSession !== undefined
       ? { egress: args.egressSession.spec }
       : {}),
+    // ADR-0119: the fence-retirement switch — the spread-guard keeps the
+    // non-yolo opts byte-identical; true makes the fence factory emit bare
+    // argv (the egress field above is already short-circuited to absent).
+    ...(args.yolo ? { yolo: true } : {}),
     // UNBOUND_FENCE physical segment — use the entry-frozen value, never
     // re-read the holder; pad=tmpDir keeps scratch writes landing (the
-    // ADR's ruling point).
+    // ADR's ruling point). Inert under yolo: the factory returns before
+    // reaching this segment (ADR-0119 Amendment).
     ...(args.unboundMainCheckout !== undefined
       ? {
           unboundFence: {
@@ -736,7 +771,12 @@ export function createBashTool(
   cwd: string,
   opts?: CreateBashToolOptions
 ): AciToolDef {
-  requireBwrap();
+  // ADR-0119 §5 (requireBwrap timing ruling): the factory probe is gated on
+  // the yolo holder's *initial* value — the yolo assembly path skips it (a
+  // host without bwrap must not block assembly; the exit side is covered by
+  // the controller's symmetric probe), the non-yolo path is byte-identical
+  // (absent / false still fails loud).
+  if (opts?.yolo?.get() !== true) requireBwrap();
   // ADR-0092: the factory captures only `tmpDir` (process-stable). fsPolicy
   // is rebuilt per call by the handler, never closed over the factory cwd.
   let fallbackFenceTmp: string | undefined;
@@ -829,7 +869,7 @@ export function createBashTool(
       gateOn: opts?.worktreeOnMutate?.get() === true,
       root: waveRoot,
     });
-    const { mode: fsMode, homeRoot } = snapshotFenceInputs(opts);
+    const { mode: fsMode, homeRoot, yolo } = snapshotFenceInputs(opts);
     const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
       if (fallbackFenceTmp === undefined) {
         fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
@@ -863,7 +903,7 @@ export function createBashTool(
         },
         opts ?? {},
         ctx,
-        { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout },
+        { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout, yolo },
         effectiveEgressPolicyFactory
       );
     }
@@ -906,6 +946,7 @@ export function createBashTool(
       homeRoot,
       tmpDir,
       unboundMainCheckout,
+      yolo,
       fsPolicy,
       fenceEnv,
       fenceIsReadonly,
@@ -974,31 +1015,49 @@ interface BackgroundSpawnInput {
  * Fence inputs (holder mode / homeRoot / tmpDir) come from the handler
  * entry's `FenceSnapshot`; this function never re-reads the cell or holder.
  */
-async function handleBackground(
-  input: BackgroundSpawnInput,
-  opts: CreateBashToolOptions,
-  ctx: ToolExecutionContext | undefined,
-  { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout }: FenceSnapshot,
-  /** ADR-0097: per-call egress policy — closure-derived, approvalGate
-   *  already injected. manager.spawn starts the session during assembly;
-   *  absent = no seam. */
-  effectiveEgressPolicyFactory?:
-    (() => EgressPolicyInput | undefined) | undefined
-): Promise<{
-  task_id: string;
-  log_path: string;
-  /** Present only in the UNBOUND_FENCE state — background stderr has no
-   *  receipt channel, so the read-only physical state is pre-disclosed at
-   *  spawn; bound / gate-OFF shapes are byte-identical. */
-  notice?: string;
-}> {
-  const manager = opts.backgroundManager;
-  if (!manager) {
-    throw new ToolExecutionError(
-      "bash: background execution is not available (no background manager configured)"
-    );
-  }
-  const result = await manager.spawn({
+/**
+ * ADR-0119 / S5 extraction: assemble the background spawn request — moves
+ * the spread-guard branches out of `handleBackground` so the latter stays
+ * under the complexity gate (the standing `lint:s5:staged` discipline:
+ * extract, never relax). Semantics are byte-identical to the inline form:
+ *
+ *   - `conversationId` / `cwdReadonly` are #653 T1 + D2 standing fields;
+ *   - `yolo` is ADR-0119's D2-frozen reading (spread-guard: absent =
+ *     non-yolo, legacy request field set unchanged);
+ *   - `unboundMainCheckout` is the UNBOUND_FENCE entry-frozen value
+ *     (foreground/background set-equal on this axis, G3 discipline);
+ *   - `fsMode` / `homeRoot` are ADR-0092 Round 2's mode surface;
+ *   - `egressPolicy` is ADR-0097 / T7's per-call policy (derived via the
+ *     caller-injected `effectiveEgressPolicyFactory`).
+ *
+ * The parameters are already-destructured values (no holder / no cell):
+ * this function re-reads no mutable state, matching `FenceSnapshot`'s D2
+ * discipline.
+ */
+function buildBackgroundSpawnRequest(args: {
+  readonly input: BackgroundSpawnInput;
+  readonly ctx: ToolExecutionContext | undefined;
+  readonly cwdReadonly: boolean;
+  readonly tmpDir: string;
+  readonly fsMode: FsIsolationMode;
+  readonly homeRoot: string;
+  readonly unboundMainCheckout: string | undefined;
+  readonly yolo: boolean;
+  readonly effectiveEgressPolicyFactory:
+    (() => EgressPolicyInput | undefined) | undefined;
+}): BackgroundSpawnRequest {
+  const {
+    input,
+    ctx,
+    cwdReadonly,
+    tmpDir,
+    fsMode,
+    homeRoot,
+    unboundMainCheckout,
+    yolo,
+    effectiveEgressPolicyFactory,
+  } = args;
+  return {
     command: input.finalCommand,
     recordCommand: input.recordCommand,
     cwd: input.cwd,
@@ -1012,9 +1071,7 @@ async function handleBackground(
     // cwdReadonly axis. GIT_OPTIONAL_LOCKS is injected in
     // defaultBackgroundSpawn after the filter (freeze-safe); here we only
     // pass the flag, not the env (the whitelist would strip that key).
-    ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
-      ? { cwdReadonly: true }
-      : {}),
+    ...(cwdReadonly ? { cwdReadonly: true } : {}),
     tmpDir,
     // ADR-0092: workspace-mode fence three layers (foreground and
     // background set-equal, sandbox discipline G3). fsMode is the already
@@ -1022,6 +1079,10 @@ async function handleBackground(
     // as the foreground handler (same-source values, no re-reading).
     fsMode,
     homeRoot,
+    // ADR-0119: the D2-frozen yolo reading (spread-guard: absent =
+    // non-yolo, legacy request field set unchanged). manager skips the
+    // egress session on it; the spawn factory emits bare argv from it.
+    ...(yolo ? { yolo: true } : {}),
     // ADR-0097: egress seam — policy injected by the caller (registry
     // assembly, derived via `effectiveEgressPolicyFactory`, approvalGate
     // already attached). manager.spawn starts the session during spawn
@@ -1044,7 +1105,46 @@ async function handleBackground(
           },
         }
       : {}),
-  });
+  };
+}
+
+async function handleBackground(
+  input: BackgroundSpawnInput,
+  opts: CreateBashToolOptions,
+  ctx: ToolExecutionContext | undefined,
+  { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout, yolo }: FenceSnapshot,
+  /** ADR-0097: per-call egress policy — closure-derived, approvalGate
+   *  already injected. manager.spawn starts the session during assembly;
+   *  absent = no seam. */
+  effectiveEgressPolicyFactory?:
+    (() => EgressPolicyInput | undefined) | undefined
+): Promise<{
+  task_id: string;
+  log_path: string;
+  /** Present only in the UNBOUND_FENCE state — background stderr has no
+   *  receipt channel, so the read-only physical state is pre-disclosed at
+   *  spawn; bound / gate-OFF shapes are byte-identical. */
+  notice?: string;
+}> {
+  const manager = opts.backgroundManager;
+  if (!manager) {
+    throw new ToolExecutionError(
+      "bash: background execution is not available (no background manager configured)"
+    );
+  }
+  const result = await manager.spawn(
+    buildBackgroundSpawnRequest({
+      input,
+      ctx,
+      cwdReadonly: opts.bashMode === "readonly" || opts.cwdReadonly === true,
+      tmpDir,
+      fsMode,
+      homeRoot,
+      unboundMainCheckout,
+      yolo,
+      effectiveEgressPolicyFactory,
+    })
+  );
   if (result.status === "spawn_error") {
     // Consistent with bash's existing error shape: render the typed error
     // (${kind}: ${context}) into a ToolExecutionError so the caller's
@@ -1061,7 +1161,11 @@ async function handleBackground(
       `bash: background spawn failed: ${result.error.kind}: ${detail}`
     );
   }
-  return unboundMainCheckout !== undefined
+  // ADR-0119: under yolo the whole fence retires — the main checkout is never
+  // ro-mounted, so the EROFS pre-disclosure would assert a physical state that
+  // does not exist. The receipt keeps the bound / gate-OFF shape (no notice
+  // key); the worktree-gate axis itself is unchanged.
+  return unboundMainCheckout !== undefined && !yolo
     ? {
         task_id: result.task_id,
         log_path: result.log_path,

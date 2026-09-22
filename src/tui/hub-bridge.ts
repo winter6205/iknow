@@ -46,6 +46,7 @@ import type {
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
+import type { YoloContext } from "../harness/sandbox/yolo.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
@@ -319,6 +320,15 @@ export interface CreateTuiBridgeOptions {
    * session-api/serve.ts).
    */
   readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0119 / specs/yolo-mode.md: the yolo no-sandbox-mode holder (same shape
+   * as `SessionHubOptions.yolo`). Passed through to `SessionHub`, whose verify
+   * call site reads it per call — it is the **same instance** as the TUI's bash
+   * surface (BuildEngineOpts.yolo, passed through buildTuiDeps). Absent = this
+   * entry has no yolo wiring -> the hub's verify surface stays non-yolo
+   * (fail-closed, fence kept).
+   */
+  readonly yolo?: YoloContext;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -393,6 +403,13 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // saving one ternary branch — the S5 lint ratchet tolerates zero
     // complexity growth in touched functions.
     fsMode: opts.fsMode,
+    // ADR-0119 / specs/yolo-mode.md: holder pass-through — the TUI's verify
+    // command surface and its bash tool surface must stay homogeneous (same
+    // instance; the hub's runVerifyLoop call site reads it per call, so a
+    // `/yolo` flip takes effect on the next call). Direct assignment:
+    // `undefined` equals "key absent" under the hub opts destructuring (same as
+    // the fsMode line).
+    yolo: opts.yolo,
   });
 
   const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({

@@ -25,6 +25,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { YOLO_ENV_KEY, type YoloContext } from "../sandbox/yolo.js";
 import {
   FS_MODE_ENV_KEY,
   PRODUCT_ROOT_ENV_KEY,
@@ -185,6 +186,23 @@ export interface DefaultSubAgentSpawnOpts {
    */
   readonly fsMode?: FsModeContext;
   /**
+   * ADR-0119 / specs/yolo-mode.md: the parent session's yolo holder → child's
+   * `IKNOW_YOLO` (the same "parent writes, worker reads" env wire as `fsMode`;
+   * the envelope is an untrusted input face and does not carry this field). The
+   * value is read from the holder **on every spawn** — the same spawn-time
+   * discipline as `fsMode`, per-spawn semantics.
+   *
+   * The key is always normalized like `IKNOW_WORKTREE_GATE_ON`: holder
+   * present → `"1"` / `"0"` both written; and an inherited `IKNOW_YOLO` from
+   * the ambient env is always scrubbed from the child env (see
+   * `buildSubAgentChildEnv`), so the worker's yolo posture derives only from
+   * this parent's holder — never from a stray host env or a stale inherited
+   * wire (fail-closed, code-review H2). Holder absent → key stays absent
+   * (legacy wire; the worker-side `yoloOptionFromEnv` reads absent as
+   * "fence present").
+   */
+  readonly yolo?: YoloContext;
+  /**
    * Parent session's worktree-on-mutate live switch holder → child's
    * `IKNOW_WORKTREE_GATE_ON` (same spawn-time read as fsMode: a panel flip
    * takes effect for the next spawn). Holder present → the key is always
@@ -192,6 +210,50 @@ export interface DefaultSubAgentSpawnOpts {
    * never emits the UNBOUND_FENCE section, bytes unchanged).
    */
   readonly worktreeGate?: WorktreeGateReader;
+}
+
+/**
+ * Child-env assembly — the single source of the spawn-time env-wire contract.
+ * Holder readings arrive pre-resolved by the caller so every read happens at
+ * spawn time (mirrors the `sessionRoot` getter discipline).
+ *
+ * ADR-0119 fail-closed ruling (code-review H2): `IKNOW_YOLO` is stripped from
+ * the inherited env before the wire value is laid down. The worker's yolo
+ * posture therefore derives only from this parent's holder — an ambient
+ * `IKNOW_YOLO=1` on the host (or a leftover from a yolo ancestor process) can
+ * never silently retire the fence of a child spawned by a non-yolo parent.
+ * Holder present → `"1"` / `"0"` both written (same normalization as
+ * `IKNOW_WORKTREE_GATE_ON`); holder absent → the key stays absent (legacy
+ * wire).
+ */
+function buildSubAgentChildEnv(readings: {
+  readonly traceDir: string;
+  readonly workspaceRoot: string | undefined;
+  readonly projectIdentityRoot: string | undefined;
+  readonly fsModeToken: string | undefined;
+  readonly worktreeGateOn: boolean | undefined;
+  readonly yolo: YoloContext | undefined;
+}): NodeJS.ProcessEnv {
+  const { [YOLO_ENV_KEY]: _ambientYolo, ...inheritedEnv } = process.env;
+  return {
+    ...inheritedEnv,
+    IKNOW_TRACE_OUT: readings.traceDir,
+    ...(readings.workspaceRoot !== undefined
+      ? { [WORKSPACE_ROOT_ENV_KEY]: readings.workspaceRoot }
+      : {}),
+    ...(readings.projectIdentityRoot !== undefined
+      ? { [PRODUCT_ROOT_ENV_KEY]: readings.projectIdentityRoot }
+      : {}),
+    ...(readings.fsModeToken !== undefined
+      ? { [FS_MODE_ENV_KEY]: readings.fsModeToken }
+      : {}),
+    ...(readings.worktreeGateOn !== undefined
+      ? { [WORKTREE_GATE_ON_ENV_KEY]: readings.worktreeGateOn ? "1" : "0" }
+      : {}),
+    ...(readings.yolo !== undefined
+      ? { [YOLO_ENV_KEY]: readings.yolo.get() === true ? "1" : "0" }
+      : {}),
+  };
 }
 
 export function createDefaultSubAgentSpawn(
@@ -204,6 +266,7 @@ export function createDefaultSubAgentSpawn(
     installRoot,
     fsMode,
     worktreeGate,
+    yolo,
   } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
@@ -211,14 +274,18 @@ export function createDefaultSubAgentSpawn(
     // same value every time; a getter returns the cell's current value, so
     // build-engine can turn a build-time decision into a spawn-time closure.
     const cwd = typeof sessionRoot === "function" ? sessionRoot() : sessionRoot;
-    // fs mode likewise reads the holder at spawn time — a mid-session
-    // (ADR-0092)
-    // `/config` flip takes effect for the next spawn (mirroring sessionRoot's
-    // spawn-time read); holder absent → env key not written (legacy child env
-    // bytes unchanged).
-    const fsModeToken = fsMode?.get();
-    // Same spawn-time read as fsMode; holder absent → env key not written.
-    const worktreeGateOn = worktreeGate?.get();
+    // All three holders are read at spawn time (mirroring sessionRoot's
+    // spawn-time read): a mid-session `/config` flip (ADR-0092) or `/yolo`
+    // flip (ADR-0119) takes effect for the next spawn; the env-wire contract
+    // per key (always-write vs absent) lives in buildSubAgentChildEnv.
+    const env = buildSubAgentChildEnv({
+      traceDir: resolvedTraceDir,
+      workspaceRoot,
+      projectIdentityRoot,
+      fsModeToken: fsMode?.get(),
+      worktreeGateOn: worktreeGate?.get(),
+      yolo,
+    });
     const child = spawn(
       process.execPath,
       resolveSubagentWorkerSpawnArgs({
@@ -228,22 +295,7 @@ export function createDefaultSubAgentSpawn(
       }),
       {
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          IKNOW_TRACE_OUT: resolvedTraceDir,
-          ...(workspaceRoot !== undefined
-            ? { [WORKSPACE_ROOT_ENV_KEY]: workspaceRoot }
-            : {}),
-          ...(projectIdentityRoot !== undefined
-            ? { [PRODUCT_ROOT_ENV_KEY]: projectIdentityRoot }
-            : {}),
-          ...(fsModeToken !== undefined
-            ? { [FS_MODE_ENV_KEY]: fsModeToken }
-            : {}),
-          ...(worktreeGateOn !== undefined
-            ? { [WORKTREE_GATE_ON_ENV_KEY]: worktreeGateOn ? "1" : "0" }
-            : {}),
-        },
+        env,
         ...(cwd !== undefined ? { cwd } : {}),
       }
     );

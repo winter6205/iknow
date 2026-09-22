@@ -386,6 +386,16 @@ export type BuildEngineOpts = {
    */
   readonly fsMode?: import("./sandbox/fs-mode.js").FsModeContext;
   /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder — same shape as
+   * `fsMode` (constructed once at assembly, held at runtime, each consumer
+   * re-reads after a flip; the engine is not rebuilt). Passed through four
+   * places: the main-chain registry (the bash factory reads per call), subagent
+   * spawn (re-read each spawn → `IKNOW_YOLO` env wire), the ask-path registry,
+   * and the worker-derived registry. Absent → non-yolo (fail-closed keeps the
+   * fence, V1 baseline byte-for-byte unchanged).
+   */
+  readonly yolo?: import("./sandbox/yolo.js").YoloContext;
+  /**
    * Runtime subagent concurrency-cap holder — when present,
    *
    // (ADR-0096)
@@ -977,6 +987,16 @@ export async function buildHarnessEngine(
             // the holder singleton means a runtime panel flip affects the
             // next spawn.
             worktreeGate: worktreeOnMutateSource,
+            // ADR-0119 / specs/yolo-mode.md: the yolo holder crosses the process
+            // boundary too — a subagent's bash fence must match the parent
+            // session (spec §6 four-route parity), otherwise children spawned in
+            // a yolo session still run inside the fence. Same shape as fsMode:
+            // the holder object itself is passed (not a `.get()` snapshot), and
+            // the spawn factory reads it **on every spawn** — a runtime `/yolo`
+            // flip affects the next spawn. Absent (tests / unwired entry) → the
+            // `IKNOW_YOLO` key is not written, child env byte-unchanged (spawn.ts
+            // checks holder.get() strictly equals true).
+            yolo: opts.yolo,
           }),
           // The manager's parent-sandboxRoot ceiling follows the live root
           // too — same logic: the getter lets buildWorkerPayload read the
@@ -1295,6 +1315,9 @@ export async function buildHarnessEngine(
       // the userHome seam would change settings / persona / state but not
       // the workspace-mode fence's home ro-bind source.
       fsMode: opts.fsMode,
+      // ADR-0119 / specs/yolo-mode.md: the yolo holder is threaded to the bash
+      // factory on the same path (read per call, the same holder as fsMode).
+      yolo: opts.yolo,
       homeRoot: userHome,
       // UNBOUND_FENCE holder for the bash factory (the singleton, see above).
       worktreeOnMutate: worktreeOnMutateSource,
@@ -1467,6 +1490,12 @@ export async function buildHarnessEngine(
       // factory. Holder absent → global mode (V1 baseline); homeRoot takes
       // this layer's `userHome` as in the main construction path.
       fsMode: opts.fsMode,
+      // ADR-0119 / specs/yolo-mode.md (ask path): the yolo holder is threaded
+      // to the bash factory on the same path — a non-TUI entry never carries
+      // `--yolo` (typed rejection at parse time), so in production this is
+      // always undefined; kept here to mirror the main chain and not drop the
+      // assembly-surface field.
+      yolo: opts.yolo,
       homeRoot: userHome,
       // UNBOUND_FENCE holder (ask path, same singleton as the main build).
       worktreeOnMutate: worktreeOnMutateSource,
@@ -1666,6 +1695,11 @@ export async function buildHarnessEngine(
     lspCtx,
     ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
     fsMode: opts.fsMode,
+    // ADR-0119: the yolo holder threads to the worker-derived bash factory in
+    // the same shape as the parent session (worker surface derives from the
+    // same registry factory — byte-identical assembly, only the deny-list
+    // differs).
+    yolo: opts.yolo,
     homeRoot: userHome,
     worktreeOnMutate: worktreeOnMutateSource,
   }).catalog.all();

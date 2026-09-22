@@ -2,6 +2,51 @@
  * Pure CLI argument parsing (no I/O).
  */
 
+import {
+  isYoloRejectedCommand,
+  rejectYoloForCommand,
+  type YoloNonTuiEntryError,
+} from "../harness/sandbox/yolo.js";
+
+/** The `--yolo` literal (valueless boolean flag). */
+const YOLO_FLAG = "--yolo";
+
+/**
+ * Read `--yolo` off argv — present → `true`, absent → `undefined` (= non-yolo).
+ *
+ * Deliberately **no** branch for it inside the scan loop: a valueless boolean
+ * flag carries no loop semantics, it only affects which head branch the input
+ * lands on. The loop collects positional tokens not consumed by value-taking
+ * flags into `rest`, and the flag is stripped once at the end — so the argument
+ * position semantics of value-taking flags (the token right after `--resume` is
+ * its value) stay byte-identical to today.
+ *
+ * The reading comes from the **raw argv**, without checking whether the token sat
+ * in a value-taking flag's argument slot. So a degenerate input like
+ * `--resume --yolo` counts as "carrying `--yolo`" and is refused on a non-TUI
+ * entry. That direction is the deliberate choice: misreading a dangerous flag
+ * must bias towards refusal, never towards silently swallowing it as a resume id.
+ */
+function yoloFlagFromArgv(argv: ReadonlyArray<string>): boolean | undefined {
+  return argv.includes(YOLO_FLAG) ? true : undefined;
+}
+
+/**
+ * Whether a bare invocation on a TTY defaults to `chat`. A bare `--yolo` (no
+ * subcommand) does **not** fall to chat — it belongs with `-h` / `-V` as a pure
+ * display path (the explicitly declared allowance in spec EXIT / the plan's
+ * closing acceptance line). Otherwise the same input would fork into two
+ * treatments depending on TTY, and under a TTY it would silently start a non-TUI
+ * session — the mirror image of the "dangerous flag silently swallowed" the plan
+ * rejected.
+ */
+function bareInvocationDefaultsToChat(
+  requested: boolean | undefined,
+  yolo: boolean | undefined
+): boolean {
+  return (requested ?? false) && yolo !== true;
+}
+
 export type CliCommand =
   | "chat"
   | "ask"
@@ -100,6 +145,24 @@ export type ParsedCli = {
    * commands keep the parsed field but never read it.
    */
   autoMode: boolean;
+  /**
+   * ADR-0119 / spec yolo-mode: startup switch for no-sandbox mode (the fence
+   * retires wholesale). Default undefined = non-yolo (argv byte-identical to
+   * today's). Reachable only through the tui entry: when one of the five non-TUI
+   * public commands carries it, yoloRejection is filled instead and the host
+   * prints then exits non-zero.
+   */
+  yolo?: boolean;
+  /**
+   * ADR-0119 ruling 7: the typed refusal for a non-TUI entry carrying --yolo
+   * (discriminated union). Absent = not carried, or a legal entry was hit. The
+   * host writes the message to stderr and exits 1, starting no service /
+   * session. The union is a plain object, so the
+   * `err instanceof Error ? err.message : String(err)` collapse is forbidden —
+   * it would print `[object Object]` and hide kind / command entirely
+   * (.claude/rules/code-quality.md typed-error catch contract).
+   */
+  yoloRejection?: YoloNonTuiEntryError;
 };
 
 export type ParseArgsOptions = {
@@ -125,6 +188,7 @@ export type ParseArgsOptions = {
  */
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
+  const yolo = yoloFlagFromArgv(argv);
   const interactive = opts.interactive ?? false;
   let json = false;
   let port = 8787;
@@ -184,6 +248,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           noOpen,
           separate,
           autoMode,
+          yolo,
           resumeId,
           query: "",
           missingQuery: false,
@@ -283,6 +348,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           noOpen,
           separate,
           autoMode,
+          yolo,
           resumeId,
           query: "",
           missingQuery: false,
@@ -306,16 +372,36 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     noOpen,
     separate,
     autoMode,
+    yolo,
     resumeId,
     versionOnly: false,
   };
-  const head = rest[0];
+  // Valueless boolean flags stay out of the positional stream (`--yolo` has no
+  // bearing on the head decision).
+  const positional = rest.filter((a) => a !== YOLO_FLAG);
+  const head = positional[0];
+
+  /**
+   * ADR-0119 ruling 7: `--yolo` reaches only the tui entry. A parse result that
+   * lands on a **session** command carries the typed refusal (discriminated
+   * union); the host reports it, exits non-zero and starts nothing. Display
+   * paths (-h / -V / non-TTY bare invocation -> help) do not pass this gate —
+   * they start no session and are the explicitly declared allowance (spec EXIT /
+   * the closing acceptance line of plans/yolo-mode.md).
+   */
+  const yoloGate = (
+    command: string
+  ): { readonly yoloRejection?: YoloNonTuiEntryError } =>
+    yolo === true && isYoloRejectedCommand(command)
+      ? { yoloRejection: rejectYoloForCommand(command) }
+      : {};
 
   if (head === "chat") {
     return baseParsed({
       command: "chat",
       fields: {
         ...flags,
+        ...yoloGate("chat"),
         query: "",
         missingQuery: false,
       },
@@ -327,6 +413,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       command: "serve",
       fields: {
         ...flags,
+        ...yoloGate("serve"),
         query: "",
         missingQuery: false,
       },
@@ -343,6 +430,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       command: "trace",
       fields: {
         ...flags,
+        ...yoloGate("trace"),
         port: tracePort,
         query: "",
         missingQuery: false,
@@ -351,7 +439,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   if (head === "tui") {
-    const sessionId = rest[1];
+    const sessionId = positional[1];
     return baseParsed({
       command: "tui",
       fields: {
@@ -364,11 +452,12 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   if (head === "ask") {
-    const query = rest.slice(1).join(" ").trim();
+    const query = positional.slice(1).join(" ").trim();
     return baseParsed({
       command: "ask",
       fields: {
         ...flags,
+        ...yoloGate("ask"),
         query,
         missingQuery: query.length === 0,
       },
@@ -386,9 +475,9 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     });
   }
 
-  const query = rest.join(" ").trim();
+  const query = positional.join(" ").trim();
   if (query.length === 0) {
-    if (interactive) {
+    if (bareInvocationDefaultsToChat(interactive, yolo)) {
       return baseParsed({
         command: "chat",
         fields: {
@@ -412,6 +501,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     command: "oneshot",
     fields: {
       ...flags,
+      ...yoloGate("oneshot"),
       query,
       missingQuery: false,
     },

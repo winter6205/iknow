@@ -184,6 +184,15 @@ export interface BackgroundSpawnRequest {
    */
   readonly homeRoot?: string;
   /**
+   * ADR-0119: --yolo no-sandbox snapshot — a static value passed through from
+   * the bash.ts handler-entry per-call snapshot, same vintage as fsMode / homeRoot.
+   * true → the fence takes bare argv (defaultBackgroundSpawn hands it to
+   * createBwrapFence), and this task starts no egress session: no fence means
+   * no netns, so the proxy seam is meaningless (ADR-0119 ruling 3). Absent /
+   * false → today's shape byte-for-byte unchanged.
+   */
+  readonly yolo?: boolean;
+  /**
    * ADR-0097: egress proxy seam policy — passed in by the caller (typically
    * derived via `createEgressPolicyFactory`). Background-task form: the egress
    * session starts per-task at assembly time and lives with the task
@@ -399,6 +408,11 @@ export async function defaultBackgroundSpawn(
     ...(req.unboundFence !== undefined
       ? { unboundFence: req.unboundFence }
       : {}),
+    // ADR-0119: the whole-fence-retirement switch — spread-guard keeps the
+    // non-yolo fence opts byte-identical; when true the fence factory emits
+    // bare argv (the egress seam is skipped on the manager.spawn side, so it
+    // never reaches the request).
+    ...(req.yolo === true ? { yolo: true } : {}),
   });
   // ADR-0045: in consumer form (manager.spawn callers) there is no direct
   // node:child_process call anymore — the server.spawn long-lived
@@ -888,6 +902,10 @@ export function createBackgroundTaskManager(
     request: BackgroundSpawnRequest,
     taskId: string
   ): Promise<EgressSession | undefined> {
+    // ADR-0119 ruling 3: a yolo task starts no egress session — no fence means
+    // no netns, so the proxy seam is meaningless; the fence takes bare argv via
+    // defaultBackgroundSpawn.
+    if (request.yolo === true) return undefined;
     if (request.egressPolicy === undefined) return undefined;
     try {
       return await createEgressSession({ policy: request.egressPolicy });

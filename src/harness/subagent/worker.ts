@@ -52,6 +52,13 @@ import {
   type FsModeContext,
 } from "../sandbox/fs-mode.js";
 import {
+  YOLO_ENV_KEY,
+  createYoloContext,
+  parseYoloFlag,
+  yoloHolderSpread,
+  type YoloContext,
+} from "../sandbox/yolo.js";
+import {
   createRealAnthropicAdapter,
   buildThinkingParams,
   createExecutor,
@@ -293,6 +300,19 @@ export interface CreateWorkerDepsOptions {
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
+   * ADR-0119 / specs/yolo-mode.md: yolo holder (per-call snapshot), passed to
+   * the worker's bash factory. Holder absent → the fence is present (V1
+   * baseline).
+   *
+   * The production entry's holder is built by `yoloOptionFromEnv(process.env)`
+   * from the parent-written `IKNOW_YOLO` — the same env wire as `fsMode`, the
+   * same "rebuild the holder in this process after the value crosses the
+   * boundary" shape. The worker exposes no `/yolo` command face, so there is no
+   * second in-place-flip entry; the holder shape is kept for the bash factory's
+   * existing opt contract.
+   */
+  readonly yolo?: YoloContext;
+  /**
    * Seam copy of envelope.role (passed through by runSubagentWorker).
    * The worker queries the catalog at assembly time for the body and injects
    * the persona segment; default / unknown → V1 baseline (no persona segment,
@@ -464,6 +484,25 @@ export function worktreeGateOptionFromEnv(
   if (token !== "1" && token !== "0") return {};
   const on = token === "1";
   return { worktreeOnMutate: Object.freeze({ get: () => on }) };
+}
+
+/**
+ * `IKNOW_YOLO` (written by the parent) → the worker bash factory's `yolo`
+ * holder.
+ *
+ * Same shape as `fsModeOptionFromEnv` (the value crosses the boundary, then the
+ * holder is rebuilt in this process). The parent normalizes the key when its
+ * holder is wired (`"1"` / `"0"` both written, and an ambient inherited value is
+ * scrubbed — see `buildSubAgentChildEnv` in `spawn.ts`); either way this reader
+ * stays fail-closed: only a `parseYoloFlag` hit produces a holder, `"0"` /
+ * absent / garbage → **empty object** (fence present, the pre-wire shape).
+ */
+export function yoloOptionFromEnv(
+  env: Readonly<Record<string, string | undefined>>
+): { readonly yolo?: YoloContext } {
+  return parseYoloFlag(env[YOLO_ENV_KEY])
+    ? { yolo: createYoloContext(true) }
+    : {};
 }
 
 function resolveWorkerFenceTmp(
@@ -737,6 +776,7 @@ export async function createWorkerRuntime(
     // not call `homedir()` again — same as the main chain: the test seam must
     // be able to steer the fence source.
     fsMode: opts.fsMode,
+    ...yoloHolderSpread(opts.yolo),
     homeRoot: userHome,
     // Switch holder threaded to the worker bash factory (absent = no segment).
     ...(opts.worktreeOnMutate !== undefined
@@ -1793,6 +1833,9 @@ async function assembleAndRunWorker(
     // Parent process IKNOW_WORKTREE_GATE_ON → this process's holder (absent =
     // no segment emitted) for the worktree-on-mutate switch.
     ...worktreeGateOptionFromEnv(process.env),
+    // ADR-0119: parent's IKNOW_YOLO → this worker's bash-factory holder. "0" /
+    // absent (off / legacy parent) → empty spread = fence present.
+    ...yoloOptionFromEnv(process.env),
     // ADR-0071: the parent manager already created
     // `<parent session folder>/subagents/agent-<taskId>.jsonl` for this taskId
     // at spawn time and threads traceFilePath + taskId through the envelope —

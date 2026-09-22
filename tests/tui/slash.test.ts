@@ -151,7 +151,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部静态命令（按词表插入顺序；graph 后追加 config、再追加 model，无 /profile）', () => {
+  test('"/" → 全部静态命令（按词表插入顺序；graph 后追加 config、再追加 model、再追加 yolo，无 /profile）', () => {
     const commands = vocabularyCommands();
     expect(commands.slice(0, 14)).toEqual([
       "sessions",
@@ -169,7 +169,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       "mcp",
       "graph",
     ]);
-    expect(commands.slice(14)).toEqual(["config", "model"]);
+    expect(commands.slice(14)).toEqual(["config", "model", "yolo"]);
     expect(slashSuggestions("/")).toEqual(
       commands.map((command) => ({ kind: "command" as const, command }))
     );
@@ -1034,13 +1034,13 @@ describe("#361 Phase D /mcp 词表", () => {
     ]);
   });
 
-  test('"/" 全部候选含 mcp；尾部 append-only 为 graph, config, model', () => {
+  test('"/" 全部候选含 mcp；尾部 append-only 为 graph, config, model, yolo', () => {
     const all = slashSuggestions("/");
     expect(all).toContainEqual({ kind: "command", command: "mcp" });
     const tail = all
-      .slice(-3)
+      .slice(-4)
       .map((c) => (c.kind === "command" ? c.command : c.name));
-    expect(tail).toEqual(["graph", "config", "model"]);
+    expect(tail).toEqual(["graph", "config", "model", "yolo"]);
   });
 
   test('/mcp 唯一匹配 → 补全 "/mcp "（尾随空格）', () => {
@@ -1376,12 +1376,12 @@ describe("/model 词表", () => {
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 
-  test("/model 是词表最末追加项（append-only 纪律，既有命令顺序不动）", () => {
+  test("词表尾部 append-only 纪律：model 之后只追加 yolo，既有命令顺序不动", () => {
     const all = slashSuggestions("/");
-    expect(all[all.length - 1]).toEqual({
-      kind: "command",
-      command: "model",
-    });
+    expect(all.slice(-2)).toEqual([
+      { kind: "command", command: "model" },
+      { kind: "command", command: "yolo" },
+    ]);
   });
 
   test("命中静态命令 → undefined（/model 不抢 skill-load）", () => {

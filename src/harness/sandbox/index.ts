@@ -11,6 +11,26 @@ export {
 } from "./fs-mode.js";
 export type { FsIsolationMode, FsModeContext } from "./fs-mode.js";
 
+// ADR-0119 / specs/yolo-mode.md: yolo no-sandbox mode — independent boolean-axis
+// holder + enter/exit actions + the typed refusal for non-TUI entries
+// (SSOT: file header of yolo.ts).
+export {
+  YOLO_DEFAULT,
+  YOLO_TUI_ONLY_REJECTED_COMMANDS,
+  createYoloContext,
+  createYoloController,
+  isYoloRejectedCommand,
+  parseYoloFlag,
+  rejectYoloForCommand,
+} from "./yolo.js";
+export type {
+  YoloActionOptions,
+  YoloActionResult,
+  YoloContext,
+  YoloController,
+  YoloNonTuiEntryError,
+} from "./yolo.js";
+
 export {
   CPU_SEC,
   MEM_BYTES,

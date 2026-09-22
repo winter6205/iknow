@@ -84,6 +84,12 @@ import {
   resolveWorktreeOnMutate,
 } from "../config/settings.js";
 import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
+import {
+  createYoloContext,
+  createYoloController,
+  type YoloContext,
+  type YoloController,
+} from "../harness/sandbox/yolo.js";
 import { createSubagentCapacityHolder } from "../harness/subagent/manager.js";
 import { createWorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
@@ -141,6 +147,19 @@ export interface RunTuiOptions {
    * precedence over IKNOW_PERMISSION_MODE. Undefined → env → default.
    */
   readonly permissionMode?: string;
+  /**
+   * ADR-0119 / specs yolo-mode: the `iknow tui --yolo` startup switch.
+   * true → the session starts in yolo (the fence retires entirely); the
+   * initial value is normalized through `createYoloContext` (illegal input
+   * fail-closes to false). Absent / undefined = non-yolo (fail-closed, the
+   * fence stays, V1 baseline byte-identical).
+   *
+   * Deliberately **not persisted**: the yolo axis never enters settings /
+   * session files / a config-panel row — each session supplies its initial
+   * value explicitly, in-session toggles go through the memory holder only
+   * (spec §5).
+   */
+  readonly yolo?: boolean;
   /** Test seam: override the renderer factory (to induce startup errors);
    *  production uses createCliRenderer. */
   readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
@@ -331,6 +350,21 @@ export function teardownTuiTerminal(
     } catch {
       // EXIT: stream closed — the terminal resets on process exit; no further action.
     }
+  }
+}
+
+/**
+ * ADR-0119 §launch: `--yolo` seeds the holder only; the enter state
+ * combination (permission -> full_auto, fsMode -> global, snapshot for exit)
+ * must be applied at startup too, or the session runs fence-less with a
+ * default permission posture. The gate reads the **normalized holder** (the
+ * single source of truth for the yolo axis), never the raw flag value. No
+ * probe gate: a bwrap-less host still assembles yolo (requireBwrap sequencing
+ * ruling); its exit refusal stays symmetric.
+ */
+function applyYoloLaunchSeed(yolo: YoloContext, controller: YoloController) {
+  if (yolo.get()) {
+    controller.enterAtLaunch();
   }
 }
 
@@ -622,6 +656,24 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // permissionMode / graphMode — Shift+Tab does not touch it. Settings are
     // read once at startup (see the startupSettings note).
     const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
+    // ADR-0119 / specs/yolo-mode.md: the yolo-axis holder + the single-point
+    // enter/exit action. Initial value comes from the `--yolo` flag
+    // (`createYoloContext` normalizes fail-closed: illegal input → false =
+    // fence on); at runtime `/yolo` + the confirm modal flip it in place (the
+    // idempotent set, the snapshot + symmetric bwrap-probe semantics live in
+    // harness/sandbox/yolo.ts). The holder feeds the engine (buildTuiDeps →
+    // BuildEngineOpts.yolo → the bash factory per-call read / the subagent env
+    // wire), bridge → hub (the verify command surface, homomorphic) and TuiApp
+    // (command surface + the mode-row red marker). **Not persisted**: the yolo
+    // axis never enters settings / session files / a config-panel row, so
+    // there is no persist channel and no markSelfWrite here (spec §5).
+    const yolo = createYoloContext(options.yolo);
+    const yoloController = createYoloController({
+      yolo,
+      permission: permissionMode,
+      fsMode,
+    });
+    applyYoloLaunchSeed(yolo, yoloController);
     // ADR-0096: subagent concurrency-cap holder (same shape as fsMode).
     // Initial value comes from env.subagent.maxConcurrentWorkers (the
     // env > settings > default-15 chain is pinned in env.ts). At runtime the
@@ -702,6 +754,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // ADR-0092: pass the fs-isolation holder to the engine (build-engine →
       // BuildEngineOpts.fsMode → bash factory per-call read).
       fsMode,
+      // ADR-0119 / specs/yolo-mode.md: the yolo holder to the engine
+      // (build-engine → BuildEngineOpts.yolo → the bash factory per-call read
+      // / the subagent env wire).
+      yolo,
       // ADR-0096: subagent concurrency-cap holder — buildTuiDeps →
       // BuildEngineOpts.subagentCapacityHolder → createSubAgentManager
       // (spawn gate reads it live per call) + registry → spawn_subagent tool
@@ -873,6 +929,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // reads the holder per call; a `/config` flip affects the next call,
       // same instance as bash). serve uses the same wiring.
       fsMode,
+      // ADR-0119 / specs/yolo-mode.md: the same yolo holder forwarded to
+      // bridge → hub — the TUI's verify command surface and bash tool surface
+      // must be homomorphic (the hub's verify call site reads the holder per
+      // call, so a `/yolo` flip affects the next call, the same instance as
+      // the bash side).
+      yolo,
     });
     // Once the bridge is ready, backfill the late-bound hub reference (see bridgeRef above).
     bridgeRef.hub = bridge.hub;
@@ -953,6 +1015,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // surface (the engine-side holder goes via depsOpts.fsMode).
           fsMode={fsMode}
           onPersistFsMode={persistFsMode}
+          // ADR-0119 / specs/yolo-mode.md: the yolo holder + controller to the
+          // command surface (`/yolo` reads the holder to decide the confirm
+          // direction, and after confirmation runs the controller's enter /
+          // exit; the engine-side holder goes via depsOpts.yolo, the
+          // bridge → hub side via the same yolo reference). **No persist
+          // callback** — the yolo axis is not persisted (spec §5).
+          yolo={yolo}
+          yoloController={yoloController}
           // ADR-0096: cap holder + persist callback for the command surface
           // (same shape as fsMode); the engine-side holder goes via
           // depsOpts.subagentCapHolder. Same reference, so one /config panel

@@ -93,6 +93,7 @@ import type {
   FsIsolationMode,
   FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
+import type { YoloContext } from "../harness/sandbox/yolo.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
@@ -691,6 +692,15 @@ export type SessionHubOptions = {
    */
   fsMode?: FsModeContext;
   /**
+   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (the same instance as
+   * the TUI / serve bash face). Passed through to `runVerifyLoop` — the verify
+   * command's fence must match the bash tool, otherwise verify still runs inside
+   * the fence in a yolo session (spec §6 four-route parity). Absent = this entry
+   * did not wire the yolo axis → the verify face treats it as non-yolo
+   * (fail-closed keeps the fence).
+   */
+  yolo?: YoloContext;
+  /**
    * Hosts that already built the engine (TUI assembles it in run.tsx) hand
    * `BuiltEngine.graphAssembly` in directly — such hosts use the injected
    * deps path, so the hub itself never builds and cannot get the snapshot
@@ -1140,6 +1150,10 @@ export class SessionHub {
   /** ADR-0092: fs isolation mode holder (injected by serve / TUI; absent =
    *  this entrypoint has no fs mode → engine follows the global default). */
   private readonly fsMode: FsModeContext | undefined;
+  /** ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (TUI injects; absent
+   *  = this entrypoint did not wire the yolo axis → the verify face treats it as
+   *  non-yolo, fail-closed keeps the fence). */
+  private readonly yolo: YoloContext | undefined;
   /** Assembly snapshot handle carried by deps-injecting hosts (TUI),
    *  passed via constructor opts. */
   private readonly injectedGraphAssembly: GraphAssembly | undefined;
@@ -1202,6 +1216,7 @@ export class SessionHub {
     this.permissionMode = opts.permissionMode;
     this.graphMode = opts.graphMode;
     this.fsMode = opts.fsMode;
+    this.yolo = opts.yolo;
     this.injectedGraphAssembly = opts.graphAssembly;
     this.liveGraphLedger = opts.liveGraphLedger;
     this.overrideEnv = opts.overrideEnv;
@@ -2091,6 +2106,17 @@ export class SessionHub {
                       // rebuild); absent → verify-loop global-tier baseline
                       // and the key does not appear.
                       ...presentFields("fsMode", this.fsModeSnapshot()),
+                      // ADR-0119 / specs/yolo-mode.md: pass the yolo holder to
+                      // verify-loop (which rebuilds the runVerify closure each
+                      // round and reads the holder once at assembly → a `/yolo`
+                      // flip affects the next round's verify). Holder absent →
+                      // the key does not appear and the verify face stays
+                      // non-yolo (fail-closed keeps the fence). One deliberate
+                      // difference from the fsMode line above: yolo's consumer
+                      // (`makeDefaultRunVerify`) wants the holder itself (it
+                      // takes the snapshot `get()` internally for vintage), so
+                      // this passes `this.yolo`, not a snapshot boolean.
+                      ...presentFields("yolo", this.yolo),
                       // homeRoot is this process's homedir() — this call site
                       // is independent of build-engine, whose default is the
                       // `opts.userHome ?? homedir()` fallback branch.
