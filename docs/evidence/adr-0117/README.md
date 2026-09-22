@@ -8,7 +8,12 @@ and in the soul/usage golden-set row of
 Committed so the claim survives the tree that makes it: the real-model set is
 re-runnable from a clone (`real-llm/`, tracked) and the measurement below is
 re-scorable **without any model call**, because each row stores the dispatch
-trace and the probe re-classifies it independently of the gate module it judges.
+trace and the probe re-scores it offline. The bash arm is classified by the
+gate predicate itself (`detectBashGrepSubstitution`) — no separate witness to
+drift; its independence is carried by the offline boundary matrix
+(`tests/harness/aci/tools/role-substitution-boundaries.test.ts`) and the
+scoring-agreement lock, while the structure/content census arms stay wider
+witnesses.
 
 ## Regenerate
 
