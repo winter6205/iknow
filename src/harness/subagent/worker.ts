@@ -70,6 +70,7 @@ import {
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
 import { createAciExecutor } from "../aci/index.js";
 import type { AciCatalog } from "../aci/types.js";
+import type { PreimageCapture } from "../aci/preimage-port.js";
 import { createLspNotifier } from "../lsp/notifier.js";
 import { withLazyLspWarmup } from "../lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
@@ -389,6 +390,17 @@ export interface CreateWorkerDepsOptions {
    * to before).
    */
   readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
+  /**
+   * ADR-0121: pre-write capture port for the worker's write tools
+   * (`FILE_WRITE_TOOL_NAMES`), threaded to
+   * `createDefaultAciRegistry` exactly like the parent build-engine seam.
+   * Gate B: the harness declares and forwards only the port; the
+   * implementation is built host-side (the cli `__subagent_worker__`
+   * dispatch, see `WorkerPreimageCaptureFactory`) because only the host may
+   * touch the session blob store. Absent → the write tools fire nothing
+   * (byte-stable legacy shape).
+   */
+  readonly preimageCapture?: PreimageCapture;
 }
 
 /**
@@ -792,6 +804,12 @@ export async function createWorkerRuntime(
       : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
     ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
+    // ADR-0121: conditional spread keeps the no-port registry call
+    // byte-identical to the pre-capture shape (same posture as the parent
+    // build-engine → registry seam).
+    ...(opts.preimageCapture !== undefined
+      ? { preimageCapture: opts.preimageCapture }
+      : {}),
     ...todoLedgerRegistryOpts(opts.todoLedger),
   });
 
@@ -1272,6 +1290,54 @@ export type WorkerTranscriptIOFactory = (loc: {
   readonly taskId: string;
   readonly cwd: string;
 }) => WorkerTranscriptIO;
+
+/**
+ * ADR-0121 — worker preimage-capture injection seam, same Gate B
+ * posture as `WorkerTranscriptIOFactory`: the cli entry constructs the
+ * implementation (it may reach session-api; the worker may not) and the
+ * harness only forwards the resulting port into the registry.
+ *
+ * The two anchors the host implementation needs:
+ *   - `taskId` — this worker's own conversation identity: the write tools'
+ *     ctx.conversationId is the taskId (see the deps assembly above), so the
+ *     host keys its preimage ledger on it and the same task's transcript
+ *     commit drains exactly those entries.
+ *   - `parentLedger` — the envelope's ADR-0085 anchor (parent projectDir +
+ *     parent conversationId): blobs land in the PARENT session folder
+ *     (ADR-0102: a worker has no project-pool leaf), where the parent
+ *     rewind's `applyCodeRestore` reads them side by side with its own.
+ *
+ * Returning undefined disables capture for this run (e.g. the
+ * codeRestore.enabled switch — settings resolution belongs to the host).
+ */
+export type WorkerPreimageCaptureFactory = (loc: {
+  readonly taskId: string;
+  readonly parentLedger: {
+    readonly projectDir: string;
+    readonly conversationId: string;
+  };
+}) => PreimageCapture | undefined;
+
+/**
+ * Envelope → capture-port wiring for the assembly spread. Both anchors must
+ * be present: no taskId → nothing to key a ledger ref on; no todoLedger → no
+ * parent folder to land blobs in (a blob no restore can find is noise). Any
+ * absent side → key omitted, registry byte-stable like the legacy envelope.
+ */
+function workerPreimageCaptureOption(
+  env: WorkerEnvelope,
+  factory: WorkerPreimageCaptureFactory | undefined
+): { preimageCapture?: PreimageCapture } {
+  if (
+    factory === undefined ||
+    env.taskId === undefined ||
+    env.todoLedger === undefined
+  ) {
+    return {};
+  }
+  const capture = factory({ taskId: env.taskId, parentLedger: env.todoLedger });
+  return capture === undefined ? {} : { preimageCapture: capture };
+}
 
 /**
  * Transcript wiring decision point (one await completes "read ledger → fix
@@ -1758,11 +1824,16 @@ export const WORKER_EXIT_ENVELOPE_PROTOCOL = 2;
  *     envelope.
  */
 export async function runSubagentWorker(
-  transcriptIo?: WorkerTranscriptIOFactory
+  transcriptIo?: WorkerTranscriptIOFactory,
+  preimageCaptureFactory?: WorkerPreimageCaptureFactory
 ): Promise<void> {
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
-  const phase = await runWorkerPhase(workerEnvelope, transcriptIo);
+  const phase = await runWorkerPhase(
+    workerEnvelope,
+    transcriptIo,
+    preimageCaptureFactory
+  );
   // Single stdout wire: success and run-phase escapes share one write point;
   // the exit code is decided by the phase containment.
   process.stdout.write(JSON.stringify(phase.envelope) + "\n");
@@ -1773,14 +1844,19 @@ export async function runSubagentWorker(
  *  (envelope, exitCode), never rethrown. */
 async function runWorkerPhase(
   workerEnvelope: WorkerEnvelope,
-  transcriptIo?: WorkerTranscriptIOFactory
+  transcriptIo: WorkerTranscriptIOFactory | undefined,
+  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined
 ): Promise<{
   readonly envelope: SubAgentEnvelope;
   readonly exitCode: number;
 }> {
   try {
     return {
-      envelope: await assembleAndRunWorker(workerEnvelope, transcriptIo),
+      envelope: await assembleAndRunWorker(
+        workerEnvelope,
+        transcriptIo,
+        preimageCaptureFactory
+      ),
       exitCode: WORKER_EXIT_OK,
     };
   } catch (err) {
@@ -1799,7 +1875,8 @@ async function runWorkerPhase(
 /** Assembly → runWorkerOnce (the envelope is the process-level form of the return value). */
 async function assembleAndRunWorker(
   workerEnvelope: WorkerEnvelope,
-  transcriptIo?: WorkerTranscriptIOFactory
+  transcriptIo: WorkerTranscriptIOFactory | undefined,
+  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined
 ): Promise<SubAgentEnvelope> {
   const env = loadIknowEnv();
   const { deps, catalog } = await createWorkerRuntime({
@@ -1875,6 +1952,9 @@ async function assembleAndRunWorker(
     ...(workerEnvelope.skillIndexSnapshot !== undefined
       ? { skillIndexSnapshot: workerEnvelope.skillIndexSnapshot }
       : {}),
+    // ADR-0121: write-tool preimage capture, host-built through the
+    // injected factory (see workerPreimageCaptureOption for the anchors).
+    ...workerPreimageCaptureOption(workerEnvelope, preimageCaptureFactory),
   });
   // Observation floor for fileRefs: derived from the ACI catalog actually
   // assembled for this worker, taking the tools with category:"write" (the

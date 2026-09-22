@@ -52,6 +52,7 @@ import {
 } from "./checkpoint.js";
 import type {
   ParsedSessionLog,
+  PreimageRef,
   SessionEventRecord,
   SessionHeadRecord,
   SessionTitleRecord,
@@ -62,6 +63,7 @@ import {
   headChainEvents,
   jsonDeepEqual,
   latestTitleText,
+  matchCodePreimage,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
@@ -430,6 +432,13 @@ export class SessionStore {
    * undefined — even if a message happens to be assistant the key stays
    * off, since the hub's commit closure passes thinkingMs only on the main
    * stepWithTrace path).
+   *
+   * `preimages` maps `tool_use_id → PreimageRef` for workspace writes captured
+   * during this commit batch. A `tool_result` block whose id is present and is
+   * NOT an error gets `codePreimage` stamped on its event record; every other
+   * event (and an errored tool_result) leaves the key absent. The stamp is
+   * transcript-side only — model message content is never modified. Absent map
+   * → byte-identical to the pre-capture behavior.
    */
   async appendEvents(opts: {
     readonly id: string;
@@ -437,8 +446,11 @@ export class SessionStore {
     /** Thinking duration (ms) carried by assistant commits; tool_result /
      *  other batches = undefined. */
     readonly thinkingMs?: number;
+    /** tool_use_id → captured preimage, for stamping successful tool_result
+     *  events; absent/empty → no stamping. */
+    readonly preimages?: ReadonlyMap<string, PreimageRef>;
   }): Promise<void> {
-    const { id, events, thinkingMs } = opts;
+    const { id, events, thinkingMs, preimages } = opts;
     if (events.length === 0) return;
     const path = this.jsonlPath(id);
     const log = await this.readJsonlLog(id, path, {
@@ -460,6 +472,7 @@ export class SessionStore {
       // Each event carries its own ingest timestamp (under the per-tool
       // commit pattern the user/assistant/tool stamps are close but
       // distinguishable).
+      const codePreimage = matchCodePreimage(message, preimages);
       const record: SessionEventRecord = {
         type: "message",
         id: eventId,
@@ -474,6 +487,10 @@ export class SessionStore {
         ...(message.role === "assistant" && stampableThinkingMs !== undefined
           ? { thinkingMs: stampableThinkingMs }
           : {}),
+        // Successful tool_result whose tool_use_id was captured → stamp its
+        // preimage ref. Errored tool_results are excluded (matchCodePreimage),
+        // so a failed write never claims a preimage it did not produce.
+        ...(codePreimage !== undefined ? { codePreimage } : {}),
       };
       lines.push(JSON.stringify(record));
       parent = eventId;
@@ -687,6 +704,50 @@ export class SessionStore {
     return buildRewindTargetsFromLog(
       parseSessionJsonl(sessionFileToJsonl(file))
     );
+  }
+
+  /**
+   * Every event a rewind to `newHead` would abandon: the current head chain,
+   * minus everything still kept under `newHead`, in current-chain order — no
+   * content filter. The rewind orchestrator reads the unfiltered segment to
+   * find the `spawn_subagent` tool_uses inside it (worker transcripts join the
+   * restore through those ids); file refs come from `rewindablePreimages`.
+   * Read-only and same error surface as `rewindToHead` (unknown `newHead` →
+   * schema_invalid).
+   */
+  async abandonedEvents(
+    id: string,
+    newHead: string | null
+  ): Promise<ReadonlyArray<SessionEventRecord>> {
+    const raw = await this.tryReadFile(this.jsonlPath(id), id);
+    if (raw === null) return [];
+    let current: ReadonlyArray<SessionEventRecord>;
+    let kept: ReadonlyArray<SessionEventRecord>;
+    try {
+      const log = parseSessionJsonl(raw);
+      current = headChainEvents(log);
+      kept = chainFromHead(log, newHead);
+    } catch (err) {
+      throw this.attachId(id, err);
+    }
+    const keptIds = new Set(kept.map((e) => e.id));
+    return current.filter((e) => !keptIds.has(e.id));
+  }
+
+  /**
+   * The preimage-bearing events a rewind to `newHead` would abandon: the
+   * current head chain, minus everything still kept under `newHead`, in
+   * current-chain order. Read-only — a legacy `.json`-only session has no
+   * captured refs (JSONL is a prerequisite), so it returns empty rather than
+   * forcing the migrate-on-write the head move already does. Unknown `newHead`
+   * surfaces as schema_invalid, same as rewindToHead.
+   */
+  async rewindablePreimages(
+    id: string,
+    newHead: string | null
+  ): Promise<ReadonlyArray<SessionEventRecord>> {
+    const abandoned = await this.abandonedEvents(id, newHead);
+    return abandoned.filter((e) => e.codePreimage !== undefined);
   }
 
   private async persistHeadMove(

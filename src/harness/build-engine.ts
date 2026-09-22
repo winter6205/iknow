@@ -39,6 +39,7 @@ import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import type { LiveGraphLedgerHost } from "./graph/ledger.js";
 import type { LastReadLedgerHost } from "./aci/last-read-ledger.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import type { PreimageCapture } from "./aci/preimage-port.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { runOverflowJudge } from "./aci/tool-overflow.js";
 import { errorMessage } from "./errors.js";
@@ -203,6 +204,13 @@ export type BuildEngineOpts = {
    * with the registry).
    */
   readonly lastReadLedger?: LastReadLedgerHost;
+  /**
+   * ADR-0036: pre-write capture seam forwarded to the three workspace write
+   * tools. The host builds the closure (session-api owns blob + ledger) and
+   * injects it here, so no harness file imports session-api (Gate B). Absent →
+   * plain writes (byte-identical). A throw before a write aborts it.
+   */
+  readonly preimageCapture?: PreimageCapture;
   /** Test seam: userHome / cwd overrides (default homedir() / process.cwd()). */
   readonly userHome?: string;
   readonly cwd?: string;
@@ -1382,6 +1390,7 @@ export async function buildHarnessEngine(
       ...(mcpManager ? { mcpManager } : {}),
       onEdit: (file) => lspNotifier.invalidate(file),
       lspCtx,
+      preimageCapture: opts.preimageCapture,
       // Secret registry pass-through → the bash handler restores placeholders
       // before spawn. Constructed above; the registry factory dereferences
       // opts.secretRegistry lazily at handler call, no circular dependency.
@@ -1531,6 +1540,7 @@ export async function buildHarnessEngine(
       // No mcpManager, nothing passed → list_mcp_resources / read_mcp_resource absent.
       onEdit: (file) => lspNotifier.invalidate(file),
       lspCtx,
+      preimageCapture: opts.preimageCapture,
       ...(secretRegistry ? { secretRegistry } : {}),
       // The ask path (this branch) passes no todoDir → todo_write is not
       // assembled (same gate as the first construction's todoDir passthrough;

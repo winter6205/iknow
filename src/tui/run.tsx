@@ -77,6 +77,7 @@ import {
   resolveGraphMode,
 } from "../harness/graph/mode.js";
 import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
+import { createPreimageLedger } from "../session-api/store/preimage-ledger.js";
 import {
   loadIknowSettings,
   resolveFsIsolationMode,
@@ -725,6 +726,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // across sessions (web panels / session switching); destroyed by
     // resetSession / hub.shutdown.
     const liveGraphLedger = createLiveGraphLedgerHost();
+    // ADR-0036: preimage accumulator shared by the engine (write tools fill it
+    // via deps.ts's capture closure) and the hub (appendSessionEvents drains it
+    // onto the transcript). One TUI singleton, resolved by conversationId.
+    const preimageLedger = createPreimageLedger();
 
     // The initial TUI engine is built before createTuiBridge, so bind this
     // host seam late to the Hub that owns dirty-root persistence. Mutates
@@ -770,6 +775,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // never auto-provisions (ADR-0037).
       worktreeOnMutateHolder,
       liveGraphLedger,
+      preimageLedger,
       sessionGrants,
       // ADR-0019: pass workspaceRoot to the build-engine identity / memory /
       // skill seams. The startup workspace is also the stable productRoot —
@@ -847,6 +853,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       subagentManager,
       // Ledger host injected into the bridge — the hub resolves it by conversationId.
       liveGraphLedger,
+      // Shared preimage accumulator: the hub drains what the engine's write
+      // tools captured, so both sides must hold the same instance.
+      preimageLedger,
       // Inject the startup deps root + the per-root engine-rebuild seam:
       // after a rebind the session root leaves the startup root → ensureDeps
       // reruns buildTuiDeps at the new root through this seam with the same

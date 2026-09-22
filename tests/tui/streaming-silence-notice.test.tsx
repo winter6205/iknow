@@ -177,7 +177,7 @@ function fakeBridge(opts: FakeBridgeOptions): {
         "continueSession unused in streaming-silence-notice tests"
       );
     },
-    rewindSession: async (_id, _head) => file,
+    rewindSession: async (_id, _head) => ({ file }),
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,

@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,11 +31,13 @@ import {
   type SessionHttpServerOptions,
 } from "../../src/session-api/http.ts";
 import {
+  CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
   resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
+import { captureCodeSnapshot } from "../../src/session-api/store/code-snapshot-store.ts";
 import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
@@ -100,6 +102,19 @@ async function postJson(opts: {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: payload === undefined ? "" : JSON.stringify(payload),
+  });
+  const body = await res.json();
+  return { status: res.status, body };
+}
+
+async function putJson(opts: {
+  readonly path: string;
+  readonly payload: unknown;
+}): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${origin}${opts.path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(opts.payload),
   });
   const body = await res.json();
   return { status: res.status, body };
@@ -672,6 +687,131 @@ describe("POST /api/v1/sessions/:id/rewind", () => {
     assert.equal(b.session.turn_count, 0);
     assert.deepEqual(b.turns, []);
   });
+
+  it("restoreCode 非布尔 → 400", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: null, restoreCode: "yes" },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+  });
+
+  it("restoreCode:true 无捕获写入 → 200，codeRestore 空回执", async () => {
+    const id = await createSession();
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "msg" },
+    });
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: null, restoreCode: true },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      codeRestore?: { restored: unknown[]; skipped: unknown[] };
+    };
+    assert.deepEqual(b.codeRestore?.restored, []);
+    assert.deepEqual(b.codeRestore?.skipped, []);
+  });
+
+  /** Seed a transcript carrying one abandoned write (a.ts A→B on e1) with both
+   *  blobs captured and head on e1, so the wire is judged against a preimage
+   *  that restore genuinely could undo. The workspace must be BOUND to the
+   *  seeded root first: the restore pass refuses to write under any identity
+   *  other than the session's own. */
+  async function seedAbandonedWrite(): Promise<{ id: string; ws: string }> {
+    const ws = await mkdtemp(join(baseDir, "iknow-http-restore-ws-"));
+    await writeFile(join(ws, "a.ts"), "B", "utf8");
+    await putJson({
+      path: "/api/v1/workspace",
+      payload: { path: ws, confirmTrust: true },
+    });
+    const id = await createSession();
+    const convDir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(baseDir, process.cwd()),
+      conversationId: id,
+    });
+    const preimageSha = await captureCodeSnapshot(convDir, "A");
+    const postimageSha = await captureCodeSnapshot(convDir, "B");
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        title: "q",
+        cwd: "/tmp",
+        sanitized_at: stamp,
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: stamp,
+        workspaceRoot: ws,
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e0",
+        parent: null,
+        message: { role: "user", content: [{ type: "text", text: "q" }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e1",
+        parent: "e0",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "a" }],
+        },
+        codePreimage: {
+          relPath: "a.ts",
+          rootIdentity: ws,
+          preimageSha,
+          postimageSha,
+        },
+      }),
+      JSON.stringify({ type: "head", id: "e1" }),
+    ];
+    await writeFile(
+      join(convDir, `${id}.jsonl`),
+      `${lines.join("\n")}\n`,
+      "utf8"
+    );
+    return { id, ws };
+  }
+
+  it("restoreCode:true 有可恢复前像 → 字节回到前像并在回执中报告", async () => {
+    const { id, ws } = await seedAbandonedWrite();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: "e0", restoreCode: true },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      head: string | null;
+      codeRestore?: { restored: string[]; skipped: unknown[] };
+    };
+    assert.equal(b.head, "e0");
+    assert.deepEqual(b.codeRestore?.restored, ["a.ts"]);
+    assert.equal(await readFile(join(ws, "a.ts"), "utf8"), "A");
+  });
+
+  it("restoreCode 缺席 + 有可恢复前像 → head 移动、字节不变、无 codeRestore 键", async () => {
+    // The wire default is the whole contract for a client that predates the
+    // flag: the write above IS restorable and absence must not restore it, and
+    // the response carries no codeRestore key at all so a client cannot
+    // mistake "not attempted" for "attempted, nothing to do".
+    const { id, ws } = await seedAbandonedWrite();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: "e0" },
+    });
+    assert.equal(status, 200);
+    const b = body as { head: string | null; codeRestore?: unknown };
+    assert.equal(b.head, "e0");
+    assert.equal("codeRestore" in b, false);
+    assert.equal(await readFile(join(ws, "a.ts"), "utf8"), "B");
+  });
 });
 
 describe("GET /api/v1/sessions/:id/rewind-targets", () => {
@@ -1007,19 +1147,6 @@ describe("static file serving", () => {
 // -- serve-workspace T3: workspace bind + recents/trust ----------------------
 
 describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
-  async function putJson(opts: {
-    readonly path: string;
-    readonly payload: unknown;
-  }): Promise<{ status: number; body: unknown }> {
-    const res = await fetch(`${origin}${opts.path}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(opts.payload),
-    });
-    const body = await res.json();
-    return { status: res.status, body };
-  }
-
   async function freshServeServer(): Promise<void> {
     await listening.close();
     const recentsHome = await mkdtemp(join(tmpdir(), "iknow-http-recents-"));

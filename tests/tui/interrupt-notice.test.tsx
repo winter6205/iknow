@@ -139,7 +139,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     rewindSession: async (id, _head) => {
       // Returns the unmodified file (TuiApp never hits the rewind branch; just satisfies the type surface).
       void id;
-      return file;
+      return { file };
     },
     listRewindTargets: async () => [],
     inflight,

@@ -104,7 +104,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     continueSession: async () => {
       throw new Error("continueSession unused in error-stop-notice tests");
     },
-    rewindSession: async (_id, _head) => file,
+    rewindSession: async (_id, _head) => ({ file }),
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,

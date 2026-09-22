@@ -319,6 +319,23 @@ export interface IknowSettingsGraph {
 }
 
 /**
+ * Code-restore (rewind preimage capture) section — user-layer only.
+ *
+ * `enabled` is the capture switch. Absent / non-boolean → the field is not
+ * produced and consumers treat it as ON (`enabled !== false`), so capture is
+ * the default and only an explicit `false` disables it. Not on
+ * `PROJECT_SETTINGS_ALLOWED_KEYS`, so a project settings file's `codeRestore`
+ * is dropped before merging (capture is a host/session decision, not a
+ * team-contract policy).
+ *
+ * Validation discipline mirrors `IknowSettingsGraph`: boolean-only; all
+ * illegal / absent → the section is not produced.
+ */
+export interface IknowSettingsCodeRestore {
+  enabled?: boolean;
+}
+
+/**
  * Auto-memory section.
  *
  * `autoExtract` / `dream` accept only booleans; missing / illegal → the field is
@@ -580,6 +597,9 @@ export interface IknowSettings {
   subagent?: IknowSettingsSubagent;
   /** Graph-orchestration overlay default for new sessions (off by default). */
   graph?: IknowSettingsGraph;
+  /** Rewind preimage capture switch (on by default; only an explicit `false`
+   *  disables). User-layer only — dropped from project files by the allowlist. */
+  codeRestore?: IknowSettingsCodeRestore;
   /** Tool-loop detection. Only a boolean is legal; consumers treat the default as true. */
   loop?: IknowSettingsLoop;
   /** Auto-memory extraction switch (default OFF). */
@@ -1194,6 +1214,35 @@ function mergeGraph(
   return out;
 }
 
+/**
+ * Validate the `codeRestore` layer — boolean-only, illegal fields dropped
+ * (mirrors `parseGraph`). Non-plain-object → undefined; non-boolean → drop the
+ * field; all fields illegal → undefined (consumers treat absent as ON via
+ * `enabled !== false`).
+ */
+function parseCodeRestore(raw: unknown): IknowSettingsCodeRestore | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsCodeRestore = {};
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (out.enabled === undefined) return undefined;
+  return out;
+}
+
+/** Merge the `codeRestore` layer. The project layer's section is always
+ *  undefined (dropped by the allowlist before merge), so the user value wins;
+ *  the branch mirrors `mergeGraph` for symmetry. */
+function mergeCodeRestore(
+  user: IknowSettingsCodeRestore | undefined,
+  project: IknowSettingsCodeRestore | undefined
+): IknowSettingsCodeRestore | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsCodeRestore = {};
+  if (project?.enabled !== undefined) out.enabled = project.enabled;
+  else if (user?.enabled !== undefined) out.enabled = user.enabled;
+  if (out.enabled === undefined) return undefined;
+  return out;
+}
+
 function parseLoop(raw: unknown): IknowSettingsLoop | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLoop = {};
@@ -1698,6 +1747,12 @@ function mergeSettings(
   const userGraph = parseGraph(userRaw.graph);
   const projectGraph = parseGraph(projectRaw.graph);
   const graph = mergeGraph(userGraph, projectGraph);
+  // Rewind preimage capture switch (on by default; project value dropped by the
+  // allowlist so only the user layer can carry it).
+  const codeRestore = mergeCodeRestore(
+    parseCodeRestore(userRaw.codeRestore),
+    parseCodeRestore(projectRaw.codeRestore)
+  );
   // Auto-memory switch (default OFF — an absent section means off).
   const memory = mergeMemory(
     parseMemory(userRaw.memory),
@@ -1735,6 +1790,7 @@ function mergeSettings(
     subagent,
     loop,
     graph,
+    codeRestore,
     memory,
     isolation,
     lsp,

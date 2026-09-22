@@ -95,7 +95,12 @@ import type {
 } from "../harness/sandbox/fs-mode.js";
 import type { YoloContext } from "../harness/sandbox/yolo.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
-import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
+import {
+  listSubagentRecordPaths,
+  resolveSessionFenceTmp,
+  workerMetaPath,
+  workerTranscriptPath,
+} from "../harness/sandbox/fence-tmp.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -126,7 +131,7 @@ import {
   withApiError,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import {
@@ -159,6 +164,25 @@ import {
 } from "./store/index.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "./store/schema.js";
+import {
+  createPreimageLedger,
+  drainPreimageRefs,
+  warnUnstampablePreimages,
+  type PreimageLedgerHost,
+} from "./store/preimage-ledger.js";
+import { createPreimageCapture } from "./store/preimage-capture.js";
+import type { PreimageCapture } from "../harness/aci/preimage-port.js";
+import {
+  applyCodeRestore,
+  buildCodeRestorePlan,
+  type CodeRestoreError,
+  type CodeRestoreReport,
+  loadWorkerPreimageEvents,
+  readWorkerSpawnToolUseId,
+  resolveConversationDir,
+  resolveSubagentTraceDir,
+  type SessionEventRecord,
+} from "./store/index.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
@@ -716,6 +740,11 @@ export type SessionHubOptions = {
    * graphAssembly default).
    */
   liveGraphLedger?: LiveGraphLedgerHost;
+  /** ADR-0036: inject the preimage ledger shared with the host's engine assembly
+   *  (TUI builds the capture in deps.ts against this instance). Absent → the hub
+   *  self-creates one and wires `preimageCapture` into the engines it builds
+   *  (serve path). */
+  preimageLedger?: PreimageLedgerHost;
   /** Env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -1170,6 +1199,14 @@ export class SessionHub {
    * handler keeps no ledger (same shape as the graphAssembly absence).
    */
   private readonly liveGraphLedger: LiveGraphLedgerHost | undefined;
+  /** ADR-0036: preimage accumulator shared by every per-root engine this hub
+   *  builds. The write tools fill it (via the injected `PreimageCapture`) and
+   *  `appendSessionEvents` drains the batch's ids onto the transcript. Cleared
+   *  per conversation on reset. Never persisted — restart → empty. The TUI
+   *  injects the same instance its own engine assembly (deps.ts) fills, so
+   *  parent commits stamp what the injected engine captured. Absent → self-created
+   *  (serve path, where this hub also builds the engine). */
+  private readonly preimageLedger: PreimageLedgerHost;
   /** serve-workspace: recents/trust roster home (absent → roster-less behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
@@ -1220,6 +1257,7 @@ export class SessionHub {
     this.yolo = opts.yolo;
     this.injectedGraphAssembly = opts.graphAssembly;
     this.liveGraphLedger = opts.liveGraphLedger;
+    this.preimageLedger = opts.preimageLedger ?? createPreimageLedger();
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -2458,6 +2496,7 @@ export class SessionHub {
         // Reset destroys the live-graph ledger, so a later run_graph in the
         // same session can reuse old ids and really spawn. No ledger → no-op.
         this.liveGraphLedger?.destroy(conversationId);
+        this.preimageLedger.clear(conversationId);
         const session = await this.store.load(conversationId);
         const reset: SessionFileV1 = {
           ...session,
@@ -2817,14 +2856,25 @@ export class SessionHub {
    * transcript). Runs through the serialize queue. Input is an event id, no
    * longer keepTurns. Legacy .json-only sessions are load+save migrated to
    * JSONL first, then the rewind is retried.
+   *
+   * `restoreCode` (default false) additionally writes the abandoned segment's
+   * workspace files back to their captured preimages before the head moves —
+   * see `restoreAbandonedCode`. The transcript head movement never depends on
+   * whether a restore happened; a restore that fails on an unreadable blob, or
+   * that still has ops but no locatable live task root, aborts the whole call
+   * and leaves the head where it was.
    */
   async rewindSession(
     conversationId: string,
-    head: string | null
+    head: string | null,
+    restoreCode = false
   ): Promise<RewindSessionResponse> {
     return this.serialize({
       conversationId,
       work: async () => {
+        const codeRestore = restoreCode
+          ? await this.restoreAbandonedCode(conversationId, head)
+          : undefined;
         let file: SessionFileV1;
         try {
           ({ file } = await this.store.rewindToHead({
@@ -2846,9 +2896,159 @@ export class SessionHub {
           session: this.summarize({ file }),
           turns: projectMessagesToTurns(file.messages),
           head: await this.store.readHead(conversationId),
+          ...(codeRestore !== undefined ? { codeRestore } : {}),
         };
       },
     });
+  }
+
+  /** Restore the workspace files a rewind to `head` would abandon (ADR-0121).
+   *  Called before the head moves: an unreadable preimage blob throws here, so
+   *  the transcript never advances past history whose code we could not put
+   *  back; a session whose live task root cannot be located while ops remain
+   *  throws the same family (`restore_root_unavailable`). Drift and
+   *  root-identity mismatches are reported skips.
+   *
+   *  The write target is the LIVE taskRoot, never the session file's
+   *  `workspaceRoot` (ADR-0121: "Restore into the session file's
+   *  workspaceRoot: Rejected"). The hub-side live value is the dirty-root
+   *  record: `markWorktreeRootDirty` runs on every successful
+   *  provision/enter/exit seam — the same seam resolution that moves the
+   *  engine's `LiveTaskRoot` cell — and the record is cleared only once
+   *  conditionalSave has persisted the new root. So while the record is
+   *  present the file's root is stale and writes must follow the record;
+   *  absent, the persisted root IS the live root. `rootIdentity` is derived
+   *  from the same live value (`rootIdentityFor(live)`), and `relPath` in
+   *  every op is measured from it.
+   *
+   *  The abandoned set spans two ledgers (ADR-0121): the parent's own
+   *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
+   *  in the abandoned segment — a worker edit is the parent's abandoned
+   *  history too. Both write their blobs into this parent session folder, so
+   *  one plan and one `applyCodeRestore` cover them — but the plan is fed one
+   *  group PER TRANSCRIPT, never one concatenated array: parent and worker are
+   *  separate writers with no shared order, so a path claimed by more than one
+   *  of them is reported instead of folded (ADR-0121 "Concatenate the parent
+   *  chain, then worker transcripts" / "Sort by `createdAt`": both Rejected). */
+  private async restoreAbandonedCode(
+    conversationId: string,
+    head: string | null
+  ): Promise<CodeRestoreReport> {
+    const parentEvents = await this.store.rewindablePreimages(
+      conversationId,
+      head
+    );
+    const workers = await this.abandonedWorkerPreimages(conversationId, head);
+    const plan = buildCodeRestorePlan([
+      { transcriptId: `parent:${conversationId}`, events: parentEvents },
+      ...workers.map((worker) => ({
+        transcriptId: `worker:${worker.taskId}`,
+        events: worker.events,
+      })),
+    ]);
+    const { workspaceRoot } = await this.store.load(conversationId);
+    const liveRoot =
+      this.dirtyWorktreeRoots.get(conversationId) ?? workspaceRoot;
+    if (liveRoot === undefined) {
+      // No live task root to restore into: same family as an unreadable blob
+      // (ADR-0121) — while ops remain, the transcript must not advance past
+      // code we have no locatable place to put back, so the call throws
+      // before any workspace write and the head stays put. Nothing to write
+      // makes the missing root a no-op: report the ownership skips and let
+      // the rewind proceed. Never degrade `taskRoot` to "" — that would
+      // resolve relative paths against the process CWD.
+      if (plan.ops.length > 0) {
+        throw {
+          kind: "restore_root_unavailable",
+          conversation_id: conversationId,
+        } satisfies CodeRestoreError;
+      }
+      return { restored: [], skipped: plan.skipped };
+    }
+    return applyCodeRestore({
+      sessionFolder: resolveConversationDir({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      }),
+      taskRoot: liveRoot,
+      rootIdentity: this.rootIdentityFor(liveRoot),
+      plan,
+    });
+  }
+
+  /** Preimage-bearing events of workers spawned from the segment a rewind to
+   *  `head` would abandon, grouped per worker transcript so the plan can
+   *  attribute each path to the transcript that wrote it. Join key:
+   *  `spawn_subagent` tool_use ids in the segment ↔
+   *  `subagents/<taskId>/agent-<taskId>.meta.json`'s `toolUseId`.
+   *  Absent meta/transcript → skipped (legacy worker or one that exited
+   *  before its first commit — no link or no stamped history exists). A
+   *  corrupt meta or transcript propagates typed: an unreadable link is
+   *  indistinguishable from a matching one, so the whole restore aborts
+   *  before the head moves, same posture as an unreadable blob. */
+  private async abandonedWorkerPreimages(
+    conversationId: string,
+    head: string | null
+  ): Promise<
+    ReadonlyArray<{ taskId: string; events: ReadonlyArray<SessionEventRecord> }>
+  > {
+    const segment = await this.store.abandonedEvents(conversationId, head);
+    const spawnIds = new Set<string>();
+    for (const event of segment) {
+      const content = event.message.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        const b = block as { type?: unknown; name?: unknown; id?: unknown };
+        if (
+          b.type === "tool_use" &&
+          b.name === "spawn_subagent" &&
+          typeof b.id === "string"
+        ) {
+          spawnIds.add(b.id);
+        }
+      }
+    }
+    if (spawnIds.size === 0) return [];
+    const subagentsDir = resolveSubagentTraceDir({
+      projectDir: this.store.getProjectDir(),
+      conversationId,
+    });
+    const out: Array<{
+      taskId: string;
+      events: ReadonlyArray<SessionEventRecord>;
+    }> = [];
+    for (const recordPath of listSubagentRecordPaths(subagentsDir)) {
+      // Glob guarantees `agent-<taskId>.jsonl`; the nested layout (ADR-0102)
+      // names the directory the same, so the record's basename identifies the
+      // task in both layouts.
+      const taskId = basename(recordPath, ".jsonl").replace(/^agent-/, "");
+      const toolUseId = await readWorkerSpawnToolUseId(
+        workerMetaPath(subagentsDir, taskId),
+        taskId
+      );
+      if (toolUseId === undefined || !spawnIds.has(toolUseId)) continue;
+      const events = await loadWorkerPreimageEvents({
+        transcriptPath: workerTranscriptPath(subagentsDir, taskId),
+        taskId,
+      });
+      // The group is kept even when empty: a transcript with no refs claims no
+      // path, so it cannot make any other transcript's path shared.
+      out.push({ taskId, events });
+    }
+    return out;
+  }
+
+  /** The live project-identity root a captured preimage `rootIdentity` is
+   *  checked against — the same derivation the engine build feeds the write
+   *  tools (`resolvePreimageRootIdentity` in
+   *  `src/harness/aci/tools/registry.ts`, fed by `build-engine`'s
+   *  `sessionRoots.projectIdentityRoot`). `mainCheckoutOf` wraps the WHOLE
+   *  chain, not just the fallback: the capture side normalized
+   *  `projectIdentityRoot ?? cwd` through the same pure derivation, and an
+   *  idempotent pass keeps a pinned / bound task-worktree value from
+   *  comparing unequal to every captured identity. */
+  private rootIdentityFor(root: string): string {
+    return mainCheckoutOf(this.projectIdentityRoot ?? this.boundRoot ?? root);
   }
 
   async listRewindTargets(
@@ -3310,6 +3510,12 @@ export class SessionHub {
      *  appendEvents omits the key. */
     readonly thinkingMs?: number;
   }): Promise<void> {
+    const preimages = drainPreimageRefs(
+      this.preimageLedger,
+      opts.conversationId,
+      opts.events,
+      (unstamped) => warnUnstampablePreimages(opts.conversationId, unstamped)
+    );
     try {
       await this.store.appendEvents({
         id: opts.conversationId,
@@ -3317,6 +3523,7 @@ export class SessionHub {
         ...(opts.thinkingMs !== undefined
           ? { thinkingMs: opts.thinkingMs }
           : {}),
+        ...(preimages !== undefined ? { preimages } : {}),
       });
     } catch (err) {
       if (!isSessionStoreError(err)) throw err;
@@ -3327,8 +3534,22 @@ export class SessionHub {
         ...(opts.thinkingMs !== undefined
           ? { thinkingMs: opts.thinkingMs }
           : {}),
+        ...(preimages !== undefined ? { preimages } : {}),
       });
     }
+  }
+
+  /** ADR-0036: build the pre-write capture closure the assembly injects into the
+   *  write tools. Reads the capture switch live so a config flip lands without
+   *  an engine rebuild; shares this hub's ledger so the commit side can drain
+   *  what the tools recorded. Gate B: the closure is constructed host-side and
+   *  only the port type crosses into the harness. */
+  private preimageCapture(): PreimageCapture {
+    return createPreimageCapture({
+      getProjectDir: () => this.store.getProjectDir(),
+      ledger: this.preimageLedger,
+      isEnabled: () => this.startupSettings?.codeRestore?.enabled !== false,
+    });
   }
 
   /** Save condition based on stopReason and progress delta.
@@ -3704,6 +3925,7 @@ export class SessionHub {
       // loadIknowSettings({cwd}) would silently drop project settings
       // (`.iknow/` is gitignored inside the worktree).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      preimageCapture: this.preimageCapture(),
       // ADR-0037: mutate-gate host seam — the switch is read at the
       // build-engine startup load point; provision builds the tree and rebinds
       // only this session's root. Passthrough does not go through
@@ -3877,6 +4099,7 @@ export class SessionHub {
       // Review High-2 (hard req 9): fallback path reuses the startup settings
       // object too (rebind-rebuilt engines must not reload settings).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      preimageCapture: this.preimageCapture(),
       // ADR-0037: the un-bound-root fallback path also wires the isolation
       // host seam (repoRoot = sandboxRoot ?? process.cwd(); sessions lacking a
       // workspaceRoot take the per-root engine path on the turn after a

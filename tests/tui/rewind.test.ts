@@ -25,7 +25,9 @@ import {
 import { resolveRewindAnchor } from "../../src/session-api/store/checkpoint.js";
 import {
   buildRewindTargets,
+  codeRestoreNoticeLines,
   reduceRewindKey,
+  rewindModalRows,
   rewindPickerContent,
   type RewindTarget,
 } from "../../src/tui/rewind-picker.js";
@@ -499,6 +501,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
         targets,
         selectedIndex: 0,
         confirming: false,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "move", index: 0 });
     expect(
@@ -506,6 +509,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
         targets,
         selectedIndex: 0,
         confirming: false,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "move", index: 1 });
     expect(
@@ -513,6 +517,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
         targets,
         selectedIndex: 2,
         confirming: false,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "move", index: 2 });
     expect(
@@ -520,6 +525,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
         targets,
         selectedIndex: 1,
         confirming: false,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "confirm" });
     expect(
@@ -527,42 +533,104 @@ describe("reduceRewindKey（选择器键路由）", () => {
         targets,
         selectedIndex: 1,
         confirming: false,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "cancel" });
   });
 
-  test("确认态：Enter → execute（携带 head）；Esc → cancel", () => {
+  test("确认态：Enter 执行高亮动作（head + restoreCode 来自所选行）", () => {
+    // Row 0 rewinds the transcript and restores code; row 1 rewinds only; the
+    // boolean is what hub.rewindSession receives (ADR-0121), so a mis-wired row
+    // is a product-visible difference, not a cosmetic one.
     expect(
       reduceRewindKey(key({ return: true }), {
         targets,
         selectedIndex: 1,
         confirming: true,
+        confirmIndex: 0,
       })
-    ).toEqual({ type: "execute", head: "e3" });
+    ).toEqual({ type: "execute", head: "e3", restoreCode: true });
+    expect(
+      reduceRewindKey(key({ return: true }), {
+        targets,
+        selectedIndex: 1,
+        confirming: true,
+        confirmIndex: 1,
+      })
+    ).toEqual({ type: "execute", head: "e3", restoreCode: false });
     expect(
       reduceRewindKey(key({ return: true }), {
         targets,
         selectedIndex: 0,
         confirming: true,
+        confirmIndex: 0,
       })
-    ).toEqual({ type: "execute", head: null });
+    ).toEqual({ type: "execute", head: null, restoreCode: true });
     expect(
       reduceRewindKey(key({ escape: true }), {
         targets,
         selectedIndex: 1,
         confirming: true,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "cancel" });
   });
 
-  test("确认态 ↑/↓ 不移动（Enter 落在当前选中锚点）", () => {
+  test("确认态：取消行 Enter → cancel（不留下 head）", () => {
+    expect(
+      reduceRewindKey(key({ return: true }), {
+        targets,
+        selectedIndex: 1,
+        confirming: true,
+        confirmIndex: 2,
+      })
+    ).toEqual({ type: "cancel" });
+  });
+
+  test("确认态：↑/↓ 在三个动作间移动并 clamp 于首尾", () => {
+    expect(
+      reduceRewindKey(key({ upArrow: true }), {
+        targets,
+        selectedIndex: 1,
+        confirming: true,
+        confirmIndex: 0,
+      })
+    ).toEqual({ type: "move", index: 0 });
     expect(
       reduceRewindKey(key({ downArrow: true }), {
         targets,
         selectedIndex: 1,
         confirming: true,
+        confirmIndex: 0,
+      })
+    ).toEqual({ type: "move", index: 1 });
+    expect(
+      reduceRewindKey(key({ downArrow: true }), {
+        targets,
+        selectedIndex: 1,
+        confirming: true,
+        confirmIndex: 2,
+      })
+    ).toEqual({ type: "move", index: 2 });
+  });
+
+  test("确认态：锚点消失（越界）时正行动作 ignore，取消行仍可用", () => {
+    expect(
+      reduceRewindKey(key({ return: true }), {
+        targets,
+        selectedIndex: 9,
+        confirming: true,
+        confirmIndex: 0,
       })
     ).toEqual({ type: "ignore" });
+    expect(
+      reduceRewindKey(key({ return: true }), {
+        targets,
+        selectedIndex: 9,
+        confirming: true,
+        confirmIndex: 2,
+      })
+    ).toEqual({ type: "cancel" });
   });
 
   test("ctrl/meta 组合键 → ignore", () => {
@@ -573,6 +641,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
           targets,
           selectedIndex: 0,
           confirming: false,
+          confirmIndex: 0,
         }
       )
     ).toEqual({ type: "ignore" });
@@ -602,7 +671,25 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     expect(content.description).toContain("之前");
     expect(content.description).toContain("账本");
     expect(content.description).not.toContain("不可恢复");
-    expect(content.options.map((o) => o.value)).toEqual(["execute", "cancel"]);
+    expect(content.options.map((o) => o.value)).toEqual([
+      "restore_code",
+      "transcript_only",
+      "cancel",
+    ]);
+  });
+
+  test("确认态三选一：恢复代码 / 仅回退对话 / 取消都在屏上（spec Does）", () => {
+    const targets = buildRewindTargets(sampleFile());
+    const content = rewindPickerContent(targets, 1, true);
+    expect(content.options.map((o) => o.label)).toEqual([
+      "回退对话并恢复代码",
+      "仅回退对话",
+      "取消",
+    ]);
+    // Two positive rows plus cancel is the whole point of the confirm step; the
+    // hint must teach ↑/↓, otherwise the second action is unreachable by keyboard.
+    expect(content.options).toHaveLength(3);
+    expect(content.hint).toContain("↑↓");
   });
 
   test("确认态有 head：desc 引用锚点消息 + 之前（Claude Code before-this-message）", () => {
@@ -636,6 +723,87 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     const content = rewindPickerContent(targets, 0, false);
     expect(content.options[0]!.label).toHaveLength(40);
     expect(targets[0]!.userMessageText).toHaveLength(80);
+  });
+});
+
+// -- rewindModalRows (row accounting for both picker states) ------------------
+
+describe("rewindModalRows（确认态按三动作计行）", () => {
+  test("确认态行数不随锚点条数增长；选择态仍按锚点计行", () => {
+    const one = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg("q1")],
+      turnCount: 1,
+    });
+    const three = buildRewindTargets(sampleFile());
+    expect(three).toHaveLength(3);
+    const confirmRows = rewindModalRows(three, 200, 1, true, 1);
+    expect(rewindModalRows(one, 200, 0, true, 0)).toBe(confirmRows);
+    // The select state counts anchors, so a one-anchor list is a shorter budget
+    // than the three fixed actions — that difference is what this pins.
+    expect(rewindModalRows(one, 200, 0, false, 0)).toBeLessThan(confirmRows);
+  });
+
+  test("高亮第几行只改前缀形状，不改行数", () => {
+    const targets = buildRewindTargets(sampleFile());
+    expect(rewindModalRows(targets, 200, 0, true, 2)).toBe(
+      rewindModalRows(targets, 200, 0, true, 0)
+    );
+  });
+
+  test("窄终端：动作行折行，行数大于宽终端（与渲染同源）", () => {
+    const targets = buildRewindTargets(sampleFile());
+    expect(rewindModalRows(targets, 24, 0, true, 0)).toBeGreaterThan(
+      rewindModalRows(targets, 200, 0, true, 0)
+    );
+  });
+});
+
+// -- codeRestoreNoticeLines (restore report → notice lines) -------------------
+
+describe("codeRestoreNoticeLines（恢复报告 → notice 行）", () => {
+  test("写回 N 个文件 → 计数行，无跳过时仅此一行", () => {
+    expect(
+      codeRestoreNoticeLines({
+        restored: ["src/a.ts", "src/b.ts"],
+        skipped: [],
+      })
+    ).toEqual(["代码恢复：写回 2 个文件。"]);
+  });
+
+  test("drift 与 root_identity 各自成行，同因路径并列", () => {
+    expect(
+      codeRestoreNoticeLines({
+        restored: ["src/a.ts"],
+        skipped: [
+          { relPath: "src/b.ts", reason: "drift" },
+          { relPath: "src/c.ts", reason: "drift" },
+          { relPath: "src/d.ts", reason: "root_identity" },
+        ],
+      })
+    ).toEqual([
+      "代码恢复：写回 1 个文件。",
+      "未恢复（文件已被后续改动）：src/b.ts、src/c.ts",
+      "未恢复（工作区根已变化）：src/d.ts",
+    ]);
+  });
+
+  test("cross_transcript 独立成行：路径属于多条转录本时不写回", () => {
+    expect(
+      codeRestoreNoticeLines({
+        restored: ["src/a.ts"],
+        skipped: [{ relPath: "src/b.ts", reason: "cross_transcript" }],
+      })
+    ).toEqual([
+      "代码恢复：写回 1 个文件。",
+      "未恢复（多条转录本改过该文件）：src/b.ts",
+    ]);
+  });
+
+  test("空报告也是明确结果：说明没有可写回的前像", () => {
+    expect(codeRestoreNoticeLines({ restored: [], skipped: [] })).toEqual([
+      "代码恢复：被放弃的回合没有可写回的前像。",
+    ]);
   });
 });
 
@@ -716,7 +884,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("turn-boundary preservation：截断到 turn 起点", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", "e3");
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      "e3",
+      false
+    );
     // turn0 ends at index 4 (tool pairing complete).
     expect(out.messages.length).toBe(4);
     expect(out.messages[0]!.content[0]!.type).toBe("text");
@@ -733,7 +905,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
       turnCount: 1,
     });
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", null);
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      null,
+      false
+    );
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
     expect(out.checkpoints).toEqual([]);
@@ -746,7 +922,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("tool-pair intact：回退后 tool_use 与 tool_result 保持配对", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", "e3");
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      "e3",
+      false
+    );
     expect((out.messages[1]!.content[0] as { type: string }).type).toBe(
       "tool_use"
     );
@@ -758,7 +938,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("turnCount === keepTurns；checkpoints 剪枝（turnIndex ≥ keepTurns 全清）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", "e5");
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      "e5",
+      false
+    );
     expect(out.turnCount).toBe(2);
     expect(out.checkpoints).toEqual([
       {
@@ -775,14 +959,22 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("title 从截断前缀重算", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", "e3");
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      "e3",
+      false
+    );
     expect(out.title).toBe("q1");
   });
 
   test("head 已是当前链尾 → no-op", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", "e7");
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      "e7",
+      false
+    );
     expect(out.messages.length).toBe(8);
     expect(out.turnCount).toBe(3);
   });
@@ -790,7 +982,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("keepTurns=0 → 空消息 + 空 checkpoints（回到会话起点）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", null);
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      null,
+      false
+    );
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
     expect(out.checkpoints).toEqual([]);
@@ -801,7 +997,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     // target === available takes the no-op branch (same shape as checkpoint.test.ts cases).
     await seedFile({ ...sampleFile(), messages: [], turnCount: 0 });
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", null);
+    const { file: out } = await bridge.rewindSession(
+      "conv-rewind",
+      null,
+      false
+    );
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
   });
@@ -814,7 +1014,9 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "conv-bad.json"), "{garbage", "utf8");
     const bridge = makeBridge();
-    await expect(bridge.rewindSession("conv-bad", null)).rejects.toMatchObject({
+    await expect(
+      bridge.rewindSession("conv-bad", null, false)
+    ).rejects.toMatchObject({
       kind: "parse_failed",
     });
   });
@@ -822,7 +1024,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("错误路径：load not_found → typed kind 透传", async () => {
     const bridge = makeBridge();
     await expect(
-      bridge.rewindSession("no-such-id", null)
+      bridge.rewindSession("no-such-id", null, false)
     ).rejects.toMatchObject({
       kind: "not_found",
     });
@@ -840,7 +1042,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     await mkdir(join(dir, "conv-rewind.jsonl.tmp"), { recursive: true });
     const bridge = makeBridge();
     await expect(
-      bridge.rewindSession("conv-rewind", "e3")
+      bridge.rewindSession("conv-rewind", "e3", false)
     ).rejects.toMatchObject({
       kind: "write_failed",
     });
@@ -849,8 +1051,24 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("rewind 后下一轮从新低基准续号（turnCount 契约，chat-session.ts:472）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    await bridge.rewindSession("conv-rewind", "e3");
+    await bridge.rewindSession("conv-rewind", "e3", false);
     const file = await bridge.loadSessionFile("conv-rewind");
     expect(file.turnCount).toBe(1);
+  });
+
+  test("restoreCode=false → 报告字段缺席；true → hub 的 codeRestore 原样带出", async () => {
+    // The bridge's only job here is to forward the boolean and surface the hub's
+    // report; whether files really went back is pinned by
+    // tests/session-api/hub-rewind-code-restore.test.ts.
+    await seedFile(sampleFile());
+    const bridge = makeBridge();
+    const plain = await bridge.rewindSession("conv-rewind", "e3", false);
+    expect(plain.codeRestore).toBeUndefined();
+    expect(plain.file.turnCount).toBe(1);
+
+    await seedFile(sampleFile());
+    const restored = await bridge.rewindSession("conv-rewind", "e5", true);
+    // No preimage was ever captured for this fixture, so the hub reports zero ops.
+    expect(restored.codeRestore).toEqual({ restored: [], skipped: [] });
   });
 });

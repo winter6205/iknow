@@ -132,7 +132,7 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     continueSession: async () => {
       throw new Error("unused");
     },
-    rewindSession: async () => file,
+    rewindSession: async () => ({ file }),
     listRewindTargets: async () => [],
     inflight: createInflightRegistry(),
     contextWindow: 200_000,

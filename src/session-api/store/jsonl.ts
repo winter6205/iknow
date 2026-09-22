@@ -88,6 +88,23 @@ export interface SessionHeaderRecord {
   readonly lastUsage?: TokenUsage;
 }
 
+/** Content-addressed preimage reference a successful workspace write leaves
+ *  behind (ADR-0036). `preimageSha` / `postimageSha` name blobs under the
+ *  session's `code-snapshots/` directory (see code-snapshot-store.ts); the
+ *  restore path resolves them back against `rootIdentity` + `relPath`.
+ *  `absentBefore` is capture-time evidence (the tool saw ENOENT) that the
+ *  path did not exist before that write, so restore deletes it instead of
+ *  writing bytes back. Absent means the path existed — legacy transcript
+ *  lines carry no key and an empty preimage never implies absence (ADR-0121);
+ *  the capture side spreads the key only when true, keeping one schema. */
+export interface PreimageRef {
+  readonly relPath: string;
+  readonly rootIdentity: string;
+  readonly preimageSha: string;
+  readonly postimageSha: string;
+  readonly absentBefore?: boolean;
+}
+
 /** One message event: unique id + parent chain + verbatim native message.
  *  `createdAt` is the ingest timestamp (ISO) written by appendEvents;
  *  optional for legacy JSONL compat — parseSessionJsonl does not strictly
@@ -95,7 +112,11 @@ export interface SessionHeaderRecord {
  *  projection lands it as messageCreatedAt[i] = null. `thinkingMs` is the
  *  assistant-turn thinking duration in ms, attached by appendEvents via
  *  conditional spread on assistant events only; non-assistant / streamed
- *  turns without thinking → field absent. */
+ *  turns without thinking → field absent. `codePreimage` is attached by
+ *  appendEvents only onto a successful (non-`is_error`) tool_result event
+ *  whose `tool_use_id` matched a captured preimage; every other event →
+ *  field absent. It is transcript-side only — never projected into model
+ *  message content. */
 export interface SessionEventRecord {
   readonly type: "message";
   readonly id: string;
@@ -103,6 +124,39 @@ export interface SessionEventRecord {
   readonly message: AnthropicNativeMessage;
   readonly createdAt?: string;
   readonly thinkingMs?: number;
+  readonly codePreimage?: PreimageRef;
+}
+
+/** The `tool_use_id` whose ref `matchCodePreimage` would resolve for this
+ *  event — the FIRST captured, non-`is_error` tool_result block. The commit
+ *  side's drain selects with this exact rule, so consumption can never strand
+ *  a ref the append side would not land. */
+export function matchCodePreimageId(
+  message: AnthropicNativeMessage,
+  preimages: ReadonlyMap<string, PreimageRef>
+): string | undefined {
+  for (const block of message.content) {
+    if (block.type !== "tool_result" || block.is_error === true) continue;
+    if (preimages.has(block.tool_use_id)) return block.tool_use_id;
+  }
+  return undefined;
+}
+
+/** Find the captured preimage ref for an event, if it is a successful
+ *  (non-`is_error`) tool_result whose `tool_use_id` was captured. A batch may
+ *  carry several tool_result blocks (parallel tools); the first captured,
+ *  non-error one wins. Shared by the parent append
+ *  (`SessionStore.appendEvents`) and the worker append
+ *  (`appendWorkerTranscript`): one stamping rule for both transcripts. A
+ *  second captured ref inside the same event is reported by the drain
+ *  (`drainPreimageRefs`' `onUnstampable`), never silently consumed. */
+export function matchCodePreimage(
+  message: AnthropicNativeMessage,
+  preimages: ReadonlyMap<string, PreimageRef> | undefined
+): PreimageRef | undefined {
+  if (preimages === undefined || preimages.size === 0) return undefined;
+  const id = matchCodePreimageId(message, preimages);
+  return id === undefined ? undefined : preimages.get(id);
 }
 
 /** The persisted rewind head pointer; id null means an empty transcript. */

@@ -2417,6 +2417,12 @@ export async function persistChatSessionCheckpoint(opts: {
  * session) → use getPriors()' in-memory messages (history before this run).
  * Underlying store IO faults propagate as typed store errors, never
  * swallowed.
+ *
+ * The chat REPL is NOT a preimage-capture host (specs/code-restore.md): its
+ * engine assembles no capture port, so nothing feeds a ledger and this hook
+ * never stamps `codePreimage` — no preimage params by design. Subagents
+ * spawned from chat still capture in their own worker process and stay
+ * restorable through the hub's rewind on the same session folder.
  */
 export function createChatSessionCommitHook(opts: {
   readonly store: SessionStore;
@@ -2429,7 +2435,10 @@ export function createChatSessionCommitHook(opts: {
   const { store, conversationId, jsonMode, getPriors, workspaceRoot } = opts;
   return async (messages) => {
     try {
-      await store.appendEvents({ id: conversationId, events: [...messages] });
+      await store.appendEvents({
+        id: conversationId,
+        events: [...messages],
+      });
       return;
     } catch (err) {
       // Only typed store errors (JSONL missing / legacy / corrupted)
@@ -2472,7 +2481,10 @@ export function createChatSessionCommitHook(opts: {
         updatedAt: new Date().toISOString(),
       },
     });
-    await store.appendEvents({ id: conversationId, events: [...messages] });
+    await store.appendEvents({
+      id: conversationId,
+      events: [...messages],
+    });
   };
 }
 

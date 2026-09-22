@@ -142,7 +142,7 @@ async function mountApp(initialTasks: SubagentInfo[]): Promise<Rig> {
     continueSession: async () => {
       throw new Error("unused");
     },
-    rewindSession: async () => file,
+    rewindSession: async () => ({ file }),
     listRewindTargets: async () => [],
     inflight: createInflightRegistry(),
     contextWindow: 200_000,

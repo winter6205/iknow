@@ -25,6 +25,10 @@ import {
 } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
+import {
+  capturePreimageBeforeWrite,
+  type PreimageCapture,
+} from "../preimage-port.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
 const TOOL_NAME = "edit_file";
@@ -33,11 +37,18 @@ const TOOL_NAME = "edit_file";
  * Optional seam: invoked after a successful write with the absolute path of
  * the modified file, so outer layers (e.g. the LSP notifier) can invalidate.
  * Fires only on the success path — failures must not trigger a bogus notice.
+ *
+ * `preimageCapture` is the mirror seam fired BEFORE the write with the current
+ * and incoming bytes; a throw aborts the write (the file stays untouched).
+ * `rootIdentity` names the project identity root the `relPath` is meaningful
+ * under; it defaults to the live task root the write resolved against.
  */
 export interface EditFileOpts {
   readonly onEdit?: (file: string) => void;
   readonly tmpDir?: string;
   readonly projectDir?: string;
+  readonly preimageCapture?: PreimageCapture;
+  readonly rootIdentity?: string;
 }
 
 const ALLOWED_KEYS = new Set(["path", "old_str", "new_str", "replace_all"]);
@@ -183,6 +194,17 @@ export function createEditFileTool(
     const replaced = validated.replace_all
       ? content.split(validated.old_str).join(validated.new_str)
       : replaceOnce(content, validated.old_str, validated.new_str);
+    // Capture the pre/post bytes before the write; a throwing port aborts the
+    // write so the file stays at `content`. The helper is a no-op when no port
+    // is injected (legacy / direct-factory callers). The successful read above
+    // proves the path existed — a surgical edit is never a create.
+    await capturePreimageBeforeWrite(opts, ctx, {
+      rootAtCall,
+      absPath,
+      preBytes: content,
+      postBytes: replaced,
+      absentBefore: false,
+    });
     await writeFile(absPath, replaced, "utf8");
 
     // Success-path seam: callback fires only after the write succeeds. Failure

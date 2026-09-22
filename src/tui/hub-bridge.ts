@@ -31,7 +31,10 @@ import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LedgerRewindTarget } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
-import type { CompactCallerOpts } from "../session-api/contract.js";
+import type {
+  CompactCallerOpts,
+  RewindCodeRestoreResult,
+} from "../session-api/contract.js";
 import type { CompactReason } from "../harness/compress/index.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type {
@@ -127,6 +130,14 @@ export interface TuiPostResult {
   readonly apiError?: { readonly status?: number; readonly message: string };
 }
 
+/** Rewind result: the post-rewind projection the TUI renders from, plus — only
+ *  on a rewind that asked for code restore — the workspace report (absent field
+ *  when no restore was requested, same byte-stable pattern as `apiError`). */
+export interface TuiRewindOutcome {
+  readonly file: SessionFileV1;
+  readonly codeRestore?: RewindCodeRestoreResult;
+}
+
 export interface TuiBridge {
   readonly hub: SessionHub;
   readonly store: SessionStore;
@@ -180,11 +191,16 @@ export interface TuiBridge {
     conversationId: string,
     opts?: CompactCallerOpts
   ) => Promise<TuiPostResult>;
-  /** Rewind: point the persisted head at an event id (null = empty transcript). */
+  /** Rewind: point the persisted head at an event id (null = empty transcript).
+   *  `restoreCode` additionally writes the abandoned segment's workspace files
+   *  back to their captured preimages before the head moves (ADR-0119); the
+   *  returned report is what went back and what the drift / root-identity guard
+   *  refused, so the TUI can say so instead of assuming. */
   readonly rewindSession: (
     conversationId: string,
-    head: string | null
-  ) => Promise<SessionFileV1>;
+    head: string | null,
+    restoreCode: boolean
+  ) => Promise<TuiRewindOutcome>;
   /** User anchors on the current head chain (skipped branches not listed). */
   readonly listRewindTargets: (
     conversationId: string
@@ -264,6 +280,10 @@ export interface CreateTuiBridgeOptions {
    * by resetSession / hub.shutdown). Absent = no live graph on this entry.
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /** ADR-0036: preimage accumulator shared with the engine built at the TUI
+   *  assembly point. Forwarded to SessionHub so the commit side drains what the
+   *  write tools captured. Absent → the hub builds its own (never fed here). */
+  readonly preimageLedger?: import("../session-api/store/preimage-ledger.js").PreimageLedgerHost;
   /** Denominator for context-usage display (the **strategy budget
    *  window**, tokens). Defaults to `DEFAULT_CONTEXT_WINDOW =
    *  DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000` (ADR-0100). */
@@ -370,6 +390,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     ...(opts.graphAssembly ? { graphAssembly: opts.graphAssembly } : {}),
     // Ledger host injected into the hub — resolved by conversationId.
     ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
+    // ADR-0036: the same preimage accumulator the engine's write tools fill.
+    // Undefined → the hub builds its own (never fed here).
+    preimageLedger: opts.preimageLedger,
     // LLM env override source — the env validated at TUI startup goes to
     // the override path, so rebuilding the adapter there never falls back to
     // process.env.
@@ -516,9 +539,14 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // store.rewindToHead, no file truncation. store.load returns the
     // projection (the authoritative view after closeout self-heal) for TUI
     // rendering.
-    rewindSession: async (conversationId, head) => {
-      await hub.rewindSession(conversationId, head);
-      return store.load(conversationId);
+    rewindSession: async (conversationId, head, restoreCode) => {
+      const { codeRestore } = await hub.rewindSession(
+        conversationId,
+        head,
+        restoreCode
+      );
+      const file = await store.load(conversationId);
+      return codeRestore !== undefined ? { file, codeRestore } : { file };
     },
     listRewindTargets: async (conversationId) => {
       const { targets } = await hub.listRewindTargets(conversationId);

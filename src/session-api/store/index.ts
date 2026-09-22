@@ -57,9 +57,22 @@ export {
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 export {
+  applyCodeRestore,
+  buildCodeRestorePlan,
+  type ApplyCodeRestoreOpts,
+  type CodeRestoreError,
+  type CodeRestoreOp,
+  type CodeRestorePlan,
+  type CodeRestoreReport,
+  type CodeRestoreSkip,
+  type CodeRestoreTranscript,
+} from "./code-preimage.js";
+export {
   appendWorkerTranscript,
   isWorkerTranscriptPathSafe,
+  loadWorkerPreimageEvents,
   loadWorkerTranscript,
+  readWorkerSpawnToolUseId,
   type WorkerTranscriptLocation,
 } from "./worker-transcript.js";
 export { readWorkerInFlightToolName } from "./worker-activity.js";

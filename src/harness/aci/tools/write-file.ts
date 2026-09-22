@@ -23,6 +23,12 @@ import {
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
+import {
+  capturePreimageBeforeWrite,
+  type PreimageCallIds,
+  type PreimageCapture,
+  type PreimageOpts,
+} from "../preimage-port.js";
 
 /**
  * ADR-0084 — typed rejection from the last-read gate (a criterion the model
@@ -67,6 +73,15 @@ export interface WriteFileOpts {
    * the pre-ledger behavior; the gate is a registry-level wiring decision.
    */
   readonly lastReadLedger?: LastReadLedgerHost;
+  /**
+   * Pre-write capture seam (ADR-0036). Present → fired with the current and
+   * incoming bytes just before the write; a throw aborts the write. Absent →
+   * legacy caller / direct factory test keeps the plain write.
+   */
+  readonly preimageCapture?: PreimageCapture;
+  /** Project identity root the captured `relPath` is meaningful under;
+   *  defaults to the live task root the write resolved against. */
+  readonly rootIdentity?: string;
 }
 
 const TOOL_NAME = "write_file";
@@ -236,12 +251,18 @@ export function createWriteFileTool(
     // file → empty string. A read failure never blocks the write (the write
     // is the main path); it only degrades oldContent to empty, keeping the
     // existing rejection semantics (missing parent / symlink escape)
-    // untouched — containment has already passed at this point.
+    // untouched — containment has already passed at this point. The one read
+    // outcome that IS information: ENOENT proves the path is being created —
+    // absence evidence for the preimage ref, which the empty bytes alone
+    // cannot give (an existing empty file reads the same). Any other failure
+    // leaves the state unknown → no absence claim (ADR-0121).
     let oldContent = "";
+    let absentBefore = false;
     try {
       oldContent = await readFile(target, "utf8");
-    } catch {
+    } catch (error) {
       oldContent = "";
+      absentBefore = (error as NodeJS.ErrnoException).code === "ENOENT";
     }
 
     // ADR-0084 last-read gate: target exists with size>0 and is absent from
@@ -255,7 +276,10 @@ export function createWriteFileTool(
     return commitWrite(target, params, {
       rootAtCall,
       oldContent,
+      absentBefore,
       sessionTmpRoot,
+      preimageOpts: opts,
+      callCtx: ctx,
     });
   };
 
@@ -296,9 +320,19 @@ async function commitWrite(
   ctx: {
     readonly rootAtCall: string;
     readonly oldContent: string;
+    readonly absentBefore: boolean;
     readonly sessionTmpRoot: string | undefined;
+    readonly preimageOpts: PreimageOpts | undefined;
+    readonly callCtx: PreimageCallIds | undefined;
   }
 ): Promise<unknown> {
+  await capturePreimageBeforeWrite(ctx.preimageOpts, ctx.callCtx, {
+    rootAtCall: ctx.rootAtCall,
+    absPath: target,
+    preBytes: ctx.oldContent,
+    postBytes: params.content,
+    absentBefore: ctx.absentBefore,
+  });
   try {
     await writeFile(target, params.content, "utf8");
   } catch (error) {

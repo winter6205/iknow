@@ -57,6 +57,8 @@ import {
   resolveProjectSessionDir,
   resolveSubagentTraceDir,
 } from "../session-api/store/session-store.js";
+import { createPreimageCapture } from "../session-api/store/preimage-capture.js";
+import type { PreimageCapture } from "../harness/aci/preimage-port.js";
 import { readWorkerInFlightToolName } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { resolveTasksDir } from "../harness/background/paths.js";
@@ -167,6 +169,10 @@ export interface BuildTuiDepsOptions {
    * change).
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /** ADR-0036: preimage ledger shared with the hub's commit side. The write
+   *  tools fill it via the capture closure built below; the hub drains it when
+   *  appending this session's `tool_result` events. Absent → no capture. */
+  readonly preimageLedger?: import("../session-api/store/preimage-ledger.js").PreimageLedgerHost;
   /** Test seam: userHome override (default homedir()). */
   readonly userHome?: string;
   /** Test seam: cwd override (default process.cwd()). */
@@ -346,6 +352,23 @@ function presentFields<V>(
  * TuiToolEvent. soleInflightId absent/undefined (concurrent sessions) →
  * events suppressed.
  */
+/** ADR-0036: build the pre-write capture seam when the hub shares its ledger
+ *  with this assembly. Absent ledger → `undefined` (no capture). The closure
+ *  writes blobs + records refs the hub drains at commit; Gate B holds because
+ *  deps.ts is host-side and the harness stays clean. */
+function buildTuiPreimageCapture(
+  opts: BuildTuiDepsOptions,
+  projectDir: string
+): PreimageCapture | undefined {
+  const ledger = opts.preimageLedger;
+  if (ledger === undefined) return undefined;
+  return createPreimageCapture({
+    getProjectDir: () => projectDir,
+    ledger,
+    isEnabled: () => opts.settings?.codeRestore?.enabled !== false,
+  });
+}
+
 function wrapTuiHook(opts: BuildTuiDepsOptions): PostToolUseHook {
   return (result) => {
     if (!opts.onToolEvent) return;
@@ -485,6 +508,9 @@ export async function buildTuiDeps(
     worktreeOnMutateHolder: opts.worktreeOnMutateHolder,
     // Live-graph ledger host passthrough (self-built at the TUI assembly point).
     ...(liveGraphLedger ? { liveGraphLedger } : {}),
+    // ADR-0036: pre-write capture seam (undefined when the hub shares no ledger
+    // — buildHarnessEngine forwards it straight to the write tools).
+    preimageCapture: buildTuiPreimageCapture(opts, todoProjectDir),
     // Observability seam: tool summary lines — postToolUse projected into TuiToolEvent.
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
     // Test seams: userHome / cwd overrides (same shape as build-engine's).

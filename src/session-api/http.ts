@@ -635,11 +635,13 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     return true;
   }
   if (method === "POST" && rest === "/rewind") {
-    const head = extractHeadField(await readJsonBody(req));
+    const body = await readJsonBody(req);
+    const head = extractHeadField(body);
+    const restoreCode = extractRestoreCodeField(body);
     sendJson({
       res,
       status: 200,
-      body: await hub.rewindSession(id, head),
+      body: await hub.rewindSession(id, head, restoreCode),
     });
     return true;
   }
@@ -762,6 +764,19 @@ function extractHeadField(raw: unknown): string | null {
     throw new ValidationError("head must be a non-empty event id or null");
   }
   return head;
+}
+
+/** `restoreCode` is opt-in: absent → false. When present it must be a real
+ *  boolean — a truthy string / number is rejected, so a client can never
+ *  accidentally trigger a workspace write with a loosely-typed body. */
+function extractRestoreCodeField(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const value = (raw as Record<string, unknown>).restoreCode;
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new ValidationError("restoreCode must be a boolean when present");
+  }
+  return value;
 }
 
 function extractTextField(raw: unknown): string {
