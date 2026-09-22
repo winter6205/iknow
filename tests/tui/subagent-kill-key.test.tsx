@@ -348,7 +348,10 @@ async function mountRealKillApp(): Promise<{
             {
               id: "spawn-1",
               name: "spawn_subagent",
-              input: { task: "sleep forever", wait: true },
+              // `title` is required on spawn_subagent (card line 1 contract);
+              // a stub without it would be rejected before the worker spawns
+              // and the kill chain under test would never arm.
+              input: { task: "sleep forever", title: "kill test", wait: true },
             },
           ],
         }),
@@ -406,13 +409,11 @@ async function mountRealKillApp(): Promise<{
   };
   await typeText("hi");
   await until(() => events.includes("spawn"), 8000, "spawn 未发生");
-  // specs/tui-subagent-transcript-live.md: the two lines render on the spawn
-  // card (live tail), created by the `tool_call_start` stream event (a real
-  // adapter always emits it per tool_use; this test's stub supplies it via
-  // streamEventsByStep above). Subagent line appearing = the card has joined
-  // the subagent projection, so the Down / Ctrl+X target row is in place.
+  // The stub title appears only on the joined card (the fallback tool line
+  // prints the catalog role), so waiting on it is what proves the two-line
+  // card — and therefore the row Down / Ctrl+X targets — is on screen.
   await until(
-    () => /running\.\.\./.test(setup.captureCharFrame()),
+    () => /kill test/.test(setup.captureCharFrame()),
     8000,
     "子代理两行未出现在 spawn 卡上"
   );

@@ -75,7 +75,10 @@ const toolUseResponse = {
       type: "tool_use",
       id: "call_spawn_subagent",
       name: "spawn_subagent",
-      input: { task: "return a deterministic handoff" },
+      input: {
+        title: "deterministic handoff",
+        task: "return a deterministic handoff",
+      },
     },
   ],
   model: "test-model",

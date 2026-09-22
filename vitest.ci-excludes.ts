@@ -216,9 +216,17 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0084 Slice B SC5: real createWorkerDeps assembly reads project permissions
   // → createDefaultAciRegistry → createBashTool → requireBwrap.
   "tests/subagent/worker-project-permission.test.ts",
+  // ADR-0122 worker model route: asserts what `createWorkerDeps` hands the
+  // child, so it runs through the same assembly chain → requireBwrap (throws
+  // at assembly time on a runner without a user-namespace).
+  "tests/subagent/worker-model-route.test.ts",
   // CLI-side harness / subagent trace assembly
   "tests/cli/tui-deps-subagent-trace-factory.test.ts",
   "tests/cli/chat-subagent-trace.test.ts",
+  // Same assembly chain on the activity-reader seam: buildTuiDeps →
+  // buildHarnessEngine → createDefaultAciRegistry → createBashTool →
+  // requireBwrap, which the guard anchor hits at assembly time.
+  "tests/cli/tui-deps-subagent-activity-reader.test.ts",
   // #406: chat × roundtrip cases have createBashTool really spawn echo to restore placeholders
   // (full excludes only e2e.test.ts; fast excludes the whole directory, see CI_FAST_EXCLUDES).
   "tests/harness/secret-roundtrip/e2e.test.ts",

@@ -1565,6 +1565,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "inspect the repository",
         subagent_type: "explore",
         wait: false,
@@ -1621,6 +1622,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "inspect the repository",
         subagent_type: "explore",
         wait: false,
@@ -1657,6 +1659,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "make the requested change",
         wait: false,
       });
@@ -1687,6 +1690,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "use an unsupported role",
         subagent_type: "not-a-catalog-role",
         wait: false,
@@ -1717,6 +1721,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "write through shell if needed",
         subagent_type: "general-purpose",
         disallowedTools: ["write_file", "edit_file"],
@@ -1751,6 +1756,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => taskRoot },
       });
       const blocked = await runSpawn(mainBuilt, {
+        title: "spawn probe",
         task: "change the repository",
         wait: false,
       });
@@ -1772,6 +1778,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => taskRoot },
       });
       const result = await runSpawn(reboundBuilt, {
+        title: "spawn probe",
         task: "change the repository",
         wait: false,
       });
@@ -1802,6 +1809,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => root },
       });
       const offResult = await runSpawn(offBuilt, {
+        title: "spawn probe",
         task: "preserve the existing path",
         wait: false,
       });
@@ -1816,6 +1824,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         subagentManager: baselineManager.manager,
       });
       const baselineResult = await runSpawn(baselineBuilt, {
+        title: "spawn probe",
         task: "preserve the existing path",
         wait: false,
       });
@@ -1865,7 +1874,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
 
       const result = await runSpawn(
         built,
-        { task: "share the ledger", wait: false },
+        { title: "ledger probe", task: "share the ledger", wait: false },
         "conv-sc9-parent"
       );
       expect(result.kind).toBe("ok");
@@ -1897,7 +1906,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
 
       const result = await runSpawn(
         built,
-        { task: "no ledger", wait: false },
+        { title: "no ledger probe", task: "no ledger", wait: false },
         "conv-sc9-parent"
       );
       expect(result.kind).toBe("ok");

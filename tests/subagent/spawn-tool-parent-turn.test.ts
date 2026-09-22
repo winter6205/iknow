@@ -35,7 +35,7 @@ describe("spawn_subagent — ctx.turnId → def.parentTurnId", () => {
     const tool = createSpawnSubAgentTool({ manager: m.manager });
 
     await tool.handler(
-      { task: "explore" },
+      { title: "sample title", task: "explore" },
       { conversationId: "conv-1", turnId: "turn-7" }
     );
 
@@ -47,7 +47,10 @@ describe("spawn_subagent — ctx.turnId → def.parentTurnId", () => {
     const m = recordingManager();
     const tool = createSpawnSubAgentTool({ manager: m.manager });
 
-    await tool.handler({ task: "explore" }, { conversationId: "conv-1" });
+    await tool.handler(
+      { title: "sample title", task: "explore" },
+      { conversationId: "conv-1" }
+    );
 
     assert.ok(!("parentTurnId" in m.spawned[0]!));
   });

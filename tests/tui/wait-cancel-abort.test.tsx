@@ -144,7 +144,10 @@ async function mountWaitingApp(): Promise<WaitingApp> {
             {
               id: "spawn-1",
               name: "spawn_subagent",
-              input: { task: "sleep forever", wait: true },
+              // `title` is required on spawn_subagent (card line 1 contract);
+              // a stub without it would be rejected before the worker spawns
+              // and the abort chain under test would never arm.
+              input: { task: "sleep forever", title: "wait test", wait: true },
             },
           ],
         }),

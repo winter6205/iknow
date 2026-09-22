@@ -142,6 +142,7 @@ import {
 import {
   createSubAgentManager,
   type SubAgentManager,
+  type SubagentActivityReader,
 } from "./subagent/manager.js";
 import { assessSubagentIsolation } from "./subagent/capability.js";
 import type { SkillIndexSnapshotEntry } from "./subagent/envelope.js";
@@ -312,6 +313,16 @@ export type BuildEngineOpts = {
   readonly projectDir?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   readonly subagentDiagnosticsDir?: string;
+  /**
+   * Read-only activity projection reader for the subagent list: the name of
+   * the tool each live worker is executing right now
+   * (`SubagentInfo.inFlightTool`). The worker ledger is a store-layer artifact
+   * and the harness may not import it, so the host that owns the codec
+   * injects an opaque reader here and build-engine only threads it into
+   * `createSubAgentManager({ readInFlightTool })`. Absent → the field never
+   * appears on the list (byte-stable for every other caller).
+   */
+  readonly subagentActivityReader?: SubagentActivityReader;
   /** TUI tool-summary observation hook, passed to createAciExecutor (chat/serve omit → zero change). */
   readonly hooks?: PostToolUseHook;
   /** Test seam: settings object override (production default → loadIknowSettings({ cwd })).
@@ -1068,6 +1079,9 @@ export async function buildHarnessEngine(
             rescanner: skillRescanner,
             readSeam: () => skillIndexSeam,
           }),
+          // Opaque pass-through: the ledger codec lives in the store layer,
+          // which the harness may not import.
+          readInFlightTool: opts.subagentActivityReader,
         }))
       : undefined;
   // bash background-task manager — conditional assembly (surface !== "ask"):

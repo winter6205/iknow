@@ -104,6 +104,7 @@ describe("spawn_subagent × 用户角色目录", () => {
       }),
     });
     await tool.handler({
+      title: "review pass",
       task: "review the diff",
       subagent_type: "reviewer",
       disallowedTools: ["web_search"],

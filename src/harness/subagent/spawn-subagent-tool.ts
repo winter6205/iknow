@@ -32,6 +32,9 @@
  * Error shapes:
  *   - input validation failure → synchronous `ToolExecutionError`
  *     (executor → execution_failed);
+ *   - `title` missing / blank / longer than `SPAWN_TITLE_MAX_LENGTH` after
+ *     trim → `ToolExecutionError`
+ *     raised before the capacity and sandbox checks, so no worker starts;
  *   - `background:true` rejected in v1 → `ToolExecutionError`;
  *   - concurrency over capacity (`SubAgentCapacityError` from
  *     manager.spawn) → `ToolExecutionError` carrying capacity + active/limit;
@@ -308,6 +311,35 @@ export function foregroundDrainExclusion(wait: boolean): {
   return wait ? { excludeFromHostDrain: true } : {};
 }
 
+/**
+ * Ceiling for the operator-facing `title` (spec subagent-card-title SC1):
+ * JavaScript string length measured after trim, because the card renders one
+ * clipped line. Exported so the boundary tests read the number from here
+ * instead of restating it.
+ */
+export const SPAWN_TITLE_MAX_LENGTH = 80;
+
+/**
+ * Validate the required `title` input, throwing `ToolExecutionError` on every
+ * reject the spec names (missing / non-string / empty after trim / longer than
+ * SPAWN_TITLE_MAX_LENGTH after trim). The handler calls it before the capacity
+ * and sandbox checks, so a bad title never leaves a worker running. Lives at
+ * module level because the handler sits at its s5-complexity ratchet baseline.
+ *
+ * Returns the trimmed label for the spawn record; the tool itself never
+ * rewrites `tool_use.input`.
+ */
+function assertValidSpawnTitle(raw: unknown): string {
+  const title = typeof raw === "string" ? raw.trim() : "";
+  if (title.length === 0 || title.length > SPAWN_TITLE_MAX_LENGTH) {
+    throw new ToolExecutionError(
+      "spawn_subagent: missing or invalid `title` (a short operator-facing " +
+        `label, 1-${SPAWN_TITLE_MAX_LENGTH} characters after trim)`
+    );
+  }
+  return title;
+}
+
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
@@ -375,7 +407,15 @@ export function createSpawnSubAgentTool(
       properties: {
         task: {
           type: "string",
-          description: "Task description for the sub-agent.",
+          description:
+            "The assignment the worker receives: what it must do, on its own, from context it can read.",
+        },
+        title: {
+          type: "string",
+          // No schema `maxLength` on purpose: the ceiling is measured after
+          // trim, and a schema bound would reject a padded-but-short title as
+          // an input-validation failure before the handler can tell.
+          description: `Short title for the operator, a few words (up to ${SPAWN_TITLE_MAX_LENGTH} characters after trim) — the label the spawn card shows. The task body stays in \`task\`.`,
         },
         subagent_type: {
           type: "string",
@@ -430,7 +470,7 @@ export function createSpawnSubAgentTool(
             "Optional (#357 T1): restrict the sub-agent to this directory. Must be a path inside the parent sandbox root (realpath-resolved, symlinks must point inside parent). Out-of-range or non-existent paths are rejected before any spawn occurs.",
         },
       },
-      required: ["task"],
+      required: ["task", "title"],
       additionalProperties: false,
     },
     aci: {
@@ -451,6 +491,9 @@ export function createSpawnSubAgentTool(
           "spawn_subagent: missing or invalid `task`"
         );
       }
+      // Required on the same defensive contract as `task` (a direct or
+      // programmatic call bypasses ajv).
+      const title = assertValidSpawnTitle(obj.title);
       // v1 rejects background:true.
       if (obj.background === true) {
         throw new ToolExecutionError("background:true not implemented in v1");
@@ -530,6 +573,7 @@ export function createSpawnSubAgentTool(
       // consumption point.
       const def: SubAgentDefinition = {
         task,
+        title,
         // terminal notices must be attributable to the session that
         // spawned the worker so a TUI session cannot wake another one.
         ...(ctx?.conversationId !== undefined

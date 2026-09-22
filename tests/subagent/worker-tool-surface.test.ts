@@ -479,6 +479,7 @@ describe("worker tool surface: T3 catalog deny contract", () => {
 
       const tool = createSpawnSubAgentTool({ manager });
       await tool.handler({
+        title: "explore only",
         task: "explore-only",
         subagent_type: "explore",
         wait: false,

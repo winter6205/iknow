@@ -42,6 +42,7 @@ import {
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
 import type { SubagentCardLines } from "./subagent-message-lines.js";
+import { settledSpawnCardFromBlock } from "./subagent-message-lines.js";
 import { SubagentCardView } from "./subagent-card-view.js";
 import {
   deriveSlot,
@@ -448,6 +449,29 @@ function resolveToolUsePreviews(
   return { preview, resultPreview, hasPreviewContent };
 }
 
+/**
+ * The two lines this spawn card draws. The live list wins while it describes
+ * the worker; a settled spawn the list does not know is a reopened session, and
+ * the card then falls back to the durable title in the block's own input rather
+ * than losing its two lines.
+ */
+function resolveSpawnCard(args: {
+  readonly block: ToolUseBlock;
+  readonly cards?: ReadonlyMap<string, SubagentCardLines>;
+  readonly settled: boolean;
+  readonly cols: number;
+}): SubagentCardLines | null {
+  return (
+    args.cards?.get(args.block.id) ??
+    settledSpawnCardFromBlock({
+      name: args.block.name,
+      input: args.block.input,
+      settled: args.settled,
+      cols: args.cols,
+    })
+  );
+}
+
 function renderToolUseBlock(args: {
   readonly block: ToolUseBlock;
   readonly statusMap: ReadonlyMap<string, boolean>;
@@ -461,9 +485,14 @@ function renderToolUseBlock(args: {
   const { block, statusMap, resultTextMap, innerCols } = args;
   const view = resolveToolUseView(block, statusMap, resultTextMap, innerCols);
   if (view === null) return null;
-  const card = args.subagentCards?.get(block.id);
+  const card = resolveSpawnCard({
+    block,
+    cards: args.subagentCards,
+    settled: statusMap.has(block.id),
+    cols: innerCols,
+  });
   const failed = statusMap.get(block.id) === true;
-  if (card !== undefined && !failed) {
+  if (card !== null && !failed) {
     return (
       <box flexDirection="column">
         <SubagentCardView card={card} />
@@ -626,9 +655,9 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
    *  (unpaired results are not rendered). */
   readonly resultTextMap?: ReadonlyMap<string, string>;
   /** toolUseId → two-line subagent card projection (produced by
-   *  `subagentCardLinesMap`). Hit and not failed → the spawn card renders
-   *  `{role} running...` + a dim summary, with a green `✓ Done` under the
-   *  completed summary; absent → byte-identical to before. */
+   *  `subagentCardLinesMap`). Hit and not failed → the spawn card renders its
+   *  title + the activity slot (dim in-flight tool name, green `✓ Done` once
+   *  completed); absent → byte-identical to before. */
   readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded?: boolean;
   /** Folded thinking lines carry `Thought for <N>s`. Passed only for the last

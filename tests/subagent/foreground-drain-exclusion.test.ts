@@ -99,7 +99,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
   it("wait:true 终态后：tool_result 是唯一交付面 —— drainCompleted 空返且 mailbox 无 notice", async () => {
     const rig = makeRig();
     const pending = rig.tool.handler(
-      { task: "fg", wait: true },
+      { title: "sample title", task: "fg", wait: true },
       { conversationId: CONVERSATION }
     );
     // The handler has spawned and is parked on waitFor (fake child never exits; only the stdout envelope ends it).
@@ -131,7 +131,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
   it("regression wait:false：仍发布 mailbox notice 且仍被 drainCompleted 收走", async () => {
     const rig = makeRig();
     const raw = await rig.tool.handler(
-      { task: "bg", wait: false },
+      { title: "sample title", task: "bg", wait: false },
       { conversationId: CONVERSATION }
     );
     // The wait:false arm's tool_result is a {task_id} JSON string (async arm, non-blocking).
@@ -173,14 +173,14 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
   it("listSubagents：fg 任务带 conversationId + foreground:true；bg 任务 foreground 缺席", async () => {
     const rig = makeRig();
     const pending = rig.tool.handler(
-      { task: "fg", wait: true },
+      { title: "sample title", task: "fg", wait: true },
       { conversationId: CONVERSATION }
     );
     await vi.waitFor(() => expect(rig.children).toHaveLength(1));
     emitEnvelope(rig.children[0]!, "fg done");
     await pending;
     await rig.tool.handler(
-      { task: "bg", wait: false },
+      { title: "sample title", task: "bg", wait: false },
       { conversationId: CONVERSATION }
     );
     emitEnvelope(rig.children[1]!, "bg done");

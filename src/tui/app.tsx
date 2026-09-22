@@ -2740,7 +2740,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // Subagent-tool symmetry — ContextBar must not carry a subagent suffix (pinned
   // by acceptance). For subagent tools (spawn_subagent /
   // subagent_result) activeToolName → undefined; subagent status is expressed
-  // by the two lines on the spawn card (`{role} running...` + preview / done)
+  // by the two lines on the spawn card (title + activity slot)
   // + SubagentPanel (the task list below the input box). Regular tools keep
   // their activeToolName; when absent it stays undefined.
   const activeToolLabel =

@@ -133,7 +133,11 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
             {
               id: "call-spawn-1",
               name: "spawn_subagent",
-              input: { task: "echo hello", wait: false },
+              input: {
+                title: "echo hello",
+                task: "echo hello",
+                wait: false,
+              },
             },
           ],
         }),

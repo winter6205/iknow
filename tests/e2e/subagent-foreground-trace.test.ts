@@ -134,7 +134,11 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
             {
               id: "call-spawn-1",
               name: "spawn_subagent",
-              input: { task: "echo hello", wait: false },
+              input: {
+                title: "echo hello",
+                task: "echo hello",
+                wait: false,
+              },
             },
           ],
         }),
@@ -230,7 +234,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
             {
               id: "call-spawn-2",
               name: "spawn_subagent",
-              input: { task: "explore", wait: false },
+              input: { title: "explore repo", task: "explore", wait: false },
             },
           ],
         }),
