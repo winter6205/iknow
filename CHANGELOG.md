@@ -609,6 +609,21 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   forbidden chars/4 estimate is still out of the decision), the adapter still projects
   exactly what it is given (ADR-0112), and the threshold plus eviction order are unchanged.
 
+- **TUI startup printed 42 lines of false settings warnings (2026-09-22)**: launching
+  the TUI with `$HOME` as the entry directory printed one
+  `[settings] project settings key "X" ignored (not in project allowlist)` line per
+  non-allowlist key, once per settings load — measured 42 lines in one startup (7 keys ×
+  6 loads), 119 on the `ask` entry. They were false: `~/.iknow/settings.json` and
+  `<cwd>/.iknow/settings.json` were the _same file_, which keeps feeding both layers
+  exactly as before (the entry directory is a workspace scope of its own), so nothing left
+  the merged result (the sibling `user settings key "permissions" ignored` claim was
+  backwards too, since `permissions` takes effect through that very project layer). The
+  warning text is now suppressed when the two paths name one file — including when `$HOME`
+  is reached through a symlink — and repeated identical facts are deduplicated on the
+  default sink, keyed by a per-file change signal so an edit re-arms them. The allowlist
+  filter still discards the same keys, and an injected warning channel still receives every
+  message. Merge output is byte-identical in all cases. ADR-0084 amendment.
+
 - **TUI silence notice no longer misfires during tool execution; copy moved to English (2026-09-17)**:
   the "~20s with no new stream bytes" waiting notice reset only on stream events,
   but the harness deliberately emits none while a tool runs (long bash commands,

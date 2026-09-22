@@ -23,7 +23,7 @@
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowSettings } from "../../src/config/settings.ts";
@@ -1729,5 +1729,172 @@ describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 
     assert.ok(Object.isFrozen(s.permissions));
     assert.ok(Object.isFrozen(s.permissions!.allow));
     assert.ok(Object.isFrozen(s.permissions!.deny));
+  });
+
+  it("cwd === home（同一文件兼任两层）→ 零警告，且 permissions 照样生效", async () => {
+    // The entry directory is a workspace in its own right — ADR-0019 D1.1 makes the launch
+    // directory the per-root state anchor, ADR-0088 keeps project settings in its `.iknow` —
+    // so both layers read one file here. That file still feeds the project layer, so
+    // `permissions` does take effect and the user's own keys are not dropped: both "ignored"
+    // wordings contradict the merge and must stay silent. Merge semantics unchanged.
+    const home = join(
+      workDir,
+      "same-file",
+      Math.random().toString(36).slice(2)
+    );
+    await mkdir(join(home, ".iknow"), { recursive: true });
+    await writeFile(
+      join(home, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "m" },
+        permissions: { allow: ["Bash(echo:*)"] },
+      })
+    );
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd: home, onWarn: (m) => warnings.push(m) }),
+      { llm: { model: "m" }, permissions: { allow: ["Bash(echo:*)"] } }
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  it("$HOME 经 symlink 可达（同一文件的两种路径写法）→ 同样零警告", async () => {
+    const rand = Math.random().toString(36).slice(2);
+    const real = join(workDir, "symlink-home", rand, "real");
+    const link = join(workDir, "symlink-home", rand, "link");
+    await mkdir(join(real, ".iknow"), { recursive: true });
+    await writeFile(
+      join(real, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "m" },
+        permissions: { allow: ["Bash(echo:*)"] },
+      })
+    );
+    await symlink(real, link);
+    const merged = {
+      llm: { model: "m" },
+      permissions: { allow: ["Bash(echo:*)"] },
+    };
+    // $HOME from the environment and process.cwd() from getcwd() can name the same
+    // directory through a link and through the physical path, so the one-file check must
+    // ask the filesystem, not the path text; both directions are the same real startup.
+    for (const pair of [
+      { home: link, cwd: real },
+      { home: real, cwd: link },
+    ]) {
+      const warnings: string[] = [];
+      assert.deepEqual(
+        loadIknowSettings({ ...pair, onWarn: (m) => warnings.push(m) }),
+        merged,
+        `home/cwd=${JSON.stringify(pair)}`
+      );
+      assert.deepEqual(warnings, [], `link 层路径应视为同一文件: ${pair.home}`);
+    }
+  });
+
+  it("cwd !== home → 同一份内容的两类警告一字不少（allowlist 契约未松动）", async () => {
+    const section = {
+      llm: { model: "m" },
+      permissions: { allow: ["Bash(echo:*)"] },
+    };
+    const { home, cwd } = await makeSettings(section, section);
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      section
+    );
+    assert.equal(warnings.length, 2);
+    assert.ok(
+      warnings.some((m) => /user settings key "permissions"/.test(m)),
+      `缺 user 层 permissions 警告：${warnings.join(" | ")}`
+    );
+    assert.ok(
+      warnings.some((m) => /project settings key "llm"/.test(m)),
+      `缺 project 层 llm 警告：${warnings.join(" | ")}`
+    );
+  });
+
+  it("默认通道按文件去重（同一句话一次启动只印一次），注入 onWarn 仍逐条收到", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { llm: { model: "p" }, isolation: { worktreeOnMutate: true } }
+    );
+    const original = console.warn;
+    const captured: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      captured.push(args);
+    };
+    try {
+      // 真实启动路径上 loadIknowSettings 会被多个入口点反复调用，去重只在默认出口做。
+      loadIknowSettings({ home, cwd });
+      loadIknowSettings({ home, cwd });
+    } finally {
+      console.warn = original;
+    }
+    assert.equal(
+      captured.length,
+      2,
+      `默认通道应各印一次：${JSON.stringify(captured)}`
+    );
+    assert.equal(
+      captured.filter((a) => String(a[0]).includes('"llm"')).length,
+      1
+    );
+    assert.equal(
+      captured.filter((a) => String(a[0]).includes('"isolation"')).length,
+      1
+    );
+
+    const warnings: string[] = [];
+    for (let i = 0; i < 2; i++)
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) });
+    const llmWarn =
+      '[settings] project settings key "llm" ignored (not in project allowlist)';
+    const isolationWarn =
+      '[settings] project settings key "isolation" ignored (not in project allowlist)';
+    assert.deepEqual(warnings, [
+      llmWarn,
+      isolationWarn,
+      llmWarn,
+      isolationWarn,
+    ]);
+  });
+
+  it("默认通道去重在设置文件变更后重新武装（长驻进程不静音新状态）", async () => {
+    // The dedup set outlives one startup, so in `iknow serve` (or anything reloading
+    // settings) a later edit must re-arm it: after the file changed, the printed set has to
+    // describe the CURRENT content again, and an unchanged file must stay deduplicated.
+    const { home, cwd } = await makeSettings({}, { llm: { model: "p" } });
+    const original = console.warn;
+    const captured: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      captured.push(args);
+    };
+    try {
+      loadIknowSettings({ home, cwd });
+      await writeFile(
+        join(cwd, ".iknow", "settings.json"),
+        JSON.stringify({
+          llm: { model: "p" },
+          isolation: { worktreeOnMutate: true },
+        })
+      );
+      loadIknowSettings({ home, cwd });
+      loadIknowSettings({ home, cwd });
+    } finally {
+      console.warn = original;
+    }
+    const count = (key: string) =>
+      captured.filter((a) => String(a[0]).includes(`"${key}"`)).length;
+    assert.equal(
+      count("llm"),
+      2,
+      `文件变更后 "llm" 应重新上报一次：${JSON.stringify(captured)}`
+    );
+    assert.equal(
+      count("isolation"),
+      1,
+      `未再变更的文件不应重复刷屏：${JSON.stringify(captured)}`
+    );
   });
 });
