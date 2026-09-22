@@ -2903,6 +2903,18 @@ export class SessionHub {
    *  the transcript never advances past history whose code we could not put
    *  back. Drift and root-identity mismatches are reported skips.
    *
+   *  The write target is the LIVE taskRoot, never the session file's
+   *  `workspaceRoot` (ADR-0121: "Restore into the session file's
+   *  workspaceRoot: Rejected"). The hub-side live value is the dirty-root
+   *  record: `markWorktreeRootDirty` runs on every successful
+   *  provision/enter/exit seam — the same seam resolution that moves the
+   *  engine's `LiveTaskRoot` cell — and the record is cleared only once
+   *  conditionalSave has persisted the new root. So while the record is
+   *  present the file's root is stale and writes must follow the record;
+   *  absent, the persisted root IS the live root. `rootIdentity` is derived
+   *  from the same live value (`rootIdentityFor(live)`), and `relPath` in
+   *  every op is measured from it.
+   *
    *  The abandoned set spans two ledgers (ADR-0121): the parent's own
    *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
    *  in the abandoned segment — a worker edit is the parent's abandoned
@@ -2922,13 +2934,15 @@ export class SessionHub {
     );
     const ops = buildCodeRestorePlan([...abandoned, ...workerEvents]);
     const { workspaceRoot } = await this.store.load(conversationId);
+    const liveRoot =
+      this.dirtyWorktreeRoots.get(conversationId) ?? workspaceRoot;
     return applyCodeRestore({
       sessionFolder: resolveConversationDir({
         projectDir: this.store.getProjectDir(),
         conversationId,
       }),
-      taskRoot: workspaceRoot ?? "",
-      rootIdentity: this.rootIdentityFor(workspaceRoot),
+      taskRoot: liveRoot ?? "",
+      rootIdentity: this.rootIdentityFor(liveRoot),
       ops,
     });
   }
