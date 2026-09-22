@@ -70,36 +70,34 @@ export function createPreimageLedger(): PreimageLedgerHost {
   return Object.freeze(host);
 }
 
-/**
- * Commit-side drain: consume exactly the refs whose `tool_use_id` appears in
- * this batch's `tool_result` blocks, but return only what the per-event stamp
- * can actually land — the FIRST captured, non-`is_error` match of each event,
- * selected with `matchCodePreimageId`, the same rule the append side stamps
- * with. A consumed ref that cannot land (a parallel write's second ref in one
- * event, a ref whose tool then errored) is handed to `onUnstampable` — never
- * dropped silently, because it will never be stampable again: ids are unique
- * per call. Shared by every ledger owner (parent hub, worker transcript) so
- * the drains cannot drift apart. Undefined when nothing stampable is pending
- * for the batch — the caller then appends without the `preimages` key,
- * byte-identical to the pre-capture shape.
- */
-export function drainPreimageRefs(
-  ledger: PreimageLedgerHost | undefined,
-  key: string,
-  events: ReadonlyArray<AnthropicNativeMessage>,
-  onUnstampable?: (unstamped: ReadonlyMap<string, PreimageRef>) => void
-): ReadonlyMap<string, PreimageRef> | undefined {
-  if (ledger === undefined) return undefined;
-  const toolUseIds: string[] = [];
+/** The `tool_use_id`s this batch's events carry, in block order — the ids the
+ *  drain may consume. `is_error` results are collected too: the ledger only
+ *  holds ids that were captured, and a captured-but-errored ref simply fails
+ *  the stampable split below (reported, never stamped). */
+function batchToolResultIds(
+  events: ReadonlyArray<AnthropicNativeMessage>
+): string[] {
+  const ids: string[] = [];
   for (const message of events) {
     if (!Array.isArray(message.content)) continue;
     for (const block of message.content) {
-      if (block.type === "tool_result") toolUseIds.push(block.tool_use_id);
+      if (block.type === "tool_result") ids.push(block.tool_use_id);
     }
   }
-  if (toolUseIds.length === 0) return undefined;
-  const consumed = ledger.consume(key, toolUseIds);
-  if (consumed.size === 0) return undefined;
+  return ids;
+}
+
+/** Split consumed refs by what the per-event stamp can actually land: each
+ *  event yields at most one ref (`matchCodePreimageId`'s first-capture rule —
+ *  the exact rule the append side stamps with), so a parallel double-write's
+ *  second ref in one event has no stampable home and lands on `unstamped`. */
+function partitionStampable(
+  events: ReadonlyArray<AnthropicNativeMessage>,
+  consumed: ReadonlyMap<string, PreimageRef>
+): {
+  stampable: Map<string, PreimageRef>;
+  unstamped: Map<string, PreimageRef>;
+} {
   const stampable = new Map<string, PreimageRef>();
   for (const message of events) {
     if (!Array.isArray(message.content)) continue;
@@ -108,12 +106,35 @@ export function drainPreimageRefs(
       stampable.set(id, consumed.get(id)!);
     }
   }
-  if (stampable.size < consumed.size) {
-    const unstamped = new Map(
-      [...consumed].filter(([id]) => !stampable.has(id))
-    );
-    onUnstampable?.(unstamped);
-  }
+  const unstamped = new Map([...consumed].filter(([id]) => !stampable.has(id)));
+  return { stampable, unstamped };
+}
+
+/**
+ * Commit-side drain: consume exactly the refs whose `tool_use_id` appears in
+ * this batch's `tool_result` blocks, but return only what the per-event stamp
+ * can actually land — the same `matchCodePreimageId` rule the append side
+ * stamps with. A consumed ref that cannot land (a parallel write's second ref
+ * in one event, a ref whose tool then errored) is handed to `onUnstampable` —
+ * never dropped silently, because it will never be stampable again: ids are
+ * unique per call. Shared by every ledger owner (parent hub, worker
+ * transcript) so the drains cannot drift apart. Undefined when nothing
+ * stampable is pending for the batch — the caller then appends without the
+ * `preimages` key, byte-identical to the pre-capture shape.
+ */
+export function drainPreimageRefs(
+  ledger: PreimageLedgerHost | undefined,
+  key: string,
+  events: ReadonlyArray<AnthropicNativeMessage>,
+  onUnstampable?: (unstamped: ReadonlyMap<string, PreimageRef>) => void
+): ReadonlyMap<string, PreimageRef> | undefined {
+  if (ledger === undefined) return undefined;
+  const toolUseIds = batchToolResultIds(events);
+  if (toolUseIds.length === 0) return undefined;
+  const consumed = ledger.consume(key, toolUseIds);
+  if (consumed.size === 0) return undefined;
+  const { stampable, unstamped } = partitionStampable(events, consumed);
+  if (unstamped.size > 0) onUnstampable?.(unstamped);
   return stampable.size > 0 ? stampable : undefined;
 }
 

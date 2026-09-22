@@ -22,7 +22,7 @@ import {
   isCodeSnapshotSha,
   readCodeSnapshot,
 } from "./code-snapshot-store.js";
-import type { SessionEventRecord } from "./jsonl.js";
+import type { PreimageRef, SessionEventRecord } from "./jsonl.js";
 
 /** One path's inverse op: put `restoreSha` bytes back at `relPath`, but only
  *  when the file currently equals `expectedPostimageSha` (this path's last
@@ -112,6 +112,21 @@ interface FoldEntry {
  * identity names no project, and the apply guard would then pass for any
  * equally-empty live root, writing relative to the process CWD.
  */
+/** Whether the transcript-supplied locators of a ref can address it at all: a
+ *  path that stays inside the root, blob names that are sha256 hex, and a
+ *  non-empty root identity. An empty identity names no project — its apply
+ *  guard could only match an equally-empty live root, so keeping such a ref
+ *  would let a session with no locatable root write/delete relative to the
+ *  process CWD. */
+function isUsableRef(ref: PreimageRef): boolean {
+  return (
+    isSafeRelPath(ref.relPath) &&
+    isCodeSnapshotSha(ref.preimageSha) &&
+    isCodeSnapshotSha(ref.postimageSha) &&
+    ref.rootIdentity.length > 0
+  );
+}
+
 export function buildCodeRestorePlan(
   transcripts: ReadonlyArray<CodeRestoreTranscript>
 ): CodeRestorePlan {
@@ -120,15 +135,7 @@ export function buildCodeRestorePlan(
   for (const group of transcripts) {
     for (const event of group.events) {
       const ref = event.codePreimage;
-      if (ref === undefined) continue;
-      if (
-        !isSafeRelPath(ref.relPath) ||
-        !isCodeSnapshotSha(ref.preimageSha) ||
-        !isCodeSnapshotSha(ref.postimageSha) ||
-        ref.rootIdentity.length === 0
-      ) {
-        continue;
-      }
+      if (ref === undefined || !isUsableRef(ref)) continue;
       const key = `${ref.rootIdentity}\u0000${ref.relPath}`;
       const existing = byPath.get(key);
       if (existing === undefined) {
