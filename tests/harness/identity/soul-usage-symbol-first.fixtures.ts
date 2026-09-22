@@ -9,14 +9,14 @@
 // .fixtures.ts and aci/tools/worktree-tool-names.fixtures.ts.
 
 export type SoulUsageCase = {
-  id: string,
-  title: string,
-  userPrompt: string,
-  spec: string,
+  id: string;
+  title: string;
+  userPrompt: string;
+  spec: string;
   // Documentation of the canonical route; the verdict itself is surface
   // membership (see soulUsageDecidingToolIndex), not this single name.
-  expectedFirstTool: string,
-  toleratedPreludeTools: readonly string[],
+  expectedFirstTool: string;
+  toleratedPreludeTools: readonly string[];
 };
 
 export const FORBIDDEN_PROMPT_TOKENS = [
@@ -66,8 +66,8 @@ export const ROLE_SUBSTITUTION_PREFIX = "[role_substitution]";
 // A refusal-tagged role-substitution attempt is enforcement success, not a
 // decision, so the verdict needs to know per dispatch whether it was refused.
 export type SoulUsageDispatch = {
-  readonly name: string,
-  readonly refused: boolean,
+  readonly name: string;
+  readonly refused: boolean;
 };
 
 // ADR-0117 reading: the case is decided by its first EFFECTIVE dispatch — the
@@ -79,13 +79,34 @@ export type SoulUsageDispatch = {
 // model substituted the wrong means and no case is decided (undefined).
 // Refused dispatches before the deciding one are skipped. `-1` when no
 // effective dispatch exists at all (all refused or all tolerated).
+//
+// Only the DECISIVE_MEANS above can decide a case, and the list is closed on
+// purpose: the two gate-governed arms plus the symbol surface. Everything else
+// (read_file, glob, memory_recall, …) is orientation — ADR-0117 keeps line-window
+// reads and name matching legal, so letting them decide would have this witness
+// invent a substitution the gate never claims. Real-model variance proved it: a
+// run that opened with memory_recall + reading the ADR itself before taking
+// find_symbol was scored as a routing failure. A trajectory that only orients
+// and never reaches the surface still fails, through the -1 branch.
+const DECISIVE_MEANS: readonly string[] = [
+  ...SYMBOL_QUERY_SURFACE,
+  "bash",
+  "grep",
+];
+
 export function soulUsageDecidingToolIndex(
   dispatches: readonly SoulUsageDispatch[],
-  toleratedPreludeTools: readonly string[],
+  toleratedPreludeTools: readonly string[]
 ): number | undefined {
   for (let index = 0; index < dispatches.length; index += 1) {
     const dispatch = dispatches[index] as SoulUsageDispatch;
-    if (dispatch.refused || toleratedPreludeTools.includes(dispatch.name)) continue;
+    if (
+      dispatch.refused ||
+      toleratedPreludeTools.includes(dispatch.name) ||
+      !DECISIVE_MEANS.includes(dispatch.name)
+    ) {
+      continue;
+    }
     return (SYMBOL_QUERY_SURFACE as readonly string[]).includes(dispatch.name)
       ? index
       : undefined;

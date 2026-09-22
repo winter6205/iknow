@@ -25,9 +25,9 @@ Status: accepted
 
 **正面 / Applied:** 能力面与 usage 三类回退对齐；bash 不再是搜代码的合法逃生口。  
 **负面 / Trade-offs:** 关键字形（`class Foo`）在源码里当字符串搜、且本会话尚无符号工具轨迹时会被拒；对照树 B 量化误伤，比完不留第二政策。  
-**实测（#1089 采样，真实模型 31 次；`npm run probe:role-substitution:sampling`，`--report` 只重算不落模型）:** bash 段首 grep 族 11/11 被拒，正文面误伤 0；结构问题到达符号面 TS 臂 10/10、py/go 臂 9/11——旁落那 2 次都是先 `glob` 再走行窗读，属接受面不属违规。换行段与下表各口即此 11/11 的余量来源，故登记而不加启发式。  
+**实测（#1089 采样，真实模型 31 次）:** 逐轮原始 trace 随本 ADR 一起提交在 `docs/evidence/adr-0117/`，`npm run probe:role-substitution:sampling -- --report` 零模型开销即可复算（`--assert-routing` 让路由地板参与 exit code）。结果：bash 段首 grep 族 11/11 被拒，正文面误伤 0；结构问题到达符号面 TS 臂 10/10、py/go 臂 9/11——旁落那 2 次都是先 `glob` 再走行窗读，属接受面不属违规。换行段与下表各口即此 11/11 的余量来源，故登记而不加启发式。真模型半边在 `real-llm/`（tracked，clone 可跑），不放在 gitignored 的 `archive/`。  
 **接受面（登记，不在本政策加启发式堵）：**
 
 - bash：只查段首 token，且段边界用 `splitShellSegments` 的 `;` / `&&` / `||` / `|`——**换行不算本闸的段边界**（与 ADR-0068 危险扫描那道墙的按行分岔语义不同，两道墙各用各的），故 `printf x\ngrep …` 一类换行后置的 grep 可穿过；`git grep` 放行；`find … | xargs grep`、`$(which grep)` 一类间接调用可穿过。
-- ACI grep：未锚定 ident+`(`；表外定义关键字（如 Go `func`、Rust `fn`）在未叠加 `^`/修饰组时当正文。
+- ACI grep：未锚定 ident+`(`；表外定义关键字（如 Go `func`、Rust `fn`）在未叠加 `^`/修饰组时当正文。POSIX 方括号类（`[[:space:]]`）不参与 ident→开括号的分隔符类，故这类写法只靠修饰组签名命中：带修饰组的 `^[[:space:]]*(public |private |…)*load[[:space:]]*[(<]` 判结构形（真模型 trace 实测形状），仅靠 POSIX 类撑开括号、无修饰组的 `^[[:space:]]*load[[:space:]]*\(` / `[[:space:]]*(load|save)[[:space:]]*\(` 当正文。闸按形状签名判定，不穷举 regex 方言。
 - 语言：不按扩展名封搜；无 LSP 时走 E3 后结构形 grep 仍合法。

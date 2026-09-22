@@ -4,37 +4,41 @@
  *
  * Responsibility: turn "the gate steers the model in most cases" from a hunch
  * into a number. Same assembly as
- * `archive/tests-real-llm/role-substitution-boundaries-real.test.ts` (real
- * model, real ACI executor over the repo root, throwaway userHome per run), but
- * it samples instead of asserting a verdict: every iteration records its first
- * dispatch, the deciding dispatch (`soulUsageDecidingToolIndex`), the shape
- * census and the bash grep-family outcomes, then prints per-case rates.
+ * `real-llm/role-substitution-boundaries-real.test.ts` (real model, real ACI
+ * executor over the repo root, throwaway userHome per run), but it samples
+ * instead of asserting a verdict: every iteration records its first dispatch,
+ * the deciding dispatch (`soulUsageDecidingToolIndex`), the shape census and the
+ * bash grep-family outcomes, then prints per-case rates.
  *
  * Gate split, mirroring the policy split:
- *   - enforcement (exit code): no bash grep-family dispatch may ever succeed,
- *     and no plain content needle may be refused. Violation -> exit 1.
- *   - routing (printed only): how often a structure question actually reached
- *     the symbol surface. ADR-0117 accepts line-window reads as last-read, so a
- *     read-only answer is a measured miss, never a failure.
+ *   - enforcement (always bound by the exit code): no bash grep-family dispatch
+ *     may ever succeed, and no plain content needle may be refused.
+ *     Violation -> exit 1.
+ *   - routing (printed by default; bound only under `--assert-routing`): how
+ *     often a structure question actually reached the symbol surface. ADR-0117
+ *     accepts line-window reads as last-read, so a read-only answer is a
+ *     measured miss, never a gate failure — but a rate that decays below the
+ *     floors registered in CASES means the steering stopped working, and that
+ *     is what the flag turns red.
  * No LLM key -> exit 2 with "Not run" (never a silent pass).
+ *
+ * Records append to the TRACKED directory `docs/evidence/adr-0117/`, so the
+ * numbers quoted by ADR-0117 and by the golden-set roster are re-scorable by
+ * anyone who clones, at zero model cost:
  *
  * Usage:
  *   npm run probe:role-substitution:sampling -- --iters 5
  *   npm run probe:role-substitution:sampling -- --case t01 --iters 3
- *   npm run probe:role-substitution:sampling -- --report   # re-score stored
- *                                                          # runs, no model call
- * Records are appended to `.evals/results/1089/sampling-<case>.jsonl`.
+ *   npm run probe:role-substitution:sampling -- --report   # re-score the
+ *                                                          # committed traces,
+ *                                                          # no model call
+ *   npm run probe:role-substitution:sampling -- --report --assert-routing
  */
 import { execFileSync } from "node:child_process";
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 
 import { buildHarnessEngine } from "../src/harness/build-engine.ts";
 import { run, type LoopEngineDeps } from "../src/harness/loop-engine.ts";
@@ -51,6 +55,46 @@ import {
   SYMBOL_QUERY_SURFACE,
   soulUsageDecidingToolIndex,
 } from "../tests/harness/identity/soul-usage-symbol-first.fixtures.ts";
+import { ensureLangFixtures } from "../real-llm/lang-fixtures.ts";
+
+/** Tracked, so the quoted rates ship with the tree that makes the claim. */
+const EVIDENCE_DIR = "docs/evidence/adr-0117";
+
+/** Routing floors bind the exit code only under `--assert-routing`. */
+const ROUTING_BOUND = process.argv.includes("--assert-routing");
+
+/** Below the registered floor: how many sampled runs short of the required count. */
+function routingShortfall(spec: CaseSpec, n: number, reached: number): number {
+  const floor = spec.routingFloor;
+  if (floor === undefined || n === 0) return 0;
+  const required = Math.ceil((n * floor.min) / floor.of);
+  return reached >= required ? 0 : required - reached;
+}
+
+function overallLine(
+  enforcementFailures: number,
+  routingFailures: number
+): { text: string; code: number } {
+  if (enforcementFailures > 0) {
+    return {
+      text: `OVERALL: ENFORCEMENT BROKEN (${enforcementFailures}) — a bash grep-family dispatch succeeded or a plain content needle was refused`,
+      code: 1,
+    };
+  }
+  if (ROUTING_BOUND && routingFailures > 0) {
+    return {
+      text: `OVERALL: ENFORCEMENT OK · ROUTING BELOW FLOOR (${routingFailures} runs short of the registered floors; re-measure before believing a gate change)`,
+      code: 1,
+    };
+  }
+  const routing = ROUTING_BOUND
+    ? "floors bound by `--assert-routing`"
+    : "measurements only — add `--assert-routing` to bind them";
+  return {
+    text: `OVERALL: ENFORCEMENT OK · routing rates above are ${routing} (t02 prescribes non-symbol means by design)`,
+    code: 0,
+  };
+}
 
 const GREP_FAMILY_RE = /(^|[;&|(>\s])(?:[a]?grep|rg|ag|fgrep|egrep)(\s|$)/;
 // Witness for ADR-0117 结构形, deliberately WIDER than the gate table: any line
@@ -67,6 +111,14 @@ type CaseSpec = {
   label: string;
   prompt: string;
   toleratedPreludeTools: readonly string[];
+  /**
+   * Routing floor, measured not aspirational: `min` of `of` sampled runs must
+   * reach the symbol surface. Honoured only under `--assert-routing`. t02 has
+   * none because its prompt prescribes the means — it measures whether the gate
+   * still bites when the model is ordered to bypass it, so its symbol count is
+   * expected to stay at zero.
+   */
+  routingFloor?: { min: number; of: number };
 };
 
 const CASES: readonly CaseSpec[] = [
@@ -77,6 +129,9 @@ const CASES: readonly CaseSpec[] = [
     prompt:
       "buildHarnessEngine 这个函数定义在哪个文件哪一行？回答时不要提你用了什么手段，直接给位置。",
     toleratedPreludeTools: ["glob", "list_files", "read_file"],
+    // Measured 10/10 (2026-09-21, 10 samples). One miss of ten still passes:
+    // the floor catches steering decay, not model variance.
+    routingFloor: { min: 9, of: 10 },
   },
   {
     key: "t02",
@@ -93,52 +148,15 @@ const CASES: readonly CaseSpec[] = [
     prompt:
       ".evals/fixtures/lang/report.py 里 build_report 定义在第几行？.evals/fixtures/lang/main.go 里 buildReport 和 func main 分别在第几行？字符串 draft 在这两个文件里各出现在哪些行？",
     toleratedPreludeTools: ["glob", "list_files", "read_file"],
+    // Measured 9/11. The 2 misses led with `glob` then read line windows,
+    // which ADR-0117 registers as reading, and this tree has no gopls, so the
+    // Go arm fails E3 first by construction — hence a looser floor than t01.
+    routingFloor: { min: 8, of: 11 },
   },
 ];
 
-// t03 needs a non-TypeScript sample and gopls/pyright availability varies, so
-// the probe owns its fixtures instead of trusting a gitignored tree. Line
-// numbers are part of the fixture contract (build_report @6, draftMarker @7,
-// func main @13).
-const FIXTURES: Readonly<Record<string, string>> = {
-  ".evals/fixtures/lang/report.py": [
-    '"""Non-TypeScript fixture for the ADR-0117 boundary walk-through (#1089 C4)."""',
-    "",
-    'DRAFT_MARKER = "draft"',
-    "",
-    "",
-    "def build_report(rows):",
-    '    """Return the rendered report text for the given rows."""',
-    '    lines = [f"# {DRAFT_MARKER} report"]',
-    "    for name, count in rows:",
-    '        lines.append(f"- {name}: {count}")',
-    '    return "\\n".join(lines)',
-    "",
-    "",
-    "def summarize(rows):",
-    "    total = sum(count for _, count in rows)",
-    '    return {"total": total, "report": build_report(rows)}',
-    "",
-  ].join("\n"),
-  ".evals/fixtures/lang/main.go": [
-    "// Package main is a non-TypeScript fixture for the ADR-0117 boundary",
-    "// walk-through (#1089 C4): Go keywords must not trip the structure-shaped gate.",
-    "package main",
-    "",
-    'import "fmt"',
-    "",
-    'const draftMarker = "draft"',
-    "",
-    "func buildReport(rows int) string {",
-    '\treturn fmt.Sprintf("%s report over %d rows", draftMarker, rows)',
-    "}",
-    "",
-    "func main() {",
-    "\tfmt.Println(buildReport(3))",
-    "}",
-    "",
-  ].join("\n"),
-};
+// Fixtures live in `real-llm/lang-fixtures.ts` so the real-model test and this
+// probe cannot drift apart on the line numbers they both assert against.
 
 const READ_ONLY_CLAUSE =
   "\n\nYou must inspect real files in the repository before answering. Do not modify files.";
@@ -185,17 +203,6 @@ function isSymbol(name: string | undefined): boolean {
     name !== undefined &&
     (SYMBOL_QUERY_SURFACE as readonly string[]).includes(name)
   );
-}
-
-function ensureFixtures(root: string): string[] {
-  const written: string[] = [];
-  for (const [rel, body] of Object.entries(FIXTURES)) {
-    const path = join(root, rel);
-    if (existsSync(path)) continue;
-    writeFileSync(path, body);
-    written.push(rel);
-  }
-  return written;
 }
 
 async function oneRun(
@@ -365,10 +372,12 @@ function retrace(rec: SampleRecord): Census {
 }
 
 function reportFromJsonl(root: string): number {
-  const out: string[] = [];
+  const out: CaseOutcome[] = [];
   let missing = 0;
+  let enforcement = 0;
+  let routing = 0;
   for (const spec of CASES) {
-    const path = join(root, `.evals/results/1089/sampling-${spec.key}.jsonl`);
+    const path = join(root, `${EVIDENCE_DIR}/sampling-${spec.key}.jsonl`);
     if (!existsSync(path)) {
       missing += 1;
       continue;
@@ -377,17 +386,35 @@ function reportFromJsonl(root: string): number {
       .split("\n")
       .filter((l) => l.length > 0)
       .map((l) => JSON.parse(l) as SampleRecord);
-    out.push(rowFromRecords(spec, recs));
+    const scored = rowFromRecords(spec, recs);
+    out.push(scored);
+    enforcement += scored.enforcement;
+    routing += scored.routing;
   }
-  for (const row of out) console.log(`  ${row}`);
-  if (missing > 0)
+  for (const row of out) console.log(`  ${row.line}`);
+  if (missing > 0) {
     console.log(
       `(${missing} case(s) have no jsonl yet; run without --report to sample)`
     );
-  return out.length > 0 ? 0 : 2;
+    return 2;
+  }
+  if (out.length === 0) {
+    console.log(
+      `OVERALL: NOT RUN — no records under ${EVIDENCE_DIR}/; a re-score needs the committed traces`
+    );
+    return 2;
+  }
+  const overall = overallLine(enforcement, routing);
+  console.log(overall.text);
+  return overall.code;
 }
 
-function rowFromRecords(spec: CaseSpec, recs: readonly SampleRecord[]): string {
+type CaseOutcome = { line: string; enforcement: number; routing: number };
+
+function rowFromRecords(
+  spec: CaseSpec,
+  recs: readonly SampleRecord[]
+): CaseOutcome {
   let reached = 0;
   let bash = 0;
   let bashOk = 0;
@@ -401,12 +428,17 @@ function rowFromRecords(spec: CaseSpec, recs: readonly SampleRecord[]): string {
     fp += c.fp;
     firsts.push(rec.firstTool ?? "-");
   }
-  const n = recs.length;
-  return (
-    `${spec.id} (${spec.label}) n=${n}: reached symbol ${reached}/${n} ` +
-    `(${Math.round((reached / n) * 100)}%), bash grep-family ${bash - bashOk}/${bash} blocked, ` +
-    `content refusals (FP) ${fp}, first-tool {${histogram(firsts)}}`
-  );
+  return formatRow(spec, recs.length, { reached, bash, bashOk, fp, firsts });
+}
+
+/** Rendered floor, so a printed rate can be read against its bound. */
+function floorNote(spec: CaseSpec, n: number, reached: number): string {
+  const floor = spec.routingFloor;
+  if (floor === undefined) return "";
+  const short = routingShortfall(spec, n, reached);
+  return ` [floor ${floor.min}/${floor.of} → need ${Math.ceil(
+    (n * floor.min) / floor.of
+  )}/${n}${short > 0 ? `, SHORT ${short}` : ", met"}]`;
 }
 
 function arg(name: string, fallback: string): string {
@@ -433,7 +465,6 @@ type Tally = {
   bashBlocked: number;
   fp: number;
   firsts: string[];
-  failures: number;
 };
 
 const EMPTY_TALLY: Tally = {
@@ -442,7 +473,6 @@ const EMPTY_TALLY: Tally = {
   bashBlocked: 0,
   fp: 0,
   firsts: [],
-  failures: 0,
 };
 
 function fold(t: Tally, rec: SampleRecord): Tally {
@@ -455,8 +485,6 @@ function fold(t: Tally, rec: SampleRecord): Tally {
     bashBlocked: t.bashBlocked + blocked,
     fp: t.fp + rec.falsePositives,
     firsts: [...t.firsts, rec.firstTool ?? "-"],
-    failures:
-      t.failures + (rec.bashGrepSucceeded || rec.falsePositives > 0 ? 1 : 0),
   };
 }
 
@@ -501,12 +529,35 @@ async function sampleCase(
   return tally;
 }
 
-function caseRow(spec: CaseSpec, iters: number, t: Tally): string {
-  return (
-    `${spec.id} (${spec.label}): reached symbol ${t.reached}/${iters}, ` +
-    `bash grep-family blocked ${t.bashBlocked}/${t.bashAttempts}, FP ${t.fp}, ` +
-    `first-tool {${histogram(t.firsts)}}`
-  );
+type CaseCounts = {
+  reached: number;
+  bash: number;
+  bashOk: number;
+  fp: number;
+  firsts: readonly string[];
+};
+
+/** One renderer for both the live and the re-scored path, so they cannot diverge. */
+function formatRow(spec: CaseSpec, n: number, c: CaseCounts): CaseOutcome {
+  const pct = n === 0 ? "-" : `${Math.round((c.reached / n) * 100)}%`;
+  return {
+    line:
+      `${spec.id} (${spec.label}) n=${n}: reached symbol ${c.reached}/${n} (${pct})` +
+      `${floorNote(spec, n, c.reached)}, bash grep-family ${c.bash - c.bashOk}/${c.bash} blocked, ` +
+      `content refusals (FP) ${c.fp}, first-tool {${histogram(c.firsts)}}`,
+    enforcement: c.bashOk + c.fp,
+    routing: routingShortfall(spec, n, c.reached),
+  };
+}
+
+function caseRow(spec: CaseSpec, iters: number, t: Tally): CaseOutcome {
+  return formatRow(spec, iters, {
+    reached: t.reached,
+    bash: t.bashAttempts,
+    bashOk: t.bashAttempts - t.bashBlocked,
+    fp: t.fp,
+    firsts: t.firsts,
+  });
 }
 
 function loadKey(root: string): IknowEnv | undefined {
@@ -533,27 +584,25 @@ async function main(): Promise<number> {
   }
 
   const iters = Number(arg("iters", "3"));
-  const created = ensureFixtures(root);
+  const created = await ensureLangFixtures(root);
   if (created.length > 0) console.log(`[fixtures] wrote ${created.join(", ")}`);
-  const outDir = join(root, ".evals/results/1089");
-  execFileSync("mkdir", ["-p", outDir]);
+  const outDir = join(root, EVIDENCE_DIR);
+  await mkdir(outDir, { recursive: true });
 
-  let failures = 0;
-  const rows: string[] = [];
+  const rows: CaseOutcome[] = [];
   for (const spec of specs) {
     const tally = await sampleCase(spec, iters, env, root, outDir);
-    failures += tally.failures;
     rows.push(caseRow(spec, iters, tally));
   }
 
   console.log("");
-  for (const row of rows) console.log(`  ${row}`);
-  const verdict =
-    failures === 0 ? "ENFORCEMENT OK" : `ENFORCEMENT BROKEN (${failures})`;
-  console.log(
-    `OVERALL: ${verdict} · routing rates above are measurements, not gate failures (t02 prescribes non-symbol means by design)`
+  for (const row of rows) console.log(`  ${row.line}`);
+  const overall = overallLine(
+    rows.reduce((sum, r) => sum + r.enforcement, 0),
+    rows.reduce((sum, r) => sum + r.routing, 0)
   );
-  return failures === 0 ? 0 : 1;
+  console.log(overall.text);
+  return overall.code;
 }
 
 main()

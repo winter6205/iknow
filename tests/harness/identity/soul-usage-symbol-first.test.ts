@@ -1,7 +1,7 @@
 // Offline half of the soul/usage 轨迹集 (ADR-0117). Locks the
 // fixture roster, the vacuity guard, the deciding-tool semantics, and the
 // STATIC contracts the set stands on. The model-running half is
-// archive/tests-real-llm/tool-role-substitution.test.ts (npm run test:real-llm).
+// real-llm/tool-role-substitution.test.ts (npm run test:real-llm).
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -22,13 +22,15 @@ function expectShape(c: SoulUsageCase) {
   expect(c.title.trim(), "case title").not.toBe("");
   expect(c.userPrompt.trim(), "case userPrompt").not.toBe("");
   expect(c.spec.trim(), "case spec").not.toBe("");
-  expect(c.userPrompt.trim().length, "prompt bounded").toBeLessThanOrEqual(1024);
+  expect(c.userPrompt.trim().length, "prompt bounded").toBeLessThanOrEqual(
+    1024
+  );
 }
 
 describe("soul/usage golden set fixture roster", () => {
   it("carries >=3 structure-question cases and >=1 shell-tempting case", () => {
     const tempting = SOUL_USAGE_CASES.filter((c) =>
-      c.toleratedPreludeTools.includes("bash"),
+      c.toleratedPreludeTools.includes("bash")
     );
     expect(SOUL_USAGE_CASES.length).toBeGreaterThanOrEqual(4);
     expect(tempting.length).toBeGreaterThanOrEqual(1);
@@ -56,7 +58,7 @@ describe("soul/usage golden set fixture roster", () => {
       for (const forbidden of FORBIDDEN_PROMPT_TOKENS) {
         expect(
           c.userPrompt.includes(forbidden),
-          `${c.id} prompt must not leak token "${forbidden}"`,
+          `${c.id} prompt must not leak token "${forbidden}"`
         ).toBe(false);
       }
     }
@@ -72,8 +74,8 @@ describe("soul/usage golden set deciding-tool semantics", () => {
           { name: "grep", refused: true },
           { name: "find_symbol", refused: false },
         ],
-        [],
-      ),
+        []
+      )
     ).toBe(2);
   });
 
@@ -84,8 +86,8 @@ describe("soul/usage golden set deciding-tool semantics", () => {
           { name: "bash", refused: false },
           { name: "find_symbol", refused: false },
         ],
-        [],
-      ),
+        []
+      )
     ).toBeUndefined();
     // An effective ACI grep deciding the case is the false-positive the ADR
     // refuses — toleratedPreludeTools must not silently cover it.
@@ -95,8 +97,8 @@ describe("soul/usage golden set deciding-tool semantics", () => {
           { name: "grep", refused: false },
           { name: "find_symbol", refused: false },
         ],
-        [],
-      ),
+        []
+      )
     ).toBeUndefined();
   });
 
@@ -108,17 +110,53 @@ describe("soul/usage golden set deciding-tool semantics", () => {
           { name: "bash", refused: false },
           { name: "find_symbol", refused: false },
         ],
-        ["bash"],
-      ),
+        ["bash"]
+      )
     ).toBe(2);
+  });
+
+  it("skips orientation dispatches: only the two governed arms can decide", () => {
+    // A real-model run opened with memory_recall, then read_file on the ADR
+    // itself, then took find_symbol. That is orientation, not substitution —
+    // ADR-0117 keeps reads and name matching legal, so scoring it as a routing
+    // failure would have the witness invent a violation the gate never claims.
+    expect(
+      soulUsageDecidingToolIndex(
+        [
+          { name: "memory_recall", refused: false },
+          { name: "read_file", refused: false },
+          { name: "glob", refused: false },
+          { name: "find_symbol", refused: false },
+        ],
+        []
+      )
+    ).toBe(3);
+    // Non-decisiveness must not become a free pass: a trajectory that only
+    // orients never reaches the surface, so no case is decided.
+    expect(
+      soulUsageDecidingToolIndex(
+        [
+          { name: "memory_recall", refused: false },
+          { name: "read_file", refused: false },
+          { name: "glob", refused: false },
+        ],
+        []
+      )
+    ).toBe(-1);
   });
 
   it("accepts any surface member as the deciding dispatch, not one canonical tool", () => {
     expect(
-      soulUsageDecidingToolIndex([{ name: "find_referencing_symbols", refused: false }], []),
+      soulUsageDecidingToolIndex(
+        [{ name: "find_referencing_symbols", refused: false }],
+        []
+      )
     ).toBe(0);
     expect(
-      soulUsageDecidingToolIndex([{ name: "get_symbols_overview", refused: false }], []),
+      soulUsageDecidingToolIndex(
+        [{ name: "get_symbols_overview", refused: false }],
+        []
+      )
     ).toBe(0);
   });
 
@@ -129,11 +167,11 @@ describe("soul/usage golden set deciding-tool semantics", () => {
           { name: "bash", refused: true },
           { name: "grep", refused: true },
         ],
-        [],
-      ),
+        []
+      )
     ).toBe(-1);
     expect(
-      soulUsageDecidingToolIndex([{ name: "bash", refused: false }], ["bash"]),
+      soulUsageDecidingToolIndex([{ name: "bash", refused: false }], ["bash"])
     ).toBe(-1);
     expect(soulUsageDecidingToolIndex([], [])).toBe(-1);
   });
@@ -166,7 +204,7 @@ describe("soul/usage golden set STATIC locks", () => {
     expect(IKNOW_USAGE_DEFAULT).toContain("three fallback situations");
     expect(IKNOW_USAGE_DEFAULT).toContain("do not start with grep");
     expect(IKNOW_USAGE_DEFAULT).toContain(
-      "Do not use grep as the first move for code structure",
+      "Do not use grep as the first move for code structure"
     );
   });
 
@@ -174,8 +212,10 @@ describe("soul/usage golden set STATIC locks", () => {
     // ADR-0117 Decision 1: enforcement lives in the gate, never in the
     // usage text — a text constant must not pull the gate module into identity.
     const source = readFileSync(
-      fileURLToPath(new URL("../../../src/harness/identity/usage.ts", import.meta.url)),
-      "utf8",
+      fileURLToPath(
+        new URL("../../../src/harness/identity/usage.ts", import.meta.url)
+      ),
+      "utf8"
     );
     expect(source).not.toContain("role-substitution");
   });
@@ -185,11 +225,14 @@ describe("soul/usage golden set seam locks (fixture witness vs gate tables)", ()
   it("binds the fixture query surface to the gate module's query-side table", () => {
     // Set equality, not shared import: each side stays an independent
     // witness, and either table drifting fails this seam.
-    expect([...SYMBOL_QUERY_SURFACE].sort()).toEqual([...SYMBOL_QUERY_TOOL_NAMES].sort());
+    expect([...SYMBOL_QUERY_SURFACE].sort()).toEqual(
+      [...SYMBOL_QUERY_TOOL_NAMES].sort()
+    );
   });
 
   it("binds the fixture refusal tag to the gate module's prefix constant", async () => {
-    const gate = await import("../../../src/harness/aci/tools/role-substitution.ts");
+    const gate =
+      await import("../../../src/harness/aci/tools/role-substitution.ts");
     expect(ROLE_SUBSTITUTION_PREFIX).toBe(gate.ROLE_SUBSTITUTION_PREFIX);
   });
 });
