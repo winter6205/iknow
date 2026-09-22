@@ -197,7 +197,16 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 _Avoid_: 在词条或文档里写死「当前 N 件」（必漂——曾写「当前 8 件 / 8+2=10」而数组早已 40+）；在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata
 
 **符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从**模型面**退役，但**没有退役出代码库**——`createLspToolSet` 是 `scripts/lsp-probe.ts:266` 的真实栈烟测仪器（经 `package.json` 的 `probe:lsp` 接线），且 `renderNoServer` / `stringifyResult` / `isLspFailureSentinel` / `getClientForWorkspaceDetailed` 等共享件仍被活的 `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts` import。该文件是**名字起错**，不是死了。
-_Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删掉（会砸掉 `probe:lsp`）；把只测 `lsp_*` 的断言当 `find_symbol` 等活路径的覆盖；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构
+_Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删掉（会砸掉 `probe:lsp`）；把只测 `lsp_*` 的断言当 `find_symbol` 等活路径的覆盖；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构；靠 usage 让模型「优先」符号工具（职分靠 **替岗拒绝**，ADR-0117）
+
+**工具职分**: `bash` 跑进程 / 构建 / git，ACI `grep` 搜正文，**符号工具面** 问程序结构；三件在 ACI 上同等可调用，职分不可替代。ADR-0117。
+_Avoid_: 按谁更高级排序；把三件当同一 sink；用说明书当职分
+
+**替岗拒绝**: 扮演他职的调用 fail-closed，回执只指向正职；放行证据认本会话工具轨迹（usage 三类回退），不认自觉。bash 段首 grep 族 / `rg` → 拒；ACI `grep` 命中**结构形**且无回退证据 → 拒。`sed`/`cat`/`nl` 行窗仍是读。实施验收 = worktree + **轨迹集**；对照树只允许「ACI `grep` 不闸」、同一集、比完只合入本政策。不是 **hard-wall**。ADR-0117。
+_Avoid_: 源码扩展名启发式；警告仍执行；加长 usage；塞进 hard-wall；无黄金集成宣称完成；把未锚定 ident+`(` / `git grep` / 段首以外的间接 grep 写成必须拦
+
+**结构形**: ACI `grep` 替岗闸认的 pattern 子集：冻结定义语法表（`function`/`class`/`def`/`impl`/`export` 等关键字、行首 `^` 绑 ident+`(`、修饰组），不是「这个调用像在问结构」。ADR-0117。
+_Avoid_: 未锚定 ident+`(`；按语言扩展名推断；把表外关键字（Go `func`、Rust `fn`）默认当成结构形
 
 **请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有**首次** `lsp_*` 同族调用触发的 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts`）；装配完成且从未调用这类工具则不起 language server。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts` / `symbol.ts`）。
 _Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
@@ -398,7 +407,7 @@ _Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；围栏
 _Avoid_: 新产品面继续写这个名字当现行合同
 
 **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
-_Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交付物写到 bash `/tmp` tmpfs
+_Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交付物写到 bash `/tmp` tmpfs；把 **替岗拒绝** / 工具选型当硬墙
 
 **compact reason**: 压缩路径分类，闭集 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，写入 `CompactSessionResponse.reason` 并驱动 UI 文案。`below_token_threshold` 只表示 proactive 未过 auto-compact token gate。
 _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字面当业务码；reason 当 `LoopTrace` / `LlmCallRecord` 字段
@@ -816,6 +825,9 @@ _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 资格只进入效用所用的 `usage.json`，不把条目装进 `system`（ADR-0044）。GC 不复活 `disabled` 条目
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
+- **工具职分 vs hard-wall**: 职分是 bash / grep / 符号工具面各管一职；hard-wall 是围栏拦不住的危险意图。替岗拒绝走 handler，不进硬墙
+- **替岗拒绝 vs usage**: usage 仍写三类回退；不变量由拒绝执法。加长说明书不代替本闸
+- **结构形 vs 结构意图**: 闸认 ADR-0117 定义语法表（关键字 / 行首锚 / 修饰组）；未锚定 ident+`(` 是正文面，不是漏写的结构查询
 - **blob 引用模式 vs 内容寻址正文池**: 前者是已退役开关名；后者是现行唯一落盘形态。messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
