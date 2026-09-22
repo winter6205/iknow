@@ -64,6 +64,7 @@ function captureInput(
     rootIdentity: root,
     preBytes: Buffer.from("old content\n", "utf8"),
     postBytes: Buffer.from("new content\n", "utf8"),
+    absentBefore: false,
     ...over,
   };
 }
@@ -228,4 +229,42 @@ describe("worker preimage host chain (capture → drain → stamp)", () => {
       "enabled=false: the port exists but is a no-op"
     );
   });
+
+  it("absentBefore evidence survives the worker capture → drain → stamp chain", async () => {
+    const projectDir = resolveProjectSessionDir(baseDir, root);
+    const capture = createWorkerPreimageCaptureFactory({ userHome: home })({
+      taskId,
+      parentLedger: { projectDir, conversationId: parentId },
+    });
+    assert.ok(capture);
+    await capture!(captureInput({ toolUseId: "tu-abs", absentBefore: true }));
+    const transcriptPath = join(
+      sessionSubagentDir(projectDir),
+      taskId,
+      `${taskId}.jsonl`
+    );
+    const io = storeWorkerTranscriptIo({ transcriptPath, taskId, cwd: root });
+    // Seed batch first: the fresh-create path writes the ledger header +
+    // initial events without stamping (same rule the main chain test uses).
+    await io.appendMessages([
+      { role: "user", content: [{ type: "text", text: "task" }] },
+    ]);
+    await io.appendMessages([
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tu-abs", content: "ok" },
+        ],
+      },
+    ]);
+    const events = await readEventRecords(transcriptPath);
+    assert.equal(events[1]!.codePreimage?.absentBefore, true);
+  });
 });
+
+function sessionSubagentDir(projectDir: string): string {
+  return join(
+    resolveConversationDir({ projectDir, conversationId: parentId }),
+    "subagents"
+  );
+}

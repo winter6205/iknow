@@ -96,6 +96,11 @@ describe("worker registry ← preimageCapture port (Gate B, harness side)", () =
     assert.equal(seen.length, 1, "port fires exactly once before the write");
     const inp = seen[0]!;
     assert.equal(inp.preBytes.length, 0, "a create has no preimage");
+    assert.equal(
+      inp.absentBefore,
+      true,
+      "the pre-write ENOENT is the capture-time absence evidence"
+    );
     assert.equal(inp.postBytes.toString("utf8"), "worker wrote\n");
     assert.equal(inp.relPath, "brand-new.ts");
     assert.equal(

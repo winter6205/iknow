@@ -160,6 +160,22 @@ describe("SessionStore.appendEvents codePreimage stamping", () => {
     assert.ok(!("codePreimage" in (rec as object)));
   });
 
+  it("(e) absentBefore 证据随 ref 原样落库 (单 schema, 旧行无键=存在)", async () => {
+    const id = "preimg-absent-flag";
+    const created: PreimageRef = { ...ref, absentBefore: true };
+    await store.save({ id, file: sampleFile(id) });
+    await store.appendEvents({
+      id,
+      events: [toolResultMsg("tu1")],
+      preimages: new Map([["tu1", created]]),
+    });
+    const records = await readMessageRecords(id);
+    assert.deepEqual(
+      (records[0] as { codePreimage?: PreimageRef }).codePreimage,
+      created
+    );
+  });
+
   it("空 map (size 0) 视为无 stamping (matchCodePreimage 短路)", async () => {
     const id = "preimg-emptymap";
     await store.save({ id, file: sampleFile(id) });

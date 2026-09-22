@@ -4,12 +4,14 @@
  * The plan is pure: fold the abandoned head-chain segment into one inverse op
  * per touched path. The apply is the only side-effecting half: it reads every
  * restore blob up front (so an unreadable blob aborts before any file changes
- * and the rewind head stays put), then writes a path back only when the live
- * root identity matches and the file's current bytes still equal the segment's
- * last captured post-image. Everything else is a reported skip.
+ * and the rewind head stays put), then restores a path only when the live root
+ * identity matches and the file's current bytes still equal the segment's last
+ * captured post-image — writing the preimage bytes back, or, where the
+ * earliest ref recorded capture-time absence, deleting the created path
+ * instead (ADR-0121). Everything else is a reported skip.
  */
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import {
   codeSnapshotSha,
   isCodeSnapshotSha,
@@ -19,12 +21,16 @@ import type { SessionEventRecord } from "./jsonl.js";
 
 /** One path's inverse op: put `restoreSha` bytes back at `relPath`, but only
  *  when the file currently equals `expectedPostimageSha` (this path's last
- *  captured write in the segment) and `rootIdentity` matches the live root. */
+ *  captured write in the segment) and `rootIdentity` matches the live root.
+ *  `absentBefore` — capture-time ENOENT evidence on the EARLIEST ref — flips
+ *  the guarded outcome from a byte write-back to a delete: the pre-segment
+ *  state of a created path is absence. Never derived from empty bytes. */
 export interface CodeRestoreOp {
   readonly relPath: string;
   readonly rootIdentity: string;
   readonly restoreSha: string;
   readonly expectedPostimageSha: string;
+  readonly absentBefore: boolean;
 }
 
 /** A path we deliberately did not touch, with why. */
@@ -73,6 +79,10 @@ export function buildCodeRestorePlan(
         rootIdentity: ref.rootIdentity,
         restoreSha: ref.preimageSha,
         expectedPostimageSha: ref.postimageSha,
+        // The delete directive belongs to the pre-segment state, which only
+        // the earliest ref describes; a later ref (even one claiming absence)
+        // cannot turn an existing file into a created one.
+        absentBefore: ref.absentBefore === true,
       });
     } else {
       byPath.set(key, { ...existing, expectedPostimageSha: ref.postimageSha });
@@ -122,6 +132,13 @@ async function restoreOne(
   const abs = resolve(join(opts.taskRoot, op.relPath));
   const current = await readFileOrEmpty(abs);
   if (codeSnapshotSha(current) !== op.expectedPostimageSha) return "drift";
+  if (op.absentBefore) {
+    // Guard hit on a created path: absence IS the restore state; a path
+    // already gone satisfies it (force absorbs ENOENT). Other IO failures
+    // propagate — no silent half-restore.
+    await rm(abs, { force: true });
+    return "restored";
+  }
   await mkdir(dirname(abs), { recursive: true });
   await writeFile(abs, restoreBytes);
   return "restored";

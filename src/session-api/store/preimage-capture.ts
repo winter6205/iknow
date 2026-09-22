@@ -73,5 +73,9 @@ export async function recordPreimagePair(opts: {
     rootIdentity: input.rootIdentity,
     preimageSha,
     postimageSha,
+    // Conditional spread: a false (the common edit) leaves the ref
+    // byte-identical to legacy lines — one schema, absence recorded only by
+    // the capture-time evidence (ADR-0121).
+    ...(input.absentBefore ? { absentBefore: true } : {}),
   });
 }

@@ -145,6 +145,9 @@ describe("rename_symbol → preimage port stages all files first", () => {
     expect(seen.map((r) => r.relPath)).toEqual(["a.ts", "b.ts"]);
     expect(seen[0]!.preBytes.toString("utf8")).toBe(MAIN_BODY);
     expect(seen[1]!.preBytes.toString("utf8")).toBe(OTHER_BODY);
+    // symbol-mutate only ever edits files it just read → no create evidence.
+    expect(seen[0]!.absentBefore).toBe(false);
+    expect(seen[1]!.absentBefore).toBe(false);
     expect(liveBytesAtCapture).toEqual([
       `${MAIN_BODY}|${OTHER_BODY}`,
       `${MAIN_BODY}|${OTHER_BODY}`,

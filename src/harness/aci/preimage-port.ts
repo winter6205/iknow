@@ -24,10 +24,16 @@ export interface PreimageCaptureInput {
   readonly relPath: string;
   /** Project identity root the relative path is meaningful under. */
   readonly rootIdentity: string;
-  /** Bytes currently on disk (empty for a create). */
+  /** Bytes currently on disk (empty when the path is absent or exists empty —
+   *  the bytes alone never say which, that is what `absentBefore` is for). */
   readonly preBytes: Buffer;
   /** Bytes about to be written. */
   readonly postBytes: Buffer;
+  /** Positive capture-time evidence the path did not exist before this write
+   *  (the tool observed ENOENT). Never derived from `preBytes`: an existing
+   *  empty file reads as empty bytes too (ADR-0121). Required so every call
+   *  site states where the answer came from. */
+  readonly absentBefore: boolean;
 }
 
 export type PreimageCapture = (
@@ -58,6 +64,8 @@ export interface PreimageWriteSite {
   readonly absPath: string;
   readonly preBytes: string;
   readonly postBytes: string;
+  /** ENOENT seen by the tool at capture time = the path is being created. */
+  readonly absentBefore: boolean;
 }
 
 /**
@@ -80,5 +88,6 @@ export async function capturePreimageBeforeWrite(
     rootIdentity: opts?.rootIdentity ?? site.rootAtCall,
     preBytes: Buffer.from(site.preBytes, "utf8"),
     postBytes: Buffer.from(site.postBytes, "utf8"),
+    absentBefore: site.absentBefore,
   });
 }

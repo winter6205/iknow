@@ -196,12 +196,14 @@ export function createEditFileTool(
       : replaceOnce(content, validated.old_str, validated.new_str);
     // Capture the pre/post bytes before the write; a throwing port aborts the
     // write so the file stays at `content`. The helper is a no-op when no port
-    // is injected (legacy / direct-factory callers).
+    // is injected (legacy / direct-factory callers). The successful read above
+    // proves the path existed — a surgical edit is never a create.
     await capturePreimageBeforeWrite(opts, ctx, {
       rootAtCall,
       absPath,
       preBytes: content,
       postBytes: replaced,
+      absentBefore: false,
     });
     await writeFile(absPath, replaced, "utf8");
 

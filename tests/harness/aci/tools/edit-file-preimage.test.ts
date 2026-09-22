@@ -46,6 +46,8 @@ describe("edit_file → preimage port", () => {
 
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.preBytes.toString("utf8"), ORIGINAL);
+    // edit_file's readFile succeeded → the path existed; never a create.
+    assert.equal(seen[0]!.absentBefore, false);
     assert.equal(
       seen[0]!.postBytes.toString("utf8"),
       "const a = 1;\nconst b = 3;\n"

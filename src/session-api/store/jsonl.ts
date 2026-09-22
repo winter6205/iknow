@@ -91,12 +91,18 @@ export interface SessionHeaderRecord {
 /** Content-addressed preimage reference a successful workspace write leaves
  *  behind (ADR-0036). `preimageSha` / `postimageSha` name blobs under the
  *  session's `code-snapshots/` directory (see code-snapshot-store.ts); the
- *  restore path resolves them back against `rootIdentity` + `relPath`. */
+ *  restore path resolves them back against `rootIdentity` + `relPath`.
+ *  `absentBefore` is capture-time evidence (the tool saw ENOENT) that the
+ *  path did not exist before that write, so restore deletes it instead of
+ *  writing bytes back. Absent means the path existed — legacy transcript
+ *  lines carry no key and an empty preimage never implies absence (ADR-0121);
+ *  the capture side spreads the key only when true, keeping one schema. */
 export interface PreimageRef {
   readonly relPath: string;
   readonly rootIdentity: string;
   readonly preimageSha: string;
   readonly postimageSha: string;
+  readonly absentBefore?: boolean;
 }
 
 /** One message event: unique id + parent chain + verbatim native message.

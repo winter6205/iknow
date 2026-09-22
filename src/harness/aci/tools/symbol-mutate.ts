@@ -578,11 +578,14 @@ async function applyWorkspaceEdit(
     }
     const next = applyEditsToText(text, fileEdits);
     if (next === text) continue;
+    // The successful read above proves every mutated path existed —
+    // symbol-mutate never captures a create.
     await capturePreimageBeforeWrite(preimage.opts, preimage.call, {
       rootAtCall: preimage.rootAtCall,
       absPath: filePath,
       preBytes: text,
       postBytes: next,
+      absentBefore: false,
     });
     staged.push({ filePath, next });
   }

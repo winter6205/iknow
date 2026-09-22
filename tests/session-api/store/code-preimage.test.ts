@@ -12,11 +12,14 @@
  *   - apply writes a path back only when the live root identity matches AND the
  *     file's current bytes equal the expected postimage; otherwise it is a
  *     reported skip (drift / root_identity).
+ *   - the op's delete directive comes from the EARLIEST ref's capture-time
+ *     absence evidence (absentBefore); a legacy ref without the field always
+ *     writes bytes back — an empty preimage alone never deletes (ADR-0121).
  *   - every restore blob is read before any write, so one unreadable blob
  *     aborts the whole pass with ZERO workspace changes.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -50,13 +53,17 @@ async function writeEvent(
   parent: string | null,
   relPath: string,
   pre: string,
-  post: string
+  post: string,
+  absentBefore?: boolean
 ): Promise<SessionEventRecord> {
   const ref: PreimageRef = {
     relPath,
     rootIdentity,
     preimageSha: await captureCodeSnapshot(folder, pre),
     postimageSha: await captureCodeSnapshot(folder, post),
+    // Conditional spread mirrors the real capture: false leaves no key, so
+    // new and legacy lines share one schema.
+    ...(absentBefore === true ? { absentBefore: true } : {}),
   };
   return { type: "message", id, parent, message: text(id), codePreimage: ref };
 }
@@ -155,9 +162,68 @@ describe("buildCodeRestorePlan", () => {
     ];
     assert.equal(buildCodeRestorePlan(events).length, 2);
   });
+
+  it("the EARLIEST ref's absence evidence becomes the op's delete directive", async () => {
+    // Segment created a.ts (capture-time ENOENT) then edited it: the restore
+    // state is "absent before the segment", so the op deletes, keyed on the
+    // earliest (empty) preimage.
+    const events = [
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e1",
+        null,
+        "a.ts",
+        "",
+        "A",
+        true
+      ),
+      await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "A", "B"),
+    ];
+    const ops = buildCodeRestorePlan(events);
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0]!.absentBefore, true);
+    assert.equal(ops[0]!.restoreSha, codeSnapshotSha(""));
+    assert.equal(ops[0]!.expectedPostimageSha, codeSnapshotSha("B"));
+  });
+
+  it("absence evidence on a LATER ref never turns an existing file into a delete", async () => {
+    // File existed before the segment (first touch is a plain edit); a later
+    // ref claims absence (e.g. an external rm then recreate). The pre-segment
+    // state is still "existed" → write bytes back, never delete.
+    const events = [
+      await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e2",
+        "e1",
+        "a.ts",
+        "",
+        "C",
+        true
+      ),
+    ];
+    const ops = buildCodeRestorePlan(events);
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0]!.absentBefore, false);
+  });
+
+  it("a legacy ref without the field plans a byte write-back, never a delete", async () => {
+    const events = [
+      await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "", "B"),
+    ];
+    assert.equal(buildCodeRestorePlan(events)[0]!.absentBefore, false);
+  });
 });
 
 // -- apply -------------------------------------------------------------------
+
+const exists = (p: string): Promise<boolean> =>
+  access(p).then(
+    () => true,
+    () => false
+  );
 
 async function expectPlan(
   events: SessionEventRecord[]
@@ -260,6 +326,7 @@ describe("applyCodeRestore", () => {
       rootIdentity: taskRoot,
       restoreSha: codeSnapshotSha("NEVER-CAPTURED"),
       expectedPostimageSha: codeSnapshotSha("Y"),
+      absentBefore: false,
     };
     const ops = [...(await expectPlan([good])), missingBlobOp];
     await assert.rejects(
@@ -306,7 +373,10 @@ describe("applyCodeRestore", () => {
     );
   });
 
-  it("a create whose preimage was empty writes back empty bytes", async () => {
+  it("a legacy line whose preimage was empty restores empty bytes, file stays", async () => {
+    // No capture-time absence evidence (old transcripts never carry the
+    // field) → the path is treated as existing, even at empty bytes:
+    // deleting here would remove a file the segment did not create.
     await writeFile(join(taskRoot, "new.ts"), "CONTENT");
     const ops = await expectPlan([
       await writeEvent(
@@ -326,5 +396,112 @@ describe("applyCodeRestore", () => {
       ops,
     });
     assert.equal(await readFile(join(taskRoot, "new.ts"), "utf8"), "");
+  });
+
+  it("a path the segment created is deleted when live bytes still equal the postimage", async () => {
+    await writeFile(join(taskRoot, "created.ts"), "CONTENT");
+    const ops = await expectPlan([
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e1",
+        null,
+        "created.ts",
+        "",
+        "CONTENT",
+        true
+      ),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      ops,
+    });
+    assert.deepEqual(report.restored, ["created.ts"]);
+    assert.deepEqual(report.skipped, []);
+    assert.equal(await exists(join(taskRoot, "created.ts")), false);
+  });
+
+  it("a created path whose bytes drifted is kept and reported as drift", async () => {
+    await writeFile(join(taskRoot, "created.ts"), "someone else's bytes");
+    const ops = await expectPlan([
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e1",
+        null,
+        "created.ts",
+        "",
+        "CONTENT",
+        true
+      ),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      ops,
+    });
+    assert.deepEqual(report.restored, []);
+    assert.deepEqual(report.skipped, [
+      { relPath: "created.ts", reason: "drift" },
+    ]);
+    assert.equal(
+      await readFile(join(taskRoot, "created.ts"), "utf8"),
+      "someone else's bytes"
+    );
+  });
+
+  it("a created path already gone is still reported restored (ENOENT = achieved)", async () => {
+    // The segment created an empty file; the user then removed it. The live
+    // read is ENOENT-empty, which equals the empty postimage, so the guard
+    // hits and the delete is already satisfied — not a failure.
+    const ops = await expectPlan([
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e1",
+        null,
+        "gone.ts",
+        "",
+        "",
+        true
+      ),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      ops,
+    });
+    assert.deepEqual(report.restored, ["gone.ts"]);
+    assert.equal(await exists(join(taskRoot, "gone.ts")), false);
+  });
+
+  it("an edit of an already-empty file writes empty bytes back and keeps the file", async () => {
+    // The capture said the path EXISTED (absentBefore false) with empty
+    // bytes; restore must put empty bytes at a live file, never delete it.
+    await writeFile(join(taskRoot, "empty.ts"), "X");
+    const ops = await expectPlan([
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "e1",
+        null,
+        "empty.ts",
+        "",
+        "X",
+        false
+      ),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      ops,
+    });
+    assert.deepEqual(report.restored, ["empty.ts"]);
+    assert.equal(await readFile(join(taskRoot, "empty.ts"), "utf8"), "");
   });
 });

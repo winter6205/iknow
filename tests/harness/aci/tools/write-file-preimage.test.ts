@@ -5,6 +5,9 @@
  *   - the injected capture is called exactly once, just before the write, with
  *     preBytes = current on-disk content (empty for a brand-new file) and
  *     postBytes = the incoming content, plus relPath/rootIdentity/ids forwarded
+ *   - absentBefore is capture-time evidence only: ENOENT on the pre-write read
+ *     → true; an existing (even empty) file → false (ADR-0121: an empty
+ *     preimage must never masquerade as a create)
  *   - a THROWING capture aborts the write: the handler rejects and the target
  *     file is left untouched on disk (bytes never hit disk)
  */
@@ -53,6 +56,7 @@ describe("write_file → preimage port E2E", () => {
     assert.equal(inp.rootIdentity, "/canonical/id");
     assert.equal(inp.toolUseId, "tu-1");
     assert.equal(inp.conversationId, "conv-1");
+    assert.equal(inp.absentBefore, false, "existing file → no absence claim");
     // 写确实发生了
     assert.equal(await readFile(file, "utf8"), newContent);
   });
@@ -68,10 +72,30 @@ describe("write_file → preimage port E2E", () => {
 
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.preBytes.length, 0);
+    assert.equal(seen[0]!.absentBefore, true, "ENOENT at capture = created");
     assert.equal(seen[0]!.postBytes.toString("utf8"), "fresh\n");
     // rootIdentity 缺席 → 回退到 live root
     assert.equal(seen[0]!.rootIdentity, root);
     assert.equal(await readFile(join(root, "brand-new.ts"), "utf8"), "fresh\n");
+  });
+
+  it("(i'') 已存在的空文件: preBytes 为空但 absentBefore=false", async () => {
+    // The ADR-0121 rejection case: an existing empty file reads as empty
+    // bytes exactly like a create — only the ENOENT evidence tells them
+    // apart, and here the file exists so absence must not be claimed.
+    const file = join(root, "empty.ts");
+    await writeFile(file, "", "utf8");
+    const seen: PreimageCaptureInput[] = [];
+    const tool = createWriteFileTool(root, {
+      preimageCapture: (i) => {
+        seen.push(i);
+      },
+    });
+    await tool.handler({ path: "empty.ts", content: "filled\n" }, ctx);
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.preBytes.length, 0);
+    assert.equal(seen[0]!.absentBefore, false);
   });
 
   it("(ii) 抛出的 capture → handler reject 且目标文件保持原样 (字节从未落盘)", async () => {

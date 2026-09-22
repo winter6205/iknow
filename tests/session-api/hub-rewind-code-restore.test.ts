@@ -10,9 +10,19 @@
  *   - an unreadable preimage blob aborts: workspace untouched AND the head
  *     stays where it was (the transcript never advances past code we failed to
  *     restore).
+ *   - a segment that created a file (capture-time absence evidence on the
+ *     ref) deletes that file on restore; a path that existed — empty included
+ *     — gets bytes back and stays (ADR-0121).
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -47,13 +57,15 @@ function ref(
   relPath: string,
   preSha: string,
   postSha: string,
-  root: string
+  root: string,
+  absentBefore?: boolean
 ): PreimageRef {
   return {
     relPath,
     rootIdentity: root,
     preimageSha: preSha,
     postimageSha: postSha,
+    ...(absentBefore === true ? { absentBefore: true } : {}),
   };
 }
 
@@ -69,6 +81,7 @@ async function seed(
     post: string;
     root?: string;
     capturePre?: boolean;
+    absentBefore?: boolean;
   }>
 ): Promise<void> {
   const dir = resolveConversationDir({
@@ -84,7 +97,10 @@ async function seed(
       p.capturePre === false
         ? codeSnapshotSha(`UNCAPTURED-${p.pre}`)
         : await captureCodeSnapshot(dir, p.pre);
-    refByEvent.set(p.event, ref(p.relPath, preSha, postSha, root));
+    refByEvent.set(
+      p.event,
+      ref(p.relPath, preSha, postSha, root, p.absentBefore)
+    );
   }
   const parentByEvent: Record<string, string | null> = {
     e0: null,
@@ -224,5 +240,38 @@ describe("rewindSession restoreCode", () => {
     );
     assert.equal(await store.readHead("hc-blob"), "e3", "head never moved");
     assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+  });
+
+  it("segment created a file: restore removes it while bytes match the postimage", async () => {
+    await writeFile(join(taskRoot, "created.ts"), "FRESH");
+    await seed("hc-create", [
+      {
+        event: "e1",
+        relPath: "created.ts",
+        pre: "",
+        post: "FRESH",
+        absentBefore: true,
+      },
+    ]);
+    const res = await hub().rewindSession("hc-create", "e0", true);
+    assert.equal(res.head, "e0");
+    assert.deepEqual(res.codeRestore?.restored, ["created.ts"]);
+    await assert.rejects(
+      () => access(join(taskRoot, "created.ts")),
+      (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT"
+    );
+  });
+
+  it("segment edited an already-empty file: empty bytes back, file stays", async () => {
+    await writeFile(join(taskRoot, "was-empty.ts"), "X");
+    // No absence evidence on the ref: the path existed (empty) before the
+    // write, so restore writes empty bytes and must not delete the file.
+    await seed("hc-empty-edit", [
+      { event: "e1", relPath: "was-empty.ts", pre: "", post: "X" },
+    ]);
+    const res = await hub().rewindSession("hc-empty-edit", "e0", true);
+    assert.equal(res.head, "e0");
+    assert.deepEqual(res.codeRestore?.restored, ["was-empty.ts"]);
+    assert.equal(await readFile(join(taskRoot, "was-empty.ts"), "utf8"), "");
   });
 });

@@ -6,6 +6,7 @@
  *   - relPath derived as relative(rootAtCall, absPath)
  *   - rootIdentity falls back to rootAtCall; opts.rootIdentity wins when present
  *   - preBytes/postBytes are Buffers equal to the input strings
+ *   - absentBefore is forwarded verbatim (capture-time evidence, not derived)
  *   - toolUseId / conversationId forwarded from the call arg
  *   - a throwing port propagates (write must abort)
  * The harness must NOT import session-api (Gate B): this file imports only the
@@ -30,6 +31,7 @@ describe("capturePreimageBeforeWrite", () => {
         absPath: "/root/a.ts",
         preBytes: "o",
         postBytes: "n",
+        absentBefore: false,
       }
     );
     // opts 整体 undefined 同样 no-op
@@ -38,6 +40,7 @@ describe("capturePreimageBeforeWrite", () => {
       absPath: "/root/a.ts",
       preBytes: "o",
       postBytes: "n",
+      absentBefore: false,
     });
   });
 
@@ -57,6 +60,7 @@ describe("capturePreimageBeforeWrite", () => {
         absPath,
         preBytes: "OLD BYTES",
         postBytes: "NEW BYTES",
+        absentBefore: true,
       }
     );
 
@@ -73,6 +77,8 @@ describe("capturePreimageBeforeWrite", () => {
     // ids 从 call 转发
     assert.equal(inp.toolUseId, "tool-42");
     assert.equal(inp.conversationId, "conv-7");
+    // absentBefore 原样转发（true 用例；false 用例在 (b2) 的站点里）
+    assert.equal(inp.absentBefore, true);
   });
 
   it("(b2) opts.rootIdentity 存在时优先于 rootAtCall", async () => {
@@ -90,11 +96,14 @@ describe("capturePreimageBeforeWrite", () => {
         absPath: "/live/root/x.ts",
         preBytes: "",
         postBytes: "",
+        absentBefore: false,
       }
     );
     assert.equal(captured?.rootIdentity, "/canonical/id");
     // relPath 仍相对 rootAtCall 计算, 不受 rootIdentity 影响
     assert.equal(captured?.relPath, "x.ts");
+    // false 同样原样转发（不得被 falsy 吞成 undefined）
+    assert.equal(captured?.absentBefore, false);
   });
 
   it("call undefined → toolUseId/conversationId 为 undefined, 仍调用端口", async () => {
@@ -111,6 +120,7 @@ describe("capturePreimageBeforeWrite", () => {
         absPath: "/root/f.ts",
         preBytes: "p",
         postBytes: "q",
+        absentBefore: true,
       }
     );
     assert.equal(captured?.toolUseId, undefined);
@@ -134,6 +144,7 @@ describe("capturePreimageBeforeWrite", () => {
             absPath: "/root/a.ts",
             preBytes: "o",
             postBytes: "n",
+            absentBefore: false,
           }
         ),
       /capture exploded/

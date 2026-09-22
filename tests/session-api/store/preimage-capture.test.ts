@@ -56,6 +56,7 @@ const input = (
   rootIdentity: "/identity/root",
   preBytes: Buffer.from("old bytes", "utf8"),
   postBytes: Buffer.from("new bytes", "utf8"),
+  absentBefore: false,
   ...over,
 });
 
@@ -93,6 +94,30 @@ describe("createPreimageCapture", () => {
       preimageSha: preSha,
       postimageSha: postSha,
     });
+  });
+
+  it("(a2) absentBefore 证据进 ref：true → ref 带 absentBefore；false → 键不存在", async () => {
+    // Conditional spread keeps new rows minimal: a false (the common edit)
+    // leaves the ref byte-identical to legacy lines, one schema for both.
+    const capture = createPreimageCapture({
+      getProjectDir: () => projectDir,
+      ledger,
+      isEnabled: () => true,
+    });
+    await capture(input({ toolUseId: "tu-created", absentBefore: true }));
+    await capture(input({ toolUseId: "tu-existed", absentBefore: false }));
+    const preSha = codeSnapshotSha(input().preBytes);
+    const postSha = codeSnapshotSha(input().postBytes);
+    const consumed = ledger.consume("conv-1", ["tu-created", "tu-existed"]);
+    assert.deepEqual(consumed.get("tu-created"), {
+      relPath: "src/a.ts",
+      rootIdentity: "/identity/root",
+      preimageSha: preSha,
+      postimageSha: postSha,
+      absentBefore: true,
+    });
+    const plain = consumed.get("tu-existed")!;
+    assert.ok(!("absentBefore" in plain), "false leaves no key");
   });
 
   it("(b) isEnabled false → 无 blob, 无 ledger 条目", async () => {
