@@ -2,12 +2,14 @@
 /**
  * tests/tui/streaming-silence-notice.test.tsx
  *
- * Streaming-arm silence ~20s → the notice text becomes "Waiting for model
- * output" (English, consistent with the sticky-notice convention); the box
- * does not auto-dismiss (sticky discipline); one rewrite per silence episode
- * (streaming bytes resume → a later silence may trigger once more); turn-end
- * behavior is unaffected (existing cancelled / completed / abnormal stopReason
- * settlement paths).
+ * Streaming-arm silence past the threshold (default 60_000, host-injectable;
+ * the on-screen copy carries no duration) → the notice text becomes "Waiting
+ * for model output" (English, consistent with the sticky-notice convention);
+ * the box does not auto-dismiss (sticky discipline); one rewrite per silence
+ * episode: any resumed stream event clears the waiting copy (it asserts "no
+ * new stream bytes", false once bytes arrive) and a later silence episode
+ * may land it again; turn-end behavior is unaffected (existing cancelled /
+ * completed / abnormal stopReason settlement paths).
  *
  * Phase gate (second half of this file): "no streaming bytes" is an anomaly
  * signal only in the **model phase**. During tool execution (incl. permission
@@ -16,12 +18,13 @@
  * still on screen (not overridden by a more specific source), it is cleared —
  * no stale hints linger.
  *
- * Uses a fake bridge + an injectable silence threshold (default 20_000 → tests
- * use 150ms) to avoid real sleeps; the fake bridge emits no onStream events →
- * simulates "connection established but the model is stuck producing nothing";
- * a sibling case sends one text_delta mid-turn (streaming bytes resume) →
- * silence continues, verifying the timer reset + no repeated setNotice within
- * the same episode (spam guard).
+ * Uses a fake bridge + an injectable silence threshold (default 60_000 →
+ * tests use 150-3000ms) to avoid real sleeps; the fake bridge emits no
+ * onStream events → simulates "connection established but the model is
+ * stuck producing nothing"; sibling cases pulse text_delta mid-turn
+ * (streaming bytes resume) → verifying the resume clears the waiting copy,
+ * a continuing stream does not re-raise it (spam guard), and a fresh
+ * cross-threshold gap lands it again.
  *
  * Turn settlement is controlled explicitly by the release latch, not by wall
  * clock — all assertions land inside the "turn in flight" interval; load only
@@ -42,6 +45,7 @@ import {
   TuiApp,
   createToolEventSink,
   nextToolPhaseActive,
+  resolveStreamingSilenceNoticeMs,
 } from "../../src/tui/app.js";
 import type { TuiBridge, TuiPostResult } from "../../src/tui/hub-bridge.js";
 import { createInflightRegistry } from "../../src/tui/hub-bridge.js";
@@ -80,6 +84,8 @@ interface TurnControl {
   pulse(): void;
   /** Emit tool_call_start (model yields tool_use → tool phase, no stream events after). */
   toolStart(): void;
+  /** Emit transport_retry (a more-specific notice source: sets its own progress copy). */
+  retry(): void;
   /** Emit agent_status (tool batch settled, next model call starting → back to model phase). */
   agentStatus(): void;
   /** Release the turn so postMessage returns its stopReason (settlement takes the existing completed path). */
@@ -106,6 +112,9 @@ function agentStatusEvent(): HarnessStreamEvent {
 
 /** Stable substring of the silence waiting text (English copy, single render surface STREAMING_SILENCE_NOTICE_LINES). */
 const SILENCE_NOTICE_LINE = "Waiting for model output";
+
+/** Stable substring of the transport_retry progress copy (a more-specific notice source). */
+const RETRY_NOTICE_LINE = "连接重试";
 
 function fakeBridge(opts: FakeBridgeOptions): {
   bridge: TuiBridge;
@@ -151,6 +160,13 @@ function fakeBridge(opts: FakeBridgeOptions): {
     pulse: () => emit({ type: "text_delta", text: "hi" }),
     toolStart: () =>
       emit({ type: "tool_call_start", id: TOOL_USE_ID, name: "bash" }),
+    retry: () =>
+      emit({
+        type: "transport_retry",
+        attempt: 1,
+        maxAttempts: 3,
+        detail: "429",
+      }),
     agentStatus: () => emit(agentStatusEvent()),
     release: () => releaseTurn?.(),
   };
@@ -297,43 +313,47 @@ describe("TUI 流式静默 notice（T2）", () => {
     await app.destroy();
   }, 30_000);
 
-  test("流式字节恢复不清 notice，静默再发生仍只改一次文案（不 spam）", async () => {
-    // Timeline (threshold 200ms, turn held by the release latch):
-    //   0ms    turn starts
-    //   200ms  silence timer expires → notice shows the waiting text
-    //   then   control.pulse() emits text_delta (streaming bytes resume) →
-    //          onStream resets the timer but does NOT clear the notice
-    //   later  a new silence window expires → the waiting text is still
-    //          visible in the next episode
-    // Assertion surface: (a) after pulse lands, the notice was not spuriously
-    // cleared by the "resume" event; (b) during the post-resume silence the
-    // box is still there; (c) no unhandled rejection (clean timer lifecycle).
+  test("流式字节恢复即清等待文案；持续流不重复触发；新的跨阈值静默再次落屏（每 episode 一次，不 spam）", async () => {
+    // Timeline (threshold 3000ms, turn held by the release latch):
+    //   silence crosses the threshold → the waiting text lands
+    //   control.pulse() emits text_delta → the resume clears the waiting
+    //     copy (the copy claims "no new stream bytes", false once bytes
+    //     arrive)
+    //   stream keeps flowing (each gap far below the threshold) → the copy
+    //     is never re-raised: one notice per silence episode (spam guard)
+    //   pulses stop, a fresh cross-threshold gap → the copy lands again
+    //     (the clear is not a one-shot disarm)
     // The turn is never released → settlement cannot race the assertions.
     const app = await mount({
       bridgeOpts: { stopReason: "completed" },
-      streamingSilenceNoticeMs: 200,
+      streamingSilenceNoticeMs: 3000,
     });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("go");
     await app.pressEnter();
     await app.control.started;
-    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 4000);
+    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 8000);
 
-    // (a) the notice is still there after the stream resumes: onStream resets
-    // the timer but does NOT clear the notice. pulse() calls onStream
-    // synchronously → by return the event has reached the app, no latch needed.
+    // Resume clears the waiting copy. The clear runs synchronously inside
+    // pulse() (onStream passes the choke point before return); the frame is
+    // polled below the re-armed 3000ms window, so a re-land can never be
+    // mistaken for "not yet cleared".
     app.control.pulse();
-    await app.setup.renderOnce();
-    expect(app.setup.captureCharFrame()).toContain(SILENCE_NOTICE_LINE);
+    await untilFrame(app.setup, (f) => !f.includes(SILENCE_NOTICE_LINE), 400);
 
-    // (b) silence again after resume (≥ 2× threshold) → the waiting text is
-    // still visible (the box was not swallowed by the resume event; the next
-    // episode still shows it). The turn is not released → load can only delay
-    // the assertions, never clear them at settlement.
-    await new Promise((r) => setTimeout(r, 500));
-    await app.setup.renderOnce();
-    expect(app.setup.captureCharFrame()).toContain(SILENCE_NOTICE_LINE);
+    // A continuing stream must not re-raise the waiting copy: each 100ms
+    // pulse lands far inside the 3000ms window, so between pulses the steady
+    // frame is observable with a single render (no state transition races).
+    for (let i = 0; i < 7; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      app.control.pulse();
+      await app.setup.renderOnce();
+      expect(app.setup.captureCharFrame()).not.toContain(SILENCE_NOTICE_LINE);
+    }
+
+    // Silence resumes past the threshold → the waiting text lands again.
+    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 8000);
 
     expect(rejections).toHaveLength(0);
 
@@ -368,7 +388,8 @@ describe("TUI 流式静默 notice（T2）", () => {
 
   test("工具相位跨静默阈值 → 不落等待文案；回到模型相位后仍会给出提示", async () => {
     // Regression pin: the harness produces no stream events during tool
-    // execution (by design), yet previously silence ~20s in that phase falsely
+    // execution (by design), yet previously silence past the threshold in
+    // that phase falsely
     // reported "Waiting for model output / Check your network". The phase is
     // driven explicitly by control (threshold 150ms): toolStart() enters the
     // tool phase (turn held by release, phase persists) → sleep past 4+
@@ -477,6 +498,50 @@ describe("TUI 流式静默 notice（T2）", () => {
     await app.destroy();
   }, 30_000);
 
+  test("模型相位已上屏的等待文案在 text_delta 恢复后立即消失（不误清其他来源 notice）", async () => {
+    // On the configured model route a large tool input arrives as one delta
+    // after 65-174s of silence, so "bytes resumed but the box still claims no
+    // new stream bytes" is a routine false statement, not a corner case.
+    const app = await mount({
+      bridgeOpts: { stopReason: "completed" },
+      streamingSilenceNoticeMs: 3000,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await app.control.started;
+    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 8000);
+
+    // (a) resumed streaming bytes clear the waiting text; the next silence
+    // episode must then re-arm and land again (the clear is not a one-shot
+    // disarm).
+    app.control.pulse();
+    await untilFrame(app.setup, (f) => !f.includes(SILENCE_NOTICE_LINE), 400);
+    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 8000);
+
+    // (b) the clear rule is silence-copy-scoped only: transport_retry owns a
+    // more-specific notice. The retry + delta pair runs synchronously through
+    // the choke point (the silence clear fires first, then retry sets its own
+    // copy); poll for the first frame showing it, bounded well below the
+    // re-armed 3000ms window so the silence copy cannot re-land inside it.
+    app.control.retry();
+    app.control.pulse();
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes(RETRY_NOTICE_LINE) && !f.includes(SILENCE_NOTICE_LINE),
+      400
+    );
+    expect(frame).toContain(RETRY_NOTICE_LINE);
+    expect(frame).not.toContain(SILENCE_NOTICE_LINE);
+
+    expect(rejections).toHaveLength(0);
+
+    app.control.release();
+    await app.setup.renderOnce();
+    await app.destroy();
+  }, 30_000);
+
   test("清理: 移除 unhandledRejection 监听", () => {
     process.off("unhandledRejection", listener);
   });
@@ -526,5 +591,15 @@ describe("nextToolPhaseActive（相位门纯函数）", () => {
     expect(
       nextToolPhaseActive(false, { type: "thinking_delta", text: "x" })
     ).toBe(false);
+  });
+});
+
+describe("resolveStreamingSilenceNoticeMs（阈值默认值 SSOT）", () => {
+  // specs/transport-continue-persist.md invariant 3 pins the default window;
+  // nothing else in the suite would catch a revert to a shorter one (every
+  // TUI case injects its own threshold to avoid real sleeps).
+  test("无注入 → 60s 默认；宿主注入优先于默认", () => {
+    expect(resolveStreamingSilenceNoticeMs(undefined)).toBe(60_000);
+    expect(resolveStreamingSilenceNoticeMs(150)).toBe(150);
   });
 });

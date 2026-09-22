@@ -143,7 +143,9 @@ export interface LlmEnv {
    * exceed 2 minutes, and the old value misjudged "still thinking" as a dead
    * stream. The idle clock runs from step start, so it must leave enough
    * slack for queueing before the first delta; the UI side only changes the
-   * notice text at ~20s silence (never waits or interrupts).
+   * notice copy past its own silence threshold (60s default, host-injectable
+   * — see DEFAULT_STREAMING_SILENCE_NOTICE_MS in tui/app.tsx), it never waits
+   * or interrupts.
    *
    * Optional rather than required: `IknowEnv` literals are hand-written in
    * dozens of test / script spots; a required field would spread this change

@@ -1417,9 +1417,9 @@ export interface TuiAppProps {
   >;
   /**
    * On the streaming arm: how long without an onStream event before the
-   * notice is rewritten to "still waiting" (ms). Default = 20_000: ~20s of
-   * silence only updates the sticky notice copy, it does **not** auto-dismiss.
-   * Tests may inject a small value to avoid a real 20s
+   * notice is rewritten to "still waiting" (ms). Default = 60_000: silence
+   * past the threshold only updates the sticky notice copy, it does
+   * **not** auto-dismiss. Tests may inject a small value to avoid a real
    * sleep. Note: this is UI-feedback throttling, **not** the harness-side
    * idle / hardCap decision (the harness still decides fault class via
    * settings.llm.idleTimeoutMs, default 300_000 ≈ 5 min).
@@ -1434,24 +1434,30 @@ interface Notice {
 /**
  * UI-feedback throttle: how long the streaming arm may go without onStream
  * events before the notice copy changes to "waiting for model output". The
- * ~20s threshold is UI feedback only and **does not**
+ * 60s default is UI feedback only and **does not**
  * affect harness-side idle / hardCap decisions — those follow
  * settings.llm.idleTimeoutMs (env > settings > default 300_000, see env.ts).
  * The copy is rewritten in place rather than adding a new notice; the notice
- * box stays sticky (no TTL auto-dismiss).
+ * box stays sticky (no TTL auto-dismiss) until a stream event resumes.
+ * The copy carries no duration: the threshold is host-injectable, and long
+ * silence inside a buffered tool input is normal on this model route.
  *
  * Phase gate: by design the harness emits no stream events during tool
  * execution (incl. permission / ask waits), so "no stream bytes" does not
  * imply a stuck model — that phase is gated by `toolPhaseActive` (see
  * nextToolPhaseActive / armSilenceTimer) and must not land in the notice.
  */
-const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 20_000;
+const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 60_000;
 
 /**
  * Silence-threshold resolution, pushed down to this leaf function so the
  * `??` doesn't add cyclomatic complexity to the already at-limit `runTurnOnce`.
+ * Exported so the spec-pinned default value has an assertion: the threshold
+ * is a tuned constant, nothing else would catch a revert.
  */
-function resolveStreamingSilenceNoticeMs(override: number | undefined): number {
+export function resolveStreamingSilenceNoticeMs(
+  override: number | undefined
+): number {
   return override ?? DEFAULT_STREAMING_SILENCE_NOTICE_MS;
 }
 
@@ -1496,7 +1502,7 @@ export function nextToolPhaseActive(
  * Both lines stay shorter than the notice box inner width, so no wrapping.
  */
 const STREAMING_SILENCE_NOTICE_LINES: ReadonlyArray<string> = [
-  "⠿ Waiting for model output — ~20s with no new stream bytes.",
+  "⠿ Waiting for model output — no new stream bytes.",
   "Still in the model phase — no new stream bytes yet.",
 ];
 
@@ -3085,10 +3091,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
     // restore idle, do not reload (a reload overwrite would fail the refresh).
     let skipTurnRefresh = false;
-    // UI-only feedback throttle: after ~20s of streaming silence, rewrite
-    // the notice to "still waiting". Harness idle decisions are unaffected
-    // (they follow settings.llm.idleTimeoutMs). Closure vars, not React
-    // state: the timer handle is re-armed on every onStream event.
+    // UI-only feedback throttle: once the streaming arm goes quiet past the
+    // silence threshold, rewrite the notice to "still waiting". Harness idle
+    // decisions are unaffected (they follow settings.llm.idleTimeoutMs).
+    // Closure vars, not React state: the timer handle is re-armed on every
+    // onStream event.
     const silenceThresholdMs = resolveStreamingSilenceNoticeMs(
       props.streamingSilenceNoticeMs
     );
@@ -3106,6 +3113,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const armSilenceTimer = (): void => {
       clearSilenceTimer();
       silenceNoticeShown = false;
+      // Resumed stream bytes make the waiting copy false: it asserts "no new
+      // stream bytes" while bytes are arriving. Cleared here — the single
+      // choke point every onStream event passes, ahead of the per-type
+      // branches, so a notice set later in the same call (transport_retry) is
+      // not erased. Unconditional rather than gated on this turn's flag: the
+      // notice slot is shared across in-flight turns, so a copy another turn
+      // raised is just as false. The identity check leaves other-source
+      // notices untouched, and returning `prev` makes React bail out, so the
+      // per-delta cost is one updater call.
+      setNotice((prev) => (isStreamingSilenceNotice(prev) ? undefined : prev));
       if (silenceThresholdMs <= 0) return;
       silenceTimerId = setTimeout(() => {
         silenceTimerId = undefined;
@@ -3148,11 +3165,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       armSilenceTimer();
       draft.append(event);
       if (event.type === "tool_call_start") {
-        // The transient "waiting for model" notice is model-phase only:
-        // clear it from screen as soon as tool_use is emitted.
-        setNotice((prev) =>
-          isStreamingSilenceNotice(prev) ? undefined : prev
-        );
         // Seal before reading sealedCount: setState updaters run at render
         // time, so re-reading state inside one is a stale-read trap.
         draft.sealText();
@@ -3258,9 +3270,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     };
     try {
       // Arm the silence timer at turn start: even if the first stream byte
-      // takes 20s+ (stream setup stuck in backpressure / TLS handshake), the
-      // UI should reach the "still waiting" path. armSilenceTimer resets
-      // silenceNoticeShown, so later events aren't swallowed by the streak.
+      // arrives only past the threshold (stream setup stuck in backpressure
+      // / TLS handshake), the UI should reach the "still waiting" path.
+      // armSilenceTimer resets silenceNoticeShown, so later events aren't
+      // swallowed by the streak.
       armSilenceTimer();
       // Thinking override gate: send a per-turn override only when the user
       // actually changed thinking state (env default → no override). Logic:

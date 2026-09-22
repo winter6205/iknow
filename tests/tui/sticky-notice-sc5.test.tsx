@@ -45,7 +45,7 @@ const ABNORMAL_NOTICE_NEEDLE = "API error (404)";
 /** Stable substring of the streaming-silence notice (STREAMING_SILENCE_NOTICE_LINES). */
 const SILENCE_NOTICE_NEEDLE = "Waiting for model output";
 /**
- * Injected silence threshold: ~1/133 of the 20s default. The silence timer is
+ * Injected silence threshold: ~1/400 of the 60s default. The silence timer is
  * the only scheduled source that can still touch the notice after a turn ends,
  * so squeezing the cycle to 150ms lets a sub-second observation window cover
  * many timer cycles.
