@@ -234,13 +234,6 @@ export interface IknowSettingsVerify {
   onExhausted?: "report" | "escalate";
   /** Overall round cap. The default 12 is applied at the consumer; only a finite positive integer is legal. */
   maxRounds?: number;
-  /**
-   * Model routing ID for the classifier (the subagent LLM judge used when
-   * command is absent). Used as-is when set; by default it resolves to
-   * settings.llm.model. Only a non-empty string is legal (same discipline as
-   * command); code does not hardcode a model ID.
-   */
-  classifierModel?: string;
 }
 
 export interface IknowSettingsSecrets {
@@ -294,6 +287,11 @@ export interface IknowSettingsSubagent {
   taskTimeoutMs?: number;
   /** Concurrency cap for subagents simultaneously in starting/running; only a positive integer or `"unlimited"` takes effect. */
   maxConcurrentWorkers?: SubagentCapValue;
+  /**
+   * Worker model route (`provider/model`, same `providers[]` as `llm.model`).
+   * User layer only — the project allowlist never adopts `subagent` (ADR-0084).
+   */
+  model?: string;
 }
 
 /**
@@ -1063,17 +1061,13 @@ function parseVerify(raw: unknown): IknowSettingsVerify | undefined {
     out.onExhausted = raw.onExhausted;
   }
   if (isValidMaxTurns(raw.maxRounds)) out.maxRounds = raw.maxRounds;
-  if (isNonEmptyString(raw.classifierModel)) {
-    out.classifierModel = raw.classifierModel.trim();
-  }
   if (
     out.command === undefined &&
     out.rerunTemplate === undefined &&
     out.countRegex === undefined &&
     out.timeoutSec === undefined &&
     out.onExhausted === undefined &&
-    out.maxRounds === undefined &&
-    out.classifierModel === undefined
+    out.maxRounds === undefined
   )
     return undefined;
   return out;
@@ -1094,7 +1088,13 @@ function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
   if (isValidMaxConcurrentWorkers(raw.maxConcurrentWorkers)) {
     out.maxConcurrentWorkers = raw.maxConcurrentWorkers;
   }
-  if (out.taskTimeoutMs === undefined && out.maxConcurrentWorkers === undefined)
+  const model = typeof raw.model === "string" ? raw.model.trim() : "";
+  if (model !== "") out.model = model;
+  if (
+    out.taskTimeoutMs === undefined &&
+    out.maxConcurrentWorkers === undefined &&
+    out.model === undefined
+  )
     return undefined;
   return out;
 }
@@ -1121,19 +1121,13 @@ function mergeVerify(
   else if (user?.onExhausted !== undefined) out.onExhausted = user.onExhausted;
   if (project?.maxRounds !== undefined) out.maxRounds = project.maxRounds;
   else if (user?.maxRounds !== undefined) out.maxRounds = user.maxRounds;
-  if (project?.classifierModel !== undefined) {
-    out.classifierModel = project.classifierModel;
-  } else if (user?.classifierModel !== undefined) {
-    out.classifierModel = user.classifierModel;
-  }
   if (
     out.command === undefined &&
     out.rerunTemplate === undefined &&
     out.countRegex === undefined &&
     out.timeoutSec === undefined &&
     out.onExhausted === undefined &&
-    out.maxRounds === undefined &&
-    out.classifierModel === undefined
+    out.maxRounds === undefined
   )
     return undefined;
   return out;
@@ -1159,7 +1153,17 @@ function mergeSubagent(
   } else if (user?.maxConcurrentWorkers !== undefined) {
     out.maxConcurrentWorkers = user.maxConcurrentWorkers;
   }
-  if (out.taskTimeoutMs === undefined && out.maxConcurrentWorkers === undefined)
+  // subagent.model is user-layer only (spec / ADR-0084): a project file must never
+  // override it, so this reads the user arm alone — unlike the sibling fields,
+  // there is no project precedence to express here.
+  if (user?.model !== undefined) {
+    out.model = user.model;
+  }
+  if (
+    out.taskTimeoutMs === undefined &&
+    out.maxConcurrentWorkers === undefined &&
+    out.model === undefined
+  )
     return undefined;
   return out;
 }

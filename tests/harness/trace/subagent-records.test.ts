@@ -8,8 +8,10 @@
  * 1. jsonl sink writes all three record kinds: row shape (record_type literal /
  *    subagent_id carries the caller-supplied id / snake_case top-level keys /
  *    conversation_id instance-bound / no duplicate id carrier / ISO ts)
- * 2. absent optional fields (model/taskPreview/maxTurns/timeoutMs/error/
- *    exitCode/signal/reason/summary) → key omitted (Postel)
+ * 2. absent optional fields (taskPreview/maxTurns/timeoutMs/error/
+ *    exitCode/signal/reason/summary) → key omitted (Postel); ADR-0122: new
+ *    spawn records carry no model, a legacy-shaped record with model still
+ *    passes through unchanged
  * 3. always-throw writer → returns undefined, never throws (@throws never)
  * 4. noop implementation returns undefined (zero side effects)
  */
@@ -37,8 +39,7 @@ const SAMPLE_SPAWN: SubagentSpawnRecord = {
   startedAt: "2026-08-18T00:00:00.000Z",
   status: "ok",
   ts: "2026-08-18T00:00:00.000Z",
-  // Postel optional: model / taskPreview / maxTurns / timeoutMs — absent ⇒ key not written
-  model: "opus",
+  // Postel optional: taskPreview / maxTurns / timeoutMs — absent ⇒ key not written
   taskPreview: "实现 goal 生命周期",
   maxTurns: 5,
   timeoutMs: 7200000,
@@ -108,7 +109,9 @@ describe("createJsonlTraceService — recordSubagentSpawn (T4, #358)", () => {
     assert.equal(parsed.origin, "parent");
     assert.equal(parsed.started_at, "2026-08-18T00:00:00.000Z");
     assert.equal(parsed.status, "ok");
-    assert.equal(parsed.model, "opus");
+    // ADR-0122: the model field is no longer populated on new records; the
+    // manager never passes it, so the key is absent.
+    assert.ok(!("model" in parsed), "model must not be written");
     assert.equal(parsed.task_preview, "实现 goal 生命周期");
     assert.equal(parsed.max_turns, 5);
     assert.equal(parsed.timeout_ms, 7200000);
@@ -139,6 +142,31 @@ describe("createJsonlTraceService — recordSubagentSpawn (T4, #358)", () => {
     assert.ok(!("task_preview" in parsed), "task_preview must be absent");
     assert.ok(!("max_turns" in parsed), "max_turns must be absent");
     assert.ok(!("timeout_ms" in parsed), "timeout_ms must be absent");
+  });
+
+  it("ADR-0122: legacy 形态 record（已含 model）仍被接受并原样落盘、行可解析", async () => {
+    // The SubagentSpawnRecord.model type field stays so previously stored
+    // lines that carry model keep parsing; the trace layer passes the
+    // legacy-shaped payload through unchanged.
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: "/tmp/unused-subagent-spawn-legacy.jsonl",
+      conversationId: "conv-subagent-spawn-legacy",
+      writer,
+    });
+    const legacy: SubagentSpawnRecord = {
+      id: "task-spawn-legacy",
+      taskId: "task-spawn-legacy",
+      origin: "parent",
+      startedAt: "2026-08-18T00:00:02.000Z",
+      status: "ok",
+      ts: "2026-08-18T00:00:02.000Z",
+      model: "opus",
+    };
+    const returned = await svc.recordSubagentSpawn(legacy);
+    assert.equal(returned, legacy.id);
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.equal(parsed.model, "opus");
   });
 
   it("@throws never: always-throw writer → 返回 undefined, 不抛", async () => {

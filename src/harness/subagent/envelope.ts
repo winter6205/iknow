@@ -3,7 +3,7 @@
  *
  * Two directions:
  *   - parent→child worker request (parseWorkerEnvelope):
- *       { task, systemPrompt?, disallowedTools?, model?, maxTurns?, timeoutMs?,
+ *       { task, systemPrompt?, disallowedTools?, maxTurns?, timeoutMs?,
  *         sandboxRoot, env?, role?, finalText?, evidenceContext? }
  *   - child→parent result (parseParentEnvelope / truncateEnvelopeResult):
  *       { status: "ok"|"failed", summary, result, fileRefs?, usage?, reason?,
@@ -55,7 +55,6 @@ export interface WorkerEnvelope {
   readonly task: string;
   readonly systemPrompt?: string;
   readonly disallowedTools?: readonly string[];
-  readonly model?: string;
   readonly maxTurns?: number;
   readonly timeoutMs?: number;
   readonly sandboxRoot: string;
@@ -283,14 +282,19 @@ export function makeEnvelopeAjv(): Ajv.default {
   return ajv;
 }
 
-/** Parent→child worker request schema (frozen; probe and product consume the same source). */
+/**
+ * Parent→child worker request schema (frozen; probe and product consume the same source).
+ * ADR-0122: the per-spawn `model` field is deleted; under
+ * `additionalProperties: false` a payload that still carries `model` is a
+ * ProtocolError (the request is stdin from a same-version parent, not a
+ * document read back across versions).
+ */
 export const WORKER_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
     task: { type: "string" },
     systemPrompt: { type: "string" },
     disallowedTools: { type: "array", items: { type: "string" } },
-    model: { type: "string" },
     maxTurns: { type: "integer", minimum: 1 },
     timeoutMs: { type: "integer", minimum: 1 },
     sandboxRoot: { type: "string" },

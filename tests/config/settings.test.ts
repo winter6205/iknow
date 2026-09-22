@@ -1188,104 +1188,35 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
     });
   });
 
-  it("classifierModel：非空串合法 → 透传 + trim（#128 verify 分类器，A7 槽位）", async () => {
-    const { home, cwd } = await makeSettings(
+  it("settings.verify.classifierModel is no longer a recognized field — dropped at parse, never stored (ADR-0122)", async () => {
+    // The classifier-model slot is gone; the worker route is owned by
+    // settings.subagent.model. A stale verify.classifierModel must not surface
+    // in IknowSettings, alone or mixed with legal fields.
+    const only = await makeSettings(
       { verify: { classifierModel: "  claude-haiku-4-5  " } },
       {}
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      verify: { classifierModel: "claude-haiku-4-5" },
-    });
-  });
-
-  it("classifierModel：空串/非字符串/数字/数组/null → 丢弃该字段（沿用 command 的 drop-not-throw 纪律）", async () => {
-    for (const bad of ["", "   ", 123, true, null, [], { foo: "bar" }]) {
-      const { home, cwd } = await makeSettings(
-        { verify: { command: "npm test", classifierModel: bad } },
-        {}
-      );
-      assert.deepEqual(
-        loadIknowSettings({ home, cwd }),
-        { verify: { command: "npm test" } },
-        `classifierModel=${JSON.stringify(bad)} 应丢弃`
-      );
-    }
-  });
-
-  it("classifierModel 与 command 互不耦合：仅 classifierModel → verify 段保留（command 缺时不透明关闭见 SC7，本字段独立）", async () => {
-    const { home, cwd } = await makeSettings(
-      { verify: { classifierModel: "claude-haiku-4-5" } },
-      {}
+    assert.deepEqual(
+      loadIknowSettings({ home: only.home, cwd: only.cwd }),
+      {},
+      "a verify section holding only classifierModel collapses to undefined"
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      verify: { classifierModel: "claude-haiku-4-5" },
-    });
-  });
 
-  it("classifierModel：project 覆盖 user（逐字段 project-wins-over-user）", async () => {
-    const { home, cwd } = await makeSettings(
-      { verify: { classifierModel: "user-model" } },
-      { verify: { classifierModel: "project-model" } }
-    );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      verify: { classifierModel: "project-model" },
-    });
-  });
-
-  it("classifierModel：project 非法值不覆盖 user 合法值（保留 user 值）", async () => {
-    for (const bad of ["", 0, null, true]) {
-      const { home, cwd } = await makeSettings(
-        { verify: { classifierModel: "user-model" } },
-        { verify: { classifierModel: bad } }
-      );
-      assert.deepEqual(
-        loadIknowSettings({ home, cwd }),
-        { verify: { classifierModel: "user-model" } },
-        `project classifierModel=${JSON.stringify(bad)} 应不覆盖 user`
-      );
-    }
-  });
-
-  it("classifierModel：与其它字段共存的合并结果（project 只覆盖部分字段）", async () => {
-    const { home, cwd } = await makeSettings(
+    const mixed = await makeSettings(
       {
         verify: {
           command: "user-test",
-          rerunTemplate: "user-template",
           timeoutSec: 300,
           classifierModel: "user-model",
         },
       },
       { verify: { command: "project-test", classifierModel: "project-model" } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      verify: {
-        command: "project-test",
-        rerunTemplate: "user-template",
-        timeoutSec: 300,
-        classifierModel: "project-model",
-      },
-    });
-  });
-
-  it("classifierModel：verify 段被整体丢弃时（仅 classifierModel 一个字段且非法）不产出 verify", async () => {
-    const { home, cwd } = await makeSettings(
-      { verify: { classifierModel: "" } },
-      {}
+    assert.deepEqual(
+      loadIknowSettings({ home: mixed.home, cwd: mixed.cwd }),
+      { verify: { command: "project-test", timeoutSec: 300 } },
+      "legal fields survive the merge while classifierModel is dropped"
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
-  });
-
-  it("classifierModel：返回对象深 frozen 含 verify.classifierModel（不可改）", async () => {
-    const { home, cwd } = await makeSettings(
-      { verify: { classifierModel: "claude-haiku-4-5" } },
-      {}
-    );
-    const s = loadIknowSettings({ home, cwd });
-    assert.ok(Object.isFrozen(s.verify));
-    assert.throws(() => {
-      (s.verify as { classifierModel: string }).classifierModel = "other";
-    }, TypeError);
   });
 
   // Assembly-layer fix: when command is missing, resolveVerifyConfig falls back to { command: "" }
@@ -1307,7 +1238,7 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
     assert.deepEqual(config, { command: "npm test", timeoutSec: 300 });
   });
 
-  it("resolveVerifyConfig 全字段透传：verify 段全字段 → 逐字段保留", async () => {
+  it("resolveVerifyConfig 全字段透传：verify 段全字段 → 逐字段保留；classifierModel 不再进 VerifyConfig（ADR-0122）", async () => {
     const { home, cwd } = await makeSettings(
       {
         verify: {
@@ -1330,23 +1261,19 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
       timeoutSec: 900,
       onExhausted: "escalate",
       maxRounds: 20,
-      classifierModel: "claude-haiku-4-5",
     });
+    assert.ok(!("classifierModel" in config));
   });
 
-  it("resolveVerifyConfig 只透传显式配置字段：command 未配 + 仅 classifierModel → { command: '', classifierModel }（默认值仍由消费点兜底）", async () => {
+  it("resolveVerifyConfig 丢弃 classifierModel：command 未配 + 仅 classifierModel → { command: '' }（judge 走 worker 路由，ADR-0122）", async () => {
     const { home, cwd } = await makeSettings(
       { verify: { classifierModel: "claude-haiku-4-5" } },
       {}
     );
     const config = resolveVerifyConfig(loadIknowSettings({ home, cwd }).verify);
-    assert.deepEqual(config, {
-      command: "",
-      classifierModel: "claude-haiku-4-5",
-    });
+    assert.deepEqual(config, { command: "" });
     assert.equal(config.timeoutSec, undefined);
     assert.equal(config.maxRounds, undefined);
-    assert.equal(config.onExhausted, undefined);
   });
 
   it("resolveVerifyConfig 非法值降级：字段级非法 → 丢弃（不产字段），command 空串兜底", async () => {

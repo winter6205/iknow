@@ -402,11 +402,6 @@ export function createSpawnSubAgentTool(
           description:
             "Denylist (priority over default). Defaults to ['spawn_subagent'].",
         },
-        model: {
-          type: "string",
-          description:
-            "Optional model override (inherits parent default if absent).",
-        },
         background: {
           type: "boolean",
           description:
@@ -561,7 +556,6 @@ export function createSpawnSubAgentTool(
         ...(mergedDisallowed !== undefined
           ? { disallowedTools: mergedDisallowed }
           : {}),
-        ...(typeof obj.model === "string" ? { model: obj.model } : {}),
         ...(typeof obj.maxTurns === "number" ? { maxTurns: obj.maxTurns } : {}),
         ...(typeof obj.timeoutMs === "number"
           ? { timeoutMs: obj.timeoutMs }

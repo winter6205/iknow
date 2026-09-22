@@ -47,7 +47,7 @@ import type { NodeContext, NodeExecutor, NodeOutcome } from "./types.js";
 export interface NodePlan {
   /** Task text handed to the subagent (worker envelope.task is required). */
   readonly task: string;
-  /** Optional systemPrompt / disallowedTools / model / maxTurns / timeoutMs / role. */
+  /** Optional systemPrompt / disallowedTools / maxTurns / timeoutMs / role. */
   readonly def?: Omit<SubAgentDefinition, "task">;
 }
 

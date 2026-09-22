@@ -101,6 +101,12 @@ describe("envelope wire schema freeze (#358 SC9)", () => {
     assert.deepEqual([...required].sort(), ["sandboxRoot", "task"]);
   });
 
+  it("WORKER_SCHEMA.properties 无 model（ADR-0122 删除 per-spawn 字段）", () => {
+    const props = (WORKER_SCHEMA as { properties: Record<string, unknown> })
+      .properties;
+    assert.ok(!("model" in props), "model must not be a schema property");
+  });
+
   it("WORKER_SCHEMA.maxTurns / timeoutMs 维持 minimum:1（D7 模型不可关寿命上限）", () => {
     const mins = collectMinConstraints(WORKER_SCHEMA);
     const maxTurns = mins.find((m) => m.path === "$.properties.maxTurns");

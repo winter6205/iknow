@@ -3,6 +3,8 @@
 Date: 2026-08-12
 Status: accepted
 
+> **Amendment 2026-09-22** (ADR-0122): §1 still holds for the **main session**. Optional user-layer `settings.subagent.model` is a worker route only; it is not a second source for `settings.llm.model`.
+>
 > **Amendment 2026-09-19** (ADR-0113): §1 still holds — the **main-session** `settings.llm.model` is fail-fast when missing. The optional `settings.llm.liteModel` does not change this clause.
 >
 > **Amendment 2026-09-12** (ADR-0084 Slice B): in the guard wording cited by §1 and §2, the tail pointing at `<cwd>/.iknow/settings.json` is **superseded** — `llm` is a user-layer key; project files only adopt `hooks` / `verify` / `secrets` / `permissions`, so the wording points only at `~/.iknow/settings.json` (`src/config/messages.ts`). §1's model-literal sole source, §2's apiKey single field and placeholder semantics, and §5's untouched scope all remain unchanged.

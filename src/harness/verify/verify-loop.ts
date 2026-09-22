@@ -140,8 +140,6 @@ export interface RunClassifierFn {
     readonly finalText: string | null;
     readonly signal?: AbortSignal;
     readonly cwd: string;
-    /** Classifier model slot (settings.verify.classifierModel ?? settings.llm.model). */
-    readonly model?: string;
     /**
      * Evidence report card. A separate RunClassifierFn parameter
      * (prompt, not the exam question); must not be concatenated into task.
@@ -749,7 +747,6 @@ async function runClassifierOnce(opts: {
   readonly runClassifier: RunClassifierFn;
   readonly signal?: AbortSignal;
   readonly cwd: string;
-  readonly model?: string;
   readonly summary: string;
   readonly finalText: string | null;
   /**
@@ -767,7 +764,6 @@ async function runClassifierOnce(opts: {
       finalText: opts.finalText,
       signal: opts.signal,
       cwd: opts.cwd,
-      ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.evidenceContext !== undefined
         ? { evidenceContext: opts.evidenceContext }
         : {}),
@@ -1219,9 +1215,6 @@ function runClassifierLoop(
         runClassifier,
         signal: options.signal,
         cwd: options.cwd,
-        ...(options.config.classifierModel !== undefined
-          ? { model: options.config.classifierModel }
-          : {}),
         summary,
         finalText: current.result.finalText,
         evidenceContext: lastEvidenceContext,

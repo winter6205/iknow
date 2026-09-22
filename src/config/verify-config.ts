@@ -25,11 +25,6 @@
  *  - Entrypoints without subagentManager (ask oneshot shape) → the assembly
  *    layer doesn't pass runClassifier, so verify-loop still goes
  *    transparently off at command="" (backward compatible); ask behavior is unchanged.
- *  - classifierModel default: when command is missing, runClassifierLoop's
- *    model may be undefined → run-classifier-adapter forwards to
- *    manager.spawn(def), and manager only writes model when
- *    def.model !== undefined; the worker falls back to env.llm.model. Hence
- *    this layer does not force-fill a model.
  */
 import type { IknowSettingsVerify } from "./settings.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
@@ -60,9 +55,6 @@ export function resolveVerifyConfig(
       ? { onExhausted: verify.onExhausted }
       : {}),
     ...(verify?.maxRounds !== undefined ? { maxRounds: verify.maxRounds } : {}),
-    ...(verify?.classifierModel !== undefined
-      ? { classifierModel: verify.classifierModel }
-      : {}),
   };
   return config;
 }

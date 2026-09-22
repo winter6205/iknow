@@ -2189,13 +2189,6 @@ export class SessionHub {
                           ? undefined
                           : createRunClassifierFromManager({
                               manager: this.subagentManager,
-                              ...(this.verifyConfig.classifierModel !==
-                              undefined
-                                ? {
-                                    classifierModel:
-                                      this.verifyConfig.classifierModel,
-                                  }
-                                : {}),
                             }),
                     })
                   : await (async () => {

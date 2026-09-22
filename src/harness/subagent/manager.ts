@@ -174,7 +174,7 @@ export interface SubAgentManager {
    * (over the limit still throws SubAgentCapacityError).
    * `def` carries only this call's turn fields (next task sentence /
    * parentTurnId / toolUseId / foreground-exclusion bit); identity and
-   * capability fields (role / model / maxTurns / sandboxRoot /
+   * capability fields (role / maxTurns / sandboxRoot /
    * disallowedTools …) are taken from the original def — rerun() the original
    * catalog role.
    * Optional on the interface so poll-only fakes stay structural.
@@ -718,7 +718,7 @@ function workerLedgerFields(
  * Resume-def merge: **identity and capability fields come from the original
  *
  // (ADR-0102)
- * def** (rerun() the original catalog role, same model / maxTurns / timeoutMs
+ * def** (rerun() the original catalog role, same maxTurns / timeoutMs
  * / sandboxRoot / disallowedTools / systemPrompt / conversationId
  * attribution); **turn and delivery-channel fields are recomputed per call**
  * (task next sentence / parentTurnId / toolUseId / foreground-exclusion bit).
@@ -1531,7 +1531,6 @@ export function createSubAgentManager(opts: {
           ...(taskPreviewSource.length > 0
             ? { taskPreview: taskPreviewSource }
             : {}),
-          ...(def.model !== undefined ? { model: def.model } : {}),
           ...(def.maxTurns !== undefined ? { maxTurns: def.maxTurns } : {}),
           ...(def.timeoutMs !== undefined ? { timeoutMs: def.timeoutMs } : {}),
         })
@@ -1863,7 +1862,6 @@ export function createSubAgentManager(opts: {
       ...(def.disallowedTools !== undefined && {
         disallowedTools: [...def.disallowedTools],
       }),
-      ...(def.model !== undefined && { model: def.model }),
       ...(def.maxTurns !== undefined && { maxTurns: def.maxTurns }),
       ...(def.timeoutMs !== undefined && { timeoutMs: def.timeoutMs }),
       ...(def.role !== undefined && { role: def.role }),

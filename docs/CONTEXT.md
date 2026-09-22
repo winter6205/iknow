@@ -23,6 +23,9 @@ _Avoid_: 把 compact 摘要当列表标题；有标题事件后还用 `extractTi
 **lite model**: 用户 settings `settings.llm.liteModel`——与 `llm.model` 同形的 `provider/model` 路由，走同一 `providers[]`，给无工具后台补全。缺席或失败不挡主会话。本切片唯一消费者是会话标题生成。ADR-0113。
 _Avoid_: 第二套 provider 表；lite 缺席时 fail-fast 启动；把 compact / memory extract / dream 自动改接到这个槽
 
+**sub-agent model route**: 用户层 `settings.subagent.model`，与 `settings.llm.model` 同形的 `provider/model`，走同一 `providers[]`，只决定工人适配器的路由。缺席、空、类型不对，或组不出传输时，工人用主会话路由，父会话不因此失败。ADR-0122。
+_Avoid_: `spawn_subagent` 的 `model` 参数；父模型当次指定；第二套 provider 表；项目 settings 覆盖；`IKNOW_SUBAGENT_MODEL`
+
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
@@ -416,6 +419,7 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 
 - `settings.llm.model`（字面值，唯一来源，trim 后非空串）: **主会话**模型路由 ID 的全局可寻址位；缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，不再有 hardcoded 兜底。
 - `settings.llm.liteModel?`（可选，同形 `provider/model`）: **lite model** 槽，见上条术语；缺失不 fail-fast。ADR-0113。
+- `settings.subagent.model?`（可选，同形 `provider/model`）: **sub-agent model route**。用户层；项目文件不采纳。ADR-0122。
 - `settings.llm.apiKey`（字面或 `${VAR}` / `$VAR` 占位符）: 唯一 key 承载。字面 → 原样；占位符 → 经 `expandPlaceholders` 从 `process.env[VAR]` 优先 / `.env.local` / `.env` 兜底解析。解析不到 → undefined（消费点守卫抛「no API key configured」）。
 - `settings.llm.fallback?: string[]`: 用户自配的模型 fallback 列表（代码不预置任何 fallback）。
 - `settings.llm.providers?: LlmProvider[]`: **LLM provider** 注册表——用户层键（项目文件不采纳，沿 ADR-0084）；每条含 `id` / `baseUrl` / `apiKeyEnv` / `headers?` / `models[]`（`id` / `name?` / `contextWindow?` / `maxTokens?`）；**仅 anthropic 格式**，baseUrl + apiKeyEnv 必填；`loadIknowEnv` 按 `settings.llm.model = "<provider>/<model>"` 拆头查表，命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`（env 缺席 → 抛「no API key for provider <id>」）；**wire model** = 尾段 `models[].id`，不是整段路由。未命中 → fallback `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`（今日路径逐字节一致，back-compat）。非法字段（id 空串 / baseUrl 非字符串 / apiKeyEnv 非字符串 / models 非数组）整条 drop，不静默。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。

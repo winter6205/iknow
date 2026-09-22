@@ -63,7 +63,16 @@ import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 function canRunSandbox(): boolean {
   const r = spawnSync(
     "bwrap",
-    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    [
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--unshare-net",
+      "--",
+      "/bin/true",
+    ],
     { stdio: "ignore" }
   );
   return r.status === 0;
@@ -196,10 +205,12 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     rmSync(markerPath, { force: true });
     // Judge envelope script: 1st spawn → pass (first turn completed → judge
     // passes → loop passed, never silently closed). History shape matches a bare run (a pass doesn't change the assembly surface).
-    const spawnedDefs: Array<{ task: string; model: string | undefined }> = [];
+    // ADR-0122: the judge spawn def carries no model — the judge inherits the
+    // worker route, so only `task` is captured for the spawn-count assert.
+    const spawnedDefs: Array<{ task: string | undefined }> = [];
     const manager: SubAgentManager = {
       spawn: (def) => {
-        spawnedDefs.push({ task: def.task, model: def.model });
+        spawnedDefs.push({ task: def.task });
         return { taskId: "judge-1" };
       },
       queryBuffer: () => ({ status: "completed" }),

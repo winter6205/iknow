@@ -2,7 +2,7 @@
  * Subagent role — SubAgentDefinition + deny-list assembly trimming.
  *
  * SubAgentDefinition is the typed form of a subagent role declaration
- * (isomorphic to envelope.ts's systemPrompt / disallowedTools / model /
+ * (isomorphic to envelope.ts's systemPrompt / disallowedTools /
  * maxTurns / timeoutMs fields), assembled by the manager layer from user
  * config and sealed into the worker envelope.
  *
@@ -27,7 +27,6 @@ import { mergeDisallowedTools } from "./capability.js";
 export interface SubAgentDefinition {
   readonly systemPrompt?: string;
   readonly disallowedTools?: ReadonlyArray<string>;
-  readonly model?: string;
   readonly maxTurns?: number;
   readonly timeoutMs?: number;
   /**

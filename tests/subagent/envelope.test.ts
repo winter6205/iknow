@@ -20,7 +20,6 @@ describe("subagent envelope schema (SC13 / D1)", () => {
         task: "investigate X",
         systemPrompt: "be concise",
         disallowedTools: ["edit_file"],
-        model: "opus",
         maxTurns: 5,
         timeoutMs: 30000,
         sandboxRoot: "/tmp/sb",
@@ -30,11 +29,24 @@ describe("subagent envelope schema (SC13 / D1)", () => {
     assert.equal(env.task, "investigate X");
     assert.equal(env.systemPrompt, "be concise");
     assert.deepEqual(env.disallowedTools, ["edit_file"]);
-    assert.equal(env.model, "opus");
     assert.equal(env.maxTurns, 5);
     assert.equal(env.timeoutMs, 30000);
     assert.equal(env.sandboxRoot, "/tmp/sb");
     assert.deepEqual(env.env, { FOO: "bar" });
+  });
+
+  it("ADR-0122: worker payload carrying model → ProtocolError (additionalProperties:false)", () => {
+    assert.throws(
+      () =>
+        parseWorkerEnvelope(
+          JSON.stringify({
+            task: "t",
+            sandboxRoot: "/tmp/sb",
+            model: "opus",
+          })
+        ),
+      ProtocolError
+    );
   });
 
   it("parses a minimal worker request (only required fields)", () => {
@@ -378,7 +390,6 @@ describe("subagent envelope types (SC2 field shape)", () => {
       sandboxRoot: "/tmp/sb",
       systemPrompt: "p",
       disallowedTools: ["a"],
-      model: "m",
       maxTurns: 3,
       timeoutMs: 1000,
       env: { K: "v" },

@@ -256,6 +256,11 @@ export interface SubagentSpawnRecord {
   readonly taskPreview?: string;
   readonly maxTurns?: number;
   readonly timeoutMs?: number;
+  /**
+   * ADR-0122: no longer written on new records (the per-spawn model field was
+   * deleted). The type field stays so previously stored lines that carry
+   * `model` still parse.
+   */
   readonly model?: string;
   readonly error?: TraceError;
 }

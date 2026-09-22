@@ -430,7 +430,6 @@ describe("SubAgentManager spawn → completed", () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({
       systemPrompt: "be concise",
-      model: "opus",
     });
     assert.ok(taskId.length > 0);
 
@@ -446,7 +445,6 @@ describe("SubAgentManager spawn → completed", () => {
     const def: SubAgentDefinition = {
       systemPrompt: "p",
       disallowedTools: ["edit_file"],
-      model: "opus",
       maxTurns: 5,
       timeoutMs: 30000,
     };
@@ -462,14 +460,16 @@ describe("SubAgentManager spawn → completed", () => {
     assert.equal(payload.sandboxRoot, realpathSync(process.cwd()));
     assert.equal(payload.systemPrompt, "p");
     assert.deepEqual(payload.disallowedTools, ["edit_file"]);
-    assert.equal(payload.model, "opus");
+    // ADR-0122: the per-spawn model field is deleted — the manager writes no
+    // `model` key into the worker payload.
+    assert.ok(!("model" in payload), "payload must not carry model");
     assert.equal(payload.maxTurns, 5);
     assert.equal(payload.timeoutMs, 30000);
   });
 
   it("worker 侧读 stdin 到 EOF 拿到整条 payload 行 (真 worker 的 for-await 契约)", async () => {
     const { manager, spawned, spawnCalls } = makeHarness();
-    manager.spawn({ systemPrompt: "p", model: "opus" });
+    manager.spawn({ systemPrompt: "p" });
     const chunks: string[] = [];
     // mirrors the real worker's consumption shape: for-await to EOF. If the
     // manager never end()s stdin, EOF never arrives here and the worker never
@@ -1198,12 +1198,11 @@ describe("SubAgentDefinition local definition typecheck", () => {
     const def: SubAgentDefinition = {
       systemPrompt: "p",
       disallowedTools: ["spawn_subagent", "edit_file"],
-      model: "opus",
       maxTurns: 5,
       timeoutMs: 30000,
     };
     assert.equal(def.maxTurns, 5);
-    assert.equal(def.model, "opus");
+    assert.equal(def.systemPrompt, "p");
   });
 
   it("accepts an empty definition (all fields optional)", () => {
@@ -1337,7 +1336,7 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
 
   it("task 缺席 → taskPreview 为空串 (回退不落全文)", () => {
     const { manager } = makeHarness();
-    manager.spawn({ model: "opus" });
+    manager.spawn({});
     const items = manager.listSubagents();
     assert.equal(items[0]!.taskPreview, "");
   });

@@ -38,6 +38,7 @@ import {
   loadIknowEnv,
   wireModelFromRoute,
   type IknowEnv,
+  type SubagentModelEnv,
 } from "../../config/env.js";
 import { loadIknowSettings } from "../../config/settings.js";
 import {
@@ -562,13 +563,18 @@ function todoLedgerRegistryOpts(
  * (the ratchet only allows flat/down), and this is the single-responsibility
  * "env → client" boundary anyway.
  */
-function createWorkerAnthropicClient(env: IknowEnv): Anthropic {
+function createWorkerAnthropicClient(
+  env: IknowEnv,
+  route?: SubagentModelEnv
+): Anthropic {
+  // A resolved worker route supplies the whole transport triple — when it is
+  // present but carries no headers, defaultHeaders stays unset rather than
+  // borrowing the main-session headers (which would mix two providers).
+  const headers = route === undefined ? env.llm.headers : route.headers;
   return new Anthropic({
-    apiKey: env.llm.apiKey,
-    baseURL: env.llm.baseUrl,
-    ...(env.llm.headers !== undefined
-      ? { defaultHeaders: env.llm.headers }
-      : {}),
+    apiKey: route?.apiKey ?? env.llm.apiKey,
+    baseURL: route?.baseUrl ?? env.llm.baseUrl,
+    ...(headers !== undefined ? { defaultHeaders: headers } : {}),
   });
 }
 
@@ -652,15 +658,17 @@ export async function createWorkerRuntime(
   // subagent focuses on execution and never re-prompts the operator y/N.
   const askUser = createNoAskUser();
 
+  const workerRoute = env.subagent?.model;
   const adapter =
     opts.model ??
     withTransportRetry(
       createRealAnthropicAdapter({
-        // env.llm.headers → client defaultHeaders; see
-        // (ADR-0093)
-        // `createWorkerAnthropicClient` (conditional spread, key absent if unset).
-        client: createWorkerAnthropicClient(env),
-        model: wireModelFromRoute(env.llm.model),
+        // A resolved `settings.subagent.model` route supplies the wire model and
+        // the provider triple (client); absent → the main-session llm transport.
+        // maxTokens / thinking stay the MAIN llm values even when the route
+        // differs (ADR-0093 host-level sampling).
+        client: createWorkerAnthropicClient(env, workerRoute),
+        model: wireModelFromRoute(workerRoute?.model ?? env.llm.model),
         maxTokens: env.llm.maxOutputTokens,
         temperature: env.llm.temperature,
         thinking: buildThinkingParams(env.llm),

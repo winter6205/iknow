@@ -33,19 +33,27 @@ import {
 } from "./workspace-root.js";
 
 /**
- * Routing result after `settings.llm.liteModel` hits the providers registry —
- * the transport triple (baseUrl/apiKey/headers) comes from the same chain as
- * the main model. `apiKey` always has a value on the success path
- * (`resolveLlmTransport` throws a typed error on a missing key and the lite
- * side catches it and drops the whole key, so undefined never appears here).
+ * Resolved transport triple for an optional provider route — the same
+ * `providers[]` chain the main model uses (baseUrl/apiKey/headers) plus the
+ * route literal. `apiKey` is always present on the success path
+ * (`resolveLlmTransport` throws a typed error on a missing key and the caller
+ * catches it and drops the whole key, so undefined never appears here). Used by
+ * both the lite route and the sub-agent worker route; the field is **absent**
+ * (never `null`) when the route is empty, wrong-typed, or unbuildable.
  */
-export interface LiteModelEnv {
-  /** Route ID (trimmed literal of settings.llm.liteModel, passed through verbatim to consumers). */
+export interface ModelRouteEnv {
+  /** Route ID (trimmed settings literal, passed through verbatim to consumers). */
   model: string;
   baseUrl: string;
   apiKey: string;
   headers?: Readonly<Record<string, string>>;
 }
+
+/** Routing result of `settings.llm.liteModel`. */
+export type LiteModelEnv = ModelRouteEnv;
+
+/** Routing result of `settings.subagent.model` (the sub-agent worker route). */
+export type SubagentModelEnv = ModelRouteEnv;
 
 export interface LlmEnv {
   baseUrl: string;
@@ -475,22 +483,25 @@ function resolveLlmTransport(
 }
 
 /**
- * `settings.llm.liteModel` → routing result. Shares `resolveLlmTransport` with
- * the main model (same providers[] lookup), but every illegal config state
- * (absent / empty string / no slash / provider unregistered / provider key
- * unset) is silently dropped to undefined — title generation is an
- * enhancement; lite must never fail-fast the main session; the main model's
- * throw paths never pass through here.
+ * Resolve an optional provider route (lite or sub-agent) into a transport triple
+ * through the same `resolveLlmTransport` chain the main model uses. An empty /
+ * wrong-typed route, or a route whose provider is unregistered or whose api-key
+ * env is unset (`LlmProviderConfigError`, recognized only by
+ * `isLlmProviderConfigError`), drops the whole key to undefined so the caller
+ * falls back — an optional route must never fail-fast anything. Any other throw
+ * propagates.
  */
-function resolveLlmLite(
-  mergedSettings: IknowSettings
-): LiteModelEnv | undefined {
-  const route = mergedSettings.llm?.liteModel?.trim();
+function resolveOptionalRoute(
+  mergedSettings: IknowSettings,
+  rawRoute: string | undefined
+): ModelRouteEnv | undefined {
+  const route = rawRoute?.trim();
   if (!route) return undefined;
   let transport: ResolvedLlmTransport;
   try {
     transport = resolveLlmTransport(mergedSettings, route);
   } catch (err) {
+    // EXIT: provider unregistered or api-key env unset → key absent, caller falls back.
     if (isLlmProviderConfigError(err)) return undefined;
     throw err;
   }
@@ -503,6 +514,24 @@ function resolveLlmLite(
   };
 }
 
+/** `settings.llm.liteModel` → routing result; illegal states silently absent. */
+function resolveLlmLite(
+  mergedSettings: IknowSettings
+): LiteModelEnv | undefined {
+  return resolveOptionalRoute(mergedSettings, mergedSettings.llm?.liteModel);
+}
+
+/**
+ * `settings.subagent.model` → sub-agent worker route; an unusable route is
+ * silently absent so the worker starts on `settings.llm.model` and the parent
+ * spawn is never failed.
+ */
+function resolveSubagentModel(
+  mergedSettings: IknowSettings
+): SubagentModelEnv | undefined {
+  return resolveOptionalRoute(mergedSettings, mergedSettings.subagent?.model);
+}
+
 /**
  * Produce `{ liteModel }` only when the lite routing result exists; absent →
  * `{}` (no key). Moved verbatim from loadIknowEnv — the conditional spread is
@@ -513,6 +542,13 @@ function spreadLiteModel(
   liteModel: LiteModelEnv | undefined
 ): Pick<LlmEnv, "liteModel"> {
   return liteModel === undefined ? {} : { liteModel };
+}
+
+/** Produce `{ model }` only when the sub-agent route resolved; absent → `{}` (no key, never `null`). */
+function spreadSubagentModel(
+  model: SubagentModelEnv | undefined
+): Pick<IknowSubagentEnv, "model"> {
+  return model === undefined ? {} : { model };
 }
 
 export interface WebEnv {
@@ -610,6 +646,12 @@ export interface IknowSubagentEnv {
   taskTimeoutMs: number | undefined;
   /** Subagent concurrency cap; loadIknowEnv always fills a positive integer default or `"unlimited"`. */
   maxConcurrentWorkers?: number | "unlimited";
+  /**
+   * Resolved worker route from `settings.subagent.model`; the worker adapter
+   * builds from this when present. **Absent (never `null`)** when the route is
+   * empty / wrong-typed / unbuildable — the worker then uses `llm.model`.
+   */
+  model?: SubagentModelEnv;
 }
 
 export interface IknowEnv {
@@ -1037,6 +1079,10 @@ export function loadIknowEnv(
   // Lite routing result (optional key) — illegal states silently absent, never affecting the main-model fail-fast above.
   const liteModel = resolveLlmLite(mergedSettings);
 
+  // Sub-agent worker route (optional key) — same providers[] chain; an
+  // unbuildable route is silently absent so the worker falls back to modelRaw.
+  const subagentModel = resolveSubagentModel(mergedSettings);
+
   return {
     llm: {
       baseUrl: transport.baseUrl,
@@ -1227,6 +1273,7 @@ export function loadIknowEnv(
         }) ??
         mergedSettings.subagent?.maxConcurrentWorkers ??
         DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
+      ...spreadSubagentModel(subagentModel),
     },
     // Workspace-root per-root state anchor (registered at env SSOT;
     // `envOptional` canonical reader — empty/unset → undefined; the consumer

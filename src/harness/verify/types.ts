@@ -82,14 +82,6 @@ export interface VerifyConfig {
   readonly onExhausted?: "report" | "escalate";
   /** Hard round cap, default 12; the judge is the trend, not the counter. */
   readonly maxRounds?: number;
-  /**
-   * Model slot for the classifier judge (used when command is absent).
-   * Explicit value wins; defaults resolve to settings.llm.model.
-   *
-   // (ADR-0015)
-   * Non-empty string only; no model IDs hardcoded in code.
-   */
-  readonly classifierModel?: string;
 }
 
 /**

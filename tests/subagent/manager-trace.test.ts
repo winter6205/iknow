@@ -180,7 +180,6 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
 
     const { taskId } = h.manager.spawn({
       task: "do thing",
-      model: "opus",
       maxTurns: 5,
       timeoutMs: 60000,
     });
@@ -205,6 +204,9 @@ describe("SubAgentManager trace 三类事件 (T4, #358 SC1)", () => {
     // spawn record fields
     assert.equal(h.recorded.spawns[0]!.taskId, taskId);
     assert.equal(h.recorded.spawns[0]!.origin, "parent");
+    // ADR-0122: the per-spawn model field is deleted — a newly written
+    // subagent_spawn record carries no `model` key.
+    assert.ok(!("model" in h.recorded.spawns[0]!), "spawn record has no model");
     assert.match(
       h.recorded.spawns[0]!.startedAt,
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -284,7 +286,6 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
     const withTrace = makeTracingHarness();
     const { taskId: withTraceTaskId } = withTrace.manager.spawn({
       task: "thing",
-      model: "opus",
     });
     emitEnvelope(withTrace.spawned[0]!, okEnvelope("payload-A"));
     await new Promise((resolve) => setImmediate(resolve));
@@ -303,7 +304,7 @@ describe("SubAgentManager NoopTraceService baseline (T4 double-track #2)", () =>
       },
       trace: createNoopTraceService(),
     });
-    const noopTaskId = noop.spawn({ task: "thing", model: "opus" }).taskId;
+    const noopTaskId = noop.spawn({ task: "thing" }).taskId;
     emitEnvelope(noopSpawned[0]!, okEnvelope("payload-B"));
     await new Promise((resolve) => setImmediate(resolve));
     const noopQuery = noop.queryBuffer(noopTaskId);

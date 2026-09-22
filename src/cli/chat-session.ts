@@ -1609,11 +1609,6 @@ async function runChatQueryLine(
                     ? undefined
                     : createRunClassifierFromManager({
                         manager: ctx.subagentManager,
-                        ...(ctx.verifyConfig.classifierModel !== undefined
-                          ? {
-                              classifierModel: ctx.verifyConfig.classifierModel,
-                            }
-                          : {}),
                       }),
               })
             : await attachPrefetch(query).then(async (effective) => {

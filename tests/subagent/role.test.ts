@@ -43,7 +43,6 @@ describe("subagent role: SubAgentDefinition 类型形态", () => {
     const def: SubAgentDefinition = {
       systemPrompt: "be concise",
       disallowedTools: ["edit_file"],
-      model: "opus",
       maxTurns: 5,
       timeoutMs: 30000,
       role: "explore",
@@ -51,7 +50,6 @@ describe("subagent role: SubAgentDefinition 类型形态", () => {
     };
     assert.equal(def.systemPrompt, "be concise");
     assert.deepEqual(def.disallowedTools, ["edit_file"]);
-    assert.equal(def.model, "opus");
     assert.equal(def.maxTurns, 5);
     assert.equal(def.timeoutMs, 30000);
     assert.equal(def.role, "explore");

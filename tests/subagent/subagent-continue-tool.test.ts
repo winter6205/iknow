@@ -13,8 +13,8 @@
  *     handle, payload.task = next message, transcriptPath identical to first run
  *     (the rewind head is consumed worker-side; tests pin that the ledger address
  *     delivered by manager stays unchanged);
- *   - identity and capability fields carry over from the original def (role / model /
- *     conversationId ownership); per-turn fields (parentTurnId / toolUseId /
+ *   - identity and capability fields carry over from the original def (role /
+ *     maxTurns / conversationId ownership); per-turn fields (parentTurnId / toolUseId /
  *     foreground exclusion) are recomputed for this hop;
  *   - wait contract identical to spawn: `wait:false` returns {task_id} immediately;
  *     foreground (wait omitted) returns the projected envelope for this hop.
@@ -104,7 +104,13 @@ function makeManagerHarness(
   const writeTranscript = (taskId: string) => {
     writeFileSync(transcriptPath(taskId), '{"type":"header"}\n', "utf8");
   };
-  return { manager, invocations, subagentsDir, transcriptPath, writeTranscript };
+  return {
+    manager,
+    invocations,
+    subagentsDir,
+    transcriptPath,
+    writeTranscript,
+  };
 }
 
 function emitOkEnvelope(child: FakeChild, result = "done"): void {
@@ -161,7 +167,10 @@ describe("subagent_continue — 输入校验", () => {
         ),
       ToolExecutionError
     );
-    await assert.rejects(() => Promise.resolve(tool.handler(null)), ToolExecutionError);
+    await assert.rejects(
+      () => Promise.resolve(tool.handler(null)),
+      ToolExecutionError
+    );
   });
 
   it("空 / 非 string message → ToolExecutionError", async () => {
@@ -170,20 +179,14 @@ describe("subagent_continue — 输入校验", () => {
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler(
-            { task_id: "t", message: "" },
-            { conversationId: "c1" }
-          )
+          tool.handler({ task_id: "t", message: "" }, { conversationId: "c1" })
         ),
       ToolExecutionError
     );
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler(
-            { task_id: "t", message: 42 },
-            { conversationId: "c1" }
-          )
+          tool.handler({ task_id: "t", message: 42 }, { conversationId: "c1" })
         ),
       ToolExecutionError
     );
@@ -217,7 +220,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler({ task_id: taskId, message: "pivot" }, { conversationId: "c1" })
+          tool.handler(
+            { task_id: taskId, message: "pivot" },
+            { conversationId: "c1" }
+          )
         ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
@@ -231,14 +237,17 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   it("终态但无工人 transcript → 拒（切片前的旧工人）", async () => {
     const { manager, invocations } = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted(
-      { manager, invocations },
-      { task: "legacy", conversationId: "c1" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted({ manager, invocations }, {
+      task: "legacy",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler({ task_id: taskId, message: "follow-up" }, { conversationId: "c1" })
+          tool.handler(
+            { task_id: taskId, message: "follow-up" },
+            { conversationId: "c1" }
+          )
         ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
@@ -252,10 +261,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   it("per-agent trace 在场不算账 —— 不从 trace 倒灌（锁句 6）", async () => {
     const { manager, invocations, subagentsDir } = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted(
-      { manager, invocations },
-      { task: "traced", conversationId: "c1" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted({ manager, invocations }, {
+      task: "traced",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     // Write only the trace form (agent-<taskId>.jsonl), not the transcript (<taskId>.jsonl).
     mkdirSync(join(subagentsDir, taskId), { recursive: true });
     writeFileSync(
@@ -266,7 +275,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler({ task_id: taskId, message: "continue" }, { conversationId: "c1" })
+          tool.handler(
+            { task_id: taskId, message: "continue" },
+            { conversationId: "c1" }
+          )
         ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
@@ -279,10 +291,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   it("跨会话拒 —— 所有权判定先于任何再拉起", async () => {
     const { manager, invocations, writeTranscript } = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted(
-      { manager, invocations },
-      { task: "owned", conversationId: "conv-owner" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted({ manager, invocations }, {
+      task: "owned",
+      conversationId: "conv-owner",
+    } as SubAgentDefinition);
     writeTranscript(taskId);
     await assert.rejects(
       () =>
@@ -300,7 +312,8 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
     );
     // A call surface without ctx.conversationId likewise must not touch an owned ledger.
     await assert.rejects(
-      () => Promise.resolve(tool.handler({ task_id: taskId, message: "hijack" })),
+      () =>
+        Promise.resolve(tool.handler({ task_id: taskId, message: "hijack" })),
       ToolExecutionError
     );
     assert.equal(invocations.length, 1);
@@ -308,10 +321,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
 
   it("manager 闸防御面：task 缺失 / 空串 → missing_task typed 抛，不起新进程", async () => {
     const harness = makeManagerHarness();
-    const taskId = await spawnCompleted(
-      harness,
-      { task: "gate", conversationId: "c1" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted(harness, {
+      task: "gate",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     harness.writeTranscript(taskId);
     const resume = harness.manager.resumeTask!;
     for (const next of [{}, { task: "" }] as SubAgentDefinition[]) {
@@ -332,10 +345,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   it("并发顶与 spawn 同源：满 → capacity 拒，不起新进程（锁句 5）", async () => {
     const harness = makeManagerHarness({ maxConcurrentWorkers: 1 });
     const tool = createSubAgentContinueTool({ manager: harness.manager });
-    const done = await spawnCompleted(
-      harness,
-      { task: "first", conversationId: "c1" } as SubAgentDefinition
-    );
+    const done = await spawnCompleted(harness, {
+      task: "first",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     harness.writeTranscript(done);
     // fill the only quota slot: a second worker is running.
     harness.manager.spawn({
@@ -345,7 +358,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
     await assert.rejects(
       () =>
         Promise.resolve(
-          tool.handler({ task_id: done, message: "more" }, { conversationId: "c1" })
+          tool.handler(
+            { task_id: done, message: "more" },
+            { conversationId: "c1" }
+          )
         ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
@@ -362,10 +378,10 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
   it("completed + transcript + 下一句（wait:false）→ 同 task_id 新进程，payload 指向同一本账", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });
-    const taskId = await spawnCompleted(
-      harness,
-      { task: "original", conversationId: "c1" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted(harness, {
+      task: "original",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     harness.writeTranscript(taskId);
     const firstPayload = harness.invocations[0]!.payload;
 
@@ -458,19 +474,15 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
   it("身份沿用原 def，回合字段按本跳重算", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });
-    const taskId = await spawnCompleted(
-      harness,
-      {
-        task: "identity",
-        conversationId: "c1",
-        role: "explore",
-        model: "m-test",
-        maxTurns: 7,
-        parentTurnId: "turn-1",
-        toolUseId: "toolu-1",
-        excludeFromHostDrain: true,
-      } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted(harness, {
+      task: "identity",
+      conversationId: "c1",
+      role: "explore",
+      maxTurns: 7,
+      parentTurnId: "turn-1",
+      toolUseId: "toolu-1",
+      excludeFromHostDrain: true,
+    } as SubAgentDefinition);
     harness.writeTranscript(taskId);
     await tool.handler(
       { task_id: taskId, message: "deeper please", wait: false },
@@ -479,7 +491,6 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
     const nextDef = harness.invocations[1]!.def;
     // identity and capability fields = the original catalog role re-run()
     assert.equal(nextDef.role, "explore");
-    assert.equal(nextDef.model, "m-test");
     assert.equal(nextDef.maxTurns, 7);
     assert.equal(nextDef.conversationId, "c1");
     assert.equal(nextDef.task, "deeper please");
@@ -492,10 +503,10 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
   it("前景臂（省略 wait）当跳返回投影信封", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });
-    const taskId = await spawnCompleted(
-      harness,
-      { task: "fg", conversationId: "c1" } as SubAgentDefinition
-    );
+    const taskId = await spawnCompleted(harness, {
+      task: "fg",
+      conversationId: "c1",
+    } as SubAgentDefinition);
     harness.writeTranscript(taskId);
 
     const pending = tool.handler(

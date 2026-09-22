@@ -6,7 +6,7 @@
  *   2. wait:true (default) → handler resolves to envelope (fake waitFor resolves immediately)
  *   3. background:true → throws ToolExecutionError, message contains "background:true"
  *   4. task missing / task:123 (non-string) / empty task / null input → ToolExecutionError
- *   5. disallowedTools / systemPrompt / model / maxTurns / timeoutMs pass-through to def
+ *   5. disallowedTools / systemPrompt / maxTurns / timeoutMs pass-through to def
  *   6. wait:false → waitFor not called
  *   7. aci metadata (timeoutTier=unbounded — ACI must not preempt manager's per-task clock)
  *   8. subagent_type optional param → def.role pass-through (default = general-purpose)
@@ -242,13 +242,20 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     );
   });
 
-  it("model 字符串透传", async () => {
-    const { manager, spawn } = makeFakeManager();
+  it("ADR-0122: inputSchema 无 model 属性，携带 model 的输入被 ajv 拒绝", async () => {
+    const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", model: "opus", wait: false });
-    expect(spawn).toHaveBeenCalledWith(
-      expect.objectContaining({ task: "t", model: "opus" })
-    );
+    const schema = tool.inputSchema as {
+      additionalProperties: boolean;
+      properties: Record<string, unknown>;
+    };
+    expect(schema.properties.model).toBeUndefined();
+    expect(schema.additionalProperties).toBe(false);
+    // The worker's model route is user settings, not a spawn argument: an
+    // input still carrying model must fail the assembled schema at the ajv
+    // gate (the handler never sees it).
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "t", model: "opus" })).toBe(false);
   });
 
   it("maxTurns 整数透传", async () => {
@@ -289,7 +296,6 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
       task: "t",
       systemPrompt: "be concise",
       disallowedTools: ["spawn_subagent"],
-      model: "opus",
       maxTurns: 7,
       timeoutMs: 90000,
       wait: false,
@@ -299,7 +305,6 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
         task: "t",
         systemPrompt: "be concise",
         disallowedTools: ["spawn_subagent"],
-        model: "opus",
         maxTurns: 7,
         timeoutMs: 90000,
       })
@@ -800,7 +805,6 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
       subagent_type: "explore",
       systemPrompt: "be focused",
       disallowedTools: ["spawn_subagent"],
-      model: "opus",
       maxTurns: 4,
       timeoutMs: 60000,
       sandboxRoot: "/tmp/work",
@@ -819,7 +823,6 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
           "spawn_subagent",
           ...FILE_WRITE_TOOL_NAMES,
         ]),
-        model: "opus",
         maxTurns: 4,
         timeoutMs: 60000,
         sandboxRoot: "/tmp/work",

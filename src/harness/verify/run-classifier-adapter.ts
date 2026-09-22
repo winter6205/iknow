@@ -2,8 +2,9 @@
  * Assembly helper for the verify classifier seam.
  *
  * Factory honoring process isolation and the judge schema contract: given a
- * SubAgentManager + classifier model slot → produce a RunClassifierFn that
- * verify-loop can wire directly.
+ * SubAgentManager → produce a RunClassifierFn that verify-loop can wire
+ * directly. The judge inherits the worker model route (ADR-0122); there is no
+ * classifier model slot.
  *
  * Production entry points:
  *  - src/session-api/hub.ts (serve);
@@ -73,7 +74,7 @@ const JUDGE_ROLE: SubAgentDefinitionShape = {
 
 /**
  * Field shape of JUDGE_ROLE: role / system prompt / tool deny set / maxTurns.
- * Not reusing SubAgentDefinition (its task / model / timeoutMs / sandboxRoot
+ * Not reusing SubAgentDefinition (its task / timeoutMs / sandboxRoot
  * fields are all optional and injected from external opts).
  */
 interface SubAgentDefinitionShape {
@@ -86,8 +87,6 @@ interface SubAgentDefinitionShape {
 
 export interface CreateRunClassifierOpts {
   readonly manager: SubAgentManager;
-  /** Classifier model slot (settings.verify.classifierModel ?? settings.llm.model). */
-  readonly classifierModel?: string;
   /** Per-round timeout (ms). Default 120_000. */
   readonly timeoutMs?: number;
 }
@@ -102,14 +101,13 @@ export interface CreateRunClassifierOpts {
 export function createRunClassifierFromManager(
   opts: CreateRunClassifierOpts
 ): RunClassifierFn {
-  const { manager, classifierModel, timeoutMs = 120_000 } = opts;
+  const { manager, timeoutMs = 120_000 } = opts;
   return async ({
     task,
     summary,
     finalText,
     signal,
     cwd,
-    model,
     evidenceContext,
   }): Promise<ClassifierEnvelope> => {
     // finalText / evidenceContext are independent spawn fields.
@@ -128,7 +126,6 @@ export function createRunClassifierFromManager(
       ...JUDGE_ROLE,
       // Exam question = goal.text only; evidenceContext is a separate spawn field.
       task,
-      model: model ?? classifierModel,
       timeoutMs,
       ...(finalText !== null && finalText !== "" ? { finalText } : {}),
       ...(evidenceContext !== undefined ? { evidenceContext } : {}),
