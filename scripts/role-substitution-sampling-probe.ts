@@ -20,7 +20,9 @@
  *     measured miss, never a gate failure — but a rate that decays below the
  *     floors registered in CASES means the steering stopped working, and that
  *     is what the flag turns red.
- * No LLM key -> exit 2 with "Not run" (never a silent pass).
+ * No LLM key -> exit 2 with "Not run" (never a silent pass). A settings load
+ * that throws -> exit 1 with the original message (a config fault is never
+ * dressed up as Not run).
  *
  * Records append to the TRACKED directory `docs/evidence/adr-0117/`, so the
  * numbers quoted by ADR-0117 and by the golden-set roster are re-scorable by
@@ -49,7 +51,12 @@ import type {
   ToolExecutionResult,
 } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
-import { loadIknowEnv, type IknowEnv } from "../src/config/env.ts";
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+  type IknowEnv,
+} from "../src/config/env.ts";
+import { loadRealLlmEnv } from "../real-llm/real-llm-env.ts";
 import {
   ROLE_SUBSTITUTION_PREFIX,
   SYMBOL_QUERY_SURFACE,
@@ -560,13 +567,10 @@ function caseRow(spec: CaseSpec, iters: number, t: Tally): CaseOutcome {
   });
 }
 
-function loadKey(root: string): IknowEnv | undefined {
-  try {
-    const env = loadIknowEnv(root);
-    return env.llm.apiKey ? env : undefined;
-  } catch {
-    return undefined;
-  }
+function renderLoadFailure(err: unknown): string {
+  if (isLlmProviderConfigError(err)) return formatLlmProviderConfigError(err);
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 async function main(): Promise<number> {
@@ -577,7 +581,13 @@ async function main(): Promise<number> {
   const specs = selectCases(arg("case", ""));
   if (specs.length === 0) return 2;
 
-  const env = loadKey(root);
+  let env: IknowEnv | undefined;
+  try {
+    env = loadRealLlmEnv(root);
+  } catch (err) {
+    console.error(`[ABORT] settings load failed: ${renderLoadFailure(err)}`);
+    return 1;
+  }
   if (env === undefined) {
     console.error("[ABORT] LLM key not set; Not run (exit 2, not a pass)");
     return 2;

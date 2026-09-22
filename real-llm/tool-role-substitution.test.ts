@@ -25,7 +25,8 @@ import type {
   ToolExecutionResult,
 } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
-import { loadIknowEnv, type IknowEnv } from "../src/config/env.ts";
+import { type IknowEnv } from "../src/config/env.ts";
+import { loadRealLlmEnv } from "./real-llm-env.ts";
 import {
   ROLE_SUBSTITUTION_PREFIX,
   SOUL_USAGE_CASES,
@@ -38,13 +39,9 @@ const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
 
-let realEnv: IknowEnv | undefined;
-try {
-  realEnv = loadIknowEnv(REPO_ROOT);
-} catch {
-  realEnv = undefined;
-}
-const HAS_KEY = realEnv !== undefined && !!realEnv.llm.apiKey;
+// A throwing load must surface at collection, not masquerade as a skip.
+const realEnv = loadRealLlmEnv(REPO_ROOT);
+const HAS_KEY = realEnv !== undefined;
 if (!HAS_KEY) console.log("[SKIP] LLM key not set; Not run");
 
 type DispatchRecord = {
