@@ -10,6 +10,11 @@
  * top-level section (`llm` / `isolation` / `subagent` / `web` / `lsp` /
  * `memory` / `loop` / `graph` / `hooks`) found in a project file is dropped
  * with a warning (`filterProjectSettingsKeys`); only the user layer may give it.
+ * One file behind both paths (cwd === home, or `$HOME` reached via a symlink) still feeds both
+ * layers: ADR-0019 D1.1 makes the launch dir the per-root state anchor and ADR-0088 keeps
+ * project settings in its `.iknow` — the entry directory is a workspace scope in its own right.
+ * In that case only the drop *wording* misleads (nothing left the merged result), so it is
+ * suppressed; the filtering itself never is.
  *
  * The `secrets` section:
  *  - `secrets.enabled`: whether hook secret redaction is active; only a boolean
@@ -60,9 +65,9 @@
  * The returned IknowSettings is deep-frozen (recursive Object.freeze, aligned
  * with the project's immutability discipline).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   parseIsolationNetwork,
@@ -668,8 +673,9 @@ export interface LoadSettingsOpts {
   home?: string;
   /**
    * Warning channel: called once per key when a project file has a top-level key
-   * outside the allowlist / a user file has `permissions`. Default → `console.warn`;
-   * tests inject one to capture messages (without injection it uses the default, no duplicate reporting).
+   * outside the allowlist / a user file has `permissions`. Default → `console.warn`,
+   * deduplicated per settings-file pair + message (a startup repeats this load from
+   * several entry points); an injected channel receives every message unchanged.
    */
   onWarn?: (message: string) => void;
 }
@@ -1866,14 +1872,82 @@ function filterProjectSettingsKeys(
   return accepted;
 }
 
+/**
+ * Default warn sink dedup state (module-level on purpose: one startup calls
+ * `loadIknowSettings` from ~8 entry points, so the same fact would otherwise be
+ * printed ~8 times). Keyed by the two paths, the text, and a change signal per file — so a
+ * warning about a *different* settings file is still reported, and a long-lived process
+ * (`iknow serve`, or anything reloading settings) re-arms after an edit instead of muting a
+ * later state for good. Only repetition about an unchanged file is noise. An injected
+ * `onWarn` never passes through here and keeps seeing every message.
+ */
+const reportedDefaultWarnings = new Set<string>();
+
+/**
+ * Cheap change signal for one settings file. A file that cannot be stat'd (not written yet,
+ * or unreadable) has no detectable content change, so it gets one stable marker — and a warn
+ * path must never throw on its way to printing a warning.
+ */
+function fileChangeSignal(path: string): string {
+  try {
+    const { mtimeMs, size } = statSync(path);
+    return `${mtimeMs}\u0000${size}`;
+  } catch {
+    return "absent";
+  }
+}
+
+function warnOncePerFile(
+  userPath: string,
+  projectPath: string,
+  message: string
+): void {
+  const fact = [
+    userPath,
+    projectPath,
+    message,
+    fileChangeSignal(userPath),
+    fileChangeSignal(projectPath),
+  ].join("\u0000");
+  if (reportedDefaultWarnings.has(fact)) return;
+  reportedDefaultWarnings.add(fact);
+  console.warn(message);
+}
+
+/**
+ * Whether the two layer paths name one file. Text equality after `resolve` is not enough:
+ * `$HOME` can be reached through a symlink while `process.cwd()` reports the physical path,
+ * and then two spellings name one file, so the wording the suppression in `loadIknowSettings`
+ * exists for would come back. `realpathSync` asks the filesystem; it throws on a path not
+ * written yet, which is exactly when two differently-spelled paths cannot be one existing file.
+ */
+function isSameSettingsFile(userPath: string, projectPath: string): boolean {
+  if (resolve(userPath) === resolve(projectPath)) return true;
+  try {
+    return realpathSync(userPath) === realpathSync(projectPath);
+  } catch {
+    return false;
+  }
+}
+
 export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
   const cwd = opts?.cwd ?? process.cwd();
   const home = opts?.home ?? homedir();
-  const onWarn = opts?.onWarn ?? ((message: string) => console.warn(message));
+  const userPath = join(home, ".iknow", "settings.json");
+  const projectPath = join(cwd, ".iknow", "settings.json");
+  // ADR-0019 D1.1 / ADR-0088 make the entry directory a workspace scope of its own, so when
+  // both layer paths name one file, the project layer must keep working exactly as before.
+  const sameFile = isSameSettingsFile(userPath, projectPath);
+  const onWarn =
+    opts?.onWarn ??
+    ((message: string) => warnOncePerFile(userPath, projectPath, message));
 
-  const userRaw = readSettingsFile(join(home, ".iknow", "settings.json"));
-  const projectRaw = readSettingsFile(join(cwd, ".iknow", "settings.json"));
-  if (Object.prototype.hasOwnProperty.call(userRaw, "permissions"))
+  const userRaw = readSettingsFile(userPath);
+  const projectRaw = readSettingsFile(projectPath);
+  // In the one-file case that sentence is false: `permissions` does take effect, via
+  // this very project layer. Same for the per-key "ignored" lines below — the user's own
+  // values are not being dropped. Suppress the text only, never the filtering.
+  if (!sameFile && Object.prototype.hasOwnProperty.call(userRaw, "permissions"))
     onWarn(
       '[settings] user settings key "permissions" ignored (project-layer only)'
     );
@@ -1881,7 +1955,10 @@ export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
   return deepFreeze(
     mergeSettings(
       userRaw,
-      filterProjectSettingsKeys(projectRaw, onWarn),
+      filterProjectSettingsKeys(
+        projectRaw,
+        sameFile ? () => undefined : onWarn
+      ),
       onWarn
     )
   );
