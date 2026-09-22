@@ -595,6 +595,20 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **First-turn overflow governance could silently never run (2026-09-22)**:
+  both ADR-0043 measurement gates — tool-surface overflow eviction and disclosure-index
+  demotion — asked `countTokens` with `messages: []`, because a first turn has no
+  history. A gateway enforcing the documented Anthropic contract answers that body with
+  `400 messages must not be empty` (code 2013); each gate caught the rejection and took
+  its documented skip path, so the session looked healthy while oversized tool surfaces
+  were never evicted — two warnings at startup were the only trace. A gateway tolerant of
+  the empty array hid the defect completely. The measurement request now carries one
+  stand-in `user` message, a shape both classes accept: against a live endpoint both gates
+  returned 200 before and after, with the numerator up by 2 and 1 tokens respectively — the
+  constant offset ADR-0043's amendment now records. The count stays a measurement (the
+  forbidden chars/4 estimate is still out of the decision), the adapter still projects
+  exactly what it is given (ADR-0112), and the threshold plus eviction order are unchanged.
+
 - **TUI silence notice no longer misfires during tool execution; copy moved to English (2026-09-17)**:
   the "~20s with no new stream bytes" waiting notice reset only on stream events,
   but the harness deliberately emits none while a tool runs (long bash commands,

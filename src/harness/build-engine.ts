@@ -24,6 +24,7 @@ import {
   withTransportRetry,
   translateAnthropicTransportFault,
   type LoopEngineDeps,
+  type AnthropicNativeMessage,
   type ThinkingParams,
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
@@ -390,11 +391,13 @@ export type BuildEngineOpts = {
    * `{ inputTokens: <n> }` and control threshold decisions without network.
    * Called once at assembly, after `await mcpManager.start()` (first-round
    * judgment, constant within a session); later rounds' `promptTools` do not
-   * re-measure ("no recompute mid-session").
+   * re-measure ("no recompute mid-session"). `messages` is the wire-validity
+   * stand-in the gateways require — see `FIRST_TURN_STAND_IN_MESSAGES`.
    */
   readonly countTokens?: (input: {
     readonly tools?: ReadonlyArray<unknown>;
     readonly system?: string;
+    readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
   }) => Promise<{ readonly inputTokens: number }>;
   /**
    * ADR-0092: fs isolation-mode holder — passed through to the bash factory,
@@ -1609,6 +1612,7 @@ export async function buildHarnessEngine(
           const v = await countTokensFn({
             tools: sampleTools(),
             system: overflowInput.system,
+            messages: FIRST_TURN_STAND_IN_MESSAGES,
           });
           return v.inputTokens;
         },
@@ -1677,7 +1681,10 @@ export async function buildHarnessEngine(
         countTokens: async (indexText) => {
           // Measured surface = exactly the two text sections the model sees;
           // tools omitted (the schema area was judged by the ladder above).
-          const v = await countTokensFn({ system: indexText });
+          const v = await countTokensFn({
+            system: indexText,
+            messages: FIRST_TURN_STAND_IN_MESSAGES,
+          });
           return v.inputTokens;
         },
       });
@@ -2601,6 +2608,20 @@ function resolveFirstTurnReadyTimeoutMs(injected?: number): number {
 }
 
 /**
+ * ADR-0043: the stand-in turn both assembly-time measurements carry. Each gate
+ * measures only the tools-schema + system-text area, but a wire-valid
+ * `countTokens` request needs at least one message — a gateway enforcing the
+ * documented contract rejects `messages: []` with HTTP 400, which folds into the
+ * skip path and would leave both gates permanently dead without any other signal.
+ * One short turn is a handful of tokens against the `contextWindow * 0.1`
+ * threshold (measured +2 / +1 at the two gates), so the measured surface
+ * stays tools + system.
+ */
+const FIRST_TURN_STAND_IN_MESSAGES: ReadonlyArray<AnthropicNativeMessage> = [
+  { role: "user", content: [{ type: "text", text: "iknow" }] },
+];
+
+/**
  * ADR-0043: assembly-time countTokens source selection (extracted so the
  * assembly body need not inline a four-branch precedence judgment).
  *
@@ -2623,15 +2644,17 @@ function selectCountTokensFn(
   if (opts.countTokens !== undefined) return opts.countTokens;
   if (opts.skipCountTokens === true) return undefined;
   if (adapter.countTokens === undefined) return undefined;
-  // Real adapter: pass only tools + system (messages absent = the SDK accepts
-  // empty; in the first-turn judgment scenario messages are necessarily empty).
+  // Real adapter: tools + system is the measured surface; `messages` carries
+  // the stand-in the caller supplies (see FIRST_TURN_STAND_IN_MESSAGES).
   return async (input: {
     readonly tools?: ReadonlyArray<unknown>;
     readonly system?: string;
+    readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
   }) => {
     return adapter.countTokens!({
       tools: input.tools as ReadonlyArray<unknown> | undefined,
       system: input.system,
+      messages: input.messages,
     });
   };
 }

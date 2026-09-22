@@ -22,6 +22,11 @@ import {
 } from "../../src/harness/build-engine.ts";
 import { MCP_TOOL_SHORT_DESCRIPTION_MAX } from "../../src/harness/identity/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import {
+  assertNoGateSkipWarnings,
+  assertStandInUserTurns,
+  type TokenSeamMeasurement,
+} from "../_helpers/token-measurement-seam.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.js";
 import type { McpManager } from "../../src/harness/mcp/manager.js";
@@ -143,6 +148,50 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
     expect(systemText).not.toContain("<deferred_internal_tools>");
+  });
+
+  it("实测请求携带一条占位 user 消息(网关不接受空 messages),tools + system 面不变", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-b6-standin-"));
+    roots.push(root);
+    await plantMcpConfig(root, ["stubsvc"]);
+
+    const inputs: TokenSeamMeasurement[] = [];
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-b6-standin"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+      createMcpClient: () =>
+        makeInstantClient([
+          {
+            name: "alpha",
+            description: "alpha tool",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ]),
+      countTokens: async (input: TokenSeamMeasurement) => {
+        inputs.push(input);
+        return { inputTokens: 1_000 };
+      },
+    });
+    shutdowns.push(async () => {
+      if (built.shutdown) await built.shutdown();
+    });
+
+    // The gate still measures the tools + system surface (ADR-0043 forbids
+    // chars/N estimation, so this must stay a real measurement of that area).
+    const toolGateCalls = inputs.filter((i) => i.tools !== undefined);
+    expect(toolGateCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of toolGateCalls) {
+      expect(call.tools!.length).toBeGreaterThan(0);
+      expect(typeof call.system).toBe("string");
+      expect(call.system!.length).toBeGreaterThan(0);
+    }
+    // Wire validity + gate success (assertions shared with the index-demotion
+    // gate — see tests/_helpers/token-measurement-seam.ts).
+    assertStandInUserTurns(inputs);
+    assertNoGateSkipWarnings(warnings);
   });
 
   it("超阈值:按退场次序逐件退,系统文本含 <deferred_internal_tools>(字母序)", async () => {
