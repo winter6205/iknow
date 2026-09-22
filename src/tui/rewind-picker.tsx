@@ -209,13 +209,16 @@ export function reduceRewindKey(
   return { type: "ignore" };
 }
 
-/** Why the restore guard left a path alone — the operator tells their own later
- *  edit (drift) apart from a moved worktree (root_identity) from here. */
+/** Why the restore left a path alone — the operator tells their own later
+ *  edit (drift) apart from a moved worktree (root_identity) and from a path
+ *  the parent and a worker both wrote (cross_transcript, no order to replay)
+ *  from here. */
 const SKIP_REASON_LABELS: Readonly<
   Record<RewindCodeRestoreSkip["reason"], string>
 > = {
   drift: "文件已被后续改动",
   root_identity: "工作区根已变化",
+  cross_transcript: "多条转录本改过该文件",
 };
 
 function joinedSkippedPaths(
@@ -247,5 +250,6 @@ export function codeRestoreNoticeLines(
       : "代码恢复：被放弃的回合没有可写回的前像。",
     ...skipLine("drift"),
     ...skipLine("root_identity"),
+    ...skipLine("cross_transcript"),
   ];
 }

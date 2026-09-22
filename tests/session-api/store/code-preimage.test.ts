@@ -2,9 +2,14 @@
  * ADR-0121: the code-restore plan + apply.
  *
  * Locked here:
- *   - plan folds a path's segment writes into one op: EARLIEST preimage = the
- *     restore target, LATEST postimage = the drift expectation; ordering is by
- *     first appearance (never a directory scan).
+ *   - the plan's input is grouped BY TRANSCRIPT: a path's refs are attributed to
+ *     the transcript that wrote them, so ordering is only ever claimed inside
+ *     one chain. A path owned by more than one transcript has no order on any
+ *     single chain → it is a receipt skip (`cross_transcript`), never a
+ *     concatenated or timestamp-sorted fold.
+ *   - within one transcript a path's segment writes fold into one op: EARLIEST
+ *     preimage = the restore target, LATEST postimage = the drift expectation;
+ *     ops appear in first-appearance order (never a directory scan).
  *   - every transcript-supplied locator is gated: a ref whose path is absolute
  *     or climbs out of the root, or whose blob name is not sha256 hex, is
  *     dropped — a transcript is not a licence to reach outside the workspace
@@ -12,6 +17,9 @@
  *   - apply writes a path back only when the live root identity matches AND the
  *     file's current bytes equal the expected postimage; otherwise it is a
  *     reported skip (drift / root_identity).
+ *   - attribution runs BEFORE any live-file guard: a shared path is skipped even
+ *     when its earliest ref recorded capture-time absence, so no delete can be
+ *     reached by a path two transcripts wrote.
  *   - the op's delete directive comes from the EARLIEST ref's capture-time
  *     absence evidence (absentBefore); a legacy ref without the field always
  *     writes bytes back — an empty preimage alone never deletes (ADR-0121).
@@ -28,6 +36,8 @@ import {
   applyCodeRestore,
   buildCodeRestorePlan,
   type CodeRestoreOp,
+  type CodeRestorePlan,
+  type CodeRestoreTranscript,
 } from "../../../src/session-api/store/code-preimage.ts";
 import {
   captureCodeSnapshot,
@@ -43,6 +53,23 @@ const text = (t: string): AnthropicNativeMessage => ({
   role: "assistant",
   content: [{ type: "text", text: t }],
 });
+
+/** One transcript's worth of events. The id is the only thing the plan uses it
+ *  for, so `parent` / `worker:<taskId>` here stand in for what the hub knows at
+ *  the join seam. */
+function chain(
+  transcriptId: string,
+  events: ReadonlyArray<SessionEventRecord>
+): CodeRestoreTranscript {
+  return { transcriptId, events };
+}
+
+/** Every ref on a single chain — the shape T2/T3 already certified. */
+function oneChain(
+  events: ReadonlyArray<SessionEventRecord>
+): ReadonlyArray<CodeRestoreTranscript> {
+  return [chain("parent", events)];
+}
 
 /** One event carrying a preimage ref for `relPath` (bytes are captured into
  *  `folder`, mirroring the real write path). */
@@ -85,24 +112,28 @@ afterEach(async () => {
 
 describe("buildCodeRestorePlan", () => {
   it("one op per path: earliest preimage restores, latest postimage is the expectation", async () => {
-    const events = [
-      await writeEvent(sessionFolder, taskRoot, "e1", "e0", "a.ts", "A", "B"),
-      await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "B", "C"),
-    ];
-    const ops = buildCodeRestorePlan(events);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0]!.relPath, "a.ts");
-    assert.equal(ops[0]!.restoreSha, codeSnapshotSha("A"));
-    assert.equal(ops[0]!.expectedPostimageSha, codeSnapshotSha("C"));
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(sessionFolder, taskRoot, "e1", "e0", "a.ts", "A", "B"),
+        await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "B", "C"),
+      ])
+    );
+    assert.deepEqual(plan.skipped, []);
+    assert.equal(plan.ops.length, 1);
+    assert.equal(plan.ops[0]!.relPath, "a.ts");
+    assert.equal(plan.ops[0]!.restoreSha, codeSnapshotSha("A"));
+    assert.equal(plan.ops[0]!.expectedPostimageSha, codeSnapshotSha("C"));
   });
 
   it("preserves first-appearance order across distinct paths", async () => {
-    const events = [
-      await writeEvent(sessionFolder, taskRoot, "e1", null, "z.ts", "z", "Z"),
-      await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "a", "A"),
-    ];
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(sessionFolder, taskRoot, "e1", null, "z.ts", "z", "Z"),
+        await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "a", "A"),
+      ])
+    );
     assert.deepEqual(
-      buildCodeRestorePlan(events).map((o) => o.relPath),
+      plan.ops.map((o) => o.relPath),
       ["z.ts", "a.ts"]
     );
   });
@@ -129,91 +160,275 @@ describe("buildCodeRestorePlan", () => {
   }
 
   it("drops absolute and `..`-climbing refs", async () => {
-    const ops = buildCodeRestorePlan([
-      refEvent("e1", { relPath: "/etc/passwd" }),
-      refEvent("e2", { relPath: "../outside.ts" }),
-    ]);
-    assert.deepEqual(ops, []);
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        refEvent("e1", { relPath: "/etc/passwd" }),
+        refEvent("e2", { relPath: "../outside.ts" }),
+      ])
+    );
+    assert.deepEqual(plan, { ops: [], skipped: [] });
   });
 
   it("drops a ref whose blob name is not sha256 hex, leaving the workspace alone", async () => {
     await writeFile(join(taskRoot, "a.ts"), "B");
-    const events = [
+    const events = oneChain([
       refEvent("e1", { preimageSha: "../outside-target" }),
       refEvent("e2", { postimageSha: "deadbeef" }),
       refEvent("e3", { preimageSha: codeSnapshotSha("A").toUpperCase() }),
-    ];
+    ]);
     // The gate is the plan; the report and the bytes show it has no effect.
-    assert.deepEqual(buildCodeRestorePlan(events), []);
+    const plan = buildCodeRestorePlan(events);
+    assert.deepEqual(plan, { ops: [], skipped: [] });
     const report = await applyCodeRestore({
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops: buildCodeRestorePlan(events),
+      plan,
     });
     assert.deepEqual(report, { restored: [], skipped: [] });
     assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
   });
 
   it("keeps the same path under two different roots as two ops", async () => {
-    const events = [
-      await writeEvent(sessionFolder, "/root-a", "e1", null, "a.ts", "A", "B"),
-      await writeEvent(sessionFolder, "/root-b", "e2", "e1", "a.ts", "A", "C"),
-    ];
-    assert.equal(buildCodeRestorePlan(events).length, 2);
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(
+          sessionFolder,
+          "/root-a",
+          "e1",
+          null,
+          "a.ts",
+          "A",
+          "B"
+        ),
+        await writeEvent(
+          sessionFolder,
+          "/root-b",
+          "e2",
+          "e1",
+          "a.ts",
+          "A",
+          "C"
+        ),
+      ])
+    );
+    assert.equal(plan.ops.length, 2);
   });
 
   it("the EARLIEST ref's absence evidence becomes the op's delete directive", async () => {
     // Segment created a.ts (capture-time ENOENT) then edited it: the restore
     // state is "absent before the segment", so the op deletes, keyed on the
     // earliest (empty) preimage.
-    const events = [
-      await writeEvent(
-        sessionFolder,
-        taskRoot,
-        "e1",
-        null,
-        "a.ts",
-        "",
-        "A",
-        true
-      ),
-      await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "A", "B"),
-    ];
-    const ops = buildCodeRestorePlan(events);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0]!.absentBefore, true);
-    assert.equal(ops[0]!.restoreSha, codeSnapshotSha(""));
-    assert.equal(ops[0]!.expectedPostimageSha, codeSnapshotSha("B"));
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "e1",
+          null,
+          "a.ts",
+          "",
+          "A",
+          true
+        ),
+        await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "A", "B"),
+      ])
+    );
+    assert.equal(plan.ops.length, 1);
+    assert.equal(plan.ops[0]!.absentBefore, true);
+    assert.equal(plan.ops[0]!.restoreSha, codeSnapshotSha(""));
+    assert.equal(plan.ops[0]!.expectedPostimageSha, codeSnapshotSha("B"));
   });
 
   it("absence evidence on a LATER ref never turns an existing file into a delete", async () => {
     // File existed before the segment (first touch is a plain edit); a later
     // ref claims absence (e.g. an external rm then recreate). The pre-segment
     // state is still "existed" → write bytes back, never delete.
-    const events = [
-      await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
-      await writeEvent(
-        sessionFolder,
-        taskRoot,
-        "e2",
-        "e1",
-        "a.ts",
-        "",
-        "C",
-        true
-      ),
-    ];
-    const ops = buildCodeRestorePlan(events);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0]!.absentBefore, false);
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "e2",
+          "e1",
+          "a.ts",
+          "",
+          "C",
+          true
+        ),
+      ])
+    );
+    assert.equal(plan.ops.length, 1);
+    assert.equal(plan.ops[0]!.absentBefore, false);
   });
 
   it("a legacy ref without the field plans a byte write-back, never a delete", async () => {
-    const events = [
-      await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "", "B"),
-    ];
-    assert.equal(buildCodeRestorePlan(events)[0]!.absentBefore, false);
+    const plan = buildCodeRestorePlan(
+      oneChain([
+        await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "", "B"),
+      ])
+    );
+    assert.equal(plan.ops[0]!.absentBefore, false);
+  });
+
+  // -- cross-transcript attribution (T4) -------------------------------------
+
+  it("a worker's own two writes still fold inside that one transcript", async () => {
+    // Ownership is per transcript, so a worker that touches one path twice is
+    // no different from the parent doing it: the fold stays in its own chain.
+    const plan = buildCodeRestorePlan([
+      chain("parent", []),
+      chain("worker:tk1", [
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "w1",
+          null,
+          "b.ts",
+          "B0",
+          "B1"
+        ),
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "w2",
+          "w1",
+          "b.ts",
+          "B1",
+          "B2"
+        ),
+      ]),
+    ]);
+    assert.deepEqual(plan.skipped, []);
+    assert.equal(plan.ops.length, 1);
+    assert.equal(plan.ops[0]!.restoreSha, codeSnapshotSha("B0"));
+    assert.equal(plan.ops[0]!.expectedPostimageSha, codeSnapshotSha("B2"));
+  });
+
+  it("a path shared by the parent chain and a worker is a cross_transcript skip, its single-owner siblings keep their ops", async () => {
+    const plan = buildCodeRestorePlan([
+      chain("parent", [
+        await writeEvent(sessionFolder, taskRoot, "p1", null, "a.ts", "A", "B"),
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "p2",
+          "p1",
+          "only-parent.ts",
+          "X",
+          "Y"
+        ),
+      ]),
+      chain("worker:tk1", [
+        await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "B", "C"),
+      ]),
+    ]);
+    assert.deepEqual(plan.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
+    assert.deepEqual(
+      plan.ops.map((o) => o.relPath),
+      ["only-parent.ts"]
+    );
+  });
+
+  it("a path shared by two workers is a cross_transcript skip too", async () => {
+    const plan = buildCodeRestorePlan([
+      chain("parent", []),
+      chain("worker:tk1", [
+        await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "A", "B"),
+      ]),
+      chain("worker:tk2", [
+        await writeEvent(sessionFolder, taskRoot, "v1", null, "a.ts", "B", "C"),
+      ]),
+    ]);
+    assert.deepEqual(plan.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
+    assert.deepEqual(plan.ops, []);
+  });
+
+  it("attribution is not the array order: swapping the transcript groups gives the same plan", async () => {
+    // Concatenation order is exactly what ADR-0121 rejects as a global sequence,
+    // so the receipt must not depend on which group was listed first. Op order
+    // IS first-appearance, so only the ops set is compared.
+    const parent = chain("parent", [
+      await writeEvent(sessionFolder, taskRoot, "p1", null, "a.ts", "A", "B"),
+      await writeEvent(sessionFolder, taskRoot, "p2", "p1", "p.ts", "P", "PP"),
+    ]);
+    const worker = chain("worker:tk1", [
+      await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "B", "C"),
+      await writeEvent(sessionFolder, taskRoot, "w2", "w1", "w.ts", "W", "WW"),
+    ]);
+    const forward = buildCodeRestorePlan([parent, worker]);
+    const backward = buildCodeRestorePlan([worker, parent]);
+    assert.deepEqual(backward.skipped, forward.skipped);
+    assert.deepEqual(
+      backward.ops.map((o) => o.relPath).sort(),
+      forward.ops.map((o) => o.relPath).sort()
+    );
+    assert.deepEqual(
+      backward.ops.map((o) => `${o.relPath}:${o.restoreSha}`).sort(),
+      forward.ops.map((o) => `${o.relPath}:${o.restoreSha}`).sort()
+    );
+  });
+
+  it("the same path under two roots in two transcripts is two files, not a shared path", async () => {
+    // Ownership keys on root identity + path: these are different files, so the
+    // one that matches the live root is still restorable.
+    const plan = buildCodeRestorePlan([
+      chain("parent", [
+        await writeEvent(
+          sessionFolder,
+          "/root-a",
+          "p1",
+          null,
+          "a.ts",
+          "A",
+          "B"
+        ),
+      ]),
+      chain("worker:tk1", [
+        await writeEvent(
+          sessionFolder,
+          "/root-b",
+          "w1",
+          null,
+          "a.ts",
+          "A",
+          "C"
+        ),
+      ]),
+    ]);
+    assert.deepEqual(plan.skipped, []);
+    assert.equal(plan.ops.length, 2);
+  });
+
+  it("attribution precedes the delete directive: a shared path whose earliest ref was absent-before is still a whole-path skip", async () => {
+    // The parent created a.ts; a worker then wrote it. The restore state of the
+    // shared path is unknown, so the plan must not hand apply a delete op at all.
+    const plan = buildCodeRestorePlan([
+      chain("parent", [
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "p1",
+          null,
+          "a.ts",
+          "",
+          "A",
+          true
+        ),
+      ]),
+      chain("worker:tk1", [
+        await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "A", "B"),
+      ]),
+    ]);
+    assert.deepEqual(plan.ops, []);
+    assert.deepEqual(plan.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
   });
 });
 
@@ -226,22 +441,22 @@ const exists = (p: string): Promise<boolean> =>
   );
 
 async function expectPlan(
-  events: SessionEventRecord[]
-): Promise<CodeRestoreOp[]> {
-  return [...buildCodeRestorePlan(events)];
+  events: ReadonlyArray<SessionEventRecord>
+): Promise<CodeRestorePlan> {
+  return buildCodeRestorePlan(oneChain(events));
 }
 
 describe("applyCodeRestore", () => {
   it("restores a single edit back to its preimage", async () => {
     await writeFile(join(taskRoot, "a.ts"), "B");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
     ]);
     const report = await applyCodeRestore({
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, ["a.ts"]);
     assert.deepEqual(report.skipped, []);
@@ -250,7 +465,7 @@ describe("applyCodeRestore", () => {
 
   it("restores the original bytes across repeated writes to one path", async () => {
     await writeFile(join(taskRoot, "a.ts"), "C");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
       await writeEvent(sessionFolder, taskRoot, "e2", "e1", "a.ts", "B", "C"),
     ]);
@@ -258,21 +473,21 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "A");
   });
 
   it("skips (drift) when the current bytes differ from the last postimage", async () => {
     await writeFile(join(taskRoot, "a.ts"), "someone else edited me");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(sessionFolder, taskRoot, "e1", null, "a.ts", "A", "B"),
     ]);
     const report = await applyCodeRestore({
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, []);
     assert.deepEqual(report.skipped, [{ relPath: "a.ts", reason: "drift" }]);
@@ -284,7 +499,7 @@ describe("applyCodeRestore", () => {
 
   it("skips (root_identity) when the live root identity differs", async () => {
     await writeFile(join(taskRoot, "a.ts"), "B");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         "/old-root",
@@ -299,7 +514,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: "/new-root",
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, []);
     assert.deepEqual(report.skipped, [
@@ -307,6 +522,78 @@ describe("applyCodeRestore", () => {
     ]);
     // The op's path never resolved under the live root, so nothing changed.
     assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+  });
+
+  it("carries the plan's cross_transcript skips into the report, touching no byte", async () => {
+    // a.ts's live bytes match the parent chain's last post-image, so a guard
+    // alone would have restored it — ownership is what refuses. b.ts is the
+    // worker's own path and is restored normally.
+    await writeFile(join(taskRoot, "a.ts"), "B");
+    await writeFile(join(taskRoot, "b.ts"), "W");
+    const plan = buildCodeRestorePlan([
+      chain("parent", [
+        await writeEvent(sessionFolder, taskRoot, "p1", null, "a.ts", "A", "B"),
+      ]),
+      chain("worker:tk1", [
+        await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "B", "C"),
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "w2",
+          "w1",
+          "b.ts",
+          "orig",
+          "W"
+        ),
+      ]),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      plan,
+    });
+    assert.deepEqual(report.restored, ["b.ts"]);
+    assert.deepEqual(report.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
+    assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+    assert.equal(await readFile(join(taskRoot, "b.ts"), "utf8"), "orig");
+  });
+
+  it("a shared path created by the segment is NOT deleted", async () => {
+    // Guard order: attribution first. Even the strongest restore action (delete)
+    // must not fire on a path two transcripts wrote.
+    await writeFile(join(taskRoot, "a.ts"), "W");
+    const plan = buildCodeRestorePlan([
+      chain("parent", [
+        await writeEvent(
+          sessionFolder,
+          taskRoot,
+          "p1",
+          null,
+          "a.ts",
+          "",
+          "A",
+          true
+        ),
+      ]),
+      chain("worker:tk1", [
+        await writeEvent(sessionFolder, taskRoot, "w1", null, "a.ts", "A", "W"),
+      ]),
+    ]);
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      plan,
+    });
+    assert.deepEqual(report.restored, []);
+    assert.deepEqual(report.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
+    assert.equal(await exists(join(taskRoot, "a.ts")), true);
+    assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "W");
   });
 
   it("reads blobs first: an unreadable preimage aborts with zero writes", async () => {
@@ -328,14 +615,18 @@ describe("applyCodeRestore", () => {
       expectedPostimageSha: codeSnapshotSha("Y"),
       absentBefore: false,
     };
-    const ops = [...(await expectPlan([good])), missingBlobOp];
+    const parentPlan = await expectPlan([good]);
+    const plan: CodeRestorePlan = {
+      ops: [...parentPlan.ops, missingBlobOp],
+      skipped: parentPlan.skipped,
+    };
     await assert.rejects(
       () =>
         applyCodeRestore({
           sessionFolder,
           taskRoot,
           rootIdentity: taskRoot,
-          ops,
+          plan,
         }),
       (err: unknown) =>
         (err as { kind: string }).kind === "code_snapshot_missing"
@@ -345,11 +636,53 @@ describe("applyCodeRestore", () => {
     assert.equal(await readFile(join(taskRoot, "b.ts"), "utf8"), "Y");
   });
 
+  it("a shared path is skipped without reading any blob for it", async () => {
+    // A cross-transcript path carries no op, so a blob only one transcript
+    // captured cannot abort the restore for it — the path was never going to be
+    // written. The parent's own restorable path still restores.
+    await writeFile(join(taskRoot, "a.ts"), "B");
+    await writeFile(join(taskRoot, "keep.ts"), "K");
+    const parentPlan = await expectPlan([
+      await writeEvent(
+        sessionFolder,
+        taskRoot,
+        "p1",
+        null,
+        "keep.ts",
+        "k",
+        "K"
+      ),
+    ]);
+    const sharedWithLostBlob: CodeRestoreOp = {
+      relPath: "a.ts",
+      rootIdentity: taskRoot,
+      restoreSha: codeSnapshotSha("NEVER-CAPTURED"),
+      expectedPostimageSha: codeSnapshotSha("B"),
+      absentBefore: false,
+    };
+    const report = await applyCodeRestore({
+      sessionFolder,
+      taskRoot,
+      rootIdentity: taskRoot,
+      plan: {
+        ops: parentPlan.ops,
+        skipped: [
+          { relPath: sharedWithLostBlob.relPath, reason: "cross_transcript" },
+        ],
+      },
+    });
+    assert.deepEqual(report.restored, ["keep.ts"]);
+    assert.deepEqual(report.skipped, [
+      { relPath: "a.ts", reason: "cross_transcript" },
+    ]);
+    assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+  });
+
   it("restores a nested path, creating parent directories when the file is gone", async () => {
     // The tool created pkg/deep/f.ts then it was removed: the live read is
     // ENOENT-empty, which equals an empty postimage, so the drift guard lets
     // the restore fire and apply must mkdir the parent chain back.
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -364,7 +697,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, [join("pkg", "deep", "f.ts")]);
     assert.equal(
@@ -378,7 +711,7 @@ describe("applyCodeRestore", () => {
     // field) → the path is treated as existing, even at empty bytes:
     // deleting here would remove a file the segment did not create.
     await writeFile(join(taskRoot, "new.ts"), "CONTENT");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -393,14 +726,14 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.equal(await readFile(join(taskRoot, "new.ts"), "utf8"), "");
   });
 
   it("a path the segment created is deleted when live bytes still equal the postimage", async () => {
     await writeFile(join(taskRoot, "created.ts"), "CONTENT");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -416,7 +749,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, ["created.ts"]);
     assert.deepEqual(report.skipped, []);
@@ -425,7 +758,7 @@ describe("applyCodeRestore", () => {
 
   it("a created path whose bytes drifted is kept and reported as drift", async () => {
     await writeFile(join(taskRoot, "created.ts"), "someone else's bytes");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -441,7 +774,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, []);
     assert.deepEqual(report.skipped, [
@@ -457,7 +790,7 @@ describe("applyCodeRestore", () => {
     // The segment created an empty file; the user then removed it. The live
     // read is ENOENT-empty, which equals the empty postimage, so the guard
     // hits and the delete is already satisfied — not a failure.
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -473,7 +806,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, ["gone.ts"]);
     assert.equal(await exists(join(taskRoot, "gone.ts")), false);
@@ -483,7 +816,7 @@ describe("applyCodeRestore", () => {
     // The capture said the path EXISTED (absentBefore false) with empty
     // bytes; restore must put empty bytes at a live file, never delete it.
     await writeFile(join(taskRoot, "empty.ts"), "X");
-    const ops = await expectPlan([
+    const plan = await expectPlan([
       await writeEvent(
         sessionFolder,
         taskRoot,
@@ -499,7 +832,7 @@ describe("applyCodeRestore", () => {
       sessionFolder,
       taskRoot,
       rootIdentity: taskRoot,
-      ops,
+      plan,
     });
     assert.deepEqual(report.restored, ["empty.ts"]);
     assert.equal(await readFile(join(taskRoot, "empty.ts"), "utf8"), "");

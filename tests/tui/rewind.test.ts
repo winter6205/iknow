@@ -788,6 +788,18 @@ describe("codeRestoreNoticeLines（恢复报告 → notice 行）", () => {
     ]);
   });
 
+  test("cross_transcript 独立成行：路径属于多条转录本时不写回", () => {
+    expect(
+      codeRestoreNoticeLines({
+        restored: ["src/a.ts"],
+        skipped: [{ relPath: "src/b.ts", reason: "cross_transcript" }],
+      })
+    ).toEqual([
+      "代码恢复：写回 1 个文件。",
+      "未恢复（多条转录本改过该文件）：src/b.ts",
+    ]);
+  });
+
   test("空报告也是明确结果：说明没有可写回的前像", () => {
     expect(codeRestoreNoticeLines({ restored: [], skipped: [] })).toEqual([
       "代码恢复：被放弃的回合没有可写回的前像。",

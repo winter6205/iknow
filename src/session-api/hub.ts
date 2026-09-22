@@ -2919,20 +2919,27 @@ export class SessionHub {
    *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
    *  in the abandoned segment — a worker edit is the parent's abandoned
    *  history too. Both write their blobs into this parent session folder, so
-   *  one plan and one `applyCodeRestore` cover them. */
+   *  one plan and one `applyCodeRestore` cover them — but the plan is fed one
+   *  group PER TRANSCRIPT, never one concatenated array: parent and worker are
+   *  separate writers with no shared order, so a path claimed by more than one
+   *  of them is reported instead of folded (ADR-0121 "Concatenate the parent
+   *  chain, then worker transcripts" / "Sort by `createdAt`": both Rejected). */
   private async restoreAbandonedCode(
     conversationId: string,
     head: string | null
   ): Promise<CodeRestoreReport> {
-    const abandoned = await this.store.rewindablePreimages(
+    const parentEvents = await this.store.rewindablePreimages(
       conversationId,
       head
     );
-    const workerEvents = await this.abandonedWorkerPreimages(
-      conversationId,
-      head
-    );
-    const ops = buildCodeRestorePlan([...abandoned, ...workerEvents]);
+    const workers = await this.abandonedWorkerPreimages(conversationId, head);
+    const plan = buildCodeRestorePlan([
+      { transcriptId: `parent:${conversationId}`, events: parentEvents },
+      ...workers.map((worker) => ({
+        transcriptId: `worker:${worker.taskId}`,
+        events: worker.events,
+      })),
+    ]);
     const { workspaceRoot } = await this.store.load(conversationId);
     const liveRoot =
       this.dirtyWorktreeRoots.get(conversationId) ?? workspaceRoot;
@@ -2943,13 +2950,15 @@ export class SessionHub {
       }),
       taskRoot: liveRoot ?? "",
       rootIdentity: this.rootIdentityFor(liveRoot),
-      ops,
+      plan,
     });
   }
 
   /** Preimage-bearing events of workers spawned from the segment a rewind to
-   *  `head` would abandon. Join key: `spawn_subagent` tool_use ids in the
-   *  segment ↔ `subagents/<taskId>/agent-<taskId>.meta.json`'s `toolUseId`.
+   *  `head` would abandon, grouped per worker transcript so the plan can
+   *  attribute each path to the transcript that wrote it. Join key:
+   *  `spawn_subagent` tool_use ids in the segment ↔
+   *  `subagents/<taskId>/agent-<taskId>.meta.json`'s `toolUseId`.
    *  Absent meta/transcript → skipped (legacy worker or one that exited
    *  before its first commit — no link or no stamped history exists). A
    *  corrupt meta or transcript propagates typed: an unreadable link is
@@ -2958,7 +2967,9 @@ export class SessionHub {
   private async abandonedWorkerPreimages(
     conversationId: string,
     head: string | null
-  ): Promise<ReadonlyArray<SessionEventRecord>> {
+  ): Promise<
+    ReadonlyArray<{ taskId: string; events: ReadonlyArray<SessionEventRecord> }>
+  > {
     const segment = await this.store.abandonedEvents(conversationId, head);
     const spawnIds = new Set<string>();
     for (const event of segment) {
@@ -2980,7 +2991,10 @@ export class SessionHub {
       projectDir: this.store.getProjectDir(),
       conversationId,
     });
-    const out: SessionEventRecord[] = [];
+    const out: Array<{
+      taskId: string;
+      events: ReadonlyArray<SessionEventRecord>;
+    }> = [];
     for (const recordPath of listSubagentRecordPaths(subagentsDir)) {
       // Glob guarantees `agent-<taskId>.jsonl`; the nested layout (ADR-0102)
       // names the directory the same, so the record's basename identifies the
@@ -2991,12 +3005,13 @@ export class SessionHub {
         taskId
       );
       if (toolUseId === undefined || !spawnIds.has(toolUseId)) continue;
-      out.push(
-        ...(await loadWorkerPreimageEvents({
-          transcriptPath: workerTranscriptPath(subagentsDir, taskId),
-          taskId,
-        }))
-      );
+      const events = await loadWorkerPreimageEvents({
+        transcriptPath: workerTranscriptPath(subagentsDir, taskId),
+        taskId,
+      });
+      // The group is kept even when empty: a transcript with no refs claims no
+      // path, so it cannot make any other transcript's path shared.
+      out.push({ taskId, events });
     }
     return out;
   }

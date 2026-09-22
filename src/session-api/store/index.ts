@@ -61,8 +61,10 @@ export {
   buildCodeRestorePlan,
   type ApplyCodeRestoreOpts,
   type CodeRestoreOp,
+  type CodeRestorePlan,
   type CodeRestoreReport,
   type CodeRestoreSkip,
+  type CodeRestoreTranscript,
 } from "./code-preimage.js";
 export {
   appendWorkerTranscript,

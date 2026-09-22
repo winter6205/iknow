@@ -5,10 +5,14 @@
  * Join key locked here: the worker's
  * `subagents/<taskId>/agent-<taskId>.meta.json` `toolUseId` field equals the
  * parent transcript's spawn tool_use id; the preimage refs live on the
- * worker transcript (`subagents/<taskId>/<taskId>.jsonl`) and its blobs in
- * the PARENT session folder. Postures (real store + fresh ids, temp workspace):
+ * worker transcript (`subagents/<taskId>/<taskId>.jsonl`) and its blobs in the
+ * PARENT session folder. Postures (real store + fresh ids, temp workspace):
  *   - abandoned-spawn worker edits restore together with parent refs in one
- *     plan/report;
+ *     plan/report — as long as each path belongs to exactly one transcript;
+ *   - a path two transcripts wrote (parent + worker, or two workers) is a
+ *     `cross_transcript` receipt skip: no byte is touched, the head still moves
+ *     (ADR-0121 rejects both a parent-then-worker concatenation and a
+ *     `createdAt` sort as a global order);
  *   - worker-file drift is a reported skip (bytes preserved, head moves);
  *   - an unreadable worker blob or a corrupt meta ABORTS: zero writes, head
  *     stays where it was (unreadable link ≠ absent link);
@@ -55,22 +59,52 @@ const spawn = (id: string): AnthropicNativeMessage => ({
   content: [{ type: "tool_use", id, name: "spawn_subagent", input: {} }],
 });
 
+/** One captured write the fixture wants stamped on a transcript event. */
+type SeedPre = {
+  relPath: string;
+  pre: string;
+  post: string;
+  /** false = point at a blob that was never written (unreadable preimage). */
+  capturePre?: boolean;
+  /** capture-time ENOENT evidence, as the real capture stamps it. */
+  absentBefore?: boolean;
+  /** override the root identity the ref records. */
+  root?: string;
+};
+
 function ref(
   relPath: string,
   preSha: string,
   postSha: string,
-  root: string
+  root: string,
+  absentBefore?: boolean
 ): PreimageRef {
   return {
     relPath,
     rootIdentity: root,
     preimageSha: preSha,
     postimageSha: postSha,
+    // Conditional spread mirrors the real capture: false leaves no key.
+    ...(absentBefore === true ? { absentBefore: true } : {}),
   };
 }
 
 const convDir = (id: string) =>
   resolveConversationDir({ projectDir: sessionDir, conversationId: id });
+
+/** Stamp `pre` onto the parent session folder, returning its transcript ref. */
+async function stampPre(
+  dir: string,
+  pre: SeedPre,
+  root: string
+): Promise<PreimageRef> {
+  const postSha = await captureCodeSnapshot(dir, pre.post);
+  const preSha =
+    pre.capturePre === false
+      ? codeSnapshotSha(`UNCAPTURED-${pre.pre}`)
+      : await captureCodeSnapshot(dir, pre.pre);
+  return ref(pre.relPath, preSha, postSha, pre.root ?? root, pre.absentBefore);
+}
 
 /** Seed the parent transcript: header (workspaceRoot = taskRoot) + given
  *  events + head. Stamped events carry `codePreimage`; blobs land in the
@@ -81,7 +115,7 @@ async function seedParent(
     id: string;
     parent: string | null;
     message: AnthropicNativeMessage;
-    pre?: { relPath: string; pre: string; post: string; capturePre?: boolean };
+    pre?: SeedPre;
   }>,
   head: string | null
 ): Promise<void> {
@@ -103,12 +137,7 @@ async function seedParent(
   for (const e of events) {
     let codePreimage: PreimageRef | undefined;
     if (e.pre !== undefined) {
-      const postSha = await captureCodeSnapshot(dir, e.pre.post);
-      const preSha =
-        e.pre.capturePre === false
-          ? codeSnapshotSha(`UNCAPTURED-${e.pre.pre}`)
-          : await captureCodeSnapshot(dir, e.pre.pre);
-      codePreimage = ref(e.pre.relPath, preSha, postSha, taskRoot);
+      codePreimage = await stampPre(dir, e.pre, taskRoot);
     }
     lines.push(
       JSON.stringify({
@@ -137,13 +166,7 @@ async function seedWorker(opts: {
   toolUseId?: string;
   metaBroken?: boolean;
   transcript?: boolean;
-  pre?: {
-    relPath: string;
-    pre: string;
-    post: string;
-    capturePre?: boolean;
-    root?: string;
-  };
+  pres?: ReadonlyArray<SeedPre>;
 }): Promise<void> {
   const subagentsDir = resolveSubagentTraceDir({
     projectDir: sessionDir,
@@ -161,19 +184,9 @@ async function seedWorker(opts: {
       "utf8"
     );
   }
-  if (opts.transcript === false || opts.pre === undefined) return;
+  const pres = opts.pres ?? [];
+  if (opts.transcript === false || pres.length === 0) return;
   const dir = convDir(opts.parent);
-  const postSha = await captureCodeSnapshot(dir, opts.pre.post);
-  const preSha =
-    opts.pre.capturePre === false
-      ? codeSnapshotSha(`UNCAPTURED-${opts.pre.pre}`)
-      : await captureCodeSnapshot(dir, opts.pre.pre);
-  const codePreimage = ref(
-    opts.pre.relPath,
-    preSha,
-    postSha,
-    opts.pre.root ?? taskRoot
-  );
   const header = {
     type: "session",
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -193,15 +206,25 @@ async function seedWorker(opts: {
       parent: null,
       message: text("worker task"),
     }),
-    JSON.stringify({
-      type: "message",
-      id: "e1",
-      parent: "e0",
-      message: text("worker wrote"),
-      codePreimage,
-    }),
-    JSON.stringify({ type: "head", id: "e1" }),
   ];
+  let parent = "e0";
+  let last = "e0";
+  for (const [i, pre] of pres.entries()) {
+    // Transcript event ids must match `e<digits>` (jsonl.ts EVENT_ID_RE).
+    const id = `e${i + 1}`;
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        id,
+        parent,
+        message: text("worker wrote"),
+        codePreimage: await stampPre(dir, pre, taskRoot),
+      })
+    );
+    parent = id;
+    last = id;
+  }
+  lines.push(JSON.stringify({ type: "head", id: last }));
   await writeFile(
     workerTranscriptPath(subagentsDir, opts.taskId),
     `${lines.join("\n")}\n`,
@@ -216,7 +239,7 @@ const parentChain = (
   id: string;
   parent: string | null;
   message: AnthropicNativeMessage;
-  pre?: { relPath: string; pre: string; post: string };
+  pre?: SeedPre;
 }> => [
   {
     id: "e0",
@@ -262,7 +285,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
       parent: "hw-join",
       taskId: "tk1",
       toolUseId: "tu-spawn",
-      pre: { relPath: "b.ts", pre: "orig", post: "W" },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W" }],
     });
     const res = await hub().rewindSession("hw-join", "e0", true);
     assert.equal(res.head, "e0");
@@ -279,7 +302,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
       parent: "hw-drift",
       taskId: "tk1",
       toolUseId: "tu-spawn",
-      pre: { relPath: "b.ts", pre: "orig", post: "W" },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W" }],
     });
     const res = await hub().rewindSession("hw-drift", "e1", true);
     assert.equal(res.head, "e1");
@@ -300,7 +323,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
       parent: "hw-blob",
       taskId: "tk1",
       toolUseId: "tu-spawn",
-      pre: { relPath: "b.ts", pre: "orig", post: "W", capturePre: false },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W", capturePre: false }],
     });
     await assert.rejects(
       () => hub().rewindSession("hw-blob", "e1", true),
@@ -318,7 +341,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
       parent: "hw-meta",
       taskId: "tk1",
       metaBroken: true,
-      pre: { relPath: "b.ts", pre: "orig", post: "W" },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W" }],
     });
     await assert.rejects(
       () => hub().rewindSession("hw-meta", "e1", true),
@@ -334,7 +357,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
     await seedWorker({
       parent: "hw-nometa",
       taskId: "tk1",
-      pre: { relPath: "b.ts", pre: "orig", post: "W" },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W" }],
     });
     const res = await hub().rewindSession("hw-nometa", "e1", true);
     assert.equal(res.head, "e1");
@@ -363,7 +386,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
       parent: "hw-kept",
       taskId: "tk1",
       toolUseId: "tu-spawn",
-      pre: { relPath: "b.ts", pre: "orig", post: "W" },
+      pres: [{ relPath: "b.ts", pre: "orig", post: "W" }],
     });
     const res = await hub().rewindSession("hw-kept", "e1", true);
     assert.equal(res.head, "e1");
@@ -380,7 +403,7 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
         parent: "hw-root",
         taskId: "tk1",
         toolUseId: "tu-spawn",
-        pre: { relPath: "b.ts", pre: "orig", post: "W", root: other },
+        pres: [{ relPath: "b.ts", pre: "orig", post: "W", root: other }],
       });
       const res = await hub().rewindSession("hw-root", "e1", true);
       assert.equal(res.head, "e1");
@@ -388,6 +411,154 @@ describe("rewindSession restoreCode: abandoned worker segment", () => {
         { relPath: "b.ts", reason: "root_identity" },
       ]);
       assert.equal(await readFile(join(taskRoot, "b.ts"), "utf8"), "W");
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("rewindSession restoreCode: paths owned by more than one transcript", () => {
+  /** Parent writes shared.ts A→B and spawns tk1, which writes shared.ts B→C
+   *  plus its own own.ts. Live bytes sit exactly where the parent chain left
+   *  them, so only transcript ownership can refuse the write. */
+  async function seedSharedWithParent(id: string): Promise<void> {
+    await writeFile(join(taskRoot, "shared.ts"), "B");
+    await writeFile(join(taskRoot, "own.ts"), "W");
+    await seedParent(
+      id,
+      [
+        { id: "e0", parent: null, message: text("e0") },
+        {
+          id: "e1",
+          parent: "e0",
+          message: text("e1"),
+          pre: { relPath: "shared.ts", pre: "A", post: "B" },
+        },
+        { id: "e2", parent: "e1", message: spawn("tu-spawn") },
+        { id: "e3", parent: "e2", message: text("e3") },
+      ],
+      "e3"
+    );
+    await seedWorker({
+      parent: id,
+      taskId: "tk1",
+      toolUseId: "tu-spawn",
+      pres: [
+        { relPath: "shared.ts", pre: "B", post: "C" },
+        { relPath: "own.ts", pre: "orig", post: "W" },
+      ],
+    });
+  }
+
+  it("parent + worker on one path: byte untouched, listed on the receipt, head still moves", async () => {
+    await seedSharedWithParent("hr-parent");
+    const res = await hub().rewindSession("hr-parent", "e0", true);
+    assert.equal(res.head, "e0", "the rewind itself still happens");
+    assert.equal(
+      await readFile(join(taskRoot, "shared.ts"), "utf8"),
+      "B",
+      "no restore, no clobber — the bytes are exactly what they were"
+    );
+    assert.equal(await readFile(join(taskRoot, "own.ts"), "utf8"), "orig");
+    assert.deepEqual(res.codeRestore?.restored, ["own.ts"]);
+    assert.deepEqual(res.codeRestore?.skipped, [
+      { relPath: "shared.ts", reason: "cross_transcript" },
+    ]);
+  });
+
+  it("a path created by the parent and then written by a worker is NOT deleted", async () => {
+    // Ownership is decided before the guard, so the delete directive on the
+    // earliest (absentBefore) ref can never fire across transcripts.
+    await writeFile(join(taskRoot, "made.ts"), "W");
+    await seedParent(
+      "hr-absent",
+      [
+        { id: "e0", parent: null, message: text("e0") },
+        {
+          id: "e1",
+          parent: "e0",
+          message: text("e1"),
+          pre: { relPath: "made.ts", pre: "", post: "A", absentBefore: true },
+        },
+        { id: "e2", parent: "e1", message: spawn("tu-spawn") },
+        { id: "e3", parent: "e2", message: text("e3") },
+      ],
+      "e3"
+    );
+    await seedWorker({
+      parent: "hr-absent",
+      taskId: "tk1",
+      toolUseId: "tu-spawn",
+      pres: [{ relPath: "made.ts", pre: "A", post: "W" }],
+    });
+    const res = await hub().rewindSession("hr-absent", "e0", true);
+    assert.equal(res.head, "e0");
+    assert.equal(await readFile(join(taskRoot, "made.ts"), "utf8"), "W");
+    assert.deepEqual(res.codeRestore?.restored, []);
+    assert.deepEqual(res.codeRestore?.skipped, [
+      { relPath: "made.ts", reason: "cross_transcript" },
+    ]);
+  });
+
+  it("two workers on one path: same verdict, each worker's own paths still restore", async () => {
+    await writeFile(join(taskRoot, "both.ts"), "W2");
+    await writeFile(join(taskRoot, "t1-only.ts"), "O1");
+    await seedParent(
+      "hr-two-workers",
+      [
+        { id: "e0", parent: null, message: text("e0") },
+        { id: "e1", parent: "e0", message: spawn("tu-a") },
+        { id: "e2", parent: "e1", message: spawn("tu-b") },
+        { id: "e3", parent: "e2", message: text("e3") },
+      ],
+      "e3"
+    );
+    await seedWorker({
+      parent: "hr-two-workers",
+      taskId: "tkA",
+      toolUseId: "tu-a",
+      pres: [
+        { relPath: "both.ts", pre: "X", post: "W1" },
+        { relPath: "t1-only.ts", pre: "n1", post: "O1" },
+      ],
+    });
+    await seedWorker({
+      parent: "hr-two-workers",
+      taskId: "tkB",
+      toolUseId: "tu-b",
+      pres: [{ relPath: "both.ts", pre: "W1", post: "W2" }],
+    });
+    const res = await hub().rewindSession("hr-two-workers", "e0", true);
+    assert.equal(res.head, "e0");
+    assert.equal(await readFile(join(taskRoot, "both.ts"), "utf8"), "W2");
+    assert.equal(await readFile(join(taskRoot, "t1-only.ts"), "utf8"), "n1");
+    assert.deepEqual(res.codeRestore?.restored, ["t1-only.ts"]);
+    assert.deepEqual(res.codeRestore?.skipped, [
+      { relPath: "both.ts", reason: "cross_transcript" },
+    ]);
+  });
+
+  it("the same relPath under two roots is two files, so no false cross-transcript skip", async () => {
+    // Parent edited shared.ts in the live root; a worker edited a same-named
+    // file in its own worktree. The worker op is refused on root identity, but
+    // the parent's restore must not be punished for the collision.
+    await writeFile(join(taskRoot, "a.ts"), "B");
+    const other = await mkdtemp(join(tmpdir(), "iknow-hr-other-"));
+    try {
+      await seedParent("hr-two-roots", parentChain("e2", true), "e3");
+      await writeFile(join(other, "a.ts"), "W");
+      await seedWorker({
+        parent: "hr-two-roots",
+        taskId: "tk1",
+        toolUseId: "tu-spawn",
+        pres: [{ relPath: "a.ts", pre: "orig", post: "W", root: other }],
+      });
+      const res = await hub().rewindSession("hr-two-roots", "e0", true);
+      assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "A");
+      assert.deepEqual(res.codeRestore?.restored, ["a.ts"]);
+      assert.deepEqual(res.codeRestore?.skipped, [
+        { relPath: "a.ts", reason: "root_identity" },
+      ]);
     } finally {
       await rm(other, { recursive: true, force: true });
     }

@@ -233,11 +233,13 @@ export type RewindSessionResponse = {
   codeRestore?: RewindCodeRestoreResult;
 };
 
-/** Workspace paths the rewind restored / skipped (drift or a root-identity
- *  mismatch), carried on a rewind that requested `restoreCode`. */
+/** Workspace paths the rewind restored / skipped, carried on a rewind that
+ *  requested `restoreCode`. `cross_transcript` = the path was written by more
+ *  than one transcript in the abandoned segment, so no order exists to replay
+ *  (ADR-0121); `drift` / `root_identity` = the live-file guards refused it. */
 export type RewindCodeRestoreSkip = {
   readonly relPath: string;
-  readonly reason: "drift" | "root_identity";
+  readonly reason: "drift" | "root_identity" | "cross_transcript";
 };
 
 export type RewindCodeRestoreResult = {
