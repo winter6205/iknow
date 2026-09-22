@@ -624,6 +624,22 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   filter still discards the same keys, and an injected warning channel still receives every
   message. Merge output is byte-identical in all cases. ADR-0084 amendment.
 
+- **TUI streaming-silence notice is cleared by resumed streaming; default silence threshold raised to 60s (2026-09-22)**:
+  the "waiting for model output" box was cleared only by `tool_call_start`, so on a
+  route where a large `tool_use` input arrives as a single delta after 65–174s of
+  zero stream events it stayed on screen long after streaming had resumed,
+  asserting something false — and at the old 20s default it fired routinely on
+  normal model-phase silence. The waiting copy is now cleared by **any** resumed
+  stream event, through the silence-timer re-arm ahead of `onStream`'s per-type
+  branches, so a `transport_retry` event's own notice in the same call is not
+  erased; notices from other sources (stop_summary / transport_retry / abnormal
+  stop) still survive by identity, and the turn-end clear stays for the case where
+  nothing resumes. The default threshold moved 20_000ms → 60_000ms (still
+  host-injectable) and the copy no longer embeds a duration, since any number
+  there can contradict the configured value. Sticky discipline is unchanged — the
+  box still has no TTL auto-dismiss. Spec: `specs/transport-continue-persist.md`
+  invariant 3 / SC6–SC7; glossary: `docs/CONTEXT.md` (sticky notice).
+
 - **TUI silence notice no longer misfires during tool execution; copy moved to English (2026-09-17)**:
   the "~20s with no new stream bytes" waiting notice reset only on stream events,
   but the harness deliberately emits none while a tool runs (long bash commands,
