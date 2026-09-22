@@ -956,8 +956,9 @@ export function createRealAnthropicAdapter(
    * Contract (aligned with types.ts CountTokensInput):
    *   - `input.tools` = current visibleSchemas() (same source as step request.tools)
    *   - `input.system` = assembly-time system text (same source as step request.system)
-   *   - `input.messages` = current message history (empty messages also
-   *     valid, the SDK supports it)
+   *   - `input.messages` = current message history (an empty list is rejected
+   *     by Anthropic-compatible gateways, so a caller measuring a first-request
+   *     surface supplies a stand-in; the adapter projects what it is given)
    *   - messages must be system-role filtered (same invariant as
    *     `buildMessageParams`: system messages never reach the wire)
    *

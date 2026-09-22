@@ -42,6 +42,11 @@ import {
   type BuiltEngine,
 } from "../../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../../src/harness/permission/ask-user.ts";
+import {
+  assertNoGateSkipWarnings,
+  assertStandInUserTurns,
+  type TokenSeamMeasurement,
+} from "../../_helpers/token-measurement-seam.ts";
 import type { IknowEnv } from "../../../src/config/env.ts";
 import type { McpClientHandle } from "../../../src/harness/mcp/manager.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/client";
@@ -657,5 +662,65 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
     expect(calls).toBe(callsAfterAssembly);
     // Demotion really happened (otherwise this case proves nothing about demoted-state stability).
     expect(system1).toMatch(/^- mcp__stubsvc__alpha$/m);
+  }, 30_000);
+
+  it("实测请求携带一条占位 user 消息(网关不接受空 messages),索引 system 面不变", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t5-standin-"));
+    roots.push(root);
+    await plantMcpConfig(root, ["stubsvc"]);
+    await plantSkill(root, "bigskill", "S".repeat(200));
+
+    const inputs: TokenSeamMeasurement[] = [];
+    // Same ladder as the demotion case above: call 1 = builtin-schema gate,
+    // the rest = the index gate's measure / re-measure sequence.
+    const measurements = [1_000, 9_000, 8_000, 7_000, 100];
+    let idx = 0;
+    const built = track(
+      await buildHarnessEngine({
+        env: makeEnv("sk-test-t5-standin"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+        createMcpClient: () =>
+          makeInstantClient([
+            {
+              name: "alpha",
+              description: "A".repeat(100),
+              inputSchema: { type: "object", properties: {} },
+            },
+            {
+              name: "beta",
+              description: "B".repeat(60),
+              inputSchema: { type: "object", properties: {} },
+            },
+          ]),
+        countTokens: async (input: TokenSeamMeasurement) => {
+          inputs.push(input);
+          const v = measurements[idx];
+          idx += 1;
+          if (v === undefined) throw new Error("countTokens: out of fixtures");
+          return { inputTokens: v };
+        },
+      })
+    );
+
+    // The index gate's measured surface is unchanged: the two rendered segments
+    // only, no tools area (tools === undefined).
+    const indexCalls = inputs.filter((i) => i.tools === undefined);
+    expect(indexCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of indexCalls) {
+      expect(call.system).toContain("<mcp_name_directory>");
+      expect(call.system).toContain("<available_skills>");
+    }
+    // Wire validity + gate success (assertions shared with the builtin-overflow
+    // gate — see tests/_helpers/token-measurement-seam.ts). The gate
+    // demoted for real, so a silent skip would be visible as the un-stripped
+    // descriptions asserted at the end of this case.
+    assertStandInUserTurns(inputs);
+    assertNoGateSkipWarnings(warnings);
+    const systemText = await built.deps.system?.();
+    expect(systemText).toMatch(/^- mcp__stubsvc__alpha$/m);
+    expect(systemText).toMatch(/^bigskill$/m);
   }, 30_000);
 });

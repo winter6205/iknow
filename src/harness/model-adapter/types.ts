@@ -165,7 +165,9 @@ export interface TokenUsage {
  * Minimal field projection:
  *   - `tools` = current visibleSchemas() (non-lazy + discovered lazy)
  *   - `system` = current system text (optional; same source as step request.system)
- *   - `messages` = current history (optional; first turn = empty, typically 0 messages)
+ *   - `messages` = current history (optional; an empty list is rejected by
+ *     Anthropic-compatible gateways → a caller measuring a first-request
+ *     surface supplies a stand-in turn)
  *
  * Real adapters implement this; stub / offline adapters / unavailable
  * endpoints → field absent (undefined), and the assembly layer skips this
