@@ -81,7 +81,7 @@ S4 is not a follow-up: `handle()` has no credential branch across its route tabl
 
 ## Admission and security boundary
 
-- Fail-closed allowlist on `open_id` **and** `chat_id`, read from the user settings section `bridge.feishu.allow`; a missing or empty section denies everything.
+- Fail-closed roster read from the user settings section `bridge.feishu.allow`: `openIds` **gates**, `chatIds` **narrows**. An absent or empty `openIds` denies everything. An empty `chatIds` narrows nothing, and that is not a loophole — it is the only order that can work, because a direct chat's `chat_id` is not knowable before its first inbound event (a DM is addressed by `open_id`, and `GET /im/v1/chats` returned an empty list for our app, facts page §Measured), so a roster that demanded a `chat_id` up front could never admit its first message. When `chatIds` is non-empty, both must match.
 - A stranger is dropped silently — neither confirming nor denying the bot — but one log line carries the `open_id`, the only onboarding path.
 - Pairing grants access: a one-time code shown only to the initiator, redeeming exactly that `open_id`. The redeemed id is appended to the settings `bridge.feishu.allow.openIds` through the existing atomic settings writer (`src/config/persist-settings.ts:492-494`, `0600`), so there is one admission roster rather than a second one in bridge state.
 - Card actions are single-consume; the nonce binds expected chat, message and operator, blocking replay and cross-chat or cross-card redirection.
