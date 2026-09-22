@@ -1,4 +1,4 @@
-# 0119. Code restore replays per-write preimages on the abandoned transcript chain
+# 0121. Code restore replays per-write preimages on the abandoned transcript chain
 
 Date: 2026-09-22
 Status: accepted
