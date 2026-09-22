@@ -27,7 +27,9 @@
  *     handler — the main repo gets zero writes;
  *   - the unbound block is side-effect free and idempotent: every mutate
  *     re-blocks with the ACI-tool notice until the model provisions and the
- *     host rebinds.
+ *     host rebinds. The only outbound edge on that branch is the
+ *     host-supplied `onUnboundBlockedCall` notification seam — the gate
+ *     itself performs no record IO, the host owns persistence.
  *
  * Switch OFF → `createWorktreeIsolationExecutor` is not wired by the
  * assembly (build-engine), i.e. byte-identical to today's behavior.
@@ -1158,12 +1160,35 @@ export interface WorktreeIsolationGateOpts {
   readonly classify?: (call: ToolCall) => MutateClass;
   /** Failure observability (typed error instance; the model still gets the block). */
   readonly onError?: (err: WorktreeIsolationError) => void;
+  /**
+   * T3 forensic notification — invoked ONLY from the unbound-block branch,
+   * once per blocked call, with the call identity and the verbatim block
+   * text so the host can persist the interception into its own records.
+   * Notification only: the gate stays IO-free, and the block receipt is
+   * byte-identical whether or not the seam is supplied.
+   */
+  readonly onUnboundBlockedCall?: (info: UnboundBlockedCallInfo) => void;
 }
 
 interface GateSessionState {
   readonly status: "open" | "pending" | "bound";
   readonly pending?: Promise<string>;
   readonly boundRoot?: string;
+}
+
+/**
+ * Identity + text handed to the host's `onUnboundBlockedCall` seam when the
+ * unbound branch blocks a call. `message` is the verbatim block receipt the
+ * model sees, so a forensic record joins back to the conversation turn
+ * without re-deriving any text.
+ */
+export interface UnboundBlockedCallInfo {
+  readonly toolName: string;
+  readonly toolUseId: string;
+  readonly conversationId: string | undefined;
+  readonly turnId: string | undefined;
+  readonly input: unknown;
+  readonly message: string;
 }
 
 /**
@@ -1224,6 +1249,25 @@ export function createWorktreeIsolationExecutor(
     message,
   });
 
+  // Host notification for the unbound-block branch only (kept out of
+  // gateMutate: the seam is notify-only, so the block decision path stays
+  // as branchless as before).
+  const notifyUnboundBlocked = (
+    call: ToolCall,
+    conversationId: string | undefined,
+    turnId: string | undefined,
+    message: string
+  ): void => {
+    opts.onUnboundBlockedCall?.({
+      toolName: call.name,
+      toolUseId: call.id,
+      conversationId,
+      turnId,
+      input: call.input,
+      message,
+    });
+  };
+
   const reboundMessage = (boundRoot: string): string =>
     `${WORKTREE_ISOLATION_PREFIX} session workspace rebound to task worktree ${boundRoot}; ` +
     `this call was not executed — the previous root stays read-only. The next wave of tool calls ` +
@@ -1232,7 +1276,8 @@ export function createWorktreeIsolationExecutor(
   async function gateMutate(
     call: ToolCall,
     conversationId: string | undefined,
-    snapshotRoot: string
+    snapshotRoot: string,
+    turnId: string | undefined
   ): Promise<ToolExecutionResult | undefined> {
     let state = stateFor(conversationId, snapshotRoot);
     if (state.status === "bound" && state.boundRoot === snapshotRoot) {
@@ -1242,12 +1287,16 @@ export function createWorktreeIsolationExecutor(
     // (main repo) can never be bound — block with the ACI-tool notice and
     // NEVER provision (no `git worktree add` on the execution path). The
     // block is side-effect free; state stays open so later mutates re-block.
+    // The host seam below only notifies — persistence is the host's, and
+    // the block receipt itself is unchanged with or without a subscriber.
     //
     // `root` here is the **wave snapshot** of `liveTaskRoot` taken at
     // executeAll entry. mid-wave flips (create-worktree) do not
     // change this snapshot — rebind takes effect on the NEXT wave.
     if (state.status === "open" && !isTaskWorktreePath(snapshotRoot)) {
-      return block(call.id, unboundMutateNotice());
+      const message = unboundMutateNotice();
+      notifyUnboundBlocked(call, conversationId, turnId, message);
+      return block(call.id, message);
     }
     if (state.status === "open") {
       const pending = provision({ conversationId, root: snapshotRoot });
@@ -1385,7 +1434,12 @@ export function createWorktreeIsolationExecutor(
           rootFlipMutateNotice(rootFlipTool ?? "a root-flip lifecycle tool")
         );
       } else {
-        const blocked = await gateMutate(call, conversationId, snapshotRoot);
+        const blocked = await gateMutate(
+          call,
+          conversationId,
+          snapshotRoot,
+          turnId
+        );
         result =
           blocked ??
           (

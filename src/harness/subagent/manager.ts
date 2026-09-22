@@ -258,6 +258,16 @@ export interface SubAgentManager {
    * new value immediately.
    */
   readonly getCapacity: () => SubagentCapacityValue;
+  /**
+   * T3 forensic: the worktree-isolation gate blocked a `spawn_subagent` call
+   * before any manager code ran (no worker, no slot, no parent content
+   * trace). Appends exactly one `subagent_spawn` status:"error" line —
+   * carrying the verbatim block notice — into a fresh per-agent record at
+   * the same JSONL layout normal spawns use, so the interception stays
+   * queryable after restart. Never registers a task and never throws.
+   * Optional so poll-only fakes stay structural.
+   */
+  readonly recordBlockedSpawn?: (info: BlockedSpawnForensics) => void;
 }
 
 /** Spawn DI factory signature: injected by the caller (test fakes / production defaultSubAgentSpawn). */
@@ -266,6 +276,20 @@ export type SubAgentSpawn = (
   taskId: string,
   stdinPayload: WorkerEnvelope
 ) => ChildProcess;
+
+/**
+ * One `spawn_subagent` call the worktree-isolation gate blocked before the
+ * manager ever ran (no worker, no slot). build-engine forwards the gate's
+ * unbound-block notification here verbatim; `notice` is the block receipt
+ * text the model saw.
+ */
+export interface BlockedSpawnForensics {
+  readonly notice: string;
+  readonly input: unknown;
+  readonly conversationId?: string;
+  readonly parentTurnId?: string;
+  readonly toolUseId?: string;
+}
 
 /** Typed rejection reasons for waitFor timeout / shutdown collection (status/reason constants passed through to the caller). */
 export class SubAgentWaitTimeoutError extends Error {
@@ -823,6 +847,32 @@ function readIsolationOn(
   return typeof value === "function" ? value() : value === true;
 }
 
+/**
+ * Minimal def-shape for the blocked-spawn forensic record: only the fields
+ * the interception actually knows (the spawn tool's raw input + turn
+ * attribution), Postel — absent values keep the key omitted. The record is
+ * rendered through the same helpers as live spawns, so a forensic row and a
+ * real spawn row share one shape.
+ */
+function blockedSpawnDefinition(
+  info: BlockedSpawnForensics
+): SubAgentDefinition {
+  const input = (info.input ?? {}) as Record<string, unknown>;
+  const role =
+    typeof input.subagent_type === "string" ? input.subagent_type : undefined;
+  return {
+    task: typeof input.task === "string" ? input.task : "",
+    ...(role !== undefined ? { role } : {}),
+    ...(info.conversationId !== undefined
+      ? { conversationId: info.conversationId }
+      : {}),
+    ...(info.parentTurnId !== undefined
+      ? { parentTurnId: info.parentTurnId }
+      : {}),
+    ...(info.toolUseId !== undefined ? { toolUseId: info.toolUseId } : {}),
+  };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -1106,6 +1156,48 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * T3 forensic landing for a gate-blocked spawn (see the
+   * SubAgentManager.recordBlockedSpawn doc). Same path helpers as a live
+   * spawn (resolveSubagentsDirForDef + resolvePerAgentTrace →
+   * `<subagentsDir>/<taskId>/agent-<taskId>.jsonl`), same error-with-no-
+   * outcome shape as the spawn-failure precedent, and the same taskId
+   * minting (randomUUID — the blocked call never had a real task, the
+   * forensic UUID only keys the record file). No tasks.set, no slot, no
+   * meta, no state_change / stop (there is no lifecycle to terminate), and
+   * never a write to the parent content trace. A forensic write must never
+   * turn the gate's block receipt into an execution error, so sync IO
+   * failures degrade like the final-text pad (warn-once per call, never
+   * rethrow); async trace rejections are already swallowed by safeTrace.
+   */
+  function recordBlockedSpawn(info: BlockedSpawnForensics): void {
+    const taskId = randomUUID();
+    const def = blockedSpawnDefinition(info);
+    const startedAt = new Date().toISOString();
+    try {
+      const taskTrace = resolvePerAgentTrace(taskId, def);
+      if (taskTrace === null) return;
+      void safeTrace(() =>
+        taskTrace.recordSubagentSpawn({
+          id: taskId,
+          taskId,
+          ...parentTurnFields(def),
+          origin: "parent",
+          startedAt,
+          status: "error",
+          ts: startedAt,
+          taskPreview: truncateTaskPreview(def),
+          error: { type: "execution_failed", message: info.notice },
+        })
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[subagent] blocked-spawn forensic record skipped for ${taskId}: ${detail}`
+      );
+    }
+  }
+
+  /**
    * Locked sentence 2: host-side final-text landing. Writes the terminal
    * assistant text (the `result` the host holds — already wire-folded by the
    * worker when it exceeded 20000 chars) to the worker pad's stable relative
@@ -1339,6 +1431,33 @@ export function createSubAgentManager(opts: {
         ? { output_path: envelope.output_path }
         : {}),
     };
+  }
+
+  /**
+   * T4: synchronous cancelled terminal for interrupts whose worker leaves no
+   * attributable envelope (Esc / Ctrl+X / subagent_stop / shutdown). The state
+   * transition and the stop record leave the memory Map and are enqueued on
+   * the per-agent subagent trace before the call returns — the shipped jsonl
+   * writer flushes inside that call (appendFileSync, no fsync). Foreground-
+   * only by design (`abortTask` gate): a background task must keep its async
+   * crashed envelope so the mailbox wake / drainCompleted surface still fires
+   * (CONTEXT 后景残留提示).
+   * `stoppedEmitted` + the state-change self-loop guard make every later path
+   * (SIGTERM epilogue envelope, exit handler, settleCrash) a no-op.
+   */
+  function emitCancelledTerminal(
+    task: Task,
+    attribution: {
+      readonly summary: string;
+      readonly signalSent: boolean;
+    }
+  ): void {
+    emitStateChange(task, "failed", { reason: "cancelled" });
+    emitStop(task, "failed", {
+      reason: "cancelled",
+      summary: attribution.summary,
+      ...(attribution.signalSent ? { signal: "SIGTERM" } : {}),
+    });
   }
 
   /**
@@ -2144,14 +2263,26 @@ export function createSubAgentManager(opts: {
     task.waitRejects.clear();
     // 2. Then abort the worker child process + backstop.
     task.abortCtrl?.abort();
+    let signaled = false;
     if (task.child) {
       try {
-        task.child.kill("SIGTERM");
+        signaled = task.child.kill("SIGTERM");
       } catch {
         /* ESRCH et al. ignore */
       }
       // Clear + re-arm: backstop baseline = this SIGTERM moment (reset=true).
       armKillFallback(task, true);
+    }
+    // 3. Foreground waits carry no envelope-side attribution, so the terminal
+    //    record must be written here, synchronously (T4). Background tasks keep
+    //    the existing async crashed-envelope path — mailbox wake intact.
+    if (task.def.excludeFromHostDrain === true) {
+      emitCancelledTerminal(task, {
+        summary: signaled
+          ? "cancelled by interrupt; SIGTERM sent to worker"
+          : "cancelled by interrupt before worker signal",
+        signalSent: signaled,
+      });
     }
     return true;
   }
@@ -2361,6 +2492,35 @@ export function createSubAgentManager(opts: {
     });
   }
 
+  /**
+   * T4 shutdown arm of `emitCancelledTerminal`: only still-live foreground
+   * tasks (`def.excludeFromHostDrain === true`, same population as the
+   * `abortTask` gate) get the guarded cancelled terminal — their waiters are
+   * already rejected and no async envelope path remains. Live background tasks
+   * keep their existing async settle path (settleCrash → crashed + stderr
+   * pointer, or timeout): a shutdown must not replace their forensics with a
+   * cancelled record (CONTEXT 后景残留提示). never throw out of shutdown:
+   * each append is isolated.
+   */
+  function cancelLiveTasksForShutdown(): void {
+    for (const t of [...tasks.values()]) {
+      if (t.state !== "starting" && t.state !== "running") continue;
+      if (t.def.excludeFromHostDrain !== true) continue;
+      try {
+        emitCancelledTerminal(t, {
+          summary: "cancelled by manager shutdown",
+          signalSent: false,
+        });
+      } catch (err) {
+        // EXIT: forensics must not break shutdown — warn and continue.
+        const detail = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[subagent] shutdown cancelled terminal skipped for ${t.id}: ${detail}`
+        );
+      }
+    }
+  }
+
   async function shutdown(): Promise<void> {
     const runningTasks = [...tasks.values()].filter(
       (t) => t.state === "starting" || t.state === "running"
@@ -2444,6 +2604,10 @@ export function createSubAgentManager(opts: {
     for (const poller of waitPollers) clearInterval(poller);
     waitPollers.clear();
 
+    // 3.5 T4: still-live tasks land the cancelled terminal before the map goes
+    //     away (helper holds the branching so shutdown keeps its shape).
+    cancelLiveTasksForShutdown();
+
     // 4. Clear the tasks map.
     tasks.clear();
     terminalMailbox.clear();
@@ -2487,5 +2651,8 @@ export function createSubAgentManager(opts: {
     // SubAgentCapacityError share one source (ADR-0096); the holder is the same one the
     // spawn gate holds.
     getCapacity: currentCapacity,
+    // T3 forensic entry: gate-blocked spawn_subagent calls land one
+    // subagent_spawn status:error line here (no task lifecycle behind it).
+    recordBlockedSpawn,
   });
 }

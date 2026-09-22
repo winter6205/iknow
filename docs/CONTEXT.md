@@ -631,7 +631,7 @@ _Avoid_: 打开 `resultCaptured` 往 tool_call 抄正文；把投影当会话账
 **role projection**: trace 读侧（`src/traceserver/` 共享核，ACI + MCP 两张皮共用）对 `llm_call.messages` 中 message role 的可见性投影——`query_trace` llm_call 行投影的 `last_assistant_preview`（最后一条 role=assistant 消息的预览，无则字段缺席）与 `get_record(detail=messages)` 清单臂每 part 的 `role` 字段；外部 agent 定位最终 assistant 结论不需盲翻 parts。plans/trace-mcp-role-projection.md。
 _Avoid_: 改 `last_message_preview` 语义（它仍是逐字最后一条消息的预览）；把它当新增读侧工具（SC6 三件白名单不变）；在 `detail=tool_results` parts 上加 role（tool_result 按定义在 user 侧）；窗臂响应添 role（窗寻址已有 message_index）
 
-**crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
+**crash 取证无条件**: 子代理生命周期（含门拦截未起 worker、前台打断/超时/kill 终态）与 stderr 指针在所有产品入口落盘，落点是已有子代理记录，不写父会话 content trace。与主循环 content 入口开关解耦。ADR-0035。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
 **worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: **用户层**写门禁开关——ON 时未绑树的 FILE_WRITE / root_flip 调用被拦前（门禁从不自动建树、回执点名 `create-worktree`）；bash 不预测拦——unbound 档围栏物理 `--ro-bind` 主 checkout，真写以 EROFS 违例回灌含同指引（ADR-0109）；OFF 时无门禁、主仓可写。工作树 ACI（create/enter/exit/list/remove）在 host 缝在场时**常注册**，不跟本开关捆死。`create-worktree` / enter / exit 成功才 **session worktree rebind**；bash `git worktree add` 不是 rebind。启动读取一次为初值；会话内可经 **config 面板**就地翻转并落盘（门禁每波读一次，翻转对下一次 tool call 生效——仍不 auto-provision）。ADR-0037（amended `specs/agent-control-surface.md`、ADR-0109）／ADR-0096。
@@ -830,7 +830,7 @@ _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读
 - **结构形 vs 结构意图**: 闸认 ADR-0117 定义语法表（关键字 / 行首锚 / 修饰组）；未锚定 ident+`(` 是正文面，不是漏写的结构查询
 - **blob 引用模式 vs 内容寻址正文池**: 前者是已退役开关名；后者是现行唯一落盘形态。messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
-- **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
+- **crash 取证无条件 vs ADR-0003 D10**: 子代理记录（含拦截与前台终态）≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **git 作业 vs worktree isolation mode**: 作业是 bash 上的版本库侧效应；隔离是写路径落点（现行 model-provision，见本表 **worktree isolation mode**）。隔离开时作业在 task 树内做完
 - **git 作业 vs 环境现势**: 现势给人看仓；作业是模型经 bash 改仓。现势不进模型消息
 - **git 作业 vs git 块**: 作业是纪律 SOP（`## Git work`）；git 块是会话级分支/status 快照（`## Git`）。两段并存，不得互替
