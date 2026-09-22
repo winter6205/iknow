@@ -1,7 +1,9 @@
 /**
  * Offline contract for loadRealLlmEnv (real-llm/real-llm-env.ts):
- * a genuine empty-key success load is the Not-run signal; a load that
- * throws must surface with its original error, never as "key not set".
+ * a genuine empty-key success load is the Not-run signal, and so is the
+ * registry's typed `provider_api_key_missing` fault (the runner contract
+ * for "no key" caught at this seam only); every other load failure must
+ * surface with its original error, never as "key not set".
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -12,6 +14,11 @@ import { LLM_MODEL_MISSING_MESSAGE } from "../../src/config/messages.ts";
 import { llmSettingsJson } from "../_helpers/test-llm-settings.ts";
 import { TEST_LLM_PROVIDER_API_KEY_ENV } from "../_helpers/test-llm-settings.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
+import {
+  isWebEnvConfigError,
+  SEARCH_BACKEND_ENV_KEY,
+  type WebEnvConfigError,
+} from "../../src/config/env.ts";
 
 vi.mock("../../src/config/env.ts", async (importOriginal) => {
   const actual =
@@ -94,6 +101,44 @@ describe("loadRealLlmEnv", () => {
       (root) => {
         expect(() => loadRealLlmEnv(root)).toThrow(LLM_MODEL_MISSING_MESSAGE);
         expect(() => loadRealLlmEnv(root)).not.toThrow(/needs API key/);
+      }
+    );
+  });
+
+  it("真实链：provider 声明的 key env 未设 → undefined（Not run），非 throw", () => {
+    // The provider registry reports a missing key as the typed
+    // provider_api_key_missing fault; Not run is the runner contract for
+    // exactly that kind, folded at this seam.
+    withTempHome(
+      llmSettingsJson({ model: "test/model" }),
+      { [TEST_LLM_PROVIDER_API_KEY_ENV]: undefined },
+      (root) => {
+        expect(loadRealLlmEnv(root)).toBeUndefined();
+      }
+    );
+  });
+
+  it("真实链：其它 typed fault（invalid search backend）仍原样传播，不折叠成 Not run", () => {
+    withTempHome(
+      llmSettingsJson({ model: "test/model" }),
+      {
+        [TEST_LLM_PROVIDER_API_KEY_ENV]: "scratch-key",
+        [SEARCH_BACKEND_ENV_KEY]: "not-a-backend",
+      },
+      (root) => {
+        let caught: unknown;
+        try {
+          loadRealLlmEnv(root);
+        } catch (err) {
+          caught = err;
+        }
+        expect(
+          isWebEnvConfigError(caught),
+          "must propagate the typed fault"
+        ).toBe(true);
+        expect((caught as WebEnvConfigError).kind).toBe(
+          "invalid_search_backend"
+        );
       }
     );
   });

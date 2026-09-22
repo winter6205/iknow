@@ -50,6 +50,7 @@ import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substi
 import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
+  isWebEnvConfigError,
   type IknowEnv,
 } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "../real-llm/real-llm-env.ts";
@@ -567,8 +568,12 @@ function caseRow(spec: CaseSpec, iters: number, t: Tally): CaseOutcome {
 
 function renderLoadFailure(err: unknown): string {
   if (isLlmProviderConfigError(err)) return formatLlmProviderConfigError(err);
-  if (err instanceof Error) return err.message;
-  return String(err);
+  // Typed web-env fault: renders the config var and its rejected value —
+  // never any secret material (the payload only carries varName/value).
+  if (isWebEnvConfigError(err))
+    return `${err.kind}: ${err.varName}=${err.value}`;
+  if (err instanceof Error) return err.message; // EXIT: generic Error → original message
+  return String(err); // EXIT: non-error thrown value → stringified verbatim
 }
 
 async function main(): Promise<number> {
