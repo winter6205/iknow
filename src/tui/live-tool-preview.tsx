@@ -7,10 +7,10 @@
  * `liveToolPreviewTextLines` is shared by the renderer (liveToolPreviewBox)
  * and the row account (liveToolPreviewRows), so the two never drift (parity).
  *
- * Exception = the subagent-card path (specs/tui-subagent-transcript-live.md):
- * on a card hit, rendering and text lines both move to `SubagentCardView` /
- * card-level projection; this module only dispatches (`cardIfLive`) —— that
- * branch is always 2 rows, both sides stay same-source.
+ * Exception = the subagent-card path (specs/subagent-card-title.md): on a card
+ * hit, rendering and text lines both move to `SubagentCardView` / card-level
+ * projection; this module only dispatches (`cardIfLive`) —— that branch is
+ * always 2 rows, both sides stay same-source.
  *
  * Running state with `partialInput` (accumulated tool_input_delta) renders an
  * English progress line `name · <partial summary>` (bash:
@@ -170,8 +170,8 @@ function cardIfLive(
 /**
  * Once the session has any spawn join card, the live tail stops drawing
  * un-joined `spawn_subagent` running rows (CONTEXT **subagent card live**: a
- * `running...` card and the fallback `general-purpose running` row must never
- * sit side by side). No join card → keep as-is, the first running row stays
+ * titled card and the fallback `general-purpose running` row must never sit
+ * side by side). No join card → keep as-is, the first running row stays
  * visible.
  */
 export function filterLiveToolRunsAgainstSpawnCards(
@@ -194,19 +194,16 @@ export function filterLiveToolRunsAgainstSpawnCards(
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
   cols: number,
-  /** specs/tui-subagent-transcript-live.md: when this run is a spawn card that
-   *  joined a subagent, the card's text lines come from the card-level
-   *  projection (row 1 `{role} running...`, row 2 the dim preview; a green
-   *  `✓ Done` is appended under the completed overview). Absent → byte-for-byte
-   *  as before (non-spawn tools, polled cards, un-joined spawn cards all take
-   *  the existing path). */
+  /** specs/subagent-card-title.md: when this run is a spawn card that joined a
+   *  subagent, the card's text lines come from the card-level projection (row 1
+   *  the title, row 2 the activity slot — dim tool name while live, `✓ Done`
+   *  once completed). Absent → byte-for-byte as before (non-spawn tools, polled
+   *  cards, un-joined spawn cards all take the existing path). */
   card?: SubagentCardLines | null
 ): ReadonlyArray<string> {
   const live = cardIfLive(run, card);
   if (live !== null) {
-    return live.doneLine === undefined
-      ? [live.roleLine, live.detailLine]
-      : [live.roleLine, live.detailLine, live.doneLine];
+    return [live.titleLine, live.detailLine];
   }
   if (run.status === "running") {
     return [runningLine(run, cols)];
@@ -237,9 +234,9 @@ export function liveToolPreviewTextLines(
 }
 
 /** Physical row count of the live tool box (status 1 row + visible preview rows).
- *  card hit → live 2 rows (identity + overview), completed 3 rows (`✓ Done`
- *  appended under the overview); the row account is same-source with
- *  `liveToolPreviewTextLines` (the 2-row path comes from it too, parity holds). */
+ *  card hit → always 2 rows (title + activity slot, in every state); the row
+ *  account is same-source with `liveToolPreviewTextLines` (the 2-row path comes
+ *  from it too, parity holds). */
 export function liveToolPreviewRows(
   run: LiveToolRun,
   cols: number,
@@ -262,10 +259,10 @@ export function liveToolPreviewRows(
  *  `memo` does not apply: the call convention passes a fresh runs array each
  *  frame, and the container itself is stateless.
  *
- *  `cards` (specs/tui-subagent-transcript-live.md): toolUseId → card-level
- *  two-row projection (produced by `subagentCardLinesMap`). Looked up exactly
+ *  `cards` (specs/subagent-card-title.md): toolUseId → card-level two-row
+ *  projection (produced by `subagentCardLinesMap`). Looked up exactly
  *  by `run.id` —— missing map / missing entry → that card keeps its existing
- *  shape, never borrowing another worker's preview. */
+ *  shape, never borrowing another worker's title or activity name. */
 export function liveToolRunsBox(
   runs: ReadonlyArray<LiveToolRun>,
   cols: number,
@@ -293,11 +290,11 @@ export function liveToolRunsBox(
  *  consume deriveSlot's color tokens —— failure is error, accent-class
  *  successes are accent; dim no longer tints every completed row.
  *
- *  `card` (specs/tui-subagent-transcript-live.md): on a hit this spawn card
- *  draws `SubagentCardView`'s two rows (row 1 `{role} running...`, row 2 the
- *  dim preview / green `✓ Done`); the whole card no longer goes through the
- *  existing title + preview combination; a failed card never takes the card
- *  (the failure cross-cut holds at the box layer too). */
+ *  `card` (specs/subagent-card-title.md): on a hit this spawn card
+ *  draws `SubagentCardView`'s two rows (row 1 the card's title, row 2 the
+ *  dim in-flight tool name / green `✓ Done`); the whole card no longer goes
+ *  through the existing title + preview combination; a failed card never takes
+ *  the card (the failure cross-cut holds at the box layer too). */
 export function liveToolPreviewBox(
   run: LiveToolRun,
   cols: number,

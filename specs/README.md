@@ -33,7 +33,12 @@
 
 - `tui-activity-block.md` — activity blocks (thinking and quiet tools share one body slot; blocks cut per message and appended)
 - `tui-skill-slash-catalog.md` — TUI skill slash → harness SkillCatalog
-- `tui-subagent-transcript-live.md` — live sub-agent's two lines land on the session spawn card
+- `tui-subagent-transcript-live.md` — live sub-agent's two lines land on the session spawn card (line content superseded by `subagent-card-title.md`; position, panel, and `subagent_result` exclusions hold)
+- `subagent-card-title.md` — spawn card line 1 = required operator `title`, line 2 = one activity slot (in-flight tool name from the worker ledger → green `✓ Done`)
+
+### IM bridge
+
+- `im-bridge-feishu.md` — Feishu / Lark as an external consumer of the session HTTP face (ADR-0120; platform numbers in `docs/platforms/feishu-facts.md`)
 
 ### Tools and extension sources
 

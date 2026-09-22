@@ -26,8 +26,10 @@ import {
 // (SSOT: vitest.ci-excludes.ts) and must still pass locally.
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listSubagentRecordPaths } from "../../src/harness/sandbox/fence-tmp.ts";
 
 // ADR-0085: worker subprocesses are replaced by fake children — the
 // assertion surface is the wire bytes on a child's stdin (build-engine →
@@ -363,8 +365,10 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 function makeTestSubagentManager(): {
   readonly manager: SubAgentManager;
   readonly spawnedTasks: string[];
+  readonly blockedCalls: unknown[];
 } {
   const spawnedTasks: string[] = [];
+  const blockedCalls: unknown[] = [];
   const manager: SubAgentManager = {
     spawn: (definition) => {
       spawnedTasks.push(definition.task ?? "");
@@ -381,8 +385,11 @@ function makeTestSubagentManager(): {
     getCapacity: () => 15,
     listSubagents: () => [],
     subscribe: () => () => {},
+    recordBlockedSpawn: (info) => {
+      blockedCalls.push(info);
+    },
   };
-  return { manager, spawnedTasks };
+  return { manager, spawnedTasks, blockedCalls };
 }
 
 function makeCapturingSubagentManager(sandboxRoot: string): {
@@ -1545,7 +1552,7 @@ describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
 describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
   it("allows explore on the main repo without provisioning and runs it read-only", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-explore-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
+    const { manager, spawnedTasks, blockedCalls } = makeTestSubagentManager();
     let provisioned = 0;
     try {
       const built = await buildHarnessEngine({
@@ -1565,6 +1572,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "inspect the repository",
         subagent_type: "explore",
         wait: false,
@@ -1573,6 +1581,8 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(result.kind).toBe("ok");
       expect(spawnedTasks).toEqual(["inspect the repository"]);
       expect(provisioned).toBe(0);
+      // read-only role never reaches the unbound block → zero forensic records
+      expect(blockedCalls).toEqual([]);
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);
@@ -1621,6 +1631,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "inspect the repository",
         subagent_type: "explore",
         wait: false,
@@ -1635,9 +1646,22 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
     }
   });
 
-  it("blocks the default general-purpose spawn on the main repo and points at worktree creation", async () => {
+  it("blocks the default general-purpose spawn on the main repo, points at worktree creation, and records the interception forensically", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-general-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
+    const subagentsDir = join(root, "subagents");
+    let spawnFactoryCalls = 0;
+    // Real manager: the forensic record must land in a genuine per-agent
+    // JSONL under the assembly dir, not just reach a spy.
+    const manager = createSubAgentManager({
+      sandboxRoot: root,
+      subagentsDir,
+      spawn: (): ChildProcess => {
+        spawnFactoryCalls += 1;
+        throw new Error(
+          "gate-blocked spawn must never reach the worker spawn factory"
+        );
+      },
+    });
     let provisioned = 0;
     try {
       const built = await buildHarnessEngine({
@@ -1657,14 +1681,35 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "make the requested change",
         wait: false,
       });
 
       expect(result.kind).toBe("execution_failed");
       expect(result.message).toContain("create-worktree ACI tool");
-      expect(spawnedTasks).toEqual([]);
+      // no worker, no slot: the spawn factory never ran, the task tables stayed empty
+      expect(spawnFactoryCalls).toBe(0);
       expect(provisioned).toBe(0);
+      expect(manager.listActive()).toEqual([]);
+      // forensic record: exactly one per-agent JSONL carrying one
+      // subagent_spawn status:error line with the verbatim block notice
+      const records = listSubagentRecordPaths(subagentsDir);
+      expect(records).toHaveLength(1);
+      const rows = readFileSync(records[0]!, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row.record_type).toBe("subagent_spawn");
+      expect(row.status).toBe("error");
+      expect(row.origin).toBe("parent");
+      expect(row.task_preview).toBe("make the requested change");
+      expect(row.subagent_id).toBe(row.task_id);
+      const err = row.error as { type: string; message: string };
+      expect(err.type).toBe("execution_failed");
+      expect(err.message).toBe(result.message);
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);
@@ -1687,6 +1732,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "use an unsupported role",
         subagent_type: "not-a-catalog-role",
         wait: false,
@@ -1717,6 +1763,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       const result = await runSpawn(built, {
+        title: "spawn probe",
         task: "write through shell if needed",
         subagent_type: "general-purpose",
         disallowedTools: ["write_file", "edit_file"],
@@ -1751,6 +1798,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => taskRoot },
       });
       const blocked = await runSpawn(mainBuilt, {
+        title: "spawn probe",
         task: "change the repository",
         wait: false,
       });
@@ -1772,6 +1820,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => taskRoot },
       });
       const result = await runSpawn(reboundBuilt, {
+        title: "spawn probe",
         task: "change the repository",
         wait: false,
       });
@@ -1802,6 +1851,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         worktreeIsolation: { provision: async () => root },
       });
       const offResult = await runSpawn(offBuilt, {
+        title: "spawn probe",
         task: "preserve the existing path",
         wait: false,
       });
@@ -1816,6 +1866,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         subagentManager: baselineManager.manager,
       });
       const baselineResult = await runSpawn(baselineBuilt, {
+        title: "spawn probe",
         task: "preserve the existing path",
         wait: false,
       });
@@ -1865,7 +1916,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
 
       const result = await runSpawn(
         built,
-        { task: "share the ledger", wait: false },
+        { title: "ledger probe", task: "share the ledger", wait: false },
         "conv-sc9-parent"
       );
       expect(result.kind).toBe("ok");
@@ -1897,7 +1948,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
 
       const result = await runSpawn(
         built,
-        { task: "no ledger", wait: false },
+        { title: "no ledger probe", task: "no ledger", wait: false },
         "conv-sc9-parent"
       );
       expect(result.kind).toBe("ok");

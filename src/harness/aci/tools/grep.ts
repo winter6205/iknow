@@ -32,6 +32,7 @@ import { isAbsolute } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
+import { assertNoGrepSubstitution } from "./role-substitution.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
@@ -124,6 +125,10 @@ export function createGrepTool(
     // the handler do not leak into this call. No cell → fall back to the
     // factory-captured root (legacy parity).
     rejectRetiredLimitField(input);
+    // ADR-0117 role-substitution gate: structure-shaped patterns need
+    // same-session fallback evidence (trajectory only). Not a hard-wall —
+    // the frozen tables live in role-substitution.ts.
+    assertNoGrepSubstitution(input, ctx?.messages, ctx?.toolUseId);
     const rootAtCall = readRoot(root);
     const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
     const resolvedRoot = await realpath(rootAtCall);

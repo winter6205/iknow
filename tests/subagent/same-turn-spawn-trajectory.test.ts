@@ -37,7 +37,10 @@ import type {
   SubAgentEnvelope,
   WorkerEnvelope,
 } from "../../src/harness/subagent/envelope.ts";
-import { getAgentEntry, resolveAgentCatalog } from "../../src/harness/subagent/catalog.ts";
+import {
+  getAgentEntry,
+  resolveAgentCatalog,
+} from "../../src/harness/subagent/catalog.ts";
 import { createAciExecutor } from "../../src/harness/aci/aci-executor.ts";
 import type { AciCatalog, AciToolDef } from "../../src/harness/aci/types.ts";
 import type {
@@ -90,7 +93,11 @@ function makeTrajectoryHarness(opts: {
   const records: SpawnRecord[] = [];
   const manager = createSubAgentManager({
     subagentsDir: opts.subagentsDir,
-    spawn: (def: SubAgentDefinition, taskId: string, _payload: WorkerEnvelope) => {
+    spawn: (
+      def: SubAgentDefinition,
+      taskId: string,
+      _payload: WorkerEnvelope
+    ) => {
       const child = makeFakeChild();
       records.push({ taskId, task: def.task ?? "", child });
       // Moment the spawn factory is called: manager has already registered this task
@@ -129,7 +136,10 @@ function makeCatalog(tools: AciToolDef[]): AciCatalog {
 }
 
 /** inner executor: dispatches the batch to the tool handler (foreground arm blocks until terminal state). */
-function makeHandlerExecutor(tool: AciToolDef, conversationId: string): Executor {
+function makeHandlerExecutor(
+  tool: AciToolDef,
+  conversationId: string
+): Executor {
   return Object.freeze({
     executeAll: async (
       batch: ReadonlyArray<ToolCall>
@@ -149,7 +159,9 @@ function makeHandlerExecutor(tool: AciToolDef, conversationId: string): Executor
             };
           } catch (err) {
             const message =
-              err instanceof ToolExecutionError ? err.message : "execution_failed";
+              err instanceof ToolExecutionError
+                ? err.message
+                : "execution_failed";
             return { kind: "execution_failed", toolUseId: call.id, message };
           }
         })
@@ -192,18 +204,39 @@ describe("ADR-0101 T1 — 同轮双 spawn 轨迹（前景默认不变）", () =>
     });
 
     // one batch = two tool_use in the same assistant message (wait omitted = foreground).
-    const results = await aciExec.executeAll([
-      { id: "tu1", name: "spawn_subagent", input: { task: "A" } },
-      { id: "tu2", name: "spawn_subagent", input: { task: "B" } },
-    ]);
+    const batch = [
+      {
+        id: "tu1",
+        name: "spawn_subagent",
+        input: { title: "recon A", task: "A" },
+      },
+      {
+        id: "tu2",
+        name: "spawn_subagent",
+        input: { title: "recon B", task: "B" },
+      },
+    ];
+    const results = await aciExec.executeAll(batch);
 
     assert.equal(results.length, 2);
+    // Spec subagent-card-title input contract, concurrent column: two spawns in
+    // one turn each carry their own title. These are the very input objects the
+    // loop persists as tool_use, so reading them back after the run also proves
+    // the tool left them untouched (line 1 of each card reads its own title).
+    assert.deepEqual(
+      batch.map((call) => call.input.title),
+      ["recon A", "recon B"]
+    );
     const handoffA = okHandoff(results[0]!);
     const handoffB = okHandoff(results[1]!);
 
     // two distinct task_ids, each handed back to the parent in its envelope.
-    assert.ok(typeof handoffA.task_id === "string" && handoffA.task_id.length > 0);
-    assert.ok(typeof handoffB.task_id === "string" && handoffB.task_id.length > 0);
+    assert.ok(
+      typeof handoffA.task_id === "string" && handoffA.task_id.length > 0
+    );
+    assert.ok(
+      typeof handoffB.task_id === "string" && handoffB.task_id.length > 0
+    );
     assert.notEqual(handoffA.task_id, handoffB.task_id);
 
     // two worker child processes, one task_id each (matched on the spawn-factory side).
@@ -255,7 +288,11 @@ describe("ADR-0101 T1 — 同轮双 spawn 轨迹（前景默认不变）", () =>
 
     // turn 1: foreground spawn A — this turn's handler blocks until A reaches terminal state.
     const turn1 = await aciExec.executeAll([
-      { id: "tu1", name: "spawn_subagent", input: { task: "A" } },
+      {
+        id: "tu1",
+        name: "spawn_subagent",
+        input: { title: "recon A", task: "A" },
+      },
     ]);
     const handoffA = okHandoff(turn1[0]!);
     assert.equal(handoffA.status, "ok");
@@ -267,7 +304,11 @@ describe("ADR-0101 T1 — 同轮双 spawn 轨迹（前景默认不变）", () =>
 
     // turn 2: foreground spawn B — can only be dispatched after A has handed off.
     const turn2 = await aciExec.executeAll([
-      { id: "tu2", name: "spawn_subagent", input: { task: "B" } },
+      {
+        id: "tu2",
+        name: "spawn_subagent",
+        input: { title: "recon B", task: "B" },
+      },
     ]);
     const handoffB = okHandoff(turn2[0]!);
     assert.equal(handoffB.status, "ok");

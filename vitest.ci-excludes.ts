@@ -64,6 +64,13 @@ export const CI_EXCLUDES: readonly string[] = [
   // cat / grep / sed / rg before asserting the ledger entries — on a runner
   // without user-namespace it throws already at assembly time.
   "tests/harness/aci/tools/bash-last-read.test.ts",
+  // ADR-0117 替岗拒绝 bash 臂：createBashTool 装配期 requireBwrap，且行窗
+  // 仍读 / echo 反例等用例真实 spawn bwrap —— runner 无 user-namespace。
+  "tests/harness/aci/tools/role-substitution.test.ts",
+  // ADR-0117 boundary matrix (#1089): same assembly chain — createBashTool
+  // requireBwraps at assembly time and the accepted-escape rows really spawn
+  // bwrap for sed/cat/nl line-window reads (no user-namespace on the runner).
+  "tests/harness/aci/tools/role-substitution-boundaries.test.ts",
   "tests/harness/aci/tools/grep.test.ts",
   "tests/harness/aci/tools/query-trace.test.ts",
   "tests/harness/aci/tools/list-sessions.test.ts",
@@ -208,8 +215,6 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/subagent/worker-addendum-untrusted.test.ts",
   // ADR-0121: worker preimage port threads through createWorkerDeps → requireBwrap
   "tests/subagent/worker-preimage-port.test.ts",
-  // settings.subagent.model route probes createWorkerDeps → requireBwrap
-  "tests/subagent/worker-model-route.test.ts",
   // #562: subagent contract tests go through the same createWorkerDeps assembly chain
   "tests/subagent/envelope-role.test.ts",
   "tests/subagent/tool-constraints.test.ts",
@@ -220,9 +225,17 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0084 Slice B SC5: real createWorkerDeps assembly reads project permissions
   // → createDefaultAciRegistry → createBashTool → requireBwrap.
   "tests/subagent/worker-project-permission.test.ts",
+  // ADR-0122 worker model route: asserts what `createWorkerDeps` hands the
+  // child, so it runs through the same assembly chain → requireBwrap (throws
+  // at assembly time on a runner without a user-namespace).
+  "tests/subagent/worker-model-route.test.ts",
   // CLI-side harness / subagent trace assembly
   "tests/cli/tui-deps-subagent-trace-factory.test.ts",
   "tests/cli/chat-subagent-trace.test.ts",
+  // Same assembly chain on the activity-reader seam: buildTuiDeps →
+  // buildHarnessEngine → createDefaultAciRegistry → createBashTool →
+  // requireBwrap, which the guard anchor hits at assembly time.
+  "tests/cli/tui-deps-subagent-activity-reader.test.ts",
   // #406: chat × roundtrip cases have createBashTool really spawn echo to restore placeholders
   // (full excludes only e2e.test.ts; fast excludes the whole directory, see CI_FAST_EXCLUDES).
   "tests/harness/secret-roundtrip/e2e.test.ts",

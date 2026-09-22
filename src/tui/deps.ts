@@ -59,6 +59,7 @@ import {
 } from "../session-api/store/session-store.js";
 import { createPreimageCapture } from "../session-api/store/preimage-capture.js";
 import type { PreimageCapture } from "../harness/aci/preimage-port.js";
+import { readWorkerInFlightToolName } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { resolveTasksDir } from "../harness/background/paths.js";
 import { MEMORY_DIR_NAME } from "../shared/session-tree-names.js";
@@ -524,6 +525,9 @@ export async function buildTuiDeps(
     // subagentDiagnosticsDir (stderr pointer) for old-path compatibility;
     // when absent the manager internally follows subagentsDir.
     subagentsDir,
+    // Same store reader the hub's rebuild path injects, so the initial build
+    // and every rebind assemble identically.
+    subagentActivityReader: readWorkerInFlightToolName,
     ...(traceOut !== undefined ? { subagentDiagnosticsDir: traceOut } : {}),
     // Test seam: createMcpManager factory override (passthrough; tests capture args).
     // prettier-ignore kept on one line verbatim (88 chars > 80 cols; reformatting disabled here).

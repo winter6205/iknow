@@ -151,6 +151,7 @@ import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
+import { readWorkerInFlightToolName } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
@@ -4000,6 +4001,12 @@ export class SessionHub {
       // (`resolveSubagentTraceDirShared`) is retired, as is
       // `createTrace("subagent")` (the conversationId-aggregated single file).
       projectDir: this.store.getProjectDir(),
+      // specs/subagent-card-title.md: the read-only subagent list also carries
+      // the tool each live worker is executing now. That reading belongs to the
+      // worker-ledger codec (this layer), so the hub injects the reader and
+      // build-engine threads it to the manager as an opaque seam — the harness
+      // never imports the store.
+      subagentActivityReader: readWorkerInFlightToolName,
       // Live-graph ledger host pass-through — resolve the per-session ledger
       // by ctx.conversationId; destroyed on resetSession / shutdown.
       ...(this.liveGraphLedger
@@ -4165,6 +4172,9 @@ export class SessionHub {
       // via def.conversationId (see the resolveSubagentTraceDirShared
       // retirement note).
       projectDir: this.store.getProjectDir(),
+      // Same as the per-root path above: the activity projection reader is
+      // injected from the layer that owns the worker-ledger codec.
+      subagentActivityReader: readWorkerInFlightToolName,
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),

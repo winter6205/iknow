@@ -26,6 +26,7 @@ import {
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
 import { readProjectDefaultMode } from "../harness/permission/project-settings.js";
+import { readWorkerInFlightToolName } from "../session-api/store/index.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import {
@@ -253,6 +254,9 @@ export async function buildHarnessEngine(
     env: bundle.env,
     askUser,
     surface: surface ?? "chat",
+    // Same store reader the hub and TUI assemblies inject, so no surface can
+    // drift on whether live spawn cards light up their activity slot.
+    subagentActivityReader: readWorkerInFlightToolName,
     ...(resolvedWorkspaceRoot !== undefined
       ? { workspaceRoot: resolvedWorkspaceRoot }
       : {}),

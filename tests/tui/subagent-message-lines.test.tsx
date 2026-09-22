@@ -3,7 +3,7 @@
  *
  * Certification of the **retained surface** (cross-module sharing and
  * single-source) of `src/tui/subagent-message-lines.ts`, per
- * specs/tui-subagent-transcript-live.md.
+ * specs/subagent-card-title.md.
  *
  * This file formerly certified the "live list spread flat" projection and the
  * identity strip above the prompt; that behavior was superseded (the
@@ -23,11 +23,11 @@
  *   2) single source: `IDENTITY_FALLBACK_ROLE` equals `SUBAGENT_ROLE_FALLBACK`
  *      in `src/shared/tool-line.ts` (tool card and two-line projection must
  *      not each print their own role name);
- *   3) composition: line 1 of the card projection = same-source role
- *      resolution + verbatim ` running...` (asserted on the projection's
- *      output, not by re-exporting the module constant — that would be
- *      tautological), and an unjoinable key never borrows another worker's
- *      preview (lock clause 6).
+ *   3) composition: line 1 of a no-title card = same-source role resolution
+ *      verbatim — spec SC1 retired the old ` running...` suffix, so the
+ *      output bytes must contain no such suffix in any state (asserted on the
+ *      projection's output, not by re-exporting module constants), and an
+ *      unjoinable key never borrows another worker's title or activity.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -60,7 +60,7 @@ function makeSubagent(overrides: Partial<SubagentInfo> = {}): SubagentInfo {
 }
 
 // ============================================================================
-// 1) Shared surface intact: isLiveSubagent / resolveIdentityRole / RUNNING_SUFFIX
+// 1) Shared surface intact: isLiveSubagent / resolveIdentityRole
 // ============================================================================
 
 describe("isLiveSubagent — 面板 / Ctrl+X 分派共用判据", () => {
@@ -107,27 +107,27 @@ describe("resolveIdentityRole — negative 边界（永不输出「子代理」�
   });
 });
 
-describe("第 1 行后缀 — 锁句的逐字形态（三个点）", () => {
-  test("live 第 1 行以逐字 ` running...` 收尾；completed 只作身份不带后缀", () => {
-    // Assert the projection's **output bytes**, not the module-internal
-    // constant: re-exporting the constant just copies the implementation
-    // (tautology); the output side is where the spec's lock clause "three
-    // dots" lands. Lock clause 2 reopen: completed drops running from line 1
-    // (the role title is identity only).
-    for (const state of ["starting", "running"] as const) {
-      const info = makeSubagent({ role: "explore", state, toolUseId: "t-sfx" });
-      expect(projectSubagentCardLines([info], "t-sfx", 80)!.roleLine).toBe(
-        "explore running..."
-      );
-    }
+describe("第 1 行无状态后缀（逐字形态钉在输出上）", () => {
+  test("live / completed 第 1 行逐字相同、均不含 running", () => {
+    // Assert the projection's **output bytes**, not module-internal constants:
+    // line 1 is a stable title that never changes across the worker's
+    // lifetime, so a suffix re-introduced on either side shows up here.
+    const live = makeSubagent({
+      role: "explore",
+      state: "running",
+      toolUseId: "t-sfx",
+    });
     const done = makeSubagent({
       role: "explore",
       state: "completed",
       toolUseId: "t-sfx",
     });
+    const liveCard = projectSubagentCardLines([live], "t-sfx", 80)!;
     const doneCard = projectSubagentCardLines([done], "t-sfx", 80)!;
-    expect(doneCard.roleLine).toBe("explore");
-    expect(doneCard.roleLine).not.toContain("running");
+    expect(liveCard.titleLine).toBe("explore");
+    expect(doneCard.titleLine).toBe("explore");
+    expect(liveCard.titleLine.includes("running")).toBe(false);
+    expect(doneCard.titleLine.includes("running")).toBe(false);
   });
 });
 
@@ -143,32 +143,54 @@ describe("IDENTITY_FALLBACK_ROLE — 与 shared 侧单源", () => {
 });
 
 // ============================================================================
-// 3) Composition: card projection consumes same-source role resolution + verbatim suffix
+// 3) Composition: card projection consumes same-source role resolution verbatim
 // ============================================================================
 
-describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", () => {
-  test("第 1 行 = resolveIdentityRole(info) 的投影值 + 逐字后缀", () => {
+describe("卡级投影的组合面 — 无 title 时第 1 行与 join 键（SC1 / join 契约）", () => {
+  test("无 title 的第 1 行 = resolveIdentityRole(info) 逐字投影（不另加后缀）", () => {
     for (const info of [
       makeSubagent({ role: "explore", toolUseId: "toolu_c1" }),
       makeSubagent({ role: undefined, toolUseId: "toolu_c2" }),
       makeSubagent({ role: "  ", toolUseId: "toolu_c3" }),
     ]) {
       const card = projectSubagentCardLines([info], info.toolUseId, 80);
-      expect(card!.roleLine).toBe(`${resolveIdentityRole(info)} running...`);
+      expect(card!.titleLine).toBe(resolveIdentityRole(info));
     }
   });
 
-  test("缺关联键 → null；不把列表里别的 worker 的预览顶上来（锁句 6）", () => {
+  test("缺关联键 → null；不把列表里别的 worker 的 title / 活动名顶上来", () => {
     const other = makeSubagent({
       toolUseId: "toolu_other",
-      taskPreview: "别的 worker 的预览",
+      role: "explore",
+      inFlightTool: "Bash",
     });
-    expect(projectSubagentCardLines([other], undefined, 80)).toBeNull();
-    expect(projectSubagentCardLines([other], "  ", 80)).toBeNull();
-    expect(projectSubagentCardLines([other], "toolu_nobody", 80)).toBeNull();
+    expect(
+      projectSubagentCardLines(
+        [other],
+        undefined,
+        80,
+        new Map([["toolu_other", "别人的标题"]])
+      )
+    ).toBeNull();
+    expect(
+      projectSubagentCardLines(
+        [other],
+        "  ",
+        80,
+        new Map([["toolu_other", "别人的标题"]])
+      )
+    ).toBeNull();
+    expect(
+      projectSubagentCardLines(
+        [other],
+        "toolu_nobody",
+        80,
+        new Map([["toolu_other", "别人的标题"]])
+      )
+    ).toBeNull();
   });
 
-  test("completed：概述留下 + doneLine 逐字 `✓ Done`（锁句 2 reopen 的宿主可见形态）", () => {
+  test("completed：第 2 行逐字 `✓ Done`，taskPreview 不上卡（SC7 的宿主可见形态）", () => {
     const card = projectSubagentCardLines(
       [
         makeSubagent({
@@ -180,9 +202,9 @@ describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", 
       "toolu_d",
       80
     );
-    expect(card!.roleLine).toBe("explore");
-    expect(card!.detailLine).toBe("查找文档");
-    expect(card!.doneLine).toBe("✓ Done");
+    expect(card!.titleLine).toBe("explore");
+    expect(card!.detailLine).toBe("✓ Done");
+    expect(card!.detailLine.includes("查找文档")).toBe(false);
     expect(card!.done).toBe(true);
   });
 
@@ -191,16 +213,16 @@ describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", 
       [
         makeSubagent({
           role: "a".repeat(100),
-          taskPreview: "查找文档并且继续往下列出更多内容",
           toolUseId: "toolu_narrow",
+          inFlightTool: "b".repeat(100),
         }),
       ],
       "toolu_narrow",
       12
     );
-    expect(visualWidth(card!.roleLine)).toBeLessThanOrEqual(12);
+    expect(visualWidth(card!.titleLine)).toBeLessThanOrEqual(12);
     expect(visualWidth(card!.detailLine)).toBeLessThanOrEqual(12);
-    expect(card!.roleLine.includes("\n")).toBe(false);
+    expect(card!.titleLine.includes("\n")).toBe(false);
     expect(card!.detailLine.includes("\n")).toBe(false);
   });
 });

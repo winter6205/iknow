@@ -58,6 +58,13 @@ export interface SubAgentDefinition {
    */
   readonly parentTurnId?: string;
   /**
+   * Parent-only: the short operator label `spawn_subagent` requires on its
+   * input, carried so the session card can draw line 1 while the worker runs —
+   * mid-turn, the parent's own `tool_use.input` is not in the TUI's loaded
+   * projection yet. Not copied onto WorkerEnvelope.
+   */
+  readonly title?: string;
+  /**
    * Parent-only: conversation that owns this worker. Used to keep terminal
    * wakeups and host drains scoped to one interactive session.
    */

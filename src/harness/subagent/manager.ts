@@ -73,6 +73,34 @@ export type QueryBufferResult =
     };
 
 /**
+ * What the injected activity reader is asked for: one live worker's own
+ * ledger, addressed by the manager's task identity (never by a path the
+ * caller invented).
+ */
+export interface SubagentActivityQuery {
+  readonly taskId: string;
+  readonly transcriptPath: string;
+}
+
+/**
+ * Injection seam for the in-flight tool name. The manager holds no transcript
+ * codec (the worker ledger belongs to the store layer, and `src/harness/**`
+ * must not reach into it), so the host that owns the codec wires a reader
+ * here. Contract: resolve with the tool name, or `""` when the worker has no
+ * call waiting on a result — and never throw, never reject, because the
+ * caller reads it from a synchronous list's background refresh. A ledger that
+ * is merely absent is one of the `""` readings; a fault is the reader's own to
+ * report, since the manager cannot tell the two apart and must not throw.
+ *
+ * Cost is bounded by the caller, not by this signature: at most one read is
+ * outstanding per live task, and a pass over the list queues at most one per
+ * task — so the read rate is the list's poll rate × live worker count.
+ */
+export type SubagentActivityReader = (
+  query: SubagentActivityQuery
+) => Promise<string>;
+
+/**
  * Minimal state surface for the Session API read-only projection.
  * Field set aligns with trace SubagentSpawnRecord, but truncation differs:
  * taskPreview is cut at ≤120 (a permission line — full task text never
@@ -110,6 +138,25 @@ export interface SubagentInfo {
    * Postel: only true is present; background / unknown absent (consumers must check `=== true`).
    */
   readonly foreground?: boolean;
+  /**
+   * The tool this live worker is executing right now — the name of the latest
+   * `tool_use` on its ledger with no matching `tool_result` yet (projected by
+   * the injected `readInFlightTool` reader; `""` = read completed, nothing
+   * waiting). Surfaces only while the task is `starting` / `running`.
+   *
+   * Two things it is NOT: not ADR-0028 `lastTool` (that is the last *successful*
+   * tool of the main loop, feeding the model status bar), and not a field on
+   * the parent-visible handoff envelope (worker stdout stays one terminal
+   * envelope — SC6).
+   */
+  readonly inFlightTool?: string;
+  /**
+   * The short operator label the parent filed on its `spawn_subagent` call
+   * (`def.title`), which the session card draws as line 1. Parent-only: it is
+   * deliberately not on the worker envelope or the handoff. Absent for a
+   * direct manager spawn, whose card falls back to the catalog role.
+   */
+  readonly title?: string;
 }
 
 export interface SubAgentManager {
@@ -211,6 +258,16 @@ export interface SubAgentManager {
    * new value immediately.
    */
   readonly getCapacity: () => SubagentCapacityValue;
+  /**
+   * T3 forensic: the worktree-isolation gate blocked a `spawn_subagent` call
+   * before any manager code ran (no worker, no slot, no parent content
+   * trace). Appends exactly one `subagent_spawn` status:"error" line —
+   * carrying the verbatim block notice — into a fresh per-agent record at
+   * the same JSONL layout normal spawns use, so the interception stays
+   * queryable after restart. Never registers a task and never throws.
+   * Optional so poll-only fakes stay structural.
+   */
+  readonly recordBlockedSpawn?: (info: BlockedSpawnForensics) => void;
 }
 
 /** Spawn DI factory signature: injected by the caller (test fakes / production defaultSubAgentSpawn). */
@@ -219,6 +276,20 @@ export type SubAgentSpawn = (
   taskId: string,
   stdinPayload: WorkerEnvelope
 ) => ChildProcess;
+
+/**
+ * One `spawn_subagent` call the worktree-isolation gate blocked before the
+ * manager ever ran (no worker, no slot). build-engine forwards the gate's
+ * unbound-block notification here verbatim; `notice` is the block receipt
+ * text the model saw.
+ */
+export interface BlockedSpawnForensics {
+  readonly notice: string;
+  readonly input: unknown;
+  readonly conversationId?: string;
+  readonly parentTurnId?: string;
+  readonly toolUseId?: string;
+}
 
 /** Typed rejection reasons for waitFor timeout / shutdown collection (status/reason constants passed through to the caller). */
 export class SubAgentWaitTimeoutError extends Error {
@@ -542,6 +613,16 @@ function presentString(v: string | undefined): boolean {
   return typeof v === "string" && v.length > 0;
 }
 
+/**
+ * Trim a display field and keep it only when something is left. A projection
+ * field that may be absent is reported through **absence**, never as `""` or an
+ * `undefined`-valued key — its consumers branch with `in` / `??`.
+ */
+function trimmedPresence(v: string | undefined): string | undefined {
+  const trimmed = v?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined;
+}
+
 function waitForStderrClose(stderr: ChildProcess["stderr"]): Promise<void> {
   if (!stderr || stderr.readableEnded || stderr.destroyed) {
     return Promise.resolve();
@@ -766,6 +847,32 @@ function readIsolationOn(
   return typeof value === "function" ? value() : value === true;
 }
 
+/**
+ * Minimal def-shape for the blocked-spawn forensic record: only the fields
+ * the interception actually knows (the spawn tool's raw input + turn
+ * attribution), Postel — absent values keep the key omitted. The record is
+ * rendered through the same helpers as live spawns, so a forensic row and a
+ * real spawn row share one shape.
+ */
+function blockedSpawnDefinition(
+  info: BlockedSpawnForensics
+): SubAgentDefinition {
+  const input = (info.input ?? {}) as Record<string, unknown>;
+  const role =
+    typeof input.subagent_type === "string" ? input.subagent_type : undefined;
+  return {
+    task: typeof input.task === "string" ? input.task : "",
+    ...(role !== undefined ? { role } : {}),
+    ...(info.conversationId !== undefined
+      ? { conversationId: info.conversationId }
+      : {}),
+    ...(info.parentTurnId !== undefined
+      ? { parentTurnId: info.parentTurnId }
+      : {}),
+    ...(info.toolUseId !== undefined ? { toolUseId: info.toolUseId } : {}),
+  };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -945,8 +1052,28 @@ export function createSubAgentManager(opts: {
     filePath: string,
     conversationId: string
   ) => TraceService;
+  /**
+   * Read-only activity projection reader (see `SubagentActivityReader`). The
+   * manager owns the task identity and the ledger *path*, never the ledger
+   * *codec*, so the store-layer reader comes in here as an opaque function —
+   * the same injection-not-import discipline `spawn` / `traceFactory` use.
+   * Absent → `SubagentInfo.inFlightTool` never appears, so every existing
+   * consumer of the list stays byte-for-byte identical.
+   */
+  readonly readInFlightTool?: SubagentActivityReader;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
+  /**
+   * Last in-flight tool name read for each live task (`""` = the read
+   * completed and nothing is waiting). Declared with `tasks` because a Task
+   * record's birth point clears its entry.
+   */
+  const inFlightToolCache = new Map<string, string>();
+  /** Tasks with a read outstanding — the guard that keeps one refresh per task. */
+  const inFlightToolRefreshes = new Set<string>();
+  /** The injected reader breaks its never-throw contract at most once per
+   *  assembly before the wiring bug is worth shouting about. */
+  let readerContractReported = false;
   /** Polling handles of all pending waitFor (non-terminal; shutdown must clear them to prevent a hanging process). */
   const waitPollers = new Set<ReturnType<typeof setInterval>>();
   /** settleReject references of pending waitFor: actively rejected at shutdown, never hanging. */
@@ -1026,6 +1153,48 @@ export function createSubAgentManager(opts: {
       return join(opts.projectDir, segment, SUBAGENT_TRACE_DIR_NAME);
     }
     return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
+  }
+
+  /**
+   * T3 forensic landing for a gate-blocked spawn (see the
+   * SubAgentManager.recordBlockedSpawn doc). Same path helpers as a live
+   * spawn (resolveSubagentsDirForDef + resolvePerAgentTrace →
+   * `<subagentsDir>/<taskId>/agent-<taskId>.jsonl`), same error-with-no-
+   * outcome shape as the spawn-failure precedent, and the same taskId
+   * minting (randomUUID — the blocked call never had a real task, the
+   * forensic UUID only keys the record file). No tasks.set, no slot, no
+   * meta, no state_change / stop (there is no lifecycle to terminate), and
+   * never a write to the parent content trace. A forensic write must never
+   * turn the gate's block receipt into an execution error, so sync IO
+   * failures degrade like the final-text pad (warn-once per call, never
+   * rethrow); async trace rejections are already swallowed by safeTrace.
+   */
+  function recordBlockedSpawn(info: BlockedSpawnForensics): void {
+    const taskId = randomUUID();
+    const def = blockedSpawnDefinition(info);
+    const startedAt = new Date().toISOString();
+    try {
+      const taskTrace = resolvePerAgentTrace(taskId, def);
+      if (taskTrace === null) return;
+      void safeTrace(() =>
+        taskTrace.recordSubagentSpawn({
+          id: taskId,
+          taskId,
+          ...parentTurnFields(def),
+          origin: "parent",
+          startedAt,
+          status: "error",
+          ts: startedAt,
+          taskPreview: truncateTaskPreview(def),
+          error: { type: "execution_failed", message: info.notice },
+        })
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[subagent] blocked-spawn forensic record skipped for ${taskId}: ${detail}`
+      );
+    }
   }
 
   /**
@@ -1265,6 +1434,33 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * T4: synchronous cancelled terminal for interrupts whose worker leaves no
+   * attributable envelope (Esc / Ctrl+X / subagent_stop / shutdown). The state
+   * transition and the stop record leave the memory Map and are enqueued on
+   * the per-agent subagent trace before the call returns — the shipped jsonl
+   * writer flushes inside that call (appendFileSync, no fsync). Foreground-
+   * only by design (`abortTask` gate): a background task must keep its async
+   * crashed envelope so the mailbox wake / drainCompleted surface still fires
+   * (CONTEXT 后景残留提示).
+   * `stoppedEmitted` + the state-change self-loop guard make every later path
+   * (SIGTERM epilogue envelope, exit handler, settleCrash) a no-op.
+   */
+  function emitCancelledTerminal(
+    task: Task,
+    attribution: {
+      readonly summary: string;
+      readonly signalSent: boolean;
+    }
+  ): void {
+    emitStateChange(task, "failed", { reason: "cancelled" });
+    emitStop(task, "failed", {
+      reason: "cancelled",
+      summary: attribution.summary,
+      ...(attribution.signalSent ? { signal: "SIGTERM" } : {}),
+    });
+  }
+
+  /**
    * emitStop — persists subagent_stop at task terminal state; the
    * stoppedEmitted flag guards single-emit (exit handler + timeout-fire +
    * child.on("error") are multiple terminal-state paths); no-op if already sent.
@@ -1453,6 +1649,11 @@ export function createSubAgentManager(opts: {
       task.padRoot = workerFenceTmpPath(layoutDir, id);
     }
     tasks.set(id, task);
+    // A new Task record under an existing external taskId (the `resumeTask`
+    // arm) must not inherit the previous hop's cached activity name: the ledger
+    // is being appended to, but the previous round's last read says nothing
+    // about this process. The read-only list re-derives it on the next pass.
+    inFlightToolCache.delete(id);
 
     let child: ChildProcess;
     // Write meta.json once (attempted on both success and failure paths) —
@@ -2062,14 +2263,26 @@ export function createSubAgentManager(opts: {
     task.waitRejects.clear();
     // 2. Then abort the worker child process + backstop.
     task.abortCtrl?.abort();
+    let signaled = false;
     if (task.child) {
       try {
-        task.child.kill("SIGTERM");
+        signaled = task.child.kill("SIGTERM");
       } catch {
         /* ESRCH et al. ignore */
       }
       // Clear + re-arm: backstop baseline = this SIGTERM moment (reset=true).
       armKillFallback(task, true);
+    }
+    // 3. Foreground waits carry no envelope-side attribution, so the terminal
+    //    record must be written here, synchronously (T4). Background tasks keep
+    //    the existing async crashed-envelope path — mailbox wake intact.
+    if (task.def.excludeFromHostDrain === true) {
+      emitCancelledTerminal(task, {
+        summary: signaled
+          ? "cancelled by interrupt; SIGTERM sent to worker"
+          : "cancelled by interrupt before worker signal",
+        signalSent: signaled,
+      });
     }
     return true;
   }
@@ -2125,6 +2338,102 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * `SubagentInfo.inFlightTool`, derived (never a second copy of the truth:
+   * the ledger is the truth, this is one cached read of it).
+   */
+  function inFlightToolInfoField(task: Task): {
+    readonly inFlightTool?: string;
+  } {
+    const reader = opts.readInFlightTool;
+    // Not injected (tests, manager-direct construction, ask surface) → the
+    // whole key stays absent, byte-identical to the pre-feature projection.
+    if (reader === undefined) return {};
+    if (task.state !== "starting" && task.state !== "running") {
+      // Terminal: that card slot becomes `✓ Done`, so a stale name must not
+      // surface. Dropping the entry here also means a later `resumeTask` (same
+      // external taskId, brand-new Task record) starts unburdened.
+      inFlightToolCache.delete(task.id);
+      return {};
+    }
+    // No ledger address at all (assembly without subagentsDir / projectDir) →
+    // nothing to read, so nothing to surface and no refresh to queue.
+    const dir = resolveSubagentsDirForDef(task.def);
+    if (dir === undefined) return {};
+    if (!inFlightToolRefreshes.has(task.id)) {
+      kickInFlightToolRead(reader, task, workerTranscriptPath(dir, task.id));
+    }
+    const cached = inFlightToolCache.get(task.id);
+    // Absent ≠ "": the first pass after a spawn has not looked at the ledger
+    // yet, and reporting "no call in flight" before the read would be a lie.
+    return cached === undefined ? {} : { inFlightTool: cached };
+  }
+
+  /**
+   * Name the contract break once — the reader is wired by the assembly, so
+   * every occurrence is the same defect and a per-task line would only bury
+   * the render path it is meant to explain.
+   */
+  function reportReaderContractBreak(): void {
+    if (readerContractReported) return;
+    readerContractReported = true;
+    console.warn(
+      "subagent: the injected in-flight tool reader threw or rejected; " +
+        "the card's activity slot stays empty"
+    );
+  }
+
+  /**
+   * Queue one read and cache what it says. A reader that breaks its contract
+   * (throws / rejects) degrades to `""`: this runs off a host's 1 Hz read-only
+   * projection, and the spec's exception row for the activity projection is
+   * "empty placeholder, a non-throw". The break is still named — once per
+   * manager — because it is a wiring bug, not a worker state.
+   */
+  function kickInFlightToolRead(
+    reader: SubagentActivityReader,
+    task: Task,
+    transcriptPath: string
+  ): void {
+    inFlightToolRefreshes.add(task.id);
+    const settle = (name: string): void => {
+      inFlightToolRefreshes.delete(task.id);
+      // A read landing after the task turned terminal — or after a resume
+      // replaced the record under the same taskId — is stale by construction.
+      if (tasks.get(task.id) !== task) return;
+      if (task.state !== "starting" && task.state !== "running") return;
+      inFlightToolCache.set(task.id, name);
+    };
+    let pending: Promise<string>;
+    try {
+      pending = reader({ taskId: task.id, transcriptPath });
+    } catch {
+      // EXIT: reader threw synchronously — contract break, empty placeholder.
+      reportReaderContractBreak();
+      settle("");
+      return;
+    }
+    void Promise.resolve(pending).then(
+      (name) => settle(name),
+      () => {
+        // EXIT: reader rejected — contract break, empty placeholder.
+        reportReaderContractBreak();
+        settle("");
+      }
+    );
+  }
+
+  /**
+   * `SubagentInfo.title`, read off the spawn record. A spawn that carried no
+   * label (direct manager call, or one from before `title` existed) leaves the
+   * key absent rather than emitting `""` — the card's line-1 fallback fires on
+   * a missing key.
+   */
+  function titleInfoField(task: Task): { readonly title?: string } {
+    const trimmed = trimmedPresence(task.def.title);
+    return trimmed === undefined ? {} : { title: trimmed };
+  }
+
+  /**
    * Full read-only projection. summary/reason come from the terminal
    * envelope (the same truth as queryBuffer); taskPreview truncates ≤120,
    * never carrying full task text (the permission row).
@@ -2141,6 +2450,7 @@ export function createSubAgentManager(opts: {
         continue;
       }
       const envelope = task.envelope;
+      const role = trimmedPresence(task.def.role);
       const item: SubagentInfo = {
         taskId: task.id,
         state: task.state,
@@ -2156,14 +2466,14 @@ export function createSubAgentManager(opts: {
         envelope.reason !== undefined
           ? { reason: envelope.reason }
           : {}),
-        ...(task.def.role !== undefined && task.def.role.trim() !== ""
-          ? { role: task.def.role.trim() }
-          : {}),
+        ...(role === undefined ? {} : { role }),
+        ...titleInfoField(task),
         // presentString = same criterion as writeMetaOnce (one helper, see module top).
         ...(presentString(task.def.toolUseId)
           ? { toolUseId: task.def.toolUseId }
           : {}),
         ...ownershipInfoFields(task.def),
+        ...inFlightToolInfoField(task),
       };
       out.push(item);
     }
@@ -2180,6 +2490,35 @@ export function createSubAgentManager(opts: {
     return terminalMailbox.subscribe((notice) => {
       if (notice.conversationId === conversationId) subscriber(notice);
     });
+  }
+
+  /**
+   * T4 shutdown arm of `emitCancelledTerminal`: only still-live foreground
+   * tasks (`def.excludeFromHostDrain === true`, same population as the
+   * `abortTask` gate) get the guarded cancelled terminal — their waiters are
+   * already rejected and no async envelope path remains. Live background tasks
+   * keep their existing async settle path (settleCrash → crashed + stderr
+   * pointer, or timeout): a shutdown must not replace their forensics with a
+   * cancelled record (CONTEXT 后景残留提示). never throw out of shutdown:
+   * each append is isolated.
+   */
+  function cancelLiveTasksForShutdown(): void {
+    for (const t of [...tasks.values()]) {
+      if (t.state !== "starting" && t.state !== "running") continue;
+      if (t.def.excludeFromHostDrain !== true) continue;
+      try {
+        emitCancelledTerminal(t, {
+          summary: "cancelled by manager shutdown",
+          signalSent: false,
+        });
+      } catch (err) {
+        // EXIT: forensics must not break shutdown — warn and continue.
+        const detail = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[subagent] shutdown cancelled terminal skipped for ${t.id}: ${detail}`
+        );
+      }
+    }
   }
 
   async function shutdown(): Promise<void> {
@@ -2265,6 +2604,10 @@ export function createSubAgentManager(opts: {
     for (const poller of waitPollers) clearInterval(poller);
     waitPollers.clear();
 
+    // 3.5 T4: still-live tasks land the cancelled terminal before the map goes
+    //     away (helper holds the branching so shutdown keeps its shape).
+    cancelLiveTasksForShutdown();
+
     // 4. Clear the tasks map.
     tasks.clear();
     terminalMailbox.clear();
@@ -2308,5 +2651,8 @@ export function createSubAgentManager(opts: {
     // SubAgentCapacityError share one source (ADR-0096); the holder is the same one the
     // spawn gate holds.
     getCapacity: currentCapacity,
+    // T3 forensic entry: gate-blocked spawn_subagent calls land one
+    // subagent_spawn status:error line here (no task lifecycle behind it).
+    recordBlockedSpawn,
   });
 }

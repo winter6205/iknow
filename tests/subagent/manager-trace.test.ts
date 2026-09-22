@@ -105,6 +105,10 @@ function makeTracingHarness(
       taskId: string,
       payload: WorkerEnvelope
     ) => ChildProcess;
+    /** Test hook: swap the state-change recorder (e.g. sync-throw to hit shutdown's warn path). */
+    readonly stateChangeRecorder?: (
+      rec: SubagentStateChangeRecord
+    ) => Promise<string | undefined>;
   } = {}
 ): TracingHarness {
   const spawned: FakeChild[] = [];
@@ -143,12 +147,12 @@ function makeTracingHarness(
       spawns.push(rec);
       return Promise.resolve(rec.id);
     },
-    recordSubagentStateChange: (
-      rec: SubagentStateChangeRecord
-    ): Promise<string | undefined> => {
-      stateChanges.push(rec);
-      return Promise.resolve(rec.id);
-    },
+    recordSubagentStateChange:
+      opts.stateChangeRecorder ??
+      ((rec: SubagentStateChangeRecord): Promise<string | undefined> => {
+        stateChanges.push(rec);
+        return Promise.resolve(rec.id);
+      }),
     recordSubagentStop: (
       rec: SubagentStopRecord
     ): Promise<string | undefined> => {
@@ -427,5 +431,178 @@ describe("SubAgentManager crash stderr drain race (T1)", () => {
     );
     assert.equal(stateFailure?.error?.type, "unknown");
     assert.equal(h.recorded.stops[0]?.error?.type, "unknown");
+  });
+});
+
+// ─── T4: cancelled terminal — abortTask / shutdown synchronous append ───────
+
+describe("SubAgentManager T4 cancelled 终态 (abortTask / shutdown)", () => {
+  const tick = (): Promise<void> =>
+    new Promise((resolve) => setImmediate(resolve));
+
+  it("前景任务 abortTask → 同步 append state_change(failed/cancelled) + stop(cancelled)，恰一次", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({
+      task: "fg interrupt",
+      excludeFromHostDrain: true,
+    });
+    assert.equal(h.manager.abortTask(taskId), true);
+    await tick();
+
+    const cancelled = h.recorded.stateChanges.filter(
+      (r) => r.reason === "cancelled"
+    );
+    assert.equal(cancelled.length, 1, "exactly one cancelled state_change");
+    assert.equal(cancelled[0]!.fromState, "running");
+    assert.equal(cancelled[0]!.toState, "failed");
+    assert.equal(h.recorded.stops.length, 1);
+    assert.equal(h.recorded.stops[0]!.reason, "cancelled");
+    assert.equal(h.recorded.stops[0]!.finalState, "failed");
+    assert.equal(h.recorded.stops[0]!.id, taskId);
+  });
+
+  it("abortTask 后 worker 回写 SIGTERM 信封 + exit：不重复 append（stoppedEmitted/自环 guard）", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({
+      task: "fg interrupt epilogue",
+      excludeFromHostDrain: true,
+    });
+    assert.equal(h.manager.abortTask(taskId), true);
+    assert.equal(manager_abort_again_false(h, taskId), true);
+    h.spawned[0]!.stdout.write(
+      JSON.stringify({
+        status: "failed",
+        reason: "timeout",
+        summary: "worker SIGTERM epilogue",
+        result: "",
+      }) + "\n"
+    );
+    h.spawned[0]!.stderr.end();
+    h.spawned[0]!.emit("exit", null, "SIGTERM");
+    await tick();
+    await tick();
+
+    assert.equal(h.recorded.stops.length, 1, "single stop record");
+    assert.equal(h.recorded.stops[0]!.reason, "cancelled");
+    assert.equal(
+      h.recorded.stateChanges.filter((r) => r.toState === "failed").length,
+      1,
+      "no failed→failed self-loop record"
+    );
+  });
+
+  function manager_abort_again_false(
+    harness: TracingHarness,
+    taskId: string
+  ): boolean {
+    return harness.manager.abortTask(taskId) === false;
+  }
+
+  it("前景 abortTask 不发 mailbox 通知（wait:true 无 drain 消息）", async () => {
+    const h = makeTracingHarness();
+    const notices: unknown[] = [];
+    h.manager.subscribe((notice) => notices.push(notice));
+    const { taskId } = h.manager.spawn({
+      task: "fg silent cancel",
+      excludeFromHostDrain: true,
+    });
+    h.manager.abortTask(taskId);
+    await tick();
+    assert.equal(notices.length, 0, "cancelled foreground stays mailbox-silent");
+  });
+
+  it("后景 abortTask：不立即落 cancelled，保持既有异步 crashed + mailbox 语义", async () => {
+    const h = makeTracingHarness();
+    const notices: unknown[] = [];
+    h.manager.subscribe((notice) => notices.push(notice));
+    const { taskId } = h.manager.spawn({ task: "bg kill" });
+    assert.equal(h.manager.abortTask(taskId), true);
+    await tick();
+    assert.equal(h.recorded.stops.length, 0, "no synchronous cancelled record for bg");
+
+    h.spawned[0]!.stderr.end();
+    h.spawned[0]!.emit("exit", null, "SIGTERM");
+    for (let i = 0; i < 10 && h.recorded.stops.length === 0; i++) await tick();
+    assert.equal(h.recorded.stops.length, 1);
+    assert.equal(h.recorded.stops[0]!.reason, "crashed");
+    assert.equal(notices.length, 1, "bg terminal still wakes the mailbox");
+  });
+
+  it("shutdown：前景 live 任务在 tasks.clear() 前落 cancelled 终态恰一次；后景 live 任务不落 cancelled", async () => {
+    const h = makeTracingHarness();
+    const fg = h.manager.spawn({
+      task: "fg survivor",
+      excludeFromHostDrain: true,
+    });
+    const bg = h.manager.spawn({ task: "bg survivor" });
+    // fake children appear already reaped: shutdown's grace loop finishes at once
+    for (const child of h.spawned) {
+      Object.defineProperty(child, "exitCode", { value: 1, configurable: true });
+    }
+    await h.manager.shutdown();
+    await tick();
+
+    // T4 contract is foreground-only: a live bg task keeps its async settle
+    // path (settleCrash → crashed + stderr pointer) and must not have its
+    // forensics replaced by a cancelled record at shutdown.
+    const stops = h.recorded.stops.filter((r) => r.reason === "cancelled");
+    assert.equal(stops.length, 1, `fg-only cancelled stop, got ${stops.length}`);
+    assert.equal(stops[0]!.id, fg.taskId);
+    assert.equal(
+      h.recorded.stateChanges.filter(
+        (r) => r.reason === "cancelled" && r.id === fg.taskId
+      ).length,
+      1
+    );
+    assert.equal(
+      h.recorded.stops.filter((r) => r.id === bg.taskId).length,
+      0,
+      "no stop record of any kind for the live bg task at shutdown"
+    );
+    assert.equal(
+      h.recorded.stateChanges.filter(
+        (r) => r.reason === "cancelled" && r.id === bg.taskId
+      ).length,
+      0,
+      "no cancelled state_change for the live bg task"
+    );
+  });
+
+  it("shutdown：foreground cancelled append 抛错 → warn 指名任务且不阻断，shutdown 正常完成", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = makeTracingHarness({
+        stateChangeRecorder: (
+          rec
+        ): Promise<string | undefined> => {
+          // Only the shutdown cancelled append fails; the spawn-time
+          // starting→running record stays healthy so the task is live.
+          if (rec.reason === "cancelled") throw new Error("disk on fire");
+          return Promise.resolve(rec.id);
+        },
+      });
+      const fg = h.manager.spawn({
+        task: "fg warn path",
+        excludeFromHostDrain: true,
+      });
+      for (const child of h.spawned) {
+        Object.defineProperty(child, "exitCode", {
+          value: 1,
+          configurable: true,
+        });
+      }
+      await h.manager.shutdown();
+      const calls = warn.mock.calls.map((args) => args.join(" "));
+      assert.ok(
+        calls.some(
+          (c) =>
+            c.includes("shutdown cancelled terminal skipped") &&
+            c.includes(fg.taskId)
+        ),
+        `expected one warn naming the skipped terminal for ${fg.taskId}`
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -1,51 +1,59 @@
 /**
  * src/tui/subagent-message-lines.ts
  *
- * Card-level two-line projection (specs/tui-subagent-transcript-live.md):
- * join one subagent back to the `spawn_subagent` card that spawned it in the
- * session transcript. Live line 1 is `{role} running...`, line 2 the dim
- * `taskPreview`; once that worker completes, the overview stays, line 1
- * drops the running suffix and is identity only, and a literal green `✓ Done`
- * is appended below it. The join key is `SubagentInfo.toolUseId` (the tool_use
- * id of that spawn — the same id space as the card side).
+ * Card-level two-line projection (specs/subagent-card-title.md): join one
+ * subagent back to the `spawn_subagent` card that spawned it in the session
+ * transcript. Line 1 is the operator `title` — from that worker's spawn record
+ * (`SubagentInfo.title`) while a list describes it, else from the settled
+ * block's own input (`settledSpawnCardFromBlock`, the durable copy), and
+ * identical while the worker runs and once it completes; line 2 is a single
+ * activity slot — the dim name of the tool that worker is executing now, or the
+ * literal green `✓ Done` once it completes. The card is exactly two lines in
+ * every state: `taskPreview` is not on the card (it stays on `SubagentInfo` and
+ * in `SubagentPanel`). The join key is
+ * `SubagentInfo.toolUseId` (the tool_use id of that spawn — the same id space as
+ * the card side).
  *
  * This replaces the older "spread the whole live list" projection
  * (`projectSubagentMessageLines` / `subagentMessageRowCount`) and the identity
- * bar above the prompt: placement is decided by the session card, so "every
- * live subagent always occupies two rows" is no longer the projection's output
- * shape — a card only knows its own correlator.
+ * bar above the prompt: placement is decided by the session card, so "every live
+ * subagent always occupies two rows" is no longer the projection's output shape —
+ * a card only knows its own correlator.
  *
  * This file is React-free pure TS (no React / OpenTUI): the projection is
  * unit-testable directly, and rendering belongs to the hosts' single surface
- * (`subagent-card-view.tsx`) — live tail and history hosts must not each
- * write their own template.
+ * (`subagent-card-view.tsx`) — live tail and history hosts must not each write
+ * their own template.
  *
  * Boundaries:
  *   - empty: empty array / `toolUseId` absent, empty or whitespace-only →
- *     `null` (no correlator — never borrow another worker's preview);
+ *     `null` (no correlator — never borrow another worker's title or tool
+ *     name); no `title` on the spawn record → catalog role fallback
+ *     (`subagent_type`, else `general-purpose`), never a blank line 1;
  *   - negative: no match / match is `failed` → `null` (failed goes to that
- *     card's existing failure overlay, not the green `✓ Done`); role absent /
- *     empty / whitespace-only → catalog fallback (the Chinese "subagent"
- *     literal is never emitted);
- *   - overflow: the two live lines are each truncated to cols visual width
- *     (CJK-safe) and never wrap; `cols <= 0` → a 1-column budget. The
- *     completed card's overview is width-clamped the same way (once back on
- *     the page it must not overflow columns any more than live does); the
- *     done marker `✓ Done` is a fixed literal face with no width clamp —
- *     literal text wins over column aesthetics, and the host's
- *     `wrapMode="none"` clips edges;
+ *     card's existing failure overlay, not the green `✓ Done`); the fallback
+ *     role absent / empty / whitespace-only → `IDENTITY_FALLBACK_ROLE` (the
+ *     Chinese "subagent" literal is never emitted);
+ *   - overflow: both lines are truncated to cols visual width (CJK-safe) and
+ *     never wrap; `cols <= 0` → a 1-column budget. The completion marker
+ *     `✓ Done` is a fixed literal face with no width clamp — literal text wins
+ *     over column aesthetics, and the host's `wrapMode="none"` clips edges;
  *   - concurrent: pure function — each projection reads the arguments at call
- *     time with no history residue; two live workers each take the
- *     `taskPreview` of their own join without crossing; on duplicate
- *     `toolUseId` the first entry in list order wins (deterministic);
- *   - exception: `startedAt` / `endedAt` / `summary` are never read (invalid
- *     ISO cannot affect the projection); missing / empty `taskPreview` → the
- *     overview line holds an empty-string placeholder so the row count never
+ *     time with no history residue; two live workers each take their own title
+ *     and their own `inFlightTool`; on duplicate `toolUseId` the first eligible
+ *     entry in list order wins (deterministic);
+ *   - exception: `startedAt` / `endedAt` / `summary` / `taskPreview` are never
+ *     read (invalid ISO cannot affect the projection); `inFlightTool` absent
+ *     (no reader injected / first read pending) or `""` (nothing in flight) →
+ *     the slot holds an empty-string placeholder so the row count never
  *     collapses.
  */
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { clipOneLineVisual } from "./tool-summary.js";
-import { SUBAGENT_ROLE_FALLBACK } from "../shared/tool-line.js";
+import {
+  resolveSubagentRoleFromInput,
+  SUBAGENT_ROLE_FALLBACK,
+} from "../shared/tool-line.js";
 
 /**
  * Catalog fallback when role is missing. Same value and source as
@@ -55,15 +63,14 @@ import { SUBAGENT_ROLE_FALLBACK } from "../shared/tool-line.js";
  */
 export const IDENTITY_FALLBACK_ROLE = SUBAGENT_ROLE_FALLBACK;
 
-/** Fixed suffix of live line 1 (three dots). Completed lines drop it — line 1
- *  is identity only then. A spawn card that never joins skips this suffix —
- *  it falls into formatToolStatusLine's dotless form (`explore running`). */
-const RUNNING_SUFFIX = " running...";
-
-/** Completed card's done marker: the overview stays and this literal green
- *  `✓ Done` renders below it. A geometric glyph like the panel's `●` / `✓`
- *  (no emoji). */
+/** Completed card's activity slot: this literal green `✓ Done` replaces the
+ *  in-flight tool name (the name is not kept). A geometric glyph like the
+ *  panel's `●` / `✓` (no emoji). */
 const DONE_MARKER = "✓ Done";
+
+/** The one tool whose card this module owns (`subagent_result` cards stay the
+ *  generic tool row). */
+const SPAWN_TOOL_NAME = "spawn_subagent";
 
 /**
  * The single predicate for a live subagent: `starting` + `running` (the row
@@ -81,7 +88,7 @@ const DONE_MARKER = "✓ Done";
  *
  * Note: the card-level projection ignores this predicate — it classifies by
  * `state` three ways (live / completed / failed), because a completed card
- * still draws its overview + green `✓ Done`.
+ * still draws its title + green `✓ Done`.
  */
 export function isLiveSubagent(info: SubagentInfo): boolean {
   return info.state === "starting" || info.state === "running";
@@ -136,7 +143,8 @@ export function formatBackgroundRunningHint(
 }
 
 /**
- * Role projection for one live subagent:
+ * Role projection for one subagent — the card's line-1 fallback when its spawn
+ * carried no `title`, and the panel's identity text:
  *   - role present and non-blank (after trim) → role.trim();
  *   - role absent / empty / whitespace-only → IDENTITY_FALLBACK_ROLE; the
  *     Chinese "subagent" literal is never emitted.
@@ -148,19 +156,20 @@ export function resolveIdentityRole(info: SubagentInfo): string {
   return trimmed.length > 0 ? trimmed : IDENTITY_FALLBACK_ROLE;
 }
 
-/** Card-level projection (the single shape both hosts render). */
+/** Card-level projection (the single shape both hosts render). Two lines, in
+ *  every state. */
 export interface SubagentCardLines {
-  /** Line 1: live → `{role} running...`; completed → identity only, no
-   *  `running...`. */
-  readonly roleLine: string;
-  /** Line 2: `taskPreview` truncated to cols for both live and completed
-   *  (empty string = placeholder row). For a completed card this line is the
-   *  kept overview, not a stand-in. */
+  /** Line 1: the `title` the parent filed, or the catalog role when that spawn
+   *  carried none. Identical while live and once completed; no progress
+   *  suffix. */
+  readonly titleLine: string;
+  /** Line 2: the activity slot. Live → the in-flight tool name (empty string
+   *  = placeholder row when that worker has no call waiting on a result);
+   *  completed → the literal `✓ Done`, which the host draws in
+   *  tuiPalette.add. Truncated to cols except for that fixed literal. */
   readonly detailLine: string;
-  /** Line 3 (completed only): literal `✓ Done`; absent (undefined) while live. */
-  readonly doneLine?: string;
-  /** Completion flag: true → doneLine present; the host draws it with
-   *  tuiPalette.add (green). */
+  /** Completion flag: the host colours line 2 with tuiPalette.add when true
+   *  and with tuiPalette.dim while live. */
   readonly done: boolean;
 }
 
@@ -177,21 +186,59 @@ function normalizeCorrelator(toolUseId: string | undefined): string | null {
 
 /** Single-card assembly (live / completed). The caller guarantees state !== "failed". */
 function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
-  const role = resolveIdentityRole(info);
+  // A spawn that carried no title (a direct manager spawn, or one recorded
+  // before `title` existed) stands in with that worker's own catalog role —
+  // never another worker's title.
+  const titleLine = clipOneLineVisual(
+    info.title ?? resolveIdentityRole(info),
+    budget
+  );
   if (info.state === "completed") {
-    // Completed: the overview stays (truncated to cols like live), line 1
-    // drops the running suffix to identity only, and the literal `✓ Done` is
-    // appended below with no width clamp.
-    return {
-      roleLine: clipOneLineVisual(role, budget),
-      detailLine: clipOneLineVisual(info.taskPreview, budget),
-      doneLine: DONE_MARKER,
-      done: true,
-    };
+    // The slot becomes the literal `✓ Done` and the last tool name is dropped;
+    // no width clamp on that literal (host wrapMode="none" edge-cuts it).
+    return { titleLine, detailLine: DONE_MARKER, done: true };
   }
+  // `inFlightTool` absent = no reader injected / first read still pending, and
+  // `""` = live with nothing in flight: both draw the empty placeholder, so the
+  // card keeps its two rows either way.
   return {
-    roleLine: clipOneLineVisual(`${role}${RUNNING_SUFFIX}`, budget),
-    detailLine: clipOneLineVisual(info.taskPreview, budget),
+    titleLine,
+    detailLine: clipOneLineVisual(info.inFlightTool ?? "", budget),
+    done: false,
+  };
+}
+
+/**
+ * The history host's card for a settled `spawn_subagent` block that no live
+ * worker describes — a session reopened without the previous process's list.
+ * Line 1 comes from the durable source, the tool input the parent itself wrote
+ * into the transcript; a spawn that carried no title falls back to the same
+ * catalog rule as everywhere else.
+ *
+ * Line 2 stays the empty placeholder rather than `✓ Done`: with no worker to
+ * ask, the card cannot tell a handoff that finished from an ack that merely
+ * dispatched, and a completion mark it cannot support is worse than a blank
+ * slot. Not a spawn block, or one still waiting on its result (the live host
+ * owns that) → `null`.
+ */
+export function settledSpawnCardFromBlock(args: {
+  readonly name: string;
+  readonly input: unknown;
+  readonly settled: boolean;
+  readonly cols: number;
+}): SubagentCardLines | null {
+  if (args.name !== SPAWN_TOOL_NAME || !args.settled) return null;
+  const rec =
+    typeof args.input === "object" && args.input !== null
+      ? (args.input as Record<string, unknown>)
+      : {};
+  const title = typeof rec.title === "string" ? rec.title.trim() : "";
+  return {
+    titleLine: clipOneLineVisual(
+      title.length > 0 ? title : resolveSubagentRoleFromInput(rec),
+      Math.max(1, args.cols)
+    ),
+    detailLine: "",
     done: false,
   };
 }
@@ -203,7 +250,7 @@ function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
  * All cases returning `null` (the host falls back to the existing single-line
  * title / failure overlay):
  *   - `toolUseId` absent / empty / whitespace-only — EXIT: no correlator,
- *     never borrow another worker's preview;
+ *     never borrow another worker's title or tool name;
  *   - no entry matches the key;
  *   - every entry under the key is `failed` — failed stays out of the join
  *     and belongs to that card's failure overlay.
@@ -220,7 +267,7 @@ export function projectSubagentCardLines(
   cols: number
 ): SubagentCardLines | null {
   const key = normalizeCorrelator(toolUseId);
-  if (key === null) return null; // EXIT: no correlator — never borrow another worker's preview
+  if (key === null) return null; // EXIT: no correlator — never borrow another worker's card
   return subagentCardLinesMap(subagents, cols).get(key) ?? null;
 }
 
@@ -231,18 +278,20 @@ export function projectSubagentCardLines(
  * new Map every second, and the memoized history message blocks
  * (MessageBlocks) below would rebuild their whole element tree likewise
  * (same class of regression as history-rerender-cost). The signature fields
- * are exactly everything the projection reads (`toolUseId` / `state` /
- * `role` / `taskPreview`); omitting one would let the cache serve stale
- * cards.
+ * are exactly everything the projection reads (`toolUseId` / `state` / `role`
+ * / `title` / `inFlightTool`); omitting one would let the cache serve stale
+ * cards — `inFlightTool` is the field the 1Hz poll
+ * actually moves, so leaving it out would freeze line 2. `taskPreview` is
+ * deliberately absent: the card stopped drawing it, and the panel reads it
+ * straight off the list.
  *
  * Encoding is JSON.stringify over nested arrays: any character inside a
  * field (quotes / commas / control chars) is escaped, and the tuple→signature
  * map is injective. Hand-joined delimiters cannot achieve that — role (the
- * `subagent_type` input) and taskPreview (`def.task`) are arbitrary
- * model-supplied strings that could collide into the same signature across a
- * delimiter and serve stale cards. JSON also keeps literal control bytes out
- * of the source (a literal NUL would make git treat this file as binary and
- * blind both diff and rg).
+ * `subagent_type` input) and the activity name are arbitrary strings that
+ * could collide into the same signature across a delimiter and serve stale
+ * cards. JSON also keeps literal control bytes out of the source (a literal
+ * NUL would make git treat this file as binary and blind both diff and rg).
  */
 export function subagentCardsKey(
   subagents: ReadonlyArray<SubagentInfo>
@@ -252,7 +301,11 @@ export function subagentCardsKey(
       info.toolUseId ?? "",
       info.state,
       info.role ?? "",
-      info.taskPreview,
+      info.title ?? null,
+      // Absent and `""` both draw the placeholder, but they are different
+      // reads (no reader yet vs. read completed); keep them distinguishable so
+      // the first real read repaints.
+      info.inFlightTool ?? null,
     ])
   );
 }
@@ -261,12 +314,16 @@ export function subagentCardsKey(
  * Per-card map (key = `toolUseId`): the history-card host reads it once and
  * looks each card up by its own id — avoiding one linear scan per card.
  *
+ * Line 1 comes from the joined worker's own spawn record
+ * (`SubagentInfo.title`); a worker that never carried one falls back to its
+ * catalog role.
+ *
  * Skip rules share the source with the single-card projection: entries with
  * absent / empty `toolUseId` are skipped entirely (never enter the map, never
  * occupy a key), `failed` entries are skipped, duplicate keys keep the first
  * entry in list order (deterministic — later entries never overwrite). Both
- * live and completed enter the map (a completed card still draws its overview
- * + green `✓ Done`).
+ * live and completed enter the map (a completed card still draws its title +
+ * green `✓ Done`).
  */
 export function subagentCardLinesMap(
   subagents: ReadonlyArray<SubagentInfo>,

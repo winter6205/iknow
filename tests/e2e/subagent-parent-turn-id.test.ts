@@ -122,7 +122,7 @@ describe("F-4 — subagent record 的 parent_turn_id 挂回真实 turn_id", () =
             {
               id: "call-spawn-f4",
               name: "spawn_subagent",
-              input: { task: "trace me" },
+              input: { title: "trace me", task: "trace me" },
             },
           ],
         }),

@@ -6,12 +6,14 @@
  *   2. wait:true (default) → handler resolves to envelope (fake waitFor resolves immediately)
  *   3. background:true → throws ToolExecutionError, message contains "background:true"
  *   4. task missing / task:123 (non-string) / empty task / null input → ToolExecutionError
- *   5. disallowedTools / systemPrompt / maxTurns / timeoutMs pass-through to def
- *   6. wait:false → waitFor not called
- *   7. aci metadata (timeoutTier=unbounded — ACI must not preempt manager's per-task clock)
- *   8. subagent_type optional param → def.role pass-through (default = general-purpose)
- *   9. inputSchema.subagent_type enum = catalog ids (derived at runtime)
- *  10. description contains the prose list (catalog entries)
+ *   5. title missing / empty / whitespace-only / over 80 after trim → ToolExecutionError
+ *      and no worker starts (SC1)
+ *   6. disallowedTools / systemPrompt / maxTurns / timeoutMs pass-through to def
+ *   7. wait:false → waitFor not called
+ *   8. aci metadata (timeoutTier=unbounded — ACI must not preempt manager's per-task clock)
+ *   9. subagent_type optional param → def.role pass-through (default = general-purpose)
+ *  10. inputSchema.subagent_type enum = catalog ids (derived at runtime)
+ *  11. description contains the prose list (catalog entries)
  *
  * Extra fields {task:"x", foo:"bar"} strictness is enforced by the registry's ajv
  * strict validation (createAciRegistry compiles inputSchema with
@@ -38,6 +40,7 @@ import {
   SPAWN_DISPATCH_ISOLATION_CLAUSE,
   SPAWN_DISPATCH_LESSON,
   SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN,
+  SPAWN_TITLE_MAX_LENGTH,
 } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
 import type {
@@ -138,7 +141,11 @@ describe("spawn_subagent — 正常路径", () => {
   it("wait:false → 返回 JSON {task_id},manager.spawn 被调一次,传入 def 含 task", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    const out = await tool.handler({ task: "explore the repo", wait: false });
+    const out = await tool.handler({
+      title: "sample title",
+      task: "explore the repo",
+      wait: false,
+    });
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "explore the repo" })
@@ -151,7 +158,7 @@ describe("spawn_subagent — 正常路径", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     // Foreground arm tool_result = envelope (object returned directly; executor's 20000-char truncation is reused naturally).
-    const out = await tool.handler({ task: "wait-me" });
+    const out = await tool.handler({ title: "sample title", task: "wait-me" });
     const parsed = out as { status: string; summary: string; result: string };
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("from-fake");
@@ -162,7 +169,11 @@ describe("spawn_subagent — 正常路径", () => {
   it("wait:false → waitFor 不被调用", async () => {
     const { manager, waitFor } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "async-arm", wait: false });
+    await tool.handler({
+      title: "sample title",
+      task: "async-arm",
+      wait: false,
+    });
     expect(waitFor).not.toHaveBeenCalled();
   });
 });
@@ -171,12 +182,12 @@ describe("spawn_subagent — 非法输入(抛 ToolExecutionError)", () => {
   it("background:true → message 含 'background:true'", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await expect(tool.handler({ task: "t", background: true })).rejects.toThrow(
-      ToolExecutionError
-    );
-    await expect(tool.handler({ task: "t", background: true })).rejects.toThrow(
-      /background:true/
-    );
+    await expect(
+      tool.handler({ title: "sample title", task: "t", background: true })
+    ).rejects.toThrow(ToolExecutionError);
+    await expect(
+      tool.handler({ title: "sample title", task: "t", background: true })
+    ).rejects.toThrow(/background:true/);
   });
 
   it("task 缺失 → message 含 'missing or invalid'", async () => {
@@ -200,9 +211,11 @@ describe("spawn_subagent — 非法输入(抛 ToolExecutionError)", () => {
   it("task 空串 → 抛", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await expect(tool.handler({ task: "" })).rejects.toThrow(
-      ToolExecutionError
-    );
+    // title is supplied so this assertion isolates the empty-task reject: the
+    // task check runs first, so a missing title could not explain the throw.
+    await expect(
+      tool.handler({ title: "sample title", task: "" })
+    ).rejects.toThrow(ToolExecutionError);
   });
 
   it("input 为 null → 按空对象处理,抛 missing task", async () => {
@@ -212,11 +225,165 @@ describe("spawn_subagent — 非法输入(抛 ToolExecutionError)", () => {
   });
 });
 
+/**
+ * SC1 (specs/subagent-card-title.md) — the operator-facing `title` gate.
+ *
+ * Two invariants the row-certifies:
+ *   1. a bad title is rejected as `ToolExecutionError`, and NO worker starts —
+ *      so the fake manager's spawn/waitFor spies staying untouched is part of
+ *      every negative assertion, not an afterthought;
+ *   2. the 80-character ceiling is measured on the JavaScript string length
+ *      AFTER trim, which is why the schema carries no `maxLength`: an
+ *      84-character padded input that trims to 80 is legal and only the
+ *      handler can say so (a schema maxLength would reject it first).
+ *
+ * The four rejects below are exactly the spec's empty / overflow columns; a
+ * non-string title is the schema's job (asserted in the ajv block).
+ */
+describe("spawn_subagent — SC1 title reject (no worker starts)", () => {
+  const badTitles: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ["missing", { task: "t" }],
+    ["empty", { task: "t", title: "" }],
+    ["whitespace-only", { task: "t", title: "   \t " }],
+    ["81 chars after trim", { task: "t", title: "x".repeat(81) }],
+  ] as const;
+
+  it.each(badTitles)(
+    "title %s → ToolExecutionError naming `title`, spawn 未被调用",
+    async (_label, input) => {
+      const { manager, spawn, waitFor } = makeFakeManager();
+      const tool = createSpawnSubAgentTool({ manager });
+      await expect(tool.handler(input)).rejects.toThrow(ToolExecutionError);
+      await expect(tool.handler(input)).rejects.toThrow(
+        /missing or invalid `title`/
+      );
+      expect(spawn).not.toHaveBeenCalled();
+      expect(waitFor).not.toHaveBeenCalled();
+    }
+  );
+
+  it("title 非 string（ajv 之外的直调）→ 同样 reject，不起 worker", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await expect(tool.handler({ task: "t", title: 42 })).rejects.toThrow(
+      ToolExecutionError
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it(`title 正好 ${SPAWN_TITLE_MAX_LENGTH} 字符 → 接受（边界含）`, async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "t",
+      title: "x".repeat(SPAWN_TITLE_MAX_LENGTH),
+      wait: false,
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("长度规则先 trim：两侧空白让 84 字符输入落回上限 → 接受", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const padded = `  ${"x".repeat(SPAWN_TITLE_MAX_LENGTH)}  `;
+    expect(padded.length).toBeGreaterThan(SPAWN_TITLE_MAX_LENGTH);
+    await tool.handler({ task: "t", title: padded, wait: false });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("上限 = spec 的 80（SSOT 常量，避免测试与 schema 各写一个数）", () => {
+    expect(SPAWN_TITLE_MAX_LENGTH).toBe(80);
+  });
+
+  it("accepted title 不改写 tool input，trim 后进 spawn record", async () => {
+    // The handler never rewrites `tool_use.input` — what the parent shows stays
+    // what the parent wrote. The card's line 1 reads the spawn record (parent-
+    // only), so the accepted label is filed there trimmed; the worker side is
+    // pinned separately (the envelope never carries it).
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const input = { task: "t", title: "  Ship the card  ", wait: false };
+    await tool.handler(input);
+    expect(input).toEqual({
+      task: "t",
+      title: "  Ship the card  ",
+      wait: false,
+    });
+    const def = spawn.mock.calls[0]![0] as Record<string, unknown>;
+    expect(def.title).toBe("Ship the card");
+    expect(def.task).toBe("t");
+  });
+});
+
+/**
+ * SC8 (specs/subagent-card-title.md) — the two inputs must read as two roles
+ * on the model-visible face: `title` is for the operator, `task` is the
+ * assignment the worker receives. The wording belongs to the PROPERTY
+ * descriptions (where a model fills the field in), never to the tool-level
+ * prose, which the D9 guard and the dispatch-lesson locks already own.
+ */
+describe("spawn_subagent — SC8 title / task property wording", () => {
+  const schemaProperties = (): Record<
+    string,
+    { type: string; description?: string; maxLength?: number }
+  > => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    return (
+      tool.inputSchema as {
+        properties: Record<
+          string,
+          { type: string; description?: string; maxLength?: number }
+        >;
+      }
+    ).properties;
+  };
+
+  it("title 描述 = 给 operator 的短标题（几个词）", () => {
+    const title = schemaProperties().title;
+    expect(title.type).toBe("string");
+    expect(title.description).toMatch(/operator/i);
+    expect(title.description).toMatch(/short/i);
+    expect(title.description).toMatch(/few words/i);
+    // The ceiling the model is told must be the one the handler enforces: a
+    // literal in the description would let the constant move alone and leave
+    // the schema lying.
+    expect(title.description).toContain(
+      `up to ${SPAWN_TITLE_MAX_LENGTH} characters`
+    );
+  });
+
+  it("task 描述 = worker 收到的 assignment", () => {
+    const task = schemaProperties().task;
+    expect(task.type).toBe("string");
+    expect(task.description).toMatch(/assignment/i);
+    expect(task.description).toMatch(/worker/i);
+  });
+
+  it("title 进 required，但不带 maxLength（trim 规则只可能在 handler）", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as { required: string[] };
+    expect(schema.required).toContain("title");
+    expect(schemaProperties().title.maxLength).toBeUndefined();
+  });
+
+  it("ajv strict: 缺 title 被 required 拒绝；带 title 通过；非 string 被拒", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "x" })).toBe(false);
+    expect(validate({ title: "ship the card", task: "x" })).toBe(true);
+    expect(validate({ title: 3, task: "x" })).toBe(false);
+  });
+});
+
 describe("spawn_subagent — 可选字段透传到 def", () => {
   it("disallowedTools 数组透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "t",
       disallowedTools: ["edit_file", "write_file"],
       wait: false,
@@ -233,6 +400,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "t",
       systemPrompt: "be a verifier",
       wait: false,
@@ -253,15 +421,21 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     expect(schema.additionalProperties).toBe(false);
     // The worker's model route is user settings, not a spawn argument: an
     // input still carrying model must fail the assembled schema at the ajv
-    // gate (the handler never sees it).
+    // gate (the handler never sees it). `title` is present so the only reject
+    // left is `model`, not the required-title rule.
     const validate = makeAjv().compile(tool.inputSchema);
-    expect(validate({ task: "t", model: "opus" })).toBe(false);
+    expect(validate({ task: "t", title: "x", model: "opus" })).toBe(false);
   });
 
   it("maxTurns 整数透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", maxTurns: 5, wait: false });
+    await tool.handler({
+      title: "sample title",
+      task: "t",
+      maxTurns: 5,
+      wait: false,
+    });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", maxTurns: 5 })
     );
@@ -270,7 +444,12 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
   it("timeoutMs 整数透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", timeoutMs: 60000, wait: false });
+    await tool.handler({
+      title: "sample title",
+      task: "t",
+      timeoutMs: 60000,
+      wait: false,
+    });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", timeoutMs: 60000 })
     );
@@ -284,7 +463,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     // decides the SIGTERM / waitFor default).
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", wait: false });
+    await tool.handler({ title: "sample title", task: "t", wait: false });
     const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
     expect(calledDef.timeoutMs).toBeUndefined();
   });
@@ -293,6 +472,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "t",
       systemPrompt: "be concise",
       disallowedTools: ["spawn_subagent"],
@@ -315,6 +495,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "t",
       sandboxRoot: "/tmp/work",
       wait: false,
@@ -332,7 +513,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler(
-      { task: "t", wait: false },
+      { title: "sample title", task: "t", wait: false },
       { toolUseId: "toolu_wire_abc" }
     );
     expect(spawn).toHaveBeenCalledWith(
@@ -343,7 +524,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
   it("T5 SC8: ctx 不带 toolUseId (ask / worker / 直调 handler) → def 整字段省略 (Postel)", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", wait: false });
+    await tool.handler({ title: "sample title", task: "t", wait: false });
     const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
     expect(calledDef.toolUseId).toBeUndefined();
   });
@@ -365,7 +546,7 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     expect(tool.aci.lazy).toBe(false);
   });
 
-  it("inputSchema 冻结:required=['task'],additionalProperties:false", () => {
+  it("inputSchema 冻结:required=['task','title'],additionalProperties:false", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const schema = tool.inputSchema as {
@@ -373,7 +554,7 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
       additionalProperties: boolean;
       properties: Record<string, { type: string }>;
     };
-    expect(schema.required).toEqual(["task"]);
+    expect(schema.required).toEqual(["task", "title"]);
     expect(schema.additionalProperties).toBe(false);
     expect(Object.isFrozen(tool)).toBe(true);
     expect(schema.properties.timeoutMs).toBeDefined();
@@ -430,10 +611,20 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
     });
     const tool = createSpawnSubAgentTool({ manager });
     await expect(
-      tool.handler({ task: "t", sandboxRoot: "/outside", wait: false })
+      tool.handler({
+        title: "sample title",
+        task: "t",
+        sandboxRoot: "/outside",
+        wait: false,
+      })
     ).rejects.toThrow(ToolExecutionError);
     await expect(
-      tool.handler({ task: "t", sandboxRoot: "/outside", wait: false })
+      tool.handler({
+        title: "sample title",
+        task: "t",
+        sandboxRoot: "/outside",
+        wait: false,
+      })
     ).rejects.toThrow(/sandboxRoot/i);
   });
 });
@@ -690,27 +881,38 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const tool = createSpawnSubAgentTool({ manager });
     const schema = tool.inputSchema as { required: string[] };
     expect(schema.required).not.toContain("subagent_type");
-    // required stays exactly ["task"] (V1 baseline preserved)
-    expect(schema.required).toEqual(["task"]);
+    // required is exactly the two operator-facing inputs: the assignment plus
+    // the card title (spec subagent-card-title SC1).
+    expect(schema.required).toEqual(["task", "title"]);
   });
 
   it("ajv 编译: subagent_type='explore' 通过 strict 校验", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const validate = makeAjv().compile(tool.inputSchema);
-    expect(validate({ task: "x", subagent_type: "explore" })).toBe(true);
-    expect(validate({ task: "x", subagent_type: "general-purpose" })).toBe(
-      true
-    );
+    expect(
+      validate({ title: "sample title", task: "x", subagent_type: "explore" })
+    ).toBe(true);
+    expect(
+      validate({
+        title: "sample title",
+        task: "x",
+        subagent_type: "general-purpose",
+      })
+    ).toBe(true);
   });
 
   it("ajv 编译: subagent_type 未知值被 enum 拒绝 (fail-fast, ajv 入口拦截)", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const validate = makeAjv().compile(tool.inputSchema);
-    expect(validate({ task: "x", subagent_type: "not_a_real_agent" })).toBe(
-      false
-    );
+    expect(
+      validate({
+        title: "sample title",
+        task: "x",
+        subagent_type: "not_a_real_agent",
+      })
+    ).toBe(false);
     // ajv enum error: instancePath=/subagent_type, keyword="enum",
     // params.allowedValues = catalog ids (ajv rejection reason: not in enum).
     const errs = validate.errors ?? [];
@@ -730,15 +932,19 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const validate = makeAjv().compile(tool.inputSchema);
-    expect(validate({ task: "x", subagent_type: 123 })).toBe(false);
-    expect(validate({ task: "x", subagent_type: ["explore"] })).toBe(false);
+    expect(
+      validate({ title: "sample title", task: "x", subagent_type: 123 })
+    ).toBe(false);
+    expect(
+      validate({ title: "sample title", task: "x", subagent_type: ["explore"] })
+    ).toBe(false);
   });
 
   it("ajv 编译: 缺 subagent_type 仍合法 (optional)", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const validate = makeAjv().compile(tool.inputSchema);
-    expect(validate({ task: "x" })).toBe(true);
+    expect(validate({ title: "sample title", task: "x" })).toBe(true);
   });
 });
 
@@ -747,6 +953,7 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "explore the repo",
       subagent_type: "explore",
       wait: false,
@@ -760,6 +967,7 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "do anything",
       subagent_type: "general-purpose",
       wait: false,
@@ -774,7 +982,7 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     // general-purpose, so the worker gets persona injection and the full tool surface.
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "no-role", wait: false });
+    await tool.handler({ title: "sample title", task: "no-role", wait: false });
     const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
     expect(calledDef.role).toBe("general-purpose");
   });
@@ -783,8 +991,9 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     // both invocations must take the general-purpose persona and full tool surface
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    await tool.handler({ task: "t", wait: false });
+    await tool.handler({ title: "sample title", task: "t", wait: false });
     await tool.handler({
+      title: "sample title",
       task: "t",
       subagent_type: "general-purpose",
       wait: false,
@@ -801,6 +1010,7 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "t",
       subagent_type: "explore",
       systemPrompt: "be focused",
@@ -843,7 +1053,7 @@ describe("spawn_subagent — capacity reject reaches the model as a typed tool e
     const tool = createSpawnSubAgentTool({ manager });
 
     const error: unknown = await tool
-      .handler({ task: "t", wait: false })
+      .handler({ title: "sample title", task: "t", wait: false })
       .then(() => undefined)
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ToolExecutionError);
@@ -867,6 +1077,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "explore-only",
       subagent_type: "explore",
       wait: false,
@@ -884,6 +1095,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "explore-with-parent",
       subagent_type: "explore",
       disallowedTools: ["some_extra_tool"],
@@ -901,6 +1113,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "dedupe-check",
       subagent_type: "explore",
       disallowedTools: ["edit_file", "another_tool"], // edit_file already in catalog
@@ -918,6 +1131,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "general",
       subagent_type: "general-purpose",
       wait: false,
@@ -931,6 +1145,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "v1-baseline",
       disallowedTools: ["some_tool"],
       wait: false,
@@ -944,6 +1159,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
+      title: "sample title",
       task: "v1-blank",
       wait: false,
     });
@@ -1085,12 +1301,12 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
         err: new SubAgentWaitTimeoutError(),
       }),
     });
-    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
-      ToolExecutionError
-    );
-    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
-      /not found|gone|unknown/i
-    );
+    await expect(
+      tool.handler({ title: "sample title", task: "t", wait: true })
+    ).rejects.toThrow(ToolExecutionError);
+    await expect(
+      tool.handler({ title: "sample title", task: "t", wait: true })
+    ).rejects.toThrow(/not found|gone|unknown/i);
   });
 
   it("exception: WaitTimeout + running → ToolExecutionError，不再合成 ok 数据（SC13）", async () => {
@@ -1106,7 +1322,7 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     });
     let caught: unknown;
     try {
-      await tool.handler({ task: "t", wait: true });
+      await tool.handler({ title: "sample title", task: "t", wait: true });
     } catch (err) {
       caught = err;
     }
@@ -1135,7 +1351,7 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     });
     let caught: unknown;
     try {
-      await tool.handler({ task: "t", wait: true });
+      await tool.handler({ title: "sample title", task: "t", wait: true });
     } catch (err) {
       caught = err;
     }
@@ -1157,7 +1373,11 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
         }),
       },
     });
-    const out = (await tool.handler({ task: "t", wait: true })) as {
+    const out = (await tool.handler({
+      title: "sample title",
+      task: "t",
+      wait: true,
+    })) as {
       status: string;
       reason?: string;
     };
@@ -1176,7 +1396,11 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
         err: new SubAgentWaitTimeoutError(),
       }),
     });
-    const out = (await tool.handler({ task: "t", wait: true })) as {
+    const out = (await tool.handler({
+      title: "sample title",
+      task: "t",
+      wait: true,
+    })) as {
       status: string;
       reason?: string;
       summary?: string;
@@ -1196,10 +1420,16 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(
-      tool.handler({ task: "t", wait: true }, { signal: controller.signal })
+      tool.handler(
+        { title: "sample title", task: "t", wait: true },
+        { signal: controller.signal }
+      )
     ).rejects.toThrow(ToolExecutionError);
     await expect(
-      tool.handler({ task: "t", wait: true }, { signal: controller.signal })
+      tool.handler(
+        { title: "sample title", task: "t", wait: true },
+        { signal: controller.signal }
+      )
     ).rejects.toThrow(/cancel/i);
   });
 
@@ -1210,9 +1440,9 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
         err: new SubAgentAbortError("fixed-task-id-1"),
       }),
     });
-    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
-      /cancelled/
-    );
+    await expect(
+      tool.handler({ title: "sample title", task: "t", wait: true })
+    ).rejects.toThrow(/cancelled/);
   });
 
   it("SC14: 调用方 signal 未 abort 的 SubAgentAbortError → 操作员强杀归因（不是 caller abort / 不是墙钟）", async () => {
@@ -1227,7 +1457,10 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     });
     let caught: unknown;
     try {
-      await tool.handler({ task: "t", wait: true }, { signal: undefined });
+      await tool.handler(
+        { title: "sample title", task: "t", wait: true },
+        { signal: undefined }
+      );
     } catch (err) {
       caught = err;
     }
@@ -1255,7 +1488,7 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     let caught: unknown;
     try {
       await tool.handler(
-        { task: "t", wait: true },
+        { title: "sample title", task: "t", wait: true },
         { signal: controller.signal }
       );
     } catch (err) {

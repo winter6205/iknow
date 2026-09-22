@@ -104,12 +104,13 @@ describe("C1: 第 5 个并发 spawn → capacity ToolExecutionError", () => {
       },
     });
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
-    await expect(tool.handler({ task: "overflow" })).rejects.toThrow(
-      ToolExecutionError
-    );
-    await expect(tool.handler({ task: "overflow" })).rejects.toThrow(
-      /capacity/i
-    );
+    // title is carried so the capacity reject below cannot be a title reject.
+    await expect(
+      tool.handler({ title: "sample title", task: "overflow" })
+    ).rejects.toThrow(ToolExecutionError);
+    await expect(
+      tool.handler({ title: "sample title", task: "overflow" })
+    ).rejects.toThrow(/capacity/i);
   });
 });
 
@@ -237,6 +238,7 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
       }),
     });
     const out = (await tool.handler({
+      title: "sample title",
       task: "t",
       wait: true,
     })) as SubAgentEnvelope;
@@ -268,6 +270,7 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
       }),
     });
     const out = (await tool.handler({
+      title: "sample title",
       task: "t",
       wait: true,
     })) as SubAgentEnvelope;
@@ -295,6 +298,7 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     });
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
     const out = (await tool.handler({
+      title: "sample title",
       task: "t",
       wait: true,
     })) as SubAgentEnvelope;
@@ -315,6 +319,7 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     });
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
     const out = (await tool.handler({
+      title: "sample title",
       task: "t",
       wait: true,
     })) as SubAgentEnvelope;
@@ -342,7 +347,7 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
     const controller = new AbortController();
     const p = tool.handler(
-      { task: "t", wait: true },
+      { title: "sample title", task: "t", wait: true },
       { signal: controller.signal }
     );
     controller.abort();
@@ -369,7 +374,7 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
     let caught: unknown;
     try {
-      await tool.handler({ task: "t", wait: true });
+      await tool.handler({ title: "sample title", task: "t", wait: true });
     } catch (err) {
       caught = err;
     }
@@ -414,7 +419,7 @@ describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeou
   const spawnCall = {
     id: "call-1",
     name: "spawn_subagent",
-    input: { task: "hang", wait: true },
+    input: { title: "hang the probe", task: "hang", wait: true },
   } as const;
 
   it("abortTask → ToolExecutionError（操作员强杀文本），且不是墙钟归因", async () => {
@@ -583,7 +588,11 @@ describe("T13: PER_TASK_TIMEOUT_MS 默认 2 小时", () => {
       },
     });
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
-    tool.handler({ task: "with-timeout", timeoutMs: 12_345 });
+    tool.handler({
+      title: "sample title",
+      task: "with-timeout",
+      timeoutMs: 12_345,
+    });
     expect(capturedDef?.timeoutMs).toBe(12_345);
   });
 });

@@ -608,7 +608,7 @@ describe("filterLiveToolRunsAgainstSpawnCards", () => {
       [
         "tu-w3",
         {
-          roleLine: "general-purpose running...",
+          titleLine: "general-purpose",
           detailLine: "ROLE: implementation worker W3",
           done: false,
         },

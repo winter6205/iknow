@@ -2,21 +2,17 @@
 /**
  * tests/tui/subagent-two-line-budget.test.tsx
  *
- * Line-budget + render regression for lock clauses 1–3 of
- * specs/tui-subagent-transcript-live.md: the two lines now render on the
- * `spawn_subagent` card inside the session transcript (scroll region); the
- * identity strip above the prompt was removed — **whether or not live
- * subagents exist they no longer enter the chrome line budget**
- * (`subagentRowBudget` is constant 0; omitting `chromeReserveRows.subagentRows`
- * reserves nothing).
- *
- * This test formerly pinned the opposite proposition (strip above the input
- * box, 2 budgeted rows per live subagent); once the placement contract was
- * superseded that subject vanished, so it was rewritten to "no prompt line
- * budget + the card's two lines never weld together". Welding is the original
- * fingerprint of this regression (Yoga squashing the two-line block into one →
- * `查找文档explore running...`), independent of placement, so that assertion is
- * kept and pinned on two real hosts:
+ * Line-budget + render regression for the spawn card in the session
+ * transcript (scroll region). The identity strip above the prompt was removed
+ * earlier and stays out of the chrome budget (`subagentRowBudget` is constant
+ * 0); this file pins that plus the card's physical two lines per
+ * specs/subagent-card-title.md: line 1 the operator title, line 2 the
+ * activity slot (dim in-flight tool name while live, green `✓ Done` once
+ * completed) — no `running...` suffix, no `taskPreview` row. Formerly this
+ * file asserted the superseded three-line shape (`{role} running...` + dim
+ * preview + `✓ Done`); re-pinned at the new contract's truth, keeping the
+ * original regression fingerprint: the two lines must never weld together
+ * (Yoga squashing the block into one row). Hosts pinned:
  *   - `SubagentCardView` (render surface shared by history and live cards);
  *   - `liveToolPreviewBox` (live-tail host, with card projection).
  */
@@ -125,15 +121,12 @@ describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => 
 });
 
 // ============================================================================
-// 2) Two lines on the card: shape, color, no welding (lock clauses 1–2)
+// 2) Two lines on the card: title + activity slot, color, no welding
 // ============================================================================
 
-async function renderCard(card: {
-  readonly roleLine: string;
-  readonly detailLine: string;
-  readonly doneLine?: string;
-  readonly done: boolean;
-}): Promise<TestRendererSetup> {
+async function renderCard(
+  card: Parameters<typeof SubagentCardView>[0]["card"]
+): Promise<TestRendererSetup> {
   const setup = await testRender(<SubagentCardView card={card} />, {
     width: 80,
     height: 5,
@@ -142,85 +135,119 @@ async function renderCard(card: {
   return setup;
 }
 
+function frameLines(setup: TestRendererSetup): string[] {
+  return setup
+    .captureCharFrame()
+    .split("\n")
+    .map((l) => l.trim());
+}
+
 describe("SubagentCardView（两行渲染面）", () => {
-  test("live：两行逐字、第 2 行紧随第 1 行、互不粘连", async () => {
+  test("live：第1行 title、第2行紧随其后的 dim 在飞工具名，互不粘连、无 running...", async () => {
     const card = projectSubagentCardLines(
-      [makeSubagent({ role: "explore", toolUseId: "toolu_live" })],
+      [
+        makeSubagent({
+          role: "explore",
+          toolUseId: "toolu_live",
+          title: "整理报告",
+          inFlightTool: "Bash",
+        }),
+      ],
       "toolu_live",
       80
     );
     expect(card).not.toBeNull();
     const setup = await renderCard(card!);
-    const lines = setup
-      .captureCharFrame()
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-    expect(lines).toContain("explore running...");
-    expect(lines).toContain("查找文档");
-    expect(lines.indexOf("查找文档")).toBe(
-      lines.indexOf("explore running...") + 1
-    );
+    const lines = frameLines(setup).filter((l) => l.length > 0);
+    expect(lines).toContain("整理报告");
+    expect(lines).toContain("Bash");
+    expect(lines.indexOf("Bash")).toBe(lines.indexOf("整理报告") + 1);
+    expect(lines.some((l) => l.includes("running"))).toBe(false);
     // The welded form must not exist (direct fingerprint of line squashing):
-    // the identity line may not share a row with any other text.
+    // the title line may not share a row with any other text.
     expect(
-      lines.some(
-        (l) => l.includes("running...") && !/^\S+( \S+)* running\.\.\.$/.test(l)
-      )
+      lines.some((l) => l.includes("整理报告") && l.includes("Bash"))
     ).toBe(false);
     await setup.renderer.destroy();
   });
 
   test("live：第 2 行 fg = palette.dim，且 ≠ 第 1 行 fg", async () => {
     const card = projectSubagentCardLines(
-      [makeSubagent({ role: "explore", toolUseId: "toolu_dim" })],
+      [
+        makeSubagent({
+          role: "explore",
+          toolUseId: "toolu_dim",
+          inFlightTool: "Bash",
+        }),
+      ],
       "toolu_dim",
       80
     );
     const setup = await renderCard(card!);
-    const roleSpan = spanWithText(setup, "explore running...");
-    const detailSpan = spanWithText(setup, "查找文档");
-    expect(roleSpan).toBeDefined();
+    const titleSpan = spanWithText(setup, "explore");
+    const detailSpan = spanWithText(setup, "Bash");
+    expect(titleSpan).toBeDefined();
     expect(detailSpan).toBeDefined();
     expect(rgbaEq(detailSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
-    expect(rgbaEq(roleSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(false);
+    expect(rgbaEq(titleSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(false);
     await setup.renderer.destroy();
   });
 
-  test("completed：概述留下 + 其下绿 `✓ Done`，第 1 行不再带 running...", async () => {
-    const card = subagentCardLinesMap(
-      [
-        makeSubagent({
-          state: "completed",
-          role: "explore",
-          taskPreview: "查找文档",
-          toolUseId: "toolu_done",
-          endedAt: iso(500),
-        }),
-      ],
-      80
-    ).get("toolu_done");
+  test('空槽位（inFlightTool 缺席 / ""）→ 仍占一行，卡片不塌缩', async () => {
+    for (const inFlight of [undefined, ""] as const) {
+      const card = projectSubagentCardLines(
+        [
+          makeSubagent({
+            role: "explore",
+            toolUseId: "toolu_slot",
+            ...(inFlight === undefined ? {} : { inFlightTool: inFlight }),
+          }),
+        ],
+        "toolu_slot",
+        80
+      );
+      const setup = await renderCard(card!);
+      const lines = frameLines(setup).filter((l) => l.length > 0);
+      expect(lines).toEqual(["explore"]);
+      await setup.renderer.destroy();
+    }
+  });
+
+  test("completed：第1行与 live 逐字相同 + 其下绿 `✓ Done`；无工具名 / 无 taskPreview 行", async () => {
+    const subagents = [
+      makeSubagent({
+        state: "completed",
+        role: "explore",
+        title: "整理报告",
+        taskPreview: "查找文档",
+        toolUseId: "toolu_done",
+        endedAt: iso(500),
+        inFlightTool: "Bash", // stale read must not survive into the done card
+      }),
+    ];
+    const map = subagentCardLinesMap(subagents, 80);
+    const card = map.get("toolu_done");
     expect(card).toBeDefined();
+    expect(card!.titleLine).toBe("整理报告");
+    expect(card!.detailLine).toBe("✓ Done");
     const setup = await renderCard(card!);
-    const lines = setup
-      .captureCharFrame()
-      .split("\n")
-      .map((l) => l.trim());
-    // Summary must be present (being pushed out by the literal `done` is what
-    // triggered the reopen).
-    expect(lines).toContain("查找文档");
+    const lines = frameLines(setup).filter((l) => l.length > 0);
+    expect(lines).toContain("整理报告");
     expect(lines).toContain("✓ Done");
-    expect(lines).toContain("explore");
-    expect(lines.some((l) => l.includes("running..."))).toBe(false);
-    // Order: summary first, completion marker directly below it.
-    expect(lines.indexOf("✓ Done")).toBe(lines.indexOf("查找文档") + 1);
+    expect(lines.some((l) => l.includes("running"))).toBe(false);
+    expect(lines.some((l) => l.includes("Bash"))).toBe(false);
+    // SC7: taskPreview stays off the card (it lives in SubagentPanel).
+    expect(lines.some((l) => l.includes("查找文档"))).toBe(false);
+    // Order: title first, completion marker directly below it.
+    expect(lines.indexOf("✓ Done")).toBe(lines.indexOf("整理报告") + 1);
     const doneSpan = spanWithText(setup, "✓ Done");
     expect(doneSpan).toBeDefined();
     expect(rgbaEq(doneSpan!.fg, RGBA.fromHex(tuiPalette.add))).toBe(true);
-    // The summary line stays dim (completion does not recolor it; green belongs
-    // to the completion marker only).
-    const previewSpan = spanWithText(setup, "查找文档");
-    expect(rgbaEq(previewSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
+    // The title line keeps the default text color (completion does not
+    // recolor it; green belongs to the completion marker only).
+    const titleSpan = spanWithText(setup, "整理报告");
+    expect(rgbaEq(titleSpan!.fg, RGBA.fromHex(tuiPalette.add))).toBe(false);
+    expect(rgbaEq(titleSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(false);
     await setup.renderer.destroy();
   });
 
@@ -235,8 +262,9 @@ describe("SubagentCardView（两行渲染面）", () => {
       [
         makeSubagent({
           role: "explore",
-          taskPreview: "查找文档并整理结果",
           toolUseId: "toolu_emoji",
+          title: "查找文档并整理结果",
+          inFlightTool: "Read",
         }),
       ],
       80
@@ -276,28 +304,30 @@ async function renderLiveBox(
 }
 
 describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
-  test("card 命中 → 卡上两行（身份 + dim 预览），不再走单行标题", async () => {
+  test("card 命中 → 卡上两行（title + dim 在飞工具名），不再走单行标题", async () => {
     const card = projectSubagentCardLines(
-      [makeSubagent({ role: "explore", toolUseId: "toolu_tail" })],
+      [
+        makeSubagent({
+          role: "explore",
+          toolUseId: "toolu_tail",
+          title: "整理报告",
+          inFlightTool: "Bash",
+        }),
+      ],
       "toolu_tail",
       80
     );
     const setup = await renderLiveBox(spawnRun(), card);
-    const lines = setup
-      .captureCharFrame()
-      .split("\n")
-      .map((l) => l.trim());
-    expect(lines).toContain("explore running...");
-    expect(lines).toContain("查找文档");
+    const lines = frameLines(setup).filter((l) => l.length > 0);
+    expect(lines).toContain("整理报告");
+    expect(lines).toContain("Bash");
+    expect(lines.some((l) => l.includes("running"))).toBe(false);
     await setup.renderer.destroy();
   });
 
   test("card 缺省（无关联键）→ 回落既有单行标题（不改 tool-line 模板）", async () => {
     const setup = await renderLiveBox(spawnRun());
-    const lines = setup
-      .captureCharFrame()
-      .split("\n")
-      .map((l) => l.trim());
+    const lines = frameLines(setup);
     // Existing detail-only text (dotless, from formatToolStatusLine) is still there.
     expect(
       lines.some((l) => l.includes("explore running") && !l.includes("..."))
@@ -305,9 +335,16 @@ describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
     await setup.renderer.destroy();
   });
 
-  test("failed 卡不吃 card 投影：走既有 failure overlay（锁句 5）", async () => {
+  test("failed 卡不吃 card 投影：走既有 failure overlay（SC5）", async () => {
     const card = projectSubagentCardLines(
-      [makeSubagent({ role: "explore", toolUseId: "toolu_tail" })],
+      [
+        makeSubagent({
+          role: "explore",
+          toolUseId: "toolu_tail",
+          title: "整理报告",
+          inFlightTool: "Bash",
+        }),
+      ],
       "toolu_tail",
       80
     );
@@ -316,7 +353,7 @@ describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
       card
     );
     const frame = setup.captureCharFrame();
-    // Failure overlay takes precedence: no green done / dim preview lines.
+    // Failure overlay takes precedence: no green done / activity-name lines.
     expect(frame.includes("done")).toBe(false);
     expect(frame).toBeDefined();
     await setup.renderer.destroy();

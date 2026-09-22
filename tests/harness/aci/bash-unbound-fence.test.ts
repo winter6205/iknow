@@ -342,7 +342,10 @@ describe("bash EROFS 回灌 — [fs_denied] 指引 (issue 1059)", () => {
       stderr: EROFS_STDERR,
     });
     const envelope = parseBash(
-      await unboundTool(MAIN, PAD).handler({ command: "grep x" })
+      // ADR-0117: `grep x` would now be refused by the role-substitution
+      // gate before reaching the (mocked) sandbox; the command is an
+      // arbitrary placeholder here, so use a gate-passing read form.
+      await unboundTool(MAIN, PAD).handler({ command: "cat x" })
     );
     expect(envelope.stderr).not.toContain("[fs_denied]");
     expect(envelope.stderr).toBe(EROFS_STDERR);
