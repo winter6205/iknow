@@ -25,6 +25,7 @@ import type {
   ToolExecutionResult,
 } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
+import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import { type IknowEnv } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "./real-llm-env.ts";
 import {
@@ -49,11 +50,6 @@ type DispatchRecord = {
   input: unknown;
   result: ToolExecutionResult | undefined;
 };
-
-// The refusal-tag pattern the contract covers: shell text-search invocations.
-function isGrepFamilyCommand(command: string): boolean {
-  return /(^|[;&|(>\s])(?:[a]?grep|rg|ag|fgrep|egrep)(\s|$)/.test(command);
-}
 
 function commandOf(dispatch: DispatchRecord): string {
   const input = dispatch.input;
@@ -155,7 +151,10 @@ function assertCase(caseId: string, dispatches: DispatchRecord[]) {
   // ([role_substitution]) are both fail-closed enforcement; an ok result
   // means bash answered a text/structure question — the leak this locks.
   for (const dispatch of dispatches) {
-    if (dispatch.name !== "bash" || !isGrepFamilyCommand(commandOf(dispatch)))
+    if (
+      dispatch.name !== "bash" ||
+      detectBashGrepSubstitution(commandOf(dispatch)) === undefined
+    )
       continue;
     expect(
       dispatch.result !== undefined && dispatch.result.kind !== "ok",

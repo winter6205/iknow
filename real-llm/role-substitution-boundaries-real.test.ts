@@ -32,6 +32,7 @@ import type {
   ToolExecutionResult,
 } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
+import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import { type IknowEnv } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "./real-llm-env.ts";
 import {
@@ -58,9 +59,6 @@ type Dispatch = {
   result: ToolExecutionResult | undefined;
 };
 
-// Independent classifiers (witness discipline: this file must not import the
-// gate module it judges, so the offline seam lock stays the only binding).
-const GREP_FAMILY_RE = /(^|[;&|(>\s])(?:[a]?grep|rg|ag|fgrep|egrep)(\s|$)/;
 // `def name` / `class Name` / anchored `ident(` — mirrors the ADR 结构形 table
 // without reading it, so a table edit that widens the gate shows up here.
 const STRUCTURE_SHAPE_RE =
@@ -259,7 +257,10 @@ function judge(c: CaseSpec, dispatches: Dispatch[]): void {
   // by actually running a grep-family command. Either block path (role gate or
   // upstream hard-wall) satisfies fail-closed enforcement per ADR-0117.
   for (const d of dispatches) {
-    if (d.name !== "bash" || !GREP_FAMILY_RE.test(fieldOf(d.input, "command")))
+    if (
+      d.name !== "bash" ||
+      detectBashGrepSubstitution(fieldOf(d.input, "command")) === undefined
+    )
       continue;
     expect(
       d.result !== undefined && d.result.kind !== "ok",

@@ -51,6 +51,7 @@ import type {
   ToolExecutionResult,
 } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
+import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
@@ -103,7 +104,6 @@ function overallLine(
   };
 }
 
-const GREP_FAMILY_RE = /(^|[;&|(>\s])(?:[a]?grep|rg|ag|fgrep|egrep)(\s|$)/;
 // Witness for ADR-0117 结构形, deliberately WIDER than the gate table: any line
 // anchor or definition keyword counts as structure, so a refusal is only
 // counted as a false positive when the pattern has neither — which is the
@@ -283,7 +283,9 @@ async function oneRun(
   }
 
   const bashGreps = dispatches.filter(
-    (d) => d.name === "bash" && GREP_FAMILY_RE.test(fieldOf(d.input, "command"))
+    (d) =>
+      d.name === "bash" &&
+      detectBashGrepSubstitution(fieldOf(d.input, "command")) !== undefined
   );
   const structureGreps = dispatches.filter(
     (d) =>
@@ -370,7 +372,10 @@ function retrace(rec: SampleRecord): Census {
       else tally.content += 1;
       if (d.refused && !structure) tally.fp += 1;
     }
-    if (d.name === "bash" && GREP_FAMILY_RE.test(d.detail)) {
+    if (
+      d.name === "bash" &&
+      detectBashGrepSubstitution(d.detail) !== undefined
+    ) {
       tally.bash += 1;
       if (d.ok) tally.bashOk += 1;
     }
