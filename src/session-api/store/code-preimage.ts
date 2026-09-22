@@ -51,7 +51,11 @@ export interface CodeRestoreTranscript {
 
 /** A path we deliberately did not touch, with why. `cross_transcript` is an
  *  attribution verdict the plan makes before any live-file guard runs; `drift`
- *  and `root_identity` are the guards themselves. */
+ *  and `root_identity` are the guards themselves.
+ *
+ *  This union is restated in `contract.ts` (`RewindCodeRestoreSkip`) and in the
+ *  TUI picker's label map; the `_rewindSkipReasonAlignment` satisfies assertion
+ *  in contract.ts keeps all three from drifting apart at compile time. */
 export interface CodeRestoreSkip {
   readonly relPath: string;
   readonly reason: "drift" | "root_identity" | "cross_transcript";
@@ -70,6 +74,16 @@ export interface CodeRestoreReport {
   readonly restored: ReadonlyArray<string>;
   readonly skipped: ReadonlyArray<CodeRestoreSkip>;
 }
+
+/** Typed failure on the restore path (plain-object convention shared with the
+ *  code-snapshot store): the rewind asked to put code back but no live task
+ *  root can be located for this conversation (no dirty-root record, no
+ *  persisted workspaceRoot). Thrown before any workspace write and before the
+ *  head moves — the same posture as an unreadable restore blob. */
+export type CodeRestoreError = {
+  kind: "restore_root_unavailable";
+  conversation_id: string;
+};
 
 /** A fold entry while the scan is still running: the op fields plus the set of
  *  transcripts that claimed the path, which is what decides if folding is legal.
@@ -93,9 +107,10 @@ interface FoldEntry {
  * cannot even reach a guard or a delete for it.
  *
  * A ref is dropped when any of its three transcript-supplied locators is
- * unusable — a relative path that is absolute or climbs out of the root, or a
- * blob name that is not sha256 hex: a transcript is history, not a licence to
- * touch anything outside the workspace's own content-addressed store.
+ * unusable — a relative path that is absolute or climbs out of the root, a
+ * blob name that is not sha256 hex, or an empty root identity: an empty
+ * identity names no project, and the apply guard would then pass for any
+ * equally-empty live root, writing relative to the process CWD.
  */
 export function buildCodeRestorePlan(
   transcripts: ReadonlyArray<CodeRestoreTranscript>
@@ -109,7 +124,8 @@ export function buildCodeRestorePlan(
       if (
         !isSafeRelPath(ref.relPath) ||
         !isCodeSnapshotSha(ref.preimageSha) ||
-        !isCodeSnapshotSha(ref.postimageSha)
+        !isCodeSnapshotSha(ref.postimageSha) ||
+        ref.rootIdentity.length === 0
       ) {
         continue;
       }

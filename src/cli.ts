@@ -677,7 +677,7 @@ async function runSubagentWorkerCommand(): Promise<void> {
   try {
     // ADR-0102: worker transcript IO is injected here (the codec belongs to
     // session-api; the harness only sees the narrow interface).
-    // ADR-0119: the worker preimage-capture factory likewise lands here
+    // ADR-0121: the worker preimage-capture factory likewise lands here
     // (Gate B — the session blob store is session-api, invisible to the
     // harness); the write-tool port it builds is threaded into the worker's
     // registry by runSubagentWorker.

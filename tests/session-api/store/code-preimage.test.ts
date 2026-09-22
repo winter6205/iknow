@@ -11,7 +11,8 @@
  *     preimage = the restore target, LATEST postimage = the drift expectation;
  *     ops appear in first-appearance order (never a directory scan).
  *   - every transcript-supplied locator is gated: a ref whose path is absolute
- *     or climbs out of the root, or whose blob name is not sha256 hex, is
+ *     or climbs out of the root, whose blob name is not sha256 hex, or whose
+ *     root identity is empty is
  *     dropped — a transcript is not a licence to reach outside the workspace
  *     and its own blob store.
  *   - apply writes a path back only when the live root identity matches AND the
@@ -187,6 +188,18 @@ describe("buildCodeRestorePlan", () => {
     });
     assert.deepEqual(report, { restored: [], skipped: [] });
     assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+  });
+
+  it("drops a ref whose rootIdentity is empty, leaving no op and no skip", async () => {
+    // An empty root identity names no project: its guard could only ever match
+    // an equally-empty live root, so keeping such a ref would let a session
+    // with no locatable root write/delete relative to the process CWD. The
+    // empty-identity locator is unusable — dropped like a bad path or sha, and
+    // silently so: there is no trustworthy identity to report it under.
+    const plan = buildCodeRestorePlan(
+      oneChain([refEvent("e1", { rootIdentity: "" })])
+    );
+    assert.deepEqual(plan, { ops: [], skipped: [] });
   });
 
   it("keeps the same path under two different roots as two ops", async () => {

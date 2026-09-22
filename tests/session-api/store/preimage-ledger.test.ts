@@ -6,9 +6,12 @@
  *     still find its own pending id → the parallel-wave invariant)
  *   - a missing conversation / id → empty map, never throws
  *   - buckets isolated per conversationId; clear drops one conversation only
- * Plus the commit-side drain (`drainPreimageRefs`), the one shape all three
- * ledger owners share: it pulls exactly the batch's own tool_result ids and
- * reports "nothing pending" as undefined, never as an empty Map.
+ * Plus the commit-side drain (`drainPreimageRefs`), the one shape every ledger
+ * owner shares (parent hub, worker transcript — the chat REPL is not a capture
+ * host): it consumes the batch's tool_result ids but returns only what the
+ * per-event stamp (matchCodePreimage) can actually land, reports the rest via
+ * `onUnstampable`, and renders "nothing pending" as undefined, never as an
+ * empty Map.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -163,5 +166,68 @@ describe("drainPreimageRefs", () => {
       [...drainPreimageRefs(ledger, "c1", [toolResult("OTHER")])!.keys()],
       ["OTHER"]
     );
+  });
+
+  // -- consume ↔ stamp coupling: nothing is dropped silently (ADR-0121) ------
+
+  it("parallel double-write in ONE event: only the stampable ref returns; the other is reported, never silently dropped", () => {
+    // The append side stamps exactly one ref per event (matchCodePreimage);
+    // a drain that consumed both would strand the second capture with no
+    // restorable ref and no receipt. Coupled drain: the second lands on the
+    // onUnstampable report instead.
+    const ledger = createPreimageLedger();
+    ledger.set("c1", "A", ref("shaA", "a.ts"));
+    ledger.set("c1", "B", ref("shaB", "b.ts"));
+    const reported: ReadonlyMap<string, PreimageRef>[] = [];
+    const drained = drainPreimageRefs(
+      ledger,
+      "c1",
+      [toolResult("A", "B")],
+      (unstamped) => reported.push(unstamped)
+    );
+    assert.deepEqual([...drained!.keys()], ["A"]);
+    assert.equal(reported.length, 1);
+    assert.deepEqual([...reported[0]!.keys()], ["B"]);
+    assert.deepEqual(reported[0]!.get("B"), ref("shaB", "b.ts"));
+    // Consumed either way — the report, not a lingering pending entry, is the
+    // observability outlet (the id can never appear in a later batch).
+    assert.equal(ledger.consume("c1", ["B"]).size, 0);
+  });
+
+  it("errored tool_result's captured ref is consumed and reported, never stamped", () => {
+    const ledger = createPreimageLedger();
+    ledger.set("c1", "A", ref("shaA", "a.ts"));
+    const errored = {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "A",
+          content: "boom",
+          is_error: true,
+        },
+      ],
+    } as unknown as AnthropicNativeMessage;
+    const reported: ReadonlyMap<string, PreimageRef>[] = [];
+    assert.equal(
+      drainPreimageRefs(ledger, "c1", [errored], (u) => reported.push(u)),
+      undefined
+    );
+    assert.deepEqual([...reported[0]!.keys()], ["A"]);
+  });
+
+  it("refs spread over SEPARATE events all stay stampable — per-tool commits unaffected, no report", () => {
+    const ledger = createPreimageLedger();
+    ledger.set("c1", "A", ref("shaA", "a.ts"));
+    ledger.set("c1", "B", ref("shaB", "b.ts"));
+    const reported: ReadonlyMap<string, PreimageRef>[] = [];
+    const drained = drainPreimageRefs(
+      ledger,
+      "c1",
+      [toolResult("A"), toolResult("B")],
+      (u) => reported.push(u)
+    );
+    assert.deepEqual([...drained!.keys()], ["A", "B"]);
+    assert.deepEqual(reported, []);
   });
 });

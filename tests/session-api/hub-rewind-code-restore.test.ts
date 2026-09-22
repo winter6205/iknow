@@ -82,7 +82,11 @@ async function seed(
     root?: string;
     capturePre?: boolean;
     absentBefore?: boolean;
-  }>
+  }>,
+  /** ADR-0121: a session whose file never persisted a workspaceRoot (legacy
+   *  header) and whose hub has no dirty-root record leaves the restore with no
+   *  locatable task root — the apply must not degrade to the process CWD. */
+  opts?: { readonly omitWorkspaceRoot?: boolean }
 ): Promise<void> {
   const dir = resolveConversationDir({
     projectDir: sessionDir,
@@ -118,7 +122,7 @@ async function seed(
     jsonMode: false,
     turnCount: 1,
     updatedAt: "2026-01-01T00:00:00.000Z",
-    workspaceRoot: taskRoot,
+    ...(opts?.omitWorkspaceRoot === true ? {} : { workspaceRoot: taskRoot }),
   };
   const lines = [JSON.stringify(header)];
   for (const eid of ["e0", "e1", "e2", "e3"]) {
@@ -273,5 +277,55 @@ describe("rewindSession restoreCode", () => {
     assert.equal(res.head, "e0");
     assert.deepEqual(res.codeRestore?.restored, ["was-empty.ts"]);
     assert.equal(await readFile(join(taskRoot, "was-empty.ts"), "utf8"), "");
+  });
+
+  it("rootless session with restorable ops aborts: head unchanged, nothing written", async () => {
+    // No workspaceRoot on the file AND no dirty-root record: the live task
+    // root cannot be located. Same family as an unreadable blob — the rewind
+    // never advances past history whose code it could not put back.
+    await writeFile(join(taskRoot, "a.ts"), "B");
+    await seed(
+      "hc-rootless-ops",
+      [{ event: "e1", relPath: "a.ts", pre: "A", post: "B" }],
+      { omitWorkspaceRoot: true }
+    );
+    await assert.rejects(
+      () => hub().rewindSession("hc-rootless-ops", "e0", true),
+      (err: unknown) =>
+        (err as { kind: string }).kind === "restore_root_unavailable"
+    );
+    assert.equal(await store.readHead("hc-rootless-ops"), "e3");
+    assert.equal(await readFile(join(taskRoot, "a.ts"), "utf8"), "B");
+  });
+
+  it("rootless session with an empty-identity ref never reaches the process CWD", async () => {
+    // A ref stamped with an empty root identity folds to no op at all (the
+    // plan drops the unusable locator), so a rootless session neither throws
+    // nor writes relative to the process CWD — the rewind just proceeds.
+    const probe = `hc-rootless-cwd-probe-${Date.now()}.ts`;
+    const probePath = join(process.cwd(), probe);
+    await writeFile(probePath, "X");
+    try {
+      await seed(
+        "hc-rootless-empty-id",
+        [{ event: "e1", relPath: probe, pre: "A", post: "X", root: "" }],
+        { omitWorkspaceRoot: true }
+      );
+      const res = await hub().rewindSession("hc-rootless-empty-id", "e0", true);
+      assert.equal(res.head, "e0");
+      assert.deepEqual(res.codeRestore?.restored, []);
+      assert.equal(await readFile(probePath, "utf8"), "X");
+    } finally {
+      await rm(probePath, { force: true });
+    }
+  });
+
+  it("rootless session without any preimage: empty report, head moves", async () => {
+    // A legacy session with no refs stays rewindable with restoreCode=true —
+    // the missing root costs nothing when there is nothing to restore.
+    await seed("hc-rootless-plain", [], { omitWorkspaceRoot: true });
+    const res = await hub().rewindSession("hc-rootless-plain", "e0", true);
+    assert.equal(res.head, "e0");
+    assert.deepEqual(res.codeRestore, { restored: [], skipped: [] });
   });
 });

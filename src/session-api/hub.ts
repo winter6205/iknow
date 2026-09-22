@@ -166,6 +166,7 @@ import { persistedLastUsage } from "./store/schema.js";
 import {
   createPreimageLedger,
   drainPreimageRefs,
+  warnUnstampablePreimages,
   type PreimageLedgerHost,
 } from "./store/preimage-ledger.js";
 import { createPreimageCapture } from "./store/preimage-capture.js";
@@ -173,6 +174,7 @@ import type { PreimageCapture } from "../harness/aci/preimage-port.js";
 import {
   applyCodeRestore,
   buildCodeRestorePlan,
+  type CodeRestoreError,
   type CodeRestoreReport,
   loadWorkerPreimageEvents,
   readWorkerSpawnToolUseId,
@@ -2857,8 +2859,9 @@ export class SessionHub {
    * `restoreCode` (default false) additionally writes the abandoned segment's
    * workspace files back to their captured preimages before the head moves —
    * see `restoreAbandonedCode`. The transcript head movement never depends on
-   * whether a restore happened; a restore that fails on an unreadable blob
-   * aborts the whole call and leaves the head where it was.
+   * whether a restore happened; a restore that fails on an unreadable blob, or
+   * that still has ops but no locatable live task root, aborts the whole call
+   * and leaves the head where it was.
    */
   async rewindSession(
     conversationId: string,
@@ -2901,7 +2904,9 @@ export class SessionHub {
   /** Restore the workspace files a rewind to `head` would abandon (ADR-0121).
    *  Called before the head moves: an unreadable preimage blob throws here, so
    *  the transcript never advances past history whose code we could not put
-   *  back. Drift and root-identity mismatches are reported skips.
+   *  back; a session whose live task root cannot be located while ops remain
+   *  throws the same family (`restore_root_unavailable`). Drift and
+   *  root-identity mismatches are reported skips.
    *
    *  The write target is the LIVE taskRoot, never the session file's
    *  `workspaceRoot` (ADR-0121: "Restore into the session file's
@@ -2943,12 +2948,28 @@ export class SessionHub {
     const { workspaceRoot } = await this.store.load(conversationId);
     const liveRoot =
       this.dirtyWorktreeRoots.get(conversationId) ?? workspaceRoot;
+    if (liveRoot === undefined) {
+      // No live task root to restore into: same family as an unreadable blob
+      // (ADR-0121) — while ops remain, the transcript must not advance past
+      // code we have no locatable place to put back, so the call throws
+      // before any workspace write and the head stays put. Nothing to write
+      // makes the missing root a no-op: report the ownership skips and let
+      // the rewind proceed. Never degrade `taskRoot` to "" — that would
+      // resolve relative paths against the process CWD.
+      if (plan.ops.length > 0) {
+        throw {
+          kind: "restore_root_unavailable",
+          conversation_id: conversationId,
+        } satisfies CodeRestoreError;
+      }
+      return { restored: [], skipped: plan.skipped };
+    }
     return applyCodeRestore({
       sessionFolder: resolveConversationDir({
         projectDir: this.store.getProjectDir(),
         conversationId,
       }),
-      taskRoot: liveRoot ?? "",
+      taskRoot: liveRoot,
       rootIdentity: this.rootIdentityFor(liveRoot),
       plan,
     });
@@ -3018,10 +3039,15 @@ export class SessionHub {
 
   /** The live project-identity root a captured preimage `rootIdentity` is
    *  checked against — the same derivation the engine build feeds the write
-   *  tools (`buildProductionEngine` → `resolvePreimageRootIdentity`). */
-  private rootIdentityFor(root: string | undefined): string {
-    if (root === undefined) return "";
-    return this.projectIdentityRoot ?? this.boundRoot ?? mainCheckoutOf(root);
+   *  tools (`resolvePreimageRootIdentity` in
+   *  `src/harness/aci/tools/registry.ts`, fed by `build-engine`'s
+   *  `sessionRoots.projectIdentityRoot`). `mainCheckoutOf` wraps the WHOLE
+   *  chain, not just the fallback: the capture side normalized
+   *  `projectIdentityRoot ?? cwd` through the same pure derivation, and an
+   *  idempotent pass keeps a pinned / bound task-worktree value from
+   *  comparing unequal to every captured identity. */
+  private rootIdentityFor(root: string): string {
+    return mainCheckoutOf(this.projectIdentityRoot ?? this.boundRoot ?? root);
   }
 
   async listRewindTargets(
@@ -3486,7 +3512,8 @@ export class SessionHub {
     const preimages = drainPreimageRefs(
       this.preimageLedger,
       opts.conversationId,
-      opts.events
+      opts.events,
+      (unstamped) => warnUnstampablePreimages(opts.conversationId, unstamped)
     );
     try {
       await this.store.appendEvents({

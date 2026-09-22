@@ -60,6 +60,7 @@ export {
   applyCodeRestore,
   buildCodeRestorePlan,
   type ApplyCodeRestoreOpts,
+  type CodeRestoreError,
   type CodeRestoreOp,
   type CodeRestorePlan,
   type CodeRestoreReport,

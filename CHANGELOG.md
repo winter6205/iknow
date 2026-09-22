@@ -141,7 +141,7 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
-- **Code restore on rewind (ADR-0119, 2026-09-22)**: a successful workspace write
+- **Code restore on rewind (ADR-0121, 2026-09-22)**: a successful workspace write
   by `edit_file`, `write_file` or one of the five symbol-mutation tools first
   captures the bytes it replaced. Blobs are content-addressed (`sha256`,
   write-if-missing so identical content dedups) under the session folder's

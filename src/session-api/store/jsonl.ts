@@ -127,24 +127,36 @@ export interface SessionEventRecord {
   readonly codePreimage?: PreimageRef;
 }
 
+/** The `tool_use_id` whose ref `matchCodePreimage` would resolve for this
+ *  event — the FIRST captured, non-`is_error` tool_result block. The commit
+ *  side's drain selects with this exact rule, so consumption can never strand
+ *  a ref the append side would not land. */
+export function matchCodePreimageId(
+  message: AnthropicNativeMessage,
+  preimages: ReadonlyMap<string, PreimageRef>
+): string | undefined {
+  for (const block of message.content) {
+    if (block.type !== "tool_result" || block.is_error === true) continue;
+    if (preimages.has(block.tool_use_id)) return block.tool_use_id;
+  }
+  return undefined;
+}
+
 /** Find the captured preimage ref for an event, if it is a successful
  *  (non-`is_error`) tool_result whose `tool_use_id` was captured. A batch may
  *  carry several tool_result blocks (parallel tools); the first captured,
- *  non-error one wins — under the per-tool commit each event holds exactly
- *  one, so the choice is deterministic. Shared by the parent append
+ *  non-error one wins. Shared by the parent append
  *  (`SessionStore.appendEvents`) and the worker append
- *  (`appendWorkerTranscript`): one stamping rule for both transcripts. */
+ *  (`appendWorkerTranscript`): one stamping rule for both transcripts. A
+ *  second captured ref inside the same event is reported by the drain
+ *  (`drainPreimageRefs`' `onUnstampable`), never silently consumed. */
 export function matchCodePreimage(
   message: AnthropicNativeMessage,
   preimages: ReadonlyMap<string, PreimageRef> | undefined
 ): PreimageRef | undefined {
   if (preimages === undefined || preimages.size === 0) return undefined;
-  for (const block of message.content) {
-    if (block.type !== "tool_result" || block.is_error === true) continue;
-    const ref = preimages.get(block.tool_use_id);
-    if (ref !== undefined) return ref;
-  }
-  return undefined;
+  const id = matchCodePreimageId(message, preimages);
+  return id === undefined ? undefined : preimages.get(id);
 }
 
 /** The persisted rewind head pointer; id null means an empty transcript. */
@@ -152,6 +164,7 @@ export interface SessionHeadRecord {
   readonly type: "head";
   readonly id: string | null;
 }
+
 /** ADR-0113: title event — the authoritative form of the title. Not part of
  *  the message chain, never projected into messages or model prior; the
  *  header `title` is demoted to its cache (latest event text; an

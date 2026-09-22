@@ -8,6 +8,7 @@ import type { StopReason, TokenUsage } from "../harness/index.js";
 import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactReason } from "../harness/compress/index.js";
+import type { CodeRestoreSkip } from "./store/code-preimage.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -241,6 +242,24 @@ export type RewindCodeRestoreSkip = {
   readonly relPath: string;
   readonly reason: "drift" | "root_identity" | "cross_transcript";
 };
+
+/** Compile-time alignment assertion (no runtime effect): the wire DTO above
+ *  and the store's `CodeRestoreSkip` (store/code-preimage.ts, the authority)
+ *  keep parallel literals for the skip reason — this is the only coupling
+ *  that stops either side drifting: renaming or adding a reason on one side
+ *  breaks typecheck (missing key or excess property) before hub/http can
+ *  serve a receipt the picker has no label for. `void` keeps the const used
+ *  (same pattern as `compress/constant.ts`). */
+const _rewindSkipReasonAlignment = {
+  drift: "drift",
+  root_identity: "root_identity",
+  cross_transcript: "cross_transcript",
+} as const satisfies Record<
+  RewindCodeRestoreSkip["reason"],
+  CodeRestoreSkip["reason"]
+> &
+  Record<CodeRestoreSkip["reason"], RewindCodeRestoreSkip["reason"]>;
+void _rewindSkipReasonAlignment;
 
 export type RewindCodeRestoreResult = {
   readonly restored: ReadonlyArray<string>;

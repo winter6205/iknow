@@ -40,11 +40,14 @@ export function codeSnapshotDir(sessionFolder: string): string {
   return join(sessionFolder, CODE_SNAPSHOTS_DIR_NAME);
 }
 
+/** Capture input → bytes: a string is utf8, a buffer passes through. One
+ *  normalization so sha and blob payload can never disagree on encoding. */
+const toBlobBytes = (bytes: Buffer | string): Buffer =>
+  typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+
 /** sha256 hex of the raw bytes — the blob's content address / filename. */
 export function codeSnapshotSha(bytes: Buffer | string): string {
-  return createHash("sha256")
-    .update(typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes)
-    .digest("hex");
+  return createHash("sha256").update(toBlobBytes(bytes)).digest("hex");
 }
 
 /**
@@ -56,7 +59,7 @@ export async function captureCodeSnapshot(
   sessionFolder: string,
   bytes: Buffer | string
 ): Promise<string> {
-  const buf = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  const buf = toBlobBytes(bytes);
   const sha = codeSnapshotSha(buf);
   const dir = codeSnapshotDir(sessionFolder);
   await mkdir(dir, { recursive: true });

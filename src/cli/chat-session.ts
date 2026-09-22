@@ -114,10 +114,6 @@ import {
 } from "../session-api/store/index.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "../session-api/store/schema.js";
-import {
-  drainPreimageRefs,
-  type PreimageLedgerHost,
-} from "../session-api/store/preimage-ledger.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
@@ -2421,6 +2417,12 @@ export async function persistChatSessionCheckpoint(opts: {
  * session) → use getPriors()' in-memory messages (history before this run).
  * Underlying store IO faults propagate as typed store errors, never
  * swallowed.
+ *
+ * The chat REPL is NOT a preimage-capture host (specs/code-restore.md): its
+ * engine assembles no capture port, so nothing feeds a ledger and this hook
+ * never stamps `codePreimage` — no preimage params by design. Subagents
+ * spawned from chat still capture in their own worker process and stay
+ * restorable through the hub's rewind on the same session folder.
  */
 export function createChatSessionCommitHook(opts: {
   readonly store: SessionStore;
@@ -2429,24 +2431,13 @@ export function createChatSessionCommitHook(opts: {
   readonly getPriors: () => ReadonlyArray<AnthropicNativeMessage>;
   /** Resolved root for a new conversation bootstrap. */
   readonly workspaceRoot?: string;
-  /** ADR-0036: per-conversation preimage ledger; drained once and stamped
-   *  onto this batch's successful tool_result events. Absent → no stamping. */
-  readonly preimageLedger?: PreimageLedgerHost;
 }): (messages: ReadonlyArray<AnthropicNativeMessage>) => Promise<void> {
   const { store, conversationId, jsonMode, getPriors, workspaceRoot } = opts;
   return async (messages) => {
-    // Pull exactly this batch's captured preimages once so the fast JSONL path
-    // and the legacy-bootstrap fallback stamp the same events.
-    const preimages = drainPreimageRefs(
-      opts.preimageLedger,
-      conversationId,
-      messages
-    );
     try {
       await store.appendEvents({
         id: conversationId,
         events: [...messages],
-        preimages,
       });
       return;
     } catch (err) {
@@ -2493,7 +2484,6 @@ export function createChatSessionCommitHook(opts: {
     await store.appendEvents({
       id: conversationId,
       events: [...messages],
-      preimages,
     });
   };
 }

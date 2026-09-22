@@ -35,6 +35,7 @@ import {
 import {
   createPreimageLedger,
   drainPreimageRefs,
+  warnUnstampablePreimages,
 } from "../session-api/store/preimage-ledger.js";
 import { recordPreimagePair } from "../session-api/store/preimage-capture.js";
 import { loadIknowSettings } from "../config/settings.js";
@@ -46,7 +47,7 @@ import type {
 import { createSerialQueue } from "../util/serial-queue.js";
 
 /**
- * ADR-0119: the worker process's preimage accumulator, shared by the
+ * ADR-0121: the worker process's preimage accumulator, shared by the
  * two host seams assembled in this module — the injected capture port
  * (`createWorkerPreimageCaptureFactory` fills it the moment a write is about
  * to land) and `appendMessages` (drains exactly the committed batch's
@@ -91,11 +92,14 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
     appendMessages: (events, thinkingMs) =>
       serialize(async () => {
         // Drain inside the queue so the consume ↔ append pair stays ordered
-        // like the parent's hub serialize → appendEvents pair.
+        // like the parent's hub serialize → appendEvents pair. A ref that
+        // cannot land on this batch's events is warned to stderr (the worker's
+        // human-visible channel; stdout carries only envelopes).
         const preimages = drainPreimageRefs(
           workerPreimageLedger,
           loc.taskId,
-          events
+          events,
+          (unstamped) => warnUnstampablePreimages(loc.taskId, unstamped)
         );
         await appendWorkerTranscript({
           location: { transcriptPath: loc.transcriptPath, taskId: loc.taskId },
@@ -109,7 +113,7 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
 };
 
 /**
- * ADR-0119: build the cli entry's `WorkerPreimageCaptureFactory` — the
+ * ADR-0121: build the cli entry's `WorkerPreimageCaptureFactory` — the
  * worker-side sibling of `createPreimageCapture` (parent path).
  *
  * The asymmetry against the parent implementation is deliberate: a worker's
