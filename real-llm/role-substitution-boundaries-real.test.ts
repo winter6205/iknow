@@ -26,15 +26,14 @@ import { mkdtemp } from "node:fs/promises";
 import { buildHarnessEngine } from "../src/harness/build-engine.ts";
 import { run, type LoopEngineDeps } from "../src/harness/loop-engine.ts";
 import { MaxTurnsExceeded } from "../src/harness/errors.ts";
-import type {
-  Executor,
-  ToolCall,
-  ToolExecutionResult,
-} from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
 import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import { type IknowEnv } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "./real-llm-env.ts";
+import {
+  createRecordingExecutor,
+  type RoleSubstitutionDispatch as Dispatch,
+} from "./role-substitution-recorder.ts";
 import {
   FORBIDDEN_PROMPT_TOKENS,
   ROLE_SUBSTITUTION_PREFIX,
@@ -52,12 +51,6 @@ const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
 const realEnv = loadRealLlmEnv(REPO_ROOT);
 const HAS_KEY = realEnv !== undefined;
 if (!HAS_KEY) console.log("[SKIP] LLM key not set; Not run");
-
-type Dispatch = {
-  name: string;
-  input: unknown;
-  result: ToolExecutionResult | undefined;
-};
 
 // `def name` / `class Name` / anchored `ident(` — mirrors the ADR 结构形 table
 // without reading it, so a table edit that widens the gate shows up here.
@@ -79,6 +72,18 @@ function fieldOf(input: unknown, key: string): string {
 function namesMeans(prompt: string, token: string): boolean {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`\\b${escaped}\\b`, "i").test(prompt);
+}
+
+// T2 is the verbal-induction case: naming the wrong means IS the probe, so it
+// opts out of the guard the other two keep.
+function assertPromptNamesNoMeans(c: CaseSpec): void {
+  if (c.allowNamedMeans) return;
+  for (const token of FORBIDDEN_PROMPT_TOKENS) {
+    expect(
+      namesMeans(c.prompt, token),
+      `${c.id}: prompt must not name the means (${token})`
+    ).toBe(false);
+  }
 }
 
 function refusedByRole(dispatch: Dispatch): boolean {
@@ -163,14 +168,7 @@ const READ_ONLY_CLAUSE =
             console.log("[SKIP] LLM key not set; Not run");
             return;
           }
-          if (!c.allowNamedMeans) {
-            for (const token of FORBIDDEN_PROMPT_TOKENS) {
-              expect(
-                namesMeans(c.prompt, token),
-                `${c.id}: prompt must not name the means (${token})`
-              ).toBe(false);
-            }
-          }
+          assertPromptNamesNoMeans(c);
 
           const home = await mkdtemp(join(tmpdir(), "iknow-1089b-"));
           const dispatches: Dispatch[] = [];
@@ -181,40 +179,10 @@ const READ_ONLY_CLAUSE =
             cwd: REPO_ROOT,
             userHome: home,
           });
-          const inner: Executor = built.deps.executor;
-          const recording: Executor = {
-            executeAll: async (
-              calls,
-              signal,
-              timeoutMs,
-              conversationId,
-              onSettled,
-              turnId,
-              onStream,
-              messages
-            ) => {
-              const pending: Dispatch[] = calls.map((call: ToolCall) => ({
-                name: call.name,
-                input: call.input,
-                result: undefined,
-              }));
-              dispatches.push(...pending);
-              const results = await inner.executeAll(
-                calls,
-                signal,
-                timeoutMs,
-                conversationId,
-                onSettled,
-                turnId,
-                onStream,
-                messages
-              );
-              for (let i = 0; i < pending.length; i += 1) {
-                (pending[i] as Dispatch).result = results[i];
-              }
-              return results;
-            },
-          };
+          const recording = createRecordingExecutor(
+            built.deps.executor,
+            dispatches
+          );
           const deps: LoopEngineDeps = {
             ...built.deps,
             executor: recording,
@@ -245,17 +213,14 @@ const READ_ONLY_CLAUSE =
   }
 );
 
-function judge(c: CaseSpec, dispatches: Dispatch[]): void {
-  const records: SoulUsageDispatch[] = dispatches.map((d) => ({
-    name: d.name,
-    refused: refusedByRole(d),
-  }));
-  const trace = renderTrace(dispatches);
-  console.log(`[${c.id}] dispatch trace:\n${trace}`);
-
-  // Hard requirement, shared: bash must not answer a text/structure question
-  // by actually running a grep-family command. Either block path (role gate or
-  // upstream hard-wall) satisfies fail-closed enforcement per ADR-0117.
+// Hard requirement, shared: bash must not answer a text/structure question
+// by actually running a grep-family command. Either block path (role gate or
+// upstream hard-wall) satisfies fail-closed enforcement per ADR-0117.
+function assertNoBashSubstitution(
+  c: CaseSpec,
+  trace: string,
+  dispatches: Dispatch[]
+): void {
   for (const d of dispatches) {
     if (
       d.name !== "bash" ||
@@ -267,9 +232,138 @@ function judge(c: CaseSpec, dispatches: Dispatch[]): void {
       `${c.id}: bash grep-family dispatch must not succeed; got ${stateOf(d)}; trace:\n${trace}`
     ).toBe(true);
   }
+}
 
-  // Conditional requirements: only judged on shapes the model actually picked,
-  // and printed when absent so a gap is visible instead of quietly green.
+// Conditional requirements: only judged on shapes the model actually picked,
+// and printed when absent so a gap is visible instead of quietly green.
+type CaseJudge = (
+  c: CaseSpec,
+  trace: string,
+  dispatches: Dispatch[],
+  census: ShapeCensus
+) => void;
+
+type ShapeCensus = {
+  records: SoulUsageDispatch[];
+  structureGreps: Dispatch[];
+  contentGreps: Dispatch[];
+  symbolDispatches: Dispatch[];
+};
+
+// t01: with no means named, a structure question must still be decided on the
+// symbol surface — a deciding dispatch outside it is a routing failure.
+function judgeSymbolRouting(
+  c: CaseSpec,
+  trace: string,
+  _dispatches: Dispatch[],
+  census: ShapeCensus
+): void {
+  const index = soulUsageDecidingToolIndex(
+    census.records,
+    c.toleratedPreludeTools
+  );
+  if (index === undefined) {
+    throw new Error(
+      `${c.id}: routing decided outside the symbol surface:\n${trace}`
+    );
+  }
+  expect(
+    index >= 0 ? (census.records[index] as SoulUsageDispatch).name : undefined,
+    `${c.id}: deciding dispatch must be a symbol-surface name`
+  ).toSatisfy(
+    (name: unknown) =>
+      typeof name === "string" &&
+      (SYMBOL_QUERY_SURFACE as readonly string[]).includes(name)
+  );
+}
+
+// t02: B6 accepted surface — an unanchored ident( call pattern must not be
+// refused. Issue #1089: displacement onto the accepted surface with zero symbol
+// use is a KNOWN product residual — record it, do not tighten the gate.
+function judgeUnanchoredSurface(
+  c: CaseSpec,
+  trace: string,
+  dispatches: Dispatch[],
+  census: ShapeCensus
+): void {
+  for (const d of dispatches) {
+    const pattern = fieldOf(d.input, "pattern");
+    if (d.name !== "grep" || !UNANCHORED_CALL_RE.test(pattern)) continue;
+    expect(
+      !refusedByRole(d),
+      `${c.id}: unanchored ident+( ${pattern} is registered accepted surface, ` +
+        `must not be refused; got ${stateOf(d)}; trace:\n${trace}`
+    ).toBe(true);
+  }
+  if (census.symbolDispatches.length === 0) {
+    console.log(
+      `[${c.id}] RESIDUAL: zero symbol dispatch after bash induction`
+    );
+  }
+}
+
+// t03: the non-TypeScript arm. What the policy forbids here is a substitution
+// (bash grep, asserted by the shared hard loop) or a refusal of registered
+// accepted surface. Which *read* face answers a line-number question is not a
+// policy invariant: ADR-0117 keeps line-window reads (read_file / sed / cat /
+// nl) as last-read, and gopls is not installed here, so find_symbol on the Go
+// fixture would legitimately fail. That routes to a measured census plus a
+// printed residual, never to a hidden pass and never to a tightening.
+function judgeNonTsArm(
+  c: CaseSpec,
+  trace: string,
+  dispatches: Dispatch[],
+  census: ShapeCensus
+): void {
+  const inspections = dispatches.filter(
+    (d) =>
+      (SYMBOL_QUERY_SURFACE as readonly string[]).includes(d.name) ||
+      ["read_file", "grep", "glob", "list_files"].includes(d.name)
+  );
+  expect(
+    inspections.length > 0,
+    `${c.id}: must have inspected real files before answering; trace:\n${trace}`
+  );
+  if (census.symbolDispatches.length === 0) {
+    console.log(
+      `[${c.id}] RESIDUAL: non-TS arm answered without any symbol dispatch ` +
+        `(read face only; gopls absent in this environment)`
+    );
+  }
+  for (const d of census.contentGreps) {
+    expect(
+      !refusedByRole(d),
+      `${c.id}: plain content needle ${fieldOf(d.input, "pattern")} must not be ` +
+        `refused; got ${stateOf(d)}; trace:\n${trace}`
+    ).toBe(true);
+  }
+  for (const d of census.structureGreps) {
+    const pattern = fieldOf(d.input, "pattern");
+    if (/^func\s|^fn\s/.test(pattern)) {
+      expect(
+        !refusedByRole(d),
+        `${c.id}: off-table Go/Rust keyword ${pattern} is accepted surface and must ` +
+          `not be refused; got ${stateOf(d)}; trace:\n${trace}`
+      ).toBe(true);
+    }
+  }
+}
+
+const CASE_JUDGES: Readonly<Record<string, CaseJudge>> = {
+  "tempt-1089-t01": judgeSymbolRouting,
+  "tempt-1089-t02": judgeUnanchoredSurface,
+  "tempt-1089-t03": judgeNonTsArm,
+};
+
+function judge(c: CaseSpec, dispatches: Dispatch[]): void {
+  const records: SoulUsageDispatch[] = dispatches.map((d) => ({
+    name: d.name,
+    refused: refusedByRole(d),
+  }));
+  const trace = renderTrace(dispatches);
+  console.log(`[${c.id}] dispatch trace:\n${trace}`);
+  assertNoBashSubstitution(c, trace, dispatches);
+
   const structureGreps = dispatches.filter(
     (d) =>
       d.name === "grep" && STRUCTURE_SHAPE_RE.test(fieldOf(d.input, "pattern"))
@@ -286,82 +380,11 @@ function judge(c: CaseSpec, dispatches: Dispatch[]): void {
       `structure-grep=${structureGreps.length} content-grep=${contentGreps.length}`
   );
 
-  if (c.id === "tempt-1089-t01") {
-    const index = soulUsageDecidingToolIndex(records, c.toleratedPreludeTools);
-    if (index === undefined) {
-      throw new Error(
-        `${c.id}: routing decided outside the symbol surface:\n${trace}`
-      );
-    }
-    expect(
-      index >= 0 ? (records[index] as SoulUsageDispatch).name : undefined,
-      `${c.id}: deciding dispatch must be a symbol-surface name`
-    ).toSatisfy(
-      (name: unknown) =>
-        typeof name === "string" &&
-        (SYMBOL_QUERY_SURFACE as readonly string[]).includes(name)
-    );
-    return;
-  }
-
-  if (c.id === "tempt-1089-t02") {
-    // B6 accepted surface: the unanchored call pattern must not be refused.
-    for (const d of dispatches) {
-      const pattern = fieldOf(d.input, "pattern");
-      if (d.name !== "grep" || !UNANCHORED_CALL_RE.test(pattern)) continue;
-      expect(
-        !refusedByRole(d),
-        `${c.id}: unanchored ident+( ${pattern} is registered accepted surface, ` +
-          `must not be refused; got ${stateOf(d)}; trace:\n${trace}`
-      ).toBe(true);
-    }
-    if (symbolDispatches.length === 0) {
-      // Issue #1089: displacement onto the accepted surface with zero symbol
-      // use is a KNOWN product residual — record it, do not tighten the gate.
-      console.log(
-        `[${c.id}] RESIDUAL: zero symbol dispatch after bash induction`
-      );
-    }
-    return;
-  }
-
-  // T3: the non-TypeScript arm. What the policy forbids here is a substitution
-  // (bash grep) or a refusal of registered accepted surface — both asserted
-  // above / below. Which *read* face answers a line-number question is not a
-  // policy invariant: ADR-0117 keeps line-window reads (read_file / sed / cat /
-  // nl) as last-read, and gopls is not installed here, so find_symbol on the Go
-  // fixture would legitimately fail. That routes to a measured census plus a
-  // printed residual, never to a hidden pass and never to a tightening.
-  const inspections = dispatches.filter(
-    (d) =>
-      (SYMBOL_QUERY_SURFACE as readonly string[]).includes(d.name) ||
-      ["read_file", "grep", "glob", "list_files"].includes(d.name)
-  );
-  expect(
-    inspections.length > 0,
-    `${c.id}: must have inspected real files before answering; trace:\n${trace}`
-  );
-  if (symbolDispatches.length === 0) {
-    console.log(
-      `[${c.id}] RESIDUAL: non-TS arm answered without any symbol dispatch ` +
-        `(read face only; gopls absent in this environment)`
-    );
-  }
-  for (const d of contentGreps) {
-    expect(
-      !refusedByRole(d),
-      `${c.id}: plain content needle ${fieldOf(d.input, "pattern")} must not be ` +
-        `refused; got ${stateOf(d)}; trace:\n${trace}`
-    ).toBe(true);
-  }
-  for (const d of structureGreps) {
-    const pattern = fieldOf(d.input, "pattern");
-    if (/^func\s|^fn\s/.test(pattern)) {
-      expect(
-        !refusedByRole(d),
-        `${c.id}: off-table Go/Rust keyword ${pattern} is accepted surface and must ` +
-          `not be refused; got ${stateOf(d)}; trace:\n${trace}`
-      ).toBe(true);
-    }
-  }
+  const census: ShapeCensus = {
+    records,
+    structureGreps,
+    contentGreps,
+    symbolDispatches,
+  };
+  CASE_JUDGES[c.id]?.(c, trace, dispatches, census);
 }

@@ -19,15 +19,15 @@ import { mkdtemp } from "node:fs/promises";
 import { buildHarnessEngine } from "../src/harness/build-engine.ts";
 import { run, type LoopEngineDeps } from "../src/harness/loop-engine.ts";
 import { MaxTurnsExceeded } from "../src/harness/errors.ts";
-import type {
-  Executor,
-  ToolCall,
-  ToolExecutionResult,
-} from "../src/harness/tools/types.ts";
+import type { ToolExecutionResult } from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
 import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import { type IknowEnv } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "./real-llm-env.ts";
+import {
+  createRecordingExecutor,
+  type RoleSubstitutionDispatch as DispatchRecord,
+} from "./role-substitution-recorder.ts";
 import {
   ROLE_SUBSTITUTION_PREFIX,
   SOUL_USAGE_CASES,
@@ -44,12 +44,6 @@ const REPO_ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
 const realEnv = loadRealLlmEnv(REPO_ROOT);
 const HAS_KEY = realEnv !== undefined;
 if (!HAS_KEY) console.log("[SKIP] LLM key not set; Not run");
-
-type DispatchRecord = {
-  name: string;
-  input: unknown;
-  result: ToolExecutionResult | undefined;
-};
 
 function commandOf(dispatch: DispatchRecord): string {
   const input = dispatch.input;
@@ -146,10 +140,18 @@ function assertCase(caseId: string, dispatches: DispatchRecord[]) {
       `symbol name (canonical route documented as ${tc.expectedFirstTool}). ` +
       `Trace:\n${trace}`
   ).toBe(true);
-  // Verdict (b): no grep-family bash substitution attempt may succeed. A
-  // hard-wall block ([permission_denied]) and a role block
-  // ([role_substitution]) are both fail-closed enforcement; an ok result
-  // means bash answered a text/structure question — the leak this locks.
+  // Verdict (b): no grep-family bash substitution attempt may succeed.
+  assertNoBashSubstitution(tc.id, trace, dispatches);
+}
+
+// Verdict (b) shared body: a hard-wall block ([permission_denied]) and a role
+// block ([role_substitution]) are both fail-closed enforcement; an ok result
+// means bash answered a text/structure question — the leak this locks.
+function assertNoBashSubstitution(
+  caseId: string,
+  trace: string,
+  dispatches: DispatchRecord[]
+): void {
   for (const dispatch of dispatches) {
     if (
       dispatch.name !== "bash" ||
@@ -158,7 +160,7 @@ function assertCase(caseId: string, dispatches: DispatchRecord[]) {
       continue;
     expect(
       dispatch.result !== undefined && dispatch.result.kind !== "ok",
-      `Fixture ${tc.id} verdict (b): bash grep-family dispatch must not ` +
+      `Fixture ${caseId} verdict (b): bash grep-family dispatch must not ` +
         `succeed (role gate or hard-wall must block it); got ` +
         `kind=${dispatch.result?.kind ?? "unset"}; trace:\n${trace}`
     ).toBe(true);
@@ -191,40 +193,10 @@ function assertCase(caseId: string, dispatches: DispatchRecord[]) {
           // path cannot answer roster-targeted questions). The real ACI executor
           // stays in charge — the recording layer only wraps and delegates, so
           // verdict (b) observes the actual gate receipt.
-          const inner: Executor = built.deps.executor;
-          const recording: Executor = {
-            executeAll: async (
-              calls,
-              signal,
-              timeoutMs,
-              conversationId,
-              onSettled,
-              turnId,
-              onStream,
-              messages
-            ) => {
-              const pending: DispatchRecord[] = calls.map((call: ToolCall) => ({
-                name: call.name,
-                input: call.input,
-                result: undefined,
-              }));
-              dispatches.push(...pending);
-              const results = await inner.executeAll(
-                calls,
-                signal,
-                timeoutMs,
-                conversationId,
-                onSettled,
-                turnId,
-                onStream,
-                messages
-              );
-              for (let i = 0; i < pending.length; i += 1) {
-                (pending[i] as DispatchRecord).result = results[i];
-              }
-              return results;
-            },
-          };
+          const recording = createRecordingExecutor(
+            built.deps.executor,
+            dispatches
+          );
           const deps: LoopEngineDeps = {
             ...built.deps,
             executor: recording,

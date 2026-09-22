@@ -45,11 +45,6 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { buildHarnessEngine } from "../src/harness/build-engine.ts";
 import { run, type LoopEngineDeps } from "../src/harness/loop-engine.ts";
 import { MaxTurnsExceeded } from "../src/harness/errors.ts";
-import type {
-  Executor,
-  ToolCall,
-  ToolExecutionResult,
-} from "../src/harness/tools/types.ts";
 import { createNoAskUser } from "../src/harness/permission/ask-user.ts";
 import { detectBashGrepSubstitution } from "../src/harness/aci/tools/role-substitution.ts";
 import {
@@ -58,6 +53,10 @@ import {
   type IknowEnv,
 } from "../src/config/env.ts";
 import { loadRealLlmEnv } from "../real-llm/real-llm-env.ts";
+import {
+  createRecordingExecutor,
+  type RoleSubstitutionDispatch as Dispatch,
+} from "../real-llm/role-substitution-recorder.ts";
 import {
   ROLE_SUBSTITUTION_PREFIX,
   SYMBOL_QUERY_SURFACE,
@@ -168,12 +167,6 @@ const CASES: readonly CaseSpec[] = [
 const READ_ONLY_CLAUSE =
   "\n\nYou must inspect real files in the repository before answering. Do not modify files.";
 
-type Dispatch = {
-  name: string;
-  input: unknown;
-  result: ToolExecutionResult | undefined;
-};
-
 type SampleRecord = {
   case: string;
   iter: number;
@@ -212,54 +205,96 @@ function isSymbol(name: string | undefined): boolean {
   );
 }
 
+/** Shared per-run context so oneRun/sampleCase do not each carry four params. */
+type RunContext = {
+  env: IknowEnv;
+  root: string;
+  outDir: string;
+};
+
+type RunTiming = {
+  ms: number;
+  apiError: string | undefined;
+  maxTurns: boolean;
+};
+
+/** Probe trace line: `<name>[(refused)|(fail)][ :: detail]`, the retrace format. */
+function traceOf(dispatches: Dispatch[]): string[] {
+  return dispatches.map((d) => {
+    const detail = fieldOf(d.input, "command") || fieldOf(d.input, "pattern");
+    const state = refusedByRole(d)
+      ? "(refused)"
+      : d.result?.kind === "ok"
+        ? ""
+        : "(fail)";
+    return `${d.name}${state}${detail !== "" ? ` :: ${detail}` : ""}`;
+  });
+}
+
+/**
+ * Score one recorded run into its SampleRecord. Kept separate from oneRun so
+ * the live path and the committed trace describe the same census; the field
+ * order is the JSONL wire format the `--report` re-scorer reads back.
+ */
+function buildSampleRecord(
+  spec: CaseSpec,
+  iter: number,
+  dispatches: Dispatch[],
+  timing: RunTiming
+): SampleRecord {
+  const bashGreps = dispatches.filter(
+    (d) =>
+      d.name === "bash" &&
+      detectBashGrepSubstitution(fieldOf(d.input, "command")) !== undefined
+  );
+  const structureGreps = dispatches.filter(
+    (d) =>
+      d.name === "grep" && STRUCTURE_SHAPE_RE.test(fieldOf(d.input, "pattern"))
+  );
+  const contentGreps = dispatches.filter(
+    (d) =>
+      d.name === "grep" && !STRUCTURE_SHAPE_RE.test(fieldOf(d.input, "pattern"))
+  );
+  const deciding = soulUsageDecidingToolIndex(
+    dispatches.map((d) => ({ name: d.name, refused: refusedByRole(d) })),
+    spec.toleratedPreludeTools
+  );
+  return {
+    case: spec.id,
+    iter,
+    ms: timing.ms,
+    apiError: timing.apiError,
+    maxTurns: timing.maxTurns,
+    firstTool: dispatches[0]?.name,
+    decidingTool:
+      deciding === undefined || deciding < 0
+        ? null
+        : (dispatches[deciding]?.name ?? null),
+    symbolCount: dispatches.filter((d) => isSymbol(d.name)).length,
+    structureGrepCount: structureGreps.length,
+    contentGrepCount: contentGreps.length,
+    bashGrepAttempts: bashGreps.length,
+    bashGrepSucceeded: bashGreps.some((d) => d.result?.kind === "ok"),
+    falsePositives: contentGreps.filter(refusedByRole).length,
+    trace: traceOf(dispatches),
+  };
+}
+
 async function oneRun(
   spec: CaseSpec,
   iter: number,
-  env: IknowEnv,
-  root: string
+  ctx: RunContext
 ): Promise<SampleRecord> {
   const home = await mkdtemp(join(tmpdir(), "iknow-1089s-"));
   const dispatches: Dispatch[] = [];
   const built = await buildHarnessEngine({
-    env,
+    env: ctx.env,
     askUser: createNoAskUser(),
     surface: "chat",
-    cwd: root,
+    cwd: ctx.root,
     userHome: home,
   });
-  const inner: Executor = built.deps.executor;
-  const recording: Executor = {
-    executeAll: async (
-      calls,
-      signal,
-      timeoutMs,
-      conversationId,
-      onSettled,
-      turnId,
-      onStream,
-      messages
-    ) => {
-      const pending: Dispatch[] = calls.map((call: ToolCall) => ({
-        name: call.name,
-        input: call.input,
-        result: undefined,
-      }));
-      dispatches.push(...pending);
-      const results = await inner.executeAll(
-        calls,
-        signal,
-        timeoutMs,
-        conversationId,
-        onSettled,
-        turnId,
-        onStream,
-        messages
-      );
-      for (let i = 0; i < pending.length; i += 1)
-        (pending[i] as Dispatch).result = results[i];
-      return results;
-    },
-  };
+  const recording = createRecordingExecutor(built.deps.executor, dispatches);
   const deps: LoopEngineDeps = {
     ...built.deps,
     executor: recording,
@@ -282,51 +317,11 @@ async function oneRun(
     await built.shutdown?.();
   }
 
-  const bashGreps = dispatches.filter(
-    (d) =>
-      d.name === "bash" &&
-      detectBashGrepSubstitution(fieldOf(d.input, "command")) !== undefined
-  );
-  const structureGreps = dispatches.filter(
-    (d) =>
-      d.name === "grep" && STRUCTURE_SHAPE_RE.test(fieldOf(d.input, "pattern"))
-  );
-  const contentGreps = dispatches.filter(
-    (d) =>
-      d.name === "grep" && !STRUCTURE_SHAPE_RE.test(fieldOf(d.input, "pattern"))
-  );
-  const deciding = soulUsageDecidingToolIndex(
-    dispatches.map((d) => ({ name: d.name, refused: refusedByRole(d) })),
-    spec.toleratedPreludeTools
-  );
-
-  return {
-    case: spec.id,
-    iter,
+  return buildSampleRecord(spec, iter, dispatches, {
     ms: Date.now() - started,
     apiError,
     maxTurns,
-    firstTool: dispatches[0]?.name,
-    decidingTool:
-      deciding === undefined || deciding < 0
-        ? null
-        : (dispatches[deciding]?.name ?? null),
-    symbolCount: dispatches.filter((d) => isSymbol(d.name)).length,
-    structureGrepCount: structureGreps.length,
-    contentGrepCount: contentGreps.length,
-    bashGrepAttempts: bashGreps.length,
-    bashGrepSucceeded: bashGreps.some((d) => d.result?.kind === "ok"),
-    falsePositives: contentGreps.filter(refusedByRole).length,
-    trace: dispatches.map((d) => {
-      const detail = fieldOf(d.input, "command") || fieldOf(d.input, "pattern");
-      const state = refusedByRole(d)
-        ? "(refused)"
-        : d.result?.kind === "ok"
-          ? ""
-          : "(fail)";
-      return `${d.name}${state}${detail !== "" ? ` :: ${detail}` : ""}`;
-    }),
-  };
+  });
 }
 
 type Census = {
@@ -524,15 +519,13 @@ function iterLine(
 async function sampleCase(
   spec: CaseSpec,
   iters: number,
-  env: IknowEnv,
-  root: string,
-  outDir: string
+  ctx: RunContext
 ): Promise<Tally> {
   let tally = EMPTY_TALLY;
   for (let i = 1; i <= iters; i += 1) {
-    const rec = await oneRun(spec, i, env, root);
+    const rec = await oneRun(spec, i, ctx);
     appendFileSync(
-      join(outDir, `sampling-${spec.key}.jsonl`),
+      join(ctx.outDir, `sampling-${spec.key}.jsonl`),
       `${JSON.stringify(rec)}\n`
     );
     tally = fold(tally, rec);
@@ -603,10 +596,11 @@ async function main(): Promise<number> {
   if (created.length > 0) console.log(`[fixtures] wrote ${created.join(", ")}`);
   const outDir = join(root, EVIDENCE_DIR);
   await mkdir(outDir, { recursive: true });
+  const ctx: RunContext = { env, root, outDir };
 
   const rows: CaseOutcome[] = [];
   for (const spec of specs) {
-    const tally = await sampleCase(spec, iters, env, root, outDir);
+    const tally = await sampleCase(spec, iters, ctx);
     rows.push(caseRow(spec, iters, tally));
   }
 
