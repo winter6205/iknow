@@ -729,10 +729,18 @@ _Avoid_: 复用 protocolError+cause 字符串做父侧归因判定；把 exit≠
 **worker exit-2 专码**: (ADR-0111 成文化归档 spec 356 assumption 16/SC13) worker 进程 exit 2 **仅** = 信封协议错误（`parseWorkerEnvelope` 抛 ProtocolError，无信封可写）；run 阶段逃逸错误 → best-effort failed 信封 + exit 1；exit 0 + failed 信封 = 结构化失败按 reason 归因。父侧对 exit≠0 无信封标 `crashed`（SC16 支），契约原文只钉「exit ≠ 0」、2 是实现专码。SC13「父标 crashed」与 assumption 16「reason=protocolError」的微差按**分层**消解：无信封→crashed，有信封→按 reason。
 _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读成契约钉死了码值 2；删改 envelope-freeze 断言代替显式修订授权
 
+**IM 桥（im bridge）**: 常驻独立进程，把一个 IM 平台会话映射成一个 conversationId，经 `iknow serve` 的 Session HTTP 面驱动轮次并回写平台。它是该面的外部消费者：不建 SessionHub、不 import SessionStore、不开 session JSONL。ADR-0120。
+_Avoid_: channel（该词已命名信任轴，ADR-0009）；chat REPL；进程内第二颗引擎
+
+**平台事实页（platform facts page）**: `docs/platforms/<平台>-facts.md`，只登记已核实的平台约束和带测法的未证实项，不做设计决策。换一个桥接目标就新增一页，平台数值不跨目标混用。ADR-0120。
+_Avoid_: 把平台数值写进桥核；把事实页当 spec
+
 ## Relationships
 
 - **代码前像 vs 内容寻址正文池**: 前像是工作区回退载荷，目录 `code-snapshots/`；正文池是 trace 消息体，目录 `blobs/`。失败语义不同：前像写失败则该次写工具失败，trace blob 写失败可吞掉该行。ADR-0121 / ADR-0071。
 - **代码回退 vs rewind head**: 回退按单条转录本链写回活 **taskRoot**；head 只移动指针。跨转录本同路径、漂移或根身份不符仍移动 head；前像 blob 读不到则 head 不动。ADR-0121 / ADR-0027。
+- **IM 桥 vs SessionHub**: 桥只做 Session HTTP 的外部消费者；session 文件的写者仍只有 hub 所在进程。ADR-0120 / ADR-0110。
+- **IM 桥 vs chat REPL**: 桥走 `iknow serve`；chat REPL 自装配、不经 hub，不在这条路径上。
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
