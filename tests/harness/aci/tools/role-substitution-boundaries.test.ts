@@ -60,7 +60,10 @@ function assistantToolUse(name: string, id: string): AnthropicNativeMessage {
   };
 }
 
-function userToolResult(toolUseId: string, text: string): AnthropicNativeMessage {
+function userToolResult(
+  toolUseId: string,
+  text: string
+): AnthropicNativeMessage {
   return {
     role: "user",
     content: [{ type: "tool_result", tool_use_id: toolUseId, content: text }],
@@ -112,7 +115,10 @@ async function expectBashRefusal(
 async function expectGrepRefusal(
   tool: AciToolDef,
   input: unknown,
-  ctx?: { readonly messages?: ReadonlyArray<AnthropicNativeMessage>; readonly toolUseId?: string }
+  ctx?: {
+    readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
+    readonly toolUseId?: string;
+  }
 ): Promise<string> {
   let caught: unknown;
   try {
@@ -147,7 +153,10 @@ describe("#1089 bash arm — accepted escape surface (B1..B3b)", () => {
         message.startsWith(ROLE_SUBSTITUTION_PREFIX),
         `${command} refusal must start with ${ROLE_SUBSTITUTION_PREFIX}`
       );
-      assert.ok(message.includes("grep"), `${command} receipt points to ACI grep`);
+      assert.ok(
+        message.includes("grep"),
+        `${command} receipt points to ACI grep`
+      );
       assert.ok(
         message.includes("find_symbol"),
         `${command} receipt points to find_symbol`
@@ -258,21 +267,37 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
     await writeFile(join(root, "notes.txt"), "TODO: fix later\n");
     await writeFile(join(root, "a.txt"), "a foo bar\n");
     const grep = createGrepTool(root);
-    const todo = (await grep.handler({ pattern: "TODO" }, { messages: [] })) as string;
-    assert.ok(todo.includes("notes.txt"), "TODO must return the file, not refuse");
-    const foo = (await grep.handler({ pattern: "\\bfoo\\b" }, { messages: [] })) as string;
-    assert.ok(foo.includes("a.txt"), "\\bfoo\\b must return the file, not refuse");
+    const todo = (await grep.handler(
+      { pattern: "TODO" },
+      { messages: [] }
+    )) as string;
+    assert.ok(
+      todo.includes("notes.txt"),
+      "TODO must return the file, not refuse"
+    );
+    const foo = (await grep.handler(
+      { pattern: "\\bfoo\\b" },
+      { messages: [] }
+    )) as string;
+    assert.ok(
+      foo.includes("a.txt"),
+      "\\bfoo\\b must return the file, not refuse"
+    );
   });
 
   // B5 — Category A: def / modifier-group shapes refuse at the handler with
   // no trajectory (the pinned set refused class Foo / function main at the
-  // handler; add a Python def + a `(async )?load[(=]` modifier group).
+  // handler; add a Python def + a `(async )?load[(=]` modifier group). The
+  // third entry is the shape a real-model run actually wrote for a definition
+  // question — nested modifier group, opener inside an alternation group —
+  // which the first table revision classified as content.
   it("B5 [A]: def process / modifier-group load refuse at the handler (no trajectory)", async () => {
     const root = await makeScratch("b1089-b5-");
     const grep = createGrepTool(root);
     for (const pattern of [
       "def process",
       String.raw`(async\s+)?load\s*[(=]`,
+      String.raw`^\s*((public|private|protected|static|override|async)\s+)*#?load\s*(\(|=|:)`,
     ]) {
       assert.equal(isStructureShapedPattern(pattern), true, pattern);
       const msg = await expectGrepRefusal(grep, { pattern }, { messages: [] });
@@ -292,11 +317,20 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
     assert.equal(isStructureShapedPattern(String.raw`console\.log\(`), false);
     const root = await makeScratch("b1089-b6-");
     await writeFile(join(root, "a.ts"), "  load(x: number) {}\n");
-    await writeFile(join(root, "b.ts"), "console.log(\"hi\");\n");
+    await writeFile(join(root, "b.ts"), 'console.log("hi");\n');
     const grep = createGrepTool(root);
-    const load = (await grep.handler({ pattern: String.raw`\bload\s*\(` }, { messages: [] })) as string;
-    assert.ok(load.includes("a.ts"), "unanchored ident+paren must be searchable");
-    const log = (await grep.handler({ pattern: String.raw`console\.log\(` }, { messages: [] })) as string;
+    const load = (await grep.handler(
+      { pattern: String.raw`\bload\s*\(` },
+      { messages: [] }
+    )) as string;
+    assert.ok(
+      load.includes("a.ts"),
+      "unanchored ident+paren must be searchable"
+    );
+    const log = (await grep.handler(
+      { pattern: String.raw`console\.log\(` },
+      { messages: [] }
+    )) as string;
     assert.ok(log.includes("b.ts"), "console.log( must be searchable");
   });
 
@@ -312,7 +346,12 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
     const sameWave: AnthropicNativeMessage = {
       role: "assistant",
       content: [
-        { type: "tool_use", id: "tu_g_1", name: "grep", input: { pattern: anchored } },
+        {
+          type: "tool_use",
+          id: "tu_g_1",
+          name: "grep",
+          input: { pattern: anchored },
+        },
         { type: "tool_use", id: "tu_s_1", name: "find_symbol", input: {} },
       ],
     };
@@ -321,7 +360,10 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
       { pattern: anchored },
       { messages: [sameWave], toolUseId: "tu_g_1" }
     );
-    assert.ok(msg.startsWith(ROLE_SUBSTITUTION_PREFIX), "same-wave must refuse");
+    assert.ok(
+      msg.startsWith(ROLE_SUBSTITUTION_PREFIX),
+      "same-wave must refuse"
+    );
   });
 
   // B8 (E2 half) — Category B: the same anchored shape PASSES on a
@@ -379,7 +421,10 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
       { pattern: "class Foo", glob: "*.{md,ts}" },
       { messages: [] }
     );
-    assert.ok(msg.startsWith(ROLE_SUBSTITUTION_PREFIX), "mixed-ext glob must refuse");
+    assert.ok(
+      msg.startsWith(ROLE_SUBSTITUTION_PREFIX),
+      "mixed-ext glob must refuse"
+    );
   });
 
   // B10 — Category D (out-of-domain languages): Go `func` / Rust `fn` are
@@ -392,9 +437,15 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
     await writeFile(join(root, "main.go"), "func main() {}\n");
     await writeFile(join(root, "lib.rs"), "fn foo() {}\n");
     const grep = createGrepTool(root);
-    const go = (await grep.handler({ pattern: "func main" }, { messages: [] })) as string;
+    const go = (await grep.handler(
+      { pattern: "func main" },
+      { messages: [] }
+    )) as string;
     assert.ok(go.includes("main.go"), "Go func must be searchable");
-    const rs = (await grep.handler({ pattern: "fn foo" }, { messages: [] })) as string;
+    const rs = (await grep.handler(
+      { pattern: "fn foo" },
+      { messages: [] }
+    )) as string;
     assert.ok(rs.includes("lib.rs"), "Rust fn must be searchable");
   });
 
@@ -420,6 +471,41 @@ describe("#1089 grep arm — accepted escape surface (B4..B11)", () => {
       { pattern: anchored },
       { messages: withFindFirst, toolUseId: "tu_not_in_snapshot" }
     );
-    assert.ok(msg.startsWith(ROLE_SUBSTITUTION_PREFIX), "unknown id must fail closed");
+    assert.ok(
+      msg.startsWith(ROLE_SUBSTITUTION_PREFIX),
+      "unknown id must fail closed"
+    );
+  });
+
+  // B12 — Category D (regex-dialect boundary, ADR-0117 接受面): POSIX bracket
+  // classes are not part of the identifier→opener separator class, so a
+  // POSIX-flavored pattern is structural only when it also carries the
+  // modifier-group signature. Locking both sides here keeps the ADR prose
+  // machine-checked instead of folklore: the gate does not chase dialects, and
+  // what it does accept is written down.
+  it("B12 [D]: POSIX bracket classes ride on the modifier-group signature", async () => {
+    assert.equal(
+      isStructureShapedPattern(
+        String.raw`^[[:space:]]*(public |private |protected |static |async |override |abstract )*(\* *)?load[[:space:]]*[(<]`
+      ),
+      true,
+      "POSIX + modifier group is the definition shape a real model wrote"
+    );
+    assert.equal(
+      isStructureShapedPattern(String.raw`^[[:space:]]*load[[:space:]]*\(`),
+      false,
+      "POSIX alone must not couple identifier to the opener"
+    );
+    const root = await makeScratch("b1089-b12-");
+    await writeFile(join(root, "a.ts"), "  load(x: number) {}\n");
+    const grep = createGrepTool(root);
+    const hit = (await grep.handler(
+      { pattern: String.raw`[[:space:]]*(load|save)[[:space:]]*\(` },
+      { messages: [] }
+    )) as string;
+    assert.ok(
+      hit.includes("a.ts"),
+      "unmodifiers POSIX call-shape must stay searchable"
+    );
   });
 });

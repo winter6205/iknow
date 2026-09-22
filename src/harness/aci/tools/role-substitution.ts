@@ -128,15 +128,18 @@ export const GREP_STRUCTURE_SHAPE_PATTERNS: ReadonlyArray<RegExp> =
       String.raw`^\^[\s\S]*?[A-Za-z_$][A-Za-z0-9_$]*${SEP}?(?:\\\(|\[[^\]]*[<(:?=]\])`
     ),
     // Modifier-group definition shape (conjunction, order-independent):
-    // the pattern text carries BOTH a parenthesized language-modifier
-    // keyword under regex optionality/repetition (`(async\s+)?`,
-    // `(public |private )*`) AND an identifier coupled to a definition
-    // opener. The modifier group is regex-source signature — content
-    // searches spell neither half. Covers both real-trace orders:
-    // group-before-identifier `(^|\s)(async\s+)?load\s*[(=]` and
-    // identifier-before-group `\bload\s*[=:]\s*(async\s*)?(\(|function)`.
+    // the pattern text carries BOTH a parenthesized language-modifier keyword
+    // AND an identifier coupled to a definition opener. The modifier group is
+    // regex-source signature — content searches spell neither half, and a
+    // prose hit on "public" without the coupling stays content. Real-model
+    // traces tempt-1078-t01 wrote the same query in three shapes
+    // (`(public |private )*load\s*(`, `(^|\s)(async\s+)?load\s*[(=]`,
+    // `((public|private|…)\s+)*#?load\s*(\(|=|:)`), so neither half may assume
+    // a fixed group position, a trailing quantifier, or the absence of regex
+    // plumbing (`(`, `|`, `#?`, `\s*`) between the name and its opener.
     new RegExp(
-      String.raw`^(?=[\s\S]*\([^()]*\b(?:public|private|protected|static|async|readonly|export|declare|abstract|final)\b[^()]*\)[*?+])(?=[\s\S]*[A-Za-z_$][A-Za-z0-9_$]*${SEP}?(?:\\\(|\[[^\]]*[<(:?=]\]))`
+      String.raw`^(?=[\s\S]*[(][^)]*\b(?:public|private|protected|static|async|readonly|export|declare|abstract|final|override)\b[^)]*[)])` +
+        String.raw`(?=[\s\S]*[A-Za-z_$][A-Za-z0-9_$]*(?:${SEP}|[(]|\|[)])*?(?:\\\(|\[[^\]]*[<(:?=]\]))`
     ),
   ]);
 

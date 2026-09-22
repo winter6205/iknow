@@ -44,7 +44,9 @@ async function makeScratch(prefix: string): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    scratchPaths.splice(0).map((path) => rm(path, { recursive: true, force: true }))
+    scratchPaths
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true }))
   );
 });
 
@@ -55,7 +57,10 @@ function assistantToolUse(name: string, id: string): AnthropicNativeMessage {
   };
 }
 
-function userToolResult(toolUseId: string, text: string): AnthropicNativeMessage {
+function userToolResult(
+  toolUseId: string,
+  text: string
+): AnthropicNativeMessage {
   return {
     role: "user",
     content: [{ type: "tool_result", tool_use_id: toolUseId, content: text }],
@@ -74,7 +79,10 @@ async function expectGrepRefusal(
   const tool = createGrepTool(root);
   let caught: unknown;
   try {
-    await tool.handler(input, messages === undefined ? undefined : { messages });
+    await tool.handler(
+      input,
+      messages === undefined ? undefined : { messages }
+    );
   } catch (error) {
     caught = error;
   }
@@ -147,6 +155,11 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       String.raw`(^|\s)(async\s+)?load\s*[(=]`,
       String.raw`(public |private |protected )*handler\s*\(`,
       String.raw`\bload\s*[=:]\s*(async\s*)?(\(|function)`,
+      // Same query, third shape: the modifier group is nested and the opener
+      // sits inside an alternation group. A real-model run answered a
+      // definition question with this and the gate called it content.
+      String.raw`^\s*((public|private|protected|static|override|async)\s+)*#?load\s*(\(|=|:)`,
+      String.raw`^\s*((public|private|protected|static|override|async|declare)\s+)*#?(load|loadAsync|loadAll)\s*(\(|=|:)`,
     ]) {
       assert.equal(isStructureShapedPattern(pattern), true, pattern);
     }
@@ -155,6 +168,9 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       String.raw`load\s*[(=]`,
       String.raw`(see appendix) load`,
       String.raw`\bfoo\b`,
+      // A modifier word in prose, with no identifier→opener coupling.
+      "static analysis of the result",
+      "public api (v2) notes",
     ]) {
       assert.equal(isStructureShapedPattern(pattern), false, pattern);
     }
@@ -208,7 +224,12 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
     const sameWave: AnthropicNativeMessage = {
       role: "assistant",
       content: [
-        { type: "tool_use", id: "tu_g_9", name: "grep", input: { pattern: "class Foo" } },
+        {
+          type: "tool_use",
+          id: "tu_g_9",
+          name: "grep",
+          input: { pattern: "class Foo" },
+        },
         { type: "tool_use", id: "tu_sym_9", name: "find_symbol", input: {} },
       ],
     };
@@ -233,7 +254,12 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       {
         role: "assistant",
         content: [
-          { type: "tool_use", id: "tu_g_p", name: "grep", input: { pattern: "class Foo" } },
+          {
+            type: "tool_use",
+            id: "tu_g_p",
+            name: "grep",
+            input: { pattern: "class Foo" },
+          },
         ],
       },
     ];
@@ -241,13 +267,13 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       { pattern: "class Foo" },
       { messages: priorTurn, toolUseId: "tu_g_p" }
     )) as string;
-    assert.ok(out.includes("a.ts"), "先前 turn 的 find_symbol 咨询豁免后续 grep");
+    assert.ok(
+      out.includes("a.ts"),
+      "先前 turn 的 find_symbol 咨询豁免后续 grep"
+    );
 
     // toolUseId 不在快照里 → 空窗口，fail closed。
-    assert.equal(
-      hasFallbackTrajectoryEvidence(priorTurn, "tu_absent"),
-      false
-    );
+    assert.equal(hasFallbackTrajectoryEvidence(priorTurn, "tu_absent"), false);
   });
 
   it("E3：改侧符号工具的 tool_result 携带 LSP 可读失败哨兵 → 放行", async () => {
@@ -277,7 +303,9 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       "哨兵必须来自符号工具调用的 result"
     );
     assert.equal(
-      hasFallbackTrajectoryEvidence([userToolResult("tu_orphan", LSP_FAILURE_SENTINEL)]),
+      hasFallbackTrajectoryEvidence([
+        userToolResult("tu_orphan", LSP_FAILURE_SENTINEL),
+      ]),
       false,
       "无配对 tool_use 的 result 不算证据"
     );
@@ -289,18 +317,20 @@ describe("ACI grep 替岗拒绝 — 结构形 pattern 需轨迹证据（ADR-0117
       false,
       "非哨兵内容不算 E3"
     );
-    await expectGrepRefusal(
-      root,
-      { pattern: "class Foo" },
-      [assistantToolUse("bash", "tu_b_1"), userToolResult("tu_b_1", LSP_FAILURE_SENTINEL)]
-    );
+    await expectGrepRefusal(root, { pattern: "class Foo" }, [
+      assistantToolUse("bash", "tu_b_1"),
+      userToolResult("tu_b_1", LSP_FAILURE_SENTINEL),
+    ]);
   });
 
   it("正文 pattern 永不误伤（无证据也放行）", async () => {
     const root = await makeScratch("role-sub-grep-content-");
     await writeFile(join(root, "a.txt"), "needle here\n");
     const tool = createGrepTool(root);
-    const out = (await tool.handler({ pattern: "needle" }, { messages: [] })) as string;
+    const out = (await tool.handler(
+      { pattern: "needle" },
+      { messages: [] }
+    )) as string;
     assert.ok(out.includes("a.txt"));
   });
 
