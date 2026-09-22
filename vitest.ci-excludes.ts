@@ -206,6 +206,10 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/subagent/worker-last-read-ledger.test.ts",
   // #1071: the untrusted-addendum contract goes through the same createWorkerDeps assembly chain → requireBwrap
   "tests/subagent/worker-addendum-untrusted.test.ts",
+  // ADR-0121: worker preimage port threads through createWorkerDeps → requireBwrap
+  "tests/subagent/worker-preimage-port.test.ts",
+  // settings.subagent.model route probes createWorkerDeps → requireBwrap
+  "tests/subagent/worker-model-route.test.ts",
   // #562: subagent contract tests go through the same createWorkerDeps assembly chain
   "tests/subagent/envelope-role.test.ts",
   "tests/subagent/tool-constraints.test.ts",
