@@ -1,5 +1,5 @@
 /**
- * tests/harness/aci/tools/edit-file-preimage.test.ts — ADR-0036 / ADR-0119
+ * tests/harness/aci/tools/edit-file-preimage.test.ts — ADR-0036 / ADR-0121
  * preimage seam on the edit path.
  *
  * Invariant pinned: `edit_file` hands the capture port the exact bytes it is

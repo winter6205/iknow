@@ -1,5 +1,5 @@
 /**
- * ADR-0119: a parent rewind whose abandoned segment contains a worker's
+ * ADR-0121: a parent rewind whose abandoned segment contains a worker's
  * `spawn_subagent` restores that worker's files under the same drift rule.
  *
  * Join key locked here: the worker's

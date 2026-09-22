@@ -1,5 +1,5 @@
 /**
- * ADR-0119: the code-restore plan + apply.
+ * ADR-0121: the code-restore plan + apply.
  *
  * Locked here:
  *   - plan folds a path's segment writes into one op: EARLIEST preimage = the

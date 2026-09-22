@@ -2898,12 +2898,12 @@ export class SessionHub {
     });
   }
 
-  /** Restore the workspace files a rewind to `head` would abandon (ADR-0119).
+  /** Restore the workspace files a rewind to `head` would abandon (ADR-0121).
    *  Called before the head moves: an unreadable preimage blob throws here, so
    *  the transcript never advances past history whose code we could not put
    *  back. Drift and root-identity mismatches are reported skips.
    *
-   *  The abandoned set spans two ledgers (ADR-0119): the parent's own
+   *  The abandoned set spans two ledgers (ADR-0121): the parent's own
    *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
    *  in the abandoned segment — a worker edit is the parent's abandoned
    *  history too. Both write their blobs into this parent session folder, so

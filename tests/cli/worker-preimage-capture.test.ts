@@ -1,5 +1,5 @@
 /**
- * ADR-0119, host seam (cli): the worker's capture → drain → stamp chain,
+ * ADR-0121, host seam (cli): the worker's capture → drain → stamp chain,
  * assembled entirely OUTSIDE the harness (Gate B: the harness only declares
  * the `PreimageCapture` port; this host constructs the implementation the
  * `__subagent_worker__` dispatch injects into `runSubagentWorker`).

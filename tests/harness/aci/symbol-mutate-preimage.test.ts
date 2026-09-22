@@ -1,5 +1,5 @@
 /**
- * tests/harness/aci/symbol-mutate-preimage.test.ts — ADR-0036 / ADR-0119
+ * tests/harness/aci/symbol-mutate-preimage.test.ts — ADR-0036 / ADR-0121
  * preimage seam on the multi-file mutate path.
  *
  * Invariant pinned: a cross-file rename stages **every** file's preimage

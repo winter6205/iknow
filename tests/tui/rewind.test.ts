@@ -540,7 +540,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
 
   test("确认态：Enter 执行高亮动作（head + restoreCode 来自所选行）", () => {
     // Row 0 rewinds the transcript and restores code; row 1 rewinds only; the
-    // boolean is what hub.rewindSession receives (ADR-0119), so a mis-wired row
+    // boolean is what hub.rewindSession receives (ADR-0121), so a mis-wired row
     // is a product-visible difference, not a cosmetic one.
     expect(
       reduceRewindKey(key({ return: true }), {

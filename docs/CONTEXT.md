@@ -29,11 +29,11 @@ _Avoid_: `spawn_subagent` 的 `model` 参数；父模型当次指定；第二套
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
-**代码前像**: 一次成功的 `edit_file` / `write_file` / `symbol-mutate` 改盘之前的文件字节。按 sha256 放在该会话文件夹的 `code-snapshots/`，引用（相对当时活 **taskRoot** 的路径、根身份、前像 sha、后像 sha）写在产生这次写入的转录本事件上。ADR-0121。
-_Avoid_: checkpoint 快照；trace **内容寻址正文池**；整树 shadow repo；用目录扫描当恢复顺序
+**代码前像**: 一次成功的 `edit_file` / `write_file` / `symbol-mutate` 改盘之前的文件字节。按 sha256 放在该会话文件夹的 `code-snapshots/`，引用（相对当时活 **taskRoot** 的路径、根身份、前像 sha、后像 sha、写入前该路径是否不存在）写在产生这次写入的转录本事件上。ADR-0121。
+_Avoid_: checkpoint 快照；trace **内容寻址正文池**；整树 shadow repo；用目录扫描当恢复顺序；用空前像字节推断「新建」
 
-**代码回退**: 沿被放弃的 head 链（含该段内的工人转录本）逆放 **代码前像**；当前字节等于该路径最后一次已捕获后像且活 **taskRoot** 身份一致才写回，否则跳过并写入回执，前像 blob 读不到则工作区与 **rewind head** 都不变。ADR-0121。
-_Avoid_: 把 **rewind head** 移动当成已经写回工作区；bash 改动也算已捕获；挂文件监控补 bash 盲区
+**代码回退**: 沿被放弃的 head 链（含该段内的工人转录本）逆放 **代码前像**；同一路径只属于这一段里的一条转录本、当前字节等于该链最后一次已捕获后像、且活 **taskRoot** 身份一致时，才写回这个活 **taskRoot**（写入前路径不存在则删除该路径，否则写回前像字节）。跨多条转录本的同一路径、漂移或根身份不符则跳过并写入回执；前像 blob 读不到则工作区与 **rewind head** 都不变。ADR-0121。
+_Avoid_: 把 **rewind head** 移动当成已经写回工作区；bash 改动也算已捕获；挂文件监控补 bash 盲区；用事件时间戳或「父链后面接工人链」给同一路径排总序；写到会话文件的 workspaceRoot 上
 
 **home 项目树（home project tree）**: harness 按项目身份落在池根下的一棵目录——`<dataDir 或 ~/.iknow>/projects/<slug>/`，slug 键 = **projectIdentityRoot**。叶子是 **会话文件夹**；同级 `tasks/` 是 **后台任务登记**；同级 `memory/` 是 **项目记忆库**。不跟 **workspaceRoot** 分片。ADR-0087 / ADR-0088 / ADR-0099。
 _Avoid_: 把树建在 `<workspaceRoot>/.iknow`；把 `tasks/` 或 `memory/` 放进 conversation 叶子；把退役 `sessions/` 当成现行树
@@ -723,7 +723,7 @@ _Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读
 ## Relationships
 
 - **代码前像 vs 内容寻址正文池**: 前像是工作区回退载荷，目录 `code-snapshots/`；正文池是 trace 消息体，目录 `blobs/`。失败语义不同：前像写失败则该次写工具失败，trace blob 写失败可吞掉该行。ADR-0121 / ADR-0071。
-- **代码回退 vs rewind head**: 回退按事件链写工作区；head 只移动指针。漂移或根身份不符仍移动 head；前像 blob 读不到则 head 不动。ADR-0121 / ADR-0027。
+- **代码回退 vs rewind head**: 回退按单条转录本链写回活 **taskRoot**；head 只移动指针。跨转录本同路径、漂移或根身份不符仍移动 head；前像 blob 读不到则 head 不动。ADR-0121 / ADR-0027。
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI

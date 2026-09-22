@@ -89,7 +89,7 @@ export async function loadWorkerTranscript(
 
 /**
  * The `codePreimage`-bearing events on the worker transcript's current head
- * chain — the worker half of the rewind/restore input (ADR-0119). Raw
+ * chain — the worker half of the rewind/restore input (ADR-0121). Raw
  * records are read (not the `loadWorkerTranscript` projection) because the
  * stamp lives on the event record, never in model message content.
  *
@@ -177,7 +177,7 @@ export async function readWorkerSpawnToolUseId(
  * `preimages` shares `SessionStore.appendEvents`' stamping contract (via the
  * same `matchCodePreimage`): a successful tool_result whose tool_use_id was
  * captured gets `codePreimage` on its event record — the worker transcript's
- * restore surface (ADR-0119).
+ * restore surface (ADR-0121).
  */
 export async function appendWorkerTranscript(opts: {
   readonly location: WorkerTranscriptLocation;

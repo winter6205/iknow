@@ -6,7 +6,7 @@
  * after confirming, head points to that message's parent (back to before it
  * was sent). The old chain is kept; the picker does not list skipped
  * branches by default. The confirm step is where transcript rewind and
- * workspace restore (ADR-0119) split apart: three actions, one Enter.
+ * workspace restore (ADR-0121) split apart: three actions, one Enter.
  */
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import {
@@ -37,7 +37,7 @@ export function buildRewindTargets(
 }
 
 /** Confirm row: transcript head movement and workspace restore are separately
- *  choosable (ADR-0119), so the two positive rows differ only in `restoreCode`.
+ *  choosable (ADR-0121), so the two positive rows differ only in `restoreCode`.
  *  The flag rides on the row instead of being re-derived from an index in the
  *  reducer, and cancel is the only row that never rewinds. */
 type RewindConfirmOption = SelectOption & { readonly restoreCode: boolean };
@@ -229,7 +229,7 @@ function joinedSkippedPaths(
 }
 
 /** What a restore-code rewind actually did to the workspace, as notice lines
- *  (ADR-0119): restored count plus every refused path and its reason. A report
+ *  (ADR-0121): restored count plus every refused path and its reason. A report
  *  with nothing restored and nothing skipped is a real outcome — the abandoned
  *  segment simply carried no preimages — so it still says so. */
 export function codeRestoreNoticeLines(

@@ -1,5 +1,5 @@
 /**
- * Code restore plan + apply (ADR-0036 / ADR-0119).
+ * Code restore plan + apply (ADR-0036 / ADR-0121).
  *
  * The plan is pure: fold the abandoned head-chain segment into one inverse op
  * per touched path. The apply is the only side-effecting half: it reads every
