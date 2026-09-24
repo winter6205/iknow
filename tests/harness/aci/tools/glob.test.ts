@@ -9,6 +9,10 @@
  *  - search root outside workspace rejected
  *  - limit truncates output (default 200, cap 5000)
  *  - Node fallback path returns the same shape when rg is unavailable
+ *  - fallback triggers on the whole unstartable errno set, not just ENOENT
+ *    (#1131: a PATH-less machine surfaced `spawn rg EACCES`)
+ *  - the production path execs the install-root pinned binary, never a PATH
+ *    `rg` (binding asserted in glob-engine-binding.test.ts)
  *  - inputSchema shape (model-facing JSON Schema)
  *  - aci metadata
  *  - error path: handler throws ToolExecutionError on bad input
@@ -16,6 +20,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -31,6 +36,8 @@ import {
   createGlobTool,
   type GlobToolDeps,
 } from "../../../../src/harness/aci/tools/glob.ts";
+import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
+import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -329,6 +336,31 @@ describe("createGlobTool — Node fallback path", () => {
     assert.deepEqual(lines, ["src/index.ts"]);
   });
 
+  /**
+   * #1131: which errno the OS reports for an unusable engine is platform- and
+   * shape-dependent (missing file → ENOENT; present-but-not-executable or
+   * restricted exec → EACCES/EPERM). The degrade gate must cover the whole
+   * set, or the contract's fallback silently never fires.
+   */
+  for (const code of ["EACCES", "EPERM"] as const) {
+    it(`falls back when the spawn rejects with ${code}`, async () => {
+      const root = await makeScratch(`glob-fallback-${code}-`);
+      await buildFixtureTree(root);
+
+      const deps: GlobToolDeps = {
+        spawnRg: async () => {
+          const error = new Error(`spawn rg ${code}`) as NodeJS.ErrnoException;
+          error.code = code;
+          throw error;
+        },
+      };
+
+      const output = await gather({ root, pattern: "src/*.ts", deps });
+      const lines = output.split("\n").filter((line) => line.length > 0);
+      assert.deepEqual(lines, ["src/index.ts"]);
+    });
+  }
+
   it("fallback supports ** recursive matching", async () => {
     const root = await makeScratch("glob-fallback-recursive-");
     await buildFixtureTree(root);
@@ -427,6 +459,54 @@ describe("createGlobTool — Node fallback path", () => {
       `.git leaked: ${lines.join(", ")}`
     );
   });
+});
+
+describe("createGlobTool — pinned engine binding", () => {
+  /**
+   * The production path execs `deps.engineBinaryPath` when given. Pointing it
+   * at a nonexistent file drives the real `spawnWithStopSignal` → ENOENT →
+   * walker chain (no seam injection), proving the pinned path — not a PATH
+   * `rg` — is what gets spawned. Runnable on CI without any engine install.
+   */
+  it("degrades to the walker when the pinned binary path does not exist", async () => {
+    const root = await makeScratch("glob-pinned-missing-");
+    await buildFixtureTree(root);
+
+    const output = await gather({
+      root,
+      pattern: "src/*.ts",
+      deps: { engineBinaryPath: join(root, "__no_such_engine__", "rg") },
+    });
+
+    const lines = output.split("\n").filter((line) => line.length > 0);
+    assert.deepEqual(lines, ["src/index.ts"]);
+  });
+
+  /**
+   * With the vendor engine installed (and, on the reporting machine, no rg on
+   * PATH at all), the default no-deps call must answer from the real binary.
+   * Skipped only when this machine has no installed engine.
+   */
+  const installedEngine = engineBinaryPath(
+    resolveInstallRoot(),
+    process.platform,
+    process.arch
+  );
+  const enginePresent =
+    installedEngine !== undefined && existsSync(installedEngine);
+
+  it.skipIf(!enginePresent)(
+    "default binding hits the installed vendor engine (no PATH involvement)",
+    async () => {
+      const root = await makeScratch("glob-pinned-real-");
+      await buildFixtureTree(root);
+
+      const output = await gather({ root, pattern: "**/*.ts" });
+
+      const lines = output.split("\n").filter((line) => line.length > 0);
+      assert.deepEqual(lines, ["src/index.ts", "src/util/helper.ts"]);
+    }
+  );
 });
 
 describe("createGlobTool — input validation", () => {

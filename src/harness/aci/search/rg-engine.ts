@@ -25,6 +25,7 @@ import { relative } from "node:path";
 import { ToolExecutionError } from "../../errors.js";
 import { spawnWithStopSignal } from "../../sandbox/runner.js";
 import { buildRgArgs } from "./argv.js";
+import { isEngineUnstartable } from "./engine-manifest.js";
 import { parseRgContextStdout } from "./context-groups.js";
 import { admittedPaths } from "./file-lines.js";
 import { isPathRepresentable } from "./path-representable.js";
@@ -220,7 +221,9 @@ async function collect(
     }
     return await collectViaSeam(input.spawn, binary, args, input);
   } catch (error) {
-    if (isUnavailable(error)) return "unavailable";
+    // The pinned engine cannot start (missing / not executable / restricted)
+    // — the only downgrade exit.
+    if (isEngineUnstartable(error)) return "unavailable";
     throw error;
   }
 }
@@ -272,12 +275,6 @@ function collectViaSeam(
 function toSearchPath(workspaceRoot: string, searchRoot: string): string {
   const rel = relative(workspaceRoot, searchRoot).split("\\").join("/");
   return rel.length === 0 ? "." : rel;
-}
-
-/** Install-root binary missing / not executable — the only cannot-start test. */
-function isUnavailable(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException)?.code;
-  return code === "ENOENT" || code === "EACCES" || code === "EPERM";
 }
 
 /**
