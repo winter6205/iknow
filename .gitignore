@@ -128,6 +128,10 @@ docs/kb-assistant-guide
 !.claude/
 .claude/*
 !.claude/settings.json
+# Team test policy referenced by CLAUDE.md; keep other rule files personal.
+!.claude/rules/
+.claude/rules/*
+!.claude/rules/test.md
 .playwright-cli
 .codebase-memory/
 
