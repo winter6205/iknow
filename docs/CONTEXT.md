@@ -409,6 +409,18 @@ _Avoid_: 新产品面继续写这个名字当现行合同
 **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交付物写到 bash `/tmp` tmpfs；把 **替岗拒绝** / 工具选型当硬墙
 
+**解析地基**: 权限决策前的语法级 shell 解析层——tree-sitter 原生绑定、全同步 `parseForSecurity(command)` 单一入口（`shell-parse.ts`），按命令字符串有界缓存，policy/handler 两道门共享一次解析。只供给语法事实（引号内外、替换结构、heredoc 语境），不做 deny 决策；各墙与切分器是它的消费者。ADR-0123。
+_Avoid_: 读片室；AST 层；把它当第二道墙或让它在解析层做政策；用旧裸子串扫描直接判新语法结构
+
+**解析判定**: 解析地基本身的输出契约——六态闭集（ok / 未知语法 / 畸形 / 中止 / 超容量 / 解析器不可用）加解析前字符级一票否决清单，是所有墙唯一的解析输入。仅"解析器不可用"降级旧扫描（终态、红字警示、不许静默），其余各态各有固定归宿。ADR-0124。
+_Avoid_: 把"未知语法"当硬拒；让运行时解析异常降级回旧扫描；把降级和硬拒混成一个态；无警示地静默降级
+
+**递归检查**: 替换类语法的判定模型——`$(...)`、反引号、`<(...)` 的内层命令提取出来，走与顶层完全相同的权限判定，ask 逐层上传导，嵌套上限 2 层（第 3 层 → ask）。静态判定不赌运行时条件：`${X:-$(cmd)}` 按会执行分析。ADR-0125。
+_Avoid_: 内层只读 allowlist（第二份清单）；出现即拒；只看外层不看内层
+
+**组合墙**: 解释器（bash/sh/python/node…）直接执行 `<(...)` 产出内容 → 硬拒，不问内层是什么。拒的是"内容运行时才生成、谁都看不见"的组合，不是"解释器执行脚本"——heredoc 脚本内容全可见，不在此墙内，改为逐行检查（正文定性看接收者）。ADR-0125。
+_Avoid_: 把它理解成禁止 bash 执行脚本；把它套到 heredoc 上；与 command-substitution 墙混同
+
 **compact reason**: 压缩路径分类，闭集 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，写入 `CompactSessionResponse.reason` 并驱动 UI 文案。`below_token_threshold` 只表示 proactive 未过 auto-compact token gate。
 _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字面当业务码；reason 当 `LoopTrace` / `LlmCallRecord` 字段
 
@@ -840,6 +852,10 @@ _Avoid_: 把平台数值写进桥核；把事实页当 spec
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
 - **工具职分 vs hard-wall**: 职分是 bash / grep / 符号工具面各管一职；hard-wall 是围栏拦不住的危险意图。替岗拒绝走 handler，不进硬墙
+- **解析地基 vs hard-wall**: 地基给语法事实（哪段是代码哪段是数据、替换的内外层结构），墙做政策决定（deny/ask）；地基自己不 deny，墙不再各自扫裸文本（ADR-0123）
+- **解析判定 vs hard-wall**: 判定是墙的输入契约（六态 + 前置否决清单），墙只消费判定结果做政策；判定层的"硬拒"（畸形/中止/超容量）发生在墙之前，不可被 grant 覆盖（ADR-0124）
+- **递归检查 vs hard-wall**: 硬墙从"认字符"变"认意图"——command-substitution 收窄为真执行替换（归宿由递归检查定），新增 parameter-expansion / interpreter-procsub / unparseable 三 id；墙的不可覆盖性不变（ADR-0125）
+- **组合墙 vs heredoc**: 同为"解释器拿到脚本"，`<(...)` 内容运行时才生成 → 硬拒；heredoc 内容白纸黑字 → 逐行检查后放行干净的（ADR-0125）
 - **替岗拒绝 vs usage**: usage 仍写三类回退；不变量由拒绝执法。加长说明书不代替本闸
 - **结构形 vs 结构意图**: 闸认 ADR-0117 定义语法表（关键字 / 行首锚 / 修饰组）；未锚定 ident+`(` 是正文面，不是漏写的结构查询
 - **blob 引用模式 vs 内容寻址正文池**: 前者是已退役开关名；后者是现行唯一落盘形态。messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
