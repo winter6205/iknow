@@ -5,8 +5,10 @@
  *   - input  : { pattern: string, path?: string, limit?: integer }
  *   - output : alphabetised, root-relative paths, one per line.
  *   - empty pattern is a hard error (NOT a "match all" fallback).
- *   - try `rg --files --glob <pattern>` first; on ENOENT fall back to a
- *     Node walker with a small, intentionally-bounded glob matcher.
+ *   - try the pinned vendor engine (`<installRoot>/vendor/ripgrep/...`,
+ *     same resolution as grep) first; when it cannot start (ENOENT /
+ *     EACCES / EPERM) fall back to a Node walker with a small,
+ *     intentionally-bounded glob matcher. A PATH `rg` is never exec'd.
  *   - limit defaults to 200, capped at 5000.
  *   - read-only / cancel / concurrency-safe.
  *
@@ -23,7 +25,11 @@ import { isAbsolute, relative, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
-import type { LiveTaskRoot } from "../../session-roots.js";
+import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
+import {
+  engineBinaryPath,
+  isEngineUnstartable,
+} from "../search/engine-manifest.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 import type { AciToolDef } from "../types.js";
 
@@ -41,15 +47,23 @@ const EMPTY_RESULT = "";
 /**
  * Subset of the `rg --files --glob <pattern>` invocation the tool needs.
  * Production: goes through `spawnWithStopSignal` so abort can stop the rg
- * child + descendants. Tests: inject a stub that either returns canned
- * output (parse-logic coverage without an `rg` binary) or rejects with
- * ENOENT to force the Node fallback path.
+ * child + descendants, and execs only the install-root pinned binary (never
+ * a PATH `rg`). Tests: inject a stub that either returns canned output
+ * (parse-logic coverage without an `rg` binary) or rejects with an
+ * unstartable errno (ENOENT / EACCES / EPERM) to force the Node fallback
+ * path.
  */
 export interface GlobToolDeps {
   readonly spawnRg?: (
     args: readonly string[],
     cwd: string
   ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the pinned binary path. Absent → `<resolveInstallRoot()>/vendor/ripgrep/...`
+   * (same resolution as grep). Tests may point at a nonexistent path to drive
+   * the "install-root binary missing" fallback branch.
+   */
+  readonly engineBinaryPath?: string;
   /**
    * Stable project identity root. When present, absolute paths (and relative
    * paths missing from the live task root) may be searched read-only there.
@@ -91,7 +105,7 @@ export function createGlobTool(
   return {
     name: "glob",
     description:
-      "Discover files by glob pattern under a workspace root before opening them with read_file / edit_file / write_file; supports `*`, `**`, `?` segments (rg-compatible when rg is on PATH). Returns up to `limit` sorted root-relative paths, one per line; default 200, hard cap 5000. Pair with grep to scan content within the matched paths.",
+      "Discover files by glob pattern under a workspace root before opening them with read_file / edit_file / write_file; supports `*`, `**`, `?` segments (rhymes with the bundled ripgrep's `--glob` semantics). Returns up to `limit` sorted root-relative paths, one per line; default 200, hard cap 5000. Pair with grep to scan content within the matched paths.",
     inputSchema: {
       type: "object",
       properties: {
@@ -132,21 +146,21 @@ export function createGlobTool(
       const realSearchRoot = await realpath(searchRoot);
       const searchPrefix = relative(realRoot, realSearchRoot); // "" or "src"
 
-      // 3. Try rg first; fall back to Node walker on ENOENT.
-      //    - Test seam path: deps.spawnRg (no signal — used only for parse
-      //      logic + ENOENT-driven fallback coverage).
-      //    - Production path: spawnWithStopSignal so ctx.signal can stop
-      //      the rg child + descendants (ADR-0005: the signal must reach
-      //      any subprocess; rg spawns workers on some workloads).
-      let rawPaths: string[];
-      try {
-        rawPaths = deps?.spawnRg
-          ? await runRgViaSeam(deps.spawnRg, pattern, realSearchRoot)
-          : await runRgViaProduction(pattern, realSearchRoot, ctx?.signal);
-      } catch (error) {
-        if (!isMissingRgError(error)) throw error;
-        rawPaths = await walkAndMatch(realSearchRoot, pattern);
-      }
+      // 3. Try the pinned engine first; fall back to the Node walker when it
+      //    cannot start (same resolve + degrade contract as grep, ADR-0089).
+      const rawPaths = await collectMatchedPaths({
+        spawnRg: deps?.spawnRg,
+        binaryPath:
+          deps?.engineBinaryPath ??
+          engineBinaryPath(
+            resolveInstallRoot(),
+            process.platform,
+            process.arch
+          ),
+        pattern,
+        realSearchRoot,
+        signal: ctx?.signal,
+      });
 
       // 4. Prepend the search-root prefix so paths are root-relative, then
       //    sort lexicographically and truncate to `limit`.
@@ -272,6 +286,43 @@ function clampLimit(value: number): number {
 /* rg path                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Engine dispatch for step 3 of the handler (kept out of the handler so the
+ * branching complexity lives here):
+ *   - Test seam path: deps.spawnRg (no signal — used only for parse logic +
+ *     unstartable-errno-driven fallback coverage).
+ *   - No manifest asset for this platform: straight to the walker; a legal
+ *     downgrade, not an error.
+ *   - Production path: spawnWithStopSignal so ctx.signal can stop the rg
+ *     child + descendants (ADR-0005: the signal must reach any subprocess;
+ *     rg spawns workers on some workloads).
+ * Any unstartable spawn errno (ENOENT / EACCES / EPERM) degrades to the
+ * walker instead of failing the call.
+ */
+async function collectMatchedPaths(input: {
+  readonly spawnRg: GlobToolDeps["spawnRg"];
+  readonly binaryPath: string | undefined;
+  readonly pattern: string;
+  readonly realSearchRoot: string;
+  readonly signal: AbortSignal | undefined;
+}): Promise<string[]> {
+  const { spawnRg, binaryPath, pattern, realSearchRoot, signal } = input;
+  try {
+    if (spawnRg) return await runRgViaSeam(spawnRg, pattern, realSearchRoot);
+    if (binaryPath === undefined)
+      return await walkAndMatch(realSearchRoot, pattern);
+    return await runRgViaProduction(
+      binaryPath,
+      pattern,
+      realSearchRoot,
+      signal
+    );
+  } catch (error) {
+    if (!isEngineUnstartable(error)) throw error;
+    return await walkAndMatch(realSearchRoot, pattern);
+  }
+}
+
 /** Test-seam path: no signal threading; used for parse-logic + ENOENT coverage. */
 async function runRgViaSeam(
   spawnRg: (
@@ -289,18 +340,25 @@ async function runRgViaSeam(
 }
 
 /**
- * Production path: real `rg` via `spawnWithStopSignal` so ctx.signal can
- * cancel the rg child + its descendant processes (ADR-0005).
+ * Production path: the install-root pinned rg via `spawnWithStopSignal` so
+ * ctx.signal can cancel the rg child + its descendant processes (ADR-0005).
+ * Never execs a PATH `rg` — `binaryPath` is the absolute vendor path resolved
+ * by the caller.
  */
 async function runRgViaProduction(
+  binaryPath: string,
   pattern: string,
   realSearchRoot: string,
   signal: AbortSignal | undefined
 ): Promise<string[]> {
-  const { done } = spawnWithStopSignal("rg", ["--files", "--glob", pattern], {
-    cwd: realSearchRoot,
-    signal,
-  });
+  const { done } = spawnWithStopSignal(
+    binaryPath,
+    ["--files", "--glob", pattern],
+    {
+      cwd: realSearchRoot,
+      signal,
+    }
+  );
   const result = await done;
   if (result.code === 0 || result.code === 1) {
     return parseRgStdout(result.stdout);
@@ -318,12 +376,6 @@ async function runRgViaProduction(
 function parseRgStdout(stdout: string): string[] {
   if (stdout.length === 0) return [];
   return stdout.split("\n").filter((line) => line.length > 0);
-}
-
-function isMissingRgError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "ENOENT";
 }
 
 /* -------------------------------------------------------------------------- */

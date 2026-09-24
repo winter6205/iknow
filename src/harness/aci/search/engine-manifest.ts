@@ -122,3 +122,23 @@ export function engineInstallDir(
 ): string {
   return `${installRoot}/vendor/ripgrep/${RIPGREP_VERSION}/${platformKey(platform, arch)}`;
 }
+
+/** Spawn errnos that mean "the engine cannot start". Which one the OS picks
+ * depends on the platform and failure shape (missing binary vs. non-executable
+ * vs. restricted exec); matching only ENOENT misreads the others as hard
+ * failures (#1131: PATH-less machine surfaced `spawn rg EACCES`). */
+const UNSTARTABLE_CODES: ReadonlySet<string> = new Set([
+  "ENOENT",
+  "EACCES",
+  "EPERM",
+]);
+
+/**
+ * The single cannot-start test shared by every consumer of the pinned engine
+ * (grep's rg-engine and glob): membership in {@link UNSTARTABLE_CODES} → the
+ * caller downgrades to its Node path instead of failing the call.
+ */
+export function isEngineUnstartable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code !== undefined && UNSTARTABLE_CODES.has(code);
+}
