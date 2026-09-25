@@ -309,6 +309,8 @@ import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
 import { createPermissionModeContext } from "../harness/permission/index.js";
+// Imported from the seam's own module, not the index: one getter, one owner.
+import { parseFoundationState } from "../harness/permission/shell-parse.js";
 import {
   agentModeLabel,
   applyGraphCommand,
@@ -1936,6 +1938,23 @@ function applyAskShortcut(
     return true;
   }
   return false;
+}
+
+/**
+ * ADR-0124 §6 「降级不许静默」: the one red row while the parse foundation
+ * answers degraded, read from the same getter that chooses the seam's arms. A
+ * plain function so the arm mounts at the input box, never in a wrapper that
+ * could stay unmounted.
+ */
+function shellParseDegradeNotice(view: TuiView): ReactNode {
+  if (view !== "chat" || parseFoundationState() !== "UNAVAILABLE") {
+    return null;
+  }
+  return (
+    <text fg={tuiPalette.error}>
+      {`shell 解析器不可用，已降级到旧扫描：判定仍生效（详见日志）`}
+    </text>
+  );
 }
 
 export function TuiApp(props: TuiAppProps): ReactNode {
@@ -4894,6 +4913,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           two lines now render on the spawn card inside the session
           transcript (see specs/tui-subagent-transcript-live.md), so no
           subagent chrome rows remain here (subagentRowBudget stays 0). */}
+      {shellParseDegradeNotice(view)}
       {view === "chat" && (
         <PromptInput
           ref={promptInputRef}

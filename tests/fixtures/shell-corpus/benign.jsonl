@@ -1,0 +1,13 @@
+{"command": "echo hi"}
+{"command": "echo $HOME"}
+{"command": "echo \"rm -rf /\""}
+{"command": "echo '$(whoami)'"}
+{"command": "cat <<'EOF'\n$(whoami)\nEOF"}
+{"command": "echo $(whoami)"}
+{"command": "rm -rf /tmp/deep"}
+{"command": "dd if=/dev/zero of=/dev/sda"}
+{"command": "> /tmp/x"}
+{"command": "find /"}
+{"command": "[[ a == b ]]"}
+{"command": "echo hi &&"}
+{"command": "echo\\ test"}
