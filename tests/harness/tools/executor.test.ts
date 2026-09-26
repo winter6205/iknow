@@ -17,7 +17,10 @@ import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import { encodeToolResults } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
-import { ToolExecutionError } from "../../../src/harness/errors.ts";
+import {
+  ToolExecutionError,
+  ToolInputValidationError,
+} from "../../../src/harness/errors.ts";
 import { createReadImageTool } from "../../../src/harness/aci/tools/read-image.ts";
 import type { AnthropicContentBlock } from "../../../src/harness/model-adapter/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
@@ -420,6 +423,88 @@ describe("createExecutor (T2 unified stop signal)", () => {
     assert.equal(
       results[0]!.kind === "execution_failed" && results[0]!.message,
       "cancelled"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildFailureResult's precedence arm: a handler-layer input rejection is the
+// model-facing "fix your arguments" signal, but a call that was already
+// cancelled or that ran out its budget reports the lifecycle outcome. Without
+// the guard the rejection would rewrite history and the narrow validation fuse
+// would count cancelled / timeout answers as identical validation stalls.
+// ---------------------------------------------------------------------------
+
+describe("createExecutor (lifecycle outcome outranks a handler rejection)", () => {
+  const rejecting: ToolDef = {
+    name: "rejecting",
+    description: "handler rejects input the schema accepted",
+    inputSchema: { type: "object", additionalProperties: false },
+    handler: () => {
+      throw new ToolInputValidationError("mode read does not accept item");
+    },
+  };
+
+  it("outer signal already aborted -> execution_failed 'cancelled', not validation_failed", async () => {
+    const exec = createExecutor(createRegistry([rejecting]));
+    const controller = new AbortController();
+    controller.abort();
+
+    const results = await exec.executeAll(
+      [{ id: "c1", name: "rejecting", input: {} }],
+      controller.signal
+    );
+
+    assert.equal(results[0]!.kind, "execution_failed");
+    assert.equal(
+      results[0]!.kind === "execution_failed" && results[0]!.message,
+      "cancelled"
+    );
+  });
+
+  it("rejection arriving after the timeout -> execution_failed 'timeout', not validation_failed", async () => {
+    const lateRejector: ToolDef = {
+      name: "late-rejector",
+      description: "rejects after the timeout arm has already fired",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => {
+        const late = new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new ToolInputValidationError("late rejection")),
+            60
+          );
+        });
+        // The timeout settles the race first; keep the late rejection observed.
+        late.catch(() => {});
+        return late;
+      },
+    };
+    const exec = createExecutor(createRegistry([lateRejector]));
+
+    const results = await exec.executeAll(
+      [{ id: "c1", name: "late-rejector", input: {} }],
+      undefined,
+      10
+    );
+
+    assert.equal(results[0]!.kind, "execution_failed");
+    assert.equal(
+      results[0]!.kind === "execution_failed" && results[0]!.message,
+      "timeout"
+    );
+  });
+
+  it("counter-proof: no lifecycle pressure keeps the rejection as validation_failed", async () => {
+    const exec = createExecutor(createRegistry([rejecting]));
+
+    const results = await exec.executeAll([
+      { id: "c1", name: "rejecting", input: {} },
+    ]);
+
+    assert.equal(results[0]!.kind, "validation_failed");
+    assert.equal(
+      results[0]!.kind === "validation_failed" && results[0]!.message,
+      "mode read does not accept item"
     );
   });
 });
