@@ -45,4 +45,5 @@
 - `251-lsp-tool.md` — LSP tool (connection-hygiene increment)
 - `skill-index-increment.md` — incremental skill model index + human-side slash unification (ADR-0098)
 - `frontmatter-shared-parser.md` — one shared frontmatter module (yaml-backed) replacing four hand-rolled parsers; memory newline guard; `when_to_use` signal (ADR-0123)
+- `memory-frontmatter-write-signals.md` — memory write-side signals: serializer refuses non-scalar extras, structured store `skipped` diagnostics (#1137; resolves ADR-0123 accepted residuals)
 - `read-image-vision.md` — read images at paths inside the fence, delivered to Anthropic vision via `tool_result` (ACR PASS)
