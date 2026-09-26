@@ -1,9 +1,12 @@
 import type { AciToolDef } from "../aci/types.js";
 import {
+  findSubstitutionAsk,
   hardWalls,
   HARD_WALL_DENY_PREFIX,
   type HardWallId,
+  type SubstitutionAsk,
 } from "./hard-walls.js";
+import { parseForSecurity } from "./shell-parse.js";
 import type {
   CodeBuiltInPolicySource,
   HardRuleSpec,
@@ -121,6 +124,92 @@ export interface CheckPermissionInput {
   readonly mode?: PermissionModeContext;
 }
 
+/** The ask tier's own reason prefix; `[hard_wall]` is deny's, never reused here. */
+const SUBSTITUTION_ASK_PREFIX = "substitution ask:";
+
+/** The command of a shell-bearing call, or `null` for every other tool. */
+function shellCommandOf(ctx: {
+  readonly tool: string;
+  readonly input: unknown;
+}): string | null {
+  if (ctx.tool !== "bash" && ctx.tool !== "execute") return null;
+  const command = (ctx.input as { command?: unknown } | null | undefined)
+    ?.command;
+  return typeof command === "string" && command.length > 0 ? command : null;
+}
+
+/** One reported ask: its token, its kind when the token does not carry it, and
+ *  the inner command the operator would have to act on. */
+function askFindingText(ask: SubstitutionAsk): string {
+  const token = ask.detail.startsWith(ask.kind)
+    ? ask.detail
+    : `${ask.kind} ${ask.detail}`;
+  return ask.inner === undefined
+    ? token
+    : `${token} ${JSON.stringify(ask.inner)}`;
+}
+
+/**
+ * The inner commands of `command` that this call owes the operator an
+ * explanation for: the substitution sites the parse hangs directly off the
+ * outer command. A site nested inside another inner belongs to that inner's own
+ * resolution — reached through the same flow below — so this list stays one
+ * level wide, and every level is a strict substring of the one above it.
+ */
+function directInnerCommands(command: string): readonly string[] {
+  const parse = parseForSecurity(command);
+  if (parse.kind !== "ok") return [];
+  const innerIndexes = new Set<number>();
+  for (const site of parse.substitutions) {
+    if (site.innerCommandIndex !== null) {
+      innerIndexes.add(site.innerCommandIndex);
+    }
+  }
+  const inners: string[] = [];
+  for (const site of parse.substitutions) {
+    const inner = site.innerCommandIndex;
+    if (inner === null) continue;
+    const owner = site.ownerCommandIndex;
+    if (owner !== null && innerIndexes.has(owner)) continue;
+    const fact = parse.commands.find((entry) => entry.index === inner);
+    if (fact === undefined) continue;
+    const source = parse.text.slice(fact.span.start, fact.span.end);
+    if (source.length === 0 || source === command) continue;
+    if (!inners.includes(source)) inners.push(source);
+  }
+  return inners;
+}
+
+/**
+ * ADR-0125 §1's ask tier: the wall's channel is deny-only, so an inner command
+ * that merely needs approval is decided here — the one place that can resolve it
+ * through the same rules, mode and category arms as the outer command, and
+ * therefore the only `inner-ask` constructor. The substitution arms arrive from
+ * `hard-walls.ts` and outrank this one: they name a shape the walk could not
+ * judge, while an inner ask is only "the same flow says ask".
+ */
+function substitutionAskReason(
+  opts: CheckPermissionInput,
+  command: string,
+  findings: readonly SubstitutionAsk[]
+): string | null {
+  const asks: SubstitutionAsk[] = [...findings];
+  if (asks.length === 0) {
+    for (const inner of directInnerCommands(command)) {
+      const innerOutcome = checkPermission({
+        ...opts,
+        input: { command: inner },
+      });
+      if (innerOutcome.decision === "ask") {
+        asks.push({ kind: "inner-ask", detail: "inner=ask", inner });
+        break;
+      }
+    }
+  }
+  if (asks.length === 0) return null;
+  return `${SUBSTITUTION_ASK_PREFIX} ${asks.map(askFindingText).join("; ")}`;
+}
+
 export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
   const { def, input } = opts;
   const ctx = { tool: def.name, input };
@@ -175,6 +264,24 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
       decision: "deny",
       reason: `mode: plan blocks mutating tools (${category})`,
     };
+  }
+  // ADR-0125 §1's ask tier, below BOTH mode branches and above the category
+  // default: it answers parse complexity, never danger. A mode that does not
+  // prompt has already allowed, `plan` has already denied a mutating category,
+  // and a session allow rule answered in step 2 — so what reaches here is a call
+  // this mode puts to the user anyway, and the reason now names the shape that
+  // made it hard to read (and the inner command to read) instead of only the
+  // category. An analysis fault is never carried here: it is step 1's deny.
+  const askCommand = shellCommandOf(ctx);
+  if (askCommand !== null) {
+    const askReason = substitutionAskReason(
+      opts,
+      askCommand,
+      findSubstitutionAsk(askCommand)
+    );
+    if (askReason !== null) {
+      return { decision: "ask", reason: askReason };
+    }
   }
   if (opts.defaultByCategory[category] === "allow") {
     return {

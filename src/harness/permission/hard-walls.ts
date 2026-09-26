@@ -1,5 +1,15 @@
 import type { HardRuleSpec } from "./types.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
+import {
+  parseForSecurity,
+  scanWithLegacyDegrade,
+  type CommandFact,
+  type ExpansionFact,
+  type SecurityParseOk,
+  type SecurityParseResult,
+  type SecurityParseUnknownSyntax,
+  type SubstitutionFact,
+} from "./shell-parse.js";
 
 // Re-export the SSOT hard-wall prefix for callers that historically imported
 // it from here. The authoritative definition lives in `./prefixes.ts`.
@@ -9,18 +19,17 @@ export type HardWallId =
   "hard-wall:execute-dangerous" | "hard-wall:sensitive-path";
 
 /**
- * Machine-readable pattern ids for the execute-dangerous hard-wall. SC3
- * (`specs/mutate-write-contract.md`) requires the deny `reason` to carry the
- * specific id of the matched pattern, not just a generic shell-metachar
- * label. Categories:
+ * Machine-readable pattern ids for the execute-dangerous hard-wall. ADR-0125
+ * requires the deny `reason` to carry the specific id of the matched pattern,
+ * not just a generic shell-metachar label. Categories:
  *   - destructive-rm: recursive / forced removal / chmod recursive / find
  *     -delete. Misuse destroys the writable root or a sibling subtree.
  *   - destructive-disk: filesystem wipe (`mkfs`, `dd if=`), fork-bomb,
  *     system shutdown / reboot, Windows `del /f` / `rd /s`, lexical
  *     `format` command. Affects the host, not just one file.
- *   - command-substitution: `$(...)` / `${...}` / backticks / `<(...)`.
- *     Process substitution / expansion that the substring scan cannot
- *     statically bound.
+ *   - command-substitution: a site that really executes a command
+ *     (`$(...)`, backticks, `<(...)`) whose inner command is denied. The hit
+ *     names the site and the inner's own id, so the reason carries both.
  *   - bare-metachar: command body consisting only of separators /
  *     redirects / pipes with no command word anywhere (e.g. `;`, `|`,
  *     `&&`, `>/tmp/x`). It is NOT an allowlist gate: a segment that names
@@ -32,13 +41,31 @@ export type HardWallId =
  *     walk (ADR-0068), and in the default global FS posture nothing else
  *     bounds it — the 2026-09-14 incident ran `find /` for ~232 s until the
  *     host cancelled. Not overridable by session grants or `full_auto`.
+ *   - unparseable: the parse verdicts ADR-0124 routes to a hard deny
+ *     (`malformed`, `aborted`, `over-cap`), its pre-parse veto arm
+ *     (`vetoed`), the degrade seam's own backstop (`legacy-threw`), and a
+ *     fault inside this file's substitution walk (`analysis-fault`). The
+ *     `pattern` carries the routed name as `verdict=<v>` plus ADR-0124's own
+ *     human text where that ADR has one.
+ *   - parameter-expansion: a `${name}` / `$((name))` site whose NAME Stage 0
+ *     read off `expansions[]` matches the secret-name roster (ADR-0125 §3's
+ *     first bucket). The other two buckets are not denials: a base-environment
+ *     name says nothing, an unknown one is the ask tier's `param-unknown`. The
+ *     `pattern` carries the bucket as `param=<bucket>`.
+ *   - interpreter-procsub: the combo wall — an interpreter command word fed a
+ *     `<(...)` process substitution (ADR-0125 §4). The content becomes code
+ *     only at runtime, so no recursion can name it: the deny is decided by the
+ *     receiver, never by the inner, and `pattern` carries `combo=<interp>-procsub`.
  */
 export type DangerousPatternId =
   | "destructive-rm"
   | "destructive-disk"
   | "command-substitution"
   | "bare-metachar"
-  | "root-find-walk";
+  | "root-find-walk"
+  | "unparseable"
+  | "parameter-expansion"
+  | "interpreter-procsub";
 
 /** Per-pattern hit record returned by `findDangerousPattern`. */
 export interface DangerousPatternHit {
@@ -631,6 +658,11 @@ function matchRootFindWalk(
  * Deny rules that hold inside ONE segment, independent of its position.
  * Returns the first hit or null. Split out of `findDangerousPattern` so the
  * per-segment scan and the ordered walk fold stay separate decision surfaces.
+ *
+ * The substitution sites are NOT judged here: on the primary path they are
+ * decided by the parse (`analyzeSubstitutions`), and the quote-blind needles
+ * that used to stand at the end of this function live on only in
+ * function legacySubstitutionScan(segment), which the degrade path reaches.
  */
 function scanSegment(segment: string): DangerousPatternHit | null {
   // Strip backslash escapes before scanning so that `r\m -rf /` (an attempt
@@ -640,7 +672,7 @@ function scanSegment(segment: string): DangerousPatternHit | null {
   for (const entry of DANGEROUS_COMMAND_PATTERNS) {
     if (lower.includes(entry.pattern)) return entry;
   }
-  // Lexical `format` command (SC2 / ADR-0068: no substring matching).
+  // Lexical `format` command (ADR-0068: no substring matching).
   // Fed the SAME normalized segment as the substring scan: the backslash
   // strip exists to defeat escape attempts (`fo\rmat` → `format` in bash),
   // so the lexical gate must not be bypassed by the same escape
@@ -648,6 +680,17 @@ function scanSegment(segment: string): DangerousPatternHit | null {
   if (isLexicalFormatCommand(lower)) {
     return { id: "destructive-disk", pattern: "format" };
   }
+  return null;
+}
+
+/**
+ * The four quote-blind substitution needles, kept verbatim as the degrade
+ * path's answer (ADR-0124's parser-unavailable state, ADR-0125's Assumption
+ * 11): a hard deny must not degrade into a silent allow just because the
+ * parser is unavailable. Reachable only through the legacy pair below, never
+ * from the primary path.
+ */
+function legacySubstitutionScan(segment: string): DangerousPatternHit | null {
   // Command-substitution / process substitution per-segment. Backticks
   // and `<(` are still per-segment because they form a complete intent
   // inside one segment.
@@ -657,7 +700,7 @@ function scanSegment(segment: string): DangerousPatternHit | null {
   if (/\$\{/.test(segment)) {
     return { id: "command-substitution", pattern: "${" };
   }
-  if (/`/.test(segment)) {
+  if (/\x60/.test(segment)) {
     return { id: "command-substitution", pattern: "`" };
   }
   if (/<\s?\(/.test(segment)) {
@@ -667,16 +710,126 @@ function scanSegment(segment: string): DangerousPatternHit | null {
 }
 
 /**
- * Returns the first dangerous pattern hit in `command`, scanning per-segment
- * after splitting on newlines and shell separators. Returns `null` if no
- * segment triggers a deny rule.
+ * Today's whole-command scan, kept as the seam's `legacyScan` role: the text
+ * branches in the same order as the primary path, plus the quote-blind
+ * substitution needles that the primary path no longer reads. Exported only
+ * so the degrade seam can be handed this value; nothing else may call it.
+ */
+export function legacyFindDangerousPattern(
+  command: string
+): DangerousPatternHit | null {
+  if (command.length === 0) return null;
+  return scanTextWalls(command, (segment) => {
+    return scanSegment(segment) ?? legacySubstitutionScan(segment);
+  });
+}
+
+/**
+ * The shared skeleton of both text scans: the ordered root-find fold gets
+ * first claim, then the per-segment rules, then — only when no segment ever
+ * started a command — the bare-metachar branch.
+ */
+function scanTextWalls(
+  command: string,
+  segmentScan: (segment: string) => DangerousPatternHit | null
+): DangerousPatternHit | null {
+  const segments = splitForDangerousScan(command);
+  if (segments.length === 0) {
+    // Command is purely metachar(s) — a bare separator / pipe / redirect
+    // with no body. Fall through to the bare-metachar check below.
+    return matchBareMetachar(command);
+  }
+
+  // Ordered fold: needs the `cd /` that preceded a `find` in the same shell.
+  const walkHit = matchRootFindWalk(segments);
+  if (walkHit !== null) return walkHit;
+
+  let anySegmentHasCommandWord = false;
+  for (const segment of segments) {
+    const hit = segmentScan(segment);
+    if (hit !== null) return hit;
+    if (segmentHasCommandWord(segment)) anySegmentHasCommandWord = true;
+  }
+
+  // No segment ever started a command — the body is nothing but
+  // separators / redirects / pipes. The raw-string metachar scan is only
+  // sound for THAT shape; run against a real command word it would score
+  // heredoc `<<` or interpreter source punctuation as danger (ADR-0068:
+  // the wall is not a syntax blacklist simulating the fence).
+  if (!anySegmentHasCommandWord) {
+    return matchBareMetachar(command);
+  }
+  return null;
+}
+
+/** The text branches of the primary path: destructive / disk / root-find / bare-metachar. */
+function findTextDangerPattern(command: string): DangerousPatternHit | null {
+  return scanTextWalls(command, scanSegment);
+}
+
+/**
+ * True when every segment of the command is operator noise — no segment ever
+ * started a command. This is the shape the bare-metachar wall speaks about,
+ * and it is a property of the text: a tree-sitter ERROR for `;` does not turn
+ * separator noise into an unparseable deny (ADR-0068 keeps the id).
+ */
+function isPureMetacharBody(command: string): boolean {
+  const segments = splitForDangerousScan(command);
+  if (segments.length === 0) return true;
+  return segments.every((segment) => !segmentHasCommandWord(segment));
+}
+
+/**
+ * The human-facing reason of ADR-0124's over-cap state and of the pre-parse
+ * veto is carried into the deny so the operator sees the class, not only a
+ * structural token; `malformed` and `aborted` render their `verdict=` alone.
+ */
+function routeParseVerdict(
+  result: SecurityParseResult
+): DangerousPatternHit | null {
+  switch (result.kind) {
+    case "malformed":
+      return { id: "unparseable", pattern: "verdict=malformed" };
+    case "aborted":
+      return { id: "unparseable", pattern: "verdict=aborted" };
+    case "over-cap":
+      return {
+        id: "unparseable",
+        pattern: `verdict=over-cap ${result.reason}`,
+      };
+    case "vetoed":
+      return { id: "unparseable", pattern: `verdict=vetoed ${result.reason}` };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Returns the first dangerous pattern hit in `command`. Returns `null` if the
+ * command triggers no deny rule.
  *
- * Per-segment semantics (ADR-0068 / SC1 / SC8):
+ * Per-segment semantics (ADR-0068 / ADR-0124 / ADR-0125):
+ *   - The single seam call, scanWithLegacyDegrade(command,
+ *     legacyFindDangerousPattern), decides everything: the parse answers the
+ *     substitution family, and only a parser that never loaded answers from
+ *     the legacy text scan.
+ *   - ADR-0124's hard-deny outcomes (malformed / aborted / over-cap / the
+ *     pre-parse veto) fold into `unparseable` and outrank every other branch.
+ *   - Substitution sites are judged by the parse: each inner command of
+ *     `substitutions[]` runs through the same text rules as the outer one and
+ *     only a DENY propagates upward (the wall cannot emit an ask). A `<(...)`
+ *     handed to an interpreter denies on the receiver alone (`combo=`), and a
+ *     `${name}` site is judged by NAME off `expansions[]` (`param=`): the
+ *     secret-name bucket is the only denial there, the unknown bucket and a
+ *     name-less site are the ask tier's, and the whitelist bucket is silence.
+ *   - A heredoc body is judged by its receiver: an interpreter's body is code
+ *     whatever its delimiter's quoting — re-parsed through the same entry and
+ *     routed by that sub-parse's verdict — and a quoted body of a text receiver
+ *     is data the substitution family never speaks about.
  *   - Newlines are segment separators, NOT a dangerous pattern.
  *   - Each segment is independently normalized (lowercase, backslash strip,
  *     whitespace collapse) and scanned against `DANGEROUS_COMMAND_PATTERNS`.
- *   - Command-substitution metachars (`$(`, `${`, backtick, `<(`) still
- *     trigger per-segment: a single segment containing them is enough.
+ *     Those text branches stay quote-blind until the AST migration.
  *   - The bare-metachar branch (segment = nothing but separators / pipes /
  *     redirects) only fires when NO segment has a command word — the
  *     "no command body" intent. Allowlist membership is irrelevant here:
@@ -693,33 +846,767 @@ export function findDangerousPattern(
 ): DangerousPatternHit | null {
   if (command.length === 0) return null;
 
-  const segments = splitForDangerousScan(command);
-  if (segments.length === 0) {
-    // Command is purely metachar(s) — a bare separator / pipe / redirect
-    // with no body. Fall through to the bare-metachar check below.
-    return matchBareMetachar(command);
+  const outcome = scanWithLegacyDegrade(command, legacyFindDangerousPattern);
+  switch (outcome.kind) {
+    case "legacy-hit":
+      // Structurally this is `legacyFindDangerousPattern`'s own record; the
+      // seam types it loosely so `shell-parse.ts` stays out of this module's
+      // import graph.
+      return outcome.hit as DangerousPatternHit;
+    case "legacy-clean":
+      return null;
+    case "legacy-threw":
+      return {
+        id: "unparseable",
+        pattern: `verdict=legacy-threw ${outcome.reason}`,
+      };
+    case "parsed":
+      break;
   }
 
-  // Ordered fold: needs the `cd /` that preceded a `find` in the same shell.
+  const result = outcome.result;
+  const routed = routeParseVerdict(result);
+  if (routed !== null) {
+    // One shape keeps its old id across the routing: a body that is nothing
+    // but separators / pipes / redirects is bare-metachar noise (ADR-0068),
+    // and the wall says so rather than blaming the parser for a tree-sitter
+    // ERROR on `;`.
+    if (isPureMetacharBody(command)) {
+      const bare = matchBareMetachar(command);
+      if (bare !== null) return bare;
+    }
+    return routed;
+  }
+
+  if (result.kind === "ok" || result.kind === "unknown-syntax") {
+    const analysis = analyzeSubstitutions(result);
+    if (analysis.verdict === "denied") return analysis.hit;
+    if (analysis.verdict === "analysis-fault") {
+      return { id: "unparseable", pattern: "verdict=analysis-fault" };
+    }
+    // `ask` is not this layer's channel: it falls through to the text rules
+    // and the mode / category default, which is where an ask is emitted.
+  }
+
+  return findTextDangerPattern(command);
+}
+
+/**
+ * The one closed roster of interpreters (ADR-0125 Assumption 7), consumed by
+ * both rules that ask "does this word execute what it is handed?": the combo
+ * wall below and the heredoc receiver test. Frozen here rather than imported:
+ * `permission/` takes no value from `sandbox/`, and merging this list with the
+ * map-fog allowlist is the sibling spec's Stage 2-4 criterion, not this stage's.
+ */
+const INTERPRETER_COMMAND_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set([
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "python",
+    "python2",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "php",
+  ])
+);
+
+/**
+ * ADR-0125 §3's first bucket, as a frozen duplicate of the sandbox module's own
+ * name matcher (`src/harness/sandbox/env-isolation.ts`'s private
+ * `SECRET_PATTERN`, whose alternation these source characters copy). Copied and
+ * not imported for two separate reasons, both recorded in
+ * `specs/substitution-hard-walls.md`: `permission/` takes no value from
+ * `sandbox/` (`prefixes.ts:10-11`), and that module's exported
+ * `SECRET_ENV_NAMES` is a snapshot of the names present in the live environment
+ * at load time — a deny whose trigger depends on the operator's environment
+ * would be weaker than an unconditional one, so bucket 1 needs the classifier,
+ * never the snapshot. `tests/harness/permission/substitution-matrix.test.ts`
+ * pins this pattern byte-for-byte against the sandbox source, where crossing the
+ * boundary is legal; Stage 4 of `specs/hard-wall-ast-migration.md` (its
+ * SC-S4-4) merges the copy back into one roster under the `secret_name` facet.
+ * It matches NAMES: a secret-shaped VALUE (`sk-…`) is the egress sentinel's and
+ * `DEFAULT_SECRET_PATTERNS`' business, never this wall's.
+ */
+export const SECRET_NAME_PATTERN =
+  /API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i;
+
+/**
+ * ADR-0125 Assumption 4's second bucket, as a frozen duplicate of
+ * `src/harness/sandbox/env-isolation.ts`'s `BASE_ENV_WHITELIST` — the same nine
+ * names, for the same reason `SECRET_NAME_PATTERN` is a copy (the boundary rule
+ * above), pinned equal from the test side and merged into one roster by the
+ * sibling spec's Stage 4 under the `base_env_name` facet. Membership here buys
+ * silence, not an allow: the command still faces the rules, the mode and the
+ * fence.
+ */
+export const BASE_ENV_NAMES: readonly string[] = Object.freeze([
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TMPDIR",
+  "NODE_NO_WARNINGS",
+  "NODE_PATH",
+]);
+
+/** Substitution sites and heredoc bodies share this one analysis ceiling. */
+const MAX_SUBSTITUTION_LEVEL = 2;
+
+/** One reason the wall layer has to hand a command to the ask tier. */
+export interface SubstitutionAsk {
+  readonly kind:
+    | "param-unknown"
+    | "substitution-depth-exceeded"
+    | "unknown-syntax"
+    | "receiver-unresolvable"
+    | "inner-ask";
+  /** The rendered token the reason carries (ADR-0125's bucket / site name). */
+  readonly detail: string;
+  /** Present exactly for the two reasons a human needs the inner to act on. */
+  readonly inner?: string;
+}
+
+/**
+ * The three answers of the substitution walk. `ask` with an empty list means
+ * "nothing to report"; a `null` owner or receiver index is a declared arm of
+ * Stage 0's payload and goes to that arm, never to `analysis-fault`, which is
+ * reserved for shapes the declared types cannot produce.
+ */
+export type SubstitutionAnalysis =
+  | { readonly verdict: "denied"; readonly hit: DangerousPatternHit }
+  | { readonly verdict: "ask"; readonly asks: readonly SubstitutionAsk[] }
+  | { readonly verdict: "analysis-fault"; readonly reason: string };
+
+/**
+ * One heredoc body the walk has to read, with the receiver's verdict already
+ * attached: `isCode` says the command word on the other end of the heredoc
+ * executes this text, which is the only thing quoting can never take away.
+ */
+interface HeredocBody {
+  readonly text: string;
+  readonly isCode: boolean;
+}
+
+/** A prepared parse: the lookups the walk needs, already shape-checked. */
+interface PreparedParse {
+  readonly text: string;
+  readonly byIndex: ReadonlyMap<number, CommandFact>;
+  readonly roots: readonly SubstitutionFact[];
+  readonly children: ReadonlyMap<number, readonly SubstitutionFact[]>;
+  readonly expansions: readonly ExpansionFact[];
+  readonly bodies: readonly HeredocBody[];
+}
+
+type Preparation =
+  | { readonly ok: true; readonly prepared: PreparedParse }
+  | { readonly ok: false; readonly reason: string };
+
+type WalkStep =
+  | { readonly kind: "hit"; readonly hit: DangerousPatternHit }
+  | { readonly kind: "fault"; readonly reason: string }
+  | { readonly kind: "clean" };
+
+const CLEAN_STEP: WalkStep = Object.freeze({ kind: "clean" });
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+function hasSpan(value: unknown): value is { start: number; end: number } {
+  if (value === null || typeof value !== "object") return false;
+  const span = value as { start?: unknown; end?: unknown };
+  return isFiniteNumber(span.start) && isFiniteNumber(span.end);
+}
+
+function nameOfWord(word: unknown): string | undefined {
+  if (word === null || typeof word !== "object") return undefined;
+  const text = (word as { text?: unknown }).text;
+  return typeof text === "string"
+    ? commandWord(stripQuoteLayer(text))
+    : undefined;
+}
+
+/**
+ * The span of one command node, read off the parse's own text. The destructive
+ * text rules are still substring rules (the AST migration retires them), so
+ * the inner command is handed to them in the same normalized form the outer
+ * segments are.
+ */
+function commandText(text: string, command: CommandFact): string {
+  if (!hasSpan(command.span)) return "";
+  return text.slice(command.span.start, command.span.end);
+}
+
+/**
+ * Shape-check the payload the walk is about to consume and collect the asks
+ * its declared `null` arms carry. Every lookup the walk performs is proven
+ * here, so the walk itself cannot miss.
+ */
+function preparePayload(
+  payload: SecurityParseOk,
+  asks: SubstitutionAsk[]
+): Preparation {
+  const text = typeof payload.text === "string" ? payload.text : undefined;
+  if (text === undefined) {
+    return { ok: false, reason: "the parsed text is not a string" };
+  }
+  if (!Array.isArray(payload.commands)) {
+    return { ok: false, reason: "commands[] is not a list of command facts" };
+  }
+  const byIndex = new Map<number, CommandFact>();
+  for (const command of payload.commands) {
+    if (command === null || typeof command !== "object") {
+      return { ok: false, reason: "a commands[] entry is not a command fact" };
+    }
+    if (!isFiniteNumber(command.index)) {
+      return {
+        ok: false,
+        reason: "a commands[] entry carries no resolvable index",
+      };
+    }
+    if (!Array.isArray(command.argv)) {
+      return {
+        ok: false,
+        reason: `commands[${command.index}].argv is not a list`,
+      };
+    }
+    if (byIndex.has(command.index)) {
+      return {
+        ok: false,
+        reason: `commands[] names index ${command.index} twice`,
+      };
+    }
+    byIndex.set(command.index, command);
+  }
+
+  if (!Array.isArray(payload.substitutions)) {
+    return { ok: false, reason: "substitutions[] is not a list of site facts" };
+  }
+  const innerIndexes = new Set<number>();
+  for (const site of payload.substitutions) {
+    if (site === null || typeof site !== "object") {
+      return {
+        ok: false,
+        reason: "a substitutions[] entry is not a site fact",
+      };
+    }
+    if (site.innerCommandIndex !== null) {
+      if (!isFiniteNumber(site.innerCommandIndex)) {
+        return {
+          ok: false,
+          reason: "innerCommandIndex holds something other than an index",
+        };
+      }
+      innerIndexes.add(site.innerCommandIndex);
+    }
+  }
+  const roots: SubstitutionFact[] = [];
+  const children = new Map<number, SubstitutionFact[]>();
+  for (const site of payload.substitutions) {
+    const inner = site.innerCommandIndex;
+    if (inner !== null && !byIndex.has(inner)) {
+      return {
+        ok: false,
+        reason: `innerCommandIndex ${String(inner)} names no command in the parse`,
+      };
+    }
+    const owner = site.ownerCommandIndex;
+    if (owner === null) {
+      roots.push(site);
+      continue;
+    }
+    if (!isFiniteNumber(owner) || !byIndex.has(owner)) {
+      return {
+        ok: false,
+        reason: `ownerCommandIndex ${String(owner)} names no command in the parse`,
+      };
+    }
+    // A site whose owner is itself some site's inner command is nested; the
+    // nesting level comes from that chain, never from a text rescan. A null
+    // owner is a declared arm (a redirect hanging off a compound node) and
+    // then the site is judged on its own, one level down from the top.
+    if (innerIndexes.has(owner)) {
+      const bucket = children.get(owner);
+      if (bucket === undefined) children.set(owner, [site]);
+      else bucket.push(site);
+    } else {
+      roots.push(site);
+    }
+  }
+
+  if (!Array.isArray(payload.expansions)) {
+    return {
+      ok: false,
+      reason: "expansions[] is not a list of expansion facts",
+    };
+  }
+  const expansions: ExpansionFact[] = [];
+  for (const entry of payload.expansions) {
+    if (entry === null || typeof entry !== "object") {
+      return {
+        ok: false,
+        reason: "an expansions[] entry is not an expansion fact",
+      };
+    }
+    if (entry.name !== null && typeof entry.name !== "string") {
+      return {
+        ok: false,
+        reason: "an expansions[] name is neither a string nor null",
+      };
+    }
+    if (!hasSpan(entry.span)) {
+      return { ok: false, reason: "an expansions[] span is not a span" };
+    }
+    // SC7's bucket key is the NAME and nothing else, so `ownerCommandIndex` is
+    // not consulted here: a null owner is a declared arm that resolves through
+    // this same name bucket (SC11's round-8 narrowing), and a number needs no
+    // lookup for the same reason.
+    expansions.push(entry);
+  }
+
+  if (!Array.isArray(payload.heredocs)) {
+    return { ok: false, reason: "heredocs[] is not a list of body facts" };
+  }
+  const bodies: HeredocBody[] = [];
+  for (const heredoc of payload.heredocs) {
+    if (heredoc === null || typeof heredoc !== "object") {
+      return { ok: false, reason: "a heredocs[] entry is not a body fact" };
+    }
+    if (!hasSpan(heredoc.bodySpan)) {
+      return { ok: false, reason: "a heredocs[] bodySpan is not a span" };
+    }
+    const { start, end } = heredoc.bodySpan;
+    if (start < 0 || end < start || end > text.length) {
+      return {
+        ok: false,
+        reason: `heredocs[] bodySpan ${start}..${end} names nothing in the text`,
+      };
+    }
+    if (typeof heredoc.delimiterQuoted !== "boolean") {
+      return {
+        ok: false,
+        reason: "a heredocs[] delimiter is neither quoted nor not",
+      };
+    }
+    const receiverIndex = heredoc.receiverCommandIndex;
+    if (receiverIndex === null) {
+      // A declared arm of the field's type: no receiver classification at all,
+      // so the body is neither code nor data here — the ask bucket decides it.
+      asks.push({
+        kind: "receiver-unresolvable",
+        detail: "receiver-unresolvable=heredoc",
+      });
+      continue;
+    }
+    if (!isFiniteNumber(receiverIndex) || !byIndex.has(receiverIndex)) {
+      return {
+        ok: false,
+        reason: `receiverCommandIndex ${String(receiverIndex)} names no command`,
+      };
+    }
+    const receiver = byIndex.get(receiverIndex) as CommandFact;
+    const name = nameOfWord(receiver.argv[0]);
+    if (name === undefined) {
+      return {
+        ok: false,
+        reason: `the receiver command ${receiverIndex} carries no command word`,
+      };
+    }
+    // The receiver, not the delimiter, decides whether this text is code: an
+    // interpreter executes its body whatever the quoting, and an unquoted body
+    // is live for any receiver because bash expands it. A quoted body of a text
+    // command is data and never reaches the walk at all.
+    const isCode = INTERPRETER_COMMAND_NAMES.has(name);
+    if (isCode || !heredoc.delimiterQuoted) {
+      bodies.push({ text: text.slice(start, end), isCode });
+    }
+  }
+
+  if (!Array.isArray(payload.redirects)) {
+    return { ok: false, reason: "redirects[] is not a list of redirect facts" };
+  }
+  for (const redirect of payload.redirects) {
+    if (redirect === null || typeof redirect !== "object") {
+      return {
+        ok: false,
+        reason: "a redirects[] entry is not a redirect fact",
+      };
+    }
+    if (redirect.ownerCommandIndex === null) {
+      asks.push({
+        kind: "receiver-unresolvable",
+        detail: "receiver-unresolvable=redirect",
+      });
+      continue;
+    }
+    if (
+      !isFiniteNumber(redirect.ownerCommandIndex) ||
+      !byIndex.has(redirect.ownerCommandIndex)
+    ) {
+      return {
+        ok: false,
+        reason: `redirect ownerCommandIndex ${String(redirect.ownerCommandIndex)} names no command`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    prepared: { text, byIndex, roots, children, expansions, bodies },
+  };
+}
+
+/** The text rules of the primary path, applied to one command node's source. */
+function scanCommandText(source: string): DangerousPatternHit | null {
+  const segments = splitForDangerousScan(source);
   const walkHit = matchRootFindWalk(segments);
   if (walkHit !== null) return walkHit;
-
-  let anySegmentHasCommandWord = false;
   for (const segment of segments) {
     const hit = scanSegment(segment);
     if (hit !== null) return hit;
-    if (segmentHasCommandWord(segment)) anySegmentHasCommandWord = true;
-  }
-
-  // No segment ever started a command — the body is nothing but
-  // separators / redirects / pipes. The raw-string metachar scan is only
-  // sound for THAT shape; run against a real command word it would score
-  // heredoc `<<` or interpreter source punctuation as danger (ADR-0068:
-  // the wall is not a syntax blacklist simulating the fence).
-  if (!anySegmentHasCommandWord) {
-    return matchBareMetachar(command);
   }
   return null;
+}
+
+/** ADR-0125 §3's three buckets, keyed on the only input the spec allows. */
+function expansionBucketOf(
+  name: string
+): "secret" | "whitelist" | "unknown" {
+  if (SECRET_NAME_PATTERN.test(name)) return "secret";
+  if (BASE_ENV_NAMES.includes(name)) return "whitelist";
+  return "unknown";
+}
+
+/**
+ * True when one site is only the WRAPPER of another. Stage 0 publishes
+ * `$(( … ))` as a name-less site whose span holds the site of every name the
+ * arithmetic really expands, so re-judging the wrapper would ask twice about one
+ * expansion the payload already names. The comparison is between two payload
+ * fields' own spans: no text is sliced, nothing is re-parsed, and a name-less
+ * site that hides no other site is still reported.
+ */
+function wrapsAnotherExpansion(
+  entry: ExpansionFact,
+  all: readonly ExpansionFact[]
+): boolean {
+  return all.some(
+    (other) =>
+      other !== entry &&
+      other.span.start >= entry.span.start &&
+      other.span.end <= entry.span.end &&
+      (other.span.start > entry.span.start || other.span.end < entry.span.end)
+  );
+}
+
+/**
+ * The `${name}` sites of one parse, judged by name alone (Assumption 4): a
+ * secret name is the deny that names the sanctioned channel, a base-environment
+ * name is silence, anything else — including a site Stage 0 modeled without a
+ * name — is the ask tier's `param-unknown`. Re-deriving a name by slicing the
+ * site's own text is SC7's ban: bash's spelling rules are Stage 0's job, and a
+ * wall that re-reads them grows its own parser.
+ */
+function scanExpansions(
+  prepared: PreparedParse,
+  asks: SubstitutionAsk[]
+): WalkStep {
+  for (const entry of prepared.expansions) {
+    if (entry.name === null) {
+      if (wrapsAnotherExpansion(entry, prepared.expansions)) continue;
+      asks.push({ kind: "param-unknown", detail: "param=none" });
+      continue;
+    }
+    const bucket = expansionBucketOf(entry.name);
+    if (bucket === "secret") {
+      return {
+        kind: "hit",
+        hit: { id: "parameter-expansion", pattern: "param=secret" },
+      };
+    }
+    if (bucket === "unknown") {
+      asks.push({ kind: "param-unknown", detail: "param=unknown" });
+    }
+  }
+  return CLEAN_STEP;
+}
+
+/**
+ * ADR-0125 §4's combo wall: an interpreter handed a `<(...)` reads bytes that
+ * only become code at run time, so recursion could at best surface the inner
+ * command while the generated content stays invisible — the deny is the
+ * receiver's, whatever the inner holds. The write side (`>(...)`) feeds a
+ * command that is already parsed, so it never combos (Assumption 5); a null
+ * owner index names no receiver, and then nothing combos either.
+ */
+function comboHitFor(
+  prepared: PreparedParse,
+  site: SubstitutionFact
+): DangerousPatternHit | null {
+  if (site.kind !== "procsub-in") return null;
+  const ownerIndex = site.ownerCommandIndex;
+  if (!isFiniteNumber(ownerIndex)) return null;
+  const owner = prepared.byIndex.get(ownerIndex);
+  if (owner === undefined) return null;
+  const name = nameOfWord(owner.argv[0]);
+  if (name === undefined || !INTERPRETER_COMMAND_NAMES.has(name)) return null;
+  return { id: "interpreter-procsub", pattern: `combo=${name}-procsub` };
+}
+
+function walkSites(
+  prepared: PreparedParse,
+  sites: readonly SubstitutionFact[],
+  level: number,
+  visited: Set<number>,
+  asks: SubstitutionAsk[]
+): WalkStep {
+  for (const site of sites) {
+    const step = walkSite(prepared, site, level, visited, asks);
+    if (step.kind !== "clean") return step;
+  }
+  return CLEAN_STEP;
+}
+
+/**
+ * Judge one substitution site at `level`: the combo wall first, because that
+ * denial belongs to the receiver and does not care what the inner holds; then
+ * the inner command's own text, then the sites nested inside that command. Deny
+ * propagates upward; sites beyond the ceiling become an ask, never a deny.
+ */
+function walkSite(
+  prepared: PreparedParse,
+  site: SubstitutionFact,
+  level: number,
+  visited: Set<number>,
+  asks: SubstitutionAsk[]
+): WalkStep {
+  const combo = comboHitFor(prepared, site);
+  if (combo !== null) return { kind: "hit", hit: combo };
+  const inner = site.innerCommandIndex;
+  if (inner === null) return CLEAN_STEP;
+  const command = prepared.byIndex.get(inner);
+  if (command === undefined) {
+    return {
+      kind: "fault",
+      reason: `innerCommandIndex ${String(inner)} vanished from the parse`,
+    };
+  }
+  if (visited.has(inner)) return CLEAN_STEP;
+  visited.add(inner);
+  const source = commandText(prepared.text, command);
+  const own = scanCommandText(source);
+  if (own !== null) {
+    return {
+      kind: "hit",
+      hit: {
+        id: "command-substitution",
+        pattern: `subst=${String(site.kind)}→${own.id}`,
+      },
+    };
+  }
+  const nested = prepared.children.get(inner) ?? [];
+  if (nested.length === 0) return CLEAN_STEP;
+  if (level + 1 > MAX_SUBSTITUTION_LEVEL) {
+    asks.push({
+      kind: "substitution-depth-exceeded",
+      detail: `depth=${level + 1}`,
+      inner: source,
+    });
+    return CLEAN_STEP;
+  }
+  return walkSites(prepared, nested, level + 1, visited, asks);
+}
+
+/**
+ * Judge one parse at nesting `level`: its `${name}` sites by name, then every
+ * root site, then the bodies of the heredocs it receives. Deny propagates
+ * upward; an inner command whose own verdict could only be an ask never becomes
+ * a wall deny (Assumption 1). `visited` is per parse — the indexes of a
+ * re-parsed body count from zero again, and the strictly shrinking text of a
+ * body ends every descent.
+ */
+function walkPrepared(
+  prepared: PreparedParse,
+  level: number,
+  asks: SubstitutionAsk[]
+): WalkStep {
+  const names = scanExpansions(prepared, asks);
+  if (names.kind !== "clean") return names;
+  const step = walkSites(
+    prepared,
+    prepared.roots,
+    level,
+    new Set<number>(),
+    asks
+  );
+  if (step.kind !== "clean") return step;
+  for (const body of prepared.bodies) {
+    if (level + 1 > MAX_SUBSTITUTION_LEVEL) {
+      asks.push({
+        kind: "substitution-depth-exceeded",
+        detail: `depth=${level + 1}`,
+      });
+      continue;
+    }
+    const bodyStep = walkBody(body, level + 1, asks);
+    if (bodyStep.kind !== "clean") return bodyStep;
+  }
+  return CLEAN_STEP;
+}
+
+/**
+ * Judge one heredoc body. The receiver already decided what the text is: a code
+ * body is re-parsed through the same public entry and routed by that sub-parse's
+ * own verdict (Assumption 6) — resolvable text is judged, unresolvable text is
+ * denied with the verdict named, ask-parity text asks — while the body of a text
+ * command that bash never expands stays data. A live body of a non-interpreter
+ * receiver keeps the narrower reading this stage inherited: bash expands it, so
+ * its substitution sites are judged, and its command words remain the substring
+ * scan's business until the AST migration retires that.
+ */
+function walkBody(
+  body: HeredocBody,
+  level: number,
+  asks: SubstitutionAsk[]
+): WalkStep {
+  const parsed = parseForSecurity(body.text);
+  if (parsed.kind === "unknown-syntax") {
+    asks.push(unknownSyntaxAsk(parsed));
+    return CLEAN_STEP;
+  }
+  if (parsed.kind === "ok") {
+    const preparedBody = preparePayload(parsed, asks);
+    if (!preparedBody.ok) {
+      return { kind: "fault", reason: preparedBody.reason };
+    }
+    const walkStep = walkPrepared(preparedBody.prepared, level, asks);
+    if (walkStep.kind !== "clean") return walkStep;
+    return body.isCode ? scanBodyCommands(preparedBody.prepared) : CLEAN_STEP;
+  }
+  if (!body.isCode) return CLEAN_STEP;
+  if (parsed.kind === "parser-unavailable") {
+    // The outer text reached a parser and its body did not: no declared shape
+    // produces that, so the walk reports the fault as a value (SC19).
+    return {
+      kind: "fault",
+      reason: "a heredoc body had no parser to read it",
+    };
+  }
+  const routed = routeParseVerdict(parsed);
+  if (routed === null) return CLEAN_STEP;
+  return { kind: "hit", hit: routed };
+}
+
+/**
+ * The other half of "the body is code": every command of the body sub-parse runs
+ * through the same inner-command rule as a substituted command. The hit is that
+ * command's own record, verbatim — SC11's `pattern=` mini-grammar has no heredoc
+ * token, and a body line `rm -rf /` must read as `destructive-rm` here exactly
+ * as it does at the top level.
+ */
+function scanBodyCommands(prepared: PreparedParse): WalkStep {
+  for (const command of prepared.byIndex.values()) {
+    const source = commandText(prepared.text, command);
+    if (source.length === 0) continue;
+    const hit = scanCommandText(source);
+    if (hit !== null) return { kind: "hit", hit };
+  }
+  return CLEAN_STEP;
+}
+
+/**
+ * ADR-0124 §2's state 2 rendered for the ask tier: the `unmodelled[]` inventory
+ * as SC11's token, plus that ADR's own human text, so an operator who has never
+ * heard of node types still sees why the command is not being judged.
+ */
+function unknownSyntaxAsk(
+  payload: SecurityParseUnknownSyntax
+): SubstitutionAsk {
+  const nodes = Array.isArray(payload.unmodelled)
+    ? payload.unmodelled.join(",")
+    : "";
+  return {
+    kind: "unknown-syntax",
+    detail: `unknown-syntax=${nodes}（含未识别语法结构）`,
+  };
+}
+
+/** The parse verdicts step 1 folds into `unparseable`; none of them is a story
+ *  the ask tier tells, because no command survives them. */
+type HardDenyParseResult = Extract<
+  SecurityParseResult,
+  { kind: "malformed" | "aborted" | "over-cap" | "vetoed" }
+>;
+
+function isHardDenyVerdict(
+  result: SecurityParseResult
+): result is HardDenyParseResult {
+  return routeParseVerdict(result) !== null;
+}
+
+/**
+ * The ask channel's entry point: the substitution-shaped asks of one raw
+ * command (`param-unknown`, `substitution-depth-exceeded`, `unknown-syntax`,
+ * `receiver-unresolvable`). An `inner-ask` is not constructible here — this
+ * module sees no rules, no mode and no category — so the caller that owns those
+ * builds it. Total over every string, like the walk it delegates to: it never
+ * throws, and it never reports an ask inferred from a region it could not
+ * analyze. The verdicts step 1 hard-denies answer with an empty list because
+ * nothing reaches the tier below them; `parser-unavailable` answers the same
+ * way, because the degrade path has no `ok` payload to read (ADR-0124 §4 keeps
+ * `unknown-syntax` out of that set: it is this tier's, never a deny).
+ */
+export function findSubstitutionAsk(
+  command: string
+): readonly SubstitutionAsk[] {
+  if (command.length === 0) return [];
+  const result = parseForSecurity(command);
+  if (result.kind === "parser-unavailable") return [];
+  if (isHardDenyVerdict(result)) return [];
+  const analysis = analyzeSubstitutions(result);
+  if (analysis.verdict !== "ask") return [];
+  return analysis.asks;
+}
+
+/**
+ * ADR-0125's recursion over one parse: every substitution site's inner command
+ * runs through the same text rules as the outer one, nested to
+ * `MAX_SUBSTITUTION_LEVEL` sites, and a body that is code is re-parsed through
+ * this same entry rather than walked line by line. Total by construction: an
+ * impossible shape returns `analysis-fault` as a value, and nothing here may
+ * throw — no caller wraps this predicate (ADR-0124 state 4's taste).
+ */
+export function analyzeSubstitutions(
+  payload: SecurityParseOk | SecurityParseUnknownSyntax
+): SubstitutionAnalysis {
+  const asks: SubstitutionAsk[] = [];
+  try {
+    if (payload.kind === "unknown-syntax") {
+      return { verdict: "ask", asks: [unknownSyntaxAsk(payload)] };
+    }
+    const prepared = preparePayload(payload, asks);
+    if (!prepared.ok) {
+      return { verdict: "analysis-fault", reason: prepared.reason };
+    }
+    const step = walkPrepared(prepared.prepared, 1, asks);
+    if (step.kind === "fault") {
+      return { verdict: "analysis-fault", reason: step.reason };
+    }
+    if (step.kind === "hit") return { verdict: "denied", hit: step.hit };
+    return { verdict: "ask", asks };
+  } catch (fault) {
+    const name = fault instanceof Error ? fault.name || "Error" : typeof fault;
+    return {
+      verdict: "analysis-fault",
+      reason: `替换分析异常（${String(name)}），硬拒该条命令`,
+    };
+  }
 }
 
 /**
@@ -825,7 +1712,8 @@ export function splitShellSegments(command: string): string[] {
  * file paths after them) before token inspection so the redirect exemption
  * is enforced at the segment boundary. Subshell / command-substitution
  * parens are still rejected because they are matched by
- * `findDangerousPattern` (single `$(` / backtick scan over the full command).
+ * `findDangerousPattern` — by the parse on the primary path, by the
+ * quote-blind scan on the degrade path.
  */
 function isSegmentAllowed(segment: string): boolean {
   if (segment.length === 0) return false;
@@ -843,9 +1731,11 @@ function isSegmentAllowed(segment: string): boolean {
 const REDIRECTION_PATTERN = /(?:<<<?|>>?|2>>?|2?>)\s*\S+/g;
 
 // `$` is deliberately NOT a segment metachar: a plain `$VAR` read (e.g.
-// `echo $HOME`) is safe and must be allowed. Command substitution / expansion
-// is still blocked — `$(...)` and `${...}` are upstream hard-walled in
-// `findDangerousPattern`, and subshell parens `(`/`)` reject `$(...)` here too.
+// `echo $HOME`) is safe and must be allowed. What an expansion can hide is no
+// longer answered here either — `findDangerousPattern` judges each site from the
+// parse (the `${name}` buckets, the recursion into `$(...)`), and this gate only
+// keeps the redirect exemption narrow. Subshell parens `(`/`)` still reject
+// `$(...)` at this level.
 const NON_REDIRECT_METACHARS: readonly string[] = Object.freeze([
   "`",
   "\n",
@@ -870,7 +1760,14 @@ function classifyDangerousExecute(input: {
   if (typeof command !== "string") return null;
   const hit = findDangerousPattern(command);
   if (hit !== null) {
-    return `dangerous command pattern matched (id=${hit.id}, pattern="${hit.pattern}")`;
+    const reason = `dangerous command pattern matched (id=${hit.id}, pattern="${hit.pattern}")`;
+    // SC3's wrapper stays byte-identical; only the secret-name bucket gets a
+    // clause after it, because that denial has a right answer the model can
+    // still act on: ADR-0125 §3 names the placeholder round-trip as the one
+    // sanctioned way to carry a secret value through a command.
+    return hit.id === "parameter-expansion" && hit.pattern === "param=secret"
+      ? `${reason} — to use the value, reference it as <<<SECRET_N>>> (the placeholder round-trip) instead of naming the variable`
+      : reason;
   }
   // Redirection exemption must NOT leak sensitive paths: `echo x > /etc/shadow`
   // passes the segment allowlist via redirect stripping but must still be denied.

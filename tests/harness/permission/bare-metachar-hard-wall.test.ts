@@ -39,10 +39,7 @@ function patternId(command: string): DangerousPatternId | undefined {
   return findDangerousPattern(command)?.id;
 }
 
-function makeTool(
-  name: string,
-  category: AciCategory
-): AciToolDef {
+function makeTool(name: string, category: AciCategory): AciToolDef {
   return Object.freeze({
     name,
     description: `test ${name}`,
@@ -118,9 +115,9 @@ describe("hard-wall: bare-metachar — purely metachar bodies still deny", () =>
 
 describe("hard-wall: per-segment rules keep first claim over the bare branch", () => {
   it("command-substitution inside an interpreter payload still hits", () => {
-    assert.equal(patternId("echo $(cat pid)"), "command-substitution");
+    assert.equal(patternId("echo $(rm -rf /)"), "command-substitution");
     assert.equal(
-      patternId("python3 - <<'EOF'\nprint($(whoami))\nEOF"),
+      patternId("python3 - <<'EOF'\nprint($(rm -rf /))\nEOF"),
       "command-substitution"
     );
   });

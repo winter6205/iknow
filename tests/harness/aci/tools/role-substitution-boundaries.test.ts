@@ -213,18 +213,19 @@ describe("#1089 bash arm — accepted escape surface (B1..B3b)", () => {
     const result = await runBash(bash, "find . | xargs grep needle");
     assert.equal(typeof result.code, "number");
 
-    // $(which grep) is stopped by the command-substitution HARD WALL, not by
-    // the substitution gate — its rejection message must NOT carry the
-    // [role_substitution] prefix (proves the gate itself let it through).
+    // $(rm -rf /tmp/x) is stopped by the command-substitution HARD WALL (the
+    // dangerous inner propagates), not by the substitution gate — its
+    // rejection message must NOT carry the [role_substitution] prefix (proves
+    // the gate itself let it through).
     let caught: unknown;
     try {
-      await bash.handler({ command: "$(which grep) needle f" });
+      await bash.handler({ command: "$(rm -rf /tmp/x) needle f" });
     } catch (error) {
       caught = error;
     }
     assert.ok(
       caught instanceof ToolExecutionError,
-      "$(which grep) is rejected by the command-substitution hard-wall"
+      "$(rm -rf /tmp/x) is rejected by the command-substitution hard-wall"
     );
     const msg = (caught as ToolExecutionError).message;
     assert.ok(
