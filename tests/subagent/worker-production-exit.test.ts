@@ -122,7 +122,8 @@ async function runWorkerEntry(opts: {
   if (opts.installApiKey) installTestProviderApiKey();
   else delete process.env.IKNOW_TEST_API_KEY;
   delete process.env.IKNOW_T4_UNSET_KEY;
-  process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
+  // Retired global output-token knob: a non-empty value now fails config load.
+  delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   process.env.IKNOW_LLM_TIMEOUT_MS = "5000";
   process.env.IKNOW_LLM_STREAM = "off";
   delete process.env.IKNOW_WORKSPACE_ROOT;

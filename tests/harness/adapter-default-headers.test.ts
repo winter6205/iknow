@@ -38,6 +38,9 @@ function makeEnv(opts: {
       ...(opts.headers !== undefined ? { headers: opts.headers } : {}),
       fallback: [],
       maxOutputTokens: 64,
+      // The route entry owns the request budget; 64 keeps the non-streaming arm
+      // inside the SDK's 10-minute-per-request allowance.
+      routeMaxTokens: 64,
       timeoutMs: 2_000,
       temperature: 0,
       thinking: "off",

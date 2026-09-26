@@ -37,6 +37,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   loadIknowEnv,
   wireModelFromRoute,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   type IknowEnv,
   type SubagentModelEnv,
 } from "../../config/env.js";
@@ -671,17 +672,25 @@ export async function createWorkerRuntime(
   const askUser = createNoAskUser();
 
   const workerRoute = env.subagent?.model;
+  // The output budget follows the route this adapter is actually built from: a
+  // resolved worker route carries its own model entry's value (and its own
+  // fallback when that entry is silent), so it neither borrows the main
+  // session's cap nor passes this one's down. Sampling stays host-level.
+  const workerMaxTokens =
+    (workerRoute === undefined
+      ? env.llm.routeMaxTokens
+      : workerRoute.maxTokens) ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const adapter =
     opts.model ??
     withTransportRetry(
       createRealAnthropicAdapter({
         // A resolved `settings.subagent.model` route supplies the wire model and
         // the provider triple (client); absent → the main-session llm transport.
-        // maxTokens / thinking stay the MAIN llm values even when the route
+        // thinking / temperature stay the MAIN llm values even when the route
         // differs (ADR-0093 host-level sampling).
         client: createWorkerAnthropicClient(env, workerRoute),
         model: wireModelFromRoute(workerRoute?.model ?? env.llm.model),
-        maxTokens: env.llm.maxOutputTokens,
+        maxTokens: workerMaxTokens,
         temperature: env.llm.temperature,
         thinking: buildThinkingParams(env.llm),
         stream: env.llm.stream === "on",

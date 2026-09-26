@@ -25,7 +25,7 @@ Copy the block below into `~/.iknow/settings.json` and replace the `<...>` place
             "id": "MiniMax-M3",
             "name": "MiniMax-M3",
             "contextWindow": 1000000,
-            "maxTokens": 128000
+            "maxTokens": 131072
           }
         ]
       }
@@ -94,7 +94,7 @@ export MINIMAX_CN_API_KEY=<your subscription key>
             "id": "MiniMax-M3",
             "name": "MiniMax-M3",
             "contextWindow": 1000000,
-            "maxTokens": 128000
+            "maxTokens": 131072
           }
         ]
       }
@@ -124,10 +124,13 @@ To switch to Ark: type `/model` in the TUI, use `↑↓` to select `volcengine-a
 | `providers[].models`                   | yes      | non-empty array    | models under this provider; fewer than 1 entry → the whole provider is dropped.                                                     |
 | `models[].id`                          | yes      | non-empty string   | the **second segment** of the routing string.                                                                                       |
 | `models[].name`                        | no       | non-empty string   | display name (used by the picker / list).                                                                                           |
-| `models[].contextWindow` / `maxTokens` | no       | positive number    | display and future use only; V1 does not rewrite the global `IKNOW_LLM_*` env.                                                      |
+| `models[].contextWindow`               | no       | positive number    | entry metadata for the context display; an illegal value drops only this field.                                                      |
+| `models[].maxTokens`                   | no       | positive whole number | **the request output budget for this model entry** — sent to the provider as `max_tokens`. Absent → the 32,000-token fallback. It is a request budget, **not a supplier hard limit** (MiniMax M3's documented maximum is 524,288 tokens). An explicit `null`, wrong type, zero, negative, fractional, or beyond-`Number.MAX_SAFE_INTEGER` value fails loading with `model_max_tokens_invalid`; it is never dropped into the fallback. |
 | `llm.model`                            | yes      | non-empty string   | current model routing ID. Matches a provider → use it; **no match → legacy `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`** (back-compat). |
 
-**Validation discipline (drop-not-throw)**: a missing or non-string `id` / `baseUrl` / `apiKeyEnv` → **the whole provider is dropped**; non-string values in `headers` → that key is dropped; a `models` entry missing `id` → that model is dropped; `models` empty after filtering → the whole provider is dropped. Drops happen silently (no throw), and dropped fields never overwrite the rest of your file.
+**Validation discipline (drop-not-throw)**: a missing or non-string `id` / `baseUrl` / `apiKeyEnv` → **the whole provider is dropped**; non-string values in `headers` → that key is dropped; a `models` entry missing `id` → that model is dropped; `models` empty after filtering → the whole provider is dropped. Drops happen silently (no throw), and dropped fields never overwrite the rest of your file. **One exception**: an explicit `models[].maxTokens` that is not a positive whole number stops loading with the typed error `model_max_tokens_invalid: <provider>/<model> field maxTokens = <value>` — a budget you configured is never quietly replaced by the 32,000 fallback. Fix the value yourself; iknow never rewrites `~/.iknow/settings.json`.
+
+**The global output-token env is retired**: `IKNOW_LLM_MAX_OUTPUT_TOKENS` (in the process environment, `.env`, or `.env.local`) no longer configures anything. If it is still set to a non-empty value, config loading fails with `legacy_max_output_tokens_env` and points at `models[].maxTokens`; delete the variable and set the budget per model entry instead.
 
 **`apiKey` vs providers**: `llm.apiKey` is used only when the registry does **not** match. On a provider hit, the key always comes from `process.env[apiKeyEnv]` and `llm.apiKey` is ignored (it does not participate in the fallback).
 

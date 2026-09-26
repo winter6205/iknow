@@ -87,6 +87,7 @@ export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
   fallback: [],
   apiKey: "test-key",
   maxOutputTokens: 128,
+  routeMaxTokens: 128,
   timeoutMs: 5000,
   temperature: 0,
   thinking: "off",
@@ -124,7 +125,10 @@ export type TestLlmEnv = {
   readonly model: string;
   readonly fallback: string[];
   readonly apiKey: string | undefined;
+  /** Retired global snapshot (required by LlmEnv until its removal); assembly
+   * reads `routeMaxTokens` — tests set that for the wire budget. */
   readonly maxOutputTokens: number;
+  readonly routeMaxTokens?: number;
   readonly timeoutMs: number;
   readonly temperature: number;
   readonly thinking: "off" | "adaptive";

@@ -17,14 +17,27 @@
  * The compress group additionally pins ADR-0100: the default **strategy budget
  * window** = 256000, and the TUI and health display denominators reference the
  * same default constant (no duplicated literals).
+ *
+ * The output-budget group pins the migration gate: `IKNOW_LLM_MAX_OUTPUT_TOKENS`
+ * is retired, any non-empty value (process env or loaded env file) fails config
+ * loading with a typed error pointing at `models[].maxTokens`, and the field
+ * stays at its 32,000 default only when the legacy variable is unconfigured.
  */
 
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_STRATEGY_CONTEXT_WINDOW,
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
@@ -35,6 +48,8 @@ import { DEFAULT_CONTEXT_WINDOW as TUI_DEFAULT_CONTEXT_WINDOW } from "../../src/
 import { DEFAULT_CONTEXT_WINDOW as HEALTH_DEFAULT_CONTEXT_WINDOW } from "../../src/session-api/http.ts";
 import { getAutoCompactThreshold } from "../../src/harness/compress/threshold.ts";
 import {
+  formatLlmBudgetConfigError,
+  isLlmBudgetConfigError,
   loadIknowSettings,
   type IknowSettings,
 } from "../../src/config/settings.ts";
@@ -369,11 +384,10 @@ describe("loadIknowEnv — maxTurns (plan T5)", () => {
 
   it("maxTurns 与其它 LLM env 字段独立(不影响 maxOutputTokens / timeoutMs / temperature)", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "5";
-    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
     process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, 5);
-    assert.equal(env.llm.maxOutputTokens, 1024);
+    assert.equal(env.llm.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
     assert.equal(env.llm.timeoutMs, 30000);
   });
 });
@@ -505,11 +519,10 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
   it("timeoutMs 与其它 LLM env 字段独立(不影响 maxTurns / maxOutputTokens / temperature)", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "45000";
     process.env.IKNOW_LLM_MAX_TURNS = "7";
-    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "2048";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.timeoutMs, 45_000);
     assert.equal(env.llm.maxTurns, 7);
-    assert.equal(env.llm.maxOutputTokens, 2048);
+    assert.equal(env.llm.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
   });
 });
 
@@ -675,39 +688,205 @@ describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
   });
 });
 
-describe("loadIknowEnv — maxOutputTokens default", () => {
-  // Full rationale for the 32000 default: see the fallback comment in src/config/env.ts.
+describe("loadIknowEnv — IKNOW_LLM_MAX_OUTPUT_TOKENS 退役迁移门", () => {
+  const scratchDirs: string[] = [];
+
   beforeEach(() => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
-  });
-
-  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 32000 fallback", () => {
-    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.maxOutputTokens, 32_000);
-  });
-
-  it("显式 env 仍可覆盖 fallback", () => {
-    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "4096";
-    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.maxOutputTokens, 4096);
-  });
-
-  it("非正或非数字 env 值 → 回退 32000，不产生 max_tokens=0", () => {
-    for (const bad of ["0", "-1", "abc"]) {
-      process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = bad;
-      const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-      assert.equal(env.llm.maxOutputTokens, 32_000, `maxOutputTokens=${bad}`);
+    while (scratchDirs.length > 0) {
+      const dir = scratchDirs.pop();
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("有限正整数大值仍可作为 maxOutputTokens", () => {
-    const largeFiniteInteger = Number.MAX_SAFE_INTEGER;
-    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = String(largeFiniteInteger);
+  /** A temp cwd holding only an env file, so the legacy read is the subject. */
+  async function cwdWithEnvFile(name: string, body: string): Promise<string> {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-legacy-max-tokens-"));
+    scratchDirs.push(cwd);
+    await writeFile(join(cwd, name), body, "utf8");
+    return cwd;
+  }
+
+  /** A temp user layer holding one settings.json. */
+  async function homeWithSettings(
+    settingsText: string
+  ): Promise<{ home: string; cwd: string; userPath: string }> {
+    const root = await mkdtemp(join(tmpdir(), "iknow-legacy-max-home-"));
+    scratchDirs.push(root);
+    const home = join(root, "home");
+    const cwd = join(root, "cwd");
+    await mkdir(join(home, ".iknow"), { recursive: true });
+    await mkdir(join(cwd, ".iknow"), { recursive: true });
+    const userPath = join(home, ".iknow", "settings.json");
+    await writeFile(userPath, settingsText, "utf8");
+    return { home, cwd, userPath };
+  }
+
+  it("未设旧变量 → 正常装载，maxOutputTokens 保持 32000 默认", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.maxOutputTokens, largeFiniteInteger);
+    assert.equal(env.llm.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+    assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 32_000);
+  });
+
+  it("空串 / 纯空白旧变量 → 视为未配置，正常装载", () => {
+    for (const blank of ["", "   "]) {
+      process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = blank;
+      assert.equal(
+        loadIknowEnv(process.cwd(), EMPTY_SETTINGS).llm.maxOutputTokens,
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        `blank=${JSON.stringify(blank)} 应视为未配置`
+      );
+    }
+  });
+
+  it("process.env 里任何非空旧值 → typed 迁移错误，点名变量与 models[].maxTokens", () => {
+    for (const legacy of [
+      "4096",
+      "0",
+      "-1",
+      "abc",
+      "1.5",
+      String(Number.MAX_SAFE_INTEGER),
+    ]) {
+      process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = legacy;
+      let err: unknown;
+      try {
+        loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+      } catch (caught) {
+        err = caught;
+      }
+      assert.ok(
+        isLlmBudgetConfigError(err),
+        `旧值 ${legacy} 应抛 typed 迁移错误，实际 ${JSON.stringify(err)}`
+      );
+      assert.equal(err.kind, "legacy_max_output_tokens_env");
+      assert.equal(err.varName, "IKNOW_LLM_MAX_OUTPUT_TOKENS");
+      const text = formatLlmBudgetConfigError(err);
+      assert.match(text, /IKNOW_LLM_MAX_OUTPUT_TOKENS/);
+      assert.match(text, /models\[\]\.maxTokens/);
+    }
+  });
+
+  it("旧值经 .env / .env.local 装载进来 → 同样 fail-fast", async () => {
+    for (const name of [".env", ".env.local"]) {
+      const cwd = await cwdWithEnvFile(
+        name,
+        "IKNOW_LLM_MAX_OUTPUT_TOKENS=4096\n"
+      );
+      let err: unknown;
+      try {
+        loadIknowEnv(cwd, EMPTY_SETTINGS);
+      } catch (caught) {
+        err = caught;
+      }
+      assert.ok(isLlmBudgetConfigError(err), `${name} 的旧值应触发迁移错误`);
+      assert.equal(err.kind, "legacy_max_output_tokens_env");
+    }
+  });
+
+  it("注释行与空值行不算配置 → 正常装载", async () => {
+    const cwd = await cwdWithEnvFile(
+      ".env.local",
+      "# IKNOW_LLM_MAX_OUTPUT_TOKENS=4096\nIKNOW_LLM_MAX_OUTPUT_TOKENS=\n"
+    );
+    assert.equal(
+      loadIknowEnv(cwd, EMPTY_SETTINGS).llm.maxOutputTokens,
+      DEFAULT_MAX_OUTPUT_TOKENS
+    );
+  });
+
+  it("迁移错误只读配置：settings 文件字节不变，目录里不多出文件", async () => {
+    const settingsText =
+      JSON.stringify(
+        {
+          llm: {
+            model: "test/model",
+            providers: [
+              {
+                ...TEST_LLM_PROVIDER,
+                models: [{ id: "model", maxTokens: 131_072 }],
+              },
+            ],
+          },
+        },
+        null,
+        2
+      ) + "\n";
+    const { home, cwd, userPath } = await homeWithSettings(settingsText);
+    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "2048";
+    let err: unknown;
+    try {
+      loadIknowEnv(cwd, undefined, home);
+    } catch (caught) {
+      err = caught;
+    }
+    assert.ok(isLlmBudgetConfigError(err));
+    assert.equal(err.kind, "legacy_max_output_tokens_env");
+    assert.equal(await readFile(userPath, "utf8"), settingsText);
+    assert.deepEqual((await readdir(join(home, ".iknow"))).sort(), [
+      "settings.json",
+    ]);
+  });
+
+  it("合法 models[].maxTokens 经真实文件装载不抛，缺省条目同样通过", async () => {
+    const { home, cwd } = await homeWithSettings(
+      JSON.stringify({
+        llm: {
+          model: "test/model",
+          providers: [
+            {
+              ...TEST_LLM_PROVIDER,
+              models: [{ id: "model", maxTokens: 131_072 }],
+            },
+          ],
+        },
+      })
+    );
+    const env = loadIknowEnv(cwd, undefined, home);
+    assert.equal(env.llm.baseUrl, TEST_LLM_PROVIDER.baseUrl);
+    assert.equal(env.llm.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+
+    const absent = await homeWithSettings(
+      JSON.stringify({
+        llm: {
+          model: "test/model",
+          providers: [{ ...TEST_LLM_PROVIDER, models: [{ id: "model" }] }],
+        },
+      })
+    );
+    assert.equal(
+      loadIknowEnv(absent.cwd, undefined, absent.home).llm.maxOutputTokens,
+      DEFAULT_MAX_OUTPUT_TOKENS
+    );
+  });
+
+  it("settings 文件里显式非法 maxTokens → 装载即抛 typed 预算错误", async () => {
+    const { home, cwd } = await homeWithSettings(
+      JSON.stringify({
+        llm: {
+          model: "test/model",
+          providers: [
+            {
+              ...TEST_LLM_PROVIDER,
+              models: [{ id: "model", maxTokens: null }],
+            },
+          ],
+        },
+      })
+    );
+    let err: unknown;
+    try {
+      loadIknowEnv(cwd, undefined, home);
+    } catch (caught) {
+      err = caught;
+    }
+    assert.ok(isLlmBudgetConfigError(err));
+    assert.equal(err.kind, "model_max_tokens_invalid");
+    assert.equal(err.modelId, "model");
+    assert.match(formatLlmBudgetConfigError(err), /models\[\]\.maxTokens/);
   });
 });
 

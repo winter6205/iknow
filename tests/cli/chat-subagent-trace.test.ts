@@ -176,9 +176,14 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       IKNOW_LLM_STREAM: "off",
       IKNOW_PERMISSION_MODE: "full_auto",
       IKNOW_LLM_TIMEOUT_MS: "5000",
-      IKNOW_LLM_MAX_OUTPUT_TOKENS: "1024",
     };
     delete childEnv.IKNOW_TRACE_OUT;
+    // Retired global output-token knob: a non-empty value fails config load. It
+    // used to carry the small budget that kept this fixture's stream="off" arm
+    // legal — the SDK rejects any non-streaming request whose output budget
+    // exceeds 21,333 tokens client-side, so this test needs the per-model
+    // models[].maxTokens budget wired into the request to shrink it again.
+    delete childEnv.IKNOW_LLM_MAX_OUTPUT_TOKENS;
 
     child = spawn(
       process.execPath,

@@ -86,6 +86,7 @@ import {
 } from "./isolation/worktree-gate.js";
 import {
   wireModelFromRoute,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   type IknowEnv,
   type LlmEnv,
 } from "../config/env.js";
@@ -492,7 +493,9 @@ export function createAdapterFromEnv(
     createRealAnthropicAdapter({
       client,
       model: wireModelFromRoute(env.llm.model),
-      maxTokens: env.llm.maxOutputTokens,
+      // The budget belongs to the model entry this route matched; a silent
+      // entry falls back here, which is the only place that number is applied.
+      maxTokens: env.llm.routeMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       temperature: env.llm.temperature,
       // SSOT env→adapter params and stream arm. ADR-0094: overrides.thinking
       // present = per-turn override; absent = env value.

@@ -27,7 +27,9 @@
 ANTHROPIC_AUTH_TOKEN=<your_real_api_key_here>
 
 # --- 其它保留 env（可选，非必填）---------------------------------------------
-IKNOW_LLM_MAX_OUTPUT_TOKENS=32000
+# 输出 token 预算不再走 env：写在 models[].maxTokens 里（见第 3 节）。
+# IKNOW_LLM_MAX_OUTPUT_TOKENS 已退役 —— 设成任何非空值都会直接报
+# legacy_max_output_tokens_env 配置错误，不再静默覆盖模型条目。
 IKNOW_LLM_TIMEOUT_MS=300000
 IKNOW_LLM_TEMPERATURE=0
 IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
@@ -90,8 +92,10 @@ The user-layer `settings.json` actually carries only the **`llm` and `web` secti
 
 **Note**: the following fields are **not carried by settings.json**; they stay env-only (`process.env > .env.local > .env > code default`), and `parseLlm` / `parseWeb` ignore them if written into settings.json:
 
-- `baseUrl` (`IKNOW_LLM_BASE_URL`), `maxOutputTokens` (`IKNOW_LLM_MAX_OUTPUT_TOKENS`), `timeoutMs` (`IKNOW_LLM_TIMEOUT_MS`), `temperature` (`IKNOW_LLM_TEMPERATURE`), `stream` (`IKNOW_LLM_STREAM`)
+- `baseUrl` (`IKNOW_LLM_BASE_URL`), `timeoutMs` (`IKNOW_LLM_TIMEOUT_MS`), `temperature` (`IKNOW_LLM_TEMPERATURE`), `stream` (`IKNOW_LLM_STREAM`)
 - `chat.showThinking` (`IKNOW_CHAT_SHOW_THINKING`), `web.searchUrl` / `web.proxy` (`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`), `mcp.connectTimeoutMs` (`IKNOW_MCP_CONNECT_TIMEOUT_MS`)
+
+**The output-token budget is the one thing that moved the other way**: it is no longer an env-only setting. `IKNOW_LLM_MAX_OUTPUT_TOKENS` is retired — a non-empty value in the process environment, `.env`, or `.env.local` makes config loading fail with the typed error `legacy_max_output_tokens_env`, naming the variable and pointing at `models[].maxTokens`. Set the budget per model entry in the provider registry (`llm.providers[].models[].maxTokens`, a positive whole number): that value is sent to the provider as `max_tokens`, and an entry without it falls back to 32,000 tokens. A configured budget is a request budget, not a supplier hard limit (MiniMax M3 documents 524,288 tokens; the maintained example configures 131,072). An explicit illegal `models[].maxTokens` value (`null`, wrong type, zero, negative, fractional, beyond `Number.MAX_SAFE_INTEGER`) fails loading with `model_max_tokens_invalid` instead of silently dropping into the fallback. Neither error rewrites `~/.iknow/settings.json` — edit the file yourself.
 
 **Exception**: `web.searchBackend` (the **ACI web backend** single name) **is carried by settings.json** — closed set `"bing" | "tavily" | "exa" | "brave"`, resolution chain `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > default `"bing"`. An invalid env value throws a typed error; an invalid settings value is dropped by `parseWeb` in `src/config/settings.ts` (drop-not-throw, falls back to default). Currently only Exa is connected (`EXA_API_KEY`); missing search/fetch legs fall back to defaults, and stubs are never reported as connected. The call remains amplify (`bash` + `network: true`); no separate curl tool. Assembly-time field: a process restart is required after changing it (not on the hot-reload allowlist, see "hot reload" below).
 
@@ -140,8 +144,7 @@ cp .env.example .env.local     # .env.local 已 gitignore
 ```env
 IKNOW_LLM_BASE_URL=https://api.minimaxi.com/anthropic
 MINIMAX_API_KEY=<你的订阅 Key，从 https://platform.minimaxi.com/user-center/payment/token-plan 拿>
-# 可选（默认 32000 / 300000 / 0 / on，按需覆盖）
-IKNOW_LLM_MAX_OUTPUT_TOKENS=32000
+# 可选（默认 300000 / 0 / on，按需覆盖）；输出 token 预算不再走 env（见 3.1）
 IKNOW_LLM_TIMEOUT_MS=300000
 IKNOW_LLM_TEMPERATURE=0
 IKNOW_LLM_STREAM=on
