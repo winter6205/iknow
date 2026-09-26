@@ -197,4 +197,30 @@ describe("subagent worker: 非成功停因 → 信封状态 (Phase 4 修复)", (
     assert.equal(env.status, "failed");
     assert.equal(env.reason, "maxTurnsExceeded");
   });
+
+  it("truncation carrying tool_use: still failed, no tool runs, no summary round", async () => {
+    // The worker's only closing-summary call is the SIGTERM-timeout epilogue
+    // (reason "timeout"), so a truncation has no summary path at all; run()
+    // itself must not request one either.
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["partial answer cut off at max_tokens"],
+          toolCalls: [{ id: "toolu_a", name: "echo", input: {} }],
+          supplierStop: "truncation",
+        }),
+        assistantResult({
+          texts: ["summary that must never be requested"],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: BASE_ENVELOPE,
+      deps: makeDeps(adapter),
+    });
+
+    assert.equal(env.status, "failed");
+    assert.equal(env.stop_reason, "nonSuccessStop");
+  });
 });

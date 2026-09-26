@@ -30,6 +30,7 @@ import {
   resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
+  resolveTurnOutcomes,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
 import type { SessionStoreError } from "../../src/session-api/store/index.ts";
@@ -381,5 +382,113 @@ describe("SessionStore.appendOutcome (real store)", () => {
       () => store.appendOutcome({ id, turnId: "e0", stopReason: "completed" }),
       (err: unknown) => (err as SessionStoreError).kind === "write_failed"
     );
+  });
+});
+
+// -- supplier-stop detail on the outcome record (ADR-0126) -------------------
+
+describe("outcome record supplier-stop detail is optional and backward compatible", () => {
+  it("a record written without the field loads unchanged (no key synthesized)", () => {
+    const raw = [
+      headerLine("detail-legacy", "placeholder"),
+      eventLine("e0", null, userMsg("q")),
+      eventLine("e1", "e0", assistantMsg("a")),
+      headLine("e1"),
+      outcomeLine("e1", "nonSuccessStop"),
+    ].join("\n");
+    const log = parseSessionJsonl(`${raw}\n`);
+    const outcome = log.records[3] as SessionOutcomeRecord;
+    assert.equal(outcome.stopReason, "nonSuccessStop");
+    assert.equal("supplierDetail" in outcome, false);
+    assert.deepEqual(resolveTurnOutcomes(log).outcomes.get("e1"), outcome);
+  });
+
+  it("a normalized supplier detail round-trips through parse and resolution", () => {
+    const raw = [
+      headerLine("detail-known", "placeholder"),
+      eventLine("e0", null, userMsg("q")),
+      eventLine("e1", "e0", assistantMsg("a")),
+      headLine("e1"),
+      JSON.stringify({
+        type: "outcome",
+        turnId: "e1",
+        stopReason: "nonSuccessStop",
+        supplierDetail: "truncation",
+      }),
+    ].join("\n");
+    const log = parseSessionJsonl(`${raw}\n`);
+    const recorded = resolveTurnOutcomes(log).outcomes.get("e1");
+    assert.equal(recorded?.stopReason, "nonSuccessStop");
+    assert.equal(recorded?.supplierDetail, "truncation");
+  });
+
+  it("an unrecognized supplier detail is rejected as schema_invalid", () => {
+    const raw = [
+      headerLine("detail-bad", "placeholder"),
+      eventLine("e0", null, userMsg("q")),
+      headLine("e0"),
+      JSON.stringify({
+        type: "outcome",
+        turnId: "e0",
+        stopReason: "nonSuccessStop",
+        supplierDetail: "output_exhausted",
+      }),
+    ].join("\n");
+    assert.throws(
+      () => parseSessionJsonl(`${raw}\n`),
+      (err: unknown) => {
+        const e = err as { kind: string; field: string };
+        return e.kind === "schema_invalid" && e.field === "type";
+      }
+    );
+  });
+
+  it("appendOutcome persists the detail and a FRESH store reads it back", async () => {
+    const id = "outcome-detail-store";
+    await seedJsonl(
+      id,
+      [
+        headerLine(id, "placeholder"),
+        eventLine("e0", null, userMsg("q")),
+        eventLine("e1", "e0", assistantMsg("a")),
+        headLine("e1"),
+      ].join("\n")
+    );
+    await store.appendOutcome({
+      id,
+      turnId: "e1",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "truncation",
+    });
+
+    const lines = await readJsonlLines(id);
+    const persisted = lines[lines.length - 1] as Record<string, unknown>;
+    assert.deepEqual(persisted, {
+      type: "outcome",
+      turnId: "e1",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "truncation",
+    });
+
+    const reopened = new SessionStore(baseDir, process.cwd());
+    const projected = await reopened.projectTurnOutcomes(id);
+    assert.equal(projected.outcomes.get("e1")?.supplierDetail, "truncation");
+  });
+
+  it("appendOutcome without the detail writes no supplierDetail key at all", async () => {
+    const id = "outcome-detail-absent";
+    await seedJsonl(
+      id,
+      [
+        headerLine(id, "placeholder"),
+        eventLine("e0", null, userMsg("q")),
+        headLine("e0"),
+      ].join("\n")
+    );
+    await store.appendOutcome({ id, turnId: "e0", stopReason: "completed" });
+
+    const lines = await readJsonlLines(id);
+    const persisted = lines[lines.length - 1] as Record<string, unknown>;
+    assert.equal("supplierDetail" in persisted, false);
   });
 });

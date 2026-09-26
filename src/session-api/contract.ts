@@ -4,7 +4,11 @@
  * TurnDto.answer is the harness RunResult projection (TurnAnswerDto);
  * ApiErrorBody is nested under { error: { kind, message, ... } }.
  */
-import type { StopReason, TokenUsage } from "../harness/index.js";
+import type {
+  StopReason,
+  SupplierStopDetail,
+  TokenUsage,
+} from "../harness/index.js";
 import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactReason } from "../harness/compress/index.js";
@@ -99,7 +103,13 @@ export interface TurnAnswerDto {
  *  crash before the terminal event) and is deliberately NOT a StopReason
  *  member — `unknown` must never be confused with a stop decision. */
 export type TurnOutcomeView =
-  | { readonly terminal: "known"; readonly stopReason: StopReason }
+  | {
+      readonly terminal: "known";
+      readonly stopReason: StopReason;
+      /** ADR-0126: supplier-stop detail behind `nonSuccessStop`; absent when the
+       *  record carries none (including every outcome written before it). */
+      readonly supplierDetail?: SupplierStopDetail;
+    }
   | { readonly terminal: "unknown" };
 
 /** Wire view of the verification loop's final verdict (rounds + outcome)

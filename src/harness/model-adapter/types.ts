@@ -70,6 +70,17 @@ export type StopReason =
   | "timeout" // timeoutMs hit
   | "fused"; // this run fused on tool-loop stall (appended only; earlier values stable)
 
+/**
+ * ADR-0126: the adapter's normalized supplier stop minus `success` — the
+ * diagnostic detail a failed turn carries alongside its StopReason. Keyed off
+ * `AssistantTurnResult["supplierStop"]` so a new supplier value is listed here
+ * without a second hand-maintained union drifting.
+ */
+export type SupplierStopDetail = Exclude<
+  AssistantTurnResult["supplierStop"],
+  "success"
+>;
+
 /** State-machine transition (discriminated union, backward-compatible). */
 export type Transition =
   | { kind: "continue"; nextState: LoopState }
@@ -82,6 +93,13 @@ export interface RunResult {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly turnCount: number;
   readonly stopReason: StopReason;
+  /**
+   * ADR-0126: normalized supplier-stop detail behind a `nonSuccessStop`
+   * (`truncation` = the output budget was exhausted). Absent for every other
+   * stop — the StopReason union stays untouched and this field never
+   * substitutes for it.
+   */
+  readonly supplierDetail?: SupplierStopDetail;
   /**
    * ADR-0008: token usage of the last successful model call (for display;
    * the TUI reads it via hub-bridge straight from RunResult). Required field:

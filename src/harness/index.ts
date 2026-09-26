@@ -24,6 +24,7 @@ export type {
   AnthropicNativeMessage,
   LoopState,
   StopReason,
+  SupplierStopDetail,
   Transition,
   RunResult,
   AssistantProjection,

@@ -620,7 +620,13 @@ function projectOutcomeFields(
     ? { outcome: { terminal: "unknown" } }
     : {
         stopReason: recorded.stopReason,
-        outcome: { terminal: "known", stopReason: recorded.stopReason },
+        outcome: {
+          terminal: "known",
+          stopReason: recorded.stopReason,
+          ...(recorded.supplierDetail !== undefined
+            ? { supplierDetail: recorded.supplierDetail }
+            : {}),
+        },
       };
 }
 
@@ -3750,6 +3756,9 @@ export class SessionHub {
       id: conversationId,
       turnId,
       stopReason: result.stopReason,
+      ...(result.supplierDetail !== undefined
+        ? { supplierDetail: result.supplierDetail }
+        : {}),
     });
   }
 

@@ -2566,3 +2566,100 @@ describe("turn outcome persistence (SC7 / SC14)", () => {
     assert.equal("stopReason" in answer, false);
   });
 });
+
+// -- T5/T6: settled truncation turn persists its supplier-stop detail ---------
+
+describe("turn outcome supplier-stop detail (output-limit truncation)", () => {
+  const outcomeRecordsOf = async (
+    id: string
+  ): Promise<Array<Record<string, unknown>>> => {
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r["type"] === "outcome");
+  };
+
+  it("a settled truncation turn records nonSuccessStop with detail truncation, live and reopened", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const res = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal(res.turn.answer.stopReason, "nonSuccessStop");
+
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "nonSuccessStop");
+    assert.equal(outcomes[0]!["supplierDetail"], "truncation");
+    assert.equal(outcomes[0]!["turnId"], await store.readHead(id));
+
+    const reopened = await hub.getSession(id);
+    assert.equal(reopened.turns.length, 1, "the closeout opens no new human turn");
+    assert.deepEqual(reopened.turns[0]!.answer.outcome, {
+      terminal: "known",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "truncation",
+    });
+  });
+
+  it("a protocolError stop persists no supplier detail (the field is never synthesized)", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({ texts: ["hi"], supplierStop: "success" }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "go" });
+
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal("supplierDetail" in outcomes[0]!, false);
+  });
+
+  it("injected outcome-append failure on a truncation turn surfaces typed failure and never completes (SC14)", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const spy = vi.spyOn(store, "appendOutcome").mockRejectedValue({
+      kind: "write_failed",
+      conversation_id: id,
+      cause: "injected",
+    } satisfies SessionStoreError);
+    try {
+      await assert.rejects(
+        () => hub.postMessage({ conversationId: id, text: "go" }),
+        (err: unknown) => (err as SessionStoreError).kind === "write_failed"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 0);
+    const res = await hub.getSession(id);
+    assert.deepEqual(res.turns[0]!.answer.outcome, { terminal: "unknown" });
+    assert.notEqual(res.turns[0]!.answer.stopReason, "completed");
+  });
+});

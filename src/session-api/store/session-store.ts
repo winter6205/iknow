@@ -43,6 +43,7 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   StopReason,
+  SupplierStopDetail,
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
 import { closeoutOrphanToolUses } from "./closeout-projection.js";
@@ -576,8 +577,9 @@ export class SessionStore {
     readonly id: string;
     readonly turnId: string;
     readonly stopReason: StopReason;
+    readonly supplierDetail?: SupplierStopDetail;
   }): Promise<void> {
-    const { id, turnId, stopReason } = opts;
+    const { id, turnId, stopReason, supplierDetail } = opts;
     if (!isStopReason(stopReason)) {
       throw {
         kind: "schema_invalid",
@@ -591,6 +593,7 @@ export class SessionStore {
       type: "outcome",
       turnId,
       stopReason,
+      ...(supplierDetail !== undefined ? { supplierDetail } : {}),
     };
     try {
       await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");

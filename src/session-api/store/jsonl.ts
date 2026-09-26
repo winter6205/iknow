@@ -52,6 +52,7 @@
 import type {
   AnthropicNativeMessage,
   StopReason,
+  SupplierStopDetail,
   TokenUsage,
 } from "../../harness/index.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
@@ -195,6 +196,13 @@ export interface SessionOutcomeRecord {
   readonly type: "outcome";
   readonly turnId: string;
   readonly stopReason: StopReason;
+  /**
+   * ADR-0126: the normalized supplier-stop detail behind a `nonSuccessStop`
+   * (`truncation` = the output budget was exhausted). Optional and never
+   * synthesized: a record written before this field, or a stop that carries no
+   * supplier detail, loads with the key simply absent.
+   */
+  readonly supplierDetail?: SupplierStopDetail;
 }
 
 /** All record shapes after the header (in file order). */
@@ -679,11 +687,36 @@ export function isStopReason(value: unknown): value is StopReason {
   );
 }
 
-function isOutcomeRecord(value: unknown): value is SessionOutcomeRecord {
+/** Same keyed-off-the-union discipline as `STOP_REASON_MEMBERS`, for the
+ *  outcome's supplier-stop detail (ADR-0126). */
+const SUPPLIER_STOP_DETAIL_MEMBERS: Record<SupplierStopDetail, true> = {
+  truncation: true,
+  refusal: true,
+  other: true,
+};
+
+export function isSupplierStopDetail(
+  value: unknown
+): value is SupplierStopDetail {
   return (
-    isRecord(value) &&
-    value["type"] === "outcome" &&
-    typeof value["turnId"] === "string" &&
-    isStopReason(value["stopReason"])
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(SUPPLIER_STOP_DETAIL_MEMBERS, value)
+  );
+}
+
+function isOutcomeRecord(value: unknown): value is SessionOutcomeRecord {
+  if (
+    !isRecord(value) ||
+    value["type"] !== "outcome" ||
+    typeof value["turnId"] !== "string" ||
+    !isStopReason(value["stopReason"])
+  ) {
+    return false;
+  }
+  // Absent is the backward-compatible shape; a present value must be one the
+  // adapter can actually normalize to.
+  return (
+    !("supplierDetail" in value) ||
+    isSupplierStopDetail(value["supplierDetail"])
   );
 }
