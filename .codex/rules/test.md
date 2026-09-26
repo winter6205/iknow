@@ -9,6 +9,10 @@ When adding or changing business logic, prioritize adding or updating tests befo
 5. Empty or invalid input.
 6. Concurrent or repeated submission, when applicable.
 
+## Docs-only commits
+
+When the staged diff contains only markdown documents (`docs/`, `specs/`, root `*.md`) and no code, typecheck and test suites are not the contract for the change: `.husky/pre-commit` fast-paths such commits (skips `typecheck` + `test:changed`, keeps lint-staged formatting). If a docs-only commit still triggers a full suite run (e.g. `vitest --changed` degrading to whole-suite on a no-code diff), committing with the hook bypassed is authorized for that commit; state "docs-only" in the commit body.
+
 Do not delete tests or weaken assertions to make a build pass. A deleted or replaced test must be covered by an equivalent or stronger test and have a rationale, authorization, and explanation in the commit body. Do not mark a failing test as skipped unless explicitly authorized and the reason is documented.
 
 ## Session and trace evidence
