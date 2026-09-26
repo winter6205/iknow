@@ -1,0 +1,93 @@
+# Unified Shell Parsing Migration Plan
+
+**Status date:** 2026-09-26
+**Scope:** Complete the migration in issue #1132 after Stage 1.
+**Behavior contract:** [Stage 0 foundation](../specs/shell-parse-foundation.md), [Stage 1 substitution walls](../specs/substitution-hard-walls.md), [Stages 2–4 migration](../specs/hard-wall-ast-migration.md), and ADR-0123 through ADR-0125. These sources own detailed acceptance criteria. This document is the tracked execution order and status map; it does not replace their contracts.
+
+## Current status
+
+| Stage                                                      | Status                                            | Rollback unit |
+| ---------------------------------------------------------- | ------------------------------------------------- | ------------- |
+| Stage 0: parse foundation and offline divergence tool      | Merged in PR #1139 (`d82ce3048`)                  | Complete      |
+| Stage 1: substitution matrix                               | Merged in PR #1140 (`c8536bcad`; includes T7–T14) | Complete      |
+| Stage 2: destructive walls and sensitive-path command scan | Next                                              | One PR        |
+| Stage 3: bare-metachar and root-find walls                 | Pending Stage 2                                   | One PR        |
+| Stage 4a: splitter consumers and splitter retirement       | Pending Stage 3                                   | One PR        |
+| Stage 4b: command-name roster consolidation                | Pending Stage 4a                                  | One PR        |
+
+The existing `shell-parse/stage-2` worktree points at the Stage 1 merge base `fc25dd3f2` and has no unique commits. Refresh it from current `master` before implementation. Preserve unrelated working-tree changes.
+
+## Dependency graph
+
+```text
+Stage 0 ✓ → Stage 1 ✓ → Stage 2: T15 → T16 → T17 → T18 → T19
+                                  ↓
+                     Stage 3: T20 → T21
+                                  ↓
+                     Stage 4a: T22 → (T23 ∥ T24 ∥ T25) → T26
+                                                        ↓
+                     Stage 4b: T27
+```
+
+Production changes proceed across stages in order. The only planned implementation parallelism is T23/T24/T25, after T22 establishes the shared parse-fact view. Read-only exploration can happen earlier if it does not edit shared files.
+
+## Stage 2 — destructive walls and sensitive paths (T15–T19)
+
+**Goal:** Move destructive-rm, destructive-disk, and the command-level sensitive-path scan to parse-derived judgments. Retain the text scan as the parser-unavailable fallback. The only behavior changes are the relaxations already specified by ADR-0125 and SC-S2-1 / SC-S2-7.
+
+| Task                            | Outcome and acceptance source                                                                                                                                                                                                                                                                                      | Dependency / ownership                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| T15 — Expand                    | Add AST argv rules alongside the existing text scan; no verdict moves. Account for every destructive roster entry and the declared interpreter / shell code-operand cases. **SC-S2-8, SC-S2-9**                                                                                                                    | After Stage 1. Owner of `hard-walls.ts` for this stage. |
+| T16 — Migrate rm                | Inert quoted/comment/data-heredoc text and dangerous substrings in non-destructive operands stop triggering the rm wall; real rm argv, interpreter code, substitutions, and shell `-c` payloads remain denied. **SC-S2-1–4**                                                                                       | After T15. Same `hard-walls.ts` owner.                  |
+| T17 — Migrate disk and format   | Move disk-tool judgments to argv; preserve the lexical `format` rule; place the fork-bomb rule on its structural AST condition and preserve its approved reason/id transition. **SC-S2-5, SC-S2-8, SC-S2-9, SC-GATES-6**                                                                                           | After T16. Same owner; do not parallelize with T16.     |
+| T18 — Contract destructive scan | Remove the destructive substring loop from the parsed path while preserving wrappers, escaped command words, deny tier, and the full-strength text fallback. **SC-GATES-4, SC-GATES-5**                                                                                                                            | After T17. Same owner.                                  |
+| T19 — Sensitive path            | Make the command-level sensitive-path judgment quote-aware with the narrowly specified excision: comments and non-interpreter quoted-delimiter heredoc bodies only. Keep operands, redirect targets, unquoted bodies, and interpreter code judged; do not change the fragment roster or path-tool arm. **SC-S2-7** | After T18; same PR and `hard-walls.ts` owner.           |
+
+**Stage 2 exit gate:** SC-S2-1 through SC-S2-9 and SC-GATES-1 through SC-GATES-6 pass; Stage 0 divergence report has no unreviewed rows under SC-S2-6; security-bypass replay remains unchanged and passes; scoped permission/ACI suites and typecheck pass; diff-scope is limited to the Stage 2 spec allow-list; code review and verification pass. This PR must be independently revertable.
+
+## Stage 3 — bare metacharacters and root-find (T20–T21)
+
+**Goal:** Replace the remaining structural text decisions with facts from the shared parse while preserving each wall's existing meaning and precedence.
+
+| Task                     | Outcome and acceptance source                                                                                                                                                                           | Dependency / ownership                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| T20 — Bare metacharacter | Deny only when the whole command has zero command nodes; preserve the existing deny/no-hit sets and first-claim behavior. Confirm Stage 0 models the required command-less shapes. **SC-S3-1, SC-S3-3** | After Stage 2; owner of `hard-walls.ts`. |
+| T21 — Root-find walk     | Fold over ordered command nodes, redirects, and `cd` state; preserve GNU find operand ordering, wrappers, reasons, and un-overridability. **SC-S3-2**                                                   | After T20; same owner.                   |
+
+**Stage 3 exit gate:** SC-S3-1 through SC-S3-4 and SC-GATES-1 through SC-GATES-6 pass; the Stage 0 corpus shows no new bare-metachar or root-find divergence; the splitter remains available for Stage 4; scoped suites, typecheck, diff-scope proof, review, and verification pass. This PR must be independently revertable.
+
+## Stage 4a — consumer migration and splitter retirement (T22–T26)
+
+**Goal:** Re-home three external consumers and the declarative rule splitter onto parse facts, then remove the splitter's export while keeping its private text segmentation for parser-unavailable fallback.
+
+| Task                                         | Outcome and acceptance source                                                                                                                                                                                                                                                              | Dependency / file ownership                                                     |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| T22 — Expand parse facts                     | Expose a parse-derived view for argv, redirects, stdin source, quote state, and substitution boundaries. Demonstrate each consumer's answer against current segmentation before production callers move. Declare each non-`ok` answer. **Field-level consumer contract; SC-S4-1, SC-S4-7** | After Stage 3. Shared preparation task; do not overlap consumer migrations.     |
+| T23 — Readonly gate                          | Move readonly admission to parse facts while preserving command/flag tables, redirect and background denials, quoted-flag behavior, and `ReadonlyViolationError`. **SC-S4-1**                                                                                                              | After T22. Own `bash-readonly.ts` and readonly tests.                           |
+| T24 — Read ledger and role-substitution gate | Move `extractSingleReadPath` and the grep-family recognition gate to parse facts. Preserve fail-closed ledger behavior and keep the role-substitution gate silent on non-`ok` parses and on substitution-body commands. **SC-S4-1**                                                        | After T22. Own `bash-read-extract.ts`, `role-substitution.ts`, and their tests. |
+| T25 — Declarative rules                      | Replace `splitCommandSegments` input with parse-derived segments while preserving its distinct separator set and fail-toward-no-match quote behavior. **SC-S4-3**                                                                                                                          | After T22. Own `declarative.ts` and its tests.                                  |
+| T26 — Contract splitter export               | Remove the public `splitShellSegments` export after all consumers have moved; retain its private text implementation for the degrade path. Include the four-input divergence review, performance artifact, and standalone revert proof. **SC-S4-2, SC-S4-5–7**                             | After T23, T24, and T25. Integrator owns `hard-walls.ts`.                       |
+
+**Parallel dispatch:** T23, T24, and T25 may run concurrently after T22. Their production ownership is disjoint. Keep test ownership with each worker; integrate and run the combined Stage 4a gates before T26 lands. Never have two workers edit `hard-walls.ts` concurrently.
+
+**Stage 4a exit gate:** SC-S4-1 through SC-S4-3 and SC-S4-5 through SC-S4-7 plus SC-GATES-1 through SC-GATES-6 pass; four decision-input outputs are reviewed with no unexplained divergence; steady-state median overhead is at most 5 ms and initialization remains within the Stage 0 200 ms bound; splitter export is gone but fallback behavior remains; scoped suites, typecheck, diff-scope proof, review, and verification pass. This PR must be independently revertable.
+
+## Stage 4b — command-name roster (T27)
+
+**Goal:** Consolidate the existing command-name sets and interpreter names into one frozen permission-context roster without changing any membership, flag policy, consumer input, or verdict. Keep environment-variable names outside this command roster.
+
+**Acceptance:** SC-S4-4 passes its two-sided membership and table-identity comparisons; only the permitted roster and name-definition sites change; affected permission, readonly, read-extract, role-substitution, and worktree-gate suites pass with expectations untouched; SC-GATES-1 through SC-GATES-6 pass. Keep 4b in a separate PR from 4a so either stage can be reverted independently.
+
+## Gates for every implementation PR
+
+- Keep `tests/harness/aci/security-bypass-replay.test.ts` byte-unchanged and passing (SC-GATES-1).
+- Review every offline divergence row against the stage's allowed classes and cite the owning criterion; no unexplained row reaches merge (SC-GATES-3).
+- Add no feature flag or environment escape hatch. Keep the parser-unavailable fallback at least as strong as the existing text scan (SC-GATES-4).
+- Add no ask destination and do not soften a hard-wall deny. Keep `HardRuleSpec.decision` deny-only and preserve its override behavior (SC-GATES-5).
+- Preserve the reason wrapper and existing description strings, except the single fork-bomb id move explicitly authorized by Stage 2 (SC-GATES-6).
+- Use a provisioned worktree (`vendor/ripgrep` is ignored and must be copied in) before interpreting POSIX bracket-class failures. Run only the suites required by the stage spec, plus typecheck; stop debug servers after interaction tests.
+- Each stage is one rollback PR and one revert. If several stages must be rolled back, revert in reverse order: 4b → 4a → 3 → 2 → 1 → 0.
+
+## Final delivery
+
+After Stage 4b, run the final review and required real MCP interaction through the available terminal MCP/CLI serve path. Cover at least: benign quoted `$(whoami)` passes; active `$(rm -rf /)` denies with the inner substitution reason; full-auto behavior preserves the deny tier; parser degradation displays the TUI warning. Complete `arthurpower:code-review`; if blocked, repair its findings and repeat verification. Publish the reviewed PR with `Closes winter6205/iknow#1132` and the measured validation results.
