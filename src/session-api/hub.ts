@@ -150,6 +150,7 @@ import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
+import type { SessionOutcomeRecord } from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
 import { readWorkerInFlightToolName } from "./store/index.js";
 import {
@@ -214,6 +215,7 @@ import type {
   RewindTargetsResponse,
   SessionSummary,
   SkillSummaryDto,
+  TurnAnswerDto,
   TurnDto,
   VerifyAnswerView,
 } from "./contract.js";
@@ -332,7 +334,7 @@ export function parseGoalCommand(text: string): string | null {
  * builds a fresh one each time), so identity comparison is useless.
  * "settings file touched but content unchanged" must be decided by value
  * across all createAdapterFromEnv inputs: model / apiKey / baseUrl /
- * headers / maxOutputTokens / temperature / stream + thinking controller's
+ * headers / routeMaxTokens / temperature / stream + thinking controller's
  * thinking / thinkingEffort. fallback is unrelated to the adapter but
  * reflects config changes, so it is compared too (element-wise,
  * order-sensitive).
@@ -341,7 +343,7 @@ function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.model !== b.model) return false;
   if (a.apiKey !== b.apiKey) return false;
   if (a.baseUrl !== b.baseUrl) return false;
-  if (a.maxOutputTokens !== b.maxOutputTokens) return false;
+  if (a.routeMaxTokens !== b.routeMaxTokens) return false;
   if (a.temperature !== b.temperature) return false;
   if (a.stream !== b.stream) return false;
   if (a.thinking !== b.thinking) return false;
@@ -560,7 +562,10 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
 /**
  * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
  * Pairs each user message with its subsequent assistant message.
- * Projection is non-authoritative: stopReason/turnCount are lossy.
+ * Projection is non-authoritative: turnCount is lossy, and stopReason is only
+ * authoritative when `outcomeEvidence` is supplied (ADR-0126) — then it comes
+ * from the turn's persisted terminal outcome record, and a turn with no record
+ * projects `outcome: {terminal:"unknown"}` with no stopReason at all.
  *
  * Also projects thinking/toolCalls per turn (messages between this user
  * query and the next real query message, per `isTurnQuery`). Output is
@@ -587,6 +592,38 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
  * retired.
  */
 
+/** ADR-0126: the durable outcome evidence a history projection may consult —
+ *  the active head chain's event ids (index-aligned with the projected
+ *  messages) plus the terminal outcome recorded per anchor. Obtained from
+ *  `SessionStore.projectTurnOutcomes`. */
+export interface TurnOutcomeEvidence {
+  readonly messageEventIds: ReadonlyArray<string>;
+  readonly outcomes: ReadonlyMap<string, SessionOutcomeRecord>;
+}
+
+/** Answer fields carrying the turn's terminal state, from the persisted
+ *  outcome at `anchorId` when this projection has evidence to consult. Without
+ *  a record the answer keeps `outcome: {terminal:"unknown"}` and omits
+ *  `stopReason` (ADR-0126: absent evidence is not a completion). */
+function projectOutcomeFields(
+  evidence: TurnOutcomeEvidence | undefined,
+  anchorId: string | undefined
+): Pick<TurnAnswerDto, "stopReason" | "outcome"> {
+  if (evidence === undefined) {
+    // No ledger evidence at all (a pure message-array caller): pre-ADR-0126
+    // shape, so those projections stay byte-stable.
+    return { stopReason: "completed" };
+  }
+  const recorded =
+    anchorId === undefined ? undefined : evidence.outcomes.get(anchorId);
+  return recorded === undefined
+    ? { outcome: { terminal: "unknown" } }
+    : {
+        stopReason: recorded.stopReason,
+        outcome: { terminal: "known", stopReason: recorded.stopReason },
+      };
+}
+
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   thinkingMs?: ReadonlyArray<number | null>,
@@ -595,7 +632,12 @@ export function projectMessagesToTurns(
    *  definition that turn's reading; earlier turns' usage is unknowable from
    *  a single ledger). Absent/null → no key anywhere (byte-stable pattern as
    *  thinking/toolCalls/lastUsage). */
-  lastUsage?: TokenUsage | null
+  lastUsage?: TokenUsage | null,
+  /** ADR-0126: terminal outcomes of the active head chain. When present, a
+   *  turn's stopReason comes from the record anchored on its terminal event
+   *  and a turn with no record projects `unknown` instead of a synthesized
+   *  completion. */
+  outcomeEvidence?: TurnOutcomeEvidence
 ): TurnDto[] {
   const mask = createOutputMask(currentSecretValues()).mask;
   const turns: TurnDto[] = [];
@@ -618,11 +660,21 @@ export function projectMessagesToTurns(
       thinkingMs,
       startIndex: i,
     });
+    // A load may append orphan-tool-use closeout messages that have no event
+    // of their own, so the terminal event of the last real turn is the head.
+    const anchorIndex = Math.min(
+      end - 1,
+      (outcomeEvidence?.messageEventIds.length ?? 0) - 1
+    );
+    const outcomeFields = projectOutcomeFields(
+      outcomeEvidence,
+      outcomeEvidence?.messageEventIds[anchorIndex]
+    );
     turns.push({
       query,
       answer: {
         finalText,
-        stopReason: "completed",
+        ...outcomeFields,
         turnCount: turnIndex,
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
@@ -1785,6 +1837,10 @@ export class SessionHub {
 
   async getSession(conversationId: string): Promise<GetSessionResponse> {
     const file = await this.store.load(conversationId);
+    // ADR-0126: reopened history is projected against the ACTIVE head chain's
+    // persisted outcomes, so a rewind/reopen can never surface an abandoned
+    // branch's terminal state.
+    const evidence = await this.store.projectTurnOutcomes(conversationId);
     return {
       session: this.summarize({ file }),
       // D2 (tui-display-consistency): pass file.thinkingMs parallel array so
@@ -1794,7 +1850,8 @@ export class SessionHub {
       turns: projectMessagesToTurns(
         file.messages,
         file.thinkingMs,
-        file.lastUsage
+        file.lastUsage,
+        evidence
       ),
     };
   }
@@ -2894,7 +2951,14 @@ export class SessionHub {
         }
         return {
           session: this.summarize({ file }),
-          turns: projectMessagesToTurns(file.messages),
+          // ADR-0126: outcomes resolve against the NEW head chain, so the
+          // rewound-away branch's terminal state drops out with its messages.
+          turns: projectMessagesToTurns(
+            file.messages,
+            file.thinkingMs,
+            file.lastUsage,
+            await this.store.projectTurnOutcomes(conversationId)
+          ),
           head: await this.store.readHead(conversationId),
           ...(codeRestore !== undefined ? { codeRestore } : {}),
         };
@@ -3660,7 +3724,33 @@ export class SessionHub {
           root === undefined ? updated : { ...updated, workspaceRoot: root },
       });
     });
+    await this.appendTurnOutcome(conversationId, session, updated, result);
     return true;
+  }
+
+  /** ADR-0126: persist the settled turn's terminal outcome. Anchored on the
+   *  persisted head — the turn's terminal message event — which keeps the
+   *  identity stable for a `/continue` that appended no human message; a
+   *  failure propagates as the store's typed error so the caller never reports
+   *  a turn completed whose terminal record is missing.
+   *
+   *  Skipped when this turn added nothing to the transcript: the head still
+   *  points at the PREVIOUS turn's terminal event, and writing there would
+   *  overwrite that turn's outcome with this one's stop reason. */
+  private async appendTurnOutcome(
+    conversationId: string,
+    prior: SessionFileV1,
+    updated: SessionFileV1,
+    result: RunResult
+  ): Promise<void> {
+    if (updated.messages.length <= prior.messages.length) return;
+    const turnId = await this.store.readHead(conversationId);
+    if (turnId === null) return;
+    await this.store.appendOutcome({
+      id: conversationId,
+      turnId,
+      stopReason: result.stopReason,
+    });
   }
 
   private async consumeDirtyRootOnSave(

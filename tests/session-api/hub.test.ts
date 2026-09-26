@@ -2402,3 +2402,167 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     assert.equal(loaded.turnCount, 1);
   });
 });
+
+// -- T4: durable terminal turn outcome (SC7 / SC14 persistence half) ----------
+
+describe("turn outcome persistence (SC7 / SC14)", () => {
+  const outcomeRecords = async (
+    id: string
+  ): Promise<Array<Record<string, unknown>>> => {
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r["type"] === "outcome");
+  };
+  const lastHead = async (id: string): Promise<string | null> =>
+    store.readHead(id);
+
+  it("a settled completed turn appends exactly one outcome anchored to the persisted head", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["hi"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "hello" });
+
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "completed");
+    assert.equal(outcomes[0]!["turnId"], await lastHead(id));
+
+    // Reopen projects the authoritative outcome (known → completed), not a synthesis.
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    assert.equal(res.turns[0]!.answer.stopReason, "completed");
+    assert.deepEqual(res.turns[0]!.answer.outcome, {
+      terminal: "known",
+      stopReason: "completed",
+    });
+  });
+
+  it("reopen with a missing outcome projects unknown and does not synthesize completed (SC7)", async () => {
+    // Legacy transcript: messages present, no outcome record at all.
+    const id = "outcome-legacy-reopen";
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, `${id}${SESSION_JSONL_EXT}`),
+      [
+        JSON.stringify({
+          type: "session",
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          conversation_id: id,
+          title: "q",
+          cwd: "/tmp/test",
+          sanitized_at: "2026-01-01T00:00:00.000Z",
+          jsonMode: false,
+          turnCount: 1,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          checkpoints: [],
+          workspaceRoot: process.cwd(),
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "e1",
+          parent: "e0",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "a" }],
+          },
+        }),
+        JSON.stringify({ type: "head", id: "e1" }),
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    const hub = makeHub(makeDeps([]));
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    // Unknown is carried independently of StopReason; no fabricated completed.
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
+    assert.equal("stopReason" in answer, false);
+  });
+
+  it("/continue settles with no new human message and still appends exactly one outcome (SC7)", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["continued"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [
+            userMsg("do"),
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "t1", name: "noop", input: {} },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "t1", content: "ok" },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+
+    const res = await hub.continueSession(id);
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "completed");
+    // Identity is the turn's terminal message event, not a newly appended query.
+    assert.equal(outcomes[0]!["turnId"], await lastHead(id));
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 4);
+    assert.equal(loaded.messages[3]!.role, "assistant");
+  });
+
+  it("injected outcome-append failure surfaces typed persistence failure and never reports completed (SC14)", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["hi"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const spy = vi.spyOn(store, "appendOutcome").mockRejectedValue({
+      kind: "write_failed",
+      conversation_id: id,
+      cause: "injected",
+    } satisfies SessionStoreError);
+    try {
+      await assert.rejects(
+        () => hub.postMessage({ conversationId: id, text: "hello" }),
+        (err: unknown) => (err as SessionStoreError).kind === "write_failed"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // The turn is NOT reported completed anywhere; the messages landed but the
+    // terminal outcome did not (the crash-before-outcome shape).
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 0);
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
+    assert.equal("stopReason" in answer, false);
+  });
+});

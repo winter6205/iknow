@@ -18,7 +18,19 @@ export const MAX_MESSAGE_CHARS = 8000;
  *  messages/trace are never exposed on the wire. */
 export interface TurnAnswerDto {
   readonly finalText: string; // maps RunResult.finalText
-  readonly stopReason: StopReason; // reuses the harness StopReason union (incl. fused)
+  /** Reuses the harness StopReason union (incl. fused). Present on every live
+   *  turn answer and on a reopened turn whose terminal outcome record exists;
+   *  absent when a reopened turn has no terminal record — that state is
+   *  carried by `outcome: { terminal: "unknown" }` (ADR-0126), so history
+   *  never claims a completion it cannot prove. */
+  readonly stopReason?: StopReason;
+  /** ADR-0126: durable terminal-outcome projection of this turn. `known`
+   *  mirrors the persisted outcome record's StopReason; `unknown` = no record
+   *  (legacy history, or a crash before the terminal event). Clients must
+   *  render incompleteness notices from this field, never from the presence of
+   *  assistant text. Absent = the projection had no outcome evidence to
+   *  consult (live turn before persist; pre-ADR-0126 producers). */
+  readonly outcome?: TurnOutcomeView;
   readonly turnCount: number; // maps RunResult.turnCount (starts at 0 per run())
   /** All non-empty assistant thinking texts within the turn, in block order.
    *  Empty thinking skipped; whole field omitted when there is none. */
@@ -81,6 +93,14 @@ export interface TurnAnswerDto {
     readonly message: string;
   };
 }
+
+/** ADR-0126: turn-outcome projection. `known` carries the persisted terminal
+ *  StopReason; `unknown` is the absence of terminal evidence (legacy history /
+ *  crash before the terminal event) and is deliberately NOT a StopReason
+ *  member — `unknown` must never be confused with a stop decision. */
+export type TurnOutcomeView =
+  | { readonly terminal: "known"; readonly stopReason: StopReason }
+  | { readonly terminal: "unknown" };
 
 /** Wire view of the verification loop's final verdict (rounds + outcome)
  *  for UI surfaces. "passed" is a success state; abort / disabled never

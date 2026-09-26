@@ -22,6 +22,13 @@
  *      cache: the load path overrides it from the latest event and
  *      save/rewind refresh the cache from event text on the write path, so
  *      extractTitle only acts as a placeholder when no title event exists.
+ *   5. outcome record (ADR-0126): `{type:"outcome", turnId, stopReason}` — one
+ *      authoritative terminal outcome per settled host turn, keyed to a stable
+ *      turn identity (`turnId` = the turn's terminal message event id, i.e. the
+ *      persisted head after that turn's save). Like the title event it is off
+ *      the message chain, so abandoned fork branches never leak into
+ *      projection; a turn with no outcome record projects as unknown (never a
+ *      synthesized completion).
  *
  * Named EXIT (exception class): `drop-trailing-corrupt-line` — if the last
  * non-empty line fails JSON.parse, drop that line and still load (the only
@@ -44,6 +51,7 @@
  */
 import type {
   AnthropicNativeMessage,
+  StopReason,
   TokenUsage,
 } from "../../harness/index.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
@@ -175,9 +183,26 @@ export interface SessionTitleRecord {
   readonly text: string;
 }
 
+/** ADR-0126: terminal outcome of one settled host turn. Not part of the
+ *  message chain (same posture as the title event), so an abandoned fork
+ *  branch's outcome can never surface on the active chain. `turnId` is the
+ *  turn's terminal message event id — the persisted head once that turn's
+ *  messages landed — which stays stable for a `/continue` turn that appends no
+ *  human message. File order = append order; the read path takes the last one
+ *  per anchor. A turn with no record is unknown, never a synthesized
+ *  completion. */
+export interface SessionOutcomeRecord {
+  readonly type: "outcome";
+  readonly turnId: string;
+  readonly stopReason: StopReason;
+}
+
 /** All record shapes after the header (in file order). */
 export type SessionTailRecord =
-  SessionEventRecord | SessionHeadRecord | SessionTitleRecord;
+  | SessionEventRecord
+  | SessionHeadRecord
+  | SessionTitleRecord
+  | SessionOutcomeRecord;
 
 export type SessionJsonlRecord = SessionHeaderRecord | SessionTailRecord;
 
@@ -206,9 +231,9 @@ export interface ParsedSessionLog {
   /** N of the largest `e<N>` among events; -1 when there are none
    *  (appendEvents continues numbering from +1). */
   readonly maxEventIndex: number;
-  /** All records after the header (event / head / title), in file order.
-   *  The save header-refresh rewrite relies on them being preserved verbatim
-   *  (including historical head records). */
+  /** All records after the header (event / head / title / outcome), in file
+   *  order. The save header-refresh rewrite relies on them being preserved
+   *  verbatim (including historical head records). */
   readonly records: ReadonlyArray<SessionTailRecord>;
 }
 
@@ -310,6 +335,12 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
       // ADR-0113: title events are off the message chain; they do not change
       // head/maxEventIndex, only ride along in records and are consumed by
       // latestTitleText.
+      tail.push(rec);
+      continue;
+    }
+    if (isOutcomeRecord(rec)) {
+      // ADR-0126: same off-chain posture as the title event — records only,
+      // never head/maxEventIndex, resolved against the head chain on read.
       tail.push(rec);
       continue;
     }
@@ -488,6 +519,25 @@ export function headChainEvents(
   return chainFromHead(log, log.head);
 }
 
+/** ADR-0126: turn outcomes resolved against one transcript's active head
+ *  chain (see `SessionStore.projectTurnOutcomes`). Outcome records whose
+ *  anchor is not on the chain — a rewound-away branch, a compacted prefix —
+ *  are dropped here, which is why the event is off-chain in the first place.
+ *  Later records win for the same anchor (append-only re-record). Pure. */
+export function resolveTurnOutcomes(log: ParsedSessionLog): {
+  readonly messageEventIds: ReadonlyArray<string>;
+  readonly outcomes: ReadonlyMap<string, SessionOutcomeRecord>;
+} {
+  const chain = headChainEvents(log);
+  const onChain = new Set(chain.map((e) => e.id));
+  const outcomes = new Map<string, SessionOutcomeRecord>();
+  for (const rec of log.records) {
+    if (rec.type !== "outcome" || !onChain.has(rec.turnId)) continue;
+    outcomes.set(rec.turnId, rec);
+  }
+  return { messageEventIds: chain.map((e) => e.id), outcomes };
+}
+
 /**
  * Ancestor chain from an arbitrary head id (null = empty). Rewind to a
  * skipped-branch user message walks this, not the current head prefix.
@@ -605,5 +655,35 @@ function isTitleRecord(value: unknown): value is SessionTitleRecord {
     isRecord(value) &&
     value["type"] === "title" &&
     typeof value["text"] === "string"
+  );
+}
+
+/** Keyed off the StopReason union so a new member fails compilation here until
+ *  it is listed — the on-disk outcome can never accept a reason the harness
+ *  does not produce. */
+const STOP_REASON_MEMBERS: Record<StopReason, true> = {
+  completed: true,
+  maxTurns: true,
+  nonSuccessStop: true,
+  protocolError: true,
+  emptyFinalResponse: true,
+  cancelled: true,
+  timeout: true,
+  fused: true,
+};
+
+export function isStopReason(value: unknown): value is StopReason {
+  return (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(STOP_REASON_MEMBERS, value)
+  );
+}
+
+function isOutcomeRecord(value: unknown): value is SessionOutcomeRecord {
+  return (
+    isRecord(value) &&
+    value["type"] === "outcome" &&
+    typeof value["turnId"] === "string" &&
+    isStopReason(value["stopReason"])
   );
 }
