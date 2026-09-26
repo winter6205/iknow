@@ -1,7 +1,9 @@
 /**
  * Per-run tool-loop detection (call key + result key, periods k=1..5,
  * repetition R=5; trips only on a stall). Anything that cannot be
- * normalized (including irregular MCP shapes) → fail-open.
+ * normalized (including irregular MCP shapes) → fail-open. Plus the parallel
+ * narrow validation-stall fuse: one identical call, one identical
+ * deterministic validation_failed answer, three distinct phases.
  */
 
 import { createHash } from "node:crypto";
@@ -13,6 +15,16 @@ export const LOOP_DETECT_MAX_PERIOD = 5;
 
 export const LOOP_DETECTED_TEXT =
   "LOOP_DETECTED: tool-call loop stalled (period repeated R=5 with no result progress). Change the approach.";
+
+/** Narrow validation-stall fuse threshold. */
+export const VALIDATION_LOOP_REPEAT = 3;
+
+/**
+ * Keep the "LOOP_DETECTED:" prefix verbatim: the host-injection seam-lock
+ * (encodeUserText + continue-pending equality) is pinned on this envelope.
+ */
+export const VALIDATION_LOOP_DETECTED_TEXT =
+  "LOOP_DETECTED: identical tool call rejected by input validation (repeated R=3 with no argument or error progress). Change the arguments or the approach.";
 
 export type ToolLoopEvent = {
   readonly callKey: string;
@@ -161,4 +173,28 @@ export function isStalledToolLoop(
     if (windowRepeatsPeriod(window, k)) return true;
   }
   return false;
+}
+
+/**
+ * Narrow validation-stall fuse: the last VALIDATION_LOOP_REPEAT events must
+ * all be the same normalizable call answered by the same deterministic
+ * `validation_failed` message, each from a distinct phase (a parallel wave
+ * shares one phaseId → no trip). Deliberately stricter than
+ * `isStalledToolLoop`; that detector's constants and semantics are unchanged.
+ */
+export function isValidationStallLoop(
+  events: ReadonlyArray<ToolLoopEvent>
+): boolean {
+  const n = events.length;
+  if (n < VALIDATION_LOOP_REPEAT) return false;
+  const window = events.slice(n - VALIDATION_LOOP_REPEAT);
+  const first = window[0];
+  if (first === undefined || !first.normalizable) return false;
+  if (!first.resultKey.startsWith("validation_failed:")) return false;
+  for (const e of window) {
+    if (!e.normalizable) return false;
+    if (e.callKey !== first.callKey) return false;
+    if (e.resultKey !== first.resultKey) return false;
+  }
+  return new Set(window.map((e) => e.phaseId)).size >= VALIDATION_LOOP_REPEAT;
 }

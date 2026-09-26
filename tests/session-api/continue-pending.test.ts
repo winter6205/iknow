@@ -11,7 +11,10 @@ import {
   matchesContinuePendingNlLine,
   shouldTriggerContinueFromNl,
 } from "../../src/session-api/continue-pending.ts";
-import { LOOP_DETECTED_TEXT } from "../../src/harness/tool-loop-detect.ts";
+import {
+  LOOP_DETECTED_TEXT,
+  VALIDATION_LOOP_DETECTED_TEXT,
+} from "../../src/harness/tool-loop-detect.ts";
 import {
   SkipAppendEmptyPriorError,
   SkipAppendWithTextError,
@@ -78,6 +81,19 @@ describe("evaluateContinuePending P0–P7", () => {
         assistantToolUse("t1"),
         toolResultOnly("t1"),
         userText(LOOP_DETECTED_TEXT),
+      ],
+    });
+    assert.equal(v.ok, false);
+    if (!v.ok) assert.equal(v.exit, "fused_clean_stop");
+  });
+
+  it("P2 twin: last user text === VALIDATION_LOOP_DETECTED_TEXT → fused_clean_stop", () => {
+    const v = evaluateContinuePending({
+      messages: [
+        userText("do"),
+        assistantToolUse("t1"),
+        toolResultOnly("t1"),
+        userText(VALIDATION_LOOP_DETECTED_TEXT),
       ],
     });
     assert.equal(v.ok, false);

@@ -6,6 +6,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   isStalledToolLoop,
+  isValidationStallLoop,
   toolLoopEventFromCall,
   type ToolLoopEvent,
 } from "../../src/harness/tool-loop-detect.ts";
@@ -14,6 +15,12 @@ import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 const fail = (msg: string): ToolExecutionResult => ({
   kind: "execution_failed",
+  toolUseId: "x",
+  message: msg,
+});
+
+const valFail = (msg: string): ToolExecutionResult => ({
+  kind: "validation_failed",
   toolUseId: "x",
   message: msg,
 });
@@ -213,5 +220,85 @@ describe("image block resultKey fingerprint", () => {
       )
     );
     assert.equal(isStalledToolLoop(events), false);
+  });
+});
+
+/**
+ * Narrow validation-stall fuse: identical callKey +
+ * identical resultKey + validation_failed kind across ≥3 distinct phases —
+ * strictly narrower than the generic R=5 detector, which stays untouched.
+ */
+describe("isValidationStallLoop", () => {
+  const same = (p: number): ToolLoopEvent =>
+    ev(
+      "todo_write",
+      { mode: "update", id: "t9", item: "x" },
+      valFail("nope"),
+      p
+    );
+
+  it("empty: no events → not tripped", () => {
+    assert.equal(isValidationStallLoop([]), false);
+  });
+
+  it("2 identical validation_failed across 2 phases → below threshold", () => {
+    assert.equal(isValidationStallLoop([same(0), same(1)]), false);
+  });
+
+  it("3 identical validation_failed across 3 phases → tripped", () => {
+    assert.equal(isValidationStallLoop([same(0), same(1), same(2)]), true);
+  });
+
+  it("negative: 3rd call with a micro-varied argument does not trip", () => {
+    const varied = ev(
+      "todo_write",
+      { mode: "update", id: "t9", item: "y" },
+      valFail("nope"),
+      2
+    );
+    assert.equal(isValidationStallLoop([same(0), same(1), varied]), false);
+  });
+
+  it("negative: identical execution_failed ×3 (IO/runtime) does not trip", () => {
+    const events = [0, 1, 2].map((p) =>
+      ev("read_file", { path: "a" }, fail("EIO"), p)
+    );
+    assert.equal(isValidationStallLoop(events), false);
+  });
+
+  it("negative: same call but the deterministic error text changed", () => {
+    const events = [
+      ev("todo_write", { mode: "add", item: "" }, valFail("empty"), 0),
+      ev("todo_write", { mode: "add", item: "" }, valFail("empty"), 1),
+      ev("todo_write", { mode: "add", item: "" }, valFail("other"), 2),
+    ];
+    assert.equal(isValidationStallLoop(events), false);
+  });
+
+  it("negative: one wave of 3 identical shares one phaseId", () => {
+    const wave = [0, 1, 2].map(() => same(0));
+    assert.equal(isValidationStallLoop(wave), false);
+  });
+
+  it("fail-open: a non-normalizable event inside the window", () => {
+    const bad: ToolLoopEvent = {
+      callKey: "mcp",
+      resultKey: "x",
+      normalizable: false,
+      phaseId: 2,
+    };
+    assert.equal(isValidationStallLoop([same(0), same(1), bad]), false);
+  });
+
+  it("only the tail window matters: older noise does not block the trip", () => {
+    const noise = ev("bash", { command: "ls" }, okText("ok"), 0);
+    assert.equal(
+      isValidationStallLoop([noise, same(1), same(2), same(3)]),
+      true
+    );
+  });
+
+  it("generic detector unchanged: 3 identical validation is below R=5", () => {
+    assert.equal(isStalledToolLoop([same(0), same(1), same(2)]), false);
   });
 });
