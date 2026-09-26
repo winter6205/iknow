@@ -378,8 +378,9 @@ const SYSTEM_INTERRUPT_MARK = "[已打断]";
  *  already suppress, e.g. the LOOP_DETECTED fuse). Same bracket-mark family
  *  as SYSTEM_INTERRUPT_MARK, warning colour, body stays visible — the stamp
  *  is the only render key, so any future stamped envelope rides this branch
- *  without text matching. */
-const HOST_INJECTED_MARK = "[系统注入]";
+ *  without text matching. Exported because the mark is a UI contract string:
+ *  tests assert against it rather than hand-copying the literal. */
+export const HOST_INJECTED_MARK = "[系统注入]";
 
 /** tool_use block rendering:
  *  - live noise (isLiveNoise and not failed) → not rendered; the activity

@@ -1,27 +1,40 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/host-injected-identity.test.tsx — host-injected 消息的 UI 身份
- * (plans/host-injected-ui-identity.md T2, form per T1 decision).
+ * tests/tui/host-injected-identity.test.tsx — render identity of host-injected
+ * user messages.
  *
- * Contract under test (marker-keyed, never envelope-text-keyed):
+ * Contract under test (marker-keyed, never envelope-text-keyed): the ADR-0112
+ * `hostInjected` provenance stamp is the only render key.
  *  - `role:"user"` + `hostInjected:true` and not in the hidden list →
- *    annotated prefix `[系统注入]` + warning colour, body visible, no ❯
- *    bubble; any future stamped envelope (validation-loop fuse) rides the
- *    same branch;
+ *    annotated prefix + warning colour, body visible, no ❯ bubble; because
+ *    nothing but the stamp is matched, any future stamped envelope (a second
+ *    host fuse, e.g.) rides the same branch untouched;
  *  - plain user messages keep the ❯ bubble byte-for-byte;
- *  - hidden-list kinds (agent_status bar / drain / verify / graph_mode /
- *    skill-index) stay suppressed even though they carry the stamp
- *    (decision (b): 现状分治不动).
+ *  - `isTuiHiddenUserMessage` runs before the stamp branch, so the hidden
+ *    kinds (agent_status bar / drain / verify / graph_mode / skill-index) stay
+ *    suppressed even though they carry the stamp.
  */
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA } from "@opentui/core";
-import { MessageBlocks } from "../../src/tui/message-blocks.js";
+import {
+  HOST_INJECTED_MARK,
+  MessageBlocks,
+} from "../../src/tui/message-blocks.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 import { LOOP_DETECTED_TEXT } from "../../src/harness/tool-loop-detect.js";
 
 const COLS = 60;
+
+/** The notice text block word-wraps at COLS, so only the leading fragment of a
+ *  long envelope can land on one frame line. Derived from the producer's SSOT
+ *  constant instead of a hand-copied literal. */
+const LOOP_DETECTED_HEAD = LOOP_DETECTED_TEXT.split(" (")[0];
+
+/** Placeholder body for a stamped envelope that has no producer yet: the point
+ *  under test is that the stamp — not the text — selects the branch. */
+const UNPRODUCED_STAMPED_BODY = "任意未注册的 host 注入正文占位。";
 
 async function renderBlocks(
   message: AnthropicNativeMessage
@@ -55,15 +68,16 @@ function fgOfSpanWith(
   return undefined;
 }
 
-describe("hostInjected user 消息：标注前缀 + 区分样式（T1 决策形态）", () => {
-  test("LOOP_DETECTED envelope：[系统注入] 前缀 + 正文可见，不再是 ❯ 气泡", async () => {
+describe("hostInjected user 消息：标注前缀 + 警示色（只按标记二分）", () => {
+  test("LOOP_DETECTED envelope：标注前缀 + 正文可见，不再是 ❯ 气泡", async () => {
     const setup = await renderBlocks(stampedUser(LOOP_DETECTED_TEXT));
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[系统注入]");
-    expect(frame).toContain("LOOP_DETECTED: tool-call loop stalled");
+    expect(frame).toContain(HOST_INJECTED_MARK);
+    expect(frame).toContain(LOOP_DETECTED_HEAD);
     expect(frame.includes("❯")).toBe(false);
-    // T1 形态 = 警示色（running token），区别于 ❯ 气泡的 accent + userBg。
-    const fg = fgOfSpanWith(setup, "[系统注入]");
+    // Warning form = running token as foreground, distinct from the ❯ bubble's
+    // accent + userBg fill.
+    const fg = fgOfSpanWith(setup, HOST_INJECTED_MARK);
     expect(fg).toBeDefined();
     const expected = RGBA.fromHex(tuiPalette.running);
     expect(
@@ -72,13 +86,11 @@ describe("hostInjected user 消息：标注前缀 + 区分样式（T1 决策形�
     await setup.renderer.destroy();
   });
 
-  test("分支按标记泛化：任意新 stampenvelope（如 validation 熔断文本）同形态", async () => {
-    const setup = await renderBlocks(
-      stampedUser("VALIDATION_LOOP_DETECTED: 未来窄谱熔断 envelope 示例。")
-    );
+  test("分支按标记泛化：任意新 stamped envelope 同形态", async () => {
+    const setup = await renderBlocks(stampedUser(UNPRODUCED_STAMPED_BODY));
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[系统注入]");
-    expect(frame).toContain("VALIDATION_LOOP_DETECTED");
+    expect(frame).toContain(HOST_INJECTED_MARK);
+    expect(frame).toContain(UNPRODUCED_STAMPED_BODY);
     expect(frame.includes("❯")).toBe(false);
     await setup.renderer.destroy();
   });
@@ -90,17 +102,17 @@ describe("hostInjected user 消息：标注前缀 + 区分样式（T1 决策形�
     });
     const frame = setup.captureCharFrame();
     expect(frame).toContain("❯ 真实的用户问题");
-    expect(frame.includes("[系统注入]")).toBe(false);
+    expect(frame.includes(HOST_INJECTED_MARK)).toBe(false);
     await setup.renderer.destroy();
   });
 
-  test("决策(b)：agent_status 栏注入虽带戳仍走既有隐藏路径（不渲染）", async () => {
+  test("agent_status 栏注入虽带戳仍走既有隐藏路径（不渲染）", async () => {
     const setup = await renderBlocks(
       stampedUser("<agent_status>\nactive_tasks: 0\n</agent_status>")
     );
     const frame = setup.captureCharFrame();
     expect(frame.includes("❯")).toBe(false);
-    expect(frame.includes("[系统注入]")).toBe(false);
+    expect(frame.includes(HOST_INJECTED_MARK)).toBe(false);
     await setup.renderer.destroy();
   });
 });
