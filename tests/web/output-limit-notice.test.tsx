@@ -31,10 +31,7 @@ import {
   stopNoticeLine,
   stopReasonLabel,
 } from "../../web/src/lib/stop-reason.ts";
-import type {
-  TurnAnswerDto,
-  TurnDto,
-} from "../../web/src/api/types.ts";
+import type { TurnAnswerDto, TurnDto } from "../../web/src/api/types.ts";
 
 /** The wire's output-limit notice for a truncated turn (verbatim, deterministic). */
 const WIRE_NOTICE =
@@ -65,10 +62,7 @@ function agentOf(msgs: ChatUiMessage[]): ChatUiMessage | undefined {
 
 describe("StopNotice — output-limit notice replaces the generic label", () => {
   it("stopNoticeLine: a carried notice wins over the nonSuccessStop label", () => {
-    assert.equal(
-      stopNoticeLine("nonSuccessStop", WIRE_NOTICE),
-      WIRE_NOTICE
-    );
+    assert.equal(stopNoticeLine("nonSuccessStop", WIRE_NOTICE), WIRE_NOTICE);
     assert.notEqual(
       stopNoticeLine("nonSuccessStop", WIRE_NOTICE),
       GENERIC_NON_SUCCESS_LABEL
@@ -84,10 +78,7 @@ describe("StopNotice — output-limit notice replaces the generic label", () => 
       stopNoticeLine("maxTurns", undefined),
       STOP_REASON_LABELS.maxTurns
     );
-    assert.equal(
-      stopNoticeLine("timeout", null),
-      STOP_REASON_LABELS.timeout
-    );
+    assert.equal(stopNoticeLine("timeout", null), STOP_REASON_LABELS.timeout);
   });
 
   it("stopNoticeLine: completed / empty never render a label", () => {
@@ -98,7 +89,11 @@ describe("StopNotice — output-limit notice replaces the generic label", () => 
 
   it("renders the notice line, not the generic label, under a truncated answer", () => {
     const html = renderToStaticMarkup(
-      <StopNotice stopReason="nonSuccessStop" outputLimitNotice={WIRE_NOTICE} turnCount={2} />
+      <StopNotice
+        stopReason="nonSuccessStop"
+        outputLimitNotice={WIRE_NOTICE}
+        turnCount={2}
+      />
     );
     assert.ok(html.includes(WIRE_NOTICE_HTML), "notice line rendered verbatim");
     assert.ok(
@@ -143,7 +138,10 @@ describe("turnsToMessages — truncated turn keeps notice + committed text (SC8)
     assert.ok(!agent!.text.includes(WIRE_NOTICE));
     // Rendering the card shows BOTH the partial text and the incomplete notice.
     const html = renderToStaticMarkup(
-      <AgentCard text={agent!.text} answer={(agent as { answer: TurnAnswerDto }).answer} />
+      <AgentCard
+        text={agent!.text}
+        answer={(agent as { answer: TurnAnswerDto }).answer}
+      />
     );
     assert.ok(html.includes("once upon a time"));
     assert.ok(html.includes(WIRE_NOTICE_HTML));
@@ -169,9 +167,7 @@ describe("live-turn shape vs reopened-turn shape → identical notice (SC8)", ()
 
   it("both shapes carry the same notice string and preserve the same body", () => {
     // Reopened history turn (goes through turnsToMessages).
-    const reopened = turnsToMessages([
-      { query: "q", answer: truncatedAnswer },
-    ]);
+    const reopened = turnsToMessages([{ query: "q", answer: truncatedAnswer }]);
     // Live turn answer (the hook builds the agent bubble from res.turn.answer
     // verbatim — same shape as a history turn's answer).
     const reopenedAgent = agentOf(reopened);
@@ -223,7 +219,11 @@ describe("unknown outcome → neither notice nor completed/incomplete label (SC1
 
   it("StopNotice renders no label and no notice for an unknown outcome", () => {
     const html = renderToStaticMarkup(
-      <StopNotice stopReason={undefined} outputLimitNotice={undefined} turnCount={1} />
+      <StopNotice
+        stopReason={undefined}
+        outputLimitNotice={undefined}
+        turnCount={1}
+      />
     );
     assert.equal(html, "");
     for (const label of Object.values(STOP_REASON_LABELS)) {

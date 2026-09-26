@@ -132,10 +132,11 @@ export interface LlmEnv {
    */
   routeMaxTokens?: number;
   /**
-   * Retired global snapshot field: always `DEFAULT_MAX_OUTPUT_TOKENS`, since a
-   * budget belongs to one model entry (`routeMaxTokens`). Request assembly no
-   * longer reads it; the only remaining reader is the hub's hot-reload
-   * comparison, and it goes away with that. The retired
+   * Retired global snapshot, kept only as a required type member until fixture
+   * migration (follow-up ticket): always `DEFAULT_MAX_OUTPUT_TOKENS`, since a
+   * budget belongs to one model entry. Nothing reads it anymore — live budget
+   * resolution uses `routeMaxTokens`, and assembly sites fall back to
+   * `DEFAULT_MAX_OUTPUT_TOKENS` for a route whose entry is silent. The retired
    * `IKNOW_LLM_MAX_OUTPUT_TOKENS` never feeds it — a non-empty value fails
    * loading with `LlmBudgetConfigError`.
    */
@@ -579,7 +580,9 @@ function resolveOptionalRoute(
     ...(transport.headers === undefined ? {} : { headers: transport.headers }),
     // entry silent → key not produced: assembly falls back per route, so this
     // route can never inherit the budget of the route it fell out of.
-    ...(transport.maxTokens === undefined ? {} : { maxTokens: transport.maxTokens }),
+    ...(transport.maxTokens === undefined
+      ? {}
+      : { maxTokens: transport.maxTokens }),
   };
 }
 
@@ -618,6 +621,19 @@ function spreadSubagentModel(
   model: SubagentModelEnv | undefined
 ): Pick<IknowSubagentEnv, "model"> {
   return model === undefined ? {} : { model };
+}
+
+/**
+ * Produce `{ routeMaxTokens }` only when the matched model entry declares a
+ * budget; a silent entry → `{}` (no key), so the `DEFAULT_MAX_OUTPUT_TOKENS`
+ * fallback stays in one place (assembly) and no other route's number can be
+ * read as this one's cap. Moved verbatim from loadIknowEnv's return so the
+ * conditional spread does not grow its complexity.
+ */
+function spreadRouteMaxTokens(
+  maxTokens: number | undefined
+): Pick<LlmEnv, "routeMaxTokens"> {
+  return maxTokens === undefined ? {} : { routeMaxTokens: maxTokens };
 }
 
 export interface WebEnv {
@@ -1196,15 +1212,13 @@ export function loadIknowEnv(
       // provider that declares apiKeyEnv opts into env; never falls back to
       // the literal here).
       apiKey: transport.apiKey,
-      // Retired global snapshot (still compared by the hub's hot-reload key);
-      // requests are assembled from `routeMaxTokens` below instead.
+      // Retired global snapshot: kept only as a required type member pending
+      // fixture migration; no reader. The live budget is `routeMaxTokens` below.
       maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
       // Budget of the entry `modelRaw` matched on this route; a silent entry
       // keeps the key absent, so the 32,000 fallback stays one place (assembly)
       // and no other route's number can be read as this one's cap.
-      ...(transport.maxTokens === undefined
-        ? {}
-        : { routeMaxTokens: transport.maxTokens }),
+      ...spreadRouteMaxTokens(transport.maxTokens),
       // Per-call LLM racing cap (env > settings > 300_000 fallback). Mirrors
       // the maxTurns pattern (envOptionalPositiveInt ?? settings); third layer
       // 5 min: thinking + 32k generations commonly exceed 60s. MCP

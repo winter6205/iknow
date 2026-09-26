@@ -142,10 +142,7 @@ async function runWorkerEntry(opts: {
   process.env.PATH = `${makeBwrapShimDir()}:${savedPath ?? ""}`;
   writeFileSync(join(opts.sandboxRoot, ".keep"), "");
 
-  const stdinPath = join(
-    scratch("iknow-t4-exit-stdin-"),
-    "envelope.jsonl"
-  );
+  const stdinPath = join(scratch("iknow-t4-exit-stdin-"), "envelope.jsonl");
   writeFileSync(stdinPath, JSON.stringify(opts.stdinEnvelope) + "\n");
 
   let exitCode = -1;

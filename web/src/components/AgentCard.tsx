@@ -6,6 +6,7 @@
 import { useState, type ReactNode } from "react";
 import type { TurnAnswerDto } from "../api/types";
 import { staggerStyle } from "../lib/stagger";
+import { stopNoticeInput } from "../lib/stop-reason";
 import { GOV_LABEL, shortSnap } from "./evidence";
 import type { EvidenceProjection, GovernanceStatus } from "./evidence";
 import { EvidencePanel } from "./EvidencePanel";
@@ -139,11 +140,7 @@ export function AgentCard({
 
       {/* Stop-reason notice (non-completed) + turnCount meta info — quiet mono row below the body.
           An output-limit turn shows the hub's notice line here, under the partial text it describes. */}
-      <StopNotice
-        stopReason={answer?.stopReason}
-        outputLimitNotice={answer?.outputLimitNotice}
-        turnCount={answer?.turnCount}
-      />
+      <StopNotice {...stopNoticeInput(answer)} />
 
       {/* Legacy toolCalls stay after the stop notice; ordered activity renders tools inline above. */}
       {!hasActivity && toolCalls && toolCalls.length > 0 ? (

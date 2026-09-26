@@ -600,7 +600,10 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
             id: "prov",
             baseUrl: capture!.origin,
             apiKeyEnv: "IKNOW_SC6_API_KEY",
-            models: [{ id: "m1", maxTokens: 128 }, { id: "m2", maxTokens: 128 }],
+            models: [
+              { id: "m1", maxTokens: 128 },
+              { id: "m2", maxTokens: 128 },
+            ],
           },
         ],
       },

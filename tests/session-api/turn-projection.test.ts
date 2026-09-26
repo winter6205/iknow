@@ -14,7 +14,10 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
-import { projectMessagesToTurns, type TurnOutcomeEvidence } from "../../src/session-api/hub.ts";
+import {
+  projectMessagesToTurns,
+  type TurnOutcomeEvidence,
+} from "../../src/session-api/hub.ts";
 import type { SessionOutcomeRecord } from "../../src/session-api/store/index.ts";
 import { OUTPUT_LIMIT_NOTICE } from "../../src/session-api/contract.ts";
 import { SUBAGENT_DRAIN_PREFIX } from "../../src/harness/subagent/host-drain.ts";

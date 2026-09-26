@@ -44,7 +44,10 @@ function file(overrides?: Partial<SessionFileV1>): SessionFileV1 {
   return {
     schemaVersion: 2,
     conversation_id: "conv-notice",
-    messages: [msg("write a long answer"), msg("partial committed text", "assistant")],
+    messages: [
+      msg("write a long answer"),
+      msg("partial committed text", "assistant"),
+    ],
     jsonMode: false,
     turnCount: 1,
     updatedAt: now,
@@ -56,9 +59,13 @@ function file(overrides?: Partial<SessionFileV1>): SessionFileV1 {
 }
 
 /** Every text block across every message, concatenated — the model-facing corpus. */
-function allMessageText(messages: ReadonlyArray<AnthropicNativeMessage>): string {
+function allMessageText(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string {
   return messages
-    .flatMap((m) => m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])))
+    .flatMap((m) =>
+      m.content.flatMap((b) => (b.type === "text" ? [b.text] : []))
+    )
     .join("\n");
 }
 
@@ -72,9 +79,13 @@ describe("attachSession — durable notice from the last settled outcome", () =>
     expect(attached.outputLimitNotice).toBe(OUTPUT_LIMIT_NOTICE);
     expect(attached.lastStopReason).toBe("nonSuccessStop");
     // The committed partial assistant text is preserved as history content.
-    expect(allMessageText(attached.messages)).toContain("partial committed text");
+    expect(allMessageText(attached.messages)).toContain(
+      "partial committed text"
+    );
     // The notice is a projection, never message content (never re-sent to the model).
-    expect(allMessageText(attached.messages)).not.toContain(OUTPUT_LIMIT_NOTICE);
+    expect(allMessageText(attached.messages)).not.toContain(
+      OUTPUT_LIMIT_NOTICE
+    );
   });
 
   test("unknown outcome → neither notice nor stop label (SC11 fail-quiet)", () => {

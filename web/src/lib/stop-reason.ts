@@ -5,6 +5,7 @@
  * domain may drift as the backend evolves, so the display layer must
  * tolerate unknown values (fail quiet).
  */
+import type { StopReason } from "../api/types";
 
 /** Non-completed stop reason → display label (rendered in quiet mono / warn tone). */
 export const STOP_REASON_LABELS: Record<string, string> = {
@@ -42,4 +43,35 @@ export function stopNoticeLine(
 ): string | null {
   if (outputLimitNotice) return outputLimitNotice;
   return stopReasonLabel(stopReason);
+}
+
+/**
+ * What the notice line reads off a turn: StopNotice's props, hand-mirrored from
+ * the three TurnAnswerDto fields (this layer cannot import src/).
+ */
+export type StopNoticeInput = {
+  /** Missing → treated as null → not shown. Absent together with
+   *  `outcome.terminal === "unknown"` is the legacy-history case: no label. */
+  stopReason?: StopReason;
+  /** The hub's output-limit notice, shown verbatim in place of the generic
+   *  non-completed label. Missing / empty → the label mapping decides. */
+  outputLimitNotice?: string;
+  /** Missing / ≤ 1 → the "N 轮" ("N turns") count is not shown. */
+  turnCount?: number;
+};
+
+/**
+ * Turn answer → notice input, derived once so the card carries no wire-field
+ * conditionals of its own. An absent answer (in-flight bubble) or an unknown
+ * outcome (the wire carries neither field) yields no fields → nothing shows.
+ */
+export function stopNoticeInput(
+  answer: StopNoticeInput | null | undefined
+): StopNoticeInput {
+  if (answer === null || answer === undefined) return {};
+  return {
+    stopReason: answer.stopReason,
+    outputLimitNotice: answer.outputLimitNotice,
+    turnCount: answer.turnCount,
+  };
 }

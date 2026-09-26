@@ -2613,7 +2613,11 @@ describe("turn outcome supplier-stop detail (output-limit truncation)", () => {
     assert.equal(outcomes[0]!["turnId"], await store.readHead(id));
 
     const reopened = await hub.getSession(id);
-    assert.equal(reopened.turns.length, 1, "the closeout opens no new human turn");
+    assert.equal(
+      reopened.turns.length,
+      1,
+      "the closeout opens no new human turn"
+    );
     assert.deepEqual(reopened.turns[0]!.answer.outcome, {
       terminal: "known",
       stopReason: "nonSuccessStop",
@@ -2623,9 +2627,7 @@ describe("turn outcome supplier-stop detail (output-limit truncation)", () => {
 
   it("a protocolError stop persists no supplier detail (the field is never synthesized)", async () => {
     const hub = makeHub(
-      makeDeps([
-        assistantResult({ texts: ["hi"], supplierStop: "success" }),
-      ])
+      makeDeps([assistantResult({ texts: ["hi"], supplierStop: "success" })])
     );
     const { session } = await hub.createSession();
     const id = session.conversation_id;

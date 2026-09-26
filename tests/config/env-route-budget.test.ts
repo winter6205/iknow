@@ -13,7 +13,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it, beforeAll, afterAll } from "vitest";
-import { loadIknowEnv, DEFAULT_MAX_OUTPUT_TOKENS } from "../../src/config/env.ts";
+import {
+  loadIknowEnv,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+} from "../../src/config/env.ts";
 import type { IknowSettings } from "../../src/config/settings.ts";
 
 const MAIN_KEY_ENV = "IKNOW_TEST_ROUTE_BUDGET_MAIN_KEY";
@@ -75,9 +78,7 @@ function settings(opts: {
     llm: {
       model: opts.model,
       providers: [MAIN_PROVIDER, SUB_PROVIDER, LITE_PROVIDER, KEYLESS_PROVIDER],
-      ...(opts.liteModel === undefined
-        ? {}
-        : { liteModel: opts.liteModel }),
+      ...(opts.liteModel === undefined ? {} : { liteModel: opts.liteModel }),
     } as IknowSettings["llm"],
     ...(opts.subagentModel === undefined
       ? {}
@@ -130,10 +131,7 @@ describe("loadIknowEnv — main-route output budget from the matched models[] en
   });
 
   it("SC3: 切换选中模型 → 解析跟随新条目，不保留旧值", () => {
-    const first = loadIknowEnv(
-      process.cwd(),
-      settings({ model: "main/opus" })
-    );
+    const first = loadIknowEnv(process.cwd(), settings({ model: "main/opus" }));
     const second = loadIknowEnv(
       process.cwd(),
       settings({ model: "main/MiniMax-M3" })
@@ -154,13 +152,10 @@ describe("loadIknowEnv — main-route output budget from the matched models[] en
     const selected = loadIknowEnv(process.cwd(), configured);
     // the fallback route is not in force while the selection stands
     assert.equal(selected.llm[BUDGET_FIELD], 72_000);
-    const afterSwitch = loadIknowEnv(
-      process.cwd(),
-      {
-        ...configured,
-        llm: { ...(configured.llm as object), model: "main/MiniMax-M3" },
-      } as IknowSettings
-    );
+    const afterSwitch = loadIknowEnv(process.cwd(), {
+      ...configured,
+      llm: { ...(configured.llm as object), model: "main/MiniMax-M3" },
+    } as IknowSettings);
     assert.equal(afterSwitch.llm[BUDGET_FIELD], 131_072);
   });
 

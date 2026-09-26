@@ -18,9 +18,7 @@ import {
   type LoopEngineDeps,
 } from "../../src/harness/loop-engine.ts";
 import { runWorkerOnce } from "../../src/harness/subagent/worker.ts";
-import type {
-  WorkerEnvelope,
-} from "../../src/harness/subagent/envelope.ts";
+import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -202,7 +200,11 @@ describe("output-limit stop SC6: the generation ends without tools or retries", 
     const retryish = events.filter(
       (e) => (e as { type: string }).type === "transport_retry"
     );
-    assert.deepEqual(retryish, [], "transport retry must not fire on truncation");
+    assert.deepEqual(
+      retryish,
+      [],
+      "transport retry must not fire on truncation"
+    );
   });
 
   it("keeps the truncated assistant text committed and finalText null", async () => {
@@ -258,7 +260,11 @@ describe("output-limit stop SC10: no closing summary for truncation", () => {
     );
 
     assert.equal(result.stopReason, "nonSuccessStop");
-    assert.equal(adapter.calls.length, 1, "the summary round must not be called");
+    assert.equal(
+      adapter.calls.length,
+      1,
+      "the summary round must not be called"
+    );
     assert.equal(
       events.filter((e) => e.type === "stop_summary").length,
       0,

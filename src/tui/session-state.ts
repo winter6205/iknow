@@ -224,8 +224,7 @@ function reuseMessageReferences(
   let i = 0;
   const limit = Math.min(prevMessages.length, next.length);
   while (i < limit && jsonDeepEqual(prevMessages[i], next[i])) i++;
-  if (i === prevMessages.length && i === next.length)
-    return prevMessages; // EXIT: fully content-equal projection
+  if (i === prevMessages.length && i === next.length) return prevMessages; // EXIT: fully content-equal projection
   return Object.freeze(prevMessages.slice(0, i).concat(next.slice(i)));
 }
 

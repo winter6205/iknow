@@ -11,9 +11,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { run, type LoopAdapter } from "../../src/harness/loop-engine.ts";
-import {
-  OUTPUT_LIMIT_TOOL_RESULT_TEXT,
-} from "../../src/harness/loop-engine.ts";
+import { OUTPUT_LIMIT_TOOL_RESULT_TEXT } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -28,16 +26,17 @@ import { assistantResult } from "../cli/_fixtures.ts";
 
 type ToolResultBlock = Extract<AnthropicContentBlock, { type: "tool_result" }>;
 
-function toolResultBlocks(
-  msg: AnthropicNativeMessage
-): ToolResultBlock[] {
+function toolResultBlocks(msg: AnthropicNativeMessage): ToolResultBlock[] {
   return msg.content.filter(
     (b): b is ToolResultBlock => b.type === "tool_result"
   );
 }
 
 /** Real echo tool + the count of times its handler actually ran. */
-function countingEchoTool(): { tool: ReturnType<typeof createStubTool>; ran: number[] } {
+function countingEchoTool(): {
+  tool: ReturnType<typeof createStubTool>;
+  ran: number[];
+} {
   const ran: number[] = [];
   const tool = createStubTool({
     name: "echo",
@@ -73,9 +72,7 @@ function truncatedTwoToolUse(): AssistantTurnResult {
  * Drives one truncating run and records every commit batch handed to the host
  * persistence hook (append order = call order).
  */
-async function runTruncatingTurn(opts?: {
-  readonly failOnBatch?: number;
-}) {
+async function runTruncatingTurn(opts?: { readonly failOnBatch?: number }) {
   const { tool, ran } = countingEchoTool();
   const reg = createRegistry([tool]);
   const exec = createExecutor(reg);
@@ -145,8 +142,7 @@ describe("truncated tool_use closeout SC13: append order and pairing", () => {
 
     assert.deepEqual(assistant.content, scripted.content);
     const thinking = assistant.content.find((b) => b.type === "thinking") as
-      | { type: "thinking"; thinking: string; signature: string }
-      | undefined;
+      { type: "thinking"; thinking: string; signature: string } | undefined;
     assert.equal(thinking?.signature, "sig-abc");
   });
 
@@ -181,7 +177,7 @@ describe("truncated tool_use closeout SC13: append order and pairing", () => {
 
     const { committed, result } = await runTruncatingTurn();
     const texts = toolResultBlocks(committed[1]![0]!)
-      .flatMap((r) => (r.content as { text?: string }[]))
+      .flatMap((r) => r.content as { text?: string }[])
       .map((c) => c.text ?? "");
     for (const t of texts) {
       assert.equal(t, OUTPUT_LIMIT_TOOL_RESULT_TEXT);
@@ -240,7 +236,9 @@ describe("truncated tool_use closeout: the no-materialized-id arm keeps protocol
       }),
       encodeToolResults: (): AnthropicContentBlock[] => [],
       step: async (): Promise<AssistantTurnResult> => {
-        throw new ProtocolError("truncated before any tool_use id materialized");
+        throw new ProtocolError(
+          "truncated before any tool_use id materialized"
+        );
       },
     });
     const committed: AnthropicNativeMessage[][] = [];
@@ -250,7 +248,9 @@ describe("truncated tool_use closeout: the no-materialized-id arm keeps protocol
       executor: exec,
       registry: reg,
       maxTurns: 5,
-      commitMessages: async (messages: ReadonlyArray<AnthropicNativeMessage>) => {
+      commitMessages: async (
+        messages: ReadonlyArray<AnthropicNativeMessage>
+      ) => {
         committed.push([...messages]);
       },
     });
@@ -283,7 +283,9 @@ describe("truncated tool_use closeout: the no-materialized-id arm keeps protocol
       executor: exec,
       registry: reg,
       maxTurns: 5,
-      commitMessages: async (messages: ReadonlyArray<AnthropicNativeMessage>) => {
+      commitMessages: async (
+        messages: ReadonlyArray<AnthropicNativeMessage>
+      ) => {
         committed.push([...messages]);
       },
     });
@@ -291,9 +293,7 @@ describe("truncated tool_use closeout: the no-materialized-id arm keeps protocol
     assert.equal(result.stopReason, "nonSuccessStop");
     assert.equal(committed.length, 1, "assistant commit only");
     assert.equal(
-      committed
-        .flat()
-        .filter((m) => toolResultBlocks(m).length > 0).length,
+      committed.flat().filter((m) => toolResultBlocks(m).length > 0).length,
       0
     );
   });

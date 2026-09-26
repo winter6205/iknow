@@ -339,16 +339,10 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
       tail.push(rec);
       continue;
     }
-    if (isTitleRecord(rec)) {
-      // ADR-0113: title events are off the message chain; they do not change
-      // head/maxEventIndex, only ride along in records and are consumed by
-      // latestTitleText.
-      tail.push(rec);
-      continue;
-    }
-    if (isOutcomeRecord(rec)) {
-      // ADR-0126: same off-chain posture as the title event — records only,
-      // never head/maxEventIndex, resolved against the head chain on read.
+    if (isOffChainRecord(rec)) {
+      // ADR-0113 / ADR-0126: title and outcome records never change
+      // head/maxEventIndex, they only ride along in records (and are resolved
+      // against the head chain on read).
       tail.push(rec);
       continue;
     }
@@ -695,9 +689,7 @@ const SUPPLIER_STOP_DETAIL_MEMBERS: Record<SupplierStopDetail, true> = {
   other: true,
 };
 
-export function isSupplierStopDetail(
-  value: unknown
-): value is SupplierStopDetail {
+function isSupplierStopDetail(value: unknown): value is SupplierStopDetail {
   return (
     typeof value === "string" &&
     Object.prototype.hasOwnProperty.call(SUPPLIER_STOP_DETAIL_MEMBERS, value)
@@ -719,4 +711,13 @@ function isOutcomeRecord(value: unknown): value is SessionOutcomeRecord {
     !("supplierDetail" in value) ||
     isSupplierStopDetail(value["supplierDetail"])
   );
+}
+
+/** The tail-record arms that only join `records` (see the parse loop):
+ *  extracted so adding the outcome arm costs parseSessionJsonl no decision
+ *  point of its own. */
+function isOffChainRecord(
+  value: unknown
+): value is SessionTitleRecord | SessionOutcomeRecord {
+  return isTitleRecord(value) || isOutcomeRecord(value);
 }

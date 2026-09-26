@@ -35,6 +35,11 @@ import {
 } from "../../src/session-api/store/index.ts";
 import type { SessionStoreError } from "../../src/session-api/store/index.ts";
 import type { SessionOutcomeRecord } from "../../src/session-api/store/index.ts";
+import {
+  OUTPUT_LIMIT_NOTICE,
+  turnOutcomeFields,
+} from "../../src/session-api/contract.ts";
+import { projectMessagesToTurns } from "../../src/session-api/hub.ts";
 import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
 
 let store: SessionStore;
@@ -490,5 +495,55 @@ describe("outcome record supplier-stop detail is optional and backward compatibl
     const lines = await readJsonlLines(id);
     const persisted = lines[lines.length - 1] as Record<string, unknown>;
     assert.equal("supplierDetail" in persisted, false);
+  });
+});
+
+// -- one assembly for the live and the reopened answer (ADR-0126) ------------
+
+describe("turnOutcomeFields is the single terminal-state assembly", () => {
+  it("a reopened turn projects the fields the live turn builds", async () => {
+    const id = "outcome-fields-shared";
+    await seedJsonl(
+      id,
+      [
+        headerLine(id, "placeholder"),
+        eventLine("e0", null, userMsg("q")),
+        eventLine("e1", "e0", assistantMsg("a")),
+        headLine("e1"),
+      ].join("\n")
+    );
+    await store.appendOutcome({
+      id,
+      turnId: "e1",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "truncation",
+    });
+    const reopened = projectMessagesToTurns(
+      [userMsg("q"), assistantMsg("a")],
+      undefined,
+      undefined,
+      await store.projectTurnOutcomes(id)
+    )[0]!.answer;
+
+    assert.deepEqual(
+      {
+        stopReason: reopened.stopReason,
+        outcome: reopened.outcome,
+        outputLimitNotice: reopened.outputLimitNotice,
+      },
+      turnOutcomeFields("nonSuccessStop", "truncation")
+    );
+    assert.equal(reopened.outputLimitNotice, OUTPUT_LIMIT_NOTICE);
+  });
+
+  it("keeps stopReason + outcome only for a known stop, and never synthesizes a detail", () => {
+    assert.deepEqual(Object.keys(turnOutcomeFields("cancelled")), [
+      "stopReason",
+      "outcome",
+    ]);
+    assert.equal(
+      "supplierDetail" in turnOutcomeFields("nonSuccessStop").outcome!,
+      false
+    );
   });
 });

@@ -362,7 +362,10 @@ describe("subagent settings — 每条路由各自的输出预算（真实 setti
   });
 
   it("SC2: 主条目省略 maxTokens → 主路由无预算键（装配侧落 32000）", async () => {
-    const { home, cwd } = await makeSettings(routeSettings(undefined, 64_000), {});
+    const { home, cwd } = await makeSettings(
+      routeSettings(undefined, 64_000),
+      {}
+    );
     const env = loadIknowEnv(cwd, undefined, home);
     assert.equal("routeMaxTokens" in env.llm, false);
     assert.ok(env.subagent.model);

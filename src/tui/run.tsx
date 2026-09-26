@@ -34,8 +34,8 @@
  * replies stranded after a throw. Non-TTY fail-fast still precedes all
  * assembly and rendering. Error bodies render via the same
  * discriminated-union dispatch as cli.ts (`isLlmProviderConfigError` /
- * `isWorkspaceRootError`) — never `String(plain object)` →
- * `[object Object]`.
+ * `isLlmBudgetConfigError` / `isWorkspaceRootError`) — never `String(plain
+ * object)` → `[object Object]`.
  *
  * Terminal teardown: all three exits (catch / /quit / normal) go through
  * the `teardownTerminal` closure calling one `teardownTuiTerminal` —
@@ -83,6 +83,8 @@ import {
   resolveFsIsolationMode,
   resolveWorktreeExclusive,
   resolveWorktreeOnMutate,
+  formatLlmBudgetConfigError,
+  isLlmBudgetConfigError,
 } from "../config/settings.js";
 import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import {
@@ -182,9 +184,9 @@ const RENDERER_CONFIG: CliRendererConfig = {
 /**
  * Typed-error catch contract: render startup-failure error bodies.
  *
- * LLM provider / workspace-root errors are typed **plain objects**
- * (`satisfies` shape, not Error instances) — a bare `String(err)` renders
- * them as `[object Object]`, hiding kind / providerId / apiKeyEnv (the
+ * LLM provider / output-budget / workspace-root errors are typed **plain
+ * objects** (`satisfies` shape, not Error instances) — a bare `String(err)`
+ * renders them as `[object Object]`, hiding kind / providerId / apiKeyEnv (the
  * TUI-side symptom of the 2026-09-14 incident). Branch order mirrors cli.ts
  * `printCliError`: discriminated unions first, then Error, other objects
  * via JSON (lossless; circular refs fall back to the constructor name).
@@ -192,6 +194,7 @@ const RENDERER_CONFIG: CliRendererConfig = {
  */
 export function describeTuiStartError(err: unknown): string {
   if (isLlmProviderConfigError(err)) return formatLlmProviderConfigError(err);
+  if (isLlmBudgetConfigError(err)) return formatLlmBudgetConfigError(err);
   if (isWorkspaceRootError(err)) return renderWorkspaceRootError(err);
   if (err instanceof Error) return err.message;
   if (typeof err === "object" && err !== null) {

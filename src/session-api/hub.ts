@@ -219,11 +219,7 @@ import type {
   TurnDto,
   VerifyAnswerView,
 } from "./contract.js";
-import {
-  knownTurnOutcome,
-  MAX_MESSAGE_CHARS,
-  projectOutputLimitNotice,
-} from "./contract.js";
+import { MAX_MESSAGE_CHARS, turnOutcomeFields } from "./contract.js";
 import { projectVerifyHumanView } from "./verify-human-view.js";
 import {
   extractRecentUserTasks,
@@ -615,10 +611,7 @@ export interface TurnOutcomeEvidence {
 function projectOutcomeFields(
   evidence: TurnOutcomeEvidence | undefined,
   anchorId: string | undefined
-): Pick<
-  TurnAnswerDto,
-  "stopReason" | "outcome" | "outputLimitNotice"
-> {
+): Pick<TurnAnswerDto, "stopReason" | "outcome" | "outputLimitNotice"> {
   if (evidence === undefined) {
     // No ledger evidence at all (a pure message-array caller): pre-ADR-0126
     // shape, so those projections stay byte-stable.
@@ -627,13 +620,20 @@ function projectOutcomeFields(
   const recorded =
     anchorId === undefined ? undefined : evidence.outcomes.get(anchorId);
   if (recorded === undefined) return { outcome: { terminal: "unknown" } };
-  const outcome = knownTurnOutcome(recorded.stopReason, recorded.supplierDetail);
-  const notice = projectOutputLimitNotice(outcome);
-  return {
-    stopReason: recorded.stopReason,
-    outcome,
-    ...(notice !== undefined ? { outputLimitNotice: notice } : {}),
-  };
+  return turnOutcomeFields(recorded.stopReason, recorded.supplierDetail);
+}
+
+/** The head-chain event id a turn's terminal outcome is anchored to: the last
+ *  event of its message slice. A load may append orphan-tool-use closeout
+ *  messages that have no event of their own, so the index is clamped to the
+ *  evidence chain — and with no evidence chain at all there is no anchor. */
+function outcomeAnchorId(
+  outcomeEvidence: TurnOutcomeEvidence | undefined,
+  sliceEnd: number
+): string | undefined {
+  const ids = outcomeEvidence?.messageEventIds;
+  if (ids === undefined || ids.length === 0) return undefined;
+  return ids[Math.min(sliceEnd - 1, ids.length - 1)];
 }
 
 export function projectMessagesToTurns(
@@ -672,15 +672,9 @@ export function projectMessagesToTurns(
       thinkingMs,
       startIndex: i,
     });
-    // A load may append orphan-tool-use closeout messages that have no event
-    // of their own, so the terminal event of the last real turn is the head.
-    const anchorIndex = Math.min(
-      end - 1,
-      (outcomeEvidence?.messageEventIds.length ?? 0) - 1
-    );
     const outcomeFields = projectOutcomeFields(
       outcomeEvidence,
-      outcomeEvidence?.messageEventIds[anchorIndex]
+      outcomeAnchorId(outcomeEvidence, end)
     );
     turns.push({
       query,
@@ -2630,6 +2624,11 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const before = session.messages;
+        // ADR-0126: compaction re-projects the history it did not change, so it
+        // consults the same persisted outcomes as `getSession` (the store
+        // guarantees those ids are index-aligned with `load`'s messages). Without
+        // them every turn here would come back as a synthesized completion.
+        const evidence = await this.store.projectTurnOutcomes(conversationId);
 
         // Manual /compact is treated as having already passed
         // evaluateCompactTrigger's token gate. The body still reuses the
@@ -2655,7 +2654,12 @@ export class SessionHub {
           // path).
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             reason: REASON_NO_COMPRESS,
             beforeCount: 0,
@@ -2730,7 +2734,12 @@ export class SessionHub {
         if (cancelled) {
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             cancelled: true,
             reason: REASON_NO_COMPRESS,
@@ -2747,7 +2756,12 @@ export class SessionHub {
         if (useCompactMessages && compacted.length >= before.length) {
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
@@ -2773,6 +2787,11 @@ export class SessionHub {
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
+        // The save re-plans the log, so the head chain just written is the one
+        // the response projects: its outcome evidence is re-read here rather
+        // than carried over from the pre-compaction ids.
+        const savedEvidence =
+          await this.store.projectTurnOutcomes(conversationId);
         // reason: LLM summary succeeded → 'full_summary' (regardless of the
         // trigger's action, since nextMessages really is SUMMARY_PREAMBLE +
         // summary); placeholder fallback → 'windowed'. SSOT: the helper keeps
@@ -2782,7 +2801,12 @@ export class SessionHub {
         });
         return {
           session: this.summarize({ file: updated }),
-          turns: projectMessagesToTurns(compacted),
+          turns: projectMessagesToTurns(
+            compacted,
+            undefined,
+            undefined,
+            savedEvidence
+          ),
           compacted: true,
           reason,
           beforeCount: before.length,
@@ -4454,15 +4478,15 @@ export class SessionHub {
     // reports the same outcome view a reload projects from the persisted
     // record — one client contract for both views. The output-limit notice
     // rides that view, so a truncation is shown identically live and reopened.
-    const outcome = knownTurnOutcome(result.stopReason, result.supplierDetail);
-    const liveNotice = projectOutputLimitNotice(outcome);
+    const outcomeFields = turnOutcomeFields(
+      result.stopReason,
+      result.supplierDetail
+    );
     return {
       query,
       answer: {
         finalText: maskedFinalText,
-        stopReason: result.stopReason,
-        outcome,
-        ...(liveNotice !== undefined ? { outputLimitNotice: liveNotice } : {}),
+        ...outcomeFields,
         turnCount: result.turnCount,
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).

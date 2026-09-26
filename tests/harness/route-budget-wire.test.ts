@@ -249,7 +249,10 @@ describe("main-session requests carry the effective route's budget", () => {
       mainModel: "main/quiet",
     });
     await stepOnce(createAdapterFromEnv(env).adapter);
-    assert.equal(sentMaxTokens(mainCapture.bodies[0]), DEFAULT_MAX_OUTPUT_TOKENS);
+    assert.equal(
+      sentMaxTokens(mainCapture.bodies[0]),
+      DEFAULT_MAX_OUTPUT_TOKENS
+    );
     assert.equal(sentMaxTokens(mainCapture.bodies[0]), 32_000);
   });
 
@@ -378,7 +381,10 @@ describe("separately routed sub-agent requests (SC12 / SC18)", () => {
     assert.equal(sentMaxTokens(subCapture.bodies[0]), 64_000);
     // the worker's client came from the sub-agent provider triple
     assert.equal(mainCapture.bodies.length, 0);
-    assert.equal((subCapture.bodies[0] as { model?: string }).model, "sub-model");
+    assert.equal(
+      (subCapture.bodies[0] as { model?: string }).model,
+      "sub-model"
+    );
   });
 
   it("SC12: subagent 条目省略 maxTokens → 子请求落 32000，而非主路由的 72000", async () => {
@@ -387,7 +393,10 @@ describe("separately routed sub-agent requests (SC12 / SC18)", () => {
       subagentModel: "sub/sub-quiet",
     });
     await stepOnce(await workerAdapter(env));
-    assert.equal(sentMaxTokens(subCapture.bodies[0]), DEFAULT_MAX_OUTPUT_TOKENS);
+    assert.equal(
+      sentMaxTokens(subCapture.bodies[0]),
+      DEFAULT_MAX_OUTPUT_TOKENS
+    );
   });
 
   it("无 subagent 路由 → worker 用主路由条目预算，主条目省略时落 32000", async () => {

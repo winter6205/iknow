@@ -36,7 +36,10 @@ import {
   type TuiLoadedSessionFile,
   type TuiSessionState,
 } from "../../src/tui/session-state.js";
-import { OUTPUT_LIMIT_NOTICE, knownTurnOutcome } from "../../src/session-api/contract.js";
+import {
+  OUTPUT_LIMIT_NOTICE,
+  knownTurnOutcome,
+} from "../../src/session-api/contract.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 

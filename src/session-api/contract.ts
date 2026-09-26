@@ -169,6 +169,27 @@ export function projectOutputLimitNotice(
     : undefined;
 }
 
+/**
+ * The answer fields that describe a settled turn's terminal state, assembled in
+ * one place so the live turn (`toTurnDto`) and a reopened turn
+ * (`projectOutcomeFields`) can never drift: a known `stopReason`, the outcome
+ * view derived from it, and — only for output truncation — the notice. A stop
+ * without truncation detail keeps `outputLimitNotice` absent as a key
+ * (byte-stable, same pattern as stopSummary / apiError).
+ */
+export function turnOutcomeFields(
+  stopReason: StopReason,
+  supplierDetail?: SupplierStopDetail
+): Pick<TurnAnswerDto, "stopReason" | "outcome" | "outputLimitNotice"> {
+  const outcome = knownTurnOutcome(stopReason, supplierDetail);
+  const notice = projectOutputLimitNotice(outcome);
+  return {
+    stopReason,
+    outcome,
+    ...(notice !== undefined ? { outputLimitNotice: notice } : {}),
+  };
+}
+
 /** Wire view of the verification loop's final verdict (rounds + outcome)
  *  for UI surfaces. "passed" is a success state; abort / disabled never
  *  enter the wire. */
