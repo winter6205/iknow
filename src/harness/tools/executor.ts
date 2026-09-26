@@ -336,6 +336,19 @@ function buildFailureResult(
   err: unknown,
   outerSignal: AbortSignal | undefined
 ): ToolExecutionResult {
+  // Lifecycle outcomes outrank the input-rejection arm: an aborted or timed-out
+  // call reports cancelled / timeout, never validation_failed.
+  if (
+    !outerSignal?.aborted &&
+    err !== TIMEOUT &&
+    err instanceof ToolInputValidationError
+  ) {
+    return {
+      kind: "validation_failed",
+      toolUseId: call.id,
+      message: err.message,
+    };
+  }
   return {
     kind: "execution_failed",
     toolUseId: call.id,
@@ -462,4 +475,4 @@ function sanitizeFailure(err: unknown): string {
 }
 
 // Late import to break potential cycle: error helpers referenced here.
-import { isModelFacingError } from "../errors.js";
+import { isModelFacingError, ToolInputValidationError } from "../errors.js";
