@@ -90,6 +90,8 @@
     "marked": "^18.0.9",
     "react": "^19.2.8",
     "string-width": "^8.2.2",
+    "tree-sitter": "0.25.1",
+    "tree-sitter-bash": "0.25.1",
     "undici": "^7.29.0",
     "vscode-jsonrpc": "^9.0.1",
     "wrap-ansi": "^8.1.0",
