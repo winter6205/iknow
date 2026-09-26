@@ -440,6 +440,38 @@ describe("runMemoryGc", () => {
     assert.deepEqual(result.disabled, [{ slug: "old", reason: "ttl_expired" }]);
   });
 
+  it("preserves a legacy entry the strict reader cannot parse, even an expired one", async () => {
+    // The pre-ADR writer emitted `title: Rule: …` bare, which is not a legal
+    // YAML scalar, so the migrated reader rejects that block. If a rejected
+    // block parsed to defaults instead of throwing, this file would enter the
+    // store as a TTL-expired entry and the soft-disable write below would
+    // replace the unreadable original with those defaults. Failing closed routes
+    // it to `skipped`, which no writer path touches.
+    const legacy = [
+      "---",
+      "id: ab12cd34ef56",
+      "type: convention",
+      "importance: 3",
+      "ttl_days: 5",
+      "disabled: false",
+      "supersedes: null",
+      "title: Rule: lockfile edits go through npm",
+      `updated_at: ${daysAgo(10)}`,
+      "---",
+      "legacy body",
+      "",
+    ].join("\n");
+    await writeFile(join(memoryDir, "legacy.md"), legacy, "utf8");
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.disabled, []);
+    assert.deepEqual(result.skipped, ["legacy"]);
+    assert.equal(
+      await readFile(join(memoryDir, "legacy.md"), "utf8"),
+      legacy,
+      "an unreadable file must survive a GC run byte for byte"
+    );
+  });
+
   it("surfaces an unreadable memory dir as a typed MemoryError", async () => {
     const missing = join(memoryDir, "nope", "deeper");
     const result = await runMemoryGc(missing, { nowMs: NOW });

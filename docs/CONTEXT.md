@@ -694,8 +694,8 @@ _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑�
 **skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
 _Avoid_: 在 `slash.ts` 自写第二套命名空间匹配；把 agent id 当 slash 技能；冲突时仍保留双份 bare
 
-**技能模型索引**: 允许进入 `<available_skills>`（开场冻表或会话内增量）并允许 `skill()` 灌正文的资格集——有 description 且未 `disable-model-invocation`。开场投影冻在 system；新建名走 **技能索引增量**。ADR-0098。
-_Avoid_: 用 `available()` 同时当 slash 候选；把无描述技能列进模型表
+**skill model index**: The set eligible for `<available_skills>` (the opening frozen table or an in-session delta) and for body injection through `skill()` consists of skills with a description and without `disable-model-invocation`. Description is the first selection signal. Optional `when_to_use` is a second signal: it gets its own line and independent 1536-character truncation, is removed with description during index demotion, and does not change eligibility. The opening projection stays frozen in the system message; newly added names use the skill index delta. ADR-0098 / ADR-0123.
+_Avoid_: Using `available()` as the slash-command candidate set; listing description-free skills in the model index; folding `when_to_use` into the description line; substituting `when_to_use` for description to change eligibility.
 
 **可加载技能面**: 人 slash 能信封加载的全集——磁盘上有可加载 SKILL.md 的 catalog 条目，含无 description、含 disable。TUI / Web / CLI **同一个入口**。ADR-0098 / `specs/skill-index-increment.md`。
 _Avoid_: 三宿主各滤一套；没描述就不能 `/`；用模型索引当 slash 列表
@@ -705,6 +705,12 @@ _Avoid_: 只从当前 transcript 回放；把 skill-load 当进场；压缩后�
 
 **技能索引增量**: 调用模型前接到 messages 最末的隐藏 user 消息，正文为 `<available_skills>` 且只含索引进场史尚未收录的模型索引行。ADR-0098。
 _Avoid_: 整表刷新；插进本轮用户消息前面；画成用户气泡；改 system 冻表
+
+**frontmatter coercion boundary**: At the shared parser's output, string/number/boolean/null values become strings, scalar arrays are joined with commas, and mappings are skipped with a warning. A nested key **must never silently overwrite a top-level key**. Consumers (skill index, subagent catalog, and memory reader) receive only scalar values. ADR-0123.
+_Avoid_: Passing arrays or objects directly into `SkillEntry`; silently discarding nested keys; implementing another coercion rule in each consumer.
+
+**frontmatter fence strip contract**: The shared module removes a leading `---` fence independently of its contents, never throws, and returns a byte-identical body slice. It also strips invalid YAML, because `skill()` body assembly, third-party skill-load envelope reverse parsing, and KV-cache prefix stability depend on those exact bytes. ADR-0123.
+_Avoid_: Using a throwing YAML parser to strip the fence; changing the body bytes; retaining another fence expression in skill body or the user catalog.
 
 **user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
 _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」

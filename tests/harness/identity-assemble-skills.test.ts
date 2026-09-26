@@ -18,6 +18,8 @@ import {
   IKNOW_ASSEMBLY_ORDER,
   assembleIdentityContext,
   createIknowSystemResolver,
+  skillIndexLine,
+  skillsSegment,
   type AssemblyContext,
 } from "../../src/harness/identity/assemble.ts";
 import { IKNOW_IDENTITY_DEFAULT } from "../../src/harness/identity/identity.ts";
@@ -121,6 +123,67 @@ describe("<available_skills> additive segment", () => {
     }
     // Non-demoted entries still carry their description.
     expect(out).toContain("kept: still described");
+  });
+
+  it("measures exactly the line it renders", () => {
+    // `deriveCandidates` sizes each skill through `skillIndexLine`, so this
+    // equality is what keeps index demotion from ranking an entry by bytes the
+    // segment never emitted (the drift a duplicated render template allowed).
+    const skills = [
+      { name: "alpha", description: "first", whenToUse: "when A" },
+      { name: "beta", description: "second" },
+      { name: "gamma", whenToUse: "only a usage hint" },
+    ];
+    expect(skillsSegment(skills)).toBe(
+      `<available_skills>\n${skills.map(skillIndexLine).join("\n")}\n</available_skills>`
+    );
+  });
+
+  it("renders when_to_use as its own line below the entry line", async () => {
+    const out = await assembleIdentityContext({
+      ...baseCtx(),
+      skills: () => [
+        { name: "alpha", description: "first", whenToUse: "when A" },
+        { name: "beta", description: "second" },
+      ],
+    });
+    expect(out).toContain(
+      "<available_skills>\n" +
+        "alpha: first\n" +
+        "  when_to_use: when A\n" +
+        "beta: second\n" +
+        "</available_skills>"
+    );
+  });
+
+  it("renders embedded newlines in when_to_use verbatim (same rule as description)", async () => {
+    const out = await assembleIdentityContext({
+      ...baseCtx(),
+      skills: () => [
+        {
+          name: "alpha",
+          description: "one line",
+          whenToUse: "pick this skill\nfor that job\n",
+        },
+      ],
+    });
+    expect(out).toContain(
+      "alpha: one line\n  when_to_use: pick this skill\nfor that job\n"
+    );
+  });
+
+  it("omits the when_to_use line when the field is absent, empty or whitespace-only", async () => {
+    const out = await assembleIdentityContext({
+      ...baseCtx(),
+      skills: () => [
+        { name: "blank", description: "d", whenToUse: "" },
+        { name: "plain", description: "d" },
+        { name: "spaces", description: "d", whenToUse: "   " },
+      ],
+    });
+    expect(out).toContain(
+      "<available_skills>\nblank: d\nplain: d\nspaces: d\n</available_skills>"
+    );
   });
 
   it("does not include disabled skills in the available_skills segment (SC3)", async () => {

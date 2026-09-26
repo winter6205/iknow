@@ -4,9 +4,13 @@
  * Spec: specs/121-memory-injection.md (Project Structure frontmatter.ts,
  * Testing Strategy frontmatter half).
  *
- * Why no YAML dependency: spec Tech Stack bans new npm deps. We parse a
- * minimal scalar subset (`key: value` lines; strings / numbers / booleans /
- * null) — enough for the 6 core fields + title + updated_at + scalar extras.
+ * Both sides speak YAML (ADR-0123): the read side is a fence slice + YAML parse
+ * with the scalar coerce boundary, and the write side emits its frontmatter map
+ * through `yaml.stringify`, so a value the flat shape would misread (`": "`,
+ * ` #`, a leading indicator, a blank) is quoted rather than silently dropped by
+ * the reader. Key order, the comma-flat list form and body-after-the-fence
+ * placement stay pinned by the round-trip assertions; `computeSignature` reads
+ * parsed fields, so the quoted form moves no digest.
  *
  * The serialized format mirrors session-store sanitized files: frontmatter
  * block delimited by `---`, body text after the closing fence. Sanitize is
@@ -16,12 +20,16 @@
  * memory's logical content).
  */
 import { createHash } from "node:crypto";
+import { stringify } from "yaml";
+import { parseFrontmatter, stripFence } from "../frontmatter/index.js";
 import { MemorySchemaInvalid } from "./errors.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { defaultMemoryEntry } from "./schema.js";
 
-/** Frontmatter regex: opening `---`, lazy body, closing `---`, body text. */
-const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
+/** `lineWidth: -1` stops `yaml` from wrapping a long scalar onto continuation
+ *  lines, which would split one frontmatter key across rows the reader reads as
+ *  separate entries. Distinct from `foldEntryLineBreaks`, which joins lines. */
+const STRINGIFY_OPTIONS = { lineWidth: -1 } as const;
 
 const STRING_KEYS = new Set(["id", "type", "title", "updated_at"]);
 const NUMBER_KEYS = new Set(["importance", "ttl_days"]);
@@ -41,42 +49,47 @@ const ALL_KNOWN_KEYS = new Set([...KNOWN_FRONT_KEYS, "body"]);
 
 /** Parse `--- ... ---` frontmatter + body into a MemoryEntryV1. Throws on malformed input. */
 export function parseMemoryEntry(raw: string): MemoryEntryV1 {
-  const m = FM_RE.exec(raw);
-  if (!m) throw new MemorySchemaInvalid("frontmatter");
-  const [, fm, body] = m;
+  const fence = stripFence(raw);
+  if (!fence.found) throw new MemorySchemaInvalid("frontmatter");
+  const { fields, warnings, rejected } = parseFrontmatter(fence.block);
+  // No warn channel reaches here (store/recall/promote catch the typed throw
+  // instead), so a degraded key goes to the module-wide console.warn seam —
+  // same posture as memory/prefetch. Reporting must never turn into a throw.
+  for (const message of warnings)
+    console.warn(`[memory/frontmatter] ${message}`);
+
+  // Fail closed on a block this reader cannot parse. Returning defaults would
+  // classify the file as a healthy empty entry, and a GC soft-disable write
+  // would then replace the unreadable original with those defaults — so the
+  // typed throw is what keeps the store's quarantine-and-preserve contract
+  // (store.ts files it under `skipped`, and GC never rewrites `skipped`).
+  // EXIT: unreadable block → throw, file preserved untouched on disk.
+  if (rejected) throw new MemorySchemaInvalid("frontmatter");
 
   const out: Record<string, unknown> = {
     ...defaultMemoryEntry(),
-    body,
+    body: fence.body,
   };
 
-  for (const line of fm.split(/\r?\n/)) {
-    const sep = line.indexOf(":");
-    if (sep === -1) continue;
-    const key = line.slice(0, sep).trim();
-    if (!key) continue;
-    const raw = line.slice(sep + 1).trim();
-    out[key] = coerce(key, raw);
-  }
+  for (const [key, value] of Object.entries(fields))
+    out[key] = coerce(key, value);
   return out as unknown as MemoryEntryV1;
 }
 
 /** Serialize a MemoryEntryV1 to its on-disk frontmatter form. Round-trip-stable. */
 export function serializeMemoryEntry(entry: MemoryEntryV1): string {
-  const lines: string[] = ["---"];
+  const fields: Record<string, unknown> = {};
   for (const key of KNOWN_FRONT_KEYS) {
-    lines.push(`${key}: ${formatValue(entry[key as keyof MemoryEntryV1])}`);
+    fields[key] = formatValue(entry[key as keyof MemoryEntryV1]);
   }
   const extraKeys = Object.keys(entry)
     .filter((k) => !ALL_KNOWN_KEYS.has(k))
     .sort();
   for (const key of extraKeys) {
     const v = (entry as unknown as Record<string, unknown>)[key];
-    if (isScalar(v)) lines.push(`${key}: ${formatScalar(v)}`);
+    if (isScalar(v)) fields[key] = v;
   }
-  lines.push("---");
-  lines.push(entry.body);
-  return lines.join("\n");
+  return `---\n${stringify(fields, STRINGIFY_OPTIONS)}---\n${entry.body}`;
 }
 
 /**
@@ -147,16 +160,20 @@ function isScalar(v: unknown): v is string | number | boolean | null {
   );
 }
 
-function formatScalar(v: unknown): string {
-  if (v === null) return "null";
-  if (typeof v === "string") return v;
-  return String(v);
-}
-
-/** Format any known-entry value (including object-like edges) for serialize. */
-function formatValue(v: unknown): string {
-  if (v === null || v === undefined) return v === null ? "null" : "";
-  if (typeof v === "string") return v;
+/**
+ * Collapse a known-entry value onto a YAML scalar and let the library decide
+ * quoting. `supersedes` keeps the comma-flat form the reader's coerce rule
+ * parses, so a list costs no extra lines.
+ */
+function formatValue(v: unknown): string | number | boolean | null {
+  if (v === undefined) return "";
+  if (
+    v === null ||
+    typeof v === "string" ||
+    typeof v === "number" ||
+    typeof v === "boolean"
+  )
+    return v;
   if (Array.isArray(v)) return v.join(",");
   return String(v);
 }

@@ -87,6 +87,23 @@ describe("skill catalog faces（技能模型索引 vs 可加载技能面）", ()
     expect(catalog.get("undocumented")?.description).toBeUndefined();
   });
 
+  it("when_to_use does not change entry: hint without description stays out of the model index", () => {
+    const catalog = createSkillCatalog([
+      entry({
+        name: "hint-only",
+        description: undefined,
+        whenToUse: "use it when X",
+      }),
+      entry({ name: "documented", whenToUse: "use it when Y" }),
+    ]);
+
+    // Eligibility stays "has description and not disabled" — the second
+    // selection signal rides along, it never grants entry.
+    expect(names(catalog.modelIndex())).toEqual(["documented"]);
+    expect(names(catalog.loadable())).toContain("hint-only");
+    expect(catalog.modelIndex()[0]!.whenToUse).toBe("use it when Y");
+  });
+
   it("两面关系可判定：模型索引 ⊆ 可加载面，差集恰为不合格条目", () => {
     const catalog = createSkillCatalog(FIXTURE);
 

@@ -13,10 +13,9 @@ import { readdir, readFile } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { join, sep } from "node:path";
 
+import { stripFence } from "../frontmatter/index.js";
 import type { SkillEntry } from "./catalog.js";
 import type { WriteSituation } from "../session-roots.js";
-
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
 /** Max sampled entries in the skill_files segment. */
 export const SKILL_FILES_SAMPLE_LIMIT = 10;
@@ -138,11 +137,13 @@ export function exceedsUserInputCap(text: string, cap: number = 8000): boolean {
   return query.length > cap;
 }
 
-/** Strip frontmatter: return the text after the `---\n...\n---\n` block. */
+/**
+ * Strip frontmatter: return the text after the `---\n...\n---\n` block. The
+ * shared fence strip is content-independent, so an invalid YAML block is
+ * stripped the same way — the returned body is always an exact byte slice.
+ */
 export function stripFrontmatter(raw: string): string {
-  const match = FRONTMATTER.exec(raw);
-  if (!match) return raw;
-  return raw.slice(match[0].length);
+  return stripFence(raw).body;
 }
 
 /**

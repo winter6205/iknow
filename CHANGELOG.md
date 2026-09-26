@@ -8,6 +8,26 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Breaking
 
+- **Memory entry frontmatter is now written as real YAML (spec `frontmatter-shared-parser`, ADR-0123 amendment, 2026-09-23)**:
+  `serializeMemoryEntry` emits `yaml.stringify` instead of unquoted `key: value`
+  lines, because the shared parser made the read side strict and the old writer
+  produced bytes that reader rejects — an unquoted plain scalar may not carry
+  `": "`, so a title like `Rule: …` cost the whole frontmatter block, reading
+  back an empty `title` and `id`. On-disk divergence is two shapes only: a blank
+  value becomes `key: ""` and an ambiguous scalar gains quotes. Key order
+  (`KNOWN_FRONT_KEYS` first, extras sorted), the comma-flat `supersedes` list,
+  `body` staying outside the block and no line folding are all pinned. Migration
+  is lazy — an existing file is rewritten on its next save; measured over 19 real
+  files, 17 need no change and 2 grow 2 bytes (the two blank-value entries), with
+  `computeSignature` stable in all 19. A memory file whose block cannot be parsed
+  at all now throws on read, so the store quarantines it and GC leaves the
+  original bytes untouched instead of soft-disabling a defaulted copy of them.
+- **Skill frontmatter degradation is block-atomic (ADR-0123)**: a `SKILL.md`
+  whose block is not valid YAML now loses every field (plus one warn, name
+  falling back to the directory basename, the skill still indexed) where the
+  per-line parser previously kept the parseable lines. Authors must quote a
+  `description` containing `": "` — e.g. `description: Emits "GATE: BLOCKED"`.
+
 - **`settings.hooks` switched to the Claude-compatible command shape (2026-09-20)**:
   user-level `~/.iknow/settings.json` `hooks` now accepts only `PreToolUse` /
   `PostToolUse` entries (`matcher` + `type: "command"`), the same form as plugin
@@ -140,6 +160,21 @@ is a curated snapshot; the complete development history lives in the git log.
     archived.
 
 ### Added
+
+- **Shared frontmatter module (spec `frontmatter-shared-parser`, ADR-0123, 2026-09-23)**: `src/harness/frontmatter/`
+  exposes two APIs that replace the four hand-rolled `---` parsers — `stripFence`
+  (content-independent, never throws, returns the body as an exact byte slice) and
+  `parseFrontmatter` (a real YAML parse plus the scalar coerce boundary: scalars to
+  string, scalar sequences folded with `", "`, mappings skipped with a warning and
+  never registered as a top-level key; a broken block yields an empty map plus a
+  warning and never throws upward). This is the repo's first `yaml` production
+  dependency, exempted from the zero-new-dependency gate by ADR-0123's gate check.
+- **`when_to_use` as a second skill selection signal (spec `frontmatter-shared-parser`, 2026-09-23)**:
+  an optional `SKILL.md` field rendered on its own line in the opening frozen
+  `<available_skills>` table and in the in-session delta rows, with its own 1536
+  truncation budget independent of `description`, stripped together with
+  `description` under index demotion, and carried on `SkillSummary`. Eligibility
+  is unchanged — a skill still needs a `description` to enter the index.
 
 - **Code restore on rewind (ADR-0121, 2026-09-22)**: a successful workspace write
   by `edit_file`, `write_file` or one of the five symbol-mutation tools first
@@ -594,6 +629,24 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   to JSONL head records or the store API. Related ADR-0027 synced.
 
 ### Fixed
+
+- **Three valid YAML frontmatter shapes were misread, one of them silently (issue #1128, ADR-0123, 2026-09-23)**:
+  the skill scanner's per-line parser dropped fields and miswarned on a block
+  sequence, lost the body on a block scalar, and — the only unwarned data
+  corruption in the set — let a nested mapping overwrite the top-level `name` and
+  `description`, so a skill could enter the model index under a polluted identity.
+  Parsing now goes through the shared module, so all three shapes read correctly
+  and a mapping key is never registered top-level. The subagent user-catalog and
+  the memory read side migrated with it, which also makes a block-scalar
+  `description` and a YAML-list `disallowedTools` in a user agent file mean the
+  same thing as their single-line and comma forms.
+- **A memory value containing a line break could split its own fence block (ADR-0123, 2026-09-23)**:
+  `sanitizeMemoryFile` now folds `\r\n` / `\n` / `\r` in `title` and unknown
+  scalar extras to a single space, and the fold is applied at
+  `writeMemoryEntryAtomic` — the choke point all three writers (`memory_save`,
+  auto-memory ingest, gc) pass through — so a model-supplied multi-line title can
+  no longer reach the writer unsanitized and orphan a second index row. Line-free
+  values are untouched, so healthy files stay byte-identical.
 
 - **First-turn overflow governance could silently never run (2026-09-22)**:
   both ADR-0043 measurement gates — tool-surface overflow eviction and disclosure-index

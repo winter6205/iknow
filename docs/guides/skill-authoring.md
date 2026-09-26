@@ -36,12 +36,14 @@ A `SKILL.md` without a `---` frontmatter block is **skipped entirely** (one warn
 ---
 name: my-skill # omit to take the directory name
 description: one line stating when to use this skill # decides whether it appears in <available_skills>
+when_to_use: the situations the model should pick this skill for # optional second selection signal
 ---
 
 # write the body here
 ```
 
 - A `description` longer than 1536 characters is truncated with a warning — **write one sentence**; don't turn the description into a body.
+- `when_to_use` is an **optional second selection signal**: when the model should pick this skill. It renders as **its own line** under the description in the model index (frozen table and in-session deltas) and gets **its own 1536-char truncation with its own warning** — a long `when_to_use` never shortens the `description` and vice versa. Under index pressure (ADR-0046 index demotion) it is stripped **together with** the `description`, leaving the bare name. It never grants index entry by itself: entry still requires a `description`.
 - Only skills that have a `description` and do not set `disable-model-invocation: true` enter the **model-facing skill index** — both the `<available_skills>` list (frozen at session start + in-session increments) and the model-side `skill({name})` honor only that qualification.
 - **The human-side slash uses the loadable-skill surface, which is wider than the model index**: TUI `/` candidates, Web `GET /api/v1/skills`, and CLI `/` candidates all include entries **without a `description`** and with **`disable-model-invocation: true`** (one shared entry point for the three hosts); fetching a body by name rejects only "not found". So skills missing a description or marked disabled can still be loaded by a human via `/name`. ADR-0098 / `specs/skill-index-increment.md`.
 - The two gates do not cross: model-side `skill({name})` returns a typed rejection for unqualified names (the message points to `/name`), and does **not** block `read_file` on the same SKILL.md.
@@ -87,7 +89,7 @@ This discipline isn't stylistic; it follows directly from the load model: the bo
 
 **No skill-specific body limit and no runtime size validation**:
 
-- Scanning never checks `SKILL.md` body length — the only size truncation anywhere is the frontmatter `description` (1536 characters + warning);
+- Scanning never checks `SKILL.md` body length — the only size truncations anywhere are the frontmatter `description` / `when_to_use` scalars (1536 characters each, each with its own warning);
 - Assembly never trims by size: strip frontmatter, append two sections, no length checks anywhere;
 - There are no `SKILL_MAX_*`-style skill-specific limit constants and no "over-limit → refuse to scan / load" decision;
 - No skill-specific truncation / preview / read-more fallback.
@@ -108,11 +110,11 @@ This discipline isn't stylistic; it follows directly from the load model: the bo
 
 **Reachability depends on install location** (`read_file`'s fence constraints):
 
-| Skill install location                  | `references/` readable via `read_file` |
-| --------------------------------------- | -------------------------------------- |
-| `<projectIdentityRoot>/.iknow/skills`   | yes                                    |
-| `<home>/.iknow/skills`                  | yes (`~/.iknow/` is a resident read root) |
-| external dirs via `IKNOW_SKILL_DIRS`    | **no** (outside the fence; refused)    |
+| Skill install location                | `references/` readable via `read_file`    |
+| ------------------------------------- | ----------------------------------------- |
+| `<projectIdentityRoot>/.iknow/skills` | yes                                       |
+| `<home>/.iknow/skills`                | yes (`~/.iknow/` is a resident read root) |
+| external dirs via `IKNOW_SKILL_DIRS`  | **no** (outside the fence; refused)       |
 
 For skills installed to external directories, never put must-read content only in `references/`.
 

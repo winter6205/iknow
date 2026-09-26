@@ -40,6 +40,7 @@
 import {
   mcpNameDirectorySegment,
   shortToolDescription,
+  skillIndexLine,
   skillsSegment,
   type McpServiceSummary,
   type SkillSummary,
@@ -101,9 +102,10 @@ export function renderIndexText(
  *  surface (rendered lines that carry a description). */
 interface Candidate {
   readonly name: string;
-  /** Rendered size = character count of this entry's line in its segment (MCP
-   *  uses the actual form after the 120-char short-description truncation,
-   *  skills use the full description) — the "largest first" sort key. */
+  /** Rendered size = character count of this entry's line(s) in its segment
+   *  (MCP uses the actual form after the 120-char short-description truncation,
+   *  skills use the full description plus their when_to_use line) — the
+   *  "largest first" sort key. */
   readonly size: number;
 }
 
@@ -211,18 +213,17 @@ function deriveCandidates(input: IndexDemotionInput): ReadonlyArray<Candidate> {
     if (skill.disabled) continue;
     const description = skill.description?.trim();
     if (description === undefined || description.length === 0) continue;
-    out.push({
-      name: skill.name,
-      size: `${skill.name}: ${skill.description}`.length,
-    });
+    // Sized through the renderer, so a change to the entry line can never make
+    // the measurement describe bytes that are no longer emitted.
+    out.push({ name: skill.name, size: skillIndexLine(skill).length });
   }
   return out.sort((a, b) =>
     b.size !== a.size ? b.size - a.size : a.name.localeCompare(b.name)
   );
 }
 
-/** Stripping a description = dropping the description field; names and
- *  service membership stay as-is (names are never deleted). */
+/** Stripping a description = dropping the description and when_to_use fields;
+ *  names and service membership stay as-is (names are never deleted). */
 function stripMcp(
   mcp: ReadonlyArray<McpServiceSummary>,
   stripped: ReadonlySet<string>
@@ -241,11 +242,10 @@ function stripSkills(
 ): ReadonlyArray<SkillSummary> {
   return skills.map((skill) => {
     if (!stripped.has(skill.name)) return skill;
-    // Drop the description field entirely → `skillsSegment` downgrades to a
-    // bare name line (same rule as the MCP directory / evicted-built-in
-    // segments: "description absent → render name only", not a second
-    // decision layer).
-    const { description: _dropped, ...rest } = skill;
+    // Drop both text fields entirely → `skillsSegment` downgrades to a bare
+    // name line (same rule as the MCP directory / evicted-built-in segments:
+    // "description absent → render name only", not a second decision layer).
+    const { description: _dropped, whenToUse: _droppedToo, ...rest } = skill;
     return rest;
   });
 }
