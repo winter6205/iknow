@@ -1670,6 +1670,7 @@ export async function buildHarnessEngine(
     .map((entry) => ({
       name: entry.name,
       description: entry.description ?? "",
+      ...(entry.whenToUse !== undefined ? { whenToUse: entry.whenToUse } : {}),
       ...(entry.disabled ? { disabled: true } : {}),
     }));
   if (countTokensFn !== undefined) {

@@ -347,6 +347,53 @@ describe("T5 SC7 — runIndexDemotion 判定层(纯逻辑)", () => {
     assert.ok(text.includes(skillsSegment(skills)));
     assert.ok(!text.includes("deferred_internal_tools"));
   });
+
+  it("demotion strips when_to_use together with the description (name stays)", async () => {
+    const skills: ReadonlyArray<SkillSummary> = [
+      {
+        name: "hinted",
+        description: "D".repeat(200),
+        whenToUse: "W".repeat(200),
+      },
+    ];
+    const out = await runIndexDemotion(
+      input({
+        skills,
+        threshold: 10,
+        countTokens: async () => 5_000, // always over → strip everything strippable
+      })
+    );
+    assert.equal(out.reason, "demoted");
+    assert.deepEqual(out.demoted, ["hinted"]);
+    assert.deepEqual(out.skills, [{ name: "hinted" }]);
+    assert.ok(!renderIndexText(out.mcp, out.skills).includes("when_to_use"));
+  });
+
+  it("candidate size counts the rendered when_to_use line (largest-first stays honest)", async () => {
+    // big-hint has a one-char description but a huge when_to_use: its RENDERED
+    // entry is the larger line, so it must be stripped first — a description-
+    // only size key would strip "small" first instead.
+    const measurements = [900, 50];
+    let idx = 0;
+    const out = await runIndexDemotion(
+      input({
+        skills: [
+          { name: "big-hint", description: "d", whenToUse: "W".repeat(300) },
+          { name: "small", description: "s".repeat(50) },
+        ],
+        threshold: 100,
+        countTokens: async () => {
+          const v = measurements[idx];
+          idx += 1;
+          if (v === undefined) throw new Error("countTokens: out of fixtures");
+          return v;
+        },
+      })
+    );
+    assert.equal(out.reason, "demoted");
+    assert.deepEqual(out.demoted, ["big-hint"]);
+    assert.equal(out.skills[1]!.description, "s".repeat(50));
+  });
 });
 
 // ---------------------------------------------------------------------------

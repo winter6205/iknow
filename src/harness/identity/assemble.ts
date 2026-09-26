@@ -148,6 +148,11 @@ export interface AssemblyContext {
 export interface SkillSummary {
   readonly name: string;
   readonly description?: string;
+  /** Optional second selection signal; renders as its own indented line
+   *  under the entry line, never appended to the description. Length is
+   *  capped upstream (scanner's own 1536 budget); index demotion strips it
+   *  together with the description. */
+  readonly whenToUse?: string;
   readonly disabled?: boolean;
 }
 
@@ -661,16 +666,11 @@ function projectPathSegment(projectIdentityRoot: string): string {
   return `## Project path\n${projectIdentityRoot}`;
 }
 
-/** `<available_skills>` segment rendering: XML-style tag + name-ordered list
- *  + description on the same line + explicit "No skills installed" for the
- *  empty list. Additive segment — does not touch IKNOW_ASSEMBLY_ORDER;
- *  disabled entries are already filtered out by the assembly layer.
- *
- *  ADR-0046 Decision 2: description absent/empty/whitespace-only → render a
- *  bare name line (index demotion strips over-threshold entries to name-only;
- *  names are never deleted and the segment is never absent). The demotion
- *  decision is not in this function — the renderer only outputs what the data
- *  shape says (single SSOT, see identity/index-demotion.ts).
+/** `<available_skills>` segment rendering: XML-style tag + name-ordered list +
+ *  explicit "No skills installed" for the empty list. Additive segment — does
+ *  not touch IKNOW_ASSEMBLY_ORDER; disabled entries are already filtered out by
+ *  the assembly layer. Per-entry text is `skillIndexLine`'s contract, so the
+ *  demotion measurement and this segment cannot drift apart.
  *
  *  Descriptions are not truncated to 120 chars (the MCP / eviction segments
  *  use shortToolDescription, this one does not): the full description is
@@ -686,15 +686,31 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   if (visible.length === 0) {
     return "<available_skills>\nNo skills installed\n</available_skills>";
   }
-  const body = visible
-    .map((s) => {
-      const description = s.description?.trim();
-      return description === undefined || description.length === 0
-        ? s.name
-        : `${s.name}: ${s.description}`;
-    })
-    .join("\n");
+  const body = visible.map(skillIndexLine).join("\n");
   return `<available_skills>\n${body}\n</available_skills>`;
+}
+
+/**
+ * One skill's entry as it appears inside `<available_skills>` — the bytes the
+ * renderer emits, in one function so the demotion measurement (index-demotion
+ * `deriveCandidates`) can size the same text instead of re-deriving it.
+ *
+ * ADR-0046 Decision 2 lives here: absent/blank description → bare name line;
+ * blank `whenToUse` → no second line. `whenToUse` is never appended to the
+ * description, and embedded newlines in either field pass through verbatim —
+ * the raw-render rule that keeps a block-scalar authoring shape intact, so no
+ * second folding decision exists anywhere on this path.
+ */
+export function skillIndexLine(skill: SkillSummary): string {
+  const description = skill.description?.trim();
+  const line =
+    description === undefined || description.length === 0
+      ? skill.name
+      : `${skill.name}: ${skill.description}`;
+  const whenToUse = skill.whenToUse?.trim();
+  return whenToUse === undefined || whenToUse.length === 0
+    ? line
+    : `${line}\n  when_to_use: ${skill.whenToUse}`;
 }
 
 /** Agent-status read rule (ADR-0112): a single static text assembled into

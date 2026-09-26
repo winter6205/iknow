@@ -41,7 +41,7 @@ import {
   detectCapabilityObservation,
 } from "../capability-gate.js";
 import { serializeMemoryEntry } from "../frontmatter.js";
-import { normalizeMemoryType } from "../schema.js";
+import { foldEntryLineBreaks, normalizeMemoryType } from "../schema.js";
 import type { MemoryEntryV1 } from "../schema.js";
 
 const DEFAULT_IMPORTANCE = 1;
@@ -97,7 +97,7 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
     handler: async (input: unknown) => {
       const params = parseInput(input);
       assertDraftAllowed(params);
-      const entry: MemoryEntryV1 = {
+      const draft: MemoryEntryV1 = {
         id: "", // filled by serialize from frontmatter; we use slug as canonical key
         type: params.type,
         importance: params.importance,
@@ -109,8 +109,10 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
         updated_at: now(),
       };
       const slug = makeSlug(random);
-      await writeMemoryEntryAtomic(deps.memoryDir, slug, entry);
-      await upsertMemoryIndex(deps.memoryDir, slug, entry);
+      // The index row is rendered from what the writer actually stored, so the
+      // human index can never show a title the file does not hold.
+      const written = await writeMemoryEntryAtomic(deps.memoryDir, slug, draft);
+      await upsertMemoryIndex(deps.memoryDir, slug, written);
       return `${MEMORY_SAVE_PERSISTED_PREFIX} ${slug}.md`;
     },
   });
@@ -229,12 +231,18 @@ function makeSlug(random: (n: number) => Buffer): string {
  * no file, so a reader can never observe a partial entry under the final
  * path. Exported because auto-memory (ADR-0031 D2) requires the ingest write
  * path to be this same path rather than a second implementation of it.
+ *
+ * Returns the entry as written. `entry` is folded here rather than in each
+ * caller's construction, so every writer shares one normalization — and the
+ * return value is what makes the MEMORY.md row trustworthy: rendering the row
+ * from the caller's own (unfolded) object would split it across lines for a
+ * title that came back from a model with newlines in it.
  */
 export async function writeMemoryEntryAtomic(
   memoryDir: string,
   slug: string,
   entry: MemoryEntryV1
-): Promise<void> {
+): Promise<MemoryEntryV1> {
   try {
     await mkdir(memoryDir, { recursive: true });
   } catch (error) {
@@ -244,9 +252,10 @@ export async function writeMemoryEntryAtomic(
   }
   const finalPath = join(memoryDir, `${slug}.md`);
   const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.${slug}.tmp`;
+  const written = foldEntryLineBreaks(entry);
   let serialized: string;
   try {
-    serialized = serializeMemoryEntry(entry);
+    serialized = serializeMemoryEntry(written);
   } catch (error) {
     throw new MemoryIOError(`[memory_save] serialize failed`, { cause: error });
   }
@@ -266,6 +275,7 @@ export async function writeMemoryEntryAtomic(
       cause: error,
     });
   }
+  return written;
 }
 
 /** Append a `<slug>.md` link line to MEMORY.md; idempotent on replay. */

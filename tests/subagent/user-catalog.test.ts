@@ -108,6 +108,132 @@ describe("loadUserAgentEntries: 扫描", () => {
     assert.equal(entry!.body, "Body here.");
   });
 
+  it("truncates an over-long description at 1536 and warns", () => {
+    const warnings: string[] = [];
+    const long = "x".repeat(2000);
+    writeFileSync(
+      path.join(dir, "long.md"),
+      `---\ndescription: ${long}\n---\nbody`
+    );
+    const [entry] = loadUserAgentEntries({
+      agentsDir: dir,
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(entry!.description.length, 1536);
+    assert.ok(warnings.some((w) => /description truncated/.test(w)));
+  });
+
+  it("block-scalar description yields the same entry as the single-line form", () => {
+    const flat = [
+      "---",
+      "description: Audit only",
+      "bashMode: readonly",
+      "---",
+      "",
+      "Body here.",
+    ].join("\n");
+    const folded = [
+      "---",
+      "description: >-",
+      "  Audit",
+      "  only",
+      "bashMode: readonly",
+      "---",
+      "",
+      "Body here.",
+    ].join("\n");
+    const literal = [
+      "---",
+      "description: |-",
+      "  Audit only",
+      "bashMode: readonly",
+      "---",
+      "",
+      "Body here.",
+    ].join("\n");
+    writeFileSync(path.join(dir, "aa-flat.md"), flat);
+    writeFileSync(path.join(dir, "ab-folded.md"), folded);
+    writeFileSync(path.join(dir, "ac-literal.md"), literal);
+    const entries = loadUserAgentEntries(scanOpts(dir));
+    assert.equal(entries.length, 3);
+    const [first, second, third] = entries;
+    assert.equal(first!.description, "Audit only");
+    assert.deepEqual(
+      { ...second!, id: first!.id },
+      first,
+      "folded block scalar must equal the single-line form"
+    );
+    assert.deepEqual(
+      { ...third!, id: first!.id },
+      first,
+      "literal block scalar must equal the single-line form"
+    );
+  });
+
+  it("block-list and flow-list disallowedTools yield the same entry as the comma form", () => {
+    const comma = [
+      "---",
+      "description: Tools off",
+      "disallowedTools: edit_file, write_file",
+      "---",
+      "Body here.",
+    ].join("\n");
+    const blockList = [
+      "---",
+      "description: Tools off",
+      "disallowedTools:",
+      "  - edit_file",
+      "  - write_file",
+      "---",
+      "Body here.",
+    ].join("\n");
+    const flowList = [
+      "---",
+      "description: Tools off",
+      "disallowedTools: [edit_file, write_file]",
+      "---",
+      "Body here.",
+    ].join("\n");
+    writeFileSync(path.join(dir, "aa-comma.md"), comma);
+    writeFileSync(path.join(dir, "ab-block.md"), blockList);
+    writeFileSync(path.join(dir, "ac-flow.md"), flowList);
+    const entries = loadUserAgentEntries(scanOpts(dir));
+    assert.equal(entries.length, 3);
+    const [first, second, third] = entries;
+    assert.deepEqual(first!.disallowedTools, ["edit_file", "write_file"]);
+    assert.deepEqual(
+      { ...second!, id: first!.id },
+      first,
+      "the block-list form folds to ', ' and must split like the comma form"
+    );
+    assert.deepEqual({ ...third!, id: first!.id }, first);
+  });
+
+  it("a mapping under description never leaks into another top-level field and warns", () => {
+    const warnings: string[] = [];
+    // The nested child key shadows a real field name, so a parser that reads
+    // indented lines as top-level pairs would leak it — the silent-overwrite
+    // path that the frontmatter coercion boundary forbids (docs/CONTEXT.md, ADR-0123).
+    writeFileSync(
+      path.join(dir, "nested.md"),
+      ["---", "description:", "  bashMode: readonly", "---", "body"].join("\n")
+    );
+    const [entry] = loadUserAgentEntries({
+      agentsDir: dir,
+      warn: (m) => warnings.push(m),
+    });
+    assert.equal(
+      entry!.bashMode,
+      undefined,
+      "a mapping child key must never become a top-level field"
+    );
+    assert.equal(entry!.description, "User-defined subagent role 'nested'.");
+    assert.ok(
+      warnings.length > 0,
+      "the skipped mapping must be reported, never silent"
+    );
+  });
+
   it("无 frontmatter → 整文件 body + description 兜底", () => {
     writeFileSync(path.join(dir, "plain.md"), "Just a body.");
     const [entry] = loadUserAgentEntries(scanOpts(dir));
@@ -195,6 +321,7 @@ describe("createMergedCatalogResolver: builtin + user 合并", () => {
     writeFileSync(path.join(dir, "explore", "AGENTS.md"), "custom explore");
     const resolver = createMergedCatalogResolver({
       agentsDir: dir,
+      home: isoHome,
       warn: (m) => warnings.push(m),
     });
     assert.equal(resolver.get("explore").body, builtinExploreBody());

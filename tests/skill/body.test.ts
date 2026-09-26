@@ -9,7 +9,7 @@
 //   - ADR-0079: assembly no longer appends the write-root trailer. Write-situation
 //     disclosure moved to the worker prior + chat-session rebind one-shot notice,
 //     sharing the `writeRootSegment` helper (still exported, covered below).
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -662,6 +662,91 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
     expect(treeBody).toBe(noRootBody);
     expect(treeBody).not.toContain("current write root");
     expect(treeBody).not.toContain("no writable root");
+  });
+});
+
+/**
+ * The fence cut is content-independent: every byte after the closing `---`
+ * line reaches the model verbatim, so an invalid YAML block is stripped exactly
+ * like a healthy one (KV-cache prefix + skill-load envelope contract).
+ * `expectedBody` is written out byte-for-byte, including CRLF and trailing
+ * newlines, because any normalization would be a prompt-cache miss.
+ */
+const BODY_BYTE_CASES: ReadonlyArray<{
+  readonly label: string;
+  readonly skillFile: string;
+  readonly expectedBody: string;
+}> = [
+  {
+    label: "a healthy fence block",
+    skillFile:
+      "---\nname: echo\ndescription: one line\n---\n# Heading\n\ntext\n",
+    expectedBody: "# Heading\n\ntext\n",
+  },
+  {
+    label: "a CRLF fence block",
+    skillFile:
+      "---\r\nname: echo\r\ndescription: one line\r\n---\r\n# Heading\r\n\r\ntext\r\n",
+    expectedBody: "# Heading\r\n\r\ntext\r\n",
+  },
+  {
+    label: "a fence block holding invalid YAML",
+    skillFile: "---\nname: [unclosed\n---\n# Heading\n\ntext\n",
+    expectedBody: "# Heading\n\ntext\n",
+  },
+  {
+    label: "an opening fence with no closing fence",
+    skillFile: "---\nname: echo\n",
+    expectedBody: "---\nname: echo\n",
+  },
+  {
+    label: "text that carries no fence at all",
+    skillFile: "# Heading\n\ntext\n",
+    expectedBody: "# Heading\n\ntext\n",
+  },
+];
+
+describe("createSkillBody — post-fence bytes are verbatim", () => {
+  for (const testCase of BODY_BYTE_CASES) {
+    it(`assembles exactly the expected string for ${testCase.label}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "iknow-body-bytes-"));
+      roots.push(root);
+      const dir = await fixtureDir(root, "echo");
+      await fixtureFile(dir, "SKILL.md", testCase.skillFile);
+
+      const text = await createSkillBody({ entry: entry(dir, "echo"), dir });
+
+      expect(text).toBe(
+        `${testCase.expectedBody}\n\n` +
+          `Base directory: ${dir}\n\n` +
+          "<skill_files>\n</skill_files>"
+      );
+      expect(stripFrontmatter(testCase.skillFile)).toBe(testCase.expectedBody);
+    });
+  }
+
+  it("assembles the checked-in repo skill fixture byte-for-byte", async () => {
+    const raw = await readFile(
+      join(process.cwd(), "tests/fixtures/skills/echo/SKILL.md"),
+      "utf8"
+    );
+    // Independent derivation of "everything after the closing fence line" so
+    // the expectation does not reuse the module's own cut.
+    const expectedBody = raw.slice(raw.indexOf("\n---\n") + "\n---\n".length);
+    expect(expectedBody).not.toBe(raw);
+
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-fixture-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", raw);
+
+    const text = await createSkillBody({ entry: entry(dir, "echo"), dir });
+
+    expect(text).toBe(
+      `${expectedBody}\n\n` +
+        `Base directory: ${dir}\n\n` +
+        "<skill_files>\n</skill_files>"
+    );
   });
 });
 

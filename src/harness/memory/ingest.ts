@@ -427,12 +427,15 @@ export async function persistMemoryOps(
       source: deps?.source ?? AUTO_MEMORY_SOURCE,
       supersedes: op.kind === "SUPERSEDE" ? op.supersedes : null,
     });
-    await writeMemoryEntryAtomic(memoryDir, slug, entry);
+    // The index row is rendered from what the writer stored (folded there, at
+    // the one choke point every writer shares), so a candidate title carrying
+    // newlines cannot orphan a second MEMORY.md row.
+    const stored = await writeMemoryEntryAtomic(memoryDir, slug, entry);
     // ADD / SUPERSEDE append a row; UPDATE rewrites the slug's existing row so
     // the title in the index matches the stored entry (SC10).
     await (op.kind === "UPDATE"
-      ? refreshMemoryIndexLine(memoryDir, slug, entry)
-      : upsertMemoryIndex(memoryDir, slug, entry));
+      ? refreshMemoryIndexLine(memoryDir, slug, stored)
+      : upsertMemoryIndex(memoryDir, slug, stored));
     written.push({ slug, kind: op.kind });
   }
   return written;

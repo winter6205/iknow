@@ -30,9 +30,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMemorySaveTool } from "../../../src/harness/memory/tools/save.ts";
+import {
+  createMemorySaveTool,
+  writeMemoryEntryAtomic,
+} from "../../../src/harness/memory/tools/save.ts";
 import {
   CAPABILITY_OBSERVATION_REASON,
+  defaultMemoryEntry,
   parseMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type {
@@ -63,6 +67,22 @@ async function exists(path: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+}
+
+/** The slug a successful save reports in its persisted-as line. */
+function persistedSlug(out: unknown): string {
+  const m = /persisted as ([a-f0-9]+)\.md/.exec(String(out));
+  assert.ok(m, `result must name the persisted slug, got: ${String(out)}`);
+  return m[1];
+}
+
+/** The frontmatter key lines between the `---` fences, for any line-break form. */
+function fenceBlockLines(raw: string): string[] {
+  const lines = raw.split(/\r?\n/);
+  assert.equal(lines[0], "---", "file must open with a fence");
+  const close = lines.indexOf("---", 1);
+  assert.ok(close > 1, "file must close the fence");
+  return lines.slice(1, close);
 }
 
 // -- tool shape / metadata ---------------------------------------------------
@@ -157,6 +177,161 @@ describe("memory_save — successful atomic write", () => {
     const idx = await readFile(join(memoryDir, "MEMORY.md"), "utf8");
     assert.ok(idx.includes("- [First]"));
     assert.ok(idx.includes("- [Second]"));
+  });
+});
+
+// -- fence-block newline guard (write side) ---------------------------------
+
+describe("memory_save — fence-block newline guard on the write path", () => {
+  it("folds a model-supplied title onto one frontmatter line", async () => {
+    for (const br of ["\r\n", "\n", "\r"]) {
+      const tool = createMemorySaveTool({
+        memoryDir,
+        now: () => "2026-02-01T12:00:00.000Z",
+      });
+      const slug = persistedSlug(
+        await tool.handler({
+          title: `Use bar()${br}not foo()`,
+          body: "line one\nline two",
+          type: "note",
+          importance: 3,
+        })
+      );
+      const raw = await readFile(join(memoryDir, `${slug}.md`), "utf8");
+      const block = fenceBlockLines(raw);
+      assert.equal(
+        block.filter((line) => line.startsWith("title: ")).length,
+        1,
+        `${JSON.stringify(br)}: title must occupy exactly one fence line, block=${JSON.stringify(block)}`
+      );
+      assert.equal(
+        block.length,
+        8,
+        `fence block must stay 8 lines, got ${block.length}`
+      );
+      // The stored entry must re-parse to the folded entry, not to a truncated one.
+      const parsed = parseMemoryEntry(raw);
+      assert.equal(
+        parsed.title,
+        "Use bar() not foo()",
+        `${JSON.stringify(br)}: a line break in title must fold to one space`
+      );
+      // `body` is the multiline part of the format — never folded.
+      assert.equal(parsed.body, "line one\nline two");
+      assert.equal(parsed.importance, 3);
+      assert.equal(parsed.updated_at, "2026-02-01T12:00:00.000Z");
+    }
+  });
+
+  it("keeps the saved slug's MEMORY.md row on one line", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const slug = persistedSlug(
+      await tool.handler({ title: "Use bar()\nnot foo()", body: "body" })
+    );
+    const idx = await readFile(join(memoryDir, "MEMORY.md"), "utf8");
+    const rows = idx.split(/\r?\n/).filter((row) => row.length > 0);
+    assert.equal(rows.length, 1, `index must hold one row, got: ${idx}`);
+    assert.ok(rows[0].startsWith("- [Use bar() not foo()]"), rows[0]);
+    assert.ok(rows[0].includes(`(${slug}.md)`), rows[0]);
+  });
+
+  it("folds at the atomic-write choke point, covering ingest and gc callers", async () => {
+    // Auto-ingest and GC hand their own entry objects to this same writer, so
+    // the fold has to live there rather than only in the tool handler.
+    const entry = {
+      ...defaultMemoryEntry(),
+      id: "mem-1",
+      type: "note",
+      title: "Use bar()\nnot foo()",
+      body: "line one\nline two",
+      updated_at: "2026-02-01T12:00:00.000Z",
+      provenance: "team review\r\n2026 ledger",
+    };
+    await writeMemoryEntryAtomic(memoryDir, "cafe0000beef", entry);
+    const raw = await readFile(join(memoryDir, "cafe0000beef.md"), "utf8");
+    const block = fenceBlockLines(raw);
+    assert.deepEqual(block, [
+      "id: mem-1",
+      "type: note",
+      "importance: 1",
+      "ttl_days: 0",
+      "disabled: false",
+      "supersedes: null",
+      "title: Use bar() not foo()",
+      "updated_at: 2026-02-01T12:00:00.000Z",
+      "provenance: team review 2026 ledger",
+    ]);
+    assert.equal(parseMemoryEntry(raw).body, "line one\nline two");
+  });
+
+  it("persists a title containing a colon-space intact through the real write path", async () => {
+    // `memory_save` feeds model text straight into `title`, and a plain YAML
+    // scalar may not carry ": " — an unquoted writer took the whole frontmatter
+    // block down with it, so id and title both came back empty.
+    const tool = createMemorySaveTool({
+      memoryDir,
+      now: () => "2026-02-01T12:00:00.000Z",
+    });
+    const slug = persistedSlug(
+      await tool.handler({
+        title: "Convention: install with npm install",
+        body: "body",
+      })
+    );
+    const raw = await readFile(join(memoryDir, `${slug}.md`), "utf8");
+    assert.deepEqual(fenceBlockLines(raw), [
+      'id: ""',
+      "type: note",
+      "importance: 1",
+      "ttl_days: 0",
+      "disabled: false",
+      "supersedes: null",
+      'title: "Convention: install with npm install"',
+      "updated_at: 2026-02-01T12:00:00.000Z",
+    ]);
+    assert.equal(
+      parseMemoryEntry(raw).title,
+      "Convention: install with npm install"
+    );
+  });
+
+  it("writes a newline-free entry's on-disk bytes exactly", async () => {
+    // Byte-identity pin: the fold must not touch an entry with no line breaks,
+    // so files already on disk stay reproducible byte for byte.
+    const tool = createMemorySaveTool({
+      memoryDir,
+      now: () => "2026-02-01T12:00:00.000Z",
+    });
+    const slug = persistedSlug(
+      await tool.handler({
+        title: "Use bar()  ",
+        body: "line one\nline two",
+        type: "convention",
+        importance: 4,
+      })
+    );
+    const raw = await readFile(join(memoryDir, `${slug}.md`), "utf8");
+    assert.equal(
+      raw,
+      [
+        "---",
+        'id: ""',
+        "type: convention",
+        "importance: 4",
+        "ttl_days: 0",
+        "disabled: false",
+        "supersedes: null",
+        'title: "Use bar()  "',
+        "updated_at: 2026-02-01T12:00:00.000Z",
+        "---",
+        "line one",
+        "line two",
+      ].join("\n")
+    );
+    // Blanks and trailing padding are now quoted, so the bytes on disk read
+    // back as the text that was written — the unquoted form lost both.
+    assert.equal(parseMemoryEntry(raw).title, "Use bar()  ");
+    assert.equal(parseMemoryEntry(raw).id, "");
   });
 });
 

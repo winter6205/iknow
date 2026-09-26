@@ -234,6 +234,35 @@ describe("computeSkillIndexDelta — 只追加新建行", () => {
       "<available_skills>\nalpha: A\nzulu: Z\n</available_skills>"
     );
   });
+
+  it("delta row carries when_to_use on its own line; hint-only skills never enter", async () => {
+    const fixture = await makeFixture("when-to-use");
+    await plantUserSkill(
+      fixture.userHome,
+      "alpha",
+      "description: Alpha skill\nwhen_to_use: when the user says A"
+    );
+    await plantUserSkill(
+      fixture.userHome,
+      "hint-only",
+      "when_to_use: when the user says B"
+    );
+    const ledger = await ledgerFor(fixture, []);
+
+    const delta = await computeSkillIndexDelta({
+      rescanner: rescannerFor(fixture),
+      ledger,
+    });
+
+    expect(delta.added).toEqual(["alpha"]);
+    expect(delta.text).toBe(
+      "<available_skills>\n" +
+        "alpha: Alpha skill\n" +
+        "  when_to_use: when the user says A\n" +
+        "</available_skills>"
+    );
+    expect(delta.text).not.toContain("hint-only");
+  });
 });
 
 describe("computeSkillIndexDelta — 失败分型（不贴残缺 delta）", () => {

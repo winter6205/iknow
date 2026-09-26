@@ -1,12 +1,12 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, delimiter, join, resolve } from "node:path";
+import { parseFrontmatter, stripFence } from "../frontmatter/index.js";
 import {
   stripNamespace,
   type SkillEntry,
   type SkillFrontmatter,
 } from "./catalog.js";
 
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const DESCRIPTION_LIMIT = 1536;
 const ARCHIVED_KEYS = [
   "source",
@@ -234,10 +234,9 @@ async function scanRoot(
     if (namespace !== undefined) {
       // Plugin skill: bare name from frontmatter (preferred) or dir basename;
       // the catalog index expects the canonical `<plugin>:<bare>` name.
-      const bare =
-        typeof parsed.frontmatter.name === "string" && parsed.frontmatter.name
-          ? parsed.frontmatter.name
-          : basename(dir);
+      const bare = parsed.frontmatter.name
+        ? parsed.frontmatter.name
+        : basename(dir);
       const entry: SkillEntry = {
         ...parsed.entry,
         name: `${namespace}:${bare}`,
@@ -256,12 +255,12 @@ async function readSkill(
   warn: Warn,
   reportIoFailure: ReportIoFailure
 ): Promise<{ entry: SkillEntry; frontmatter: SkillFrontmatter } | undefined> {
+  const file = join(dir, "SKILL.md");
   let raw: string;
   try {
-    raw = await readFile(join(dir, "SKILL.md"), "utf8");
+    raw = await readFile(file, "utf8");
   } catch (error) {
     if (isMissing(error)) return undefined;
-    const file = join(dir, "SKILL.md");
     reportIoFailure(
       toIoFailure("file_unreadable", file, error),
       `skill skipped unreadable file: ${file}`
@@ -269,34 +268,18 @@ async function readSkill(
     return undefined;
   }
 
-  const match = FRONTMATTER.exec(raw);
-  if (!match) {
-    warn(`skill skipped malformed frontmatter: ${join(dir, "SKILL.md")}`);
+  const fence = stripFence(raw);
+  if (!fence.found) {
+    warn(`skill skipped malformed frontmatter: ${file}`);
     return undefined;
   }
-  const frontmatter = parseFrontmatter(match[1], dir, warn);
-  return { entry: toEntry(frontmatter, dir, warn), frontmatter };
-}
-
-function parseFrontmatter(
-  block: string,
-  dir: string,
-  warn: Warn
-): SkillFrontmatter {
-  const parsed: Record<string, unknown> = {};
-  let skipped = false;
-  for (const line of block.split(/\r?\n/)) {
-    const separator = line.indexOf(":");
-    const key = separator > 0 ? line.slice(0, separator).trim() : "";
-    if (!key) {
-      if (line.trim()) skipped = true;
-      continue;
-    }
-    parsed[key] = scalar(line.slice(separator + 1).trim());
-  }
-  if (skipped)
-    warn(`skill skipped malformed frontmatter line: ${join(dir, "SKILL.md")}`);
-  return parsed as SkillFrontmatter;
+  // Degradation is block-atomic and reported by the shared parser: a rejected
+  // block yields no fields at all, so `toEntry` falls back to the directory
+  // name and the skill stays indexed — never silent, never partly parsed.
+  const { fields, warnings } = parseFrontmatter(fence.block);
+  for (const warning of warnings)
+    warn(`skill frontmatter degraded: ${file}: ${warning}`);
+  return { entry: toEntry(fields, dir, warn), frontmatter: fields };
 }
 
 function toEntry(
@@ -304,22 +287,26 @@ function toEntry(
   dir: string,
   warn: Warn
 ): SkillEntry {
-  let description =
-    typeof frontmatter.description === "string"
-      ? frontmatter.description
-      : undefined;
-  if (description && description.length > DESCRIPTION_LIMIT) {
-    description = description.slice(0, DESCRIPTION_LIMIT);
-    warn(`skill description truncated: ${join(dir, "SKILL.md")}`);
-  }
+  const file = join(dir, "SKILL.md");
+  // description and when_to_use share the cap constant but each field gets
+  // its own budget: neither one's length can shorten the other's.
+  const truncate = (
+    value: string | undefined,
+    label: string
+  ): string | undefined => {
+    if (value === undefined || value.length <= DESCRIPTION_LIMIT) return value;
+    warn(`skill ${label} truncated: ${file}`);
+    return value.slice(0, DESCRIPTION_LIMIT);
+  };
+  const description = truncate(frontmatter.description, "description");
+  const whenToUse = truncate(frontmatter.when_to_use, "when_to_use");
   const entry: SkillEntry = {
-    name:
-      typeof frontmatter.name === "string" && frontmatter.name
-        ? frontmatter.name
-        : basename(dir),
+    name: frontmatter.name ? frontmatter.name : basename(dir),
     description,
+    ...(whenToUse !== undefined ? { whenToUse } : {}),
     dir,
-    disabled: frontmatter["disable-model-invocation"] === true,
+    // The coerce boundary is string-only, so the YAML boolean arrives as "true".
+    disabled: frontmatter["disable-model-invocation"] === "true",
   };
   for (const key of ARCHIVED_KEYS) {
     const value = frontmatter[key];
@@ -327,14 +314,6 @@ function toEntry(
       (entry as unknown as Record<string, unknown>)[key] = value;
   }
   return entry;
-}
-
-function scalar(raw: string): string | number | boolean | null {
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  if (raw === "null") return null;
-  const number = Number(raw);
-  return raw !== "" && Number.isFinite(number) ? number : raw;
 }
 
 /** Internal seam signature: one failure yields both the structured fact and the existing warn text. */

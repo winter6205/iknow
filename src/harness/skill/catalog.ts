@@ -1,20 +1,32 @@
 import { join } from "node:path";
 
+/**
+ * A `SKILL.md` frontmatter block as the scanner sees it, i.e. after the shared
+ * coerce boundary (ADR-0123): every value is a string, so a YAML boolean
+ * arrives as `"true"` and a scalar sequence as a `", "`-folded list. Unknown
+ * author keys survive as extras on the index signature.
+ */
 export interface SkillFrontmatter {
   name?: string;
   description?: string;
-  "disable-model-invocation"?: boolean;
+  /** Optional second selection signal (author vocabulary, snake_case key). */
+  when_to_use?: string;
+  /** Author opt-out from model invocation; the coerce boundary yields "true". */
+  "disable-model-invocation"?: string;
   source?: string;
-  version?: string | number;
+  version?: string;
   tags?: string;
   author?: string;
   license?: string;
   metadata?: string;
+  [key: string]: string | undefined;
 }
 
 export interface SkillEntry {
   name: string;
   description?: string;
+  /** `when_to_use` after the scanner's own 1536 budget; undefined when absent. */
+  whenToUse?: string;
   dir: string;
   disabled: boolean;
   source?: string;

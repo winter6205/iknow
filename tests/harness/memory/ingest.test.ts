@@ -874,6 +874,23 @@ describe("persistMemoryOps", () => {
     assert.ok(index.includes(`${written[0]!.slug}.md`), index);
   });
 
+  it("keeps one index row per entry when an extracted title carries newlines", async () => {
+    // The extractor's candidate text comes from a model, so a title can arrive
+    // with line breaks in it. The atomic writer folds at the one choke point
+    // every writer shares and returns what it stored; rendering the index row
+    // from anything else would orphan a second row and split the entry.
+    const written = await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate({ title: "Rule one\nrule two" }) }],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    const slug = written[0]!.slug;
+    assert.deepEqual(await indexLines(slug), [
+      `- [Rule one rule two](${slug}.md) · importance=2 · updated_at=${NOW_ISO}`,
+    ]);
+    assert.equal((await readSlug(slug)).title, "Rule one rule two");
+  });
+
   it("appends exactly one index line per ADD, even when the slug repeats", async () => {
     const deps = {
       now: () => NOW_ISO,

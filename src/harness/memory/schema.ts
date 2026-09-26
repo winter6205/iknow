@@ -92,6 +92,10 @@ export function defaultMemoryEntry(): MemoryEntryV1 {
  * unknown top-level and per-entry fields are preserved verbatim so future
  * schema additions round-trip without dropping data.
  *
+ * `title` and unknown scalar extras get their line breaks folded (see
+ * `foldEntryLineBreaks`), so a sanitized value can never break the `---` fence
+ * block that `serializeMemoryEntry` writes.
+ *
  * Pure, no IO, no writes (Boundaries Always).
  */
 export function sanitizeMemoryFile(raw: unknown): MemoryFileV1 {
@@ -147,7 +151,42 @@ function sanitizeMemoryEntry(raw: unknown): MemoryEntryV1 {
   out["body"] = typeof obj["body"] === "string" ? obj["body"] : base.body;
   out["updated_at"] =
     typeof obj["updated_at"] === "string" ? obj["updated_at"] : base.updated_at;
+  return foldEntryLineBreaks(out as unknown as MemoryEntryV1);
+}
+
+/**
+ * Fold the line breaks a value must not carry, so the entry can never be
+ * serialized into a `---` fence block that re-parses wrong. Covers `title` and
+ * unknown scalar extras; `body` keeps its breaks — multiline text after the
+ * closing fence is what the body field is for. Shared by the read side
+ * (`sanitizeMemoryEntry`) and the atomic write so both agree on one rule.
+ */
+export function foldEntryLineBreaks(entry: MemoryEntryV1): MemoryEntryV1 {
+  const out: Record<string, unknown> = { ...entry };
+  if (typeof out["title"] === "string")
+    out["title"] = foldLineBreaks(out["title"]);
+  const knownKeys = new Set(Object.keys(defaultMemoryEntry()));
+  for (const [key, value] of Object.entries(out)) {
+    if (!knownKeys.has(key) && typeof value === "string") {
+      out[key] = foldLineBreaks(value);
+    }
+  }
   return out as unknown as MemoryEntryV1;
+}
+
+/** Reads as: a maximal line-break run plus the horizontal whitespace around it. */
+const LINE_BREAK_RUN = /[ \t]*(?:\r\n?|\n)[ \t]*(?:(?:\r\n?|\n)[ \t]*)*/g;
+
+/**
+ * Fold line breaks into a single space so the value stays on one frontmatter
+ * line. A value with no line break is returned untouched — healthy on-disk
+ * entries must survive sanitize byte-identically. Once a fold does happen the
+ * value is also trimmed, because the fold cannot tell the whitespace it
+ * created from padding the author left around the value.
+ */
+function foldLineBreaks(value: string): string {
+  if (!/[\r\n]/.test(value)) return value;
+  return value.replace(LINE_BREAK_RUN, " ").trim();
 }
 
 /**

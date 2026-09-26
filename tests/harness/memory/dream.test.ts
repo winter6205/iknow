@@ -249,7 +249,7 @@ describe("runMemoryDream — replaces", () => {
       const result = await runMemoryDream({ memoryDir, llm });
       assert.equal(result.ops[0]!.kind, "SUPERSEDE");
 
-      await runMemoryGc(memoryDir);
+      await runMemoryGc(memoryDir, { nowMs: Date.parse(NOW_ISO) });
 
       const fresh = result.written.find(
         (written) => written.kind === "SUPERSEDE"

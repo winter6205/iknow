@@ -7,9 +7,10 @@
  *   - `~/.iknow/agents/<id>.md` (flat file, id = basename)
  *
  * Format: optional `---` frontmatter with keys `description` (string),
- * `bashMode` ("any" | "readonly"), `disallowedTools` (comma-separated tool
- * names); the text after frontmatter is the persona body, injected into the
- * worker system prompt through the same channel as builtin catalog bodies.
+ * `bashMode` ("any" | "readonly"), `disallowedTools` (comma-separated or YAML
+ * list of tool names); the text after frontmatter is the persona body,
+ * injected into the worker system prompt through the same channel as builtin
+ * catalog bodies.
  * No frontmatter → the whole file is body, description falls back to
  * `User-defined subagent role '<id>'.`.
  *
@@ -37,7 +38,9 @@
  * = pure builtin, byte-equivalent to prior behavior); empty body / invalid
  * frontmatter values / invalid id → warn + degrade (description fallback /
  * key treated as undefined / skip the file), never throw — hand-written role
- * files must not break the spawn assembly chain.
+ * files must not break the spawn assembly chain. A frontmatter block that is
+ * not valid YAML degrades block-atomically (every field dropped + one warn per
+ * rejected key, ADR-0123), never line-by-line.
  */
 import { basename, join, resolve } from "node:path";
 import { readdirSync, readFileSync } from "node:fs";
@@ -52,6 +55,11 @@ import {
   enumeratePluginAgentDirs,
   resolvePluginRoots,
 } from "../plugin/roots.js";
+import {
+  parseFrontmatter,
+  stripFence,
+  type FrontmatterFields,
+} from "../frontmatter/index.js";
 
 /** Global agents directory name (`<home>/.iknow/<dirname>`). */
 const USER_AGENTS_DIRNAME = "agents";
@@ -66,7 +74,6 @@ const DESCRIPTION_LIMIT = 1536;
  */
 const ROLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]*$/;
 
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const MD_SUFFIX = /\.md$/i;
 
 type Warn = (message: string) => void;
@@ -106,45 +113,18 @@ function splitFrontmatter(
   raw: string,
   filePath: string,
   warn: Warn
-): { frontmatter: Record<string, string>; body: string } {
-  const match = FRONTMATTER.exec(raw);
-  if (!match) {
-    return { frontmatter: {}, body: raw.trim() };
+): { frontmatter: FrontmatterFields; body: string } {
+  const fence = stripFence(raw);
+  if (!fence.found) return { frontmatter: {}, body: fence.body.trim() };
+  const { fields, warnings } = parseFrontmatter(fence.block);
+  for (const message of warnings) {
+    warn(`user agent frontmatter degraded: ${filePath}: ${message}`);
   }
-  return {
-    frontmatter: parseFrontmatterBlock(match[1], filePath, warn),
-    body: raw.slice(match[0].length).trim(),
-  };
-}
-
-/**
- * Frontmatter key-value parsing: `key: scalar` per line (same shape as the
- * skill scanner's parseFrontmatter). All keys here are string-valued — no
- * number/boolean coercion, since bashMode/disallowedTools are string
- * literals.
- */
-function parseFrontmatterBlock(
-  block: string,
-  filePath: string,
-  warn: Warn
-): Record<string, string> {
-  const parsed: Record<string, string> = {};
-  for (const line of block.split(/\r?\n/)) {
-    const separator = line.indexOf(":");
-    const key = separator > 0 ? line.slice(0, separator).trim() : "";
-    if (!key) {
-      if (line.trim()) {
-        warn(`user agent skipped malformed frontmatter line: ${filePath}`);
-      }
-      continue;
-    }
-    parsed[key] = line.slice(separator + 1).trim();
-  }
-  return parsed;
+  return { frontmatter: fields, body: fence.body.trim() };
 }
 
 function parseDescription(
-  frontmatter: Record<string, string>,
+  frontmatter: FrontmatterFields,
   filePath: string,
   warn: Warn
 ): string | undefined {
@@ -156,7 +136,7 @@ function parseDescription(
 }
 
 function parseBashMode(
-  frontmatter: Record<string, string>,
+  frontmatter: FrontmatterFields,
   filePath: string,
   warn: Warn
 ): AgentCatalogEntry["bashMode"] {
@@ -169,12 +149,14 @@ function parseBashMode(
 }
 
 function parseDisallowedTools(
-  frontmatter: Record<string, string>,
+  frontmatter: FrontmatterFields,
   filePath: string,
   warn: Warn
 ): ReadonlyArray<string> | undefined {
   const raw = frontmatter.disallowedTools;
   if (raw === undefined) return undefined;
+  // trim covers both author shapes: the coerce boundary folds a YAML sequence
+  // to "a, b", a hand-written value is usually "a,b" or "a, b".
   const names = raw
     .split(",")
     .map((name) => name.trim())

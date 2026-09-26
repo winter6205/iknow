@@ -148,7 +148,13 @@ export async function computeSkillIndexDelta(
     // Full description — the opening 10% downgrade is not on the delta path.
     return entry === undefined
       ? { name }
-      : { name, description: entry.description ?? "" };
+      : {
+          name,
+          description: entry.description ?? "",
+          ...(entry.whenToUse !== undefined
+            ? { whenToUse: entry.whenToUse }
+            : {}),
+        };
   });
   return {
     added: receipt.added,
