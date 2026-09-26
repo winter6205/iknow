@@ -202,8 +202,8 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
         mode: { type: "string", enum: [...TODO_WRITE_MODES] },
         // add: one `item` or many `items` at once (ADR-0085: write a
         // multi-step plan in one call). The two are mutually exclusive; the
-        // oneOf branches reject per-mode field exclusion before the handler
-        // runs, and parseInput keeps the same checks for direct calls.
+        // mode contract branches reject per-mode field exclusion before the
+        // handler runs, and parseInput keeps the same checks for direct calls.
         item: {
           type: "string",
           description:
@@ -241,7 +241,7 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       additionalProperties: false,
       // Mode-specific contract enforced at the ajv layer before the handler
       // runs; FORBIDDEN_KEYS in parseInput stays as the direct-call fallback.
-      oneOf: modeOneOfBranches(),
+      allOf: modeContractBranches(),
     },
     aci: {
       category: "write",
@@ -408,33 +408,57 @@ const FORBIDDEN_KEYS: Readonly<Record<TodoWriteMode, ReadonlyArray<string>>> = {
 const UPDATE_CHANGE_FIELDS = ["subject", "status", "delete"] as const;
 
 /**
- * Mode-specific oneOf branches, derived from the same FORBIDDEN_KEYS table
- * the parseInput fallback reads (single source of truth). A `false` property
- * schema rejects any branch whose instance carries that cross-mode field;
- * `add` splits into item/items branches so coexisting fields match none.
+ * Mode-specific contract branches, derived from the same FORBIDDEN_KEYS table
+ * the parseInput fallback reads (single source of truth). Each branch is an
+ * `if / then` pair guarded by the mode discriminator, so only the branches of
+ * the mode the caller actually declared can fail: a cross-mode field is
+ * reported once, on that field, instead of one `mode` mismatch per branch.
+ * Within a mode the field-exclusion branch is listed first, so the surfaced
+ * rejection names the offending field ahead of any missing-field complaint.
  */
-function modeOneOfBranches(): ReadonlyArray<Record<string, unknown>> {
-  const branch = (
+function modeContractBranches(): ReadonlyArray<Record<string, unknown>> {
+  const declaredAs = (
     mode: TodoWriteMode,
-    forbidden: ReadonlyArray<string>,
-    required: ReadonlyArray<string>
+    alsoRequired: ReadonlyArray<string> = []
   ): Record<string, unknown> => ({
-    type: "object",
-    properties: {
-      mode: { const: mode },
-      ...Object.fromEntries(forbidden.map((key) => [key, false])),
+    properties: { mode: { const: mode } },
+    required: ["mode", ...alsoRequired],
+  });
+  const excludes = (
+    mode: TodoWriteMode,
+    forbidden: ReadonlyArray<string>
+  ): Record<string, unknown> => ({
+    if: declaredAs(mode),
+    then: {
+      properties: Object.fromEntries(forbidden.map((key) => [key, false])),
     },
-    required: ["mode", ...required],
   });
   return [
-    branch("read", FORBIDDEN_KEYS.read, []),
+    excludes("read", FORBIDDEN_KEYS.read),
+    excludes("add", FORBIDDEN_KEYS.add),
     {
-      ...branch("update", FORBIDDEN_KEYS.update, ["id"]),
-      anyOf: UPDATE_CHANGE_FIELDS.map((field) => ({ required: [field] })),
+      // add takes `item` (single) or `items` (many): each arm accepts exactly
+      // one of the two, so coexisting fields match none.
+      if: declaredAs("add"),
+      then: {
+        anyOf: [
+          { required: ["item"], properties: { items: false } },
+          { required: ["items"], properties: { item: false } },
+        ],
+      },
     },
-    branch("add", [...FORBIDDEN_KEYS.add, "items"], ["item"]),
-    branch("add", [...FORBIDDEN_KEYS.add, "item"], ["items"]),
-    branch("replace", FORBIDDEN_KEYS.replace, ["items"]),
+    excludes("update", FORBIDDEN_KEYS.update),
+    { if: declaredAs("update"), then: { required: ["id"] } },
+    {
+      // An id alone is a no-op: a change field is required only once the id is
+      // there, so a missing id stays the single reported problem.
+      if: declaredAs("update", ["id"]),
+      then: {
+        anyOf: UPDATE_CHANGE_FIELDS.map((field) => ({ required: [field] })),
+      },
+    },
+    excludes("replace", FORBIDDEN_KEYS.replace),
+    { if: declaredAs("replace"), then: { required: ["items"] } },
   ];
 }
 

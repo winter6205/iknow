@@ -37,6 +37,7 @@ import { createPermissionPolicy } from "../../../../src/harness/permission/polic
 import {
   createTodoWriteTool,
   resolveConversationTodoPath,
+  TODO_WRITE_MODES,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 
 const tempDirs: string[] = [];
@@ -215,7 +216,13 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
       // ToolExecutionError carries it). Recorded dispatch:
       //   - validation_failed → AJV layer (no [todo_write] prefix)
       //   - execution_failed  → handler-layer ToolExecutionError ([todo_write] prefix)
-      expect(result.message).toBeDefined();
+      // Actionability (issue #1136): the bad-value field is named, and the mode
+      // enum error lists the accepted modes so the call is self-correctable.
+      expect(result.message).toContain("at /mode:");
+      expect(result.message).not.toMatch(/^\[todo_write\]/);
+      for (const mode of TODO_WRITE_MODES) {
+        expect(result.message).toContain(mode);
+      }
     }
   });
 
@@ -440,11 +447,12 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     ).toBe("- [ ] [t1] stale-plan\n");
   });
 
-  it("typed-error: replace 带 item 字段 → validation_failed (AJV oneOf 层先拒),现行不动", async () => {
-    // Since the mode-specific oneOf schema was added, this cross-mode field
-    // rejection is answered by the AJV layer before the handler — the message
-    // carries no `[todo_write]` prefix. The parseInput exclusion stays as the
-    // direct-handler-call fallback (unit tests pin its text).
+  it("typed-error: replace 带 item 字段 → validation_failed (AJV mode contract 层先拒),现行不动", async () => {
+    // The mode-specific contract branches answer this cross-mode field
+    // rejection before the handler runs — the message names the offending
+    // field instead of ajv's branch noise, and carries no `[todo_write]`
+    // prefix. The parseInput exclusion stays as the direct-handler-call
+    // fallback (unit tests pin its text).
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-mixed-fields";
@@ -480,7 +488,8 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     );
     expect(result.kind).toBe("validation_failed");
     if (result.kind === "validation_failed") {
-      expect(result.message).toBeDefined();
+      expect(result.message).toContain("at /item:");
+      expect(result.message).toMatch(/not accepted/);
       expect(result.message).not.toMatch(/^\[todo_write\]/);
     }
 

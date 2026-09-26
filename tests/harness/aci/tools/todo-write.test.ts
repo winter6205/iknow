@@ -1936,12 +1936,12 @@ describe("todo_write — executor classification of validation vs execution fail
 });
 
 // ---------------------------------------------------------------------------
-// Mode-specific oneOf schema: ajv must reject every cross-mode field
+// Mode-specific schema contract: ajv must reject every cross-mode field
 // combination BEFORE the handler runs. Discriminator vs the
 // parseInput fallback: ajv-layer messages carry no `[todo_write]` prefix.
 // ---------------------------------------------------------------------------
 
-describe("todo_write — oneOf rejects cross-mode shapes at the schema layer", () => {
+describe("todo_write — mode contract branches reject cross-mode shapes at the schema layer", () => {
   async function execute(input: unknown) {
     const tool = createTodoWriteTool({ todoDir });
     const registry = createRegistry([tool]);
@@ -1992,6 +1992,50 @@ describe("todo_write — oneOf rejects cross-mode shapes at the schema layer", (
     );
   });
 
+  // The point of the schema-layer contract: the rejection the model reads must
+  // name the field to fix, and two different bad inputs must not collapse into
+  // one byte-identical string.
+  it("cross-mode rejection names the offending field of that input", async () => {
+    const cases: ReadonlyArray<[string, Record<string, unknown>]> = [
+      ["/item", { mode: "replace", items: ["x"], item: "y" }],
+      ["/item", { mode: "update", id: "t1", status: "pending", item: "x" }],
+      ["/id", { mode: "add", item: "x", id: "t1" }],
+      ["/items", { mode: "read", items: ["x"] }],
+    ];
+    const messages: string[] = [];
+    for (const [field, input] of cases) {
+      const result = await execute(input);
+      assert.equal(result.kind, "validation_failed");
+      const message =
+        (result as { kind: string; message?: string }).message ?? "";
+      assert.ok(
+        message.includes(`at ${field}:`),
+        `expected ${field} to be named in the rejection, got: ${message}`
+      );
+      assert.match(message, /not accepted/);
+      messages.push(message);
+    }
+    // Two /item cases share one string; /id and /items each add one.
+    assert.equal(new Set(messages).size, 3);
+  });
+
+  it("bad-mode rejection lists every accepted mode so the model can self-correct", async () => {
+    const result = await execute({ mode: "bogus" });
+    assert.equal(result.kind, "validation_failed");
+    const message =
+      (result as { kind: string; message?: string }).message ?? "";
+    assert.ok(
+      message.includes("at /mode:"),
+      `expected /mode to be named, got: ${message}`
+    );
+    for (const mode of TODO_WRITE_MODES) {
+      assert.ok(
+        message.includes(mode),
+        `expected accepted mode "${mode}" in: ${message}`
+      );
+    }
+  });
+
   it("each mode's valid minimal shape still passes the schema", async () => {
     const tool = createTodoWriteTool({ todoDir });
     const registry = createRegistry([tool]);
@@ -2028,18 +2072,43 @@ describe("todo_write — oneOf rejects cross-mode shapes at the schema layer", (
     assert.equal(after[0]!.kind, "ok");
   });
 
-  it("oneOf is derived from the mode table (5 branches for 4 modes, add split for item/items exclusivity)", () => {
+  it("mode contract branches derive one field-exclusion branch per mode", () => {
     const tool = createTodoWriteTool({ todoDir });
     const schema = tool.inputSchema as {
-      oneOf?: ReadonlyArray<{
-        properties?: Record<string, unknown>;
-        required?: ReadonlyArray<string>;
+      allOf?: ReadonlyArray<{
+        if?: {
+          properties?: Record<string, unknown>;
+          required?: ReadonlyArray<string>;
+        };
+        then?: { properties?: Record<string, unknown> };
       }>;
       properties?: Record<string, unknown>;
       required?: ReadonlyArray<string>;
       additionalProperties?: boolean;
     };
-    assert.equal(schema.oneOf?.length, 5);
+    const exclusions = (schema.allOf ?? []).filter(
+      (branch) => Object.keys(branch.then?.properties ?? {}).length > 0
+    );
+    assert.equal(
+      exclusions.length,
+      TODO_WRITE_MODES.length,
+      "one field-exclusion branch per mode"
+    );
+    exclusions.forEach((branch, i) => {
+      const declared = (
+        branch.if?.properties?.mode as { const?: string } | undefined
+      )?.const;
+      assert.equal(declared, TODO_WRITE_MODES[i], `branch #${i} mode guard`);
+      for (const [field, subSchema] of Object.entries(
+        branch.then?.properties ?? {}
+      )) {
+        assert.equal(
+          subSchema,
+          false,
+          `${declared} excludes ${field} with a false subschema`
+        );
+      }
+    });
     // Top-level flat contract (properties/required/additionalProperties) is
     // kept so field descriptions and the direct-call parseInput fallback stay
     // single-sourced.
