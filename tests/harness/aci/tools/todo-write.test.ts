@@ -49,7 +49,12 @@ import {
   formatLedgerLine,
   serializeLedger,
 } from "../../../../src/harness/aci/tools/todo-ledger.ts";
-import { ToolExecutionError } from "../../../../src/harness/errors.ts";
+import { createRegistry } from "../../../../src/harness/tools/registry.ts";
+import { createExecutor } from "../../../../src/harness/tools/executor.ts";
+import {
+  ToolExecutionError,
+  ToolInputValidationError,
+} from "../../../../src/harness/errors.ts";
 
 let todoDir: string;
 
@@ -1836,5 +1841,210 @@ describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书
   // (no negative prohibitions) and keeps the positive keywords present.
   it("SC5 regression guard: description 仍含 multi-step", () => {
     assert.ok(readTool().description.includes("multi-step"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Executor result classification for input-validation failures.
+//
+// parseInput rejections must arrive at the model as `validation_failed`
+// (the deterministic-input-error signal the narrow fuse consumes), with the
+// message bytes unchanged (ADR-0086 passthrough); state-dependent / IO
+// failures stay `execution_failed`.
+// ---------------------------------------------------------------------------
+
+describe("todo_write — executor classification of validation vs execution failures", () => {
+  function executorFor() {
+    const tool = createTodoWriteTool({ todoDir });
+    const registry = createRegistry([tool]);
+    return { tool, executor: createExecutor(registry) };
+  }
+
+  it("parseInput rejection → kind validation_failed, message byte-identical to the handler throw", async () => {
+    const { tool, executor } = executorFor();
+    const input = { mode: "add", item: "" };
+    const results = await executor.executeAll([
+      { id: "call-vf", name: "todo_write", input },
+    ]);
+    assert.equal(results[0]!.kind, "validation_failed");
+    let direct = "";
+    try {
+      await tool.handler(input);
+    } catch (err) {
+      direct = (err as Error).message;
+    }
+    assert.ok(
+      direct.startsWith("[todo_write]"),
+      `handler text seam: ${direct}`
+    );
+    assert.equal(
+      (results[0] as { kind: string; message?: string }).message,
+      direct
+    );
+  });
+
+  it("state-dependent failure (unknown id) → still execution_failed", async () => {
+    const { executor } = executorFor();
+    const results = await executor.executeAll([
+      {
+        id: "call-ue",
+        name: "todo_write",
+        input: { mode: "update", id: "t9", status: "completed" },
+      },
+    ]);
+    assert.equal(results[0]!.kind, "execution_failed");
+    assert.match(
+      (results[0] as { kind: string; message?: string }).message ?? "",
+      /\[todo_write\] unknown id: t9/
+    );
+  });
+
+  it("IO failure (atomic write EACCES) → still execution_failed", async () => {
+    const file = join(todoDir, "todos.md");
+    await fsWriteFile(file, "- [ ] [t1] seed\n", "utf8");
+    await chmod(todoDir, 0o555);
+    try {
+      const { executor } = executorFor();
+      const results = await executor.executeAll([
+        {
+          id: "call-io",
+          name: "todo_write",
+          input: { mode: "add", item: "boom" },
+        },
+      ]);
+      assert.equal(results[0]!.kind, "execution_failed");
+      assert.match(
+        (results[0] as { kind: string; message?: string }).message ?? "",
+        /atomic write failed|mkdir failed/
+      );
+    } finally {
+      await chmod(todoDir, 0o755);
+    }
+  });
+
+  it("parseInput rejections are ToolInputValidationError and remain ToolExecutionError instances", async () => {
+    const { tool } = executorFor();
+    await assert.rejects(
+      tool.handler({ mode: "read", item: "x" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolInputValidationError);
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mode-specific oneOf schema: ajv must reject every cross-mode field
+// combination BEFORE the handler runs. Discriminator vs the
+// parseInput fallback: ajv-layer messages carry no `[todo_write]` prefix.
+// ---------------------------------------------------------------------------
+
+describe("todo_write — oneOf rejects cross-mode shapes at the schema layer", () => {
+  async function execute(input: unknown) {
+    const tool = createTodoWriteTool({ todoDir });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const [result] = await executor.executeAll([
+      { id: "call-schema", name: "todo_write", input },
+    ]);
+    return result!;
+  }
+
+  const rejected: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ["mode=update carries item", { mode: "update", id: "t1", item: "x" }],
+    ["mode=update carries items", { mode: "update", id: "t1", items: ["x"] }],
+    ["mode=add carries id", { mode: "add", item: "x", id: "t1" }],
+    ["mode=add carries subject", { mode: "add", item: "x", subject: "s" }],
+    ["mode=add carries status", { mode: "add", item: "x", status: "pending" }],
+    ["mode=add carries delete", { mode: "add", item: "x", delete: true }],
+    ["mode=add item+items coexist", { mode: "add", item: "x", items: ["y"] }],
+    ["mode=add without item or items", { mode: "add" }],
+    ["mode=update without id", { mode: "update", status: "completed" }],
+    ["mode=update with id but no change field", { mode: "update", id: "t1" }],
+    ["mode=replace carries item", { mode: "replace", item: "x" }],
+    ["mode=replace without items", { mode: "replace" }],
+    ["mode=read carries item", { mode: "read", item: "x" }],
+  ];
+
+  for (const [name, input] of rejected) {
+    it(`${name} → validation_failed from the ajv layer (no [todo_write] prefix)`, async () => {
+      const result = await execute(input);
+      assert.equal(result.kind, "validation_failed");
+      const message =
+        (result as { kind: string; message?: string }).message ?? "";
+      assert.ok(
+        !message.startsWith("[todo_write]"),
+        `expected schema-layer rejection, parseInput answered: ${message}`
+      );
+    });
+  }
+
+  it("schema-layer rejection of coexisting add item/items does not reach the handler prefix path", async () => {
+    const result = await execute({ mode: "add", item: "x", items: ["y"] });
+    assert.equal(result.kind, "validation_failed");
+    const message =
+      (result as { kind: string; message?: string }).message ?? "";
+    assert.ok(
+      !message.includes("accepts item or items"),
+      `handler exclusiveness text must stay the direct-call fallback only: ${message}`
+    );
+  });
+
+  it("each mode's valid minimal shape still passes the schema", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const results = await executor.executeAll([
+      { id: "s-read", name: "todo_write", input: { mode: "read" } },
+      {
+        id: "s-add-item",
+        name: "todo_write",
+        input: { mode: "add", item: "one" },
+      },
+      {
+        id: "s-add-items",
+        name: "todo_write",
+        input: { mode: "add", items: ["a", "b"] },
+      },
+      {
+        id: "s-replace",
+        name: "todo_write",
+        input: { mode: "replace", items: ["z"] },
+      },
+    ]);
+    assert.deepEqual(
+      results.map((r) => r.kind),
+      ["ok", "ok", "ok", "ok"]
+    );
+    const after = await executor.executeAll([
+      {
+        id: "s-upd",
+        name: "todo_write",
+        input: { mode: "update", id: "t1", status: "completed" },
+      },
+    ]);
+    assert.equal(after[0]!.kind, "ok");
+  });
+
+  it("oneOf is derived from the mode table (5 branches for 4 modes, add split for item/items exclusivity)", () => {
+    const tool = createTodoWriteTool({ todoDir });
+    const schema = tool.inputSchema as {
+      oneOf?: ReadonlyArray<{
+        properties?: Record<string, unknown>;
+        required?: ReadonlyArray<string>;
+      }>;
+      properties?: Record<string, unknown>;
+      required?: ReadonlyArray<string>;
+      additionalProperties?: boolean;
+    };
+    assert.equal(schema.oneOf?.length, 5);
+    // Top-level flat contract (properties/required/additionalProperties) is
+    // kept so field descriptions and the direct-call parseInput fallback stay
+    // single-sourced.
+    assert.ok(schema.properties && "mode" in schema.properties);
+    assert.deepEqual(schema.required, ["mode"]);
+    assert.equal(schema.additionalProperties, false);
   });
 });
