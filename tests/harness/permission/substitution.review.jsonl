@@ -1,0 +1,13 @@
+{"command": "echo `whoami`", "old": "command-substitution", "new": "ok", "citation": "SC4:permission.test.ts:188-190"}
+{"command": "echo $(whoami)", "old": "command-substitution", "new": "ok", "citation": "SC4:permission.test.ts:188-190"}
+{"command": "echo ${PATH}", "old": "command-substitution", "new": "ok", "citation": "SC4:permission.test.ts:188-190"}
+{"command": "echo $(rm -rf /)", "old": "destructive-rm", "new": "ok", "citation": "SC4:permission.test.ts:331-335"}
+{"command": "echo $(rm -rf /)", "old": "destructive-rm", "new": "ok", "citation": "SC4:permission.test.ts:615-621"}
+{"command": "echo $(whoami)", "old": "command-substitution", "new": "ok", "citation": "SC4:permission.test.ts:379"}
+{"command": "$(rm -rf /tmp/x) needle f", "old": "destructive-rm", "new": "ok", "citation": "SC4:role-substitution-boundaries.test.ts:216-233"}
+{"command": "python3 - <<'EOF'\nprint($(rm -rf /))\nEOF", "old": "destructive-rm", "new": "ok", "citation": "SC4:bare-metachar-hard-wall.test.ts:119-126"}
+{"command": "$(which grep) needle f", "old": "command-substitution", "new": "ok", "citation": "ADR-0125 §1"}
+{"command": "echo '$(whoami) ${HOME} \\`id\\`'", "old": "command-substitution", "new": "ok", "citation": "ADR-0125 §6"}
+{"command": "echo hi # $(whoami) ${HOME} not a command", "old": "command-substitution", "new": "ok", "citation": "ADR-0125 §6"}
+{"command": "cat <<'EOF'\n$(whoami) ${ANTHROPIC_AUTH_TOKEN} `id`\nEOF", "old": "command-substitution", "new": "ok", "citation": "ADR-0125 §5"}
+{"command": "echo '${HOME}'", "old": "command-substitution", "new": "ok", "citation": "ADR-0125 §6"}

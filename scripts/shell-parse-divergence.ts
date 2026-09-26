@@ -26,7 +26,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { findDangerousPattern } from "../src/harness/permission/hard-walls.js";
+import { legacyFindDangerousPattern } from "../src/harness/permission/hard-walls.js";
 import {
   parseForSecurity,
   type FactSpan,
@@ -255,7 +255,7 @@ function encodeNewVerdict(parse: SecurityParseResult): string {
 export function dualRunCommand(command: string): ReportRow {
   const base: ClassifyInput = {
     command,
-    oldVerdict: findDangerousPattern(command)?.id ?? null,
+    oldVerdict: legacyFindDangerousPattern(command)?.id ?? null,
     newVerdict: encodeNewVerdict(parseForSecurity(command)),
   };
   return { ...base, ...classifyRow(base) };

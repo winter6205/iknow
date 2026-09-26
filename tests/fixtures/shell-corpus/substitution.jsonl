@@ -1,0 +1,11 @@
+{"command": "echo `whoami`"}
+{"command": "echo $(whoami)"}
+{"command": "echo ${PATH}"}
+{"command": "echo $(rm -rf /)"}
+{"command": "$(rm -rf /tmp/x) needle f"}
+{"command": "$(which grep) needle f"}
+{"command": "python3 - <<'EOF'\nprint($(rm -rf /))\nEOF"}
+{"command": "echo '$(whoami) ${HOME} \\`id\\`'"}
+{"command": "echo hi # $(whoami) ${HOME} not a command"}
+{"command": "cat <<'EOF'\n$(whoami) ${ANTHROPIC_AUTH_TOKEN} `id`\nEOF"}
+{"command": "echo '${HOME}'"}

@@ -712,8 +712,9 @@ function legacySubstitutionScan(segment: string): DangerousPatternHit | null {
 /**
  * Today's whole-command scan, kept as the seam's `legacyScan` role: the text
  * branches in the same order as the primary path, plus the quote-blind
- * substitution needles that the primary path no longer reads. Exported only
- * so the degrade seam can be handed this value; nothing else may call it.
+ * substitution needles that the primary path no longer reads. Two production
+ * readers: the degrade seam's degrade path, and the divergence report's
+ * historical column, which has to keep measuring the old scanner.
  */
 export function legacyFindDangerousPattern(
   command: string
@@ -1276,9 +1277,7 @@ function scanCommandText(source: string): DangerousPatternHit | null {
 }
 
 /** ADR-0125 §3's three buckets, keyed on the only input the spec allows. */
-function expansionBucketOf(
-  name: string
-): "secret" | "whitelist" | "unknown" {
+function expansionBucketOf(name: string): "secret" | "whitelist" | "unknown" {
   if (SECRET_NAME_PATTERN.test(name)) return "secret";
   if (BASE_ENV_NAMES.includes(name)) return "whitelist";
   return "unknown";
