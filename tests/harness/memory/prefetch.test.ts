@@ -9,13 +9,14 @@
  * `promotedIds`). The system no longer renders a promote block, so excluding
  * here would silently drop eligible entries from the user-side overlay.
  */
-import { afterEach, describe, it, vi } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryRecallTool } from "../../../src/harness/memory/tools/recall.ts";
 import { assembleSystemPrompt } from "../../../src/harness/memory/assembly.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_DISCIPLINE,
@@ -247,28 +248,19 @@ describe("buildMemoryPrefetchOverlay — skipped quarantine warning", () => {
       )
     );
     await writeFile(join(tmp, "broken.md"), "no frontmatter here", "utf8");
-    const warned: string[] = [];
-    const spy = vi
-      .spyOn(console, "warn")
-      .mockImplementation((...args: unknown[]) => {
-        warned.push(args.map(String).join(" "));
-      });
-    let overlay: string;
-    try {
-      overlay = await buildMemoryPrefetchOverlay({
+    const built = await captureConsoleWarnAsync(() =>
+      buildMemoryPrefetchOverlay({
         memoryDir: tmp,
         query: "deploy pipeline",
-      });
-    } finally {
-      spy.mockRestore();
-    }
-    const skipWarns = warned.filter((w) =>
+      })
+    );
+    const skipWarns = built.messages.filter((w) =>
       w.includes("[memory/prefetch] skipped")
     );
     assert.equal(skipWarns.length, 1);
     assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
     assert.ok(
-      overlay.includes("### Deploy pipeline"),
+      built.result.includes("### Deploy pipeline"),
       "a quarantined sibling must not change what the healthy entries serve"
     );
   });

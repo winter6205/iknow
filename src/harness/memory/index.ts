@@ -39,7 +39,14 @@ export {
 } from "./errors.js";
 
 export { listStoreEntries } from "./store.js";
-export type { MemoryStoreScan, StoredMemoryEntry } from "./store.js";
+// `warnSkippedEntries` stays out of the barrel: its callers live in this
+// bounded context and a consumer must not be able to forget it.
+export type {
+  MemorySkipReason,
+  MemoryStoreScan,
+  MemoryStoreSkip,
+  StoredMemoryEntry,
+} from "./store.js";
 
 export {
   AUTO_MEMORY_SOURCE,

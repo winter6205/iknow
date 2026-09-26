@@ -25,12 +25,23 @@ export interface StoredMemoryEntry {
 }
 
 /**
+ * The bounded grammar a skip reason may take: the two closed categories are
+ * wire-stable tokens, and the `read_failed:<code>` family carries only an
+ * errno code. Neither can carry an exception message, so no file content can
+ * ride along.
+ */
+export type MemorySkipReason =
+  "frontmatter_unreadable" | "read_failed" | `read_failed:${string}`;
+
+/**
  * One quarantined file: slug plus a machine-usable reason category, never
- * file content (wire-stable tokens — future versions only add categories).
+ * file content. `MemorySkipReason` is what makes that "wire-stable tokens
+ * only" claim checkable: a future version may add an arm, never reinterpret
+ * one a consumer already switches on.
  */
 export interface MemoryStoreSkip {
   readonly slug: string;
-  readonly reason: string;
+  readonly reason: MemorySkipReason;
 }
 
 export interface MemoryStoreScan {
@@ -76,15 +87,15 @@ export async function listStoreEntries(
   return { entries, skipped };
 }
 
-/**
- * Failure category for a quarantined file: the reader's typed quarantine
- * throw (`frontmatter_unreadable`, the case that keeps the file preserved)
- * versus a read-side fault carrying its errno code. Categories only —
- * neither the exception message nor file content may ride along.
- */
-function classifySkip(error: unknown): string {
+/** Categories, not messages: an exception message can carry the file's text. */
+export function classifySkip(error: unknown): MemorySkipReason {
   if (error instanceof MemorySchemaInvalid) return "frontmatter_unreadable";
-  const code = (error as NodeJS.ErrnoException).code;
+  // A throw is `unknown` here: reading `.code` off a nullish one would turn
+  // the skip into a crash and stall the pass the skip exists to protect.
+  const code =
+    typeof error === "object" && error !== null
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
   return typeof code === "string" ? `read_failed:${code}` : "read_failed";
 }
 

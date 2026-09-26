@@ -238,11 +238,6 @@ function makeSlug(random: (n: number) => Buffer): string {
  * return value is what makes the MEMORY.md row trustworthy: rendering the row
  * from the caller's own (unfolded) object would split it across lines for a
  * title that came back from a model with newlines in it.
- *
- * An entry the serializer refuses (a non-scalar unknown extra) is not written
- * at all: serialize runs before the first disk mutation, so the target stays
- * absent or byte-identical, one `[memory/save]` warning names slug and key, and
- * the typed `MemoryIOError` reaches the caller.
  */
 export async function writeMemoryEntryAtomic(
   memoryDir: string,
@@ -263,14 +258,11 @@ export async function writeMemoryEntryAtomic(
   try {
     serialized = serializeMemoryEntry(written);
   } catch (error) {
-    // EXIT: the serializer refused this entry, so nothing has touched disk yet
-    // and the existing file (if any) keeps its bytes. Report the refusal on the
-    // module warn seam — slug and key only, never the value — then let the
-    // caller see the typed failure.
+    // EXIT: serializer refused; disk untouched. One warn names slug and key
+    // (the typed message carries no value), then the caller sees the typed
+    // failure.
     if (error instanceof MemorySchemaInvalid) {
-      console.warn(
-        `[memory/save] refused ${slug}.md: frontmatter extra "${error.field}" is not a scalar`
-      );
+      console.warn(`[memory/save] refused ${slug}.md: ${error.message}`);
     }
     throw new MemoryIOError(`[memory_save] serialize failed`, { cause: error });
   }

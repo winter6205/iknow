@@ -23,6 +23,9 @@ import {
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
+// A degraded parse must never be silent: the warn seam is part of the contract
+// these cases pin, so the shared recorder wraps every reading run.
+import { captureConsoleWarn } from "../../_helpers/capture-console-warn.ts";
 
 // -- fixtures ----------------------------------------------------------------
 
@@ -48,24 +51,6 @@ function fenceLines(out: string): string[] {
   const close = lines.indexOf("---", 1);
   assert.ok(close > 1, "file must close the fence");
   return lines.slice(1, close);
-}
-
-/**
- * Run `run` with console.warn captured, so a degraded parse cannot be silent.
- * `sink` lets a caller that expects `run` to throw keep what was warned before
- * it threw.
- */
-function captureConsoleWarn(run: () => void, sink: string[] = []): string[] {
-  const messages = sink;
-  const original = console.warn;
-  console.warn = (...args: unknown[]) =>
-    void messages.push(args.map(String).join(" "));
-  try {
-    run();
-  } finally {
-    console.warn = original;
-  }
-  return messages;
 }
 
 // -- parse -------------------------------------------------------------------
@@ -181,7 +166,7 @@ describe("parseMemoryEntry", () => {
 
   it("never registers a nested mapping key as a top-level field, and warns", () => {
     let parsed: Record<string, unknown> = {};
-    const warned = captureConsoleWarn(() => {
+    const { messages: warned } = captureConsoleWarn(() => {
       parsed = parseMemoryEntry(
         frontmatter(["id: x", "title:", "  importance: 9"], "body")
       ) as unknown as Record<string, unknown>;
@@ -231,7 +216,7 @@ describe("parseMemoryEntry", () => {
       "the body"
     );
     assert.throws(() => parseMemoryEntry(legacy), MemorySchemaInvalid);
-    const warned = captureConsoleWarn(() => {
+    const { messages: warned } = captureConsoleWarn(() => {
       assert.throws(() => parseMemoryEntry(legacy));
     });
     assert.ok(

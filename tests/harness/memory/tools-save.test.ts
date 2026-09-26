@@ -21,7 +21,7 @@
  *     a corrupted entry is).
  *   - aci metadata: write / not-concurrency-safe / block / default
  */
-import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   access,
@@ -55,6 +55,7 @@ import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import { createAciRegistry } from "../../../src/harness/aci/aci-registry.ts";
 import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 
 let memoryDir: string;
 
@@ -715,29 +716,21 @@ describe("memory_save — runtime capability persist gate", () => {
 // -- non-scalar extra: the shared writer refuses the write and says so --------
 
 /**
- * Capture `console.warn` across an await. The writer is async, so the sync
- * capture helper used by the pure-serializer tests cannot see its warnings.
+ * Capture `console.warn` across an await and keep the rejection. The refusal
+ * is a pair — one warn plus one typed throw — and the cases below assert both
+ * halves, so the rejection is parked instead of rethrown.
  */
 async function captureWarns(
   run: () => Promise<unknown>
 ): Promise<{ rejected: unknown; warned: string[] }> {
   const warned: string[] = [];
-  const spy = vi
-    .spyOn(console, "warn")
-    .mockImplementation((...args: unknown[]) => {
-      warned.push(args.map(String).join(" "));
-    });
+  let rejected: unknown;
   try {
-    let rejected: unknown;
-    try {
-      await run();
-    } catch (error) {
-      rejected = error;
-    }
-    return { rejected, warned };
-  } finally {
-    spy.mockRestore();
+    await captureConsoleWarnAsync(run, warned);
+  } catch (error) {
+    rejected = error;
   }
+  return { rejected, warned };
 }
 
 /** The one shape the pinned writer cannot emit: an unknown extra that is a sequence. */
@@ -807,6 +800,12 @@ describe("writeMemoryEntryAtomic — a non-scalar extra refuses the write", () =
       `exactly one warning expected, got: ${JSON.stringify(warned)}`
     );
     assert.match(warned[0]!, /^\[memory\/save\]/);
+    // The warn text is the typed message, not a second copy of it: one string
+    // source, so the seam and the error can never drift apart.
+    assert.equal(
+      warned[0]!,
+      `[memory/save] refused ${SLUG}.md: memory frontmatter extra "tags" is not a scalar`
+    );
     assert.ok(
       warned[0]!.includes(SLUG),
       `warning must name the slug: ${warned[0]}`
