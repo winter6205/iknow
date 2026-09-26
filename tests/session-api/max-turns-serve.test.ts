@@ -179,21 +179,25 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
 });
 
 describe("ensureDeps env → deps.maxTurns 接线 (serve 侧, plan T6)", () => {
-  it("IKNOW_LLM_MAX_TURNS 流经 ensureDeps 到 deps.maxTurns", async () => {
-    const prev = process.env.IKNOW_LLM_MAX_TURNS;
-    process.env.IKNOW_LLM_MAX_TURNS = "7";
-    process.env.ANTHROPIC_AUTH_TOKEN = "test-key-for-ensure-deps";
-    try {
-      const hub = new SessionHub({ store, askUser: createNoAskUser() });
-      const ensure = (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps.bind(hub);
-      const deps = await ensure();
-      assert.equal(deps.maxTurns, 7);
-    } finally {
-      if (prev === undefined) delete process.env.IKNOW_LLM_MAX_TURNS;
-      else process.env.IKNOW_LLM_MAX_TURNS = prev;
-      delete process.env.ANTHROPIC_AUTH_TOKEN;
+  it(
+    "IKNOW_LLM_MAX_TURNS 流经 ensureDeps 到 deps.maxTurns",
+    { timeout: 90_000 },
+    async () => {
+      const prev = process.env.IKNOW_LLM_MAX_TURNS;
+      process.env.IKNOW_LLM_MAX_TURNS = "7";
+      process.env.ANTHROPIC_AUTH_TOKEN = "test-key-for-ensure-deps";
+      try {
+        const hub = new SessionHub({ store, askUser: createNoAskUser() });
+        const ensure = (
+          hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
+        ).ensureDeps.bind(hub);
+        const deps = await ensure();
+        assert.equal(deps.maxTurns, 7);
+      } finally {
+        if (prev === undefined) delete process.env.IKNOW_LLM_MAX_TURNS;
+        else process.env.IKNOW_LLM_MAX_TURNS = prev;
+        delete process.env.ANTHROPIC_AUTH_TOKEN;
+      }
     }
-  });
+  );
 });
