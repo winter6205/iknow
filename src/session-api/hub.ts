@@ -219,7 +219,11 @@ import type {
   TurnDto,
   VerifyAnswerView,
 } from "./contract.js";
-import { MAX_MESSAGE_CHARS } from "./contract.js";
+import {
+  knownTurnOutcome,
+  MAX_MESSAGE_CHARS,
+  projectOutputLimitNotice,
+} from "./contract.js";
 import { projectVerifyHumanView } from "./verify-human-view.js";
 import {
   extractRecentUserTasks,
@@ -604,11 +608,17 @@ export interface TurnOutcomeEvidence {
 /** Answer fields carrying the turn's terminal state, from the persisted
  *  outcome at `anchorId` when this projection has evidence to consult. Without
  *  a record the answer keeps `outcome: {terminal:"unknown"}` and omits
- *  `stopReason` (ADR-0126: absent evidence is not a completion). */
+ *  `stopReason` (ADR-0126: absent evidence is not a completion), and no notice
+ *  either — an unrecorded stop is never described as a truncation. The
+ *  output-limit notice rides the same fields, so a reopened turn and a live
+ *  turn hand clients one shape. */
 function projectOutcomeFields(
   evidence: TurnOutcomeEvidence | undefined,
   anchorId: string | undefined
-): Pick<TurnAnswerDto, "stopReason" | "outcome"> {
+): Pick<
+  TurnAnswerDto,
+  "stopReason" | "outcome" | "outputLimitNotice"
+> {
   if (evidence === undefined) {
     // No ledger evidence at all (a pure message-array caller): pre-ADR-0126
     // shape, so those projections stay byte-stable.
@@ -616,18 +626,14 @@ function projectOutcomeFields(
   }
   const recorded =
     anchorId === undefined ? undefined : evidence.outcomes.get(anchorId);
-  return recorded === undefined
-    ? { outcome: { terminal: "unknown" } }
-    : {
-        stopReason: recorded.stopReason,
-        outcome: {
-          terminal: "known",
-          stopReason: recorded.stopReason,
-          ...(recorded.supplierDetail !== undefined
-            ? { supplierDetail: recorded.supplierDetail }
-            : {}),
-        },
-      };
+  if (recorded === undefined) return { outcome: { terminal: "unknown" } };
+  const outcome = knownTurnOutcome(recorded.stopReason, recorded.supplierDetail);
+  const notice = projectOutputLimitNotice(outcome);
+  return {
+    stopReason: recorded.stopReason,
+    outcome,
+    ...(notice !== undefined ? { outputLimitNotice: notice } : {}),
+  };
 }
 
 export function projectMessagesToTurns(
@@ -4444,11 +4450,19 @@ export class SessionHub {
     const turnMessages = opts.turnMessages ?? result.messages;
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
+    // A settled turn has terminal evidence by definition, so the live answer
+    // reports the same outcome view a reload projects from the persisted
+    // record — one client contract for both views. The output-limit notice
+    // rides that view, so a truncation is shown identically live and reopened.
+    const outcome = knownTurnOutcome(result.stopReason, result.supplierDetail);
+    const liveNotice = projectOutputLimitNotice(outcome);
     return {
       query,
       answer: {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
+        outcome,
+        ...(liveNotice !== undefined ? { outputLimitNotice: liveNotice } : {}),
         turnCount: result.turnCount,
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).

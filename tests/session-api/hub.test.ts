@@ -48,6 +48,7 @@ import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
 import { TransportRetryExhaustedError } from "../../src/harness/errors.ts";
+import { OUTPUT_LIMIT_NOTICE } from "../../src/session-api/contract.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -701,9 +702,11 @@ describe("postMessage answer wire fields — interrupted (B1)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal("interrupted" in res.turn.answer, false);
-    // Same key set as the existing byte-stable assertion (no leaked new keys).
+    // Key set gains exactly "outcome" (the durable terminal-state view every
+    // live answer now carries); nothing else leaks.
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -1566,6 +1569,7 @@ describe("postMessage answer wire fields (T1)", () => {
     assert.equal("toolCalls" in res.turn.answer, false);
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -1666,6 +1670,7 @@ describe("postMessage answer wire fields — lastUsage (context-usage-display)",
     assert.equal("lastUsage" in res.turn.answer, false);
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -2661,5 +2666,83 @@ describe("turn outcome supplier-stop detail (output-limit truncation)", () => {
     const res = await hub.getSession(id);
     assert.deepEqual(res.turns[0]!.answer.outcome, { terminal: "unknown" });
     assert.notEqual(res.turns[0]!.answer.stopReason, "completed");
+  });
+
+  it("output-limit notice rides live and reopened answers byte-identically and never reaches the transcript", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const live = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal(live.turn.answer.outputLimitNotice, OUTPUT_LIMIT_NOTICE);
+
+    const reopened = await hub.getSession(id);
+    assert.equal(reopened.turns.length, 1);
+    // One wire string for both surfaces: clients render it verbatim.
+    assert.equal(
+      reopened.turns[0]!.answer.outputLimitNotice,
+      live.turn.answer.outputLimitNotice
+    );
+
+    // The notice is a DTO-only projection: no transcript line holds it, so
+    // neither the persisted messages nor any model replay can.
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    assert.equal(raw.includes(OUTPUT_LIMIT_NOTICE), false);
+  });
+
+  it("known non-truncation stop carries no notice on either surface", async () => {
+    const hub = makeHub(
+      makeDeps([assistantResult({ texts: ["no"], supplierStop: "refusal" })])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const live = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal("outputLimitNotice" in live.turn.answer, false);
+    assert.deepEqual(live.turn.answer.outcome, {
+      terminal: "known",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "refusal",
+    });
+
+    const reopened = await hub.getSession(id);
+    assert.equal("outputLimitNotice" in reopened.turns[0]!.answer, false);
+  });
+
+  it("legacy transcript with no outcome lines: no notice, no stopReason, outcome unknown", async () => {
+    const hub = makeHub(makeDeps([]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [
+            userMsg("q"),
+            { role: "assistant", content: [{ type: "text", text: "a" }] },
+          ],
+        },
+      }),
+    });
+
+    const res = await hub.getSession(id);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    assert.equal("outputLimitNotice" in answer, false);
+    assert.equal("stopReason" in answer, false);
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
   });
 });

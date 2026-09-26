@@ -24,3 +24,22 @@ export function stopReasonLabel(
   if (!reason) return null;
   return STOP_REASON_LABELS[reason] ?? null;
 }
+
+/**
+ * The warn line under an answer: the hub's own output-limit notice when the
+ * turn carries one, otherwise the stop-reason label.
+ *
+ * The notice string is rendered verbatim — the wire is its only source, so a
+ * live turn and a reopened session show identical bytes and this layer never
+ * re-composes the copy. The hub attaches the field only to a known outcome
+ * whose supplier detail is `truncation`, so no other stop reason can pick it
+ * up; an unknown outcome carries neither field and renders nothing (neither a
+ * truncation notice nor a completed/incomplete label).
+ */
+export function stopNoticeLine(
+  stopReason: string | null | undefined,
+  outputLimitNotice?: string | null
+): string | null {
+  if (outputLimitNotice) return outputLimitNotice;
+  return stopReasonLabel(stopReason);
+}

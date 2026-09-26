@@ -99,9 +99,11 @@ function queryIdSlice(query: string): string {
  * Project wire turns → timeline messages (exported for tests/web/).
  *
  * Agent-message keep predicate: emit when finalText is non-empty OR when the
- * turn carries thinking OR tool calls. A maxTurns/timeout turn that ran tools
- * (or thought) but never produced text is NOT a blank reply — dropping it
- * loses the tool/thinking trail entirely. AgentCard renders
+ * turn carries thinking OR tool calls OR the hub's output-limit notice. A
+ * maxTurns/timeout turn that ran tools (or thought) but never produced text is
+ * NOT a blank reply — dropping it loses the tool/thinking trail entirely. A
+ * truncated response can carry nothing but its notice, and that notice has to
+ * stay on screen, so it keeps the message too. AgentCard renders
  * the empty-text body region as an empty block alongside its thinking /
  * tool sections, so `text: ""` is safe for the display path.
  */
@@ -130,13 +132,16 @@ export function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   return out;
 }
 
-/** FinalText content OR any thinking entries OR any tool calls. */
+/** FinalText content OR any thinking entries OR any tool calls OR a notice. */
 function hasDisplayableAnswer(answer: TurnAnswerDto): boolean {
   if (answer.finalText.trim()) return true;
   if (answer.thinking !== undefined) return true;
   if (answer.toolCalls !== undefined && answer.toolCalls.length > 0) {
     return true;
   }
+  // The notice is the only evidence a thinking-less, text-less truncation
+  // leaves behind; dropping the message would drop the notice with it.
+  if (answer.outputLimitNotice !== undefined) return true;
   return false;
 }
 

@@ -26,7 +26,9 @@ export interface TurnAnswerDto {
    *  turn answer and on a reopened turn whose terminal outcome record exists;
    *  absent when a reopened turn has no terminal record — that state is
    *  carried by `outcome: { terminal: "unknown" }` (ADR-0126), so history
-   *  never claims a completion it cannot prove. */
+   *  never claims a completion it cannot prove. Optional is therefore the
+   *  byte-stable legacy shape: a client reads the turn's terminal state from
+   *  `outcome`, never from the presence of this key. */
   readonly stopReason?: StopReason;
   /** ADR-0126: durable terminal-outcome projection of this turn. `known`
    *  mirrors the persisted outcome record's StopReason; `unknown` = no record
@@ -96,6 +98,20 @@ export interface TurnAnswerDto {
     readonly status?: number;
     readonly message: string;
   };
+  /**
+   * The turn's output-limit notice: one deterministic English line shown when
+   * the terminal outcome records supplier detail `truncation`. Attached by both
+   * projections (live `toTurnDto` and reopened `projectOutcomeFields`) through
+   * `projectOutputLimitNotice`, and absent as a key everywhere else — same
+   * byte-stable pattern as stopSummary / apiError, so a turn that did not
+   * truncate is byte-identical to one from before this field.
+   *
+   * UI: TUI and Web render this string verbatim and never re-compute the copy,
+   * which is what makes the live and reopened notice identical on both clients.
+   * It is a projection of the outcome, not conversation content: it is never
+   * written into an assistant message nor sent as model input.
+   */
+  readonly outputLimitNotice?: string;
 }
 
 /** ADR-0126: turn-outcome projection. `known` carries the persisted terminal
@@ -111,6 +127,47 @@ export type TurnOutcomeView =
       readonly supplierDetail?: SupplierStopDetail;
     }
   | { readonly terminal: "unknown" };
+
+/** Build the `known` side of the outcome view from a settled turn's stop reason
+ *  and (optional) supplier-stop detail. One construction point so the live
+ *  projection, the reopened projection, and the TUI bridge's reopen path hand
+ *  clients the identical shape. An absent detail keeps the key absent
+ *  (byte-stable). */
+export function knownTurnOutcome(
+  stopReason: StopReason,
+  supplierDetail?: SupplierStopDetail
+): TurnOutcomeView {
+  return {
+    terminal: "known",
+    stopReason,
+    ...(supplierDetail !== undefined ? { supplierDetail } : {}),
+  };
+}
+
+/**
+ * The one English notice shown for a turn whose terminal outcome records output
+ * truncation. A deterministic constant rather than per-client copy: the live
+ * turn and a reopened session, on the TUI and on the Web, must render the same
+ * bytes, and no client may re-compute the wording. It states that the response
+ * did not finish, so any committed text is partial, and invites a new
+ * instruction (which starts a new turn — there is no automatic continuation).
+ */
+export const OUTPUT_LIMIT_NOTICE =
+  "The model response hit its output limit and did not finish, so this turn's answer is incomplete. Send a new instruction to continue.";
+
+/** The notice a turn answer carries: present only when the outcome is a KNOWN
+ *  stop whose supplier detail is `truncation`. Any other known stop, and any
+ *  unknown outcome (legacy history with no terminal record), leaves the field
+ *  absent — an unrecorded stop is never described as a truncation. */
+export function projectOutputLimitNotice(
+  outcome: TurnOutcomeView | undefined
+): string | undefined {
+  return outcome !== undefined &&
+    outcome.terminal === "known" &&
+    outcome.supplierDetail === "truncation"
+    ? OUTPUT_LIMIT_NOTICE
+    : undefined;
+}
 
 /** Wire view of the verification loop's final verdict (rounds + outcome)
  *  for UI surfaces. "passed" is a success state; abort / disabled never

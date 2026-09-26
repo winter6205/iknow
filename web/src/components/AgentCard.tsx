@@ -137,9 +137,11 @@ export function AgentCard({
         </>
       )}
 
-      {/* Stop-reason notice (non-completed) + turnCount meta info — quiet mono row below the body. */}
+      {/* Stop-reason notice (non-completed) + turnCount meta info — quiet mono row below the body.
+          An output-limit turn shows the hub's notice line here, under the partial text it describes. */}
       <StopNotice
         stopReason={answer?.stopReason}
+        outputLimitNotice={answer?.outputLimitNotice}
         turnCount={answer?.turnCount}
       />
 

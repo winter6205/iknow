@@ -14,7 +14,9 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
-import { projectMessagesToTurns } from "../../src/session-api/hub.ts";
+import { projectMessagesToTurns, type TurnOutcomeEvidence } from "../../src/session-api/hub.ts";
+import type { SessionOutcomeRecord } from "../../src/session-api/store/index.ts";
+import { OUTPUT_LIMIT_NOTICE } from "../../src/session-api/contract.ts";
 import { SUBAGENT_DRAIN_PREFIX } from "../../src/harness/subagent/host-drain.ts";
 import {
   IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
@@ -1075,5 +1077,83 @@ describe("D2 wire surface — projectMessagesToTurns thinkingMs 透传", () => {
     // a lone user message is still a turn (no assistant closing it, but it is a turn query)
     assert.equal(turns.length, 1);
     assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
+  });
+});
+
+// -- ADR-0126 evidence path: key-set pins for the outcome fields --------------
+
+describe("outcome evidence — answer key sets (byte-stable)", () => {
+  const oneTurn = [
+    assistant("user", [{ type: "text", text: "q" }]),
+    assistant("assistant", [{ type: "text", text: "a" }]),
+  ];
+  const evidence = (
+    outcomes: ReadonlyMap<string, SessionOutcomeRecord>
+  ): TurnOutcomeEvidence => ({
+    messageEventIds: ["e0", "e1"],
+    outcomes,
+  });
+
+  it("known truncation outcome → stopReason + outcome + notice keys", () => {
+    const turns = projectMessagesToTurns(
+      oneTurn,
+      undefined,
+      null,
+      evidence(
+        new Map([
+          [
+            "e1",
+            {
+              type: "outcome",
+              turnId: "e1",
+              stopReason: "nonSuccessStop",
+              supplierDetail: "truncation",
+            },
+          ],
+        ])
+      )
+    );
+    assert.deepEqual(Object.keys(turns[0]!.answer).sort(), [
+      "finalText",
+      "outcome",
+      "outputLimitNotice",
+      "stopReason",
+      "turnCount",
+    ]);
+    assert.equal(turns[0]!.answer.outputLimitNotice, OUTPUT_LIMIT_NOTICE);
+  });
+
+  it("known non-truncation outcome → outcome + stopReason, no notice key", () => {
+    const turns = projectMessagesToTurns(
+      oneTurn,
+      undefined,
+      null,
+      evidence(
+        new Map([
+          ["e1", { type: "outcome", turnId: "e1", stopReason: "completed" }],
+        ])
+      )
+    );
+    assert.deepEqual(Object.keys(turns[0]!.answer).sort(), [
+      "finalText",
+      "outcome",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("no outcome record → only the unknown view; stopReason and notice keys absent", () => {
+    const turns = projectMessagesToTurns(
+      oneTurn,
+      undefined,
+      null,
+      evidence(new Map())
+    );
+    assert.deepEqual(Object.keys(turns[0]!.answer).sort(), [
+      "finalText",
+      "outcome",
+      "turnCount",
+    ]);
+    assert.deepEqual(turns[0]!.answer.outcome, { terminal: "unknown" });
   });
 });

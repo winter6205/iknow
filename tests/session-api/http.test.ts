@@ -400,7 +400,21 @@ describe("GET /api/v1/sessions/:id", () => {
       session: { conversation_id: string; turn_count: number };
       turns: Array<{
         query: string;
-        answer: { finalText: string; stopReason: string; turnCount: number };
+        answer: {
+          finalText: string;
+          // Mirrors the wire shape: stopReason is omitted when the outcome is
+          // unknown; the terminal state itself rides the always-present view.
+          stopReason?: string;
+          outcome?:
+            | {
+                terminal: "known";
+                stopReason: string;
+                supplierDetail?: string;
+              }
+            | { terminal: "unknown" };
+          outputLimitNotice?: string;
+          turnCount: number;
+        };
       }>;
     };
     assert.equal(b.session.conversation_id, id);
@@ -418,6 +432,66 @@ describe("GET /api/v1/sessions/:id", () => {
       undefined,
       "must not leak raw content blocks"
     );
+  });
+
+  it("legacy transcript without outcome records: wire omits stopReason and notice, outcome unknown", async () => {
+    // A transcript stored before turn outcomes existed (no `outcome` lines at
+    // all): the reopened answer must not gain a stopReason key, an outcome
+    // claim of completion, or any notice — absent evidence stays absent.
+    const id = await createSession();
+    const convDir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(baseDir, process.cwd()),
+      conversationId: id,
+    });
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        title: "q",
+        cwd: "/tmp",
+        sanitized_at: stamp,
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: stamp,
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e0",
+        parent: null,
+        message: { role: "user", content: [{ type: "text", text: "q" }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e1",
+        parent: "e0",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "a" }],
+        },
+      }),
+      JSON.stringify({ type: "head", id: "e1" }),
+    ];
+    await writeFile(join(convDir, `${id}.jsonl`), `${lines.join("\n")}\n`);
+
+    const { status, body } = await getJson(`/api/v1/sessions/${id}`);
+    assert.equal(status, 200);
+    const b = body as {
+      turns: Array<{
+        answer: {
+          finalText: string;
+          stopReason?: string;
+          outputLimitNotice?: string;
+          outcome?: unknown;
+        };
+      }>;
+    };
+    const answer = b.turns[0]!.answer;
+    assert.equal(answer.finalText, "a");
+    assert.equal("stopReason" in answer, false);
+    assert.equal("outputLimitNotice" in answer, false);
+    assert.deepEqual(answer.outcome, { terminal: "unknown" });
   });
 
   it("returns 404 not_found for missing session (nested shape)", async () => {
@@ -447,7 +521,21 @@ describe("POST /api/v1/sessions/:id/messages", () => {
       session: { conversation_id: string; turn_count: number };
       turn: {
         query: string;
-        answer: { finalText: string; stopReason: string; turnCount: number };
+        answer: {
+          finalText: string;
+          // Mirrors the wire shape: stopReason is omitted when the outcome is
+          // unknown; the terminal state itself rides the always-present view.
+          stopReason?: string;
+          outcome?:
+            | {
+                terminal: "known";
+                stopReason: string;
+                supplierDetail?: string;
+              }
+            | { terminal: "unknown" };
+          outputLimitNotice?: string;
+          turnCount: number;
+        };
       };
     };
     assert.equal(b.session.conversation_id, id);
@@ -511,7 +599,13 @@ describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => 
       });
       assert.equal(status, 200);
       const b = body as {
-        turn: { answer: { finalText: string; stopReason: string } };
+        turn: {
+          answer: {
+            finalText: string;
+            stopReason?: string;
+            outputLimitNotice?: string;
+          };
+        };
       };
       assert.equal(b.turn.answer.finalText, "override ok");
       assert.equal(b.turn.answer.stopReason, "completed");
