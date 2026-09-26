@@ -12,7 +12,7 @@
  *   concurrent— a memory_save landing mid-GC is neither lost nor half-written
  *   exception — malformed entry file skipped, GC still completes
  */
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import {
   mkdir,
@@ -436,8 +436,46 @@ describe("runMemoryGc", () => {
     );
     await put("old", { ttl_days: 5, updated_at: daysAgo(10) });
     const result = await runMemoryGc(memoryDir, { nowMs: NOW });
-    assert.deepEqual(result.skipped, ["broken"]);
+    assert.deepEqual(result.skipped, [
+      { slug: "broken", reason: "frontmatter_unreadable" },
+    ]);
     assert.deepEqual(result.disabled, [{ slug: "old", reason: "ttl_expired" }]);
+  });
+
+  it("warns once naming the skipped slug on both scan exit paths", async () => {
+    const warned: string[] = [];
+    const spy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warned.push(args.map(String).join(" "));
+      });
+    try {
+      await writeFile(
+        join(memoryDir, "broken.md"),
+        "no frontmatter here",
+        "utf8"
+      );
+      // Entries-empty early exit: the quarantine line must still be surfaced.
+      const empty = await runMemoryGc(memoryDir, { nowMs: NOW });
+      assert.deepEqual(empty.skipped, [
+        { slug: "broken", reason: "frontmatter_unreadable" },
+      ]);
+      let gcWarns = warned.filter((w) => w.includes("[memory/gc]"));
+      assert.equal(gcWarns.length, 1);
+      assert.match(
+        gcWarns[0]!,
+        /^\[memory\/gc\] skipped unparseable entries: broken\.md=frontmatter_unreadable$/
+      );
+
+      warned.length = 0;
+      await put("old", { ttl_days: 5, updated_at: daysAgo(10) });
+      await runMemoryGc(memoryDir, { nowMs: NOW });
+      gcWarns = warned.filter((w) => w.includes("[memory/gc]"));
+      assert.equal(gcWarns.length, 1, "the full-scan path warns exactly once");
+      assert.match(gcWarns[0]!, /broken\.md=frontmatter_unreadable/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("preserves a legacy entry the strict reader cannot parse, even an expired one", async () => {
@@ -464,7 +502,9 @@ describe("runMemoryGc", () => {
     await writeFile(join(memoryDir, "legacy.md"), legacy, "utf8");
     const result = await runMemoryGc(memoryDir, { nowMs: NOW });
     assert.deepEqual(result.disabled, []);
-    assert.deepEqual(result.skipped, ["legacy"]);
+    assert.deepEqual(result.skipped, [
+      { slug: "legacy", reason: "frontmatter_unreadable" },
+    ]);
     assert.equal(
       await readFile(join(memoryDir, "legacy.md"), "utf8"),
       legacy,

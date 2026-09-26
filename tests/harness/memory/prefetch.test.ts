@@ -9,7 +9,7 @@
  * `promotedIds`). The system no longer renders a promote block, so excluding
  * here would silently drop eligible entries from the user-side overlay.
  */
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -227,6 +227,50 @@ describe("buildMemoryPrefetchOverlay — promote eligibility is not an exclusion
     // disabled still does not surface.
     const hits = [...overlay.matchAll(/^### /gm)];
     assert.equal(hits.length, 1, "disabled entry must remain excluded");
+  });
+});
+
+// SC-B3 (specs/memory-frontmatter-write-signals.md): the disk-built path
+// quarantines an unreadable file and must say so on the module warn seam.
+describe("buildMemoryPrefetchOverlay — skipped quarantine warning", () => {
+  it("warns once naming the skipped slug and still serves the healthy entries", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "prefetch-skip-"));
+    written.push(tmp);
+    await writeFile(
+      join(tmp, "healthy.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "healthy",
+          title: "Deploy pipeline",
+          body: "ship the deploy pipeline on Fridays",
+        })
+      )
+    );
+    await writeFile(join(tmp, "broken.md"), "no frontmatter here", "utf8");
+    const warned: string[] = [];
+    const spy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warned.push(args.map(String).join(" "));
+      });
+    let overlay: string;
+    try {
+      overlay = await buildMemoryPrefetchOverlay({
+        memoryDir: tmp,
+        query: "deploy pipeline",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const skipWarns = warned.filter((w) =>
+      w.includes("[memory/prefetch] skipped")
+    );
+    assert.equal(skipWarns.length, 1);
+    assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
+    assert.ok(
+      overlay.includes("### Deploy pipeline"),
+      "a quarantined sibling must not change what the healthy entries serve"
+    );
   });
 });
 

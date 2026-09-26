@@ -42,7 +42,7 @@ import {
 import { formatMemoryCatalog } from "./catalog.js";
 import { isCapabilityObservationEntry } from "./capability-gate.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import { listStoreEntries } from "./store.js";
+import { listStoreEntries, warnSkippedEntries } from "./store.js";
 
 /** Locked by spec SC 4 (must appear exactly once, between user and project). */
 export const PRIORITY_DECLARATION =
@@ -219,6 +219,7 @@ async function loadCatalogSegment(
 ): Promise<string | undefined> {
   try {
     const scan = await listStoreEntries(memoryDir);
+    warnSkippedEntries("[memory/assembly]", scan.skipped);
     const live = scan.entries
       .filter(
         (row) => !row.entry.disabled && !isCapabilityObservationEntry(row.entry)

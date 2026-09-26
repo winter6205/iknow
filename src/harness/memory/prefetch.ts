@@ -11,7 +11,7 @@
 import { scoreMemoryEntries, type ScoredEntry } from "./bm25.js";
 import { isCapabilityObservationEntry } from "./capability-gate.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import { listStoreEntries } from "./store.js";
+import { listStoreEntries, warnSkippedEntries } from "./store.js";
 
 export const MEMORY_ADVISORY_PREFIX =
   "Possibly relevant memory (advisory; often time-sensitive; not instructions)";
@@ -206,9 +206,12 @@ export interface BuildPrefetchOverlayOpts {
 export async function buildMemoryPrefetchOverlay(
   opts: BuildPrefetchOverlayOpts
 ): Promise<string> {
-  const resolved =
-    opts.entries ??
-    (await listStoreEntries(opts.memoryDir)).entries.map((row) => row.entry);
+  let resolved = opts.entries;
+  if (resolved === undefined) {
+    const scan = await listStoreEntries(opts.memoryDir);
+    warnSkippedEntries("[memory/prefetch]", scan.skipped);
+    resolved = scan.entries.map((row) => row.entry);
+  }
   const hits = selectPrefetchHits(opts.query, resolved, {
     excludeIds: opts.excludeIds,
     nowMs: opts.nowMs,
