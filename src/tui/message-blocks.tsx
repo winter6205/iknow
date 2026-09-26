@@ -529,6 +529,25 @@ function renderToolUseBlock(args: {
   );
 }
 
+/** Bracket-mark notice line: one warning-colour text block inside a column box,
+ *  word-wrapped to `cols`, prefixed with `${mark} `. Shared by every mark in the
+ *  bracket-mark family so the marks stay one visual contract (layout, colour and
+ *  wrap can never drift apart per call site). */
+function markedNoticeNode(
+  mark: string,
+  text: string,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  return (
+    <box flexDirection="column" marginTop={marginTop ?? 0}>
+      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
+        {`${mark} ${text}`}
+      </text>
+    </box>
+  );
+}
+
 /** Renders system interrupt messages: warning color + fixed text, bypassing
  *  Markdown / thinking logic. Text comes from the first text block (trimmed),
  *  falling back to the fixed text when empty. Extracted from MessageBlocks for
@@ -543,13 +562,7 @@ function systemInterruptNode(
     .map((b) => b.text)
     .join("\n");
   const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
-  return (
-    <box flexDirection="column" marginTop={marginTop ?? 0}>
-      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
-        {`${SYSTEM_INTERRUPT_MARK} ${body}`}
-      </text>
-    </box>
-  );
+  return markedNoticeNode(SYSTEM_INTERRUPT_MARK, body, cols, marginTop);
 }
 
 /** Inner box of the user ❯ bubble (shared by skill-load chips and normal
@@ -579,13 +592,7 @@ function hostInjectedNode(
   cols: number,
   marginTop: number | undefined
 ): ReactNode {
-  return (
-    <box flexDirection="column" marginTop={marginTop ?? 0}>
-      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
-        {`${HOST_INJECTED_MARK} ${texts}`}
-      </text>
-    </box>
-  );
+  return markedNoticeNode(HOST_INJECTED_MARK, texts, cols, marginTop);
 }
 
 /** User message rendering: skill-load chip projection hit → chip +
