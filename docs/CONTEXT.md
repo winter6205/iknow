@@ -68,8 +68,11 @@ _Avoid_: 与 verify 失败签名混名；与工具四 kind 混名；塞进 StopR
 **tool-call loop detection**: 本 `run()` 内，工具阶段结果已追加进 append-only messages 之后、下一次 adapter.step 之前，用调用键与结果键做周期（k=1..5）重复 R=5 且停滞则 trip。ADR-0029。
 _Avoid_: 连续 N=3 简化；verify 趋势停；sandbox violation kill；正文复读检测；settle 前取消同波 tool_use
 
-**LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息，写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人至少经 `stop=fused` 可见。
+**LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息（`hostInjected: true`），写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人经 `stop=fused` 可见，resume 分类靠 continue-pending 对全文等值匹配判 `fused_clean_stop`。
 _Avoid_: 只 toast 不进历史；下一轮不喂模型；当成 tool_result 吞掉真实失败
+
+**host-injected 消息的 UI 身份缺口**: 数据层有 `hostInjected` 标记但 UI 层无差异化渲染——恢复路径上这类消息（**LOOP_DETECTED envelope**、`<agent_status>` 栏历史）以普通 user 气泡形态进入 TUI 聊天流，人无法从视觉上区分 host 注入与真实用户输入。live run 的 `<agent_status>` 走专属 stream event 有专门渲染，不在缺口内。修复方案见 plans/host-injected-ui-identity.md。
+_Avoid_: 给持久化消息 schema 加 kind/type 字段当第一刀；改 continue-pending 的全等匹配契约；动 `<agent_status>` 的 live 流渲染
 
 **viewport API error**: 供应商/API/连接失败给人看的对话流行：薄外壳 `API error (status):` + 服务商原文；不追加进 **session transcript**，下一轮不喂模型。ADR-0094。异常停的底栏提示见 **sticky notice**。
 _Avoid_: 把 `protocolError` / 「可能是连接或模型故障」当 UX 文案；把 API 失败落成 append-only assistant；与 sticky notice 混成同一条消息气泡
