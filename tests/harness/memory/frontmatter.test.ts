@@ -3,8 +3,8 @@
  * pure-function tests.
  *
  * Coverage (frontmatter half): parse / round-trip / defaults for missing
- * fields / retention of excess fields / signature stability / error when the
- * frontmatter fence is missing.
+ * fields / retention of excess fields / refusal of a non-scalar excess field /
+ * signature stability / error when the frontmatter fence is missing.
  *
  * The read side parses through the shared frontmatter module (ADR-0123), so
  * these tests pin both the old flat-subset shapes (they must keep parsing
@@ -424,6 +424,67 @@ describe("serializeMemoryEntry", () => {
     >;
     assert.equal(parsed["promoted"], true);
     assert.equal(parsed["tags"], "alpha,beta");
+  });
+
+  it("emits the pinned bytes for an entry whose extras are all scalar", () => {
+    const e = {
+      ...full(),
+      promoted: true,
+      tags: "alpha,beta",
+    } as unknown as MemoryEntryV1;
+    assert.equal(
+      serializeMemoryEntry(e),
+      [
+        "---",
+        "id: mem-1",
+        "type: preference",
+        "importance: 3",
+        "ttl_days: 30",
+        "disabled: false",
+        "supersedes: null",
+        "title: Use bar() not foo()",
+        "updated_at: 2026-01-01T00:00:00.000Z",
+        "promoted: true",
+        "tags: alpha,beta",
+        "---",
+        "Calling bar() is the supported path; foo() is thread-unsafe.",
+      ].join("\n")
+    );
+  });
+
+  it("refuses a non-scalar extra with a typed error naming the key, not the value", () => {
+    const cases: ReadonlyArray<readonly [string, unknown]> = [
+      ["tags", ["alpha", "beta"]],
+      ["origin", { recorded_by: "tester" }],
+    ];
+    for (const [key, value] of cases) {
+      const e = { ...full(), [key]: value } as unknown as MemoryEntryV1;
+      let caught: unknown;
+      try {
+        serializeMemoryEntry(e);
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(
+        caught instanceof MemorySchemaInvalid,
+        `${key}: a non-scalar extra must be refused with a typed error, got ${String(caught)}`
+      );
+      const err: MemorySchemaInvalid = caught;
+      assert.equal(err.field, key);
+      assert.ok(err.message.includes(key), "the message must name the key");
+      const valueTokens = JSON.stringify(value)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length > 2);
+      assert.ok(
+        valueTokens.length > 0,
+        "the fixture must carry recognizable value text"
+      );
+      for (const token of valueTokens)
+        assert.ok(
+          !err.message.includes(token),
+          `the message must carry the key only, got: ${err.message}`
+        );
+    }
   });
 });
 

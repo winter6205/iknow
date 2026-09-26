@@ -14,10 +14,11 @@
  *
  * The serialized format mirrors session-store sanitized files: frontmatter
  * block delimited by `---`, body text after the closing fence. Sanitize is
- * pure (no IO, no clock read); signature is deterministic over canonical
- * fields (unknown extras are not part of the fingerprint by design — they
- * are forward-compat metadata and can change without changing the
- * memory's logical content).
+ * pure (no IO, no clock read); an unknown extra the pinned shape cannot emit
+ * is refused with a typed error instead of dropped; the signature is
+ * deterministic over canonical fields (unknown extras are not part of the
+ * fingerprint by design — they are forward-compat metadata and can change
+ * without changing the memory's logical content).
  */
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
@@ -76,7 +77,14 @@ export function parseMemoryEntry(raw: string): MemoryEntryV1 {
   return out as unknown as MemoryEntryV1;
 }
 
-/** Serialize a MemoryEntryV1 to its on-disk frontmatter form. Round-trip-stable. */
+/**
+ * Serialize a MemoryEntryV1 to its on-disk frontmatter form. Round-trip-stable
+ * for a scalar extra; a non-scalar one throws `MemorySchemaInvalid` naming the
+ * key. The pinned shape has no block/list emission, and emitting the entry
+ * without that extra would replace a file with one that quietly lost a field —
+ * so the writer refuses and the caller preserves what is on disk. Still pure:
+ * a throw is not IO and reads no clock.
+ */
 export function serializeMemoryEntry(entry: MemoryEntryV1): string {
   const fields: Record<string, unknown> = {};
   for (const key of KNOWN_FRONT_KEYS) {
@@ -87,7 +95,12 @@ export function serializeMemoryEntry(entry: MemoryEntryV1): string {
     .sort();
   for (const key of extraKeys) {
     const v = (entry as unknown as Record<string, unknown>)[key];
-    if (isScalar(v)) fields[key] = v;
+    if (!isScalar(v))
+      throw new MemorySchemaInvalid(
+        key,
+        `memory frontmatter extra "${key}" is not a scalar`
+      );
+    fields[key] = v;
   }
   return `---\n${stringify(fields, STRINGIFY_OPTIONS)}---\n${entry.body}`;
 }
