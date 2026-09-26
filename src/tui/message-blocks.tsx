@@ -373,6 +373,14 @@ const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
  *  the interrupt warning itself and does not follow those renames. */
 const SYSTEM_INTERRUPT_MARK = "[已打断]";
 
+/** Annotation prefix for host-injected envelope texts (user messages carrying
+ *  the ADR-0112 provenance stamp that the hidden-injection list does not
+ *  already suppress, e.g. the LOOP_DETECTED fuse). Same bracket-mark family
+ *  as SYSTEM_INTERRUPT_MARK, warning colour, body stays visible — the stamp
+ *  is the only render key, so any future stamped envelope rides this branch
+ *  without text matching. */
+const HOST_INJECTED_MARK = "[系统注入]";
+
 /** tool_use block rendering:
  *  - live noise (isLiveNoise and not failed) → not rendered; the activity
  *    block takes it over
@@ -564,6 +572,22 @@ function userBubble(cols: number, text: string): ReactNode {
   );
 }
 
+/** Host-injected envelope node: annotated prefix + warning colour single
+ *  block, bypassing the user bubble / Markdown / chip-projection paths. */
+function hostInjectedNode(
+  texts: string,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  return (
+    <box flexDirection="column" marginTop={marginTop ?? 0}>
+      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
+        {`${HOST_INJECTED_MARK} ${texts}`}
+      </text>
+    </box>
+  );
+}
+
 /** User message rendering: skill-load chip projection hit → chip +
  *  remainder; normal input → ❯ bubble. Pure tool_result (no text) and hidden
  *  agent_status → null (summary lines already cover them). Extracted from
@@ -580,6 +604,9 @@ function userMessageNode(
     .join("\n");
   if (texts.trim() === "") return null; // pure tool_result: summary lines cover it.
   if (isTuiHiddenUserMessage(message)) return null;
+  if (message.hostInjected === true) {
+    return hostInjectedNode(texts, cols, marginTop);
+  }
   // Skill-load chip projection: when the closed envelope form
   // `[skill-load name="X"]\n<body>[+\n\n<remainder>]` matches, the body never
   // enters the ❯ bubble. Visible form: a `loading skill <name>` chip plus the
