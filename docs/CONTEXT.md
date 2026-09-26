@@ -11,11 +11,14 @@
 **Loop Engine**: Foundation 的状态机运行内核，驱动模型 -> 工具 -> 真实结果 -> 下一轮模型 -> 明确停止；位于 `src/harness/`，作为 018 退役旧 loop 后的可靠运行时基础。
 _Avoid_: 与旧 `IknowAgent` / `LlmIknowAgent` 混同；将泛称 "agent loop" 当作本项目术语
 
-**append-only messages**: Foundation 的权威 Anthropic 原生会话历史，是唯一事实来源；消息只能以不可变追加（`[...prev, x]`）更新，禁止原地修改或建立第二份权威副本。磁盘形态见 **session transcript**（JSONL 事件投影出当前头的 messages）。
+**append-only messages**: Foundation's authoritative Anthropic-native conversation history and the sole source of message content. Messages are added immutably (`[...prev, x]`), never edited in place or copied into a second authoritative history; the **session transcript** projects them from JSONL events, while a separate **turn outcome** records each turn's terminal state.
 _Avoid_: 任何 host 层第二份权威历史；任意形式的"编辑历史"
 
 **session transcript**: 会话权威账本——单文件 append-only JSONL，每条事件有 id 与 parent；当前可见历史由 **rewind head** 投影，旧链保留。ADR-0027。
 _Avoid_: 把 `SessionFileV1.messages[]` 当第二份权威；把 harness trace JSONL 当会话历史
+
+**turn outcome**: A terminal record in the **session transcript** for one settled host turn, linked by a stable turn identity even when no new user message was appended. It carries the authoritative **StopReason** and separate normalized supplier-stop detail without entering model-facing messages; a missing record means unknown, not `completed`. ADR-0126.
+_Avoid_: Reconstructing success from message grouping; requiring a new user message to identify a turn; treating an interruption checkpoint, trace record, API error, or closing summary as the terminal outcome
 
 **session-title event**: transcript 里与 **message** 并列的标题记录；lite 生成的权威落点，不进 `messages`、不进模型 prior。header `title` 只是列表缓存（有事件用事件正文；无事件才 `extractTitle` 占位）。没有给人改名的入口。ADR-0113。
 _Avoid_: 把 compact 摘要当列表标题；有标题事件后还用 `extractTitle` 回盖；把标题事件投影进 prior；会话 `/rename` / 列表点按改名

@@ -3,6 +3,8 @@
 Date: 2026-08-08
 Status: accepted
 
+> **Amendment 2026-09-26** (MOT spec): the model-authored closing summary is not invoked for output-limit `nonSuccessStop`. The existing closing-summary behavior for all other abnormal stops remains unchanged.
+
 ## Context
 
 `src/harness/loop-engine.ts:593-603` silently returns `{ kind: "stop", reason: "maxTurns" }` when the turn count hits the limit — no summary, no notification, and no turn record (`turn: null`). The external `stepWithTrace` consumes this stop result, but if the caller does not read it, the run "dies silently", and what the user sees is "it broke after 6 turns" with no idea why. Fixing the pain point "a hard stop leaves no trace of what was done" requires upgrading the over-limit case from "an ignorable return value" to "a forcibly-perceived exception".
