@@ -26,6 +26,27 @@ export const VALIDATION_LOOP_REPEAT = 3;
 export const VALIDATION_LOOP_DETECTED_TEXT =
   "LOOP_DETECTED: identical tool call rejected by input validation (repeated R=3 with no argument or error progress). Change the arguments or the approach.";
 
+/**
+ * Result-key tag for a deterministic input-validation answer. Single source
+ * for the encoder in `resultKeyFrom` and for the narrow fuse's membership
+ * test, so the two cannot drift apart.
+ */
+export const VALIDATION_FAILED_RESULT_PREFIX = "validation_failed:";
+
+/**
+ * Every fuse envelope text a resumed session must treat as a clean stop.
+ * Add the text here when a new fuse lands — callers test membership with
+ * `isFuseEnvelopeText` instead of re-listing the constants.
+ */
+export const FUSE_ENVELOPE_TEXTS: ReadonlySet<string> = Object.freeze(
+  new Set([LOOP_DETECTED_TEXT, VALIDATION_LOOP_DETECTED_TEXT])
+);
+
+/** Exact membership test for a fuse envelope text. */
+export function isFuseEnvelopeText(text: string): boolean {
+  return FUSE_ENVELOPE_TEXTS.has(text);
+}
+
 export type ToolLoopEvent = {
   readonly callKey: string;
   readonly resultKey: string;
@@ -90,7 +111,7 @@ function resultKeyFrom(result: ToolExecutionResult): string | null {
     return `execution_failed:${result.message}`;
   }
   if (result.kind === "validation_failed") {
-    return `validation_failed:${result.message}`;
+    return `${VALIDATION_FAILED_RESULT_PREFIX}${result.message}`;
   }
   if (result.kind === "tool_not_found") {
     return `tool_not_found:${result.toolName}`;
@@ -190,7 +211,8 @@ export function isValidationStallLoop(
   const window = events.slice(n - VALIDATION_LOOP_REPEAT);
   const first = window[0];
   if (first === undefined || !first.normalizable) return false;
-  if (!first.resultKey.startsWith("validation_failed:")) return false;
+  if (!first.resultKey.startsWith(VALIDATION_FAILED_RESULT_PREFIX))
+    return false;
   for (const e of window) {
     if (!e.normalizable) return false;
     if (e.callKey !== first.callKey) return false;

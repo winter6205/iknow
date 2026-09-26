@@ -5,9 +5,14 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
+  FUSE_ENVELOPE_TEXTS,
+  isFuseEnvelopeText,
   isStalledToolLoop,
   isValidationStallLoop,
+  LOOP_DETECTED_TEXT,
   toolLoopEventFromCall,
+  VALIDATION_FAILED_RESULT_PREFIX,
+  VALIDATION_LOOP_DETECTED_TEXT,
   type ToolLoopEvent,
 } from "../../src/harness/tool-loop-detect.ts";
 import type { AnthropicContentBlock } from "../../src/harness/model-adapter/types.ts";
@@ -300,5 +305,39 @@ describe("isValidationStallLoop", () => {
 
   it("generic detector unchanged: 3 identical validation is below R=5", () => {
     assert.equal(isStalledToolLoop([same(0), same(1), same(2)]), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single source of truth for the fuse texts: the resume classifier consumes
+// this roster, so a new fuse lands in one place instead of a growing || chain.
+// ---------------------------------------------------------------------------
+
+describe("fuse envelope text roster", () => {
+  it("holds exactly the two fuse envelopes", () => {
+    assert.deepEqual(
+      [...FUSE_ENVELOPE_TEXTS],
+      [LOOP_DETECTED_TEXT, VALIDATION_LOOP_DETECTED_TEXT]
+    );
+  });
+
+  it("isFuseEnvelopeText matches exactly; a same-prefix text stays out", () => {
+    assert.equal(isFuseEnvelopeText(LOOP_DETECTED_TEXT), true);
+    assert.equal(isFuseEnvelopeText(VALIDATION_LOOP_DETECTED_TEXT), true);
+    assert.equal(isFuseEnvelopeText("LOOP_DETECTED: some other stall"), false);
+    assert.equal(isFuseEnvelopeText(""), false);
+  });
+
+  it("result-key encoder and fuse share one validation tag", () => {
+    const event = toolLoopEventFromCall(
+      "todo_write",
+      { mode: "read" },
+      valFail("mode read does not accept item"),
+      0
+    );
+    assert.equal(
+      event.resultKey,
+      `${VALIDATION_FAILED_RESULT_PREFIX}mode read does not accept item`
+    );
   });
 });

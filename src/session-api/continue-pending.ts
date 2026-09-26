@@ -6,10 +6,7 @@
  * or the priorMessages passed to run (EXIT cancelled_keep_interrupt).
  */
 import type { AnthropicNativeMessage } from "../harness/index.js";
-import {
-  LOOP_DETECTED_TEXT,
-  VALIDATION_LOOP_DETECTED_TEXT,
-} from "../harness/tool-loop-detect.js";
+import { isFuseEnvelopeText } from "../harness/tool-loop-detect.js";
 import {
   SkipAppendEmptyPriorError,
   SkipAppendWithTextError,
@@ -130,10 +127,7 @@ function classifyLastMessage(
 ): ContinuePendingVerdict {
   if (last.role === "user") {
     if (isToolResultOnlyUser(last)) return { ok: true };
-    if (
-      userTextOf(last) === LOOP_DETECTED_TEXT ||
-      userTextOf(last) === VALIDATION_LOOP_DETECTED_TEXT
-    ) {
+    if (isFuseEnvelopeText(userTextOf(last))) {
       return { ok: false, exit: "fused_clean_stop" };
     }
     return { ok: true };
