@@ -486,6 +486,9 @@ function parseInput(input: unknown): ParsedInput {
   }
 }
 
+// EXIT: the schema's mode contract branches already reject these combinations
+// before the handler runs; this re-check can go once no todo_write handler is
+// invocable without the registry validator.
 function assertModeFieldsExclusive(
   raw: Record<string, unknown>,
   mode: TodoWriteMode
