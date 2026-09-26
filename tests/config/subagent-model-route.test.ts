@@ -7,8 +7,11 @@
  *    for it), and the project layer never contributes `subagent` (ADR-0084);
  *  - `loadIknowEnv` resolution: a registered route with a non-empty api-key env
  *    yields the resolved `env.subagent.model` (same transport triple as
- *    `LiteModelEnv`); every illegal state or `LlmProviderConfigError` leaves the
- *    key absent (never `null`); a non-config throw propagates.
+ *    `LiteModelEnv`) plus the budget of the model entry its route tail matched
+ *    (ADR-0122 amendment: that value, not the main route's, is the worker's
+ *    request output budget; a silent entry carries no key at all); every illegal
+ *    state or `LlmProviderConfigError` leaves the key absent (never `null`); a
+ *    non-config throw propagates.
  */
 import assert from "node:assert/strict";
 import { describe, it, beforeAll, afterAll } from "vitest";
@@ -27,7 +30,7 @@ const MAIN_PROVIDER = {
   id: "main",
   baseUrl: "http://main.test/v1",
   apiKeyEnv: MAIN_KEY_ENV,
-  models: [{ id: "model" }],
+  models: [{ id: "model", maxTokens: 72_000 }],
 };
 
 const SUB_PROVIDER = {
@@ -35,7 +38,7 @@ const SUB_PROVIDER = {
   baseUrl: "http://sub.test/v1/",
   apiKeyEnv: SUB_KEY_ENV,
   headers: { "X-Sub": "1" },
-  models: [{ id: "sub-model" }],
+  models: [{ id: "sub-model", maxTokens: 64_000 }, { id: "sub-quiet" }],
 };
 
 /** A keyless provider — registered, but its api-key env is never set. */
@@ -92,6 +95,27 @@ describe("loadIknowEnv — subagent.model route resolution", () => {
     assert.deepEqual(env.subagent.model.headers, { "X-Sub": "1" });
     // The worker's wire model is the route tail, not the provider-prefixed literal.
     assert.equal(wireModelFromRoute(env.subagent.model.model), "sub-model");
+  });
+
+  it("SC12: route carries its own model entry's maxTokens, independent of the main route", () => {
+    const env = loadIknowEnv(process.cwd(), settings("sub/sub-model"));
+    assert.ok(env.subagent.model);
+    assert.equal(env.subagent.model.maxTokens, 64_000);
+    assert.equal(env.llm.routeMaxTokens, 72_000);
+  });
+
+  it("SC12: route whose entry omits maxTokens → no budget key on that route only", () => {
+    const env = loadIknowEnv(process.cwd(), settings("sub/sub-quiet"));
+    assert.ok(env.subagent.model);
+    assert.equal("maxTokens" in env.subagent.model, false);
+    assert.equal(env.llm.routeMaxTokens, 72_000);
+  });
+
+  it("route model not listed in models[] → triple present, budget key absent", () => {
+    const env = loadIknowEnv(process.cwd(), settings("sub/unlisted"));
+    assert.ok(env.subagent.model);
+    assert.equal(env.subagent.model.baseUrl, "http://sub.test/v1");
+    assert.equal("maxTokens" in env.subagent.model, false);
   });
 
   it("absent subagent.model → key absent (never null), main route untouched", () => {

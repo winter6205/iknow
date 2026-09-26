@@ -21,6 +21,7 @@ import { loadIknowEnv } from "../../src/config/env.ts";
 import {
   installTestProviderApiKey,
   withTestLlmProvider,
+  TEST_LLM_PROVIDER_API_KEY_ENV,
 } from "../_helpers/test-llm-settings.ts";
 
 let workDir: string;
@@ -300,5 +301,71 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
       await rm(tmpEmpty, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Per-route output budgets read from a real user settings file: main and
+ * separately routed sub-agent each keep their own model entry's value, so
+ * neither route can be read as the other's cap.
+ */
+describe("subagent settings — 每条路由各自的输出预算（真实 settings 文件）", () => {
+  beforeAll(() => {
+    installTestProviderApiKey();
+  });
+  afterAll(() => {
+    delete process.env[TEST_LLM_PROVIDER_API_KEY_ENV];
+  });
+
+  /** Two providers, one model entry each; an omitted budget stays omitted. */
+  function routeSettings(mainTokens?: number, subTokens?: number): object {
+    const entry = (id: string, tokens?: number) => ({
+      id,
+      ...(tokens === undefined ? {} : { maxTokens: tokens }),
+    });
+    return {
+      llm: {
+        model: "main/main-model",
+        providers: [
+          {
+            id: "main",
+            baseUrl: "http://main.test/v1",
+            apiKeyEnv: TEST_LLM_PROVIDER_API_KEY_ENV,
+            models: [entry("main-model", mainTokens)],
+          },
+          {
+            id: "sub",
+            baseUrl: "http://sub.test/v1",
+            apiKeyEnv: TEST_LLM_PROVIDER_API_KEY_ENV,
+            models: [entry("sub-model", subTokens)],
+          },
+        ],
+      },
+      subagent: { model: "sub/sub-model" },
+    };
+  }
+
+  it("SC12/SC18: main 72000 + subagent 64000 → 两侧各自保留自身值", async () => {
+    const { home, cwd } = await makeSettings(routeSettings(72_000, 64_000), {});
+    const env = loadIknowEnv(cwd, undefined, home);
+    assert.equal(env.llm.routeMaxTokens, 72_000);
+    assert.ok(env.subagent.model);
+    assert.equal(env.subagent.model.maxTokens, 64_000);
+  });
+
+  it("SC12: subagent 条目省略 maxTokens → 该路由无预算键，主路由不受影响", async () => {
+    const { home, cwd } = await makeSettings(routeSettings(72_000), {});
+    const env = loadIknowEnv(cwd, undefined, home);
+    assert.ok(env.subagent.model);
+    assert.equal("maxTokens" in env.subagent.model, false);
+    assert.equal(env.llm.routeMaxTokens, 72_000);
+  });
+
+  it("SC2: 主条目省略 maxTokens → 主路由无预算键（装配侧落 32000）", async () => {
+    const { home, cwd } = await makeSettings(routeSettings(undefined, 64_000), {});
+    const env = loadIknowEnv(cwd, undefined, home);
+    assert.equal("routeMaxTokens" in env.llm, false);
+    assert.ok(env.subagent.model);
+    assert.equal(env.subagent.model.maxTokens, 64_000);
   });
 });
