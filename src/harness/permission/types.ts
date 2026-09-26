@@ -51,7 +51,8 @@ export interface HardRuleSpec {
   readonly reason: string;
   readonly tier: "hard-wall";
   /**
-   * Optional input-specific reason override (specs/mutate-write-contract.md):
+   * Optional input-specific reason override (ADR-0125, SC3 of
+   * specs/substitution-hard-walls.md):
    * when present and it returns a string, that string replaces the static
    * `reason` in the deny outcome so the message can carry the specific
    * matched pattern id. Falls back to the static `reason` otherwise.

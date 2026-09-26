@@ -185,9 +185,6 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "chmod -R 777 /",
     "echo a && rm -rf /",
     "echo a; rm -rf /",
-    "echo `whoami`",
-    "echo $(whoami)",
-    "echo ${PATH}",
     "echo $(rm -rf /)",
     // In-segment dangerous substrings must not regress: a segment after a
     // newline still has to hit `rm -rf` etc.
@@ -237,6 +234,11 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "echo a\nrm",
     "mkdir -p ./a\nls",
     "echo a\nls",
+    // ADR-0125: a substitution glyph is no longer a deny on its own — each of
+    // these recurses through a benign inner / plain name read.
+    "echo `whoami`",
+    "echo $(whoami)",
+    "echo ${PATH}",
   ];
   for (const cmd of safe) {
     it(`allows safe: ${JSON.stringify(cmd)}`, () => {
@@ -329,9 +331,12 @@ describe("hard-wall deny reason 带 pattern id (SC3)", () => {
   });
 
   it("命令替换命中 → reason 含 command-substitution id", () => {
-    const reason = denyReason("echo $(whoami)");
+    const reason = denyReason("echo $(rm -rf /)");
     assert.ok(reason.includes("dangerous command pattern"));
     assert.ok(reason.includes("command-substitution"), `reason=${reason}`);
+    assert.ok(reason.includes("destructive-rm"), `reason=${reason}`);
+    // The glyph-only deny is retired: a benign inner no longer reaches here.
+    assert.equal(isDangerousCommand("echo $(whoami)"), false);
   });
 
   it("换行后段内 rm 命中 → reason 仍带 destructive-rm id", () => {
@@ -372,11 +377,11 @@ describe("输入五类表 A — findDangerousPattern / isDangerousCommand (S2)",
     // N/A: pure
   });
 
-  // exception: genuinely dangerous (rm -rf, $(...)) → deny and reason
-  // carries the pattern id.
+  // exception: genuinely dangerous (rm -rf, a substitution with a dangerous
+  // inner) → deny and reason carries the pattern id.
   it("exception: 真危险 deny 且 reason 带 pattern id（见 SC3 describe）", () => {
     assert.equal(isDangerousCommand("rm -rf /"), true);
-    assert.equal(isDangerousCommand("echo $(whoami)"), true);
+    assert.equal(isDangerousCommand("echo $(whoami)"), false);
   });
 });
 
@@ -612,10 +617,10 @@ describe("checkPermission — execute 安全兜底细节", () => {
     assert.equal(out.decision, "ask");
   });
 
-  it("execute + echo $(whoami)（命令替换）→ deny (hard-wall $()", () => {
+  it("execute + echo $(rm -rf /)（命令替换内危险内层）→ deny (inner propagates)", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
-      input: { command: "echo $(whoami)" },
+      input: { command: "echo $(rm -rf /)" },
       policy,
     });
     assert.equal(out.decision, "deny");
