@@ -373,6 +373,15 @@ const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
  *  the interrupt warning itself and does not follow those renames. */
 const SYSTEM_INTERRUPT_MARK = "[已打断]";
 
+/** Annotation prefix for host-injected envelope texts (user messages carrying
+ *  the ADR-0112 provenance stamp that the hidden-injection list does not
+ *  already suppress, e.g. the LOOP_DETECTED fuse). Same bracket-mark family
+ *  as SYSTEM_INTERRUPT_MARK, warning colour, body stays visible — the stamp
+ *  is the only render key, so any future stamped envelope rides this branch
+ *  without text matching. Exported because the mark is a UI contract string:
+ *  tests assert against it rather than hand-copying the literal. */
+export const HOST_INJECTED_MARK = "[系统注入]";
+
 /** tool_use block rendering:
  *  - live noise (isLiveNoise and not failed) → not rendered; the activity
  *    block takes it over
@@ -521,6 +530,25 @@ function renderToolUseBlock(args: {
   );
 }
 
+/** Bracket-mark notice line: one warning-colour text block inside a column box,
+ *  word-wrapped to `cols`, prefixed with `${mark} `. Shared by every mark in the
+ *  bracket-mark family so the marks stay one visual contract (layout, colour and
+ *  wrap can never drift apart per call site). */
+function markedNoticeNode(
+  mark: string,
+  text: string,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  return (
+    <box flexDirection="column" marginTop={marginTop ?? 0}>
+      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
+        {`${mark} ${text}`}
+      </text>
+    </box>
+  );
+}
+
 /** Renders system interrupt messages: warning color + fixed text, bypassing
  *  Markdown / thinking logic. Text comes from the first text block (trimmed),
  *  falling back to the fixed text when empty. Extracted from MessageBlocks for
@@ -535,13 +563,7 @@ function systemInterruptNode(
     .map((b) => b.text)
     .join("\n");
   const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
-  return (
-    <box flexDirection="column" marginTop={marginTop ?? 0}>
-      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
-        {`${SYSTEM_INTERRUPT_MARK} ${body}`}
-      </text>
-    </box>
-  );
+  return markedNoticeNode(SYSTEM_INTERRUPT_MARK, body, cols, marginTop);
 }
 
 /** Inner box of the user ❯ bubble (shared by skill-load chips and normal
@@ -564,6 +586,16 @@ function userBubble(cols: number, text: string): ReactNode {
   );
 }
 
+/** Host-injected envelope node: annotated prefix + warning colour single
+ *  block, bypassing the user bubble / Markdown / chip-projection paths. */
+function hostInjectedNode(
+  texts: string,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  return markedNoticeNode(HOST_INJECTED_MARK, texts, cols, marginTop);
+}
+
 /** User message rendering: skill-load chip projection hit → chip +
  *  remainder; normal input → ❯ bubble. Pure tool_result (no text) and hidden
  *  agent_status → null (summary lines already cover them). Extracted from
@@ -580,6 +612,9 @@ function userMessageNode(
     .join("\n");
   if (texts.trim() === "") return null; // pure tool_result: summary lines cover it.
   if (isTuiHiddenUserMessage(message)) return null;
+  if (message.hostInjected === true) {
+    return hostInjectedNode(texts, cols, marginTop);
+  }
   // Skill-load chip projection: when the closed envelope form
   // `[skill-load name="X"]\n<body>[+\n\n<remainder>]` matches, the body never
   // enters the ❯ bubble. Visible form: a `loading skill <name>` chip plus the
