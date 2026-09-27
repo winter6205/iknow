@@ -28,6 +28,7 @@ import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 import { ProtocolError } from "../errors.js";
 import type { StopReason } from "../model-adapter/types.js";
+import type { ThinkingParams } from "../model-adapter/anthropic-adapter.js";
 import type { WriteSituation } from "../session-roots.js";
 
 /**
@@ -66,6 +67,8 @@ export interface WorkerEnvelope {
    * worker.ts).
    */
   readonly role?: string;
+  /** Effective thinking settings of the parent turn at this dispatch hop. */
+  readonly parentThinking?: ThinkingParams;
   /**
    * Host truncated dialogue (judge). Independent of `task`.
    */
@@ -300,6 +303,18 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     sandboxRoot: { type: "string" },
     env: { type: "object" },
     role: { type: "string" },
+    parentThinking: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["off", "adaptive"] },
+        effort: {
+          type: "string",
+          enum: ["", "low", "medium", "high", "xhigh", "max"],
+        },
+      },
+      required: ["mode"],
+      additionalProperties: false,
+    },
     finalText: { type: "string" },
     evidenceContext: { type: "object" },
     // Write-situation tri-state — same shape as role (wire additive,

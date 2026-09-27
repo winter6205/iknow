@@ -297,6 +297,10 @@ export interface IknowSettingsSubagent {
    * User layer only — the project allowlist never adopts `subagent` (ADR-0084).
    */
   model?: string;
+  /** Worker thinking mode; unset values inherit the parent's effective thinking settings. */
+  thinking?: IknowSettingsThinking;
+  /** Worker thinking effort; unset values inherit the parent's effective thinking settings. */
+  thinkingEffort?: IknowSettingsThinkingEffort;
 }
 
 /**
@@ -1116,10 +1120,16 @@ function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
   }
   const model = typeof raw.model === "string" ? raw.model.trim() : "";
   if (model !== "") out.model = model;
+  if (isValidThinking(raw.thinking)) out.thinking = raw.thinking;
+  if (isValidThinkingEffort(raw.thinkingEffort)) {
+    out.thinkingEffort = raw.thinkingEffort;
+  }
   if (
     out.taskTimeoutMs === undefined &&
     out.maxConcurrentWorkers === undefined &&
-    out.model === undefined
+    out.model === undefined &&
+    out.thinking === undefined &&
+    out.thinkingEffort === undefined
   )
     return undefined;
   return out;
@@ -1185,10 +1195,18 @@ function mergeSubagent(
   if (user?.model !== undefined) {
     out.model = user.model;
   }
+  // Worker thinking settings are user-layer only; project settings cannot
+  // override them, matching subagent.model and the ADR-0084 allowlist.
+  if (user?.thinking !== undefined) out.thinking = user.thinking;
+  if (user?.thinkingEffort !== undefined) {
+    out.thinkingEffort = user.thinkingEffort;
+  }
   if (
     out.taskTimeoutMs === undefined &&
     out.maxConcurrentWorkers === undefined &&
-    out.model === undefined
+    out.model === undefined &&
+    out.thinking === undefined &&
+    out.thinkingEffort === undefined
   )
     return undefined;
   return out;

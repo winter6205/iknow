@@ -825,6 +825,7 @@ function resumeDefinition(
   const {
     parentTurnId: _baseTurnId,
     toolUseId: _baseToolUseId,
+    parentThinking: _baseParentThinking,
     excludeFromHostDrain: _baseDrain,
     ...identity
   } = base;
@@ -835,6 +836,9 @@ function resumeDefinition(
       ? { parentTurnId: next.parentTurnId }
       : {}),
     ...(next.toolUseId !== undefined ? { toolUseId: next.toolUseId } : {}),
+    ...(next.parentThinking !== undefined
+      ? { parentThinking: next.parentThinking }
+      : {}),
     ...(next.excludeFromHostDrain === true
       ? { excludeFromHostDrain: true }
       : {}),
@@ -2066,6 +2070,9 @@ export function createSubAgentManager(opts: {
       ...(def.maxTurns !== undefined && { maxTurns: def.maxTurns }),
       ...(def.timeoutMs !== undefined && { timeoutMs: def.timeoutMs }),
       ...(def.role !== undefined && { role: def.role }),
+      ...(def.parentThinking !== undefined && {
+        parentThinking: def.parentThinking,
+      }),
       ...(def.finalText !== undefined && { finalText: def.finalText }),
       ...(def.evidenceContext !== undefined && {
         evidenceContext: def.evidenceContext,

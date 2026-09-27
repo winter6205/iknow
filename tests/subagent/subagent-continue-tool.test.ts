@@ -27,7 +27,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it, vi } from "vitest";
@@ -45,6 +45,7 @@ import type {
   WorkerEnvelope,
 } from "../../src/harness/subagent/envelope.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
+import type { ToolExecutionContext } from "../../src/harness/tools/types.ts";
 
 interface FakeChild {
   readonly stdout: PassThrough;
@@ -375,6 +376,51 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
 });
 
 describe("subagent_continue — 死工人续跑（新进程、同句柄）", () => {
+  it("uses the current parent's thinking snapshot for the resumed worker", async () => {
+    const harness = makeManagerHarness();
+    const originalThinking = { mode: "off", effort: "low" } as const;
+    const currentThinking = { mode: "adaptive", effort: "high" } as const;
+    const taskId = await spawnCompleted(harness, {
+      task: "original",
+      conversationId: "c1",
+      parentThinking: originalThinking,
+    } as SubAgentDefinition);
+    harness.writeTranscript(taskId);
+    const tool = createSubAgentContinueTool({ manager: harness.manager });
+    const ctx = {
+      conversationId: "c1",
+      parentThinking: currentThinking,
+    } as unknown as ToolExecutionContext;
+
+    try {
+      await tool.handler(
+        {
+          task_id: taskId,
+          message: "continue with current reasoning",
+          wait: false,
+        },
+        ctx
+      );
+
+      const resumed = harness.invocations[1]!;
+      assert.equal(resumed.taskId, taskId);
+      assert.deepEqual(
+        (resumed.payload as WorkerEnvelope & {
+          readonly parentThinking?: unknown;
+        }).parentThinking,
+        currentThinking
+      );
+    } finally {
+      const resumed = harness.invocations[1];
+      if (resumed !== undefined) {
+        emitOkEnvelope(resumed.child, "resumed");
+        await waitForTerminal(harness.manager, taskId);
+      }
+      await harness.manager.shutdown();
+      rmSync(harness.subagentsDir, { recursive: true, force: true });
+    }
+  });
+
   it("completed + transcript + 下一句（wait:false）→ 同 task_id 新进程，payload 指向同一本账", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });

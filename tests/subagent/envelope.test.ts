@@ -58,6 +58,36 @@ describe("subagent envelope schema (SC13 / D1)", () => {
     assert.equal(env.maxTurns, undefined);
   });
 
+  it("parses an optional parent thinking snapshot", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({
+        task: "inherit thinking",
+        sandboxRoot: "/tmp/sb",
+        parentThinking: { mode: "adaptive", effort: "high" },
+      })
+    ) as WorkerEnvelope & {
+      readonly parentThinking?: { readonly mode: string; readonly effort: string };
+    };
+    assert.deepEqual(env.parentThinking, {
+      mode: "adaptive",
+      effort: "high",
+    });
+  });
+
+  it("rejects malformed parent thinking with ProtocolError", () => {
+    assert.throws(
+      () =>
+        parseWorkerEnvelope(
+          JSON.stringify({
+            task: "malformed thinking",
+            sandboxRoot: "/tmp/sb",
+            parentThinking: { mode: "loud", effort: "high" },
+          })
+        ),
+      (err: unknown) => err instanceof ProtocolError
+    );
+  });
+
   it("throws ProtocolError when a required worker field is missing (task)", () => {
     assert.throws(
       () => parseWorkerEnvelope(JSON.stringify({ sandboxRoot: "/tmp/sb" })),

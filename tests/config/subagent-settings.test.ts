@@ -116,6 +116,103 @@ describe("subagent settings — settings 文件层 parse (#358 T1)", () => {
   });
 });
 
+describe("subagent thinking settings — user settings parsing", () => {
+  it("accepts off and adaptive thinking modes from user settings", async () => {
+    for (const thinking of ["off", "adaptive"] as const) {
+      const { home, cwd } = await makeSettings({ subagent: { thinking } }, {});
+      assert.deepEqual(loadIknowSettings({ home, cwd }), {
+        subagent: { thinking },
+      });
+    }
+  });
+
+  it("accepts every supported thinking effort from user settings", async () => {
+    for (const thinkingEffort of [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ] as const) {
+      const { home, cwd } = await makeSettings(
+        { subagent: { thinkingEffort } },
+        {}
+      );
+      assert.deepEqual(loadIknowSettings({ home, cwd }), {
+        subagent: { thinkingEffort },
+      });
+    }
+  });
+
+  it("leaves absent thinking fields out of the parsed subagent settings", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("propagates non-JSON user settings file read errors", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    await mkdir(join(home, ".iknow", "settings.json"));
+
+    assert.throws(() => loadIknowSettings({ home, cwd }), { code: "EISDIR" });
+  });
+
+  it("drops invalid and long invalid thinking values while preserving valid sibling fields", async () => {
+    const invalidValues: unknown[] = [
+      null,
+      1,
+      true,
+      {},
+      "",
+      "ADAPTIVE",
+      "unknown",
+      "x".repeat(4096),
+    ];
+
+    for (const [field, expectedSibling] of [
+      ["thinking", { thinkingEffort: "high" }],
+      ["thinkingEffort", { thinking: "adaptive" }],
+    ] as const) {
+      for (const invalid of invalidValues) {
+        const subagent: Record<string, unknown> = {
+          thinking: "adaptive",
+          thinkingEffort: "high",
+        };
+        subagent[field] = invalid;
+        const { home, cwd } = await makeSettings({ subagent }, {});
+        assert.deepEqual(
+          loadIknowSettings({ home, cwd }),
+          { subagent: expectedSibling },
+          `${field}=${JSON.stringify(invalid)} should be dropped`
+        );
+      }
+    }
+  });
+
+  it("ignores project-layer subagent thinking values and keeps user values", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { thinking: "adaptive", thinkingEffort: "high" } },
+      { subagent: { thinking: "off", thinkingEffort: "max" } }
+    );
+    const warnings: string[] = [];
+
+    assert.deepEqual(
+      loadIknowSettings({
+        home,
+        cwd,
+        onWarn: (message) => warnings.push(message),
+      }),
+      { subagent: { thinking: "adaptive", thinkingEffort: "high" } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"subagent"/);
+  });
+});
+
 describe("subagent settings — 项目层不参与（ADR-0084 允许名单）", () => {
   it("project 的 llm 被丢弃并告警 → user 值胜出（不再被 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
@@ -241,6 +338,21 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY);
     assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
     assert.equal(env.llm.timeoutMs, 300_000);
+  });
+
+  it("projects optional subagent thinking settings into the environment", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        ...withTestLlmProvider(),
+        subagent: { thinking: "adaptive", thinkingEffort: "xhigh" },
+      },
+      {}
+    );
+
+    const env = loadIknowEnv(cwd, undefined, home);
+    const projected = env.subagent as unknown as Record<string, unknown>;
+    assert.equal(projected.thinking, "adaptive");
+    assert.equal(projected.thinkingEffort, "xhigh");
   });
 });
 

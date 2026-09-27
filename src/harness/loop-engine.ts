@@ -69,6 +69,7 @@ import type {
   TokenUsage,
   Transition,
 } from "./model-adapter/types.js";
+import type { ThinkingParams } from "./model-adapter/anthropic-adapter.js";
 import type {
   Executor,
   Registry,
@@ -233,6 +234,8 @@ export interface LoopEngineDeps {
   readonly adapter: LoopAdapter;
   readonly executor: Executor;
   readonly registry: Registry;
+  /** Effective thinking settings for this engine turn, forwarded to tools. */
+  readonly parentThinking?: ThinkingParams;
   /**
    * ADR-0012: max loop turns per session (optional). `undefined`
    * (default) = unlimited (the loop never stops on turn count); when
@@ -2637,7 +2640,8 @@ async function executeWaveAndCommit(opts: {
     },
     opts.turnId,
     opts.onStream,
-    opts.messages
+    opts.messages,
+    opts.deps.parentThinking
   );
   for (let i = 0; i < waveResults.length; i++) {
     if (slots[i] === undefined) slots[i] = waveResults[i];

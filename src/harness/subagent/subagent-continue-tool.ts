@@ -202,6 +202,9 @@ function continueTurnFields(
   return {
     task: message,
     ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
+    ...(ctx?.parentThinking !== undefined
+      ? { parentThinking: ctx.parentThinking }
+      : {}),
     ...(ctx?.toolUseId !== undefined ? { toolUseId: ctx.toolUseId } : {}),
     ...foregroundDrainExclusion(wait),
   };

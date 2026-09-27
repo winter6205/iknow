@@ -22,6 +22,7 @@
  * downstream (worker internals / envelope serialization path).
  */
 import { RegistryConstructionError } from "../errors.js";
+import type { ThinkingParams } from "../model-adapter/anthropic-adapter.js";
 import { mergeDisallowedTools } from "./capability.js";
 
 export interface SubAgentDefinition {
@@ -48,6 +49,11 @@ export interface SubAgentDefinition {
    * Copied onto WorkerEnvelope. Orthogonal to excludeFromHostDrain.
    */
   readonly role?: string;
+  /**
+   * Parent's effective thinking settings for this dispatch hop. Carried to
+   * the worker so unset subagent settings inherit the spawning turn.
+   */
+  readonly parentThinking?: ThinkingParams;
   /**
    * Parent-only: trace turn id of the turn that spawned this subagent. The
    * manager copies it into the `parentTurnId` of subagent_spawn /

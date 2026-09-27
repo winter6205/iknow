@@ -1338,7 +1338,8 @@ export function createWorktreeIsolationExecutor(
     ) => void | Promise<void>,
     turnId?: string,
     onStream?: (event: import("../stream.js").HarnessStreamEvent) => void,
-    messages?: import("../tools/types.js").ToolExecutionContext["messages"]
+    messages?: import("../tools/types.js").ToolExecutionContext["messages"],
+    parentThinking?: import("../tools/types.js").ToolExecutionContext["parentThinking"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
     // ADR-0096 — wave snapshot for the SWITCH as well: read the holder
     // ONCE at wave entry. A panel flip (ON→OFF / OFF→ON) therefore applies to
@@ -1353,7 +1354,8 @@ export function createWorktreeIsolationExecutor(
         onSettled,
         turnId,
         onStream,
-        messages
+        messages,
+        parentThinking
       );
     }
     // Snapshot live taskRoot ONCE at executeAll entry. The whole wave
@@ -1386,7 +1388,8 @@ export function createWorktreeIsolationExecutor(
         onSettled,
         turnId,
         onStream,
-        messages
+        messages,
+        parentThinking
       );
     }
     // mixed / mutating batch: per-call gating (read calls still batched one
@@ -1413,7 +1416,8 @@ export function createWorktreeIsolationExecutor(
           undefined,
           turnId,
           onStream,
-          messages
+          messages,
+          parentThinking
         );
         rootFlipped = true;
         rootFlipTool = call.name;
@@ -1426,7 +1430,8 @@ export function createWorktreeIsolationExecutor(
           undefined,
           turnId,
           onStream,
-          messages
+          messages,
+          parentThinking
         );
       } else if (rootFlipped) {
         result = block(
@@ -1451,7 +1456,8 @@ export function createWorktreeIsolationExecutor(
               undefined,
               turnId,
               onStream,
-              messages
+              messages,
+              parentThinking
             )
           )[0]!;
       }

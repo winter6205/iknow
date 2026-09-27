@@ -163,7 +163,8 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       ) => void | Promise<void>,
       turnId?: string,
       onStream?: (event: HarnessStreamEvent) => void,
-      messages?: ToolExecutionContext["messages"]
+      messages?: ToolExecutionContext["messages"],
+      parentThinking?: ToolExecutionContext["parentThinking"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       if (calls.length === 0) return [];
       const waves = partitionConcurrencyWaves(
@@ -188,6 +189,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           indexBase,
           onStream,
           messages,
+          parentThinking,
         });
         for (const r of part) out.push(r);
         indexBase += wave.length;
@@ -271,6 +273,7 @@ async function runWave(opts: {
   readonly indexBase: number;
   readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
   readonly messages: ToolExecutionContext["messages"];
+  readonly parentThinking: ToolExecutionContext["parentThinking"];
 }): Promise<ReadonlyArray<ToolExecutionResult>> {
   const gated: Array<{
     readonly item: WaveItem;
@@ -301,7 +304,8 @@ async function runWave(opts: {
                   opts.conversationId,
                   opts.turnId,
                   opts.onStream,
-                  opts.messages
+                  opts.messages,
+                  opts.parentThinking
                 ),
               call: g.item.call,
               def: g.item.def,

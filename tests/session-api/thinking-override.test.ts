@@ -159,6 +159,41 @@ describe("parseThinkingOverride — invalid values throw ValidationError", () =>
 // -- withThinkingOverride: construction behavior -----------------------
 
 describe("withThinkingOverride — replaces adapter only, reuses other deps", () => {
+  it("returns the effective per-turn thinking snapshot for downstream tool calls", () => {
+    const deps: LoopEngineDeps = {
+      adapter: {
+        step: async () => {
+          throw new Error("nope");
+        },
+        encodeUserText: () => ({ role: "user", content: [] }),
+        encodeToolResults: () => [],
+      },
+      executor: createExecutor(createRegistry([])),
+      registry: createRegistry([]),
+      maxTurns: 1,
+    };
+    const env = makeTestLlmEnv({
+      baseUrl: "http://invalid",
+      model: "x",
+      apiKey: "k",
+      thinking: "off",
+      thinkingEffort: "",
+    });
+
+    const result = withThinkingOverride({
+      deps,
+      override: { mode: "adaptive", effort: "high" },
+      env,
+    }) as LoopEngineDeps & {
+      readonly parentThinking?: { readonly mode: string; readonly effort: string };
+    };
+
+    assert.deepEqual(result.parentThinking, {
+      mode: "adaptive",
+      effort: "high",
+    });
+  });
+
   it("returned deps.executor / registry / maxTurns / timeoutMs identical to base", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);

@@ -584,6 +584,9 @@ export function createSpawnSubAgentTool(
         // direct handler call) the field is omitted entirely; Postel, no
         // empty values.
         ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
+        ...(ctx?.parentThinking !== undefined
+          ? { parentThinking: ctx.parentThinking }
+          : {}),
         // ADR-0071: reverse lookup to the parent loop's originating tool call
         // — the executor has put call.id (Anthropic tool_use_id) into
         // ctx.toolUseId and the manager copies it into the .meta.json
