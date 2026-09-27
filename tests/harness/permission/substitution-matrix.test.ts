@@ -2113,22 +2113,14 @@ describe("SC7 — ${var} is bucketed by NAME, off Stage 0's expansions[] alone",
 /* SC6 / T12 — the combo wall: <( + interpreter, and nothing else      */
 /* ================================================================== */
 
-/** The frozen interpreter roster read out of its single definition. */
+/**
+ * The frozen interpreter roster read out of its single definition (SC-S4-4:
+ * the `interpreter: true` rows of `command-roster.ts`'s command-name table).
+ */
 function rosterMembers(source: string): string[] {
-  const lines = source.split("\n");
-  const start = lines.findIndex((line) =>
-    /^(const|let|var) INTERPRETER_COMMAND_NAMES\b/.test(line)
-  );
-  expect(
-    start,
-    "the interpreter roster is not declared at top level"
-  ).toBeGreaterThanOrEqual(0);
-  const block: string[] = [];
-  for (let index = start; index < lines.length; index += 1) {
-    block.push(lines[index] ?? "");
-    if (lines[index] === ");") break;
-  }
-  return [...block.join("\n").matchAll(/"([a-z0-9]+)"/g)]
+  return [
+    ...source.matchAll(/"([a-z0-9]+)": \{[^\n]*\binterpreter: true\b/g),
+  ]
     .map((entry) => entry[1] ?? "")
     .sort();
 }
@@ -2231,11 +2223,15 @@ describe("SC6 — the combo wall is <()-only and interpreter-consuming", () => {
 
   it("freezes exactly one interpreter roster, and both walls read it", () => {
     const walls = sourceFile("hard-walls.ts");
+    const roster = sourceFile("command-roster.ts");
+    // SC-S4-4 (Stage 4b): the single definition is the roster module's
+    // frozen table; `hard-walls.ts` keeps no copy.
     expect(
       lineCountMatching(walls, /^(const|let|var) INTERPRETER_COMMAND_NAMES\b/)
-    ).toBe(1);
-    expect(rosterMembers(walls)).toEqual([...ROSTER].sort());
-    // One definition, two consumers: the combo test and the heredoc receiver
+    ).toBe(0);
+    expect(lineCountMatching(roster, /^export const COMMAND_ROSTER\b/)).toBe(1);
+    expect(rosterMembers(roster)).toEqual([...ROSTER].sort());
+    // One roster, two consumers: the combo test and the heredoc receiver
     // test both read this set, so the two rules cannot drift apart.
     expect(lineCountMatching(walls, /INTERPRETER_COMMAND_NAMES\.has\(/)).toBe(
       2

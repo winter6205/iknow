@@ -42,6 +42,12 @@
  */
 
 import { ToolExecutionError } from "../../errors.js";
+import {
+  FORBIDDEN_COMMANDS,
+  READONLY_ALLOWED,
+  commandFlagPolicy,
+  type CommandFlagPolicy,
+} from "../../permission/command-roster.js";
 import { firstToken } from "../../permission/hard-walls.js";
 import { splitShellSegments } from "../../permission/text-segments.js";
 import {
@@ -76,58 +82,11 @@ export class ReadonlyViolationError extends ToolExecutionError {
 
 /* ---------------------------------------------------------------------------
  * Policy tables (pure data, frozen; no shared mutable state)
+ *
+ * The command-NAME sets (`FORBIDDEN_COMMANDS` / `READONLY_ALLOWED`) are
+ * projections of `permission/command-roster.ts` (SC-S4-4); the flag tables
+ * below stay owned here, keyed off the roster's `flag_policy` string keys.
  * ------------------------------------------------------------------------- */
-
-/** Class 1: Execution agents — directly forbidden regardless of flags. */
-const FORBIDDEN_COMMANDS: ReadonlySet<string> = Object.freeze(
-  new Set(["env", "xargs", "time", "nohup", "timeout"])
-);
-
-/** Class 3: Pure read commands — bare allow, any flags. */
-const READONLY_ALLOWED: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "ls",
-    "cat",
-    "grep",
-    "wc",
-    "stat",
-    "du",
-    "df",
-    "ps",
-    "diff",
-    "sha256sum",
-    "md5sum",
-    "jq",
-    "head",
-    "tail",
-    "printenv",
-    "rg",
-    "file",
-    "which",
-    "whereis",
-    "uname",
-    "hostname",
-    "id",
-    "whoami",
-    "date",
-    "pwd",
-    "echo",
-    "printf",
-    "true",
-    "false",
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    "column",
-    "nl",
-    "fold",
-    "od",
-    "xxd",
-    "hexdump",
-    "strings",
-  ])
-);
 
 /** Class 2: find — denied flags (write/execute side effects). */
 const FIND_DENIED_FLAGS: ReadonlySet<string> = Object.freeze(
@@ -180,6 +139,21 @@ const GIT_ALLOWED_SUBCOMMANDS: ReadonlySet<string> = Object.freeze(
     "remote",
   ])
 );
+
+/**
+ * Roster `flag_policy` key → the table that key names, resolved here where
+ * the tables live (SC-S4-4): the roster holds keys, never references, and
+ * `validateSegmentTokens` indexes this map with the key. Routing on the
+ * indexed table's identity means a mis-wired key changes a verdict, so the
+ * table-identity probes cannot pass on a swapped map.
+ */
+const FLAG_POLICY_TABLES: Readonly<
+  Record<CommandFlagPolicy, ReadonlySet<string>>
+> = Object.freeze({
+  find: FIND_DENIED_FLAGS,
+  sort: SORT_DENIED_FLAGS,
+  git: GIT_ALLOWED_SUBCOMMANDS,
+});
 
 /**
  * Git global flags that consume the next token as an argument. Used to
@@ -326,8 +300,9 @@ function admitUnit(unit: ReadonlyUnit, command: string): void {
  * stopped consulting the readonly tables entirely when issue 1059 replaced
  * the prediction with the physical ro-bind fence. Today this function and
  * its token-array twin `validateSegmentTokens` are reached only from
- * `admitUnit`, and the export stays as the policy-table seam for the Stage 4b
- * roster consolidation (specs/hard-wall-ast-migration.md SC-S4-4).
+ * `admitUnit`; the command names come from `permission/command-roster.ts`
+ * (SC-S4-4) and the flag tables stay keyed off its `flag_policy` strings
+ * here.
  */
 export function validateSegmentPolicy(segment: string, command: string): void {
   validateSegmentTokens(tokenize(segment), command);
@@ -345,17 +320,21 @@ function validateSegmentTokens(
     });
   }
   if (READONLY_ALLOWED.has(token)) return;
-  if (token === "find") {
-    validateFindFlags(tokens, command);
-    return;
-  }
-  if (token === "sort") {
-    validateSortFlags(tokens, command);
-    return;
-  }
-  if (token === "git") {
-    validateGitSubcommand(tokens, command);
-    return;
+  const flagPolicy = commandFlagPolicy(token);
+  if (flagPolicy !== null) {
+    const table = FLAG_POLICY_TABLES[flagPolicy];
+    if (table === FIND_DENIED_FLAGS) {
+      validateFindFlags(tokens, command);
+      return;
+    }
+    if (table === SORT_DENIED_FLAGS) {
+      validateSortFlags(tokens, command);
+      return;
+    }
+    if (table === GIT_ALLOWED_SUBCOMMANDS) {
+      validateGitSubcommand(tokens, command);
+      return;
+    }
   }
   // Deny-by-default: anything not in any policy entry is rejected.
   throw new ReadonlyViolationError({

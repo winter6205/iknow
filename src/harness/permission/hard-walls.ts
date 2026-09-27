@@ -4,6 +4,10 @@ import type {
   SecurityReviewRequirement,
 } from "./security-review.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
+import {
+  ALLOWED_COMMAND_TOKENS,
+  INTERPRETER_COMMAND_NAMES,
+} from "./command-roster.js";
 import { splitShellSegments } from "./text-segments.js";
 import {
   parseForSecurity,
@@ -82,43 +86,6 @@ export interface DangerousPatternHit {
   /** The literal pattern / token that matched (for diagnostic display). */
   readonly pattern: string;
 }
-
-const ALLOWED_COMMAND_TOKENS: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "mkdir",
-    "cp",
-    "mv",
-    "touch",
-    "tee",
-    "sed",
-    "chmod",
-    "chown",
-    "diff",
-    "file",
-    "base64",
-    "jq",
-    "curl",
-    "env",
-    "export",
-    "unset",
-    "true",
-    "false",
-    "echo",
-    "pwd",
-    "printf",
-    "wc",
-    "cat",
-    "head",
-    "tail",
-    "ls",
-    "node",
-    "npm",
-    "git",
-    "dir",
-    "type",
-    "where",
-  ])
-);
 
 /**
  * Two denies the roster and a structural/text rule BOTH state, so each is one
@@ -212,8 +179,8 @@ export function firstToken(command: string): string {
  *
  * The `ok` path carries both facts the old segment fold decided:
  *   - membership: every depth-0 command unit's first argv word must be an
- *     `ALLOWED_COMMAND_TOKENS` name (the table itself is unchanged — 4b owns
- *     where the names live);
+ *     `ALLOWED_COMMAND_TOKENS` name (a projection of `./command-roster.js`,
+ *     SC-S4-4 — the membership is the table's own);
  *   - the second syntactic fact (SC-S4-2's keep): no bare newline / carriage
  *     return anywhere outside quoted spans and heredoc bodies, which is what
  *     pins `echo a\nrm -rf /` → `false`, `echo a\nls` → `false` and
@@ -1203,29 +1170,10 @@ function substitutionHit(
   return null;
 }
 
-/**
- * The one closed roster of interpreters (ADR-0125 Assumption 7), consumed by
- * both rules that ask "does this word execute what it is handed?": the combo
- * wall below and the heredoc receiver test. Frozen here rather than imported:
- * `permission/` takes no value from `sandbox/`, and merging this list with the
- * map-fog allowlist is the sibling spec's Stage 2-4 criterion, not this stage's.
- */
-const INTERPRETER_COMMAND_NAMES: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    "python",
-    "python2",
-    "python3",
-    "node",
-    "perl",
-    "ruby",
-    "php",
-  ])
-);
+// `INTERPRETER_COMMAND_NAMES` (ADR-0125 Assumption 7's closed interpreter
+// roster) moved to `./command-roster.js` with Stage 4b (SC-S4-4): the roster
+// consolidation this literal's own comment deferred to the sibling spec's
+// Stage 2-4 criterion is that module; both readers below import the name.
 
 // --- Stage-2 destructive walls on the parsed tree (SC-S2-8 / SC-S2-9) -------
 //
