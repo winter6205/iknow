@@ -1542,11 +1542,14 @@ describe("spawn_subagent — parent thinking snapshot", () => {
       expect(calls).toHaveLength(2);
       expect(launches).toHaveLength(2);
       expect(
-        launches.map(({ payload }) =>
-          (payload as WorkerEnvelope & {
-            readonly parentThinking?: unknown;
-          }).parentThinking
-        ),
+        launches.map(
+          ({ payload }) =>
+            (
+              payload as WorkerEnvelope & {
+                readonly parentThinking?: unknown;
+              }
+            ).parentThinking
+        )
       ).toEqual([
         { mode: "off", effort: "low" },
         { mode: "adaptive", effort: "xhigh" },

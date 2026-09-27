@@ -1070,9 +1070,7 @@ function resolveWorkerThinking(
   const inherited = parentThinking ?? buildThinkingParams(env.llm);
   const mode =
     env.subagent?.thinking ??
-    (env.subagent?.thinkingEffort !== undefined
-      ? "adaptive"
-      : inherited.mode);
+    (env.subagent?.thinkingEffort !== undefined ? "adaptive" : inherited.mode);
   const effort = env.subagent?.thinkingEffort ?? inherited.effort;
   return {
     mode,

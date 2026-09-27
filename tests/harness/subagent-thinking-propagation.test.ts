@@ -115,11 +115,12 @@ describe("parent thinking propagation through the assembled harness executor", (
         return child as unknown as ChildProcess;
       },
     });
-    const provisionCalls: Array<{ readonly conversationId?: string; readonly root: string }> = [];
+    const provisionCalls: Array<{
+      readonly conversationId?: string;
+      readonly root: string;
+    }> = [];
     const env = makeEnv();
-    let built:
-      | Awaited<ReturnType<typeof buildHarnessEngine>>
-      | undefined;
+    let built: Awaited<ReturnType<typeof buildHarnessEngine>> | undefined;
 
     try {
       built = await buildHarnessEngine({

@@ -185,7 +185,10 @@ describe("withThinkingOverride — replaces adapter only, reuses other deps", ()
       override: { mode: "adaptive", effort: "high" },
       env,
     }) as LoopEngineDeps & {
-      readonly parentThinking?: { readonly mode: string; readonly effort: string };
+      readonly parentThinking?: {
+        readonly mode: string;
+        readonly effort: string;
+      };
     };
 
     assert.deepEqual(result.parentThinking, {

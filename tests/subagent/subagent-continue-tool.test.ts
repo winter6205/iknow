@@ -405,9 +405,11 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
       const resumed = harness.invocations[1]!;
       assert.equal(resumed.taskId, taskId);
       assert.deepEqual(
-        (resumed.payload as WorkerEnvelope & {
-          readonly parentThinking?: unknown;
-        }).parentThinking,
+        (
+          resumed.payload as WorkerEnvelope & {
+            readonly parentThinking?: unknown;
+          }
+        ).parentThinking,
         currentThinking
       );
     } finally {

@@ -66,7 +66,10 @@ describe("subagent envelope schema (SC13 / D1)", () => {
         parentThinking: { mode: "adaptive", effort: "high" },
       })
     ) as WorkerEnvelope & {
-      readonly parentThinking?: { readonly mode: string; readonly effort: string };
+      readonly parentThinking?: {
+        readonly mode: string;
+        readonly effort: string;
+      };
     };
     assert.deepEqual(env.parentThinking, {
       mode: "adaptive",

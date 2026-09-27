@@ -8,6 +8,19 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Breaking
 
+- **Model output budgets moved to per-route `models[].maxTokens`; `IKNOW_LLM_MAX_OUTPUT_TOKENS` is retired (spec `model-output-truncation`, ADR-0126, 2026-09-27)**:
+  the global `maxOutputTokens` ladder (2048 → 8192 → 16384, logged below) is replaced
+  by a per-model-route budget. Any non-empty `IKNOW_LLM_MAX_OUTPUT_TOKENS` — process
+  environment or user / project settings file — now fails fast with a typed
+  `LlmBudgetConfigError` (`legacy_max_output_tokens_env`) rendered on all three startup
+  surfaces (CLI, chat, TUI) rather than being silently read. `LlmEnv.maxOutputTokens`
+  is deprecated and never consulted as a budget; it is kept only so the ~70 fixtures
+  that pin it keep compiling, and its removal plus fixture migration is a separate
+  ticket. Truncation is now a recorded terminal outcome rather than an error fold: the
+  output-limit stop performs no retry and requests no closing summary, because the
+  settled partial turn is itself the record, and a `tool_use` the limit left
+  unexecuted is closed out with a synthetic `is_error` tool result stating the call
+  never ran.
 - **Memory entry frontmatter is now written as real YAML (spec `frontmatter-shared-parser`, ADR-0123 amendment, 2026-09-23)**:
   `serializeMemoryEntry` emits `yaml.stringify` instead of unquoted `key: value`
   lines, because the shared parser made the read side strict and the old writer
@@ -160,6 +173,24 @@ is a curated snapshot; the complete development history lives in the git log.
     archived.
 
 ### Added
+
+- **Per-model-route output budgets and an explicit output-limit notice (spec `model-output-truncation`, ADR-0126, 2026-09-27)**:
+  each `models[]` entry takes an optional `maxTokens`; the matched route carries it as
+  `llm.routeMaxTokens` / `ModelRouteEnv.maxTokens`, and request assembly falls back to
+  32,000 only for a route that declares none. The limit is a request budget, not
+  evidence that the route returned one. When the supplier stops on the output limit the
+  terminal outcome is persisted in the session JSONL, and one server-owned notice —
+  a single exported constant, so the live append and every replay of it carry identical
+  bytes — is rendered verbatim by both TUI and Web, live and on reopen. `compactSession`
+  consults the persisted outcomes and never synthesizes `completed` for a truncated
+  turn, so a rewind / compact round keeps the truth.
+- **Independent subagent thinking settings (spec `subagent-thinking-settings`, 2026-09-27)**:
+  `settings.json` gains optional `subagent.thinking` and `subagent.thinkingEffort`, so
+  a worker's thinking mode and effort are configurable independently of the parent.
+  When either field is unset the parent's effective values are inherited, including
+  per-turn overrides and continuation calls. An immutable parent snapshot is carried
+  through the executor wrappers and the worker envelope, the envelope is validated, and
+  the legacy worker (no snapshot) still falls back to `env.llm` thinking. No TUI change.
 
 - **Shared frontmatter module (spec `frontmatter-shared-parser`, ADR-0123, 2026-09-23)**: `src/harness/frontmatter/`
   exposes two APIs that replace the four hand-rolled `---` parsers — `stripFence`
@@ -630,6 +661,28 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **`todo_write` advertised a flat schema its handler would not accept, and a model repeating itself burned the full retry budget (issue #1136, 2026-09-27)**:
+  the tool exposed one schema while the handler enforced per-mode field rules, so a
+  cross-mode call reached deterministic validation, failed, and re-fired identically —
+  spending the generic R=5 loop budget before anything stopped. The schema now carries
+  the per-mode `oneOf` and a schema rejection names the offending field instead of
+  quoting the generic `must be equal to constant`. A narrow fuse (threshold
+  `VALIDATION_LOOP_REPEAT = 3`) trips before the generic R=5 detector when the last
+  three tool events are the same call with the same deterministic validation error;
+  it reuses the existing `LOOP_DETECTED:` envelope so `isStalledToolLoop` is unchanged,
+  and both seams' texts and the validation tag have a single source. A handler
+  rejection is now classified `validation_failed` via a new `ToolInputValidationError`
+  subclass, with the model-visible message bytes unchanged; cancel and timeout still
+  outrank a handler rejection.
+- **Host-injected messages were indistinguishable from real user input after a resume (follow-up to #1136, ADR-0112, 2026-09-27)**:
+  the loop fuses and the new validation-stall fuse persist a `user`-role message
+  carrying the `hostInjected` stamp, but the TUI drew it as an ordinary user bubble —
+  no way to tell host injection from something the user typed. Stamped envelopes now
+  render with a `[系统注入]` prefix in the amber `running` colour, with no user-bubble
+  background fill and no `❯` prompt. The render is marker-driven only: it keys on
+  `message.hostInjected === true` and never on envelope text, so an unstamped message
+  carrying the same words still renders as a normal bubble. The renderer is shared with
+  the interrupt notice. Web-layer parity is still open.
 - **A memory write-back could drop a field it did not understand, and a quarantined file stayed silent (issue #1137, spec `memory-frontmatter-write-signals`, ADR-0123 residuals, 2026-09-26)**:
   `serializeMemoryEntry` now throws a typed `MemorySchemaInvalid` naming the key when
   an unknown frontmatter extra is not a scalar — the old `isScalar` filter emitted the

@@ -90,7 +90,10 @@ function baseEnv(): IknowEnv {
 
 function probeOpts(
   env: IknowEnv,
-  parentThinking?: { readonly mode: "off" | "adaptive"; readonly effort: string }
+  parentThinking?: {
+    readonly mode: "off" | "adaptive";
+    readonly effort: string;
+  }
 ): CreateWorkerDepsOptions {
   return {
     env,
@@ -179,9 +182,7 @@ describe("worker adapter route (settings.subagent.model)", () => {
       thinkingEffort: "high",
     });
 
-    await createWorkerDeps(
-      probeOpts(env, { mode: "off", effort: "low" })
-    );
+    await createWorkerDeps(probeOpts(env, { mode: "off", effort: "low" }));
 
     assert.deepEqual(adapterArgs[0]!.thinking, {
       mode: "adaptive",
@@ -206,9 +207,7 @@ describe("worker adapter route (settings.subagent.model)", () => {
     const env = baseEnv();
     Object.assign(env.subagent, { thinkingEffort: "medium" });
 
-    await createWorkerDeps(
-      probeOpts(env, { mode: "off", effort: "low" })
-    );
+    await createWorkerDeps(probeOpts(env, { mode: "off", effort: "low" }));
 
     assert.deepEqual(adapterArgs[0]!.thinking, {
       mode: "adaptive",
@@ -220,9 +219,7 @@ describe("worker adapter route (settings.subagent.model)", () => {
     const env = baseEnv();
     Object.assign(env.subagent, { thinking: "adaptive" });
 
-    await createWorkerDeps(
-      probeOpts(env, { mode: "off", effort: "max" })
-    );
+    await createWorkerDeps(probeOpts(env, { mode: "off", effort: "max" }));
 
     assert.deepEqual(adapterArgs[0]!.thinking, {
       mode: "adaptive",
