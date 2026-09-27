@@ -132,6 +132,15 @@ docs/kb-assistant-guide
 !.claude/rules/
 .claude/rules/*
 !.claude/rules/test.md
+# Mirror of the same team-shared policy for the Codex CLI, same convention:
+# only the shared rule files and generic settings are tracked; config.toml
+# wires machine-local MCP daemons (nvm-pinned binary paths) and stays personal.
+!.codex/
+.codex/*
+!.codex/settings.json
+!.codex/rules/
+.codex/rules/*
+!.codex/rules/*.md
 .playwright-cli
 .codebase-memory/
 

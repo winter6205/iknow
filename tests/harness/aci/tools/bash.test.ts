@@ -125,8 +125,11 @@ describe("bash — permission gates", () => {
     const cwd = await makeScratch("bash-dangerous-");
     const tool = createBashTool(cwd);
 
+    // A real destructive argv: the wall answers nothing for an inert
+    // `echo rm -rf /` anymore. The target does not exist, so a wall that
+    // stopped rejecting could still not destroy anything from this scratch dir.
     await assert.rejects(
-      tool.handler({ command: "echo rm -rf /" }),
+      tool.handler({ command: "rm -rf ./bash-dangerous-nonexistent" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("bash: dangerous command rejected")

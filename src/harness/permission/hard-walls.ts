@@ -5,10 +5,14 @@ import {
   scanWithLegacyDegrade,
   type CommandFact,
   type ExpansionFact,
+  type FactSpan,
+  type HeredocFact,
+  type InertFact,
   type SecurityParseOk,
   type SecurityParseResult,
   type SecurityParseUnknownSyntax,
   type SubstitutionFact,
+  type WordFact,
 } from "./shell-parse.js";
 
 // Re-export the SSOT hard-wall prefix for callers that historically imported
@@ -112,6 +116,22 @@ const ALLOWED_COMMAND_TOKENS: ReadonlySet<string> = Object.freeze(
 );
 
 /**
+ * Two denies the roster and a structural/text rule BOTH state, so each is one
+ * frozen object rather than a literal at two sites: a rule that reconstructs
+ * either one can drift its id or its spelling without touching the roster, and
+ * the `pattern=` desc is what an operator reads (SC-GATES-6).
+ */
+const FORMAT_GATE_HIT: DangerousPatternHit = Object.freeze({
+  id: "destructive-disk",
+  pattern: "format",
+});
+
+const FORK_BOMB_HIT: DangerousPatternHit = Object.freeze({
+  id: "destructive-disk",
+  pattern: ":(){ :|:& };:",
+});
+
+/**
  * Each entry pairs the machine-readable id (SC3) with the literal substring
  * the segment scan looks for after the standard normalize step (lowercase,
  * backslash strip, whitespace collapse). The `format` substring is
@@ -133,7 +153,7 @@ const DANGEROUS_COMMAND_PATTERNS: readonly DangerousPatternHit[] =
     { id: "destructive-rm", pattern: "chmod -r" },
     { id: "destructive-disk", pattern: "mkfs" },
     { id: "destructive-disk", pattern: "dd if=" },
-    { id: "destructive-disk", pattern: ":(){ :|:& };:" },
+    FORK_BOMB_HIT,
     { id: "destructive-disk", pattern: "shutdown" },
     { id: "destructive-disk", pattern: "reboot" },
     { id: "destructive-disk", pattern: "del /f" },
@@ -377,13 +397,17 @@ function commandWord(token: string): string {
  * to bash. Returns the command word and its token index.
  */
 function commandAt(
-  tokens: ReadonlyArray<string>
+  tokens: ReadonlyArray<string>,
+  extraWrappers?: ReadonlySet<string>
 ): { name: string; index: number } | undefined {
   let i = 0;
   let wrapper: string | undefined;
   while (i < tokens.length) {
     const bare = stripQuoteLayer(tokens[i]!.replace(/\\/g, "")).toLowerCase();
-    if (FIND_WRAPPER_TOKENS.has(bare)) {
+    if (
+      FIND_WRAPPER_TOKENS.has(bare) ||
+      (extraWrappers !== undefined && extraWrappers.has(bare))
+    ) {
       wrapper = bare;
       i += 1;
       continue;
@@ -655,6 +679,16 @@ function matchRootFindWalk(
 }
 
 /**
+ * The normalize the substring roster and the lexical `format` gate share, and
+ * the reason both see `fo\rmat` as `format` (bash joins an escaped word) and
+ * `rm  -rf` as one literal. Deliberately NOT `scanFold`: that one keeps
+ * newlines, because the splitter turns them into separate segments.
+ */
+function segmentScanFold(raw: string): string {
+  return raw.toLowerCase().replace(/\\/g, "").replace(/\s+/g, " ");
+}
+
+/**
  * Deny rules that hold inside ONE segment, independent of its position.
  * Returns the first hit or null. Split out of `findDangerousPattern` so the
  * per-segment scan and the ordered walk fold stay separate decision surfaces.
@@ -668,7 +702,7 @@ function scanSegment(segment: string): DangerousPatternHit | null {
   // Strip backslash escapes before scanning so that `r\m -rf /` (an attempt
   // to defeat substring matching) still triggers the `rm -rf` pattern.
   // Collapse runs of whitespace so `rm  -rf` (extra spaces) still hits.
-  const lower = segment.toLowerCase().replace(/\\/g, "").replace(/\s+/g, " ");
+  const lower = segmentScanFold(segment);
   for (const entry of DANGEROUS_COMMAND_PATTERNS) {
     if (lower.includes(entry.pattern)) return entry;
   }
@@ -678,7 +712,7 @@ function scanSegment(segment: string): DangerousPatternHit | null {
   // so the lexical gate must not be bypassed by the same escape
   // (`isLexicalFormatCommand(raw)` saw firstToken `rmat` and let it through).
   if (isLexicalFormatCommand(lower)) {
-    return { id: "destructive-disk", pattern: "format" };
+    return FORMAT_GATE_HIT;
   }
   return null;
 }
@@ -828,9 +862,16 @@ function routeParseVerdict(
  *     routed by that sub-parse's verdict — and a quoted body of a text receiver
  *     is data the substitution family never speaks about.
  *   - Newlines are segment separators, NOT a dangerous pattern.
+ *   - The destructive rules of an `ok` parse are judged off the tree: command
+ *     words, declared code operands, and the heredoc bodies the receiver rule
+ *     keeps — after the root-find fold, which still owns `find /`. The lexical
+ *     `format` gate and the bare-metachar branch still read the text there: the
+ *     first is scoped by the splitter rather than by a node, the second is
+ *     Stage 3's to move.
  *   - Each segment is independently normalized (lowercase, backslash strip,
  *     whitespace collapse) and scanned against `DANGEROUS_COMMAND_PATTERNS`.
- *     Those text branches stay quote-blind until the AST migration.
+ *     That scan is quote-blind, and it stays the whole answer wherever the parse
+ *     cannot speak for the shape: unmodelled syntax and the degrade path.
  *   - The bare-metachar branch (segment = nothing but separators / pipes /
  *     redirects) only fires when NO segment has a command word — the
  *     "no command body" intent. Allowlist membership is irrelevant here:
@@ -880,16 +921,36 @@ export function findDangerousPattern(
   }
 
   if (result.kind === "ok" || result.kind === "unknown-syntax") {
-    const analysis = analyzeSubstitutions(result);
-    if (analysis.verdict === "denied") return analysis.hit;
-    if (analysis.verdict === "analysis-fault") {
-      return { id: "unparseable", pattern: "verdict=analysis-fault" };
-    }
-    // `ask` is not this layer's channel: it falls through to the text rules
-    // and the mode / category default, which is where an ask is emitted.
+    const substitution = substitutionHit(result);
+    if (substitution !== null) return substitution;
+    // `ask` is not this layer's channel: it falls through to the destructive
+    // rules and the mode / category default, which is where an ask is emitted.
   }
 
+  if (result.kind === "ok") return findDestructiveAfterParse(command, result);
+
+  // An unmodelled node means the tree cannot speak for the shape at all, so this
+  // arm keeps the text rules whole: narrowing them here would turn a
+  // today-deny into an allow, which no arm of the parse verdict contract buys.
   return findTextDangerPattern(command);
+}
+
+/**
+ * The substitution family's answer for a parse the tree can speak about: a hit
+ * to deny with, or `null` to fall through. `analysis-fault` is a contradiction
+ * inside this wall's own reading of a tree it was told is `ok`, so it reports
+ * through the same `unparseable` id the verdict routing uses rather than
+ * pretending the substitution roster answered.
+ */
+function substitutionHit(
+  payload: SecurityParseOk | SecurityParseUnknownSyntax
+): DangerousPatternHit | null {
+  const analysis = analyzeSubstitutions(payload);
+  if (analysis.verdict === "denied") return analysis.hit;
+  if (analysis.verdict === "analysis-fault") {
+    return { id: "unparseable", pattern: "verdict=analysis-fault" };
+  }
+  return null;
 }
 
 /**
@@ -915,6 +976,539 @@ const INTERPRETER_COMMAND_NAMES: ReadonlySet<string> = Object.freeze(
     "php",
   ])
 );
+
+// --- Stage-2 destructive walls on the parsed tree (SC-S2-8 / SC-S2-9) -------
+//
+// These rules judge a command node by its command WORD (wrapper-folded, and
+// un-quoted for the name test only), never by a substring of the whole command.
+// That is what lets a dangerous literal sitting in an `echo`/`grep` operand or
+// in quoted / comment / data-heredoc text stop denying (SC-S2-1) while a real
+// destructive argv, an execution carrier's operand run, and a code-consuming
+// name's code operand all still deny. Every literal read below is a literal the
+// whole-command substring scan read, and it is read inside one node, so nothing
+// here can deny a shape that scan let through. The fork bomb is the one entry
+// read differently and it goes the other way: `SUBSTRING_ROSTER` drops it from
+// these arms because the scan never denied a bomb sitting inside
+// `bash -c '…'`, and only the structural rule (SC-S2-8) answers for it — the
+// `(id, pattern)` pair that rule renders is the authorized move. The quote-blind
+// text scan (`scanSegment`, `legacyFindDangerousPattern`) stays the
+// parser-unavailable answer at full strength (SC-GATES-4) and the answer of
+// every non-`ok` arm of the parse.
+
+const SHELL_NAME_POWERSHELL = "powershell";
+const SHELL_NAME_PWSH = "pwsh";
+const SHELL_NAME_CMD = "cmd";
+
+/**
+ * Windows shells that eat a command string as another program's source. NOT
+ * Stage-1's interpreter roster (that answers "does this consume generated
+ * code?"); this trio answers "does this read its operand as a shell script".
+ * The two lists are unioned only for the declared-code-operand test below, and
+ * each keeps its own single definition (SC-S2-9).
+ */
+const SHELL_FAMILY_ROSTER: ReadonlySet<string> = Object.freeze(
+  new Set([SHELL_NAME_POWERSHELL, SHELL_NAME_PWSH, SHELL_NAME_CMD])
+);
+
+/**
+ * `builtin` runs its operand unchanged, so this family must see past it. It is
+ * folded here and not in `FIND_WRAPPER_TOKENS` because that set is shared with
+ * the root-find walk, whose answer for `cd / && builtin find .` would move with
+ * it — a wall this stage does not own.
+ */
+const DESTRUCTIVE_EXTRA_WRAPPERS: ReadonlySet<string> = Object.freeze(
+  new Set(["builtin"])
+);
+
+/**
+ * The folded command word of one node, for EVERY arm of this family: the
+ * command-word rule, the declared-code-operand rule, the heredoc receiver and
+ * the sensitive path's blanking test. Folding in one arm and not another is a
+ * bypass rather than a difference of opinion — `builtin bash -c 'rm -rf /'` is
+ * the same command to bash as `bash -c 'rm -rf /'`, and an arm that reads the
+ * first word only sees `builtin`, names nothing that eats code, and allows.
+ */
+function destructiveCommandAt(
+  cmd: CommandFact
+): { name: string; index: number } | undefined {
+  return commandAt(cmd.argv.map(wordSource), DESTRUCTIVE_EXTRA_WRAPPERS);
+}
+
+/**
+ * The same fold read one word at a time, for the walk that must stop at the
+ * first word able to BE the command rather than skipping to it.
+ */
+function isDestructiveWrapper(name: string): boolean {
+  return FIND_WRAPPER_TOKENS.has(name) || DESTRUCTIVE_EXTRA_WRAPPERS.has(name);
+}
+
+/** Command words whose OWN argv can carry a destructive roster literal. */
+const DESTRUCTIVE_COMMAND_WORDS: ReadonlySet<string> = Object.freeze(
+  new Set([
+    "rm",
+    "rmdir",
+    "remove-item",
+    "chmod",
+    "find",
+    "dd",
+    "shutdown",
+    "reboot",
+    "del",
+    "rd",
+  ])
+);
+
+function wordSource(word: WordFact): string {
+  return word.text;
+}
+
+/**
+ * The scan form the roster rules read: the segment normalization (lowercase,
+ * backslash fold, blank collapse) with one difference kept on purpose —
+ * newlines are NOT collapsed, because the text scan splits them into separate
+ * segments, so `rm -r<NL>f` is a literal the old scanner never joined and no
+ * rule here may join either.
+ */
+function scanFold(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/\\/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+/**
+ * Raw word source, never `WordFact.value`: `value` erases the quote layer, and
+ * a join over it can synthesize a roster literal (`rm "-rf"`) the text scan
+ * never saw. Folded raw text keeps every join a substring of what that scan
+ * reads, which is what makes "cannot newly deny" true rather than asserted.
+ */
+function rawFoldedWord(word: WordFact): string {
+  return scanFold(wordSource(word));
+}
+
+/** The roster's scan form for the words a rule judges, joined in source order. */
+function argvScanText(words: readonly WordFact[]): string {
+  return words.map(rawFoldedWord).join(" ");
+}
+
+/**
+ * The roster the parse-based arms read: every entry but the fork bomb. The bomb
+ * is a structural rule (SC-S2-8) — `:(){ :|:& };:` means recursion only when a
+ * `function_definition` pipes its own body back to itself — and the quote-blind
+ * scan never matched it in an operand or a body, because there the words sit
+ * inside a quoted string whose only command word is `bash` or `python3`, so the
+ * metachar rule that used to catch it abstained. Matching it by substring here
+ * would newly deny shapes the pre-migration wall let through, which no arm of
+ * the floor licenses from this direction.
+ */
+const SUBSTRING_ROSTER: readonly DangerousPatternHit[] = Object.freeze(
+  DANGEROUS_COMMAND_PATTERNS.filter(
+    (entry) => entry.pattern !== FORK_BOMB_HIT.pattern
+  )
+);
+
+/** The substring roster, run over text already in scan form. */
+function rosterHit(text: string): DangerousPatternHit | null {
+  for (const entry of SUBSTRING_ROSTER) {
+    if (text.includes(entry.pattern)) return entry;
+  }
+  return null;
+}
+
+function isDestructiveWord(name: string): boolean {
+  return name.startsWith("mkfs") || DESTRUCTIVE_COMMAND_WORDS.has(name);
+}
+
+/**
+ * SC-S2-8's command-word rule for one node: reconstruct the node's argv text and
+ * run the unchanged roster over it, but only when the command word names a
+ * destructive program. A non-destructive command word (`echo`, `grep`) never
+ * reaches the roster, which is exactly the operand-scope relaxation SC-S2-1's
+ * third flip class asks for. `format` is absent on purpose — it is the lexical
+ * gate of `lexicalFormatHit`, whose carrier is the segment, not the node.
+ */
+function commandWordDestructiveHit(
+  cmd: CommandFact
+): DangerousPatternHit | null {
+  const at = destructiveCommandAt(cmd);
+  if (at === undefined) return null;
+  if (!isDestructiveWord(at.name)) return null;
+  return rosterHit(argvScanText(cmd.argv.slice(at.index)));
+}
+
+/**
+ * The two rosters unioned, for the one question they answer together: which
+ * command names eat a string as another program's source. Computed here and
+ * never by editing either list, so each keeps its own single owner and its own
+ * narrower question.
+ */
+const CODE_CONSUMING_COMMAND_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set([...INTERPRETER_COMMAND_NAMES, ...SHELL_FAMILY_ROSTER])
+);
+
+/**
+ * SC-S2-9's declared-code-operand arm: everything after a code-consuming name is
+ * source that name hands on, so the WHOLE word run is judged. Selecting one
+ * operand by a per-name flag map loses the payload whenever an unmapped word
+ * comes first (`--login`, `build.sh`, `-MPOSIX`), and every loss is a deny
+ * turned into an allow; the run contains each operand any selection could have
+ * picked and stays inside the node's own text, so it cannot deny past the scan.
+ */
+function codeOperandDestructiveHit(
+  cmd: CommandFact
+): DangerousPatternHit | null {
+  const at = destructiveCommandAt(cmd);
+  if (at === undefined) return null;
+  if (!CODE_CONSUMING_COMMAND_NAMES.has(at.name)) return null;
+  return rosterHit(argvScanText(cmd.argv.slice(at.index + 1)));
+}
+
+/**
+ * Names that run what they are handed somewhere other than in this shell: `ssh`
+ * and `su` hand the operand to a shell on the far side or under the other uid,
+ * `docker`/`podman`/`kubectl exec` spawn it, `watch`, `parallel` and `xargs`
+ * build a command out of it. Their operand is not data in the sense of
+ * SC-S2-1's third flip class — `grep rm -rf /x` discards the words, `ssh host
+ * rm -rf /x` runs them — so the operand run is judged exactly as the quote-blind
+ * scan judged it.
+ */
+const EXECUTION_CARRIER_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set([
+    "ssh",
+    "su",
+    "docker",
+    "podman",
+    "kubectl",
+    "watch",
+    "parallel",
+    "xargs",
+  ])
+);
+
+/**
+ * Every name that runs or stores exactly what it is handed without being an
+ * interpreter: the four this shell does itself (`eval` re-executes its operand,
+ * `trap` and `alias` store it for later, `env` execs it) plus the execution
+ * carriers above. The question is "does this word execute or store what it is
+ * handed?", which neither the interpreter roster (generated code) nor the
+ * destructive words (their own argv) answers. Every shape it catches already
+ * denied under the quote-blind scan, so the set holds the floor rather than
+ * widening policy.
+ */
+const EXECUTES_OR_STORES_OPERAND_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set(["eval", "trap", "alias", "env", ...EXECUTION_CARRIER_NAMES])
+);
+
+/**
+ * The one owner of "does this word run or store the text it is handed?", as the
+ * union of the two rosters above. The heredoc receiver of both walls asks it
+ * whole; the two operand arms ask one half each because they anchor on different
+ * words (`destructiveCommandAt` folds wrappers, `handedOperandNameIndex` walks
+ * them). Answering the receiver question three ways is how `docker exec -i c sh
+ * <<'EOF'` came to be code to one wall and data to the other.
+ */
+function runsWhatItIsHanded(name: string): boolean {
+  return (
+    CODE_CONSUMING_COMMAND_NAMES.has(name) ||
+    EXECUTES_OR_STORES_OPERAND_NAMES.has(name)
+  );
+}
+
+/**
+ * The index of such a name when everything before it is a transparent wrapper
+ * (`sudo env -S "…"`), stopping at the first word that could itself be the
+ * command — an `echo env "…"` operand is data, not a name in command position.
+ * `commandAt` cannot answer this: a value-taking wrapper flag (`env -S`) eats
+ * the payload as its own argument and folds past it.
+ */
+function handedOperandNameIndex(argv: readonly WordFact[]): number | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const name = nameOfWord(argv[i]);
+    if (name === undefined) return undefined;
+    if (EXECUTES_OR_STORES_OPERAND_NAMES.has(name)) return i;
+    if (!isDestructiveWrapper(name)) return undefined;
+  }
+  return undefined;
+}
+
+function handedOperandDestructiveHit(
+  cmd: CommandFact
+): DangerousPatternHit | null {
+  const at = handedOperandNameIndex(cmd.argv);
+  if (at === undefined) return null;
+  return rosterHit(argvScanText(cmd.argv.slice(at + 1)));
+}
+
+/**
+ * The heredoc arm of the same judgment. A body the receiver rule collects is
+ * text the shell or the interpreter actually consumes, so the roster's substring
+ * rule reads it exactly as the whole-command scan used to. The Windows shells
+ * count as code receivers for this wall too, which the frozen interpreter roster
+ * does not answer: a quoted `powershell <<'EOF'` body is a script, and dropping
+ * it would newly allow text the quote-blind scan always read. The quoted body of
+ * a plain text command stays data and never reaches here — that span is the
+ * relaxation. A collection this file cannot resolve at all is the substitution
+ * walk's `analysis-fault`, reported ahead of this path, and a body it can read
+ * but cannot attribute to a node is judged by `foldedReceiverBodies` rather than
+ * dropped.
+ */
+function heredocBodyDestructiveHit(
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  const collected = collectHeredocBodies(
+    parse.text,
+    parse.commands,
+    parse.heredocs,
+    SHELL_FAMILY_ROSTER
+  );
+  if (!collected.ok) return null;
+  const bodies = collected.bodies.map((body) => body.text);
+  bodies.push(...foldedReceiverBodies(parse));
+  for (const body of bodies) {
+    const hit = rosterHit(scanFold(body));
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+/**
+ * The quoted bodies the collector drops because it names the receiver by its
+ * FIRST word and by the frozen interpreter roster only: `sudo bash <<'EOF'`
+ * reads as `sudo`, so its body is called data, while `sudo bash -c "…"` folds.
+ * This arm asks the same question both walls ask — `receiverConsumesBody` — and
+ * may re-read a body the collector already took, which costs one rescan of
+ * already-judged text and nothing else.
+ *
+ * A body with no receiver to ask is judged, not dropped. `receiverCommandIndex`
+ * is a declared `null` whenever the segment carries more than one node, so
+ * `cd /tmp && bash <<'EOF'` arrives here unattributed; the quote-blind scan read
+ * that body, and abstaining on an absent fact is how a code heredoc became a new
+ * allow. This mirrors the sensitive wall, which already fails closed on the same
+ * population.
+ */
+function foldedReceiverBodies(parse: SecurityParseOk): string[] {
+  const bodies: string[] = [];
+  for (const heredoc of parse.heredocs) {
+    if (!heredoc.delimiterQuoted) continue;
+    const body = spanText(parse.text, heredoc.bodySpan);
+    if (body === undefined) continue;
+    const receiver = findCommand(parse.commands, heredoc.receiverCommandIndex);
+    if (receiver === undefined || receiverConsumesBody(receiver)) {
+      bodies.push(body);
+    }
+  }
+  return bodies;
+}
+
+/**
+ * A here-string body is an operand the receiver reads and is in none of the
+ * relaxation classes, so it is judged receiver-blind: relaxing it for `cat`
+ * would be new policy, and it cannot newly deny because the reach is one
+ * command node's own text. The node rather than the target word, because an
+ * unquoted body is one word and the payload continues in the argv after it —
+ * `sh <<< rm -rf /tmp/x` is a body of `rm` plus an argv of `-rf /tmp/x`.
+ */
+function hereStringDestructiveHit(
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  for (const redirect of parse.redirects) {
+    if (redirect.op !== "<<<") continue;
+    const owner = findCommand(parse.commands, redirect.ownerCommandIndex);
+    const judged =
+      owner === undefined
+        ? rawFoldedWord(redirect.target)
+        : scanFold(commandText(parse.text, owner));
+    const hit = rosterHit(judged);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+/**
+ * An escape inside a word is bash's own join, not data: `r\m` names the same
+ * program as `rm` wherever it sits. So a node that carries one is judged over
+ * its OWN span text — the same normalized substring rule the segment scan used
+ * — because which word the author meant the escape to hide cannot be read off
+ * argv once the command word is a non-destructive one. The reach is one command
+ * node's text, never the whole command, so an escape sitting in a comment or in
+ * a quoted data body stays outside this rule.
+ */
+function escapedWordDestructiveHit(
+  parse: SecurityParseOk,
+  cmd: CommandFact
+): DangerousPatternHit | null {
+  if (cmd.argv.some((word) => wordSource(word).includes("\\")) === false) {
+    return null;
+  }
+  return rosterHit(scanFold(commandText(parse.text, cmd)));
+}
+
+/**
+ * SC-S2-8's fork bomb as a structural rule: a function whose OWN name is the
+ * no-op `:` and whose body backgrounds a pipeline of that same name. Today it
+ * reaches `bare-metachar` only because the quote-blind splitter finds no command
+ * word in `:(){`; on a real parse the body has command nodes and its `|` / `&`
+ * are well-formed, so Stage-3's "zero command nodes" rule would otherwise let it
+ * through. It renders the roster's own literal under `destructive-disk` — the
+ * single authorized `(id, pattern)` move (SC-GATES-6), gated on Stage 0 modelling
+ * `function_definition` (its OQ3, answered yes).
+ */
+function forkBombStructuralHit(
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  // The condition is observable, not assumed: unobserved, this family says
+  // nothing about the shape at all.
+  if ((parse.nodeTypes["function_definition"] ?? 0) === 0) return null;
+  return bombRecursion(parse);
+}
+
+/**
+ * The bomb's own shape: its body is a `|`-pipeline whose stages call the
+ * function's own name, and the last stage is backgrounded. Read as pairs
+ * because the recursion is between SIBLINGS, and the text between them is the
+ * only thing that says `|` rather than `;`.
+ */
+function bombRecursion(parse: SecurityParseOk): DangerousPatternHit | null {
+  const text = parse.text;
+  const stages = parse.commands.filter(
+    (command) => command.depth > 0 && nameOfWord(command.argv[0]) === ":"
+  );
+  for (let i = 1; i < stages.length; i += 1) {
+    const previous = stages[i - 1]!;
+    const stage = stages[i]!;
+    if (!isBombPipelineStage(text, previous, stage)) continue;
+    if (!isColonNamedDefinition(text.slice(0, previous.span.start))) continue;
+    return FORK_BOMB_HIT;
+  }
+  return null;
+}
+
+/** Two adjacent `:` stages wired as `… : | : …&` — one link of the pipeline. */
+function isBombPipelineStage(
+  text: string,
+  previous: CommandFact,
+  stage: CommandFact
+): boolean {
+  if (stage.depth !== previous.depth) return false;
+  if (!hasSpan(previous.span) || !hasSpan(stage.span)) return false;
+  if (text.slice(previous.span.end, stage.span.start) !== "|") return false;
+  return text[stage.span.end] === "&";
+}
+
+/**
+ * The definition's name is not a parse fact, so it is read back from the source
+ * its body points at: `:(){` is what makes the piped stages recursion, and a body
+ * under any other name (`x(){ :|:& };`) is a no-op that never re-enters itself.
+ */
+function isColonNamedDefinition(head: string): boolean {
+  return /(?:^|[;|&\s])\s*:\s*\(\s*\)\s*\{\s*$/.test(head);
+}
+
+/**
+ * The destructive judgment on an `ok` tree: every command node in source order,
+ * command-word rule then declared-code-operand rule then handed-operand rule then
+ * the escape rule; then the here-string spans, the heredoc bodies the receiver
+ * rule keeps, and the fork-bomb structural rule. Precedence with the root-find
+ * fold (which owns `find /`) is preserved at the call site, which runs the fold
+ * first.
+ */
+export function findDestructiveOnParse(
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  for (const cmd of parse.commands) {
+    const wordHit = commandWordDestructiveHit(cmd);
+    if (wordHit !== null) return wordHit;
+    const codeHit = codeOperandDestructiveHit(cmd);
+    if (codeHit !== null) return codeHit;
+    const handedHit = handedOperandDestructiveHit(cmd);
+    if (handedHit !== null) return handedHit;
+    const escapeHit = escapedWordDestructiveHit(parse, cmd);
+    if (escapeHit !== null) return escapeHit;
+  }
+  const hereStringHit = hereStringDestructiveHit(parse);
+  if (hereStringHit !== null) return hereStringHit;
+  return heredocBodyDestructiveHit(parse);
+}
+
+/**
+ * The `format` gate's deny plus which surface owns reporting it: the gate fires
+ * on a chunk the splitter produced, so a command can carry BOTH a `format` deny
+ * and a destructive literal, and the pair is ordered, not ambiguous.
+ */
+interface FormatClaim {
+  readonly hit: DangerousPatternHit;
+  /** `"tree"` when an earlier chunk's literal is what the scan answered first. */
+  readonly firstClaim: "format" | "tree";
+}
+
+/**
+ * ADR-0068's lexical `format` gate, still read over the splitter's segments.
+ * Its carrier is the segment and not the command node: the gate fires on a chunk
+ * the quote-blind splitter starts with the word `format` and nowhere else, so an
+ * argv reading of it denies shapes the text scan never reached — measured on
+ * `if true; then format C:; fi`, `( format C: )`, `while :; do format C:; done`,
+ * `! format C:`, `x=1 format C:` — eleven allow→deny rows no arm of this plan
+ * licenses. It stays a text rule until the stage that retires the splitter makes
+ * the question a structural one.
+ *
+ * `firstClaim` is the same gate's precedence, also taken from the text path: an
+ * EARLIER chunk carrying a roster literal is one the scan answered before it ever
+ * reached `format`, so the tree gets first claim on it and `format` speaks only if
+ * the tree finds nothing. That nothing is this stage's licensed relaxation (the
+ * literal sat in inert text), and dropping the `format` deny along with it would
+ * be a new allow rather than a re-labelling.
+ */
+function lexicalFormatHit(command: string): FormatClaim | null {
+  let seenEarlierRoster = false;
+  for (const segment of splitForDangerousScan(command)) {
+    const folded = segmentScanFold(segment);
+    if (isLexicalFormatCommand(folded)) {
+      // The gate has always shared one loop with the substring roster, and that
+      // roster reads the segment first, so a destructive literal inside the SAME
+      // chunk keeps reporting its own id (`format rm -rf /tmp/x` is `rm -rf`
+      // today). Here it can only choose which deny to name, never create one.
+      return {
+        hit: rosterHit(folded) ?? FORMAT_GATE_HIT,
+        firstClaim: seenEarlierRoster ? "tree" : "format",
+      };
+    }
+    if (rosterHit(folded) !== null) seenEarlierRoster = true;
+  }
+  return null;
+}
+
+/**
+ * The destructive judgment of the parsed path, in the precedence the text path
+ * has always used: the ordered root-find fold keeps first claim, because it owns
+ * `find / -delete` while the command-word rule owns `find /tmp -delete`; then the
+ * tree answers for every destructive id. What stays on the text here is the
+ * lexical `format` gate and the bare-metachar branch — the first because its
+ * carrier is the splitter rather than the tree, the second because that wall is
+ * Stage 3's to move. A body with no command word anywhere is still the
+ * bare-metachar's shape, not either of the other two's.
+ */
+function findDestructiveAfterParse(
+  command: string,
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  const walkHit = matchRootFindWalk(splitForDangerousScan(command));
+  if (walkHit !== null) return walkHit;
+  const format = lexicalFormatHit(command);
+  if (format !== null && format.firstClaim === "format") return format.hit;
+  const astHit = findDestructiveOnParse(parse);
+  if (astHit !== null) return astHit;
+  if (format !== null) return format.hit;
+  // Every argv rule abstained, so the body names no command word anywhere. That
+  // is the one shape where the text roster still speaks with full authority —
+  // nothing about it was licensed away — and it keeps the precedence it has
+  // always had: the fork bomb's structural recognition, then the segment scan,
+  // then the bare operator noise neither of them claimed.
+  if (!isPureMetacharBody(command)) return null;
+  const bomb = forkBombStructuralHit(parse);
+  if (bomb !== null) return bomb;
+  return findTextDangerPattern(command);
+}
 
 /**
  * ADR-0125 §3's first bucket, as a frozen duplicate of the sandbox module's own
@@ -1009,6 +1603,15 @@ type Preparation =
   | { readonly ok: true; readonly prepared: PreparedParse }
   | { readonly ok: false; readonly reason: string };
 
+/** The receiver rule's answer: the bodies worth reading, or why none can be. */
+type HeredocCollection =
+  | {
+      readonly ok: true;
+      readonly bodies: readonly HeredocBody[];
+      readonly asks: readonly SubstitutionAsk[];
+    }
+  | { readonly ok: false; readonly reason: string };
+
 type WalkStep =
   | { readonly kind: "hit"; readonly hit: DangerousPatternHit }
   | { readonly kind: "fault"; readonly reason: string }
@@ -1024,6 +1627,37 @@ function hasSpan(value: unknown): value is { start: number; end: number } {
   if (value === null || typeof value !== "object") return false;
   const span = value as { start?: unknown; end?: unknown };
   return isFiniteNumber(span.start) && isFiniteNumber(span.end);
+}
+
+/**
+ * A span's own bounds, once they are numbers in the right order. Says nothing
+ * about whether the text is long enough to hold them — that is `spanText`.
+ */
+function spanRange(
+  span: FactSpan | undefined
+): { start: number; end: number } | undefined {
+  if (!hasSpan(span)) return undefined;
+  const { start, end } = span;
+  return start >= 0 && end >= start ? { start, end } : undefined;
+}
+
+/** The text a span addresses, or `undefined` when it addresses none of `text`. */
+function spanText(
+  text: string,
+  span: FactSpan | undefined
+): string | undefined {
+  const range = spanRange(span);
+  if (range === undefined || range.end > text.length) return undefined;
+  return text.slice(range.start, range.end);
+}
+
+/** The node an index addresses, when this parse carries one at that index. */
+function findCommand(
+  commands: readonly CommandFact[],
+  index: number | null | undefined
+): CommandFact | undefined {
+  if (index === null || index === undefined) return undefined;
+  return commands.find((command) => command.index === index);
 }
 
 function nameOfWord(word: unknown): string | undefined {
@@ -1043,6 +1677,150 @@ function nameOfWord(word: unknown): string | undefined {
 function commandText(text: string, command: CommandFact): string {
   if (!hasSpan(command.span)) return "";
   return text.slice(command.span.start, command.span.end);
+}
+
+const NO_EXTRA_CODE_RECEIVERS: ReadonlySet<string> = Object.freeze(
+  new Set<string>()
+);
+
+/**
+ * What one `heredocs[]` fact turned out to be: nothing this file can read
+ * (`fault`, which fails the whole collection), a declared `null` receiver
+ * (`ask`), a body worth judging, or `data` — the quoted body of a text
+ * receiver, which no walk collects and which IS this stage's relaxation.
+ */
+type HeredocEntry =
+  | { state: "fault"; reason: string }
+  | { state: "ask" }
+  | { state: "data" }
+  | { state: "body"; body: HeredocBody };
+
+/** The text of one fact's `bodySpan`, or the fault saying it addresses none. */
+function heredocBodyText(
+  text: string,
+  bodySpan: HeredocFact["bodySpan"]
+): { body: string } | { state: "fault"; reason: string } {
+  if (!hasSpan(bodySpan)) {
+    return { state: "fault", reason: "a heredocs[] bodySpan is not a span" };
+  }
+  const { start, end } = bodySpan;
+  if (start < 0 || end < start || end > text.length) {
+    return {
+      state: "fault",
+      reason: `heredocs[] bodySpan ${start}..${end} names nothing in the text`,
+    };
+  }
+  return { body: text.slice(start, end) };
+}
+
+/** One fact's receiver, resolved to its command word. */
+function heredocReceiver(
+  commands: readonly CommandFact[],
+  receiverIndex: number | null
+): { name: string } | HeredocEntry {
+  if (receiverIndex === null) return { state: "ask" };
+  const receiver = findCommand(commands, receiverIndex);
+  if (receiver === undefined) {
+    return {
+      state: "fault",
+      reason: `receiverCommandIndex ${String(receiverIndex)} names no command`,
+    };
+  }
+  const name = nameOfWord(receiver.argv[0]);
+  if (name === undefined) {
+    return {
+      state: "fault",
+      reason: `the receiver command ${String(receiverIndex)} carries no command word`,
+    };
+  }
+  return { name };
+}
+
+/**
+ * Whether a receiver eats its body as code. The frozen interpreter roster
+ * answers for both walks; `extraCodeReceivers` is the caller's wider reading of
+ * the same question — the destructive path counts the shells too, the
+ * substitution walk asks the frozen roster and nothing else.
+ */
+function isCodeReceiver(
+  name: string,
+  extraCodeReceivers: ReadonlySet<string>
+): boolean {
+  return INTERPRETER_COMMAND_NAMES.has(name) || extraCodeReceivers.has(name);
+}
+
+/** One fact, classified. Every fault this collector can return is decided here. */
+function resolveHeredocEntry(
+  text: string,
+  commands: readonly CommandFact[],
+  heredoc: HeredocFact,
+  extraCodeReceivers: ReadonlySet<string>
+): HeredocEntry {
+  if (heredoc === null || typeof heredoc !== "object") {
+    return { state: "fault", reason: "a heredocs[] entry is not a body fact" };
+  }
+  const span = heredocBodyText(text, heredoc.bodySpan);
+  if ("state" in span) return span;
+  if (typeof heredoc.delimiterQuoted !== "boolean") {
+    return {
+      state: "fault",
+      reason: "a heredocs[] delimiter is neither quoted nor not",
+    };
+  }
+  const receiver = heredocReceiver(commands, heredoc.receiverCommandIndex);
+  if ("state" in receiver) {
+    // A declared-`null` receiver cannot make an UNQUOTED body inert: bash
+    // expands that body whoever reads it, so it stays live code exactly as the
+    // quote-blind scan read it. A receiver naming no command is the parse
+    // contradicting itself and stays a fault.
+    if (receiver.state === "ask" && !heredoc.delimiterQuoted) {
+      return { state: "body", body: { text: span.body, isCode: true } };
+    }
+    return receiver;
+  }
+  const isCode = isCodeReceiver(receiver.name, extraCodeReceivers);
+  if (isCode || !heredoc.delimiterQuoted) {
+    return { state: "body", body: { text: span.body, isCode } };
+  }
+  return { state: "data" };
+}
+
+/**
+ * The receiver, not the delimiter, decides what a heredoc body IS, and this is
+ * the one owner of that rule: an interpreter executes its body whatever the
+ * quoting, and an unquoted body is live for any receiver because bash expands
+ * it. A quoted body of a text command is data, so it is collected by neither
+ * walk. A `null` receiver is a declared arm of the field's type — the body is
+ * quoted and unattributable, so it comes back as an ask rather than being
+ * guessed at; unquoted, the receiver's identity is irrelevant and the body stays
+ * live code.
+ */
+function collectHeredocBodies(
+  text: string,
+  commands: readonly CommandFact[],
+  heredocs: readonly HeredocFact[],
+  extraCodeReceivers: ReadonlySet<string> = NO_EXTRA_CODE_RECEIVERS
+): HeredocCollection {
+  const bodies: HeredocBody[] = [];
+  const asks: SubstitutionAsk[] = [];
+  for (const heredoc of heredocs) {
+    const entry = resolveHeredocEntry(
+      text,
+      commands,
+      heredoc,
+      extraCodeReceivers
+    );
+    if (entry.state === "fault") return { ok: false, reason: entry.reason };
+    if (entry.state === "ask") {
+      asks.push({
+        kind: "receiver-unresolvable",
+        detail: "receiver-unresolvable=heredoc",
+      });
+      continue;
+    }
+    if (entry.state === "body") bodies.push(entry.body);
+  }
+  return { ok: true, bodies, asks };
 }
 
 /**
@@ -1175,60 +1953,14 @@ function preparePayload(
   if (!Array.isArray(payload.heredocs)) {
     return { ok: false, reason: "heredocs[] is not a list of body facts" };
   }
-  const bodies: HeredocBody[] = [];
-  for (const heredoc of payload.heredocs) {
-    if (heredoc === null || typeof heredoc !== "object") {
-      return { ok: false, reason: "a heredocs[] entry is not a body fact" };
-    }
-    if (!hasSpan(heredoc.bodySpan)) {
-      return { ok: false, reason: "a heredocs[] bodySpan is not a span" };
-    }
-    const { start, end } = heredoc.bodySpan;
-    if (start < 0 || end < start || end > text.length) {
-      return {
-        ok: false,
-        reason: `heredocs[] bodySpan ${start}..${end} names nothing in the text`,
-      };
-    }
-    if (typeof heredoc.delimiterQuoted !== "boolean") {
-      return {
-        ok: false,
-        reason: "a heredocs[] delimiter is neither quoted nor not",
-      };
-    }
-    const receiverIndex = heredoc.receiverCommandIndex;
-    if (receiverIndex === null) {
-      // A declared arm of the field's type: no receiver classification at all,
-      // so the body is neither code nor data here — the ask bucket decides it.
-      asks.push({
-        kind: "receiver-unresolvable",
-        detail: "receiver-unresolvable=heredoc",
-      });
-      continue;
-    }
-    if (!isFiniteNumber(receiverIndex) || !byIndex.has(receiverIndex)) {
-      return {
-        ok: false,
-        reason: `receiverCommandIndex ${String(receiverIndex)} names no command`,
-      };
-    }
-    const receiver = byIndex.get(receiverIndex) as CommandFact;
-    const name = nameOfWord(receiver.argv[0]);
-    if (name === undefined) {
-      return {
-        ok: false,
-        reason: `the receiver command ${receiverIndex} carries no command word`,
-      };
-    }
-    // The receiver, not the delimiter, decides whether this text is code: an
-    // interpreter executes its body whatever the quoting, and an unquoted body
-    // is live for any receiver because bash expands it. A quoted body of a text
-    // command is data and never reaches the walk at all.
-    const isCode = INTERPRETER_COMMAND_NAMES.has(name);
-    if (isCode || !heredoc.delimiterQuoted) {
-      bodies.push({ text: text.slice(start, end), isCode });
-    }
-  }
+  const collected = collectHeredocBodies(
+    text,
+    payload.commands,
+    payload.heredocs
+  );
+  if (!collected.ok) return { ok: false, reason: collected.reason };
+  asks.push(...collected.asks);
+  const bodies = collected.bodies;
 
   if (!Array.isArray(payload.redirects)) {
     return { ok: false, reason: "redirects[] is not a list of redirect facts" };
@@ -1801,10 +2533,102 @@ function dangerousExecuteReasonFor(input: {
 }
 
 /**
+ * Whether the receiver of a heredoc body runs or stores that body. One rule for
+ * both walls, read off the folded command word so `sudo bash <<'EOF'` and
+ * `docker exec -i c sh <<'EOF'` answer the same way their `-c` spellings do.
+ */
+function receiverConsumesBody(receiver: CommandFact): boolean {
+  const at = destructiveCommandAt(receiver);
+  return at !== undefined && runsWhatItIsHanded(at.name);
+}
+
+/**
+ * Whether a quoted heredoc body may be text some program reads as
+ * instructions — which is the same question `receiverConsumesBody` answers, and
+ * answered by it. The fail-closed arms are the two that cannot say: no declared
+ * receiver, and a receiver index addressing no node, which is the parse
+ * contradicting its own text.
+ */
+function heredocBodyMayBeCode(
+  parse: SecurityParseOk,
+  entry: InertFact
+): boolean {
+  if (entry.ownerCommandIndex === undefined) return true;
+  const receiver = findCommand(parse.commands, entry.ownerCommandIndex);
+  // An index addressing no node is the parse contradicting its own text, so
+  // nothing of this command can be called data.
+  if (receiver === undefined) return true;
+  return receiverConsumesBody(receiver);
+}
+
+/**
+ * Whether one inert span is text this wall may still judge as a live path: a
+ * comment never is, `single-quoted` text always is (those quotes are shell
+ * hygiene around an `argv` operand, and a sensitive path inside one is a real
+ * path — the operand exclusion), and a heredoc body is judged by its receiver.
+ */
+function spanIsData(span: InertFact, parse: SecurityParseOk): boolean {
+  if (span.why === "single-quoted") return false;
+  if (span.why === "comment") return true;
+  return span.delimiterQuoted === true && !heredocBodyMayBeCode(parse, span);
+}
+
+/**
+ * Whether this parse can be trusted to blank ANYTHING: every span must address
+ * real text, and a heredoc must either name no owner or name a node that exists.
+ * A span out of range, reversed or non-integer, or an owner index addressing no
+ * node, is the parse contradicting its own text, and then excision is abandoned
+ * for the whole command — the fail-toward-deny arm of this wall.
+ */
+function spansAreTrustworthy(parse: SecurityParseOk, command: string): boolean {
+  for (const span of parse.inert) {
+    const range = spanRange(span.span);
+    if (range === undefined || range.end > command.length) return false;
+    if (span.why !== "heredoc-body" || span.ownerCommandIndex === undefined) {
+      continue;
+    }
+    if (findCommand(parse.commands, span.ownerCommandIndex) === undefined) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `command` with each data span replaced by spaces of the SAME byte count.
+ * Blanking, never trimming: nothing on either side becomes adjacent, no word is
+ * re-anchored, and the roster's `$`-anchored arms keep matching end-of-text and
+ * only there. Length-preserving writes also keep every later span's offsets
+ * valid whatever the order the spans are applied. Any verdict other than `ok`
+ * (unknown-syntax, malformed, aborted, over-cap, vetoed, parser-unavailable)
+ * scans raw at full strength — the degrade path keeps today's answer.
+ */
+function scanTextForSensitivePath(command: string): string {
+  const parse = parseForSecurity(command);
+  if (parse.kind !== "ok") return command;
+  if (!spansAreTrustworthy(parse, command)) return command;
+  let scanned = command;
+  for (const span of parse.inert) {
+    if (!spanIsData(span, parse)) continue;
+    const range = spanRange(span.span);
+    if (range === undefined) continue;
+    scanned = `${scanned.slice(0, range.start)}${" ".repeat(
+      range.end - range.start
+    )}${scanned.slice(range.end)}`;
+  }
+  return scanned;
+}
+
+/**
  * Scan a command string for sensitive path fragments (`.ssh/`, `/etc/passwd`,
  * `/etc/shadow`, `.env`, `.pem`, etc.). This mirrors `matchSensitivePath` for
  * path-bearing tools, applied to the `command` field of execute tools so the
  * redirect exemption cannot be abused to write to a sensitive location.
+ *
+ * The roster itself runs unchanged; only the text it runs over is quote-aware —
+ * exactly comment text and non-interpreter quoted-delimiter heredoc bodies are
+ * blanked first, everything else (operands, redirect targets, interpreter code)
+ * is judged whole.
  *
  * Exported so `src/harness/aci/tools/bash.ts` (the handler-level gate) applies
  * the same check as the hard-wall — otherwise a redirect like `>> /etc/shadow`
@@ -1812,9 +2636,10 @@ function dangerousExecuteReasonFor(input: {
  * bwrap's ro-bind, not by policy (axis2 skeptic finding).
  */
 export function commandContainsSensitivePath(command: string): boolean {
+  const scanned = scanTextForSensitivePath(command);
   return SENSITIVE_PATH_FRAGMENTS.some((fragment) => {
-    if (fragment.startsWith("\\")) return new RegExp(fragment).test(command);
-    return command.includes(fragment);
+    if (fragment.startsWith("\\")) return new RegExp(fragment).test(scanned);
+    return scanned.includes(fragment);
   });
 }
 

@@ -337,8 +337,14 @@ describe("bash background handler（fake manager）", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createBashTool(cwd, { backgroundManager: manager });
 
+    // A real destructive argv: the wall answers nothing for an inert
+    // `echo rm -rf /` anymore. The target does not exist, so a wall that
+    // stopped rejecting could still not destroy anything from this scratch dir.
     await assert.rejects(
-      tool.handler({ command: "echo rm -rf /", background: true }),
+      tool.handler({
+        command: "rm -rf ./bash-bg-danger-nonexistent",
+        background: true,
+      }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("bash: dangerous command rejected")
